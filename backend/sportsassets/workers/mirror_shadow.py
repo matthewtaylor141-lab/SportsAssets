@@ -328,35 +328,129 @@ async def active_conditions(pool, whale: str, hours: float = LOOKBACK_H) -> list
     return [str(r["condition_id"]) for r in rows]
 
 
+# THE SOURCES THAT WRITE THE WALLET'S OWN NET LEGS (D1, 2026-09-06). The
+# chain path (ingestion/chain.py, _wallet_1155_legs) writes ONE row per
+# tx per token: the wallet's net ERC-1155 flow, size = the whole taker
+# order, price = its average. The S1 emitter (ingestion/s1_emitter.py)
+# is the second chain source: its `agg` record is the same aggregate
+# view (the wallet against the exchange), and the ingest probes on both
+# paths (`SQL_PROBE`, `_handle_v3`'s pre-probe: `source IN ('chain',
+# 's1')` per (tx, whale, asset)) make the two mutually exclusive on a
+# fill, so a (tx, asset, side) carries at most one of them. Everything
+# else in `trades.source` -- 'poll' (ingestion/poller.py), the
+# reconciler's re-sweep, 'backfill' -- is the Data API's shape: ONE ROW
+# PER MAKER MATCH, so a taker order that matched N makers is N rows
+# whose sizes sum to the chain row.
+FILLS_NET_LEG_SOURCES: tuple[str, ...] = ("chain", "s1")
+# what the LAST his_fills call collapsed (see his_fills_dedup)
+_FILLS_DEDUP: dict[str, float] = {"dup_rows": 0, "dup_shares": 0.0}
+
+
+def his_fills_dedup() -> dict:
+    """What the most recent `his_fills` call collapsed: `dup_rows`, the
+    per-match rows dropped because their (tx_hash, asset, side) also
+    holds a net-leg row, and `dup_shares`, their shares. Read by the
+    shadow and the live tick right after each call, so a tick can sum
+    them onto its stats (`fills_dedup_rows` / `fills_dedup_shares`).
+    Zero after a call that collapsed nothing, or that raised."""
+    return {"dup_rows": int(_FILLS_DEDUP["dup_rows"]),
+            "dup_shares": round(float(_FILLS_DEDUP["dup_shares"]), 4)}
+
+
 async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
     """ALL his fills on the condition (his position is cumulative), with
-    the trade context the mapper needs. The event title lives on the
-    markets table, not on trades (review round two): without it the
-    premap lookup builds its keys from one source instead of three and
-    misses the markets the copy sleeve never traded -- the very ones
-    the mirror exists to add. The OUTCOME is coalesced from the token
-    catalogue the way the copy lane's unmapped census reads it
-    (api/app.py, COALESCE(t.outcome, mt.outcome); C1 build step 3): a
-    chain row is inserted with outcome NULL and enriched later, and a
-    NULL outcome was filed as no_side_match -- our miss, not the
-    venue's."""
+    the trade context the mapper needs, ONE READING PER (tx_hash, asset,
+    side): the net-leg row (source 'chain' or 's1',
+    FILLS_NET_LEG_SOURCES) when the key holds one, else every per-match
+    row (poll, backfill) the key holds.
+
+    THE RULE, AND WHY IT IS THE VENUE'S OWN NUMBER (D1, 2026-09-06,
+    book 16, aec-wta-markos-linnos-2026-09-06). The chain row is the
+    wallet's net 1155 legs for the tx -- the whole taker order at its
+    average price; the Data-API rows for the same tx are its maker
+    matches, and they sum to it exactly (tx 0x5446ded9b2e157ec Kostyuk
+    BUY: chain 15,164.0 @ 0.563; poll 4,996 @ 0.560 + 5,172 @ 0.560 +
+    4,996 @ 0.570 = 15,164.0). The ingest dedupe key (ingestion/
+    dedupe.py: tx, asset, side, size, price, ts) never collapses them
+    when the taker matched more than one maker, so the same fill sat in
+    the table twice and every fills-derived reading of his position was
+    inflated by the poll legs of multi-maker orders: 92,145 / 39,779
+    against the exit worker's snapshot of his wallet reading 55,993 /
+    29,555 (drift 0.44, so `rules.admission` refused every increase on
+    his most active book under `drift`). Collapsed by this rule the
+    fills read 49,483.5 + 6,509.9 (poll-only txs the chain path missed)
+    = 55,993.4 long and 29,555 other -- the snapshot, to the share. A
+    poll-only tx is KEPT WHOLE (nothing to collapse into), and a
+    per-match row whose leg does not sum to the chain row still
+    collapses: the chain row is the wallet's net legs, the truth.
+
+    This collapse is the MIRROR'S OWN READ-SIDE view. The trades table
+    is shared with the copy lane, the edge analytics and the
+    reconciler, and a wrong dedupe at ingest loses fills; the durable
+    fix is a dedupe on (tx, asset, side) at ingest with a sum check,
+    not here. It is done in SQL, deterministically (a window over the
+    key; rows keep their `ts, id` order), and what was dropped is
+    counted on every call (his_fills_dedup).
+
+    The event title lives on the markets table, not on trades (review
+    round two): without it the premap lookup builds its keys from one
+    source instead of three and misses the markets the copy sleeve
+    never traded -- the very ones the mirror exists to add. The OUTCOME
+    is coalesced from the token catalogue the way the copy lane's
+    unmapped census reads it (api/app.py, COALESCE(t.outcome,
+    mt.outcome); C1 build step 3): a chain row is inserted with outcome
+    NULL and enriched later, and a NULL outcome was filed as
+    no_side_match -- our miss, not the venue's."""
+    _FILLS_DEDUP.update(dup_rows=0, dup_shares=0.0)
     rows = await pool.fetch(
         """
-        SELECT t.id, t.asset, t.side, t.size::float8 AS size, t.price::float8 AS price,
-               extract(epoch FROM t.ts)::float8 AS ts,
-               COALESCE(t.market_title, m.title) AS market_title, t.event_slug,
-               m.event_title, COALESCE(t.market_slug, m.slug) AS market_slug,
-               COALESCE(t.outcome, mt.outcome) AS outcome,
-               COALESCE(t.outcome_index, mt.outcome_index) AS outcome_index,
-               COALESCE(NULLIF(m.sport, 'unclassified'), NULLIF(t.sport, 'unclassified'),
-                        'unclassified') AS sport
-          FROM trades t JOIN whales w ON w.id = t.whale_id
-          LEFT JOIN markets m ON m.condition_id = t.condition_id
-          LEFT JOIN market_tokens mt ON mt.token_id = t.asset
-         WHERE lower(w.username) = $1 AND t.condition_id = $2
-         ORDER BY t.ts, t.id
+        WITH f AS (
+            SELECT t.id, t.source, t.tx_hash, t.asset, t.side,
+                   t.size::float8 AS size, t.price::float8 AS price,
+                   extract(epoch FROM t.ts)::float8 AS ts,
+                   COALESCE(t.market_title, m.title) AS market_title, t.event_slug,
+                   m.event_title, COALESCE(t.market_slug, m.slug) AS market_slug,
+                   COALESCE(t.outcome, mt.outcome) AS outcome,
+                   COALESCE(t.outcome_index, mt.outcome_index) AS outcome_index,
+                   COALESCE(NULLIF(m.sport, 'unclassified'), NULLIF(t.sport, 'unclassified'),
+                            'unclassified') AS sport,
+                   -- the key holds a net-leg row (chain / s1): the wallet's
+                   -- own legs for the tx, which every per-match row of the
+                   -- same key is a split of
+                   bool_or(COALESCE(t.source, '') IN ('chain', 's1')) OVER (
+                       PARTITION BY t.whale_id, COALESCE(lower(NULLIF(t.tx_hash, '')), 'row:' || t.id::text),
+                                    t.asset, upper(t.side)) AS has_net_leg
+              FROM trades t JOIN whales w ON w.id = t.whale_id
+              LEFT JOIN markets m ON m.condition_id = t.condition_id
+              LEFT JOIN market_tokens mt ON mt.token_id = t.asset
+             WHERE lower(w.username) = $1 AND t.condition_id = $2
+        ), c AS (
+            SELECT f.*, (COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed
+              FROM f
+        ), d AS (
+            SELECT c.*,
+                   count(*) FILTER (WHERE c.collapsed) OVER () AS dup_rows,
+                   COALESCE(sum(c.size) FILTER (WHERE c.collapsed) OVER (), 0.0) AS dup_shares
+              FROM c
+        )
+        SELECT d.id, d.source, d.tx_hash, d.asset, d.side, d.size, d.price, d.ts,
+               d.market_title, d.event_slug, d.event_title, d.market_slug,
+               d.outcome, d.outcome_index, d.sport, d.dup_rows, d.dup_shares
+          FROM d
+         WHERE NOT d.collapsed
+         ORDER BY d.ts, d.id
         """, whale, condition_id)
-    return [dict(r) for r in rows]
+    out: list[dict] = []
+    dup_rows, dup_shares = 0, 0.0
+    for r in rows:
+        d = dict(r)
+        # the same totals ride on every kept row (a window over the
+        # whole result); a fake pool's rows carry none, which reads 0
+        dup_rows = int(d.pop("dup_rows", 0) or 0)
+        dup_shares = float(d.pop("dup_shares", 0.0) or 0.0)
+        out.append(d)
+    _FILLS_DEDUP.update(dup_rows=dup_rows, dup_shares=dup_shares)
+    return out
 
 
 async def snapshot_sizes(pool, whale: str) -> tuple[dict[str, float], float | None, bool]:
@@ -1658,9 +1752,16 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
     mapping lane (C1); None is a fresh per-call budget. Returns the row
     that was written."""
     fills = await his_fills(pool, whale, condition_id)
+    dedup = his_fills_dedup()
     pos = mi.net_positions(fills)
     row: dict[str, Any] = {"whale": whale, "condition_id": condition_id,
                            "ratio": ratio, "detail": {}}
+    if dedup["dup_rows"]:
+        # the per-match rows his_fills collapsed under a net-leg row on
+        # this market (D1), so a row's his_long/his_other can be read
+        # beside what the raw table would have said
+        row["detail"].update(fills_dedup_rows=dedup["dup_rows"],
+                             fills_dedup_shares=dedup["dup_shares"])
     mo: dict[str, Any] = {}
     m = await map_market(pool, fills, pmus, whale=whale, condition_id=condition_id,
                          budget=map_budget, out=mo)
@@ -2077,7 +2178,11 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
                              # and markets left without a verdict by the budget
                              "mapped_by": {"ledger": 0, "premap": 0, "exact": 0,
                                            "grammar": 0, "yesno": 0},
-                             "map_venue_reads": 0, "map_cache_hit": 0, "map_reads_capped": 0}
+                             "map_venue_reads": 0, "map_cache_hit": 0, "map_reads_capped": 0,
+                             # D1: the per-match rows his_fills collapsed under
+                             # a net-leg row across this tick's markets, and
+                             # their shares (his_fills_dedup)
+                             "fills_dedup_rows": 0, "fills_dedup_shares": 0.0}
     map_budget = MapBudget()
     if knob_unreadable:
         stats.update(status="degraded", intent_guard_unreadable=knob_unreadable)
@@ -2144,6 +2249,9 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
             _d = row.get("detail") or {}
             stats["map_venue_reads"] += int(_d.get("map_venue_reads") or 0)
             stats["map_cache_hit"] += int(_d.get("map_cache_hit") or 0)
+            stats["fills_dedup_rows"] += int(_d.get("fills_dedup_rows") or 0)
+            stats["fills_dedup_shares"] = round(
+                stats["fills_dedup_shares"] + float(_d.get("fills_dedup_shares") or 0.0), 4)
             if str(row.get("reason") or "").startswith("map reads capped"):
                 stats["map_reads_capped"] += 1
             if row.get("us_market_slug") and _d.get("map") in stats["mapped_by"]:

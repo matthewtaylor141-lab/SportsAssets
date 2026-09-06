@@ -1016,6 +1016,53 @@ on the second, a single 0.24 never -- with `dust_total` on the trip receipt besi
 `held`. `ledger_dust` also rides on the served `integ` block (`_INTEG_CENSUS_KEYS`), since it sits past
 the sanitizer's 40-key cap in `CENSUS_KEYS`.
 
+2026-09-06, D1 (owner 18:57Z: "I don't see trades firing on POLYMARKET and we need more volume"): HIS
+FILLS WERE COUNTED TWICE ACROSS THE CHAIN AND POLL PATHS, AND THE MIRROR NOW READS THE VENUE-EXACT
+POSITION. Book 16, `aec-wta-markos-linnos-2026-09-06` (his `wta-kostyuk-noskova-2026-09-06`), read from
+the production `trades` table at 19:13Z: chain BUY Noskova 50 rows / 29,555.0 sh, chain BUY Kostyuk 37
+rows / 49,483.5, poll BUY Noskova 2 rows / 10,224.4, poll BUY Kostyuk 10 rows / 42,661.7. The chain path
+(`ingestion/chain.py`, `_wallet_1155_legs`) writes ONE row per tx per token -- the wallet's net 1155 legs,
+size = the whole taker order, price = its average -- and the Data-API path (`ingestion/poller.py`, the
+reconciler's re-sweep, `backfill`) writes ONE ROW PER MAKER MATCH, so the ingest dedupe key
+(`ingestion/dedupe.py`: tx, asset, side, size, price, ts) never collapses them when a taker order matched
+more than one maker: tx `0x5446ded9b2e157ec` Kostyuk BUY is chain 15,164.0 @ 0.563 AND poll 4,996 @ 0.560
++ 5,172 @ 0.560 + 4,996 @ 0.570 = 15,164.0, the same fill twice (likewise `0x9cf14ff1b7711eb6` 14,777.0,
+`0xaa52fe6c5a12901d` 10,224.4, `0xf66028301c277143` 6,210.8); 46,376.2 extra shares on this one market.
+THE RULE, read-side, in `mirror_shadow.his_fills` (SQL, a window over the key, deterministic): ONE reading
+per (tx_hash, asset, side) -- the net-leg row (`source` in `chain`/`s1`, `FILLS_NET_LEG_SOURCES`) when the
+key holds one, else every per-match row (a poll-only tx the chain path missed is kept whole; two poll legs
+of one tx with no chain row are both kept; a poll leg that does NOT sum to the chain row still collapses --
+the chain row is the wallet's net legs, the truth). THE PROOF it is the venue's own number: the exit
+worker's snapshot of his wallet (19:10Z-19:13Z, `fills_since` 0) read long 55,993 / other 29,555;
+collapsed, the fills read 49,483.5 + 6,509.9 (the two poll-only Kostyuk txs) = 55,993.4 long and 29,555.0
+other -- the snapshot, to the share -- where the raw table read 92,145 / 39,779, drift 0.44 against the
+snapshot, so `rules.admission` refused every increase on his most active book under `drift`
+(MIRROR_DRIFT_MAX 0.05): 157 shares held against a target of ~2,900. Every reader of his position goes
+through `his_fills` and gets the collapse: `shadow_market`, `mirror_live._tick_candidate` / `_tick_book`
+(`net_positions`, `_his_level`, `fills_since`), `mirror_report.mirror_cover_report` (`notional_in_window`,
+`gross_sh`, `paired_sh`); the two raw `trades` reads left in the shadow derive no position (`compute_ratio`'s
+opening bursts -- a diagnostic since U12b -- and `active_conditions`). What was dropped is counted on
+every call (`his_fills_dedup`): the shadow sums it per tick as `fills_dedup_rows` / `fills_dedup_shares`
+(and per row on `detail`); the live tick as ONE nested block `fills_dedup = {rows, shares}` appended after
+every other key -- `integ` sits at 39 keys under the sanitizer's 40-key cap and the top level one slot
+short of it, so the block is what a tick that also appends `capped_tick` or `abandon_reason` loses from the
+served surface, never those. S1 rows (`ingestion/s1_emitter.py`) are the second chain source: an `agg`
+record is the same aggregate view as the chain row, the ingest probes on both paths (`SQL_PROBE`,
+`_handle_v3`'s pre-probe, `source IN ('chain', 's1')` per (tx, whale, asset)) keep an s1 row and a chain
+row off the same fill, and an s1 row CAN share a tx with poll rows (the venue re-delivers the fill; a
+multi-maker split lands under other keys), so they follow the same rule. Known residual of that rule: the
+emitter's `same_asset_entry` deferral (a taker sweep filling two of his resting orders on one token in one
+tx: s1 emits leg 1, the poller carries leg 2) collapses leg 2 under the s1 row -- an UNDER-read by one leg,
+counted on the emitter's beat as `s1.abstain.same_asset_entry`. The direction of that error depends on the side (review D1, minor 2): a lost BUY leg under-reads his position (the mirror holds less: conservative), a lost SELL leg over-reads it (the mirror keeps holding what he sold). The partition also carries `whale_id` (review minor 1): `whales.username` is not unique, so a second wallet filed under one username in the same batched tx cannot have its poll legs swallowed by the first wallet's chain row.
+THE INGESTION-SIDE FIX IS NOT IN THIS CHANGE: the table is shared with the copy lane, the edge analytics
+and the reconciler, and a wrong dedupe at ingest loses fills; the durable fix is a dedupe on (tx, asset,
+side) at ingest with a sum check. His day by source at 19:13Z: chain 9,659 rows / $1.87M, poll 1,297 rows
+/ $813k, s1 109 rows / $167k. Tests: `tests/test_d1_fills_dedup.py` executes the SQL against a scratch
+Postgres on exactly the rows above (skips visibly without one, the `test_s1_sql_real_pg` shape).
+Beside it, the live candidate walk's TERMINAL MEMO (`mirror_live._terminal_until`,
+`cand_terminal_skipped`; docs/mirror-coverage.md §1.5): the 19:02Z census read `venue_halted` on 26 of 29
+candidate reads, every one `MARKET_STATE_EXPIRED`, and the 20 slots per tick went to re-reading them.
+
 ## 6. WHAT "TO A TEE" CANNOT MEAN — the honest residuals, with numbers
 
 | residual | number | source |

@@ -248,6 +248,12 @@ CENSUS_KEYS: tuple[str, ...] = (
     # the copy lane's soccer/esports price floor, lifted for a mirror
     # book by owner order (2026-09-06, _mirror_cell): counted, never a refusal
     "soccer_floor_lifted",
+    # D1 (2026-09-06): a candidate skipped because its venue state read
+    # TERMINAL inside the last UNMAPPED_TTL_S (_terminal_until). Appended
+    # LAST, past the served 40-key prefix; `integ` is at its own ceiling
+    # (39 keys under the sanitizer's cap), so this one is read off the
+    # raw heartbeat and this module's tests, not the served census
+    "cand_terminal_skipped",
 )
 _FAMILIES = (("mapping:", "mapping"), ("edge_gate:", "edge_gate"),
              ("cell_gate_", "cell_gate"), ("place_refused:", "place_refused"))
@@ -275,6 +281,22 @@ _last_tick_at = 0.0
 _last_mode: str | None = None
 _last_whales: list = []
 _unmapped_until: dict[tuple[str, str], float] = {}
+# THE TERMINAL MEMO (D1, 2026-09-06). The candidate walk spends its
+# MAX_MARKETS_PER_TICK quote reads newest-touched first, and his
+# newest-touched mapped markets are matches he trades to settlement:
+# the 19:02Z census read `venue_halted` on 26 of 29 reads, every one
+# MARKET_STATE_EXPIRED, re-read every tick while the open market behind
+# them never reached a slot. A candidate whose quote read carried a
+# TERMINAL state (ms.STATE_TERMINAL: expired, closed, terminated, the
+# closing auction -- a market that has ended, a per-market fact) is
+# remembered here per (whale, condition_id) for ms.UNMAPPED_TTL_S the
+# way _unmapped_until remembers a market with no venue market, and
+# skipped under `cand_terminal_skipped` until the TTL runs. NEVER for a
+# HALTED / SUSPENDED / PREOPEN read (those reopen, and count toward the
+# miss streak), and NEVER from an existing book's read (_tick_book never
+# writes it: a book on an ended market is managed every tick until it
+# closes).
+_terminal_until: dict[tuple[str, str], float] = {}
 # The venue IGNORED the post-only flag once (executions on a post-only
 # create): the flag is off for the rest of the process and the maker
 # thesis is measured by price selection alone (spec X.L).
@@ -898,6 +920,11 @@ class _Tick:
     cand_reads: int = 0
     misses: int = 0
     abandoned: bool = False
+    # D1: the per-match rows ms.his_fills collapsed under a net-leg row
+    # across every fills read this tick (books and candidates), and their
+    # shares; published as the `fills_dedup` block (_publish_fills_dedup)
+    fills_dedup_rows: int = 0
+    fills_dedup_shares: float = 0.0
     # the venue's own market state on every quote read this tick, as
     # the venue spells it (MARKET_STATE_OPEN, MARKET_STATE_HALTED, ...)
     venue_states: Counter = field(default_factory=Counter)
@@ -3350,6 +3377,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # write of it: a fill booked later in the tick does not move it
     book["_held"] = _num(standing.get("filled_shares"))
     fills = await ms.his_fills(t.pool, w, cid)
+    _count_fills_dedup(t)
     # STEP M BEFORE ANY PLAN (addendum section 10): a closed or
     # resolved market, or a closing book, cancels and never increases.
     # 'closing' is entered on a POSITIVE reading only (closed True or
@@ -4553,6 +4581,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     by the first name, else open the book and plan it this tick."""
     w = whale
     fills = await ms.his_fills(t.pool, w, cid)
+    _count_fills_dedup(t)
     # the shadow's own mapper, venue module and all (C1): ledger, premap,
     # then the copy lane's exact steps -- paced, cached per market,
     # bounded per tick by t.map_budget
@@ -4602,6 +4631,12 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
             oa = None
         oa = str(oa) if oa else None
     r = await _read_market(t, w, cid, slug, la, oa, fills)
+    if t.slug_states.get(slug) in ms.STATE_TERMINAL:
+        # the market has ended (this read's own state, as _bbo recorded
+        # it): remembered for the TTL so the next ticks' slots go to
+        # markets that can open a book (D1). Only a candidate's read
+        # writes this; HALTED/SUSPENDED never do (they reopen)
+        _terminal_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
     if t.abandoned:
         return
     shorts = _shorts_on(t)
@@ -4793,8 +4828,34 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             # last, and in the `finally`: an abandoned or raising tick
             # publishes the counters it did reach, never a stale block
             stats["integ"] = _integ_block(stats)
+            _publish_fills_dedup(t)
             _current_stats = None
     return stats
+
+
+def _count_fills_dedup(t: _Tick) -> None:
+    """Right after every `ms.his_fills` call: add what it collapsed
+    (ms.his_fills_dedup, the per-match rows dropped under a net-leg row
+    and their shares) to the tick's totals."""
+    d = ms.his_fills_dedup()
+    t.fills_dedup_rows += int(d.get("dup_rows") or 0)
+    t.fills_dedup_shares = round(t.fills_dedup_shares + float(d.get("dup_shares") or 0.0), 4)
+
+
+def _publish_fills_dedup(t: _Tick) -> None:
+    """The tick's fills collapse (D1), as ONE nested block appended AFTER
+    every other key: `fills_dedup = {rows, shares}`, served whole as
+    `.detail.fills_dedup.rows` / `.shares`. Why a block and why last:
+    the health endpoint's sanitizer caps every dict at 40 keys. `integ`
+    (the served projection for past-cap names) holds 39 and is pinned
+    under the cap by this file's tests, so two more names cannot ride
+    there; the top level holds 38 base keys plus `venue_positions` on
+    every ON tick, one slot short of the cap, so a block written LAST is
+    the one the sanitizer drops on a tick that also appends
+    `capped_tick` or `abandon_reason` -- never one of those. The numbers
+    are always present on the raw heartbeat and the ops log line."""
+    t.stats["fills_dedup"] = {"rows": int(t.fills_dedup_rows),
+                              "shares": round(float(t.fills_dedup_shares), 4)}
 
 
 async def _tick(t: _Tick, woken: list) -> None:
@@ -4943,6 +5004,11 @@ async def _tick(t: _Tick, woken: list) -> None:
                 stats["capped_tick"] = True
                 break
             if (w, cid) in t.books_seen or _unmapped_until.get((w, cid), 0.0) > t.now:
+                continue
+            if _terminal_until.get((w, cid), 0.0) > t.now:
+                # its last candidate read said the market had ended (D1):
+                # no slot spent on it until the memo's TTL runs
+                _mirror_stop("cand_terminal_skipped", w)
                 continue
             try:
                 await _tick_candidate(t, w, cid)

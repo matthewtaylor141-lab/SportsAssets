@@ -991,6 +991,7 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_last_mode", None)
     monkeypatch.setattr(ml, "_last_whales", [])
     monkeypatch.setattr(ml, "_unmapped_until", {})
+    monkeypatch.setattr(ml, "_terminal_until", {})     # D1: the terminal memo, same shape
     monkeypatch.setattr(ml, "_BOOK_LOCKS", {})
     monkeypatch.setattr(ms, "_ratio_cache", {"at": 0.0, "by_whale": {}})
     monkeypatch.setattr(ms, "_unmapped_until", {})
@@ -4035,7 +4036,10 @@ def test_an_open_empty_book_is_no_quote_and_a_closed_quoted_book_is_venue_halted
     assert _census(st, "venue_halted") == 1 and _census(st, "no_quote") == 0, st["census"]
     assert st["venue_state"] == "MARKET_STATE_CLOSED" and not st["abandoned"]
     assert not p.books and not p.orders and not _places(v), "never placed on"
-    # a quoted OPEN market on the same fixture DOES open a book: the refusal above was the state
+    assert ml._terminal_until == {("rn1", CID): NOW + ms.UNMAPPED_TTL_S}, "an ended market is memoised (D1)"
+    # a quoted OPEN market on the same fixture DOES open a book: the refusal
+    # above was the state (a fresh world: the D1 memo of the CLOSED read cleared)
+    ml._terminal_until.clear()
     p = _pool()
     v = _Venue(bid=0.01, ask=0.20)
     _tick(p, v)
@@ -4481,15 +4485,17 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-15:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-16:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
                           "grammar_echo_unreadable", "grammar_tripped", "grammar_probation",
                           "grammar_echo_unverified", "grammar_echo_ok", "side_echo_mismatch",
                           # the copy lane's soccer floor, lifted for the mirror (owner order)
-                          "soccer_floor_lifted")
-    assert keys[-16] == "short_share_cap" and keys.count("books_unreadable") == 1
+                          "soccer_floor_lifted",
+                          # D1: the terminal memo's skip, LAST
+                          "cand_terminal_skipped")
+    assert keys[-17] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -6031,6 +6037,25 @@ def test_the_soccer_floor_is_lifted_for_a_mirror_book_and_counted(monkeypatch):
 
 
 # ------------------------------------------------ 12. the census coverage
+
+def test_a_terminal_candidate_is_memoised_and_skipped_on_the_next_tick(monkeypatch):
+    """D1: a candidate whose quote read said the market had ended
+    (ms.STATE_TERMINAL) is remembered for ms.UNMAPPED_TTL_S the way an
+    unmapped one is, and skipped under `cand_terminal_skipped` -- the
+    walk's 20 slots were going to his settled matches. The 25-ahead-of-1
+    walk, the halt/book exclusions and the TTL are pinned in
+    tests/test_d1_fills_dedup.py."""
+    monkeypatch.setattr(ml, "_terminal_until", {})
+    p = _pool()
+    v = _Venue(state="MARKET_STATE_EXPIRED")
+    st = _tick(p, v)
+    assert _census(st, "venue_halted") == 1 and not st["abandoned"] and not p.books
+    assert ml._terminal_until == {("rn1", CID): NOW + ms.UNMAPPED_TTL_S}
+    v.calls.clear()
+    st2 = _tick(p, v, now=NOW + 1)
+    assert _census(st2, "cand_terminal_skipped") == 1 and st2["reads"] == 0
+    assert not [c for c in v.calls if c[0] == "bbo"], "no slot spent on it"
+
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():
     """Runs last. One name is declared for the reader and structurally

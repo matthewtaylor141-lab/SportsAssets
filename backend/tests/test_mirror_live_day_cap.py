@@ -935,6 +935,8 @@ def test_a_non_open_read_on_an_existing_book_never_counts_toward_the_streak(capl
     # the same book HALTED (an in-play halt, the venue's own shape for a
     # fight in progress) three ticks running: the book is held, never
     # the tick -- and the reset a quoted candidate gives is not needed
+    # (a fresh world: c1/c2 read EXPIRED above and D1 memoised them)
+    ml._terminal_until.clear()
     p = _pool(conds=["c1", "c2"])
     p.markets[OTHER_CID] = {"closed": False, "resolved": False, "resolved_prices": None}
     b = _other_book(p)
@@ -968,12 +970,17 @@ def test_a_terminal_state_counts_nowhere_and_a_non_terminal_one_still_abandons_t
     for venue in (_Venue(bid=None, ask=None, state=EXPIRED),
                   _Venue(bid=0.01, ask=0.20, state="MARKET_STATE_CLOSED"),
                   _Venue(bid=None, ask=None, state="MARKET_STATE_TERMINATED")):
+        # a fresh world per state: D1's terminal memo would otherwise
+        # skip c1..c4 on the second and third ticks (the same clock)
+        ml._terminal_until.clear()
         p = _pool(conds=["c1", "c2", "c3", "c4"])
         st = _tick(p, venue)
         assert not st["abandoned"] and st["reads"] == 4, venue.state
+        assert len(ml._terminal_until) == 4, "every ended market is memoised (D1)"
         assert _census(st, "venue_halted") == 4 and _census(st, "no_quote") == 0, st["census"]
         assert st["venue_state"] == venue.state and not p.books and not _places(venue)
     for state in ("MARKET_STATE_SUSPENDED", HALTED, "MARKET_STATE_PREOPEN"):
+        ml._terminal_until.clear()                # the fresh world again
         p = _pool(conds=["c1", "c2", "c3", "c4"])
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger=ml.log.name):
