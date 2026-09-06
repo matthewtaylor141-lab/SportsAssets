@@ -497,6 +497,13 @@ class _Pool(_ShadowPool):
             if a[1] in ("filled", "cancelled", "expired", "rejected", "lost"):
                 o["done_at"] = NOW
             return "UPDATE 1"
+        if "ml-order-refused" in s:
+            # the refused placement's row (U13): rejected, done, and the
+            # adapter's raw kept as the receipt, parsed as the column would
+            o = self.orders[a[0]]
+            o.update(state="rejected", venue_state=a[1], reason=a[2],
+                     receipt=json.loads(a[3]), done_at=NOW)
+            return "UPDATE 1"
         if "ml-order-cursor" in s:
             o = self.orders[a[0]]
             if abs(float(o["booked_filled"]) - float(a[4])) > 1e-9:
@@ -1711,6 +1718,60 @@ def test_a_refused_create_and_a_429_in_its_text_back_off():
     assert _census(st, "place_refused") == 1 and _census(st, "rate_limited") == 1 and st["abandoned"]
     assert next(iter(p.orders.values()))["state"] == "rejected"
     assert _tick(_pool(), _Venue(), now=NOW + 1, keep_backoff=True)["skipped_backoff"]
+
+
+def test_a_refused_placement_keeps_the_adapters_raw_as_its_receipt():
+    """U13: mirror_orders 49-63 (the first two short books, refused
+    fifteen times over) carried nothing but the status. The row now
+    keeps the adapter's raw -- the guard's figures beside the venue's
+    preview -- so the next refusal explains itself."""
+    raw = {"preview": {"order": {"price": {"value": "0.89"}, "quantity": 92,
+                                 "cashOrderQty": {"value": "0.0000"}}},
+           "expected_cost": 10.12, "venue_cost": None, "venue_price": 0.89,
+           "venue_quantity": 92.0, "venue_side": None, "cost_space": "echo",
+           "expected_price": 0.89, "expected_quantity": 92, "why": "test"}
+
+    def _place(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
+        return {"ok": False, "order_id": None, "status": "preview_mismatch", "fill_price": None,
+                "filled_shares": 0.0, "raw": raw}
+    p = _pool()
+    st = _tick(p, _Venue(place=_place))
+    assert _census(st, "place_refused") == 1 and not st["abandoned"]
+    o = next(iter(p.orders.values()))
+    assert o["state"] == "rejected" and o["order_id"] is None and o["done_at"] == NOW
+    assert o["venue_state"] == "preview_mismatch" and o["reason"] == "place_refused:preview_mismatch"
+    assert o["receipt"] == raw and o["receipt"]["expected_cost"] == 10.12
+    # the statement is the refusal's own, with the receipt as the persist's shape
+    sent = [(s, a) for k, s, a in p.sent if "ml-order-refused" in s]
+    assert len(sent) == 1 and json.loads(sent[0][1][3]) == raw
+    # the new short status counts under the family by its prefix
+    assert ml._family("place_refused:preview_side_mismatch") == "place_refused"
+
+
+def test_a_refused_receipt_is_bounded_and_always_valid_json():
+    big = {"preview": {"order": {"blob": "x" * 6000}}, "expected_cost": 10.12,
+           "venue_cost": None, "cost_space": "echo", "why": "w"}
+    s = ml._refusal_receipt(big)
+    assert len(s) <= ml._REFUSAL_RECEIPT_MAX
+    d = json.loads(s)
+    assert d["expected_cost"] == 10.12 and d["cost_space"] == "echo" and d["why"] == "w"
+    assert d["truncated"]["preview"] > 6000 and "preview" not in d
+    # the scalars alone over the bound: the head of the text, still JSON
+    s2 = ml._refusal_receipt({"why": "y" * 5000, "expected_cost": 1.0})
+    assert len(s2) <= ml._REFUSAL_RECEIPT_MAX and json.loads(s2)["truncated"] is True
+    # under the bound, byte-for-byte the persist's own dump
+    small = {"expected_cost": 10.12, "preview": {"a": 1}}
+    assert ml._refusal_receipt(small) == json.dumps(small, default=str)
+    assert json.loads(ml._refusal_receipt("not a dict")) == {"raw": "not a dict"}
+    # a NaN or an infinity in the adapter's raw (a venue quantity that
+    # read "NaN") is not JSON: the jsonb cast would reject the whole
+    # update and the refusal would never be recorded (U13 review, F3)
+    nan_raw = {"expected_cost": 10.12, "venue_quantity": float("nan"),
+               "preview": {"order": {"x": float("inf"), "y": [float("-inf"), 1.0]}}}
+    s3 = ml._refusal_receipt(nan_raw)
+    d3 = json.loads(s3, parse_constant=lambda c: (_ for _ in ()).throw(ValueError(c)))
+    assert d3["venue_quantity"] == "nan" and d3["expected_cost"] == 10.12
+    assert d3["preview"]["order"]["x"] == "inf" and d3["preview"]["order"]["y"] == ["-inf", 1.0]
 
 
 # ---------------------------------------------------------- 8. flattens F

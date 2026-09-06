@@ -346,6 +346,59 @@ def _jsonish(v: Any) -> Any:
     return v
 
 
+# the bound on a refused placement's receipt JSON (U13): the adapter's
+# raw carries the venue's whole preview beside the guard's figures
+_REFUSAL_RECEIPT_MAX = 4000
+
+
+def _refusal_receipt(raw: Any) -> str:
+    """The adapter's raw on a refused placement as the row's receipt
+    JSON: json.dumps(raw, default=str), the shape _SQL_ORDER_PERSIST_ID
+    stores, bounded to _REFUSAL_RECEIPT_MAX characters and ALWAYS valid
+    JSON (a cut string would fail the column's jsonb cast and lose the
+    whole update). Over the bound, the guard's scalars (expected_cost,
+    venue_cost, the echoed price/quantity/side, cost_space, why) are
+    kept whole and each nested value is replaced by its length under
+    `truncated`; if even that is over, the head of the text is kept."""
+    if not isinstance(raw, dict):
+        raw = {"raw": raw}
+    # NaN and the infinities are not JSON: json.dumps emits them by
+    # default and the column's jsonb cast rejects the whole update, so
+    # the refusal would never be recorded and the row would stay
+    # 'placing' (U13 review, F3). They are written as their names.
+    def _dumps(obj: Any) -> str:
+        try:
+            return json.dumps(obj, default=str, allow_nan=False)
+        except ValueError:
+            return json.dumps(_no_nan(obj), default=str, allow_nan=False)
+    text = _dumps(raw)
+    if len(text) <= _REFUSAL_RECEIPT_MAX:
+        return text
+    slim = {k: v for k, v in raw.items() if not isinstance(v, (dict, list))}
+    slim["truncated"] = {k: len(_dumps(v)) for k, v in raw.items()
+                         if isinstance(v, (dict, list))}
+    text = _dumps(slim)
+    if len(text) <= _REFUSAL_RECEIPT_MAX:
+        return text
+    head = text
+    while True:
+        out = json.dumps({"truncated": True, "head": head})
+        if len(out) <= _REFUSAL_RECEIPT_MAX or not head:
+            return out
+        head = head[: len(head) * 2 // 3]
+
+
+def _no_nan(obj: Any) -> Any:
+    """`obj` with every non-finite float replaced by its name, recursively."""
+    if isinstance(obj, float) and not math.isfinite(obj):
+        return "nan" if obj != obj else ("inf" if obj > 0 else "-inf")
+    if isinstance(obj, dict):
+        return {k: _no_nan(v) for k, v in obj.items()}
+    if isinstance(obj, (list, tuple)):
+        return [_no_nan(v) for v in obj]
+    return obj
+
+
 def _post_only_enabled() -> bool:
     return (_POST_ONLY_OK and os.environ.get("PMUS_MIRROR_POST_ONLY", "on")
             .strip().lower() not in _OFF_VALUES)
@@ -602,6 +655,20 @@ UPDATE mirror_orders SET state = $2, venue_state = $3, reason = $4, maker = $5,
                       THEN now() ELSE done_at END,
        order_id = COALESCE($6, order_id), updated_at = now()
  WHERE id = $1 /* ml-order-state */
+"""
+# A REFUSED PLACEMENT KEEPS THE ADAPTER'S RAW (U13, 2026-09-06). The
+# first two short books were refused fifteen times over as
+# place_refused:preview_mismatch (mirror_orders 49-63) and the rows
+# carried nothing but the status: the expected and venue figures the
+# guard compared were in the adapter's raw and were dropped here, so the
+# cause (the venue's preview stating the notional, not the collateral)
+# had to be reconstructed from the code. The receipt column is the same
+# shape _SQL_ORDER_PERSIST_ID stores on a placed row; _SQL_ORDER_STATE
+# has no receipt slot, so the refusal has its own statement.
+_SQL_ORDER_REFUSED = """
+UPDATE mirror_orders SET state = 'rejected', venue_state = $2, reason = $3,
+       receipt = $4::jsonb, done_at = now(), updated_at = now()
+ WHERE id = $1 /* ml-order-refused */
 """
 _SQL_ORDER_CURSOR = """
 UPDATE mirror_orders SET booked_filled = booked_filled + $2, filled = $3, avg_px = $4,
@@ -3749,8 +3816,10 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
         _recent(book["id"], "post_only_rejected", code=code, order=(str(oid) if oid else None))
         return "post_only_rejected"
     if not oid:
-        await t.pool.execute(_SQL_ORDER_STATE, o["id"], "rejected", status,
-                             f"place_refused:{status or 'no_id'}", None, None)
+        # the row keeps the adapter's raw (U13): the guard's expected
+        # and venue figures, the venue's preview, its `why`
+        await t.pool.execute(_SQL_ORDER_REFUSED, o["id"], status,
+                             f"place_refused:{status or 'no_id'}", _refusal_receipt(raw))
         _mirror_stop(f"place_refused:{status or 'no_id'}", w)
         if "429" in json.dumps(raw, default=str):
             _mirror_stop("rate_limited", w)
@@ -4114,8 +4183,9 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
             # response of the CLOSE row, never a refusal to retry
             return await _lost_response(t, o, book, r, RuntimeError(
                 str(((resp.get("raw") or {}).get("error")) or "close_failed")[:80]))
-        await t.pool.execute(_SQL_ORDER_STATE, o["id"], "rejected", status,
-                             f"place_refused:{status or 'no_id'}", None, None)
+        await t.pool.execute(_SQL_ORDER_REFUSED, o["id"], status,
+                             f"place_refused:{status or 'no_id'}",
+                             _refusal_receipt(resp.get("raw") or {}))
         _mirror_stop(f"place_refused:{status or 'no_id'}", w)
         return f"place_refused:{status}"
     await _finish_order(t, o, book, st, kind)

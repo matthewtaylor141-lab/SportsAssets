@@ -328,9 +328,20 @@ def test_submit_ioc_partial_fill(monkeypatch):
 # ── SH1: the preview bound in COLLATERAL space (owner order 2026-09-05,
 # "we need to make sure we are mirroring shorts") ────────────────────
 
-def _short_stub(monkeypatch, venue_cost, create_resp=None):
+def _short_stub(monkeypatch, venue_cost, create_resp=None, wire=None, qty=None, side=None):
+    """A preview stating a cash figure and, when `wire`/`qty` are given,
+    echoing the order (U13: a short's guard reads the echo; the SH1
+    fixtures below echo what they send). `side`, when given, is the
+    venue's derived side on the previewed order."""
+    order = {"cashOrderQty": {"value": f"{venue_cost:.2f}", "currency": "USD"}}
+    if wire is not None:
+        order["price"] = {"value": f"{wire:.2f}", "currency": "USD"}
+    if qty is not None:
+        order["quantity"] = qty
+    if side is not None:
+        order["side"] = side
     orders = _StubOrders(
-        preview_order={"cashOrderQty": {"value": f"{venue_cost:.2f}", "currency": "USD"}},
+        preview_order=order,
         create_resp=create_resp or {"id": "ord-s", "executions": []},
     )
     monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": orders,
@@ -344,10 +355,12 @@ def test_expected_cost_is_collateral_on_a_short(monkeypatch, wire, qty):
     """A BUY_SHORT at contract price `wire` ties up (1 - wire) x qty; a
     venue preview stating exactly that is agreement, from a longshot's
     short (0.05: collateral 0.95 a share) to a favourite's (0.89: 0.11)."""
-    orders = _short_stub(monkeypatch, (1.0 - wire) * qty)
+    orders = _short_stub(monkeypatch, (1.0 - wire) * qty, wire=wire, qty=qty)
     r = pmus.submit_fok("m", wire, qty, intent="ORDER_INTENT_BUY_SHORT")
     assert r["status"] != "preview_mismatch", r
     assert orders.created and orders.created[0]["intent"] == "ORDER_INTENT_BUY_SHORT"
+    assert r["raw"]["expected_cost"] == pytest.approx((1.0 - wire) * qty)
+    assert r["raw"]["cost_space"] == "cash"
     # the same venue figure held to the LONG formula would have refused
     # every short of a favourite and passed every short of a longshot by
     # (1 - wire) / wire: the void-and-inverted guard SH1 replaces
@@ -357,17 +370,23 @@ def test_expected_cost_is_collateral_on_a_short(monkeypatch, wire, qty):
 
 def test_a_correctly_priced_short_of_a_favourite_is_not_a_preview_mismatch(monkeypatch):
     # his 0.72 leg: the contract sells at 0.28, the collateral is 0.72 x 20 = 14.40
-    orders = _short_stub(monkeypatch, 14.40)
+    orders = _short_stub(monkeypatch, 14.40, wire=0.28, qty=20)
     r = pmus.submit_fok("m", 0.28, 20, intent="ORDER_INTENT_BUY_SHORT")
     assert r["status"] != "preview_mismatch" and orders.created
 
 
 def test_a_short_whose_venue_cost_exceeds_the_collateral_still_refuses(monkeypatch):
-    # collateral 0.22 x 20 = 4.40; the venue says 4.60 (4.5% over): refused, nothing placed
-    orders = _short_stub(monkeypatch, 4.60)
+    # collateral 0.22 x 20 = 4.40, notional 0.78 x 20 = 15.60; the venue's
+    # cash figure is in one of those two spaces (U13), so it is held to
+    # the larger: 16.00 is above both (2.6% over the notional): refused,
+    # nothing placed. (Before U13 this fixture said 4.60, 4.5% over the
+    # collateral alone; that figure is now read as a notional-space
+    # statement well inside its bound.)
+    orders = _short_stub(monkeypatch, 16.00, wire=0.78, qty=20)
     r = pmus.submit_fok("m", 0.78, 20, intent="ORDER_INTENT_BUY_SHORT")
     assert r["ok"] is False and r["status"] == "preview_mismatch"
     assert r["raw"]["expected_cost"] == pytest.approx(4.40) and orders.created == []
+    assert r["raw"]["venue_cost"] == pytest.approx(16.00) and r["raw"]["cost_space"] == "cash"
 
 
 def test_the_long_expectation_is_byte_identical(monkeypatch):
@@ -379,3 +398,135 @@ def test_the_long_expectation_is_byte_identical(monkeypatch):
     orders = _short_stub(monkeypatch, 10.00)
     assert pmus.submit_fok("m", 0.50, 20, intent="ORDER_INTENT_BUY_LONG")["status"] != "preview_mismatch"
     assert orders.created[0]["intent"] == "ORDER_INTENT_BUY_LONG"
+
+
+# ── U13: the short's guard checks what the preview can tell us (the
+# first two short books, 2026-09-06 15:43Z: every placement refused
+# preview_mismatch against a venue figure that was the NOTIONAL) ──────
+
+_SHORT_FACTS = ("expected_cost", "venue_cost", "venue_price", "venue_quantity",
+                "venue_side", "cost_space")
+
+
+def _book6(monkeypatch, cash, wire=0.89, qty=92, side=None):
+    """Book 6's placement: BUY_SHORT 92 at wire 0.89, collateral 10.12,
+    notional 81.88; the preview echoes `wire`/`qty` and states `cash`."""
+    return _short_stub(monkeypatch, cash, wire=wire, qty=qty, side=side)
+
+
+def _place_short(orders):
+    r = pmus.submit_fok("m", 0.89, 92, intent="ORDER_INTENT_BUY_SHORT")
+    return r, orders.created
+
+
+def test_a_short_whose_preview_echoes_it_with_no_cash_figure_is_placed_in_echo_space(monkeypatch):
+    # the live shape: cashOrderQty 0.0000 (the per-fill lane's short executions)
+    r, created = _place_short(_book6(monkeypatch, 0.0))
+    assert r["status"] != "preview_mismatch" and created
+    assert created[0]["intent"] == "ORDER_INTENT_BUY_SHORT"
+    assert r["raw"]["cost_space"] == "echo" and r["raw"]["venue_cost"] is None
+    assert r["raw"]["expected_cost"] == pytest.approx(10.12)
+    assert r["raw"]["venue_price"] == pytest.approx(0.89) and r["raw"]["venue_quantity"] == 92
+    assert r["raw"]["venue_side"] is None
+    assert all(k in r["raw"] for k in _SHORT_FACTS)
+    # the placed raw's existing keys come first and are untouched
+    assert list(r["raw"])[:2] == ["preview", "response"]
+
+
+def test_a_cash_figure_that_is_the_notional_is_inside_the_bound(monkeypatch):
+    # the observed mismatch: 0.89 x 92 = 81.88, the contract notional
+    r, created = _place_short(_book6(monkeypatch, 81.88))
+    assert r["status"] != "preview_mismatch" and created
+    assert r["raw"]["cost_space"] == "cash" and r["raw"]["venue_cost"] == pytest.approx(81.88)
+
+
+def test_a_cash_figure_that_is_the_collateral_is_inside_the_bound(monkeypatch):
+    r, created = _place_short(_book6(monkeypatch, 10.12))
+    assert r["status"] != "preview_mismatch" and created
+    assert r["raw"]["cost_space"] == "cash"
+
+
+def test_a_cash_figure_above_both_spaces_is_a_real_overcharge(monkeypatch):
+    # 90.00 > max(10.12, 81.88) x 1.02 = 83.52
+    r, created = _place_short(_book6(monkeypatch, 90.00))
+    assert r["ok"] is False and r["status"] == "preview_mismatch" and created == []
+    assert r["raw"]["venue_cost"] == pytest.approx(90.00) and r["raw"]["cost_space"] == "cash"
+    assert r["raw"]["expected_cost"] == pytest.approx(10.12)
+    assert r["raw"]["expected_price"] == 0.89 and r["raw"]["expected_quantity"] == 92
+    assert "preview" in r["raw"]
+
+
+def test_a_preview_that_read_our_price_in_the_other_space_is_refused(monkeypatch):
+    # the venue echoing 0.11 for a 0.89 wire would place a different order
+    r, created = _place_short(_book6(monkeypatch, 0.0, wire=0.11))
+    assert r["status"] == "preview_mismatch" and created == []
+    assert r["raw"]["venue_price"] == pytest.approx(0.11) and r["raw"]["expected_price"] == 0.89
+    assert r["raw"]["cost_space"] is None
+
+
+def test_a_sub_cent_echo_that_implies_more_collateral_is_refused(monkeypatch):
+    # 0.8860 rounds to the 0.89 cent, so the echo passes, but the collateral
+    # it implies, 0.114 x 92 = 10.49, is over 10.12 x 1.02 (U13 review, F1:
+    # the echo-space money branch had no fixture)
+    orders = _short_stub(monkeypatch, 0.0, qty=92)
+    orders.preview_order["price"] = {"value": "0.8860", "currency": "USD"}
+    r = pmus.submit_fok("m", 0.89, 92, intent="ORDER_INTENT_BUY_SHORT")
+    assert r["status"] == "preview_mismatch" and orders.created == []
+    assert r["raw"]["cost_space"] == "echo"
+
+
+def test_an_echo_off_by_one_cent_is_refused_even_when_the_money_would_pass(monkeypatch):
+    # 0.90 for a 0.89 wire implies LESS collateral (money passes); the echo
+    # alone refuses it (U13 review, F2)
+    orders = _short_stub(monkeypatch, 0.0, wire=0.90, qty=92)
+    r = pmus.submit_fok("m", 0.89, 92, intent="ORDER_INTENT_BUY_SHORT")
+    assert r["status"] == "preview_mismatch" and orders.created == []
+    orders = _short_stub(monkeypatch, 0.0, wire=0.89, qty=91)
+    r = pmus.submit_fok("m", 0.89, 92, intent="ORDER_INTENT_BUY_SHORT")
+    assert r["status"] == "preview_mismatch" and orders.created == []
+
+
+def test_a_preview_that_read_our_quantity_wrong_is_refused(monkeypatch):
+    r, created = _place_short(_book6(monkeypatch, 0.0, qty=920))
+    assert r["status"] == "preview_mismatch" and created == []
+    assert r["raw"]["venue_quantity"] == 920 and r["raw"]["expected_quantity"] == 92
+
+
+def test_a_preview_whose_side_is_not_sell_is_a_side_mismatch(monkeypatch):
+    r, created = _place_short(_book6(monkeypatch, 0.0, side="ORDER_SIDE_BUY"))
+    assert r["ok"] is False and r["status"] == "preview_side_mismatch" and created == []
+    assert r["raw"]["venue_side"] == "ORDER_SIDE_BUY"
+
+
+def test_a_preview_whose_side_is_sell_is_placed(monkeypatch):
+    r, created = _place_short(_book6(monkeypatch, 0.0, side="ORDER_SIDE_SELL"))
+    assert r["status"] != "preview_side_mismatch" and created
+    assert r["raw"]["venue_side"] == "ORDER_SIDE_SELL"
+
+
+def test_a_preview_without_a_side_is_placed(monkeypatch):
+    r, created = _place_short(_book6(monkeypatch, 0.0))
+    assert r["status"] not in ("preview_side_mismatch", "preview_mismatch") and created
+
+
+def test_a_short_preview_with_neither_cash_nor_echo_is_unreadable(monkeypatch):
+    orders = _StubOrders(preview_order={}, create_resp={"id": "no"})
+    monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": orders,
+                                                    "markets": _SideLookupStub()})())
+    r = pmus.submit_fok("m", 0.89, 92, intent="ORDER_INTENT_BUY_SHORT")
+    assert r["status"] == "preview_unreadable" and orders.created == []
+    assert r["raw"]["expected_cost"] == pytest.approx(10.12)
+
+
+def test_a_long_with_a_cash_figure_above_its_cost_refuses_exactly_as_today(monkeypatch):
+    # 0.50 x 20 = 10.00; the venue says 17.00: the long guard, byte-identical
+    orders = _short_stub(monkeypatch, 17.00, wire=0.50, qty=20)
+    r = pmus.submit_fok("m", 0.50, 20)
+    assert r["status"] == "preview_mismatch" and orders.created == []
+    assert r["raw"] == {"preview": {"order": orders.preview_order},
+                        "expected_cost": 10.0, "venue_cost": 17.0}
+    # and a placed long's raw carries none of the short facts
+    orders = _short_stub(monkeypatch, 10.00, wire=0.50, qty=20)
+    r = pmus.submit_fok("m", 0.50, 20)
+    assert not any(k in r["raw"] for k in _SHORT_FACTS)
+    assert list(r["raw"]) == ["preview", "response"]

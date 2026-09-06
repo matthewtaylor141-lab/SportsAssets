@@ -136,3 +136,31 @@ census-coverage test on a subset run. Three minors, two folded before the commit
   changes; what changes is the shadow's `.short` detail block and its live-compared long reading
   on a legacy negative ledger. The `.short` block's dead-band verdicts before and after this deploy
   are NOT one series; S1 reads it from the deploy forward.
+
+**2026-09-06, U13 (the short's pre-trade guard; workers on 5df3975, 15:43Z-15:49Z).** The first two
+short books opened (book 6 target -92 @ wire 0.89, book 7 target -284 @ wire 0.99) and every
+placement was refused by our own guard, `place_refused:preview_mismatch`, mirror_orders 49-63, one per
+book per tick, the venue's preview answering 200 each time; no order reached the venue. What the
+venue's preview states for a short: NOTHING in collateral space that we have read. SH1 set the
+short's expectation to the collateral, (1 - wire) x qty (10.12 for book 6), and compared it to
+`_order_cost`, which reads `cashOrderQty` when > 0 and otherwise falls back to price x quantity; on
+a short the cash figure has only ever been read as `0.0000` (the per-fill lane's short executions,
+the SHORTROW lines), so the venue's figure was the contract NOTIONAL (0.89 x 92 = 81.88) and every
+short of a favourite read as an eight-fold overcharge. The 386 per-fill BUY_SHORTs since 2026-08-25
+passed only because the old long formula equalled that same fallback. What the guard now checks on
+a BUY_SHORT (`pmus._short_preview_gate`; every long path byte-identical): (1) the preview's order
+must ECHO ours, price equal to the wire to the cent and quantity equal to qty, else
+`preview_mismatch` with both sides' figures on raw; (2) when the preview order carries `side` it
+must be `ORDER_SIDE_SELL` (the venue derives side from intent; SHORTTRUTH read six of six creates as
+SELL), else the new `preview_side_mismatch`, counted by the mirror under
+`place_refused:preview_side_mismatch` by the prefix rule; (3) the money bound: expected_cost stays
+the collateral; a `cashOrderQty` > 0 is in one of the two spaces and may not exceed
+max(collateral, notional) x 1.02, and with no cash figure the collateral is recomputed from the
+ECHOED price and quantity and held to the expectation under the same tolerance (cost_space "echo").
+A preview with neither a cash figure nor an echo stays `preview_unreadable`. The returned raw on
+every short path carries `expected_cost`, `venue_cost`, `venue_price`, `venue_quantity`,
+`venue_side`, `cost_space`, and a refused placement's mirror_orders row now KEEPS that raw as its
+receipt (`_SQL_ORDER_REFUSED`, bounded to 4000 chars), so the next refusal explains itself. Still
+open: rung S4, the resting SELL_SHORT read-back (section 5c / open question 1), which nothing here
+touches; and the preview's cash figure on a short has still never been read non-zero, so which of
+the two spaces it is stated in remains unobserved.

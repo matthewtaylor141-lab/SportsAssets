@@ -2605,32 +2605,54 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                      if params["intent"] == "ORDER_INTENT_BUY_SHORT"
                      else limit_price * quantity)
     prev_order: dict = {}
+    # U13 (2026-09-06): what the short guard read off the preview,
+    # attached to the returned raw on every BUY_SHORT path; empty (and
+    # so absent from raw) on every long path.
+    short_facts: dict = {}
     if not sell:
         preview = client.orders.preview(
             {"request": {k: v for k, v in params.items()
                          if k != "synchronousExecution"}})
         prev_order = (preview or {}).get("order") or {}
-        prev_cost = _order_cost(prev_order)
-        # FAIL CLOSED (2026-08-25). An unreadable preview is not
-        # agreement — it is the absence of a second opinion on a real
-        # order, and it is exactly the state in which the overspend got
-        # through. Refuse and let the row record why.
-        if prev_cost is None:
-            return {"ok": False, "order_id": None,
-                    "status": "preview_unreadable",
-                    "fill_price": None, "filled_shares": 0.0,
-                    "raw": {"preview": preview,
-                            "expected_cost": expected_cost,
-                            "why": "venue preview stated no cost; "
-                                   "refusing rather than assuming it "
-                                   "agrees with ours"}}
-        if prev_cost > expected_cost * PREVIEW_COST_TOLERANCE:
-            return {"ok": False, "order_id": None,
-                    "status": "preview_mismatch",
-                    "fill_price": None, "filled_shares": 0.0,
-                    "raw": {"preview": preview,
-                            "expected_cost": expected_cost,
-                            "venue_cost": prev_cost}}
+        if params["intent"] == "ORDER_INTENT_BUY_SHORT":
+            # THE SHORT'S GUARD CHECKS WHAT THE PREVIEW CAN TELL US
+            # (U13, 2026-09-06). The venue's preview has never been
+            # read stating a short's collateral: on the first two short
+            # books (2026-09-06 15:43Z) every placement was refused
+            # `preview_mismatch` by SH1's collateral expectation against
+            # a venue figure that was the contract NOTIONAL (wire x
+            # qty, the fallback _order_cost reads when cashOrderQty is
+            # absent or zero -- the per-fill lane's short executions
+            # print cashOrderQty 0.0000). What the preview honestly
+            # states is the order it will place: the echoed price and
+            # quantity, the side it derived from the intent, and a cash
+            # figure in one of two spaces when it states one at all.
+            short_facts, refusal = _short_preview_gate(
+                preview, prev_order, limit_price, quantity, expected_cost)
+            if refusal is not None:
+                return refusal
+        else:
+            prev_cost = _order_cost(prev_order)
+            # FAIL CLOSED (2026-08-25). An unreadable preview is not
+            # agreement — it is the absence of a second opinion on a real
+            # order, and it is exactly the state in which the overspend got
+            # through. Refuse and let the row record why.
+            if prev_cost is None:
+                return {"ok": False, "order_id": None,
+                        "status": "preview_unreadable",
+                        "fill_price": None, "filled_shares": 0.0,
+                        "raw": {"preview": preview,
+                                "expected_cost": expected_cost,
+                                "why": "venue preview stated no cost; "
+                                       "refusing rather than assuming it "
+                                       "agrees with ours"}}
+            if prev_cost > expected_cost * PREVIEW_COST_TOLERANCE:
+                return {"ok": False, "order_id": None,
+                        "status": "preview_mismatch",
+                        "fill_price": None, "filled_shares": 0.0,
+                        "raw": {"preview": preview,
+                                "expected_cost": expected_cost,
+                                "venue_cost": prev_cost}}
 
     if post_only:
         # Only the post-only caller reads a 4xx as the venue's refusal;
@@ -2642,7 +2664,7 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
             refusal = _post_only_refusal(exc, prev_order)
             if refusal is None:
                 raise
-            return refusal
+            return _with_short_facts(refusal, short_facts)
     else:
         resp = client.orders.create(params)
     order_id = (resp or {}).get("id")
@@ -2679,20 +2701,22 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
         records = [_execution_record(ex) for ex in executions]
         cross = _post_only_cross(resp, prev_order, records, filled)
         if cross is not None:
-            return cross
+            return _with_short_facts(cross, short_facts)
         return {"ok": ok, "order_id": order_id,
                 "status": state.replace("ORDER_STATE_", "").lower() or "unknown",
                 "fill_price": fill_price, "filled_shares": filled,
                 "raw": {"preview": prev_order, "response": resp,
-                        "executions": records}}
+                        "executions": records, **short_facts}}
     # The flag-off return is byte-for-byte the pre-Phase-7 literal (the
     # same keys in the same order, so str(raw) and json.dumps(raw), which
     # live_executor persists as the error column, never move); the
-    # fixtures in tests/test_pmus_commission.py pin it as literals.
+    # fixtures in tests/test_pmus_commission.py pin it as literals. The
+    # short facts spread in AFTER those keys and are empty on every
+    # long path, so a long's raw is the same literal it always was.
     return {"ok": ok, "order_id": order_id,
             "status": state.replace("ORDER_STATE_", "").lower() or "unknown",
             "fill_price": fill_price, "filled_shares": filled,
-            "raw": {"preview": prev_order, "response": resp}}
+            "raw": {"preview": prev_order, "response": resp, **short_facts}}
 
 
 def close_position(us_slug: str, *, slippage_bips: int) -> dict:
@@ -2787,6 +2811,122 @@ def _order_cost(order: dict, default: float | None = None) -> float | None:
     if px and qty:
         return px * qty
     return default
+
+
+# The venue's side enum for the contract SELL a BUY_SHORT is booked as
+# (short-truth 2026-08-25: 50 of 50; SHORTTRUTH 2026-09-06: six of six
+# creates). Quoted once so the short guard and its tests cannot drift.
+_ORDER_SIDE_SELL = "ORDER_SIDE_SELL"
+
+
+def _cents(px: float) -> int:
+    return int(round(float(px) * 100))
+
+
+def _short_preview_gate(preview: Any, prev_order: dict, limit_price: float,
+                        quantity: int, expected_cost: float) -> tuple[dict, dict | None]:
+    """The BUY_SHORT pre-trade guard: what the venue's preview can
+    honestly tell us about a short, checked; the facts it read, kept.
+
+    Returns (facts, refusal). `facts` is attached to the returned raw
+    on EVERY short path, refused or placed: expected_cost (the
+    collateral, (1 - wire) x qty), venue_cost (cashOrderQty when > 0,
+    else None), venue_price, venue_quantity, venue_side, and
+    cost_space ("cash" when the venue stated a cash figure, "echo" when
+    the money bound was computed from the echoed order). `refusal` is
+    the submit_fok result dict to return, or None to place.
+
+    WHY THIS IS NOT THE LONG GUARD (U13, 2026-09-06). SH1 made the
+    short's expectation the collateral, which is right, and compared
+    it to _order_cost, which on a short is wrong: the preview's
+    cashOrderQty on a short has only ever been read as 0.0000 (the
+    per-fill lane's short executions), so _order_cost fell back to
+    price x quantity, the contract NOTIONAL. Every short of a
+    favourite (wire above 0.50) then read as an overcharge -- book 6's
+    0.89 x 92: expected 10.12, "venue" 81.88 -- and the first two
+    short books never reached the venue (mirror_orders 49-63). The
+    386 per-fill BUY_SHORTs before SH1 passed only because the OLD
+    long formula happened to equal that same fallback.
+
+    What a preview can state for a short, and what is checked:
+      1. THE ECHO. The previewed order must be OUR order: price equal
+         to the wire to the cent, quantity equal to qty. A venue that
+         read our price in the other space (0.11 for a 0.89 wire) or
+         our size wrong is refused `preview_mismatch` with both sides'
+         numbers on raw. A preview with neither a cash figure nor an
+         echoed price/quantity is `preview_unreadable`, as before.
+      2. THE SIDE. When the preview order carries `side` it must be
+         ORDER_SIDE_SELL, the side the venue derives from BUY_SHORT;
+         anything else is `preview_side_mismatch` (a new status; the
+         mirror counts it under place_refused:preview_side_mismatch by
+         its prefix rule). A preview without `side` says nothing and
+         is not refused for it.
+      3. THE MONEY. expected_cost stays the collateral. A cashOrderQty
+         > 0 is in ONE of the two spaces (collateral or notional) --
+         which one the venue has never told us -- so it may not exceed
+         max(collateral, notional) x PREVIEW_COST_TOLERANCE; above
+         both is a real overcharge, `preview_mismatch`. With no cash
+         figure the collateral is recomputed from the venue's ECHOED
+         price and quantity, (1 - price) x quantity, and held to the
+         expectation under the same tolerance: the echo check in money
+         terms, which is what the preview can honestly tell us.
+    Rung S4 (the resting SELL_SHORT read-back) is untouched and open."""
+    cash = _amount_value(prev_order.get("cashOrderQty"))
+    px = (_amount_value(prev_order.get("price"))
+          if prev_order.get("price") is not None else None)
+    qty = _opt_float(prev_order.get("quantity"))
+    side = prev_order.get("side") or None
+    facts = {"expected_cost": expected_cost,
+             "venue_cost": cash if cash > 0 else None,
+             "venue_price": px, "venue_quantity": qty,
+             "venue_side": side, "cost_space": None}
+
+    def _refuse(status: str, why: str) -> dict:
+        return {"ok": False, "order_id": None, "status": status,
+                "fill_price": None, "filled_shares": 0.0,
+                "raw": {"preview": preview, **facts,
+                        "expected_price": limit_price,
+                        "expected_quantity": quantity, "why": why}}
+
+    echoed = bool(px) and bool(qty)
+    if facts["venue_cost"] is None and not echoed:
+        return facts, _refuse("preview_unreadable",
+                              "venue preview stated no cost and echoed no "
+                              "order; refusing rather than assuming it "
+                              "agrees with ours")
+    if (not echoed or _cents(px) != _cents(limit_price)
+            or float(qty) != float(quantity)):
+        return facts, _refuse("preview_mismatch",
+                              "venue preview did not echo our order "
+                              "(price to the cent, quantity)")
+    if side is not None and side != _ORDER_SIDE_SELL:
+        return facts, _refuse("preview_side_mismatch",
+                              "venue derived a side other than "
+                              f"{_ORDER_SIDE_SELL} for a BUY_SHORT")
+    notional = px * qty
+    if facts["venue_cost"] is not None:
+        facts["cost_space"] = "cash"
+        if facts["venue_cost"] > max(expected_cost, notional) * PREVIEW_COST_TOLERANCE:
+            return facts, _refuse("preview_mismatch",
+                                  "venue cash figure exceeds both the "
+                                  "collateral and the notional")
+    else:
+        facts["cost_space"] = "echo"
+        if (1.0 - px) * qty > expected_cost * PREVIEW_COST_TOLERANCE:
+            return facts, _refuse("preview_mismatch",
+                                  "collateral from the echoed order exceeds "
+                                  "the collateral we expect")
+    return facts, None
+
+
+def _with_short_facts(result: dict, facts: dict) -> dict:
+    """The short facts attached to a refusal built elsewhere (the two
+    post-only refusal shapes); a long's result (empty facts) untouched."""
+    if not facts:
+        return result
+    raw = result.get("raw")
+    result["raw"] = {**(raw if isinstance(raw, dict) else {"raw": raw}), **facts}
+    return result
 
 
 def _norm_order(o: dict) -> dict:
