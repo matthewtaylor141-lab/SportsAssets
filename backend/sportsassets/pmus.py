@@ -769,6 +769,59 @@ def _bbo_quotes(client, us_slug: str) -> tuple[float | None, float | None]:
     return None, None
 
 
+def bbo_read(client, us_slug: str) -> dict:
+    """The mirror's quote read: `{"bid", "ask", "state", "error"}`.
+
+    The same two feeds `_bbo_quotes` tries, in the same order, the
+    quotes parsed the same way -- and the venue's own MARKET STATE
+    beside them. On 2026-09-05 the venue was halted venue-wide for five
+    hours (`"state": "MARKET_STATE_HALTED"`, `bestBid: null`,
+    `bestAsk: null` on every market, HTTP 200) and the mirror named
+    every read `no_quote`: the word it also uses for an unreadable
+    book, so an operator could not tell "the venue is halted" from
+    "our reads are failing" without an external probe.
+
+    `state` is `marketData.state` as the venue spells it (the string,
+    not lowered, not stripped of its prefix), or None when the payload
+    carries none (the SDK's MarketBBO TypedDict does not list it; the
+    live payload does). `error` is the name of the LAST exception when
+    both feeds raised, else None: an exception is never swallowed into
+    a silent (None, None). A feed that answers with a quote returns at
+    once; a feed that answers empty lends its state to the next one's
+    try, so `bbo` empty and `book` quoted is the book's quotes with the
+    book's state. `_bbo_quotes` is untouched: slug_bid and every other
+    caller keep its 2-tuple."""
+    out: dict = {"bid": None, "ask": None, "state": None, "error": None}
+    error, answered = None, False
+    for meth in ("bbo", "book"):
+        fn = getattr(getattr(client, "markets", None), meth, None)
+        if fn is None:
+            continue
+        try:
+            d = (fn(us_slug) or {}).get("marketData") or {}
+        except Exception as exc:  # noqa: BLE001 — named, then the next feed
+            error = type(exc).__name__
+            continue
+        if not isinstance(d, dict):
+            # a marketData that is not an object is not an answer: named
+            # by its shape, so a read on which no feed answered says why
+            error = f"marketData:{type(d).__name__}"
+            continue
+        answered = True
+        b = _quote_px(d, "bestBid", "best_bid", "bid")
+        a = _quote_px(d, "bestAsk", "best_ask", "ask")
+        st = d.get("state")
+        st = str(st) if st is not None else None
+        if b is not None or a is not None:
+            return {"bid": b, "ask": a, "state": st, "error": None}
+        if out["state"] is None:
+            out["state"] = st
+    # a feed that answered (empty) is an answer: the error names a read
+    # on which NO feed answered, never one the other feed covered
+    out["error"] = None if answered else error
+    return out
+
+
 def slug_bid(us_slug: str, long_leg: bool | None = None) -> float | None:
     """Live best BID for one orderable US slug (desk cash-out, owner
     directive 2026-08-22). None when the venue has no readable bid —

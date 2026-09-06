@@ -74,7 +74,7 @@ import logging
 import math
 import os
 import time
-from collections import deque
+from collections import Counter, deque
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -184,7 +184,7 @@ CENSUS_KEYS: tuple[str, ...] = (
     "loss_breaker", "loss_breaker_unreadable", "no_budget_room",
     "mirror_day_cap", "mirror_loss_stop", "positions_unreadable",
     "open_orders_unreadable", "protected_ids_unreadable", "tick_abandoned",
-    "no_ratio", "no_mark", "no_quote", "unmapped", "family", "per_side_unsupported",
+    "no_ratio", "no_mark", "no_quote", "venue_halted", "unmapped", "family", "per_side_unsupported",
     "market_closed", "market_unreadable", "game_too_far_out", "mapping", "edge_gate", "cell_gate",
     "clip_zero", "legacy_row", "slug_recent_copy", "underdog_coholds",
     "venue_already_holds", "kalshi_claimed", "side_band", "snapshot_stale",
@@ -219,6 +219,16 @@ _TICK_LOCK = asyncio.Lock()
 _BOOK_LOCKS: dict[int, asyncio.Lock] = {}
 _backoff_until = 0.0
 _last_tick_at = 0.0
+# THE MODE THE WORKER ACTUALLY HOLDS, for a tick inside the backoff. A
+# skipped tick returned _new_stats() whole -- mode 'safe', whales [] --
+# so every 10th tick that fell inside a 60 s backoff printed a mode
+# line reading `mode=safe` between `mode=on` abandons, and a reader saw
+# the mirror flip to SAFE every few minutes (live log 23:09-23:25Z,
+# 2026-09-05). The last completed tick's mode and allowlist are kept
+# here and published on the skipped tick, which also says how long the
+# backoff has left.
+_last_mode: str | None = None
+_last_whales: list = []
 _unmapped_until: dict[tuple[str, str], float] = {}
 # The venue IGNORED the post-only flag once (executions on a post-only
 # create): the flag is off for the rest of the process and the maker
@@ -699,6 +709,13 @@ class _Tick:
     reads: int = 0
     misses: int = 0
     abandoned: bool = False
+    # the venue's own market state on every quote read this tick, as
+    # the venue spells it (MARKET_STATE_OPEN, MARKET_STATE_HALTED, ...)
+    venue_states: Counter = field(default_factory=Counter)
+    # slug -> the state its LAST quote read this tick carried (None on
+    # a read that failed or a payload with no state): the reading's
+    # `venue_state`, which the flatten's slippage leg refuses on
+    slug_states: dict = field(default_factory=dict)
     snaps: dict = field(default_factory=dict)
     # (whale, condition_id) -> the per-market read, taken at most once
     # per market per tick (Phase 1); a refused or unreadable read is
@@ -714,13 +731,15 @@ class _Tick:
 # THE COUNTERS AN OPERATOR SURFACE CAN ACTUALLY READ.
 # `/api/health/services` publishes this worker's stats through
 # `_sanitize_detail`, which caps EVERY dict at 40 keys and appends
-# `_truncated_keys` -- and `census` carries ~98. So `.detail.census.<name>`
+# `_truncated_keys` -- and `census` carries ~99. So `.detail.census.<name>`
 # reads a real number for the first 40 names in CENSUS_KEYS order and a
-# STRUCTURAL ZERO for every name after them: `snapshot_stale` (index 40),
-# every `snap_market_*` name, `drift`, `venue_ledger_disagree`,
-# `wrong_sign_trip`, `order_lost`, `post_only_ignored` and
-# `mirror_flatten` are all past the cap. A gate line reading those prints
-# a pass that was never measured, which is worse than printing nothing.
+# STRUCTURAL ZERO for every name after them: `side_band` (index 40,
+# pushed past the cap when `venue_halted` took index 24 on 2026-09-05),
+# `snapshot_stale` (41), every `snap_market_*` name, `drift`,
+# `venue_ledger_disagree`, `wrong_sign_trip`, `order_lost`,
+# `post_only_ignored` and `mirror_flatten` are all past the cap. A gate
+# line reading those prints a pass that was never measured, which is
+# worse than printing nothing.
 #
 # `integ` is the fix that lives on THIS side of the wire: one extra
 # top-level key holding a small flat block of exactly the names the P1
@@ -729,12 +748,15 @@ class _Tick:
 # is a projection of `census` and the `snap_market_*` counters, never a
 # second place where a count is kept -- `_integ_block` reads them, it
 # never writes them. `api/app.py` needs no change and gets none.
+# `side_band` and `venue_halted` ride here so both stay on the served
+# surface: the one the new key pushed past the cap, and the new key
+# itself (an operator reading the halted venue reads it off `integ`).
 _INTEG_CENSUS_KEYS: tuple[str, ...] = (
     "mirror_overspend", "overspend_uncheckable", "venue_ledger_disagree",
     "wrong_sign_trip", "overfill", "order_lost", "post_only_ignored",
     "mirror_flatten", "snapshot_stale", "drift", "snap_market_unreadable",
     "snap_market_capped", "snap_market_stale", "snap_market_no_ids",
-    "snap_market_skipped",
+    "snap_market_skipped", "side_band", "venue_halted",
 )
 _INTEG_STAT_KEYS: tuple[str, ...] = (
     "snap_market_planned", "snap_market_reads", "snap_market_fresh_reads",
@@ -759,7 +781,10 @@ def _new_stats() -> dict:
             # the day room _global_guards read, in dollars (filled plus
             # resting off MIRROR_DAY_USD); None on a tick that never
             # read it (SAFE, exits, a cancel-only tick)
-            "mirror_day_room": None, "placed_rest": 0, "placed_take": 0,
+            "mirror_day_room": None,
+            # the venue's own market state, the most common one this
+            # tick's quote reads carried (None: no read carried one)
+            "venue_state": None, "placed_rest": 0, "placed_take": 0,
             "filled_rest": 0, "filled_take": 0, "partial_fills": 0, "requotes": 0,
             "cancelled": 0, "flattened": 0, "closed_books": 0, "frozen_reasons": {},
             "census": {k: 0 for k in CENSUS_KEYS}, "recent": [], "abandoned": False,
@@ -990,18 +1015,63 @@ async def _snapshot(t: _Tick, whale: str) -> tuple[dict, float | None, bool]:
     return t.snaps[whale]
 
 
+_STATE_OPEN = "MARKET_STATE_OPEN"
+
+
+def _miss(t: _Tick, why: str, detail: str | None = None) -> None:
+    """One quote read that is not a quote to trade on, by name; the
+    MISS_STREAK_ABANDON-th in a row abandons the tick under that name."""
+    t.misses += 1
+    _mirror_stop(why)
+    if t.misses >= ms.MISS_STREAK_ABANDON:
+        _abandon(t, why, detail)
+
+
 async def _bbo(t: _Tick, slug: str) -> tuple[float | None, float | None]:
+    """The quote read, and the venue's own word for the market it read.
+    Three names, never one (2026-09-05, when five hours of a venue-wide
+    MARKET_STATE_HALTED read as `no_quote`, the word for an unreadable
+    book, and cost forty minutes and an external probe):
+
+      no_quote      the read failed on every feed (the error is named
+                    on the WARNING) -- OR the market is OPEN (or the
+                    state is absent, the shape the SDK's typed dict
+                    promises) and both quotes are empty: an open market
+                    with no makers is not a placement either
+      venue_halted  the venue says the market is not OPEN (HALTED,
+                    SUSPENDED, PREOPEN, CLOSED, EXPIRED, ...): the
+                    state is recorded on the tick and the census, and
+                    a quote on such a market -- a settled market's
+                    stale rests -- is NOT a quote to trade on
+      a quote       on an OPEN market: the miss streak resets
+
+    The mirror resumes on its own when the state reads OPEN and a quote
+    is present; nothing here is sticky."""
     try:
-        bid, ask = await asyncio.to_thread(ms._paced_bbo, t.pmus, slug)
+        q = await asyncio.to_thread(ms._paced_bbo, t.pmus, slug)
     except Exception as exc:  # noqa: BLE001 — an unreadable book is no quote
-        log.warning("mirror_live: BBO for %s unreadable (%s)", slug, type(exc).__name__)
-        bid = ask = None
+        q = {"bid": None, "ask": None, "state": None, "error": type(exc).__name__}
     t.reads += 1
+    q = q if isinstance(q, dict) else {}
+    bid, ask, state, err = q.get("bid"), q.get("ask"), q.get("state"), q.get("error")
+    if err:
+        log.warning("mirror_live: BBO for %s unreadable (%s)", slug, err)
+        t.slug_states[slug] = None
+        _miss(t, "no_quote")
+        return None, None
+    state = str(state) if state is not None else None
+    # the state per slug rides on the tick, for the reading the flatten's
+    # slippage leg refuses on (_flatten_vanished): slug_bid reads the
+    # sell bid through _bbo_quotes, which carries no state of its own
+    t.slug_states[slug] = state
+    if state is not None:
+        t.venue_states[state] += 1
+        t.stats["venue_state"] = t.venue_states.most_common(1)[0][0]
+        if state != _STATE_OPEN:
+            _miss(t, "venue_halted", state)
+            return None, None
     if bid is None and ask is None:
-        t.misses += 1
-        _mirror_stop("no_quote")
-        if t.misses >= ms.MISS_STREAK_ABANDON:
-            _abandon(t, "no_quote")
+        _miss(t, "no_quote")
     else:
         t.misses = 0
     return bid, ask
@@ -1016,14 +1086,18 @@ def _mark_of(bid, ask) -> float | None:
     return None
 
 
-def _abandon(t: _Tick, why: str) -> None:
+def _abandon(t: _Tick, why: str, detail: str | None = None) -> None:
+    """`why` is the census name (`abandon_reason`); `detail` rides on
+    the WARNING alone -- the venue's state string on a venue_halted
+    abandon, so the line reads `(venue_halted: MARKET_STATE_HALTED)`."""
     global _backoff_until
     if not t.abandoned:
         _backoff_until = t.now + ms.BACKOFF_S
         t.abandoned = True
         t.stats.update(abandoned=True, status="degraded", abandon_reason=why)
         _mirror_stop("tick_abandoned")
-        log.warning("mirror_live: tick abandoned (%s), backing off %ss", why, ms.BACKOFF_S)
+        log.warning("mirror_live: tick abandoned (%s), backing off %ss",
+                    f"{why}: {detail}" if detail else why, ms.BACKOFF_S)
 
 
 async def _abandon_reconciled(t: _Tick, why: str) -> None:
@@ -1853,6 +1927,12 @@ class _Reading:
     mkt_long: float | None = None
     mkt_other: float | None = None
     mkt_net: float | None = None
+    # THE VENUE'S OWN STATE FOR THIS SLUG, as this tick's quote read
+    # carried it (t.slug_states): None when the read failed, the
+    # payload carried no state (the SDK's typed shape), or the quote
+    # was not read this tick. The flatten's slippage leg refuses on a
+    # state that is present and not OPEN (2026-09-06 review of U9).
+    venue_state: str | None = None
 
 
 async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: str | None,
@@ -1901,7 +1981,8 @@ async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: s
     return _Reading(whale, cid, slug, la, oa, fills, his_long, his_other, snap, age,
                     bool(partial), fresh_read, fresh, _snap_of(la), _snap_of(oa), bid, ask,
                     _mark_of(bid, ask), venue, manual, mk, market_live,
-                    mkf, ml_long, ml_other, mnet)
+                    mkf, ml_long, ml_other, mnet,
+                    venue_state=t.slug_states.get(slug))
 
 
 _MktSnap = tuple[bool | None, float | None, float | None, float | None]
@@ -3036,6 +3117,24 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
     ledger = int(book.get("ledger_net") or 0)
     if ledger < 1:
         return "flatten_vanished: flat"
+    # THE SLIPPAGE LEG READS THE VENUE'S STATE BEFORE IT READS A BID.
+    # The co-held IOC prices off slug_bid, which reads through
+    # _bbo_quotes -- a feed that carries no market state -- so a CLOSED
+    # market with a stale resting book (the 2026-09-05 probe: bid 0.01,
+    # ask 0.20 on a settled CFB market) yielded a tradeable bid and an
+    # IOC SELL went out on it in the same tick whose quote read had
+    # counted the slug venue_halted; the sole-holder branch sent
+    # close_position with no quote read at all (review of U9,
+    # 2026-09-06). The tick's OWN read of this slug decides, by the
+    # name _bbo gave it: a state that is present and not OPEN refuses
+    # here, before the position read and before either order, and the
+    # tick after the venue reads OPEN takes the leg as before. A state
+    # of None (the read failed, or the payload carried none) is not a
+    # refusal, exactly as it is not one in _bbo; the bid read below
+    # still refuses a book it cannot price.
+    if r.venue_state is not None and r.venue_state != _STATE_OPEN:
+        _mirror_stop("venue_halted", w)
+        return "venue_halted"
     try:
         held, _avg = await le._pm_held(r.slug)
     except Exception as exc:  # noqa: BLE001 — cannot size: refuse, retry next tick
@@ -3348,9 +3447,18 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
 
 
 async def _tick(t: _Tick, woken: list) -> None:
+    global _last_mode, _last_whales
     stats = t.stats
     if t.now < _backoff_until:
+        # the mode and allowlist the worker holds, never _new_stats'
+        # SAFE default (see _last_mode); read the real way when no
+        # tick has completed yet
         stats["skipped_backoff"] = True
+        stats["backoff_left_s"] = round(_backoff_until - t.now, 1)
+        if _last_mode is None:
+            await _read_mode(t)
+        else:
+            stats["mode"], stats["whales"] = _last_mode, list(_last_whales)
         return
     # the trading tables: workers never run migrations
     try:
@@ -3366,6 +3474,7 @@ async def _tick(t: _Tick, woken: list) -> None:
         t.mode = MODE_SAFE
         stats["mode"] = MODE_SAFE
         t.cancel_all = "no_venue"
+    _last_mode, _last_whales = t.mode, list(stats.get("whales") or [])
     if t.mode == MODE_SAFE:
         t.cancel_all = t.cancel_all or "mode_env_off"
         await _reconcile_orders(t)
@@ -3480,14 +3589,24 @@ def _mode_line(stats: dict, ticks: int) -> None:
     `books_live`, `orders_open` and `mirror_day_room` (the day ROOM in
     dollars, what _global_guards read off MIRROR_DAY_USD after what
     filled and what rests; None on a tick that never read it) are its
-    own keys. `census` and `recent` are left out of the trailing dict,
-    as the ops line leaves them out."""
+    own keys, and so are `venue_state` (the venue's own market state,
+    the most common one the tick's quote reads carried; None on a tick
+    that read none), `abandon_reason` (printed as `abandon=` on a tick
+    that abandoned) and `backoff_left_s` (printed as `backoff=` on a
+    tick skipped inside the backoff, whose `mode` is the one the worker
+    holds -- never SAFE unless the mode IS safe). `census` and `recent`
+    are left out of the trailing dict, as the ops line leaves them out."""
     if ticks < 1 or ticks % MODE_LINE_EVERY_TICKS:
         return
-    log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s stats=%s",
+    extra = ""
+    if stats.get("abandoned"):
+        extra += " abandon=%s" % (stats.get("abandon_reason"),)
+    if stats.get("skipped_backoff"):
+        extra += " backoff=%s" % (stats.get("backoff_left_s"),)
+    log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s venue=%s%s stats=%s",
              stats.get("mode"), stats.get("whales"), stats.get("books_live"),
-             stats.get("orders_open"), stats.get("mirror_day_room"),
-             {k: v for k, v in stats.items() if k not in ("census", "recent")})
+             stats.get("orders_open"), stats.get("mirror_day_room"), stats.get("venue_state"),
+             extra, {k: v for k, v in stats.items() if k not in ("census", "recent")})
 
 
 async def main() -> None:

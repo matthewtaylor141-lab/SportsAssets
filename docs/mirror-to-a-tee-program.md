@@ -99,7 +99,11 @@ than him), then raise MIRROR_MAX_REPLACES_PER_HOUR by CODE to the measured down-
 D21. gap_r1_4 G1 changing `_paced_bbo` to a 3-tuple — killed as not parallel-safe: spec routes every worker
 venue read through `ms._paced_bbo` (spec ~:110) and the in-flight worker unpacks two values;
 test_mirror_shadow:120-124 and :640 pin the shape and the pacing source text. Amended: sibling
-`_paced_bbo_state` returning (bid, ask, state, err); `_paced_bbo` untouched.
+`_paced_bbo_state` returning (bid, ask, state, err); `_paced_bbo` untouched. SUPERSEDED 2026-09-06 (U9,
+after the 2026-09-05 venue-wide halt read as `no_quote` for five hours): `_paced_bbo` now returns
+`pmus.bbo_read`'s dict `{bid, ask, state, error}`, both of its callers (mirror_shadow.shadow_market,
+mirror_live._bbo) were adapted in the same change, the `pace(READ_PACING_S)` source pin holds, and no
+`_paced_bbo_state` sibling is built.
 
 D22. gap_r1_5's per-side table (13/62 readings, $45,033 refused `per_side_unsupported`) — killed: an atc-
 contract's two sides share ONE identifier with a `long` bool (probe:1866); per_side needs two BUY_LONG rows
@@ -232,7 +236,10 @@ fee_coef, game_start_ts, status, ep3, closed carried as read); gamma.py (`parse_
 terms census, `rules_unreadable`); api/app.py; .github/workflows/engine-diagnostic.yml (MIRRORPHASE,
 MIRRORTERMS folded into the `mirror-cover` job from tee/mirror-terms-probe.yml, MIRRORRULES); tests.
 Depends on: 0a. parallel_safe_with_step9: TRUE (`rebase_on_step9_tree`; no worker-called signature changes;
-`_paced_bbo` keeps its 2-tuple).
+`_paced_bbo` keeps its 2-tuple). AMENDED 2026-09-06 (U9): the `_paced_bbo_state` / `_bbo_state` sibling
+plan above is superseded -- `_paced_bbo` returns `pmus.bbo_read`'s dict (`{bid, ask, state, error}`),
+both callers were adapted with it, the `pace(READ_PACING_S)` pin holds, and this phase reads the BBO
+call's `state` off that dict rather than building a sibling.
 
 Rule. Every mapped shadow row carries the venue's own lifecycle and contract facts, read once per market and
 cached: `phase ∈ {pre_open, in_play, decided, expired, resolved, unknown}` from gameStartTime (pre_open = now
@@ -842,6 +849,29 @@ M1-total (all families) printed beside M1.
   mirror_orders open=1 at 00:42:43Z. The three rung keys (MIRROR_MAX_LIVE_BOOKS, MIRROR_NET_CAP_USD,
   MIRROR_DAY_USD) were deleted from sportsassets-workers at 00:44:14-18Z (render-ops env-del, HTTP 204
   each), so the code defaults now ride: 5 books, $250 per market, $1,250 per day, $1,000 stop.
+
+### 5b. OPERATOR NOTES (2026-09-05): reading `venue_halted`
+
+`abandon_reason: venue_halted` (census key `venue_halted`, the WARNING `mirror_live: tick abandoned
+(venue_halted: MARKET_STATE_HALTED), backing off 60.0s`, the mode line's `venue=MARKET_STATE_HALTED
+abandon=venue_halted`) means the venue answered our quote reads and said, in its own words, that the
+market is not open for trading. The string after the colon is the venue's own `marketData.state` as it
+spells it (`MARKET_STATE_HALTED`, `MARKET_STATE_SUSPENDED`, `MARKET_STATE_PREOPEN`, `MARKET_STATE_CLOSED`,
+`MARKET_STATE_EXPIRED`, ...), read from the same `bbo`/`book` payload the quotes come from; it is not a
+word of ours. It is a different fact from `no_quote`, which now means only "the read failed on every
+feed (the error is named on the `BBO for <slug> unreadable (...)` line)" or "an OPEN market with an
+empty book". On the night of 2026-09-05 the venue was halted venue-wide for five hours with HTTP 200 on
+every read, and the mirror's fail-closed answer — abandon, back off, place nothing — was right while its
+name for it (`no_quote`) cost forty minutes and an external probe. A quote on a non-OPEN market (a settled
+market's stale resting book) is counted `venue_halted` too and is never traded on -- and the flatten's
+slippage leg (a sole holder's `close_position`, the co-held IOC at the bid) refuses under the same name
+on a slug whose quote read that tick carried a non-OPEN state, before it reads a bid or a position: its
+own bid read (`slug_bid`) carries no state, so without this a settled market's stale rests were a
+tradeable bid to it (2026-09-06). Nothing about this is
+sticky: the mirror resumes on its own, on the next tick after the backoff, the moment the state reads
+`MARKET_STATE_OPEN` and a quote is present. A tick that falls inside the backoff prints
+`mode=<the mode the worker holds> ... backoff=<seconds left>` on the mode line, never `mode=safe` unless the
+mode is safe.
 
 ## 6. WHAT "TO A TEE" CANNOT MEAN — the honest residuals, with numbers
 

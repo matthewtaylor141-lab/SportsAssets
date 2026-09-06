@@ -70,6 +70,7 @@ import math
 import os
 import re
 import time
+from collections import Counter
 from typing import Any
 
 from ..analytics import mirror as mi
@@ -149,6 +150,9 @@ EXIT_CENSUS_TIMEOUT_S = 15.0
 # decision 18; this is the count under which there is no reading at all.
 EXIT_MIN_N = 30
 _unmapped_until: dict[tuple[str, str], float] = {}
+# the venue's word for a market open for trading (bbo_read's `state`);
+# an empty book under it is `no_quote`, never a halt
+_STATE_OPEN = "MARKET_STATE_OPEN"
 _STATE_RATIO = "mirror_ratio"
 _STATE_SWITCH = "mirror_shadow"
 _SNAP_RAW_KEY = "whale_positions_raw:%s"
@@ -464,10 +468,14 @@ async def account_positions(pmus) -> dict[str, float] | None:
         return None
 
 
-def _paced_bbo(pmus, slug: str) -> tuple[float | None, float | None]:
-    """One BBO read behind the process-wide measurement pacer."""
+def _paced_bbo(pmus, slug: str) -> dict:
+    """One BBO read behind the process-wide measurement pacer:
+    pmus.bbo_read's dict -- `{"bid", "ask", "state", "error"}` -- so the
+    two workers that read through here see the venue's own market
+    state beside the quotes (2026-09-05: five hours of
+    MARKET_STATE_HALTED read as `no_quote`)."""
     pace(READ_PACING_S)
-    return pmus._bbo_quotes(pmus._get_client(), slug)
+    return pmus.bbo_read(pmus._get_client(), slug)
 
 
 def _px(f: dict) -> float | None:
@@ -1343,9 +1351,16 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
     # venue quote for the long side (one paced call) and what we hold
     bid = ask = None
     try:
-        bid, ask = await asyncio.to_thread(_paced_bbo, pmus, slug)
+        q = await asyncio.to_thread(_paced_bbo, pmus, slug)
     except Exception as exc:  # noqa: BLE001 — unreadable book, named below
         row["detail"]["bbo_error"] = type(exc).__name__
+    else:
+        # the venue's own state string rides on every mapped row, and
+        # a read on which no feed answered is named, never silent
+        bid, ask = q.get("bid"), q.get("ask")
+        row["detail"]["state"] = q.get("state")
+        if q.get("error"):
+            row["detail"]["bbo_error"] = str(q["error"])
     mark = None
     if bid is not None and ask is not None and 0.0 < bid < 1.0 and 0.0 < ask < 1.0:
         mark = round((float(bid) + float(ask)) / 2.0, 4)
@@ -1593,7 +1608,10 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
                              "exit_rows": 0, "exit_rest": 0, "exit_hold": 0,
                              "exit_unjudged": 0, "exit_left": 0,
                              "frozen": 0, "skipped_markets": 0, "skipped_unmapped": 0,
-                             "stale_snapshots": 0, "skipped_backoff": False, "ratio": {}}
+                             "stale_snapshots": 0, "skipped_backoff": False, "ratio": {},
+                             # the venue's own market state, the most common one
+                             # read this tick (None: no read carried one)
+                             "venue_state": None}
     if now_ts < _backoff_until:
         stats["skipped_backoff"] = True
         attach_exit_census(stats, now_ts)
@@ -1617,6 +1635,7 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
     stats["venue_positions"] = len(positions)
     reads = 0
     misses = 0
+    venue_states: Counter = Counter()
     for w in whales:
         stats["whales"] += 1
         r = (ratios.get(w) or {})
@@ -1663,13 +1682,24 @@ async def tick_once(pool, pmus, now_ts: float | None = None) -> dict:
                       "exit_hold" if ex == "hold" else "exit_unjudged"] += 1
             if "frozen" in str(row.get("reason") or ""):
                 stats["frozen"] += 1
+            state = (row.get("detail") or {}).get("state")
+            if state is not None:
+                venue_states[str(state)] += 1
+                stats["venue_state"] = venue_states.most_common(1)[0][0]
             if row.get("us_market_slug") and row.get("bid") is None and row.get("ask") is None:
                 misses += 1
                 if misses >= MISS_STREAK_ABANDON:
                     _backoff_until = now_ts + BACKOFF_S
                     stats.update(abandoned=True, status="degraded")
-                    log.warning("mirror_shadow: %d consecutive venue misses — "
-                                "abandoning the tick, backing off %ss", misses, BACKOFF_S)
+                    # the venue's own word for the last miss -- a halted
+                    # market is not an unreadable one (2026-09-05). An
+                    # OPEN empty book, or a read with no state, is
+                    # `no_quote`: three OPEN empty books must not read
+                    # as if OPEN were the cause
+                    log.warning("mirror_shadow: %d consecutive venue misses (%s) — "
+                                "abandoning the tick, backing off %ss",
+                                misses, state if state not in (None, _STATE_OPEN) else "no_quote",
+                                BACKOFF_S)
                     break
             else:
                 misses = 0

@@ -39,13 +39,16 @@ its armed fixture:
      ticks 10 and 20, not on tick 9; the cadence helper; the env dial
      and its floor.
 """
+import inspect
 import logging
 import types
 
 import pytest
 
+from sportsassets import live_executor as le
 from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.workers import mirror_live as ml
+from sportsassets.workers import mirror_shadow as ms
 from tests.test_mirror_live_worker import _armed  # noqa: F401 -- the autouse fixture, armed here too
 from tests.test_mirror_live_worker import (
     BUY, CID, M, N, NOW, SELL, SLUG, _cancels, _census, _fill, _his, _Http, _places, _pool,
@@ -461,9 +464,9 @@ def _quiet_stats():
 
 
 def _expected_line(stats):
-    return "mirror_live mode=%s whales=%s books=%s open=%s day=%s stats=%s" % (
+    return "mirror_live mode=%s whales=%s books=%s open=%s day=%s venue=%s stats=%s" % (
         stats["mode"], stats["whales"], stats["books_live"], stats["orders_open"],
-        stats["mirror_day_room"],
+        stats["mirror_day_room"], stats["venue_state"],
         {k: v for k, v in stats.items() if k not in ("census", "recent")})
 
 
@@ -540,7 +543,7 @@ def test_the_cadence_helper_and_the_env_dial(monkeypatch, caplog):
     line = _mode_lines(caplog)[0]
     assert " day=412.5 " in line and " day=4 " not in line
     assert "'census'" not in line and "'recent'" not in line
-    assert line.startswith("mirror_live mode=on whales=['rn1'] books=2 open=1 day=412.5 stats={")
+    assert line.startswith("mirror_live mode=on whales=['rn1'] books=2 open=1 day=412.5 venue=None stats={")
     assert "mirror_day_room" in ml._new_stats() and ml._new_stats()["mirror_day_room"] is None
     # the dial: an int with a floor of one; absent, blank or unparseable is 10
     monkeypatch.delenv("MIRROR_MODE_LINE_EVERY_TICKS", raising=False)
@@ -549,3 +552,215 @@ def test_the_cadence_helper_and_the_env_dial(monkeypatch, caplog):
                       ("", 10), ("abc", 10), ("2.5", 10)):
         monkeypatch.setenv("MIRROR_MODE_LINE_EVERY_TICKS", raw)
         assert ml._mode_line_every_ticks() == want, raw
+
+
+# ------------------- 4. the venue's market state, and the backed-off tick
+
+THIRD_CID, THIRD_SLUG, M3, N3 = "0xthird", "aec-atp-third-2026-09-02", "tok-m3", "tok-n3"
+HALTED = "MARKET_STATE_HALTED"
+
+
+def _three_markets():
+    """rn1 long 300 on the fixture market, a second and a third, all
+    readable (the _two_markets shape, one market wider)."""
+    fills = _his() + [_fill(M2, "BUY", 300.0, 0.31, NOW - 2500), _fill(M3, "BUY", 300.0, 0.31, NOW - 2400)]
+    p = _pool(fills=fills, snap={M: 300.0, N: 0.0, M2: 300.0, N2: 0.0, M3: 300.0, N3: 0.0})
+    for cid in (OTHER_CID, THIRD_CID):
+        p.markets[cid] = {"closed": False, "resolved": False, "resolved_prices": None}
+    p.token_index.update({M2: 1, N2: 0, M3: 1, N3: 0})
+    p.token_cid.update({M2: OTHER_CID, N2: OTHER_CID, M3: THIRD_CID, N3: THIRD_CID})
+    http = _ByMarket({
+        CID: [{"conditionId": CID, "asset": M, "size": 300},
+              {"conditionId": CID, "asset": N, "size": 0}],
+        OTHER_CID: [{"conditionId": OTHER_CID, "asset": M2, "size": 300},
+                    {"conditionId": OTHER_CID, "asset": N2, "size": 0}],
+        THIRD_CID: [{"conditionId": THIRD_CID, "asset": M3, "size": 300},
+                    {"conditionId": THIRD_CID, "asset": N3, "size": 0}]})
+    return p, http
+
+
+def test_a_mixed_tick_two_halted_books_then_an_open_quoted_one_does_not_abandon():
+    """The miss streak is a STREAK: two halted markets and then an OPEN
+    quoted one reset it, the tick goes on, and the open market is
+    placed on. `states` overrides the venue's state per slug."""
+    p, http = _three_markets()
+    b1 = p.add_book(ledger=0)
+    b2 = _other_book(p)
+    b3 = p.add_book(ledger=0, us_market_slug=THIRD_SLUG, condition_id=THIRD_CID,
+                    long_asset=M3, other_asset=N3)
+    v = _Venue(bid=0.30, ask=0.32, states={SLUG: HALTED, OTHER_SLUG: HALTED})
+    st = _tick(p, v, http=http)
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG, OTHER_SLUG, THIRD_SLUG]
+    assert not st["abandoned"] and "abandon_reason" not in st
+    assert _census(st, "venue_halted") == 2 and _census(st, "no_quote") == 0, st["census"]
+    assert st["venue_state"] == HALTED, "two of three reads: the most common state"
+    pl = _places(v)
+    assert [(c[1], c[3]) for c in pl] == [(THIRD_SLUG, 300)], pl
+    assert b3["open_order_id"] is not None
+    assert b1["open_order_id"] is None and b2["open_order_id"] is None, "never placed on a halted market"
+    # the same three, all halted: the streak reaches three and abandons
+    p, http = _three_markets()
+    p.add_book(ledger=0)
+    _other_book(p)
+    p.add_book(ledger=0, us_market_slug=THIRD_SLUG, condition_id=THIRD_CID, long_asset=M3, other_asset=N3)
+    v = _Venue(state=HALTED)
+    st = _tick(p, v, http=http)
+    assert st["abandoned"] and st["abandon_reason"] == "venue_halted" and not _places(v)
+    assert _census(st, "venue_halted") == 3
+
+
+class _SeqVenue(_Venue):
+    """A venue whose quote reads answer in ORDER, one bbo_read dict per
+    call (the last one repeats), so a miss can follow a quote."""
+
+    def __init__(self, answers, **kw):
+        super().__init__(**kw)
+        self.answers = list(answers)
+
+    def bbo_read(self, client, slug):
+        self.calls.append(("bbo", slug))
+        a = self.answers.pop(0) if len(self.answers) > 1 else self.answers[0]
+        return {"bid": None, "ask": None, "state": None, "error": None, **a}
+
+
+_H = {"state": HALTED}
+_Q = {"bid": 0.30, "ask": 0.32, "state": "MARKET_STATE_OPEN"}
+
+
+def test_a_quoted_read_resets_the_miss_streak_so_a_miss_after_it_starts_a_new_one():
+    """THE RESET, PINNED (review of U9: deleting `t.misses = 0` survived
+    the mixed-tick test above, whose quoted read was the LAST read).
+    Four candidates, four reads in sequence -- halted, halted, quoted
+    OPEN, halted: with the reset the streak reads 1, 2, 0, 1 and the
+    tick goes on; without it the fourth read is the third miss and the
+    tick abandons. A `cN` candidate has no markets row on this fixture,
+    so the quoted one is refused `market_unreadable` AFTER its read and
+    no book opens to re-read the slug: exactly four reads, three of
+    them venue_halted."""
+    p = _pool(conds=["c1", "c2", "c3", "c4"])
+    v = _SeqVenue([_H, _H, _Q, _H])
+    st = _tick(p, v)
+    assert [c for c in v.calls if c[0] == "bbo"] == [("bbo", SLUG)] * 4 and st["reads"] == 4
+    assert _census(st, "venue_halted") == 3 and _census(st, "no_quote") == 0, st["census"]
+    assert not st["abandoned"] and "abandon_reason" not in st and st["status"] == "ok"
+    assert _census(st, "tick_abandoned") == 0 and _census(st, "market_unreadable") == 1, st["census"]
+    assert st["venue_state"] == HALTED and not p.books and not _places(v)
+    # the same four reads without a quote between them: the third abandons, the fourth never happens
+    p2 = _pool(conds=["c1", "c2", "c3", "c4"])
+    v2 = _SeqVenue([_H, _H, _H, _Q])
+    st2 = _tick(p2, v2)
+    assert st2["abandoned"] and st2["abandon_reason"] == "venue_halted" and st2["reads"] == 3
+    # at _bbo's own level: the streak goes 1, 2, 0, 1
+    t = ml._Tick(pool=_pool(), pmus=_SeqVenue([_H, _H, _Q, _H]), http=None, now=NOW,
+                 stats=ml._new_stats())
+    seen = []
+    for _ in range(4):
+        _run(ml._bbo(t, SLUG))
+        seen.append(t.misses)
+    assert seen == [1, 2, 0, 1] and t.reads == 4 and not t.abandoned
+    assert t.stats["venue_state"] == HALTED and t.venue_states == {HALTED: 3, "MARKET_STATE_OPEN": 1}
+
+
+def test_a_backed_off_tick_after_a_no_venue_safe_tick_prints_mode_safe(monkeypatch, caplog):
+    """The mode the worker holds is captured AFTER the no_venue
+    narrowing: a tick that read PMUS_MIRROR=on and then found no
+    venue armed is a SAFE tick, and the backed-off tick that follows
+    it prints mode=safe -- never the `on` the environment said before
+    the narrowing."""
+    monkeypatch.setattr(le, "active_venue", lambda: None)
+    st = _tick(_pool(), _Venue())
+    assert st["mode"] == ml.MODE_SAFE and _census(st, "no_venue") >= 1 and not st["abandoned"]
+    assert ml._last_mode == ml.MODE_SAFE and ml._last_whales == ["rn1"]
+    ml._backoff_until = NOW + ms.BACKOFF_S
+    with caplog.at_level(logging.INFO, logger=ml.log.name):
+        st2 = _tick(_pool(), _Venue(), now=NOW + 1, keep_backoff=True)
+        ml._mode_line(st2, ml.MODE_LINE_EVERY_TICKS)
+    assert st2["skipped_backoff"] is True and st2["backoff_left_s"] == 59.0
+    assert st2["mode"] == ml.MODE_SAFE and st2["whales"] == ["rn1"] and st2["reads"] == 0
+    line = _mode_lines(caplog)[0]
+    assert line.startswith("mirror_live mode=safe whales=['rn1'] books=0 open=0 day=None venue=None backoff=59.0 stats={")
+    assert "mode=on" not in line
+    src = inspect.getsource(ml._tick)
+    assert src.index('_mirror_stop("no_venue")') < src.index("_last_mode, _last_whales = t.mode")
+
+
+def test_a_tick_inside_the_backoff_carries_the_mode_the_worker_holds_and_the_seconds_left(caplog):
+    """THE MODE LINE ON A BACKED-OFF TICK LIED (live log 23:09-23:25Z,
+    2026-09-05): a skipped tick returned _new_stats() whole, so every
+    10th tick that fell inside a 60 s backoff printed `mode=safe
+    whales=[]` between `mode=on` abandons. The skipped tick now carries
+    the last completed tick's mode and allowlist, `skipped_backoff` and
+    the seconds left, and the mode line prints `backoff=`."""
+    p = _pool(conds=["c1", "c2", "c3"])
+    st = _tick(p, _Venue(state=HALTED))
+    assert st["abandoned"] and st["mode"] == ml.MODE_ON and st["whales"] == ["rn1"]
+    with caplog.at_level(logging.INFO, logger=ml.log.name):
+        st2 = _tick(_pool(), _Venue(), now=NOW + 1, keep_backoff=True)
+        ml._mode_line(st2, ml.MODE_LINE_EVERY_TICKS)
+    assert st2["skipped_backoff"] is True and st2["backoff_left_s"] == 59.0
+    assert st2["mode"] == ml.MODE_ON and st2["whales"] == ["rn1"], "the mode the worker holds"
+    assert st2["reads"] == 0 and not st2["abandoned"] and st2["status"] == "ok"
+    line = _mode_lines(caplog)[0]
+    assert line.startswith("mirror_live mode=on whales=['rn1'] books=0 open=0 day=None venue=None backoff=59.0 stats={")
+    assert "mode=safe" not in line
+    # a tick in SAFE mode that abandons... cannot: SAFE reads no market.
+    # A SAFE tick's mode is still SAFE on the following skipped tick.
+    ml._last_mode, ml._last_whales = ml.MODE_SAFE, []
+    st3 = _tick(_pool(), _Venue(), now=NOW + 2, keep_backoff=True)
+    assert st3["skipped_backoff"] and st3["mode"] == ml.MODE_SAFE and st3["whales"] == []
+    # no tick has completed yet: the mode is READ, the real way
+    ml._last_mode = None
+    st4 = _tick(_pool(), _Venue(), now=NOW + 3, keep_backoff=True)
+    assert st4["skipped_backoff"] and st4["mode"] == ml.MODE_ON and st4["whales"] == ["rn1"]
+
+
+def test_main_prints_backoff_and_never_mode_safe_on_a_backed_off_tick(monkeypatch, caplog):
+    """main() driven with a fake tick_once that returns a backed-off
+    tick on tick 10 (mode on, skipped_backoff, 42.5 s left) and a
+    quiet tick everywhere else: the tick-10 line says `mode=on ...
+    backoff=42.5`, the tick-20 line is the quiet one."""
+    quiet = _quiet_stats()
+    quiet.update(mode=ml.MODE_ON)
+    backed = ml._new_stats()
+    backed.update(mode=ml.MODE_ON, whales=["rn1"], skipped_backoff=True, backoff_left_s=42.5)
+    seen = {"n": 0}
+
+    async def _tick_once(pool, pmus, http):
+        seen["n"] += 1
+        if seen["n"] > 20:
+            raise _Stop()
+        return dict(backed if seen["n"] == 10 else quiet)
+
+    async def _get_pool():
+        return object()
+
+    async def _heartbeat(*a, **k):
+        return None
+
+    monkeypatch.setattr(ml, "tick_once", _tick_once)
+    monkeypatch.setattr(ml, "get_pool", _get_pool)
+    monkeypatch.setattr(ml, "heartbeat", _heartbeat)
+    monkeypatch.setattr(ml, "settings",
+                        lambda: types.SimpleNamespace(data_api_base="http://data.invalid"))
+    monkeypatch.setattr(ml, "POLL_S", 0.0)
+    monkeypatch.setattr(ml, "WAKE_MIN_GAP_S", 0.0)
+    ml._WAKE.clear()
+    with caplog.at_level(logging.INFO, logger=ml.log.name):
+        with pytest.raises(_Stop):
+            _run(ml.main())
+    lines = _mode_lines(caplog)
+    assert len(lines) == 2
+    assert lines[0].startswith("mirror_live mode=on whales=['rn1'] books=0 open=0 day=None venue=None backoff=42.5 stats={")
+    assert "'skipped_backoff': True" in lines[0] and "'backoff_left_s': 42.5" in lines[0]
+    assert lines[1] == _expected_line(quiet) and "backoff=" not in lines[1]
+    assert not [ln for ln in lines if "mode=safe" in ln]
+    # an abandoned tick's line names the reason after the venue's state
+    ab = ml._new_stats()
+    ab.update(mode=ml.MODE_ON, whales=["rn1"], abandoned=True, abandon_reason="venue_halted",
+              venue_state=HALTED, status="degraded")
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger=ml.log.name):
+        ml._mode_line(ab, ml.MODE_LINE_EVERY_TICKS)
+    assert _mode_lines(caplog)[0].startswith(
+        "mirror_live mode=on whales=['rn1'] books=0 open=0 day=None venue=MARKET_STATE_HALTED "
+        "abandon=venue_halted stats={")

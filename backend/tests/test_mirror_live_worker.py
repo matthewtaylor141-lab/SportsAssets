@@ -68,6 +68,7 @@ import asyncio
 import copy
 import inspect
 import json
+import logging
 import pathlib
 import re
 import time
@@ -668,8 +669,11 @@ class _Venue:
                  open_raises=False, status_raises=False, status_none=False, cancel_ok=True,
                  place=None, place_raises=None, rest_on_raise=False, trades=None,
                  trades_raise=False, close=None, flatten_bid=0.29, extra_open=None,
-                 ioc_fill=0.0, fills=None):
+                 ioc_fill=0.0, fills=None, state="MARKET_STATE_OPEN", states=None):
         self.bid, self.ask = bid, ask
+        # the venue's own market state on every quote read (bbo_read),
+        # as the venue spells it; `states` overrides it per slug
+        self.state, self.states = state, dict(states or {})
         self.portfolio = _Portfolio(held or {}, raise_walk)
         self.raise_bbo, self.open_raises = raise_bbo, open_raises
         self.status_raises, self.status_none, self.cancel_ok = status_raises, status_none, cancel_ok
@@ -691,6 +695,16 @@ class _Venue:
         if self.raise_bbo:
             raise RuntimeError("venue down")
         return self.bid, self.ask
+
+    def bbo_read(self, client, slug):
+        """pmus.bbo_read's shape: a read on which every feed raised is
+        NAMED in `error`, never raised; the state rides beside the
+        quotes."""
+        self.calls.append(("bbo", slug))
+        if self.raise_bbo:
+            return {"bid": None, "ask": None, "state": None, "error": "RuntimeError"}
+        return {"bid": self.bid, "ask": self.ask,
+                "state": self.states.get(slug, self.state), "error": None}
 
     def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
              filled=0.0, avg=None):
@@ -769,7 +783,13 @@ class _Venue:
                 "filled_shares": 300.0, "raw": {}}
 
     def slug_bid(self, slug, long_leg=None):
+        """The flatten's bid read. It honours the slug's state (None
+        unless OPEN): the real slug_bid reads through _bbo_quotes and
+        knows no state, which is exactly why the worker must refuse a
+        non-OPEN slug BEFORE it asks for a bid."""
         self.calls.append(("slug_bid", slug, long_leg))
+        if self.states.get(slug, self.state) != "MARKET_STATE_OPEN":
+            return None
         return self.flatten_bid
 
 
@@ -873,6 +893,10 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_POST_ONLY_OK", True)
     monkeypatch.setattr(ml, "_backoff_until", 0.0)
     monkeypatch.setattr(ml, "_last_tick_at", 0.0)
+    # the mode the worker holds for a backed-off tick: module globals
+    # that outlive a test, reset so no test inherits another's mode
+    monkeypatch.setattr(ml, "_last_mode", None)
+    monkeypatch.setattr(ml, "_last_whales", [])
     monkeypatch.setattr(ml, "_unmapped_until", {})
     monkeypatch.setattr(ml, "_BOOK_LOCKS", {})
     monkeypatch.setattr(ms, "_ratio_cache", {"at": 0.0, "by_whale": {}})
@@ -3389,6 +3413,16 @@ def test_the_gate_counters_survive_the_health_endpoints_sanitizer():
     assert all(k in ml.CENSUS_KEYS for k in ml._INTEG_CENSUS_KEYS)
     zero = ml._new_stats()
     assert set(zero["integ"]) == set(st["integ"]) and set(zero["integ"].values()) == {0}
+    # THE CAP MOVED (2026-09-05): `venue_halted` took index 24 of
+    # CENSUS_KEYS and pushed `side_band` to index 40, past the cap, so
+    # the served census dropped an admission clause it used to carry.
+    # Both ride on `integ`: the one the new key displaced, and the new
+    # key itself, so an operator reading the halted venue reads a real
+    # number off the served surface
+    assert "side_band" not in served["census"], "the defect, driven: past the cap"
+    assert served["integ"]["side_band"] == 0 and served["integ"]["venue_halted"] == 0
+    assert "side_band" in ml._INTEG_CENSUS_KEYS and "venue_halted" in ml._INTEG_CENSUS_KEYS
+    assert isinstance(served["integ"]["side_band"], int) and isinstance(served["integ"]["venue_halted"], int)
     # AND THE TOP LEVEL IS CAPPED AT 40 TOO. `integ` must never be the
     # key that gets dropped. It is written in `_new_stats`, and every
     # conditional key the tick adds later (`capped_tick`,
@@ -3503,6 +3537,207 @@ def test_an_unreadable_requote_count_is_the_cap_for_the_replace_and_for_the_take
     assert not _cancels(v) and not _places(v)
     assert p.orders[o["id"]]["state"] == "open" and b["open_order_id"] == o["id"]
     assert [x for x in p.sent if "ml-replaces" in x[1]], "the count was asked for"
+
+
+# ------------------ 16. the quote read names the venue's market STATE
+
+HALTED = "MARKET_STATE_HALTED"
+
+
+def _warnings(caplog):
+    return [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+
+
+def test_a_halted_venue_abandons_the_tick_as_venue_halted_with_the_venues_own_word(caplog):
+    """2026-09-05, 22:29Z on: the venue answered HTTP 200 with
+    `state: MARKET_STATE_HALTED` and empty quotes on every market for
+    five hours, and the mirror abandoned every tick `no_quote` -- the
+    same word it uses for an UNREADABLE book, so an operator could not
+    tell "the venue is halted" from "our reads are failing". Three
+    candidates on a halted venue: three reads, each `venue_halted`,
+    never `no_quote`; the third abandons the tick under that name, the
+    WARNING carries the state string, the tick publishes the state,
+    and the mode line prints both. Nothing is placed."""
+    assert ms.MISS_STREAK_ABANDON == 3
+    p = _pool(conds=["c1", "c2", "c3"])
+    v = _Venue(state=HALTED)
+    with caplog.at_level(logging.INFO, logger=ml.log.name):
+        st = _tick(p, v)
+        ml._mode_line(st, ml.MODE_LINE_EVERY_TICKS)
+    assert st["abandoned"] and st["abandon_reason"] == "venue_halted" and st["status"] == "degraded"
+    assert _census(st, "venue_halted") == 3 and _census(st, "no_quote") == 0, st["census"]
+    assert _census(st, "tick_abandoned") == 1 and st["reads"] == 3
+    assert [c for c in v.calls if c[0] == "bbo"] == [("bbo", SLUG)] * 3
+    assert st["venue_state"] == HALTED
+    assert not p.books and not _places(v)
+    assert ml._backoff_until == NOW + ms.BACKOFF_S
+    assert ("mirror_live: tick abandoned (venue_halted: MARKET_STATE_HALTED), backing off 60.0s"
+            in _warnings(caplog))
+    assert not [w for w in _warnings(caplog) if "unreadable" in w], "a halted venue is readable"
+    line = [r.getMessage() for r in caplog.records if r.getMessage().startswith("mirror_live mode=")][0]
+    assert " venue=MARKET_STATE_HALTED abandon=venue_halted stats={" in line
+    assert line.startswith("mirror_live mode=on whales=['rn1'] ")
+    assert "venue_halted" in ml.CENSUS_KEYS and "venue_halted" in st["census"]
+    # the venue resumes: OPEN with a quote on the next tick is a book, on its own
+    p2, v2 = _pool(), _Venue()
+    st2 = _tick(p2, v2, now=NOW + ms.BACKOFF_S + 1)
+    assert not st2["abandoned"] and st2["venue_state"] == "MARKET_STATE_OPEN"
+    assert _census(st2, "venue_halted") == 0 and p2.books and _places(v2)
+
+
+def test_an_unreadable_book_is_still_no_quote_with_the_existing_warning(caplog):
+    p = _pool(conds=["c1", "c2", "c3"])
+    v = _Venue(raise_bbo=True)
+    with caplog.at_level(logging.WARNING, logger=ml.log.name):
+        st = _tick(p, v)
+    assert st["abandoned"] and st["abandon_reason"] == "no_quote"
+    assert _census(st, "no_quote") == 3 and _census(st, "venue_halted") == 0, st["census"]
+    assert st["venue_state"] is None, "a read that failed carries no state"
+    ws = _warnings(caplog)
+    assert ws.count(f"mirror_live: BBO for {SLUG} unreadable (RuntimeError)") == 3
+    assert "mirror_live: tick abandoned (no_quote), backing off 60.0s" in ws
+    assert not p.books and not _places(v)
+
+
+def test_an_open_empty_book_is_no_quote_and_a_closed_quoted_book_is_venue_halted():
+    # an OPEN market with no makers: no_quote, exactly as before
+    p = _pool()
+    v = _Venue(bid=None, ask=None)
+    st = _tick(p, v)
+    assert _census(st, "no_quote") == 1 and _census(st, "venue_halted") == 0, st["census"]
+    assert st["venue_state"] == "MARKET_STATE_OPEN" and not st["abandoned"]
+    assert not p.books and not _places(v)
+    # the SDK's typed shape, no state at all: the same empty-open reading
+    p = _pool()
+    st = _tick(p, _Venue(bid=None, ask=None, state=None))
+    assert _census(st, "no_quote") == 1 and _census(st, "venue_halted") == 0 and st["venue_state"] is None
+    # a settled market with a stale resting book (the probe's CLOSED
+    # payload: bid 0.01, ask 0.20): a quote on a non-OPEN market is NOT
+    # a quote to trade on
+    p = _pool()
+    v = _Venue(bid=0.01, ask=0.20, state="MARKET_STATE_CLOSED")
+    st = _tick(p, v)
+    assert _census(st, "venue_halted") == 1 and _census(st, "no_quote") == 0, st["census"]
+    assert st["venue_state"] == "MARKET_STATE_CLOSED" and not st["abandoned"]
+    assert not p.books and not p.orders and not _places(v), "never placed on"
+    # a quoted OPEN market on the same fixture DOES open a book: the refusal above was the state
+    p = _pool()
+    v = _Venue(bid=0.01, ask=0.20)
+    _tick(p, v)
+    assert p.books
+    # a QUOTED read with no state at all (the SDK-typed shape, which
+    # promises no `state`): an OPEN book, never a halt -- a book opens
+    # and a rest is placed, nothing is counted venue_halted
+    p = _pool()
+    v = _Venue(state=None)
+    st = _tick(p, v)
+    assert _census(st, "venue_halted") == 0 and _census(st, "no_quote") == 0, st["census"]
+    assert st["venue_state"] is None and not st["abandoned"]
+    assert p.books and _places(v) and _census(st, "rest_placed") == 1
+
+
+def test_a_raising_quote_read_is_no_quote_and_the_warning_names_the_exception(caplog, monkeypatch):
+    """The raising path of _bbo, driven: ms._paced_bbo itself raises
+    (a client that cannot be built, a pacer that fails) rather than
+    bbo_read answering with `error` -- the worker names the exception
+    on the existing WARNING, counts the read no_quote, and the third
+    abandons the tick under that name. No state is read, none is
+    published, and nothing is placed."""
+    def _boom(pmus, slug):
+        raise RuntimeError("client down")
+    monkeypatch.setattr(ms, "_paced_bbo", _boom)
+    p = _pool(conds=["c1", "c2", "c3"])
+    v = _Venue()
+    with caplog.at_level(logging.WARNING, logger=ml.log.name):
+        st = _tick(p, v)
+    assert st["abandoned"] and st["abandon_reason"] == "no_quote" and st["status"] == "degraded"
+    assert _census(st, "no_quote") == 3 and _census(st, "venue_halted") == 0, st["census"]
+    assert st["reads"] == 3 and st["venue_state"] is None
+    ws = _warnings(caplog)
+    assert ws.count(f"mirror_live: BBO for {SLUG} unreadable (RuntimeError)") == 3
+    assert "mirror_live: tick abandoned (no_quote), backing off 60.0s" in ws
+    assert not [c for c in v.calls if c[0] == "bbo"], "the raise sat before the fake's read"
+    assert not p.books and not _places(v)
+
+
+def _vanish_after_the_rest(state, held=300, manual=0.0, **venue_kw):
+    """A book of 300 in a vanish whose flatten rest stood its wait and
+    was cancelled (the shape test_a_close_row_never_trips_overspend
+    drives), under the ADMIN FLATTEN LEVER; the venue's quote read for
+    the slug carries `state`."""
+    p = _pool(fills=_his(300, sold=300), snap=None)
+    p.state["mirror_flatten"] = True
+    if manual:
+        p.manual_shares[SLUG] = manual
+    b = p.add_book(ledger=300, last_plan={"kind": "flatten_vanished", "vanish_since": NOW - 400})
+    p.add_order(b, side=SELL, wire=0.32, qty=300, kind="flatten_vanished", state="cancelled",
+                placed_ts=NOW - 400, done_at=NOW - 10, order_id=None)
+    v = _Venue(held={SLUG: held}, state=state, **venue_kw)
+    return p, b, v
+
+
+@pytest.mark.parametrize("state, quotes", [
+    ("MARKET_STATE_CLOSED", dict(bid=0.01, ask=0.20)),      # the probe's settled CFB market, stale rests
+    ("MARKET_STATE_HALTED", dict(bid=None, ask=None)),      # the venue-wide halt, empty book
+])
+def test_the_flattens_slippage_leg_refuses_a_non_open_slug_before_it_reads_a_bid(monkeypatch, state, quotes):
+    """THE MONEY-PATH HOLE (review of U9, 2026-09-06). The flatten's
+    slippage leg priced its IOC off slug_bid, which reads through
+    _bbo_quotes -- no market state -- so the reviewer's probe (a CLOSED
+    market with a stale resting book: bid 0.01, ask 0.20) yielded a
+    tradeable bid and an IOC SELL went out in the same tick whose quote
+    read counted the slug venue_halted; the sole-holder branch sent
+    close_position with no quote read at all. Under the admin flatten
+    lever, after MIRROR_FLATTEN_REST_S of the rest: no IOC, no
+    close_position, no bid read, no position read -- the leg is
+    refused `venue_halted` (the read's own count plus the leg's), the
+    plan names it, the book keeps its shares. The same fixture with the
+    slug OPEN takes the leg as before: close_position for the sole
+    holder, the IOC at the bid when co-held."""
+    assert rules.MIRROR_FLATTEN_REST_S <= 400
+    gone = _gone()
+    # SOLE HOLDER: close_position is the order at stake
+    p, b, v = _vanish_after_the_rest(state, **quotes)
+    st = _tick(p, v, http=gone)
+    assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v), v.calls
+    assert not [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+    assert not _places(v), "nothing rested either: the read was not a quote"
+    assert _census(st, "venue_halted") == 2, st["census"]       # the read, then the leg
+    assert _census(st, "no_bid_for_flatten") == 0 and _census(st, "flatten_vanished") == 1
+    assert b["ledger_net"] == 300 and b["last_reason"] == "venue_halted" and b["state"] == "live"
+    assert st["venue_state"] == state and not st["abandoned"]
+    assert not [x for x in p.orders.values() if x["state"] in ("placing", "open", "unknown")]
+    # CO-HELD: the IOC at sell_limit_price(bid) is the order at stake
+    async def _held(slug):
+        return 500, 0.31
+    monkeypatch.setattr(le, "_pm_held", _held)
+    p, b, v = _vanish_after_the_rest(state, held=500, manual=200.0, flatten_bid=0.29, ioc_fill=300.0,
+                                     **quotes)
+    st = _tick(p, v, http=gone)
+    assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v) and not _places(v), v.calls
+    assert _census(st, "venue_halted") == 2 and _census(st, "no_bid_for_flatten") == 0, st["census"]
+    assert b["ledger_net"] == 300 and b["last_reason"] == "venue_halted"
+    # THE CONTROL: the slug OPEN on the same fixture takes the leg
+    p, b, v = _vanish_after_the_rest("MARKET_STATE_OPEN", held=500, manual=200.0, flatten_bid=0.29,
+                                     ioc_fill=300.0, bid=0.30, ask=0.32)
+    st = _tick(p, v, http=gone)
+    assert ("slug_bid", SLUG, True) in v.calls and "close" not in _kinds(v)
+    ioc = [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+    assert len(ioc) == 1 and ioc[0][2] == le.sell_limit_price(0.29) and ioc[0][3] == 300 and ioc[0][4] is True
+    assert b["ledger_net"] == 0 and _census(st, "venue_halted") == 0
+
+    async def _held300(slug):
+        return 300, 0.31
+    monkeypatch.setattr(le, "_pm_held", _held300)
+    p, b, v = _vanish_after_the_rest("MARKET_STATE_OPEN", bid=0.30, ask=0.32)
+    st = _tick(p, v, http=gone)
+    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v.calls and b["ledger_net"] == 0
+    assert _census(st, "venue_halted") == 0 and st["flattened"] == 1
+    # the refusal sits BEFORE the position read and the bid read, by the source
+    src = inspect.getsource(ml._flatten_vanished)
+    i_refuse = src.index('_mirror_stop("venue_halted", w)')
+    assert i_refuse < src.index("le._pm_held(") < src.index("t.pmus.slug_bid")
+    assert 'r.venue_state is not None and r.venue_state != _STATE_OPEN' in src
 
 
 # ------------------------------------------------ 12. the census coverage

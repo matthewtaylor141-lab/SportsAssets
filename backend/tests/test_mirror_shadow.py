@@ -111,8 +111,11 @@ class _Client:
 
 class _Pmus:
     def __init__(self, bid=0.30, ask=0.32, held=None, raise_bbo=False, raise_walk=False,
-                 pages=None):
+                 pages=None, state="MARKET_STATE_OPEN", states=None):
         self.bid, self.ask, self.raise_bbo = bid, ask, raise_bbo
+        # the venue's own market state on every quote read (bbo_read),
+        # as the venue spells it; `states` overrides it per slug
+        self.state, self.states = state, dict(states or {})
         held = held or {}
         pages = pages or [{s: {"netPosition": v} for s, v in held.items()}]
         self.portfolio = _Portfolio(pages, raise_walk=raise_walk)
@@ -126,6 +129,16 @@ class _Pmus:
         if self.raise_bbo:
             raise RuntimeError("venue down")
         return self.bid, self.ask
+
+    def bbo_read(self, client, slug):
+        """pmus.bbo_read's shape: a read on which every feed raised is
+        NAMED in `error`, never raised; the state rides beside the
+        quotes."""
+        self.calls.append(("bbo", slug))
+        if self.raise_bbo:
+            return {"bid": None, "ask": None, "state": None, "error": "RuntimeError"}
+        return {"bid": self.bid, "ask": self.ask,
+                "state": self.states.get(slug, self.state), "error": None}
 
     # the shadow must never reach for these
     def position_side(self, slug):
@@ -318,6 +331,92 @@ def test_a_run_of_book_misses_abandons_the_tick_and_the_cap_reads_newest_first(m
     assert stats2["markets"] == 2 and stats2["skipped_markets"] == 3 and stats2["capped_tick"] is True
     q = [s for s, _ in p2.queries if "max(t.ts) AS last_ts" in s][0]
     assert "ORDER BY last_ts DESC" in q
+
+
+def test_the_venues_market_state_rides_on_the_row_and_names_the_abandon(monkeypatch, caplog):
+    """2026-09-05: the venue was halted venue-wide for five hours (HTTP
+    200, `state: MARKET_STATE_HALTED`, empty quotes) and this worker
+    logged `3 consecutive venue misses — abandoning the tick` every
+    minute, the same line an unreadable book earns. The row's detail
+    now carries the venue's own state string, the abandon line names
+    the state of the last miss (or `no_quote` when the read failed),
+    and the census publishes the most common state read this tick."""
+    import logging
+    _nosleep(monkeypatch)
+    p = _Pool(fills=HIS)
+    row = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {}, positions={}))
+    assert row["detail"]["state"] == "MARKET_STATE_OPEN" and "bbo_error" not in row["detail"]
+    halted = _run(ms.shadow_market(p, _Pmus(bid=None, ask=None, state="MARKET_STATE_HALTED"),
+                                   "rn1", CID, RATIO, {}, positions={}))
+    assert halted["detail"]["state"] == "MARKET_STATE_HALTED" and "bbo_error" not in halted["detail"]
+    assert halted["bid"] is None and halted["ask"] is None and halted["reason"].startswith("no mark")
+    failed = _run(ms.shadow_market(p, _Pmus(raise_bbo=True), "rn1", CID, RATIO, {}, positions={}))
+    assert failed["detail"]["state"] is None and failed["detail"]["bbo_error"] == "RuntimeError"
+    # the abandon line, on a halted venue and on a failing read
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    for pm, word in ((_Pmus(bid=None, ask=None, state="MARKET_STATE_HALTED"), "MARKET_STATE_HALTED"),
+                     (_Pmus(raise_bbo=True), "no_quote")):
+        ms._backoff_until = 0.0
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=ms.log.name):
+            stats = _run(ms.tick_once(_Pool(fills=HIS, conds=[f"c{i}" for i in range(5)]), pm,
+                                      now_ts=7000.0))
+        assert stats["abandoned"] is True and stats["markets"] == 3, word
+        assert stats["venue_state"] == (None if word == "no_quote" else word), word
+        assert (f"mirror_shadow: 3 consecutive venue misses ({word}) — abandoning the tick, "
+                f"backing off {ms.BACKOFF_S}s") in [r.getMessage() for r in caplog.records], word
+    ms._backoff_until = 0.0
+    # a quiet tick: the state is OPEN and the census says so
+    stats = _run(ms.tick_once(_Pool(fills=HIS), _Pmus(), now_ts=8000.0))
+    assert stats["venue_state"] == "MARKET_STATE_OPEN" and not stats.get("abandoned")
+    assert "pace(READ_PACING_S)" in inspect.getsource(ms._paced_bbo)
+    ms._backoff_until = 0.0
+
+
+def test_three_open_empty_books_abandon_as_no_quote_never_as_if_open_were_the_cause(monkeypatch, caplog):
+    """The abandon line prints the state only when the state IS the
+    cause: three OPEN markets with empty books (and three reads with
+    no state at all, the SDK's typed shape) abandon `(no_quote)`, not
+    `(MARKET_STATE_OPEN)` -- the census still publishes the state it
+    read."""
+    import logging
+    _nosleep(monkeypatch)
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    for pm, venue_state in ((_Pmus(bid=None, ask=None), "MARKET_STATE_OPEN"),
+                            (_Pmus(bid=None, ask=None, state=None), None)):
+        ms._backoff_until = 0.0
+        caplog.clear()
+        with caplog.at_level(logging.WARNING, logger=ms.log.name):
+            stats = _run(ms.tick_once(_Pool(fills=HIS, conds=[f"c{i}" for i in range(5)]), pm,
+                                      now_ts=7000.0))
+        msgs = [r.getMessage() for r in caplog.records]
+        assert stats["abandoned"] is True and stats["markets"] == 3, venue_state
+        assert stats["venue_state"] == venue_state, venue_state
+        assert (f"mirror_shadow: 3 consecutive venue misses (no_quote) — abandoning the tick, "
+                f"backing off {ms.BACKOFF_S}s") in msgs, msgs
+        assert not [m for m in msgs if "(MARKET_STATE_OPEN)" in m or "(None)" in m], msgs
+    ms._backoff_until = 0.0
+
+
+def test_a_raising_paced_read_is_named_bbo_error_and_carries_no_state(monkeypatch):
+    """The raising path of shadow_market's read, driven: _paced_bbo
+    itself raises (a client that cannot be built) rather than bbo_read
+    answering with `error`. The row names the exception in
+    detail.bbo_error, carries no `state` key at all (nothing was
+    read), and plans nothing."""
+    _nosleep(monkeypatch)
+
+    def _boom(pmus, slug):
+        raise RuntimeError("client down")
+    monkeypatch.setattr(ms, "_paced_bbo", _boom)
+    pm = _Pmus()
+    row = _run(ms.shadow_market(_Pool(fills=HIS), pm, "rn1", CID, RATIO, {}, positions={}))
+    assert row["detail"]["bbo_error"] == "RuntimeError" and "state" not in row["detail"]
+    assert row["bid"] is None and row["ask"] is None and row["mark"] is None
+    assert row["would_side"] is None and row["reason"].startswith("no mark")
+    assert pm.calls == [], "the raise sat before the fake's read"
 
 
 def test_a_write_failure_stops_the_tick_and_degrades_the_heartbeat(monkeypatch):
