@@ -59,13 +59,29 @@ BURST_S = 60.0
 # rounds to nothing for us.
 RATIO_MAX = 1.0
 RATIO_MIN = 1e-4
-# Per-market net exposure cap at the mark, in dollars: the promoted clip
-# ceiling reused as the mirror's per-market bound. When it binds the
-# target is SCALED, not truncated on one side.
-MARKET_NET_CAP_USD = 250.0
+# Per-EVENT net exposure cap at the mark, in dollars. When it binds the
+# target is SCALED, never refused, and never truncated on one side.
+# $250 -> $1,000 (owner order 2026-09-06 13:36Z, "max trade on one side
+# of an event to be $1000 between all fills") -> $2,500 (owner order
+# ~14:00Z the same day, verbatim: "Just trade 10% of what he puts on
+# everything he takes (with a hard cap of no single event having more
+# than $2.5k on it) this limitation should never force us to decline
+# any of the possible copies"). One mirror book is one side of one game
+# (the one-per-game claim keys on game_key), so "a single event" IS the
+# book, and the cap is on the book's net at the mark across every fill:
+# his 100,000 sh @ 0.60 at 10% is 10,000 raw -> 4,166 sh = $2,500. The
+# shadow sizes from the same constant, so its targets scale with it.
+MARKET_NET_CAP_USD = 2500.0
 # Dead band: a move under one whole share, or under this many dollars at
 # the mark, is not worth an order -- unless it takes the book to zero.
-MIN_MOVE_USD = 5.0
+# $5 -> $0 (owner order ~14:10Z 2026-09-06, verbatim: "Bets under $10,
+# take the full position (exact copy)"): his small bets are copied
+# whole (mirror_live_rules.open_ratio), so no dollar floor may drop
+# them -- the ONLY floor is one whole share, and the `dead_band` name
+# stays for that sub-share move. MIN_MOVE_FRAC (the 2% hysteresis on
+# adjustments) is unchanged. The plan's dollar clause is inert at 0
+# and is kept as the operator's handle should a floor ever be wanted.
+MIN_MOVE_USD = 0.0
 # Hysteresis: skip moves smaller than this fraction of the target.
 MIN_MOVE_FRAC = 0.02
 # Venue and ledger agree when they are within this many shares.
@@ -191,9 +207,10 @@ def mirror_ratio(bursts: Iterable[float], clip_usd: float = MIRROR_ANCHOR_CLIP_U
     # everything ... mirror the whales to a tee"; the sizing lens and its
     # engineering refutation, 2026-09-02, F1-F2): both burst anchors map
     # his typical FIRST MOVE to the $50 measuring clip, so on the markets
-    # that carry his money the median ratio clamps to 1.0 and the $250
-    # cap does all the sizing (it binds on 68.7-85.1% of his long dollars
-    # at r=1.9%), which inverts his shape. The fraction that keeps his
+    # that carry his money the median ratio clamps to 1.0 and the
+    # per-market cap does all the sizing (at the $250 it was when this
+    # was measured it bound on 68.7-85.1% of his long dollars at
+    # r=1.9%; $1,000 since 2026-09-06), which inverts his shape. The fraction that keeps his
     # shape is bankroll / his deployed dollars: the 30-day open cost
     # OVERSTATES him (resolved balances stay in the denominator), so this
     # r errs small, never large. It is reported here and measured in the
@@ -220,8 +237,8 @@ def mirror_ratio(bursts: Iterable[float], clip_usd: float = MIRROR_ANCHOR_CLIP_U
     # THE DOLLAR-WEIGHTED ANCHOR, reported beside the median (first shadow
     # hour, 2026-09-02): RN1 opened 19,742 markets in 30 days with a
     # median burst of $25.60, so the median-anchored ratio clamps to 1.0
-    # and the $250 cap does all the sizing on the markets that carry his
-    # money. This is the burst size at which half of his opening dollars
+    # and the per-market cap (MARKET_NET_CAP_USD) does all the sizing on
+    # the markets that carry his money. This is the burst size at which half of his opening dollars
     # sit in LARGER bursts -- where the money is, not where the count is.
     total = sum(xs)
     acc = 0.0

@@ -73,7 +73,7 @@ from dataclasses import dataclass, replace
 from typing import Any, NamedTuple
 
 from . import mirror as mi
-from .mirror import MARKET_NET_CAP_USD, MIN_MOVE_FRAC, RATIO_MAX, Plan
+from .mirror import MARKET_NET_CAP_USD, MIN_MOVE_FRAC, RATIO_MAX, RATIO_MIN, Plan
 from .proof import MIN_PROOF_CLUSTERS, Z95
 from .roster_rules import MIRROR_ANCHOR_CLIP_USD, MIN_N_DEMOTE, MIN_N_PROMOTE
 
@@ -119,12 +119,16 @@ def env_switch(name: str, default: bool = False) -> bool:
 # (mirror_target admits a negative target as a BUY_SHORT book on the same
 # slug) AND the shadow's tick_once computes its target column with the
 # same allow_short, in the same deploy, so shadow_live_disagree compares
-# like with like (brief E5). The environment may turn it ON in this
-# rung; the DEFAULT flips to True by a code change at rung S5 (the rails
-# rung), never from a shell -- the same discipline as capped_env: a
-# wider door is a code change that wants a review. Read through the
-# module at call time (rules.MIRROR_SHORTS), like every cap.
-MIRROR_SHORTS = env_switch("MIRROR_SHORTS", False)
+# like with like (brief E5). ON BY DEFAULT since 2026-09-06 (owner order
+# ~14:10Z, verbatim: "I want shorts live as well"); MIRROR_SHORTS=off
+# still turns it off from a shell. The default moved by a code change,
+# as the discipline required. What did NOT move is the pre-S4 exit
+# safety: a short book's partial reduce stays `short_reduce_unproven`
+# (held, counted) and its flatten stays close_position when sole
+# holder -- the only proven short exit -- until a 1-share resting
+# SELL_SHORT has been read back at rung S4. Read through the module at
+# call time (rules.MIRROR_SHORTS), like every cap.
+MIRROR_SHORTS = env_switch("MIRROR_SHORTS", True)
 
 
 def column_missing(exc: BaseException, column: str) -> bool:
@@ -280,6 +284,47 @@ def min_wait_env(name: str, default: float) -> float:
     return max(d, v)
 
 
+def unbounded_env(name: str) -> float:
+    """A cap -- a count of books or a day's dollars -- whose code
+    default is NO CAP, spelled math.inf.
+
+    capped_env's semantics with an unbounded default (owner orders
+    2026-09-06: 13:36Z "I don't want to cap books opened at all";
+    ~14:00Z "Let's remove those caps so we start copying his actual
+    book"): the environment may only LOWER it, to a finite number --
+    rung S3's 1-share probe runs with MIRROR_MAX_LIVE_BOOKS=1 -- and
+    nobody can raise one from a shell, because there is nothing above
+    no cap. An absent, blank, unparseable or non-finite value is the
+    default (unbounded; 'inf' in the environment is not a lowering). A
+    negative value lands on 0, the most closed setting there is (no
+    books; no room). UNBOUNDED IS math.inf AND NOTHING ELSE: never a
+    large number, which a reader would take for a count or a budget,
+    and never 0, which capped_env's floor rule reads as NONE. The count
+    caps are read through `_bounded`; the day cap through
+    math.isfinite at the one site that applies it.
+    """
+    v = _env_float(name)
+    if v is None:
+        return math.inf
+    return max(0.0, v)
+
+
+def _bounded(cap: Any) -> int | None:
+    """A count cap as admission reads it: None for UNBOUNDED (positive
+    math.inf, the only spelling of "no cap"), else a whole count at or
+    above zero (a fraction floors). Anything else -- None, a bool, NaN,
+    a string, a negative -- is an UNREADABLE cap and reads as 0, the
+    most closed: a cap nobody can read is a shut door, never an open
+    one (fail closed; the cap with no readable default IS the floor,
+    as capped_env has it)."""
+    if isinstance(cap, float) and cap == math.inf:
+        return None
+    f = _num(cap)
+    if f is None or f < 0:
+        return 0
+    return int(math.floor(f))
+
+
 # Per-market net exposure at the mark. mi.MARKET_NET_CAP_USD is the
 # number; this is the operator's downward handle on it, passed to
 # mi.target_shares as cap_usd so the target is SCALED at the mark.
@@ -295,22 +340,149 @@ def min_wait_env(name: str, default: float) -> float:
 MIRROR_NET_CAP_FLOOR_USD = 1.0
 MIRROR_NET_CAP_USD = capped_env("MIRROR_NET_CAP_USD", MARKET_NET_CAP_USD,
                                 floor=MIRROR_NET_CAP_FLOOR_USD)
-# Blast radius: at most this many books live, this many opened per day,
-# so the worst case is books x net cap (5 x $250 = $1,250).
-MIRROR_MAX_LIVE_BOOKS = int(capped_env("MIRROR_MAX_LIVE_BOOKS", 5))
-MIRROR_MAX_BOOKS_PER_DAY = int(capped_env("MIRROR_MAX_BOOKS_PER_DAY", 5))
+# Blast radius. NO COUNT CAP on books, live or opened per day (owner
+# order 2026-09-06 13:36Z, verbatim: "I don't want to cap books opened
+# at all. I want max trade on one side of an event to be $1000 between
+# all fills"; and ~14:00Z: "Let's remove those caps so we start copying
+# his actual book"): both default to UNBOUNDED (math.inf; unbounded_env)
+# and the environment may only LOWER them. admission reads them through
+# `_bounded`: a finite cap bites by name (`max_books`), an unreadable
+# COUNT of books refuses by its own name (`books_unreadable`), and an
+# unbounded cap never refuses. THE WORST CASE, said plainly: with no
+# count cap and no day cap (MIRROR_DAY_USD below) it is bounded by the
+# loss stop (MIRROR_LOSS_STOP_USD, $1,000 realized in 24 h, then
+# reduce-only until re-armed by hand) and by the venue balance -- not
+# by a count of books and not by a day figure. Per event it is the
+# $2,500 net cap (MIRROR_NET_CAP_USD), which scales and never declines.
+MIRROR_MAX_LIVE_BOOKS = unbounded_env("MIRROR_MAX_LIVE_BOOKS")
+MIRROR_MAX_BOOKS_PER_DAY = unbounded_env("MIRROR_MAX_BOOKS_PER_DAY")
+# THE FIXED RATIO (owner order ~14:00Z 2026-09-06: "Just trade 10% of
+# what he puts on everything he takes"). The ratio a book opens at for
+# every allowlisted whale whose position is at or over
+# MIRROR_SMALL_BET_USD (open_ratio; under it the copy is exact, ratio
+# 1.0 -- owner order ~14:10Z, "Bets under $10, take the full position
+# (exact copy)"). DECIDED AT OPEN AND STORED ON THE BOOK
+# (mirror_books.ratio): an open book sizes on its stored ratio for its
+# whole life and is never re-targeted at another -- a position that
+# crosses $10 must not flip between 100% and 10% every tick -- so the
+# books open today keep the 1.0 they opened at. ms.refresh_ratios keeps
+# running and its anchor/bankroll readings stay reported as
+# diagnostics; the shadow keeps sizing from its own readings (it
+# measures). capped_env: the environment may only LOWER it, and the
+# floor is mi.RATIO_MIN, so no shell can set it to 0 -- at open,
+# `no_ratio` can fire only on a non-finite or non-positive constant.
+MIRROR_RATIO = capped_env("MIRROR_RATIO", 0.10, floor=RATIO_MIN)
+# THE SMALL-BET LINE (same order). His dollars at the mark at open --
+# |his net shares| x px, px the mark for a long and 1 - mark for a
+# short -- under this many dollars is copied whole. The environment may
+# only LOWER it (0: nothing is small, every book opens at MIRROR_RATIO).
+MIRROR_SMALL_BET_USD = capped_env("MIRROR_SMALL_BET_USD", 10.0)
+
+
+def open_ratio(net: Any, mark: Any) -> float:
+    """THE RATIO A BOOK OPENS AT (owner orders 2026-09-06 ~14:00Z and
+    ~14:10Z): 1.0 -- an exact copy -- when his dollars at the mark are
+    under MIRROR_SMALL_BET_USD, else MIRROR_RATIO. His dollars are |net|
+    x px with px the mark for a long (net >= 0) and 1 - mark for a
+    short (net < 0): the collateral his side commits, which is what
+    "bets under $10" means on either side. Unreadable net or mark (by
+    _num), or a mark off the ladder, is NOT small: the conservative
+    MIRROR_RATIO -- and mirror_target still names the unreadable fact
+    itself (`no_position`, `no_mark`), since it reads both again. Pure
+    and side-effect free; the worker stores the result on the book at
+    open and never calls this for an open book."""
+    # the constant is handed on AS IS, never coerced: an unreadable one
+    # is mirror_target's to name (`no_ratio`), not this reader's to mask
+    usd = _his_dollars(net, mark)
+    line = _num(MIRROR_SMALL_BET_USD)
+    if usd is None or line is None or line <= 0:
+        return MIRROR_RATIO
+    return 1.0 if usd < line else MIRROR_RATIO
+
+
+def _his_dollars(net: Any, mark: Any) -> float | None:
+    """His dollars at the mark: |net| x mark on a long (net >= 0), |net|
+    x (1 - mark) -- the collateral -- on a short. None when the net or
+    the mark is unreadable (_num) or the mark is off the ladder."""
+    n, m = _num(net), _num(mark)
+    if n is None or m is None or not (0.01 <= m <= 0.99):
+        return None
+    return abs(n) * (m if n >= 0 else 1.0 - m)
+
+
+def step_ratio(stored_ratio: Any, net: Any, mark: Any) -> float | None:
+    """THE ONE-WAY STEP off an exact-copy book (review of U12c, FIX-1):
+    the ratio is decided at open from ONE read of his position, so a
+    book opened on the first $8 fill of a larger burst would follow him
+    at 100% up to the $2,500 cap. When a book's STORED ratio is 1.0 (a
+    small-bet book) and his dollars at the mark now EXCEED twice the
+    small-bet line -- 2 x MIRROR_SMALL_BET_USD, $20, derived here and
+    never a second knob -- the answer is MIRROR_RATIO: the worker
+    writes it to the row for the book's life and names `ratio_stepped`.
+    None otherwise: a 1.0 book at or under the step line, a book at any
+    other ratio (a 0.10 book never steps, and NOTHING EVER STEPS UP),
+    an unreadable stored ratio, net or mark (a step on a guess would
+    sell). The hysteresis is the gap between $10 and $20: a position
+    that crosses $10 does not flip; one that doubles past it does,
+    once. The step changes the target from 100% to 10% and the normal
+    reduce path sells the excess."""
+    stored = _num(stored_ratio)
+    if stored is None or abs(stored - 1.0) > 1e-9:
+        return None
+    usd = _his_dollars(net, mark)
+    line = _num(MIRROR_SMALL_BET_USD)
+    if usd is None or line is None or line <= 0:
+        return None
+    return MIRROR_RATIO if usd > 2.0 * line else None
+# THE MIRROR LANE'S OWN PER-ORDER CLIP (same order). The copy lane's
+# LIVE_MAX_CLIP_USD ($250) and per_fill_usd are the COPY lane's
+# numbers: sizing the mirror's rests from them made a $2,500 target ten
+# sequential $250 rests under one-open-per-book. The mirror's rest is
+# clipped here instead -- a $2,500 target is one rest -- and the copy
+# lane's constants are untouched. le.per_fill_usd(whale) stays what it
+# was for ADMISSION (a whale demoted to a $0 clip opens no book and
+# adds to none: `clip_zero`); it no longer sizes. Floor $1: an env of
+# 0 would be no rest at all, and "no exposure" is the switch's job.
+MIRROR_CLIP_USD = capped_env("MIRROR_CLIP_USD", 2500.0, floor=1.0)
+# THE SMALLEST ORDER THE MIRROR SENDS (review of U12c, FIX-2). With no
+# dollar dead band and exact copies under $10, his 1 sh @ 0.05 became a
+# $0.05 BUY on the wire; the venue's minimum notional is unknown, and a
+# refused order would burn one of the six ops per tick, every tick,
+# for as long as the book stood. An order whose notional -- wire x qty
+# on a long, (1 - wire) x qty of collateral on a short -- is under this
+# many dollars is NOT SENT, named `under_min_notional`, the book held.
+# So his positions under $1 at the mark are not copied. A FLATTEN IS
+# EXEMPT: a position that is leaving leaves at any size (a refused
+# flatten rest would never write the row the vanish's rest clock keys
+# on, and close_position would never be reached). capped_env: the
+# environment may only LOWER it, to 0 (send everything).
+MIRROR_MIN_ORDER_USD = capped_env("MIRROR_MIN_ORDER_USD", 1.0)
 # THE SHORT SIDE'S SHARE CAP (P2 rung S0, S3 expressibility). The most
-# shares a SHORT book may target, whatever his net says: ONE until rung
-# S5 -- the 1-share venue probe S3 runs is expressible only with a door
-# this narrow, and the knob alone would open every admitted short at
-# the full net cap. Read at the two sites that admit a short target
-# (the candidate's open and the open book's tick) and named
-# `short_share_cap` when it bites. capped_env: the environment may
-# only LOWER it (0 refuses every short by that name); the default
-# rises by a code change at rung S5, never from a shell.
-MIRROR_SHORT_MAX_SHARES = int(capped_env("MIRROR_SHORT_MAX_SHARES", 1))
-# Gross BUY dollars per rolling day on top of the sleeve's own caps.
-MIRROR_DAY_USD = capped_env("MIRROR_DAY_USD", 1250.0)
+# shares a SHORT book may target, whatever his net says. UNBOUNDED by
+# default since 2026-09-06 (owner order ~14:10Z, "I want shorts live as
+# well"): a short book sizes by the same rule as a long -- the ratio
+# decided at open (open_ratio) times his net, capped at $2,500 of
+# COLLATERAL at the mark ((1 - mark) x shares, mi.target_shares'
+# short-leg price), scaling and never refusing. Same representation as
+# the count caps (math.inf, unbounded_env; read through `_bounded` at
+# the two sites that admit a short target, the candidate's open and
+# the open book's tick): the environment may only LOWER it -- the
+# 1-share venue probe of rung S3/S4 runs with MIRROR_SHORT_MAX_SHARES=1
+# -- and 0 refuses every short by the name `short_share_cap`, as before.
+MIRROR_SHORT_MAX_SHARES = unbounded_env("MIRROR_SHORT_MAX_SHARES")
+# Gross BUY dollars per rolling day. NO DAY CAP (owner order ~14:00Z
+# 2026-09-06: "Let's remove those caps ... this limitation should never
+# force us to decline any of the possible copies"; it answers the
+# day-cap question that was saved as task 25): UNBOUNDED by default
+# (math.inf, unbounded_env), the environment may only LOWER it, and a
+# zero env means no room, as before. The worker applies it at one site
+# (_global_guards): a FINITE cap bites `mirror_day_cap` on what filled,
+# an UNREADABLE spend read bites `mirror_day_cap` whatever the cap
+# (fail closed), and an unbounded cap publishes `mirror_day_room` as
+# null and the mode line's `day=none`. The copy sleeve's DAILY room
+# (config live_max_daily_usd) no longer binds the mirror either -- that
+# was a day cap by another road; the sleeve's TOTAL room still does.
+MIRROR_DAY_USD = unbounded_env("MIRROR_DAY_USD")
 # Mirror-own loss stop: 24 h realized including partial sales, which the
 # global breaker cannot see (it reads terminal rows only). $250 -> $1,000
 # by owner decision (2026-09-05 23:0xZ, asked as a multiple choice with
@@ -422,13 +594,16 @@ def mirror_target(ratio: float | None, net: float | None, mark: float | None,
     target 0, `short_side_refused` -- the reversal path the rung plan
     keeps (knob off restores it alone).
 
-    ratio_eff = shadow ratio x min(1, per_fill_usd / MIRROR_ANCHOR_CLIP_USD):
-    the $50 anchor sets the ratio, a smaller per-fill clip scales it
-    down, and nothing scales it UP in P1 (the anchor moves only by the
-    P4 promotion). THE ANCHOR IS NOT THE PER-FILL LANE'S CLIP: that clip
-    rose to $250 on 2026-09-04 and the mirror must not resize as a side
-    effect of it -- the shadow's evidence was gathered at the anchor and
-    the mirror moves when its own gate says so.
+    ratio_eff = ratio x min(1, per_fill_usd / MIRROR_ANCHOR_CLIP_USD):
+    the $50 anchor sets the scale, a smaller clip scales it down, and
+    nothing scales it UP. SINCE 2026-09-06 (U12b/U12c) the `ratio` the
+    worker passes at OPEN is open_ratio's -- 1.0 under the small-bet
+    line, else MIRROR_RATIO -- with MIRROR_CLIP_USD as the clip (at or
+    over the anchor: scale 1, the ratio is stored unscaled), and on an
+    open book's tick the book's STORED ratio with the anchor clip; the
+    shadow's measured ratio sizes nothing live any more. THE ANCHOR IS
+    NOT THE PER-FILL LANE'S CLIP: that clip rose to $250 on 2026-09-04
+    and the mirror must not resize as a side effect of it.
 
     THE CLIP SCALING APPLIES AT BOOK OPEN ONLY. A book's ratio is fixed
     at open (addendum section 7, mirror_books.ratio): the worker passes
@@ -704,10 +879,14 @@ def admission(f: AdmissionFacts, increase: bool = False) -> str | None:
     d = _num(f.drift)
     if d is None or d < 0.0 or d > float(MIRROR_DRIFT_MAX):
         return "drift"
+    # the book counts: an UNREADABLE count refuses under its own name
+    # (fail closed, never "no cap"); a FINITE cap bites as max_books;
+    # an unbounded cap (the default since 2026-09-06) never does
     live, today = _count(f.books_live), _count(f.opened_today)
     if live is None or today is None:
-        return "max_books"
-    if live >= MIRROR_MAX_LIVE_BOOKS or today >= MIRROR_MAX_BOOKS_PER_DAY:
+        return "books_unreadable"
+    live_cap, day_cap = _bounded(MIRROR_MAX_LIVE_BOOKS), _bounded(MIRROR_MAX_BOOKS_PER_DAY)
+    if (live_cap is not None and live >= live_cap) or (day_cap is not None and today >= day_cap):
         return "max_books"
     if f.first_fill_ok is not True:
         return "first_fill_gate"
@@ -1820,10 +1999,11 @@ def p2_verdict(numbers: dict) -> tuple[bool, list[str]]:
 __all__ = [
     "ORDER_INTENT", "ORDER_INTENT_SHORT", "WIRE_INTENTS", "BUY", "SELL",
     "ORDER_STATE_REJECTED", "EXECUTION_TYPE_REJECTED",
-    "capped_env", "min_wait_env", "env_switch", "MIRROR_SHORTS",
+    "capped_env", "min_wait_env", "unbounded_env", "env_switch", "MIRROR_SHORTS",
     "column_missing", "shorts_effective", "MIRROR_SHORT_MAX_SHARES",
     "is_short", "wire_side", "leg_action", "sign_flip",
-    "MIRROR_NET_CAP_FLOOR_USD",
+    "MIRROR_NET_CAP_FLOOR_USD", "MIRROR_RATIO", "MIRROR_CLIP_USD",
+    "MIRROR_SMALL_BET_USD", "open_ratio", "step_ratio", "MIRROR_MIN_ORDER_USD",
     "MIRROR_NET_CAP_USD", "MIRROR_MAX_LIVE_BOOKS", "MIRROR_MAX_BOOKS_PER_DAY",
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
     "MIRROR_MAX_REPLACES_PER_HOUR", "MIRROR_REST_TTL_S", "MIRROR_TAKE_AFTER_S",

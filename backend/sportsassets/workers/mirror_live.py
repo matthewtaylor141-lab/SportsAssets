@@ -218,6 +218,18 @@ CENSUS_KEYS: tuple[str, ...] = (
     # the probe of the 050 column failing for any reason but absence
     # (the tick is refused), and the short side's share cap biting
     "intent_guard_unreadable", "short_share_cap",
+    # U12 (2026-09-06): the book COUNT unreadable at admission. Used to
+    # hide under `max_books`; now the count caps are unbounded by
+    # default and an unreadable count still refuses -- fail closed --
+    # under its own name. Appended LAST: the served census is a 40-key
+    # prefix of this tuple and its order is pinned
+    "books_unreadable",
+    # review of U12c (FIX-1, FIX-2): the one-way step off an exact-copy
+    # book, and an order under the mirror's minimum notional, not sent
+    "ratio_stepped", "under_min_notional",
+    # FIX-3b: the shadow row lacked what a raw-arithmetic comparison
+    # needs (never a disagree)
+    "shadow_check_skipped",
 )
 _FAMILIES = (("mapping:", "mapping"), ("edge_gate:", "edge_gate"),
              ("cell_gate_", "cell_gate"), ("place_refused:", "place_refused"))
@@ -693,8 +705,8 @@ SELECT token_id FROM market_tokens WHERE condition_id = $1 AND token_id <> $2
 """
 _SQL_WHALE_ADDRESS = "SELECT address FROM whales WHERE lower(username) = $1 LIMIT 1 /* ml-whale-address */"
 _SQL_SHADOW_LATEST = """
-SELECT target, ratio::float8 AS ratio, his_net::float8 AS his_net,
-       extract(epoch FROM at)::float8 AS at_ts
+SELECT target, target_raw::float8 AS target_raw, capped, ratio::float8 AS ratio,
+       his_net::float8 AS his_net, extract(epoch FROM at)::float8 AS at_ts
   FROM mirror_shadow WHERE whale = $1 AND condition_id = $2
  ORDER BY at DESC LIMIT 1 /* ml-shadow-latest */
 """
@@ -728,6 +740,9 @@ UPDATE mirror_books SET state = $2, last_reason = $3,
  WHERE id = $1 /* ml-book-state */
 """
 _SQL_BOOK_OPEN_ORDER = "UPDATE mirror_books SET open_order_id = $2, updated_at = now() WHERE id = $1 /* ml-book-open-order */"
+# the one-way step off an exact-copy book (rules.step_ratio): written
+# for the book's life, read back from the row on every later tick
+_SQL_BOOK_RATIO = "UPDATE mirror_books SET ratio = $2, updated_at = now() WHERE id = $1 /* ml-book-ratio */"
 # THE FIRST REFUSAL STARTS THE TAKE CLOCK: an arm already set is kept,
 # never re-stamped. Every post-only 400 once wrote now(), and _act reads
 # the arm BEFORE it re-places, so at the 30 s poll a book that kept
@@ -787,7 +802,15 @@ class _Tick:
     total_room: float | None = None
     mirror_day: float | None = None
     ops: int = 0
-    reads: int = 0
+    reads: int = 0                              # every quote read this tick, books and candidates
+    # THE CANDIDATE WALK'S OWN QUOTE BUDGET (U12, 2026-09-06). The book
+    # walk runs first and every live book is read every tick, so a
+    # budget shared with it was a count cap on books by another road:
+    # with MAX_MARKETS_PER_TICK live books no candidate was ever read.
+    # Candidates break on THIS counter against ms.MAX_MARKETS_PER_TICK
+    # (`capped_tick`); the book walk is unbounded in reads -- exits must
+    # be managed -- and `tick_s` on the stats shows the tick stretching
+    cand_reads: int = 0
     misses: int = 0
     abandoned: bool = False
     # the venue's own market state on every quote read this tick, as
@@ -803,7 +826,8 @@ class _Tick:
     # cached as the fail-closed tuple so it is not retried in the tick
     mkts: dict = field(default_factory=dict)
     addrs: dict = field(default_factory=dict)   # whale -> address, read once per tick
-    mkt_reads: int = 0                          # the per-market read's OWN budget
+    mkt_reads: int = 0                          # every per-market read this tick, books and candidates
+    cand_mkt_reads: int = 0                     # the CANDIDATES' per-market reads: the budgeted ones (U12)
     open_by_book: dict = field(default_factory=dict)   # book_id -> (order row, status)
     nonterminal: set = field(default_factory=set)      # book ids with a non-terminal order
     books_seen: set = field(default_factory=set)       # (whale, condition_id)
@@ -851,6 +875,12 @@ _INTEG_CENSUS_KEYS: tuple[str, ...] = (
     "short_reduce_unproven", "sign_flip", "short_model_disarmed",
     "short_gate_refused", "short_column_absent", "intent_guard_unreadable",
     "short_share_cap",
+    # U12 (2026-09-06): the book COUNT unreadable at admission -- a
+    # fail-closed refusal past the served cap, so it rides here where
+    # an operator can read it
+    "books_unreadable",
+    # review of U12c: both past the served cap, so they ride here too
+    "ratio_stepped", "under_min_notional", "shadow_check_skipped",
 )
 _INTEG_STAT_KEYS: tuple[str, ...] = (
     "snap_market_planned", "snap_market_reads", "snap_market_fresh_reads",
@@ -900,7 +930,12 @@ def _new_stats() -> dict:
             "filled_rest": 0, "filled_take": 0, "partial_fills": 0, "requotes": 0,
             "cancelled": 0, "flattened": 0, "closed_books": 0, "frozen_reasons": {},
             "census": {k: 0 for k in CENSUS_KEYS}, "recent": [], "abandoned": False,
-            "skipped_backoff": False, "ops": 0, "reads": 0, "woken": [],
+            "skipped_backoff": False, "ops": 0, "reads": 0,
+            # the tick's WALL TIME in seconds (1 dp; None until a tick
+            # ran): the book walk is unbounded in reads since U12, so
+            # this is what an operator watches stretch as books grow --
+            # the 0.35 s pacer (D29) bounds the venue rate, not the tick
+            "tick_s": None, "woken": [],
             "reaper_touched_mirror": 0, "post_only": _POST_ONLY_OK,
             # MIRRORSNAP, always present so a reader can tell "never
             # read" from "read and never fresh". THE DENOMINATOR IS
@@ -1054,43 +1089,61 @@ async def _global_guards(t: _Tick) -> None:
         t.increase_block = "loss_breaker"
     if t.increase_block is None:
         try:
-            # the rest lane's in-flight reservations come off the room
-            # first (addendum section 7: concurrent placements across
-            # lanes must not exceed the day cap by one clip each)
+            # THE SLEEVE'S TOTAL ROOM BINDS; ITS DAILY ROOM DOES NOT
+            # (owner order ~14:00Z 2026-09-06, "Let's remove those caps
+            # ... this limitation should never force us to decline any
+            # of the possible copies"): le._copy_day_room's day figure is
+            # the COPY lane's live_max_daily_usd, a day cap on the mirror
+            # by another road, so it is read and set aside -- the two
+            # lanes no longer share a day budget. The rest lane's
+            # in-flight reservations come off the TOTAL room instead
+            # (addendum section 7's concurrent-placement guard, now per
+            # lane against the room that still binds). The sleeve's
+            # lifetime knob defaults to no ceiling; room_scale reads a
+            # number, so an unbounded room is written as the largest
+            # bound there is. An unreadable ledger is still no room.
             async with le._REST_LOCK:
-                day, total = await le._copy_day_room(t.pool, settings())
-                day -= float(le._REST_RESERVED_USD or 0.0)
-            # the sleeve's day and lifetime knobs default to no ceiling
-            # (an infinite room); room_scale reads a number, so an
-            # unbounded room is written as the largest bound there is
-            t.day_room = float(day) if math.isfinite(day) else 1e12
+                _day_unused, total = await le._copy_day_room(t.pool, settings())
+                total -= float(le._REST_RESERVED_USD or 0.0)
+            t.day_room = 1e12
             t.total_room = float(total) if math.isfinite(total) else 1e12
         except Exception as exc:  # noqa: BLE001 — an unreadable ledger is no room
             log.warning("mirror_live: sleeve room unreadable (%s)", type(exc).__name__)
             t.increase_block = "no_budget_room"
         else:
-            if not (t.day_room > 0 and t.total_room > 1):
+            if not (t.total_room > 1):
                 t.increase_block = "no_budget_room"
     if t.increase_block is None:
+        # the mirror's own day cap: UNBOUNDED by default since 2026-09-06
+        # (rules.MIRROR_DAY_USD, math.inf; the environment may lower it)
+        day_cap = float(rules.MIRROR_DAY_USD)
         try:
             # the day read is switched on the per-tick 050 guard exactly
             # as the open-orders read and the INSERT are: the 050 text
             # names the column, and against a database without it every
-            # tick read `mirror_day_cap` for good (P2 rung S0 review)
+            # tick read `mirror_day_cap` for good (P2 rung S0 review).
+            # READ WHATEVER THE CAP: an unreadable spend is refused by
+            # name under an unbounded cap too (fail closed)
             row = await t.pool.fetchrow(_SQL_MIRROR_DAY if t.short_col else _SQL_MIRROR_DAY_047)
             filled = float((row or {})["filled"] or 0.0) if row else 0.0
             resting = float((row or {})["open"] or 0.0) if row else 0.0
-            t.mirror_day = float(rules.MIRROR_DAY_USD) - filled - resting
+            t.mirror_day = (day_cap if math.isfinite(day_cap) else 1e12) - filled - resting
         except Exception as exc:  # noqa: BLE001
             log.warning("mirror_live: mirror day spend unreadable (%s)", type(exc).__name__)
             t.increase_block = "mirror_day_cap"
         else:
             # the block is on what FILLED and the room on what filled
             # plus what rests (the paragraph over _SQL_MIRROR_DAY); the
-            # room is published for the quiet-tick mode line
-            t.stats["mirror_day_room"] = round(t.mirror_day, 2)
-            if filled >= float(rules.MIRROR_DAY_USD):
-                t.increase_block = "mirror_day_cap"
+            # room is published for the quiet-tick mode line -- as null
+            # under an unbounded cap (never 1e12 to an operator; the
+            # mode line prints `day=none`), and the block can bite only
+            # on a FINITE cap
+            if math.isfinite(day_cap):
+                t.stats["mirror_day_room"] = round(t.mirror_day, 2)
+                if filled >= day_cap:
+                    t.increase_block = "mirror_day_cap"
+            else:
+                t.stats["mirror_day_room"] = None
     if t.increase_block is None:
         stop, err = await _state(t.pool, _STATE_LOSS_STOP)
         if err is not None or stop is not None:
@@ -1227,6 +1280,8 @@ async def _bbo(t: _Tick, slug: str, book: bool = False) -> tuple[float | None, f
     except Exception as exc:  # noqa: BLE001 — an unreadable book is no quote
         q = {"bid": None, "ask": None, "state": None, "error": type(exc).__name__}
     t.reads += 1
+    if not book:
+        t.cand_reads += 1           # the candidate walk's budget; a book's read is never charged to it
     q = q if isinstance(q, dict) else {}
     bid, ask, state, err = q.get("bid"), q.get("ask"), q.get("state"), q.get("error")
     if err:
@@ -2319,7 +2374,7 @@ async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: s
     if market_live is False:
         mkf, ml_long, ml_other, mnet = None, None, None, None
     else:
-        mkf, ml_long, ml_other, mnet = await _market_snap(t, whale, cid, la, oa)
+        mkf, ml_long, ml_other, mnet = await _market_snap(t, whale, cid, la, oa, book=book)
     return _Reading(whale, cid, slug, la, oa, fills, his_long, his_other, snap, age,
                     bool(partial), fresh_read, fresh, _snap_of(la), _snap_of(oa), bid, ask,
                     _mark_of(bid, ask), venue, manual, mk, market_live,
@@ -2330,7 +2385,8 @@ async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: s
 _MktSnap = tuple[bool | None, float | None, float | None, float | None]
 
 
-async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None) -> _MktSnap:
+async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None,
+                       book: bool = False) -> _MktSnap:
     """ONE `whale_exits.market_positions` read of BOTH tokens of THIS
     condition, once per book and per candidate per tick, on its own
     bounded budget. Returns (snap_market_fresh, long, other, net).
@@ -2391,7 +2447,23 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None) 
     charging a second read per market silently halved the number of
     markets a tick considers -- and that number is the denominator of
     P1's own gate. Two read classes, two budgets of the same bounded
-    size (`capped_env`, so no shell can widen either). Each read is
+    size (`capped_env`, so no shell can widen either). AND THE BUDGET
+    IS THE CANDIDATES' (U12, 2026-09-06, the same split as `t.reads` /
+    `t.cand_reads`): an existing book's read (`book=True`) is never
+    charged to it and is never refused by it, because a book whose
+    whole-book walk is not fresh plans its reduces and its flatten on
+    THIS read alone -- with the budget shared, the twenty-first live
+    book had no reading, no plan and no managed exit, a count cap by
+    another road. Books are unbounded here as they are in quote reads;
+    the wall time of the tick (`tick_s`) is the operator's instrument.
+    `t.mkt_reads` stays the total for the counters; `t.cand_mkt_reads`
+    is what candidates break on (`snap_market_capped`). A candidate's
+    per-market read follows its quote read one for one (_read_market),
+    so the candidate walk's own budget (`capped_tick`) stops a
+    candidate FIRST and this clause is the defence behind it -- it
+    bites only if a candidate reaches here without spending a quote
+    read, which nothing does today; the worker's tests drive it at
+    this function's own level. Each read is
     additionally bounded in WALL TIME by `_SNAP_READ_TIMEOUT_S`: a data
     API that is merely SLOW raises nothing, and 20 unbounded awaits
     against a 25 s client timeout inside a 30 s poll is a tick that
@@ -2435,10 +2507,11 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None) 
         t.stats["snap_market_skipped"] = int(t.stats.get("snap_market_skipped") or 0) + 1
         _mirror_stop("snap_market_skipped", whale)
         return out
-    if t.mkt_reads >= ms.MAX_MARKETS_PER_TICK:
-        # past the budget: REFUSE the market, do not read it. Its OWN
-        # census name -- budget pressure is not venue unreadability, and
-        # §3b grades `snap_market_unreadable` at <= 5% of market-ticks
+    if not book and t.cand_mkt_reads >= ms.MAX_MARKETS_PER_TICK:
+        # a CANDIDATE past the budget: REFUSE the market, do not read
+        # it. Its OWN census name -- budget pressure is not venue
+        # unreadability, and §3b grades `snap_market_unreadable` at
+        # <= 5% of market-ticks. A book is never refused here (U12)
         t.stats["snap_market_capped"] = int(t.stats.get("snap_market_capped") or 0) + 1
         _mirror_stop("snap_market_capped", whale)
         return out
@@ -2448,6 +2521,8 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None) 
         _mirror_stop("snap_market_no_ids", whale)
         return out
     t.mkt_reads += 1
+    if not book:
+        t.cand_mkt_reads += 1
     t.stats["snap_market_reads"] = int(t.stats.get("snap_market_reads") or 0) + 1
     raw = None
     try:
@@ -2721,29 +2796,61 @@ async def _confirm_gone(t: _Tick, whale: str, asset: str) -> bool:
         return False
 
 
-async def _shadow_check(t: _Tick, book: dict, target: int, net_used: float) -> None:
+async def _shadow_check(t: _Tick, book: dict, target: int, net_used: float,
+                        mark: float | None, allow_short: bool) -> None:
     """spec 1e: a shadow reading of the same whale and market within
-    60 s that computed a different target FROM THE SAME INPUTS -- the
-    same net and the book's ratio -- is an arithmetic divergence and is
-    named; readings from different inputs (the shadow's live ratio and
-    fills-derived net against the book's fixed ratio and snapshot net,
-    addendum sections 1 and 7) are not compared."""
+    60 s that computed a different target FROM THE SAME NET is an
+    arithmetic divergence and is named. THE RATIOS MAY DIFFER (review
+    of U12c, FIX-3): the shadow sizes from its own measured ratio and
+    the book from the ratio stored at open (1.0 or MIRROR_RATIO), so
+    comparing only at equal ratios never checked a 0.10 book.
+
+    COMPARE RAW ARITHMETIC, NEVER CAPPED OR TRUNCATED OUTPUTS (FIX-3b):
+    the shadow's `target` is capped at $2,500 at ITS ratio (his 24,000
+    sh @ 0.50 at 1.0 is 5,000) and truncated to whole shares (0.058 x
+    16 is 0), so scaling it by book.ratio / shadow.ratio named ordinary
+    books. The shadow's RAW is reconstructed from the row: ratio x net
+    when the row is capped (its stored raw is the cap, not arithmetic)
+    or when its stored raw agrees with ratio x net; the stored raw only
+    when it DISAGREES with ratio x net, which is exactly the divergence
+    this instrument exists to name. That raw is scaled to the book's
+    ratio, then the SAME cap the live book applies (MIRROR_NET_CAP_USD
+    at the mark, in collateral on a short) and the same whole-share
+    truncation and short door (mi.target_shares) -- and only then is it
+    compared, a whole share or more apart being `shadow_live_disagree`
+    (a P2 integrity counter: any non-zero fails the verdict, so a false
+    one is not cheap). SKIPPED BY NAME (`shadow_check_skipped`, not a
+    disagree) when the row lacks the fields to do that -- no raw, no
+    `capped` bool, an unreadable or non-positive ratio, a mark off the
+    ladder, an unreadable book ratio; a different net is not compared,
+    silently, as before (addendum sections 1 and 7)."""
     try:
         row = await t.pool.fetchrow(_SQL_SHADOW_LATEST, book["whale"], book["condition_id"])
     except Exception:  # noqa: BLE001 — the shadow's table is its own
         return
     if not row:
         return
-    at, sr, sn = _num(row["at_ts"]), _num(row["ratio"]), _num(row["his_net"])
+    at = _num(row["at_ts"])
     if at is None or abs(t.now - at) > SHADOW_AGREE_WINDOW_S:
         return
-    if sr is None or sn is None or abs(sr - float(book.get("ratio") or 0.0)) > 1e-9:
+    sr, sn, br, m = _num(row["ratio"]), _num(row["his_net"]), _num(book.get("ratio")), _num(mark)
+    raw, capped = _num(row.get("target_raw")), row.get("capped")
+    if (sr is None or sr <= 0 or sn is None or br is None or br <= 0 or m is None
+            or not (0.01 <= m <= 0.99) or not isinstance(capped, bool)
+            or (capped is False and raw is None)):
+        _mirror_stop("shadow_check_skipped", book["whale"])
         return
     if abs(sn - net_used) > 1e-6:
         return
-    if row["target"] is not None and int(row["target"]) != int(target):
+    arith = sr * sn
+    shadow_raw = arith if (capped or raw is None or abs(raw - arith) <= 1e-3) else raw
+    scaled = round(shadow_raw * (br / sr), 6)
+    expected = mi.target_shares(1.0, scaled, m, allow_short=bool(allow_short),
+                                cap_usd=float(rules.MIRROR_NET_CAP_USD))["target"]
+    if abs(float(expected) - float(target)) >= 1.0:
         _mirror_stop("shadow_live_disagree", book["whale"])
-        _recent(book["id"], "shadow_live_disagree", shadow=int(row["target"]), live=int(target))
+        _recent(book["id"], "shadow_live_disagree", shadow=row["target"], live=int(target),
+                shadow_ratio=sr, expected=int(expected), scaled=round(scaled, 3))
 
 
 async def _write_plan(t: _Tick, book: dict, r: _Reading | None, target, target_raw,
@@ -2937,6 +3044,19 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # above zero
     if prior_plan.get("flat_since") is not None and abs(ledger) < FLAT_TOL_SHARES:
         plan["flat_since"] = prior_plan["flat_since"]
+    # THE ONE-WAY STEP (review of U12c, FIX-1): an exact-copy book (ratio
+    # 1.0) whose owner position has grown past twice the small-bet line
+    # steps to MIRROR_RATIO for life -- written to the row BEFORE the
+    # in-memory book moves, so a failed write steps nothing -- and is
+    # named; the target below then reads the stepped ratio and the
+    # reduce path sells the excess. Never up; never on any other ratio
+    stepped = rules.step_ratio(book.get("ratio"), net, r.mark)
+    if stepped is not None:
+        await t.pool.execute(_SQL_BOOK_RATIO, book["id"], float(stepped))
+        book["ratio"] = float(stepped)
+        plan["ratio_stepped"] = float(stepped)
+        _mirror_stop("ratio_stepped", w)
+        _recent(book["id"], "ratio_stepped", ratio=float(stepped))
     # THE TARGET, from the book's FIXED ratio (addendum section 7)
     if t.flatten_all:
         tg = {"target": 0, "raw": 0.0, "refusal": None}
@@ -2978,7 +3098,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     if target is not None and target != 0:
         plan.pop("flat_since", None)
     plan.update(target=target, target_raw=tg["raw"])
-    await _shadow_check(t, book, raw_target, net)
+    await _shadow_check(t, book, raw_target, net, r.mark, shorts)
     # THE FREEZE: venue vs ledger + the desk's explained shares, one
     # signed subtraction on either sign (brief 3.1)
     explained = ledger + r.manual
@@ -3143,8 +3263,11 @@ def _short_capped(t: _Tick, target: int | None, whale: str, plan: dict | None = 
     or above zero is never touched, so a long book is byte-identical."""
     if target is None or target >= 0:
         return target
-    cap = max(0, int(rules.MIRROR_SHORT_MAX_SHARES))
-    if -target <= cap:
+    # unbounded (the default since 2026-09-06) never clamps; a finite
+    # cap, lowered from the environment, clamps and is named; an
+    # unreadable cap reads as 0 -- shut -- through rules._bounded
+    cap = rules._bounded(rules.MIRROR_SHORT_MAX_SHARES)
+    if cap is None or -target <= cap:
         return target
     _mirror_stop("short_share_cap", whale)
     if plan is not None:
@@ -3417,7 +3540,10 @@ def _short_wire(his_px: float | None, ask: float | None) -> float | None:
 
 
 def _room_qty(t: _Tick, qty: int, wire: float | None, intent: str | None = None) -> int:
-    return rules.room_scale(int(qty), wire, le.LIVE_MAX_CLIP_USD, t.day_room, t.total_room,
+    # the MIRROR lane's own per-order clip (rules.MIRROR_CLIP_USD, $2,500:
+    # owner order ~14:00Z 2026-09-06), never the copy lane's $250 -- a
+    # $2,500 target is one rest, not ten sequential ones
+    return rules.room_scale(int(qty), wire, rules.MIRROR_CLIP_USD, t.day_room, t.total_room,
                             t.mirror_day, intent=intent)
 
 
@@ -3512,6 +3638,23 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
         return "book_error"
     wire_intent, sell, action = ws
     intent = _book_intent(book)
+    # THE SMALLEST ORDER (review of U12c, FIX-2): under
+    # rules.MIRROR_MIN_ORDER_USD of notional -- wire x qty on a long,
+    # (1 - wire) x qty of collateral on a short (_cost_px) -- the order
+    # is not sent and the book is held under its own name, before any
+    # read or op is spent on it; the venue's minimum is unknown and a
+    # refused order would burn an op every tick for as long as it stood.
+    # A FLATTEN IS EXEMPT (FIX-2b): a position that is leaving must be
+    # allowed to leave at any size -- the flatten kinds (paired,
+    # vanished), the sign-flip flatten and any plan toward target 0 --
+    # because a refused flatten rest never writes the order row that
+    # _flatten_vanished keys its rest clock on, and close_position is
+    # then never reached
+    flattening = (kind in ("flatten_paired", "flatten_vanished")
+                  or int(_num(plan.get("target")) or 0) == 0)
+    if not flattening and float(qty) * _cost_px(float(wire), book) < float(rules.MIRROR_MIN_ORDER_USD):
+        _mirror_stop("under_min_notional", w)
+        return "under_min_notional"
     if wire_intent in (ORDER_INTENT_SHORT, "ORDER_INTENT_SELL_SHORT") and not t.short_col:
         # a short row is never written through the 047 INSERT: the
         # column would read BUY_LONG for a row whose wire intent is a
@@ -4012,11 +4155,21 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     shorts = _shorts_on(t)
     drift, _drift_src = _drift_for(r)
     net, _snap_net = _net_for(r, drift, short=shorts)
-    ratio = (t.ratios.get(w) or {}).get("ratio")
+    # THE RATIO IS DECIDED HERE, AT OPEN, AND STORED ON THE BOOK (owner
+    # orders 2026-09-06 ~14:00Z and ~14:10Z; rules.open_ratio): an exact
+    # copy under MIRROR_SMALL_BET_USD of his dollars at the mark, else
+    # MIRROR_RATIO. The shadow's reading (t.ratios) stays what
+    # refresh_ratios measured -- reported, its anchor stored beside the
+    # book as a diagnostic -- and no longer sizes anything live. The
+    # SIZE clip is the mirror lane's own (MIRROR_CLIP_USD, at or over
+    # the anchor so the ratio is stored unscaled); the copy lane's
+    # per-whale clip stays the ADMISSION fact below (a demoted whale,
+    # $0, opens no book: `clip_zero`), never the size
+    ratio = rules.open_ratio(net, r.mark)
     anchor = (t.ratios.get(w) or {}).get("anchor_usd")
     clip = le.per_fill_usd(w, slug)
-    tg = rules.mirror_target(ratio, net, r.mark, clip, cap_usd=rules.MIRROR_NET_CAP_USD,
-                             allow_short=shorts)
+    tg = rules.mirror_target(ratio, net, r.mark, rules.MIRROR_CLIP_USD,
+                             cap_usd=rules.MIRROR_NET_CAP_USD, allow_short=shorts)
     if tg.get("refusal"):
         _mirror_stop(tg["refusal"], w)
         return
@@ -4165,9 +4318,10 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
     every counter is present whatever the tick did."""
     global _current_stats, _last_tick_at
     now = time.time() if now_ts is None else float(now_ts)
+    started = time.monotonic()          # the real clock: `now` may be the caller's
     stats = _new_stats()
     if _TICK_LOCK.locked():
-        stats.update(status="overlap", skipped_overlap=True)
+        stats.update(status="overlap", skipped_overlap=True, tick_s=0.0)
         return stats
     async with _TICK_LOCK:
         _current_stats = stats
@@ -4181,6 +4335,7 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
         finally:
             _last_tick_at = now
             stats["ops"], stats["reads"] = t.ops, t.reads
+            stats["tick_s"] = round(time.monotonic() - started, 1)
             stats["recent"] = list(_RECENT)[-20:]
             stats["post_only"] = _POST_ONLY_OK
             # last, and in the `finally`: an abandoned or raising tick
@@ -4290,7 +4445,12 @@ async def _tick(t: _Tick, woken: list) -> None:
         await _reconcile_orders(t, count=False)
         await _instruments(t)
         return
-    # B: the books, woken markets first
+    # B: the books, woken markets first. EVERY live book is read every
+    # tick, unbounded in reads (U12): a book's quote and per-market
+    # reads are charged to the totals (t.reads, t.mkt_reads) and never
+    # to the candidates' budgets below -- exits must be managed, and a
+    # book walk that spent the candidates' budget was a count cap on
+    # books by another road
     books = [dict(b) for b in await t.pool.fetch(_SQL_BOOKS_OPEN)]
     for book in _woken_first(books, woken):
         if t.abandoned or t.cancel_all:
@@ -4324,7 +4484,10 @@ async def _tick(t: _Tick, woken: list) -> None:
         for cid in conds:
             if t.abandoned:
                 break
-            if t.reads >= ms.MAX_MARKETS_PER_TICK:
+            if t.cand_reads >= ms.MAX_MARKETS_PER_TICK:
+                # the CANDIDATES' own budget (U12): the books above did
+                # not spend it, so with any number of live books the
+                # first MAX_MARKETS_PER_TICK candidates are still read
                 stats["capped_tick"] = True
                 break
             if (w, cid) in t.books_seen or _unmapped_until.get((w, cid), 0.0) > t.now:
@@ -4375,9 +4538,14 @@ def _mode_line(stats: dict, ticks: int) -> None:
         extra += " abandon=%s" % (stats.get("abandon_reason"),)
     if stats.get("skipped_backoff"):
         extra += " backoff=%s" % (stats.get("backoff_left_s"),)
+    # `day=none` under an unbounded day cap (the default since
+    # 2026-09-06): the room is null, and there is no cap to print
+    day = stats.get("mirror_day_room")
+    if day is None and not math.isfinite(float(rules.MIRROR_DAY_USD)):
+        day = "none"
     log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s venue=%s%s stats=%s",
              stats.get("mode"), stats.get("whales"), stats.get("books_live"),
-             stats.get("orders_open"), stats.get("mirror_day_room"), stats.get("venue_state"),
+             stats.get("orders_open"), day, stats.get("venue_state"),
              extra, {k: v for k, v in stats.items() if k not in ("census", "recent")})
 
 

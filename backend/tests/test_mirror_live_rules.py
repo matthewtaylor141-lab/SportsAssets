@@ -55,11 +55,33 @@ def _p2_numbers(**over):
 
 # ------------------------------------------------------------ constants
 
-def test_caps_carry_the_spec_defaults_and_reuse_the_shared_ones():
-    assert r.MIRROR_NET_CAP_USD == mi.MARKET_NET_CAP_USD == 250.0
-    assert (r.MIRROR_MAX_LIVE_BOOKS, r.MIRROR_MAX_BOOKS_PER_DAY) == (5, 5)
-    # $250 -> $1,000 by owner decision, 2026-09-05
-    assert r.MIRROR_DAY_USD == 1250.0 and r.MIRROR_LOSS_STOP_USD == 1000.0
+def test_caps_carry_the_spec_defaults_and_reuse_the_shared_ones(monkeypatch):
+    # THE RAILS OF 2026-09-06 (owner orders 13:36Z, ~14:00Z, ~14:10Z):
+    # $2,500 per event at the mark, scaling never refusing
+    assert r.MIRROR_NET_CAP_USD == mi.MARKET_NET_CAP_USD == 2500.0
+    # NO COUNT CAP on books ("I don't want to cap books opened at all"):
+    # unbounded is math.inf and nothing else -- never a large int a
+    # reader would take for a number of books
+    assert r.MIRROR_MAX_LIVE_BOOKS == r.MIRROR_MAX_BOOKS_PER_DAY == math.inf
+    assert r._bounded(r.MIRROR_MAX_LIVE_BOOKS) is None and r._bounded(r.MIRROR_MAX_BOOKS_PER_DAY) is None
+    # NO DAY CAP ("Let's remove those caps ... this limitation should
+    # never force us to decline any of the possible copies"); the $1,000
+    # loss stop is unchanged (owner decision 2026-09-05)
+    assert r.MIRROR_DAY_USD == math.inf and r.MIRROR_LOSS_STOP_USD == 1000.0
+    # 10% of what he puts on, exact copy under $10 (decided at open)
+    assert r.MIRROR_RATIO == 0.10 and r.MIRROR_SMALL_BET_USD == 10.0
+    # the mirror lane's own per-order clip; the copy lane's is not read for size
+    assert r.MIRROR_CLIP_USD == 2500.0
+    # the smallest order sent (U12c review, FIX-2): $1 of notional, env may lower to 0
+    assert r.MIRROR_MIN_ORDER_USD == 1.0
+    assert r.capped_env("MIRROR_MIN_ORDER_USD", 1.0) == 1.0
+    # no dollar dead band: one whole share is the only floor
+    assert mi.MIN_MOVE_USD == 0.0 and mi.MIN_MOVE_FRAC == 0.02
+    # shorts on ("I want shorts live as well"), no short share cap; the
+    # default pinned through the reader with the variable unset
+    monkeypatch.delenv("MIRROR_SHORTS", raising=False)
+    assert r.env_switch("MIRROR_SHORTS", True) is True
+    assert r.MIRROR_SHORT_MAX_SHARES == math.inf and r._bounded(r.MIRROR_SHORT_MAX_SHARES) is None
     assert r.MIRROR_MAX_ORDER_OPS_PER_TICK == 6 and r.MIRROR_MAX_REPLACES_PER_HOUR == 12
     assert r.MIRROR_REST_TTL_S == 600.0 and r.MIRROR_TAKE_AFTER_S == 120.0
     assert r.MIRROR_FLATTEN_REST_S == 300.0 and r.MIRROR_FLAT_CLOSE_S == 3600.0
@@ -109,17 +131,74 @@ def test_env_override_only_lowers_a_cap(monkeypatch):
     monkeypatch.delenv("MIRROR_TEST_CAP")
     assert r.capped_env("MIRROR_TEST_CAP", 250.0) == 250.0
     # the module constants go through the same helper: a raise is
-    # ignored at import, a lowering is honoured
+    # ignored at import, a lowering is honoured. The count caps are
+    # unbounded by default (U12), so ANY finite count is a lowering --
+    # rung S3's probe at 1, an operator's 50 -- and reads as that count
     monkeypatch.setenv("MIRROR_MAX_LIVE_BOOKS", "50")
+    monkeypatch.setenv("MIRROR_MAX_BOOKS_PER_DAY", "1")
     monkeypatch.setenv("MIRROR_NET_CAP_USD", "25")
     try:
         mod = importlib.reload(r)
-        assert mod.MIRROR_MAX_LIVE_BOOKS == 5 and mod.MIRROR_NET_CAP_USD == 25.0
+        assert mod.MIRROR_MAX_LIVE_BOOKS == 50.0 and mod._bounded(mod.MIRROR_MAX_LIVE_BOOKS) == 50
+        assert mod.MIRROR_MAX_BOOKS_PER_DAY == 1.0 and mod._bounded(mod.MIRROR_MAX_BOOKS_PER_DAY) == 1
+        assert mod.MIRROR_NET_CAP_USD == 25.0
+        # and the lowered cap BITES, by name, at the count it names
+        assert mod.admission(_admitted(books_live=50, opened_today=0)) == "max_books"
+        assert mod.admission(_admitted(books_live=49, opened_today=1)) == "max_books"
+        assert mod.admission(_admitted(books_live=49, opened_today=0)) is None
     finally:
         monkeypatch.delenv("MIRROR_MAX_LIVE_BOOKS")
+        monkeypatch.delenv("MIRROR_MAX_BOOKS_PER_DAY")
         monkeypatch.delenv("MIRROR_NET_CAP_USD")
         importlib.reload(r)
-    assert r.MIRROR_MAX_LIVE_BOOKS == 5 and r.MIRROR_NET_CAP_USD == 250.0
+    assert r.MIRROR_MAX_LIVE_BOOKS == r.MIRROR_MAX_BOOKS_PER_DAY == math.inf
+    assert r.MIRROR_NET_CAP_USD == 2500.0
+    # the same helper carries the day cap and the short share cap (U12b,
+    # U12c): a shell lowers, never raises, and a lowered day cap BITES
+    # in the worker by name (test_mirror_live_worker, section 18)
+    monkeypatch.setenv("MIRROR_DAY_USD", "100")
+    monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "1")
+    monkeypatch.setenv("MIRROR_RATIO", "0.5")            # a RAISE: ignored
+    monkeypatch.setenv("MIRROR_CLIP_USD", "0")           # under the floor: lands on it
+    try:
+        mod = importlib.reload(r)
+        assert mod.MIRROR_DAY_USD == 100.0 and mod.MIRROR_SHORT_MAX_SHARES == 1.0
+        assert mod._bounded(mod.MIRROR_SHORT_MAX_SHARES) == 1
+        assert mod.MIRROR_RATIO == 0.10 and mod.MIRROR_CLIP_USD == 1.0
+    finally:
+        for name in ("MIRROR_DAY_USD", "MIRROR_SHORT_MAX_SHARES", "MIRROR_RATIO", "MIRROR_CLIP_USD"):
+            monkeypatch.delenv(name)
+        importlib.reload(r)
+    assert r.MIRROR_DAY_USD == r.MIRROR_SHORT_MAX_SHARES == math.inf
+    assert r.MIRROR_RATIO == 0.10 and r.MIRROR_CLIP_USD == 2500.0
+
+
+def test_count_caps_are_unbounded_by_default_and_the_env_can_only_lower_them(monkeypatch):
+    """U12. unbounded_env: absent, blank, unparseable or non-finite is
+    the default -- UNBOUNDED, math.inf -- and 'inf' is not a lowering;
+    a finite count is honoured as read; a negative lands on 0, the
+    most closed (no books). _bounded is the one reader: None for
+    unbounded, a whole count otherwise, and 0 -- shut -- for every cap
+    that is not a number (a cap nobody can read is never no cap)."""
+    for absent in (None, "", "  ", "lots", "nan", "inf", "Infinity", "1e400", "-inf"):
+        if absent is None:
+            monkeypatch.delenv("MIRROR_TEST_COUNT", raising=False)
+        else:
+            monkeypatch.setenv("MIRROR_TEST_COUNT", absent)
+        assert r.unbounded_env("MIRROR_TEST_COUNT") == math.inf, absent
+        assert r._bounded(r.unbounded_env("MIRROR_TEST_COUNT")) is None, absent
+    for raw, count in (("1", 1), ("50", 50), ("0", 0), ("2.5", 2), ("1e3", 1000)):
+        monkeypatch.setenv("MIRROR_TEST_COUNT", raw)
+        assert r._bounded(r.unbounded_env("MIRROR_TEST_COUNT")) == count, raw
+    monkeypatch.setenv("MIRROR_TEST_COUNT", "-5")
+    assert r.unbounded_env("MIRROR_TEST_COUNT") == 0.0 and r._bounded(0.0) == 0
+    # the reader alone: only a positive float infinity is "no cap"
+    assert r._bounded(math.inf) is None
+    for shut in (None, True, False, math.nan, -math.inf, "inf", "5", b"5", -1, -0.5, object()):
+        assert r._bounded(shut) == 0, shut
+    assert r._bounded(Decimal("7")) == 7 and r._bounded(7.9) == 7 and r._bounded(0) == 0
+    # no magic large int anywhere: the constants ARE the infinity
+    assert isinstance(r.MIRROR_MAX_LIVE_BOOKS, float) and isinstance(r.MIRROR_MAX_BOOKS_PER_DAY, float)
 
 
 def test_a_zero_or_negative_net_cap_env_never_removes_the_cap(monkeypatch):
@@ -153,7 +232,7 @@ def test_a_zero_or_negative_net_cap_env_never_removes_the_cap(monkeypatch):
         finally:
             monkeypatch.delenv("MIRROR_NET_CAP_USD")
             importlib.reload(r)
-    assert r.MIRROR_NET_CAP_USD == 250.0
+    assert r.MIRROR_NET_CAP_USD == 2500.0
 
 
 def test_env_override_only_raises_a_wait(monkeypatch):
@@ -367,7 +446,7 @@ def test_a_caller_can_only_tighten_a_cap_never_raise_one():
     # drift_max=1.0 allowed increases on 50% drift, flat_close_s=0
     # cashed out at once, ratio=100 ignored mi.RATIO_MAX)
     capped = int(r.MIRROR_NET_CAP_USD / 0.4574)
-    for cap in (1e9, 1e308, Decimal("1e6"), 251.0, r.MIRROR_NET_CAP_USD + 1e-9):
+    for cap in (1e9, 1e308, Decimal("1e6"), 2501.0, r.MIRROR_NET_CAP_USD + 1e-9):
         t = r.mirror_target(0.5, 24423.0, 0.4574, 50.0, cap_usd=cap)
         assert t["capped"] is True and t["target"] == capped, (cap, t)
     assert r.mirror_target(0.5, 24423.0, 0.4574, 50.0, cap_usd=25.0)["target"] == int(25.0 / 0.4574)
@@ -444,8 +523,12 @@ def test_an_exotic_float_that_raises_is_not_a_number():
 
 
 def test_cap_scales_the_target_at_the_mark_and_a_lowered_cap_scales_further():
+    # 1,416 raw shares are $648 at the mark: under the $2,500 per-event
+    # cap (U12b), so whole; at ratio 1.0 the same net binds at 5,465
     t = r.mirror_target(50.0 / 861.8, 24423.06, 0.4574, 50.0)
-    assert t["capped"] is True and t["target"] == int(250.0 / 0.4574)
+    assert t["capped"] is False and t["target"] == int(50.0 / 861.8 * 24423.06) == 1416
+    big = r.mirror_target(1.0, 24423.06, 0.4574, 50.0)
+    assert big["capped"] is True and big["target"] == int(2500.0 / 0.4574) == 5465
     small = r.mirror_target(50.0 / 861.8, 24423.06, 0.4574, 50.0, cap_usd=25.0)
     assert small["capped"] is True and small["target"] == int(25.0 / 0.4574)
     un = r.mirror_target(50.0 / 861.8, 2780.0, 0.31, 50.0)
@@ -1202,7 +1285,7 @@ def test_a_resting_order_off_a_cent_is_replaced():
     assert r.keep_or_replace(r.OpenOrder(r.BUY, 0.46, 100, 100, 0.0), p, 10.0) == "replace"
 
 
-def test_plan_reasons_map_to_census_names_including_the_dead_bands():
+def test_plan_reasons_map_to_census_names_including_the_dead_bands(monkeypatch):
     assert r.plan_reason_key("on target") == "on_target"
     assert r.plan_reason_key("under one share") == "under_one_share"
     assert r.plan_reason_key("under the dollar dead band") == "dead_band"
@@ -1212,11 +1295,17 @@ def test_plan_reasons_map_to_census_names_including_the_dead_bands():
     assert r.plan_reason_key("venue unreadable") == "positions_unreadable"
     assert r.plan_reason_key("Something New?") == "something_new"
     assert r.plan_reason_key(None) == "no_plan"
-    # the dead bands are mi.plan's, reused not restated: a $4 move at
-    # the mark is refused, a 1% move inside hysteresis is refused, and
-    # a flatten crosses both
+    # the dead bands are mi.plan's, reused not restated: a $3 move at
+    # the mark is refused under a $5 band (the band is $0 since
+    # 2026-09-06, U12c, so it is pinned here under an explicit $5 and
+    # the same move is a plan at the default), a 1% move inside
+    # hysteresis is refused, and a flatten crosses both
     bk = mi.Book(bid=0.30, ask=0.32)
+    assert mi.MIN_MOVE_USD == 0.0
+    assert r.plan_reason_key(mi.plan(110, 100, 100, bk, 0.31, 0.31).reason) == "increase_toward_target"
+    monkeypatch.setattr(mi, "MIN_MOVE_USD", 5.0)
     assert r.plan_reason_key(mi.plan(110, 100, 100, bk, 0.31, 0.31).reason) == "dead_band"
+    monkeypatch.setattr(mi, "MIN_MOVE_USD", 0.0)
     # 15 shares at 0.50 is $7.50 (over the dollar band) and 1.5% of the
     # target (inside the 2% hysteresis)
     half = mi.Book(bid=0.49, ask=0.51)
@@ -1735,12 +1824,21 @@ def test_admission_admits_the_clean_candidate_and_names_the_first_refusal_in_ord
         ({"side_band_hit": True}, "side_band"),
         ({"snap_fresh": False}, "snapshot_stale"),
         ({"drift": 0.06}, "drift"),
-        ({"books_live": r.MIRROR_MAX_LIVE_BOOKS}, "max_books"),
-        ({"opened_today": r.MIRROR_MAX_BOOKS_PER_DAY}, "max_books"),
         ({"first_fill_ok": False}, "first_fill_gate"),
     ]
     for over, name in expect:
         assert r.admission(_admitted(**over)) == name, over
+    # NO COUNT CAP (U12): the counts refuse nothing at the default,
+    # whatever they read; a FINITE cap, lowered from the environment or
+    # patched here, bites by name at the count it names
+    for many in (5, 50, 10**6):
+        assert r.admission(_admitted(books_live=many, opened_today=many)) is None, many
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(r, "MIRROR_MAX_LIVE_BOOKS", 5.0)
+        mp.setattr(r, "MIRROR_MAX_BOOKS_PER_DAY", 3.0)
+        assert r.admission(_admitted(books_live=5, opened_today=0)) == "max_books"
+        assert r.admission(_admitted(books_live=0, opened_today=3)) == "max_books"
+        assert r.admission(_admitted(books_live=4, opened_today=2)) is None
     # two refusals: the earlier gate names it
     assert r.admission(_admitted(legacy_row=True, first_fill_ok=False)) == "legacy_row"
     assert r.admission(_admitted(per_fill_usd=0.0, legacy_row=True)) == "clip_zero"
@@ -1768,12 +1866,15 @@ def test_admission_fails_closed_on_every_unread_fact():
         ({"snap_fresh": None}, "snapshot_stale"),
         ({"drift": None}, "drift"),
         ({"drift": float("nan")}, "drift"),
-        ({"books_live": None}, "max_books"),
-        ({"opened_today": None}, "max_books"),
+        # U12: an unreadable COUNT refuses under its own name, never
+        # "no cap" -- and does so with the caps unbounded
+        ({"books_live": None}, "books_unreadable"),
+        ({"opened_today": None}, "books_unreadable"),
         ({"first_fill_ok": None}, "first_fill_gate"),
     ]
     for over, name in unread:
         assert r.admission(_admitted(**over)) == name, over
+    assert r.MIRROR_MAX_LIVE_BOOKS == math.inf, "the unreadable count refused with NO cap in force"
 
 
 def test_admission_parses_every_number_and_never_raises():
@@ -1807,12 +1908,19 @@ def test_admission_parses_every_number_and_never_raises():
         assert r.admission(_admitted(drift=bad)) == "drift", bad
     assert r.admission(_admitted(drift=0)) is None
     assert r.admission(_admitted(drift=r.MIRROR_DRIFT_MAX)) is None
-    # the counts: nan/'x'/inf/-1/a fraction/a bool never raise, all refuse
+    # the counts: nan/'x'/inf/-1/a fraction/a bool never raise, all
+    # refuse -- by the count's own name (U12), with no cap in force
     for bad in (math.nan, "x", "4", math.inf, -1, 2.5, True, False, None, 10**400):
-        assert r.admission(_admitted(books_live=bad)) == "max_books", bad
-        assert r.admission(_admitted(opened_today=bad)) == "max_books", bad
+        assert r.admission(_admitted(books_live=bad)) == "books_unreadable", bad
+        assert r.admission(_admitted(opened_today=bad)) == "books_unreadable", bad
     assert r.admission(_admitted(books_live=4.0, opened_today=0)) is None
-    assert r.admission(_admitted(books_live=r.MIRROR_MAX_LIVE_BOOKS - 1)) is None
+    assert r.admission(_admitted(books_live=10**6, opened_today=10**6)) is None
+    # and a cap that is itself unreadable is SHUT, never open: a
+    # readable count against it is max_books
+    with pytest.MonkeyPatch.context() as mp:
+        for junk in (None, math.nan, "5", True):
+            mp.setattr(r, "MIRROR_MAX_LIVE_BOOKS", junk)
+            assert r.admission(_admitted(books_live=0, opened_today=0)) == "max_books", junk
     # every fact in the dataclass defaults to its fail-closed value
     assert r.admission(r.AdmissionFacts(increases_ok=True)) == "clip_unreadable"
     assert r.AdmissionFacts().per_side is None and r.AdmissionFacts().increases_ok is None
@@ -2102,12 +2210,17 @@ def _short(ledger=-300.0, avg=0.32, **over):
     return r.BookState(ledger_net=ledger, avg_cost=avg, intent=SHORT, **over)
 
 
-def test_the_knob_is_off_by_default_and_read_like_the_other_dials(monkeypatch):
+def test_the_knob_is_on_by_default_and_read_like_the_other_dials(monkeypatch):
     # the DEFAULT is pinned through the reader with the variable unset,
     # never through the import-time constant (the runner's environment
-    # may have the knob on in this rung; the mirror set stays green)
+    # may have the knob set; the mirror set stays green). ON since
+    # 2026-09-06 (owner order ~14:10Z, "I want shorts live as well");
+    # MIRROR_SHORTS=off still turns it off
     monkeypatch.delenv("MIRROR_SHORTS", raising=False)
-    assert r.env_switch("MIRROR_SHORTS", False) is False
+    assert r.env_switch("MIRROR_SHORTS", True) is True
+    monkeypatch.setenv("MIRROR_SHORTS", "off")
+    assert r.env_switch("MIRROR_SHORTS", True) is False
+    monkeypatch.delenv("MIRROR_SHORTS", raising=False)
     assert isinstance(r.MIRROR_SHORTS, bool)
     assert r.ORDER_INTENT_SHORT == SHORT and r.ORDER_INTENT == INTENT
     assert r.WIRE_INTENTS == {"ORDER_INTENT_BUY_LONG", "ORDER_INTENT_SELL_LONG",
@@ -2124,10 +2237,12 @@ def test_the_knob_is_off_by_default_and_read_like_the_other_dials(monkeypatch):
     assert r.env_switch("MIRROR_SHORTS") is False
     assert r.env_switch(None) is False and r.env_switch(5, True) is True
     # the module reads it at import like every cap; the default is the
-    # code's, and flips to True only by a code change (rung S5)
+    # code's, and it moved to True by a code change (2026-09-06), the
+    # way the discipline required; the pre-S4 exit safety is named
+    # beside it
     src = inspect.getsource(r)
-    assert 'MIRROR_SHORTS = env_switch("MIRROR_SHORTS", False)' in src
-    assert "rung S5" in src
+    assert 'MIRROR_SHORTS = env_switch("MIRROR_SHORTS", True)' in src
+    assert "short_reduce_unproven" in src and "rung S4" in src
 
 
 def test_the_effective_knob_is_the_env_and_the_050_column_and_absence_is_the_columns_error_alone(monkeypatch):
@@ -2158,23 +2273,118 @@ def test_the_effective_knob_is_the_env_and_the_050_column_and_absence_is_the_col
     assert r.column_missing(RuntimeError('column "side" does not exist'), "intent") is False
 
 
-def test_the_short_share_cap_is_one_until_s5_and_the_env_may_only_lower_it(monkeypatch):
+def test_the_short_share_cap_is_unbounded_by_default_and_the_env_may_only_lower_it(monkeypatch):
+    """U12c: no short share cap (owner order ~14:10Z 2026-09-06); the
+    same representation as the count caps, read through _bounded. A
+    shell lowers it -- the 1-share probe of rung S3/S4 runs at 1 -- and
+    0 refuses every short by `short_share_cap`, as before."""
     monkeypatch.delenv("MIRROR_SHORT_MAX_SHARES", raising=False)
-    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 1.0
-    assert isinstance(r.MIRROR_SHORT_MAX_SHARES, int) and 0 <= r.MIRROR_SHORT_MAX_SHARES <= 1
+    assert r.unbounded_env("MIRROR_SHORT_MAX_SHARES") == math.inf
+    assert r.MIRROR_SHORT_MAX_SHARES == math.inf and r._bounded(r.MIRROR_SHORT_MAX_SHARES) is None
     monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "50")
-    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 1.0, "a shell never raises it"
+    assert r._bounded(r.unbounded_env("MIRROR_SHORT_MAX_SHARES")) == 50, "a lowering, honoured"
+    monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "1")
+    assert r._bounded(r.unbounded_env("MIRROR_SHORT_MAX_SHARES")) == 1, "the probe's door"
     monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "0")
-    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 0.0, "zero refuses every short"
+    assert r._bounded(r.unbounded_env("MIRROR_SHORT_MAX_SHARES")) == 0, "zero refuses every short"
     monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "-3")
-    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 0.0
-    monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", "lots")
-    assert r.capped_env("MIRROR_SHORT_MAX_SHARES", 1) == 1.0
-    # the module reads it through capped_env with the code default 1
+    assert r._bounded(r.unbounded_env("MIRROR_SHORT_MAX_SHARES")) == 0
+    for not_a_lowering in ("lots", "inf", ""):
+        monkeypatch.setenv("MIRROR_SHORT_MAX_SHARES", not_a_lowering)
+        assert r.unbounded_env("MIRROR_SHORT_MAX_SHARES") == math.inf, not_a_lowering
+    # the module reads it through unbounded_env, never a magic int
     src = inspect.getsource(r)
-    assert 'MIRROR_SHORT_MAX_SHARES = int(capped_env("MIRROR_SHORT_MAX_SHARES", 1))' in src
+    assert 'MIRROR_SHORT_MAX_SHARES = unbounded_env("MIRROR_SHORT_MAX_SHARES")' in src
     assert "MIRROR_SHORT_MAX_SHARES" in r.__all__ and "shorts_effective" in r.__all__
     assert "column_missing" in r.__all__
+
+
+def test_the_ratio_is_decided_at_open_exact_under_the_small_bet_line_and_ten_percent_above():
+    """U12b/U12c (owner orders ~14:00Z and ~14:10Z 2026-09-06): "Just
+    trade 10% of what he puts on everything he takes" and "Bets under
+    $10, take the full position (exact copy)". open_ratio reads his
+    dollars at the mark -- |net| x mark on a long, |net| x (1 - mark)
+    on a short -- and answers 1.0 under MIRROR_SMALL_BET_USD, else
+    MIRROR_RATIO. Pure; the worker stores the answer on the book."""
+    assert r.MIRROR_RATIO == 0.10 and r.MIRROR_SMALL_BET_USD == 10.0
+    # his $8 bet (16 sh @ 0.50): exact copy, target 16
+    assert r.open_ratio(16.0, 0.50) == 1.0
+    assert r.mirror_target(r.open_ratio(16.0, 0.50), 16.0, 0.50, r.MIRROR_CLIP_USD)["target"] == 16
+    # his $12 bet (24 sh @ 0.50): 10%, target 2
+    assert r.open_ratio(24.0, 0.50) == 0.10
+    assert r.mirror_target(r.open_ratio(24.0, 0.50), 24.0, 0.50, r.MIRROR_CLIP_USD)["target"] == 2
+    # exactly on the line is not under it
+    assert r.open_ratio(20.0, 0.50) == 0.10 and r.open_ratio(19.99, 0.50) == 1.0
+    # his 5,516 sh @ 0.118 ($651): 551, not capped
+    t = r.mirror_target(r.open_ratio(5516.0, 0.118), 5516.0, 0.118, r.MIRROR_CLIP_USD)
+    assert (t["target"], t["capped"]) == (551, False)
+    # a SHORT's dollars are collateral: his -12 sh at 0.30 is 12 x 0.70
+    # = $8.40, exact copy, target -12; -3,000 sh at 0.30 is $2,100, 10%
+    assert r.open_ratio(-12.0, 0.30) == 1.0 and r.open_ratio(-3000.0, 0.30) == 0.10
+    s = r.mirror_target(1.0, -12.0, 0.30, r.MIRROR_CLIP_USD, allow_short=True)
+    assert s["target"] == -12 and s["intent"] == SHORT and s["capped"] is False
+    s3 = r.mirror_target(0.10, -3000.0, 0.30, r.MIRROR_CLIP_USD, allow_short=True)
+    assert s3["target"] == -300 and s3["capped"] is False
+    # the line only LOWERS from a shell; 0 makes nothing small
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(r, "MIRROR_SMALL_BET_USD", 5.0)
+        assert r.open_ratio(16.0, 0.50) == 0.10, "the $8 bet is a 10% book under a $5 line"
+        assert r.mirror_target(0.10, 16.0, 0.50, r.MIRROR_CLIP_USD)["target"] == 1
+        mp.setattr(r, "MIRROR_SMALL_BET_USD", 0.0)
+        assert r.open_ratio(1.0, 0.50) == 0.10
+    # unreadable is NOT small: the conservative ratio, and mirror_target
+    # names the unreadable fact itself
+    for net, mark in ((None, 0.5), ("16", 0.5), (math.nan, 0.5), (16.0, None), (16.0, 1e-320),
+                      (16.0, 0.0), (16.0, 1.0), (True, 0.5)):
+        assert r.open_ratio(net, mark) == 0.10, (net, mark)
+    assert r.mirror_target(r.open_ratio(None, 0.5), None, 0.5, r.MIRROR_CLIP_USD)["refusal"] == "no_position"
+    assert r.mirror_target(r.open_ratio(16.0, None), 16.0, None, r.MIRROR_CLIP_USD)["refusal"] == "no_mark"
+    # at open, `no_ratio` can come only from a bad constant
+    assert r.mirror_target(r.open_ratio(16.0, 0.5), 16.0, 0.5, r.MIRROR_CLIP_USD)["refusal"] is None
+    with pytest.MonkeyPatch.context() as mp:
+        for bad in (0.0, -1.0, math.nan, None):
+            mp.setattr(r, "MIRROR_RATIO", bad)
+            assert r.mirror_target(r.open_ratio(24.0, 0.5), 24.0, 0.5, r.MIRROR_CLIP_USD)["refusal"] == "no_ratio"
+    # the mirror clip at or over the anchor stores the ratio UNSCALED
+    assert r.mirror_target(0.10, 24.0, 0.5, r.MIRROR_CLIP_USD)["ratio_eff"] == 0.10
+    assert r.MIRROR_CLIP_USD >= r.MIRROR_ANCHOR_CLIP_USD
+
+
+def test_the_event_cap_scales_and_never_refuses_on_either_side():
+    """U12b: "a hard cap of no single event having more than $2.5k on it
+    ... this limitation should never force us to decline any of the
+    possible copies". The cap SCALES the target at the mark (long) or
+    in collateral (short) and no refusal fires because of it: every
+    refusal mirror_target can name is about a cap AT OR UNDER ZERO, an
+    unreadable input or the short door, never a capped target."""
+    # 10% of his 100,000 sh @ 0.60 ($60,000): 10,000 raw -> 4,166 = $2,500
+    t = r.mirror_target(0.10, 100000.0, 0.60, r.MIRROR_CLIP_USD)
+    assert (t["target"], t["capped"], t["refusal"]) == (int(2500.0 / 0.60), True, None)
+    assert t["target"] == 4166 and t["raw"] == pytest.approx(4166.6667, abs=1e-3)
+    # 10% of 34,442 sh @ 0.60: 3,444 raw is $2,066 -- under, not capped
+    t2 = r.mirror_target(0.10, 34442.0, 0.60, r.MIRROR_CLIP_USD)
+    assert (t2["target"], t2["capped"]) == (3444, False)
+    # a short: his -100,000 sh at 0.30 is 10,000 raw; $2,500 of
+    # collateral at 0.70 a share is 3,571 -- capped, no refusal
+    s = r.mirror_target(0.10, -100000.0, 0.30, r.MIRROR_CLIP_USD, allow_short=True)
+    assert (s["target"], s["capped"], s["refusal"]) == (-int(2500.0 / 0.70), True, None)
+    assert s["target"] == -3571 and s["intent"] == SHORT
+    # the exact-copy ratio caps the same way: 1.0 x 100,000 @ 0.60 -> 4,166
+    assert r.mirror_target(1.0, 100000.0, 0.60, r.MIRROR_CLIP_USD)["target"] == 4166
+    # the refusals that exist, and what each is about: none is the cap binding
+    assert r.mirror_target(0.10, 100000.0, 0.60, r.MIRROR_CLIP_USD, cap_usd=0.0)["refusal"] == "net_cap_zero"
+    assert r.mirror_target(0.10, 100000.0, 0.60, r.MIRROR_CLIP_USD, cap_usd=-1)["refusal"] == "net_cap_zero"
+    assert r.mirror_target(0.10, 100000.0, 0.60, r.MIRROR_CLIP_USD, cap_usd=1e-9)["refusal"] is None
+    assert r.mirror_target(0.10, -100000.0, 0.30, r.MIRROR_CLIP_USD)["refusal"] == "short_side_refused"
+    src = inspect.getsource(r.mirror_target)
+    for name in ("net_cap_zero", "no_ratio", "no_mark", "no_position", "clip_unreadable", "clip_zero",
+                 "short_side_refused"):
+        assert name in src, name
+    assert src.count('out["refusal"] = ') == 7, "every refusal is one of the seven above"
+    # and the room does not refuse a capped target either: $2,500 at
+    # the wire is the mirror clip's own figure
+    assert r.room_scale(4166, 0.60, r.MIRROR_CLIP_USD, 1e12, 1e12, 1e12) == 4166
+    assert r.room_scale(3571, 0.30, r.MIRROR_CLIP_USD, 1e12, 1e12, 1e12, intent=SHORT) == 3571
 
 
 def test_mirror_target_admits_a_signed_short_only_by_the_knob_and_names_its_intent():
@@ -2183,9 +2393,10 @@ def test_mirror_target_admits_a_signed_short_only_by_the_knob_and_names_its_inte
     assert t["raw"] == -300.0 and t["capped"] is False
     # capped on the SHORT leg's price, 1 - mark
     big = r.mirror_target(1.0, -100000.0, 0.9, 50.0, allow_short=True)
-    assert big["target"] == -int(250.0 / 0.1) == -2500 and big["capped"] is True
+    assert big["target"] == -int(2500.0 / (1 - 0.9)) and big["capped"] is True
+    assert big["target"] in (-24999, -25000), "$2,500 of collateral on the short leg at 0.10 (U12b)"
     lng = r.mirror_target(1.0, 100000.0, 0.9, 50.0, allow_short=True)
-    assert lng["target"] == 277 and lng["intent"] == INTENT
+    assert lng["target"] == int(2500.0 / 0.9) == 2777 and lng["intent"] == INTENT
     # a positive target keeps the long intent under either knob; zero is zero
     assert r.mirror_target(1.0, 0.0, 0.5, 50.0, allow_short=True)["target"] == 0
     assert r.mirror_target(1.0, 0.0, 0.5, 50.0, allow_short=True)["intent"] == INTENT

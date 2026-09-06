@@ -67,6 +67,7 @@ import ast
 import asyncio
 import copy
 import inspect
+import math
 import json
 import logging
 import pathlib
@@ -595,6 +596,9 @@ class _Pool(_ShadowPool):
         if "ml-book-open-order" in s:
             self.books[a[0]]["open_order_id"] = a[1]
             return "UPDATE 1"
+        if "ml-book-ratio" in s:
+            self.books[a[0]]["ratio"] = a[1]
+            return "UPDATE 1"
         if "ml-book-arm" in s:
             # the worker's COALESCE: an arm already set is kept; a new
             # one is stamped with the tick's clock (the real now()). The
@@ -955,13 +959,22 @@ def _armed(monkeypatch):
     monkeypatch.delenv("PMUS_MIRROR_GTD", raising=False)
     monkeypatch.setattr(le, "active_venue", lambda: "polymarket-us")
     monkeypatch.setattr(le, "_REST_RESERVED_USD", 0.0)
-    # HERMETIC AGAINST THE RUNNER'S ENVIRONMENT: the knob and the short
-    # share cap are pinned at their code defaults for every test (the
-    # rules module reads the environment at import); a test that wants
-    # the knob on says so (_shorts_on). Every file that imports this
-    # fixture is covered with it
+    # THE FIXTURE WORLD'S RAILS, pinned through the rules module (which
+    # the worker reads at call time) so this file is hermetic against
+    # the runner's environment AND against the code defaults moving.
+    # The world below was built on the P1/P2 rails -- ratio 1.0 for
+    # his $93 fixture position, a $1,250 day cap, the short knob off,
+    # the short share cap at one -- and every pin in it reads them. The
+    # code defaults since 2026-09-06 (U12/U12b/U12c) are 10% above a $10
+    # bet, no day cap, shorts on, no short share cap: the rules tests
+    # pin THOSE, and the tests in this file that exercise the new rules
+    # set them explicitly (section 18). A test that wants the knob on
+    # says so (_shorts_on). Every file that imports this fixture is
+    # covered with it
     monkeypatch.setattr(rules, "MIRROR_SHORTS", False)
     monkeypatch.setattr(rules, "MIRROR_SHORT_MAX_SHARES", 1)
+    monkeypatch.setattr(rules, "MIRROR_RATIO", 1.0)
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", 1250.0)
     monkeypatch.setitem(edge_gate._cache, "err", None)     # conftest seeds the rest
     monkeypatch.setattr(ml, "_POST_ONLY_OK", True)
     monkeypatch.setattr(ml, "_backoff_until", 0.0)
@@ -1870,15 +1883,20 @@ def test_ops_are_capped_per_tick(monkeypatch):
 
 
 def test_the_room_scales_the_quantity_and_names_over_room(monkeypatch):
-    async def _room(pool, cfg):
-        return 0.1, 1e9
-    monkeypatch.setattr(le, "_copy_day_room", _room)
+    """The rooms scale the rest and name `over_room` under one share
+    (U12b: the sleeve's DAILY room no longer binds the mirror -- see
+    section 18 -- so the sub-share room here is the mirror's own day
+    room, lowered from the environment, and the scaling room is the
+    sleeve's TOTAL)."""
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", 0.1)
     p = _pool()
     st = _tick(p, _Venue())
     assert _census(st, "over_room") == 1 and not [o for o in p.orders.values()]
+    assert _census(st, "mirror_day_cap") == 0, "nothing filled: the block is not set, the room is"
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", 1250.0)
 
     async def _room2(pool, cfg):
-        return 30.0, 1e9
+        return 1e9, 30.0
     monkeypatch.setattr(le, "_copy_day_room", _room2)
     p2 = _pool()
     v2 = _Venue()
@@ -1933,16 +1951,110 @@ def test_the_drift_rule_refuses_increases_and_reduces_from_the_smaller_reading()
 def test_the_shadow_live_instrument_names_an_arithmetic_divergence_only():
     p = _pool()
     p.add_book(ledger=0, ratio=1.0)
-    p.shadow.append({"whale": "rn1", "condition_id": CID, "target": 299, "ratio": 1.0,
-                     "his_net": 300.0, "at_ts": NOW - 10})
+    # the shadow's STATED raw (299) diverges from its own 1.0 x 300: named
+    p.shadow.append(_shadow_row(299, 1.0, 300.0, raw=299.0))
     st = _tick(p, _Venue())
     assert _census(st, "shadow_live_disagree") == 1
     p2 = _pool()
     p2.add_book(ledger=0, ratio=0.5)
-    p2.shadow.append({"whale": "rn1", "condition_id": CID, "target": 300, "ratio": 1.0,
-                      "his_net": 300.0, "at_ts": NOW - 10})
+    p2.shadow.append(_shadow_row(300, 1.0, 300.0))
     st2 = _tick(p2, _Venue())
-    assert _census(st2, "shadow_live_disagree") == 0, "different inputs are not compared"
+    assert _census(st2, "shadow_live_disagree") == 0, "300 at 1.0 scaled to the 0.5 book is 150: agrees"
+    # a different NET is still not compared
+    p3 = _pool()
+    p3.add_book(ledger=0, ratio=1.0)
+    p3.shadow.append(_shadow_row(299, 1.0, 299.0))
+    st3 = _tick(p3, _Venue())
+    assert _census(st3, "shadow_live_disagree") == 0, "different inputs are not compared"
+
+
+def _shadow_row(target, ratio, his_net, raw=None, capped=False, at_ts=None):
+    """A mirror_shadow row as the live read hands it back: the shadow's
+    stated raw defaults to ratio x net (its own arithmetic)."""
+    if raw is None and isinstance(ratio, (int, float)) and not isinstance(ratio, bool):
+        raw = ratio * his_net
+    return {"whale": "rn1", "condition_id": CID, "target": target, "ratio": ratio,
+            "his_net": his_net, "target_raw": raw, "capped": capped,
+            "at_ts": NOW - 10 if at_ts is None else at_ts}
+
+
+def test_the_shadow_live_instrument_scales_the_shadows_target_to_the_books_ratio(monkeypatch):
+    """Review of U12c, FIX-3 and FIX-3b: compared only at equal ratios
+    a 0.10 book was never checked; compared on capped or truncated
+    OUTPUTS ordinary books were falsely named (a P2 integrity counter).
+    The comparison is on RAW arithmetic scaled to the book's ratio,
+    then the live cap and truncation. 2,400 at 1.0 against a 0.10 book
+    at 240 agrees; a shadow whose stated raw diverges from its own
+    ratio x net (3,000 against 2,400) is named; a CAPPED shadow (his
+    24,000 sh @ 0.50: 5,000 at 1.0) against the uncapped 0.10 book at
+    2,400 agrees; a shadow at 0.058 whose target truncated to 0
+    against an exact-copy book at 16 agrees; a row without the fields
+    is skipped by name, never a disagree."""
+    _rails_2026_09_06(monkeypatch)
+    p = _pool(fills=_his(2400), snap={M: 2400.0, N: 0.0})
+    b = p.add_book(ledger=0, ratio=0.10)
+    p.shadow.append(_shadow_row(2400, 1.0, 2400.0))
+    st = _tick(p, _Venue(), http=_mkt(2400.0, 0.0))
+    assert b["target"] == 240 and _census(st, "shadow_live_disagree") == 0
+    assert _census(st, "shadow_check_skipped") == 0
+    # the shadow's arithmetic off: a stated raw of 3,000 against its own
+    # 1.0 x 2,400 scales to 300 against the live 240 -- named
+    p2 = _pool(fills=_his(2400), snap={M: 2400.0, N: 0.0})
+    b2 = p2.add_book(ledger=0, ratio=0.10)
+    p2.shadow.append(_shadow_row(3000, 1.0, 2400.0, raw=3000.0))
+    st2 = _tick(p2, _Venue(), http=_mkt(2400.0, 0.0))
+    assert b2["target"] == 240 and _census(st2, "shadow_live_disagree") == 1
+    assert any(x["what"] == "shadow_live_disagree" and x.get("expected") == 300 for x in ml._RECENT)
+    # (a) the CAPPED shadow: his 24,000 sh @ 0.50 at ratio 1.0 is 5,000
+    # ($2,500), stored raw 5000.0 and capped True; the 0.10 book is
+    # 2,400 uncapped ($1,200) -- the shadow's raw is 1.0 x 24,000, and
+    # 2,400 agrees
+    p3 = _pool(fills=_his(24000, long_px=0.50), snap={M: 24000.0, N: 0.0})
+    b3 = p3.add_book(ledger=0, ratio=0.10, avg_cost=0.50)
+    p3.shadow.append(_shadow_row(5000, 1.0, 24000.0, raw=5000.0, capped=True))
+    st3 = _tick(p3, _Venue(bid=0.49, ask=0.51), http=_mkt(24000.0, 0.0))
+    assert b3["target"] == 2400 and _census(st3, "shadow_live_disagree") == 0, st3["census"]
+    # (b) the exact-copy book: his 16 sh @ 0.50, the shadow at 0.058
+    # truncated its 0.928 to 0; the book at 1.0 targets 16 -- agrees
+    p4 = _pool(fills=_his(16, long_px=0.50), snap={M: 16.0, N: 0.0})
+    b4 = p4.add_book(ledger=16, ratio=1.0, avg_cost=0.50)
+    p4.shadow.append(_shadow_row(0, 0.058, 16.0, raw=0.928))
+    st4 = _tick(p4, _Venue(bid=0.49, ask=0.51, held={SLUG: 16}), http=_mkt(16.0, 0.0))
+    assert b4["target"] == 16 and _census(st4, "shadow_live_disagree") == 0, st4["census"]
+    # the same cap the live book applies: a 0.10 book on his 240,000
+    # against a CAPPED 0.058 shadow (13,920 raw, stored 5,000) -- the
+    # scaled raw is 24,000, capped to 5,000 like the live target, agrees
+    p5 = _pool(fills=_his(240000, long_px=0.50), snap={M: 240000.0, N: 0.0})
+    b5 = p5.add_book(ledger=0, ratio=0.10, avg_cost=0.50)
+    p5.shadow.append(_shadow_row(5000, 0.058, 240000.0, raw=5000.0, capped=True))
+    st5 = _tick(p5, _Venue(bid=0.49, ask=0.51), http=_mkt(240000.0, 0.0))
+    assert b5["target"] == 5000 and _census(st5, "shadow_live_disagree") == 0, st5["census"]
+    # a row that lacks the fields, or a ratio that is not positive, is
+    # SKIPPED by name -- never a disagree
+    for row in (dict(_shadow_row(3000, 1.0, 2400.0), target_raw=None),
+                dict(_shadow_row(3000, 1.0, 2400.0), capped=None),
+                _shadow_row(3000, None, 2400.0), _shadow_row(3000, 0.0, 2400.0),
+                _shadow_row(3000, -1.0, 2400.0), _shadow_row(3000, "x", 2400.0)):
+        p6 = _pool(fills=_his(2400), snap={M: 2400.0, N: 0.0})
+        p6.add_book(ledger=0, ratio=0.10)
+        p6.shadow.append(row)
+        st6 = _tick(p6, _Venue(), http=_mkt(2400.0, 0.0))
+        assert _census(st6, "shadow_live_disagree") == 0, row
+        assert _census(st6, "shadow_check_skipped") == 1 and st6["integ"]["shadow_check_skipped"] == 1, row
+    # a different net is not compared, silently, as before
+    p7 = _pool(fills=_his(2400), snap={M: 2400.0, N: 0.0})
+    p7.add_book(ledger=0, ratio=0.10)
+    p7.shadow.append(_shadow_row(3000, 1.0, 3000.0))
+    st7 = _tick(p7, _Venue(), http=_mkt(2400.0, 0.0))
+    assert _census(st7, "shadow_live_disagree") == 0 and _census(st7, "shadow_check_skipped") == 0
+    # the short door is the live one: knob off, the shadow's negative
+    # raw against a live 0 agrees
+    p8 = _pool(fills=_his(100, other_size=400, other_px=0.72), snap={M: 100.0, N: 400.0})
+    b8 = p8.add_book(ledger=0, ratio=1.0)
+    p8.shadow.append(_shadow_row(-300, 1.0, -300.0))
+    st8 = _tick(p8, _Venue(), http=_mkt(100.0, 400.0))
+    assert b8["target"] == 0 and _census(st8, "shadow_live_disagree") == 0
+    assert "shadow_live_disagree" in rules.P2_INTEGRITY_COUNTERS
 
 
 def test_the_reaper_isolation_instrument_reads_zero_and_names_a_touch():
@@ -1962,6 +2074,7 @@ def test_the_reaper_isolation_instrument_reads_zero_and_names_a_touch():
     ("clip", "clip_zero"), ("legacy", "legacy_row"), ("recent", "slug_recent_copy"),
     ("underdog", "underdog_coholds"), ("venue", "venue_already_holds"), ("kalshi", "kalshi_claimed"),
     ("band", "side_band"), ("stale", "snapshot_stale"), ("drift", "drift"), ("max", "max_books"),
+    ("count_unreadable", "books_unreadable"),
     ("first", "first_fill_gate"), ("asset", "asset_claimed"), ("exists", "book_exists"),
     ("unmapped", "unmapped"), ("ratio", "no_ratio"), ("quote", "no_quote"), ("level", "no_price"),
     ("short", "short_side_refused")])
@@ -1996,11 +2109,21 @@ def test_every_admission_clause_refuses_a_new_book_by_name(monkeypatch, arm, nam
     elif arm == "drift":
         kw["snap"] = {M: 200.0, N: 0.0}
     elif arm == "max":
-        monkeypatch.setattr(rules, "MIRROR_MAX_LIVE_BOOKS", 0)
+        # a FINITE cap, lowered (the default is unbounded since U12)
+        monkeypatch.setattr(rules, "MIRROR_MAX_LIVE_BOOKS", 0.0)
+    elif arm == "count_unreadable":
+        # U12: the count itself unreadable refuses by its own name,
+        # with no cap in force -- fail closed, never "no cap"
+        assert rules.MIRROR_MAX_LIVE_BOOKS == rules.MIRROR_MAX_BOOKS_PER_DAY == math.inf
+        kw["_count_raises"] = True
     elif arm == "unmapped":
         kw["mapped"] = False
     elif arm == "ratio":
+        # the live ratio is a constant since U12b (open_ratio): too few
+        # markets for the shadow's reading no longer refuses a book, and
+        # `no_ratio` can fire only on a non-finite or non-positive constant
         kw["ratio_fills"] = _ratio_fills(3)
+        monkeypatch.setattr(rules, "MIRROR_RATIO", 0.0)
     elif arm == "quote":
         v = _Venue(raise_bbo=True)
     elif arm == "level":
@@ -2008,7 +2131,10 @@ def test_every_admission_clause_refuses_a_new_book_by_name(monkeypatch, arm, nam
     elif arm == "short":
         kw["fills"] = [_fill(N, "BUY", 300.0, 0.72, NOW - 3000)]
         kw["snap"] = {M: 0.0, N: 300.0}
+    count_raises = kw.pop("_count_raises", False)
     p = _pool(**kw)
+    if count_raises:
+        p.raise_on.append(("ml-books-count", RuntimeError("count down")))
     if arm == "closed":
         p.markets[CID]["closed"] = True
     elif arm == "legacy":
@@ -2041,6 +2167,70 @@ def test_every_admission_clause_refuses_a_new_book_by_name(monkeypatch, arm, nam
         assert p.tx_events and p.tx_events[-1] == "rollback"
 
 
+def _many_books(p, n):
+    """`n` live books on `n` distinct markets, each with its own token
+    pair (the ledger's one-fill-per-asset rule would otherwise name the
+    candidate `asset_claimed`), beside the fixture candidate. His
+    fixture fills are on M alone, so on these markets he holds nothing
+    and a ledger of 0 is on target: each book costs the tick one quote
+    read and places no order. Returns their slugs."""
+    slugs = []
+    for i in range(n):
+        cid, slug = f"0xbook{i}", f"aec-atp-p{i}-q{i}-2026-09-06"
+        p.markets[cid] = {"closed": False, "resolved": False, "resolved_prices": None}
+        p.add_book(ledger=0, target=0, condition_id=cid, us_market_slug=slug,
+                   long_asset=f"tokL{i}", other_asset=f"tokO{i}", game_key=le._us_game_key(slug))
+        slugs.append(slug)
+    return slugs
+
+
+def test_the_read_budget_is_the_candidates_own_so_live_books_never_cap_new_ones():
+    """U12 (owner order 2026-09-06: "I don't want to cap books opened at
+    all"). Every live book is walked first and each quote read charged
+    `t.reads`; candidates then ran only while `t.reads` was under
+    MAX_MARKETS_PER_TICK (20). With 20+ live books no candidate was
+    ever read: a count cap by another road. Twenty-five live books,
+    one candidate: every book is read (exits must be managed), the
+    candidate is read too, a twenty-sixth book opens, and the tick is
+    not `capped_tick`. `t.reads` stays the total for the stats line;
+    `tick_s` is the wall time an operator watches as books grow."""
+    assert ms.MAX_MARKETS_PER_TICK == 20
+    p = _pool()
+    slugs = _many_books(p, 25)
+    v = _Venue()
+    st = _tick(p, v)
+    bbos = [c[1] for c in v.calls if c[0] == "bbo"]
+    # 25 book reads, the candidate's, and the new book's own plan read;
+    # `books_live` counts the new book too, ticked in the same tick
+    assert st["books_live"] == 26 and len(bbos) == 27 and st["reads"] == 27
+    assert all(s in bbos for s in slugs), "every live book read, unbounded"
+    assert SLUG in bbos, "the candidate was read behind 25 books"
+    assert st.get("capped_tick") is not True and not st["abandoned"]
+    assert len(p.books) == 26 and [c[1] for c in _places(v)] == [SLUG], (
+        "and it opened a book", {k: n for k, n in st["census"].items() if n}, st["recent"][-3:])
+    assert _census(st, "max_books") == 0 and _census(st, "books_unreadable") == 0
+    assert _census(st, "on_target") >= 25, "the 25 books planned nothing and cost one read each"
+    assert _census(st, "ops_capped") == 0 and st["ops"] == 1, "one placement: the new book's rest"
+    # the candidates' OWN budget still binds, under the same name: 20
+    # candidates read behind the 25 books, the twenty-first not
+    p2 = _pool(conds=[f"c{i}" for i in range(21)])
+    _many_books(p2, 25)
+    v2 = _Venue()
+    st2 = _tick(p2, v2)
+    assert st2["capped_tick"] is True and st2["reads"] == 25 + 20
+    # the tick's wall time is published, 1 dp, on every tick
+    assert isinstance(st["tick_s"], float) and st["tick_s"] >= 0.0 and st["tick_s"] == round(st["tick_s"], 1)
+    assert "tick_s" in ml._new_stats() and ml._new_stats()["tick_s"] is None
+    # the tick's own counters say what was charged where
+    t = ml._Tick(pool=p, pmus=v, http=None, now=NOW, stats=ml._new_stats())
+    _run(ml._bbo(t, SLUG, book=True))
+    _run(ml._bbo(t, SLUG))
+    assert (t.reads, t.cand_reads) == (2, 1), "a book's read is never charged to the candidates"
+    src = inspect.getsource(ml._tick)
+    assert "t.cand_reads >= ms.MAX_MARKETS_PER_TICK" in src and "t.reads >= ms.MAX_MARKETS_PER_TICK" not in src
+    assert ms.MAX_MARKETS_PER_TICK == 20, "the budget itself is not raised"
+
+
 def test_the_starred_clauses_are_rechecked_on_every_increase(monkeypatch):
     p = _pool()
     b = p.add_book(ledger=0)
@@ -2064,11 +2254,23 @@ def test_step_m_runs_before_the_plan_so_a_closing_book_never_increases():
     assert src.index("STEP M BEFORE ANY PLAN") < src.index("rules.mirror_target(")
 
 
-def test_the_dead_bands_and_hysteresis_are_named():
+def test_the_dead_bands_and_hysteresis_are_named(monkeypatch):
+    # the dollar band is $0 since 2026-09-06 (U12c: small bets copy
+    # whole), so a 1-share move on a 301-share target is refused by the
+    # 2% hysteresis, not the band; the band's own name is driven under
+    # an explicit $5, where a 10-share ($3.10) move clears hysteresis
+    # (6.2 shares) and is banded
+    assert ml.mi.MIN_MOVE_USD == 0.0
     p = _pool(fills=_his(301), snap={M: 301.0, N: 0.0})
     p.add_book(ledger=300)
     st = _tick(p, _Venue(held={SLUG: 300}), http=_mkt(301.0, 0.0))
-    assert _census(st, "dead_band") == 1
+    assert _census(st, "hysteresis") == 1 and _census(st, "dead_band") == 0
+    monkeypatch.setattr(ml.mi, "MIN_MOVE_USD", 5.0)
+    p2 = _pool(fills=_his(310), snap={M: 310.0, N: 0.0})
+    p2.add_book(ledger=300)
+    st2 = _tick(p2, _Venue(held={SLUG: 300}), http=_mkt(310.0, 0.0))
+    assert _census(st2, "dead_band") == 1 and _census(st2, "hysteresis") == 0
+    monkeypatch.setattr(ml.mi, "MIN_MOVE_USD", 0.0)
     p3 = _pool(fills=_his(600), snap={M: 600.0, N: 0.0})
     p3.add_book(ledger=0)
     st3 = _tick(p3, _Venue(bid=None, ask=0.32), http=_mkt(600.0, 0.0))
@@ -2726,12 +2928,21 @@ _SHAPE_200 = {"status_code": 200, "order_state": "ORDER_STATE_REJECTED",
 
 
 def _room_holder(monkeypatch, day):
-    """The sleeve's day room, adjustable between ticks: 0.1 is a room
-    the clip cannot fit (over_room), a large one fits everything."""
-    room = {"day": day}
+    """The MIRROR'S OWN day room, adjustable between ticks: 0.1 is a
+    room the clip cannot fit (over_room), a large one fits everything.
+    It was the sleeve's day room; that no longer binds the mirror
+    (U12b), so `room["day"]` now sets rules.MIRROR_DAY_USD, which the
+    worker reads at call time, and the sleeve answers with no ceiling."""
+    class _Room(dict):
+        def __setitem__(self, key, value):
+            super().__setitem__(key, value)
+            monkeypatch.setattr(rules, "MIRROR_DAY_USD", float(value))
+
+    room = _Room()
+    room["day"] = day
 
     async def _room(pool, cfg):
-        return room["day"], 1e9
+        return 1e9, 1e9
     monkeypatch.setattr(le, "_copy_day_room", _room)
     return room
 
@@ -3129,21 +3340,66 @@ def test_the_per_market_read_has_its_own_budget_and_never_shortens_the_walk(monk
     http, v = _mkt(300.0, 0.0), _Venue()
     st = _tick(p, v, now=now, http=http)
     bbos = len([c for c in v.calls if c[0] == "bbo"])
-    assert st["reads"] == bbos, "t.reads is the venue quote budget and nothing else"
+    assert st["reads"] == bbos, "t.reads is the venue quote total and nothing else"
     assert st["snap_market_reads"] == 1 and st["reads"] >= 1
     assert "t.reads >= ms.MAX_MARKETS_PER_TICK" not in inspect.getsource(ml._market_snap)
 
-    # its own budget still binds, under its own name
+    # its own budget still binds, under its own name -- for a CANDIDATE
+    # (U12: the budget is the candidates'; a book is never refused by
+    # it). At the tick level the candidate walk's own quote budget stops
+    # a candidate FIRST (a candidate's per-market read follows its quote
+    # read one for one, so `t.cand_mkt_reads` never reaches the cap
+    # before `t.cand_reads` does): with the budget at 0 no candidate is
+    # read at all, by the name `capped_tick`
     monkeypatch.setattr(ms, "MAX_MARKETS_PER_TICK", 0)
     p2 = _pool(snap=None)
-    b = p2.add_book(ledger=0)
     http2, v2 = _mkt(300.0, 0.0), _Venue()
     st2 = _tick(p2, v2, now=now, http=http2)
-    assert not _pos_calls(http2), "past the budget the market is refused, not read"
-    assert st2["snap_market_reads"] == 0 and st2["snap_market_capped"] >= 1
-    assert _census(st2, "snap_market_capped") >= 1
-    assert _census(st2, "snap_market_unreadable") == 0, "budget pressure is not unreadability"
-    assert b["state"] == "live" and not _places(v2), "no increase on a market we did not read"
+    assert st2["capped_tick"] is True and not _pos_calls(http2) and "bbo" not in _kinds(v2)
+    assert st2["snap_market_planned"] == 0 and not p2.books and not _places(v2)
+    # the per-market clause is the defence behind that, and it is
+    # driven at the function's own level: a candidate past the budget
+    # is refused, not read, under its own name
+    t2 = ml._Tick(pool=_pool(snap=None), pmus=_Venue(), http=_mkt(300.0, 0.0), now=now,
+                  stats=ml._new_stats())
+    t2.cand_mkt_reads = ms.MAX_MARKETS_PER_TICK
+    prior = ml._current_stats
+    ml._current_stats = t2.stats
+    try:
+        assert _run(ml._market_snap(t2, "rn1", CID, M, N)) == (None, None, None, None)
+    finally:
+        ml._current_stats = prior
+    assert not _pos_calls(t2.http), "past the budget the market is refused, not read"
+    assert t2.stats["snap_market_reads"] == 0 and t2.stats["snap_market_capped"] == 1
+    assert _census(t2.stats, "snap_market_capped") == 1
+    assert _census(t2.stats, "snap_market_unreadable") == 0, "budget pressure is not unreadability"
+    assert t2.mkt_reads == 0 and t2.cand_mkt_reads == ms.MAX_MARKETS_PER_TICK
+    # and the same tick reads a BOOK's market past it, charging the
+    # total and never the candidates' budget
+    t3 = ml._Tick(pool=_pool(snap=None), pmus=_Venue(), http=_mkt(300.0, 0.0), now=now,
+                  stats=ml._new_stats())
+    t3.cand_mkt_reads = ms.MAX_MARKETS_PER_TICK
+    ml._current_stats = t3.stats
+    try:
+        assert _run(ml._market_snap(t3, "rn1", CID, M, N, book=True))[0] is True
+    finally:
+        ml._current_stats = prior
+    assert _pos_calls(t3.http) and t3.stats["snap_market_fresh_reads"] == 1
+    assert (t3.mkt_reads, t3.cand_mkt_reads) == (1, ms.MAX_MARKETS_PER_TICK)
+    assert t3.stats["snap_market_capped"] == 0
+
+    # AND A BOOK IS READ PAST IT (U12): a book whose whole-book walk is
+    # not fresh plans its reduces and its flatten on this read alone,
+    # so a shared budget was a count cap on books by another road --
+    # the twenty-first live book had no reading and no managed exit
+    p3 = _pool(snap=None)
+    b = p3.add_book(ledger=0)
+    http3, v3 = _mkt(300.0, 0.0), _Venue()
+    st3 = _tick(p3, v3, now=now, http=http3)
+    assert _pos_calls(http3), "the book's per-market read is never budgeted away"
+    assert st3["snap_market_reads"] == 1 and st3["snap_market_fresh_reads"] == 1
+    assert st3["snap_market_capped"] == 0 and _census(st3, "snap_market_capped") == 0
+    assert b["state"] == "live" and _places(v3), "and the book plans on it"
 
 
 def test_the_snapshot_counters_carry_a_denominator_that_does_not_flatter_us(monkeypatch):
@@ -3155,15 +3411,30 @@ def test_the_snapshot_counters_carry_a_denominator_that_does_not_flatter_us(monk
     for arm in ("ok", "capped", "no_address", "no_sibling"):
         p = _pool(snap=None)
         # a planned market whatever the walk does; the sibling id lives
-        # on the BOOK row, so that is where its absence is set
-        p.add_book(ledger=0, **({"other_asset": None} if arm == "no_sibling" else {}))
-        if arm == "capped":
-            monkeypatch.setattr(ms, "MAX_MARKETS_PER_TICK", 0)
-        else:
-            monkeypatch.setattr(ms, "MAX_MARKETS_PER_TICK", 20)
+        # on the BOOK row, so that is where its absence is set. The
+        # capped arm is a CANDIDATE's (U12: the budget is the
+        # candidates'; a book's read is never refused by it)
+        if arm != "capped":
+            p.add_book(ledger=0, **({"other_asset": None} if arm == "no_sibling" else {}))
+        monkeypatch.setattr(ms, "MAX_MARKETS_PER_TICK", 20)
         if arm == "no_address":
             p.whale_address = {}
-        st = _tick(p, _Venue(), now=now, http=_mkt(300.0, 0.0))
+        if arm == "capped":
+            # at the tick level the candidate walk's own budget stops a
+            # candidate before its per-market read (see the budget test
+            # above), so the clause is driven at the function's level
+            t = ml._Tick(pool=p, pmus=_Venue(), http=_mkt(300.0, 0.0), now=now,
+                         stats=ml._new_stats())
+            t.cand_mkt_reads = ms.MAX_MARKETS_PER_TICK
+            prior = ml._current_stats
+            ml._current_stats = t.stats
+            try:
+                _run(ml._market_snap(t, "rn1", CID, M, N))
+            finally:
+                ml._current_stats = prior
+            st = t.stats
+        else:
+            st = _tick(p, _Venue(), now=now, http=_mkt(300.0, 0.0))
         planned = st["snap_market_planned"]
         assert planned >= 1, arm
         assert planned == (st["snap_market_reads"] + st["snap_market_capped"]
@@ -4145,7 +4416,11 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # and everything before it keeps its own
     assert keys.count("ledger_dust") == 1
     assert keys.index("ledger_dust") == keys.index("book_error") + 1
-    assert keys[keys.index("ledger_dust") + 1] == "short_open" and keys[-1] == "short_share_cap"
+    # U12: `books_unreadable` appended after the short side's names; the
+    # U12c review's two names after it, LAST
+    assert keys[keys.index("ledger_dust") + 1] == "short_open"
+    assert keys[-4:] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-5] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -4162,7 +4437,13 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # past the cap by construction, so it rides on the served `integ` block
     ik = ml._INTEG_CENSUS_KEYS
     assert ik.count("ledger_dust") == 1 and ik[ik.index("venue_halted") + 1] == "ledger_dust"
-    assert ik[ik.index("ledger_dust") + 1] == "short_reduce_unproven" and ik[-1] == "short_share_cap"
+    assert ik[ik.index("ledger_dust") + 1] == "short_reduce_unproven" and ik[-5] == "short_share_cap"
+    assert ik[-4:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+                       "shadow_check_skipped"), "served on integ"
+    # and `integ` itself stays inside the served 40-key top level
+    from sportsassets.api import app as api_app
+    order = list(ml._new_stats())
+    assert order.index("integ") < api_app._DETAIL_MAX_KEYS and len(order) <= api_app._DETAIL_MAX_KEYS
     assert ml._new_stats()["census"]["ledger_dust"] == 0 and ml._new_stats()["integ"]["ledger_dust"] == 0
 
 
@@ -4170,9 +4451,11 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
 #
 # The live lane follows his SHORT side (owner order 2026-09-05, "we need
 # to make sure we are mirroring shorts") behind ONE knob,
-# rules.MIRROR_SHORTS, off by default: every section above ran with it
-# off and is byte-identical. These drive the knob ON through the same
-# fakes: a short book opens by a BUY_SHORT rest at his level, the ledger
+# rules.MIRROR_SHORTS -- off in this fixture world (the autouse rails),
+# ON by default in the code since 2026-09-06 (U12c, "I want shorts live
+# as well"; the rules tests pin the default): every section above ran
+# with it off and is byte-identical. These drive the knob ON through
+# the same fakes: a short book opens by a BUY_SHORT rest at his level, the ledger
 # is signed, the day cap and the room read the collateral, a fill above
 # the wire's collateral trips, a reduce before rung S4 is refused by name,
 # the whole book flattens by close_position when sole, the wrong sign
@@ -4189,8 +4472,9 @@ def _short_world(**kw):
     so his level for our short is 1 - 0.72 = 0.28 in long space, the
     ask 0.32 is above it, and the plan rests at the ask: a BUY_SHORT
     whose contract price is 0.32 and whose collateral is 0.68 a share.
-    ratio 1.0 x -300 at mark 0.31 caps at $250 / 0.69 = 362, so the
-    target is -300 uncapped."""
+    ratio 1.0 x -300 at mark 0.31 caps at $2,500 / 0.69 = 3,623 of
+    collateral (U12b; 362 at the $250 it was), so the target is -300
+    uncapped."""
     kw.setdefault("fills", _his(100, other_size=400, other_px=0.72))
     kw.setdefault("snap", {M: 100.0, N: 400.0})
     return _pool(**kw)
@@ -4743,7 +5027,7 @@ def _shadow_row_from(p, at_ts):
     assert len(ins) == 1, len(ins)
     a = ins[-1]
     return {"whale": a[0], "condition_id": a[1], "his_net": a[7], "ratio": a[10], "target": a[11],
-            "at_ts": at_ts}
+            "target_raw": a[12], "capped": a[13], "at_ts": at_ts}
 
 
 def test_the_shadow_reads_the_effective_knob_so_env_on_and_050_unapplied_never_disagree(monkeypatch):
@@ -4911,15 +5195,31 @@ def test_a_confirmed_vanish_on_a_short_cancels_the_resting_add_then_closes(monke
     assert _census(st, "open_order_pending") == 0
 
 
-def test_the_short_share_cap_is_one_until_s5_and_bites_by_name(monkeypatch):
+def test_the_short_share_cap_lowered_to_one_bites_by_name(monkeypatch):
     """S3 expressibility: rules.MIRROR_SHORT_MAX_SHARES caps what a
-    SHORT book may target, ONE by default until rung S5, lowered only
-    from the environment. A capped target is the whole probe, so the
-    plan's $5 dead band is not read on it: the 1-share book opens and
-    rests one share; 0 refuses every short by the cap's name; a long
-    book never reads it."""
+    SHORT book may target -- UNBOUNDED by default since 2026-09-06
+    (U12c; ONE before), lowered only from the environment, and the
+    1-share probe of rung S3/S4 runs at 1. A capped target is the whole
+    probe: the 1-share book opens and rests one share; 0 refuses every
+    short by the cap's name; a long book never reads it; and at the
+    unbounded default the same short is not clamped at all."""
     _shorts_on(monkeypatch, max_shares=1)
     assert rules.MIRROR_SHORT_MAX_SHARES == 1
+    # THE PROBE RUNS UNDER THE MINIMUM NOTIONAL: one share of a 0.32
+    # contract is $0.68 of collateral, under MIRROR_MIN_ORDER_USD ($1,
+    # U12c review FIX-2), so the 1-share probe of rung S3/S4 runs with
+    # MIRROR_MIN_ORDER_USD=0 as well -- pinned here the way the rung
+    # will run it, and said in the docs
+    monkeypatch.setattr(rules, "MIRROR_MIN_ORDER_USD", 0.0)
+    # the default first: math.inf through _bounded is no clamp, no name
+    monkeypatch.setattr(rules, "MIRROR_SHORT_MAX_SHARES", math.inf)
+    p0 = _short_world()
+    v0 = _Venue()
+    st0 = _tick(p0, v0, http=_short_http())
+    b0 = next(iter(p0.books.values()))
+    assert b0["target"] == -300 and _census(st0, "short_share_cap") == 0
+    assert _places(v0)[0][3] == 300 and "short_share_cap" not in (b0["last_plan"] or {})
+    monkeypatch.setattr(rules, "MIRROR_SHORT_MAX_SHARES", 1)
     p = _short_world()
     v = _Venue()
     st = _tick(p, v, http=_short_http())
@@ -4932,8 +5232,7 @@ def test_the_short_share_cap_is_one_until_s5_and_bites_by_name(monkeypatch):
                                          SHORT, True, None)
     assert _census(st, "short_open") == 1
     # the shadow is compared against the UNCAPPED figure: no disagreement by construction
-    p.shadow.append({"whale": "rn1", "condition_id": CID, "target": -300, "ratio": 1.0,
-                     "his_net": -300.0, "at_ts": NOW})
+    p.shadow.append(_shadow_row(-300, 1.0, -300.0, at_ts=NOW))
     v2 = _Venue(held={SLUG: -1}, fills={"oid-1": (1.0, 0.32)})
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + 30, http=_short_http())
@@ -5075,10 +5374,13 @@ def test_an_add_to_an_open_short_book_is_named_short_add_and_sized_by_collateral
     b = _short_book(p, ledger=-300)
     v = _Venue(held={SLUG: -300})
     st = _tick(p, v, http=_mkt(100.0, 700.0))
-    # -600 raw, capped at $250 on the SHORT leg's price 1 - 0.31: -362
-    assert b["target"] == -int(250.0 / 0.69) == -362 and b["target_raw"] == pytest.approx(-362.3188, abs=1e-3)
+    # -600 raw: $414 of collateral on the SHORT leg's price 1 - 0.31,
+    # under the $1,000 per-side cap (U12; at the $250 it was, this
+    # capped at -362), so the target is his -600 whole
+    assert b["target"] == -600 and b["target_raw"] == pytest.approx(-600.0, abs=1e-3)
+    assert -int(rules.MIRROR_NET_CAP_USD / 0.69) < -600, "the cap sits past the target"
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][4] is False and pl[0][6] == SHORT and pl[0][3] == 62
+    assert len(pl) == 1 and pl[0][4] is False and pl[0][6] == SHORT and pl[0][3] == 300
     assert _census(st, "short_add") == 1 and _census(st, "short_open") == 0
     o = next(iter(p.orders.values()))
     assert (o["side"], o["intent"], o["kind"]) == (SELL, SHORT, "increase")
@@ -5095,19 +5397,446 @@ def test_an_add_to_an_open_short_book_is_named_short_add_and_sized_by_collateral
     assert st2["mirror_day_room"] == pytest.approx(25.0)
 
 
+# ------------------------------ 18. the rails of 2026-09-06 (U12b, U12c)
+#
+# Owner orders ~14:00Z ("Let's remove those caps so we start copying his
+# actual book. Just trade 10% of what he puts on everything he takes
+# (with a hard cap of no single event having more than $2.5k on it) this
+# limitation should never force us to decline any of the possible
+# copies.") and ~14:10Z ("Bets under $10, take the full position (exact
+# copy)"; "I want shorts live as well"). The fixture rails above pin the
+# old world; each test here sets the new rule it exercises.
+
+def _rails_2026_09_06(monkeypatch):
+    """The code defaults, restored over the fixture world's rails."""
+    monkeypatch.setattr(rules, "MIRROR_RATIO", 0.10)
+    monkeypatch.setattr(rules, "MIRROR_SMALL_BET_USD", 10.0)
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", math.inf)
+    monkeypatch.setattr(rules, "MIRROR_CLIP_USD", 2500.0)
+
+
+def test_no_day_cap_a_fifty_thousand_dollar_day_still_opens_and_a_lowered_cap_bites(monkeypatch, caplog):
+    """U12b item 4: MIRROR_DAY_USD unbounded by default. $50,000 of
+    filled BUYs in the window and the candidate still opens; the room
+    is published as null (JSON), never 1e12, and the mode line prints
+    `day=none`; a cap lowered from the environment bites by name; an
+    unreadable spend read bites by name under the unbounded cap too."""
+    import logging
+
+    from sportsassets.api import app as api_app
+    _rails_2026_09_06(monkeypatch)
+    monkeypatch.setattr(rules, "MIRROR_RATIO", 1.0)      # the fixture's 300-share book
+    p = _pool()
+    other = p.add_book(ledger=0, us_market_slug="aec-atp-other-2026-09-02", condition_id="0xother",
+                       long_asset="tokO", other_asset="tokP")
+    p.add_order(other, state="filled", cash_usd=50000.0, order_id="old", placed_ts=NOW - 100,
+                us_market_slug="aec-atp-other-2026-09-02")
+    v = _Venue()
+    st = _tick(p, v)
+    assert _census(st, "mirror_day_cap") == 0 and st["mirror_day_room"] is None
+    assert [c[1] for c in _places(v)] == [SLUG] and len(p.books) == 2, "$50,000 spent, still opens"
+    assert api_app._sanitize_detail(st)["mirror_day_room"] is None
+    assert "1e12" not in json.dumps(api_app._sanitize_detail(st))
+    # the mode line: day=none under no cap; day=None on a tick that
+    # never read the room under a finite cap, as before
+    with caplog.at_level(logging.INFO, logger=ml.log.name):
+        ml._mode_line(st, ml.MODE_LINE_EVERY_TICKS)
+    lines = [rec.getMessage() for rec in caplog.records if rec.getMessage().startswith("mirror_live mode=")]
+    assert lines and " day=none " in lines[0], lines
+    caplog.clear()
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", 1250.0)
+    with caplog.at_level(logging.INFO, logger=ml.log.name):
+        ml._mode_line(dict(st, mirror_day_room=None), ml.MODE_LINE_EVERY_TICKS)
+    lines2 = [rec.getMessage() for rec in caplog.records if rec.getMessage().startswith("mirror_live mode=")]
+    assert lines2 and " day=None " in lines2[0], lines2
+    # a lowered cap bites on what filled
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", 100.0)
+    p2 = _pool()
+    o2 = p2.add_book(ledger=0, us_market_slug="aec-atp-other-2026-09-02", condition_id="0xother",
+                     long_asset="tokO", other_asset="tokP")
+    p2.add_order(o2, state="filled", cash_usd=2000.0, order_id="old", placed_ts=NOW - 100,
+                 us_market_slug="aec-atp-other-2026-09-02")
+    v2 = _Venue()
+    st2 = _tick(p2, v2)
+    assert _census(st2, "mirror_day_cap") >= 1 and not _places(v2) and len(p2.books) == 1
+    assert st2["mirror_day_room"] == pytest.approx(100.0 - 2000.0)
+    # an unreadable spend read refuses by name, cap or no cap
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", math.inf)
+    p3 = _pool()
+    p3.raise_on.append(("ml-mirror-day", RuntimeError("db")))
+    v3 = _Venue()
+    st3 = _tick(p3, v3)
+    assert _census(st3, "mirror_day_cap") >= 1 and not _places(v3) and not p3.books
+    assert st3["mirror_day_room"] is None
+    # the worker reads the cap through the rules module at call time
+    src = inspect.getsource(ml)
+    assert "MIRROR_DAY_USD =" not in src and "math.isfinite(day_cap)" in src
+
+
+def test_the_copy_sleeves_daily_room_does_not_bind_the_mirror_but_its_total_room_does(monkeypatch):
+    """U12b item 4, the day cap by another road: le._copy_day_room's
+    day figure is the copy lane's live_max_daily_usd. The mirror reads
+    the tuple and sets the day aside; the TOTAL room still binds, and
+    the rest lane's reservations now come off the total."""
+    async def _no_day(pool, cfg):
+        return 0.0, 1e12
+    monkeypatch.setattr(le, "_copy_day_room", _no_day)
+    p = _pool()
+    v = _Venue()
+    st = _tick(p, v)
+    assert _census(st, "no_budget_room") == 0 and _places(v) and p.books, "no sleeve day room: opens"
+
+    async def _no_total(pool, cfg):
+        return 1e12, 0.5
+    monkeypatch.setattr(le, "_copy_day_room", _no_total)
+    p2 = _pool()
+    v2 = _Venue()
+    st2 = _tick(p2, v2)
+    assert _census(st2, "no_budget_room") >= 1 and not _places(v2) and not p2.books
+    # the reservations come off the total room
+    async def _plenty(pool, cfg):
+        return 1e12, 1000.0
+    monkeypatch.setattr(le, "_copy_day_room", _plenty)
+    monkeypatch.setattr(le, "_REST_RESERVED_USD", 999.5)
+    p3 = _pool()
+    v3 = _Venue()
+    st3 = _tick(p3, v3)
+    assert _census(st3, "no_budget_room") >= 1 and not _places(v3)
+    monkeypatch.setattr(le, "_REST_RESERVED_USD", 910.0)
+    p4 = _pool()
+    v4 = _Venue()
+    _tick(p4, v4)
+    assert _places(v4)[0][3] == 300, "$90 of total room at 0.30 is the whole 300"
+    src = inspect.getsource(ml._global_guards)
+    assert "t.day_room = 1e12" in src and "_day_unused" in src and "total -= float(le._REST_RESERVED_USD" in src
+
+
+def test_a_four_thousand_share_target_rests_as_one_order_under_the_mirror_clip(monkeypatch):
+    """U12b item 7: the mirror lane's own per-order clip ($2,500), not
+    the copy lane's $250. 10% of his 40,000 sh @ 0.60 is 4,000 shares,
+    $2,400 -- under the event cap -- and rests as ONE order of 4,000
+    (416 under the copy lane's clip at the 0.59 wire)."""
+    _rails_2026_09_06(monkeypatch)
+    p = _pool(fills=_his(40000, long_px=0.60), snap={M: 40000.0, N: 0.0})
+    v = _Venue(bid=0.59, ask=0.61)
+    st = _tick(p, v, http=_mkt(40000.0, 0.0))
+    b = next(iter(p.books.values()))
+    assert b["target"] == 4000 and b["ratio"] == 0.10 and _census(st, "over_room") == 0
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][3] == 4000 and pl[0][2] == 0.59
+    assert int(le.LIVE_MAX_CLIP_USD / 0.59) == 423, "what the copy lane's clip would have rested"
+    # the copy lane's clip is not read for size anywhere in the worker
+    src = inspect.getsource(ml._room_qty)
+    assert "rules.MIRROR_CLIP_USD" in src and "LIVE_MAX_CLIP_USD" not in src
+    assert "rules.MIRROR_CLIP_USD" in inspect.getsource(ml._tick_candidate)
+    # a lowered mirror clip scales the rest and names over_room by the room rule
+    monkeypatch.setattr(rules, "MIRROR_CLIP_USD", 250.0)
+    p2 = _pool(fills=_his(40000, long_px=0.60), snap={M: 40000.0, N: 0.0})
+    v2 = _Venue(bid=0.59, ask=0.61)
+    _tick(p2, v2, http=_mkt(40000.0, 0.0))
+    assert _places(v2)[0][3] == 423
+
+
+def test_small_bets_copy_whole_and_the_ratio_is_stored_at_open_for_the_books_life(monkeypatch):
+    """U12c item 10: his $8 bet (16 sh @ 0.50) opens at ratio 1.0 and
+    targets 16; his $12 bet (24 sh @ 0.50) opens at 0.10 and targets 2;
+    a book opened at 1.0 whose position grew to $30 stays at 1.0 and
+    targets his whole net; env MIRROR_SMALL_BET_USD=5 makes the $8 bet
+    a 10% book of one share. The copy lane's per-whale clip stays the
+    admission gate (a demoted whale opens nothing) and sizes nothing."""
+    _rails_2026_09_06(monkeypatch)
+    v = _Venue(bid=0.49, ask=0.51)
+    p = _pool(fills=_his(16, long_px=0.50), snap={M: 16.0, N: 0.0})
+    st = _tick(p, v, http=_mkt(16.0, 0.0))
+    b = next(iter(p.books.values()))
+    assert (b["target"], b["ratio"]) == (16, 1.0) and _places(v)[0][3] == 16
+    assert _census(st, "dead_band") == 0 and _census(st, "under_one_share") == 0
+    # his $15 bet (30 sh @ 0.50): 10%, target 3 ($1.47 at the wire, sent)
+    p2 = _pool(fills=_his(30, long_px=0.50), snap={M: 30.0, N: 0.0})
+    v2 = _Venue(bid=0.49, ask=0.51)
+    _tick(p2, v2, http=_mkt(30.0, 0.0))
+    b2 = next(iter(p2.books.values()))
+    assert (b2["target"], b2["ratio"]) == (3, 0.10) and _places(v2)[0][3] == 3
+    # his $12 bet (24 sh @ 0.50): 10%, target 2 -- $0.98 at the wire,
+    # under the $1 minimum notional (FIX-2): the book opens and is held
+    p2b = _pool(fills=_his(24, long_px=0.50), snap={M: 24.0, N: 0.0})
+    v2b = _Venue(bid=0.49, ask=0.51)
+    st2b = _tick(p2b, v2b, http=_mkt(24.0, 0.0))
+    b2b = next(iter(p2b.books.values()))
+    assert (b2b["target"], b2b["ratio"]) == (2, 0.10) and not _places(v2b)
+    assert _census(st2b, "under_min_notional") == 1
+    # an open book sizes on its STORED ratio: opened at 1.0 on $8, his
+    # position now 30 sh ($15, past the $10 line but under the $20 step
+    # line of the U12c review) -> target 30, an increase of 14, never 3;
+    # past $20 the one-way step applies (its own test below)
+    p3 = _pool(fills=_his(30, long_px=0.50), snap={M: 30.0, N: 0.0})
+    b3 = p3.add_book(ledger=16, ratio=1.0, avg_cost=0.50)
+    v3 = _Venue(bid=0.49, ask=0.51, held={SLUG: 16})
+    _tick(p3, v3, http=_mkt(30.0, 0.0))
+    assert b3["target"] == 30 and b3["ratio"] == 1.0 and _places(v3)[0][3] == 14
+    # and the other way: opened at 0.10, his position shrunk under $10
+    # -- still 0.10 (a position that crosses $10 never flips)
+    p4 = _pool(fills=_his(16, long_px=0.50), snap={M: 16.0, N: 0.0})
+    b4 = p4.add_book(ledger=2, ratio=0.10, avg_cost=0.50)
+    v4 = _Venue(bid=0.49, ask=0.51, held={SLUG: 2})
+    st4 = _tick(p4, v4, http=_mkt(16.0, 0.0))
+    assert b4["target"] == 1 and b4["ratio"] == 0.10 and _census(st4, "on_target") == 0
+    # the line lowered from the environment: the $8 bet is a 10% book of
+    # one share -- $0.49 at the wire, held under the minimum notional
+    monkeypatch.setattr(rules, "MIRROR_SMALL_BET_USD", 5.0)
+    p5 = _pool(fills=_his(16, long_px=0.50), snap={M: 16.0, N: 0.0})
+    v5 = _Venue(bid=0.49, ask=0.51)
+    st5 = _tick(p5, v5, http=_mkt(16.0, 0.0))
+    b5 = next(iter(p5.books.values()))
+    assert (b5["target"], b5["ratio"]) == (1, 0.10) and not _places(v5)
+    assert _census(st5, "under_min_notional") == 1
+    # a demoted whale (the copy lane's clip at $0) still opens no book
+    monkeypatch.setattr(rules, "MIRROR_SMALL_BET_USD", 10.0)
+    monkeypatch.setattr(le, "per_fill_usd", lambda *a, **k: 0.0)
+    p6 = _pool(fills=_his(16, long_px=0.50), snap={M: 16.0, N: 0.0})
+    v6 = _Venue(bid=0.49, ask=0.51)
+    st6 = _tick(p6, v6, http=_mkt(16.0, 0.0))
+    assert _census(st6, "clip_zero") >= 1 and not p6.books and not _places(v6)
+    src = inspect.getsource(ml._tick_candidate)
+    assert "rules.open_ratio(net, r.mark)" in src and "le.per_fill_usd(w, slug)" in src
+    assert "rules.open_ratio" not in inspect.getsource(ml._tick_book), "never re-decided on an open book"
+
+
+def test_shorts_are_on_by_default_and_a_short_sizes_by_the_same_rule(monkeypatch):
+    """U12c item 11: the knob's code default is True (pinned in the
+    rules tests through env_switch); with it on and the share cap
+    unbounded, his -3,000 sh at mark 0.31 opens a short book at 10%:
+    target -300, collateral 0.69 x 300 = $207, one BUY_SHORT rest at
+    the contract-price rule already built. His -12 sh ($8.28 of
+    collateral) is an exact copy, -12. The pre-S4 exit safety is
+    untouched: a partial reduce is `short_reduce_unproven` and nothing
+    is sent; the flatten when he leaves is close_position."""
+    _rails_2026_09_06(monkeypatch)
+    monkeypatch.setattr(rules, "MIRROR_SHORTS", True)
+    monkeypatch.setattr(rules, "MIRROR_SHORT_MAX_SHARES", math.inf)
+    while le._SHORT_LOCK.locked():
+        le._SHORT_LOCK.release()
+    assert le.short_model_confirmed() is True, "by construction (live_executor)"
+    p = _pool(fills=_his(100, other_size=3100, other_px=0.72), snap={M: 100.0, N: 3100.0})
+    v = _Venue()
+    st = _tick(p, v, http=_mkt(100.0, 3100.0))
+    b = next(iter(p.books.values()))
+    assert b["intent"] == SHORT and (b["target"], b["ratio"]) == (-300, 0.10)
+    assert _census(st, "short_share_cap") == 0 and _census(st, "short_side_refused") == 0
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][3] == 300 and pl[0][6] == SHORT and pl[0][2] == 0.32
+    assert _census(st, "short_open") == 1
+    # the small short copies whole
+    p2 = _pool(fills=_his(100, other_size=112, other_px=0.72), snap={M: 100.0, N: 112.0})
+    v2 = _Venue()
+    _tick(p2, v2, http=_mkt(100.0, 112.0))
+    b2 = next(iter(p2.books.values()))
+    assert (b2["target"], b2["ratio"]) == (-12, 1.0) and _places(v2)[0][3] == 12
+    # the exit safety: a partial reduce on the open short is held by name
+    p3 = _pool(fills=_his(100, other_size=1600, other_px=0.72), snap={M: 100.0, N: 1600.0})
+    b3 = _short_book(p3, ledger=-300, ratio=0.10)
+    v3 = _Venue(held={SLUG: -300})
+    st3 = _tick(p3, v3, http=_mkt(100.0, 1600.0))
+    assert b3["target"] == -150 and _census(st3, "short_reduce_unproven") == 1
+    assert not _places(v3) and "close" not in _kinds(v3)
+    # MIRROR_SHORTS=off is the P1 door, as before
+    monkeypatch.setattr(rules, "MIRROR_SHORTS", False)
+    p4 = _pool(fills=_his(100, other_size=3100, other_px=0.72), snap={M: 100.0, N: 3100.0})
+    v4 = _Venue()
+    st4 = _tick(p4, v4, http=_mkt(100.0, 3100.0))
+    assert _census(st4, "short_side_refused") == 1 and not p4.books and not _places(v4)
+    # the worker reads the cap through _bounded: unreadable is shut
+    monkeypatch.setattr(rules, "MIRROR_SHORTS", True)
+    monkeypatch.setattr(rules, "MIRROR_SHORT_MAX_SHARES", None)
+    p5 = _pool(fills=_his(100, other_size=3100, other_px=0.72), snap={M: 100.0, N: 3100.0})
+    v5 = _Venue()
+    st5 = _tick(p5, v5, http=_mkt(100.0, 3100.0))
+    assert _census(st5, "short_share_cap") >= 1 and not p5.books and not _places(v5)
+    assert "rules._bounded(rules.MIRROR_SHORT_MAX_SHARES)" in inspect.getsource(ml._short_capped)
+
+
+def test_an_exact_copy_book_steps_down_once_when_his_position_passes_twice_the_line(monkeypatch):
+    """Review of U12c, FIX-1. A book opened at ratio 1.0 on his $8 (16
+    sh @ 0.50) follows him at 100% -- so when his position grows to 60
+    sh ($30, past the $20 step line) the stored ratio steps to 0.10 for
+    life, is named `ratio_stepped`, the target becomes 6 and the reduce
+    path sells the 10 excess. A 1.0 book at $15 does not step; a 0.10
+    book never steps; the step persists (read back from the row)."""
+    _rails_2026_09_06(monkeypatch)
+    v = _Venue(bid=0.49, ask=0.51, held={SLUG: 16})
+    p = _pool(fills=_his(60, long_px=0.50), snap={M: 60.0, N: 0.0})
+    b = p.add_book(ledger=16, ratio=1.0, avg_cost=0.50)
+    st = _tick(p, v, http=_mkt(60.0, 0.0))
+    assert _census(st, "ratio_stepped") == 1 and st["integ"]["ratio_stepped"] == 1
+    assert b["ratio"] == 0.10 and b["target"] == 6 and b["last_plan"]["ratio_stepped"] == 0.10
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][4] is True and pl[0][3] == 10, "SELL_LONG reduce of the excess"
+    assert any(("ml-book-ratio" in s and a == (b["id"], 0.10)) for k, s, a in p.sent)
+    # persists: the next tick reads 0.10 off the row and steps nothing
+    v2 = _Venue(bid=0.49, ask=0.51, held={SLUG: 16})
+    st2 = _tick(p, v2, now=NOW + 30, http=_mkt(60.0, 0.0))
+    assert _census(st2, "ratio_stepped") == 0 and b["ratio"] == 0.10 and b["target"] == 6
+    # a 1.0 book whose position stays at $15 does not step: target 30, an add of 14
+    p3 = _pool(fills=_his(30, long_px=0.50), snap={M: 30.0, N: 0.0})
+    b3 = p3.add_book(ledger=16, ratio=1.0, avg_cost=0.50)
+    v3 = _Venue(bid=0.49, ask=0.51, held={SLUG: 16})
+    st3 = _tick(p3, v3, http=_mkt(30.0, 0.0))
+    assert _census(st3, "ratio_stepped") == 0 and b3["ratio"] == 1.0 and b3["target"] == 30
+    assert _places(v3)[0][3] == 14 and _places(v3)[0][4] is False
+    # exactly on the step line is not past it
+    p4 = _pool(fills=_his(40, long_px=0.50), snap={M: 40.0, N: 0.0})
+    b4 = p4.add_book(ledger=16, ratio=1.0, avg_cost=0.50)
+    _tick(p4, _Venue(bid=0.49, ask=0.51, held={SLUG: 16}), http=_mkt(40.0, 0.0))
+    assert b4["ratio"] == 1.0 and b4["target"] == 40
+    # a 0.10 book never steps, whatever his position does
+    p5 = _pool(fills=_his(600, long_px=0.50), snap={M: 600.0, N: 0.0})
+    b5 = p5.add_book(ledger=60, ratio=0.10, avg_cost=0.50)
+    st5 = _tick(p5, _Venue(bid=0.49, ask=0.51, held={SLUG: 60}), http=_mkt(600.0, 0.0))
+    assert _census(st5, "ratio_stepped") == 0 and b5["ratio"] == 0.10 and b5["target"] == 60
+    # nothing ever steps UP: a 0.10 book whose position shrinks under $10 stays 0.10
+    p6 = _pool(fills=_his(16, long_px=0.50), snap={M: 16.0, N: 0.0})
+    b6 = p6.add_book(ledger=2, ratio=0.10, avg_cost=0.50)
+    _tick(p6, _Venue(bid=0.49, ask=0.51, held={SLUG: 2}), http=_mkt(16.0, 0.0))
+    assert b6["ratio"] == 0.10 and b6["target"] == 1
+    # a failed write steps nothing in memory: the book is its own error, the ratio stands
+    p7 = _pool(fills=_his(60, long_px=0.50), snap={M: 60.0, N: 0.0})
+    b7 = p7.add_book(ledger=16, ratio=1.0, avg_cost=0.50)
+    p7.raise_on.append(("ml-book-ratio", RuntimeError("db")))
+    st7 = _tick(p7, _Venue(bid=0.49, ask=0.51, held={SLUG: 16}), http=_mkt(60.0, 0.0))
+    assert _census(st7, "book_error") == 1 and _census(st7, "ratio_stepped") == 0 and b7["ratio"] == 1.0
+    # the rule at its own level: one way, derived line, unreadable steps nothing
+    assert rules.step_ratio(1.0, 60.0, 0.50) == 0.10 and rules.step_ratio(1.0, 40.0, 0.50) is None
+    assert rules.step_ratio(1.0, 40.01, 0.50) == 0.10 and rules.step_ratio(0.10, 6000.0, 0.50) is None
+    assert rules.step_ratio(1.0, -30.0, 0.30) == 0.10, "a short's dollars are collateral: 30 x 0.70 = $21"
+    assert rules.step_ratio(1.0, -28.0, 0.30) is None
+    for bad in ((None, 60.0, 0.5), (1.0, None, 0.5), (1.0, 60.0, None), ("1.0", 60.0, 0.5), (1.0, 60.0, 1e-320)):
+        assert rules.step_ratio(*bad) is None, bad
+    with pytest.MonkeyPatch.context() as mp:
+        mp.setattr(rules, "MIRROR_SMALL_BET_USD", 5.0)
+        assert rules.step_ratio(1.0, 21.0, 0.50) == 0.10 and rules.step_ratio(1.0, 20.0, 0.50) is None
+    assert "MIRROR_SMALL_BET_STEP" not in inspect.getsource(rules), "derived, never a second knob"
+
+
+def test_an_order_under_the_minimum_notional_is_not_sent_and_the_book_is_held(monkeypatch):
+    """Review of U12c, FIX-2. His 1 sh @ 0.05 is an exact copy whose
+    rest would be a $0.04 BUY at the 0.04 bid: not sent, named
+    `under_min_notional`, the book held with no op spent. 2 sh @ 0.60
+    ($1.18 at the 0.59 wire) is sent; 1 sh @ 0.60 ($0.59) is not; the
+    environment may lower the line to 0 and then everything is sent."""
+    _rails_2026_09_06(monkeypatch)
+    assert rules.MIRROR_MIN_ORDER_USD == 1.0
+    p = _pool(fills=_his(1, long_px=0.05), snap={M: 1.0, N: 0.0})
+    v = _Venue(bid=0.04, ask=0.06)
+    st = _tick(p, v, http=_mkt(1.0, 0.0))
+    b = next(iter(p.books.values()))
+    assert b["target"] == 1 and b["ratio"] == 1.0
+    assert _census(st, "under_min_notional") == 1 and st["integ"]["under_min_notional"] == 1
+    assert not _places(v) and not p.orders and st["ops"] == 0 and b["state"] == "live"
+    p2 = _pool(fills=_his(2, long_px=0.60), snap={M: 2.0, N: 0.0})
+    v2 = _Venue(bid=0.59, ask=0.61)
+    st2 = _tick(p2, v2, http=_mkt(2.0, 0.0))
+    assert _places(v2)[0][3] == 2 and _census(st2, "under_min_notional") == 0
+    p3 = _pool(fills=_his(1, long_px=0.60), snap={M: 1.0, N: 0.0})
+    v3 = _Venue(bid=0.59, ask=0.61)
+    st3 = _tick(p3, v3, http=_mkt(1.0, 0.0))
+    assert not _places(v3) and _census(st3, "under_min_notional") == 1
+    monkeypatch.setattr(rules, "MIRROR_MIN_ORDER_USD", 0.0)
+    p4 = _pool(fills=_his(1, long_px=0.05), snap={M: 1.0, N: 0.0})
+    v4 = _Venue(bid=0.04, ask=0.06)
+    st4 = _tick(p4, v4, http=_mkt(1.0, 0.0))
+    assert _places(v4)[0][3] == 1 and _census(st4, "under_min_notional") == 0
+    # a short reads its collateral: 1 sh of a 0.32 contract is $0.68, not sent; 2 are $1.36, sent
+    monkeypatch.setattr(rules, "MIRROR_MIN_ORDER_USD", 1.0)
+    monkeypatch.setattr(rules, "MIRROR_SHORTS", True)
+    monkeypatch.setattr(rules, "MIRROR_SHORT_MAX_SHARES", math.inf)
+    while le._SHORT_LOCK.locked():
+        le._SHORT_LOCK.release()
+    p5 = _pool(fills=_his(100, other_size=101, other_px=0.72), snap={M: 100.0, N: 101.0})
+    v5 = _Venue()
+    st5 = _tick(p5, v5, http=_mkt(100.0, 101.0))
+    assert next(iter(p5.books.values()))["target"] == -1 and not _places(v5)
+    assert _census(st5, "under_min_notional") == 1
+    p6 = _pool(fills=_his(100, other_size=102, other_px=0.72), snap={M: 100.0, N: 102.0})
+    v6 = _Venue()
+    st6 = _tick(p6, v6, http=_mkt(100.0, 102.0))
+    assert _places(v6)[0][3] == 2 and _census(st6, "under_min_notional") == 0
+    src = inspect.getsource(ml._place)
+    assert "rules.MIRROR_MIN_ORDER_USD" in src and src.index("under_min_notional") < src.index("_read_open(t)")
+
+
+def test_a_sub_dollar_flatten_still_leaves_and_reaches_close_position(monkeypatch):
+    """FIX-2b: a position that is leaving must leave at any size. A
+    2-share book @ 0.30 whose owner is gone rests its flatten ($0.64 at
+    the 0.32 ask, under the $1 minimum), and after MIRROR_FLATTEN_REST_S
+    reaches close_position when sole and the IOC when co-held -- with
+    the minimum notional the rest was refused before the row INSERT,
+    _flatten_vanished never found the row its clock keys on, and the
+    rest was re-attempted and re-refused every tick. The increase path
+    still refuses under $1."""
+    _rails_2026_09_06(monkeypatch)
+    assert rules.MIRROR_MIN_ORDER_USD == 1.0
+
+    async def _ours(slug):
+        return 2, 0.30                       # the venue holds our 2 and nobody else's
+    monkeypatch.setattr(le, "_pm_held", _ours)
+    p = _pool(fills=_his(2, long_px=0.30, sold=2), snap=None)
+    b = p.add_book(ledger=2, avg_cost=0.30)
+    v = _Venue(held={SLUG: 2})
+    st = _tick(p, v, http=_gone())
+    assert _census(st, "flatten_vanished") == 1 and _census(st, "flatten_rested") == 1
+    assert _census(st, "under_min_notional") == 0
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][3] == 2 and pl[0][4] is True and pl[0][2] == 0.32
+    assert next(iter(p.orders.values()))["kind"] == "flatten_vanished"
+    # sole holder after the wait: cancel, then close_position
+    v2 = _Venue(held={SLUG: 2})
+    v2.orders = v.orders
+    st2 = _tick(p, v2, now=NOW + rules.MIRROR_FLATTEN_REST_S + 1, http=_gone())
+    assert ("cancel", "oid-1", SLUG) in v2.calls and ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v2.calls
+    assert b["ledger_net"] == 0 and st2["flattened"] == 1
+    # co-held: one IOC for our 2 shares at the slippage bound, $0.58, sent
+    async def _held(slug):
+        return 202, 0.30
+    monkeypatch.setattr(le, "_pm_held", _held)
+    p3 = _pool(fills=_his(2, long_px=0.30, sold=2), snap=None)
+    p3.manual_shares[SLUG] = 200.0
+    b3 = p3.add_book(ledger=2, avg_cost=0.30)
+    p3.add_order(b3, side=SELL, wire=0.32, qty=2, kind="flatten_vanished",
+                 placed_ts=NOW - rules.MIRROR_FLATTEN_REST_S - 1)
+    v3 = _Venue(held={SLUG: 202}, flatten_bid=0.29, ioc_fill=2.0)
+    v3.rest("oid-1", "SELL", 0.32, 2, created=NOW - 400)
+    st3 = _tick(p3, v3, http=_gone())
+    ioc = [c for c in _places(v3) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+    assert len(ioc) == 1 and ioc[0][3] == 2 and ioc[0][4] is True and b3["ledger_net"] == 0
+    assert _census(st3, "under_min_notional") == 0
+    # the paired flatten (his net to zero, both legs held) rests too
+    p4 = _pool(fills=_his(2, long_px=0.30, other_size=2, other_px=0.70), snap={M: 2.0, N: 2.0})
+    b4 = p4.add_book(ledger=2, avg_cost=0.30)
+    v4 = _Venue(held={SLUG: 2})
+    st4 = _tick(p4, v4, http=_mkt(2.0, 2.0))
+    assert b4["target"] == 0 and _places(v4) and _census(st4, "under_min_notional") == 0
+    # the increase path still refuses under $1: his 2 sh @ 0.30 is a $0.58 BUY
+    p5 = _pool(fills=_his(2, long_px=0.30), snap={M: 2.0, N: 0.0})
+    v5 = _Venue()
+    st5 = _tick(p5, v5, http=_mkt(2.0, 0.0))
+    assert _census(st5, "under_min_notional") == 1 and not _places(v5)
+    src = inspect.getsource(ml._place)
+    assert 'kind in ("flatten_paired", "flatten_vanished")' in src and "not flattening and" in src
+
+
 # ------------------------------------------------ 12. the census coverage
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():
-    """Runs last. Two names are declared for the reader and structurally
-    unreachable at the shipped constants, so they are excluded here by
+    """Runs last. One name is declared for the reader and structurally
+    unreachable at the shipped constants, so it is excluded here by
     name: `under_one_share` is mi.plan's name for a delta under a
     share, which whole-share targets and ledgers never produce (delta 0
-    is `on_target`); `hysteresis` needs a move at or over MIN_MOVE_USD
-    that is still under MIN_MOVE_FRAC of the target, i.e. a target over
-    MIN_MOVE_USD / MIN_MOVE_FRAC = $250 at the mark, which is exactly
-    the per-market cap the target is scaled to."""
+    is `on_target`). `dead_band` (the dollar band, $0 since 2026-09-06
+    -- U12c, small bets copy whole) is driven under an explicit $5, and
+    `hysteresis` is reachable at the $0 band (a 1-share move on a
+    301-share target)."""
     if _RAN["n"] < 40:
         pytest.skip("the coverage read needs the whole file")
-    unreachable = {"under_one_share", "hysteresis"}
+    unreachable = {"under_one_share"}
     missing = set(ml.CENSUS_KEYS) - SEEN - unreachable
     assert not missing, sorted(missing)

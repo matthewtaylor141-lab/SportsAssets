@@ -209,7 +209,9 @@ def test_shadow_market_reads_his_book_and_plans_a_buy_at_his_level_without_order
     # a market absent from a successful walk is NOT held: venue 0, not unreadable
     assert row["ledger_net"] == 0 and row["venue_net"] == 0.0
     assert (row["bid"], row["ask"], row["mark"]) == (0.30, 0.32, 0.31)
-    # target = ratio x net (596 shares, $185 at the 0.31 mark: under the $250 cap)
+    # target = ratio x net (596 shares, $185 at the 0.31 mark: under the
+    # per-event cap, $2,500 since 2026-09-06 -- the shadow shares
+    # mi.MARKET_NET_CAP_USD with the live lane)
     assert row["target"] == int(RATIO * row["his_net"]) == 596 and row["capped"] is False
     assert row["would_side"] == "BUY_LONG" and row["would_qty"] == row["target"]
     assert row["would_px"] == 0.30
@@ -1456,12 +1458,24 @@ def test_a_shadow_side_probe_blip_never_trips_the_live_compare(monkeypatch, _liv
     assert sh["status"] == "degraded" and sh["intent_guard_unreadable"] == "RuntimeError"
     a = [a for k, s, a in p.sent if "INSERT INTO mirror_shadow" in s][-1]
     assert a[11] is None, "the live-compared target is NULL on a blip"
+    # the row as the live read hands it back (target, target_raw, capped
+    # are the INSERT's 12th-14th parameters): the blip wrote the target
+    # NULL; the live compare (U12c review, FIX-3b) reads the row's RAW
+    # arithmetic, which is the same -300 the live lane computes, so
+    # nothing disagrees -- and a row with no raw at all is SKIPPED by
+    # name, never a disagree
     p.shadow.append({"whale": a[0], "condition_id": a[1], "his_net": a[7], "ratio": a[10],
-                     "target": a[11], "at_ts": NOW})
+                     "target": a[11], "target_raw": a[12], "capped": a[13], "at_ts": NOW})
     p.raise_on.clear()
     st = _tick(p, _Venue(held={SLUG: 300}), now=NOW + 30, http=_short_http())
     assert _census(st, "sign_flip") == 1, "the live lane read -300 on its own answered probe"
     assert _census(st, "shadow_live_disagree") == 0
+    p0 = _short_world()
+    p0.add_book(ledger=300)
+    p0.shadow.append({"whale": a[0], "condition_id": a[1], "his_net": a[7], "ratio": a[10],
+                      "target": None, "target_raw": None, "capped": None, "at_ts": NOW})
+    st0 = _tick(p0, _Venue(held={SLUG: 300}), now=NOW + 30, http=_short_http())
+    assert _census(st0, "shadow_live_disagree") == 0 and _census(st0, "shadow_check_skipped") == 1
     # control: no blip -> the shadow writes -300 and nothing disagrees
     p2 = _short_world()
     p2.add_book(ledger=300)
@@ -1470,14 +1484,15 @@ def test_a_shadow_side_probe_blip_never_trips_the_live_compare(monkeypatch, _liv
     a2 = [a for k, s, a in p2.sent if "INSERT INTO mirror_shadow" in s][-1]
     assert a2[11] == -300
     p2.shadow.append({"whale": a2[0], "condition_id": a2[1], "his_net": a2[7], "ratio": a2[10],
-                      "target": a2[11], "at_ts": NOW})
+                      "target": a2[11], "target_raw": a2[12], "capped": a2[13], "at_ts": NOW})
     st2 = _tick(p2, _Venue(held={SLUG: 300}), now=NOW + 30, http=_short_http())
-    assert _census(st2, "shadow_live_disagree") == 0
-    # and a shadow row that DID disagree still trips: the instrument is intact
+    assert _census(st2, "shadow_live_disagree") == 0 and _census(st2, "shadow_check_skipped") == 0
+    # and a shadow row that DID disagree still trips: the instrument is
+    # intact (a stated raw of 300 against its own 1.0 x -300)
     p3 = _short_world()
     p3.add_book(ledger=300)
     p3.shadow.append({"whale": a2[0], "condition_id": a2[1], "his_net": a2[7], "ratio": a2[10],
-                      "target": 300, "at_ts": NOW})
+                      "target": 300, "target_raw": 300.0, "capped": False, "at_ts": NOW})
     st3 = _tick(p3, _Venue(held={SLUG: 300}), now=NOW + 30, http=_short_http())
     assert _census(st3, "shadow_live_disagree") == 1
 

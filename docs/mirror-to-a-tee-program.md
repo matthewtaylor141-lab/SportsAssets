@@ -396,15 +396,17 @@ copy-ROI sd 0.282 of stake over 15 days ≥ $1k, §A):
 
 | constant | today | at r_measure = 0.126% ($31.5k on the MERGEPNL denominator) | at r = 1% | arithmetic |
 |---|---|---|---|---|
-| MIRROR_DAY_USD (gross buys/day) | $1,250 (rules:214) | $1,718 | $13,637 | r × $1,363,663 |
-| MIRROR_MAX_BOOKS_PER_DAY | 5 (rules:212) | bounded by the read budget: ≤ 60 (1 read/book/tick) until the key-wide bucket exists (D29) | same | 85.7 paced reads/tick − 5 positions − 20 candidates |
-| MIRROR_MAX_LIVE_BOOKS | 5 (rules:211) | same bound | same | same |
-| LIVE_MAX_CLIP_USD per order | $250 (le:2610) | $250 (a $737 target at r=1.9% is 3 sequential rests under 047:113-114 one-open-per-book) | raise with the ladder decision 22 | — |
+| MIRROR_DAY_USD (gross buys/day) | UNBOUNDED since U12b (2026-09-06; was $1,250). Env may only lower it (`unbounded_env`); the sleeve's daily room no longer binds the mirror either | no day cap: the owner's order, not r's | same | worst case bounded by the loss stop and the venue balance |
+| MIRROR_MAX_BOOKS_PER_DAY | UNBOUNDED by default since U12 (2026-09-06; was 5). Env may only lower it (`unbounded_env`) | not a count | same | the candidate walk keeps its own 20-read budget; the book walk is unbounded and `tick_s` on the stats is what stretches |
+| MIRROR_MAX_LIVE_BOOKS | UNBOUNDED by default since U12 (was 5); env may only lower it (rung S3's probe runs at 1) | same | same | same |
+| MIRROR_NET_CAP_USD / mi.MARKET_NET_CAP_USD (per event = one book = one side of one game; at the mark on a long, in collateral on a short; across every fill) | $2,500 since U12b (2026-09-06; was $250) | unchanged: the owner's number, not r's | unchanged | scales, never declines; the shadow sizes from the same constant |
+| MIRROR_RATIO / MIRROR_SMALL_BET_USD (decided at open, stored on the book) | 10% above $10 of his dollars at the mark, exact copy under it (U12b/U12c) | the owner's number; the bankroll ratio stays a diagnostic | same | env may only lower either |
+| MIRROR_CLIP_USD per order (the mirror lane's own; LIVE_MAX_CLIP_USD $250 stays the copy lane's) | $2,500 since U12b | a $2,500 target is one rest | same | `per_fill_usd` stays the admission gate, never the size |
 | MIRROR_LOSS_STOP_USD (24 h realized) | $250 (rules:217) | stop = k × sigma_day, sigma_day ≈ sigma_per_dollar × day_gross / sqrt(books_day): at 1.302 × $1,718 / sqrt(20) = $500 → a 2-sigma stop is $1,000 | 1.302 × $13,637 / sqrt(60) = $2,292 → 2-sigma $4,584 | a $250 stop at $13,637/day is 1.8% of a day's gross; with daily ROI sd 0.28 of stake it trips on ~47% of days (§A) |
 | PMUS_LOSS_BREAKER_USD (global, terminal rows) | $5,000 (le:2674-2675) | unchanged | unchanged | shared with the per-fill sleeve; the mirror's stop sits under it |
 | MIRROR_MAX_ORDER_OPS_PER_TICK | 6 (rules:222) | 6 until the key-wide bucket; then books × 2 per simultaneous kickoff | same | 5 books cancel+place at one kickoff = 10 ops (tee/lifecycle.refute.engineering.md missed 2) |
 | MIRROR_MAX_REPLACES_PER_HOUR | 12 (rules:223) | the measured DOWN-move rate on in-play books (28 of 46 600-s moves are down on the one read book; 15.3 cent-changes/h) → 16-20 by code, after MIRRORLADDER prints | same | D20 |
-| MIN_MOVE_USD | $5 (mi:64) | drops his markets under $3,968 | under $500 | $5 / r; decision 21 |
+| MIN_MOVE_USD | $0 since U12c (2026-09-06; was $5): one whole share is the only floor, small bets copy whole | — | — | decision 21 closed by the owner's order |
 
 Tests: `bankroll_cap` and `insufficient_cash` by name; room on cost basis; reservation released on refusal
 and on terminal; `test_caps_carry_the_spec_defaults` pins updated to the table; a demoted clip still zeroes
@@ -849,6 +851,93 @@ M1-total (all families) printed beside M1.
   mirror_orders open=1 at 00:42:43Z. The three rung keys (MIRROR_MAX_LIVE_BOOKS, MIRROR_NET_CAP_USD,
   MIRROR_DAY_USD) were deleted from sportsassets-workers at 00:44:14-18Z (render-ops env-del, HTTP 204
   each), so the code defaults now ride: 5 books, $250 per market, $1,250 per day, $1,000 stop.
+- U12 / U12b / U12c, 2026-09-06 -- THREE OWNER ORDERS, verbatim, and the rails they leave.
+  13:36Z: "I don't want to cap books opened at all. I want max trade on one side of an event to be $1000
+  between all fills." ~14:00Z: "Let's remove those caps so we start copying his actual book. Just trade
+  10% of what he puts on everything he takes (with a hard cap of no single event having more than $2.5k
+  on it) this limitation should never force us to decline any of the possible copies." ~14:10Z: "Bets
+  under $10, take the full position (exact copy)" and "I want shorts live as well". The later orders
+  supersede the earlier where they overlap (the $1,000 per side became $2,500 per event; the saved
+  day-cap question, task 25, is answered: no day cap).
+  THE RAILS NOW. (1) RATIO: 10% of what he puts on (`rules.MIRROR_RATIO`, env may only lower), EXACT
+  COPY (ratio 1.0) when his dollars at the mark are under $10 (`MIRROR_SMALL_BET_USD`, env may lower;
+  his dollars are |net| x mark on a long and |net| x (1 - mark) -- collateral -- on a short). The ratio
+  is DECIDED WHEN THE BOOK OPENS (`rules.open_ratio`) and STORED on the book (`mirror_books.ratio`); an
+  open book sizes on its stored ratio for its whole life and is never re-targeted at another -- a
+  position that crosses $10 must not flip between 100% and 10% every tick -- so the two books open
+  today keep the 1.0 they opened at. `ms.refresh_ratios` keeps running and its anchor/bankroll readings
+  stay reported as diagnostics; the shadow keeps sizing from its own readings (it measures). (2) PER
+  EVENT: $2,500 (`mi.MARKET_NET_CAP_USD` 250 -> 2500) on the book's net at the mark (long) or in
+  collateral, (1 - mark) x shares (short), across every fill; one mirror book is one side of one game
+  (the one-per-game claim keys on game_key), so "a single event" is the book. The cap SCALES the target
+  (his 100,000 sh @ 0.60 at 10% is 10,000 raw -> 4,166 sh = $2,500) and NEVER declines a copy: every
+  refusal `mirror_target` can name is about a cap at or under zero, an unreadable input or the short
+  door, never a capped target (pinned). The shadow shares the constant. (3) NO COUNT CAPS:
+  `MIRROR_MAX_LIVE_BOOKS` and `MIRROR_MAX_BOOKS_PER_DAY` default to UNBOUNDED (`math.inf`,
+  `rules.unbounded_env`); the environment may still LOWER them (rung S3's 1-share probe runs with
+  `MIRROR_MAX_LIVE_BOOKS=1`), `rules.admission` bites `max_books` only on a finite cap, and an
+  unreadable book COUNT still refuses, fail closed, under its own name `books_unreadable` (appended
+  last to CENSUS_KEYS, served on `integ`). (4) NO DAY CAP: `MIRROR_DAY_USD` defaults to UNBOUNDED (env
+  may lower; a finite cap bites `mirror_day_cap` on what filled, an unreadable spend read bites it
+  whatever the cap); the published `mirror_day_room` is null and the mode line prints `day=none`. The
+  copy sleeve's DAILY room (`live_max_daily_usd`, $11,000) no longer binds the mirror -- that was a day
+  cap by another road -- so the copy lane's daily cap and the mirror's are now separate: the copy lane
+  is off, and if it is turned back on the two lanes no longer share a day budget (addendum section 7's
+  concurrent-placement guard is then per lane, the rest lane's reservations coming off the sleeve's
+  TOTAL room, which still binds). (5) THE MIRROR'S OWN CLIP: `MIRROR_CLIP_USD` $2,500 per order (env
+  may lower, floor $1) sizes every rest; the copy lane's `LIVE_MAX_CLIP_USD` ($250) and per-whale
+  `per_fill_usd` no longer size the mirror -- a $2,500 target is one rest, not ten -- and the copy
+  lane's constants are untouched; `per_fill_usd` stays the ADMISSION gate (a whale demoted to $0 opens
+  no book, `clip_zero`). (6) DEAD BAND $0 (`mi.MIN_MOVE_USD` 5 -> 0): the only floor is one whole
+  share; `MIN_MOVE_FRAC` (2% hysteresis on adjustments) unchanged. (7) SHORTS ON: `MIRROR_SHORTS`
+  defaults to True (`MIRROR_SHORTS=off` still turns it off), `MIRROR_SHORT_MAX_SHARES` defaults to
+  UNBOUNDED (env may lower; 0 refuses every short by `short_share_cap`), and a short sizes by the same
+  rule as a long. THE PRE-S4 EXIT RULE, STATED PLAINLY: a short exits WHOLE when he leaves the side
+  (close_position when sole holder, the only proven short exit); his PARTIAL short reductions are HELD
+  and counted (`short_reduce_unproven`) until a 1-share resting SELL_SHORT has been read back at rung
+  S4, which is still to run and needs a short book to exist; no SELL_SHORT rest is enabled by this
+  change. `le.short_model_confirmed()` is True by construction and SH1 (the pmus preview bound in
+  collateral space) is in HEAD. (8) UNCHANGED: the $1,000 loss stop (reduce-only until re-armed by
+  hand), `MIRROR_MAX_ORDER_OPS_PER_TICK` 6 (the `ops_capped` census name already counts every op the
+  budget refused, so the throttle is visible), `MAX_MARKETS_PER_TICK` 20 -- which is no longer a book
+  cap by another road: the candidate walk has its OWN quote budget (`t.cand_reads`, `capped_tick` as
+  before) and per-market read budget (`t.cand_mkt_reads`, `snap_market_capped`); every live book is
+  read every tick, unbounded -- exits must be managed -- and the stat `tick_s` (wall time, 1 dp) is
+  what an operator watches as books grow (the 0.35 s pacer bounds the venue rate, not the tick).
+  THE WORST CASE, said plainly: with no count cap and no day cap it is bounded by the loss stop and the
+  venue balance, and per event by the $2,500 cap -- not by a count of books and not by a day figure.
+  REVIEW OF U12c (same day), three fixes. (a) THE ONE-WAY STEP: the exact-copy ratio is decided from
+  ONE read at open, so a book opened on the first $8 fill of a larger burst would follow him at 100% up
+  to the $2,500 cap. When a book's stored ratio is 1.0 and his dollars at the mark (collateral on a
+  short) EXCEED twice the small-bet line -- $20, derived from `MIRROR_SMALL_BET_USD`, never a second
+  knob -- the row's ratio is written to `MIRROR_RATIO` for the book's life (`rules.step_ratio`,
+  census `ratio_stepped`, served on `integ`); the target drops from 100% to 10% and the normal reduce
+  path sells the excess (opened at $8 with 16 sh held, his position now 60 sh @ 0.50 = $30: ratio
+  0.10, target 6, a SELL_LONG of 10). Never up; a 1.0 book at $15 does not step; a 0.10 book never
+  steps; a failed write steps nothing. (b) THE SMALLEST ORDER: `MIRROR_MIN_ORDER_USD` $1 (env may
+  lower to 0). His positions under $1 at the mark are not copied: with no dead band and exact copies,
+  his 1 sh @ 0.05 became a $0.05 BUY on the wire, the venue's minimum notional is unknown, and a refused
+  order would burn one of the six ops per tick for as long as the book stood. An order whose notional
+  (wire x qty on a long, collateral on a short) is under the line is not sent, named
+  `under_min_notional`, the book held before any read or op is spent. CONSEQUENCE FOR THE PROBES: one
+  share of a 0.32 contract is $0.68 of collateral, so the 1-share probe of rung S3/S4 runs with
+  `MIRROR_MIN_ORDER_USD=0` beside `MIRROR_SHORT_MAX_SHARES=1` (a long probe under $1 the same). A
+  FLATTEN IS EXEMPT from the minimum (re-verification, FIX-2b): a position that is leaving leaves at
+  any size -- the flatten kinds, the sign-flip flatten and any plan toward target 0 -- because a
+  refused flatten rest never wrote the order row `_flatten_vanished` keys its rest clock on, so the rest
+  was re-attempted and re-refused every tick and close_position was never reached. (c) THE SHADOW CHECK
+  compares across ratios ON RAW ARITHMETIC (FIX-3, re-verified as FIX-3b): the shadow's `target` is
+  capped at $2,500 at ITS ratio and truncated to whole shares, so scaling that output falsely named
+  ordinary books (his 24,000 sh @ 0.50: shadow 5,000 at 1.0 against the uncapped 0.10 book at 2,400; a
+  0.058 shadow truncated to 0 against an exact-copy book at 16) -- and `shadow_live_disagree` is a P2
+  integrity counter, any non-zero failing the verdict. Now the shadow's raw is reconstructed from the
+  row (ratio x net when the row is capped or agrees with its stated raw; the stated raw only when it
+  diverges, which is the divergence to name), scaled by book.ratio / shadow.ratio, then the SAME cap
+  the live book applies (at the mark, in collateral on a short), the same short door and whole-share
+  truncation, and only then compared with a one-share tolerance. A row without the fields (`target_raw`,
+  `capped`, a positive ratio, a mark on the ladder) is `shadow_check_skipped` by name, never a disagree;
+  a different net is not compared, as before. Both false-positive cases are pinned as agreeing and the
+  true divergence (a stated raw of 3,000 against 1.0 x 2,400, live 240) still fires.
 
 ### 5b. OPERATOR NOTES (2026-09-05): reading `venue_halted`
 

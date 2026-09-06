@@ -47,17 +47,28 @@ def test_mirror_ratio_maps_his_median_burst_to_the_measuring_clip():
 
 
 def test_target_is_ratio_times_net_whole_shares_capped_at_the_mark():
+    # the cap is $2,500 per event since 2026-09-06 (owner order: "a hard
+    # cap of no single event having more than $2.5k on it ... should
+    # never force us to decline any of the possible copies"): it
+    # SCALES, and `why` is never set by it
+    assert mi.MARKET_NET_CAP_USD == 2500.0
     r = 50.0 / 861.8
     t = mi.target_shares(r, 24423.06, 0.4574)
-    # 1,416 raw shares -> capped at $250 / 0.4574 = 546 shares
-    assert t["capped"] is True and t["target"] == int(250.0 / 0.4574)
+    # 1,416 raw shares ($648 at the mark): under the $2,500 cap, whole
+    assert t["capped"] is False and t["target"] == int(r * 24423.06) == 1416
+    # a bigger net binds: capped at $2,500 / 0.4574 = 5,465 shares
+    big = mi.target_shares(1.0, 24423.06, 0.4574)
+    assert big["capped"] is True and big["target"] == int(2500.0 / 0.4574) == 5465 and big["why"] is None
+    # 10% of his 100,000 sh @ 0.60 ($60,000): 10,000 raw -> 4,166 = $2,500
+    ten = mi.target_shares(0.10, 100000.0, 0.60)
+    assert ten["capped"] is True and ten["target"] == int(2500.0 / 0.60) == 4166 and ten["why"] is None
     t2 = mi.target_shares(r, 2780.0, 0.31)
     assert t2["target"] == int(r * 2780.0) and t2["capped"] is False
     # negative net: refused unless shorts are admitted; when admitted the
-    # cap prices the short at 1 - mark
+    # cap prices the short at 1 - mark (collateral)
     assert mi.target_shares(r, -24423.06, 0.4574)["target"] == 0
-    s = mi.target_shares(r, -24423.06, 0.4574, allow_short=True)
-    assert s["target"] == -int(250.0 / (1 - 0.4574)) and s["capped"] is True
+    s = mi.target_shares(1.0, -24423.06, 0.4574, allow_short=True)
+    assert s["target"] == -int(2500.0 / (1 - 0.4574)) == -4607 and s["capped"] is True
     assert mi.target_shares(None, 100, 0.5)["why"] == "no ratio"
 
 
@@ -92,11 +103,27 @@ def test_plan_sells_down_at_his_equivalent_price_and_flattens_through_the_dead_b
     assert p3.would_fill is True
 
 
-def test_plan_dead_bands():
+def test_plan_dead_bands(monkeypatch):
     bk = mi.Book(bid=0.50, ask=0.52)
     assert mi.plan(100, 100, 100, bk, 0.5, 0.5).reason == "on target"
-    # 4 shares at 0.50 is $2: under the dollar band
+    # NO DOLLAR BAND (owner order ~14:10Z 2026-09-06, "Bets under $10,
+    # take the full position (exact copy)"): 4 shares at 0.50 is $2 and
+    # is a plan; the only floor is one whole share
+    assert mi.MIN_MOVE_USD == 0.0
+    p4 = mi.plan(104, 100, 100, bk, 0.5, 0.5)
+    assert (p4.side, p4.qty) == ("BUY_LONG", 4)
+    # one share at $0.50 is a plan (of a 41-share target: 1 of 101 is
+    # inside the 2% hysteresis, which is unchanged); half a share is not
+    assert mi.plan(41, 40, 40, bk, 0.5, 0.5).side == "BUY_LONG", "one share at $0.50 is a plan"
+    assert mi.plan(101, 100, 100, bk, 0.5, 0.5).reason == "inside hysteresis"
+    # (a sub-share delta cannot arise: delta is int(target) - int(ledger),
+    # so `under one share` is declared for the reader and never reached)
+    assert mi.plan(101, 100.5, 100.5, bk, 0.5, 0.5).reason == "inside hysteresis"
+    # the dollar clause is kept as the operator's handle and reads the
+    # constant at call time: at $5 the same $2 move is banded
+    monkeypatch.setattr(mi, "MIN_MOVE_USD", 5.0)
     assert mi.plan(104, 100, 100, bk, 0.5, 0.5).reason == "under the dollar dead band"
+    monkeypatch.setattr(mi, "MIN_MOVE_USD", 0.0)
     # 1% of a 2,000-share target is inside hysteresis even at $10
     assert mi.plan(2000, 1980, 1980, bk, 0.5, 0.5).reason == "inside hysteresis"
     # no price to rest at -> named, no fill claim
@@ -113,7 +140,7 @@ def test_the_rn1_book_under_the_mirror():
     r = mi.mirror_ratio([861.8] * 12)["ratio"]
     assert mi.target_shares(r, net, 0.545)["target"] == 0
     s = mi.target_shares(r, net, 0.545, allow_short=True)["target"]
-    assert s < 0 and abs(s) <= int(250.0 / (1 - 0.545))
+    assert s < 0 and abs(s) <= int(2500.0 / (1 - 0.545))
 
 
 def test_the_ratio_reports_the_dollar_weighted_anchor_beside_the_median():
@@ -244,13 +271,18 @@ def test_venue_and_ledger_agree_within_one_share():
 def test_target_shares_allow_short_sign_cap_and_truncation_table():
     # (ratio, net, mark) -> (target, capped): the cap prices a short at
     # 1 - mark, whole shares toward zero on either sign
+    # the cap is $2,500 per event (2026-09-06); 1 - 0.9 is 0.1 only to
+    # float noise, so the short leg's figure is int(2500 / (1 - 0.9))
+    # as the code computes it, not a hand-rounded 25,000
     table = [
-        ((1.0, 100000.0, 0.9), (int(250.0 / 0.9), True)),        # +277: the long leg at 0.90
-        ((1.0, -100000.0, 0.9), (-int(250.0 / 0.1), True)),      # -2500: the short leg at 0.10
-        ((1.0, -100000.0, 0.1), (-int(250.0 / 0.9), True)),      # -277 the other way round
+        ((1.0, 100000.0, 0.9), (int(2500.0 / 0.9), True)),          # +2777: the long leg at 0.90
+        ((1.0, -100000.0, 0.9), (-int(2500.0 / (1 - 0.9)), True)),  # the short leg at 0.10
+        ((1.0, -100000.0, 0.1), (-int(2500.0 / (1 - 0.1)), True)),  # -2777 the other way round
         ((0.5, -300.0, 0.31), (-150, False)),
         ((0.5, 300.0, 0.31), (150, False)),
-        ((0.05, -24423.06, 0.4574), (-int(250.0 / (1 - 0.4574)), True)),
+        ((0.2, -24423.06, 0.4574), (-int(2500.0 / (1 - 0.4574)), True)),   # $2,650 of collateral: capped
+        ((0.05, -24423.06, 0.4574), (-int(0.05 * 24423.06), False)),   # -1221: $663 on the short leg, under
+        ((0.10, -100000.0, 0.30), (-int(2500.0 / 0.70), True)),        # -3571: $2,500 of collateral at 0.70
         ((0.3, -7.5, 0.5), (-2, False)),                          # -2.25 truncates toward zero
         ((0.3, 7.5, 0.5), (2, False)),
         ((1.0, 0.0, 0.5), (0, False)),
@@ -260,10 +292,11 @@ def test_target_shares_allow_short_sign_cap_and_truncation_table():
         assert (t["target"], t["capped"]) == (target, capped), (ratio, net, mark, t)
         assert t["why"] is None
         assert isinstance(t["target"], int)
-    assert mi.target_shares(1.0, 100000.0, 0.9, allow_short=True)["target"] == 277
-    assert mi.target_shares(1.0, -100000.0, 0.9, allow_short=True)["target"] == -2500
-    # both $250 on their own leg
-    assert 277 * 0.9 <= 250.0 < 278 * 0.9 and 2500 * 0.1 <= 250.0 < 2501 * 0.1
+    assert mi.target_shares(1.0, 100000.0, 0.9, allow_short=True)["target"] == 2777
+    short_leg = mi.target_shares(1.0, -100000.0, 0.9, allow_short=True)["target"]
+    assert short_leg in (-24999, -25000) and short_leg == -int(2500.0 / (1 - 0.9))
+    # both $2,500 on their own leg
+    assert 2777 * 0.9 <= 2500.0 < 2778 * 0.9 and abs(short_leg) * (1 - 0.9) <= 2500.0 < (abs(short_leg) + 1) * (1 - 0.9)
     # the door shut: the same negative raw is 0, named
     t0 = mi.target_shares(1.0, -100000.0, 0.9)
     assert t0["target"] == 0 and t0["why"] == "short side not admitted" and t0["raw"] < 0
@@ -284,13 +317,20 @@ def test_plan_from_flat_to_a_short_target_sells_the_long_leg_at_his_equivalent_o
     assert (p3.side, p3.qty, p3.reason) == ("SELL_LONG", 200, "reduce toward target")
 
 
-def test_the_dead_band_on_a_short_is_priced_at_the_legs_own_price():
+def test_the_dead_band_on_a_short_is_priced_at_the_legs_own_price(monkeypatch):
     """Brief C6 (review, sign lens): a move on a SHORT ledger commits
     collateral at 1 - mark a share. 12 shares of a 0.70 leg are $8.40
     -- not "under $5" because the long token trades at 0.30 -- and 40
     shares of a 0.10 leg are $4 whatever 40 x 0.90 says. A long book's
-    band is what it was."""
+    band is what it was. THE BAND IS $0 SINCE 2026-09-06 (U12c), so the
+    leg-pricing rule is pinned under an explicit $5 and then shown
+    inert at the default: every move below is a plan at $0."""
     book = mi.Book(bid=0.29, ask=0.31)
+    assert mi.MIN_MOVE_USD == 0.0
+    assert mi.plan(312, 300.0, 300.0, book, 0.30, 0.30).side == "BUY_LONG"
+    assert mi.plan(-340, -300.0, -300.0, mi.Book(bid=0.89, ask=0.91), 0.90, 0.90).side == "SELL_LONG"
+    assert mi.plan(-40, 0.0, 0.0, mi.Book(bid=0.89, ask=0.91), 0.90, 0.90).side == "SELL_LONG"
+    monkeypatch.setattr(mi, "MIN_MOVE_USD", 5.0)
     p = mi.plan(-312, -300.0, -300.0, book, 0.30, 0.30)
     assert (p.side, p.qty, p.price, p.reason) == ("SELL_LONG", 12, 0.31, "reduce toward target")
     # the same 12 shares on a LONG ledger at mark 0.30 are $3.60: banded
