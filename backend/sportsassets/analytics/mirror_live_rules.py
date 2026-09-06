@@ -491,7 +491,14 @@ MIRROR_DAY_USD = unbounded_env("MIRROR_DAY_USD")
 # lane's measured daily ROI spread; he chose the program document's
 # figure). Still downward-only from the environment; still realized
 # only; still re-armed by hand (render-ops sql mirror-rearm).
-MIRROR_LOSS_STOP_USD = capped_env("MIRROR_LOSS_STOP_USD", 1000.0)
+# $1,000 -> $5,000 by owner decision (2026-09-06 ~22:30Z): the stop
+# tripped at 20:47:34Z on a genuine night (his Juventus/Milan draw
+# short and Espanyol/Sevilla under 1.5 settled against him; our 10%
+# copies -$1,214 and -$975; the 24 h sum read -$1,553 at the trip and
+# -$2,445 at 22:22Z). Asked "$3,000 / $5,000 / keep $1,000" with the
+# figures beside each, Matt: "$5,000" -- roughly half of a day's peak
+# stake ($10,666 that day) at 10% of his book.
+MIRROR_LOSS_STOP_USD = capped_env("MIRROR_LOSS_STOP_USD", 5000.0)
 # Venue writes per tick, replaces per book per hour: the venue 429s a
 # board walk above ~3 req/s and the copy lane shares the budget. The
 # ops budget floors at ONE (review finding): a SAFE or exits-only tick

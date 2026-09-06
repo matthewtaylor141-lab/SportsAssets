@@ -833,6 +833,13 @@ M1-total (all families) printed beside M1.
   joins at the same rails once it passes. The owner's words: "we also need to make sure that we are
   mirroring shorts".
 - LOSS STOP (decision 15): $1,000 at the full rails (was $250; MIRROR_LOSS_STOP_USD's code default).
+  AMENDED 2026-09-06 ~22:30Z: $5,000. The $1,000 stop tripped at 20:47:34Z on a genuine night (his
+  Juventus/Milan draw short and Espanyol/Sevilla under 1.5 settled against him; our 10% copies
+  -$1,214 and -$975; the 24 h sum -$1,553 at the trip, -$2,445 by 22:22Z after the Cruzeiro short
+  settled). Told that a re-arm alone re-trips on the first tick because the stop re-reads the
+  trailing 24 h every tick, and asked "$3,000 / $5,000 / keep $1,000" with the figures beside each,
+  Matt: "Re arm" then "$5,000" -- about half of that day's $10,666 peak stake at 10% of his book.
+  Raised in code (env can only lower it), re-armed by mirror-rearm once the build was live.
 - THE SLEEVE (decisions 1 and 20): $10,000 of the account's $31,502 buying power is the mirror's pot.
   Today the per-market ($250) and per-day ($1,250) caps size every order and the pot is not binding; it
   becomes the ratio's denominator when Phase 3a reads his deployed capital (`why_bankroll` is still
