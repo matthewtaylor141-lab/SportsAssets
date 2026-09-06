@@ -851,6 +851,15 @@ M1-total (all families) printed beside M1.
   mirror_orders open=1 at 00:42:43Z. The three rung keys (MIRROR_MAX_LIVE_BOOKS, MIRROR_NET_CAP_USD,
   MIRROR_DAY_USD) were deleted from sportsassets-workers at 00:44:14-18Z (render-ops env-del, HTTP 204
   each), so the code defaults now ride: 5 books, $250 per market, $1,250 per day, $1,000 stop.
+- OWNER DECISION, 2026-09-06 19:2xZ -- the Paul/Alcaraz short is HIS. The venue held a 4,817-share
+  short on aec-atp-tompau-caralc-2026-09-06 that no mirror book placed (census `venue_already_holds`
+  1; the shadow row `frozen: venue and ledger disagree`, venue -4817 / ledger 0), so the mirror
+  refused every candidate read of his $49k on that market. Asked "Tell me to flatten it or leave it",
+  Matt: "Leave it, I manually placed it". So: the position is the owner's own, the mirror keeps
+  refusing that slug by rule (a position the book cannot explain is never traded against or
+  flattened), nothing is placed or cancelled on it by any lane, and the refusal is expected on
+  every tick until the market settles. Recorded here so the next reader does not file the
+  refusal as a defect.
 - U12 / U12b / U12c, 2026-09-06 -- THREE OWNER ORDERS, verbatim, and the rails they leave.
   13:36Z: "I don't want to cap books opened at all. I want max trade on one side of an event to be $1000
   between all fills." ~14:00Z: "Let's remove those caps so we start copying his actual book. Just trade
