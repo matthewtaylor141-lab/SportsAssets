@@ -354,6 +354,63 @@ _STATE_SIDE_ECHO = "side_echo_last"
 _STATE_TERMINAL_MEMO = "mirror_terminal_memo"
 TERMINAL_MEMO_WRITE_S = 60.0
 _TERMINAL_MEMO_MAX = 4000
+# THE CANDIDATE MEMOS STOP RE-READING WHAT HAS NOT CHANGED (E7,
+# 2026-09-07; owner "Need everything running and running at mirror to
+# him"). With E6 live (tick 47.9 / 51.3 s at 21:15Z / 21:20Z) the
+# candidate stage was 25.9 / 13.3 s and the census read map_reads_capped
+# 114 / 86: 100+ markets waiting on a resolver read, and the 24 h
+# refusal census (cand_refusals 21:17Z) said the reads were the SAME
+# ANSWERS every rotation -- `unmapped` 276 markets / 1,667 rows (each a
+# paced resolver call, e.g. por-est-aro-2026-09-07-total-0pt5 unmapped
+# @20:04 @20:20 @20:35 @20:51 @21:09: five paced calls for one unchanged
+# answer) and `no_mark` 179 markets / 1,121 rows / $1.01M (the morning's
+# tennis, the matches over, the venue still OPEN with an empty book,
+# re-read at every rotation slot: a paced quote read AND a per-market
+# data-API read each time, with NO memo). THE RULE: a candidate whose
+# quote read found an OPEN market with no mark (the `no_mark` refusal
+# rules.mirror_target returns for a candidate; never a HALTED /
+# SUSPENDED / PREOPEN read -- those reopen, D1's rule -- and never a
+# read that raised) is remembered per (whale, condition_id) for
+# NO_MARK_TTL_S beside _unmapped_until, and skipped under
+# `cand_no_mark_skipped` (no slot, no venue call) until the memo runs.
+# BOTH candidate memos are RELEASED BY HIS FILLS: each stores the `at`
+# of the read beside its `until`, and at the walk a memoised market
+# whose newest fill of his (the `last_ts` the candidate order already
+# ranks on -- no new read) is NEWER than the memo's `at`, or that WOKE
+# this tick (a fill ingested late carries an old stamp: E6 review
+# HIGH-2's reasoning), is read this tick, the memo dropped
+# (`cand_memo_released`): C2's "a market unlisted at first sight may be
+# listed a minute later" answered by evidence instead of a clock -- a
+# market he is still trading is re-checked at once, one he stopped
+# trading is not. GROWTH, the unmapped memo only: a market read
+# unmapped again with NO fill of his since its last read (the fills
+# the read holds; a fill with no readable stamp counts as one) doubles
+# its TTL, ms.UNMAPPED_TTL_S -> ... -> UNMAPPED_TTL_MAX_S (a constant:
+# nothing to lower under the base); a release by fill, a cleared entry
+# or a deploy resets it to the base. The no_mark memo keeps its flat
+# TTL (the book may fill in; his fill releases it anyway).
+# `map_reads_capped` stays a no-verdict: never memoised. A BOOK's read
+# never writes either memo (the book memo is _terminal_book_until's, W1
+# / R4). Both memos PERSIST across a deploy under ONE ingestion_state
+# key of their own, `mirror_cand_memo` = {"unmapped": [[whale, cid,
+# until, at, ttl]...], "no_mark": [[whale, cid, until, at]...], "at"},
+# under E6's rules exactly -- expired entries dropped on write, at most
+# _TERMINAL_MEMO_MAX per list (the soonest to expire dropped first),
+# written at most once per TERMINAL_MEMO_WRITE_S and only on change,
+# read ONCE at boot, nothing written before that read -- and a KEY OF
+# ITS OWN because E6 pins `mirror_terminal_memo`'s exact shape
+# ({cand, book, at}; test_e6_tick_budget). Fail closed: an unreadable
+# or malformed key is an empty memo, a malformed entry (a TTL off the
+# ladder, an `until` past its `at` + TTL, a future `at`) is dropped --
+# the market is READ, never skipped on a guess; a fill stamp the walk
+# could not read releases nothing and grows nothing (the flat TTL, the
+# C2 clock, stands). Env may only LOWER NO_MARK_TTL_S (capped_env,
+# floor 60). This decides WHEN a candidate is read, never what a read
+# decides: mapping, admission, the throttle's rate, READ_PACING_S and
+# a book's reads are untouched.
+NO_MARK_TTL_S = rules.capped_env("MIRROR_NO_MARK_TTL_S", 900.0, floor=60.0)
+UNMAPPED_TTL_MAX_S = 3600.0
+_STATE_CAND_MEMO = "mirror_cand_memo"
 MODE_SAFE, MODE_EXITS, MODE_ON = "safe", "exits", "on"
 _OFF_VALUES = frozenset({"off", "0", "false", "no"})
 
@@ -535,6 +592,12 @@ CENSUS_KEYS: tuple[str, ...] = (
     # `registered_no_increase` (F3: a book whose slug carries a register
     # row never grows). Before the pinned last key
     "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
+    # E7 (2026-09-07): a candidate skipped on the no_mark memo (its last
+    # quote read found an OPEN market with no mark inside NO_MARK_TTL_S),
+    # and a candidate memo (unmapped or no_mark) dropped because his
+    # newer fill landed -- the market read this tick. Before E6's key,
+    # which the E6 pins hold at keys[-2]
+    "cand_no_mark_skipped", "cand_memo_released",
     # E6 (2026-09-07): a quiet book's quote read skipped under the tick's
     # venue-call budget (plan `no_plan`, `read_on` the tick it is read
     # on). Before the pinned last key
@@ -572,6 +635,22 @@ _last_tick_at = 0.0
 _last_mode: str | None = None
 _last_whales: list = []
 _unmapped_until: dict[tuple[str, str], float] = {}
+# E7 (the paragraph over NO_MARK_TTL_S): beside each candidate memo's
+# `until`, the READ it was written on -- `_unmapped_memo[(whale, cid)]
+# = (at, ttl)`, the memo's TTL as grown so far; `_no_mark_memo[(whale,
+# cid)] = at` -- the instant his newer fill is judged against at the
+# walk (_release_cand_memo) and the growth is judged from at the next
+# unmapped read (_memo_unmapped). An `until` entry with no `at` beside
+# it (written by hand) is released by any readable stamp: fail closed.
+# `_no_mark_until` is the no_mark memo itself, _unmapped_until's shape.
+# An expired entry is kept UNMAPPED_TTL_MAX_S past its `until` so the
+# re-read can judge the growth, then pruned (_prune_cand_memos)
+_unmapped_memo: dict[tuple[str, str], tuple[float, float]] = {}
+_no_mark_until: dict[tuple[str, str], float] = {}
+_no_mark_memo: dict[tuple[str, str], float] = {}
+# the candidate memos' last persisted write (the instant and the
+# signature), the terminal memos' idiom (_terminal_memo_last)
+_cand_memo_last: dict[str, Any] = {"at": 0.0, "sig": None}
 # THE TERMINAL MEMO (D1, 2026-09-06). The candidate walk spends its
 # MAX_MARKETS_PER_TICK quote reads newest-touched first, and his
 # newest-touched mapped markets are matches he trades to settlement:
@@ -1730,9 +1809,15 @@ class _Tick:
     # and the newly DUE quiet reads taken (`due_reads`, under what the
     # budget leaves after the deferred head; `quiet_reads` counts both)
     seq: int = 0
+    # E7: `books_data` split -- the books' per-market reads' seconds
+    # inside the data-API throttle's wait and inside the request itself
+    # (whale_exits.market_positions' `timing`), summed per call; served
+    # beside the timing block as `short.data_api` (the block's own keys
+    # are pinned exactly)
     timing: dict = field(default_factory=lambda: {"walk": 0.0, "orders": 0.0, "books": 0.0,
                                                   "books_venue": 0.0, "books_data": 0.0,
-                                                  "candidates": 0.0})
+                                                  "candidates": 0.0,
+                                                  "books_data_wait": 0.0, "books_data_req": 0.0})
     outcomes: Counter = field(default_factory=Counter)
     placed_books: set = field(default_factory=set)
     quiet_budget: int = 0
@@ -1740,6 +1825,10 @@ class _Tick:
     cand_budget: int = CAND_MIN_PER_TICK
     cand_cap: int = 0
     woken: set = field(default_factory=set)
+    # E7 review MEDIUM-2: the walk's `last_ts` per condition (the stamp the
+    # candidate order ranks on), for the unmapped memo's fill-independent
+    # ceiling; absent = no evidence
+    stamps: dict = field(default_factory=dict)
     deferred_due: set = field(default_factory=set)
     due_reads: int = 0
 
@@ -4457,9 +4546,10 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None,
     t.stats["snap_market_reads"] = int(t.stats.get("snap_market_reads") or 0) + 1
     raw = None
     t0 = time.monotonic()
+    split: dict = {}                      # E7: the read's wait / request seconds
     try:
         raw = await asyncio.wait_for(
-            whale_exits.market_positions(t.http, str(address), str(cid), long_asset=la),
+            whale_exits.market_positions(t.http, str(address), str(cid), long_asset=la, timing=split),
             timeout=_SNAP_READ_TIMEOUT_S)
     except (asyncio.TimeoutError, TimeoutError):
         # SLOW IS A FAILURE MODE WITH A NAME. Without this the tick just
@@ -4474,8 +4564,12 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None,
         raw = None
     if book:
         # E6: an existing book's per-market data-API read (the throttle's
-        # wait and the request), summed per call
+        # wait and the request), summed per call; E7: the two parts,
+        # as the callee measured them (a timed-out call recorded what
+        # it reached)
         t.timing["books_data"] += time.monotonic() - t0
+        t.timing["books_data_wait"] += float(split.get("wait") or 0.0)
+        t.timing["books_data_req"] += float(split.get("req") or 0.0)
     by = raw.get("by_asset") if isinstance(raw, dict) else None
     ts = _num(raw.get("ts")) if isinstance(raw, dict) else None
     if not isinstance(by, dict) or ts is None or raw.get("complete") is not True:
@@ -5142,6 +5236,28 @@ def _timing_block(t: _Tick) -> dict:
     return out
 
 
+def _data_api_block(t: _Tick) -> dict:
+    """The data-API wait, measured (E7 part B): the books' per-market
+    reads' seconds inside the process-wide throttle's wait
+    (`books_data_wait`) and inside the request (`books_data_req`),
+    summed per call like `books_data` (which they split), and
+    `data_rps`, the throttle's configured rate
+    (settings().data_api_max_rps, shared with the live poller, the
+    backfill and the reconciler; None when unreadable). Served beside
+    the timing block as `short.data_api` -- the block's own keys are
+    pinned exactly, so these ride in a sibling. Bounded: these keys and
+    no others. Measurement only: nothing here changes a read, its
+    budget or the throttle's rate."""
+    tm = t.timing
+    try:
+        rps = _num(getattr(settings(), "data_api_max_rps", None))
+    except Exception:  # noqa: BLE001 — settings unreadable: no rate to print, never a raise
+        rps = None
+    return {"books_data_wait": round(float(tm.get("books_data_wait") or 0.0), 1),
+            "books_data_req": round(float(tm.get("books_data_req") or 0.0), 1),
+            "data_rps": rps}
+
+
 def _paced_seconds() -> float:
     with _PACED_LOCK:
         return float(_PACED_S["s"])
@@ -5219,6 +5335,221 @@ async def _persist_terminal_memo(t: _Tick) -> None:
         log.warning("mirror_live: %s write failed (%s)", _STATE_TERMINAL_MEMO, type(exc).__name__)
         return
     _terminal_memo_last.update(at=float(t.now), sig=sig)
+
+
+# ------------------------------- E7: the candidate memos, released by his fills
+
+def _memo_unmapped(t: _Tick, whale: str, cid: str, fills: list) -> float:
+    """The unmapped memo's ONE writer (the paragraph over NO_MARK_TTL_S):
+    every candidate exit that maps this market to nothing this lane can
+    open -- `unmapped`, `map_source_unverified`, the grammar class's
+    refusals, `long_token_unknown` -- writes `until` = now + TTL and the
+    read's `at` beside it. GROWTH: when the market's previous memo
+    still stands in the dict (expired or released nothing) and NO fill
+    of his landed since that read (`fills`, the rows this read holds; a
+    fill with no readable stamp counts as one; a wake this tick counts
+    as one) AND the walk's stamp of his newest fill on the market, when
+    it holds one, is older than UNMAPPED_TTL_MAX_S (review MEDIUM-2: a
+    market he entered inside the hour keeps the base TTL, listed later
+    or not) the TTL doubles,
+    capped at UNMAPPED_TTL_MAX_S; else the base. Returns the TTL written."""
+    key = (whale, cid)
+    base = float(ms.UNMAPPED_TTL_S)
+    ttl = base
+    prev = _unmapped_memo.get(key) if key in _unmapped_until else None
+    prev_at = _memo_at(prev)
+    prev_ttl = _num(prev[1]) if isinstance(prev, tuple) and len(prev) == 2 else None
+    # the fill-independent ceiling (E7 review MEDIUM-2): no growth while
+    # his newest fill on the market -- the walk's stamp, the `last_ts` the
+    # candidate order ranks on (t.stamps; absent = no evidence) -- sits
+    # inside the last UNMAPPED_TTL_MAX_S: a market he entered inside the
+    # hour is re-read at the base TTL whether or not he adds
+    newest = _num(t.stamps.get(cid))
+    recent = newest is not None and (float(t.now) - newest) < float(UNMAPPED_TTL_MAX_S)
+    if (prev_at is not None and prev_ttl is not None and cid not in t.woken
+            and not _his_fill_since(fills, prev_at) and not recent):
+        ttl = min(max(base, prev_ttl) * 2.0, float(UNMAPPED_TTL_MAX_S))
+    _unmapped_until[key] = t.now + ttl
+    _unmapped_memo[key] = (float(t.now), float(ttl))
+    return ttl
+
+
+def _memo_at(m: Any) -> float | None:
+    """The read's `at` off a memo entry: the unmapped memo's (at, ttl)
+    tuple or the no_mark memo's bare instant; unreadable is None."""
+    if isinstance(m, tuple):
+        return _num(m[0]) if m else None
+    return _num(m)
+
+
+def _memo_no_mark(t: _Tick, whale: str, cid: str, r: _Reading) -> bool:
+    """The no_mark memo's ONE writer: a CANDIDATE's quote read (never a
+    book's: _tick_book never calls this) that found the market OPEN --
+    the venue's own state on that read, `r.venue_state` -- with no mark
+    to read (`r.mark` None: an empty book, or a bid with no ask). A
+    HALTED / SUSPENDED / PREOPEN read (those reopen), a read naming no
+    state and a read that raised write nothing (D1's rule for the
+    terminal memo, the same reason). Returns whether it was written."""
+    if r.mark is not None or r.venue_state != _STATE_OPEN:
+        return False
+    key = (whale, cid)
+    _no_mark_until[key] = t.now + float(NO_MARK_TTL_S)
+    _no_mark_memo[key] = float(t.now)
+    return True
+
+
+def _release_cand_memo(t: _Tick, whale: str, cid: str, stamp: float | None) -> None:
+    """RELEASE BY HIS FILLS, at the walk: a memoised market (either
+    memo) whose newest fill of his (`stamp`, the `last_ts` the
+    candidate order ranks on) is NEWER than the memo's `at`, or that
+    WOKE this tick, is read this tick -- the memo dropped, counted
+    `cand_memo_released` when it still held. An `until` with no `at`
+    beside it is released by any readable stamp (fail closed: read). A
+    stamp the walk could not read (None) releases nothing: no evidence
+    of a newer fill, the memo's own TTL stands."""
+    key = (whale, cid)
+    woken = cid in t.woken
+    for until_d, memo_d in ((_unmapped_until, _unmapped_memo), (_no_mark_until, _no_mark_memo)):
+        if key not in until_d:
+            continue
+        at = _memo_at(memo_d.get(key))
+        if not (woken or (stamp is not None and (at is None or float(stamp) > at))):
+            continue
+        until = _num(until_d.get(key))
+        live = until is not None and until > t.now
+        until_d.pop(key, None)
+        memo_d.pop(key, None)
+        if live:
+            _mirror_stop("cand_memo_released", whale)
+
+
+def _cand_memo_skips(whale: str, cid: str, now: float, stamp: float | None, woken: set) -> bool:
+    """Would either candidate memo skip this market at `now`, once his
+    newest fill is judged against it (the walk's release rule, judged
+    without dropping anything)? For _name_unread: a market the memo
+    would have skipped anyway is not one the cap cut."""
+    key = (whale, cid)
+    if cid in woken:
+        return False
+    for until_d, memo_d in ((_unmapped_until, _unmapped_memo), (_no_mark_until, _no_mark_memo)):
+        at = _memo_at(memo_d.get(key))
+        until = _num(until_d.get(key))
+        if until is None or until <= now:
+            continue
+        if stamp is not None and (at is None or float(stamp) > at):
+            continue                        # his newer fill: it would have been read
+        return True
+    return False
+
+
+def _prune_cand_memos(now: float) -> None:
+    """Drop every candidate memo entry UNMAPPED_TTL_MAX_S past its
+    `until` (the growth it could still inform is a re-read that never
+    came: the market left his active list or sat behind the cap for an
+    hour -- it restarts at the base), and any `at` entry with no
+    `until` beside it. Bounded by his active conditions, like the
+    dicts themselves."""
+    cut = float(now) - float(UNMAPPED_TTL_MAX_S)
+    for until_d, memo_d in ((_unmapped_until, _unmapped_memo), (_no_mark_until, _no_mark_memo)):
+        for k in [k for k, u in until_d.items() if _num(u) is None or float(u) < cut]:
+            until_d.pop(k, None)
+            memo_d.pop(k, None)
+        for k in [k for k in memo_d if k not in until_d]:
+            memo_d.pop(k, None)
+
+
+def _cand_memo_snapshot(now: float) -> dict:
+    """Both candidate memos, bounded the terminal memos' way: every
+    entry whose `until` has passed dropped, one with no readable `at`
+    (or TTL) beside it dropped (nothing to judge a release by after a
+    deploy: the market is read), at most _TERMINAL_MEMO_MAX per list,
+    the soonest to expire dropped first, sorted so the same memo is the
+    same text."""
+    un, nm = [], []
+    for (w, c), u in _unmapped_until.items():
+        m = _unmapped_memo.get((w, c))
+        if _num(u) is None or float(u) <= now or not (isinstance(m, tuple) and len(m) == 2):
+            continue
+        at, ttl = _num(m[0]), _num(m[1])
+        if at is None or ttl is None:
+            continue
+        un.append([str(w), str(c), round(float(u), 1), round(at, 1), round(ttl, 1)])
+    for (w, c), u in _no_mark_until.items():
+        at = _num(_no_mark_memo.get((w, c)))
+        if _num(u) is None or float(u) <= now or at is None:
+            continue
+        nm.append([str(w), str(c), round(float(u), 1), round(at, 1)])
+    un.sort(key=lambda e: (-e[2], e[0], e[1]))
+    nm.sort(key=lambda e: (-e[2], e[0], e[1]))
+    return {"unmapped": un[:_TERMINAL_MEMO_MAX], "no_mark": nm[:_TERMINAL_MEMO_MAX]}
+
+
+def _cand_memo_entry_ok(e: Any, n: int, now: float, max_ttl: float) -> bool:
+    """One persisted entry's shape: [whale, cid, until, at(, ttl)] with
+    strings, a finite `until` still ahead, a finite `at` not ahead of
+    `now` and not past `until`, the memo no longer than `max_ttl` (an
+    entry written under a wider rail than today's is dropped: the
+    lowered rail is honoured, the market read) and, for the unmapped
+    memo, a TTL on the ladder [base, UNMAPPED_TTL_MAX_S] that the
+    `until` respects. Anything else is dropped, never guessed."""
+    if not (isinstance(e, list) and len(e) == n and isinstance(e[0], str) and isinstance(e[1], str)):
+        return False
+    until, at = _num(e[2]), _num(e[3])
+    if until is None or at is None or until <= now or at > now or at > until or until - at > max_ttl + 1e-3:
+        return False
+    if n == 5:
+        ttl = _num(e[4])
+        if ttl is None or ttl < float(ms.UNMAPPED_TTL_S) or ttl > float(UNMAPPED_TTL_MAX_S) or until - at > ttl + 1e-3:
+            return False
+    return True
+
+
+async def _load_cand_memo(t: _Tick) -> None:
+    """The one boot read of the candidate memos (E7), the terminal
+    memos' idiom: unreadable or malformed, the memos stay empty (a
+    deploy reads everything, today's behaviour) and the reason is
+    logged; an entry _cand_memo_entry_ok refuses is dropped."""
+    value, err = await _state(t.pool, _STATE_CAND_MEMO)
+    loaded = 0
+    if err is not None or (value is not None and not isinstance(value, dict)):
+        log.warning("mirror_live: %s unreadable (%s); the candidate memos start empty",
+                    _STATE_CAND_MEMO, err or type(value).__name__)
+    elif isinstance(value, dict):
+        un, nm = value.get("unmapped"), value.get("no_mark")
+        for e in (un if isinstance(un, list) else []):
+            if _cand_memo_entry_ok(e, 5, t.now, float(UNMAPPED_TTL_MAX_S)):
+                _unmapped_until[(e[0], e[1])] = float(e[2])
+                _unmapped_memo[(e[0], e[1])] = (float(e[3]), float(e[4]))
+                loaded += 1
+        for e in (nm if isinstance(nm, list) else []):
+            if _cand_memo_entry_ok(e, 4, t.now, float(NO_MARK_TTL_S)):
+                _no_mark_until[(e[0], e[1])] = float(e[2])
+                _no_mark_memo[(e[0], e[1])] = float(e[3])
+                loaded += 1
+    _cand_memo_last.update(at=float(t.now), sig=_terminal_memo_sig(_cand_memo_snapshot(t.now)))
+    if loaded:
+        log.info("mirror_live: %d candidate memo entries read at boot", loaded)
+
+
+async def _persist_cand_memo(t: _Tick) -> None:
+    """The candidate memos' bounded snapshot, written when it changed
+    and at most once per TERMINAL_MEMO_WRITE_S, never before the boot
+    read (E6 review MEDIUM-5), a failed write logged and retried on a
+    later tick. Never raises."""
+    if not _terminal_memo_loaded:
+        return
+    snap = _cand_memo_snapshot(t.now)
+    sig = _terminal_memo_sig(snap)
+    if sig == _cand_memo_last.get("sig"):
+        return
+    if float(t.now) - float(_cand_memo_last.get("at") or 0.0) < TERMINAL_MEMO_WRITE_S:
+        return
+    try:
+        await _write_state(t.pool, _STATE_CAND_MEMO, {**snap, "at": _iso(float(t.now))})
+    except Exception as exc:  # noqa: BLE001 — a memo that did not persist is the old behaviour
+        log.warning("mirror_live: %s write failed (%s)", _STATE_CAND_MEMO, type(exc).__name__)
+        return
+    _cand_memo_last.update(at=float(t.now), sig=sig)
 
 
 def _memo_terminal_book(t: _Tick, book: dict, r: _Reading) -> None:
@@ -8081,14 +8412,14 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
             _mirror_stop("map_reads_capped", w)
             return "map_reads_capped"
         _mirror_stop("unmapped", w)
-        _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
+        _memo_unmapped(t, w, cid, fills)    # E7: the TTL grows while nothing of his lands
         return "unmapped"
     src = str(m.get("source") or "")
     if src not in MIRROR_LIVE_MAP_SRC and src != "grammar":
         # a mapping class no lane has certified opens no book, whatever
         # the quarantine says (MIRROR_LIVE_MAP_SRC); the shadow measures it
         _mirror_stop("map_source_unverified", w)
-        _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
+        _memo_unmapped(t, w, cid, fills)
         return "map_source_unverified"
     slug, la, oa = m["us_slug"], m["long_asset"], m.get("other_asset")
     d.update(slug=slug, long_asset=la)
@@ -8105,7 +8436,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
         if held:
             _mirror_stop(held, w)
             if held != "grammar_probation":
-                _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
+                _memo_unmapped(t, w, cid, fills)
             return held
     if not la:
         # THE LONG TOKEN HIS FILLS NEVER TOUCHED (W2 / P1, class B of
@@ -8132,7 +8463,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
             la = str(la) if la else None
         if not la:
             _mirror_stop("long_token_unknown", w)
-            _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
+            _memo_unmapped(t, w, cid, fills)
             return "long_token_unknown"
         d.update(long_asset=la, long_from="catalogue")
     if (w, cid) in t.books_seen:
@@ -8208,6 +8539,11 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     d["target"] = tg.get("target")
     if tg.get("refusal"):
         _mirror_stop(tg["refusal"], w)
+        if tg["refusal"] == "no_mark":
+            # E7: an OPEN market with no mark is remembered for
+            # NO_MARK_TTL_S (released by his next fill); a non-OPEN or
+            # unread state writes nothing (_memo_no_mark)
+            _memo_no_mark(t, w, cid, r)
         return str(tg["refusal"])
     if room < cap:
         full = rules.mirror_target(ratio, net, r.mark, rules.MIRROR_CLIP_USD,
@@ -8484,12 +8820,16 @@ def _candidate_order(conds: list, woken, planned, cursor: str | None) -> list:
     return first + rot
 
 
-def _name_unread(t: _Tick, whale: str, unread: list) -> None:
+def _name_unread(t: _Tick, whale: str, unread: list, stamps: dict | None = None) -> None:
     """The candidates the cap left unread this tick, each named
     `cand_unread_capped` (W2 / P2) -- never one a memo or a book would
-    have skipped anyway: those spend no slot and were not cut."""
+    have skipped anyway: those spend no slot and were not cut. E7: a
+    candidate memo his newer fill (`stamps`, the walk's) would have
+    released is one the cap DID cut, and is named."""
     for cid in unread:
-        if (whale, cid) in t.books_seen or _unmapped_until.get((whale, cid), 0.0) > t.now:
+        if (whale, cid) in t.books_seen:
+            continue
+        if _cand_memo_skips(whale, cid, t.now, (stamps or {}).get(cid), t.woken):
             continue
         if _terminal_until.get((whale, cid), 0.0) > t.now:
             continue
@@ -8572,8 +8912,12 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             # this one (served whole, `.detail.short.timing`). The raw
             # heartbeat, the ops line and the mode line's `t=` carry it too
             stats.setdefault("short", {})["timing"] = _timing_block(t)
+            # E7 part B: the data-API wait, beside the timing block (whose
+            # keys are pinned exactly); the same home, served whole
+            stats["short"]["data_api"] = _data_api_block(t)
             _publish_fills_dedup(t)
             await _persist_terminal_memo(t)     # E6 part 3: bounded, once per 60 s, on change
+            await _persist_cand_memo(t)         # E7: the candidate memos, the same rules, their own key
             _last_loss = t.loss         # L1: the mode line's `loss=` fragment
             _last_sleeve = t.sleeve     # L2: its `sleeve=` fragment
             _current_stats = None
@@ -8668,6 +9012,7 @@ async def _tick(t: _Tick, woken: list) -> None:
     if not _terminal_memo_loaded:
         _terminal_memo_loaded = True
         await _load_terminal_memo(t)
+        await _load_cand_memo(t)            # E7: the candidate memos, the same one boot read
     await _read_mode(t)
     if t.mode != MODE_SAFE and le.active_venue() != "polymarket-us":
         _mirror_stop("no_venue")
@@ -8774,6 +9119,7 @@ async def _tick(t: _Tick, woken: list) -> None:
     t.cand_budget = _cand_budget(t)
     t.map_budget.cap = _map_cap(t.cand_budget)
     t.cand_cap = _cand_cap(t)
+    _prune_cand_memos(t.now)                # E7: the memos an hour past their until
     cands_t0 = time.monotonic()
     for w in sorted(t.allow):
         if t.abandoned:
@@ -8783,10 +9129,15 @@ async def _tick(t: _Tick, woken: list) -> None:
             _mirror_stop(refusal, w)         # a whale who may not open a book, by name
             continue
         try:
-            conds = await ms.active_conditions(t.pool, w)
+            # E7: the same one read, with the `last_ts` it ranks on -- his
+            # newest fill per market, what releases a candidate memo
+            stamped = await ms.active_conditions(t.pool, w, stamped=True)
         except Exception as exc:  # noqa: BLE001
             log.warning("mirror_live: active markets for %s unreadable (%s)", w, type(exc).__name__)
             continue
+        conds = [c for c, _ in stamped]
+        stamps = {c: s for c, s in stamped}
+        t.stamps.update(stamps)
         t.active_conds[w] = len(conds)
         wk = set(woken)
         cursor = _cand_cursor.get(w)
@@ -8816,7 +9167,18 @@ async def _tick(t: _Tick, woken: list) -> None:
                 stats["capped_tick"] = True
                 unread, capped = conds[i:], True
                 break
-            if (w, cid) in t.books_seen or _unmapped_until.get((w, cid), 0.0) > t.now:
+            if (w, cid) in t.books_seen:
+                continue
+            # E7: his newer fill (or a wake) drops a candidate memo BEFORE
+            # it is checked -- the market is read this tick
+            _release_cand_memo(t, w, cid, stamps.get(cid))
+            if _unmapped_until.get((w, cid), 0.0) > t.now:
+                continue
+            if _no_mark_until.get((w, cid), 0.0) > t.now:
+                # its last candidate read found the market OPEN with no
+                # mark (E7): no slot spent on it until the memo's TTL
+                # runs or his next fill lands
+                _mirror_stop("cand_no_mark_skipped", w)
                 continue
             if _terminal_until.get((w, cid), 0.0) > t.now:
                 # its last candidate read said the market had ended (D1):
@@ -8854,7 +9216,7 @@ async def _tick(t: _Tick, woken: list) -> None:
         elif not capped and not t.abandoned:
             _cand_cursor.pop(w, None)
             _cand_trail.pop(w, None)
-        _name_unread(t, w, unread)
+        _name_unread(t, w, unread, stamps)
     t.timing["candidates"] += time.monotonic() - cands_t0
     await _flush_candidate_refusals(t)
     await _instruments(t)

@@ -858,8 +858,13 @@ def test_three_open_empty_candidates_are_refused_no_quote_and_the_walk_goes_on(c
     # game (E1 re-review, `_game_full_until`: its rest read
     # `order_state_unknown` at NOW + 30, so the game was `game_unreadable`
     # and its candidates are skipped for GAME_FULL_MEMO_S) is module
-    # state and would skip c1..c3 before their read
+    # state and would skip c1..c3 before their read -- and so is E7's
+    # no_mark memo of their OPEN-empty reads above (`_no_mark_until`,
+    # `cand_no_mark_skipped` until his next fill or NO_MARK_TTL_S)
     ml._game_full_until.clear()
+    assert set(ml._no_mark_until) == {("rn1", "c1"), ("rn1", "c2"), ("rn1", "c3")}, "the three memoised (E7)"
+    ml._no_mark_until.clear()
+    ml._no_mark_memo.clear()
     p = _pool(conds=["c1", "c2", "c3"])
     b = p.add_book(ledger=0)
     v = _SeqVenue([_Q, _E, _E, _E])
@@ -885,6 +890,11 @@ def test_an_open_empty_read_neither_steps_nor_resets_the_streak():
     assert st["abandoned"] and st["abandon_reason"] == "venue_halted" and st["reads"] == 4
     assert _census(st, "no_quote") == 1 and _census(st, "venue_halted") == 3, st["census"]
     assert ml._backoff_until == NOW + ms.BACKOFF_S
+    # a fresh world: E7's no_mark memo of c1's OPEN-empty read is module
+    # state and would skip c1 before its read (the HALTED reads wrote none)
+    assert set(ml._no_mark_until) == {("rn1", "c1")}
+    ml._no_mark_until.clear()
+    ml._no_mark_memo.clear()
     p = _pool(conds=["c1", "c2", "c3", "c4", "c5"])
     v = _SeqVenue([_H, _H, _Q, _H, _H])
     st = _tick(p, v)

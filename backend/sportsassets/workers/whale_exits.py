@@ -530,7 +530,8 @@ async def _confirm_gone(http: httpx.AsyncClient, pool, address: str,
 
 async def market_positions(http: httpx.AsyncClient, address: str,
                            condition_id: str, *,
-                           long_asset: str | None = None) -> dict | None:
+                           long_asset: str | None = None,
+                           timing: dict | None = None) -> dict | None:
     """ONE per-market read of what a whale holds on BOTH tokens of a
     condition (to-a-tee Phase 1, owner order 2026-09-02: "I want us to
     match everything ... mirror the whales to a tee").
@@ -578,11 +579,21 @@ async def market_positions(http: httpx.AsyncClient, address: str,
     The mirror will make this call once per book per tick, a load
     `_confirm_gone` (vanish-only) never put on that budget, so the read
     waits on that throttle first. `_confirm_gone` is left byte-identical.
+
+    `timing` (E7, 2026-09-07; the mirror's `books_data_wait` /
+    `books_data_req`): when a dict is handed in, the seconds this call
+    spent WAITING on the throttle are added to its `wait` and the
+    seconds from the request's start to the call's end to its `req`,
+    whatever the call returned -- measurement only; the wait, the
+    request and what is read are untouched.
     """
     from ..ratelimit import data_api_throttle
 
+    t0 = time.monotonic()
+    t1: float | None = None
     try:
         await data_api_throttle().wait()
+        t1 = time.monotonic()
         resp = await http.get("/positions", params={
             "user": address, "market": condition_id, "limit": 100,
             "sizeThreshold": 0})
@@ -620,6 +631,13 @@ async def market_positions(http: httpx.AsyncClient, address: str,
                 "long": long_size, "complete": True, "ts": time.time()}
     except Exception:  # noqa: BLE001 -- unknown is not a position
         return None
+    finally:
+        if timing is not None:
+            # the split, summed per call: a call cut short inside the
+            # wait (a caller's timeout) is all wait
+            end = time.monotonic()
+            timing["wait"] = float(timing.get("wait") or 0.0) + ((t1 if t1 is not None else end) - t0)
+            timing["req"] = float(timing.get("req") or 0.0) + ((end - t1) if t1 is not None else 0.0)
 
 
 def _finite_size(raw: Any) -> float | None:

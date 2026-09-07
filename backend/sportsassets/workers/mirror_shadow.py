@@ -71,6 +71,7 @@ import os
 import re
 import time
 from collections import Counter
+from datetime import datetime
 from typing import Any
 
 from ..analytics import mirror as mi
@@ -341,9 +342,17 @@ async def refresh_ratios(pool, whales: list[str], force: bool = False) -> dict[s
 
 # ------------------------------------------------------------ his book
 
-async def active_conditions(pool, whale: str, hours: float = LOOKBACK_H) -> list[str]:
+async def active_conditions(pool, whale: str, hours: float = LOOKBACK_H, *,
+                            stamped: bool = False) -> list:
     """His markets with activity in the window, NEWEST FIRST, so the
-    per-tick cap always reads the market he just moved in."""
+    per-tick cap always reads the market he just moved in.
+
+    `stamped` (E7, 2026-09-07) hands back `(condition_id, last_ts)`
+    pairs instead -- the very `last_ts` this query already ranks on, as
+    an epoch float, None where the row carries none or it cannot be
+    read as an instant -- so the live lane's candidate memos can be
+    RELEASED by his newest fill without a read of their own. The same
+    one query either way."""
     rows = await pool.fetch(
         """
         SELECT t.condition_id, max(t.ts) AS last_ts
@@ -353,7 +362,25 @@ async def active_conditions(pool, whale: str, hours: float = LOOKBACK_H) -> list
          GROUP BY t.condition_id
          ORDER BY last_ts DESC
         """, whale, float(hours))
+    if stamped:
+        return [(str(r["condition_id"]), _stamp_epoch(r.get("last_ts"))) for r in rows]
     return [str(r["condition_id"]) for r in rows]
+
+
+def _stamp_epoch(v: Any) -> float | None:
+    """A fill stamp as an epoch float: a timestamptz (the column's
+    type, an aware datetime from the driver) or a finite number; a
+    naive datetime, anything else and an unreadable value are None --
+    no evidence, never a guessed instant."""
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            return None
+        return float(v.timestamp())
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if math.isfinite(float(v)) else None
+    return None
 
 
 # THE SOURCES THAT WRITE THE WALLET'S OWN NET LEGS (D1, 2026-09-06). The

@@ -1112,6 +1112,12 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_quiet_deferred", {}, raising=False)
     monkeypatch.setattr(ml, "_terminal_memo_loaded", True, raising=False)
     monkeypatch.setattr(ml, "_terminal_memo_last", {"at": 0.0, "sig": None}, raising=False)
+    # E7: the candidate memos' `at` beside _unmapped_until, the no_mark
+    # memo and its `at`, and the persisted key's last write
+    monkeypatch.setattr(ml, "_unmapped_memo", {}, raising=False)
+    monkeypatch.setattr(ml, "_no_mark_until", {}, raising=False)
+    monkeypatch.setattr(ml, "_no_mark_memo", {}, raising=False)
+    monkeypatch.setattr(ml, "_cand_memo_last", {"at": 0.0, "sig": None}, raising=False)
     monkeypatch.setattr(ml, "_rearm_malformed_logged", False)   # L1: the malformed re-arm key's one line
     monkeypatch.setattr(ml, "_last_loss", None)                  # L1: the mode line's loss window
     monkeypatch.setattr(ml, "_last_sleeve", None)                # L2: its sleeve reading
@@ -4258,6 +4264,11 @@ def test_an_open_empty_book_is_no_quote_and_a_closed_quoted_book_is_venue_halted
     assert st["venue_state"] == "MARKET_STATE_OPEN" and not st["abandoned"]
     assert not p.books and not _places(v)
     # the SDK's typed shape, no state at all: the same empty-open reading
+    # (a fresh world: E7's no_mark memo of the OPEN empty read cleared,
+    # as the D1 memo is below -- the process remembers the market)
+    assert ml._no_mark_until == {("rn1", CID): NOW + ml.NO_MARK_TTL_S}, "an OPEN empty book is memoised (E7)"
+    ml._no_mark_until.clear()
+    ml._no_mark_memo.clear()
     p = _pool()
     st = _tick(p, _Venue(bid=None, ask=None, state=None))
     assert _census(st, "no_quote") == 1 and _census(st, "venue_halted") == 0 and st["venue_state"] is None
@@ -4729,7 +4740,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-59:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-61:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4776,11 +4787,14 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E5 review: the fill-this-tick refusal, the unexplained surplus, the
                           # registered book's no-increase -- before the last key
                           "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
+                          # E7: the no_mark memo's skip and a candidate memo released
+                          # by his fill, before E6's key (which the E6 pins hold at -2)
+                          "cand_no_mark_skipped", "cand_memo_released",
                           # E6: a quiet book's read skipped under the tick's budget
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-60] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-62] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -7275,10 +7289,11 @@ def _tick_wall(p, v, **kw):
 
 def _comparable(st):
     """The tick's stats less what wall time and interleaving order move
-    (E6: the timing block inside `short` is wall time too)."""
+    (E6: the timing block inside `short` is wall time too; E7: so is
+    the data-API block beside it)."""
     out = {k: v for k, v in st.items() if k not in ("recent", "tick_s")}
     if isinstance(out.get("short"), dict):
-        out["short"] = {k: v for k, v in out["short"].items() if k != "timing"}
+        out["short"] = {k: v for k, v in out["short"].items() if k not in ("timing", "data_api")}
     return out
 
 
@@ -12260,6 +12275,36 @@ def test_w2_target_zero_is_named(monkeypatch):
     st = _tick(p, v)
     assert _census(st, "target_zero") == 1 and not p.books and not _places(v)
     assert [(r["refusal"], r["target"], r["his_net"]) for r in p.cand_refusals] == [("target_zero", 0, 300.0)]
+
+
+def test_e7_a_no_mark_candidate_is_memoised_and_released_by_his_newer_fill():
+    """E7 (the pins are test_e7_cand_memo.py's; this one keeps the
+    file's every-name census whole): an OPEN empty book memoises the
+    candidate (`cand_no_mark_skipped` next tick, no quote read), and a
+    stamp newer than the memo's `at` -- the `last_ts` the candidate
+    order ranks on -- drops it (`cand_memo_released`) and reads it."""
+    from datetime import datetime, timezone
+
+    class _Stamped(_Pool):
+        stamp = None
+
+        async def fetch(self, sql, *a):
+            if "SELECT t.condition_id, max(t.ts) AS last_ts" in _flat(sql):
+                return [{"condition_id": CID, "last_ts": self.stamp}]
+            return await super().fetch(sql, *a)
+
+    p = _Stamped(fills=_his(), snap={M: 300.0, N: 0.0}, snap_at=NOW - 40, ratio_fills=_ratio_fills())
+    v = _Venue(bid=None, ask=None)
+    st = _tick(p, v)
+    assert _census(st, "no_mark") == 1 and "bbo" in _kinds(v)
+    assert ml._no_mark_until == {("rn1", CID): NOW + ml.NO_MARK_TTL_S} and ml._no_mark_memo == {("rn1", CID): NOW}
+    v.calls.clear()
+    st2 = _tick(p, v, now=NOW + 30)
+    assert _census(st2, "cand_no_mark_skipped") == 1 and "bbo" not in _kinds(v) and _census(st2, "no_mark") == 0
+    p.stamp = datetime.fromtimestamp(NOW + 10, tz=timezone.utc)
+    st3 = _tick(p, v, now=NOW + 60)
+    assert _census(st3, "cand_memo_released") == 1 and "bbo" in _kinds(v) and _census(st3, "no_mark") == 1
+    assert ml._no_mark_memo == {("rn1", CID): NOW + 60}, "read again, memoised again on this read"
 
 
 def test_w2_the_walks_cap_names_every_candidate_it_left_unread(monkeypatch):
