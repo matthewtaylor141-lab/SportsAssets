@@ -3998,6 +3998,140 @@ jobs:
               print(f"  contrast ERR {type(e).__name__}: {str(e)[:100]}")
           PY
 
+      - name: PREMAP-TEAM - does a cfb side bind its mascot to a school?
+        if: always()
+        run: |
+          pip install --quiet polymarket-us 2>/dev/null || pip install polymarket-us
+          echo "###########################################################"
+          echo "#   PREMAP-TEAM: the one fact the C6 cfb lane hangs on    #"
+          echo "###########################################################"
+          # gap_cfb.md section 0 (2026-09-07): every stored cfb row names
+          # the mascot ('cardinals' / 'rebels') on the side and the school
+          # ('Louisville vs. Ole Miss') on the event, and NO stored row
+          # names both together -- the only tie is ORDER, which is the
+          # positional assumption C1 refuses (docs section 7.2). The one
+          # non-positional candidate is the venue's own `team` / `teamId`
+          # on marketSides[i] (SDK Team = {id, name, abbreviation, league,
+          # alias, safeName, ...}), which the sweep drops (premap
+          # _market_rows stores only the description) and no probe has
+          # ever printed for a cfb market. Read it ONCE per slug on the
+          # SIDE-TRUTH road above (markets.retrieve_by_slug, the same
+          # per-slug read pmus.py makes), print description / team /
+          # teamId verbatim on every side, the market's own team field
+          # (a contract market may carry it on the market, not a side),
+          # and for the aec moneyline the event's title (one
+          # events.retrieve_by_slug on the market's eventSlug -- the
+          # title the sweep stores as us_premap.event_title). Nothing is
+          # ordered, nothing is written. Bounded like BIDGT: a per-request
+          # SDK timeout and a wall-clock budget, so a halted venue prints
+          # ERR lines instead of hanging the job.
+          python - <<'PY'
+          import json
+          import time as _time
+          from datetime import datetime as _dt, timedelta as _td
+          from datetime import timezone as _tz
+          from polymarket_us import PolymarketUS
+
+          pub = PolymarketUS(timeout=20.0)
+          _T0 = _time.monotonic()
+          _BUDGET_S = 120.0
+          SLUGS = ["aec-cfb-smu-flst-2026-09-07",
+                   "aec-cfb-lou-miss-2026-09-06",
+                   "atc-cfb-wisc-nd-2026-09-06-winner-1h-nd",
+                   "atc-cfb-lou-miss-2026-09-06-winner-1h-miss"]
+
+          def _left():
+              return _BUDGET_S - (_time.monotonic() - _T0)
+
+          def _j(v):
+              return json.dumps(v, default=str, sort_keys=True) if v is not None else "null"
+
+          def _read(slug):
+              """One retrieve_by_slug; (market, None) or (None, why)."""
+              try:
+                  m = (pub.markets.retrieve_by_slug(slug) or {}).get("market") or {}
+              except Exception as e:
+                  return None, f"ERR {type(e).__name__}: {str(e)[:100]}"
+              if not m.get("slug"):
+                  return None, "NOT FOUND"
+              return m, None
+
+          def _print_market(slug, m):
+              sides = [s for s in (m.get("marketSides") or []) if isinstance(s, dict)]
+              print(f"PREMAP-TEAM {slug} market.slug={m.get('slug')!r} "
+                    f"eventSlug={str(m.get('eventSlug') or m.get('event_slug'))!r} "
+                    f"question={str(m.get('question'))[:90]!r} "
+                    f"outcome={str(m.get('outcome'))[:40]!r} sides={len(sides)}")
+              # the market's OWN team field (SDK MarketDetail.team)
+              print(f"PREMAP-TEAM {slug} market team={_j(m.get('team'))} "
+                    f"teamId={m.get('teamId')!r}")
+              for i, s in enumerate(sides):
+                  print(f"PREMAP-TEAM {slug} side[{i}] "
+                        f"description={str(s.get('description'))!r} "
+                        f"team={_j(s.get('team'))} teamId={s.get('teamId')!r} "
+                        f"long={s.get('long')!r} identifier={str(s.get('identifier'))!r}")
+              if slug.startswith("aec-"):
+                  ev_slug = m.get("eventSlug") or m.get("event_slug")
+                  if not ev_slug:
+                      print(f"PREMAP-TEAM {slug} event.title=<market carries no eventSlug>")
+                      return
+                  try:
+                      ev = (pub.events.retrieve_by_slug(ev_slug) or {}).get("event") or {}
+                      print(f"PREMAP-TEAM {slug} event.slug={ev.get('slug')!r} "
+                            f"event.title={str(ev.get('title'))!r}")
+                  except Exception as e:
+                      print(f"PREMAP-TEAM {slug} event.title=ERR "
+                            f"{type(e).__name__}: {str(e)[:100]}")
+
+          for slug in SLUGS:
+              if _left() <= 0:
+                  print(f"PREMAP-TEAM {slug} SKIPPED (wall-clock budget {int(_BUDGET_S)}s)")
+                  continue
+              m, why = _read(slug)
+              if m is None:
+                  print(f"PREMAP-TEAM {slug} -> {why}")
+                  continue
+              _print_market(slug, m)
+
+          # Tennis control: one live aec-atp- market, found off ONE page of
+          # the sweep's own start-time-bounded events.list (BIDGT's window,
+          # no per-event reads), then read on the same per-slug road so the
+          # two families are compared on identical fields. Skipped, and
+          # said so, when the page holds none or the budget is spent.
+          ctrl = None
+          if _left() > 0:
+              _now = _dt.now(_tz.utc)
+              _iso = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")
+              try:
+                  resp = pub.events.list({"active": True, "closed": False,
+                                          "startTimeMin": _iso(_now - _td(hours=6)),
+                                          "startTimeMax": _iso(_now + _td(hours=72)),
+                                          "limit": 25, "offset": 0})
+                  evs = list((resp.get("events") if isinstance(resp, dict)
+                              else resp) or [])
+                  for ev in evs:
+                      for m in (ev.get("markets") or []):
+                          if isinstance(m, dict) and str(m.get("slug") or "").startswith("aec-atp-"):
+                              ctrl = m.get("slug")
+                              break
+                      if ctrl:
+                          break
+              except Exception as e:
+                  print(f"PREMAP-TEAM control events.list ERR {type(e).__name__}: {str(e)[:100]}")
+          if not ctrl:
+              print("PREMAP-TEAM control SKIPPED (no aec-atp- market on the first "
+                    f"events.list page, or budget spent; {int(_left())}s left)")
+          elif _left() <= 0:
+              print(f"PREMAP-TEAM {ctrl} SKIPPED (wall-clock budget {int(_BUDGET_S)}s)")
+          else:
+              m, why = _read(ctrl)
+              if m is None:
+                  print(f"PREMAP-TEAM {ctrl} -> {why}")
+              else:
+                  _print_market(ctrl, m)
+          print(f"PREMAP-TEAM done ({int(_time.monotonic() - _T0)}s)")
+          PY
+
   mirror-cover:
     # OWN JOB, like side-truth and for the same reason: the probe step is
     # at its budget and GitHub truncates the log after it, and this one
