@@ -427,7 +427,25 @@ def market_type_of(slug: str) -> str:
         return "spread"
     if len(suffix) == 1 and suffix[0].isalpha():
         return "moneyline"        # team-code pick side
+    # THE DIGIT TEAM CODE (M1, 2026-09-07; gap_new_families.md §1.7). A
+    # team code carrying a digit -- 'chi1-cdp-cu1-2026-09-06-cu1',
+    # 'bra-cor1-cha-…-cor1', 'arg-riv-riv1-…-riv1', 'ere-her1-az-…-her1'
+    # ($14.7k/30 h of his moneylines) -- failed the isalpha test above
+    # and typed 'unknown' (unknown_market_type:unparsed), although his
+    # own slug names that very token as one of its two teams before the
+    # date. Identity from his slug and nothing else: the lone token must
+    # EQUAL one of those two codes. Any other alnum token ('cu2',
+    # 'game2') stays unknown, never tradeable.
+    if len(suffix) == 1 and suffix[0] in _slug_team_codes(parts, suffix):
+        return "moneyline"
     return "unknown"
+
+
+def _slug_team_codes(parts: list[str], suffix: list[str]) -> tuple[str, ...]:
+    """The two team codes of a kindless <lg>-<a>-<b>-<date>… slug, read
+    before the date; () for any other head shape."""
+    head = parts[:len(parts) - len(suffix) - 3]
+    return tuple(head[1:3]) if len(head) == 3 else ()
 
 
 # ── THE FEED'S DERIVATIVE FAMILIES, READ FINER THAN market_type_of (C3,

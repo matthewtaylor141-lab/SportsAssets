@@ -252,13 +252,16 @@ class TestTheSevenFeedRowsAgainstTheDump:
 class TestTheLeagueSlotIsALeagueNotAClub:
     @pytest.mark.parametrize("lg", ["serie a", "la liga", "ligue 1", "primeira liga",
                                     "liga argentina", "eliteserien", "ekstraklasa",
-                                    "bundesliga", "premier league", "k league 1"])
+                                    "bundesliga", "premier league", "k league 1",
+                                    # M1 (2026-09-07): the venue's own phrase on
+                                    # every srb row -- the tier letter after 'serie'
+                                    "serie b"])
     def test_real_league_names_pass(self, lg):
         assert pmus._yn_league_slot_bad(lg) is False
 
     @pytest.mark.parametrize("lg", ["serie a u21", "serie a women", "primavera", "primavera 1",
-                                    "serie b", "liga f", "serie a reserves", "esoccer battle",
-                                    "gt leagues", "", "a", "serie a friendly",
+                                    "serie b women", "primavera b", "liga f", "serie a reserves",
+                                    "esoccer battle", "gt leagues", "", "a", "b", "serie a friendly",
                                     "one two three four five six", "serie a play off"])
     def test_another_scope_refuses(self, lg):
         assert pmus._yn_league_slot_bad(lg) is True
@@ -270,7 +273,9 @@ class TestTheLeagueSlotIsALeagueNotAClub:
         slug, title, ev, oc = FEED[0]
         rows = _board()
         assert _short(_resolve(rows, slug, title, ev, oc)) == EXPECT[slug]
-        for lg in ("Serie A U21", "Serie A Women", "Primavera", "Serie B"):
+        # M1 (2026-09-07): 'Serie B' left this list -- it is the venue's own
+        # league phrase for the srb rows, not a scope (test_m1_identity_fixes)
+        for lg in ("Serie A U21", "Serie A Women", "Primavera", "Serie B Women"):
             q = (f"Will Juventus FC win against AC Milan in the {lg} match scheduled for "
                  f"Sep 6, 2026?")
             bad = _with_question(rows, "atc-sea-juv-mil-2026-09-06-juv", q)
@@ -310,10 +315,13 @@ class TestNamesWithDigits:
         assert not pmus._yn_name_match("bologna fc 1909", "bologna fc 1919")
         assert not pmus._yn_name_match("bologna fc 1909", "bologna fc")
 
-    def test_a_digit_in_his_own_subject_still_refuses_at_the_bridge_and_is_named(self, armed):
+    def test_a_digit_in_his_own_subject_maps_only_when_the_venue_restates_it(self, armed):
         """The whale-side pin (subject_has_digit, test_mapping_identity)
-        is untouched: 'Will Mainz 05 win ...' refuses, now under the
-        census name yn:name-digits."""
+        is untouched at the bridge. M1 P6 (2026-09-07) REVERSED this
+        pin's verdict by design: the C2 arm reads the venue's own row,
+        and 'Mainz 05' restated verbatim maps; a row that does not
+        restate the number keeps the census name yn:name-digits
+        (test_m1_identity_fixes pins the verbatim numbered clubs)."""
         q = ("Will Mainz 05 win against Eintracht Frankfurt in the Bundesliga match scheduled "
              "for Sep 6, 2026?")
         venue = {"aec-bun-mai-fra-2026-09-06": ("Mainz 05 vs. Eintracht Frankfurt", [
@@ -321,8 +329,12 @@ class TestNamesWithDigits:
         rows = _board(venue)
         args = (rows, "bun-mai-fra-2026-09-06-mai", "Will Mainz 05 win on 2026-09-06?",
                 "Mainz 05 vs. Eintracht Frankfurt", "Yes")
-        assert _resolve(*args) is None
-        ex = _explain(*args)
+        assert _short(_resolve(*args)) == ("atc-bun-mai-fra-2026-09-06-mai", LONG,
+                                           "premap_identity", None)
+        assert premap._bridge_title_subject(args[2], args[1]) == (None, "subject_has_digit")
+        bad = _with_question(rows, "atc-bun-mai-fra-2026-09-06-mai", q.replace("Mainz 05", "Mainz"))
+        assert _resolve(bad, *args[1:]) is None
+        ex = _explain(bad, *args[1:])
         assert ex["step"] == "no_side_match" and ex["split"] == "yn:name-digits"
 
 

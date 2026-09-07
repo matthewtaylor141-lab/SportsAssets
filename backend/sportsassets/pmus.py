@@ -1403,11 +1403,15 @@ _YN_DRAW_Q_RE = re.compile(
 # tokens, at least one token of three letters, no token or stem that
 # names a different SCOPE (u21, women, reserves, b, ii, primavera,
 # esoccer ...), adjacent-run joins included; a single letter refuses
-# unless it is 'a' (Serie A) or the word before 'league' ('K League
-# 1', 'J League' -- the venue lists kl1 tonight); Liga F -- the
-# women's league -- refuses, Serie B refuses through 'b'; a lone digit
-# is a league number ('ligue 1'). Refusal-widening additions carry
-# GENERIC_CLUB_TOKENS-grade review.
+# unless it is 'a' (Serie A), the word before 'league' ('K League
+# 1', 'J League' -- the venue lists kl1 tonight) or the word after
+# 'serie' ('Serie B' -- the venue's own league phrase on every srb
+# row, M1 2026-09-07: 'Will Hellas Verona FC win against SS Arezzo in
+# the Serie B match scheduled for Sep 6, 2026?', $25.7k refused
+# yn:league-slot on codes equal to the venue's); Liga F -- the
+# women's league -- refuses; a lone digit is a league number ('ligue
+# 1'). Refusal-widening additions carry GENERIC_CLUB_TOKENS-grade
+# review.
 _YN_LEAGUE_SCOPE = frozenset({
     "primavera", "youth", "junior", "juniors", "academy", "ladies",
     "girls", "boys", "u16", "u17", "u18", "u19", "u20", "u21", "u23",
@@ -1434,6 +1438,12 @@ def _yn_league_slot_bad(norm_text: str) -> bool:
     if not any(len(t) >= 3 and t.isalpha() for t in toks):
         return True
     for i, t in enumerate(toks):
+        if len(t) == 1 and t.isalpha() and toks[i - 1:i] == ["serie"]:
+            # the letter after 'serie' is the tier ('Serie B'), the
+            # venue's own league phrase -- not the reserve-side 'b' of
+            # the club screen (M1); every scope token and stem around
+            # it ('serie b women', 'primavera b') still refuses
+            continue
         if (t in _pm._BRIDGE_SCOPE_TOKENS or t in _YN_SCOPE_EXTRA
                 or t in _YN_LEAGUE_SCOPE
                 or t.startswith(_pm._BRIDGE_SCOPE_STEMS)):
@@ -1452,23 +1462,36 @@ def _yn_league_slot_bad(norm_text: str) -> bool:
 
 def _yn_slot_bad(norm_text: str) -> bool:
     """Scope screen for ANY free name slot: the bridge's reviewed
-    tokens + stems + single-letter rule + adjacent-run joins
-    (premap._has_scope_token), PLUS this lane's extra list with its
-    own 2-4-token adjacent joins, PLUS the bridge's 5-token name cap.
-    True = refuse. Empty is bad: a slot with no content corroborates
-    nothing."""
+    tokens + stems + adjacent-run joins (premap._has_scope_token's
+    lists, read here), PLUS this lane's extra list with its own
+    2-4-token adjacent joins, PLUS the bridge's 5-token name cap, PLUS
+    the single-LETTER rule _yn_league_slot_bad uses. True = refuse.
+    Empty is bad: a slot with no content corroborates nothing.
+
+    M1 P7 (2026-09-07; gap_soccer.md §7): '1. FSV Mainz 05' refused
+    every slot it appeared in -- _norm leaves a bare token '1' and the
+    bridge's single-CHARACTER rule read it as a scope letter (yn:scope
+    on -hsv, yn:draw-unwitnessed on the draw, total:title-shape on the
+    total; $5.2k/24 h). No lone digit is in any reviewed scope list
+    ('u', 'b', 'w' are letters; 'u19', '2nd' are longer tokens), so the
+    rule here is letters-only, as the league slot's already is. The
+    bridge's own _has_scope_token is byte-identical (the wording arm
+    keeps its rule); a scope LETTER still refuses ('sc braga b')."""
     from .workers import premap as _pm
 
-    if not norm_text or _pm._has_scope_token(norm_text):
+    toks = (norm_text or "").split()
+    if not toks or len(toks) > _pm._BRIDGE_NAME_TOKEN_CAP:
         return True
-    toks = norm_text.split()
-    if len(toks) > _pm._BRIDGE_NAME_TOKEN_CAP:
-        return True
-    if any(t in _YN_SCOPE_EXTRA for t in toks):
-        return True
+    for t in toks:
+        if (t in _pm._BRIDGE_SCOPE_TOKENS or t in _YN_SCOPE_EXTRA
+                or t.startswith(_pm._BRIDGE_SCOPE_STEMS)):
+            return True
+        if len(t) == 1 and t.isalpha() and t not in ("y", "e"):
+            return True
     for n in (2, 3, 4):
         for i in range(len(toks) - n + 1):
-            if "".join(toks[i:i + n]) in _YN_SCOPE_EXTRA:
+            j = "".join(toks[i:i + n])
+            if j in _pm._BRIDGE_SCOPE_TOKENS or j in _YN_SCOPE_EXTRA:
                 return True
     return False
 
@@ -1496,6 +1519,19 @@ def _yn_name_match(a: str, b: str) -> bool:
         return SequenceMatcher(None, " ".join(da),
                                " ".join(db)).ratio() >= MATCH_FLOOR
     return False
+
+
+def _yn_name_match_raw(a: str, b: str) -> bool:
+    """_yn_name_match's FIRST branch alone: raw token-set equality and
+    the ratio floor, no GENERIC_CLUB_TOKENS removal. The C2 arm holds a
+    numbered club to the venue's subject through this (M1 P6): every
+    token of 'bologna fc 1909', the number included, must be restated
+    by the venue verbatim -- 'bologna fc' and 'bologna fc 1919' are
+    not it."""
+    ta, tb = a.split(), b.split()
+    if not ta or not tb or frozenset(ta) != frozenset(tb):
+        return False
+    return SequenceMatcher(None, a, b).ratio() >= MATCH_FLOOR
 
 
 def _yn_thin(norm_name: str) -> bool:

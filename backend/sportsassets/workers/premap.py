@@ -41,6 +41,17 @@ REFRESH_SECONDS = 1800          # full sweep cadence
 #   type_prefix_filter_emptied 45/400 (11.3%) — the event was captured
 #                               but that market type was not yet
 #
+# THAT STEP IS TWO CLASSES (M1, 2026-09-07; gap_prefix_filter.md): the
+# latency case above, where the venue lists the family in that league
+# and the row simply is not swept yet, and the STRUCTURAL case, where
+# the venue lists only the moneyline for the whole league (bra, lpa,
+# ekst, scp, srb, swsl, sld: 6 atc rows per game and no tsc/asc/astatc
+# row anywhere in the table -- ~$82k/24 h of his totals and spreads
+# that no sweep cadence can ever reach). resolve_explain names them
+# apart on refusal ('<family>:kind-absent:league-listed' /
+# ':league-unlisted', a read-only probe of the venue's own rows); the
+# step name stays so the census keeps bucketing on it.
+#
 # The fast lane re-sweeps only the IMMINENT window on a short cadence.
 # It writes through the same _market_rows / _upsert path as the full
 # sweep, so rows carry the venue's own side expansion and the
@@ -202,6 +213,47 @@ def _esports_matchup(title: str | None) -> str | None:
     m = _ESPORTS_TITLE_MATCHUP_RE.match(title or "")
     return f"{m.group('a')} vs {m.group('b')}" if m else None
 
+# M1 (2026-09-07): his stored markets.event_title sometimes carries a
+# trailing FAMILY segment after the matchup -- 'Everton FC vs. Manchester
+# United FC - Exact Score', '… - Halftime Result', '… - More Markets'
+# (nf_his_1350.log: every exact-score and halftime-result row). The key
+# then read 'everton fc vs manchester united fc exact score@2026-09-06'
+# and met nothing: $84k/24 h of exact scores and halftime results died
+# at no_key_intersection before any lane ran, and _yn_event_sides read
+# the segment as part of the second club ('levante ud more markets'), so
+# C5's event witness was dark on the same rows. The HEAD -- the matchup
+# -- is what the keys and the sides are read from; the segment builds
+# no key of its own, and a title naming one club builds no matchup key
+# at all. THE LIST IS CLOSED (M1 review, CRITICAL): _yn_event_sides is
+# a WITNESS -- the alias arm, the draw and C5 decide on it -- and a
+# regex admitting any trailing word made 'Arsenal FC vs. Chelsea FC -
+# Women' / '- Reserves' / '- Aggregate' witness the men's full-game
+# rows (the wrong-event class the bridge's scope belt exists for,
+# through a hyphen instead of a parenthesis). Only the feed's three
+# attested family segments are a head; any other suffix stays in the
+# title, keys nothing and witnesses nothing, exactly as before -- C3's
+# own precedent: only that one wording, never a wider key. A lookup,
+# not a decision: every decision still reads the venue's question (the
+# exact-score / halftime lanes are separate builds).
+_EVENT_TITLE_SEGMENT_RE = re.compile(
+    r"^(?P<head>.+? vs\.? .+?) - (?P<seg>[A-Za-z ]+)$")
+_EVENT_TITLE_SEGMENTS = frozenset({"exact score", "halftime result", "more markets"})
+# the feed's exact-score market title, 'Exact Score: <A> X - Y <B>?'
+# (nf_his_1350.log, every exact-score row, no other shape): the two
+# clubs are the event, the score is the market -- keyed as the matchup
+_EXACT_TITLE_MATCHUP_RE = re.compile(
+    r"^\s*exact score\s*:\s*(?P<a>.+?)\s+\d+\s*-\s*\d+\s+(?P<b>.+?)\s*\??\s*$", re.I)
+
+
+def _event_title_head(title: str | None) -> str | None:
+    """The matchup of a title carrying one of the attested family
+    segments above; any other title unchanged (a '- Women' tail is not
+    a head: it keys and witnesses nothing)."""
+    m = _EVENT_TITLE_SEGMENT_RE.match(title or "")
+    if m and " ".join(m.group("seg").lower().split()) in _EVENT_TITLE_SEGMENTS:
+        return m.group("head")
+    return title
+
 
 def _key_norm(text: str | None) -> str:
     """A title normalized for use as an EVENT KEY.
@@ -263,6 +315,13 @@ def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
     # an ø/ł/đ club. Keys are a lookup, not a decision: what the rows
     # then answer to is unchanged.
     title = pmus.fold_latin(title) if title else title
+    # M1: the trailing family segment of his stored event title is not
+    # part of the matchup (see _EVENT_TITLE_SEGMENT_RE), and his
+    # exact-score title names the two clubs around the score
+    title = _event_title_head(title)
+    em = _EXACT_TITLE_MATCHUP_RE.match(title or "")
+    if em:
+        title = f"{em.group('a')} vs {em.group('b')}"
     # C3 (2026-09-06): the feed's draw question is 'Will A vs. B end in
     # a draw?' and _clean_title keeps it whole, so its side split read
     # 'will a' vs 'b end in a draw' and its surname key 'draw vs …' --
@@ -947,6 +1006,21 @@ def _bridge_title_subject(his_title: str | None,
     own date — never handed to _lines_of/signed_line, which today read
     'on 2026-08-27' as a line and a sign and refuse every dated yes/no
     title at _yn_line_ok."""
+    subj, why = _bridge_title_subject_any(his_title, his_slug)
+    if subj is not None and any(ch.isdigit() for ch in subj):
+        # 'FC Schalke 04' refuses — the safe direction. A digit in a
+        # subject is more often a line, a game number or a year that
+        # escaped the grammar than a team identity.
+        return None, "subject_has_digit"
+    return subj, why
+
+
+def _bridge_title_subject_any(his_title: str | None,
+                              his_slug: str | None) -> tuple[str | None, str]:
+    """_bridge_title_subject before its digit rule: the isolated,
+    date-verified subject whatever it carries. The bridge never reads
+    this; the C2 arm does, once, for a numbered club the venue's own
+    question restates (M1 P6, 2026-09-07)."""
     # C2: his anchor is read through the same explicit Latin fold the
     # venue subject is (pmus.fold_latin) -- 'Tromsø' -> 'tromso', the
     # venue's own ASCII -- never through a fold that drops the letter
@@ -979,11 +1053,6 @@ def _bridge_title_subject(his_title: str | None,
         if want != got:
             return None, "title_date_mismatch"
     subj = " ".join(m.group("subj").split())
-    if any(ch.isdigit() for ch in subj):
-        # 'FC Schalke 04' refuses — the safe direction. A digit in a
-        # subject is more often a line, a game number or a year that
-        # escaped the grammar than a team identity.
-        return None, "subject_has_digit"
     return subj, "ok"
 
 
@@ -2204,7 +2273,9 @@ def _yn_event_sides(his_event_title: str | None) -> list[str] | None:
     normalized, or None when it does not name exactly two."""
     if not his_event_title or _folds_away(his_event_title):
         return None
-    n = " ".join(_norm(pmus.fold_latin(his_event_title)).split())
+    # M1: read from the same head event_keys_for keys ('… - Exact
+    # Score' / '… - More Markets' are not the second club's name)
+    n = " ".join(_norm(pmus.fold_latin(_event_title_head(his_event_title))).split())
     sides = [" ".join(x.split()) for x in re.split(r"\s+vs\s+", n)
              if x.strip()]
     if len(sides) != 2 or any(pmus._yn_slot_bad(s) for s in sides):
@@ -2261,14 +2332,17 @@ def _yn_team_question(q: str | None, d: str) -> tuple[dict | None, str | None]:
 
 
 def _yn_team_row(r: dict, *, d: str, anchor: str,
-                 opp_witness: str | None) -> str | None:
+                 opp_witness: str | None, exact: bool = False) -> str | None:
     """One per-team row against his date, his anchor and (alias only)
     his opponent witness: the refusal name, or None when it passes.
-    The side and the intent are the caller's filter."""
+    The side and the intent are the caller's filter. `exact` (M1 P6):
+    the subject must equal his anchor by RAW token-set equality -- a
+    numbered club's number restated by the venue verbatim."""
     gd, why = _yn_team_question(r.get("question"), d)
     if gd is None:
         return why
-    if not pmus._yn_name_match(gd["subj"], anchor):
+    nm = pmus._yn_name_match_raw if exact else pmus._yn_name_match
+    if not nm(gd["subj"], anchor):
         return "yn:subj"
     if opp_witness is not None and not pmus._yn_name_match(gd["opp"], opp_witness):
         return "yn:opp-witness"
@@ -2400,6 +2474,27 @@ def _yn_pick(rows: list[dict], outcome: str | None, his_title: str | None,
     # the bridge's own title gate consumes his date clause and refuses
     # any title that is not his dated win-question
     anchor, why = _bridge_title_subject(his_title, his_slug)
+    numbered = False
+    if anchor is None and why == "subject_has_digit" and parts is not None:
+        # THE NUMBERED CLUB (M1 P6, 2026-09-07; gap_soccer.md §7): 'Will
+        # Bologna FC 1909 win on 2026-09-06?' refused yn:name-digits at
+        # the bridge's digit rule before any venue row was read, while
+        # the venue's own row atc-sea-bol-sas-2026-09-06-bol says 'Will
+        # Bologna FC 1909 win against US Sassuolo Calcio in the Serie A
+        # match scheduled for Sep 6, 2026?' -- Parma Calcio 1913, Stade
+        # Rennais FC 1901, FC Basel 1893, US Avellino 1912, 1. FSV Mainz
+        # 05 alike ($25k/24 h). The bridge's rule stands (the wording
+        # arm never reads a numbered subject); this arm reads the same
+        # date-verified subject, only when his slug's tail is a TEAM
+        # CODE (a moneyline carries no line, so the number is never a
+        # line here), and holds the venue's subject to it by RAW
+        # token-set equality: the number must be restated verbatim.
+        # Not restated ('Bologna FC', 'Bologna FC 1919'): yn:name-digits
+        # as before.
+        anchor, _why = _bridge_title_subject_any(his_title, his_slug)
+        numbered = anchor is not None
+        if numbered:
+            _t(numbered=anchor)
     if anchor is None:
         _t(refusal=("yn:name-digits" if why == "subject_has_digit"
                     else f"yn:title-{why}"))
@@ -2409,21 +2504,21 @@ def _yn_pick(rows: list[dict], outcome: str | None, his_title: str | None,
             and r["identifier"] in want_ids]
     out, refusal = _yn_gate(mine, on, want_intent,
                             lambda r: _yn_team_row(r, d=d, anchor=anchor,
-                                                   opp_witness=None))
+                                                   opp_witness=None, exact=numbered))
     if out:
         _t(matched_by="premap_identity", admitted=want_ids)
         return out
     if mine:
         # his OWN identifier is on the board and refused: no other
         # league's row may stand in for it
-        _t(refusal=refusal)
+        _t(refusal=_yn_numbered_refusal(refusal, numbered))
         return []
     if identity_only:
         _t(refusal="yn:no-row")
         return []
     alias_trace: dict = {}
     out = _yn_alias_pick(rows, parts, on, want_intent, d, anchor,
-                         his_event_title, alias_trace)
+                         his_event_title, alias_trace, exact=numbered)
     if out or alias_trace.get("refusal") != "yn:no-row":
         _t(**alias_trace)
         return out
@@ -2433,10 +2528,16 @@ def _yn_pick(rows: list[dict], outcome: str | None, his_title: str | None,
                           his_event_title, trace, other=names_witness)
 
 
+def _yn_numbered_refusal(refusal: str, numbered: bool) -> str:
+    """A numbered subject the venue's row did not restate keeps the
+    bridge's name (yn:name-digits); every other refusal is its own."""
+    return "yn:name-digits" if numbered and refusal == "yn:subj" else refusal
+
+
 def _yn_alias_pick(rows: list[dict], parts: dict | None, on: str,
                    want_intent: str, d: str, anchor: str,
                    his_event_title: str | None,
-                   trace: dict | None) -> list[dict]:
+                   trace: dict | None, *, exact: bool = False) -> list[dict]:
     def _t(**kw):
         if trace is not None:
             trace.update(kw)
@@ -2469,9 +2570,9 @@ def _yn_alias_pick(rows: list[dict], parts: dict | None, on: str,
     other = sides[1] if hit[0] is sides[0] else sides[0]
     out, refusal = _yn_gate(cands, on, want_intent,
                             lambda r: _yn_team_row(r, d=d, anchor=anchor,
-                                                   opp_witness=other))
+                                                   opp_witness=other, exact=exact))
     if not out:
-        _t(refusal=refusal)
+        _t(refusal=_yn_numbered_refusal(refusal, exact))
         return []
     alias = f"{parts['lg']}->{code}"
     _t(matched_by="premap_alias", league_alias=alias,
@@ -3627,7 +3728,19 @@ def _c3_pick_spread(rows: list[dict], his: dict, outcome: str | None,
     hits = [r for r in cands if r.get("identifier") == want_id
             and _norm(r.get("side_norm")) == side]
     if not hits:
-        trace["refusal"] = "spread:line-absent"
+        # M1 (2026-09-07, reporting only; gap_soccer.md §1): the wanted
+        # identifier IS on the board but no row of it carries a yes/no
+        # side -- the pre-C3 sweep's digit sides ('1 50' / '2 50',
+        # BUY_SHORT) on an ended game the sweep never re-read (every
+        # EPL / lal spread residue of 2026-09-06, $39.5k). The line is
+        # listed; the SIDES are unparsed. Named apart so the census
+        # stops filing it as a venue line gap; a live sweep writes the
+        # yes/no rows and the pick proceeds exactly as pinned.
+        listed = [r for r in cands if r.get("identifier") == want_id]
+        if listed and not any(_norm(r.get("side_norm")) in ("yes", "no") for r in listed):
+            trace["refusal"] = "spread:sides-unparsed"
+        else:
+            trace["refusal"] = "spread:line-absent"
         trace["wanted"] = want_id
         return None
     if len(hits) > 1:
@@ -4803,6 +4916,47 @@ def live_rows_for_market(parent_slug: str) -> list[dict]:
     return _market_rows({"slug": "", "title": ""}, m)
 
 
+async def _kind_absent_probe(pool, rows: list[dict], his_c3: dict, out: dict) -> None:
+    """THE EMPTY PREFIX FILTER, NAMED BY THE BOARD (M1, 2026-09-07;
+    gap_prefix_filter.md). `kept` emptied on a C3 family: the venue
+    lists this event but not one row of his family's kind. Two classes
+    wear that step name -- the fast-lane latency the module comment
+    describes, and a league the venue lists ONLY moneylines for (bra,
+    lpa, ekst, scp, srb, swsl, sld: 6 atc rows per game, zero tsc /
+    asc / astatc rows table-wide; ~$82k/24 h of his totals and spreads
+    counted as a mapper gap). Named apart from the venue's own rows,
+    never a table: the league code(s) the board's identifiers carry
+    for this game, then one read-only probe -- does ANY identifier of
+    that kind exist under that code -- '<family>:kind-absent:league-
+    listed' (the latency case) or ':league-unlisted' (structural,
+    unmappable at this venue). Sibling of total:segment-absent. Runs
+    only on the refusal, like league_alias_probe; the step name stays
+    (the census buckets on it); resolve is untouched. No code readable
+    from the rows, or a failed probe: the bare '<family>:kind-absent'
+    with the reason in `kind_probe`."""
+    fam = his_c3["family"]
+    kind = C3_PREFIX[fam]
+    split = f"{fam}:kind-absent"
+    codes = sorted({m.group("lg") for m in (
+        _C3_IDENT_RE.match(str(r.get("identifier") or "").lower()) for r in rows) if m})
+    probe: dict = {"kind": kind, "league_codes": codes, "asked": []}
+    try:
+        listed = None
+        for lg in codes:
+            pat = f"{kind}-{lg}-%"
+            probe["asked"].append(pat)
+            if await pool.fetch("SELECT 1 FROM us_premap WHERE identifier LIKE $1 LIMIT 1", pat):
+                listed = pat
+                break
+        if codes:
+            split += ":league-listed" if listed else ":league-unlisted"
+            probe["listed"] = listed
+    except Exception as exc:  # noqa: BLE001 — diagnostics never raise
+        probe["error"] = type(exc).__name__
+    out["split"] = out["refusal"] = split
+    out["kind_probe"] = probe
+
+
 async def resolve_explain(pool, market_title: str | None,
                           event_title: str | None, outcome: str | None,
                           global_slug: str | None) -> dict:
@@ -4976,6 +5130,8 @@ async def resolve_explain(pool, market_title: str | None,
         out["step"] = "type_prefix_filter_emptied"
         out["detail"] = (f"{len(rows)} rows on this event, none with a "
                          f"{sorted(want)} prefix")
+        if his_c3 is not None:
+            await _kind_absent_probe(pool, rows, his_c3, out)
         return out
     if his_c3 is not None:
         kept = c3_same_segment(kept, his_c3["seg"])
