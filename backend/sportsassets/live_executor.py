@@ -5101,6 +5101,19 @@ async def cancel_manual_open(row_id: int) -> dict:
     return {"ok": True, "cancelled": True, "filled_shares": filled}
 
 
+def buy_limit_price(ask: float, max_price: float | None = None) -> float:
+    """sell_limit_price mirrored for a BUY (the mirror lane's short
+    cover when he is gone and gave no price, S4 2026-09-07): the live
+    best ask plus 2c of book-motion protection, capped at the venue's
+    $0.99 tick -- and never above the caller's own max_price. The IOC
+    can only fill AT OR UNDER this limit, so the cap is the worst
+    realizable price."""
+    limit = min(0.99, round(ask + 0.02, 2))
+    if max_price is not None and max_price > 0:
+        limit = min(limit, round(float(max_price), 2))
+    return round(max(limit, 0.01), 2)
+
+
 def sell_limit_price(bid: float, min_price: float | None = None) -> float:
     """Protective cash-out limit (owner directive 2026-08-22): the live
     best bid minus 2c of book-motion protection, floored at the venue's

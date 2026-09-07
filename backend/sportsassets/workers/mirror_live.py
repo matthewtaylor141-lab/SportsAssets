@@ -188,6 +188,44 @@ _STATE_WHALES = "mirror_live_whales"
 _STATE_DEMOTED = "mirror_live_demoted"
 _STATE_LOSS_STOP = "mirror_loss_stop"
 _STATE_FLATTEN = "mirror_flatten"
+# S4: the read-back proof of a resting SELL_SHORT (the short cover's
+# wire intent). {"proved": bool, "at", "slug", "order_id", "price",
+# "bid", "ask", "echo": {...}, "why", "cancel", "booked"}; written by
+# _s4_probe, read every tick beside the other mirror-state keys. Absent,
+# malformed or `proved` not True: every short cover is refused
+# `s4_unproven` and the probe runs at most once per S4_PROBE_GAP_S on a
+# live short book with a two-sided quote. `order_id` on an UNPROVED
+# record whose `cancel.ok` is False is a probe order the venue KEPT
+# (S4 review round 2, GAP 2): the cancel is retried every tick before
+# the walk (_s4_cancel_retry) and no second probe goes out until the
+# venue reports it gone; `booked` names the mirror_orders row a probe
+# that FILLED at create was booked on (GAP 1)
+_STATE_S4 = "mirror_s4_proof"
+S4_PROBE_GAP_S = 3600.0
+# the probe's price sits this far UNDER the bid (a BUY of the long token
+# that cannot fill), floored to the cent and never under 0.01
+S4_PROBE_OFFSET = 0.05
+# the venue's OWN side for a resting SELL_SHORT that buys the contract
+# back (the SDK's Order.side; pmus._norm_order carries it as
+# `venue_side`): the one fact that settles the denomination. The proof
+# requires it beside the price, the quantity and the intent (S4 review,
+# F1); a venue that lists the probe as ORDER_SIDE_SELL is an order in
+# another price space, never proved
+S4_VENUE_BUY = "ORDER_SIDE_BUY"
+# the venue's order STATES that mean "this order stands on the book as
+# sent" (S4 review round 2, INFO 5), as pmus._norm_order spells them
+# (the SDK's OrderState enum, polymarket_us/types/orders.py:21-33, with
+# the ORDER_STATE_ prefix dropped and lower-cased): NEW (accepted and
+# resting), PENDING_NEW (accepted, being written to the book) and
+# PENDING_RISK (accepted for listing, not yet past risk) are the states a
+# standing 1-share limit passes through on the way to resting; the proof
+# accepts those three. FILLED / PARTIALLY_FILLED (the venue did not read
+# our price or our side as sent), CANCELED / EXPIRED / REJECTED /
+# REPLACED (nothing stands), PENDING_CANCEL / PENDING_REPLACE (something
+# other than our create acted on it), or no state at all are refused:
+# an echo the venue lists with the right fields but in a state that is
+# not a standing order proves nothing about a standing cover
+S4_RESTING_STATES = frozenset({"new", "pending_new", "pending_risk"})
 _STATE_SIDE_ECHO = "side_echo_last"
 MODE_SAFE, MODE_EXITS, MODE_ON = "safe", "exits", "on"
 _OFF_VALUES = frozenset({"off", "0", "false", "no"})
@@ -311,6 +349,18 @@ CENSUS_KEYS: tuple[str, ...] = (
     # IOC sent FIRST, before any rest. Inserted BEFORE
     # `cand_terminal_skipped`, which stays last (pinned)
     "exit_take", "exit_out_of_tol", "requote_same_wire", "take_first",
+    # S4 (2026-09-07): the short cover as a PRICED ORDER through the
+    # placement machinery (the venue refuses close_position as an
+    # unpriced limit order: "Price is required for limit order", 11
+    # CLOSE rows / 0 executed on 2026-09-07). The 1-share read-back
+    # probe placed / proved; a cover refused because the proof has not
+    # passed; the cover's rest at floor(his) / its IOC at the ceiling
+    # cent / held outside the tolerance. `s4_probe_filled` (S4 review
+    # round 2, GAP 1): a probe that EXECUTED at create, booked on an
+    # `s4_probe` row through the ledger like any cover fill. Inserted
+    # BEFORE `cand_terminal_skipped`, which stays last (pinned)
+    "s4_probe_placed", "s4_proved", "s4_unproven", "s4_probe_filled",
+    "short_cover_rest", "short_cover_take", "short_cover_out_of_tol",
     # D1 (2026-09-06): a candidate skipped because its venue state read
     # TERMINAL inside the last UNMAPPED_TTL_S (_terminal_until). Appended
     # LAST, past the served 40-key prefix; `integ` is at its own ceiling
@@ -1079,6 +1129,11 @@ class _Tick:
     demoted: set = field(default_factory=set)
     demoted_unreadable: bool = False
     flatten_all: bool = False
+    # S4: the read-back proof as the tick read it (None when absent or
+    # malformed), the read's error, and whether a probe ran this tick
+    s4_proof: dict | None = None
+    s4_proof_err: str | None = None
+    s4_probed: bool = False
     positions: dict | None = None
     open: list | None = None
     open_error: str | None = None
@@ -1937,6 +1992,13 @@ async def _global_guards(t: _Tick) -> None:
     if err is None and flat is True:
         t.flatten_all = True
         _mirror_stop("mirror_flatten")
+    # S4: the short cover's read-back proof, read in every mode that can
+    # exit (the cover is an exit). Unreadable or malformed reads as
+    # unproven AND stops the probe (nothing is placed on a key we cannot
+    # read back into)
+    proof, err = await _state(t.pool, _STATE_S4)
+    t.s4_proof_err = err
+    t.s4_proof = proof if isinstance(proof, dict) else None
     if t.mode != MODE_ON:
         return
     lb = await le._loss_breaker_tripped(t.pool)
@@ -2750,8 +2812,29 @@ def _order_side_of(o: dict) -> str:
 
 def _on_book_matches(o: dict, venue: dict, wire: float, qty: int) -> bool:
     """The rest lane's _bid_matches generalised to a side: OUR side, our
-    cent, our whole quantity."""
-    if str(venue.get("side") or "").upper() != _order_side_of(o) or not venue.get("order_id"):
+    cent, our whole quantity.
+
+    THE SIDE IS THE WIRE INTENT WHEN BOTH NAME ONE (S4 review, F4). A
+    cover row is side BUY (the plan side: a BUY of the long token) with
+    intent SELL_SHORT, and pmus._norm_order derives the venue row's
+    `side` from the intent string -- 'SELL' for any *_SELL_* intent --
+    so the plan side and the derived side could never agree on a
+    cover, and a cover placement whose response was lost was never
+    adopted: the rest stood on the venue with no row, the book frozen
+    `placement_lost`. The 050 column's intent on our row IS the wire
+    intent the venue echoes (BUY_LONG / SELL_LONG / BUY_SHORT /
+    SELL_SHORT), so when the row and the venue row both carry one the
+    match is intent to intent -- the cover's SELL_SHORT, and a short
+    ADD's BUY_SHORT (whose derived side 'BUY' never matched its row
+    side SELL either). A row without an intent (pre-050) or a venue
+    row reporting none falls back to the side comparison as before."""
+    mine, theirs = o.get("intent"), venue.get("intent")
+    if mine and theirs:
+        if str(theirs) != str(mine):
+            return False
+    elif str(venue.get("side") or "").upper() != _order_side_of(o):
+        return False
+    if not venue.get("order_id"):
         return False
     try:
         px = float(venue.get("price") or 0.0)
@@ -2856,7 +2939,10 @@ async def _reconcile_placing(t: _Tick, o: dict, book: dict) -> None:
     orders.create and the persist. Adopt by fingerprint, else book from
     the trade log by ORDER, else freeze 'placement_lost'; past
     _LOST_FILL_WINDOW_S the order is 'lost' and the book thaws only
-    when venue == ledger (step P)."""
+    when venue == ledger (step P). A short cover's row (side BUY, intent
+    SELL_SHORT, tif GTC / IOC) is an ordinary row on this road: the
+    fingerprint matches it by its wire intent (_on_book_matches, S4
+    review F4); only the legacy CLOSE rows go to _reconcile_lost_close."""
     t.nonterminal.add(book["id"])
     age = t.now - float(o.get("placed_ts") or t.now)
     if age < PLACING_ORPHAN_S:
@@ -3210,6 +3296,12 @@ async def _finish_order(t: _Tick, o: dict, book: dict, st: dict, reason: str | N
             t.stats["filled_take"] += 1
         if o.get("kind") in ("flatten_paired", "flatten_vanished"):
             t.stats["flattened"] += 1
+        if o.get("intent") == "ORDER_INTENT_SELL_SHORT" and _leg_of(book) < 1:
+            # S4: a short book's leg covered to flat by its cover order
+            # -- the take at the ceiling cent, the rest at floor(his),
+            # the unpriced vanish IOC (the name close_position's fill
+            # used to carry)
+            _mirror_stop("short_flatten_close", w)
     elif state == "expired":
         _mirror_stop("expired", w)
     elif filled <= FLAT_TOL_SHARES and state == "cancelled":
@@ -4372,6 +4464,10 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         plan["short_proof"] = "ok"
     elif prior_plan.get("short_proof") is not None:
         plan["short_proof"] = prior_plan["short_proof"]
+    # S4: the read-back probe, on the first live short book with a
+    # two-sided quote while the proof is unproven (once an hour at most)
+    if short:
+        await _s4_probe(t, book, r)
     # INCREASES: mode, allowlist, the drift rule, the starred re-checks.
     # An increase is a move AWAY from zero on the book's own leg (P2
     # rung S0, brief C3 / G1): above the ledger on a long book, below it
@@ -4649,9 +4745,14 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
     ex = _exit_terms(t, book, p.side if p is not None else None, his_px, plan)
     wire = _wire_for(p, his_px, r, book.get("intent"), ex)
     is_exit = p is not None and rules.leg_action(book.get("intent"), p.side) == "reduce"
-    # the exit rule's two prices apply on a LONG book's SELL: a short
-    # book's cover has no rest and is priced in _flatten_send
+    # the exit rule's two prices on a LONG book's SELL (floor / rest /
+    # take) and, since S4, on a SHORT book's BUY -- the cover, a priced
+    # order through this same path: the rest at floor(his) to the
+    # cent, the IOC at the ceiling cent whenever the ask is at or under
+    # it, held outside; gated by the read-back proof (_s4_refusal)
     long_exit = ex is not None and not short
+    short_exit = ex is not None and short and is_exit
+    priced_exit = long_exit or short_exit
     # THE ENTRY'S TAKE CENT IS HIS CENT (E4 review, HIGH-1). An entry's
     # rest sits at buy_price(his, bid) -- floor-to-cent of min(his, bid),
     # at or under the bid -- and a book with bid < ask is never "at or
@@ -4679,7 +4780,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         want = rules.wire_side(book.get("intent"), p.side) if p is not None else None
         decision = rules.keep_or_replace(oo, p, t.now, cancel_reason=(t.cancel_all or cancel_reason),
                                          wire=wire, intent=(want[0] if want else None),
-                                         stands=long_exit)
+                                         stands=priced_exit)
         if decision == "keep":
             _mirror_stop("open_order_pending", w)
             plan["open_order"] = o["id"]
@@ -4703,6 +4804,30 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 # outside the cent: the rest stands at his cent, and a
                 # rest past its TTL at the same cent is the no-op the
                 # TTL re-quote would have been (rule 3)
+                _exit_held(t, r, ex, plan, w)
+                if t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S):
+                    _mirror_stop("requote_same_wire", w)
+                    plan["requote_same_wire"] = True
+                return "open_order_pending"
+            if short_exit:
+                # THE COVER'S TAKE off its standing rest (S4): the ask
+                # at or under the ceiling cent cancels the rest and
+                # sends the one IOC there, this tick; outside it the
+                # rest stands at floor(his) and nothing chases
+                refusal = _s4_refusal(t, book, kind, plan, w)
+                if refusal is not None:
+                    return refusal
+                if rules.at_or_through(BUY, r.bid, r.ask, ex["cover"]):
+                    res = await _cancel_and_settle(t, o, book, "take", exit=True)
+                    named = _cancel_outcome(t, book, o, res)
+                    if named is not None:
+                        return named
+                    left = _cover_qty(book, int(min(p.qty, max(0.0, float(o["qty"])
+                                                               - float(o.get("booked_filled") or 0.0)))))
+                    if left >= 1:
+                        return await _place(t, book, r, "take", BUY, ex["cover"], left, his_px, p,
+                                            plan, tif="IOC")
+                    return "take"
                 _exit_held(t, r, ex, plan, w)
                 if t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S):
                     _mirror_stop("requote_same_wire", w)
@@ -4790,6 +4915,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             wire = _wire_for(p, his_px, r, book.get("intent"), ex)
             is_exit = rules.leg_action(book.get("intent"), p.side) == "reduce"
             long_exit = ex is not None and not short
+            short_exit = ex is not None and short and is_exit
             take_lvl = wire
             if p.side == BUY and not short and rules.buy_wire(his_px) is not None:
                 take_lvl = rules.buy_wire(his_px)
@@ -4815,6 +4941,10 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         return "open_order_pending"
     if wire is None:
         _mirror_stop("no_price", w)
+        if short and is_exit:
+            # S4: a cover with no buy-back price of his is HELD, named
+            # (exit_px_src 'none' is on the plan), never a guessed level
+            plan["cover"] = "unpriced_held"
         return "no_price"
     if long_exit:
         # THE EXIT WITH NO REST STANDING (E4): the bid at or through the
@@ -4829,6 +4959,22 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 _mirror_stop("under_one_share", w)
                 return "under_one_share"
             return await _place(t, book, r, "take", SELL, ex["take"], qty, his_px, p, plan, tif="IOC")
+        _exit_held(t, r, ex, plan, w)
+    elif short_exit:
+        # THE COVER WITH NO REST STANDING (S4): the ask at or under the
+        # ceiling cent (his buy-back plus the tolerance, buy_wire'd)
+        # sends the one IOC there now -- no wait, no arm; a partial fill
+        # leaves NOTHING resting (the next tick plans again). Outside
+        # the cent the rest goes at floor(his) below, held by name
+        refusal = _s4_refusal(t, book, kind, plan, w)
+        if refusal is not None:
+            return refusal
+        if rules.at_or_through(BUY, r.bid, r.ask, ex["cover"]):
+            qty = _cover_qty(book, p.qty)
+            if qty < 1:
+                _mirror_stop("under_one_share", w)
+                return "under_one_share"
+            return await _place(t, book, r, "take", BUY, ex["cover"], qty, his_px, p, plan, tif="IOC")
         _exit_held(t, r, ex, plan, w)
     else:
         # the take armed by a post-only rejection, with no rest standing.
@@ -4894,17 +5040,36 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             return "over_room"
         return await _place(t, book, r, "increase", p.side, wire, qty, his_px, p, plan)
     if short:
-        # A SHORT BOOK MAY ONLY FLATTEN BEFORE RUNG S4, and only by
-        # close_position when we are the slug's sole holder (brief 3.4,
-        # G1): the venue has never read a resting SELL_SHORT back in a
-        # stated denomination, so a partial reduce -- and a flatten
-        # while co-held -- is `short_reduce_unproven`: counted, the
-        # book held, nothing sent, no freeze
-        if kind in ("flatten_paired", "flatten_vanished"):
-            return await _flatten_vanished(t, book, r, p, his_px, plan, kind=kind)
-        _mirror_stop("short_reduce_unproven", w)
-        plan["short_reduce"] = "unproven"
-        return "short_reduce_unproven"
+        # THE SHORT COVER AS A PRICED ORDER (S4, 2026-09-07). Every
+        # cover -- a partial reduce, the paired or vanish flatten, the
+        # sign-flip flatten -- is a BUY of the long token with the
+        # closing intent (SELL_SHORT on the wire), through this same
+        # placement machinery, never close_position: the venue refuses
+        # that call as an unpriced limit order ("Price is required for
+        # limit order"; 11 CLOSE rows, 0 executed on 2026-09-07). Gated
+        # by the read-back proof (`s4_unproven` on a flatten,
+        # `short_reduce_unproven` on a partial reduce until the proof
+        # has passed). With his buy-back price: the rest at floor(his)
+        # to the cent (the take above fired if the ask was inside the
+        # ceiling). With none: the flatten kinds decide below (the
+        # bounded IOC when he is gone, else held); a partial reduce
+        # with no price of his is held `no_price`, never guessed
+        refusal = _s4_refusal(t, book, kind, plan, w)
+        if refusal is not None:
+            return refusal
+        if ex is None:
+            if kind in ("flatten_paired", "flatten_vanished"):
+                return await _flatten_vanished(t, book, r, p, his_px, plan, kind=kind)
+            _mirror_stop("no_price", w)
+            plan["cover"] = "unpriced_held"
+            log.warning("mirror_live: book %s short reduce held: no buy-back price of his to cover at "
+                        "(exit_px_src none)", book["id"])
+            return "no_price"
+        qty = _cover_qty(book, p.qty)
+        if qty < 1:
+            _mirror_stop("under_one_share", w)
+            return "under_one_share"
+        return await _place(t, book, r, kind or "reduce", BUY, ex["rest"], qty, his_px, p, plan)
     qty = _sell_qty(book, p.qty)
     if qty < 1:
         _mirror_stop("under_one_share", w)
@@ -4920,6 +5085,511 @@ async def _requotes_this_hour(t: _Tick, book: dict) -> int:
         return int(await t.pool.fetchval(_SQL_REPLACES, book["id"]) or 0)
     except Exception:  # noqa: BLE001 — an unreadable count is the cap
         return int(rules.MIRROR_MAX_REPLACES_PER_HOUR)
+
+
+def _cover_qty(book: dict, qty: int) -> int:
+    """The COVER quantity a short book may place (S4): _sell_qty's rule
+    on the leg -- min(plan qty, |ledger|, ceil(held)) when the standing
+    row was readable this tick, else min(plan qty, |ledger|). A cover
+    is an ordinary clamped order of OUR quantity, never the whole
+    slug: co-holding is no longer a question it asks."""
+    leg = _leg_of(book)
+    held = _num(book.get("_held"))
+    if held is None:
+        return min(int(qty), leg)
+    return min(int(qty), leg, int(math.ceil(max(held, 0.0))))
+
+
+def _s4_proved(t: _Tick) -> bool:
+    """Has the resting SELL_SHORT read-back proof passed (S4)? Only a
+    dict under `mirror_s4_proof` whose `proved` is True; anything else
+    -- absent, unreadable, malformed, a recorded mismatch -- is not."""
+    return isinstance(t.s4_proof, dict) and t.s4_proof.get("proved") is True
+
+
+def _s4_refusal(t: _Tick, book: dict, kind: str | None, plan: dict, whale: str) -> str | None:
+    """The cover's gate (S4): None when the proof has passed, else the
+    refusal by name -- `s4_unproven` for a flatten (paired, vanished,
+    the sign flip), `short_reduce_unproven` for a partial reduce (the
+    pre-S4 name, kept until the proof has passed in production). The
+    book is held, nothing sent, no freeze; the plan says why. The 050
+    column is the first gate: a cover row names SELL_SHORT, which only
+    the 050 INSERT can carry (`short_column_absent`, as before S4)."""
+    if not t.short_col:
+        _mirror_stop("short_column_absent", whale)
+        plan["short_column"] = "absent"
+        return "short_column_absent"
+    if _s4_proved(t):
+        return None
+    why = (t.s4_proof_err or (t.s4_proof or {}).get("why") or "absent") if t.s4_proof is not None \
+        or t.s4_proof_err else "absent"
+    if kind in ("flatten_paired", "flatten_vanished") or plan.get("sign_flip") is True:
+        _mirror_stop("s4_unproven", whale)
+        plan["s4"] = {"unproven": why}
+        return "s4_unproven"
+    _mirror_stop("short_reduce_unproven", whale)
+    plan["short_reduce"] = "unproven"
+    plan["s4"] = {"unproven": why}
+    return "short_reduce_unproven"
+
+
+def _s4_probe_due(t: _Tick, book: dict, r: _Reading) -> bool:
+    """Does the 1-share read-back probe run now (S4)? Once per tick,
+    never proved, never with the key unreadable (nothing is placed on
+    a key we cannot record into), at most once per S4_PROBE_GAP_S while
+    unproven, on a LIVE short book (never frozen) with a readable
+    two-sided quote on a market the venue calls OPEN (or names no
+    state), the 050 column present, the tick not tripped or abandoned.
+    Never while the record holds a probe order the venue KEPT (S4
+    review round 2, GAP 2: one probe at a time; _s4_cancel_retry clears
+    the id), and never on a book with an order standing (a probe that
+    fills at create is booked on a row of its own, and the one-open-
+    per-book index has room for it only when nothing else is open)."""
+    if t.s4_probed or _s4_proved(t) or t.s4_proof_err is not None:
+        return False
+    if _s4_held_order(t.s4_proof) is not None:
+        return False
+    if not _book_short(book) or book.get("state") != "live" or not t.short_col:
+        return False
+    if t.cancel_all or t.abandoned:
+        return False
+    if book["id"] in t.open_by_book or book["id"] in t.nonterminal or book.get("open_order_id"):
+        return False
+    if r.venue_state is not None and r.venue_state != _STATE_OPEN:
+        return False
+    b, a = _num(r.bid), _num(r.ask)
+    if b is None or a is None or not (0.0 < b < 1.0) or not (0.0 < a < 1.0) or b >= a:
+        return False
+    last = _num((t.s4_proof or {}).get("at"))
+    return last is None or t.now - last >= float(S4_PROBE_GAP_S)
+
+
+def _s4_probe_price(bid: float) -> float:
+    """max(0.01, floor(bid - S4_PROBE_OFFSET)) to the cent: off-market
+    for a BUY of the long token, so the probe cannot fill."""
+    cents = math.floor(round((float(bid) - float(S4_PROBE_OFFSET)) * 100.0, 6))
+    return round(max(1, cents) / 100.0, 2)
+
+
+async def _s4_probe(t: _Tick, book: dict, r: _Reading) -> None:
+    """THE READ-BACK PROOF (S4, owner-authorized in principle: "the
+    resting SELL_SHORT read-back on the live short book (1 share,
+    off-market, read price/side back, cancel)"). ONE 1-share post-only
+    BUY of the long token with the closing intent -- the adapter sends
+    intent SELL_SHORT for sell=True on a BUY_SHORT book -- at
+    _s4_probe_price(bid), read back through open_orders on the slug
+    (price, quantity, the venue's OWN side and the intent as the venue
+    reports them), then cancelled. A match records {"proved": true, ...}
+    under `mirror_s4_proof` and every cover after it goes; any mismatch
+    -- refused, missing on the read-back, another price or quantity, a
+    side the venue reports that is not S4_VENUE_BUY (or none reported),
+    an intent that is not SELL_SHORT (or none reported), an execution
+    at create, a failed cancel -- records {"proved": false, "why", ...}
+    and the cover stays refused `s4_unproven`; the probe runs again
+    after S4_PROBE_GAP_S. No mirror_orders row: the probe is not a
+    position of the book's (its record is the state key and the tick's
+    `recent`); its two writes are exit ops (exempt from the budget) and
+    counted venue calls. Every venue call is paced.
+
+    THE PRICE SPACE (S4 review, F2). The probe is placed against the
+    LONG token's quote -- the book's own _bbo read, the bid and ask in
+    the space `his_px` and the cover's rest / take cents are priced in
+    -- and the read-back price must equal what was sent IN THAT SPACE;
+    the record keeps the quote (`bid`, `ask`) it was placed against. A
+    venue that reads a SELL_SHORT limit in the SHORT token's space
+    ("sell the short token at >= p", i.e. buy the long at <= 1 - p)
+    refuses the probe on a low-priced book (it crosses: fail closed) and
+    RESTS it on a high-priced one, echoing our price and intent -- and
+    every cover after it would rest where it can never fill. Only the
+    venue's own side tells that venue apart: it lists such a probe as
+    ORDER_SIDE_SELL, and the proof refuses it `wrong_side`. A book whose
+    quote cannot be read two-sided in that space is not probed
+    (_s4_probe_due).
+
+    A 429 ON THE PROBE IS NO VERDICT (S4 review, F3) BUT IT IS AN HOUR'S
+    HOLD (round 2, GAP 3). E2's rule: a venue 429 is a refusal before
+    anything was processed -- named `rate_limited`, the pacer's circuit,
+    the tick abandoned `rate_limited` (the backoff skipped while the
+    circuit holds) -- never a fact about the order. The create under
+    post_only True hands a 429 back as the post_only_rejected shape
+    (status_code 429 on the raw; _raw_rate_limit reads the named
+    fields), and the preview or an IOC-less create can raise the SDK's
+    RateLimitError (ms.is_rate_limit on the exception): both go to the
+    rate-limit path, which records {"proved": false, "why":
+    "rate_limited", "at": now} so the hourly clock holds the probe --
+    without the record the probe was the first write of EVERY tick while
+    the venue limited creates, and abandoned each one; a placement's
+    429 has the same effect but is a needed order, the probe is a
+    diagnostic. Any other refusal or raise records the mismatch as
+    before.
+
+    A PROBE THAT FILLS AT CREATE IS BOOKED (round 2, GAP 1): the share
+    is ours whatever the venue read, so it goes on an ordinary
+    mirror_orders row of kind `s4_probe` (side BUY, the closing intent,
+    qty 1, the fill's price, maker False) and through _book_delta
+    exactly as a cover fill would (the ledger toward zero by one, the
+    realized on it, the standing row's shares), counted
+    `s4_probe_filled`; the record says `filled_at_create` with the row
+    under `booked` and the cover stays gated. _cover_qty reads the
+    ledger the row moved. A PROBE THE VENUE KEPT (a refused cancel,
+    round 2, GAP 2) keeps its `order_id` on the record; the cancel is
+    retried every tick before the walk (_s4_cancel_retry) and nothing
+    is probed again until the venue reports it gone.
+
+    THE STATE (round 2, INFO 5): the echo must also be in a standing
+    state (S4_RESTING_STATES: new / pending_new / pending_risk); a
+    filled, cancelled, rejected, expired or replaced echo, or one in
+    no state, is `wrong_state` / `state_missing`."""
+    if await _s4_leftover_filled(t, book, r):
+        return
+    if not _s4_probe_due(t, book, r):
+        return
+    t.s4_probed = True
+    w, slug = r.whale, r.slug
+    price = _s4_probe_price(float(r.bid))
+    intent = _book_intent(book)
+    rec: dict = {"proved": False, "at": t.now, "slug": slug, "price": price, "order_id": None,
+                 "echo": None, "why": None, "bid": _num(r.bid), "ask": _num(r.ask)}
+    echo: dict | None = None
+    oid = None
+    slot = _op_slot(t, w, exit=True)
+    if slot is None:
+        return
+    try:
+        _venue_call(t, 1, guard=True)
+        try:
+            resp = await asyncio.to_thread(_paced, t.pmus.submit_fok, slug, price, 1, True,
+                                           "TIME_IN_FORCE_GOOD_TILL_CANCEL", intent, True, None)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001 — the probe's raise is its verdict
+            if ms.is_rate_limit(exc):
+                # the request went out (the op is spent, the probe
+                # counted placed) and the venue refused it before
+                # processing anything: E2's path, under the hour's hold
+                slot.commit()
+                _mirror_stop("s4_probe_placed", w)
+                await _s4_probe_rate_limited(t, book, r, rec, type(exc).__name__, str(exc)[:200])
+                return
+            rec["why"] = f"place_raised:{type(exc).__name__}"
+            rec["echo"] = {"error": str(exc)[:200]}
+            resp = None
+        slot.commit()
+        _mirror_stop("s4_probe_placed", w)
+        if resp is not None:
+            resp = resp if isinstance(resp, dict) else {}
+            oid = resp.get("order_id")
+            rec["order_id"] = str(oid) if oid else None
+            filled = float(_num(resp.get("filled_shares")) or 0.0)
+            raw = resp.get("raw") or {}
+            if not oid and _raw_rate_limit(raw):
+                # the create's 429 in the post_only_rejected shape, by
+                # the raw's named fields (never '429' anywhere in its
+                # text): a refusal, not a mismatch -- held for the hour
+                await _s4_probe_rate_limited(t, book, r, rec,
+                                             str(raw.get("error_type") or resp.get("status") or "429"),
+                                             str(raw.get("error") or "")[:200])
+                return
+            if not oid:
+                rec["why"] = f"place_refused:{resp.get('status') or 'no_id'}"
+                rec["echo"] = {"raw": _jsonish(_refusal_receipt(raw))}
+            elif filled > 0.0:
+                # an off-market rest that executed at create: the venue
+                # did not read our price (or our side) as we sent it --
+                # and the share is ours: booked on its own row (GAP 1)
+                rec["why"] = "filled_at_create"
+                rec["echo"] = {"filled_shares": filled, "fill_price": resp.get("fill_price"),
+                               "status": resp.get("status")}
+                rec["booked"] = await _s4_book_filled(t, book, r, str(oid), filled,
+                                                      resp.get("fill_price"), str(resp.get("status") or ""),
+                                                      raw, price)
+    finally:
+        slot.release()
+    if oid and rec["why"] is None:
+        try:
+            orders = list(await _venue_read(t, t.pmus.open_orders, [slug], guard=True) or [])
+        except Exception as exc:  # noqa: BLE001 — unreadable is not a proof
+            orders = None
+            rec["why"] = f"read_back_raised:{type(exc).__name__}"
+        if orders is not None:
+            mine = [o for o in orders if str(o.get("order_id")) == str(oid)]
+            if not mine:
+                rec["why"] = "not_found"
+                rec["echo"] = {"open_on_slug": len(orders)}
+            else:
+                v = mine[0]
+                echo = {k: v.get(k) for k in ("order_id", "us_market_slug", "side", "venue_side",
+                                                "intent", "price", "quantity", "state", "tif")}
+                rec["echo"] = echo
+                vp, vq = _num(v.get("price")), _num(v.get("quantity"))
+                if str(v.get("us_market_slug") or "").lower() != slug.lower():
+                    rec["why"] = "wrong_slug"
+                elif vp is None or abs(vp - price) > 1e-9:
+                    rec["why"] = "wrong_price"
+                elif vq is None or abs(vq - 1.0) > 1e-9:
+                    rec["why"] = "wrong_quantity"
+                elif v.get("venue_side") != S4_VENUE_BUY:
+                    # THE VENUE'S OWN SIDE, never the desk's derived
+                    # `side` (F1): a BUY of the contract, or nothing
+                    rec["why"] = "side_missing" if not v.get("venue_side") else "wrong_side"
+                elif v.get("intent") != "ORDER_INTENT_SELL_SHORT":
+                    rec["why"] = "intent_missing" if not v.get("intent") else "wrong_intent"
+                elif str(v.get("state") or "") not in S4_RESTING_STATES:
+                    # a standing order, in one of the states the venue
+                    # lists a standing order under (INFO 5); a fill, a
+                    # cancel, a rejection or no state proves nothing
+                    rec["why"] = ("state_missing" if str(v.get("state") or "") in ("", "unknown")
+                                  else "wrong_state")
+    if oid and rec["why"] != "filled_at_create":
+        # cancelled whatever the verdict: nothing of the probe's may stand
+        _venue_call(t, 1, guard=True)
+        try:
+            res = await asyncio.to_thread(_paced, t.pmus.cancel_order, oid, slug)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+        if not (isinstance(res, dict) and res.get("ok")):
+            err = (res or {}).get("error") if isinstance(res, dict) else None
+            log.error("mirror_live: S4 probe order %s on %s could not be cancelled (%s); it may still rest: "
+                      "the cancel is retried every tick until the venue reports it gone", oid, slug, err)
+            # the id STAYS on the record with `cancel.ok` False (GAP 2):
+            # _s4_held_order reads exactly that, the retry runs before
+            # every walk, and no second probe goes out meanwhile
+            rec["cancel"] = {"ok": False, "error": str(err)[:200] if err else None, "retries": 0,
+                             "at": t.now}
+            if ms.is_rate_limit(err):
+                # the cancel's 429: named and penalized, never a verdict
+                # about the order (E2's rule for a cancel)
+                _rate_limited(t, w, f"S4 probe cancel {oid}")
+            if rec["why"] is None:
+                rec["why"] = "cancel_failed"
+        else:
+            rec["cancel"] = {"ok": True}
+    rec["proved"] = rec["why"] is None
+    rec = await _s4_record(t, rec)
+    if rec["proved"]:
+        _mirror_stop("s4_proved", w)
+        log.warning("mirror_live: S4 read-back PROVED on %s: order %s at %s read back as %s", slug, oid,
+                    price, echo)
+    else:
+        log.warning("mirror_live: S4 read-back NOT proved on %s (%s): %s", slug, rec["why"], rec["echo"])
+    _recent(book["id"], "s4_probe", proved=rec["proved"], why=rec["why"], order=rec["order_id"],
+            price=price)
+
+
+async def _s4_record(t: _Tick, rec: dict) -> dict:
+    """Write the proof record under the key and make it the tick's
+    reading; a failed write is `record_failed:<Type>` in memory (an
+    unrecorded probe is unproven, and the next tick reads the key as it
+    was)."""
+    try:
+        await _write_state(t.pool, _STATE_S4, rec)
+    except Exception as exc:  # noqa: BLE001 — unrecorded is unproven
+        log.error("mirror_live: S4 proof could not be recorded (%s)", type(exc).__name__)
+        rec = {**rec, "proved": False, "why": f"record_failed:{type(exc).__name__}"}
+    t.s4_proof = rec
+    return rec
+
+
+async def _s4_probe_rate_limited(t: _Tick, book: dict, r: _Reading, rec: dict, name: str,
+                                 text: str) -> None:
+    """The probe's placement refused by the venue's rate limit (S4
+    review, F3): E2's path for a placement's 429 -- `rate_limited` on
+    the census, the pacer's circuit (_rate_limited), the tick abandoned
+    `rate_limited` with the backoff skipped while the circuit holds.
+    A 429 is the venue refusing the request before it processed
+    anything, not a fact about the order -- but it IS the hour's hold
+    (round 2, GAP 3): the record {"proved": false, "why":
+    "rate_limited", "at": now, ...} is written so _s4_probe_due waits
+    S4_PROBE_GAP_S before the next probe, one abandon per hour instead of
+    one per tick for as long as the venue limits creates. The request
+    went out: the caller counted `s4_probe_placed` as every placement's
+    429 counts its op."""
+    w, slug = r.whale, r.slug
+    log.warning("mirror_live: S4 probe on %s refused by the venue's rate limit (%s: %s); not a verdict, "
+                "held for the hour", slug, name, text)
+    rec["why"] = "rate_limited"
+    rec["echo"] = {"raised": name, "error": text}
+    rec["proved"] = False
+    await _s4_record(t, rec)
+    _rate_limited(t, w, f"S4 probe {slug}")
+    _recent(book["id"], "s4_probe", proved=False, why="rate_limited", raised=name)
+    _abandon(t, "rate_limited", rate_limited=True)
+
+
+def _s4_held_order(rec: Any) -> str | None:
+    """The probe order the venue KEPT, as the record names it (round 2,
+    GAP 2): an unproved record carrying `order_id` whose `cancel.ok` is
+    False -- the cancel was refused (or 429'd) and nothing has reported
+    the order gone since. A filled probe (no `cancel`), a cancelled one
+    (`cancel.ok` True) and a proved record hold nothing."""
+    if not isinstance(rec, dict) or rec.get("proved") is True:
+        return None
+    oid, cancel = rec.get("order_id"), rec.get("cancel")
+    if not oid or not isinstance(cancel, dict) or cancel.get("ok") is not False:
+        return None
+    return str(oid)
+
+
+async def _s4_book_filled(t: _Tick, book: dict, r: _Reading, oid: str, filled: float,
+                          fill_price: Any, status: str, raw: Any, wire: float) -> dict:
+    """Book the probe's share (round 2, GAP 1): the post-only latch
+    tripped and the venue filled our 1-share off-market cover at
+    create (or a probe the venue kept later filled, GAP 2). It is a
+    share of OUR short bought back, so it is booked exactly as a cover
+    fill: an ordinary mirror_orders row of kind `s4_probe` (side BUY,
+    the closing intent SELL_SHORT, qty 1, GTC post-only as sent, the
+    fill's price as the venue named it), the id persisted, then
+    _book_delta (the leg's reduce booking: the ledger toward zero by
+    one, the realized on it, the standing row's shares) and
+    _finish_order (filled, maker False: it executed at create). Counted
+    `s4_probe_filled`. Returns what the record keeps under `booked`:
+    the row and the ledger after it, or the failure by name -- a row
+    that could not be written leaves the share on the venue and not on
+    the ledger, so the book is frozen `s4_probe_unbooked` (named, never
+    silent; the venue/ledger read is inside its one-share tolerance
+    and would not say it)."""
+    w, slug = r.whale, r.slug
+    args = [book["id"], w, slug, "s4_probe", BUY, "GTC", True, None, None, wire, wire, 1,
+            json.dumps([]), int(_num(book.get("target")) or 0), int(book.get("ledger_net") or 0),
+            r.bid, r.ask, "s4_probe"]
+    try:
+        row_id = int(await t.pool.fetchval(_SQL_ORDER_INSERT, *args, "ORDER_INTENT_SELL_SHORT"))
+        await t.pool.execute(_SQL_ORDER_PERSIST_ID, row_id, oid, status, json.dumps(raw or {}, default=str))
+    except Exception as exc:  # noqa: BLE001 — the share is on the venue; say so by name
+        log.error("mirror_live: S4 probe %s on %s FILLED (%s share at %s) but its row could not be written "
+                  "(%s); the share is on the venue and not on the ledger", oid, slug, filled, fill_price,
+                  type(exc).__name__, exc_info=True)
+        _mirror_stop("s4_probe_filled", w)
+        await _freeze(t, book, "s4_probe_unbooked", {"order": oid, "filled": filled,
+                                                     "error": type(exc).__name__})
+        return {"row": None, "error": type(exc).__name__}
+    o = {"id": row_id, "book_id": book["id"], "whale": w, "us_market_slug": slug,
+         "kind": "s4_probe", "side": BUY, "tif": "GTC", "post_only": True, "his_level": None,
+         "price": wire, "wire": wire, "qty": 1, "order_id": oid, "state": "open", "filled": 0.0,
+         "booked_filled": 0.0, "avg_px": None, "taker_at_placement": True, "pre_ids": [],
+         "placed_ts": t.now, "reason": "s4_probe", "intent": "ORDER_INTENT_SELL_SHORT"}
+    st = {"state": status or "filled", "filled_shares": float(filled), "avg_px": fill_price}
+    _mirror_stop("s4_probe_filled", w)
+    out = await _book_delta(t, o, book, st, maker=False, taker_at_placement=True)
+    await _finish_order(t, o, book, st, "s4_probe")
+    log.warning("mirror_live: S4 probe %s on %s FILLED at create (%s share at %s): booked on row %s (%s), "
+                "ledger %s", oid, slug, filled, fill_price, row_id, out, book.get("ledger_net"))
+    _recent(book["id"], "s4_probe_filled", order=oid, row=row_id, px=fill_price, booked=out,
+            ledger=book.get("ledger_net"))
+    return {"row": row_id, "booked": out, "ledger": book.get("ledger_net")}
+
+
+async def _s4_leftover_filled(t: _Tick, book: dict, r: _Reading) -> bool:
+    """A probe the venue kept that FILLED before its cancel got through
+    (round 2, GAP 2): _s4_cancel_retry read the fill off the order's
+    status and left it on the record (`cancel.filled`) for the walk,
+    which holds the book the share belongs to. On that book: booked as
+    a filled probe (_s4_book_filled), the id cleared, the clock
+    restarted. True when this book did that (nothing else is probed
+    this tick)."""
+    rec = t.s4_proof
+    oid = _s4_held_order(rec)
+    if oid is None or not _book_short(book):
+        return False
+    cancel = rec.get("cancel") or {}
+    filled = float(_num(cancel.get("filled")) or 0.0)
+    if filled <= 0.0 or str(rec.get("slug") or "").lower() != str(r.slug or "").lower():
+        return False
+    if book.get("state") != "live" or book["id"] in t.open_by_book or book["id"] in t.nonterminal \
+            or book.get("open_order_id"):
+        # the row needs the book's open slot; the record keeps the fill
+        # until a tick that has it
+        return False
+    booked = await _s4_book_filled(t, book, r, oid, filled, cancel.get("fill_price"),
+                                   str(cancel.get("state") or "filled"), None, float(rec.get("price") or 0.0))
+    new = {**rec, "order_id": None, "at": t.now, "booked": booked,
+           "cancel": {**cancel, "ok": True, "order": oid, "gone": "filled", "at": t.now}}
+    await _s4_record(t, new)
+    return True
+
+
+async def _s4_cancel_retry(t: _Tick) -> None:
+    """Before the walk: the probe order the venue KEPT (round 2, GAP 2)
+    is cancelled again -- paced, through _guarded (no row: the orphan
+    write has nothing to persist), an exit op -- every tick until the
+    venue reports it gone. Gone is the cancel accepted, or a refused
+    cancel followed by an order status the venue reads TERMINAL
+    (cancelled / expired / rejected / replaced) or no record of the id
+    at all: then the id is cleared and the hourly clock restarts from
+    now (`at`), the retry count kept under `cancel`. A status that reads
+    FILLED is the share of GAP 1 by another road: the fill is left on
+    the record (`cancel.filled`, `fill_price`) for the walk to book on
+    its book (_s4_leftover_filled) and the id is held until it does.
+    A 429 on the cancel is E2's path for a cancel -- `rate_limited`,
+    the pacer's circuit -- and the id is kept, retried next tick; the
+    tick is not abandoned (a cancel's 429 never was). Still resting, or
+    unreadable: kept, retried next tick. While an id is held nothing is
+    probed (_s4_probe_due)."""
+    rec = t.s4_proof
+    oid = _s4_held_order(rec)
+    if oid is None:
+        return
+    slug = str(rec.get("slug") or "")
+    cancel = dict(rec.get("cancel") or {})
+    if not slug:
+        log.error("mirror_live: S4 probe order %s is held on a record naming no slug; cannot cancel it", oid)
+        return
+    if float(_num(cancel.get("filled")) or 0.0) > 0.0:
+        return                              # the walk books it on its book
+    slot = _op_slot(t, None, exit=True)
+    if slot is None:
+        return
+    try:
+        try:
+            res = await _guarded(t, 0, t.pmus.cancel_order, oid, slug)
+        except asyncio.CancelledError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            res = {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+        slot.commit()
+    finally:
+        slot.release()
+    ok = isinstance(res, dict) and bool(res.get("ok"))
+    err = None if ok else ((res or {}).get("error") if isinstance(res, dict) else None)
+    cancel["retries"] = int(cancel.get("retries") or 0) + 1
+    cancel["at"] = t.now
+    gone: str | None = "cancelled" if ok else None
+    if not ok:
+        cancel["error"] = str(err)[:200] if err else None
+        if ms.is_rate_limit(err):
+            _rate_limited(t, None, f"S4 probe cancel {oid}")
+            _recent(None, "s4_probe_cancel", order=oid, why="rate_limited", retries=cancel["retries"])
+            await _s4_record(t, {**rec, "cancel": cancel})
+            return
+        # refused: does the venue still hold it? its own record decides
+        st = await _order_status(t, oid)
+        if st is None:
+            gone = "no_record"
+        else:
+            filled = float(_num(st.get("filled_shares")) or 0.0)
+            state = str(st.get("state") or "")
+            if filled > 0.0:
+                cancel.update(filled=filled, fill_price=st.get("avg_px"), state=state)
+                log.error("mirror_live: S4 probe order %s on %s FILLED while the venue kept it (%s share); "
+                          "booked on its book's next walk", oid, slug, filled)
+                _recent(None, "s4_probe_cancel", order=oid, why="filled", filled=filled)
+                await _s4_record(t, {**rec, "cancel": cancel})
+                return
+            if le._rest_terminal(st):
+                gone = state or "terminal"
+    if gone is None:
+        log.error("mirror_live: S4 probe order %s on %s still rests; cancel refused again (%s), retry %s",
+                  oid, slug, err, cancel["retries"])
+        _recent(None, "s4_probe_cancel", order=oid, why="refused", retries=cancel["retries"])
+        await _s4_record(t, {**rec, "cancel": cancel})
+        return
+    log.warning("mirror_live: S4 probe order %s on %s is gone (%s) after %s cancel retries; the hour "
+                "restarts", oid, slug, gone, cancel["retries"])
+    _recent(None, "s4_probe_cancel", order=oid, why="gone", gone=gone, retries=cancel["retries"])
+    await _s4_record(t, {**rec, "order_id": None, "at": t.now,
+                         "cancel": {**cancel, "ok": True, "order": oid, "gone": gone}})
 
 
 def _exit_terms(t: _Tick, book: dict, side: str | None, his_px: float | None,
@@ -4943,7 +5613,7 @@ def _exit_terms(t: _Tick, book: dict, side: str | None, his_px: float | None,
     if "floor" in ex:
         plan.update(exit_floor=round(ex["floor"], 6), exit_rest=ex["rest"], exit_take=ex["take"])
     else:
-        plan.update(exit_ceiling=round(ex["ceiling"], 6), exit_cover=ex["cover"])
+        plan.update(exit_ceiling=round(ex["ceiling"], 6), exit_cover=ex["cover"], exit_rest=ex["rest"])
     return ex
 
 
@@ -4955,6 +5625,8 @@ def _exit_held(t: _Tick, r: _Reading, ex: dict, plan: dict, whale: str,
     tick's, when one was read (the priced cover's read before its
     close)."""
     _mirror_stop("exit_out_of_tol", whale)
+    if "ceiling" in ex:
+        _mirror_stop("short_cover_out_of_tol", whale)     # S4: the cover held outside the cent
     bound = ("floor", round(ex["floor"], 6)) if "floor" in ex else ("ceiling", round(ex["ceiling"], 6))
     bid, ask = quote if quote is not None else (r.bid, r.ask)
     plan["exit_out_of_tol"] = {"bid": bid, "ask": ask, bound[0]: bound[1], "at": t.now}
@@ -5012,15 +5684,22 @@ def _wire_for(p: mi.Plan | None, his_px: float | None, r: _Reading,
 
     ON A SHORT BOOK (P2 rung S0, brief C4, Q6 (a)) the SELL_LONG plan
     is an ADD to the short and its wire is the BUY_SHORT wire
-    (_short_wire); the BUY_LONG plan is a cover, whose SELL_SHORT wire
-    is unproven before rung S4 -- the cent it WOULD rest at, in
-    contract space, is returned for the record only and nothing sends
-    it (the reduce path refuses by name)."""
+    (_short_wire); the BUY_LONG plan is a COVER (S4, 2026-09-07): with
+    his buy-back price it rests at floor(his) to the cent
+    (rules.exit_terms(BUY)["rest"]); with none, buy_price's figure is
+    returned for the record and the cover is held by name (`no_price`),
+    never sent at a guessed level."""
     if p is None or p.side is None:
         return None
     if rules.is_short(intent):
         if p.side == SELL:
             return _short_wire(his_px, r.ask)
+        if ex is not None and ex.get("rest") is not None:
+            # S4: the cover rests at floor(his buy-back) to the cent --
+            # never above him, and under the ask whenever the take did
+            # not fire (the ask is then above his price plus the
+            # tolerance, so above the rest): rules.exit_terms(BUY)
+            return float(ex["rest"])
         return rules.buy_price(his_px, r.bid)
     if p.side == BUY:
         return rules.buy_price(his_px, r.bid)
@@ -5394,10 +6073,14 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
             # counted at the decision it named a take an ops-capped
             # cancel never let out)
             _mirror_stop("exit_take", w)
+            if wire_intent == "ORDER_INTENT_SELL_SHORT":
+                _mirror_stop("short_cover_take", w)      # S4: the cover's IOC
     else:
         _mirror_stop("flatten_rested" if kind in ("flatten_paired", "flatten_vanished")
                      else "rest_placed", w)
         t.stats["placed_rest"] += 1
+        if wire_intent == "ORDER_INTENT_SELL_SHORT":
+            _mirror_stop("short_cover_rest", w)          # S4: the cover's rest at floor(his)
     if wire_intent == ORDER_INTENT_SHORT:
         # the short side's own names beside the lane's (brief G4): an
         # OPEN onto a flat book, an ADD onto a held one
@@ -5501,7 +6184,12 @@ async def _lost_response(t: _Tick, o: dict, book: dict, r: _Reading, exc: BaseEx
     found -> the row stays 'placing' with no id and the book is frozen
     'placement_lost' for step O to revisit. A raise that names the
     venue's rate limit never reaches here: the caller routes it to
-    _place_rate_limited (round 4, HIGH-1), a refusal, not a loss."""
+    _place_rate_limited (round 4, HIGH-1), a refusal, not a loss. A
+    short cover's placement comes here like every other (S4 review,
+    F4): its row is an ordinary GTC / IOC row, the fingerprint matches
+    it by its wire intent, and a rest the search cannot find freezes
+    the book `placement_lost` -- never silently live with a cover
+    standing unmanaged on the venue."""
     # the text too: for a CLOSE row it is the adapter's close_failed
     # error (pmus.close_position), the only record of the venue's reason
     log.warning("mirror_live: placement on %s raised %s (%s); searching the book", r.slug,
@@ -5553,14 +6241,18 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
     EXIT_SLIPPAGE_BIPS; co-held -> one IOC at sell_limit_price(bid),
     refused by name when the bid is unreadable.
 
-    ON A SHORT BOOK (P2 rung S0, brief 3.4 / G3) there is no rest to
-    stand: a resting SELL_SHORT has never been read back from the
-    venue, so the ONE proven short exit is close_position, sign-agnostic
-    on the venue's side, sent when we are the slug's sole holder --
-    for a vanish AND, with `kind='flatten_paired'`, for the paired-out
-    flatten a long book would rest for (his net gone to zero while he
-    still holds a token) and the sign flip. Co-held, the flatten is
-    `short_reduce_unproven`: counted, the book held, nothing sent."""
+    ON A SHORT BOOK (S4, 2026-09-07) the flatten is the COVER, a priced
+    BUY of the long token with the closing intent through _act and
+    _place -- never close_position, which the venue refuses as an
+    unpriced limit order ("Price is required for limit order"). With
+    his buy-back price it is _act's priced cover (the rest at floor(his),
+    the IOC at the ceiling cent). With NO price of his the rule cannot
+    apply and the book is held `no_price` under `exit_px_src: 'none'`,
+    with ONE exception: a vanish (he is gone) or the sign flip (his
+    position on our side is gone) covers by one IOC at the ask bounded
+    by le.buy_limit_price (the long flatten's own slippage, mirrored) for
+    our quantity. Every cover passes the read-back gate first
+    (_s4_refusal)."""
     w = r.whale
     short = _book_short(book)
     if kind == "flatten_vanished":
@@ -5577,19 +6269,43 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
         # count the cover's proceeds as a long BUY against the day rail
         # (P2 rung S0 review). While the column is absent the flatten is
         # refused by name and the book held, never mislabelled
-        if not t.short_col:
-            _mirror_stop("short_column_absent", w)
-            plan["short_column"] = "absent"
-            return "short_column_absent"
-        # a resting BUY_SHORT add is cancelled first: the close takes
-        # the WHOLE slug, and a rest that filled after it would reopen
-        # the leg the book has just closed (the cover's path: exempt
-        # from the ops budget, M-1)
+        refusal = _s4_refusal(t, book, kind, plan, w)
+        if refusal is not None:
+            return refusal
+        if _exit_terms(t, book, BUY, his_px, plan) is not None:
+            # HIS BUY-BACK PRICE IS KNOWN: the priced cover, every tick
+            # through _act (a standing BUY_SHORT add is replaced by it)
+            return await _act(t, book, r, p, kind, his_px, plan) or "flatten_rested"
+        if not (kind == "flatten_vanished" or plan.get("sign_flip") is True):
+            # paired out with no price of his and his position on our
+            # side still there: held, named, never guessed
+            _mirror_stop("no_price", w)
+            plan["cover"] = "unpriced_held"
+            log.warning("mirror_live: book %s short flatten held: no buy-back price of his "
+                        "(exit_px_src none)", book["id"])
+            return "no_price"
+        ask = _num(r.ask)
+        if ask is None or not (0.0 < ask < 1.0):
+            _mirror_stop("no_bid_for_flatten", w)
+            return "no_bid_for_flatten"
+        # a resting BUY_SHORT add is cancelled first: a rest that filled
+        # after the cover would reopen the leg (exempt from the budget)
         await _cancel_open_for(t, book, kind, exit=True)
         if book["id"] in t.open_by_book:
             return "cancel_pending"
         if t.cancel_all:
             return t.cancel_all
+        if t.abandoned:
+            _mirror_stop("abandoned_in_flight", w)
+            return "tick_abandoned"
+        limit = le.buy_limit_price(float(ask))
+        plan["cover"] = {"ioc_at_ask": ask, "limit": limit, "why": "vanished" if kind == "flatten_vanished"
+                         else "sign_flip"}
+        qty = _cover_qty(book, _leg_of(book))
+        if qty < 1:
+            _mirror_stop("under_one_share", w)
+            return "under_one_share"
+        return await _place(t, book, r, kind, BUY, limit, qty, his_px, p, plan, tif="IOC")
     else:
         if _exit_terms(t, book, p.side, his_px, plan) is not None:
             # HIS EXIT PRICE IS KNOWN (E4): the rest stands at his cent
@@ -5639,9 +6355,16 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
 async def _flatten_send(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, his_px, plan: dict,
                         kind: str) -> str:
     """The slippage leg of _flatten_vanished, on a reserved op: sole ->
-    close_position, co-held -> one IOC at sell_limit_price(bid)."""
+    close_position, co-held -> one IOC at sell_limit_price(bid). A LONG
+    book's leg alone since S4: a short book's flatten is its priced
+    cover (_flatten_vanished, _act) and never reaches here."""
     w = r.whale
     short = _book_short(book)
+    if short:
+        _mirror_stop("book_error", w)
+        log.error("mirror_live: book %s (short) reached the close_position leg; the cover is a priced "
+                  "order (S4)", book["id"])
+        return "book_error"
     # the LEG, whole shares, after the cancel's booking: what a close
     # must account for on either sign
     ledger = _leg_of(book)
@@ -5666,40 +6389,6 @@ async def _flatten_send(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, his_px
         _mirror_stop("venue_halted", w)
         return "venue_halted"
     close_bips = int(le.EXIT_SLIPPAGE_BIPS)
-    if short:
-        # THE COVER AT HIS PRICE (E4 rule 2): a short flattens only by
-        # close_position before rung S4 -- a market order at the ask --
-        # so the ask this tick read is judged against the CEILING, his
-        # buy-back price in long space plus the tolerance, BEFORE the
-        # position read and the close: above it the book is held by
-        # name and read again next tick (no freeze); at or under it the
-        # close goes. No price of his (`exit_px_src: 'none'`) is today's
-        # close with today's slippage.
-        # THE CLOSE IS BOUNDED TO THE CEILING (E4 review, MEDIUM-2): a
-        # close_position sent with EXIT_SLIPPAGE_BIPS (300) and no limit
-        # could fill 3% past an ask judged seconds earlier. On a PRICED
-        # cover the ask is read again, paced, immediately before the
-        # close (one extra read, on this path alone), judged against the
-        # ceiling again, and the slippage the close may take is what the
-        # ceiling leaves above THAT ask: min(EXIT_SLIPPAGE_BIPS, max(1,
-        # floor((ceiling / ask - 1) x 10000))). At the ceiling itself
-        # that is ONE bip (the adapter refuses 0): a hundredth of a cent
-        # the cent ladder cannot express, so the fill is at the ceiling
-        # cent -- the rule is "at the ceiling, never a cent past it"
-        ex = _exit_terms(t, book, BUY, his_px, plan)
-        if ex is not None:
-            if not rules.at_or_through(BUY, r.bid, r.ask, ex["cover"]):
-                _exit_held(t, r, ex, plan, w)
-                return "exit_out_of_tol"
-            fbid, fask = await _bbo(t, r.slug, book=True)
-            fa = _num(fask)
-            if fa is None or not rules.at_or_through(BUY, fbid, fask, ex["cover"]):
-                _exit_held(t, r, ex, plan, w, quote=(fbid, fask))
-                return "exit_out_of_tol"
-            close_bips = min(int(le.EXIT_SLIPPAGE_BIPS),
-                             max(1, int(math.floor((float(ex["ceiling"]) / fa - 1.0) * 10000.0))))
-            plan["exit_close_bips"] = close_bips
-            plan["exit_close_ask"] = fa
     try:
         held, _avg = await _pm_held(t, r.slug)
     except Exception as exc:  # noqa: BLE001 — cannot size: refuse, retry next tick
@@ -5732,19 +6421,10 @@ async def _flatten_send(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, his_px
     venue_now = math.ceil(abs(float(r.venue)))
     sole_walk = ledger >= venue_now
     sole_read = ledger >= int(held)
-    # ON A SHORT BOOK, SOLE ALSO NEEDS THE SIGN AND NOBODY BESIDE US.
-    # The two readings above compare MAGNITUDES, so a MIXED-SIGN co-hold
-    # -- the desk long 100 (explained by _SQL_MANUAL_SHARES) beside our
-    # short 300, the venue net -200 -- read "sole" and close_position
-    # closed the NET: 200 of our 300 covered, the desk's long netted
-    # away, the book left at -100 against a venue of 0 with nothing
-    # named (P2 rung S0 review, sign lens). Fewer closes is the safe
-    # direction R7's comment permits: the desk's shares must be zero
-    # and the venue must read our side, else the flatten is
-    # `short_reduce_unproven` below
-    if short and (r.manual != 0 or not (float(r.venue) < 0)):
-        sole_walk = sole_read = False
-    elif sole_walk != sole_read:
+    # (The short book's sign clause that sat here -- a mixed-sign co-hold
+    # read "sole" by magnitude -- went with close_position: a short's
+    # cover is a clamped order of our own quantity, S4.)
+    if sole_walk != sole_read:
         # Two readings that disagree are EVIDENCE OF CO-HOLDING, not an
         # unreadable account: the walk keeps the fraction and the fresh
         # read floors it away, so `ledger < venue < ledger + 1` -- exactly
@@ -5778,13 +6458,6 @@ async def _flatten_send(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, his_px
     # ceil(held)) (_sell_qty), refused under one share by name.
     qty = ledger
     if not sole:
-        if short:
-            # co-held: the only exit would be a SELL_SHORT IOC in a
-            # denomination nobody has read back (brief 3.4): held,
-            # named, nothing sent
-            _mirror_stop("short_reduce_unproven", w)
-            plan["short_reduce"] = "unproven"
-            return "short_reduce_unproven"
         qty = _sell_qty(book, ledger)
         if qty < 1:
             _mirror_stop("under_one_share", w)
@@ -5802,10 +6475,10 @@ async def _flatten_send(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, his_px
     if book["id"] in t.nonterminal:
         _mirror_stop("open_order_pending", w)
         return "open_order_pending"
-    # the row: the PLAN side of a reduce on this book (SELL_LONG on a
-    # long book, BUY_LONG on a short one) and the WIRE intent the exit
-    # maps to (brief 3.3); a CLOSE carries no cent of its own
-    side = BUY if short else SELL
+    # the row: the PLAN side of a reduce on this (long) book and the
+    # WIRE intent the exit maps to (brief 3.3); a CLOSE carries no cent
+    # of its own
+    side = SELL
     ws = rules.wire_side(book.get("intent"), side)
     if ws is None:
         _mirror_stop("book_error", w)
@@ -5892,8 +6565,6 @@ async def _flatten_send(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, his_px
         _mirror_stop(f"place_refused:{status or 'no_id'}", w)
         return f"place_refused:{status}"
     await _finish_order(t, o, book, st, kind)
-    if short:
-        _mirror_stop("short_flatten_close", w)
     _recent(book["id"], "flattened", how="close_position" if sole else "ioc", filled=filled)
     return kind
 
@@ -6313,6 +6984,10 @@ async def _tick(t: _Tick, woken: list) -> None:
         await _reconcile_orders(t)
         await _instruments(t)
         return
+    # S4 (review round 2, GAP 2): a probe order the venue kept is
+    # cancelled again before anything else -- every tick, until the
+    # venue reports it gone; no probe goes out while one is held
+    await _s4_cancel_retry(t)
     # R: the reads, once. Ratios for the allowlist only: an open book
     # carries its own fixed ratio and never re-reads one
     t.ratios = await ms.refresh_ratios(t.pool, sorted(t.allow)) if t.allow else {}

@@ -698,6 +698,14 @@ MIRROR_TAKE_AFTER_S = min_wait_env("MIRROR_TAKE_AFTER_S", 0.0)
 # to settlement. Under this rule it takes at 0.45+ while the bid is
 # there and, once the market has fallen, HOLDS at his cent.
 MIRROR_EXIT_TOL = capped_env("MIRROR_EXIT_TOL", 0.01, floor=0.0)
+# THE FLATTEN'S SLIPPAGE (S4, 2026-09-07): the one bound an UNPRICED
+# flatten IOC may slip past the touch -- the long flatten's co-held IOC
+# at le.sell_limit_price (the bid less 2c, floored at 0.01) and, mirrored
+# for the short cover when he is gone (a vanish, the sign flip) with no
+# price of his, le.buy_limit_price (the ask plus 2c, capped at 0.99).
+# Documentary: the executor's two functions carry the figure; the tests
+# pin them to this constant. Not a knob.
+MIRROR_FLATTEN_SLIP = 0.02
 # A vanished whale's flatten rests at his equivalent this long before
 # the slippage path (critic C16). A wait like the take's: the
 # environment may only lengthen it.
@@ -1480,13 +1488,18 @@ def exit_terms(side: str, his_px: float | None,
                 to the cent (0.44) would admit a fill 1.95c under him,
                 past the tolerance; ceiled (0.45) every fill is inside
                 it, at any precision. On a cent floor the two agree.
-      BUY (a short book's cover, in long space):
-        px      his price
+      BUY (a short book's cover, in long space; S4 makes it a priced
+      order through the same machinery as the SELL):
+        px      his buy-back price
         ceiling his price + tol
         cover   the highest cent AT OR UNDER the ceiling (buy_wire of
-                the ceiling, capped at 0.99): close_position is sent
+                the ceiling, capped at 0.99): the IOC's limit, sent
                 only while the ask is at or under it
-                (at_or_through(BUY, bid, ask, cover)).
+                (at_or_through(BUY, bid, ask, cover)); `take` is the
+                same cent, the SELL's name for it
+        rest    the cent the cover RESTS at, floor(his price) (buy_wire,
+                never under 0.01): never above him, and under the ask
+                whenever the take did not fire.
 
     None when he gave no exit price -- `his_px` missing, not a number,
     a bool, or off (0, 1) -- when the side is not BUY or SELL, or when
@@ -1512,9 +1525,10 @@ def exit_terms(side: str, his_px: float | None,
     if side == BUY:
         ceiling = h + tl
         cover = buy_wire(min(ceiling, 0.99))
-        if cover is None:
+        rest = buy_wire(max(h, 0.01))
+        if cover is None or rest is None:
             return None
-        return {"px": h, "ceiling": ceiling, "cover": cover}
+        return {"px": h, "ceiling": ceiling, "cover": cover, "rest": rest, "take": cover}
     return None
 
 
@@ -2275,7 +2289,7 @@ __all__ = [
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
     "MIRROR_BOOK_CONCURRENCY", "MIRROR_VENUE_CALLS_PER_TICK",
     "MIRROR_MAX_REPLACES_PER_HOUR", "MIRROR_REST_TTL_S", "MIRROR_TAKE_AFTER_S",
-    "MIRROR_EXIT_TOL", "exit_terms",
+    "MIRROR_EXIT_TOL", "exit_terms", "MIRROR_FLATTEN_SLIP",
     "MIRROR_FLATTEN_REST_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FAMILIES", "FLAT_TOL_SHARES",
     "SELL_DUST_SHARES",

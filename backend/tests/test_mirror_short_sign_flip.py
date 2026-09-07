@@ -3,7 +3,7 @@ sure we are mirroring shorts"; brief B8, owner default Q5 (a)).
 
 His net crosses zero while a book is open. The book flattens under the
 name `sign_flip` -- a long book by its own rest, a short book by
-close_position when sole -- and once flat with no order open the flip
+its priced cover (S4) -- and once flat with no order open the flip
 IS the close (2026-09-06, owner 19:33Z "I need more trades firing in
 the mirror sleeve"): the episode closes on that tick, no 3600 s flat
 wait, and the opposite side opens as a NEW episode on the next tick
@@ -69,19 +69,19 @@ def test_a_long_book_flattens_on_his_flip_to_short_and_the_short_episode_opens_o
     assert _census(st4, "short_open") == 1 and _census(st4, "sign_flip") == 0
 
 
-def test_a_short_book_flattens_by_close_position_on_his_flip_to_long_and_the_long_episode_follows(monkeypatch):
+def test_a_short_book_flattens_by_its_priced_cover_on_his_flip_to_long_and_the_long_episode_follows(monkeypatch):
     _shorts_on(monkeypatch)
     # an open short book of 300, and his net now +300 (the default fixture: 300 long, none other)
     p = _pool()
     b = _short_book(p, ledger=-300)
-    v = _Venue(held={SLUG: -300})
+    v = _Venue(held={SLUG: -300}, ioc_fill=300.0)
     st = _tick(p, v)
     assert _census(st, "sign_flip") == 1 and b["target"] == 0 and b["last_plan"]["sign_flip"] is True
-    # sole holder: the one proven short exit, at once
-    assert ("close", SLUG, COVER_AT_CEILING_BIPS) in v.calls and "place" not in _kinds(v)
+    # the cover (S4): one IOC at the ceiling cent (his BUY 0.31 + 0.01), never close_position
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.32, 300, True, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")]
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
-    assert b["realized_pnl"] == pytest.approx((0.32 - 0.29) * 300)
-    # flat by close_position inside the tick: the venue was read at -300
+    assert b["realized_pnl"] == pytest.approx((0.32 - 0.32) * 300)
+    # flat by the cover inside the tick: the venue was read at -300
     # BEFORE the cover, so the close waits for the venue's own 0 (review
     # M-1) -- the book stays live, not_due, this tick
     assert b["state"] == "live" and b["last_plan"]["close"] == "not_due" and len(p.books) == 1

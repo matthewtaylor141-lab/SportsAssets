@@ -3078,13 +3078,26 @@ def _with_short_facts(result: dict, facts: dict) -> dict:
 
 
 def _norm_order(o: dict) -> dict:
-    """One venue order -> the desk's open-order row shape."""
+    """One venue order -> the desk's open-order row shape.
+
+    `side` is the DESK's reading, derived from the intent ('SELL' for
+    any *_SELL_* intent: the money direction as the desk shows it).
+    `venue_side` is the venue's OWN field verbatim (the SDK's
+    Order.side: ORDER_SIDE_BUY / ORDER_SIDE_SELL, the contract side
+    the venue derived from the intent -- a BUY_SHORT reads
+    ORDER_SIDE_SELL, short-truth 6/6; a SELL_SHORT that buys the
+    contract back must read ORDER_SIDE_BUY), None when the venue
+    reported none. The S4 read-back proof compares `venue_side`,
+    never the derived one (S4 review, F1: the derivation hid the
+    venue's side, so a venue listing the probe as a SELL still
+    proved)."""
     md = o.get("marketMetadata") or {}
     return {
         "order_id": o.get("id"),
         "us_market_slug": o.get("marketSlug"),
         "intent": o.get("intent"),
         "side": ("SELL" if "SELL" in str(o.get("intent") or "") else "BUY"),
+        "venue_side": (str(o["side"]) if o.get("side") else None),
         "price": _amount_value(o.get("price") or {}),
         "quantity": float(o.get("quantity") or 0),
         "filled_shares": float(o.get("cumQuantity") or 0),

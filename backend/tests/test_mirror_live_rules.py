@@ -820,7 +820,10 @@ def test_exit_terms_price_every_exit_off_his_price_within_the_tolerance():
     assert r.exit_terms(r.SELL, 0.995)["rest"] == 0.99 and r.exit_terms(r.SELL, 0.995)["take"] == 0.99
     # the short cover
     cv = r.exit_terms(r.BUY, 0.30)
-    assert cv == {"px": 0.30, "ceiling": pytest.approx(0.31), "cover": 0.31}
+    assert cv == {"px": 0.30, "ceiling": pytest.approx(0.31), "cover": 0.31, "rest": 0.30, "take": 0.31}
+    # S4: the cover's rest is floor(his) to the cent, never above him, never under 0.01
+    assert r.exit_terms(r.BUY, 0.4595)["rest"] == 0.45 and r.exit_terms(r.BUY, 0.005)["rest"] == 0.01
+    assert r.exit_terms(r.BUY, 0.995)["rest"] == 0.99 and r.exit_terms(r.BUY, 0.31)["take"] == r.exit_terms(r.BUY, 0.31)["cover"]
     assert r.exit_terms(r.BUY, 0.4595)["cover"] == 0.46 and r.exit_terms(r.BUY, 0.46)["cover"] == 0.47
     assert r.exit_terms(r.BUY, 0.985)["cover"] == 0.99
     assert r.at_or_through(r.BUY, 0.29, 0.31, cv["cover"]) is True

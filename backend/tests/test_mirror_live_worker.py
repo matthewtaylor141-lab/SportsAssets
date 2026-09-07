@@ -76,7 +76,7 @@ import time
 
 import pytest
 
-from sportsassets import copy_sports, edge_gate, ratelimit, venue_pace
+from sportsassets import copy_sports, edge_gate, pmus, ratelimit, venue_pace
 from sportsassets import live_executor as le
 from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.workers import mirror_live as ml
@@ -228,7 +228,12 @@ class _Pool(_ShadowPool):
         self.snap_partial = snap_partial
         self.map_rows = map_rows
         self.books, self.orders, self.rows = {}, {}, {}
-        self.state = {"mirror_live": True, "side_echo_last": {"ok": 1}}
+        # S4: the fixture's default is the read-back proof PASSED (the
+        # steady state once the probe has run in production), so the
+        # short tests exercise the cover; the probe's own tests and the
+        # unproven refusals delete the key
+        self.state = {"mirror_live": True, "side_echo_last": {"ok": 1},
+                      "mirror_s4_proof": {"proved": True, "at": NOW - 100.0, "slug": SLUG, "fixture": True}}
         self.markets = {CID: {"closed": False, "resolved": False, "resolved_prices": None}}
         self.token_index = {M: 1, N: 0}
         self.token_cid = {M: CID, N: CID}
@@ -828,11 +833,20 @@ class _Venue:
                 "state": self.states.get(slug, self.state), "error": None}
 
     def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
-             filled=0.0, avg=None):
+             filled=0.0, avg=None, intent=None):
+        # `intent`: the order's intent as the venue's open-orders read
+        # reports it (pmus._norm_order carries `intent`); the S4 probe
+        # reads it back. A fixture rest placed by hand carries none
+        # unless the test names it. `side` is the venue's contract
+        # side in the desk's spelling; `venue_side` is the venue's own
+        # field for it (pmus._norm_order carries the SDK's Order.side
+        # verbatim: ORDER_SIDE_BUY / ORDER_SIDE_SELL), the field the S4
+        # proof compares (S4 review, F1)
         self.orders[oid] = {"order_id": oid, "us_market_slug": slug, "side": side, "price": price,
                             "quantity": float(qty), "filled_shares": filled, "avg_px": avg,
                             "state": state, "created_at": NOW if created is None else created,
-                            "tif": "GOOD_TILL_CANCEL"}
+                            "tif": "GOOD_TILL_CANCEL", "intent": intent,
+                            "venue_side": (f"ORDER_SIDE_{str(side).upper()}" if side else None)}
         return self.orders[oid]
 
     def _norm(self, o):
@@ -875,14 +889,23 @@ class _Venue:
         self.calls.append(("place", slug, price, qty, sell, tif, intent, post_only, good_till))
         self.n += 1
         oid = f"oid-{self.n}"
-        # the venue books a BUY_SHORT as ORDER_SIDE_SELL of the contract
-        # (short-truth 6/6, 50/50): the resting order's side is what the
-        # open-orders read hands back. Every existing caller's shape --
-        # no intent, or BUY_LONG -- rests as it did
-        venue_side = "SELL" if (sell or intent == "ORDER_INTENT_BUY_SHORT") else "BUY"
+        # the intent the adapter puts on the wire (pmus.submit_fok:
+        # _exit_intent for a sell, the caller's BUY intent else)
+        wire_intent = (("ORDER_INTENT_SELL_SHORT" if intent == "ORDER_INTENT_BUY_SHORT"
+                        else "ORDER_INTENT_SELL_LONG") if sell else (intent or "ORDER_INTENT_BUY_LONG"))
+        # THE VENUE'S OWN SIDE, derived by the venue from the wire
+        # intent: the CONTRACT side. A BUY_SHORT is ORDER_SIDE_SELL of
+        # the contract (short-truth 6/6, 50/50) and so is a SELL_LONG;
+        # a SELL_SHORT that buys the contract back is ORDER_SIDE_BUY,
+        # as a BUY_LONG is (S4 review, F1: the fixture used to model the
+        # adapter's derivation -- SELL for any sell=True -- which is the
+        # desk's `side`, not the venue's). The resting order's side is
+        # what the open-orders read hands back. Every existing caller's
+        # shape -- no intent, or BUY_LONG -- rests as it did
+        venue_side = "SELL" if wire_intent in ("ORDER_INTENT_BUY_SHORT", "ORDER_INTENT_SELL_LONG") else "BUY"
         if self.place_raises is not None:
             if self.rest_on_raise:
-                self.rest(oid, venue_side, price, qty, slug)
+                self.rest(oid, venue_side, price, qty, slug, intent=wire_intent)
             raise self.place_raises
         if self.place is not None:
             return self.place(self, oid, slug, price, qty, sell, tif, intent, post_only, good_till)
@@ -891,7 +914,7 @@ class _Venue:
             return {"ok": f > 0, "order_id": oid, "status": "filled" if f >= qty else "canceled",
                     "fill_price": price if f > 0 else None, "filled_shares": f,
                     "raw": {"response": {"id": oid}}}
-        self.rest(oid, venue_side, price, qty, slug)
+        self.rest(oid, venue_side, price, qty, slug, intent=wire_intent)
         return {"ok": False, "order_id": oid, "status": "new", "fill_price": None,
                 "filled_shares": 0.0, "raw": {"response": {"id": oid}}}
 
@@ -4494,15 +4517,18 @@ def test_a_sole_holder_at_ledger_one_row_a_fraction_sends_close_position_unclamp
     assert row["filled_shares"] == 0.0 and b["ledger_net"] == 0 and b["state"] != "frozen"
     assert p.state["mirror_live"] is True
     # the gate sits BELOW the sole decision and inside the co-held arm only
-    src = _flatten_src()
+    # (of the slippage leg itself: since S4 _flatten_vanished carries the
+    # short cover's own under_one_share gate beside it)
+    src = inspect.getsource(ml._flatten_send)
     i_sole = src.index("sole = sole_walk and sole_read")
     i_gate = src.index('_mirror_stop("under_one_share", w)')
     assert i_sole < src.index("qty = _sell_qty(book, ledger)") < i_gate < src.index("t.pmus.slug_bid")
     assert src.count('_mirror_stop("under_one_share", w)') == 1
-    # merged with P2 rung S0: the co-held arm refuses a SHORT book by name
-    # first (short_reduce_unproven), then sizes the long book's IOC
-    assert "qty = ledger\n    if not sole:\n        if short:" in src
-    assert 'return "short_reduce_unproven"\n        qty = _sell_qty(book, ledger)' in src
+    # S4: the slippage leg is the LONG book's alone -- a short book is
+    # refused at its head (`book_error`) and its cover is _act's priced
+    # order; the co-held arm sizes the long book's IOC directly
+    assert "qty = ledger\n    if not sole:\n        qty = _sell_qty(book, ledger)" in src
+    assert "short_reduce_unproven" not in inspect.getsource(ml._flatten_send)
 
 
 def test_a_coheld_ioc_at_ledger_one_row_a_fraction_sends_one_share(monkeypatch):
@@ -4646,7 +4672,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-31:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-38:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4672,9 +4698,14 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # same-wire re-quote skipped) and the addendum's
                           # entry take-first, before the last key
                           "exit_take", "exit_out_of_tol", "requote_same_wire", "take_first",
+                          # S4: the probe placed / proved, the cover refused unproven, the
+                          # probe that filled at create and was booked (v3), the
+                          # cover's rest / take / hold outside the cent
+                          "s4_probe_placed", "s4_proved", "s4_unproven", "s4_probe_filled",
+                          "short_cover_rest", "short_cover_take", "short_cover_out_of_tol",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-32] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-39] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -4739,6 +4770,18 @@ def _short_world(**kw):
 
 def _short_http():
     return _mkt(100.0, 400.0)
+
+
+def _s4_unproven(p, why="wrong_price", at=NOW - 10.0):
+    """The S4 read-back proof NOT passed: a mismatch recorded inside the
+    hour (so no probe runs this tick either). Every cover is refused by
+    name until the key reads proved."""
+    p.state["mirror_s4_proof"] = {"proved": False, "at": at, "slug": SLUG, "why": why,
+                                  "echo": {"price": 0.24, "quantity": 1.0, "intent": "ORDER_INTENT_SELL_SHORT"}}
+
+
+def _s4_proved(p, at=NOW - 100.0):
+    p.state["mirror_s4_proof"] = {"proved": True, "at": at, "slug": SLUG, "fixture": True}
 
 
 def _shorts_on(monkeypatch, max_shares=10 ** 6):
@@ -4866,10 +4909,14 @@ def test_a_short_fill_that_cost_more_than_the_wires_collateral_trips_overspend(m
     assert ml._overspend_of({"side": BUY, "tif": "GTC", "wire": 0.30}, {"avg_px": 0.31}, INTENT) is True
 
 
-def test_a_partial_reduce_of_a_short_is_refused_by_name_before_rung_s4_and_nothing_is_sent(monkeypatch):
+def test_a_partial_reduce_of_a_short_is_refused_by_name_until_the_read_back_proof_then_covered(monkeypatch):
+    """S4: the partial short reduce (his partial buy-back) stays
+    `short_reduce_unproven` while the read-back proof has not passed;
+    once it has, it is the priced cover (section 22)."""
     _shorts_on(monkeypatch)
     # his net moved up from -300 to -100: 300 long against 400 other
     p = _short_world(fills=_his(300, other_size=400, other_px=0.72), snap={M: 300.0, N: 400.0})
+    _s4_unproven(p)
     b = _short_book(p, ledger=-300)
     v = _Venue(held={SLUG: -300})
     st = _tick(p, v, http=_mkt(300.0, 400.0))
@@ -4883,53 +4930,57 @@ def test_a_partial_reduce_of_a_short_is_refused_by_name_before_rung_s4_and_nothi
     assert b["last_plan"]["his_level"] == pytest.approx(0.31)
 
 
-def test_a_sole_held_short_flattens_by_close_position_and_a_co_held_one_is_refused_by_name(monkeypatch):
+def test_a_short_flattens_by_its_priced_cover_sole_or_co_held_never_close_position(monkeypatch):
+    """S4: the paired flatten of a short is a BUY of the long token with
+    the closing intent (SELL_SHORT on the wire) through _place -- here
+    the IOC at the ceiling cent (his buy-back 0.31 + 0.01 = 0.32, the
+    ask there) -- never close_position, and for OUR quantity: a
+    co-holder beside us changes nothing (no sole reading, no refusal)."""
     _shorts_on(monkeypatch)
     # his net gone to zero while he still holds both tokens: the paired flatten
     p = _short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0})
     b = _short_book(p, ledger=-300)
-    v = _Venue(held={SLUG: -300})
+    v = _Venue(held={SLUG: -300}, ioc_fill=300.0)
     st = _tick(p, v, http=_mkt(400.0, 400.0))
     assert b["target"] == 0 and b["last_plan"]["kind"] == "flatten_paired"
-    assert ("close", SLUG, COVER_AT_CEILING_BIPS) in v.calls and "place" not in _kinds(v)
-    assert "slug_bid" not in _kinds(v)
+    assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v)
+    assert [c[1:] for c in _places(v)] == [(SLUG, 0.32, 300, True, IOC_TIF, SHORT, False, None)]
     o = next(iter(p.orders.values()))
-    assert (o["kind"], o["side"], o["tif"], o["intent"]) == ("flatten_paired", BUY, "CLOSE",
-                                                              "ORDER_INTENT_SELL_SHORT")
-    assert o["qty"] == 300 and o["state"] == "filled"
-    # the close filled 300 @ 0.29: the leg covers to zero, realized (0.32 - 0.29) x 300
-    assert b["ledger_net"] == 0 and b["realized_pnl"] == pytest.approx(9.0)
-    assert b["gross_sell_usd"] == pytest.approx(300 * 0.71)
+    assert (o["kind"], o["side"], o["tif"], o["intent"]) == ("take", BUY, "IOC", "ORDER_INTENT_SELL_SHORT")
+    assert o["qty"] == 300 and o["state"] == "filled" and o["wire"] == 0.32
+    # the cover filled 300 @ 0.32 against a 0.32 short: the leg covers to zero, realized 0
+    assert b["ledger_net"] == 0 and b["realized_pnl"] == pytest.approx(0.0)
     assert p.rows[b["standing_row_id"]]["filled_shares"] == 0.0
-    assert p.rows[b["standing_row_id"]]["pnl"] == pytest.approx(9.0)
-    assert _census(st, "short_flatten_close") == 1 and st["flattened"] == 1
+    assert _census(st, "short_flatten_close") == 1
+    assert _census(st, "short_cover_take") == 1 and _census(st, "exit_take") == 1
     assert _census(st, "overfill") == 0 and _census(st, "short_reduce_unproven") == 0
+    lp = b["last_plan"]
+    assert lp["exit_px"] == pytest.approx(0.31) and lp["exit_ceiling"] == pytest.approx(0.32)
+    assert lp["exit_cover"] == 0.32 and lp["exit_rest"] == 0.31 and lp["exit_px_src"] == "his_fill"
     # flat at target 0 on a live market: the row stays 'filled' at 0 and
     # the episode waits its flat hour like any other
     assert p.rows[b["standing_row_id"]]["status"] == "filled" and b["last_plan"]["close"] == "not_due"
 
     # CO-HELD: someone else's half share beside our 300 (the walk sees
-    # -300.5, the fresh read floors to 300, the two readings disagree:
-    # NOT sole, section 14's rule) -- the whole-slug close would take a
-    # stranger's leg with ours, and the co-held IOC is a SELL_SHORT
-    # nobody has read back: refused by name, held, nothing sent. A
-    # same-sign co-hold the ledger cannot explain freezes the book
+    # -300.5): the cover is a clamped order of OUR 300, so the stranger's
+    # leg is never touched and nothing is refused (S4). A same-sign
+    # co-hold the ledger cannot explain freezes the book
     # `venue_ledger_disagree` first, as it does a long book (R7)
     p2 = _short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0})
     b2 = _short_book(p2, ledger=-300)
-    v2 = _Venue(held={SLUG: -300.5})
+    v2 = _Venue(held={SLUG: -300.5}, ioc_fill=300.0)
     st2 = _tick(p2, v2, http=_mkt(400.0, 400.0))
-    assert "close" not in _kinds(v2) and not _places(v2) and "slug_bid" not in _kinds(v2)
-    assert _census(st2, "flatten_holding_disagrees") == 1
-    assert _census(st2, "short_reduce_unproven") == 1 and b2["ledger_net"] == -300
-    assert b2["state"] == "live" and not p2.orders
+    assert "close" not in _kinds(v2) and "slug_bid" not in _kinds(v2)
+    assert [c[2:6] for c in _places(v2)] == [(0.32, 300, True, IOC_TIF)]
+    assert _census(st2, "flatten_holding_disagrees") == 0 and _census(st2, "short_reduce_unproven") == 0
+    assert b2["ledger_net"] == 0 and b2["state"] == "live" and _census(st2, "short_flatten_close") == 1
     p3 = _short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0})
     b3 = _short_book(p3, ledger=-300)
     st3 = _tick(p3, _Venue(held={SLUG: -500}), http=_mkt(400.0, 400.0))
     assert b3["frozen_reason"] == "venue_ledger_disagree" and _census(st3, "wrong_sign_trip") == 0
 
 
-def test_a_confirmed_vanish_on_a_short_closes_at_once_by_close_position_with_no_rest_first(monkeypatch):
+def test_a_confirmed_vanish_on_a_short_covers_at_once_by_the_priced_ioc_with_no_rest_first(monkeypatch):
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
              _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
@@ -4937,17 +4988,18 @@ def test_a_confirmed_vanish_on_a_short_closes_at_once_by_close_position_with_no_
     b = _short_book(p, ledger=-300)
     # his buy-back is 0.30 in long space (his SELL of the other at 0.70,
     # his newest): the cover's ceiling is 0.31 (E4), so the ask sits there
-    v = _Venue(ask=0.31, held={SLUG: -300})
+    # and the cover is ONE IOC at 0.31 this tick (S4), no rest first
+    v = _Venue(ask=0.31, held={SLUG: -300}, ioc_fill=300.0)
     http = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0},
                        {"conditionId": CID, "asset": N, "size": 0}])
     st = _tick(p, v, http=http)
     # the vanish was confirmed on the token carrying his net, the OTHER one
     assert any(c[1].get("market") == CID for c in http.calls)
     assert _census(st, "flatten_vanished") == 1 and _census(st, "flatten_rested") == 0
-    assert ("close", SLUG, COVER_AT_CEILING_BIPS) in v.calls and "place" not in _kinds(v)
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.31, 300, True, IOC_TIF)]
     o = next(iter(p.orders.values()))
-    assert o["kind"] == "flatten_vanished" and o["tif"] == "CLOSE"
-    assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
+    assert o["kind"] == "take" and o["tif"] == "IOC" and o["intent"] == "ORDER_INTENT_SELL_SHORT"
+    assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1 and _census(st, "short_cover_take") == 1
     # flat on a confirmed vanish: the episode closes without the flat hour
     assert b["state"] == "closed"
 
@@ -5158,12 +5210,13 @@ def test_a_transient_intent_guard_error_refuses_the_tick_and_never_flattens_a_sh
     assert b2["ledger_net"] == -300 and b2["target"] == 0 and b2["last_plan"]["short_column"] == "absent"
     assert _census(st2, "short_flatten_close") == 0 and _census(st2, "intent_guard_unreadable") == 0
     # the column back and the knob off (the reversal path): the same book
-    # flattens by close_position, its close row through the 050 INSERT
+    # flattens by its priced cover (S4), the row through the 050 INSERT
     p2.no_intent_column = False
     monkeypatch.setattr(rules, "MIRROR_SHORTS", False)
-    v3 = _Venue(held={SLUG: -300})
+    v3 = _Venue(held={SLUG: -300}, ioc_fill=300.0)
     st3 = _tick(p2, v3, now=NOW + 30, http=_short_http())
-    assert ("close", SLUG, COVER_AT_CEILING_BIPS) in v3.calls and b2["ledger_net"] == 0
+    assert "close" not in _kinds(v3) and [c[2:6] for c in _places(v3)] == [(0.32, 300, True, IOC_TIF)]
+    assert b2["ledger_net"] == 0
     ins = [a for k, s, a in p2.sent if "ml-order-insert" in s]
     assert ins and all(len(a) == 19 and a[18] == "ORDER_INTENT_SELL_SHORT" for a in ins)
     assert _census(st3, "short_flatten_close") == 1
@@ -5228,11 +5281,10 @@ def test_a_pre_050_sell_rest_back_filled_buy_long_is_kept_not_replaced():
 
 def test_a_mixed_sign_co_hold_on_a_short_is_never_sole_and_nothing_closes(monkeypatch):
     """The desk long 100 (explained by _SQL_MANUAL_SHARES) beside our
-    short of 300: the venue nets -200 and both sole readings compare
-    magnitudes (300 >= 200), so close_position would close the NET --
-    200 of ours covered, the desk's long netted away, the book left at
-    -100 against a venue of 0 with nothing named (review, sign lens).
-    A short is sole only with nothing of the desk's beside it."""
+    short of 300: the venue nets -200. Before S4 close_position would
+    have closed the NET (200 of ours covered, the desk's long netted
+    away); since S4 the cover is an ordinary order of our own 300 and
+    the sole question is never asked."""
     _shorts_on(monkeypatch)
     p = _short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0})
     b = _short_book(p, ledger=-300)
@@ -5246,8 +5298,10 @@ def test_a_mixed_sign_co_hold_on_a_short_is_never_sole_and_nothing_closes(monkey
                       "filled_shares": 200.0, "raw": {}})
     st = _tick(p, v, http=_mkt(400.0, 400.0))
     assert b["target"] == 0 and b["last_plan"]["kind"] == "flatten_paired"
-    assert "close" not in _kinds(v) and not _places(v) and not p.orders
-    assert _census(st, "short_reduce_unproven") == 1 and _census(st, "short_flatten_close") == 0
+    # S4: the cover is a clamped order of OUR 300 (never the net, never the
+    # desk's long): one IOC at the ceiling cent, close_position never called
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.32, 300, True, IOC_TIF)]
+    assert _census(st, "short_reduce_unproven") == 0 and _census(st, "short_cover_take") == 1
     assert _census(st, "venue_ledger_disagree") == 0 and _census(st, "flatten_holding_disagrees") == 0
     assert b["ledger_net"] == -300 and b["state"] == "live" and b["frozen_reason"] is None
     # and no sign proof is read off a mixed-sign co-hold either
@@ -5350,19 +5404,28 @@ def test_a_disarmed_model_is_named_before_the_candidates_referees_are_read(monke
     assert not [s for k, s, a in p.sent if "ml-kalshi" in s], "no referee read on a disarmed model"
 
 
-# (ad) a short REDUCE take is never sent before rung S4, even with the arm live
-def test_a_short_reduce_take_is_refused_by_name_and_no_sell_short_ioc_goes_out(monkeypatch):
+# (ad) a short REDUCE take is never sent while the read-back proof is unproven, even with the arm live
+def test_a_short_reduce_take_is_refused_by_name_while_unproven_and_is_the_cover_ioc_once_proved(monkeypatch):
     _shorts_on(monkeypatch)
     # his net moved up from -300 to -100: the plan is a BUY_LONG cover of 200
     p = _short_world(fills=_his(300, other_size=400, other_px=0.72), snap={M: 300.0, N: 400.0})
+    _s4_unproven(p)
     b = _short_book(p, ledger=-300, take_armed_ts=NOW - 130)
     # a locked book at the cover's wire (his long BUY 0.31 floors to the 0.30 bid): the take would fire
     v = _Venue(bid=0.30, ask=0.30, held={SLUG: -300}, ioc_fill=300.0)
     st = _tick(p, v, http=_mkt(300.0, 400.0))
     assert b["target"] == -100 and b["last_plan"]["side"] == BUY
-    assert not _places(v) and "close" not in _kinds(v), _places(v)
+    assert not [c for c in _places(v) if c[3] != 1] and "close" not in _kinds(v), _places(v)
     assert _census(st, "take_placed") == 0 and _census(st, "short_reduce_unproven") == 1
-    assert b["ledger_net"] == -300 and not p.orders
+    assert b["ledger_net"] == -300 and not p.orders and b["last_plan"]["s4"] == {"unproven": "wrong_price"}
+    # (a locked book is not a two-sided quote: no probe ran on it)
+    assert _census(st, "s4_probe_placed") == 0
+    # the proof passed (the probe on another book, or by hand): the cover IOC
+    _s4_proved(p)
+    v2 = _Venue(bid=0.30, ask=0.30, held={SLUG: -300}, ioc_fill=300.0)
+    st2 = _tick(p, v2, now=NOW + 30, http=_mkt(300.0, 400.0))
+    assert [c[2:6] for c in _places(v2)] == [(0.32, 200, True, IOC_TIF)] and _census(st2, "short_cover_take") == 1
+    assert b["ledger_net"] == -100 and _census(st2, "short_reduce_unproven") == 0
 
 
 # (h3) the reserve a short rest commits while in flight is its collateral
@@ -5385,25 +5448,24 @@ def test_the_reserve_held_during_a_short_placement_is_the_collateral(monkeypatch
     assert le._REST_RESERVED_USD == 0.0
 
 
-# (af) a lost close on a short book is sized off the LEG of the venue's negative position
+# (af) a lost LEGACY close on a short book is sized off the LEG of the venue's negative position
 def test_a_lost_close_on_a_short_reads_the_venues_negative_position_as_the_leg(monkeypatch):
+    """_reconcile_lost_close stays for the CLOSE rows on file from before
+    S4 (a short sends no close_position since): the row is seeded as the
+    lost close left it -- 'placing', no id, tif CLOSE -- and walked by
+    step O."""
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
              _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
     gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0},
                        {"conditionId": CID, "asset": N, "size": 0}])
-
-    class _V(_Venue):
-        def close_position(self, slug, *, slippage_bips):
-            self.calls.append(("close", slug, slippage_bips))
-            raise TimeoutError("read timed out")
-
     p = _short_world(fills=fills, snap=None)
     b = _short_book(p, ledger=-300)
-    v = _V(ask=0.31, held={SLUG: -300})          # the ask inside the cover's ceiling (E4)
+    row = p.add_order(b, side=BUY, wire=0.0, qty=300, kind="flatten_vanished", tif="CLOSE", order_id=None,
+                      state="placing", placed_ts=NOW - 90, intent="ORDER_INTENT_SELL_SHORT")
+    v = _Venue(ask=0.31, held={SLUG: -300})
     st = _tick(p, v, http=gone)
-    assert ("close", SLUG, COVER_AT_CEILING_BIPS) in v.calls
-    row = next(x for x in p.orders.values() if x["tif"] == "CLOSE")
+    assert "close" not in _kinds(v) and not _places(v)
     assert row["state"] == "placing" and b["frozen_reason"] == "placement_lost"
     assert _census(st, "placement_lost") == 1
     # nothing left the account: the venue still shows -300, the leg is 300, nothing sold
@@ -5436,22 +5498,23 @@ def test_no_sign_proof_is_recorded_while_the_desk_holds_shares_on_the_slug(monke
     assert (b["last_plan"] or {}).get("short_proof") is None
 
 
-# (au) a short's flatten cancels its resting BUY_SHORT add BEFORE the whole-slug close
-def test_a_confirmed_vanish_on_a_short_cancels_the_resting_add_then_closes(monkeypatch):
+# (au) a short's flatten replaces its resting BUY_SHORT add with the cover, in one tick
+def test_a_confirmed_vanish_on_a_short_cancels_the_resting_add_then_covers(monkeypatch):
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
              _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
     p = _short_world(fills=fills, snap=None)
     b = _short_book(p, ledger=-300)
     o = p.add_order(b, side=SELL, wire=0.32, qty=100, kind="increase")
-    v = _Venue(ask=0.31, held={SLUG: -300})      # the ask inside the cover's ceiling (E4)
+    v = _Venue(ask=0.31, held={SLUG: -300}, ioc_fill=300.0)      # the ask inside the cover's ceiling (E4)
     v.rest("oid-1", "SELL", 0.32, 100)
     http = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0},
                        {"conditionId": CID, "asset": N, "size": 0}])
     st = _tick(p, v, http=http)
     assert _cancels(v) == [("cancel", "oid-1", SLUG)]
-    assert p.orders[o["id"]]["state"] == "cancelled"
-    assert ("close", SLUG, COVER_AT_CEILING_BIPS) in v.calls, "the close follows the cancel in one tick"
+    assert p.orders[o["id"]]["state"] == "cancelled" and p.orders[o["id"]]["reason"] == "replace"
+    assert "close" not in _kinds(v)
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, IOC_TIF)], "the cover follows the cancel in one tick"
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
     assert _census(st, "open_order_pending") == 0
 
@@ -5501,13 +5564,15 @@ def test_the_short_share_cap_lowered_to_one_bites_by_name(monkeypatch):
     st3 = _tick(p, _Venue(held={SLUG: -1}), now=NOW + 60, http=_short_http())
     assert _census(st3, "on_target") == 1 and _census(st3, "short_share_cap") == 1
     # an open short book above the cap is clamped toward zero: the
-    # partial cover it would take is short_reduce_unproven, nothing sent
+    # partial cover it would take is short_reduce_unproven while the
+    # read-back proof is unproven (S4), nothing sent
     p4 = _short_world()
+    _s4_unproven(p4)
     b4 = _short_book(p4, ledger=-300)
     v4 = _Venue(held={SLUG: -300})
     st4 = _tick(p4, v4, http=_short_http())
     assert b4["target"] == -1 and _census(st4, "short_share_cap") == 1
-    assert _census(st4, "short_reduce_unproven") == 1 and not _places(v4) and "close" not in _kinds(v4)
+    assert _census(st4, "short_reduce_unproven") == 1 and "close" not in _kinds(v4) and not _places(v4)
     # a cap of 0 refuses every short by name: no book, nothing placed
     monkeypatch.setattr(rules, "MIRROR_SHORT_MAX_SHARES", 0)
     p5 = _short_world()
@@ -5590,28 +5655,29 @@ def test_the_g4_census_keys_are_declared_and_served():
 
 def test_the_knob_off_on_an_open_short_book_is_the_reversal_path(monkeypatch):
     """Rung plan, reversal at any rung: knob off restores short_side_refused
-    alone; an open short book flattens by close_position when sole."""
+    alone; an open short book flattens by its priced cover (S4)."""
     monkeypatch.setattr(rules, "MIRROR_SHORTS", False)
     p = _short_world()
     b = _short_book(p, ledger=-300)
-    v = _Venue(held={SLUG: -300})
+    v = _Venue(held={SLUG: -300}, ioc_fill=300.0)
     st = _tick(p, v, http=_short_http())
     assert _census(st, "short_side_refused") == 1 and b["target"] == 0
-    assert ("close", SLUG, COVER_AT_CEILING_BIPS) in v.calls and "place" not in _kinds(v)
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.32, 300, True, IOC_TIF)]
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
-    # co-held (a stranger's fraction beside ours): held and paged, never a SELL_SHORT
+    # co-held (a stranger's fraction beside ours): the cover of OUR 300, as any other
     p2 = _short_world()
     b2 = _short_book(p2, ledger=-300)
-    v2 = _Venue(held={SLUG: -300.5})
+    v2 = _Venue(held={SLUG: -300.5}, ioc_fill=300.0)
     st2 = _tick(p2, v2, http=_short_http())
-    assert _census(st2, "short_reduce_unproven") == 1 and b2["ledger_net"] == -300 and not _places(v2)
-    assert "close" not in _kinds(v2)
+    assert _census(st2, "short_reduce_unproven") == 0 and b2["ledger_net"] == 0
+    assert [c[2:6] for c in _places(v2)] == [(0.32, 300, True, IOC_TIF)] and "close" not in _kinds(v2)
 
 
-def test_a_sign_flip_on_a_short_book_flattens_by_close_position_under_its_name(monkeypatch):
+def test_a_sign_flip_on_a_short_book_flattens_by_its_priced_cover_under_its_name(monkeypatch):
     """B8, owner default Q5 (a): his net crossed to the LONG side while
     our short book is open. The book flattens under the name sign_flip
-    -- the one proven short exit when sole -- and, flat with nothing
+    -- by its priced cover since S4 (his newest long BUY at 0.31: the
+    ceiling 0.32, the ask there, one IOC) -- and, flat with nothing
     open and the venue read at 0, the flip IS the close (2026-09-06):
     the episode closes on the next tick's venue read and the long side
     opens as a NEW episode after it (test_mirror_short_sign_flip drives
@@ -5619,11 +5685,11 @@ def test_a_sign_flip_on_a_short_book_flattens_by_close_position_under_its_name(m
     _shorts_on(monkeypatch)
     p = _pool()                                   # his net +300: the default fixture
     b = _short_book(p, ledger=-300)
-    v = _Venue(held={SLUG: -300})
+    v = _Venue(held={SLUG: -300}, ioc_fill=300.0)
     st = _tick(p, v)
     assert _census(st, "sign_flip") == 1 and b["target"] == 0 and b["last_plan"]["sign_flip"] is True
     assert _census(st, "short_side_refused") == 0
-    assert ("close", SLUG, COVER_AT_CEILING_BIPS) in v.calls and "place" not in _kinds(v)
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.32, 300, True, IOC_TIF)]
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
     # the venue was read at -300 before the cover: the close waits for
     # the venue's own 0 (next tick), never the fill report alone
@@ -5874,8 +5940,8 @@ def test_shorts_are_on_by_default_and_a_short_sizes_by_the_same_rule(monkeypatch
     target -300, collateral 0.69 x 300 = $207, one BUY_SHORT rest at
     the contract-price rule already built. His -12 sh ($8.28 of
     collateral) is an exact copy, -12. The pre-S4 exit safety is
-    untouched: a partial reduce is `short_reduce_unproven` and nothing
-    is sent; the flatten when he leaves is close_position."""
+    untouched while the S4 read-back proof is unproven: a partial
+    reduce is `short_reduce_unproven` and nothing is sent."""
     _rails_2026_09_06(monkeypatch)
     monkeypatch.setattr(rules, "MIRROR_SHORTS", True)
     monkeypatch.setattr(rules, "MIRROR_SHORT_MAX_SHARES", math.inf)
@@ -5898,7 +5964,9 @@ def test_shorts_are_on_by_default_and_a_short_sizes_by_the_same_rule(monkeypatch
     b2 = next(iter(p2.books.values()))
     assert (b2["target"], b2["ratio"]) == (-12, 1.0) and _places(v2)[0][3] == 12
     # the exit safety: a partial reduce on the open short is held by name
+    # while the read-back proof is unproven (S4)
     p3 = _pool(fills=_his(100, other_size=1600, other_px=0.72), snap={M: 100.0, N: 1600.0})
+    _s4_unproven(p3)
     b3 = _short_book(p3, ledger=-300, ratio=0.10)
     v3 = _Venue(held={SLUG: -300})
     st3 = _tick(p3, v3, http=_mkt(100.0, 1600.0))
@@ -9433,14 +9501,24 @@ def test_e4_book_29_replay_the_sign_flip_flatten_rests_at_his_cent_and_stands_fi
     assert _census(st6, "exit_take") == 1 and b["ledger_net"] == 0 and _census(st6, "requote_same_wire") == 0
 
 
-def test_e4_a_short_cover_closes_inside_the_ceiling_and_is_held_by_name_above_it(monkeypatch):
-    """A short book's one exit before rung S4 is close_position, a
-    market order at the ask. His buy-back in long space is 0.30 (his
-    SELL of the other token at 0.70, his newest fill), so the ceiling
-    is 0.31. The ask at 0.32: `exit_out_of_tol`, nothing sent, the
-    position never read, the book held live and read again next tick
-    (no freeze); the ask at 0.31: the close, as before. The plan
-    carries `exit_ceiling` / `exit_cover`."""
+class _NoClose(_Venue):
+    """The fixture venue whose close_position RAISES: since S4 no cover
+    path may call it (the venue refuses it as an unpriced limit order)."""
+
+    def close_position(self, slug, *, slippage_bips):
+        raise AssertionError(f"close_position called on {slug}: the cover is a priced order (S4)")
+
+
+def test_e4_s4_a_short_cover_rests_at_floor_his_outside_the_ceiling_and_takes_at_the_ceiling_cent_inside_it(monkeypatch):
+    """S4 on E4's rule: his buy-back in long space is 0.30 (his SELL of
+    the other token at 0.70, his newest fill), so the ceiling is 0.31
+    and the cover cent 0.31. The ask at 0.32: the cover RESTS post-only
+    at floor(his) = 0.30 (a BUY of the long token with the closing
+    intent, SELL_SHORT on the wire, GTC, no good-till), the book held
+    `exit_out_of_tol` / `short_cover_out_of_tol` with bid/ask/ceiling on
+    the plan, no position read, no freeze. Next tick the ask at 0.31:
+    the rest is cancelled and ONE IOC goes at 0.31 for 300, the same
+    tick, no wait. close_position is never called."""
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
              _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
@@ -9454,78 +9532,102 @@ def test_e4_a_short_cover_closes_inside_the_ceiling_and_is_held_by_name_above_it
     b = _short_book(p, ledger=-300)
     gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0},
                        {"conditionId": CID, "asset": N, "size": 0}])
-    v = _Venue(bid=0.30, ask=0.32, held={SLUG: -300})
+    v = _NoClose(bid=0.30, ask=0.32, held={SLUG: -300})
     st = _tick(p, v, http=gone)
-    assert "close" not in _kinds(v) and not _places(v) and not reads
-    assert _census(st, "exit_out_of_tol") == 1 and _census(st, "flatten_vanished") == 1
+    assert "close" not in _kinds(v) and not reads
+    assert [c[1:] for c in _places(v)] == [(SLUG, 0.30, 300, True, GTC_TIF, SHORT, True, None)]
+    o = next(iter(p.orders.values()))
+    assert (o["kind"], o["side"], o["tif"], o["intent"], o["wire"], o["qty"]) == (
+        "flatten_vanished", BUY, "GTC", "ORDER_INTENT_SELL_SHORT", 0.30, 300)
+    assert o["state"] == "open" and o["good_till"] is None
+    assert _census(st, "exit_out_of_tol") == 1 and _census(st, "short_cover_out_of_tol") == 1
+    assert _census(st, "short_cover_rest") == 1 and _census(st, "flatten_rested") == 1
     assert _census(st, "short_flatten_close") == 0 and _census(st, "short_reduce_unproven") == 0
-    assert b["state"] == "live" and b["ledger_net"] == -300 and not p.orders
+    assert _census(st, "s4_unproven") == 0 and _census(st, "flatten_vanished") == 1
+    assert b["state"] == "live" and b["ledger_net"] == -300
     lp = b["last_plan"]
     assert lp["exit_px"] == pytest.approx(0.30) and lp["exit_px_src"] == "his_fill"
-    assert lp["exit_ceiling"] == pytest.approx(0.31) and lp["exit_cover"] == 0.31 and "exit_floor" not in lp
+    assert lp["exit_ceiling"] == pytest.approx(0.31) and lp["exit_cover"] == 0.31 and lp["exit_rest"] == 0.30
+    assert "exit_floor" not in lp
     assert lp["exit_out_of_tol"] == {"bid": 0.30, "ask": 0.32, "ceiling": 0.31, "at": NOW}
-    # re-checked next tick with the ask at the ceiling: close_position,
-    # after a FRESH paced read of the ask (two quote reads this tick) and
-    # with ONE bip of slippage -- the ceiling leaves nothing above the
-    # ask, and the adapter refuses 0 (review MEDIUM-2)
-    v2 = _Venue(bid=0.30, ask=0.31, held={SLUG: -300})
+    # re-checked next tick with the ask at the ceiling: the rest cancelled
+    # under `take`, the one IOC at the cover cent, filled, the book flat
+    v2 = _NoClose(bid=0.30, ask=0.31, held={SLUG: -300}, ioc_fill=300.0)
+    v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + 30, http=gone)
-    assert ("close", SLUG, 1) in v2.calls and reads == [SLUG]
-    assert [c for c in v2.calls if c[0] == "bbo"] == [("bbo", SLUG), ("bbo", SLUG)]
-    assert b["ledger_net"] == 0 and _census(st2, "short_flatten_close") == 1
-    assert _census(st2, "exit_out_of_tol") == 0 and b["last_plan"]["exit_cover"] == 0.31
-    assert b["last_plan"]["exit_close_bips"] == 1 and b["last_plan"]["exit_close_ask"] == 0.31
-    # the check sits before the position read and the close, after the venue-state refusal
-    src = _flatten_src()
-    assert src.index('_mirror_stop("venue_halted", w)') < src.index('return "exit_out_of_tol"') < src.index("_pm_held(t, r.slug)")
-    assert src.index("_bbo(t, r.slug, book=True)") < src.index("_pm_held(t, r.slug)")
+    assert _cancels(v2) == [("cancel", "oid-1", SLUG)] and p.orders[o["id"]]["reason"] == "take"
+    assert [c[1:] for c in _places(v2)] == [(SLUG, 0.31, 300, True, IOC_TIF, SHORT, False, None)]
+    assert b["ledger_net"] == 0 and _census(st2, "short_cover_take") == 1 and _census(st2, "exit_take") == 1
+    assert _census(st2, "short_flatten_close") == 1 and _census(st2, "exit_out_of_tol") == 0
+    assert not reads and "close" not in _kinds(v2)
+    assert b["last_plan"]["exit_cover"] == 0.31 and b["state"] == "closed"
+    take = next(x for x in p.orders.values() if x["tif"] == "IOC")
+    assert (take["kind"], take["side"], take["intent"], take["state"]) == ("take", BUY, "ORDER_INTENT_SELL_SHORT", "filled")
 
 
-def test_e4_review_a_priced_close_is_bounded_to_the_ceiling_by_a_fresh_ask_read(monkeypatch):
-    """MEDIUM-2. His buy-back 0.30 -> ceiling 0.31. The ask at 0.30: the
-    ceiling leaves 333 bips, capped at le.EXIT_SLIPPAGE_BIPS (300). The
-    tick's ask at 0.31 but the fresh read just before the close at 0.33:
-    held `exit_out_of_tol` with the FRESH quote on the plan, nothing
-    sent. An unpriced cover keeps the adapter's slippage."""
+def test_e4_s4_no_price_of_his_holds_the_cover_by_name_except_a_vanish_or_the_sign_flip_which_cover_by_a_bounded_ioc(monkeypatch):
+    """S4, fail closed: with NO buy-back price of his the cover is HELD
+    `no_price` under `exit_px_src: 'none'` (a paired flatten while he
+    still holds a token; a partial reduce) -- never a rest at the ask.
+    The one exception: his position on our side is GONE -- a confirmed
+    vanish, the sign flip -- and the cover is ONE IOC at the ask bounded
+    by le.buy_limit_price (the ask + MIRROR_FLATTEN_SLIP, the long
+    flatten's own bound mirrored), for our quantity. close_position is
+    never called."""
     _shorts_on(monkeypatch)
-    fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
-             _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
-
-    async def _held(t, slug):
-        return 300, 0.32
-    monkeypatch.setattr(ml, "_pm_held", _held)
     gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0},
                        {"conditionId": CID, "asset": N, "size": 0}])
-    p = _short_world(fills=fills, snap=None)
+    # (a) the confirmed vanish, unpriced: the bounded IOC at once
+    p = _short_world(fills=_unpriced(), snap=None)
     b = _short_book(p, ledger=-300)
-    v = _Venue(bid=0.29, ask=0.30, held={SLUG: -300})
+    v = _NoClose(bid=0.30, ask=0.40, held={SLUG: -300}, ioc_fill=300.0)
     st = _tick(p, v, http=gone)
-    assert ("close", SLUG, int(le.EXIT_SLIPPAGE_BIPS)) in v.calls and b["ledger_net"] == 0
-    assert b["last_plan"]["exit_close_bips"] == 300 and _census(st, "short_flatten_close") == 1
-    assert le.EXIT_SLIPPAGE_BIPS == 300 and int(math.floor((0.31 / 0.30 - 1) * 10000)) == 333
-
-    class _Moves(_Venue):
-        """The ask 0.31 on the tick's read, 0.33 on the read before the close."""
-        def bbo_read(self, client, slug):
-            out = super().bbo_read(client, slug)
-            if sum(1 for c in self.calls if c[0] == "bbo") >= 2:
-                out["ask"] = 0.33
-            return out
-    p2 = _short_world(fills=fills, snap=None)
+    assert "close" not in _kinds(v) and [c[1:] for c in _places(v)] == [(SLUG, 0.42, 300, True, IOC_TIF, SHORT, False, None)]
+    assert le.buy_limit_price(0.40) == 0.42 == round(0.40 + rules.MIRROR_FLATTEN_SLIP, 2)
+    lp = b["last_plan"]
+    assert lp["exit_px_src"] == "none" and lp["exit_px"] is None and "exit_ceiling" not in lp
+    assert lp["cover"] == {"ioc_at_ask": 0.40, "limit": 0.42, "why": "vanished"}
+    assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1 and _census(st, "short_cover_take") == 1
+    assert _census(st, "exit_out_of_tol") == 0 and _census(st, "no_price") == 0
+    o = next(iter(p.orders.values()))
+    assert (o["kind"], o["tif"], o["intent"], o["wire"]) == ("flatten_vanished", "IOC", "ORDER_INTENT_SELL_SHORT", 0.42)
+    # (b) an UNPRICED sign flip cannot be built from his fills: the fills
+    # that carry his net across zero on a short book -- a BUY of the long
+    # token, a SELL of the other -- are the cover-side fills _his_level
+    # prices the cover off, so a flip is priced by construction; a
+    # snapshot that says he flipped while the fills say otherwise is
+    # target 0 with no `sign_flip` (fail closed: the paired hold below).
+    # The `sign_flip` clause of the bounded IOC is kept for the record
+    p2 = _short_world(fills=[_fill(N, "BUY", 400, 0.72, NOW - 2500)], snap={M: 700.0, N: 400.0})
     b2 = _short_book(p2, ledger=-300)
-    v2 = _Moves(bid=0.30, ask=0.31, held={SLUG: -300})
-    st2 = _tick(p2, v2, http=gone)
-    assert "close" not in _kinds(v2) and not _places(v2) and b2["ledger_net"] == -300 and b2["state"] == "live"
-    assert _census(st2, "exit_out_of_tol") == 1 and _census(st2, "short_flatten_close") == 0
-    assert b2["last_plan"]["exit_out_of_tol"] == {"bid": 0.30, "ask": 0.33, "ceiling": 0.31, "at": NOW}
-    # an unpriced cover (no fill of his): the adapter's slippage, one quote read
-    p3 = _short_world(fills=_unpriced(), snap=None)
+    v2 = _NoClose(bid=0.30, ask=0.35, held={SLUG: -300}, ioc_fill=300.0)
+    st2 = _tick(p2, v2, http=_mkt(700.0, 400.0))
+    assert _census(st2, "sign_flip") == 0 and b2["target"] == 0 and not _places(v2)
+    assert _census(st2, "no_price") == 1 and b2["last_plan"]["cover"] == "unpriced_held" and b2["ledger_net"] == -300
+    # (c) the paired flatten, unpriced, his position on our side still
+    # there (he holds both tokens, net zero): HELD by name, nothing sent
+    p3 = _short_world(fills=[_fill(N, "BUY", 400, 0.72, NOW - 2500)], snap={M: 400.0, N: 400.0})
     b3 = _short_book(p3, ledger=-300)
-    v3 = _Venue(bid=0.30, ask=0.40, held={SLUG: -300})
-    st3 = _tick(p3, v3, http=gone)
-    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v3.calls and b3["ledger_net"] == 0
-    assert [c for c in v3.calls if c[0] == "bbo"] == [("bbo", SLUG)] and b3["last_plan"]["exit_px_src"] == "none"
-    assert _census(st3, "short_flatten_close") == 1 and _census(st3, "exit_out_of_tol") == 0
+    v3 = _NoClose(bid=0.30, ask=0.40, held={SLUG: -300}, ioc_fill=300.0)
+    st3 = _tick(p3, v3, http=_mkt(400.0, 400.0))
+    assert b3["target"] == 0 and b3["last_plan"]["kind"] == "flatten_paired"
+    assert not _places(v3) and "close" not in _kinds(v3) and b3["ledger_net"] == -300 and b3["state"] == "live"
+    assert _census(st3, "no_price") == 1 and b3["last_plan"]["cover"] == "unpriced_held"
+    assert b3["last_plan"]["exit_px_src"] == "none" and _census(st3, "s4_unproven") == 0
+    # (d) a partial reduce, unpriced: held by name too
+    p4 = _short_world(fills=[_fill(N, "BUY", 400, 0.72, NOW - 2500)], snap={M: 300.0, N: 400.0})
+    b4 = _short_book(p4, ledger=-300)
+    v4 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+    st4 = _tick(p4, v4, http=_mkt(300.0, 400.0))
+    assert b4["target"] == -100 and not _places(v4) and b4["ledger_net"] == -300
+    assert _census(st4, "no_price") == 1 and _census(st4, "short_reduce_unproven") == 0
+    # (e) a re-check every tick: the held paired book is read again and, his
+    # buy-back now on file, covers
+    p3.fills.append(_fill(M, "BUY", 300, 0.31, NOW + 10))
+    v5 = _NoClose(bid=0.30, ask=0.32, held={SLUG: -300}, ioc_fill=300.0)
+    st5 = _tick(p3, v5, now=NOW + 30, http=_mkt(400.0, 400.0))
+    assert [c[2:6] for c in _places(v5)] == [(0.32, 300, True, IOC_TIF)] and b3["ledger_net"] == 0
+    assert b3["last_plan"]["exit_px_src"] == "his_fill" and _census(st5, "short_flatten_close") == 1
 
 
 def test_e4_review_a_priced_vanish_takes_within_the_cent_and_never_runs_the_slippage_leg():
@@ -10009,9 +10111,9 @@ def test_e4_r3_an_exit_is_exempt_from_the_ops_budget_so_its_take_at_the_last_op_
     monkeypatch.setattr(ml, "_pm_held", _held)
     p10 = _short_world(fills=sfills, snap=None)
     b10 = _short_book(p10, ledger=-300)
-    v10 = _Venue(bid=0.30, ask=0.31, held={SLUG: -300})
+    v10 = _Venue(bid=0.30, ask=0.31, held={SLUG: -300}, ioc_fill=300.0)
     st10 = _tick(p10, v10, http=_gone())
-    assert ("close", SLUG, 1) in v10.calls and b10["ledger_net"] == 0
+    assert [c[2:6] for c in _places(v10)] == [(0.31, 300, True, IOC_TIF)] and b10["ledger_net"] == 0
     assert st10["ops"] == 1 and _census(st10, "ops_capped") == 0 and _census(st10, "short_flatten_close") == 1
     # the mechanism, by name: the slot's `exit`, read off the side's leg
     # action in _place, passed by every exit cancel, the flatten's slot
@@ -10019,7 +10121,7 @@ def test_e4_r3_an_exit_is_exempt_from_the_ops_budget_so_its_take_at_the_last_op_
     assert "if not exit and t.ops + t.ops_pending >= rules.MIRROR_MAX_ORDER_OPS_PER_TICK:" in src
     assert 'exit=rules.leg_action(book.get("intent"), side) == "reduce"' in inspect.getsource(ml._place)
     act = inspect.getsource(ml._act)
-    assert act.count('"take", exit=') == 2 and '"replace", exit=is_exit' in act and "decision, exit=is_exit" in act
+    assert act.count('"take", exit=') == 3 and '"replace", exit=is_exit' in act and "decision, exit=is_exit" in act
     assert "slot = _op_slot(t, w, exit=True)" in inspect.getsource(ml._flatten_vanished)
 
 
@@ -10255,7 +10357,790 @@ def test_e4_constants_the_exit_tolerance_tightens_only_the_take_wait_is_zero_and
     assert "and not _priced_exit_rest(o, book)" in rec and 'cancel_reason = "ttl"' in rec
     act = inspect.getsource(ml._act)
     assert act.count("not _exit_or_flip(book, p, o)") == 2, "rule 4 is E2's exemption, one mechanism"
-    assert "stands=long_exit" in act and 'return await _entry_take(' in act
+    assert "stands=priced_exit" in act and 'return await _entry_take(' in act
+
+
+# ---------------- 22. S4: the short cover as a priced order; the read-back proof (2026-09-07)
+#
+# Every short close on 2026-09-07 failed within a second: the venue's
+# reason (4a5da1f's logging) reads `pmus: close_position <slug> failed:
+# BadRequestError: Price is required for limit order` -- 11 CLOSE rows,
+# 0 executed. So the cover is a REAL order through the placement
+# machinery the long side uses (a BUY of the long token with the closing
+# intent, SELL_SHORT on the wire; E4's exit rule mirrored: the rest at
+# floor(his), ONE IOC at the ceiling cent whenever the ask is at or
+# under it, held outside), gated by the 1-share read-back proof under
+# `mirror_s4_proof`. The census keys: s4_probe_placed, s4_proved,
+# s4_unproven, short_cover_rest, short_cover_take, short_cover_out_of_tol.
+
+def _flip_world(**venue_kw):
+    """His net +300 (the default fixture: 300 long at 0.31) against our
+    short of 300: the sign flip, the cover priced off his long BUY 0.31
+    (ceiling 0.32, the ask there: the IOC)."""
+    p = _pool()
+    b = _short_book(p, ledger=-300)
+    venue_kw.setdefault("held", {SLUG: -300})
+    return p, b, _NoClose(**venue_kw)
+
+
+def test_s4_the_read_back_probe_runs_once_on_the_first_live_short_book_with_a_two_sided_quote_proves_and_gates_the_cover(monkeypatch):
+    """The key absent: on the first tick with a live short book and a
+    two-sided quote ONE 1-share post-only BUY of the long token with the
+    closing intent goes at max(0.01, floor(bid - 0.05)) = 0.25, is read
+    back through open_orders on the slug (price 0.25, quantity 1,
+    intent SELL_SHORT as the venue reports it), cancelled, and the key
+    records {proved: true, echo}. The cover goes on the SAME tick. A
+    malformed key reads as absent. The probe never runs twice in a tick,
+    on a frozen book, on a locked book, or inside an hour of a recorded
+    mismatch; a malformed key is unreadable and places nothing."""
+    _shorts_on(monkeypatch)
+    p, b, v = _flip_world(ioc_fill=300.0)
+    p.state.pop("mirror_s4_proof")
+    st = _tick(p, v)
+    pl = _places(v)
+    assert [c[1:] for c in pl] == [(SLUG, 0.25, 1, True, GTC_TIF, SHORT, True, None),
+                                   (SLUG, 0.32, 300, True, IOC_TIF, SHORT, False, None)]
+    k = _kinds(v)
+    i_probe = k.index("place")
+    assert k[i_probe + 1:i_probe + 3] == ["open_orders", "cancel"], "read back, then cancelled, before anything else"
+    assert ("open_orders", [SLUG]) in v.calls and ("cancel", "oid-1", SLUG) in v.calls
+    assert v.orders["oid-1"]["state"] == "cancelled"
+    rec = p.state["mirror_s4_proof"]
+    assert rec["proved"] is True and rec["why"] is None and rec["at"] == NOW and rec["slug"] == SLUG
+    assert rec["order_id"] == "oid-1" and rec["price"] == 0.25 and rec["cancel"] == {"ok": True}
+    # the echo carries the venue's OWN side beside the desk's (S4 v2, F1):
+    # a SELL_SHORT that buys the contract back reads ORDER_SIDE_BUY
+    assert rec["echo"] == {"order_id": "oid-1", "us_market_slug": SLUG, "side": "BUY",
+                           "venue_side": "ORDER_SIDE_BUY", "intent": "ORDER_INTENT_SELL_SHORT",
+                           "price": 0.25, "quantity": 1.0, "state": "new", "tif": "GOOD_TILL_CANCEL"}
+    assert rec["bid"] == 0.30 and rec["ask"] == 0.32, "the quote the probe was placed against (F2)"
+    assert _census(st, "s4_probe_placed") == 1 and _census(st, "s4_proved") == 1 and _census(st, "s4_unproven") == 0
+    assert _census(st, "short_cover_take") == 1 and b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
+    assert not [o for o in p.orders.values() if o["qty"] == 1], "no mirror_orders row for the probe"
+    pr = [r for r in st["recent"] if r["what"] == "s4_probe"]
+    assert pr and pr[0]["proved"] is True and pr[0]["order"] == "oid-1" and pr[0]["price"] == 0.25
+    assert st["ops"] == 2 and _census(st, "venue_calls") >= 4, "the probe's place and cancel are counted writes"
+    # proved: the next tick probes nothing more
+    p2, b2, v2 = _flip_world(ioc_fill=300.0)
+    p2.state["mirror_s4_proof"] = dict(rec)
+    st2 = _tick(p2, v2)
+    assert [c[3] for c in _places(v2)] == [300] and _census(st2, "s4_probe_placed") == 0
+    # a malformed key is an UNREADABLE key: nothing is placed on a key we
+    # cannot record into -- no probe, the cover refused by name
+    p3, b3, v3 = _flip_world(ioc_fill=300.0)
+    p3.state["mirror_s4_proof"] = "garbage"
+    st3 = _tick(p3, v3)
+    assert not _places(v3) and _census(st3, "s4_probe_placed") == 0 and _census(st3, "s4_unproven") == 1
+    assert b3["last_plan"]["s4"] == {"unproven": "malformed"} and b3["ledger_net"] == -300
+    # inside the hour of a recorded mismatch: no probe, the cover refused by name
+    p4, b4, v4 = _flip_world(ioc_fill=300.0)
+    _s4_unproven(p4, at=NOW - 3599.0)
+    st4 = _tick(p4, v4)
+    assert not _places(v4) and _census(st4, "s4_unproven") == 1 and _census(st4, "s4_probe_placed") == 0
+    assert b4["ledger_net"] == -300 and b4["state"] == "live" and b4["last_plan"]["s4"] == {"unproven": "wrong_price"}
+    # an hour on: the probe again
+    v5 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+    st5 = _tick(p4, v5, now=NOW + 1)
+    assert [c[3] for c in _places(v5)] == [1, 300] and _census(st5, "s4_proved") == 1 and b4["ledger_net"] == 0
+    # a LOCKED book (bid == ask) is not a two-sided quote: no probe, refused
+    p6, b6, v6 = _flip_world(bid=0.30, ask=0.30, ioc_fill=300.0)
+    p6.state.pop("mirror_s4_proof")
+    st6 = _tick(p6, v6)
+    assert not _places(v6) and _census(st6, "s4_probe_placed") == 0 and _census(st6, "s4_unproven") == 1
+    # the probe's price never under 0.01 and always floored to the cent
+    assert ml._s4_probe_price(0.30) == 0.25 and ml._s4_probe_price(0.03) == 0.01 and ml._s4_probe_price(0.0549) == 0.01
+    assert ml._s4_probe_price(0.999) == 0.94 and ml.S4_PROBE_GAP_S == 3600.0 and ml.S4_PROBE_OFFSET == 0.05
+
+
+def test_s4_a_probe_mismatch_records_why_and_the_echo_and_the_cover_stays_refused_by_name(monkeypatch):
+    """Every way the read-back can fail records {proved: false, why,
+    echo} and refuses the cover `s4_unproven` (the book held, no
+    freeze): the venue resting our order at another price; reporting no
+    intent, or another; not listing it; refusing it; raising on it;
+    and a cancel the venue refused (the order may still rest: logged,
+    unproven, the id kept on the record for the retry -- S4 v3, GAP 2).
+    A probe that executed at create is `filled_at_create` AND booked
+    (S4 v3, GAP 1): section 22c."""
+    _shorts_on(monkeypatch)
+
+    class _WrongPrice(_NoClose):
+        def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
+                 filled=0.0, avg=None, intent=None):
+            return super().rest(oid, side, round(price + 0.01, 2), qty, slug, created, state, filled, avg, intent)
+
+    class _NoIntent(_NoClose):
+        def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
+                 filled=0.0, avg=None, intent=None):
+            return super().rest(oid, side, price, qty, slug, created, state, filled, avg, None)
+
+    class _WrongIntent(_NoClose):
+        def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
+                 filled=0.0, avg=None, intent=None):
+            return super().rest(oid, side, price, qty, slug, created, state, filled, avg, "ORDER_INTENT_SELL_LONG")
+
+    class _NotListed(_NoClose):
+        def open_orders(self, slugs=None):
+            self.calls.append(("open_orders", slugs))
+            return []
+
+    class _ListRaises(_NoClose):
+        """The per-slug read-back raises; the tick's own open-orders read (no slugs) answers."""
+        def open_orders(self, slugs=None):
+            if slugs:
+                self.calls.append(("open_orders", slugs))
+                raise RuntimeError("list down")
+            return super().open_orders(slugs)
+
+    def _refuse(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
+        return {"ok": False, "order_id": None, "status": "rejected", "fill_price": None,
+                "filled_shares": 0.0, "raw": {"status_code": 400, "error": "minimum order size"}}
+
+    cases = [
+        (lambda: _WrongPrice(held={SLUG: -300}), "wrong_price", {"price": 0.26}),
+        (lambda: _NoIntent(held={SLUG: -300}), "intent_missing", {"intent": None}),
+        (lambda: _WrongIntent(held={SLUG: -300}), "wrong_intent", {"intent": "ORDER_INTENT_SELL_LONG"}),
+        (lambda: _NotListed(held={SLUG: -300}), "not_found", {"open_on_slug": 0}),
+        (lambda: _ListRaises(held={SLUG: -300}), "read_back_raised:RuntimeError", None),
+        (lambda: _NoClose(held={SLUG: -300}, place=_refuse), "place_refused:rejected", None),
+        (lambda: _NoClose(held={SLUG: -300}, place_raises=RuntimeError("socket reset")),
+         "place_raised:RuntimeError", {"error": "socket reset"}),
+        (lambda: _NoClose(held={SLUG: -300}, cancel_ok=False), "cancel_failed", {"price": 0.25}),
+    ]
+    for mk, why, echo_part in cases:
+        p = _pool()
+        b = _short_book(p, ledger=-300)
+        p.state.pop("mirror_s4_proof")
+        v = mk()
+        st = _tick(p, v)
+        rec = p.state["mirror_s4_proof"]
+        assert rec["proved"] is False and rec["why"] == why and rec["at"] == NOW, (why, rec)
+        if echo_part is not None:
+            for k2, val in echo_part.items():
+                assert (rec["echo"] or {}).get(k2) == val, (why, rec["echo"])
+        assert _census(st, "s4_probe_placed") == 1 and _census(st, "s4_proved") == 0, why
+        assert _census(st, "s4_unproven") == 1 and b["last_plan"]["s4"] == {"unproven": why}, why
+        assert not [c for c in _places(v) if c[3] != 1], (why, "no cover")
+        assert b["ledger_net"] == -300 and b["state"] == "live" and "close" not in _kinds(v), why
+        if why not in ("place_refused:rejected", "place_raised:RuntimeError"):
+            assert ("cancel", "oid-1", SLUG) in v.calls, (why, "the probe order is cancelled whatever the verdict")
+        if why == "cancel_failed":
+            # the id stays on the record beside the refusal (S4 v3, GAP 2)
+            assert rec["cancel"]["ok"] is False and rec["cancel"]["error"] == "boom"
+            assert rec["order_id"] == "oid-1" and rec["cancel"]["retries"] == 0
+        else:
+            assert rec["order_id"] is None or rec["cancel"] == {"ok": True}, why
+        assert not [o for o in p.orders.values() if o["qty"] == 1]
+    # the recorded mismatch holds the cover on the next tick without a second
+    # probe; the held id is retried first and, the venue having no record of
+    # it, cleared (S4 v3, GAP 2)
+    v2 = _NoClose(held={SLUG: -300})
+    st2 = _tick(p, v2, now=NOW + 30)
+    assert not _places(v2) and _census(st2, "s4_unproven") == 1 and _census(st2, "s4_probe_placed") == 0
+    assert _kinds(v2)[:2] == ["cancel", "status"] and p.state["mirror_s4_proof"]["order_id"] is None
+    assert p.state["mirror_s4_proof"]["cancel"]["gone"] == "no_record"
+
+
+def test_s4_a_frozen_short_book_is_untouched_no_probe_no_cover(monkeypatch):
+    _shorts_on(monkeypatch)
+    p, b, v = _flip_world(ioc_fill=300.0)
+    p.state.pop("mirror_s4_proof")
+    b.update(state="frozen", frozen_reason="placement_lost", frozen_ts=NOW - 100)
+    # the 'placing' row of the lost placement keeps the book non-terminal: no thaw
+    p.add_order(b, side=BUY, wire=0.31, qty=300, kind="flatten_paired", state="placing", order_id=None,
+                placed_ts=NOW - 10, intent="ORDER_INTENT_SELL_SHORT")
+    st = _tick(p, v)
+    assert not _places(v) and "close" not in _kinds(v) and "mirror_s4_proof" not in p.state
+    assert _census(st, "s4_probe_placed") == 0 and _census(st, "s4_unproven") == 0
+    assert b["state"] == "frozen" and b["ledger_net"] == -300 and b["last_plan"]["kind"] == "frozen"
+    # a book frozen THIS tick (the venue disagrees) is not probed either
+    p2, b2, v2 = _flip_world(held={SLUG: -100}, ioc_fill=300.0)
+    p2.state.pop("mirror_s4_proof")
+    st2 = _tick(p2, v2)
+    assert b2["state"] == "frozen" and b2["frozen_reason"] == "venue_ledger_disagree"
+    assert not _places(v2) and _census(st2, "s4_probe_placed") == 0
+
+
+def test_s4_the_cover_rest_stands_outside_the_cent_past_its_ttl_and_takes_the_tick_the_ask_returns(monkeypatch):
+    """Book 29's shape on a short: his buy-back 0.30, the ask far above
+    (0.40): the rest at 0.30 stands through five TTL periods with no
+    cancel and no re-place (`requote_same_wire`), held by name each
+    tick; the ask back at 0.31 takes at once."""
+    _shorts_on(monkeypatch)
+    fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
+             _fill(N, "SELL", 400, 0.70, NOW - 2000)]
+    p = _short_world(fills=fills, snap=None)
+    b = _short_book(p, ledger=-300)
+    v = _NoClose(bid=0.29, ask=0.40, held={SLUG: -300})
+    st = _tick(p, v, http=_gone())
+    assert [c[2:6] for c in _places(v)] == [(0.30, 300, True, GTC_TIF)] and _census(st, "short_cover_rest") == 1
+    o = next(iter(p.orders.values()))
+    ttl = float(rules.MIRROR_REST_TTL_S)
+    for k in range(1, 6):
+        now = NOW + k * (ttl + 1)
+        vk = _NoClose(bid=0.29, ask=0.40, held={SLUG: -300})
+        vk.orders = v.orders
+        stk = _tick(p, vk, now=now, http=_gone())
+        assert not _cancels(vk) and not _places(vk) and stk["ops"] == 0, k
+        assert _census(stk, "requote_same_wire") == 1 and _census(stk, "short_cover_out_of_tol") == 1, k
+        assert _census(stk, "exit_out_of_tol") == 1 and _census(stk, "short_cover_take") == 0, k
+    assert o["state"] == "open" and b["ledger_net"] == -300 and b["state"] == "live" and len(p.orders) == 1
+    v6 = _NoClose(bid=0.30, ask=0.31, held={SLUG: -300}, ioc_fill=300.0)
+    v6.orders = v.orders
+    st6 = _tick(p, v6, now=NOW + 6 * (ttl + 1), http=_gone())
+    assert _cancels(v6) == [("cancel", "oid-1", SLUG)] and [c[2:6] for c in _places(v6)] == [(0.31, 300, True, IOC_TIF)]
+    assert _census(st6, "short_cover_take") == 1 and b["ledger_net"] == 0
+    # the plan's fields on the held tick
+    assert b["last_plan"]["exit_rest"] == 0.30 and b["last_plan"]["exit_cover"] == 0.31
+
+
+def test_s4_a_partial_cover_fill_leaves_nothing_resting_and_the_take_never_fires_twice_for_one_rest(monkeypatch):
+    _shorts_on(monkeypatch)
+    # the IOC fills 100 of 300: nothing rests after it this tick; the next tick plans the remainder
+    p, b, v = _flip_world(ioc_fill=100.0)
+    st = _tick(p, v)
+    assert [c[2:6] for c in _places(v)] == [(0.32, 300, True, IOC_TIF)] and b["ledger_net"] == -200
+    assert not [o for o in p.orders.values() if o["state"] == "open"] and b["open_order_id"] is None
+    assert _census(st, "short_cover_take") == 1 and _census(st, "short_cover_rest") == 0
+    v2 = _NoClose(held={SLUG: -200}, ioc_fill=200.0)
+    _tick(p, v2, now=NOW + 30)
+    assert [c[2:6] for c in _places(v2)] == [(0.32, 200, True, IOC_TIF)] and b["ledger_net"] == 0
+    # a standing cover rest with the ask inside the cent: ONE cancel, ONE IOC, nothing more
+    p3, b3, v3 = _flip_world(ioc_fill=0.0)
+    p3.add_order(b3, side=BUY, wire=0.31, qty=300, kind="flatten_paired", intent="ORDER_INTENT_SELL_SHORT")
+    v3.rest("oid-1", "SELL", 0.31, 300, intent="ORDER_INTENT_SELL_SHORT")
+    st3 = _tick(p3, v3)
+    assert _cancels(v3) == [("cancel", "oid-1", SLUG)] and [c[5] for c in _places(v3)] == [IOC_TIF]
+    assert sum(1 for c in _places(v3) if c[5] == IOC_TIF) == 1 and _census(st3, "short_cover_take") == 1
+    assert not [o for o in p3.orders.values() if o["state"] == "open"]
+
+
+def test_s4_the_cover_is_exempt_from_the_ops_budget_the_replace_budget_and_the_loss_stop(monkeypatch):
+    _shorts_on(monkeypatch)
+    monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", 0)
+    # the IOC at budget 0
+    p, b, v = _flip_world(ioc_fill=300.0)
+    st = _tick(p, v)
+    assert [c[5] for c in _places(v)] == [IOC_TIF] and st["ops"] == 1 and _census(st, "ops_capped") == 0
+    assert b["ledger_net"] == 0
+    # the rest at budget 0 (the ask above the ceiling)
+    p2, b2, v2 = _flip_world(bid=0.30, ask=0.40)
+    st2 = _tick(p2, v2)
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 300, True, GTC_TIF)] and st2["ops"] == 1
+    assert _census(st2, "ops_capped") == 0 and _census(st2, "short_cover_rest") == 1
+    # the take off a standing rest at budget 0: the cancel AND the IOC go
+    p3, b3, v3 = _flip_world(ioc_fill=300.0)
+    p3.add_order(b3, side=BUY, wire=0.31, qty=300, kind="flatten_paired", intent="ORDER_INTENT_SELL_SHORT")
+    v3.rest("oid-1", "SELL", 0.31, 300, intent="ORDER_INTENT_SELL_SHORT")
+    st3 = _tick(p3, v3)
+    assert _cancels(v3) == [("cancel", "oid-1", SLUG)] and [c[5] for c in _places(v3)] == [IOC_TIF]
+    assert st3["ops"] == 2 and _census(st3, "ops_capped") == 0 and b3["ledger_net"] == 0
+    # the replace budget spent and the loss stop set: the cover still goes
+    monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", 20)
+    p4, b4, v4 = _flip_world(ioc_fill=300.0)
+    for _ in range(rules.MIRROR_MAX_REPLACES_PER_HOUR):
+        p4.add_order(b4, state="cancelled", reason="replace", done_at=NOW - 100, order_id=None)
+    p4.state["mirror_loss_stop"] = {"at": "x"}
+    st4 = _tick(p4, v4)
+    assert [c[5] for c in _places(v4)] == [IOC_TIF] and b4["ledger_net"] == 0
+    assert _census(st4, "take_capped") == 0 and _census(st4, "replace_capped") == 0
+    assert _census(st4, "mirror_loss_stop") >= 1 and not [x for x in p4.sent if "ml-replaces" in x[1]]
+
+
+def test_s4_close_position_is_never_called_on_any_cover_path_and_the_lost_close_reader_stays_for_legacy_rows(monkeypatch):
+    """Every cover world under the raising venue: the paired flatten, the
+    confirmed vanish (priced and unpriced), the sign flip, the partial
+    reduce, the held (out-of-tolerance) cover -- close_position is never
+    reached. _reconcile_lost_close is still on the CLOSE rows of old."""
+    _shorts_on(monkeypatch)
+    fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
+             _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
+    worlds = [
+        (_short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0}), _mkt(400.0, 400.0), 0.32, 0.32),
+        (_short_world(fills=fills, snap=None), _gone(), 0.31, 0.31),
+        (_short_world(fills=_unpriced(), snap=None), _gone(), 0.32, 0.34),
+        (_pool(), None, 0.32, 0.32),
+        (_short_world(fills=_his(300, other_size=400, other_px=0.72), snap={M: 300.0, N: 400.0}), _mkt(300.0, 400.0), 0.32, 0.32),
+    ]
+    for p, http, ask, px in worlds:
+        b = _short_book(p, ledger=-300)
+        v = _NoClose(bid=0.30, ask=ask, held={SLUG: -300}, ioc_fill=300.0)
+        st = _tick(p, v, http=http)
+        assert "close" not in _kinds(v) and _places(v) and _places(v)[0][2] == px, (px, _places(v))
+        assert _census(st, "short_cover_take") == 1 and not st["abandoned"]
+    # held outside the cent, and the unproven refusal: nothing touches close_position either
+    p, b, v = _flip_world(bid=0.30, ask=0.40)
+    _tick(p, v)
+    p2, b2, v2 = _flip_world()
+    _s4_unproven(p2)
+    _tick(p2, v2)
+    assert "close" not in _kinds(v) and "close" not in _kinds(v2)
+    # the seams by name: _flatten_send refuses a short at its head, _act's short tail never closes
+    fs = inspect.getsource(ml._flatten_send)
+    assert 'return "book_error"' in fs.split("if r.venue_state is not None")[0] and "close_position" in fs
+    act = inspect.getsource(ml._act)
+    assert "pmus.close_position" not in act and "_s4_refusal(t, book, kind, plan, w)" in act
+    assert "pmus.close_position" not in inspect.getsource(ml._flatten_vanished)
+    assert "t.pmus.close_position" in fs
+    assert "_reconcile_lost_close" in inspect.getsource(ml._reconcile_placing)
+
+
+def test_s4_buy_limit_price_mirrors_sell_limit_price_by_the_flatten_slip():
+    for px in (0.01, 0.02, 0.30, 0.50, 0.97, 0.98, 0.99):
+        assert le.buy_limit_price(px) == min(0.99, round(px + rules.MIRROR_FLATTEN_SLIP, 2))
+        assert le.sell_limit_price(px) == max(0.01, round(px - rules.MIRROR_FLATTEN_SLIP, 2))
+    assert le.buy_limit_price(0.30, max_price=0.31) == 0.31 and le.buy_limit_price(0.30, max_price=0.50) == 0.32
+    assert rules.MIRROR_FLATTEN_SLIP == 0.02 and "MIRROR_FLATTEN_SLIP" in rules.__all__
+    for k in ("s4_probe_placed", "s4_proved", "s4_unproven", "short_cover_rest", "short_cover_take",
+              "short_cover_out_of_tol"):
+        assert k in ml.CENSUS_KEYS and ml.CENSUS_KEYS.index(k) < ml.CENSUS_KEYS.index("cand_terminal_skipped")
+    assert ml._STATE_S4 == "mirror_s4_proof"
+
+
+# ---------------- 22b. S4 v2: the adversarial review folded (2026-09-07)
+#
+# F1 the proof reads the VENUE'S OWN side (pmus._norm_order's
+# `venue_side`, the SDK's Order.side verbatim), never the desk's derived
+# `side`: a SELL_SHORT that buys the contract back must read
+# ORDER_SIDE_BUY, anything else is `wrong_side` (none reported:
+# `side_missing`). F2 the probe is placed in the LONG token's space, the
+# book's own quote, and the record keeps that quote; a venue that quotes
+# the short token's space rests the probe on a high-priced book with the
+# right price and intent and is told apart by its side alone. F3 a 429
+# on the probe's placement is E2's rate-limit path, no proof record. F4
+# a lost cover placement is adopted by its WIRE INTENT (the fingerprint
+# matches intent to intent when both name one), in _lost_response and in
+# step O; a rest the search cannot find freezes `placement_lost`. The
+# reviewer's four FINDING tests are verbatim below, except F2's two
+# cover assertions: with the fold the proof refuses `wrong_side` on that
+# venue, so no cover rests (the assertions are inverted and say so).
+
+SELL_SHORT = "ORDER_INTENT_SELL_SHORT"
+
+
+def _cover_world(fills, snap, http_rows=None, **venue_kw):
+    """A proved short book of 300 with his fills as given."""
+    p = _short_world(fills=fills, snap=snap)
+    b = _short_book(p, ledger=-300)
+    venue_kw.setdefault("held", {SLUG: -300})
+    return p, b, _NoClose(**venue_kw)
+
+
+def test_FINDING_the_read_back_never_reads_the_venues_own_side_so_a_sell_side_echo_still_proves(monkeypatch):
+    """THE ONE FACT THAT SETTLES THE DENOMINATION IS THE VENUE'S OWN
+    `side` (Order.side, derived by the venue from the intent: a
+    BUY_SHORT reads ORDER_SIDE_SELL, short-truth 6/6). A SELL_SHORT that
+    buys the contract back must read ORDER_SIDE_BUY. pmus._norm_order
+    OVERWRITES that field from the intent string ('SELL' for any
+    *_SELL_* intent), so the probe's echo `side` is the adapter's
+    derivation, not the venue's, and _s4_probe compares only the
+    intent. A venue that lists the probe as a SELL at 0.25 -- an order
+    in another space -- is recorded PROVED."""
+    _shorts_on(monkeypatch)
+    # the adapter drops the venue's side: both venue sides normalise to 'SELL'
+    for venue_side in ("ORDER_SIDE_BUY", "ORDER_SIDE_SELL"):
+        row = pmus._norm_order({"id": "x", "marketSlug": SLUG, "intent": SELL_SHORT, "side": venue_side,
+                                "price": {"value": "0.25"}, "quantity": 1, "state": "ORDER_STATE_NEW"})
+        assert row["side"] == "SELL", "the adapter's derived side hides the venue's"
+
+    class _SellSideEcho(_NoClose):
+        """The venue lists the probe with intent SELL_SHORT and its OWN
+        side SELL (the read-back as the worker would see it if
+        _norm_order carried the venue's field)."""
+
+        def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
+                 filled=0.0, avg=None, intent=None):
+            return super().rest(oid, "SELL", price, qty, slug, created, state, filled, avg, intent)
+
+    p = _pool()
+    b = _short_book(p, ledger=-300)
+    p.state.pop("mirror_s4_proof")
+    v = _SellSideEcho(held={SLUG: -300}, ioc_fill=300.0)
+    st = _tick(p, v)
+    rec = p.state["mirror_s4_proof"]
+    assert rec["echo"]["side"] == "SELL" and rec["echo"]["intent"] == SELL_SHORT
+    # the spec's proof: price, quantity, the SIDE and the intent as the venue reports them
+    assert rec["proved"] is False and rec["why"] == "wrong_side", rec
+    assert _census(st, "s4_unproven") == 1 and b["ledger_net"] == -300
+
+
+def test_FINDING_under_a_short_token_space_venue_the_probe_rests_and_proves_on_a_high_priced_book_and_the_cover_can_never_fill(monkeypatch):
+    """The consequence of the side-blind proof. Model the OTHER reading
+    of a SELL_SHORT limit -- 'sell the short token at >= p', i.e. buy the
+    long at <= 1 - p (post-only honoured). On a book at 0.30/0.32 the
+    probe at 0.25 crosses (0.25 <= 1 - 0.32) and is refused: fail closed.
+    On a book at 0.70/0.72 the probe at 0.65 does NOT cross (0.65 > 0.28),
+    rests, echoes its price and intent, and is PROVED -- and every cover
+    after it rests at floor(his) 0.70 = 'buy the long at <= 0.30' against
+    an ask of 0.72: it never fills, the book is held for good with
+    `short_cover_rest` counted and nothing wrong named. The proof must
+    refuse this venue; only the venue's own side tells it apart.
+
+    WITH THE FOLD (S4 v2): the venue's own side is read, the high book's
+    probe is refused `wrong_side`, and NO cover rests after it -- the
+    reviewer's two cover assertions are inverted here, everything else
+    verbatim."""
+    _shorts_on(monkeypatch)
+
+    class _ShortSpace(_NoClose):
+        def submit_fok(self, slug, price, qty, sell=False, tif=GTC_TIF, intent=None, post_only=False,
+                       good_till=None, paced_pair=False):
+            self.calls.append(("place", slug, price, qty, sell, tif, intent, post_only, good_till))
+            self.n += 1
+            oid = f"oid-{self.n}"
+            if sell and intent == SHORT:
+                buy_long_at_most = round(1.0 - price, 2)
+                if buy_long_at_most >= self.ask:           # marketable
+                    if post_only:
+                        return {"ok": False, "order_id": None, "status": "post_only_rejected",
+                                "fill_price": None, "filled_shares": 0.0,
+                                "raw": {"status_code": 400, "error": "would cross"}}
+                    if tif == IOC_TIF:
+                        return {"ok": True, "order_id": oid, "status": "filled", "fill_price": self.ask,
+                                "filled_shares": float(qty), "raw": {}}
+                self.rest(oid, "SELL", price, qty, slug, intent=SELL_SHORT)
+                if tif == IOC_TIF:
+                    self.orders[oid]["state"] = "cancelled"
+                    return {"ok": False, "order_id": oid, "status": "canceled", "fill_price": None,
+                            "filled_shares": 0.0, "raw": {}}
+                return {"ok": False, "order_id": oid, "status": "new", "fill_price": None,
+                        "filled_shares": 0.0, "raw": {"response": {"id": oid}}}
+            return super().submit_fok(slug, price, qty, sell, tif, intent, post_only, good_till, paced_pair)
+
+    # (a) the low book: the probe crosses under this reading and is refused -- fail closed
+    p = _pool()
+    b = _short_book(p, ledger=-300)
+    p.state.pop("mirror_s4_proof")
+    v = _ShortSpace(bid=0.30, ask=0.32, held={SLUG: -300})
+    st = _tick(p, v)
+    assert p.state["mirror_s4_proof"]["proved"] is False and _census(st, "s4_unproven") == 1
+    assert p.state["mirror_s4_proof"]["why"] == "place_refused:post_only_rejected" and b["ledger_net"] == -300
+    # (b) the high book: his BUY of the long at 0.70 (the cover level), the market 0.70/0.72
+    fills = [_fill(N, "BUY", 400, 0.35, NOW - 2500), _fill(M, "BUY", 400, 0.70, NOW - 2000)]
+    p2 = _short_world(fills=fills, snap=None)
+    b2 = _short_book(p2, ledger=-300, avg=0.68)
+    p2.state.pop("mirror_s4_proof")
+    v2 = _ShortSpace(bid=0.70, ask=0.72, held={SLUG: -300})
+    st2 = _tick(p2, v2, http=_gone())
+    rec = p2.state["mirror_s4_proof"]
+    assert [c[2:4] for c in _places(v2)][0] == (0.65, 1)
+    # the probe rested and echoed price 0.65 / intent SELL_SHORT: proved by S4's check ...
+    assert rec["echo"]["price"] == 0.65 and rec["echo"]["intent"] == SELL_SHORT
+    # ... and with the fold NO cover rests after it: the proof refused this venue
+    assert [c[2:6] for c in _places(v2)][1:] == []
+    assert _census(st2, "short_cover_rest") == 0 and b2["ledger_net"] == -300
+    # the spec: this venue must NOT be proved (its side is not a contract BUY)
+    assert rec["proved"] is False, rec
+
+
+def test_FINDING_a_429_on_the_probe_is_recorded_as_a_mismatch_not_routed_to_the_rate_limit_circuit(monkeypatch):
+    """E2's rule: a venue 429 is a refusal before anything was processed
+    -- `rate_limited`, the pacer's circuit, the tick abandoned; never a
+    verdict about the order. The probe's create under post_only=True
+    hands a 429 back as the post_only_rejected shape (status_code 429,
+    error_type RateLimitError); _s4_probe reads `not oid` and records
+    `place_refused:post_only_rejected` -- the cover refused for an HOUR
+    on a transient 429, no circuit, no abandon, and the tick goes on
+    placing into the limited venue."""
+    _shorts_on(monkeypatch)
+
+    def _limited(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
+        return {"ok": False, "order_id": None, "status": "post_only_rejected", "fill_price": None,
+                "filled_shares": 0.0,
+                "raw": {"preview": {}, "status_code": 429, "error": "RateLimitError: Too Many Requests",
+                        "error_type": "RateLimitError", "body": None}}
+    p, b, v = _cover_world(_his(), snap={M: 300.0, N: 0.0}, place=_limited, ioc_fill=300.0)
+    p.state.pop("mirror_s4_proof")
+    st = _tick(p, v)
+    rec = p.state.get("mirror_s4_proof") or {}
+    assert ml._raw_rate_limit({"status_code": 429}) is True, "the reader exists; the probe does not call it"
+    assert _census(st, "rate_limited") >= 1 and st["abandoned"] and st.get("abandon_reason") == "rate_limited", \
+        (rec, {k: v_ for k, v_ in st["census"].items() if v_})
+    # a 429 is not a proof verdict that should hold the cover for an hour
+    assert rec.get("why") not in ("place_refused:post_only_rejected",), rec
+
+
+def test_FINDING_a_cover_placement_whose_response_is_lost_is_never_adopted_the_rest_stands_unmanaged_on_the_venue(monkeypatch):
+    """The lost-close history in a new shape. The cover's create raises
+    after the venue rested it (the 30 s SDK timeout class that produced
+    tonight's freezes). _lost_response searches the book by fingerprint:
+    _on_book_matches compares the venue's normalized side ('SELL', which
+    pmus._norm_order derives from the SELL_SHORT intent) against
+    _order_side_of(row) = 'BUY' (the plan side) -- never equal, so the
+    resting 300-share cover is not adopted, the book is frozen
+    `placement_lost`, and the rest stands on the venue with no row: step
+    O re-searches by the same fingerprint, then marks the row lost at
+    1200 s while the order still rests; when it fills the book lands in
+    `venue_ledger_disagree` for good. A short ADD lost the same way IS
+    adopted (its row side SELL matches the venue's SELL)."""
+    _shorts_on(monkeypatch)
+    fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
+             _fill(N, "SELL", 400, 0.70, NOW - 2000)]
+    p, b, v = _cover_world(fills, snap=None, bid=0.29, ask=0.40, place_raises=RuntimeError("read timeout"),
+                           rest_on_raise=True)
+    st = _tick(p, v, http=_gone())
+    assert [c[2:6] for c in _places(v)] == [(0.30, 300, True, GTC_TIF)]
+    assert v.orders["oid-1"]["state"] == "new" and v.orders["oid-1"]["intent"] == SELL_SHORT
+    o = next(iter(p.orders.values()))
+    assert ("open_orders", [SLUG]) in v.calls, "the lost-response search ran"
+    # the spec: a rest the venue lists at our cent, our quantity, our intent is OURS -- adopted
+    assert o["state"] == "open" and o["order_id"] == "oid-1" and b["state"] == "live", (o["state"], b["frozen_reason"])
+    assert _census(st, "placement_lost") == 0
+
+
+def test_s4v2_the_adapter_carries_the_venues_own_side_verbatim_and_the_proof_reads_it_alone(monkeypatch):
+    """F1 pinned. pmus._norm_order keeps the desk's derived `side` and
+    adds `venue_side`, the SDK's Order.side as it came (None when the
+    venue reported none). The proof compares `venue_side` to
+    S4_VENUE_BUY: a SELL there is `wrong_side`, none is `side_missing`
+    -- both cancelled, both recorded with the echo naming both sides,
+    both refusing the cover by name and holding the next tick. The
+    fixture venue's model of the venue's side is the CONTRACT side by
+    wire intent: BUY_SHORT and SELL_LONG rest ORDER_SIDE_SELL, BUY_LONG
+    and the cover's SELL_SHORT rest ORDER_SIDE_BUY."""
+    _shorts_on(monkeypatch)
+    assert ml.S4_VENUE_BUY == "ORDER_SIDE_BUY"
+    raw = {"id": "x", "marketSlug": SLUG, "intent": SELL_SHORT, "price": {"value": "0.25"},
+           "quantity": 1, "state": "ORDER_STATE_NEW"}
+    assert pmus._norm_order({**raw, "side": "ORDER_SIDE_BUY"})["venue_side"] == "ORDER_SIDE_BUY"
+    assert pmus._norm_order({**raw, "side": "ORDER_SIDE_SELL"})["venue_side"] == "ORDER_SIDE_SELL"
+    assert pmus._norm_order(raw)["venue_side"] is None and pmus._norm_order(raw)["side"] == "SELL"
+    # the fixture's side model, by wire intent
+    v = _Venue()
+    v.submit_fok(SLUG, 0.30, 10, False, GTC_TIF, INTENT, True, None)                 # BUY_LONG
+    v.submit_fok(SLUG, 0.30, 10, True, GTC_TIF, INTENT, True, None)                  # SELL_LONG
+    v.submit_fok(SLUG, 0.30, 10, False, GTC_TIF, SHORT, True, None)                  # BUY_SHORT
+    v.submit_fok(SLUG, 0.30, 10, True, GTC_TIF, SHORT, True, None)                   # SELL_SHORT
+    assert [(o["intent"], o["side"], o["venue_side"]) for o in v.orders.values()] == [
+        (INTENT, "BUY", "ORDER_SIDE_BUY"), ("ORDER_INTENT_SELL_LONG", "SELL", "ORDER_SIDE_SELL"),
+        (SHORT, "SELL", "ORDER_SIDE_SELL"), (SELL_SHORT, "BUY", "ORDER_SIDE_BUY")]
+
+    class _NoSide(_NoClose):
+        def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
+                 filled=0.0, avg=None, intent=None):
+            o = super().rest(oid, side, price, qty, slug, created, state, filled, avg, intent)
+            o["venue_side"] = None
+            return o
+
+    class _SellSide(_NoClose):
+        def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
+                 filled=0.0, avg=None, intent=None):
+            return super().rest(oid, "SELL", price, qty, slug, created, state, filled, avg, intent)
+
+    for mk, why, vs in ((_NoSide, "side_missing", None), (_SellSide, "wrong_side", "ORDER_SIDE_SELL")):
+        p = _pool()
+        b = _short_book(p, ledger=-300)
+        p.state.pop("mirror_s4_proof")
+        v = mk(held={SLUG: -300}, ioc_fill=300.0)
+        st = _tick(p, v)
+        rec = p.state["mirror_s4_proof"]
+        assert rec["proved"] is False and rec["why"] == why and rec["at"] == NOW, (why, rec)
+        assert rec["echo"]["venue_side"] == vs and rec["echo"]["intent"] == SELL_SHORT, why
+        assert rec["echo"]["price"] == 0.25 and rec["echo"]["quantity"] == 1.0, why
+        assert rec["cancel"] == {"ok": True} and v.orders["oid-1"]["state"] == "cancelled", why
+        assert _census(st, "s4_probe_placed") == 1 and _census(st, "s4_proved") == 0, why
+        assert _census(st, "s4_unproven") == 1 and b["last_plan"]["s4"] == {"unproven": why}, why
+        assert [c[3] for c in _places(v)] == [1] and b["ledger_net"] == -300 and b["state"] == "live", why
+        assert not p.orders, "no mirror_orders row for the probe"
+        # the recorded mismatch holds the next tick, no second probe
+        v2 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+        st2 = _tick(p, v2, now=NOW + 30)
+        assert not _places(v2) and _census(st2, "s4_unproven") == 1 and _census(st2, "s4_probe_placed") == 0, why
+    # the side is checked before the intent: a SELL-side echo with the
+    # right intent is `wrong_side`, never proved by the intent alone
+    assert inspect.getsource(ml._s4_probe).index('"wrong_side"') < inspect.getsource(ml._s4_probe).index('"wrong_intent"')
+
+
+def test_s4v2_the_probe_is_placed_in_the_long_tokens_space_against_the_covers_own_quote(monkeypatch):
+    """F2 pinned. The probe's price is _s4_probe_price of the BID the
+    book's own _bbo read returned -- the long token's space, the space
+    his_px and the cover's rest / take cents live in -- and the record
+    keeps that quote (`bid`, `ask`) beside the price it sent; the
+    read-back price is held to what was sent in that space. A quote
+    the book cannot read two-sided in that space (one side missing,
+    or locked) is not probed. Under the reviewer's short-token-space
+    venue the high-priced book's probe rests at our price with our
+    intent and is refused by its side alone, `wrong_side`; the cover
+    is refused `s4_unproven` and the book held, never a rest that can
+    never fill."""
+    _shorts_on(monkeypatch)
+    p, b, v = _flip_world(bid=0.30, ask=0.34, ioc_fill=300.0)
+    p.state.pop("mirror_s4_proof")
+    st = _tick(p, v)
+    rec = p.state["mirror_s4_proof"]
+    assert rec["proved"] is True and rec["bid"] == 0.30 and rec["ask"] == 0.34
+    assert rec["price"] == ml._s4_probe_price(0.30) == 0.25 == rec["echo"]["price"]
+    # the cover's own cents on the same tick, in the same space (his 0.31: ceiling 0.32)
+    assert b["last_plan"]["exit_cover"] == 0.32 and _census(st, "s4_proved") == 1
+    # one side of the quote missing: no probe, the cover refused by name
+    for bid, ask in ((0.30, None), (None, 0.32)):
+        p2, b2, v2 = _flip_world(bid=bid, ask=ask, ioc_fill=300.0)
+        p2.state.pop("mirror_s4_proof")
+        st2 = _tick(p2, v2)
+        assert not [c for c in _places(v2) if c[3] == 1] and _census(st2, "s4_probe_placed") == 0, (bid, ask)
+        assert "mirror_s4_proof" not in p2.state and b2["ledger_net"] == -300, (bid, ask)
+
+
+def test_s4v2_a_429_on_the_probe_in_either_shape_goes_to_the_rate_limit_path_and_writes_the_hours_hold(monkeypatch):
+    """F3 pinned in both shapes: the create's 429 in the
+    post_only_rejected raw (status_code 429), and the SDK's
+    RateLimitError raised by the placement. Each: `rate_limited` and
+    the circuit, `s4_probe_placed` (the request went out), the tick
+    abandoned `rate_limited` with the backoff skipped, the tick's
+    `recent` naming it, NO cover this tick -- and (S4 v3, GAP 3) the
+    record {"proved": false, "why": "rate_limited", "at": now} written
+    over the prior one, so the hour's clock holds the probe: the next
+    tick probes nothing (no abandon), an hour on it probes again and
+    proves. v2 wrote no record and the probe was the first write of
+    every tick while the venue limited creates, abandoning each. A
+    post_only_rejected raw whose text merely mentions '429' under an
+    int status 400 is a crossing refusal and is recorded as the
+    mismatch it is (the anchored rule), the tick not abandoned."""
+    _shorts_on(monkeypatch)
+
+    def _limited(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
+        return {"ok": False, "order_id": None, "status": "post_only_rejected", "fill_price": None,
+                "filled_shares": 0.0,
+                "raw": {"preview": {}, "status_code": 429, "error": "RateLimitError: Too Many Requests",
+                        "error_type": "RateLimitError", "body": None}}
+    prior = {"proved": False, "at": NOW - 7200.0, "slug": SLUG, "why": "wrong_price", "echo": {"price": 0.24}}
+    for label, kw in (("the raw shape", {"place": _limited}), ("the raised shape", {"place_raises": _sdk_429()})):
+        p, b, v = _cover_world(_his(), snap={M: 300.0, N: 0.0}, ioc_fill=300.0, **kw)
+        p.state["mirror_s4_proof"] = dict(prior)
+        st = _tick(p, v)
+        rec = p.state["mirror_s4_proof"]
+        assert rec["proved"] is False and rec["why"] == "rate_limited" and rec["at"] == NOW, (label, rec)
+        assert rec["order_id"] is None and rec["echo"]["raised"] == "RateLimitError", (label, rec)
+        assert rec["slug"] == SLUG and rec["price"] == 0.25 and rec["bid"] == 0.30 and rec["ask"] == 0.32, label
+        assert "cancel" not in rec and "booked" not in rec, label
+        assert _census(st, "rate_limited") == 1 and _census(st, "s4_probe_placed") == 1, label
+        assert _census(st, "s4_proved") == 0 and _census(st, "s4_unproven") == 1, label
+        assert st["abandoned"] and st["abandon_reason"] == "rate_limited", label
+        assert _census(st, "backoff_skipped_circuit") == 1, label
+        assert [c[3] for c in _places(v)] == [1] and b["ledger_net"] == -300 and b["state"] == "live", label
+        assert not [c for c in v.calls if c[0] == "cancel"] and not p.orders, label
+        pr = [r for r in st["recent"] if r["what"] == "s4_probe"]
+        assert pr and pr[-1]["why"] == "rate_limited" and pr[-1]["raised"] == "RateLimitError", (label, pr)
+        assert b["last_plan"]["s4"] == {"unproven": "rate_limited"}, label
+        venue_pace._penalty_until = 0.0
+        # the next tick, the venue answering: NO probe (the hour's hold), no
+        # abandon, the cover still refused by the 429's name
+        v2 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+        st2 = _tick(p, v2, now=NOW + 1)
+        assert not _places(v2) and not st2["abandoned"] and _census(st2, "s4_probe_placed") == 0, label
+        assert _census(st2, "s4_unproven") == 1 and b["last_plan"]["s4"] == {"unproven": "rate_limited"}, label
+        assert p.state["mirror_s4_proof"] == rec and b["ledger_net"] == -300, label
+        # an hour on: the probe again, proved, the cover after it
+        v3 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+        st3 = _tick(p, v3, now=NOW + 3600)
+        assert [c[3] for c in _places(v3)] == [1, 300] and _census(st3, "s4_proved") == 1, label
+        assert p.state["mirror_s4_proof"]["proved"] is True and b["ledger_net"] == 0, label
+    # a 400 whose text mentions 429 is a crossing refusal: the mismatch recorded, no abandon
+    def _crossed(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
+        return {"ok": False, "order_id": None, "status": "post_only_rejected", "fill_price": None,
+                "filled_shares": 0.0, "raw": {"status_code": 400, "error": "would cross at 0.429"}}
+    p3, b3, v3 = _cover_world(_his(), snap={M: 300.0, N: 0.0}, place=_crossed, ioc_fill=300.0)
+    p3.state.pop("mirror_s4_proof")
+    st3 = _tick(p3, v3)
+    assert p3.state["mirror_s4_proof"]["why"] == "place_refused:post_only_rejected"
+    assert _census(st3, "rate_limited") == 0 and not st3["abandoned"] and _census(st3, "s4_unproven") == 1
+    # the rate-limit reader is the placement's (never '429' in free text)
+    src = inspect.getsource(ml._s4_probe)
+    assert "_raw_rate_limit(raw)" in src and "ms.is_rate_limit(exc)" in src and "_s4_probe_rate_limited" in src
+    assert "_abandon(t, \"rate_limited\", rate_limited=True)" in inspect.getsource(ml._s4_probe_rate_limited)
+
+
+def test_s4v2_a_lost_cover_is_adopted_by_its_wire_intent_in_step_o_and_an_unfound_cover_rest_freezes_placement_lost(monkeypatch):
+    """F4 pinned. The fingerprint matches INTENT to intent when both
+    the row and the venue row name one (the production shape:
+    _norm_order's derived side is 'SELL' for a SELL_SHORT, the row's
+    plan side BUY), else side to side as before. Step O: a 'placing'
+    cover row past PLACING_ORPHAN_S with the venue listing our cent /
+    quantity / intent is adopted; a SELL_LONG at our cent and quantity
+    is not ours (frozen `placement_lost`, the row left 'placing'). A
+    lost cover response with NOTHING resting, or a rest at another
+    cent, freezes `placement_lost` -- never a live book with a cover
+    standing unmanaged."""
+    _shorts_on(monkeypatch)
+    cover = {"side": BUY, "wire": 0.30, "qty": 300, "intent": SELL_SHORT}
+    # the unit: the production shape of a resting cover, and the mismatches
+    listed = {"order_id": "v-1", "side": "SELL", "intent": SELL_SHORT, "price": 0.30, "quantity": 300.0}
+    assert ml._on_book_matches(cover, listed, 0.30, 300) is True
+    assert ml._on_book_matches(cover, {**listed, "intent": "ORDER_INTENT_SELL_LONG"}, 0.30, 300) is False
+    assert ml._on_book_matches(cover, {**listed, "intent": "ORDER_INTENT_BUY_LONG", "side": "BUY"}, 0.30, 300) is False
+    assert ml._on_book_matches(cover, {**listed, "price": 0.31}, 0.30, 300) is False
+    assert ml._on_book_matches(cover, {**listed, "quantity": 299.0}, 0.30, 300) is False
+    assert ml._on_book_matches(cover, {**listed, "order_id": None}, 0.30, 300) is False
+    # a short ADD's production shape (derived side 'BUY' against the row's SELL): by intent
+    add = {"side": SELL, "wire": 0.32, "qty": 300, "intent": SHORT}
+    assert ml._on_book_matches(add, {"order_id": "v-2", "side": "BUY", "intent": SHORT, "price": 0.32,
+                                     "quantity": 300.0}, 0.32, 300) is True
+    # no intent on either: the side comparison as before
+    legacy = {"side": BUY, "wire": 0.30, "qty": 300, "intent": None}
+    assert ml._on_book_matches(legacy, {**listed, "intent": None, "side": "BUY"}, 0.30, 300) is True
+    assert ml._on_book_matches(legacy, {**listed, "intent": None, "side": "SELL"}, 0.30, 300) is False
+    assert ml._on_book_matches(cover, {**listed, "intent": None, "side": "BUY"}, 0.30, 300) is True
+    # step O: the 'placing' cover row older than a minute (the process died
+    # between the create and the persist), the venue listing our order
+    fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
+             _fill(N, "SELL", 400, 0.70, NOW - 2000)]
+    p, b, v = _cover_world(fills, snap=None, bid=0.29, ask=0.40)
+    o = p.add_order(b, side=BUY, wire=0.30, qty=300, kind="flatten_paired", state="placing", order_id=None,
+                    placed_ts=NOW - 90, intent=SELL_SHORT)
+    v.rest("venue-7", "BUY", 0.30, 300, created=NOW - 85, intent=SELL_SHORT)
+    st = _tick(p, v, http=_gone())
+    assert o["order_id"] == "venue-7" and o["state"] == "open" and ("status", "venue-7") in v.calls
+    assert not _places(v) and _census(st, "order_lost") == 0 and b["open_order_id"] == o["id"]
+    assert [r for r in st["recent"] if r["what"] == "adopted"][0]["order"] == "venue-7"
+    assert b["state"] == "live" and _census(st, "short_cover_out_of_tol") == 1, "the adopted rest is managed"
+    # step O on the book _lost_response froze: adopted by fingerprint, the
+    # rest cancelled under the freeze's name, the book thawed and the cover
+    # rested again the same tick -- the frozen road, never a rest unmanaged
+    pf, bf, vf = _cover_world(fills, snap=None, bid=0.29, ask=0.40)
+    of = pf.add_order(bf, side=BUY, wire=0.30, qty=300, kind="flatten_paired", state="placing", order_id=None,
+                      placed_ts=NOW - 90, intent=SELL_SHORT)
+    bf.update(state="frozen", frozen_reason="placement_lost", frozen_ts=NOW - 90)
+    vf.rest("venue-7", "BUY", 0.30, 300, created=NOW - 85, intent=SELL_SHORT)
+    stf = _tick(pf, vf, http=_gone())
+    assert of["order_id"] == "venue-7" and of["state"] == "cancelled" and of["reason"] == "placement_lost"
+    assert [r["what"] for r in stf["recent"]][-5:] == ["adopted", "cancel", "order_cancelled", "thawed", "placed"]
+    assert ("cancel", "venue-7", SLUG) in vf.calls and vf.orders["venue-7"]["state"] == "cancelled"
+    assert bf["state"] == "live" and [c[2:6] for c in _places(vf)] == [(0.30, 300, True, GTC_TIF)]
+    assert _census(stf, "short_cover_rest") == 1 and _census(stf, "order_lost") == 0
+    # step O: a SELL_LONG resting at our cent and quantity is not ours -- frozen, the row left
+    p2, b2, v2 = _cover_world(fills, snap=None, bid=0.29, ask=0.40)
+    o2 = p2.add_order(b2, side=BUY, wire=0.30, qty=300, kind="flatten_paired", state="placing", order_id=None,
+                      placed_ts=NOW - 90, intent=SELL_SHORT)
+    v2.rest("venue-8", "SELL", 0.30, 300, created=NOW - 85, intent="ORDER_INTENT_SELL_LONG")
+    st2 = _tick(p2, v2, http=_gone())
+    assert o2["order_id"] is None and o2["state"] == "placing" and not _places(v2)
+    assert b2["state"] == "frozen" and b2["frozen_reason"] == "placement_lost" and _census(st2, "placement_lost") >= 1
+    # the lost response with nothing resting: frozen by name, never live
+    p3, b3, v3 = _cover_world(fills, snap=None, bid=0.29, ask=0.40, place_raises=RuntimeError("read timeout"))
+    st3 = _tick(p3, v3, http=_gone())
+    o3 = next(iter(p3.orders.values()))
+    assert [c[2:6] for c in _places(v3)] == [(0.30, 300, True, GTC_TIF)] and ("open_orders", [SLUG]) in v3.calls
+    assert o3["state"] == "placing" and o3["order_id"] is None and (o3["side"], o3["intent"]) == (BUY, SELL_SHORT)
+    assert b3["state"] == "frozen" and b3["frozen_reason"] == "placement_lost" and _census(st3, "placement_lost") >= 1
+    assert b3["open_order_id"] == o3["id"] and "close" not in _kinds(v3)
+
+    # the lost response with the venue's rest at ANOTHER cent: not ours, frozen
+    class _OffByOne(_NoClose):
+        def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
+                 filled=0.0, avg=None, intent=None):
+            return super().rest(oid, side, round(price + 0.01, 2), qty, slug, created, state, filled, avg, intent)
+    p4 = _short_world(fills=fills, snap=None)
+    b4 = _short_book(p4, ledger=-300)
+    v4 = _OffByOne(bid=0.29, ask=0.40, held={SLUG: -300}, place_raises=RuntimeError("read timeout"),
+                   rest_on_raise=True)
+    st4 = _tick(p4, v4, http=_gone())
+    o4 = next(iter(p4.orders.values()))
+    assert v4.orders["oid-1"]["price"] == 0.31 and o4["state"] == "placing" and o4["order_id"] is None
+    assert b4["state"] == "frozen" and b4["frozen_reason"] == "placement_lost" and _census(st4, "placement_lost") >= 1
+    # the next tick: the frozen book with its non-terminal row is held, no second cover
+    v5 = _NoClose(bid=0.29, ask=0.40, held={SLUG: -300})
+    v5.orders = v4.orders
+    st5 = _tick(p4, v5, now=NOW + 10, http=_gone())
+    assert not _places(v5) and _census(st5, "open_order_pending") >= 1 and b4["state"] == "frozen"
 
 
 # ------------------------------------------------ 12. the census coverage
@@ -10277,6 +11162,345 @@ def test_a_terminal_candidate_is_memoised_and_skipped_on_the_next_tick(monkeypat
     st2 = _tick(p, v, now=NOW + 1)
     assert _census(st2, "cand_terminal_skipped") == 1 and st2["reads"] == 0
     assert not [c for c in v.calls if c[0] == "bbo"], "no slot spent on it"
+
+
+# ---------------- 22c. S4 v3: the review's round 2 folded (2026-09-07)
+#
+# GAP 1: a probe that FILLS at create (the post-only latch tripped) is
+# BOOKED -- an `s4_probe` row, the ledger through _book_delta as a cover
+# fill, `s4_probe_filled` -- and the cover after it is sized off the
+# ledger the row moved. GAP 2: a probe the venue KEPT (a refused cancel)
+# holds its id on the record; the cancel is retried every tick before
+# the walk and nothing is probed until the venue reports it gone; a 429
+# on the cancel is E2's path, the id kept. GAP 3: a 429 on the placement
+# writes the hour's hold. INFO 5: the echo's state must be a standing one.
+
+
+class _ProbeFills(_NoClose):
+    """The 23:16Z shape: the venue fills the 1-share post-only probe at
+    create, at the ask."""
+
+    def submit_fok(self, slug, price, qty, sell=False, tif=GTC_TIF, intent=None, post_only=False,
+                   good_till=None, paced_pair=False):
+        if not (sell and qty == 1):
+            return super().submit_fok(slug, price, qty, sell, tif, intent, post_only, good_till, paced_pair)
+        self.calls.append(("place", slug, price, qty, sell, tif, intent, post_only, good_till))
+        self.n += 1
+        oid = f"oid-{self.n}"
+        self.rest(oid, "BUY", price, qty, slug, state="filled", filled=1.0, avg=self.ask, intent=SELL_SHORT)
+        return {"ok": True, "order_id": oid, "status": "filled", "fill_price": self.ask,
+                "filled_shares": 1.0, "raw": {"response": {"id": oid}}}
+
+
+class _ProbeState(_NoClose):
+    """The probe rests in the state given and the venue LISTS it
+    whatever the state (the read-back sees it)."""
+
+    def __init__(self, *a, probe_state="new", **kw):
+        super().__init__(*a, **kw)
+        self.probe_state = probe_state
+
+    def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
+             filled=0.0, avg=None, intent=None):
+        return super().rest(oid, side, price, qty, slug, created,
+                            self.probe_state if qty == 1 else state, filled, avg, intent)
+
+    def open_orders(self, slugs=None):
+        self.calls.append(("open_orders", slugs))
+        return [self._norm(o) for o in self.orders.values()]
+
+
+class _Cancel429(_NoClose):
+    """The venue rate-limits the cancel (the adapter never raises: its
+    error string leads with the SDK's name)."""
+
+    def cancel_order(self, oid, slug):
+        self.calls.append(("cancel", oid, slug))
+        return {"ok": False, "error": "RateLimitError: Too Many Requests"}
+
+
+def _probe_row(p):
+    rows = [o for o in p.orders.values() if o["kind"] == "s4_probe"]
+    assert len(rows) <= 1
+    return rows[0] if rows else None
+
+
+def test_s4v3_a_probe_that_fills_at_create_is_booked_on_an_s4_probe_row_through_the_ledger_and_the_cover_is_sized_off_it(monkeypatch):
+    """GAP 1. The probe fills at create (1 share at the ask 0.32 on avg
+    0.32): the record says `filled_at_create` (the cover gated,
+    `s4_unproven`, no cancel), and the share is BOOKED -- an ordinary
+    mirror_orders row of kind `s4_probe` (side BUY, intent SELL_SHORT,
+    qty 1, GTC post-only as sent, wire 0.25, the fill at 0.32, maker
+    False, taker at placement, filled) through _book_delta: the ledger
+    -300 -> -299, realized (0.32 - 0.32) x 1 = 0, the standing row 299,
+    counted `s4_probe_filled`, the record naming the row under
+    `booked`. An hour on the venue reads -299 (no disagreement), the
+    probe proves and the cover is 299 -- _cover_qty off the ledger the
+    row moved -- to ledger 0."""
+    _shorts_on(monkeypatch)
+    p, b, v = _flip_world(ioc_fill=300.0)
+    p.state.pop("mirror_s4_proof")
+    v.__class__ = _ProbeFills
+    st = _tick(p, v)
+    rec = p.state["mirror_s4_proof"]
+    assert rec["proved"] is False and rec["why"] == "filled_at_create" and "cancel" not in rec
+    assert rec["echo"] == {"filled_shares": 1.0, "fill_price": 0.32, "status": "filled"}
+    assert rec["order_id"] == "oid-1" and rec["price"] == 0.25
+    o = _probe_row(p)
+    assert o is not None and rec["booked"] == {"row": o["id"], "booked": "booked", "ledger": -299}
+    assert (o["side"], o["intent"], o["qty"], o["tif"], o["post_only"]) == (BUY, SELL_SHORT, 1, "GTC", True)
+    assert (o["wire"], o["price"], o["avg_px"], o["order_id"], o["state"]) == (0.25, 0.25, 0.32, "oid-1", "filled")
+    assert o["maker"] is False and o["taker_at_placement"] is True and o["booked_filled"] == 1.0
+    assert o["realized"] == pytest.approx(0.0) and o["reason"] == "s4_probe" and o["done_at"] is not None
+    assert b["ledger_net"] == -299 and b["avg_cost"] == 0.32 and b["realized_pnl"] == pytest.approx(0.0)
+    assert p.rows[b["standing_row_id"]]["filled_shares"] == 299.0
+    assert b["state"] == "live" and b["open_order_id"] is None and p._nonterminal(b["id"]) == []
+    assert _census(st, "s4_probe_filled") == 1 and _census(st, "s4_unproven") == 1 and _census(st, "s4_proved") == 0
+    assert _census(st, "s4_probe_placed") == 1 and _census(st, "short_flatten_close") == 0
+    assert not _cancels(v) and [c[3] for c in _places(v)] == [1], "no cover this tick"
+    assert b["last_plan"]["s4"] == {"unproven": "filled_at_create"}
+    fr = [r for r in st["recent"] if r["what"] == "s4_probe_filled"]
+    assert fr and fr[0]["order"] == "oid-1" and fr[0]["row"] == o["id"] and fr[0]["ledger"] == -299
+    # inside the hour: held, nothing placed, the ledger where the row left it
+    v2 = _NoClose(held={SLUG: -299}, ioc_fill=300.0)
+    st2 = _tick(p, v2, now=NOW + 30)
+    assert not _places(v2) and b["ledger_net"] == -299 and b["state"] == "live"
+    assert _census(st2, "venue_ledger_disagree") == 0 and _census(st2, "s4_unproven") == 1
+    # an hour on: the probe proves and the cover is the LEDGER'S 299, never 300
+    v3 = _NoClose(held={SLUG: -299}, ioc_fill=300.0)
+    st3 = _tick(p, v3, now=NOW + 3600)
+    assert [c[2:6] for c in _places(v3)] == [(0.25, 1, True, GTC_TIF), (0.32, 299, True, IOC_TIF)]
+    assert p.state["mirror_s4_proof"]["proved"] is True and b["ledger_net"] == 0
+    assert _census(st3, "short_flatten_close") == 1 and _census(st3, "s4_probe_filled") == 0
+    # the quantity rule, on the book the row moved
+    assert ml._cover_qty({"intent": SHORT, "ledger_net": -299, "_held": 299.0}, 300) == 299
+
+
+def test_s4v3_a_filled_probe_whose_row_cannot_be_written_freezes_the_book_by_name(monkeypatch):
+    """GAP 1, the failure road: the INSERT raises -- the share is on the
+    venue and not on the ledger, inside the one-share tolerance the
+    venue/ledger read would never name -- so the book is frozen
+    `s4_probe_unbooked` with the order and the error, counted
+    `s4_probe_filled`, the record's `booked` naming the failure, the
+    ledger untouched. A probe is never placed on a book with an order
+    standing (the row needs the book's open slot)."""
+    _shorts_on(monkeypatch)
+    p, b, v = _flip_world(ioc_fill=300.0)
+    p.state.pop("mirror_s4_proof")
+    v.__class__ = _ProbeFills
+    p.raise_on.append(("ml-order-insert", RuntimeError("insert down")))
+    st = _tick(p, v)
+    rec = p.state["mirror_s4_proof"]
+    assert rec["why"] == "filled_at_create" and rec["booked"] == {"row": None, "error": "RuntimeError"}
+    assert b["state"] == "frozen" and b["frozen_reason"] == "s4_probe_unbooked" and b["ledger_net"] == -300
+    assert _probe_row(p) is None and _census(st, "s4_probe_filled") == 1
+    assert _census(st, "s4_probe_unbooked") == 1
+    # a standing order on the book: no probe (the key untouched), the book's own plan runs
+    p2, b2, v2 = _flip_world(ioc_fill=300.0)
+    p2.state.pop("mirror_s4_proof")
+    p2.add_order(b2, side=SELL, wire=0.32, qty=100, kind="increase", intent="ORDER_INTENT_BUY_SHORT")
+    v2.rest("oid-1", "SELL", 0.32, 100, intent="ORDER_INTENT_BUY_SHORT")
+    st2 = _tick(p2, v2)
+    assert "mirror_s4_proof" not in p2.state and _census(st2, "s4_probe_placed") == 0
+    assert not [c for c in _places(v2) if c[3] == 1]
+
+
+def test_s4v3_a_probe_the_venue_kept_is_cancelled_again_every_tick_before_the_walk_and_never_probed_beside(monkeypatch):
+    """GAP 2. The cancel refused: the record keeps the id with
+    `cancel.ok` False. Every tick after, BEFORE the walk (the cancel is
+    the tick's first venue call), the cancel is retried -- paced,
+    through _guarded, an exit op -- and no probe goes out meanwhile
+    (inside the hour or past it). Accepted: the id cleared, `at` = now
+    (the hour restarts), `cancel` = {ok, order, gone: cancelled,
+    retries}; the record's `why` stays `cancel_failed`. An hour after
+    THAT the probe runs again and proves. A refused cancel followed by
+    a status the venue reads cancelled, or no record of the id, is
+    gone too. A 429 on the cancel is E2's path -- `rate_limited`, the
+    circuit -- the id kept, no status read, no abandon."""
+    _shorts_on(monkeypatch)
+    p, b, v = _flip_world(ioc_fill=300.0, cancel_ok=False)
+    p.state.pop("mirror_s4_proof")
+    st = _tick(p, v)
+    rec = p.state["mirror_s4_proof"]
+    assert rec["why"] == "cancel_failed" and rec["order_id"] == "oid-1" and rec["cancel"]["ok"] is False
+    assert rec["cancel"]["retries"] == 0 and _census(st, "rate_limited") == 0
+    assert ml._s4_held_order(rec) == "oid-1"
+    # the venue still refuses: retried, counted, the id kept, no probe, inside the hour
+    v2 = _NoClose(held={SLUG: -300}, ioc_fill=300.0, cancel_ok=False)
+    v2.orders, v2.n = v.orders, v.n
+    st2 = _tick(p, v2, now=NOW + 30)
+    assert _kinds(v2)[0] == "cancel" and _cancels(v2) == [("cancel", "oid-1", SLUG)]
+    assert ("status", "oid-1") in v2.calls and v2.orders["oid-1"]["state"] == "new"
+    assert p.state["mirror_s4_proof"]["order_id"] == "oid-1" and p.state["mirror_s4_proof"]["cancel"]["retries"] == 1
+    assert not _places(v2) and _census(st2, "s4_probe_placed") == 0 and _census(st2, "s4_unproven") == 1
+    assert st2["ops"] == 1 and not st2["abandoned"]
+    # an hour on, still refusing: no second probe beside the first
+    v3 = _NoClose(held={SLUG: -300}, ioc_fill=300.0, cancel_ok=False)
+    v3.orders, v3.n = v.orders, v.n
+    st3 = _tick(p, v3, now=NOW + 3600)
+    assert not _places(v3) and _cancels(v3) == [("cancel", "oid-1", SLUG)]
+    assert p.state["mirror_s4_proof"]["cancel"]["retries"] == 2 and _census(st3, "s4_probe_placed") == 0
+    # the venue accepts: cleared, the hour restarts from now, no probe this tick
+    v4 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+    v4.orders, v4.n = v.orders, v.n
+    st4 = _tick(p, v4, now=NOW + 3700)
+    rec4 = p.state["mirror_s4_proof"]
+    assert v4.orders["oid-1"]["state"] == "cancelled" and _kinds(v4)[0] == "cancel"
+    assert rec4["order_id"] is None and rec4["at"] == NOW + 3700 and rec4["why"] == "cancel_failed"
+    assert rec4["cancel"]["ok"] is True and rec4["cancel"]["order"] == "oid-1"
+    assert rec4["cancel"]["gone"] == "cancelled" and rec4["cancel"]["retries"] == 3
+    assert ml._s4_held_order(rec4) is None and not _places(v4) and ("status", "oid-1") not in v4.calls
+    assert _census(st4, "s4_probe_placed") == 0 and _census(st4, "s4_unproven") == 1
+    cr = [r for r in st4["recent"] if r["what"] == "s4_probe_cancel"]
+    assert cr and cr[-1]["why"] == "gone" and cr[-1]["order"] == "oid-1"
+    # an hour after the clearing: the probe again, proved, the cover
+    v5 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+    v5.orders, v5.n = v.orders, v.n
+    st5 = _tick(p, v5, now=NOW + 7300)
+    assert [c[2:4] for c in _places(v5)] == [(0.25, 1), (0.32, 300)] and _cancels(v5) == [("cancel", "oid-2", SLUG)]
+    assert p.state["mirror_s4_proof"]["proved"] is True and p.state["mirror_s4_proof"]["order_id"] == "oid-2"
+    assert b["ledger_net"] == 0 and _census(st5, "s4_proved") == 1
+    # refused, then the venue's own record reads it cancelled: gone by status
+    for state, gone in (("cancelled", "cancelled"), ("expired", "expired"), (None, "no_record")):
+        pa, ba, va = _flip_world(ioc_fill=300.0, cancel_ok=False)
+        pa.state.pop("mirror_s4_proof")
+        _tick(pa, va)
+        vb = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+        if state is not None:
+            vb.orders = {"oid-1": {**va.orders["oid-1"], "state": state}}
+        stb = _tick(pa, vb, now=NOW + 30)
+        assert _kinds(vb)[:2] == ["cancel", "status"] and not _places(vb), state
+        assert pa.state["mirror_s4_proof"]["order_id"] is None, state
+        assert pa.state["mirror_s4_proof"]["cancel"]["gone"] == gone and _census(stb, "rate_limited") == 0, state
+    # the cancel's 429: named and penalized, the id kept, no status read, not abandoned
+    pc, bc, vc = _flip_world(ioc_fill=300.0, cancel_ok=False)
+    pc.state.pop("mirror_s4_proof")
+    _tick(pc, vc)
+    vd = _Cancel429(held={SLUG: -300}, ioc_fill=300.0)
+    vd.orders, vd.n = vc.orders, vc.n
+    std = _tick(pc, vd, now=NOW + 30)
+    assert _cancels(vd) == [("cancel", "oid-1", SLUG)] and ("status", "oid-1") not in vd.calls
+    assert _census(std, "rate_limited") == 1 and venue_pace.penalty_left() > 0.0 and not std["abandoned"]
+    assert pc.state["mirror_s4_proof"]["order_id"] == "oid-1" and pc.state["mirror_s4_proof"]["cancel"]["retries"] == 1
+    assert not _places(vd) and vd.orders["oid-1"]["state"] == "new"
+    venue_pace._penalty_until = 0.0
+    # the 429 on the FIRST cancel (inside _s4_probe) is named the same way
+    pe, be, ve = _flip_world(ioc_fill=300.0)
+    pe.state.pop("mirror_s4_proof")
+    ve.__class__ = _Cancel429
+    ste = _tick(pe, ve)
+    assert pe.state["mirror_s4_proof"]["why"] == "cancel_failed" and _census(ste, "rate_limited") == 1
+    assert pe.state["mirror_s4_proof"]["order_id"] == "oid-1" and not ste["abandoned"]
+    venue_pace._penalty_until = 0.0
+    # the retry goes through _guarded (paced, counted) and never through a row
+    src = inspect.getsource(ml._s4_cancel_retry)
+    assert "_guarded(t, 0, t.pmus.cancel_order, oid, slug)" in src and "_abandon(" not in src
+    assert "await _s4_cancel_retry(t)" in inspect.getsource(ml._tick)
+    # the unit: what holds an id
+    assert ml._s4_held_order({"proved": False, "order_id": "x", "cancel": {"ok": False}}) == "x"
+    for rec_ in ({"proved": True, "order_id": "x", "cancel": {"ok": False}},
+                 {"proved": False, "order_id": "x", "cancel": {"ok": True}},
+                 {"proved": False, "order_id": "x"}, {"proved": False, "order_id": None, "cancel": {"ok": False}},
+                 "garbage", None):
+        assert ml._s4_held_order(rec_) is None, rec_
+
+
+def test_s4v3_a_kept_probe_that_filled_before_its_cancel_is_booked_on_its_book_and_cleared(monkeypatch):
+    """GAP 2 meets GAP 1: the kept order filled (the venue refuses the
+    cancel; its status reads filled, 1 share at 0.27). The retry leaves
+    the fill on the record (`cancel.filled`), holds the id, and the
+    walk books it on the book the share belongs to: the `s4_probe` row,
+    the ledger -299, realized (0.32 - 0.27) x 1 = 0.05, counted
+    `s4_probe_filled`; then the id is cleared and the hour restarts.
+    No probe that tick."""
+    _shorts_on(monkeypatch)
+    p, b, v = _flip_world(ioc_fill=300.0, cancel_ok=False)
+    p.state.pop("mirror_s4_proof")
+    _tick(p, v)
+    v2 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+    v2.orders = {"oid-1": {**v.orders["oid-1"], "state": "filled", "filled_shares": 1.0, "avg_px": 0.27}}
+    st2 = _tick(p, v2, now=NOW + 30)
+    rec = p.state["mirror_s4_proof"]
+    assert _kinds(v2)[:2] == ["cancel", "status"] and not _places(v2)
+    o = _probe_row(p)
+    assert o is not None and (o["qty"], o["avg_px"], o["state"], o["order_id"]) == (1, 0.27, "filled", "oid-1")
+    assert o["realized"] == pytest.approx(0.05) and b["ledger_net"] == -299
+    assert b["realized_pnl"] == pytest.approx(0.05) and p.rows[b["standing_row_id"]]["filled_shares"] == 299.0
+    assert rec["order_id"] is None and rec["at"] == NOW + 30 and rec["cancel"]["gone"] == "filled"
+    assert rec["cancel"]["filled"] == 1.0 and rec["booked"]["row"] == o["id"] and rec["booked"]["ledger"] == -299
+    assert _census(st2, "s4_probe_filled") == 1 and _census(st2, "s4_probe_placed") == 0
+    assert ml._s4_held_order(rec) is None and b["state"] == "live"
+    # an hour on: proved, the cover the ledger's 299
+    v3 = _NoClose(held={SLUG: -299}, ioc_fill=300.0)
+    _tick(p, v3, now=NOW + 3700)
+    assert [c[3] for c in _places(v3)] == [1, 299] and b["ledger_net"] == 0
+
+
+def test_s4v3_a_429_on_the_probe_holds_it_for_the_hour_one_abandon_not_one_per_tick(monkeypatch):
+    """GAP 3, the reviewer's four ticks: the venue limits creates; the
+    first tick probes, is refused 429, abandons `rate_limited` and
+    writes {"proved": false, "why": "rate_limited", "at": now}; the
+    three ticks after place nothing and abandon nothing. The record is
+    the hold, not a verdict: `rate_limited` counted once."""
+    _shorts_on(monkeypatch)
+    p, b, v = _flip_world(ioc_fill=300.0, place_raises=_sdk_429())
+    p.state.pop("mirror_s4_proof")
+    abandoned, placed = 0, 0
+    for i in range(4):
+        st = _tick(p, v, now=NOW + 5 * i)
+        abandoned += int(bool(st["abandoned"]))
+        placed += _census(st, "s4_probe_placed")
+        venue_pace._penalty_until = 0.0
+    assert abandoned == 1 and placed == 1 and len(_places(v)) == 1
+    rec = p.state["mirror_s4_proof"]
+    assert rec["proved"] is False and rec["why"] == "rate_limited" and rec["at"] == NOW
+    assert b["last_plan"]["s4"] == {"unproven": "rate_limited"} and b["ledger_net"] == -300
+
+
+def test_s4v3_the_proof_requires_a_standing_state_on_the_echo(monkeypatch):
+    """INFO 5. The SDK's OrderState enum, as _norm_order spells it:
+    new, pending_new and pending_risk are the states a standing 1-share
+    limit is listed under (accepted and resting, being written, past
+    listing and awaiting risk) and prove; filled, partially_filled,
+    canceled, expired, rejected, replaced, pending_cancel and
+    pending_replace are not a standing order and are `wrong_state`; no
+    state (`unknown`) is `state_missing`. The state is the LAST check
+    (a wrong intent in a filled state is `wrong_intent`); every
+    verdict cancels the probe."""
+    _shorts_on(monkeypatch)
+    assert ml.S4_RESTING_STATES == frozenset({"new", "pending_new", "pending_risk"})
+    table = ([(s, None) for s in ("new", "pending_new", "pending_risk")]
+             + [(s, "wrong_state") for s in ("filled", "partially_filled", "canceled", "cancelled", "expired",
+                                             "rejected", "replaced", "pending_cancel", "pending_replace")]
+             + [("unknown", "state_missing"), ("", "state_missing")])
+    for state, why in table:
+        p, b, v = _flip_world(ioc_fill=300.0)
+        p.state.pop("mirror_s4_proof")
+        v.__class__ = _ProbeState
+        v.probe_state = state
+        st = _tick(p, v)
+        rec = p.state["mirror_s4_proof"]
+        assert rec["echo"]["state"] == state and ("cancel", "oid-1", SLUG) in v.calls, state
+        if why is None:
+            assert rec["proved"] is True and [c[3] for c in _places(v)] == [1, 300] and b["ledger_net"] == 0, state
+        else:
+            assert rec["proved"] is False and rec["why"] == why and b["ledger_net"] == -300, state
+            assert _census(st, "s4_unproven") == 1 and b["last_plan"]["s4"] == {"unproven": why}, state
+    # the order of the checks: price, side, intent, then the state
+    src = inspect.getsource(ml._s4_probe)
+    assert src.index('"wrong_intent"') < src.index('"wrong_state"')
+
+    class _FilledWrongIntent(_ProbeState):
+        def rest(self, oid, side="BUY", price=0.30, qty=300, slug=SLUG, created=None, state="new",
+                 filled=0.0, avg=None, intent=None):
+            return super().rest(oid, side, price, qty, slug, created, state, filled, avg,
+                                "ORDER_INTENT_BUY_LONG" if qty == 1 else intent)
+    p2, b2, v2 = _flip_world(ioc_fill=300.0)
+    p2.state.pop("mirror_s4_proof")
+    v2.__class__ = _FilledWrongIntent
+    v2.probe_state = "filled"
+    _tick(p2, v2)
+    assert p2.state["mirror_s4_proof"]["why"] == "wrong_intent"
 
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():

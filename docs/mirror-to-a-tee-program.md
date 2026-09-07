@@ -1419,6 +1419,140 @@ M1-total (all families) printed beside M1.
   shape, a cancel's error string, the walk's RuntimeError) falls back to the name and the anchored
   text. The reviewer's three FINDING tests are in section 20f verbatim, beside the full-road pins.
 
+### 5a-S4. S4 (2026-09-07) — THE SHORT COVER AS A PRICED ORDER, and the read-back proof
+
+THE EVIDENCE (worker log, 2026-09-07): every short close today failed within a second; with 4a5da1f's
+logging the venue's reason reads `pmus: close_position aec-itfwo-wuszhe-jiaqwan-2026-09-07 failed:
+BadRequestError: Price is required for limit order` (03:30:06Z, 03:50:54Z), the same for
+aec-itfme-yuatak-kazido at 04:29:56Z and 04:51:16Z and aec-itfme-kosuz-chisat at 04:51:52Z; 11 CLOSE
+rows today, 0 executed (render-ops close-rows). The venue's close-position endpoint (`POST
+/v1/order/close-position`, params marketSlug / slippageTolerance / synchronousExecution, SDK
+polymarket_us 0.1.2) refuses our call as an unpriced limit order. So the short cover is a REAL order
+through the same placement machinery the long side uses (`_act` → `_place` → `pmus.submit_fok`,
+sell=True on a BUY_SHORT book: the adapter's `_exit_intent` puts `ORDER_INTENT_SELL_SHORT` on the wire
+beside a price and a quantity), never `close_position` — `_flatten_send` refuses a short book at its
+head (`book_error`) and no cover path reaches it (pinned with a fake venue whose close_position
+raises). THE RULE, E4's mirrored for a short book (`rules.exit_terms(BUY)` gains `rest` and `take`):
+his cover price in long-token space (`his_px` as `_his_level` reads it: 1 − his price on the other
+token when that is what he traded), ceiling = his_px + MIRROR_EXIT_TOL; the REST post-only at
+floor(his_px) to the cent (below the ask whenever the take did not fire, never above him; GTC, no
+good-till; `short_cover_rest`); the TAKE one IOC at the ceiling cent whenever ask ≤ ceiling, on the
+same tick, no wait, never twice per rest (`short_cover_take`); a partial IOC leaves no remainder
+resting; outside the tolerance the rest stands (`requote_same_wire`), `exit_out_of_tol` /
+`short_cover_out_of_tol` with bid/ask/ceiling on the plan, held, re-checked every tick, no freeze.
+NO PRICE OF HIS (a snapshot reduce, a vanish without his fill, the admin flatten): fail closed — held
+and named `no_price` under `exit_px_src: 'none'` (`cover: unpriced_held`), logged; the ONE exception
+is the confirmed vanish / the sign flip with his position on our side gone: one IOC at the ask bounded
+by `le.buy_limit_price` (the ask + 2c, `sell_limit_price` mirrored; the figure is
+`rules.MIRROR_FLATTEN_SLIP`) for our quantity. Exits stay exempt from the ops budget (E4 round 3), the
+loss stop and the replace budget. Partial short REDUCES (his partial buy-back) use the same priced BUY
+for the reduce quantity — S4 unlocks them: `short_reduce_unproven` stays the refusal by name until
+the read-back proof has passed in production; proved, the reduce is the cover.
+THE READ-BACK PROOF (the 1-share probe, owner-authorized in principle as "S4: the resting SELL_SHORT
+read-back on the live short book (1 share, off-market, read price/side back, cancel)"): the state key
+`mirror_s4_proof` (read with the other mirror-state keys, in every mode that can exit) gates every
+cover. Absent or unproven, on the first tick that holds a live SHORT book with a readable two-sided
+quote the worker places ONE 1-share post-only BUY of the long token with the closing intent at
+max(0.01, floor(bid − 0.05)) (off-market, cannot fill), reads it back through `open_orders` on the
+slug (price, quantity 1, the side and the `intent` as the venue reports them), cancels it, and
+records `{"proved": true, "at", "slug", "order_id", "price", "echo": {...}, "cancel"}`; any mismatch
+(another price or quantity, an intent that is not SELL_SHORT or none reported, missing on the
+read-back, refused, raised, executed at create, a cancel the venue refused) records `{"proved": false,
+"why", "echo"}` and the cover stays refused `s4_unproven` (the book held, no freeze). The probe runs at
+most once per hour while unproven, never on a frozen book, never on a locked book, never twice in a
+tick, and never when the key is unreadable or malformed (nothing is placed on a key we cannot record
+into). It writes no mirror_orders row (its record is the key and the tick's `recent`); its two writes
+are exit ops and counted, paced venue calls. `_reconcile_lost_close` stays for the legacy CLOSE rows;
+new covers are ordinary rows (tif GTC / IOC) that `_reconcile_placing` / `_find_lost_placement`
+cover. Census keys: `s4_probe_placed`, `s4_proved`, `s4_unproven`, `short_cover_rest`,
+`short_cover_take`, `short_cover_out_of_tol` (docs/mirror-coverage.md §14); `short_flatten_close` now
+counts a short leg covered to flat by any cover order. The sole/co-held question is gone from the
+short side: a cover is a clamped order of our own quantity. Tests: section 22 of
+tests/test_mirror_live_worker.py and the rewritten short-flatten pins (rung S0's, E4's).
+
+S4 v2 (2026-09-07, the adversarial review folded; four findings). F1 — THE PROOF READS THE VENUE'S OWN
+SIDE. The one fact that settles the denomination is the venue's `side` on the resting order (the SDK's
+Order.side, derived by the venue from the intent: a BUY_SHORT reads ORDER_SIDE_SELL, short-truth 6/6; a
+SELL_SHORT that buys the contract back must read ORDER_SIDE_BUY). `pmus._norm_order` used to overwrite
+that field from the intent string ('SELL' for any *_SELL_* intent), so the echo's side was the desk's
+derivation and the proof compared the intent alone: a venue listing the probe as a SELL at our price
+— an order in another space — was recorded PROVED. Now `_norm_order` keeps the desk's `side` and
+carries the venue's field verbatim as `venue_side`; the proof requires `venue_side == ORDER_SIDE_BUY`
+(`ml.S4_VENUE_BUY`) beside the price, the quantity 1, the slug and the intent SELL_SHORT — a SELL there
+records `{"proved": false, "why": "wrong_side"}`, none reported `side_missing`, the probe cancelled
+whatever the verdict, the cover refused `s4_unproven`. F2 — THE PRICE SPACE. The probe is placed against
+the LONG token's quote (the book's own `_bbo` read, the space `his_px` and the cover's rest/take cents
+are priced in) and the read-back price is held to what was sent in that space; the record keeps the
+quote it was placed against (`bid`, `ask`). The reviewer's venue that reads a SELL_SHORT limit in the
+SHORT token's space ("sell the short token at ≥ p", i.e. buy the long at ≤ 1 − p) refuses the probe on
+a low-priced book (it crosses: fail closed) and RESTS it on a high-priced one, echoing our price and
+intent — under v1 that proved, and every cover after it rested where it could never fill; only the
+venue's own side tells that venue apart, and the proof now refuses it `wrong_side`. A book whose quote
+cannot be read two-sided in that space is not probed. F3 — A 429 ON THE PROBE IS NO VERDICT. E2's rule:
+the create's 429 in the post_only_rejected shape (`status_code` 429 on the raw, read by
+`_raw_rate_limit`'s named fields) or the SDK's RateLimitError raised by the placement
+(`ms.is_rate_limit`) goes to the rate-limit path — `rate_limited` on the census, the pacer's circuit,
+the tick abandoned `rate_limited` with the backoff skipped while the circuit holds — and writes NO proof
+record: the key stays what it was (unproven, no mismatch named for the hour) and the probe runs again
+on the next tick that reads a live short book, under the circuit; v1 recorded
+`place_refused:post_only_rejected` and held the cover for an hour on a transient 429 with no circuit and
+no abandon. Any other refusal or raise records the mismatch as before. F4 — THE LOST COVER IS ADOPTED
+BY ITS WIRE INTENT. `_on_book_matches` compared the plan side (BUY for a cover) against the venue row's
+derived side ('SELL' for SELL_SHORT), so a cover placement whose response was lost was never adopted:
+the rest stood on the venue with no row, the book frozen `placement_lost`, step O marking the row lost
+at 1200 s while the order still rested. The fingerprint now matches INTENT to intent whenever the row
+(the 050 column) and the venue row both name one — the cover's SELL_SHORT, and a short ADD's BUY_SHORT
+(whose derived side 'BUY' never matched its row side SELL either) — and falls back to the side
+comparison for a row or a venue row without one. `_lost_response` and step O's `_reconcile_placing` /
+`_find_lost_placement` adopt a lost cover at our cent, our quantity, our intent, inside the window;
+one the search cannot find freezes the book `placement_lost` as any rest does (never silently live), and
+a cover adopted on a frozen book is cancelled under the freeze's name, the book thawed and the cover
+rested again. No census key changes; the `mirror_s4_proof` record gains `bid`, `ask` and
+`echo.venue_side`, and `why` gains `wrong_side` / `side_missing` (docs/mirror-coverage.md §14). The
+fixture venue's model of the venue's side is the CONTRACT side by wire intent (BUY_SHORT and SELL_LONG
+rest ORDER_SIDE_SELL; BUY_LONG and SELL_SHORT rest ORDER_SIDE_BUY), where it used to model the
+adapter's derivation. Tests: section 22b of tests/test_mirror_live_worker.py — the reviewer's four
+FINDING tests verbatim (F2's two cover assertions inverted: with the fold no cover rests on that venue)
+and a pin per finding.
+
+S4 v3 (2026-09-07, review round 2 folded; three LOW gaps, one INFO, no finding). THE PROOF'S SEMANTICS,
+as the reviewer stated them and as the fold keeps them: what the probe proves is that the venue ACCEPTS a
+priced SELL_SHORT limit, LISTS it with contract-side semantics (the venue's own `side` ORDER_SIDE_BUY), ECHOES
+our price, quantity and intent, and READS the price in long space on a low or mid book (there the other-space
+reading crosses and the post-only refusal fails closed on its own). What it cannot prove: the fill semantics
+and the position effect of the first real cover (that a SELL_SHORT fill moves the venue's net toward zero and
+never opens a long — the ledger books it as a reduce and the venue/ledger read of the next tick is the check),
+and on a high-priced book (0.90/0.92: the probe at 0.85 is non-crossing in BOTH spaces) the `side` field is
+the whole proof. GAP 1 — A FILLED PROBE IS BOOKED. The post-only latch can trip (23:16Z: a post-only rest
+filled at create); v2 recorded `filled_at_create` and gated the cover, sound, but booked the share nowhere —
+the venue held one share the ledger did not, inside the one-share tolerance, and the cover an hour on was
+sized 300 against a venue short of 299. Now the share goes on an ordinary mirror_orders row of kind
+`s4_probe` (side BUY, the closing intent, qty 1, the fill's price, maker false) and through `_book_delta`
+exactly as a cover fill (ledger −300 → −299, the realized on it, the standing row 299), counted
+`s4_probe_filled`, the record naming the row under `booked`; `_cover_qty` reads the ledger the row moved and
+the cover is 299. A row that cannot be written freezes the book `s4_probe_unbooked` by name. The probe is
+never placed on a book with an order standing (the row needs the book's open slot). GAP 2 — A PROBE THE
+VENUE KEPT IS RETRIED, NEVER DOUBLED. A refused cancel left the 1-share order resting with no row, and the
+hour's next probe overwrote the record (the id lost) and placed a second beside it. Now the record keeps
+`order_id` with `cancel.ok` false; every tick, before the walk and before anything else (`_s4_cancel_retry`,
+paced through `_guarded`, an exit op), the cancel is retried, and no probe goes out while an id is held; the
+venue accepting, or its own status reading the order cancelled / expired / rejected / replaced or absent,
+clears the id and restarts the hourly clock from then; a status reading FILLED is the GAP-1 share by another
+road, booked on the book's next walk and then cleared; a 429 on the cancel is E2's path for a cancel
+(`rate_limited`, the circuit), the id kept, the tick not abandoned. GAP 3 — A 429 ON THE PLACEMENT IS THE
+HOUR'S HOLD. v2's F3 wrote no record, so while the venue limited creates the probe was the first write of
+EVERY tick and abandoned each; now the 429 writes `{"proved": false, "why": "rate_limited", "at": now}` —
+one abandon, then the hour — still counted `rate_limited` and penalized as before; a 429 is still no verdict
+about the order: the record is the hold. INFO 5 — THE STATE IS READ. The echo must be in one of the venue's
+STANDING states (`ml.S4_RESTING_STATES` = new / pending_new / pending_risk, read off the SDK's OrderState
+enum; filled, partially_filled, canceled, expired, rejected, replaced, pending_cancel, pending_replace are
+`wrong_state`, no state `state_missing`), checked last, after the intent. Census: `s4_probe_filled` added
+(docs/mirror-coverage.md §14); the record gains `booked`, `cancel.retries` / `cancel.gone` / `cancel.filled`,
+and `why` gains `rate_limited`, `wrong_state`, `state_missing`. Tests: section 22c of
+tests/test_mirror_live_worker.py, and the reviewer's round-2 file kept in the tree as
+tests/test_s4_review_pins.py (its three GAP tests and F3 restated the way F2 was: the spec lines verbatim,
+the intermediate assertions that pinned v2's consequence inverted, each docstring saying which).
+
 ### 5b. OPERATOR NOTES (2026-09-05): reading `venue_halted`
 
 `abandon_reason: venue_halted` (census key `venue_halted`, the WARNING `mirror_live: tick abandoned
