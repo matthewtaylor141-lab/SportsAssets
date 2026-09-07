@@ -361,6 +361,12 @@ CENSUS_KEYS: tuple[str, ...] = (
     # BEFORE `cand_terminal_skipped`, which stays last (pinned)
     "s4_probe_placed", "s4_proved", "s4_unproven", "s4_probe_filled",
     "short_cover_rest", "short_cover_take", "short_cover_out_of_tol",
+    # W1 / R4 (2026-09-07): an open book whose last BOOK read said the
+    # market had ended (_terminal_book_until): its quote read and its
+    # per-market read skipped this tick, the plan written `no_plan`
+    # under `no_mark` as before. Inserted BEFORE `cand_terminal_skipped`,
+    # which stays last (pinned)
+    "book_terminal_skipped",
     # D1 (2026-09-06): a candidate skipped because its venue state read
     # TERMINAL inside the last UNMAPPED_TTL_S (_terminal_until). Appended
     # LAST, past the served 40-key prefix; `integ` is at its own ceiling
@@ -410,6 +416,34 @@ _unmapped_until: dict[tuple[str, str], float] = {}
 # writes it: a book on an ended market is managed every tick until it
 # closes).
 _terminal_until: dict[tuple[str, str], float] = {}
+# THE BOOK'S OWN TERMINAL MEMO (W1 / R4, 2026-09-07). An open book on a
+# market the venue has EXPIRED, whose markets row still reads
+# closed=false / resolved=false (48 of 64 in the 13:50Z census), cannot
+# take step M's closing branch, so every tick read its quote
+# (`venue_halted`, uncounted for the streak), got no mark, cancelled
+# under `no_mark`, held -- and read its per-market position too
+# (`snap_market_unreadable` on an expired market): two paced venue
+# calls per book per tick. The 13:44Z tick read 26 of 27 books on
+# MARKET_STATE_EXPIRED markets, >= 18 s of a 20.4 s tick, before a
+# single candidate. A book whose BOOK read (_bbo, book=True) carried a
+# TERMINAL state (ms.STATE_TERMINAL) is remembered here per (whale,
+# condition_id) for ms.UNMAPPED_TTL_S -- the candidate memo's TTL --
+# and its state string beside it (_terminal_book_state, the plan's
+# `venue_terminal`); on the ticks inside the memo _tick_book skips the
+# quote read AND the per-market read and writes the plan `no_plan`
+# under the existing `no_mark` name (census `no_mark` as today, plus
+# `book_terminal_skipped`). Step M (the markets row,
+# _maybe_close_episode) still runs EVERY tick, so the close lands the
+# tick the row reads closed. NEVER set on a HALTED / SUSPENDED /
+# PREOPEN read (those reopen: such a book is read every tick as
+# before), never on an unread state, never while the book has an order
+# open (t.open_by_book / t.nonterminal: the cancel the first terminal
+# read sends under `no_mark` must have landed first -- the memo is
+# written on the NEXT terminal read, when nothing is open), never from
+# a candidate read (that is _terminal_until's). Fail-closed: a terminal
+# market accepts no order, and no order path is touched here.
+_terminal_book_until: dict[tuple[str, str], float] = {}
+_terminal_book_state: dict[tuple[str, str], str] = {}
 # THE FULL-GAME MEMO (E1 re-review LOW-2). A candidate on a game whose
 # books already hold the $2,500 opens nothing, and the first cut
 # returned before books_seen, so every un-opened market of a full game
@@ -4163,6 +4197,24 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
     return verdict
 
 
+def _memo_terminal_book(t: _Tick, book: dict, r: _Reading) -> None:
+    """The book memo's ONE writer (W1 / R4): this book's own quote read
+    (`r.venue_state`, as _bbo recorded it on the book=True read) named
+    a TERMINAL state and nothing is open on the book. HALTED /
+    SUSPENDED / PREOPEN (not in ms.STATE_TERMINAL) and an unread state
+    (None) write nothing; a book with an order open (t.open_by_book /
+    t.nonterminal) writes nothing this tick -- the `no_mark` refusal
+    below cancels the rest, and the next terminal read memoises."""
+    state = r.venue_state
+    if state is None or state not in ms.STATE_TERMINAL:
+        return
+    if book["id"] in t.open_by_book or book["id"] in t.nonterminal or book.get("open_order_id"):
+        return
+    key = (book["whale"], book["condition_id"])
+    _terminal_book_until[key] = t.now + ms.UNMAPPED_TTL_S
+    _terminal_book_state[key] = str(state)
+
+
 async def _tick_book(t: _Tick, book: dict) -> None:
     """One existing book: read, step M, plan, act, close."""
     w, cid, slug = book["whale"], book["condition_id"], book["us_market_slug"]
@@ -4232,9 +4284,25 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                           "market_unreadable", {"kind": "no_plan", "market_unreadable": True,
                                                 "at": t.now})
         return
+    if (_terminal_book_until.get((w, cid), 0.0) > t.now
+            and book["id"] not in t.open_by_book and book["id"] not in t.nonterminal
+            and not book.get("open_order_id")):
+        # THE BOOK'S LAST READ SAID THE MARKET HAD ENDED (W1 / R4): no
+        # quote read and no per-market read until the memo's TTL runs
+        # -- step M above still ran, so the row's close lands the tick
+        # it reads closed. Held under the name the terminal read
+        # cancelled it under; nothing rests on it (the memo is never
+        # written over an open order), so there is nothing to cancel
+        _mirror_stop("no_mark", w)
+        _mirror_stop("book_terminal_skipped", w)
+        await _write_plan(t, book, None, book.get("target"), None, None, book.get("his_level"),
+                          "no_mark", {"kind": "no_plan", "at": t.now,
+                                      "venue_terminal": _terminal_book_state.get((w, cid))})
+        return
     r = await _read_market(t, w, cid, slug, la, oa, fills, market=mk, book=True)
     if t.abandoned:
         return
+    _memo_terminal_book(t, book, r)
     if str(book.get("map_source") or "") == "grammar":
         # the class's first-fill echo (C1 round 2): a frozen mismatch
         # plans nothing this tick, and neither does a book whose side the

@@ -1067,10 +1067,13 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_last_whales", [])
     monkeypatch.setattr(ml, "_unmapped_until", {})
     monkeypatch.setattr(ml, "_terminal_until", {})     # D1: the terminal memo, same shape
+    monkeypatch.setattr(ml, "_terminal_book_until", {})    # W1 / R4: the book's own terminal memo
+    monkeypatch.setattr(ml, "_terminal_book_state", {})
     monkeypatch.setattr(ml, "_game_full_until", {})    # E1: the full-game memo, by game key
     monkeypatch.setattr(ml, "_BOOK_LOCKS", {})
     monkeypatch.setattr(ms, "_ratio_cache", {"at": 0.0, "by_whale": {}})
     monkeypatch.setattr(ms, "_unmapped_until", {})
+    monkeypatch.setattr(ms, "_terminal_until", {})     # W1 / R2: the shadow's terminal memo
     ml._WOKEN.clear()
     ml._MIRROR_CENSUS.clear()
     ml._RECENT.clear()
@@ -4312,13 +4315,18 @@ def test_the_flattens_slippage_leg_refuses_a_non_open_slug_before_it_reads_a_bid
     async def _held(t, slug):
         return 500, 0.31
     monkeypatch.setattr(ml, "_pm_held", _held)
+    # a fresh world: the CLOSED read above memoised the book (W1 / R4)
+    # and a memo-skipped book never reaches the leg at all
+    ml._terminal_book_until.clear()
     p, b, v = _vanish_after_the_rest(state, held=500, manual=200.0, flatten_bid=0.29, ioc_fill=300.0,
                                      **quotes)
     st = _tick(p, v, http=gone)
     assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v) and not _places(v), v.calls
     assert _census(st, "venue_halted") == 2 and _census(st, "no_bid_for_flatten") == 0, st["census"]
     assert b["ledger_net"] == 300 and b["last_reason"] == "venue_halted"
-    # THE CONTROL: the slug OPEN on the same fixture takes the leg
+    # THE CONTROL: the slug OPEN on the same fixture takes the leg (a
+    # fresh world again: the co-held CLOSED read memoised the book)
+    ml._terminal_book_until.clear()
     p, b, v = _vanish_after_the_rest("MARKET_STATE_OPEN", held=500, manual=200.0, flatten_bid=0.29,
                                      ioc_fill=300.0, bid=0.30, ask=0.32)
     st = _tick(p, v, http=gone)
@@ -4672,7 +4680,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-38:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-39:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4703,9 +4711,11 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # cover's rest / take / hold outside the cent
                           "s4_probe_placed", "s4_proved", "s4_unproven", "s4_probe_filled",
                           "short_cover_rest", "short_cover_take", "short_cover_out_of_tol",
+                          # W1 / R4: an open book's reads skipped on the book memo
+                          "book_terminal_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-39] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-40] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -11501,6 +11511,263 @@ def test_s4v3_the_proof_requires_a_standing_state_on_the_echo(monkeypatch):
     v2.probe_state = "filled"
     _tick(p2, v2)
     assert p2.state["mirror_s4_proof"]["why"] == "wrong_intent"
+
+
+# ------- 23. W1 / R4 (2026-09-07): the live lane stops re-reading expired books
+#
+# The 13:44Z tick: 26 of 27 book reads on MARKET_STATE_EXPIRED markets
+# whose markets row still read closed=false, two paced venue calls each
+# (the quote, then the per-market position read `snap_market_unreadable`
+# names), >= 18 s of a 20.4 s tick before a single candidate. A book
+# whose OWN read said the market had ended is remembered for
+# ms.UNMAPPED_TTL_S (_terminal_book_until) and, inside the memo, skips
+# both reads and is held `no_mark` with `venue_terminal` on the plan;
+# step M still runs every tick. Never for a halt, never over an open
+# order, never from a candidate read. No order path is touched.
+
+EXPIRED_BOOK = "MARKET_STATE_EXPIRED"
+
+
+def test_an_expired_book_is_read_once_per_ttl_and_still_closes_on_the_markets_row():
+    p = _pool()
+    b = p.add_book(ledger=0)
+    v = _Venue(state=EXPIRED_BOOK)
+    # the first terminal read is today's: venue_halted on the census, the
+    # book held no_mark, BOTH reads spent -- and the book memo written
+    st = _tick(p, v)
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG] and st["reads"] == 1
+    assert _census(st, "venue_halted") == 1 and _census(st, "no_mark") == 1, st["census"]
+    assert _census(st, "book_terminal_skipped") == 0 and st["snap_market_planned"] == 1
+    assert b["last_reason"] == "no_mark" and b["state"] == "live"
+    assert ml._terminal_book_until == {("rn1", CID): NOW + ms.UNMAPPED_TTL_S}
+    assert ml._terminal_book_state == {("rn1", CID): EXPIRED_BOOK}
+    assert ml._terminal_until == {}, "the candidate memo (D1) is not the book's"
+    # inside the TTL: no quote read, no per-market read, no order sent;
+    # the plan names the venue's word, the census counts the skip
+    v.calls.clear()
+    st2 = _tick(p, v, now=NOW + 30)
+    assert "bbo" not in _kinds(v) and st2["reads"] == 0 and not st2.get("snap_market_planned")
+    assert _census(st2, "book_terminal_skipped") == 1 and _census(st2, "no_mark") == 1, st2["census"]
+    assert _census(st2, "venue_halted") == 0 and _census(st2, "snap_market_unreadable") == 0
+    assert b["last_reason"] == "no_mark" and b["state"] == "live" and st2["books_live"] == 1
+    assert b["last_plan"] == {"kind": "no_plan", "at": NOW + 30, "venue_terminal": EXPIRED_BOOK}
+    assert not _places(v) and not _cancels(v) and not st2["abandoned"]
+    # the TTL runs: the book is read again, and memoised again
+    v.calls.clear()
+    st3 = _tick(p, v, now=NOW + ms.UNMAPPED_TTL_S + 1)
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG] and st3["reads"] == 1
+    assert _census(st3, "book_terminal_skipped") == 0 and _census(st3, "venue_halted") == 1
+    assert ml._terminal_book_until == {("rn1", CID): NOW + ms.UNMAPPED_TTL_S + 1 + ms.UNMAPPED_TTL_S}
+    # STEP M RUNS EVERY TICK: the tick the markets row reads closed the
+    # book closes, inside the memo, with no read spent
+    v.calls.clear()
+    p.markets[CID] = {"closed": True, "resolved": False, "resolved_prices": None}
+    st4 = _tick(p, v, now=NOW + ms.UNMAPPED_TTL_S + 31)
+    assert "bbo" not in _kinds(v) and st4["reads"] == 0
+    assert _census(st4, "market_closed") == 1 and _census(st4, "book_terminal_skipped") == 0
+    assert b["state"] == "closed" and _census(st4, "closed_cancelled") == 1, (b["state"], st4["census"])
+    assert "book_terminal_skipped" in ml.CENSUS_KEYS and ml.CENSUS_KEYS[-1] == "cand_terminal_skipped"
+
+
+def test_a_halted_book_is_read_every_tick():
+    """HALTED / SUSPENDED / PREOPEN reopen: the book is read every tick
+    as before (venue_halted, held no_mark) and the memo never writes.
+    Nor does an unread state -- the SDK-typed empty shape or a failed
+    read -- memoise anything."""
+    for state in ("MARKET_STATE_HALTED", "MARKET_STATE_SUSPENDED", "MARKET_STATE_PREOPEN"):
+        p = _pool()
+        b = p.add_book(ledger=300)
+        v = _Venue(state=state, bid=None, ask=None)
+        for i in range(3):
+            st = _tick(p, v, now=NOW + 30 * i)
+            assert _census(st, "venue_halted") == 1 and _census(st, "book_terminal_skipped") == 0, state
+            assert st["reads"] == 1 and st["snap_market_planned"] == 1 and b["last_reason"] == "no_mark"
+            assert not st["abandoned"], "a book's halt never counts toward the streak"
+        assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG] * 3, state
+        assert ml._terminal_book_until == {} and ml._terminal_book_state == {}, state
+    for kw in (dict(state=None, bid=None, ask=None), dict(raise_bbo=True)):
+        p = _pool()
+        p.add_book(ledger=300)
+        v = _Venue(**kw)
+        st = _tick(p, v)
+        assert st["reads"] == 1 and ml._terminal_book_until == {}, kw
+        assert _census(st, "book_terminal_skipped") == 0 and _census(st, "no_quote") == 1, kw
+
+
+def test_a_book_with_an_open_order_is_never_memo_skipped():
+    """A rest stands on the book when the market expires. The first
+    terminal read cancels it under no_mark (as today) and writes NO
+    memo -- the cancel must land first; the next terminal read, with
+    nothing open, memoises, and the one after is skipped. A cancel the
+    venue refused leaves the order 'unknown' (the book frozen
+    cancel_pending, t.nonterminal): read every tick, never memoised."""
+    p = _pool()
+    b = p.add_book(ledger=300)
+    o = p.add_order(b, side=BUY, wire=0.30, qty=300)
+    v = _Venue(state=EXPIRED_BOOK)
+    v.rest("oid-1", "BUY", 0.30, 300)
+    st = _tick(p, v)
+    assert _cancels(v) == [("cancel", "oid-1", SLUG)] and p.orders[o["id"]]["reason"] == "no_mark"
+    assert p.orders[o["id"]]["state"] == "cancelled" and b["open_order_id"] is None
+    assert _census(st, "venue_halted") == 1 and b["last_reason"] == "no_mark" and b["state"] == "live"
+    assert ml._terminal_book_until == {} and _census(st, "book_terminal_skipped") == 0
+    v.calls.clear()
+    st2 = _tick(p, v, now=NOW + 30)
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG] and _census(st2, "book_terminal_skipped") == 0
+    assert ml._terminal_book_until == {("rn1", CID): NOW + 30 + ms.UNMAPPED_TTL_S}
+    v.calls.clear()
+    st3 = _tick(p, v, now=NOW + 60)
+    assert "bbo" not in _kinds(v) and _census(st3, "book_terminal_skipped") == 1
+    assert not _places(v) and not _cancels(v)
+    # the refused cancel: non-terminal order, frozen book, no memo on any tick
+    ml._terminal_book_until.clear()
+    ml._terminal_book_state.clear()
+    p2 = _pool()
+    b2 = p2.add_book(ledger=300)
+    p2.add_order(b2, side=BUY, wire=0.30, qty=300)
+    v2 = _Venue(state=EXPIRED_BOOK, cancel_ok=False)
+    v2.rest("oid-1", "BUY", 0.30, 300)
+    for i in range(2):
+        st = _tick(p2, v2, now=NOW + 30 * i)
+        assert ml._terminal_book_until == {} and _census(st, "book_terminal_skipped") == 0, i
+    assert b2["state"] == "frozen" and b2["frozen_reason"] == "cancel_pending"
+    assert [c[1] for c in v2.calls if c[0] == "bbo"] == [SLUG] * 2, "read every tick"
+
+
+def test_the_book_memo_never_sets_from_a_candidate_read():
+    p = _pool()
+    v = _Venue(state=EXPIRED_BOOK)
+    st = _tick(p, v)
+    assert _census(st, "venue_halted") == 1 and not p.books and not _places(v)
+    assert ml._terminal_until == {("rn1", CID): NOW + ms.UNMAPPED_TTL_S}, "D1's memo, as before"
+    assert ml._terminal_book_until == {} and ml._terminal_book_state == {}
+    # the memo's one writer is the book's own read, after step M and
+    # before the quote read; the candidate path never names it
+    src = inspect.getsource(ml._tick_book)
+    assert "_memo_terminal_book(t, book, r)" in src and "book=True" in src
+    assert src.index("await _market(t, cid)") < src.index("_terminal_book_until.get(") < src.index("_read_market(")
+    cand = inspect.getsource(ml._tick_candidate)
+    assert "_terminal_book" not in cand and "_memo_terminal_book" not in cand
+    assert "_memo_terminal_book" not in inspect.getsource(ml._bbo)
+    # the shadow's invariant stands
+    from tests.test_mirror_shadow import test_the_shadow_never_touches_an_order
+    test_the_shadow_never_touches_an_order()
+
+
+# ------- 23b. W1 review pins (the adversarial review of R4)
+#
+# The memo's guards live at WRITE time only (_memo_terminal_book reads
+# t.open_by_book / t.nonterminal); the SKIP path at the head of the plan
+# reads the memo alone. Step O fills those two sets and `continue`s an
+# order whose book row it could not read (mirror_live._reconcile_orders,
+# the fetchrow's except), so one transient on the tick the book first
+# reads terminal writes the memo over a standing rest, and every tick
+# inside the TTL then returns before the cancel the no_mark refusal
+# used to send. These pins say what the rule promised: never a memo
+# while the book has an order open, and never a skip over one.
+
+
+def test_the_book_memo_never_writes_over_a_rest_step_o_did_not_see_and_never_skips_its_cancel():
+    """Tick 1: a rest stands on the book (the row 'open', the venue
+    listing it); step O's read of the order's book row raises, so the
+    order is in neither t.open_by_book nor t.nonterminal; the book's own
+    read says EXPIRED. The memo must NOT be written (the book row the
+    walk read carries `open_order_id`). Tick 2: step O reconciles the
+    rest as before; the book is read, gets no mark and cancels the rest
+    under no_mark -- as every tick did before W1 -- never memo-skipped
+    over it."""
+    p = _pool()
+    b = p.add_book(ledger=300)
+    o = p.add_order(b, side=BUY, wire=0.30, qty=300)
+    v = _Venue(state=EXPIRED_BOOK)
+    v.rest("oid-1", "BUY", 0.30, 300)
+    p.raise_on.append(("ml-book-read", RuntimeError("blip")))
+    st = _tick(p, v)
+    assert p.orders[o["id"]]["state"] == "open" and not _cancels(v), "step O never saw the order"
+    assert _census(st, "venue_halted") == 1 and b["open_order_id"] == o["id"]
+    assert ml._terminal_book_until == {} and ml._terminal_book_state == {}, \
+        "the memo was written while the book had an order open"
+    p.raise_on.clear()
+    v.calls.clear()
+    st2 = _tick(p, v, now=NOW + 30)
+    assert _cancels(v) == [("cancel", "oid-1", SLUG)], "the standing rest was memo-skipped, never cancelled"
+    assert p.orders[o["id"]]["state"] == "cancelled" and p.orders[o["id"]]["reason"] == "no_mark"
+    assert _census(st2, "book_terminal_skipped") == 0 and b["open_order_id"] is None
+    # with the rest gone the next terminal read memoises, and the one
+    # after is skipped -- the builder's rule, unchanged
+    v.calls.clear()
+    _tick(p, v, now=NOW + 60)
+    assert ml._terminal_book_until == {("rn1", CID): NOW + 60 + ms.UNMAPPED_TTL_S}
+    v.calls.clear()
+    st4 = _tick(p, v, now=NOW + 90)
+    assert "bbo" not in _kinds(v) and _census(st4, "book_terminal_skipped") == 1
+
+
+def test_a_rest_that_appears_inside_the_memo_is_cancelled_not_skipped():
+    """The memo holds (written with nothing open). A rest then stands
+    on the book -- adopted by step O, or placed by a path the memo did
+    not see. The tick inside the memo must not return over it: the
+    book is read and the rest cancelled under no_mark, as before W1."""
+    p = _pool()
+    b = p.add_book(ledger=300)
+    v = _Venue(state=EXPIRED_BOOK)
+    _tick(p, v)
+    assert ml._terminal_book_until == {("rn1", CID): NOW + ms.UNMAPPED_TTL_S}
+    o = p.add_order(b, side=BUY, wire=0.30, qty=300)
+    v.rest("oid-1", "BUY", 0.30, 300)
+    v.calls.clear()
+    st = _tick(p, v, now=NOW + 30)
+    assert _cancels(v) == [("cancel", "oid-1", SLUG)], "a rest inside the memo was never cancelled"
+    assert p.orders[o["id"]]["state"] == "cancelled" and p.orders[o["id"]]["reason"] == "no_mark"
+    assert _census(st, "book_terminal_skipped") == 0 and b["state"] == "live"
+
+
+def test_a_memo_skipped_book_still_closes_on_its_standing_row():
+    """The standing row read (settled / cashed_out / cancelled) comes
+    before the memo, like step M: the tick the row retires, the book
+    closes inside the memo with no read spent."""
+    p = _pool()
+    b = p.add_book(ledger=0)
+    v = _Venue(state=EXPIRED_BOOK)
+    _tick(p, v)
+    assert ml._terminal_book_until == {("rn1", CID): NOW + ms.UNMAPPED_TTL_S}
+    v.calls.clear()
+    p.rows[b["standing_row_id"]]["status"] = "settled"
+    st = _tick(p, v, now=NOW + 30)
+    assert "bbo" not in _kinds(v) and st["reads"] == 0
+    assert b["state"] == "closed" and st["closed_books"] == 1
+    assert _census(st, "book_terminal_skipped") == 0
+
+
+def test_a_memo_skipped_book_whose_markets_row_is_unreadable_is_named_market_unreadable():
+    """An unreadable markets row inside the memo keeps its own name and
+    its own cancel (`market_unreadable`, step M's rule): the memo never
+    stands in for a reading the tick could not make."""
+    p = _pool()
+    b = p.add_book(ledger=300)
+    v = _Venue(state=EXPIRED_BOOK)
+    _tick(p, v)
+    assert ml._terminal_book_until != {}
+    v.calls.clear()
+    del p.markets[CID]
+    st = _tick(p, v, now=NOW + 30)
+    assert "bbo" not in _kinds(v)
+    assert _census(st, "market_unreadable") == 1 and _census(st, "book_terminal_skipped") == 0
+    assert b["last_reason"] == "market_unreadable" and b["state"] == "live"
+
+
+def test_the_book_memo_never_normalises_the_venues_word():
+    """A state string that is not one of ms.STATE_TERMINAL's exact
+    strings -- the venue's word in another case, or a word the set does
+    not name -- is a halt-like read: no memo, read every tick."""
+    for state in ("market_state_expired", "MARKET_STATE_EXPIRED ", "MARKET_STATE_SETTLED"):
+        p = _pool()
+        p.add_book(ledger=300)
+        v = _Venue(state=state, bid=None, ask=None)
+        for i in range(2):
+            st = _tick(p, v, now=NOW + 30 * i)
+            assert _census(st, "venue_halted") == 1 and st["reads"] == 1, state
+        assert ml._terminal_book_until == {} and ml._terminal_book_state == {}, state
 
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():

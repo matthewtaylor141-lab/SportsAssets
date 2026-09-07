@@ -193,6 +193,22 @@ EXIT_CENSUS_TIMEOUT_S = 15.0
 # decision 18; this is the count under which there is no reading at all.
 EXIT_MIN_N = 30
 _unmapped_until: dict[tuple[str, str], float] = {}
+# THE SHADOW LEAVES A TERMINAL MARKET (W1 / R2, 2026-09-07; the live
+# lane's D1 rule, mirror_live._terminal_until). The tick's 20 slots go
+# newest-touched first, and his newest-touched markets are matches he
+# trades to settlement: every one of them was re-judged for LOOKBACK_H
+# after the venue expired it, so the newest row per market -- the row
+# the coverage census keys on -- read 'no mark' on $385k that was
+# two-sided OPEN while he traded (skipped_markets 49-85 at 09:37Z and
+# 13:44Z, capped_tick true). A market whose read carried a TERMINAL
+# state (STATE_TERMINAL, the venue's own word) is remembered here per
+# (whale, condition_id) for UNMAPPED_TTL_S and skipped in the tick loop
+# beside _unmapped_until under `skipped_terminal`: one `no mark: venue
+# state ...` row, then silence, so the last reading before expiry is
+# the last row that can plan. NEVER for HALTED / SUSPENDED / PREOPEN
+# (they reopen), never when the state was unread. The miss streak's
+# rule is untouched (a terminal read counts nowhere, as before).
+_terminal_until: dict[tuple[str, str], float] = {}
 # THE MIRROR MAPS WHAT THE COPY LANE MAPS (C1, owner order 2026-09-06).
 # After premap says no, map_market runs the copy lane's exact steps
 # (map_lane.exact_lane: the slug grammar through resolve_market_exact /
@@ -1974,7 +1990,7 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
         row.update(target=0, target_raw=0.0, capped=False, ledger_net=int(ledger),
                    venue_net=venue, bid=bid, ask=ask, mark=None, his_last_px=None,
                    would_side=None, would_qty=0, would_px=None, would_fill=None,
-                   reason="no mark: book unreadable")
+                   reason=no_mark_reason(row["detail"], bid, ask))
         row["detail"].update(exit_leg(ev, ledger, venue, no_plan_reason=row["reason"]))
         return row
     tgt = mi.target_shares(ratio, net, mark, allow_short=allow_short)
@@ -2000,6 +2016,49 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
     row["detail"].update(short_reading(ratio, net, mark, ledger, venue,
                                        mi.Book(bid=bid, ask=ask), fills, la, oa))
     return row
+
+
+NO_MARK_PREFIX = "no mark:"
+
+
+def no_mark_reason(detail: dict, bid, ask) -> str:
+    """THE VENUE'S WORD FOR A BOOK WITH NO MARK (W1 / R1, 2026-09-07).
+    One string, 'no mark: book unreadable', covered four venue readings
+    the row told apart only in `detail`, and the coverage census keyed
+    on it printed $385k of finished markets -- two-sided OPEN for the
+    whole match, EXPIRED minutes after -- as a read problem (64 markets,
+    8,740 rows, 0 halts, 0 raised reads, 2026-09-07 13:50Z). Named by
+    the reading the row already holds, in this order:
+
+      no mark: venue state <STATE>   the state is present and not OPEN
+                                     (terminal or a halt), the string
+                                     as read, never normalised
+      no mark: read failed <Exc>     bbo_error: the read raised, or no
+                                     feed answered (state OPEN or None)
+      no mark: no state, empty       no state, no error, no quote (the
+                                     SDK-typed shape)
+      no mark: bid only <px>         OPEN, a bid, no ask (a decided
+                                     market's 0.99 bid)
+      no mark: quote off ladder      OPEN, a quote the mark rule refused
+                                     (an ask at 0 or 1) -- named rather
+                                     than read as an empty book
+      no mark: empty open book       OPEN, neither side
+
+    Every consumer reads the PREFIX (NO_MARK_PREFIX); nothing else on
+    the row moves (target 0, would_side None, no plan). Pure."""
+    state = detail.get("state")
+    err = detail.get("bbo_error")
+    if state is not None and str(state) != _STATE_OPEN:
+        return f"{NO_MARK_PREFIX} venue state {state}"
+    if err:
+        return f"{NO_MARK_PREFIX} read failed {err}"
+    if state is None:
+        return f"{NO_MARK_PREFIX} no state, empty"
+    if bid is not None and ask is None:
+        return f"{NO_MARK_PREFIX} bid only {bid}"
+    if ask is not None:
+        return f"{NO_MARK_PREFIX} quote off ladder {bid}/{ask}"
+    return f"{NO_MARK_PREFIX} empty open book"
 
 
 def _rowcount(status) -> int:
@@ -2253,6 +2312,9 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
                              "exit_rows": 0, "exit_rest": 0, "exit_hold": 0,
                              "exit_unjudged": 0, "exit_left": 0,
                              "frozen": 0, "skipped_markets": 0, "skipped_unmapped": 0,
+                             # W1 / R2: markets whose last read said they had
+                             # ended, skipped inside the memo's TTL
+                             "skipped_terminal": 0,
                              "stale_snapshots": 0, "skipped_backoff": False, "ratio": {},
                              # the venue's own market state, the most common one
                              # read this tick (None: no read carried one)
@@ -2314,6 +2376,11 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
             if _unmapped_until.get((w, cid), 0.0) > now_ts:
                 stats["skipped_unmapped"] += 1
                 continue
+            if _terminal_until.get((w, cid), 0.0) > now_ts:
+                # its last read said the market had ended (R2): no slot
+                # spent on it until the memo's TTL runs
+                stats["skipped_terminal"] += 1
+                continue
             reads += 1
             stats["markets"] += 1
             try:
@@ -2364,6 +2431,11 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
             if state is not None:
                 venue_states[state] += 1
                 stats["venue_state"] = venue_states.most_common(1)[0][0]
+            if state in STATE_TERMINAL:
+                # the market has ended, the venue's own word for it
+                # (R2): remembered for the TTL. An unread state (None)
+                # and a halt (not in the set) never reach here
+                _terminal_until[(w, cid)] = now_ts + UNMAPPED_TTL_S
             # THE MISS STREAK COUNTS ONLY WHAT CAN BE A VENUE-WIDE
             # OUTAGE -- the live worker's rule (mirror_live._bbo,
             # 2026-09-06), so shadow and live agree on every read:

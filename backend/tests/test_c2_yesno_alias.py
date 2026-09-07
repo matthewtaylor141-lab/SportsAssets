@@ -697,7 +697,9 @@ class TestTheUnmappedMemoOnFirstSight:
         i = src.index('startswith("unmapped")')
         assert "unmapped_memo_s(" in src[i:i + 300]
         assert "seen_before=(w, cid) in _unmapped_until" in src[i:i + 300]
-        assert "now_ts + UNMAPPED_TTL_S" not in src
+        # the UNMAPPED memo never bypasses the rule (the terminal memo
+        # beside it, W1 / R2, is a flat UNMAPPED_TTL_S by design)
+        assert "_unmapped_until[(w, cid)] = now_ts + UNMAPPED_TTL_S" not in src
 
     def test_first_sight_then_the_full_memo(self, monkeypatch):
         """Two shadow ticks on one unmapped market: the first verdict is

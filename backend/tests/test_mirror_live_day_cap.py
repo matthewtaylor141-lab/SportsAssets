@@ -941,8 +941,10 @@ def test_a_non_open_read_on_an_existing_book_never_counts_toward_the_streak(capl
     # the same book HALTED (an in-play halt, the venue's own shape for a
     # fight in progress) three ticks running: the book is held, never
     # the tick -- and the reset a quoted candidate gives is not needed
-    # (a fresh world: c1/c2 read EXPIRED above and D1 memoised them)
+    # (a fresh world: c1/c2 read EXPIRED above and D1 memoised them; the
+    # book's own EXPIRED read memoised the book, W1 / R4)
     ml._terminal_until.clear()
+    ml._terminal_book_until.clear()
     p = _pool(conds=["c1", "c2"])
     p.markets[OTHER_CID] = {"closed": False, "resolved": False, "resolved_prices": None}
     b = _other_book(p)
@@ -1098,3 +1100,25 @@ def test_main_prints_backoff_and_never_mode_safe_on_a_backed_off_tick(monkeypatc
     assert _mode_lines(caplog)[0].startswith(
         "mirror_live mode=on whales=['rn1'] books=0 open=0 day=None venue=MARKET_STATE_HALTED "
         "abandon=venue_halted stats={")
+
+# ------- W1 review pin (R4): the memo is written off the BOOK'S OWN read
+
+def test_the_book_memo_is_written_off_the_books_own_read_not_the_ticks_state(monkeypatch):
+    """Two books, walked one at a time: the first reads EXPIRED, the
+    second OPEN. The tick's most-common state (stats.venue_state) is
+    the first's; the memo must follow each book's own quote read --
+    the EXPIRED book memoised, the OPEN book never."""
+    monkeypatch.setattr(rules, "MIRROR_BOOK_CONCURRENCY", 1)
+    ml._terminal_book_until.clear()
+    ml._terminal_book_state.clear()
+    p, http = _two_markets()
+    p.add_book(ledger=300)
+    b2 = _other_book(p)
+    v = _Venue(states={SLUG: "MARKET_STATE_EXPIRED", OTHER_SLUG: "MARKET_STATE_OPEN"})
+    st = _tick(p, v, http=http)
+    assert st["venue_state"] == "MARKET_STATE_EXPIRED", "the tick's word is the first read's"
+    assert ml._terminal_book_until == {("rn1", CID): NOW + ms.UNMAPPED_TTL_S}
+    assert ml._terminal_book_state == {("rn1", CID): "MARKET_STATE_EXPIRED"}
+    assert b2["last_reason"] != "no_mark"
+    ml._terminal_book_until.clear()
+    ml._terminal_book_state.clear()

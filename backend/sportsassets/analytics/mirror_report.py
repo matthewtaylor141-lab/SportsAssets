@@ -117,6 +117,43 @@ def rate_with_ci(rows: list[dict], filled_key: str = "would_fill",
     return out
 
 
+NO_MARK_PREFIX = "no mark:"
+# the classes whose reason carries a figure after the class name (the
+# bid, the refused quote): counted under the class alone
+_NO_MARK_FIGURED = ("bid only", "quote off ladder")
+
+
+def no_mark_class(reason) -> str | None:
+    """The no-mark class of a row's reason (W1 / R1: the shadow names
+    the venue's word after the `no mark:` prefix -- `venue state
+    MARKET_STATE_EXPIRED`, `bid only 0.99`, `empty open book`, `read
+    failed RuntimeError`, `no state, empty`), or None for any other
+    reason. A row written before the split reads `book unreadable`.
+    Pure."""
+    s = str(reason or "")
+    if not s.startswith(NO_MARK_PREFIX):
+        return None
+    body = s[len(NO_MARK_PREFIX):].strip()
+    for fixed in _NO_MARK_FIGURED:
+        if body.startswith(fixed):
+            return fixed
+    return body or "unclassified"
+
+
+def no_mark_by(latest: list[dict], all_rows: list[dict]) -> dict:
+    """`no_mark_by`: per class, the markets whose NEWEST row carries it
+    and the rows in the window that do. Pure."""
+    out: dict[str, dict] = {}
+    for key, rows in (("markets", latest), ("rows", all_rows)):
+        for r in rows:
+            c = no_mark_class(r.get("reason"))
+            if c is None:
+                continue
+            cell = out.setdefault(c, {"markets": 0, "rows": 0})
+            cell[key] += 1
+    return out
+
+
 def _p(sorted_vals: list[float], q: float) -> float | None:
     """Nearest-rank percentile (the same rule the drift p90 uses)."""
     if not sorted_vals:
@@ -174,6 +211,8 @@ def summarize(latest: list[dict], all_rows: list[dict], ratios: dict) -> dict:
         "drift_n": len(drift), "drift_p90": round(p90, 4) if p90 is not None else None,
         "drift_over_5pct": sum(1 for d in drift if d > 0.05),
         "stale_snapshot_rows": stale,
+        # W1 / R1: the no-mark rows by the venue's word (no_mark_class)
+        "no_mark_by": no_mark_by(latest, all_rows),
         "ratios": ratios,
         "latest": [dict({k: r.get(k) for k in (
             "at", "whale", "condition_id", "us_market_slug", "his_long", "his_other",
@@ -803,4 +842,5 @@ async def mirror_cover_report(pool: Any, whale: str = "rn1", hours: float = 24.0
 
 __all__ = ["summarize", "phase0_census", "mirror_shadow_report", "frozen_detail",
            "settle_would_pnl", "would_pnl_rows", "rate_with_ci", "is_legacy_plan",
-           "candidate_slugs", "derivative_candidates", "mirror_cover_report", "ADMISSIBLE_SRC"]
+           "candidate_slugs", "derivative_candidates", "mirror_cover_report", "ADMISSIBLE_SRC",
+           "no_mark_class", "no_mark_by", "NO_MARK_PREFIX"]

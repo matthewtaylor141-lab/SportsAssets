@@ -170,6 +170,9 @@ def _nosleep(monkeypatch):
     monkeypatch.setattr(ms, "_sleep", _s)
     monkeypatch.setattr(ms, "pace", lambda s=ms.READ_PACING_S: _nosleep.slept.append(s) or 0.0)
     monkeypatch.setattr(ms.time, "sleep", lambda s: _nosleep.slept.append(("sync", s)))
+    # W1 / R2: the terminal memo outlives a test the way _unmapped_until
+    # does; a tick that read EXPIRED here must not skip the next test's
+    monkeypatch.setattr(ms, "_terminal_until", {})
     return _nosleep.slept
 
 
@@ -445,6 +448,9 @@ def test_the_shadows_miss_streak_reads_by_the_live_workers_rule(monkeypatch, cap
 
     def _once(pm, n=5):
         ms._backoff_until = 0.0
+        # a fresh world each time: the terminal reads above memoise
+        # c0..c4 (W1 / R2) and the next tick would skip them
+        ms._terminal_until.clear()
         caplog.clear()
         with caplog.at_level(logging.WARNING, logger=ms.log.name):
             st = _run(ms.tick_once(_Pool(fills=HIS, conds=[f"c{i}" for i in range(n)]), pm,
@@ -546,6 +552,176 @@ def test_no_ratio_and_no_mark_plan_nothing_and_never_flatten(monkeypatch):
     row3 = _run(ms.shadow_market(p, _Pmus(bid=0.30, ask=None), "rn1", CID, RATIO, {},
                                  positions={SLUG: 147.0}))
     assert row3["mark"] is None and row3["would_side"] is None
+
+
+def test_no_mark_names_the_venue_state(monkeypatch):
+    """W1 / R1 (2026-09-07): the six verbatim readings of
+    hard2/unread_repro.py -- 'no mark: book unreadable' covered the
+    first five and the coverage census printed $385k of finished
+    markets as a read problem. The reason now names the reading the
+    row already holds; target 0, would_side None, no plan, the exit
+    leg's no_plan_reason carrying the same string, on every one."""
+    _nosleep(monkeypatch)
+    p = _Pool(fills=HIS, ledger_rows=[{"sh": 147.0, "intent": "ORDER_INTENT_BUY_LONG"}])
+    cases = [
+        (_Pmus(bid=None, ask=None, state="MARKET_STATE_EXPIRED"), "no mark: venue state MARKET_STATE_EXPIRED"),
+        (_Pmus(bid=0.99, ask=None, state="MARKET_STATE_OPEN"), "no mark: bid only 0.99"),
+        (_Pmus(bid=None, ask=None, state="MARKET_STATE_OPEN"), "no mark: empty open book"),
+        (_Pmus(bid=None, ask=None, state="MARKET_STATE_HALTED"), "no mark: venue state MARKET_STATE_HALTED"),
+        (_Pmus(raise_bbo=True), "no mark: read failed RuntimeError"),
+        (_Pmus(bid=None, ask=None, state=None), "no mark: no state, empty"),
+    ]
+    for pm, want in cases:
+        row = _run(ms.shadow_market(p, pm, "rn1", CID, RATIO, {}, positions={SLUG: 147.0}))
+        assert row["reason"] == want, (row["reason"], want)
+        assert row["mark"] is None and row["target"] == 0 and row["would_side"] is None, want
+        assert row["would_qty"] == 0 and row["would_px"] is None and row["ledger_net"] == 147, want
+        assert "exit_reason" not in row["detail"], "he never reduced on HIS: no exit leg"
+        assert row["reason"].startswith(ms.NO_MARK_PREFIX)
+    # the exit leg carries the same string when he reduced (A3: the
+    # unjudged class, never a fill, never a miss)
+    _at_now(monkeypatch)
+    row = _run(ms.shadow_market(_Pool(fills=EXITFILLS), _Pmus(bid=None, ask=None, state="MARKET_STATE_EXPIRED"),
+                                "rn1", CID, RATIO, {}, positions={SLUG: 147.0}))
+    assert row["detail"]["exit_plan"] == "none"
+    assert row["detail"]["exit_reason"] == "no mark: venue state MARKET_STATE_EXPIRED"
+    # the control: two-sided OPEN plans
+    ctl = _run(ms.shadow_market(p, _Pmus(bid=0.30, ask=0.32), "rn1", CID, RATIO, {}, positions={SLUG: 147.0}))
+    assert ctl["mark"] == 0.31 and not ctl["reason"].startswith("no mark")
+    # the state string is the venue's, never normalised: CLOSED and the
+    # closing auction by name; a quote the mark rule refused on an OPEN
+    # market is named, not "empty". (A CLOSED market with a settled
+    # book's stale rests, bid 0.01 / ask 0.20, is NOT a no-mark row
+    # here: shadow_market marks off the quotes whatever the state --
+    # only the live lane's _bbo refuses a quote on a non-OPEN market --
+    # and R1 splits the no-mark branch alone.)
+    for pm, want in ((_Pmus(bid=None, ask=None, state="MARKET_STATE_CLOSED"),
+                      "no mark: venue state MARKET_STATE_CLOSED"),
+                     (_Pmus(bid=None, ask=None, state="MARKET_STATE_MATCH_AND_CLOSE_AUCTION"),
+                      "no mark: venue state MARKET_STATE_MATCH_AND_CLOSE_AUCTION"),
+                     (_Pmus(bid=None, ask=1.0, state="MARKET_STATE_OPEN"),
+                      "no mark: quote off ladder None/1.0")):
+        row = _run(ms.shadow_market(p, pm, "rn1", CID, RATIO, {}, positions={SLUG: 147.0}))
+        assert row["reason"] == want and row["would_side"] is None and row["target"] == 0
+    # pure, on the detail alone
+    assert ms.no_mark_reason({"state": "MARKET_STATE_OPEN", "bbo_error": "TimeoutError"}, None, None) == \
+        "no mark: read failed TimeoutError"
+    assert ms.no_mark_reason({"state": "MARKET_STATE_SUSPENDED", "bbo_error": "TimeoutError"}, None, None) == \
+        "no mark: venue state MARKET_STATE_SUSPENDED"
+    # summarize counts the classes: the newest row per market and every row
+    rows = [{"us_market_slug": "s1", "condition_id": "c1", "reason": "no mark: venue state MARKET_STATE_EXPIRED"},
+            {"us_market_slug": "s2", "condition_id": "c2", "reason": "no mark: bid only 0.99"},
+            {"us_market_slug": "s3", "condition_id": "c3", "reason": "no mark: book unreadable"},
+            {"us_market_slug": "s4", "condition_id": "c4", "reason": "increase toward target"}]
+    older = [{"us_market_slug": "s1", "condition_id": "c1", "reason": "no mark: bid only 0.96"},
+             {"us_market_slug": "s1", "condition_id": "c1", "reason": "reduce toward target"}]
+    out = mr.summarize(rows, rows + older, {})
+    assert out["no_mark_by"] == {"venue state MARKET_STATE_EXPIRED": {"markets": 1, "rows": 1},
+                                 "bid only": {"markets": 1, "rows": 2},
+                                 "book unreadable": {"markets": 1, "rows": 1}}
+    assert mr.no_mark_class("no mark:") == "unclassified" and mr.no_mark_class("frozen") is None
+    assert mr.no_mark_class("no mark: quote off ladder None/1.0") == "quote off ladder"
+    # the census's SQL reads the prefix, never the old exact text
+    wf = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
+    src = wf.read_text()
+    assert "= 'no mark: book unreadable'" not in src and "LIKE 'no mark:%'" in src
+
+
+def test_a_terminal_read_leaves_the_read_set_for_the_ttl(monkeypatch):
+    """W1 / R2: a market whose read carried a TERMINAL state is not
+    re-judged for LOOKBACK_H: one row, then `skipped_terminal` until
+    UNMAPPED_TTL_S runs, then read again. The slot goes to the next
+    market. Every terminal state, by the venue's own word."""
+    _nosleep(monkeypatch)
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    ms._backoff_until = 0.0
+    for state in sorted(ms.STATE_TERMINAL):
+        monkeypatch.setattr(ms, "_terminal_until", {})
+        pm = _Pmus(bid=None, ask=None, state=state)
+        p = _Pool(fills=HIS)
+        s1 = _run(ms.tick_once(p, pm, now_ts=9000.0))
+        assert s1["markets"] == 1 and s1["rows"] == 1 and s1["skipped_terminal"] == 0, state
+        assert s1["venue_state"] == state and not s1.get("abandoned")
+        assert ms._terminal_until == {("rn1", CID): 9000.0 + ms.UNMAPPED_TTL_S}, state
+        s2 = _run(ms.tick_once(p, pm, now_ts=9000.0 + 30))
+        assert s2["markets"] == 0 and s2["rows"] == 0 and s2["skipped_terminal"] == 1, state
+        assert len(pm.calls) == 1, "no read spent inside the memo"
+        s3 = _run(ms.tick_once(p, pm, now_ts=9000.0 + ms.UNMAPPED_TTL_S + 1))
+        assert s3["markets"] == 1 and s3["rows"] == 1 and s3["skipped_terminal"] == 0, state
+        assert len(pm.calls) == 2
+    # the memo is per market: the ended one is skipped, the others read,
+    # and the tick's cap is spent on markets that can plan
+    monkeypatch.setattr(ms, "_terminal_until", {})
+    monkeypatch.setattr(ms, "MAX_MARKETS_PER_TICK", 2)
+    pm = _Pmus(bid=0.30, ask=0.32, states={SLUG: "MARKET_STATE_EXPIRED"})
+    p = _Pool(fills=HIS, conds=["c1", "c2", "c3"])
+    s1 = _run(ms.tick_once(p, pm, now_ts=9500.0))
+    assert s1["markets"] == 2 and s1["skipped_markets"] == 1 and s1["capped_tick"] is True
+    assert {k[1] for k in ms._terminal_until} == {"c1", "c2"}
+    s2 = _run(ms.tick_once(p, pm, now_ts=9500.0 + 30))
+    assert s2["skipped_terminal"] == 2 and s2["markets"] == 1 and s2["skipped_markets"] == 0
+    ms._backoff_until = 0.0
+
+
+def test_a_halted_read_never_leaves_the_read_set(monkeypatch):
+    """HALTED / SUSPENDED / PREOPEN reopen: read every tick, no memo --
+    and the streak still abandons at three as before (the existing
+    pins). A quoted OPEN read and an empty OPEN read memoise nothing."""
+    _nosleep(monkeypatch)
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    for state in ("MARKET_STATE_HALTED", "MARKET_STATE_SUSPENDED", "MARKET_STATE_PREOPEN",
+                  "MARKET_STATE_OPEN"):
+        monkeypatch.setattr(ms, "_terminal_until", {})
+        ms._backoff_until = 0.0
+        pm = _Pmus(bid=None, ask=None, state=state)
+        p = _Pool(fills=HIS)
+        for i in range(3):
+            st = _run(ms.tick_once(p, pm, now_ts=9000.0 + 30 * i))
+            assert st["markets"] == 1 and st["skipped_terminal"] == 0, (state, i)
+            assert not st.get("abandoned"), "one market a tick: one miss, never three"
+        assert len(pm.calls) == 3 and ms._terminal_until == {}, state
+    monkeypatch.setattr(ms, "_terminal_until", {})
+    ms._backoff_until = 0.0
+    p = _Pool(fills=HIS)
+    _run(ms.tick_once(p, _Pmus(bid=0.30, ask=0.32), now_ts=9000.0))
+    assert ms._terminal_until == {}
+    ms._backoff_until = 0.0
+
+
+def test_an_unread_state_never_leaves_the_read_set(monkeypatch):
+    """A read that failed (bbo_error, no state), the SDK-typed empty
+    shape (no state), and a row with no slug (no read at all) write no
+    memo; the streak counts them exactly as before (three no-state
+    reads abandon `no_quote`)."""
+    _nosleep(monkeypatch)
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    for pm in (_Pmus(raise_bbo=True), _Pmus(bid=None, ask=None, state=None)):
+        monkeypatch.setattr(ms, "_terminal_until", {})
+        ms._backoff_until = 0.0
+        p = _Pool(fills=HIS)
+        st = _run(ms.tick_once(p, pm, now_ts=9000.0))
+        assert st["markets"] == 1 and st["skipped_terminal"] == 0 and ms._terminal_until == {}
+        assert st["venue_state"] is None
+        st2 = _run(ms.tick_once(p, pm, now_ts=9030.0))
+        assert st2["markets"] == 1 and len(pm.calls) == 2, "read again next tick"
+        # the streak: three of them in one tick still abandon, no memo
+        monkeypatch.setattr(ms, "_terminal_until", {})
+        ms._backoff_until = 0.0
+        st3 = _run(ms.tick_once(_Pool(fills=HIS, conds=["c1", "c2", "c3", "c4"]), pm, now_ts=9100.0))
+        assert st3["abandoned"] is True and st3["markets"] == 3 and ms._terminal_until == {}
+    monkeypatch.setattr(ms, "_terminal_until", {})
+    ms._backoff_until = 0.0
+    p = _Pool(fills=HIS, mapped=False)
+    st = _run(ms.tick_once(p, _Pmus(state="MARKET_STATE_EXPIRED"), now_ts=9200.0))
+    assert st["unmapped"] == 1 and ms._terminal_until == {}, "no slug, no read, no memo"
+    ms._backoff_until = 0.0
+    # the memo is checked beside the unmapped one, before any read
+    src = inspect.getsource(ms.tick_once)
+    assert src.index("_unmapped_until.get((w, cid)") < src.index("_terminal_until.get((w, cid)") \
+        < src.index("await shadow_market(")
 
 
 def test_a_plan_is_judged_as_a_resting_order_over_its_life(monkeypatch):
@@ -2599,3 +2775,51 @@ def test_the_exit_probe_lines_print_on_an_empty_endpoint_and_on_a_real_census(tm
         assert ("MIRROREXIT rn1: mapped_markets_he_reduced=30 window=24.0h "
                 "gate_n=30/30") in got.stdout, (got.stdout, got.stderr)
         assert "MIRROREXITFAM rn1/moneyline: n=30" in got.stdout
+
+def test_a_memo_skipped_market_leaves_the_miss_streak_where_it_stood(monkeypatch):
+    """W1 review pin (R2): c1 HALTED (miss 1), c2 HALTED (miss 2), c3
+    inside the terminal memo (no read: neither a miss nor a reset), c4
+    HALTED (miss 3: abandon, three markets read). A skip that counted
+    would abandon on c3 with two read; one that reset would never
+    abandon."""
+    _nosleep(monkeypatch)
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    ms._backoff_until = 0.0
+    monkeypatch.setattr(ms, "_terminal_until", {("rn1", "c3"): 9000.0 + ms.UNMAPPED_TTL_S})
+    pm = _Pmus(bid=None, ask=None, state="MARKET_STATE_HALTED")
+    st = _run(ms.tick_once(_Pool(fills=HIS, conds=["c1", "c2", "c3", "c4"]), pm, now_ts=9000.0))
+    assert st["skipped_terminal"] == 1 and st["markets"] == 3 and len(pm.calls) == 3
+    assert st["abandoned"] is True and st["venue_state"] == "MARKET_STATE_HALTED"
+    assert ms._terminal_until == {("rn1", "c3"): 9000.0 + ms.UNMAPPED_TTL_S}, "a halt never memoises"
+    ms._backoff_until = 0.0
+    # the control: two HALTED reads either side of the skip and no third
+    # -- no abandon, the skip added nothing
+    monkeypatch.setattr(ms, "_terminal_until", {("rn1", "c3"): 9000.0 + ms.UNMAPPED_TTL_S})
+    pm = _Pmus(bid=None, ask=None, state="MARKET_STATE_HALTED")
+    st = _run(ms.tick_once(_Pool(fills=HIS, conds=["c1", "c3", "c2"]), pm, now_ts=9000.0))
+    assert st["skipped_terminal"] == 1 and st["markets"] == 2 and not st.get("abandoned")
+    ms._backoff_until = 0.0
+
+
+def test_the_shadows_terminal_memo_never_normalises_the_venues_word(monkeypatch):
+    """W1 review pin (R1 + R2): the reason carries the string as read;
+    a string outside ms.STATE_TERMINAL's exact spellings never
+    memoises (read again next tick, the halt-like rule)."""
+    _nosleep(monkeypatch)
+    monkeypatch.setenv("MIRROR_WHALES", "rn1")
+    ms._ratio_cache.update(at=0.0, by_whale={})
+    for state in ("market_state_expired", "MARKET_STATE_SETTLED"):
+        monkeypatch.setattr(ms, "_terminal_until", {})
+        ms._backoff_until = 0.0
+        pm = _Pmus(bid=None, ask=None, state=state)
+        p = _Pool(fills=HIS)
+        st = _run(ms.tick_once(p, pm, now_ts=9000.0))
+        assert st["markets"] == 1 and ms._terminal_until == {}, state
+        assert st["venue_state"] == state, "the string as read"
+        st2 = _run(ms.tick_once(p, pm, now_ts=9030.0))
+        assert st2["markets"] == 1 and len(pm.calls) == 2, state
+        # the reason carries the same string, never upper-cased or mapped
+        row = _run(ms.shadow_market(_Pool(fills=HIS), pm, "rn1", CID, RATIO, {}, positions={SLUG: 147.0}))
+        assert row["reason"] == f"no mark: venue state {state}" and row["target"] == 0, state
+    ms._backoff_until = 0.0
