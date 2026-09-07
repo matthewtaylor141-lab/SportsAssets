@@ -4027,6 +4027,7 @@ jobs:
           # ERR lines instead of hanging the job.
           python - <<'PY'
           import json
+          import re
           import time as _time
           from datetime import datetime as _dt, timedelta as _td
           from datetime import timezone as _tz
@@ -4038,7 +4039,25 @@ jobs:
           SLUGS = ["aec-cfb-smu-flst-2026-09-07",
                    "aec-cfb-lou-miss-2026-09-06",
                    "atc-cfb-wisc-nd-2026-09-06-winner-1h-nd",
-                   "atc-cfb-lou-miss-2026-09-06-winner-1h-miss"]
+                   "atc-cfb-lou-miss-2026-09-06-winner-1h-miss",
+                   # SOCCER (owner 2026-09-07 14:45Z: "the soccer mapping ... can be
+                   # solved 100%"): the same fields on the venue's per-team yes/no
+                   # rows whose club NAMES or DATES differ from his feed --
+                   # Liga Portugal (his 'Vitoria SC' / date 09-06 vs the venue's
+                   # 'Vitoria SC Guimaraes' / 09-05), Liga Colombia, Primera
+                   # Chile, Serie B, and one Premier League control that maps.
+                   "atc-ligpor-vit-cas-2026-09-05-vit",
+                   "atc-ligpor-gil-acv-2026-09-05-gil",
+                   "atc-ligpor-scl-rav-2026-09-05-scl",
+                   "atc-lco-per-mil-2026-09-06-mil",
+                   "atc-pdc-hua-col-2026-09-06-col",
+                   "atc-srb-ver-are-2026-09-06-ver",
+                   "atc-epl-eve-mnu-2026-09-06-mnu",
+                   "tsc-epl-eve-mnu-2026-09-06-2pt5"]
+          # every top-level key the market carries whose NAME suggests a team,
+          # a start time, an event or a league -- printed verbatim so a binding
+          # the venue states outside marketSides is read, never guessed
+          _KEY_RE = re.compile(r"team|start|event|game|league|sport|home|away|kick|date|competition|tournament", re.I)
 
           def _left():
               return _BUDGET_S - (_time.monotonic() - _T0)
@@ -4065,6 +4084,15 @@ jobs:
               # the market's OWN team field (SDK MarketDetail.team)
               print(f"PREMAP-TEAM {slug} market team={_j(m.get('team'))} "
                     f"teamId={m.get('teamId')!r}")
+              print(f"PREMAP-TEAM {slug} market.keys={sorted(m.keys())}")
+              for k in sorted(m.keys()):
+                  if _KEY_RE.search(k) and k not in ("team", "teamId", "marketSides"):
+                      print(f"PREMAP-TEAM {slug} market.{k}={_j(m.get(k))[:600]}")
+              for i, s in enumerate(sides):
+                  extra = {k: s.get(k) for k in sorted(s.keys())
+                           if _KEY_RE.search(k) and k not in ("team", "teamId")}
+                  if extra:
+                      print(f"PREMAP-TEAM {slug} side[{i}] extra={_j(extra)[:400]}")
               for i, s in enumerate(sides):
                   print(f"PREMAP-TEAM {slug} side[{i}] "
                         f"description={str(s.get('description'))!r} "
