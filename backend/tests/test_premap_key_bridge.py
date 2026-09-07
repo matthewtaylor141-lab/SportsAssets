@@ -60,8 +60,11 @@ class TestTheTwoGrammarsNowMeet:
             assert f"nba-lal-bos-{D}" in keys, pre
 
     def test_a_slug_with_no_kind_prefix_is_unchanged(self):
+        """The kind-prefix bridge adds nothing to a kindless slug; R1
+        (2026-09-07) adds the league-stripped pair key beside the slug
+        key on both sides (test_r1_pair_key)."""
         keys = set(event_keys_for(None, WHALE))
-        assert keys == {"efl-don-mid-2026-08-25"}
+        assert keys == {"efl-don-mid-2026-08-25", "don-mid-2026-08-25"}
 
 
 class TestTheReadSideAdmitsIt:

@@ -477,9 +477,12 @@ class TestTheLeagueAlias:
         rows = _board()
         for ev in (None, "", "Tromsø IL", "A vs B vs C", "Tromsø IL vs. B"):
             assert _resolve(rows, S_TRO, T_TRO, ev, "Yes") is None, ev
-            # without his event title the keys never fetch the venue's
-            # rows at all; handed the rows, the branch names the gap
-            assert _explain(rows, S_TRO, T_TRO, ev, "Yes")["step"] == "no_key_intersection"
+            # R1 (2026-09-07): the league-stripped pair key fetches the
+            # venue's rows without his event title (before it, the keys
+            # never met and the census read no_key_intersection); the
+            # witness rule survives the lookup and names the gap
+            ex = _explain(rows, S_TRO, T_TRO, ev, "Yes")
+            assert (ex["step"], ex["split"]) == ("no_side_match", "yn:alias-unwitnessed"), ev
             tr: dict = {}
             assert premap._yn_pick(rows, "Yes", T_TRO, S_TRO, ev, tr) == []
             assert tr["refusal"] == "yn:alias-unwitnessed", ev

@@ -242,8 +242,13 @@ class TestTheSpreadTable:
                                "Spread: Olympique de Marseille (-1.5)", "Paris FC",
                                ev="Olympique de Marseille vs. Paris FC")) == \
             (f"asc-lg1-olm-pfc-{D}-neg-1pt5", "no", SHORT, "premap_spread", "fl1->lg1")
-        assert _explain(rows, f"fl1-olm-pfc-{D}-spread-home-1pt5",
-                        "Spread: Olympique de Marseille (-1.5)", "Paris FC")["step"] == "no_key_intersection"
+        # R1 (2026-09-07): without his event title the league-stripped
+        # pair key olm-pfc-2026-09-06 now fetches the lg1 rows (before it
+        # the keys never met: no_key_intersection) and the same C3 pick
+        # maps through _c3_code's alias, nothing else changed
+        assert _short(_resolve(rows, f"fl1-olm-pfc-{D}-spread-home-1pt5",
+                               "Spread: Olympique de Marseille (-1.5)", "Paris FC")) == \
+            (f"asc-lg1-olm-pfc-{D}-neg-1pt5", "no", SHORT, "premap_spread", "fl1->lg1")
         assert _short(_resolve(rows, S_ESP, f"Spread: {ESP} (-1.5)", SEV)) == \
             (f"asc-lal-esp-sev-{D}-neg-1pt5", "no", SHORT, "premap_spread", None)
         assert _short(_resolve(rows, f"sea-juv-mil-{D}-spread-away-1pt5",

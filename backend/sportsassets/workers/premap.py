@@ -310,9 +310,114 @@ def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
         # type exactly as before. Game agreement comes from the date in
         # the key, which is untouched.
         head = slug_key.split("-", 1)
+        kindless = slug_key
         if len(head) == 2 and head[0] in _KIND_PREFIXES:
-            keys.add(head[1])
+            kindless = head[1]
+            keys.add(kindless)
+        # THE LEAGUE-STRIPPED PAIR KEY (R1, 2026-09-07; gap_league_codes
+        # §c R1, gap_esports_chi §0.2). His feed and the venue code the
+        # same game under DIFFERENT league codes -- itsb/srb, sui/swsl,
+        # nor/els, den/sld, chi1/pdc, col1/lco -- with the team codes
+        # and the date byte-identical, so the slug keys never met:
+        #
+        #   whale  nor-kbk-tro-2026-09-06-kbk   -> key nor-kbk-tro-2026-09-06
+        #   venue  atc-els-kbk-tro-2026-09-06-kbk -> key els-kbk-tro-2026-09-06
+        #
+        # and the only bridge was the matchup key from markets.event_title,
+        # absent on a moneyline judged before the title is stored and
+        # unequal whenever the venue spells a club otherwise ($58k of
+        # chi1/col1, $44k of listed itsb/sui/nor/den in 24 h). Both sides
+        # now also emit <a>-<b>-<date>: it ENDS in the date, so
+        # _dated_admissible admits it like the slug key, and it is a
+        # LOOKUP, never a decision -- the rows it fetches answer to the
+        # same arms as before (identity, the alias arm's single-code and
+        # opponent witness, the draw witness, C3's _c3_code, C5). Exactly
+        # three tokens must stand in front of the date (the grammar
+        # <lg>-<a>-<b>-<date>): a two-token slug has no league to strip
+        # and a bare date matches every game that day, so neither ever
+        # produces a key (the league_alias_probe's own lesson).
+        pk = _pair_key(kindless, d)
+        if pk:
+            keys.add(pk)
     return sorted(k for k in keys if k)
+
+
+def _pair_key(kindless_key: str, d: str) -> str | None:
+    """`<a>-<b>-<date>` of a kindless `<lg>-<a>-<b>-<date>` key, or
+    None for any other token count -- never anything shorter."""
+    if not d or not kindless_key.endswith(d):
+        return None
+    toks = [t for t in kindless_key[:-len(d)].rstrip("-").split("-") if t]
+    if len(toks) != 3:
+        return None
+    return f"{toks[1]}-{toks[2]}-{d}"
+
+
+# THE PER-CLUB DATED NAME KEY (C6-N, 2026-09-07; gap_league_codes §c R2,
+# gap_esports_chi §3.2). When BOTH club codes differ on top of the league
+# code (his cdh-csc vs the venue's hua-col, cle-gdr vs leq-agu) the pair
+# key does not fetch the rows either, and the only witness the venue
+# offers is its own per-team question naming his club on his date. So the
+# venue side keys each FULL-GAME per-team row by the P4 subject its
+# question names (and the draw row by the two clubs its draw template
+# names), and his side keys his title's anchor, his event title's two
+# sides and his draw title's two sides -- `<club>@<date>`, folded and
+# normalized exactly as the arms read names. A lookup only: what the
+# fetched rows then answer to is _yn_names_pick's witness, never the key.
+def venue_name_keys(question: str | None, identifier: str | None) -> list[str]:
+    """The name keys one venue row carries: `<P4 subject>@<date>` for a
+    full-game per-team atc row, `<a>@<date>` and `<b>@<date>` for its
+    draw row; [] for every other row or wording. The question's own
+    date must be the identifier's (a row whose two dates disagree is
+    keyed by nothing here)."""
+    ident = str(identifier or "").lower()
+    m = _C3_IDENT_RE.match(ident) if ident.startswith("atc-") else None
+    if m is None or not question or _folds_away(question):
+        return []
+    d = m.group("date")
+    rest = m.group("rest") or ""
+    n = " ".join(_norm(pmus.fold_latin(str(question))).split())
+    names: list[str] = []
+    if rest in (m.group("a"), m.group("b")) and m.group("a") != m.group("b"):
+        for pat in pmus._YN_Q_PATTERNS:
+            gm = pat.fullmatch(n)
+            if gm and pmus._yn_date_ok(gm.groupdict(), d):
+                names.append(" ".join(gm.group("subj").split()))
+                break
+    elif rest == "draw":
+        gm = pmus._YN_DRAW_Q_RE.fullmatch(n)
+        if gm and pmus._yn_date_ok(gm.groupdict(), d):
+            names += [" ".join(gm.group("a").split()), " ".join(gm.group("b").split())]
+    return sorted({f"{x}@{d}" for x in names if x})
+
+
+def keys_for_row(event_keys: list[str], r: dict) -> list[str]:
+    """The keys the sweep writes on ONE row: the event's keys plus the
+    row's own name keys (C6-N)."""
+    extra = venue_name_keys(r.get("question"), r.get("identifier"))
+    if not extra:
+        return list(event_keys)
+    return sorted(set(event_keys) | set(extra))
+
+
+def his_name_keys(market_title: str | None, event_title: str | None,
+                  slug: str | None) -> list[str]:
+    """His side of the name key: his win-question's anchor, his event
+    title's two sides, his draw title's two sides -- each `<club>@<date>`
+    on his slug's date; [] when the slug carries no date."""
+    d = date_of(slug)
+    if not d:
+        return []
+    names: set[str] = set()
+    anchor, _why = _bridge_title_subject(market_title, slug)
+    if anchor:
+        names.add(anchor)
+    for reader in (lambda: _yn_event_sides(event_title),
+                   lambda: _yn_draw_title_sides(market_title)):
+        sides = reader()
+        if sides:
+            names.update(sides)
+    return sorted(f"{x}@{d}" for x in names if x)
 
 
 def _dated_admissible(keys: set[str], d: str) -> set[str]:
@@ -335,6 +440,10 @@ def _dated_admissible(keys: set[str], d: str) -> set[str]:
     the whale both put it. Admitting it costs nothing and recovers the
     largest cause in the funnel (no_key_intersection, 51.8% of sampled
     unmapped rows).
+
+    R1 (2026-09-07): the league-stripped pair key `<a>-<b>-<date>` ends
+    in the date too and is admitted by the same rule; a pair key with
+    no date (`kbk-tro`) is not a dated key and never passes here.
     """
     ok = set(dated_keys(keys))
     ok |= {k for k in keys if k.startswith(
@@ -2224,12 +2333,16 @@ def _yn_draw_row(r: dict, *, d: str, sides: list[str]) -> str | None:
 
 def _yn_pick(rows: list[dict], outcome: str | None, his_title: str | None,
              his_slug: str | None, his_event_title: str | None,
-             trace: dict | None, *, identity_only: bool = False) -> list[dict]:
+             trace: dict | None, *, identity_only: bool = False,
+             names_witness: str | None = None) -> list[dict]:
     """The yes/no branch: identity, then the league alias, then the
-    draw — see the block comment above. Pure. Returns the passing rows
-    (alias and draw hits are COPIES carrying `yn_branch` and, for an
+    names-witnessed row (C6-N), then the draw — see the block comments
+    above and at _yn_names_pick. Pure. Returns the passing rows (alias,
+    names and draw hits are COPIES carrying `yn_branch` and, for an
     alias, `league_alias`); `trace` receives the refusal name or the
-    hit's labels."""
+    hit's labels. `names_witness` is the OTHER club's name as his stored
+    moneyline title states it (names_resolve reads it when his event
+    title is not stored); None otherwise."""
     def _t(**kw):
         if trace is not None:
             trace.update(kw)
@@ -2280,8 +2393,16 @@ def _yn_pick(rows: list[dict], outcome: str | None, his_title: str | None,
     if identity_only:
         _t(refusal="yn:no-row")
         return []
-    return _yn_alias_pick(rows, parts, on, want_intent, d, anchor,
-                          his_event_title, trace)
+    alias_trace: dict = {}
+    out = _yn_alias_pick(rows, parts, on, want_intent, d, anchor,
+                         his_event_title, alias_trace)
+    if out or alias_trace.get("refusal") != "yn:no-row":
+        _t(**alias_trace)
+        return out
+    # C6-N: no row under ANY league code carries his suffix -- both club
+    # codes differ -- so the venue's own question is the only witness
+    return _yn_names_pick(rows, parts, on, want_intent, d, anchor,
+                          his_event_title, trace, other=names_witness)
 
 
 def _yn_alias_pick(rows: list[dict], parts: dict | None, on: str,
@@ -2328,6 +2449,224 @@ def _yn_alias_pick(rows: list[dict], parts: dict | None, on: str,
     _t(matched_by="premap_alias", league_alias=alias,
        admitted=frozenset(r["identifier"] for r in out))
     return [dict(r, yn_branch="alias", league_alias=alias) for r in out]
+
+
+# ---------------------------------------------------------------- C6-N
+# THE NAMES-WITNESSED PER-TEAM ROW WHEN NO CODE IS SHARED (2026-09-07;
+# gap_esports_chi §1.1-1.2, §3.2; gap_league_codes §b, §c R3). His feed
+# and the venue code the same game with a different league code AND two
+# different club codes:
+#   his    chi1-cdh-csc-2026-09-06-csc  "Will CSD Colo-Colo win on 2026-09-06?"
+#          event "CD Huachipato vs. CSD Colo-Colo"   (No $24,372; his +30,419 win)
+#   venue  atc-pdc-hua-col-2026-09-06-col  yes/LONG no/SHORT, line empty,
+#          "Will CSD Colo-Colo win against CD Huachipato in the Primera
+#          Chile match scheduled for Sep 6, 2026?"
+#   his    col1-dep-mif-…-mif / col1-cle-gdr-…-gdr   venue  atc-lco-per-mil-… / atc-lco-leq-agu-…
+# The alias arm refuses yn:no-row (no row under any code carries his
+# <a>-<b>-<date>-<t>) and C5 has no candidate (it needs exactly one shared
+# code). Yet the venue's own per-team question names his club as his title
+# states it and his opponent as his event title states it, on his date --
+# C2's alias witness (premap.py _yn_alias_pick step iii) minus the suffix
+# equality. That, and nothing else, admits the row:
+#   (i)   his title is his dated win question (_bridge_title_subject: the
+#         anchor X; the C2 gate, already passed by _yn_pick);
+#   (ii)  his event title names exactly two sides, X matches exactly ONE
+#         (yn:event-shear) and that side's POSITION is t's position in his
+#         slug (t == a -> 0), else yn:names-shear; with no event title, his
+#         stored moneyline title on the OTHER code (names_resolve: the C5
+#         read _C5_TITLES_SQL, bounded, the trades/markets store) names the
+#         opponent, else yn:names-unwitnessed;
+#   (iii) among the fetched rows the FULL-GAME per-team atc rows on his
+#         date whose suffix is the code at the SAME position (never fh/sh/
+#         draw/exact) and whose P4 question passes _yn_team_row(anchor=X,
+#         opp_witness=other) -- subject X, opponent the other side, his
+#         date, the club scope screens, the league-slot rule -- form
+#         EXACTLY ONE identifier; two (a same-day twin under another code
+#         with the same league phrase) is yn:names-ambiguous; a row naming
+#         X against another club, or his opponent against another club, is
+#         the venue's pair naming another club: yn:names-mismatch ('Junior
+#         FC' is not 'CDP Junior FC' under token-set equality -- by design);
+#         none at all: yn:no-row stands;
+#   (iv)  _yn_gate: the venue's own side and intent for his Yes/No; then
+#         match_side's _yn_line_ok and identity veto as for every arm.
+# The draw: the -draw row of that one event (the per-team rows naming his
+# two sides at their positions witness the event; a reversed title is
+# yn:names-shear) through _yn_draw_row on his event / draw-title sides.
+# The hit is matched_by 'premap_names', source 'premap', and carries
+# code_pair {"cdh": "hua", "csc": "col"} and witness (the row that named
+# him) -- read in this one call, never stored, never reused for another
+# date or opponent, never a table. Consulted only after the alias arm's
+# yn:no-row and only where C5 has no candidate (one shared code is C5's
+# shape: today's reason stands and C5 runs after, as before), inside
+# PREMAP_YN_IDENTITY like all of C2/C3/C5.
+_C6_UNWITNESSED = "yn:names-unwitnessed"
+_C6_SHEAR = "yn:names-shear"
+_C6_AMBIGUOUS = "yn:names-ambiguous"
+_C6_MISMATCH = "yn:names-mismatch"
+
+
+def _c5_owns(rows: list[dict], parts: dict, d: str) -> bool:
+    """C5's trigger, read purely: his own event is on the board under
+    some league code, or an event shares exactly one of his codes in
+    position -- either way the names arm stands aside."""
+    a, b = parts["a"], parts["b"]
+    return any((va, vb) == (a, b) or ((va == a) != (vb == b))
+               for (_lg, va, vb) in _c5_venue_events(rows, d))
+
+
+def _yn_names_rows(rows: list[dict], d: str, pos: int) -> list[tuple[dict, tuple]]:
+    """The FULL-GAME per-team atc rows on date d whose suffix is the
+    code at position `pos` of their own identifier, with the event head
+    (lg, va, vb) each belongs to."""
+    out: list[tuple[dict, tuple]] = []
+    for r in rows:
+        ident = r.get("identifier")
+        if not isinstance(ident, str) or not ident.startswith("atc-"):
+            continue
+        m = _C3_IDENT_RE.match(ident)
+        if m is None or m.group("date") != d:
+            continue
+        va, vb, t = m.group("a"), m.group("b"), m.group("rest") or ""
+        if va == vb or t != (va, vb)[pos]:
+            continue
+        out.append((r, (m.group("lg"), va, vb)))
+    return out
+
+
+def _yn_names_pick(rows: list[dict], parts: dict | None, on: str,
+                   want_intent: str, d: str, anchor: str,
+                   his_event_title: str | None, trace: dict | None, *,
+                   other: str | None = None) -> list[dict]:
+    """Step (ii)-(iv) of the block comment above for a per-team slug.
+    `other` is the opponent as his stored moneyline title names him
+    (names_resolve), read only when his event title names no sides."""
+    def _t(**kw):
+        if trace is not None:
+            trace.update(kw)
+
+    if parts is None or parts["t"] == "draw" or _c5_owns(rows, parts, d):
+        _t(refusal="yn:no-row")
+        return []
+    pos = 0 if parts["t"] == parts["a"] else 1
+    sides = _yn_event_sides(his_event_title)
+    if sides is not None:
+        hit = [s for s in sides if pmus._yn_name_match(s, anchor)]
+        if len(hit) != 1:
+            _t(refusal="yn:event-shear")
+            return []
+        if sides.index(hit[0]) != pos:
+            _t(refusal=_C6_SHEAR)
+            return []
+        other_name, src = sides[1 - pos], "event"
+    elif other:
+        other_name, src = other, "trades"
+    else:
+        _t(refusal=_C6_UNWITNESSED)
+        return []
+    cands = _yn_names_rows(rows, d, pos)
+    passing: dict[str, tuple] = {}
+    named: list[str] = []
+    for r, head in cands:
+        why = _yn_team_row(r, d=d, anchor=anchor, opp_witness=other_name)
+        if why is None:
+            passing[r["identifier"]] = head
+        elif why == "yn:opp-witness":
+            named.append(r["identifier"])          # his club, another opponent
+        elif why == "yn:subj":
+            gd, _w = _yn_team_question(r.get("question"), d)
+            if gd is not None and pmus._yn_name_match(gd["opp"], other_name):
+                named.append(r["identifier"])      # his opponent, another club
+    # the OTHER position's row is the same pair read in mirror: his
+    # opponent as its subject against a club that is not his ('Academico
+    # de Viseu FC win against Gil Vicente Barcelos' beside his 'Gil Vicente
+    # FC') -- his opponent's name key fetches that row alone when the
+    # venue calls his club otherwise, so the mismatch is named from it;
+    # it admits nothing
+    for r, _head in _yn_names_rows(rows, d, 1 - pos):
+        if _yn_team_row(r, d=d, anchor=other_name, opp_witness=anchor) == "yn:opp-witness":
+            named.append(r["identifier"])
+    if not passing:
+        if named:
+            _t(refusal=_C6_MISMATCH, venue_rows=sorted(set(named)))
+        else:
+            _t(refusal="yn:no-row")
+        return []
+    if len(passing) > 1:
+        _t(refusal=_C6_AMBIGUOUS, candidates=sorted(passing))
+        return []
+    (ident, (lg, va, vb)), = passing.items()
+    out, refusal = _yn_gate([r for r, _h in cands if r["identifier"] == ident],
+                            on, want_intent,
+                            lambda r: _yn_team_row(r, d=d, anchor=anchor,
+                                                   opp_witness=other_name))
+    if not out:
+        _t(refusal=refusal)
+        return []
+    code_pair = {parts["a"]: va, parts["b"]: vb}
+    alias = {"league_alias": f"{parts['lg']}->{lg}"} if lg != parts["lg"] else {}
+    _t(matched_by="premap_names", code_pair=code_pair, witness=ident, witness_src=src,
+       admitted=frozenset(r["identifier"] for r in out), **alias)
+    return [dict(r, yn_branch="names", matched_by="premap_names", code_pair=code_pair,
+                 witness=ident, **alias) for r in out]
+
+
+def _yn_names_draw_pick(rows: list[dict], parts: dict, on: str, want_intent: str,
+                        d: str, sides: list[str], witness: str,
+                        trace: dict | None) -> list[dict]:
+    """The draw of the one event whose per-team rows name his two sides
+    at their positions (the block comment above); `sides` are his
+    event's (or his draw title's) two clubs in his order."""
+    def _t(**kw):
+        if trace is not None:
+            trace.update(kw)
+
+    if _c5_owns(rows, parts, d):
+        _t(refusal="yn:no-row")
+        return []
+    events: dict[tuple, str] = {}
+    swapped = False
+    named: list[str] = []
+    for pos in (0, 1):
+        for r, head in _yn_names_rows(rows, d, pos):
+            why = _yn_team_row(r, d=d, anchor=sides[pos], opp_witness=sides[1 - pos])
+            if why is None:
+                events.setdefault(head, r["identifier"])
+            elif _yn_team_row(r, d=d, anchor=sides[1 - pos], opp_witness=sides[pos]) is None:
+                swapped = True
+            elif why == "yn:opp-witness":
+                named.append(r["identifier"])      # his club, another opponent
+            elif why == "yn:subj":
+                gd, _w = _yn_team_question(r.get("question"), d)
+                if gd is not None and pmus._yn_name_match(gd["opp"], sides[1 - pos]):
+                    named.append(r["identifier"])  # his opponent, another club
+    if not events:
+        if swapped:
+            _t(refusal=_C6_SHEAR)
+        elif named:
+            _t(refusal=_C6_MISMATCH, venue_rows=sorted(set(named)))
+        else:
+            _t(refusal="yn:no-row")
+        return []
+    if len(events) > 1:
+        _t(refusal=_C6_AMBIGUOUS, candidates=sorted(f"{lg}-{va}-{vb}-{d}" for lg, va, vb in events))
+        return []
+    ((lg, va, vb), witness_id), = events.items()
+    draw_id = f"atc-{lg}-{va}-{vb}-{d}-draw"
+    cands = [r for r in rows if r.get("identifier") == draw_id]
+    if not cands:
+        _t(refusal="yn:no-row", event=f"{lg}-{va}-{vb}-{d}")
+        return []
+    out, refusal = _yn_gate(cands, on, want_intent,
+                            lambda r: _yn_draw_row(r, d=d, sides=sides))
+    if not out:
+        _t(refusal=refusal)
+        return []
+    code_pair = {parts["a"]: va, parts["b"]: vb}
+    alias = {"league_alias": f"{parts['lg']}->{lg}"} if lg != parts["lg"] else {}
+    _t(matched_by="premap_names", code_pair=code_pair, witness=witness_id,
+       draw_witness=witness, admitted=frozenset(r["identifier"] for r in out), **alias)
+    return [dict(r, yn_branch="draw", matched_by="premap_names", code_pair=code_pair,
+                 witness=witness_id, draw_witness=witness, **alias) for r in out]
 
 
 # THE DRAW'S TITLE WITNESS (C3, 2026-09-06). The feed's draw market
@@ -2389,8 +2728,13 @@ def _yn_draw_pick(rows: list[dict], parts: dict, on: str, want_intent: str,
         # the four-argument identity arm: his own league code only
         by_code = {c: v for c, v in by_code.items() if c == parts["lg"]}
     if not by_code:
-        _t(refusal="yn:no-row")
-        return []
+        if identity_only:
+            _t(refusal="yn:no-row")
+            return []
+        # C6-N: no -draw row under any code carries his codes; the
+        # event's per-team rows naming his two sides are the witness
+        return _yn_names_draw_pick(rows, parts, on, want_intent, d, sides,
+                                   witness, trace)
     if len(by_code) > 1:
         _t(refusal="yn:league-ambiguous", league_codes=sorted(by_code))
         return []
@@ -2736,6 +3080,59 @@ async def c5_resolve(pool, rows: list[dict], kept: list[dict], outcome: str | No
         out["league_alias"] = cert["league_alias"]
     trace.update(label=_C5_TRANSLATED, matched_by=label, admitted=out.get("identifier"))
     return out
+
+
+async def names_resolve(pool, rows: list[dict], kept: list[dict], outcome: str | None,
+                        market_title: str | None, event_title: str | None,
+                        his_slug: str | None, trace: dict, *, wording: bool) -> dict | None:
+    """C6-N's stored-title witness (step ii of the block comment at
+    _yn_names_pick): when no event title of his names two sides, his
+    moneyline title on the OTHER code -- as trades / markets store it,
+    the bounded C5 read -- names his opponent, and the identity lane's
+    yes/no call runs again with that one name as the witness. Read only
+    once the pure arm said yn:names-unwitnessed; an unreadable, empty,
+    disagreeing or overflowing store witnesses nothing."""
+    if not wording or _norm(outcome) not in ("yes", "no"):
+        return None
+    parts = _yn_slug_parts(his_slug)
+    if parts is None or parts["t"] == "draw" or _yn_event_sides(event_title) is not None:
+        return None
+    pure: dict = {}
+    _yn_pick(kept, outcome, market_title, his_slug, event_title, pure)
+    if pure.get("refusal") != _C6_UNWITNESSED:
+        return None
+    other_code = parts["b"] if parts["t"] == parts["a"] else parts["a"]
+    ev_slug = f"{parts['lg']}-{parts['a']}-{parts['b']}-{parts['date']}"
+    ml_slug = f"{ev_slug}-{other_code}"
+    try:
+        stored = list(await pool.fetch(_C5_TITLES_SQL, ml_slug, ev_slug))
+    except Exception:  # noqa: BLE001 — unreadable is unwitnessed, never a guess
+        stored = []
+    if len(stored) > _C5_TITLES_MAX:
+        trace.update(refusal=_C6_UNWITNESSED, why="titles-overflow")
+        return None
+    anchors: set[str] = set()
+    for r in stored:
+        anchor, _why = _bridge_title_subject(r["t"], ml_slug)
+        if anchor is not None:
+            anchors.add(anchor)
+    if len(anchors) != 1:
+        trace.update(refusal=_C6_UNWITNESSED,
+                     why="titles-disagree" if anchors else "no-stored-title")
+        return None
+    other = next(iter(anchors))
+    lane: dict = {}
+    _yn_pick(kept, outcome, market_title, his_slug, event_title, lane, names_witness=other)
+    hit = match_side(kept, outcome, market_title, his_slug, yn_identity=True,
+                     his_event_title=event_title, names_witness=other)
+    trace.update(lane=lane, witness_src="trades", other=other)
+    if hit is None:
+        trace["refusal"] = lane.get("refusal") or (
+            "yn:picked-vetoed" if lane.get("matched_by") else "yn:no-row")
+        return None
+    trace.update(matched_by=hit.get("matched_by"), code_pair=hit.get("code_pair"),
+                 witness=hit.get("witness"), admitted=hit.get("identifier"))
+    return hit
 
 
 # ---------------------------------------------------------------- C3
@@ -3358,7 +3755,8 @@ def match_side(rows: list[dict], outcome: str | None,
                his_title: str | None,
                his_slug: str | None = None, *,
                yn_identity: bool = False,
-               his_event_title: str | None = None) -> dict | None:
+               his_event_title: str | None = None,
+               names_witness: str | None = None) -> dict | None:
     """Pick the unique premap row that IS the whale's outcome.
 
     Precision rules (each one is a shipped incident):
@@ -3378,7 +3776,9 @@ def match_side(rows: list[dict], outcome: str | None,
       and then only after wording found nothing.
     - his_event_title (C2) feeds ONLY that armed branch: the league
       alias and the draw need his event's two team names as the
-      witness (_yn_pick); the wording arm never reads it.
+      witness (_yn_pick); the wording arm never reads it. names_witness
+      (C6-N) likewise: the opponent his stored moneyline title names,
+      handed in by names_resolve when no event title is stored.
     """
     on = _norm(outcome)
     if not on:
@@ -3533,7 +3933,8 @@ def match_side(rows: list[dict], outcome: str | None,
             # witness); yn_identity_rows is its four-argument form.
             c2_trace: dict = {}
             picked = _yn_pick(rows, outcome, his_title, his_slug,
-                              his_event_title, c2_trace)
+                              his_event_title, c2_trace,
+                              names_witness=names_witness)
             c2_ids = c2_trace.get("admitted")
             cands = [r for r in picked
                      if _yn_line_ok(r) and _yn_identity_ok(r)]
@@ -4070,7 +4471,11 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                     continue
                 for m in markets:
                     for r in _market_rows(ev, m):
-                        await _upsert(pool, r, keys)
+                        # R1 / C6-N: the event's keys (the pair key among
+                        # them) plus the row's own name keys; the UPSERT
+                        # rewrites event_keys on conflict, so every row the
+                        # sweep still sees gains them on its next pass
+                        await _upsert(pool, r, keys_for_row(keys, r))
                         seen_rows += 1
             await _record_last(pool, {"mode": "events/page%d" % _page,
                                       "events": events, "rows": seen_rows},
@@ -4133,7 +4538,7 @@ async def refresh(*, back_h: float = 12.0, fwd_h: float = 96.0,
                         continue
                     events += 1
                     for r in _market_rows(ev, m):
-                        await _upsert(pool, r, keys)
+                        await _upsert(pool, r, keys_for_row(keys, r))
                         seen_rows += 1
                 await _record_last(pool, {"mode": "markets/page%d" % _page,
                                           "events": events,
@@ -4285,6 +4690,7 @@ async def resolve_explain(pool, market_title: str | None,
         keys.update(event_keys_for(t, global_slug if d else None))
     if global_slug:
         keys.update(event_keys_for(None, global_slug))
+    keys.update(his_name_keys(market_title, event_title, global_slug))
     keys = {k for k in keys if k}
     if d:
         keys = _dated_admissible(keys, d)
@@ -4324,45 +4730,40 @@ async def resolve_explain(pool, market_title: str | None,
         # league-code ALIASING, and after the kind-prefix bridge it is
         # the obvious next suspect for a cause still sitting at 37%.
         #
-        # This only REPORTS. Dropping the league token from the key
-        # would widen what a signal can match, and widening a key is
-        # how a whale's pick reaches another game's row — the incident
-        # this whole lane exists to prevent. So the size of the class
-        # gets measured first, on real rejected rows, and the matcher
-        # is not touched until the number says it is worth the risk and
-        # the ambiguity it would introduce is understood.
+        # This only REPORTS. It measured the class as zero for two weeks
+        # because the venue side never emitted the stripped key
+        # (gap_league_codes §0.1): "would have hit" read false on every
+        # row. R1 (2026-09-07) now emits the league-stripped pair key on
+        # BOTH sides, so that key is in the fetch above and the old
+        # question has no answer left to give. RE-POINTED (R3): the probe
+        # asks what the venue's identifiers say beside C6-N's own lookup:
+        # his club NAMES (his_name_keys) were in the fetch above and met
+        # nothing; does ANY atc row on his date carry either of his club
+        # codes in its position? Nothing: the venue does not list his
+        # league that day (gre1, bel1, ere, bra3 on 2026-09-06) --
+        # `venue:league-unlisted` rides the split, and the row leaves the
+        # mapper's bucket. Something: listed, and the gap is the lookup or
+        # an arm -- would_have_hit, counted by the census exactly as
+        # before. Reads only; the identifier scan is bounded (LIMIT 25)
+        # and lives on this diagnostic path alone, never in resolve; a
+        # slug outside the <lg>-<a>-<b>-<date> grammar asks nothing.
         try:
-            # AT LEAST TWO TOKENS MUST SURVIVE IN FRONT OF THE DATE.
-            #
-            # Counting hyphens is not enough and my first attempt got
-            # this wrong: `gvs-2026-08-25` carries three hyphens, two of
-            # them inside the date, so a naive rule strips it to
-            # `2026-08-25` — A BARE DATE, which matches every game
-            # played that day. That is not a widened key, it is no key
-            # at all, and it would have made this diagnostic report a
-            # huge recoverable class that does not exist.
-            #
-            # The real grammar is <league>-<home>-<away>-<date>, so
-            # after dropping the league at least the two team tokens
-            # must remain.
-            stripped = set()
-            for k in keys:
-                if not d or not k.endswith(d):
-                    continue
-                toks = [t for t in k[:-len(d)].rstrip("-").split("-") if t]
-                if len(toks) >= 3:
-                    stripped.add("-".join(toks[1:]) + "-" + d)
-            if stripped:
+            parts = _yn_slug_parts(global_slug) or _c5_slug_parts(global_slug)
+            if parts is not None:
+                pat = (f"^atc-[a-z0-9]+-({parts['a']}-[a-z0-9]+|[a-z0-9]+-{parts['b']})"
+                       f"-{d}-")
                 alt = await pool.fetch(
-                    "SELECT identifier FROM us_premap "
-                    "WHERE event_keys && $1::text[] LIMIT 25",
-                    sorted(stripped))
+                    "SELECT identifier FROM us_premap WHERE identifier ~ $1::text LIMIT 25",
+                    pat)
                 out["league_alias_probe"] = {
-                    "stripped_keys": sorted(stripped)[:4],
+                    "name_keys": his_name_keys(market_title, event_title, global_slug)[:4],
+                    "code_pattern": pat,
                     "rows_it_would_find": len(alt),
                     "would_have_hit": bool(alt),
                     "sample": [str(r["identifier"]) for r in alt[:3]],
                 }
+                if not alt:
+                    out["split"] = "venue:league-unlisted"
         except Exception as exc:  # noqa: BLE001 — diagnostics never
             out["league_alias_probe"] = {"error": type(exc).__name__}
         return out
@@ -4420,6 +4821,10 @@ async def resolve_explain(pool, market_title: str | None,
             out["league_alias"] = hit["league_alias"]
         if hit is not None and hit.get("matched_by"):
             out["matched_by"] = hit["matched_by"]
+        if hit is not None and hit.get("code_pair"):
+            # C6-N: the pair the venue's question witnessed, the row that named him
+            out["code_pair"] = dict(hit["code_pair"])
+            out["witness"] = hit["witness"]
         if hit is None and his_c3 is not None:
             # the same C3 call resolve makes, inside the same switch (C4:
             # a spread also sees the event's aec row and the grammar
@@ -4443,6 +4848,20 @@ async def resolve_explain(pool, market_title: str | None,
         if hit is not None:
             out["matched_by"] = hit["matched_by"]
             out["code_translated"] = hit["code_translated"]
+            out["witness"] = hit["witness"]
+            if hit.get("league_alias"):
+                out["league_alias"] = hit["league_alias"]
+    c6_trace: dict = {}
+    if hit is None and yn_identity_on():
+        # C6-N: the same stored-title witness resolve reads, after C5;
+        # the trace is the census's reading (yn_c6)
+        hit = await names_resolve(pool, rows, kept, outcome, market_title, event_title,
+                                  global_slug, c6_trace, wording=wording)
+        if c6_trace:
+            out["yn_c6"] = c6_trace
+        if hit is not None:
+            out["matched_by"] = hit["matched_by"]
+            out["code_pair"] = dict(hit["code_pair"])
             out["witness"] = hit["witness"]
             if hit.get("league_alias"):
                 out["league_alias"] = hit["league_alias"]
@@ -4737,6 +5156,10 @@ async def resolve_explain(pool, market_title: str | None,
             # name-mismatch), or it was certified and the lane refused
             # the rewritten slug by its own name
             out["split"] = c5_trace["refusal"]
+        if c6_trace.get("refusal"):
+            # C6-N: the stored-title witness was read and the names arm
+            # refused by its own name (yn:names-… with `why`)
+            out["split"] = c6_trace["refusal"]
         return out
     if not hit.get("intent"):
         out["step"] = "side_has_no_intent"
@@ -4788,6 +5211,8 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         keys.update(event_keys_for(t, global_slug if d else None))
     if global_slug:
         keys.update(event_keys_for(None, global_slug))
+    # C6-N: his side of the per-club dated name key (a lookup only)
+    keys.update(his_name_keys(market_title, event_title, global_slug))
     keys = {k for k in keys if k}
     if d:
         keys = _dated_admissible(keys, d)
@@ -4903,6 +5328,14 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
                                global_slug, {}, his_c3=his_c3, wording=wording)
         if hit is not None:
             matched_by = hit["matched_by"]
+    if hit is None and yn_identity_on():
+        # C6-N (2026-09-07): the names-witnessed row's stored-title
+        # witness (the block comment at _yn_names_pick); the arm itself
+        # already ran inside match_side above with his event title
+        hit = await names_resolve(pool, rows, kept, outcome, market_title, event_title,
+                                  global_slug, {}, wording=wording)
+        if hit is not None:
+            matched_by = hit["matched_by"]
     if hit is None:
         return None
     # AMBIGUOUS SIDE = REFUSE (venue ground truth 2026-08-24): on the
@@ -4927,6 +5360,11 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         # C5: the translation this event certified and the venue row that
         # named his club -- the plan's record of why this identifier
         out["code_translated"] = dict(hit["code_translated"])
+        out["witness"] = hit["witness"]
+    if hit.get("code_pair"):
+        # C6-N: the code pair the venue's question witnessed for this
+        # event and the row that named him -- the record, never a table
+        out["code_pair"] = dict(hit["code_pair"])
         out["witness"] = hit["witness"]
     return out
 
