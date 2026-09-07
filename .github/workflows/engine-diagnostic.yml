@@ -1278,7 +1278,11 @@ jobs:
           # silent instrument is indistinguishable from a healthy quiet one).
           [ -s /tmp/mirror.json ] && jq -r '"  MIRRORUNMAP markets=\(.unmapped.markets // 0) usd6h=\(.unmapped.usd // 0) named=\(.unmapped.named // 0) outcome_null=\(.unmapped.outcome_null_markets // 0) | fam: " + ((.unmapped.by_family // {}) | to_entries | map("\(.key)=\(.value.markets // 0)/$\(.value.usd // 0)") | join(" ")) + " | why: " + ((.unmapped.by_explain // {}) | to_entries | map("\(.key)=\(.value.markets // 0)/$\(.value.usd // 0)") | join(" "))' \
             /tmp/mirror.json 2>/dev/null || echo "  MIRRORUNMAP unavailable"
-          [ -s /tmp/mirror.json ] && jq -r '.latest // [] | map(select(.us_market_slug == null)) | sort_by(.detail.notional_6h // 0) | reverse | .[:12][] | "  MIRRORUNMAPMKT \(.whale // "-") \(.detail.his_slug // (.condition_id // "-")[:16]) sport=\(.detail.sport // "-") fam=\(.detail.family // "-") why=\(.detail.explain // "-") usd6h=\(.detail.notional_6h // 0) gross_sh=\(.detail.gross_sh // 0) outcome_null=\(.detail.outcome_null // 0) | \(.detail.title // "-")"' \
+          # `at=` is when the row was WRITTEN (mirror_report's latest keeps it): the shadow
+          # re-judges only the 20 newest-touched markets a tick, so a market whose fills
+          # stopped keeps the verdict of whatever code judged it last -- a stale `why`
+          # must be readable as stale (2026-09-06 epl investigation §5.2)
+          [ -s /tmp/mirror.json ] && jq -r '.latest // [] | map(select(.us_market_slug == null)) | sort_by(.detail.notional_6h // 0) | reverse | .[:12][] | "  MIRRORUNMAPMKT \(.whale // "-") \(.detail.his_slug // (.condition_id // "-")[:16]) sport=\(.detail.sport // "-") fam=\(.detail.family // "-") why=\(.detail.explain // "-") at=\(.at // "-") usd6h=\(.detail.notional_6h // 0) gross_sh=\(.detail.gross_sh // 0) outcome_null=\(.detail.outcome_null // 0) | \(.detail.title // "-")"' \
             /tmp/mirror.json 2>/dev/null || echo "  MIRRORUNMAPMKT unavailable"
           [ -s /tmp/mirror.json ] && jq -r '.mapped_by_source // {} | "  MIRRORSRC mapped=\(.markets // 0) admissible=\(.admissible // 0)/$\(.admissible_usd // 0) share=\(.admissible_share // "n/a") admits=\(.admissible_src // [] | join(",")) | " + ((.by_source // {}) | to_entries | map("\(.key)=\(.value.markets // 0)/$\(.value.usd // 0)") | join(" ")) + " | ledger: " + ((.ledger_classes // {}) | to_entries | map("\(.key)=\(.value)") | join(" "))' \
             /tmp/mirror.json 2>/dev/null || echo "  MIRRORSRC unavailable"
