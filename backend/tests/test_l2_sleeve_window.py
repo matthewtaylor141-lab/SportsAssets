@@ -298,11 +298,11 @@ def test_l2_the_mode_line_prints_the_sleeve_beside_the_loss(caplog):
 # ------------------------------------------------------------- 4. the preset
 
 def _presets():
+    """The workflow's raw text (the yaml parses; the case labels keep
+    the file's own indentation, as test_e5_frozen_exits reads them)."""
     text = RENDER_OPS.read_text()
-    wf = yaml.safe_load(text)
-    run = wf["jobs"]["ops"]["steps"][-1]["run"] if "run" in wf["jobs"]["ops"]["steps"][-1] else \
-        next(s["run"] for s in wf["jobs"]["ops"]["steps"] if "run" in s and "loss-breaker)" in s["run"])
-    return run
+    yaml.safe_load(text)
+    return text
 
 
 def test_l2_the_preset_reads_both_windows_and_sits_in_the_error_line():
@@ -312,10 +312,16 @@ def test_l2_the_preset_reads_both_windows_and_sits_in_the_error_line():
     sql = m.group(1)
     assert "need_confirm" not in run[max(0, m.start() - 40):m.start()]
     assert "WHERE key = 'mirror_loss_rearm'" in sql and "(value->>'at')::timestamptz" in sql
-    assert "GREATEST(now() - interval '24 hours', COALESCE((SELECT at FROM r), now() - interval '24 hours'))" in sql
+    # review LOW-5: the preset's window is the worker's -- a naive `at` is not a
+    # re-arm, one ahead of the clock by more than the skew is malformed (the full
+    # window), one inside the skew is clamped to now (_rearm_at, LOSS_REARM_SKEW_S)
+    assert "AND value->>'at' ~ '([+-][0-9]{2}:?[0-9]{2}|Z)$'" in sql
+    assert "x WHERE x.at <= now() + interval '%d seconds'" % int(ml.LOSS_REARM_SKEW_S) in sql
+    assert "GREATEST(now() - interval '24 hours', LEAST(now(), COALESCE((SELECT at FROM r), now() - interval '24 hours')))" in sql
     assert "status IN ('settled', 'cashed_out')" in sql and sql.count("live_orders") == 2
     assert "ORDER BY o.settled_at DESC LIMIT 40" in sql
     assert not re.search(r"\b(DELETE|UPDATE|INSERT|DROP|TRUNCATE)\b", sql)
-    line = re.search(r'\*\) echo "sql: arg must be one of ([^ ]+) \(got', run).group(1).split("|")
-    labels = re.findall(r"^\s+([a-z0-9-]+)\) (?:need_confirm; )?SQL=", run, flags=re.M)
+    err = next(ln for ln in run.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
+    line = err.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
+    labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", run[run.index('case "$ARG" in'):run.index(err)], re.M)
     assert line == labels and "loss-breaker" in line and "mirror-rearm" in line
