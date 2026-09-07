@@ -7452,6 +7452,37 @@ async def _rest_after_ioc(pool, row_id: int, us_slug: str,
 # decides -- a helper never picks a stance for a lane it does not know.
 
 
+_SQL_LOSS_BREAKER_24H = (
+    "SELECT COALESCE(sum(pnl), 0) FROM live_orders "
+    "WHERE settled_at > now() - interval '24 hours' "
+    "AND status IN ('settled', 'cashed_out') "
+    "AND COALESCE(whale_username, '') NOT IN "
+    "('manual', 'underdog')")
+# L2 (2026-09-07): the same sum from a caller-named instant -- the
+# mirror's re-arm window (workers/mirror_live._loss_window_start). One
+# parameter, the window's start; nothing else differs from the 24 h text.
+_SQL_LOSS_BREAKER_SINCE = (
+    "SELECT COALESCE(sum(pnl), 0) FROM live_orders "
+    "WHERE settled_at > $1::timestamptz "
+    "AND status IN ('settled', 'cashed_out') "
+    "AND COALESCE(whale_username, '') NOT IN "
+    "('manual', 'underdog')")
+
+
+async def _loss_breaker_sum(pool, since=None) -> float | None:
+    """The copy sleeve's realized P&L (settled + cashed out, every lane,
+    copies only) over the last 24 hours -- or, with `since` (an aware
+    datetime), from that instant: the mirror's re-arm window (L2). The
+    sum as a float, None when the ledger could not be read. A reading,
+    never a verdict: each caller applies its own threshold and stance."""
+    try:
+        if since is None:
+            return float(await pool.fetchval(_SQL_LOSS_BREAKER_24H) or 0)
+        return float(await pool.fetchval(_SQL_LOSS_BREAKER_SINCE, since) or 0)
+    except Exception:  # noqa: BLE001 — unreadable is a reading, not a
+        return None    # verdict; each lane applies its own stance
+
+
 async def _loss_breaker_tripped(pool) -> bool | None:
     """The 24h rolling-loss breaker: True when realized copy P&L
     (settled + cashed out, copies only) over the last 24 hours is at or
@@ -7466,15 +7497,9 @@ async def _loss_breaker_tripped(pool) -> bool | None:
     answers from Postgres so a deploy cannot amnesia it. Logs the
     breaker line when tripped, exactly as the inline check did.
     """
-    try:
-        lost_24h = float(await pool.fetchval(
-            "SELECT COALESCE(sum(pnl), 0) FROM live_orders "
-            "WHERE settled_at > now() - interval '24 hours' "
-            "AND status IN ('settled', 'cashed_out') "
-            "AND COALESCE(whale_username, '') NOT IN "
-            "('manual', 'underdog')") or 0)
-    except Exception:  # noqa: BLE001 — unreadable is a reading, not a
-        return None    # verdict; each lane applies its own stance
+    lost_24h = await _loss_breaker_sum(pool)
+    if lost_24h is None:
+        return None
     if lost_24h <= -PMUS_LOSS_BREAKER_USD:
         log.warning(
             "LOSS BREAKER: copy sleeve realized %.2f in 24h "

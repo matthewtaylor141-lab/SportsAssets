@@ -284,3 +284,78 @@ def test_the_mirror_rearm_preset_executes_deletes_the_stop_and_writes_the_prior(
         finally:
             await _drop(admin, c, name)
     asyncio.run(run())
+
+
+# ------------------------------------------------------------ L2: the sleeve
+
+DDL_L2 = """
+CREATE TABLE live_orders (
+    id bigserial PRIMARY KEY, lane text, whale_username text,
+    us_market_slug text, status text NOT NULL DEFAULT 'submitting',
+    pnl numeric(24, 6), settled_at timestamptz);
+"""
+
+
+async def _settled(c, lane, whale, status, pnl, hours_ago):
+    await c.execute(
+        "INSERT INTO live_orders (lane, whale_username, us_market_slug, status, pnl, settled_at) "
+        "VALUES ($1, $2, 'aec-x-2026-09-07', $3, $4, now() - $5::interval)",
+        lane, whale, status, pnl, timedelta(hours=hours_ago))
+
+
+def _loss_breaker_statements() -> list[str]:
+    m = re.search(r'loss-breaker\) SQL="(.*?)"; TO=', RENDER_OPS.read_text())
+    assert m, "the loss-breaker preset is not where render-ops.yml kept it"
+    return [s.strip() for s in m.group(1).split(";") if s.strip()]
+
+
+def test_l2_the_sleeve_sum_executes_over_the_re_arm_window_and_the_preset_reads_both():
+    """L2. The 18:23Z shape against Postgres: the mirror's standing rows
+    settled this morning (-5,200), a settled row 25 h old (out of both
+    windows), a manual row (never counted), and a -100 mirror settlement
+    after the re-arm half an hour back. The 24 h text reads -5,200 - 100
+    (the trip); the parameterised text from the re-arm reads -100 (no
+    trip); the preset prints both windows and the newest rows."""
+    from sportsassets import live_executor as le
+
+    async def run():
+        admin, c, name = await _scratch()
+        try:
+            for stmt in DDL_L2.split(";"):
+                if stmt.strip():
+                    await c.execute(stmt)
+            await _settled(c, "mirror", "rn1", "settled", -5000.0, 9.0)
+            await _settled(c, "mirror", "rn1", "cashed_out", -200.0, 8.0)
+            await _settled(c, None, "rn1", "settled", -999.0, 25.0)
+            await _settled(c, "mirror", "manual", "settled", -700.0, 1.0)
+            await _settled(c, "mirror", "rn1", "filled", -300.0, 0.2)          # not settled: not counted
+            await _settled(c, "mirror", "rn1", "settled", -100.0, 0.25)
+            rearm_at = time.time() - 1800
+            assert await le._loss_breaker_sum(c) == pytest.approx(-5300.0)
+            assert await le._loss_breaker_sum(c, _window(rearm_at)) == pytest.approx(-100.0)
+            assert await le._loss_breaker_sum(c, _window(None)) == pytest.approx(-5300.0)
+            assert await le._loss_breaker_tripped(c) is True
+            # the preset, with the re-arm key as mirror-rearm writes it
+            await c.execute("INSERT INTO ingestion_state (key, value) VALUES ('mirror_loss_rearm', $1::jsonb)",
+                            json.dumps({"at": ml._iso(rearm_at), "by": "render-ops", "prior": None}))
+            stmts = _loss_breaker_statements()
+            assert len(stmts) == 2, stmts
+            rows = await c.fetch(stmts[0])
+            by = {(r["window"][:6], r["lane"], r["whale"], r["status"]): float(r["pnl"]) for r in rows}
+            assert by[("sleeve", "mirror", "rn1", "settled")] == pytest.approx(-5100.0)
+            assert by[("sleeve", "mirror", "rn1", "cashed_out")] == pytest.approx(-200.0)
+            assert by[("sleeve", "mirror", "manual", "settled")] == pytest.approx(-700.0)
+            assert by[("since ", "mirror", "rn1", "settled")] == pytest.approx(-100.0)
+            assert not any(k[0] == "since " and k[3] == "cashed_out" for k in by)
+            assert all(r["window"].startswith("sleeve 24h") or r["window"].startswith("since ") for r in rows)
+            newest = await c.fetch(stmts[1])
+            assert [float(r["pnl"]) for r in newest][:2] == [pytest.approx(-100.0), pytest.approx(-700.0)]
+            assert all(r["status"] in ("settled", "cashed_out") for r in newest) and len(newest) == 4
+            # with no re-arm key the second window is the 24 h edge
+            await c.execute("DELETE FROM ingestion_state WHERE key = 'mirror_loss_rearm'")
+            rows = await c.fetch(stmts[0])
+            since_rows = [r for r in rows if r["window"].startswith("since ")]
+            assert sum(float(r["pnl"]) for r in since_rows if r["whale"] == "rn1") == pytest.approx(-5300.0)
+        finally:
+            await _drop(admin, c, name)
+    asyncio.run(run())

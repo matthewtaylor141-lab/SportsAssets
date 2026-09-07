@@ -328,5 +328,11 @@ def test_review_the_re_arm_read_sits_inside_loss_stop_only():
     src = inspect.getsource(ml)
     assert src.count("_state(t.pool, _STATE_LOSS_REARM)") == 1
     assert "_write_state(t.pool, _STATE_LOSS_REARM" not in src and "_write_state(pool, _STATE_LOSS_REARM" not in src
-    assert "_STATE_LOSS_REARM" in inspect.getsource(ml._loss_stop)
-    assert "_STATE_LOSS_REARM" not in inspect.getsource(ml._global_guards)
+    # L2: the one read is _read_rearm (cached on the tick); _loss_stop and
+    # the sleeve read in _global_guards both go through it, neither reads
+    # the key itself
+    assert "_STATE_LOSS_REARM" in inspect.getsource(ml._read_rearm)
+    assert "_read_rearm(t)" in inspect.getsource(ml._loss_stop)
+    assert "_read_rearm(t)" in inspect.getsource(ml._global_guards)
+    assert "_state(t.pool, _STATE_LOSS_REARM)" not in inspect.getsource(ml._loss_stop)
+    assert "_state(t.pool, _STATE_LOSS_REARM)" not in inspect.getsource(ml._global_guards)

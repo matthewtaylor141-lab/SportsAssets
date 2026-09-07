@@ -1100,6 +1100,7 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_cand_write_logged", False)
     monkeypatch.setattr(ml, "_rearm_malformed_logged", False)   # L1: the malformed re-arm key's one line
     monkeypatch.setattr(ml, "_last_loss", None)                  # L1: the mode line's loss window
+    monkeypatch.setattr(ml, "_last_sleeve", None)                # L2: its sleeve reading
     monkeypatch.setattr(ml, "_BOOK_LOCKS", {})
     monkeypatch.setattr(ms, "_ratio_cache", {"at": 0.0, "by_whale": {}})
     monkeypatch.setattr(ms, "_unmapped_until", {})

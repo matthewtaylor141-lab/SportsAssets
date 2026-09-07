@@ -351,7 +351,7 @@ def test_l1_the_mode_line_prints_the_loss_and_its_window(caplog):
     assert " day=None loss=-5023.9545/5000.0 since xxxxx venue=None abandon=venue_halted stats={" \
         in _mode_lines(caplog)[0]
     # main() hands over the tick's reading: what the tick read, or None
-    assert "_mode_line(stats, ticks, _last_loss)" in inspect.getsource(ml.main)
+    assert "_mode_line(stats, ticks, _last_loss, _last_sleeve)" in inspect.getsource(ml.main)  # L2 added the sleeve
     p = _pool()
     _tick(p, _Venue())
     assert ml._last_loss == {"sum": 0.0, "books": 0, "limit": float(rules.MIRROR_LOSS_STOP_USD),
@@ -377,5 +377,8 @@ def test_l1_the_limit_and_the_refusal_order_are_untouched(monkeypatch):
         '"mode_env_off"', '"whales_unreadable"', '"mode_db_off"', '"demoted"', "None"]
     # the stop's read sits where it did: after the day cap, the last guard
     src = inspect.getsource(ml._global_guards)
-    assert src.index("mirror_day_cap") < src.index("_STATE_LOSS_STOP") < src.index("await _loss_stop(t)")
+    # (L2 reads the key once for the sleeve, ahead of every guard, and the
+    # stop STEP reuses that read: its decision still sits last)
+    assert src.index("mirror_day_cap") < src.rindex("_STATE_LOSS_STOP") < src.index("await _loss_stop(t)")
+    assert src.index("t.stop = await _state(t.pool, _STATE_LOSS_STOP)") < src.index("_loss_breaker_sum(")
     assert "_STATE_LOSS_REARM" in inspect.getsource(ml._loss_stop)

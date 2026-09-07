@@ -219,6 +219,9 @@ _rearm_malformed_logged = False
 # fills them (_publish_fills_dedup), so a new key would only ever be
 # the dropped one
 _last_loss: dict | None = None
+# L2: the copy sleeve's breaker the LAST tick read over the mirror's
+# window (t.sleeve: sum, limit, since), for the mode line's `sleeve=`
+_last_sleeve: dict | None = None
 _STATE_FLATTEN = "mirror_flatten"
 # S4: the read-back proof of a resting SELL_SHORT (the short cover's
 # wire intent). {"proved": bool, "at", "slug", "order_id", "price",
@@ -1375,6 +1378,17 @@ class _Tick:
     # rearmed_at -- the receipt's fields), None on a tick that never
     # read it; tick_once hands it to the mode line (_last_loss)
     loss: dict | None = None
+    # L2: the re-arm key's ONE read this tick ((value, err) off _state),
+    # made by _global_guards for the sleeve breaker and reused by
+    # _loss_stop; None on a tick that never read it
+    rearm: tuple | None = None
+    # L2: the stop key's ONE read this tick ((value, err)), made before
+    # the sleeve's read and reused by the stop step; None if never read
+    stop: tuple | None = None
+    # L2: the copy sleeve's breaker as this tick read it over the
+    # mirror's window (sum, limit, since), None on a tick that never
+    # read it; tick_once hands it to the mode line (_last_sleeve)
+    sleeve: dict | None = None
     # the venue's own market state on every quote read this tick, as
     # the venue spells it (MARKET_STATE_OPEN, MARKET_STATE_HALTED, ...)
     venue_states: Counter = field(default_factory=Counter)
@@ -2258,11 +2272,45 @@ async def _global_guards(t: _Tick) -> None:
     t.s4_proof = proof if isinstance(proof, dict) else None
     if t.mode != MODE_ON:
         return
-    lb = await le._loss_breaker_tripped(t.pool)
-    if lb is None:
+    # THE SLEEVE'S BREAKER OVER THE MIRROR'S WINDOW (L2, 2026-09-07).
+    # le._loss_breaker_tripped sums EVERY settled live_orders row of the
+    # last 24 h, and the mirror's standing rows settle there too, so the
+    # morning's -5,000 tripped it for the rest of the day whatever the
+    # re-arm said (18:23Z: `loss_breaker` 14 under a re-armed stop; the
+    # owner: "turn the trip off"). The mirror reads the same sum from
+    # the start ITS stop uses: _loss_window_start off the re-arm key,
+    # read ONCE here (t.rearm) and reused by _loss_stop. A raised
+    # re-arm read is the FULL window here -- the wider one; _loss_stop
+    # then stops the tick on that same read -- and a malformed key
+    # reads as absent (_rearm_at). The threshold is the sleeve's own
+    # (le.PMUS_LOSS_BREAKER_USD); the stance on an unreadable ledger is
+    # unchanged (refuse, by name). The copy lane's own call is untouched.
+    # Behind a STANDING (or unreadable) stop key nothing else is read
+    # (review L1): the stop key is read here first, cached for the stop
+    # step below, and the sleeve then reads its full window without
+    # consulting the re-arm key -- the tick is exits-only either way.
+    t.stop = await _state(t.pool, _STATE_LOSS_STOP)
+    stop_val, stop_err = t.stop
+    if stop_err is not None or stop_val is not None:
+        since = None
+    else:
+        rearm_val, rearm_err = await _read_rearm(t)
+        if rearm_err is not None and rearm_err != "malformed":
+            since = None
+        else:
+            since = _loss_window_start(t.now, _rearm_at(rearm_val, rearm_err, t.now))
+    lost = await le._loss_breaker_sum(t.pool, None if since is None else _utc(since))
+    limit = float(le.PMUS_LOSS_BREAKER_USD)
+    if lost is None:
         t.increase_block = "loss_breaker_unreadable"
-    elif lb:
-        t.increase_block = "loss_breaker"
+    else:
+        t.sleeve = {"sum": round(lost, 4), "limit": limit,
+                    "since": None if since is None else _iso(since)}
+        if lost <= -limit:
+            log.warning("LOSS BREAKER: copy sleeve realized %.2f since %s (threshold -%.0f)"
+                        " -- the mirror refuses increases", lost,
+                        t.sleeve["since"] or "24h", limit)
+            t.increase_block = "loss_breaker"
     if t.increase_block is None:
         try:
             # THE SLEEVE'S TOTAL ROOM BINDS; ITS DAILY ROOM DOES NOT
@@ -2321,13 +2369,24 @@ async def _global_guards(t: _Tick) -> None:
             else:
                 t.stats["mirror_day_room"] = None
     if t.increase_block is None:
-        stop, err = await _state(t.pool, _STATE_LOSS_STOP)
+        # L2: the stop key was read once already for the sleeve (t.stop)
+        stop, err = t.stop if t.stop is not None else await _state(t.pool, _STATE_LOSS_STOP)
         if err is not None or stop is not None:
             t.increase_block = "mirror_loss_stop"
         else:
             await _loss_stop(t)
     if t.increase_block:
         _mirror_stop(t.increase_block)
+
+
+async def _read_rearm(t: _Tick) -> tuple:
+    """The re-arm key's ONE read per tick (L2), cached on t.rearm for
+    whoever asks first -- _global_guards' sleeve read, then _loss_stop --
+    and the only place in the worker that reads it (nothing here writes
+    it: only the mirror-rearm preset does)."""
+    if t.rearm is None:
+        t.rearm = await _state(t.pool, _STATE_LOSS_REARM)
+    return t.rearm
 
 
 async def _loss_stop(t: _Tick) -> None:
@@ -2341,8 +2400,9 @@ async def _loss_stop(t: _Tick) -> None:
     trip's receipt carries `since` and `rearmed_at` beside sum/books/
     limit, so mirror-state shows what window tripped; the tick keeps the
     same reading (t.loss) for the mode line. The limit and the exit
-    carve-out are as they were."""
-    rearm, err = await _state(t.pool, _STATE_LOSS_REARM)
+    carve-out are as they were. L2: the re-arm key is read ONCE per tick
+    (_read_rearm; _global_guards' sleeve read is reused)."""
+    rearm, err = await _read_rearm(t)
     if err is not None and err != "malformed":
         t.increase_block = "mirror_loss_stop"
         return
@@ -7372,10 +7432,11 @@ def _woken_first(rows: list, woken: list) -> list:
 async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
     """One reconciler pass. Returns the census the heartbeat carries;
     every counter is present whatever the tick did."""
-    global _current_stats, _last_tick_at, _last_loss
+    global _current_stats, _last_tick_at, _last_loss, _last_sleeve
     now = time.time() if now_ts is None else float(now_ts)
     started = time.monotonic()          # the real clock: `now` may be the caller's
     _last_loss = None                   # L1: never a stale window on the mode line
+    _last_sleeve = None                 # L2: nor a stale sleeve reading
     stats = _new_stats()
     if _TICK_LOCK.locked():
         stats.update(status="overlap", skipped_overlap=True, tick_s=0.0)
@@ -7400,6 +7461,7 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             stats["integ"] = _integ_block(stats)
             _publish_fills_dedup(t)
             _last_loss = t.loss         # L1: the mode line's `loss=` fragment
+            _last_sleeve = t.sleeve     # L2: its `sleeve=` fragment
             _current_stats = None
     return stats
 
@@ -7744,7 +7806,8 @@ async def _instruments(t: _Tick) -> None:
 
 # ------------------------------------------------------------------- main
 
-def _mode_line(stats: dict, ticks: int, loss: dict | None = None) -> None:
+def _mode_line(stats: dict, ticks: int, loss: dict | None = None,
+               sleeve: dict | None = None) -> None:
     """The quiet-tick line, on every MODE_LINE_EVERY_TICKS-th completed
     tick. Built from the census the tick published: `mode`, `whales`,
     `books_live`, `orders_open` and `mirror_day_room` (the day ROOM in
@@ -7761,7 +7824,9 @@ def _mode_line(stats: dict, ticks: int, loss: dict | None = None) -> None:
     (_last_loss, the paragraph over it): `loss=<sum>/<limit> since
     <HH:MM>` beside the day rail, the window's start to the minute --
     bounded text, the ISO's clock alone -- so a re-arm shows as the
-    start moving to its instant; nothing on a tick that read none."""
+    start moving to its instant; nothing on a tick that read none.
+    `sleeve` (L2) is the copy sleeve's breaker the tick read over the
+    same window (_last_sleeve): `sleeve=<sum>/<limit>` beside it."""
     if ticks < 1 or ticks % MODE_LINE_EVERY_TICKS:
         return
     extra = ""
@@ -7773,6 +7838,8 @@ def _mode_line(stats: dict, ticks: int, loss: dict | None = None) -> None:
     if isinstance(loss, dict):
         rail = " loss=%s/%s since %s" % (loss.get("sum"), loss.get("limit"),
                                          str(loss.get("since") or "")[11:16])
+    if isinstance(sleeve, dict):
+        rail += " sleeve=%s/%s" % (sleeve.get("sum"), sleeve.get("limit"))
     # `day=none` under an unbounded day cap (the default since
     # 2026-09-06): the room is null, and there is no cap to print
     day = stats.get("mirror_day_room")
@@ -7809,7 +7876,7 @@ async def main() -> None:
                 if stats.get("ops") or stats.get("abandoned"):
                     log.info("mirror_live: %s", {k: v for k, v in stats.items()
                                                  if k not in ("census", "recent")})
-                _mode_line(stats, ticks, _last_loss)
+                _mode_line(stats, ticks, _last_loss, _last_sleeve)
             except Exception:  # noqa: BLE001 — the reconciler never dies
                 log.exception("mirror_live pass failed")
             try:
