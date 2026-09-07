@@ -658,6 +658,12 @@ class _Pool(_ShadowPool):
                      snap_long=a[6], snap_other=a[7], drift=a[8], his_level=a[9], venue_net=a[10],
                      last_reason=a[11], last_plan=json.loads(a[12]), updated_ts=NOW)
             return "UPDATE 1"
+        if "ml-book-skip" in s:
+            # E6 review LOW-1: the quiet skip's own write -- the name and
+            # the plan; every other column of the row stands
+            b = self.books[a[0]]
+            b.update(last_reason=a[1], last_plan=json.loads(a[2]), updated_ts=NOW)
+            return "UPDATE 1"
         if "ml-book-freeze" in s:
             b = self.books[a[0]]
             if b["state"] in ("live", "frozen"):
@@ -1098,6 +1104,14 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_cand_trail", {}, raising=False)   # W2 review: the cursor's trail (the fix)
     monkeypatch.setattr(ml, "_cand_refusal_last", {})  # W2 / P2: the refusal rows' memo
     monkeypatch.setattr(ml, "_cand_write_logged", False)
+    # E6: the quiet rotation's clock and memos (book ids repeat across
+    # this file's pools), and the terminal memos' boot read, already made
+    # (test_e6_tick_budget drives the read itself)
+    monkeypatch.setattr(ml, "_tick_seq", 0, raising=False)
+    monkeypatch.setattr(ml, "_quiet_memo", {}, raising=False)
+    monkeypatch.setattr(ml, "_quiet_deferred", {}, raising=False)
+    monkeypatch.setattr(ml, "_terminal_memo_loaded", True, raising=False)
+    monkeypatch.setattr(ml, "_terminal_memo_last", {"at": 0.0, "sig": None}, raising=False)
     monkeypatch.setattr(ml, "_rearm_malformed_logged", False)   # L1: the malformed re-arm key's one line
     monkeypatch.setattr(ml, "_last_loss", None)                  # L1: the mode line's loss window
     monkeypatch.setattr(ml, "_last_sleeve", None)                # L2: its sleeve reading
@@ -2464,7 +2478,11 @@ def test_the_read_budget_is_the_candidates_own_so_live_books_never_cap_new_ones(
     _many_books(p2, 25)
     v2 = _Venue()
     st2 = _tick(p2, v2)
-    assert st2["capped_tick"] is True and st2["reads"] == 25 + 40
+    # E6: the candidate stage takes what the tick's venue-call budget
+    # (60) leaves after the positions walk, the open-orders read and the
+    # 25 book reads -- 33 here, under the cap of 40 and over the floor
+    # of 10 -- so the books' reads are no longer free to the candidates
+    assert st2["capped_tick"] is True and st2["reads"] == 25 + (ml.VENUE_CALLS_PER_TICK - 27) == 25 + 33
     # the tick's wall time is published, 1 dp, on every tick
     assert isinstance(st["tick_s"], float) and st["tick_s"] >= 0.0 and st["tick_s"] == round(st["tick_s"], 1)
     assert "tick_s" in ml._new_stats() and ml._new_stats()["tick_s"] is None
@@ -4711,7 +4729,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-58:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-59:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4758,9 +4776,11 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E5 review: the fill-this-tick refusal, the unexplained surplus, the
                           # registered book's no-increase -- before the last key
                           "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
+                          # E6: a quiet book's read skipped under the tick's budget
+                          "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-59] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-60] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -4929,7 +4949,15 @@ def test_a_short_fill_books_a_signed_ledger_the_collateral_and_the_sign_proof(mo
     # desk's beside them -- recorded ONCE into the gate's own tally
     assert p.state["short_side_proof"]["ok"] == 1 and p.state["short_side_proof"]["mismatch"] == 0
     assert b["last_plan"]["short_proof"] == "ok"
+    # E6: on target with nothing open and no fill of his inside HOT_S the
+    # book is QUIET on the next tick: skipped by the rotation, its proof
+    # carried on the skip's plan (recorded once: the tally does not move);
+    # read again after the memo's clear (a deploy) and still recorded once
     st3 = _tick(p, _Venue(held={SLUG: -300}), now=NOW + 60, http=_short_http())
+    assert _census(st3, "book_quiet_skipped") == 1 and p.state["short_side_proof"]["ok"] == 1
+    assert b["last_plan"]["short_proof"] == "ok" and b["last_reason"] == "book_quiet_skipped"
+    ml._quiet_memo.clear()
+    st3 = _tick(p, _Venue(held={SLUG: -300}), now=NOW + 90, http=_short_http())
     assert _census(st3, "on_target") == 1 and p.state["short_side_proof"]["ok"] == 1
     assert b["last_plan"]["short_proof"] == "ok"
     # and the shadow's reading of the same inputs agrees with the signed target
@@ -5616,7 +5644,13 @@ def test_the_short_share_cap_lowered_to_one_bites_by_name(monkeypatch):
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + 30, http=_short_http())
     assert b["ledger_net"] == -1 and _census(st2, "shadow_live_disagree") == 0
+    # E6: the filled book is on target with nothing open -- quiet on the
+    # next tick (skipped by the rotation); read again after the memo's
+    # clear, on target at the cap as before
     st3 = _tick(p, _Venue(held={SLUG: -1}), now=NOW + 60, http=_short_http())
+    assert _census(st3, "book_quiet_skipped") == 1 and _census(st3, "on_target") == 0
+    ml._quiet_memo.clear()
+    st3 = _tick(p, _Venue(held={SLUG: -1}), now=NOW + 90, http=_short_http())
     assert _census(st3, "on_target") == 1 and _census(st3, "short_share_cap") == 1
     # an open short book above the cap is clamped toward zero: the
     # partial cover it would take is short_reduce_unproven while the
@@ -6964,12 +6998,18 @@ def test_a_full_games_unopened_markets_are_skipped_for_the_memo_then_read_again(
     v2 = _Venue(bid=0.49, ask=0.51, held={GAME_SLUG_A: 5000, SLUG: 0})
     st2 = _tick(p, v2, now=NOW + 1, http=http)
     assert _census(st2, "cand_game_full_skipped") == 1 and _census(st2, "game_cap_full") == 0
-    assert [c[1] for c in v2.calls if c[0] == "bbo"] == [GAME_SLUG_A], "no read on the skipped candidate"
-    assert st2["reads"] == 1 and len(p.books) == 1, "A's read alone: no venue read, no candidate slot"
+    # E6: A read on target with nothing open a tick ago is a QUIET book,
+    # skipped by the rotation this tick (`book_quiet_skipped`), so no
+    # quote read at all lands on the venue
+    assert [c[1] for c in v2.calls if c[0] == "bbo"] == [], "no read on the skipped candidate"
+    assert _census(st2, "book_quiet_skipped") == 1 and st2["reads"] == 0 and len(p.books) == 1, \
+        "A quiet, the candidate memo-skipped: no venue read, no candidate slot"
     v3 = _Venue(bid=0.49, ask=0.51, held={GAME_SLUG_A: 5000, SLUG: 0})
     st3 = _tick(p, v3, now=NOW + ml.GAME_FULL_MEMO_S + 1, http=http)
     assert _census(st3, "cand_game_full_skipped") == 0 and _census(st3, "game_cap_full") == 1
-    assert ("bbo", SLUG) in v3.calls and st3["reads"] == 2
+    # E6: A's turn is the third tick after its read (QUIET_EVERY_TICKS);
+    # this is the second, so the candidate's read is the tick's one
+    assert ("bbo", SLUG) in v3.calls and st3["reads"] == 1 and _census(st3, "book_quiet_skipped") == 1
     # the game freed up inside the memo -- he cut A's market to 4,000
     # and A followed him down to 2,000 @ 0.50, $1,000 at cost: still
     # skipped until the memo runs (a minute at most), then read and
@@ -7234,8 +7274,12 @@ def _tick_wall(p, v, **kw):
 
 
 def _comparable(st):
-    """The tick's stats less what wall time and interleaving order move."""
-    return {k: v for k, v in st.items() if k not in ("recent", "tick_s")}
+    """The tick's stats less what wall time and interleaving order move
+    (E6: the timing block inside `short` is wall time too)."""
+    out = {k: v for k, v in st.items() if k not in ("recent", "tick_s")}
+    if isinstance(out.get("short"), dict):
+        out["short"] = {k: v for k, v in out["short"].items() if k != "timing"}
+    return out
 
 
 def test_e2_constants_the_walk_concurrency_the_ops_budget_and_the_call_guard(monkeypatch):
@@ -8175,7 +8219,12 @@ def test_r_forty_candidate_reads_are_reachable_at_forty_six_books_at_the_default
     st = _tick(p, v)
     bbos = [c[1] for c in v.calls if c[0] == "bbo"]
     assert st["books_live"] >= 46 and st["reads"] == len(bbos)
-    assert len(bbos) - st["books_live"] == 40, (len(bbos), st["books_live"])
+    # E6: the soft guard still never counts the books' reads (the whole
+    # 40 is reachable under IT), but the tick's venue-call budget (60)
+    # leaves the candidate stage 60 - 48 = 12 after the positions walk,
+    # the open-orders read and the 46 book reads: 12 candidates, over
+    # the floor of 10
+    assert len(bbos) - st["books_live"] == 12, (len(bbos), st["books_live"])
     assert st["capped_tick"] is True and _census(st, "venue_calls_capped") == 0
     assert _census(st, "venue_calls") == _expected_calls(v)
 
@@ -8551,9 +8600,17 @@ def test_r2_twenty_buys_and_forty_candidate_reads_fit_the_default_guard_of_eight
     assert st["ops"] == 20 and len(_places(v)) == 20 and _census(st, "ops_capped") == 26
     bbos = [c[1] for c in v.calls if c[0] == "bbo"]
     cand = len(bbos) - st["books_live"]
-    assert cand == 40 and _census(st, "venue_calls_capped") == 0 and st["capped_tick"] is True, (cand, st["census"])
+    # E6: 46 book reads and 20 BUYs (40 requests) spend the tick's
+    # venue-call budget (60) before the candidates; the stage never
+    # starves below CAND_MIN_PER_TICK (10) -- under the guard of 80 the
+    # whole 40 would still fit, it is the budget that bounds them now
+    assert cand == ml.CAND_MIN_PER_TICK == 10 and _census(st, "venue_calls_capped") == 0 \
+        and st["capped_tick"] is True, (cand, st["census"])
     assert _census(st, "venue_calls") == _expected_calls(v)
     monkeypatch.setattr(rules, "MIRROR_VENUE_CALLS_PER_TICK", 79)
+    # E6: the guard's own pin -- the tick's budget lifted here so the
+    # guard is what bites (test_e6_tick_budget pins the budget itself)
+    monkeypatch.setattr(ml, "VENUE_CALLS_PER_TICK", 10 ** 6)
     p2, slugs2, http2 = _increase_world(46, conds=[f"c{i}" for i in range(41)])
     v2 = _Venue()
     st2 = _tick(p2, v2, http=http2)
@@ -8822,7 +8879,10 @@ def test_r3_forty_six_books_placing_and_forty_one_candidates_are_128_requests(mo
     st = _tick(p, v, http=http)
     calls = _census(st, "venue_calls")
     cand = len([c for c in v.calls if c[0] == "bbo"]) - st["books_live"]
-    assert st["ops"] == 20 and len(_places(v)) == 20 and cand == 40 and calls == _expected_calls(v) == 128
+    # E6: the same world under the tick's venue-call budget (60) -- the
+    # books' 46 reads and the 20 BUYs' 40 requests spend it, the
+    # candidate stage reads its floor of 10: 128 - 30 = 98 requests
+    assert st["ops"] == 20 and len(_places(v)) == 20 and cand == 10 and calls == _expected_calls(v) == 98
     assert rules.MIRROR_MAX_ORDER_OPS_PER_TICK * 2 + ml.MAX_MARKETS_PER_TICK == rules.MIRROR_VENUE_CALLS_PER_TICK
 
 

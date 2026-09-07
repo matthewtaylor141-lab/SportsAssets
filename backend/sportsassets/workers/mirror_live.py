@@ -73,6 +73,7 @@ import json
 import logging
 import math
 import os
+import threading
 import time
 from collections import Counter, deque
 from dataclasses import dataclass, field
@@ -134,6 +135,80 @@ MAX_MARKETS_PER_TICK = int(rules.capped_env("MIRROR_LIVE_MAX_MARKETS", 40.0, flo
 # 40 x 5 s on the candidates -- the freshness clause below
 # (ms.SNAP_MAX_AGE_S) still refuses a read that lands late.
 _SNAP_READ_TIMEOUT_S = 5.0
+# THE TICK'S VENUE-CALL BUDGET (E6, 2026-09-07; owner 18:3xZ / 19:1xZ
+# "Need everything running and running at mirror to him"). The tick
+# was 80-127 s with 74-77 live books (19:10Z 79.8 s, 19:21Z 98.7 s,
+# 19:28Z 127.2 s; venue_calls 89-112, every one behind the 0.35 s
+# pacer) and his median entry latency measured 86.8 s: a tick that
+# long IS the latency. Every existing book was read every tick (U12),
+# most of them quiet -- on target, nothing open, no fill of his for an
+# hour -- and their reads sat in front of the candidates every tick.
+# The budget is a COUNT OF PACED VENUE CALLS a tick spends, so a tick
+# lands near TICK_TARGET_S at today's book count (60 calls ~ 21 s of
+# pacing plus latency), with PRIORITY so nothing money-critical waits:
+#   ALWAYS READ (never budgeted): a book with an order open, a frozen
+#     book (E5's exit path), a book whose last read was not on target
+#     (a reduce or an increase is pending), a book with a fill of his
+#     on its market inside HOT_S (the fills the tick already holds --
+#     no new read), a book whose market WOKE this tick (E6 review
+#     HIGH-2: a fill ingested late -- the poller catching up after a
+#     deploy, a backfill -- carries an old `ts` but the wake is the
+#     process's strongest money-in-motion evidence), a book whose last
+#     plan was an exit's take, the take at his level or an unfilled
+#     reduce (QUIET_EXIT_PLANS; census names, see docs section 28);
+#   ROUND-ROBIN under the budget: the QUIET books are read every
+#     QUIET_EVERY_TICKS ticks (_quiet_memo: the tick each book was last
+#     quote-read on and its verdict, process-local like the candidate
+#     cursor _cand_cursor); a quiet book DUE for its read that the
+#     budget cannot fit is DEFERRED: it joins a FIFO queue
+#     (_quiet_deferred) and the next ticks read the queue FIRST, in
+#     order, max(quiet_budget, DEFERRED_MIN_PER_TICK) a tick -- the
+#     floor so a budget the hot books alone spend (0) can never starve
+#     a quiet book -- the overflow staying queued (E6 review MEDIUM-1:
+#     the whole deferred cohort was read next tick whatever the budget,
+#     102 reads at a budget of 20 after a restart); so a deferred
+#     book's worst wait past its due tick is ceil(N_quiet /
+#     max(quiet_budget, DEFERRED_MIN_PER_TICK)) ticks; a quiet book
+#     that is not due is skipped under `book_quiet_skipped` (plan
+#     `no_plan`, `read_on` the tick it will be read on). Step M (the
+#     markets row, _maybe_close_episode), the standing-row close and
+#     the terminal memos still run EVERY tick for EVERY book: a skipped
+#     quote read never skips a close; the skip writes its name and its
+#     plan on the row and NOTHING else (the last read's his_net /
+#     venue_net / snapshot stand: review LOW-1);
+#   CANDIDATES: the walk runs AFTER the books and takes what the budget
+#     leaves -- cand_budget = max(CAND_MIN_PER_TICK, budget - calls so
+#     far), the quiet share having reserved CAND_MIN_PER_TICK (review
+#     MEDIUM-4: the due tick spent budget + CAND_MIN) -- the resolver's
+#     map reads take what sits ABOVE the quote reads' floor
+#     (max(ms.MAP_READS_PER_TICK, cand_budget - CAND_MIN_PER_TICK)) and
+#     the quote reads never fall under it (min(MAX_MARKETS_PER_TICK,
+#     max(CAND_MIN_PER_TICK, cand_budget - map reads)); review HIGH-1:
+#     at the floor the resolver reads spent the whole share and the
+#     mapped candidates behind them got no quote read).
+# Fail closed: a book this process has never read (an empty memo, a
+# restart) is read -- the old behaviour -- never skipped; an unreadable
+# fill row is a hot book. Env may only LOWER the budget (capped_env,
+# floor 20). NOT this knob: rules.MIRROR_VENUE_CALLS_PER_TICK is E2's
+# soft guard on the tick's writes and candidate reads (80, its own
+# name, untouched); this is the whole tick's paced-call budget under a
+# name of its own. Pacing (READ_PACING_S), the per-market data-API
+# throttle, what a read decides once made and order placement are not
+# touched here.
+TICK_TARGET_S = 25.0
+VENUE_CALLS_PER_TICK = int(rules.capped_env("MIRROR_TICK_VENUE_CALLS", 60.0, floor=20.0))
+HOT_S = 600.0
+QUIET_EVERY_TICKS = 3
+CAND_MIN_PER_TICK = 10
+# the deferred queue's floor: the reads a tick makes on books the budget
+# deferred even when the hot books alone spent it -- the same floor the
+# candidates keep, for the same reason (a share of zero for as long as
+# the hot books outnumber the budget is a quiet book never read again)
+DEFERRED_MIN_PER_TICK = 10
+QUIET_EXIT_PLANS = frozenset({"exit_take", "take_at_his_level", "reduce_unfilled"})
+# the prior plan's fields a quiet skip's plan carries (the next read and
+# a sibling's game room read them off the row: _tick_book, _held_exposure)
+_SKIP_CARRIED = ("flat_since", "short_proof", "mark", "bid", "ask", "exit_px_src")
 # A 'placing' row with no order id older than this is a placement whose
 # response was lost with the process (step O); younger, the placement
 # may still be the one in flight under this very tick's lock.
@@ -262,6 +337,23 @@ S4_VENUE_BUY = "ORDER_SIDE_BUY"
 # not a standing order proves nothing about a standing cover
 S4_RESTING_STATES = frozenset({"new", "pending_new", "pending_risk"})
 _STATE_SIDE_ECHO = "side_echo_last"
+# THE TERMINAL MEMOS SURVIVE A DEPLOY (E6 part 3). _terminal_until and
+# _terminal_book_until are process-local, so every deploy (four in the
+# hour to 19:28Z) started with them empty: every book on an EXPIRED
+# market was re-read once (venue_halted 38 / 78 right after 18:59Z and
+# 19:28Z) and every candidate walked again (cand_unread_capped 335 /
+# 325) -- 60-90 s of the first tick each time. Both memos are kept
+# under ONE ingestion_state key, {"cand": [[whale, cid, until], ...],
+# "book": [[whale, cid, until, state], ...], "at": ISO}, BOUNDED:
+# entries whose `until` has passed are dropped on write, at most
+# _TERMINAL_MEMO_MAX kept (the soonest to expire dropped first), written
+# at most once per TERMINAL_MEMO_WRITE_S and only when the bounded
+# snapshot changed, and read ONCE at boot. Fail closed: an unreadable
+# or malformed key is an EMPTY memo (today's behaviour), never a raise;
+# a malformed entry is dropped, never guessed.
+_STATE_TERMINAL_MEMO = "mirror_terminal_memo"
+TERMINAL_MEMO_WRITE_S = 60.0
+_TERMINAL_MEMO_MAX = 4000
 MODE_SAFE, MODE_EXITS, MODE_ON = "safe", "exits", "on"
 _OFF_VALUES = frozenset({"off", "0", "false", "no"})
 
@@ -443,6 +535,10 @@ CENSUS_KEYS: tuple[str, ...] = (
     # `registered_no_increase` (F3: a book whose slug carries a register
     # row never grows). Before the pinned last key
     "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
+    # E6 (2026-09-07): a quiet book's quote read skipped under the tick's
+    # venue-call budget (plan `no_plan`, `read_on` the tick it is read
+    # on). Before the pinned last key
+    "book_quiet_skipped",
     # D1 (2026-09-06): a candidate skipped because its venue state read
     # TERMINAL inside the last UNMAPPED_TTL_S (_terminal_until). Appended
     # LAST, past the served 40-key prefix; `integ` is at its own ceiling
@@ -595,6 +691,38 @@ _cand_cursor: dict[str, str] = {}
 # review): when the cursor candidate leaves his active list between
 # ticks, the walk resumes after the last of these still on it
 _cand_trail: dict[str, list[str]] = {}
+# THE QUIET BOOKS' ROTATION (E6; the paragraph over VENUE_CALLS_PER_TICK).
+# `_tick_seq` counts the ticks this process ran (past the backoff and
+# the table guard). `_quiet_memo`: book id -> {seq: the tick its quote
+# was last read on, quiet: whether that read left it ON TARGET with
+# nothing placed and nothing open, at: the `at` of the plan THIS
+# process last wrote on the row (a read's or a skip's)} -- the verdict
+# is the last READ's, never a skip's plan write (a skip writes
+# `book_quiet_skipped` on the row, which must not make the book hot
+# next tick), and a row whose last_plan `at` is not the one this
+# process wrote was written by another hand (a second process during a
+# deploy, an operator, a row that is not the one the memo knew) and is
+# read, never skipped. `_quiet_deferred`: the books that were DUE and
+# skipped for budget, book id -> the tick it was deferred on, in the
+# order they were deferred (a dict keeps insertion order: the queue is
+# FIFO) -- each tick reads the head of the queue first, under
+# max(quiet_budget, DEFERRED_MIN_PER_TICK) (_deferred_due). Both forget
+# a book the moment it closes and any book the walk no longer lists
+# (_forget_quiet, _forget_unlisted; review LOW-2). All three
+# process-local, like _cand_cursor: an empty memo reads everything.
+_tick_seq = 0
+_quiet_memo: dict[int, dict] = {}
+_quiet_deferred: dict[int, int] = {}
+# E6 part 3: the terminal memos' one boot read, and the last write's
+# instant and signature (the write is made only when the bounded
+# snapshot changed, at most once per TERMINAL_MEMO_WRITE_S)
+_terminal_memo_loaded = False
+_terminal_memo_last: dict[str, Any] = {"at": 0.0, "sig": None}
+# E6 part 1: the seconds this process spent inside _paced (the pacer's
+# gap plus the request), summed per call across the worker threads;
+# the tick snapshots it around the book walk for the timing block
+_PACED_S = {"s": 0.0}
+_PACED_LOCK = threading.Lock()
 # The venue IGNORED the post-only flag once (executions on a post-only
 # create): the flag is off for the rest of the process and the maker
 # thesis is measured by price selection alone (spec X.L).
@@ -853,8 +981,16 @@ def _paced(fn, *args, **kwargs):
     placement and close of this lane claims its gaps here, and the
     venue sees one request per gap from this process whatever N is --
     half that while the 429 circuit holds (venue_pace.penalize)."""
-    pace(ms.READ_PACING_S)
-    return fn(*args, **kwargs)
+    t0 = time.monotonic()
+    try:
+        pace(ms.READ_PACING_S)
+        return fn(*args, **kwargs)
+    finally:
+        # E6: the seconds this call spent here (the gap and the request),
+        # summed across the worker threads for the tick's timing block;
+        # nothing about the call changes
+        with _PACED_LOCK:
+            _PACED_S["s"] += time.monotonic() - t0
 
 
 def _rate_limited(t: "_Tick", whale: str | None, where: str) -> None:
@@ -1361,6 +1497,16 @@ UPDATE mirror_books SET target = $2, target_raw = $3, his_net = $4, his_long = $
        venue_net = $11, last_reason = $12, last_plan = $13::jsonb, updated_at = now()
  WHERE id = $1 /* ml-book-plan */
 """
+# A QUIET SKIP WRITES ITS NAME AND ITS PLAN, NOTHING ELSE (E6 review,
+# LOW-1): the plan write above with no reading nulled his_net /
+# his_long / his_other / snap_* / drift / venue_net / target_raw on the
+# row two ticks in three, and the `zz book` rows and `planned-unopened`
+# (his_net < 0) read them. The last read's figures stand until the next
+# read.
+_SQL_BOOK_SKIP = """
+UPDATE mirror_books SET last_reason = $2, last_plan = $3::jsonb, updated_at = now()
+ WHERE id = $1 /* ml-book-skip */
+"""
 # THE FIRST REASON STICKS: a book frozen 'overfill' whose venue then
 # disagrees with its emptied ledger is still the overfill, not the
 # disagreement; the later name rides in last_reason and the census.
@@ -1570,6 +1716,32 @@ class _Tick:
     cand_rows: list = field(default_factory=list)
     cand_pending: dict = field(default_factory=dict)
     active_conds: dict = field(default_factory=dict)
+    # E6: the tick's sequence number (_tick_seq), its timing block
+    # (seconds per step, summed per call for the two book-read parts),
+    # the books' outcome classes (`read`, `on_target`, `placed`,
+    # `no_mark`, `terminal_skipped`, `quiet_skipped`), the ids of the
+    # books a placement went out for this tick (the outcome class and
+    # the quiet verdict read it), the quiet books' budget and the reads
+    # taken from it (reserved at the decision, no await between), and
+    # the candidate stage's share of the budget -- map reads and quote
+    # reads together -- with the quote-read cap it leaves. Review fold:
+    # the markets that WOKE this tick (a woken book is hot, HIGH-2), the
+    # deferred books this tick reads (the queue's head, _deferred_due)
+    # and the newly DUE quiet reads taken (`due_reads`, under what the
+    # budget leaves after the deferred head; `quiet_reads` counts both)
+    seq: int = 0
+    timing: dict = field(default_factory=lambda: {"walk": 0.0, "orders": 0.0, "books": 0.0,
+                                                  "books_venue": 0.0, "books_data": 0.0,
+                                                  "candidates": 0.0})
+    outcomes: Counter = field(default_factory=Counter)
+    placed_books: set = field(default_factory=set)
+    quiet_budget: int = 0
+    quiet_reads: int = 0
+    cand_budget: int = CAND_MIN_PER_TICK
+    cand_cap: int = 0
+    woken: set = field(default_factory=set)
+    deferred_due: set = field(default_factory=set)
+    due_reads: int = 0
 
 
 # ------------------------------------------- E2: the tick's shared counters
@@ -2680,10 +2852,14 @@ async def _bbo(t: _Tick, slug: str, book: bool = False) -> tuple[float | None, f
     # candidate's read, and a book's read outside the walk (the book a
     # candidate just opened), step the live streak as before
     ws = slug if (book and t.walking) else None
+    t0 = time.monotonic()
     try:
         q = await asyncio.to_thread(ms._paced_bbo, t.pmus, slug)
     except Exception as exc:  # noqa: BLE001 — an unreadable book is no quote
         q = {"bid": None, "ask": None, "state": None, "error": type(exc).__name__}
+    if book:
+        # E6: an existing book's paced quote read, summed per call
+        t.timing["books_venue"] += time.monotonic() - t0
     t.reads += 1
     if not book:
         t.cand_reads += 1           # the candidate walk's budget; a book's read is never charged to it
@@ -4280,6 +4456,7 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None,
         t.cand_mkt_reads += 1
     t.stats["snap_market_reads"] = int(t.stats.get("snap_market_reads") or 0) + 1
     raw = None
+    t0 = time.monotonic()
     try:
         raw = await asyncio.wait_for(
             whale_exits.market_positions(t.http, str(address), str(cid), long_asset=la),
@@ -4295,6 +4472,10 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None,
         log.warning("mirror_live: per-market read of %s for %s raised (%s)",
                     cid, whale, type(exc).__name__)
         raw = None
+    if book:
+        # E6: an existing book's per-market data-API read (the throttle's
+        # wait and the request), summed per call
+        t.timing["books_data"] += time.monotonic() - t0
     by = raw.get("by_asset") if isinstance(raw, dict) else None
     ts = _num(raw.get("ts")) if isinstance(raw, dict) else None
     if not isinstance(by, dict) or ts is None or raw.get("complete") is not True:
@@ -4679,6 +4860,7 @@ async def _close_settled(t: _Tick, book: dict, standing: dict, status: str) -> N
     await t.pool.execute(_SQL_BOOK_SETTLED, book["id"], settled_pnl, own, disagree,
                          f"closed: standing row {status}")
     book["state"] = "closed"
+    _forget_quiet(book["id"])
     t.stats["closed_books"] += 1
     _recent(book["id"], "closed", row=status, settled=settled_pnl, own=own)
 
@@ -4717,10 +4899,326 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
         return "close_refused"
     await t.pool.execute(_SQL_BOOK_STATE, book["id"], "closed", f"closed_{verdict}")
     book["state"] = "closed"
+    _forget_quiet(book["id"])
     t.stats["closed_books"] += 1
     _mirror_stop(f"closed_{verdict}", book["whale"])
     _recent(book["id"], "closed", how=verdict)
     return verdict
+
+
+# ------------------------------------------- E6: the tick's venue-call budget
+
+def _book_open(t: _Tick, book: dict) -> bool:
+    """An order is open or non-terminal on the book (the reading the
+    terminal memo and the quiet rule share)."""
+    return (book["id"] in t.open_by_book or book["id"] in t.nonterminal
+            or bool(book.get("open_order_id")))
+
+
+def _exit_plan_stands(book: dict) -> bool:
+    """The book's last plan was an exit's take, the take at his level or
+    an unfilled reduce (QUIET_EXIT_PLANS): read on the row's own
+    `last_reason` and the plan's `kind` / `reason`. Unreadable is hot."""
+    try:
+        lp = _jsonish(book.get("last_plan")) or {}
+        names = {str(book.get("last_reason") or ""), str(lp.get("kind") or ""),
+                 str(lp.get("reason") or "")}
+    except Exception:  # noqa: BLE001 — an unreadable plan is a hot book
+        return True
+    return bool(names & QUIET_EXIT_PLANS)
+
+
+def _his_fill_since(fills: list, since: float) -> bool:
+    """A fill of his at or after `since` (the rows the tick already
+    holds). A row with no readable `ts` counts as one: fail closed."""
+    for f in fills or ():
+        ts = _num((f or {}).get("ts")) if isinstance(f, dict) else None
+        if ts is None or ts >= since:
+            return True
+    return False
+
+
+def _memo_holds(book: dict) -> dict | None:
+    """The quiet memo entry for the book IF the row is the one this
+    process last wrote (its last_plan `at` is the memo's); None when the
+    book was never read here or the row moved under another hand."""
+    m = _quiet_memo.get(book["id"])
+    if m is None:
+        return None
+    try:
+        at = _num((_jsonish(book.get("last_plan")) or {}).get("at"))
+    except Exception:  # noqa: BLE001 — an unreadable plan is a row the memo does not know
+        return None
+    if at is None or abs(at - float(m.get("at") or 0.0)) > 1e-3:
+        return None
+    return m
+
+
+def _hot_by_row(t: _Tick, book: dict) -> bool:
+    """The always-read classes the book ROW and the tick's wake alone
+    decide (the fills are read inside its tick): never read by this
+    process (or written by another hand since), the last read not on
+    target, frozen (or any state but live), an order open, an exit plan
+    standing, its market woken this tick (review HIGH-2)."""
+    m = _memo_holds(book)
+    return (m is None or not m.get("quiet") or book.get("state") != "live"
+            or _book_open(t, book) or _exit_plan_stands(book)
+            or str(book.get("condition_id")) in t.woken)
+
+
+def _memo_skips(t: _Tick, book: dict) -> bool:
+    """The terminal memo will skip this book before any venue call
+    (_tick_book: `_terminal_book_until` ahead and nothing open) -- a
+    hot book that costs the tick no read (review MEDIUM-2: ~40 books
+    on EXPIRED markets each charged the quiet share one read)."""
+    return (_terminal_book_until.get((book.get("whale"), book.get("condition_id")), 0.0) > t.now
+            and not _book_open(t, book))
+
+
+def _quiet_budget(t: _Tick, books: list) -> int:
+    """What the budget leaves the quiet books once the calls the tick
+    already made (steps R and O), one quote read per hot book the memo
+    will not skip, and the candidates' floor (CAND_MIN_PER_TICK, review
+    MEDIUM-4: reserved here so the due tick stays inside the budget)
+    are counted; never negative."""
+    hot = sum(1 for b in books if _hot_by_row(t, b) and not _memo_skips(t, b))
+    return max(0, int(VENUE_CALLS_PER_TICK) - int(t.venue_calls) - hot - int(CAND_MIN_PER_TICK))
+
+
+def _quiet_slots(t: _Tick) -> int:
+    """The reads a tick makes on the DEFERRED queue: the quiet budget,
+    never under DEFERRED_MIN_PER_TICK."""
+    return max(int(t.quiet_budget), int(DEFERRED_MIN_PER_TICK))
+
+
+def _forget_quiet(bid) -> None:
+    """The rotation forgets a book (it closed; the walk no longer lists
+    it): review LOW-2. A book that comes back is read, never skipped."""
+    _quiet_memo.pop(bid, None)
+    _quiet_deferred.pop(bid, None)
+
+
+def _forget_unlisted(books: list) -> None:
+    listed = {b["id"] for b in books}
+    for bid in [k for k in set(_quiet_memo) | set(_quiet_deferred) if k not in listed]:
+        _forget_quiet(bid)
+
+
+def _deferred_due(t: _Tick) -> set:
+    """The deferred books THIS tick reads: the head of the queue, in
+    the order they were deferred, _quiet_slots of them. Decided before
+    the walk so the walk's order (games, not deferral order) cannot
+    hand a deferred book's slot to a newly due one."""
+    return set(list(_quiet_deferred)[:_quiet_slots(t)])
+
+
+def _deferred_read_on(t: _Tick, bid) -> int:
+    """The tick a queued book is read on at this tick's slot count: the
+    next tick for the first _quiet_slots of the queue once this tick's
+    head is read, one tick more per slot count behind that."""
+    ahead = 0
+    for k in _quiet_deferred:
+        if k == bid:
+            break
+        if k not in t.deferred_due:
+            ahead += 1
+    return int(t.seq) + 1 + ahead // max(1, _quiet_slots(t))
+
+
+def _quiet_skip(t: _Tick, book: dict, fills: list) -> int | None:
+    """THE QUIET RULE (E6), decided after step M and before the quote
+    read. None: read the book now. An int: skip its reads this tick and
+    write `book_quiet_skipped` with that tick number as `read_on`.
+
+      hot (always None)   never read by this process; the last read not
+                          on target; not live; an order open; an exit
+                          plan standing; woken; a fill of his inside HOT_S
+      deferred, at the    read now: the queue's head, FIFO, under
+        queue's head      max(quiet_budget, DEFERRED_MIN_PER_TICK)
+      deferred, behind    stays queued: read_on = its turn in the queue
+      not due             fewer than QUIET_EVERY_TICKS ticks since its
+                          last read: read_on = last + QUIET_EVERY_TICKS
+      due, budget spent   joins the queue's tail (the budget less the
+                          head's reads): read_on = its turn
+      due, budget left    read now (one slot reserved here, no await)"""
+    bid = book["id"]
+    try:
+        m = _memo_holds(book)
+        hot = m is None or _hot_by_row(t, book) or _his_fill_since(fills, t.now - HOT_S)
+        last = None if hot else int(m["seq"])
+    except Exception:  # noqa: BLE001 — a memo or a row this cannot read is a book it reads
+        hot, last = True, None
+    if hot:
+        _quiet_deferred.pop(bid, None)
+        return None
+    if bid in _quiet_deferred:
+        if bid in t.deferred_due:
+            _quiet_deferred.pop(bid, None)
+            t.quiet_reads += 1
+            return None
+        return _deferred_read_on(t, bid)
+    if t.seq < last + QUIET_EVERY_TICKS:
+        return last + QUIET_EVERY_TICKS
+    if t.due_reads >= max(0, int(t.quiet_budget) - len(t.deferred_due)):
+        _quiet_deferred[bid] = int(t.seq)
+        return _deferred_read_on(t, bid)
+    t.due_reads += 1
+    t.quiet_reads += 1
+    return None
+
+
+def _note_read(t: _Tick, book: dict, on_target: bool) -> None:
+    """The quiet memo's writer for a READ: this book's quote was read
+    this tick (`on_target` False until the plan's final verdict says
+    otherwise); `at` is the plan's `at` this tick writes (t.now)."""
+    _quiet_memo[book["id"]] = {"seq": int(t.seq), "quiet": bool(on_target), "at": float(t.now)}
+
+
+def _note_skip(t: _Tick, book: dict) -> None:
+    """The memo's writer for a SKIP: the seq and the verdict stand (the
+    last read's), `at` moves to the plan this tick writes."""
+    m = _quiet_memo.get(book["id"]) or {"seq": int(t.seq), "quiet": False}
+    _quiet_memo[book["id"]] = {**m, "at": float(t.now)}
+
+
+def _cand_budget(t: _Tick) -> int:
+    """The candidate stage's share of the budget once the books are
+    walked: map reads and candidate quote reads together, never below
+    CAND_MIN_PER_TICK."""
+    return max(int(CAND_MIN_PER_TICK), int(VENUE_CALLS_PER_TICK) - int(t.venue_calls))
+
+
+def _map_cap(cand_budget: int) -> int:
+    """The candidate stage's MAP-read cap (E6 fold, the 19:42Z tick:
+    `map_reads_capped` 108 at `map_venue_read` 10, ~$100k of his 24 h
+    flow unmapped by the old per-tick cap of ms.MAP_READS_PER_TICK).
+    The old cap is the budget's FLOOR, never its ceiling: the resolver
+    may spend what sits ABOVE the quote reads' own floor -- the share
+    less CAND_MIN_PER_TICK (review HIGH-1: a candidate maps before it
+    reads, so a resolver that spent the whole share left the mapped
+    candidates behind it unread, every tick at the floor). An operator
+    who set MIRROR_MAP_READS lowered a rail, and a lowered rail is
+    honoured as a ceiling under the share."""
+    floor = int(ms.MAP_READS_PER_TICK)
+    share = max(floor, int(cand_budget) - int(CAND_MIN_PER_TICK))
+    if os.environ.get("MIRROR_MAP_READS", "").strip():
+        return max(0, min(floor, share))
+    return share
+
+
+def _cand_cap(t: _Tick) -> int:
+    """The candidate QUOTE-read cap this tick: MAX_MARKETS_PER_TICK (env
+    may only lower it), and never more than the stage's share leaves
+    after its map reads (spent first: a candidate maps before it reads)
+    -- never under CAND_MIN_PER_TICK, the quote reads' floor the map
+    reads cannot spend (review HIGH-1)."""
+    left = max(int(CAND_MIN_PER_TICK), int(t.cand_budget) - int(t.map_budget.reads))
+    return max(0, min(int(MAX_MARKETS_PER_TICK), left))
+
+
+def _timing_block(t: _Tick) -> dict:
+    """The tick's time, measured (E6 part 1): seconds, one decimal --
+    `walk` (step R, the positions walk), `orders` (step O), `books`
+    (step B, wall time), `books_venue` (the books' paced venue calls:
+    their quote reads and every paced write the walk sent, summed per
+    call, so under the parallel walk it can exceed `books`),
+    `books_data` (their per-market data-API reads, the same way),
+    `candidates` (the candidate stage); the counts beside them
+    (`venue_calls`, `snap_market_reads`); the books by outcome class
+    (`read`: a quote read; `on_target`, `placed`, `no_mark`,
+    `terminal_skipped`, `quiet_skipped`); the budget's numbers
+    (`budget`, `quiet_budget`, `quiet_reads`, `cand_budget`, `map_cap`,
+    `cand_cap`). Bounded: these keys and no others."""
+    tm = t.timing
+    out = {k: round(float(tm.get(k) or 0.0), 1)
+           for k in ("walk", "orders", "books", "books_venue", "books_data", "candidates")}
+    out["venue_calls"] = int(t.venue_calls)
+    out["snap_market_reads"] = int(t.stats.get("snap_market_reads") or 0)
+    for k in ("read", "on_target", "placed", "no_mark", "terminal_skipped", "quiet_skipped"):
+        out[k] = int(t.outcomes.get(k) or 0)
+    out.update(budget=int(VENUE_CALLS_PER_TICK), quiet_budget=int(t.quiet_budget),
+               quiet_reads=int(t.quiet_reads), cand_budget=int(t.cand_budget),
+               map_cap=int(getattr(t.map_budget, "cap", 0) or 0), cand_cap=int(t.cand_cap))
+    return out
+
+
+def _paced_seconds() -> float:
+    with _PACED_LOCK:
+        return float(_PACED_S["s"])
+
+
+def _terminal_memo_snapshot(now: float) -> dict:
+    """Both terminal memos, bounded: every entry whose `until` has
+    passed dropped, at most _TERMINAL_MEMO_MAX kept (the soonest to
+    expire dropped first), sorted so the same memo is the same text."""
+    cand = sorted([[str(w), str(c), round(float(u), 1)] for (w, c), u in _terminal_until.items()
+                   if _num(u) is not None and float(u) > now], key=lambda e: (-e[2], e[0], e[1]))
+    book = sorted([[str(w), str(c), round(float(u), 1), _terminal_book_state.get((w, c))]
+                   for (w, c), u in _terminal_book_until.items()
+                   if _num(u) is not None and float(u) > now], key=lambda e: (-e[2], e[0], e[1]))
+    return {"cand": cand[:_TERMINAL_MEMO_MAX], "book": book[:_TERMINAL_MEMO_MAX]}
+
+
+def _terminal_memo_sig(snap: dict) -> str:
+    return json.dumps(snap, sort_keys=True, default=str)
+
+
+async def _load_terminal_memo(t: _Tick) -> None:
+    """The one boot read of the terminal memos (E6 part 3). Unreadable
+    or malformed: the memos stay empty (today's behaviour) and the
+    reason is logged; an entry that is not [whale, cid, until(, state)]
+    with a finite `until` still ahead is dropped, never guessed; a book
+    entry whose state is not one of ms.STATE_TERMINAL (the only states
+    the memo's writer ever records) is dropped too -- a HALTED entry in
+    the key would skip a live book for its `until` (review LOW-3)."""
+    value, err = await _state(t.pool, _STATE_TERMINAL_MEMO)
+    loaded = 0
+    if err is not None or (value is not None and not isinstance(value, dict)):
+        log.warning("mirror_live: %s unreadable (%s); the terminal memos start empty",
+                    _STATE_TERMINAL_MEMO, err or type(value).__name__)
+    elif isinstance(value, dict):
+        cand, book = value.get("cand"), value.get("book")
+        for e in (cand if isinstance(cand, list) else []):
+            if (isinstance(e, list) and len(e) == 3 and isinstance(e[0], str) and isinstance(e[1], str)
+                    and _num(e[2]) is not None and float(e[2]) > t.now):
+                _terminal_until[(e[0], e[1])] = float(e[2])
+                loaded += 1
+        for e in (book if isinstance(book, list) else []):
+            if (isinstance(e, list) and len(e) == 4 and isinstance(e[0], str) and isinstance(e[1], str)
+                    and _num(e[2]) is not None and float(e[2]) > t.now and isinstance(e[3], str)
+                    and e[3] in ms.STATE_TERMINAL):
+                _terminal_book_until[(e[0], e[1])] = float(e[2])
+                _terminal_book_state[(e[0], e[1])] = e[3]
+                loaded += 1
+    # what is held now is what stands written: the next write is a change
+    _terminal_memo_last.update(at=float(t.now), sig=_terminal_memo_sig(_terminal_memo_snapshot(t.now)))
+    if loaded:
+        log.info("mirror_live: %d terminal memo entries read at boot", loaded)
+
+
+async def _persist_terminal_memo(t: _Tick) -> None:
+    """The bounded snapshot, written when it changed and at most once
+    per TERMINAL_MEMO_WRITE_S; a failed write is logged and retried on
+    a later tick (the signature is kept only on success). Never raises.
+    Nothing is written before the boot read was made: a first tick
+    refused ahead of it (tables_absent, intent_guard_unreadable -- the
+    pool not yet up at the deploy's own moment) would otherwise persist
+    a fresh process's EMPTY memo over the old process's (review
+    MEDIUM-5)."""
+    if not _terminal_memo_loaded:
+        return
+    snap = _terminal_memo_snapshot(t.now)
+    sig = _terminal_memo_sig(snap)
+    if sig == _terminal_memo_last.get("sig"):
+        return
+    if float(t.now) - float(_terminal_memo_last.get("at") or 0.0) < TERMINAL_MEMO_WRITE_S:
+        return
+    try:
+        await _write_state(t.pool, _STATE_TERMINAL_MEMO, {**snap, "at": _iso(float(t.now))})
+    except Exception as exc:  # noqa: BLE001 — a memo that did not persist is the old behaviour
+        log.warning("mirror_live: %s write failed (%s)", _STATE_TERMINAL_MEMO, type(exc).__name__)
+        return
+    _terminal_memo_last.update(at=float(t.now), sig=sig)
 
 
 def _memo_terminal_book(t: _Tick, book: dict, r: _Reading) -> None:
@@ -4826,11 +5324,56 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         # written over an open order), so there is nothing to cancel
         _mirror_stop("no_mark", w)
         _mirror_stop("book_terminal_skipped", w)
+        t.outcomes["terminal_skipped"] += 1
         await _write_plan(t, book, None, book.get("target"), None, None, book.get("his_level"),
                           "no_mark", {"kind": "no_plan", "at": t.now,
                                       "venue_terminal": _terminal_book_state.get((w, cid))})
         return
+    read_on = _quiet_skip(t, book, fills)
+    if read_on is not None:
+        # THE QUIET BOOK'S TURN IS NOT THIS TICK (E6; the paragraph over
+        # VENUE_CALLS_PER_TICK): on target at its last read, nothing
+        # open, no fill of his inside HOT_S, no exit plan standing --
+        # its quote read and its per-market read wait for `read_on`.
+        # Step M above ran, the standing row was read, nothing rests on
+        # it (an open order is a hot book), so nothing is cancelled and
+        # no order path is touched. The row says so by name
+        _mirror_stop("book_quiet_skipped", w)
+        t.outcomes["quiet_skipped"] += 1
+        # what the next read takes from the PRIOR plan rides on the skip's
+        # (_SKIP_CARRIED): the flat clock, the episode's one short proof
+        # (recorded once: a plan without it would record it again), the
+        # last read's mark and quotes (a sibling's game room reads a book
+        # not read this tick at its last plan's mark, _held_exposure),
+        # the exit's price source
+        prior = _jsonish(book.get("last_plan")) or {}
+        plan = {k: prior[k] for k in _SKIP_CARRIED if prior.get(k) is not None}
+        plan.update(kind="no_plan", at=t.now, read_on=int(read_on), tick=int(t.seq),
+                    last_read=int(_quiet_memo[book["id"]]["seq"]))
+        if _num(plan.get("mark")) is not None:
+            t.marks[book["id"]] = float(plan["mark"])
+        _note_skip(t, book)
+        # A SKIPPED READ NEVER SKIPS A CLOSE: the episode close runs on
+        # the skipped book exactly as on a read one -- step M's own
+        # market reading, the row's last target (the last read's, at
+        # most QUIET_EVERY_TICKS ticks old with no fill of his since)
+        # and the flat clock carried from the prior plan; `vanished` and
+        # `venue_flat` are readings the skip does not have, so they are
+        # handed False (the vanish and the sign-flip closes wait for a
+        # read tick, never a guess)
+        tg = _num(book.get("target"))
+        plan["close"] = await _maybe_close_episode(t, book, market_live, False,
+                                                   None if tg is None else int(tg), plan)
+        if book.get("state") != "closed":
+            # the skip's own write (_SQL_BOOK_SKIP): the name and the
+            # plan; the last read's figures on the row stand (LOW-1)
+            book["last_reason"] = "book_quiet_skipped"
+            await t.pool.execute(_SQL_BOOK_SKIP, book["id"], "book_quiet_skipped",
+                                 json.dumps(plan, default=str))
+        return
     r = await _read_market(t, w, cid, slug, la, oa, fills, market=mk, book=True)
+    t.outcomes["read"] += 1
+    _note_read(t, book, False)              # read this tick; the verdict is the plan's, below
     if t.abandoned:
         return
     _memo_terminal_book(t, book, r)
@@ -4938,6 +5481,8 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         # NO PLAN: never "target zero, flatten". What rests is cancelled
         # by the plan's own name; the book is held.
         _mirror_stop(tg["refusal"], w)
+        if tg["refusal"] == "no_mark":
+            t.outcomes["no_mark"] += 1          # E6: the outcome class
         await _cancel_open_for(t, book, tg["refusal"])
         await _write_plan(t, book, r, None, None, drift.drift, book.get("his_level"),
                           tg["refusal"], {**plan, "kind": "no_plan"})
@@ -5216,6 +5761,19 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         why = await _maybe_close_episode(t, book, r.market_live, vanished, target, plan,
                                          venue_flat=abs(float(r.venue or 0.0)) < FLAT_TOL_SHARES)
         plan["close"] = why
+        # E6: the book's outcome class and its quiet verdict -- ON TARGET
+        # with nothing placed and nothing open is the one quiet verdict;
+        # every other exit of this function leaves the book hot
+        placed = book["id"] in t.placed_books
+        on_target = (rules.plan_reason_key(reason) == "on_target" and not placed
+                     and not _book_open(t, book) and book.get("state") == "live")
+        if placed:
+            t.outcomes["placed"] += 1
+        elif on_target:
+            t.outcomes["on_target"] += 1
+        elif reason == "no_mark":
+            t.outcomes["no_mark"] += 1
+        _note_read(t, book, on_target)
         if reason != "tick_abandoned":
             # a decided order refused because another book abandoned
             # the tick mid-flight (E2 review, LOW-6) writes NO plan: the
@@ -6978,6 +7536,7 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
     await t.pool.execute(_SQL_BOOK_OPEN_ORDER, book["id"], o["id"])
     book["open_order_id"] = o["id"]
     t.nonterminal.add(book["id"])
+    t.placed_books.add(book["id"])              # E6: the outcome class, the quiet verdict
     if is_take:
         _mirror_stop("take_placed", w)
         t.stats["placed_take"] += 1
@@ -7138,6 +7697,7 @@ async def _lost_response(t: _Tick, o: dict, book: dict, r: _Reading, exc: BaseEx
                                               "leaves": what.get("leaves")})
             _mirror_stop("rest_placed", r.whale)
             t.stats["placed_rest"] += 1
+            t.placed_books.add(book["id"])
             await _disarm_take(t, book)
             return "rest_placed"
         if verdict == "ambiguous":
@@ -8003,7 +8563,17 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             # last, and in the `finally`: an abandoned or raising tick
             # publishes the counters it did reach, never a stale block
             stats["integ"] = _integ_block(stats)
+            # E6: the tick's time, INSIDE the `short` block -- the health
+            # endpoint serves 40 top-level keys and an ON tick fills them
+            # (pinned never truncated); `integ` is pinned under 40 keys
+            # of its own, `fills_dedup` is the key the sanitizer drops on
+            # a capped tick and is pinned by value, `frozen_reasons` is a
+            # reason -> count map, so the one nested block with room is
+            # this one (served whole, `.detail.short.timing`). The raw
+            # heartbeat, the ops line and the mode line's `t=` carry it too
+            stats.setdefault("short", {})["timing"] = _timing_block(t)
             _publish_fills_dedup(t)
+            await _persist_terminal_memo(t)     # E6 part 3: bounded, once per 60 s, on change
             _last_loss = t.loss         # L1: the mode line's `loss=` fragment
             _last_sleeve = t.sleeve     # L2: its `sleeve=` fragment
             _current_stats = None
@@ -8038,6 +8608,9 @@ def _publish_fills_dedup(t: _Tick) -> None:
 async def _tick(t: _Tick, woken: list) -> None:
     global _last_mode, _last_whales
     stats = t.stats
+    # the markets that woke this tick: a book on one is hot whatever its
+    # fills' stamps say (E6 review HIGH-2)
+    t.woken = {str(c) for c in (woken or ())}
     if t.now < _backoff_until:
         # the mode and allowlist the worker holds, never _new_stats'
         # SAFE default (see _last_mode); read the real way when no
@@ -8085,6 +8658,16 @@ async def _tick(t: _Tick, woken: list) -> None:
             log.warning("mirror_live: MIRROR_SHORTS is on but mirror_orders.intent is absent "
                         "(migration 050 not applied yet: %s); shorts stay off", type(exc).__name__)
     stats.setdefault("short", {})["on"] = _shorts_on(t)
+    # E6: this tick's number in the process (the quiet rotation's clock),
+    # and the terminal memos' one boot read (part 3) -- once per process,
+    # whatever it read: a failed boot read is the empty memo, never a retry
+    # on every tick
+    global _tick_seq, _terminal_memo_loaded
+    _tick_seq += 1
+    t.seq = _tick_seq
+    if not _terminal_memo_loaded:
+        _terminal_memo_loaded = True
+        await _load_terminal_memo(t)
     await _read_mode(t)
     if t.mode != MODE_SAFE and le.active_venue() != "polymarket-us":
         _mirror_stop("no_venue")
@@ -8109,7 +8692,9 @@ async def _tick(t: _Tick, woken: list) -> None:
     # R: the reads, once. Ratios for the allowlist only: an open book
     # carries its own fixed ratio and never re-reads one
     t.ratios = await ms.refresh_ratios(t.pool, sorted(t.allow)) if t.allow else {}
+    t0 = time.monotonic()
     t.positions, pages, limited = await ms.account_positions_walk(t.pmus)
+    t.timing["walk"] += time.monotonic() - t0
     _venue_call(t, pages)               # every page the walk read (E2 review), per call
     if limited:
         _rate_limited(t, None, "positions walk")
@@ -8137,7 +8722,9 @@ async def _tick(t: _Tick, woken: list) -> None:
         await _abandon_reconciled(t, "protected_ids_unreadable")
         return
     # O: the orders first
+    t0 = time.monotonic()
     await _reconcile_orders(t)
+    t.timing["orders"] += time.monotonic() - t0
     if t.cancel_all:
         # a trip while booking (an overfill): the tick is cancel-only
         # from here -- what step O kept before the trip is cancelled,
@@ -8157,7 +8744,19 @@ async def _tick(t: _Tick, woken: list) -> None:
     # whale's, one game one cap), before any book is sized, so each
     # book's target reads the room its game has left after the others
     _index_games(t, books)
+    # THE BUDGET'S SHARES (E6; the paragraph over VENUE_CALLS_PER_TICK):
+    # the quiet books get what the budget leaves after steps R and O,
+    # one read per hot book and the candidates' floor; the deferred
+    # queue's head is decided here, before the walk; a book the walk no
+    # longer lists leaves the rotation (LOW-2); the paced seconds the
+    # walk spends are read off the process accumulator around it
+    _forget_unlisted(books)
+    t.quiet_budget = _quiet_budget(t, books)
+    t.deferred_due = _deferred_due(t)
+    t0, paced0 = time.monotonic(), _paced_seconds()
     await _walk_books(t, _woken_first(books, woken))
+    t.timing["books"] += time.monotonic() - t0
+    t.timing["books_venue"] += _paced_seconds() - paced0
     if t.cancel_all:
         # a wrong-sign trip on a book: "cancel everything" (spec P) --
         # every order the earlier books kept, and no candidate
@@ -8166,7 +8765,16 @@ async def _tick(t: _Tick, woken: list) -> None:
         return
     # then new candidates -- the woken first, then the shadow's planned
     # ahead of the rest, resumed from the whale's rotation cursor (W2 /
-    # P3; newest-first within each group) -- for whales that may increase
+    # P3; newest-first within each group) -- for whales that may increase.
+    # THE CANDIDATE STAGE'S SHARE (E6): what the budget leaves after the
+    # books, map reads and quote reads together, never under
+    # CAND_MIN_PER_TICK; the map cap is the old per-tick cap at least
+    # (_map_cap), and the quote-read cap what the share leaves after the
+    # map reads, under MAX_MARKETS_PER_TICK as before
+    t.cand_budget = _cand_budget(t)
+    t.map_budget.cap = _map_cap(t.cand_budget)
+    t.cand_cap = _cand_cap(t)
+    cands_t0 = time.monotonic()
     for w in sorted(t.allow):
         if t.abandoned:
             break
@@ -8197,10 +8805,14 @@ async def _tick(t: _Tick, woken: list) -> None:
         for i, cid in enumerate(conds):
             if t.abandoned:
                 break
-            if t.cand_reads >= MAX_MARKETS_PER_TICK:
-                # the CANDIDATES' own budget (U12): the books above did
-                # not spend it, so with any number of live books the
-                # first MAX_MARKETS_PER_TICK candidates are still read
+            t.cand_cap = _cand_cap(t)
+            if t.cand_reads >= MAX_MARKETS_PER_TICK or t.cand_reads >= t.cand_cap:
+                # the CANDIDATES' own cap (U12: MAX_MARKETS_PER_TICK, the
+                # books never spent it) -- and since E6 the stage's share
+                # of the tick's budget (t.cand_cap, never above the cap):
+                # what the hot books and the quiet rotation left, the map
+                # reads spent first, never under CAND_MIN_PER_TICK
+                # (_cand_budget, _cand_cap)
                 stats["capped_tick"] = True
                 unread, capped = conds[i:], True
                 break
@@ -8243,6 +8855,7 @@ async def _tick(t: _Tick, woken: list) -> None:
             _cand_cursor.pop(w, None)
             _cand_trail.pop(w, None)
         _name_unread(t, w, unread)
+    t.timing["candidates"] += time.monotonic() - cands_t0
     await _flush_candidate_refusals(t)
     await _instruments(t)
 
@@ -8389,9 +9002,21 @@ def _mode_line(stats: dict, ticks: int, loss: dict | None = None,
     day = stats.get("mirror_day_room")
     if day is None and not math.isfinite(float(rules.MIRROR_DAY_USD)):
         day = "none"
-    log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s%s venue=%s%s stats=%s",
+    tm = (stats.get("short") or {}).get("timing") if isinstance(stats.get("short"), dict) else None
+    tfrag = ""
+    if isinstance(tm, dict) and not stats.get("skipped_backoff"):
+        # E6: the tick's time by step, `t=walk/orders/books/cands` (seconds,
+        # one decimal) beside the books it read, skipped and placed on --
+        # right after the day rail, before `loss=` / `sleeve=` and
+        # `venue=`, inside the line's first 400 characters; nothing on a
+        # dict that carries no timing, nor on a backed-off tick (no time
+        # to print, and its line is pinned as it was)
+        tfrag = " t=%s/%s/%s/%s read=%s quiet=%s placed=%s" % (
+            tm.get("walk"), tm.get("orders"), tm.get("books"), tm.get("candidates"),
+            tm.get("read"), tm.get("quiet_skipped"), tm.get("placed"))
+    log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s%s%s venue=%s%s stats=%s",
              stats.get("mode"), stats.get("whales"), stats.get("books_live"),
-             stats.get("orders_open"), day, rail, stats.get("venue_state"),
+             stats.get("orders_open"), day, tfrag, rail, stats.get("venue_state"),
              extra, {k: v for k, v in stats.items() if k not in ("census", "recent")})
 
 
