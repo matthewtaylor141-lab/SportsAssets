@@ -2875,9 +2875,15 @@ def close_position(us_slug: str, *, slippage_bips: int) -> dict:
             "synchronousExecution": True,
         })
     except Exception as exc:  # noqa: BLE001 — a refusal, not a crash
+        # the text is the only record of WHY the venue refused the close
+        # (three short closes failed on 2026-09-06/07 with no cause on
+        # file: mirror books 75, 79, 109); logged here, kept on the row
+        log.warning("pmus: close_position %s failed: %s: %s", us_slug,
+                    type(exc).__name__, str(exc)[:200])
         return {"ok": False, "order_id": None, "status": "close_failed",
                 "fill_price": None, "filled_shares": 0.0,
-                "raw": {"error": str(exc)[:200], "slug": us_slug}}
+                "raw": {"error": str(exc)[:200], "slug": us_slug,
+                        "error_type": type(exc).__name__}}
     executions = (resp or {}).get("executions") or []
     filled, notional, state = 0.0, 0.0, ""
     for ex in executions:

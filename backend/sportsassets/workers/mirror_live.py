@@ -4588,8 +4588,10 @@ async def _lost_response(t: _Tick, o: dict, book: dict, r: _Reading, exc: BaseEx
     the protected set and every ledger id excluded; found -> adopt; not
     found -> the row stays 'placing' with no id and the book is frozen
     'placement_lost' for step O to revisit."""
-    log.warning("mirror_live: placement on %s raised %s; searching the book", r.slug,
-                type(exc).__name__)
+    # the text too: for a CLOSE row it is the adapter's close_failed
+    # error (pmus.close_position), the only record of the venue's reason
+    log.warning("mirror_live: placement on %s raised %s (%s); searching the book", r.slug,
+                type(exc).__name__, str(exc)[:200])
     if o.get("tif") == "CLOSE":
         # a close carries no cent and no quantity to search by: the
         # next tick reads the venue's position (_reconcile_lost_close)
