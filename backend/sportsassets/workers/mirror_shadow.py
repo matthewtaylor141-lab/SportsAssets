@@ -621,6 +621,53 @@ async def _exact_for_token(pool, pmus, f: dict, read, now_ts: float,
     return None, refusal
 
 
+# THE VENUE'S OWN TOKEN FOR THE OTHER SIDE OF A CONDITION (W2 / P1,
+# 2026-09-07; the live lane's ml-sibling-token statement, ONE text for
+# both lanes the way INTENT_GUARD_SQL is). Identity-only: the token
+# catalogue's row for THIS condition_id whose token is not the one in
+# hand -- never a name, never a position guess.
+SIBLING_TOKEN_SQL = """
+SELECT token_id FROM market_tokens WHERE condition_id = $1 AND token_id <> $2
+ ORDER BY outcome_index LIMIT 1 /* ml-sibling-token */
+"""
+
+
+async def sibling_token(pool, condition_id: str | None, asset: str | None) -> str | None:
+    """The catalogue's other token of the condition, or None (absent,
+    unnamed, unreadable: the caller refuses by name; never a guess)."""
+    if not condition_id or not asset:
+        return None
+    try:
+        tok = await pool.fetchval(SIBLING_TOKEN_SQL, str(condition_id), str(asset))
+    except Exception:  # noqa: BLE001 — an unreadable catalogue names nothing
+        return None
+    return str(tok) if tok else None
+
+
+async def _long_from_catalogue(pool, condition_id: str | None, m: dict | None) -> dict | None:
+    """THE LONG TOKEN HIS FILLS NEVER TOUCHED (W2 / P1, gap_planned_unopened
+    section 1 class B). `_choose_long` names the LONG side `other_of(a)`
+    when his only mapped token resolved BUY_SHORT -- and `assets` is HIS
+    fills' tokens, so with every fill on the venue's short-side token
+    (the aec tennis family: `<his side>:SHORT`) `other_of` is None and
+    the mapping came back {us_slug, long_asset: None, other_asset: B}.
+    The shadow then read his_long 0, planned SELL_LONG and wrote the row
+    with long_asset NULL (14 of 22 mapped markets on 2026-09-07 opened
+    that way, 15-127 min each); the live lane left silently. The
+    catalogue names the long token by identity (the condition's other
+    token, SIBLING_TOKEN_SQL) exactly as the live lane already read the
+    OTHER token for a long-only fill; a mapping with its long side set
+    is returned as it was, byte for byte. `long_from: catalogue` marks
+    the fill; a catalogue that does not name it leaves long_asset None
+    for the callers to refuse (`long_token_unknown` on the live lane)."""
+    if not m or m.get("long_asset") or not m.get("other_asset"):
+        return m
+    la = await sibling_token(pool, condition_id, m["other_asset"])
+    if not la:
+        return m
+    return {**m, "long_asset": la, "long_from": "catalogue"}
+
+
 async def map_market(pool, fills: list[dict], pmus=None, *, whale: str | None = None,
                      condition_id: str | None = None, budget: MapBudget | None = None,
                      out: dict | None = None) -> dict | None:
@@ -662,7 +709,7 @@ async def map_market(pool, fills: list[dict], pmus=None, *, whale: str | None = 
     for r in rows:                      # newest row per token
         cands.setdefault(str(r["asset"]), (str(r["us_market_slug"]), str(r["intent"])))
     if cands:
-        return _choose_long(assets, cands, pos, "ledger")
+        return await _long_from_catalogue(pool, condition_id, _choose_long(assets, cands, pos, "ledger"))
     # premap, per token, with the event title the markets table carries
     try:
         from . import premap as _premap
@@ -682,7 +729,7 @@ async def map_market(pool, fills: list[dict], pmus=None, *, whale: str | None = 
         if m and m.get("market_slug") and m.get("intent"):
             cands[a] = (str(m["market_slug"]), str(m["intent"]))
     if cands:
-        return _choose_long(assets, cands, pos, "premap")
+        return await _long_from_catalogue(pool, condition_id, _choose_long(assets, cands, pos, "premap"))
     if pmus is None:
         return None
     return await _map_exact(pool, pmus, assets, by_asset, pos, whale, condition_id, budget, out)
@@ -827,7 +874,7 @@ async def _map_exact(pool, pmus, assets: list[str], by_asset: dict[str, dict],
         sources = [v["source"] for v in copy_lane.values()]
         source = max(sources, key=lambda s: MAP_SOURCE_RANK.index(s))
         out["lane"] = source
-        return _choose_long(assets, cands, pos, source)
+        return await _long_from_catalogue(pool, condition_id, _choose_long(assets, cands, pos, source))
     grammar = {a: v for a, v in tokens.items()
                if isinstance(v, dict) and v.get("source") == map_lane.SRC_GRAMMAR}
     if not grammar:
@@ -867,7 +914,8 @@ async def _map_exact(pool, pmus, assets: list[str], by_asset: dict[str, dict],
     out["grammar"] = {"his_slug": v1.get("his_slug"), "side_index": v1.get("side_index"),
                       "outcome_desc": v1.get("outcome_desc"), "intent": v1.get("intent"),
                       "slug": v1["slug"], "asset": a1}
-    return _choose_long(assets, cands, pos, map_lane.SRC_GRAMMAR)
+    return await _long_from_catalogue(pool, condition_id,
+                                      _choose_long(assets, cands, pos, map_lane.SRC_GRAMMAR))
 
 
 # --------------------------------------------------------------- ours
@@ -1934,6 +1982,15 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
                his_long=his_long, his_other=his_other, his_net=net,
                snap_long=_snap_of(la), snap_other=_snap_of(oa))
     row["detail"]["map"] = m["source"]
+    if m.get("long_from"):
+        # W2 / P1: the long token came off the catalogue (his fills sit
+        # only on the short-side token), so the row's long_asset is set
+        # and the two lanes read the same pair
+        row["detail"]["long_from"] = str(m["long_from"])
+    elif not la:
+        # the catalogue did not name it either: the row says so, and
+        # the live lane refuses the candidate `long_token_unknown`
+        row["detail"]["long_token_unknown"] = True
     if m.get("per_side"):
         row["detail"]["per_side"] = True     # his larger side is the long, on its own slug
     if fresh_snap and snap_partial:

@@ -643,3 +643,123 @@ def test_the_worker_degrades_by_name_when_050_is_unapplied():
     assert "intent" not in ml._SQL_ORDERS_OPEN_047 and "intent" in ml._SQL_ORDERS_OPEN
     assert "intent" not in ml._SQL_ORDER_INSERT_047 and "$19" in ml._SQL_ORDER_INSERT
     assert "intent" not in ml._SQL_MIRROR_DAY_047 and "intent" in ml._SQL_MIRROR_DAY
+
+
+# ------------------------------------- 054 (W2 / P2, candidate refusals)
+#
+# 054 is the next free number after 053 (the register reserves 048 and
+# 051; 052 and 053 are landed). ONE table, CREATE-only, measurement
+# only: the live lane writes one row per (whale, condition_id)
+# transition of the candidate's refusal name through one statement per
+# tick, and degrades by name (`refusal_write_failed`) while the table
+# is absent -- the workers never run migrations.
+
+SQL_054 = MIG_DIR.joinpath("054_mirror_candidate_refusals.sql")
+# the brief's columns (W2 P2): whale, condition_id, us_slug, refusal, at,
+# his_net, target, mark, his_px, ask, band, long_asset, books_live,
+# opened_today, active_conditions, cand_reads, tick_s -- plus the id
+REFUSAL_COLUMNS_054 = {
+    "id", "at", "whale", "condition_id", "us_slug", "refusal", "his_net", "target", "mark",
+    "his_px", "ask", "band", "long_asset", "long_from", "books_live", "opened_today", "active_conditions",
+    "cand_reads", "tick_s",
+}
+
+
+def _sql_054() -> str:
+    return SQL_054.read_text()
+
+
+def test_054_exists_and_sorts_directly_after_053():
+    assert SQL_054.exists()
+    files = [p.name for p in sorted(MIG_DIR.glob("*.sql"))]
+    i = files.index("053_copy_probes_probe_at_idx.sql")
+    assert files[i + 1] == "054_mirror_candidate_refusals.sql", files[i:i + 3]
+    assert sum(1 for f in files if f.startswith("054_")) == 1
+    assert files.index("050_mirror_shorts.sql") < files.index("052_copy_exit_legs.sql") < i
+
+
+def test_054_header_is_in_the_house_style():
+    head = _sql_054().splitlines()[0]
+    assert head.startswith("-- 054: MIRROR CANDIDATE REFUSALS (W2 / P2, 2026-09-07")
+
+
+def test_054_is_create_only_one_table_two_indexes_and_names_the_briefs_columns():
+    sql = _sql_054()
+    up = " ".join(_statements(sql)).upper()
+    assert "ALTER TABLE" not in up and "DROP " not in up and "UPDATE " not in up
+    stmts = _statements(sql)
+    assert len(stmts) == 3, stmts
+    assert stmts[0].startswith("CREATE TABLE IF NOT EXISTS mirror_candidate_refusals (")
+    assert stmts[1:] == [
+        "CREATE INDEX IF NOT EXISTS mirror_candidate_refusals_whale_market_at_idx "
+        "ON mirror_candidate_refusals (whale, condition_id, at DESC)",
+        "CREATE INDEX IF NOT EXISTS mirror_candidate_refusals_at_idx ON mirror_candidate_refusals (at DESC)",
+    ]
+    cols = _table_columns(sql, "mirror_candidate_refusals")
+    assert set(cols) == REFUSAL_COLUMNS_054, set(cols) ^ REFUSAL_COLUMNS_054
+    assert cols["id"] == "BIGSERIAL PRIMARY KEY"
+    assert cols["at"].startswith("TIMESTAMPTZ NOT NULL DEFAULT now()")
+    # the columns a writer MUST supply: the pair and the name; every
+    # number is nullable ("not reached before the exit" is NULL, never 0)
+    required = {n for n, d in cols.items()
+                if "NOT NULL" in d and "DEFAULT" not in d and "PRIMARY KEY" not in d}
+    assert required == {"whale", "condition_id", "refusal"}
+    for c in ("his_net", "mark", "his_px", "ask", "band", "tick_s"):
+        assert cols[c].startswith("DOUBLE PRECISION") and "NOT NULL" not in cols[c], (c, cols[c])
+    for c in ("target", "books_live", "opened_today", "active_conditions", "cand_reads"):
+        assert cols[c].startswith("INTEGER") and "NOT NULL" not in cols[c], (c, cols[c])
+    for c in ("us_slug", "long_asset"):
+        assert cols[c].startswith("TEXT") and "NOT NULL" not in cols[c], (c, cols[c])
+    # never one of the older files' objects
+    for name in ("mirror_books", "mirror_orders", "mirror_shadow", "live_orders", "trades"):
+        assert name not in " ".join(stmts), name
+
+
+def test_054_leaves_047_049_050_exactly_as_pinned():
+    assert len(_statements(_sql())) == 11 and all(s.startswith("CREATE ") for s in _statements(_sql()))
+    for older in (_sql(), _sql_049(), _sql_050()):
+        assert "054" not in older and "mirror_candidate_refusals" not in older
+    for s in _statements(_sql()):
+        if s.startswith(("CREATE UNIQUE INDEX IF NOT EXISTS ", "CREATE INDEX IF NOT EXISTS ")):
+            name = s.split("IF NOT EXISTS ", 1)[1].split(" ", 1)[0]
+            assert name not in _sql_054(), name
+
+
+def test_054_parses_as_postgres_sql_and_the_tree_agrees_with_the_text():
+    pglast = pytest.importorskip("pglast")
+    stmts = pglast.parse_sql(_sql_054())
+    kinds = [type(s.stmt).__name__ for s in stmts]
+    assert kinds == ["CreateStmt", "IndexStmt", "IndexStmt"], kinds
+    create = stmts[0].stmt
+    assert create.relation.relname == "mirror_candidate_refusals" and create.if_not_exists
+    tree_cols = {e.colname for e in create.tableElts if type(e).__name__ == "ColumnDef"}
+    assert tree_cols == REFUSAL_COLUMNS_054, tree_cols ^ REFUSAL_COLUMNS_054
+    idx = {s.stmt.idxname: s.stmt for s in stmts[1:]}
+    assert all(i.if_not_exists and not i.unique and i.relation.relname == "mirror_candidate_refusals"
+               for i in idx.values())
+    assert [p.name for p in idx["mirror_candidate_refusals_whale_market_at_idx"].indexParams] == [
+        "whale", "condition_id", "at"]
+    assert [p.name for p in idx["mirror_candidate_refusals_at_idx"].indexParams] == ["at"]
+
+
+def test_the_worker_writes_054_through_one_statement_and_degrades_by_name():
+    """The refusal rows go out as ONE INSERT ... SELECT FROM
+    jsonb_to_recordset per tick naming every column of the table but
+    its id, and the write's failure is a census name, never a raise."""
+    ml = pytest.importorskip("sportsassets.workers.mirror_live")
+    src = pathlib.Path(ml.__file__).read_text()
+    assert "refusal_write_failed" in src and "mirror_candidate_refusals" in src
+    s = _flat(ml._SQL_CAND_REFUSALS)
+    cols = REFUSAL_COLUMNS_054 - {"id"}
+    head = s.split(")", 1)[0]
+    assert head.startswith("INSERT INTO mirror_candidate_refusals (")
+    named = {c.strip() for c in head.split("(", 1)[1].split(",")}
+    assert named == cols, named ^ cols
+    assert "jsonb_to_recordset($1::jsonb)" in s and "to_timestamp(r.at_ts)" in s
+    assert "ml-cand-refusals" in s and "$2" not in s
+    # the statement's record shape names every column the table has
+    rec = s.split("AS r(", 1)[1].split(")", 1)[0]
+    rec_cols = {x.strip().split(" ")[0] for x in rec.split(",")}
+    assert rec_cols == (cols - {"at"}) | {"at_ts"}, rec_cols
+    # every refusal name the rows carry is a census key
+    assert "refusal_write_failed" in ml.CENSUS_KEYS and "cand_unread_capped" in ml.CENSUS_KEYS

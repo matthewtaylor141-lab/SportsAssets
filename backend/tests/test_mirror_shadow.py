@@ -50,6 +50,9 @@ class _Pool:
         self.writes = []
         self.state = {}
         self.queries = []
+        # W2 / P1: the token catalogue's answer to the sibling read,
+        # (condition_id, token) -> the other token; empty = no catalogue
+        self.siblings = {}
 
     async def fetch(self, sql, *a):
         s = " ".join(sql.split())
@@ -70,6 +73,9 @@ class _Pool:
         return []
 
     async def fetchval(self, sql, *a):
+        if "ml-sibling-token" in sql:
+            self.queries.append((" ".join(sql.split()), a))
+            return self.siblings.get((a[0], a[1]))
         if "ingestion_state" in sql and a and a[0] == "mirror_shadow":
             return self.switch
         if "ingestion_state" in sql and a and str(a[0]).startswith("whale_positions_raw:"):
@@ -896,6 +902,86 @@ def test_ledger_net_signs_shorts_and_the_ledger_map_reads_a_short_row(monkeypatc
     # a ledger row that SHORTED Michelsen names Nakashima as the long token
     m = _run(ms.map_market(_P(fills=HIS), HIS))
     assert m == {"us_slug": SLUG, "long_asset": N, "other_asset": M, "source": "ledger"}
+
+
+def _short_side_only_resolve(monkeypatch):
+    """premap naming his ONLY token (N, Nakashima) as the venue's
+    SHORT side of SLUG -- the aec tennis family's `<his side>:SHORT`
+    (gap_planned_unopened.md section 1, class B)."""
+    from sportsassets.workers import premap
+
+    async def _short_only(pool, market_title, event_title, outcome, global_slug):
+        if outcome == "Brandon Nakashima":
+            return {"market_slug": SLUG, "intent": "ORDER_INTENT_BUY_SHORT"}
+        return None
+    monkeypatch.setattr(premap, "resolve", _short_only)
+    return [_fill(N, "BUY", 367.42, 0.77, 1900)]
+
+
+def test_w2_the_mapper_fills_the_long_token_from_the_catalogue_when_his_fills_sit_on_the_short_side(monkeypatch):
+    """W2 / P1. Fills on the short-side token alone: _choose_long's
+    other_of() finds no second token of his, so the mapping came back
+    long_asset None. The catalogue's row for the condition's OTHER
+    token fills it, by identity (SIBLING_TOKEN_SQL, the live lane's
+    ml-sibling-token statement); no catalogue, no condition id, or an
+    unreadable read leaves it None for the callers to refuse. A
+    mapping whose long side his fills named is returned as it was."""
+    fills = _short_side_only_resolve(monkeypatch)
+    p = _Pool(fills=fills, mapped=False)
+    m0 = _run(ms.map_market(p, fills, condition_id=CID))
+    assert m0 == {"us_slug": SLUG, "long_asset": None, "other_asset": N, "source": "premap"}
+    assert [q for q in p.queries if "ml-sibling-token" in q[0]] == [(" ".join(ms.SIBLING_TOKEN_SQL.split()), (CID, N))]
+    p.siblings = {(CID, N): M}
+    m = _run(ms.map_market(p, fills, condition_id=CID))
+    assert m == {"us_slug": SLUG, "long_asset": M, "other_asset": N, "source": "premap",
+                 "long_from": "catalogue"}
+    # no condition id (a table-only caller): nothing is looked up
+    p.queries.clear()
+    assert _run(ms.map_market(p, fills))["long_asset"] is None
+    assert not [q for q in p.queries if "ml-sibling-token" in q[0]]
+    # an unreadable catalogue names nothing
+
+    class _Raises(_Pool):
+        async def fetchval(self, sql, *a):
+            if "ml-sibling-token" in sql:
+                raise RuntimeError("db down")
+            return await super().fetchval(sql, *a)
+    assert _run(ms.map_market(_Raises(fills=fills, mapped=False), fills, condition_id=CID))["long_asset"] is None
+    # the long side his fills named: byte for byte as before, no read
+    p2 = _Pool(fills=HIS)
+    p2.siblings = {(CID, M): N, (CID, N): M}
+    assert _run(ms.map_market(p2, HIS, condition_id=CID)) == {
+        "us_slug": SLUG, "long_asset": M, "other_asset": N, "source": "ledger"}
+    assert not [q for q in p2.queries if "ml-sibling-token" in q[0]]
+    assert "ml-sibling-token" in ms.SIBLING_TOKEN_SQL
+    assert _run(ms.sibling_token(p, None, N)) is None and _run(ms.sibling_token(p, CID, None)) is None
+    assert _run(ms.sibling_token(p, CID, N)) == M
+
+
+def test_w2_the_shadow_row_carries_the_catalogue_long_token_and_names_an_unnamed_one(monkeypatch):
+    """W2 / P1. The row's long_asset is the catalogue's token, his_long
+    0, his_other his fills, the net negative -- the pair the live lane
+    reads -- with `long_from: catalogue` on the detail; when the
+    catalogue names nothing the row says `long_token_unknown` and
+    plans as it did (the shadow measures; the live lane refuses)."""
+    fills = _short_side_only_resolve(monkeypatch)
+    p = _Pool(fills=fills, mapped=False)
+    p.siblings = {(CID, N): M}
+    row = _run(ms.shadow_market(p, _Pmus(), "rn1", CID, RATIO, {}, positions={}))
+    assert (row["long_asset"], row["other_asset"]) == (M, N)
+    assert row["his_long"] == 0.0 and row["his_other"] == pytest.approx(367.42)
+    assert row["his_net"] == pytest.approx(-367.42) and row["us_market_slug"] == SLUG
+    assert row["detail"]["long_from"] == "catalogue" and "long_token_unknown" not in row["detail"]
+    assert row["detail"]["map"] == "premap"
+    p2 = _Pool(fills=fills, mapped=False)
+    row2 = _run(ms.shadow_market(p2, _Pmus(), "rn1", CID, RATIO, {}, positions={}))
+    assert row2["long_asset"] is None and row2["other_asset"] == N
+    assert row2["detail"]["long_token_unknown"] is True and "long_from" not in row2["detail"]
+    assert row2["his_long"] == 0.0 and row2["his_net"] == pytest.approx(-367.42)
+    assert row2["reason"] == row["reason"], "the verdict is the shadow's as before; only the row's pair moves"
+    # a mapped row whose long side his fills named carries neither mark
+    row3 = _run(ms.shadow_market(_Pool(fills=HIS), _Pmus(), "rn1", CID, RATIO, {}, positions={}))
+    assert row3["long_asset"] == M and "long_from" not in row3["detail"] and "long_token_unknown" not in row3["detail"]
 
 
 def test_the_premap_fallback_names_the_long_token_from_either_side(monkeypatch):

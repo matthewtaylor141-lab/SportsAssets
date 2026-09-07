@@ -367,6 +367,18 @@ CENSUS_KEYS: tuple[str, ...] = (
     # under `no_mark` as before. Inserted BEFORE `cand_terminal_skipped`,
     # which stays last (pinned)
     "book_terminal_skipped",
+    # W2 (2026-09-07): every exit of _tick_candidate is a NAME and lands
+    # on mirror_candidate_refusals (migration 054). The four exits that
+    # were silent: `long_token_unknown` (his fills sit only on the
+    # venue's short-side token and the catalogue names no long token),
+    # `target_zero` (ratio x net rounds to nothing), `book_row_unreadable`
+    # (the book row could not be read back after the open),
+    # `cand_unread_capped` (the walk's cap left the candidate unread this
+    # tick). `refusal_write_failed`: the refusal table could not be
+    # written (absent until 054 lands, or a blip); the tick goes on.
+    # Inserted BEFORE `cand_terminal_skipped`, which stays last (pinned)
+    "long_token_unknown", "target_zero", "book_row_unreadable", "cand_unread_capped",
+    "refusal_write_failed",
     # D1 (2026-09-06): a candidate skipped because its venue state read
     # TERMINAL inside the last UNMAPPED_TTL_S (_terminal_until). Appended
     # LAST, past the served 40-key prefix; `integ` is at its own ceiling
@@ -459,6 +471,62 @@ _terminal_book_state: dict[tuple[str, str], str] = {}
 # game and always has room).
 GAME_FULL_MEMO_S = 60.0
 _game_full_until: dict[tuple, float] = {}
+# THE CANDIDATE'S REFUSAL, NAMED AND PERSISTED (W2 / P2, 2026-09-07;
+# gap_planned_unopened.md section 0: 58 mapped markets, $218k in 24 h,
+# had a shadow plan on an OPEN two-sided book while he traded and never
+# a mirror_books row, and the lane's per-candidate verdict survived
+# nowhere -- the census counts a name once per tick, the heartbeat
+# keeps the last tick, four exits of _tick_candidate returned nothing).
+# Every exit of _tick_candidate now returns its NAME (the census
+# counters it already had are unchanged), and _walk_candidate writes
+# one row per (whale, condition_id) TRANSITION to
+# mirror_candidate_refusals (migration 054): a row when the name
+# differs from the last one written for the pair, and again when the
+# same name has stood for CAND_REFUSAL_RESTAMP_S (900 s, the memo
+# class of _unmapped_until), so the writes are bounded by the active
+# conditions over 900 s. `_cand_refusal_last` is the memo: (whale,
+# cid) -> (name, stamp) of the last row WRITTEN -- a write that failed
+# leaves it alone, so the next tick's same name is a transition again
+# and the row is retried. The row carries only what the tick already
+# holds (his net, the target, the mark, his level, the ask, the band,
+# the long token, the book counts, his active conditions, the reads so
+# far, the wall time so far): no venue call is made for it. A write
+# failure never blocks the tick: `refusal_write_failed` on the census,
+# logged once per process (the table is absent until 054 is applied;
+# the workers never run migrations). A candidate with a book (books_seen)
+# writes nothing: it is not a candidate with no book.
+CAND_REFUSAL_RESTAMP_S = ms.UNMAPPED_TTL_S
+# the one write's bound: past it the rows are dropped and named again on
+# the next transition, exactly as a failed write (never a stop)
+CAND_REFUSAL_WRITE_TIMEOUT_S = 5.0
+_cand_refusal_last: dict[tuple[str, str], tuple[str, float]] = {}
+_CAND_REFUSAL_MEMO_MAX = 8000
+_cand_write_logged = False
+# THE CANDIDATE WALK'S ROTATION CURSOR (W2 / P3). The walk read his
+# conditions newest-fill-first up to MAX_MARKETS_PER_TICK, so on a busy
+# evening (549-790 active conditions, capped_tick true in 7 of 9
+# heartbeats 20:34Z-02:46Z 2026-09-06) the tail was never reached: a
+# mapped market he last traded 10-20 min earlier sat behind dozens of
+# fresher unmapped ones every tick. The order is now: the woken markets
+# (his fill this poll, as before), then the candidates with a shadow
+# plan (_shadow_planned) ahead of the rest, the two rotated together so
+# a CAPPED tick RESUMES after the last candidate it walked for the
+# whale -- every readable candidate is walked within
+# ceil(readable / MAX_MARKETS_PER_TICK) ticks. The cursor is set only
+# by a walk that broke on the cap (the candidates' budget or the soft
+# guard): the last rotation candidate _walk_candidate was called for
+# (a woken one never moves it); a walk that reached the end of its
+# list clears it, so an uncapped tick keeps the order it always had
+# (woken, planned, newest first), and a cursor no longer in the list
+# restarts at the head, the planned first. The cap is unchanged (env
+# may only lower it) and the memos (_unmapped_until, _terminal_until,
+# the full-game memo, a market with a book) still skip BEFORE any read,
+# spending no slot.
+_cand_cursor: dict[str, str] = {}
+# the rotation candidates the last capped walk read, in order (W2
+# review): when the cursor candidate leaves his active list between
+# ticks, the walk resumes after the last of these still on it
+_cand_trail: dict[str, list[str]] = {}
 # The venue IGNORED the post-only flag once (executions on a post-only
 # create): the flag is off for the rest of the process and the maker
 # thesis is measured by price selection alone (spec X.L).
@@ -1071,11 +1139,39 @@ SELECT EXISTS (
 _SQL_KALSHI = "SELECT 1 FROM kalshi_claims WHERE asset = $1 LIMIT 1 /* ml-kalshi */"
 _SQL_MARKET = "SELECT closed, resolved, resolved_prices FROM markets WHERE condition_id = $1 /* ml-market */"
 _SQL_TOKEN_INDEX = "SELECT outcome_index FROM market_tokens WHERE token_id = $1 /* ml-token-index */"
-_SQL_SIBLING_TOKEN = """
-SELECT token_id FROM market_tokens WHERE condition_id = $1 AND token_id <> $2
- ORDER BY outcome_index LIMIT 1 /* ml-sibling-token */
-"""
+# ONE statement for both lanes since W2 / P1 (the shadow's map_market
+# reads the same catalogue row to fill a mapping whose long side his
+# fills never touched); the text and its tag are unchanged
+_SQL_SIBLING_TOKEN = ms.SIBLING_TOKEN_SQL
 _SQL_WHALE_ADDRESS = "SELECT address FROM whales WHERE lower(username) = $1 LIMIT 1 /* ml-whale-address */"
+# THE SHADOW'S PLAN PER CANDIDATE, ONE READ PER WHALE PER TICK (W2 / P3):
+# the newest shadow row of every condition in the lookback, so the
+# candidate walk reads the markets the shadow planned a leg on first
+# (a would_side, or a target that is not 0). Unreadable: no plan is
+# known and the walk rotates over his conditions as they come.
+_SQL_SHADOW_PLANNED = """
+SELECT DISTINCT ON (condition_id) condition_id, would_side, target
+  FROM mirror_shadow
+ WHERE whale = $1 AND at >= now() - ($2::float8 * interval '1 hour')
+ ORDER BY condition_id, at DESC /* ml-shadow-planned */
+"""
+# THE CANDIDATE'S REFUSAL, PERSISTED (W2 / P2, migration 054): the rows
+# a tick collected, written ONCE at the end of the walk from one JSON
+# array (a busy evening names 500+ unread candidates on its first tick;
+# one round trip, never one per row). `at` is the tick's clock.
+_SQL_CAND_REFUSALS = """
+INSERT INTO mirror_candidate_refusals
+       (whale, condition_id, us_slug, refusal, at, his_net, target, mark, his_px, ask, band,
+        long_asset, long_from, books_live, opened_today, active_conditions, cand_reads, tick_s)
+SELECT r.whale, r.condition_id, r.us_slug, r.refusal, to_timestamp(r.at_ts), r.his_net,
+       r.target, r.mark, r.his_px, r.ask, r.band, r.long_asset, r.long_from, r.books_live, r.opened_today,
+       r.active_conditions, r.cand_reads, r.tick_s
+  FROM jsonb_to_recordset($1::jsonb) AS r(
+       whale text, condition_id text, us_slug text, refusal text, at_ts float8,
+       his_net float8, target int, mark float8, his_px float8, ask float8, band float8,
+       long_asset text, long_from text, books_live int, opened_today int, active_conditions int,
+       cand_reads int, tick_s float8) /* ml-cand-refusals */
+"""
 _SQL_SHADOW_LATEST = """
 SELECT target, target_raw::float8 AS target_raw, capped, ratio::float8 AS ratio,
        his_net::float8 AS his_net, extract(epoch FROM at)::float8 AS at_ts
@@ -1273,6 +1369,14 @@ class _Tick:
     walk_order: list = field(default_factory=list)
     book_reads: dict = field(default_factory=dict)
     walk_done: set = field(default_factory=set)
+    # W2 / P2: the tick's real clock (tick_once's `started`; the row's
+    # `tick_s` is the wall time so far), the refusal rows collected this
+    # tick, the memo entries they will commit on a successful write, and
+    # his active conditions per whale as the walk read them
+    started: float = field(default_factory=time.monotonic)
+    cand_rows: list = field(default_factory=list)
+    cand_pending: dict = field(default_factory=dict)
+    active_conds: dict = field(default_factory=dict)
 
 
 # ------------------------------------------- E2: the tick's shared counters
@@ -6639,10 +6743,21 @@ async def _flatten_send(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, his_px
 
 # ----------------------------------------------------- step A: admission
 
-async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
+async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = None) -> str | None:
     """A market with no book: read everything admission wants, refuse
-    by the first name, else open the book and plan it this tick."""
+    by the first name, else open the book and plan it this tick.
+
+    RETURNS THE NAME OF EVERY EXIT (W2 / P2), None only when a book
+    opened: the census name `_mirror_stop` counted, or `book_seen` for
+    a market that already has a book (counted nowhere, as before). The
+    four exits that returned silently are named `long_token_unknown`,
+    `target_zero` and `book_row_unreadable` here and `cand_unread_capped`
+    in the walk. `ctx`, when given, collects what the candidate read
+    before it left (slug, long token, his net, target, mark, his level,
+    ask, band, the book counts) for the refusal row _walk_candidate
+    writes; nothing is read for it."""
     w = whale
+    d = ctx if ctx is not None else {}
     fills = await ms.his_fills(t.pool, w, cid)
     _count_fills_dedup(t)
     # the shadow's own mapper, venue module and all (C1): ledger, premap,
@@ -6660,18 +6775,23 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         if mo.get("refusal") == "map_reads_capped":
             # no verdict this tick: never TTL-skipped, read again next tick
             _mirror_stop("map_reads_capped", w)
-            return
+            return "map_reads_capped"
         _mirror_stop("unmapped", w)
         _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
-        return
+        return "unmapped"
     src = str(m.get("source") or "")
     if src not in MIRROR_LIVE_MAP_SRC and src != "grammar":
         # a mapping class no lane has certified opens no book, whatever
         # the quarantine says (MIRROR_LIVE_MAP_SRC); the shadow measures it
         _mirror_stop("map_source_unverified", w)
         _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
-        return
+        return "map_source_unverified"
     slug, la, oa = m["us_slug"], m["long_asset"], m.get("other_asset")
+    d.update(slug=slug, long_asset=la)
+    if m.get("long_from"):
+        # the mapper already named the long token off the catalogue
+        # (ms._long_from_catalogue); the row says so (W2 review LOW-1)
+        d["long_from"] = str(m["long_from"])
     if src == "grammar":
         # the class's own certification first (venue-only truth, the
         # probation, the trip): a refusal here is named and, except the
@@ -6682,16 +6802,44 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
             _mirror_stop(held, w)
             if held != "grammar_probation":
                 _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
-            return
-    if not la or (w, cid) in t.books_seen:
-        return
+            return held
+    if not la:
+        # THE LONG TOKEN HIS FILLS NEVER TOUCHED (W2 / P1, class B of
+        # gap_planned_unopened.md: $26.9k proven, up to $79k). Every
+        # fill of his is on the venue's SHORT-side token, so the mapper
+        # named no long token (_choose_long's other_of over HIS tokens)
+        # and this exit was silent, every tick, until he bought the
+        # other token -- 14 of 22 mapped markets on 2026-09-07 opened
+        # that way. The catalogue names it by identity, exactly as the
+        # OTHER token is read below for a long-only fill: the
+        # condition's sibling of the token in hand (ms.map_market fills
+        # it the same way, so the shadow's row agrees). Named, the
+        # EXISTING short road runs unchanged from here: the signed
+        # target, his other-token BUY at 1 - p, BUY_SHORT behind
+        # short_model_confirmed and _short_gate. A catalogue that does
+        # not name it refuses `long_token_unknown` and memoises the
+        # market for the unmapped TTL: never a guess, never a token the
+        # catalogue does not name.
+        if oa:
+            try:
+                la = await t.pool.fetchval(_SQL_SIBLING_TOKEN, cid, oa)
+            except Exception:  # noqa: BLE001 — an unreadable catalogue names no token
+                la = None
+            la = str(la) if la else None
+        if not la:
+            _mirror_stop("long_token_unknown", w)
+            _unmapped_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
+            return "long_token_unknown"
+        d.update(long_asset=la, long_from="catalogue")
+    if (w, cid) in t.books_seen:
+        return "book_seen"
     memo_key = le._us_game_key(slug)
     if memo_key and _game_full_until.get(("game", str(memo_key)), 0.0) > t.now:
         # the game read FULL inside the last GAME_FULL_MEMO_S (E1
         # re-review LOW-2): no venue read and no candidate slot spent
         # on it until the memo runs
         _mirror_stop("cand_game_full_skipped", w)
-        return
+        return "cand_game_full_skipped"
     if not oa:
         # his fills never touched the other outcome: the market names
         # it, and the book must know both tokens (the underdog referee
@@ -6702,6 +6850,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
             oa = None
         oa = str(oa) if oa else None
     r = await _read_market(t, w, cid, slug, la, oa, fills)
+    d.update(mark=r.mark, ask=r.ask)
     if t.slug_states.get(slug) in ms.STATE_TERMINAL:
         # the market has ended (this read's own state, as _bbo recorded
         # it): remembered for the TTL so the next ticks' slots go to
@@ -6709,10 +6858,11 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         # writes this; HALTED/SUSPENDED never do (they reopen)
         _terminal_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
     if t.abandoned:
-        return
+        return "tick_abandoned"
     shorts = _shorts_on(t)
     drift, _drift_src = _drift_for(r)
     net, _snap_net = _net_for(r, drift, short=shorts)
+    d["his_net"] = net
     # THE RATIO IS DECIDED HERE, AT OPEN, AND STORED ON THE BOOK (owner
     # orders 2026-09-06 ~14:00Z and ~14:10Z; rules.open_ratio): an exact
     # copy under MIRROR_SMALL_BET_USD of his dollars at the mark, else
@@ -6744,16 +6894,17 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         # retries next tick, so the market is read again then
         if exposure is None:
             _mirror_stop("game_unreadable", w)
-            return
+            return "game_unreadable"
         _mirror_stop("game_cap_full", w)
         if game_key:
             _game_full_until[("game", str(game_key))] = t.now + GAME_FULL_MEMO_S
-        return
+        return "game_cap_full"
     tg = rules.mirror_target(ratio, net, r.mark, rules.MIRROR_CLIP_USD,
                              cap_usd=min(room, cap), allow_short=shorts)
+    d["target"] = tg.get("target")
     if tg.get("refusal"):
         _mirror_stop(tg["refusal"], w)
-        return
+        return str(tg["refusal"])
     if room < cap:
         full = rules.mirror_target(ratio, net, r.mark, rules.MIRROR_CLIP_USD,
                                    cap_usd=cap, allow_short=shorts)
@@ -6763,8 +6914,12 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     # the short side's share cap (rules.MIRROR_SHORT_MAX_SHARES, ONE
     # until rung S5): a negative target is clamped toward zero and named
     target = _short_capped(t, target, w)
+    d["target"] = target
     if target == 0:
-        return                       # nothing to hold: no book
+        # nothing to hold: no book. Named since W2 / P2 (it was a
+        # silent exit: ratio x net rounding to nothing, every tick)
+        _mirror_stop("target_zero", w)
+        return "target_zero"
     # A NEGATIVE TARGET IS A SHORT BOOK (P2 rung S0, brief 3.2): his
     # net is negative on the mapped market and the knob is on. Its
     # level is his most recent move DOWN in long-token terms -- his
@@ -6773,11 +6928,12 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     short = target < 0
     if short and not le.short_model_confirmed():
         _mirror_stop("short_model_disarmed", w)
-        return
+        return "short_model_disarmed"
     his_px = _his_level(fills, la, oa, reducing=short, short=short)
+    d["his_px"] = his_px
     if his_px is None or not (0.0 < his_px < 1.0):
         _mirror_stop("no_price", w)
-        return
+        return "no_price"
     mk = r.market
     if mk is None:
         # A MARKETS ROW THAT IS ABSENT OR COULD NOT BE READ IS THE NAMED
@@ -6791,7 +6947,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         # re-review; owner order 2026-09-02, "go for it, let's get this
         # working")
         _mirror_stop("market_unreadable", w)
-        return
+        return "market_unreadable"
     ok, why = await _admit_source(t, w, m.get("source"), slug)
     edge_ok, edge_why = edge_gate.verdict(w)
     his_slug = next((f.get("market_slug") for f in fills if f.get("market_slug")), None)
@@ -6819,6 +6975,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     # from the environment is parsed on this path
     band = rules._env_float("LIVE_SIDE_PRICE_BAND")
     band = 0.15 if band is None else band
+    d["band"] = band
     side_band_hit = None
     if r.ask is not None:
         side_band_hit = abs(float(r.ask) - float(his_px)) > band
@@ -6829,6 +6986,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
             books_live, opened_today = int(row["live"] or 0), int(row["today"] or 0)
     except Exception:  # noqa: BLE001
         pass
+    d.update(books_live=books_live, opened_today=opened_today)
     se, err = await _state(t.pool, _STATE_SIDE_ECHO)
     first_fill_ok = None
     if err is None and isinstance(se, dict):
@@ -6860,7 +7018,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     refusal = rules.admission(facts)
     if refusal:
         _mirror_stop(refusal, w)
-        return
+        return str(refusal)
     intent = ORDER_INTENT_SHORT if short else ORDER_INTENT
     if short:
         # the two doors in front of every short open (H1, H2), after
@@ -6868,15 +7026,20 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
         held = await _short_open_refusal(t)
         if held:
             _mirror_stop(held, w)
-            return
+            return held
     opened = await le._open_mirror_book(t.pool, w, cid, slug, la, oa, tg["ratio_eff"], anchor,
                                         his_px, target, m.get("source"), game_key, intent=intent)
     if not opened.get("ok"):
-        _mirror_stop(str(opened.get("refusal") or "open_failed"), w)
-        return
+        refused = str(opened.get("refusal") or "open_failed")
+        _mirror_stop(refused, w)
+        return refused
     book = await t.pool.fetchrow(_SQL_BOOK_READ, opened["book_id"])
     if not book:
-        return
+        # the book opened and its row could not be read back: named
+        # since W2 / P2 (it was a silent exit); the book is walked from
+        # its row next tick like any other
+        _mirror_stop("book_row_unreadable", w)
+        return "book_row_unreadable"
     book = dict(book)
     if int(book.get("episode") or 1) > 1:
         await t.pool.execute(_SQL_BOOK_REOPENS, book["id"], int(book["episode"]) - 1)
@@ -6889,6 +7052,145 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     t.game_books.setdefault(_game_key_of(book), []).append(book)
     async with _lock_for(book["id"]):
         await _tick_book(t, book)
+    return None
+
+
+# --------------------------------- W2: the candidate's refusal, persisted
+
+# the exits that are not a refusal of a candidate WITH NO BOOK and so
+# write no row: a market that already has a book (the walk skips it
+# before the call; the name is for a direct caller)
+_CAND_NOT_RECORDED = frozenset({"book_seen"})
+
+
+async def _walk_candidate(t: _Tick, whale: str, cid: str) -> str | None:
+    """The walk's call: _tick_candidate with a context, and its exit
+    name noted for the refusal table (W2 / P2). Returns the name."""
+    d: dict = {}
+    name = await _tick_candidate(t, whale, cid, ctx=d)
+    if name is None:
+        # a book opened: no row, but the memo reads `opened` so a refusal
+        # after the book closes is a transition again, whatever stood
+        # before the open
+        _cand_refusal_last[(whale, cid)] = ("opened", t.now)
+    elif name not in _CAND_NOT_RECORDED:
+        _note_candidate_refusal(t, whale, cid, name, d)
+    return name
+
+
+def _note_candidate_refusal(t: _Tick, whale: str, cid: str, name: str, d: dict) -> bool:
+    """Queue one refusal row for (whale, cid) when `name` is a
+    TRANSITION from the last row written for the pair, or the same
+    name re-stamped after CAND_REFUSAL_RESTAMP_S. Returns whether a row
+    was queued. Pure bookkeeping: no read, no write here."""
+    key = (whale, cid)
+    last = _cand_refusal_last.get(key)
+    if last is not None and (t.now - last[1]) < CAND_REFUSAL_RESTAMP_S:
+        # inside the restamp window the same name is no transition; nor
+        # is the cap's name over ANY name (W2 review): under the rotation
+        # a candidate is read one tick and left unread the next, and a
+        # row each way was ~2 x cap rows every tick with no 900 s bound
+        if last[0] == name or name == "cand_unread_capped":
+            return False
+    if key in t.cand_pending:
+        return False                    # once per pair per tick
+    t.cand_pending[key] = (name, t.now)
+    t.cand_rows.append({
+        "whale": whale, "condition_id": cid, "us_slug": d.get("slug"), "refusal": name,
+        "at_ts": float(t.now), "his_net": _num(d.get("his_net")), "target": _int_or_none(d.get("target")),
+        "mark": _num(d.get("mark")), "his_px": _num(d.get("his_px")), "ask": _num(d.get("ask")),
+        "band": _num(d.get("band")), "long_asset": d.get("long_asset"),
+        "long_from": d.get("long_from"),
+        "books_live": _int_or_none(d.get("books_live", t.stats.get("books_live"))),
+        "opened_today": _int_or_none(d.get("opened_today")),
+        "active_conditions": _int_or_none(t.active_conds.get(whale)),
+        "cand_reads": int(t.cand_reads),
+        "tick_s": round(time.monotonic() - t.started, 1)})
+    return True
+
+
+def _int_or_none(v: Any) -> int | None:
+    n = _num(v)
+    return None if n is None else int(n)
+
+
+async def _flush_candidate_refusals(t: _Tick) -> None:
+    """ONE write of the tick's refusal rows; on success the memo takes
+    the pending entries. A failure is counted (`refusal_write_failed`),
+    logged once per process, and leaves the memo alone so the same
+    names are transitions again next tick. Never raises."""
+    global _cand_write_logged
+    rows, pending = t.cand_rows, t.cand_pending
+    t.cand_rows, t.cand_pending = [], {}
+    if not rows:
+        return
+    try:
+        # bounded (W2 review): the pool carries no command_timeout and the
+        # write runs under _TICK_LOCK, so a hung write must not hold the tick
+        await asyncio.wait_for(t.pool.execute(_SQL_CAND_REFUSALS, json.dumps(rows)),
+                               CAND_REFUSAL_WRITE_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — measurement never blocks the tick
+        _mirror_stop("refusal_write_failed")
+        if not _cand_write_logged:
+            _cand_write_logged = True
+            log.warning("mirror_live: mirror_candidate_refusals write failed (%s); %d rows dropped "
+                        "this tick, written again on the next transition (migration 054 applied?)",
+                        type(exc).__name__, len(rows))
+        return
+    _cand_refusal_last.update(pending)
+    if len(_cand_refusal_last) > _CAND_REFUSAL_MEMO_MAX:
+        # bounded: the pairs whose stamp is older than the lookback are
+        # gone from his active conditions anyway
+        cutoff = t.now - float(ms.LOOKBACK_H) * 3600.0
+        for k in [k for k, v in _cand_refusal_last.items() if v[1] < cutoff]:
+            del _cand_refusal_last[k]
+
+
+async def _shadow_planned(t: _Tick, whale: str) -> set:
+    """The conditions whose newest shadow row carries a plan (W2 / P3):
+    a would_side, or a target that is not 0. Unreadable: the empty set,
+    and the walk rotates over his conditions as they come."""
+    try:
+        rows = await t.pool.fetch(_SQL_SHADOW_PLANNED, whale, float(ms.LOOKBACK_H))
+    except Exception as exc:  # noqa: BLE001 — no plan known is no plan, never a stop
+        log.debug("mirror_live: shadow plans for %s unreadable (%s)", whale, type(exc).__name__)
+        return set()
+    out = set()
+    for r in rows or []:
+        tg = _num(r.get("target"))
+        if r.get("would_side") or (tg is not None and int(tg) != 0):
+            out.add(str(r.get("condition_id")))
+    return out
+
+
+def _candidate_order(conds: list, woken, planned, cursor: str | None) -> list:
+    """The walk's order for one whale (W2 / P3): the woken markets first
+    in his newest-fill order, then the rotation -- the planned
+    candidates ahead of the rest, each group in newest-fill order,
+    the whole rotated to resume right AFTER `cursor` (the last rotation
+    candidate the previous tick walked). A cursor not in the list
+    restarts at the head. Pure."""
+    wk = set(woken or ())
+    pl = set(planned or ())
+    first = [c for c in conds if c in wk]
+    rot = [c for c in conds if c not in wk and c in pl] + [c for c in conds if c not in wk and c not in pl]
+    if cursor is not None and cursor in rot:
+        i = rot.index(cursor) + 1
+        rot = rot[i:] + rot[:i]
+    return first + rot
+
+
+def _name_unread(t: _Tick, whale: str, unread: list) -> None:
+    """The candidates the cap left unread this tick, each named
+    `cand_unread_capped` (W2 / P2) -- never one a memo or a book would
+    have skipped anyway: those spend no slot and were not cut."""
+    for cid in unread:
+        if (whale, cid) in t.books_seen or _unmapped_until.get((whale, cid), 0.0) > t.now:
+            continue
+        if _terminal_until.get((whale, cid), 0.0) > t.now:
+            continue
+        _mirror_stop("cand_unread_capped", whale)
+        _note_candidate_refusal(t, whale, cid, "cand_unread_capped", {})
 
 
 # -------------------------------------------------------------- tick_once
@@ -6939,7 +7241,7 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
         return stats
     async with _TICK_LOCK:
         _current_stats = stats
-        t = _Tick(pool=pool, pmus=pmus, http=http, now=now, stats=stats)
+        t = _Tick(pool=pool, pmus=pmus, http=http, now=now, stats=stats, started=started)
         woken = sorted(_WOKEN)
         _WOKEN.clear()
         _WAKE.clear()
@@ -7114,7 +7416,9 @@ async def _tick(t: _Tick, woken: list) -> None:
         await _reconcile_orders(t, count=False)
         await _instruments(t)
         return
-    # then new candidates, newest first, for whales that may increase
+    # then new candidates -- the woken first, then the shadow's planned
+    # ahead of the rest, resumed from the whale's rotation cursor (W2 /
+    # P3; newest-first within each group) -- for whales that may increase
     for w in sorted(t.allow):
         if t.abandoned:
             break
@@ -7127,8 +7431,22 @@ async def _tick(t: _Tick, woken: list) -> None:
         except Exception as exc:  # noqa: BLE001
             log.warning("mirror_live: active markets for %s unreadable (%s)", w, type(exc).__name__)
             continue
-        conds = [c for c in conds if c in woken] + [c for c in conds if c not in woken]
-        for cid in conds:
+        t.active_conds[w] = len(conds)
+        wk = set(woken)
+        cursor = _cand_cursor.get(w)
+        if cursor is not None and (cursor not in conds or cursor in wk):
+            # the cursor candidate left his active list (its newest fill
+            # aged past the lookback -- the tail of a newest-first list is
+            # exactly where that happens) or was woken: resume after the
+            # last candidate the capped walk read that is still on the
+            # list, never at the head (W2 review: the tail starved again)
+            cursor = next((c for c in reversed(_cand_trail.get(w, ())) if c in conds and c not in wk), None)
+        conds = _candidate_order(conds, wk, await _shadow_planned(t, w), cursor)
+        unread: list = []                 # what the cap left unread, named below (W2 / P2)
+        last_rot: str | None = None       # the last rotation candidate walked this tick
+        trail: list = []                  # the rotation candidates walked, in order
+        capped = False
+        for i, cid in enumerate(conds):
             if t.abandoned:
                 break
             if t.cand_reads >= MAX_MARKETS_PER_TICK:
@@ -7136,6 +7454,7 @@ async def _tick(t: _Tick, woken: list) -> None:
                 # not spend it, so with any number of live books the
                 # first MAX_MARKETS_PER_TICK candidates are still read
                 stats["capped_tick"] = True
+                unread, capped = conds[i:], True
                 break
             if (w, cid) in t.books_seen or _unmapped_until.get((w, cid), 0.0) > t.now:
                 continue
@@ -7155,12 +7474,28 @@ async def _tick(t: _Tick, woken: list) -> None:
                 # the next tick reads on
                 _mirror_stop("venue_calls_capped", w)
                 stats["capped_tick"] = True
+                unread, capped = conds[i:], True
                 break
+            if cid not in wk:
+                last_rot = cid
+                trail.append(cid)
             try:
-                await _tick_candidate(t, w, cid)
+                await _walk_candidate(t, w, cid)
             except Exception as exc:  # noqa: BLE001
                 _mirror_stop("book_error", w)
                 log.exception("mirror_live: candidate %s/%s failed (%s)", w, cid, type(exc).__name__)
+        # THE CURSOR (W2 / P3): a capped walk resumes AFTER the last
+        # rotation candidate it walked next tick; a walk that reached the
+        # end of the list starts from the head (woken, planned, newest
+        # first) -- nothing was starved, so nothing to resume
+        if capped and last_rot is not None:
+            _cand_cursor[w] = last_rot
+            _cand_trail[w] = trail
+        elif not capped and not t.abandoned:
+            _cand_cursor.pop(w, None)
+            _cand_trail.pop(w, None)
+        _name_unread(t, w, unread)
+    await _flush_candidate_refusals(t)
     await _instruments(t)
 
 

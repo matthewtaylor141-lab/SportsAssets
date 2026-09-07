@@ -242,6 +242,7 @@ class _Pool(_ShadowPool):
         self.manual_shares = {}
         self.shadow = []
         self.reaper_touched = 0
+        self.cand_refusals = []       # W2 / P2: mirror_candidate_refusals, as written
         self.raise_on = []
         self.hide_orders = set()
         self.tables_absent = False
@@ -626,6 +627,22 @@ class _Pool(_ShadowPool):
         if "ml-shadow-latest" in s:
             rows = [r for r in self.shadow if r["whale"] == a[0] and r["condition_id"] == a[1]]
             return max(rows, key=lambda r: r["at_ts"]) if rows else None
+        if "ml-shadow-planned" in s:
+            # W2 / P3: the newest shadow row per condition for the whale,
+            # its plan columns as the rows carry them (absent: no plan)
+            newest: dict = {}
+            for r in self.shadow:
+                if r["whale"] == a[0] and (r["condition_id"] not in newest
+                                           or r["at_ts"] > newest[r["condition_id"]]["at_ts"]):
+                    newest[r["condition_id"]] = r
+            return [{"condition_id": c, "would_side": r.get("would_side"), "target": r.get("target")}
+                    for c, r in newest.items()]
+        if "ml-cand-refusals" in s:
+            # W2 / P2: the refusal rows, parsed the way the statement's
+            # jsonb_to_recordset would read them; kept in arrival order
+            for r in json.loads(a[0]):
+                self.cand_refusals.append(dict(r))
+            return "INSERT 0 %d" % len(json.loads(a[0]))
         if "ml-reaper-touched" in s:
             return self.reaper_touched
         if "ml-book-plan" in s:
@@ -1070,6 +1087,10 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_terminal_book_until", {})    # W1 / R4: the book's own terminal memo
     monkeypatch.setattr(ml, "_terminal_book_state", {})
     monkeypatch.setattr(ml, "_game_full_until", {})    # E1: the full-game memo, by game key
+    monkeypatch.setattr(ml, "_cand_cursor", {})        # W2 / P3: the walk's rotation cursor
+    monkeypatch.setattr(ml, "_cand_trail", {}, raising=False)   # W2 review: the cursor's trail (the fix)
+    monkeypatch.setattr(ml, "_cand_refusal_last", {})  # W2 / P2: the refusal rows' memo
+    monkeypatch.setattr(ml, "_cand_write_logged", False)
     monkeypatch.setattr(ml, "_BOOK_LOCKS", {})
     monkeypatch.setattr(ms, "_ratio_cache", {"at": 0.0, "by_whale": {}})
     monkeypatch.setattr(ms, "_unmapped_until", {})
@@ -4680,7 +4701,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-39:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-44:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4713,9 +4734,13 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "short_cover_rest", "short_cover_take", "short_cover_out_of_tol",
                           # W1 / R4: an open book's reads skipped on the book memo
                           "book_terminal_skipped",
+                          # W2 / P2: the four once-silent candidate exits and the
+                          # refusal table's write failure, before the last key
+                          "long_token_unknown", "target_zero", "book_row_unreadable",
+                          "cand_unread_capped", "refusal_write_failed",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-40] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-45] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -11768,6 +11793,710 @@ def test_the_book_memo_never_normalises_the_venues_word():
             st = _tick(p, v, now=NOW + 30 * i)
             assert _census(st, "venue_halted") == 1 and st["reads"] == 1, state
         assert ml._terminal_book_until == {} and ml._terminal_book_state == {}, state
+
+
+# ------------------------------------------------ 24. W2 (2026-09-07)
+#
+# gap_planned_unopened.md: 58 mapped tennis and football markets ($218k
+# in 24 h) had a shadow plan on an OPEN two-sided book while he traded
+# and never a mirror_books row. P1: his fills sit only on the venue's
+# SHORT-side token, the mapper names no long token, and the candidate
+# left silently (mirror_live.py:6618 at 1c1e1d7) -- the catalogue names
+# it by identity and the EXISTING short road runs. P2: every exit of
+# _tick_candidate returns its name and one row per (whale, market)
+# transition lands on mirror_candidate_refusals (migration 054). P3:
+# the candidate walk rotates, the shadow's planned first.
+
+def _short_side_only(**kw):
+    """His fills on the venue's SHORT-side token alone (class B: the aec
+    tennis family's `<his side>:SHORT`): 400 of the other token at
+    0.72, his last move, so his level for our short is 1 - 0.72 = 0.28
+    in long space -- _short_world's reading with the long-token leg
+    absent (net -400 instead of -300)."""
+    kw.setdefault("fills", [_fill(N, "BUY", 400, 0.72, NOW - 2000)])
+    kw.setdefault("snap", {M: 0.0, N: 400.0})
+    return _pool(**kw)
+
+
+def _map_short_only(monkeypatch, long_asset=None):
+    """The mapper's verdict for those fills, exactly the dict
+    _choose_long returns when his only token resolved BUY_SHORT and
+    other_of() finds no second token of his: long_asset None (or the
+    control's M), other_asset N."""
+    seen = []
+
+    async def _m(pool, fills, pmus=None, **kw):
+        seen.append(kw.get("condition_id"))
+        return {"us_slug": SLUG, "long_asset": long_asset, "other_asset": N, "source": "premap"}
+    monkeypatch.setattr(ms, "map_market", _m)
+    return seen
+
+
+def _sibling_reads(p):
+    return [a for k, s, a in p.sent if "ml-sibling-token" in s]
+
+
+def _walked(p):
+    """The candidates the walk called, in order: one his_fills read each."""
+    return [a[1] for s, a in p.queries if "AS market_title, t.event_slug" in s]
+
+
+def test_w2_fills_only_on_the_short_side_token_open_a_short_book_through_the_existing_gates(monkeypatch):
+    """P1. ONE catalogue read names the long token (the condition's
+    sibling of the token in hand), then the short road the file already
+    has: target -400 signed, his other-token BUY read at 1 - 0.72, ONE
+    BUY_SHORT rest at the ask -- the same book, rest and row
+    test_with_the_knob_on_a_short_book_opens_by_a_buy_short_rest_at_his_level
+    pins for a short whose long token his fills named. No row on the
+    refusal table: the book opened."""
+    _shorts_on(monkeypatch)
+    _map_short_only(monkeypatch)
+    p = _short_side_only()
+    v = _Venue()
+    st = _tick(p, v, http=_mkt(0.0, 400.0))
+    assert _sibling_reads(p) == [(CID, N)], "one catalogue read, for the sibling of his short-side token"
+    assert st["short"]["on"] is True and len(p.books) == 1
+    b = next(iter(p.books.values()))
+    assert (b["long_asset"], b["other_asset"], b["intent"]) == (M, N, SHORT)
+    assert b["target"] == -400 and b["his_level"] == round(1.0 - 0.72, 6) == pytest.approx(0.28)
+    row = p.rows[b["standing_row_id"]]
+    assert row["asset"] == N and row["raw"]["preview"]["intent"] == SHORT and row["requested_shares"] == 400.0
+    pl = _places(v)
+    assert len(pl) == 1
+    assert pl[0][1:] == (SLUG, 0.32, 400, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL", SHORT, True, None)
+    o = next(iter(p.orders.values()))
+    assert (o["side"], o["intent"], o["kind"], o["tif"], o["wire"]) == (SELL, SHORT, "increase", "GTC", 0.32)
+    assert _census(st, "short_open") == 1 and _census(st, "rest_placed") == 1
+    assert _census(st, "long_token_unknown") == 0 and _census(st, "short_side_refused") == 0
+    assert p.cand_refusals == [], "no row on an opened book"
+
+
+def test_w2_a_short_side_only_candidate_is_refused_by_the_gates_exactly_as_one_whose_long_token_was_named(monkeypatch):
+    """P1. The knob off (`short_side_refused`), the model disarmed
+    (`short_model_disarmed`), the S4 proof failing on the short gate
+    (`short_gate_refused`): the catalogue-named long token and the
+    mapper-named one leave under the same name, with the same row on
+    the refusal table, and nothing opens. Never a widened gate."""
+    orig = le.short_model_confirmed
+    arms = (
+        ("short_side_refused", lambda: monkeypatch.setattr(rules, "MIRROR_SHORTS", False)),
+        ("short_model_disarmed", lambda: monkeypatch.setattr(le, "short_model_confirmed", lambda: False)),
+        ("short_gate_refused", lambda: None),
+    )
+    for want, arm in arms:
+        rows = {}
+        for la in (None, M):
+            ml._cand_refusal_last.clear()          # a fresh world: the memo is per (whale, cid)
+            _shorts_on(monkeypatch)
+            monkeypatch.setattr(le, "short_model_confirmed", orig)
+            arm()
+            _map_short_only(monkeypatch, long_asset=la)
+            p = _short_side_only()
+            if want == "short_gate_refused":
+                p.state["short_side_proof"] = {"ok": 5, "mismatch": 1}
+            v = _Venue()
+            st = _tick(p, v, http=_mkt(0.0, 400.0))
+            assert _census(st, want) == 1 and not p.books and not _places(v), (want, la, st["census"])
+            assert _census(st, "long_token_unknown") == 0
+            assert _sibling_reads(p) == ([(CID, N)] if la is None else [])
+            assert [r["refusal"] for r in p.cand_refusals] == [want], (want, la)
+            rows[la] = {k: v_ for k, v_ in p.cand_refusals[0].items() if k not in ("tick_s", "long_from")}
+            # the row says where the long token came from (W2 review LOW-1):
+            # the catalogue when his fills never touched it, nothing otherwise
+            assert p.cand_refusals[0]["long_from"] == ("catalogue" if la is None else None), (want, la)
+        assert rows[None] == rows[M], want
+        assert rows[None]["long_asset"] == M and rows[None]["his_net"] == -400.0
+
+
+def test_w2_an_unnamed_long_token_refuses_long_token_unknown_before_any_read(monkeypatch):
+    """P1. The catalogue names no other token of the condition (or
+    cannot be read, or the mapper named neither side): refused by name
+    BEFORE the quote read, memoised for the unmapped TTL, one row on the
+    refusal table with the slug and no long token; no venue call, no
+    book. Never a token the catalogue does not name."""
+    _shorts_on(monkeypatch)
+    _map_short_only(monkeypatch)
+    p = _short_side_only()
+    p.token_cid = {N: CID}                  # the catalogue holds his token alone
+    v = _Venue()
+    st = _tick(p, v, http=_mkt(0.0, 400.0))
+    assert _census(st, "long_token_unknown") == 1 and not p.books and not _places(v)
+    assert "bbo" not in _kinds(v), "refused before the quote read"
+    assert st["reads"] == 0 and st.get("capped_tick") is not True
+    assert _sibling_reads(p) == [(CID, N)]
+    assert ml._unmapped_until[("rn1", CID)] == NOW + ms.UNMAPPED_TTL_S
+    rows = p.cand_refusals
+    assert [(r["refusal"], r["us_slug"], r["long_asset"], r["condition_id"], r["whale"]) for r in rows] == [
+        ("long_token_unknown", SLUG, None, CID, "rn1")]
+    assert rows[0]["his_net"] is None and rows[0]["target"] is None and rows[0]["mark"] is None
+    assert rows[0]["at_ts"] == NOW and rows[0]["active_conditions"] == 1 and rows[0]["cand_reads"] == 0
+    # memoised: the next tick spends nothing on it and writes nothing new
+    st2 = _tick(p, v, now=NOW + 10, http=_mkt(0.0, 400.0))
+    assert _census(st2, "long_token_unknown") == 0 and "bbo" not in _kinds(v) and len(p.cand_refusals) == 1
+    # an unreadable catalogue is the same refusal, never a guess (a fresh
+    # world: the unmapped memo is per (whale, cid))
+    ml._unmapped_until.clear()
+    p3 = _short_side_only()
+    p3.raise_on.append(("ml-sibling-token", RuntimeError("db down")))
+    v3 = _Venue()
+    st3 = _tick(p3, v3, http=_mkt(0.0, 400.0))
+    assert _census(st3, "long_token_unknown") == 1 and not p3.books and "bbo" not in _kinds(v3)
+    # a mapper naming NEITHER token: nothing to look up, the same name, no read
+
+    async def _neither(pool, fills, pmus=None, **kw):
+        return {"us_slug": SLUG, "long_asset": None, "other_asset": None, "source": "premap"}
+    monkeypatch.setattr(ms, "map_market", _neither)
+    ml._unmapped_until.clear()
+    p4 = _short_side_only()
+    v4 = _Venue()
+    st4 = _tick(p4, v4, http=_mkt(0.0, 400.0))
+    assert _census(st4, "long_token_unknown") == 1 and not p4.books and "bbo" not in _kinds(v4)
+    assert _sibling_reads(p4) == [], "no other token to look the sibling up by"
+
+
+def test_w2_the_long_path_is_unchanged_when_the_mapper_names_the_long_token(monkeypatch):
+    """P1. A long book opens exactly as before: the one catalogue read
+    is the OTHER token's (his fills name M alone, as they always did),
+    the statement is one text for both lanes, and the long-token read
+    sits after the grammar certification and before the book check and
+    the quote read. A short-side mapping whose long token the mapper
+    named makes no catalogue read at all."""
+    p = _pool()
+    v = _Venue()
+    st = _tick(p, v)
+    assert [c[1] for c in _places(v)] == [SLUG] and len(p.books) == 1
+    assert _sibling_reads(p) == [(CID, M)], "the other token's read, as before; none for the long"
+    assert _census(st, "long_token_unknown") == 0 and p.cand_refusals == []
+    # one text for both lanes (== not `is`: a test above reloads ms)
+    assert ml._SQL_SIBLING_TOKEN == ms.SIBLING_TOKEN_SQL
+    assert _flat(ml._SQL_SIBLING_TOKEN) == ("SELECT token_id FROM market_tokens WHERE condition_id = $1 "
+                                            "AND token_id <> $2 ORDER BY outcome_index LIMIT 1 /* ml-sibling-token */")
+    src = inspect.getsource(ml._tick_candidate)
+    assert (src.index("_grammar_admission(") < src.index('"long_token_unknown"')
+            < src.index("in t.books_seen") < src.index("_read_market("))
+    assert src.count("_SQL_SIBLING_TOKEN") == 2, "the long token and the other token, each through the one statement"
+    _shorts_on(monkeypatch)
+    _map_short_only(monkeypatch, long_asset=M)
+    p2 = _short_side_only()
+    v2 = _Venue()
+    _tick(p2, v2, http=_mkt(0.0, 400.0))
+    assert _sibling_reads(p2) == [] and len(p2.books) == 1
+
+
+def test_w2_every_exit_of_the_candidate_returns_a_name_and_every_name_is_a_census_key():
+    """P2. No bare return in _tick_candidate; the one None is a book
+    opened; every returned literal is a census key (book_seen aside:
+    a market with a book, which the walk skips before the call and the
+    recorder never writes); the row is built from the tick's numbers
+    alone -- no venue call, no read, no venue module."""
+    src = inspect.getsource(ml._tick_candidate)
+    assert not re.search(r"^\s+return\s*$", src, re.M), "a bare return is a silent exit"
+    assert src.rstrip().endswith("return None")
+    names = set(re.findall(r'return "([a-z_]+)"', src))
+    assert {"long_token_unknown", "target_zero", "book_row_unreadable", "book_seen", "unmapped",
+            "map_reads_capped", "map_source_unverified", "cand_game_full_skipped", "tick_abandoned",
+            "game_unreadable", "game_cap_full", "short_model_disarmed", "no_price",
+            "market_unreadable"} <= names
+    for n in names - {"book_seen"}:
+        assert n in ml.CENSUS_KEYS, n
+    for k in ("long_token_unknown", "target_zero", "book_row_unreadable", "cand_unread_capped",
+              "refusal_write_failed"):
+        assert k in ml.CENSUS_KEYS and k not in ml._INTEG_CENSUS_KEYS
+    assert ml._CAND_NOT_RECORDED == frozenset({"book_seen"})
+    for fn in (ml._note_candidate_refusal, ml._flush_candidate_refusals, ml._name_unread,
+               ml._candidate_order, ml._shadow_planned):
+        s = inspect.getsource(fn)
+        for banned in ("_bbo(", "_venue_call(", "pmus", "_read_market(", "_market_snap(", "_paced"):
+            assert banned not in s, (fn.__name__, banned)
+    # a market with a book: the name, no row, nothing counted
+    ml._current_stats = ml._new_stats()
+    p = _pool()
+    t = ml._Tick(pool=p, pmus=_Venue(), http=_Http(), now=NOW, stats=ml._current_stats)
+    t.books_seen.add(("rn1", CID))
+    assert _run(ml._tick_candidate(t, "rn1", CID)) == "book_seen"
+    assert _run(ml._walk_candidate(t, "rn1", CID)) == "book_seen" and t.cand_rows == []
+    ml._current_stats = None
+    # the statement writes every column of the 054 table but its id, once, from one JSON array
+    cols = ("whale", "condition_id", "us_slug", "refusal", "at", "his_net", "target", "mark", "his_px",
+            "ask", "band", "long_asset", "long_from", "books_live", "opened_today", "active_conditions", "cand_reads",
+            "tick_s")
+    s = _flat(ml._SQL_CAND_REFUSALS)
+    assert s.startswith("INSERT INTO mirror_candidate_refusals (" + ", ".join(cols) + ")")
+    assert "jsonb_to_recordset($1::jsonb)" in s and "$2" not in s and "ml-cand-refusals" in s
+
+
+def test_w2_one_row_per_transition_and_a_restamp_after_900_s(monkeypatch):
+    """P2. The same name inside 900 s writes nothing; a new name is a
+    row; the name coming back is a row; the same name standing 900 s is
+    re-stamped, not before. The row carries what the candidate read
+    before it left and NULL for what it never reached. The census
+    counters are what they were (one name per tick). A candidate that
+    opened writes nothing, this tick or while the book stands."""
+    assert ml.CAND_REFUSAL_RESTAMP_S == 900.0 == ms.UNMAPPED_TTL_S
+    p = _short_world()                       # the knob off: short_side_refused every tick
+    v = _Venue()
+    st = _tick(p, v, http=_short_http())
+    assert _census(st, "short_side_refused") == 1
+    assert [r["refusal"] for r in p.cand_refusals] == ["short_side_refused"]
+    r = p.cand_refusals[0]
+    assert (r["whale"], r["condition_id"], r["us_slug"], r["long_asset"]) == ("rn1", CID, SLUG, M)
+    assert r["at_ts"] == NOW and r["his_net"] == -300.0 and r["target"] == 0, "the P1 door's target IS 0"
+    assert r["mark"] == 0.31 and r["ask"] == 0.32
+    assert r["his_px"] is None and r["band"] is None and r["opened_today"] is None, "never reached"
+    assert r["books_live"] == 0 and r["active_conditions"] == 1 and r["cand_reads"] == 1
+    assert isinstance(r["tick_s"], float) and r["tick_s"] >= 0.0
+    assert ml._cand_refusal_last[("rn1", CID)] == ("short_side_refused", NOW)
+    st2 = _tick(p, v, now=NOW + 10, http=_short_http())
+    assert _census(st2, "short_side_refused") == 1 and len(p.cand_refusals) == 1, "the same name: no row"
+    # a transition: the knob on, the model disarmed
+    orig = le.short_model_confirmed
+    _shorts_on(monkeypatch)
+    monkeypatch.setattr(le, "short_model_confirmed", lambda: False)
+    st3 = _tick(p, v, now=NOW + 20, http=_short_http())
+    assert _census(st3, "short_model_disarmed") == 1
+    assert [x["refusal"] for x in p.cand_refusals] == ["short_side_refused", "short_model_disarmed"]
+    assert p.cand_refusals[-1]["target"] == -300 and p.cand_refusals[-1]["his_px"] is None
+    assert p.cand_refusals[-1]["at_ts"] == NOW + 20
+    # and back: a transition too
+    monkeypatch.setattr(rules, "MIRROR_SHORTS", False)
+    monkeypatch.setattr(le, "short_model_confirmed", orig)
+    _tick(p, v, now=NOW + 30, http=_short_http())
+    assert [x["refusal"] for x in p.cand_refusals] == ["short_side_refused", "short_model_disarmed",
+                                                       "short_side_refused"]
+    # the same name standing: re-stamped at 900 s, not at 899
+    st5 = _tick(p, v, now=NOW + 30 + 899, http=_short_http())
+    assert _census(st5, "short_side_refused") == 1 and len(p.cand_refusals) == 3
+    st6 = _tick(p, v, now=NOW + 30 + 900, http=_short_http())
+    assert _census(st6, "short_side_refused") == 1 and len(p.cand_refusals) == 4
+    assert p.cand_refusals[-1]["refusal"] == "short_side_refused" and p.cand_refusals[-1]["at_ts"] == NOW + 930
+    assert ml._cand_refusal_last[("rn1", CID)] == ("short_side_refused", NOW + 930)
+    # no row on an opened book, and none while the book stands; the memo
+    # reads `opened`, so a refusal after the book closes is a transition
+    # again whatever stood before the open
+    p2 = _pool()
+    v2 = _Venue()
+    _tick(p2, v2, now=NOW + 1000)
+    assert p2.books and p2.cand_refusals == [] and ml._cand_refusal_last[("rn1", CID)] == ("opened", NOW + 1000)
+    _tick(p2, v2, now=NOW + 1010)
+    assert p2.cand_refusals == []
+    p3 = _short_world()
+    _tick(p3, _Venue(), now=NOW + 1020, http=_short_http())
+    assert [r["refusal"] for r in p3.cand_refusals] == ["short_side_refused"]
+
+
+def test_w2_a_refusal_write_failure_never_blocks_the_tick_and_is_logged_once(caplog):
+    """P2, fail-closed. The table absent (054 not applied) or a blip:
+    the tick's census and verdicts are what they were, the failure is
+    counted `refusal_write_failed` every tick and logged ONCE per
+    process, the memo never takes the failed write, so the row lands
+    on the next tick that can write it."""
+    p = _short_world()
+    v = _Venue()
+    p.raise_on.append(("ml-cand-refusals", RuntimeError('relation "mirror_candidate_refusals" does not exist')))
+    with caplog.at_level(logging.WARNING):
+        st = _tick(p, v, http=_short_http())
+        st2 = _tick(p, v, now=NOW + 10, http=_short_http())
+    for s in (st, st2):
+        assert s["status"] == "ok" and not s["abandoned"] and _census(s, "short_side_refused") == 1
+        assert _census(s, "refusal_write_failed") == 1
+    assert p.cand_refusals == [] and ml._cand_refusal_last == {}
+    warns = [x for x in caplog.records if "mirror_candidate_refusals write failed" in x.getMessage()]
+    assert len(warns) == 1 and warns[0].levelno == logging.WARNING, "logged once per process"
+    assert ml._cand_write_logged is True
+    p.raise_on.clear()
+    st3 = _tick(p, v, now=NOW + 20, http=_short_http())
+    assert _census(st3, "refusal_write_failed") == 0
+    assert [r["refusal"] for r in p.cand_refusals] == ["short_side_refused"]
+    assert ml._cand_refusal_last[("rn1", CID)] == ("short_side_refused", NOW + 20)
+    # the write is the walk's last step before the instruments: one statement, after every whale
+    src = inspect.getsource(ml._tick)
+    assert src.rstrip().endswith("await _flush_candidate_refusals(t)\n    await _instruments(t)")
+    assert src.count("_flush_candidate_refusals(") == 1
+
+
+def test_w2_review_a_hung_refusal_write_is_bounded_and_counted_as_a_failed_write(monkeypatch):
+    """W2 review MEDIUM-2. The pool carries no command_timeout and the
+    write runs under the tick lock: a write that never returns is cut at
+    `CAND_REFUSAL_WRITE_TIMEOUT_S`, counted `refusal_write_failed`, the
+    memo left alone, the tick's verdicts what they were."""
+    p = _short_world()
+    v = _Venue()
+    orig = p.execute
+
+    async def hung(sql, *a):
+        if "ml-cand-refusals" in sql:
+            await asyncio.sleep(3600)
+        return await orig(sql, *a)
+
+    p.execute = hung
+    assert ml.CAND_REFUSAL_WRITE_TIMEOUT_S == 5.0
+    monkeypatch.setattr(ml, "CAND_REFUSAL_WRITE_TIMEOUT_S", 0.05)
+    st = _tick(p, v, http=_short_http())
+    assert st["status"] == "ok" and not st["abandoned"] and _census(st, "short_side_refused") == 1
+    assert _census(st, "refusal_write_failed") == 1
+    assert p.cand_refusals == [] and ml._cand_refusal_last == {}
+    src = inspect.getsource(ml._flush_candidate_refusals)
+    assert "asyncio.wait_for(t.pool.execute(_SQL_CAND_REFUSALS" in src
+    assert "CAND_REFUSAL_WRITE_TIMEOUT_S" in src
+
+
+def test_w2_a_book_row_that_cannot_be_read_back_is_named_and_the_book_is_walked_next_tick(monkeypatch):
+    """P2. The book opened and its row did not come back: named
+    `book_row_unreadable` (a silent exit before), one row, nothing
+    planned this tick; the next tick walks the book from its row like
+    any other."""
+    p = _pool()
+    v = _Venue()
+    orig = ml._SQL_BOOK_READ
+    monkeypatch.setattr(ml, "_SQL_BOOK_READ", "SELECT 1 /* ml-gone */")
+    st = _tick(p, v)
+    assert len(p.books) == 1 and _census(st, "book_row_unreadable") == 1 and not _places(v)
+    assert [r["refusal"] for r in p.cand_refusals] == ["book_row_unreadable"]
+    assert p.cand_refusals[0]["target"] == 300 and p.cand_refusals[0]["his_px"] == 0.31
+    monkeypatch.setattr(ml, "_SQL_BOOK_READ", orig)
+    st2 = _tick(p, v, now=NOW + 10)
+    assert st2["books_live"] == 1 and _places(v) and _census(st2, "book_row_unreadable") == 0
+    assert len(p.cand_refusals) == 1, "a book now: no candidate row"
+
+
+def test_w2_target_zero_is_named(monkeypatch):
+    """P2. ratio x net rounding to nothing left silently; it is
+    `target_zero` now, counted and on the row."""
+    _rails_2026_09_06(monkeypatch)
+    monkeypatch.setattr(rules, "MIRROR_RATIO", 0.001)
+    monkeypatch.setattr(rules, "MIRROR_SMALL_BET_USD", 0.0)
+    p = _pool()
+    v = _Venue()
+    st = _tick(p, v)
+    assert _census(st, "target_zero") == 1 and not p.books and not _places(v)
+    assert [(r["refusal"], r["target"], r["his_net"]) for r in p.cand_refusals] == [("target_zero", 0, 300.0)]
+
+
+def test_w2_the_walks_cap_names_every_candidate_it_left_unread(monkeypatch):
+    """P2. A cap of 5 over 45 candidates: five read (each under its own
+    name), forty `cand_unread_capped` rows with the tick's numbers, none
+    for a market a memo or a book already skips. The census counts the
+    unread ones too."""
+    monkeypatch.setattr(ml, "MAX_MARKETS_PER_TICK", 5)
+    conds = [f"c{i}" for i in range(45)]
+    p = _pool(conds=conds)
+    v = _Venue()
+    st = _tick(p, v)
+    assert st["capped_tick"] is True and st["reads"] == 5 and _census(st, "cand_unread_capped") == 40
+    rows = p.cand_refusals
+    assert len(rows) == 45
+    read = [r for r in rows if r["refusal"] != "cand_unread_capped"]
+    assert [r["condition_id"] for r in read] == conds[:5]
+    assert all(r["refusal"] == "market_unreadable" for r in read), "no markets row for c*"
+    unread = [r for r in rows if r["refusal"] == "cand_unread_capped"]
+    assert [r["condition_id"] for r in unread] == conds[5:]
+    assert all(r["active_conditions"] == 45 and r["cand_reads"] == 5 and r["us_slug"] is None
+               and r["long_asset"] is None and r["at_ts"] == NOW for r in unread)
+    assert _census(st, "market_unreadable") == 5
+    # a market a memo or a book already skips is not one the cap cut
+    ml._unmapped_until[("rn1", "c44")] = NOW + 900
+    ml._terminal_until[("rn1", "c43")] = NOW + 900
+    p.cand_refusals.clear()
+    ml._cand_refusal_last.clear()
+    st2 = _tick(p, v, now=NOW + 1)
+    unread2 = [r["condition_id"] for r in p.cand_refusals if r["refusal"] == "cand_unread_capped"]
+    assert "c44" not in unread2 and "c43" not in unread2 and len(unread2) == 38
+    assert _census(st2, "cand_unread_capped") == 38 and st2["reads"] == 5
+    # the soft guard's break names them the same way
+    monkeypatch.setattr(ml, "MAX_MARKETS_PER_TICK", 40)
+    monkeypatch.setattr(rules, "MIRROR_VENUE_CALLS_PER_TICK", 2)
+    ml._cand_refusal_last.clear()
+    ml._cand_cursor.clear()
+    p3 = _pool(conds=conds[:10])
+    st3 = _tick(p3, _Venue())
+    assert _census(st3, "venue_calls_capped") == 1 and st3["capped_tick"] is True
+    assert _census(st3, "cand_unread_capped") == 8 and st3["reads"] == 2
+    assert [r["refusal"] for r in p3.cand_refusals].count("cand_unread_capped") == 8
+
+
+def test_w2_the_candidate_walk_rotates_planned_first_woken_first_and_the_memos_still_skip(monkeypatch):
+    """P3. 100 candidates, the cap 40: every candidate is walked within
+    ceil(100 / 40) = 3 ticks, the cap never exceeded, a capped tick
+    resuming after the last one it walked; an uncapped walk clears the
+    cursor. The shadow's planned candidates (a would_side, or a target
+    that is not 0, on the NEWEST row) come first, a woken market before
+    them, and the memos (unmapped, terminal, a book) still skip before
+    any read, spending no slot."""
+    assert ml.MAX_MARKETS_PER_TICK == 40
+    conds = [f"c{i}" for i in range(100)]
+    p = _pool(conds=conds)
+    v = _Venue()
+    st1 = _tick(p, v)
+    w1 = _walked(p)
+    assert w1 == conds[:40] and st1["reads"] == 40 and st1["capped_tick"] is True
+    assert ml._cand_cursor == {"rn1": "c39"}
+    p.queries.clear()
+    st2 = _tick(p, v, now=NOW + 1)
+    w2 = _walked(p)
+    assert w2 == conds[40:80] and st2["reads"] == 40 and ml._cand_cursor == {"rn1": "c79"}
+    p.queries.clear()
+    st3 = _tick(p, v, now=NOW + 2)
+    w3 = _walked(p)
+    assert w3 == conds[80:] + conds[:20] and st3["reads"] == 40
+    assert set(w1) | set(w2) | set(w3) == set(conds), "every candidate within ceil(100/40) ticks"
+    assert ml._cand_cursor == {"rn1": "c19"}
+    # a walk that reaches the end clears the cursor: the next starts at the head
+    p.conds = conds[:10]
+    p.queries.clear()
+    st4 = _tick(p, v, now=NOW + 3)
+    assert _walked(p) == conds[:10] and st4.get("capped_tick") is not True and "rn1" not in ml._cand_cursor
+    # the shadow's planned first: the NEWEST row decides, a judged market with no plan is not planned
+    p.conds = conds
+    p.shadow = [
+        {"whale": "rn1", "condition_id": "c60", "at_ts": NOW - 5, "would_side": "BUY", "target": 12},
+        {"whale": "rn1", "condition_id": "c70", "at_ts": NOW - 5, "would_side": None, "target": -7},
+        {"whale": "rn1", "condition_id": "c80", "at_ts": NOW - 5, "would_side": None, "target": 0},
+        {"whale": "rn1", "condition_id": "c60", "at_ts": NOW - 50, "would_side": None, "target": 0},
+        {"whale": "rn1", "condition_id": "c85", "at_ts": NOW - 5, "would_side": "SELL", "target": 3},
+        {"whale": "rn1", "condition_id": "c85", "at_ts": NOW - 2, "would_side": None, "target": 0},
+    ]
+    p.queries.clear()
+    n_plan_reads = len([a for k, s, a in p.sent if "ml-shadow-planned" in s])
+    st5 = _tick(p, v, now=NOW + 4)
+    w5 = _walked(p)
+    assert w5[:2] == ["c60", "c70"] and w5[2:] == conds[:38] and st5["reads"] == 40
+    planned = [a for k, s, a in p.sent if "ml-shadow-planned" in s]
+    assert len(planned) == n_plan_reads + 1 and planned[-1] == ("rn1", float(ms.LOOKBACK_H)), \
+        "one plan read per whale per tick"
+    # a woken market before the planned ones
+    ml._cand_cursor.clear()
+    ml.notify("c90")
+    p.queries.clear()
+    _tick(p, v, now=NOW + 5)
+    assert _walked(p)[:3] == ["c90", "c60", "c70"]
+    # the memos skip before a read and spend no slot; a market with a book is skipped too
+    ml._cand_cursor.clear()
+    ml._unmapped_until[("rn1", "c60")] = NOW + 900
+    ml._terminal_until[("rn1", "c0")] = NOW + 900
+    p.queries.clear()
+    st7 = _tick(p, v, now=NOW + 6)
+    w7 = _walked(p)
+    assert "c60" not in w7 and "c0" not in w7 and len(w7) == 40 and st7["reads"] == 40
+    assert w7[0] == "c70" and _census(st7, "cand_terminal_skipped") == 1
+    # the plan read unreadable: no plan known, the rotation stands (never a stop)
+    ml._cand_cursor.clear()
+    ml._unmapped_until.clear()
+    ml._terminal_until.clear()
+    p.raise_on.append(("ml-shadow-planned", RuntimeError("db down")))
+    p.queries.clear()
+    st8 = _tick(p, v, now=NOW + 7)
+    assert _walked(p) == conds[:40] and st8["status"] == "ok" and st8["reads"] == 40
+    p.raise_on.clear()
+    # the order, pure
+    assert ml._candidate_order(["a", "b", "c", "d"], set(), set(), None) == ["a", "b", "c", "d"]
+    assert ml._candidate_order(["a", "b", "c", "d"], set(), {"c"}, None) == ["c", "a", "b", "d"]
+    assert ml._candidate_order(["a", "b", "c", "d"], set(), {"c"}, "a") == ["b", "d", "c", "a"]
+    assert ml._candidate_order(["a", "b", "c", "d"], {"d"}, {"c"}, "a") == ["d", "b", "c", "a"]
+    assert ml._candidate_order(["a", "b", "c", "d"], set(), set(), "d") == ["a", "b", "c", "d"]
+    assert ml._candidate_order(["a", "b", "c", "d"], set(), set(), "zz") == ["a", "b", "c", "d"]
+    assert ml._candidate_order([], {"d"}, {"c"}, "a") == []
+    src = inspect.getsource(ml._tick)
+    assert "t.cand_reads >= MAX_MARKETS_PER_TICK" in src and "ms.MAX_MARKETS_PER_TICK" not in src
+    assert src.index("_unmapped_until.get((w, cid)") < src.index("_walk_candidate(t, w, cid)")
+    assert src.index("_terminal_until.get((w, cid)") < src.index("_walk_candidate(t, w, cid)")
+
+
+# ------- 23c. W2 review pins (the adversarial review of P1 / P2 / P3)
+#
+# P1's money path is the EXISTING short road entered from a long token
+# the catalogue named: the pins below take that token onto the LONG road
+# (his net positive with no BUY of it), behind the owner's loss stop,
+# and behind admission's caps, and show nothing opens on any of them.
+# P2: the cap's name never lands on a market with a book, and the rows
+# stay bounded under the rotation (the brief's bound: his active
+# conditions per 900 s). P3: the rotation's bound holds when memos and
+# books interleave, and when the cursor candidate leaves his active
+# list between ticks (the tail of a newest-first list is exactly where
+# the oldest fills age out, so the cursor is lost where the starvation
+# was).
+
+def test_w2r_a_sale_of_the_short_side_token_alone_never_opens_a_long_on_the_catalogue_token(monkeypatch):
+    """P1 cannot reach the LONG road. A catalogue-named long token is
+    one his fills never touched, so his long from the fills is 0 by
+    construction and the derived net is at most 0 (mi.net_positions
+    floors a token at 0: a sale of the short-side token he bought
+    before the lookback is a position of 0, not a negative one). The
+    venue's reading cannot lift it either: an increase reads the
+    snapshot only when the two agree, and on disagreement the short
+    rule reads TOWARD zero. His only window fills SELL the short-side
+    token, the venue holding the long token (first arm) or nothing
+    (second): both are `target_zero` with the catalogue's long token on
+    the row -- no book, no placement, never a long on a token he never
+    bought."""
+    _shorts_on(monkeypatch)
+    _map_short_only(monkeypatch)
+    sold = [_fill(N, "SELL", 400, 0.72, NOW - 2000)]
+    for snap, http in (({M: 400.0, N: 0.0}, _mkt(400.0, 0.0)), ({M: 0.0, N: 0.0}, _mkt(0.0, 0.0))):
+        ml._cand_refusal_last.clear()
+        p = _short_side_only(fills=sold, snap=snap)
+        v = _Venue()
+        st = _tick(p, v, http=http)
+        assert not p.books and not _places(v) and _sibling_reads(p) == [(CID, N)], snap
+        assert _census(st, "long_token_unknown") == 0 and _census(st, "target_zero") == 1, st["census"]
+        assert _census(st, "short_open") == 0 and _census(st, "rest_placed") == 0
+        assert [(r["refusal"], r["long_asset"], r["his_net"], r["target"]) for r in p.cand_refusals] == [
+            ("target_zero", M, 0.0, 0)], snap
+    assert ml._his_level(sold, M, N, reducing=False, short=False) is None, "and no level for a long anyway"
+
+
+def test_w2r_the_loss_stop_holds_the_short_side_only_candidate_before_any_read(monkeypatch):
+    """P1 behind the owner's stop (gap_planned_unopened class L): the
+    walk is refused `mirror_loss_stop` for the whale before any
+    candidate -- no catalogue read, no fills read, no quote, no book,
+    and no refusal row (the stop is the whale's, not the candidate's;
+    the table stays silent on it, as the brief accepted)."""
+    stop = float(rules.MIRROR_LOSS_STOP_USD)
+    _shorts_on(monkeypatch)
+    _map_short_only(monkeypatch)
+    p = _short_side_only()
+    _settled_book(p, -0.4 * stop, -1.1 * stop, **_ZZ)
+    v = _Venue()
+    st = _tick(p, v, http=_mkt(0.0, 400.0))
+    assert _census(st, "mirror_loss_stop") >= 1 and not _places(v)
+    assert all(b["state"] == "closed" for b in p.books.values())
+    assert _sibling_reads(p) == [] and _walked(p) == [] and "bbo" not in _kinds(v)
+    assert p.cand_refusals == [] and _census(st, "long_token_unknown") == 0
+
+
+def test_w2r_admissions_caps_hold_the_short_side_only_candidate_by_name(monkeypatch):
+    """P1 behind the existing caps: the book count (`max_books`, a
+    finite cap lowered from the environment) and the clip (`clip_zero`)
+    refuse the catalogue-named candidate exactly as they refuse one
+    whose long token his fills named -- one sibling read, no book, the
+    row under the cap's name with the catalogue's long token."""
+    for arm, name in (("max", "max_books"), ("clip", "clip_zero")):
+        ml._cand_refusal_last.clear()
+        ml._unmapped_until.clear()
+        _shorts_on(monkeypatch)
+        _map_short_only(monkeypatch)
+        if arm == "max":
+            monkeypatch.setattr(rules, "MIRROR_MAX_LIVE_BOOKS", 0.0)
+        else:
+            monkeypatch.setattr(rules, "MIRROR_MAX_LIVE_BOOKS", math.inf)
+            monkeypatch.setattr(le, "per_fill_usd", lambda *a, **k: 0.0)
+        p = _short_side_only()
+        v = _Venue()
+        st = _tick(p, v, http=_mkt(0.0, 400.0))
+        assert _census(st, name) == 1 and not p.books and not _places(v), (name, st["census"])
+        assert _sibling_reads(p) == [(CID, N)]
+        assert [(r["refusal"], r["long_asset"], r["his_net"]) for r in p.cand_refusals] == [(name, M, -400.0)]
+
+
+def test_w2r_the_cap_never_names_a_market_with_a_book_as_unread(monkeypatch):
+    """P2. A market with a book is walked by the book walk and skipped
+    by the candidate walk without a slot; the cap's `cand_unread_capped`
+    must not land on it (mutant: the books_seen clause dropped from
+    _name_unread survives the builder's pins)."""
+    monkeypatch.setattr(ml, "MAX_MARKETS_PER_TICK", 5)
+    conds = [f"c{i}" for i in range(45)]
+    p = _pool(conds=conds)
+    p.token_cid.update({"tokL44": "c44", "tokO44": "c44"})
+    p.add_book(ledger=300, us_market_slug="aec-atp-c44-2026-09-02", condition_id="c44",
+               long_asset="tokL44", other_asset="tokO44")
+    v = _Venue()
+    st = _tick(p, v)
+    assert st["capped_tick"] is True and st["books_live"] == 1
+    unread = [r["condition_id"] for r in p.cand_refusals if r["refusal"] == "cand_unread_capped"]
+    assert "c44" not in unread and len(unread) == 39 and _census(st, "cand_unread_capped") == 39
+    assert all(r["condition_id"] != "c44" for r in p.cand_refusals)
+
+
+def test_w2r_an_abandoned_tick_keeps_the_rotation_cursor(monkeypatch):
+    """P3. A tick abandoned mid-walk (three quote misses -> no_quote)
+    neither sets nor clears the cursor: the candidates it did not judge
+    are read again from where the last capped tick stood (mutant: the
+    `not t.abandoned` clause dropped clears it, restarting at the head)."""
+    conds = [f"c{i}" for i in range(100)]
+    p = _pool(conds=conds)
+    st1 = _tick(p, _Venue())
+    assert st1["capped_tick"] is True and ml._cand_cursor == {"rn1": "c39"}
+    st2 = _tick(p, _Venue(raise_bbo=True), now=NOW + 1)
+    assert st2["abandoned"] and st2["abandon_reason"] == "no_quote"
+    assert ml._cand_cursor == {"rn1": "c39"}, "an abandoned walk moves nothing"
+    p.queries.clear()
+    st3 = _tick(p, _Venue(), now=NOW + 2)
+    assert _walked(p) == conds[40:80] and st3["reads"] == 40
+
+
+def test_w2r_rotation_covers_every_readable_candidate_when_memos_books_and_a_lost_cursor_interleave(monkeypatch):
+    """P3's bound, on the shape the builder's fixture does not have:
+    100 candidates, 34 under the unmapped memo, 2 with a book (skipped
+    without a slot), 64 readable -> every readable one within
+    ceil(64 / 40) = 2 ticks. Then the cursor candidate LEAVES his
+    active list between ticks (its newest fill aged past the lookback:
+    the tail of a newest-first list is exactly where that happens, and
+    exactly where the starvation was): the walk must still resume
+    where it stood, so the 24 readable candidates the capped tick left
+    are read next tick, not the 40 at the head again."""
+    assert ml.MAX_MARKETS_PER_TICK == 40
+    conds = [f"c{i}" for i in range(100)]
+    memo = {c for i, c in enumerate(conds) if i % 3 == 0}
+    for c in memo:
+        ml._unmapped_until[("rn1", c)] = NOW + 900
+    p = _pool(conds=conds)
+    for c in ("c1", "c5"):
+        p.token_cid.update({f"tokL{c}": c, f"tokO{c}": c})
+        p.add_book(ledger=300, us_market_slug=f"aec-atp-{c}-2026-09-02", condition_id=c,
+                   long_asset=f"tokL{c}", other_asset=f"tokO{c}")
+    readable = [c for c in conds if c not in memo and c not in ("c1", "c5")]
+    assert len(readable) == 64
+
+    def walked():
+        # the book walk reads the two books' fills too; the candidates' reads alone
+        return [c for c in _walked(p) if c not in ("c1", "c5")]
+    v = _Venue()
+    st1 = _tick(p, v)
+    w1 = walked()
+    assert w1 == readable[:40] and st1["capped_tick"] is True and st1["books_live"] == 2
+    assert ml._cand_cursor == {"rn1": readable[39]}
+    p.queries.clear()
+    st2 = _tick(p, v, now=NOW + 1)
+    w2 = walked()
+    assert w2[:24] == readable[40:] and len(w2) == 40 and st2["capped_tick"] is True
+    assert set(w1) | set(w2) == set(readable), "every readable candidate within ceil(64/40) ticks"
+    # the cursor candidate leaves the list between ticks: the rotation
+    # resumes where it stood, the 24 left unread are read first
+    ml._cand_cursor.clear()
+    p.queries.clear()
+    _tick(p, v, now=NOW + 2)
+    cursor = ml._cand_cursor["rn1"]
+    assert cursor == readable[39]
+    left = readable[40:]
+    p.conds = [c for c in conds if c != cursor]
+    p.queries.clear()
+    _tick(p, v, now=NOW + 3)
+    w4 = walked()
+    assert len(w4) == 40 and set(left) <= set(w4), \
+        "the tail the capped tick left is read next tick even though the cursor candidate is gone"
+
+
+def test_w2r_the_refusal_rows_stay_bounded_when_the_cap_rotates_the_walk(monkeypatch):
+    """P2 under P3. With the cap rotating, a candidate is read one tick
+    and left unread the next; if the alternation is a transition each
+    way the table takes ~2 x cap rows EVERY tick, with no 900 s bound
+    (600 conditions at 100 s ticks: ~69k rows a day, and every
+    market's path on the preset reads `x@t capped@t+1 x@t+2 ...`).
+    The brief's bound is his active conditions per 900 s; the pin
+    allows twice that (a first-tick name and one more per pair)."""
+    conds = [f"c{i}" for i in range(100)]
+    p = _pool(conds=conds)
+    v = _Venue()
+    for k in range(6):
+        _tick(p, v, now=NOW + 30 * k)
+    n = len(p.cand_refusals)
+    assert n <= 2 * len(conds), f"{n} rows for 100 candidates inside 900 s"
+    # the pins the rule must keep: a real name after the cap's is a
+    # row, the cap's name after a real one inside 900 s is not
+    by = {}
+    for r in p.cand_refusals:
+        by.setdefault(r["condition_id"], []).append(r["refusal"])
+    assert by["c0"][0] == "market_unreadable" and by["c40"][0] == "cand_unread_capped"
+    assert "market_unreadable" in by["c40"], "the read that followed the cap is a transition"
 
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():
