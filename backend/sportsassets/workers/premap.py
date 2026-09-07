@@ -572,6 +572,11 @@ def _want_prefixes(global_slug: str | None) -> set[str] | None:
         # E2: the map winner's kind, inside the same switch; off, the
         # slug reads market_type_of's 'unknown' as before
         return {MAP_PREFIX}
+    if yn_identity_on() and c6_his(global_slug) is not None:
+        # C6: the venue lists exact scores and halftime results under
+        # the moneyline prefix (epl_rows_1338.log:241-314); off, no
+        # prefix, as before
+        return {C6_PREFIX}
     return PREFIX_FOR_TYPE.get(market_type_of(global_slug or ""))
 
 
@@ -3165,12 +3170,14 @@ async def c5_certify(pool, rows: list[dict], market_title: str | None,
 async def c5_resolve(pool, rows: list[dict], kept: list[dict], outcome: str | None,
                      market_title: str | None, event_title: str | None,
                      his_slug: str | None, trace: dict, *,
-                     his_c3: dict | None, wording: bool) -> dict | None:
+                     his_c3: dict | None, wording: bool,
+                     his_c6: dict | None = None) -> dict | None:
     """Step 3: the identity lane exactly as resolve runs it, on the
-    rewritten slug -- the same match_side / c3_pick calls on the same
-    prefix- and segment-kept rows. The hit (a COPY) carries the lane's
-    own matched_by, code_translated and witness; a lane refusal on the
-    rewritten slug is named in `trace` as the lane names it."""
+    rewritten slug -- the same match_side / c3_pick / c6_pick calls on
+    the same prefix- and segment-kept rows. The hit (a COPY) carries
+    the lane's own matched_by, code_translated and witness; a lane
+    refusal on the rewritten slug is named in `trace` as the lane
+    names it."""
     cert = await c5_certify(pool, rows, market_title, event_title, his_slug, trace)
     if cert is None:
         return None
@@ -3195,6 +3202,17 @@ async def c5_resolve(pool, rows: list[dict], kept: list[dict], outcome: str | No
         # event's aec row and the grammar class's certification state)
         gcert = await grammar_cert(pool) if his_c3["family"] == "spread" else None
         hit = c3_pick(kept, outcome, market_title, slug, lane, board=rows, cert=gcert)
+        trace["lane"] = lane
+        if hit is not None:
+            label = hit["matched_by"]
+            trace.pop("refusal", None)
+        elif lane.get("refusal"):
+            trace["refusal"] = lane["refusal"]
+    if hit is None and his_c6 is not None:
+        # C6: the exact score / halftime result on the rewritten slug
+        # (mun -> mnu, che -> cfc: the codes his exact-score rows carry)
+        lane = {}
+        hit = c6_pick(kept, outcome, market_title, slug, event_title, lane)
         trace["lane"] = lane
         if hit is not None:
             label = hit["matched_by"]
@@ -3309,9 +3327,12 @@ async def names_resolve(pool, rows: list[dict], kept: list[dict], outcome: str |
 #            the match|first half|second half between <A> and <B> on
 #            <date> …' -- the segment word must agree with the
 #            identifier's, the date with his.
-# Not on the venue tonight (c3_rows_2041.log lists none for these
-# events): exact score, halftime result, team totals -- refused by
-# family name, never mapped to a neighbour.
+# Refused by family name, never mapped to a neighbour: team totals (no
+# such identifier in the venue's complete suffix census, nf_venue_1350
+# .log), and -- when the event carries no row of the family -- exact
+# score and halftime result, which C6 below maps where the venue lists
+# them (c3_rows_2041.log listed none only because that preset filtered
+# 'atc-%' out; they live under the moneyline prefix).
 C3_FAMILIES = frozenset({"spread", "total", "btts"})
 C3_PREFIX = {"spread": "asc", "total": "tsc", "btts": "astatc"}
 C3_ABSENT = {"exact_score": "exact:family-absent",
@@ -4042,6 +4063,417 @@ def _c3_pick_map(rows: list[dict], his: dict, outcome: str | None,
     return dict(r, matched_by="premap_map_winner")
 
 
+# ---------------------------------------------------------------- C6
+# THE EXACT SCORE AND THE HALFTIME RESULT BY IDENTITY (2026-09-07; owner:
+# "capture and mirror RN1's whole book"). C3_ABSENT above refused both
+# families by name because c3_rows_2041.log listed none -- an artefact
+# of that preset's `NOT LIKE 'atc-%'` filter. The venue lists BOTH under
+# the moneyline prefix (epl_rows_1338.log:241-314, nf_venue_1350.log,
+# premap_rows_1909.log; gap_new_families.md §1.1, §1.4): ~$86k + ~$15k
+# of his book in 24 h died at family_not_listed.
+#   exact score  his <lg>-<a>-<b>-<date>-exact-score-X-Y, title 'Exact
+#            Score: <A> X - Y <B>?', outcome Yes/No; venue
+#            atc-<LG>-<a>-<b>-<date>-exact-score-X-Y yes/no LONG/SHORT,
+#            question 'Will EVE vs MNU finish EVE wins 2-1?' (-2-1),
+#            '… MNU wins 2-1?' (-1-2), '… Draw 1-1?' (-1-1), '… Other?'
+#            (-other). The identifier IS his slug under atc- (the C2
+#            league alias, the C5 code translation as for every family);
+#            the question then CERTIFIES the identifier's digit order in
+#            the venue's own words -- codes in identifier order, the
+#            winner BY CODE with the score max-min: X>Y => '<va> wins X-Y',
+#            X<Y => '<vb> wins Y-X', X=Y => 'Draw X-X' (all 34 rows of
+#            both EPL games read so); anything else exact:order-
+#            uncertified, never assumed. His title binds X to his FIRST
+#            club; that club is the venue's <va> only through the event's
+#            own P4 rows (atc-<e>-<va> 'Will Everton FC win against …'),
+#            both required (exact:club-unwitnessed). 'Other' is every
+#            score the venue does not list -- not a proposition his title
+#            states (exact:other). The venue's rows carry a PHANTOM line
+#            ('1' out of 'wins 2-1', _question_line): the side is the
+#            row's own side_norm / intent for his Yes/No, never
+#            _yn_line_ok, and _market_rows stamps no line on these
+#            identifiers so the phantom reaches no other arm.
+#   halftime result  his …-halftime-result-(home|away|draw), title
+#            '<S> leading at halftime?' / '<A> vs. <B>: Draw at
+#            halftime?', outcome Yes/No; venue atc-<LG>-<a>-<b>-<date>-
+#            fh-<t>, t in {a, b, draw}, question 'Will Chelsea FC lead
+#            Arsenal FC at halftime?' / 'Will ARS vs CFC be tied at
+#            halftime?'. Home/away is NEVER read as a position: his title
+#            names ONE club S, the row whose question's subject IS S (and
+#            whose opponent is his other club, from his event title) is
+#            his, and the code t is then read from that row's identifier.
+#            The draw names both clubs in his title and the codes in the
+#            venue's question; the P4 rows bind the two as above.
+# Segments never cross: the exact-score lane keeps only a post-date rest
+# of exactly 'exact-score-X-Y' (the -fh-exact-score- twin is never a
+# candidate), the halftime lane only 'fh-<t>' (never -sh-, never a
+# full-game row, never -fh-exact-score-) -- the wrong-market trap
+# _yn_title_is_his_game names. Every refusal is a census split
+# ('exact:…', 'halftime:…'); matched_by premap_exact_score /
+# premap_halftime, source premap; behind PREMAP_YN_IDENTITY with C2-C5.
+# Off, _want_prefixes carries no prefix and both families read
+# family_not_listed / C3_ABSENT exactly as before this lane existed.
+C6_FAMILIES = frozenset({"exact_score", "halftime_result"})
+C6_PREFIX = "atc"
+_C6_TAG = {"exact_score": "exact", "halftime_result": "halftime"}
+_C6_EXACT_TITLE_RE = re.compile(
+    r"^exact score: (?P<a>.+?) (?P<x>\d+) - (?P<y>\d+) (?P<b>.+?)\??$")
+_C6_EXACT_Q_RE = re.compile(
+    r"^will (?P<va>[a-z0-9]+) vs (?P<vb>[a-z0-9]+) finish "
+    r"(?:(?P<w>[a-z0-9]+) wins (?P<m>\d+)-(?P<n>\d+)|draw (?P<d1>\d+)-(?P<d2>\d+)|other)\??$")
+_C6_HT_LEAD_TITLE_RE = re.compile(r"^(?P<s>.+?) leading at halftime\??$")
+_C6_HT_LEAD_Q_RE = re.compile(r"^will (?P<s>.+?) lead (?P<o>.+?) at halftime\??$")
+_C6_HT_TIED_Q_RE = re.compile(
+    r"^will (?P<va>[a-z0-9]+) vs (?P<vb>[a-z0-9]+) be tied at halftime\??$")
+_C6_HT_DRAW_QUAL = "draw at halftime"
+
+
+def c6_his(his_slug: str | None) -> dict | None:
+    """His slug read as a C6 family: {family, seg, lg, a, b, date, shape,
+    x, y, t} or None when it is not one. `shape` is 'score' (exact-
+    score-X-Y, digits), 'other' (exact-score-other), 'result' (halftime-
+    result-<home|away|draw>) or None for a slug the family names but
+    the lane cannot read (the older '-es-X-Y' form, a segmented exact
+    score): the lane then refuses <tag>:slug-shape by name."""
+    from ..copy_sports import family_of, segment_of
+
+    s = (his_slug or "").lower()
+    fam = family_of(s)
+    if fam not in C6_FAMILIES:
+        return None
+    m = _C3_IDENT_RE.match("x-" + s)
+    if m is None or m.group("a") == m.group("b"):
+        return None
+    rest = [t for t in (m.group("rest") or "").split("-") if t]
+    out = {"family": fam, "seg": segment_of(s), "lg": m.group("lg"), "a": m.group("a"),
+           "b": m.group("b"), "date": m.group("date"), "shape": None,
+           "x": None, "y": None, "t": None}
+    if out["seg"]:
+        # the segment word(s) the feed wrote ('halftime-result-…'), as c3_his
+        rest = rest[2:] if rest[:1] in (["first"], ["second"], ["1st"], ["2nd"]) else rest[1:]
+    if fam == "exact_score" and not out["seg"] and rest[:2] == ["exact", "score"]:
+        if len(rest) == 4 and rest[2].isdigit() and rest[3].isdigit():
+            out.update(shape="score", x=int(rest[2]), y=int(rest[3]))
+        elif rest[2:] == ["other"]:
+            out["shape"] = "other"
+    elif fam == "halftime_result" and out["seg"] == "ht" and len(rest) == 2 \
+            and rest[0] == "result" and rest[1] in ("home", "away", "draw"):
+        out.update(shape="result", t=rest[1])
+    return out
+
+
+def _c6_text(s: str | None) -> str:
+    """The venue's question or his title folded for the C6 grammars:
+    fold_latin, lower case, one space -- the punctuation the grammars
+    read (':', '-', '?') kept; '' when the fold erases content."""
+    if not s or _folds_away(s):
+        return ""
+    return " ".join(pmus.fold_latin(str(s)).lower().split())
+
+
+def _c6_family_rows(rows: list[dict], his: dict) -> dict[str, list[dict]]:
+    """The venue's rows of HIS family on his event (his codes, his
+    date), by venue league code: atc-<code>-<a>-<b>-<date>-exact-score-…
+    for the exact score; atc-…-fh-<t>, t in {a, b, draw}, for the
+    halftime result. Never a -sh- row, never the -fh-exact-score- twin,
+    never a full-game row."""
+    by_code: dict[str, list[dict]] = {}
+    for r in rows:
+        ident = r.get("identifier")
+        if not isinstance(ident, str) or not ident.startswith(C6_PREFIX + "-"):
+            continue
+        m = _C3_IDENT_RE.match(ident)
+        if m is None or (m.group("a"), m.group("b"), m.group("date")) != \
+                (his["a"], his["b"], his["date"]):
+            continue
+        rest = [t for t in (m.group("rest") or "").split("-") if t]
+        if his["family"] == "exact_score":
+            ok = rest[:2] == ["exact", "score"]
+        else:
+            ok = len(rest) == 2 and rest[0] == "fh" and rest[1] in (his["a"], his["b"], "draw")
+        if ok:
+            by_code.setdefault(m.group("lg"), []).append(r)
+    return by_code
+
+
+def _c6_code(by_code: dict[str, list[dict]], his: dict, tag: str,
+             trace: dict) -> tuple[str | None, list[dict]]:
+    """The venue league code for his family rows: his own when any row
+    carries it, else the ONE other code carrying his codes and date (the
+    C2 alias rule, as _c3_code); two is ambiguous."""
+    if his["lg"] in by_code:
+        return his["lg"], by_code[his["lg"]]
+    if len(by_code) > 1:
+        trace["refusal"] = f"{tag}:league-ambiguous"
+        trace["league_codes"] = sorted(by_code)
+        return None, []
+    (code, rs), = by_code.items()
+    trace["league_alias"] = f"{his['lg']}->{code}"
+    return code, rs
+
+
+def _c6_side_row(cands: list[dict], want_id: str, on: str, want_intent: str,
+                 tag: str, trace: dict) -> dict | None:
+    """The one row that IS `want_id` on his Yes/No side with the venue's
+    own intent -- the row's side_norm / intent, never a line guard (the
+    exact-score rows carry a phantom line)."""
+    mine = [r for r in cands if r.get("identifier") == want_id]
+    if not mine:
+        trace["refusal"] = f"{tag}:no-row"
+        return None
+    hits = [r for r in mine if _norm(r.get("side_norm")) == on]
+    if not hits:
+        trace["refusal"] = f"{tag}:side"
+        return None
+    if len(hits) > 1:
+        trace["refusal"] = f"{tag}:ambiguous"
+        return None
+    if hits[0].get("intent") != want_intent:
+        trace["refusal"] = f"{tag}:intent"
+        return None
+    return hits[0]
+
+
+def _c6_clubs_witnessed(rows: list[dict], code: str, his: dict,
+                        names: tuple[str, str]) -> str | None:
+    """The event's own P4 rows bind his two clubs to the identifier's
+    two codes: atc-<code>-<a>-<b>-<date>-<a> must be the venue's per-
+    team contract (_c5_sided) whose question (the measured template on
+    his date, _yn_team_question) has his FIRST club as its subject, and
+    -<b> his second. The reason it is not, else None. Both rows are
+    required: one alone binds one code and leaves the other assumed."""
+    e = f"{C6_PREFIX}-{code}-{his['a']}-{his['b']}-{his['date']}"
+    for t, name in ((his["a"], names[0]), (his["b"], names[1])):
+        rs = [r for r in rows if r.get("identifier") == f"{e}-{t}"]
+        if not rs:
+            return f"p4-row-absent:{t}"
+        why = _c5_sided(rs)
+        if why:
+            return f"{why}:{t}"
+        gd, why = _yn_team_question(rs[0].get("question"), his["date"])
+        if gd is None:
+            return f"{why}:{t}"
+        if not pmus._yn_name_match(gd["subj"], name):
+            return f"subject:{t}"
+    return None
+
+
+def _c6_finish(r: dict, label: str, want_id: str, on: str, trace: dict) -> dict:
+    trace.update(matched_by=label, admitted=want_id, side=on)
+    return dict(r, matched_by=label,
+                **({"league_alias": trace["league_alias"]} if trace.get("league_alias") else {}))
+
+
+def _c6_pick_exact(rows: list[dict], his: dict, outcome: str | None,
+                   his_title: str | None, trace: dict) -> dict | None:
+    on = _norm(outcome)
+    want_intent = _YN_IDENTITY_INTENT.get(on)
+    if not want_intent:
+        trace["refusal"] = "exact:outcome"
+        return None
+    tm = _C6_EXACT_TITLE_RE.fullmatch(_c6_text(his_title))
+    if tm is None:
+        trace["refusal"] = "exact:title-shape"
+        return None
+    A, B = _c3_norm(tm.group("a")), _c3_norm(tm.group("b"))
+    if pmus._yn_slot_bad(A) or pmus._yn_slot_bad(B):
+        trace["refusal"] = "exact:title-shape"
+        return None
+    if (int(tm.group("x")), int(tm.group("y"))) != (his["x"], his["y"]):
+        trace["refusal"] = "exact:title-score"
+        return None
+    by_code = _c6_family_rows(rows, his)
+    if not by_code:
+        trace["refusal"] = C3_ABSENT["exact_score"]
+        return None
+    code, cands = _c6_code(by_code, his, "exact", trace)
+    if code is None:
+        return None
+    want_id = f"{C6_PREFIX}-{code}-{his['a']}-{his['b']}-{his['date']}-exact-score-{his['x']}-{his['y']}"
+    r = _c6_side_row(cands, want_id, on, want_intent, "exact", trace)
+    if r is None:
+        return None
+    qm = _C6_EXACT_Q_RE.fullmatch(_c6_text(r.get("question")))
+    if qm is None:
+        trace["refusal"] = "exact:question-shape"
+        return None
+    if (qm.group("va"), qm.group("vb")) != (his["a"], his["b"]):
+        trace["refusal"] = "exact:codes"
+        trace["venue_codes"] = [qm.group("va"), qm.group("vb")]
+        return None
+    if qm.group("w") is None and qm.group("d1") is None:
+        trace["refusal"] = "exact:other"
+        return None
+    # THE ORDER, CERTIFIED BY THE VENUE'S OWN WORDS: the winner by code
+    # with the score max-min, or the draw with X twice -- never the
+    # digit order assumed from the identifier
+    x, y = his["x"], his["y"]
+    if x > y:
+        ok = qm.group("w") == his["a"] and (int(qm.group("m")), int(qm.group("n"))) == (x, y)
+    elif x < y:
+        ok = qm.group("w") == his["b"] and (int(qm.group("m")), int(qm.group("n"))) == (y, x)
+    else:
+        ok = qm.group("d1") is not None and int(qm.group("d1")) == int(qm.group("d2")) == x
+    if not ok:
+        trace["refusal"] = "exact:order-uncertified"
+        trace["venue_question"] = " ".join(str(r.get("question") or "").split())
+        return None
+    why = _c6_clubs_witnessed(rows, code, his, (A, B))
+    if why:
+        trace["refusal"] = "exact:club-unwitnessed"
+        trace["why"] = why
+        return None
+    return _c6_finish(r, "premap_exact_score", want_id, on, trace)
+
+
+def _c6_pick_halftime(rows: list[dict], his: dict, outcome: str | None,
+                      his_title: str | None, his_event_title: str | None,
+                      trace: dict) -> dict | None:
+    on = _norm(outcome)
+    want_intent = _YN_IDENTITY_INTENT.get(on)
+    if not want_intent:
+        trace["refusal"] = "halftime:outcome"
+        return None
+    if his["t"] == "draw":
+        sides, qual = _c3_title_parts(his_title)
+        if sides is None or qual != _C6_HT_DRAW_QUAL:
+            trace["refusal"] = "halftime:title-shape"
+            return None
+        S = O = None
+    else:
+        tm = _C6_HT_LEAD_TITLE_RE.fullmatch(_c6_text(his_title))
+        S = _c3_norm(tm.group("s")) if tm else ""
+        if not tm or pmus._yn_slot_bad(S):
+            trace["refusal"] = "halftime:title-shape"
+            return None
+        # his OTHER club, from his event title: the opponent witness the
+        # C2 alias arm reads (game agreement by names on both clubs)
+        sides = _yn_event_sides(his_event_title)
+        if sides is None:
+            trace["refusal"] = "halftime:event-unwitnessed"
+            return None
+        hit = [s for s in sides if pmus._yn_name_match(s, S)]
+        if len(hit) != 1:
+            trace["refusal"] = "halftime:event-shear"
+            return None
+        O = sides[1] if hit[0] is sides[0] else sides[0]
+    by_code = _c6_family_rows(rows, his)
+    if not by_code:
+        trace["refusal"] = C3_ABSENT["halftime_result"]
+        return None
+    code, cands = _c6_code(by_code, his, "halftime", trace)
+    if code is None:
+        return None
+    e = f"{C6_PREFIX}-{code}-{his['a']}-{his['b']}-{his['date']}-fh-"
+    if his["t"] == "draw":
+        want_id = e + "draw"
+        r = _c6_side_row(cands, want_id, on, want_intent, "halftime", trace)
+        if r is None:
+            return None
+        qm = _C6_HT_TIED_Q_RE.fullmatch(_c6_text(r.get("question")))
+        if qm is None:
+            trace["refusal"] = "halftime:question-shape"
+            return None
+        if (qm.group("va"), qm.group("vb")) != (his["a"], his["b"]):
+            trace["refusal"] = "halftime:codes"
+            trace["venue_codes"] = [qm.group("va"), qm.group("vb")]
+            return None
+        why = _c6_clubs_witnessed(rows, code, his, (sides[0], sides[1]))
+        if why:
+            trace["refusal"] = "halftime:subject-unwitnessed"
+            trace["why"] = why
+            return None
+        return _c6_finish(r, "premap_halftime", want_id, on, trace)
+    # home / away: the row whose question's SUBJECT is his club and whose
+    # opponent is his other club -- one row, by name; then t from ITS
+    # identifier. 'home' / 'away' is never read.
+    team = {}
+    for r in cands:
+        ident = r["identifier"]
+        if ident in (e + his["a"], e + his["b"]):
+            team.setdefault(ident, []).append(r)
+    if not team:
+        trace["refusal"] = "halftime:no-row"
+        return None
+    named: list[str] = []
+    parsed = 0
+    subjects: list[str] = []
+    for ident, rs in sorted(team.items()):
+        qm = _C6_HT_LEAD_Q_RE.fullmatch(_c6_text(rs[0].get("question")))
+        if qm is None:
+            continue
+        parsed += 1
+        s, o = _c3_norm(qm.group("s")), _c3_norm(qm.group("o"))
+        subjects.append(s)
+        if pmus._yn_name_match(s, S) and pmus._yn_name_match(o, O):
+            named.append(ident)
+    if not parsed:
+        trace["refusal"] = "halftime:question-shape"
+        return None
+    if not named:
+        trace["refusal"] = "halftime:subject-unwitnessed"
+        trace["venue_subjects"] = subjects
+        return None
+    if len(named) > 1:
+        trace["refusal"] = "halftime:ambiguous"
+        return None
+    want_id = named[0]
+    r = _c6_side_row(team[want_id], want_id, on, want_intent, "halftime", trace)
+    if r is None:
+        return None
+    # THE ROW PLACED ON IS THE ROW READ (review LOW-1): the identifier
+    # was chosen on its first row's question; the side row he is placed
+    # on must say the same (two sides of one identifier carrying
+    # different questions is unattested, and _c5_sided guards exactly
+    # that on the P4 rows)
+    qm = _C6_HT_LEAD_Q_RE.fullmatch(_c6_text(r.get("question")))
+    if qm is None or not (pmus._yn_name_match(_c3_norm(qm.group("s")), S)
+                          and pmus._yn_name_match(_c3_norm(qm.group("o")), O)):
+        trace["refusal"] = "halftime:subject-unwitnessed"
+        trace["why"] = "side-row-question"
+        return None
+    # THE IDENTIFIER'S CODE IS HELD AGAINST THE CLUB (review MEDIUM-1):
+    # a venue event whose two -fh- questions are swapped against their
+    # identifiers (the shape c5_certify names rows-swapped on the P4
+    # rows) would otherwise be traded on the question alone. The code t
+    # of the chosen row must name S through the event's own P4 pair --
+    # the row -<t> asks about S, the other about O -- else nothing of the
+    # venue's certifies which club the identifier is.
+    t = want_id[len(e):]
+    why = _c6_clubs_witnessed(rows, code, his, (S, O) if t == his["a"] else (O, S))
+    if why:
+        trace["refusal"] = "halftime:subject-unwitnessed"
+        trace["why"] = f"code-shear:{t}"
+        trace["p4"] = why
+        return None
+    trace["fh_code"] = t
+    return _c6_finish(r, "premap_halftime", want_id, on, trace)
+
+
+def c6_pick(rows: list[dict], outcome: str | None, his_title: str | None,
+            his_slug: str | None, his_event_title: str | None = None,
+            trace: dict | None = None) -> dict | None:
+    """The C6 families' identity pick over the atc- rows: the matched
+    row (a COPY carrying matched_by and, under an alias, league_alias)
+    or None with the refusal named in `trace`. Pure."""
+    t: dict = {} if trace is None else trace
+    his = c6_his(his_slug)
+    if his is None:
+        t["refusal"] = "c6:not-a-family"
+        return None
+    t["family"] = his["family"]
+    tag = _C6_TAG[his["family"]]
+    if his["shape"] is None:
+        t["refusal"] = f"{tag}:slug-shape"
+        return None
+    if his["shape"] == "other":
+        t["refusal"] = "exact:other"
+        return None
+    if his["family"] == "exact_score":
+        return _c6_pick_exact(rows, his, outcome, his_title, t)
+    return _c6_pick_halftime(rows, his, outcome, his_title, his_event_title, t)
+
+
 def match_side(rows: list[dict], outcome: str | None,
                his_title: str | None,
                his_slug: str | None = None, *,
@@ -4522,6 +4954,15 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
     # so a whole-number line ('-3', 'O/U 47') left the row unlined and
     # the line comparison was skipped on both sides.
     line = _question_line(q)
+    if "-exact-score-" in str(m.get("slug") or "").lower():
+        # AN EXACT SCORE STATES A SCORE, NOT A LINE (C6, 2026-09-07).
+        # 'Will EVE vs MNU finish EVE wins 2-1?' stamped line '1' ('0'
+        # out of '3-0') on every exact-score row of the 2026-09-06 dump
+        # (epl_rows_1338.log:247-314): a phantom that _yn_line_ok would
+        # hold against his unlined Yes/No and refuse. The C6 lane reads
+        # the score from the question; no other arm may read it as a
+        # line, so none is stamped.
+        line = ""
     ev_slug = ev.get("slug") or ev.get("eventSlug") or ""
     ev_title = ev.get("title") or ""
     out: list[dict] = []
@@ -5106,6 +5547,7 @@ async def resolve_explain(pool, market_title: str | None,
     his_c3 = c3_his(global_slug) if yn_identity_on() else None
     # E2: the map winner, read inside the same switch (resolve's own)
     his_map = map_his(global_slug) if yn_identity_on() and his_c3 is None else None
+    his_c6 = c6_his(global_slug) if yn_identity_on() else None
     out["family"] = family_of(global_slug or "")
     out["c3_on"] = yn_identity_on()
     if not want:
@@ -5145,11 +5587,14 @@ async def resolve_explain(pool, market_title: str | None,
                              f"{his_c3['seg']!r} for this event")
             return out
     # E2: a map winner is read by its own pick alone, as a segmented C3
-    # family is -- the wording arm never sees its rows
-    wording = (his_c3 is None or not his_c3["seg"]) and his_map is None
+    # family is -- the wording arm never sees its rows; C6 (the exact
+    # score / halftime result) likewise
+    wording = ((his_c3 is None or not his_c3["seg"]) and his_map is None
+               and his_c6 is None)
     hit = match_side(kept, outcome, market_title, global_slug) if wording else None
     c3_trace: dict = {}
     map_trace: dict = {}
+    c6_trace: dict = {}
     if hit is None and yn_identity_on():
         # the same second call resolve makes, so the census attributes
         # exactly what production does once the owner's flip is on
@@ -5182,12 +5627,22 @@ async def resolve_explain(pool, market_title: str | None,
             out["map"] = map_trace
             if hit is not None:
                 out["matched_by"] = hit["matched_by"]
+        if hit is None and his_c6 is not None:
+            # the same C6 call resolve makes (the exact score / halftime
+            # result by identity), inside the same switch
+            hit = c6_pick(kept, outcome, market_title, global_slug, event_title, c6_trace)
+            out["c6"] = c6_trace
+            if hit is not None:
+                out["matched_by"] = hit["matched_by"]
+                if hit.get("league_alias"):
+                    out["league_alias"] = hit["league_alias"]
     c5_trace: dict = {}
     if hit is None and yn_identity_on():
         # C5: the same code translation resolve makes, after every other
         # arm found nothing; the trace is the census's reading
         hit = await c5_resolve(pool, rows, kept, outcome, market_title, event_title,
-                               global_slug, c5_trace, his_c3=his_c3, wording=wording)
+                               global_slug, c5_trace, his_c3=his_c3, wording=wording,
+                               his_c6=his_c6)
         if c5_trace:
             out["yn_c5"] = c5_trace
         if hit is not None:
@@ -5196,20 +5651,35 @@ async def resolve_explain(pool, market_title: str | None,
             out["witness"] = hit["witness"]
             if hit.get("league_alias"):
                 out["league_alias"] = hit["league_alias"]
-    c6_trace: dict = {}
+    names_trace: dict = {}
     if hit is None and yn_identity_on():
         # C6-N: the same stored-title witness resolve reads, after C5;
         # the trace is the census's reading (yn_c6)
         hit = await names_resolve(pool, rows, kept, outcome, market_title, event_title,
-                                  global_slug, c6_trace, wording=wording)
-        if c6_trace:
-            out["yn_c6"] = c6_trace
+                                  global_slug, names_trace, wording=wording)
+        if names_trace:
+            out["yn_c6"] = names_trace
         if hit is not None:
             out["matched_by"] = hit["matched_by"]
             out["code_pair"] = dict(hit["code_pair"])
             out["witness"] = hit["witness"]
             if hit.get("league_alias"):
                 out["league_alias"] = hit["league_alias"]
+    if hit is None and his_c6 is not None:
+        # C6: the event carries NO row of the family (nor does the one
+        # C5 certified): the venue does not list it there -- the family
+        # gap it always was, under the step / split / refusal names the
+        # census has bucketed since C1 step 5 (family_not_listed,
+        # exact:family-absent / halftime:family-absent), with the lane's
+        # trace beside them
+        absent = C3_ABSENT[his_c6["family"]]
+        if c6_trace.get("refusal") == absent and c5_trace.get("refusal") in (None, absent):
+            out["step"] = "unknown_market_type"
+            out["split"] = "family_not_listed"
+            out["refusal"] = absent
+            out["detail"] = (f"{len(kept)} {C6_PREFIX}- rows on this event, none of the "
+                             f"{his_c6['family']} family")
+            return out
     if hit is None:
         out["step"] = "no_side_match"
         # printed through the same date strip the matcher applies, so
@@ -5495,16 +5965,19 @@ async def resolve_explain(pool, market_title: str | None,
             # C3: the family's own refusal name is the split the census
             # counts (no_side_match:spread:line-absent …)
             out["split"] = c3_trace["refusal"]
+        if c6_trace.get("refusal"):
+            # C6 likewise (no_side_match:exact:order-uncertified …)
+            out["split"] = c6_trace["refusal"]
         if c5_trace.get("refusal"):
             # C5: a single candidate event was found and the translation
             # refused (yn:code-translate:ambiguous / unwitnessed /
             # name-mismatch), or it was certified and the lane refused
             # the rewritten slug by its own name
             out["split"] = c5_trace["refusal"]
-        if c6_trace.get("refusal"):
+        if names_trace.get("refusal"):
             # C6-N: the stored-title witness was read and the names arm
             # refused by its own name (yn:names-… with `why`)
-            out["split"] = c6_trace["refusal"]
+            out["split"] = names_trace["refusal"]
         if map_trace.get("refusal"):
             # E2: the map winner's own refusal is the split -- last, so
             # a C5 trace on a digit-suffixed code ('1win-ast') never
@@ -5612,7 +6085,13 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     # inside the same switch and read by its own pick alone, as a
     # segmented C3 family is -- the wording arm never sees its rows
     his_map = map_his(global_slug) if yn_identity_on() and his_c3 is None else None
-    wording = (his_c3 is None or not his_c3["seg"]) and his_map is None
+    # C6: an exact score / halftime result is read by the family's own
+    # identity pick alone, like a segmented C3 pick -- the wording arm
+    # never sees the atc- rows its prefix admits (a full-game moneyline
+    # row is never this pick's, _yn_title_is_his_game)
+    his_c6 = c6_his(global_slug) if yn_identity_on() else None
+    wording = ((his_c3 is None or not his_c3["seg"]) and his_map is None
+               and his_c6 is None)
     hit = match_side(kept, outcome, market_title, global_slug) if wording else None
     matched_by = "premap"
     if hit is None and yn_identity_on():
@@ -5653,6 +6132,13 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
             hit = _c3_pick_map(kept, his_map, outcome, market_title, {})
             if hit is not None:
                 matched_by = hit["matched_by"]
+        if hit is None and his_c6 is not None:
+            # C6 (2026-09-07): the exact score / halftime result by
+            # identity -- matched_by premap_exact_score / premap_halftime,
+            # source 'premap'; inside the same switch
+            hit = c6_pick(kept, outcome, market_title, global_slug, event_title)
+            if hit is not None:
+                matched_by = hit["matched_by"]
     if hit is None and os.getenv("PREMAP_NAMED_LANE",
                                  "").strip().lower() == "on":
         # NAMED-TENNIS LANE, Phase 1 wiring (mapper-fail diagnosis
@@ -5686,7 +6172,8 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         # the hit carries code_translated and witness and keeps the
         # lane's own matched_by and source 'premap'.
         hit = await c5_resolve(pool, rows, kept, outcome, market_title, event_title,
-                               global_slug, {}, his_c3=his_c3, wording=wording)
+                               global_slug, {}, his_c3=his_c3, wording=wording,
+                               his_c6=his_c6)
         if hit is not None:
             matched_by = hit["matched_by"]
     if hit is None and yn_identity_on():

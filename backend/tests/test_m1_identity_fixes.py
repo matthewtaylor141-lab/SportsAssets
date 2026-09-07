@@ -180,16 +180,29 @@ class TestTheEventTitleKeyGrammar:
     def test_repro_j_the_stored_title_now_reaches_the_rows(self, armed):
         """With the stored '… - Exact Score' title the exact score died at
         no_key_intersection (repro J, keys 4 rows 0); it now reaches the
-        venue's rows and refuses by the family name, as with a plain
-        title (repro A) -- the lane is another build, nothing maps."""
+        venue's rows. C6 (M2): the exact-score lane then maps it -- the
+        C5 translation certified by this event title's head (mun -> mnu)
+        and the venue's own question ('Will EVE vs MNU finish EVE wins
+        2-1?') certifying the digit order; the halftime result, whose
+        -fh- rows this board does not list, still refuses by the family
+        name."""
         rows = c5._board()
         p = _Pool(rows)
         ex = _explain(p, S_ES, T_ES, f"{EVE_MNU} - Exact Score", "Yes")
-        assert ex["step"] == "unknown_market_type" and ex["split"] == "family_not_listed"
-        assert ex["refusal"] == "exact:family-absent" and ex["rows"] > 0
-        assert _resolve(p, S_ES, T_ES, f"{EVE_MNU} - Exact Score", "Yes") is None
-        # and his exact-score title alone (no stored event title) fetches them too
-        assert _explain(p, S_ES, T_ES, None, "Yes")["refusal"] == "exact:family-absent"
+        assert ex["step"] == "resolves" and ex["rows"] > 0
+        assert ex["matched_by"] == "premap_exact_score" and ex["code_translated"] == {"mun": "mnu"}
+        assert ex["yn_c5"]["witness_src"] == "event"
+        h = _resolve(p, S_ES, T_ES, f"{EVE_MNU} - Exact Score", "Yes")
+        assert _short(h) == (f"atc-epl-eve-mnu-{D}-exact-score-2-1", "yes", LONG,
+                             "premap_exact_score", None)
+        # his exact-score title alone (no stored event title) fetches them
+        # too, but nothing witnesses mun -> mnu: C5 refuses, the lane's own
+        # reading of his untranslated codes (family-absent) beside it
+        ex = _explain(p, S_ES, T_ES, None, "Yes")
+        assert ex["rows"] > 0 and ex["step"] == "no_side_match"
+        assert ex["split"] == "yn:code-translate:unwitnessed"
+        assert ex["c6"]["refusal"] == "exact:family-absent"
+        assert _resolve(p, S_ES, T_ES, None, "Yes") is None
         slug = f"epl-ars-che-{D}-halftime-result-away"
         ex = _explain(p, slug, "Chelsea FC leading at halftime?", f"{ARS_CFC} - Halftime Result", "Yes")
         assert ex["step"] == "unknown_market_type" and ex["refusal"] == "halftime:family-absent"
