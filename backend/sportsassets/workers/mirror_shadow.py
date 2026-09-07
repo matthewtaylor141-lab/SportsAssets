@@ -433,7 +433,7 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
     rows = await pool.fetch(
         """
         WITH f AS (
-            SELECT t.id, t.source, t.tx_hash, t.asset, t.side,
+            SELECT t.id, t.source, t.tx_hash, t.asset, t.side, t.condition_id,
                    t.size::float8 AS size, t.price::float8 AS price,
                    extract(epoch FROM t.ts)::float8 AS ts,
                    COALESCE(t.market_title, m.title) AS market_title, t.event_slug,
@@ -723,7 +723,8 @@ async def map_market(pool, fills: list[dict], pmus=None, *, whale: str | None = 
     for a, f in by_asset.items():
         try:
             m = await _premap.resolve(pool, f.get("market_title"), f.get("event_title"),
-                                      f.get("outcome"), f.get("market_slug"))
+                                      f.get("outcome"), f.get("market_slug"),
+                                      condition_id=condition_id)
         except Exception:  # noqa: BLE001
             m = None
         if m and m.get("market_slug") and m.get("intent"):
@@ -1180,7 +1181,9 @@ def _first_context(fills: list[dict]) -> dict:
             sport = "unclassified"
     return {"his_slug": slug or None, "title": ctx.get("market_title"),
             "event_title": ctx.get("event_title"), "event_slug": ctx.get("event_slug"),
-            "outcome": ctx.get("outcome"), "sport": sport}
+            "outcome": ctx.get("outcome"), "sport": sport,
+            # C7: the condition the resolver reads his kickoff for
+            "condition_id": ctx.get("condition_id")}
 
 
 def _family_of(slug: str | None) -> str:
@@ -1210,7 +1213,8 @@ async def explain_unmapped(pool, ctx: dict, refusal: str | None = None) -> str:
         return "explain_unavailable"
     try:
         ex = await _premap.resolve_explain(pool, ctx.get("title"), ctx.get("event_title"),
-                                           ctx.get("outcome"), ctx.get("his_slug"))
+                                           ctx.get("outcome"), ctx.get("his_slug"),
+                                           condition_id=ctx.get("condition_id"))
     except Exception as exc:  # noqa: BLE001 — one market's why, named
         return f"explain_raised:{type(exc).__name__}"
     step = str((ex or {}).get("step") or "unknown")

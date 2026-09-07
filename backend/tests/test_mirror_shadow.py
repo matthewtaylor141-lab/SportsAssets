@@ -910,7 +910,7 @@ def _short_side_only_resolve(monkeypatch):
     (gap_planned_unopened.md section 1, class B)."""
     from sportsassets.workers import premap
 
-    async def _short_only(pool, market_title, event_title, outcome, global_slug):
+    async def _short_only(pool, market_title, event_title, outcome, global_slug, **_kw):
         if outcome == "Brandon Nakashima":
             return {"market_slug": SLUG, "intent": "ORDER_INTENT_BUY_SHORT"}
         return None
@@ -988,7 +988,7 @@ def test_the_premap_fallback_names_the_long_token_from_either_side(monkeypatch):
     from sportsassets.workers import premap
     calls = []
 
-    async def _short_side(pool, market_title, event_title, outcome, global_slug):
+    async def _short_side(pool, market_title, event_title, outcome, global_slug, **_kw):
         calls.append((market_title, event_title, outcome, global_slug))
         if outcome == "Alex Michelsen":
             return {"market_slug": SLUG, "intent": "ORDER_INTENT_BUY_SHORT"}
@@ -1001,7 +1001,7 @@ def test_the_premap_fallback_names_the_long_token_from_either_side(monkeypatch):
     assert m == {"us_slug": SLUG, "long_asset": N, "other_asset": M, "source": "premap"}
     assert calls and calls[0][1] == "US Open 2026", "the event title reaches the resolver"
 
-    async def _long_side(pool, market_title, event_title, outcome, global_slug):
+    async def _long_side(pool, market_title, event_title, outcome, global_slug, **_kw):
         if outcome == "Brandon Nakashima":
             return {"market_slug": SLUG, "intent": "ORDER_INTENT_BUY_LONG"}
         return None
@@ -1013,6 +1013,13 @@ def test_the_premap_fallback_names_the_long_token_from_either_side(monkeypatch):
     src = inspect.getsource(ms.his_fills)
     assert "LEFT JOIN markets m ON m.condition_id = t.condition_id" in src
     assert "m.event_title" in src and "t.event_title" not in src
+    # C7 (M6 review v2 M4): the fills carry his condition, so the
+    # shadow's re-judge and the report hand the resolver the condition
+    # whose kickoff instant it reads (None handed = kick:unknown for
+    # every soccer market until the marks job's clock)
+    assert "t.side, t.condition_id," in src
+    assert ms._first_context([{"market_title": "T", "condition_id": CID}])["condition_id"] == CID
+    assert ms._first_context([{"market_title": "T"}])["condition_id"] is None
 
 
 def test_mirror_shadow_report_reads_newest_per_market_and_names_a_missing_table():
@@ -1139,7 +1146,7 @@ def test_the_long_side_is_chosen_by_shape_never_by_row_or_fill_order(monkeypatch
     # the same through the premap fallback
     from sportsassets.workers import premap
 
-    async def _both_long(pool, market_title, event_title, outcome, global_slug):
+    async def _both_long(pool, market_title, event_title, outcome, global_slug, **_kw):
         return {"market_slug": "slug-mich" if outcome == "Alex Michelsen" else "slug-nak",
                 "intent": "ORDER_INTENT_BUY_LONG"}
 
@@ -1150,7 +1157,7 @@ def test_the_long_side_is_chosen_by_shape_never_by_row_or_fill_order(monkeypatch
     assert m2 == {"us_slug": "slug-mich", "long_asset": M, "other_asset": N,
                   "source": "premap", "per_side": True}
     # both long on ONE slug is ambiguous: refused, not guessed
-    async def _same_slug(pool, market_title, event_title, outcome, global_slug):
+    async def _same_slug(pool, market_title, event_title, outcome, global_slug, **_kw):
         return {"market_slug": SLUG, "intent": "ORDER_INTENT_BUY_LONG"}
 
     monkeypatch.setattr(premap, "resolve", _same_slug)
@@ -1284,7 +1291,7 @@ def test_an_unmapped_row_names_the_market_in_its_detail(monkeypatch):
     from sportsassets.workers import premap
     calls = []
 
-    async def _explain(pool, market_title, event_title, outcome, global_slug):
+    async def _explain(pool, market_title, event_title, outcome, global_slug, **_kw):
         calls.append((market_title, event_title, outcome, global_slug))
         return {"step": "no_key_intersection", "detail": "x", "keys": 5, "rows": 0}
 
@@ -1308,7 +1315,7 @@ def test_an_unmapped_row_names_the_market_in_its_detail(monkeypatch):
     assert d["gross_sh"] == round(sum(ms.mi.net_positions(fills).values()), 4)
     assert d["outcome_null"] == 1
     # a resolver that raises is named, never guessed; sport falls back to the slug
-    async def _boom(*a):
+    async def _boom(*a, **_k):
         raise RuntimeError("premap down")
 
     monkeypatch.setattr(premap, "resolve_explain", _boom)
@@ -1362,7 +1369,7 @@ def test_a_mapped_row_carries_family_per_side_snapshot_state_and_ledger_facts(mo
     # a premap-sourced map carries its source as its class
     from sportsassets.workers import premap
 
-    async def _long(pool, market_title, event_title, outcome, global_slug):
+    async def _long(pool, market_title, event_title, outcome, global_slug, **_kw):
         return {"market_slug": SLUG, "intent": "ORDER_INTENT_BUY_LONG"} if outcome == "Alex Michelsen" else None
 
     monkeypatch.setattr(premap, "resolve", _long)

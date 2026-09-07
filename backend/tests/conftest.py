@@ -21,6 +21,22 @@ def _lift_emergency_halt(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _no_clob_from_tests(monkeypatch):
+    """C7 (2026-09-07): premap.resolve asks edge_marks._game_start for
+    his kickoff when a condition_id is handed in, and that read falls
+    back to the public CLOB when market_starts has no row. No test
+    reaches the network: a test that wants an instant seeds its fake
+    pool's market_starts read; every other read is 'unread' (deferred),
+    which the resolver names kick:unknown."""
+    from sportsassets.workers import edge_marks
+
+    def _refuse(_condition_id):
+        raise RuntimeError("no CLOB from tests")
+
+    monkeypatch.setattr(edge_marks, "fetch_game_start", _refuse)
+
+
+@pytest.fixture(autouse=True)
 def _edge_gate_seeded(monkeypatch):
     """The 95% gate has a proven verdict for the fixture whales.
 

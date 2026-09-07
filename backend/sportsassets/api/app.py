@@ -5213,7 +5213,8 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
                COALESCE(t.market_title, m.title)     AS market_title,
                m.event_title                         AS event_title,
                COALESCE(t.outcome, mt.outcome)       AS outcome,
-               COALESCE(t.market_slug, m.slug)       AS market_slug
+               COALESCE(t.market_slug, m.slug)       AS market_slug,
+               COALESCE(mt.condition_id, lo.condition_id) AS condition_id
           FROM live_orders lo
           JOIN trades t ON t.id = lo.trade_id
           LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
@@ -5263,9 +5264,14 @@ async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
                          "attested_family": 0}
     for r in rows:
         try:
+            # C7: the condition production hands resolve() (his kickoff
+            # instant is read per condition), so the census asks the
+            # same question -- and never fans out venue reads per row
+            # (fetch_kick=False: market_starts as the live path reads it)
             ex = await resolve_explain(
                 pool, r["market_title"], r["event_title"], r["outcome"],
-                r["market_slug"])
+                r["market_slug"], condition_id=r.get("condition_id"),
+                fetch_kick=False)
         except Exception as exc:  # noqa: BLE001 — one row, not the census
             ex = {"step": "explain_raised",
                   "detail": type(exc).__name__, "keys": 0, "rows": 0}

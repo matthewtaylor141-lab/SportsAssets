@@ -287,7 +287,10 @@ class TestTheSweepStoresTheTeamField:
             sql, a = calls[-1]
             assert "team_abbr" not in sql and len(a) == 11, n
             assert asyncio.run(premap.team_select_cols(p)) == ""
-            assert premap.TEAM_SELECT_COLS == "team_abbr, team_safe_name, "
+            # C7 (M6, the merge): the kickoff lane's four columns ride the
+            # same fragment and the same probe -- one SELECT
+            assert premap.TEAM_SELECT_COLS == ("team_abbr, team_safe_name, team_name, team_league, "
+                                               "game_start, sports_type, ")
             # absent is asked again after the re-probe window, present is final
             assert p.probes == 1
             premap._TEAM_COLS_STATE["at"] -= premap._TEAM_COLS_REPROBE_S + 1

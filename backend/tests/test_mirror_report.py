@@ -340,10 +340,10 @@ def test_mirror_cover_report_serves_candidates_dollars_class_and_source(monkeypa
 
     from sportsassets.workers import premap
 
-    async def _resolve(pool, market_title, event_title, outcome, global_slug):
+    async def _resolve(pool, market_title, event_title, outcome, global_slug, **_kw):
         return None
 
-    async def _explain(pool, market_title, event_title, outcome, global_slug):
+    async def _explain(pool, market_title, event_title, outcome, global_slug, **_kw):
         return {"step": "no_side_match"}
 
     monkeypatch.setattr(premap, "resolve", _resolve)

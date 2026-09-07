@@ -8555,7 +8555,8 @@ async def maybe_execute(payload: dict, reaction: float | None) -> None:
 
                 mapping = await _premap.resolve(
                     pool, ctx.get("market_title"), ctx.get("event_title"),
-                    ctx.get("outcome"), ctx.get("market_slug"))
+                    ctx.get("outcome"), ctx.get("market_slug"),
+                    condition_id=payload.get("condition_id"))
             except Exception:  # noqa: BLE001 — premap never blocks a copy
                 log.exception("premap resolve failed; falling through")
                 mapping = None

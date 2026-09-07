@@ -404,7 +404,7 @@ def test_the_venue_truth_and_the_fill_echo_are_pure_and_fail_closed():
 def test_a_venue_that_lists_nothing_keeps_premaps_own_explain(monkeypatch):
     """Every candidate 404s and the yes/no lane refuses: the market is
     unmapped under premap's own step name, never a new one."""
-    async def _explain(pool, market_title, event_title, outcome, global_slug):
+    async def _explain(pool, market_title, event_title, outcome, global_slug, **_kw):
         return {"step": "no_side_match", "detail": "x", "keys": 3, "rows": 2}
 
     monkeypatch.setattr(premap, "resolve_explain", _explain)
