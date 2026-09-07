@@ -277,7 +277,12 @@ class TestSpreadRefusals:
             slug = f"cfb-washst-wash-{D}-spread-home-{ln}"
             assert _resolve(rows, slug, f"Spread: Washington (-{L})", "Washington State") is None
             ex = _explain(rows, slug, f"Spread: Washington (-{L})", "Washington State")
-            assert ex["split"] == "spread:names-unreadable" and ex["c3"]["venue_names"] == ["cougars", "huskies"]
+            # C4 (2026-09-06): the name step still reads nothing on these
+            # rows; the code chain then refuses by ITS name -- this board
+            # lists no aec row and no grammar certification, so the
+            # subject is uncertified (test_c4_cfb_spreads pins the chain)
+            assert ex["split"] == "spread:subject-uncertified" and ex["c3"]["venue_names"] == ["cougars", "huskies"]
+            assert ex["c3"]["subject"] == "aec-absent"
 
     def test_the_schools_on_the_venue_row_are_readable(self, armed):
         # the 22.5 row names the schools: S.C. State -22.5 -> neg yes

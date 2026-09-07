@@ -196,6 +196,62 @@ def code_names(code: str, outcome: str | None, sibling: str) -> bool:
     return (stem in words or first.startswith(stem)) and not longer_named
 
 
+def _code_words_of(outcome: str | None) -> list[str]:
+    """The outcome's words for the split rule: NFKD-folded, lower, with
+    an ampersand INSIDE a word dropped ('A&M' -> 'am', the venue's own
+    'flam' for Florida A&M) -- nothing else is folded."""
+    import unicodedata as _ud
+
+    folded = _ud.normalize("NFKD", str(outcome or "")).encode("ascii", "ignore").decode().lower()
+    folded = re.sub(r"(?<=[a-z0-9])&(?=[a-z0-9])", "", folded)
+    return _WORD_RE.findall(folded)
+
+
+def code_words(code: str, outcome: str | None) -> bool:
+    """THE MULTI-WORD SCHOOL CODE (C4, 2026-09-06): 'scarst' for South
+    Carolina State, 'flam' for Florida A&M, 'washst' for Washington
+    State. The code is the concatenation of NON-EMPTY PREFIXES of
+    CONSECUTIVE words of the outcome, starting at its first word, EVERY
+    word used in order, and the split is UNIQUE: 'scarst' = s|car|st
+    over South|Carolina|State, 'flam' = fl|am over Florida|A&M. Refused:
+    a code with more than one split, a split that would skip a word
+    ('tex' over Texas|Tech leaves Tech unused -- the whole-word rule
+    owns single-word claims), an outcome of one word (the first-word
+    rule owns it), a code under three letters. No subsequence, no
+    similarity: every letter of the code is accounted for, in order, by
+    the front of the outcome's own words."""
+    code = (code or "").lower()
+    words = _code_words_of(outcome)
+    if len(code) < 3 or len(words) < 2 or len(words) > len(code):
+        return False
+
+    def splits(pos: int, w: int) -> int:
+        if w == len(words):
+            return 1 if pos == len(code) else 0
+        n = 0
+        word = words[w]
+        for k in range(1, min(len(word), len(code) - pos) + 1):
+            if code[pos:pos + k] != word[:k]:
+                break
+            n += splits(pos + k, w + 1)
+            if n > 1:
+                break
+        return n
+
+    return splits(0, 0) == 1
+
+
+def code_reads(code: str, outcome: str | None, sibling: str) -> bool:
+    """code_names, and ONLY where the C1/C3 rules name NEITHER of the
+    slug's two codes, the multi-word split (code_words) for this one.
+    Every verdict code_names gives -- a hit, an ambiguity, a conflict --
+    stands; the split rule turns a 'names neither' into a hit and
+    nothing else ('South Carolina State' -> scarst beside flam)."""
+    if code_names(code, outcome, sibling) or code_names(sibling, outcome, code):
+        return code_names(code, outcome, sibling)
+    return code_words(code, outcome)
+
+
 def contract_slug(global_slug: str | None, i: int) -> str | None:
     """The venue's per-side contract for team i of his slug --
     atc-<lg>-<a>-<b>-<date>-<code_i> -- the copy lane's own atc-
@@ -258,8 +314,10 @@ def aec_code_side(global_slug: str | None, outcome: str | None, market: dict,
     if a == b or len(tail) > 1 or (tail and tail[0] not in (a, b)):
         return None, REFUSE_CODE_SHAPE
     # each code read against its sibling: a shared stem (wash/washst)
-    # decides by the outcome's own words, never by the stem alone (C3)
-    hits = [i for i, c in enumerate((a, b)) if code_names(c, outcome, (b, a)[i])]
+    # decides by the outcome's own words, never by the stem alone (C3);
+    # a multi-word school code (scarst) only where neither code is
+    # named by those rules (C4, code_reads)
+    hits = [i for i, c in enumerate((a, b)) if code_reads(c, outcome, (b, a)[i])]
     if not hits:
         return None, REFUSE_CODE_UNMATCHED
     if len(hits) != 1:
@@ -291,8 +349,8 @@ def aec_code_side(global_slug: str | None, outcome: str | None, market: dict,
         return None, REFUSE_CODE_SHAPE
     for j, s in enumerate(sides):
         desc = str(s.get("description") or "")
-        own = code_names((a, b)[j], desc, (b, a)[j])
-        other = code_names((b, a)[j], desc, (a, b)[j])
+        own = code_reads((a, b)[j], desc, (b, a)[j])
+        other = code_reads((b, a)[j], desc, (a, b)[j])
         if other and not own:
             return None, REFUSE_CODE_CONFLICT
         if own and other:
@@ -303,8 +361,8 @@ def aec_code_side(global_slug: str | None, outcome: str | None, market: dict,
     # the other way round is a contradiction, a mascot title says nothing
     for text in (m.get("title"), m.get("question")):
         ts = _title_sides(text)
-        if ts and code_names(b, ts[0], a) and code_names(a, ts[1], b) \
-                and not (code_names(a, ts[0], b) or code_names(b, ts[1], a)):
+        if ts and code_reads(b, ts[0], a) and code_reads(a, ts[1], b) \
+                and not (code_reads(a, ts[0], b) or code_reads(b, ts[1], a)):
             return None, REFUSE_CODE_CONFLICT
     side = sides[i]
     # the venue's own marker on the side: pmus.order_intent_for when the
@@ -343,7 +401,7 @@ def pair_agrees(global_slug: str | None, i: int, other_outcome: str | None,
     # conflict; a sibling naming the mapped code and not its own, with
     # no stem to share ('Baylor' beside a mapped 'bayl'), still refuses
     mapped, own = (a, b)[i], (a, b)[1 - i]
-    if code_names(mapped, other_outcome, own) and not code_names(own, other_outcome, mapped):
+    if code_reads(mapped, other_outcome, own) and not code_reads(own, other_outcome, mapped):
         return REFUSE_CODE_CONFLICT
     return None
 

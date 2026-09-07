@@ -307,8 +307,11 @@ def test_a_question_naming_both_sides_is_not_our_contract():
     base = "atc-cfb-bayl-aubrn-2026-09-05-"
     rows = [_row(base + "bu", "Will the Bears win against the Tigers?"),
             _row(base + "au", "Will the Tigers win against the Bears?")]
-    # without the other side's description (legacy callers): both fit our side by question
-    assert len(_run(ml._contract_candidates(_PremapPool(rows), CFB, 0, "Bears"))) == 2
+    # without the other side's description (legacy callers): the venue's
+    # short code fits our side by question; the 'au' row does NOT -- its
+    # suffix prefixes aubrn, the OTHER side's contract, which no question
+    # makes ours (C4 review fold 2026-09-06, HIGH-2; this line said 2)
+    assert _run(ml._contract_candidates(_PremapPool(rows), CFB, 0, "Bears")) == [base + "bu"]
     # with it: neither question is ours alone -> no fit by question
     assert _run(ml._contract_candidates(_PremapPool(rows), CFB, 0, "Bears", "Tigers")) == []
     # a question naming our side only still fits; the code fit is untouched

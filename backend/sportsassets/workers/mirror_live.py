@@ -1122,6 +1122,14 @@ async def _grammar_admission(t: _Tick, whale: str, slug: str, g: dict | None) ->
     else:
         con = await asyncio.to_thread(_market_read, t.pmus, cands[0])
         verdict, detail = map_lane.grammar_truth(con, market, i)
+    if verdict == "ok":
+        # a record already certified for this market that CONTRADICTS
+        # tonight's reading is a mismatch like any other (review fold v3,
+        # LOW-2): never a silent overwrite
+        prior = st["certified"].get(slug) if isinstance(st.get("certified"), dict) else None
+        clash = _grammar_contradiction(prior, str(g.get("outcome_desc") or ""), i)
+        if clash:
+            verdict, detail = "mismatch", f"certified record contradicted: {clash}"
     st[verdict] = int(st.get(verdict) or 0) + 1
     st["last"] = {"verdict": verdict, "slug": slug, "detail": detail, "at": t.now, "stage": "open"}
     if verdict == "mismatch":
@@ -1136,9 +1144,54 @@ async def _grammar_admission(t: _Tick, whale: str, slug: str, g: dict | None) ->
     st.setdefault("pending", {})[slug] = {"outcome_desc": g.get("outcome_desc"),
                                          "intent": g.get("intent"), "side_index": i,
                                          "his_slug": g.get("his_slug"), "at": t.now}
+    # C4 (2026-09-06): the venue-truth fact itself, kept after the fill
+    # echo pops `pending` -- the per-side contract for code i named this
+    # mascot -- so a spread on the same event whose asc row names mascots
+    # can place the question's subject at the code's position through
+    # this record (premap._c4_subject_certified). Bounded like `verified`.
+    _grammar_certify(st, slug, {"outcome_desc": g.get("outcome_desc"), "side_index": i,
+                                "his_slug": g.get("his_slug"), "at": t.now})
     await _grammar_write(t, st)
     _mirror_stop("grammar_echo_ok", whale)
     return None
+
+
+def _grammar_certify(st: dict, slug: str, rec: dict) -> None:
+    """Record the venue-truth fact for `slug` in st['certified'], newest
+    LAST: a market certified again is popped and re-inserted so it is
+    the newest (review fold 2026-09-06, LOW: re-inserting under an
+    existing key kept its old position and tonight's certification was
+    the first evicted), and the oldest are evicted past
+    _GRAMMAR_VERIFIED_MAX. A state whose 'certified' is not a dict is
+    started afresh."""
+    cert = dict(st["certified"]) if isinstance(st.get("certified"), dict) else {}
+    cert.pop(slug, None)
+    cert[slug] = rec
+    st["certified"] = dict(list(cert.items())[-_GRAMMAR_VERIFIED_MAX:])
+
+
+def _grammar_contradiction(prior: dict | None, desc: str, i: int) -> str | None:
+    """THE WRONG-SIDE GUARD ON A RE-CERTIFICATION (review fold v3,
+    2026-09-07, LOW-2): the record the class already holds for this aec
+    market against tonight's venue-truth reading (side description
+    `desc` at position `i`). The SAME mascot at the OTHER position, or
+    ANOTHER mascot at THIS position, is the venue contradicting itself
+    -- a wrong side one of the two times -- and reads as a mismatch
+    (the caller trips the class and keeps the old record). The same
+    reading is a refresh, and the complementary side (the other mascot
+    at the other position: Huskies at wash after Cougars at washst) is
+    the pair itself, consistent -- neither is a contradiction. Returns
+    the detail, or None."""
+    from .. import map_lane
+
+    if not isinstance(prior, dict):
+        return None
+    pd, pi = map_lane._norm(prior.get("outcome_desc")), prior.get("side_index")
+    same_desc, same_pos = pd == map_lane._norm(desc), pi == i
+    if same_desc == same_pos:
+        return None
+    return (f"the class certified {prior.get('outcome_desc')!r} at position {pi}; the venue now "
+            f"reads {desc!r} at position {i}")
 
 
 async def _contract_candidates(pool, his_slug: str, i: int, desc: str,
@@ -1149,7 +1202,13 @@ async def _contract_candidates(pool, his_slug: str, i: int, desc: str,
     atc-cfb-hawaii-stan-2026-08-29-h). The event's atc- rows in us_premap
     are listed and the one that fits the side is taken: a single-token
     suffix that is his code, or a prefix of his code and of no other, or
-    a row whose question names the aec side description whole. Exactly
+    a row whose question names the aec side description whole AND whose
+    suffix does not fit the OTHER side (review fold 2026-09-06, HIGH-2:
+    with only atc-cfb-washst-wash-…-wash 'Will the Cougars win?' listed,
+    the question alone fitted the OTHER code's contract to washst, the
+    truth check read the same name and certified Cougars at washst --
+    the wrong side of every washst-wash spread; a suffix that is the
+    other code, or prefixes it, is never ours by its question). Exactly
     one distinct contract, else the caller reads it as unverified. When
     the sweep lists none, his own code's slug is the one candidate -- a
     guess the venue must confirm by naming the side. None: unreadable."""
@@ -1183,9 +1242,15 @@ async def _contract_candidates(pool, his_slug: str, i: int, desc: str,
             if not suffix or "-" in suffix:
                 continue                    # a segment or prop row, never the contract
             by_code = (suffix == code or (code.startswith(suffix) and not other.startswith(suffix)))
+            # the suffix fits the other side: the other code itself, a
+            # prefix of it (whether or not of ours too), or an extension
+            # of it ('texas' beside tex; v3 LOW-3) -- its question never
+            # makes it ours
+            fits_other = suffix == other or other.startswith(suffix) or suffix.startswith(other)
             q_norm = map_lane._norm(r.get("question"))
             by_question = (bool(want) and want in q_norm
-                           and not (other_want and other_want in q_norm))
+                           and not (other_want and other_want in q_norm)
+                           and not fits_other)
             if (by_code or by_question) and s not in fits:
                 fits.append(s)
     if not rows:
