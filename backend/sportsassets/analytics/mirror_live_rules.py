@@ -718,6 +718,17 @@ MIRROR_DRIFT_MAX = capped_env("MIRROR_DRIFT_MAX", 0.05)
 # the gates endpoint after this many ticks (never as an `error` row).
 MIRROR_FROZEN_ALERT_S = capped_env("MIRROR_FROZEN_ALERT_S", 600.0)
 MIRROR_FROZEN_NAME_TICKS = int(capped_env("MIRROR_FROZEN_NAME_TICKS", 3))
+# FROZEN BOOKS FOLLOW HIS EXITS (E5, 2026-09-07; owner question 16:5xZ
+# "when he wins we win, when he loses we lose?"). A book frozen
+# `placement_lost` or `venue_ledger_disagree` cancelled its orders and
+# held to settlement while he sold. On, the live worker places REDUCING
+# orders on such a book sized on the venue's own position, toward his
+# net, at his price (mirror_live._frozen_exit); off, a frozen book does
+# nothing but read, as before. The environment may only turn it OFF: a
+# knob may lower a rail, never raise one. A module constant read at
+# import, as every switch here (a change in the environment needs a
+# restart); the worker reads it through the module at call time.
+MIRROR_FROZEN_EXITS = env_switch("MIRROR_FROZEN_EXITS", True)
 # Market families a book may open on (copy_sports.market_type_of).
 # P1 opened on moneylines alone and refused derivatives at admission
 # by the name `family` (program decision 19: totals, spreads and props
@@ -2296,8 +2307,8 @@ __all__ = [
     "MIRROR_MAX_REPLACES_PER_HOUR", "MIRROR_REST_TTL_S", "MIRROR_TAKE_AFTER_S",
     "MIRROR_EXIT_TOL", "exit_terms", "MIRROR_FLATTEN_SLIP",
     "MIRROR_FLATTEN_REST_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
-    "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FAMILIES", "FLAT_TOL_SHARES",
-    "SELL_DUST_SHARES",
+    "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAMILIES",
+    "FLAT_TOL_SHARES", "SELL_DUST_SHARES",
     "P2_MAKER_SHARE_MIN", "P2_TAKE_SLIP_MAX", "P2_FROZEN_TICK_FRAC_MAX", "P2_CAPTURE_MIN",
     "P2_INTEGRITY_COUNTERS",
     "mirror_target", "AdmissionFacts", "admission",

@@ -415,10 +415,12 @@ def test_review_the_error_line_names_every_case_label():
     -- five valid presets, one of them the switch that turns the mirror
     ON -- dropped out of the operator's help text, and the builder's pin
     (`line == labels`) locks the loss in."""
-    wf = yaml.safe_load(RENDER_OPS.read_text())
-    runs = [str(s.get("run") or "") for job in wf["jobs"].values() for s in (job.get("steps") or [])]
-    run = next(r for r in runs if "loss-breaker)" in r)
-    cases = re.findall(r"^\s+([a-z0-9-]+)\)\s+(?:need_confirm; )?SQL=", run, flags=re.M)
-    line = re.search(r'\*\) echo "sql: arg must be one of ([^ ]+) \(got', run).group(1).split("|")
+    text = RENDER_OPS.read_text()
+    yaml.safe_load(text)
+    # every case label in the sql block, whatever follows the `)` (a preset
+    # whose SQL sits on a later line -- E5's mirror-register -- counts too)
+    err = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
+    cases = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(err)], re.M)
+    line = err.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
     assert "mirror-on" in cases and "tables" in cases
     assert sorted(cases) == sorted(line), (sorted(set(cases) - set(line)), sorted(set(line) - set(cases)))

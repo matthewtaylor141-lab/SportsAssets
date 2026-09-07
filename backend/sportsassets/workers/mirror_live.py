@@ -414,6 +414,35 @@ CENSUS_KEYS: tuple[str, ...] = (
     # Inserted BEFORE `cand_terminal_skipped`, which stays last (pinned)
     "long_token_unknown", "target_zero", "book_row_unreadable", "cand_unread_capped",
     "refusal_write_failed",
+    # E5 (2026-09-07): FROZEN BOOKS FOLLOW HIS EXITS, and the operator
+    # register. A book frozen `placement_lost` / `venue_ledger_disagree`
+    # plans a REDUCE sized on the venue's own position toward his net
+    # (_frozen_exit): `frozen_reduce` when one went out; the refusals
+    # `frozen_exits_off` (the knob, off), `frozen_venue_unread` (the
+    # venue's position or his per-market read not read this tick),
+    # `frozen_coheld` (a live non-mirror row on the slug: the venue's
+    # number is not the book's alone), `frozen_venue_flat` (nothing of
+    # the book's on the venue), `frozen_no_his_exit` (his net is not
+    # under ours), `frozen_reduce_only` (the plan was not a reduce:
+    # never sent). `frozen_excess_sold`: a frozen reduce's fill past
+    # the ledger -- the lost response's shares, sold inside the venue's
+    # own reading -- named on the receipt, never the overfill trip.
+    # `registered_books`: a book whose slug carries a register row
+    # (migration 056); `registered_sign_refused`: a register row whose
+    # sign is against the book's leg (not read: fail closed);
+    # `registered_unreadable`: the register could not be read (absent
+    # until 056 lands; explains nothing). Inserted BEFORE
+    # `cand_terminal_skipped`, which stays last (pinned)
+    "frozen_reduce", "frozen_exits_off", "frozen_venue_unread", "frozen_coheld",
+    "frozen_venue_flat", "frozen_no_his_exit", "frozen_reduce_only", "frozen_excess_sold",
+    "registered_books", "registered_sign_refused", "registered_unreadable",
+    # E5 review: `frozen_fill_this_tick` (F1/F2: a fill booked on the
+    # book after the walk -- r.venue is stale by it, nothing sized),
+    # `frozen_venue_unexplained` (M1: a placement_lost book's venue
+    # surplus past its leg plus its lost rows' quantity), and
+    # `registered_no_increase` (F3: a book whose slug carries a register
+    # row never grows). Before the pinned last key
+    "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
     # D1 (2026-09-06): a candidate skipped because its venue state read
     # TERMINAL inside the last UNMAPPED_TTL_S (_terminal_until). Appended
     # LAST, past the served 40-key prefix; `integ` is at its own ceiling
@@ -537,6 +566,10 @@ CAND_REFUSAL_WRITE_TIMEOUT_S = 5.0
 _cand_refusal_last: dict[tuple[str, str], tuple[str, float]] = {}
 _CAND_REFUSAL_MEMO_MAX = 8000
 _cand_write_logged = False
+# E5: the register unreadable (absent until 056 lands), logged once per process
+_registered_logged = False
+# E5 / P2: the two freeze reasons a frozen book may follow his exit under
+FROZEN_EXIT_REASONS = frozenset({"placement_lost", "venue_ledger_disagree"})
 # THE CANDIDATE WALK'S ROTATION CURSOR (W2 / P3). The walk read his
 # conditions newest-fill-first up to MAX_MARKETS_PER_TICK, so on a busy
 # evening (549-790 active conditions, capped_tick true in 7 of 9
@@ -1190,6 +1223,63 @@ SELECT COALESCE(sum(filled_shares), 0)::float8 FROM live_orders
  WHERE us_market_slug = $1 AND COALESCE(whale_username, '') = 'manual'
    AND status IN ('filled', 'exiting') /* ml-manual-shares */
 """
+# THE OPERATOR REGISTER (E5 / P1, 2026-09-07; migration 056). A row is
+# the owner's dated, named statement that `shares` on the slug are
+# outside the book -- a lost placement response whose fill the venue
+# reports and the ledger never booked (book 77, Shelton/Tsitsipas:
+# venue 1,128, ledger 0, manual 0 since 2026-09-06). Written ONLY by
+# the render-ops `mirror-register` dispatch (confirm=DO), from the
+# book's own slug / asset / condition, after the preset printed venue
+# vs ledger vs manual and refused unless the figure equals venue -
+# ledger - manual exactly; the worker never writes it and never adopts
+# a fill into it. Read beside _SQL_MANUAL_SHARES, the same shape, and
+# treated exactly as `manual` in the venue == ledger comparison:
+# explained = ledger + manual + registered. Signed like the ledger
+# (negative is the short side); a sum whose sign is against the book's
+# leg is not read (_tick_book, `registered_sign_refused`): a register
+# row that made the ledger appear to hold what the venue does not
+# would have the live plan sell shares that are not there.
+_SQL_REGISTERED_SHARES = """
+SELECT COALESCE(sum(shares), 0)::float8 FROM mirror_registered_positions
+ WHERE us_market_slug = $1 /* ml-registered-shares */
+"""
+# THE CO-HOLD READ OF A FROZEN EXIT (E5 / P2): a LIVE non-mirror row on
+# the slug that is not the desk's `manual` sleeve -- the copy lane's
+# per-fill position the R7 paragraph above leaves unexplained. The
+# venue's number is then not the book's alone, and a reduce sized on
+# it would sell that lane's shares under this book: refused by name
+# (`frozen_coheld`), never sized around. Unreadable refuses too.
+_SQL_SLUG_COHELD = """
+SELECT EXISTS (
+  SELECT 1 FROM live_orders
+   WHERE us_market_slug = $1 AND COALESCE(lane, '') <> 'mirror'
+     AND (COALESCE(whale_username, '') <> 'manual' OR status NOT IN ('filled', 'exiting'))
+     AND status IN ('filled', 'submitting', 'exiting')) /* ml-slug-coheld */
+"""
+# E5 review M1: a `manual` row in a live state _SQL_MANUAL_SHARES does
+# not count ('submitting': its fill on the venue, its row not yet
+# filled) is co-held too -- the venue's surplus is the desk's, not the
+# lost response's. The bound a placement_lost book may sell up to: its
+# ledger plus what its own lost rows asked for (a 'lost' row, or a
+# 'placing' row whose response was lost) -- a surplus past that is
+# explained by nothing the book knows, and is refused by name
+# (`frozen_venue_unexplained`), never sold under the book. The rows
+# come back with their side: only a row that ADDS to the leg explains
+# a surplus (E5 review v3, V3-1: a lost CLOSE -- the seven books' own
+# shape after P3 -- explains nothing the book holds; _lost_bound keys
+# on _order_action, never on the wire side alone)
+_SQL_LOST_QTY = """
+SELECT side, qty FROM mirror_orders
+ WHERE book_id = $1 AND (state = 'lost' OR (state = 'placing' AND order_id IS NULL)) /* ml-lost-qty */
+"""
+# a JSON fragment merged onto the order's receipt (the _SQL_ORDER_DUST
+# shape, generalised): the frozen reduce's excess over the ledger, and
+# the venue's own reading a lost close was marked 'lost' on (E5 / P3)
+_SQL_ORDER_RECEIPT = """
+UPDATE mirror_orders
+   SET receipt = COALESCE(receipt, '{}'::jsonb) || $2::jsonb, updated_at = now()
+ WHERE id = $1 /* ml-order-receipt */
+"""
 # A LIVE per-fill row is a claim whatever its age (spec A: it keeps its
 # own exit path until it is cashed_out or settled); only the NAMED
 # error rows age out of the 48 h window. The window once wrapped both
@@ -1407,6 +1497,11 @@ class _Tick:
     open_by_book: dict = field(default_factory=dict)   # book_id -> (order row, status)
     nonterminal: set = field(default_factory=set)      # book ids with a non-terminal order
     books_seen: set = field(default_factory=set)       # (whale, condition_id)
+    # E5 review F1: book ids a fill was BOOKED on this tick (_book_fill,
+    # after its commit) -- step R walks the account before step O books
+    # fills, so r.venue is stale by that fill for the book walk, and the
+    # frozen exit refuses on it by name (`frozen_fill_this_tick`)
+    filled_books: set = field(default_factory=set)
     # mirror_orders.intent (migration 050) exists this tick: read by the
     # per-tick guard; False sends the 047-shaped statements and keeps
     # the MIRROR_SHORTS knob effectively off (P2 rung S0)
@@ -3039,10 +3134,36 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
                     peak_exposure_usd=ns.peak_exposure_usd, realized_pnl=ns.realized_pnl)
     if dust > 0.0:
         o["dust_total"] = dust_total
+    # E5 review F1 / F2: the tick booked a fill on this book after the
+    # walk -- the frozen exit refuses on it -- and a frozen seat set for
+    # an act in flight (a cancel's settle inside _act) moves by the
+    # leg-signed fill, so the replace re-plan and the clamps read the
+    # venue as the fill left it, never the walk's stale figure
+    t.filled_books.add(book["id"])
+    fv = _num(book.get("_frozen_venue"))
+    if fv is not None:
+        sign = 1.0 if action == "add" else -1.0
+        if _book_short(book):
+            sign = -sign
+        book["_frozen_venue"] = fv + sign * inc
     if 0.0 < new_filled < float(o["qty"]) - FLAT_TOL_SHARES:
         _mirror_stop("partial_fill", o["whale"])
         t.stats["partial_fills"] += 1
     _recent(book["id"], "fill", side=side, shares=round(inc, 4), px=px, maker=maker)
+    if overfill and _frozen_excess(o, book, action, new_filled):
+        # A FROZEN REDUCE'S FILL PAST THE LEDGER (E5 / P2): the row was
+        # sized on the venue's own position (_frozen_exit, reason
+        # `frozen_reduce`), so the shares past the ledger are the lost
+        # response's -- held on the venue, never booked -- and the sale
+        # cannot pass zero on the venue: the fill is within the row's
+        # quantity and the row within the venue's reading. The ledger
+        # booked what it held (book_sell / _book_mirror_sell, above);
+        # the excess is named on the receipt with its price and counted
+        # -- never the overfill trip, which is for a sale the venue's
+        # own number does not cover
+        excess = round(inc - float(booking.booked if booking is not None else 0.0), 6)
+        await _note_frozen_excess(t, o, book, excess, px)
+        return "booked"
     if overfill:
         # a SELL MORE than a lot past what the ledger held -- on this
         # delta, or summed over the order's deltas -- is a SHORT on a
@@ -3071,6 +3192,39 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
                  "row held %s): dust, booked to the ledger, no trip; dust_total %s on the order",
                  book["id"], o["id"], dust, round(inc, 4), held, dust_total)
     return "booked"
+
+
+def _frozen_excess(o: dict, book: dict, action: str, new_filled: float) -> bool:
+    """Is this overfill a frozen reduce's fill past the ledger (E5 /
+    P2)? The row must be the frozen exit's own (reason `frozen_reduce`),
+    shrink the leg, and the venue's cumulative fill must sit inside the
+    row's quantity: a venue reporting MORE than the row asked for is
+    the overfill it always was."""
+    if action != "reduce" or not str(o.get("reason") or "").startswith("frozen_reduce"):
+        return False
+    return float(new_filled) <= float(o.get("qty") or 0.0) + FLAT_TOL_SHARES
+
+
+async def _note_frozen_excess(t: _Tick, o: dict, book: dict, excess: float, px: float) -> None:
+    """The frozen reduce's shares past the ledger, on the row's receipt
+    (cumulative shares and proceeds, the last price) and the census."""
+    rec = _jsonish(o.get("receipt"))
+    prior = (rec.get("frozen_excess") if isinstance(rec, dict) else None) or {}
+    shares = round(float(_num(prior.get("shares")) or 0.0) + max(excess, 0.0), 6)
+    usd = round(float(_num(prior.get("usd")) or 0.0) + max(excess, 0.0) * float(px), 4)
+    note = {"frozen_excess": {"shares": shares, "usd": usd, "px": px, "at": t.now}}
+    try:
+        await t.pool.execute(_SQL_ORDER_RECEIPT, o["id"], json.dumps(note, default=str))
+    except Exception:  # noqa: BLE001 — the fill is booked; the note is for a human
+        log.warning("mirror_live: could not note the frozen excess on order %s", o["id"],
+                    exc_info=True)
+    o["receipt"] = {**(rec if isinstance(rec, dict) else {}), **note}
+    _mirror_stop("frozen_excess_sold", o["whale"])
+    _recent(book["id"], "frozen_excess_sold", order_row=o["id"], shares=round(excess, 4), px=px,
+            ledger=book.get("ledger_net"))
+    log.warning("mirror_live: book %s frozen reduce on order %s sold %s shares past the ledger "
+                "(the lost response's shares, inside the venue's own reading); ledger now %s",
+                book["id"], o["id"], round(excess, 4), book.get("ledger_net"))
 
 
 def _dust_total(o: dict) -> float:
@@ -3108,7 +3262,14 @@ async def _freeze(t: _Tick, book: dict, reason: str, detail: dict | None = None)
         _mirror_stop(reason, book.get("whale"))
         return
     await t.pool.execute(_SQL_BOOK_FREEZE, book["id"], reason)
-    if book.get("state") != "frozen" or book.get("frozen_reason") != reason:
+    # the census name and the recent entry are a TRANSITION's, or a
+    # reason NEW to this book (an overfill on a frozen book is a new
+    # event; the W2 once-per-transition convention). A re-freeze under
+    # the reason the book already carries counts nothing and emits
+    # nothing (E5 review v3, V3-2) -- the `frozen_reasons` gauge below
+    # stays the tick's, as before
+    new_reason = book.get("state") != "frozen" or book.get("frozen_reason") != reason
+    if new_reason:
         _mirror_stop(reason, book.get("whale"))
     if book.get("state") != "frozen":
         book["frozen_reason"] = reason
@@ -3118,7 +3279,8 @@ async def _freeze(t: _Tick, book: dict, reason: str, detail: dict | None = None)
     book["frozen_ticks"] = int(book.get("frozen_ticks") or 0) + 1
     fr = t.stats["frozen_reasons"]
     fr[reason] = fr.get(reason, 0) + 1
-    _recent(book["id"], "frozen", reason=reason, **(detail or {}))
+    if new_reason:
+        _recent(book["id"], "frozen", reason=reason, **(detail or {}))
 
 
 async def _thaw(t: _Tick, book: dict) -> None:
@@ -3301,8 +3463,9 @@ async def _reconcile_placing(t: _Tick, o: dict, book: dict) -> None:
         return
     if verdict == "found":
         oid = str(what.get("order_id"))
-        await t.pool.execute(_SQL_ORDER_ADOPT, o["id"], oid, "adopted by fingerprint")
+        await t.pool.execute(_SQL_ORDER_ADOPT, o["id"], oid, _adopt_reason(o, "adopted by fingerprint"))
         o["order_id"], o["state"] = oid, "open"
+        o["reason"] = _adopt_reason(o, "adopted by fingerprint")
         _recent(book["id"], "adopted", order=oid)
         log.warning("mirror_live: order row %s adopted venue order %s by fingerprint", o["id"], oid)
         await _reconcile_open(t, o, book)
@@ -3318,8 +3481,9 @@ async def _reconcile_placing(t: _Tick, o: dict, book: dict) -> None:
         return
     if fills:
         oid = str(fills[0].get("order_id"))
-        await t.pool.execute(_SQL_ORDER_ADOPT, o["id"], oid, "adopted from the trade log")
+        await t.pool.execute(_SQL_ORDER_ADOPT, o["id"], oid, _adopt_reason(o, "adopted from the trade log"))
         o["order_id"], o["state"] = oid, "open"
+        o["reason"] = _adopt_reason(o, "adopted from the trade log")
         total = 0.0
         notional = 0.0
         for f in fills:
@@ -3400,8 +3564,23 @@ async def _reconcile_lost_close(t: _Tick, o: dict, book: dict) -> None:
                 total += q
                 notional += q * px
     if len(by_id) != 1 or total < 1.0:
-        await _freeze(t, book, "placement_lost",
-                      {"close": "unattributed", "sold": sold, "sellers": len(by_id)})
+        detail = {"close": "unattributed", "sold": sold, "sellers": len(by_id)}
+        await _freeze(t, book, "placement_lost", detail)
+        if age >= le._LOST_FILL_WINDOW_S:
+            # E5 / P3 (task 46's third clause): past the window the log
+            # will not name the seller, and the row stood 'placing' for
+            # good -- read, searched and re-frozen `close: unattributed`
+            # every tick for the same seven books (16:07Z heartbeat).
+            # Marked 'lost' ONCE, as the nothing_sold branch marks its
+            # row, with the venue's own reading on the receipt (held,
+            # sold, the sellers the log named); the book stays frozen
+            # by name for a human, and the freeze stops re-emitting
+            await _mark_lost(t, o, book, receipt={**detail, "held": int(held), "qty": qty,
+                                                  "venue": t.positions.get(slug.lower()),
+                                                  "at": t.now})
+            # the mark is the one event the recent list carries for this
+            # close (V3-2: _freeze itself emits on a transition only)
+            _recent(book["id"], "frozen", reason="placement_lost", **detail)
         return
     oid = next(iter(by_id))
     booked = min(total, float(sold))
@@ -3415,10 +3594,20 @@ async def _reconcile_lost_close(t: _Tick, o: dict, book: dict) -> None:
     await _finish_order(t, o, book, st, "booked from the position and the trade log")
 
 
-async def _mark_lost(t: _Tick, o: dict, book: dict) -> None:
-    await t.pool.execute(_SQL_ORDER_STATE, o["id"], "lost", None, "order_lost", None, None)
+async def _mark_lost(t: _Tick, o: dict, book: dict, receipt: dict | None = None) -> None:
+    await t.pool.execute(_SQL_ORDER_STATE, o["id"], "lost", None, _adopt_reason(o, "order_lost"),
+                         None, None)
     await t.pool.execute(_SQL_BOOK_OPEN_ORDER, book["id"], None)
-    o["state"] = "lost"
+    o["state"], o["reason"] = "lost", _adopt_reason(o, "order_lost")
+    if receipt:
+        # the venue's own reading the row was lost on (E5 / P3), beside
+        # whatever the placement's response left; best-effort, the
+        # state above is what stops the re-read
+        try:
+            await t.pool.execute(_SQL_ORDER_RECEIPT, o["id"], json.dumps(receipt, default=str))
+        except Exception:  # noqa: BLE001 — the receipt is for a human
+            log.warning("mirror_live: could not write the lost receipt on order %s", o["id"],
+                        exc_info=True)
     t.nonterminal.discard(book["id"])
     # A LOST ORDER FINISHES THE SAME WAY A FILLED OR CANCELLED ONE DOES:
     # the take arm goes with it. The lost path once kept the arm a
@@ -3596,8 +3785,10 @@ async def _finish_order(t: _Tick, o: dict, book: dict, st: dict, reason: str | N
     state = _terminal_state(o, st)
     maker = (o.get("tif") in ("GTC", "GTD") and not o.get("taker_at_placement")
              and o.get("kind") != "take")
+    reason = _adopt_reason(o, str(reason)) if reason is not None else None
     await t.pool.execute(_SQL_ORDER_STATE, o["id"], state, str(st.get("state") or ""),
                          reason, bool(maker), o.get("order_id"))
+    o["reason"] = reason
     await t.pool.execute(_SQL_BOOK_OPEN_ORDER, book["id"], None)
     o["state"] = state
     if (state in ("cancelled", "expired") and _order_action(o, book) == "add"
@@ -3686,7 +3877,12 @@ async def _reconcile_open(t: _Tick, o: dict, book: dict, cancel_reason: str | No
             # reader saw a live disagreement on a book that had ended
             # (step-9 re-review minor 6; its residual, task 7)
             cancel_reason = str(book["state"])
-        elif book.get("state") == "frozen":
+        elif book.get("state") == "frozen" and not _frozen_reduce_stands(book, o):
+            # a frozen book's rest is cancelled under the freeze's name
+            # -- except the frozen exit's own venue-sized reduce (E5 /
+            # P2), which stands for _act to keep, replace or take like
+            # a live exit's rest (the priced-exit and TTL clauses below
+            # read it as they read any reduce rest)
             cancel_reason = book.get("frozen_reason") or "frozen"
         elif (t.now - float(o.get("placed_ts") or t.now) >= float(rules.MIRROR_REST_TTL_S)
               and not _priced_exit_rest(o, book)):
@@ -3768,8 +3964,8 @@ async def _cancel_and_settle(t: _Tick, o: dict, book: dict, reason: str,
                                                  and not o.get("taker_at_placement")))
     if not le._rest_terminal(st):
         await t.pool.execute(_SQL_ORDER_STATE, o["id"], "unknown", str((st or {}).get("state") or ""),
-                             reason, None, oid)
-        o["state"] = "unknown"
+                             _adopt_reason(o, reason), None, oid)
+        o["state"], o["reason"] = "unknown", _adopt_reason(o, reason)
         t.open_by_book.pop(book["id"], None)
         t.nonterminal.add(book["id"])
         await _freeze(t, book, "cancel_pending", {"cancel_ok": cancel_ok})
@@ -3860,6 +4056,11 @@ class _Reading:
     # was not read this tick. The flatten's slippage leg refuses on a
     # state that is present and not OPEN (2026-09-06 review of U9).
     venue_state: str | None = None
+    # E5 / P1: the operator register's signed sum for the slug
+    # (_SQL_REGISTERED_SHARES), 0.0 when absent or unreadable -- read
+    # beside `manual` and, on a book, counted only when its sign is the
+    # book's leg's (_tick_book)
+    registered: float = 0.0
 
 
 async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: str | None,
@@ -3895,6 +4096,7 @@ async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: s
         manual = float(await t.pool.fetchval(_SQL_MANUAL_SHARES, slug) or 0.0)
     except Exception:  # noqa: BLE001 — the desk's shares unreadable: explained nothing
         manual = 0.0
+    registered = await _registered_shares(t, whale, slug)
     mk = market if market is not None else await _market(t, cid)
     market_live = None if mk is None else bool(mk["closed"] is False and mk["resolved"] is False)
     # THE MARKETS ROW FIRST, THEN THE VENUE READ. A candidate on a
@@ -3912,7 +4114,27 @@ async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: s
                     bool(partial), fresh_read, fresh, _snap_of(la), _snap_of(oa), bid, ask,
                     _mark_of(bid, ask), venue, manual, mk, market_live,
                     mkf, ml_long, ml_other, mnet,
-                    venue_state=t.slug_states.get(slug))
+                    venue_state=t.slug_states.get(slug), registered=registered)
+
+
+async def _registered_shares(t: _Tick, whale: str, slug: str) -> float:
+    """The operator register's signed sum for the slug (E5 / P1), the
+    way the desk's `manual` shares are read: 0.0 explains nothing. An
+    unreadable register (absent until migration 056 is applied; the
+    workers never run migrations) is counted `registered_unreadable`
+    and logged once per process -- a book whose venue the register
+    would have explained stays frozen, never a guess."""
+    global _registered_logged
+    try:
+        return float(await t.pool.fetchval(_SQL_REGISTERED_SHARES, slug) or 0.0)
+    except Exception as exc:  # noqa: BLE001 — unreadable: explained nothing (fail closed)
+        _mirror_stop("registered_unreadable", whale)
+        if not _registered_logged:
+            _registered_logged = True
+            log.warning("mirror_live: the operator register could not be read (%s); is migration "
+                        "056 applied? registered shares explain nothing until it is",
+                        type(exc).__name__)
+        return 0.0
 
 
 _MktSnap = tuple[bool | None, float | None, float | None, float | None]
@@ -4524,7 +4746,12 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     w, cid, slug = book["whale"], book["condition_id"], book["us_market_slug"]
     la, oa = book["long_asset"], book.get("other_asset")
     t.books_seen.add((w, cid))
-    if book.get("state") == "frozen":
+    # E5 review F1: was the book frozen when its tick began? A book that
+    # freezes THIS tick (venue vs ledger on a walk one fill stale) is on
+    # its transition tick: a one-tick disagreement is not evidence of a
+    # lost response, and the frozen exit never runs on it
+    was_frozen = book.get("state") == "frozen"
+    if was_frozen:
         t.stats["books_frozen"] += 1
         if book.get("frozen_ts") and t.now - float(book["frozen_ts"]) > float(rules.MIRROR_FROZEN_ALERT_S):
             t.stats["status"] = "degraded"
@@ -4624,8 +4851,22 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     net, snap_net = _net_for(r, drift, short=shorts)
     venue_int = int(r.venue)
     # the plan's numbers, written whatever happens below
+    # THE REGISTER'S SIGN (E5 / P1): a register sum is read only when
+    # its sign is the book's leg's -- at or above 0 on a long book, at
+    # or under 0 on a short one. Against the leg it would say the
+    # venue holds LESS than the ledger (a lost close's sale registered
+    # as a negative on a long book) and the thawed plan would sell
+    # shares the venue does not hold: not read, named, the book stays
+    # frozen. Counted as a registered book on the row's presence alone
+    registered = float(r.registered or 0.0)
+    sign_refused = None
+    if registered != 0.0:
+        _mirror_stop("registered_books", w)
+        if (registered < 0.0) != short:
+            _mirror_stop("registered_sign_refused", w)
+            sign_refused, registered = registered, 0.0
     plan: dict[str, Any] = {"bid": r.bid, "ask": r.ask, "mark": r.mark, "venue": r.venue,
-                            "manual": r.manual, "ledger": ledger, "net": net,
+                            "manual": r.manual, "registered": registered, "ledger": ledger, "net": net,
                             "snap_net": snap_net, "fresh": r.fresh, "drift": drift.drift,
                             # MIRRORSNAP reads these: the per-market
                             # read's own verdict for THIS market, the two
@@ -4640,6 +4881,8 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                             "mkt_long": r.mkt_long, "mkt_other": r.mkt_other,
                             "snap_net_book": _book_net(r), "fresh_agreed": _fresh_agreed(r),
                             "at": t.now}
+    if sign_refused is not None:
+        plan["registered_sign_refused"] = sign_refused
     prior_plan = _jsonish(book.get("last_plan")) or {}
     # the flat clock carries only while the book IS flat: a re-bought
     # book that flattens again starts a new MIRROR_FLAT_CLOSE_S wait,
@@ -4782,10 +5025,11 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     plan.update(target=target, target_raw=tg["raw"])
     await _shadow_check(t, book, arith, net, r.mark, shorts, cap_usd=cap_eff)
     # THE FREEZE: venue vs ledger + the desk's explained shares, one
-    # signed subtraction on either sign (brief 3.1)
-    explained = ledger + r.manual
+    # signed subtraction on either sign (brief 3.1); since E5 the
+    # operator register explains shares exactly as the desk's `manual`
+    explained = ledger + r.manual + registered
     if abs(venue_int - explained) > mi.VENUE_LEDGER_TOL_SHARES:
-        detail = {"venue": venue_int, "ledger": ledger, "manual": r.manual}
+        detail = {"venue": venue_int, "ledger": ledger, "manual": r.manual, "registered": registered}
         if r.venue != 0 and ledger != 0 and (r.venue < 0) != (ledger < 0):
             # SYMMETRIC (brief B5): the venue holds the OTHER sign of
             # what the book booked, on either book. On a short book it
@@ -4804,25 +5048,64 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             await _cancel_open_for(t, book, "wrong_sign_trip")
             await _freeze(t, book, "wrong_sign_trip", detail)
         else:
-            await _cancel_open_for(t, book, "venue_ledger_disagree")
-            await _freeze(t, book, "venue_ledger_disagree", detail)
+            await _cancel_frozen_open(t, book, "venue_ledger_disagree")
+            if book.get("state") == "frozen":
+                # E5 review v3, V3-2: a book already frozen (placement_lost:
+                # the lost fill IS the disagreement) disagrees every tick
+                # by the same reading; that reading sits on the plan's
+                # detail, and is not a new event -- the tick's gauge and
+                # the freeze's age move, the census and the recent list do not
+                await t.pool.execute(_SQL_BOOK_FREEZE, book["id"], "venue_ledger_disagree")
+                book["frozen_ticks"] = int(book.get("frozen_ticks") or 0) + 1
+                book["last_reason"] = "venue_ledger_disagree"
+                fr = t.stats["frozen_reasons"]
+                fr[book["frozen_reason"]] = fr.get(book["frozen_reason"], 0) + 1
+            else:
+                await _freeze(t, book, "venue_ledger_disagree", detail)
             if int(book.get("frozen_ticks") or 0) > rules.MIRROR_FROZEN_NAME_TICKS:
                 try:
                     await t.pool.execute(_SQL_STANDING_NAME, book["standing_row_id"])
                 except Exception:  # noqa: BLE001 — the name is for a human, best-effort
                     log.warning("mirror_live: could not name the standing row of book %s",
                                 book["id"], exc_info=True)
-        await _write_plan(t, book, r, target, tg["raw"], drift.drift, book.get("his_level"),
+            # E5 / P2: the frozen book follows his exit, sized on the
+            # venue's own position (never the ledger it disagrees with)
+            # -- never on the transition tick (review F1: the walk ran
+            # before step O booked this tick's fills, so a disagreement
+            # that is one tick old may be that fill, not a lost response)
+            if was_frozen:
+                await _frozen_exit(t, book, r, target, fills, registered, plan)
+            else:
+                plan["frozen_exit"] = {"held": "transition_tick"}
+        await _write_plan(t, book, r, target, tg["raw"], drift.drift, plan.get("his_level"),
                           book["frozen_reason"], {**plan, "kind": "frozen", **detail})
         return
     if book.get("state") == "frozen":
         if book["id"] in t.open_by_book:
-            await _cancel_open_for(t, book, book.get("frozen_reason") or "frozen")
+            await _cancel_frozen_open(t, book, book.get("frozen_reason") or "frozen")
         if book["id"] not in t.open_by_book and book["id"] not in t.nonterminal:
-            # venue == ledger and nothing non-terminal: the book thaws
-            await _thaw(t, book)
+            if registered == 0.0:
+                # venue == ledger and nothing non-terminal: the book thaws
+                await _thaw(t, book)
+            else:
+                # A REGISTERED BOOK NEVER THAWS (E5 review F3, owner's
+                # option b): the register is an audit row and the third
+                # term of the freeze comparison, nothing more. Thawed, the
+                # book planned from its own ledger -- book 77 (ledger 0,
+                # register 1,128) bought his net again on top of the
+                # 1,128, and with him gone closed flat with the 1,128
+                # unmanaged. Held frozen, the exit below sells the
+                # registered shares toward his net exactly as any frozen
+                # book's (the frozen seat is the venue less the desk's
+                # manual shares alone)
+                plan["registered_frozen"] = True
         if book.get("state") == "frozen":
-            await _write_plan(t, book, r, target, tg["raw"], drift.drift, book.get("his_level"),
+            # E5 / P2: venue == ledger + the explained shares, but a
+            # non-terminal row keeps the freeze -- the book still
+            # follows his exit (the row's index refuses a placement
+            # while it stands: `open_order_pending`, as any book)
+            await _frozen_exit(t, book, r, target, fills, registered, plan)
+            await _write_plan(t, book, r, target, tg["raw"], drift.drift, plan.get("his_level"),
                               book["frozen_reason"], {**plan, "kind": "frozen"})
             return
     # THE POSITION-SIGN PROOF (brief H1): venue == ledger on a short
@@ -4830,7 +5113,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # the venue saying our BUY_SHORT holds the short side -- the same
     # reading the per-fill lane's echo tallies, recorded ONCE per
     # episode into the same key the short gate reads
-    if (short and ledger < 0 and r.venue < 0 and r.manual == 0
+    if (short and ledger < 0 and r.venue < 0 and r.manual == 0 and registered == 0
             and prior_plan.get("short_proof") is None):
         await le._record_short_proof(t.pool, ok=True, net=r.venue, slug=slug)
         plan["short_proof"] = "ok"
@@ -4845,6 +5128,13 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # rung S0, brief C3 / G1): above the ledger on a long book, below it
     # on a short one
     inc_refusal = _increases_refusal(t, w)
+    if inc_refusal is None and registered != 0.0:
+        # E5 review F3 (option b): a book whose slug carries a register
+        # row never grows -- the slug already holds the registered
+        # shares beyond the ledger. Reachable only on a LIVE book with a
+        # row written by hand (the preset registers frozen books alone,
+        # and a registered book never thaws above); fail closed by name
+        inc_refusal = "registered_no_increase"
     if inc_refusal is None and not drift.increase_ok:
         inc_refusal = drift.refusal or "snapshot_stale"
     increasing = (target < ledger) if short else (target > ledger)
@@ -4861,7 +5151,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # rules.MIRROR_SHORT_MAX_SHARES (ONE until rung S5) is under it by
     # construction; the band is not read on it, else the S3 probe could
     # never rest. mi.plan reads the mark for the band alone
-    p = mi.plan(target, float(ledger), float(venue_int - r.manual), mi.Book(r.bid, r.ask),
+    p = mi.plan(target, float(ledger), float(venue_int - r.manual - registered), mi.Book(r.bid, r.ask),
                 his_px, None if plan.get("short_share_cap") is not None else r.mark)
     kind = None
     confirm_gone = None
@@ -5065,6 +5355,240 @@ def _cancel_outcome(t: _Tick, book: dict, o: dict, res: str) -> str | None:
     if o["state"] not in ("filled", "cancelled", "expired"):
         return "cancel_pending"
     return None
+
+
+# ------------------------------------ E5 / P2: frozen books follow his exits
+#
+# A book frozen `placement_lost` or `venue_ledger_disagree` cancelled its
+# open orders every tick, wrote a plan of kind 'frozen' and returned: it
+# never followed his exit. He sells, we hold to settlement -- a direct
+# P&L divergence on markets mapped correctly (owner question 2026-09-07
+# 16:5xZ; heartbeat 16:42Z: 8 books frozen, book 77 venue 1,128 / ledger
+# 0). Under these rules a frozen book plans and places REDUCING orders
+# only, sized on THE VENUE'S OWN POSITION -- never the ledger it
+# disagrees with, never the plan's target -- toward his net exactly as
+# a live book would: mi.plan with the venue in the ledger's seat (the
+# same dead band and hysteresis), _act's E4 exit at his price within
+# the cent (the rest at his cent, the take the tick the bid is there),
+# a short book's cover through _act's S4 gate. Never an increase, never
+# a flip, never a new episode; `books_live` does not count it; a reduce
+# that fills books through the existing fill path (_book_fill names the
+# part past the ledger `frozen_excess_sold` on the row's receipt, inside
+# the venue's own reading, never the overfill trip); at venue 0 the book
+# thaws on the next agreement read and closes as any flat book does.
+# Every refusal is named (the CENSUS_KEYS paragraph). rules
+# .MIRROR_FROZEN_EXITS=off turns the whole clause off (a knob may only
+# LOWER a rail): the frozen book then does nothing but read, as before.
+
+async def _slug_coheld(t: _Tick, slug: str) -> bool | None:
+    """Is a LIVE non-mirror, non-manual row standing on the slug
+    (_SQL_SLUG_COHELD)? None when the read failed or answered nothing
+    a bool can be made of: the venue's number cannot be attributed."""
+    try:
+        v = await t.pool.fetchval(_SQL_SLUG_COHELD, slug)
+    except Exception as exc:  # noqa: BLE001 — unreadable: not attributable
+        log.warning("mirror_live: co-hold read for %s failed (%s)", slug, type(exc).__name__)
+        return None
+    return None if v is None else bool(v)
+
+
+def _plan_seat(book: dict, r: _Reading, plan: dict) -> tuple[float, float]:
+    """(the ledger seat, the venue seat) mi.plan is handed for this
+    book: on a frozen exit the venue's own position in BOTH seats (the
+    book's `_frozen_venue`, set for the act by _frozen_exit), else the
+    ledger and the venue less the desk's `manual` and the register's
+    shares as the plan read them (sign-checked in _tick_book)."""
+    fv = _num(book.get("_frozen_venue"))
+    if fv is not None:
+        return float(int(fv)), float(int(fv))
+    ledger = float(int(book.get("ledger_net") or 0))
+    reg = float(_num(plan.get("registered")) or 0.0)
+    return ledger, float(int(r.venue) - r.manual - reg)
+
+
+def _frozen_reduce_stands(book: dict, o: dict) -> bool:
+    """May this order row STAND on a frozen book (E5 / P2)? Only a row
+    the frozen exit itself placed (reason `frozen_reduce`: sized on the
+    venue's own position) that shrinks the leg, on a book frozen under
+    one of FROZEN_EXIT_REASONS, with the knob on. Any other row on a
+    frozen book -- an add, a live reduce sized on a ledger the venue
+    disagrees with, any row under another freeze -- is cancelled under
+    the freeze's name as before."""
+    if not rules.MIRROR_FROZEN_EXITS or book.get("state") != "frozen":
+        return False
+    if book.get("frozen_reason") not in FROZEN_EXIT_REASONS:
+        return False
+    if _order_action(o, book) != "reduce":
+        return False
+    return str(o.get("reason") or "").startswith("frozen_reduce")
+
+
+async def _cancel_frozen_open(t: _Tick, book: dict, reason: str) -> None:
+    """The freeze's cancel of the book's standing rest, except a frozen
+    reduce that stands (_frozen_reduce_stands): that rest is the frozen
+    exit's to keep, replace or take this tick, through _act."""
+    ent = t.open_by_book.get(book["id"])
+    if ent is None:
+        return
+    o, _st = ent
+    if _frozen_reduce_stands(book, o):
+        return
+    await _cancel_and_settle(t, o, book, reason)
+
+
+def _adopt_reason(o: dict, text: str) -> str:
+    """The reason a row is written with when its reason moves -- an
+    adoption, a terminal state, an 'unknown' cancel: the frozen exit's
+    marker survives it (`frozen_reduce: <text>`), so a frozen reduce
+    whose response was lost and then found by fingerprint, or whose
+    cancel left it 'unknown', books its fill under the same rule as one
+    placed cleanly, and the `mirror-frozen` preset finds the finished
+    row by its marker."""
+    if str(o.get("reason") or "").startswith("frozen_reduce"):
+        return f"frozen_reduce: {text}"
+    return text
+
+
+def _frozen_venue_own(r: _Reading) -> int:
+    """The book's OWN position as the venue reports it: the slug's
+    signed net less the desk's `manual` shares (explained, the desk's
+    to manage), whole shares. THE REGISTER IS NOT SUBTRACTED (E5 review
+    F3, option b): registered shares are the book's to exit toward his
+    net -- the register explains them to the freeze comparison, it does
+    not hand them to anyone else."""
+    return int(r.venue) - int(round(float(r.manual or 0.0)))
+
+
+async def _lost_bound(t: _Tick, book: dict) -> int | None:
+    """What a placement_lost book can explain holding on the venue (E5
+    review M1): its leg plus the quantity its own lost rows asked for
+    (_SQL_LOST_QTY). None when the rows could not be read."""
+    try:
+        rows = await t.pool.fetch(_SQL_LOST_QTY, book["id"])
+    except Exception as exc:  # noqa: BLE001 — unreadable: no bound is known
+        log.warning("mirror_live: lost rows of book %s unreadable (%s)", book["id"], type(exc).__name__)
+        return None
+    if rows is None:
+        return None
+    # V3-1: a lost row that REDUCES the leg (a lost close) explains no
+    # surplus; only what the book asked to add can sit on the venue unbooked
+    v = sum(float(r["qty"] or 0.0) for r in rows if _order_action(dict(r), book) == "add")
+    return _leg_of(book) + int(math.ceil(v))
+
+
+async def _frozen_refuse(t: _Tick, book: dict, name: str, plan: dict, verdict: dict,
+                         whale: str, cancel: bool = True) -> str:
+    """A frozen exit's refusal past the eligibility and knob checks:
+    counted, on the plan, and -- E5 review F4 -- a standing frozen
+    reduce the plan no longer wants is cancelled under the refusal's
+    name (an exit's cancel: never `ops_capped`). A live book replaces a
+    rest its plan no longer wants; a frozen one may not keep selling at
+    his old exit cent while he buys. `cancel=False` (E5 review v3, V3-3)
+    is the read that FAILED this tick -- the venue, his market, the
+    co-hold: the plan is unknown, not unwanted, and the standing reduce
+    keeps standing (as `frozen_fill_this_tick` already keeps it)."""
+    _mirror_stop(name, whale)
+    plan["frozen_exit"] = {**verdict, "held": name}
+    ent = t.open_by_book.get(book["id"])
+    if cancel and ent is not None and _frozen_reduce_stands(book, ent[0]):
+        await _cancel_and_settle(t, ent[0], book, name, exit=True)
+        plan["frozen_exit"]["cancelled"] = ent[0]["id"]
+    return name
+
+
+async def _frozen_exit(t: _Tick, book: dict, r: _Reading, target: int | None, fills: list,
+                       registered: float, plan: dict) -> str | None:
+    """The frozen book's reduce toward his net (E5 / P2), or the named
+    reason it placed nothing. Returns _act's word when a plan reached
+    it, else the refusal's name; the plan's `frozen_exit` carries the
+    verdict with the venue-side position and the target."""
+    w, slug = r.whale, r.slug
+    short = _book_short(book)
+    reason = book.get("frozen_reason")
+    if reason not in FROZEN_EXIT_REASONS:
+        plan["frozen_exit"] = {"held": "reason_not_eligible", "reason": reason}
+        return None
+    if not rules.MIRROR_FROZEN_EXITS:
+        # (step O already cancelled any standing frozen reduce under the
+        # freeze's name: _frozen_reduce_stands reads the knob)
+        _mirror_stop("frozen_exits_off", w)
+        plan["frozen_exit"] = {"held": "frozen_exits_off"}
+        return "frozen_exits_off"
+    if book["id"] in t.filled_books:
+        # E5 review F1 / F2: a fill was booked on this book after the
+        # walk (step O, or the walk's own cancel-settle), so r.venue is
+        # stale by it: nothing is sized this tick. A standing frozen
+        # reduce keeps standing -- its leaves and the venue moved in
+        # step, and it is still the exit at his cent
+        _mirror_stop("frozen_fill_this_tick", w)
+        plan["frozen_exit"] = {"held": "frozen_fill_this_tick"}
+        return "frozen_fill_this_tick"
+    if t.positions is None or r.venue is None:
+        return await _frozen_refuse(t, book, "frozen_venue_unread", plan, {"why": "venue_positions"}, w, cancel=False)
+    if r.snap_market_fresh is not True:
+        # his side not read for THIS market this tick (unreadable,
+        # capped, no ids, stale): the exit follows a net nobody read
+        return await _frozen_refuse(t, book, "frozen_venue_unread", plan, {"why": "his_market_read"}, w, cancel=False)
+    coheld = await _slug_coheld(t, slug)
+    if coheld is None:
+        return await _frozen_refuse(t, book, "frozen_venue_unread", plan, {"why": "coheld_unreadable"}, w, cancel=False)
+    if coheld:
+        return await _frozen_refuse(t, book, "frozen_coheld", plan, {}, w)
+    venue_own = _frozen_venue_own(r)
+    tgt = int(target or 0)
+    verdict: dict[str, Any] = {"venue_own": venue_own, "target": tgt}
+    if (venue_own <= 0) if not short else (venue_own >= 0):
+        return await _frozen_refuse(t, book, "frozen_venue_flat", plan, verdict, w)
+    if (tgt < 0) if not short else (tgt > 0):
+        # the sign flip flattened the target to 0 above; a target
+        # against the leg cannot reach here -- belt and braces
+        return await _frozen_refuse(t, book, "frozen_reduce_only", plan, verdict, w)
+    if reason == "placement_lost":
+        # E5 review M1: a placement_lost book sells no more than it can
+        # explain -- its leg plus its own lost rows' quantity; a surplus
+        # past that is someone else's (a venue_ledger_disagree book has
+        # no such bound: the disagreement itself is what it holds)
+        bound = await _lost_bound(t, book)
+        if bound is None:
+            return await _frozen_refuse(t, book, "frozen_venue_unexplained", plan,
+                                        {**verdict, "why": "lost_rows_unreadable"}, w)
+        if abs(venue_own) > bound:
+            return await _frozen_refuse(t, book, "frozen_venue_unexplained", plan,
+                                        {**verdict, "bound": bound}, w)
+    if (tgt >= venue_own) if not short else (tgt <= venue_own):
+        # he has not exited under what the venue holds for us: read
+        # only -- and a rest placed on an earlier exit of his is
+        # cancelled (F4: he came back)
+        return await _frozen_refuse(t, book, "frozen_no_his_exit", plan, verdict, w)
+    la, oa = book["long_asset"], book.get("other_asset")
+    # his level as the live path reads it: `reducing` is his net moving
+    # DOWN in long-token terms (target <= the seat), which a short
+    # book's cover is not (_his_level reads his buy-back for it)
+    his_px = _his_level(fills, la, oa, tgt <= venue_own, short=short)
+    plan["his_level"] = his_px
+    # the venue in the ledger's seat: the same plan a live book makes,
+    # from what the venue holds toward his net
+    p = mi.plan(tgt, float(venue_own), float(venue_own), mi.Book(r.bid, r.ask), his_px,
+                None if plan.get("short_share_cap") is not None else r.mark)
+    plan.update(side=p.side, qty=p.qty, price=p.price, reason=p.reason)
+    if p.side is None:
+        await _frozen_refuse(t, book, rules.plan_reason_key(p.reason), plan, verdict, w)
+        return p.reason
+    if rules.leg_action(book.get("intent"), p.side) != "reduce":
+        # never an increase, never a flip, never sent (belt and braces)
+        return await _frozen_refuse(t, book, "frozen_reduce_only", plan, {**verdict, "side": p.side}, w)
+    plan["frozen_exit"] = {**verdict, "side": p.side, "qty": p.qty}
+    book["_frozen_venue"] = venue_own
+    try:
+        res = await _act(t, book, r, p, "reduce", his_px, plan)
+    finally:
+        book.pop("_frozen_venue", None)
+    plan["frozen_exit"]["result"] = res
+    if res in ("rest_placed", "take", "filled_at_create"):
+        _mirror_stop("frozen_reduce", w)
+        _recent(book["id"], "frozen_reduce", side=p.side, qty=p.qty, venue_own=venue_own,
+                target=tgt, result=res)
+    return res
 
 
 async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str | None,
@@ -5274,10 +5798,11 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             named = _cancel_outcome(t, book, o, res)
             if named is not None:
                 return named
-            # re-plan against the ledger the cancel's booking left
-            ledger = int(book.get("ledger_net") or 0)
+            # re-plan against the ledger the cancel's booking left (or,
+            # on a frozen exit, the venue's own position: _plan_seat)
             target = int(plan.get("target") or 0)
-            p = mi.plan(target, float(ledger), float(int(r.venue) - r.manual),
+            seat_ledger, seat_venue = _plan_seat(book, r, plan)
+            p = mi.plan(target, seat_ledger, seat_venue,
                         mi.Book(r.bid, r.ask), his_px,
                         None if plan.get("short_share_cap") is not None else r.mark)
             if p.side is None:
@@ -5465,6 +5990,11 @@ def _cover_qty(book: dict, qty: int) -> int:
     row was readable this tick, else min(plan qty, |ledger|). A cover
     is an ordinary clamped order of OUR quantity, never the whole
     slug: co-holding is no longer a question it asks."""
+    fv = _num(book.get("_frozen_venue"))
+    if fv is not None:
+        # E5 / P2: a frozen book's cover is clamped on the VENUE's own
+        # short position, never the ledger or the row it disagrees with
+        return min(int(qty), max(0, -int(fv)))
     leg = _leg_of(book)
     held = _num(book.get("_held"))
     if held is None:
@@ -6148,12 +6678,19 @@ def _sell_qty(book: dict, qty: int) -> int:
     SELL_DUST_SHARES), so the extra lot books, never trips, and the
     book reaches flat (ledger 0, row 0.0) after one flatten. The
     ceiling never exceeds the ledger, so a row holding more than the
-    ledger says still sells the ledger. The sole-holder close_position
+    ledger says still sells the ledger. ON A FROZEN EXIT (E5 / P2) the
+    clamp is the VENUE's own position (the book's `_frozen_venue`):
+    the ledger and the row are what the venue disagrees with, and a
+    reduce sized on them would leave the lost response's shares held
+    to settlement. The sole-holder close_position
     (_flatten_vanished) does NOT size here: it closes the whole slug,
     fraction included, unclamped. With the row unreadable this tick
     (None) the sizing stands on the ledger as before -- fail closed on
     the trip, which still exists for a sale more than a lot past the
     ledger."""
+    fv = _num(book.get("_frozen_venue"))
+    if fv is not None:
+        return min(int(qty), max(0, int(fv)))
     ledger = int(book.get("ledger_net") or 0)
     held = _num(book.get("_held"))
     if held is None:
@@ -6334,10 +6871,16 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
     # is taken BEFORE the venue call, given back on an outright refusal
     est = float(qty) * _cost_px(wire, book) if action == "add" else 0.0
     _room_take(t, est)
+    # THE ROW'S REASON IS THE FROZEN EXIT'S MARKER (E5 / P2): a reduce
+    # sized on the venue's own position carries `frozen_reduce`, the
+    # one word step O reads to let it stand on a frozen book and the
+    # fill path reads to name a fill past the ledger `frozen_excess_sold`
+    # instead of the overfill trip. Every other row keeps its kind
+    reason_col = "frozen_reduce" if book.get("_frozen_venue") is not None else kind
     args = [book["id"], w, slug, kind, side, tif_rec, post_only, good_till,
             his_px, (p.price if p is not None else wire), wire, int(qty), json.dumps(pre_ids),
             int(_num(plan.get("target")) or 0), int(book.get("ledger_net") or 0), r.bid, r.ask,
-            kind]
+            reason_col]
     try:
         if t.short_col:
             row_id = await t.pool.fetchval(_SQL_ORDER_INSERT, *args, wire_intent)
@@ -6355,7 +6898,7 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
          "his_level": his_px, "price": (p.price if p is not None else wire), "wire": wire,
          "qty": int(qty), "order_id": None, "state": "placing", "filled": 0.0,
          "booked_filled": 0.0, "avg_px": None, "taker_at_placement": False,
-         "pre_ids": pre_ids, "placed_ts": t.now, "reason": kind, "intent": wire_intent}
+         "pre_ids": pre_ids, "placed_ts": t.now, "reason": reason_col, "intent": wire_intent}
     if est:
         le._REST_RESERVED_USD = float(le._REST_RESERVED_USD or 0.0) + est
     try:
@@ -6583,8 +7126,9 @@ async def _lost_response(t: _Tick, o: dict, book: dict, r: _Reading, exc: BaseEx
             t, o, book, orders, (t.now - le._ORPHAN_SKEW_S, t.now + le._ORPHAN_MATCH_S))
         if verdict == "found":
             oid = str(what.get("order_id"))
-            await t.pool.execute(_SQL_ORDER_ADOPT, o["id"], oid, "adopted after a lost response")
-            o.update(order_id=oid, state="open")
+            await t.pool.execute(_SQL_ORDER_ADOPT, o["id"], oid,
+                                 _adopt_reason(o, "adopted after a lost response"))
+            o.update(order_id=oid, state="open", reason=_adopt_reason(o, "adopted after a lost response"))
             await t.pool.execute(_SQL_BOOK_OPEN_ORDER, book["id"], o["id"])
             book["open_order_id"] = o["id"]
             t.nonterminal.add(book["id"])

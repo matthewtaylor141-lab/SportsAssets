@@ -4711,7 +4711,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-44:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-58:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4748,9 +4748,19 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # refusal table's write failure, before the last key
                           "long_token_unknown", "target_zero", "book_row_unreadable",
                           "cand_unread_capped", "refusal_write_failed",
+                          # E5: the frozen exit's placement, its six refusals and
+                          # the excess it sells past the ledger; the register's
+                          # three names -- before the last key
+                          "frozen_reduce", "frozen_exits_off", "frozen_venue_unread",
+                          "frozen_coheld", "frozen_venue_flat", "frozen_no_his_exit",
+                          "frozen_reduce_only", "frozen_excess_sold",
+                          "registered_books", "registered_sign_refused", "registered_unreadable",
+                          # E5 review: the fill-this-tick refusal, the unexplained surplus, the
+                          # registered book's no-increase -- before the last key
+                          "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-45] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-59] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -12517,6 +12527,35 @@ def test_w2r_the_refusal_rows_stay_bounded_when_the_cap_rotates_the_walk(monkeyp
         by.setdefault(r["condition_id"], []).append(r["refusal"])
     assert by["c0"][0] == "market_unreadable" and by["c40"][0] == "cand_unread_capped"
     assert "market_unreadable" in by["c40"], "the read that followed the cap is a transition"
+
+
+def test_e5_the_frozen_exit_and_register_names_are_emitted_here_too(monkeypatch, caplog):
+    """E5's names are driven in tests/test_e5_frozen_exits.py (the pool
+    there answers the register, co-hold and receipt statements this
+    file's fake leaves unmodelled -- against this fake a frozen exit
+    refuses `frozen_venue_unread` by name, which is why every older
+    frozen pin above still holds). Run here as well so the coverage read
+    below sees them when this file runs alone."""
+    from tests import test_e5_frozen_exits as e5
+    e5.test_e5_a_frozen_long_book_sells_toward_his_exit_sized_on_the_venue_and_names_the_excess()
+    e5.test_e5_the_reduce_is_sized_on_the_venue_not_the_ledger_when_the_venue_holds_less()
+    e5.test_e5_the_frozen_exit_is_read_only_when_the_venue_or_his_market_read_is_missing()
+    e5.test_e5_a_co_held_slug_refuses_the_frozen_exit_by_name()
+    e5.test_e5_a_register_row_against_the_books_leg_is_not_read_and_the_book_stays_frozen()
+    e5.test_e5_an_unreadable_register_explains_nothing_is_counted_and_logged_once(caplog)
+    e5.test_e5_a_placement_lost_book_sells_no_more_than_its_ledger_plus_its_lost_rows_ask_for()
+    e5.test_e5_a_live_book_with_a_register_row_reads_it_as_manual_in_its_seat_and_never_increases()
+    from tests import test_e5_review_pins as e5r
+    e5r.test_e5r_F2_a_standing_frozen_reduce_partly_filled_after_the_walk_is_not_re_sized_past_the_venue()
+    # last, the two that monkeypatch for the rest of this test: mi.plan
+    # into a BUY, then the knob off
+    e5.test_e5_a_frozen_book_never_places_a_buy_that_increases_and_a_non_reduce_plan_is_refused_by_name(monkeypatch)
+    e5.test_e5_the_knob_only_lowers_the_rail_off_is_read_only_and_the_default_is_on(monkeypatch)
+    for k in ("frozen_reduce", "frozen_exits_off", "frozen_venue_unread", "frozen_coheld",
+              "frozen_venue_flat", "frozen_no_his_exit", "frozen_reduce_only", "frozen_excess_sold",
+              "registered_books", "registered_sign_refused", "registered_unreadable",
+              "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase"):
+        assert k in SEEN, k
 
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():
