@@ -616,12 +616,39 @@ SELECT COALESCE(sum(cash_usd), 0)::float8 AS filled,
  WHERE ((side = 'BUY_LONG' AND intent = 'ORDER_INTENT_BUY_LONG') OR intent = 'ORDER_INTENT_BUY_SHORT')
    AND placed_at > now() - interval '24 hours' /* ml-mirror-day */
 """
+# THE 24 H LOSS FIGURE COUNTS A DOLLAR ONCE (E3, the day reconciliation
+# of 2026-09-06 23:10Z). settled_pnl is the venue's WHOLE-position
+# figure for the standing row -- _close_settled cross-checks it against
+# `own = realized_pnl + shares x (payout - avg)` under
+# book_settle_disagree -- so it already holds the book's realized part,
+# and the first cut, which summed realized_pnl over every book updated
+# in 24 h PLUS settled_pnl over every book closed-settled in 24 h,
+# counted a settled book's sales twice: tonight book 16 (realized
+# -244.75, settled -315.40 = sales 349.25 - cost 664.65 + 157 x 0),
+# 3 (+2.48 / +156.17), 19 (-2.11 / -41.46) and 22 (+14.64 / +19.74)
+# put the 22:22Z reading at -2,445 where the truth was about -2,215:
+# it failed closed (too pessimistic), but the figure the owner was
+# told was wrong. THE RULE: `lost` is settled_pnl over the books
+# closed-settled in the window (state 'closed', settled_pnl not null,
+# closed_at in 24 h) PLUS realized_pnl over every OTHER book updated
+# in the window -- the open, frozen and closing books, and the closed
+# books whose close was cashed_out / cancelled with settled_pnl NULL,
+# whose P&L lives only in realized_pnl. A closed-settled book counts
+# by its settled figure or not at all: the exclusion reads the row's
+# state and settled_pnl, never its closed_at, so a settlement that has
+# left the window brings no realized part back in. The settled branch
+# clocks a row by closed_at, or by updated_at where a row has none:
+# every close the worker writes stamps both (ml-book-settled,
+# ml-book-state), so only a hand-edited row reads that way, and it
+# would otherwise vanish from BOTH sums (E3 review, minor 2). `books`
+# and the MIRROR_LOSS_STOP_USD stop write are as they were.
 _SQL_LOSS_SUM = """
-SELECT COALESCE((SELECT sum(realized_pnl) FROM mirror_books
-                  WHERE updated_at > now() - interval '24 hours'), 0)::float8
-     + COALESCE((SELECT sum(settled_pnl) FROM mirror_books
+SELECT COALESCE((SELECT sum(settled_pnl) FROM mirror_books
                   WHERE state = 'closed' AND settled_pnl IS NOT NULL
-                    AND closed_at > now() - interval '24 hours'), 0)::float8
+                    AND COALESCE(closed_at, updated_at) > now() - interval '24 hours'), 0)::float8
+     + COALESCE((SELECT sum(realized_pnl) FROM mirror_books
+                  WHERE updated_at > now() - interval '24 hours'
+                    AND NOT (state = 'closed' AND settled_pnl IS NOT NULL)), 0)::float8
        AS lost,
        (SELECT count(*) FROM mirror_books
          WHERE updated_at > now() - interval '24 hours') AS books /* ml-loss-sum */

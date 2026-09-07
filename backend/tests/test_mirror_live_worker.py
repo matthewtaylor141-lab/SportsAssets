@@ -438,9 +438,37 @@ class _Pool(_ShadowPool):
             # names two, the one sum when it names one
             return filled if " AS filled" in s else filled + resting
         if "ml-loss-sum" in s:
-            return {"lost": sum(b["realized_pnl"] for b in self.books.values())
-                    + sum(b["settled_pnl"] or 0.0 for b in self.books.values() if b["state"] == "closed"),
-                    "books": len(self.books)}
+            # A DOLLAR COUNTS ONCE (E3, the day reconciliation of
+            # 2026-09-06): settled_pnl is the venue's WHOLE-position
+            # figure and already holds the realized part, so a closed
+            # book with one counts by it alone -- when its close is in
+            # the window -- and every other book updated in the window
+            # counts by realized_pnl. The window is the statement's
+            # own, and the exclusion clause must be in its text: a
+            # statement without it is the double count the
+            # reconciliation found, and this fake refuses to model it
+            # rather than quietly sum both, as its first cut did
+            assert "AND NOT (state = 'closed' AND settled_pnl IS NOT NULL)" in s, \
+                f"ml-loss-sum: a shape this fake does not model: {s}"
+            # the settled branch's clock: closed_at, or updated_at where a
+            # (hand-edited) row has none -- modelled only if the text says so
+            assert "COALESCE(closed_at, updated_at) > now() - interval" in s, \
+                f"ml-loss-sum: a settled clock this fake does not model: {s}"
+            hours = {int(h) for h in re.findall(r"now\(\) - interval '(\d+) hours'", s)}
+            assert len(hours) == 1, f"ml-loss-sum: one window, not {hours}"
+            since = self.clock - hours.pop() * 3600
+
+            def _settled(b):
+                return b["state"] == "closed" and b["settled_pnl"] is not None
+
+            def _closed_ts(b):
+                return b["updated_ts"] if b["closed_at"] is None else b["closed_at"]
+            lost = (sum(b["settled_pnl"] for b in self.books.values()
+                        if _settled(b) and _closed_ts(b) > since)
+                    + sum(b["realized_pnl"] for b in self.books.values()
+                          if not _settled(b) and b["updated_ts"] > since))
+            return {"lost": lost,
+                    "books": sum(1 for b in self.books.values() if b["updated_ts"] > since)}
         if "ml-replaces" in s:
             # the reasons and the tifs the statement names, read from
             # its text: `reason = 'replace'` was the original predicate,
@@ -5904,6 +5932,121 @@ def test_a_sub_dollar_flatten_still_leaves_and_reaches_close_position(monkeypatc
     assert _census(st5, "under_min_notional") == 1 and not _places(v5)
     src = inspect.getsource(ml._place)
     assert 'kind in ("flatten_paired", "flatten_vanished")' in src and "not flattening and" in src
+
+
+def _settled_book(p, realized, settled, closed_ago=3600, **slug):
+    """A book closed-settled `closed_ago` seconds before the fixture
+    clock, opened 30 h ago so it is nobody's book-of-the-day: its
+    updated_at is its closed_at, as ml-book-settled stamps both."""
+    return p.add_book(ledger=0, state="closed", realized_pnl=realized, settled_pnl=settled,
+                      closed_at=NOW - closed_ago, updated_ts=NOW - closed_ago,
+                      opened_ts=NOW - 30 * 3600, **slug)
+
+
+def test_e3_the_loss_sum_counts_a_settled_books_dollars_once():
+    """E3 (the day reconciliation of 2026-09-06 23:10Z). _SQL_LOSS_SUM
+    summed realized_pnl over every book updated in 24 h PLUS
+    settled_pnl over every book closed-settled in 24 h, but settled_pnl
+    is the venue's WHOLE-position figure -- what _close_settled
+    cross-checks `own = realized + shares x (payout - avg)` against
+    under book_settle_disagree -- so a settled book's realized part
+    was counted twice. Tonight: book 16 (realized -244.75, settled
+    -315.40 = sales 349.25 - cost 664.65 + 157 x 0), 3 (+2.48 /
+    +156.17), 19 (-2.11 / -41.46), 22 (+14.64 / +19.74); the 22:22Z
+    reading of -2,445 was about -2,215 in truth. The rule now: settled
+    over the closed-settled books in the window, realized over every
+    OTHER book updated in the window -- open, frozen and closing books,
+    and closes cashed out / cancelled with settled_pnl NULL -- and a
+    settlement outside the window brings nothing back in. The `books`
+    count is as it was. Pinned by the statement's text and through the
+    fake, which reads the exclusion from the text and refuses the
+    double-counting shape; tests/test_mirror_loss_sum_real_pg executes
+    the same rows against Postgres."""
+    tonight = [(16, -244.75, -315.40), (3, 2.48, 156.17), (19, -2.11, -41.46), (22, 14.64, 19.74)]
+    p = _pool()
+    for bid, realized, settled in tonight:
+        _settled_book(p, realized, settled, closed_ago=7200, us_market_slug=f"aec-set-{bid}-2026-09-06",
+                      condition_id=f"0xset{bid}", long_asset=f"tok-s{bid}", other_asset=f"tok-t{bid}")
+    p.add_book(ledger=300, realized_pnl=-100.0)                           # open: realized only
+    # a cashed-out close (settled_pnl NULL): its P&L lives in realized_pnl
+    p.add_book(ledger=0, state="closed", realized_pnl=-50.0, settled_pnl=None,
+               closed_at=NOW - 1800, updated_ts=NOW - 1800, **_OTHER)
+    # a settlement 25 h old is outside the window entirely: neither its
+    # settled figure nor its realized part comes back through updated_at
+    _settled_book(p, -999.0, -1500.0, closed_ago=25 * 3600, **_ZZ)
+    row = p._run("fetchrow", ml._SQL_LOSS_SUM, ())
+    assert row["lost"] == pytest.approx(sum(s for _, _, s in tonight) - 100.0 - 50.0)
+    assert row["lost"] == pytest.approx(-330.95)
+    assert row["books"] == 6, "every book updated in 24 h, the 25 h settlement not among them"
+    # the double count would have read the four books' realized part on
+    # top: -229.74 more, the same gap as tonight's -2,445 vs -2,215
+    assert row["lost"] - sum(r for _, r, _ in tonight) == pytest.approx(-101.21)
+    # a closed-settled row with NO closed_at (only a hand-edited row: both
+    # close statements stamp it) is clocked by updated_at and counted
+    # ONCE, by its settled figure -- it vanished from both sums before
+    # (E3 review, minor 2)
+    nul = p.add_book(ledger=0, state="closed", realized_pnl=-7.0, settled_pnl=-20.0,
+                     closed_at=None, updated_ts=NOW - 900, opened_ts=NOW - 30 * 3600,
+                     us_market_slug="aec-set-null-2026-09-06", condition_id="0xsetnull",
+                     long_asset="tok-sn", other_asset="tok-tn")
+    row2 = p._run("fetchrow", ml._SQL_LOSS_SUM, ())
+    assert row2["lost"] == pytest.approx(-350.95) and row2["books"] == 7
+    nul["realized_pnl"] = -1e6                     # its realized part never leaks in
+    assert p._run("fetchrow", ml._SQL_LOSS_SUM, ())["lost"] == pytest.approx(-350.95)
+    nul["updated_ts"] = NOW - 25 * 3600            # and out of the window it is nothing
+    assert p._run("fetchrow", ml._SQL_LOSS_SUM, ())["lost"] == pytest.approx(-330.95)
+    # the statement's text: settled over closed-settled-in-window (clocked
+    # by closed_at, else updated_at), realized over updated-in-window
+    # EXCLUDING closed-settled, one window, the tag -- and the ARITHMETIC
+    # between them: the two sums ADDED, each unsigned and unscaled, the
+    # sum the `lost` column. The fake computes the rule itself, so a
+    # mutant that flips a sign or halves the figure passes through it
+    # unseen; only the text catches it here (E3 review, minor 1)
+    sql = _flat(ml._SQL_LOSS_SUM)
+    assert "ml-loss-sum" in sql and sql.count("now() - interval '24 hours'") == 3
+    assert ("(SELECT sum(settled_pnl) FROM mirror_books WHERE state = 'closed' AND settled_pnl IS NOT NULL "
+            "AND COALESCE(closed_at, updated_at) > now() - interval '24 hours')") in sql
+    assert ("(SELECT sum(realized_pnl) FROM mirror_books WHERE updated_at > now() - interval '24 hours' "
+            "AND NOT (state = 'closed' AND settled_pnl IS NOT NULL))") in sql
+    assert "(SELECT count(*) FROM mirror_books WHERE updated_at > now() - interval '24 hours') AS books" in sql
+    assert sql.startswith("SELECT COALESCE((SELECT sum(settled_pnl)")
+    assert ")::float8 + COALESCE((SELECT sum(realized_pnl)" in sql
+    assert "), 0)::float8 AS lost," in sql
+    # no other sign or factor anywhere: the window's `now() - interval`,
+    # `count(*)` and the tag are the only '-' and '*' the text may hold
+    bare = sql.replace("now() - interval", "").replace("count(*)", "").replace("/* ml-loss-sum */", "")
+    assert sql.count("COALESCE((SELECT sum(") == 2 and "-" not in bare and "*" not in bare, bare
+    # the fake refuses the shape the reconciliation found rather than
+    # modelling it: a test against a double-counting statement fails here
+    double = ml._SQL_LOSS_SUM.replace("AND NOT (state = 'closed' AND settled_pnl IS NOT NULL)", "")
+    with pytest.raises(AssertionError, match="a shape this fake does not model"):
+        p._run("fetchrow", double, ())
+
+
+def test_e3_the_stop_trips_on_the_once_counted_sum_and_not_on_the_double_count():
+    """The same rule through the tick. A settlement of -0.8 x stop with
+    a realized part of -0.4 x stop read -1.2 x stop under the double
+    count and tripped; in truth it is -0.8 x stop and the candidate
+    still opens. With a cashed-out close of -0.3 x stop beside it the
+    truth is -1.1 x stop: the stop trips, its receipt carries the
+    once-counted sum and the 24 h book count, and nothing is placed."""
+    stop = float(rules.MIRROR_LOSS_STOP_USD)
+    p = _pool()
+    _settled_book(p, -0.4 * stop, -0.8 * stop, **_ZZ)
+    v = _Venue()
+    st = _tick(p, v)
+    assert _census(st, "mirror_loss_stop") == 0 and "mirror_loss_stop" not in p.state
+    assert [c[1] for c in _places(v)] == [SLUG], "the truth is under the stop: the candidate opens"
+    p2 = _pool()
+    _settled_book(p2, -0.4 * stop, -0.8 * stop, **_ZZ)
+    p2.add_book(ledger=0, state="closed", realized_pnl=-0.3 * stop, settled_pnl=None,
+                closed_at=NOW - 1800, updated_ts=NOW - 1800, opened_ts=NOW - 30 * 3600, **_OTHER)
+    v2 = _Venue()
+    st2 = _tick(p2, v2)
+    assert _census(st2, "mirror_loss_stop") >= 1 and not _places(v2)
+    receipt = p2.state["mirror_loss_stop"]
+    assert receipt["sum"] == pytest.approx(-1.1 * stop) and receipt["books"] == 2
+    assert receipt["limit"] == stop
 
 
 # ------------------------------------------ 11d. the mapping lane (C1)

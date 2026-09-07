@@ -840,6 +840,21 @@ M1-total (all families) printed beside M1.
   trailing 24 h every tick, and asked "$3,000 / $5,000 / keep $1,000" with the figures beside each,
   Matt: "Re arm" then "$5,000" -- about half of that day's $10,666 peak stake at 10% of his book.
   Raised in code (env can only lower it), re-armed by mirror-rearm once the build was live.
+  E3 (day reconciliation, 2026-09-06 23:10Z): the 24 h figure the stop reads (`_SQL_LOSS_SUM`) DOUBLE-COUNTED
+  a settled book's sales. It summed realized_pnl over every book updated in 24 h PLUS settled_pnl over every
+  book closed-settled in 24 h, but settled_pnl is the venue's whole-position figure (the one `_close_settled`
+  checks `own = realized + shares × (payout − avg)` against under `book_settle_disagree`), so it already holds
+  the realized part: book 16 (realized −244.75, settled −315.40 = sales 349.25 − cost 664.65 + 157 × 0),
+  3 (+2.48 / +156.17), 19 (−2.11 / −41.46) and 22 (+14.64 / +19.74) put the 22:22Z reading at −2,445 where
+  the truth was ≈ −2,215 — it failed closed (too pessimistic), but the number the owner was told was wrong.
+  THE RULE NOW, a dollar counts once: lost = Σ settled_pnl over books with state 'closed' AND settled_pnl not
+  null AND closed_at in 24 h (updated_at where a hand-edited row has no closed_at: every close the worker
+  writes stamps both), PLUS Σ realized_pnl over every OTHER book updated in 24 h (open / frozen /
+  closing books, and closes that were cashed out or cancelled with settled_pnl NULL, whose P&L lives only in
+  realized_pnl); a closed-settled book counts by its settled figure or not at all. The `books` count, the
+  $5,000 stop and the stop write are unchanged. The render-ops `mirror-pnl` preset's 'today' row prints
+  `day_pnl` by the same rule beside the raw realized and settled sums, so the hourly status quotes one true
+  number; the statement executes against real Postgres in tests/test_mirror_loss_sum_real_pg.
 - THE SLEEVE (decisions 1 and 20): $10,000 of the account's $31,502 buying power is the mirror's pot.
   Today the per-market ($250) and per-day ($1,250) caps size every order and the pot is not binding; it
   becomes the ratio's denominator when Phase 3a reads his deployed capital (`why_bankroll` is still
