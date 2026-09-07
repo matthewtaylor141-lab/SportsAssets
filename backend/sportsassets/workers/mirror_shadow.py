@@ -76,6 +76,7 @@ from typing import Any
 from ..analytics import mirror as mi
 from ..analytics import mirror_live_rules as rules
 from ..db import get_pool, heartbeat
+from .. import venue_pace
 from ..venue_pace import pace
 
 log = logging.getLogger(__name__)
@@ -95,11 +96,22 @@ log = logging.getLogger(__name__)
 # reads on a key shared with the live lane), so it lengthens only --
 # which also keeps the operator's incident lever, slowing the shadow
 # during a venue event without a deploy
+#
+# E2 (2026-09-06) left this at 30 s, and the live lane's POLL_S with it:
+# the brief lowered both to 10 s ONLY with the live tick under 10 s on
+# the live book count, and the tick's floor is the pacer's -- one paced
+# read per 0.35 s, ~46 books x 0.35 s = 16 s before a single candidate
+# -- so the parallel walk lands the tick near that floor, not under 10 s.
 POLL_S = rules.min_wait_env("MIRROR_SHADOW_POLL_S", 30.0)
 LOOKBACK_H = rules.capped_env("MIRROR_LOOKBACK_H", 6.0, floor=0.25)
 RATIO_DAYS = int(rules.capped_env("MIRROR_RATIO_DAYS", 30.0, floor=1.0))
 RATIO_REFRESH_S = 3600.0
 READ_PACING_S = 0.35
+# THE SHADOW'S candidate quote reads a tick: 20, as before E2. The live
+# lane's budget is its own (mirror_live.MAX_MARKETS_PER_TICK, env
+# MIRROR_LIVE_MAX_MARKETS, 40 since E2): sharing one constant doubled
+# the shadow's reads on a venue that was already answering 429s (E2
+# review round 2, HIGH-B). Still capped_env: env may only lower it.
 MAX_MARKETS_PER_TICK = int(rules.capped_env("MIRROR_MAX_MARKETS", 20.0, floor=0.0))
 POSITIONS_PAGES_MAX = 5
 MISS_STREAK_ABANDON = 3
@@ -869,6 +881,19 @@ async def account_positions(pmus) -> dict[str, float] | None:
     """ONE paced walk of the venue account's positions per tick:
     {slug (lower): signed netPosition}. None when the walk failed -- a
     market absent from a successful walk is simply not held (0)."""
+    positions, _pages, _rate_limited = await account_positions_walk(pmus)
+    return positions
+
+
+async def account_positions_walk(pmus) -> tuple[dict[str, float] | None, int, bool]:
+    """account_positions with its own accounting, PER CALL (E2 review
+    round 2, LOW-b: a module-level page count was shared with the shadow
+    on the same loop): (positions or None, the pages the walk read --
+    every one a venue request, failed or truncated walks included --
+    and whether the walk failed on a 429). A 429 also trips the
+    process-wide pacer's circuit (venue_pace.penalize)."""
+    pages = [0]
+
     def _walk() -> dict[str, float]:
         client = pmus._get_client()
         out: dict[str, float] = {}
@@ -879,6 +904,7 @@ async def account_positions(pmus) -> dict[str, float] | None:
             # measurement pacer (review round two): this worker and
             # price_path together never exceed one read per gap
             pace(READ_PACING_S)
+            pages[0] += 1
             resp = client.portfolio.positions(
                 {"limit": 100, **({"cursor": cursor} if cursor else {})}) or {}
             for slug, p in (resp.get("positions") or {}).items():
@@ -918,14 +944,53 @@ async def account_positions(pmus) -> dict[str, float] | None:
         return out
 
     try:
-        return await asyncio.to_thread(_walk)
+        return await asyncio.to_thread(_walk), pages[0], False
     except Exception as exc:  # noqa: BLE001 — a failed walk is named, never guessed
         # the message names WHICH row or WHICH cap refused: three raise
         # sites all carry RuntimeError, and a walk that fails every tick
-        # on one stuck row is otherwise indistinguishable from a 429
-        log.warning("mirror_shadow: positions walk failed (%s: %s)",
-                    type(exc).__name__, str(exc)[:200])
-        return None
+        # on one stuck row is otherwise indistinguishable from a 429 --
+        # except a 429 itself, which trips the pacer's circuit (E2
+        # review round 2, HIGH-B) and is reported to the caller by name
+        limited = is_rate_limit(exc)
+        if limited:
+            venue_pace.penalize()
+        log.warning("mirror_shadow: positions walk failed (%s: %s)%s",
+                    type(exc).__name__, str(exc)[:200], " -- 429: pacer penalty on" if limited else "")
+        return None, pages[0], limited
+
+
+_RATE_LIMIT_TEXT = re.compile(r"^\s*(RateLimitError\b|429\b|HTTP 429\b|Too Many Requests\b)", re.I)
+
+
+def is_rate_limit(err: Any) -> bool:
+    """Does an error -- an exception or the adapter's error string --
+    name the venue's rate limit? The SDK maps status 429 to
+    RateLimitError whatever the body (an HTML page from a proxy
+    included), so the class name, a `status_code` of 429, or a text
+    that STARTS with the SDK's name / '429' / 'Too Many Requests' (the
+    positions walk's RuntimeError wrapper, the adapter's `error`
+    strings, which lead with the exception's name). Never a substring
+    match over free text (E2 review round 3, LOW-4): '429' inside an
+    order id, a slug or a price is not a rate limit. Anything else
+    (a timeout, a 5xx, a socket reset) is not one.
+
+    AN INT STATUS IS AUTHORITATIVE (round 5, LOW d5): the SDK already
+    decided the status when it built the exception, so an exception
+    carrying an int `status_code` that is not 429 is not a rate limit
+    whatever its text says -- a BadRequestError(400) whose message
+    begins "429 contracts exceeds the maximum order size" is a size
+    refusal, an InternalServerError(503) beginning "429 upstream busy"
+    is an outage. The text is consulted only when no int status is
+    there (the adapter's error strings, the walk's RuntimeError)."""
+    if err is None:
+        return False
+    if isinstance(err, BaseException):
+        if "RateLimit" in type(err).__name__:
+            return True
+        code = getattr(err, "status_code", None)
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code == 429
+    return bool(_RATE_LIMIT_TEXT.match(str(err)))
 
 
 def _paced_bbo(pmus, slug: str) -> dict:
@@ -953,7 +1018,12 @@ def his_level(fills: list[dict], long_asset: str | None, other_asset: str | None
     token. Reducing: the most recent of his SELL of the long token (at
     its price) and his BUY of the other token (his pair completion, at
     one minus its price) -- by timestamp, so a sale after an old entry
-    is not priced off the entry (review round one)."""
+    is not priced off the entry (review round one). The other-token
+    equivalent is round(1 - p, 6), THE SAME ROUNDING AS THE LIVE
+    WORKER'S mirror_live._his_level (E4 review round 3, L-3): a 4-place
+    figure read his other-token BUY at 0.47996 as 0.52 and this
+    module's exit leg then recorded `exit_rest_px` 0.52, a cent under
+    the live rest at 0.53 (rules.exit_terms ceils 0.52004)."""
     best: tuple[float, float] | None = None
     for f in fills:
         a, side = str(f.get("asset") or ""), str(f.get("side") or "").upper()
@@ -972,7 +1042,7 @@ def his_level(fills: list[dict], long_asset: str | None, other_asset: str | None
             if long_asset and a == long_asset and side == "SELL":
                 lvl = p
             elif other_asset and a == other_asset and side == "BUY":
-                lvl = round(1.0 - p, 4)
+                lvl = round(1.0 - p, 6)
         if lvl is not None and (best is None or ts >= best[0]):
             best = (ts, lvl)
     return best[1] if best else None
@@ -1448,6 +1518,19 @@ def exit_leg(ev: dict | None, ledger: float, venue: float | None,
                    # the immediate read, beside the verdict and never in
                    # it: the bid is already at or through our price
                    exit_marketable_now=bool(p.would_fill))
+        # THE LIVE WORKER'S EXIT PRICES, beside the plan's (E4, owner
+        # order 2026-09-06 "exit when he exits at his price or within
+        # 1c"): the same rules.exit_terms off the same his_px -- the
+        # floor (his price less the tolerance), the cent the live rest
+        # goes at (his cent, never lifted to the ask as plan.price is)
+        # and the cent its IOC fires at. Recorded so the shadow's row
+        # and the live plan read the same figures; the live/shadow
+        # comparison (mirror_live._shadow_check) compares the TARGET
+        # alone and never a price, so nothing here can name a
+        # disagreement. Absent when he gave no exit price
+        ex = rules.exit_terms(rules.SELL, his_px)
+        if ex is not None:
+            out.update(exit_floor=round(ex["floor"], 6), exit_rest_px=ex["rest"], exit_take_px=ex["take"])
         return out
     if p.side is None and str(p.reason or "") in _EXIT_HOLD_REASONS:
         out.update(exit_plan="hold", exit_reason=p.reason)

@@ -204,9 +204,11 @@ def test_the_kwargs_sit_after_intent_with_off_defaults():
     params = list(inspect.signature(pmus.submit_fok).parameters.values())
     names = [p.name for p in params]
     assert names == ["us_market_slug", "limit_price", "quantity", "sell",
-                     "tif", "intent", "post_only", "good_till"]
+                     "tif", "intent", "post_only", "good_till", "paced_pair"]
     assert params[names.index("post_only")].default is False
     assert params[names.index("good_till")].default is None
+    # E2 (2026-09-07): the mirror lane's paced preview/create pair, off for every other caller
+    assert params[names.index("paced_pair")].default is False
 
 
 # ── 2. post_only: the flag rides in both requests ────────────────────

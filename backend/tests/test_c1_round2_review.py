@@ -222,7 +222,8 @@ def test_the_fill_echo_freezes_on_mismatch_and_trades_on_when_unreadable(monkeyp
                               long_asset="tok-bayl", other_asset="tok-aubrn"))
     t = _live_tick(monkeypatch, pool, _Venue(_aec_cfb()))
     # sign wrong: mismatch, frozen, tripped
-    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: {"net": -99.0, "outcome": "Bears"})
+    # _position_echo answers (echo, pages read) since E2: every page a paced venue request
+    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: ({"net": -99.0, "outcome": "Bears"}, 1))
     assert _run(ml._grammar_fill_check(t, book)) == "frozen" and book["state"] == "frozen"
     assert pool.state["mirror_grammar_echo"]["tripped"] is True
     # round 3 (review 4): state unreadable / echo unreadable -> the book WAITS
@@ -234,7 +235,7 @@ def test_the_fill_echo_freezes_on_mismatch_and_trades_on_when_unreadable(monkeyp
     assert _run(ml._grammar_fill_check(t2, book2)) == "wait", "unreadable certification state: waits"
     pool2.raise_on.clear()
     pool2.state["mirror_grammar_echo"] = {"tripped": False, "verified": [], "pending": {}}
-    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: None)
+    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: (None, 1))
     assert _run(ml._grammar_fill_check(t2, book2)) == "wait", "echo unreadable: waits"
     assert book2["state"] == "live" and pool2.state["mirror_grammar_echo"].get("tripped") is False
     ml._current_stats = None

@@ -234,14 +234,14 @@ def test_a_grammar_book_waits_on_an_unverified_first_fill_and_never_trips_on_a_m
                               long_asset="tok-bayl", other_asset="tok-aubrn"))
     t = _live_tick(monkeypatch, pool, _Venue(_aec_cfb()))
     # pending[slug] absent: unverified, the book waits, nothing trips
-    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: {"net": 99.0, "outcome": "Tigers"})
+    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: ({"net": 99.0, "outcome": "Tigers"}, 1))
     assert _run(ml._grammar_fill_check(t, book)) == "wait"
     st = pool.state["mirror_grammar_echo"]
     assert st["unverified"] == 1 and st["tripped"] is False and book["state"] == "live"
     # an unattributable echo: waits
     st["pending"][AEC_CFB] = {"outcome_desc": "Bears", "intent": LONG, "side_index": 0, "his_slug": CFB}
     pool.state["mirror_grammar_echo"] = st
-    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: {"net": 30.0, "outcome": "Bears"})
+    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: ({"net": 30.0, "outcome": "Bears"}, 1))
     assert _run(ml._grammar_fill_check(t, book)) == "wait"
     # the state unreadable: waits, by name
     pool.raise_on.append(("SELECT value FROM ingestion_state", RuntimeError("db down")))

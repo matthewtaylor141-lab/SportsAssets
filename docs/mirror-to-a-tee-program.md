@@ -1058,6 +1058,366 @@ M1-total (all families) printed beside M1.
   two candidates of one game in one tick open at 4,000 and 1,000; a full game's candidate is skipped
   for the memo's minute; two games are independent; a game is walked oldest-touched first, its books in
   id order, and an abandoned tick's unreached games come first on the next.
+- E2, 2026-09-06 -- LATENCY: THE MIRROR FIRES AS OFTEN AS THE WALK CAN. Owner, ~22:50Z, verbatim: "We
+  need to be mapping and mirroring a larger percentage of his orders and positions, I want this firing
+  as frequently as his. Make the latency as low as possible and do whatever you have to do to get us
+  rolling and operating at the highest level possible." The rails stay: ratio 10% (exact under $10),
+  $2,500 per game (E1), the $5,000 24 h loss stop, identity-only mapping, fail closed. BEFORE (the
+  heartbeats and the code, 2026-09-06): his fill reached our trades table in -0.7 s p50 on the chain
+  lane (not the bottleneck); the loop polled every 30 s; a tick took 45-52 s with 28 books and 162 s
+  with 46 (20:48Z) because `_tick_book` walked the open books ONE AT A TIME with each book's 2-4 reads
+  in series (~3.5 s a book), so a fill of his waited up to a tick plus a poll (~3.5 min at 50 books);
+  `MIRROR_MAX_ORDER_OPS_PER_TICK` was 6 and 16 of 41 books waited a tick at 20:35Z (`ops_capped` 16);
+  the candidate walk read 20 markets a tick; the bounded take waited 120 s and placed 0 IOCs all night
+  (`placed_take` 0 on every heartbeat; on 22:22Z's books 9 of 26 had ever filled anything). WHAT
+  CHANGED: (1) `_walk_books` -- the open books tick under an `asyncio.Semaphore` of
+  `rules.MIRROR_BOOK_CONCURRENCY` (default 6, `capped_env`: env lowers only, 1 is the old walk). The
+  unit of concurrency is a GAME: the walk order `_woken_first` gives (games oldest-touched first, the
+  woken game first, ids ascending inside a game) is grouped by `_game_key_of` and a game's books run
+  one after another under the per-book lock, so E1's rule 4 (one fixed order for a game's room)
+  holds; games start in walk order. Every shared counter a book reads and writes across an await was
+  audited: the ops budget is reserved at the check (`_op_slot`) and committed at the write, released on
+  a refusal before it (`ops` still counts writes); an add's quantity is re-scaled on the room as it
+  stands and the room TAKEN before the venue call (`_room_take`), given back on an outright refusal and
+  KEPT on a lost response (money that may have filled stays counted), so two books cannot each spend
+  the last clip; the read-once caches (open orders, protected ids, his snapshots, whale addresses) sit
+  under per-tick locks; the grammar class's read-judge-write of its state is under a lock;
+  `_lock_for`'s sweep never drops a held lock; `_place` and the flatten's slippage leg refuse a book
+  still in flight when another abandoned the tick (`abandoned_in_flight`, named; NO plan is written
+  for it, so its updated_at stays and E1's walk reads it as unreached). THE MISS STREAK IS JUDGED IN
+  WALK ORDER (`_walk_streak`, review MEDIUM-4): the live streak counted consecutive misses in arrival
+  order, and under the walk three failing reads landing before three slow good ones abandoned a tick
+  the sequential walk never would; a book's read now records its outcome by slug and the run is judged
+  over the walk's own order as each read lands, the candidates starting from the walk's trailing run.
+  Every `t.<counter> += 1` with no await between read and write is atomic under asyncio and was left
+  as it is. (2) THE WRITES ARE PACED (review HIGH-1): pmus has no pace() on submit_fok, cancel_order or
+  close_position, and under the walk six books finishing their reads together placed together --
+  twelve HTTP inside one 0.35 s gap, and a write 429 is `rate_limited`, the tick abandoned and every
+  exit unmanaged for the 60 s backoff. Every cancel, placement and close of this lane now claims its
+  gaps on the process-wide pacer (`_paced`, one gap per HTTP request: a BUY placement is a preview and
+  a create, two), so the venue sees at most one request per gap from this process whatever N is. Ops
+  per tick 6 -> 20 (still `capped_env`; a bound on what a tick spends, ~40 requests, not on the rate --
+  the rate is the pacer's). Every venue REQUEST the tick makes is one `venue_calls` census event
+  (paced reads, cancels, placements at two for a BUY, closes, every positions page of the tick's walk
+  and of the flatten's own reading `ml._pm_held`, the mapping lane's resolver calls; review MEDIUM-3),
+  and the soft guard `rules.MIRROR_VENUE_CALLS_PER_TICK` (default 60, `capped_env`) counts the tick's
+  WRITES and CANDIDATE reads alone (review MEDIUM-5: the open books' reads are the tick's fixed cost,
+  and counting them left 12 candidate reads at 46 books): at 60 the CANDIDATE walk stops
+  (`venue_calls_capped`, `capped_tick`) -- never the books, never an exit. 60 is the 40 candidate reads
+  plus the 20 writes. (3) POLL_S STAYS 30 s, the shadow's too: the brief allowed 10 s only with the
+  tick under 10 s on the live book count, and the tick's floor is the pacer's -- every read AND now
+  every write queues on `venue_pace`'s one-per-0.35 s gate, so 46 books are >= 16 s of quote reads
+  before a candidate is read. The parallel walk takes the tick from ~3.5 s a book to the pacer's
+  0.35 s a request; it does not get under 10 s. (4) `MIRROR_TAKE_AFTER_S` default 120 s -> 20 s
+  (`min_wait_env`: env lengthens only); the PRICE RULE IS UNCHANGED -- one IOC at the same wire, only
+  with the book at or through his level, never chased -- and the two verdicts are counted:
+  `take_at_his_level`, `take_refused_price`. AN EXIT IS NEVER GATED BY THE REPLACE BUDGET (review
+  MEDIUM-2): at 20 s a rest -> take (IOC, 0 fill) -> rest cycle spends the hour's 12 replaces in ~13
+  minutes and the book is `take_capped` (entry churn, still bounded); a reduce, a flatten or a plan on
+  the OTHER side of the rest (`_exit_or_flip`) cancels and goes out whatever the count -- it was
+  `replace_capped` until the rest's TTL, an exit held up to 600 s behind an entry budget. The take's
+  cancel of an IOC row is not a replace (`_SQL_REPLACES` filters GTC/GTD). The stale-arm window is
+  max(2 x wait, `TAKE_ARM_STALE_MIN_S` 60 s): twice a 20 s wait is 40 s, and at a 0 s wait every arm
+  would have been stale on the next tick. (5) `MIRROR_MAX_MARKETS` 20 -> 40 candidate reads a tick,
+  the D1 terminal memo and the C2 unmapped memo unchanged; reachable at 46 books under the default
+  guard (the reads the guard counts are the candidates' own). AFTER (the tests, on a fake venue whose
+  quote read sleeps 0.05 s, the pacer patched out as in every worker test): 50 books tick in 2.6 s
+  sequential and 0.5 s at N=6 with every stat equal, on a clean venue and on one whose every other read
+  fails; 25 books in flight place exactly 20 and `ops_capped` 5; three $90 rests against a $200 room
+  place 300 + 300 + 66 shares whatever the arrival order; six BUY placements in flight land one pacer
+  gap apart, never a burst; a 20 s rest with the ask at his level takes ONE IOC at the same wire,
+  three ticks above it none, never twice for one rest; 46 books and 41 candidates read 40 at the
+  default guard. LIVE EXPECTATION, stated plainly: with 46 books the tick should land near the pacer
+  floor (~16 s of book reads plus the candidates' reads and ~0.35 s per write request) instead of
+  162 s, i.e. a fill of his waits ~30-45 s instead of ~3 min. Measure it on the census: `tick_s`,
+  `venue_calls`, `venue_calls_capped`, `ops_capped`, `placed_take`, `take_at_his_level`,
+  `take_refused_price`, `abandoned_in_flight`, `map_reads_capped`. Left out, by design: the 0.35 s
+  pacer itself (it is what the venue's ~3 req/s budget is measured against and the copy and exit lanes
+  share it -- lowering it is a venue-rate decision, not a latency one); a shorter poll (see (3));
+  parallel candidates (they share the read budget and the soft guard, and their opens are placements).
+- E4, 2026-09-06 -- EXITS FOLLOW HIS EXITS AT HIS PRICE, WITHIN ONE CENT. Owner, ~23:24Z, verbatim:
+  "we should exit when he exits at his price or within 1c variance (tolerance)". THE HISTORY HE WAS
+  ANSWERING, book 29 (tsc-cfb-washst-wash total 46.5, LONG 63 shares): his net flipped short at
+  ~20:30Z; our flatten rest sat at his level -- 0.46 = max(his equivalent 0.4595, ask),
+  `rules.sell_price` -- while the US market fell to bid 0.01 / ask 0.02; the TTL cancelled and
+  re-quoted it 14 times at the same cent and it never filled; the bounded take
+  (`MIRROR_TAKE_AFTER_S`, "only at/through his level") never fired because the bid never came back
+  to the rest; the position went to settlement. THE RULE (every exit: a reduce, the paired flatten,
+  the vanish flatten, the sign-flip flatten, a short book's cover; entries are NOT given it):
+  (1) an exit is planned the tick his reduce is seen, as before, and its take waits for nothing.
+  (2) our exit price is HIS EXIT PRICE for the token -- `his_px`, his reduce fill on the token as
+  `_his_level` reads it; for a short cover his buy-back in long space, 1 - his price on the other
+  token -- worse by at most `rules.MIRROR_EXIT_TOL` (0.01; `capped_env`, the environment may only
+  TIGHTEN it, floor 0). `rules.exit_terms` derives every price from that one figure: a long book's
+  SELL has a floor of his price less the tolerance, RESTS at the cent ceil(his price) (post-only;
+  no longer max(his, ask) -- the ask never lifts the rest above him) and TAKES one IOC at the
+  lowest cent at or above the floor the tick the bid is at or through it, whether a rest stands
+  (cancelled first) or not; the IOC's limit is that cent, not floor-to-cent of the floor, because an
+  off-cent floor floored (0.4595 - 0.01 = 0.4495 -> 0.44) would admit a fill 1.95c under him; on a
+  cent floor the two agree. A short book's cover (close_position, the one short exit before rung S4)
+  has a ceiling of his price plus the tolerance: `_flatten_send` reads the tick's ask against it
+  BEFORE the position read and the close, refuses `exit_out_of_tol` above it (held, no freeze, read
+  again next tick) and closes as before at or under it; a short's partial reduce stays
+  `short_reduce_unproven`. He gave no exit price (a snapshot-driven reduce, a vanish with no fill
+  of his inside the lookback, the admin flatten): the plan keeps its old prices and its old
+  slippage leg under `exit_px_src: 'none'`, never a guessed level. (3) NEVER CHASE PAST THE CENT:
+  outside the tolerance the rest stands (`exit_out_of_tol`, the plan carries bid/ask/floor), the
+  take does not fire, and a rest past its TTL at the same cent is NOT cancelled and re-placed --
+  `_reconcile_open`'s TTL clause skips an exit rest, `keep_or_replace(stands=True)` keeps it, the
+  no-op is named `requote_same_wire`, and under the GTD flag an exit rest carries no good-till so
+  the venue cannot expire it into the re-quote. The C16 slippage leg of a vanish (close_position /
+  the IOC at bid less slippage after `MIRROR_FLATTEN_REST_S`) runs only for an unpriced vanish: on
+  a priced one it would sell past the cent, so the book is held at his cent instead. Book 29 under
+  this rule: taken at 0.45+ at ~20:30Z while the bid was there; once the market fell, held. (4) the
+  replace budget (`MIRROR_MAX_REPLACES_PER_HOUR`) never blocks an exit's take or rest: the
+  `_requotes_this_hour` read at the keep and replace paths is skipped for an exit or a side change
+  -- E2 v2's `_exit_or_flip` (review MEDIUM-2a), the one mechanism; a take on an exit is not a
+  replace, and an IOC row is never one (`_SQL_REPLACES` counts GTC/GTD cancels). (5) the loss stop and every increase refusal never block an exit, as
+  before, pinned on the new take path. (6) census: `exit_take`, `exit_out_of_tol`,
+  `requote_same_wire`; plan fields `exit_px`, `exit_px_src`, `exit_floor` / `exit_rest` /
+  `exit_take` on a long book, `exit_ceiling` / `exit_cover` on a short, and `exit_out_of_tol`
+  {bid, ask, floor|ceiling, at} while held. (7) the shadow's exit leg records the same floor, rest
+  and take cents beside `would_px` (`exit_floor`, `exit_rest_px`, `exit_take_px`); the live/shadow
+  comparison (`_shadow_check`) compares the TARGET alone and reads no price, so the new price can
+  name no disagreement. THE ADDENDUM, ~23:38Z, verbatim: "Remove the 20 second wait on entires
+  too". `MIRROR_TAKE_AFTER_S` default 20 s -> 0 (`min_wait_env`: the environment may only LENGTHEN
+  it). An increase with the ask at or through his level -- the entry price rule, unchanged: at or
+  through the wire, never above him, NO tolerance -- sends ONE IOC at the wire for the plannable
+  quantity FIRST (`take_first`, on the no-rest path, never through the armed path) and rests the
+  unfilled remainder post-only at the same wire (`_entry_take`); the ask above his level rests as
+  before and the take fires the tick the ask arrives, with no age condition on the rest. The
+  take-first IOC cancels no rest and so consumes no replace (`_SQL_REPLACES` counts GTC/GTD
+  cancels only); an entry's take + rest is two ops against the tick's budget; the room is reserved
+  once for the plan -- the IOC's unfilled part is given back before the remainder is sized
+  (`_place_reserved`), so a $45 room places an IOC of 150 that fills 50 and a rest of 100, never
+  `over_room`; never twice for one plan (the IOC's remainder is the venue's cancel, the rest is the
+  only standing order). Under a LENGTHENED wait E2's rest-first take and the arm's staleness bound
+  (`TAKE_ARM_STALE_WAITS`, read only under a positive wait) run exactly as they did. PINS
+  (test_mirror_live_worker section 21): a long reduce at bid = his - 0.01 takes one IOC that tick
+  and at his - 0.02 rests at his cent, `exit_out_of_tol`, then takes the tick the bid comes back;
+  the book-29 replay rests at 0.46 against 0.01/0.02 and stands five TTL periods with one order
+  row and `requote_same_wire`, then takes at 0.45; a short cover at ask 0.32 against his 0.30 is
+  held and closes at 0.31; exits ignore the replace budget and the loss stop; an unpriced vanish and
+  the admin flatten keep today's prices under `'none'`; a partial exit IOC leaves nothing resting;
+  the entry take-first spends its room once with two ops and no replace; every entry pin (E2
+  section 20, the arm bounds of sections 13/14 under a lengthened wait) is green. PINS UPDATED for
+  the behaviour the owner changed: the paired-out rest (was max(1 - q, ask): now his cent, the
+  take within a cent), the section-7/20 take pins (was a 20 s wait), nine vanish-slippage pins now
+  run on an unpriced vanish (`_unpriced`), three short-cover pins put the ask inside the ceiling,
+  one pre-050 intent pin puts the bid two cents under him. Left out: a fresh venue read of the ask
+  before a short's close (the tick's own read, seconds old, is what every other price decision
+  reads; a second paced read a tick is the same budget the venue-call guard exists for); a rest for
+  the remainder after a partial EXIT IOC in the same tick (the brief's (i): the next tick plans it,
+  and the bid still there is another take); `flattened` on the stats line counts the flatten rows
+  only, not an exit take that empties a flatten book (read `exit_take` beside it).
+  REVIEW FOLD (2026-09-07, E4 review round 1: the exit half held every attack, the addendum half did
+  not). HIGH-1: the entry's take-first never fired in a normal book -- it was judged at the REST's
+  wire, buy_price(his, bid) = floor-to-cent of min(his, bid), at or under the bid, and `at_or_through`
+  needs ask <= wire, impossible with bid < ask (only a locked book fired; `placed_take` 0 all night).
+  Now the entry's take is judged and SENT at HIS cent, `rules.buy_wire(his)` (floored, never above
+  him), on the standing-rest path and the no-rest path alike; the rest keeps its wire and
+  `keep_or_replace` compares the rest's wire; a short book's add stays on the rest path (its wire is
+  `_short_wire`'s contract cent; no take-first is built for it). Pins in a normal book: his 0.30,
+  bid 0.29 / ask 0.30 -> one IOC at 0.30 first, the remainder rests at 0.29; ask 0.29 (through) ->
+  the IOC at 0.30; ask 0.31 -> the rest alone, and the ask arriving at 0.30 later cancels and takes;
+  his 0.2999 with the ask at 0.30 rests (his cent is 0.29). E2's pins that read "the IOC at the same
+  wire" now read his cent (0.31 on the fixture's his 0.31, the rest at 0.30). MEDIUM-2: a priced
+  short cover judged on the tick's ask then sent close_position with 300 bips and no limit could fill
+  past the ceiling; now the ask is read again, paced, immediately before the close (one extra read,
+  on a priced cover alone), judged against the ceiling again, and the close is sent with
+  min(EXIT_SLIPPAGE_BIPS, max(1, floor((ceiling / ask - 1) x 10000))) bips -- at the ceiling itself
+  ONE bip (the adapter refuses 0), a hundredth of a cent the ladder cannot express, so the fill is at
+  the ceiling cent: the rule is "at the ceiling, never a cent past it"; his 0.30 -> ceiling 0.31: ask
+  0.31 -> 1 bip, ask 0.30 -> 300 (333 capped), a fresh ask of 0.33 -> held with the fresh quote on the
+  plan. An unpriced cover keeps the adapter's slippage and one read. MEDIUM-3: the priced vanish
+  never running the slippage leg is pinned (the reviewer's a7, ported). LOW-4: `exit_take` is counted
+  where the IOC is SENT (`_place_reserved`, beside `take_placed`), not at the decision an ops-capped
+  cancel could refuse. LOW-6: `rules.exit_terms` reads `MIRROR_EXIT_TOL` at call time (the default is
+  None, never a value bound at import), so the environment's tightening and a test's monkeypatch
+  both reach the worker.
+  REBASE ONTO E2 v4 (2026-09-07). E2's round-3 fold dropped the pacer's slot reservation (one
+  claim per request; the adapter claims its own gap before the create), skipped the 60 s backoff on
+  a placement 429 while the circuit holds, and made a TTL/replace cancel and its re-rest ONE op
+  (`_Tick.requote_credit`, spent in `_place` by a non-IOC alone). E4 adds no write path of its own,
+  so the first two need nothing of it. The credit meets E4 in three places, each pinned: the
+  same-wire path sends no cancel (a reduce rest past its TTL is left to the plan and
+  `keep_or_replace(stands)` keeps it), so no credit is granted there -- nothing to clear, none to go
+  stale, and a `_Tick` is built per tick so an unspent credit never outlives one; an IOC -- an
+  exit's take, an entry's take-first -- never spends it and is its own op (cancel + IOC is two ops,
+  cancel + IOC + the remainder's rest is two); and an IOC the budget refused with the credit standing
+  rests the plannable quantity on the credit instead (`_entry_take`), so a TTL cohort's crossing
+  book is not left bare for the tick, which is what the credit is for.
+  REVIEW FOLD (2026-09-07, E4 review round 3: one MEDIUM, three LOWs; every attack on the cent, the
+  one-IOC-per-rest rule, his price moving, the cover's sources and fresh read, the entry's cent, the
+  frozen books, pacing and the credit held). M-1 (MEDIUM): the exit's take off a standing rest is a
+  cancel and an IOC, two ops with no credit, and at the budget's LAST op the cancel went and the IOC
+  was `ops_capped` -- the book had NO exit order for the tick, the one thing an exit is never (E2
+  LOW-6: "an exit is never shed"). Decision: EXITS ARE EXEMPT FROM THE PER-TICK OPS BUDGET.
+  `_op_slot(exit=True)` hands back a slot whatever the count -- reserved, committed, counted in `ops`,
+  on `venue_calls` and the soft guard at the write, never refused -- and every op on an exit's path
+  takes one: the take's cancel and IOC on the keep path, the replace's cancel and the IOC or the
+  re-rest after it, the named cancel under an exit plan, the exit's rest and IOC with no rest
+  standing (`_place` reads exit-ness off the side's leg action on the book, so a short book's SELL --
+  an add -- stays bounded and its BUY -- the cover -- is exempt), the flatten's cancel before its
+  close or slippage leg and that close or IOC (`_flatten_vanished`), the short cover's close, and
+  step O's TTL re-quote of a reduce rest (the first half of an exit's re-quote; its re-rest rides the
+  credit). It mirrors how the replace budget (`_exit_or_flip`) and the loss stop already exempt
+  exits. Entries are bounded exactly as before, E2's take-first fallback on the credit included.
+  Pins (`test_e4_r3_an_exit_is_exempt_from_the_ops_budget...`): the reviewer's c1 / c2 shapes at
+  budget 1 AND at budget 0 send the cancel and the IOC (`ops` 2, `exit_take` 1, `ops_capped` 0), the
+  replace outside the cent sends the cancel and the credited re-rest (`ops` 1), the no-rest IOC and
+  rest each one op, an ENTRY at the same budget is still `ops_capped` (its IOC at 0, its remainder's
+  rest at 1, a plain rest at 0), and at budget 0 the sign-flip flatten's take, the unpriced vanish's
+  cancel + close and the short cover's close all go, each counted. D-1 / D-2 (LOW): step O's TTL
+  clause skipped EVERY reduce rest, so an UNPRICED reduce's TTL re-quote ran through
+  `keep_or_replace`'s age clause under the reason `replace` -- which `_SQL_REPLACES` counts against
+  the book's ENTRY budget (a `ttl` never was) -- and on an abandoned tick, which never plans, the
+  unpriced rest stood past its TTL for the whole backoff. Narrowed to PRICED exit rests:
+  `_priced_exit_rest` -- a reduce rest under a book whose last plan says `exit_px_src: 'his_fill'`,
+  the same predicate `_place_reserved` reads for the no-good-till; the plan is read off the book
+  because step O runs before any book is planned and the order row records no price source. With
+  NO plan on file (a row placed before its plan was written, a book from before E4) the row's own
+  facts decide: a long book's rest whose wire is the cent of the level it was placed against
+  (`his_level` on the row, `rules.sell_wire`) is at his cent; a rest the ask lifted, a rest with no
+  level of his and a short book's are unpriced (fail closed: a TTL re-quote never sheds, its re-rest
+  rides the credit). An unpriced reduce rest keeps today's `ttl` re-quote (reason `ttl`, `requotes`
+  1, never `replace`, `_SQL_REPLACES` 0) and is TTL'd through an abandoned tick as before E4; a
+  priced rest stands (`requote_same_wire`, the book-29 replay unchanged) and stands through an
+  abandoned tick. Pins: the reviewer's d1 / d2 shapes read `ttl` / cancelled on the abandoned tick;
+  the priced rest stands on both; with no plan on file a rest at his cent stands and a rest the ask
+  lifted (or with no level of his) takes ONE `ttl` re-quote to his cent and then stands on the plan
+  it wrote; the predicate on every shape, the plan winning over the row. L-3 (LOW): `mirror_live._his_level` handed the
+  other-token equivalent back unrounded (0.47996 -> 0.5200400000000001) and `mirror_shadow.his_level`
+  to 4 places (0.52), so the shadow's `exit_rest_px` was 0.52, a cent under the live rest at 0.53.
+  Both now round the same way, `round(1 - p, 6)` -- the executor's own precision, which keeps
+  0.52004 (the rest 0.53) and absorbs float noise (1 - 0.77 reads 0.23 in both) -- so the shadow's
+  rest cent IS the live rest's on every fixture (pinned with the reviewer's i1 numbers, and on a
+  tick: his other-token BUY at 0.47996 rests at 0.53 with `exit_px` 0.52004). L-4 (LOW): with no op
+  left the take's cancel was refused and the plan read `take` with nothing sent. `_cancel_outcome`
+  names it `cancel_refused:<reason>` (`cancel_refused:ops_capped`: reachable on an entry's take or
+  replace at the cap, unreachable on an exit since exits are exempt -- pinned by a refusal forced
+  onto the exit path), and a cancel that went out and left the order unknown reads `cancel_pending`
+  -- the freeze's own name -- on the take paths as the replace path always read it. The reviewer's
+  spec notes stand unchanged: the exit IOC at the floor cent when the bid sits at his cent, the
+  entry IOC at his cent, a priced vanish held when the market never returns within a cent. Two
+  source pins moved with the reconcile clause (`not _priced_exit_rest(o, book)` for
+  `_order_action(o, book) != "reduce"`); no other pin moved. Census: no new key; `ops` above the
+  budget reads as exits going out (docs/mirror-coverage.md §13).
+
+- E2 review round 2 fold (2026-09-07). HIGH-A: `_paced(slots=2)` claimed its two gaps as two pace()
+  calls with the gate released between, so six contending BUYs fired twelve requests inside ~five gaps;
+  now ONE locked claim -- `venue_pace.pace(gap, slots=n)` claims the slot and RESERVES the next n-1
+  (each a gap on), and the adapter takes the reserved slot between its preview and its create
+  (`pmus.submit_fok(paced_pair=True)`, what `_guarded` passes; off for every other caller, whose pair
+  stays back to back and never queues behind measurement) -- so every request of this lane is one gap
+  from any other, the create one gap after the preview, and two writers cannot interleave. HIGH-B: the
+  venue answered five HTML 429s in 1.5 h at ~1 req/s (22:48:48, 22:49:10, 23:35:51, 00:10:32, 00:11:33
+  in the worker log, 'walk failed') BEFORE E2 raised the rate, so (1) a 429 CIRCUIT ON THE GAP:
+  `venue_pace.penalize()` doubles the pacer's gap (PENALTY_MULT 2) for PENALTY_S (600 s) from the last
+  429, for every lane on the gate, and it expires on its own; called from every site that reads a 429
+  -- a placement (with the abandon, as before), a quote read (`_bbo`: now named `rate_limited`, never
+  `no_quote`, the market refused for the tick and the outage streak untouched), a cancel whose error
+  names 429/RateLimit (named, the reads decide the order as for any failed cancel), and the positions
+  walk (`ms.account_positions_walk`, per call: positions, pages, rate-limited) -- each counted
+  `rate_limited` on the census; (2) the live lane's OWN candidate budget, `mirror_live.MAX_MARKETS_PER_TICK`
+  (env MIRROR_LIVE_MAX_MARKETS, 40, lowers only), the shadow's `ms.MAX_MARKETS_PER_TICK` back at 20 (one
+  shared name had doubled the shadow's reads too); (3) the guard default 60 -> 80: 20 BUYs are 40
+  requests, and 40 + 40 is what leaves the candidates their whole 40 (at 60 they had 20). LOWs: the
+  positions page count is per call (b); the grammar echo pages through the pacer and counts per page
+  (d); the flip's ADD half stays exempt from the replace budget, documented on `_exit_or_flip` (e); a
+  raise inside the walk-order streak judge is named `walk_error` and logged, the game's walk goes on
+  (f); E1's short-book collateral sizing test folded into section 19. RATE, RE-MEASURED (46 books, 20
+  BUY placements, 41 candidates, N=6, on the fakes): 46 book reads + 2 (open orders, positions) + 40
+  placement requests + 40 candidate reads = 128 requests a tick (measured, `venue_calls`);
+  every one claims a 0.35 s gap, so a tick is ~45 s of pacer time and the sustained rate is the
+  pacer's 2.86 req/s (171/min) whatever N is -- 1.43 req/s (86/min) while the 429 circuit holds, and
+  the walk's concurrency only decides how much of that time overlaps the database and data-API reads.
+  Before E2 the same tick was ~48 requests (6 ops, 20 candidates) over 162 s = 0.3 req/s; the venue's
+  ~3 req/s limit is the pacer's own bound, and the circuit is the answer to the 429s it already sent
+  under it.
+
+- E2 review round 3 fold (2026-09-07). HIGH-1: round 2's RESERVED second slot recorded the create at
+  its reserved time, not when it fired, so a preview whose HTTP took longer than the gap (live latency
+  ~0.65 s a request against a 0.35 s gap -- the common case) fired its create late and the next claimant
+  landed a fraction of a gap after it. The reservation is GONE: `venue_pace.pace(gap)` is one claim per
+  REQUEST -- `_paced` claims before the preview, `pmus.submit_fok(paced_pair=True)` claims its own gap
+  before the create -- so pairwise spacing holds at any latency (pinned on the REAL gate, real sleep,
+  preview slower than the gap, six writers and three readers). MEDIUM-2: `penalize()` took the gate's
+  lock, which every pacer holds through its sleep, so a 429 handled on the event loop stalled the loop
+  a gap or more; it is one float store under its own tiny lock now (< 5 ms with six threads asleep in
+  the gate). MEDIUM-3: a placement 429 was triple-punished (circuit x2, the abandon, a 60 s backoff
+  with every exit unmanaged): the abandon stays, the backoff is skipped while the circuit holds
+  (`backoff_skipped_circuit`); an outage abandon still backs off. LOW-4: `is_rate_limit` matched '429'
+  anywhere in free text (an order id, a slug, a price); now the SDK's RateLimitError class, a
+  status_code of 429, or a text that STARTS with the name / '429' / 'Too Many Requests'. LOW-6: a TTL
+  cohort's cancels ate the whole ops budget in step O before any book was planned (46 expired rests ->
+  20 cancels, 0 re-rests, 20 books bare for a tick); a TTL or replace cancel and its re-rest are ONE op
+  (`requote_credit`: the cancel's op covers the rest that follows on that book this tick; a take's
+  cancel is not credited), so the same tick cancels 20 AND re-rests 20, the 26 others `ops_capped`
+  with their rests standing -- an exit is never shed. Rate table, re-measured on the fakes (46 books,
+  41 candidates, N=6, one 0.35 s gap per request): 20 fresh BUYs -> 128 requests, ~45 s of pacer time,
+  2.86 req/s = 171/min sustained (86/min under the circuit); the TTL-cohort tick (46 expired rests) ->
+  20 cancels + 20 re-rests (60 write requests) + 46 + 40 quotes + 2 = ~148 requests, ~52 s of pacer
+  time; every tick's rate is the pacer's whatever N is, and the poll adds 30 s.
+
+- E2 review round 4 fold (2026-09-07). HIGH-1: round 2's "every site that reads a 429 trips the
+  circuit" was false for half of every BUY's requests. `pmus.submit_fok` wraps only the CREATE (and
+  only under post_only), so the SDK's `RateLimitError` raised by a BUY's PREVIEW -- or by an IOC take's
+  create, sent with post_only False -- crossed `_guarded` into `_place_reserved`'s except and was read
+  as a LOST response: no `rate_limited`, no circuit, one more paced read into the limited venue (the
+  open-orders search) and the book FROZEN `placement_lost` on a 'placing' row for twenty minutes though
+  nothing had been sent. A 429 is the venue refusing the request before it processed it: the except
+  now reads `ms.is_rate_limit` on the raise first (`_place_rate_limited`) -- `rate_limited` and the
+  circuit, the row refused `place_refused:rate_limited` with a receipt naming the raise, the room
+  given back, the tick abandoned `rate_limited` as on the create's 429 (mid-tick consistency; the
+  backoff skipped while the circuit holds); no freeze, no search; the next tick places the book. The
+  same road for any placement raise the match names. Pinned through the REAL adapter on the SDK's own
+  exception (a preview 429, an IOC create 429, the post-only create 429). MEDIUM-2: the placement
+  sites still matched '429' as a substring -- `"429" in raw.error` on a post-only rejection and
+  `"429" in json.dumps(raw)` on any refusal without an id -- so a `preview_mismatch` whose
+  expected_cost was $429.xx (per book, recurring every tick) or a 400 saying "would cross at 0.429"
+  abandoned the tick and halved every lane's rate for ten minutes. Both sites read the raw's NAMED
+  fields now (`_raw_rate_limit`: `status_code` 429, `error_type` naming RateLimitError -- the adapter's
+  4xx refusal carries the exception's class beside its text, as close_position's does -- or `error`'s
+  head through the anchored match); the pin that enshrined the old text is replaced. LOW-3: the
+  re-quote credit's `tif != "IOC"` clause is pinned by behaviour (a credited book placing an IOC spends
+  its own op and keeps the credit; the GTC rest after it spends the credit and no op), not by its text.
+  LOW-4/5: the positions walk's 429 called `_rate_limited` (the circuit) and abandoned
+  `positions_unreadable`, so the 60 s backoff applied on top of the circuit and the next tick was
+  skipped while a placement 429 skipped it. `_abandon` (and `_abandon_reconciled`) take an explicit
+  keyword flag, `rate_limited`, passed by the three placement sites and the walk's 429 site (the
+  reason keeps its name); the skip is `rate_limited and penalty_left() > 0.0` -- the name alone no
+  longer decides, and the circuit clause stays because every site that passes the flag calls
+  `_rate_limited` first in the same block (a flagged abandon with no circuit still backs off). An
+  outage abandon while an earlier circuit holds still backs off. LOW-6: the woken-first pin read the
+  fake venue's call log, which two worker threads append to after a wall-clock sleep each, so the
+  first slot's read could land second under load; it reads the walk's ENTRY order on the event loop
+  now (the order the tasks were created in and the semaphore hands slots out in), on explicit
+  updated_ts values, and pins the whole order -- the woken game first, then the games oldest
+  updated_at first, not id order. No rate-table change: a refused preview is one request, as before.
+- E2 review round 5 fold (2026-09-07). c2/c3: round 4's seam sat in `_place_reserved` alone; the
+  flatten's two placements had none. The SOLE-HOLDER CLOSE: `pmus.close_position` catches every
+  exception into a `close_failed` raw naming `error_type` (4a5da1f), and for the SDK's
+  `RateLimitError` that raw reads as a 429 by name -- but `_flatten_send` never asked: it re-wrapped
+  the raw's text into a RuntimeError for `_lost_response`, which froze the EXIT book `placement_lost`
+  on a 'placing' CLOSE row, and `_reconcile_lost_close` kept the freeze ("nothing_sold") until the
+  1200 s window marked it lost -- the whale gone and our shares held behind a frozen book for twenty
+  minutes, over a request the venue refused before it processed anything. The CO-HELD IOC: its create
+  (sell=True: no preview, post_only False, no 4xx wrapper) raised through `_flatten_send`'s own except
+  straight into `_lost_response` -- one more paced read into the limited venue, then the same freeze.
+  Both now go the round-4 road (`_place_rate_limited`, which takes the adapter's raw beside a raise):
+  `rate_limited` and the circuit, the row refused `place_refused:rate_limited` with the raw (or the
+  raise) as its receipt, the tick abandoned `rate_limited` with the backoff skipped, no freeze, no
+  search; the next tick runs and the flatten begins again on a live book (the vanish clock restarts:
+  the SELL rests its MIRROR_FLATTEN_REST_S first, then the slippage leg). A socket reset on the same
+  create is still the search and the freeze: only a refusal the venue NAMED is a refusal. d5 (LOW):
+  `_raw_rate_limit` and `ms.is_rate_limit` read an int `status_code` as AUTHORITATIVE -- 429 is a
+  rate limit and any other int is not, whatever `error_type` or the text's head says (a
+  BadRequestError(400) whose message begins "429 contracts exceeds the maximum order size" is a size
+  refusal that arms the take and abandons nothing; on v5 it abandoned the tick and halved every lane
+  for ten minutes, recurring every tick); only a raw or a raise with NO int status (close_failed's
+  shape, a cancel's error string, the walk's RuntimeError) falls back to the name and the anchored
+  text. The reviewer's three FINDING tests are in section 20f verbatim, beside the full-road pins.
 
 ### 5b. OPERATOR NOTES (2026-09-05): reading `venue_halted`
 

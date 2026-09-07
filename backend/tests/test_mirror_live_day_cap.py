@@ -853,7 +853,13 @@ def test_three_open_empty_candidates_are_refused_no_quote_and_the_walk_goes_on(c
     st2 = _tick(p, _Venue(), now=NOW + ml.POLL_S, keep_backoff=True)
     assert not st2.get("skipped_backoff") and st2["reads"] >= 1
     # an EXISTING book (quoted, rested) walked before three OPEN-empty
-    # candidates: planned as ever, and the tick goes on past them
+    # candidates: planned as ever, and the tick goes on past them. A
+    # fresh world: the full-game memo the tick above wrote for this
+    # game (E1 re-review, `_game_full_until`: its rest read
+    # `order_state_unknown` at NOW + 30, so the game was `game_unreadable`
+    # and its candidates are skipped for GAME_FULL_MEMO_S) is module
+    # state and would skip c1..c3 before their read
+    ml._game_full_until.clear()
     p = _pool(conds=["c1", "c2", "c3"])
     b = p.add_book(ledger=0)
     v = _SeqVenue([_Q, _E, _E, _E])

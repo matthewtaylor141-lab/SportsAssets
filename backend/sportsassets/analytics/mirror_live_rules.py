@@ -604,7 +604,41 @@ MIRROR_LOSS_STOP_USD = capped_env("MIRROR_LOSS_STOP_USD", 5000.0)
 # board walk above ~3 req/s and the copy lane shares the budget. The
 # ops budget floors at ONE (review finding): a SAFE or exits-only tick
 # is cancel-only, and a tick that may not write at all cannot cancel.
-MIRROR_MAX_ORDER_OPS_PER_TICK = int(capped_env("MIRROR_MAX_ORDER_OPS_PER_TICK", 6, floor=1))
+# 6 -> 20 (E2, 2026-09-06, owner order "I want this firing as
+# frequently as his"): with 41 books 16 waited a tick (ops_capped 16 at
+# 20:35Z). THE RATE IS THE PACER'S, NOT THIS CAP'S (E2 review, HIGH-1):
+# a BUY placement is two HTTP requests (preview, create), a cancel and
+# a close one, and since E2 every one of this lane's writes claims its
+# gaps on the process-wide 0.35 s pacer beside the reads (mirror_live
+# _paced), so the venue sees at most one request per gap from this
+# process whatever the walk's concurrency. This cap bounds how many
+# writes a TICK spends -- 20 writes are ~40 requests, ~14 s of pacer
+# time -- and MIRROR_VENUE_CALLS_PER_TICK below bounds the tick's
+# writes and candidate reads together.
+MIRROR_MAX_ORDER_OPS_PER_TICK = int(capped_env("MIRROR_MAX_ORDER_OPS_PER_TICK", 20, floor=1))
+# THE BOOK WALK'S CONCURRENCY (E2). The open books are ticked under an
+# asyncio.Semaphore of this many at once (the books of ONE GAME stay
+# sequential, in id order, so the per-game cap's room is consumed in
+# E1's one fixed order); env may only LOWER it, and 1 is the sequential
+# walk. Not a venue-rate knob: every measurement read still queues on
+# the process-wide 0.35 s pacer (venue_pace), which is what bounds the
+# venue rate -- this bounds the in-flight database and data-API reads.
+MIRROR_BOOK_CONCURRENCY = int(capped_env("MIRROR_BOOK_CONCURRENCY", 6, floor=1))
+# THE TICK'S VENUE-CALL SOFT GUARD (E2). Every venue request the tick
+# makes -- paced reads, cancels, placements (two for a BUY), closes,
+# every positions page, the mapping lane's resolver calls -- is counted
+# on the census (`venue_calls`). The GUARD counts the tick's WRITES and
+# its CANDIDATE reads alone (review MEDIUM-5): the open books' reads are
+# the tick's fixed cost -- exits must be managed -- and counting them
+# left 12 candidate reads at 46 books. At this many the CANDIDATE walk
+# stops for the tick (`venue_calls_capped`), and NOTHING ELSE does:
+# every open book is still read and every exit still managed. 80 is
+# the 40 candidate reads (mirror_live.MAX_MARKETS_PER_TICK) plus the
+# 20 ops above AS REQUESTS -- a BUY placement is a preview and a
+# create, so 20 BUYs are 40 (review round 2: at 60 they left 20
+# candidate reads) -- ~28 s of pacer time on top of the books' reads.
+# Env may only lower it; 0 is a tick that opens no book.
+MIRROR_VENUE_CALLS_PER_TICK = int(capped_env("MIRROR_VENUE_CALLS_PER_TICK", 80, floor=0))
 MIRROR_MAX_REPLACES_PER_HOUR = int(capped_env("MIRROR_MAX_REPLACES_PER_HOUR", 12))
 # A resting order's life. NOT the copy lane's REST_BID_TTL_S (clamped to
 # 15 s and doubling as mirror_exit's in-flight wait; critic C14): the
@@ -622,7 +656,48 @@ MIRROR_REST_TTL_S = capped_env("MIRROR_REST_TTL_S", 600.0, floor=30.0)
 # aggressive change and wants a review. The price rule, not the timer,
 # keeps the take at or under him (critic C15). The caps above stay
 # downward-only.
-MIRROR_TAKE_AFTER_S = min_wait_env("MIRROR_TAKE_AFTER_S", 120.0)
+# 120 s -> 20 s (E2, 2026-09-06, the reviewed aggressive change; owner
+# order "I want this firing as frequently as his ... make the latency
+# as low as possible"): the 120 s take placed 0 IOCs all night
+# (placed_take 0 on every heartbeat read) and fills came only when the
+# market came to us (9 of 26 live books had ever filled at 22:22Z). The
+# PRICE RULE IS UNCHANGED: one IOC at the SAME wire, only with the book
+# at or through his level (at_or_through), never chased. Env may still
+# only lengthen it.
+# 20 s -> 0 (E4 addendum, 2026-09-06 ~23:38Z, owner verbatim: "Remove
+# the 20 second wait on entires too"): an ENTRY takes on the tick it is
+# planned -- the ask at or through his level sends ONE IOC at the wire
+# FIRST (`take_first`) and the remainder rests post-only at his level;
+# the ask above his level rests as before and the take fires on the
+# tick the ask arrives, with no age condition on the rest. THE PRICE
+# RULE IS STILL UNCHANGED (never above his level; the 1c tolerance of
+# E4 is the EXITS' rule, never an entry's). Zero here means "no wait":
+# take_allowed reads `age >= 0`, so a rest of any age and a plan with
+# no rest at all have waited. Env may only lengthen it, as before: a
+# positive wait restores E2's rest-first take on the rest's own age
+# and the arm's, and the arm's staleness bound (mirror_live
+# TAKE_ARM_STALE_WAITS) is read only under a positive wait.
+MIRROR_TAKE_AFTER_S = min_wait_env("MIRROR_TAKE_AFTER_S", 0.0)
+# THE EXIT TOLERANCE (E4, 2026-09-06 ~23:24Z, owner verbatim: "we should
+# exit when he exits at his price or within 1c variance (tolerance)").
+# Every EXIT -- a reduce, the paired flatten, the vanish flatten, the
+# sign-flip flatten, a short book's cover -- goes at HIS EXIT PRICE for
+# the token, worse by at most this much: a long book's SELL has a
+# FLOOR of his price less the tolerance (the rest at the cent ceil(his
+# price), the take ONE IOC at the lowest cent at or above the floor
+# whenever the bid is there, on the same tick, never chased past it); a
+# short book's cover a CEILING of his price plus it (close_position
+# only while the ask is at or under it). exit_terms below derives both
+# from one figure; the worker never restates it. capped_env: the
+# environment may only TIGHTEN it, to 0 (at his cent, nothing worse).
+# Book 29 that night (tsc-cfb-washst-wash total 46.5, LONG 63 sh): his
+# net flipped short at ~20:30Z, our flatten rest sat at max(his 0.4595,
+# ask) while the bid fell to 0.01 / ask 0.02, was cancelled and
+# re-quoted 14 times by TTL and never filled, the bounded take never
+# fired (the bid never came back to the rest), and the position went
+# to settlement. Under this rule it takes at 0.45+ while the bid is
+# there and, once the market has fallen, HOLDS at his cent.
+MIRROR_EXIT_TOL = capped_env("MIRROR_EXIT_TOL", 0.01, floor=0.0)
 # A vanished whale's flatten rests at his equivalent this long before
 # the slippage path (critic C16). A wait like the take's: the
 # environment may only lengthen it.
@@ -1231,7 +1306,8 @@ def keep_or_replace(order: OpenOrder, p: Plan | None, now: float,
                     ttl_s: float = MIRROR_REST_TTL_S,
                     cancel_reason: str | None = None,
                     wire: float | None | object = _FROM_PLAN,
-                    intent: str | None = None) -> str:
+                    intent: str | None = None,
+                    stands: bool = False) -> str:
     """What to do with the order already resting on this book.
 
     `intent` (P2 rung S0, brief B6) is the WIRE intent the plan would
@@ -1239,6 +1315,14 @@ def keep_or_replace(order: OpenOrder, p: Plan | None, now: float,
     compared to the resting order's own (OpenOrder.intent) when BOTH
     were read: a rest carrying another intent is not this plan's rest,
     'replace'. Either side None is not compared (every P1 caller).
+
+    `stands` (E4: an EXIT rest at his cent) turns the TTL off: a rest
+    past MIRROR_REST_TTL_S at the same side, cent and quantity is
+    'keep', because cancelling it to re-place the same cent is a
+    wasted replace (the worker names it `requote_same_wire`); every
+    other clause -- the side, the intent, the cent, the quantity, an
+    unreadable fact, a placement in the future -- decides exactly as
+    before. Entries never pass it.
 
       'keep'      same side, same cent, leaves within a share (or within
                   MIN_MOVE_FRAC of the plan's quantity), younger than
@@ -1281,7 +1365,7 @@ def keep_or_replace(order: OpenOrder, p: Plan | None, now: float,
         return "replace"
     ttl = min(ttl, float(MIRROR_REST_TTL_S))
     age = t - placed
-    if age < 0 or age >= ttl:
+    if age < 0 or (age >= ttl and stands is not True):
         return "replace"
     if (not isinstance(p.side, str) or not isinstance(order.side, str)
             or p.side not in (BUY, SELL) or p.side != order.side):
@@ -1369,6 +1453,69 @@ def take_allowed(rest_age_s: float | None, take_armed_at: float | None, now: flo
     if armed is not None and t is not None and 0.0 <= armed <= t and t - armed >= ws:
         waited = True
     return waited and at_or_through(side, bid, ask, wire)
+
+
+def exit_terms(side: str, his_px: float | None,
+               tol: float | None = None) -> dict[str, float] | None:
+    """THE EXIT'S PRICES FROM HIS EXIT PRICE (E4, owner order 2026-09-06
+    "we should exit when he exits at his price or within 1c variance
+    (tolerance)"), for the one figure the worker already hands the exit
+    plan as his level (`his_px`: his reduce fill on the token, or for a
+    short cover his buy-back in the long token's space, as _his_level
+    reads it), unrounded.
+
+      SELL (a long book's reduce or flatten):
+        px      his price
+        floor   his price - tol: the worst price the exit may fill at
+        rest    the cent the rest goes at, ceil(his price) capped at
+                0.99 (sell_wire) -- HIS cent, never max(his, ask): the
+                ask no longer lifts the rest above him
+        take    the lowest cent AT OR ABOVE the floor (sell_wire of the
+                floor, never under 0.01): the IOC's limit. The take
+                fires when the bid is at or through it
+                (at_or_through(SELL, bid, ask, take)); a SELL IOC at
+                that limit fills at the bid, at or above the floor.
+                The cent is taken ABOVE the floor, not under it: a
+                floor off a cent (his 0.4595 - 0.01 = 0.4495) floored
+                to the cent (0.44) would admit a fill 1.95c under him,
+                past the tolerance; ceiled (0.45) every fill is inside
+                it, at any precision. On a cent floor the two agree.
+      BUY (a short book's cover, in long space):
+        px      his price
+        ceiling his price + tol
+        cover   the highest cent AT OR UNDER the ceiling (buy_wire of
+                the ceiling, capped at 0.99): close_position is sent
+                only while the ask is at or under it
+                (at_or_through(BUY, bid, ask, cover)).
+
+    None when he gave no exit price -- `his_px` missing, not a number,
+    a bool, or off (0, 1) -- when the side is not BUY or SELL, or when
+    the tolerance is unreadable or negative: the rule cannot apply and
+    the worker keeps the plan's old behaviour under `exit_px_src:
+    'none'`, never a guessed level. Pure; the tolerance is a parameter
+    so the property tests sweep it, and with none given the module
+    constant is read AT CALL TIME (E4 review, LOW-6: a default bound at
+    import would neither see the environment's tightening nor a test's
+    monkeypatch through the worker)."""
+    h, tl = _num(his_px), _num(MIRROR_EXIT_TOL if tol is None else tol)
+    if h is None or not (0.0 < h < 1.0) or tl is None or tl < 0.0 or isinstance(his_px, bool):
+        return None
+    if not isinstance(side, str):
+        return None
+    if side == SELL:
+        floor = h - tl
+        take = sell_wire(max(floor, 0.01))
+        rest = sell_wire(h)
+        if take is None or rest is None:
+            return None
+        return {"px": h, "floor": floor, "rest": rest, "take": take}
+    if side == BUY:
+        ceiling = h + tl
+        cover = buy_wire(min(ceiling, 0.99))
+        if cover is None:
+            return None
+        return {"px": h, "ceiling": ceiling, "cover": cover}
+    return None
 
 
 def _int_code(v: Any) -> int | None:
@@ -2126,7 +2273,9 @@ __all__ = [
     "MIRROR_SMALL_BET_USD", "open_ratio", "step_ratio", "MIRROR_MIN_ORDER_USD",
     "MIRROR_NET_CAP_USD", "MIRROR_MAX_LIVE_BOOKS", "MIRROR_MAX_BOOKS_PER_DAY",
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
+    "MIRROR_BOOK_CONCURRENCY", "MIRROR_VENUE_CALLS_PER_TICK",
     "MIRROR_MAX_REPLACES_PER_HOUR", "MIRROR_REST_TTL_S", "MIRROR_TAKE_AFTER_S",
+    "MIRROR_EXIT_TOL", "exit_terms",
     "MIRROR_FLATTEN_REST_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FAMILIES", "FLAT_TOL_SHARES",
     "SELL_DUST_SHARES",

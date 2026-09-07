@@ -411,7 +411,7 @@ def test_memo_mutants_are_caught(monkeypatch):
 
 # ------------------------------------------ 7. the served census
 
-def test_census_prefix_and_integ_are_byte_identical_to_the_base_and_nothing_served_is_lost():
+def test_census_prefix_and_integ_are_byte_identical_to_the_base_and_nothing_served_is_lost(monkeypatch):
     import re
     import subprocess
     old = subprocess.run(["git", "show", "2dc3204:backend/sportsassets/workers/mirror_live.py"],
@@ -426,7 +426,9 @@ def test_census_prefix_and_integ_are_byte_identical_to_the_base_and_nothing_serv
     # a capped ON tick: 38 base + venue_positions + capped_tick + fills_dedup = 41.
     # The sanitizer drops exactly `fills_dedup` (last) and every key that
     # was served at 2dc3204 is still served; the marker `_truncated_keys`
-    # is new on such a tick
+    # is new on such a tick (the candidate budget is 40 since E2; the
+    # capped shape this pins is driven at the 20 it was written for)
+    monkeypatch.setattr(ml, "MAX_MARKETS_PER_TICK", 20)
     p = _pool(conds=[f"0xc{i:02d}" for i in range(25)])
     st = _tick(p, _Venue())
     assert st["capped_tick"] is True and "venue_positions" in st and list(st)[-1] == "fills_dedup"

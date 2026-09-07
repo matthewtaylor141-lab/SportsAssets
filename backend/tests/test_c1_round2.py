@@ -135,7 +135,7 @@ def _cert_env(monkeypatch):
 def _live_tick(monkeypatch, pool, venue, now=5000.0):
     from sportsassets import ratelimit
     monkeypatch.setattr(ratelimit, "_throttle", _NoThrottle())
-    monkeypatch.setattr(ml, "pace", lambda s=ms.READ_PACING_S: 0.0)
+    monkeypatch.setattr(ml, "pace", lambda s=ms.READ_PACING_S, slots=1: 0.0)     # slots: the write claim (E2)
     ml._current_stats = ml._new_stats()
     return ml._Tick(pool=pool, pmus=venue, http=_Http(), now=now, stats=ml._current_stats)
 
@@ -257,12 +257,13 @@ def test_the_first_fill_echo_verifies_or_freezes_a_grammar_book(monkeypatch):
     t = _live_tick(monkeypatch, pool, _Venue(_aec_cfb()))
     # no position yet at the venue: unverified, the book WAITS (no plan,
     # no freeze -- round 3, review 4)
-    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: {"net": 0.0, "outcome": None})
+    # _position_echo answers (echo, pages read) since E2: every page a paced venue request
+    monkeypatch.setattr(ml, "_position_echo", lambda pmus, slug: ({"net": 0.0, "outcome": None}, 1))
     assert _run(ml._grammar_fill_check(t, book)) == "wait"
     assert pool.state["mirror_grammar_echo"]["unverified"] == 1 and book["state"] == "live"
     # the venue holds Bears, +99: verified
     monkeypatch.setattr(ml, "_position_echo",
-                        lambda pmus, slug: {"net": 99.0, "outcome": "Bears", "title": "Baylor vs. Auburn"})
+                        lambda pmus, slug: ({"net": 99.0, "outcome": "Bears", "title": "Baylor vs. Auburn"}, 1))
     assert _run(ml._grammar_fill_check(t, book)) == "ok"
     st = pool.state["mirror_grammar_echo"]
     assert st["ok"] == 2 and book["id"] in st["verified"] and AEC_CFB not in st["pending"]
@@ -279,7 +280,7 @@ def test_the_first_fill_echo_verifies_or_freezes_a_grammar_book(monkeypatch):
     st["pending"][AEC_UH] = {"outcome_desc": "Bruins", "intent": LONG, "side_index": 0, "his_slug": UH}
     pool.state["mirror_grammar_echo"] = st
     monkeypatch.setattr(ml, "_position_echo",
-                        lambda pmus, slug: {"net": 50.0, "outcome": "Rainbow Warriors", "title": "x"})
+                        lambda pmus, slug: ({"net": 50.0, "outcome": "Rainbow Warriors", "title": "x"}, 1))
     assert _run(ml._grammar_fill_check(t, book2)) == "frozen"
     assert book2["state"] == "frozen" and book2["frozen_reason"] == "side_echo_mismatch"
     st = pool.state["mirror_grammar_echo"]

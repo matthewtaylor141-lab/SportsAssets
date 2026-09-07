@@ -2434,6 +2434,11 @@ def _post_only_refusal(exc: BaseException, prev_order: dict) -> dict | None:
                     "status_code": code,
                     "error": str(getattr(exc, "message", None)
                                  or exc)[:500],
+                    # the exception's type beside its text, as
+                    # close_position's raw carries it: the reader that
+                    # tells a 429 apart matches this and status_code by
+                    # name, never '429' inside the text
+                    "error_type": type(exc).__name__,
                     "body": body}}
 
 
@@ -2589,10 +2594,19 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                tif: str = "TIME_IN_FORCE_FILL_OR_KILL",
                intent: str | None = None,
                post_only: bool = False,
-               good_till: str | None = None) -> dict:
+               good_till: str | None = None,
+               paced_pair: bool = False) -> dict:
     """Preview then place a limit order. Returns the same normalized
     shape the global executor uses:
     {ok, order_id, status, fill_price, filled_shares, raw}.
+
+    paced_pair=True (the mirror lane, E2 review rounds 2-3): the caller
+    claimed a gap on the process-wide pacer before this call (the
+    preview's), and the create claims its OWN gap here
+    (venue_pace.pace), so the preview and the create land at least one
+    gap apart whatever the preview's HTTP latency. Off for every other
+    caller: the copy lane's money path never queues behind the
+    measurement pacer (venue_pace's own note).
 
     sell=True places SELL_LONG (underdog cash-out sleeve, owner directive
     2026-08-08) — the limit is then the MINIMUM acceptable price, so a
@@ -2767,6 +2781,14 @@ def submit_fok(us_market_slug: str, limit_price: float, quantity: int,
                         "raw": {"preview": preview,
                                 "expected_cost": expected_cost,
                                 "venue_cost": prev_cost}}
+        if paced_pair:
+            # the create is a request of its own: it claims its own gap
+            # on the process-wide pacer, so it lands at least one gap
+            # after the preview however long the preview's HTTP took
+            # (E2 review round 3, HIGH-1: a reserved slot recorded the
+            # create at its reserved time, not when it fired)
+            from .venue_pace import pace
+            pace()
 
     if post_only:
         # Only the post-only caller reads a 4xx as the venue's refusal;
@@ -2880,10 +2902,16 @@ def close_position(us_slug: str, *, slippage_bips: int) -> dict:
         # file: mirror books 75, 79, 109); logged here, kept on the row
         log.warning("pmus: close_position %s failed: %s: %s", us_slug,
                     type(exc).__name__, str(exc)[:200])
+        # the SDK's int status rides along so the worker's rate-limit
+        # read (_raw_rate_limit) decides by it, never by a '429' inside
+        # the text ('429 contracts exceeds the maximum order size' is a
+        # 400): E2 review round 6, LOW a4
+        code = getattr(exc, "status_code", None)
         return {"ok": False, "order_id": None, "status": "close_failed",
                 "fill_price": None, "filled_shares": 0.0,
                 "raw": {"error": str(exc)[:200], "slug": us_slug,
-                        "error_type": type(exc).__name__}}
+                        "error_type": type(exc).__name__,
+                        "status_code": code if isinstance(code, int) and not isinstance(code, bool) else None}}
     executions = (resp or {}).get("executions") or []
     filled, notional, state = 0.0, 0.0, ""
     for ex in executions:

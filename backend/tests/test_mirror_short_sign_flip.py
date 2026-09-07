@@ -13,11 +13,10 @@ both directions.
 """
 import pytest
 
-from sportsassets import live_executor as le
 from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.workers import mirror_live as ml
 from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse fixture arms every tick
-    BUY, INTENT, M, N, NOW, SELL, SHORT, SLUG, _armed, _census, _his, _kinds, _mkt, _places, _pool,
+    BUY, COVER_AT_CEILING_BIPS, INTENT, M, N, NOW, SELL, SHORT, SLUG, _armed, _census, _his, _kinds, _mkt, _places, _pool,
     _short_book, _shorts_on, _tick, _Venue,
 )
 
@@ -27,15 +26,21 @@ def test_a_long_book_flattens_on_his_flip_to_short_and_the_short_episode_opens_o
     # an open long book of 300, and his net now -300 (100 long against 400 other)
     p = _pool(fills=_his(100, other_size=400, other_px=0.72), snap={M: 100.0, N: 400.0})
     b = p.add_book(ledger=300)
-    v = _Venue(held={SLUG: 300})
+    # his equivalent is 0.28 (the other token at 0.72); the bid three
+    # cents under him is outside E4's one-cent tolerance, so the flatten
+    # RESTS at his cent (within a cent it would take at once: section 21
+    # of the worker tests, the book-29 replay)
+    v = _Venue(bid=0.26, held={SLUG: 300})
     st = _tick(p, v, http=_mkt(100.0, 400.0))
     assert _census(st, "sign_flip") == 1 and _census(st, "short_side_refused") == 0
     assert b["target"] == 0 and b["last_plan"]["sign_flip"] is True
     # the long book flattens by ITS rule: a SELL_LONG rest at his
-    # equivalent or the ask, never marketed, never a short
+    # equivalent's cent (E4; the ask no longer lifts it), never
+    # marketed past the cent, never a short
     pl = _places(v)
     assert len(pl) == 1 and pl[0][4] is True and pl[0][6] == INTENT and pl[0][3] == 300
     assert pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and "close" not in _kinds(v)
+    assert pl[0][2] == 0.28 and _census(st, "exit_out_of_tol") == 1
     o = next(iter(p.orders.values()))
     assert (o["side"], o["kind"], o["intent"]) == (SELL, "flatten_paired", "ORDER_INTENT_SELL_LONG")
     # the rest stands: the episode waits on it (orders_open), then closes
@@ -73,7 +78,7 @@ def test_a_short_book_flattens_by_close_position_on_his_flip_to_long_and_the_lon
     st = _tick(p, v)
     assert _census(st, "sign_flip") == 1 and b["target"] == 0 and b["last_plan"]["sign_flip"] is True
     # sole holder: the one proven short exit, at once
-    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v.calls and "place" not in _kinds(v)
+    assert ("close", SLUG, COVER_AT_CEILING_BIPS) in v.calls and "place" not in _kinds(v)
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
     assert b["realized_pnl"] == pytest.approx((0.32 - 0.29) * 300)
     # flat by close_position inside the tick: the venue was read at -300
@@ -100,7 +105,7 @@ def test_with_the_knob_off_a_long_book_never_flips_and_names_the_p1_refusal(monk
     monkeypatch.setattr(rules, "MIRROR_SHORTS", False)
     p = _pool(fills=_his(100, other_size=400, other_px=0.72), snap={M: 100.0, N: 400.0})
     b = p.add_book(ledger=300)
-    v = _Venue(held={SLUG: 300})
+    v = _Venue(bid=0.26, held={SLUG: 300})      # outside E4's cent of his 0.28: the flatten rests
     st = _tick(p, v, http=_mkt(100.0, 400.0))
     assert _census(st, "sign_flip") == 0 and _census(st, "short_side_refused") == 1
     assert b["target"] == 0 and "sign_flip" not in (b["last_plan"] or {})

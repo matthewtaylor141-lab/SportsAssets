@@ -82,8 +82,14 @@ def test_caps_carry_the_spec_defaults_and_reuse_the_shared_ones(monkeypatch):
     monkeypatch.delenv("MIRROR_SHORTS", raising=False)
     assert r.env_switch("MIRROR_SHORTS", True) is True
     assert r.MIRROR_SHORT_MAX_SHARES == math.inf and r._bounded(r.MIRROR_SHORT_MAX_SHARES) is None
-    assert r.MIRROR_MAX_ORDER_OPS_PER_TICK == 6 and r.MIRROR_MAX_REPLACES_PER_HOUR == 12
-    assert r.MIRROR_REST_TTL_S == 600.0 and r.MIRROR_TAKE_AFTER_S == 120.0
+    # E2 (2026-09-06): 20 ops a tick (was 6); the walk's concurrency and
+    # the venue-call soft guard beside them. The take wait is 0 since the
+    # E4 addendum ("Remove the 20 second wait on entires too"; 20 s under
+    # E2, 120 s before) and the exit tolerance one cent (E4)
+    assert r.MIRROR_MAX_ORDER_OPS_PER_TICK == 20 and r.MIRROR_MAX_REPLACES_PER_HOUR == 12
+    assert r.MIRROR_REST_TTL_S == 600.0 and r.MIRROR_TAKE_AFTER_S == 0.0
+    assert r.MIRROR_EXIT_TOL == 0.01
+    assert r.MIRROR_BOOK_CONCURRENCY == 6 and r.MIRROR_VENUE_CALLS_PER_TICK == 80
     assert r.MIRROR_FLATTEN_REST_S == 300.0 and r.MIRROR_FLAT_CLOSE_S == 3600.0
     assert r.MIRROR_DRIFT_MAX == 0.05
     assert r.MIRROR_FROZEN_ALERT_S == 600.0 and r.MIRROR_FROZEN_NAME_TICKS == 3
@@ -264,12 +270,18 @@ def test_env_override_only_raises_a_wait(monkeypatch):
     monkeypatch.delenv("MIRROR_TEST_WAIT")
     assert r.min_wait_env("MIRROR_TEST_WAIT", 120.0) == 120.0
     # the module constants go through the wait helper: a shortening is
-    # ignored at import, a lengthening is honoured
-    monkeypatch.setenv("MIRROR_TAKE_AFTER_S", "30")
+    # ignored at import, a lengthening is honoured (the take's default
+    # is 0 since the E4 addendum, so "10" LENGTHENS it and "-1" is
+    # ignored; the flatten rest's 300 s ignores "60")
+    monkeypatch.setenv("MIRROR_TAKE_AFTER_S", "10")
     monkeypatch.setenv("MIRROR_FLATTEN_REST_S", "60")
     try:
         mod = importlib.reload(r)
-        assert mod.MIRROR_TAKE_AFTER_S == 120.0 and mod.MIRROR_FLATTEN_REST_S == 300.0
+        assert mod.MIRROR_TAKE_AFTER_S == 10.0 and mod.MIRROR_FLATTEN_REST_S == 300.0
+        monkeypatch.setenv("MIRROR_TAKE_AFTER_S", "-1")
+        assert importlib.reload(r).MIRROR_TAKE_AFTER_S == 0.0
+        monkeypatch.setenv("MIRROR_TAKE_AFTER_S", "30")
+        assert importlib.reload(r).MIRROR_TAKE_AFTER_S == 30.0
         monkeypatch.setenv("MIRROR_TAKE_AFTER_S", "600")
         monkeypatch.setenv("MIRROR_FLATTEN_REST_S", "900")
         mod = importlib.reload(r)
@@ -281,7 +293,7 @@ def test_env_override_only_raises_a_wait(monkeypatch):
         monkeypatch.delenv("MIRROR_TAKE_AFTER_S")
         monkeypatch.delenv("MIRROR_FLATTEN_REST_S")
         importlib.reload(r)
-    assert r.MIRROR_TAKE_AFTER_S == 120.0 and r.MIRROR_FLATTEN_REST_S == 300.0
+    assert r.MIRROR_TAKE_AFTER_S == 0.0 and r.MIRROR_FLATTEN_REST_S == 300.0
     # the source records the decision beside the two constants
     src = inspect.getsource(r)
     assert 'min_wait_env("MIRROR_TAKE_AFTER_S"' in src
@@ -294,7 +306,7 @@ def test_a_safe_tick_can_still_cancel_and_a_rest_still_lives(monkeypatch):
     # the ops budget floors at 1 (a cancel-only tick must write once)
     # and the rest TTL at 30 s (an env 0 must not re-place every tick)
     for ops, ttl, want_ops, want_ttl in (("0", "0", 1, 30.0), ("-3", "-1", 1, 30.0),
-                                          ("3", "60", 3, 60.0), ("99", "9999", 6, 600.0)):
+                                          ("3", "60", 3, 60.0), ("99", "9999", 20, 600.0)):
         monkeypatch.setenv("MIRROR_MAX_ORDER_OPS_PER_TICK", ops)
         monkeypatch.setenv("MIRROR_REST_TTL_S", ttl)
         try:
@@ -305,7 +317,7 @@ def test_a_safe_tick_can_still_cancel_and_a_rest_still_lives(monkeypatch):
             monkeypatch.delenv("MIRROR_MAX_ORDER_OPS_PER_TICK")
             monkeypatch.delenv("MIRROR_REST_TTL_S")
             importlib.reload(r)
-    assert r.MIRROR_MAX_ORDER_OPS_PER_TICK == 6 and r.MIRROR_REST_TTL_S == 600.0
+    assert r.MIRROR_MAX_ORDER_OPS_PER_TICK == 20 and r.MIRROR_REST_TTL_S == 600.0
 
 
 def test_the_rules_module_is_pure():
@@ -774,6 +786,100 @@ def test_take_only_after_the_wait_and_at_or_through():
     assert r.at_or_through("SOMETHING", 0.5, 0.5, 0.5) is False
 
 
+def test_exit_terms_price_every_exit_off_his_price_within_the_tolerance():
+    """E4 (owner order 2026-09-06 "exit when he exits at his price or
+    within 1c variance"). A long book's SELL: the floor is his price
+    less the tolerance, the rest cent ceil(his), the take cent the
+    LOWEST cent at or above the floor (never a cent under it: his
+    0.4595 - 0.01 = 0.4495 is 0.45, not 0.44). A short's cover: the
+    ceiling his price plus it, the cover cent the highest at or under
+    the ceiling. No price of his, a side that is neither, a bad
+    tolerance: None, never a guess."""
+    assert r.MIRROR_EXIT_TOL == 0.01
+    ex = r.exit_terms(r.SELL, 0.4595)
+    assert ex == {"px": 0.4595, "floor": pytest.approx(0.4495), "rest": 0.46, "take": 0.45}
+    ex = r.exit_terms(r.SELL, 0.31)
+    assert ex["floor"] == pytest.approx(0.30) and ex["rest"] == 0.31 and ex["take"] == 0.30
+    assert r.exit_terms(r.SELL, 0.46)["take"] == 0.45 and r.exit_terms(r.SELL, 0.46)["rest"] == 0.46
+    assert r.exit_terms(r.SELL, 0.45)["take"] == 0.44
+    # a cent floor and an off-cent floor: the take is never under the floor
+    for his_c in range(2, 100):
+        for frac in (0.0, 0.0025, 0.005, 0.0095):
+            his = his_c / 100.0 + frac
+            if his >= 1.0:
+                continue
+            ex = r.exit_terms(r.SELL, his)
+            assert ex is not None, his
+            assert ex["take"] >= ex["floor"] - 1e-9 and ex["take"] <= ex["rest"], his
+            assert ex["rest"] >= min(his, 0.99) - 1e-9 and ex["take"] - ex["floor"] < 0.01 + 1e-9, his
+            # the take fires only with the bid at or over the take cent
+            assert r.at_or_through(r.SELL, ex["take"], 0.99, ex["take"]) is True
+            assert r.at_or_through(r.SELL, round(ex["take"] - 0.01, 2), 0.99, ex["take"]) is False
+    # the ladder's edges
+    assert r.exit_terms(r.SELL, 0.015) == {"px": 0.015, "floor": pytest.approx(0.005), "rest": 0.02, "take": 0.01}
+    assert r.exit_terms(r.SELL, 0.995)["rest"] == 0.99 and r.exit_terms(r.SELL, 0.995)["take"] == 0.99
+    # the short cover
+    cv = r.exit_terms(r.BUY, 0.30)
+    assert cv == {"px": 0.30, "ceiling": pytest.approx(0.31), "cover": 0.31}
+    assert r.exit_terms(r.BUY, 0.4595)["cover"] == 0.46 and r.exit_terms(r.BUY, 0.46)["cover"] == 0.47
+    assert r.exit_terms(r.BUY, 0.985)["cover"] == 0.99
+    assert r.at_or_through(r.BUY, 0.29, 0.31, cv["cover"]) is True
+    assert r.at_or_through(r.BUY, 0.29, 0.32, cv["cover"]) is False
+    # the tolerance is a parameter (the environment may only tighten it)
+    assert r.exit_terms(r.SELL, 0.31, tol=0.0) == {"px": 0.31, "floor": 0.31, "rest": 0.31, "take": 0.31}
+    assert r.exit_terms(r.SELL, 0.31, tol=0.005)["take"] == 0.31 and r.exit_terms(r.SELL, 0.31, tol=0.02)["take"] == 0.29
+    # nothing to price off, or nothing to price with: None
+    for bad in (None, 0.0, 1.0, 1.5, -0.3, True, False, "0.31", math.nan, math.inf):
+        assert r.exit_terms(r.SELL, bad) is None, bad
+        assert r.exit_terms(r.BUY, bad) is None, bad
+    for bad_tol in (-0.01, math.nan, "0.01", True):
+        assert r.exit_terms(r.SELL, 0.31, tol=bad_tol) is None, bad_tol
+    # no tolerance given: the module constant, read at call time (E4 review LOW-6)
+    assert r.exit_terms(r.SELL, 0.31, tol=None) == r.exit_terms(r.SELL, 0.31)
+    assert inspect.signature(r.exit_terms).parameters["tol"].default is None
+    assert r.exit_terms("SOMETHING", 0.31) is None and r.exit_terms(None, 0.31) is None
+
+
+def test_the_exit_tolerance_is_read_at_call_time(monkeypatch):
+    """LOW-6: a tightened constant reaches every caller that passes no
+    tolerance -- the worker's -- without a reload."""
+    monkeypatch.setattr(r, "MIRROR_EXIT_TOL", 0.0)
+    assert r.exit_terms(r.SELL, 0.31) == {"px": 0.31, "floor": 0.31, "rest": 0.31, "take": 0.31}
+    monkeypatch.setattr(r, "MIRROR_EXIT_TOL", 0.02)
+    assert r.exit_terms(r.SELL, 0.31)["take"] == 0.29 and r.exit_terms(r.BUY, 0.31)["cover"] == 0.33
+
+
+def test_an_exit_rest_at_his_cent_stands_past_the_ttl_and_every_other_clause_still_replaces():
+    """keep_or_replace's `stands` (E4 rule 3): a rest past
+    MIRROR_REST_TTL_S at the same side, cent and quantity is 'keep',
+    not the TTL's 'replace'; the side, the intent, the cent, the
+    quantity, an unreadable fact and a placement in the future decide
+    exactly as before. Entries (stands False) keep the TTL."""
+    ttl = r.MIRROR_REST_TTL_S
+    o = r.OpenOrder(r.SELL, 0.31, 200, 200, placed_at=1000.0)
+    p = mi.Plan(r.SELL, 200, 0.31, "reduce toward target")
+    assert r.keep_or_replace(o, p, now=1000.0 + ttl, wire=0.31) == "replace"
+    assert r.keep_or_replace(o, p, now=1000.0 + ttl, wire=0.31, stands=True) == "keep"
+    assert r.keep_or_replace(o, p, now=1000.0 + 50 * ttl, wire=0.31, stands=True) == "keep"
+    assert r.keep_or_replace(o, p, now=1000.0 + ttl - 1, wire=0.31, stands=True) == "keep"
+    # every other clause, past the TTL, still replaces
+    late = 1000.0 + ttl
+    assert r.keep_or_replace(o, p, now=late, wire=0.32, stands=True) == "replace"
+    assert r.keep_or_replace(o, mi.Plan(r.SELL, 100, 0.31, "x"), now=late, wire=0.31, stands=True) == "replace"
+    assert r.keep_or_replace(o, mi.Plan(r.BUY, 200, 0.31, "x"), now=late, wire=0.31, stands=True) == "replace"
+    so = r.OpenOrder(r.SELL, 0.31, 200, 200, 1000.0, "ORDER_INTENT_SELL_LONG")
+    assert r.keep_or_replace(so, p, now=late, wire=0.31, intent="ORDER_INTENT_BUY_SHORT", stands=True) == "replace"
+    assert r.keep_or_replace(so, p, now=late, wire=0.31, intent="ORDER_INTENT_SELL_LONG", stands=True) == "keep"
+    assert r.keep_or_replace(r.OpenOrder(r.SELL, 0.31, 200, None, 1000.0), p, late, wire=0.31, stands=True) == "replace"
+    assert r.keep_or_replace(r.OpenOrder(r.SELL, 0.31, 200, 200, late + 1), p, late, wire=0.31, stands=True) == "replace"
+    assert r.keep_or_replace(o, p, now=late, wire=None, stands=True) == "no_price"
+    assert r.keep_or_replace(o, p, now=late, wire=0.31, cancel_reason="closing", stands=True) == "closing"
+    # only the bool True stands: anything else is the TTL as before
+    for not_true in (1, "yes", None, 1.0):
+        assert r.keep_or_replace(o, p, now=late, wire=0.31, stands=not_true) == "replace", not_true
+    assert "stands" in inspect.signature(r.keep_or_replace).parameters
+
+
 def test_take_property_never_pays_above_him():
     # for every wire and ask, allowed implies ask <= wire (his level or better)
     for wire_c in range(1, 100):
@@ -801,17 +907,24 @@ def test_take_inputs_fail_closed_and_the_wait_cannot_be_shortened():
         assert r.take_allowed(bad, None, 1000.0, 0.46, 0.47, 0.47, r.BUY) is False, bad
         assert r.take_allowed(None, bad, 1000.0, 0.46, 0.47, 0.47, r.BUY) is False, bad
         assert r.take_allowed(None, 0.0, bad, 0.46, 0.47, 0.47, r.BUY) is False, bad
-    # wait_s can only lengthen: a caller's 1 s is still the constant
+    # wait_s can only lengthen: the effective wait is max(wait_s, the
+    # constant) -- at the constant's 0 (E4 addendum) a caller's 1 s
+    # LENGTHENS to 1 s, and a caller's 0 or an unreadable wait_s is the
+    # constant; a rest of age 0 (a plan with no rest yet) has waited it
     assert r.take_allowed(wait - 1, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=1) is False
-    assert r.take_allowed(wait, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=1) is True
+    assert r.take_allowed(max(wait, 1.0) - 0.5, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=1) is False
+    assert r.take_allowed(max(wait, 1.0), None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=1) is True
     assert r.take_allowed(wait, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=0) is True
+    assert r.take_allowed(0.0, None, 1000.0, 0.46, 0.47, 0.47, r.BUY) is (wait <= 0.0)
     for bad in (None, math.nan, True, "1", -5):
         assert r.take_allowed(wait, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=bad) is True, bad
         assert r.take_allowed(wait - 1, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=bad) is False, bad
-    # and a longer wait is honoured
-    assert r.take_allowed(wait, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=wait * 2) is False
-    assert r.take_allowed(wait * 2, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=wait * 2) is True
-    assert r.take_allowed(None, 0.0, wait * 2 - 1, 0.46, 0.47, 0.47, r.BUY, wait_s=wait * 2) is False
+    # and a longer wait is honoured (twice the constant, or 2 s at the
+    # constant's 0 since the E4 addendum)
+    longer = max(wait, 1.0) * 2
+    assert r.take_allowed(wait, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=longer) is False
+    assert r.take_allowed(longer, None, 1000.0, 0.46, 0.47, 0.47, r.BUY, wait_s=longer) is True
+    assert r.take_allowed(None, 0.0, longer - 1, 0.46, 0.47, 0.47, r.BUY, wait_s=longer) is False
 
 
 def test_take_arms_only_on_a_crossing_refusal():

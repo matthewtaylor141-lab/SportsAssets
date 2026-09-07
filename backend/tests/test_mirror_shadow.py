@@ -832,7 +832,7 @@ def test_the_measurement_pacer_is_one_gate_for_both_workers(monkeypatch):
     from sportsassets.workers import price_path as ppw
     assert ms.pace is vp.pace and ppw.pace is vp.pace, "one process-wide gate, not one per worker"
     assert "pace(READ_PACING_S)" in inspect.getsource(ms._paced_bbo)
-    assert "pace(READ_PACING_S)" in inspect.getsource(ms.account_positions)
+    assert "pace(READ_PACING_S)" in inspect.getsource(ms.account_positions_walk)   # the walk account_positions wraps (E2)
     assert "pace(READ_PACING_S)" in inspect.getsource(ppw._paced_ask)
     slept = []
     clock = {"t": 100.0}
@@ -844,6 +844,7 @@ def test_the_measurement_pacer_is_one_gate_for_both_workers(monkeypatch):
     monkeypatch.setattr(vp.time, "monotonic", lambda: clock["t"])
     monkeypatch.setattr(vp.time, "sleep", _sleep)
     monkeypatch.setattr(vp, "_last", 0.0)
+    monkeypatch.setattr(vp, "_penalty_until", 0.0)     # the 429 circuit off: the plain gap is measured (E2)
     assert vp.pace(0.35) == 0.0                 # first read: no wait
     clock["t"] += 0.10
     assert round(vp.pace(0.35), 3) == 0.25      # 0.10 s later: wait the rest of the gap
@@ -1649,7 +1650,7 @@ def test_no_shadow_knob_can_be_loosened_from_a_shell(monkeypatch, request):
         "MIRROR_JUDGE_TTL_S": ("JUDGE_TTL_S", 600.0),
         "MIRROR_LOOKBACK_H": ("LOOKBACK_H", 6.0),
         "MIRROR_RATIO_DAYS": ("RATIO_DAYS", 30),
-        "MIRROR_MAX_MARKETS": ("MAX_MARKETS_PER_TICK", 20),
+        "MIRROR_MAX_MARKETS": ("MAX_MARKETS_PER_TICK", 20),      # the shadow's own 20; the live lane's 40 is mirror_live's (E2)
         # the exit leg's own two bounds (A3): a longer window and a
         # bigger market cap are both MORE reading, so both tighten only
         "MIRROR_EXIT_WINDOW_H": ("EXIT_WINDOW_H", 24.0),
@@ -1837,6 +1838,13 @@ def test_the_exit_leg_records_his_reduction_and_what_the_rule_would_have_done(mo
     assert d["exit_plan"] == "rest" and d["exit_side"] == "SELL_LONG"
     assert d["exit_qty"] == 66 and d["exit_px"] == 0.32
     assert d["exit_at_his_level"] is True and d["exit_marketable_now"] is False
+    # the live worker's exit prices beside the plan's (E4): his 0.32 less
+    # the 1c tolerance is the floor, the live rest goes at his cent and
+    # its IOC at the lowest cent at or above the floor
+    assert d["exit_floor"] == 0.31 and d["exit_rest_px"] == 0.32 and d["exit_take_px"] == 0.31
+    assert "exit_floor" not in ms.exit_leg({"kind": "reduced", "move": "m", "at": 1.0, "size": 1.0,
+                                            "px_equiv": 0.3, "complement_px": 0.7, "net_before": 1.0,
+                                            "net_after": 0.0}, 1.0, 1.0, 0, ms.mi.Plan("SELL_LONG", 1, 0.3, "r"), None)
     # ... and it is the row's OWN plan, named -- not a second arithmetic
     assert (row["would_side"], row["would_qty"], row["would_px"]) == ("SELL_LONG", 66, 0.32)
     # the exit leg costs no venue read at all: one BBO for the market

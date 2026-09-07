@@ -481,6 +481,9 @@ def test_terminal_candidates_are_memoised_so_the_open_one_gets_a_slot(monkeypatc
 
     monkeypatch.setattr(ms, "map_market", _map)
     monkeypatch.setattr(ml, "_terminal_until", {})
+    # the walk's geometry this test is about: 20 slots (the default is
+    # 40 since E2, 2026-09-06; the memo's rule is the same at either)
+    monkeypatch.setattr(ml, "MAX_MARKETS_PER_TICK", 20)
     p = _pool(conds=exp + [CID])
     v = _Venue(states={slugs[c]: "MARKET_STATE_EXPIRED" for c in exp})
     st1 = _tick(p, v)
