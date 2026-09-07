@@ -340,6 +340,107 @@ def _bounded(cap: Any) -> int | None:
 MIRROR_NET_CAP_FLOOR_USD = 1.0
 MIRROR_NET_CAP_USD = capped_env("MIRROR_NET_CAP_USD", MARKET_NET_CAP_USD,
                                 floor=MIRROR_NET_CAP_FLOOR_USD)
+
+
+# THE CAP IS PER GAME, ACROSS EVERY MARKET OF THE GAME (E1, owner orders
+# 2026-09-06 ~14:00Z "a hard cap of no single event having more than
+# $2.5k on it ... this limitation should never force us to decline any
+# of the possible copies" and ~22:3xZ "I just want to make sure the per
+# game cap is at 2500 per game (never more)"). Each market of a game --
+# the moneyline per team, the draw, every total line, btts, the spreads
+# -- is its own book, and MIRROR_NET_CAP_USD applied per book let a
+# game with six markets carry $15,000 (Espanyol/Sevilla ~$2,347 across
+# five books on the night of the order, under the line by luck). The
+# three pure readings below give the worker the per-game figure:
+#   book_exposure  dollars at risk AT COST on one book -- ledger x
+#                  avg_cost on a long, |ledger| x (1 - avg_cost) (the
+#                  collateral) on a short, mirror-pnl's `open_cost` --
+#                  plus the resting BUY-side notional of its open
+#                  increase (money that can still fill). avg_cost NULL
+#                  on a held book reads the MARK (more exposure counted,
+#                  never less); nothing readable is None
+#   game_room      MIRROR_NET_CAP_USD less the OTHER books' exposure of
+#                  the game, clamped to [0, cap]; an unreadable sum is
+#                  no room (fail closed)
+#   game_capped    the target once the room is applied: an INCREASE is
+#                  sized at the room -- SCALED, never refused -- and
+#                  with no room it is at most what the book holds (an
+#                  increase of 0, `game_cap_full`; `game_unreadable`
+#                  when the game could not be read); a reduce or a
+#                  flatten is never touched: the cap is not a reason to
+#                  sell. The room is dollars AT COST: the worker hands
+#                  mi.target_shares the held shares at the MARK plus
+#                  what the room leaves after the book's own held cost,
+#                  so the increase costs at most that (the per-market
+#                  cap keeps its at-the-mark reading, unchanged)
+# The game is the game_key ALONE -- every whale's books of one game
+# share the one cap ("no single EVENT"). A book with no game_key is
+# its own game (the per-market cap as before). The worker walks games
+# oldest-touched first and a game's books in one fixed order (book id
+# ascending), and counts a book sized this tick at its new target, so
+# the room is consumed deterministically inside the tick.
+
+def book_exposure(ledger_net: Any, avg_cost: Any, mark: Any, intent: Any = None,
+                  resting_usd: Any = 0.0) -> float | None:
+    """Dollars at risk at cost on one book (see the block above): the
+    held leg at its average cost -- the mark when the cost is unreadable
+    -- plus `resting_usd`, the open increase's unfilled notional. The
+    short leg is the book whose ledger is negative or whose intent is
+    BUY_SHORT; its cost a share is 1 - price. None when the ledger, the
+    resting figure, or (on a held book) both the cost and the mark are
+    unreadable, or the price is off the ladder: a figure nobody can read
+    is no figure, and the caller treats None as no room."""
+    n = _num(ledger_net)
+    rest = _num(resting_usd)
+    if n is None or rest is None or rest < 0:
+        return None
+    held = abs(n)
+    if held < FLAT_TOL_SHARES:
+        return round(rest, 4)
+    px = _num(avg_cost)
+    if px is None:
+        px = _num(mark)
+    if px is None or not (0.0 < px < 1.0):
+        return None
+    short = n < 0 or is_short(intent)
+    return round(held * ((1.0 - px) if short else px) + rest, 4)
+
+
+def game_room(other_exposure: Any, cap_usd: Any = None) -> float:
+    """The dollars a game has left for one of its books: cap less the
+    exposure of the game's OTHER books, clamped to [0, cap]. `cap_usd`
+    None is MIRROR_NET_CAP_USD (read at call time); a cap at or under
+    zero, or an unreadable exposure, is no room -- 0, fail closed."""
+    cap = _num(MIRROR_NET_CAP_USD if cap_usd is None else cap_usd)
+    if cap is None or cap <= 0:
+        return 0.0
+    e = _num(other_exposure)
+    if e is None or e < 0:
+        return 0.0
+    return round(min(cap, max(0.0, cap - e)), 4)
+
+
+def game_capped(full: int, room_target: int | None, ledger: Any,
+                short: bool) -> tuple[int, str | None]:
+    """(target, name): `full` is the per-market target as today,
+    `room_target` the same arithmetic at cap min(room, per-market cap)
+    -- None when the room is 0 -- and `ledger` the book's held shares.
+    Only an INCREASE (away from zero on the book's own leg: above the
+    ledger on a long book, below it on a short one) is touched; a
+    reduce, a flatten or an on-target book keeps `full` (name None).
+    An increase the room still admits past the ledger is the room
+    target (`game_cap_scaled` when that is under `full`, None when the
+    room did not bind); one the room does not admit is the ledger
+    itself -- an increase of 0, `game_cap_full` -- and NEVER less."""
+    led = int(_num(ledger) or 0)
+    increasing = (full < led) if short else (full > led)
+    if not increasing:
+        return int(full), None
+    if room_target is not None:
+        rt = int(room_target)
+        if (rt < led) if short else (rt > led):
+            return rt, (None if rt == int(full) else "game_cap_scaled")
+    return led, "game_cap_full"
 # Blast radius. NO COUNT CAP on books, live or opened per day (owner
 # order 2026-09-06 13:36Z, verbatim: "I don't want to cap books opened
 # at all. I want max trade on one side of an event to be $1000 between

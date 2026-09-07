@@ -1020,6 +1020,7 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_last_whales", [])
     monkeypatch.setattr(ml, "_unmapped_until", {})
     monkeypatch.setattr(ml, "_terminal_until", {})     # D1: the terminal memo, same shape
+    monkeypatch.setattr(ml, "_game_full_until", {})    # E1: the full-game memo, by game key
     monkeypatch.setattr(ml, "_BOOK_LOCKS", {})
     monkeypatch.setattr(ms, "_ratio_cache", {"at": 0.0, "by_whale": {}})
     monkeypatch.setattr(ms, "_unmapped_until", {})
@@ -4513,7 +4514,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-16:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-20:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4521,9 +4522,13 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "grammar_echo_unverified", "grammar_echo_ok", "side_echo_mismatch",
                           # the copy lane's soccer floor, lifted for the mirror (owner order)
                           "soccer_floor_lifted",
+                          # E1: the per-game cap's names -- scaled, full, the game
+                          # unreadable, a candidate skipped by the full-game memo --
+                          # inserted before the pinned last key (all past the served prefix)
+                          "game_cap_scaled", "game_cap_full", "game_unreadable", "cand_game_full_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-17] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-21] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -6181,6 +6186,578 @@ def test_the_soccer_floor_is_lifted_for_a_mirror_book_and_counted(monkeypatch):
     monkeypatch.setattr(copy_sports, "copy_verdict", lambda *a, **k: "sport_halted")
     assert ml._mirror_cell("rn1", "sea-juv-mil-2026-09-06-juv", 0.2) == "sport_halted"
     ml._current_stats = None
+
+
+# ------------------------------------ 19. the cap is PER GAME (E1, 2026-09-06)
+#
+# Owner, ~14:00Z: "Just trade 10% of what he puts on everything he takes
+# (with a hard cap of no single event having more than $2.5k on it) this
+# limitation should never force us to decline any of the possible
+# copies"; 22:3xZ: "I just want to make sure the per game cap is at 2500
+# per game (never more)". Two books of the fixture GAME: A on another
+# market of it (its own tokens, its own fills, on target at its ratio so
+# it holds still), B on the fixture market. The venue quotes 0.49/0.51
+# on every slug, so the mark is 0.50 everywhere.
+
+GAME_SLUG_A = "tsc-atp-branak-alemic-2026-09-02-o22pt5"     # the same game as SLUG
+OTHER_GAME_SLUG = "aec-atp-branak-alemic-2026-09-03"         # another date: another game
+CID_A = "0xgame-a"
+LA, OA = "tokLA", "tokOA"
+
+
+def _game_world(monkeypatch, his_b=30000.0, b_ledger=0, b_ratio=0.10, a_ledger=3600, a_avg=0.50,
+                a_net=None, a_ratio=0.5, a_slug=GAME_SLUG_A, a_short=False, b_first=False, **a_over):
+    """(pool, book A, book B, venue, http). A holds `a_ledger` at
+    `a_avg` and his net on A's market is `a_net` (default: the ledger
+    over A's ratio, so A is on target and places nothing; the ratio is
+    0.5, not 1.0, so the small-bet step never re-rates it); B holds
+    `b_ledger` against his `his_b` shares of M at 0.50. A gets the
+    lower id (walked first) unless `b_first`."""
+    _rails_2026_09_06(monkeypatch)
+    a_net = float(a_ledger) / a_ratio if a_net is None else float(a_net)
+    fills = _his(his_b, long_px=0.50)
+    if a_short:
+        _shorts_on(monkeypatch)
+        fills += [_fill(LA, "BUY", 100.0, 0.28, NOW - 2500), _fill(OA, "BUY", 100.0 - a_net, 0.72, NOW - 2400)]
+        snap = {M: his_b, N: 0.0, LA: 100.0, OA: 100.0 - a_net}
+    else:
+        fills.append(_fill(LA, "BUY", a_net, 0.50, NOW - 2500))
+        snap = {M: his_b, N: 0.0, LA: a_net, OA: 0.0}
+    p = _pool(fills=fills, snap=snap)
+    p.markets[CID_A] = {"closed": False, "resolved": False, "resolved_prices": None}
+    p.token_index.update({LA: 1, OA: 0})
+    p.token_cid.update({LA: CID_A, OA: CID_A})
+    over = {"condition_id": CID_A, "us_market_slug": a_slug, "long_asset": LA, "other_asset": OA,
+            "game_key": le._us_game_key(a_slug), **a_over}
+    b = p.add_book(ledger=b_ledger, ratio=b_ratio, avg_cost=0.50) if b_first else None
+    if a_short:
+        a = _short_book(p, ledger=a_ledger, avg=a_avg, ratio=a_ratio, **over)
+        p.rows[a["standing_row_id"]].update(asset=OA, us_market_slug=a_slug, condition_id=CID_A)
+    else:
+        a = p.add_book(ledger=a_ledger, ratio=a_ratio, avg_cost=a_avg, **over)
+    if b is None:
+        b = p.add_book(ledger=b_ledger, ratio=b_ratio, avg_cost=0.50)
+    rows = [{"conditionId": CID, "asset": M, "size": his_b}, {"conditionId": CID, "asset": N, "size": 0},
+            {"conditionId": CID_A, "asset": LA, "size": snap[LA]},
+            {"conditionId": CID_A, "asset": OA, "size": snap[OA]}]
+    v = _Venue(bid=0.49, ask=0.51, held={a_slug: a_ledger, SLUG: b_ledger})
+    return p, a, b, v, _Http(rows=rows)
+
+
+def test_the_cap_is_per_game_a_second_market_is_scaled_to_what_the_game_has_left(monkeypatch):
+    """(a) A holds 3,600 @ 0.50 = $1,800 at cost on the total line; B's
+    10% target on the moneyline is 3,000 sh = $1,500 at the mark. The
+    game has $700 left, so B is sized at $700 / 0.50 = 1,400 sh --
+    scaled, never refused -- named `game_cap_scaled`, the plan carrying
+    the room and the exposure it read; A (walked first, id order) read
+    the whole $2,500 with B flat. The shadow, at the same net, is not
+    a disagreement: the check compares at the cap B was sized at."""
+    p, a, b, v, http = _game_world(monkeypatch)
+    p.shadow.append(_shadow_row(3000, 0.10, 30000.0))
+    st = _tick(p, v, http=http)
+    assert a["target"] == 3600 and a["last_plan"]["game_room"] == 2500.0
+    assert a["last_plan"]["game_exposure"] == 0.0 and "game_cap" not in a["last_plan"]
+    assert b["target"] == 1400 and b["last_plan"]["game_cap"] == "game_cap_scaled"
+    assert b["last_plan"]["game_room"] == 700.0 and b["last_plan"]["game_exposure"] == 1800.0
+    assert b["last_plan"]["target_raw"] == 3000.0, "E5: the plan keeps the unclamped arithmetic"
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.49, 1400, False), pl
+    assert _census(st, "game_cap_scaled") == 1 and _census(st, "game_cap_full") == 0
+    assert _census(st, "shadow_live_disagree") == 0 and _census(st, "shadow_check_skipped") == 0
+    assert "game_cap_scaled" in ml.CENSUS_KEYS and "game_cap_full" in ml.CENSUS_KEYS
+    assert ml.CENSUS_KEYS[-1] == "cand_terminal_skipped"
+
+
+def test_a_short_books_collateral_counts_against_its_game(monkeypatch):
+    """(b) A is SHORT 2,500 of a 0.72 contract: $0.28 a share of
+    collateral, $700 at cost. B's 10% of 40,000 is 4,000 sh = $2,000 at
+    the mark; the game has $1,800 left: 3,600 sh."""
+    p, a, b, v, http = _game_world(monkeypatch, his_b=40000.0, a_ledger=-2500, a_avg=0.72, a_short=True)
+    st = _tick(p, v, http=http)
+    assert a["target"] == -2500 and a["ledger_net"] == -2500, "A holds still"
+    assert b["last_plan"]["game_exposure"] == pytest.approx(700.0)
+    assert b["last_plan"]["game_room"] == pytest.approx(1800.0) and b["target"] == 3600
+    assert _places(v)[-1][1:5] == (SLUG, 0.49, 3600, False)
+    assert _census(st, "game_cap_scaled") == 1
+    # the reading itself: a short's exposure is its collateral
+    assert rules.book_exposure(-2500, 0.72, 0.50, SHORT) == pytest.approx(700.0)
+    assert rules.book_exposure(-2500, 0.72, 0.50, INTENT) == pytest.approx(700.0), "a negative ledger IS the short leg"
+
+
+def test_no_room_holds_the_book_at_what_it_has_and_never_sells(monkeypatch):
+    """(c) A holds 5,000 @ 0.50 = the whole $2,500. B holds 200 and his
+    net says 4,000: the target is 200 -- the increase is 0, named
+    `game_cap_full` -- not 0 and not a reduce; nothing is placed."""
+    p, a, b, v, http = _game_world(monkeypatch, his_b=40000.0, b_ledger=200, a_ledger=5000)
+    st = _tick(p, v, http=http)
+    assert b["target"] == 200 and b["last_plan"]["game_cap"] == "game_cap_full"
+    assert b["last_plan"]["game_room"] == 0.0 and b["last_plan"]["game_exposure"] == 2500.0
+    assert b["last_plan"]["target_raw"] == 4000.0
+    assert not _places(v) and b["last_plan"]["reason"] == "on target"
+    assert _census(st, "game_cap_full") == 1 and _census(st, "game_cap_scaled") == 0
+    assert _census(st, "shadow_live_disagree") == 0
+
+
+def test_a_reduce_on_a_game_over_the_cap_still_runs(monkeypatch):
+    """(d) A holds the whole $2,500; B holds 500 and his net says 300.
+    The cap is not a reason to sell, and not a reason to keep either:
+    the reduce of 200 rests as it always did, unnamed."""
+    p, a, b, v, http = _game_world(monkeypatch, his_b=3000.0, b_ledger=500, a_ledger=5000)
+    st = _tick(p, v, http=http)
+    assert b["target"] == 300 and "game_cap" not in b["last_plan"]
+    assert b["last_plan"]["game_room"] == 0.0
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][1] == SLUG and pl[0][3] == 200 and pl[0][4] is True, pl
+    assert _census(st, "game_cap_full") == 0 and _census(st, "game_cap_scaled") == 0
+    # and a flatten: his net gone to 0 on B with the game full
+    p2, a2, b2, v2, http2 = _game_world(monkeypatch, his_b=0.0, b_ledger=500, a_ledger=5000)
+    _tick(p2, v2, http=http2)
+    assert b2["target"] == 0 and "game_cap" not in b2["last_plan"]
+    assert any(c[1] == SLUG and c[3] == 500 and c[4] is True for c in _places(v2))
+
+
+def test_a_resting_buy_counts_its_unfilled_notional_against_the_game(monkeypatch):
+    """(e) A is flat with a 3,600-share BUY resting at 0.49 that its
+    plan keeps: $1,764 that can fill. B, walked FIRST (A not yet sized
+    this tick), reads it off the rest: $736 of room, 1,472 sh -- and A,
+    walked next, reads B's $736 and is itself re-sized to the $1,764
+    left, 3,528 sh (the game never over $2,500 at the mark). Walked
+    after A, B reads A's sized figure instead -- the larger of the rest
+    and A's increase at the mark, $1,800 -- and gets 1,400."""
+    p, a, b, v, http = _game_world(monkeypatch, a_ledger=0, a_net=7200.0, b_first=True)
+    p.add_order(a, side=BUY, wire=0.49, qty=3600, order_id="oid-a", us_market_slug=GAME_SLUG_A,
+                his_level=0.50)
+    v.rest("oid-a", "BUY", 0.49, 3600, slug=GAME_SLUG_A)
+    st = _tick(p, v, http=http)
+    assert b["last_plan"]["game_exposure"] == 1764.0 and b["last_plan"]["game_room"] == 736.0
+    assert b["target"] == 1472
+    assert a["target"] == 3528 and a["last_plan"]["game_room"] == 1764.0
+    assert _census(st, "game_cap_scaled") == 2
+    # a partial fill counts its booked part at cost and only the remainder
+    # as resting; a resting reduce counts nothing (test (d) rests one)
+    p2, a2, b2, v2, http2 = _game_world(monkeypatch, a_ledger=1600, a_avg=0.49, a_net=7200.0, b_first=True)
+    p2.add_order(a2, side=BUY, wire=0.49, qty=3600, order_id="oid-a", us_market_slug=GAME_SLUG_A,
+                 booked=1600.0, his_level=0.50)
+    v2.rest("oid-a", "BUY", 0.49, 3600, slug=GAME_SLUG_A, filled=1600.0, avg=0.49)
+    _tick(p2, v2, http=http2)
+    assert b2["last_plan"]["game_exposure"] == pytest.approx(1764.0), "1,600 held + 2,000 resting, at 0.49"
+    # A, walked after B, reads B's $736 and is re-sized to what the
+    # $1,764 left admits AT COST (MEDIUM-1): $784 held at 0.49, so $980
+    # more at the 0.50 mark = 1,960 sh -> 3,560, the game at $2,500
+    # exactly (the at-the-mark reading gave 3,528: A's 1,600 valued at
+    # the mark, not at its cost)
+    assert b2["target"] == 1472 and a2["target"] == 3560 and a2["last_plan"]["game_room"] == 1764.0
+    assert 784.0 + (3560 - 1600) * 0.50 == pytest.approx(1764.0)
+    # A walked first: its sized figure, the increase at the mark
+    p3, a3, b3, v3, http3 = _game_world(monkeypatch, a_ledger=0, a_net=7200.0)
+    p3.add_order(a3, side=BUY, wire=0.49, qty=3600, order_id="oid-a", us_market_slug=GAME_SLUG_A,
+                 his_level=0.50)
+    v3.rest("oid-a", "BUY", 0.49, 3600, slug=GAME_SLUG_A)
+    _tick(p3, v3, http=http3)
+    assert a3["target"] == 3600 and v3.orders["oid-a"]["state"] == "new"
+    assert b3["last_plan"]["game_exposure"] == 1800.0 and b3["target"] == 1400
+
+
+def test_two_games_are_independent_and_a_book_without_a_game_key_is_its_own_game(monkeypatch):
+    """(f) A's $2,500 on ANOTHER game leaves B the whole cap; (h) a
+    book with no game_key is its own game and counts for nothing
+    against the fixture game."""
+    p, a, b, v, http = _game_world(monkeypatch, a_ledger=5000, a_slug=OTHER_GAME_SLUG)
+    assert a["game_key"] != b["game_key"]
+    st = _tick(p, v, http=http)
+    assert b["target"] == 3000 and b["last_plan"]["game_room"] == 2500.0
+    assert b["last_plan"]["game_exposure"] == 0.0 and _census(st, "game_cap_scaled") == 0
+    p2, a2, b2, v2, http2 = _game_world(monkeypatch, a_ledger=5000, game_key=None)
+    assert a2["game_key"] is None
+    st2 = _tick(p2, v2, http=http2)
+    assert b2["target"] == 3000 and b2["last_plan"]["game_room"] == 2500.0
+    assert _census(st2, "game_cap_scaled") == 0
+    assert ml._game_key_of(a2) == ("book", str(a2["id"])) and ml._game_key_of(b2) == ("game", GAME_KEY)
+
+
+def test_the_cap_is_per_event_two_whales_books_of_one_game_share_it(monkeypatch):
+    """Owner: "no single EVENT having more than $2.5k on it" -- the game
+    is the key, not (whale, game). A is ANOTHER whale's book on the
+    total line, 3,600 @ 0.50 = $1,800 at cost and on target; B (rn1)
+    on the moneyline gets the $700 the game has left, 1,400 sh."""
+    p, a, b, v, http = _game_world(monkeypatch, whale="rn2")
+    p.whale_address["rn2"] = "0xdef"
+    assert a["whale"] == "rn2" and b["whale"] == "rn1"
+    assert ml._game_key_of(a) == ml._game_key_of(b) == ("game", GAME_KEY)
+    st = _tick(p, v, http=http)
+    assert a["target"] == 3600 and a["ledger_net"] == 3600, "A holds still"
+    assert b["target"] == 1400 and b["last_plan"]["game_cap"] == "game_cap_scaled"
+    assert b["last_plan"]["game_exposure"] == 1800.0 and b["last_plan"]["game_room"] == 700.0
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.49, 1400, False), pl
+    assert _census(st, "game_cap_scaled") == 1
+
+
+def test_the_walk_order_is_games_oldest_touched_first_and_book_id_within_a_game(monkeypatch):
+    """(g) WITHIN a game the order is book id ascending, whatever
+    updated_at says: both books want an increase, A (the lower id) is
+    sized first and its new target counts against B -- not just what A
+    holds -- so A takes $1,500 and B gets the $1,000 left, 2,000 sh. A
+    wake on B's market does not reorder the game's books; nor does A's
+    newer updated_at. ACROSS games the order is the oldest updated_at
+    among a game's books (the abandon round-robin the pre-E1 walk had
+    from `ORDER BY updated_at, id`), a NULL last, ties by lowest id; a
+    wake brings its whole game to the front, in that order."""
+    for wake in (False, True):
+        p, a, b, v, http = _game_world(monkeypatch, a_ledger=0, a_net=30000.0, a_ratio=0.10)
+        a["updated_ts"] = NOW - 1        # A touched LAST: updated_at order would walk B first
+        if wake:
+            ml.notify(CID)
+        st = _tick(p, v, http=http)
+        assert a["target"] == 3000 and a["last_plan"]["game_room"] == 2500.0
+        assert b["target"] == 2000 and b["last_plan"]["game_exposure"] == 1500.0, wake
+        assert b["last_plan"]["game_room"] == 1000.0 and _census(st, "game_cap_scaled") == 1
+        assert [c[3] for c in _places(v)] == [3000, 2000]
+    rows = [{"id": 3, "condition_id": "x", "game_key": "g", "updated_ts": 100.0},
+            {"id": 1, "condition_id": "y", "game_key": "h", "updated_ts": 200.0},
+            {"id": 2, "condition_id": "z", "game_key": "g", "updated_ts": 300.0}]
+    assert [r["id"] for r in ml._woken_first(rows, [])] == [2, 3, 1], "g's oldest book is older than h's"
+    assert [r["id"] for r in ml._woken_first(rows, ["y"])] == [1, 2, 3], "the woken GAME first"
+    assert [r["id"] for r in ml._woken_first(rows, ["x"])] == [2, 3, 1], "a woken game keeps id order inside"
+    for r in rows:
+        r["updated_ts"] = None
+    assert [r["id"] for r in ml._woken_first(rows, [])] == [1, 2, 3], "no timestamps: the lowest id"
+    rows[1]["updated_ts"] = 5.0
+    assert [r["id"] for r in ml._woken_first(rows, [])] == [1, 2, 3], "a NULL updated_at sorts last"
+    rows[0]["updated_ts"] = 1.0
+    assert [r["id"] for r in ml._woken_first(rows, [])] == [2, 3, 1], "one dated book dates its game"
+
+
+class _SlugDownVenue(_Venue):
+    """The venue with ONE slug's quote read failing."""
+
+    def __init__(self, down, **kw):
+        super().__init__(**kw)
+        self.down = down
+
+    def bbo_read(self, client, slug):
+        if slug == self.down:
+            self.calls.append(("bbo", slug))
+            return {"bid": None, "ask": None, "state": None, "error": "RuntimeError"}
+        return super().bbo_read(client, slug)
+
+
+def test_an_abandoned_ticks_unreached_games_are_walked_first_on_the_next(monkeypatch):
+    """Three games, one book each, all touched at the same time. The
+    tick abandons at the second book's quote read (`no_quote`; no plan
+    written for it): the first book's plan bumped its updated_at, the
+    second and third were left. The next tick walks the two unreached
+    games first, then the one that was read -- the round-robin the
+    id-only walk of the first cut had dropped."""
+    monkeypatch.setattr(ms, "MISS_STREAK_ABANDON", 1)
+    p = _pool()
+    p.add_book(ledger=0)
+    p.add_book(ledger=0, game_key=le._us_game_key(_OTHER["us_market_slug"]), **_OTHER)
+    p.add_book(ledger=0, game_key=le._us_game_key(_ZZ["us_market_slug"]), **_ZZ)
+    p.markets["0xother"] = dict(_LIVE)
+    p.markets["0xzz"] = dict(_LIVE)
+    assert len({ml._game_key_of(b) for b in p.books.values()}) == 3
+    assert len({b["updated_ts"] for b in p.books.values()}) == 1, "all touched at once"
+    v = _SlugDownVenue(_OTHER["us_market_slug"])
+    st = _tick(p, v)
+    assert st["abandoned"] and st["abandon_reason"] == "no_quote"
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG, _OTHER["us_market_slug"]], "abandoned at book 2"
+    ts = {b["us_market_slug"]: b["updated_ts"] for b in p.books.values()}
+    assert ts[SLUG] > ts[_OTHER["us_market_slug"]] == ts[_ZZ["us_market_slug"]], "only book 1's plan was written"
+    v2 = _Venue()
+    st2 = _tick(p, v2, now=NOW + 30)
+    assert not st2["abandoned"]
+    assert [c[1] for c in v2.calls if c[0] == "bbo"] == [_OTHER["us_market_slug"], _ZZ["us_market_slug"], SLUG]
+
+
+def test_a_candidate_on_a_full_game_opens_nothing_and_one_on_a_part_full_game_opens_scaled(monkeypatch):
+    """A new market of a game the books already fill to $2,500 opens no
+    book this tick (`game_cap_full`, read again next tick); with $700
+    left the candidate opens at $700 and the new book's own tick reads
+    the same room."""
+    p, a, b, v, http = _game_world(monkeypatch, his_b=40000.0, a_ledger=5000)
+    del p.books[b["id"]], p.rows[b["standing_row_id"]]
+    st = _tick(p, v, http=http)
+    assert len(p.books) == 1 and _census(st, "game_cap_full") == 1 and not _places(v)
+    assert _census(st, "game_unreadable") == 0, "a full game is not an unreadable one"
+    ml._game_full_until.clear()         # the memo the full game wrote (pinned below, on its own)
+    p2, a2, b2, v2, http2 = _game_world(monkeypatch)
+    del p2.books[b2["id"]], p2.rows[b2["standing_row_id"]]
+    st2 = _tick(p2, v2, http=http2)
+    new = [bk for bk in p2.books.values() if bk["us_market_slug"] == SLUG]
+    assert len(new) == 1 and new[0]["target"] == 1400 and new[0]["last_plan"]["game_room"] == 700.0
+    assert _census(st2, "game_cap_scaled") == 2, "named at open and on the new book's tick"
+    assert _places(v2)[-1][1:5] == (SLUG, 0.49, 1400, False)
+
+
+def test_an_unreadable_exposure_is_no_room_and_the_rules_are_pure(monkeypatch):
+    """A held book whose avg_cost AND mark cannot be read is an
+    unreadable figure: the game has no room (fail closed), the plan
+    says the exposure was unreadable, and nothing sells."""
+    p, a, b, v, http = _game_world(monkeypatch, his_b=40000.0, b_ledger=200, a_ledger=100, b_first=True)
+    a["avg_cost"] = None
+    a["last_plan"] = None
+    assert b["id"] < a["id"], "B is walked first: A's mark has not been read when B is sized"
+    st = _tick(p, v, http=http)
+    assert b["last_plan"]["game_exposure"] is None and b["last_plan"]["game_room"] == 0.0
+    assert b["target"] == 200 and b["last_plan"]["game_cap"] == "game_unreadable" and not _places(v)
+    assert _census(st, "game_unreadable") == 1 and _census(st, "game_cap_full") == 0, "told apart"
+    # the readings, pure
+    assert rules.book_exposure(3600, 0.50, 0.31) == 1800.0
+    assert rules.book_exposure(3600, None, 0.31) == pytest.approx(1116.0), "no cost: the mark"
+    assert rules.book_exposure(3600, None, None) is None and rules.book_exposure(None, 0.5, 0.5) is None
+    assert rules.book_exposure(0, None, None) == 0.0 and rules.book_exposure(0, None, None, resting_usd=12.5) == 12.5
+    assert rules.book_exposure(100, 0.5, 0.5, resting_usd=None) is None
+    assert rules.book_exposure(100, 1.0, 0.5) is None and rules.book_exposure(100, 0.0, 0.5) is None
+    assert rules.game_room(1800.0) == 700.0 and rules.game_room(0.0) == 2500.0
+    assert rules.game_room(2500.0) == 0.0 and rules.game_room(9999.0) == 0.0
+    assert rules.game_room(None) == 0.0 and rules.game_room(-1.0) == 0.0
+    assert rules.game_room(100.0, cap_usd=0.0) == 0.0 and rules.game_room(100.0, cap_usd=1000.0) == 900.0
+    # game_capped: only an increase is touched, never below the ledger
+    assert rules.game_capped(3000, 1400, 0, False) == (1400, "game_cap_scaled")
+    assert rules.game_capped(3000, 3000, 0, False) == (3000, None)
+    assert rules.game_capped(4000, None, 200, False) == (200, "game_cap_full")
+    assert rules.game_capped(4000, 150, 200, False) == (200, "game_cap_full"), "a room under the ledger is no reduce"
+    assert rules.game_capped(300, None, 500, False) == (300, None) and rules.game_capped(0, None, 500, False) == (0, None)
+    assert rules.game_capped(-3000, -1400, 0, True) == (-1400, "game_cap_scaled")
+    assert rules.game_capped(-4000, None, -200, True) == (-200, "game_cap_full")
+    assert rules.game_capped(-4000, -150, -200, True) == (-200, "game_cap_full")
+    assert rules.game_capped(-300, None, -500, True) == (-300, None)
+    assert rules.game_capped(300, None, -500, True) == (300, None), "a sign flip is not an increase"
+
+
+def test_room_whose_target_is_under_the_ledger_holds_the_book_and_never_sells(monkeypatch):
+    """A holds 4,900 @ 0.50 = $2,450 at cost; B holds 200 and his net
+    says 4,000. The game has $50 left: a room target of 100 sh, UNDER
+    B's 200 -- the book stays at 200 (an increase of 0, `game_cap_full`),
+    never a sale of the 100 over; nothing is placed."""
+    p, a, b, v, http = _game_world(monkeypatch, his_b=40000.0, b_ledger=200, a_ledger=4900)
+    st = _tick(p, v, http=http)
+    assert b["target"] == 200 and b["last_plan"]["game_cap"] == "game_cap_full"
+    assert b["last_plan"]["game_room"] == 50.0 and b["last_plan"]["game_exposure"] == 2450.0
+    assert b["last_plan"]["target_raw"] == 4000.0 and b["ledger_net"] == 200
+    assert not _places(v) and b["last_plan"]["reason"] == "on target"
+    assert _census(st, "game_cap_full") == 1 and _census(st, "game_cap_scaled") == 0
+
+
+def test_a_rest_whose_cancel_did_not_land_is_no_room_for_its_siblings(monkeypatch):
+    """The adversarial review's repro (HIGH, fail-open). A (id 2) is
+    flat with a 3,600 @ 0.49 BUY rest past the TTL; the cancel fails
+    twice and the venue still shows it resting: the row is 'unknown',
+    popped from open_by_book, A frozen cancel_pending -- and the rest
+    can still fill for $1,764. B (id 1), walked first, must NOT read A
+    at $0 and take the whole $2,500 ($3,724 at cost on the game): a
+    figure nobody can read is no figure, the game has no room, B's
+    increase is 0 -- named `game_unreadable`, not `game_cap_full`
+    (re-review LOW-3: an unreadable game is told apart from a full
+    one) -- nothing is placed."""
+    p, a, b, v, http = _game_world(monkeypatch, his_b=40000.0, a_ledger=0, a_net=7200.0, b_first=True)
+    p.add_order(a, side=BUY, wire=0.49, qty=3600, order_id="oid-a", us_market_slug=GAME_SLUG_A,
+                his_level=0.50, placed_ts=NOW - 700)
+    v.rest("oid-a", "BUY", 0.49, 3600, slug=GAME_SLUG_A)
+    v.cancel_ok = False
+    assert b["id"] < a["id"], "B is walked first"
+    st = _tick(p, v, http=http)
+    assert v.orders["oid-a"]["state"] == "new", "the rest still stands on the venue"
+    assert a["state"] == "frozen" and a["frozen_reason"] == "cancel_pending"
+    assert next(iter(p.orders.values()))["state"] == "unknown"
+    assert b["last_plan"]["game_exposure"] is None and b["last_plan"]["game_room"] == 0.0
+    assert b["target"] == 0 and b["last_plan"]["game_cap"] == "game_unreadable"
+    assert not _places(v) and _census(st, "game_unreadable") == 1
+    assert _census(st, "game_cap_full") == 0 and _census(st, "game_cap_scaled") == 0, "told apart"
+    assert _census(st, "cancel_pending") == 1
+    assert a["last_plan"]["game_exposure"] == 0.0 and "game_cap" not in a["last_plan"], "A's own room ignores itself"
+    # the candidate path reads the same nothing: A's OWN sized figure is
+    # None (not $0 plus its target), so a new market of the game opens
+    # no book this tick, named `game_unreadable` there too
+    p2, a2, b2, v2, http2 = _game_world(monkeypatch, his_b=40000.0, a_ledger=0, a_net=7200.0)
+    del p2.books[b2["id"]], p2.rows[b2["standing_row_id"]]
+    p2.add_order(a2, side=BUY, wire=0.49, qty=3600, order_id="oid-a", us_market_slug=GAME_SLUG_A,
+                 his_level=0.50, placed_ts=NOW - 700)
+    v2.rest("oid-a", "BUY", 0.49, 3600, slug=GAME_SLUG_A)
+    v2.cancel_ok = False
+    st2 = _tick(p2, v2, http=http2)
+    assert a2["frozen_reason"] == "cancel_pending" and v2.orders["oid-a"]["state"] == "new"
+    assert len(p2.books) == 1 and not _places(v2), "no book opened on a game nobody can read"
+    assert _census(st2, "game_unreadable") == 1 and _census(st2, "game_cap_full") == 0
+    assert _census(st2, "game_cap_scaled") == 0
+    assert ml._game_full_until == {}, "an unreadable game writes no memo (only a full one does)"
+    # a cancel the PLAN sent -- a rest kept by step O, then cancelled
+    # under the plan's own refusal (no ratio: `no_plan`) -- that did not
+    # land is the same unreadable figure for the book walked after it
+    p3, a3, b3, v3, http3 = _game_world(monkeypatch, his_b=40000.0, a_ledger=0, a_net=7200.0, a_ratio=None)
+    p3.add_order(a3, side=BUY, wire=0.49, qty=3600, order_id="oid-a", us_market_slug=GAME_SLUG_A,
+                 his_level=0.50, placed_ts=NOW - 30)
+    v3.rest("oid-a", "BUY", 0.49, 3600, slug=GAME_SLUG_A)
+    v3.cancel_ok = False
+    assert a3["id"] < b3["id"], "A is walked first, B reads it after its plan"
+    st3 = _tick(p3, v3, http=http3)
+    assert a3["last_reason"] == "no_ratio" and a3["last_plan"]["kind"] == "no_plan"
+    assert a3["frozen_reason"] == "cancel_pending" and v3.orders["oid-a"]["state"] == "new"
+    assert ("cancel", "oid-a", GAME_SLUG_A) in v3.calls, "the plan's cancel went out"
+    assert b3["last_plan"]["game_exposure"] is None and b3["last_plan"]["game_room"] == 0.0
+    assert b3["target"] == 0 and not _places(v3) and _census(st3, "game_unreadable") == 1
+    assert _census(st3, "game_cap_full") == 0
+    # the reading itself: a non-terminal order the tick could not read
+    # is None, nothing resting is 0, a resting reduce is 0
+    t = ml._Tick(pool=p, pmus=v, http=http, now=NOW, stats=ml._new_stats())
+    t.nonterminal.add(a["id"])
+    assert ml._resting_add_usd(t, a) is None and ml._held_exposure(t, a) is None
+    t.nonterminal.discard(a["id"])
+    assert ml._resting_add_usd(t, a) == 0.0 and ml._held_exposure(t, a) == 0.0
+
+
+def test_the_game_room_is_applied_at_cost_so_a_fallen_mark_never_averages_down_past_the_cap(monkeypatch):
+    """The re-review's X1 (MEDIUM-1). A holds 3,600 @ 0.49 = $1,764 at
+    cost; B holds 1,400 @ 0.50 = $700; the mark falls to 0.30 and his
+    net on B says 3,000. B's room is $736 -- right -- but the first
+    cut handed mi.target_shares cap_usd=736 AT THE MARK: 736 / 0.30 =
+    2,453 shares in total, a BUY of 1,053 @ 0.29 = $305, and the game
+    held $2,769 at cost. The room is dollars at cost: the cap handed
+    over is B's 1,400 at the mark ($420) plus the $36 the room leaves
+    after B's own $700 -- $456, 1,520 shares, a BUY of 120 @ 0.29 =
+    $34.80 -- and the game stays at $2,498.80: mirror-pnl's
+    `open_cost` reading of the game, held at cost plus the resting
+    BUY, never over $2,500. The per-market cap keeps its at-the-mark
+    reading (cap / mark shares in total), unchanged."""
+    p, a, b, v, http = _game_world(monkeypatch, his_b=30000.0, b_ledger=1400, a_ledger=3600, a_avg=0.49)
+    v.bid, v.ask = 0.29, 0.31
+    st = _tick(p, v, http=http)
+    assert a["target"] == 3600 and a["last_plan"]["game_room"] == pytest.approx(1800.0), "A reads B's $700"
+    assert b["last_plan"]["game_room"] == pytest.approx(736.0)
+    assert b["last_plan"]["game_exposure"] == pytest.approx(1764.0)
+    assert b["target"] == 1520 and b["last_plan"]["game_cap"] == "game_cap_scaled"
+    assert b["last_plan"]["target_raw"] == 3000.0
+    pl = [c for c in _places(v) if c[1] == SLUG]
+    assert len(pl) == 1 and pl[0][2:5] == (0.29, 120, False), pl
+    held = sum(rules.book_exposure(bk["ledger_net"], bk["avg_cost"], 0.30, bk["intent"])
+               for bk in (a, b))
+    resting = pl[0][3] * pl[0][2]
+    assert held == pytest.approx(2464.0) and resting == pytest.approx(34.8)
+    assert held + resting <= 2500.0 and held + resting == pytest.approx(2498.8)
+    assert _census(st, "game_cap_scaled") == 1 and _census(st, "shadow_live_disagree") == 0
+    # the shadow, at the same net, agrees with the at-cost figure: the
+    # check is handed the cap B was sized at ($456), not the room
+    p2, a2, b2, v2, http2 = _game_world(monkeypatch, his_b=30000.0, b_ledger=1400, a_ledger=3600, a_avg=0.49)
+    v2.bid, v2.ask = 0.29, 0.31
+    p2.shadow.append(_shadow_row(3000, 0.10, 30000.0))
+    st2 = _tick(p2, v2, http=http2)
+    assert b2["target"] == 1520 and _census(st2, "shadow_live_disagree") == 0
+    assert _census(st2, "shadow_check_skipped") == 0
+    # a mark ABOVE the cost: the increase still costs the room's $36 at
+    # the mark -- 1,400 @ 0.60 ($840) + $36 = $876, 1,460 shares, 60 more
+    p3, a3, b3, v3, http3 = _game_world(monkeypatch, his_b=30000.0, b_ledger=1400, a_ledger=3600, a_avg=0.49)
+    v3.bid, v3.ask = 0.59, 0.61
+    _tick(p3, v3, http=http3)
+    assert b3["target"] == 1460 and b3["last_plan"]["game_room"] == pytest.approx(736.0)
+    pl3 = [c for c in _places(v3) if c[1] == SLUG]
+    assert len(pl3) == 1 and pl3[0][3] == 60 and pl3[0][3] * pl3[0][2] <= 36.0 + 1e-9
+
+
+def test_a_full_games_unopened_markets_are_skipped_for_the_memo_then_read_again(monkeypatch):
+    """Re-review LOW-2. A holds the whole $2,500; the fixture market is
+    a candidate of the same game. Tick 1 reads it and opens nothing
+    (`game_cap_full`) and writes the memo; tick 2, a second later,
+    skips the candidate BEFORE its venue read -- no quote read on its
+    slug, no candidate slot -- under `cand_game_full_skipped`; tick 3,
+    past GAME_FULL_MEMO_S, reads it again. An unreadable game is
+    memoised the same way."""
+    assert ml.GAME_FULL_MEMO_S == 60.0
+    p, a, b, v, http = _game_world(monkeypatch, his_b=40000.0, a_ledger=5000)
+    del p.books[b["id"]], p.rows[b["standing_row_id"]]
+    st = _tick(p, v, http=http)
+    assert len(p.books) == 1 and _census(st, "game_cap_full") == 1
+    assert ("bbo", SLUG) in v.calls and st["reads"] == 2, "A's read and the candidate's"
+    assert ml._game_full_until == {("game", GAME_KEY): NOW + ml.GAME_FULL_MEMO_S}
+    v2 = _Venue(bid=0.49, ask=0.51, held={GAME_SLUG_A: 5000, SLUG: 0})
+    st2 = _tick(p, v2, now=NOW + 1, http=http)
+    assert _census(st2, "cand_game_full_skipped") == 1 and _census(st2, "game_cap_full") == 0
+    assert [c[1] for c in v2.calls if c[0] == "bbo"] == [GAME_SLUG_A], "no read on the skipped candidate"
+    assert st2["reads"] == 1 and len(p.books) == 1, "A's read alone: no venue read, no candidate slot"
+    v3 = _Venue(bid=0.49, ask=0.51, held={GAME_SLUG_A: 5000, SLUG: 0})
+    st3 = _tick(p, v3, now=NOW + ml.GAME_FULL_MEMO_S + 1, http=http)
+    assert _census(st3, "cand_game_full_skipped") == 0 and _census(st3, "game_cap_full") == 1
+    assert ("bbo", SLUG) in v3.calls and st3["reads"] == 2
+    # the game freed up inside the memo -- he cut A's market to 4,000
+    # and A followed him down to 2,000 @ 0.50, $1,000 at cost: still
+    # skipped until the memo runs (a minute at most), then read and
+    # opened at the $1,500 left, 3,000 sh
+    for f in p.fills:
+        if f["asset"] == LA:
+            f["size"] = 4000.0
+    p.snap[LA] = 4000.0
+    for row in http.rows:
+        if row["asset"] == LA:
+            row["size"] = 4000.0
+    a["ledger_net"] = 2000
+    p.rows[a["standing_row_id"]]["filled_shares"] = 2000.0
+    v4 = _Venue(bid=0.49, ask=0.51, held={GAME_SLUG_A: 2000, SLUG: 0})
+    st4 = _tick(p, v4, now=NOW + ml.GAME_FULL_MEMO_S + 2, http=http)
+    assert a["target"] == 2000 and not _places(v4), "A on target at $1,000"
+    assert _census(st4, "cand_game_full_skipped") == 1 and len(p.books) == 1
+    v5 = _Venue(bid=0.49, ask=0.51, held={GAME_SLUG_A: 2000, SLUG: 0})
+    st5 = _tick(p, v5, now=NOW + 2 * ml.GAME_FULL_MEMO_S + 2, http=http)
+    assert _census(st5, "cand_game_full_skipped") == 0 and len(p.books) == 2
+    new = [bk for bk in p.books.values() if bk["us_market_slug"] == SLUG][0]
+    assert new["target"] == 3000 and new["last_plan"]["game_room"] == 1500.0
+    assert _census(st5, "game_cap_scaled") == 2 and _places(v5)[-1][1:5] == (SLUG, 0.49, 3000, False)
+    assert ml._game_full_until == {("game", GAME_KEY): NOW + 2 * ml.GAME_FULL_MEMO_S + 1}, \
+        "a game with room writes no new memo: tick 3's, expired, is all that stands"
+    # an UNREADABLE game writes no memo: its cause (a sibling's order
+    # nobody could read) is retried by step O every tick, so the market
+    # is read again next tick -- and opens the moment the cancel lands
+    p6, a6, b6, v6, http6 = _game_world(monkeypatch, his_b=40000.0, a_ledger=0, a_net=7200.0)
+    del p6.books[b6["id"]], p6.rows[b6["standing_row_id"]]
+    p6.add_order(a6, side=BUY, wire=0.49, qty=3600, order_id="oid-a", us_market_slug=GAME_SLUG_A,
+                 his_level=0.50, placed_ts=NOW - 700)
+    v6.rest("oid-a", "BUY", 0.49, 3600, slug=GAME_SLUG_A)
+    v6.cancel_ok = False
+    ml._game_full_until.clear()
+    st6 = _tick(p6, v6, http=http6)
+    assert _census(st6, "game_unreadable") == 1 and len(p6.books) == 1
+    assert ml._game_full_until == {}, "unreadable is a per-tick reading, never memoised"
+    v7 = _Venue(bid=0.49, ask=0.51, held={GAME_SLUG_A: 0, SLUG: 0})
+    v7.orders = v6.orders
+    v7.cancel_ok = False
+    st7 = _tick(p6, v7, now=NOW + 1, http=http6)
+    assert _census(st7, "cand_game_full_skipped") == 0 and ("bbo", SLUG) in v7.calls, "read again"
+    assert _census(st7, "game_unreadable") == 1 and len(p6.books) == 1
+    v8 = _Venue(bid=0.49, ask=0.51, held={GAME_SLUG_A: 0, SLUG: 0})
+    v8.orders = v6.orders                 # the cancel lands this tick: the rest is gone
+    st8 = _tick(p6, v8, now=NOW + 2, http=http6)
+    assert v8.orders["oid-a"]["state"] == "cancelled" and _census(st8, "game_unreadable") == 0
+    assert len(p6.books) == 2, "readable again: the candidate opens"
+    # a candidate with no game key is never memoised: the memo's key is the game
+    assert ml._game_key_of({"id": 9, "game_key": None}) == ("book", "9")
+
+
+def test_two_candidates_on_one_game_in_one_tick_share_the_room(monkeypatch):
+    """The re-review's A4: no book on the game, two of its markets are
+    candidates in one tick (his 40,000 on each, 10%). The first opens
+    at 4,000 sh = $2,000 and joins the game's index; the second reads
+    that $2,000 and opens at the $500 left, 1,000 sh."""
+    p, a, b, v, http = _game_world(monkeypatch, his_b=40000.0, a_ledger=0, a_net=40000.0, a_ratio=0.10)
+    del p.books[a["id"]], p.rows[a["standing_row_id"]]
+    del p.books[b["id"]], p.rows[b["standing_row_id"]]
+    p.conds = [CID, CID_A]
+    orig_fetch = p.fetch
+
+    async def fetch(sql, *args):
+        s = " ".join(sql.split())
+        if "AS market_title, t.event_slug" in s:          # his_fills, per condition
+            return [x for x in p.fills if p.token_cid.get(x["asset"]) == args[1]]
+        if "FROM live_orders WHERE asset = ANY($1::text[])" in s:
+            rows = [{"asset": M, "us_market_slug": SLUG, "intent": "ORDER_INTENT_BUY_LONG"},
+                    {"asset": LA, "us_market_slug": GAME_SLUG_A, "intent": "ORDER_INTENT_BUY_LONG"}]
+            return [r for r in rows if r["asset"] in set(args[0])]
+        return await orig_fetch(sql, *args)
+    p.fetch = fetch
+    st = _tick(p, v, http=http)
+    books = sorted(p.books.values(), key=lambda bk: bk["id"])
+    assert [bk["target"] for bk in books] == [4000, 1000]
+    assert books[1]["last_plan"]["game_exposure"] == 2000.0 and books[1]["last_plan"]["game_room"] == 500.0
+    assert sum(abs(bk["target"]) * 0.5 for bk in books) <= 2500.0
+    assert [x[3] for x in _places(v)] == [4000, 1000] and _census(st, "game_cap_scaled") >= 1
 
 
 # ------------------------------------------------ 12. the census coverage

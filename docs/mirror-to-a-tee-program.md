@@ -989,6 +989,75 @@ M1-total (all families) printed beside M1.
   `capped`, a positive ratio, a mark on the ladder) is `shadow_check_skipped` by name, never a disagree;
   a different net is not compared, as before. Both false-positive cases are pinned as agreeing and the
   true divergence (a stated raw of 3,000 against 1.0 x 2,400, live 240) still fires.
+- E1, 2026-09-06 -- THE $2,500 CAP IS PER GAME, ACROSS EVERY MARKET OF THE GAME. Two owner orders,
+  verbatim: ~14:00Z "Just trade 10% of what he puts on everything he takes (with a hard cap of no single
+  event having more than $2.5k on it) this limitation should never force us to decline any of the
+  possible copies"; 22:3xZ "I just want to make sure the per game cap is at 2500 per game (never more)".
+  WHAT THE CODE DID: `mi.MARKET_NET_CAP_USD` was applied PER BOOK (`mi.target_shares`, cap_usd / px at
+  the mark), and each market of a game -- the moneyline per team, the draw, every total line, btts, the
+  spreads -- is its own book, so a game with six markets could carry $15,000. On the night of the order
+  (mirror-pnl 22:22Z) Espanyol/Sevilla held ~$2,347 across five books (26, 43, 46, 48, 49) and
+  Juventus/Milan ~$1,714 across 30/32/35/37: under $2,500 by luck, not by rule. THE RULE NOW
+  (`rules.book_exposure`, `game_room`, `game_capped`; the worker's `_game_exposure` and the walk):
+  (1) a book's EXPOSURE is dollars at risk at cost -- ledger x avg_cost on a long, |ledger| x (1 -
+  avg_cost), the collateral, on a short (mirror-pnl's `open_cost`) -- plus the unfilled notional of its
+  resting BUY-side increase; avg_cost NULL on a held book reads the mark (more counted, never less), and
+  a figure nobody can read is no room -- that includes a book with a NON-TERMINAL order the tick could
+  not read (a rest whose cancel did not land, 'unknown'; a 'placing' row with no id; a lost placement):
+  it may still stand on the venue and fill, so it is None, the game's room is 0 for every sibling and
+  the book's own sized figure is None (the adversarial review's repro: a 3,600 @ 0.49 rest past the TTL
+  whose cancel failed read as $0 and the sibling took the whole $2,500 -- $3,724 at cost on one game).
+  (2) GAME EXPOSURE is the sum over every non-closed book of the same `mirror_books.game_key` this
+  tick, WHOEVER THE WHALE: the order is "no single EVENT", so two whales' books of one game share the
+  one $2,500 (the first cut keyed on (whale, game_key) and let them hold $5,000). (3) A book's ROOM is
+  $2,500 less the OTHER books' exposure, clamped to [0, 2500], and it is applied AT COST: the cap handed
+  to `mi.target_shares` for the room reading is the shares the book already holds valued at the MARK
+  plus what the room leaves after the book's own held cost, so the increase costs at most `room -
+  held_cost` and a mark that has fallen under the cost never lets a book average down past the game's
+  $2,500 at cost (the re-review's X1: A 3,600 @ 0.49, B 1,400 @ 0.50, the mark at 0.30 -- B's room is
+  $736 and its increase $36, 120 sh, where the first cut sized 736 / 0.30 = 2,453 in total, bought 1,053
+  and put the game at $2,769). The PER-MARKET cap keeps its at-the-mark reading (cap / mark shares in
+  total, `mi.target_shares` as before), unchanged. The increase is the same `mi.target_shares` scaling,
+  so it is SCALED and never refused (`game_cap_scaled`); with no room -- or with room whose target is
+  under what the book holds -- the target is what the book already holds: an increase of 0,
+  `game_cap_full` (or `game_unreadable`, below), and NEVER a reduce: the cap is not a reason to sell,
+  and reductions and flattens follow his book exactly as before. (4) The walk: GAMES in order of the
+  oldest `updated_at` among their books -- `_write_plan`
+  bumps it, so a tick abandoned at book k resumes next tick with the games it did not reach first, the
+  round-robin the books had before E1 -- and WITHIN a game book id ascending, ONE fixed order (a woken
+  market brings its whole game forward, the games and each game's books still in that order); a book
+  sized this tick counts what it holds at cost plus the larger of its resting increase and its new
+  target's increase at the mark against the later books of its game. That sized figure is read BEFORE
+  the sign flip, so a book about to flip to a flatten counts its pre-flip target's increase for one
+  tick: more counted than will stand, never less, and left so. (5) A book with no game_key is its own
+  game (the per-market cap as before) -- a KNOWN GAP for a slug the grammar cannot key
+  (`le._us_game_key` None: a non-grammar slug, a mapping by ledger or venue), whose markets each keep
+  their own $2,500 until the game_key is filled. (6) A CANDIDATE on a game with no room opens nothing
+  this tick (`game_cap_full`); with part of the room left it opens at that part. A game read FULL is
+  then remembered for `GAME_FULL_MEMO_S` (60 s, `_game_full_until`, the shape of D1's terminal memo)
+  and every candidate on it is skipped BEFORE its venue read under `cand_game_full_skipped` until the
+  memo runs -- the first cut re-read every un-opened market of a full game on every tick, a venue read
+  and one of the 20 candidate slots each; a game that frees up is read again within the minute. An
+  UNREADABLE game is never memoised: its cause is a sibling's order nobody could read this tick, which
+  step O retries next tick, so its markets are read again then and open the moment it reads. (7) The
+  shadow check (`_shadow_check`) is handed the cap the book was sized at, so a target the game room
+  scaled is not `shadow_live_disagree`; E5's comparison of the unclamped arithmetic (before the ledger
+  floor, the sign flip and the short share cap) stands. (8) An UNREADABLE game is told apart from a full
+  one: `game_unreadable` on the census (counted once per book at the read, and at a candidate's
+  refusal) and as the plan's `game_cap` when it held an increase, beside the null `game_exposure`;
+  `game_cap_full` names only a game that is genuinely full. The plan row carries `game_room`,
+  `game_exposure` (null when unreadable) and, when it bit, `game_cap`; the four census names sit past
+  the served 40-key prefix (raw heartbeat and plan only). The numbers, pinned end to end in
+  test_mirror_live_worker section 19: A holds 3,600 @ 0.50 ($1,800) on the total line and B's 10% on
+  the moneyline is 3,000 sh ($1,500 at the mark) -> B is sized to $700 / 0.50 = 1,400 sh; the same
+  with A another whale's book; a short of 2,500 at a 0.72 contract counts $700 of collateral; a full
+  game holds B at its 200 and sells nothing, and so does $50 of room (a room target of 100 under B's
+  200); a reduce of 200 on a full game still rests; a resting 3,600 @ 0.49 counts $1,764, and one
+  whose cancel failed is no room for the sibling, the candidate and the book itself (`game_unreadable`);
+  the mark at 0.30 under B's 0.50 cost sizes B's increase at $36 = 120 sh and the game reads $2,498.80;
+  two candidates of one game in one tick open at 4,000 and 1,000; a full game's candidate is skipped
+  for the memo's minute; two games are independent; a game is walked oldest-touched first, its books in
+  id order, and an abandoned tick's unreached games come first on the next.
 
 ### 5b. OPERATOR NOTES (2026-09-05): reading `venue_halted`
 

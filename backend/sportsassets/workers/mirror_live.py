@@ -248,6 +248,22 @@ CENSUS_KEYS: tuple[str, ...] = (
     # the copy lane's soccer/esports price floor, lifted for a mirror
     # book by owner order (2026-09-06, _mirror_cell): counted, never a refusal
     "soccer_floor_lifted",
+    # E1 (2026-09-06, owner order "the per game cap is at 2500 per game
+    # (never more)"): the $2,500 cap is PER GAME across every market of
+    # the game -- a target SCALED to the room the game has left, and a
+    # target held at what the book has because the game has no room
+    # (an increase of 0, never a reduce). Both sit past the served
+    # 40-key prefix; `integ` is at its ceiling, so they are read off the
+    # raw heartbeat and the plan (`game_room`, `game_exposure`).
+    # `game_unreadable` (re-review LOW-3): the game's exposure could not
+    # be read this tick (a sibling with a non-terminal order nobody can
+    # read, an unreadable cost) -- no room, told apart from a game that
+    # IS full. `cand_game_full_skipped` (re-review LOW-2): a candidate
+    # on a game the memo (_game_full_until) says read FULL inside the
+    # last GAME_FULL_MEMO_S, skipped before its venue read (an
+    # unreadable game is never memoised: read again next tick).
+    # All inserted BEFORE `cand_terminal_skipped`, which stays last (pinned)
+    "game_cap_scaled", "game_cap_full", "game_unreadable", "cand_game_full_skipped",
     # D1 (2026-09-06): a candidate skipped because its venue state read
     # TERMINAL inside the last UNMAPPED_TTL_S (_terminal_until). Appended
     # LAST, past the served 40-key prefix; `integ` is at its own ceiling
@@ -297,6 +313,21 @@ _unmapped_until: dict[tuple[str, str], float] = {}
 # writes it: a book on an ended market is managed every tick until it
 # closes).
 _terminal_until: dict[tuple[str, str], float] = {}
+# THE FULL-GAME MEMO (E1 re-review LOW-2). A candidate on a game whose
+# books already hold the $2,500 opens nothing, and the first cut
+# returned before books_seen, so every un-opened market of a full game
+# was mapped, quote-read and charged a candidate slot again on every
+# tick. The game key (_game_key_of's, the game alone) is remembered
+# here for GAME_FULL_MEMO_S and every candidate on it is skipped BEFORE
+# its venue read under `cand_game_full_skipped` until the memo runs; a
+# game that frees up (a sibling reduced) is read again within the
+# memo's minute. Only a game read FULL is memoised: an UNREADABLE game
+# (a sibling's order nobody could read this tick) is a per-tick
+# reading, retried by step O, and its markets are read again next
+# tick. A candidate with no game key is never memoised (it is its own
+# game and always has room).
+GAME_FULL_MEMO_S = 60.0
+_game_full_until: dict[tuple, float] = {}
 # The venue IGNORED the post-only flag once (executions on a post-only
 # create): the flag is off for the rest of the process and the maker
 # thesis is measured by price selection alone (spec X.L).
@@ -979,6 +1010,19 @@ class _Tick:
     # tick across every candidate, past which a candidate is
     # `map_reads_capped` -- no verdict, read again next tick
     map_budget: Any = field(default_factory=lambda: ms.MapBudget())
+    # THE PER-GAME CAP'S TICK STATE (E1). `game_books`: game key
+    # (_game_key_of: the game_key alone, every whale's books of one
+    # game together) -> the game's non-closed books, id ascending, as
+    # the walk read them (a book opened this tick is appended);
+    # `game_sized`: book id -> the exposure a book SIZED this tick counts
+    # for against the room of the later books of its game (its held
+    # exposure or its new target's, whichever is more; None when its
+    # ledger or its resting order could not be read); `marks`: book id
+    # -> the mark this tick read for it, the fallback price of a held
+    # book with no avg_cost
+    game_books: dict = field(default_factory=dict)
+    game_sized: dict = field(default_factory=dict)
+    marks: dict = field(default_factory=dict)
 
 
 # THE SOURCES A LIVE BOOK MAY OPEN FROM (C1). map_market answers with
@@ -1890,6 +1934,98 @@ def _book_state(book: dict) -> rules.BookState:
 
 def _book_short(book: dict) -> bool:
     return rules.is_short(book.get("intent"))
+
+
+# ------------------------------------------- the per-game cap (E1)
+#
+# The $2,500 cap is per GAME across every market of the game (owner
+# orders 2026-09-06 ~14:00Z and ~22:3xZ; rules.book_exposure, game_room,
+# game_capped carry the arithmetic). The tick indexes every non-closed
+# book by game_key before the walk -- EVERY whale's books of one game
+# share the $2,500: the order is "no single EVENT having more than
+# $2.5k on it", not one event per whale -- walks a game's books in id
+# order, and hands each book's target the room its game has left after
+# the OTHER books' exposure -- held at cost plus the resting increase,
+# or the new target of a book sized earlier this tick.
+
+def _game_key_of(book: dict) -> tuple:
+    """The game a book belongs to: its game_key ALONE, whoever the
+    whale (review of the first cut, which keyed on (whale, game_key)
+    and let two whales on one game hold $5,000). A book with no
+    game_key is its own game, keyed on its own id (rule 5)."""
+    gk = book.get("game_key")
+    if gk:
+        return ("game", str(gk))
+    return ("book", str(book.get("id")))
+
+
+def _index_games(t: _Tick, books: list) -> None:
+    t.game_books = {}
+    t.game_sized = {}
+    t.marks = {}
+    for b in sorted(books, key=lambda b: int(b.get("id") or 0)):
+        t.game_books.setdefault(_game_key_of(b), []).append(b)
+
+
+def _resting_add_usd(t: _Tick, book: dict) -> float | None:
+    """The unfilled notional of the book's resting INCREASE this tick
+    (t.open_by_book, as step O left it or as _place wrote it): (qty -
+    booked) x wire on a long book, x (1 - wire) -- the collateral -- on
+    a short one. 0 with nothing resting or a resting reduce; None when
+    the row's figures cannot be read -- and None when the book has a
+    NON-TERMINAL order the tick could NOT read into open_by_book: a
+    rest whose cancel did not land ('unknown', _cancel_and_settle), one
+    whose status read failed (_reconcile_open), a 'placing' row with no
+    id, a lost placement, an unbooked fill. Each of those may still
+    stand on the venue and fill, and a figure nobody can read is no
+    figure: the game's room is 0 for every sibling and the book's own
+    sized figure is None (review of the first cut, which read such a
+    book at $0 and let a sibling take the whole $2,500 beside a 3,600
+    @ 0.49 rest that still stood)."""
+    ent = t.open_by_book.get(book["id"])
+    if ent is None:
+        if book["id"] in t.nonterminal:
+            return None
+        return 0.0
+    o, _st = ent
+    if _order_action(o, book) != "add":
+        return 0.0
+    qty, wire = _num(o.get("qty")), _num(o.get("wire"))
+    booked = _num(o.get("booked_filled")) or 0.0
+    if qty is None or wire is None or not (0.0 < wire < 1.0):
+        return None
+    rem = max(0.0, qty - booked)
+    return round(rem * ((1.0 - wire) if _book_short(book) else wire), 4)
+
+
+def _held_exposure(t: _Tick, book: dict) -> float | None:
+    """rules.book_exposure for one book as this tick can read it: the
+    mark is the one this tick read for the book, else the one its last
+    plan carried (a book later in the walk has not been read yet)."""
+    rest = _resting_add_usd(t, book)
+    if rest is None:
+        return None
+    mark = t.marks.get(book["id"])
+    if mark is None:
+        mark = _num((_jsonish(book.get("last_plan")) or {}).get("mark"))
+    return rules.book_exposure(book.get("ledger_net"), book.get("avg_cost"), mark,
+                               book.get("intent"), rest)
+
+
+def _game_exposure(t: _Tick, book: dict) -> float | None:
+    """The exposure of the OTHER non-closed books of the book's game
+    this tick: a book sized earlier in the walk counts its sized figure
+    (t.game_sized), any other its held exposure. None when any of them
+    is unreadable -- the room is then 0 (fail closed), never a guess."""
+    total = 0.0
+    for b in t.game_books.get(_game_key_of(book), []):
+        if b["id"] == book.get("id"):
+            continue
+        e = t.game_sized[b["id"]] if b["id"] in t.game_sized else _held_exposure(t, b)
+        if e is None:
+            return None
+        total += e
+    return round(total, 4)
 
 
 def _book_intent(book: dict) -> str:
@@ -3288,7 +3424,8 @@ async def _confirm_gone(t: _Tick, whale: str, asset: str) -> bool:
 
 
 async def _shadow_check(t: _Tick, book: dict, target: int, net_used: float,
-                        mark: float | None, allow_short: bool) -> None:
+                        mark: float | None, allow_short: bool,
+                        cap_usd: float | None = None) -> None:
     """spec 1e: a shadow reading of the same whale and market within
     60 s that computed a different target FROM THE SAME NET is an
     arithmetic divergence and is named. THE RATIOS MAY DIFFER (review
@@ -3314,7 +3451,12 @@ async def _shadow_check(t: _Tick, book: dict, target: int, net_used: float,
     disagree) when the row lacks the fields to do that -- no raw, no
     `capped` bool, an unreadable or non-positive ratio, a mark off the
     ladder, an unreadable book ratio; a different net is not compared,
-    silently, as before (addendum sections 1 and 7)."""
+    silently, as before (addendum sections 1 and 7).
+
+    `cap_usd` (E1) is the cap THIS book was sized at this tick -- the
+    game's room when the per-game cap bound, else the per-market cap;
+    None reads the per-market cap. The comparison is the arithmetic at
+    that cap: a target the game room scaled is not a disagreement."""
     try:
         row = await t.pool.fetchrow(_SQL_SHADOW_LATEST, book["whale"], book["condition_id"])
     except Exception:  # noqa: BLE001 — the shadow's table is its own
@@ -3336,8 +3478,11 @@ async def _shadow_check(t: _Tick, book: dict, target: int, net_used: float,
     arith = sr * sn
     shadow_raw = arith if (capped or raw is None or abs(raw - arith) <= 1e-3) else raw
     scaled = round(shadow_raw * (br / sr), 6)
+    cap = float(rules.MIRROR_NET_CAP_USD)
+    if cap_usd is not None and _num(cap_usd) is not None:
+        cap = min(cap, float(cap_usd))          # tighten only, never raise
     expected = mi.target_shares(1.0, scaled, m, allow_short=bool(allow_short),
-                                cap_usd=float(rules.MIRROR_NET_CAP_USD))["target"]
+                                cap_usd=cap)["target"]
     if abs(float(expected) - float(target)) >= 1.0:
         _mirror_stop("shadow_live_disagree", book["whale"])
         _recent(book["id"], "shadow_live_disagree", shadow=row["target"], live=int(target),
@@ -3568,6 +3713,22 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         plan["ratio_stepped"] = float(stepped)
         _mirror_stop("ratio_stepped", w)
         _recent(book["id"], "ratio_stepped", ratio=float(stepped))
+    # THE GAME'S ROOM (E1): the per-game cap less the OTHER books of the
+    # game -- held at cost plus their resting increases, or the target a
+    # book earlier in this tick's walk was sized to. Read before the
+    # target, whatever the target turns out to be, so the plan row says
+    # what the game had left; this book's own mark is recorded for the
+    # later books' reading of it (a held book with no avg_cost)
+    t.marks[book["id"]] = r.mark
+    cap = float(rules.MIRROR_NET_CAP_USD)
+    game_exposure = _game_exposure(t, book)
+    room = rules.game_room(game_exposure, cap)
+    plan.update(game_exposure=game_exposure, game_room=room)
+    if game_exposure is None:
+        # named ONCE per book, here, and told apart from a game that is
+        # full (re-review LOW-3): the plan's null `game_exposure` says
+        # which, the census counts them separately
+        _mirror_stop("game_unreadable", w)
     # THE TARGET, from the book's FIXED ratio (addendum section 7)
     if t.flatten_all:
         tg = {"target": 0, "raw": 0.0, "refusal": None}
@@ -3590,6 +3751,67 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         await _write_plan(t, book, r, None, None, drift.drift, book.get("his_level"),
                           tg["refusal"], {**plan, "kind": "no_plan"})
         return
+    # THE PER-GAME CAP (E1, owner order 2026-09-06 "the per game cap is
+    # at 2500 per game (never more)"): an INCREASE is sized again at
+    # the room the game has left, AT COST (re-review MEDIUM-1). The
+    # per-market cap keeps its at-the-mark reading in mi.target_shares
+    # (cap / mark shares in TOTAL, unchanged); the GAME room is dollars
+    # at cost, so the cap handed over for the room reading is the
+    # shares already held valued AT THE MARK plus what the room leaves
+    # after the book's own held cost -- the increase then costs at most
+    # room - held_cost, and a mark that has fallen under the cost never
+    # lets a book average down past the game's $2,500 at cost (the
+    # re-review's X1: A 3,600 @ 0.49, B 1,400 @ 0.50, the mark at
+    # 0.30 -- B's room is $736 and its increase $36, 120 sh, where the
+    # first cut sized 736 / 0.30 = 2,453 in total and bought 1,053).
+    # The same mi.target_shares scaling, so it is never refused; with
+    # no room it is held at what the book has (`game_cap_full`;
+    # `game_unreadable` when the game could not be read, named at the
+    # read above); a reduce or a flatten is never touched
+    # (rules.game_capped). The shadow is compared against the
+    # ARITHMETIC figure at the cap this book was sized at (`arith`,
+    # `cap_eff`), before the ledger floor, the sign flip and the short
+    # share cap (E5 keeps comparing the unclamped target)
+    held_cost = rules.book_exposure(book.get("ledger_net"), book.get("avg_cost"), r.mark,
+                                    book.get("intent"), 0.0)
+    arith, cap_eff = target, cap
+    if not t.flatten_all and room < cap:
+        room_tg = room_cap = None
+        if room > 0 and held_cost is not None and r.mark is not None:
+            px_mark = (1.0 - float(r.mark)) if short else float(r.mark)
+            room_cap = round(abs(ledger) * px_mark + max(0.0, room - held_cost), 4)
+        if room_cap is not None and room_cap > 0:
+            room_tg = rules.mirror_target(book.get("ratio"), net, r.mark, MIRROR_ANCHOR_CLIP_USD,
+                                          cap_usd=room_cap, allow_short=shorts)
+            if room_tg.get("refusal"):
+                room_tg = None          # the same inputs refused nothing above; belt and braces
+        target, game_name = rules.game_capped(target, None if room_tg is None else room_tg["target"],
+                                              ledger, short)
+        if game_name is not None:
+            if game_name == "game_cap_full" and game_exposure is None:
+                game_name = "game_unreadable"      # counted once, at the read
+            else:
+                _mirror_stop(game_name, w)
+            plan["game_cap"] = game_name
+        if room_tg is not None and target == int(room_tg["target"]):
+            arith, cap_eff = target, min(float(room_cap), cap)
+    # what this book counts for against the later books of its game
+    # (rule 4): what it holds at cost (`held_cost`, read above), plus
+    # the larger of its resting increase and its new target's increase
+    # at the mark (the rest, if it stands, IS that increase or part of
+    # it; a reduce still holds until it sells, so it adds nothing and
+    # subtracts nothing). An unreadable ledger, or a non-terminal order
+    # the tick could not read (_resting_add_usd None), stays
+    # unreadable: the later books read no room. Read BEFORE the sign
+    # flip below, so a book about to flip counts its pre-flip target's
+    # increase -- more counted than will stand, never less
+    resting = _resting_add_usd(t, book)
+    increase_sh = max(0, abs(int(target)) - abs(ledger))
+    if held_cost is None or resting is None or (increase_sh and r.mark is None):
+        t.game_sized[book["id"]] = None
+    else:
+        px = 0.0 if r.mark is None else (float(r.mark) if target >= 0 else 1.0 - float(r.mark))
+        t.game_sized[book["id"]] = round(held_cost + max(resting, increase_sh * px), 4)
     # THE SIGN FLIP (brief B8, owner default Q5 (a)): his net has crossed
     # zero against this book. The book flattens under that name -- a
     # plan from a short ledger toward a positive target would run PAST
@@ -3600,7 +3822,6 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # lets the next tick's candidate open the other side. The
     # shadow is compared against the UNCLAMPED target: it computes the
     # same signed figure from the same knob (E5)
-    raw_target = target
     if rules.sign_flip(book.get("intent"), target):
         target = 0
         plan["sign_flip"] = True
@@ -3611,7 +3832,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     if target is not None and target != 0:
         plan.pop("flat_since", None)
     plan.update(target=target, target_raw=tg["raw"])
-    await _shadow_check(t, book, raw_target, net, r.mark, shorts)
+    await _shadow_check(t, book, arith, net, r.mark, shorts, cap_usd=cap_eff)
     # THE FREEZE: venue vs ledger + the desk's explained shares, one
     # signed subtraction on either sign (brief 3.1)
     explained = ledger + r.manual
@@ -4725,6 +4946,13 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
             return
     if not la or (w, cid) in t.books_seen:
         return
+    memo_key = le._us_game_key(slug)
+    if memo_key and _game_full_until.get(("game", str(memo_key)), 0.0) > t.now:
+        # the game read FULL inside the last GAME_FULL_MEMO_S (E1
+        # re-review LOW-2): no venue read and no candidate slot spent
+        # on it until the memo runs
+        _mirror_stop("cand_game_full_skipped", w)
+        return
     if not oa:
         # his fills never touched the other outcome: the market names
         # it, and the book must know both tokens (the underdog referee
@@ -4759,11 +4987,39 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     ratio = rules.open_ratio(net, r.mark)
     anchor = (t.ratios.get(w) or {}).get("anchor_usd")
     clip = le.per_fill_usd(w, slug)
+    # THE GAME'S ROOM AT OPEN (E1): a new book on a game whose other
+    # books already hold the $2,500 opens nothing this tick (an increase
+    # of 0, `game_cap_full`; read again next tick), and one on a game
+    # with part of it left is sized at that part (`game_cap_scaled`) --
+    # the same reading _tick_book makes for the book once it exists
+    game_key = le._us_game_key(slug)
+    cap = float(rules.MIRROR_NET_CAP_USD)
+    exposure = _game_exposure(t, {"whale": w, "game_key": game_key, "id": None})
+    room = rules.game_room(exposure, cap)
+    if room <= 0:
+        # full, or unreadable (told apart, re-review LOW-3). A FULL
+        # game's un-opened markets skip their read for GAME_FULL_MEMO_S
+        # (re-review LOW-2; the memo is checked before the read above);
+        # an UNREADABLE game is never memoised -- its cause is a
+        # sibling's order nobody could read this tick, which step O
+        # retries next tick, so the market is read again then
+        if exposure is None:
+            _mirror_stop("game_unreadable", w)
+            return
+        _mirror_stop("game_cap_full", w)
+        if game_key:
+            _game_full_until[("game", str(game_key))] = t.now + GAME_FULL_MEMO_S
+        return
     tg = rules.mirror_target(ratio, net, r.mark, rules.MIRROR_CLIP_USD,
-                             cap_usd=rules.MIRROR_NET_CAP_USD, allow_short=shorts)
+                             cap_usd=min(room, cap), allow_short=shorts)
     if tg.get("refusal"):
         _mirror_stop(tg["refusal"], w)
         return
+    if room < cap:
+        full = rules.mirror_target(ratio, net, r.mark, rules.MIRROR_CLIP_USD,
+                                   cap_usd=cap, allow_short=shorts)
+        if int(full["target"] or 0) != int(tg["target"]):
+            _mirror_stop("game_cap_scaled", w)
     target = int(tg["target"])
     # the short side's share cap (rules.MIRROR_SHORT_MAX_SHARES, ONE
     # until rung S5): a negative target is clamped toward zero and named
@@ -4801,7 +5057,6 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
     edge_ok, edge_why = edge_gate.verdict(w)
     his_slug = next((f.get("market_slug") for f in fills if f.get("market_slug")), None)
     clause = _mirror_cell(w, his_slug, his_px)
-    game_key = le._us_game_key(slug)
     legacy = slug_recent = underdog = kalshi = None
     try:
         legacy = bool(await t.pool.fetchval(_SQL_LEGACY_ROW, la, slug, game_key,
@@ -4890,17 +5145,46 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str) -> None:
             intent=(intent if short else None))
     log.info("mirror_live: book %s opened for %s on %s (target %s @ %s)", book["id"], w, slug,
              target, his_px)
+    # the new book joins its game for the rest of the tick (E1): a
+    # second candidate on the same game reads its target as exposure
+    t.game_books.setdefault(_game_key_of(book), []).append(book)
     async with _lock_for(book["id"]):
         await _tick_book(t, book)
 
 
 # -------------------------------------------------------------- tick_once
 
+def _book_id(row: dict) -> int:
+    return int(row.get("id") or 0)
+
+
+def _game_walk_key(books: list) -> tuple:
+    """A game's place in the walk: the OLDEST updated_at among its
+    books, then its lowest id. A NULL updated_at sorts last, as the
+    read's own `ORDER BY updated_at` puts it."""
+    ts = [x for x in (_num(b.get("updated_ts")) for b in books) if x is not None]
+    return (0 if ts else 1, min(ts) if ts else 0.0, min(_book_id(b) for b in books))
+
+
 def _woken_first(rows: list, woken: list) -> list:
-    if not woken:
-        return rows
-    first = [r for r in rows if str(r.get("condition_id")) in woken]
-    rest = [r for r in rows if str(r.get("condition_id")) not in woken]
+    """The book walk's order. GAMES in order of the oldest updated_at
+    among their books, and WITHIN a game book id ascending (E1, rule
+    4: the books of one game consume the game's room in one fixed
+    order whatever their updated_at says). The game order keeps the
+    abandon round-robin the first cut's id-only walk had dropped:
+    _write_plan bumps updated_at, a tick abandoned at book k wrote no
+    plan for k or for anything after it, so the next tick resumes with
+    the games it did not reach first. A woken market brings its WHOLE
+    game to the front, the games still in that order among themselves
+    and each game's books still in id order, so a wake never reorders
+    a game's books against each other."""
+    games: dict = {}
+    for r in rows:
+        games.setdefault(_game_key_of(r), []).append(r)
+    ordered = sorted(games.items(), key=lambda kv: _game_walk_key(kv[1]))
+    wk = {_game_key_of(r) for r in rows if str(r.get("condition_id")) in woken} if woken else set()
+    first = [b for k, bs in ordered if k in wk for b in sorted(bs, key=_book_id)]
+    rest = [b for k, bs in ordered if k not in wk for b in sorted(bs, key=_book_id)]
     return first + rest
 
 
@@ -5069,6 +5353,10 @@ async def _tick(t: _Tick, woken: list) -> None:
     # book walk that spent the candidates' budget was a count cap on
     # books by another road
     books = [dict(b) for b in await t.pool.fetch(_SQL_BOOKS_OPEN)]
+    # the per-game index (E1): every non-closed book by game_key (every
+    # whale's, one game one cap), before any book is sized, so each
+    # book's target reads the room its game has left after the others
+    _index_games(t, books)
     for book in _woken_first(books, woken):
         if t.abandoned or t.cancel_all:
             break
