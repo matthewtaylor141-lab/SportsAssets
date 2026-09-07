@@ -17,6 +17,13 @@ statement as the worker does -- and the render-ops `mirror-pnl`
 preset's totals row, whose `day_pnl` is the same rule, straight from
 the workflow file.
 
+L1 (2026-09-07): the statement takes the window's START as its one
+parameter -- GREATEST(now - 24 h, the newest re-arm), computed by the
+worker -- so the rows below also run with the start moved to a re-arm,
+and the render-ops `mirror-rearm` preset (one statement: DELETE the
+stop, write 'mirror_loss_rearm' with the deleted stop as `prior`)
+executes here against an ingestion_state table.
+
 Skips (visibly) when no local Postgres answers, the way the S1 pin
 does -- the fleet and dev boxes run one; CI without it loses this
 file only.
@@ -25,9 +32,11 @@ file only.
 from __future__ import annotations
 
 import asyncio
+import json
 import os
 import pathlib
 import re
+import time
 import uuid
 from datetime import timedelta
 
@@ -61,7 +70,14 @@ CREATE TABLE mirror_orders (
     cash_usd double precision NOT NULL DEFAULT 0,
     realized double precision NOT NULL DEFAULT 0,
     placed_at timestamptz NOT NULL DEFAULT now());
+CREATE TABLE ingestion_state (key text PRIMARY KEY, value jsonb NOT NULL);
 """
+
+
+def _window(rearm_at: float | None = None):
+    """The statement's one parameter as the worker hands it (L1): the
+    window's start, GREATEST(now - 24 h, the newest re-arm)."""
+    return ml._utc(ml._loss_window_start(time.time(), rearm_at))
 
 # tonight's four settled books: (id, realized_pnl, settled_pnl)
 TONIGHT = [(16, -244.75, -315.40), (3, 2.48, 156.17), (19, -2.11, -41.46), (22, 14.64, 19.74)]
@@ -121,7 +137,7 @@ def test_the_loss_sum_executes_and_counts_a_settled_books_dollars_once():
         admin, c, name = await _scratch()
         try:
             await _seed(c)
-            row = await c.fetchrow(ml._SQL_LOSS_SUM)
+            row = await c.fetchrow(ml._SQL_LOSS_SUM, _window())
             # settled over the four, realized over the open book and the
             # cashed-out close, nothing from the 25 h settlement
             assert row["lost"] == pytest.approx(SETTLED_TONIGHT - 100.0 - 50.0)
@@ -133,22 +149,22 @@ def test_the_loss_sum_executes_and_counts_a_settled_books_dollars_once():
             # the settled figure alone, for a book whose close is in the
             # window, whatever its realized part: no realized leaks in
             await c.execute("UPDATE mirror_books SET realized_pnl = -1e6 WHERE id = 16")
-            assert (await c.fetchval(ml._SQL_LOSS_SUM)) == pytest.approx(-330.95)
+            assert (await c.fetchval(ml._SQL_LOSS_SUM, _window())) == pytest.approx(-330.95)
             # a closed-settled row with NO closed_at -- only a hand-edited
             # row reads so; both close statements stamp it -- is clocked
             # by updated_at and counted once, by its settled figure; it
             # vanished from both sums before (E3 review, minor 2)
             await _book(c, 33, "closed", -7.0, -20.0, closed_h=0.25)
             await c.execute("UPDATE mirror_books SET closed_at = NULL WHERE id = 33")
-            row = await c.fetchrow(ml._SQL_LOSS_SUM)
+            row = await c.fetchrow(ml._SQL_LOSS_SUM, _window())
             assert row["lost"] == pytest.approx(-350.95) and row["books"] == 7
             await c.execute("UPDATE mirror_books SET realized_pnl = -1e6 WHERE id = 33")
-            assert (await c.fetchval(ml._SQL_LOSS_SUM)) == pytest.approx(-350.95)
+            assert (await c.fetchval(ml._SQL_LOSS_SUM, _window())) == pytest.approx(-350.95)
             await c.execute("UPDATE mirror_books SET updated_at = now() - interval '25 hours' WHERE id = 33")
-            assert (await c.fetchval(ml._SQL_LOSS_SUM)) == pytest.approx(-330.95)
+            assert (await c.fetchval(ml._SQL_LOSS_SUM, _window())) == pytest.approx(-330.95)
             # an empty table reads 0.0 and 0, the worker's `or 0.0` path
             await c.execute("DELETE FROM mirror_books")
-            empty = await c.fetchrow(ml._SQL_LOSS_SUM)
+            empty = await c.fetchrow(ml._SQL_LOSS_SUM, _window())
             assert (empty["lost"], empty["books"]) == (0.0, 0)
         finally:
             await _drop(admin, c, name)
@@ -191,6 +207,80 @@ def test_the_mirror_pnl_presets_totals_row_executes_and_day_pnl_is_the_stops_rul
             assert float(t["day_pnl"]) == pytest.approx(-330.95, abs=0.006)
             assert float(t["day_pnl"]) != pytest.approx(float(t["realized"]) + float(t["settled"]))
             assert fills[0]["what"] == "fills today" and fills[0]["n"] == 2
+        finally:
+            await _drop(admin, c, name)
+    asyncio.run(run())
+
+
+def test_the_re_arm_restarts_the_window_against_postgres():
+    """L1. The same rows with the window's start moved to a re-arm: 45
+    min back counts the cashed-out close (30 min) and the open book (10
+    min) and nothing settled two hours ago; three hours back counts
+    tonight's four again; a re-arm older than the window is the window's
+    own edge (the GREATEST). Then the 17:07:45Z shape: the tripped sum
+    settled an hour ago, a re-arm 30 min ago, a book that lost $100
+    since -- the sum is -100, not -5,123.95; with no re-arm it is."""
+    async def run():
+        admin, c, name = await _scratch()
+        try:
+            await _seed(c)
+            now = time.time()
+            row = await c.fetchrow(ml._SQL_LOSS_SUM, _window(now - 45 * 60))
+            assert (row["lost"], row["books"]) == (pytest.approx(-150.0), 2)
+            row = await c.fetchrow(ml._SQL_LOSS_SUM, _window(now - 3 * 3600))
+            assert (row["lost"], row["books"]) == (pytest.approx(-330.95), 6)
+            assert ml._loss_window_start(now, now - 25 * 3600) == now - 24 * 3600
+            row = await c.fetchrow(ml._SQL_LOSS_SUM, _window(now - 25 * 3600))
+            assert (row["lost"], row["books"]) == (pytest.approx(-330.95), 6)
+            await c.execute("DELETE FROM mirror_books")
+            await _book(c, 40, "closed", -1200.0, -5023.9545, closed_h=1.0)   # the morning's losses
+            await _book(c, 41, "closed", -100.0, None, closed_h=1 / 6)         # lost after the re-arm
+            row = await c.fetchrow(ml._SQL_LOSS_SUM, _window(now - 1800))
+            assert (row["lost"], row["books"]) == (pytest.approx(-100.0), 1)
+            row = await c.fetchrow(ml._SQL_LOSS_SUM, _window(None))
+            assert (row["lost"], row["books"]) == (pytest.approx(-5123.9545), 2)
+        finally:
+            await _drop(admin, c, name)
+    asyncio.run(run())
+
+
+def _mirror_rearm_statements() -> list[str]:
+    m = re.search(r'mirror-rearm\) need_confirm; SQL="(.*?)"; TO=', RENDER_OPS.read_text())
+    assert m, "the mirror-rearm preset is not where render-ops.yml kept it"
+    return [s.strip() for s in m.group(1).split(";") if s.strip()]
+
+
+def test_the_mirror_rearm_preset_executes_deletes_the_stop_and_writes_the_prior():
+    """L1. The preset's first statement against a tripped stop: the stop
+    row is gone, 'mirror_loss_rearm' holds now() as an instant the
+    worker parses, 'render-ops', and the deleted stop whole as `prior`;
+    the SELECT reads both back. A second run with no stop standing
+    upserts: a newer `at`, `prior` null, no second row."""
+    async def run():
+        admin, c, name = await _scratch()
+        try:
+            tripped = {"at": "2026-09-07T17:07:45Z", "sum": -5023.9545, "books": 214, "limit": 5000.0}
+            await c.execute("INSERT INTO ingestion_state (key, value) VALUES ('mirror_live', 'true'::jsonb), "
+                            "('mirror_loss_stop', $1::jsonb)", json.dumps(tripped))
+            stmts = _mirror_rearm_statements()
+            assert len(stmts) == 2, stmts
+            first, select = stmts
+            before = time.time()
+            await c.execute(first)
+            keys = {r["key"]: json.loads(r["value"]) for r in await c.fetch(select)}
+            assert "mirror_loss_stop" not in keys and keys["mirror_live"] is True
+            rearm = keys["mirror_loss_rearm"]
+            assert set(rearm) == {"at", "by", "prior"} and rearm["by"] == "render-ops"
+            assert rearm["prior"] == tripped
+            at = ml._rearm_at(rearm, None)
+            assert at is not None and before - 5 <= at <= time.time() + 5
+            assert ml._loss_window_start(time.time(), at) == at, "inside the window: the start"
+            await asyncio.sleep(0.01)
+            await c.execute(first)
+            again = json.loads(await c.fetchval("SELECT value FROM ingestion_state WHERE key = 'mirror_loss_rearm'"))
+            assert again["prior"] is None and again["by"] == "render-ops"
+            assert ml._rearm_at(again, None) >= at
+            assert await c.fetchval("SELECT count(*) FROM ingestion_state") == 2
         finally:
             await _drop(admin, c, name)
     asyncio.run(run())

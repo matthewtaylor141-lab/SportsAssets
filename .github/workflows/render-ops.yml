@@ -199,8 +199,17 @@ jobs:
                 mirror-preflight) SQL="SELECT what, value FROM (SELECT key AS what, left(value::text, 240) AS value FROM ingestion_state WHERE key IN ('mirror_live','mirror_live_whales','mirror_live_demoted','mirror_loss_stop','mapping_quarantine','premap_live','side_echo_last','live_trading_paused','copy_overspend_halt','live_verified_whales','live_clip_overrides','workers_boot','roster_auto_last') UNION ALL SELECT 'zz mirror_books live/24h', (SELECT count(*) FILTER (WHERE state <> 'closed') || '/' || count(*) FILTER (WHERE opened_at > now() - interval '24 hours') FROM mirror_books) UNION ALL SELECT 'zz mirror_orders by state', (SELECT COALESCE(string_agg(state || '=' || n, ' ' ORDER BY state), 'none') FROM (SELECT state, count(*) AS n FROM mirror_orders GROUP BY state) s) UNION ALL SELECT 'zz kalshi_claims rn1 24h', (SELECT count(*) FROM kalshi_claims WHERE lower(whale) = 'rn1' AND claimed_at > now() - interval '24 hours')::text UNION ALL SELECT 'zz live_orders 24h by status', (SELECT COALESCE(string_agg(status || '=' || n, ' ' ORDER BY status), 'none') FROM (SELECT status, count(*) AS n FROM live_orders WHERE placed_at > now() - interval '24 hours' GROUP BY status) s) UNION ALL SELECT 'zz live_orders last placed', (SELECT COALESCE(max(placed_at)::text, 'none') FROM live_orders)) t ORDER BY what;"; TO=30000 ;;
                 # The loss stop's only re-arm: nothing in the worker deletes
                 # 'mirror_loss_stop' once it trips (pre-flight 2026-09-05),
-                # so the operator does it here, on the record.
-                mirror-rearm) need_confirm; SQL="DELETE FROM ingestion_state WHERE key = 'mirror_loss_stop'; SELECT key, value FROM ingestion_state WHERE key LIKE 'mirror_%' ORDER BY key;"; TO=30000 ;;
+                # so the operator does it here, on the record. THE RE-ARM
+                # RESTARTS THE WINDOW (L1, 2026-09-07): the 16:51Z re-arm
+                # re-tripped at 17:07:45Z on the morning's losses, still
+                # inside the worker's trailing 24 h. ONE statement now deletes
+                # the stop AND writes 'mirror_loss_rearm' = {at: now(), by:
+                # render-ops, prior: the deleted stop or null}; the worker's
+                # loss sum counts only what happened after that instant
+                # (mirror_live._loss_window_start) and its next receipt says
+                # `since` / `rearmed_at`. The limit does not move. The SELECT
+                # reads both rows back.
+                mirror-rearm) need_confirm; SQL="WITH gone AS (DELETE FROM ingestion_state WHERE key = 'mirror_loss_stop' RETURNING value) INSERT INTO ingestion_state (key, value) VALUES ('mirror_loss_rearm', jsonb_build_object('at', now(), 'by', 'render-ops', 'prior', (SELECT value FROM gone))) ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value; SELECT key, value FROM ingestion_state WHERE key LIKE 'mirror_%' ORDER BY key;"; TO=30000 ;;
                 # THE LAST TICK, WHOLE (2026-09-06). The worker logs its mode
                 # line with the full stats dict, but the logs action above
                 # keeps 400 characters of a message and the census that says

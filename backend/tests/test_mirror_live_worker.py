@@ -477,11 +477,18 @@ class _Pool(_ShadowPool):
                 f"ml-loss-sum: a shape this fake does not model: {s}"
             # the settled branch's clock: closed_at, or updated_at where a
             # (hand-edited) row has none -- modelled only if the text says so
-            assert "COALESCE(closed_at, updated_at) > now() - interval" in s, \
+            assert "COALESCE(closed_at, updated_at) > $1::timestamptz" in s, \
                 f"ml-loss-sum: a settled clock this fake does not model: {s}"
-            hours = {int(h) for h in re.findall(r"now\(\) - interval '(\d+) hours'", s)}
-            assert len(hours) == 1, f"ml-loss-sum: one window, not {hours}"
-            since = self.clock - hours.pop() * 3600
+            # L1: the window's START is the statement's one parameter (the
+            # worker's GREATEST(now - 24 h, the newest re-arm)), clocking
+            # both arms and the count -- read from the call, never from
+            # this fake's clock. A text with an interval of its own, or
+            # with the parameter anywhere but those three places, is a
+            # shape this fake refuses to model
+            assert s.count("> $1::timestamptz") == 3 and s.count("$1") == 3 and "interval" not in s, \
+                f"ml-loss-sum: one window, the parameter: {s}"
+            assert len(a) == 1 and a[0].tzinfo is not None, f"ml-loss-sum: the window start: {a}"
+            since = a[0].timestamp()
 
             def _settled(b):
                 return b["state"] == "closed" and b["settled_pnl"] is not None
@@ -1091,6 +1098,8 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_cand_trail", {}, raising=False)   # W2 review: the cursor's trail (the fix)
     monkeypatch.setattr(ml, "_cand_refusal_last", {})  # W2 / P2: the refusal rows' memo
     monkeypatch.setattr(ml, "_cand_write_logged", False)
+    monkeypatch.setattr(ml, "_rearm_malformed_logged", False)   # L1: the malformed re-arm key's one line
+    monkeypatch.setattr(ml, "_last_loss", None)                  # L1: the mode line's loss window
     monkeypatch.setattr(ml, "_BOOK_LOCKS", {})
     monkeypatch.setattr(ms, "_ratio_cache", {"at": 0.0, "by_whale": {}})
     monkeypatch.setattr(ms, "_unmapped_until", {})
@@ -6201,6 +6210,12 @@ def _settled_book(p, realized, settled, closed_ago=3600, **slug):
                       opened_ts=NOW - 30 * 3600, **slug)
 
 
+# the loss sum's one parameter (L1): the window's start, the full 24 h
+# back from the fixture clock -- what the worker hands the statement
+# when no re-arm stands
+_WINDOW = (ml._utc(NOW - ml.LOSS_WINDOW_S),)
+
+
 def test_e3_the_loss_sum_counts_a_settled_books_dollars_once():
     """E3 (the day reconciliation of 2026-09-06 23:10Z). _SQL_LOSS_SUM
     summed realized_pnl over every book updated in 24 h PLUS
@@ -6232,7 +6247,7 @@ def test_e3_the_loss_sum_counts_a_settled_books_dollars_once():
     # a settlement 25 h old is outside the window entirely: neither its
     # settled figure nor its realized part comes back through updated_at
     _settled_book(p, -999.0, -1500.0, closed_ago=25 * 3600, **_ZZ)
-    row = p._run("fetchrow", ml._SQL_LOSS_SUM, ())
+    row = p._run("fetchrow", ml._SQL_LOSS_SUM, _WINDOW)
     assert row["lost"] == pytest.approx(sum(s for _, _, s in tonight) - 100.0 - 50.0)
     assert row["lost"] == pytest.approx(-330.95)
     assert row["books"] == 6, "every book updated in 24 h, the 25 h settlement not among them"
@@ -6247,12 +6262,12 @@ def test_e3_the_loss_sum_counts_a_settled_books_dollars_once():
                      closed_at=None, updated_ts=NOW - 900, opened_ts=NOW - 30 * 3600,
                      us_market_slug="aec-set-null-2026-09-06", condition_id="0xsetnull",
                      long_asset="tok-sn", other_asset="tok-tn")
-    row2 = p._run("fetchrow", ml._SQL_LOSS_SUM, ())
+    row2 = p._run("fetchrow", ml._SQL_LOSS_SUM, _WINDOW)
     assert row2["lost"] == pytest.approx(-350.95) and row2["books"] == 7
     nul["realized_pnl"] = -1e6                     # its realized part never leaks in
-    assert p._run("fetchrow", ml._SQL_LOSS_SUM, ())["lost"] == pytest.approx(-350.95)
+    assert p._run("fetchrow", ml._SQL_LOSS_SUM, _WINDOW)["lost"] == pytest.approx(-350.95)
     nul["updated_ts"] = NOW - 25 * 3600            # and out of the window it is nothing
-    assert p._run("fetchrow", ml._SQL_LOSS_SUM, ())["lost"] == pytest.approx(-330.95)
+    assert p._run("fetchrow", ml._SQL_LOSS_SUM, _WINDOW)["lost"] == pytest.approx(-330.95)
     # the statement's text: settled over closed-settled-in-window (clocked
     # by closed_at, else updated_at), realized over updated-in-window
     # EXCLUDING closed-settled, one window, the tag -- and the ARITHMETIC
@@ -6261,24 +6276,28 @@ def test_e3_the_loss_sum_counts_a_settled_books_dollars_once():
     # mutant that flips a sign or halves the figure passes through it
     # unseen; only the text catches it here (E3 review, minor 1)
     sql = _flat(ml._SQL_LOSS_SUM)
-    assert "ml-loss-sum" in sql and sql.count("now() - interval '24 hours'") == 3
+    # L1: the window's start is the statement's one parameter, in all
+    # three places; the text carries no interval and no now() of its own
+    assert "ml-loss-sum" in sql and sql.count("> $1::timestamptz") == 3
+    assert "interval" not in sql and "now()" not in sql
     assert ("(SELECT sum(settled_pnl) FROM mirror_books WHERE state = 'closed' AND settled_pnl IS NOT NULL "
-            "AND COALESCE(closed_at, updated_at) > now() - interval '24 hours')") in sql
-    assert ("(SELECT sum(realized_pnl) FROM mirror_books WHERE updated_at > now() - interval '24 hours' "
+            "AND COALESCE(closed_at, updated_at) > $1::timestamptz)") in sql
+    assert ("(SELECT sum(realized_pnl) FROM mirror_books WHERE updated_at > $1::timestamptz "
             "AND NOT (state = 'closed' AND settled_pnl IS NOT NULL))") in sql
-    assert "(SELECT count(*) FROM mirror_books WHERE updated_at > now() - interval '24 hours') AS books" in sql
+    assert "(SELECT count(*) FROM mirror_books WHERE updated_at > $1::timestamptz) AS books" in sql
     assert sql.startswith("SELECT COALESCE((SELECT sum(settled_pnl)")
     assert ")::float8 + COALESCE((SELECT sum(realized_pnl)" in sql
     assert "), 0)::float8 AS lost," in sql
-    # no other sign or factor anywhere: the window's `now() - interval`,
-    # `count(*)` and the tag are the only '-' and '*' the text may hold
-    bare = sql.replace("now() - interval", "").replace("count(*)", "").replace("/* ml-loss-sum */", "")
+    # no other sign or factor anywhere: `count(*)` and the tag are the
+    # only '-' and '*' the text may hold (the window's `now() - interval`
+    # left the text with L1: the start is the parameter)
+    bare = sql.replace("count(*)", "").replace("/* ml-loss-sum */", "")
     assert sql.count("COALESCE((SELECT sum(") == 2 and "-" not in bare and "*" not in bare, bare
     # the fake refuses the shape the reconciliation found rather than
     # modelling it: a test against a double-counting statement fails here
     double = ml._SQL_LOSS_SUM.replace("AND NOT (state = 'closed' AND settled_pnl IS NOT NULL)", "")
     with pytest.raises(AssertionError, match="a shape this fake does not model"):
-        p._run("fetchrow", double, ())
+        p._run("fetchrow", double, _WINDOW)
 
 
 def test_e3_the_stop_trips_on_the_once_counted_sum_and_not_on_the_double_count():

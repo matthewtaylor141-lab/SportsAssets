@@ -187,6 +187,38 @@ _STATE_LIVE = "mirror_live"
 _STATE_WHALES = "mirror_live_whales"
 _STATE_DEMOTED = "mirror_live_demoted"
 _STATE_LOSS_STOP = "mirror_loss_stop"
+# THE RE-ARM RESTARTS THE WINDOW (L1, 2026-09-07). The operator's
+# `mirror-rearm` (render-ops, confirm=DO) deleted the stop at 16:51Z and
+# the worker re-tripped itself at 17:07:45Z ({"sum": -5023.9545,
+# "books": 214, "limit": 5000.0}): the morning's losses (tripped
+# 09:46:36Z at -5,002.58) sat inside the trailing 24 h until the next
+# morning, so every re-arm re-tripped within a tick or two of any new
+# loss. A re-arm that cannot hold is not a re-arm. The preset now writes
+# this key in the same statement as its DELETE -- {"at": now() ISO,
+# "by": "render-ops", "prior": the deleted stop's value or null} -- and
+# the loss sum counts only what happened AFTER the newest re-arm: the
+# window starts at GREATEST(now - LOSS_WINDOW_S, at) (_loss_window_start).
+# A re-arm older than the window changes nothing; a key with no
+# parseable `at` reads as ABSENT and is logged once (fail closed toward
+# the FULL window, never a shorter one); an unreadable key is a stop, as
+# the stop key's own read is. The limit (MIRROR_LOSS_STOP_USD) and the
+# exit carve-out are untouched: a standing stop key holds whatever this
+# key says -- only the preset's DELETE clears it.
+_STATE_LOSS_REARM = "mirror_loss_rearm"
+LOSS_WINDOW_S = 24 * 3600.0
+# a re-arm `at` this far AHEAD of the tick's clock is still the re-arm it
+# says (a DB clock a moment ahead of the worker's); further ahead it is
+# malformed -- the full window, never an empty one (review L1)
+LOSS_REARM_SKEW_S = 300.0
+_rearm_malformed_logged = False
+# the loss window the LAST tick read (t.loss, published by tick_once;
+# None on a tick that never read it): what main() hands the quiet-tick
+# mode line to print as `loss=<sum>/<limit> since <HH:MM>`. A module
+# global like _last_mode, and NOT a stats key: the health endpoint's
+# sanitizer caps the served detail at 40 keys and an ON tick already
+# fills them (_publish_fills_dedup), so a new key would only ever be
+# the dropped one
+_last_loss: dict | None = None
 _STATE_FLATTEN = "mirror_flatten"
 # S4: the read-back proof of a resting SELL_SHORT (the short cover's
 # wire intent). {"proved": bool, "at", "slug", "order_id", "price",
@@ -722,6 +754,46 @@ async def _write_state(pool, key: str, value: Any) -> None:
         key, json.dumps(value, default=str))
 
 
+def _utc(ts: float) -> datetime:
+    return datetime.fromtimestamp(ts, tz=timezone.utc)
+
+
+def _rearm_at(value: Any, err: str | None, now: float | None = None) -> float | None:
+    """The newest re-arm's instant (epoch) off the 'mirror_loss_rearm'
+    row, or None: ABSENT, or MALFORMED -- unparseable JSON (_state's
+    "malformed"), not an object, no `at`, an `at` that is not an ISO
+    instant, or a naive one (no offset: it would be keyed to a guessed
+    zone). Malformed reads as absent -- the FULL window, the wider one
+    -- and is logged once per process (L1). A raised read is not this
+    function's: the caller stops on it, as on the stop key's."""
+    global _rearm_malformed_logged
+    if value is None and err is None:
+        return None
+    at = value.get("at") if isinstance(value, dict) else None
+    dt = None
+    if isinstance(at, str):
+        try:
+            dt = datetime.fromisoformat(at.strip().replace("Z", "+00:00"))
+        except ValueError:
+            dt = None
+    if dt is None or dt.tzinfo is None or (now is not None and dt.timestamp() > now + LOSS_REARM_SKEW_S):
+        if not _rearm_malformed_logged:
+            _rearm_malformed_logged = True
+            log.warning("mirror_live: %s malformed (%s); read as absent, the full %d h window stands",
+                        _STATE_LOSS_REARM, err or repr(at)[:80], int(LOSS_WINDOW_S // 3600))
+        return None
+    return dt.timestamp()
+
+
+def _loss_window_start(now: float, rearm_at: float | None) -> float:
+    """GREATEST(now - LOSS_WINDOW_S, rearm_at): the loss sum's window
+    starts at the newest re-arm when one is inside the window, else at
+    the window's own edge (L1). A re-arm older than the window changes
+    nothing; None is no re-arm."""
+    start = now - LOSS_WINDOW_S
+    return start if rearm_at is None else max(start, min(rearm_at, now))
+
+
 def _paced(fn, *args, **kwargs):
     """One venue call behind the process-wide measurement pacer, run in
     a worker thread by the caller (the shadow's _paced_bbo shape): ONE
@@ -948,16 +1020,24 @@ SELECT COALESCE(sum(cash_usd), 0)::float8 AS filled,
 # ml-book-state), so only a hand-edited row reads that way, and it
 # would otherwise vanish from BOTH sums (E3 review, minor 2). `books`
 # and the MIRROR_LOSS_STOP_USD stop write are as they were.
+# THE WINDOW STARTS AT THE NEWEST RE-ARM (L1, the paragraph over
+# _STATE_LOSS_REARM): the statement's ONE parameter is the window's
+# start, GREATEST(now - LOSS_WINDOW_S, rearm_at) computed by the worker
+# (_loss_window_start) from the tick's clock, and both arms and the
+# count clock by it -- the text holds no interval of its own, so the
+# three predicates cannot drift apart. The tick's clock is taken at
+# the tick's start, so a long tick reads a window no shorter than
+# now() - 24 h would (fail closed).
 _SQL_LOSS_SUM = """
 SELECT COALESCE((SELECT sum(settled_pnl) FROM mirror_books
                   WHERE state = 'closed' AND settled_pnl IS NOT NULL
-                    AND COALESCE(closed_at, updated_at) > now() - interval '24 hours'), 0)::float8
+                    AND COALESCE(closed_at, updated_at) > $1::timestamptz), 0)::float8
      + COALESCE((SELECT sum(realized_pnl) FROM mirror_books
-                  WHERE updated_at > now() - interval '24 hours'
+                  WHERE updated_at > $1::timestamptz
                     AND NOT (state = 'closed' AND settled_pnl IS NOT NULL)), 0)::float8
        AS lost,
        (SELECT count(*) FROM mirror_books
-         WHERE updated_at > now() - interval '24 hours') AS books /* ml-loss-sum */
+         WHERE updated_at > $1::timestamptz) AS books /* ml-loss-sum */
 """
 # A TAKE'S CANCEL IS A RE-QUOTE AND SPENDS THE REPLACE BUDGET. The count
 # read reason = 'replace' alone, but the take arm cancels the rest under
@@ -1291,6 +1371,10 @@ class _Tick:
     # shares; published as the `fills_dedup` block (_publish_fills_dedup)
     fills_dedup_rows: int = 0
     fills_dedup_shares: float = 0.0
+    # L1: the loss window this tick read (sum, books, limit, since,
+    # rearmed_at -- the receipt's fields), None on a tick that never
+    # read it; tick_once hands it to the mode line (_last_loss)
+    loss: dict | None = None
     # the venue's own market state on every quote read this tick, as
     # the venue spells it (MARKET_STATE_OPEN, MARKET_STATE_HALTED, ...)
     venue_states: Counter = field(default_factory=Counter)
@@ -2241,25 +2325,46 @@ async def _global_guards(t: _Tick) -> None:
         if err is not None or stop is not None:
             t.increase_block = "mirror_loss_stop"
         else:
-            try:
-                row = await t.pool.fetchrow(_SQL_LOSS_SUM)
-                lost = float((row or {})["lost"] or 0.0) if row else 0.0
-                books = int((row or {})["books"] or 0) if row else 0
-            except Exception as exc:  # noqa: BLE001 — a stop that cannot be read is a stop
-                log.warning("mirror_live: loss stop unreadable (%s)", type(exc).__name__)
-                t.increase_block = "mirror_loss_stop"
-            else:
-                if lost <= -float(rules.MIRROR_LOSS_STOP_USD):
-                    try:
-                        await _write_state(t.pool, _STATE_LOSS_STOP,
-                                           {"at": _iso(t.now), "sum": round(lost, 4),
-                                            "books": books,
-                                            "limit": float(rules.MIRROR_LOSS_STOP_USD)})
-                    except Exception:  # noqa: BLE001 — the tick still refuses
-                        log.warning("mirror_live: loss stop receipt not written", exc_info=True)
-                    t.increase_block = "mirror_loss_stop"
+            await _loss_stop(t)
     if t.increase_block:
         _mirror_stop(t.increase_block)
+
+
+async def _loss_stop(t: _Tick) -> None:
+    """The loss stop's read and trip, with no stop key standing. L1 (the
+    paragraph over _STATE_LOSS_REARM): the re-arm key is read beside the
+    stop's -- a raised read is a stop exactly as the stop key's, a
+    malformed one reads as absent -- and the window starts at the newest
+    re-arm inside LOSS_WINDOW_S, else at the window's edge; that start is
+    the one parameter _SQL_LOSS_SUM takes. The tick publishes what it
+    read (`loss` on the stats: the mode line, the raw heartbeat), and a
+    trip's receipt carries `since` and `rearmed_at` beside sum/books/
+    limit, so mirror-state shows what window tripped; the tick keeps the
+    same reading (t.loss) for the mode line. The limit and the exit
+    carve-out are as they were."""
+    rearm, err = await _state(t.pool, _STATE_LOSS_REARM)
+    if err is not None and err != "malformed":
+        t.increase_block = "mirror_loss_stop"
+        return
+    rearm_at = _rearm_at(rearm, err, t.now)
+    since = _loss_window_start(t.now, rearm_at)
+    try:
+        row = await t.pool.fetchrow(_SQL_LOSS_SUM, _utc(since))
+        lost = float((row or {})["lost"] or 0.0) if row else 0.0
+        books = int((row or {})["books"] or 0) if row else 0
+    except Exception as exc:  # noqa: BLE001 — a stop that cannot be read is a stop
+        log.warning("mirror_live: loss stop unreadable (%s)", type(exc).__name__)
+        t.increase_block = "mirror_loss_stop"
+        return
+    window = {"sum": round(lost, 4), "books": books, "limit": float(rules.MIRROR_LOSS_STOP_USD),
+              "since": _iso(since), "rearmed_at": None if rearm_at is None else _iso(rearm_at)}
+    t.loss = dict(window)
+    if lost <= -float(rules.MIRROR_LOSS_STOP_USD):
+        try:
+            await _write_state(t.pool, _STATE_LOSS_STOP, {"at": _iso(t.now), **window})
+        except Exception:  # noqa: BLE001 — the tick still refuses
+            log.warning("mirror_live: loss stop receipt not written", exc_info=True)
+        t.increase_block = "mirror_loss_stop"
 
 
 async def _read_open(t: _Tick) -> list | None:
@@ -7267,9 +7372,10 @@ def _woken_first(rows: list, woken: list) -> list:
 async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
     """One reconciler pass. Returns the census the heartbeat carries;
     every counter is present whatever the tick did."""
-    global _current_stats, _last_tick_at
+    global _current_stats, _last_tick_at, _last_loss
     now = time.time() if now_ts is None else float(now_ts)
     started = time.monotonic()          # the real clock: `now` may be the caller's
+    _last_loss = None                   # L1: never a stale window on the mode line
     stats = _new_stats()
     if _TICK_LOCK.locked():
         stats.update(status="overlap", skipped_overlap=True, tick_s=0.0)
@@ -7293,6 +7399,7 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             # publishes the counters it did reach, never a stale block
             stats["integ"] = _integ_block(stats)
             _publish_fills_dedup(t)
+            _last_loss = t.loss         # L1: the mode line's `loss=` fragment
             _current_stats = None
     return stats
 
@@ -7637,7 +7744,7 @@ async def _instruments(t: _Tick) -> None:
 
 # ------------------------------------------------------------------- main
 
-def _mode_line(stats: dict, ticks: int) -> None:
+def _mode_line(stats: dict, ticks: int, loss: dict | None = None) -> None:
     """The quiet-tick line, on every MODE_LINE_EVERY_TICKS-th completed
     tick. Built from the census the tick published: `mode`, `whales`,
     `books_live`, `orders_open` and `mirror_day_room` (the day ROOM in
@@ -7649,7 +7756,12 @@ def _mode_line(stats: dict, ticks: int) -> None:
     that abandoned) and `backoff_left_s` (printed as `backoff=` on a
     tick skipped inside the backoff, whose `mode` is the one the worker
     holds -- never SAFE unless the mode IS safe). `census` and `recent`
-    are left out of the trailing dict, as the ops line leaves them out."""
+    are left out of the trailing dict, as the ops line leaves them out.
+    `loss` (L1) is the loss window the tick read, handed over by main()
+    (_last_loss, the paragraph over it): `loss=<sum>/<limit> since
+    <HH:MM>` beside the day rail, the window's start to the minute --
+    bounded text, the ISO's clock alone -- so a re-arm shows as the
+    start moving to its instant; nothing on a tick that read none."""
     if ticks < 1 or ticks % MODE_LINE_EVERY_TICKS:
         return
     extra = ""
@@ -7657,14 +7769,18 @@ def _mode_line(stats: dict, ticks: int) -> None:
         extra += " abandon=%s" % (stats.get("abandon_reason"),)
     if stats.get("skipped_backoff"):
         extra += " backoff=%s" % (stats.get("backoff_left_s"),)
+    rail = ""
+    if isinstance(loss, dict):
+        rail = " loss=%s/%s since %s" % (loss.get("sum"), loss.get("limit"),
+                                         str(loss.get("since") or "")[11:16])
     # `day=none` under an unbounded day cap (the default since
     # 2026-09-06): the room is null, and there is no cap to print
     day = stats.get("mirror_day_room")
     if day is None and not math.isfinite(float(rules.MIRROR_DAY_USD)):
         day = "none"
-    log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s venue=%s%s stats=%s",
+    log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s%s venue=%s%s stats=%s",
              stats.get("mode"), stats.get("whales"), stats.get("books_live"),
-             stats.get("orders_open"), day, stats.get("venue_state"),
+             stats.get("orders_open"), day, rail, stats.get("venue_state"),
              extra, {k: v for k, v in stats.items() if k not in ("census", "recent")})
 
 
@@ -7693,7 +7809,7 @@ async def main() -> None:
                 if stats.get("ops") or stats.get("abandoned"):
                     log.info("mirror_live: %s", {k: v for k, v in stats.items()
                                                  if k not in ("census", "recent")})
-                _mode_line(stats, ticks)
+                _mode_line(stats, ticks, _last_loss)
             except Exception:  # noqa: BLE001 — the reconciler never dies
                 log.exception("mirror_live pass failed")
             try:
