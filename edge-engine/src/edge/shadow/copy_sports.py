@@ -352,6 +352,25 @@ def market_type_of(slug: str) -> str:
     # reading one abbreviation over.
     if any(t in _SEGMENT_TOKENS for t in suffix):
         return "prop"
+    # THE VENUE'S TOTAL-MAPS TOKEN (E2, 2026-09-07; gap_esports_chi §3.5).
+    # His 'cs2-<a>-<b>-<date>-tot-2pt5' fell to the bare-line fallback
+    # and typed SPREAD -- a wrong-family route into the asc rows. The
+    # venue lists it as 'tsc-cs2-<a>-<b>-<date>-tot-2pt5' with the full
+    # total grammar (esports_chi_rows_1403.log: over/under, line 2.5,
+    # 'Will the total in FOKUS vs. Nemiga be more than 2.5?'), and NO
+    # lane reads a total of maps yet: it is the series' map count, a
+    # derivative like a segment, so it is prop class here exactly as a
+    # first-half total is (no venue prefix, the copy lane's block) and
+    # family_of reads it 'total' on the segment 'maps' so the identity
+    # lane refuses it by name (total:segment-absent). It is NOT typed
+    # 'total': with the identity switch off the wording arm would then
+    # map it onto that tsc row on line equality alone, and the env may
+    # only lower rails. A 'tot' that IS one of his slug's two team codes
+    # (a Tottenham pick side, its compact spread '…-tot-1pt5') is that
+    # code as before -- his own slug says which.
+    if (len(suffix) == 2 and suffix[0] == "tot" and suffix[0] not in parts[1:3]
+            and _LINE_RE.match(suffix[1])):
+        return "prop"
     # SPELLED MONEYLINE. A bare team code types as moneyline, but the
     # feed also spells it out — and 'moneyline' is nine characters, so
     # it hit the >4 unknown-word guard below and returned "unknown",
@@ -427,7 +446,14 @@ def market_type_of(slug: str) -> str:
 #   btts                      -> family 'btts'
 #   spread-(home|away)-<line> -> family 'spread'
 #   total-<line>              -> family 'total'
+# E2 (2026-09-07, gap_esports_chi §3.4-3.5), the feed's esports rows:
+#   game<N>                   -> family 'map_winner', segment 'map<N>'
+#                                (his 'cs2-fnc-nip-2026-09-06-game1',
+#                                title '… - Map 1 Winner')
+#   tot-<line>                -> family 'total',      segment 'maps'
+#                                (total maps; refused by name, §3.5)
 # Anything else answers market_type_of, unchanged.
+_MAP_GAME_RE = _re.compile(r"^game(\d+)$")
 _SEGMENT_PHRASES = (("first", "half", "fh"), ("second", "half", "sh"),
                     ("1st", "half", "fh"), ("2nd", "half", "sh"))
 _SEGMENT_SINGLE = {"halftime": "ht", "ht": "ht", "fh": "fh", "sh": "sh",
@@ -459,6 +485,16 @@ def _feed_family(slug: str) -> tuple[str, str] | None:
     if not suffix:
         return None
     seg, rest = _split_segment(suffix)
+    if not seg and len(rest) == 1 and _MAP_GAME_RE.match(rest[0]):
+        # E2: a lone 'game<N>' is the map-N winner; the map is the
+        # segment, its number read from his own token
+        return "map_winner", "map" + _MAP_GAME_RE.match(rest[0]).group(1)
+    if not seg and len(rest) == 2 and rest[0] == "tot" and rest[0] not in parts[1:3] \
+            and _LINE_RE.match(rest[1]) and not rest[1].startswith(("pos", "neg")):
+        # E2: the total of maps -- the total family on the 'maps'
+        # segment, which no venue identifier carries as a segment token,
+        # so the C3 segment gate refuses it by name
+        return "total", "maps"
     if rest == ["btts"]:
         return "btts", seg
     if len(rest) == 2 and rest[0] == "total" and _LINE_RE.match(rest[1]) \
@@ -495,7 +531,7 @@ def segment_of(slug: str) -> str:
     return fam[1] if fam is not None else ""
 
 
-MIRROR_FAMILY_OF_C3 = frozenset({"spread", "total", "btts"})
+MIRROR_FAMILY_OF_C3 = frozenset({"spread", "total", "btts", "map_winner"})
 
 
 def mirror_family_of(slug: str) -> str:
@@ -503,7 +539,9 @@ def mirror_family_of(slug: str) -> str:
     first-half total is the 'total' family (segment 'fh' in its slug)
     so the per-family census and any per-family cap read it as a total,
     where market_type_of files it 'prop' for the copy lane's block --
-    which is unchanged: copy_verdict still refuses it. Every other slug
+    which is unchanged: copy_verdict still refuses it. E2: a map winner
+    ('game<N>') is the 'map_winner' family (market_type_of stays
+    'unknown' there: the copy lane never reads it). Every other slug
     is market_type_of's answer."""
     fam = family_of(slug)
     return fam if fam in MIRROR_FAMILY_OF_C3 else market_type_of(slug)

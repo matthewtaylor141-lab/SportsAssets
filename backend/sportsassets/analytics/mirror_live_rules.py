@@ -732,7 +732,12 @@ MIRROR_FROZEN_NAME_TICKS = int(capped_env("MIRROR_FROZEN_NAME_TICKS", 3))
 # stops refusing a derivative for BEING one. Its residuals (decision
 # 17's resolution-rule mismatches, decision 19's unmeasured fill
 # behaviour by family) are the owner's, accepted with the choice.
-MIRROR_FAMILIES = frozenset({"moneyline", "spread", "total", "prop", "btts", "exact_score"})
+# E2 (2026-09-07): 'map_winner' joins the set -- the esports map winner
+# copy_sports.mirror_family_of files a 'game<N>' slug under (docs §17);
+# the family's mapping is the identity pick's alone, behind the same
+# switch as C3, and everything in front of a book stands as before.
+MIRROR_FAMILIES = frozenset({"moneyline", "spread", "total", "prop", "btts", "exact_score",
+                             "map_winner"})
 # The flat tolerance in shares, ONE number for the ledger and the
 # bookings (addendum section 9): a fractional venue fill can leave a
 # ledger of 1e-8 that is not zero, and a book "held" by dust would never

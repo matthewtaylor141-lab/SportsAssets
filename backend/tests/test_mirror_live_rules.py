@@ -96,8 +96,9 @@ def test_caps_carry_the_spec_defaults_and_reuse_the_shared_ones(monkeypatch):
     # "everything he trades" (owner decision 2026-09-05): every sports
     # family the grammar names; never crypto (another lane's venue),
     # never unknown or blank (fail closed)
+    # E2 (2026-09-07): the esports map winner joins (docs §17)
     assert r.MIRROR_FAMILIES == frozenset({"moneyline", "spread", "total", "prop", "btts",
-                                           "exact_score"})
+                                           "exact_score", "map_winner"})
     assert not ({"crypto", "unknown", ""} & r.MIRROR_FAMILIES)
     # the shared numbers are the shared objects, never restated
     assert r.MIN_PROOF_CLUSTERS is proof.MIN_PROOF_CLUSTERS

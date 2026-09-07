@@ -182,6 +182,25 @@ _KIND_PREFIXES = frozenset({"aec", "atc", "asc", "tsc", "astatc"})
 # event, the rest is the question
 _DRAW_TITLE_MATCHUP_RE = re.compile(
     r"^\s*will\s+(.+?\s+vs\.?\s+.+?)\s+end\s+in\s+a\s+draw\s*\??\s*$", re.I)
+# E1 (2026-09-07, gap_esports_chi §1.3/§3.3): the feed's attested esports
+# event title, 'Counter-Strike: <A> vs <B> (BO<n>) - <tournament>' on
+# every cs2 row of esports_chi_rows_1352.txt, keyed 'fokus vs nemiga
+# stake ranked episode 4@…' where the venue's 'FOKUS vs. Nemiga' keys
+# 'fokus vs nemiga@…' -- the two could never meet (no_key_intersection
+# on every series whose team codes his feed digit-suffixes). Exactly
+# this template, read on the raw title (the punctuation it names is
+# what _key_norm erases), down to its matchup; a lookup, not a
+# decision -- what the rows then answer to is match_side, unchanged.
+_ESPORTS_TITLE_MATCHUP_RE = re.compile(
+    r"^\s*counter-strike:\s+(?P<a>.+?)\s+vs\s+(?P<b>.+?)\s+\(bo\d\)(?:\s+-\s+.*)?\s*$",
+    re.I | re.S)
+
+
+def _esports_matchup(title: str | None) -> str | None:
+    """'<A> vs <B>' of the feed's esports event title, or None when the
+    title is not that wording (it then keys as it always did)."""
+    m = _ESPORTS_TITLE_MATCHUP_RE.match(title or "")
+    return f"{m.group('a')} vs {m.group('b')}" if m else None
 
 
 def _key_norm(text: str | None) -> str:
@@ -254,6 +273,11 @@ def event_keys_for(title: str | None, slug: str | None = None) -> list[str]:
     dm = _DRAW_TITLE_MATCHUP_RE.match(title or "")
     if dm:
         title = dm.group(1)
+    # E1 (2026-09-07): the esports event title, the same way -- its own
+    # template (_esports_matchup above), its matchup, nothing wider
+    em = _esports_matchup(title)
+    if em:
+        title = em
     t = pmus._clean_title(title)
     if t:
         # Every emission goes through _key_variants: raw _norm left
@@ -485,6 +509,10 @@ def _want_prefixes(global_slug: str | None) -> set[str] | None:
     his = c3_his(global_slug) if yn_identity_on() else None
     if his is not None:
         return {C3_PREFIX[his["family"]]}
+    if yn_identity_on() and map_his(global_slug) is not None:
+        # E2: the map winner's kind, inside the same switch; off, the
+        # slug reads market_type_of's 'unknown' as before
+        return {MAP_PREFIX}
     return PREFIX_FOR_TYPE.get(market_type_of(global_slug or ""))
 
 
@@ -3231,7 +3259,17 @@ def c3_his(his_slug: str | None) -> dict | None:
         return None
     seg = segment_of(s)
     rest = [t for t in (m.group("rest") or "").split("-") if t]
-    if seg:
+    if seg == "maps":
+        # E2 (2026-09-07): the feed's total of maps, 'tot-<L>' -- the
+        # total family on the segment 'maps', which no venue identifier
+        # carries as a segment token, so c3_same_segment empties the pool
+        # and the pick refuses total:segment-absent by name; the venue's
+        # tsc-…-tot-<L> rows (esports_chi_rows_1403.log) are a lane
+        # nobody has built (docs §17), never the wording arm's
+        if len(rest) != 2 or rest[0] != "tot":
+            return None
+        rest = ["total", rest[1]]
+    elif seg:
         rest = rest[2:] if rest[:1] in (["first"], ["second"], ["1st"], ["2nd"]) else rest[1:]
     out = {"family": fam, "seg": seg, "lg": m.group("lg"), "a": m.group("a"),
            "b": m.group("b"), "date": m.group("date"), "line": "", "side": ""}
@@ -3749,6 +3787,146 @@ def c3_pick(rows: list[dict], outcome: str | None, his_title: str | None,
     if his["family"] == "total":
         return _c3_pick_total(rows, his, outcome, his_title, t)
     return _c3_pick_btts(rows, his, outcome, his_title, t)
+
+
+# ---------------------------------------------------------------- E2
+# THE MAP WINNER (2026-09-07; gap_esports_chi §1.4/§3.4, $24.5k + $5.2k
+# refused in 30 h as no_key_intersection / unknown_market_type:unparsed).
+# His '<lg>-<a>-<b>-<date>-game<N>' with title 'Counter-Strike: <A> vs
+# <B> - Map <N> Winner' and a TEAM as his outcome; the venue lists ONE
+# per-team yes/no row per map, 'astatc-cs2-<a>-<b>-<date>-map<N>' with
+# the question 'Will <X> win Map <N> vs <Y>?' (nf-venue_1350.log,
+# esports_chi_rows_1403.log: fnc-nip map1/map2 name NIP, hero-1win map2
+# Heroic, 1win-astr map2 1WIN, fokus-nemi map1/map2 FOKUS, k27-sin map2
+# K27). The rows are reached through E1's keys (his event title's
+# matchup), so his codes need not equal the venue's ('1win-ast' vs
+# '1win-astr'); the identity is then the venue's own words, in the C3
+# discipline: his title's map number must be his slug's
+# (map:title-shear); a row on this event whose identifier suffix is
+# map<N> (map:segment-absent); its question in exactly that template
+# with the same N (map:question-shape); <X> naming HIS OUTCOME and <Y>
+# the other side of his title's matchup by _yn_name_match (map:names);
+# then his BUY of X is the row's `yes` side with the venue's own intent.
+# His fill on Y -- no listed row has Y as its subject -- refuses
+# map:subject-absent: 'no on NIP wins Map 1' is 'fnatic wins Map 1' only
+# if a listed map is never voided, which no row states, so the
+# complement is NOT assumed. Two identifiers passing is map:ambiguous.
+# Never a position, never a code similarity, never a nickname.
+MAP_PREFIX = "astatc"
+_MAP_TITLE_RE = re.compile(
+    r"^\s*counter-strike:\s+(?P<a>.+?)\s+vs\s+(?P<b>.+?)\s+-\s+map\s+(?P<n>\d+)\s+winner\s*$",
+    re.I)
+_MAP_Q_RE = re.compile(
+    r"^\s*will\s+(?P<x>.+?)\s+win\s+map\s+(?P<n>\d+)\s+vs\s+(?P<y>.+?)\s*\??\s*$", re.I)
+_MAP_REST_RE = re.compile(r"^map(\d+)$")
+
+
+def map_his(his_slug: str | None) -> dict | None:
+    """His slug read as a map winner: {lg, a, b, date, n} or None when
+    it is not one (family_of reads 'game<N>' and nothing else)."""
+    from ..copy_sports import family_of
+
+    s = (his_slug or "").lower()
+    if family_of(s) != "map_winner":
+        return None
+    m = _C3_IDENT_RE.match("x-" + s)
+    if m is None or m.group("a") == m.group("b"):
+        return None
+    rest = [t for t in (m.group("rest") or "").split("-") if t]
+    if len(rest) != 1 or not rest[0].startswith("game"):
+        return None
+    return {"lg": m.group("lg"), "a": m.group("a"), "b": m.group("b"),
+            "date": m.group("date"), "n": int(rest[0][4:])}
+
+
+def _c3_pick_map(rows: list[dict], his: dict, outcome: str | None,
+                 his_title: str | None, trace: dict) -> dict | None:
+    """The map winner's identity pick over the astatc-kept rows: the
+    `yes` row (a COPY carrying matched_by premap_map_winner) or None
+    with the refusal named in `trace`. Pure."""
+    nm = pmus._yn_name_match
+    trace["family"], trace["segment"] = "map_winner", f"map{his['n']}"
+    on = _c3_norm(outcome)
+    tm = _MAP_TITLE_RE.match(pmus.fold_latin(str(his_title or "")))
+    if tm is None or _folds_away(his_title) or int(tm.group("n")) != his["n"]:
+        trace["refusal"] = "map:title-shear"
+        return None
+    sides = [_c3_norm(tm.group("a")), _c3_norm(tm.group("b"))]
+    want_rest = f"map{his['n']}"
+    # THE EVENT WITNESS (M4 review, HIGH-1 / MEDIUM-1): the matchup keys
+    # reach every astatc row titled '<A> vs. <B>' on his date, whatever
+    # game code or team codes its identifier carries -- fnatic and NIP
+    # field rosters in several games, and a bracket's same-day rematch
+    # lists the pair under reversed codes. The identifier's league code
+    # must be his (plain equality: the venue's esports codes read cs2 on
+    # every row), and when ANY row on his date carries his own stem
+    # 'astatc-<lg>-<a>-<b>-<date>-' (his codes byte for byte, the C3
+    # identity) an identifier outside it is another event. The
+    # digit-suffixed case ('1win-ast' -> '1win-astr') carries no stem on
+    # the board and is unchanged; fails closed.
+    cands = []
+    own_stem = f"{MAP_PREFIX}-{his['lg']}-{his['a']}-{his['b']}-{his['date']}-"
+    own = any(str(r.get("identifier") or "").lower().startswith(own_stem) for r in rows)
+    for r in rows:
+        ident = str(r.get("identifier") or "").lower()
+        m = _C3_IDENT_RE.match(ident)
+        if (m is None or m.group("kind") != MAP_PREFIX or m.group("date") != his["date"]
+                or m.group("lg") != his["lg"]):
+            continue
+        if own and not ident.startswith(own_stem):
+            continue
+        if (m.group("rest") or "") != want_rest:
+            continue
+        cands.append(r)
+    if not cands:
+        trace["refusal"] = "map:segment-absent"
+        return None
+    parsed = []
+    for r in cands:
+        qm = _MAP_Q_RE.match(pmus.fold_latin(str(r.get("question") or "")))
+        if qm is None or int(qm.group("n")) != his["n"]:
+            continue
+        parsed.append((r, _c3_norm(qm.group("x")), _c3_norm(qm.group("y"))))
+    if not parsed:
+        trace["refusal"] = "map:question-shape"
+        return None
+    mine = [i for i, s in enumerate(sides) if on and nm(s, on)]
+    if len(mine) != 1:
+        # his outcome is not one side of his own title's matchup (a
+        # yes/no, another name, or both sides at once)
+        trace["refusal"] = "map:names"
+        trace["title_sides"] = sides
+        return None
+    other = sides[1 - mine[0]]
+    hits = [r for r, x, y in parsed if nm(x, on) and nm(y, other)]
+    if not hits:
+        trace["venue_names"] = [[x, y] for _, x, y in parsed]
+        if any(nm(x, other) and nm(y, on) for _, x, y in parsed):
+            # the venue's subject on this map is the OTHER team; his
+            # team has no row of its own and the complement is not read
+            trace["refusal"] = "map:subject-absent"
+        else:
+            trace["refusal"] = "map:names"
+        return None
+    ids = sorted({str(r.get("identifier")) for r in hits})
+    if len(ids) > 1:
+        trace["refusal"] = "map:ambiguous"
+        trace["identifiers"] = ids
+        return None
+    yes = [r for r in hits if _norm(r.get("side_norm")) == "yes"]
+    if not yes:
+        trace["refusal"] = "map:side"
+        return None
+    if len(yes) > 1:
+        trace["refusal"] = "map:ambiguous"
+        return None
+    r = yes[0]
+    if r.get("intent") != _YN_IDENTITY_INTENT["yes"]:
+        trace["refusal"] = "map:intent"
+        return None
+    trace.update(matched_by="premap_map_winner", admitted=ids[0], side="yes",
+                 his_team=("a", "b")[mine[0]], venue_subject=on)
+    return dict(r, matched_by="premap_map_winner")
 
 
 def match_side(rows: list[dict], outcome: str | None,
@@ -4772,6 +4950,8 @@ async def resolve_explain(pool, market_title: str | None,
     mtype = market_type_of(global_slug or "")
     want = _want_prefixes(global_slug)
     his_c3 = c3_his(global_slug) if yn_identity_on() else None
+    # E2: the map winner, read inside the same switch (resolve's own)
+    his_map = map_his(global_slug) if yn_identity_on() and his_c3 is None else None
     out["family"] = family_of(global_slug or "")
     out["c3_on"] = yn_identity_on()
     if not want:
@@ -4808,9 +4988,12 @@ async def resolve_explain(pool, market_title: str | None,
             out["detail"] = (f"no {C3_PREFIX[his_c3['family']]}- row on segment "
                              f"{his_c3['seg']!r} for this event")
             return out
-    wording = his_c3 is None or not his_c3["seg"]
+    # E2: a map winner is read by its own pick alone, as a segmented C3
+    # family is -- the wording arm never sees its rows
+    wording = (his_c3 is None or not his_c3["seg"]) and his_map is None
     hit = match_side(kept, outcome, market_title, global_slug) if wording else None
     c3_trace: dict = {}
+    map_trace: dict = {}
     if hit is None and yn_identity_on():
         # the same second call resolve makes, so the census attributes
         # exactly what production does once the owner's flip is on
@@ -4837,6 +5020,12 @@ async def resolve_explain(pool, market_title: str | None,
                 out["matched_by"] = hit["matched_by"]
                 if hit.get("league_alias"):
                     out["league_alias"] = hit["league_alias"]
+        if hit is None and his_map is not None:
+            # E2: the same map-winner call resolve makes
+            hit = _c3_pick_map(kept, his_map, outcome, market_title, map_trace)
+            out["map"] = map_trace
+            if hit is not None:
+                out["matched_by"] = hit["matched_by"]
     c5_trace: dict = {}
     if hit is None and yn_identity_on():
         # C5: the same code translation resolve makes, after every other
@@ -5160,6 +5349,11 @@ async def resolve_explain(pool, market_title: str | None,
             # C6-N: the stored-title witness was read and the names arm
             # refused by its own name (yn:names-… with `why`)
             out["split"] = c6_trace["refusal"]
+        if map_trace.get("refusal"):
+            # E2: the map winner's own refusal is the split -- last, so
+            # a C5 trace on a digit-suffixed code ('1win-ast') never
+            # relabels a family C5 has no lane for
+            out["split"] = map_trace["refusal"]
         return out
     if not hit.get("intent"):
         out["step"] = "side_has_no_intent"
@@ -5258,7 +5452,11 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         kept = c3_same_segment(kept, his_c3["seg"])
         if not kept:
             return None
-    wording = his_c3 is None or not his_c3["seg"]
+    # E2 (2026-09-07): the map winner (the block comment at map_his),
+    # inside the same switch and read by its own pick alone, as a
+    # segmented C3 family is -- the wording arm never sees its rows
+    his_map = map_his(global_slug) if yn_identity_on() and his_c3 is None else None
+    wording = (his_c3 is None or not his_c3["seg"]) and his_map is None
     hit = match_side(kept, outcome, market_title, global_slug) if wording else None
     matched_by = "premap"
     if hit is None and yn_identity_on():
@@ -5290,6 +5488,13 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
             # premap_fh_total / premap_btts …; inside the same switch
             cert = await grammar_cert(pool) if his_c3["family"] == "spread" else None
             hit = c3_pick(kept, outcome, market_title, global_slug, board=rows, cert=cert)
+            if hit is not None:
+                matched_by = hit["matched_by"]
+        if hit is None and his_map is not None:
+            # E2: the map winner's identity pick -- source 'premap',
+            # matched_by premap_map_winner; the `yes` row of the venue's
+            # per-team map market naming his outcome, never its `no`
+            hit = _c3_pick_map(kept, his_map, outcome, market_title, {})
             if hit is not None:
                 matched_by = hit["matched_by"]
     if hit is None and os.getenv("PREMAP_NAMED_LANE",
