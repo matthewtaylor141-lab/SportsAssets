@@ -913,7 +913,10 @@ async def _map_exact(pool, pmus, assets: list[str], by_asset: dict[str, dict],
     out["lane"] = map_lane.SRC_GRAMMAR
     out["grammar"] = {"his_slug": v1.get("his_slug"), "side_index": v1.get("side_index"),
                       "outcome_desc": v1.get("outcome_desc"), "intent": v1.get("intent"),
-                      "slug": v1["slug"], "asset": a1}
+                      "slug": v1["slug"], "asset": a1,
+                      # C6: his outcome's own words, for the live class's
+                      # team-field truth check (map_lane.grammar_truth)
+                      "his_outcome": (by_asset.get(a1) or {}).get("outcome")}
     return await _long_from_catalogue(pool, condition_id,
                                       _choose_long(assets, cands, pos, map_lane.SRC_GRAMMAR))
 

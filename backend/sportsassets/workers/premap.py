@@ -3201,7 +3201,8 @@ async def c5_resolve(pool, rows: list[dict], kept: list[dict], outcome: str | No
         # the same C3 call resolve makes (C4: a spread also sees the
         # event's aec row and the grammar class's certification state)
         gcert = await grammar_cert(pool) if his_c3["family"] == "spread" else None
-        hit = c3_pick(kept, outcome, market_title, slug, lane, board=rows, cert=gcert)
+        hit = c3_pick(kept, outcome, market_title, slug, lane, board=rows, cert=gcert,
+                      his_event_title=event_title)
         trace["lane"] = lane
         if hit is not None:
             label = hit["matched_by"]
@@ -3573,12 +3574,126 @@ async def grammar_cert(pool) -> dict | None:
     return raw if isinstance(raw, dict) else None
 
 
+# ---------------------------------------------------------------- C6
+# THE VENUE'S OWN TEAM FIELD (2026-09-07; gap_cfb.md, the PREMAP-TEAM
+# probe of 14:15:54Z). C4's subject step needed the C1 class's record
+# for the aec market, and the class never certified one: the venue's
+# cfb per-side contracts are `atc-…-winner-<seg>-<code>` rows the
+# admission skipped, so every mascot spread died at
+# spread:subject-uncertified and every cfb moneyline at
+# grammar_echo_unverified ($283k refused in 24 h). The probe printed
+# what the sweep had been dropping: on EVERY aec-cfb side a `team` dict
+# whose `abbreviation` IS the slug code ('lou', 'miss', 'smu', 'flst'),
+# `safeName` the school ('Louisville', 'Ole Miss', 'SMU', 'Florida
+# State') and `name`/`alias` the mascot ('Cardinals', 'Rebels'). So the
+# mascot<->code<->school binding is VENUE-STATED on the moneyline row
+# itself, and no positional assumption is needed anywhere:
+#   C6a  the code witness (map_lane.code_school): code -> school from
+#        the event's `winner-<seg>-<code>` rows ('Will Notre Dame win
+#        the first half?'), every row per code agreeing, both codes
+#        witnessed, the schools distinct -- replaces code_reads ONLY
+#        where it exists (the two-letter `nd` no code rule can read);
+#   C6b  the event-title pair witness: when his title names his own
+#        team, his event title '<A> vs. <B>' must resolve to the two
+#        different positions with his outcome's name on his;
+#   C6c  the subject: aec side i is certified as code_i when its
+#        team_abbr == code_i AND its team_safe_name names the school
+#        C6a witnessed for code_i (else his own words for that position,
+#        as the pair witness read them) -- the (description, index,
+#        code) triple _c4_subject_certified always required, read from
+#        the venue's row instead of mirror_grammar_echo.certified, which
+#        stands only where the row carries no team.
+# Never a prefix, never `name`/`alias` (the mascot) as the school,
+# never `ordering`. Refusals: spread:code-witness-disagree,
+# spread:code-witness-same, spread:code-unnamed, spread:code-both,
+# spread:event-collision, spread:subject-uncertified (subject
+# team-absent / team-unnamed / team-school), spread:subject-conflict.
+
+
+def _c6_event_sides(his_event_title: str | None) -> list[str] | None:
+    """His event title's two names ('Louisville vs. Ole Miss'), folded as
+    the C3 names are, or None when it does not carry exactly two. C6b
+    reads each against the slug codes (the C6a witness, else the code
+    rules), never as a lookup key, so the yes/no lane's free-slot screen
+    does not apply: 'Florida A&M' folds to 'florida a m', which that
+    screen refuses and this reader may not."""
+    if not his_event_title or _folds_away(his_event_title):
+        return None
+    sides = [x.strip() for x in re.split(r"\s+vs\s+", _c3_norm(his_event_title)) if x.strip()]
+    return sides if len(sides) == 2 else None
+
+
+def _c6_pair_by_event(his_event_title: str | None, on: str, mine: int, codes: tuple[str, str],
+                      reads, trace: dict) -> str | None:
+    """C6b: the OTHER position's team in his own words, or None with the
+    refusal named. His title named his outcome's own team (one name,
+    read twice: no pair), so his event title's two names must resolve
+    to the two DIFFERENT positions -- through `reads` (the C6a witness,
+    else the code rules) -- and the one at his position must be his
+    outcome. No event title (unchanged) or a name reading no/both
+    positions: spread:pair-unwitnessed; two names on one position, or a
+    second name of his on his own position: spread:event-collision (the
+    collision C4's pair witness exists to refuse)."""
+    ev = _c6_event_sides(his_event_title)
+    if ev is None:
+        trace["refusal"] = "spread:pair-unwitnessed"
+        return None
+    epos = [[i for i in (0, 1) if reads(i, s)] for s in ev]
+    trace["event_hits"] = [[codes[i] for i in p] for p in epos]
+    if any(len(p) != 1 for p in epos):
+        trace["refusal"] = "spread:pair-unwitnessed"
+        return None
+    if epos[0][0] == epos[1][0]:
+        trace["refusal"] = "spread:event-collision"
+        return None
+    k = 0 if epos[0][0] == mine else 1          # the event side at his position
+    if not pmus._yn_name_match(ev[k], on):
+        trace["refusal"] = "spread:event-collision"
+        return None
+    trace["pair_via"] = "event"
+    return ev[1 - k]
+
+
+def _c6_team_subject(his: dict, names: tuple[str, str], team: dict[str, tuple[str, str]],
+                     schools: dict[int, str], trace: dict) -> str | None:
+    """C6c: the subject certified by the venue's OWN team field on the
+    aec sides. `team` maps each aec side's mascot to (team_abbr,
+    team_safe_name) as the sweep stored them; `schools` the school each
+    position must name -- the C6a witness's, else his own words as the
+    pair witness read them. Each side's abbreviation must be one of the
+    slug codes (else team-unnamed) and its school must name that code's
+    school (else team-school); a side whose code sits at the OTHER slot
+    of the question (the subject's mascot bound to b, or the opponent's
+    to a) is the venue contradicting the grammar: spread:subject-
+    conflict, nothing maps."""
+    a, b = his["a"], his["b"]
+    nm = pmus._yn_name_match
+    for j, mascot in enumerate(names):         # 0: the question's subject (a), 1: its opponent (b)
+        abbr, school = team[mascot]
+        if abbr not in (a, b):
+            trace["subject"] = {"team-unnamed": abbr, "mascot": mascot}
+            return "spread:subject-uncertified"
+        i = (a, b).index(abbr)
+        want = schools.get(i)
+        if not school or not want or not nm(school, want):
+            trace["subject"] = {"team-school": school, "code": abbr, "want": want}
+            return "spread:subject-uncertified"
+        if i != j:
+            trace["subject"] = {"certified": mascot, "code": abbr, "slot": j, "via": "team"}
+            return "spread:subject-conflict"
+    trace["subject"] = {"certified": names[0], "code": a, "via": "team"}
+    return None
+
+
 def _c4_subject_certified(his: dict, code: str, names: tuple[str, str],
-                          board: list[dict], cert: dict | None, trace: dict) -> str | None:
+                          board: list[dict], cert: dict | None, trace: dict,
+                          schools: dict[int, str] | None = None) -> str | None:
     """Step 3 of the chain: the refusal name, or None when the venue's
     own rows on this event certify that the question's subject (names[0])
     is slug team a. Pure: `board` is the event's rows, `cert` the class
-    state as read by the caller."""
+    state as read by the caller, `schools` (C6) the school each position
+    must name. The aec row's own team field certifies first (C6c); a row
+    carrying no team falls to the class's record as before."""
     from .. import map_lane
 
     aec_id = f"aec-{code}-{his['a']}-{his['b']}-{his['date']}"
@@ -3597,9 +3712,31 @@ def _c4_subject_certified(his: dict, code: str, names: tuple[str, str],
     if cert.get("tripped") or int(cert.get("mismatch") or 0) > 0:
         trace["subject"] = "grammar-tripped"
         return "spread:subject-uncertified"
+    team = {_c3_norm(r.get("side_norm")): (str(r.get("team_abbr")).lower(),
+                                            _c3_norm(r.get("team_safe_name")))
+            for r in aec if r.get("team_abbr")}
     rec = (cert.get("certified") or {}).get(aec_id) if isinstance(cert.get("certified"), dict) else None
+    if len(team) == 2:
+        if isinstance(rec, dict):
+            # M5 review MEDIUM-3: a class record for this market that
+            # DISAGREES with the row's own binding is the venue stating
+            # two things in time -- a wrong side one of the two times,
+            # the bar _grammar_contradiction holds live: conflict, no map
+            rdesc, ri = _c3_norm(rec.get("outcome_desc")), rec.get("side_index")
+            rabbr = team.get(rdesc, ("", ""))[0]
+            if (rdesc in names and ri in (0, 1) and rabbr in (his["a"], his["b"])
+                    and (his["a"], his["b"]).index(rabbr) != ri):
+                trace["subject"] = {"record-team": rdesc, "record": ri, "code": rabbr}
+                return "spread:subject-conflict"
+        return _c6_team_subject(his, names, team, dict(schools or {}), trace)
+    if team:
+        # one side states its team and the other does not: half a
+        # binding certifies nothing
+        trace["subject"] = "team-absent"
+        return "spread:subject-uncertified"
     if not isinstance(rec, dict):
         trace["subject"] = "grammar-uncertified"
+        trace["team"] = "absent"
         return "spread:subject-uncertified"
     desc = _c3_norm(rec.get("outcome_desc"))
     i = rec.get("side_index")
@@ -3620,13 +3757,16 @@ def _c4_subject_certified(his: dict, code: str, names: tuple[str, str],
 
 def _c4_subject_by_code(his: dict, code: str, names: tuple[str, str], on: str,
                         title_team: str, board: list[dict], cert: dict | None,
-                        trace: dict) -> tuple[int, int] | None:
+                        trace: dict, his_event_title: str | None = None) -> tuple[int, int] | None:
     """Steps 2 and 3: (his team's position, his title's team's position)
     or None with the refusal named. Runs only when neither venue name is
     his outcome by name; a venue name that names a code by the code
     rules was the authority, so C3's own refusal stands there. The two
     positions are always DIFFERENT (the pair witness): a map here is
-    never on one name's reading of a code."""
+    never on one name's reading of a code. C6: where the event's
+    winner rows witness the codes, the names are read against the
+    venue's own schools (token-set equality, never a prefix); where his
+    title names his own team, his event title witnesses the pair."""
     from .. import map_lane
 
     a, b = his["a"], his["b"]
@@ -3634,16 +3774,33 @@ def _c4_subject_by_code(his: dict, code: str, names: tuple[str, str], on: str,
     if any(map_lane.code_reads(c, n, s) for n in names for c, s in ((a, b), (b, a))):
         trace["refusal"] = "spread:names-unreadable"
         return None
-    pos = [i for i, c in enumerate((a, b)) if map_lane.code_reads(c, on, (b, a)[i])]
+    witness, why = map_lane.code_school(board, code, a, b, his["date"])
+    if why:
+        trace["refusal"] = why
+        return None
+    if witness:
+        trace["code_school"] = dict(witness)
+
+    def reads(i: int, name: str) -> bool:
+        if witness:
+            return pmus._yn_name_match(witness[(a, b)[i]], name)
+        return map_lane.code_reads((a, b)[i], name, (b, a)[i])
+
+    pos = [i for i in (0, 1) if reads(i, on)]
     trace["code_hits"] = [(a, b)[i] for i in pos]
     if len(pos) != 1:
-        trace["refusal"] = "spread:code-unmatched"
+        trace["refusal"] = (("spread:code-both" if pos else "spread:code-unnamed") if witness
+                            else "spread:code-unmatched")
         return None
-    tpos = [i for i, c in enumerate((a, b)) if map_lane.code_reads(c, title_team, (b, a)[i])]
+    tpos = [i for i in (0, 1) if reads(i, title_team)]
     trace["title_hits"] = [(a, b)[i] for i in tpos]
     if len(tpos) != 1:
         trace["refusal"] = "spread:title-unreadable"
         return None
+    # the school each position must name (C6c): the witness's own words
+    # where it exists, else his -- his outcome on his position, his
+    # title's team (or his event title's other side) on the other
+    schools = {pos[0]: on, tpos[0]: title_team}
     if pos[0] == tpos[0]:
         # THE PAIR WITNESS (review fold, 2026-09-06, HIGH-1): the code
         # rules read each name alone, and a first-word prefix names one
@@ -3654,10 +3811,22 @@ def _c4_subject_by_code(his: dict, code: str, names: tuple[str, str], on: str,
         # his outcome's team) is no witness at all: C1 maps a moneyline
         # only when the sibling names the OTHER code, and this chain
         # holds the same bar. Refused before any certification is read.
-        trace["refusal"] = ("spread:code-collision" if on != title_team
-                            else "spread:pair-unwitnessed")
-        return None
-    why = _c4_subject_certified(his, code, names, board, cert, trace)
+        # C6b: his own event title's two names are the second witness
+        # (the named follow-up of the fold): both must read the two
+        # different positions, his outcome on his.
+        if on != title_team:
+            trace["refusal"] = "spread:code-collision"
+            return None
+        if not his_event_title:
+            trace["refusal"] = "spread:pair-unwitnessed"      # no event title: unchanged
+            return None
+        other = _c6_pair_by_event(his_event_title, on, pos[0], (a, b), reads, trace)
+        if other is None:
+            return None
+        schools[1 - pos[0]] = other
+    if witness:
+        schools = {i: witness[(a, b)[i]] for i in (0, 1)}
+    why = _c4_subject_certified(his, code, names, board, cert, trace, schools)
     if why:
         trace["refusal"] = why
         return None
@@ -3666,7 +3835,7 @@ def _c4_subject_by_code(his: dict, code: str, names: tuple[str, str], on: str,
 
 def _c3_pick_spread(rows: list[dict], his: dict, outcome: str | None,
                     his_title: str | None, trace: dict, board: list[dict] | tuple = (),
-                    cert: dict | None = None) -> dict | None:
+                    cert: dict | None = None, his_event_title: str | None = None) -> dict | None:
     on = _c3_norm(outcome)
     if not on or on in ("yes", "no"):
         trace["refusal"] = "spread:outcome"
@@ -3731,7 +3900,8 @@ def _c3_pick_spread(rows: list[dict], his: dict, outcome: str | None,
         # C4: the question names neither team his outcome names (the
         # mascot rows) -- the code chain, certified by the venue's own
         # rows on this event and the grammar class's venue-truth record
-        by_code = _c4_subject_by_code(his, code, names, on, title_team, list(board), cert, trace)
+        by_code = _c4_subject_by_code(his, code, names, on, title_team, list(board), cert, trace,
+                                      his_event_title)
         if by_code is None:
             return None
         mine, titled, label = [by_code[0]], [by_code[1]], "premap_spread_code"
@@ -3898,14 +4068,16 @@ def _c3_pick_btts(rows: list[dict], his: dict, outcome: str | None,
 
 def c3_pick(rows: list[dict], outcome: str | None, his_title: str | None,
             his_slug: str | None, trace: dict | None = None, *,
-            board: list[dict] | tuple = (), cert: dict | None = None) -> dict | None:
+            board: list[dict] | tuple = (), cert: dict | None = None,
+            his_event_title: str | None = None) -> dict | None:
     """The C3 families' identity pick over the prefix-kept rows: the
     matched row (a COPY carrying matched_by and, under an alias,
     league_alias) or None with the refusal named in `trace`. Pure.
     C4: `board` is the event's unfiltered rows (the aec moneyline row a
     mascot spread's subject step reads) and `cert` the grammar class's
     state as the caller read it; a spread whose question names mascots
-    refuses spread:subject-uncertified without both."""
+    refuses spread:subject-uncertified without both. C6b: his event
+    title is the pair witness where his title names his own team."""
     t: dict = {} if trace is None else trace
     his = c3_his(his_slug)
     if his is None:
@@ -3917,7 +4089,7 @@ def c3_pick(rows: list[dict], outcome: str | None, his_title: str | None,
         t["refusal"] = f"{his['family']}:segment-absent"
         return None
     if his["family"] == "spread":
-        return _c3_pick_spread(rows, his, outcome, his_title, t, board, cert)
+        return _c3_pick_spread(rows, his, outcome, his_title, t, board, cert, his_event_title)
     if his["family"] == "total":
         return _c3_pick_total(rows, his, outcome, his_title, t)
     return _c3_pick_btts(rows, his, outcome, his_title, t)
@@ -4819,6 +4991,18 @@ async def _ensure_table(pool) -> None:
     # that blocks everything is an outage wearing a guard's uniform.
     await pool.execute(
         "ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS signed text")
+    # THE VENUE'S OWN TEAM FIELD (C6, 2026-09-07; migration 055, the
+    # block comment at _side_team). The same precedent as `signed`: the
+    # sweep adds the columns it writes, so the writer never depends on
+    # the API's boot migrate having run first (the workers never
+    # migrate); the readers that run no sweep probe for them
+    # (team_columns_present).
+    for _col, _typ in (("team_abbr", "text"), ("team_name", "text"), ("team_safe_name", "text"),
+                       ("team_id", "bigint"), ("team_league", "text"),
+                       ("game_start", "timestamptz"), ("sports_type", "text")):
+        await pool.execute(
+            f"ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS {_col} {_typ}")
+    _TEAM_COLS_STATE["present"] = None          # re-probed: the columns were just ensured
     await pool.execute(
         "ALTER TABLE us_premap DROP CONSTRAINT IF EXISTS us_premap_pkey")
     await pool.execute(
@@ -4940,6 +5124,62 @@ def _asc_yes_no(m: dict, sides: list[dict]) -> dict | None:
             for s, mk in zip(sides, markers)}
 
 
+def _game_start(raw):
+    """market.gameStartTime as the venue states it -- a tz-aware
+    datetime -- or None: an ISO string (a trailing 'Z' read as UTC), or
+    an epoch number; anything else is stored as nothing, never guessed."""
+    from datetime import datetime as _dt, timezone as _tz
+
+    if isinstance(raw, bool) or raw is None:
+        return None
+    if isinstance(raw, (int, float)):
+        try:
+            return _dt.fromtimestamp(float(raw), _tz.utc)
+        except (OverflowError, OSError, ValueError):
+            return None
+    s = str(raw).strip()
+    if not s:
+        return None
+    try:
+        d = _dt.fromisoformat(s[:-1] + "+00:00" if s.endswith("Z") else s)
+    except ValueError:
+        return None
+    return d if d.tzinfo is not None else d.replace(tzinfo=_tz.utc)
+
+
+def _side_team(s: dict, m: dict) -> dict:
+    """THE VENUE'S OWN TEAM FIELD (C6, 2026-09-07; migration 054). The
+    SDK side carries `team` = {abbreviation, safeName, name, alias, id,
+    league, ordering, ...} and `teamId` (the PREMAP-TEAM probe of
+    14:15:54Z: aec-cfb-lou-miss side[0] description 'Cardinals'
+    abbreviation 'lou' safeName 'Louisville' name 'Cardinals' id 1085;
+    the atc winner rows carry team=null on both sides). Each field is
+    stored as the venue wrote it, folded the way the side descriptions
+    are, and NOTHING is derived: the abbreviation is not compared to a
+    slug here, `ordering` is never read, and an absent or unreadable
+    field is None -- every reader takes None as 'the venue stated
+    nothing' and refuses. The market-level gameStartTime and
+    sportsMarketType ride the same row."""
+    t = s.get("team") if isinstance(s.get("team"), dict) else {}
+    abbr = str(t.get("abbreviation") or "").strip().lower() or None
+    name = _norm(t.get("name")) or None
+    safe = _norm(t.get("safeName")) or None
+    league = str(t.get("league") or "").strip().lower() or None
+    tid = None
+    for raw in (s.get("teamId"), t.get("id")):
+        if raw is None or isinstance(raw, bool):
+            continue
+        try:
+            tid = int(str(raw).strip())
+        except ValueError:
+            tid = None
+        break
+    return {"team_abbr": abbr, "team_name": name, "team_safe_name": safe,
+            "team_id": tid, "team_league": league,
+            "game_start": _game_start(m.get("gameStartTime")),
+            "sports_type": str(m.get("sportsMarketType") or "").strip() or None}
+
+
 def _market_rows(ev: dict, m: dict) -> list[dict]:
     """Rows for one venue market: each side its own orderable row.
 
@@ -5003,6 +5243,7 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
                     "side_norm": yn,
                     "signed": signed_line(s["description"]) or signed_line(q),
                     "intent": intent,
+                    **_side_team(s, m),
                 })
                 continue
             out.append({
@@ -5020,6 +5261,10 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
                 # shared-identifier SHORT side would default to BUY_LONG
                 # — the exact inversion this whole build exists to stop
                 "intent": side_intent(s, all_sides),
+                # C6: the venue's own team field on the side, stored as
+                # stated (the mascot<->code<->school binding the C4
+                # subject step and the C1 grammar class read)
+                **_side_team(s, m),
             })
         return out
     # per-side contract: the market IS one side; its subject names it
@@ -5047,26 +5292,106 @@ def _market_rows(ev: dict, m: dict) -> list[dict]:
             "line": line,
             "side_norm": _norm(subject),
             "intent": "ORDER_INTENT_BUY_LONG",
+            **_side_team({}, m),
         })
     return out
 
 
+# THE DEPLOY WINDOW (C6 v2, M5 review MEDIUM-4). The workers never
+# migrate: the API's start.sh runs migrate before uvicorn, and the
+# worker services deploy from the same commit beside it, so a worker
+# can boot before 055 has been applied. A SELECT naming the new columns
+# then fails on EVERY premap read of every league (premap_query_failed,
+# the market unmapped for UNMAPPED_TTL_S) and the sweep raises on its
+# first row -- with the switch OFF too. So the columns are PROBED once
+# per process from information_schema.columns (cached; a 'present'
+# answer is final, an absent or unreadable one is asked again every
+# _TEAM_COLS_REPROBE_S so a worker that booted first picks the columns
+# up without a restart) and every reader and the writer fall back to
+# the pre-C6 statement while they are absent: the rows then carry no
+# team field and every C6 reader refuses, exactly as on a row the
+# venue stated nothing for.
+_TEAM_COLUMNS = ("team_abbr", "team_name", "team_safe_name", "team_id", "team_league",
+                 "game_start", "sports_type")
+_TEAM_COLS_STATE: dict = {"present": None, "at": 0.0}
+_TEAM_COLS_REPROBE_S = 600.0
+# the fragment the two readers add to their SELECT once the columns exist
+TEAM_SELECT_COLS = "team_abbr, team_safe_name, "
+
+
+async def team_columns_present(pool) -> bool:
+    """Whether us_premap carries the seven C6 columns of migration 055,
+    read from information_schema once per process (see the block
+    comment above). Unreadable is absent."""
+    import time as _time
+
+    st = _TEAM_COLS_STATE
+    now = _time.time()
+    if st["present"] is True or (st["present"] is False and now - st["at"] < _TEAM_COLS_REPROBE_S):
+        return bool(st["present"])
+    try:
+        n = await pool.fetchval(
+            "SELECT count(*) FROM information_schema.columns WHERE table_name = 'us_premap' "
+            "AND column_name = ANY($1::text[]) /* premap-c6-columns */", list(_TEAM_COLUMNS))
+        present = int(n or 0) == len(_TEAM_COLUMNS)
+    except Exception:  # noqa: BLE001 — unreadable is absent, never a guess
+        present = False
+    st["present"], st["at"] = present, now
+    return present
+
+
+async def team_select_cols(pool) -> str:
+    """The C6 columns the readers SELECT -- only where the table carries
+    them (TEAM_SELECT_COLS), else nothing."""
+    return TEAM_SELECT_COLS if await team_columns_present(pool) else ""
+
+
 async def _upsert(pool, r: dict, keys: list[str]) -> None:
+    if not await team_columns_present(pool):
+        # 055 not applied on this database yet: the pre-C6 row
+        await pool.execute(
+            """
+            INSERT INTO us_premap (identifier, event_slug,
+                event_title, market_slug, question, kind, line,
+                side_norm, event_keys, intent, signed, updated_at)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+            ON CONFLICT (identifier, side_norm) DO UPDATE SET
+                event_slug=$2, event_title=$3, market_slug=$4,
+                question=$5, kind=$6, line=$7,
+                event_keys=$9, intent=$10, signed=$11, updated_at=now()
+            """,
+            r["identifier"], r["event_slug"], r["event_title"],
+            r["market_slug"], r["question"], r["kind"],
+            r["line"], r["side_norm"], keys, r.get("intent"),
+            r.get("signed"))
+        return
     await pool.execute(
         """
         INSERT INTO us_premap (identifier, event_slug,
             event_title, market_slug, question, kind, line,
-            side_norm, event_keys, intent, signed, updated_at)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11, now())
+            side_norm, event_keys, intent, signed,
+            team_abbr, team_name, team_safe_name, team_id, team_league,
+            game_start, sports_type, updated_at)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,
+                $12,$13,$14,$15,$16,$17,$18, now())
         ON CONFLICT (identifier, side_norm) DO UPDATE SET
             event_slug=$2, event_title=$3, market_slug=$4,
             question=$5, kind=$6, line=$7,
-            event_keys=$9, intent=$10, signed=$11, updated_at=now()
+            event_keys=$9, intent=$10, signed=$11,
+            team_abbr=$12, team_name=$13, team_safe_name=$14, team_id=$15,
+            team_league=$16, game_start=$17, sports_type=$18,
+            updated_at=now()
         """,
         r["identifier"], r["event_slug"], r["event_title"],
         r["market_slug"], r["question"], r["kind"],
         r["line"], r["side_norm"], keys, r.get("intent"),
-        r.get("signed"))
+        r.get("signed"),
+        # C6 (migration 055): the venue's team field, rewritten on
+        # conflict like every other column so a re-listed side never
+        # keeps a stale binding
+        r.get("team_abbr"), r.get("team_name"), r.get("team_safe_name"),
+        r.get("team_id"), r.get("team_league"), r.get("game_start"),
+        r.get("sports_type"))
 
 
 async def _record_last(pool, summary: dict,
@@ -5475,7 +5800,7 @@ async def resolve_explain(pool, market_title: str | None,
     try:
         rows = [dict(r) for r in await pool.fetch(
             "SELECT identifier, side_norm, kind, line, question, "
-            "event_title, "
+            "event_title, " + await team_select_cols(pool) +
             "intent, signed, event_slug, market_slug FROM us_premap "
             "WHERE event_keys && $1::text[]", sorted(keys))]
     except Exception as exc:  # noqa: BLE001
@@ -5615,7 +5940,7 @@ async def resolve_explain(pool, market_title: str | None,
             # class's certification state)
             cert = await grammar_cert(pool) if his_c3["family"] == "spread" else None
             hit = c3_pick(kept, outcome, market_title, global_slug, c3_trace,
-                          board=rows, cert=cert)
+                          board=rows, cert=cert, his_event_title=event_title)
             out["c3"] = c3_trace
             if hit is not None:
                 out["matched_by"] = hit["matched_by"]
@@ -6044,7 +6369,7 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     try:
         rows = [dict(r) for r in await pool.fetch(
             "SELECT identifier, side_norm, kind, line, question, "
-            "event_title, "
+            "event_title, " + await team_select_cols(pool) +
             "intent, signed, event_slug, market_slug FROM us_premap "
             "WHERE event_keys && $1::text[]",
             sorted(keys))]
@@ -6122,7 +6447,8 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
             # source 'premap', matched_by premap_spread / premap_total /
             # premap_fh_total / premap_btts …; inside the same switch
             cert = await grammar_cert(pool) if his_c3["family"] == "spread" else None
-            hit = c3_pick(kept, outcome, market_title, global_slug, board=rows, cert=cert)
+            hit = c3_pick(kept, outcome, market_title, global_slug, board=rows, cert=cert,
+                          his_event_title=event_title)
             if hit is not None:
                 matched_by = hit["matched_by"]
         if hit is None and his_map is not None:

@@ -252,6 +252,188 @@ def code_reads(code: str, outcome: str | None, sibling: str) -> bool:
     return code_words(code, outcome)
 
 
+# ---------------------------------------------------------------- C6
+# THE VENUE'S OWN TEAM FIELD AND ITS CODE WITNESS (2026-09-07; the C6
+# block comment in workers/premap.py). Two readings, both venue<->venue:
+# the segment-winner rows `atc-<lg>-<a>-<b>-<date>-winner-<seg>-<code>`
+# state the SCHOOL beside the CODE in their own question ('Will Notre
+# Dame win the first half?' under `-nd`), and the aec side's `team` dict
+# states abbreviation (the code) and safeName (the school) beside the
+# mascot. Names meet by token-set equality (pmus._yn_name_match), never
+# a prefix; `name`/`alias` (the mascot) is never the school; `ordering`
+# is never read.
+_WINNER_Q_RE = re.compile(
+    r"^will (?P<school>.+?) win the (?:first|second|third|fourth) (?:half|quarter)\?$")
+
+
+def same_name(a: str | None, b: str | None) -> bool:
+    """Two folded names naming the same team: the yes/no lane's token-set
+    equality (pmus._yn_name_match), and nothing looser."""
+    from . import pmus
+
+    a, b = _norm(a), _norm(b)
+    return bool(a and b) and pmus._yn_name_match(a, b)
+
+
+def winner_school(question: str | None) -> str | None:
+    """The school a venue segment-winner row names in its own question
+    ('Will Notre Dame win the first half?' -> 'notre dame'), folded; None
+    for any other wording -- the draw rows ('Will the first half end
+    tied?') and the prop rows never parse."""
+    q = " ".join(str(question or "").split()).lower()
+    m = _WINNER_Q_RE.match(q)
+    return (_norm(m.group("school")) or None) if m else None
+
+
+def code_school(board: list[dict], lg: str, a: str, b: str, date: str) -> tuple[dict | None, str | None]:
+    """THE CODE WITNESS (C6a): code -> school from the event's own
+    `winner-<seg>-<code>` rows on `board` (the event's rows as the sweep
+    stored them). Every parsed row for a code must name the same school,
+    both codes must be witnessed, and the two schools must differ.
+    Returns ({code: school}, None); (None, refusal) when the venue's rows
+    contradict each other (spread:code-witness-disagree: one code, two
+    schools; spread:code-witness-same: both codes one school); (None,
+    None) when the witness is absent, and today's code rules stand. A
+    row whose question is not this grammar states nothing here."""
+    base = f"atc-{lg}-{a}-{b}-{date}-winner-"
+    named: dict[str, list[str]] = {a: [], b: []}
+    for r in board:
+        ident = str(r.get("identifier") or "").lower()
+        if not ident.startswith(base):
+            continue
+        tail = ident[len(base):].split("-")
+        if len(tail) != 2 or tail[1] not in (a, b):
+            continue                    # the draw row, or not this grammar
+        school = winner_school(r.get("question"))
+        if school:
+            named[tail[1]].append(school)
+    if not named[a] or not named[b]:
+        return None, None
+    out: dict[str, str] = {}
+    for c in (a, b):
+        if any(not same_name(named[c][0], s) for s in named[c][1:]):
+            return None, "spread:code-witness-disagree"
+        out[c] = named[c][0]
+    if a == b or same_name(out[a], out[b]):
+        return None, "spread:code-witness-same"
+    return out, None
+
+
+def side_team(side: dict | None) -> tuple[str, str]:
+    """(abbreviation, safeName) of a venue side's own `team` dict, folded
+    -- the slug code and the school as the venue states them; ('', '')
+    when absent. Never `name`/`alias` (the mascot), never `ordering`."""
+    t = side.get("team") if isinstance(side, dict) and isinstance(side.get("team"), dict) else {}
+    return str(t.get("abbreviation") or "").strip().lower(), _norm(t.get("safeName"))
+
+
+def _identity_on() -> bool:
+    """The owner's identity switch (premap.yn_identity_on): every C6
+    moneyline read below is dark without it (M5 review HIGH-1), exactly
+    as the C6 spread chain is -- OFF is byte-identical."""
+    from .workers.premap import yn_identity_on
+
+    return yn_identity_on()
+
+
+def aec_head(market: dict | None) -> tuple[str, str, str, str] | None:
+    """(lg, a, b, date) of the venue's OWN aec market slug
+    (aec-<lg>-<a>-<b>-<date>) -- the head every C6 moneyline read is
+    bounded by (M5 review LOW-1 / LOW-2 / MEDIUM-2); None for any other
+    shape."""
+    s = str((market or {}).get("slug") or "").lower() if isinstance(market, dict) else ""
+    if not s.startswith("aec-"):
+        return None
+    h = slug_head(s[4:])
+    return (h[0], h[1], h[2], h[3]) if h and not h[4] else None
+
+
+def _team_hits(a: str, b: str, outcome: str | None, market: dict) -> list[int] | None:
+    """C6 on the moneyline: the positions the venue's OWN team field
+    certifies for his outcome -- a side whose abbreviation is one of the
+    slug codes and whose safeName names his outcome puts him at that
+    code's position. BOTH sides must state an abbreviation (M5 review
+    MEDIUM-1: half a binding is none, the bar the spread reader holds).
+    None when the venue states a code at the OTHER side index (its side
+    order is not the slug's: a contradiction the positional pick below
+    could not survive, refused as a conflict)."""
+    m = market if isinstance(market, dict) else {}
+    sides = [s for s in (m.get("marketSides") or []) if isinstance(s, dict)]
+    if len(sides) != 2:
+        return []
+    teams = [side_team(s) for s in sides]
+    # both halves of BOTH bindings: an abbreviation AND a school on each
+    # side (M5 v2 review LOW-1: the bar the spread reader holds)
+    if not all(abbr and school for abbr, school in teams):
+        return []
+    hits: list[int] = []
+    for j, (abbr, school) in enumerate(teams):
+        if abbr not in (a, b):
+            continue
+        i = (a, b).index(abbr)
+        if i != j:
+            return None
+        if same_name(school, outcome):
+            hits.append(i)
+    return hits
+
+
+def _team_code_clash(sides: list[dict], i: int, code: str, a: str, b: str) -> str | None:
+    """M5 review MEDIUM-2: the aec side's OWN abbreviation against the
+    code the plain contract certified it as -- the side stating the
+    OTHER slug code, or the other side stating this one, is the venue
+    contradicting itself (the detail, a mismatch); an abbreviation that
+    is neither code is not evidence and changes nothing."""
+    abbr, _own = side_team(sides[i])
+    oabbr, _other = side_team(sides[1 - i])
+    if abbr in (a, b) and abbr != code:
+        return f"the aec side at position {i} states abbreviation {abbr!r}, not {code!r}"
+    if oabbr == code:
+        return f"the aec side at position {1 - i} states abbreviation {code!r} too"
+    return None
+
+
+def _team_truth(contract: dict, head: tuple[str, str, str, str], sides: list[dict], i: int,
+                code: str, school: str | None) -> tuple[str, str] | None:
+    """C6 venue-only truth for a SEGMENT-WINNER contract: the contract's
+    slug is exactly atc-<lg>-<a>-<b>-<date>-winner-<seg>-<code> under the
+    aec market's own head (never a suffix read: M5 review LOW-1), its
+    question names a school, and the aec side at position i states
+    abbreviation == code and safeName naming that school (and his
+    outcome, when the caller carries it). None when the contract is not
+    that grammar (the name reading above is the whole verdict);
+    unverified when either side states no team (MEDIUM-1); ok when every
+    field agrees; MISMATCH on any disagreement, or when the other side
+    claims the same code or school."""
+    q_school = winner_school(contract.get("question"))
+    if q_school is None:
+        return None
+    lg, a, b, date = head
+    slug = str(contract.get("slug") or "").lower()
+    prefix = f"atc-{lg}-{a}-{b}-{date}-winner-"
+    tail = slug[len(prefix):].split("-") if slug.startswith(prefix) else []
+    if code not in (a, b) or len(tail) != 2 or not tail[0] or tail[1] != code:
+        return "unverified", f"contract {slug} is not {prefix}<seg>-{code}, the {code!r} winner row"
+    abbr, own = side_team(sides[i])
+    oabbr, other = side_team(sides[1 - i])
+    if not abbr and not own:
+        return "unverified", f"the aec side at position {i} states no team"
+    if not oabbr or not other:
+        # both halves, or none of it (M5 v2 review LOW-1): the bar the
+        # spread reader holds; his own side's half is read below, where a
+        # school without the code is a mismatch
+        return "unverified", (f"the other aec side (position {1 - i}) states no team "
+                              f"(abbreviation {oabbr!r}, school {other!r}): half a binding")
+    stated = f"the aec side at position {i} states abbreviation {abbr!r}, school {own!r}"
+    if abbr == code and same_name(own, q_school) and (school is None or same_name(own, school)):
+        if oabbr == code or same_name(other, q_school):
+            return "mismatch", (f"contract {slug} names {q_school!r}; both aec sides claim it "
+                                f"({abbr!r}/{own!r} and {oabbr!r}/{other!r})")
+        return "ok", f"contract {slug} names {q_school!r}; {stated}"
+    return "mismatch", (f"contract {slug} names {q_school!r} for {code!r}; {stated}"
+                        + (f", his outcome {school!r}" if school else ""))
+
+
 def contract_slug(global_slug: str | None, i: int) -> str | None:
     """The venue's per-side contract for team i of his slug --
     atc-<lg>-<a>-<b>-<date>-<code_i> -- the copy lane's own atc-
@@ -318,6 +500,17 @@ def aec_code_side(global_slug: str | None, outcome: str | None, market: dict,
     # a multi-word school code (scarst) only where neither code is
     # named by those rules (C4, code_reads)
     hits = [i for i, c in enumerate((a, b)) if code_reads(c, outcome, (b, a)[i])]
+    if not hits and lg == "cfb" and _identity_on():
+        # C6 (2026-09-07): where no code rule reads his outcome (the
+        # two-letter `nd`; 'Notre Dame'), the venue's OWN team field on
+        # the aec side -- abbreviation the code, safeName the school --
+        # names his position; a side stating a code at the other index
+        # is the venue's contradiction, refused. College football only
+        # for now (the soccer builder lands its own reader of the same
+        # columns) and dark without the identity switch (M5 review).
+        hits = _team_hits(a, b, outcome, market)
+        if hits is None:
+            return None, REFUSE_CODE_CONFLICT
     if not hits:
         return None, REFUSE_CODE_UNMATCHED
     if len(hits) != 1:
@@ -416,7 +609,8 @@ def _equal_names(contract: dict, description: str) -> bool:
     return any(_norm(f) == want for f in fields if f)
 
 
-def grammar_truth(contract: dict | None, market: dict | None, i: int) -> tuple[str, str]:
+def grammar_truth(contract: dict | None, market: dict | None, i: int, *,
+                  code: str | None = None, school: str | None = None) -> tuple[str, str]:
     """VENUE-ONLY TRUTH BEFORE A GRAMMAR BOOK OPENS (review (2)): the
     venue's per-side contract for the code the rule chose
     (atc-<lg>-<a>-<b>-<date>-<code_i>) names its team in its own
@@ -427,7 +621,10 @@ def grammar_truth(contract: dict | None, market: dict | None, i: int) -> tuple[s
     ('ok' | 'mismatch' | 'unverified', detail): unverified when the
     contract is not listed or either payload is unreadable (refuse the
     open, nothing tripped); mismatch when the contract is listed and
-    names something else (refuse and trip)."""
+    names something else (refuse and trip). C6 (2026-09-07): with
+    `code` (the slug code at i), a segment-winner contract whose question
+    names the school is read against the aec side's own team field
+    (_team_truth); `school` is his outcome, checked too when carried."""
     m = market if isinstance(market, dict) else {}
     sides = [s for s in (m.get("marketSides") or []) if isinstance(s, dict)]
     if len(sides) != 2 or i not in (0, 1) or not sides[i].get("description") \
@@ -437,7 +634,14 @@ def grammar_truth(contract: dict | None, market: dict | None, i: int) -> tuple[s
     if not c.get("slug"):
         return "unverified", "per-side contract not listed"
     desc = str(sides[i]["description"])
+    head = aec_head(m) if code and _identity_on() else None
     if _equal_names(c, desc):
+        if head is not None:
+            # M5 review MEDIUM-2: the plain contract's name never
+            # overrides the side's own code field
+            clash = _team_code_clash(sides, i, str(code).lower(), head[1], head[2])
+            if clash:
+                return "mismatch", f"contract {c.get('slug')} names {desc!r} but {clash}"
         return "ok", f"contract {c.get('slug')} names {desc!r}"
     # MISMATCH ONLY WHEN THE CONTRACT NAMES THE OTHER SIDE (round 3, review
     # 2): a contract that names sides[1-i] is a wrong side, and trips; any
@@ -448,6 +652,11 @@ def grammar_truth(contract: dict | None, market: dict | None, i: int) -> tuple[s
     if _equal_names(c, other):
         return "mismatch", (f"contract {c.get('slug')} names {other!r}, the OTHER side; the aec "
                             f"side at position {i} is {desc!r}")
+    if head is not None and head[0] == "cfb":
+        # C6-ML: college football only for now, under the identity switch
+        c6 = _team_truth(c, head, sides, i, str(code).lower(), school)
+        if c6 is not None:
+            return c6
     named = [str(x) for x in (c.get("outcome"), c.get("title")) if x]
     return "unverified", f"contract {c.get('slug')} names {named!r}, neither side by name"
 

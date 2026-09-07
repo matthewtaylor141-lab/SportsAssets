@@ -1675,7 +1675,13 @@ async def _grammar_admission(t: _Tick, whale: str, slug: str, g: dict | None) ->
     else:
         _venue_call(t)
         con = await asyncio.to_thread(_market_read, t.pmus, cands[0])
-        verdict, detail = map_lane.grammar_truth(con, market, i)
+        # C6 (2026-09-07): the slug code at i and his outcome ride along
+        # so a segment-winner contract is read against the aec side's
+        # own team field (map_lane._team_truth)
+        head = map_lane.slug_head(g["his_slug"])
+        verdict, detail = map_lane.grammar_truth(
+            con, market, i, code=(head[1], head[2])[i] if head else None,
+            school=g.get("his_outcome"))
     if verdict == "ok":
         # a record already certified for this market that CONTRADICTS
         # tonight's reading is a mismatch like any other (review fold v3,
@@ -1787,14 +1793,32 @@ async def _contract_candidates(pool, his_slug: str, i: int, desc: str,
     # by_question fits only a question naming our side and not the other's
     other_want = map_lane._norm(other_desc) if other_desc else ""
     fits: list[str] = []
+    winner: list[tuple[str, str]] = []
     for r in rows:
         for s in (r.get("market_slug"), r.get("identifier")):
             s = str(s or "").lower()
             if not s.startswith(base):
                 continue
             suffix = s[len(base):]
-            if not suffix or "-" in suffix:
-                continue                    # a segment or prop row, never the contract
+            if not suffix:
+                continue
+            if "-" in suffix:
+                # C6 (2026-09-07): the venue's SEGMENT-WINNER row for the
+                # code -- `winner-<seg>-<code_i>`, its question naming the
+                # school ('Will Notre Dame win the first half?') -- is the
+                # code's contract where the venue lists no plain one (the
+                # whole cfb book: 144 such rows, no `atc-…-<code>`); the
+                # `-draw` row and every other dashed suffix (a prop row)
+                # never are. Read below, after the plain fits.
+                seg = suffix.split("-")
+                if (len(seg) == 3 and seg[0] == "winner" and seg[2] == code
+                        and lg == "cfb" and map_lane._identity_on()):
+                    # college football only for now, and dark without the
+                    # identity switch (M5 review HIGH-1 / LOW-2)
+                    school = map_lane.winner_school(r.get("question"))
+                    if school and (s, school) not in winner:
+                        winner.append((s, school))
+                continue
             by_code = (suffix == code or (code.startswith(suffix) and not other.startswith(suffix)))
             # the suffix fits the other side: the other code itself, a
             # prefix of it (whether or not of ours too), or an extension
@@ -1807,6 +1831,17 @@ async def _contract_candidates(pool, his_slug: str, i: int, desc: str,
                            and not fits_other)
             if (by_code or by_question) and s not in fits:
                 fits.append(s)
+    if not fits and winner:
+        # every winner row for the code must name ONE school (the C6a
+        # witness's bar); then the first by name stands for them all and
+        # the truth check reads its payload. Rows naming two schools are
+        # the venue disagreeing with itself: all of them, so the caller
+        # reads 'more than one' and refuses
+        slugs = sorted(s for s, _sch in winner)
+        if all(map_lane.same_name(winner[0][1], sch) for _s, sch in winner[1:]):
+            fits.append(slugs[0])
+        else:
+            fits.extend(slugs)
     if not rows:
         c = map_lane.contract_slug(his_slug, i)
         return [c] if c else []
