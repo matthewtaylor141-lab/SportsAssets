@@ -68,7 +68,7 @@ def test_review_a_deferred_cohort_is_read_within_the_budget_not_all_at_once(monk
     _many_books(p, 120)
     v = _Venue()
     worst = 0
-    for i in range(10):
+    for i in range(16):                 # E11: the due tick is 10 (was 4) and the queue drains after it
         v.calls.clear()
         _tick(p, v, now=NOW + 30 * i)
         if i >= 1:                                   # tick 1 reads everything: the old behaviour, by design
@@ -86,7 +86,9 @@ def test_review_the_deferred_cohort_is_bounded_by_the_quiet_books_and_no_book_wa
     than the quiet books; and every quiet book is read again within
     QUIET_EVERY_TICKS + ceil(N_quiet / slots) ticks of its last read.
     120 quiet books at the floor: quiet_budget 20 - 2 - 10 = 8, slots
-    10, so a cycle is 12 ticks and the worst gap 15."""
+    10, so a cycle is 12 ticks and the worst gap QUIET_EVERY_TICKS + 12
+    (E11: 21 at 9; it was 15 at 3 -- the loop runs 24 ticks so every
+    book is read twice, as 18 covered 15)."""
     monkeypatch.setattr(ml, "VENUE_CALLS_PER_TICK", 20)
     p = _pool(conds=[])
     slugs = _many_books(p, 120)
@@ -94,7 +96,7 @@ def test_review_the_deferred_cohort_is_bounded_by_the_quiet_books_and_no_book_wa
     read_at: dict = {s: [] for s in slugs}
     queued_at: dict = {}
     slots = None
-    for i in range(18):
+    for i in range(24):
         v.calls.clear()
         st = _tick(p, v, now=NOW + 30 * i)
         tm = _timing(st)
@@ -132,17 +134,19 @@ def test_review_hot_books_are_read_when_the_budget_is_negative_and_the_quiet_wai
     slugs = _many_books(p, 30)
     hot = slugs[:25]
     v = _Venue(states={s: HALTED for s in hot})
-    for i in range(3):
+    # E11: the due tick is 1 + QUIET_EVERY_TICKS = 10 (was 4); the ticks
+    # before it skip the quiet five
+    for i in range(ml.QUIET_EVERY_TICKS):
         v.calls.clear()
         _tick(p, v, now=NOW + 30 * i)
     v.calls.clear()
-    st4 = _tick(p, v, now=NOW + 90)
-    assert _timing(st4)["quiet_budget"] == 0 and _census(st4, "no_mark") == 25
-    assert sorted(_bbos(v)) == sorted(hot) and _census(st4, "book_quiet_skipped") == 5
+    st10 = _tick(p, v, now=NOW + 270)
+    assert _timing(st10)["quiet_budget"] == 0 and _census(st10, "no_mark") == 25
+    assert sorted(_bbos(v)) == sorted(hot) and _census(st10, "book_quiet_skipped") == 5
     v.calls.clear()
-    st5 = _tick(p, v, now=NOW + 120)
-    assert sorted(_bbos(v)) == sorted(slugs) and _census(st5, "book_quiet_skipped") == 0
-    assert not ml._quiet_deferred and _timing(st5)["quiet_reads"] == 5 <= ml.DEFERRED_MIN_PER_TICK
+    st11 = _tick(p, v, now=NOW + 300)
+    assert sorted(_bbos(v)) == sorted(slugs) and _census(st11, "book_quiet_skipped") == 0
+    assert not ml._quiet_deferred and _timing(st11)["quiet_reads"] == 5 <= ml.DEFERRED_MIN_PER_TICK
 
 
 # ------------------------------------------------------ the budget's shares
@@ -191,13 +195,13 @@ def test_review_terminal_memo_skipped_books_cost_the_quiet_budget_nothing():
     p = _pool(conds=[])
     slugs = _many_books(p, 70)
     v = _Venue(states={s: EXPIRED for s in slugs[:40]})
-    for i in range(3):
+    for i in range(ml.QUIET_EVERY_TICKS):          # E11: the due tick is 10 (was 4)
         st = _tick(p, v, now=NOW + 30 * i)
     assert _census(st, "book_terminal_skipped") == 40
     v.calls.clear()
-    st4 = _tick(p, v, now=NOW + 90)
-    assert _timing(st4)["quiet_budget"] >= 30, _timing(st4)
-    assert _census(st4, "book_quiet_skipped") == 0 and len(_bbos(v)) == 30
+    st10 = _tick(p, v, now=NOW + 270)
+    assert _timing(st10)["quiet_budget"] >= 30, _timing(st10)
+    assert _census(st10, "book_quiet_skipped") == 0 and len(_bbos(v)) == 30
 
 
 def test_review_the_total_venue_calls_over_the_rotation_and_the_map_share(monkeypatch):
@@ -218,7 +222,8 @@ def test_review_the_total_venue_calls_over_the_rotation_and_the_map_share(monkey
     _many_books(p, 50)
     v = _Venue()
     totals = []
-    for i in range(5):
+    due = ml.QUIET_EVERY_TICKS           # E11: the due tick is the 10th (index 9), was the 4th (index 3)
+    for i in range(due + 2):
         v.calls.clear()
         st = _tick(p, v, now=NOW + 30 * i)
         tm = _timing(st)
@@ -226,8 +231,8 @@ def test_review_the_total_venue_calls_over_the_rotation_and_the_map_share(monkey
         assert _census(st, "venue_calls") == 2 + len(_bbos(v))
         assert _census(st, "venue_calls") <= ml.VENUE_CALLS_PER_TICK + ml.CAND_MIN_PER_TICK
         assert tm["map_cap"] == max(ms.MAP_READS_PER_TICK, tm["cand_budget"] - ml.CAND_MIN_PER_TICK)
-    assert totals[3] == 2 + 48 + ml.CAND_MIN_PER_TICK == ml.VENUE_CALLS_PER_TICK, totals
-    assert totals[4] == 2 + 2 + ml.MAX_MARKETS_PER_TICK, totals     # the two queued, then the candidates
+    assert totals[due] == 2 + 48 + ml.CAND_MIN_PER_TICK == ml.VENUE_CALLS_PER_TICK, totals
+    assert totals[due + 1] == 2 + 2 + ml.MAX_MARKETS_PER_TICK, totals     # the two queued, then the candidates
     assert ml._map_cap(58) == 58 - ml.CAND_MIN_PER_TICK == 48 > ms.MAP_READS_PER_TICK == 10
 
 
@@ -236,14 +241,15 @@ def test_review_the_due_tick_stays_inside_the_budget():
     p = _pool(conds=[f"c{i}" for i in range(60)])
     _many_books(p, 50)
     v = _Venue()
-    for i in range(4):
+    for i in range(1 + ml.QUIET_EVERY_TICKS):      # E11: through the due tick, 10 (was 4)
         st = _tick(p, v, now=NOW + 30 * i)
     assert _census(st, "venue_calls") <= ml.VENUE_CALLS_PER_TICK, st["census"]["venue_calls"]
 
 
 def test_review_the_superseded_pins_are_the_budgets_arithmetic():
     """U12 25 + 33, E2 MEDIUM-5 12, r2 / r3 10 (the floor), the E1
-    full-game pin's fourth-tick turn: each derived, none fitted."""
+    full-game pin's turn on the tick after the rotation (the tenth
+    since E11, the fourth under E6): each derived, none fitted."""
     t = ml._Tick(pool=_pool(), pmus=_Venue(), http=None, now=NOW, stats=ml._new_stats())
     t.venue_calls = 2 + 25
     assert ml._cand_budget(t) == 33 == ml.VENUE_CALLS_PER_TICK - 27
@@ -252,8 +258,8 @@ def test_review_the_superseded_pins_are_the_budgets_arithmetic():
     t.venue_calls = 2 + 46 + 40                            # twenty BUYs: preview + create each
     assert ml._cand_budget(t) == ml.CAND_MIN_PER_TICK == 10
     assert 128 - (40 - 10) == 98
-    # the rotation: read on tick 1, read_on = 1 + QUIET_EVERY_TICKS = 4; tick 3 is a skip
-    assert 1 + ml.QUIET_EVERY_TICKS == 4 and 3 < 4
+    # the rotation: read on tick 1, read_on = 1 + QUIET_EVERY_TICKS = 10 (E11; 4 at 3); tick 3 is a skip
+    assert 1 + ml.QUIET_EVERY_TICKS == 10 and 3 < 10
 
 
 # ------------------------------------------------------- money in motion

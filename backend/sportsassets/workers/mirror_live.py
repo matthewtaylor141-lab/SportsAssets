@@ -215,7 +215,34 @@ CONFIRM_GONE_WAIT_S = rules.capped_env("MIRROR_CONFIRM_GONE_WAIT_S", 5.0, floor=
 TICK_TARGET_S = 25.0
 VENUE_CALLS_PER_TICK = int(rules.capped_env("MIRROR_TICK_VENUE_CALLS", 60.0, floor=20.0))
 HOT_S = 600.0
-QUIET_EVERY_TICKS = 3
+# THE QUIET ROTATION, WIDENED (E11, 2026-09-08): 3 -> 9. At 03:22Z (E10
+# live) the tick was 41.8 s with 87 live books: 47 paced venue claims,
+# of which ~29 were this rotation's due reads (87 / 3 a tick) -- and a
+# quiet book (on target, nothing open, no exit plan standing, no fill
+# of his inside HOT_S, not woken, read at least once, live) places
+# NOTHING on its read: its quote feeds the plan row's display fields
+# (mark, bid, ask) and t.marks (whose one money reader, the game's
+# exposure, takes the mark only when a book's avg_cost is unreadable),
+# so no read a plan could act on is removed. The skip is the WHOLE read
+# (the E11 review's design note): the per-market data-API read of his
+# position is skipped with the quote, so the safety net for a fill of
+# his that every ingest path missed widens from ~1.5 to ~4.5 minutes
+# -- the witnesses for "he moved" are the fills table (chain, poll,
+# s1) and the wake, and MIRROR_QUIET_EVERY_TICKS=3 restores the old
+# net. Every event that makes a quiet book matter -- his fill, a wake,
+# an order, an exit plan, a state change, another hand on the row --
+# makes it HOT the same tick, read then, whatever this says. Why
+# nine and no more: at 87 books and a ~30 s tick a quiet book is
+# re-read inside ~5 minutes (nine ticks; its display mark at most that
+# old), and the deferred queue's floor keeps the worst wait past the
+# due tick at ceil(N_quiet / max(quiet_budget, DEFERRED_MIN_PER_TICK))
+# ticks as before. Read through capped_env so the environment may
+# LOWER it (more reads, more venue load: MIRROR_QUIET_EVERY_TICKS=3 is
+# E6's rotation) and never raise it past 9 (fewer reads is less venue
+# load, but a staler display mark is a code change that wants a
+# review); floor 1 (every tick); unreadable is 9. The deferred floor,
+# every always-read class and the take arm are untouched.
+QUIET_EVERY_TICKS = int(rules.capped_env("MIRROR_QUIET_EVERY_TICKS", 9, floor=1))
 CAND_MIN_PER_TICK = 10
 # the deferred queue's floor: the reads a tick makes on books the budget
 # deferred even when the hot books alone spent it -- the same floor the
@@ -359,6 +386,44 @@ HIS_FILLS_SEEN_MAX = 20
 # NOT here: the venue pacer, MIRROR_BOOK_CONCURRENCY, SNAP_MAX_AGE_S,
 # the E6 budgets, the read's shape (one scoped request, sizeThreshold=0,
 # the foreign-row refusal) or any read's decision.
+# THE VENUE GATE (E11, 2026-09-08; owner 22:4xZ "latency must be
+# flawless and exceptional"). With E10 live (03:22Z heartbeat) the tick
+# was 41.8 s at 87 live books, `short.timing.books` 25.7 s of wall and
+# `short.wall.books_venue_wall` 22.6 s of it: venue_pace.pace is ONE
+# serial gap of MIN_GAP_S = 0.35 s for the whole process, so 47 claims
+# are 16.4 s of floor whatever the walk's width, and the other ~6 s
+# were the shadow's and price_path's claims interleaving on the same
+# gate. Of the 47 claims ~29 were E6's quiet rotation's due reads (87
+# books / 3 a tick), reads that place nothing. Three parts, none of
+# them a read's decision, the gap and the venue's rate unchanged:
+#   1  QUIET_EVERY_TICKS 3 -> 9 (MIRROR_QUIET_EVERY_TICKS, env may only
+#      lower it): the paragraph at the constant; the hot path -- the
+#      take arm, the sizing's mark, the no_mark / no_quote memo, the
+#      halt read, every always-read class (_hot_by_row) -- untouched;
+#   2  a PRIORITY CLAIM on the gate (venue_pace.pace: the next gap
+#      ahead of every waiting normal claimant, normal claimants FIFO
+#      among themselves, at most venue_pace.PACE_PRIORITY_BURST = 12
+#      priority claims in a row while a normal waits, then one normal;
+#      the 429 circuit doubles both lanes). The ONLY priority claimant
+#      is THIS WORKER'S TICK: tick_once and fast_tick_once run their
+#      body inside venue_pace.priority_claims(), a context every worker
+#      thread the tick starts inherits (asyncio.to_thread copies it),
+#      so every venue claim the tick makes takes the lane -- its own
+#      (_paced: the cancels, rests, takes and the reads _venue_read
+#      sends; _pm_held's positions pages; the grammar class's echo and
+#      market read; the create pmus.submit_fok claims for a BUY) and
+#      those it makes through the shadow's functions (the walk's quote
+#      reads in ms._paced_bbo, step R's ms.account_positions_walk, the
+#      resolver's reads in ms.map_market), which the E6 / E9 pins fix
+#      as the mirror's reads and whose own claims say no lane; the
+#      shadow's and price_path's loops and pmus's default stay normal;
+#   3  MEASURED: `short.gate` = {wait, claims} -- the seconds this
+#      tick's claims spent on the gate (queue and gap, summed per claim
+#      as books_data_wait is; venue_pace.lane_stats, the priority lane's
+#      delta) and their count -- a sibling of `short.wall`, whose five
+#      keys the E10 pins fix exactly.
+# NOT here: MIN_GAP_S, MIRROR_BOOK_CONCURRENCY, the WebSocket feed,
+# HOT_S, the take arm, any read's decision.
 # A 'placing' row with no order id older than this is a placement whose
 # response was lost with the process (step O); younger, the placement
 # may still be the one in flight under this very tick's lock.
@@ -2162,6 +2227,9 @@ class _Tick:
     # E10: the books stage's wall-time deltas (_WallClock.delta around
     # the walk; a fast tick's around its markets): data / venue / plan
     wall: dict = field(default_factory=dict)
+    # E11: what this lane's venue claims had spent on the gate when the
+    # tick began (_gate_snapshot); `short.gate` is the delta (_gate_block)
+    gate0: dict = field(default_factory=lambda: _gate_snapshot())
 
 
 # ------------------------------------------- E2: the tick's shared counters
@@ -5697,6 +5765,30 @@ def _fast_wall_take() -> tuple[float, float]:
 def _paced_seconds() -> float:
     with _PACED_LOCK:
         return float(_PACED_S["s"])
+
+
+def _gate_snapshot() -> dict:
+    """What the live mirror's venue claims -- the gate's PRIORITY lane,
+    this worker being its only claimant -- have spent on the gate so
+    far (E11 part 3): seconds and count, process-wide."""
+    return dict(venue_pace.lane_stats()["priority"])
+
+
+def _gate_block(t: _Tick) -> dict:
+    """The venue gate, measured (E11 part 3), a sibling of `short.wall`
+    (whose five keys the E10 pins fix exactly): `wait`, the seconds
+    this lane's venue claims spent on the gate this tick -- from the
+    call to the claim, the queue behind other claimants and the gap
+    itself, SUMMED PER CLAIM like books_data_wait (under the six-wide
+    walk it exceeds the wall time it cost), one decimal -- and
+    `claims`, their count. The delta since the tick's start
+    (_Tick.gate0), so a full tick's block is its own claims and a fast
+    tick's its own. Bounded: these keys and no others. Measurement
+    only: nothing here changes a claim, its lane or its gap."""
+    now = _gate_snapshot()
+    g0 = t.gate0 if isinstance(t.gate0, dict) else {}
+    return {"wait": round(max(0.0, now["wait"] - float(g0.get("wait") or 0.0)), 1),
+            "claims": max(0, now["claims"] - int(g0.get("claims") or 0))}
 
 
 def _terminal_memo_snapshot(now: float) -> dict:
@@ -9367,7 +9459,14 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
         _WAKE.clear()
         stats["woken"] = woken
         try:
-            await _tick(t, woken)
+            # E11 part 2: every venue claim this tick makes -- its own
+            # (_paced, _pm_held's pages, the grammar reads) and those
+            # made through the shadow's functions (ms._paced_bbo, the
+            # positions walk, the resolver's reads), in every worker
+            # thread the tick starts -- is the live mirror's PRIORITY
+            # claim on the gate (the context asyncio.to_thread copies)
+            with venue_pace.priority_claims():
+                await _tick(t, woken)
         finally:
             _last_tick_at = now
             _full_tick = None
@@ -9397,6 +9496,9 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             # E10 part 4: the books stage in WALL time and the fast ticks'
             # lock wait / work split, the same home (`short.wall`)
             stats["short"]["wall"] = _wall_block(t, *_fast_wall_take())
+            # E11 part 3: this lane's venue claims on the gate this tick,
+            # a sibling of `short.wall` (whose keys the E10 pins fix)
+            stats["short"]["gate"] = _gate_block(t)
             _publish_fills_dedup(t)
             await _persist_terminal_memo(t)     # E6 part 3: bounded, once per 60 s, on change
             await _persist_cand_memo(t)         # E7: the candidate memos, the same rules, their own key
@@ -10090,7 +10192,8 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
             t.seq = int(_tick_seq)
             wall0 = _WALL.snapshot()    # E10: the fast tick's markets are its books stage
             try:
-                await _fast_tick(t, taken)
+                with venue_pace.priority_claims():      # E11: the fast tick's claims, the same lane
+                    await _fast_tick(t, taken)
             except Exception as exc:  # noqa: BLE001 — fail closed, by name
                 _mirror_stop("fast_tick_failed")
                 for c in taken:
@@ -10125,6 +10228,7 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
                 stats.setdefault("short", {})["timing"] = _timing_block(t)
                 stats["short"]["data_api"] = _data_api_block(t)
                 stats["short"]["wall"] = _wall_block(t, acquired - started, end - acquired)
+                stats["short"]["gate"] = _gate_block(t)     # E11: the fast tick's own claims
                 _publish_fills_dedup(t)
                 if _current_stats is stats:
                     _current_stats = None

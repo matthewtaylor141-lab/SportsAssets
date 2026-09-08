@@ -94,7 +94,7 @@ def _busy(seconds):
 # ---------------------------------------------------------------- constants
 
 def test_e6_the_constants_and_the_env_can_only_lower_the_budget(monkeypatch):
-    assert ml.TICK_TARGET_S == 25.0 and ml.HOT_S == 600.0 and ml.QUIET_EVERY_TICKS == 3
+    assert ml.TICK_TARGET_S == 25.0 and ml.HOT_S == 600.0 and ml.QUIET_EVERY_TICKS == 9   # E11: 3 -> 9
     assert ml.CAND_MIN_PER_TICK == 10 and ml.VENUE_CALLS_PER_TICK == 60
     assert ml.QUIET_EXIT_PLANS == frozenset({"exit_take", "take_at_his_level", "reduce_unfilled"})
     # capped_env: within [floor 20, default 60]; unreadable is the default
@@ -315,25 +315,30 @@ def test_e6_a_quiet_book_is_read_on_its_turn_and_skipped_otherwise_never_twice_d
     st1 = _tick(p, v)
     assert _census(st1, "on_target") == 1 and ml._quiet_memo[b["id"]]["quiet"] is True
     assert ml._quiet_memo[b["id"]] == {"seq": 1, "quiet": True, "at": NOW}
-    # ticks 2 and 3: skipped, no venue call, the plan names the tick
-    for i, now in ((2, NOW + 30), (3, NOW + 60)):
+    # ticks 2 to 9: skipped, no venue call, the plan names the tick (E11:
+    # the rotation is 9 ticks, was 3 -- ticks 2 and 3 skipped, tick 4 the
+    # turn; the same numbers off the constant)
+    turn = 1 + ml.QUIET_EVERY_TICKS
+    assert turn == 10
+    for i in range(2, turn):
+        now = NOW + 30 * (i - 1)
         v.calls.clear()
         st = _tick(p, v, now=now)
         assert "bbo" not in _kinds(v) and st["reads"] == 0 and not st.get("snap_market_planned"), i
         assert _census(st, "book_quiet_skipped") == 1 and _census(st, "on_target") == 0
         assert b["last_reason"] == "book_quiet_skipped" and b["state"] == "live"
         pl = b["last_plan"]
-        assert pl["kind"] == "no_plan" and pl["read_on"] == 4 and pl["tick"] == i and pl["last_read"] == 1
+        assert pl["kind"] == "no_plan" and pl["read_on"] == 10 and pl["tick"] == i and pl["last_read"] == 1
         assert pl["at"] == now and pl["mark"] == 0.31 and pl["bid"] == 0.30 and pl["ask"] == 0.32
         assert not _places(v) and not _cancels(v) and st["ops"] == 0
         assert _timing(st)["quiet_skipped"] == 1 and _timing(st)["read"] == 0
-    # tick 4: its turn -- read, on target, the memo moves
+    # tick 10: its turn -- read, on target, the memo moves
     v.calls.clear()
-    st4 = _tick(p, v, now=NOW + 90)
-    assert _bbos(v) == [SLUG] and _census(st4, "on_target") == 1 and _census(st4, "book_quiet_skipped") == 0
-    assert ml._quiet_memo[b["id"]] == {"seq": 4, "quiet": True, "at": NOW + 90}
-    st5 = _tick(p, v, now=NOW + 120)
-    assert _census(st5, "book_quiet_skipped") == 1 and b["last_plan"]["read_on"] == 7
+    st10 = _tick(p, v, now=NOW + 270)
+    assert _bbos(v) == [SLUG] and _census(st10, "on_target") == 1 and _census(st10, "book_quiet_skipped") == 0
+    assert ml._quiet_memo[b["id"]] == {"seq": 10, "quiet": True, "at": NOW + 270}
+    st11 = _tick(p, v, now=NOW + 300)
+    assert _census(st11, "book_quiet_skipped") == 1 and b["last_plan"]["read_on"] == 19
 
 
 def _read_ids(p, v):
@@ -345,15 +350,20 @@ def test_e6_a_due_quiet_book_the_budget_cannot_fit_is_deferred_once_and_read_nex
     the 12 books tick 4 could not fit were read on tick 5 whatever the
     budget said; the fold reads the deferred QUEUE first, FIFO, under
     max(quiet_budget, DEFERRED_MIN_PER_TICK) a tick, the overflow
-    staying queued. 30 quiet books at the budget's floor (20): tick 4's
-    quiet share is 20 - 2 (steps R and O) - 10 (the candidates' floor,
-    MEDIUM-4) = 8, so 8 are read and 22 join the queue with `read_on`
-    their turn (5, 5, ..., 6, ..., 7 at ten a tick); tick 5 reads the
-    queue's first ten, tick 6 the next ten, tick 7 the last two ahead
-    of the tick-4 cohort now due (six of which fit, two queue); from
-    there eight a tick, every book read again within
-    QUIET_EVERY_TICKS + ceil(30 / 10) = 6 ticks, never more than ten
-    quiet reads a tick."""
+    staying queued. 30 quiet books at the budget's floor (20): the due
+    tick's quiet share is 20 - 2 (steps R and O) - 10 (the candidates'
+    floor, MEDIUM-4) = 8, so 8 are read and 22 join the queue with
+    `read_on` their turn (the next tick, the one after, the third at
+    ten a tick); the next tick reads the queue's first ten, the one
+    after the next ten, the third the last two; from there every book
+    is read again within QUIET_EVERY_TICKS + ceil(30 / 10) ticks of its
+    last read, never more than ten quiet reads a tick. E11: the due
+    tick is 10 (1 + QUIET_EVERY_TICKS; it was 4 at 3), the queue's
+    turns 11 / 12 / 13 (were 5 / 6 / 7), and the due-tick cohort comes
+    round again on 19 -- at 3 the queue's third tick WAS that cohort's
+    next turn (7 = 4 + 3) and read six of it beside the two; at 9 the
+    two are read alone and ticks 14-18 read no quiet book. The same
+    arithmetic off the constant, nothing else moved."""
     monkeypatch.setattr(ml, "VENUE_CALLS_PER_TICK", 20)
     p = _pool(conds=[])
     slugs = _many_books(p, 30)
@@ -361,42 +371,58 @@ def test_e6_a_due_quiet_book_the_budget_cannot_fit_is_deferred_once_and_read_nex
     st1 = _tick(p, v)
     assert sorted(_bbos(v)) == sorted(slugs) and _census(st1, "on_target") == 30, "an empty memo reads everything"
     assert _timing(st1)["quiet_budget"] == 0 and _timing(st1)["cand_budget"] == ml.CAND_MIN_PER_TICK
-    for now in (NOW + 30, NOW + 60):
+    due = 1 + ml.QUIET_EVERY_TICKS
+    assert due == 10
+    for seq in range(2, due):
         v.calls.clear()
-        st = _tick(p, v, now=now)
+        st = _tick(p, v, now=NOW + 30 * (seq - 1))
         assert not _bbos(v) and _census(st, "book_quiet_skipped") == 30
     v.calls.clear()
-    st4 = _tick(p, v, now=NOW + 90)
-    read4 = _read_ids(p, v)
-    assert len(read4) == 8 and _census(st4, "book_quiet_skipped") == 22, (len(read4), st4["census"])
-    assert _timing(st4)["quiet_budget"] == 20 - 2 - ml.CAND_MIN_PER_TICK == 8 and _timing(st4)["quiet_reads"] == 8
+    st10 = _tick(p, v, now=NOW + 270)
+    read10 = _read_ids(p, v)
+    assert len(read10) == 8 and _census(st10, "book_quiet_skipped") == 22, (len(read10), st10["census"])
+    assert _timing(st10)["quiet_budget"] == 20 - 2 - ml.CAND_MIN_PER_TICK == 8 and _timing(st10)["quiet_reads"] == 8
     queue = list(ml._quiet_deferred)
     assert len(queue) == 22 and set(queue) == {b["id"] for b in p.books.values() if b["last_reason"] == "book_quiet_skipped"}
-    assert all(ml._quiet_deferred[i] == 4 for i in queue), "queued on tick 4"
-    assert [p.books[i]["last_plan"]["read_on"] for i in queue] == [5] * 10 + [6] * 10 + [7] * 2, "its turn in the queue"
+    assert all(ml._quiet_deferred[i] == 10 for i in queue), "queued on tick 10"
+    assert [p.books[i]["last_plan"]["read_on"] for i in queue] == [11] * 10 + [12] * 10 + [13] * 2, "its turn in the queue"
     v.calls.clear()
-    st5 = _tick(p, v, now=NOW + 120)
-    assert _read_ids(p, v) == set(queue[:10]) and _census(st5, "book_quiet_skipped") == 20
-    assert _timing(st5)["quiet_reads"] == 10 == ml.DEFERRED_MIN_PER_TICK > _timing(st5)["quiet_budget"] == 8
+    st11 = _tick(p, v, now=NOW + 300)
+    assert _read_ids(p, v) == set(queue[:10]) and _census(st11, "book_quiet_skipped") == 20
+    assert _timing(st11)["quiet_reads"] == 10 == ml.DEFERRED_MIN_PER_TICK > _timing(st11)["quiet_budget"] == 8
     assert list(ml._quiet_deferred) == queue[10:], "FIFO: the head read, the rest in order"
     v.calls.clear()
-    st6 = _tick(p, v, now=NOW + 150)
-    assert _read_ids(p, v) == set(queue[10:20]) and _census(st6, "book_quiet_skipped") == 20
+    st12 = _tick(p, v, now=NOW + 330)
+    assert _read_ids(p, v) == set(queue[10:20]) and _census(st12, "book_quiet_skipped") == 20
     assert list(ml._quiet_deferred) == queue[20:]
     v.calls.clear()
-    st7 = _tick(p, v, now=NOW + 180)
-    read7 = _read_ids(p, v)
-    assert set(queue[20:]) < read7 and len(read7) == 8 and len(read7 & read4) == 6, "the queue first, then the due"
-    assert _census(st7, "book_quiet_skipped") == 22 and set(ml._quiet_deferred) == read4 - read7
+    st13 = _tick(p, v, now=NOW + 360)
+    read13 = _read_ids(p, v)
+    # E11: the queue's last two alone -- the tick-10 cohort is not due
+    # again until tick 19 (at 3 the queue's third tick, 7, was that
+    # cohort's next turn and read six of it beside the two)
+    assert read13 == set(queue[20:]) and _census(st13, "book_quiet_skipped") == 28 and not ml._quiet_deferred
+    last = {b["id"]: 13 if b["id"] in read13 else (12 if b["id"] in set(queue[10:20]) else (11 if b["id"] in set(queue[:10]) else 10))
+            for b in p.books.values()}
+    # ticks 14-18: nothing due, nothing read -- a quiet book is read on
+    # its turn and never before it
+    for seq in range(14, 19):
+        v.calls.clear()
+        st = _tick(p, v, now=NOW + 30 * (seq - 1))
+        assert not _read_ids(p, v) and _census(st, "book_quiet_skipped") == 30, seq
+    # tick 19: the tick-10 cohort's turn, the eight inside the budget
+    v.calls.clear()
+    st19 = _tick(p, v, now=NOW + 30 * 18)
+    assert _read_ids(p, v) == read10 and _timing(st19)["quiet_reads"] == 8 and not ml._quiet_deferred
+    for i in read10:
+        last[i] = 19
     # steady state: never more than the slots a tick, every book read
     # again within QUIET_EVERY_TICKS + ceil(30 / 10) ticks of its last read
-    last = {b["id"]: 7 if b["id"] in read7 else (6 if b["id"] in set(queue[10:20]) else (5 if b["id"] in set(queue[:10]) else 4))
-            for b in p.books.values()}
-    for seq in range(8, 20):
+    for seq in range(20, 40):
         v.calls.clear()
         st = _tick(p, v, now=NOW + 30 * (seq - 1))
         read = _read_ids(p, v)
-        assert 0 < len(read) <= max(_timing(st)["quiet_budget"], ml.DEFERRED_MIN_PER_TICK) == 10, seq
+        assert len(read) <= max(_timing(st)["quiet_budget"], ml.DEFERRED_MIN_PER_TICK) == 10, seq
         assert _timing(st)["quiet_reads"] == len(read) and _census(st, "book_quiet_skipped") == 30 - len(read)
         for i in read:
             assert seq - last[i] <= ml.QUIET_EVERY_TICKS + 3, (seq, i, last[i])

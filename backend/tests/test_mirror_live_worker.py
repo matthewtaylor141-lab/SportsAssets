@@ -7074,6 +7074,12 @@ def test_a_full_games_unopened_markets_are_skipped_for_the_memo_then_read_again(
     a["ledger_net"] = 2000
     p.rows[a["standing_row_id"]]["filled_shares"] = 2000.0
     v4 = _Venue(bid=0.49, ask=0.51, held={GAME_SLUG_A: 2000, SLUG: 0})
+    # E6: this tick is A's turn in the quiet rotation (read on tick 1,
+    # due on tick 1 + QUIET_EVERY_TICKS); E11 widened the rotation 3 -> 9,
+    # so the rotation's clock is moved to that tick -- the tick after
+    # this one keeps the same clock-based memo story (the same number
+    # read off the constant, nothing else moved)
+    ml._tick_seq = ml._quiet_memo[a["id"]]["seq"] + ml.QUIET_EVERY_TICKS - 1
     st4 = _tick(p, v4, now=NOW + ml.GAME_FULL_MEMO_S + 2, http=http)
     assert a["target"] == 2000 and not _places(v4), "A on target at $1,000"
     assert _census(st4, "cand_game_full_skipped") == 1 and len(p.books) == 1
@@ -7331,7 +7337,7 @@ def _comparable(st):
     if isinstance(out.get("short"), dict):
         # E9: and the fast ticks' block beside them (seconds); E10: the wall block too
         out["short"] = {k: v for k, v in out["short"].items()
-                        if k not in ("timing", "data_api", "fast", "wall")}
+                        if k not in ("timing", "data_api", "fast", "wall", "gate")}
     return out
 
 
