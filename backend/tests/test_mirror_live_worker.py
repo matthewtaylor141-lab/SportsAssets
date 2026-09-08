@@ -1020,9 +1020,13 @@ def _gone(other=0.0):
 
 
 class _NoThrottle:
-    """ratelimit.Throttle with the wait taken out."""
+    """ratelimit.Throttle with the wait taken out (both lanes: E10's
+    priority lane is the mirror's per-market read)."""
 
     async def wait(self):
+        return None
+
+    async def acquire(self, priority=False):
         return None
 
 
@@ -1140,6 +1144,10 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_fast_last_at", 0.0, raising=False)
     monkeypatch.setattr(ml, "_fast_acc", Counter(), raising=False)
     monkeypatch.setattr(ml, "_fast_seconds", {"s": 0.0}, raising=False)
+    # E10: the fast ticks' wait / work split and the books stage's wall
+    # clock (process-wide counters, read as deltas): fresh per test
+    monkeypatch.setattr(ml, "_fast_wall", {"wait": 0.0, "work": 0.0}, raising=False)
+    monkeypatch.setattr(ml, "_WALL", ml._WallClock(), raising=False)
     monkeypatch.setattr(ml, "_fast_census", Counter(), raising=False)
     monkeypatch.setattr(ml, "_fast_calls", 0, raising=False)
     monkeypatch.setattr(ml, "_fast_guard_calls", 0, raising=False)
@@ -7321,8 +7329,9 @@ def _comparable(st):
     the data-API block beside it)."""
     out = {k: v for k, v in st.items() if k not in ("recent", "tick_s")}
     if isinstance(out.get("short"), dict):
-        # E9: and the fast ticks' block beside them (seconds)
-        out["short"] = {k: v for k, v in out["short"].items() if k not in ("timing", "data_api", "fast")}
+        # E9: and the fast ticks' block beside them (seconds); E10: the wall block too
+        out["short"] = {k: v for k, v in out["short"].items()
+                        if k not in ("timing", "data_api", "fast", "wall")}
     return out
 
 

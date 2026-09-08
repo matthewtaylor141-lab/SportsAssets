@@ -50,8 +50,27 @@ class Settings(BaseSettings):
     poll_priority_seconds: float = 2.5
     # 4.0 -> 6.0 with the fast lane (its ~2 rps rides on top of the
     # roster pass); polite_get's 429 backoff still owns the true ceiling.
+    # E10 (2026-09-08): the CEILING, and the env may only lower it --
+    # ratelimit.data_api_rate() reads min(this, ratelimit.DATA_API_MAX_RPS
+    # 6.0); the mirror's per-market read rides a priority lane on it.
     data_api_max_rps: float = 6.0  # combined ceiling across all Data-API callers
-    positions_sync_interval_seconds: int = 300
+    # E10 (2026-09-08): 300 -> 900. api_positions, the table positions_sync
+    # writes, is read by the API alone: the UI's whale profile
+    # (api/queries.whale_profile) and events view (api/queries.events_view)
+    # AND the edge engine's /api/signal alignment (api/app.api_signal,
+    # read by edge-engine/src/edge/shadow/runner.py's shadow runner) -- a
+    # 15-minute freshness moves that signal too; nothing under workers/,
+    # analytics/ or ingestion/ reads it (the mirror's per-market read and
+    # the exit worker's walk are their own reads), so nothing on the money
+    # path does (E10 fold, the review's LOW-2: it was "the UI only"). At
+    # 300 s its <= 48-page walk per whale was ~1.1 rps of the 6.0 rps
+    # data-API budget the mirror's per-market read shares (hard2/E10_map.md
+    # §1e: ~18% of the ceiling, the budget oversubscribed). At 900 s the
+    # UI's book, and /api/signal's positioning, is at most 15 minutes old
+    # (was 5) and the burst ~0.37 rps. The env may set it lower for a
+    # fresher UI, never under positions_sync.POSITIONS_SYNC_MIN_S = 60 (the
+    # floor sits where the value is read: positions_sync.sync_interval_s).
+    positions_sync_interval_seconds: int = 900
     history_max_trades: int = 500_000  # deep-backfill cap per wallet
     history_start_date: str = "2025-07-01"  # earliest fill date to import
     poll_failure_alert_threshold: int = 3

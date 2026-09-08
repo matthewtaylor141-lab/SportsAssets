@@ -95,6 +95,7 @@ from ..analytics.mirror_live_rules import BUY, FLAT_TOL_SHARES, ORDER_INTENT, OR
 from ..analytics.roster_rules import MIRROR_ANCHOR_CLIP_USD
 from ..config import settings
 from ..db import get_pool, heartbeat
+from .. import ratelimit
 from .. import venue_pace
 from ..venue_pace import pace
 from . import mirror_shadow as ms
@@ -135,6 +136,22 @@ MAX_MARKETS_PER_TICK = int(rules.capped_env("MIRROR_LIVE_MAX_MARKETS", 40.0, flo
 # 40 x 5 s on the candidates -- the freshness clause below
 # (ms.SNAP_MAX_AGE_S) still refuses a read that lands late.
 _SNAP_READ_TIMEOUT_S = 5.0
+# THE MIRROR'S OWN VANISH CONFIRMATION'S WAIT BOUND (E10 fold, the
+# review's MEDIUM-2). `_confirm_gone` below is select_flatten's money
+# read -- "is his position really gone before we flatten ours" --
+# awaited inside the six-wide walk under the book lock. E10 put its
+# throttle slot on the NORMAL lane with no bound: behind the whole
+# telemetry FIFO (the poller's nine fast-lane pages, the walk's and
+# the sync's page) plus up to ratelimit.PRIORITY_BURST of the mirror's
+# own sibling reads, ~4 s holding a walk slot on the very tick that
+# decides an exit. Now it takes the PRIORITY lane, as _market_snap's
+# read does, and waits at most this long for the slot; past it the
+# confirm is unreadable -- NOT gone, HOLD -- exactly as a raise is
+# read. Five seconds, as _SNAP_READ_TIMEOUT_S; the environment may
+# only lower it, never under 1.0 s (a bound under a few slots would
+# refuse every contended confirm). whale_exits' own _cycle site stays
+# on the normal lane: it is the exit worker's walk, not the mirror.
+CONFIRM_GONE_WAIT_S = rules.capped_env("MIRROR_CONFIRM_GONE_WAIT_S", 5.0, floor=1.0)
 # THE TICK'S VENUE-CALL BUDGET (E6, 2026-09-07; owner 18:3xZ / 19:1xZ
 # "Need everything running and running at mirror to him"). The tick
 # was 80-127 s with 74-77 live books (19:10Z 79.8 s, 19:21Z 98.7 s,
@@ -292,6 +309,56 @@ FAST_TICK_MIN_S = 2.0
 FAST_WALK_MAX_S = 90.0
 FAST_RETRIES = 2
 HIS_FILLS_SEEN_MAX = 20
+# THE PRIORITY LANE AND THE WALL CLOCK (E10, 2026-09-08; owner 22:4xZ
+# "latency must be flawless and exceptional"). With E9 live the tick
+# was 25-44 s (00:50-00:59Z: tick_s 25.3 / 34.5 / 43.9, books 19.5-24.7
+# s of wall at MIRROR_BOOK_CONCURRENCY 6) and E9's fast tick waits
+# behind the full tick (the serialisation), so a shorter full tick is
+# the lever for every wake that lands mid-tick. Its books stage is the
+# per-market data-API reads: `books_data_wait` 21-28 s SUMMED over
+# 16-20 reads -- ~1.4 s of queue per read on a process-wide throttle
+# (ratelimit.Throttle, 6.0 rps, one FIFO) oversubscribed by the
+# poller's roster pass and fast lane, positions_sync and this worker
+# (~6.6-7.2 rps offered; hard2/E10_map.md §1e), with two /positions
+# bursts (whale_exits._fetch_positions, _confirm_gone) not on it at
+# all. Four parts, none of them a read's decision:
+#   1  a PRIORITY LANE on the throttle (ratelimit.Throttle.acquire(
+#      priority=True)): the mirror's per-market read -- market_positions
+#      from _market_snap alone; the book walk, the fast tick and the
+#      candidate read all pass through it -- takes the next free slot
+#      ahead of every waiting normal caller; the RATE is unchanged (6.0
+#      rps total, env may only lower it: ratelimit.data_api_rate),
+#      normal callers keep FIFO among themselves, and at most
+#      ratelimit.PRIORITY_BURST = 12 priority slots (two waves of the
+#      six-wide walk) are served in a row while a normal caller waits;
+#   2  positions_sync's cadence 300 -> 900 s (config.py: api_positions
+#      is read by the API alone -- the UI's whale profile and events
+#      view and the edge engine's /api/signal alignment, a book at most
+#      15 min old for each; nothing under workers/, analytics/ or
+#      ingestion/ reads it; env floor 60);
+#   3  the two out-of-budget bursts go BEHIND the throttle -- the walk
+#      inside _fetch_positions, one NORMAL slot per page; _confirm_gone
+#      at its two call sites, the callee itself pinned byte for byte:
+#      whale_exits._cycle's on the NORMAL lane (the exit worker's walk)
+#      and this file's _confirm_gone -- the mirror's OWN money read,
+#      select_flatten's vanish confirmation inside the walk -- on the
+#      PRIORITY lane with its wait bounded by CONFIRM_GONE_WAIT_S (the
+#      E10 fold, the review's MEDIUM-2; a wait past the bound is read
+#      as an unreadable confirm: not gone, HOLD);
+#   4  WALL TIME: E6's `books_venue` / `books_data` and E7's split stay
+#      SUMS PER CALL (their keys and that reading are pinned);
+#      `short.wall` = {books_data_wall, books_venue_wall,
+#      books_plan_wall, fast_wait, fast_work} rides beside them
+#      (_WallClock, _wall_block): the seconds the books stage spent with
+#      at least one per-market read / paced venue call / planner step in
+#      flight, and E9's `fast` seconds split into the fast ticks' wait
+#      for _TICK_LOCK and the work after the acquire (43.2 s of `fast`
+#      for one fast tick at 00:50Z was the wait). The mode line prints
+#      ` fast=N/W.Ws` (count / work seconds) in the ` fast=N` token's
+#      place, ` fast=N` still on a dict that carries no wall block.
+# NOT here: the venue pacer, MIRROR_BOOK_CONCURRENCY, SNAP_MAX_AGE_S,
+# the E6 budgets, the read's shape (one scoped request, sizeThreshold=0,
+# the foreign-row refusal) or any read's decision.
 # A 'placing' row with no order id older than this is a placement whose
 # response was lost with the process (step O); younger, the placement
 # may still be the one in flight under this very tick's lock.
@@ -890,6 +957,71 @@ _terminal_memo_last: dict[str, Any] = {"at": 0.0, "sig": None}
 # the tick snapshots it around the book walk for the timing block
 _PACED_S = {"s": 0.0}
 _PACED_LOCK = threading.Lock()
+
+
+class _WallClock:
+    """E10 part 4 (2026-09-08): the books stage in WALL time. E6's
+    `books_venue` / `books_data` and E7's `books_data_wait` / `_req`
+    are SUMS PER CALL, so under the six-wide walk they exceed the
+    stage's wall time (27.0 s of `books_data_wait` inside a 19.5 s
+    `books` at 00:50Z, ~16 s of it the walk queueing behind its own
+    siblings); the number an operator can act on is how long the stage
+    spent with at least one call of a class in flight. Three in-flight
+    counters -- `data` (a per-market read, _market_snap), `venue` (a
+    paced venue call: a quote read in _bbo, a paced write in _paced)
+    and `books` (a book inside _tick_book) -- and three accumulators of
+    the seconds a class was above zero: `data`, `venue` and `plan`, a
+    PLANNER STEP being a book in flight that is inside neither a venue
+    call nor a data read (books - venue - data > 0: its own database
+    reads and writes and the plan arithmetic). Process-wide and
+    thread-safe (the paced writes enter from worker threads), read as a
+    delta around the stage like _PACED_S. Measurement only: nothing
+    here changes a read, a call or its order."""
+
+    KEYS = ("data", "venue", "plan")
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._n = {"data": 0, "venue": 0, "books": 0}
+        self._since = dict.fromkeys(self.KEYS, 0.0)
+        self._total = dict.fromkeys(self.KEYS, 0.0)
+
+    def _active(self, key: str) -> bool:
+        if key == "plan":
+            return self._n["books"] - self._n["venue"] - self._n["data"] > 0
+        return self._n[key] > 0
+
+    def move(self, counter: str, delta: int) -> None:
+        """One call of `counter`'s class entering (+1) or leaving (-1)."""
+        with self._lock:
+            now = time.monotonic()
+            before = {k: self._active(k) for k in self.KEYS}
+            self._n[counter] = max(0, self._n[counter] + int(delta))
+            for k in self.KEYS:
+                after = self._active(k)
+                if after and not before[k]:
+                    self._since[k] = now
+                elif before[k] and not after:
+                    self._total[k] += now - self._since[k]
+
+    def snapshot(self) -> dict:
+        """The seconds each class has been in flight so far, an open
+        interval included."""
+        with self._lock:
+            now = time.monotonic()
+            return {k: self._total[k] + ((now - self._since[k]) if self._active(k) else 0.0)
+                    for k in self.KEYS}
+
+    def delta(self, before: dict) -> dict:
+        now = self.snapshot()
+        return {k: max(0.0, now[k] - float(before.get(k) or 0.0)) for k in self.KEYS}
+
+
+_WALL = _WallClock()
+# E10: the fast ticks' seconds since the last full tick published them,
+# split -- the wait for _TICK_LOCK and the work after the acquire (E9's
+# `fast` is their sum); reset on publish like _fast_seconds
+_fast_wall = {"wait": 0.0, "work": 0.0}
 # The venue IGNORED the post-only flag once (executions on a post-only
 # create): the flag is off for the rest of the process and the maker
 # thesis is measured by price selection alone (spec X.L).
@@ -1247,10 +1379,12 @@ def _paced(fn, *args, **kwargs):
     venue sees one request per gap from this process whatever N is --
     half that while the 429 circuit holds (venue_pace.penalize)."""
     t0 = time.monotonic()
+    _WALL.move("venue", 1)              # E10: a paced venue call in flight (wall time)
     try:
         pace(ms.READ_PACING_S)
         return fn(*args, **kwargs)
     finally:
+        _WALL.move("venue", -1)
         # E6: the seconds this call spent here (the gap and the request),
         # summed across the worker threads for the tick's timing block;
         # nothing about the call changes
@@ -2025,6 +2159,9 @@ class _Tick:
     fast_calls: int = 0
     # E9: the fast tick's own record -- cid -> the reason it was skipped
     fast_skipped: dict = field(default_factory=dict)
+    # E10: the books stage's wall-time deltas (_WallClock.delta around
+    # the walk; a fast tick's around its markets): data / venue / plan
+    wall: dict = field(default_factory=dict)
 
 
 # ------------------------------------------- E2: the tick's shared counters
@@ -3136,10 +3273,13 @@ async def _bbo(t: _Tick, slug: str, book: bool = False) -> tuple[float | None, f
     # candidate just opened), step the live streak as before
     ws = slug if (book and t.walking) else None
     t0 = time.monotonic()
+    _WALL.move("venue", 1)              # E10: a quote read in flight (wall time)
     try:
         q = await asyncio.to_thread(ms._paced_bbo, t.pmus, slug)
     except Exception as exc:  # noqa: BLE001 — an unreadable book is no quote
         q = {"bid": None, "ask": None, "state": None, "error": type(exc).__name__}
+    finally:
+        _WALL.move("venue", -1)
     if book:
         # E6: an existing book's paced quote read, summed per call
         t.timing["books_venue"] += time.monotonic() - t0
@@ -4741,9 +4881,16 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None,
     raw = None
     t0 = time.monotonic()
     split: dict = {}                      # E7: the read's wait / request seconds
+    _WALL.move("data", 1)                 # E10: a per-market read in flight (wall time)
     try:
+        # E10: THE PRIORITY LANE. This is the per-market read's priority
+        # entry on the process-wide throttle (the only other: this file's
+        # _confirm_gone, the mirror's own vanish confirmation, since the
+        # E10 fold): the next free slot ahead of every waiting
+        # telemetry page, the rate unchanged, one wait before the one GET
         raw = await asyncio.wait_for(
-            whale_exits.market_positions(t.http, str(address), str(cid), long_asset=la, timing=split),
+            whale_exits.market_positions(t.http, str(address), str(cid), long_asset=la,
+                                         timing=split, priority=True),
             timeout=_SNAP_READ_TIMEOUT_S)
     except (asyncio.TimeoutError, TimeoutError):
         # SLOW IS A FAILURE MODE WITH A NAME. Without this the tick just
@@ -4756,6 +4903,8 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None,
         log.warning("mirror_live: per-market read of %s for %s raised (%s)",
                     cid, whale, type(exc).__name__)
         raw = None
+    finally:
+        _WALL.move("data", -1)
     if book:
         # E6: an existing book's per-market data-API read (the throttle's
         # wait and the request), summed per call; E7: the two parts,
@@ -5012,7 +5161,8 @@ async def _confirm_gone(t: _Tick, whale: str, asset: str) -> bool:
     """The mirror's OWN vanish confirmation (addendum section 8): the
     exit worker's `ours` clause excludes a book-held asset from its
     partial-walk branch, so the worker asks the data API itself. False
-    on everything unreadable."""
+    on everything unreadable -- a wait for the throttle's slot past
+    CONFIRM_GONE_WAIT_S included (E10 fold, MEDIUM-2)."""
     try:
         address = await t.pool.fetchval(_SQL_WHALE_ADDRESS, whale.lower())
     except Exception:  # noqa: BLE001
@@ -5020,8 +5170,19 @@ async def _confirm_gone(t: _Tick, whale: str, asset: str) -> bool:
     if not address or t.http is None:
         return False
     try:
+        # E10 fold (the review's MEDIUM-2): one slot per confirm read,
+        # taken here on the PRIORITY lane (the callee is pinned byte for
+        # byte and stays as it was inside) -- this is the mirror's own
+        # money read on its exit path, select_flatten's "is his position
+        # really gone before we flatten ours", inside the six-wide walk
+        # under the book lock, not the exit worker's walk (whose _cycle
+        # site stays normal). The wait is bounded: past
+        # CONFIRM_GONE_WAIT_S the slot never came and the confirm is
+        # unreadable, read below exactly as a raise is -- not gone, HOLD.
+        await asyncio.wait_for(ratelimit.data_api_throttle().acquire(priority=True),
+                               timeout=CONFIRM_GONE_WAIT_S)
         return bool(await whale_exits._confirm_gone(t.http, t.pool, str(address), asset))
-    except Exception:  # noqa: BLE001 — unknown is not gone
+    except Exception:  # noqa: BLE001 — unknown (unreadable, or the wait past its bound) is not gone
         return False
 
 
@@ -5487,8 +5648,9 @@ def _data_api_block(t: _Tick) -> dict:
     reads' seconds inside the process-wide throttle's wait
     (`books_data_wait`) and inside the request (`books_data_req`),
     summed per call like `books_data` (which they split), and
-    `data_rps`, the throttle's configured rate
-    (settings().data_api_max_rps, shared with the live poller, the
+    `data_rps`, the rate the throttle runs at (ratelimit.data_api_rate:
+    settings().data_api_max_rps and never above ratelimit
+    .DATA_API_MAX_RPS since E10 -- shared with the live poller, the
     backfill and the reconciler; None when unreadable). Served beside
     the timing block as `short.data_api` -- the block's own keys are
     pinned exactly, so these ride in a sibling. Bounded: these keys and
@@ -5496,12 +5658,40 @@ def _data_api_block(t: _Tick) -> dict:
     budget or the throttle's rate."""
     tm = t.timing
     try:
-        rps = _num(getattr(settings(), "data_api_max_rps", None))
+        rps = _num(ratelimit.data_api_rate())
     except Exception:  # noqa: BLE001 — settings unreadable: no rate to print, never a raise
         rps = None
     return {"books_data_wait": round(float(tm.get("books_data_wait") or 0.0), 1),
             "books_data_req": round(float(tm.get("books_data_req") or 0.0), 1),
             "data_rps": rps}
+
+
+def _wall_block(t: _Tick, fast_wait: float, fast_work: float) -> dict:
+    """The books stage in WALL time (E10 part 4), beside E6's exactly-
+    pinned timing block and E7's data-API block: `books_data_wall`,
+    `books_venue_wall`, `books_plan_wall` -- the seconds the stage spent
+    with at least one per-market read / paced venue call / planner step
+    in flight (_WallClock; each <= the stage's `books` <= `tick_s`,
+    never a sum per call) -- and `fast_wait` / `fast_work`, E9's `fast`
+    seconds split into the fast ticks' wait for _TICK_LOCK and the work
+    after the acquire (a full tick's block carries the fast ticks since
+    the last publish, as `short.fast` does; a fast tick's own block its
+    own). One decimal. Bounded: these keys and no others. Measurement
+    only."""
+    w = t.wall if isinstance(t.wall, dict) else {}
+    return {"books_data_wall": round(float(w.get("data") or 0.0), 1),
+            "books_venue_wall": round(float(w.get("venue") or 0.0), 1),
+            "books_plan_wall": round(float(w.get("plan") or 0.0), 1),
+            "fast_wait": round(float(fast_wait or 0.0), 1),
+            "fast_work": round(float(fast_work or 0.0), 1)}
+
+
+def _fast_wall_take() -> tuple[float, float]:
+    """The fast ticks' lock wait and work since the last full tick
+    published them; reset on the take (the _fast_seconds shape)."""
+    out = (float(_fast_wall["wait"]), float(_fast_wall["work"]))
+    _fast_wall["wait"] = _fast_wall["work"] = 0.0
+    return out
 
 
 def _paced_seconds() -> float:
@@ -8945,7 +9135,11 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     # second candidate on the same game reads its target as exposure
     t.game_books.setdefault(_game_key_of(book), []).append(book)
     async with _lock_for(book["id"]):
-        await _tick_book(t, book)
+        _WALL.move("books", 1)          # E10: a book in flight (its planner steps)
+        try:
+            await _tick_book(t, book)
+        finally:
+            _WALL.move("books", -1)
     return None
 
 
@@ -9200,6 +9394,9 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             # E9: the fast ticks since the last publish, the same home
             # (E6's block keeps exactly its keys); the mode line's ` fast=N`
             stats["short"]["fast"] = _fast_block()
+            # E10 part 4: the books stage in WALL time and the fast ticks'
+            # lock wait / work split, the same home (`short.wall`)
+            stats["short"]["wall"] = _wall_block(t, *_fast_wall_take())
             _publish_fills_dedup(t)
             await _persist_terminal_memo(t)     # E6 part 3: bounded, once per 60 s, on change
             await _persist_cand_memo(t)         # E7: the candidate memos, the same rules, their own key
@@ -9385,7 +9582,9 @@ async def _tick(t: _Tick, woken: list) -> None:
     t.quiet_budget = _quiet_budget(t, books)
     t.deferred_due = _deferred_due(t)
     t0, paced0 = time.monotonic(), _paced_seconds()
+    wall0 = _WALL.snapshot()            # E10: the stage's wall-time counters, read as a delta
     await _walk_books(t, _woken_first(books, woken))
+    t.wall = _WALL.delta(wall0)         # inside the `books` timer: each <= books
     t.timing["books"] += time.monotonic() - t0
     t.timing["books_venue"] += _paced_seconds() - paced0
     if t.cancel_all:
@@ -9547,6 +9746,7 @@ async def _walk_books(t: _Tick, ordered: list) -> None:
                 if t.abandoned or t.cancel_all:
                     return
                 async with _lock_for(book["id"]):
+                    _WALL.move("books", 1)      # E10: a book in flight (its planner steps)
                     try:
                         await _tick_book(t, book)
                     except Exception as exc:  # noqa: BLE001 — one book, not the tick
@@ -9554,6 +9754,7 @@ async def _walk_books(t: _Tick, ordered: list) -> None:
                         log.exception("mirror_live: book %s failed (%s)", book["id"],
                                       type(exc).__name__)
                     finally:
+                        _WALL.move("books", -1)
                         # the miss streak, judged in WALK order as each
                         # book finishes (E2 review, MEDIUM-4)
                         t.walk_done.add(book["id"])
@@ -9691,7 +9892,11 @@ async def _fast_book(t: _Tick, book: dict) -> None:
             return _fast_skip(t, cid, "order_open")
         if _full_tick is not None and bid in _full_tick.filled_books:
             return _fast_skip(t, cid, "fill_after_walk")
-        await _tick_book(t, fresh)
+        _WALL.move("books", 1)          # E10: a book in flight (its planner steps)
+        try:
+            await _tick_book(t, fresh)
+        finally:
+            _WALL.move("books", -1)
     if bid in t.placed_books:
         _mirror_stop("fast_tick_placed", fresh.get("whale"))
 
@@ -9867,6 +10072,7 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
         return stats
     async with _FAST_LOCK, _TICK_LOCK:
         _fast_holding = True
+        acquired = time.monotonic()     # E10: the lock wait ends here; the work starts
         try:
             if cids is None:
                 taken = list(_FAST_WOKEN)[:FAST_TICK_MAX]
@@ -9882,6 +10088,7 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
             t.fast_calls, t.guard_calls, t.ops = int(_fast_calls), int(_fast_guard_calls), int(_fast_ops)
             seed_guard, seed_ops = t.guard_calls, t.ops
             t.seq = int(_tick_seq)
+            wall0 = _WALL.snapshot()    # E10: the fast tick's markets are its books stage
             try:
                 await _fast_tick(t, taken)
             except Exception as exc:  # noqa: BLE001 — fail closed, by name
@@ -9890,6 +10097,8 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
                     t.fast_skipped.setdefault(c, "fast_tick_failed")
                 log.exception("mirror_live: fast tick failed (%s)", type(exc).__name__)
             finally:
+                end = time.monotonic()
+                t.wall = _WALL.delta(wall0)
                 _fast_last_at = time.time()
                 _fast_calls += int(t.venue_calls)
                 _fast_guard_calls += max(0, int(t.guard_calls) - seed_guard)
@@ -9899,7 +10108,10 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
                 skipped = len(t.fast_skipped) - failed
                 _fast_acc.update({"n": 1 if taken else 0, "markets": len(taken), "placed": placed,
                                   "skipped": skipped, "failed": failed, "calls": int(t.venue_calls)})
-                _fast_seconds["s"] += time.monotonic() - started
+                _fast_seconds["s"] += end - started
+                # E10: the split -- the wait for _TICK_LOCK, the work after it
+                _fast_wall["wait"] += acquired - started
+                _fast_wall["work"] += end - acquired
                 if own:
                     for k, v in stats["census"].items():
                         if v:
@@ -9912,6 +10124,7 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
                 stats["integ"] = _integ_block(stats)
                 stats.setdefault("short", {})["timing"] = _timing_block(t)
                 stats["short"]["data_api"] = _data_api_block(t)
+                stats["short"]["wall"] = _wall_block(t, acquired - started, end - acquired)
                 _publish_fills_dedup(t)
                 if _current_stats is stats:
                     _current_stats = None
@@ -9991,7 +10204,14 @@ def _mode_line(stats: dict, ticks: int, loss: dict | None = None,
         # sibling of the timing block); nothing on a dict that has none
         fb = (stats.get("short") or {}).get("fast")
         if isinstance(fb, dict):
-            tfrag += " fast=%s" % (fb.get("n"),)
+            # E10: ` fast=N/W.Ws` -- the count and the fast ticks' WORK
+            # seconds (`short.wall.fast_work`, the lock wait left out) in
+            # E9's token's place; E9's ` fast=N` on a dict without the block
+            wb = (stats.get("short") or {}).get("wall")
+            if isinstance(wb, dict):
+                tfrag += " fast=%s/%ss" % (fb.get("n"), wb.get("fast_work"))
+            else:
+                tfrag += " fast=%s" % (fb.get("n"),)
     log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s%s%s venue=%s%s stats=%s",
              stats.get("mode"), stats.get("whales"), stats.get("books_live"),
              stats.get("orders_open"), day, tfrag, rail, stats.get("venue_state"),

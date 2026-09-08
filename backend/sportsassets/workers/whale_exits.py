@@ -41,6 +41,7 @@ from typing import Any
 
 import httpx
 
+from .. import ratelimit
 from ..config import settings
 from ..db import get_pool, heartbeat
 
@@ -333,6 +334,21 @@ async def _fetch_positions(http: httpx.AsyncClient,
     offset = 0
     truncated = False
     while offset < POSITIONS_MAX:
+        # INSIDE THE BUDGET (E10, 2026-09-08). This walk -- up to 48
+        # pages per held whale per cycle, the largest single burst on
+        # the data API -- was a raw http.get, invisible to the
+        # process-wide throttle every other caller shares
+        # (config.data_api_max_rps 6.0, ratelimit.Throttle), so the
+        # venue's real rate ran above the ceiling the number promised
+        # (hard2/E10_map.md §1b). One NORMAL slot per request now, the
+        # retry's included; the mirror's per-market read holds the
+        # PRIORITY lane (market_positions from mirror_live), so this
+        # walk waits behind it and never the other way round. Cost: at
+        # 6 rps a full 48-page walk is >= 8 s of wait per whale, and
+        # nothing here times out on it -- the client's 25 s timeout is
+        # per request and the wait precedes the request; the cycle has
+        # no deadline of its own (main sleeps INTERVAL_S after it).
+        await ratelimit.data_api_throttle().wait()
         resp = await http.get("/positions",
                               params={"user": address,
                                       "limit": POSITIONS_PAGE,
@@ -342,6 +358,7 @@ async def _fetch_positions(http: httpx.AsyncClient,
             # single throttled page was costing the whale's entire
             # exit coverage for the cycle
             await asyncio.sleep(2.0)
+            await ratelimit.data_api_throttle().wait()
             resp = await http.get("/positions",
                                   params={"user": address,
                                           "limit": POSITIONS_PAGE,
@@ -531,7 +548,8 @@ async def _confirm_gone(http: httpx.AsyncClient, pool, address: str,
 async def market_positions(http: httpx.AsyncClient, address: str,
                            condition_id: str, *,
                            long_asset: str | None = None,
-                           timing: dict | None = None) -> dict | None:
+                           timing: dict | None = None,
+                           priority: bool = False) -> dict | None:
     """ONE per-market read of what a whale holds on BOTH tokens of a
     condition (to-a-tee Phase 1, owner order 2026-09-02: "I want us to
     match everything ... mirror the whales to a tee").
@@ -586,13 +604,28 @@ async def market_positions(http: httpx.AsyncClient, address: str,
     seconds from the request's start to the call's end to its `req`,
     whatever the call returned -- measurement only; the wait, the
     request and what is read are untouched.
+
+    `priority` (E10, 2026-09-08; the mirror's per-market read stops
+    queueing behind telemetry): True takes the throttle's PRIORITY lane
+    (ratelimit.Throttle.acquire(priority=True) -- the next free slot
+    ahead of every waiting normal caller, the rate unchanged, at most
+    ratelimit.PRIORITY_BURST priority slots in a row before a waiting
+    normal caller is served); False -- the default, and every caller
+    but mirror_live._market_snap (the book walk, the fast tick and the
+    candidate read all pass through it) -- waits on the normal lane
+    exactly as before. One throttled wait precedes the one GET on either
+    lane; the request, the verdict and the `timing` split are untouched
+    by the lane.
     """
     from ..ratelimit import data_api_throttle
 
     t0 = time.monotonic()
     t1: float | None = None
     try:
-        await data_api_throttle().wait()
+        if priority:
+            await data_api_throttle().acquire(priority=True)
+        else:
+            await data_api_throttle().wait()
         t1 = time.monotonic()
         resp = await http.get("/positions", params={
             "user": address, "market": condition_id, "limit": 100,
@@ -973,6 +1006,12 @@ async def _cycle(http: httpx.AsyncClient, pool) -> dict:
                     for a in live_gone:
                         if a not in held_here:
                             continue
+                        # E10: one NORMAL slot per confirm read, taken
+                        # HERE -- _confirm_gone itself is pinned byte
+                        # for byte (its SHA-256 in test_e7_review_pins,
+                        # its params line in test_whale_exits_market_
+                        # positions) and stays as it was inside
+                        await ratelimit.data_api_throttle().wait()
                         if await _confirm_gone(http, pool,
                                                r["address"], a):
                             exclusion.discard(a)

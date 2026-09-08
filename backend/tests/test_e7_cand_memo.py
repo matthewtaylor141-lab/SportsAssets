@@ -607,6 +607,9 @@ def test_e7_the_wait_and_the_request_are_measured_on_the_books_reads_only(monkey
     class _Slow:
         async def wait(self):
             _busy(0.12)
+
+        async def acquire(self, priority=False):      # E10: the books' reads take the priority lane
+            _busy(0.12)
     monkeypatch.setattr(ratelimit, "_throttle", _Slow())
     p = _pool()
     p.add_book(ledger=300)

@@ -22,6 +22,20 @@ log = logging.getLogger(__name__)
 # 2000 -> 6000 (2026-08-26), 6000 -> 24000 (2026-08-27), in lockstep
 # with whale_exits.POSITIONS_MAX. See the note there.
 MAX_POSITIONS_PER_WALLET = 24000
+# E10 (2026-09-08): the FLOOR under settings().positions_sync_interval_
+# seconds. The default is 900 (config.py: this snapshot feeds the API
+# alone -- the UI's whale profile and events view and the edge engine's
+# /api/signal alignment -- a book at most 15 minutes old);
+# the env may set it lower for a fresher UI, never under this -- at
+# 60 s a roster of seven is ~5.6 rps of <= 48-page walks, the whole
+# data-API budget the mirror's per-market read shares.
+POSITIONS_SYNC_MIN_S = 60
+
+
+def sync_interval_s() -> int:
+    """The cycle gate's seconds: the setting, never under
+    POSITIONS_SYNC_MIN_S."""
+    return max(POSITIONS_SYNC_MIN_S, int(settings().positions_sync_interval_seconds))
 
 
 def parse_api_position(raw: dict[str, Any]) -> dict[str, Any] | None:
@@ -120,14 +134,16 @@ _last_sync: float = 0.0
 async def sync_all_positions(force: bool = False) -> dict[str, int]:
     """One snapshot pass over every tracked whale.
 
-    Rate-limited to every POSITIONS_SYNC_INTERVAL_SECONDS (default 5 min) —
-    open-position freshness is worth minutes, not a rate-limit ban.
+    Rate-limited to every POSITIONS_SYNC_INTERVAL_SECONDS (default 15 min
+    since E10, floored at POSITIONS_SYNC_MIN_S) — open-position freshness
+    is worth minutes, not a rate-limit ban, and this snapshot is the
+    UI's alone.
     """
     global _last_sync
     import time as _time
 
     now = _time.monotonic()
-    if not force and _last_sync and now - _last_sync < settings().positions_sync_interval_seconds:
+    if not force and _last_sync and now - _last_sync < sync_interval_s():
         return {}
     _last_sync = now
     pool = await get_pool()
