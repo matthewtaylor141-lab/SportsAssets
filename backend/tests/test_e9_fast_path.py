@@ -388,7 +388,7 @@ def test_e9_a_fast_tick_is_refused_while_the_full_tick_holds_the_books_lock_and_
     src = inspect.getsource(ml._fast_gate)
     assert "_lock_for(bid).locked()" in src and "async with" not in src
     fb = inspect.getsource(ml._fast_book)
-    assert fb.index("_fast_gate(t, book)") < fb.index("async with lk:") < fb.index("_SQL_BOOK_READ") \
+    assert fb.index("_fast_gate(t, book)") < fb.index("async with lk:") < fb.index("_sql_book_read(t)") \
         < fb.index("await _tick_book(t, fresh)")
 
 
@@ -523,7 +523,7 @@ def test_e9_a_sibling_with_an_order_open_makes_the_games_room_unreadable_no_incr
 def test_e9_the_fast_tick_reads_the_mode_ladder_and_the_loss_rails_exactly_as_the_full_tick(monkeypatch):
     src = inspect.getsource(ml._fast_tick)
     assert src.index("_SQL_TABLE_GUARD") < src.index("_SQL_INTENT_GUARD") < src.index("await _read_mode(t)") \
-        < src.index("await _global_guards(t)") < src.index("_SQL_BOOKS_OPEN")
+        < src.index("await _global_guards(t)") < src.index("_sql_books_open(t)")
     for fn in ("account_positions_walk", "_reconcile_orders", "_walk_books", "_candidate_order",
                "mirror_target(", "mi.plan(", "submit_fok", "_place("):
         assert fn not in src, fn                    # no walk, no step O, no rotation, no second planner

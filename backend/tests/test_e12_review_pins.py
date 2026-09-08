@@ -424,7 +424,7 @@ def test_fold_h2_his_25_percent_sale_witnessed_by_his_fill_ratchets_25_percent_a
         lp = b["last_plan"]
         assert lp["flow_ratchet"] == {"from": 10_000.0, "to": 7_500.0} and lp["exit_px"] == 0.70, reading
         assert lp.get("flow_reading", {}).get("why") == named and lp["kind"] == "reduce", reading
-        assert _sent(p, "ml-book-flow")[0][1] == (b["id"], 7_500.0, 8_250.0) and b["ledger_net"] == 75, reading
+        assert _sent(p, "ml-book-flow")[0][1][:3] == (b["id"], 7_500.0, 8_250.0) and b["ledger_net"] == 75, reading
 
 
 def test_fold_h2_his_full_exit_witnessed_by_his_fill_is_our_full_exit(monkeypatch):
@@ -634,31 +634,40 @@ def test_fold_review_h2_the_vanish_confirmation_still_reads_the_venue_but_never_
 
 
 def test_fold_review_h2_finding_a_fall_of_the_fills_net_with_no_reducing_fill_of_his_still_ratchets(monkeypatch):
-    """FINDING (MEDIUM). The fold witnesses the fills' NET, not a reducing
-    FILL: the chain-first collapse (ms.his_fills: a per-match row whose
-    legs do not sum to the chain row still collapses) can lower the
-    fills' net with no sale of his -- two poll legs of 6,000 + 5,640
-    replaced by their chain row of 11,000 -- and the ratchet moves: block
-    100,000 x 111,000 / 111,640 = 99,426.7, flow 11,573.3, target 1,157
-    against the corrected flow's 1,100: 57 shares of the block stay held
-    as flow (at 10%, $41 at 0.72; scales with the legs' mismatch).
-    Bounded by the legs' mismatch; the brief's own words ("a reducing
-    fill on the axis stamped after flow_last_net's clock") would hold
-    the block here. Pinned as the tree behaves."""
+    """WAS THE FINDING (the fold re-review's MEDIUM-1). The fold witnessed
+    the fills' NET, not a reducing FILL: the chain-first collapse
+    (ms.his_fills: a per-match row whose legs do not sum to the chain
+    row still collapses) lowered the fills' net with no sale of his --
+    two poll legs of 6,000 + 5,640 replaced by their chain row of 11,000
+    -- and the ratchet moved: block 100,000 x 111,000 / 111,640 =
+    99,426.7, target 1,157 against the corrected flow's 1,100 (57 shares
+    of the block held as flow; nothing placed only because the 7-share
+    reduce sat inside MIN_MOVE_FRAC). E12b: the ratchet moves only on a
+    reducing fill of his clocked after the reference's clock
+    (mi.reducing_since / mi.witnessed_ratchet) -- the collapse ratchets
+    NOTHING, writes nothing, names `flow_fills_shrank` = {from 111,640,
+    to 111,000, unexplained 640, witnessed 0}; the target is the
+    corrected flow's 1,100 and the 64-share reduce toward it is HELD
+    (`flow_hold`, reason `flow_fills_shrank`): he sold nothing, so
+    nothing is sold. The name is the review's; the pin is the fix."""
     _rails_2026_09_06(monkeypatch)
     old = _fill(M, "BUY", 100_000, 0.29, NOW - 9000, source="chain")
     # stamped inside HOT_S so E11's quiet rotation reads the book on both ticks
     legs = [_fill(M, "BUY", 6_000, 0.71, NOW - 100, source="poll"), _fill(M, "BUY", 5_640, 0.71, NOW - 99, source="poll")]
     p = _pool(fills=[old] + legs, snap={M: 111_640.0, N: 0.0})
-    b = _flow_book(p, ledger=1_164, flow_base=100_000.0, flow_last_net=111_640.0)
+    b = _flow_book(p, ledger=1_164, flow_base=100_000.0, flow_last_net=111_640.0, flow_last_at=NOW - 99)
     _tick(p, _Venue(bid=0.71, ask=0.73, held={SLUG: 1_164}), http=_mkt(111_640.0))
     assert (b["flow_base"], b["target"]) == (100_000.0, 1_164) and not _sent(p, "ml-book-flow")
     p.fills[:] = [old, _fill(M, "BUY", 11_000, 0.71, NOW - 100, source="chain")]
     p.snap[M] = 111_100.0
     v2 = _Venue(bid=0.71, ask=0.73, held={SLUG: 1_164})
     _tick(p, v2, now=NOW + 30, http=_mkt(111_100.0))
-    assert b["flow_base"] == round(100_000 * 111_000 / 111_640, 6) and b["target"] == 1_157
-    assert b["last_plan"]["flow_ratchet"] == {"from": 100_000.0, "to": b["flow_base"]}
+    assert (b["flow_base"], b["flow_last_net"], b["target"]) == (100_000.0, 111_640.0, 1_100)
+    lp = b["last_plan"]
+    assert "flow_ratchet" not in lp and not _sent(p, "ml-book-flow") and not _places(v2)
+    assert lp["flow_fills_shrank"] == {"from": 111_640.0, "to": 111_000.0, "unexplained": 640.0, "witnessed": 0.0}
+    assert (lp["flow_hold"]["kind"], lp["flow_hold"]["qty"]) == ("reduce", 64) and b["last_reason"] == "flow_fills_shrank"
+    assert b["ledger_net"] == 1_164 and lp["flow_net"] == 11_000.0
     assert not any(f.get("side") == "SELL" or f.get("asset") == N for f in p.fills), "no reducing fill of his"
 
 
@@ -673,9 +682,9 @@ def test_fold_review_e11_the_guard_and_the_plan_sit_inside_the_priority_context_
     fsrc = inspect.getsource(ml.fast_tick_once)
     assert fsrc.index("_TICK_LOCK") < fsrc.index("with venue_pace.priority_claims():") < fsrc.index("await _fast_tick(t, taken)")
     tsrc = inspect.getsource(ml._tick)
-    assert tsrc.index("_SQL_INTENT_GUARD") < tsrc.index("_flow_guard(t, stats)") < tsrc.index("_SQL_BOOKS_OPEN")
+    assert tsrc.index("_SQL_INTENT_GUARD") < tsrc.index("_flow_guard(t, stats)") < tsrc.index("_sql_books_open(t)")
     ftsrc = inspect.getsource(ml._fast_tick)
-    assert ftsrc.index("_SQL_INTENT_GUARD") < ftsrc.index("_flow_guard(t, stats)") < ftsrc.index("_SQL_BOOKS_OPEN")
+    assert ftsrc.index("_SQL_INTENT_GUARD") < ftsrc.index("_flow_guard(t, stats)") < ftsrc.index("_sql_books_open(t)")
     assert ml.QUIET_EVERY_TICKS == 9
     assert 'capped_env("MIRROR_QUIET_EVERY_TICKS", 9, floor=1)' in inspect.getsource(ml)
     assert "q = int(ml.QUIET_EVERY_TICKS)" in (ROOT / "backend" / "tests" / "test_e12_flow_only.py").read_text()

@@ -434,7 +434,7 @@ def test_mirror_live_refreshes_the_pair_every_tick():
     i = s.index("await le.refresh_whale_overrides(t.pool)")
     # the books are planned by _walk_books since E2 (the parallel walk)
     assert i < s.index("await _walk_books(t, "), "before any book is planned"
-    assert i < s.index("_SQL_BOOKS_OPEN"), "before the books are read"
+    assert i < s.index("_sql_books_open(t)"), "before the books are read"
 
 
 # ───────────────────────── one log line per transition ────────────────────────

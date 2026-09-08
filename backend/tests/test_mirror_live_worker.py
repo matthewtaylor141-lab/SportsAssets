@@ -259,6 +259,11 @@ class _Pool(_ShadowPool):
         # flow INSERT, the ratchet's write -- is UndefinedColumnError,
         # the way Postgres answers it
         self.no_flow_column = False
+        # THE DATABASE BETWEEN MIGRATIONS 057 AND 058 (E12b): every
+        # statement that names mirror_books.flow_last_at -- the clock
+        # guard, the 058-shaped book reads, the clock INSERT, the clock
+        # UPDATE -- is UndefinedColumnError, the way Postgres answers it
+        self.no_flow_clock_column = False
         self.lost_24h = 0.0
         self.caps = {"day": 0.0, "total": 0.0}
         self.sent = []
@@ -279,8 +284,10 @@ class _Pool(_ShadowPool):
                 "standing_row_id": standing_row_id, "episode": 1, "flat_reopens": 0,
                 "state": state, "frozen_reason": None, "frozen_ts": None, "frozen_ticks": 0,
                 "target": target, "target_raw": None, "his_net": None, "ledger_net": ledger,
-                # E12 (migration 057): NULL on every fixture book = the old rule
-                "flow_base": None, "flow_last_net": None,
+                # E12 (migration 057): NULL on every fixture book = the old rule;
+                # E12b (058): the reference's clock, NULL = the landed rule for
+                # a book with a block until its first reference write
+                "flow_base": None, "flow_last_net": None, "flow_last_at": None,
                 "venue_net": None, "open_order_id": None, "take_armed_ts": None,
                 "last_reason": None, "last_plan": None, "gross_buy_usd": gross_buy,
                 "gross_sell_usd": 0.0, "peak_exposure_usd": gross_buy, "avg_cost": avg_cost,
@@ -390,6 +397,8 @@ class _Pool(_ShadowPool):
             raise _UndefinedColumn('column "intent" does not exist')
         if self.no_flow_column and "flow_base" in s:
             raise _UndefinedColumn('column "flow_base" does not exist')
+        if self.no_flow_clock_column and "flow_last_at" in s:
+            raise _UndefinedColumn('column "flow_last_at" does not exist')
         if "ml-table-guard" in s:
             if self.tables_absent:
                 raise _Undefined('relation "mirror_books" does not exist')
@@ -418,6 +427,9 @@ class _Pool(_ShadowPool):
                 for b in rows:
                     b.pop("flow_base", None)
                     b.pop("flow_last_net", None)
+            if "flow_last_at" not in s:                  # the 057 shape names no clock (E12b)
+                for b in rows:
+                    b.pop("flow_last_at", None)
             return rows
         if "ml-book-read" in s:
             b = self.books.get(a[0])
@@ -427,10 +439,15 @@ class _Pool(_ShadowPool):
             if "flow_base" not in s:
                 row.pop("flow_base", None)
                 row.pop("flow_last_net", None)
+            if "flow_last_at" not in s:
+                row.pop("flow_last_at", None)
             return row
         if "ml-book-flow" in s:
-            # E12: the ratchet's write -- the block and the net it was read at
+            # E12: the ratchet's write -- the block and the net it was read
+            # at; E12b: the reference's clock with them on the 058 shape
             self.books[a[0]].update(flow_base=a[1], flow_last_net=a[2])
+            if "flow_last_at" in s:
+                self.books[a[0]]["flow_last_at"] = a[3]
             return "UPDATE 1"
         if "ml-books-count" in s:
             return {"live": sum(1 for b in self.books.values() if b["state"] != "closed"),
@@ -755,7 +772,8 @@ class _Pool(_ShadowPool):
                      # E12: the flow-carrying INSERT's two parameters, else
                      # the columns' NULL (the 056-shaped statement)
                      flow_base=a[12] if len(a) > 12 else None,
-                     flow_last_net=a[13] if len(a) > 13 else None)
+                     flow_last_net=a[13] if len(a) > 13 else None,
+                     flow_last_at=a[14] if len(a) > 14 else None)      # E12b: the clock INSERT's third
             self.books[bid] = b
             return {"id": bid, "episode": episode}
         if "INSERT INTO live_orders" in s:

@@ -75,7 +75,13 @@ def _late_world(monkeypatch, fills=None, net=11_000.0, bid=0.71, ask=0.73, **ven
 
 
 def _flow_book(p, ledger=100, flow_base=10_000.0, flow_last_net=11_000.0, **over):
+    """A book opened under E12 on the block-and-add world. E12b: it
+    carries the reference's clock (migration 058) as a book opened after
+    058 does -- the add's ingest clock, NOW - 3000, so a reducing fill
+    stamped since is a witness; `flow_last_at=None` in `over` is a book
+    opened between 057 and 058 (the landed rule until its first write)."""
     over.setdefault("avg_cost", 0.71)
+    over.setdefault("flow_last_at", NOW - 3000.0)
     return p.add_book(ledger=ledger, ratio=0.10, flow_base=flow_base, flow_last_net=flow_last_net,
                       **over)
 
@@ -265,7 +271,8 @@ def test_e12_a_market_he_built_at_29_and_adds_to_at_71_at_first_sight_opens_with
                              "flow_base": 10_000.0, "why": "flow_only"}
     assert lp["flow_base"] == 10_000.0 and lp["flow_net"] == 1_000.0 and "flow_ratchet" not in lp
     ins = _sent(p, "INSERT INTO mirror_books")
-    assert len(ins) == 1 and "flow_last_net)" in ins[0][0] and ins[0][1][12:14] == (10_000.0, 11_000.0)
+    # E12b: the INSERT carries the reference's clock (the add's ingest clock, the newest the reference counted)
+    assert len(ins) == 1 and "flow_last_net, flow_last_at)" in ins[0][0] and ins[0][1][12:15] == (10_000.0, 11_000.0, NOW - 10)
     rec = [r for r in ml._RECENT if r.get("what") == "opened"][-1]
     assert rec["flow_base"] == 10_000.0 and rec["catchup"] == "flow_only" and rec["target"] == 100
     # the refusal row's context judged the whole net (admission's figure)
@@ -383,7 +390,8 @@ def test_e12_his_25_percent_sale_after_a_flow_only_open_is_our_25_percent_reduce
     assert lp["flow_base"] == 7_500.0 and lp["flow_net"] == 750.0 and lp["kind"] == "reduce"
     assert lp["exit_px"] == 0.70 and lp["exit_px_src"] == "his_fill"
     flow = _sent(p, "ml-book-flow")
-    assert flow == [(flow[0][0], (b["id"], 7_500.0, 8_250.0))]
+    # E12b: the write carries the reference's clock -- the newest ingest clock the reference counted (his SELL's)
+    assert len(flow) == 1 and flow[0][1] == (b["id"], 7_500.0, 8_250.0, NOW - 100) and b["flow_last_at"] == NOW - 100
     # the write comes BEFORE the plan's write, as the ratio step's does
     tags = [s for k, s, a in p.sent if "ml-book-flow" in s or "ml-book-plan" in s]
     assert "ml-book-flow" in tags[0] and "ml-book-plan" in tags[-1]
@@ -422,7 +430,7 @@ def test_e12_his_add_moves_the_reference_net_and_leaves_the_block_where_it_is(mo
     assert _places(v)[0][1:5] == (SLUG, 0.75, 200, False) and _census(st, "rest_placed") == 1
     lp = b["last_plan"]
     assert "flow_ratchet" not in lp and lp["flow_net"] == 3_000.0
-    assert _sent(p, "ml-book-flow")[0][1] == (b["id"], 10_000.0, 13_000.0)
+    assert _sent(p, "ml-book-flow")[0][1] == (b["id"], 10_000.0, 13_000.0, NOW - 10)    # E12b: the clock with it
     # nothing moved: nothing written
     p2 = _pool(fills=_block_and_add(add_at=NOW - 3000), snap={M: 11_000.0, N: 0.0})
     b2 = _flow_book(p2)
@@ -584,7 +592,7 @@ def test_e12_the_probe_failing_for_any_other_reason_refuses_the_tick_by_name(mon
     src = inspect.getsource(ml._tick)
     assert src.index("_SQL_TABLE_GUARD") < src.index("_SQL_INTENT_GUARD") < src.index("_flow_guard(t, stats)")
     fsrc = inspect.getsource(ml._fast_tick)
-    assert fsrc.index("_SQL_INTENT_GUARD") < fsrc.index("_flow_guard(t, stats)") < fsrc.index("_SQL_BOOKS_OPEN")
+    assert fsrc.index("_SQL_INTENT_GUARD") < fsrc.index("_flow_guard(t, stats)") < fsrc.index("_sql_books_open(t)")
 
 
 def test_e12_the_fast_tick_opens_the_woken_market_under_the_same_verdict(monkeypatch):
@@ -622,7 +630,7 @@ def test_e12_057_exists_sorts_after_056_and_is_two_nullable_add_column_if_not_ex
     files = [x.name for x in sorted(MIG_DIR.glob("*.sql"))]
     i = files.index("056_mirror_registered_positions.sql")
     assert files[i + 1] == "057_mirror_books_flow.sql" and sum(f.startswith("057_") for f in files) == 1
-    assert files[-1] == "057_mirror_books_flow.sql"
+    assert files[i + 2] == "058_mirror_books_flow_clock.sql" and files[-1] == "058_mirror_books_flow_clock.sql"    # E12b
     sql = SQL_057.read_text()
     assert sql.splitlines()[0].startswith("-- 057: MIRROR BOOKS FLOW BASE (E12, 2026-09-08")
     body = "\n".join(ln.split("--", 1)[0] for ln in sql.splitlines())
@@ -646,9 +654,10 @@ def test_e12_057_exists_sorts_after_056_and_is_two_nullable_add_column_if_not_ex
     for name in ("_SQL_BOOKS_OPEN", "_SQL_BOOK_READ"):
         assert "flow_base" in getattr(ml, name) and "flow_base" not in getattr(ml, name + "_056")
     src = inspect.getsource(ml)
-    assert len(re.findall(r"_SQL_BOOKS_OPEN if t\.flow_col\s+else _SQL_BOOKS_OPEN_056", src)) == 3
-    assert len(re.findall(r"_SQL_BOOK_READ if t\.flow_col\s+else _SQL_BOOK_READ_056", src)) == 3
+    # E12b: the six read sites go through the pair that reads BOTH probes (056 / 057 / 058 shapes)
+    assert src.count("t.pool.fetch(_sql_books_open(t))") == 3 and src.count("fetchrow(_sql_book_read(t),") == 3
     assert "t.pool.fetch(_SQL_BOOKS_OPEN)" not in src and "fetchrow(_SQL_BOOK_READ," not in src
+    assert not re.findall(r"_SQL_BOOKS_OPEN(?:_057)? if t\.flow_col", src) and "_SQL_BOOK_READ if t.flow_col" not in src
     # the mirror_orders CHECK stands: no new order kind
     sql_047 = (MIG_DIR / "047_mirror_live.sql").read_text()
     assert "kind IN ('increase','reduce','flatten_paired','flatten_vanished','take','adjust')" in sql_047
@@ -724,14 +733,15 @@ def test_e12_057_applies_on_a_real_postgres_twice_and_the_worker_statements_run_
                                       rules.ORDER_INTENT, "ledger", 0.10, 50.0, 0.71, 100, 10_000.0, 11_000.0)
             old = await conn.fetchrow(le._MIRROR_BOOK_INSERT_SQL, "rn1", CID, SLUG + "-2", "g", M, N,
                                       rules.ORDER_INTENT, "ledger", 0.10, 50.0, 0.71, 100)
-            got = await conn.fetchrow(ml._SQL_BOOK_READ, row["id"])
+            # the 057 shapes (E12b's own pin runs 058 and the clock shapes)
+            got = await conn.fetchrow(ml._SQL_BOOK_READ_057, row["id"])
             assert (got["flow_base"], got["flow_last_net"]) == (10_000.0, 11_000.0)
-            got_old = await conn.fetchrow(ml._SQL_BOOK_READ, old["id"])
+            got_old = await conn.fetchrow(ml._SQL_BOOK_READ_057, old["id"])
             assert got_old["flow_base"] is None and got_old["flow_last_net"] is None, "NULL = the old rule"
             await conn.execute(ml._SQL_BOOK_FLOW, row["id"], 7_500.0, 8_250.0)
-            got = await conn.fetchrow(ml._SQL_BOOK_READ, row["id"])
+            got = await conn.fetchrow(ml._SQL_BOOK_READ_057, row["id"])
             assert (got["flow_base"], got["flow_last_net"]) == (7_500.0, 8_250.0)
-            opened = await conn.fetch(ml._SQL_BOOKS_OPEN)
+            opened = await conn.fetch(ml._SQL_BOOKS_OPEN_057)
             assert {r["id"] for r in opened} == {row["id"], old["id"]}
             assert {r["flow_base"] for r in opened} == {7_500.0, None}
             older = await conn.fetch(ml._SQL_BOOKS_OPEN_056)

@@ -1590,6 +1590,16 @@ UPDATE mirror_orders
 # because a blip read as absence would size every flow-only book on his
 # WHOLE net for a tick -- the catch-up this change exists to stop.
 _SQL_FLOW_GUARD = "SELECT flow_base, flow_last_net FROM mirror_books LIMIT 0 /* ml-flow-guard */"
+# THE 058 COLUMN (E12b), probed the same way once 057 read present:
+# `mirror_books.flow_last_at`, the reference's clock the ratchet's
+# witness is read against (mi.reducing_since). ABSENT, the tick sends
+# the 057-shaped book reads and writes (`_SQL_*_057`, `_SQL_BOOK_FLOW`)
+# and every book with a block runs the LANDED rule -- a fall of the
+# fills' net ratchets -- said on the heartbeat (`flow_clock_absent`,
+# logged once), so no exit stalls on a migration that has not landed;
+# any other failure refuses the tick by name (`flow_guard_unreadable`),
+# as 057's probe does
+_SQL_FLOW_CLOCK_GUARD = "SELECT flow_last_at FROM mirror_books LIMIT 0 /* ml-flow-clock-guard */"
 _SQL_BOOK_COLS_056 = """
 SELECT b.id, b.whale, b.condition_id, b.us_market_slug, b.game_key, b.long_asset,
        b.other_asset, b.intent, b.map_source, b.ratio::float8 AS ratio,
@@ -1607,14 +1617,38 @@ SELECT b.id, b.whale, b.condition_id, b.us_market_slug, b.game_key, b.long_asset
 """
 # the 056 read plus the 057 columns, appended after settled_pnl so a
 # positional reader keeps its meaning
-_SQL_BOOK_COLS = _SQL_BOOK_COLS_056.replace(
+_SQL_BOOK_COLS_057 = _SQL_BOOK_COLS_056.replace(
     "b.realized_pnl::float8 AS realized_pnl, b.settled_pnl::float8 AS settled_pnl,",
     "b.realized_pnl::float8 AS realized_pnl, b.settled_pnl::float8 AS settled_pnl,\n"
     "       b.flow_base::float8 AS flow_base, b.flow_last_net::float8 AS flow_last_net,")
+# the 057 read plus the 058 clock (E12b), appended after it
+_SQL_BOOK_COLS = _SQL_BOOK_COLS_057.replace(
+    "b.flow_base::float8 AS flow_base, b.flow_last_net::float8 AS flow_last_net,",
+    "b.flow_base::float8 AS flow_base, b.flow_last_net::float8 AS flow_last_net,\n"
+    "       b.flow_last_at::float8 AS flow_last_at,")
 _SQL_BOOKS_OPEN_056 = _SQL_BOOK_COLS_056 + " WHERE b.state <> 'closed' ORDER BY b.updated_at, b.id /* ml-books-open */"
 _SQL_BOOK_READ_056 = _SQL_BOOK_COLS_056 + " WHERE b.id = $1 /* ml-book-read */"
+_SQL_BOOKS_OPEN_057 = _SQL_BOOK_COLS_057 + " WHERE b.state <> 'closed' ORDER BY b.updated_at, b.id /* ml-books-open */"
+_SQL_BOOK_READ_057 = _SQL_BOOK_COLS_057 + " WHERE b.id = $1 /* ml-book-read */"
 _SQL_BOOKS_OPEN = _SQL_BOOK_COLS + " WHERE b.state <> 'closed' ORDER BY b.updated_at, b.id /* ml-books-open */"
 _SQL_BOOK_READ = _SQL_BOOK_COLS + " WHERE b.id = $1 /* ml-book-read */"
+
+
+def _sql_books_open(t) -> str:
+    """The open-books read in the shape the tick's column probes read
+    (_flow_guard): 056 with the flow columns absent, 057 with the clock
+    absent, else the whole row. Every book read of the tick goes
+    through this pair, so a row is never asked for a column the probe
+    did not see."""
+    if t.flow_col is not True:
+        return _SQL_BOOKS_OPEN_056
+    return _SQL_BOOKS_OPEN if t.flow_clock_col is True else _SQL_BOOKS_OPEN_057
+
+
+def _sql_book_read(t) -> str:
+    if t.flow_col is not True:
+        return _SQL_BOOK_READ_056
+    return _SQL_BOOK_READ if t.flow_clock_col is True else _SQL_BOOK_READ_057
 _SQL_BOOKS_COUNT = """
 SELECT count(*) FILTER (WHERE state <> 'closed') AS live,
        count(*) FILTER (WHERE opened_at > now() - interval '24 hours') AS today
@@ -2052,6 +2086,13 @@ _SQL_BOOK_FLOW = """
 UPDATE mirror_books SET flow_base = $2, flow_last_net = $3, updated_at = now()
  WHERE id = $1 /* ml-book-flow */
 """
+# E12b: the same write carrying the reference's clock (migration 058,
+# mi.fills_clock: the newest ingest clock the reference counted), sent
+# when the tick's probe read the column; the 057-shaped one above else
+_SQL_BOOK_FLOW_CLOCK = """
+UPDATE mirror_books SET flow_base = $2, flow_last_net = $3, flow_last_at = $4, updated_at = now()
+ WHERE id = $1 /* ml-book-flow */
+"""
 # THE FIRST REFUSAL STARTS THE TAKE CLOCK: an arm already set is kept,
 # never re-stamped. Every post-only 400 once wrote now(), and _act reads
 # the arm BEFORE it re-places, so at the 30 s poll a book that kept
@@ -2179,6 +2220,11 @@ class _Tick:
     # 056-shaped book reads and opens every book under the old rule;
     # None until the guard has read
     flow_col: bool | None = None
+    # mirror_books.flow_last_at (migration 058, E12b) exists this tick:
+    # read by the same guard after 057's probe; False sends the
+    # 057-shaped reads and writes and runs every block under the landed
+    # rule (a net fall ratchets); None until the guard has read
+    flow_clock_col: bool | None = None
     # the tick's venue budget for the exact mapping lane (C1): the
     # shadow's own MapBudget, ms.MAP_READS_PER_TICK resolver calls a
     # tick across every candidate, past which a candidate is
@@ -2566,8 +2612,7 @@ async def _grammar_admission(t: _Tick, whale: str, slug: str, g: dict | None) ->
     if not isinstance(g, dict) or g.get("side_index") not in (0, 1) or not g.get("his_slug"):
         return "grammar_echo_unverified"
     try:
-        books = [dict(b) for b in await t.pool.fetch(_SQL_BOOKS_OPEN if t.flow_col
-                                                     else _SQL_BOOKS_OPEN_056)]
+        books = [dict(b) for b in await t.pool.fetch(_sql_books_open(t))]
     except Exception:  # noqa: BLE001 — unreadable books: the probation cannot be judged
         return "grammar_echo_unreadable"
     verified = {int(x) for x in (st.get("verified") or []) if str(x).isdigit()}
@@ -4722,7 +4767,7 @@ async def _reconcile_orders(t: _Tick, count: bool = True) -> None:
         t.stats["orders_open"] = len(rows)
     for o in rows:
         try:
-            book = await t.pool.fetchrow(_SQL_BOOK_READ if t.flow_col else _SQL_BOOK_READ_056,
+            book = await t.pool.fetchrow(_sql_book_read(t),
                                          o["book_id"])
         except Exception as exc:  # noqa: BLE001
             log.warning("mirror_live: book %s unreadable (%s)", o["book_id"], type(exc).__name__)
@@ -6432,22 +6477,90 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # fills that say he holds, `flow_reading_zero`): no ratchet, no
     # write, the book planned on the fills' net. A sale the fills have
     # not yet ingested is answered when they are, at his price (E4's
-    # exit), at most the poll lane's lag later; a blip never sells and
-    # never re-buys. The old rule's readers (the drift refusal on
-    # increases, the vanish confirmation, the freeze, the shadow's
+    # exit), at most the poll lane's lag later -- and when both live
+    # lanes miss his SELL, the S1 reconciler's (RECON_VENUE_LAG_S, the
+    # 600 s margin, ingestion/s1_emitter.py): a full exit the fills
+    # never carry is not a confirmed vanish on either rule; a blip never
+    # sells and never re-buys. The old rule's readers (the drift refusal
+    # on increases, the vanish confirmation, the freeze, the shadow's
     # whole-net figure) still read the reading. A NULL block is untouched
     # by any of this. The fast tick's plan is this same function.
+    #
+    # THE WITNESS IS A REDUCING FILL OF HIS (E12b; the fold re-review's
+    # MEDIUM-1). The fills' net falls with no sale of his when the
+    # chain-first collapse (ms.his_fills) replaces the poll lane's legs
+    # by a smaller chain row, and the landed ratchet moved on it (a
+    # 100,000 block to 99,426.7: 57 shares of the block held as flow).
+    # With the reference's clock on the row (`flow_last_at`, migration
+    # 058: the newest ingest clock the reference counted, mi.fills_clock)
+    # the ratchet moves ONLY by the reduction the fills clocked after it
+    # carry on the block's axis (mi.reducing_since: a SELL of the long
+    # token or a BUY of the other on a long book, the mirror image on a
+    # short; mi.witnessed_ratchet: net_t' = net_{t-1} less the witnessed
+    # reduction, block x net_t' / net_{t-1}). A fall none of them
+    # explains -- the collapse alone, or a crossing to <= 0 no fill of
+    # his made -- ratchets nothing, writes nothing (the reference and
+    # its clock stand, so the fall is re-read against them every tick
+    # until a witness lands), names `flow_fills_shrank` = {from, to,
+    # unexplained, witnessed: 0} on the plan, and the book is planned
+    # on the block as it is (the flow target from the fills' net: a net
+    # that fell under the block reads a flow of 0) but HOLDS: it never
+    # sells on a fall he did not make (`flow_hold`, below at the reduce
+    # branch), and a rest of his exit keeps its whole E4 life. A sale and
+    # a collapse in one tick ratchet by the witnessed share, the
+    # remainder named, and the reference moves to the fills' net -- and
+    # the reduce is to the target, his proportion of the corrected flow,
+    # so the phantom the collapse revealed goes with HIS sale (the
+    # review's Q3, judged right: the collapse alone holds it, never a
+    # sale he did not make; his sale is the moment we trade at his price
+    # anyway). THE RISE (the E12b fold, HIGH-1): the mirror image -- a
+    # rise of the fills' net the adds clocked after the reference do not
+    # explain (mi.adding_since; a reducing leg the poll lane overstated,
+    # corrected by its chain row) goes to the BLOCK (mi.restored_block:
+    # block + unexplained, never past the net), named `flow_fills_grew`,
+    # never bought; a rise his adds explain is his flow, as today. No
+    # clock on the row (a book opened between 057 and 058) or the column
+    # absent: the landed rule for that book -- a net fall ratchets and a
+    # net rise is flow whatever explains it -- the clock written with its
+    # first reference write; a NULL block is untouched.
     flow = None
+    flow_hold = False
     if book.get("flow_base") is not None:
         fills_net = mi.his_net(r.his_long, r.his_other)
-        fb = mi.pre_existing_ratchet(book.get("flow_base"), book.get("flow_last_net"), fills_net)
+        clock = _num(book.get("flow_last_at")) if t.flow_clock_col is True else None
+        shrank = grew = None
+        if clock is None:
+            fb = mi.pre_existing_ratchet(book.get("flow_base"), book.get("flow_last_net"), fills_net)
+        else:
+            witnessed = mi.reducing_since(fills, la, oa, book.get("flow_base"), clock)
+            fb, shrank = mi.witnessed_ratchet(book.get("flow_base"), book.get("flow_last_net"),
+                                              fills_net, witnessed)
+            if fb is not None:
+                added = mi.adding_since(fills, la, oa, fb if fb != 0.0 else fills_net, clock)
+                fb, grew = mi.restored_block(fb, book.get("flow_last_net"), fills_net, added)
         if fb is not None:
             was = _num(book.get("flow_base"))
-            if was != fb or _num(book.get("flow_last_net")) != float(fills_net):
-                await t.pool.execute(_SQL_BOOK_FLOW, book["id"], float(fb), float(fills_net))
-                if was != fb:
+            if shrank is not None:
+                plan["flow_fills_shrank"] = shrank
+            if grew is not None:
+                plan["flow_fills_grew"] = grew
+            if shrank is not None and shrank.get("witnessed") == 0.0:
+                # an unwitnessed fall: no ratchet, no write (the reference
+                # and its clock stand), the plan holds -- the flow target
+                # below still reads the fills' net against the block
+                flow_hold = True
+                fb = float(was)
+            elif was != fb or _num(book.get("flow_last_net")) != float(fills_net):
+                if t.flow_clock_col is True:
+                    stamp = mi.fills_clock(fills, t.now)
+                    await t.pool.execute(_SQL_BOOK_FLOW_CLOCK, book["id"], float(fb), float(fills_net), stamp)
+                    book["flow_last_at"] = stamp
+                else:
+                    await t.pool.execute(_SQL_BOOK_FLOW, book["id"], float(fb), float(fills_net))
+                if was != fb and grew is None:
                     plan["flow_ratchet"] = {"from": was, "to": float(fb)}
-            book["flow_base"], book["flow_last_net"] = float(fb), float(fills_net)
+            if not flow_hold:
+                book["flow_base"], book["flow_last_net"] = float(fb), float(fills_net)
             flow = mi.flow_net(fills_net, fb)
             plan.update(flow_base=float(fb), flow_net=flow)
             verdict = mi.flow_reading(net, fills_net)
@@ -6750,6 +6863,50 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             if kind == "vanish_unconfirmed":
                 _mirror_stop("vanish_unconfirmed", w)
                 kind = "flatten_paired"
+        if flow_hold and kind != "flatten_vanished":
+            # THE HOLD (E12b): the fills' net fell with no reducing fill
+            # of his since the reference -- the plan's sale is his
+            # collapse's, not his -- so no NEW sale goes out: the reduce
+            # (or the paired flatten) is named `flow_fills_shrank` and
+            # held; a resting add is cancelled under the hold's name (the
+            # target fell: nothing more is bought). A vanish the data API
+            # confirms keeps its own reader (the old rule's, the fold
+            # re-review's LOW-1), as the freeze does. THE WITNESSED EXIT
+            # (the E12b fold, CRITICAL-1): HIS witnessed sale -- the reduce
+            # resting before the hold, or one step O cancelled under its
+            # TTL, or one never placed (a no_mark tick) -- keeps its whole
+            # E4 life through _act: the rest at his cent, the re-quote
+            # inside MIRROR_EXIT_TOL, the take at his level the tick the
+            # bid arrives. The plan handed over is capped at the WITNESSED
+            # SHARE still outstanding: our ledger past the target the
+            # REFERENCE sizes (`flow_last_net`, the last witnessed state,
+            # which the hold never moves) -- the standing rest's qty when
+            # one stands -- planned through mi.plan toward the reference's
+            # target so its bands apply (a landed 7-share phantom inside
+            # MIN_MOVE_FRAC stays inside it) and only a REDUCING side is
+            # taken, so the hold never turns the witnessed 25 into the
+            # collapse's 64 (the re-plan after a replace is capped the same
+            # way); nothing witnessed outstanding: nothing sent
+            plan["flow_hold"] = {"kind": kind, "qty": p.qty, "price": p.price}
+            ref_tg = rules.mirror_target(book.get("ratio"), mi.flow_net(book.get("flow_last_net"), fb),
+                                         r.mark, MIRROR_ANCHOR_CLIP_USD,
+                                         cap_usd=rules.MIRROR_NET_CAP_USD, allow_short=shorts)
+            wp = None
+            if not ref_tg.get("refusal") and ref_tg.get("target") is not None:
+                wp = mi.plan(int(ref_tg["target"]), float(ledger), float(venue_int - r.manual - registered),
+                             mi.Book(r.bid, r.ask), his_px,
+                             None if plan.get("short_share_cap") is not None else r.mark)
+            held = t.open_by_book.get(book["id"])
+            if held is not None and rules.leg_action(book.get("intent"), held[0]["side"]) == "reduce":
+                plan["open_order"] = held[0]["id"]
+            if wp is not None and wp.side is not None and rules.leg_action(book.get("intent"), wp.side) == "reduce":
+                plan["flow_hold"]["cap"] = wp.qty
+                kind = "reduce"
+                p = wp
+                flow_hold = "rest"
+            else:
+                cancel_reason = mi.FLOW_FILLS_SHRANK
+                p = None
     else:
         _mirror_stop(rules.plan_reason_key(p.reason), w)
         if (target == 0 and abs(ledger) < FLAT_TOL_SHARES
@@ -6772,11 +6929,16 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                 price=(p.price if p else None), his_level=his_px,
                 reason=(p.reason if p else inc_refusal))
     reason = p.reason if p else (inc_refusal or "no plan")
+    if plan.get("flow_hold") is not None and p is None:
+        reason = mi.FLOW_FILLS_SHRANK
+        plan["reason"] = reason
     try:
         if kind == "flatten_vanished" and p is not None:
             vanished = True
             reason = await _flatten_vanished(t, book, r, p, his_px, plan)
         else:
+            # the hold's standing exit (flow_hold == "rest") goes through
+            # here with its capped plan: the take, the re-quote, the rest
             reason = await _act(t, book, r, p, kind, his_px, plan, cancel_reason) or reason
     finally:
         why = await _maybe_close_episode(t, book, r.market_live, vanished, target, plan,
@@ -7388,6 +7550,12 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             if p.side is None:
                 _mirror_stop(rules.plan_reason_key(p.reason), w)
                 return p.reason
+            hold = plan.get("flow_hold")
+            if isinstance(hold, dict) and _num(hold.get("cap")) is not None:
+                # E12b fold (CRITICAL-1): under the hold the re-plan is
+                # capped at the standing rest's qty -- the witnessed share
+                p = mi.Plan(p.side, min(int(p.qty), int(hold["cap"])), p.price, p.reason,
+                            p.would_fill, p.detail)
             ex = _exit_terms(t, book, p.side, his_px, plan)
             wire = _wire_for(p, his_px, r, book.get("intent"), ex)
             is_exit = rules.leg_action(book.get("intent"), p.side) == "reduce"
@@ -9378,9 +9546,14 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     cu, open_target = _open_flow(t, fills, la, oa, short, fills_net, r.mark, ratio, target,
                                  min(room, cap), shorts)
     # the block travels only when there is one to store (the columns
-    # present, a verdict made): an old-rule open is the pre-E12 call
+    # present, a verdict made): an old-rule open is the pre-E12 call.
+    # E12b: the reference's clock with it (mi.fills_clock, the newest
+    # ingest clock among the fills the reference counted) when the tick's
+    # probe read the 058 column; the 057-shaped INSERT else
     flow_kw = {} if cu.get("flow_base") is None else {"flow_base": cu["flow_base"],
                                                        "flow_last_net": fills_net}
+    if flow_kw and t.flow_clock_col is True:
+        flow_kw["flow_last_at"] = mi.fills_clock(fills, t.now)
     opened = await le._open_mirror_book(t.pool, w, cid, slug, la, oa, tg["ratio_eff"], anchor,
                                         his_px, open_target, m.get("source"), game_key,
                                         intent=intent, **flow_kw)
@@ -9393,7 +9566,7 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
         _mirror_stop("open_flow_only", w)
     elif cu.get("why") in ("small_bet", "within_tol"):
         _mirror_stop("open_catchup", w)
-    book = await t.pool.fetchrow(_SQL_BOOK_READ if t.flow_col else _SQL_BOOK_READ_056,
+    book = await t.pool.fetchrow(_sql_book_read(t),
                                  opened["book_id"])
     if not book:
         # the book opened and its row could not be read back: named
@@ -9431,8 +9604,10 @@ def _open_flow(t: _Tick, fills: list, la: str, oa: str | None, short: bool, net:
     inside FIRST_SIGHT_S AND stamped no more than mi.LATE_FILL_S before
     it -- the fold's HIGH-1: a backfilled or reconciled old fill is the
     block whatever its ingest clock), his cost over it their
-    size-weighted BUY price (mi.vwap_of, the same cut), the verdict
-    rules.open_catchup's. Admitted (or nothing pre-existing), the book
+    size-weighted price over every fill that ADDS on the axis
+    (mi.vwap_of, the same cut; E12b: a SELL of the other token at
+    1 - p builds a long as a BUY of the long token at p does, the
+    mirror image on a short), the verdict rules.open_catchup's. Admitted (or nothing pre-existing), the book
     opens at `target`, the whole-net figure; refused, at ratio x his
     flow (mi.flow_net) sized by the same mirror_target at the same cap,
     never past the whole-net target admission and the short share cap
@@ -9757,6 +9932,7 @@ def _publish_fills_dedup(t: _Tick) -> None:
 
 
 _flow_absent_logged = False
+_flow_clock_absent_logged = False
 
 
 async def _flow_guard(t: _Tick, stats: dict) -> bool:
@@ -9768,12 +9944,20 @@ async def _flow_guard(t: _Tick, stats: dict) -> bool:
     any reason but absence, and the tick is refused by name
     (`flow_guard_unreadable`, status degraded) exactly as the intent
     guard refuses -- a blip read as absence would size every flow-only
-    book on his whole net for a tick."""
-    global _flow_absent_logged
+    book on his whole net for a tick.
+
+    THE 058 CLOCK (E12b), probed the same way right after, and only
+    once 057 read present (058 sorts after it; with 057 absent no book
+    has a block to clock): `t.flow_clock_col` says whether the
+    clock-carrying statements are sent and the witness rule runs, or
+    the 057-shaped ones and the LANDED rule (absent: `flow_clock_absent`
+    on the heartbeat, logged once per process -- the exits never stall
+    on a migration that has not landed); any other failure refuses the
+    tick by the same name, for the same reason."""
+    global _flow_absent_logged, _flow_clock_absent_logged
     try:
         await t.pool.fetch(_SQL_FLOW_GUARD)
         t.flow_col = True
-        return True
     except Exception as exc:  # noqa: BLE001 — a column that is not there is a fact; a blip is not
         if not rules.column_missing(exc, "flow_base"):
             _mirror_stop("flow_guard_unreadable")
@@ -9782,11 +9966,31 @@ async def _flow_guard(t: _Tick, stats: dict) -> bool:
                         type(exc).__name__)
             return False
         t.flow_col = False
+        t.flow_clock_col = False
         stats["flow_column_absent"] = type(exc).__name__
         if not _flow_absent_logged:
             _flow_absent_logged = True
             log.warning("mirror_live: mirror_books.flow_base is absent (migration 057 not applied "
                         "yet: %s); every book opens and sizes under the pre-E12 rule",
+                        type(exc).__name__)
+        return True
+    try:
+        await t.pool.fetch(_SQL_FLOW_CLOCK_GUARD)
+        t.flow_clock_col = True
+        return True
+    except Exception as exc:  # noqa: BLE001 — the same reading: absence is a fact, a blip is not
+        if not rules.column_missing(exc, "flow_last_at"):
+            _mirror_stop("flow_guard_unreadable")
+            stats.update(status="degraded", flow_guard_unreadable=type(exc).__name__)
+            log.warning("mirror_live: mirror_books.flow_last_at probe failed (%s); refusing the tick",
+                        type(exc).__name__)
+            return False
+        t.flow_clock_col = False
+        stats["flow_clock_absent"] = type(exc).__name__
+        if not _flow_clock_absent_logged:
+            _flow_clock_absent_logged = True
+            log.warning("mirror_live: mirror_books.flow_last_at is absent (migration 058 not applied "
+                        "yet: %s); every block ratchets under the landed rule (a net fall, no witness)",
                         type(exc).__name__)
         return True
 
@@ -9931,8 +10135,7 @@ async def _tick(t: _Tick, woken: list) -> None:
     # to the candidates' budgets below -- exits must be managed, and a
     # book walk that spent the candidates' budget was a count cap on
     # books by another road
-    books = [dict(b) for b in await t.pool.fetch(_SQL_BOOKS_OPEN if t.flow_col
-                                                 else _SQL_BOOKS_OPEN_056)]
+    books = [dict(b) for b in await t.pool.fetch(_sql_books_open(t))]
     # the per-game index (E1): every non-closed book by game_key (every
     # whale's, one game one cap), before any book is sized, so each
     # book's target reads the room its game has left after the others
@@ -10245,7 +10448,7 @@ async def _fast_book(t: _Tick, book: dict) -> None:
         return _fast_skip(t, cid, why)
     lk = _lock_for(bid)
     async with lk:                      # no await between the gate's locked() and here
-        row = await t.pool.fetchrow(_SQL_BOOK_READ if t.flow_col else _SQL_BOOK_READ_056, bid)
+        row = await t.pool.fetchrow(_sql_book_read(t), bid)
         if not row:
             return _fast_skip(t, cid, "book_row_unreadable")
         fresh = dict(row)
@@ -10375,8 +10578,7 @@ async def _fast_tick(t: _Tick, cids: list) -> None:
     await edge_gate.refresh(t.pool)
     if await _read_protected(t) is None:
         return _fast_skip_all(t, cids, "protected_ids_unreadable")
-    books = [dict(b) for b in await t.pool.fetch(_SQL_BOOKS_OPEN if t.flow_col
-                                                 else _SQL_BOOKS_OPEN_056)]
+    books = [dict(b) for b in await t.pool.fetch(_sql_books_open(t))]
     _index_games(t, books)
     rows = await t.pool.fetch(_SQL_ORDERS_OPEN if t.short_col else _SQL_ORDERS_OPEN_047)
     # every open order is a figure this tick did not read (no step O):

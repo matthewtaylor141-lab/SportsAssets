@@ -328,12 +328,79 @@ def target_shares(ratio: float | None, net: float, mark: float | None,
 # ticks old at the reopen and are the new side's block; target 0 unless
 # the mark is within the allowance of his cost on the new side (the
 # short axis reads his other-token BUY at 1 - p). MEDIUM-3, a
-# FOLLOW-UP: vwap_of reads BUYs alone (the long token at p; a short's
-# other token at 1 - p), so a long he built by SELLING the other token
-# reads `vwap_unread` and the book opens flow-only at the exact mark --
-# fail-closed, a missed follow, not money; the fix (a SELL of the other
-# token at 1 - p on a long book, the mirror image on a short) is not
-# one line and is not in this change.
+# FOLLOW-UP at the fold, built by E12b: vwap_of read BUYs alone (the
+# long token at p; a short's other token at 1 - p), so a long he built
+# by SELLING the other token read `vwap_unread` and the book opened
+# flow-only at the exact mark -- fail-closed, a missed follow, not
+# money; it now reads every fill that ADDS on the book's axis (below).
+#
+# E12b (2026-09-08; the fold re-review's MEDIUM-1). The fold witnessed
+# the fills' NET, not a reducing FILL: the chain-first collapse in
+# workers/mirror_shadow.his_fills (a per-match row whose legs do not sum
+# to the chain row still collapses) lowers the fills' net with no sale
+# of his -- two poll legs of 6,000 + 5,640 replaced by their chain row
+# of 11,000 -- and D25's ratchet moved on it (a 100,000 block to
+# 99,426.7; 57 shares of the block held as flow). So the ratchet moves
+# ONLY when the tick's fills hold a REDUCING fill of his on the block's
+# axis -- a SELL of the long token or a BUY of the other on a long
+# block, the mirror image on a short -- whose ingest clock is after the
+# reference's clock (reducing_since), and by no more than those fills'
+# share of the fall (witnessed_ratchet: net_t' = net_{t-1} less the
+# witnessed reduction, block x net_t' / net_{t-1}); a fall none of them
+# explains is named `flow_fills_shrank` = {from, to, unexplained,
+# witnessed} for the plan and the block stands. The reference's clock
+# (mirror_books.flow_last_at, migration 058) is the newest ingest clock
+# among the fills the reference counted (fills_clock): a counted fill
+# never witnesses again, a fill ingested after the read always can,
+# whatever the worker's clock says against the ingestion's (pipeline.py
+# stamps detected_at on the ingestion host).
+#
+# THE E12b FOLD (2026-09-08; the review's CRITICAL-1 and HIGH-1).
+# HIGH-1: the witness was one-sided -- a RISE of the fills' net was
+# D25's "unchanged on increases" whatever explained it, so a poll SELL
+# leg overstated at 2,750 witnessed a 25 % ratchet and its chain row at
+# the true 2,000 raised the fills' net by 750 with no adding fill of
+# his; the flow read it and the book BOUGHT 75 of the block at his cent.
+# Now the mirror image of the witness reads the rise (adding_since: a
+# BUY of the long token or a SELL of the other on a long axis, the
+# mirror image on a short, clocked after the reference) and a rise the
+# adds do not explain goes to the BLOCK (restored_block: block_t =
+# block_{t-1} + unexplained, never past the net), named
+# `flow_fills_grew` -- never bought; a rise with no adding fill at all
+# is block whole. The landed rule (a row with no clock) shares the
+# defect and stays as it is. CRITICAL-1 (the worker): the hold
+# suppresses NEW reduces only; his witnessed exit -- resting, cancelled
+# by its TTL, or never placed -- keeps its whole E4 life through _act,
+# capped at the witnessed share still outstanding (our ledger past the
+# target the reference sizes). MEDIUM-1, said: a sale
+# and a re-add in one tick apply the FALL (witnessed_ratchet), so the
+# re-add is under-mirrored (sell 3,000 + re-buy 2,000: block 9,090.9,
+# target 90; over two ticks 7,272.7 and 272 -- 182 fewer held), D25's
+# path dependence, fail-closed toward not buying. LOW-1, said:
+# reducing_since compares a stamp-only fill's VENUE time to a reference
+# clock that is an INGEST stamp, so a SELL made inside the lag with no
+# detected_at is missed until a later fill moves the clock -- the
+# legacy-NULL case only (pipeline.py and history.py stamp every insert).
+# LOW-2, said: a part-witnessed crossing leaves a residual block (the
+# collapse's 640 and his full exit in one tick: 573.3 at net 0) that
+# under-mirrors his re-buy (442 where a clean block gives 500),
+# fail-closed; accepted.
+#
+# THE E12b FOLD RE-REVIEW (2026-09-08; MEDIUM-1): adding_since read the
+# ingest clock alone, so a backfilled or S1-reconciled BUY of his
+# history (stamped 2 h 13 min ago, inserted now) explained a rise and
+# was BOUGHT at his current cent -- the road is_flow closes at the open.
+# Now an adding fill counts only when its own stamp is also no more
+# than LATE_FILL_S before the reference's clock (the one constant);
+# an older one is unexplained, restored to the block, never bought.
+# reducing_since keeps one clock: an old-stamped SELL of his is a sale
+# that happened, late-known -- a witness, never missed. LOW-1, said: a
+# legacy-NULL add (no detected_at, an old stamp) is absorbed into the
+# block and never followed -- fail-closed. LOW-2, said: on a book at
+# the per-event cap the reference's target is read at this tick's mark
+# (3,000 at 0.80, 2,777 at 0.90), so a mark that rose since the
+# reference lowers the hold's cap -- the cap's own rule on any tick
+# (E1's at-the-mark cap), not the hold's; below the cap it is the flow's.
 
 def _num_r(v: Any) -> float | None:
     if isinstance(v, (bool, str)) or v is None:
@@ -465,12 +532,16 @@ def pre_existing_ratchet(block: Any, last_net: Any, net: Any) -> float | None:
 
     BOTH NETS ARE HIS FILLS' (the fold, HIGH-2): net_t and net_{t-1}
     are his_net over net_positions of the fills the tick holds, which
-    move only when a fill of his is ingested and fall only on a SELL of
-    the long token or a BUY of the other -- so a fall here IS a fall
-    his fills witness, by their arithmetic (net_t = net_{t-1} less the
-    reduction they carry), and a reading of the venue that wobbles or
-    reads zero (D1's merged pair) never reaches this function. The
-    reading's own verdict is flow_reading's."""
+    move only when a fill of his is ingested, and a reading of the
+    venue that wobbles or reads zero (D1's merged pair) never reaches
+    this function. The reading's own verdict is flow_reading's. But the
+    fills' net does NOT fall only on a SELL of the long token or a BUY
+    of the other (the re-review's MEDIUM-1): the chain-first collapse
+    of the poll lane's legs lowers it with no sale of his, so the live
+    worker runs this arithmetic through witnessed_ratchet -- on the fall
+    a reducing fill of his explains, never on the rest -- once the
+    reference carries its clock (migration 058); this is the LANDED
+    rule, kept for a row with no clock and for the clock column absent."""
     b, n = _num_r(block), _num_r(net)
     if b is None or n is None:
         return None
@@ -521,38 +592,234 @@ def flow_reading(reading: Any, fills_net: Any, dust: float = VENUE_LEDGER_TOL_SH
     return FLOW_READING_DISAGREE
 
 
+FLOW_FILLS_SHRANK = "flow_fills_shrank"
+
+
+def fills_clock(fills: Iterable[dict], fallback: Any = None) -> float | None:
+    """THE REFERENCE'S CLOCK (E12b; mirror_books.flow_last_at): the
+    newest ingest clock (fill_clock: `detected_at`, else the stamp)
+    among the fills a reference write counted. Written beside the
+    reference net, and what reducing_since reads a witness against:
+    a fill the reference counted is at or before it and never witnesses
+    again; a fill ingested after that read is stamped after it by the
+    ingestion's own clock (pipeline.py stamps `detected_at` on the
+    ingestion host, in insertion order), whatever the worker's clock
+    reads -- a clock skew between the two hosts, or a fill landing
+    between the tick's read and its write, can neither hide a sale nor
+    re-witness one. `fallback` (the tick's own clock) when no fill has
+    a clock; None when neither reads."""
+    best = None
+    for f in fills or ():
+        at = fill_clock(f) if isinstance(f, dict) else None
+        if at is not None and (best is None or at > best):
+            best = at
+    return _num_r(fallback) if best is None else best
+
+
+def reducing_since(fills: Iterable[dict], long_asset: str | None, other_asset: str | None,
+                   block: Any, since: Any) -> float:
+    """THE WITNESS (E12b; the re-review's MEDIUM-1): the reduction his
+    fills carry on the block's axis since the reference's clock, in
+    long-token shares -- a SELL of the long token or a BUY of the other
+    on a long block; a BUY of the long token or a SELL of the other on
+    a short one (the mirror image); nothing else is a witness (a SELL
+    of the other token on a long book is an ADD) -- summed over the
+    fills whose ingest clock (fill_clock) is strictly AFTER `since`.
+    An old row re-read (clocked at or before the reference) is no
+    witness; the poll lane's late row (stamped minutes ago, ingested
+    now) is one. NO SECOND CLOCK HERE (the E12b fold re-review): a
+    reducing row of his stamped hours ago and inserted now -- a
+    backfilled or S1-reconciled SELL -- is still a witness, because
+    his sale HAPPENED and we learn of it late: the block ratchets by
+    it and the exit follows at his price, as it must (adding_since
+    reads the stamp too, because an old add is history that must not
+    be bought; an old sale is an exit that must not be missed). 0
+    with no block, no clock, or nothing reducing."""
+    b, at0 = _num_r(block), _num_r(since)
+    if b is None or b == 0.0 or at0 is None:
+        return 0.0
+    s = 1.0 if b > 0 else -1.0
+    total = 0.0
+    for f in fills or ():
+        if not isinstance(f, dict):
+            continue
+        at = fill_clock(f)
+        if at is None or at <= at0:
+            continue
+        sz = _signed_size(f, long_asset, other_asset)
+        if sz is None:
+            continue
+        red = -sz * s
+        if red > 0.0:
+            total += red
+    return round(total, 6)
+
+
+def witnessed_ratchet(block: Any, last_net: Any, net: Any,
+                      witnessed: Any) -> tuple[float | None, dict | None]:
+    """D25's ratchet on the fall his fills WITNESS (E12b): `(block_t,
+    shrank)`. No fall (net_t at or above net_{t-1} on the block's
+    axis): pre_existing_ratchet's answer -- unchanged on increases --
+    and None. A fall explained by the witnessed reduction (the reducing
+    fills reducing_since summed; a sale and a re-add in one tick
+    explain more than they fell, and the fall is what is applied):
+    `block_{t-1} x net_t / net_{t-1}`, D25 as landed, and None. A fall
+    LARGER than the witnessed reduction -- a chain-first collapse and a
+    sale in one tick: the witnessed part only, `net_t' = net_{t-1} -
+    witnessed`, `block_{t-1} x net_t' / net_{t-1}` (0 when net_t'
+    crosses to <= 0), and the remainder named: `shrank = {from: net_{t-1},
+    to: net_t, unexplained, witnessed}`. A fall with NOTHING witnessed
+    (the collapse alone, or a crossing to <= 0 no fill of his made):
+    the block as it was and the same dict with `witnessed` 0 -- the
+    caller neither writes nor sells on it. None, None on an unreadable
+    block or net; an unreadable witness is 0 (nothing seen, nothing
+    moved: fail closed toward holding, never toward selling)."""
+    b, n = _num_r(block), _num_r(net)
+    if b is None or n is None:
+        return None, None
+    if b == 0.0:
+        return 0.0, None
+    s = 1.0 if b > 0 else -1.0
+    ln = _num_r(last_net)
+    ln = b if ln is None else ln
+    fall = round((ln - n) * s, 6)
+    if fall <= 0.0:
+        return pre_existing_ratchet(b, ln, n), None
+    w = _num_r(witnessed)
+    w = 0.0 if w is None or w < 0.0 else w
+    applied = min(fall, w)
+    unexplained = round(fall - applied, 6)
+    if applied <= 0.0:
+        return b, {"from": ln, "to": n, "unexplained": unexplained, "witnessed": 0.0}
+    fb = pre_existing_ratchet(b, ln, (ln * s - applied) * s)
+    if unexplained <= 0.0:
+        return fb, None
+    return fb, {"from": ln, "to": n, "unexplained": unexplained, "witnessed": round(applied, 6)}
+
+
+FLOW_FILLS_GREW = "flow_fills_grew"
+
+
+def adding_since(fills: Iterable[dict], long_asset: str | None, other_asset: str | None,
+                 axis: Any, since: Any, late_s: float = LATE_FILL_S) -> float:
+    """THE MIRROR IMAGE OF THE WITNESS (the E12b fold, HIGH-1): the ADDS
+    his fills carry on the axis since the reference's clock, in
+    long-token shares -- a BUY of the long token or a SELL of the other
+    on a long axis; a SELL of the long token or a BUY of the other on a
+    short one -- over the fills whose ingest clock (fill_clock) is
+    strictly AFTER `since` AND whose own stamp `ts` is not older than
+    `since` by more than `late_s` (the E12b fold re-review's MEDIUM-1:
+    is_flow's second clock, the one constant LATE_FILL_S). A backfilled
+    or S1-reconciled BUY of his HISTORY -- stamped hours ago, inserted
+    now -- is clocked after the reference but is not an add he made
+    since it: not counted, so the rise it makes is unexplained and
+    restored to the block (never bought), the road is_flow closes at
+    the open; the poll lane's late add (minutes) stays flow. An
+    unstamped adding row is old, as at the open. `axis` is the block,
+    or his net when the block is 0: its sign is the side. 0 with no
+    axis, no clock, or nothing adding (fail closed: an unexplained rise
+    is block); an unreadable allowance admits nothing stamped before
+    the clock."""
+    a, at0 = _num_r(axis), _num_r(since)
+    if a is None or a == 0.0 or at0 is None:
+        return 0.0
+    late = _num_r(late_s)
+    late = 0.0 if late is None or late < 0.0 else late
+    s = 1.0 if a > 0 else -1.0
+    total = 0.0
+    for f in fills or ():
+        if not isinstance(f, dict):
+            continue
+        at = fill_clock(f)
+        if at is None or at <= at0:
+            continue
+        ts = _num_r(f.get("ts"))
+        if ts is None or ts < at0 - late:
+            continue                                    # his history, late-known: the block's
+        sz = _signed_size(f, long_asset, other_asset)
+        if sz is None:
+            continue
+        add = sz * s
+        if add > 0.0:
+            total += add
+    return round(total, 6)
+
+
+def restored_block(block: Any, last_net: Any, net: Any, added: Any) -> tuple[float | None, dict | None]:
+    """AN UNEXPLAINED RISE OF THE FILLS' NET GOES TO THE BLOCK (the E12b
+    fold, HIGH-1): `(block_t, grew)`. No rise on the axis, or a rise
+    the adding fills (adding_since) explain: the block as handed and
+    None -- D25's "unchanged on increases", the rise is his flow. A
+    rise LARGER than the adds -- a reducing leg the poll lane
+    overstated, corrected by its chain row; a legs' mismatch the other
+    way -- puts the unexplained part in the BLOCK: `block_t =
+    block_{t-1} + unexplained`, never past the net, and `grew = {from:
+    net_{t-1}, to: net_t, unexplained, witnessed: the explained adds}`
+    names it; a rise with no adding fill at all is block whole. So the
+    flow -- and the target -- rise by the explained adds alone: never
+    a buy on a rise he did not make. Additive, not pro rata: undoing
+    the phantom ratchet pro rata (7,500 x 9,000 / 8,250 = 8,181.8 on
+    the review's harness, the true path's block) would BUY 6 shares on
+    the correction; the additive restore (8,250) holds 75 where the true
+    path holds 81 -- fail-closed toward not buying. The block's sign is
+    the axis; a block of 0 takes the net's. None, None on an unreadable
+    block or net; an unreadable `added` is nothing seen."""
+    b, n = _num_r(block), _num_r(net)
+    if b is None or n is None:
+        return None, None
+    s = (1.0 if b > 0 else -1.0) if b != 0.0 else ((1.0 if n > 0 else -1.0) if n != 0.0 else 0.0)
+    if s == 0.0:
+        return b, None
+    ln = _num_r(last_net)
+    ln = b if ln is None else ln
+    rise = round((n - ln) * s, 6)
+    if rise <= 0.0:
+        return b, None
+    a = _num_r(added)
+    a = 0.0 if a is None or a < 0.0 else a
+    explained = min(rise, a)
+    unexplained = round(rise - explained, 6)
+    if unexplained <= 0.0:
+        return b, None
+    fb = round(min(b * s + unexplained, n * s) * s, 6)
+    return fb, {"from": ln, "to": n, "unexplained": unexplained, "witnessed": round(explained, 6)}
+
+
 def vwap_of(fills: Iterable[dict], long_asset: str | None, other_asset: str | None,
             short: bool = False, before: float | None = None,
             late_s: float = LATE_FILL_S) -> float | None:
-    """His size-weighted BUY price on the book's axis -- the long token
-    at p; on a SHORT book the other token at 1 - p, the way his level is
-    read -- over the BLOCK's fills: those that are not flow from
-    `before` (is_flow, the same cut pre_existing_block makes: a fill
-    ingested inside the window but stamped more than `late_s` before it
-    is the block's, and its price enters here); every fill when `before`
-    is None. The cost of the block, which the catch-up tolerance is read
-    against. None when he bought nothing readable there (a long built by
-    SELLING the other token: MEDIUM-3, a follow-up -- fail-closed)."""
+    """His size-weighted cost on the book's axis over the BLOCK's
+    fills: those that are not flow from `before` (is_flow, the same cut
+    pre_existing_block makes: a fill ingested inside the window but
+    stamped more than `late_s` before it is the block's, and its price
+    enters here); every fill when `before` is None. The cost of the
+    block, which the catch-up tolerance is read against.
+
+    EVERY FILL THAT ADDS ON THE AXIS (E12b; the first review's
+    MEDIUM-3): on a long book a BUY of the long token at p and a SELL
+    of the other token at 1 - p -- the way his level is read on the
+    long axis -- and on a SHORT book the mirror image, a BUY of the
+    other token at 1 - p and a SELL of the long token at p; a reducing
+    fill on the axis is excluded as before (his cost is what he paid
+    to build, not what he took to trim). So a long he built by SELLING
+    the other token alone reads his cost and catches up within the
+    allowance of 1 - his price, where it read `vwap_unread` and opened
+    flow-only at the exact mark. None when he built nothing readable."""
     num = den = 0.0
     for f in fills or ():
         if not isinstance(f, dict):
             continue
         if before is not None and is_flow(f, before, late_s):
             continue
-        a, side = str(f.get("asset") or ""), str(f.get("side") or "").upper()
-        if side != "BUY":
+        sz = _signed_size(f, long_asset, other_asset)
+        if sz is None or ((sz < 0.0) if not short else (sz > 0.0)):
+            continue                                    # not on the axis, or a reducing fill
+        p = _num_r(f.get("price"))
+        if p is None or not (0.0 < p < 1.0):
             continue
-        p, size = _num_r(f.get("price")), _num_r(f.get("size"))
-        if p is None or size is None or size <= 0 or not (0.0 < p < 1.0):
-            continue
-        if not short and long_asset and a == long_asset:
-            px = p
-        elif short and other_asset and a == other_asset:
-            px = 1.0 - p
-        else:
-            continue
-        num += px * size
-        den += size
+        px = p if str(f.get("asset") or "") == long_asset else 1.0 - p
+        num += px * abs(sz)
+        den += abs(sz)
     return round(num / den, 6) if den > 0 else None
 
 
@@ -652,4 +919,8 @@ __all__ = ["Fill", "Book", "Plan", "net_positions", "his_net", "opening_burst",
            "MIN_MOVE_USD", "MIN_MOVE_FRAC", "MIN_MARKETS", "VENUE_LEDGER_TOL_SHARES",
            # E12: Rule LE's arithmetic; the fold's late row and the reading's verdict
            "fill_clock", "pre_existing_block", "flow_net", "pre_existing_ratchet", "vwap_of",
-           "LATE_FILL_S", "is_flow", "flow_reading", "FLOW_READING_ZERO", "FLOW_READING_DISAGREE"]
+           "LATE_FILL_S", "is_flow", "flow_reading", "FLOW_READING_ZERO", "FLOW_READING_DISAGREE",
+           # E12b: the witness, the reference's clock, the ratchet on the witnessed fall
+           "fills_clock", "reducing_since", "witnessed_ratchet", "FLOW_FILLS_SHRANK",
+           # the E12b fold: the mirror image of the witness, the unexplained rise to the block
+           "adding_since", "restored_block", "FLOW_FILLS_GREW"]
