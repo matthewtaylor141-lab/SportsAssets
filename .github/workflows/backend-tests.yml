@@ -24,6 +24,11 @@ jobs:
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
+        with:
+          # the whole history: the suite pins a few functions byte for byte
+          # against a named commit (git show <sha>:<path>); a depth-1
+          # checkout answered those with exit 128 (runs 262-264, 2026-09-08)
+          fetch-depth: 0
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"

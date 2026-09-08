@@ -119,16 +119,8 @@ def _key_reading(rows):
     return out
 
 
-def test_collapsed_reading_per_key_is_the_rule_and_never_over_the_raw_total():
-    """Randomised: per key the collapsed shares are EXACTLY what E19's
-    rule says (_key_reading: the net-leg sum, plus the per-match rows
-    that are neither its splits nor its repeats -- random sizes and
-    prices never sum or repeat, so a net-leg key reads net + per here),
-    the market total is never over the raw total, and what was dropped
-    is accounted to the share. Before E19 this pin read "never over
-    max(chain, poll)": the Martinez rows (the venue's own 29,054.9, the
-    sum of every row) overturned it. (Excludes a chain+s1 collision on
-    one key, pinned separately.)"""
+def _random_rows():
+    """The randomised draw both invariants below read (seed 1106)."""
     rng = random.Random(1106)
     rows = []
     for i in range(160):
@@ -140,13 +132,67 @@ def test_collapsed_reading_per_key_is_the_rule_and_never_over_the_raw_total():
                      round(rng.uniform(1, 5000), 2), round(rng.uniform(0.05, 0.95), 3), i))
     # one net-leg source per key: drop s1 rows on keys that hold a chain row
     chain_keys = {(r[1].lower(), r[2], r[3].upper()) for r in rows if r[0] == "chain"}
-    rows = [r for r in rows if not (r[0] == "s1" and (r[1].lower(), r[2], r[3].upper()) in chain_keys)]
+    return [r for r in rows if not (r[0] == "s1" and (r[1].lower(), r[2], r[3].upper()) in chain_keys)]
+
+
+def test_collapsed_reading_per_key_is_never_larger_than_max_of_chain_and_poll():
+    """Randomised: per key the collapsed shares are EXACTLY the net-leg
+    sum when the key holds one, else the per-match sum -- so never over
+    max(chain, poll), and the market total is never over the raw total.
+    (Excludes a chain+s1 collision on one key, pinned separately.)
+
+    E19b (2026-09-08): BACK TO 7a4b852's PIN on THE READER (his_fills,
+    D1's key). Lane 8 re-pinned this to its own rule ("net + per"); the
+    fills-vs-venue first run (17:07Z) read that rule farther from the
+    venue on the day's books (old closer 22, new closer 4), so D1's
+    invariant is the one that ships and lane 8's is kept below on the
+    unwired reference."""
+    rows = _random_rows()
 
     async def run():
         admin, c, name = await _scratch()
         try:
             await _insert(c, rows)
             fills = await ms.his_fills(c, "rn1", D1_CID)
+            got: dict = {}
+            for f in fills:
+                k = (f["tx_hash"].lower(), f["asset"], f["side"].upper())
+                got[k] = got.get(k, 0.0) + f["size"]
+            exp = _key_sums(rows)
+            for k, (net, per) in exp.items():
+                want = net if net else per
+                assert abs(got.get(k, 0.0) - want) < 1e-6, (k, net, per, got.get(k))
+                assert got.get(k, 0.0) <= max(net, per) + 1e-6
+            assert set(got) == set(exp)
+            raw = sum(r[4] for r in rows)
+            assert sum(f["size"] for f in fills) <= raw + 1e-6
+            d = ms.his_fills_dedup()
+            assert abs(raw - sum(f["size"] for f in fills) - d["dup_shares"]) < 1e-3
+            assert d["dup_rows"] == len(rows) - len(fills)
+        finally:
+            await _drop(admin, c, name)
+    _run(run())
+
+
+def test_e19b_reference_collapsed_reading_per_key_is_lane_8s_rule_on_the_unwired_key():
+    """Lane 8's re-pin of the invariant above, kept as a pin of the
+    WITHDRAWN behaviour on the unwired reference (his_fills_distinct):
+    per key the collapsed shares are EXACTLY what E19's rule says
+    (_key_reading: the net-leg sum, plus the per-match rows that are
+    neither its splits nor its repeats -- random sizes and prices never
+    sum or repeat, so a net-leg key reads net + per here), the market
+    total is never over the raw total, and what was dropped is accounted
+    to the share; every key reads at or over max(chain, poll). The
+    reader's counter is never moved by the call."""
+    rows = _random_rows()
+
+    async def run():
+        admin, c, name = await _scratch()
+        try:
+            await _insert(c, rows)
+            await ms.his_fills(c, "rn1", D1_CID)
+            before = ms.his_fills_dedup()
+            fills = await ms.his_fills_distinct(c, "rn1", D1_CID)
             got: dict = {}
             for f in fills:
                 k = (f["tx_hash"].lower(), f["asset"], f["side"].upper())
@@ -160,9 +206,10 @@ def test_collapsed_reading_per_key_is_the_rule_and_never_over_the_raw_total():
             assert all(got[k] >= max(net, per) - 1e-6 for k, (net, per) in sums.items())
             raw = sum(r[4] for r in rows)
             assert sum(f["size"] for f in fills) <= raw + 1e-6
-            d = ms.his_fills_dedup()
+            d = ms.his_fills_distinct_dedup()
             assert abs(raw - sum(f["size"] for f in fills) - d["dup_shares"]) < 1e-3
             assert d["dup_rows"] == len(rows) - len(fills)
+            assert ms.his_fills_dedup() == before
         finally:
             await _drop(admin, c, name)
     _run(run())
@@ -190,16 +237,24 @@ def test_chain_and_s1_on_one_key_are_BOTH_kept_an_over_read_the_rule_admits():
     _run(run())
 
 
-def test_the_s1_same_asset_entry_deferral_reads_the_venues_figure_on_either_side():
+def test_the_s1_same_asset_entry_deferral_under_reads_and_the_direction_depends_on_side():
     """A taker sweep fills two of his resting orders on one token in one
     tx: s1 emits leg 1 (exec_owner), defers leg 2 to the poller
-    (`s1.abstain.same_asset_entry`), the poller carries both legs. D1's
-    key collapsed BOTH poll legs under the s1 row and leg 2 was LOST
-    (this pin held the defect: 5,000 against the venue's 2,000). E19
-    (PNL lane 8) is Martinez's shape exactly -- the poll legs do not sum
-    to the s1 row (8,000 vs 5,000), so only the repeat (leg 1: the same
-    price and size) collapses and leg 2 counts: the venue's own figure
-    on a SELL (his exit read whole) and on a BUY alike."""
+    (`s1.abstain.same_asset_entry`), the poller carries both legs. The
+    rule collapses BOTH poll legs under the s1 row: leg 2 is LOST.
+    On a BUY that is an under-read of his position (smaller mirror
+    target: conservative). On a SELL it is an under-read of his EXIT --
+    his position reads LARGER than the venue's, so the mirror keeps
+    holding what he sold: not conservative.
+
+    E19b (2026-09-08): BACK TO 7a4b852's PIN -- D1's residual, visible
+    again on THE READER (his_fills). Lane 8 re-pinned this to the
+    venue's 2,000 / 8,000 on its own key; that key's first production
+    measure (fills-vs-venue, 17:07Z) read farther from the venue on the
+    day's books than D1 (old closer 22, new closer 4), so D1's key ships
+    with this residual named, and lane 8's reading is kept below on the
+    unwired reference. The redesign section 43 asks for is judged on
+    this shape too."""
     async def run():
         admin, c, name = await _scratch()
         try:
@@ -212,12 +267,11 @@ def test_the_s1_same_asset_entry_deferral_reads_the_venues_figure_on_either_side
             ])
             fills = await ms.his_fills(c, "rn1", D1_CID)
             pos = mi.net_positions(fills)
-            assert pos[K] == 2000.0, "the venue holds 2,000: leg 2 counts, leg 1's repeat collapses"
-            assert ms.his_fills_dedup() == {"dup_rows": 1, "dup_shares": 5000.0}
+            assert pos[K] == 5000.0, "the venue holds 2,000: the collapsed reading is LARGER"
             raw_net = float(await c.fetchval(
                 "SELECT sum(CASE WHEN side='BUY' THEN size ELSE -size END) FROM trades WHERE asset=$1", K))
             assert raw_net == 10000.0 - 13000.0, "the raw table over-counts his SELL (leg 1 twice)"
-            # the same shape on a BUY: the venue's 8,000
+            # the same shape on a BUY: the collapsed reading is SMALLER
             await c.execute("DELETE FROM trades")
             await _insert(c, [
                 ("s1", "0xsweepb", K, "BUY", 5000.0, 0.6, 10),
@@ -225,8 +279,42 @@ def test_the_s1_same_asset_entry_deferral_reads_the_venues_figure_on_either_side
                 ("poll", "0xsweepb", K, "BUY", 3000.0, 0.6, 10),
             ])
             fills = await ms.his_fills(c, "rn1", D1_CID)
-            assert mi.net_positions(fills)[K] == 8000.0
-            assert ms.his_fills_dedup() == {"dup_rows": 1, "dup_shares": 5000.0}
+            assert mi.net_positions(fills)[K] == 5000.0 < 8000.0
+            assert ms.his_fills_dedup() == {"dup_rows": 2, "dup_shares": 8000.0}
+        finally:
+            await _drop(admin, c, name)
+    _run(run())
+
+
+def test_e19b_reference_the_s1_same_asset_entry_deferral_reads_the_venues_figure_on_the_unwired_key():
+    """Lane 8's re-pin of the test above, kept as a pin of the WITHDRAWN
+    behaviour on the unwired reference (his_fills_distinct): the poll
+    legs do not sum to the s1 row (8,000 vs 5,000), so only the repeat
+    (leg 1: the same price and size) collapses and leg 2 counts -- the
+    venue's own figure on a SELL (his exit read whole) and on a BUY
+    alike. What the redesign must keep while not over-reading books
+    611 / 622 / 656 / 601 (section 43)."""
+    async def run():
+        admin, c, name = await _scratch()
+        try:
+            await _insert(c, [
+                ("chain", "0xopen", K, "BUY", 10000.0, 0.5, 1),
+                ("s1", "0xsweep", K, "SELL", 5000.0, 0.6, 10),
+                ("poll", "0xsweep", K, "SELL", 5000.0, 0.6, 10),
+                ("poll", "0xsweep", K, "SELL", 3000.0, 0.6, 10),
+            ])
+            ref = await ms.his_fills_distinct(c, "rn1", D1_CID)
+            assert mi.net_positions(ref)[K] == 2000.0, "the venue holds 2,000: leg 2 counts, leg 1's repeat collapses"
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 1, "dup_shares": 5000.0}
+            await c.execute("DELETE FROM trades")
+            await _insert(c, [
+                ("s1", "0xsweepb", K, "BUY", 5000.0, 0.6, 10),
+                ("poll", "0xsweepb", K, "BUY", 5000.0, 0.6, 10),
+                ("poll", "0xsweepb", K, "BUY", 3000.0, 0.6, 10),
+            ])
+            ref = await ms.his_fills_distinct(c, "rn1", D1_CID)
+            assert mi.net_positions(ref)[K] == 8000.0
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 1, "dup_shares": 5000.0}
         finally:
             await _drop(admin, c, name)
     _run(run())
@@ -355,19 +443,66 @@ def test_kostyuk_target_before_and_after_and_a_poll_only_market_is_unchanged():
 # ------------------------------------------ 9. the SQL mutants, executed
 
 def test_sql_mutants_are_caught():
+    """E19b (2026-09-08): BACK TO 7a4b852's PIN -- the five mutants on
+    D1's clauses, executed against THE READER (his_fills, D1's text byte
+    for byte). Lane 8's seven mutants on its two arms are kept below on
+    the unwired reference."""
     async def run():
         admin, c, name = await _scratch()
         try:
-            # E19: the '' poll row is the chain '' row's repeat in price and
-            # size, so the sentinel mutant (one key for every '' row) would
-            # swallow it; the correct key keeps each '' row its own
+            await _insert(c, _d1_rows() + [
+                ("chain", "0xcase", NS, "BUY", 100.0, 0.5, 9000), ("poll", "0xCASE", NS, "BUY", 100.0, 0.5, 9000),
+                ("chain", "0xside", NS, "BUY", 100.0, 0.5, 9001), ("poll", "0xside", NS, "buy", 100.0, 0.5, 9001),
+                ("chain", "", NS, "BUY", 10.0, 0.5, 9002), ("poll", "", NS, "BUY", 20.0, 0.5, 9003),
+            ])
+            fills = await ms.his_fills(c, "rn1", D1_CID)
+            good = mi.net_positions(fills)
+            assert abs(good[K] - 55993.4) < 1e-6 and abs(good[NS] - 29555.0 - 100 - 100 - 30) < 1e-6
+            mutants = {
+                "no lower()": [("lower(NULLIF(t.tx_hash, ''))", "NULLIF(t.tx_hash, '')")],
+                "no upper()": [("t.asset, upper(t.side)", "t.asset, t.side")],
+                "no '' sentinel": [("COALESCE(lower(NULLIF(t.tx_hash, '')), 'row:' || t.id::text)",
+                                    "lower(t.tx_hash)")],
+                "chain rows collapse too": [
+                    ("(COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed",
+                     "f.has_net_leg AS collapsed")],
+                "poll is a net-leg source": [("IN ('chain', 's1')", "IN ('chain', 's1', 'poll')")],
+            }
+            caught = {}
+            for label, subs in mutants.items():
+                m = mi.net_positions(await ms.his_fills(_Mut(c, subs), "rn1", D1_CID))
+                caught[label] = (round(m.get(K, 0.0), 1), round(m.get(NS, 0.0), 1))
+                assert m != good, label
+            assert caught["no lower()"][1] == good[NS] + 100.0            # 0xCASE kept: +100
+            assert caught["no upper()"][1] == good[NS] + 100.0            # 'buy' kept: +100
+            assert caught["no '' sentinel"][1] == good[NS] - 20.0         # the '' poll row swallowed
+            # every key that holds a chain row loses the chain row too: only
+            # the poll-only txs (6,509.9 K) and the '' poll row (20 NS) survive
+            assert caught["chain rows collapse too"] == (6509.9, 20.0)
+            assert caught["poll is a net-leg source"][0] == 92145.2       # the raw reading
+        finally:
+            await _drop(admin, c, name)
+    _run(run())
+
+
+def test_e19b_reference_sql_mutants_are_caught_on_the_unwired_key():
+    """Lane 8's version of the mutant test, kept as a pin of the
+    WITHDRAWN behaviour on the unwired reference (his_fills_distinct):
+    its seven mutants -- D1's five on the moved clauses and the two on
+    its own arms (the split sum widened to any sum, the repeat by price
+    alone) -- executed against the reference's SQL, each caught."""
+    async def run():
+        admin, c, name = await _scratch()
+        try:
+            # the '' poll row is the chain '' row's repeat in price and size,
+            # so the sentinel mutant (one key for every '' row) would swallow
+            # it; the correct key keeps each '' row its own
             await _insert(c, _d1_rows() + [
                 ("chain", "0xcase", NS, "BUY", 100.0, 0.5, 9000), ("poll", "0xCASE", NS, "BUY", 100.0, 0.5, 9000),
                 ("chain", "0xside", NS, "BUY", 100.0, 0.5, 9001), ("poll", "0xside", NS, "buy", 100.0, 0.5, 9001),
                 ("chain", "", NS, "BUY", 10.0, 0.5, 9002), ("poll", "", NS, "BUY", 10.0, 0.5, 9003),
             ])
-            fills = await ms.his_fills(c, "rn1", D1_CID)
-            good = mi.net_positions(fills)
+            good = mi.net_positions(await ms.his_fills_distinct(c, "rn1", D1_CID))
             assert abs(good[K] - 55993.4) < 1e-6 and abs(good[NS] - 29555.0 - 100 - 100 - 20) < 1e-6
             mutants = {
                 "no lower()": [("lower(NULLIF(t.tx_hash, ''))", "NULLIF(t.tx_hash, '')")],
@@ -378,7 +513,7 @@ def test_sql_mutants_are_caught():
                                     "lower(t.tx_hash)")],
                 "chain rows collapse too": [("(NOT k.net_leg AND k.has_net_leg AND (", "(k.has_net_leg AND (")],
                 "poll is a net-leg source": [("IN ('chain', 's1')", "IN ('chain', 's1', 'poll')")],
-                # E19's two arms: the split sum widened to any sum, the repeat
+                # the two arms: the split sum widened to any sum, the repeat
                 # test dropped to the price alone
                 "any sum is the splits": [("abs(k.match_sum - leg.leg_size) <= greatest(0.01, 0.001 * leg.leg_size)",
                                            "k.match_sum > 0")],
@@ -390,12 +525,15 @@ def test_sql_mutants_are_caught():
                 ("s1", "0xe19a", NS, "BUY", 5225.0, 0.61, 9010), ("poll", "0xe19a", NS, "BUY", 4283.5, 0.60, 9010),
                 ("s1", "0xe19b", NS, "BUY", 5225.0, 0.15, 9020), ("poll", "0xe19b", NS, "BUY", 5245.0, 0.15, 9020),
             ])
-            fills = await ms.his_fills(c, "rn1", D1_CID)
-            good = mi.net_positions(fills)
+            good = mi.net_positions(await ms.his_fills_distinct(c, "rn1", D1_CID))
             assert abs(good[NS] - 29555.0 - 220 - 5225.0 - 4283.5 - 5225.0 - 5245.0) < 1e-6
+            # THE READER on the same rows: D1 drops the four E19 poll rows too
+            reader = mi.net_positions(await ms.his_fills(c, "rn1", D1_CID))
+            assert abs(reader[NS] - 29555.0 - 220 - 5225.0 - 5225.0) < 1e-6
+            assert reader[NS] < good[NS], "D1 reads LESS of his flow on the E19 shapes"
             caught = {}
             for label, subs in mutants.items():
-                m = mi.net_positions(await ms.his_fills(_Mut(c, subs), "rn1", D1_CID))
+                m = mi.net_positions(await ms.his_fills_distinct(_Mut(c, subs), "rn1", D1_CID))
                 caught[label] = (round(m.get(K, 0.0), 1), round(m.get(NS, 0.0), 1))
                 assert m != good, label
             assert caught["no lower()"][1] == good[NS] + 100.0            # 0xCASE kept: +100
@@ -540,8 +678,11 @@ def test_no_live_sizing_path_reads_trades_raw():
     # the his_fills rows, inside _read_market
     s = inspect.getsource(ml._read_market)
     assert "pos = mi.net_positions(fills)" in s and "his_long = float(pos.get(la" in s
-    # the shadow's two remaining raw reads derive no position
-    assert inspect.getsource(ms).count("FROM trades t") == 3      # his_fills, compute_ratio, active_conditions
+    # the shadow's two remaining raw reads derive no position; E19b: the
+    # fourth statement is the UNWIRED reference his_fills_distinct (lane
+    # 8's key), which derives a position no sizing path reads
+    assert inspect.getsource(ms).count("FROM trades t") == 4      # his_fills, compute_ratio, active_conditions, his_fills_distinct
+    assert "his_fills_distinct" not in src and inspect.getsource(ms).count("his_fills_distinct(") == 1
     assert "net_positions" not in inspect.getsource(ms.compute_ratio)
     from sportsassets.analytics import mirror_report as mr
     s = inspect.getsource(mr)

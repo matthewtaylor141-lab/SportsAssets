@@ -679,9 +679,14 @@ def test_e7_the_source_order_release_before_the_memo_checks_and_the_boot_read_be
     assert once.index("_persist_terminal_memo(t)") < once.index("_persist_cand_memo(t)")
     assert "if not _terminal_memo_loaded:\n        return" in inspect.getsource(ml._persist_cand_memo)
     assert "_STATE_TERMINAL_MEMO" not in inspect.getsource(ml._persist_cand_memo)
-    # the stamped call is the one query, unchanged in text; the plain call unchanged in shape
+    # the stamped call is the one query, unchanged in text; the plain call unchanged in shape.
+    # E19b (2026-09-08): the shadow's fourth `FROM trades t` is the UNWIRED
+    # reference his_fills_distinct (lane 8's collapse key, withdrawn from
+    # sizing by the fills-vs-venue first run; test_d1_fills_dedup names the
+    # four and pins that no worker calls it) -- active_conditions itself is untouched
     shadow = inspect.getsource(ms)
-    assert shadow.count("FROM trades t") == 3 and "ORDER BY last_ts DESC" in inspect.getsource(ms.active_conditions)
+    assert shadow.count("FROM trades t") == 4 and "ORDER BY last_ts DESC" in inspect.getsource(ms.active_conditions)
+    assert "FROM trades t" in inspect.getsource(ms.his_fills_distinct) and "his_fills_distinct" not in inspect.getsource(ml)
 
 
 def test_e7_the_stamped_query_is_the_one_query_and_the_plain_call_is_unchanged():

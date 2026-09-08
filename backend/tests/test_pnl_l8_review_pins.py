@@ -26,6 +26,18 @@ arm collapses ONE per-match row per net-leg row (a ranked pairing); the
 split arm measures the splits against ONE source's net-leg rows; both
 arms judge price as the same cent by round(., 2) on both sides or within
 half a cent in numeric to the mil (float8 read 0.615 - 0.61 over 0.005).
+
+E19b (2026-09-08, the same day): the collapse pins below are RE-PINNED.
+The fills-vs-venue preset's first production run (17:07Z, ten minutes
+after the deploy) read lane 8's key FARTHER from the venue than D1's on
+the day's books -- the old key closer on 22 markets, the new on 4; the
+summed gap 81,470.2 sh old against 119,856.5 sh new; on live books with
+no later fills the old key equals the venue to the decimal (611: -966.9)
+where the new key over-reads by thousands (+19,349.5) -- so his_fills is
+D1's key again (7a4b852, byte for byte) and lane 8's key is the UNWIRED
+`mirror_shadow.his_fills_distinct`. Each collapse pin says which
+function holds which claim; CRITICAL-1 / HIGH-1 (part (a)) and the
+preset pins are untouched.
 """
 
 from __future__ import annotations
@@ -140,7 +152,12 @@ def test_l8_review_MEDIUM_1_two_identical_real_fills_under_one_tx_keep_the_secon
     10,000). Folded: one per-match row per net-leg row -- the pairs are
     ranked by id on both sides and hold where the ranks agree -- so the
     second poll row counts: 10,000, one row / 5,000 sh dropped. Beside it
-    two s1 records and three poll rows of one size: two collapse, 15,000."""
+    two s1 records and three poll rows of one size: two collapse, 15,000.
+    E19b RE-PIN: the folded claim holds on the UNWIRED reference
+    (his_fills_distinct); THE READER (his_fills, D1's key) collapses every
+    poll row under an s1 key -- 5,000 then 15,000 (both s1 records kept,
+    D1's admitted shape), 10,000 then 25,000 sh dropped: less of his flow,
+    never more."""
     async def run():
         admin, c, name = await _scratch()
         try:
@@ -148,14 +165,22 @@ def test_l8_review_MEDIUM_1_two_identical_real_fills_under_one_tx_keep_the_secon
                               ("poll", "0xtwin", K, "BUY", 5000.0, 0.61, 1),
                               ("poll", "0xtwin", K, "BUY", 5000.0, 0.61, 1)])
             fills = await ms.his_fills(c, "rn1", D1_CID)
-            assert mi.net_positions(fills)[K] == 10000.0
-            assert ms.his_fills_dedup() == {"dup_rows": 1, "dup_shares": 5000.0}
+            assert mi.net_positions(fills)[K] == 5000.0
+            assert ms.his_fills_dedup() == {"dup_rows": 2, "dup_shares": 10000.0}
+            ref = await ms.his_fills_distinct(c, "rn1", D1_CID)
+            assert mi.net_positions(ref)[K] == 10000.0
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 1, "dup_shares": 5000.0}
             await _insert(c, [("s1", "0xtrip", K, "BUY", 5000.0, 0.61, 2), ("s1", "0xtrip", K, "BUY", 5000.0, 0.61, 2),
                               ("poll", "0xtrip", K, "BUY", 5000.0, 0.61, 2), ("poll", "0xtrip", K, "BUY", 5000.0, 0.61, 2),
                               ("poll", "0xtrip", K, "BUY", 5000.0, 0.61, 2)])
             fills = await ms.his_fills(c, "rn1", D1_CID)
-            assert mi.net_positions(fills)[K] == 10000.0 + 15000.0
-            assert ms.his_fills_dedup() == {"dup_rows": 3, "dup_shares": 15000.0}
+            assert mi.net_positions(fills)[K] == 5000.0 + 10000.0
+            assert ms.his_fills_dedup() == {"dup_rows": 5, "dup_shares": 25000.0}
+            ref = await ms.his_fills_distinct(c, "rn1", D1_CID)
+            assert mi.net_positions(ref)[K] == 10000.0 + 15000.0
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 3, "dup_shares": 15000.0}
+            # the reference's read never moves the reader's counter
+            assert ms.his_fills_dedup() == {"dup_rows": 5, "dup_shares": 25000.0}
         finally:
             await _drop(admin, c, name)
     _run(run())
@@ -167,7 +192,9 @@ def test_l8_review_LOW_1_the_chain_s1_collision_keeps_the_splits_collapsed():
     poll splits no longer summed to the DOUBLED leg (30,328) so they
     counted as well: 45,492. Folded: the splits are measured against ONE
     source's net-leg rows (chain's 15,164, or s1's) and collapse -- 30,328,
-    D1's admitted collision alone, the three splits dropped."""
+    D1's admitted collision alone, the three splits dropped. E19b: THE
+    READER (his_fills, D1's key) reads the same figure -- every poll row
+    under a net-leg key collapses -- so the claim is read on both."""
     async def run():
         admin, c, name = await _scratch()
         try:
@@ -177,6 +204,8 @@ def test_l8_review_LOW_1_the_chain_s1_collision_keeps_the_splits_collapsed():
             fills = await ms.his_fills(c, "rn1", D1_CID)
             assert mi.net_positions(fills)[K] == 30328.0
             assert ms.his_fills_dedup() == {"dup_rows": 3, "dup_shares": 15164.0}
+            assert mi.net_positions(await ms.his_fills_distinct(c, "rn1", D1_CID))[K] == 30328.0
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 3, "dup_shares": 15164.0}
         finally:
             await _drop(admin, c, name)
     _run(run())
@@ -189,7 +218,9 @@ def test_l8_review_LOW_2_the_kostyuk_identical_pair_and_the_half_cent_pair_both_
     is a hair over 0.005. Folded: both arms judge price as the same cent
     by round(., 2) on both sides or within half a cent in numeric to the
     mil, so the pair is one fill (the venue quotes cents; a full cent off
-    stays two fills -- E19's 0.60 / 0.59 pin)."""
+    stays two fills -- E19's 0.60 / 0.59 pin). E19b: THE READER (his_fills,
+    D1's key) collapses both pairs whatever the price, the same figure --
+    read on both."""
     async def run():
         admin, c, name = await _scratch()
         try:
@@ -198,6 +229,8 @@ def test_l8_review_LOW_2_the_kostyuk_identical_pair_and_the_half_cent_pair_both_
             fills = await ms.his_fills(c, "rn1", D1_CID)
             assert mi.net_positions(fills)[K] == 15164.0 + 5000.0
             assert ms.his_fills_dedup() == {"dup_rows": 2, "dup_shares": 20164.0}
+            assert mi.net_positions(await ms.his_fills_distinct(c, "rn1", D1_CID))[K] == 15164.0 + 5000.0
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 2, "dup_shares": 20164.0}
         finally:
             await _drop(admin, c, name)
     _run(run())

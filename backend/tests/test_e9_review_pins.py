@@ -772,11 +772,13 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     src = inspect.getsource(ms.his_fills)
     assert src.count("detected_at") == 3, "the comment, the CTE line and the outer projection (the fold)"
     assert "d.ts,\n               d.detected_at," in src
-    # E19 (PNL lane 8): the collapse keeps distinct fills -- a per-match row
-    # under a net-leg row is dropped only as its split (the sum) or its
-    # repeat (price to the cent, size within the dust); the clause moved
-    assert "(NOT k.net_leg AND k.has_net_leg AND (" in src and ") AS collapsed" in src
-    assert "abs(k.match_sum - leg.leg_size) <= greatest(0.01, 0.001 * leg.leg_size)" in src
+    # E19b (2026-09-08): D1's one clause again -- lane 8's split / repeat
+    # arms were withdrawn from sizing the same day (the fills-vs-venue first
+    # run read them farther from the venue: old closer 22, new closer 4) and
+    # live on the UNWIRED ms.his_fills_distinct alone; his_fills is
+    # 7a4b852's text byte for byte
+    assert "(COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed" in src
+    assert "match_sum" not in src and "match_sum" in inspect.getsource(ms.his_fills_distinct)
     assert "WHERE NOT d.collapsed" in src and "ORDER BY d.ts, d.id" in src
     keys = ml.CENSUS_KEYS
     # E12 moved the tail by its three names (-65 -> -68, -66 -> -69), E13 by

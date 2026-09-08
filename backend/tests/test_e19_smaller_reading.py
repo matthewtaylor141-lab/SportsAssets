@@ -21,6 +21,18 @@ honours the same admission; the census counts `drift_smaller_open`.
 (b) mirror_shadow.his_fills: a per-match row under a net-leg row collapses
 only as its split (the per-match rows summing to the net-leg size) or its
 repeat (price to the cent, size within max(0.01 sh, 0.1 %)).
+    WITHDRAWN FROM SIZING BY E19b (2026-09-08, the same day): the
+    fills-vs-venue preset's first production run (17:07Z, ten minutes
+    after the deploy) read the new key FARTHER from the venue than D1's
+    on the day's books -- old closer on 22 markets, new closer on 4, the
+    summed gap 81,470.2 sh old against 119,856.5 sh new; on live books
+    with no later fills the old key equals the venue to the decimal and
+    the new key over-reads by thousands (611: -966.9 = venue against
+    +19,349.5) -- and the live census went drift 0 -> 7 across the deploy.
+    THE READER is D1's his_fills again (7a4b852's text byte for byte);
+    lane 8's key is kept UNWIRED as mirror_shadow.his_fills_distinct, the
+    reference the preset's new_* columns compute. The collapse pins below
+    say, each, which function holds which claim.
 (c) the fills-vs-venue preset in render-ops.yml.
 
 The collapse pins EXECUTE the SQL on the scratch Postgres the D1 file
@@ -298,7 +310,10 @@ def test_e19_kostyuks_shape_stays_collapsed_to_the_venues_share():
     """D1's verbatim rows: every shared tx's poll rows SUM to its chain
     row (15,164 = 4,996 + 5,172 + 4,996), so they are its maker splits
     and collapse: 55,993.4 / 29,555.0, the exit worker's snapshot to the
-    share, ten rows and 46,376.2 sh dropped -- unchanged under E19."""
+    share, ten rows and 46,376.2 sh dropped. E19b: the claim holds on
+    THE READER (his_fills, D1's key: this IS D1's figure) and on the
+    unwired reference alike -- the one shape both keys agree on, so it is
+    read on both here."""
     async def run():
         admin, c, name = await _scratch()
         try:
@@ -307,13 +322,16 @@ def test_e19_kostyuks_shape_stays_collapsed_to_the_venues_share():
             pos = mi.net_positions(fills)
             assert abs(pos[K] - 55993.4) <= 1.0 and abs(pos[NS] - 29555.0) <= 1.0, pos
             assert ms.his_fills_dedup() == {"dup_rows": 10, "dup_shares": 46376.2}
+            ref = mi.net_positions(await ms.his_fills_distinct(c, "rn1", D1_CID))
+            assert ref == pos and ms.his_fills_distinct_dedup() == {"dup_rows": 10, "dup_shares": 46376.2}
             # the brief's shape too: one fill reported by chain and poll with
-            # identical price and size collapses
+            # identical price and size collapses (under either key)
             await c.execute("DELETE FROM trades")
             await _insert(c, [("chain", "0xsame", K, "BUY", 15164.0, 0.563, 1),
                               ("poll", "0xsame", K, "BUY", 15164.0, 0.563, 1)])
             fills = await ms.his_fills(c, "rn1", D1_CID)
             assert mi.net_positions(fills)[K] == 15164.0 and ms.his_fills_dedup() == {"dup_rows": 1, "dup_shares": 15164.0}
+            assert mi.net_positions(await ms.his_fills_distinct(c, "rn1", D1_CID))[K] == 15164.0
         finally:
             await _drop(admin, c, name)
     _run(run())
@@ -345,21 +363,46 @@ def _martinez_rows():
 
 
 def test_e19_martinez_shape_counts_every_row_to_the_venues_29054_9():
+    """E19b RE-PIN (2026-09-08). The 29,054.9 claim now holds on the
+    UNWIRED reference alone (his_fills_distinct). THE READER -- his_fills,
+    D1's key byte for byte -- reads Martinez's long at 15,925.4 (chain
+    230.4 + s1 15,695; the four poll rows under s1 keys dropped, 18,374.5
+    sh) and the net 11,974.5 at 12:10:43Z's rows: the under-read E19b
+    ACCEPTS on the fills' side, because the fills-vs-venue first run
+    (17:07Z) showed lane 8's key over-reading the venue on the day's live
+    books (old closer 22 markets, new closer 4; book 611 old_net -966.9 =
+    venue against new_net +19,349.5). Part (a) -- rules.smaller_reading --
+    covers the reopen from the venue's side and is untouched (the pins
+    above)."""
     async def run():
         admin, c, name = await _scratch()
         try:
             await _insert(c, _martinez_rows())
+            # THE READER: D1's figure
             fills = await ms.his_fills(c, "rn1", D1_CID)
             pos = mi.net_positions(fills)
-            # the venue's own per-market snapshot in 534's last plan: mkt_long 29,054.9
-            assert pos[K] == pytest.approx(MKT_LONG, abs=0.05), pos
+            assert pos[K] == pytest.approx(230.4 + 15695.0, abs=0.05), pos
+            assert pos[NS] == pytest.approx(3950.9 + 5225.0, abs=0.05), pos
+            assert ms.his_fills_dedup() == {"dup_rows": 4, "dup_shares": 18374.5}
+            # the net the reopen READ at 12:10:43Z (the other side's chain rows
+            # alone then): 11,974.5 on these rows, rounded to the tenth as
+            # the log prints them; candref_1408.log's own figure is 11,974.6
+            # (FILLS_NET), a tenth apart on the rows' rounding
+            assert mi.his_net(pos[K], 3950.9) == pytest.approx(11974.5, abs=0.05)
+            assert abs(mi.his_net(pos[K], 3950.9) - FILLS_NET) <= 0.11
+            # THE REFERENCE: lane 8's key reads the venue's own per-market
+            # snapshot in 534's last plan, mkt_long 29,054.9
+            ref = mi.net_positions(await ms.his_fills_distinct(c, "rn1", D1_CID))
+            assert ref[K] == pytest.approx(MKT_LONG, abs=0.05), ref
             # the other side: the chain rows to 12:10:07Z (the venue's 3,950.8
             # within its own rounding) plus the 12:23:33Z pair, two fills
-            assert pos[NS] == pytest.approx(3950.9 + 5225.0 + 5245.0, abs=0.05), pos
-            assert ms.his_fills_dedup() == {"dup_rows": 0, "dup_shares": 0.0}
+            assert ref[NS] == pytest.approx(3950.9 + 5225.0 + 5245.0, abs=0.05), ref
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 0, "dup_shares": 0.0}
+            # the reference's read never moves the reader's counter
+            assert ms.his_fills_dedup() == {"dup_rows": 4, "dup_shares": 18374.5}
             # and the net the reopen should have read at 12:10:43Z
             assert mi.his_net(MKT_LONG, 3950.9) == pytest.approx(25104.0, abs=0.1)
-            # D1's key on the same rows: the four poll rows dropped, 18,374.5 sh
+            # D1's key spelled out on the same rows: the four poll rows, 18,374.5 sh
             old = await c.fetch(
                 "SELECT sum(size)::float8 AS s, count(*) AS n FROM (SELECT t.size, COALESCE(t.source, '') IN ('chain', 's1') AS leg, "
                 "bool_or(COALESCE(t.source, '') IN ('chain', 's1')) OVER (PARTITION BY t.whale_id, lower(t.tx_hash), t.asset, upper(t.side)) AS has "
@@ -371,6 +414,9 @@ def test_e19_martinez_shape_counts_every_row_to_the_venues_29054_9():
 
 
 def test_e19_a_tx_with_three_price_levels_counts_all_three():
+    """E19b RE-PIN: 'all three' holds on the unwired reference; THE READER
+    (D1) keeps the s1 record alone and drops both poll rows under its key
+    (5,225; two rows / 8,846 sh dropped) -- less of his flow, never more."""
     async def run():
         admin, c, name = await _scratch()
         try:
@@ -378,16 +424,23 @@ def test_e19_a_tx_with_three_price_levels_counts_all_three():
                               ("poll", "0xsweep", K, "BUY", 3601.0, 0.61, 1),
                               ("poll", "0xsweep", K, "BUY", 5245.0, 0.61, 1)])
             fills = await ms.his_fills(c, "rn1", D1_CID)
-            assert [(f["source"], f["size"], f["price"]) for f in fills] == [
+            assert [(f["source"], f["size"], f["price"]) for f in fills] == [("s1", 5225.0, 0.62)]
+            assert mi.net_positions(fills)[K] == 5225.0
+            assert ms.his_fills_dedup() == {"dup_rows": 2, "dup_shares": 3601.0 + 5245.0}
+            ref = await ms.his_fills_distinct(c, "rn1", D1_CID)
+            assert [(f["source"], f["size"], f["price"]) for f in ref] == [
                 ("s1", 5225.0, 0.62), ("poll", 3601.0, 0.61), ("poll", 5245.0, 0.61)]
-            assert mi.net_positions(fills)[K] == 5225.0 + 3601.0 + 5245.0
-            assert ms.his_fills_dedup() == {"dup_rows": 0, "dup_shares": 0.0}
+            assert mi.net_positions(ref)[K] == 5225.0 + 3601.0 + 5245.0
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 0, "dup_shares": 0.0}
         finally:
             await _drop(admin, c, name)
     _run(run())
 
 
 def test_e19_the_s1_poll_pair_with_identical_price_and_size_collapses():
+    """E19b RE-PIN: the cent-witness verdicts (0xcent one fill, 0xoff two)
+    hold on the unwired reference; THE READER (D1) collapses every poll
+    row under an s1 key -- the three s1 rows alone, 5,445 sh dropped."""
     async def run():
         admin, c, name = await _scratch()
         try:
@@ -396,34 +449,43 @@ def test_e19_the_s1_poll_pair_with_identical_price_and_size_collapses():
                               # the price to the CENT: 0.590 and 0.5904 are one price
                               ("s1", "0xcent", K, "BUY", 100.0, 0.590, 5),
                               ("poll", "0xcent", K, "BUY", 100.0, 0.5904, 5),
-                              # a cent apart at the same size: two fills
+                              # a cent apart at the same size: two fills (the reference)
                               ("s1", "0xoff", K, "BUY", 100.0, 0.59, 9),
                               ("poll", "0xoff", K, "BUY", 100.0, 0.60, 9)])
             fills = await ms.his_fills(c, "rn1", D1_CID)
-            assert [(f["source"], f["size"]) for f in fills] == [
+            assert [(f["source"], f["size"]) for f in fills] == [("s1", 5245.0), ("s1", 100.0), ("s1", 100.0)]
+            assert ms.his_fills_dedup() == {"dup_rows": 3, "dup_shares": 5445.0}
+            ref = await ms.his_fills_distinct(c, "rn1", D1_CID)
+            assert [(f["source"], f["size"]) for f in ref] == [
                 ("s1", 5245.0), ("s1", 100.0), ("s1", 100.0), ("poll", 100.0)]
-            assert ms.his_fills_dedup() == {"dup_rows": 2, "dup_shares": 5345.0}
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 2, "dup_shares": 5345.0}
         finally:
             await _drop(admin, c, name)
     _run(run())
 
 
 def test_e19_a_size_off_by_a_thousandth_collapses_by_a_share_on_a_hundred_not_and_5225_5245_are_two():
+    """E19b RE-PIN: the dust verdicts hold on the unwired reference; THE
+    READER (D1) drops every poll row under an s1 key whatever its size
+    (10,200 / 5,225; four rows, 15,455.001 sh)."""
     async def run():
         admin, c, name = await _scratch()
         try:
             await _insert(c, [("s1", "0xdust", K, "BUY", 100.0, 0.5, 1),
                               ("poll", "0xdust", K, "BUY", 100.001, 0.5, 1),       # within 0.01 sh
                               ("s1", "0xshare", K, "BUY", 100.0, 0.5, 5),
-                              ("poll", "0xshare", K, "BUY", 101.0, 0.5, 5),        # 1 sh = 1 %: two fills
+                              ("poll", "0xshare", K, "BUY", 101.0, 0.5, 5),        # 1 sh = 1 %: two fills (the reference)
                               ("s1", "0xpermille", K, "BUY", 10000.0, 0.5, 9),
                               ("poll", "0xpermille", K, "BUY", 10009.0, 0.5, 9),   # 0.09 %: within 0.1 %
                               ("s1", "0xmartinez", NS, "BUY", 5225.0, 0.15, 13),
-                              ("poll", "0xmartinez", NS, "BUY", 5245.0, 0.15, 13)])  # 20 sh, 0.38 %: two fills
+                              ("poll", "0xmartinez", NS, "BUY", 5245.0, 0.15, 13)])  # 20 sh, 0.38 %: two fills (the reference)
             fills = await ms.his_fills(c, "rn1", D1_CID)
             pos = mi.net_positions(fills)
-            assert pos[K] == 100.0 + 100.0 + 101.0 + 10000.0 and pos[NS] == 5225.0 + 5245.0
-            assert ms.his_fills_dedup() == {"dup_rows": 2, "dup_shares": 10109.001}
+            assert pos[K] == 100.0 + 100.0 + 10000.0 and pos[NS] == 5225.0
+            assert ms.his_fills_dedup() == {"dup_rows": 4, "dup_shares": 100.001 + 101.0 + 10009.0 + 5245.0}
+            ref = mi.net_positions(await ms.his_fills_distinct(c, "rn1", D1_CID))
+            assert ref[K] == 100.0 + 100.0 + 101.0 + 10000.0 and ref[NS] == 5225.0 + 5245.0
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 2, "dup_shares": 10109.001}
         finally:
             await _drop(admin, c, name)
     _run(run())
@@ -432,28 +494,41 @@ def test_e19_a_size_off_by_a_thousandth_collapses_by_a_share_on_a_hundred_not_an
 def test_e19_every_reader_of_the_collapsed_figure_reads_it_through_his_fills():
     """One function holds the key: the live tick (the candidate, the book),
     the shadow (his_paired_sh, fills_dedup_*), the report. Nothing else
-    partitions his rows by tx."""
+    partitions his rows by tx. E19b RE-PIN: that one function is D1's
+    key again (the one clause, no split arm, no repeat pairing); lane 8's
+    two arms live on the UNWIRED reference `his_fills_distinct`, which no
+    money path names and the module itself never calls."""
     from sportsassets.analytics import mirror_report as mr
     sql = inspect.getsource(ms.his_fills)
-    assert "WINDOW w AS (PARTITION BY f.whale_id, f.tx_key, f.asset, upper(f.side))" in sql
-    # the review's fold: the leg is ONE source's rows, the repeat pairs are
-    # ranked one-to-one, the price witness is the same cent or half a cent
-    # in numeric to the mil (both arms)
-    assert "abs(k.match_sum - leg.leg_size) <= greatest(0.01, 0.001 * leg.leg_size)" in sql
-    assert "GROUP BY n.source) leg" in sql
-    assert "round(n.price::numeric, 2) = round(m.price::numeric, 2)" in sql
-    assert "OR abs(round(n.price::numeric, 3) - round(m.price::numeric, 3)) <= 0.005)" in sql
-    assert "abs(n.size - m.size) <= greatest(0.01, 0.001 * n.size)" in sql
-    assert "WHERE rep.m_id = k.id AND rep.m_rank = rep.n_rank" in sql
+    assert "(COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed" in sql
+    for frag in ("match_sum", "match_vwap", "leg_vwap", "rep.m_rank", "tx_key", "WINDOW w AS"):
+        assert frag not in sql, frag
+    # the reference carries the review's fold as lane 8 built it: the leg
+    # is ONE source's rows, the repeat pairs are ranked one-to-one, the
+    # price witness is the same cent or half a cent in numeric to the mil
+    ref = inspect.getsource(ms.his_fills_distinct)
+    assert "WINDOW w AS (PARTITION BY f.whale_id, f.tx_key, f.asset, upper(f.side))" in ref
+    assert "abs(k.match_sum - leg.leg_size) <= greatest(0.01, 0.001 * leg.leg_size)" in ref
+    assert "GROUP BY n.source) leg" in ref
+    assert "round(n.price::numeric, 2) = round(m.price::numeric, 2)" in ref
+    assert "OR abs(round(n.price::numeric, 3) - round(m.price::numeric, 3)) <= 0.005)" in ref
+    assert "abs(n.size - m.size) <= greatest(0.01, 0.001 * n.size)" in ref
+    assert "WHERE rep.m_id = k.id AND rep.m_rank = rep.n_rank" in ref
+    assert "NOT WIRED" in ref and "81,470.2" in ref and "119,856.5" in ref and "_FILLS_DEDUP_DISTINCT" in ref
+    # no money path names the reference; every reader is his_fills
     for mod in (ml, mr):
         src = inspect.getsource(mod)
         assert "has_net_leg" not in src and "ms.his_fills(" in src, mod.__name__
+        assert "his_fills_distinct" not in src, mod.__name__
     live = inspect.getsource(ml)
     assert "d = ms.his_fills_dedup()" in inspect.getsource(ml._count_fills_dedup)
     assert live.count("await ms.his_fills(t.pool, w, cid)") == 2      # the candidate, the book
     shadow = inspect.getsource(ms)
     assert shadow.index("fills = await his_fills(pool, whale, condition_id)") < shadow.index(
         "his_paired_sh=round(min(his_long, his_other), 4)")
+    assert shadow.count("his_fills_distinct(") == 1, "the def alone: the module never calls it"
+    for fn in (ms.shadow_market, ms.tick_once, ms.map_market, ms.compute_ratio, ms.active_conditions):
+        assert "his_fills_distinct" not in inspect.getsource(fn), fn.__name__
 
 
 # --------------------------------------------------------- (c) the preset
@@ -508,4 +583,9 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     assert re.search(r"^## \d+\. E19 \(2026-09-08, PNL lane 8\)", doc, re.M)
     for k in ("drift_smaller_open", "drift_sized_smaller", "smaller_reading", "fills-vs-venue", "29,054.9",
               "18,374.5", "0.1 %"):
+        assert k in doc, k
+    # E19b: the withdrawal is written up under its own header with the
+    # first run's numbers and the reference's name
+    assert re.search(r"^## 43\. E19b \(2026-09-08\)", doc, re.M)
+    for k in ("his_fills_distinct", "81,470.2", "119,856.5", "old_closer 22", "new_closer 4", "drift 0 -> 7"):
         assert k in doc, k

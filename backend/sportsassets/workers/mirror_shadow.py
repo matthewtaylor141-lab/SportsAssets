@@ -435,7 +435,150 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
     his most active book under `drift`). Collapsed by this rule the
     fills read 49,483.5 + 6,509.9 (poll-only txs the chain path missed)
     = 55,993.4 long and 29,555 other -- the snapshot, to the share. A
-    poll-only tx is KEPT WHOLE (nothing to collapse into).
+    poll-only tx is KEPT WHOLE (nothing to collapse into), and a
+    per-match row whose leg does not sum to the chain row still
+    collapses: the chain row is the wallet's net legs, the truth.
+
+    This collapse is the MIRROR'S OWN READ-SIDE view. The trades table
+    is shared with the copy lane, the edge analytics and the
+    reconciler, and a wrong dedupe at ingest loses fills; the durable
+    fix is a dedupe on (tx, asset, side) at ingest with a sum check,
+    not here. It is done in SQL, deterministically (a window over the
+    key; rows keep their `ts, id` order), and what was dropped is
+    counted on every call (his_fills_dedup).
+
+    The event title lives on the markets table, not on trades (review
+    round two): without it the premap lookup builds its keys from one
+    source instead of three and misses the markets the copy sleeve
+    never traded -- the very ones the mirror exists to add. The OUTCOME
+    is coalesced from the token catalogue the way the copy lane's
+    unmapped census reads it (api/app.py, COALESCE(t.outcome,
+    mt.outcome); C1 build step 3): a chain row is inserted with outcome
+    NULL and enriched later, and a NULL outcome was filed as
+    no_side_match -- our miss, not the venue's."""
+    _FILLS_DEDUP.update(dup_rows=0, dup_shares=0.0)
+    rows = await pool.fetch(
+        """
+        WITH f AS (
+            SELECT t.id, t.source, t.tx_hash, t.asset, t.side, t.condition_id,
+                   t.size::float8 AS size, t.price::float8 AS price,
+                   extract(epoch FROM t.ts)::float8 AS ts,
+                   -- E9: the ingest's clock, for the plan's his_fills_seen
+                   extract(epoch FROM t.detected_at)::float8 AS detected_at,
+                   COALESCE(t.market_title, m.title) AS market_title, t.event_slug,
+                   m.event_title, COALESCE(t.market_slug, m.slug) AS market_slug,
+                   COALESCE(t.outcome, mt.outcome) AS outcome,
+                   COALESCE(t.outcome_index, mt.outcome_index) AS outcome_index,
+                   COALESCE(NULLIF(m.sport, 'unclassified'), NULLIF(t.sport, 'unclassified'),
+                            'unclassified') AS sport,
+                   -- the key holds a net-leg row (chain / s1): the wallet's
+                   -- own legs for the tx, which every per-match row of the
+                   -- same key is a split of
+                   bool_or(COALESCE(t.source, '') IN ('chain', 's1')) OVER (
+                       PARTITION BY t.whale_id, COALESCE(lower(NULLIF(t.tx_hash, '')), 'row:' || t.id::text),
+                                    t.asset, upper(t.side)) AS has_net_leg
+              FROM trades t JOIN whales w ON w.id = t.whale_id
+              LEFT JOIN markets m ON m.condition_id = t.condition_id
+              LEFT JOIN market_tokens mt ON mt.token_id = t.asset
+             WHERE lower(w.username) = $1 AND t.condition_id = $2
+        ), c AS (
+            SELECT f.*, (COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed
+              FROM f
+        ), d AS (
+            SELECT c.*,
+                   count(*) FILTER (WHERE c.collapsed) OVER () AS dup_rows,
+                   COALESCE(sum(c.size) FILTER (WHERE c.collapsed) OVER (), 0.0) AS dup_shares
+              FROM c
+        )
+        SELECT d.id, d.source, d.tx_hash, d.asset, d.side, d.size, d.price, d.ts,
+               d.detected_at,
+               d.market_title, d.event_slug, d.event_title, d.market_slug,
+               d.outcome, d.outcome_index, d.sport, d.dup_rows, d.dup_shares
+          FROM d
+         WHERE NOT d.collapsed
+         ORDER BY d.ts, d.id
+        """, whale, condition_id)
+    out: list[dict] = []
+    dup_rows, dup_shares = 0, 0.0
+    for r in rows:
+        d = dict(r)
+        # the same totals ride on every kept row (a window over the
+        # whole result); a fake pool's rows carry none, which reads 0
+        dup_rows = int(d.pop("dup_rows", 0) or 0)
+        dup_shares = float(d.pop("dup_shares", 0.0) or 0.0)
+        out.append(d)
+    _FILLS_DEDUP.update(dup_rows=dup_rows, dup_shares=dup_shares)
+    return out
+
+
+# what the LAST his_fills_distinct call collapsed (his_fills_distinct_dedup):
+# its own counter, so a reference read never moves what his_fills_dedup
+# reports to the shadow and the live tick
+_FILLS_DEDUP_DISTINCT: dict[str, float] = {"dup_rows": 0, "dup_shares": 0.0}
+
+
+def his_fills_distinct_dedup() -> dict:
+    """What the most recent `his_fills_distinct` call collapsed, in the
+    shape of his_fills_dedup. Read by no worker: the function it counts
+    for is not wired (its docstring); a pin reads it beside the D1
+    figure."""
+    return {"dup_rows": int(_FILLS_DEDUP_DISTINCT["dup_rows"]),
+            "dup_shares": round(float(_FILLS_DEDUP_DISTINCT["dup_shares"]), 4)}
+
+
+async def his_fills_distinct(pool, whale: str, condition_id: str) -> list[dict]:
+    """NOT WIRED. Lane 8's collapse key (E19 part (b), commit e9cda86,
+    2026-09-08) kept under its own name: the reference the fills-vs-venue
+    preset's `new_*` columns compute (render-ops.yml, the same SQL) and
+    the figure a later redesign is measured against. NO sizing path calls
+    it -- not the candidate, not the book, not the shadow's his_paired_sh
+    / fills_dedup_*, not the report (pinned: test_e19_smaller_reading,
+    test_d1_fills_dedup) -- and it keeps its own dedup counter
+    (his_fills_distinct_dedup), so a call never moves what
+    his_fills_dedup reports to the census. `his_fills` above, D1's key
+    byte for byte, is THE reader.
+
+    WHY IT IS NOT WIRED (E19b, 2026-09-08; docs/mirror-coverage.md
+    section 43). On Martinez's rows this key reads the long at 29,054.9
+    against the venue's 29,054.9 where D1 reads 15,925.4 (the net
+    11,974.5 at 12:10:43Z). But the FIRST PRODUCTION RUN of the
+    fills-vs-venue preset (17:07Z, ten minutes after e9cda86 deployed at
+    16:57Z) read it FARTHER from the venue's per-market position than the
+    D1 key it replaced, on the whole day: 359 markets in 24 h, 83 with a
+    venue figure; the summed gap to the venue's net 81,470.2 sh under the
+    old key against 119,856.5 sh under the new; the old key closer on 22
+    markets, the new closer on 4 (raw 8,683,766.1 sh; 3,313,258.2 dropped
+    under the old key, 786,112.1 under the new; $1,267,599 the new key
+    kept). On books with no fill after the plan's clock (611, 622, 656
+    live; 601 closed at its read) the OLD key
+    reads the venue to the decimal and this key over-reads by thousands
+    of shares: book 611 aec-cs2-g2-ast-2026-09-08, old_net -966.9 =
+    snap_net -966.9, new_net +19,349.5 (chain 301 rows / 113,737.2 sh, s1
+    5 / 1,398.3, poll 72 / 67,966.3; 66,580.3 sh dropped under the old
+    key, 15,780.3 under the new; the plan's drift 1.05); 601
+    aec-cs2-gl-furia-2026-09-08, old gap 0.0, new gap 10,127.5 (old_net
+    2,228.3 = snap_net; new_net 12,355.8; chain 78 / 25,611.7, poll 9 /
+    18,534.2); 622 atc-spl-haz-taa-2026-09-08-taa, old 15,000 = venue
+    15,000, new 20,000 (chain 3 rows / 15,000 sh, poll ONE row / 5,000;
+    drift 0.25); 656 atc-ucl-bru-ast-2026-09-08-bru, old -9,150.7 = venue
+    -9,150.7, new -13,746.8 (chain 24 / 9,474.5, poll 4 / 4,596.1; drift
+    0.33). The shape those rows show: the poll lane's rows under a chain
+    key are a PARTIAL set of the maker matches the chain row already
+    holds (622: one 5,000 row under 15,000 of chain legs), so they
+    neither sum to the leg nor repeat it, and this key counts them ON TOP
+    of the chain row. The live census read drift 0 at 16:25Z and drift 7
+    at 17:04:48Z across the deploy (611 drift 1.113, 613 0.812, 633
+    0.506). An over-read of his net inflates the mirror's target (10 % of
+    his net); the drift gate refused those increases (fail closed), but
+    a reader that sizes on MORE of his flow than the venue holds cannot
+    stand: when in doubt the mirror sizes on LESS. So D1's key is the
+    reader again and this one is the reference; the candidate's
+    smaller-reading open (E19 part (a), rules.smaller_reading) stands and
+    covers the Martinez shape from the venue's side. What remains is a
+    redesign judged by fills-vs-venue with books 611 / 622 / 656 / 601's
+    raw rows as fixtures.
+
+    THE RULE AS LANE 8 BUILT IT, for the record (its docstring, verbatim):
 
     THE COLLAPSE KEEPS DISTINCT FILLS (E19, PNL lane 8, 2026-09-08;
     Martinez, aec-atp-pedmar-frafor-2026-09-08, books 529/534). D1's
@@ -466,24 +609,9 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
     by round(., 2) on both sides, or within half a cent in numeric to
     the mil (0.615 against 0.61 is one fill, not float8's two).
 
-    This collapse is the MIRROR'S OWN READ-SIDE view. The trades table
-    is shared with the copy lane, the edge analytics and the
-    reconciler, and a wrong dedupe at ingest loses fills; the durable
-    fix is a dedupe on (tx, asset, side) at ingest with a sum check,
-    not here. It is done in SQL, deterministically (a window over the
-    key; rows keep their `ts, id` order), and what was dropped is
-    counted on every call (his_fills_dedup).
-
-    The event title lives on the markets table, not on trades (review
-    round two): without it the premap lookup builds its keys from one
-    source instead of three and misses the markets the copy sleeve
-    never traded -- the very ones the mirror exists to add. The OUTCOME
-    is coalesced from the token catalogue the way the copy lane's
-    unmapped census reads it (api/app.py, COALESCE(t.outcome,
-    mt.outcome); C1 build step 3): a chain row is inserted with outcome
-    NULL and enriched later, and a NULL outcome was filed as
-    no_side_match -- our miss, not the venue's."""
-    _FILLS_DEDUP.update(dup_rows=0, dup_shares=0.0)
+    Returns rows in the shape of his_fills (the totals stripped, counted
+    on _FILLS_DEDUP_DISTINCT)."""
+    _FILLS_DEDUP_DISTINCT.update(dup_rows=0, dup_shares=0.0)
     rows = await pool.fetch(
         """
         WITH f AS (
@@ -585,12 +713,10 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
     dup_rows, dup_shares = 0, 0.0
     for r in rows:
         d = dict(r)
-        # the same totals ride on every kept row (a window over the
-        # whole result); a fake pool's rows carry none, which reads 0
         dup_rows = int(d.pop("dup_rows", 0) or 0)
         dup_shares = float(d.pop("dup_shares", 0.0) or 0.0)
         out.append(d)
-    _FILLS_DEDUP.update(dup_rows=dup_rows, dup_shares=dup_shares)
+    _FILLS_DEDUP_DISTINCT.update(dup_rows=dup_rows, dup_shares=dup_shares)
     return out
 
 

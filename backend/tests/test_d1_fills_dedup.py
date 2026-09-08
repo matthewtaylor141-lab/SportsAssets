@@ -224,35 +224,76 @@ def test_a_poll_only_tx_is_kept_whole_and_two_poll_legs_without_a_chain_row_are_
     _run(run())
 
 
-def test_a_poll_leg_that_neither_sums_to_the_chain_row_nor_repeats_it_is_a_distinct_fill():
-    """E19 (PNL lane 8) overturned this pin's old reading ("a chain row
-    wins even when the poll legs do not sum to it"): Martinez's rows
-    (hard2/book_534_1424.log) carried s1 5,225 @0.61 beside poll
-    4,283.5 @0.60 under one tx at 12:09:45Z, and the venue's own
-    per-market snapshot summed EVERY row (29,054.9), so a per-match row
-    that neither sums to the net-leg row nor repeats it is a distinct
-    fill and counts. A repeat (0xABCDEF: the same price and size, the
-    hash's case never splitting the key) still collapses."""
+def test_a_chain_row_wins_even_when_the_poll_legs_do_not_sum_to_it():
+    """The chain row is the wallet's net legs -- the truth; a poll leg
+    the venue re-delivered at another size still collapses, and is
+    counted.
+
+    E19b (2026-09-08): BACK TO 7a4b852's PIN. Lane 8 (E19 part (b))
+    re-pinned this to "a distinct fill and counts" on Martinez's rows;
+    the fills-vs-venue preset's first production run (17:07Z) showed
+    that key over-reading the venue on the day's live books (old closer
+    22 markets, new closer 4; book 622: chain 3 rows / 15,000 = the
+    venue's 15,000, plus ONE poll row of 5,000 the new key counted on
+    top), so this -- D1's key -- is the reader that ships. Lane 8's
+    reading is kept below on the UNWIRED his_fills_distinct."""
     async def run():
         admin, c, name = await _scratch()
         try:
             await _insert(c, [
                 ("chain", "0xmismatch", K, "BUY", 15164.0, 0.563, 10),
-                ("poll", "0xmismatch", K, "BUY", 4996.0, 0.560, 10),            # 4,996 != 15,164: a second fill
+                ("poll", "0xmismatch", K, "BUY", 4996.0, 0.560, 10),            # 4,996 != 15,164
                 # the SAME tx, the other side / the other token: different keys, kept
                 ("poll", "0xmismatch", K, "SELL", 50.0, 0.60, 11),
                 ("poll", "0xmismatch", NS, "BUY", 70.0, 0.40, 12),
-                # tx hash case never splits a key; the repeat collapses
+                # tx hash case never splits a key
                 ("chain", "0xABCDEF", NS, "BUY", 200.0, 0.80, 20),
                 ("poll", "0xabcdef", NS, "BUY", 200.0, 0.80, 20),
             ])
             fills = await ms.his_fills(c, "rn1", D1_CID)
             assert [(f["source"], f["asset"], f["side"], f["size"]) for f in fills] == [
+                ("chain", K, "BUY", 15164.0), ("poll", K, "SELL", 50.0), ("poll", NS, "BUY", 70.0),
+                ("chain", NS, "BUY", 200.0)]
+            assert ms.his_fills_dedup() == {"dup_rows": 2, "dup_shares": 5196.0}
+            pos = mi.net_positions(fills)
+            assert pos[K] == 15114.0 and pos[NS] == 270.0
+        finally:
+            await _drop(admin, c, name)
+    _run(run())
+
+
+def test_e19b_reference_a_poll_leg_that_neither_sums_nor_repeats_is_distinct_on_the_unwired_key():
+    """Lane 8's re-pin of the test above, kept as a pin of the WITHDRAWN
+    behaviour on the unwired reference (his_fills_distinct): Martinez's
+    rows (hard2/book_534_1424.log) carried s1 5,225 @0.61 beside poll
+    4,283.5 @0.60 under one tx at 12:09:45Z and the venue's own
+    per-market snapshot summed EVERY row (29,054.9), so under that key a
+    per-match row that neither sums to the net-leg row nor repeats it is
+    a distinct fill and counts; a repeat (0xABCDEF) still collapses. The
+    reader's counter (his_fills_dedup) is never moved by the call."""
+    async def run():
+        admin, c, name = await _scratch()
+        try:
+            await _insert(c, [
+                ("chain", "0xmismatch", K, "BUY", 15164.0, 0.563, 10),
+                ("poll", "0xmismatch", K, "BUY", 4996.0, 0.560, 10),            # 4,996 != 15,164: a second fill (the reference)
+                ("poll", "0xmismatch", K, "SELL", 50.0, 0.60, 11),
+                ("poll", "0xmismatch", NS, "BUY", 70.0, 0.40, 12),
+                ("chain", "0xABCDEF", NS, "BUY", 200.0, 0.80, 20),
+                ("poll", "0xabcdef", NS, "BUY", 200.0, 0.80, 20),
+            ])
+            await ms.his_fills(c, "rn1", D1_CID)
+            before = ms.his_fills_dedup()
+            assert before == {"dup_rows": 2, "dup_shares": 5196.0}
+            ref = await ms.his_fills_distinct(c, "rn1", D1_CID)
+            assert [(f["source"], f["asset"], f["side"], f["size"]) for f in ref] == [
                 ("chain", K, "BUY", 15164.0), ("poll", K, "BUY", 4996.0), ("poll", K, "SELL", 50.0),
                 ("poll", NS, "BUY", 70.0), ("chain", NS, "BUY", 200.0)]
-            assert ms.his_fills_dedup() == {"dup_rows": 1, "dup_shares": 200.0}
-            pos = mi.net_positions(fills)
+            assert ms.his_fills_distinct_dedup() == {"dup_rows": 1, "dup_shares": 200.0}
+            pos = mi.net_positions(ref)
             assert pos[K] == 15164.0 + 4996.0 - 50.0 and pos[NS] == 270.0
+            assert ms.his_fills_dedup() == before, "the reference never moves the reader's counter"
+            assert not any(k in ref[0] for k in ("dup_rows", "dup_shares", "has_net_leg", "collapsed", "tx_key", "net_leg"))
         finally:
             await _drop(admin, c, name)
     _run(run())
@@ -378,12 +419,48 @@ def test_every_reader_of_his_position_goes_through_his_fills():
     # the only raw `trades` statements left in the two workers read no
     # position: the ratio's opening bursts (compute_ratio) and the
     # active-market list (active_conditions), beside his_fills itself;
-    # the live worker reads `trades` nowhere
+    # the live worker reads `trades` nowhere. E19b (2026-09-08): a FOURTH
+    # statement, the UNWIRED reference his_fills_distinct (lane 8's key,
+    # withdrawn from sizing by the fills-vs-venue first run), reads a
+    # position that no worker, tick or report ever calls for -- pinned
+    # by name here, so the count is 4 and the callers are named
     assert "FROM trades" not in inspect.getsource(ml)
-    assert inspect.getsource(ms).count("FROM trades t") == 3
+    assert inspect.getsource(ms).count("FROM trades t") == 4
     assert "FROM trades t" in inspect.getsource(ms.compute_ratio)
     assert "FROM trades t" in inspect.getsource(ms.active_conditions)
     assert "FROM trades t" in inspect.getsource(ms.his_fills)
+    assert "FROM trades t" in inspect.getsource(ms.his_fills_distinct)
+    assert inspect.getsource(ms).count("his_fills_distinct(") == 1, "the def alone"
+    assert "his_fills_distinct" not in inspect.getsource(ml)
+    assert "his_fills_distinct" not in inspect.getsource(mr)
+    for fn in (ms.shadow_market, ms.tick_once):
+        assert "his_fills_distinct" not in inspect.getsource(fn), fn.__name__
+    # his_fills itself is 7a4b852's text byte for byte (D1's key, the
+    # reader that ships) -- read off a COMMITTED COPY of the commit's own
+    # slice (tests/fixtures/his_fills_7a4b852.py.txt), never a paraphrase,
+    # so the pin holds on every checkout: backend-tests.yml checks out at
+    # depth 1 and `git show 7a4b852:...` there is "invalid object name"
+    # (exit 128), and a source export carries no history at all. Where
+    # the checkout DOES carry the commit, the fixture is read back
+    # against it too, so the copy can never drift from the commit.
+    import pathlib
+    import subprocess
+    fixture = pathlib.Path(__file__).resolve().with_name("fixtures") / "his_fills_7a4b852.py.txt"
+    want = fixture.read_text()
+    assert want == inspect.getsource(ms.his_fills)
+    head = "async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:\n"
+    tail = "    _FILLS_DEDUP.update(dup_rows=dup_rows, dup_shares=dup_shares)\n    return out\n"
+    assert want.startswith(head) and want.endswith(tail)
+    try:
+        has_commit = subprocess.run(["git", "cat-file", "-e", "7a4b852^{commit}"],
+                                    capture_output=True).returncode == 0
+    except OSError:                      # no git on the PATH: the fixture stands alone
+        has_commit = False
+    if has_commit:
+        old = subprocess.run(["git", "show", "7a4b852:backend/sportsassets/workers/mirror_shadow.py"],
+                             capture_output=True, text=True, check=True).stdout
+        i = old.index(head)
+        assert old[i:old.index(tail, i) + len(tail)] == want, "the fixture is the commit's own slice"
 
 
 # --------------------------------------------- 3. the two ticks' census
