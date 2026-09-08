@@ -32,7 +32,7 @@ import yaml
 from sportsassets import live_executor as le
 from sportsassets.workers import mirror_live as ml
 from tests.test_l1_rearm_window import H24, TRIPPED, _loss_reads, _rearm, _reduce_world
-from tests.test_mirror_live_worker import M, N, NOW, SLUG, _armed  # noqa: F401 — the fixture
+from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, M, N, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import _census, _places, _pool, _tick, _Venue
 
 RENDER_OPS = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
@@ -204,7 +204,7 @@ def test_l2_an_unreadable_re_arm_read_is_the_full_window_and_the_stop(monkeypatc
     assert ml._last_sleeve == {"sum": -10.0, "limit": 5000.0, "since": None}
     assert ("cancel", "oid-1", SLUG) in v.calls
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][4] is True, pl       # the reduce, as L1 pinned it
+    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl   # the IOC that filled nothing, then its same-tick rest at his cent (E14b; the reduce, as L1 pinned it)
 
 
 def test_l2_an_unreadable_ledger_still_refuses_by_name(monkeypatch):

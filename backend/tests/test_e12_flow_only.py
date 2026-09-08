@@ -508,7 +508,8 @@ def test_e12_the_sign_flip_keeps_its_rule_on_a_flow_book(monkeypatch):
     lp = b["last_plan"]
     assert lp["sign_flip"] is True and b["target"] == 0 and b["flow_base"] == 0.0
     assert lp["kind"] == "flatten_paired" and _census(st, "sign_flip") == 1
-    assert len(_places(v)) == 1 and _places(v)[0][3] == 100 and _places(v)[0][4] is True
+    # the flip's SELL IOC (filled nothing), then E14b's same-tick rest of the 100 at his cent
+    assert [c[2:6] for c in _places(v)] == [(0.69, 100, True, IOC_TIF), (0.70, 100, True, GTC_TIF)]
 
 
 # ------------------------------------------------ the old rule, byte for byte

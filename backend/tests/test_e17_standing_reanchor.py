@@ -414,8 +414,11 @@ def test_e17_the_census_names_sit_before_registered_no_increase():
     assert keys[-12] == "registered_no_increase"
     # the fold (2026-09-08, review HIGH-1) added `venue_dust_ours` beside
     # `adopted_prior_episode`: eight names; E19 (PNL lane 8) placed
-    # `drift_smaller_open` after them, before `registered_no_increase`
-    assert keys[-22:-14] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
+    # `drift_smaller_open` after them, before `registered_no_increase`;
+    # E14b (FILL lane 1) placed `exit_take_rested` between the two
+    # (-21:-13 -> -22:-14); E20
+    # placed `wrong_sign_hold` before that (-22:-14 -> -23:-15)
+    assert keys[-23:-15] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
                              "adopted_prior_episode", "venue_dust_ours", "adopt_prior_unreadable",
                              "adopt_no_fill_since_close", "adopt_prior_venue_settled")
     assert keys[-13] == "drift_smaller_open"

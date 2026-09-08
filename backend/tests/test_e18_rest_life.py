@@ -372,21 +372,25 @@ def test_e18_an_exit_ioc_is_withheld_when_the_bid_fell_and_is_re_read_whatever_t
     """His 300 @0.31, his SELL of 200 @0.31: the take cent is 0.30 (his
     price less the tolerance, E4); the bid at 0.30 on the tick's read
     fires the exit take, the re-read at 0.28 withholds it (`bid_moved`);
-    nothing rests this tick (the next tick rests at his cent, as after
-    an expired IOC). The exit's re-read is made with the budget spent."""
+    the whole 200 rests at his cent 0.31 on the SAME tick (E14b, FILL
+    lane 1: the pin read "nothing rests this tick" before it -- the rest
+    came with the next tick's plan). The exit's re-read is made with the
+    budget spent; the rest is not re-read (only an IOC is)."""
     monkeypatch.setattr(rules, "MIRROR_VENUE_CALLS_PER_TICK", 0)
     p = _pool(fills=[_fill(M, "BUY", 300, 0.31, NOW - 3000), _fill(M, "SELL", 200, 0.31, NOW - 1000)],
               snap={M: 100.0, N: 0.0})
     b = p.add_book(ledger=300, avg_cost=0.31)
     v = _MovingVenue([(0.30, 0.32), (0.28, 0.32)], held={SLUG: 300}, ioc_fill=200.0)
     st = _tick(p, v)
-    assert _bbos(v).count(SLUG) == 2 and not _places(v) and b["ledger_net"] == 300
-    assert _census(st, "bid_moved") == 1 and _census(st, "exit_take") == 0
+    assert _bbos(v).count(SLUG) == 2 and b["ledger_net"] == 300
+    assert [c[2:6] for c in _places(v)] == [(0.31, 200, True, GTC_TIF)], "the rest at his cent this tick (E14b)"
+    assert _census(st, "bid_moved") == 1 and _census(st, "exit_take") == 0 and _census(st, "exit_take_rested") == 1
     assert b["last_plan"]["bid_moved"] == {"bid_at_plan": 0.30, "bid_at_send": 0.28, "wire": 0.30}
-    # the next tick, the bid still away: the rest at his cent, as today
-    st2 = _tick(p, v, now=NOW + 30)
-    assert [c[2:6] for c in _places(v)] == [(0.31, 200, True, GTC_TIF)] and _census(st2, "bid_moved") == 0
     assert _inserts(p)[0][20] == "exit_rest"
+    # the next tick, the bid still away: the rest stands at his cent, held by name, nothing more
+    st2 = _tick(p, v, now=NOW + 30)
+    assert len(_places(v)) == 1 and _census(st2, "bid_moved") == 0 and _census(st2, "exit_out_of_tol") == 1
+    assert _census(st2, "exit_take_rested") == 0
     # the bid holding on the re-read: the exit IOC goes, ask_at_send recorded
     p2 = _pool(fills=[_fill(M, "BUY", 300, 0.31, NOW - 3000), _fill(M, "SELL", 200, 0.31, NOW - 1000)],
                snap={M: 100.0, N: 0.0})

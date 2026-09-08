@@ -39,7 +39,7 @@ import yaml
 
 from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.workers import mirror_live as ml
-from tests.test_mirror_live_worker import M, N, NOW, SLUG, _armed  # noqa: F401 — the fixture
+from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, M, N, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import (_OTHER, _ZZ, _census, _his, _places, _pool, _settled_book,
                                            _tick, _Venue)
 
@@ -262,7 +262,7 @@ def test_l1_an_unreadable_re_arm_key_is_a_stop_and_a_reduce_still_passes(monkeyp
     assert not _loss_reads(p), "no sum was read"
     assert ("cancel", "oid-1", SLUG) in v.calls
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][4] is True, pl
+    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl   # the IOC that filled nothing, then its same-tick rest at his cent (E14b)
 
 
 def test_l1_a_standing_stop_holds_against_a_newer_re_arm_key_and_a_reduce_passes():
@@ -280,7 +280,7 @@ def test_l1_a_standing_stop_holds_against_a_newer_re_arm_key_and_a_reduce_passes
     assert not _loss_reads(p)
     assert ("cancel", "oid-1", SLUG) in v.calls
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][4] is True, pl
+    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl   # the IOC that filled nothing, then its same-tick rest at his cent (E14b)
 
 
 # ---------------------------------------------------------- 4. the preset

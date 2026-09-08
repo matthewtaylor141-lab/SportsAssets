@@ -350,14 +350,19 @@ def test_f3_the_holds_cap_is_the_outstanding_of_the_last_witnessed_state_after_a
     v1 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=10.0)
     _tick(p, v1, http=_mkt(8_250.0))
     assert (b["flow_base"], b["flow_last_net"], b["ledger_net"], b["target"]) == (7_500.0, 8_250.0, 90, 75)
+    # E14b (FILL lane 1): the IOC's unfilled 15 rests at his cent 0.70 the
+    # SAME tick (the pin read "nothing rests" before it), and it is the
+    # standing rest the hold's cap reads on the next tick
+    assert [c[2:6] for c in _places(v1)] == [(0.69, 25, True, IOC), (0.70, 15, True, GTC)]
     p.fills[:] = [_fill(M, "BUY", 9_500, 0.29, NOW - 9000), add, sale]     # the block's row 500 smaller
     p.snap[M] = 7_750.0
     v2 = _Venue(bid=0.68, ask=0.71, held={SLUG: 90})
+    v2.orders = v1.orders
     _tick(p, v2, now=NOW + 30, http=_mkt(7_750.0))
     lp = b["last_plan"]
     assert (b["flow_base"], b["flow_last_net"], b["ledger_net"]) == (7_500.0, 8_250.0, 90)
     assert lp["flow_fills_shrank"]["witnessed"] == 0.0 and lp["flow_hold"]["cap"] == 15 and (lp["side"], lp["qty"]) == (SELL, 15)
-    assert _places(v2)[0][2:6] == (0.70, 15, True, GTC)
+    assert not _places(v2) and not _cancels(v2), "the 15 already rest at his cent; the hold keeps them"
 
 
 def test_f4_a_witnessed_full_exit_under_a_hold_is_the_full_exit(monkeypatch):

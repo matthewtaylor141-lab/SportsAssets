@@ -1367,7 +1367,8 @@ def test_exits_only_never_increases_but_reduces(monkeypatch):
     v2 = _Venue(held={SLUG: 300})
     _tick(p2, v2)
     pl = _places(v2)
-    assert len(pl) == 1 and pl[0][4] is True and pl[0][3] == 200
+    # the SELL IOC (filled nothing), then E14b's same-tick rest of the 200 at his cent
+    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)]
 
 
 def test_db_switch_false_absent_or_unreadable_is_exits_only():
@@ -1482,7 +1483,9 @@ def test_every_increase_only_guard_refuses_by_name_cancels_buys_and_lets_a_reduc
     assert _census(st, name) >= 1, st["census"]
     assert ("cancel", "oid-1", SLUG) in v.calls                # the BUY rest is gone
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][4] is True, pl                # the reduce still goes out
+    # the reduce still goes out: the IOC (filled nothing), then -- E14b
+    # (FILL lane 1) -- the unfilled 200 resting at his cent the same tick
+    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl
     if arm == "stop":
         assert p.state["mirror_loss_stop"]["sum"] == -(rules.MIRROR_LOSS_STOP_USD + 1.0)
 
@@ -2287,7 +2290,8 @@ def test_a_removed_whales_book_still_reduces_and_never_increases(monkeypatch):
     v = _Venue(held={SLUG: 300})
     _tick(p, v)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][4] is True and pl[0][3] == 200
+    # the SELL IOC, then E14b's same-tick rest of the unfilled 200 (never a BUY)
+    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)]
     p2 = _pool()
     p2.add_book(ledger=0)
     v2 = _Venue()
@@ -2772,7 +2776,8 @@ def test_an_unreadable_market_read_cancels_holds_and_never_makes_the_book_closin
     v2 = _Venue(held={SLUG: 300})
     _tick(p, v2, now=NOW + 30)
     pl = _places(v2)
-    assert b["state"] == "live" and len(pl) == 1 and pl[0][4] is True and pl[0][3] == 200
+    # the SELL IOC, then E14b's same-tick rest of the unfilled 200
+    assert b["state"] == "live" and [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)]
     # the row absent, and a reading that is not False, are the same refusal
     for mk in (None, {"closed": None, "resolved": False, "resolved_prices": None}):
         p3 = _pool(fills=_his(300, sold=200), snap={M: 100.0, N: 0.0})
@@ -4848,8 +4853,9 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89)
-    assert keys[-90:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89;
+    # E20 by its one and E14b (FILL lane 1) by its one: -89 -> -91)
+    assert keys[-91:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4923,6 +4929,9 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # disagreeing readings of one sign -- before
                           # `registered_no_increase` (keys[-12])
                           "wrong_sign_hold",    # E20
+                          # E14b (FILL lane 1): the same-tick rest of a long exit IOC's
+                          # withheld or unfilled quantity -- before E19's key (keys[-13])
+                          "exit_take_rested",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -4939,7 +4948,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-91] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one and E20's one before the tail
+    assert keys[-92] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one and E20's one and E14b's one before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -7799,7 +7808,8 @@ def test_venue_calls_are_counted_on_the_census_and_the_soft_guard_stops_candidat
     v3 = _Venue(held={SLUG: 300})
     st3 = _tick(p3, v3, http=_mkt(100.0))
     pl3 = _places(v3)
-    assert len(pl3) == 1 and pl3[0][4] is True and pl3[0][3] == 200 and st3["ops"] == 1
+    # the SELL IOC, then E14b's same-tick rest of the unfilled 200: two exit ops, neither guarded
+    assert [c[3:6] for c in pl3] == [(200, True, IOC_TIF), (200, True, GTC_TIF)] and st3["ops"] == 2
     assert _census(st3, "venue_calls_capped") == 0 and b3["state"] == "live", st3["census"]
     src = inspect.getsource(ml._tick)
     assert src.index("t.guard_calls >= rules.MIRROR_VENUE_CALLS_PER_TICK") > src.index("_walk_books(")
@@ -8035,7 +8045,8 @@ def test_r_take_cycles_burn_the_entry_budget_but_an_exit_or_a_side_change_is_nev
     assert b["target"] == 50 and b["last_plan"]["side"] == "SELL_LONG", b["last_plan"]
     assert _census(st2, "replace_capped") == 0 and len(_cancels(v2)) == 1
     sells = [c for c in _places(v2) if c[4] is True and c[3] == 50]
-    assert len(sells) == 1, (st2["census"], _places(v2))
+    # the SELL IOC (filled nothing), then E14b's same-tick rest of the 50 at his cent
+    assert [c[5] for c in sells] == [IOC_TIF, GTC_TIF], (st2["census"], _places(v2))
     assert not [o for o in p.orders.values() if o["state"] == "open" and o["side"] == "BUY_LONG"]
     # the predicate, at the unit
     from sportsassets.analytics.mirror import Plan
@@ -8305,7 +8316,8 @@ def test_r_an_in_flight_exit_refused_under_an_abandon_is_named_and_writes_no_pla
     st3 = _tick(p, v3, now=NOW + 30, http=http, keep_backoff=True)
     assert not st3.get("skipped_backoff")
     pl = [c for c in _places(v3) if c[1] == SLUG]
-    assert len(pl) == 1 and pl[0][4] is True and pl[0][3] == 200, (st3["census"], _places(v3))
+    # the SELL IOC, then E14b's same-tick rest of the unfilled 200
+    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], (st3["census"], _places(v3))
     assert b["last_reason"] is not None and b["updated_ts"] != touched
     src = inspect.getsource(ml._tick_book)
     assert 'if reason != "tick_abandoned":' in src
@@ -10112,31 +10124,43 @@ def test_e4_an_exit_he_gave_no_price_for_keeps_todays_prices_under_exit_px_src_n
     assert _census(st2, "exit_out_of_tol") == 0 and b2["ledger_net"] == 300
 
 
-def test_e4_the_exit_take_fires_once_per_rest_and_a_partial_ioc_leaves_nothing_resting():
+def test_e4_the_exit_take_fires_once_per_rest_and_a_partial_ioc_rests_its_remainder_the_same_tick():
     """(i) a rest of 200 at his cent, the bid within a cent, the IOC
-    filling 50 of the 200: one cancel, ONE IOC, and nothing rests after
-    it this tick (the IOC's remainder is the venue's cancel, not a
-    rest). The next tick plans again: the bid still there is another
-    IOC for what is left (a new plan, not a second take on one rest);
-    the bid gone, the remainder rests at his cent, once."""
+    filling 50 of the 200: one cancel, ONE IOC, and -- since E14b (FILL
+    lane 1; the pin read "nothing rests after it this tick" before) --
+    the unfilled 150 rests at his cent 0.31 on the SAME tick, the only
+    standing order, never a second IOC. The next tick with the bid still
+    there cancels that rest and takes for what is left (a new plan, not
+    a second take on one rest), and rests the remainder again; the bid
+    gone, the standing rest at his cent is held (`exit_out_of_tol`),
+    nothing placed."""
     p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=50.0)
     o = p.add_order(b, side=SELL, wire=0.31, qty=200, kind="reduce")
     v.rest("oid-1", "SELL", 0.31, 200)
     st = _tick(p, v, http=http)
     assert _cancels(v) == [("cancel", "oid-1", SLUG)]
-    assert [c[2:6] for c in _places(v)] == [(0.30, 200, True, IOC_TIF)], "one IOC, no rest after it"
-    assert b["ledger_net"] == 250 and _census(st, "exit_take") == 1 and _census(st, "rest_placed") == 0
-    assert b["open_order_id"] is None and not [x for x in p.orders.values() if x["state"] == "open"]
+    assert [c[2:6] for c in _places(v)] == [(0.30, 200, True, IOC_TIF), (0.31, 150, True, GTC_TIF)], \
+        "one IOC, then the unfilled 150 resting at his cent the same tick (E14b)"
+    assert b["ledger_net"] == 250 and _census(st, "exit_take") == 1 and _census(st, "rest_placed") == 1
+    assert _census(st, "exit_take_rested") == 1 and _census(st, "ops_capped") == 0
+    opens = [x for x in p.orders.values() if x["state"] == "open"]
+    assert len(opens) == 1 and opens[0]["kind"] == "reduce" and opens[0]["qty"] == 150 and opens[0]["wire"] == 0.31
+    assert b["open_order_id"] == opens[0]["id"]
     take = next(x for x in p.orders.values() if x["kind"] == "take")
     assert take["booked_filled"] == 50.0 and take["state"] != "open" and p.orders[o["id"]]["state"] == "cancelled"
-    v2 = _Venue(bid=0.30, ask=0.32, held={SLUG: 250}, ioc_fill=50.0)
-    st2 = _tick(p, v2, now=NOW + 30, http=http)
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 150, True, IOC_TIF)] and not _cancels(v2)
-    assert b["ledger_net"] == 200 and _census(st2, "exit_take") == 1
-    v3 = _Venue(bid=0.29, ask=0.32, held={SLUG: 200})
-    st3 = _tick(p, v3, now=NOW + 60, http=http)
-    assert [c[2:6] for c in _places(v3)] == [(0.31, 100, True, GTC_TIF)]
-    assert _census(st3, "exit_out_of_tol") == 1 and _census(st3, "exit_take") == 0
+    assert b["last_plan"]["exit_take_rested"] == {"take": 0.30, "rest": 0.31, "qty": 200, "filled": 50.0, "rested": 150}
+    # the next tick, the bid still there: the rest is cancelled and taken
+    # for the 150 (fills 50), the 100 left rests again
+    v.portfolio.held[SLUG] = 250
+    st2 = _tick(p, v, now=NOW + 30, http=http)
+    assert [c[1] for c in _cancels(v)] == ["oid-1", "oid-2"]
+    assert [c[2:6] for c in _places(v)][2:] == [(0.30, 150, True, IOC_TIF), (0.31, 100, True, GTC_TIF)]
+    assert b["ledger_net"] == 200 and _census(st2, "exit_take") == 1 and _census(st2, "exit_take_rested") == 1
+    # the bid gone: the standing rest at his cent is held, nothing placed
+    v.bid, v.portfolio.held[SLUG] = 0.29, 200
+    st3 = _tick(p, v, now=NOW + 60, http=http)
+    assert len(_places(v)) == 4 and len(_cancels(v)) == 2
+    assert _census(st3, "exit_out_of_tol") == 1 and _census(st3, "exit_take") == 0 and _census(st3, "exit_take_rested") == 0
     assert len([x for x in p.orders.values() if x["state"] == "open"]) == 1
 
 

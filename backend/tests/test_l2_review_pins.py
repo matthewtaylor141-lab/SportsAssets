@@ -54,7 +54,7 @@ from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.workers import mirror_live as ml
 from tests.test_l1_rearm_window import H24, TRIPPED, _loss_reads, _rearm, _reduce_world
 from tests.test_l2_sleeve_window import REARM_DT, REARM_TS, SQL_24H, _recorder
-from tests.test_mirror_live_worker import NOW, SLUG, _armed  # noqa: F401 — the fixture
+from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import _census, _places, _pool, _tick, _Venue
 
 RENDER_OPS = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
@@ -77,7 +77,7 @@ def _state_reads(p):
 def _reduce_went_out(v):
     pl = _places(v)
     assert ("cancel", "oid-1", SLUG) in v.calls, "the BUY rest is gone"
-    assert len(pl) == 1 and pl[0][4] is True, pl
+    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl   # the IOC that filled nothing, then its same-tick rest at his cent (E14b)
 
 
 # ------------------------------------------------ 1. the decision order

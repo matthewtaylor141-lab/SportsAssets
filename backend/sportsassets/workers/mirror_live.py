@@ -919,6 +919,15 @@ CENSUS_KEYS: tuple[str, ...] = (
     # Before `drift_smaller_open` (keys[-13]) by the convention E13, E17
     # and E19 followed; the tail pins moved by one
     "wrong_sign_hold",
+    # E14b (2026-09-08; FILL program lane 1): a long book's exit IOC
+    # withheld at the send (`bid_moved`, `ioc_quote_unread`) or filled
+    # only in part left the book with NO exit order until the next tick;
+    # now the unfilled quantity rests at his cent (ceil(his)) on the SAME
+    # tick, as the entry's take already rests its remainder
+    # (`exit_take_rested`: the same-tick rest placed after an exit IOC).
+    # Before E19's `drift_smaller_open` (keys[-13]) and
+    # `registered_no_increase` (keys[-12]), whose places from the end hold
+    "exit_take_rested",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -8875,8 +8884,10 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                     left = _sell_qty(book, int(min(p.qty, max(0.0, float(o["qty"])
                                                               - float(o.get("booked_filled") or 0.0)))))
                     if left >= 1:
-                        return await _place(t, book, r, "take", SELL, ex["take"], left, his_px, p,
-                                            plan, tif="IOC")
+                        # E14b: the IOC's withheld or unfilled part rests
+                        # back at his cent THIS tick (_exit_take), never
+                        # left bare until the next plan
+                        return await _exit_take(t, book, r, p, ex, left, his_px, plan, kind)
                     return "take"
                 # outside the cent: the rest stands at his cent, and a
                 # rest past its TTL at the same cent is the no-op the
@@ -9038,16 +9049,17 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
     if long_exit:
         # THE EXIT WITH NO REST STANDING (E4): the bid at or through the
         # take cent sends the one IOC there now -- no wait, no arm, no
-        # MIN_MOVE_FRAC test, and a partial fill leaves NOTHING resting
-        # (the next tick plans again: the bid still there is another
-        # take, gone is the rest); outside the cent the rest goes at
-        # his cent below, held by name
+        # MIN_MOVE_FRAC test. E14b (FILL lane 1): a partial fill, or an
+        # IOC withheld at the send, leaves its unfilled quantity RESTING
+        # at his cent this same tick (_exit_take), where it used to leave
+        # nothing until the next tick planned again; outside the cent
+        # the rest goes at his cent below, held by name
         if rules.at_or_through(SELL, r.bid, r.ask, ex["take"]):
             qty = _sell_qty(book, p.qty)
             if qty < 1:
                 _mirror_stop("under_one_share", w)
                 return "under_one_share"
-            return await _place(t, book, r, "take", SELL, ex["take"], qty, his_px, p, plan, tif="IOC")
+            return await _exit_take(t, book, r, p, ex, qty, his_px, plan, kind)
         _exit_held(t, r, ex, plan, w)
     elif short_exit:
         # THE COVER WITH NO REST STANDING (S4): the ask at or under the
@@ -9727,7 +9739,8 @@ def _exit_held(t: _Tick, r: _Reading, ex: dict, plan: dict, whale: str,
 
 
 # the names under which an IOC is NOT sent (E18): the entry's remainder
-# rests as today, an exit's rest goes with the next tick's plan
+# rests as today; a long exit's whole quantity rests at his cent the
+# same tick (E14b, _exit_take), a short cover's with the next tick's plan
 IOC_SKIPPED = ("ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread")
 
 
@@ -9840,6 +9853,78 @@ async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: flo
     if left < 1 or book["id"] in t.nonterminal:
         return res
     rest = await _place(t, book, r, "increase", p.side, rest_px, left, his_px, p, plan)
+    return rest if rest == "rest_placed" else res
+
+
+async def _exit_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ex: dict, qty: int,
+                     his_px: float | None, plan: dict, kind: str | None) -> str:
+    """A LONG book's exit take (E14b, FILL program lane 1; the mirror
+    image of _entry_take): ONE IOC at the take cent (`ex["take"]`, the
+    lowest cent at or above his price less rules.MIRROR_EXIT_TOL) for
+    `qty`, then the unfilled quantity RESTS post-only at his cent
+    (`ex["rest"]`, ceil(his)) on the SAME tick -- never a second IOC,
+    never a cent outside his. Before this the IOC withheld at the send
+    (`bid_moved`, `ioc_quote_unread`: E18's re-read) or filled in part
+    left the book with NO exit order until the next full tick planned
+    again (book 334: his 0.549, our 358, filled 0.50 at a lag of 279 s;
+    book 467: his 0.250, our 570, filled 0.43). The prices are E4's,
+    byte for byte: the take cent and the rest cent are rules.exit_terms'
+    and nothing here chases.
+
+    THE REMAINDER IS BOUNDED TWICE: never more than the plan's own
+    unfilled quantity (`qty - floor(take_filled)`, the IOC's booking
+    read off the plan) AND never more than the ledger reads NOW
+    (_sell_qty over that remainder: the IOC's fill is booked into the
+    ledger by _book_delta before _finish_order returns, and a booking
+    that failed froze the book and left the row non-terminal, which the
+    guards below refuse). The rest is placed only when the IOC's result
+    is one of IOC_SKIPPED (nothing executed: the whole `qty` is the
+    remainder) or 'take' with a remainder of at least one share, and
+    never on a tick that tripped or abandoned, on a frozen book, or
+    with a row of the book non-terminal (_entry_take's guards). Its row
+    writes decision 'exit_rest' (rules.order_decision: the existing
+    word at a new site); the IOC's row keeps 'take'. Census
+    `exit_take_rested`; the plan carries `exit_take_rested`
+    {take, rest, qty, filled, rested} whenever a rest was attempted
+    (`rested` 0 when the placement was refused by name -- the refusal
+    is on the census as today: `open_order_pending`; a remainder under
+    `rules.MIRROR_MIN_ORDER_USD` at the rest cent on a reduce that is
+    not a flatten -> `under_min_notional`, a flatten exempt as every
+    flatten rest is). A remainder of a share or more that _sell_qty
+    reads NONE to sell (the ledger or the standing row under it) ->
+    `under_one_share` on the census and `rested` 0 on the plan before
+    any rest is sent: never a rest sized past the ledger. The IOC
+    filling the whole quantity leaves nothing to rest and writes
+    nothing. An exit's ops are exempt from the ops budget
+    and the replace budget (M-1, _exit_or_flip), so the extra rest is
+    never `ops_capped`. Any other IOC result is returned as today."""
+    res = await _place(t, book, r, "take", SELL, ex["take"], qty, his_px, p, plan, tif="IOC")
+    if t.cancel_all or t.abandoned or book.get("state") == "frozen" or book["id"] in t.nonterminal:
+        return res
+    if res in IOC_SKIPPED:
+        filled = 0.0
+    elif res == "take":
+        filled = float(_num(plan.get("take_filled")) or 0.0)
+    else:
+        return res
+    unfilled = max(0, int(math.floor(float(qty) - filled + 1e-9)))
+    if unfilled < 1:
+        return res                      # the IOC filled the whole quantity: nothing to rest
+    left = min(unfilled, _sell_qty(book, unfilled))
+    if left < 1:
+        # the plan's remainder is a share or more but the ledger (or the
+        # standing row) reads NONE to sell: held by name, the hold on the
+        # plan (`rested` 0), never a rest sized past the ledger
+        _mirror_stop("under_one_share", r.whale)
+        plan["exit_take_rested"] = {"take": ex["take"], "rest": ex["rest"], "qty": int(qty),
+                                    "filled": filled, "rested": 0}
+        return res
+    rest = await _place(t, book, r, kind or "reduce", SELL, ex["rest"], left, his_px, p, plan)
+    rested = rest in ("rest_placed", "filled_at_create")
+    plan["exit_take_rested"] = {"take": ex["take"], "rest": ex["rest"], "qty": int(qty),
+                                "filled": filled, "rested": left if rested else 0}
+    if rested:
+        _mirror_stop("exit_take_rested", r.whale)
     return rest if rest == "rest_placed" else res
 
 
