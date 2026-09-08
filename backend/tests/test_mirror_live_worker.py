@@ -1152,6 +1152,10 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_terminal_until", {})     # D1: the terminal memo, same shape
     monkeypatch.setattr(ml, "_terminal_book_until", {})    # W1 / R4: the book's own terminal memo
     monkeypatch.setattr(ml, "_terminal_book_state", {})
+    # E13: the book memo's confirmation (the first terminal read's
+    # instant, the confirmed state) -- never inherited across tests
+    monkeypatch.setattr(ml, "_terminal_book_seen", {}, raising=False)
+    monkeypatch.setattr(ml, "_terminal_book_confirmed", {}, raising=False)
     monkeypatch.setattr(ml, "_game_full_until", {})    # E1: the full-game memo, by game key
     monkeypatch.setattr(ml, "_cand_cursor", {})        # W2 / P3: the walk's rotation cursor
     monkeypatch.setattr(ml, "_cand_trail", {}, raising=False)   # W2 review: the cursor's trail (the fix)
@@ -4821,7 +4825,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-68:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-69:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4867,7 +4871,11 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "registered_books", "registered_sign_refused", "registered_unreadable",
                           # E5 review: the fill-this-tick refusal, the unexplained surplus, the
                           # registered book's no-increase -- before the last key
-                          "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
+                          "frozen_fill_this_tick", "frozen_venue_unexplained",
+                          # E13: a flat book made 'closing' on the venue's own confirmed
+                          # terminal state -- before `registered_no_increase` (keys[-12])
+                          "venue_market_ended",
+                          "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
                           # opened on his whole net (the block admitted), the 057 probe
                           # failing for any reason but absence -- before E9's four
@@ -4882,7 +4890,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-69] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-70] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -12789,6 +12797,15 @@ def test_e12_the_flow_names_are_emitted_here_too(monkeypatch, caplog):
     e12.test_e12_every_name_is_emitted_here(monkeypatch, caplog)
     for k in ("open_flow_only", "open_catchup", "flow_guard_unreadable"):
         assert k in SEEN, k
+
+
+def test_e13_the_venue_close_name_is_emitted_here_too():
+    """E13's one name is driven in tests/test_e13_venue_close.py; run
+    here as well so the coverage read below sees it when this file runs
+    alone (E12's convention)."""
+    from tests import test_e13_venue_close as e13
+    e13.test_e13_a_live_flat_book_closes_cancelled_on_the_second_terminal_read_a_ttl_apart_never_on_one()
+    assert "venue_market_ended" in SEEN
 
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():

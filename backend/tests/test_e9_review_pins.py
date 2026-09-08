@@ -771,10 +771,11 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     assert "(COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed" in src
     assert "WHERE NOT d.collapsed" in src and "ORDER BY d.ts, d.id" in src
     keys = ml.CENSUS_KEYS
-    # E12 moved the tail by its three names (-65 -> -68, -66 -> -69), the
-    # convention every builder followed; E9's four stay keys[-8:-4]
-    assert keys[-68:-64] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-69] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # E12 moved the tail by its three names (-65 -> -68, -66 -> -69), E13 by
+    # its one (-68 -> -69, -69 -> -70), the convention every builder
+    # followed; E9's four stay keys[-8:-4]
+    assert keys[-69:-65] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-70] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence
@@ -782,8 +783,10 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
 def test_review_q10_nothing_new_is_persisted_and_a_deploy_leaves_the_market_to_the_full_tick():
     src = inspect.getsource(ml)
     keys = sorted(set(re.findall(r"^(_STATE_[A-Z0-9_]+)\s*=", src, re.M)))
+    # (E13 added _STATE_TERMINAL_CONFIRM, the book memo's confirmation beside the E6 memo)
     assert keys == ["_STATE_CAND_MEMO", "_STATE_DEMOTED", "_STATE_FLATTEN", "_STATE_LIVE", "_STATE_LOSS_REARM",
-                    "_STATE_LOSS_STOP", "_STATE_OPEN", "_STATE_S4", "_STATE_SIDE_ECHO", "_STATE_TERMINAL_MEMO",
+                    "_STATE_LOSS_STOP", "_STATE_OPEN", "_STATE_S4", "_STATE_SIDE_ECHO", "_STATE_TERMINAL_CONFIRM",
+                    "_STATE_TERMINAL_MEMO",
                     "_STATE_WHALES"], "no new ingestion_state key (E9 adds none; _STATE_OPEN is the venue's word)"
     e9 = "".join(inspect.getsource(f) for f in (ml.notify, ml._fast_wake, ml._fast_run, ml._fast_requeue,
                                                 ml._fast_tick, ml.fast_tick_once, ml._fast_book,

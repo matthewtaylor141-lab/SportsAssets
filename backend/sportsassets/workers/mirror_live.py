@@ -590,6 +590,12 @@ _STATE_SIDE_ECHO = "side_echo_last"
 _STATE_TERMINAL_MEMO = "mirror_terminal_memo"
 TERMINAL_MEMO_WRITE_S = 60.0
 _TERMINAL_MEMO_MAX = 4000
+# E13: the book memo's CONFIRMATION (the paragraph over
+# _terminal_book_seen), persisted beside the E6 memo under its own key
+# -- the E6 key's value is pinned byte-for-byte by its tests, and the
+# row's last_plan is rewritten by five paths -- by the same writer, on
+# the same cadence and bound, read at the same boot read.
+_STATE_TERMINAL_CONFIRM = "mirror_terminal_confirm"
 # THE CANDIDATE MEMOS STOP RE-READING WHAT HAS NOT CHANGED (E7,
 # 2026-09-07; owner "Need everything running and running at mirror to
 # him"). With E6 live (tick 47.9 / 51.3 s at 21:15Z / 21:20Z) the
@@ -827,7 +833,13 @@ CENSUS_KEYS: tuple[str, ...] = (
     # surplus past its leg plus its lost rows' quantity), and
     # `registered_no_increase` (F3: a book whose slug carries a register
     # row never grows). Before the pinned last key
-    "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
+    "frozen_fill_this_tick", "frozen_venue_unexplained",
+    # E13 (2026-09-08): a FLAT book made 'closing' on the venue's own
+    # confirmed terminal state (two reads a TTL apart), the gamma row
+    # still live -- the one new name. Before `registered_no_increase`,
+    # whose place from the end the E12 pin holds
+    "venue_market_ended",
+    "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
     # his FLOW from first sight, its pre-existing block never bought
     # (`open_flow_only`); a book opened on his whole net because the block
@@ -946,6 +958,50 @@ _terminal_until: dict[tuple[str, str], float] = {}
 # market accepts no order, and no order path is touched here.
 _terminal_book_until: dict[tuple[str, str], float] = {}
 _terminal_book_state: dict[tuple[str, str], str] = {}
+# THE VENUE'S OWN TERMINAL STATE ENDS A FLAT BOOK (E13, 2026-09-08). A
+# mirror book ended on exactly two signals: step M reading the GAMMA
+# row closed or resolved, or the standing row settling from the venue's
+# POSITION_RESOLUTION activities. Neither fires for a FLAT book whose
+# gamma row the resolution sweep never reaches (49,213 unresolved
+# traded conditions, LIMIT 500 with no ORDER BY: the same 500 every
+# cycle, `newly_resolved: 4`): 40+ books opened 09-06 / 09-07 with
+# ledger 0 stood 'live' at 10:4xZ 09-08, each costing the tick its
+# standing-row read, its fills read and its market read every tick and
+# holding its asset claim; book 455 (ledger 0) stood frozen
+# cancel_pending behind the memo above with nowhere to thaw. The venue
+# ITSELF says the market ended: the book's own quote read carries
+# ms.STATE_TERMINAL, memoised above. THE RULE: two terminal reads at
+# least ms.UNMAPPED_TTL_S apart -- the memo write and the re-read after
+# the memo's TTL (~15 min: the memo skips the read in between) -- with
+# no non-terminal read between them CONFIRM the state, and a confirmed
+# state is a close signal in step M for a FLAT book (|ledger_net| <
+# FLAT_TOL_SHARES) exactly as the gamma row's closed flag is: 'closing'
+# under `venue_market_ended`, the rest cancelled, the episode closed
+# 'cancelled' (never bought) or 'cashed_out' by _maybe_close_episode.
+# One terminal read never closes anything (the U10 review's 12:32Z
+# expiries were transient); a non-terminal or unread state on the
+# re-read CLEARS the pending confirmation (the market is live again);
+# a book with shares held is NOT touched by the venue's word -- the
+# settle closes it (the rules' 'held' verdict) and a frozen one keeps
+# its frozen exit. A FROZEN book's ledger is not its position (review
+# F1: book 77, ledger 0, the venue holding the register's 1,128; a
+# placement_lost book whose lost BUY the venue filled unbooked), so a
+# frozen book is never closed on the venue's word when its frozen
+# reason is one under which the venue may hold what the ledger does
+# not (_VENUE_MAY_HOLD_REASONS), and never unless its last plan's own
+# `venue` reading (the position the last read tick saw) is a number
+# that is flat -- absent, non-numeric or held: the book waits for the
+# settle, as a held book does. A frozen cancel_pending /
+# order_state_unknown / row_not_live book whose last read saw the venue
+# flat (455's shape) ends as a live flat book does. `_terminal_book_seen`
+# is the FIRST terminal read's instant of the current unbroken run;
+# `_terminal_book_confirmed` the state the confirming read carried. Both
+# persist with the E6 memo (_STATE_TERMINAL_CONFIRM), both are forgotten
+# when the book closes.
+_terminal_book_seen: dict[tuple[str, str], float] = {}
+_terminal_book_confirmed: dict[tuple[str, str], str] = {}
+_VENUE_MAY_HOLD_REASONS = frozenset({"venue_ledger_disagree", "placement_lost", "lost_ambiguous",
+                                     "order_lost", "wrong_sign_trip"})
 # THE FULL-GAME MEMO (E1 re-review LOW-2). A candidate on a game whose
 # books already hold the $2,500 opens nothing, and the first cut
 # returned before books_seen, so every un-opened market of a full game
@@ -5541,6 +5597,7 @@ async def _close_settled(t: _Tick, book: dict, standing: dict, status: str) -> N
                          f"closed: standing row {status}")
     book["state"] = "closed"
     _forget_quiet(book["id"])
+    _forget_terminal_confirm(book)
     t.stats["closed_books"] += 1
     _recent(book["id"], "closed", row=status, settled=settled_pnl, own=own)
 
@@ -5592,10 +5649,79 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
     await t.pool.execute(_SQL_BOOK_STATE, book["id"], "closed", f"closed_{verdict}")
     book["state"] = "closed"
     _forget_quiet(book["id"])
+    _forget_terminal_confirm(book)
     t.stats["closed_books"] += 1
     _mirror_stop(f"closed_{verdict}", book["whale"])
     _recent(book["id"], "closed", how=verdict)
     return verdict
+
+
+# --------------------------- E13: the venue's confirmed terminal state
+
+def _forget_terminal_confirm(book: dict) -> None:
+    """The book closed (by any path): its pending or confirmed venue
+    close is forgotten. The W1 memo (_terminal_book_until) keeps its
+    own TTL as before."""
+    key = (book.get("whale"), book.get("condition_id"))
+    _terminal_book_seen.pop(key, None)
+    _terminal_book_confirmed.pop(key, None)
+
+
+def _venue_market_ended(book: dict) -> str | None:
+    """The confirmed terminal state that ENDS this book, or None: the
+    book is flat (|ledger_net| < FLAT_TOL_SHARES, the same reading
+    _maybe_close_episode hands the rules) and the venue's state was
+    read terminal twice at least ms.UNMAPPED_TTL_S apart with nothing
+    non-terminal between (_memo_terminal_book). Fail closed: a ledger
+    that is not a number, a memo entry that is not one of the venue's
+    terminal states, a book with shares held -- None, nothing closes
+    on the venue's word (the settle closes a held book).
+
+    A FROZEN book's ledger is not its position (E13 review F1: book
+    77, ledger 0 while the venue held the register's 1,128; a
+    placement_lost book whose lost BUY the venue filled and the ledger
+    never booked). So on a frozen book the verdict is None when the
+    freeze's reason is one under which the venue may hold shares the
+    ledger does not (_VENUE_MAY_HOLD_REASONS: venue_ledger_disagree,
+    placement_lost, lost_ambiguous, order_lost, wrong_sign_trip), and
+    None unless the book's last plan carries the venue's own position
+    (`venue`, written by every read tick) as a number that is flat
+    (|venue| < FLAT_TOL_SHARES): absent, non-numeric or held -- None.
+    A frozen cancel_pending / order_state_unknown / row_not_live book
+    whose last read saw the venue flat (455's shape) still ends here."""
+    raw = book.get("ledger_net")
+    ledger = 0.0 if raw is None else _num(raw)          # NULL reads 0, as step M's own `or 0` reads it
+    if ledger is None or abs(ledger) >= FLAT_TOL_SHARES:
+        return None
+    if book.get("state") == "frozen":
+        if book.get("frozen_reason") in _VENUE_MAY_HOLD_REASONS:
+            return None
+        # the pool serves jsonb as text: decoded as every other reader
+        # of the row decodes it (the fold re-review, G1)
+        lp = _jsonish(book.get("last_plan"))
+        venue = _num(lp.get("venue")) if isinstance(lp, dict) else None
+        if venue is None or abs(venue) >= FLAT_TOL_SHARES:
+            return None
+    st = _terminal_book_confirmed.get((book.get("whale"), book.get("condition_id")))
+    if not isinstance(st, str) or st not in ms.STATE_TERMINAL:
+        return None
+    return st
+
+
+def _terminal_confirm_snapshot(now: float) -> list:
+    """The confirmation memo, bounded: every pending or confirmed entry
+    as [whale, cid, seen_at, confirmed_state | None], an entry with a
+    `seen_at` that is not a finite instant at or before `now` dropped,
+    at most _TERMINAL_MEMO_MAX kept (the oldest first read dropped
+    first), sorted so the same memo is the same text."""
+    out = []
+    for (w, c), at in _terminal_book_seen.items():
+        a = _num(at)
+        if a is None or a > now:
+            continue
+        out.append([str(w), str(c), round(a, 1), _terminal_book_confirmed.get((w, c))])
+    out.sort(key=lambda e: (-e[2], e[0], e[1]))
+    return out[:_TERMINAL_MEMO_MAX]
 
 
 # ------------------------------------------- E6: the tick's venue-call budget
@@ -5961,8 +6087,28 @@ async def _load_terminal_memo(t: _Tick) -> None:
                 _terminal_book_until[(e[0], e[1])] = float(e[2])
                 _terminal_book_state[(e[0], e[1])] = e[3]
                 loaded += 1
+    # E13: the confirmation memo beside it, the same one read, the same
+    # rules: [whale, cid, seen_at, state | None] with a finite `seen_at`
+    # at or before now (a future first read is junk) and a state that is
+    # None or one of ms.STATE_TERMINAL; anything else dropped, never
+    # guessed (a dropped confirmation is a book that closes on the
+    # settle or on its next pair of reads -- fail closed toward not closing)
+    cvalue, cerr = await _state(t.pool, _STATE_TERMINAL_CONFIRM)
+    if cerr is not None or (cvalue is not None and not isinstance(cvalue, list)):
+        log.warning("mirror_live: %s unreadable (%s); the venue-close memo starts empty",
+                    _STATE_TERMINAL_CONFIRM, cerr or type(cvalue).__name__)
+    elif isinstance(cvalue, list):
+        for e in cvalue:
+            if (isinstance(e, list) and len(e) == 4 and isinstance(e[0], str) and isinstance(e[1], str)
+                    and _num(e[2]) is not None and float(e[2]) <= t.now
+                    and (e[3] is None or (isinstance(e[3], str) and e[3] in ms.STATE_TERMINAL))):
+                _terminal_book_seen[(e[0], e[1])] = float(e[2])
+                if e[3] is not None:
+                    _terminal_book_confirmed[(e[0], e[1])] = e[3]
+                loaded += 1
     # what is held now is what stands written: the next write is a change
-    _terminal_memo_last.update(at=float(t.now), sig=_terminal_memo_sig(_terminal_memo_snapshot(t.now)))
+    _terminal_memo_last.update(at=float(t.now), sig=_terminal_memo_sig(_terminal_memo_snapshot(t.now)),
+                               csig=_terminal_memo_sig(_terminal_confirm_snapshot(t.now)))
     if loaded:
         log.info("mirror_live: %d terminal memo entries read at boot", loaded)
 
@@ -5980,16 +6126,31 @@ async def _persist_terminal_memo(t: _Tick) -> None:
         return
     snap = _terminal_memo_snapshot(t.now)
     sig = _terminal_memo_sig(snap)
-    if sig == _terminal_memo_last.get("sig"):
+    # E13: the confirmation memo rides on the same gate (its own key,
+    # its own signature): written when IT changed, the E6 key untouched
+    # when only it did
+    csnap = _terminal_confirm_snapshot(t.now)
+    csig = _terminal_memo_sig(csnap)
+    changed = sig != _terminal_memo_last.get("sig")
+    cchanged = csig != _terminal_memo_last.get("csig")
+    if not changed and not cchanged:
         return
     if float(t.now) - float(_terminal_memo_last.get("at") or 0.0) < TERMINAL_MEMO_WRITE_S:
         return
-    try:
-        await _write_state(t.pool, _STATE_TERMINAL_MEMO, {**snap, "at": _iso(float(t.now))})
-    except Exception as exc:  # noqa: BLE001 — a memo that did not persist is the old behaviour
-        log.warning("mirror_live: %s write failed (%s)", _STATE_TERMINAL_MEMO, type(exc).__name__)
-        return
-    _terminal_memo_last.update(at=float(t.now), sig=sig)
+    if changed:
+        try:
+            await _write_state(t.pool, _STATE_TERMINAL_MEMO, {**snap, "at": _iso(float(t.now))})
+        except Exception as exc:  # noqa: BLE001 — a memo that did not persist is the old behaviour
+            log.warning("mirror_live: %s write failed (%s)", _STATE_TERMINAL_MEMO, type(exc).__name__)
+            return
+        _terminal_memo_last.update(at=float(t.now), sig=sig)
+    if cchanged:
+        try:
+            await _write_state(t.pool, _STATE_TERMINAL_CONFIRM, csnap)
+        except Exception as exc:  # noqa: BLE001 — retried on a later tick, as the E6 key is
+            log.warning("mirror_live: %s write failed (%s)", _STATE_TERMINAL_CONFIRM, type(exc).__name__)
+            return
+        _terminal_memo_last.update(at=float(t.now), csig=csig)
 
 
 # ------------------------------- E7: the candidate memos, released by his fills
@@ -6214,15 +6375,34 @@ def _memo_terminal_book(t: _Tick, book: dict, r: _Reading) -> None:
     SUSPENDED / PREOPEN (not in ms.STATE_TERMINAL) and an unread state
     (None) write nothing; a book with an order open (t.open_by_book /
     t.nonterminal) writes nothing this tick -- the `no_mark` refusal
-    below cancels the rest, and the next terminal read memoises."""
+    below cancels the rest, and the next terminal read memoises.
+
+    E13, THE CONFIRMATION (the paragraph over _terminal_book_seen): a
+    non-terminal or unread state CLEARS the pending confirmation and
+    the confirmed one before anything else (the market is live again,
+    or nobody can say: nothing closes on the venue's word). A terminal
+    read past the guard is the FIRST of a run when none stands, else
+    -- at least ms.UNMAPPED_TTL_S after the first (the memo's own TTL
+    is what puts the re-read there) -- the CONFIRMING one, its state
+    remembered for step M. A second read inside the TTL (a cleared
+    memo, a restart with the memo dropped) confirms nothing."""
     state = r.venue_state
+    key = (book["whale"], book["condition_id"])
     if state is None or state not in ms.STATE_TERMINAL:
+        if key in _terminal_book_seen or key in _terminal_book_confirmed:
+            _terminal_book_seen.pop(key, None)
+            _terminal_book_confirmed.pop(key, None)
         return
     if book["id"] in t.open_by_book or book["id"] in t.nonterminal or book.get("open_order_id"):
         return
-    key = (book["whale"], book["condition_id"])
     _terminal_book_until[key] = t.now + ms.UNMAPPED_TTL_S
     _terminal_book_state[key] = str(state)
+    first = _num(_terminal_book_seen.get(key))
+    if first is None or first > t.now:
+        _terminal_book_seen[key] = float(t.now)
+        _terminal_book_confirmed.pop(key, None)
+    elif float(t.now) - first >= float(ms.UNMAPPED_TTL_S) and key not in _terminal_book_confirmed:
+        _terminal_book_confirmed[key] = str(state)
 
 
 async def _tick_book(t: _Tick, book: dict) -> None:
@@ -6282,14 +6462,26 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     mk = await _market(t, cid)
     market_live = None if mk is None else bool(mk["closed"] is False and mk["resolved"] is False)
     closed_read = mk is not None and (mk["closed"] is True or mk["resolved"] is True)
-    if closed_read or book.get("state") == "closing":
+    # E13: THE VENUE'S OWN CONFIRMED TERMINAL STATE ENDS A FLAT BOOK
+    # (the paragraph over _terminal_book_seen): read here, BEFORE the
+    # memo skip below and before the frozen branch, so book 455's shape
+    # (frozen, ledger 0, the memo standing) ends here too. The gamma
+    # path keeps its name and its reading byte for byte; the venue's
+    # close names itself `venue_market_ended`, hands the episode close
+    # market_live False exactly as the gamma path hands it, and is
+    # None on any book with shares held (that book is the settle's)
+    venue_ended = None if closed_read else _venue_market_ended(book)
+    if closed_read or venue_ended is not None or book.get("state") == "closing":
+        close_name = "venue_market_ended" if (venue_ended is not None and not closed_read) else "market_closed"
         if book.get("state") != "closing":
-            await t.pool.execute(_SQL_BOOK_STATE, book["id"], "closing", "market_closed")
+            await t.pool.execute(_SQL_BOOK_STATE, book["id"], "closing", close_name)
             book["state"] = "closing"
-            _mirror_stop("market_closed", w)
-        await _cancel_open_for(t, book, "market_closed")
+            _mirror_stop(close_name, w)
+        await _cancel_open_for(t, book, close_name)
         plan = {"kind": "closing", "market_live": market_live}
-        why = await _maybe_close_episode(t, book, market_live, False,
+        if venue_ended is not None:
+            plan["venue_terminal"] = venue_ended
+        why = await _maybe_close_episode(t, book, False if venue_ended is not None else market_live, False,
                                          0 if abs(float(book.get("ledger_net") or 0)) < FLAT_TOL_SHARES else None,
                                          plan)
         if book.get("state") != "closed":
