@@ -224,30 +224,35 @@ def test_a_poll_only_tx_is_kept_whole_and_two_poll_legs_without_a_chain_row_are_
     _run(run())
 
 
-def test_a_chain_row_wins_even_when_the_poll_legs_do_not_sum_to_it():
-    """The chain row is the wallet's net legs -- the truth; a poll leg
-    the venue re-delivered at another size still collapses, and is
-    counted."""
+def test_a_poll_leg_that_neither_sums_to_the_chain_row_nor_repeats_it_is_a_distinct_fill():
+    """E19 (PNL lane 8) overturned this pin's old reading ("a chain row
+    wins even when the poll legs do not sum to it"): Martinez's rows
+    (hard2/book_534_1424.log) carried s1 5,225 @0.61 beside poll
+    4,283.5 @0.60 under one tx at 12:09:45Z, and the venue's own
+    per-market snapshot summed EVERY row (29,054.9), so a per-match row
+    that neither sums to the net-leg row nor repeats it is a distinct
+    fill and counts. A repeat (0xABCDEF: the same price and size, the
+    hash's case never splitting the key) still collapses."""
     async def run():
         admin, c, name = await _scratch()
         try:
             await _insert(c, [
                 ("chain", "0xmismatch", K, "BUY", 15164.0, 0.563, 10),
-                ("poll", "0xmismatch", K, "BUY", 4996.0, 0.560, 10),            # 4,996 != 15,164
+                ("poll", "0xmismatch", K, "BUY", 4996.0, 0.560, 10),            # 4,996 != 15,164: a second fill
                 # the SAME tx, the other side / the other token: different keys, kept
                 ("poll", "0xmismatch", K, "SELL", 50.0, 0.60, 11),
                 ("poll", "0xmismatch", NS, "BUY", 70.0, 0.40, 12),
-                # tx hash case never splits a key
+                # tx hash case never splits a key; the repeat collapses
                 ("chain", "0xABCDEF", NS, "BUY", 200.0, 0.80, 20),
                 ("poll", "0xabcdef", NS, "BUY", 200.0, 0.80, 20),
             ])
             fills = await ms.his_fills(c, "rn1", D1_CID)
             assert [(f["source"], f["asset"], f["side"], f["size"]) for f in fills] == [
-                ("chain", K, "BUY", 15164.0), ("poll", K, "SELL", 50.0), ("poll", NS, "BUY", 70.0),
-                ("chain", NS, "BUY", 200.0)]
-            assert ms.his_fills_dedup() == {"dup_rows": 2, "dup_shares": 5196.0}
+                ("chain", K, "BUY", 15164.0), ("poll", K, "BUY", 4996.0), ("poll", K, "SELL", 50.0),
+                ("poll", NS, "BUY", 70.0), ("chain", NS, "BUY", 200.0)]
+            assert ms.his_fills_dedup() == {"dup_rows": 1, "dup_shares": 200.0}
             pos = mi.net_positions(fills)
-            assert pos[K] == 15114.0 and pos[NS] == 270.0
+            assert pos[K] == 15164.0 + 4996.0 - 50.0 and pos[NS] == 270.0
         finally:
             await _drop(admin, c, name)
     _run(run())

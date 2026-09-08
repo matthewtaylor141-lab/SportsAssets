@@ -413,11 +413,12 @@ def test_e17_the_census_names_sit_before_registered_no_increase():
     keys = ml.CENSUS_KEYS
     assert keys[-12] == "registered_no_increase"
     # the fold (2026-09-08, review HIGH-1) added `venue_dust_ours` beside
-    # `adopted_prior_episode`: eight names, the tail pins moved by one
-    assert keys[-20:-12] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
+    # `adopted_prior_episode`: eight names; E19 (PNL lane 8) placed
+    # `drift_smaller_open` after them, before `registered_no_increase`
+    assert keys[-21:-13] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
                              "adopted_prior_episode", "venue_dust_ours", "adopt_prior_unreadable",
                              "adopt_no_fill_since_close", "adopt_prior_venue_settled")
+    assert keys[-13] == "drift_smaller_open"
     # landed 2026-09-08 after E18 (lane 6): its six names sit between
-    # `venue_market_ended` and this block, so the E13 name precedes the
-    # block rather than touching it
+    # `venue_market_ended` and this block
     assert keys.index("venue_market_ended") < keys.index("standing_row_reanchored") and len(set(keys)) == len(keys)

@@ -61,11 +61,74 @@ def _key_sums(rows):
 
 # ------------------------------------------ 1. the collapse can lose fills?
 
-def test_collapsed_reading_per_key_is_never_larger_than_max_of_chain_and_poll():
-    """Randomised: per key the collapsed shares are EXACTLY the net-leg
-    sum when the key holds one, else the per-match sum -- so never over
-    max(chain, poll), and the market total is never over the raw total.
-    (Excludes a chain+s1 collision on one key, pinned separately.)"""
+def _same_price(a, b):
+    """The collapse's price witness (the E19 review's fold, both arms):
+    the same cent by round(., 2) on both sides, or within half a cent
+    judged to the mil -- in decimal, as Postgres reads a float8 cast to
+    numeric (15 significant digits, half away from zero)."""
+    from decimal import ROUND_HALF_UP, Decimal
+    qa, qb = Decimal(f"{a:.15g}"), Decimal(f"{b:.15g}")
+    cent, mil = Decimal("0.01"), Decimal("0.001")
+    return (qa.quantize(cent, ROUND_HALF_UP) == qb.quantize(cent, ROUND_HALF_UP)
+            or abs(qa.quantize(mil, ROUND_HALF_UP) - qb.quantize(mil, ROUND_HALF_UP)) <= Decimal("0.005"))
+
+
+def _key_reading(rows):
+    """E19's rule in Python, per (lower tx, asset, upper side): the
+    net-leg rows' sum plus every per-match row that is neither one of
+    their splits (the per-match rows summing to ONE source's net-leg
+    rows within max(0.01 sh, 0.1 %), their size-weighted price by the
+    witness) nor a repeat of one (the witness, the size within the same
+    dust; ONE per-match row per net-leg row -- both sides ranked by id,
+    paired where the ranks agree, the review's fold); a key with no
+    net-leg row reads whole."""
+    by: dict = {}
+    for src, tx, asset, side, size, px, _dt in rows:
+        by.setdefault((tx.lower(), asset, side.upper()), []).append((src, size, px))
+    out = {}
+    for k, rs in by.items():
+        legs = [(src, s, p) for src, s, p in rs if src in ms.FILLS_NET_LEG_SOURCES]
+        per = [(s, p) for src, s, p in rs if src not in ms.FILLS_NET_LEG_SOURCES]
+        if not legs:
+            out[k] = sum(s for s, _ in per)
+            continue
+        total = sum(s for _, s, _ in legs)
+        per_size = sum(s for s, _ in per)
+        per_vwap = sum(s * p for s, p in per) / per_size if per_size else None
+        by_src: dict = {}
+        for src, s, p in legs:
+            by_src.setdefault(src, []).append((s, p))
+        splits = False
+        for src_legs in by_src.values():
+            leg_size = sum(s for s, _ in src_legs)
+            leg_vwap = sum(s * p for s, p in src_legs) / leg_size
+            if (abs(per_size - leg_size) <= max(0.01, 0.001 * leg_size)
+                    and per_vwap is not None and _same_price(per_vwap, leg_vwap)):
+                splits = True
+        if not splits:
+            pairs = [(i, j) for i, (s, p) in enumerate(per) for j, (_, ls, lp) in enumerate(legs)
+                     if _same_price(lp, p) and abs(ls - s) <= max(0.01, 0.001 * ls)]
+            for i, (s, _) in enumerate(per):
+                repeat = any(m == i
+                             and sum(1 for a, b in pairs if b == n and a < m)
+                             == sum(1 for a, b in pairs if a == m and b < n)
+                             for m, n in pairs)
+                if not repeat:
+                    total += s
+        out[k] = total
+    return out
+
+
+def test_collapsed_reading_per_key_is_the_rule_and_never_over_the_raw_total():
+    """Randomised: per key the collapsed shares are EXACTLY what E19's
+    rule says (_key_reading: the net-leg sum, plus the per-match rows
+    that are neither its splits nor its repeats -- random sizes and
+    prices never sum or repeat, so a net-leg key reads net + per here),
+    the market total is never over the raw total, and what was dropped
+    is accounted to the share. Before E19 this pin read "never over
+    max(chain, poll)": the Martinez rows (the venue's own 29,054.9, the
+    sum of every row) overturned it. (Excludes a chain+s1 collision on
+    one key, pinned separately.)"""
     rng = random.Random(1106)
     rows = []
     for i in range(160):
@@ -88,12 +151,13 @@ def test_collapsed_reading_per_key_is_never_larger_than_max_of_chain_and_poll():
             for f in fills:
                 k = (f["tx_hash"].lower(), f["asset"], f["side"].upper())
                 got[k] = got.get(k, 0.0) + f["size"]
-            exp = _key_sums(rows)
-            for k, (net, per) in exp.items():
-                want = net if net else per
-                assert abs(got.get(k, 0.0) - want) < 1e-6, (k, net, per, got.get(k))
-                assert got.get(k, 0.0) <= max(net, per) + 1e-6
+            exp = _key_reading(rows)
+            for k, want in exp.items():
+                assert abs(got.get(k, 0.0) - want) < 1e-6, (k, want, got.get(k))
             assert set(got) == set(exp)
+            sums = _key_sums(rows)
+            assert any(net and per for net, per in sums.values()), "the draw holds shared keys"
+            assert all(got[k] >= max(net, per) - 1e-6 for k, (net, per) in sums.items())
             raw = sum(r[4] for r in rows)
             assert sum(f["size"] for f in fills) <= raw + 1e-6
             d = ms.his_fills_dedup()
@@ -126,15 +190,16 @@ def test_chain_and_s1_on_one_key_are_BOTH_kept_an_over_read_the_rule_admits():
     _run(run())
 
 
-def test_the_s1_same_asset_entry_deferral_under_reads_and_the_direction_depends_on_side():
+def test_the_s1_same_asset_entry_deferral_reads_the_venues_figure_on_either_side():
     """A taker sweep fills two of his resting orders on one token in one
     tx: s1 emits leg 1 (exec_owner), defers leg 2 to the poller
-    (`s1.abstain.same_asset_entry`), the poller carries both legs. The
-    rule collapses BOTH poll legs under the s1 row: leg 2 is LOST.
-    On a BUY that is an under-read of his position (smaller mirror
-    target: conservative). On a SELL it is an under-read of his EXIT --
-    his position reads LARGER than the venue's, so the mirror keeps
-    holding what he sold: not conservative."""
+    (`s1.abstain.same_asset_entry`), the poller carries both legs. D1's
+    key collapsed BOTH poll legs under the s1 row and leg 2 was LOST
+    (this pin held the defect: 5,000 against the venue's 2,000). E19
+    (PNL lane 8) is Martinez's shape exactly -- the poll legs do not sum
+    to the s1 row (8,000 vs 5,000), so only the repeat (leg 1: the same
+    price and size) collapses and leg 2 counts: the venue's own figure
+    on a SELL (his exit read whole) and on a BUY alike."""
     async def run():
         admin, c, name = await _scratch()
         try:
@@ -147,11 +212,12 @@ def test_the_s1_same_asset_entry_deferral_under_reads_and_the_direction_depends_
             ])
             fills = await ms.his_fills(c, "rn1", D1_CID)
             pos = mi.net_positions(fills)
-            assert pos[K] == 5000.0, "the venue holds 2,000: the collapsed reading is LARGER"
+            assert pos[K] == 2000.0, "the venue holds 2,000: leg 2 counts, leg 1's repeat collapses"
+            assert ms.his_fills_dedup() == {"dup_rows": 1, "dup_shares": 5000.0}
             raw_net = float(await c.fetchval(
                 "SELECT sum(CASE WHEN side='BUY' THEN size ELSE -size END) FROM trades WHERE asset=$1", K))
             assert raw_net == 10000.0 - 13000.0, "the raw table over-counts his SELL (leg 1 twice)"
-            # the same shape on a BUY: the collapsed reading is SMALLER
+            # the same shape on a BUY: the venue's 8,000
             await c.execute("DELETE FROM trades")
             await _insert(c, [
                 ("s1", "0xsweepb", K, "BUY", 5000.0, 0.6, 10),
@@ -159,8 +225,8 @@ def test_the_s1_same_asset_entry_deferral_under_reads_and_the_direction_depends_
                 ("poll", "0xsweepb", K, "BUY", 3000.0, 0.6, 10),
             ])
             fills = await ms.his_fills(c, "rn1", D1_CID)
-            assert mi.net_positions(fills)[K] == 5000.0 < 8000.0
-            assert ms.his_fills_dedup() == {"dup_rows": 2, "dup_shares": 8000.0}
+            assert mi.net_positions(fills)[K] == 8000.0
+            assert ms.his_fills_dedup() == {"dup_rows": 1, "dup_shares": 5000.0}
         finally:
             await _drop(admin, c, name)
     _run(run())
@@ -292,24 +358,41 @@ def test_sql_mutants_are_caught():
     async def run():
         admin, c, name = await _scratch()
         try:
+            # E19: the '' poll row is the chain '' row's repeat in price and
+            # size, so the sentinel mutant (one key for every '' row) would
+            # swallow it; the correct key keeps each '' row its own
             await _insert(c, _d1_rows() + [
                 ("chain", "0xcase", NS, "BUY", 100.0, 0.5, 9000), ("poll", "0xCASE", NS, "BUY", 100.0, 0.5, 9000),
                 ("chain", "0xside", NS, "BUY", 100.0, 0.5, 9001), ("poll", "0xside", NS, "buy", 100.0, 0.5, 9001),
-                ("chain", "", NS, "BUY", 10.0, 0.5, 9002), ("poll", "", NS, "BUY", 20.0, 0.5, 9003),
+                ("chain", "", NS, "BUY", 10.0, 0.5, 9002), ("poll", "", NS, "BUY", 10.0, 0.5, 9003),
             ])
             fills = await ms.his_fills(c, "rn1", D1_CID)
             good = mi.net_positions(fills)
-            assert abs(good[K] - 55993.4) < 1e-6 and abs(good[NS] - 29555.0 - 100 - 100 - 30) < 1e-6
+            assert abs(good[K] - 55993.4) < 1e-6 and abs(good[NS] - 29555.0 - 100 - 100 - 20) < 1e-6
             mutants = {
                 "no lower()": [("lower(NULLIF(t.tx_hash, ''))", "NULLIF(t.tx_hash, '')")],
-                "no upper()": [("t.asset, upper(t.side)", "t.asset, t.side")],
+                "no upper()": [("f.asset, upper(f.side)", "f.asset, f.side"),
+                               ("upper(n.side) = upper(k.side)", "n.side = k.side"),
+                               ("upper(n.side) = upper(m.side)", "n.side = m.side")],
                 "no '' sentinel": [("COALESCE(lower(NULLIF(t.tx_hash, '')), 'row:' || t.id::text)",
                                     "lower(t.tx_hash)")],
-                "chain rows collapse too": [
-                    ("(COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed",
-                     "f.has_net_leg AS collapsed")],
+                "chain rows collapse too": [("(NOT k.net_leg AND k.has_net_leg AND (", "(k.has_net_leg AND (")],
                 "poll is a net-leg source": [("IN ('chain', 's1')", "IN ('chain', 's1', 'poll')")],
+                # E19's two arms: the split sum widened to any sum, the repeat
+                # test dropped to the price alone
+                "any sum is the splits": [("abs(k.match_sum - leg.leg_size) <= greatest(0.01, 0.001 * leg.leg_size)",
+                                           "k.match_sum > 0")],
+                "a repeat by price alone": [("AND abs(n.size - m.size) <= greatest(0.01, 0.001 * n.size)", "")],
             }
+            # the E19 shapes beside D1's: a split that does not sum (Martinez
+            # 12:09:45Z) and a repeat off by more than the dust (5,225 / 5,245)
+            await _insert(c, [
+                ("s1", "0xe19a", NS, "BUY", 5225.0, 0.61, 9010), ("poll", "0xe19a", NS, "BUY", 4283.5, 0.60, 9010),
+                ("s1", "0xe19b", NS, "BUY", 5225.0, 0.15, 9020), ("poll", "0xe19b", NS, "BUY", 5245.0, 0.15, 9020),
+            ])
+            fills = await ms.his_fills(c, "rn1", D1_CID)
+            good = mi.net_positions(fills)
+            assert abs(good[NS] - 29555.0 - 220 - 5225.0 - 4283.5 - 5225.0 - 5245.0) < 1e-6
             caught = {}
             for label, subs in mutants.items():
                 m = mi.net_positions(await ms.his_fills(_Mut(c, subs), "rn1", D1_CID))
@@ -317,11 +400,19 @@ def test_sql_mutants_are_caught():
                 assert m != good, label
             assert caught["no lower()"][1] == good[NS] + 100.0            # 0xCASE kept: +100
             assert caught["no upper()"][1] == good[NS] + 100.0            # 'buy' kept: +100
-            assert caught["no '' sentinel"][1] == good[NS] - 20.0         # the '' poll row swallowed
-            # every key that holds a chain row loses the chain row too: only
-            # the poll-only txs (6,509.9 K) and the '' poll row (20 NS) survive
-            assert caught["chain rows collapse too"] == (6509.9, 20.0)
+            assert caught["no '' sentinel"][1] == good[NS] - 10.0         # the '' poll row swallowed
+            # a net-leg row goes with its splits when its key's per-match rows
+            # sum to it ((i) is a test of the key: Kostyuk's aggregates, the
+            # 0xcase / 0xside chain rows), but never repeats ITSELF under the
+            # fold's ranked pairing (rep pairs per-match rows to net-leg rows),
+            # so the rest stay -- before the fold every net-leg key emptied
+            # (6,509.9 / 9,538.5)
+            assert caught["chain rows collapse too"] == (19841.6, 39329.1)
             assert caught["poll is a net-leg source"][0] == 92145.2       # the raw reading
+            # the 12:09:45Z pair is a cent apart (0.60 / 0.61): the price witness
+            # holds it whatever the sum arm says; the 12:23:33Z pair (0.15 / 0.15) drops
+            assert caught["any sum is the splits"][1] == good[NS] - 5245.0
+            assert caught["a repeat by price alone"][1] == good[NS] - 5245.0         # 5,245 read as 5,225's repeat
         finally:
             await _drop(admin, c, name)
     _run(run())

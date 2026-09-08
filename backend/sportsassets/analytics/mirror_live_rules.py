@@ -1259,6 +1259,14 @@ class AdmissionFacts:
     # (venue_dust_is_ours); False (not read) refuses as before. Appended
     # LAST, after prior_episode_ledger.
     venue_dust_ours: bool | None = False
+    # E19 (2026-09-08, PNL lane 8; Martinez, books 529/534): the worker
+    # sized this candidate's target on the SMALLER of two readings of
+    # his net that agree on the side -- his fills' net and this tick's
+    # per-market venue read (smaller_reading) -- so the drift clause may
+    # admit past MIRROR_DRIFT_MAX, and only beside snap_market_fresh
+    # True; the drift number itself is never touched. False, the
+    # fail-closed default: `drift` as before. Appended LAST.
+    drift_sized_smaller: bool = False
 
 
 def venue_dust_is_ours(venue_net: Any, ours: Any) -> bool:
@@ -1275,6 +1283,30 @@ def venue_dust_is_ours(venue_net: Any, ours: Any) -> bool:
     if vn is None or ours is not True:
         return False
     return vn != 0.0 and abs(vn) < float(mi.VENUE_LEDGER_TOL_SHARES)
+
+
+def smaller_reading(fills_net: Any, venue_net: Any) -> float | None:
+    """E19: the SIGNED smaller magnitude of two readings of his net on
+    one market, or None -- the reading a candidate may be sized on when
+    the two disagree past MIRROR_DRIFT_MAX (owner 2026-09-08: "Why did
+    we only have 12c on Martinez. I see RN1 had 25000 on Martinez": his
+    fills read 11,974.6, the venue's own per-market snapshot 25,104,
+    drift 0.523, and every window for two hours was refused `drift`
+    while both readings said LONG).
+
+    Both readings must be numbers (_num: None, a bool, a string, NaN,
+    an infinity are no reading), both non-zero, and of ONE sign: two
+    readings that disagree on which side he is on justify holding
+    neither (None -- the worker keeps the `drift` refusal). The smaller
+    magnitude never buys more than either reading says he holds; on a
+    short (both negative) it is the smaller short, the same rule."""
+    a, b = _num(fills_net), _num(venue_net)
+    if a is None or b is None or a == 0.0 or b == 0.0:
+        return None
+    if (a < 0.0) != (b < 0.0):
+        return None
+    m = min(abs(a), abs(b))
+    return -m if a < 0.0 else m
 
 
 def prior_episode_adoption(venue_net: Any, prior_ledger: Any) -> bool:
@@ -1397,7 +1429,15 @@ def admission(f: AdmissionFacts, increase: bool = False) -> str | None:
         return "snapshot_stale"
     d = _num(f.drift)
     if d is None or d < 0.0 or d > float(MIRROR_DRIFT_MAX):
-        return "drift"
+        # E19 (PNL lane 8): past the max the candidate is admitted ONLY
+        # when the worker sized its target on the smaller of the two
+        # readings (drift_sized_smaller, smaller_reading) AND the reading
+        # that disagreed was this tick's per-market read (snap_market_fresh
+        # True): the drift number is the real one, never a stand-in, and
+        # an unreadable or negative drift refuses whatever the flag says
+        if not (d is not None and d >= 0.0 and f.drift_sized_smaller is True
+                and f.snap_market_fresh is True):
+            return "drift"
     # the book counts: an UNREADABLE count refuses under its own name
     # (fail closed, never "no cap"); a FINITE cap bites as max_books;
     # an unbounded cap (the default since 2026-09-06) never does

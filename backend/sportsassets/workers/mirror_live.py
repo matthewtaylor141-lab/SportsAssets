@@ -880,6 +880,12 @@ CENSUS_KEYS: tuple[str, ...] = (
     "standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
     "adopted_prior_episode", "venue_dust_ours", "adopt_prior_unreadable", "adopt_no_fill_since_close",
     "adopt_prior_venue_settled",
+    # E19 (PNL lane 8): a book opened on the SMALLER of two disagreeing
+    # readings of one sign (rules.smaller_reading; the paragraph in
+    # _tick_candidate) -- an open name beside `open_flow_only` /
+    # `open_catchup` in meaning; placed before `registered_no_increase`
+    # by the convention E13 and E17 followed (the tail pins hold)
+    "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
     # his FLOW from first sight, its pre-existing block never bought
@@ -5758,6 +5764,10 @@ async def _write_plan(t: _Tick, book: dict, r: _Reading | None, target, target_r
     vd = book.pop("_venue_dust", None)
     if vd is not None:
         plan["venue_dust"] = vd
+    # E19: the open sized on the smaller of two readings, on the first plan
+    sm = book.pop("_drift_smaller", None)
+    if sm is not None:
+        plan["drift_sized_smaller"] = sm
     # E9 part 1: every fill of his the tick holds, answered or named on
     # the row; the reading's fills when there is one, else the ones the
     # book's tick read before step M (book["_fills"])
@@ -7356,6 +7366,22 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         # full (re-review LOW-3): the plan's null `game_exposure` says
         # which, the census counts them separately
         _mirror_stop("game_unreadable", w)
+    # E19 (PNL lane 8; the review's CRITICAL-1): THE OPENING TICK SIZES
+    # ON THE SMALLER READING TOO. Admission judged this open on the
+    # smaller of his fills' net and the venue's fresh per-market read
+    # (`net` above IS that reading), but a flow book's target is sized on
+    # the fills' axis (`net_sized` = flow) and the gate below lifts
+    # `drift` for it: fills 30,000 against the venue's 25,104.1 admitted
+    # 2,510 and placed 3,000; the short face, -300 against -100, placed
+    # 300 BUY_SHORT. So the open is clamped to the smaller of the sizing
+    # axis and the reading admission judged (sign x min, the same rule;
+    # signs that part size 0 -> `target_zero`). Only the in-memory flag
+    # the candidate set reaches here: a book read from its row sizes as
+    # today. The game cap below still applies on top
+    sm = book.get("_drift_smaller")
+    if sm is not None:
+        clamped = rules.smaller_reading(net_sized, sm.get("net"))
+        net_sized = 0.0 if clamped is None else clamped
     # THE TARGET, from the book's FIXED ratio (addendum section 7)
     if t.flatten_all:
         tg = {"target": 0, "raw": 0.0, "refusal": None}
@@ -7658,6 +7684,19 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         inc_refusal = "venue_suspect_hold"
     if inc_refusal is None and not drift.increase_ok:
         inc_refusal = drift.refusal or "snapshot_stale"
+        # E19 (PNL lane 8): THE OPENING TICK of a book the candidate
+        # admitted on the smaller of two disagreeing readings of one sign
+        # (the in-memory `_drift_smaller` the candidate set on the row it
+        # handed here; _write_plan takes it off with the first plan).
+        # Admission has already judged this disagreement on this reading
+        # -- `net` above IS that smaller reading (_net_for) -- so the same
+        # gate does not refuse, in the same tick, the open it admitted. A
+        # book read from its row (every later tick) carries no flag and
+        # refuses `drift` as today; the whole-book walk ('book') never
+        # sets one. Lane 34's drift section above is untouched.
+        if (inc_refusal == "drift" and drift_src == "market"
+                and book.get("_drift_smaller") is not None):
+            inc_refusal = None
     increasing = (target < ledger) if short else (target > ledger)
     # his net moving DOWN in long-token terms (the same signed compare
     # on either book; _his_level reads the fills for it)
@@ -10688,6 +10727,30 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     shorts = _shorts_on(t)
     drift, _drift_src = _drift_for(r)
     net, _snap_net = _net_for(r, drift, short=shorts)
+    # THE CANDIDATE OPENS ON THE SMALLER READING (E19, PNL lane 8,
+    # 2026-09-08; owner: "Why did we only have 12c on Martinez. I see
+    # RN1 had 25000 on Martinez"). Book 534 closed on his flip at
+    # 12:10:17Z; the reopen was refused `drift` at 12:10:43Z with his
+    # fills reading 11,974.6 and the venue's own per-market snapshot
+    # 25,104 (drift 0.523) -- both LONG -- and every later window the
+    # same, so no book followed for the rest of the match. When the
+    # per-market read is FRESH (drift_src 'market') and past
+    # MIRROR_DRIFT_MAX, two readings of ONE sign size the target on the
+    # smaller magnitude (rules.smaller_reading: never more than either
+    # says he holds); admission is told so by an explicit fact
+    # (drift_sized_smaller) beside the real drift number, never a
+    # stand-in for it. Signs that disagree, a reading that is not a
+    # number, a zero on either side, the whole-book walk ('book'): None
+    # here, and the refusal stays `drift` as before. The existing-book
+    # path is lane 34's (mi.drift_explained) and is not touched.
+    smaller = None
+    if drift.refusal == "drift" and _drift_src == "market":
+        fills_net_all = mi.his_net(r.his_long, r.his_other)
+        smaller = rules.smaller_reading(fills_net_all, r.mkt_net)
+        if smaller is not None:
+            net = smaller
+            d.update(drift=drift.drift, drift_src=_drift_src, fills_net=fills_net_all,
+                     venue_net=r.mkt_net, sized_from="smaller")
     d["his_net"] = net
     # THE RATIO IS DECIDED HERE, AT OPEN, AND STORED ON THE BOOK (owner
     # orders 2026-09-06 ~14:00Z and ~14:10Z; rules.open_ratio): an exact
@@ -10874,7 +10937,10 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
         # that named at least one of its two tokens.
         snap_market_fresh=r.snap_market_fresh,
         prior_episode_ledger=prior_ledger,
-        venue_dust_ours=(dust is not None))
+        venue_dust_ours=(dust is not None),
+        # E19: the target above was sized on the smaller of two readings
+        # of one sign (the paragraph over `smaller`); False else
+        drift_sized_smaller=smaller is not None)
     refusal = rules.admission(facts)
     if refusal:
         _mirror_stop(refusal, w)
@@ -11004,6 +11070,14 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
         book["_venue_dust"] = {"venue": vn, "prior_book": dust.get("id")}
         _mirror_stop("venue_dust_ours", w)
         _recent(book["id"], "venue_dust_ours", **book["_venue_dust"])
+    if smaller is not None:
+        # E19: the book opened on the smaller of two disagreeing readings
+        # of one sign (the paragraph over `smaller`); counted beside the
+        # open names, both readings on the first plan (_write_plan)
+        book["_drift_smaller"] = {"drift": drift.drift, "drift_src": "market",
+                                  "fills_net": d.get("fills_net"), "venue_net": r.mkt_net,
+                                  "net": smaller, "sized_from": "smaller"}
+        _mirror_stop("drift_smaller_open", w)
     book["_catchup"] = cu               # the open's verdict, on the book's first plan (_write_plan)
     _recent(book["id"], "opened", whale=w, slug=slug, target=open_target, ratio=tg["ratio_eff"],
             intent=(intent if short else None), flow_base=cu.get("flow_base"), catchup=cu.get("why"))

@@ -772,14 +772,18 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     src = inspect.getsource(ms.his_fills)
     assert src.count("detected_at") == 3, "the comment, the CTE line and the outer projection (the fold)"
     assert "d.ts,\n               d.detected_at," in src
-    assert "(COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed" in src
+    # E19 (PNL lane 8): the collapse keeps distinct fills -- a per-match row
+    # under a net-leg row is dropped only as its split (the sum) or its
+    # repeat (price to the cent, size within the dust); the clause moved
+    assert "(NOT k.net_leg AND k.has_net_leg AND (" in src and ") AS collapsed" in src
+    assert "abs(k.match_sum - leg.leg_size) <= greatest(0.01, 0.001 * leg.leg_size)" in src
     assert "WHERE NOT d.collapsed" in src and "ORDER BY d.ts, d.id" in src
     keys = ml.CENSUS_KEYS
     # E12 moved the tail by its three names (-65 -> -68, -66 -> -69), E13 by
-    # its one (-68 -> -69, -69 -> -70), E16 by its four, E18 by its six and E17 by
-    # its eight (-69 -> -87, -70 -> -88), the convention every builder followed; E9's four stay keys[-8:-4]
-    assert keys[-87:-83] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-88] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # its one (-68 -> -69, -69 -> -70), E16 by its four, E18 by its six, E17 by its
+    # eight and E19 by its one (-69 -> -88, -70 -> -89), the convention every builder followed; E9's four stay keys[-8:-4]
+    assert keys[-88:-84] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-89] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence

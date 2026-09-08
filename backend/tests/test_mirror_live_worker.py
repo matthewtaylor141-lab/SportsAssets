@@ -4844,8 +4844,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    # (E16 moved the tail by its four names, E18 by its six, E17 by its eight: -69 -> -87)
-    assert keys[-87:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one: -69 -> -88)
+    assert keys[-88:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4912,6 +4912,10 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
                           "adopted_prior_episode", "venue_dust_ours", "adopt_prior_unreadable",
                           "adopt_no_fill_since_close", "adopt_prior_venue_settled",
+                          # E19 (PNL lane 8): a book opened on the smaller of two
+                          # disagreeing readings of one sign -- before
+                          # `registered_no_increase` (keys[-12])
+                          "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
                           # opened on his whole net (the block admitted), the 057 probe
@@ -4927,7 +4931,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-88] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six and E17's eight before the tail
+    assert keys[-89] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight and E19's one before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -12899,6 +12903,15 @@ def test_e17_the_reanchor_and_adoption_names_are_emitted_here_too(monkeypatch):
                  "adopted_prior_episode", "venue_dust_ours", "adopt_prior_unreadable",
                  "adopt_no_fill_since_close", "adopt_prior_venue_settled"):
         assert name in SEEN, name
+
+
+def test_e19_the_smaller_reading_open_name_is_emitted_here_too(monkeypatch):
+    """E19's one name is driven in tests/test_e19_smaller_reading.py; run
+    here as well so the coverage read below sees it when this file runs
+    alone (E13's convention)."""
+    from tests import test_e19_smaller_reading as e19
+    e19.test_e19_martinez_shape_a_fresh_read_past_the_max_of_one_sign_opens_on_the_smaller_reading(monkeypatch)
+    assert "drift_smaller_open" in SEEN
 
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():

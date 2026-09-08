@@ -435,9 +435,36 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
     his most active book under `drift`). Collapsed by this rule the
     fills read 49,483.5 + 6,509.9 (poll-only txs the chain path missed)
     = 55,993.4 long and 29,555 other -- the snapshot, to the share. A
-    poll-only tx is KEPT WHOLE (nothing to collapse into), and a
-    per-match row whose leg does not sum to the chain row still
-    collapses: the chain row is the wallet's net legs, the truth.
+    poll-only tx is KEPT WHOLE (nothing to collapse into).
+
+    THE COLLAPSE KEEPS DISTINCT FILLS (E19, PNL lane 8, 2026-09-08;
+    Martinez, aec-atp-pedmar-frafor-2026-09-08, books 529/534). D1's
+    key alone dropped EVERY per-match row under a net-leg row, and one
+    of his sweeps fills across price levels under ONE tx: at 12:09:24Z
+    the s1 lane carried 5,225 @0.62 and the poll carried 3,601 @0.61
+    and 5,245 @0.61 under the same hash; at 12:09:45Z s1 5,225 @0.61
+    beside poll 4,283.5 @0.60. The venue's own per-market snapshot in
+    534's last plan read mkt_long 29,054.9 -- the SUM of every row,
+    chain 230.4 + s1 15,695 + poll 13,129.5 -- so the four poll rows
+    (18,374.5 sh with the 12:23:33Z other-token pair) were real fills
+    the old key dropped, his net read ~50 % low for the rest of the
+    match, and every reopen was refused `drift`. Two rows are the SAME
+    fill only when they agree on the key AND (i) the per-match rows
+    under it SUM to the net-leg row's size (D1's aggregate/split
+    shape: Kostyuk's 4,996 + 5,172 + 4,996 = 15,164, the venue to the
+    share) or (ii) the row repeats the net-leg row's price to the cent
+    and its size within max(0.01 sh, 0.1 %). Rows that share a tx but
+    differ in price or size are distinct fills and every one counts:
+    the s1 record is one fill of the sweep, not its aggregate, when
+    the splits do not sum to it (5,225 vs 8,846). The tolerance is the
+    D1 dust: 5,225 against 5,245 (20 sh, 0.38 %) is two fills. The
+    review's fold (2026-09-08): the leg the splits are measured against
+    is ONE source's net-leg rows (chain and s1 on one key stay D1's
+    admitted collision, never a doubled leg); a repeat collapses ONE
+    per-match row per net-leg row (two makers of one size in one tx are
+    two fills); and both arms judge price the same way -- the same cent
+    by round(., 2) on both sides, or within half a cent in numeric to
+    the mil (0.615 against 0.61 is one fill, not float8's two).
 
     This collapse is the MIRROR'S OWN READ-SIDE view. The trades table
     is shared with the copy lane, the edge analytics and the
@@ -471,19 +498,75 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
                    COALESCE(t.outcome_index, mt.outcome_index) AS outcome_index,
                    COALESCE(NULLIF(m.sport, 'unclassified'), NULLIF(t.sport, 'unclassified'),
                             'unclassified') AS sport,
-                   -- the key holds a net-leg row (chain / s1): the wallet's
-                   -- own legs for the tx, which every per-match row of the
-                   -- same key is a split of
-                   bool_or(COALESCE(t.source, '') IN ('chain', 's1')) OVER (
-                       PARTITION BY t.whale_id, COALESCE(lower(NULLIF(t.tx_hash, '')), 'row:' || t.id::text),
-                                    t.asset, upper(t.side)) AS has_net_leg
+                   t.whale_id,
+                   -- the key: (whale, tx, asset, side); a '' hash is its own row
+                   COALESCE(lower(NULLIF(t.tx_hash, '')), 'row:' || t.id::text) AS tx_key,
+                   (COALESCE(t.source, '') IN ('chain', 's1')) AS net_leg
               FROM trades t JOIN whales w ON w.id = t.whale_id
               LEFT JOIN markets m ON m.condition_id = t.condition_id
               LEFT JOIN market_tokens mt ON mt.token_id = t.asset
              WHERE lower(w.username) = $1 AND t.condition_id = $2
-        ), c AS (
-            SELECT f.*, (COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed
+        ), k AS (
+            -- the key holds a net-leg row (chain / s1): the wallet's own
+            -- legs for the tx; the per-match rows' sum and size-weighted
+            -- price under the key are measured against ONE source's
+            -- net-leg rows below (E19: the paragraph in the docstring)
+            SELECT f.*,
+                   bool_or(f.net_leg) OVER w AS has_net_leg,
+                   COALESCE(sum(f.size) FILTER (WHERE NOT f.net_leg) OVER w, 0.0) AS match_sum,
+                   sum(f.size * f.price) FILTER (WHERE NOT f.net_leg) OVER w
+                       / NULLIF(sum(f.size) FILTER (WHERE NOT f.net_leg) OVER w, 0.0) AS match_vwap
               FROM f
+            WINDOW w AS (PARTITION BY f.whale_id, f.tx_key, f.asset, upper(f.side))
+        ), rep AS (
+            -- (ii) the repeat pairs of a key: a per-match row m at a net-leg
+            -- row n's price and size (the witness below). Each side ranks
+            -- the other by id and a pair holds only where the ranks agree,
+            -- so a net-leg row is repeated by ONE per-match row and no more
+            -- (E19 review MEDIUM-1: two makers of one size in one tx, the
+            -- s1 lane carrying one record and the poll both, are two fills
+            -- -- 10,000, not 5,000 -- and the second poll row counts).
+            -- THE PRICE WITNESS (both arms; review LOW-2): the same cent by
+            -- round(., 2) on both sides, or within half a cent judged in
+            -- numeric to the mil -- the venue quotes cents, and 0.615 less
+            -- 0.61 in float8 is a hair OVER 0.005, which read one fill as
+            -- two. A cent off is another fill
+            SELECT m.id AS m_id,
+                   row_number() OVER (PARTITION BY n.id ORDER BY m.id) AS m_rank,
+                   row_number() OVER (PARTITION BY m.id ORDER BY n.id) AS n_rank
+              FROM f m JOIN f n
+                ON n.whale_id = m.whale_id AND n.tx_key = m.tx_key AND n.asset = m.asset
+               AND upper(n.side) = upper(m.side) AND n.net_leg AND NOT m.net_leg
+               AND (round(n.price::numeric, 2) = round(m.price::numeric, 2)
+                    OR abs(round(n.price::numeric, 3) - round(m.price::numeric, 3)) <= 0.005)
+               AND abs(n.size - m.size) <= greatest(0.01, 0.001 * n.size)
+        ), c AS (
+            SELECT k.*,
+                   COALESCE(NOT k.net_leg AND k.has_net_leg AND (
+                        -- (i) the per-match rows are the maker splits of ONE
+                        -- source's net-leg rows on the key (E19 review LOW-1:
+                        -- chain and s1 on one key are D1's admitted collision,
+                        -- never a doubled leg the splits are measured against):
+                        -- they sum to that source's rows within max(0.01 sh,
+                        -- 0.1 %) and their size-weighted price is its price by
+                        -- the witness above (Kostyuk 0.563 / 0.5633)
+                        EXISTS (SELECT 1
+                                  FROM (SELECT sum(n.size) AS leg_size,
+                                               sum(n.size * n.price) / sum(n.size) AS leg_vwap
+                                          FROM f n
+                                         WHERE n.whale_id = k.whale_id AND n.tx_key = k.tx_key
+                                           AND n.asset = k.asset AND upper(n.side) = upper(k.side)
+                                           AND n.net_leg
+                                         GROUP BY n.source) leg
+                                 WHERE abs(k.match_sum - leg.leg_size) <= greatest(0.01, 0.001 * leg.leg_size)
+                                   AND (round(k.match_vwap::numeric, 2) = round(leg.leg_vwap::numeric, 2)
+                                        OR abs(round(k.match_vwap::numeric, 3)
+                                               - round(leg.leg_vwap::numeric, 3)) <= 0.005))
+                        -- (ii) this row repeats a net-leg row of the key, one
+                        -- per-match row per net-leg row (rep)
+                        OR EXISTS (SELECT 1 FROM rep WHERE rep.m_id = k.id AND rep.m_rank = rep.n_rank)
+                   ), false) AS collapsed
+              FROM k
         ), d AS (
             SELECT c.*,
                    count(*) FILTER (WHERE c.collapsed) OVER () AS dup_rows,

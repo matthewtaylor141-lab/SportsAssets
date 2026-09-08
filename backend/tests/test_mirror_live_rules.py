@@ -2097,13 +2097,13 @@ def test_a_per_market_fresh_read_admits_where_the_whole_book_walk_is_stale():
     # built positionally changes meaning
     assert r.AdmissionFacts().snap_market_fresh is None
     # E17 (PNL lane 5) appended `prior_episode_ledger` after it by the same
-    # convention, and its fold (2026-09-08, review HIGH-1) `venue_dust_ours`
-    # after that: the Phase 1 field stays where it was, the fold's is LAST
-    # and defaults to the fail-closed False (only the bool True admits)
-    assert dataclasses.fields(r.AdmissionFacts)[-3].name == "snap_market_fresh"
-    assert dataclasses.fields(r.AdmissionFacts)[-2].name == "prior_episode_ledger"
-    assert dataclasses.fields(r.AdmissionFacts)[-1].name == "venue_dust_ours"
-    assert r.AdmissionFacts().venue_dust_ours is False
+    # convention, its fold (2026-09-08, review HIGH-1) `venue_dust_ours` after
+    # that, and E19 (PNL lane 8) `drift_sized_smaller` LAST by the same
+    # convention; both fold fields default to the fail-closed False
+    assert dataclasses.fields(r.AdmissionFacts)[-3].name == "prior_episode_ledger"
+    assert dataclasses.fields(r.AdmissionFacts)[-2].name == "venue_dust_ours"
+    assert dataclasses.fields(r.AdmissionFacts)[-1].name == "drift_sized_smaller"
+    assert r.AdmissionFacts().venue_dust_ours is False and r.AdmissionFacts().drift_sized_smaller is False
     # the existing helper never sets it and still admits on snap_fresh
     assert r.admission(_admitted()) is None
     # the per-market read admits where the walk is stale or unread
