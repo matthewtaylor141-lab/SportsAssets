@@ -862,6 +862,24 @@ CENSUS_KEYS: tuple[str, ...] = (
     # whose place from the end the E12 pin holds
     "kept_min_life", "ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread",
     "order_cols_guard_unreadable",
+    # E17 (2026-09-08, PNL lane 5): a standing row retired while its
+    # market is LIVE by every reader is re-anchored (`standing_row_
+    # reanchored`), or closed as before when a reader cannot tell
+    # (`standing_row_ambiguous`) or the re-anchor's write failed
+    # (`standing_row_reanchor_failed`); a candidate whose venue shares
+    # are exactly a closed book's ledger adopts them (`adopted_prior_
+    # episode`), or is refused when the prior cannot be read
+    # (`adopt_prior_unreadable`), when he has no fill since the close
+    # (`adopt_no_fill_since_close`), or when the prior's row carries the
+    # venue's own settle (`adopt_prior_venue_settled`: the venue's word
+    # stands, nothing reopens against it). The fold (review HIGH-1): a
+    # sub-share venue residual beside a closed mirror book on the market
+    # is the mirror's own dust, admitted and named `venue_dust_ours` (an
+    # event, beside `adopted_prior_episode`). Before `registered_no_increase`
+    # (keys[-12])
+    "standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
+    "adopted_prior_episode", "venue_dust_ours", "adopt_prior_unreadable", "adopt_no_fill_since_close",
+    "adopt_prior_venue_settled",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
     # his FLOW from first sight, its pre-existing block never bought
@@ -2012,7 +2030,51 @@ SELECT count(*) FROM live_orders lo,
 """
 _SQL_STANDING_READ = """
 SELECT status, lane, filled_shares::float8 AS filled_shares, fill_price::float8 AS fill_price,
-       pnl::float8 AS pnl, raw FROM live_orders WHERE id = $1 /* ml-standing-read */
+       pnl::float8 AS pnl, raw, settled_at FROM live_orders WHERE id = $1 /* ml-standing-read */
+"""
+# E17: the re-anchor -- the mirror's own row back to 'filled', ONLY
+# while it still reads 'settled' with neither of the venue settle's
+# two marks (engine._settle_pmus_from_venue writes pnl AND settled_at
+# in one statement); a row the venue settled is never touched
+_SQL_STANDING_REANCHOR = """
+UPDATE live_orders SET status = 'filled',
+       raw = jsonb_set(COALESCE(raw, '{}'::jsonb), '{mirror,reanchored}', $2::jsonb)
+ WHERE id = $1 AND lane = 'mirror' AND status = 'settled' AND pnl IS NULL AND settled_at IS NULL
+ RETURNING id /* ml-standing-reanchor */
+"""
+# E17: the newest CLOSED book on this whale and condition that still
+# holds shares -- the prior episode a candidate may adopt
+_SQL_PRIOR_EPISODE = """
+SELECT b.id, b.episode, b.intent, b.ledger_net, b.avg_cost::float8 AS avg_cost, b.standing_row_id,
+       extract(epoch FROM b.closed_at)::float8 AS closed_ts,
+       lo.status AS row_status, lo.lane AS row_lane, lo.pnl::float8 AS row_pnl,
+       lo.settled_at AS row_settled_at, lo.filled_shares::float8 AS row_shares
+  FROM mirror_books b LEFT JOIN live_orders lo ON lo.id = b.standing_row_id
+ WHERE b.whale = $1 AND b.condition_id = $2 AND b.state = 'closed' AND b.ledger_net <> 0
+ ORDER BY b.closed_at DESC NULLS LAST, b.id DESC LIMIT 1 /* ml-prior-episode */
+"""
+# E17 fold (review HIGH-1): the IDENTITY behind a sub-share venue
+# residual -- the newest CLOSED mirror book on this whale and condition
+# whose standing row is lane 'mirror' on one of the market's two tokens
+# (never a magnitude: the ledger is not compared; a flat close's
+# INTEGER ledger reads 0 beside the venue's 0.2)
+_SQL_PRIOR_DUST_OURS = """
+SELECT b.id, b.ledger_net, lo.asset AS row_asset
+  FROM mirror_books b JOIN live_orders lo ON lo.id = b.standing_row_id
+ WHERE b.whale = $1 AND b.condition_id = $2 AND b.state = 'closed'
+   AND lo.lane = 'mirror' AND lo.asset IN ($3, $4)
+ ORDER BY b.closed_at DESC NULLS LAST, b.id DESC LIMIT 1 /* ml-prior-dust */
+"""
+# E17: the adoption's ledger write on the new book, guarded on the
+# row still being the empty one the open wrote. The fold (review
+# MEDIUM-1): gross_buy_usd and peak_exposure_usd are written 0 --
+# nothing was bought this episode; the prior keeps its own, so the
+# day's peak_stake no longer counts the shares twice (lane M's stake
+# denominator across episodes is lane M's to change)
+_SQL_BOOK_ADOPT = """
+UPDATE mirror_books SET ledger_net = $2, avg_cost = $3, gross_buy_usd = 0,
+       peak_exposure_usd = 0, updated_at = now()
+ WHERE id = $1 AND ledger_net = 0 /* ml-book-adopt */
 """
 _SQL_STANDING_NAME = """
 UPDATE live_orders SET raw = jsonb_set(COALESCE(raw, '{}'::jsonb), '{mirror,named}', 'true'::jsonb)
@@ -5687,6 +5749,15 @@ async def _write_plan(t: _Tick, book: dict, r: _Reading | None, target, target_r
         cu = prior.get("catchup") if isinstance(prior, dict) else None
     if cu is not None:
         plan["catchup"] = cu
+    # E17: the adoption of a closed episode's shares, on the first plan
+    ad = book.pop("_adopted", None)
+    if ad is not None:
+        plan["adopted_prior_episode"] = ad
+    # E17 fold (HIGH-1): the mirror's own sub-share dust the open stood
+    # beside, on the first plan
+    vd = book.pop("_venue_dust", None)
+    if vd is not None:
+        plan["venue_dust"] = vd
     # E9 part 1: every fill of his the tick holds, answered or named on
     # the row; the reading's fills when there is one, else the ones the
     # book's tick read before step M (book["_fills"])
@@ -5811,6 +5882,224 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
     _mirror_stop(f"closed_{verdict}", book["whale"])
     _recent(book["id"], "closed", how=verdict)
     return verdict
+
+
+# --------------------------- E17: a standing row retired on a live market
+
+async def _standing_row_verdict(t: _Tick, book: dict, standing: dict) -> tuple[str, dict]:
+    """E17 (PNL lane 5; book 204): the standing row left 'filled' --
+    'settled', 'cashed_out' or 'cancelled' -- while the book holds
+    shares. Which of the two closes is it?
+
+      THE VENUE'S SETTLE: engine._settle_pmus_from_venue writes the
+      row's `pnl` (the venue's POSITION_RESOLUTION realized for the
+      slug) AND `settled_at` in one statement, so a 'settled' row
+      carrying BOTH is the venue's word -- terminal -- and closes as
+      before. 'cashed_out' / 'cancelled' are the mirror's own episode
+      close (le._close_mirror_episode, only on a FLAT row) or the copy
+      lane's stale-exiting reaper (status and settled_at, never on a
+      mirror row): with shares held they are inconsistent, and close.
+
+      A 'settled' row with NEITHER mark is not the venue's settle; it
+      re-anchors ONLY when the market is live by EVERY reader: the
+      gamma row closed=f resolved=f with resolved_prices NULL, AND the
+      venue's own quote read THIS TICK (one paced read, _bbo) OPEN.
+
+    'close' (as before), 'reanchor', or 'ambiguous' -- the book holds
+    shares, the row is not the venue's settle, and a reader cannot
+    tell (the gamma row unreadable, the venue state unread, HALTED /
+    SUSPENDED / PREOPEN, the row's shares not the ledger's): named
+    `standing_row_ambiguous` and closed as before -- the old
+    behaviour, which does not trade."""
+    w, slug = book["whale"], book["us_market_slug"]
+    status = str(standing.get("status"))
+    ledger = _num(book.get("ledger_net"))
+    if ledger is None or abs(ledger) < FLAT_TOL_SHARES:
+        return "close", {}
+    has_pnl, has_at = _num(standing.get("pnl")) is not None, standing.get("settled_at") is not None
+    if status != "settled" or (has_pnl and has_at):
+        return "close", {}
+    detail: dict = {"row": book.get("standing_row_id"), "status_was": status, "ledger": ledger}
+    if has_pnl or has_at:
+        # one mark without the other is no writer this worker knows
+        detail["why"] = "settle_marks_partial"
+        return _standing_ambiguous(t, w, detail)
+    held = _num(standing.get("filled_shares"))
+    if held is None or abs(held - abs(ledger)) > mi.VENUE_LEDGER_TOL_SHARES:
+        detail["why"] = "row_shares_not_ledger"
+        return _standing_ambiguous(t, w, detail)
+    mk = await _market(t, book["condition_id"])
+    if mk is None or mk["closed"] is None or mk["resolved"] is None:
+        # the fold (review LOW-3): a row whose closed / resolved are NULL
+        # cannot say the market is live any more than a missing one can
+        detail["why"] = "market_unreadable"
+        return _standing_ambiguous(t, w, detail)
+    if mk["closed"] is not False or mk["resolved"] is not False or mk.get("resolved_prices") is not None:
+        return "close", {}
+    await _bbo(t, slug, book=True)
+    state = t.slug_states.get(slug)
+    detail["venue_state"] = state
+    if state in ms.STATE_TERMINAL:
+        return "close", {}
+    if state != _STATE_OPEN:
+        detail["why"] = "venue_state_not_open"
+        return _standing_ambiguous(t, w, detail)
+    return "reanchor", detail
+
+
+def _standing_ambiguous(t: _Tick, whale: str, detail: dict) -> tuple[str, dict]:
+    _mirror_stop("standing_row_ambiguous", whale)
+    _recent(None, "standing_row_ambiguous", **detail)
+    return "ambiguous", detail
+
+
+async def _reanchor_standing(t: _Tick, book: dict, standing: dict, detail: dict) -> bool:
+    """E17: the row back to 'filled' (its shares untouched: the read
+    just found them the ledger's), the plan naming
+    `standing_row_reanchored`, the book live on the next tick. The
+    UPDATE re-checks the two marks in its WHERE; 0 rows -- the venue
+    settled it between the read and the write, or anything else --
+    is `standing_row_reanchor_failed`: False, the close as before."""
+    w = book["whale"]
+    stamp = json.dumps({"at": float(t.now), "status_was": detail.get("status_was")})
+    try:
+        row = await t.pool.fetchrow(_SQL_STANDING_REANCHOR, book["standing_row_id"], stamp)
+    except Exception as exc:  # noqa: BLE001 — a failed write re-anchors nothing
+        log.warning("mirror_live: book %s re-anchor failed (%s)", book["id"], type(exc).__name__)
+        row = None
+    if not row:
+        _mirror_stop("standing_row_reanchor_failed", w)
+        _recent(book["id"], "standing_row_reanchor_failed", **detail)
+        return False
+    _mirror_stop("standing_row_reanchored", w)
+    _recent(book["id"], "standing_row_reanchored", **detail)
+    log.warning("mirror_live: book %s standing row %s re-anchored (%s, %s sh held, venue %s)",
+                book["id"], book.get("standing_row_id"), detail.get("status_was"), detail.get("ledger"),
+                detail.get("venue_state"))
+    await _write_plan(t, book, None, book.get("target"), None, None, book.get("his_level"),
+                      "standing_row_reanchored",
+                      {"kind": "no_plan", "at": t.now, "standing_row_reanchored": detail})
+    return True
+
+
+async def _prior_episode(t: _Tick, whale: str, cid: str) -> dict | None:
+    """E17: the newest closed book on the market that still holds
+    shares, or None (none, or unreadable -- the candidate then reads
+    the venue's shares as foreign, as before)."""
+    try:
+        row = await t.pool.fetchrow(_SQL_PRIOR_EPISODE, whale, cid)
+    except Exception as exc:  # noqa: BLE001 — unreadable: no prior, venue_already_holds as before
+        log.warning("mirror_live: prior episode for %s unreadable (%s)", cid, type(exc).__name__)
+        return None
+    return dict(row) if row else None
+
+
+async def _prior_dust_ours(t: _Tick, whale: str, cid: str, la: str, oa: str | None) -> dict | None:
+    """E17 fold (review HIGH-1): the identity behind a sub-share venue
+    residual -- the newest closed mirror book on the market whose
+    standing row is lane 'mirror' on one of its tokens -- or None
+    (none, or unreadable: the residual then reads as foreign,
+    `venue_already_holds` as before). Read only for a residual under
+    the tolerance, never on a whole-share figure."""
+    try:
+        row = await t.pool.fetchrow(_SQL_PRIOR_DUST_OURS, whale, cid, la, oa)
+    except Exception as exc:  # noqa: BLE001 — unreadable: no identity, venue_already_holds as before
+        log.warning("mirror_live: prior dust identity for %s unreadable (%s)", cid, type(exc).__name__)
+        return None
+    return dict(row) if row else None
+
+
+def _adopted_open(t: _Tick, fills: list, la: str, oa: str | None, short: bool, net: float,
+                  mark: float | None, ratio: float, target: int, cap_usd: float,
+                  shorts: bool, since: float, adopted: float) -> tuple[dict, int]:
+    """E17: _open_flow on the CLOSE CLOCK. The reopen's first sight is
+    the prior episode's close: his fills before it are the block (E12),
+    less the part the adopted shares already cover
+    (rules.adopted_block), his fills after it the flow the book opens
+    on. The verdict, the sizing and the cap are _open_flow's, byte for
+    byte; `column_absent` as there."""
+    if t.flow_col is not True:
+        return {"vwap": None, "mark": _num(mark), "tol": _num(rules.MIRROR_CATCHUP_TOL_CENTS),
+                "allowed": True, "flow_base": None, "why": "column_absent"}, target
+    block = rules.adopted_block(mi.pre_existing_block(net, fills, la, oa, since), adopted, ratio)
+    vwap = mi.vwap_of(fills, la, oa, short=short, before=since)
+    cu = rules.open_catchup(net, mark, ratio, block, vwap)
+    cu["since"] = since
+    fb = _num(cu.get("flow_base"))
+    if fb is None or cu.get("allowed") is True:
+        return cu, target
+    flow = mi.flow_net(net, fb)
+    ft = rules.mirror_target(ratio, flow, mark, rules.MIRROR_CLIP_USD, cap_usd=cap_usd,
+                             allow_short=shorts)
+    if ft.get("refusal") or ft.get("target") is None:
+        return cu, 0
+    ot = int(ft["target"])
+    return cu, (max(ot, target) if short else min(ot, target))
+
+
+def _prior_venue_settled(prior: dict) -> bool:
+    """E17: the prior episode's standing row carries the venue settle's
+    two marks (engine._settle_pmus_from_venue: pnl AND settled_at in one
+    statement) -- the venue's own word on the position."""
+    return (prior.get("row_status") == "settled" and _num(prior.get("row_pnl")) is not None
+            and prior.get("row_settled_at") is not None)
+
+
+async def _open_adopted_book(t: _Tick, w: str, cid: str, slug: str, la: str, oa: str | None,
+                             ratio: float | None, anchor: float | None, his_px: float, target: int,
+                             src: str | None, game_key: str | None, intent: str, prior: dict,
+                             adopted: float, flow_kw: dict) -> dict:
+    """E17: the adoption's open -- le._open_mirror_book's transaction
+    with the standing row REUSED. Migration 014's one-fill-per-asset
+    index holds 'settled' rows too, so a second 'filled' row on the
+    asset can never be inserted beside the prior's settled one: the
+    prior episode's own row -- 'settled' with NEITHER of the venue's
+    marks, its shares the ledger's -- is re-anchored to 'filled'
+    (_SQL_STANDING_REANCHOR, the same statement step M uses) and
+    becomes the new book's standing row; the book's opening ledger is
+    the adopted shares at the prior's cost (_SQL_BOOK_ADOPT; its
+    gross_buy_usd and peak_exposure_usd 0 -- the fold, review
+    MEDIUM-1: nothing was bought this episode, the prior keeps its
+    own). ONE transaction: any failure rolls every write back and is
+    named `open_failed:<Exc>` / `book_exists`, nothing half-opened."""
+    row_id = int(prior["standing_row_id"])
+    ac = _num(prior.get("avg_cost"))
+    out = {"ok": False, "book_id": None, "standing_row_id": None, "refusal": None}
+    fb, fl, fa = flow_kw.get("flow_base"), flow_kw.get("flow_last_net"), flow_kw.get("flow_last_at")
+    try:
+        async with t.pool.acquire() as conn:
+            async with conn.transaction():
+                if fb is None:
+                    book = await conn.fetchrow(le._MIRROR_BOOK_INSERT_SQL, w, cid, slug, game_key, la, oa,
+                                               intent, src, ratio, anchor, his_px, target)
+                elif fa is None:
+                    book = await conn.fetchrow(le._MIRROR_BOOK_INSERT_FLOW_SQL, w, cid, slug, game_key, la,
+                                               oa, intent, src, ratio, anchor, his_px, target, fb, fl)
+                else:
+                    book = await conn.fetchrow(le._MIRROR_BOOK_INSERT_CLOCK_SQL, w, cid, slug, game_key,
+                                               la, oa, intent, src, ratio, anchor, his_px, target, fb, fl, fa)
+                book_id, episode = int(book["id"]), int(book["episode"])
+                stamp = json.dumps({"at": float(t.now), "status_was": prior.get("row_status"),
+                                    "adopted_by": book_id, "episode": episode,
+                                    "from_book": prior.get("id"), "shares": adopted})
+                row = await conn.fetchrow(_SQL_STANDING_REANCHOR, row_id, stamp)
+                if not row:
+                    raise RuntimeError("the prior row is no longer a re-anchorable one")
+                await conn.execute(le._MIRROR_BOOK_BACKFILL_SQL, book_id, row_id)
+                a = await conn.execute(_SQL_BOOK_ADOPT, book_id, adopted, ac)
+                if not str(a).endswith(" 1"):
+                    raise RuntimeError(f"adopt wrote {a!r}")
+    except Exception as exc:  # noqa: BLE001 — every failure is named; the transaction rolled back
+        if le._names_constraint(exc, "mirror_books_one_open_per_market"):
+            out["refusal"] = "book_exists"
+        else:
+            out["refusal"] = f"open_failed:{type(exc).__name__}"
+        log.warning("mirror_live: adopted book not opened (%s %s): %s -- %s", w, slug, out["refusal"], exc)
+        return out
+    out.update(ok=True, book_id=book_id, standing_row_id=row_id)
+    log.info("mirror_live: book %s opened for %s on %s adopting %s sh of book %s (episode %s, row %s)",
+             book_id, w, slug, adopted, prior.get("id"), episode, row_id)
+    return out
 
 
 # --------------------------- E13: the venue's confirmed terminal state
@@ -6593,6 +6882,14 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     standing = await t.pool.fetchrow(_SQL_STANDING_READ, book["standing_row_id"])
     standing = dict(standing) if standing else None
     if standing is not None and standing.get("status") in ("settled", "cashed_out", "cancelled"):
+        # E17: a row retired while the book's market is LIVE by every
+        # reader re-anchors (the paragraph over _standing_row_verdict);
+        # the venue's own settle, a flat row, a reader that cannot
+        # tell: the close below, byte for byte as before
+        verdict, detail = await _standing_row_verdict(t, book, standing)
+        if verdict == "reanchor":
+            if await _reanchor_standing(t, book, standing, detail):
+                return
         await _cancel_open_for(t, book, "market_closed")
         # closed only once nothing of the book is non-terminal: a
         # cancel the ops budget refused, or an order 'unknown', still
@@ -10530,6 +10827,33 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
             first_fill_ok = None
     elif err is None and se is None:
         first_fill_ok = False
+    # E17 (PNL lane 5; book 204): the newest CLOSED book on this market
+    # that still holds shares. The venue's shares that ARE its ledger
+    # (rules.prior_episode_adoption: the same sign, within the D1 dust)
+    # are the prior episode's, not foreign -- admission lets the book
+    # open and the new episode adopts them below. A prior on the OTHER
+    # leg (his net flipped since) is handed to admission as no prior:
+    # `venue_already_holds` as before, nothing adopted against the leg.
+    # The fold (review LOW-1): the prior is read only when the venue's
+    # figure is a non-zero number -- the one shape that can adopt
+    vn = None if t.positions is None else _num(r.venue)
+    prior = await _prior_episode(t, w, cid) if vn is not None and vn != 0.0 else None
+    prior_ledger = _num(prior.get("ledger_net")) if prior else None
+    if prior_ledger is not None and (prior_ledger < 0.0) != short:
+        prior_ledger = None
+    # The fold (review HIGH-1; Martinez 12:10Z: 371.2 bought against 371
+    # sold, the venue +0.2, the INTEGER ledger 0, every later fill of his
+    # refused): a residual under mi.VENUE_LEDGER_TOL_SHARES that the
+    # prior read cannot adopt is the mirror's own dust WHEN a closed
+    # mirror book on the market has its standing row lane 'mirror' on one
+    # of the market's tokens (_prior_dust_ours: identity, never
+    # magnitude). The fact travels as the bool True only on that read;
+    # any whole-share residual, no such book, or the read failing keeps
+    # `venue_already_holds` as before
+    dust = None
+    if (vn is not None and vn != 0.0 and abs(vn) < float(mi.VENUE_LEDGER_TOL_SHARES)
+            and not rules.prior_episode_adoption(vn, prior_ledger)):
+        dust = await _prior_dust_ours(t, w, cid, la, oa)
     facts = rules.AdmissionFacts(
         increases_ok=_increases_refusal(t, w) is None,
         increases_refusal=_increases_refusal(t, w) or "mode_env_off",
@@ -10548,12 +10872,49 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
         # of him, so this is the flag that lets a book open at all --
         # and it is True only on a read this tick, for THIS condition,
         # that named at least one of its two tokens.
-        snap_market_fresh=r.snap_market_fresh)
+        snap_market_fresh=r.snap_market_fresh,
+        prior_episode_ledger=prior_ledger,
+        venue_dust_ours=(dust is not None))
     refusal = rules.admission(facts)
     if refusal:
         _mirror_stop(refusal, w)
         return str(refusal)
     intent = ORDER_INTENT_SHORT if short else ORDER_INTENT
+    # E17: the adoption, decided by the same rule admission read
+    vn = _num(facts.venue_net)
+    adopting = (prior is not None and vn is not None and vn != 0.0
+                and rules.prior_episode_adoption(vn, prior_ledger))
+    since_close = adopted = None
+    if adopting:
+        since_close = _num(prior.get("closed_ts"))
+        if since_close is None or since_close > t.now:
+            # the close clock unreadable: the reopen's first sight cannot
+            # be set, so nothing is sized -- refused by name (fail closed)
+            _mirror_stop("adopt_prior_unreadable", w)
+            return "adopt_prior_unreadable"
+        if _prior_venue_settled(prior):
+            # the prior's row carries the venue's own settle: its word on
+            # the position stands, nothing reopens against it (the walk's
+            # shares and the gamma row disagree with it: named, not traded).
+            # Named BEFORE the no-fill check (the fold, review LOW-4) so
+            # the census counts the venue-settled shape's dollars whether
+            # or not he has traded since the close
+            _mirror_stop("adopt_prior_venue_settled", w)
+            return "adopt_prior_venue_settled"
+        if not any(mi.is_flow(f, since_close) for f in fills):
+            # the reopen is on a fill of his AFTER the close; his older
+            # fills are the block (E12) and open nothing
+            _mirror_stop("adopt_no_fill_since_close", w)
+            return "adopt_no_fill_since_close"
+        rs = _num(prior.get("row_shares"))
+        if (prior.get("row_status") != "settled" or prior.get("row_lane") != "mirror" or rs is None
+                or abs(rs - abs(prior_ledger)) > mi.VENUE_LEDGER_TOL_SHARES
+                or prior.get("standing_row_id") is None):
+            # a row that is not the mirror's own 'settled' one holding the
+            # ledger's shares cannot be re-anchored: refused by name
+            _mirror_stop("adopt_prior_unreadable", w)
+            return "adopt_prior_unreadable"
+        adopted = float(prior_ledger)
     if short:
         # the two doors in front of every short open (H1, H2), after
         # admission so the census names the earlier gate first
@@ -10583,8 +10944,13 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     # first sight at the reference's clock before the crossing, so the
     # crossing fills are the new side's flow; else the window as today
     flip_since = await _flip_since(t, w, cid)
-    cu, open_target = _open_flow(t, fills, la, oa, short, fills_net, r.mark, ratio, target,
-                                 min(room, cap), shorts, since=flip_since)
+    if adopting:
+        # E17: the reopen's first sight is the prior episode's close
+        cu, open_target = _adopted_open(t, fills, la, oa, short, fills_net, r.mark, ratio, target,
+                                        min(room, cap), shorts, since_close, adopted)
+    else:
+        cu, open_target = _open_flow(t, fills, la, oa, short, fills_net, r.mark, ratio, target,
+                                     min(room, cap), shorts, since=flip_since)
     # the block travels only when there is one to store (the columns
     # present, a verdict made): an old-rule open is the pre-E12 call.
     # E12b: the reference's clock with it (mi.fills_clock, the newest
@@ -10594,9 +10960,15 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
                                                        "flow_last_net": fills_net}
     if flow_kw and t.flow_clock_col is True:
         flow_kw["flow_last_at"] = mi.fills_clock(fills, t.now)
-    opened = await le._open_mirror_book(t.pool, w, cid, slug, la, oa, tg["ratio_eff"], anchor,
-                                        his_px, open_target, m.get("source"), game_key,
-                                        intent=intent, **flow_kw)
+    if adopting:
+        # E17: the prior episode's own row re-anchored as the standing row
+        opened = await _open_adopted_book(t, w, cid, slug, la, oa, tg["ratio_eff"], anchor, his_px,
+                                          open_target, m.get("source"), game_key, intent, prior,
+                                          adopted, flow_kw)
+    else:
+        opened = await le._open_mirror_book(t.pool, w, cid, slug, la, oa, tg["ratio_eff"], anchor,
+                                            his_px, open_target, m.get("source"), game_key,
+                                            intent=intent, **flow_kw)
     if not opened.get("ok"):
         refused = str(opened.get("refusal") or "open_failed")
         _mirror_stop(refused, w)
@@ -10617,6 +10989,21 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     book = dict(book)
     if int(book.get("episode") or 1) > 1:
         await t.pool.execute(_SQL_BOOK_REOPENS, book["id"], int(book["episode"]) - 1)
+    if adopting:
+        # E17: the prior episode's shares are this one's opening ledger
+        # at its cost (_open_adopted_book); the first plan names it
+        book["_adopted"] = {"book": prior.get("id"), "row": prior.get("standing_row_id"),
+                            "episode": prior.get("episode"), "shares": adopted,
+                            "avg_cost": _num(prior.get("avg_cost")), "closed_at": since_close}
+        _mirror_stop("adopted_prior_episode", w)
+        _recent(book["id"], "adopted_prior_episode", **book["_adopted"])
+    elif dust is not None:
+        # E17 fold (HIGH-1): the book opened at ledger 0 beside the
+        # mirror's own sub-share dust (the freeze reads |venue - ledger|
+        # within the tolerance as agreement); the first plan names it
+        book["_venue_dust"] = {"venue": vn, "prior_book": dust.get("id")}
+        _mirror_stop("venue_dust_ours", w)
+        _recent(book["id"], "venue_dust_ours", **book["_venue_dust"])
     book["_catchup"] = cu               # the open's verdict, on the book's first plan (_write_plan)
     _recent(book["id"], "opened", whale=w, slug=slug, target=open_target, ratio=tg["ratio_eff"],
             intent=(intent if short else None), flow_base=cu.get("flow_base"), catchup=cu.get("why"))

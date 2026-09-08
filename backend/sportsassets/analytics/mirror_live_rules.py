@@ -1240,6 +1240,80 @@ class AdmissionFacts:
     # read) is the fail-closed default, and nothing but the bool True
     # admits.
     snap_market_fresh: bool | None = None
+    # E17 (2026-09-08, PNL lane 5): the ledger of the newest CLOSED
+    # mirror book on this whale and condition that still holds shares
+    # (book 204: closed "standing row settled" at 18:48Z on a live
+    # market with our 13 sh on the venue; he added 6,350 sh after and
+    # every candidate was refused `venue_already_holds` on our own
+    # shares). None -- no such book, or unread -- is the fail-closed
+    # default: the venue's shares then refuse as before. Appended LAST.
+    prior_episode_ledger: float | None = None
+    # E17 fold (2026-09-08, review HIGH-1; Martinez 12:10Z: the flip
+    # close's IOC bought 371.2 against 371 sold, the venue +0.2, the
+    # INTEGER ledger 0, every later fill of his refused
+    # `venue_already_holds`). The IDENTITY read by the worker: a CLOSED
+    # mirror book on this whale and condition whose standing row is lane
+    # 'mirror' on the market's asset exists -- the venue's sub-share
+    # residual beside it is the mirror's own dust. Honoured only as the
+    # bool True, and only with |venue| under mi.VENUE_LEDGER_TOL_SHARES
+    # (venue_dust_is_ours); False (not read) refuses as before. Appended
+    # LAST, after prior_episode_ledger.
+    venue_dust_ours: bool | None = False
+
+
+def venue_dust_is_ours(venue_net: Any, ours: Any) -> bool:
+    """E17 fold (HIGH-1): the venue's figure on the slug is a sub-share
+    residual -- non-zero, |venue| < mi.VENUE_LEDGER_TOL_SHARES (the D1
+    dust the freeze reads as agreement with a ledger of 0) -- AND the
+    worker read the identity (`ours` is the bool True: a closed mirror
+    book on the market whose standing row is lane 'mirror' on the
+    asset). Any residual at or over the tolerance, an unreadable
+    figure, the identity not read: False -- `venue_already_holds`
+    stands. Never a magnitude match against a ledger; never loosens
+    admission's `vn != 0.0`. Pure."""
+    vn = _num(venue_net)
+    if vn is None or ours is not True:
+        return False
+    return vn != 0.0 and abs(vn) < float(mi.VENUE_LEDGER_TOL_SHARES)
+
+
+def prior_episode_adoption(venue_net: Any, prior_ledger: Any) -> bool:
+    """E17: the venue's shares on the slug ARE a closed mirror book's
+    ledger -- both numbers, the prior a held position (|prior| >=
+    mi.VENUE_LEDGER_TOL_SHARES), the same sign, and |venue - prior| <=
+    mi.VENUE_LEDGER_TOL_SHARES (the D1 dust, the tolerance the freeze
+    reads the same pair at). Any other magnitude, a sign against, a
+    flat prior, an unreadable figure: False -- `venue_already_holds`
+    stands. Pure."""
+    vn, pr = _num(venue_net), _num(prior_ledger)
+    if vn is None or pr is None:
+        return False
+    tol = float(mi.VENUE_LEDGER_TOL_SHARES)
+    if abs(pr) < tol or (pr > 0) != (vn > 0):
+        return False
+    return abs(vn - pr) <= tol
+
+
+def adopted_block(block: Any, adopted: Any, ratio: Any) -> float | None:
+    """E17: the block the adopted shares already cover. The prior
+    episode bought `adopted` shares of his pre-close net; on the new
+    episode that net is the block (E12: fills older than the close
+    clock), and the part the adopted shares stand for -- adopted /
+    ratio on the block's axis -- is already ours, so it is taken off
+    the block, clamped between 0 and the block (never past the block,
+    never across zero). An unreadable adopted figure or ratio leaves
+    the block whole (fail closed: a larger block is less flow, nothing
+    more bought); a block of None stays None."""
+    b = _num(block)
+    if b is None:
+        return None
+    a, r = _num(adopted), _num(ratio)
+    if a is None or r is None or r <= 0.0:
+        return b
+    covered = a / r
+    if b >= 0.0:
+        return max(0.0, min(b, b - max(0.0, covered)))
+    return min(0.0, max(b, b - min(0.0, covered)))
 
 
 def _why(v: Any) -> str:
@@ -1299,7 +1373,16 @@ def admission(f: AdmissionFacts, increase: bool = False) -> str | None:
     vn = _num(f.venue_net)
     if vn is None:
         return "positions_unreadable"
-    if vn != 0.0:
+    # E17: the venue's shares that are exactly a closed mirror book's
+    # ledger on this market are the prior episode's, adopted by the new
+    # one (prior_episode_adoption; the worker names `adopted_prior_episode`
+    # and carries them as the opening ledger); any other magnitude refuses.
+    # E17 fold (HIGH-1): a sub-share residual beside a closed mirror book
+    # on the market (venue_dust_is_ours: the identity read True AND
+    # |venue| under the tolerance) is the mirror's own dust and admits;
+    # the worker names `venue_dust_ours` and opens the book at ledger 0
+    if (vn != 0.0 and not prior_episode_adoption(vn, f.prior_episode_ledger)
+            and not venue_dust_is_ours(vn, f.venue_dust_ours)):
         return "venue_already_holds"
     if f.kalshi_claimed is not False:
         return "kalshi_claimed"
@@ -2659,7 +2742,8 @@ __all__ = [
     "FLAT_TOL_SHARES", "SELL_DUST_SHARES",
     "P2_MAKER_SHARE_MIN", "P2_TAKE_SLIP_MAX", "P2_FROZEN_TICK_FRAC_MAX", "P2_CAPTURE_MIN",
     "P2_INTEGRITY_COUNTERS",
-    "mirror_target", "AdmissionFacts", "admission",
+    "mirror_target", "AdmissionFacts", "admission", "prior_episode_adoption", "adopted_block",
+    "venue_dust_is_ours",
     "buy_wire", "sell_wire", "buy_price", "sell_price", "plan_wire", "room_scale",
     "OpenOrder", "plan_reason_key", "keep_or_replace", "rest_decision", "replace_decision",
     "order_decision", "MIRROR_REST_MIN_LIFE_S", "REST_MIN_LIFE_CENT_MOVE",

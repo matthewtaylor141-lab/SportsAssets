@@ -776,10 +776,10 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     assert "WHERE NOT d.collapsed" in src and "ORDER BY d.ts, d.id" in src
     keys = ml.CENSUS_KEYS
     # E12 moved the tail by its three names (-65 -> -68, -66 -> -69), E13 by
-    # its one (-68 -> -69, -69 -> -70), E16 by its four and E18 by its six
-    # (-69 -> -79, -70 -> -80), the convention every builder followed; E9's four stay keys[-8:-4]
-    assert keys[-79:-75] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-80] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # its one (-68 -> -69, -69 -> -70), E16 by its four, E18 by its six and E17 by
+    # its eight (-69 -> -87, -70 -> -88), the convention every builder followed; E9's four stay keys[-8:-4]
+    assert keys[-87:-83] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-88] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence
