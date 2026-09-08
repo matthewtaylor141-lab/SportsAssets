@@ -227,7 +227,7 @@ def test_the_exits_paired_help_line_is_the_case_labels_after_nf_venue_with_hourl
     hourly_sql, _ = _preset(text, "hourly")
     assert "exits-paired" not in hourly_sql and STUCK not in hourly_sql and "his_exit_from" not in hourly_sql
     assert "AS leg," not in hourly_sql
-    hourly.test_the_hourly_preset_is_the_five_presets_sql_joined_under_section_markers()
+    hourly.test_the_hourly_preset_is_the_eight_presets_sql_joined_under_section_markers()
     hourly.test_the_hourly_preset_is_read_only_with_its_own_output_cap_and_timeout()
     hourly.test_the_help_line_is_the_case_labels_with_hourly_last()
     # the comment block over the preset names the rule the columns read by

@@ -1,10 +1,11 @@
-"""The `hourly` render-ops preset (2026-09-08): the five read-only presets
-the hourly status reads, joined into ONE job under '== name' section
-markers, so the hour's numbers come from one log. The pins: the joined
-text equals the five presets' own SQL (an edit to one of them that
-forgets the hourly line fails here), the markers sit in order, the
-preset is read-only, its output cap is its own, the help line is the
-case labels regenerated.
+"""The `hourly` render-ops preset (2026-09-08): the read-only presets
+the hourly status reads -- five at first, eight since the PNL program's
+lane M added paired-ratio, fills-missed and on-target-why -- joined into
+ONE job under '== name' section markers, so the hour's numbers come from
+one log. The pins: the joined text equals the presets' own SQL (an edit
+to one of them that forgets the hourly line fails here), the markers sit
+in order, the preset is read-only, its output cap is its own, the help
+line is the case labels regenerated.
 """
 from __future__ import annotations
 
@@ -12,7 +13,8 @@ import re
 from pathlib import Path
 
 YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
-PARTS = ("mirror-tick", "mirror-pnl", "paired-day", "latency-census", "fills-answered")
+PARTS = ("mirror-tick", "mirror-pnl", "paired-day", "paired-ratio", "latency-census", "fills-answered",
+         "fills-missed", "on-target-why")
 
 
 def _sql(text: str, name: str) -> str:
@@ -21,15 +23,18 @@ def _sql(text: str, name: str) -> str:
     return m.group(1)
 
 
-def test_the_hourly_preset_is_the_five_presets_sql_joined_under_section_markers():
+def test_the_hourly_preset_is_the_eight_presets_sql_joined_under_section_markers():
     text = YML.read_text()
     hourly = _sql(text, "hourly")
     expected = " ".join(
         "SELECT '== %s' AS section; %s" % (n, _sql(text, n).rstrip().rstrip(";") + ";") for n in PARTS
     )
-    assert hourly == expected, "the hourly line is the five presets' SQL joined; regenerate it"
+    assert hourly == expected, "the hourly line is the eight presets' SQL joined; regenerate it"
     markers = re.findall(r"SELECT '== ([a-z-]+)' AS section;", hourly)
     assert tuple(markers) == PARTS
+    # lane M: the paired ratio's one line, the mirror's own filled-vs-missed and the on_target causes
+    assert "AS line FROM (SELECT count(*) AS markets" in hourly and "first_verdict_after_his_last" not in hourly
+    assert "'missed_expired_ioc'" in hourly and "'stale_snapshot'" in hourly
 
 
 def test_the_hourly_preset_is_read_only_with_its_own_output_cap_and_timeout():

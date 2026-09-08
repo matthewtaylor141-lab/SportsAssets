@@ -5594,8 +5594,20 @@ async def _write_plan(t: _Tick, book: dict, r: _Reading | None, target, target_r
         net = mi.his_net(r.his_long, r.his_other)
     book["last_reason"] = reason
     # E12: the open's verdict on his block (_tick_candidate's `catchup`),
-    # on the book's FIRST plan whatever path writes it
+    # on the book's FIRST plan whatever path writes it -- and carried from
+    # the prior plan onto every later one (PNL lane M fold, HIGH-5,
+    # 2026-09-08: the plan is built fresh each tick, so the verdict lived
+    # on the first plan alone and flow-books read `unread` past it), the
+    # way _fills_seen carries his_fills_seen. The quiet skip's plan does
+    # NOT carry it (_SKIP_CARRIED is E6's pinned contract, not widened by
+    # that fold; its UPDATE replaces the plan), so a book quiet-skipped
+    # before its next read loses the verdict and flow-books reads
+    # `unread` from there. Nothing in the worker reads it back: a
+    # measure, never a decision
     cu = book.pop("_catchup", None)
+    if cu is None:
+        prior = _jsonish(book.get("last_plan")) or {}
+        cu = prior.get("catchup") if isinstance(prior, dict) else None
     if cu is not None:
         plan["catchup"] = cu
     # E9 part 1: every fill of his the tick holds, answered or named on
