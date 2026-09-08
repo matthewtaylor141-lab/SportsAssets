@@ -254,6 +254,11 @@ class _Pool(_ShadowPool):
         # only let the 050 day read go out against a column that was
         # not there, unseen: P2 rung S0 review, migration lens)
         self.no_intent_column = False
+        # THE DATABASE BEFORE MIGRATION 057 (E12): every statement that
+        # names mirror_books.flow_base -- the guard, the book reads, the
+        # flow INSERT, the ratchet's write -- is UndefinedColumnError,
+        # the way Postgres answers it
+        self.no_flow_column = False
         self.lost_24h = 0.0
         self.caps = {"day": 0.0, "total": 0.0}
         self.sent = []
@@ -274,6 +279,8 @@ class _Pool(_ShadowPool):
                 "standing_row_id": standing_row_id, "episode": 1, "flat_reopens": 0,
                 "state": state, "frozen_reason": None, "frozen_ts": None, "frozen_ticks": 0,
                 "target": target, "target_raw": None, "his_net": None, "ledger_net": ledger,
+                # E12 (migration 057): NULL on every fixture book = the old rule
+                "flow_base": None, "flow_last_net": None,
                 "venue_net": None, "open_order_id": None, "take_armed_ts": None,
                 "last_reason": None, "last_plan": None, "gross_buy_usd": gross_buy,
                 "gross_sell_usd": 0.0, "peak_exposure_usd": gross_buy, "avg_cost": avg_cost,
@@ -381,6 +388,8 @@ class _Pool(_ShadowPool):
                 raise exc
         if self.no_intent_column and "mirror_orders" in s and "intent" in s:
             raise _UndefinedColumn('column "intent" does not exist')
+        if self.no_flow_column and "flow_base" in s:
+            raise _UndefinedColumn('column "flow_base" does not exist')
         if "ml-table-guard" in s:
             if self.tables_absent:
                 raise _Undefined('relation "mirror_books" does not exist')
@@ -401,11 +410,28 @@ class _Pool(_ShadowPool):
                     o.pop("intent", None)
             return rows
         if "ml-books-open" in s:
-            return [dict(b) for b in sorted(self.books.values(), key=lambda b: (b["updated_ts"], b["id"]))
+            rows = [dict(b) for b in sorted(self.books.values(), key=lambda b: (b["updated_ts"], b["id"]))
                     if b["state"] != "closed"]
+            # the projection the statement asks for: the 056 shape names
+            # no flow column, so the rows it hands back carry no such key
+            if "flow_base" not in s:
+                for b in rows:
+                    b.pop("flow_base", None)
+                    b.pop("flow_last_net", None)
+            return rows
         if "ml-book-read" in s:
             b = self.books.get(a[0])
-            return dict(b) if b else None
+            if not b:
+                return None
+            row = dict(b)
+            if "flow_base" not in s:
+                row.pop("flow_base", None)
+                row.pop("flow_last_net", None)
+            return row
+        if "ml-book-flow" in s:
+            # E12: the ratchet's write -- the block and the net it was read at
+            self.books[a[0]].update(flow_base=a[1], flow_last_net=a[2])
+            return "UPDATE 1"
         if "ml-books-count" in s:
             return {"live": sum(1 for b in self.books.values() if b["state"] != "closed"),
                     "today": sum(1 for b in self.books.values() if b["opened_ts"] > NOW - 86400)}
@@ -725,7 +751,11 @@ class _Pool(_ShadowPool):
             b.update(whale=a[0], condition_id=a[1], us_market_slug=a[2], game_key=a[3],
                      long_asset=a[4], other_asset=a[5], intent=a[6], map_source=a[7],
                      anchor_usd=a[9], his_level=a[10], target=a[11], episode=episode,
-                     updated_ts=NOW)
+                     updated_ts=NOW,
+                     # E12: the flow-carrying INSERT's two parameters, else
+                     # the columns' NULL (the 056-shaped statement)
+                     flow_base=a[12] if len(a) > 12 else None,
+                     flow_last_net=a[13] if len(a) > 13 else None)
             self.books[bid] = b
             return {"id": bid, "episode": episode}
         if "INSERT INTO live_orders" in s:
@@ -4773,7 +4803,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-65:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-68:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4820,6 +4850,10 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E5 review: the fill-this-tick refusal, the unexplained surplus, the
                           # registered book's no-increase -- before the last key
                           "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
+                          # E12: a book opened on his flow (the block never bought), one
+                          # opened on his whole net (the block admitted), the 057 probe
+                          # failing for any reason but absence -- before E9's four
+                          "open_flow_only", "open_catchup", "flow_guard_unreadable",
                           # E7: the no_mark memo's skip and a candidate memo released
                           # by his fill, before E6's key (which the E6 pins hold at -2)
                           # E9: the wake fast path's four names, before E7's pair (whose
@@ -4830,7 +4864,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-66] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-69] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -6087,7 +6121,11 @@ def test_shorts_are_on_by_default_and_a_short_sizes_by_the_same_rule(monkeypatch
     while le._SHORT_LOCK.locked():
         le._SHORT_LOCK.release()
     assert le.short_model_confirmed() is True, "by construction (live_executor)"
-    p = _pool(fills=_his(100, other_size=3100, other_px=0.72), snap={M: 100.0, N: 3100.0})
+    # E12: his other-token BUYs at 0.70 (0.30 on the axis, a cent from
+    # the 0.31 mark) so the block he built before first sight is admitted
+    # and the book opens on his whole net, as this pin was written; at
+    # 0.72 (three cents) it opens on his flow alone (test_e12_flow_only)
+    p = _pool(fills=_his(100, other_size=3100, other_px=0.70), snap={M: 100.0, N: 3100.0})
     v = _Venue()
     st = _tick(p, v, http=_mkt(100.0, 3100.0))
     b = next(iter(p.books.values()))
@@ -12722,6 +12760,16 @@ def test_e9_the_fast_path_names_are_emitted_here_too(monkeypatch, caplog):
     e9.test_e9_the_budget_is_shared_with_the_full_tick()
     e9.test_e9_a_failing_fast_tick_names_fast_tick_failed_and_the_full_tick_reads_the_market(caplog)
     for k in ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed"):
+        assert k in SEEN, k
+
+
+def test_e12_the_flow_names_are_emitted_here_too(monkeypatch, caplog):
+    """E12's three names are driven in tests/test_e12_flow_only.py; run
+    here as well so the coverage read below sees them when this file
+    runs alone (E9's convention)."""
+    from tests import test_e12_flow_only as e12
+    e12.test_e12_every_name_is_emitted_here(monkeypatch, caplog)
+    for k in ("open_flow_only", "open_catchup", "flow_guard_unreadable"):
         assert k in SEEN, k
 
 

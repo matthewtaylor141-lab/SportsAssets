@@ -771,8 +771,10 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     assert "(COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed" in src
     assert "WHERE NOT d.collapsed" in src and "ORDER BY d.ts, d.id" in src
     keys = ml.CENSUS_KEYS
-    assert keys[-65:-61] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-66] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # E12 moved the tail by its three names (-65 -> -68, -66 -> -69), the
+    # convention every builder followed; E9's four stay keys[-8:-4]
+    assert keys[-68:-64] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-69] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence

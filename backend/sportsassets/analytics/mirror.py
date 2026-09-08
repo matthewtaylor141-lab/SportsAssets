@@ -47,6 +47,7 @@ import statistics
 from dataclasses import dataclass, field
 from typing import Any, Iterable
 
+from ..ingestion.shadow_v2 import LATE_POLL_ROW_S
 from .roster_rules import MIRROR_ANCHOR_CLIP_USD
 
 # A whale's opening move is a BURST of fills, not one fill (RN1 loaded
@@ -280,6 +281,281 @@ def target_shares(ratio: float | None, net: float, mark: float | None,
     return {"target": tgt, "raw": round(raw, 4), "capped": capped, "why": None}
 
 
+# ------------------------------------------ E12: his FLOW from first sight
+#
+# docs/mirror-to-a-tee-program.md decision 13 (2026-09-08): "(A) follow
+# only his flow from first sight (Rule LE, pro-rata ratchet); (B) build
+# r x his_net into his open book at his newest level (today's code);
+# ... RECOMMENDATION: (A) now ...; (B) never." And D25's amendment of
+# the ratchet, verbatim: "Amended to PRO-RATA on reductions: `block_t =
+# block_{t-1} x net_t/net_{t-1}` when net falls, unchanged on
+# increases, 0 on a crossing to <= 0." THE BLOCK is his net on the
+# book's long-token axis that stood before we saw the market: never
+# bought (the 03:22Z paired day: ours 0.71 vs his 0.287 on the losers
+# opened late). What the target is sized on is his net LESS the block.
+# Pure; the live worker stores the block (`mirror_books.flow_base`) and
+# the net it was last read against (`flow_last_net`) and hands both
+# back every tick. Every number is read by _num_r: a bool, a string,
+# NaN or an infinity is unreadable, and unreadable is answered None --
+# the caller names it (no_position), never a guess.
+#
+# THE FOLD (2026-09-08; the review of E12). HIGH-1: the ingest clock
+# alone read a backfilled or reconciled OLD fill as the flow that woke
+# the market (ingestion/history.py stamps `detected_at` at the backfill,
+# an S1 reconciliation row at its insertion), and the book opened on it
+# at his NEWEST cent -- the block, bought, by the back door. A fill is
+# the FLOW only when BOTH clocks say so (is_flow): its ingest clock
+# inside the window AND its own stamp not older than the window's start
+# by more than LATE_FILL_S. HIGH-2: the ratchet moves ONLY on a fall his
+# FILLS witness -- the fills' net (his_net over net_positions) moves
+# only when a fill of his is ingested and falls only on a SELL of the
+# long token or a BUY of the other -- so the block, its reference
+# (`flow_last_net`) and the ratchet live on the FILLS' axis, and the
+# tick's two-source reading never moves the block and never sizes a
+# flow book: it is compared with the fills' arithmetic and named on the
+# plan when it disagrees (flow_reading). THE MEDIUMS, said, not built:
+# MEDIUM-1, first sight is the FIRST_SIGHT_S window before the OPEN,
+# not before our first look -- a market we map late (an `unmapped` or
+# no-mark memo, a read the walk's cap deferred, a loss stop) reads his
+# fills in the meantime as the block, by design under (A): the mirror
+# buys the flow it could have answered, never his history at the
+# current price, and the 2c allowance admits the rest (the 03:22Z
+# paired day: his fill reached our first order after more than 60 s on
+# 9 of 29 books -- 105 to 1,315 s -- and each of those opens is a
+# flow-only open unless the allowance admits it). MEDIUM-2: a sign-flip
+# reopen is flow-only -- the flip's close needs the venue read at 0 and
+# the reopen the tick after, so his crossing fills are at least two
+# ticks old at the reopen and are the new side's block; target 0 unless
+# the mark is within the allowance of his cost on the new side (the
+# short axis reads his other-token BUY at 1 - p). MEDIUM-3, a
+# FOLLOW-UP: vwap_of reads BUYs alone (the long token at p; a short's
+# other token at 1 - p), so a long he built by SELLING the other token
+# reads `vwap_unread` and the book opens flow-only at the exact mark --
+# fail-closed, a missed follow, not money; the fix (a SELL of the other
+# token at 1 - p on a long book, the mirror image on a short) is not
+# one line and is not in this change.
+
+def _num_r(v: Any) -> float | None:
+    if isinstance(v, (bool, str)) or v is None:
+        return None
+    try:
+        x = float(v)
+    except (TypeError, ValueError):
+        return None
+    return x if x == x and x not in (float("inf"), float("-inf")) else None
+
+
+def fill_clock(f: Any) -> float | None:
+    """When WE learned of the fill: the ingest's `detected_at`, else the
+    fill's own stamp `ts`. None when neither reads -- an unclocked fill
+    is an OLD one, the block's side (not bought), never the flow's."""
+    d = f if isinstance(f, dict) else getattr(f, "__dict__", None)
+    if not isinstance(d, dict):
+        return None
+    for k in ("detected_at", "ts"):
+        v = _num_r(d.get(k))
+        if v is not None:
+            return v
+    return None
+
+
+# THE LATE ROW (the fold, HIGH-1): the poll lane's own late-row allowance,
+# ingestion/shadow_v2.LATE_POLL_ROW_S (900 s: "detected_at - ts beyond
+# this = reconciler artifact"), reused rather than a second number for
+# the same fact -- a row whose ingest clock trails its stamp by more
+# than this is the reconciler's or the backfill's, not the poll's (whose
+# lag is minutes), and a fill of his that old was not answered by
+# anything: the block's side, whatever its ingest clock says. The poll
+# lane's ~281 s lag stays flow.
+LATE_FILL_S = float(LATE_POLL_ROW_S)
+
+
+def is_flow(f: Any, since: float | None, late_s: float = LATE_FILL_S) -> bool:
+    """The fill is FLOW from first sight -- answered as any fill of his
+    is -- only when BOTH clocks say so: its ingest clock (fill_clock) at
+    or after `since` AND its own stamp `ts` not older than `since` by
+    more than `late_s`. `since` None reads every fill as old; an
+    unclocked or unstamped fill is old (the block's side, not bought);
+    an unreadable `late_s` admits nothing past the window's start."""
+    if since is None:
+        return False
+    at = fill_clock(f)
+    if at is None or at < float(since):
+        return False
+    d = f if isinstance(f, dict) else getattr(f, "__dict__", None)
+    ts = _num_r(d.get("ts")) if isinstance(d, dict) else None
+    late = _num_r(late_s)
+    late = 0.0 if late is None or late < 0.0 else late
+    return ts is not None and ts >= float(since) - late
+
+
+def _signed_size(f: dict, long_asset: str | None, other_asset: str | None) -> float | None:
+    """The fill's move of his net in long-token shares: BUY of the long
+    token +, SELL of it -, BUY of the other token -, SELL of it +. None
+    for a token that is neither, or an unreadable size."""
+    a, side = str(f.get("asset") or ""), str(f.get("side") or "").upper()
+    size = _num_r(f.get("size"))
+    if size is None or size <= 0 or side not in ("BUY", "SELL"):
+        return None
+    if long_asset and a == long_asset:
+        return size if side == "BUY" else -size
+    if other_asset and a == other_asset:
+        return -size if side == "BUY" else size
+    return None
+
+
+def pre_existing_block(net: Any, fills: Iterable[dict], long_asset: str | None,
+                       other_asset: str | None, since: float | None,
+                       late_s: float = LATE_FILL_S) -> float | None:
+    """THE BLOCK AT FIRST SIGHT: his net on the axis less the fills that
+    are flow (is_flow: ingested at or after `since` AND stamped no more
+    than `late_s` before it) -- the flow that brought the market to us,
+    answered as any fill of his is -- clamped to the axis: never past
+    his net, never across zero (he built 12,000 while nobody watched
+    and added 1,000 as we looked: the block is 12,000 of his 13,000; he
+    bought 1,000 and sold 500 inside the window on a net of 400: the
+    block is 0, not -100). `net` is HIS FILLS' net (the axis the block
+    and its ratchet live on). `since` None reads every fill as old: the
+    whole net is the block. None on an unreadable net."""
+    n = _num_r(net)
+    if n is None:
+        return None
+    recent = 0.0
+    if since is not None:
+        for f in fills or ():
+            if not isinstance(f, dict) or not is_flow(f, since, late_s):
+                continue
+            s = _signed_size(f, long_asset, other_asset)
+            if s is not None:
+                recent += s
+    b = n - recent
+    if n >= 0:
+        return round(min(max(0.0, b), n), 6)
+    return round(max(min(0.0, b), n), 6)
+
+
+def flow_net(net: Any, block: Any) -> float | None:
+    """The net the target is sized on under Rule LE: his net less the
+    block, on the block's side of zero and never under it (a 12,000
+    block on a net of 13,000 is a flow of 1,000; on a net of 11,500 --
+    a fall the ratchet has not yet read -- a flow of 0, never -500).
+    His WHOLE net when the block is 0 (nothing pre-existing, or the
+    ratchet zeroed it) or his net has crossed to the other sign (the
+    sign flip keeps its rule). None when either is unreadable."""
+    n, b = _num_r(net), _num_r(block)
+    if n is None or b is None:
+        return None
+    if b == 0.0 or n == 0.0 or (n > 0) != (b > 0):
+        return round(n, 6)
+    if b > 0:
+        return round(max(0.0, n - b), 6)
+    return round(min(0.0, n - b), 6)
+
+
+def pre_existing_ratchet(block: Any, last_net: Any, net: Any) -> float | None:
+    """D25, in its words: `block_t = block_{t-1} x net_t/net_{t-1}` when
+    net falls, unchanged on increases, 0 on a crossing to <= 0 -- read
+    on the block's axis (a short book's block is negative and "falls"
+    toward zero). So a 25% sale by him is a 25% reduce by us, and his
+    full exit is our full exit; an increase after a reduction leaves
+    the ratcheted block where it is (never restored). `last_net` is
+    net_{t-1}, his net the block was last read against; unreadable, the
+    block itself stands in (the state at open). None on an unreadable
+    block or net (the caller sizes nothing on it).
+
+    BOTH NETS ARE HIS FILLS' (the fold, HIGH-2): net_t and net_{t-1}
+    are his_net over net_positions of the fills the tick holds, which
+    move only when a fill of his is ingested and fall only on a SELL of
+    the long token or a BUY of the other -- so a fall here IS a fall
+    his fills witness, by their arithmetic (net_t = net_{t-1} less the
+    reduction they carry), and a reading of the venue that wobbles or
+    reads zero (D1's merged pair) never reaches this function. The
+    reading's own verdict is flow_reading's."""
+    b, n = _num_r(block), _num_r(net)
+    if b is None or n is None:
+        return None
+    if b == 0.0:
+        return 0.0
+    s = 1.0 if b > 0 else -1.0
+    ln = _num_r(last_net)
+    ln = b if ln is None else ln
+    bn, lnn, nn = b * s, ln * s, n * s
+    if nn <= 0.0:
+        return 0.0                              # a crossing to <= 0
+    if lnn > 0.0 and nn < lnn:
+        return round(min(bn * nn / lnn, nn) * s, 6)      # falls: pro rata (never past the net)
+    return round(min(bn, nn) * s, 6)                     # unchanged on increases
+
+
+FLOW_READING_ZERO = "flow_reading_zero"
+FLOW_READING_DISAGREE = "flow_reading_disagree"
+
+
+def flow_reading(reading: Any, fills_net: Any, dust: float = VENUE_LEDGER_TOL_SHARES) -> str | None:
+    """THE TICK'S READING AGAINST HIS FILLS' ARITHMETIC (the fold,
+    HIGH-2), for the plan's `flow_reading`. A flow book is sized on his
+    fills' net (flow_net over the block, which pre_existing_ratchet
+    moves by the fills alone); the two-source reading the tick made
+    (the per-market read, the walk, the smaller of two disagreeing
+    readings) is compared with it and NAMED when it disagrees, never
+    obeyed: None when it agrees within `dust` (one share, D1's "to the
+    share" -- VENUE_LEDGER_TOL_SHARES, the tolerance the worker's
+    _fresh_agreed reads the same pair at); `flow_reading_zero` when it
+    reads zero against fills that say he holds (D1's merged pair, a
+    blip: the old rule's zero-read flatten and, under E12, the re-buy
+    of his whole block next tick -- neither now); `flow_reading_disagree`
+    otherwise (a 0.9% wobble inside MIRROR_DRIFT_MAX, which ratcheted
+    the block and bought part of it next tick; a venue reading past the
+    fills, which sized a buy his fills never made). Either unreadable:
+    `flow_reading_disagree` -- a reading that was not made agrees with
+    nothing. Pure."""
+    r, n = _num_r(reading), _num_r(fills_net)
+    if r is None or n is None:
+        return FLOW_READING_DISAGREE
+    d = _num_r(dust)
+    d = 0.0 if d is None or d < 0.0 else d
+    if abs(r - n) <= d:
+        return None
+    if r == 0.0:
+        return FLOW_READING_ZERO
+    return FLOW_READING_DISAGREE
+
+
+def vwap_of(fills: Iterable[dict], long_asset: str | None, other_asset: str | None,
+            short: bool = False, before: float | None = None,
+            late_s: float = LATE_FILL_S) -> float | None:
+    """His size-weighted BUY price on the book's axis -- the long token
+    at p; on a SHORT book the other token at 1 - p, the way his level is
+    read -- over the BLOCK's fills: those that are not flow from
+    `before` (is_flow, the same cut pre_existing_block makes: a fill
+    ingested inside the window but stamped more than `late_s` before it
+    is the block's, and its price enters here); every fill when `before`
+    is None. The cost of the block, which the catch-up tolerance is read
+    against. None when he bought nothing readable there (a long built by
+    SELLING the other token: MEDIUM-3, a follow-up -- fail-closed)."""
+    num = den = 0.0
+    for f in fills or ():
+        if not isinstance(f, dict):
+            continue
+        if before is not None and is_flow(f, before, late_s):
+            continue
+        a, side = str(f.get("asset") or ""), str(f.get("side") or "").upper()
+        if side != "BUY":
+            continue
+        p, size = _num_r(f.get("price")), _num_r(f.get("size"))
+        if p is None or size is None or size <= 0 or not (0.0 < p < 1.0):
+            continue
+        if not short and long_asset and a == long_asset:
+            px = p
+        elif short and other_asset and a == other_asset:
+            px = 1.0 - p
+        else:
+            continue
+        num += px * size
+        den += size
+    return round(num / den, 6) if den > 0 else None
+
+
 @dataclass
 class Book:
     bid: float | None = None
@@ -373,4 +649,7 @@ def plan(target: int, ledger: float, venue: float | None, book: Book,
 __all__ = ["Fill", "Book", "Plan", "net_positions", "his_net", "opening_burst",
            "mirror_ratio", "bankroll_ratio", "target_shares", "plan", "BURST_S",
            "MARKET_NET_CAP_USD",
-           "MIN_MOVE_USD", "MIN_MOVE_FRAC", "MIN_MARKETS", "VENUE_LEDGER_TOL_SHARES"]
+           "MIN_MOVE_USD", "MIN_MOVE_FRAC", "MIN_MARKETS", "VENUE_LEDGER_TOL_SHARES",
+           # E12: Rule LE's arithmetic; the fold's late row and the reading's verdict
+           "fill_clock", "pre_existing_block", "flow_net", "pre_existing_ratchet", "vwap_of",
+           "LATE_FILL_S", "is_flow", "flow_reading", "FLOW_READING_ZERO", "FLOW_READING_DISAGREE"]

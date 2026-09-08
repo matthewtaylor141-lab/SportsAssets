@@ -535,6 +535,78 @@ def step_ratio(stored_ratio: Any, net: Any, mark: Any) -> float | None:
     if usd is None or line is None or line <= 0:
         return None
     return MIRROR_RATIO if usd > 2.0 * line else None
+
+
+# THE CATCH-UP TOLERANCE, IN CENTS (E12, 2026-09-08; docs/mirror-to-a-
+# tee-program.md decision 13, option (A) "follow only his flow from
+# first sight (Rule LE, pro-rata ratchet)" with option (b)'s small
+# allowance). A block he built before we saw the market is bought --
+# the book opens sized on his WHOLE net, as before E12 -- only when the
+# mark at open is within this many cents of his cost over that block
+# (mi.vwap_of: his size-weighted BUY price on the book's axis), so the
+# premium is at most the tolerance and "10% of his shares" holds; else
+# the book opens on his FLOW alone (mi.flow_net) and the block is never
+# bought. capped_env: the environment may only LOWER it; 0 is NEVER
+# catch up (not "within 0c": an exact-copy book under MIRROR_SMALL_BET_USD
+# still copies whole, its premium being cents on under $10).
+MIRROR_CATCHUP_TOL_CENTS = capped_env("MIRROR_CATCHUP_TOL_CENTS", 2.0, floor=0.0)
+
+
+def open_catchup(net: Any, mark: Any, ratio: Any, block: Any, vwap: Any) -> dict[str, Any]:
+    """THE OPEN'S VERDICT ON HIS PRE-EXISTING BLOCK (E12): the plan row's
+    `catchup` = {vwap, mark, tol, allowed, flow_base, why}. `flow_base`
+    is what the book stores: 0 when the block is bought (the book sizes
+    on his whole net, as before), the block itself when it is not (the
+    book sizes on his flow from first sight), None only when the block
+    could not be read AND neither could his net. In order:
+
+      `block_unread`  the block is unreadable: his whole net stands in
+                      for it (nothing is bought); allowed False
+      `no_block`      nothing pre-existing (the market is new to him
+                      too): flow IS his net; allowed True, flow_base 0
+      `small_bet`     the book's ratio is 1.0 -- the exact copy under
+                      MIRROR_SMALL_BET_USD (owner ~14:10Z 2026-09-06):
+                      copied whole, the premium is cents; allowed
+      `tol_zero`      MIRROR_CATCHUP_TOL_CENTS at or under 0: never
+      `vwap_unread`   he bought nothing readable in the block: nothing
+                      to read the premium against, not bought
+      `mark_unread`   no mark on the ladder (mirror_target has refused
+                      `no_mark` before this is reached; belt and braces)
+      `within_tol`    |mark - vwap| <= tol cents: allowed, flow_base 0
+      `flow_only`     outside it: the block is never bought
+
+    Pure and side-effect free; the tolerance is read at call time."""
+    tol = _num(MIRROR_CATCHUP_TOL_CENTS)
+    tol = 0.0 if tol is None or tol < 0 else tol
+    b, n, m, v = _num(block), _num(net), _num(mark), _num(vwap)
+    out: dict[str, Any] = {"vwap": v, "mark": m, "tol": tol, "allowed": False,
+                           "flow_base": b, "why": None}
+    if b is None:
+        out.update(flow_base=n, why="block_unread")
+        return out
+    if b == 0.0:
+        out.update(allowed=True, flow_base=0.0, why="no_block")
+        return out
+    rt = _num(ratio)
+    if rt is not None and abs(rt - 1.0) < 1e-9:
+        out.update(allowed=True, flow_base=0.0, why="small_bet")
+        return out
+    if tol <= 0.0:
+        out["why"] = "tol_zero"
+        return out
+    if v is None:
+        out["why"] = "vwap_unread"
+        return out
+    if m is None or not (0.01 <= m <= 0.99):
+        out["why"] = "mark_unread"
+        return out
+    if abs(m - v) <= tol / 100.0 + 1e-9:
+        out.update(allowed=True, flow_base=0.0, why="within_tol")
+        return out
+    out["why"] = "flow_only"
+    return out
+
+
 # THE MIRROR LANE'S OWN PER-ORDER CLIP (same order). The copy lane's
 # LIVE_MAX_CLIP_USD ($250) and per_fill_usd are the COPY lane's
 # numbers: sizing the mirror's rests from them made a $2,500 target ten
@@ -2301,6 +2373,7 @@ __all__ = [
     "is_short", "wire_side", "leg_action", "sign_flip",
     "MIRROR_NET_CAP_FLOOR_USD", "MIRROR_RATIO", "MIRROR_CLIP_USD",
     "MIRROR_SMALL_BET_USD", "open_ratio", "step_ratio", "MIRROR_MIN_ORDER_USD",
+    "MIRROR_CATCHUP_TOL_CENTS", "open_catchup",
     "MIRROR_NET_CAP_USD", "MIRROR_MAX_LIVE_BOOKS", "MIRROR_MAX_BOOKS_PER_DAY",
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
     "MIRROR_BOOK_CONCURRENCY", "MIRROR_VENUE_CALLS_PER_TICK",

@@ -6419,6 +6419,15 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12,
         'live')
 RETURNING id, episode
 """
+# E12 (migration 057): the same INSERT carrying the block his flow is
+# read against (`flow_base`) and the net it was read at (`flow_last_net`).
+# Sent ONLY when the worker hands a block over -- it does so only on a
+# tick whose guard read the 057 columns present -- so a book opened
+# before the migration lands, or by a caller that knows no block, goes
+# through the statement above and reads NULL there: the old rule.
+_MIRROR_BOOK_INSERT_FLOW_SQL = _MIRROR_BOOK_INSERT_SQL.replace(
+    "                          state)", "                          state, flow_base, flow_last_net)"
+).replace("        'live')", "        'live', $13, $14)")
 
 # Every 007 NOT NULL is named (asset, side, his_price, limit_price,
 # requested_usd, requested_shares, status); venue (008) and lane (041)
@@ -6448,11 +6457,23 @@ async def _open_mirror_book(pool, whale: str, cid: str, slug: str,
                             ratio: float | None, anchor_usd: float | None,
                             his_level: float, target: int,
                             map_source: str | None, game_key: str | None,
-                            intent: str = MIRROR_INTENT) -> dict:
+                            intent: str = MIRROR_INTENT,
+                            flow_base: float | None = None,
+                            flow_last_net: float | None = None) -> dict:
     """Open a book: ONE transaction that inserts the mirror_books row,
     then the standing live_orders row (P1 spec section 1b), then
     back-fills standing_row_id. Returns {ok, book_id, standing_row_id,
     refusal}; on any refusal nothing is written.
+
+    `flow_base` / `flow_last_net` (E12, migration 057): the block his
+    flow is read against and the net it was read at, written through
+    the flow-carrying INSERT when a block is handed over (0 is a block:
+    "bought", the book sizes on his whole net); None -- the default,
+    and what every caller before E12 passes -- sends the 056-shaped
+    statement, so the row reads NULL and the book is an old-rule book.
+    A block against the leg (negative on a long book, positive on a
+    short one) or past his net's side is refused before the pool is
+    touched, as any unusable input.
 
     THE INSERT IS THE CLAIM. 045's live_orders_one_fill_per_asset refuses
     the standing row while any copy row holds the asset -> 'asset_claimed'
@@ -6503,9 +6524,15 @@ async def _open_mirror_book(pool, whale: str, cid: str, slug: str,
         anchor = float(anchor_usd) if anchor_usd is not None else None
         # a NaN ratio would reach json.dumps as the bare token NaN and be
         # refused by the jsonb cast (step-5 review): refused here, by name
-        for name, v in (("ratio", r), ("anchor", anchor)):
+        fb = float(flow_base) if flow_base is not None else None
+        fl = float(flow_last_net) if flow_last_net is not None else None
+        for name, v in (("ratio", r), ("anchor", anchor), ("flow_base", fb), ("flow_last_net", fl)):
             if v is not None and not math.isfinite(v):
                 raise ValueError(f"{name} is not a number")
+        if fb is not None and ((fb < 0.0 and not short) or (fb > 0.0 and short)):
+            raise ValueError("the block must sit on the book's own leg")
+        if fb is not None and fl is None:
+            raise ValueError("a block needs the net it was read at")
         oa = str(other_asset).strip() if other_asset else None
         src = str(map_source) if map_source else None
         gk = str(game_key) if game_key else None
@@ -6516,9 +6543,14 @@ async def _open_mirror_book(pool, whale: str, cid: str, slug: str,
     try:
         async with pool.acquire() as conn:
             async with conn.transaction():
-                book = await conn.fetchrow(
-                    _MIRROR_BOOK_INSERT_SQL, w, c, s, gk, la, oa, intent, src,
-                    r, anchor, lvl, tgt)
+                if fb is None:
+                    book = await conn.fetchrow(
+                        _MIRROR_BOOK_INSERT_SQL, w, c, s, gk, la, oa, intent, src,
+                        r, anchor, lvl, tgt)
+                else:
+                    book = await conn.fetchrow(
+                        _MIRROR_BOOK_INSERT_FLOW_SQL, w, c, s, gk, la, oa, intent, src,
+                        r, anchor, lvl, tgt, fb, fl)
                 book_id, episode = int(book["id"]), int(book["episode"])
                 # raw.preview.intent is the one side-aware field the
                 # ledger's readers (ORDER_INTENT_SQL: ms.ledger_net,
