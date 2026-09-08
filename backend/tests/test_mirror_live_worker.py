@@ -1773,10 +1773,13 @@ def test_manual_desk_shares_on_the_slug_are_explained_not_frozen():
 
 
 def test_a_wrong_sign_venue_net_trips_mirror_live_off_with_a_receipt():
+    # E20: the trip is the GENUINE inversion's -- the venue's magnitude is
+    # the leg's (10 against -10); a -5 read freezes the book alone
+    # (test_e20_wrong_sign_hold.py)
     p = _pool()
     b = p.add_book(ledger=10)
     p.add_order(b)
-    v = _Venue(held={SLUG: -5})
+    v = _Venue(held={SLUG: -10})
     v.rest("oid-1")
     st = _tick(p, v)
     assert p.state["mirror_live"] is False and p.state["mirror_live_trip"]["why"] == "wrong_sign_trip"
@@ -2696,7 +2699,7 @@ def test_a_trip_mid_tick_makes_the_rest_of_the_tick_cancel_only():
     p.markets["0xzz"] = dict(_LIVE)
     p.markets["0xother"] = dict(_LIVE)
     ob = p.add_order(b, order_id="oid-b", us_market_slug=_OTHER["us_market_slug"])
-    v = _Venue(held={_ZZ["us_market_slug"]: -5})
+    v = _Venue(held={_ZZ["us_market_slug"]: -10})    # E20: the genuine inversion (magnitude the leg's)
     v.rest("oid-b", slug=_OTHER["us_market_slug"])
     st = _tick(p, v)
     assert p.state["mirror_live"] is False and _census(st, "wrong_sign_trip") == 1
@@ -4845,7 +4848,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
     # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89)
-    assert keys[-89:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-90:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4918,6 +4921,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E19 (PNL lane 8): a book opened on the smaller of two
                           # disagreeing readings of one sign -- before
                           # `registered_no_increase` (keys[-12])
+                          "wrong_sign_hold",    # E20
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -4934,7 +4938,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-90] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight and E19's one and L7's one before the tail
+    assert keys[-91] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one and E20's one before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -5564,12 +5568,17 @@ def test_the_sign_proof_mismatch_is_recorded_only_on_a_magnitude_match(monkeypat
     assert _census(st, "wrong_sign_trip") == 1 and b["frozen_reason"] == "wrong_sign_trip"
     assert p.state["short_side_proof"]["mismatch"] == 1 and b["last_plan"]["short_proof"] == "mismatch"
     assert _run(le._short_gate(p))[0] is False
-    # a foreign long of 800 beside our short of 300: venue +500, not our inversion
+    # a foreign long of 800 beside our short of 300: venue +500, not our
+    # inversion. E20 (2026-09-08, book 663): a sign disagreement that is
+    # not the leg's freezes THIS book under `wrong_sign_hold` and never
+    # trips the desk (before E20 it kept the trip and the freeze); the
+    # shared tally is still never touched
     p2 = _short_world()
     b2 = _short_book(p2, ledger=-300)
     st2 = _tick(p2, _Venue(held={SLUG: 500}), http=_short_http())
-    assert _census(st2, "wrong_sign_trip") == 1 and b2["frozen_reason"] == "wrong_sign_trip"
-    assert p2.state["mirror_live"] is False and not _places(_Venue())
+    assert _census(st2, "wrong_sign_hold") == 1 and b2["frozen_reason"] == "wrong_sign_hold"
+    assert _census(st2, "wrong_sign_trip") == 0 and "mirror_live_trip" not in p2.state
+    assert p2.state.get("mirror_live") is not False and not _places(_Venue())
     assert "short_side_proof" not in p2.state and (b2["last_plan"] or {}).get("short_proof") is None
     # the tolerance is the plan's own, one share
     p3 = _short_world()

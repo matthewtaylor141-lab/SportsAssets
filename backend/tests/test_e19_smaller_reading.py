@@ -569,7 +569,9 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     keys = ml.CENSUS_KEYS
     assert keys.count("drift_smaller_open") == 1
     assert keys[keys.index("drift_smaller_open") + 1] == "registered_no_increase"
-    assert keys[keys.index("drift_smaller_open") - 1] == "adopt_prior_venue_settled"
+    # E20 placed `wrong_sign_hold` immediately before it (the convention every lane follows)
+    assert keys[keys.index("drift_smaller_open") - 1] == "wrong_sign_hold"
+    assert keys[keys.index("drift_smaller_open") - 2] == "adopt_prior_venue_settled"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     src = inspect.getsource(rules)
     # the knob count of the tip (lane 1's MIRROR_CATCHUP_PCT and

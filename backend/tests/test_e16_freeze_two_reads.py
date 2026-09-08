@@ -239,12 +239,13 @@ def test_e16_a_suspect_book_is_never_quiet_and_its_add_rest_is_cancelled_by_name
 
 
 def test_e16_wrong_sign_trip_on_one_read_is_unchanged_byte_for_byte():
-    """ledger 10, the walk reads -5: the trip, the freeze and its receipt
+    """ledger 10, the walk reads -10 (the genuine inversion: the venue's
+    magnitude is the leg's, E20): the trip, the freeze and its receipt
     on ONE read, exactly as before; no suspect is written."""
     p = _pool()
     b = p.add_book(ledger=10)
     p.add_order(b)
-    v = _Venue(held={SLUG: -5})
+    v = _Venue(held={SLUG: -10})
     v.rest("oid-1")
     st = _tick(p, v)
     assert p.state["mirror_live"] is False and p.state["mirror_live_trip"]["why"] == "wrong_sign_trip"
@@ -252,8 +253,8 @@ def test_e16_wrong_sign_trip_on_one_read_is_unchanged_byte_for_byte():
     assert _cancels(v) and not _places(v) and _census(st, "wrong_sign_trip") == 1 and _census(st, "venue_ledger_suspect") == 0
     trip = p.state["mirror_live_trip"]
     assert {k: trip[k] for k in ("book", "venue", "ledger", "manual", "registered")} == {
-        "book": b["id"], "venue": -5, "ledger": 10, "manual": 0.0, "registered": 0.0}
-    assert _suspect(b) is None and b["last_plan"]["kind"] == "frozen" and b["last_plan"]["venue"] == -5
+        "book": b["id"], "venue": -10, "ledger": 10, "manual": 0.0, "registered": 0.0}
+    assert _suspect(b) is None and b["last_plan"]["kind"] == "frozen" and b["last_plan"]["venue"] == -10
     src = inspect.getsource(ml._tick_book)
     assert 'await _freeze(t, book, "wrong_sign_trip", detail)' in src
     assert src.index('await _freeze(t, book, "wrong_sign_trip", detail)') < src.index("elif book.get(\"state\") != \"frozen\" and not _second_disagreeing_read(")
@@ -314,7 +315,11 @@ def test_e16_frozen_plus_two_agreeing_fresh_reads_thaws_to_live_by_default():
     assert [x for x in _recent("thawed") if x.get("why") == "venue_agrees"]
     assert any("ml-book-thaw-agrees" in s for _k, s, _a in p.sent)
     s = " ".join(ml._SQL_BOOK_THAW_AGREES.split())
-    assert "frozen_ticks = 0" in s and "AND frozen_reason = 'venue_ledger_disagree'" in s
+    # E20 (review, HIGH-1): the statement names the two reasons that thaw
+    # under the two-reads rule -- `wrong_sign_hold` beside this one -- and
+    # still no other
+    assert "frozen_ticks = 0" in s and "AND frozen_reason IN ('venue_ledger_disagree', 'wrong_sign_hold')" in s
+    assert ml._TWO_READS_THAW_REASONS == frozenset({"venue_ledger_disagree", "wrong_sign_hold"})
 
 
 def test_e16_a_disagreeing_read_between_two_agreeing_ones_starts_the_count_over():

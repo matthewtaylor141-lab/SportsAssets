@@ -913,6 +913,12 @@ CENSUS_KEYS: tuple[str, ...] = (
     # _tick_candidate) -- an open name beside `open_flow_only` /
     # `open_catchup` in meaning; placed before `registered_no_increase`
     # by the convention E13 and E17 followed (the tail pins hold)
+    # E20 (2026-09-08): a venue read of the OTHER sign whose magnitude is
+    # not the leg's freezes the one book (`wrong_sign_hold`) and never
+    # trips the desk; the genuine inversion keeps `wrong_sign_trip`.
+    # Before `drift_smaller_open` (keys[-13]) by the convention E13, E17
+    # and E19 followed; the tail pins moved by one
+    "wrong_sign_hold",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -1089,7 +1095,7 @@ _terminal_book_state: dict[tuple[str, str], str] = {}
 _terminal_book_seen: dict[tuple[str, str], float] = {}
 _terminal_book_confirmed: dict[tuple[str, str], str] = {}
 _VENUE_MAY_HOLD_REASONS = frozenset({"venue_ledger_disagree", "placement_lost", "lost_ambiguous",
-                                     "order_lost", "wrong_sign_trip"})
+                                     "order_lost", "wrong_sign_trip", "wrong_sign_hold"})
 # THE FULL-GAME MEMO (E1 re-review LOW-2). A candidate on a game whose
 # books already hold the $2,500 opens nothing, and the first cut
 # returned before books_seen, so every un-opened market of a full game
@@ -2336,8 +2342,13 @@ UPDATE mirror_books SET state = 'live', frozen_reason = NULL, frozen_at = NULL,
 _SQL_BOOK_THAW_AGREES = """
 UPDATE mirror_books SET state = 'live', frozen_reason = NULL, frozen_at = NULL,
        frozen_ticks = 0, updated_at = now()
- WHERE id = $1 AND state = 'frozen' AND frozen_reason = 'venue_ledger_disagree' /* ml-book-thaw-agrees */
+ WHERE id = $1 AND state = 'frozen' AND frozen_reason IN ('venue_ledger_disagree', 'wrong_sign_hold') /* ml-book-thaw-agrees */
 """
+# E20 (review, HIGH-1): the reasons that thaw under D2's two-reads rule
+# alone -- a walk that disagreed (either sign) is believed again only on
+# two consecutive FRESH agreeing reads; every other reason keeps E5's
+# one-read thaw (the freeze that ends when its own cause ends)
+_TWO_READS_THAW_REASONS = frozenset({"venue_ledger_disagree", "wrong_sign_hold"})
 _SQL_BOOK_STATE = """
 UPDATE mirror_books SET state = $2, last_reason = $3,
        closed_at = CASE WHEN $2 = 'closed' THEN now() ELSE closed_at END, updated_at = now()
@@ -7694,12 +7705,47 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             # Any other sign disagreement is a co-hold the ledger cannot
             # explain; it keeps the trip and the freeze here and never
             # touches the shared tally (P2 rung S0 review, sign lens)
-            if short and abs(abs(r.venue) - abs(ledger)) <= mi.VENUE_LEDGER_TOL_SHARES:
-                await le._record_short_proof(t.pool, ok=False, net=r.venue, slug=slug)
-                plan["short_proof"] = "mismatch"
-            await _trip_live_off(t, "wrong_sign_trip", {"book": book["id"], **detail})
-            await _cancel_open_for(t, book, "wrong_sign_trip")
-            await _freeze(t, book, "wrong_sign_trip", detail)
+            # E20 (2026-09-08 20:57:19Z, book 663): the venue read +69 --
+            # the size of our last 69-share cover -- against a short of
+            # 1,011 the fills reconcile to the share; the SHADOW had judged
+            # it frozen on that disagreement from 20:44:58Z (the live row's
+            # frozen_reason is wrong_sign_trip: the trip was its first
+            # freeze), and this branch turned the whole desk off -- 34
+            # minutes and counting at the 21:31Z mirror-state -- on a
+            # reading that could not be the inversion it guards against.
+            # The desk-wide trip is the
+            # GENUINE inversion's alone: the venue's magnitude is the
+            # leg's within the tolerance (our leg booked as the other
+            # side). Any other sign disagreement is a co-hold the ledger
+            # cannot explain: THIS book freezes under `wrong_sign_hold`
+            # (its orders cancelled, the E5 frozen exit as under any
+            # freeze, the E13 may-hold list), the desk keeps trading, and
+            # the plan carries the reading. Fail closed on the book, never
+            # on the desk for a reading that is not the inversion
+            genuine = abs(abs(r.venue) - abs(ledger)) <= mi.VENUE_LEDGER_TOL_SHARES
+            if genuine:
+                if short:
+                    await le._record_short_proof(t.pool, ok=False, net=r.venue, slug=slug)
+                    plan["short_proof"] = "mismatch"
+                await _trip_live_off(t, "wrong_sign_trip", {"book": book["id"], **detail})
+                await _cancel_open_for(t, book, "wrong_sign_trip")
+                await _freeze(t, book, "wrong_sign_trip", detail)
+            else:
+                plan["wrong_sign_hold"] = {**detail, "at": t.now}
+                await _cancel_open_for(t, book, "wrong_sign_hold")
+                if (book.get("state") == "frozen" and book.get("frozen_reason") != "wrong_sign_hold"
+                        and isinstance(prior_plan.get("wrong_sign_hold"), dict)):
+                    # V3-2 on a book frozen under ANOTHER name (the first
+                    # reason sticks, _SQL_BOOK_FREEZE): the same reading as
+                    # last tick moves the gauge and the tick count, never
+                    # the census or the recent list (review, MEDIUM-1)
+                    await t.pool.execute(_SQL_BOOK_FREEZE, book["id"], "wrong_sign_hold")
+                    book["frozen_ticks"] = int(book.get("frozen_ticks") or 0) + 1
+                    book["last_reason"] = "wrong_sign_hold"
+                    fr = t.stats["frozen_reasons"]
+                    fr["wrong_sign_hold"] = fr.get("wrong_sign_hold", 0) + 1
+                else:
+                    await _freeze(t, book, "wrong_sign_hold", detail)
         elif book.get("state") != "frozen" and not _second_disagreeing_read(prior_suspect, delta, t):
             # THE FIRST READ IS A SUSPECT (E16): named, the increase held
             # below by name, everything else this tick as a live book --
@@ -8373,7 +8419,7 @@ def _thaw_verdict(t: _Tick, book: dict, ledger: int, prior_plan: dict, plan: dic
     `one_read` (the first agreeing fresh read), `cached_read`."""
     if abs(int(ledger)) < FLAT_TOL_SHARES:
         return None
-    if book.get("frozen_reason") != "venue_ledger_disagree":
+    if book.get("frozen_reason") not in _TWO_READS_THAW_REASONS:
         return None
     agrees = _agree_record(prior_plan, t)
     plan["venue_agrees"] = agrees
@@ -8388,7 +8434,7 @@ async def _thaw_agrees(t: _Tick, book: dict, plan: dict) -> None:
     """The D2 thaw: state live, frozen_reason NULL, frozen_ticks 0,
     `thawed_venue_agrees` on the plan; the book plans live this tick as
     E5's thaw let it."""
-    if book.get("state") != "frozen" or book.get("frozen_reason") != "venue_ledger_disagree":
+    if book.get("state") != "frozen" or book.get("frozen_reason") not in _TWO_READS_THAW_REASONS:
         return
     await t.pool.execute(_SQL_BOOK_THAW_AGREES, book["id"])
     book.update(state="live", frozen_reason=None, frozen_ts=None, frozen_ticks=0)

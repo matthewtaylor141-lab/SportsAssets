@@ -372,7 +372,8 @@ def test_fold_review_g2_every_reason_of_the_set_by_its_own_name_holds_a_frozen_b
     reading is FLAT here -- stale, written before the venue's shares
     appeared -- so the reason alone holds the book."""
     ml._terminal_book_confirmed[KEY] = EXPIRED
-    names = ["venue_ledger_disagree", "placement_lost", "lost_ambiguous", "order_lost", "wrong_sign_trip"]
+    names = ["venue_ledger_disagree", "placement_lost", "lost_ambiguous", "order_lost", "wrong_sign_trip",
+             "wrong_sign_hold"]    # E20
     assert sorted(ml._VENUE_MAY_HOLD_REASONS) == sorted(names) and isinstance(ml._VENUE_MAY_HOLD_REASONS, frozenset)
     base = {"whale": "rn1", "condition_id": CID, "ledger_net": 0, "state": "frozen", "last_plan": {"venue": 0.0}}
     for reason in names:
@@ -385,7 +386,8 @@ def test_fold_review_g2_every_reason_of_the_set_by_its_own_name_holds_a_frozen_b
         assert f'"{reason}"' in wsrc, reason
     # end to end, 77's shape and the lost-fill shape with a STALE flat plan reading: still frozen
     for reason, held, lost in (("venue_ledger_disagree", 1128, 0), ("placement_lost", 300, 300),
-                               ("lost_ambiguous", 300, 0), ("order_lost", 300, 0), ("wrong_sign_trip", 300, 0)):
+                               ("lost_ambiguous", 300, 0), ("order_lost", 300, 0), ("wrong_sign_trip", 300, 0),
+                               ("wrong_sign_hold", 300, 0)):
         ml._terminal_book_seen.clear()
         ml._terminal_book_confirmed.clear()
         ml._terminal_book_until.clear()
