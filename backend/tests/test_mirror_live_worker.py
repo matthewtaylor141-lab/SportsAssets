@@ -73,6 +73,7 @@ import logging
 import pathlib
 import re
 import time
+from collections import Counter
 
 import pytest
 
@@ -1122,6 +1123,30 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_last_loss", None)                  # L1: the mode line's loss window
     monkeypatch.setattr(ml, "_last_sleeve", None)                # L2: its sleeve reading
     monkeypatch.setattr(ml, "_BOOK_LOCKS", {})
+    # E9 fold (the review's serialisation): a fast tick holds _TICK_LOCK
+    # and a full tick WAITS on that hold, and a contended acquire binds
+    # an asyncio.Lock to the loop it waited on (asyncio.run makes one per
+    # test) -- both locks fresh per test, the hold flag down
+    monkeypatch.setattr(ml, "_TICK_LOCK", asyncio.Lock())
+    monkeypatch.setattr(ml, "_FAST_LOCK", asyncio.Lock(), raising=False)
+    monkeypatch.setattr(ml, "_fast_holding", False, raising=False)
+    # E9: the fast path's state -- the woken set, the loop's context (a
+    # wake schedules nothing unless a test arms it), the pending run, the
+    # last fast tick's clock and what the fast ticks accumulated; the
+    # full tick in flight and the last walk / filled books it left
+    monkeypatch.setattr(ml, "_FAST_WOKEN", {}, raising=False)
+    monkeypatch.setattr(ml, "_fast_ctx", None, raising=False)
+    monkeypatch.setattr(ml, "_fast_task", None, raising=False)
+    monkeypatch.setattr(ml, "_fast_last_at", 0.0, raising=False)
+    monkeypatch.setattr(ml, "_fast_acc", Counter(), raising=False)
+    monkeypatch.setattr(ml, "_fast_seconds", {"s": 0.0}, raising=False)
+    monkeypatch.setattr(ml, "_fast_census", Counter(), raising=False)
+    monkeypatch.setattr(ml, "_fast_calls", 0, raising=False)
+    monkeypatch.setattr(ml, "_fast_guard_calls", 0, raising=False)
+    monkeypatch.setattr(ml, "_fast_ops", 0, raising=False)
+    monkeypatch.setattr(ml, "_full_tick", None, raising=False)
+    monkeypatch.setattr(ml, "_last_walk", None, raising=False)
+    monkeypatch.setattr(ml, "_last_filled", set(), raising=False)
     monkeypatch.setattr(ms, "_ratio_cache", {"at": 0.0, "by_whale": {}})
     monkeypatch.setattr(ms, "_unmapped_until", {})
     monkeypatch.setattr(ms, "_terminal_until", {})     # W1 / R2: the shadow's terminal memo
@@ -4740,7 +4765,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-61:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-65:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4789,12 +4814,15 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase",
                           # E7: the no_mark memo's skip and a candidate memo released
                           # by his fill, before E6's key (which the E6 pins hold at -2)
+                          # E9: the wake fast path's four names, before E7's pair (whose
+                          # pin holds the last four keys exactly)
+                          "fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed",
                           "cand_no_mark_skipped", "cand_memo_released",
                           # E6: a quiet book's read skipped under the tick's budget
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-62] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-66] == "short_share_cap" and keys.count("books_unreadable") == 1
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -7293,7 +7321,8 @@ def _comparable(st):
     the data-API block beside it)."""
     out = {k: v for k, v in st.items() if k not in ("recent", "tick_s")}
     if isinstance(out.get("short"), dict):
-        out["short"] = {k: v for k, v in out["short"].items() if k not in ("timing", "data_api")}
+        # E9: and the fast ticks' block beside them (seconds)
+        out["short"] = {k: v for k, v in out["short"].items() if k not in ("timing", "data_api", "fast")}
     return out
 
 
@@ -11680,7 +11709,13 @@ def test_an_expired_book_is_read_once_per_ttl_and_still_closes_on_the_markets_ro
     assert _census(st2, "book_terminal_skipped") == 1 and _census(st2, "no_mark") == 1, st2["census"]
     assert _census(st2, "venue_halted") == 0 and _census(st2, "snap_market_unreadable") == 0
     assert b["last_reason"] == "no_mark" and b["state"] == "live" and st2["books_live"] == 1
-    assert b["last_plan"] == {"kind": "no_plan", "at": NOW + 30, "venue_terminal": EXPIRED_BOOK}
+    # E9 part 1: every plan write carries `his_fills_seen` (his one fill,
+    # named by the first tick that held it: the no_mark read); the rest
+    # of the memo skip's plan is exactly as W1 / R4 wrote it
+    seen = b["last_plan"]["his_fills_seen"]
+    assert [e["name"] for e in seen] == ["no_mark"] and seen[0]["at"] == NOW
+    assert {k: v for k, v in b["last_plan"].items() if k != "his_fills_seen"} == {
+        "kind": "no_plan", "at": NOW + 30, "venue_terminal": EXPIRED_BOOK}
     assert not _places(v) and not _cancels(v) and not st2["abandoned"]
     # the TTL runs: the book is read again, and memoised again
     v.calls.clear()
@@ -12660,6 +12695,18 @@ def test_e5_the_frozen_exit_and_register_names_are_emitted_here_too(monkeypatch,
               "frozen_venue_flat", "frozen_no_his_exit", "frozen_reduce_only", "frozen_excess_sold",
               "registered_books", "registered_sign_refused", "registered_unreadable",
               "frozen_fill_this_tick", "frozen_venue_unexplained", "registered_no_increase"):
+        assert k in SEEN, k
+
+
+def test_e9_the_fast_path_names_are_emitted_here_too(monkeypatch, caplog):
+    """E9's four names are driven in tests/test_e9_fast_path.py; run
+    here as well so the coverage read below sees them when this file
+    runs alone (E7's convention)."""
+    from tests import test_e9_fast_path as e9
+    e9.test_e9_the_fast_tick_reads_and_places_the_woken_market_inside_the_floor_and_touches_no_other_book(monkeypatch)
+    e9.test_e9_the_budget_is_shared_with_the_full_tick()
+    e9.test_e9_a_failing_fast_tick_names_fast_tick_failed_and_the_full_tick_reads_the_market(caplog)
+    for k in ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed"):
         assert k in SEEN, k
 
 

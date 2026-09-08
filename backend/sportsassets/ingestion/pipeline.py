@@ -237,6 +237,21 @@ async def ingest_trade_result(ev: TradeEvent,
     if not notify:
         return trade_id, True
 
+    # THE MIRROR'S WAKE, AT THE FILL'S WRITE (E9, 2026-09-07). The copy
+    # lane's hand-off gate (live_executor.maybe_execute, spec 3.1) woke
+    # the reconciler for a mirrored whale's BUY only, and only under the
+    # copy probe: his SELLs returned to mirror_exit above it and a paused
+    # copy lane never reached it (E7 review LOW-2), so his exits -- the
+    # fills a held book must answer fastest -- never woke the loop. The
+    # wake now fires HERE, for every newly inserted fill of a mirrored
+    # whale, BUY and SELL, chain and poll, the copy probe on or off: the
+    # reconciler runs a bounded fast tick for the market (mirror_live,
+    # the paragraph over FAST_TICK_MAX). The gate's own call stays where
+    # the spec's pins hold it (a second wake for the same market is a
+    # set add). A chain row inserted with no condition_id wakes from
+    # _enrich, the moment it has one. Never raises; env-only predicate.
+    _mirror_wake(ev.whale_username, ev.condition_id)
+
     payload = _feed_payload(trade_id, ev, detected_at, pre_enriched)
 
     # Fire fan-out NOW on the provisional record.
@@ -279,6 +294,26 @@ async def ingest_trade_result(ev: TradeEvent,
         # Enrich off the hot path; never blocks the next detection.
         asyncio.get_running_loop().create_task(_enrich(trade_id, ev, detected_at))
     return trade_id, True
+
+
+def _mirror_wake(whale_username: str | None, condition_id: str | None) -> None:
+    """E9: wake the mirror reconciler for a mirrored whale's fill on
+    `condition_id` (nothing for a fill with no condition yet, or a
+    whale the mirror does not hold). live_executor.mirror_mode reads
+    the deploy alone (PMUS_MIRROR and the allowlist) and _mirror_notify
+    never raises; the import is inside so ingestion imports nothing of
+    the executor at module load. A wake that cannot be delivered is a
+    late tick, never a lost fill."""
+    try:
+        cid = str(condition_id or "").strip()
+        if not cid:
+            return
+        from ..live_executor import _mirror_notify, mirror_mode
+
+        if mirror_mode(whale_username):
+            _mirror_notify(cid)
+    except Exception:  # noqa: BLE001 — the wake is a courtesy; ingestion is the product
+        log.debug("mirror wake for %s dropped", condition_id, exc_info=True)
 
 
 async def _write_outbox(trade_id: int, payload: dict) -> None:
@@ -341,6 +376,8 @@ async def _enrich(trade_id: int, ev: TradeEvent, detected_at: datetime) -> None:
         ev.event_slug = meta["event_slug"]
         ev.event_title = meta.get("event_title")
         ev.sport = meta["sport"]
+        # E9: a chain row learns its condition here; the mirror wakes now
+        _mirror_wake(ev.whale_username, ev.condition_id)
         payload = _feed_payload(trade_id, ev, detected_at, enriched=True)
         await publish(CH_TRADES_ENRICHED, payload)
         # Refresh the outbox payload if it hasn't been dispatched yet, so the

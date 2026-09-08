@@ -209,6 +209,89 @@ QUIET_EXIT_PLANS = frozenset({"exit_take", "take_at_his_level", "reduce_unfilled
 # the prior plan's fields a quiet skip's plan carries (the next read and
 # a sibling's game room read them off the row: _tick_book, _held_exposure)
 _SKIP_CARRIED = ("flat_since", "short_proof", "mark", "bid", "ask", "exit_px_src")
+# THE WAKE FAST PATH (E9, 2026-09-07; owner 22:4xZ "latency must be
+# flawless and exceptional"). With E6 + E7 live the tick was 14.9 s
+# (22:44:50Z: walk 0.2, orders 3.2, books 10.0, candidates 0.8) and his
+# fills' ingest lag a median of -1 s (we see the fill as it lands), yet
+# his fill on a market we hold reached our FIRST order after a median of
+# 27-39 s (22:00Z / 21:00Z) and a p90 of 468-661 s: one tick of waiting
+# plus the walk's order, and a market that waited its turn or was refused
+# with no row that said why. Two parts, both in this file:
+#   PART 1  every fill of his on a market with a book is ANSWERED or
+#     NAMED: the plan row (`last_plan.his_fills_seen`, at most
+#     HIS_FILLS_SEEN_MAX entries, the newest kept) carries one entry per
+#     fill the tick that FIRST planned with it in hand -- the fill's id,
+#     its `ts`, its `detected_at` (the ingest), our order row id when
+#     that tick placed on the book, else the plan's reason as its census
+#     name, and the tick's `at`. Never renamed once written (the first
+#     sight is the answer). No venue call, no new table.
+#   PART 2  the wake (notify) now fires on EVERY ingested fill of his --
+#     BUY and SELL, chain and poll, the copy probe on or off (the
+#     ingestion pipeline calls it where the fill is written, beside the
+#     copy lane's own gate, which stays where spec 3.1 pins it) -- and
+#     on a wake a bounded FAST TICK runs for the woken markets only,
+#     before the next full tick and NEVER beside one: it reads the
+#     book's quote (paced, one call) and his per-market position (the
+#     data-API read, one call) and plans and places through _tick_book /
+#     _tick_candidate -- the SAME functions, rails and refusal names; no
+#     second planner, entries at his cent, exits within MIRROR_EXIT_TOL.
+#     SERIALISED (the E9 review's CRITICAL-1 / HIGH-1): a fast tick runs
+#     under _TICK_LOCK, the full tick's own lock, taken inside _FAST_LOCK,
+#     and a full tick that arrives while a fast tick holds it WAITS
+#     (`_fast_holding`; tick_once's `overlap` return is kept for a FULL
+#     tick's hold alone). Why: the full tick plans every book off the
+#     books list and the step-O rows it read at its start, and a fast
+#     tick beside it that placed after that read -- a take that filled
+#     (ledger 300 on the row, 0 in the walk's dict), a rest on a sibling
+#     (in no open_by_book the candidate stage reads the game's room off)
+#     -- was invisible to it: the book sized again (600 held against his
+#     300), the game sized past its cap. Under the lock the full tick
+#     reads the row as the fast tick left it (`order_open` /
+#     `fill_after_walk` on its side, the room less the rest on the
+#     candidate's); the fast tick pops its woken markets only once it
+#     holds the lock, so a full tick that started while it waited drains
+#     _FAST_WOKEN first and the fast tick finds nothing (never a stale
+#     plan on a market the full tick already read woken-first). The
+#     wake-to-placement clock with no full tick in flight is unchanged;
+#     under one the answer is that tick's (it reads the market first).
+#     BOUNDED: at most FAST_TICK_MAX woken markets per fast tick, at most
+#     one fast tick per FAST_TICK_MIN_S, its venue calls counted against
+#     the full tick's budget (`t.fast_calls`: _quiet_budget / _cand_budget
+#     subtract what the fast ticks spent since the last full tick, and a
+#     fast tick refuses a market once the budget is spent), the E2 soft
+#     guard's counter seeded with the same spend, the ops budget the same
+#     way, the loss rails read exactly as the full tick reads them
+#     (_read_mode, _global_guards). A fast tick never plans a book the
+#     full tick may still write this tick: the book's per-book lock held
+#     (step O or the walk has it: `_lock_for(id).locked()`, refused, never
+#     awaited) or the running full tick's walk not yet done with the
+#     book's GAME (`_full_tick.walk_done`) -- that tick reads the market
+#     itself, hot by the fill; both clauses dead under the serialisation
+#     above, kept as the fail-closed floor -- and never a book with an order open
+#     (the DB rows: step O's read is the one that books a fill), a frozen
+#     book (E5's exit path reads the venue), a book a fill was booked on
+#     after the last walk (E5 review F1), or with no positions walk
+#     younger than FAST_WALK_MAX_S (the fast tick makes no walk: it
+#     plans on the last full tick's, which nothing of ours can have moved
+#     on a book with nothing open). Every sibling with an open order
+#     reads as non-terminal, so the game's room is unreadable and no
+#     increase is sized on it (fail closed; the full tick sizes it).
+#     FAIL CLOSED: any error in the fast tick leaves the market to the
+#     next full tick under `fast_tick_failed`; a skipped market is
+#     `fast_tick_skipped` (the reason on the fast tick's own stats and
+#     the log). Census: `fast_tick`, `fast_tick_placed`,
+#     `fast_tick_skipped`, `fast_tick_failed`; the full tick folds the
+#     fast ticks' census in and publishes `short.fast` (seconds, ticks,
+#     markets, placed, skipped, failed, calls) beside E6's timing block
+#     (whose keys are pinned exactly) and ` fast=N` on the mode line.
+#     NOT here: the poll cadence, the data-API rate, pacing, the
+#     resolver, what a read decides. No env knob: nothing to lower under
+#     five markets and two seconds that is not the rails themselves.
+FAST_TICK_MAX = 5
+FAST_TICK_MIN_S = 2.0
+FAST_WALK_MAX_S = 90.0
+FAST_RETRIES = 2
+HIS_FILLS_SEEN_MAX = 20
 # A 'placing' row with no order id older than this is a placement whose
 # response was lost with the process (step O); younger, the placement
 # may still be the one in flight under this very tick's lock.
@@ -597,6 +680,11 @@ CENSUS_KEYS: tuple[str, ...] = (
     # and a candidate memo (unmapped or no_mark) dropped because his
     # newer fill landed -- the market read this tick. Before E6's key,
     # which the E6 pins hold at keys[-2]
+    # E9 (2026-09-07): the wake fast path -- a fast tick ran, placed on a
+    # woken market, skipped one (the reason on its own stats), failed on
+    # one (the market left to the full tick). Before E7's pair: the E7
+    # pins hold the last four keys exactly
+    "fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed",
     "cand_no_mark_skipped", "cand_memo_released",
     # E6 (2026-09-07): a quiet book's quote read skipped under the tick's
     # venue-call budget (plan `no_plan`, `read_on` the tick it is read
@@ -813,20 +901,118 @@ _MIRROR_CENSUS_MAX = 400
 _RECENT: deque = deque(maxlen=40)
 _current_stats: dict | None = None
 _sleep = asyncio.sleep          # indirection so a test can skip the cancel-read gap
+# THE FAST TICK'S STATE (E9; the paragraph over FAST_TICK_MAX). `_FAST_WOKEN`:
+# the markets a wake handed the fast path and not yet read by one, cid ->
+# the times a fast tick put it back (a book under the full tick's hand is
+# retried up to FAST_RETRIES, then left to the full tick); insertion
+# order = arrival order. `_fast_ctx` is (pool, pmus, http) once main() has
+# them -- before that, and in a test that never arms it, a wake schedules
+# nothing. `_fast_task` is the one pending run; `_fast_last_at` the last
+# fast tick's clock (the FAST_TICK_MIN_S floor is judged against it).
+# `_fast_acc` sums what the fast ticks did since the last full tick
+# published it (`short.fast`); `_fast_census` their census names, folded
+# into the next full tick's; `_fast_calls` / `_fast_guard_calls` /
+# `_fast_ops` their venue calls, guarded calls and ops, seeded into the
+# next fast tick and subtracted from the full tick's budget (the full tick
+# seeds its own E2 guard counter and ops budget from the guard and ops
+# spend too: the window is counted once, review MEDIUM-2). `_full_tick`
+# is the full tick in flight (its walk_done and filled_books are read by
+# the fast tick), `_last_walk` the last full tick's positions walk and
+# its clock, `_last_filled` the books that tick booked a fill on.
+# `_fast_holding` is True only while a fast tick holds _TICK_LOCK (set
+# after the acquire, cleared in its `finally`): tick_once waits on that
+# hold and returns `overlap` on a full tick's (the serialisation, the
+# paragraph over FAST_TICK_MAX).
+_FAST_LOCK = asyncio.Lock()
+_fast_holding = False
+_FAST_WOKEN: dict[str, int] = {}
+_fast_ctx: tuple | None = None
+_fast_task: Any = None
+_fast_last_at = 0.0
+_fast_sleep = asyncio.sleep
+_fast_acc: Counter = Counter()
+_fast_seconds = {"s": 0.0}
+_fast_census: Counter = Counter()
+_fast_calls = 0
+_fast_guard_calls = 0
+_fast_ops = 0
+_full_tick: Any = None
+_last_walk: tuple | None = None
+_last_filled: set = set()
 
 
 def notify(condition_id: str | None = None) -> None:
     """Wake the loop for one market. Tolerant of None and of a blank
     id (a fill with no condition still wakes the poll); never raises,
     because the caller is the money decision on a mirrored whale's fill
-    and a lost wake is a late tick, never a copy."""
+    and a lost wake is a late tick, never a copy. Since E9 the wake also
+    hands the market to the fast path (_fast_wake): a fast tick runs
+    for it before the next full tick when the worker is armed."""
     try:
         cid = str(condition_id or "").strip()
         if cid and len(_WOKEN) < _WOKEN_MAX:
             _WOKEN.add(cid)
         _WAKE.set()
+        if cid:
+            _fast_wake(cid)
     except Exception:  # noqa: BLE001 — a wake must not become the caller's exception
         log.debug("mirror_live: wake for %r dropped", condition_id, exc_info=True)
+
+
+def _fast_wake(cid: str) -> None:
+    """The fast path's half of the wake: the market joins _FAST_WOKEN
+    (bounded like _WOKEN) and one fast tick is scheduled on the running
+    loop when main() has armed the path (_arm_fast). Outside a running
+    loop, or unarmed, the market waits for the full tick as before --
+    the wake is a courtesy, never a condition. Never raises past
+    notify's own guard."""
+    global _fast_task
+    if cid not in _FAST_WOKEN and len(_FAST_WOKEN) >= _WOKEN_MAX:
+        return
+    _FAST_WOKEN.setdefault(cid, 0)
+    if _fast_ctx is None:
+        return
+    if _fast_task is not None and not _fast_task.done():
+        return                          # one pending run takes what is woken when it runs
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return                          # no loop here: the poll's tick reads it
+    _fast_task = loop.create_task(_fast_run(_fast_ctx), name="mirror_live.fast")
+
+
+def _arm_fast(pool, pmus, http) -> None:
+    """main() hands the fast path the loop's own pool, venue adapter and
+    data-API client; a wake before this schedules nothing."""
+    global _fast_ctx
+    _fast_ctx = (pool, pmus, http)
+
+
+async def _fast_run(ctx: tuple) -> None:
+    """One scheduled run: wait out the FAST_TICK_MIN_S floor since the
+    last fast tick, then fast ticks of FAST_TICK_MAX markets until the
+    woken set is drained, the floor between them. Never raises: the
+    task's own error is logged and the markets wait for the full tick."""
+    try:
+        gap = _fast_last_at + FAST_TICK_MIN_S - time.time()
+        if gap > 0:
+            await _fast_sleep(gap)
+        while _FAST_WOKEN and _fast_ctx is ctx:
+            await fast_tick_once(*ctx)
+            if _FAST_WOKEN:
+                await _fast_sleep(FAST_TICK_MIN_S)
+    except asyncio.CancelledError:
+        raise
+    except Exception:  # noqa: BLE001 — the fast path's own failure is never the loop's
+        log.exception("mirror_live: fast tick run failed")
+
+
+def _fast_requeue(cid: str, tries: int) -> None:
+    """A market the full tick's hand kept from the fast tick goes back
+    for the next fast tick, at most FAST_RETRIES times; past that the
+    full tick reads it (it is woken there too)."""
+    if tries < FAST_RETRIES and len(_FAST_WOKEN) < _WOKEN_MAX:
+        _FAST_WOKEN[cid] = tries + 1
 
 
 def _family(reason: str) -> str:
@@ -1831,6 +2017,14 @@ class _Tick:
     stamps: dict = field(default_factory=dict)
     deferred_due: set = field(default_factory=set)
     due_reads: int = 0
+    # E9: a FAST tick (the paragraph over FAST_TICK_MAX), and the venue
+    # calls the fast ticks spent since the last full tick -- subtracted
+    # from this tick's budget (_quiet_budget, _cand_budget) so the two
+    # share one rail; on a fast tick, the spend before it
+    fast: bool = False
+    fast_calls: int = 0
+    # E9: the fast tick's own record -- cid -> the reason it was skipped
+    fast_skipped: dict = field(default_factory=dict)
 
 
 # ------------------------------------------- E2: the tick's shared counters
@@ -4897,12 +5091,60 @@ async def _shadow_check(t: _Tick, book: dict, target: int, net_used: float,
                 shadow_ratio=sr, expected=int(expected), scaled=round(scaled, 3))
 
 
+def _fill_key(f: dict) -> str | None:
+    """The fill's identity for his_fills_seen: its trades row id, else
+    its stamp (a row with neither is not recorded: nothing to key on)."""
+    for k in ("id", "ts"):
+        v = f.get(k)
+        if v is not None and str(v).strip():
+            return str(v)
+    return None
+
+
+def _fills_seen(t: _Tick, book: dict, reason: str, fills: list | None = None) -> list:
+    """PART 1 of E9 (the paragraph over FAST_TICK_MAX): the plan's
+    `his_fills_seen`, the prior row's entries plus ONE new entry for
+    every fill of his the tick holds on this market that no earlier plan
+    recorded -- {id, ts, det (the ingest's detected_at), at (the tick's
+    clock), order (our order row id when this tick placed on the book,
+    else None), name (else the plan's reason as its census name)}.
+    Written once per fill and never renamed: the tick that first planned
+    with the fill in hand is its answer. Bounded at HIS_FILLS_SEEN_MAX,
+    the newest fills kept (by stamp, then id). An unreadable prior list
+    is an empty one (fail closed toward naming, never a raise)."""
+    prior = _jsonish(book.get("last_plan")) or {}
+    seen = prior.get("his_fills_seen") if isinstance(prior, dict) else None
+    out: list = [e for e in seen if isinstance(e, dict) and e.get("id") is not None] \
+        if isinstance(seen, list) else []
+    known = {str(e.get("id")) for e in out}
+    ent = t.open_by_book.get(book["id"]) if book["id"] in t.placed_books else None
+    order = int(ent[0]["id"]) if ent and _num(ent[0].get("id")) is not None else None
+    name = rules.plan_reason_key(reason)
+    for f in (fills if fills is not None else book.get("_fills")) or []:
+        if not isinstance(f, dict):
+            continue
+        key = _fill_key(f)
+        if key is None or key in known:
+            continue
+        known.add(key)
+        out.append({"id": key, "ts": _num(f.get("ts")), "det": _num(f.get("detected_at")),
+                    "at": float(t.now), "order": order, "name": name})
+    if len(out) > HIS_FILLS_SEEN_MAX:
+        out.sort(key=lambda e: (float(_num(e.get("ts")) or 0.0), str(e.get("id"))))
+        out = out[-HIS_FILLS_SEEN_MAX:]
+    return out
+
+
 async def _write_plan(t: _Tick, book: dict, r: _Reading | None, target, target_raw,
                       drift_v, his_level, reason: str, plan: dict) -> None:
     net = None
     if r is not None:
         net = mi.his_net(r.his_long, r.his_other)
     book["last_reason"] = reason
+    # E9 part 1: every fill of his the tick holds, answered or named on
+    # the row; the reading's fills when there is one, else the ones the
+    # book's tick read before step M (book["_fills"])
+    plan["his_fills_seen"] = _fills_seen(t, book, reason, r.fills if r is not None else None)
     await t.pool.execute(
         _SQL_BOOK_PLAN, book["id"], target, target_raw, net,
         r.his_long if r else None, r.his_other if r else None,
@@ -5076,7 +5318,9 @@ def _quiet_budget(t: _Tick, books: list) -> int:
     MEDIUM-4: reserved here so the due tick stays inside the budget)
     are counted; never negative."""
     hot = sum(1 for b in books if _hot_by_row(t, b) and not _memo_skips(t, b))
-    return max(0, int(VENUE_CALLS_PER_TICK) - int(t.venue_calls) - hot - int(CAND_MIN_PER_TICK))
+    # E9: the fast ticks' calls since the last full tick come off the same rail
+    return max(0, int(VENUE_CALLS_PER_TICK) - int(t.venue_calls) - int(t.fast_calls)
+               - hot - int(CAND_MIN_PER_TICK))
 
 
 def _quiet_slots(t: _Tick) -> int:
@@ -5178,8 +5422,10 @@ def _note_skip(t: _Tick, book: dict) -> None:
 def _cand_budget(t: _Tick) -> int:
     """The candidate stage's share of the budget once the books are
     walked: map reads and candidate quote reads together, never below
-    CAND_MIN_PER_TICK."""
-    return max(int(CAND_MIN_PER_TICK), int(VENUE_CALLS_PER_TICK) - int(t.venue_calls))
+    CAND_MIN_PER_TICK. E9: the fast ticks' calls since the last full
+    tick (t.fast_calls) are spent from the same rail."""
+    return max(int(CAND_MIN_PER_TICK),
+               int(VENUE_CALLS_PER_TICK) - int(t.venue_calls) - int(t.fast_calls))
 
 
 def _map_cap(cand_budget: int) -> int:
@@ -5612,6 +5858,10 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     book["_held"] = _num(standing.get("filled_shares"))
     fills = await ms.his_fills(t.pool, w, cid)
     _count_fills_dedup(t)
+    # E9 part 1: the fills every plan write of this tick answers or names
+    # (_fills_seen reads them off the tick's book dict on the paths that
+    # write a plan with no reading: closing, unreadable, the memo skip)
+    book["_fills"] = fills
     # STEP M BEFORE ANY PLAN (addendum section 10): a closed or
     # resolved market, or a closing book, cancels and never increases.
     # 'closing' is entered on a POSITIVE reading only (closed True or
@@ -5697,8 +5947,12 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                                                    None if tg is None else int(tg), plan)
         if book.get("state") != "closed":
             # the skip's own write (_SQL_BOOK_SKIP): the name and the
-            # plan; the last read's figures on the row stand (LOW-1)
+            # plan; the last read's figures on the row stand (LOW-1).
+            # E9 part 1: a fill the skip is the first to hold is named
+            # by the skip (a fill inside HOT_S or a wake makes the book
+            # hot, so this names only a fill older than that)
             book["last_reason"] = "book_quiet_skipped"
+            plan["his_fills_seen"] = _fills_seen(t, book, "book_quiet_skipped", fills)
             await t.pool.execute(_SQL_BOOK_SKIP, book["id"], "book_quiet_skipped",
                                  json.dumps(plan, default=str))
         return
@@ -8875,19 +9129,45 @@ def _woken_first(rows: list, woken: list) -> list:
 
 async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
     """One reconciler pass. Returns the census the heartbeat carries;
-    every counter is present whatever the tick did."""
+    every counter is present whatever the tick did.
+
+    The lock (E9 review CRITICAL-1 / HIGH-1): a FULL tick's hold is
+    `overlap` (returned, never waited on -- the loop is the one caller
+    and a second full tick beside it is a bug to name); a FAST tick's
+    hold (`_fast_holding`) is WAITED on, because the fast tick may be
+    placing on a book this tick would otherwise read at its start and
+    then plan off a dict the fast tick's fill has moved past -- the book
+    sized twice, the game sized past its cap. No await sits between the
+    check and the acquire, so the hold the check read is the hold the
+    acquire waits on."""
     global _current_stats, _last_tick_at, _last_loss, _last_sleeve
+    global _full_tick, _fast_calls, _fast_guard_calls, _fast_ops, _last_filled
     now = time.time() if now_ts is None else float(now_ts)
     started = time.monotonic()          # the real clock: `now` may be the caller's
     _last_loss = None                   # L1: never a stale window on the mode line
     _last_sleeve = None                 # L2: nor a stale sleeve reading
     stats = _new_stats()
-    if _TICK_LOCK.locked():
+    if _TICK_LOCK.locked() and not _fast_holding:
         stats.update(status="overlap", skipped_overlap=True, tick_s=0.0)
         return stats
     async with _TICK_LOCK:
         _current_stats = stats
         t = _Tick(pool=pool, pmus=pmus, http=http, now=now, stats=stats, started=started)
+        # E9: the fast ticks since the last full tick -- their venue calls
+        # come off this tick's budget, their guarded calls and ops SEED
+        # this tick's E2 soft guard and ops budget (the window counted
+        # once, review MEDIUM-2; an exit exempt as ever), their census
+        # names ride this tick's census, and the markets they still hold
+        # are this tick's to read (woken first, hot); the three counters
+        # then start over
+        _full_tick = t
+        t.fast_calls = int(_fast_calls)
+        t.guard_calls, t.ops = int(_fast_guard_calls), int(_fast_ops)
+        _fast_calls = _fast_guard_calls = _fast_ops = 0
+        for k, v in _fast_census.items():
+            stats["census"][k] = int(stats["census"].get(k, 0)) + int(v)
+        _fast_census.clear()
+        _FAST_WOKEN.clear()
         woken = sorted(_WOKEN)
         _WOKEN.clear()
         _WAKE.clear()
@@ -8896,6 +9176,8 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             await _tick(t, woken)
         finally:
             _last_tick_at = now
+            _full_tick = None
+            _last_filled = set(t.filled_books)      # E9: the fast tick's fill-after-walk clause
             stats["ops"], stats["reads"] = t.ops, t.reads
             stats["tick_s"] = round(time.monotonic() - started, 1)
             stats["recent"] = list(_RECENT)[-20:]
@@ -8915,6 +9197,9 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             # E7 part B: the data-API wait, beside the timing block (whose
             # keys are pinned exactly); the same home, served whole
             stats["short"]["data_api"] = _data_api_block(t)
+            # E9: the fast ticks since the last publish, the same home
+            # (E6's block keeps exactly its keys); the mode line's ` fast=N`
+            stats["short"]["fast"] = _fast_block()
             _publish_fills_dedup(t)
             await _persist_terminal_memo(t)     # E6 part 3: bounded, once per 60 s, on change
             await _persist_cand_memo(t)         # E7: the candidate memos, the same rules, their own key
@@ -8950,7 +9235,7 @@ def _publish_fills_dedup(t: _Tick) -> None:
 
 
 async def _tick(t: _Tick, woken: list) -> None:
-    global _last_mode, _last_whales
+    global _last_mode, _last_whales, _last_walk
     stats = t.stats
     # the markets that woke this tick: a book on one is hot whatever its
     # fills' stamps say (E6 review HIGH-2)
@@ -9052,6 +9337,7 @@ async def _tick(t: _Tick, woken: list) -> None:
         await _abandon_reconciled(t, "positions_unreadable", rate_limited=bool(limited))
         return
     stats["venue_positions"] = len(t.positions)
+    _last_walk = (dict(t.positions), float(t.now))     # E9: what the fast tick plans on
     if await _read_open(t) is None:
         await _abandon_reconciled(t, "open_orders_unreadable")
         return
@@ -9323,6 +9609,331 @@ async def _instruments(t: _Tick) -> None:
         t.stats["status"] = "degraded"
 
 
+# ------------------------------------------------ E9: the wake fast path
+
+_FAST_REQUEUE = frozenset({"book_locked", "full_tick_pending"})
+
+
+def _fast_skip(t: _Tick, cid: str, why: str) -> None:
+    """One woken market the fast tick leaves to the full tick, by name:
+    `fast_tick_skipped` on the census, the reason on the fast tick's
+    own stats (`fast_skipped`). A market the full tick's hand kept from
+    it (the lock, the walk not yet past its game) goes back for the
+    next fast tick, at most FAST_RETRIES times."""
+    _mirror_stop("fast_tick_skipped")
+    t.fast_skipped[cid] = why
+    if why in _FAST_REQUEUE:
+        _fast_requeue(cid, int(((t.stats.get("fast") or {}).get("tries") or {}).get(cid, 0)))
+
+
+def _fast_skip_all(t: _Tick, cids: list, why: str) -> None:
+    for cid in cids:
+        if cid not in t.fast_skipped:
+            _fast_skip(t, cid, why)
+
+
+def _fast_gate(t: _Tick, book: dict) -> str | None:
+    """Why the fast tick may NOT plan this book now, or None (the
+    paragraph over FAST_TICK_MAX, the fail-closed clauses in order):
+    the per-book lock held (step O or the full tick's walk has the
+    book: refused, never awaited -- the lock decides, as the brief
+    asks); a full tick in flight whose walk is not yet done with the
+    book's whole GAME (that tick reads the market itself, hot by the
+    fill, and sizes the game in its one fixed order) or that is
+    cancel-only; a book that is not live; an order open on it (the DB
+    rows read this fast tick, or the row's own open_order_id); no
+    positions walk to plan on; a fill booked on it after that walk.
+    Since the serialisation (fast_tick_once holds _TICK_LOCK) no full
+    tick is in flight beside a fast tick and no per-book lock is held by
+    one, so the lock, `walk_done` and `full_tick_pending` clauses are
+    dead -- kept, harmless, as the fail-closed floor under a hand that
+    holds either without the tick lock."""
+    bid = book["id"]
+    if _lock_for(bid).locked():
+        return "book_locked"
+    full = _full_tick
+    if full is not None:
+        if full.cancel_all or full.abandoned:
+            return str(full.cancel_all or "tick_abandoned")
+        game = t.game_books.get(_game_key_of(book), [])
+        if not game or not all(b["id"] in full.walk_done for b in game):
+            return "full_tick_pending"
+    if book.get("state") != "live":
+        return "not_live"
+    if bid in t.nonterminal or book.get("open_order_id"):
+        return "order_open"
+    if t.positions is None:
+        return "walk_stale"
+    if bid in _last_filled or (full is not None and bid in full.filled_books):
+        return "fill_after_walk"
+    return None
+
+
+async def _fast_book(t: _Tick, book: dict) -> None:
+    """One woken BOOK through _tick_book, under its lock, after the
+    gate -- the row re-read under the lock so the plan is made on the
+    row as it stands, and the gate read again on it."""
+    cid, bid = str(book.get("condition_id")), book["id"]
+    why = _fast_gate(t, book)
+    if why is not None:
+        return _fast_skip(t, cid, why)
+    lk = _lock_for(bid)
+    async with lk:                      # no await between the gate's locked() and here
+        row = await t.pool.fetchrow(_SQL_BOOK_READ, bid)
+        if not row:
+            return _fast_skip(t, cid, "book_row_unreadable")
+        fresh = dict(row)
+        # the gate's row clauses again, on the row as it stands (the
+        # lock is ours now, so the lock clause is not asked again)
+        if fresh.get("state") != "live":
+            return _fast_skip(t, cid, "not_live")
+        if fresh.get("open_order_id"):
+            return _fast_skip(t, cid, "order_open")
+        if _full_tick is not None and bid in _full_tick.filled_books:
+            return _fast_skip(t, cid, "fill_after_walk")
+        await _tick_book(t, fresh)
+    if bid in t.placed_books:
+        _mirror_stop("fast_tick_placed", fresh.get("whale"))
+
+
+async def _fast_candidate(t: _Tick, cid: str) -> None:
+    """A woken market with no book: _walk_candidate for every whale who
+    may increase, behind the walk's own checks in the walk's own order
+    (the memo release by the wake, the three memos, the E2 guard, the
+    candidate caps). Never beside a full tick in flight: its candidate
+    stage may open the same market and size the same game (dead under
+    the serialisation, kept as _fast_gate keeps its own)."""
+    if _full_tick is not None:
+        return _fast_skip(t, cid, "full_tick_pending")
+    if t.positions is None:
+        return _fast_skip(t, cid, "walk_stale")
+    for w in sorted(t.allow):
+        if (w, cid) in t.books_seen:
+            continue
+        refusal = _increases_refusal(t, w)
+        if refusal:
+            _mirror_stop(refusal, w)
+            _fast_skip(t, cid, refusal)
+            continue
+        try:
+            stamped = await ms.active_conditions(t.pool, w, stamped=True)
+        except Exception as exc:  # noqa: BLE001 — no stamp is no evidence; the wake releases
+            log.warning("mirror_live: active markets for %s unreadable (%s)", w, type(exc).__name__)
+            stamped = []
+        stamps = {c: s for c, s in stamped}
+        t.stamps.update(stamps)
+        _release_cand_memo(t, w, cid, stamps.get(cid))
+        if _unmapped_until.get((w, cid), 0.0) > t.now:
+            _fast_skip(t, cid, "unmapped")
+            continue
+        if _no_mark_until.get((w, cid), 0.0) > t.now:
+            _mirror_stop("cand_no_mark_skipped", w)
+            _fast_skip(t, cid, "cand_no_mark_skipped")
+            continue
+        if _terminal_until.get((w, cid), 0.0) > t.now:
+            _mirror_stop("cand_terminal_skipped", w)
+            _fast_skip(t, cid, "cand_terminal_skipped")
+            continue
+        if t.guard_calls >= rules.MIRROR_VENUE_CALLS_PER_TICK:
+            _mirror_stop("venue_calls_capped", w)
+            _fast_skip(t, cid, "venue_calls_capped")
+            continue
+        t.cand_cap = _cand_cap(t)
+        if t.cand_reads >= MAX_MARKETS_PER_TICK or t.cand_reads >= t.cand_cap:
+            _fast_skip(t, cid, "capped_tick")
+            continue
+        name = await _walk_candidate(t, w, cid)
+        if name is None and _fast_placed_on(t, cid):
+            _mirror_stop("fast_tick_placed", w)     # the book it opened placed this fast tick
+
+
+def _fast_placed_on(t: _Tick, cid: str) -> bool:
+    """Did this fast tick place on a book of the market (the book the
+    walk read, or the one a candidate opened and appended to its game)."""
+    return any(str(b.get("condition_id")) == cid and b["id"] in t.placed_books
+               for bs in t.game_books.values() for b in bs)
+
+
+async def _fast_tick(t: _Tick, cids: list) -> None:
+    """The fast tick's body: the full tick's prelude read the same way
+    (the table and column guards, the mode ladder, the venue, the
+    global and increase-only guards -- the loss rails included), then
+    the woken markets one by one through _fast_book / _fast_candidate.
+    No positions walk (the last full tick's, inside FAST_WALK_MAX_S),
+    no step O (a book with an open order is left to it), no rotation."""
+    stats = t.stats
+    t.woken = set(cids)
+    if not cids:
+        return
+    _mirror_stop("fast_tick")
+    if t.now < _backoff_until:
+        stats["skipped_backoff"] = True
+        return _fast_skip_all(t, cids, "backoff")
+    try:
+        await t.pool.fetch(_SQL_TABLE_GUARD)
+    except Exception as exc:  # noqa: BLE001 — absent or unreadable: refuse, never crash
+        _mirror_stop("tables_absent")
+        stats.update(status="degraded", tables_absent=type(exc).__name__)
+        return _fast_skip_all(t, cids, "tables_absent")
+    try:
+        await t.pool.fetch(_SQL_INTENT_GUARD)
+        t.short_col = True
+    except Exception as exc:  # noqa: BLE001 — the same reading as _tick's
+        if not rules.column_missing(exc, "intent"):
+            _mirror_stop("intent_guard_unreadable")
+            stats.update(status="degraded", intent_guard_unreadable=type(exc).__name__)
+            return _fast_skip_all(t, cids, "intent_guard_unreadable")
+        t.short_col = False
+    stats.setdefault("short", {})["on"] = _shorts_on(t)
+    await _read_mode(t)
+    if t.mode != MODE_SAFE and le.active_venue() != "polymarket-us":
+        _mirror_stop("no_venue")
+        return _fast_skip_all(t, cids, "no_venue")
+    if t.mode == MODE_SAFE:
+        return _fast_skip_all(t, cids, "mode_env_off")   # cancel-only: the full tick's reconcile
+    await _global_guards(t)
+    if t.cancel_all:
+        return _fast_skip_all(t, cids, str(t.cancel_all))
+    t.ratios = await ms.refresh_ratios(t.pool, sorted(t.allow)) if t.allow else {}
+    walk = _last_walk
+    if walk is not None and walk[0] is not None and 0.0 <= t.now - float(walk[1]) <= FAST_WALK_MAX_S:
+        t.positions = dict(walk[0])
+        stats["venue_positions"] = len(t.positions)
+    await le.refresh_whale_overrides(t.pool)
+    await edge_gate.refresh(t.pool)
+    if await _read_protected(t) is None:
+        return _fast_skip_all(t, cids, "protected_ids_unreadable")
+    books = [dict(b) for b in await t.pool.fetch(_SQL_BOOKS_OPEN)]
+    _index_games(t, books)
+    rows = await t.pool.fetch(_SQL_ORDERS_OPEN if t.short_col else _SQL_ORDERS_OPEN_047)
+    # every open order is a figure this tick did not read (no step O):
+    # its book is non-terminal -- the gate refuses it and every sibling's
+    # game room reads unreadable (no increase sized beside it)
+    t.nonterminal = {int(r["book_id"]) for r in rows}
+    stats["orders_open"] = len(rows)
+    t.cand_budget = _cand_budget(t)
+    t.map_budget.cap = _map_cap(t.cand_budget)
+    t.cand_cap = _cand_cap(t)
+    for cid in cids:
+        if t.abandoned or t.cancel_all:
+            _fast_skip(t, cid, str(t.cancel_all or "tick_abandoned"))
+            continue
+        if t.venue_calls + t.fast_calls >= int(VENUE_CALLS_PER_TICK):
+            _fast_skip(t, cid, "budget_spent")      # the full tick's rail, shared
+            continue
+        on = [b for b in books if str(b.get("condition_id")) == cid]
+        try:
+            if on:
+                for b in on:
+                    await _fast_book(t, b)
+            else:
+                await _fast_candidate(t, cid)
+        except Exception as exc:  # noqa: BLE001 — fail closed: this market waits for the full tick
+            _mirror_stop("fast_tick_failed")
+            t.fast_skipped[cid] = "fast_tick_failed"
+            log.exception("mirror_live: fast tick on %s failed (%s)", cid, type(exc).__name__)
+    await _flush_candidate_refusals(t)
+
+
+async def fast_tick_once(pool, pmus, http, cids: list | None = None,
+                         now_ts: float | None = None) -> dict:
+    """One FAST tick (E9; the paragraph over FAST_TICK_MAX): the woken
+    markets only -- `cids`, else the next FAST_TICK_MAX off _FAST_WOKEN
+    -- through the full tick's own functions and rails. Returns its own
+    stats (the same shape as a full tick's plus one nested `fast` block:
+    `on`, `tries`, `skipped` -- the reason by market -- and `placed`,
+    the markets placed on); its census folds into the next full tick's
+    and its calls, guarded calls and ops seed the next fast tick and
+    come off the full tick's budget. Never overlaps another fast tick
+    (_FAST_LOCK) and NEVER runs beside a full tick: it holds _TICK_LOCK
+    (taken inside _FAST_LOCK, `_fast_holding` raised while it does) and
+    a full tick that arrives waits on it, so what it places is on the
+    rows the full tick then reads (the review's CRITICAL-1 / HIGH-1).
+    The woken markets are taken off _FAST_WOKEN only once the lock is
+    held: a full tick that started while this one waited drained them
+    at its start and read them woken-first, and this tick then finds
+    nothing -- never a stale plan on a market already answered. Any
+    error is `fast_tick_failed` and the markets wait for the full tick."""
+    global _current_stats, _fast_last_at, _fast_calls, _fast_guard_calls, _fast_ops, _fast_holding
+    now = time.time() if now_ts is None else float(now_ts)
+    started = time.monotonic()
+    stats = _new_stats()
+    # ONE nested block for the fast tick's own facts (the top level stays
+    # under the served cap): the wake retries per market, the reasons by
+    # market it was skipped for, the markets placed on
+    stats["fast"] = {"on": True, "tries": {}, "skipped": {}, "placed": 0}
+    if _FAST_LOCK.locked():
+        stats.update(status="overlap", skipped_overlap=True, tick_s=0.0)
+        return stats
+    async with _FAST_LOCK, _TICK_LOCK:
+        _fast_holding = True
+        try:
+            if cids is None:
+                taken = list(_FAST_WOKEN)[:FAST_TICK_MAX]
+                stats["fast"]["tries"] = {c: int(_FAST_WOKEN.pop(c, 0) or 0) for c in taken}
+            else:
+                taken = [str(c) for c in cids][:FAST_TICK_MAX]
+                stats["fast"]["tries"] = {c: 0 for c in taken}
+            stats["woken"] = list(taken)
+            own = _current_stats is None
+            if own:
+                _current_stats = stats
+            t = _Tick(pool=pool, pmus=pmus, http=http, now=now, stats=stats, started=started, fast=True)
+            t.fast_calls, t.guard_calls, t.ops = int(_fast_calls), int(_fast_guard_calls), int(_fast_ops)
+            seed_guard, seed_ops = t.guard_calls, t.ops
+            t.seq = int(_tick_seq)
+            try:
+                await _fast_tick(t, taken)
+            except Exception as exc:  # noqa: BLE001 — fail closed, by name
+                _mirror_stop("fast_tick_failed")
+                for c in taken:
+                    t.fast_skipped.setdefault(c, "fast_tick_failed")
+                log.exception("mirror_live: fast tick failed (%s)", type(exc).__name__)
+            finally:
+                _fast_last_at = time.time()
+                _fast_calls += int(t.venue_calls)
+                _fast_guard_calls += max(0, int(t.guard_calls) - seed_guard)
+                _fast_ops += max(0, int(t.ops) - seed_ops)
+                placed = sum(1 for c in taken if _fast_placed_on(t, c))
+                failed = sum(1 for v in t.fast_skipped.values() if v == "fast_tick_failed")
+                skipped = len(t.fast_skipped) - failed
+                _fast_acc.update({"n": 1 if taken else 0, "markets": len(taken), "placed": placed,
+                                  "skipped": skipped, "failed": failed, "calls": int(t.venue_calls)})
+                _fast_seconds["s"] += time.monotonic() - started
+                if own:
+                    for k, v in stats["census"].items():
+                        if v:
+                            _fast_census[k] += int(v)
+                stats["ops"], stats["reads"] = t.ops, t.reads
+                stats["tick_s"] = round(time.monotonic() - started, 1)
+                stats["fast"]["skipped"] = dict(t.fast_skipped)
+                stats["fast"]["placed"] = placed
+                stats["recent"] = list(_RECENT)[-20:]
+                stats["integ"] = _integ_block(stats)
+                stats.setdefault("short", {})["timing"] = _timing_block(t)
+                stats["short"]["data_api"] = _data_api_block(t)
+                _publish_fills_dedup(t)
+                if _current_stats is stats:
+                    _current_stats = None
+        finally:
+            _fast_holding = False
+    return stats
+
+
+def _fast_block() -> dict:
+    """What the fast ticks did since the last full tick published it
+    (`short.fast`, a sibling of E6's exactly-pinned timing block):
+    `fast` seconds (1 dp), `n` fast ticks, `markets`, `placed`,
+    `skipped`, `failed`, `calls` (their venue calls). Bounded: these
+    keys and no others. Reset on publish."""
+    out = {"fast": round(float(_fast_seconds["s"]), 1)}
+    for k in ("n", "markets", "placed", "skipped", "failed", "calls"):
+        out[k] = int(_fast_acc.get(k, 0))
+    _fast_acc.clear()
+    _fast_seconds["s"] = 0.0
+    return out
+
+
 # ------------------------------------------------------------------- main
 
 def _mode_line(stats: dict, ticks: int, loss: dict | None = None,
@@ -9376,6 +9987,11 @@ def _mode_line(stats: dict, ticks: int, loss: dict | None = None,
         tfrag = " t=%s/%s/%s/%s read=%s quiet=%s placed=%s" % (
             tm.get("walk"), tm.get("orders"), tm.get("books"), tm.get("candidates"),
             tm.get("read"), tm.get("quiet_skipped"), tm.get("placed"))
+        # E9: the fast ticks since the last full tick (`short.fast`, a
+        # sibling of the timing block); nothing on a dict that has none
+        fb = (stats.get("short") or {}).get("fast")
+        if isinstance(fb, dict):
+            tfrag += " fast=%s" % (fb.get("n"),)
     log.info("mirror_live mode=%s whales=%s books=%s open=%s day=%s%s%s venue=%s%s stats=%s",
              stats.get("mode"), stats.get("whales"), stats.get("books_live"),
              stats.get("orders_open"), day, tfrag, rail, stats.get("venue_state"),
@@ -9395,6 +10011,7 @@ async def main() -> None:
     log.info("mirror_live up: PMUS_MIRROR=%s allowlist=%s poll=%ss",
              os.environ.get("PMUS_MIRROR", "off"), sorted(le.mirror_allowlist()), POLL_S)
     async with httpx.AsyncClient(base_url=cfg.data_api_base, timeout=25.0) as http:
+        _arm_fast(pool, pmus, http)     # E9: a wake may now run a fast tick before the next poll
         ticks = 0
         while True:
             try:
@@ -9420,4 +10037,4 @@ async def main() -> None:
 
 
 __all__ = ["POLL_S", "WAKE_MIN_GAP_S", "MODE_LINE_EVERY_TICKS", "SERVICE", "CENSUS_KEYS",
-           "notify", "tick_once", "mirror_census_snapshot", "main"]
+           "notify", "tick_once", "fast_tick_once", "mirror_census_snapshot", "main"]

@@ -463,6 +463,8 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
             SELECT t.id, t.source, t.tx_hash, t.asset, t.side, t.condition_id,
                    t.size::float8 AS size, t.price::float8 AS price,
                    extract(epoch FROM t.ts)::float8 AS ts,
+                   -- E9: the ingest's clock, for the plan's his_fills_seen
+                   extract(epoch FROM t.detected_at)::float8 AS detected_at,
                    COALESCE(t.market_title, m.title) AS market_title, t.event_slug,
                    m.event_title, COALESCE(t.market_slug, m.slug) AS market_slug,
                    COALESCE(t.outcome, mt.outcome) AS outcome,
@@ -489,6 +491,7 @@ async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
               FROM c
         )
         SELECT d.id, d.source, d.tx_hash, d.asset, d.side, d.size, d.price, d.ts,
+               d.detected_at,
                d.market_title, d.event_slug, d.event_title, d.market_slug,
                d.outcome, d.outcome_index, d.sport, d.dup_rows, d.dup_shares
           FROM d

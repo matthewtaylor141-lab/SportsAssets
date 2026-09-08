@@ -96,13 +96,26 @@ def test_review_q1_the_wake_covers_the_late_ingested_fill_only_while_the_process
     assert _bbos(v) == [SLUG] and _census(st3, "cand_no_mark_skipped") == 0, "the rail bounds it"
 
 
-@pytest.mark.xfail(strict=True, reason="review LOW-2: the wake the release leans on fires for his BUYs only -- "
-                   "execute_copy returns every SELL to mirror_exit above the mirror hand-off, and the hand-off "
-                   "sits under copy_probe_enabled; his exits and a paused copy lane never wake the loop")
 def test_review_q1_the_wake_fires_for_his_sells_too():
+    """Review LOW-2, closed by E9 (2026-09-07) by the road the E9 brief
+    named rather than the review's FIX: the wake fires where the fill is
+    WRITTEN (ingestion/pipeline.ingest_trade_result -> _mirror_wake ->
+    live_executor._mirror_notify), for every newly inserted fill of a
+    mirrored whale -- SELL and BUY, chain and poll, the copy probe on or
+    off -- and again from _enrich when a chain row learns its condition;
+    execute_copy still returns every SELL to mirror_exit above the
+    hand-off, and the hand-off's own call stays where the spec 3.1 pins
+    hold it (test_mirror_live_handoff fixes the gate block's text). The
+    behaviour itself is driven in test_e9_fast_path."""
+    from sportsassets.ingestion import pipeline
     src = inspect.getsource(le.execute_copy)
-    assert src.count("_mirror_notify(") == 1
-    assert src.index("_mirror_notify(") < src.index('if payload.get("side") == "SELL":')
+    assert src.count("_mirror_notify(") == 0, "the copy lane's SELL return is untouched"
+    pipe = inspect.getsource(pipeline.ingest_trade_result)
+    assert pipe.count("_mirror_wake(ev.whale_username, ev.condition_id)") == 1
+    assert pipe.index('if not row["was_insert"]') < pipe.index("_mirror_wake(") < pipe.index("fresh = (ev.ts_epoch")
+    body = inspect.getsource(pipeline._mirror_wake)
+    assert "mirror_mode(" in body and "_mirror_notify(" in body and "copy_probe" not in body
+    assert "_mirror_wake(ev.whale_username, ev.condition_id)" in inspect.getsource(pipeline._enrich)
 
 
 # ------------------------------------------------------- Q2: the stamp

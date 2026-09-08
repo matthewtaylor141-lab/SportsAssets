@@ -57,8 +57,13 @@ CREATE TABLE trades (id bigserial PRIMARY KEY, whale_id bigint NOT NULL, tx_hash
     asset text NOT NULL, condition_id text, side text NOT NULL, outcome text, outcome_index integer,
     size numeric(24, 6) NOT NULL, price numeric(10, 6) NOT NULL, notional numeric(24, 6),
     market_title text, market_slug text, event_slug text,
-    sport text NOT NULL DEFAULT 'unclassified', ts timestamptz NOT NULL, source text NOT NULL);
+    sport text NOT NULL DEFAULT 'unclassified', ts timestamptz NOT NULL, source text NOT NULL,
+    detected_at timestamptz);
 """
+# `detected_at` (E9, 2026-09-07): his_fills now selects the ingest's clock
+# beside the fill's own stamp (the plan's his_fills_seen); the real table
+# has carried it since migration 001. Nullable here: no D1 row sets it and
+# the collapse rule never reads it.
 
 D1_CID = "0xd1-wta-kostyuk-noskova-2026-09-06"
 K, NS = "tok-kostyuk", "tok-noskova"          # his long (Kostyuk) and other (Noskova) tokens
