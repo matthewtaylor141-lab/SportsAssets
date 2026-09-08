@@ -58,10 +58,33 @@ def test_traded_day_reads_the_days_filled_rows_at_the_returned_average():
 
 def test_traded_day_label_sits_after_verify_day_and_the_help_line_names_it():
     text = YML.read_text()
-    i_v, i_t, i_p, i_h = (text.index(f"\n                {n}) SQL=") for n in ("verify-day", "traded-day", "premap-rows", "hourly"))
-    assert i_v < i_t < i_p < i_h
+    i_v, i_t, i_48, i_p, i_h = (text.index(f"\n                {n}) SQL=")
+                                for n in ("verify-day", "traded-day", "traded-48h", "premap-rows", "hourly"))
+    assert i_v < i_t < i_48 < i_p < i_h
     line = next(l for l in text.splitlines() if "sql: arg must be one of" in l)
-    assert "|on-target-why|verify-day|traded-day|premap-rows|" in line
-    assert line.count("traded-day") == 1
+    assert "|on-target-why|verify-day|traded-day|traded-48h|premap-rows|" in line
+    assert line.count("traded-day") == 1 and line.count("traded-48h") == 1
     hourly_sql, _ = _preset(text, "hourly")
-    assert "traded-day" not in hourly_sql and "== traded-day" not in hourly_sql
+    assert "traded-" not in hourly_sql
+
+
+def test_traded_48h_is_the_same_read_over_48_hours_by_day():
+    """The owner's second question (23:5xZ): the same three statements
+    with the window `now() - interval '48 hours'` and the third grouped by
+    UTC day instead of hour; the label reads `last_48h`."""
+    text = YML.read_text()
+    day, _ = _preset(text, "traded-day")
+    h48, to = _preset(text, "traded-48h")
+    assert to == 30000
+    W48 = "o.whale = 'rn1' AND o.filled > 0 AND COALESCE(o.done_at, o.placed_at) >= now() - interval '48 hours'"
+    assert h48.count("FROM mirror_orders o WHERE " + W48) == 3 and "date_trunc('day', now())" not in h48
+    assert "SELECT 'last_48h' AS what" in h48 and "'today'" not in h48
+    assert "date_trunc('day', COALESCE(o.done_at, o.placed_at))::date AS day, count(*) AS n" in h48
+    assert "date_trunc('hour'" not in h48
+    # everything else byte for byte the day's read
+    norm = lambda s: s.replace(W48, "W").replace(WHERE, "W")
+    assert norm(h48).replace("'last_48h'", "'today'").replace(
+        "date_trunc('day', COALESCE(o.done_at, o.placed_at))::date AS day",
+        "date_trunc('hour', COALESCE(o.done_at, o.placed_at))::time(0) AS hour") == norm(day)
+    for st in [s for s in h48.split(";") if s.strip()]:
+        pglast.parse_sql(st)
