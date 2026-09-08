@@ -4844,8 +4844,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one: -69 -> -88)
-    assert keys[-88:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89)
+    assert keys[-89:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4895,6 +4895,9 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E16: the freeze's suspect read and its increase hold, the
                           # frozen reduce on his witnessed sale, the thaw held by name
                           "venue_ledger_suspect", "venue_suspect_hold", "frozen_reduce_on_fill", "thaw_held",
+                          # L7: a candidate refused on its slug's own date more than a
+                          # day past with no fill of his in a day -- before E13's key
+                          "event_stale",
                           # E13: a flat book made 'closing' on the venue's own confirmed
                           # terminal state -- before `registered_no_increase` (keys[-12])
                           "venue_market_ended",
@@ -4931,7 +4934,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-89] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight and E19's one before the tail
+    assert keys[-90] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight and E19's one and L7's one before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -12912,6 +12915,24 @@ def test_e19_the_smaller_reading_open_name_is_emitted_here_too(monkeypatch):
     from tests import test_e19_smaller_reading as e19
     e19.test_e19_martinez_shape_a_fresh_read_past_the_max_of_one_sign_opens_on_the_smaller_reading(monkeypatch)
     assert "drift_smaller_open" in SEEN
+def test_l7_event_stale_is_emitted_on_a_dated_candidate_with_no_fill_of_his_in_a_day():
+    """L7 (2026-09-08): a candidate whose slug's own date is more than one
+    day past with no fill of his in a day is refused `event_stale` --
+    the terminal memo, no venue read. The rule is pinned tick by tick in
+    test_c8_tennis_witness; this emits the name for the coverage read
+    below (his slug's shape verbatim, cand_refusals_1158 row 686, its
+    date three days before the tick's clock)."""
+    day = time.strftime("%Y-%m-%d", time.gmtime(NOW - 3 * 86400))
+    slug = f"atp-gea-zandsch-{day}"
+    p = _pool(fills=[_fill(M, "BUY", 300.0, 0.31, NOW - 3 * 86400, market_slug=slug, event_slug=slug)])
+    v = _Venue()
+    st = _tick(p, v)
+    assert _census(st, "event_stale") == 1 and [c for c in v.calls if c[0] == "bbo"] == [] and not p.books
+    assert ml._terminal_until.pop(("rn1", CID)) == NOW + ms.UNMAPPED_TTL_S
+    # the fold (2026-09-08, review HIGH-1): the read's `at` beside the memo
+    assert ml._event_stale_memo.pop(("rn1", CID)) == NOW
+    assert [r["refusal"] for r in p.cand_refusals] == ["event_stale"]
+    assert "event_stale" in SEEN
 
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():

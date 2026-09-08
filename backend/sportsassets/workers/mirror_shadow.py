@@ -691,11 +691,17 @@ def _prune_maps(now_ts: float) -> None:
 
 
 async def _exact_for_token(pool, pmus, f: dict, read, now_ts: float,
-                           retrieve=None) -> tuple[dict | None, str | None]:
+                           retrieve=None, slugs_404: set | None = None) -> tuple[dict | None, str | None]:
     """The copy lane's exact steps for ONE of his tokens: ({slug, intent,
     source[, side_index, outcome_desc]} | None, refusal). Candidates the
     venue answered 404 inside the TTL are skipped without a read (the
-    resumable lane)."""
+    resumable lane). `slugs_404`, when given, collects the DISTINCT
+    candidate slugs the venue answered 404 on this token's exact asks
+    (the resolver's own '404' note on a one-slug ask, or the memo's
+    remembered 404 for a slug it did not re-ask -- the venue's answer
+    either way) so the caller can count the slugs, each once however
+    many tokens asked it (L7, the census trail `exact:404:<n>`; the
+    fold of review MEDIUM-2: the trail counted every ask)."""
     from .. import map_lane
 
     diag: list[str] = []
@@ -704,22 +710,29 @@ async def _exact_for_token(pool, pmus, f: dict, read, now_ts: float,
            "market_title": f.get("market_title"), "event_title": f.get("event_title"),
            "outcome": f.get("outcome"), "outcome_index": f.get("outcome_index")}
 
+    def _answered_404(slug: str) -> None:
+        if slugs_404 is not None and slug:
+            slugs_404.add(slug)
+
     async def _read(fn, *args):
-        # a single-candidate exact call on a slug the venue 404'd inside
-        # the TTL: the remembered answer, no venue call
-        if fn is getattr(pmus, "resolve_market_exact", None) and args and \
-                isinstance(args[0], list) and len(args[0]) == 1:
-            slug = str(args[0][0] or "").lower()
-            if _slug_404_until.get(slug, 0.0) > now_ts:
-                if len(args) > 2 and isinstance(args[2], list) and len(args[2]) < 24:
-                    args[2].append("404")
-                return None
-            n0 = len(diag)
-            res = await read(fn, *args)
-            if res is None and len(diag) > n0 and diag[n0] == "404":
+        # a one-slug exact ask (the resolver's list of one candidate):
+        # on a slug the venue 404'd inside the TTL, the remembered
+        # answer, no venue call; else the read, its '404' note memoised
+        one = bool(args) and isinstance(args[0], list) and len(args[0]) == 1
+        slug = str(args[0][0] or "").lower() if one else ""
+        memo = one and fn is getattr(pmus, "resolve_market_exact", None)
+        if memo and _slug_404_until.get(slug, 0.0) > now_ts:
+            if len(args) > 2 and isinstance(args[2], list) and len(args[2]) < 24:
+                args[2].append("404")
+            _answered_404(slug)
+            return None
+        n0 = len(diag)
+        res = await read(fn, *args)
+        if one and res is None and len(diag) > n0 and diag[n0] == "404":
+            if memo:
                 _slug_404_until[slug] = now_ts + MAP_CACHE_TTL_S
-            return res
-        return await read(fn, *args)
+            _answered_404(slug)
+        return res
 
     mapping, source, refusal = await map_lane.exact_lane(
         pool, pmus, ctx, _read, diag=diag, cands_out=cands, grammar=True, retrieve=retrieve)
@@ -924,6 +937,17 @@ async def _map_exact(pool, pmus, assets: list[str], by_asset: dict[str, dict],
     ent = _map_cache.get(key)
     tokens: dict = dict(ent["tokens"]) if ent else {}
     refusals: dict = dict(ent.get("refusals") or {}) if ent else {}
+    # THE 404 TRAIL (L7, 2026-09-08; PNL_lane3_coverage §3): the DISTINCT
+    # candidate slugs the exact lane asked and the venue answered 404
+    # (the resolver's own '404' note per one-slug ask, or the memo's for
+    # a slug inside _slug_404_until), each once however many of his
+    # tokens asked it (L7 fold, review MEDIUM-2: every ask was counted,
+    # `:exact:404:12` for five slugs). Remembered with the verdicts so
+    # a cache hit keeps the trail; named on the census as
+    # `<premap step>:exact:404:<n>` by explain_unmapped -- tennis was
+    # hiding under premap's bare `no_key_intersection` ($154k/6 h,
+    # atp-gea-zandsch $98,210) with no word that the venue was asked
+    slugs404: set[str] = set(ent.get("slugs_404") or ()) if ent else set()
     read = _venue_reader(pmus, budget, out)
     markets: dict[str, dict] = {}
 
@@ -939,7 +963,10 @@ async def _map_exact(pool, pmus, assets: list[str], by_asset: dict[str, dict],
     def _remember() -> None:
         if tokens:
             _map_cache[key] = {"until": now_ts + MAP_CACHE_TTL_S, "tokens": dict(tokens),
-                               "refusals": dict(refusals)}
+                               "refusals": dict(refusals), "exact_404": len(slugs404),
+                               "slugs_404": sorted(slugs404)}
+        if slugs404:
+            out["exact_404"] = len(slugs404)
 
     order = sorted(assets, key=lambda a: (-abs(float(pos.get(a, 0.0))), a))
     for a in order:
@@ -957,7 +984,11 @@ async def _map_exact(pool, pmus, assets: list[str], by_asset: dict[str, dict],
                 continue
             f = by_asset.get(a) or {}
             try:
-                verdict, why = await _exact_for_token(pool, pmus, f, read, now_ts, _retrieve)
+                # the slugs the venue answered 404 land in slugs404 as
+                # they are asked, so a lane the budget cuts keeps its
+                # trail so far
+                verdict, why = await _exact_for_token(pool, pmus, f, read, now_ts, _retrieve,
+                                                      slugs_404=slugs404)
             except ReadsCapped:
                 budget.capped += 1
                 out["refusal"] = "map_reads_capped"
@@ -1308,7 +1339,8 @@ def _family_of(slug: str | None) -> str:
         return "unknown"
 
 
-async def explain_unmapped(pool, ctx: dict, refusal: str | None = None) -> str:
+async def explain_unmapped(pool, ctx: dict, refusal: str | None = None, *,
+                           exact_404: int | None = None) -> str:
     """WHY the market is unmapped: a REFUSAL the exact lane named
     (side_code_unmatched and its siblings, the budget) when it found his
     market and refused the side; else why premap said no, as the
@@ -1317,7 +1349,22 @@ async def explain_unmapped(pool, ctx: dict, refusal: str | None = None) -> str:
     fail keeps premap's name), or a named failure -- never a guess.
     `unknown_market_type` carries its split (C1 build step 5):
     `:unparsed` (the slug grammar named no family) or
-    `:family_not_listed` (a family the venue table has no prefix for)."""
+    `:family_not_listed` (a family the venue table has no prefix for).
+
+    THE 404 TRAIL (L7, 2026-09-08): when premap's step carries NO split
+    (its keys never met the venue's rows -- tennis, docs §1.4 R3 -- so
+    the venue's own rows certified nothing) and the venue answered 404
+    on `exact_404` DISTINCT candidate slugs the exact lane asked (each
+    slug once, however many of his tokens asked it -- the fold of
+    review MEDIUM-2), the trail rides on the step:
+    `no_key_intersection:exact:404:5` on atp-gea-zandsch's shape -- the
+    two aec slug orders, the atc slug, `aec-<his slug>` and his own
+    slug were asked and the venue listed none of them. A split premap
+    named from the venue's rows (`:venue:league-unlisted`,
+    `:kind-absent`, ...) is the venue's word and stands as it is; the
+    trail then lives on the row's `exact_404` detail only. A refusal the
+    lane named wins over both, as before. Never a guess: 0 or an
+    unreadable count prints premap's name alone."""
     if refusal:
         return str(refusal)
     try:
@@ -1332,7 +1379,22 @@ async def explain_unmapped(pool, ctx: dict, refusal: str | None = None) -> str:
         return f"explain_raised:{type(exc).__name__}"
     step = str((ex or {}).get("step") or "unknown")
     split = (ex or {}).get("split")
-    return f"{step}:{split}" if split else step
+    if split:
+        return f"{step}:{split}"
+    n = _exact_404_count(exact_404)
+    return f"{step}:exact:404:{n}" if n > 0 else step
+
+
+def _exact_404_count(v: Any) -> int:
+    """The 404 trail's count as an int >= 0; anything unreadable (None,
+    a bool, a NaN, text) is 0 -- no trail, premap's name alone."""
+    if isinstance(v, bool) or v is None:
+        return 0
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
 
 
 # THE LIVE ROWS ARE NEVER TRUNCATED (Phase 0 review of the instruments,
@@ -2058,14 +2120,21 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
         # his dollars in the window, and the NULL-outcome fills that
         # make a premap miss ours rather than the venue's.
         ctx = _first_context(fills)
+        n404 = _exact_404_count(mo.get("exact_404"))
+        # the trail is handed over only when there is one (a caller's
+        # three-argument explain keeps working where the lane asked nothing)
+        trail_kw = {"exact_404": n404} if n404 > 0 else {}
         row["detail"].update(
             his_slug=ctx["his_slug"], title=ctx["title"], event_title=ctx["event_title"],
             event_slug=ctx["event_slug"], sport=ctx["sport"],
             family=_family_of(ctx["his_slug"]),
-            explain=await explain_unmapped(pool, ctx, mo.get("refusal")),
+            explain=await explain_unmapped(pool, ctx, mo.get("refusal"), **trail_kw),
             notional_6h=notional_in_window(fills, LOOKBACK_H),
             gross_sh=round(sum(pos.values()), 4),
             outcome_null=outcome_null_count(fills))
+        if n404 > 0:
+            # L7: the exact lane's 404 trail, whatever the explain says
+            row["detail"]["exact_404"] = n404
         return row
     la, oa, slug = m["long_asset"], m["other_asset"], m["us_slug"]
     his_long = float(pos.get(la, 0.0)) if la else 0.0

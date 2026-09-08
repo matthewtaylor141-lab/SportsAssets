@@ -403,7 +403,11 @@ def test_the_venue_truth_and_the_fill_echo_are_pure_and_fail_closed():
 
 def test_a_venue_that_lists_nothing_keeps_premaps_own_explain(monkeypatch):
     """Every candidate 404s and the yes/no lane refuses: the market is
-    unmapped under premap's own step name, never a new one."""
+    unmapped under premap's own step name, never a new one -- since L7
+    (2026-09-08) with the exact lane's 404 trail riding on the bare
+    step (`:exact:404:<n>`, n the candidates the venue answered 404),
+    so the census says the venue was asked; a split step stands alone
+    (test_c8_tennis_witness)."""
     async def _explain(pool, market_title, event_title, outcome, global_slug, **_kw):
         return {"step": "no_side_match", "detail": "x", "keys": 3, "rows": 2}
 
@@ -412,7 +416,9 @@ def test_a_venue_that_lists_nothing_keeps_premaps_own_explain(monkeypatch):
     _with_venue(monkeypatch, v)
     p = _Pool(fills=_cfb_fills(), mapped=False)
     row = _run(ms.shadow_market(p, v, "rn1", CID, RATIO, {}, positions={}))
-    assert row["reason"].startswith("unmapped") and row["detail"]["explain"] == "no_side_match"
+    assert row["reason"].startswith("unmapped")
+    n404 = row["detail"]["exact_404"]
+    assert n404 >= 3 and row["detail"]["explain"] == f"no_side_match:exact:404:{n404}"
     assert row["detail"]["map_venue_reads"] >= 1
     assert all(c in v.slug_calls for c in ("atc-cfb-bayl-aubrn-2026-09-05-bayl", AEC_CFB, CFB))
 

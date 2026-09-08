@@ -652,6 +652,28 @@ _STATE_TERMINAL_CONFIRM = "mirror_terminal_confirm"
 # a book's reads are untouched.
 NO_MARK_TTL_S = rules.capped_env("MIRROR_NO_MARK_TTL_S", 900.0, floor=60.0)
 UNMAPPED_TTL_MAX_S = 3600.0
+# L7 (2026-09-08; PNL_program lane 7 item 4, cand_refusals_1158: ~370
+# active candidates per tick, avg tick 133.9 s on the candidate stage,
+# cand_unread_capped $71,892/24 h). THE EVENT-STALE MEMO: a candidate
+# whose market's own date (the YYYY-MM-DD his slug names, premap.date_of
+# -- the market's identity, never a title guess) is MORE THAN ONE DAY
+# past (the whole day after it has run: now >= date + 2 days) AND with
+# no fill of his in the last EVENT_STALE_FILL_S gets the D1 terminal
+# memo (_terminal_until, ms.UNMAPPED_TTL_S) without a map read or a
+# quote read: `event_stale`. Both witnesses or none: an undated slug, an
+# unreadable date, no readable fill instant, a fill inside the day or a
+# wake this tick -> read as today (fail closed toward the read the rail
+# already bounds). Two constants, not knobs: the day is the calendar's
+# and a knob could only make the memo fire on a live market. L7 fold
+# (2026-09-08): his newest fill is the newest of the walk's stamp and
+# the rows read (review MEDIUM-1), and the memo is released at the walk
+# by his next fill or a wake through its sibling _event_stale_memo
+# (review HIGH-1). Inert at these constants (review MEDIUM-3): the walk
+# lists only markets with a fill of his inside ms.LOOKBACK_H (6 h), so
+# no walked candidate's newest fill is a day old -- the name fires only
+# once the owner sizes the fill window at or under the lookback.
+EVENT_STALE_DAY_S = 86400.0
+EVENT_STALE_FILL_S = 86400.0
 _STATE_CAND_MEMO = "mirror_cand_memo"
 MODE_SAFE, MODE_EXITS, MODE_ON = "safe", "exits", "on"
 _OFF_VALUES = frozenset({"off", "0", "false", "no"})
@@ -845,6 +867,12 @@ CENSUS_KEYS: tuple[str, ...] = (
     # D2 thaw switched off, one read only, a cached read). Before
     # `venue_market_ended`; E13's and E12's pins hold the tail
     "venue_ledger_suspect", "venue_suspect_hold", "frozen_reduce_on_fill", "thaw_held",
+    # L7 (2026-09-08): a candidate refused on its slug's own date more
+    # than one day past with no fill of his in a day (the paragraph over
+    # EVENT_STALE_DAY_S) -- the terminal memo written, no venue read.
+    # Before E13's key, whose place before `registered_no_increase` the
+    # E13 pin holds
+    "event_stale",
     # E13 (2026-09-08): a FLAT book made 'closing' on the venue's own
     # confirmed terminal state (two reads a TTL apart), the gamma row
     # still live -- the one new name. Before `registered_no_increase`,
@@ -977,6 +1005,19 @@ _cand_memo_last: dict[str, Any] = {"at": 0.0, "sig": None}
 # writes it: a book on an ended market is managed every tick until it
 # closes).
 _terminal_until: dict[tuple[str, str], float] = {}
+# L7 fold (2026-09-08, review HIGH-1): beside an `event_stale` entry in
+# _terminal_until, the READ it was written on -- `_event_stale_memo[
+# (whale, cid)] = at`, the no_mark memo's shape -- so his next fill (a
+# walk stamp newer than `at`) or a wake releases it at the walk
+# (_release_cand_memo, `cand_memo_released`) the way the E7 memos are
+# released: the event-stale memo is the ABSENCE of his fills, which his
+# next fill undoes at once. D1's own entries carry NO sibling and stay
+# TTL-bound (the venue's terminal word, which his fill cannot undo).
+# NOT persisted: after a restart the reloaded _terminal_until entry has
+# no sibling and stays TTL-bound too (at most ms.UNMAPPED_TTL_S -- fail
+# closed toward the read, never toward a trade). Pruned beside the E7
+# memos (_prune_cand_memos) once its `until` is gone or has run.
+_event_stale_memo: dict[tuple[str, str], float] = {}
 # THE BOOK'S OWN TERMINAL MEMO (W1 / R4, 2026-09-07). An open book on a
 # market the venue has EXPIRED, whose markets row still reads
 # closed=false / resolved=false (48 of 64 in the 13:50Z census), cannot
@@ -6680,6 +6721,84 @@ def _memo_no_mark(t: _Tick, whale: str, cid: str, r: _Reading) -> bool:
     return True
 
 
+def _slug_of_fills(fills: list) -> str | None:
+    """His market's own slug off the rows the tick holds: the first row
+    that carries one (the _first_context idiom)."""
+    for f in fills or ():
+        if isinstance(f, dict) and f.get("market_slug"):
+            return str(f["market_slug"])
+    return None
+
+
+def _event_day_epoch(slug: str | None) -> float | None:
+    """The instant the market's own date starts (UTC midnight of the
+    YYYY-MM-DD his slug names, premap.date_of), or None: an undated
+    slug, a date the calendar refuses (2026-13-40), an unreadable slug."""
+    if not slug:
+        return None
+    try:
+        from .premap import date_of
+        d = date_of(slug)
+        if not d:
+            return None
+        return datetime.strptime(d, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp()
+    except Exception:  # noqa: BLE001 — no date is no witness
+        return None
+
+
+def _newest_fill_epoch(t: _Tick, cid: str, fills: list) -> float | None:
+    """His newest fill on the market: the NEWEST of the walk's stamp
+    (the `last_ts` the candidate order ranks on, E7 -- taken at the
+    start of the candidate stage, up to a tick before this read) and
+    every readable `ts` among the rows this read holds, so the newer
+    evidence wins whichever read carried it (L7 fold, review MEDIUM-1:
+    a fill of his ingested between the walk's query and this
+    candidate's `his_fills` read sits in the rows, newer than the
+    stamp). A row with no readable instant is None whatever the stamp
+    says, and so is no stamp with no rows: no evidence, the market is
+    read."""
+    newest = _num(t.stamps.get(cid))
+    for f in fills or ():
+        ts = _num((f or {}).get("ts")) if isinstance(f, dict) else None
+        if ts is None:
+            return None
+        newest = ts if newest is None else max(newest, ts)
+    return newest
+
+
+def _event_stale(t: _Tick, whale: str, cid: str, fills: list) -> dict | None:
+    """THE EVENT-STALE VERDICT (L7; the paragraph over EVENT_STALE_DAY_S):
+    {event_date, fill_age_s} when BOTH witnesses hold -- the market's
+    own date more than one day past (now >= its day + 2 days) and his
+    newest fill on it older than EVENT_STALE_FILL_S -- and the market
+    did not wake this tick; else None and the candidate is read as
+    today. Pure: no read, no write."""
+    if cid in t.woken:
+        return None
+    slug = _slug_of_fills(fills)
+    day = _event_day_epoch(slug)
+    if day is None or float(t.now) < day + 2.0 * float(EVENT_STALE_DAY_S):
+        return None
+    newest = _newest_fill_epoch(t, cid, fills)
+    if newest is None or (float(t.now) - newest) < float(EVENT_STALE_FILL_S):
+        return None
+    from .premap import date_of
+    return {"event_date": date_of(slug), "fill_age_s": round(float(t.now) - newest, 1)}
+
+
+def _memo_event_stale(t: _Tick, whale: str, cid: str) -> None:
+    """The event-stale memo's ONE writer: the D1 terminal memo, the same
+    TTL (ms.UNMAPPED_TTL_S), so the walk skips the market
+    `cand_terminal_skipped` until it runs -- or his next fill lands or
+    the market wakes (L7 fold, review HIGH-1): the read's `at` is kept
+    beside it in `_event_stale_memo`, and _release_cand_memo drops both
+    on a walk stamp newer than `at` or a wake, `cand_memo_released`.
+    The sibling is not persisted: a restart reloads the `until` alone
+    and the entry is TTL-bound as D1's own are."""
+    _terminal_until[(whale, cid)] = t.now + ms.UNMAPPED_TTL_S
+    _event_stale_memo[(whale, cid)] = float(t.now)
+
+
 def _release_cand_memo(t: _Tick, whale: str, cid: str, stamp: float | None) -> None:
     """RELEASE BY HIS FILLS, at the walk: a memoised market (either
     memo) whose newest fill of his (`stamp`, the `last_ts` the
@@ -6688,13 +6807,22 @@ def _release_cand_memo(t: _Tick, whale: str, cid: str, stamp: float | None) -> N
     `cand_memo_released` when it still held. An `until` with no `at`
     beside it is released by any readable stamp (fail closed: read). A
     stamp the walk could not read (None) releases nothing: no evidence
-    of a newer fill, the memo's own TTL stands."""
+    of a newer fill, the memo's own TTL stands.
+
+    L7 fold (2026-09-08, review HIGH-1): the third pair is the terminal
+    memo with its event-stale sibling -- released on the same rule
+    when the sibling holds the memo's `at`; an `until` with NO sibling
+    is D1's own terminal word (or the event-stale memo reloaded after
+    a restart) and is released by nothing but its TTL."""
     key = (whale, cid)
     woken = cid in t.woken
-    for until_d, memo_d in ((_unmapped_until, _unmapped_memo), (_no_mark_until, _no_mark_memo)):
+    for until_d, memo_d in ((_unmapped_until, _unmapped_memo), (_no_mark_until, _no_mark_memo),
+                            (_terminal_until, _event_stale_memo)):
         if key not in until_d:
             continue
         at = _memo_at(memo_d.get(key))
+        if until_d is _terminal_until and at is None:
+            continue                        # D1's word: the TTL alone
         if not (woken or (stamp is not None and (at is None or float(stamp) > at))):
             continue
         until = _num(until_d.get(key))
@@ -6709,17 +6837,21 @@ def _cand_memo_skips(whale: str, cid: str, now: float, stamp: float | None, woke
     """Would either candidate memo skip this market at `now`, once his
     newest fill is judged against it (the walk's release rule, judged
     without dropping anything)? For _name_unread: a market the memo
-    would have skipped anyway is not one the cap cut."""
+    would have skipped anyway is not one the cap cut. L7 fold: the
+    terminal memo is the third pair, on _release_cand_memo's rule -- a
+    live `until` with no event-stale sibling skips whatever the stamp
+    or the wake says (D1's word)."""
     key = (whale, cid)
-    if cid in woken:
-        return False
-    for until_d, memo_d in ((_unmapped_until, _unmapped_memo), (_no_mark_until, _no_mark_memo)):
+    for until_d, memo_d in ((_unmapped_until, _unmapped_memo), (_no_mark_until, _no_mark_memo),
+                            (_terminal_until, _event_stale_memo)):
         at = _memo_at(memo_d.get(key))
         until = _num(until_d.get(key))
         if until is None or until <= now:
             continue
-        if stamp is not None and (at is None or float(stamp) > at):
-            continue                        # his newer fill: it would have been read
+        if until_d is _terminal_until and at is None:
+            return True                     # D1's word: the TTL alone
+        if cid in woken or (stamp is not None and (at is None or float(stamp) > at)):
+            continue                        # his newer fill or a wake: it would have been read
         return True
     return False
 
@@ -6738,6 +6870,12 @@ def _prune_cand_memos(now: float) -> None:
             memo_d.pop(k, None)
         for k in [k for k in memo_d if k not in until_d]:
             memo_d.pop(k, None)
+    # L7 fold: the event-stale sibling with no live terminal `until`
+    # beside it (dropped, run out, or never there) -- the terminal memo
+    # itself is left as D1 left it
+    for k in [k for k in _event_stale_memo
+              if _num(_terminal_until.get(k)) is None or float(_terminal_until[k]) <= float(now)]:
+        _event_stale_memo.pop(k, None)
 
 
 def _cand_memo_snapshot(now: float) -> dict:
@@ -10625,6 +10763,18 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     d = ctx if ctx is not None else {}
     fills = await ms.his_fills(t.pool, w, cid)
     _count_fills_dedup(t)
+    stale = _event_stale(t, w, cid, fills)
+    if stale:
+        # L7: the market's own date more than a day past and nothing of
+        # his in a day -- the terminal memo, no map read, no quote read.
+        # The refusal row carries the NAME alone (us_slug, mark, his_net
+        # NULL: _note_candidate_refusal's fixed key set has no column for
+        # event_date / fill_age_s; they ride the ctx for the caller --
+        # L7 fold, review LOW-1)
+        _mirror_stop("event_stale", w)
+        _memo_event_stale(t, w, cid)
+        d.update(stale)
+        return "event_stale"
     # the shadow's own mapper, venue module and all (C1): ledger, premap,
     # then the copy lane's exact steps -- paced, cached per market,
     # bounded per tick by t.map_budget
@@ -11321,9 +11471,7 @@ def _name_unread(t: _Tick, whale: str, unread: list, stamps: dict | None = None)
         if (whale, cid) in t.books_seen:
             continue
         if _cand_memo_skips(whale, cid, t.now, (stamps or {}).get(cid), t.woken):
-            continue
-        if _terminal_until.get((whale, cid), 0.0) > t.now:
-            continue
+            continue                        # the terminal memo too (L7 fold)
         _mirror_stop("cand_unread_capped", whale)
         _note_candidate_refusal(t, whale, cid, "cand_unread_capped", {})
 
