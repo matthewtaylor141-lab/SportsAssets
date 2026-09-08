@@ -2360,6 +2360,13 @@ class _Tick:
     # `venue_state`, which the flatten's slippage leg refuses on
     slug_states: dict = field(default_factory=dict)
     snaps: dict = field(default_factory=dict)
+    # whale -> the wall clock at which this tick's whole-book walk was
+    # read (E15 lane 4): ms.snapshot_sizes measures the walk's age on
+    # time.time(), not on t.now, so the walk's OWN clock is this less
+    # the age -- never t.now less the age, which drifts by the tick's
+    # elapsed time and would hand mi.drift_explained a `since` earlier
+    # than the walk (an add the walk already counted read as after it)
+    snap_read_at: dict = field(default_factory=dict)
     # (whale, condition_id) -> the per-market read, taken at most once
     # per market per tick (Phase 1); a refused or unreadable read is
     # cached as the fail-closed tuple so it is not retried in the tick
@@ -3494,6 +3501,7 @@ async def _snapshot(t: _Tick, whale: str) -> tuple[dict, float | None, bool]:
     async with t.snap_lock:             # E2: one read per whale per tick, whoever asks first
         if whale not in t.snaps:
             t.snaps[whale] = await ms.snapshot_sizes(t.pool, whale)
+            t.snap_read_at[whale] = time.time()       # E15: the walk's clock = this - age
         return t.snaps[whale]
 
 
@@ -6689,6 +6697,8 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         # the exit's price source
         prior = _jsonish(book.get("last_plan")) or {}
         plan = {k: prior[k] for k in _SKIP_CARRIED if prior.get(k) is not None}
+        if isinstance(prior.get("reduce_ref"), dict):
+            plan["reduce_ref"] = prior["reduce_ref"]       # E15: the witness's reference rides the skip
         plan.update(kind="no_plan", at=t.now, read_on=int(read_on), tick=int(t.seq),
                     last_read=int(_quiet_memo[book["id"]]["seq"]))
         if _num(plan.get("mark")) is not None:
@@ -6741,6 +6751,27 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     shorts = _shorts_on(t)
     drift, drift_src = _drift_for(r)
     net, snap_net = _net_for(r, drift, short=shorts)
+    # THE DRIFT HIS FILLS EXPLAIN (lane 4, 2026-09-08; $14,254/6 h of his
+    # fills refused `drift`): the whole-book walk is older than one tick
+    # and his fills' net stands above it on the leg by exactly the adds
+    # the chain / s1 lanes ingested after the walk's clock -- the
+    # disagreement is the walk's age, not a reading nobody made -- so the
+    # INCREASE is sized on the fills' net (mi.drift_explained, named on
+    # the plan). A reduce never sizes on a reading (E15 below, E12b's
+    # hold kept); the per-market read (stamped this tick) and any
+    # unexplained drift refuse as today
+    fills_net_all = mi.his_net(r.his_long, r.his_other)
+    drift_ex = None
+    if (drift.refusal == "drift" and drift_src == "book" and r.snap_age is not None
+            and float(r.snap_age) > POLL_S and _num(t.snap_read_at.get(w)) is not None):
+        # the walk's own clock (the _Tick field's paragraph); a walk whose
+        # read this tick did not stamp explains nothing
+        snap_at = float(t.snap_read_at[w]) - float(r.snap_age)
+        ex = mi.drift_explained(fills, la, oa, short, fills_net_all, snap_net, snap_at)
+        if ex is not None:
+            drift = rules.DriftRule(True, "derived", None, drift.drift)
+            net = fills_net_all
+            drift_ex = {"snapshot_at": snap_at, **ex}
     venue_int = int(r.venue)
     # the plan's numbers, written whatever happens below
     # THE REGISTER'S SIGN (E5 / P1): a register sum is read only when
@@ -6775,7 +6806,59 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                             "at": t.now}
     if sign_refused is not None:
         plan["registered_sign_refused"] = sign_refused
+    if drift_ex is not None:
+        plan[mi.DRIFT_FILLS_EXPLAIN] = drift_ex
     prior_plan = _jsonish(book.get("last_plan")) or {}
+    # THE REFERENCE EVERY BOOK'S REDUCE IS WITNESSED AGAINST (E15, task
+    # 69; the paragraph over mi.reducing_on): `reduce_ref` = {target, at}
+    # -- the target the last un-held plan sized and the newest ingest
+    # clock among the fills it counted (mi.fills_clock, E12b's clock, on
+    # the ingestion host's own stamps). A plan written before this rule
+    # seeds it from its own target and clock (the landed state stands as
+    # the reference); nothing readable is no reference -- a reduce then
+    # has no witness and holds (`no_reference`). Carried as it stands
+    # until the plan below moves or keeps it
+    ref = prior_plan.get("reduce_ref")
+    if not isinstance(ref, dict):
+        ref = None
+        pt = prior_plan.get("target")
+        pt = pt if isinstance(pt, int) and not isinstance(pt, bool) else None
+        if prior_plan.get("kind") == "reduce":
+            # THE SEED AT DEPLOY (the E15 review's MEDIUM-1, folded
+            # 2026-09-08): a prior plan that was itself a REDUCE was sized
+            # by the landed rule -- on a reading, with no witness asked --
+            # so its target is not a witnessed state; read as the
+            # reference it would admit that sale once (target 70 under a
+            # ledger of 100 reads 70 against 70: no fall, 30 sold on the
+            # first tick of this rule). Seeded at the LEDGER instead: hold
+            # what we hold, his next reducing fill witnesses -- his exit
+            # resting at deploy re-plans from the ledger as the E12b hold's
+            pt = int(ledger)
+        # a flow book's own reference (E12b's clock, the last witnessed
+        # state) stands in first; else the landed plan's own clock
+        pa = _num(book.get("flow_last_at")) if book.get("flow_base") is not None else None
+        pa = _num(prior_plan.get("at")) if pa is None else pa
+        # A FROZEN plan carries E16's `fills_at` -- the newest clock among
+        # his fills the frozen exit answered or read while the book was
+        # frozen (landing 2026-09-08, lanes 2 + 3+4 together): a thawed
+        # book's first live reduce is witnessed against THAT clock, so a
+        # sale of his the freeze held unanswered (under_proportion, the
+        # walk unread) is still its witness, and one the frozen exit
+        # already answered (fills_at moved past it) never sells twice
+        fa = _num(prior_plan.get("fills_at"))
+        if fa is not None:
+            pa = fa
+        if pa is not None:
+            ref = {"target": pt, "at": pa}
+    ref_target = ref.get("target") if ref else None
+    ref_at = _num(ref.get("at")) if ref else None
+    if ref is not None:
+        plan["reduce_ref"] = ref
+    # a book NEVER planned (no last plan on the row) has no reference and
+    # nothing to reduce -- its ledger is 0 until a plan places -- and
+    # plans as today; its first plan writes the reference. A plan that
+    # stands but reads no clock holds (`no_reference`, below)
+    e15_ref = bool(prior_plan) or ref is not None
     # the flat clock carries only while the book IS flat: a re-bought
     # book that flattens again starts a new MIRROR_FLAT_CLOSE_S wait,
     # never closes cashed_out at once off the clock of an earlier flat
@@ -6918,6 +7001,44 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             if verdict is not None:
                 plan["flow_reading"] = {"why": verdict, "reading": net, "fills": fills_net}
     net_sized = net if flow is None else flow
+    # THE TWO-SIDED BURST (E15; book 278): both tokens bought inside one
+    # tick -- his fills clocked after the reference carry an add AND a
+    # reduction on the leg (mi.burst_since) -- sizes on the NET of the
+    # burst, his fills' net, never on a reading that carries the last
+    # leg alone: a flow book is on the fills' net already (mi.flow_net);
+    # an old-rule book (no block) sizes this tick on the fills' net in
+    # place of the two-source reading. Named with both legs' shares
+    burst = mi.burst_since(fills, la, oa, short, ref_at)
+    if burst is not None:
+        plan[mi.FLIP_BURST_NET] = burst
+    # THE WITNESSED SALE IS SIZED ON HIS FILLS (E15): whenever his fills
+    # clocked after the reference carry a reduction on the leg (a burst
+    # or a plain sale), an old-rule book sizes THIS tick on his fills'
+    # net -- the witness's own axis, E12b's construction -- never on the
+    # two-source reading: a walk lagging his adds (278) would otherwise
+    # turn a witnessed 1 % sale into the reading's 30 % reduce. The
+    # reading's excess follows when the fills carry it; an increase the
+    # fills' net asks for still meets the drift refusal by name. ONLY
+    # while the reading keeps him on the book's side: a reading at 0 or
+    # across it (the paired flatten, the confirmed vanish, the sign
+    # flip) keeps its own reader, as before -- those are not this rule's.
+    # AND ONLY FOR THE REDUCE IT WAS BUILT FOR (the E15 review's
+    # MEDIUM-2, folded 2026-09-08): the override stands when the target
+    # the fills' net sizes is at or under the ledger on the leg (long:
+    # at or under; short: at or above) -- a plan that would reduce; a
+    # fills' net asking for an INCREASE keeps the reading (he buys 300
+    # and sells 100 as we watch, the per-market read this tick says
+    # 1,150 inside the drift gate: the increase is the reading's 15, never
+    # the fills' 20 past the venue's own count of him). A refused or
+    # unreadable figure on the fills' axis keeps the reading too
+    same_side = (net != 0.0 and fills_net_all != 0.0 and (net > 0.0) == (fills_net_all > 0.0))
+    if (flow is None and same_side
+            and (burst is not None or mi.reducing_on(fills, la, oa, short, ref_at) > 0.0)):
+        fills_tg = rules.mirror_target(book.get("ratio"), fills_net_all, r.mark, MIRROR_ANCHOR_CLIP_USD,
+                                       cap_usd=rules.MIRROR_NET_CAP_USD, allow_short=shorts)
+        ft = None if fills_tg.get("refusal") else fills_tg.get("target")
+        if ft is not None and ((int(ft) >= ledger) if short else (int(ft) <= ledger)):
+            net_sized = fills_net_all
     # flat at a flow target of 0 while HIS BLOCK STANDS: he holds, the
     # book waits for his flow -- never the flat clock (_maybe_close_episode)
     flow_wait = bool(flow is not None and float(book.get("flow_base") or 0.0) != 0.0
@@ -7037,6 +7158,26 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         target = 0
         plan["sign_flip"] = True
         _mirror_stop("sign_flip", w)
+        # THE FLIP'S WITNESS (E15; books 198, 122, 451: the reopen sized 0
+        # under E12's MEDIUM-2). The crossing is witnessed when his fills
+        # clocked after the reference REDUCE this leg (mi.reducing_on) --
+        # a sale of his, never a venue reading -- and `flip_witness` =
+        # {since: the reference's clock BEFORE the crossing, reduced, at}
+        # rides on the plan and is carried tick to tick while the flip
+        # stands, so the close tick (the venue read at 0, one tick later)
+        # hands it to the reopen: _tick_candidate reads the closed book's
+        # last plan and _open_flow cuts first sight at `since`, so the
+        # crossing fills, witnessed live, are the new side's FLOW. A flip
+        # no fill of his witnessed carries nothing: the reopen is
+        # flow-only, as today
+        fw = prior_plan.get("flip_witness") if prior_plan.get("sign_flip") is True else None
+        if not isinstance(fw, dict):
+            fw = None
+            reduced = mi.reducing_on(fills, la, oa, short, ref_at)
+            if reduced > 0.0 and ref_at is not None:
+                fw = {"since": float(ref_at), "reduced": reduced, "at": t.now}
+        if fw is not None:
+            plan["flip_witness"] = fw
     # THE SHORT SIDE'S SHARE CAP, after the flip and after the shadow's
     # figure is taken: the shadow computes the uncapped target
     target = _short_capped(t, target, w, plan)
@@ -7316,6 +7457,71 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             else:
                 cancel_reason = mi.FLOW_FILLS_SHRANK
                 p = None
+        elif kind == "reduce" and e15_ref:
+            # E15 (task 69; the paragraph over mi.reducing_on): a reduce on
+            # ANY book needs his witness -- a reducing fill of his on the
+            # leg clocked after the reference (`reduce_ref.at`). None: the
+            # target fell for a reason of ours (the ratio step at the $10
+            # line, the $20 line crossed: 451's shape; a reading smaller
+            # than his fills: 278's; a cap scaled down; the chain-first
+            # collapse; no reference to read against), and the plan HOLDS
+            # at the ledger, named `reduce_unwitnessed` = {from, to,
+            # cause}. HIS witnessed exit already resting keeps its whole
+            # E4 life exactly as under E12b's hold: the plan handed to
+            # _act is capped at the REFERENCE's target (the last witnessed
+            # state; a reference of 0 -- a flatten's -- caps nothing: a
+            # flatten is never re-sent as a reduce) and only a reducing
+            # side is taken; nothing witnessed outstanding: nothing sent,
+            # a resting add cancelled under the hold's name (the target
+            # fell: nothing more is bought). The reference stands
+            rt = ref_target
+            if rt is None and book.get("flow_base") is not None and fb is not None:
+                # a flow book's reference target is the row's (E12b: the
+                # reference net less the block, sized as the hold sizes it)
+                ref_tg = rules.mirror_target(book.get("ratio"), mi.flow_net(book.get("flow_last_net"), fb),
+                                             r.mark, MIRROR_ANCHOR_CLIP_USD,
+                                             cap_usd=rules.MIRROR_NET_CAP_USD, allow_short=shorts)
+                if not ref_tg.get("refusal") and ref_tg.get("target") is not None:
+                    rt = int(ref_tg["target"])
+            # a target at or above the reference's on the leg is no fall:
+            # the reduce is the reference's own, witnessed when it moved.
+            # A reference of 0 (a flatten's, a flow-only open's) stands
+            # for no witnessed reduce at all -- the flatten kept its own
+            # reader and the shares it left are not its residue to sell
+            # -- so every reduce against it needs his fill (fail closed:
+            # a venue blip read at 0 and back is never sold into)
+            fell = True if rt is None or rt == 0 else ((target > rt) if short else (target < rt))
+            witnessed = 0.0 if not fell else mi.reducing_on(fills, la, oa, short, ref_at)
+            if fell and witnessed <= 0.0:
+                ref_target = rt
+                if ref_at is None:
+                    cause = "no_reference"
+                elif plan.get("ratio_stepped") is not None:
+                    cause = "ratio_stepped"
+                elif plan.get("short_share_cap") is not None:
+                    cause = "short_share_cap"
+                elif plan.get("game_cap") is not None:
+                    cause = "game_cap"
+                elif flow is None and net_sized != fills_net_all:
+                    cause = "reading"
+                else:
+                    cause = "fills"
+                plan[mi.REDUCE_UNWITNESSED] = {"from": ref_target, "to": target, "cause": cause}
+                wp = None
+                if isinstance(ref_target, int) and ref_target != 0:
+                    wp = mi.plan(int(ref_target), float(ledger), float(venue_int - r.manual - registered),
+                                 mi.Book(r.bid, r.ask), his_px,
+                                 None if plan.get("short_share_cap") is not None else r.mark)
+                held = t.open_by_book.get(book["id"])
+                if held is not None and rules.leg_action(book.get("intent"), held[0]["side"]) == "reduce":
+                    plan["open_order"] = held[0]["id"]
+                if (wp is not None and wp.side is not None
+                        and rules.leg_action(book.get("intent"), wp.side) == "reduce"):
+                    plan[mi.REDUCE_UNWITNESSED]["cap"] = wp.qty
+                    p = wp
+                else:
+                    cancel_reason = mi.REDUCE_UNWITNESSED
+                    p = None
     else:
         _mirror_stop(rules.plan_reason_key(p.reason), w)
         if (target == 0 and abs(ledger) < FLAT_TOL_SHARES
@@ -7341,6 +7547,19 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     if plan.get("flow_hold") is not None and p is None:
         reason = mi.FLOW_FILLS_SHRANK
         plan["reason"] = reason
+    if plan.get(mi.REDUCE_UNWITNESSED) is not None:
+        # E15: the hold's name on the row when nothing of his exit rests;
+        # a book with no reference at all seeds one at the ledger and the
+        # fills' clock (hold what we hold; his next reducing fill witnesses)
+        if p is None:
+            reason = mi.REDUCE_UNWITNESSED
+            plan["reason"] = reason
+        if ref is None:
+            plan["reduce_ref"] = {"target": int(ledger), "at": mi.fills_clock(fills, t.now)}
+    elif not t.flatten_all:
+        # the reference moves with every un-held plan: the target it sized
+        # and the newest ingest clock among the fills it counted
+        plan["reduce_ref"] = {"target": int(target), "at": mi.fills_clock(fills, t.now)}
     try:
         if kind == "flatten_vanished" and p is not None:
             vanished = True
@@ -10359,8 +10578,13 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     # the axis the ratchet moves on, never the two-source reading `net`
     # that admission judged the whole-net target on)
     fills_net = mi.his_net(r.his_long, r.his_other)
+    # E15: a sign-flip reopen whose crossing his fills witnessed (the
+    # closed book's last plan carries `flip_witness`, _flip_since) cuts
+    # first sight at the reference's clock before the crossing, so the
+    # crossing fills are the new side's flow; else the window as today
+    flip_since = await _flip_since(t, w, cid)
     cu, open_target = _open_flow(t, fills, la, oa, short, fills_net, r.mark, ratio, target,
-                                 min(room, cap), shorts)
+                                 min(room, cap), shorts, since=flip_since)
     # the block travels only when there is one to store (the columns
     # present, a verdict made): an old-rule open is the pre-E12 call.
     # E12b: the reference's clock with it (mi.fills_clock, the newest
@@ -10410,9 +10634,39 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     return None
 
 
+_SQL_BOOK_FLIP = """
+SELECT last_plan FROM mirror_books
+ WHERE whale = $1 AND condition_id = $2 AND state = 'closed'
+ ORDER BY id DESC LIMIT 1 /* ml-book-flip */"""
+
+
+async def _flip_since(t: _Tick, whale: str, cid: str) -> float | None:
+    """THE FLIP REOPEN'S FIRST SIGHT (E15): the reference's clock before
+    the crossing, from the last CLOSED book's last plan on this market
+    -- only when that plan closed under the sign flip with a witness of
+    his fills (`flip_witness`, _tick_book) no older than mi.LATE_FILL_S.
+    None on everything else (no prior book, an unreadable row or plan,
+    a flip no fill of his witnessed, a stale one): the window as today,
+    the reopen flow-only. Fail closed toward NOT buying the block."""
+    try:
+        row = await t.pool.fetchrow(_SQL_BOOK_FLIP, whale, cid)
+        lp = _jsonish(row["last_plan"]) if row else None
+    except Exception:  # noqa: BLE001 — an unreadable prior book is no witness
+        return None
+    if not isinstance(lp, dict) or lp.get("sign_flip") is not True:
+        return None
+    fw = lp.get("flip_witness")
+    if not isinstance(fw, dict):
+        return None
+    since, at = _num(fw.get("since")), _num(fw.get("at"))
+    if since is None or at is None or at > t.now or t.now - at > float(mi.LATE_FILL_S):
+        return None
+    return float(since)
+
+
 def _open_flow(t: _Tick, fills: list, la: str, oa: str | None, short: bool, net: float,
                mark: float | None, ratio: float, target: int, cap_usd: float,
-               shorts: bool) -> tuple[dict, int]:
+               shorts: bool, since: float | None = None) -> tuple[dict, int]:
     """THE OPEN'S VERDICT ON HIS BLOCK AND THE TARGET THE BOOK OPENS AT
     (E12; the paragraph in _tick_candidate). `net` is HIS FILLS' net on
     the axis (the fold, HIGH-2). The block is that net less the fills
@@ -10440,7 +10694,12 @@ def _open_flow(t: _Tick, fills: list, la: str, oa: str | None, short: bool, net:
     if t.flow_col is not True:
         return {"vwap": None, "mark": _num(mark), "tol": _num(rules.MIRROR_CATCHUP_TOL_CENTS),
                 "allowed": True, "flow_base": None, "why": "column_absent"}, target
-    since = t.now - FIRST_SIGHT_S
+    window = t.now - FIRST_SIGHT_S
+    # E15: the witnessed flip's clock widens first sight only (never
+    # narrows it): the crossing fills are flow, the old side's the block
+    # -- clamped to 0 on the new axis by mi.pre_existing_block
+    flip = _num(since)
+    since = window if flip is None or flip >= window else flip
     block = mi.pre_existing_block(net, fills, la, oa, since)
     vwap = mi.vwap_of(fills, la, oa, short=short, before=since)
     # PNL lane 1: the book's axis travels with the call, so a mark at or
@@ -10448,6 +10707,8 @@ def _open_flow(t: _Tick, fills: list, la: str, oa: str | None, short: bool, net:
     # (`at_or_better`); the worse side is D1's band (owner YES,
     # 2026-09-08): 10% of his cost, floor E12's 2c, cap 5c (`within_pct`)
     cu = rules.open_catchup(net, mark, ratio, block, vwap, short=short)
+    if flip is not None and since == flip:
+        cu["flip_reopen"] = {"since": flip}
     fb = _num(cu.get("flow_base"))
     if fb is None or cu.get("allowed") is True:
         return cu, target

@@ -785,6 +785,91 @@ def restored_block(block: Any, last_net: Any, net: Any, added: Any) -> tuple[flo
     return fb, {"from": ln, "to": n, "unexplained": unexplained, "witnessed": round(explained, 6)}
 
 
+# ------------------------------ E15 (2026-09-08): the witness on EVERY book
+#
+# Book 451 (task 69): an exact copy of 16 @0.39; he added to $46, the
+# one-way ratio step (rules.step_ratio) took the target to 10 and the
+# reduce path SOLD 6 at 0.33 while he was BUYING. Book 278: nine
+# increase rests at 0.62 -> 0.12 -> 0.07 sized on a reading that lagged
+# his 4,415 Yes buys; 24 @0.12 and 292 @0.07 filled -- $446 of our $539
+# loss on a sale he did not make. E12b's rule (the ratchet moves only on
+# a REDUCING fill of his clocked after the reference) governed flow
+# books alone; a book with no block (opened before 057, or with the
+# block admitted) still sold on any fall of the target: the ratio step,
+# the $10 line crossed, a cap scaled down, a snapshot smaller than the
+# fills' net, the chain-first collapse. Now EVERY book's reduce needs
+# the same witness: a reducing fill of his on the book's axis, clocked
+# after the last plan's reference (`reduce_ref` on the plan row: the
+# target the last un-held plan sized and the newest ingest clock among
+# the fills it counted, mi.fills_clock). Pure helpers here; the live
+# worker names `reduce_unwitnessed` = {from, to, cause} and HOLDS at the
+# ledger (his witnessed exit's rest keeps its E4 life, capped at the
+# reference's target, exactly E12b's construction); a witnessed fall
+# reduces to the target at his price within MIRROR_EXIT_TOL; a target
+# of 0 (his full exit, the confirmed vanish, the sign flip) keeps its
+# own readers -- none of them is this rule's.
+
+REDUCE_UNWITNESSED = "reduce_unwitnessed"
+FLIP_BURST_NET = "flip_burst_net"
+DRIFT_FILLS_EXPLAIN = "drift_fills_explain"
+
+
+def reducing_on(fills: Iterable[dict], long_asset: str | None, other_asset: str | None,
+                short: bool, since: Any) -> float:
+    """THE WITNESS ON THE BOOK'S OWN LEG (E15): reducing_since read on
+    the leg's axis rather than a block's -- a SELL of the long token or
+    a BUY of the other on a long book, the mirror image on a short --
+    over the fills clocked strictly after `since`. 0 with no clock or
+    nothing reducing (fail closed: no witness, no sale)."""
+    return reducing_since(fills, long_asset, other_asset, -1.0 if short else 1.0, since)
+
+
+def burst_since(fills: Iterable[dict], long_asset: str | None, other_asset: str | None,
+                short: bool, since: Any) -> dict | None:
+    """THE TWO-SIDED BURST (E15; book 278): both tokens bought inside
+    one tick -- his fills clocked after `since` carry an ADD and a
+    REDUCTION on the book's axis at once (adding_since and reducing_on,
+    each > 0). `{adds, reductions, net}` in long-token shares on the
+    leg's axis, else None (one-sided or nothing). The worker sizes an
+    increase on the NET of the burst (his fills' net), never on a
+    reading that carries the last leg alone."""
+    adds = adding_since(fills, long_asset, other_asset, -1.0 if short else 1.0, since)
+    reds = reducing_on(fills, long_asset, other_asset, short, since)
+    if adds <= 0.0 or reds <= 0.0:
+        return None
+    return {"adds": adds, "reductions": reds, "net": round(adds - reds, 6)}
+
+
+def drift_explained(fills: Iterable[dict], long_asset: str | None, other_asset: str | None,
+                    short: bool, fills_net: Any, snap_net: Any, since: Any,
+                    dust: float = VENUE_LEDGER_TOL_SHARES) -> dict | None:
+    """THE DRIFT HIS FILLS EXPLAIN (lane 4, 2026-09-08): the snapshot is
+    older than one tick and his fills' net stands ABOVE it on the
+    book's leg by exactly the adds ingested after the snapshot's clock
+    (adding_since over the chain / s1-sourced fills alone -- the poll
+    lane's rows never explain a reading, they are what the chain
+    corrects) within `dust`. `{fills_after, delta}` when explained --
+    the worker then sizes the INCREASE on the fills' net -- else None:
+    a fills' net under the snapshot (a sale the reading has not seen,
+    or a collapse) is never this rule's, an unexplained rise refuses as
+    today, an unreadable figure explains nothing."""
+    n, s0, at0 = _num_r(fills_net), _num_r(snap_net), _num_r(since)
+    if n is None or s0 is None or at0 is None:
+        return None
+    sgn = -1.0 if short else 1.0
+    delta = round((n - s0) * sgn, 6)
+    if delta <= 0.0:
+        return None
+    sourced = [f for f in fills or () if isinstance(f, dict)
+               and str(f.get("source") or "") in ("chain", "s1")]
+    added = adding_since(sourced, long_asset, other_asset, sgn, at0)
+    d = _num_r(dust)
+    d = 0.0 if d is None or d < 0.0 else d
+    if added <= 0.0 or abs(delta - added) > d:
+        return None
+    return {"fills_after": added, "delta": delta}
+
+
 def vwap_of(fills: Iterable[dict], long_asset: str | None, other_asset: str | None,
             short: bool = False, before: float | None = None,
             late_s: float = LATE_FILL_S) -> float | None:
@@ -923,4 +1008,7 @@ __all__ = ["Fill", "Book", "Plan", "net_positions", "his_net", "opening_burst",
            # E12b: the witness, the reference's clock, the ratchet on the witnessed fall
            "fills_clock", "reducing_since", "witnessed_ratchet", "FLOW_FILLS_SHRANK",
            # the E12b fold: the mirror image of the witness, the unexplained rise to the block
-           "adding_since", "restored_block", "FLOW_FILLS_GREW"]
+           "adding_since", "restored_block", "FLOW_FILLS_GREW",
+           # E15: the witness on every book, the two-sided burst, the drift his fills explain
+           "reducing_on", "burst_since", "drift_explained", "REDUCE_UNWITNESSED",
+           "FLIP_BURST_NET", "DRIFT_FILLS_EXPLAIN"]

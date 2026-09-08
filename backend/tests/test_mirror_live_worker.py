@@ -754,6 +754,14 @@ class _Pool(_ShadowPool):
         if "ml-book-reopens" in s:
             self.books[a[0]]["flat_reopens"] = a[1]
             return "UPDATE 1"
+        if "ml-book-flip" in s:
+            # E15: the last CLOSED book's plan on the market (the flip's witness)
+            closed = [b for b in self.books.values()
+                      if b["whale"] == a[0] and b["condition_id"] == a[1] and b["state"] == "closed"]
+            if not closed:
+                return None
+            b = max(closed, key=lambda b: b["id"])
+            return {"last_plan": json.dumps(b["last_plan"]) if isinstance(b["last_plan"], dict) else b["last_plan"]}
         # -- the executor's own statements ----------------------------
         if "INSERT INTO mirror_books" in s:
             if any(b["whale"] == a[0] and b["us_market_slug"] == a[2] and b["state"] != "closed"
@@ -2756,6 +2764,7 @@ def test_an_unreadable_market_read_cancels_holds_and_never_makes_the_book_closin
     assert _cancels(v) == [("cancel", "oid-1", SLUG)] and p.orders[o["id"]]["reason"] == "market_unreadable"
     assert not _places(v) and "bbo" not in _kinds(v) and b["last_plan"]["kind"] == "no_plan"
     p.raise_on.clear()
+    p.fills[-1]["detected_at"] = NOW + 10      # E15: his sale, late-known, is the reduce's witness
     v2 = _Venue(held={SLUG: 300})
     _tick(p, v2, now=NOW + 30)
     pl = _places(v2)
@@ -10450,7 +10459,9 @@ def test_e4_r3_an_unpriced_reduce_rest_keeps_its_ttl_requote_and_a_priced_one_st
     assert st4["abandoned"] and not _cancels(v4) and p4.orders[o4["id"]]["state"] == "open"
     # a priced rest at his cent past its TTL on a normal tick: stands
     p5, b5, v5, http5 = _reduce_world(bid=0.29, ask=0.32)
-    b5["last_plan"] = {"kind": "reduce", "exit_px_src": "his_fill", "exit_rest": 0.31}
+    # E15: the rest is the reference's own reduce (target 100, witnessed when the reference moved)
+    b5["last_plan"] = {"kind": "reduce", "exit_px_src": "his_fill", "exit_rest": 0.31,
+                       "reduce_ref": {"target": 100, "at": NOW - 30.0}}
     o5 = p5.add_order(b5, side=SELL, wire=0.31, qty=200, kind="reduce", placed_ts=NOW - ttl - 1)
     v5.rest("oid-1", "SELL", 0.31, 200)
     st5 = _tick(p5, v5, http=http5)
