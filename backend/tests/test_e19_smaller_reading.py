@@ -540,10 +540,12 @@ def test_e19_the_fills_vs_venue_preset_carries_both_keys_and_the_venues_figures_
     names = line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)
     # beside the drift measures (book-drift, drift-16); the pinned neighbours
-    # (nf-venue|exits-paired|hourly, books-new|flow-books|nf-his,
+    # (nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|hourly since
+    # FILL lane 0b, books-new|flow-books|nf-his,
     # latency-census|fills-answered|close-rows) are untouched
     assert names == labels and names.index("fills-vs-venue") == names.index("drift-16") + 1
-    assert "drift-16|fills-vs-venue|books-new|" in line and "nf-venue|exits-paired|hourly (got" in line
+    assert "drift-16|fills-vs-venue|books-new|" in line
+    assert "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|hourly (got" in line
     assert names[-1] == "hourly"
     body = text[text.index("fills-vs-venue) SQL="):text.index("books-new) SQL=")]
     sql = body.split('SQL="', 1)[1].split('"; TO=', 1)[0]
@@ -576,8 +578,10 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     src = inspect.getsource(rules)
     # the knob count of the tip (lane 1's MIRROR_CATCHUP_PCT and
     # MIRROR_CATCHUP_MAX_CENTS make 20 rails; lane 6's MIRROR_REST_MIN_LIFE_S
-    # the fourth wait; the lane's own base read 18 and 3): E19 adds none
-    assert src.count("capped_env(") == 20 and src.count("min_wait_env(") == 4
+    # the fourth wait; the lane's own base read 18 and 3): E19 adds none;
+    # FILL lane 0a (2026-09-08) made the candidate's side band the 21st rail
+    # (LIVE_SIDE_PRICE_BAND_MAX, the default 0.15 as its ceiling)
+    assert src.count("capped_env(") == 21 and src.count("min_wait_env(") == 4
     assert "MIRROR_DRIFT_MAX = capped_env" in src and "E19" in inspect.getsource(rules.admission)
     for name in ("MIRROR_SMALLER", "SMALLER_READING", "DRIFT_SMALLER"):
         assert name not in src, "no knob"

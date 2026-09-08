@@ -17,17 +17,30 @@ each carrying the whole CTE chain (psql runs them one by one); the help
 line regenerated from the case labels with `exits-paired` after
 `nf-venue`, `hourly` still last and the hourly line untouched (its pins
 re-run here).
+
+FILL lane 0b (2026-09-08; book 266: he cut 30 % and we held 1,955 sh to
+-977.65, read `no_exit_by_him` because the 10 % rule never fired;
+hourly_1737 1424): `trough` = his lowest running net after the peak,
+`his_reduced_pct` = 1 - trough / peak, and the verdict he_reduced_we_held
+(no exit by the 10 % rule, his_reduced_pct >= 0.25, under half our peak
+filled after his first reducing fill) read BEFORE no_exit_by_him -- a
+CASE reads in order and the arm is that verdict's own sub-case -- counted
+in the stuck dollars and the totals. VERDICTS gains the word in its CASE
+place; the scratch-database pin at the end reads 266's shape.
 """
 from __future__ import annotations
 
 import re
 from pathlib import Path
 
+import pytest
+
 from tests import test_render_ops_hourly as hourly
+from tests.test_render_ops_fills_missed import World, _f
 
 YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
-VERDICTS = ("no_exit_by_him", "exited_with_him", "partial_exit", "exit_placed_unfilled",
-            "no_exit_order")
+VERDICTS = ("he_reduced_we_held", "no_exit_by_him", "exited_with_him", "partial_exit", "exit_placed_unfilled",
+            "no_exit_order")      # he_reduced_we_held since FILL lane 0b, before no_exit_by_him (its sub-case)
 GUARDS = ("no_position", "his_net_unseen")
 STUCK = "stuck_after_his_exit_usd"
 
@@ -124,11 +137,11 @@ def test_the_exits_paired_preset_reads_his_net_on_the_books_token_axis():
                 " net_after AS peak FROM hn WHERE net_after > 0"
                 " ORDER BY condition_id, net_after DESC, ts, id)") in stmt
         # after the peak: out at or under 10 % of it; reducing = a leg against it (either token)
-        assert "hn.net_after <= 0.10 * pk.peak AS out, hn.leg < 0 AS reducing" in stmt
+        assert "hn.net_after, hn.net_after <= 0.10 * pk.peak AS out, hn.leg < 0 AS reducing" in stmt
         assert "WHERE (hn.ts, hn.id) > (pk.peak_ts, pk.peak_id)" in stmt
         assert "h.side" not in stmt and "hn.side" not in stmt, "no BUY / SELL reading of his exit"
         # his exit price and dollars on the long axis; the dollars its complement on a short
-        assert "min(hr.ts) FILTER (WHERE hr.reducing) AS exit_from" in stmt
+        assert "min(hr.net_after) AS trough, min(hr.ts) FILTER (WHERE hr.reducing) AS exit_from" in stmt
         assert stmt.count("FILTER (WHERE hr.reducing AND (hr.ts, hr.id) <= (hx.exit_ts, hx.exit_id))") == 3
         assert "sum(hr.size * hr.eff_px) FILTER" in stmt
         assert "sum(hr.size * (CASE WHEN bk.is_short THEN 1 - hr.eff_px ELSE hr.eff_px END))" in stmt
@@ -182,17 +195,22 @@ def test_the_exits_paired_preset_names_the_verdicts_in_order_and_puts_the_stuck_
     assert case.count("THEN '") == len(GUARDS + VERDICTS) - 1 and case.endswith("ELSE 'no_exit_order'")
     assert "WHEN hs.condition_id IS NULL THEN 'his_net_unseen'" in case
     assert "WHEN hs.exit_ts IS NULL THEN 'no_exit_by_him'" in case
+    # FILL lane 0b: the reduction the 10 % rule hides, read before no_exit_by_him (0.25 / 0.5 chosen)
+    assert ("WHEN hs.exit_ts IS NULL AND (1 - COALESCE(hs.trough, hs.peak) / hs.peak) >= 0.25"
+            " AND COALESCE(ox.our_exit_filled, 0) / NULLIF(op.our_peak, 0) < 0.5 THEN 'he_reduced_we_held'"
+            " WHEN hs.exit_ts IS NULL THEN 'no_exit_by_him'") in case
+    assert "CASE WHEN hs.peak > 0 THEN round((1 - COALESCE(hs.trough, hs.peak) / hs.peak)::numeric, 2) END AS his_reduced_pct" in rows
     assert "WHEN ox.our_exit_filled / NULLIF(op.our_peak, 0) >= 0.8 THEN 'exited_with_him'" in case
     assert "WHEN ox.our_exit_filled > 0 THEN 'partial_exit'" in case
     assert "WHEN ox.our_exit_placed > 0 THEN 'exit_placed_unfilled'" in case
     assert "his_fills_unseen" not in sql, "the guard's old name: it now also covers a net never on the axis"
     # the stuck dollars: settled NEGATIVE on the three verdicts that left us in, as a positive figure
-    assert ("CASE WHEN verdict IN ('partial_exit', 'exit_placed_unfilled', 'no_exit_order')"
-            " AND our_settled < 0 THEN -our_settled END AS " + STUCK) in rows
+    assert ("CASE WHEN verdict IN ('partial_exit', 'exit_placed_unfilled', 'no_exit_order', 'he_reduced_we_held')"
+            " AND our_settled < 0 THEN -our_settled END AS " + STUCK) in rows      # the fourth word since FILL lane 0b
     assert rows.endswith("FROM v ORDER BY %s DESC NULLS LAST, book LIMIT 60;" % STUCK)
     cols = rows[rows.rindex(" SELECT ") + len(" SELECT "):rows.rindex(" FROM v ")].split(", ")
     assert cols == ["book", "market", "side", "his_peak", "his_exit_from", "his_exit_ts", "his_exit_px",
-                    "his_exit_usd", "his_pnl", "our_peak", "our_exit_ts", "our_exit_px",
+                    "his_exit_usd", "his_reduced_pct", "his_pnl", "our_peak", "our_exit_ts", "our_exit_px",
                     "our_exit_filled_pct", "lag_s", "cents_vs_his", "held_to_settlement",
                     "our_settled", "our_roi", "verdict", STUCK, "last_reason"]
     # ONE totals row: books, his exits, ours with him, partial, unfilled, no order, the sum of the
@@ -203,6 +221,9 @@ def test_the_exits_paired_preset_names_the_verdicts_in_order_and_puts_the_stuck_
                    "FILTER (WHERE verdict = 'exit_placed_unfilled') AS unfilled",
                    "FILTER (WHERE verdict = 'no_exit_order') AS no_order",
                    "FILTER (WHERE verdict = 'no_exit_by_him') AS he_held",
+                   "count(*) FILTER (WHERE verdict = 'he_reduced_we_held') AS reduced_we_held",
+                   "round(sum(stuck_after_his_exit_usd) FILTER (WHERE verdict = 'he_reduced_we_held')::numeric, 2)"
+                   " AS reduced_we_held_stuck_usd",
                    "FILTER (WHERE verdict IN ('no_position', 'his_net_unseen')) AS unmeasured",
                    "round(sum(%s)::numeric, 2) AS stuck_usd" % STUCK,
                    "percentile_cont(0.5) WITHIN GROUP (ORDER BY lag_s)"
@@ -222,12 +243,13 @@ def test_the_exits_paired_help_line_is_the_case_labels_after_nf_venue_with_hourl
     assert names == labels, "the line is the case labels, in order (regenerated)"
     assert len(names) == len(set(names))
     assert names.index("exits-paired") == names.index("nf-venue") + 1
-    assert names[-1] == "hourly" and "nf-venue|exits-paired|hourly (got" in line
+    # FILL lane 0b's three read presets sit between exits-paired and hourly (was "nf-venue|exits-paired|hourly")
+    assert names[-1] == "hourly" and "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|hourly (got" in line
     # the hourly line joins the five it always joined: this preset is not one of them
     hourly_sql, _ = _preset(text, "hourly")
     assert "exits-paired" not in hourly_sql and STUCK not in hourly_sql and "his_exit_from" not in hourly_sql
     assert "AS leg," not in hourly_sql
-    hourly.test_the_hourly_preset_is_the_eight_presets_sql_joined_under_section_markers()
+    hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()
     hourly.test_the_hourly_preset_is_read_only_with_its_own_output_cap_and_timeout()
     hourly.test_the_help_line_is_the_case_labels_with_hourly_last()
     # the comment block over the preset names the rule the columns read by
@@ -236,5 +258,78 @@ def test_the_exits_paired_help_line_is_the_case_labels_after_nf_venue_with_hourl
                  "BUYING the No", "-1 on a", "BUY_SHORT book", "10 % of the peak", "his_exit_from",
                  "a No at p is a Yes at 1 - p", "10 s of", "clock skew",
                  "book's intent and the row's plan side", "no_position", "his_net_unseen",
-                 "Read-only, LIMITed"):
+                 "Read-only, LIMITed", "he_reduced_we_held", "his_reduced_pct", "0.25 (chosen)", "0.5 chosen",
+                 "BEFORE no_exit_by_him"):
         assert word in block, word
+
+
+# ------------------------------------------- FILL lane 0b: the scratch database
+
+# book 266's shape (hourly_1737 1424: wta-scott-lepchen, LONG, our 1,955 sh at
+# 0.50 held to settlement, -977.65; he cut 30 % of his peak and never reached
+# the 10 % rule): his BUY of the long 30,000 (the peak) then a SELL of 9,000
+# (running 21,000 = 0.70 x peak: his_reduced_pct 0.30); our one entry filled
+# 1,955, no reducing row of ours -> he_reduced_we_held, stuck 977.65. Beside
+# it two controls on their own conditions: 267, he cut 30 % and we SOLD 60 %
+# of our peak after his first reducing fill -> no_exit_by_him as before; 268,
+# he cut 10 % and we held -> no_exit_by_him (under the 0.25 chosen).
+FIXTURE_266 = """
+INSERT INTO whales (id, address, username) VALUES (99, '0xrn1-l0', 'RN1');
+INSERT INTO markets (condition_id, title, slug, event_title, sport, resolved_prices, resolved) VALUES
+ ('c266', 'Scott v Lepchenko', 'wta-scott-lepchen-2026-09-07', 'ev', 'tennis', '["0", "1"]'::jsonb, true),
+ ('c267', 'Control A', 'wta-ctl-a-2026-09-07', 'ev', 'tennis', '["0", "1"]'::jsonb, true),
+ ('c268', 'Control B', 'wta-ctl-b-2026-09-07', 'ev', 'tennis', '["0", "1"]'::jsonb, true);
+INSERT INTO market_tokens (token_id, condition_id, outcome, outcome_index) VALUES
+ ('L6', 'c266', 's', 0), ('O6', 'c266', 'l', 1), ('L7', 'c267', 'a', 0), ('O7', 'c267', 'b', 1), ('L8', 'c268', 'c', 0), ('O8', 'c268', 'd', 1);
+INSERT INTO trades (id, whale_id, tx_hash, asset, condition_id, side, size, price, notional, market_slug, sport, ts, source, detected_at, dedupe_key) VALUES
+ (961, 99, '0xh1', 'L6', 'c266', 'BUY', 30000, 0.50, 15000, 'wta-scott-lepchen-2026-09-07', 'tennis', now() - interval '6 hours', 'chain', now() - interval '6 hours' + interval '2 seconds', 'h1'),
+ (962, 99, '0xh2', 'L6', 'c266', 'SELL', 9000, 0.45, 4050, 'wta-scott-lepchen-2026-09-07', 'tennis', now() - interval '4 hours', 'chain', now() - interval '4 hours' + interval '2 seconds', 'h2'),
+ (963, 99, '0xh3', 'L7', 'c267', 'BUY', 1000, 0.50, 500, 'wta-ctl-a-2026-09-07', 'tennis', now() - interval '6 hours', 'chain', now() - interval '6 hours' + interval '2 seconds', 'h3'),
+ (964, 99, '0xh4', 'L7', 'c267', 'SELL', 300, 0.45, 135, 'wta-ctl-a-2026-09-07', 'tennis', now() - interval '4 hours', 'chain', now() - interval '4 hours' + interval '2 seconds', 'h4'),
+ (965, 99, '0xh5', 'L8', 'c268', 'BUY', 1000, 0.50, 500, 'wta-ctl-b-2026-09-07', 'tennis', now() - interval '6 hours', 'chain', now() - interval '6 hours' + interval '2 seconds', 'h5'),
+ (966, 99, '0xh6', 'L8', 'c268', 'SELL', 100, 0.45, 45, 'wta-ctl-b-2026-09-07', 'tennis', now() - interval '4 hours', 'chain', now() - interval '4 hours' + interval '2 seconds', 'h6');
+INSERT INTO mirror_books (id, whale, condition_id, us_market_slug, long_asset, other_asset, intent, ratio, state, target, target_raw, his_net, ledger_net, last_plan, peak_exposure_usd, avg_cost, settled_pnl, opened_at, closed_at, last_reason, flow_base) VALUES
+ (266, 'rn1', 'c266', 'aec-wta-scott-lepchen-2026-09-07', 'L6', 'O6', 'ORDER_INTENT_BUY_LONG', 0.1, 'closed', 1955, 1955.0, 21000, 0, '{}'::jsonb, 977.65, 0.50, -977.65, now() - interval '6 hours', now() - interval '1 hour', 'closed: standing row settled', 0),
+ (267, 'rn1', 'c267', 'aec-wta-ctl-a-2026-09-07', 'L7', 'O7', 'ORDER_INTENT_BUY_LONG', 0.1, 'closed', 100, 100.0, 700, 0, '{}'::jsonb, 50.0, 0.50, -20.0, now() - interval '6 hours', now() - interval '1 hour', 'closed: standing row settled', 0),
+ (268, 'rn1', 'c268', 'aec-wta-ctl-b-2026-09-07', 'L8', 'O8', 'ORDER_INTENT_BUY_LONG', 0.1, 'closed', 100, 100.0, 900, 0, '{}'::jsonb, 50.0, 0.50, -50.0, now() - interval '6 hours', now() - interval '1 hour', 'closed: standing row settled', 0);
+INSERT INTO mirror_orders (id, book_id, whale, us_market_slug, kind, side, tif, his_level, price, wire, qty, state, filled, avg_px, bid_at_place, ask_at_place, placed_at, done_at, reason, decision) VALUES
+ (9611, 266, 'rn1', 'aec-wta-scott-lepchen-2026-09-07', 'increase', 'BUY_LONG', 'GTC', 0.50, 0.50, 0.50, 1955, 'filled', 1955, 0.50, 0.50, 0.51, now() - interval '6 hours' + interval '10 seconds', now() - interval '6 hours' + interval '100 seconds', 'increase', 'rest'),
+ (9631, 267, 'rn1', 'aec-wta-ctl-a-2026-09-07', 'increase', 'BUY_LONG', 'GTC', 0.50, 0.50, 0.50, 100, 'filled', 100, 0.50, 0.50, 0.51, now() - interval '6 hours' + interval '10 seconds', now() - interval '6 hours' + interval '100 seconds', 'increase', 'rest'),
+ (9632, 267, 'rn1', 'aec-wta-ctl-a-2026-09-07', 'reduce', 'SELL_LONG', 'GTC', 0.45, 0.45, 0.45, 60, 'filled', 60, 0.45, 0.45, 0.46, now() - interval '4 hours' + interval '20 seconds', now() - interval '4 hours' + interval '60 seconds', 'reduce', 'exit_rest'),
+ (9651, 268, 'rn1', 'aec-wta-ctl-b-2026-09-07', 'increase', 'BUY_LONG', 'GTC', 0.50, 0.50, 0.50, 100, 'filled', 100, 0.50, 0.50, 0.51, now() - interval '6 hours' + interval '10 seconds', now() - interval '6 hours' + interval '100 seconds', 'increase', 'rest');
+"""
+
+
+@pytest.fixture(scope="module")
+def world():
+    w = World(FIXTURE_266, "exits-paired lane 0b")
+    try:
+        yield w
+    finally:
+        w.close()
+
+
+def test_exits_paired_on_book_266s_shape_reads_he_reduced_we_held_and_the_controls_stay(world):
+    sql, _ = _preset(YML.read_text(), "exits-paired")
+    rows, totals = _statements(sql)
+    world.rows(rows)
+    world.rows(totals)
+    world.run(sql)
+    by = {r["book"]: r for r in world.rows(rows)}
+    assert set(by) == {266, 267, 268}
+    r = by[266]
+    assert r["verdict"] == "he_reduced_we_held" and _f(r["his_reduced_pct"]) == 0.30
+    assert _f(r["his_peak"]) == 30000.0 and r["his_exit_ts"] is None and r["his_exit_from"] is not None
+    assert _f(r["our_peak"]) == 1955.0 and r["our_exit_filled_pct"] is None and r["our_exit_ts"] is None
+    assert _f(r["our_settled"]) == -977.65 and _f(r["stuck_after_his_exit_usd"]) == 977.65
+    assert r["held_to_settlement"] is True
+    # 267: he cut 30 %, we sold 60 % of our peak after his first reducing fill: no_exit_by_him as before
+    assert by[267]["verdict"] == "no_exit_by_him" and _f(by[267]["his_reduced_pct"]) == 0.30
+    assert _f(by[267]["our_exit_filled_pct"]) == 0.6 and by[267]["stuck_after_his_exit_usd"] is None
+    # 268: he cut 10 %, under the 0.25 chosen: no_exit_by_him
+    assert by[268]["verdict"] == "no_exit_by_him" and _f(by[268]["his_reduced_pct"]) == 0.10
+    assert by[268]["stuck_after_his_exit_usd"] is None
+    t = world.rows(totals)[0]
+    assert t["books"] == 3 and t["his_exits"] == 0 and t["he_held"] == 2 and t["reduced_we_held"] == 1
+    assert _f(t["reduced_we_held_stuck_usd"]) == 977.65 and _f(t["stuck_usd"]) == 977.65
+    assert t["with_him"] == 0 and t["partial"] == 0 and t["unfilled"] == 0 and t["no_order"] == 0

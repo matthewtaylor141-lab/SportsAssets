@@ -578,6 +578,19 @@ _CATCHUP_TOL_DEFAULT_CENTS = 2.0
 MIRROR_CATCHUP_PCT = capped_env("MIRROR_CATCHUP_PCT", 0.10, floor=0.0)
 MIRROR_CATCHUP_MAX_CENTS = capped_env("MIRROR_CATCHUP_MAX_CENTS", 5.0, floor=0.0)
 
+# THE CANDIDATE'S SIDE BAND (FILL lane 0a, 2026-09-08). How far the ask
+# may sit from his price at the OPEN before the candidate refuses
+# `side_band` (the admission clause; Martinez 534 on 2026-09-08: his
+# 0.61 against a market at 0.81 / 0.82, refused). The live worker read
+# LIVE_SIDE_PRICE_BAND bare (`_env_float`, 0.15 when unset), so a value
+# above 0.15 in the environment WIDENED the open's price band -- the one
+# rail on the money path a shell could raise. capped_env: 0.15 is the
+# ceiling, the environment may only LOWER it (0 = only an ask AT his
+# price opens), an unreadable value lands on 0.15. The copy lane's
+# executor reads the same variable at its own side check
+# (live_executor.maybe_execute) and is not this rail's caller.
+LIVE_SIDE_PRICE_BAND_MAX = capped_env("LIVE_SIDE_PRICE_BAND", 0.15, floor=0.0)
+
 # THE AXIS NOT HANDED IN (PNL lane 1, 2026-09-08). open_catchup's E12
 # callers and pins pass five arguments and no axis; they get E12's
 # verdict exactly as pinned (the symmetric tolerance, no allowance --
@@ -2772,6 +2785,7 @@ __all__ = [
     "MIRROR_NET_CAP_FLOOR_USD", "MIRROR_RATIO", "MIRROR_CLIP_USD",
     "MIRROR_SMALL_BET_USD", "open_ratio", "step_ratio", "MIRROR_MIN_ORDER_USD",
     "MIRROR_CATCHUP_TOL_CENTS", "MIRROR_CATCHUP_PCT", "MIRROR_CATCHUP_MAX_CENTS", "open_catchup",
+    "LIVE_SIDE_PRICE_BAND_MAX",
     "MIRROR_NET_CAP_USD", "MIRROR_MAX_LIVE_BOOKS", "MIRROR_MAX_BOOKS_PER_DAY",
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
     "MIRROR_BOOK_CONCURRENCY", "MIRROR_VENUE_CALLS_PER_TICK",

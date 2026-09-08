@@ -351,6 +351,10 @@ def test_e12_a_flow_only_open_names_target_zero_only_on_the_whole_net(monkeypatc
     `target_zero` as before; a block worth holding opens the book even
     though the flow target at open is 0 (no order, the book waits)."""
     _rails_2026_09_06(monkeypatch)
+    # FILL lane 0a (2026-09-08): the side band is a rail the environment can only lower, so the
+    # conftest's widened env no longer reaches the worker; this world's block sits 44c under the
+    # mark (E12's subject, not the band's), so the band is widened here, by name
+    monkeypatch.setattr(rules, "LIVE_SIDE_PRICE_BAND_MAX", 2.0)
     p = _pool(fills=[_fill(M, "BUY", 10_000, 0.29, NOW - 9000)], snap={M: 10_000.0, N: 0.0})
     v = _Venue(bid=0.71, ask=0.73)
     st = _tick(p, v, http=_mkt(10_000.0))

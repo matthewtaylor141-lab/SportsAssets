@@ -2470,7 +2470,8 @@ def test_every_admission_clause_refuses_a_new_book_by_name(monkeypatch, arm, nam
     elif arm == "venue":
         v = _Venue(held={SLUG: 5})
     elif arm == "band":
-        monkeypatch.setenv("LIVE_SIDE_PRICE_BAND", "0.15")      # the conftest widens it to 2.0
+        # FILL lane 0a: the rail's default (the env no longer reaches the worker; the constant does)
+        monkeypatch.setattr(rules, "LIVE_SIDE_PRICE_BAND_MAX", 0.15)
         v = _Venue(bid=0.58, ask=0.60)
     elif arm == "stale":
         kw["snap_at"] = NOW - 900

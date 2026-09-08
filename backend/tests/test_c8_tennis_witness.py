@@ -355,7 +355,9 @@ def test_c8_the_tennis_witness_preset_is_read_only_dated_and_its_regex_is_the_on
         assert bad not in body, bad
     text = YML.read_text()
     help_line = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
-    assert "patterns: book=<id>, tennis-witness=<YYYY-MM-DD>[:<surname>,<surname>...]" in help_line
+    # FILL lane 0b (2026-09-08): the two paired since-arms sit between book=* and tennis-witness=* in case order
+    assert ("patterns: book=<id>, paired-day=<YYYY-MM-DDTHH:MM[:SS]Z>, paired-ratio=<YYYY-MM-DDTHH:MM[:SS]Z>,"
+            " tennis-witness=<YYYY-MM-DD>[:<surname>,<surname>...]") in help_line
     assert help_line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")[-1] == "hourly", "the hourly pin stands"
 
 

@@ -1,6 +1,8 @@
 """The `hourly` render-ops preset (2026-09-08): the read-only presets
 the hourly status reads -- five at first, eight since the PNL program's
-lane M added paired-ratio, fills-missed and on-target-why -- joined into
+lane M added paired-ratio, fills-missed and on-target-why, nine since
+FILL lane 0b added take-band beside fills-missed (the rest-vs-take read
+rides the first hourly after the deploy) -- joined into
 ONE job under '== name' section markers, so the hour's numbers come from
 one log. The pins: the joined text equals the presets' own SQL (an edit
 to one of them that forgets the hourly line fails here), the markers sit
@@ -14,7 +16,7 @@ from pathlib import Path
 
 YML = Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
 PARTS = ("mirror-tick", "mirror-pnl", "paired-day", "paired-ratio", "latency-census", "fills-answered",
-         "fills-missed", "on-target-why")
+         "fills-missed", "take-band", "on-target-why")
 
 
 def _sql(text: str, name: str) -> str:
@@ -23,18 +25,22 @@ def _sql(text: str, name: str) -> str:
     return m.group(1)
 
 
-def test_the_hourly_preset_is_the_eight_presets_sql_joined_under_section_markers():
+def test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers():
     text = YML.read_text()
     hourly = _sql(text, "hourly")
     expected = " ".join(
         "SELECT '== %s' AS section; %s" % (n, _sql(text, n).rstrip().rstrip(";") + ";") for n in PARTS
     )
-    assert hourly == expected, "the hourly line is the eight presets' SQL joined; regenerate it"
+    assert hourly == expected, "the hourly line is the nine presets' SQL joined; regenerate it"
     markers = re.findall(r"SELECT '== ([a-z-]+)' AS section;", hourly)
     assert tuple(markers) == PARTS
     # lane M: the paired ratio's one line, the mirror's own filled-vs-missed and the on_target causes
     assert "AS line FROM (SELECT count(*) AS markets" in hourly and "first_verdict_after_his_last" not in hourly
     assert "'missed_expired_ioc'" in hourly and "'stale_snapshot'" in hourly
+    # FILL lane 0b: take-band's bucket table sits after fills-missed; the exit and close reads stay out
+    assert markers.index("take-band") == markers.index("fills-missed") + 1
+    assert "GROUP BY ROLLUP (decision, bucket)" in hourly and "'== exits-band'" not in hourly
+    assert "'== closed-while-he-traded'" not in hourly and "$PS" not in hourly
 
 
 def test_the_hourly_preset_is_read_only_with_its_own_output_cap_and_timeout():

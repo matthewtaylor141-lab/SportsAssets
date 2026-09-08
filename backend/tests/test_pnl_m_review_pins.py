@@ -86,8 +86,10 @@ US_PREMAP_DDL = ("CREATE TABLE IF NOT EXISTS us_premap (identifier text PRIMARY 
 #   cG  book 19 flow_base 0 with a fill 1 h before its open, on_target.
 #   cH  book 20 with a rest cancelled `replace` 30 s after his fill.
 #   cI  book 22 LIVE on a resolved market beside a closed, settled episode
-#       25 on the same condition: the market pairs only when EVERY book
-#       is closed with settled_pnl (bool_and), so it never pairs.
+#       25 on the same condition: before FILL lane 0b the market paired only
+#       when EVERY book was closed with settled_pnl (bool_and), so it never
+#       paired; since lane 0b it pairs on the settled episode alone (staked
+#       5.0, settled 1.0, episodes 2 / settled_eps 1; his +50 on 50).
 #   cJ  books 23 (long) / 24 (short) with a catchup on their plan.
 FIXTURE = """
 INSERT INTO whales (id, address, username) VALUES (99, '0xrn1-review', 'RN1');
@@ -233,8 +235,9 @@ def test_every_lane_m_statement_runs_on_the_real_schema_and_the_hourly_is_one_st
             world.rows(s)
         world.run(sql)
     hourly = _preset("hourly")[0]
-    assert hourly.count("AS section;") == 8 and "'== paired-ratio'" in hourly and "'== fills-missed'" in hourly \
-        and "'== on-target-why'" in hourly
+    # nine since FILL lane 0b's take-band (was eight)
+    assert hourly.count("AS section;") == 9 and "'== paired-ratio'" in hourly and "'== fills-missed'" in hourly \
+        and "'== on-target-why'" in hourly and "'== take-band'" in hourly
     for bad in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER"):
         for name in PRESETS + ("hourly",):
             assert bad not in _preset(name)[0], (name, bad)
@@ -310,9 +313,17 @@ def test_paired_ratio_an_unreadable_axis_prints_null_fractions_and_a_live_book_n
     assert r["his_net_peak"] is None and r["his_cost_net"] is None
     assert r["share_frac_pct"] is None and r["stake_frac_net_pct"] is None and r["our_peak_sh"] is None
     assert r["sign_agree"] == "OPPOSITE"           # his +50 against our 0.00: named, not hidden
-    assert [x["book"] for x in rows if x["book"] in (22, 25)] == []
+    # FILL lane 0b (2026-09-08): the market pairs on its settled episode (25) alone -- the row keyed by the
+    # market's first book (22, min id), staked / settled the settled episode's, both episodes counted
+    ci = _by(rows, "book", 22)
+    assert [x["book"] for x in rows if x["book"] == 25] == []
+    assert _f(ci["our_staked"]) == 5.0 and _f(ci["our_settled"]) == 1.0 and ci["episodes"] == 2 and ci["settled_eps"] == 1
+    assert _f(ci["his_pnl"]) == 50.0 and _f(ci["his_roi"]) == 1.0 and _f(ci["our_roi"]) == 0.2 and _f(ci["roi_ratio"]) == 0.2
+    assert _f(ci["his_roi_net"]) == 1.0 and _f(ci["roi_ratio_net"]) == 0.2 and _f(ci["share_frac_pct"]) == 10.0
     t = world.rows(_stmts("paired-ratio")[1])[0]
-    assert t["markets"] == 3 and t["share_frac_n"] == 2 and t["same_sign"] == 2 and t["opposite_sign"] == 1
+    # was markets 3 / share_frac_n 2 / same_sign 2 before lane 0b
+    assert t["markets"] == 4 and t["share_frac_n"] == 3 and t["same_sign"] == 3 and t["opposite_sign"] == 1
+    assert t["staked_mkts"] == 4 and t["zero_stake_mkts"] == 0 and t["zero_stake_settled"] is None
     assert t["opposite"] == "18(closed: standing row settled)"
 
 
@@ -324,11 +335,19 @@ def test_paired_ratio_totals_line_folded_median_share_reads_the_true_fractions(w
     11.2); his_cost_net 700 + 325 = 1025.00, his_roi_net 35 / 1025 =
     0.0341, roi_ratio_net 0.0314 / 0.0341 = 0.92 beside the gross ones."""
     t = world.rows(_stmts("paired-ratio")[1])[0]
-    assert t["line"] == ("PAIRED 3 mkts his_roi 0.0314 our_roi 0.0314 roi_ratio 1.00x same 2/3 opposite "
-                         "18(closed: standing row settled) share_frac_med 10.0% stake_frac_net_med 10.6% "
+    # FILL lane 0b (2026-09-08; owner decision D3): cI pairs on its settled episode (his 50 / 50, ours 1.0 /
+    # 5.0), so his_cost 1165, his_pnl 85, his_roi 85 / 1165 = 0.0730; our 116.50 / 4.50 = 0.0386; roi_ratio
+    # 0.53; his_cost_net 1075, his_roi_net 0.0791, roi_ratio_net 0.0386 / 0.0791 = 0.49; stake_frac_net_med
+    # over (10.0, 11.2, 10.0) = 10.0; the line leads with the net ratio and keeps the gross beside it. Was:
+    # "PAIRED 3 mkts his_roi 0.0314 our_roi 0.0314 roi_ratio 1.00x same 2/3 opposite 18(closed: standing row
+    # settled) share_frac_med 10.0% stake_frac_net_med 10.6% cents_over -0.5c lat_med 50s"
+    assert t["line"] == ("PAIRED 4 mkts (4 staked, 0 zero-stake dropped) his_roi_net 0.0791 our_roi 0.0386 "
+                         "roi_ratio_net 0.49x gross his_roi 0.0730 roi_ratio 0.53x same 3/4 opposite "
+                         "18(closed: standing row settled) share_frac_med 10.0% stake_frac_net_med 10.0% "
                          "cents_over -0.5c lat_med 50s"), t["line"]
-    assert _f(t["his_cost_net"]) == 1025.0 and _f(t["his_cost"]) == 1115.0
-    assert _f(t["his_roi_net"]) == 0.0341 and _f(t["roi_ratio_net"]) == 0.92 and _f(t["roi_ratio"]) == 1.0
+    assert _f(t["his_cost_net"]) == 1075.0 and _f(t["his_cost"]) == 1165.0 and _f(t["his_pnl"]) == 85.0
+    assert _f(t["our_staked"]) == 116.5 and _f(t["our_settled"]) == 4.5 and _f(t["pnl_ratio"]) == 0.0529
+    assert _f(t["his_roi_net"]) == 0.0791 and _f(t["roi_ratio_net"]) == 0.49 and _f(t["roi_ratio"]) == 0.53
 
 
 # --------------------------------------------------------- fills-missed
@@ -355,7 +374,7 @@ def test_fills_missed_classes_on_the_fixture_and_folded_the_axis_is_the_book_who
     assert by["missed_replace"]["n"] == 1 and "missed_open" not in by
     assert by["unseen"]["n"] == 1 and _f(by["unseen"]["his_usd"]) == 50.0 and by["unseen"]["lag_med_s"] is None
     assert "missed_expired_ioc" not in by
-    per = world.rows(_stmts("fills-missed")[1])
+    per = world.rows(_stmts("fills-missed")[3])          # the per-book statement: fourth since FILL lane 0b's state / decision blocks
     b14 = [r for r in per if r["book"] == 14]
     assert [r["class"] for r in b14] == ["filled"] and _f(b14[0]["his_usd"]) == 40.0, "folded MEDIUM-2 (was missed_open)"
     assert _by(per, "book", 15)["class"] == "filled" and _f(_by(per, "book", 15)["his_usd"]) == 325.0
@@ -372,7 +391,7 @@ def test_fills_missed_folded_band_c_rounds_his_cent_in_numeric_before_the_floor_
     Folded 2026-09-08: his level x 100 is rounded to six places in numeric
     before the floor / ceil and this pin reads 100.0 (the float8
     arithmetic beneath it is pinned as the server's own)."""
-    all_ = _by(world.rows(_stmts("fills-missed")[2]), "kind", "ALL")
+    all_ = _by(world.rows(_stmts("fills-missed")[4]), "kind", "ALL")     # the band table: fifth since FILL lane 0b
     assert all_["orders"] == 7 and all_["with_band"] == 7 and all_["filled"] == 3
     assert _f(all_["inside_1c_pct"]) == 100.0 and _f(all_["band_med_c"]) == 0.0
     assert _f(all_["at_or_through_pct"]) == 100.0, "folded HIGH-3 (was 71.4)"

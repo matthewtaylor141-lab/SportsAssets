@@ -11060,11 +11060,14 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
             kalshi = bool(await t.pool.fetchval(_SQL_KALSHI, oa if short else la))
     except Exception:  # noqa: BLE001 — unreadable: claimed
         kalshi = None
-    # the executor's own band (live_executor reads the same env with
-    # the same default at its side check), parsed the one way a string
-    # from the environment is parsed on this path
-    band = rules._env_float("LIVE_SIDE_PRICE_BAND")
-    band = 0.15 if band is None else band
+    # the side band is a RAIL (FILL lane 0a, 2026-09-08): rules.
+    # LIVE_SIDE_PRICE_BAND_MAX is capped_env 0.15 floor 0.0, so the
+    # environment may only narrow how far the ask may sit from his
+    # price at the open, never widen it (the bare read before this
+    # honoured any value). The 054 row's `band` column keeps printing
+    # the band the tick admitted on. live_executor reads the same env
+    # at its own side check and is not this caller
+    band = float(rules.LIVE_SIDE_PRICE_BAND_MAX)
     d["band"] = band
     side_band_hit = None
     if r.ask is not None:

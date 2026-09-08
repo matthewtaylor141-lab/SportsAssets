@@ -102,6 +102,10 @@ def _permissive_ask(monkeypatch):
     # and the fixture whales pay ~0.55 — so a fixed 0.01 stub would trip
     # the band on every test. Widen the band past 1.0 for the suite;
     # test_side_band.py pins the real width and the real refusals.
+    # This reaches the copy lane's executor only: the mirror's candidate
+    # reads rules.LIVE_SIDE_PRICE_BAND_MAX, a capped_env rail the
+    # environment can only LOWER (FILL lane 0a, 2026-09-08), so a mirror
+    # test that needs a wider band sets the constant by name.
     monkeypatch.setenv("LIVE_SIDE_PRICE_BAND", "2.0")
 
 

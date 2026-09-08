@@ -343,7 +343,12 @@ def test_fold_h1_the_late_row_bound_is_the_poll_lanes_own_and_both_clocks_decide
     assert not mi.is_flow(poll, None) and not mi.is_flow("x", since) and not mi.is_flow(None, since)
     # an unreadable allowance admits nothing past the window's start
     assert not mi.is_flow(poll, since, late_s=None) and mi.is_flow(_fill(M, "BUY", 1, 0.5, NOW - 5), since, late_s="x")
-    # the planner: the poll row opens the book on 100 at his cent, the block 10,000
+    # the planner: the poll row opens the book on 100 at his cent, the block 10,000.
+    # FILL lane 0a (2026-09-08): the side band is a rail the environment can only lower, so
+    # the conftest's widened env no longer reaches the worker; the third world's newest fill
+    # (0.33) sits 38c under the mark -- the block reading is the subject, not the band --
+    # so the band is widened here, by name
+    monkeypatch.setattr(rules, "LIVE_SIDE_PRICE_BAND_MAX", 2.0)
     block = _fill(M, "BUY", 10_000, 0.29, NOW - 9000)
     p, v, http = _world(monkeypatch, [block, poll], 11_000, 0.71, 0.73)
     _tick(p, v, http=http)

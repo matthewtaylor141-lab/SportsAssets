@@ -427,5 +427,8 @@ def test_review_the_preset_sits_in_case_order_and_the_help_line_stays_the_labels
     case = text[text.index('case "$ARG" in'):text.index('*) echo "sql: arg must be one of')]
     assert case.index("book=*)") < case.index("verify-day)") < case.index("tennis-witness=*)") < case.index("premap-rows)") < case.index("hourly)")
     line = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
-    assert line.rstrip().endswith("patterns: book=<id>, tennis-witness=<YYYY-MM-DD>[:<surname>,<surname>...]\"; exit 1 ;;")
+    # FILL lane 0b (2026-09-08) added paired-day=<ISO> / paired-ratio=<ISO> between them, in case order
+    assert line.rstrip().endswith("patterns: book=<id>, paired-day=<YYYY-MM-DDTHH:MM[:SS]Z>,"
+                                  " paired-ratio=<YYYY-MM-DDTHH:MM[:SS]Z>,"
+                                  " tennis-witness=<YYYY-MM-DD>[:<surname>,<surname>...]\"; exit 1 ;;")
     assert line.count("tennis-witness") == 1 and line.count("book=<id>") == 1
