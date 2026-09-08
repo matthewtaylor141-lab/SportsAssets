@@ -463,7 +463,9 @@ def test_the_probe_runs_at_most_once_an_hour_on_the_clock_never_on_a_frozen_book
     # frozen: a book frozen by the venue reading this tick (held -250 vs ledger -300) and one
     # frozen from before: no probe, the key untouched, no cover
     p2, b2, v2 = _unproven_world(held={SLUG: -250}, ioc_fill=300.0)
-    st2 = _tick(p2, v2)
+    st1 = _tick(p2, v2)          # E16: the first disagreeing read is a suspect -- no probe on it either
+    assert b2["state"] == "live" and KEY not in p2.state and not _places(v2) and _census(st1, "s4_probe_placed") == 0
+    st2 = _tick(p2, v2, now=NOW + 15)
     assert b2["state"] == "frozen" and b2["frozen_reason"] == "venue_ledger_disagree"
     assert KEY not in p2.state and not _places(v2) and _census(st2, "s4_probe_placed") == 0
     p3, b3, v3 = _unproven_world(ioc_fill=300.0)

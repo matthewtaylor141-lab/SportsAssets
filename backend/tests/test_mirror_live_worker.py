@@ -1726,14 +1726,22 @@ def test_a_cancel_failing_twice_is_unknown_frozen_and_places_nothing():
 # ------------------------------------------------------- 5. the freeze P
 
 def test_venue_ledger_disagree_freezes_cancels_and_names_the_row_after_three_ticks():
+    """E16 (the freeze reads twice): the first disagreeing read is a
+    suspect -- the add rest cancelled by name, nothing placed, the book
+    live; the second fresh walk disagreeing the same way freezes it."""
     p = _pool()
     b = p.add_book(ledger=0)
     p.add_order(b)
     v = _Venue(held={SLUG: 50})
     v.rest("oid-1")
-    st = _tick(p, v)
+    st0 = _tick(p, v)
+    assert b["state"] == "live" and b["frozen_reason"] is None and _census(st0, "venue_ledger_disagree") == 0
+    assert _cancels(v) and not _places(v) and _census(st0, "venue_ledger_suspect") == 1
+    assert b["last_plan"]["venue_ledger_suspect"]["delta"] == 50.0 and b["last_plan"]["reason"] == "venue_suspect_hold"
+    v = _Venue(held={SLUG: 50})
+    st = _tick(p, v, now=NOW + 15)
     assert b["state"] == "frozen" and b["frozen_reason"] == "venue_ledger_disagree"
-    assert _cancels(v) and not _places(v) and _census(st, "venue_ledger_disagree") == 1
+    assert not _places(v) and _census(st, "venue_ledger_disagree") == 1
     assert st["books_live"] == 1
     row = p.rows[b["standing_row_id"]]
     for i in range(3):
@@ -4127,11 +4135,13 @@ def test_the_gate_counters_survive_the_health_endpoints_sanitizer():
     nothing. `integ` is the projection that survives, and it is asserted
     here against the REAL sanitizer, not a copy of it.
 
-    Driven on a tick that really freezes `venue_ledger_disagree`."""
+    Driven on a tick that really freezes `venue_ledger_disagree` (E16:
+    the second disagreeing walk)."""
     from sportsassets.api import app as api_app
     p = _pool()
     b = p.add_book(ledger=100)
-    st = _tick(p, _Venue(held={SLUG: 400}))
+    _tick(p, _Venue(held={SLUG: 400}))
+    st = _tick(p, _Venue(held={SLUG: 400}), now=NOW + 15)
     assert b["state"] == "frozen" and b["frozen_reason"] == "venue_ledger_disagree"
     assert _census(st, "venue_ledger_disagree") == 1
     served = api_app._sanitize_detail(st)
@@ -4825,7 +4835,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-75:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # (E16 moved the tail by its four names and E18 by its six: -69 -> -79)
+    assert keys[-79:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4872,6 +4883,9 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E5 review: the fill-this-tick refusal, the unexplained surplus, the
                           # registered book's no-increase -- before the last key
                           "frozen_fill_this_tick", "frozen_venue_unexplained",
+                          # E16: the freeze's suspect read and its increase hold, the
+                          # frozen reduce on his witnessed sale, the thaw held by name
+                          "venue_ledger_suspect", "venue_suspect_hold", "frozen_reduce_on_fill", "thaw_held",
                           # E13: a flat book made 'closing' on the venue's own confirmed
                           # terminal state -- before `registered_no_increase` (keys[-12])
                           "venue_market_ended",
@@ -4896,7 +4910,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-76] == "short_share_cap" and keys.count("books_unreadable") == 1    # E18: six names before the tail
+    assert keys[-80] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four and E18's six before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -5176,6 +5190,8 @@ def test_a_short_flattens_by_its_priced_cover_sole_or_co_held_never_close_positi
     p3 = _short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0})
     b3 = _short_book(p3, ledger=-300)
     st3 = _tick(p3, _Venue(held={SLUG: -500}), http=_mkt(400.0, 400.0))
+    assert b3["state"] == "live" and _census(st3, "venue_ledger_suspect") == 1     # E16: the first read
+    st3 = _tick(p3, _Venue(held={SLUG: -500}), now=NOW + 15, http=_mkt(400.0, 400.0))
     assert b3["frozen_reason"] == "venue_ledger_disagree" and _census(st3, "wrong_sign_trip") == 0
 
 
@@ -5222,6 +5238,8 @@ def test_the_wrong_sign_trip_is_symmetric_and_records_the_mismatch_on_a_short(mo
     p2 = _short_world()
     b2 = _short_book(p2, ledger=-300)
     st2 = _tick(p2, _Venue(held={}), http=_short_http())
+    assert b2["state"] == "live" and _census(st2, "wrong_sign_trip") == 0     # E16: a suspect first
+    st2 = _tick(p2, _Venue(held={}), now=NOW + 15, http=_short_http())
     assert b2["frozen_reason"] == "venue_ledger_disagree" and _census(st2, "wrong_sign_trip") == 0
 
 
@@ -10809,9 +10827,13 @@ def test_s4_a_frozen_short_book_is_untouched_no_probe_no_cover(monkeypatch):
     assert _census(st, "s4_probe_placed") == 0 and _census(st, "s4_unproven") == 0
     assert b["state"] == "frozen" and b["ledger_net"] == -300 and b["last_plan"]["kind"] == "frozen"
     # a book frozen THIS tick (the venue disagrees) is not probed either
+    # -- nor on the suspect tick before it (E16: the first read)
     p2, b2, v2 = _flip_world(held={SLUG: -100}, ioc_fill=300.0)
     p2.state.pop("mirror_s4_proof")
-    st2 = _tick(p2, v2)
+    st1 = _tick(p2, v2)
+    assert b2["state"] == "live" and _census(st1, "venue_ledger_suspect") == 1
+    assert not _places(v2) and _census(st1, "s4_probe_placed") == 0
+    st2 = _tick(p2, v2, now=NOW + 15)
     assert b2["state"] == "frozen" and b2["frozen_reason"] == "venue_ledger_disagree"
     assert not _places(v2) and _census(st2, "s4_probe_placed") == 0
 
@@ -12823,6 +12845,18 @@ def test_e18_the_rest_life_names_are_emitted_here_too(monkeypatch, caplog):
     from tests import test_e18_rest_life as e18
     e18.test_e18_every_name_is_emitted_here(monkeypatch, caplog)
     for k in e18.NEW_NAMES:
+        assert k in SEEN, k
+
+
+def test_e16_the_freeze_names_are_emitted_here_too(monkeypatch):
+    """E16's four names are driven in tests/test_e16_freeze_two_reads.py;
+    run here as well so the coverage read below sees them when this
+    file runs alone (E13's convention)."""
+    from tests import test_e16_freeze_two_reads as e16
+    e16.test_e16_one_disagreeing_read_is_a_suspect_no_freeze_no_increase_the_exit_still_plans()
+    e16.test_e16_frozen_plus_his_witnessed_sale_with_the_walk_unread_reduces_on_the_fills_net_at_his_price(monkeypatch)
+    e16.test_e16_a_held_venue_ledger_disagree_book_that_agrees_stays_frozen_with_the_switch_off(monkeypatch)
+    for k in ("venue_ledger_suspect", "venue_suspect_hold", "frozen_reduce_on_fill", "thaw_held"):
         assert k in SEEN, k
 
 

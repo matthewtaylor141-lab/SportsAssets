@@ -99,20 +99,29 @@ def test_e5v3_F1_a_frozen_reduce_filled_in_step_o_places_nothing_more_this_tick(
 def test_e5v3_F1_the_transition_tick_places_nothing_even_with_no_fill_booked():
     """The transition guard alone (nothing booked this tick, so the
     fill guard is not in play): a LIVE book, ledger 300, the walk reads
-    600 with he gone. This tick it freezes `venue_ledger_disagree` and
-    the plan says `held: transition_tick`, nothing placed; the next tick
-    -- the disagreement standing -- sells the venue's 600 at his cent."""
+    600 with he gone. E16 (the freeze reads twice): the first read is a
+    SUSPECT and the live exit still plans -- the vanish flatten sells
+    OUR 300 (the ledger, never the reading) at his cent; the second
+    fresh walk (300 left on the venue against a ledger of 0, the same
+    direction) freezes `venue_ledger_disagree` and the plan says `held:
+    transition_tick`, nothing placed; the next tick -- the disagreement
+    standing -- sells the venue's 300 at his cent."""
     p = _pool(fills=_his(300, sold=300), snap=None)
     b = p.add_book(ledger=300, avg_cost=0.31)
     v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=600)
     st = _tick(p, v, http=_gone())
+    assert b["state"] == "live" and _census(st, "venue_ledger_suspect") == 1 and _census(st, "venue_ledger_disagree") == 0
+    assert [c[2:6] for c in _places(v)] == [(0.30, 300, True, IOC_TIF)] and b["ledger_net"] == 0
+    assert _census(st, "frozen_reduce") == 0 and b["last_plan"]["venue_ledger_suspect"]["delta"] == 300.0
+    v1 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300)
+    st1 = _tick(p, v1, now=NOW + 15, http=_gone())
     assert b["state"] == "frozen" and b["frozen_reason"] == "venue_ledger_disagree"
-    assert not _places(v) and _plan_exit(b) == {"held": "transition_tick"}
-    assert _census(st, "frozen_reduce") == 0 and _census(st, "frozen_fill_this_tick") == 0
-    assert _census(st, "venue_ledger_disagree") == 1 and b["ledger_net"] == 300
-    v2 = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=600)
+    assert not _places(v1) and _plan_exit(b) == {"held": "transition_tick"}
+    assert _census(st1, "frozen_reduce") == 0 and _census(st1, "frozen_fill_this_tick") == 0
+    assert _census(st1, "venue_ledger_disagree") == 1 and b["ledger_net"] == 0
+    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300)
     st2 = _tick(p, v2, now=NOW + 30, http=_gone())
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 600, True, IOC_TIF)] and b["ledger_net"] == 0
+    assert [c[2:6] for c in _places(v2)] == [(0.30, 300, True, IOC_TIF)] and b["ledger_net"] == 0
     assert _census(st2, "frozen_reduce") == 1 and _plan_exit(b)["result"] == "take"
 
 

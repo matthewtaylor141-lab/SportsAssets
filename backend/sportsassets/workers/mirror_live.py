@@ -834,6 +834,17 @@ CENSUS_KEYS: tuple[str, ...] = (
     # `registered_no_increase` (F3: a book whose slug carries a register
     # row never grows). Before the pinned last key
     "frozen_fill_this_tick", "frozen_venue_unexplained",
+    # E16 (2026-09-08; the PNL program, lane 2): THE FREEZE READS TWICE.
+    # `venue_ledger_suspect`: a LIVE book's first disagreeing venue read
+    # (no freeze; the increase arm held by name `venue_suspect_hold`,
+    # exits unchanged); the freeze fires on the NEXT fresh walk that
+    # disagrees the same way. `frozen_reduce_on_fill`: a frozen book's
+    # reduce on HIS witnessed sale while the walk is unread, sized on
+    # the fills' net x ratio and capped at the ledger. `thaw_held`: a
+    # frozen book the venue agrees with that stays frozen by name (the
+    # D2 thaw switched off, one read only, a cached read). Before
+    # `venue_market_ended`; E13's and E12's pins hold the tail
+    "venue_ledger_suspect", "venue_suspect_hold", "frozen_reduce_on_fill", "thaw_held",
     # E13 (2026-09-08): a FLAT book made 'closing' on the venue's own
     # confirmed terminal state (two reads a TTL apart), the gamma row
     # still live -- the one new name. Before `registered_no_increase`,
@@ -1064,6 +1075,50 @@ _cand_write_logged = False
 _registered_logged = False
 # E5 / P2: the two freeze reasons a frozen book may follow his exit under
 FROZEN_EXIT_REASONS = frozenset({"placement_lost", "venue_ledger_disagree"})
+# E16 / OWNER DECISION D2 = YES (2026-09-08 13:3xZ, owner and
+# management: "make the changes, and get it live and running
+# immediately"): a book frozen `venue_ledger_disagree` THAWS ON ITS OWN
+# when the venue agrees with the ledger on two consecutive fresh walks
+# (_thaw_verdict). ON BY DEFAULT, by this code change (the discipline:
+# the default moves in code, as MIRROR_SHORTS' did). The switch
+# PMUS_MIRROR_AUTO_THAW may only turn it OFF (_auto_thaw_switch: absent
+# is on; any word but on/1/true/yes -- off, 0, no, a blank, a typo --
+# is off, read stricter than rules.env_switch so an unreadable word
+# fails closed toward NOT thawing); a switch may lower a rail, never
+# raise one, and off a held venue_ledger_disagree book the venue agrees
+# with stays frozen by name (`thaw_held: thaw_off`) with only its E5
+# exits -- the whole clause sits behind rules.MIRROR_FROZEN_EXITS as
+# the frozen exits do. Read once at import, as every switch is (a
+# change in the environment needs a restart); _thaw_verdict reads it
+# through the module at call time. THE RULE NAMES ONE REASON: a book
+# frozen placement_lost / order_lost / lost_ambiguous is never thawed
+# BY THIS RULE -- it keeps E5's own thaw, one agreeing read (the lane's
+# brief said "never auto-thaws"; the code and its pins say a lost order
+# the venue never filled -- venue == ledger -- thaws and the exit is
+# re-managed, test_a_lost_close_response_is_named_and_reconciled...,
+# test_s4v2_a_lost_cover_is_adopted...; a lost order the venue DID fill
+# disagrees and never agrees on its own, so nothing is masked; a fill
+# the venue reports later re-freezes on two fresh reads). A FLAT book
+# under any reason thaws on the one agreeing read as before (E5: it
+# closes as any flat book does -- nothing resumes). The thawed book is
+# a live book again: its next disagreeing fresh read is a suspect and
+# the one after it the freeze (the two-reads rule, _tick_book) -- a
+# lost fill the venue reports later re-freezes it, D2's own bound
+
+
+def _auto_thaw_switch(name: str = "PMUS_MIRROR_AUTO_THAW") -> bool:
+    """The D2 thaw's switch: absent, ON (the owner's default); present,
+    ON only for the words on/1/true/yes and OFF for anything else (a
+    blank and a typo among them). Never the lenient rules.env_switch,
+    whose typo keeps the default: here the default is the raised rail,
+    so an unreadable word must fall to the safe side."""
+    raw = os.environ.get(name)
+    if raw is None:
+        return True
+    return str(raw).strip().lower() in ("on", "1", "true", "yes")
+
+
+MIRROR_FROZEN_THAW = _auto_thaw_switch()
 # THE CANDIDATE WALK'S ROTATION CURSOR (W2 / P3). The walk read his
 # conditions newest-fill-first up to MAX_MARKETS_PER_TICK, so on a busy
 # evening (549-790 active conditions, capped_tick true in 7 of 9
@@ -2165,6 +2220,15 @@ UPDATE mirror_books SET state = 'live', frozen_reason = NULL, frozen_at = NULL,
        updated_at = now()
  WHERE id = $1 AND state = 'frozen' /* ml-book-thaw */
 """
+# E16 / D2: the two-agreeing-reads thaw of a venue_ledger_disagree book
+# (_thaw_agrees): the freeze's tick count starts over, and the statement
+# names the one reason it may thaw so a stale in-memory row can never
+# thaw another freeze
+_SQL_BOOK_THAW_AGREES = """
+UPDATE mirror_books SET state = 'live', frozen_reason = NULL, frozen_at = NULL,
+       frozen_ticks = 0, updated_at = now()
+ WHERE id = $1 AND state = 'frozen' AND frozen_reason = 'venue_ledger_disagree' /* ml-book-thaw-agrees */
+"""
 _SQL_BOOK_STATE = """
 UPDATE mirror_books SET state = $2, last_reason = $3,
        closed_at = CASE WHEN $2 = 'closed' THEN now() ELSE closed_at END, updated_at = now()
@@ -2242,6 +2306,11 @@ class _Tick:
     s4_proof_err: str | None = None
     s4_probed: bool = False
     positions: dict | None = None
+    # E16: the instant of THIS tick's own positions walk (step R), None
+    # on a tick that plans on the last full tick's walk (the fast tick,
+    # _last_walk) -- how the freeze knows a venue read is FRESH: two
+    # disagreeing reads of one walk are one read
+    walk_at: float | None = None
     open: list | None = None
     open_error: str | None = None
     open_tried: bool = False
@@ -5706,6 +5775,17 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
         since = t.now if since is None else since
         plan["flat_since"] = since
         flat_for = t.now - since
+    if plan.get("venue_ledger_suspect") is not None:
+        # E16: a book whose venue read is a SUSPECT this tick does not
+        # END on it. Closed, the next fresh walk could neither freeze it
+        # nor clear it, and a surplus the walk reported would be
+        # nobody's (the vanish flatten sold the LEDGER, never the
+        # reading; a lost fill's shares may still sit on the venue --
+        # book 77's shape before E5). The flat clock above keeps
+        # running; the walk decides next tick: agreeing, this close as
+        # any tick's; disagreeing, the freeze and E5's exit on the
+        # venue's own position. Fail closed toward NOT ending the book
+        return "venue_ledger_suspect"
     why = rules.episode_close_reason(_book_state(book), None if market_live is None else not market_live,
                                      vanished, flat_for, 0,
                                      sign_flipped=plan.get("sign_flip") is True and venue_flat is True)
@@ -5757,20 +5837,30 @@ def _venue_market_ended(book: dict) -> str | None:
     (`venue`, written by every read tick) as a number that is flat
     (|venue| < FLAT_TOL_SHARES): absent, non-numeric or held -- None.
     A frozen cancel_pending / order_state_unknown / row_not_live book
-    whose last read saw the venue flat (455's shape) still ends here."""
+    whose last read saw the venue flat (455's shape) still ends here.
+
+    A LIVE book whose last plan carries `venue_ledger_suspect` (E16: the
+    walk reported shares the ledger does not explain, read once) is
+    the same reading the frozen clause makes -- None (the E16 review,
+    R4: the suspect tick holds the close, but step M runs before the
+    freeze section next tick, and the venue's terminal word would end
+    the book with the surplus nobody's; pre-E16 the one-read freeze put
+    it under _VENUE_MAY_HOLD_REASONS first)."""
     raw = book.get("ledger_net")
     ledger = 0.0 if raw is None else _num(raw)          # NULL reads 0, as step M's own `or 0` reads it
     if ledger is None or abs(ledger) >= FLAT_TOL_SHARES:
         return None
+    # the pool serves jsonb as text: decoded as every other reader
+    # of the row decodes it (the fold re-review, G1)
+    lp = _jsonish(book.get("last_plan"))
     if book.get("state") == "frozen":
         if book.get("frozen_reason") in _VENUE_MAY_HOLD_REASONS:
             return None
-        # the pool serves jsonb as text: decoded as every other reader
-        # of the row decodes it (the fold re-review, G1)
-        lp = _jsonish(book.get("last_plan"))
         venue = _num(lp.get("venue")) if isinstance(lp, dict) else None
         if venue is None or abs(venue) >= FLAT_TOL_SHARES:
             return None
+    elif isinstance(lp, dict) and lp.get("venue_ledger_suspect") is not None:
+        return None
     st = _terminal_book_confirmed.get((book.get("whale"), book.get("condition_id")))
     if not isinstance(st, str) or st not in ms.STATE_TERMINAL:
         return None
@@ -6968,7 +7058,28 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # signed subtraction on either sign (brief 3.1); since E5 the
     # operator register explains shares exactly as the desk's `manual`
     explained = ledger + r.manual + registered
-    if abs(venue_int - explained) > mi.VENUE_LEDGER_TOL_SHARES:
+    # THE FREEZE READS TWICE (E16, 2026-09-08; the PNL program, lane 2).
+    # Book 266: our 1,940 @0.50 filled 22:39:50Z and the book froze
+    # `venue_ledger_disagree` on ONE walk that had not caught up with it;
+    # a frozen book never increases, so while his net went 19,400 ->
+    # 30,900 we held 1,955 ($571 of stake), and while he cut 30% at
+    # 0.11-0.25 the frozen exit refused `frozen_venue_unread` and we
+    # held to 0 (-100% vs his -51%). Now a LIVE book's first disagreeing
+    # read is a SUSPECT (`venue_ledger_suspect` on the plan and the
+    # census): no freeze, no increase this tick (`venue_suspect_hold`,
+    # the increase arm's name), the exit and the reduce planned as a
+    # live book plans them; the freeze fires only when the NEXT fresh
+    # walk (t.walk_at: this tick's own step R, never the fast tick's
+    # cached _last_walk) disagrees again by more than the tolerance in
+    # the SAME direction; a fresh read that agrees clears the suspect;
+    # a cached read carries it, neither freezing nor clearing. The
+    # wrong-sign trip below keeps its one-read trip (an inversion is
+    # not a lag). A book already frozen re-freezes as before (V3-2)
+    delta = venue_int - explained
+    prior_suspect = prior_plan.get("venue_ledger_suspect")
+    prior_suspect = prior_suspect if isinstance(prior_suspect, dict) else None
+    suspect_hold = False
+    if abs(delta) > mi.VENUE_LEDGER_TOL_SHARES:
         detail = {"venue": venue_int, "ledger": ledger, "manual": r.manual, "registered": registered}
         if r.venue != 0 and ledger != 0 and (r.venue < 0) != (ledger < 0):
             # SYMMETRIC (brief B5): the venue holds the OTHER sign of
@@ -6987,7 +7098,17 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             await _trip_live_off(t, "wrong_sign_trip", {"book": book["id"], **detail})
             await _cancel_open_for(t, book, "wrong_sign_trip")
             await _freeze(t, book, "wrong_sign_trip", detail)
+        elif book.get("state") != "frozen" and not _second_disagreeing_read(prior_suspect, delta, t):
+            # THE FIRST READ IS A SUSPECT (E16): named, the increase held
+            # below by name, everything else this tick as a live book --
+            # with the LEDGER in mi.plan's venue seat (the reading is
+            # not trusted either way; an add is refused above the plan)
+            plan["venue_ledger_suspect"] = _suspect_record(prior_suspect, delta, venue_int, explained, t)
+            _mirror_stop("venue_ledger_suspect", w)
+            suspect_hold = True
         else:
+            if prior_suspect is not None and not was_frozen:
+                plan["venue_ledger_suspect"] = prior_suspect      # the first read, for the record
             await _cancel_frozen_open(t, book, "venue_ledger_disagree")
             if book.get("state") == "frozen":
                 # E5 review v3, V3-2: a book already frozen (placement_lost:
@@ -7017,16 +7138,32 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                 await _frozen_exit(t, book, r, target, fills, registered, plan)
             else:
                 plan["frozen_exit"] = {"held": "transition_tick"}
-        await _write_plan(t, book, r, target, tg["raw"], drift.drift, plan.get("his_level"),
-                          book["frozen_reason"], {**plan, "kind": "frozen", **detail})
-        return
+            plan["fills_at"] = _frozen_clock(plan, prior_plan, fills, t.now)
+        if not suspect_hold:
+            await _write_plan(t, book, r, target, tg["raw"], drift.drift, plan.get("his_level"),
+                              book["frozen_reason"], {**plan, "kind": "frozen", **detail})
+            return
     if book.get("state") == "frozen":
         if book["id"] in t.open_by_book:
             await _cancel_frozen_open(t, book, book.get("frozen_reason") or "frozen")
         if book["id"] not in t.open_by_book and book["id"] not in t.nonterminal:
             if registered == 0.0:
                 # venue == ledger and nothing non-terminal: the book thaws
-                await _thaw(t, book)
+                # -- E16: on one read only while FLAT (nothing resumes:
+                # the flat book closes, E5) or under a reason outside
+                # the two-reads rule; a HELD venue_ledger_disagree book
+                # thaws on two consecutive fresh agreeing reads (D2 =
+                # YES: on unless PMUS_MIRROR_AUTO_THAW turns it off), a
+                # held lost-order book never by this rule
+                # (_thaw_verdict); otherwise it stays frozen by name
+                thaw_why = _thaw_verdict(t, book, ledger, prior_plan, plan)
+                if thaw_why is None:
+                    await _thaw(t, book)
+                elif thaw_why == "venue_agrees":
+                    await _thaw_agrees(t, book, plan)
+                else:
+                    _mirror_stop("thaw_held", w)
+                    plan["thaw_held"] = thaw_why
             else:
                 # A REGISTERED BOOK NEVER THAWS (E5 review F3, owner's
                 # option b): the register is an audit row and the third
@@ -7045,6 +7182,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             # follows his exit (the row's index refuses a placement
             # while it stands: `open_order_pending`, as any book)
             await _frozen_exit(t, book, r, target, fills, registered, plan)
+            plan["fills_at"] = _frozen_clock(plan, prior_plan, fills, t.now)
             await _write_plan(t, book, r, target, tg["raw"], drift.drift, plan.get("his_level"),
                               book["frozen_reason"], {**plan, "kind": "frozen"})
             return
@@ -7061,7 +7199,8 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         plan["short_proof"] = prior_plan["short_proof"]
     # S4: the read-back probe, on the first live short book with a
     # two-sided quote while the proof is unproven (once an hour at most)
-    if short:
+    if short and not suspect_hold:
+        # (E16: never a probe on a reading not yet believed)
         await _s4_probe(t, book, r)
     # INCREASES: mode, allowlist, the drift rule, the starred re-checks.
     # An increase is a move AWAY from zero on the book's own leg (P2
@@ -7075,6 +7214,10 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         # row written by hand (the preset registers frozen books alone,
         # and a registered book never thaws above); fail closed by name
         inc_refusal = "registered_no_increase"
+    if inc_refusal is None and suspect_hold:
+        # E16: the venue's first disagreeing read holds the increase
+        # arm by name; the next fresh walk decides (freeze or clear)
+        inc_refusal = "venue_suspect_hold"
     if inc_refusal is None and not drift.increase_ok:
         inc_refusal = drift.refusal or "snapshot_stale"
     increasing = (target < ledger) if short else (target > ledger)
@@ -7091,7 +7234,12 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # rules.MIRROR_SHORT_MAX_SHARES (ONE until rung S5) is under it by
     # construction; the band is not read on it, else the S3 probe could
     # never rest. mi.plan reads the mark for the band alone
-    p = mi.plan(target, float(ledger), float(venue_int - r.manual - registered), mi.Book(r.bid, r.ask),
+    # E16: on the suspect tick the ledger sits in the venue seat too --
+    # mi.plan's own venue check would refuse every plan, the exit with
+    # it, and the reading is exactly what is not yet believed; the add
+    # is already refused by name above
+    seat_venue = float(ledger) if suspect_hold else float(venue_int - r.manual - registered)
+    p = mi.plan(target, float(ledger), seat_venue, mi.Book(r.bid, r.ask),
                 his_px, None if plan.get("short_share_cap") is not None else r.mark)
     kind = None
     confirm_gone = None
@@ -7210,8 +7358,10 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         # with nothing placed and nothing open is the one quiet verdict;
         # every other exit of this function leaves the book hot
         placed = book["id"] in t.placed_books
+        # E16: a suspect book is never quiet -- its second read is next tick's
         on_target = (rules.plan_reason_key(reason) == "on_target" and not placed
-                     and not _book_open(t, book) and book.get("state") == "live")
+                     and not _book_open(t, book) and book.get("state") == "live"
+                     and plan.get("venue_ledger_suspect") is None)
         if placed:
             t.outcomes["placed"] += 1
         elif on_target:
@@ -7446,10 +7596,173 @@ def _adopt_reason(o: dict, text: str) -> str:
     whose response was lost and then found by fingerprint, or whose
     cancel left it 'unknown', books its fill under the same rule as one
     placed cleanly, and the `mirror-frozen` preset finds the finished
-    row by its marker."""
-    if str(o.get("reason") or "").startswith("frozen_reduce"):
-        return f"frozen_reduce: {text}"
+    row by its marker. E16: the row's OWN marker survives verbatim --
+    `frozen_reduce_on_fill` (the reduce on his witnessed sale with the
+    walk unread) is not rewritten to `frozen_reduce`; every reader
+    matches the prefix."""
+    reason = str(o.get("reason") or "")
+    if reason.startswith("frozen_reduce"):
+        return f"{reason.split(':', 1)[0]}: {text}"
     return text
+
+
+# ------------------------------------------- E16: the freeze reads twice
+#
+# The rules over the freeze in _tick_book. A suspect is a record on the
+# plan (`venue_ledger_suspect`: the reading, its delta, its clock and the
+# walk it came from); the freeze asks the NEXT tick's record against it.
+# A thaw of a held venue_ledger_disagree book asks two consecutive fresh
+# agreeing reads (`venue_agrees` on the frozen plan) behind the D2
+# switch (on; PMUS_MIRROR_AUTO_THAW may only turn it off). Every verdict
+# fails closed: an unreadable prior, an unclocked walk, an opposite
+# direction -- a first read, never a second.
+
+def _second_disagreeing_read(prior: dict | None, delta: float, t: _Tick) -> bool:
+    """Is THIS disagreeing read the second of two? Only against a prior
+    suspect that was itself a FRESH read (its `walk_at`), on a tick
+    that walked the account itself (t.walk_at), in the same direction
+    as the suspect's delta. A cached walk (the fast tick) is never a
+    second read and never the FIRST either (the lane's review, R1: a
+    record the fast tick started with `walk_at: None` counted as the
+    first read, so one fresh walk after it froze the book -- the fresh
+    read after a cached record writes a fresh record, and the one
+    after that freezes); an opposite sign is a new first."""
+    if prior is None or t.walk_at is None or prior.get("walk_at") is None:
+        return False
+    d0 = _num(prior.get("delta"))
+    if d0 is None or d0 == 0.0 or delta == 0.0:
+        return False
+    return (d0 > 0.0) == (delta > 0.0)
+
+
+def _suspect_record(prior: dict | None, delta: float, venue: int, explained: float,
+                    t: _Tick) -> dict:
+    """The suspect the plan carries: a fresh read in the same direction
+    as the prior is (unreachable here: that is the freeze) -- so a fresh
+    read writes a NEW record; a cached read (t.walk_at None) carries the
+    prior forward with its cached count, and starts a record when there
+    is none."""
+    if prior is not None and t.walk_at is None:
+        d0 = _num(prior.get("delta"))
+        if d0 is not None and d0 != 0.0 and (d0 > 0.0) == (delta > 0.0):
+            return {**prior, "cached": int(prior.get("cached") or 0) + 1}
+    return {"venue": int(venue), "explained": float(explained), "delta": float(delta),
+            "at": float(t.now), "walk_at": t.walk_at, "cached": 0 if t.walk_at is not None else 1}
+
+
+def _agree_record(prior_plan: dict, t: _Tick) -> dict:
+    """`venue_agrees` on a frozen plan whose venue read agrees with the
+    ledger: `reads` counts consecutive FRESH agreeing reads (the prior
+    plan's record plus this walk); a cached read carries the prior
+    unchanged; a disagreeing tick writes no record, so the count starts
+    over at the next agreement."""
+    prior = prior_plan.get("venue_agrees")
+    prior = prior if isinstance(prior, dict) else None
+    if t.walk_at is None:
+        return dict(prior) if prior is not None else {"reads": 0, "at": float(t.now)}
+    n = int(_num(prior.get("reads")) or 0) if prior is not None else 0
+    return {"reads": n + 1, "at": float(t.now), "walk_at": float(t.walk_at)}
+
+
+def _thaw_verdict(t: _Tick, book: dict, ledger: int, prior_plan: dict, plan: dict) -> str | None:
+    """May a frozen book the venue agrees with (nothing open, nothing
+    non-terminal, no register) thaw this tick? None: yes, on this one
+    read, as E5 did -- the book is FLAT on the ledger (and the venue
+    agrees within the tolerance: nothing of the book's is held, the
+    thawed book closes as any flat book) or its reason is outside the
+    two-reads rule (placement_lost, cancel_pending, order_state_unknown,
+    overfill, ...: the freeze that ends when its own cause ends -- the
+    paragraph over MIRROR_FROZEN_THAW). `venue_agrees`: a held
+    venue_ledger_disagree book on its second consecutive fresh agreeing
+    read with the D2 switch and the E5 knob on (both on by default; each
+    may only be turned off). Otherwise the name it stays frozen under:
+    `thaw_off` (PMUS_MIRROR_AUTO_THAW off, or the E5 knob off),
+    `one_read` (the first agreeing fresh read), `cached_read`."""
+    if abs(int(ledger)) < FLAT_TOL_SHARES:
+        return None
+    if book.get("frozen_reason") != "venue_ledger_disagree":
+        return None
+    agrees = _agree_record(prior_plan, t)
+    plan["venue_agrees"] = agrees
+    if not (rules.MIRROR_FROZEN_EXITS and MIRROR_FROZEN_THAW):
+        return "thaw_off"
+    if t.walk_at is None:
+        return "cached_read"
+    return "venue_agrees" if int(agrees.get("reads") or 0) >= 2 else "one_read"
+
+
+async def _thaw_agrees(t: _Tick, book: dict, plan: dict) -> None:
+    """The D2 thaw: state live, frozen_reason NULL, frozen_ticks 0,
+    `thawed_venue_agrees` on the plan; the book plans live this tick as
+    E5's thaw let it."""
+    if book.get("state") != "frozen" or book.get("frozen_reason") != "venue_ledger_disagree":
+        return
+    await t.pool.execute(_SQL_BOOK_THAW_AGREES, book["id"])
+    book.update(state="live", frozen_reason=None, frozen_ts=None, frozen_ticks=0)
+    plan["thawed_venue_agrees"] = True
+    _recent(book["id"], "thawed", why="venue_agrees")
+
+
+# The frozen exit's holds that refuse BEFORE _frozen_reduce_on_fill runs:
+# nothing was witnessed on such a tick because nothing was READ, so the
+# clock may not move past a sale of his the tick held (the review, R2)
+_FROZEN_CLOCK_HOLDS = frozenset({"transition_tick", "frozen_fill_this_tick", "frozen_exits_off"})
+
+
+def _seen_clock(prior_plan: dict) -> float | None:
+    """The newest ingest clock among the fills the prior plan answered
+    (`his_fills_seen`: `det`, the ingest's detected_at, else the stamp
+    `ts` -- mi.fill_clock's own order); None when the list is absent,
+    empty or carries no clock."""
+    seen = prior_plan.get("his_fills_seen")
+    best = None
+    for e in seen if isinstance(seen, list) else ():
+        if not isinstance(e, dict):
+            continue
+        at = _num(e.get("det"))
+        at = _num(e.get("ts")) if at is None else at
+        if at is not None and (best is None or at > best):
+            best = at
+    return best
+
+
+def _frozen_clock(plan: dict, prior_plan: dict, fills: list, now: float) -> float | None:
+    """`fills_at` on a frozen plan: the newest ingest clock among the
+    fills this plan held (mi.fills_clock, the E12b reference's rule) --
+    what the next tick's witness is read against, so a sale this plan
+    counted never witnesses twice. A witnessed sale the exit did NOT get
+    out this tick (refused, no bid, capped) keeps the prior clock, so
+    the next tick witnesses it again; a placed exit, or nothing
+    witnessed, moves the clock.
+
+    A tick whose frozen exit refused BEFORE the witness was read
+    (_FROZEN_CLOCK_HOLDS: the transition tick, a fill of our own booked
+    this tick, the knob off) witnessed nothing because it read nothing
+    (no `frozen_witness` on the plan): it keeps the prior plan's
+    `fills_at`, so a sale of his that landed in that tick is witnessed
+    by the next unread tick (the review, R2: the freeze tick consumed
+    his sale unanswered, and with the walk unread -- 266's for 30 min
+    -- it was never followed). On the transition tick the prior plan is
+    a LIVE one with no `fills_at`: the clock is the newest among the
+    fills that plan answered (`his_fills_seen`, _seen_clock: a sale the
+    live path answered never witnesses again), else the fills' clock as
+    before."""
+    fw = plan.get("frozen_witness")
+    if isinstance(fw, dict) and (_num(fw.get("witnessed")) or 0.0) > 0.0 and fw.get("placed") is not True:
+        since = _num(fw.get("since"))
+        if since is not None:
+            return since
+    fe = plan.get("frozen_exit")
+    held = fe.get("held") if isinstance(fe, dict) else None
+    if fw is None and held in _FROZEN_CLOCK_HOLDS:
+        prior_at = _num(prior_plan.get("fills_at"))
+        if prior_at is not None:
+            return prior_at
+        if held == "transition_tick":
+            seen_at = _seen_clock(prior_plan)
+            if seen_at is not None:
+                return seen_at
+    return mi.fills_clock(fills, now)
 
 
 def _frozen_venue_own(r: _Reading) -> int:
@@ -7526,15 +7839,36 @@ async def _frozen_exit(t: _Tick, book: dict, r: _Reading, target: int | None, fi
         _mirror_stop("frozen_fill_this_tick", w)
         plan["frozen_exit"] = {"held": "frozen_fill_this_tick"}
         return "frozen_fill_this_tick"
+    unread = coheld = None
     if t.positions is None or r.venue is None:
-        return await _frozen_refuse(t, book, "frozen_venue_unread", plan, {"why": "venue_positions"}, w, cancel=False)
-    if r.snap_market_fresh is not True:
+        unread = "venue_positions"
+    elif r.snap_market_fresh is not True:
         # his side not read for THIS market this tick (unreadable,
         # capped, no ids, stale): the exit follows a net nobody read
-        return await _frozen_refuse(t, book, "frozen_venue_unread", plan, {"why": "his_market_read"}, w, cancel=False)
-    coheld = await _slug_coheld(t, slug)
-    if coheld is None:
-        return await _frozen_refuse(t, book, "frozen_venue_unread", plan, {"why": "coheld_unreadable"}, w, cancel=False)
+        unread = "his_market_read"
+    else:
+        coheld = await _slug_coheld(t, slug)
+        if coheld is None:
+            unread = "coheld_unreadable"
+    if unread is not None:
+        # E16: HIS WITNESSED SALE EXITS THE FROZEN BOOK EVEN WITH THE
+        # WALK UNREAD (book 266 held 1,955 to 0 while he cut 30%): a
+        # reducing fill of his clocked after the last plan sizes a
+        # reduce on the fills' net x ratio, capped at the ledger; no
+        # witness, or the witness under our proportion: as before
+        out = await _frozen_reduce_on_fill(t, book, r, fills, plan, unread)
+        if out is not None:
+            return out
+        # `under_proportion` ALONE cancels a standing frozen reduce (the
+        # E16 review, R5): he re-bought past our proportion, so a rest
+        # at his OLD exit cent may not keep selling while he buys -- E5
+        # F4's rule, which the read path applies under
+        # `frozen_no_his_exit`. Every other verdict here is a read that
+        # FAILED (nothing witnessed, an unread target, an unknown plan):
+        # V3-3's hold, the rest keeps standing
+        fw = plan.get("frozen_witness")
+        cancel = isinstance(fw, dict) and fw.get("held") == "under_proportion"
+        return await _frozen_refuse(t, book, "frozen_venue_unread", plan, {"why": unread}, w, cancel=cancel)
     if coheld:
         return await _frozen_refuse(t, book, "frozen_coheld", plan, {}, w)
     venue_own = _frozen_venue_own(r)
@@ -7591,6 +7925,92 @@ async def _frozen_exit(t: _Tick, book: dict, r: _Reading, target: int | None, fi
         _mirror_stop("frozen_reduce", w)
         _recent(book["id"], "frozen_reduce", side=p.side, qty=p.qty, venue_own=venue_own,
                 target=tgt, result=res)
+    return res
+
+
+async def _frozen_reduce_on_fill(t: _Tick, book: dict, r: _Reading, fills: list, plan: dict,
+                                 unread: str) -> str | None:
+    """THE FROZEN EXIT ON HIS WITNESSED SALE (E16, lane 2): the frozen
+    book's tick holds a REDUCING fill of his on the book's axis
+    (mi.reducing_since -- a SELL of the long token or a BUY of the
+    other on a long book, the mirror image on a short -- clocked
+    strictly after the last frozen plan's `fills_at`, the E12b
+    witness's own rule) while the walk is unread (`unread`: the reason
+    E5 refuses `frozen_venue_unread` under). Then the reduce is sized as
+    a LIVE book sizes it, on the FILLS' net x the book's ratio
+    (rules.mirror_target on mi.his_net, less the block on a flow book:
+    the plan's `flow_net`), with the LEDGER in both of mi.plan's seats
+    -- never the venue figure it cannot read -- and placed as E5 places
+    it (_act, the E4 exit at his price within MIRROR_EXIT_TOL), marked
+    `frozen_reduce_on_fill` on the row. Never more than the ledger,
+    never an increase, never past his proportion: a target at or above
+    the ledger on the axis (our share already under his) is no sale
+    (`frozen_witness.held = under_proportion`; 266's own shape after his
+    11,000 adds while frozen reads so). None when nothing is witnessed
+    -- no prior clock (`unclocked`), no reducing fill after it, an
+    unreadable target -- and the caller refuses as before; the plan
+    carries `frozen_witness` whenever a clock was read."""
+    ledger = int(book.get("ledger_net") or 0)
+    if ledger == 0:
+        return None
+    prior = _jsonish(book.get("last_plan")) or {}
+    since = _num(prior.get("fills_at"))
+    if since is None:
+        plan["frozen_witness"] = {"why": unread, "held": "unclocked"}
+        return None
+    la, oa = book["long_asset"], book.get("other_asset")
+    witnessed = mi.reducing_since(fills, la, oa, float(ledger), since)
+    if witnessed <= 0.0:
+        return None
+    w, short = r.whale, _book_short(book)
+    fills_net = mi.his_net(r.his_long, r.his_other)
+    net_f = _num(plan.get("flow_net"))
+    net_f = fills_net if net_f is None else net_f
+    verdict: dict[str, Any] = {"why": unread, "since": since, "witnessed": witnessed,
+                               "fills_net": fills_net, "ledger": ledger}
+    tg = rules.mirror_target(book.get("ratio"), net_f, r.mark, MIRROR_ANCHOR_CLIP_USD,
+                             cap_usd=rules.MIRROR_NET_CAP_USD, allow_short=_shorts_on(t))
+    if tg.get("refusal") or tg.get("target") is None:
+        plan["frozen_witness"] = {**verdict, "held": tg.get("refusal") or "target_unread"}
+        return None
+    tgt = int(tg["target"])
+    if rules.sign_flip(book.get("intent"), tgt):
+        tgt = 0
+    verdict["target"] = tgt
+    if (tgt >= ledger) if not short else (tgt <= ledger):
+        plan["frozen_witness"] = {**verdict, "held": "under_proportion"}
+        return None
+    reducing = tgt <= ledger
+    his_px = _his_level(fills, la, oa, reducing, short=short)
+    plan["his_level"] = his_px
+    p = mi.plan(tgt, float(ledger), float(ledger), mi.Book(r.bid, r.ask), his_px,
+                None if plan.get("short_share_cap") is not None else r.mark)
+    plan.update(side=p.side, qty=p.qty, price=p.price, reason=p.reason)
+    plan["frozen_witness"] = {**verdict, "side": p.side, "qty": p.qty}
+    if p.side is None:
+        # the plan is unknown, not unwanted (V3-3): a standing frozen
+        # reduce keeps standing; the witness is read again next tick
+        await _frozen_refuse(t, book, rules.plan_reason_key(p.reason), plan, verdict, w, cancel=False)
+        return p.reason
+    if rules.leg_action(book.get("intent"), p.side) != "reduce" or int(p.qty) > abs(ledger):
+        # never an increase, never past the ledger (belt and braces)
+        return await _frozen_refuse(t, book, "frozen_reduce_only", plan,
+                                    {**verdict, "side": p.side, "qty": p.qty}, w, cancel=False)
+    plan["frozen_exit"] = {**verdict, "side": p.side, "qty": p.qty, "reduce_on_fill": True}
+    book["_frozen_venue"] = ledger
+    book["_frozen_on_fill"] = True
+    try:
+        res = await _act(t, book, r, p, "reduce", his_px, plan)
+    finally:
+        book.pop("_frozen_venue", None)
+        book.pop("_frozen_on_fill", None)
+    plan["frozen_exit"]["result"] = res
+    placed = res in ("rest_placed", "take", "filled_at_create", "open_order_pending")
+    plan["frozen_witness"]["placed"] = placed
+    if res in ("rest_placed", "take", "filled_at_create"):
+        _mirror_stop("frozen_reduce_on_fill", w)
+        _recent(book["id"], "frozen_reduce_on_fill", side=p.side, qty=p.qty, ledger=ledger,
+                target=tgt, witnessed=witnessed, result=res)
     return res
 
 
@@ -9007,7 +9427,13 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
     # one word step O reads to let it stand on a frozen book and the
     # fill path reads to name a fill past the ledger `frozen_excess_sold`
     # instead of the overfill trip. Every other row keeps its kind
-    reason_col = "frozen_reduce" if book.get("_frozen_venue") is not None else kind
+    # E16: the reduce on his witnessed sale with the walk unread carries
+    # `frozen_reduce_on_fill` -- the same prefix, so every reader of the
+    # marker (the stand, the adoption, the excess, the preset) reads it
+    if book.get("_frozen_on_fill"):
+        reason_col = "frozen_reduce_on_fill"
+    else:
+        reason_col = "frozen_reduce" if book.get("_frozen_venue") is not None else kind
     args = [book["id"], w, slug, kind, side, tif_rec, post_only, good_till,
             his_px, (p.price if p is not None else wire), wire, int(qty), json.dumps(pre_ids),
             int(_num(plan.get("target")) or 0), int(book.get("ledger_net") or 0), r.bid, r.ask,
@@ -10553,6 +10979,7 @@ async def _tick(t: _Tick, woken: list) -> None:
         return
     stats["venue_positions"] = len(t.positions)
     _last_walk = (dict(t.positions), float(t.now))     # E9: what the fast tick plans on
+    t.walk_at = float(t.now)                           # E16: this tick's walk is a FRESH read
     if await _read_open(t) is None:
         await _abandon_reconciled(t, "open_orders_unreadable")
         return

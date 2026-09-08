@@ -357,7 +357,9 @@ def test_review_q3_the_day_stop_the_post_only_latch_and_a_venue_ledger_disagreem
     _fast(p4, v4)
     assert _places(v3)[0][7] is False and _places(v4)[0][7] is False
     ml._POST_ONLY_OK = True
-    # venue vs ledger: the walk says 300 held, the ledger 0 -> frozen by the same name on both
+    # venue vs ledger: the walk says 300 held, the ledger 0 -> a SUSPECT by
+    # the same name on both (E16: the first read never freezes; the fast
+    # tick's is a cached walk, so it can never be the second)
     p5 = _pool()
     b5 = p5.add_book(ledger=0)
     _tick(p5, _Venue(held={SLUG: 300}))
@@ -365,8 +367,10 @@ def test_review_q3_the_day_stop_the_post_only_latch_and_a_venue_ledger_disagreem
     b6 = p6.add_book(ledger=0)
     _walk({SLUG: 300.0})
     fs6 = _fast(p6, _Venue())
-    assert b5["state"] == b6["state"] == "frozen"
-    assert b5["frozen_reason"] == b6["frozen_reason"] == "venue_ledger_disagree" and _skips(fs6) == {}
+    assert b5["state"] == b6["state"] == "live" and b5["frozen_reason"] is b6["frozen_reason"] is None
+    assert b5["last_plan"]["reason"] == b6["last_plan"]["reason"] == "venue_suspect_hold" and _skips(fs6) == {}
+    assert b5["last_plan"]["venue_ledger_suspect"]["walk_at"] == NOW and b6["last_plan"]["venue_ledger_suspect"]["walk_at"] is None
+    assert b6["last_plan"]["venue_ledger_suspect"]["cached"] == 1
 
 
 def test_review_q3_a_short_books_cover_after_his_buy_back_goes_through_the_fast_tick_as_through_the_full(monkeypatch):
@@ -772,11 +776,10 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     assert "WHERE NOT d.collapsed" in src and "ORDER BY d.ts, d.id" in src
     keys = ml.CENSUS_KEYS
     # E12 moved the tail by its three names (-65 -> -68, -66 -> -69), E13 by
-    # its one (-68 -> -69, -69 -> -70), the convention every builder
-    # followed; E9's four stay keys[-8:-4]
-    # E18 by its six (-69 -> -75, -70 -> -76)
-    assert keys[-75:-71] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-76] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # its one (-68 -> -69, -69 -> -70), E16 by its four and E18 by its six
+    # (-69 -> -79, -70 -> -80), the convention every builder followed; E9's four stay keys[-8:-4]
+    assert keys[-79:-75] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-80] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence

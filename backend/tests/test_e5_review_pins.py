@@ -250,18 +250,23 @@ def test_e5r_F1_a_live_books_reduce_fill_between_the_walk_and_step_o_is_not_sold
     before step O read it; step O books 100 -> ledger 200; the book
     tick reads venue 300 (stale by the fill) against explained 200.
     On a5ff689 this is a one-tick `venue_ledger_disagree` freeze that
-    thaws next tick `on_target`. Under E5 nothing may be placed."""
+    thaws next tick `on_target`. Under E5 nothing may be placed. E16
+    (the freeze reads twice): the one stale read is a SUSPECT, not a
+    freeze -- still nothing placed, and the next fresh walk agreeing
+    clears it `on_target`."""
     p = _pool(fills=_his(300, sold=100), snap={M: 200.0, N: 0.0})
     b = p.add_book(ledger=300, avg_cost=0.31)
     o = p.add_order(b, side=SELL, wire=0.31, qty=100, kind="reduce", his_level=0.31, placed_ts=NOW - 30)
     v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=100, fills={"oid-1": (100.0, 0.31)})
     v.rest("oid-1", "SELL", 0.31, 100)
     st = _tick(p, v, http=_mkt(200))
-    assert o["state"] == "filled" and b["frozen_reason"] == "venue_ledger_disagree"
+    assert o["state"] == "filled" and b["frozen_reason"] is None and b["state"] == "live"
+    assert b["last_plan"]["venue_ledger_suspect"]["delta"] == 100.0 and _census(st, "venue_ledger_suspect") == 1
     assert not _places(v) and b["ledger_net"] == 200 and _census(st, "frozen_reduce") == 0
     v2 = _Venue(held={SLUG: 200}, bid=0.30, ask=0.32)
     st2 = _tick(p, v2, now=NOW + 30, http=_mkt(200))
     assert b["state"] == "live" and not _places(v2) and _census(st2, "on_target") == 1
+    assert "venue_ledger_suspect" not in b["last_plan"] and _census(st2, "venue_ledger_disagree") == 0
 
 
 def test_e5r_F2_a_standing_frozen_reduce_partly_filled_after_the_walk_is_not_re_sized_past_the_venue():
