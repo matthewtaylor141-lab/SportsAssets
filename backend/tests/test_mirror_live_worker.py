@@ -4825,7 +4825,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # U12c review's two names after it; C1's four mapping-lane names
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
-    assert keys[-69:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-75:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4875,6 +4875,12 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E13: a flat book made 'closing' on the venue's own confirmed
                           # terminal state -- before `registered_no_increase` (keys[-12])
                           "venue_market_ended",
+                          # E18 (PNL lane 6): the rest-life floor's keep, the IOC withheld on
+                          # the quote re-read (a BUY's ask, a SELL's bid), the re-read refused
+                          # by the budget or unreadable, the 059 probe failing -- before
+                          # `registered_no_increase` (keys[-12])
+                          "kept_min_life", "ask_moved", "bid_moved", "ioc_reread_capped",
+                          "ioc_quote_unread", "order_cols_guard_unreadable",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
                           # opened on his whole net (the block admitted), the 057 probe
@@ -4890,7 +4896,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-70] == "short_share_cap" and keys.count("books_unreadable") == 1
+    assert keys[-76] == "short_share_cap" and keys.count("books_unreadable") == 1    # E18: six names before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -5360,7 +5366,9 @@ def test_the_050_column_absent_keeps_the_knob_off_by_name_and_sends_the_047_stat
     p4 = _pool()
     _tick(p4, _Venue())
     ins4 = [a for k, s, a in p4.sent if "ml-order-insert" in s]
-    assert ins4 and all(len(a) == 19 and a[18] == INTENT for a in ins4)
+    # E18 (migration 059, the fixture's database carries it): the 050
+    # INSERT's nineteenth parameter stands, the send record after it
+    assert ins4 and all(len(a) == 22 and a[18] == INTENT for a in ins4)
     # the guard is the shadow's statement: both lanes probe with one text
     assert ml._SQL_INTENT_GUARD == ms.INTENT_GUARD_SQL and "ml-intent-guard" in ms.INTENT_GUARD_SQL
 
@@ -5411,7 +5419,7 @@ def test_a_transient_intent_guard_error_refuses_the_tick_and_never_flattens_a_sh
     assert "close" not in _kinds(v3) and [c[2:6] for c in _places(v3)] == [(0.32, 300, True, IOC_TIF)]
     assert b2["ledger_net"] == 0
     ins = [a for k, s, a in p2.sent if "ml-order-insert" in s]
-    assert ins and all(len(a) == 19 and a[18] == "ORDER_INTENT_SELL_SHORT" for a in ins)
+    assert ins and all(len(a) == 22 and a[18] == "ORDER_INTENT_SELL_SHORT" for a in ins)    # E18: 059's three after
     assert _census(st3, "short_flatten_close") == 1
 
 
@@ -10184,9 +10192,9 @@ def test_e4_the_requote_credit_is_never_granted_on_the_same_wire_path_and_no_ioc
         seen.append(set(t.requote_credit))
         return res
 
-    async def _cs(t, o, book, reason, exit=False):
+    async def _cs(t, o, book, reason, exit=False, decision=None):
         reasons.append(reason)
-        return await orig_cs(t, o, book, reason, exit=exit)
+        return await orig_cs(t, o, book, reason, exit=exit, decision=decision)
     monkeypatch.setattr(ml, "_act", _spy)
     monkeypatch.setattr(ml, "_cancel_and_settle", _cs)
     ttl = float(rules.MIRROR_REST_TTL_S)
@@ -12806,6 +12814,16 @@ def test_e13_the_venue_close_name_is_emitted_here_too():
     from tests import test_e13_venue_close as e13
     e13.test_e13_a_live_flat_book_closes_cancelled_on_the_second_terminal_read_a_ttl_apart_never_on_one()
     assert "venue_market_ended" in SEEN
+
+
+def test_e18_the_rest_life_names_are_emitted_here_too(monkeypatch, caplog):
+    """E18's six names are driven in tests/test_e18_rest_life.py; run
+    here as well so the coverage read below sees them when this file
+    runs alone (E13's convention)."""
+    from tests import test_e18_rest_life as e18
+    e18.test_e18_every_name_is_emitted_here(monkeypatch, caplog)
+    for k in e18.NEW_NAMES:
+        assert k in SEEN, k
 
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():

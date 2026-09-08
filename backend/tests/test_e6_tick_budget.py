@@ -265,7 +265,8 @@ def test_e6_a_not_on_target_book_is_never_skipped():
     st = _tick(p2, v2)
     assert _places(v2) and _timing(st)["placed"] == 1 and _census(st, "book_quiet_skipped") == 0
     st2 = _tick(p2, v2, now=NOW + 30)
-    assert _census(st2, "book_quiet_skipped") == 0 and len(_bbos(v2)) == 2
+    # E18: each tick's exit IOC re-reads the quote once before its send (two reads a tick)
+    assert _census(st2, "book_quiet_skipped") == 0 and len(_bbos(v2)) == 4
 
 
 def test_e6_a_book_with_his_fill_inside_hot_s_is_never_skipped():

@@ -279,7 +279,8 @@ def test_review_a_woken_book_is_read_that_tick_whatever_the_fills_stamp():
     v.calls.clear()
     st = _tick(p, v, now=NOW + 30)
     assert st["woken"] == [CID]
-    assert _census(st, "book_quiet_skipped") == 0 and _bbos(v) == [SLUG], st["census"]
+    # E18: the second read of the slug is the exit IOC's re-read before its send
+    assert _census(st, "book_quiet_skipped") == 0 and _bbos(v) == [SLUG, SLUG], st["census"]
 
 
 def test_review_a_fresh_fill_of_his_that_lands_between_two_ticks_is_read_next_tick():
@@ -292,7 +293,7 @@ def test_review_a_fresh_fill_of_his_that_lands_between_two_ticks_is_read_next_ti
     p.snap[M] = 100.0
     v.calls.clear()
     st = _tick(p, v, now=NOW + 30)
-    assert _census(st, "book_quiet_skipped") == 0 and _bbos(v) == [SLUG]
+    assert _census(st, "book_quiet_skipped") == 0 and _bbos(v) == [SLUG, SLUG]    # E18: the IOC's re-read
     assert ml._quiet_memo[b["id"]]["quiet"] is False, "a reduce placed: hot from here"
 
 

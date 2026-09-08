@@ -853,6 +853,26 @@ MIRROR_MAX_REPLACES_PER_HOUR = int(capped_env("MIRROR_MAX_REPLACES_PER_HOUR", 12
 # of 0 would cancel and re-place every tick, a taker's churn on a
 # maker's book and the replace budget gone in an hour.
 MIRROR_REST_TTL_S = capped_env("MIRROR_REST_TTL_S", 600.0, floor=30.0)
+# THE REST LIVES (E18, 2026-09-08; PNL program lane 6; owner "I want to
+# know when he makes money we make money"). An ENTRY rest younger than
+# this is not cancelled and re-placed over a cent move under
+# REST_MIN_LIFE_CENT_MOVE or over a quantity move alone: 10 of the 24
+# increase rows of the 11Z window (hourly_1129 rows 2697-2736) were
+# cancelled `replace` after 14, 14, 15, 16, 19, 21, 27, 30, 64, 424 s
+# (median 20 s) as his next fill moved the plan by a cent or a few
+# shares, each re-quote to the back of the venue's queue -- book 533's
+# 2734 @0.49 FILLED after 100 s once left alone, 2725/2729/2731 never
+# stood 30 s; book 278's four rests at the SAME cent 0.62 (qty 86 ->
+# 316 -> 493 -> 451) filled nothing. A WAIT, NOT A CAP: the environment
+# may only LENGTHEN it (min_wait_env), a shorter floor is the churn
+# and wants a review. Exits never read it (keep_or_replace's `stands`
+# and every reduce rest are E4's rule, unchanged); a cent move of
+# REST_MIN_LIFE_CENT_MOVE or more, a side or intent change, the TTL and
+# an unreadable fact replace as before. The 12/h replace budget stands.
+MIRROR_REST_MIN_LIFE_S = min_wait_env("MIRROR_REST_MIN_LIFE_S", 45.0)
+# the cent move that ends the floor early: two cents, in contract space
+# (a 1c move of his stands the young rest; 2c re-quotes it). Not a knob
+REST_MIN_LIFE_CENT_MOVE = 0.02
 # The bounded take: a rest must have stood unfilled this long (or a
 # post-only rejection this old) before ONE IOC at the same wire is
 # allowed, and even then only with the book at or through his level.
@@ -1533,12 +1553,115 @@ def plan_reason_key(reason: str | None) -> str:
     return "".join(ch if ch.isalnum() else "_" for ch in r.lower()).strip("_") or "no_plan"
 
 
+def rest_decision(order: OpenOrder, p: Plan | None, now: float,
+                  ttl_s: float = MIRROR_REST_TTL_S,
+                  cancel_reason: str | None = None,
+                  wire: float | None | object = _FROM_PLAN,
+                  intent: str | None = None,
+                  stands: bool = False,
+                  min_life_s: float = MIRROR_REST_MIN_LIFE_S,
+                  entry: bool | None = None) -> tuple[str, dict]:
+    """keep_or_replace's verdict WITH ITS CAUSE: (verdict, detail).
+    `detail["cause"]` names the clause that decided -- 'cancel_reason',
+    'unreadable', 'no_plan', 'future', 'ttl', 'side', 'intent',
+    'no_price', 'cent', 'under_one_share', 'qty', 'same' -- and, under
+    THE REST-LIFE FLOOR (E18), 'min_life' with `kept_min_life` True,
+    `rest_age_s`, `floor_s`, `cent_moved` and, when the plan's quantity
+    GREW past the rest's leaves, `add_pending` = {qty, wire, since}:
+    the growth the worker re-plans once the floor has passed (`since`
+    is the tick's clock that first held it). A quantity that FELL is
+    his exit and never waits: 'replace' with cause 'qty' at any age
+    (the review's CRITICAL-1, folded 2026-09-08). The floor applies to
+    an ENTRY rest (`stands` is not True) younger than `min_life_s`
+    whose side and intent are unchanged and whose cent moved under
+    REST_MIN_LIFE_CENT_MOVE in ONE direction only -- the rest's wire at
+    or UNDER his new cent on a BUY, at or OVER it on a SELL (the
+    review's MEDIUM-2, folded 2026-09-08 as the mandate's reading,
+    "entries at his cent": a rest is never left a cent past him for
+    the floor's life; his cent moving past the rest replaces at once,
+    as before the floor) -- and never when `entry` is False (the worker
+    passes the leg action: an UNPRICED reduce rest -- he gave no exit
+    price, the rest sits at the ask -- is an exit, not an entry, and
+    keeps E4's rule whole); `min_life_s` can only LENGTHEN the floor
+    (max(min_life_s, MIRROR_REST_MIN_LIFE_S); unreadable is the
+    constant), the mirror of take_allowed's wait. Everything else is
+    keep_or_replace's docstring, byte for byte."""
+    if cancel_reason is not None:
+        name = cancel_reason if isinstance(cancel_reason, str) and cancel_reason.strip() else "cancel_unnamed"
+        return name, {"cause": "cancel_reason"}
+    if not isinstance(order, OpenOrder) or (p is not None and not isinstance(p, Plan)):
+        return "replace", {"cause": "unreadable"}
+    if p is None or p.side is None:
+        return plan_reason_key(p.reason if p is not None else "no_plan"), {"cause": "no_plan"}
+    placed, t, ttl = _num(order.placed_at), _num(now), _num(ttl_s)
+    if placed is None or t is None or ttl is None:
+        return "replace", {"cause": "unreadable"}
+    ttl = min(ttl, float(MIRROR_REST_TTL_S))
+    age = t - placed
+    if age < 0:
+        return "replace", {"cause": "future"}
+    if age >= ttl and stands is not True:
+        return "replace", {"cause": "ttl", "rest_age_s": age}
+    if (not isinstance(p.side, str) or not isinstance(order.side, str)
+            or p.side not in (BUY, SELL) or p.side != order.side):
+        return "replace", {"cause": "side"}
+    oi = getattr(order, "intent", None)
+    if isinstance(intent, str) and isinstance(oi, str) and intent != oi:
+        return "replace", {"cause": "intent"}
+    pw = _cent(plan_wire(p) if wire is _FROM_PLAN else wire)
+    if pw is None:
+        return "no_price", {"cause": "no_price"}
+    ow = _cent(order.wire)
+    if ow is None:
+        return "replace", {"cause": "cent"}
+    moved = round(abs(ow - pw), 6)
+    # THE FLOOR (E18): the caller's floor can only lengthen the constant
+    floor = _num(min_life_s)
+    floor = float(MIRROR_REST_MIN_LIFE_S) if floor is None else max(floor, float(MIRROR_REST_MIN_LIFE_S))
+    young = stands is not True and entry is not False and age < floor
+    # ONE DIRECTION ONLY (the E18 review's MEDIUM-2, folded 2026-09-08 --
+    # the mandate's reading, "entries at his cent"): a young rest stands
+    # over a sub-2c move only while its wire is at or UNDER his new cent
+    # on a BUY (at or OVER it on a SELL) -- the queue kept when his cent
+    # rose (533: 0.43 -> 0.48 -> 0.49). His cent moving the other way
+    # would leave the rest a cent PAST him for the floor's life, so it
+    # replaces at once, as before the floor
+    not_past_him = ow <= pw if p.side == BUY else ow >= pw
+    if moved >= 0.01 and not (young and moved < REST_MIN_LIFE_CENT_MOVE and not_past_him):
+        return "replace", {"cause": "cent", "cent_moved": moved}
+    leaves, q = _num(order.leaves), _num(p.qty)
+    if leaves is None or q is None:
+        return "replace", {"cause": "unreadable"}
+    if q < 1:
+        return "replace", {"cause": "under_one_share"}
+    diff = abs(leaves - q)
+    if diff < 1.0 or diff <= MIN_MOVE_FRAC * abs(q):
+        if moved >= 0.01:
+            # the cent moved under two cents on a young rest: kept by the floor
+            return "keep", {"cause": "min_life", "kept_min_life": True, "rest_age_s": age,
+                            "floor_s": floor, "cent_moved": moved}
+        return "keep", {"cause": "same"}
+    if young and q > leaves:
+        # the quantity GREW (alone, or with a sub-2c cent move) on a young
+        # rest: kept, the growth carried for the tick past the floor. A
+        # FALL never waits (the E18 review's CRITICAL-1, folded
+        # 2026-09-08): a target under the rest's leaves is his exit, and
+        # a rest kept over it would stand past his proportion for the
+        # floor's life -- it replaces at once, as before the floor
+        return "keep", {"cause": "min_life", "kept_min_life": True, "rest_age_s": age,
+                        "floor_s": floor, "cent_moved": moved,
+                        "add_pending": {"qty": int(q), "wire": pw, "since": float(t)}}
+    return "replace", {"cause": "qty"}
+
+
 def keep_or_replace(order: OpenOrder, p: Plan | None, now: float,
                     ttl_s: float = MIRROR_REST_TTL_S,
                     cancel_reason: str | None = None,
                     wire: float | None | object = _FROM_PLAN,
                     intent: str | None = None,
-                    stands: bool = False) -> str:
+                    stands: bool = False,
+                    min_life_s: float = MIRROR_REST_MIN_LIFE_S,
+                    entry: bool | None = None) -> str:
     """What to do with the order already resting on this book.
 
     `intent` (P2 rung S0, brief B6) is the WIRE intent the plan would
@@ -1555,9 +1678,29 @@ def keep_or_replace(order: OpenOrder, p: Plan | None, now: float,
     unreadable fact, a placement in the future -- decides exactly as
     before. Entries never pass it.
 
+    THE REST-LIFE FLOOR (E18, 2026-09-08; `min_life_s`, the constant
+    MIRROR_REST_MIN_LIFE_S, env may only lengthen): an ENTRY rest
+    (`stands` is not True) younger than the floor is 'keep' when the
+    side and the intent are unchanged and the cent moved under
+    REST_MIN_LIFE_CENT_MOVE (2c) with the rest still at or UNDER his
+    new cent on a BUY (at or OVER it on a SELL; the review's MEDIUM-2,
+    folded 2026-09-08 -- the mandate's "entries at his cent": his cent
+    moving past the rest replaces at once, as before) -- a quantity
+    GROWTH is 'keep' too, and rest_decision carries it as `add_pending`
+    for the worker to re-plan once the floor has passed; a quantity
+    that FELL is his exit and replaces at once (the review's
+    CRITICAL-1, folded 2026-09-08). A cent move of 2c or more, a side
+    or intent change, the TTL and an unreadable fact are 'replace' as
+    before; a rest at or past the floor decides exactly as before. The
+    floor is a WAIT (a caller's `min_life_s` can only
+    lengthen it); exits never read it -- `stands` (a priced exit) and
+    `entry` False (the worker's word for any reduce rest) both keep
+    the floor off.
+
       'keep'      same side, same cent, leaves within a share (or within
                   MIN_MOVE_FRAC of the plan's quantity), younger than
-                  the TTL -- the worker names it `open_order_pending`
+                  the TTL -- the worker names it `open_order_pending`;
+                  or an entry rest under the floor (above)
       'replace'   the plan moved (side, cent, quantity), the order aged
                   past the TTL, or a fact about the order could not be
                   read (its wire, its age, its leaves, the TTL, the
@@ -1585,38 +1728,35 @@ def keep_or_replace(order: OpenOrder, p: Plan | None, now: float,
     (after a cancel_reason, which always wins); sides are compared
     only as the two strings BUY / SELL.
     """
-    if cancel_reason is not None:
-        return cancel_reason if isinstance(cancel_reason, str) and cancel_reason.strip() else "cancel_unnamed"
-    if not isinstance(order, OpenOrder) or (p is not None and not isinstance(p, Plan)):
-        return "replace"
-    if p is None or p.side is None:
-        return plan_reason_key(p.reason if p is not None else "no_plan")
-    placed, t, ttl = _num(order.placed_at), _num(now), _num(ttl_s)
-    if placed is None or t is None or ttl is None:
-        return "replace"
-    ttl = min(ttl, float(MIRROR_REST_TTL_S))
-    age = t - placed
-    if age < 0 or (age >= ttl and stands is not True):
-        return "replace"
-    if (not isinstance(p.side, str) or not isinstance(order.side, str)
-            or p.side not in (BUY, SELL) or p.side != order.side):
-        return "replace"
-    oi = getattr(order, "intent", None)
-    if isinstance(intent, str) and isinstance(oi, str) and intent != oi:
-        return "replace"
-    pw = _cent(plan_wire(p) if wire is _FROM_PLAN else wire)
-    if pw is None:
-        return "no_price"
-    ow = _cent(order.wire)
-    if ow is None or round(abs(ow - pw), 6) >= 0.01:
-        return "replace"
-    leaves, q = _num(order.leaves), _num(p.qty)
-    if leaves is None or q is None or q < 1:
-        return "replace"
-    diff = abs(leaves - q)
-    if diff < 1.0 or diff <= MIN_MOVE_FRAC * abs(q):
-        return "keep"
-    return "replace"
+    return rest_decision(order, p, now, ttl_s=ttl_s, cancel_reason=cancel_reason, wire=wire,
+                         intent=intent, stands=stands, min_life_s=min_life_s, entry=entry)[0]
+
+
+_REPLACE_DECISIONS = {"ttl": "ttl", "cent": "replace_cent", "qty": "replace_qty",
+                      "side": "replace_side", "intent": "replace_side"}
+
+
+def replace_decision(detail: dict | None) -> str:
+    """The `decision` the cancelled row records (mirror_orders.decision,
+    migration 059) for a replace: 'ttl', 'replace_cent', 'replace_qty',
+    'replace_side' (a side or intent change), else 'replace_unread' (an
+    unreadable fact, a placement in the future, a plan under a share) --
+    never a guess from a detail that names no cause."""
+    cause = detail.get("cause") if isinstance(detail, dict) else None
+    return _REPLACE_DECISIONS.get(str(cause), "replace_unread")
+
+
+def order_decision(action: str | None, is_take: bool, short_cover: bool) -> str:
+    """The `decision` an order row records at its INSERT (E18; migration
+    059): 'cover' for a short book's buy-back (its rest or its IOC),
+    'take' for any other IOC, 'exit_rest' for a rest that shrinks the
+    leg, 'rest' for an entry's. 'take_in_band' is reserved for the
+    entry band (lane 8) and is never written here."""
+    if short_cover:
+        return "cover"
+    if is_take:
+        return "take"
+    return "exit_rest" if action == "reduce" else "rest"
 
 
 # -------------------------------------------------------------- the take
@@ -2521,7 +2661,8 @@ __all__ = [
     "P2_INTEGRITY_COUNTERS",
     "mirror_target", "AdmissionFacts", "admission",
     "buy_wire", "sell_wire", "buy_price", "sell_price", "plan_wire", "room_scale",
-    "OpenOrder", "plan_reason_key", "keep_or_replace",
+    "OpenOrder", "plan_reason_key", "keep_or_replace", "rest_decision", "replace_decision",
+    "order_decision", "MIRROR_REST_MIN_LIFE_S", "REST_MIN_LIFE_CENT_MOVE",
     "at_or_through", "take_allowed", "take_arms", "select_flatten",
     "BookState", "Booking", "book_buy", "book_sell",
     "DriftRule", "drift_of", "drift_rule", "drift_net_rule",

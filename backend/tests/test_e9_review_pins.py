@@ -774,8 +774,9 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     # E12 moved the tail by its three names (-65 -> -68, -66 -> -69), E13 by
     # its one (-68 -> -69, -69 -> -70), the convention every builder
     # followed; E9's four stay keys[-8:-4]
-    assert keys[-69:-65] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-70] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # E18 by its six (-69 -> -75, -70 -> -76)
+    assert keys[-75:-71] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-76] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence

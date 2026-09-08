@@ -630,7 +630,8 @@ def test_e12_057_exists_sorts_after_056_and_is_two_nullable_add_column_if_not_ex
     files = [x.name for x in sorted(MIG_DIR.glob("*.sql"))]
     i = files.index("056_mirror_registered_positions.sql")
     assert files[i + 1] == "057_mirror_books_flow.sql" and sum(f.startswith("057_") for f in files) == 1
-    assert files[i + 2] == "058_mirror_books_flow_clock.sql" and files[-1] == "058_mirror_books_flow_clock.sql"    # E12b
+    assert files[i + 2] == "058_mirror_books_flow_clock.sql"    # E12b
+    assert files[i + 3] == "059_mirror_orders_send_record.sql" == files[-1]    # E18 (PNL lane 6)
     sql = SQL_057.read_text()
     assert sql.splitlines()[0].startswith("-- 057: MIRROR BOOKS FLOW BASE (E12, 2026-09-08")
     body = "\n".join(ln.split("--", 1)[0] for ln in sql.splitlines())

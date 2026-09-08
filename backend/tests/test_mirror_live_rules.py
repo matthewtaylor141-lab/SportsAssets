@@ -1331,24 +1331,27 @@ def test_keep_or_replace_fails_closed_on_every_input():
 
 
 def test_keep_or_replace_wants_a_cent_and_a_plan_of_at_least_a_share():
+    # read at 100 s: past the E18 rest-life floor (MIRROR_REST_MIN_LIFE_S),
+    # so every clause decides as it always did (test_e18_rest_life pins the
+    # floor's own keeps at 20 s)
     o = r.OpenOrder(r.BUY, 0.47, 100, 100, placed_at=0.0)
     p = mi.Plan(r.BUY, 100, 0.47, "x")
-    assert r.keep_or_replace(o, p, 10.0, wire=Decimal("0.47")) == "keep"
-    assert r.keep_or_replace(o, p, 10.0, wire=0.47 + 1e-9) == "keep"
+    assert r.keep_or_replace(o, p, 100.0, wire=Decimal("0.47")) == "keep"
+    assert r.keep_or_replace(o, p, 100.0, wire=0.47 + 1e-9) == "keep"
     # a wire off a cent is not a wire the worker computed
     for off in (0.475, 0.471, 0.4699, 0.4650001):
-        assert r.keep_or_replace(o, p, 10.0, wire=off) == "no_price", off
+        assert r.keep_or_replace(o, p, 100.0, wire=off) == "no_price", off
     # a plan under one share cannot be what an order is for
     half = r.OpenOrder(r.BUY, 0.47, 1, 0.5, 0.0)
-    assert r.keep_or_replace(half, mi.Plan(r.BUY, 0, 0.47, "x"), 10.0) == "replace"
-    assert r.keep_or_replace(half, mi.Plan(r.BUY, 0.5, 0.47, "x"), 10.0) == "replace"
-    assert r.keep_or_replace(o, mi.Plan(r.BUY, -100, 0.47, "x"), 10.0) == "replace"
-    assert r.keep_or_replace(r.OpenOrder(r.BUY, 0.47, 100, -5, 0.0), p, 10.0) == "replace"
+    assert r.keep_or_replace(half, mi.Plan(r.BUY, 0, 0.47, "x"), 100.0) == "replace"
+    assert r.keep_or_replace(half, mi.Plan(r.BUY, 0.5, 0.47, "x"), 100.0) == "replace"
+    assert r.keep_or_replace(o, mi.Plan(r.BUY, -100, 0.47, "x"), 100.0) == "replace"
+    assert r.keep_or_replace(r.OpenOrder(r.BUY, 0.47, 100, -5, 0.0), p, 100.0) == "replace"
     # the SELL side through the worker's wire, like the BUY side
     so = r.OpenOrder(r.SELL, 0.53, 100, 100, 0.0)
     sp = mi.Plan(r.SELL, 100, 0.52, "reduce")
-    assert r.keep_or_replace(so, sp, 10.0) == "replace"                       # plan_wire 0.52 != 0.53
-    assert r.keep_or_replace(so, sp, 10.0, wire=r.sell_price(0.52004, 0.51)) == "keep"
+    assert r.keep_or_replace(so, sp, 100.0) == "replace"                      # plan_wire 0.52 != 0.53
+    assert r.keep_or_replace(so, sp, 100.0, wire=r.sell_price(0.52004, 0.51)) == "keep"
 
 
 def test_keep_or_replace_and_plan_wire_refuse_objects_that_are_not_theirs():
@@ -1394,12 +1397,17 @@ def test_a_resting_order_off_a_cent_is_replaced():
     # held to the same rule -- an order at 0.475 is not one this book
     # placed, and 'keep' would leave it standing
     p = mi.Plan(r.BUY, 100, 0.47, "x")
-    for off in (0.475, 0.479, 0.4799, 0.4701, 0.46999, 0.005, 0.995):
-        assert r.keep_or_replace(r.OpenOrder(r.BUY, off, 100, 100, 0.0), p, 10.0) == "replace", off
-        assert r.keep_or_replace(r.OpenOrder(r.BUY, off, 100, 100, 0.0), p, 10.0, wire=0.47) == "replace", off
-    for on in (0.47, 0.47 + 1e-9, 0.47 - 1e-9, Decimal("0.47")):
-        assert r.keep_or_replace(r.OpenOrder(r.BUY, on, 100, 100, 0.0), p, 10.0) == "keep", on
-    assert r.keep_or_replace(r.OpenOrder(r.BUY, 0.46, 100, 100, 0.0), p, 10.0) == "replace"
+    # at 10 s and at 100 s alike: an order OFF a cent is never kept by the
+    # E18 rest-life floor (its own clause runs before the floor's)
+    for now in (10.0, 100.0):
+        for off in (0.475, 0.479, 0.4799, 0.4701, 0.46999, 0.005, 0.995):
+            assert r.keep_or_replace(r.OpenOrder(r.BUY, off, 100, 100, 0.0), p, now) == "replace", off
+            assert r.keep_or_replace(r.OpenOrder(r.BUY, off, 100, 100, 0.0), p, now, wire=0.47) == "replace", off
+        for on in (0.47, 0.47 + 1e-9, 0.47 - 1e-9, Decimal("0.47")):
+            assert r.keep_or_replace(r.OpenOrder(r.BUY, on, 100, 100, 0.0), p, now) == "keep", on
+    # a 1c move: replaced past the floor, kept under it (E18)
+    assert r.keep_or_replace(r.OpenOrder(r.BUY, 0.46, 100, 100, 0.0), p, 100.0) == "replace"
+    assert r.keep_or_replace(r.OpenOrder(r.BUY, 0.46, 100, 100, 0.0), p, 10.0) == "keep"
 
 
 def test_plan_reasons_map_to_census_names_including_the_dead_bands(monkeypatch):

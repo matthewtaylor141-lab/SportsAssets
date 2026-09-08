@@ -839,6 +839,18 @@ CENSUS_KEYS: tuple[str, ...] = (
     # still live -- the one new name. Before `registered_no_increase`,
     # whose place from the end the E12 pin holds
     "venue_market_ended",
+    # E18 (2026-09-08; PNL program lane 6): an entry rest kept standing
+    # under the rest-life floor where the plan would have re-quoted it
+    # (`kept_min_life`); an IOC not sent because the quote re-read
+    # immediately before the send was no longer at or through the wire
+    # (`ask_moved`, a BUY; `bid_moved`, a SELL), because the re-read
+    # could not be made inside the tick's call budget
+    # (`ioc_reread_capped`) or came back unreadable (`ioc_quote_unread`);
+    # the 059 column probe failing for any reason but absence
+    # (`order_cols_guard_unreadable`). Before `registered_no_increase`,
+    # whose place from the end the E12 pin holds
+    "kept_min_life", "ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread",
+    "order_cols_guard_unreadable",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
     # his FLOW from first sight, its pre-existing block never bought
@@ -1870,6 +1882,33 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'placing', $13::jsonb
         $14, $15, $16, $17, $18, $19)
 RETURNING id /* ml-order-insert */
 """
+# THE 059 SHAPE (E18): the 050 statement plus the send record -- the
+# re-read's ask immediately before an IOC's send (NULL on a rest), the
+# decision that placed the row, and the fill of his it answers -- as
+# the LAST three parameters, so every positional reader of the 050
+# statement keeps its meaning; sent only when the tick's probe read the
+# columns (t.order_cols), the 050 shape else (the 057 guard's pattern)
+_SQL_ORDER_INSERT_059 = """
+INSERT INTO mirror_orders (book_id, whale, us_market_slug, kind, side, tif, post_only,
+                           good_till, his_level, price, wire, qty, state, pre_ids,
+                           target_at_place, ledger_at_place, bid_at_place, ask_at_place,
+                           reason, intent, ask_at_send, decision, his_fill_id)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'placing', $13::jsonb,
+        $14, $15, $16, $17, $18, $19, $20, $21, $22)
+RETURNING id /* ml-order-insert */
+"""
+# the cancel's word on the row it cancelled (E18): 'replace_cent',
+# 'replace_qty', 'replace_side', 'ttl', 'replace_unread' -- written
+# after the row is terminal, under the 059 probe alone
+_SQL_ORDER_DECISION = """
+UPDATE mirror_orders SET decision = $2, updated_at = now() WHERE id = $1 /* ml-order-decision */
+"""
+# THE 059 COLUMN PROBE (E18), read the 057 way once per tick after the
+# 050 probe read present (059 carries the intent column): absent, the
+# 050-shaped INSERT and no decision write; any other failure refuses
+# the tick by name (`order_cols_guard_unreadable`)
+_SQL_ORDER_COLS_GUARD = ("SELECT ask_at_send, decision, his_fill_id FROM mirror_orders LIMIT 0 "
+                         "/* ml-order-cols-guard */")
 _SQL_ORDER_PERSIST_ID = """
 UPDATE mirror_orders SET order_id = $2, state = 'open', venue_state = $3,
        receipt = $4::jsonb, updated_at = now()
@@ -2281,6 +2320,12 @@ class _Tick:
     # 057-shaped reads and writes and runs every block under the landed
     # rule (a net fall ratchets); None until the guard has read
     flow_clock_col: bool | None = None
+    # mirror_orders.ask_at_send / decision / his_fill_id (migration 059,
+    # E18) exist this tick: read by _order_cols_guard after the 050 and
+    # 057/058 probes; False sends the 050-shaped INSERT and writes no
+    # decision on a cancel; None until the guard has read (never True
+    # without the 050 column: the 059 INSERT carries the intent)
+    order_cols: bool | None = None
     # the tick's venue budget for the exact mapping lane (C1): the
     # shadow's own MapBudget, ms.MAP_READS_PER_TICK resolver calls a
     # tick across every candidate, past which a candidate is
@@ -4740,7 +4785,8 @@ async def _reconcile_open(t: _Tick, o: dict, book: dict, cancel_reason: str | No
         # `ops_capped` (M-1); every other cancel here is bounded as before
         return await _cancel_and_settle(t, o, book, cancel_reason,
                                         exit=(cancel_reason == "ttl"
-                                              and _order_action(o, book) == "reduce"))
+                                              and _order_action(o, book) == "reduce"),
+                                        decision=("ttl" if cancel_reason == "ttl" else None))
     t.open_by_book[book["id"]] = (o, st)
     t.nonterminal.add(book["id"])
     if o["state"] != "open":
@@ -4751,13 +4797,17 @@ async def _reconcile_open(t: _Tick, o: dict, book: dict, cancel_reason: str | No
 
 
 async def _cancel_and_settle(t: _Tick, o: dict, book: dict, reason: str,
-                             exit: bool = False) -> str:
+                             exit: bool = False, decision: str | None = None) -> str:
     """Step C: cancel twice, read until terminal (bounded), book the
     delta, write the terminal state. Non-terminal after the reads is
     'unknown', the book frozen 'cancel_pending', nothing new on it.
     `exit` is a cancel on an exit's path (the take's, the replace's, a
     flatten's, the TTL re-quote of a reduce rest): never `ops_capped`
-    (_op_slot, review round 3 M-1)."""
+    (_op_slot, review round 3 M-1). `decision` (E18, migration 059) is
+    the cancel's word on the row -- 'ttl', 'replace_cent',
+    'replace_qty', 'replace_side', 'replace_unread' -- written after
+    the row is terminal and only under the 059 probe; a write that
+    fails is logged and changes nothing (the record, never the money)."""
     slot = _op_slot(t, o["whale"], exit=exit)
     if slot is None:
         # the order still RESTS: it stays in open_by_book so no caller
@@ -4808,7 +4858,14 @@ async def _cancel_and_settle(t: _Tick, o: dict, book: dict, reason: str,
         # the cancel is the first half of a re-quote: the rest that
         # follows on this book this tick rides the same op (LOW-6)
         t.requote_credit.add(book["id"])
-    return await _finish_order(t, o, book, st, reason)
+    out = await _finish_order(t, o, book, st, reason)
+    if decision is not None and t.order_cols is True and out != "unknown":
+        try:
+            await t.pool.execute(_SQL_ORDER_DECISION, o["id"], str(decision))
+        except Exception as exc:  # noqa: BLE001 — the record, never the money
+            log.warning("mirror_live: order %s decision %r not written (%s)", o["id"], decision,
+                        type(exc).__name__)
+    return out
 
 
 async def _reconcile_orders(t: _Tick, count: bool = True) -> None:
@@ -7608,12 +7665,31 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         oo = rules.OpenOrder(o["side"], _num(o.get("wire")), int(o["qty"]), leaves,
                        _num(o.get("placed_ts")), _order_intent(o, book))
         want = rules.wire_side(book.get("intent"), p.side) if p is not None else None
-        decision = rules.keep_or_replace(oo, p, t.now, cancel_reason=(t.cancel_all or cancel_reason),
-                                         wire=wire, intent=(want[0] if want else None),
-                                         stands=priced_exit)
+        # E18: the rest-life floor reads an ENTRY rest alone -- `entry` is
+        # the plan's leg action, so an unpriced reduce rest (an exit at
+        # the ask, `stands` False) never waits on it
+        decision, why = rules.rest_decision(oo, p, t.now, cancel_reason=(t.cancel_all or cancel_reason),
+                                            wire=wire, intent=(want[0] if want else None),
+                                            stands=priced_exit, entry=not is_exit)
         if decision == "keep":
             _mirror_stop("open_order_pending", w)
             plan["open_order"] = o["id"]
+            if why.get("kept_min_life"):
+                # THE REST LIVES (E18): an entry rest younger than
+                # rules.MIRROR_REST_MIN_LIFE_S stands over a sub-2c cent
+                # move or a quantity move alone (book 533's 2734 @0.49
+                # filled after 100 s once left alone; its 2725/2729/2731
+                # were re-quoted at 15-30 s and filled nothing). The plan
+                # says so, and carries the growth (`add_pending`) the tick
+                # past the floor re-plans through the replace branch below.
+                # An exit rest never reads the floor (`stands`, E4); the
+                # take below still fires the tick the ask arrives
+                _mirror_stop("kept_min_life", w)
+                plan["decision"] = "kept_min_life"
+                plan["rest_life"] = {"age_s": round(float(why.get("rest_age_s") or 0.0), 1),
+                                     "floor_s": why.get("floor_s"), "cent_moved": why.get("cent_moved")}
+                if isinstance(why.get("add_pending"), dict):
+                    plan["add_pending"] = dict(why["add_pending"])
             if long_exit:
                 # THE EXIT'S TAKE off the standing rest (E4): the bid at
                 # or through the take cent -- inside the tolerance of his
@@ -7727,8 +7803,13 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 return "replace_capped"
             # an exit plan's replace -- its rest moving to his cent, or
             # a BUY rest standing over the reduce -- is never
-            # `ops_capped` (M-1); a refused entry replace is named (L-4)
-            res = await _cancel_and_settle(t, o, book, "replace", exit=is_exit)
+            # `ops_capped` (M-1); a refused entry replace is named (L-4).
+            # E18: the cancelled row records the replace's cause
+            # (rules.replace_decision: replace_cent / replace_qty /
+            # replace_side / ttl / replace_unread) under the 059 probe
+            plan["replaced"] = rules.replace_decision(why)
+            res = await _cancel_and_settle(t, o, book, "replace", exit=is_exit,
+                                           decision=plan["replaced"])
             named = _cancel_outcome(t, book, o, res)
             if named is not None:
                 return named
@@ -8474,6 +8555,76 @@ def _exit_held(t: _Tick, r: _Reading, ex: dict, plan: dict, whale: str,
     plan["exit_out_of_tol"] = {"bid": bid, "ask": ask, bound[0]: bound[1], "at": t.now}
 
 
+# the names under which an IOC is NOT sent (E18): the entry's remainder
+# rests as today, an exit's rest goes with the next tick's plan
+IOC_SKIPPED = ("ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread")
+
+
+def _his_fill_id(book: dict, r: _Reading | None) -> str | None:
+    """The fill of his the order answers (E18; mirror_orders.his_fill_id):
+    the newest fill the tick holds on this market by stamp then id
+    (_fill_key: the trades row id, else its stamp), else the last entry
+    of the prior plan's his_fills_seen; None when nothing can be read
+    (the record, never a guess)."""
+    fills = r.fills if r is not None else book.get("_fills")
+    best, best_key = None, None
+    for f in fills or []:
+        if not isinstance(f, dict):
+            continue
+        key = _fill_key(f)
+        if key is None:
+            continue
+        rank = (float(_num(f.get("ts")) or 0.0), key)
+        if best is None or rank > best:
+            best, best_key = rank, key
+    if best_key is not None:
+        return best_key
+    prior = _jsonish(book.get("last_plan")) or {}
+    seen = prior.get("his_fills_seen") if isinstance(prior, dict) else None
+    if isinstance(seen, list) and seen and isinstance(seen[-1], dict) and seen[-1].get("id") is not None:
+        return str(seen[-1]["id"])
+    return None
+
+
+async def _ioc_reread(t: _Tick, book: dict, r: _Reading, side: str, wire: float, action: str,
+                      plan: dict) -> str | None:
+    """ONE paced quote read immediately before an IOC's send (E18), and
+    the verdict on it. None: the level is still at or through the wire
+    (rules.at_or_through on the RE-READ, the same rule the tick fired
+    on) and the IOC may go; the plan carries `ioc_quote_at_send`
+    {bid, ask, bid_at_plan, ask_at_plan}. A name: the IOC is withheld --
+    `ask_moved` (a BUY: the ask left his cent) / `bid_moved` (a SELL:
+    the bid fell under the take cent), the plan carrying {ask_at_plan,
+    ask_at_send} (bid on a SELL); `ioc_reread_capped`: an ENTRY's
+    re-read would pass the tick's call budget
+    (rules.MIRROR_VENUE_CALLS_PER_TICK, the soft guard), so no read and
+    no IOC -- the rest is still placed; an EXIT's re-read is made
+    whatever the count, as every exit's op is (M-1); `ioc_quote_unread`:
+    the re-read failed, came back empty, or came back WITHOUT the side
+    the IOC needs -- the ask on a BUY, the bid on a SELL (a one-sided
+    book, a half-failed read: the level was never read, it did not
+    move; the E18 review's MEDIUM-1, folded 2026-09-08) -- no IOC
+    (fails closed toward not sending, never toward a send on the
+    tick's stale figure). The read is charged to the budget
+    (t.guard_calls) like a write."""
+    if action != "reduce" and t.guard_calls >= rules.MIRROR_VENUE_CALLS_PER_TICK:
+        plan["ioc_reread_capped"] = {"guard_calls": int(t.guard_calls),
+                                     "budget": int(rules.MIRROR_VENUE_CALLS_PER_TICK)}
+        return "ioc_reread_capped"
+    bid2, ask2 = await _bbo(t, r.slug, book=True)
+    t.guard_calls += 1                  # charged like a write: the books' reads never are
+    plan["ioc_quote_at_send"] = {"bid": bid2, "ask": ask2, "bid_at_plan": r.bid, "ask_at_plan": r.ask}
+    if (bid2 if side == SELL else ask2) is None:
+        return "ioc_quote_unread"
+    if rules.at_or_through(side, bid2, ask2, wire):
+        return None
+    if side == SELL:
+        plan["bid_moved"] = {"bid_at_plan": r.bid, "bid_at_send": bid2, "wire": wire}
+        return "bid_moved"
+    plan["ask_moved"] = {"ask_at_plan": r.ask, "ask_at_send": ask2, "wire": wire}
+    return "ask_moved"
+
+
 async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: float, rest_px: float,
                       qty: int, his_px: float | None, plan: dict, first: bool) -> str:
     """An ENTRY's take (E4 addendum): ONE IOC at HIS cent (`ioc_px`,
@@ -8500,6 +8651,16 @@ async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: flo
                        take_first=first)
     if (res == "ops_capped" and book["id"] in t.requote_credit
             and not (t.cancel_all or t.abandoned) and book.get("state") != "frozen"):
+        rest = await _place(t, book, r, "increase", p.side, rest_px, qty, his_px, p, plan)
+        return rest if rest == "rest_placed" else res
+    if (res in IOC_SKIPPED and not (t.cancel_all or t.abandoned)
+            and book.get("state") != "frozen" and book["id"] not in t.nonterminal):
+        # THE IOC WAS NOT SENT (E18): the quote re-read immediately
+        # before the send was no longer at or through his cent
+        # (`ask_moved`), or could not be made (`ioc_reread_capped`,
+        # `ioc_quote_unread`). Nothing executed, so the whole plannable
+        # quantity rests post-only at the wire as the remainder would
+        # have -- the rest is placed as today, the IOC alone is withheld
         rest = await _place(t, book, r, "increase", p.side, rest_px, qty, his_px, p, plan)
         return rest if rest == "rest_placed" else res
     if res != "take" or t.cancel_all or t.abandoned or book.get("state") == "frozen":
@@ -8791,6 +8952,24 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
     tif_rec = "IOC" if is_take else ("GTD" if good_till else "GTC")
     venue_tif = ("TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" if is_take
                  else "TIME_IN_FORCE_GOOD_TILL_CANCEL")
+    # THE IOC RE-READS THE QUOTE BEFORE THE SEND (E18): book 509's two
+    # cover IOCs (2726, 2727) expired 0 filled because the ask moved
+    # between the tick's quote read and the send. One paced read through
+    # the E11 gate immediately before ANY IOC -- the entry take, the
+    # exit's take, the cover -- charged to the tick's call budget; the
+    # IOC goes only while the level is still at or through the wire.
+    # Refused by name before the room's READ, the row and the op are
+    # spent: the re-read is an await, and E2's room invariant below
+    # ("nothing between this read and the take") admits none between
+    # _room_qty and _room_take (the E18 review's HIGH-1, folded
+    # 2026-09-08)
+    ask_at_send: float | None = None
+    if is_take:
+        held = await _ioc_reread(t, book, r, side, wire, action, plan)
+        if held is not None:
+            _mirror_stop(held, w)
+            return held
+        ask_at_send = _num(plan.get("ioc_quote_at_send", {}).get("ask"))
     if action == "add" and (kind != "take" or take_first):
         # THE ROOM, READ AGAIN AND TAKEN NOW (E2): _act sized this add
         # off the tick's room across awaits another book may have spent
@@ -8821,8 +9000,15 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
             his_px, (p.price if p is not None else wire), wire, int(qty), json.dumps(pre_ids),
             int(_num(plan.get("target")) or 0), int(book.get("ledger_net") or 0), r.bid, r.ask,
             reason_col]
+    # E18 (migration 059): the decision that places the row and the fill
+    # of his it answers, beside the re-read's ask (NULL on a rest)
+    decision = rules.order_decision(action, is_take, wire_intent == "ORDER_INTENT_SELL_SHORT")
+    plan["decision"] = decision
     try:
-        if t.short_col:
+        if t.order_cols is True:
+            row_id = await t.pool.fetchval(_SQL_ORDER_INSERT_059, *args, wire_intent, ask_at_send,
+                                           decision, _his_fill_id(book, r))
+        elif t.short_col:
             row_id = await t.pool.fetchval(_SQL_ORDER_INSERT, *args, wire_intent)
         else:
             row_id = await t.pool.fetchval(_SQL_ORDER_INSERT_047, *args)
@@ -10202,6 +10388,47 @@ async def _flow_guard(t: _Tick, stats: dict) -> bool:
         return True
 
 
+_order_cols_absent_logged = False
+
+
+async def _order_cols_guard(t: _Tick, stats: dict) -> bool:
+    """THE 059 COLUMN PROBE (E18; the paragraph over _SQL_ORDER_COLS_GUARD),
+    made once per tick after the 050 probe and only once it read
+    present (the 059 INSERT carries the intent column; with 050 absent
+    the 047 shape is sent and nothing here is asked). True: the tick
+    goes on -- `t.order_cols` says whether the 059-shaped INSERT and
+    the cancel's decision write are sent (present) or the 050-shaped
+    ones (absent, said on the heartbeat as `order_cols_absent` and
+    logged once per process). False: the probe failed for any reason
+    but absence, and the tick is refused by name
+    (`order_cols_guard_unreadable`, status degraded), exactly as the
+    057 probe refuses -- the same reading for every column the workers
+    reach production ahead of."""
+    global _order_cols_absent_logged
+    if not t.short_col:
+        t.order_cols = False
+        return True
+    try:
+        await t.pool.fetch(_SQL_ORDER_COLS_GUARD)
+        t.order_cols = True
+        return True
+    except Exception as exc:  # noqa: BLE001 — a column that is not there is a fact; a blip is not
+        if not rules.column_missing(exc, "ask_at_send"):
+            _mirror_stop("order_cols_guard_unreadable")
+            stats.update(status="degraded", order_cols_guard_unreadable=type(exc).__name__)
+            log.warning("mirror_live: mirror_orders.ask_at_send probe failed (%s); refusing the tick",
+                        type(exc).__name__)
+            return False
+        t.order_cols = False
+        stats["order_cols_absent"] = type(exc).__name__
+        if not _order_cols_absent_logged:
+            _order_cols_absent_logged = True
+            log.warning("mirror_live: mirror_orders.ask_at_send is absent (migration 059 not applied "
+                        "yet: %s); every order row is written through the 050 INSERT, no decision recorded",
+                        type(exc).__name__)
+        return True
+
+
 async def _tick(t: _Tick, woken: list) -> None:
     global _last_mode, _last_whales, _last_walk
     stats = t.stats
@@ -10257,6 +10484,10 @@ async def _tick(t: _Tick, woken: list) -> None:
     # E12: the 057 columns, the same reading (absent: the old rule; a
     # failed probe: the tick refused by name)
     if not await _flow_guard(t, stats):
+        return
+    # E18: the 059 columns, the same reading (absent: the 050 INSERT; a
+    # failed probe: the tick refused by name)
+    if not await _order_cols_guard(t, stats):
         return
     stats.setdefault("short", {})["on"] = _shorts_on(t)
     # E6: this tick's number in the process (the quiet rotation's clock),
@@ -10766,6 +10997,8 @@ async def _fast_tick(t: _Tick, cids: list) -> None:
         t.short_col = False
     if not await _flow_guard(t, stats):            # E12: the same reading as _tick's
         return _fast_skip_all(t, cids, "flow_guard_unreadable")
+    if not await _order_cols_guard(t, stats):      # E18: the same reading as _tick's
+        return _fast_skip_all(t, cids, "order_cols_guard_unreadable")
     stats.setdefault("short", {})["on"] = _shorts_on(t)
     await _read_mode(t)
     if t.mode != MODE_SAFE and le.active_venue() != "polymarket-us":
