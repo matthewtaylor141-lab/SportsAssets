@@ -64,11 +64,19 @@ def test_q1_the_briefs_numbers_20000_at_29_plus_1000_at_71_first_tick_100_second
 def test_q1_addendum_a_a_market_mapped_three_minutes_after_his_first_fills_is_all_block(monkeypatch):
     """Every fill of his is 3 minutes old at first sight (the map lagged
     his first fill by 3 min): the whole net is the block. With the mark
-    3c off his cost the book opens at 0 and waits; within 2c it catches
+    6c off his cost the book opens at 0 and waits; within 2c it catches
     up in full at his cent -- the same answer a book-open-time cut
-    would give, since nothing of his is inside 60 s."""
+    would give, since nothing of his is inside 60 s.
+
+    Re-pinned under PNL lane 1 part (b) (owner decision D1 = YES,
+    2026-09-08): this pin's first world had the mark 3c over his 0.61
+    cost, which E12's flat 2c refused; the worker hands the book's axis
+    and the worse side's band on a 0.61 cost is min(5c, max(2c, 10% x
+    0.61)) = 5c, so 3c over is now `within_pct` (test_e12_catchup_side
+    pins it). 6c over is past the 5c cap on any cost and keeps the
+    flow-only half of this pin; the 1c world is unchanged."""
     fills = [_fill(M, "BUY", 5_000, 0.60, NOW - 180), _fill(M, "BUY", 5_000, 0.62, NOW - 170)]
-    p, v, http = _world(monkeypatch, fills, 10_000, 0.63, 0.65)      # mark 0.64, vwap 0.61
+    p, v, http = _world(monkeypatch, fills, 10_000, 0.66, 0.68)      # mark 0.67, vwap 0.61: 6c over
     st = _tick(p, v, http=http)
     b = _one_book(p)
     assert (b["flow_base"], b["target"]) == (10_000.0, 0) and not _places(v)

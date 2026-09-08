@@ -9756,8 +9756,8 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
     fb = _num(cu.get("flow_base"))
     if fb is not None and fb != 0.0:
         _mirror_stop("open_flow_only", w)
-    elif cu.get("why") in ("small_bet", "within_tol"):
-        _mirror_stop("open_catchup", w)
+    elif cu.get("why") in ("small_bet", "within_tol", "at_or_better", "within_pct"):
+        _mirror_stop("open_catchup", w)     # PNL lane 1: the block bought at or better than his cost, or within D1's band, counts here too
     book = await t.pool.fetchrow(_sql_book_read(t),
                                  opened["book_id"])
     if not book:
@@ -9799,30 +9799,45 @@ def _open_flow(t: _Tick, fills: list, la: str, oa: str | None, short: bool, net:
     size-weighted price over every fill that ADDS on the axis
     (mi.vwap_of, the same cut; E12b: a SELL of the other token at
     1 - p builds a long as a BUY of the long token at p does, the
-    mirror image on a short), the verdict rules.open_catchup's. Admitted (or nothing pre-existing), the book
-    opens at `target`, the whole-net figure; refused, at ratio x his
-    flow (mi.flow_net) sized by the same mirror_target at the same cap,
+    mirror image on a short), the verdict rules.open_catchup's WITH the
+    book's axis handed (PNL lane 1, 2026-09-08: a mark at or better
+    than his cost on the axis is `at_or_better` at any distance; the
+    worse side is D1's band, `within_tol` / `within_pct`, else
+    `flow_only`). Admitted (or nothing pre-existing), the book opens at
+    `target`, the whole-net figure; refused, at ratio x his flow
+    (mi.flow_net) sized by the same mirror_target at the same cap,
     never past the whole-net target admission and the short share cap
-    judged. With the 057 columns absent (t.flow_col not True) the book
-    is an old-rule book: the whole-net target, `column_absent` on the
-    row, no block stored."""
+    judged -- the clamp reads the TARGET'S sign, never the axis
+    argument, and an `axis_unread` verdict sizes NOTHING (the lane's
+    review fold, 2026-09-08, HIGH-1: the side of his cost could not be
+    read, so nothing at open). With the 057 columns absent (t.flow_col
+    not True) the book is an old-rule book: the whole-net target,
+    `column_absent` on the row, no block stored."""
     if t.flow_col is not True:
         return {"vwap": None, "mark": _num(mark), "tol": _num(rules.MIRROR_CATCHUP_TOL_CENTS),
                 "allowed": True, "flow_base": None, "why": "column_absent"}, target
     since = t.now - FIRST_SIGHT_S
     block = mi.pre_existing_block(net, fills, la, oa, since)
     vwap = mi.vwap_of(fills, la, oa, short=short, before=since)
-    cu = rules.open_catchup(net, mark, ratio, block, vwap)
+    # PNL lane 1: the book's axis travels with the call, so a mark at or
+    # better than his cost on it is admitted at any distance
+    # (`at_or_better`); the worse side is D1's band (owner YES,
+    # 2026-09-08): 10% of his cost, floor E12's 2c, cap 5c (`within_pct`)
+    cu = rules.open_catchup(net, mark, ratio, block, vwap, short=short)
     fb = _num(cu.get("flow_base"))
     if fb is None or cu.get("allowed") is True:
         return cu, target
+    if cu.get("why") == "axis_unread":
+        return cu, 0            # the side of his cost could not be read: nothing at open (fold, HIGH-1)
     flow = mi.flow_net(net, fb)
     ft = rules.mirror_target(ratio, flow, mark, rules.MIRROR_CLIP_USD, cap_usd=cap_usd,
                              allow_short=shorts)
     if ft.get("refusal") or ft.get("target") is None:
         return cu, 0            # the same inputs sized the whole net; belt and braces: nothing at open
     ot = int(ft["target"])
-    return cu, (max(ot, target) if short else min(ot, target))
+    # the clamp is on the TARGET's sign (fold, HIGH-1): `short` is the axis handed in, and an axis
+    # the rule could not read must never pick the side of the clamp -- it read the whole net back
+    return cu, (max(ot, target) if target < 0 else min(ot, target))
 
 
 # --------------------------------- W2: the candidate's refusal, persisted

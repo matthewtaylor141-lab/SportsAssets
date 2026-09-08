@@ -550,9 +550,75 @@ def step_ratio(stored_ratio: Any, net: Any, mark: Any) -> float | None:
 # catch up (not "within 0c": an exact-copy book under MIRROR_SMALL_BET_USD
 # still copies whole, its premium being cents on under $10).
 MIRROR_CATCHUP_TOL_CENTS = capped_env("MIRROR_CATCHUP_TOL_CENTS", 2.0, floor=0.0)
+# the knob's own default, named once (the lane's review fold, 2026-09-08,
+# MEDIUM-2): a tolerance LOWERED under it from the environment was, before
+# D1, the operator's only handle on the worse side and meant that many
+# cents -- it stays that many cents, bounding D1's band (below), so the
+# rail an operator lowered is never widened by a deploy. Must agree with
+# the literal above (pinned).
+_CATCHUP_TOL_DEFAULT_CENTS = 2.0
+
+# THE WORSE SIDE'S BAND (PNL lane 1 part (b); OWNER DECISION D1 = YES,
+# 2026-09-08 ~13:3xZ, "make the changes, and get it live and running
+# immediately"; hard2/PNL_program.md §2). With the book's axis known
+# the worse side's allowance is no longer the flat 2c but
+#   min(MIRROR_CATCHUP_MAX_CENTS, max(MIRROR_CATCHUP_TOL_CENTS,
+#       MIRROR_CATCHUP_PCT x vwap))
+# in cents on the contract price on the axis: 10% of his cost, never
+# under the 2c floor, never over 5c (a 0.20 cost keeps 2c, a 0.50 cost
+# gets 5c, a 0.80 cost is capped at 5c not 8c). The premium is bounded
+# by 5c x shares (<= $125 on a $2,500 position) and the bought block
+# earns his ROI on the day. capped_env, both: the environment may only
+# LOWER the percentage (0 = the 2c floor alone) and the cap (0 = no
+# worse side at all); nothing raises either, and MIRROR_CATCHUP_TOL_CENTS
+# lowered under its 2c default IS the band (the fold, MEDIUM-2: the env
+# may only lower, so the handle it had before D1 keeps its meaning). The
+# five-argument call (no axis) keeps E12's flat 2c: the band needs the
+# side of his cost.
+MIRROR_CATCHUP_PCT = capped_env("MIRROR_CATCHUP_PCT", 0.10, floor=0.0)
+MIRROR_CATCHUP_MAX_CENTS = capped_env("MIRROR_CATCHUP_MAX_CENTS", 5.0, floor=0.0)
+
+# THE AXIS NOT HANDED IN (PNL lane 1, 2026-09-08). open_catchup's E12
+# callers and pins pass five arguments and no axis; they get E12's
+# verdict exactly as pinned (the symmetric tolerance, no allowance --
+# never wider than E12 was). A caller that WANTS the at-or-better
+# allowance hands the book's axis (`short` True or False); an axis that
+# is handed in but unreadable (None, a non-bool) is `axis_unread`.
+_AXIS_NOT_GIVEN: Any = object()
 
 
-def open_catchup(net: Any, mark: Any, ratio: Any, block: Any, vwap: Any) -> dict[str, Any]:
+def _mark_at_or_better(m: float, v: float, short: bool) -> bool:
+    """Is the mark at or better than his cost on the book's axis, in
+    contract space (the long token's price, the space mi.vwap_of reads
+    both tokens onto)? A long is built by buying: at or UNDER his cost.
+    A short is built by selling: at or OVER it. Equality is at-or-better
+    on both (1e-9: the same float epsilon the tolerance reads with)."""
+    return (m >= v - 1e-9) if short else (m <= v + 1e-9)
+
+
+def _catchup_band_cents(tol: float, v: float) -> float:
+    """The WORSE side's band in cents (owner decision D1 = YES,
+    2026-09-08): min(MIRROR_CATCHUP_MAX_CENTS, max(tol, MIRROR_CATCHUP_PCT
+    x vwap)), the vwap in contract space so 10% of 0.50 is 5c. Read at
+    call time as the tolerance is. A knob that does not read (None, a
+    string, NaN -- never from capped_env, which falls back to its
+    default) grants NO widening: the band is the tolerance alone, E12's
+    2c; a cap under the tolerance narrows the band under it (the env
+    may only lower). A tolerance LOWERED under its 2c default (the
+    environment's pre-D1 handle on the worse side; the lane's review
+    fold, 2026-09-08, MEDIUM-2) is the band itself: TOL 1 admits 1c on
+    every cost, never max(1c, 10%) -- the env may only lower, and a
+    rail the operator lowered is not widened by a deploy."""
+    if tol < _CATCHUP_TOL_DEFAULT_CENTS:
+        return tol
+    pct, mx = _num(MIRROR_CATCHUP_PCT), _num(MIRROR_CATCHUP_MAX_CENTS)
+    if pct is None or mx is None:
+        return tol
+    return min(mx, max(tol, pct * v * 100.0))
+
+
+def open_catchup(net: Any, mark: Any, ratio: Any, block: Any, vwap: Any,
+                 short: Any = _AXIS_NOT_GIVEN) -> dict[str, Any]:
     """THE OPEN'S VERDICT ON HIS PRE-EXISTING BLOCK (E12): the plan row's
     `catchup` = {vwap, mark, tol, allowed, flow_base, why}. `flow_base`
     is what the book stores: 0 when the block is bought (the book sizes
@@ -567,18 +633,75 @@ def open_catchup(net: Any, mark: Any, ratio: Any, block: Any, vwap: Any) -> dict
       `small_bet`     the book's ratio is 1.0 -- the exact copy under
                       MIRROR_SMALL_BET_USD (owner ~14:10Z 2026-09-06):
                       copied whole, the premium is cents; allowed
+      `axis_unread`   the axis was handed in and is not True / False:
+                      the side of his cost cannot be read, not bought
+                      (PNL lane 1; a verdict on a guessed axis would buy
+                      a short's block at a premium)
+      `at_or_better`  PNL LANE 1 (2026-09-08; the E12 allowance defect,
+                      hard2/PNL_program.md lane 1): the mark is at or
+                      better than his cost on the book's axis -- long
+                      mark <= vwap, short mark >= vwap, contract space
+                      (_mark_at_or_better) -- at ANY distance: allowed,
+                      flow_base 0. Book 266 (his vwap 0.503-0.549, mark
+                      0.50) was 4.9c UNDER his cost and E12's |mark -
+                      vwap| <= tol refused it as it refuses 4.9c over;
+                      a better mark carries all of his edge and no
+                      premium, and proportionality is the objective.
+                      THIS IS AN ALLOWANCE, NOT A TOLERANCE: it stands
+                      with MIRROR_CATCHUP_TOL_CENTS lowered to 0 (the
+                      env may only LOWER the worse side's tolerance;
+                      it never touches the better side), so it is
+                      judged BEFORE `tol_zero`. Only when the axis was
+                      handed in; the mark and the vwap must both read
+                      (else the unchanged chain below names which)
       `tol_zero`      MIRROR_CATCHUP_TOL_CENTS at or under 0: never
       `vwap_unread`   he bought nothing readable in the block: nothing
-                      to read the premium against, not bought
+                      to read the premium against, not bought. Readable
+                      is a price on the ladder, 0 < vwap < 1 (the
+                      lane's review fold, 2026-09-08, MEDIUM-1): a
+                      finite figure no fill could carry -- 1.5, 55.0, a
+                      negative -- is not his cost, and the better side
+                      above never reads it either (E12's symmetric
+                      tolerance refused it; the allowance must too)
       `mark_unread`   no mark on the ladder (mirror_target has refused
                       `no_mark` before this is reached; belt and braces)
       `within_tol`    |mark - vwap| <= tol cents: allowed, flow_base 0
+                      (with the axis handed in only the WORSE side
+                      reaches here: the 2c floor of the band)
+      `within_pct`    PNL LANE 1 PART (b), OWNER DECISION D1 = YES
+                      (2026-09-08 ~13:3xZ; hard2/PNL_program.md §2):
+                      with the axis handed in the worse side's band is
+                      min(MIRROR_CATCHUP_MAX_CENTS, max(tol,
+                      MIRROR_CATCHUP_PCT x vwap)) cents on the contract
+                      price on the axis (_catchup_band_cents: 10% of
+                      his cost, floor 2c, cap 5c -- a 0.50 cost gets
+                      5c, a 0.80 cost 5c not 8c, a 0.20 cost the 2c
+                      floor); a mark past the floor but within the
+                      band is admitted, allowed, flow_base 0, and named
+                      here (within_tol stays for the floor). Both knobs
+                      capped_env: the env may only LOWER the band
+                      (MIRROR_CATCHUP_PCT 0 = the floor alone,
+                      MIRROR_CATCHUP_MAX_CENTS 0 = no worse side);
+                      MIRROR_CATCHUP_TOL_CENTS at 0 is still `tol_zero`
+                      ahead of the band -- "never catch up" closes the
+                      band too -- and lowered under its 2c default it
+                      IS the band (the fold, MEDIUM-2: TOL 1 admits 1c
+                      on every cost; the env may only lower). The
+                      row's `tol` stays the floor knob; the band is
+                      min(5, max(tol, 10 x vwap)) of the row's `vwap`
       `flow_only`     outside it: the block is never bought
 
-    Pure and side-effect free; the tolerance is read at call time."""
+    Without `short` (E12's five-argument call) the verdict is E12's as
+    pinned: the symmetric tolerance, no allowance, the flat 2c and no
+    band -- never wider. Pure and side-effect free; the tolerance and
+    the band's knobs are read at call time."""
     tol = _num(MIRROR_CATCHUP_TOL_CENTS)
     tol = 0.0 if tol is None or tol < 0 else tol
     b, n, m, v = _num(block), _num(net), _num(mark), _num(vwap)
+    on_ladder = m is not None and 0.01 <= m <= 0.99
+    # his cost must be a price a fill could carry (fold, MEDIUM-1): off the
+    # ladder it is `vwap_unread` on both sides, never a cost to be better than
+    v_ok = v is not None and 0.0 < v < 1.0
     out: dict[str, Any] = {"vwap": v, "mark": m, "tol": tol, "allowed": False,
                            "flow_base": b, "why": None}
     if b is None:
@@ -591,17 +714,29 @@ def open_catchup(net: Any, mark: Any, ratio: Any, block: Any, vwap: Any) -> dict
     if rt is not None and abs(rt - 1.0) < 1e-9:
         out.update(allowed=True, flow_base=0.0, why="small_bet")
         return out
+    if short is not _AXIS_NOT_GIVEN:
+        if not isinstance(short, bool):
+            out["why"] = "axis_unread"
+            return out
+        if on_ladder and v_ok and _mark_at_or_better(m, v, short):
+            out.update(allowed=True, flow_base=0.0, why="at_or_better")
+            return out
     if tol <= 0.0:
         out["why"] = "tol_zero"
         return out
-    if v is None:
+    if not v_ok:
         out["why"] = "vwap_unread"
         return out
     if m is None or not (0.01 <= m <= 0.99):
         out["why"] = "mark_unread"
         return out
-    if abs(m - v) <= tol / 100.0 + 1e-9:
-        out.update(allowed=True, flow_base=0.0, why="within_tol")
+    # the band widens the floor only with the axis known (D1): the
+    # five-argument call is judged on the flat tolerance, as E12 pinned
+    band = _catchup_band_cents(tol, v) if short is not _AXIS_NOT_GIVEN else tol
+    d = abs(m - v)
+    if d <= band / 100.0 + 1e-9:
+        why = "within_tol" if d <= tol / 100.0 + 1e-9 else "within_pct"
+        out.update(allowed=True, flow_base=0.0, why=why)
         return out
     out["why"] = "flow_only"
     return out
@@ -2373,7 +2508,7 @@ __all__ = [
     "is_short", "wire_side", "leg_action", "sign_flip",
     "MIRROR_NET_CAP_FLOOR_USD", "MIRROR_RATIO", "MIRROR_CLIP_USD",
     "MIRROR_SMALL_BET_USD", "open_ratio", "step_ratio", "MIRROR_MIN_ORDER_USD",
-    "MIRROR_CATCHUP_TOL_CENTS", "open_catchup",
+    "MIRROR_CATCHUP_TOL_CENTS", "MIRROR_CATCHUP_PCT", "MIRROR_CATCHUP_MAX_CENTS", "open_catchup",
     "MIRROR_NET_CAP_USD", "MIRROR_MAX_LIVE_BOOKS", "MIRROR_MAX_BOOKS_PER_DAY",
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
     "MIRROR_BOOK_CONCURRENCY", "MIRROR_VENUE_CALLS_PER_TICK",
