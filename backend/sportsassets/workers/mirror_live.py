@@ -928,6 +928,15 @@ CENSUS_KEYS: tuple[str, ...] = (
     # Before E19's `drift_smaller_open` (keys[-13]) and
     # `registered_no_increase` (keys[-12]), whose places from the end hold
     "exit_take_rested",
+    # E14 (2026-09-08; FILL program lane 2): an ENTRY's one IOC sent at
+    # the band cent -- the ask above his cent but at or under
+    # rules.band_cent(his) at first sight on a long book (`take_in_band`;
+    # the re-read's own names `ask_moved` / `ioc_reread_capped` /
+    # `ioc_quote_unread` say when it was withheld, `rest_placed` the rest
+    # that follows). Before `registered_no_increase` (keys[-12]) and E19's
+    # `drift_smaller_open` (keys[-13]) by the convention E13 / E17 / E19 /
+    # E20 / E14b followed (keys[-14]; the tail pins moved by one)
+    "take_in_band",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -8805,7 +8814,18 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
     rests the remainder post-only at the same wire; a rest already
     standing is cancelled and taken the tick the ask arrives, with no
     age condition. Under a LENGTHENED wait (env) the rest-first take of
-    E2 is back exactly as it was, arm bounds included."""
+    E2 is back exactly as it was, arm bounds included.
+
+    THE ENTRY TAKES INSIDE THE BAND (E14, 2026-09-08, FILL lane 2; owner
+    decision D1 (a)): on a LONG book with NO order of ours standing, an
+    add whose ask is above his cent but at or under rules.band_cent(his)
+    -- his unrounded price plus rules.MIRROR_TAKE_BAND (0.01, env may
+    only lower it; 0 = off), floored to the cent -- sends ONE IOC at that
+    cent (decision 'take_in_band', the plan's `take_band` read by
+    _take_band, census `take_in_band`), re-read at the send like every
+    IOC, the remainder resting at his cent as today. The at-level take
+    above fires first and unchanged; the keep branch is never converted
+    by the band; a short's add and every reduce never read it."""
     w = r.whale
     short = _book_short(book)
     intent = _book_intent(book)
@@ -9118,7 +9138,15 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         # it (_entry_take); a long exit with no price of his takes at
         # its wire as before. Under a lengthened wait this is E2's armed
         # take: the arm's age is the wait (take_allowed reads it beside
-        # a rest age of 0), the price rule is the same
+        # a rest age of 0), the price rule is the same.
+        # E14 (FILL lane 2): a LONG book's add reads the entry band here
+        # too -- AFTER the arm's clearing above, so the wait it honours
+        # is the one the at-level take honours -- and stamps the plan's
+        # `take_band` whatever the verdict; the band cent comes back only
+        # when its IOC is to go (_take_band)
+        band = None
+        if p.side == BUY and not short and rules.leg_action(book.get("intent"), p.side) == "add":
+            band = _take_band(t, book, r, his_px, plan)
         if rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, take_lvl, p.side):
             if rules.leg_action(book.get("intent"), p.side) == "add":
                 qty = _room_qty(t, p.qty, wire, intent)
@@ -9134,6 +9162,33 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                     return await _place(t, book, r, "take", p.side, wire, qty, his_px, p, plan, tif="IOC")
             # a short REDUCE take is a SELL_SHORT IOC -- unproven before
             # rung S4 (brief G2): the reduce path below decides
+        # THE TAKE INSIDE THE BAND (E14, 2026-09-08, FILL program lane 2;
+        # owner decision D1 (a)): the at-level take did not fire and the
+        # ask sits ABOVE his cent but at or under rules.band_cent(his) --
+        # his unrounded price plus rules.MIRROR_TAKE_BAND (0.01, env may
+        # only lower it; 0 = off), floored to the cent -- on a LONG book's
+        # add with NO order of ours standing (this path alone: the keep
+        # branch above is never converted by the band, a short's add
+        # never band-takes, a reduce never reads it). ONE IOC limited at
+        # the band cent, sized on the room AT THAT CENT, re-read at the
+        # send as every IOC is (E18: the ask above the band cent at the
+        # re-read withholds it, `ask_moved`, and the whole quantity rests
+        # at his cent), the unfilled remainder resting at the wire --
+        # his cent -- exactly as the at-level take's does (_entry_take).
+        # The row: decision 'take_in_band' (the word 059 reserved), wire
+        # the band cent, his_level his price. Counted here as the
+        # at-level take is (`take_in_band` beside `take_at_his_level`):
+        # the decision, whether or not the re-read lets the IOC out.
+        # An uncounted band take is not allowed: with the 059 columns
+        # absent this tick _take_band reads `uncounted` and the rest goes
+        if band is not None:
+            qty = _room_qty(t, p.qty, band, intent)
+            if qty < 1:
+                _mirror_stop("over_room", w)
+                return "over_room"
+            _mirror_stop("take_in_band", w)
+            return await _entry_take(t, book, r, p, band, wire, qty, his_px, plan, first=True,
+                                     in_band=True)
     if rules.leg_action(book.get("intent"), p.side) == "add":
         qty = _room_qty(t, p.qty, wire, intent)
         if qty < 1:
@@ -9809,8 +9864,52 @@ async def _ioc_reread(t: _Tick, book: dict, r: _Reading, side: str, wire: float,
     return "ask_moved"
 
 
+def _take_band(t: _Tick, book: dict, r: _Reading, his_px: float | None, plan: dict) -> float | None:
+    """THE ENTRY BAND'S READ (E14, FILL lane 2), made on every first-sight
+    entry plan of a long book and stamped on the plan as `take_band`
+    {his_cent, band, band_cent, bid, ask, verdict}. Returns the band
+    cent ONLY under the verdict `in_band` -- the one IOC at that cent is
+    to go -- and None under every other, which is the rest as today:
+    `unread` (his cent unreadable: rules.buy_wire(his) None; or the
+    tick's ask missing or off the ladder -- a non-quote is never in
+    band), `at_level` (the ask at or under his cent: today's take rule
+    governs, whether it fires now or waits), `off` (rules.band_cent None:
+    MIRROR_TAKE_BAND at 0, under a cent, or no cent on the ladder),
+    `uncounted` (the 059 columns absent this tick, `t.order_cols` not
+    True: an uncounted band take is not allowed, the rest goes by the
+    050 INSERT), `out` (the ask above the band cent), `waiting` (the ask
+    inside the band but rules.take_allowed not yet -- a LENGTHENED
+    MIRROR_TAKE_AFTER_S makes the band rest-first exactly as it makes
+    the at-level take; at the default wait of 0 never read). The band
+    is judged here on the tick's quote and again at the send on the
+    re-read (_ioc_reread at the band cent); both must hold."""
+    his_cent = rules.buy_wire(his_px)
+    bc = rules.band_cent(his_px)
+    tb: dict = {"his_cent": his_cent, "band": _num(rules.MIRROR_TAKE_BAND), "band_cent": bc,
+                "bid": r.bid, "ask": r.ask}
+    plan["take_band"] = tb
+    ask = _num(r.ask)
+    if his_cent is None or ask is None or not (0.01 <= ask <= 0.99):
+        tb["verdict"] = "unread"
+    elif rules.at_or_through(BUY, r.bid, r.ask, his_cent):
+        tb["verdict"] = "at_level"
+    elif bc is None:
+        tb["verdict"] = "off"
+    elif t.order_cols is not True:
+        tb["verdict"] = "uncounted"
+    elif not rules.take_in_band(r.bid, r.ask, his_cent, bc):
+        tb["verdict"] = "out"
+    elif not rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, bc, BUY):
+        tb["verdict"] = "waiting"
+    else:
+        tb["verdict"] = "in_band"
+        return bc
+    return None
+
+
 async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: float, rest_px: float,
-                      qty: int, his_px: float | None, plan: dict, first: bool) -> str:
+                      qty: int, his_px: float | None, plan: dict, first: bool,
+                      in_band: bool = False) -> str:
     """An ENTRY's take (E4 addendum): ONE IOC at HIS cent (`ioc_px`,
     rules.buy_wire(his): the ask at or under it is at or through his
     level, and the IOC can never fill above him) for `qty`, then the
@@ -9821,7 +9920,11 @@ async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: flo
     fill is given back before the rest is sized (_place_reserved), so
     the plan spends its room once. A take the venue refused, a tick
     that tripped or abandoned, a book frozen by the take's own booking:
-    nothing more this tick.
+    nothing more this tick. `in_band` (E14, FILL lane 2): the IOC is
+    the band's, `ioc_px` the band cent (rules.band_cent(his): at most
+    MIRROR_TAKE_BAND over his unrounded price) and its row's decision
+    'take_in_band'; the remainder and the withheld quantity rest at
+    `rest_px` -- his cent -- with decision 'rest', exactly as below.
 
     THE RE-QUOTE CREDIT (E2 review round 3, LOW-6) MEETS THE TAKE-FIRST:
     a TTL or replace cancel of this book this tick covers ONE rest
@@ -9832,10 +9935,16 @@ async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: flo
     on the credit instead: the cohort's book is not left bare for the
     tick with its rest cancelled, which is what the credit is for."""
     res = await _place(t, book, r, "take", p.side, ioc_px, qty, his_px, p, plan, tif="IOC",
-                       take_first=first)
+                       take_first=first, in_band=in_band)
+    # E14 (the review's LOW-1): the band IOC was sized on the room at the
+    # BAND cent; its rest is sized on the room at HIS cent by
+    # _place_reserved's own re-read (every non-take add is re-scaled
+    # there), so the plan's quantity goes in and today's rest comes out
+    # -- never more shares than the rest at his cent would have been
+    rest_qty = int(p.qty) if in_band else qty
     if (res == "ops_capped" and book["id"] in t.requote_credit
             and not (t.cancel_all or t.abandoned) and book.get("state") != "frozen"):
-        rest = await _place(t, book, r, "increase", p.side, rest_px, qty, his_px, p, plan)
+        rest = await _place(t, book, r, "increase", p.side, rest_px, rest_qty, his_px, p, plan)
         return rest if rest == "rest_placed" else res
     if (res in IOC_SKIPPED and not (t.cancel_all or t.abandoned)
             and book.get("state") != "frozen" and book["id"] not in t.nonterminal):
@@ -9845,11 +9954,11 @@ async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: flo
         # `ioc_quote_unread`). Nothing executed, so the whole plannable
         # quantity rests post-only at the wire as the remainder would
         # have -- the rest is placed as today, the IOC alone is withheld
-        rest = await _place(t, book, r, "increase", p.side, rest_px, qty, his_px, p, plan)
+        rest = await _place(t, book, r, "increase", p.side, rest_px, rest_qty, his_px, p, plan)
         return rest if rest == "rest_placed" else res
     if res != "take" or t.cancel_all or t.abandoned or book.get("state") == "frozen":
         return res
-    left = int(math.floor(float(qty) - float(_num(plan.get("take_filled")) or 0.0) + 1e-9))
+    left = int(math.floor(float(rest_qty) - float(_num(plan.get("take_filled")) or 0.0) + 1e-9))
     if left < 1 or book["id"] in t.nonterminal:
         return res
     rest = await _place(t, book, r, "increase", p.side, rest_px, left, his_px, p, plan)
@@ -10096,7 +10205,7 @@ async def _record_orphan(pool, row_id: int, fut) -> None:
 
 async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: float,
                  qty: int, his_px: float | None, p: mi.Plan | None, plan: dict,
-                 tif: str = "GTC", take_first: bool = False) -> str:
+                 tif: str = "GTC", take_first: bool = False, in_band: bool = False) -> str:
     """Step L (and T when tif is IOC): INSERT the 'placing' row with
     the pre-placement snapshot BEFORE the venue call, place, persist
     the id IMMEDIATELY, book what executed on create.
@@ -10108,7 +10217,9 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
     released on every refusal before the write, so `ops` still counts
     writes alone. `take_first` (E4 addendum) is an entry's IOC with no
     rest behind it: sized on the room as it stands like a rest, and
-    counted `take_first`."""
+    counted `take_first`. `in_band` (E14, FILL lane 2) is the entry
+    band's IOC: its row's decision reads 'take_in_band'
+    (rules.order_decision); nothing else about the placement differs."""
     w = r.whale
     if t.cancel_all:
         # a tick that tripped mid-way (an overfill booked by the cancel
@@ -10140,14 +10251,15 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
         return "ops_capped"
     try:
         return await _place_reserved(t, slot, book, r, kind, side, wire, qty, his_px, p, plan, tif,
-                                     take_first)
+                                     take_first, in_band)
     finally:
         slot.release()
 
 
 async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind: str, side: str,
                           wire: float, qty: int, his_px: float | None, p: mi.Plan | None,
-                          plan: dict, tif: str, take_first: bool = False) -> str:
+                          plan: dict, tif: str, take_first: bool = False,
+                          in_band: bool = False) -> str:
     global _POST_ONLY_OK
     w, slug = r.whale, r.slug
     # THE WIRE-SIDE MAP (P2 rung S0, brief 3.3): the book's intent and
@@ -10263,8 +10375,11 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
             int(_num(plan.get("target")) or 0), int(book.get("ledger_net") or 0), r.bid, r.ask,
             reason_col]
     # E18 (migration 059): the decision that places the row and the fill
-    # of his it answers, beside the re-read's ask (NULL on a rest)
-    decision = rules.order_decision(action, is_take, wire_intent == "ORDER_INTENT_SELL_SHORT")
+    # of his it answers, beside the re-read's ask (NULL on a rest).
+    # E14: the entry band's IOC writes the word 059 reserved,
+    # 'take_in_band' (an add's IOC with `in_band`; a cover stays 'cover')
+    decision = rules.order_decision(action, is_take, wire_intent == "ORDER_INTENT_SELL_SHORT",
+                                    in_band=bool(in_band) and is_take)
     plan["decision"] = decision
     try:
         if t.order_cols is True:

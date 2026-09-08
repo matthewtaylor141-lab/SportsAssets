@@ -205,7 +205,9 @@ def test_e18_the_floor_constant_only_lengthens_from_the_environment(monkeypatch)
     assert rules.order_decision("add", False, False) == "rest" and rules.order_decision("add", True, False) == "take"
     assert rules.order_decision("reduce", False, False) == "exit_rest" and rules.order_decision("reduce", True, False) == "take"
     assert rules.order_decision("reduce", False, True) == rules.order_decision("reduce", True, True) == "cover"
-    assert "take_in_band" not in inspect.getsource(rules.order_decision).split('"""')[2]
+    # E14 (2026-09-08, FILL lane 2) writes the word 059 reserved, at ONE
+    # site in the body (re-pinned from "never written": the rule changed)
+    assert inspect.getsource(rules.order_decision).split('"""')[2].count('"take_in_band"') == 1
 
 
 # ---------------------------------------------------------- the worker

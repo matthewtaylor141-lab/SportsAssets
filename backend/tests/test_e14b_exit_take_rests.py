@@ -368,7 +368,9 @@ def test_e14b_the_short_cover_emits_none_of_the_new_names_and_the_flatten_send_i
 def test_e14b_the_census_name_sits_before_drift_smaller_open_and_the_tail_pins_hold():
     keys = ml.CENSUS_KEYS
     assert keys.count("exit_take_rested") == 1 and len(set(keys)) == len(keys)
-    assert keys[-14] == "exit_take_rested" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    # E14 (FILL lane 2) landed after this lane and placed `take_in_band` nearer the key (-14 -> -15)
+    assert keys[-15] == "exit_take_rested" and keys[-14] == "take_in_band"
+    assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert ml._new_stats()["census"]["exit_take_rested"] == 0
     # no knob of the lane's own: no env read added to the worker or the rules

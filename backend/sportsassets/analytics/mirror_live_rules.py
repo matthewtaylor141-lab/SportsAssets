@@ -938,6 +938,35 @@ MIRROR_TAKE_AFTER_S = min_wait_env("MIRROR_TAKE_AFTER_S", 0.0)
 # to settlement. Under this rule it takes at 0.45+ while the bid is
 # there and, once the market has fallen, HOLDS at his cent.
 MIRROR_EXIT_TOL = capped_env("MIRROR_EXIT_TOL", 0.01, floor=0.0)
+# THE ENTRY'S TAKE BAND (E14, 2026-09-08; FILL program lane 2; owner
+# order ~17:45Z: "We are being filled on his losers and missing his
+# winners ... E14 (take at once when the ask is inside the band) is the
+# lane for it"; decision D1 (a): one cent, live from the deploy, with
+# the 24 h gate). On a LONG book, at FIRST SIGHT only (no order of ours
+# standing: the open, the tick after a re-quote cancel, the fast tick's
+# wake), an entry whose ask is ABOVE his cent but at or under
+# band_cent(his) = buy_wire(his price + this band) -- floor-to-cent of
+# his unrounded price plus the band, so no fill is ever more than the
+# band over what HE paid -- sends ONE IOC limited at that cent
+# (decision 'take_in_band', the word migration 059 reserved), re-read
+# at the send as every IOC is (E18), the unfilled remainder resting at
+# his cent as today. An ask at or under his cent is today's take
+# ('take', unchanged); above the band cent the rest as today ('rest').
+# A rest already standing is NEVER converted by this band (the keep
+# branch is E18's queue position, docs section 36), a short book's add
+# is never band-taken, a reduce never reads it. The 24 h rows before
+# this (hourly_1737 1746-1747): 1,922 entry rests, 42.2% placed with
+# the ask inside 1c of his cent and 16.0% at or through it, so the
+# exactly-1c tranche is (42.2 - 16.0)% x 1,827 = 479 placements --
+# the population this converts and nothing else; 557 IOC takes, 65.4%
+# filled. A CONTRACT PRICE, capped_env floor 0.0: the environment may
+# only LOWER it (0 = the band off, today's behaviour byte for byte);
+# the default IS the ceiling, so a wider band is a code change with a
+# review, never a shell's. Not the brief's max(2c, 10% of his cent)
+# capped 5c: FILL_R5's table turns negative at 4c (-276) and 5c (-440).
+# Read at call time by band_cent (tests and the operator's 0 apply
+# without a restart of the rule).
+MIRROR_TAKE_BAND = capped_env("MIRROR_TAKE_BAND", 0.01, floor=0.0)
 # THE FLATTEN'S SLIPPAGE (S4, 2026-09-07): the one bound an UNPRICED
 # flatten IOC may slip past the touch -- the long flatten's co-held IOC
 # at le.sell_limit_price (the bid less 2c, floored at 0.01) and, mirrored
@@ -1498,6 +1527,33 @@ def buy_wire(px: float | None) -> float | None:
     return w if w >= 0.01 else None
 
 
+def band_cent(his_px: float | None, band: float | None = None) -> float | None:
+    """THE ENTRY BAND'S CENT (E14, FILL lane 2): buy_wire(his price +
+    band) -- floor-to-cent of his UNROUNDED price plus the band, so the
+    IOC limited here can never fill more than the band over what he
+    paid (his 0.471 + 0.01 = 0.481 -> 0.48; his 0.479 -> 0.489 -> 0.48:
+    the same cent, at most 0.9c over him). `band` None reads
+    MIRROR_TAKE_BAND at call time. None -- no band, the rest as today --
+    when his price is not a price in (0, 1) or a bool, when the band is
+    unreadable, negative or zero, when the sum has no cent on the
+    ladder, and when the cent is not STRICTLY above his own cent
+    (buy_wire(his)): a band under a cent is no band (his 0.472 + 0.005
+    = 0.477 floors to his own 0.47), and at 0 the lane is off."""
+    h = _num(his_px)
+    if h is None or not (0.0 < h < 1.0):
+        return None
+    b = _num(MIRROR_TAKE_BAND if band is None else band)
+    if b is None or b <= 0.0:
+        return None
+    base = buy_wire(h)
+    if base is None:
+        return None
+    w = buy_wire(h + b)
+    if w is None or w <= base + 1e-9:
+        return None
+    return w
+
+
 def sell_wire(px: float | None) -> float | None:
     """The cent a SELL rests at: a price CEILED to the tick, capped at
     the venue's top tick 0.99. Ceiled so the sale is never under the
@@ -1882,16 +1938,19 @@ def replace_decision(detail: dict | None) -> str:
     return _REPLACE_DECISIONS.get(str(cause), "replace_unread")
 
 
-def order_decision(action: str | None, is_take: bool, short_cover: bool) -> str:
+def order_decision(action: str | None, is_take: bool, short_cover: bool,
+                   in_band: bool = False) -> str:
     """The `decision` an order row records at its INSERT (E18; migration
     059): 'cover' for a short book's buy-back (its rest or its IOC),
-    'take' for any other IOC, 'exit_rest' for a rest that shrinks the
-    leg, 'rest' for an entry's. 'take_in_band' is reserved for the
-    entry band (lane 8) and is never written here."""
+    'take_in_band' for an ENTRY's IOC sent at the band cent (E14, FILL
+    lane 2: `in_band` True on an add's IOC -- the word 059 reserved,
+    written here and nowhere else; a cover wins over it, a reduce's IOC
+    is 'take' whatever the caller says), 'take' for any other IOC,
+    'exit_rest' for a rest that shrinks the leg, 'rest' for an entry's."""
     if short_cover:
         return "cover"
     if is_take:
-        return "take"
+        return "take_in_band" if (in_band is True and action == "add") else "take"
     return "exit_rest" if action == "reduce" else "rest"
 
 
@@ -1931,6 +1990,23 @@ def at_or_through(side: str, bid: float | None, ask: float | None,
         b = _num(bid)
         return b is not None and 0.01 <= b <= 0.99 and b >= w - 1e-9
     return False
+
+
+def take_in_band(bid: float | None, ask: float | None, his_cent: float | None,
+                 band_cent: float | None) -> bool:
+    """Is the ask STRICTLY above his cent and at or under the band cent
+    (E14, FILL lane 2)? `not at_or_through(BUY, his_cent) and
+    at_or_through(BUY, band_cent)`: an ask at or under his cent is
+    today's take, which fires first and is never this; an ask above
+    the band cent is the rest. Both cents must be readable numbers on
+    the ladder with the band cent above his (else False: no band on a
+    cent nobody read), and at_or_through's own quote rules hold -- a
+    missing, unreadable or impossible ask is never in band. The bid is
+    not read."""
+    hc, bc = _num(his_cent), _num(band_cent)
+    if hc is None or bc is None or not (0.01 <= hc <= 0.99) or not (bc > hc + 1e-9):
+        return False
+    return (not at_or_through(BUY, bid, ask, hc)) and at_or_through(BUY, bid, ask, bc)
 
 
 def take_allowed(rest_age_s: float | None, take_armed_at: float | None, now: float,
@@ -2790,7 +2866,8 @@ __all__ = [
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
     "MIRROR_BOOK_CONCURRENCY", "MIRROR_VENUE_CALLS_PER_TICK",
     "MIRROR_MAX_REPLACES_PER_HOUR", "MIRROR_REST_TTL_S", "MIRROR_TAKE_AFTER_S",
-    "MIRROR_EXIT_TOL", "exit_terms", "MIRROR_FLATTEN_SLIP",
+    "MIRROR_EXIT_TOL", "exit_terms", "MIRROR_TAKE_BAND", "band_cent", "take_in_band",
+    "MIRROR_FLATTEN_SLIP",
     "MIRROR_FLATTEN_REST_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAMILIES",
     "FLAT_TOL_SHARES", "SELL_DUST_SHARES",

@@ -571,19 +571,24 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     keys = ml.CENSUS_KEYS
     assert keys.count("drift_smaller_open") == 1
     assert keys[keys.index("drift_smaller_open") + 1] == "registered_no_increase"
-    # E14b (FILL lane 1) placed `exit_take_rested` immediately before this key,
-    # E20 `wrong_sign_hold` before that (the convention every lane follows)
-    assert keys[keys.index("drift_smaller_open") - 1] == "exit_take_rested"
-    assert keys[keys.index("drift_smaller_open") - 2] == "wrong_sign_hold"
-    assert keys[keys.index("drift_smaller_open") - 3] == "adopt_prior_venue_settled"
+    # E14 (FILL lane 2, 2026-09-08) placed `take_in_band` immediately before
+    # this key; E14b (FILL lane 1) `exit_take_rested` and E20
+    # `wrong_sign_hold` before that (the convention every lane follows;
+    # E17's last name is four before)
+    assert keys[keys.index("drift_smaller_open") - 1] == "take_in_band"
+    assert keys[keys.index("drift_smaller_open") - 2] == "exit_take_rested"
+    assert keys[keys.index("drift_smaller_open") - 3] == "wrong_sign_hold"
+    assert keys[keys.index("drift_smaller_open") - 4] == "adopt_prior_venue_settled"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     src = inspect.getsource(rules)
     # the knob count of the tip (lane 1's MIRROR_CATCHUP_PCT and
     # MIRROR_CATCHUP_MAX_CENTS make 20 rails; lane 6's MIRROR_REST_MIN_LIFE_S
     # the fourth wait; the lane's own base read 18 and 3): E19 adds none;
     # FILL lane 0a (2026-09-08) made the candidate's side band the 21st rail
-    # (LIVE_SIDE_PRICE_BAND_MAX, the default 0.15 as its ceiling)
-    assert src.count("capped_env(") == 21 and src.count("min_wait_env(") == 4
+    # (LIVE_SIDE_PRICE_BAND_MAX, the default 0.15 as its ceiling); E14
+    # (FILL lane 2, 2026-09-08) adds ONE downward-only rail,
+    # MIRROR_TAKE_BAND (21 -> 22), pinned by name in test_e14_take_band
+    assert src.count("capped_env(") == 22 and src.count("min_wait_env(") == 4
     assert "MIRROR_DRIFT_MAX = capped_env" in src and "E19" in inspect.getsource(rules.admission)
     for name in ("MIRROR_SMALLER", "SMALLER_READING", "DRIFT_SMALLER"):
         assert name not in src, "no knob"

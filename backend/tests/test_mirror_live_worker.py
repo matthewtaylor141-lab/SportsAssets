@@ -1145,6 +1145,16 @@ def _armed(monkeypatch):
     monkeypatch.setattr(rules, "MIRROR_SHORT_MAX_SHARES", 1)
     monkeypatch.setattr(rules, "MIRROR_RATIO", 1.0)
     monkeypatch.setattr(rules, "MIRROR_DAY_USD", 1250.0)
+    # E14 (2026-09-08, FILL lane 2): the entry band OFF in this fixture
+    # world -- its default quote (his 0.31, bid 0.30 / ask 0.32) sits
+    # exactly one cent above his cent, so at the code default of 0.01
+    # every first-sight entry here would band-take before it rests and
+    # 58 pins of E4's rest-first world would read the IOC first. At 0
+    # the band is today's behaviour byte for byte (rules.band_cent None,
+    # verdict `off`); tests/test_e14_take_band.py switches it ON (0.01,
+    # the code default, pinned there against the environment) for every
+    # test of the band, the convention this paragraph names
+    monkeypatch.setattr(rules, "MIRROR_TAKE_BAND", 0.0)
     monkeypatch.setitem(edge_gate._cache, "err", None)     # conftest seeds the rest
     monkeypatch.setattr(ml, "_POST_ONLY_OK", True)
     monkeypatch.setattr(ml, "_backoff_until", 0.0)
@@ -4854,8 +4864,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
     # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89;
-    # E20 by its one and E14b (FILL lane 1) by its one: -89 -> -91)
-    assert keys[-91:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # E20 by its one, E14b (FILL lane 1) by its one and E14 (FILL lane 2) by its one `take_in_band`: -89 -> -92)
+    assert keys[-92:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4932,6 +4942,11 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E14b (FILL lane 1): the same-tick rest of a long exit IOC's
                           # withheld or unfilled quantity -- before E19's key (keys[-13])
                           "exit_take_rested",
+                          # E14 (FILL lane 2): an entry's one IOC sent at the band cent
+                          # (the ask a cent above his, at first sight on a long book) --
+                          # before E19's name and `registered_no_increase` (keys[-12]),
+                          # after E20's and E14b's, which landed first (keys[-14])
+                          "take_in_band",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -4948,7 +4963,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-92] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one and E20's one and E14b's one before the tail
+    assert keys[-93] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one and E14's one before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -12949,6 +12964,16 @@ def test_e19_the_smaller_reading_open_name_is_emitted_here_too(monkeypatch):
     from tests import test_e19_smaller_reading as e19
     e19.test_e19_martinez_shape_a_fresh_read_past_the_max_of_one_sign_opens_on_the_smaller_reading(monkeypatch)
     assert "drift_smaller_open" in SEEN
+
+
+def test_e14_the_take_in_band_name_is_emitted_here_too(monkeypatch):
+    """E14's one name (FILL lane 2) is driven in tests/test_e14_take_band.py;
+    run here as well so the coverage read below sees it when this file
+    runs alone (E13's convention). The band is ON for it (the fixture
+    world's rail above holds it at 0)."""
+    from tests import test_e14_take_band as e14
+    e14.test_e14_every_name_is_emitted_here(monkeypatch)
+    assert "take_in_band" in SEEN
 def test_l7_event_stale_is_emitted_on_a_dated_candidate_with_no_fill_of_his_in_a_day():
     """L7 (2026-09-08): a candidate whose slug's own date is more than one
     day past with no fill of his in a day is refused `event_stale` --
