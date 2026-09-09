@@ -244,6 +244,13 @@ class _Pool(_ShadowPool):
         self.shadow = []
         self.reaper_touched = 0
         self.cand_refusals = []       # W2 / P2: mirror_candidate_refusals, as written
+        # T2 (FILL lane 4): mirror_fill_answers (migration 060) as written,
+        # keyed (whale, fill_id) with the FIRST row kept (the conflict
+        # clause), the rows per INSERT statement, and the database before
+        # 060 (the guard and the INSERT are UndefinedTableError)
+        self.fill_answers = {}
+        self.fill_writes = []
+        self.no_fill_answers_table = False
         self.raise_on = []
         self.hide_orders = set()
         self.tables_absent = False
@@ -694,6 +701,25 @@ class _Pool(_ShadowPool):
             for r in json.loads(a[0]):
                 self.cand_refusals.append(dict(r))
             return "INSERT 0 %d" % len(json.loads(a[0]))
+        if "ml-fill-answers-guard" in s:
+            # T2 (FILL lane 4): the 060 table probe, absent as Postgres answers it
+            if self.no_fill_answers_table:
+                raise _Undefined('relation "mirror_fill_answers" does not exist')
+            return []
+        if "ml-fill-answers" in s:
+            # T2: the per-fill rows the way json_populate_recordset reads
+            # them, ON CONFLICT (whale, fill_id) DO NOTHING -- the FIRST
+            # row for a key stays; `fill_writes` counts the statements
+            if self.no_fill_answers_table:
+                raise _Undefined('relation "mirror_fill_answers" does not exist')
+            n = 0
+            for r in json.loads(a[0]):
+                k = (r["whale"], r["fill_id"])
+                if k not in self.fill_answers:
+                    self.fill_answers[k] = dict(r)
+                    n += 1
+            self.fill_writes.append(len(json.loads(a[0])))
+            return "INSERT 0 %d" % n
         if "ml-reaper-touched" in s:
             return self.reaper_touched
         if "ml-book-plan" in s:
@@ -1179,6 +1205,13 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_cand_trail", {}, raising=False)   # W2 review: the cursor's trail (the fix)
     monkeypatch.setattr(ml, "_cand_refusal_last", {})  # W2 / P2: the refusal rows' memo
     monkeypatch.setattr(ml, "_cand_write_logged", False)
+    # T2 (FILL lane 4): the per-fill record's memos (the rows a failed
+    # flush kept, the high-water mark per book id -- ids repeat across
+    # this file's pools) and its two once-per-process log latches
+    monkeypatch.setattr(ml, "_fill_pending", {}, raising=False)
+    monkeypatch.setattr(ml, "_fill_hwm", {}, raising=False)
+    monkeypatch.setattr(ml, "_fill_write_logged", False, raising=False)
+    monkeypatch.setattr(ml, "_fill_answers_absent_logged", False, raising=False)
     # E6: the quiet rotation's clock and memos (book ids repeat across
     # this file's pools), and the terminal memos' boot read, already made
     # (test_e6_tick_budget drives the read itself)
@@ -4868,8 +4901,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
     # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89;
     # E20 by its one, E14b (FILL lane 1) by its one and E14 (FILL lane 2) by its one `take_in_band`: -89 -> -92;
-    # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95)
-    assert keys[-95:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95; T2 (FILL lane 4) by its two: -95 -> -97)
+    assert keys[-97:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4956,6 +4989,11 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # order-open split on his reducing fill -- before E19's name and
                           # `registered_no_increase` (keys[-12]), after E14's (keys[-16:-13])
                           "exit_take_in_band", "cover_in_band", "order_open_his_exit",
+                          # T2 (FILL lane 4): the per-fill record's one INSERT failed or
+                          # timed out (the rows kept for the next tick); the 060 table
+                          # absent this tick (nothing queued) -- before E19's name and
+                          # `registered_no_increase` (keys[-12]), after E14's (keys[-15:-13])
+                          "fill_answer_write_failed", "fill_answers_absent",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -4972,7 +5010,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-96] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three before the tail
+    assert keys[-98] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -11908,8 +11946,12 @@ def test_an_expired_book_is_read_once_per_ttl_and_still_closes_on_the_markets_ro
     # of the memo skip's plan is exactly as W1 / R4 wrote it
     seen = b["last_plan"]["his_fills_seen"]
     assert [e["name"] for e in seen] == ["no_mark"] and seen[0]["at"] == NOW
-    assert {k: v for k, v in b["last_plan"].items() if k != "his_fills_seen"} == {
+    # T2 (FILL lane 4): `fills_hwm` rides beside `his_fills_seen` on every
+    # plan write once a flush has succeeded (the first tick's), so it is
+    # dropped from the comparison as the list is
+    assert {k: v for k, v in b["last_plan"].items() if k not in ("his_fills_seen", "fills_hwm")} == {
         "kind": "no_plan", "at": NOW + 30, "venue_terminal": EXPIRED_BOOK}
+    assert b["last_plan"]["fills_hwm"] == NOW - 3000, "the record's hwm: the one fill's stamp, written by the first tick"
     assert not _places(v) and not _cancels(v) and not st2["abandoned"]
     # the TTL runs: the book is read again, and memoised again
     v.calls.clear()
@@ -12443,9 +12485,13 @@ def test_w2_a_refusal_write_failure_never_blocks_the_tick_and_is_logged_once(cap
     assert [r["refusal"] for r in p.cand_refusals] == ["short_side_refused"]
     assert ml._cand_refusal_last[("rn1", CID)] == ("short_side_refused", NOW + 20)
     # the write is the walk's last step before the instruments: one statement, after every whale
+    # (T2 / FILL lane 4, 2026-09-08: the per-fill record's one write sits between it and the
+    # instruments, the same tail on both tick paths)
     src = inspect.getsource(ml._tick)
-    assert src.rstrip().endswith("await _flush_candidate_refusals(t)\n    await _instruments(t)")
-    assert src.count("_flush_candidate_refusals(") == 1
+    assert src.rstrip().endswith("await _flush_candidate_refusals(t)\n"
+                                 "    await _flush_fill_answers(t)            # T2: the fills the tick named, one write\n"
+                                 "    await _instruments(t)")
+    assert src.count("_flush_candidate_refusals(") == 1 and src.count("_flush_fill_answers(") == 1
 
 
 def test_w2_review_a_hung_refusal_write_is_bounded_and_counted_as_a_failed_write(monkeypatch):
@@ -12996,6 +13042,14 @@ def test_fill_x1_the_exit_band_names_are_emitted_here_too(monkeypatch):
     x1.test_x1_every_name_is_emitted_here(monkeypatch)
     for k in ("exit_take_in_band", "cover_in_band", "order_open_his_exit"):
         assert k in SEEN, k
+def test_t2_the_fill_answers_names_are_emitted_here_too(caplog):
+    """T2's two names (FILL lane 4) are driven in tests/test_fill_t2_record.py;
+    run here as well so the coverage read below sees them when this file
+    runs alone (E13's convention)."""
+    from tests import test_fill_t2_record as t2
+    t2.test_t2_every_name_is_emitted_here(caplog)
+    for name in ("fill_answer_write_failed", "fill_answers_absent"):
+        assert name in SEEN, name
 def test_l7_event_stale_is_emitted_on_a_dated_candidate_with_no_fill_of_his_in_a_day():
     """L7 (2026-09-08): a candidate whose slug's own date is more than one
     day past with no fill of his in a day is refused `event_stale` --

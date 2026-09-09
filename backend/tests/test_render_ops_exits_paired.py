@@ -244,7 +244,7 @@ def test_the_exits_paired_help_line_is_the_case_labels_after_nf_venue_with_hourl
     assert len(names) == len(set(names))
     assert names.index("exits-paired") == names.index("nf-venue") + 1
     # FILL lane 0b's three read presets sit between exits-paired and hourly (was "nf-venue|exits-paired|hourly")
-    assert names[-1] == "hourly" and "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|hourly (got" in line
+    assert names[-1] == "hourly" and "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
     # the hourly line joins the five it always joined: this preset is not one of them
     hourly_sql, _ = _preset(text, "hourly")
     assert "exits-paired" not in hourly_sql and STUCK not in hourly_sql and "his_exit_from" not in hourly_sql

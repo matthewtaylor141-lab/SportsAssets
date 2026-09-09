@@ -103,7 +103,7 @@ def test_take_band_sits_after_exits_paired_and_rides_the_hourly_after_fills_miss
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)
     assert names == labels and len(names) == len(set(names))
     assert names.index("take-band") == names.index("exits-paired") + 1
-    assert names[-1] == "hourly" and "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|hourly (got" in line
+    assert names[-1] == "hourly" and "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
     h, _ = _preset(text, "hourly")
     sql, _ = _preset(text, "take-band")
     markers = re.findall(r"SELECT '== ([a-z-]+)' AS section;", h)

@@ -150,10 +150,13 @@ def test_fills_missed_reads_the_state_off_the_book_windows_and_the_decision_off_
     assert "o.ostate = 'cancelled' AND COALESCE(o.reason, '') LIKE '%replace%' THEN 'missed_replace'" in chain
     assert "o.state = 'cancelled'" not in chain and chain.count("ord.state") == 1
     assert "AS lag_s, " + BAND_C + ", CASE WHEN m.resolved_prices" in chain
-    # the class CASE is untouched in its words
+    # the class CASE keeps its words; FILL lane 4 (2026-09-08) reads the per-fill record's name
+    # first (`'refused:' || COALESCE(o.e->>'name', 'unnamed')` -> `COALESCE(o.fa_name, o.e->>'name', 'unnamed')`)
+    # and `unseen` only when neither the table nor the plan's list holds the fill
     for word in ("'filled'", "'partial'", "'missed_expired_ioc'", "'missed_replace'", "'missed_open'", "'unseen'",
-                 "'order_row_unread'", "'refused:' || COALESCE(o.e->>'name', 'unnamed')"):
+                 "'order_row_unread'", "'refused:' || COALESCE(o.fa_name, o.e->>'name', 'unnamed')"):
         assert word in chain, word
+    assert "WHEN o.e IS NULL AND o.fa_name IS NULL THEN 'unseen'" in chain
 
 
 def test_fills_missed_state_and_decision_statements_carry_the_class_rows_measures():

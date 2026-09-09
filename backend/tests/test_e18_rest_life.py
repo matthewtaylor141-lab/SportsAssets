@@ -474,7 +474,8 @@ def test_e18_059_exists_sorts_last_and_is_three_nullable_add_column_if_not_exist
     assert SQL_059.exists()
     files = [x.name for x in sorted(MIG_DIR.glob("*.sql"))]
     i = files.index("058_mirror_books_flow_clock.sql")
-    assert files[i + 1] == "059_mirror_orders_send_record.sql" == files[-1]
+    # T2 (FILL lane 4, 2026-09-08) added 060 after this one: 059 sorts after 058, 060 last
+    assert files[i + 1] == "059_mirror_orders_send_record.sql" and files[-1] == "060_mirror_fill_answers.sql"
     assert sum(f.startswith("059_") for f in files) == 1
     sql = SQL_059.read_text()
     assert sql.splitlines()[0].startswith("-- 059: MIRROR ORDERS SEND RECORD (E18, 2026-09-08")

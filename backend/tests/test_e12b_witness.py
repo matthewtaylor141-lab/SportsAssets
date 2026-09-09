@@ -629,7 +629,8 @@ def test_e12b_058_exists_sorts_after_057_and_is_one_nullable_add_column_if_not_e
     files = [x.name for x in sorted(MIG_DIR.glob("*.sql"))]
     i = files.index("057_mirror_books_flow.sql")
     assert files[i + 1] == "058_mirror_books_flow_clock.sql" and sum(f.startswith("058_") for f in files) == 1
-    assert files[-1] == "059_mirror_orders_send_record.sql"    # E18 (PNL lane 6): the send record sorts after the clock
+    assert files[i + 2] == "059_mirror_orders_send_record.sql"    # E18 (PNL lane 6): the send record sorts after the clock
+    assert files[-1] == "060_mirror_fill_answers.sql"    # T2 (FILL lane 4): the per-fill record sorts last
     sql = SQL_058.read_text()
     assert sql.splitlines()[0].startswith("-- 058: MIRROR BOOKS FLOW CLOCK (E12b, 2026-09-08")
     body = "\n".join(ln.split("--", 1)[0] for ln in sql.splitlines())

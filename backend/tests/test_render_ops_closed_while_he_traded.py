@@ -45,7 +45,8 @@ def _statements(sql: str) -> list[str]:
 
 def test_closed_while_he_traded_is_three_read_only_statements_on_one_chain_limited():
     text = YML.read_text()
-    block = text[text.index("closed-while-he-traded) SQL="):text.index("# THE HOURLY, IN ONE RUN")]
+    # FILL lane 4 placed fill-answers (its own comment block) between this preset and the hourly
+    block = text[text.index("closed-while-he-traded) SQL="):text.index("# THE PER-FILL RECORD'S HEALTH LINE")]
     assert "need_confirm" not in block and "$ARG" not in block and "HEAD=" not in block
     for bad in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER"):
         assert bad not in block, bad
@@ -116,7 +117,8 @@ def test_closed_while_he_traded_sits_after_exits_band_before_hourly_and_stays_ou
     names = line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)
     assert names == labels and names.index("closed-while-he-traded") == names.index("exits-band") + 1
-    assert names[-1] == "hourly" and names[-2] == "closed-while-he-traded"
+    # FILL lane 4 (2026-09-08): fill-answers sits after this label, hourly still last (names[-2] -> names[-3])
+    assert names[-1] == "hourly" and names[-2] == "fill-answers" and names[-3] == "closed-while-he-traded"
     h, _ = _preset(text, "hourly")
     assert "closed-while-he-traded" not in h and "later_pnl_at_his_px" not in h and "first_refusal" not in h
     hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()

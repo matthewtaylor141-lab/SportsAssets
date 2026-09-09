@@ -609,7 +609,9 @@ def test_e9_every_name_and_plan_the_full_tick_writes_is_the_one_the_fast_tick_wr
     fs = _fast(p2, v2, now=NOW, http=h2)
     assert _skips(fs) == {}
     assert b2["last_reason"] == b1["last_reason"], kind
-    drop = ("his_fills_seen",)
+    # T2 (FILL lane 4): `fills_hwm` rides beside the list (the two worlds
+    # share book ids, so the full world's flush is the fast world's memo)
+    drop = ("his_fills_seen", "fills_hwm")
     assert {k: v for k, v in b2["last_plan"].items() if k not in drop} == \
         {k: v for k, v in b1["last_plan"].items() if k not in drop}, kind
     assert _places(v2) == _places(v1) and _kinds(v2).count("cancel") == _kinds(v1).count("cancel"), kind

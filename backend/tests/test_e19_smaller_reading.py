@@ -545,7 +545,8 @@ def test_e19_the_fills_vs_venue_preset_carries_both_keys_and_the_venues_figures_
     # latency-census|fills-answered|close-rows) are untouched
     assert names == labels and names.index("fills-vs-venue") == names.index("drift-16") + 1
     assert "drift-16|fills-vs-venue|books-new|" in line
-    assert "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|hourly (got" in line
+    # FILL lane 4 placed fill-answers between closed-while-he-traded and hourly
+    assert "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
     assert names[-1] == "hourly"
     body = text[text.index("fills-vs-venue) SQL="):text.index("books-new) SQL=")]
     sql = body.split('SQL="', 1)[1].split('"; TO=', 1)[0]
@@ -576,14 +577,18 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     # `wrong_sign_hold` before that (the convention every lane follows;
     # E17's last name is four before)
     # FILL lane 3 (2026-09-08) placed exit_take_in_band / cover_in_band /
-    # order_open_his_exit immediately before this key (the chain moves by three)
-    assert keys[keys.index("drift_smaller_open") - 1] == "order_open_his_exit"
-    assert keys[keys.index("drift_smaller_open") - 2] == "cover_in_band"
-    assert keys[keys.index("drift_smaller_open") - 3] == "exit_take_in_band"
-    assert keys[keys.index("drift_smaller_open") - 4] == "take_in_band"
-    assert keys[keys.index("drift_smaller_open") - 5] == "exit_take_rested"
-    assert keys[keys.index("drift_smaller_open") - 6] == "wrong_sign_hold"
-    assert keys[keys.index("drift_smaller_open") - 7] == "adopt_prior_venue_settled"
+    # order_open_his_exit immediately before this key, and T2 (FILL lane 4)
+    # placed fill_answer_write_failed / fill_answers_absent after those
+    # (the chain moves by five)
+    assert keys[keys.index("drift_smaller_open") - 1] == "fill_answers_absent"
+    assert keys[keys.index("drift_smaller_open") - 2] == "fill_answer_write_failed"
+    assert keys[keys.index("drift_smaller_open") - 3] == "order_open_his_exit"
+    assert keys[keys.index("drift_smaller_open") - 4] == "cover_in_band"
+    assert keys[keys.index("drift_smaller_open") - 5] == "exit_take_in_band"
+    assert keys[keys.index("drift_smaller_open") - 6] == "take_in_band"
+    assert keys[keys.index("drift_smaller_open") - 7] == "exit_take_rested"
+    assert keys[keys.index("drift_smaller_open") - 8] == "wrong_sign_hold"
+    assert keys[keys.index("drift_smaller_open") - 9] == "adopt_prior_venue_settled"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     src = inspect.getsource(rules)
     # the knob count of the tip (lane 1's MIRROR_CATCHUP_PCT and

@@ -954,6 +954,17 @@ CENSUS_KEYS: tuple[str, ...] = (
     # `registered_no_increase` (keys[-12]) by the convention every lane
     # since E13 followed (keys[-16:-13]; the tail pins moved by three)
     "exit_take_in_band", "cover_in_band", "order_open_his_exit",
+    # T2 (2026-09-08; FILL program lane 4): the per-fill record
+    # (mirror_fill_answers, migration 060) -- `fill_answer_write_failed`,
+    # the tick's one INSERT of the fills it named failed or timed out
+    # (the rows kept for the next tick, the hwm not advanced);
+    # `fill_answers_absent`, the table not there this tick (060 not yet
+    # applied, or the probe failed): nothing queued, the plan's list and
+    # the order window carry the census as before. Before E19's
+    # `drift_smaller_open` (keys[-13]) and `registered_no_increase`
+    # (keys[-12]) by the convention every lane followed (keys[-15:-13];
+    # the tail pins moved by two)
+    "fill_answer_write_failed", "fill_answers_absent",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -1177,6 +1188,44 @@ CAND_REFUSAL_WRITE_TIMEOUT_S = 5.0
 _cand_refusal_last: dict[tuple[str, str], tuple[str, float]] = {}
 _CAND_REFUSAL_MEMO_MAX = 8000
 _cand_write_logged = False
+# THE PER-FILL RECORD (T2, 2026-09-08; FILL program lane 4; migration
+# 060, mirror_fill_answers). fills-missed at 17:37Z (hourly_1737 rows
+# 1659-1660) read 1,105 fills of his / $517,203.44 as `unseen` -- no
+# plan held the fill -- of which $397,223.87 (76.8%) fell on markets
+# with a live or closing book: the tick HAD named those fills on the
+# plan's `his_fills_seen`, and the list is bounded at HIS_FILLS_SEEN_MAX
+# (20, E9's contract: the tick's working memory) and rides the book's
+# last plan, so the name was gone twenty fills later on a 301-fill book
+# (611, post_fvv_1707 row 334) and gone for good at the close. Now
+# _fills_seen also QUEUES one row (t.fill_rows) for every entry whose
+# ingest clock (`det`, else `ts`) is past the book's high-water mark
+# `fills_hwm` -- the prior plan's, or the memo below, whichever is
+# later; absent, every entry the list holds, once -- and
+# _flush_fill_answers writes the tick's rows in ONE INSERT ... ON
+# CONFLICT (whale, fill_id) DO NOTHING at the tail of both tick paths,
+# under CAND_REFUSAL_WRITE_TIMEOUT_S like the candidate flush (the pool
+# carries no command_timeout and the write runs under _TICK_LOCK). The
+# hwm is advanced ONLY by a successful flush (`_fill_hwm`, book id ->
+# the newest clock written; the plan carries it beside his_fills_seen
+# and the quiet skip carries it too), so a failed or timed-out write
+# (`fill_answer_write_failed`, logged once per process) keeps its rows
+# in `_fill_pending` for the next tick and the next plan re-queues
+# nothing already written -- fail closed toward RE-WRITING, never toward
+# losing a name (the conflict clause keeps the FIRST name, the list's
+# own rule). The table is probed once per tick the 059 way
+# (_fill_answers_guard: absent -> `fill_answers_absent`, nothing queued,
+# the tick goes on -- a measurement never refuses a tick). Bounds: one
+# INSERT per tick of at most FILL_ANSWERS_FLUSH_MAX rows (the rest wait
+# in the memo), the memo at most _FILL_PENDING_MAX rows (past it the
+# OLDEST are dropped and the plan's list still names them), the hwm memo
+# at most _FILL_HWM_MEMO_MAX books. NO order path reads the table.
+FILL_ANSWERS_FLUSH_MAX = 5000
+_FILL_PENDING_MAX = 20000
+_FILL_HWM_MEMO_MAX = 4000
+_fill_pending: dict[tuple[str, str], dict] = {}
+_fill_hwm: dict[int, float] = {}
+_fill_write_logged = False
+_fill_answers_absent_logged = False
 # E5: the register unreadable (absent until 056 lands), logged once per process
 _registered_logged = False
 # E5 / P2: the two freeze reasons a frozen book may follow his exit under
@@ -2070,6 +2119,10 @@ UPDATE mirror_orders SET decision = $2, updated_at = now() WHERE id = $1 /* ml-o
 # the tick by name (`order_cols_guard_unreadable`)
 _SQL_ORDER_COLS_GUARD = ("SELECT ask_at_send, decision, his_fill_id FROM mirror_orders LIMIT 0 "
                          "/* ml-order-cols-guard */")
+# THE 060 TABLE PROBE (T2, FILL lane 4; the paragraph over
+# FILL_ANSWERS_FLUSH_MAX): once per tick after the 059 probe; absent,
+# nothing is queued this tick and the tick goes on
+_SQL_FILL_ANSWERS_GUARD = "SELECT fill_id FROM mirror_fill_answers LIMIT 0 /* ml-fill-answers-guard */"
 _SQL_ORDER_PERSIST_ID = """
 UPDATE mirror_orders SET order_id = $2, state = 'open', venue_state = $3,
        receipt = $4::jsonb, updated_at = now()
@@ -2330,6 +2383,17 @@ SELECT r.whale, r.condition_id, r.us_slug, r.refusal, to_timestamp(r.at_ts), r.h
        long_asset text, long_from text, books_live int, opened_today int, active_conditions int,
        cand_reads int, tick_s float8) /* ml-cand-refusals */
 """
+# THE PER-FILL RECORD'S ONE WRITE (T2, FILL lane 4; migration 060): the
+# tick's rows from one JSON array through the table's own row type; a
+# (whale, fill_id) already written keeps its FIRST name
+_SQL_FILL_ANSWERS = """
+INSERT INTO mirror_fill_answers
+       (whale, condition_id, fill_id, fill_ts, detected_at, at, book_id, order_id, name, tick)
+SELECT r.whale, r.condition_id, r.fill_id, r.fill_ts, r.detected_at, r.at, r.book_id, r.order_id,
+       r.name, r.tick
+  FROM json_populate_recordset(NULL::mirror_fill_answers, $1::json) AS r
+    ON CONFLICT (whale, fill_id) DO NOTHING /* ml-fill-answers */
+"""
 _SQL_SHADOW_LATEST = """
 SELECT target, target_raw::float8 AS target_raw, capped, ratio::float8 AS ratio,
        his_net::float8 AS his_net, extract(epoch FROM at)::float8 AS at_ts
@@ -2557,6 +2621,13 @@ class _Tick:
     # decision on a cancel; None until the guard has read (never True
     # without the 050 column: the 059 INSERT carries the intent)
     order_cols: bool | None = None
+    # mirror_fill_answers (migration 060, T2 / FILL lane 4) exists this
+    # tick: read by _fill_answers_guard after the 059 probe; only the
+    # bool True lets _fills_seen queue rows (`fill_rows`, flushed once at
+    # the tail of the tick by _flush_fill_answers); None until the guard
+    # has read, False when the table is absent or the probe failed
+    fill_answers: bool | None = None
+    fill_rows: list = field(default_factory=list)
     # the tick's venue budget for the exact mapping lane (C1): the
     # shadow's own MapBudget, ms.MAP_READS_PER_TICK resolver calls a
     # tick across every candidate, past which a candidate is
@@ -5808,6 +5879,7 @@ def _fills_seen(t: _Tick, book: dict, reason: str, fills: list | None = None) ->
     ent = t.open_by_book.get(book["id"]) if book["id"] in t.placed_books else None
     order = int(ent[0]["id"]) if ent and _num(ent[0].get("id")) is not None else None
     name = rules.plan_reason_key(reason)
+    appended: set = set()
     for f in (fills if fills is not None else book.get("_fills")) or []:
         if not isinstance(f, dict):
             continue
@@ -5815,12 +5887,72 @@ def _fills_seen(t: _Tick, book: dict, reason: str, fills: list | None = None) ->
         if key is None or key in known:
             continue
         known.add(key)
+        appended.add(key)
         out.append({"id": key, "ts": _num(f.get("ts")), "det": _num(f.get("detected_at")),
                     "at": float(t.now), "order": order, "name": name})
+    kept = out
     if len(out) > HIS_FILLS_SEEN_MAX:
-        out.sort(key=lambda e: (float(_num(e.get("ts")) or 0.0), str(e.get("id"))))
-        out = out[-HIS_FILLS_SEEN_MAX:]
-    return out
+        kept = sorted(out, key=lambda e: (float(_num(e.get("ts")) or 0.0), str(e.get("id"))))[-HIS_FILLS_SEEN_MAX:]
+    # T2 (FILL lane 4; the paragraph over FILL_ANSWERS_FLUSH_MAX): the
+    # durable row for every entry of the UNBOUNDED list past the book's
+    # high-water mark -- so a burst of forty fills on one tick is forty
+    # rows and a list of twenty -- and for every entry this tick appended
+    # that the bound keeps, whatever its clock: a row that commits late
+    # with an earlier detected_at (the ingest stamps before it writes) is
+    # the list's fill, so it is the record's. An entry under the hwm that
+    # the bound drops is a fill the list rolled off and re-appends every
+    # tick from the lookback: already written, never queued again. Only
+    # when the 060 table read present this tick (the conflict clause
+    # makes any re-write harmless). Nothing here sizes, places or cancels.
+    if t.fill_answers is True:
+        hwm = _fills_hwm_of(book, prior)
+        keep_ids = {e["id"] for e in kept}
+        for e in out:
+            clk = _num(e.get("det"))
+            clk = _num(e.get("ts")) if clk is None else clk
+            if hwm is None or (clk is not None and clk > hwm) or (e["id"] in appended and e["id"] in keep_ids):
+                t.fill_rows.append(_fill_answer_row(t, book, e))
+    return kept
+
+
+def _fills_hwm_of(book: dict, prior: Any) -> float | None:
+    """The book's fill-record high-water mark (T2): the later of the
+    prior plan's `fills_hwm` and the memo the last successful flush
+    wrote for the book (`_fill_hwm`); None when neither can be read --
+    every entry the list holds is then queued once."""
+    p = _num(prior.get("fills_hwm")) if isinstance(prior, dict) else None
+    m = _fill_hwm.get(book["id"])
+    if p is None:
+        return m
+    return p if m is None else max(p, m)
+
+
+def _fill_answer_row(t: _Tick, book: dict, e: dict) -> dict:
+    """One mirror_fill_answers row from one his_fills_seen entry: the
+    fill's id, stamp and ingest clock, the tick's clock when the entry
+    was first named, the book, the order the tick placed when it named
+    the fill (None when none), the name, this tick's sequence number.
+    `at` and `name` are NOT NULL in 060: an entry that lost them (a
+    junk prior list) is stamped now and `unnamed`, never dropped."""
+    at = _num(e.get("at"))
+    order = _num(e.get("order"))
+    return {"whale": str(book.get("whale")), "condition_id": str(book.get("condition_id")),
+            "fill_id": str(e.get("id")), "fill_ts": _num(e.get("ts")), "detected_at": _num(e.get("det")),
+            "at": float(t.now) if at is None else float(at), "book_id": int(book["id"]),
+            "order_id": None if order is None else int(order),
+            "name": str(e.get("name") or "unnamed"), "tick": int(t.seq)}
+
+
+def _carry_fills_hwm(book: dict, plan: dict) -> None:
+    """`plan["fills_hwm"]` beside `his_fills_seen` on every plan write
+    (T2): the hwm as the LAST SUCCESSFUL FLUSH left it -- never this
+    tick's rows, which are not written yet -- so a plan read back after
+    a restart re-queues at most one tick's fills (idempotent under the
+    conflict clause) and nothing already written. Absent stays absent."""
+    prior = _jsonish(book.get("last_plan")) or {}
+    hwm = _fills_hwm_of(book, prior)
+    if hwm is not None:
+        plan["fills_hwm"] = float(hwm)
 
 
 async def _write_plan(t: _Tick, book: dict, r: _Reading | None, target, target_raw,
@@ -5863,6 +5995,7 @@ async def _write_plan(t: _Tick, book: dict, r: _Reading | None, target, target_r
     # the row; the reading's fills when there is one, else the ones the
     # book's tick read before step M (book["_fills"])
     plan["his_fills_seen"] = _fills_seen(t, book, reason, r.fills if r is not None else None)
+    _carry_fills_hwm(book, plan)            # T2: the record's high-water mark rides beside it
     await t.pool.execute(
         _SQL_BOOK_PLAN, book["id"], target, target_raw, net,
         r.his_long if r else None, r.his_other if r else None,
@@ -7222,6 +7355,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             # hot, so this names only a fill older than that)
             book["last_reason"] = "book_quiet_skipped"
             plan["his_fills_seen"] = _fills_seen(t, book, "book_quiet_skipped", fills)
+            _carry_fills_hwm(book, plan)    # T2: the skip carries the record's hwm too
             await t.pool.execute(_SQL_BOOK_SKIP, book["id"], "book_quiet_skipped",
                                  json.dumps(plan, default=str))
         return
@@ -11834,6 +11968,64 @@ async def _flush_candidate_refusals(t: _Tick) -> None:
             del _cand_refusal_last[k]
 
 
+def _fill_row_clock(row: dict) -> float | None:
+    clk = _num(row.get("detected_at"))
+    return _num(row.get("fill_ts")) if clk is None else clk
+
+
+async def _flush_fill_answers(t: _Tick) -> None:
+    """ONE write of the fills the tick named (T2, FILL lane 4; the
+    paragraph over FILL_ANSWERS_FLUSH_MAX): the rows a failed flush
+    kept, then this tick's, one per (whale, fill_id), at most
+    FILL_ANSWERS_FLUSH_MAX in the statement (the rest wait in the memo).
+    Success advances each book's high-water mark to the newest clock
+    written. A failure or a timeout is counted
+    (`fill_answer_write_failed`), logged once per process, and keeps
+    every row for the next tick -- bounded at _FILL_PENDING_MAX, the
+    oldest dropped past it -- with no hwm moved. Nothing when the table
+    read absent this tick (the rows already pending stay pending).
+    Never raises; nothing here sizes, places or cancels."""
+    global _fill_write_logged
+    rows, t.fill_rows = t.fill_rows, []
+    for r in rows:
+        _fill_pending.setdefault((r["whale"], r["fill_id"]), r)
+    if len(_fill_pending) > _FILL_PENDING_MAX:
+        for k in list(_fill_pending)[:len(_fill_pending) - _FILL_PENDING_MAX]:
+            del _fill_pending[k]
+    if t.fill_answers is not True or not _fill_pending:
+        return
+    keys = list(_fill_pending)[:FILL_ANSWERS_FLUSH_MAX]
+    batch = [_fill_pending[k] for k in keys]
+    try:
+        # bounded as the candidate flush is: the pool carries no
+        # command_timeout and the write runs under _TICK_LOCK, so a hung
+        # write must not hold the tick
+        await asyncio.wait_for(t.pool.execute(_SQL_FILL_ANSWERS, json.dumps(batch, default=str)),
+                               CAND_REFUSAL_WRITE_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — measurement never blocks the tick
+        _mirror_stop("fill_answer_write_failed")
+        if not _fill_write_logged:
+            _fill_write_logged = True
+            log.warning("mirror_live: mirror_fill_answers write failed (%s); %d rows kept for the next "
+                        "tick, the high-water mark not advanced (migration 060 applied?)",
+                        type(exc).__name__, len(batch))
+        return
+    for k in keys:
+        _fill_pending.pop(k, None)
+    for r in batch:
+        clk = _fill_row_clock(r)
+        bid = r.get("book_id")
+        if clk is None or bid is None:
+            continue
+        have = _fill_hwm.get(int(bid))
+        _fill_hwm[int(bid)] = float(clk) if have is None else max(float(have), float(clk))
+    if len(_fill_hwm) > _FILL_HWM_MEMO_MAX:
+        # bounded: the oldest books first (ids ascend with time); a book
+        # dropped re-reads its hwm off its own plan next tick
+        for k in sorted(_fill_hwm)[:len(_fill_hwm) - _FILL_HWM_MEMO_MAX]:
+            del _fill_hwm[k]
+
+
 async def _shadow_planned(t: _Tick, whale: str) -> set:
     """The conditions whose newest shadow row carries a plan (W2 / P3):
     a would_side, or a target that is not 0. Unreadable: the empty set,
@@ -12144,6 +12336,32 @@ async def _order_cols_guard(t: _Tick, stats: dict) -> bool:
         return True
 
 
+async def _fill_answers_guard(t: _Tick, stats: dict) -> None:
+    """THE 060 TABLE PROBE (T2, FILL lane 4; the paragraph over
+    FILL_ANSWERS_FLUSH_MAX), made once per tick after the 059 probe on
+    both tick paths. Present: `t.fill_answers` True and _fills_seen
+    queues the record's rows. Absent -- or the probe failing for ANY
+    reason: the table is on no order path, so a blip here is named and
+    the tick goes on, never refused -- `t.fill_answers` False, nothing
+    queued this tick (the hwm stands, so the next tick that reads the
+    table present queues what this one held), `fill_answers_absent` on
+    the census with the error's name on the heartbeat, logged once per
+    process."""
+    global _fill_answers_absent_logged
+    try:
+        await t.pool.fetch(_SQL_FILL_ANSWERS_GUARD)
+        t.fill_answers = True
+    except Exception as exc:  # noqa: BLE001 — a table that is not there is a fact; nothing is sent on it
+        t.fill_answers = False
+        _mirror_stop("fill_answers_absent")
+        stats["fill_answers_absent"] = type(exc).__name__
+        if not _fill_answers_absent_logged:
+            _fill_answers_absent_logged = True
+            log.warning("mirror_live: mirror_fill_answers is absent or unreadable (migration 060 not "
+                        "applied yet? %s); the fills the tick names are not recorded, the plan's list "
+                        "carries them", type(exc).__name__)
+
+
 async def _tick(t: _Tick, woken: list) -> None:
     global _last_mode, _last_whales, _last_walk
     stats = t.stats
@@ -12204,6 +12422,8 @@ async def _tick(t: _Tick, woken: list) -> None:
     # failed probe: the tick refused by name)
     if not await _order_cols_guard(t, stats):
         return
+    # T2: the 060 table, named when absent, never a refusal
+    await _fill_answers_guard(t, stats)
     stats.setdefault("short", {})["on"] = _shorts_on(t)
     # E6: this tick's number in the process (the quiet rotation's clock),
     # and the terminal memos' one boot read (part 3) -- once per process,
@@ -12426,6 +12646,7 @@ async def _tick(t: _Tick, woken: list) -> None:
         _name_unread(t, w, unread, stamps)
     t.timing["candidates"] += time.monotonic() - cands_t0
     await _flush_candidate_refusals(t)
+    await _flush_fill_answers(t)            # T2: the fills the tick named, one write
     await _instruments(t)
 
 
@@ -12787,6 +13008,7 @@ async def _fast_tick(t: _Tick, cids: list) -> None:
         return _fast_skip_all(t, cids, "flow_guard_unreadable")
     if not await _order_cols_guard(t, stats):      # E18: the same reading as _tick's
         return _fast_skip_all(t, cids, "order_cols_guard_unreadable")
+    await _fill_answers_guard(t, stats)            # T2: the same reading as _tick's
     stats.setdefault("short", {})["on"] = _shorts_on(t)
     await _read_mode(t)
     if t.mode != MODE_SAFE and le.active_venue() != "polymarket-us":
@@ -12837,6 +13059,7 @@ async def _fast_tick(t: _Tick, cids: list) -> None:
             t.fast_skipped[cid] = "fast_tick_failed"
             log.exception("mirror_live: fast tick on %s failed (%s)", cid, type(exc).__name__)
     await _flush_candidate_refusals(t)
+    await _flush_fill_answers(t)                   # T2: the fast tick's own rows, one write
 
 
 async def fast_tick_once(pool, pmus, http, cids: list | None = None,
