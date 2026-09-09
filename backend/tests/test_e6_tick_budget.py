@@ -483,6 +483,15 @@ def test_e6_step_m_runs_on_a_skipped_book_a_closed_row_closes_it_that_tick():
 
 
 def test_e6_the_flat_close_runs_on_a_skipped_book_with_the_carried_clock():
+    """The episode close runs on the skipped book with the CARRIED clock.
+    FILL lane 5 (2026-09-08) re-pinned the verdict past the clock: the
+    skip has no reading of his sizes, so the clock-alone close on a skip
+    is HELD `he_holds_unread` (the carried clock ran out -- the verdict
+    is the guard's, never `not_due`), and the rotation's read tick reads
+    him -- paired out here, still holding the book's token -- `he_holds`.
+    Before the lane the skip closed it `cashed_out`; the clock close now
+    lands on a READ tick that reads him gone from the book's side
+    (test_fill_t1_turn)."""
     p = _pool(fills=_his(300, other_size=300), snap={M: 300.0, N: 300.0})   # paired out: target 0
     b = p.add_book(ledger=0, gross_buy=93.0, avg_cost=0.31)
     row = p.rows[b["standing_row_id"]]
@@ -495,7 +504,18 @@ def test_e6_the_flat_close_runs_on_a_skipped_book_with_the_carried_clock():
     v3 = _Venue()
     st3 = _tick(p, v3, now=NOW + rules.MIRROR_FLAT_CLOSE_S + 1)
     assert "bbo" not in _kinds(v3) and _census(st3, "book_quiet_skipped") == 1
-    assert row["status"] == "cashed_out" and b["state"] == "closed" and _census(st3, "closed_cashed_out") == 1
+    assert b["last_plan"]["flat_since"] == NOW and b["last_plan"]["close"] == "he_holds_unread", "the carried clock ran; the guard held"
+    assert row["status"] == "filled" and b["state"] == "live" and _census(st3, "closed_cashed_out") == 0
+    assert _census(st3, "he_holds_unread") == 1
+    # the rotation's read tick: his sizes read -- he holds the book's token -- `he_holds`, still live
+    for i in range(1, int(ml.QUIET_EVERY_TICKS) + 1):
+        v4 = _Venue()
+        st4 = _tick(p, v4, now=NOW + rules.MIRROR_FLAT_CLOSE_S + 1 + 30 * i)
+        assert b["state"] == "live" and row["status"] == "filled" and _census(st4, "closed_cashed_out") == 0, i
+        if "bbo" in _kinds(v4):
+            break
+    assert "bbo" in _kinds(v4) and b["last_plan"]["close"] == "he_holds" and _census(st4, "he_holds") == 1
+    assert b["last_plan"]["flat_since"] == NOW
 
 
 def test_e6_a_skipped_books_plan_carries_what_the_next_read_and_a_sibling_read_off_the_row():

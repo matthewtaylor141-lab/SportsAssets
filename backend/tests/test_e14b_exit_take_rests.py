@@ -376,8 +376,9 @@ def test_e14b_the_census_name_sits_before_drift_smaller_open_and_the_tail_pins_h
     keys = ml.CENSUS_KEYS
     assert keys.count("exit_take_rested") == 1 and len(set(keys)) == len(keys)
     # E14 (FILL lane 2) landed after this lane and placed `take_in_band` nearer the key (-14 -> -15);
-    # FILL lane 3 placed its three names after that and T2 (FILL lane 4) its two (-15 -> -20, -14 -> -19)
-    assert keys[-20] == "exit_take_rested" and keys[-19] == "take_in_band"
+    # FILL lane 3 (three names), T2 (two) and FILL lane 5 (three) placed theirs after these (-15 -> -23, -14 -> -22)
+    assert keys[-23] == "exit_take_rested" and keys[-22] == "take_in_band"
+    assert keys[-16:-13] == ("he_holds", "he_holds_unread", "reopen_refused")
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert ml._new_stats()["census"]["exit_take_rested"] == 0

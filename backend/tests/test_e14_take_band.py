@@ -677,16 +677,17 @@ def test_e14_the_census_name_sits_before_drift_smaller_open_and_the_pins_hold():
     keys = ml.CENSUS_KEYS
     assert keys.count("take_in_band") == 1
     # FILL lane 3 (2026-09-08) placed its three names between this one and E19's key;
-    # T2 (FILL lane 4) its two after those, the convention every lane follows
+    # T2 (FILL lane 4) its two after those; FILL lane 5 its three after those
     assert keys[keys.index("take_in_band") + 1] == "exit_take_in_band"
     assert keys[keys.index("take_in_band") + 4] == "fill_answer_write_failed"
-    assert keys[keys.index("take_in_band") + 6] == "drift_smaller_open"
+    assert keys[keys.index("take_in_band") + 6] == "he_holds"
+    assert keys[keys.index("take_in_band") + 9] == "drift_smaller_open"
     # landed after E20 (`wrong_sign_hold`) and E14b (`exit_take_rested`), which sit before it by the same convention
     assert keys[keys.index("take_in_band") - 1] == "exit_take_rested"
     assert keys[keys.index("take_in_band") - 2] == "wrong_sign_hold"
     assert keys[keys.index("take_in_band") - 3] == "adopt_prior_venue_settled"
-    # FILL lane 3 (three names) and T2 (two) placed theirs after this one (-14 -> -19)
-    assert keys[-19] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    # FILL lane 3 (three names), T2 (two) and FILL lane 5 (three) placed theirs after this one (-14 -> -22)
+    assert keys[-22] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert ml._new_stats()["census"]["take_in_band"] == 0
     # the one emit site, at the decision, beside the at-level take's

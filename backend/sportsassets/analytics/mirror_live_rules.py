@@ -2314,6 +2314,22 @@ def select_flatten(target: int, his_long: float | None, his_other: float | None,
     return "vanish_unconfirmed"
 
 
+def he_holds_on_axis(his_long: Any, his_other: Any, short: Any) -> bool | None:
+    """Does he still hold a token on the book's OWN side, by his fills
+    (FILL lane 5, 2026-09-08: the flat-clock guard in
+    episode_close_reason)? A long book reads his long size, a short book
+    his other-token size, each by select_flatten's `_size` reading -- a
+    finite number at or above zero. None when EITHER size is not such a
+    number (a None, a bool, a string, NaN, a negative): a reading that
+    was not made is never "he left", so the caller's flat clock holds
+    the book (`he_holds_unread`) instead of ending it. `short` is read
+    as a bool -- anything truthy is the short axis."""
+    hl, ho = _size(his_long), _size(his_other)
+    if hl is None or ho is None:
+        return None
+    return (ho > 0) if short else (hl > 0)
+
+
 # --------------------------------------------------------------- booking
 
 @dataclass
@@ -2682,7 +2698,8 @@ def episode_close_reason(state: BookState, market_closed_or_resolved: bool | Non
                          vanished_confirmed: bool | None, flat_for_s: float | None,
                          open_orders: int | None,
                          flat_close_s: float = MIRROR_FLAT_CLOSE_S,
-                         sign_flipped: bool | None = None) -> str:
+                         sign_flipped: bool | None = None,
+                         he_holds: bool | None = None) -> str:
     """Whether this episode closes now and how -- or, by name, why not.
 
     `sign_flipped` (P2 rung S0, brief B8; owner default Q5 (a)): the
@@ -2729,13 +2746,28 @@ def episode_close_reason(state: BookState, market_closed_or_resolved: bool | Non
                          net has FLIPPED against this book (sign_flipped
                          True); the book sat flat at target 0 for
                          `flat_close_s`
+      'he_holds'         flat at target 0 past the flat clock, and due
+                         on the clock ALONE -- but his fills still show
+                         him holding a token on the book's own side
+                         (`he_holds` is the bool True; the worker reads
+                         it by he_holds_on_axis). Not a close: a flat
+                         book never ends on the clock while he holds
+                         (FILL lane 5, 2026-09-08). The market's end,
+                         his confirmed vanish and the sign flip close
+                         exactly as before -- the guard reads only the
+                         clock-alone path, never those three
+      'he_holds_unread'  the same path, and his sizes could not be read
+                         (`he_holds` None -- or anything that is not
+                         the bool False): held, not closed, until a
+                         tick reads them (the quiet skip hands None)
 
-    Only the first two are a close; episode_close() is this reduced
-    to the verdict, for the tick that asks nothing more. `flat_close_s`
-    can only LENGTHEN the flat wait: the effective limit is
-    max(flat_close_s, MIRROR_FLAT_CLOSE_S), so no caller closes a
-    flat book early (review finding: flat_close_s=0 cashed out at
-    once).
+    Only 'cashed_out' and 'cancelled' are a close; episode_close() is
+    this reduced to the verdict, for the tick that asks nothing more
+    (it hands `he_holds` None, so on the clock-alone path it reads
+    `he_holds_unread` and closes nothing). `flat_close_s` can only
+    LENGTHEN the flat wait: the effective limit is max(flat_close_s,
+    MIRROR_FLAT_CLOSE_S), so no caller closes a flat book early (review
+    finding: flat_close_s=0 cashed out at once).
     """
     n = _int(open_orders)
     if n is None:
@@ -2754,6 +2786,14 @@ def episode_close_reason(state: BookState, market_closed_or_resolved: bool | Non
         if limit is not None:
             limit = max(limit, float(MIRROR_FLAT_CLOSE_S))
         due = flat is not None and limit is not None and flat >= limit
+        if due and he_holds is not False:
+            # FILL lane 5: due on the flat clock ALONE (none of the three
+            # readings above was True) while his fills show him holding
+            # on this side -- or could not be read -- the book is held
+            # open by name; a flat book at target 0 buys nothing, so
+            # holding it is the closed direction. Only the bool False
+            # (read: he holds nothing on this side) lets the clock close
+            return "he_holds" if he_holds is True else "he_holds_unread"
     if not due:
         return "not_due"
     return "cashed_out" if st.gross_buy_usd > 0 else "cancelled"

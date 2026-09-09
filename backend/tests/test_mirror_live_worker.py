@@ -788,6 +788,24 @@ class _Pool(_ShadowPool):
                 return None
             b = max(closed, key=lambda b: b["id"])
             return {"last_plan": json.dumps(b["last_plan"]) if isinstance(b["last_plan"], dict) else b["last_plan"]}
+        if "ml-book-turn" in s:
+            # FILL lane 5: the same row with its id (the turn's record)
+            closed = [b for b in self.books.values()
+                      if b["whale"] == a[0] and b["condition_id"] == a[1] and b["state"] == "closed"]
+            if not closed:
+                return None
+            b = max(closed, key=lambda b: b["id"])
+            return {"id": b["id"],
+                    "last_plan": json.dumps(b["last_plan"]) if isinstance(b["last_plan"], dict) else b["last_plan"]}
+        if "ml-book-reopen-refused" in s:
+            # FILL lane 5: the closed book's plan MERGED with the entry; the
+            # statement names no updated_at, so updated_ts stands (pinned)
+            b = self.books.get(a[0])
+            if b is None or b["state"] != "closed":
+                return "UPDATE 0"
+            prior = b["last_plan"] if isinstance(b["last_plan"], dict) else json.loads(b["last_plan"] or "{}")
+            b["last_plan"] = {**prior, **json.loads(a[1])}
+            return "UPDATE 1"
         # -- the executor's own statements ----------------------------
         if "INSERT INTO mirror_books" in s:
             if any(b["whale"] == a[0] and b["us_market_slug"] == a[2] and b["state"] != "closed"
@@ -1212,6 +1230,7 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_fill_hwm", {}, raising=False)
     monkeypatch.setattr(ml, "_fill_write_logged", False, raising=False)
     monkeypatch.setattr(ml, "_fill_answers_absent_logged", False, raising=False)
+    monkeypatch.setattr(ml, "_reopen_write_logged", False, raising=False)   # FILL lane 5: the reopen record's one line
     # E6: the quiet rotation's clock and memos (book ids repeat across
     # this file's pools), and the terminal memos' boot read, already made
     # (test_e6_tick_budget drives the read itself)
@@ -2271,8 +2290,21 @@ def test_flat_and_live_keeps_the_row_filled_at_zero_until_the_flat_close():
     _tick(p, _Venue(), now=NOW + rules.MIRROR_FLAT_CLOSE_S - 1)
     assert row["status"] == "filled" and b["state"] == "live"
     st3 = _tick(p, _Venue(), now=NOW + rules.MIRROR_FLAT_CLOSE_S + 1)
+    # FILL lane 5 (2026-09-08): paired out, he still HOLDS the book's token, so the
+    # clock holds the book by name (`he_holds` on a read tick, `he_holds_unread`
+    # on a quiet skip) -- the row filled at zero, nothing closed (re-pinned from
+    # `cashed_out` on the clock); the close lands once he has LEFT (the vanish)
+    assert row["status"] == "filled" and b["state"] == "live"
+    assert b["last_plan"]["close"] in ("he_holds", "he_holds_unread") and _census(st3, "closed_cashed_out") == 0
+    p.fills, p.snap = [], {M: 0.0, N: 0.0}
+    # (the vanish is a READ tick's verdict: the quiet rotation's skips hold `he_holds_unread` until it)
+    for i in range(1, int(ml.QUIET_EVERY_TICKS) + 2):
+        st3b = _tick(p, _Venue(), now=NOW + rules.MIRROR_FLAT_CLOSE_S + 1 + 30 * i, http=_gone())
+        if b["state"] == "closed":
+            break
+        assert b["last_plan"]["close"] == "he_holds_unread" and row["status"] == "filled", i
     assert row["status"] == "cashed_out" and b["state"] == "closed"
-    assert _census(st3, "closed_cashed_out") == 1 and st3["closed_books"] == 1
+    assert _census(st3b, "closed_cashed_out") == 1 and st3b["closed_books"] == 1
     # he re-leans on the still-live market: a NEW book, episode 2, counted as a reopen
     p.fills = _his(600)
     p.snap = {M: 600.0, N: 0.0}
@@ -3046,7 +3078,10 @@ def test_flat_since_is_dropped_while_the_book_is_held_or_the_target_is_above_zer
     _tick(p, _Venue(), now=NOW + 30 + rules.MIRROR_FLAT_CLOSE_S - 1, http=pair)
     assert b["state"] == "live"
     st4 = _tick(p, _Venue(), now=NOW + 30 + rules.MIRROR_FLAT_CLOSE_S + 1, http=pair)
-    assert b["state"] == "closed" and _census(st4, "closed_cashed_out") == 1
+    # FILL lane 5 (2026-09-08): paired out, he still holds the book's token -- the clock
+    # holds by name and the flat clock is CARRIED, not dropped (re-pinned from `closed`)
+    assert b["state"] == "live" and b["last_plan"]["close"] in ("he_holds", "he_holds_unread")
+    assert b["last_plan"]["flat_since"] == NOW + 30 and _census(st4, "closed_cashed_out") == 0
     p5 = _pool(fills=_his(300, other_size=300), snap={M: 300.0, N: 300.0})
     b5 = p5.add_book(ledger=300, last_plan={"flat_since": NOW - 3 * 3600})
     _tick(p5, _Venue(held={SLUG: 300}), http=_mkt(300.0, 300.0))
@@ -4669,10 +4704,20 @@ def test_the_incident_book_flattens_at_the_ledger_books_the_dust_and_reaches_the
     assert b["state"] == "live" and p.state["mirror_live"] is True and "mirror_live_trip" not in p.state
     assert o["state"] == "filled" and o["booked_filled"] == 414.0 and o["receipt"]["dust_total"] == pytest.approx(0.24)
     assert b["last_plan"]["flat_since"] == NOW + 30 and b["last_plan"]["close"] == "not_due"
-    # the flat close, on its clock
+    # the flat clock: FILL lane 5 (2026-09-08) -- his 300 still on the book's side
+    # (the fixture's fills) hold the flat book by name under the operator's flatten
+    # too (re-pinned from `closed_cashed_out` on the clock); the close lands once
+    # he has left (the vanish confirmed), the row cashed out, still no under_one_share
     st3 = _tick(p, _Venue(held={SLUG: 0}), now=NOW + 30 + rules.MIRROR_FLAT_CLOSE_S + 1)
-    assert b["state"] == "closed" and row["status"] == "cashed_out" and _census(st3, "closed_cashed_out") == 1
-    assert _census(st3, "under_one_share") == 0 and not _places(v2)
+    assert b["state"] == "live" and row["status"] == "filled" and _census(st3, "closed_cashed_out") == 0
+    assert b["last_plan"]["close"] in ("he_holds", "he_holds_unread") and _census(st3, "under_one_share") == 0
+    p.fills, p.snap = [], {M: 0.0, N: 0.0}
+    for i in range(1, int(ml.QUIET_EVERY_TICKS) + 2):     # the vanish is a read tick's verdict
+        st3b = _tick(p, _Venue(held={SLUG: 0}), now=NOW + 30 + rules.MIRROR_FLAT_CLOSE_S + 1 + 30 * i, http=_gone())
+        if b["state"] == "closed":
+            break
+    assert b["state"] == "closed" and row["status"] == "cashed_out" and _census(st3b, "closed_cashed_out") == 1
+    assert _census(st3b, "under_one_share") == 0 and not _places(v2)
     # the column unreadable: the ledger sizes it (fail closed on the trip, which stands)
     p2 = _pool()
     p2.state["mirror_flatten"] = True
@@ -4901,8 +4946,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
     # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89;
     # E20 by its one, E14b (FILL lane 1) by its one and E14 (FILL lane 2) by its one `take_in_band`: -89 -> -92;
-    # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95; T2 (FILL lane 4) by its two: -95 -> -97)
-    assert keys[-97:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95; T2 (FILL lane 4) by its two: -95 -> -97; FILL lane 5 by its three: -97 -> -100)
+    assert keys[-100:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4994,6 +5039,12 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # absent this tick (nothing queued) -- before E19's name and
                           # `registered_no_increase` (keys[-12]), after E14's (keys[-15:-13])
                           "fill_answer_write_failed", "fill_answers_absent",
+                          # FILL lane 5: a flat book held open on the clock while he
+                          # holds / while his sizes could not be read; a candidate
+                          # refused on a turned market -- before E19's name (keys[-13])
+                          # and `registered_no_increase` (keys[-12]), after E14's
+                          # (keys[-16:-13])
+                          "he_holds", "he_holds_unread", "reopen_refused",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5010,7 +5061,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-98] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two before the tail
+    assert keys[-101] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (

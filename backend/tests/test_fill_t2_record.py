@@ -528,9 +528,10 @@ def test_t2_the_census_names_sit_before_drift_smaller_open_the_emit_sites_and_no
     keys = ml.CENSUS_KEYS
     for k in NEW_NAMES:
         assert keys.count(k) == 1 and ml._new_stats()["census"][k] == 0, k
-    assert keys[-15] == "fill_answer_write_failed" and keys[-14] == "fill_answers_absent"
+    # FILL lane 5 landed after this lane and placed its three names nearer the key (-15/-14 -> -18/-17)
+    assert keys[-18] == "fill_answer_write_failed" and keys[-17] == "fill_answers_absent"
     # FILL lane 3 landed first and sits between E14's name and these two (take_in_band -16 -> -19)
-    assert keys[-19] == "take_in_band" and keys[-18] == "exit_take_in_band" and keys[-16] == "order_open_his_exit"
+    assert keys[-22] == "take_in_band" and keys[-21] == "exit_take_in_band" and keys[-19] == "order_open_his_exit"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")

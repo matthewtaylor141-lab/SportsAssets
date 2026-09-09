@@ -419,9 +419,9 @@ def test_e17_the_census_names_sit_before_registered_no_increase():
     # (-21:-13 -> -22:-14); E20
     # placed `wrong_sign_hold` before that (-22:-14 -> -23:-15); E14
     # (FILL lane 2) placed `take_in_band` after both (-23:-15 -> -24:-16);
-    # FILL lane 3 placed its three names after that (-24:-16 -> -27:-19) and
-    # T2 (FILL lane 4) its two (-27:-19 -> -29:-21)
-    assert keys[-29:-21] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
+    # FILL lane 3 placed its three names after that (-24:-16 -> -27:-19),
+    # T2 (FILL lane 4) its two (-> -29:-21) and FILL lane 5 its three (-> -32:-24)
+    assert keys[-32:-24] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
                              "adopted_prior_episode", "venue_dust_ours", "adopt_prior_unreadable",
                              "adopt_no_fill_since_close", "adopt_prior_venue_settled")
     assert keys[-13] == "drift_smaller_open"

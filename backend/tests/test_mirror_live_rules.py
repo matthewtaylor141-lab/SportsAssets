@@ -482,15 +482,29 @@ def test_a_caller_can_only_tighten_a_cap_never_raise_one():
     assert r.drift_rule(1000.0, 500.0, True, False, drift_max=math.inf).refusal == "drift"
     assert r.drift_rule(1000.0, 960.0, True, False, drift_max=1.0).increase_ok is True
     assert r.drift_rule(1000.0, 960.0, True, False, drift_max=0.01).refusal == "drift"
-    # episode_close: flat_close_s only lengthens the flat wait
+    # episode_close: flat_close_s only lengthens the flat wait. FILL lane 5
+    # (2026-09-08): the clock-alone close needs his sizes READ as not held
+    # (he_holds False, episode_close_reason); the reduced form hands None
+    # and reads `he_holds_unread` -- not a close -- where it read
+    # 'cashed_out' before (re-pinned: the reason with he_holds=False is
+    # the old value, the reduced form None)
     flat = r.BookState(ledger_net=0.0, gross_buy_usd=10.0)
     for short in (0.0, -5.0, 1.0, r.MIRROR_FLAT_CLOSE_S - 1):
         assert r.episode_close(flat, False, False, 0.0, 0, flat_close_s=short) is None, short
         assert r.episode_close(flat, False, False, r.MIRROR_FLAT_CLOSE_S - 1, 0, flat_close_s=short) is None, short
-        assert r.episode_close(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0, flat_close_s=short) == "cashed_out", short
+        assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S - 1, 0,
+                                      flat_close_s=short, he_holds=False) == "not_due", short
+        assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0,
+                                      flat_close_s=short, he_holds=False) == "cashed_out", short
+        assert r.episode_close(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0, flat_close_s=short) is None, short
+        assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0,
+                                      flat_close_s=short) == "he_holds_unread", short
     longer = r.MIRROR_FLAT_CLOSE_S * 2
     assert r.episode_close(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0, flat_close_s=longer) is None
-    assert r.episode_close(flat, False, False, longer, 0, flat_close_s=longer) == "cashed_out"
+    assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0, flat_close_s=longer,
+                                  he_holds=False) == "not_due"
+    assert r.episode_close_reason(flat, False, False, longer, 0, flat_close_s=longer, he_holds=False) == "cashed_out"
+    assert r.episode_close(flat, False, False, longer, 0, flat_close_s=longer) is None
 
 
 def test_the_mark_must_be_on_the_ladder():
@@ -1869,8 +1883,13 @@ def test_episode_close_rules():
     assert r.episode_close(bought, True, False, None, 0) is None
     # he has left and we are flat
     assert r.episode_close(flat, False, True, None, 0) == "cashed_out"
-    # flat at target 0 long enough
-    assert r.episode_close(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0) == "cashed_out"
+    # flat at target 0 long enough: since FILL lane 5 (2026-09-08) the
+    # clock-alone close needs his sizes READ as not held (he_holds False);
+    # the reduced form hands None and closes nothing (`he_holds_unread`;
+    # re-pinned from 'cashed_out'), the reason with he_holds=False closes
+    assert r.episode_close(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0) is None
+    assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0) == "he_holds_unread"
+    assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0, he_holds=False) == "cashed_out"
     assert r.episode_close(flat, False, False, r.MIRROR_FLAT_CLOSE_S - 1, 0) is None
     assert r.episode_close(flat, False, False, None, 0) is None
     # an order still non-terminal, or an unreadable count: nothing closes
@@ -1910,8 +1929,13 @@ def test_episode_close_fails_closed_on_garbage_and_names_why():
     assert r.episode_close_reason(bought, True, False, None, 0) == "held"
     assert r.episode_close_reason(flat, False, False, None, 0) == "not_due"
     assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S - 1, 0) == "not_due"
-    assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0) == "cashed_out"
-    assert r.episode_close_reason(never, False, False, r.MIRROR_FLAT_CLOSE_S, 0) == "cancelled"
+    # FILL lane 5: the clock-alone close reads his sizes; unread (the
+    # default None) holds by name where it read 'cashed_out' / 'cancelled'
+    assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0) == "he_holds_unread"
+    assert r.episode_close_reason(never, False, False, r.MIRROR_FLAT_CLOSE_S, 0) == "he_holds_unread"
+    assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0, he_holds=False) == "cashed_out"
+    assert r.episode_close_reason(never, False, False, r.MIRROR_FLAT_CLOSE_S, 0, he_holds=False) == "cancelled"
+    assert r.episode_close_reason(flat, False, False, r.MIRROR_FLAT_CLOSE_S, 0, he_holds=True) == "he_holds"
     for bad in (math.nan, math.inf, True, "9999", None):
         assert r.episode_close_reason(flat, False, False, bad, 0) == "not_due", bad
         assert r.episode_close_reason(flat, False, False, 9999.0, 0, flat_close_s=bad) == "not_due", bad

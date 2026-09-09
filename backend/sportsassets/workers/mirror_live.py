@@ -965,6 +965,21 @@ CENSUS_KEYS: tuple[str, ...] = (
     # (keys[-12]) by the convention every lane followed (keys[-15:-13];
     # the tail pins moved by two)
     "fill_answer_write_failed", "fill_answers_absent",
+    # FILL lane 5 (2026-09-08): the turn's record and the flat-clock
+    # guard. `he_holds`: a book flat at target 0 past MIRROR_FLAT_CLOSE_S
+    # held open because his fills still show him holding a token on the
+    # book's own side (rules.he_holds_on_axis; rules.episode_close_reason
+    # reads it on the clock-alone path -- the market's end, his confirmed
+    # vanish and the sign flip close as before); `he_holds_unread`: held
+    # because the sizes could not be read this tick (the quiet skip hands
+    # None). `reopen_refused`: a candidate refused on a condition whose
+    # newest CLOSED book closed under a sign flip (`plan.turn`), the
+    # refusal written on that closed book's plan beside the 054 row.
+    # Before E19's `drift_smaller_open` (keys[-13]) and
+    # `registered_no_increase` (keys[-12]), after E14's `take_in_band`, by
+    # the convention every lane followed (keys[-16:-13]; the tail pins
+    # moved by three)
+    "he_holds", "he_holds_unread", "reopen_refused",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -1226,6 +1241,9 @@ _fill_pending: dict[tuple[str, str], dict] = {}
 _fill_hwm: dict[int, float] = {}
 _fill_write_logged = False
 _fill_answers_absent_logged = False
+# FILL lane 5: the closed book's plan write (`reopen_refused`) failing is
+# logged once per process, counted every time (`reopen_refused_write_failed`)
+_reopen_write_logged = False
 # E5: the register unreadable (absent until 056 lands), logged once per process
 _registered_logged = False
 # E5 / P2: the two freeze reasons a frozen book may follow his exit under
@@ -6055,7 +6073,8 @@ async def _close_settled(t: _Tick, book: dict, standing: dict, status: str) -> N
 
 async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
                                vanished: bool, target: int | None, plan: dict,
-                               venue_flat: bool = False, flow_wait: bool = False) -> str:
+                               venue_flat: bool = False, flow_wait: bool = False,
+                               he_holds: bool | None = None) -> str:
     """Step E: the episode close by the rules' verdict, only with no
     non-terminal order on the book. `venue_flat` is this tick's OWN
     venue reading of the slug at zero: the sign-flip close (rules,
@@ -6074,7 +6093,22 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
     for nothing; here he has not left at all, and a close would only
     reopen the same book with the same block an hour later): the plan
     says `flow_wait`, the verdict reads `not_due`. Every other close --
-    the market ending, the vanish confirmed, the sign flip -- stands."""
+    the market ending, the vanish confirmed, the sign flip -- stands.
+
+    `he_holds` (FILL lane 5, 2026-09-08): whether his fills still show
+    him holding a token on the book's own side (rules.he_holds_on_axis
+    at the read; None from the quiet skip, which has no reading). The
+    rules read it on the flat-clock path ALONE: a flat book at target 0
+    past MIRROR_FLAT_CLOSE_S is held open `he_holds` while he holds, and
+    `he_holds_unread` while the sizes cannot be read -- both counted on
+    the census, neither a close. The market's end, the confirmed vanish
+    and the sign flip close exactly as before (the flip close is never
+    guarded: it is how the other side opens). On a close under the flip
+    (`plan.sign_flip` True) the plan records the TURN -- `turn = {from,
+    to, his_net, at}` -- before the state write, so the closed row's
+    last plan (the read path's _write_plan runs after this close) names
+    the market as turned and the candidate's refusals can be written on
+    it (`reopen_refused`, _walk_candidate)."""
     if (book["id"] in t.open_by_book or book["id"] in t.nonterminal
             or book.get("state") == "closed"):
         return "orders_open"
@@ -6101,13 +6135,26 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
         return "venue_ledger_suspect"
     why = rules.episode_close_reason(_book_state(book), None if market_live is None else not market_live,
                                      vanished, flat_for, 0,
-                                     sign_flipped=plan.get("sign_flip") is True and venue_flat is True)
+                                     sign_flipped=plan.get("sign_flip") is True and venue_flat is True,
+                                     he_holds=he_holds)
+    if why in ("he_holds", "he_holds_unread"):
+        # FILL lane 5: the flat clock ran out while he holds (or while
+        # his sizes could not be read): held open by name, nothing placed
+        _mirror_stop(why, book["whale"])
     if why not in ("cashed_out", "cancelled"):
         return why
     verdict = await le._close_mirror_episode(t.pool, book["standing_row_id"],
                                              float(book.get("gross_buy_usd") or 0.0))
     if verdict is None:
         return "close_refused"
+    if plan.get("sign_flip") is True:
+        # FILL lane 5: the flip close is a TURN -- the closed row's plan
+        # names the side it leaves, the side he crossed to, his net at
+        # the close and the clock; _walk_candidate reads it back to name
+        # every refusal of the reopen on this row (`reopen_refused`)
+        plan["turn"] = {"from": book.get("intent"),
+                        "to": ORDER_INTENT if _book_short(book) else ORDER_INTENT_SHORT,
+                        "his_net": _num(plan.get("net")), "at": t.now}
     await t.pool.execute(_SQL_BOOK_STATE, book["id"], "closed", f"closed_{verdict}")
     book["state"] = "closed"
     _forget_quiet(book["id"])
@@ -8264,7 +8311,10 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     finally:
         why = await _maybe_close_episode(t, book, r.market_live, vanished, target, plan,
                                          venue_flat=abs(float(r.venue or 0.0)) < FLAT_TOL_SHARES,
-                                         flow_wait=flow_wait)
+                                         flow_wait=flow_wait,
+                                         # FILL lane 5: his fills' sizes on the book's own axis,
+                                         # the flat clock's guard (the quiet skip hands None)
+                                         he_holds=rules.he_holds_on_axis(r.his_long, r.his_other, short))
         plan["close"] = why
         # E6: the book's outcome class and its quiet verdict -- ON TARGET
         # with nothing placed and nothing open is the one quiet verdict;
@@ -11790,6 +11840,79 @@ _SQL_BOOK_FLIP = """
 SELECT last_plan FROM mirror_books
  WHERE whale = $1 AND condition_id = $2 AND state = 'closed'
  ORDER BY id DESC LIMIT 1 /* ml-book-flip */"""
+# FILL lane 5 (2026-09-08): the same row _SQL_BOOK_FLIP reads -- the
+# newest CLOSED book on the market -- with its id, for the turn's record:
+# a candidate refused on a market whose newest closed book closed under
+# the sign flip (`plan.turn`, _maybe_close_episode) writes the refusal
+# on that row's plan (`reopen_refused`, _note_reopen_refused). The plan
+# is MERGED (`||`), never replaced, and `updated_at` is NOT touched: the
+# fills-missed census reads the plan of the newest-UPDATED book on the
+# condition, so a bump here would move which closed book it reads. The
+# row must still be 'closed' at the write (a reopened market's live book
+# is never written by it)
+_SQL_BOOK_TURN = """
+SELECT id, last_plan FROM mirror_books
+ WHERE whale = $1 AND condition_id = $2 AND state = 'closed'
+ ORDER BY id DESC LIMIT 1 /* ml-book-turn */"""
+_SQL_BOOK_REOPEN_REFUSED = """
+UPDATE mirror_books SET last_plan = COALESCE(last_plan, '{}'::jsonb) || $2::jsonb
+ WHERE id = $1 AND state = 'closed' /* ml-book-reopen-refused */"""
+
+
+async def _reopen_of(t: _Tick, whale: str, cid: str) -> int | None:
+    """FILL lane 5: the id of the newest CLOSED book on this market when
+    its plan carries `turn` (it closed under the sign flip), else None
+    -- no closed book, a closed book that did not turn, an unreadable
+    row or plan, a read that hung past CAND_REFUSAL_WRITE_TIMEOUT_S.
+    ONE read, bounded like the refusal flush; the caller caches it on
+    the candidate's context so a tick reads it at most once per pair."""
+    try:
+        row = await asyncio.wait_for(t.pool.fetchrow(_SQL_BOOK_TURN, whale, cid),
+                                     CAND_REFUSAL_WRITE_TIMEOUT_S)
+        lp = _jsonish(row["last_plan"]) if row else None
+        bid = _int_or_none(row["id"]) if row else None
+    except Exception:  # noqa: BLE001 — an unreadable prior book names no turn: the 054 row as today
+        return None
+    if bid is None or not isinstance(lp, dict) or not isinstance(lp.get("turn"), dict):
+        return None
+    return bid
+
+
+async def _note_reopen_refused(t: _Tick, whale: str, cid: str, name: str, d: dict) -> None:
+    """FILL lane 5: a candidate refused `name` on a market whose newest
+    closed book is a TURN writes `reopen_refused = {name, at, his_net,
+    ask, his_px, band}` on that closed book's plan (the newest refusal
+    overwrites; migration 054's table keeps the history) and counts
+    `reopen_refused`. Only a refusal with a verdict on the market -- the
+    candidate's quote read made (`mark` on the context: drift, the side
+    band, a stale snapshot, the venue holding, the game cap, the short
+    gates, a target of 0) -- is a reopen refused; a refusal before the
+    read (unmapped, stale, a budget cap) writes nothing. Never on an
+    abandoned tick. The read and the write are each bounded by
+    CAND_REFUSAL_WRITE_TIMEOUT_S; a failed write is counted
+    `reopen_refused_write_failed` and logged once per process. Nothing
+    here admits: the refusal stands by its own name, as before."""
+    global _reopen_write_logged
+    if t.abandoned or "mark" not in d:
+        return
+    if "reopen_of" not in d:
+        d["reopen_of"] = await _reopen_of(t, whale, cid)
+    bid = d.get("reopen_of")
+    if bid is None:
+        return
+    entry = {"reopen_refused": {"name": name, "at": float(t.now), "his_net": _num(d.get("his_net")),
+                                "ask": _num(d.get("ask")), "his_px": _num(d.get("his_px")),
+                                "band": _num(d.get("band"))}}
+    try:
+        await asyncio.wait_for(t.pool.execute(_SQL_BOOK_REOPEN_REFUSED, int(bid), json.dumps(entry, default=str)),
+                               CAND_REFUSAL_WRITE_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — a record, never a stop: the 054 row stands
+        _mirror_stop("reopen_refused_write_failed")
+        if not _reopen_write_logged:
+            _reopen_write_logged = True
+            log.warning("mirror_live: reopen_refused write on book %s failed (%s)", bid, type(exc).__name__)
+        return
+    _mirror_stop("reopen_refused", whale)
 
 
 async def _flip_since(t: _Tick, whale: str, cid: str) -> float | None:
@@ -11897,6 +12020,9 @@ async def _walk_candidate(t: _Tick, whale: str, cid: str) -> str | None:
         _cand_refusal_last[(whale, cid)] = ("opened", t.now)
     elif name not in _CAND_NOT_RECORDED:
         _note_candidate_refusal(t, whale, cid, name, d)
+        # FILL lane 5: the same refusal on a TURNED market, on the closed
+        # book's plan (one bounded read, cached on `d`; nothing admitted)
+        await _note_reopen_refused(t, whale, cid, name, d)
     return name
 
 

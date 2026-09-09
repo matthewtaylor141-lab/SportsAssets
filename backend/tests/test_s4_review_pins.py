@@ -418,7 +418,17 @@ def test_after_a_cover_fill_the_ledger_moves_toward_zero_never_past_it_realized_
     st2 = _tick(p, _NoClose(bid=0.30, ask=0.31, held={SLUG: 0}), now=NOW + 5, http=_gone())
     assert b["state"] == "live" and b["last_plan"]["close"] == "not_due"
     st2 = _tick(p, _NoClose(bid=0.30, ask=0.31, held={SLUG: 0}), now=NOW + 3601, http=_gone())
-    assert b["state"] == "closed" and _census(st2, "closed_cashed_out") == 1
+    # FILL lane 5 (2026-09-08): this tick is the quiet rotation's SKIP (on target at its
+    # last read, no fill of his inside HOT_S), which hands the flat-clock guard no reading
+    # -- held `he_holds_unread`, live (re-pinned from `closed` on the skip); the rotation's
+    # read tick reads his 0 on the short axis (400 bought, 400 sold) and the clock closes
+    assert b["state"] == "live" and b["last_plan"]["close"] == "he_holds_unread"
+    assert _census(st2, "closed_cashed_out") == 0 and _census(st2, "he_holds_unread") == 1
+    for i in range(1, int(ml.QUIET_EVERY_TICKS) + 2):
+        st2 = _tick(p, _NoClose(bid=0.30, ask=0.31, held={SLUG: 0}), now=NOW + 3601 + 30 * i, http=_gone())
+        if b["state"] == "closed":
+            break
+    assert b["state"] == "closed" and _census(st2, "closed_cashed_out") == 1 and _census(st2, "he_holds") == 0
     # a partial cover: ledger -100, avg untouched, realized on the 200
     # (his newest cover-direction fill at 0.30: the ceiling 0.31, the IOC at that cent)
     fills = [_fill(M, "BUY", 300, 0.30, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2000)]

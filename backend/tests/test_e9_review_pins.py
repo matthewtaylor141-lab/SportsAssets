@@ -785,10 +785,10 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     # its one (-68 -> -69, -69 -> -70), E16 by its four, E18 by its six, E17 by its
     # eight, E19 by its one and L7 by its one `event_stale` (-69 -> -89, -70 -> -90), E20 by its one `wrong_sign_hold`, E14b (FILL lane 1) by its one
     # `exit_take_rested` and E14 (FILL lane 2) by its one `take_in_band` (-89 -> -92, -90 -> -93), the convention every builder followed; E9's four stay keys[-8:-4]
-    # FILL lane 3 by its three (exit_take_in_band / cover_in_band / order_open_his_exit: -92 -> -95, -93 -> -96);
-    # T2 (FILL lane 4) by its two (fill_answer_write_failed / fill_answers_absent: -95 -> -97, -96 -> -98)
-    assert keys[-97:-93] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-98] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # FILL lane 3 by its three (-92 -> -95, -93 -> -96); T2 (FILL lane 4) by its two (-95 -> -97, -96 -> -98);
+    # FILL lane 5 by its three (he_holds / he_holds_unread / reopen_refused: -97 -> -100, -98 -> -101)
+    assert keys[-100:-96] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-101] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence
