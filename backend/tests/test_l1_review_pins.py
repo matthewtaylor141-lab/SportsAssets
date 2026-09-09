@@ -48,6 +48,14 @@ from tests.test_l1_rearm_window import (H24, REARM_AT, TRIPPED, _loss_reads, _mo
 from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import _census, _places, _pool, _tick, _Venue
 
+
+@pytest.fixture(autouse=True)
+def _fixtures_limit(monkeypatch):
+    """The fixtures here are test_l1_rearm_window's, cut at the $5,000 stop;
+    the live default is the owner's $10,000 since 2026-09-09 (pinned by
+    source there). The tick reads the attribute at tick time."""
+    monkeypatch.setattr(rules, "MIRROR_LOSS_STOP_USD", 5000.0)
+
 RENDER_OPS = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
 MIGRATION = pathlib.Path(__file__).resolve().parents[1] / "migrations" / "001_init.sql"
 

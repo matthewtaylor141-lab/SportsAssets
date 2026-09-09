@@ -242,8 +242,9 @@ def test_rolling_loss_breaker_pauses_copies(monkeypatch):
     realized copy losses at the floor over any rolling 24h pause the
     sleeve before any order or audit row is written; a smaller
     drawdown trades normally."""
+    # $5,000 -> $10,000 by owner order 2026-09-09 ("Make the loss stop 10k (not 5k)")
     pool = _LadderPool([])
-    pool.lost_24h = -5000.0
+    pool.lost_24h = -10000.0
     submitted = _wire(monkeypatch, pool,
                       f"tsc-epl-ars-che-{TODAY}-o3pt5")
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))
@@ -251,7 +252,7 @@ def test_rolling_loss_breaker_pauses_copies(monkeypatch):
     assert not pool.updates, "breaker fires before any row exists"
 
     pool2 = _LadderPool([])
-    pool2.lost_24h = -4999.0
+    pool2.lost_24h = -9999.0
     submitted2 = _wire(monkeypatch, pool2,
                        f"tsc-epl-ars-che-{TODAY}-o3pt5")
     asyncio.run(live_executor.maybe_execute(_payload(), 5.0))

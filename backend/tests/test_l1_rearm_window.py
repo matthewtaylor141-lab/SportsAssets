@@ -45,6 +45,17 @@ from tests.test_mirror_live_worker import (_OTHER, _ZZ, _census, _his, _places, 
 
 RENDER_OPS = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
 H24 = ml.LOSS_WINDOW_S
+
+
+@pytest.fixture(autouse=True)
+def _fixtures_limit(monkeypatch):
+    """This file's fixtures were cut at the $5,000 stop of 2026-09-06 (the
+    17:07Z trip's -5,023.95, the -5,123.95 shape that trips without the
+    re-arm key). The live default is the owner's $10,000 since 2026-09-09
+    ("Make the loss stop 10k (not 5k)"), pinned by source in
+    test_l1_the_limit_and_the_refusal_order_are_untouched; the tick reads
+    the module attribute at tick time, so the fixtures keep their limit."""
+    monkeypatch.setattr(rules, "MIRROR_LOSS_STOP_USD", 5000.0)
 # the receipt the worker wrote at 17:07:45Z, verbatim: the `prior` a
 # re-arm carries, and the standing stop the holding pins seed
 TRIPPED = {"at": "2026-09-07T17:07:45Z", "sum": -5023.9545, "books": 214, "limit": 5000.0}
@@ -159,7 +170,7 @@ def test_l1_the_17_07_shape_a_re_arm_holds_and_the_tick_counts_only_what_came_af
     instant. The same rows with no re-arm key read -5,123.95 and trip:
     the key is what holds."""
     stop = float(rules.MIRROR_LOSS_STOP_USD)
-    assert stop == 5000.0, "the limit does not change (capped_env 5000; env may only lower)"
+    assert stop == 5000.0, "the fixtures' limit (_fixtures_limit); the live default is the owner's $10,000"
     p = _pool()
     _morning_and_after(p)
     p.state["mirror_loss_rearm"] = _rearm()
@@ -366,11 +377,14 @@ def test_l1_the_mode_line_prints_the_loss_and_its_window(caplog):
 # ----------------------------------------------- 6. what does not change
 
 def test_l1_the_limit_and_the_refusal_order_are_untouched(monkeypatch):
-    assert rules.MIRROR_LOSS_STOP_USD == 5000.0
-    monkeypatch.setenv("MIRROR_LOSS_STOP_USD", "9000")
-    assert rules.capped_env("MIRROR_LOSS_STOP_USD", 5000.0) == 5000.0, "env may only lower"
+    # $5,000 -> $10,000 by owner order 2026-09-09 ("Make the loss stop 10k (not 5k)"): the live
+    # default is pinned by source (this file's fixtures run under _fixtures_limit's 5000)
+    assert 'MIRROR_LOSS_STOP_USD = capped_env("MIRROR_LOSS_STOP_USD", 10000.0)' in inspect.getsource(rules)
+    assert rules.MIRROR_LOSS_STOP_USD == 5000.0, "_fixtures_limit"
+    monkeypatch.setenv("MIRROR_LOSS_STOP_USD", "19000")
+    assert rules.capped_env("MIRROR_LOSS_STOP_USD", 10000.0) == 10000.0, "env may only lower"
     monkeypatch.setenv("MIRROR_LOSS_STOP_USD", "1000")
-    assert rules.capped_env("MIRROR_LOSS_STOP_USD", 5000.0) == 1000.0
+    assert rules.capped_env("MIRROR_LOSS_STOP_USD", 10000.0) == 1000.0
     # _increases_refusal's order, by its return lines
     assert re.findall(r"return (.+)", inspect.getsource(ml._increases_refusal)) == [
         "t.cancel_all", '"mode_env_off"', "t.mode_db_refusal", "t.increase_block",

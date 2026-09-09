@@ -819,7 +819,15 @@ MIRROR_DAY_USD = unbounded_env("MIRROR_DAY_USD")
 # -$2,445 at 22:22Z). Asked "$3,000 / $5,000 / keep $1,000" with the
 # figures beside each, Matt: "$5,000" -- roughly half of a day's peak
 # stake ($10,666 that day) at 10% of his book.
-MIRROR_LOSS_STOP_USD = capped_env("MIRROR_LOSS_STOP_USD", 5000.0)
+# $5,000 -> $10,000 by owner order (2026-09-09 ~13:55Z, "Make the loss
+# stop 10k (not 5k)"): the sleeve breaker tripped at 13:40:06Z on
+# -$8,104.36 realized in 24 h after two proportional copies of his
+# losers settled at 13:22Z (book 1032 -$2,752.00, book 1056
+# -$2,238.60; the day's mirror P&L read -$5,857.60 over 256 books).
+# The same figure on both stops (this one and the sleeve's
+# PMUS_LOSS_BREAKER_USD, which the mirror reads as its limit); still
+# downward-only from the environment; still realized only.
+MIRROR_LOSS_STOP_USD = capped_env("MIRROR_LOSS_STOP_USD", 10000.0)
 # Venue writes per tick, replaces per book per hour: the venue 429s a
 # board walk above ~3 req/s and the copy lane shares the budget. The
 # ops budget floors at ONE (review finding): a SAFE or exits-only tick

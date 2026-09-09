@@ -218,7 +218,8 @@ def test_review_a_re_arm_inside_the_skew_clamps_the_sleeves_start_to_the_tick(mo
 # --------------------------------------- 4. the threshold is the sleeve's own
 
 def test_review_the_threshold_is_the_sleeves_not_the_mirrors(monkeypatch):
-    assert float(rules.MIRROR_LOSS_STOP_USD) == 5000.0
+    # $5,000 -> $10,000 by owner order 2026-09-09 ("Make the loss stop 10k (not 5k)")
+    assert float(rules.MIRROR_LOSS_STOP_USD) == 10000.0
     monkeypatch.setattr(le, "PMUS_LOSS_BREAKER_USD", 1000.0)
     _recorder(monkeypatch, {REARM_DT: -1500.0})
     p = _pool()

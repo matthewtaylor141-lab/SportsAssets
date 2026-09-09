@@ -38,6 +38,7 @@ import pathlib
 import re
 import time
 import uuid
+from unittest import mock
 from datetime import timedelta
 
 import pytest
@@ -334,7 +335,12 @@ def test_l2_the_sleeve_sum_executes_over_the_re_arm_window_and_the_preset_reads_
             assert await le._loss_breaker_sum(c) == pytest.approx(-5300.0)
             assert await le._loss_breaker_sum(c, _window(rearm_at)) == pytest.approx(-100.0)
             assert await le._loss_breaker_sum(c, _window(None)) == pytest.approx(-5300.0)
-            assert await le._loss_breaker_tripped(c) is True
+            # the sleeve's default is the owner's $10,000 since 2026-09-09 ("Make the loss
+            # stop 10k (not 5k)"): the fixture's -5,300 trips the old $5,000, not the new bar
+            assert float(le.PMUS_LOSS_BREAKER_USD) == 10000.0
+            assert await le._loss_breaker_tripped(c) is False
+            with mock.patch.object(le, "PMUS_LOSS_BREAKER_USD", 5000.0):
+                assert await le._loss_breaker_tripped(c) is True
             # the preset, with the re-arm key as mirror-rearm writes it
             await c.execute("INSERT INTO ingestion_state (key, value) VALUES ('mirror_loss_rearm', $1::jsonb)",
                             json.dumps({"at": ml._iso(rearm_at), "by": "render-ops", "prior": None}))

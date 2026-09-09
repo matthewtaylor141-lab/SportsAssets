@@ -2884,8 +2884,15 @@ PER_FILL_BY_WHALE_SPORT = {(_W2C33, "tennis"): 0.00}
 # 3500 -> 5000 (2026-08-21, dossier promotions): two new $100-clip
 # whales add up to $12k/day of probation envelope on top of ~$10k —
 # same rule, same env override for an owner-set absolute.
+# 5000 -> 10000 by owner order (2026-09-09 ~13:55Z, "Make the loss
+# stop 10k (not 5k)"): the breaker tripped at 13:40:06Z on -$8,104.36
+# realized in 24 h (two settled copies of his losers at 13:22Z, books
+# 1032 and 1056, -$4,990.60 together). The mirror worker reads this
+# figure as its own limit (workers/mirror_live.py, the sleeve read),
+# so the two stops move together; rules.MIRROR_LOSS_STOP_USD carries
+# the same $10,000. The env var still overrides.
 PMUS_LOSS_BREAKER_USD = float(
-    os.environ.get("PMUS_LOSS_BREAKER_USD", "5000"))
+    os.environ.get("PMUS_LOSS_BREAKER_USD", "10000"))
 
 
 # RN1 CAPTURE TOLERANCE (owner mandate 2026-08-20 midday: "make any and

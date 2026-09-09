@@ -67,7 +67,8 @@ def test_caps_carry_the_spec_defaults_and_reuse_the_shared_ones(monkeypatch):
     # NO DAY CAP ("Let's remove those caps ... this limitation should
     # never force us to decline any of the possible copies"); the $1,000
     # loss stop is unchanged (owner decision 2026-09-05)
-    assert r.MIRROR_DAY_USD == math.inf and r.MIRROR_LOSS_STOP_USD == 5000.0  # owner, 2026-09-06 ~22:30Z
+    # $5,000 (owner, 2026-09-06 ~22:30Z) -> $10,000 (owner, 2026-09-09 ~13:55Z: "Make the loss stop 10k (not 5k)")
+    assert r.MIRROR_DAY_USD == math.inf and r.MIRROR_LOSS_STOP_USD == 10000.0
     # 10% of what he puts on, exact copy under $10 (decided at open)
     assert r.MIRROR_RATIO == 0.10 and r.MIRROR_SMALL_BET_USD == 10.0
     # the mirror lane's own per-order clip; the copy lane's is not read for size
