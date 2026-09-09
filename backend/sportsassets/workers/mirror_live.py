@@ -999,6 +999,19 @@ CENSUS_KEYS: tuple[str, ...] = (
     # the convention every lane followed (keys[-17:-13]; the tail pins
     # moved by four)
     "lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous",
+    # FILL lane 11 (2026-09-09): the candidate's terminal pre-check.
+    # `cand_market_closed_db`: a candidate whose markets row already read
+    # closed or resolved (rules.market_closed_fact, admission's own
+    # clause) BEFORE its paced quote read -- refused `market_closed` by
+    # the existing name with no venue call and D1's 900 s terminal memo
+    # written as a terminal venue read writes it. The count that says,
+    # per tick, whether the markets row was current for the expired
+    # cohort (22:44Z: no_mark 33 / venue_halted 33 / market_closed 0 on
+    # 33 EXPIRED candidate reads, 16.2 s). Before E19's
+    # `drift_smaller_open` (keys[-13]) and `registered_no_increase`
+    # (keys[-12]), after FILL lane 5's three, by the convention every
+    # lane followed (keys[-14]; the tail pins moved by one)
+    "cand_market_closed_db",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -6738,7 +6751,10 @@ def _timing_block(t: _Tick) -> dict:
     `candidates` (the candidate stage); the counts beside them
     (`venue_calls`, `snap_market_reads`); the books by outcome class
     (`read`: a quote read; `on_target`, `placed`, `no_mark`,
-    `terminal_skipped`, `quiet_skipped`); the budget's numbers
+    `terminal_skipped`, `quiet_skipped`) and the candidates refused by
+    their markets row before the quote read (`cand_closed_db`, FILL
+    lane 11 -- here because mirror-tick's census line is cut at 2400
+    characters and the name sorts past the cut); the budget's numbers
     (`budget`, `quiet_budget`, `quiet_reads`, `cand_budget`, `map_cap`,
     `cand_cap`). Bounded: these keys and no others."""
     tm = t.timing
@@ -6746,7 +6762,7 @@ def _timing_block(t: _Tick) -> dict:
            for k in ("walk", "orders", "books", "books_venue", "books_data", "candidates")}
     out["venue_calls"] = int(t.venue_calls)
     out["snap_market_reads"] = int(t.stats.get("snap_market_reads") or 0)
-    for k in ("read", "on_target", "placed", "no_mark", "terminal_skipped", "quiet_skipped"):
+    for k in ("read", "on_target", "placed", "no_mark", "terminal_skipped", "quiet_skipped", "cand_closed_db"):
         out[k] = int(t.outcomes.get(k) or 0)
     out.update(budget=int(VENUE_CALLS_PER_TICK), quiet_budget=int(t.quiet_budget),
                quiet_reads=int(t.quiet_reads), cand_budget=int(t.cand_budget),
@@ -11672,7 +11688,37 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
         except Exception:  # noqa: BLE001 — unknown sibling: the referees read the long token
             oa = None
         oa = str(oa) if oa else None
-    r = await _read_market(t, w, cid, slug, la, oa, fills)
+    # THE TERMINAL PRE-CHECK (FILL lane 11, 2026-09-09): the market's
+    # own row BEFORE the paced quote read. At 22:44Z the candidate
+    # stage was 33 paced reads of markets that had ENDED (timing
+    # candidates 16.2 s of a 38.0 s tick; census no_mark 33 /
+    # venue_halted 33 / market_closed 0; venue_state EXPIRED), each
+    # quote-read first and refused afterwards -- `no_mark` before
+    # admission ever consulted the row. A row that already says closed
+    # or resolved, by admission's OWN clause (rules.market_closed_fact:
+    # NULL reads as not-live, exactly as `market_closed` refuses it
+    # today), is refused `market_closed` here with no venue call and
+    # D1's terminal memo written as a terminal venue read writes it
+    # (UNMAPPED_TTL_S: a row wrongly closed waits its 900 s -- it could
+    # not have opened anyway). The row is read ONCE: the reading is
+    # handed to _read_market, which reads it itself only for a
+    # candidate that arrives without one. An unreadable or absent row
+    # (None) changes nothing: the quote read as before, then
+    # `market_unreadable` by the existing name below. The count
+    # `cand_market_closed_db` beside `market_closed` says, per tick,
+    # whether the markets row was CURRENT for the expired cohort (the
+    # resolution sweep lags; task 66). A market with a book never
+    # reaches here (`book_seen` above); the E2 guard, the caps and
+    # E13's two-reads close of a BOOK are untouched
+    mk = await _market(t, cid)
+    if mk is not None and rules.market_closed_fact(mk["closed"], mk["resolved"]):
+        _mirror_stop("market_closed", w)
+        _mirror_stop("cand_market_closed_db", w)
+        t.outcomes["cand_closed_db"] += 1      # the readable copy: short.timing (E6's block; the census line is cut at 2400 chars in mirror-tick)
+        _terminal_until[(w, cid)] = t.now + ms.UNMAPPED_TTL_S
+        d.update(market_closed=mk["closed"], market_resolved=mk["resolved"])
+        return "market_closed"
+    r = await _read_market(t, w, cid, slug, la, oa, fills, market=mk)
     d.update(mark=r.mark, ask=r.ask)
     if t.slug_states.get(slug) in ms.STATE_TERMINAL:
         # the market has ended (this read's own state, as _bbo recorded

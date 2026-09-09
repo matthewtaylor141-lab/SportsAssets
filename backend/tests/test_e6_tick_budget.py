@@ -56,7 +56,7 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
 EXPIRED = "MARKET_STATE_EXPIRED"
 TIMING_KEYS = ("walk", "orders", "books", "books_venue", "books_data", "candidates",
                "venue_calls", "snap_market_reads",
-               "read", "on_target", "placed", "no_mark", "terminal_skipped", "quiet_skipped",
+               "read", "on_target", "placed", "no_mark", "terminal_skipped", "quiet_skipped", "cand_closed_db",
                "budget", "quiet_budget", "quiet_reads", "cand_budget", "map_cap", "cand_cap")
 
 

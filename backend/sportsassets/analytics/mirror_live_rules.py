@@ -1436,6 +1436,20 @@ def _why(v: Any) -> str:
     return str(v) if isinstance(v, str) and v else "unreadable"
 
 
+def market_closed_fact(closed: Any, resolved: Any) -> bool:
+    """FILL lane 11 (2026-09-09): the markets row's own word, read the
+    way `admission` refuses `market_closed` -- its clause, spelled once
+    more here so the candidate's pre-check (mirror_live._tick_candidate,
+    BEFORE the paced quote read) and the admission (AFTER it) cannot
+    drift apart: True unless BOTH `closed` and `resolved` are the bool
+    False. NULL, a string, a number, anything unreadable reads as
+    not-live (fail closed: a row that cannot say "live" opens no book),
+    exactly as `f.market_closed is not False or f.market_resolved is
+    not False` reads it. The text is pinned equal to admission's
+    clause in test_fill_c11_cand_terminal_db.py. Pure."""
+    return closed is not False or resolved is not False
+
+
 def admission(f: AdmissionFacts, increase: bool = False) -> str | None:
     """The first named refusal, or None when the book may open.
 
@@ -3001,7 +3015,7 @@ __all__ = [
     "FLAT_TOL_SHARES", "SELL_DUST_SHARES",
     "P2_MAKER_SHARE_MIN", "P2_TAKE_SLIP_MAX", "P2_FROZEN_TICK_FRAC_MAX", "P2_CAPTURE_MIN",
     "P2_INTEGRITY_COUNTERS",
-    "mirror_target", "AdmissionFacts", "admission", "prior_episode_adoption", "adopted_block",
+    "mirror_target", "AdmissionFacts", "admission", "market_closed_fact", "prior_episode_adoption", "adopted_block",
     "venue_dust_is_ours",
     "buy_wire", "sell_wire", "buy_price", "sell_price", "plan_wire", "room_scale",
     "OpenOrder", "plan_reason_key", "keep_or_replace", "rest_decision", "replace_decision",
