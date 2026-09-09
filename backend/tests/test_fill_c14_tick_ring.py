@@ -409,7 +409,10 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # _tick_book read a0061ad32302a610 and _tick 51b72e7567d9f197 after E21; E23 (FILL lane 23:
     # the disagree adoption arm in _tick_book, the memoed cancel re-read after step O in _tick)
     # landed after and moved both -- re-cut at E23's landing
-    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "859d33ff50b22047"
+    # E24 (FILL lane 24: the desk's hand read on the disagree and closing branches of _tick_book) landed
+    # after E23 and moved _tick_book -- re-cut at E24 (859d33ff50b22047 -> d1b7103a1fcfe2e1)
+    # (the E24 review's HIGH-1 / LOW-1: the order-open return and the unrounded delta -- d1b7103a1fcfe2e1 -> ce2e3dccbb4140f4)
+    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "ce2e3dccbb4140f4"
     assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "a766496554ff357e"
     # 219f140 read 9898ac1e343b5e41; the owner's $10,000 loss stop (863ad77, docs 62) landed ahead of
     # this lane and moved the module's hash to 308fd0c45fb78448 -- the lane itself touches nothing in

@@ -133,7 +133,19 @@ def _venue(held=VENUE, trades=None, **kw):
 
 
 def _trades_reads(v):
-    return [c for c in v.calls if c[0] == "trades"]
+    """E23's OWN trade-log reads (since the earliest cancelled row's
+    placement - the skew). E24 (FILL lane 24) reads the log for the desk's
+    hand FIRST on every disagreement past the tolerance, over [the book's
+    open - the skew, now]: those reads are _hand_reads, one per wait on the
+    same residual, and never this lane's."""
+    return [c for c in v.calls if c[0] == "trades" and c[2] != HAND_SINCE]
+
+
+HAND_SINCE = NOW - 600 - le._ORPHAN_SKEW_S       # the fixture book opened NOW - 600 (_Pool._book_dict)
+
+
+def _hand_reads(v):
+    return [c for c in v.calls if c[0] == "trades" and c[2] == HAND_SINCE]
 
 
 def _statuses(v):
@@ -211,6 +223,7 @@ def test_e23_book_986_the_cancelled_rows_unbooked_fills_are_adopted_and_the_exis
     assert b["last_plan"]["disagree_fill_at"] == NOW and b["last_plan"]["kind"] == "frozen"
     assert _plan_exit(b)["held"] == "frozen_fill_this_tick"
     assert len(_trades_reads(v)) == 1 and _trades_reads(v)[0][1:] == (SLUG, FIRST_PLACED - le._ORPHAN_SKEW_S)
+    assert len(_hand_reads(v)) == 1 and v.calls.index(_hand_reads(v)[0]) < v.calls.index(_trades_reads(v)[0])   # E24: the hand first
     rec = _recent("disagree_fill_adopted", b["id"])
     assert len(rec) == 1 and rec[0]["order_row"] == o["id"] and rec[0]["order"] == "oid-6292"
     assert rec[0]["shares"] == 802.0 and rec[0]["px"] == 0.56
@@ -355,7 +368,7 @@ def test_e23_manual_shares_on_the_slug_are_unexplained_and_read_no_log():
     b, rows = _book_986(p)
     v = _venue(trades=[_log_fill("oid-6292", 802.0)])
     st = _tick(p, v, http=_mkt(HIS))
-    assert not _trades_reads(v) and b["ledger_net"] == LEDGER and b["state"] == "frozen"
+    assert not _trades_reads(v) and len(_hand_reads(v)) == 1 and b["ledger_net"] == LEDGER and b["state"] == "frozen"
     assert _census(st, "disagree_fill_unexplained") == 1 and _census(st, "disagree_fill_adopted") == 0
     assert _dis(b) == {"rows": [x["id"] for x in rows], "shares": 0.0, "delta": SURPLUS, "verdict": "unexplained", "at": NOW}
     assert "disagree_fill_at" not in b["last_plan"]
@@ -371,13 +384,13 @@ def test_e23_the_surplus_on_the_other_token_or_past_the_rows_room_is_unexplained
     b, rows = _book_986(p)
     v = _venue(held=100, trades=[_log_fill("oid-6292", 802.0)])
     st = _tick(p, v, http=_mkt(HIS))
-    assert not _trades_reads(v) and _census(st, "disagree_fill_unexplained") == 1
+    assert not _trades_reads(v) and len(_hand_reads(v)) == 1 and _census(st, "disagree_fill_unexplained") == 1
     assert _dis(b)["delta"] == 100 - LEDGER and _dis(b)["verdict"] == "unexplained" and b["ledger_net"] == LEDGER
     p2 = _pool()
     b2, rows2 = _book_986(p2)
     v2 = _venue(held=40000, trades=[_log_fill("oid-6292", 802.0)])
     st2 = _tick(p2, v2, http=_mkt(HIS))
-    assert not _trades_reads(v2) and _census(st2, "disagree_fill_unexplained") == 1 and b2["ledger_net"] == LEDGER
+    assert not _trades_reads(v2) and len(_hand_reads(v2)) == 1 and _census(st2, "disagree_fill_unexplained") == 1 and b2["ledger_net"] == LEDGER
     assert _dis(b2)["delta"] == 40000 - LEDGER
 
 
@@ -398,7 +411,7 @@ def test_e23_registered_shares_reduce_the_surplus_and_a_full_register_never_reac
     b2, rows2 = _book_986(p2)
     v2 = _venue(trades=[_log_fill("oid-6292", 802.0)])
     st2 = _tick(p2, v2, http=_mkt(HIS))
-    assert len(_trades_reads(v2)) == 1 and _census(st2, "disagree_fill_ambiguous") == 1
+    assert len(_trades_reads(v2)) == 1 and len(_hand_reads(v2)) == 1 and _census(st2, "disagree_fill_ambiguous") == 1
     assert _dis(b2)["delta"] == 402 and b2["ledger_net"] == LEDGER
 
 
@@ -412,7 +425,7 @@ def test_e23_a_cancelled_row_booked_to_its_quantity_is_not_a_candidate_and_a_boo
     b, rows = _book_986(p, rows=full)
     v = _venue(trades=[_log_fill("oid-6292", 802.0)])
     st = _tick(p, v, http=_mkt(HIS))
-    assert not _trades_reads(v) and all(_census(st, k) == 0 for k in NEW_NAMES)
+    assert not _trades_reads(v) and len(_hand_reads(v)) == 1 and all(_census(st, k) == 0 for k in NEW_NAMES)
     assert "disagree_fill" not in b["last_plan"] and b["ledger_net"] == LEDGER and b["state"] == "frozen"
     one = tuple((oid, qty, (0.0 if oid == "oid-6292" else float(qty)), why) for oid, qty, _bk, why in ROWS_986)
     p2 = _pool()
@@ -437,29 +450,32 @@ def test_e23_the_memo_bounds_the_read_to_one_per_wait_through_e22s_rail(monkeypa
     v = _venue(trades=[_log_fill("oid-6292", 500.0)])
     st = _tick(p, v, http=_mkt(HIS))
     assert len(_trades_reads(v)) == 1 and _census(st, "disagree_fill_unexplained") == 1
+    assert len(_hand_reads(v)) == 1                                  # E24: the hand's read, on the same wait
     assert b["last_plan"]["disagree_fill_at"] == NOW
     st2 = _tick(p, v, now=NOW + 40, http=_mkt(HIS))
-    assert len(_trades_reads(v)) == 1, "inside the wait: no second read"
+    assert len(_trades_reads(v)) == 1 and len(_hand_reads(v)) == 1, "inside the wait: no second read"
     assert all(_census(st2, k) == 0 for k in NEW_NAMES)
     assert b["last_plan"]["disagree_fill_at"] == NOW and _dis(b)["at"] == NOW, "the memo and the last verdict carried"
     assert b["state"] == "frozen" and b["ledger_net"] == LEDGER
     st3 = _tick(p, v, now=NOW + 300, http=_mkt(HIS))
     assert len(_trades_reads(v)) == 2 and _census(st3, "disagree_fill_unexplained") == 1
+    assert len(_hand_reads(v)) == 2
     assert b["last_plan"]["disagree_fill_at"] == NOW + 300
     # the process memo covers a plan that lost the clock (a quiet skip carries _SKIP_CARRIED alone)
-    b["last_plan"] = {k: v_ for k, v_ in b["last_plan"].items() if k not in ("disagree_fill_at", "disagree_fill")}
+    b["last_plan"] = {k: v_ for k, v_ in b["last_plan"].items() if k not in ("disagree_fill_at", "disagree_fill", "hand")}
     _tick(p, v, now=NOW + 340, http=_mkt(HIS))
-    assert len(_trades_reads(v)) == 2
+    assert len(_trades_reads(v)) == 2 and len(_hand_reads(v)) == 2
     # the plan memo covers a restart (the process memo empty)
     ml._disagree_fill_read_at.clear()
+    ml._hand_read_at.clear()
     _tick(p, v, now=NOW + 380, http=_mkt(HIS))
-    assert len(_trades_reads(v)) == 2 and b["last_plan"]["disagree_fill_at"] == NOW + 300
+    assert len(_trades_reads(v)) == 2 and len(_hand_reads(v)) == 2 and b["last_plan"]["disagree_fill_at"] == NOW + 300
     # the wait lengthened (E22's rail, min_wait_env): 40 s ticks never read again inside it
     monkeypatch.setattr(rules, "MIRROR_LOST_FILL_REREAD_S", 900.0)
     _tick(p, v, now=NOW + 620, http=_mkt(HIS))
-    assert len(_trades_reads(v)) == 2
+    assert len(_trades_reads(v)) == 2 and len(_hand_reads(v)) == 2
     _tick(p, v, now=NOW + 1200, http=_mkt(HIS))
-    assert len(_trades_reads(v)) == 3
+    assert len(_trades_reads(v)) == 3 and len(_hand_reads(v)) == 3
     # then the log names it: adopted after the wait
     v2 = _venue(trades=[_log_fill("oid-6292", 802.0)])
     st4 = _tick(p, v2, now=NOW + 2200, http=_mkt(HIS))
@@ -770,10 +786,11 @@ def test_e23_part_a_only_a_rest_with_an_id_is_re_read_and_the_site_sits_before_t
 
 def test_e23_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob():
     keys = ml.CENSUS_KEYS
-    assert keys[-19:-13] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-19:-13 -> -23:-17, -27 -> -31, -31:-27 -> -35:-31, -34:-31 -> -38:-35, -40 -> -44)
+    assert keys[-23:-17] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     # FILL lane 16 (one name) and E21 / FILL lane 10 (six) landed first and sit between lane 11's one and these six (-20 -> -27)
-    assert keys[-27] == "cand_market_closed_db" and keys[-31:-27] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert keys[-34:-31] == ("he_holds", "he_holds_unread", "reopen_refused") and keys[-40] == "take_in_band"
+    assert keys[-31] == "cand_market_closed_db" and keys[-35:-31] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert keys[-38:-35] == ("he_holds", "he_holds_unread", "reopen_refused") and keys[-44] == "take_in_band"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)

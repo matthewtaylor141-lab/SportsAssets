@@ -97,7 +97,19 @@ def _log_fill(oid="venue-x", qty=20.0, px=WIRE, ts=FILLED_AT, order_qty=float(LO
 
 
 def _trades_reads(v):
-    return [c for c in v.calls if c[0] == "trades"]
+    """E22's OWN trade-log reads (by order, since placed - 30 s). E24 (FILL
+    lane 24) reads the log for the desk's hand FIRST on every disagreement
+    past the tolerance, over [the book's open - the skew, now]: those reads
+    are _hand_reads, one per wait on the same residual, and never this
+    lane's."""
+    return [c for c in v.calls if c[0] == "trades" and c[2] != HAND_SINCE]
+
+
+HAND_SINCE = NOW - 600 - le._ORPHAN_SKEW_S       # the fixture book opened NOW - 600 (_Pool._book_dict)
+
+
+def _hand_reads(v):
+    return [c for c in v.calls if c[0] == "trades" and c[2] == HAND_SINCE]
 
 
 def _lost(b):
@@ -135,6 +147,7 @@ def test_e22_book_863_the_lost_row_is_adopted_when_the_position_proves_it_and_th
     assert b["last_plan"]["lost_fill_at"] == NOW and b["last_plan"]["kind"] == "frozen"
     assert _plan_exit(b)["held"] == "frozen_fill_this_tick"
     assert len(_trades_reads(v)) == 1 and _trades_reads(v)[0][1:] == (SLUG, PLACED - 30.0)
+    assert len(_hand_reads(v)) == 1 and v.calls.index(_hand_reads(v)[0]) < v.calls.index(_trades_reads(v)[0])   # E24: the hand first
     rec = [x for x in ml._RECENT if x["what"] == "lost_fill_adopted"]
     assert rec and rec[-1]["book"] == b["id"] and rec[-1]["order"] == "venue-x" and rec[-1]["shares"] == 28.0 and rec[-1]["px"] == 0.30
     assert ("lost_fill_adopted", "rn1") in {tuple(k.split("|")) for k in ml.mirror_census_snapshot()}
@@ -239,7 +252,7 @@ def test_e22_a_delta_that_is_not_the_lost_quantity_reads_no_log(monkeypatch):
     b, o = _book_863(p)
     v = _venue(held=-20, trades=[_log_fill(qty=28.0)])
     st = _tick(p, v, http=_mkt(100.0, 400.0))
-    assert not _trades_reads(v)
+    assert not _trades_reads(v) and len(_hand_reads(v)) == 1        # E24's hand read alone; nothing of E22's
     assert _census(st, "lost_fill_unexplained") == 1 and _census(st, "lost_fill_adopted") == 0
     assert _lost(b) == {"row": o["id"], "qty": 28, "delta": -18, "verdict": "unexplained", "at": NOW, "order": None}
     assert "lost_fill_at" not in b["last_plan"] and b["ledger_net"] == -2 and b["state"] == "frozen"
@@ -250,7 +263,7 @@ def test_e22_a_delta_that_is_not_the_lost_quantity_reads_no_log(monkeypatch):
                       kind="increase", done_at=PLACED + 60 + le._LOST_FILL_WINDOW_S, reason="order_lost")
     v2 = _venue(held=-35, trades=[_log_fill(qty=28.0)])
     st2 = _tick(p2, v2, http=_mkt(100.0, 400.0))
-    assert not _trades_reads(v2) and _census(st2, "lost_fill_unexplained") == 1
+    assert not _trades_reads(v2) and len(_hand_reads(v2)) == 1 and _census(st2, "lost_fill_unexplained") == 1
     assert _lost(b2) == {"row": None, "qty": 33, "delta": -33, "verdict": "unexplained", "at": NOW, "order": None}
     assert p2.orders[o2["id"]]["state"] == "lost" and p2.orders[o3["id"]]["state"] == "lost" and b2["ledger_net"] == -2
 
@@ -267,15 +280,16 @@ def test_e22_the_delta_on_the_other_token_is_unexplained_never_a_booking(monkeyp
     b, o = _book_863(p, ledger=-100)
     v = _venue(held=-72, trades=[_log_fill(qty=28.0)])
     st = _tick(p, v, http=_mkt(100.0, 400.0))
-    assert not _trades_reads(v)
+    assert not _trades_reads(v) and len(_hand_reads(v)) == 1        # E24's hand read alone; nothing of E22's
     assert _census(st, "lost_fill_unexplained") == 1 and _census(st, "lost_fill_adopted") == 0
     assert _lost(b) == {"row": o["id"], "qty": 28, "delta": 28, "verdict": "unexplained", "at": NOW, "order": None}
     assert b["ledger_net"] == -100 and p.orders[o["id"]]["state"] == "lost" and b["state"] == "frozen"
+    ml._hand_read_at.clear()                     # E24's memo: book ids repeat across this file's pools, the residual too (28)
     p2 = _pool()
     b2, o2 = _book_863(p2)
     v2 = _venue(held=26, trades=[_log_fill(qty=28.0)])
     st2 = _tick(p2, v2, http=_mkt(100.0, 400.0))
-    assert not _trades_reads(v2) and all(_census(st2, k) == 0 for k in NEW_NAMES)
+    assert not _trades_reads(v2) and len(_hand_reads(v2)) == 1 and all(_census(st2, k) == 0 for k in NEW_NAMES)
     assert b2["last_plan"]["wrong_sign_hold"]["venue"] == 26 and b2["ledger_net"] == -2 and "lost_fill" not in b2["last_plan"]
     assert p2.orders[o2["id"]]["state"] == "lost" and b2["frozen_reason"] == "placement_lost"
     # the pure rule on both sides: a SELL row's surplus is negative, a BUY row's positive
@@ -299,29 +313,32 @@ def test_e22_the_memo_bounds_the_read_to_one_per_wait_and_the_wait_only_lengthen
     v = _venue(trades=[])
     st = _tick(p, v, http=_mkt(100.0, 400.0))
     assert len(_trades_reads(v)) == 1 and _census(st, "lost_fill_unexplained") == 1
+    assert len(_hand_reads(v)) == 1                                  # E24: the hand's read, on the same wait
     assert b["last_plan"]["lost_fill_at"] == NOW
     st2 = _tick(p, v, now=NOW + 40, http=_mkt(100.0, 400.0))
-    assert len(_trades_reads(v)) == 1, "inside the wait: no second read"
+    assert len(_trades_reads(v)) == 1 and len(_hand_reads(v)) == 1, "inside the wait: no second read"
     assert _census(st2, "lost_fill_unexplained") == 0 and all(_census(st2, k) == 0 for k in NEW_NAMES)
     assert b["last_plan"]["lost_fill_at"] == NOW and _lost(b)["at"] == NOW, "the memo and the last verdict carried"
     assert b["state"] == "frozen" and b["ledger_net"] == -2
     st3 = _tick(p, v, now=NOW + 300, http=_mkt(100.0, 400.0))
     assert len(_trades_reads(v)) == 2 and _census(st3, "lost_fill_unexplained") == 1
+    assert len(_hand_reads(v)) == 2
     assert b["last_plan"]["lost_fill_at"] == NOW + 300
     # the process memo covers a plan that lost the clock (a quiet skip carries _SKIP_CARRIED alone)
-    b["last_plan"] = {k: v_ for k, v_ in b["last_plan"].items() if k not in ("lost_fill_at", "lost_fill")}
+    b["last_plan"] = {k: v_ for k, v_ in b["last_plan"].items() if k not in ("lost_fill_at", "lost_fill", "hand")}
     _tick(p, v, now=NOW + 340, http=_mkt(100.0, 400.0))
-    assert len(_trades_reads(v)) == 2
+    assert len(_trades_reads(v)) == 2 and len(_hand_reads(v)) == 2
     # the plan memo covers a restart (the process memo empty)
     ml._lost_fill_read_at.clear()
+    ml._hand_read_at.clear()
     _tick(p, v, now=NOW + 380, http=_mkt(100.0, 400.0))
-    assert len(_trades_reads(v)) == 2 and b["last_plan"]["lost_fill_at"] == NOW + 300
+    assert len(_trades_reads(v)) == 2 and len(_hand_reads(v)) == 2 and b["last_plan"]["lost_fill_at"] == NOW + 300
     # the wait lengthened: 40 s ticks never read again inside it
     monkeypatch.setattr(rules, "MIRROR_LOST_FILL_REREAD_S", 900.0)
     _tick(p, v, now=NOW + 620, http=_mkt(100.0, 400.0))
-    assert len(_trades_reads(v)) == 2
+    assert len(_trades_reads(v)) == 2 and len(_hand_reads(v)) == 2
     _tick(p, v, now=NOW + 1200, http=_mkt(100.0, 400.0))
-    assert len(_trades_reads(v)) == 3
+    assert len(_trades_reads(v)) == 3 and len(_hand_reads(v)) == 3
     # the rail: min_wait_env, default 300; the environment may only lengthen it
     assert 'MIRROR_LOST_FILL_REREAD_S = min_wait_env("MIRROR_LOST_FILL_REREAD_S", 300.0)' in inspect.getsource(rules)
     assert rules.min_wait_env("MIRROR_LOST_FILL_REREAD_S", 300.0) == 300.0
@@ -436,7 +453,7 @@ def test_e22_registered_shares_reduce_the_delta_and_a_cached_read_reads_nothing(
     b1, o1 = _book_863(p1)
     v1 = _venue(trades=[_log_fill(qty=28.0)])
     st1 = _tick(p1, v1, http=_mkt(100.0, 400.0))
-    assert not _trades_reads(v1) and _census(st1, "lost_fill_unexplained") == 1
+    assert not _trades_reads(v1) and len(_hand_reads(v1)) == 1 and _census(st1, "lost_fill_unexplained") == 1
     assert _lost(b1)["delta"] == -20 and b1["ledger_net"] == -2 and p1.orders[o1["id"]]["state"] == "lost"
     # the pure guard on a cached read: nothing read, nothing written, the memo carried
     p2 = _pool()
@@ -467,7 +484,7 @@ def test_e22_the_adopt_update_failing_is_logged_once_and_the_row_is_left(monkeyp
         assert all(_census(st, k) == 0 for k in NEW_NAMES) and _census(st, "write_failed") == 0
         assert _lost(b)["verdict"] == "adopt_write_failed" and _lost(b)["order"] == "venue-x"
         st2 = _tick(p, v, now=NOW + 300, http=_mkt(100.0, 400.0))
-        assert len(_trades_reads(v)) == 2 and p.orders[o["id"]]["state"] == "lost"
+        assert len(_trades_reads(v)) == 2 and len(_hand_reads(v)) == 2 and p.orders[o["id"]]["state"] == "lost"
     assert sum("could not adopt venue order" in r.message for r in caplog.records) == 1
     # the write allowed again: the next matching tick adopts
     p.raise_on.clear()
@@ -503,9 +520,10 @@ def test_e22_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     keys = ml.CENSUS_KEYS
     # FILL lane 11 landed after this lane and placed its one name nearer the key (-17:-13 -> -18:-14); -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) its six after that one (-18:-14 -> -24:-20, -14 -> -20, -19 / -21 / -27 -> -25 / -27 / -33)
-    assert keys[-31:-27] == NEW_NAMES and keys[-27] == "cand_market_closed_db"
-    assert keys[-32] == "reopen_refused" and keys[-34] == "he_holds" and keys[-40] == "take_in_band"
-    assert keys[-26] == "turn_woke_fast" and keys[-25] == "fast_order_open" and keys[-20] == "fast_status_unread"
+    # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-31:-27 -> -35:-31, -27 / -32 / -34 / -40 -> -31 / -36 / -38 / -44, -26 / -25 / -20 -> -30 / -29 / -24)
+    assert keys[-35:-31] == NEW_NAMES and keys[-31] == "cand_market_closed_db"
+    assert keys[-36] == "reopen_refused" and keys[-38] == "he_holds" and keys[-44] == "take_in_band"
+    assert keys[-30] == "turn_woke_fast" and keys[-29] == "fast_order_open" and keys[-24] == "fast_status_unread"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)

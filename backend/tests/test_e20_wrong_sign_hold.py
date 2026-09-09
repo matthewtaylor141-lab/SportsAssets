@@ -266,13 +266,16 @@ def test_e20_census_place_may_hold_list_and_the_source_shape():
     keys = ml.CENSUS_KEYS
     # E14b, E14, FILL lane 3 (three), T2 (two), FILL lane 5 (three), E22 (FILL lane 22, four) and FILL lane 11 (one) landed after E20 and sit nearer the key (-16/-15/-14 -> -29/-28/-27) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names nearer the key (-29 / -28 / -27 -> -35 / -34 / -33)
-    assert keys[-42] == "wrong_sign_hold" and keys[-41] == "exit_take_rested" and keys[-13] == "drift_smaller_open"
-    assert keys[-40] == "take_in_band"
+    # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-42 / -41 / -40 -> -46 / -45 / -44)
+    assert keys[-46] == "wrong_sign_hold" and keys[-45] == "exit_take_rested" and keys[-13] == "drift_smaller_open"
+    assert keys[-44] == "take_in_band"
     assert keys[-12] == "registered_no_increase" and len(set(keys)) == len(keys)
     assert "wrong_sign_hold" in ml._VENUE_MAY_HOLD_REASONS and "wrong_sign_trip" in ml._VENUE_MAY_HOLD_REASONS
     src = inspect.getsource(ml._tick_book)
     # the trip is guarded by the magnitude test; the hold is the other arm
-    i_gen = src.index("genuine = abs(abs(r.venue) - abs(ledger)) <= mi.VENUE_LEDGER_TOL_SHARES")
+    # E24 (FILL lane 24): the genuine inversion is judged on the book's OWN venue reading -- the walk's
+    # figure net of the desk's hand fills on the book's side (`venue_own`); with no hand fill it is r.venue
+    i_gen = src.index("genuine = abs(abs(venue_own) - abs(ledger)) <= mi.VENUE_LEDGER_TOL_SHARES")
     i_trip = src.index('await _trip_live_off(t, "wrong_sign_trip", {"book": book["id"], **detail})')
     i_hold = src.index('await _freeze(t, book, "wrong_sign_hold", detail)')
     assert i_gen < i_trip < i_hold

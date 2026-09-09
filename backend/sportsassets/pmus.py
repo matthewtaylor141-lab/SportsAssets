@@ -3190,6 +3190,65 @@ def trade_order(t: dict) -> dict:
     return {}
 
 
+MANUAL_ORDER_INDICATOR_MANUAL = "MANUAL_ORDER_INDICATOR_MANUAL"
+_UNDEFINED_WORD = "UNDEFINED"
+
+
+def trade_own_order(t: dict) -> dict:
+    """The account's OWN order on a venue trade row (E24, 2026-09-09):
+    the aggressor execution's order when the trade's `isAggressor` is
+    the bool True, the passive execution's when it is the bool False.
+    The venue prints BOTH orders of a fill in full -- a counterparty
+    aggressor's order arrives with its own intent and its own manual
+    indicator (the 15:53-16:14Z buys that hit book 1156's resting
+    shorts: isAggressor false, the aggressor order BUY / BUY_LONG /
+    MANUAL, the passive order ours) -- so 'carries an intent' is NOT
+    ours; only isAggressor says which side the account was on. Empty
+    when the flag is absent or not a bool (the own side cannot be
+    read: unknown, never guessed) or the row names no such order."""
+    agg = t.get("isAggressor")
+    if not isinstance(agg, bool):
+        return {}
+    o = ((t.get("aggressorExecution" if agg else "passiveExecution") or {}).get("order") or {})
+    return o if isinstance(o, dict) else {}
+
+
+def trade_other_order(t: dict) -> dict:
+    """The COUNTERPARTY's order on a venue trade row: the other
+    execution's order (the passive one when the account aggressed,
+    the aggressor's when it rested). Empty when isAggressor is not a
+    bool or the row names none."""
+    agg = t.get("isAggressor")
+    if not isinstance(agg, bool):
+        return {}
+    o = ((t.get("passiveExecution" if agg else "aggressorExecution") or {}).get("order") or {})
+    return o if isinstance(o, dict) else {}
+
+
+def _bare_word(v, prefix: str) -> str | None:
+    """A venue enum word without its prefix: ORDER_SIDE_SELL -> SELL,
+    ORDER_INTENT_BUY_SHORT -> BUY_SHORT; None when absent or UNDEFINED."""
+    if not v:
+        return None
+    w = str(v)
+    if w.startswith(prefix):
+        w = w[len(prefix):]
+    return None if (not w or w == _UNDEFINED_WORD) else w
+
+
+def _manual_flag(o: dict) -> bool | None:
+    """True when the order carries the venue's MANUAL indicator (placed
+    by hand through the venue's app), False when it carries any other
+    indicator word (AUTOMATIC: an API order), None when the indicator
+    is absent, blank or UNDEFINED -- unknown, never a hand fill."""
+    if not o:
+        return None
+    w = _bare_word(o.get("manualOrderIndicator"), "MANUAL_ORDER_INDICATOR_")
+    if w is None:
+        return None
+    return w == "MANUAL"
+
+
 def _opt_float(v) -> float | None:
     """A number the venue may or may not have sent: None stays None
     (unknown is not zero), an Amount or scalar becomes a float."""
@@ -3219,6 +3278,33 @@ def recent_trades(us_market_slug: str, since_ts: float,
     on a string raised on exactly the rows that mattered). The order_*
     fields come from the nested execution order (round nine) and are
     None when the venue did not name it -- unknown, never zero.
+
+    E24 (2026-09-09, FILL lane 24; the desk's hand): five more keys,
+    every earlier key byte for byte -- `manual` (True when the account's
+    OWN order on the row, trade_own_order, carries the venue's
+    MANUAL_ORDER_INDICATOR_MANUAL: placed by hand through the venue's
+    app; False on any other indicator word; None when the indicator or
+    the own side is absent), `own_order_id` (that order's id),
+    `own_side` (its contract side, BUY / SELL: a SELL is a short or a
+    sale of the long token, a BUY the long token bought or a short
+    covered), `own_intent` (its intent word, BUY_SHORT / SELL_SHORT /
+    BUY_LONG / SELL_LONG, None when UNDEFINED) and `self` (True when the
+    account sat on BOTH sides of the trade). THE OWN SIDE IS isAggressor's
+    (trade_own_order): the venue prints both orders of a fill in full and
+    a counterparty aggressor's order arrives with its intent and its
+    manual indicator -- the 20 rows of 15:53-16:14Z on
+    aec-wta-qinzhe-eleryb-2026-09-08 read isAggressor false / the
+    aggressor order BUY BUY_LONG MANUAL / the passive order ours
+    (BUY_SHORT AUTOMATIC) -- so 'both orders carry an intent' is NOT a
+    self-trade (27 of the day's 44 rows on that market carry a defined intent
+    on both orders and would read so; a 28th carries UNDEFINED on the
+    aggressor, which _bare_word reads as no intent).
+    The rule read from the rows: a self-trade is the account on both
+    sides, and the venue then prints the account's OTHER order as the
+    counterparty -- so `self` is True when the counterparty order's id is
+    one of the account's own order ids in the same read (or when one
+    trade id is printed twice, once per side); no row of the day reads
+    so (no counterparty id of the 44 is an own id, no trade id repeats).
     """
     from .api.pmus_account import _amt, _any_ts
 
@@ -3227,6 +3313,8 @@ def recent_trades(us_market_slug: str, since_ts: float,
     cursor = ""
     want = (us_market_slug or "").lower()
     reached = False
+    own_ids: set[str] = set()
+    trade_ids: dict[str, int] = {}
     for _ in range(max_pages):
         resp = client.portfolio.activities(
             {"limit": 100, "sortOrder": "SORT_ORDER_DESCENDING",
@@ -3248,6 +3336,15 @@ def recent_trades(us_market_slug: str, since_ts: float,
                 continue
             o = trade_order(t)
             agg = t.get("isAggressor")
+            own = trade_own_order(t)
+            other = trade_other_order(t)
+            own_id = str(own.get("id")) if own.get("id") else None
+            other_id = str(other.get("id")) if other.get("id") else None
+            tid = str(t.get("id")) if t.get("id") else None
+            if own_id:
+                own_ids.add(own_id)
+            if tid:
+                trade_ids[tid] = trade_ids.get(tid, 0) + 1
             out.append({
                 "qty": _amt(t.get("qty")),
                 "price": _amt(t.get("price")),
@@ -3260,6 +3357,18 @@ def recent_trades(us_market_slug: str, since_ts: float,
                 "order_tif": (str(o.get("tif")).replace("TIME_IN_FORCE_", "")
                               if o.get("tif") else None),
                 "aggressor": (bool(agg) if isinstance(agg, bool) else None),
+                # E24: the account's own side of the fill, by isAggressor
+                "manual": _manual_flag(own),
+                "own_order_id": own_id,
+                "own_side": _bare_word(own.get("side"), "ORDER_SIDE_"),
+                "own_intent": _bare_word(own.get("intent"), "ORDER_INTENT_"),
+                "own_qty": _opt_float(own.get("quantity")),
+                "own_price": _opt_float(own.get("price")),
+                "own_tif": (str(own.get("tif")).replace("TIME_IN_FORCE_", "")
+                            if own.get("tif") else None),
+                "_other_order_id": other_id,
+                "_trade_id": tid,
+                "self": False,
             })
         cursor = resp.get("nextCursor") or ""
         if resp.get("eof") or not cursor:
@@ -3271,6 +3380,12 @@ def recent_trades(us_market_slug: str, since_ts: float,
     if not reached:
         raise RuntimeError(f"trade log truncated after {max_pages} pages "
                            f"before reaching {int(since_ts)}")
+    # E24: the self-trade flag, decided over the whole read (the rule in
+    # the docstring): the counterparty's order is one of the account's
+    # own, or the trade id is printed twice
+    for row in out:
+        oth, tid = row.pop("_other_order_id"), row.pop("_trade_id")
+        row["self"] = bool((oth and oth in own_ids) or (tid and trade_ids.get(tid, 0) > 1))
     return out
 
 

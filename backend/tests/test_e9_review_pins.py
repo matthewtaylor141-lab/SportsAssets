@@ -796,8 +796,9 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     # FILL lane 5 by its three (he_holds / he_holds_unread / reopen_refused: -97 -> -100, -98 -> -101);
     # E22 (FILL lane 22) by its four lost_fill_* names and FILL lane 11 by its one (-100 -> -105, -101 -> -106);
     # E23 (FILL lane 23) by its six cancel_fill_* / disagree_fill_* names (-105 -> -111, -106 -> -112) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
-    assert keys[-118:-114] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-119] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-118:-114 -> -122:-118, -119 -> -123)
+    assert keys[-122:-118] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-123] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence

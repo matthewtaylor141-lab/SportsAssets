@@ -689,13 +689,15 @@ def test_e14_the_census_name_sits_before_drift_smaller_open_and_the_pins_hold():
     assert keys[keys.index("take_in_band") + 14] == "turn_woke_fast"
     assert keys[keys.index("take_in_band") + 15] == "fast_order_open"
     assert keys[keys.index("take_in_band") + 21] == "cancel_fill_late"
-    assert keys[keys.index("take_in_band") + 27] == "drift_smaller_open"
+    # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key between E23's six and the key (+27 -> +31; -40 -> -44)
+    assert keys[keys.index("take_in_band") + 27] == "hand_explained"
+    assert keys[keys.index("take_in_band") + 31] == "drift_smaller_open"
     # landed after E20 (`wrong_sign_hold`) and E14b (`exit_take_rested`), which sit before it by the same convention
     assert keys[keys.index("take_in_band") - 1] == "exit_take_rested"
     assert keys[keys.index("take_in_band") - 2] == "wrong_sign_hold"
     assert keys[keys.index("take_in_band") - 3] == "adopt_prior_venue_settled"
     # FILL lane 3 (three names), T2 (two), FILL lane 5 (three), E22 (FILL lane 22, four), FILL lane 11 (one) and E23 (FILL lane 23, six) placed theirs after this one (-14 -> -33) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
-    assert keys[-40] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-44] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert ml._new_stats()["census"]["take_in_band"] == 0
     # the one emit site, at the decision, beside the at-level take's

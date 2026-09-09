@@ -1110,6 +1110,30 @@ CENSUS_KEYS: tuple[str, ...] = (
     "cancel_fill_late", "cancel_fill_unread",
     "disagree_fill_adopted", "disagree_fill_unread", "disagree_fill_unexplained",
     "disagree_fill_ambiguous",
+    # E24 (2026-09-09; FILL lane 24): the desk's hand. A fill the venue
+    # marks MANUAL on the account's OWN side of the trade (isAggressor
+    # picks the side; pmus.trade_own_order) is the desk's, not the
+    # book's (_hand_net, on the venue-vs-ledger disagreement of a live,
+    # frozen or closing book). `hand_explained`: hand fills that ADD to
+    # the book's side (or the desk's own opposite position past the
+    # book's shares) are the fourth explained term -- the comparison
+    # agrees net of them, no freeze, nothing sized on them.
+    # `hand_adopted`: hand fills that REDUCE the book's own shares (the
+    # desk selling the book's long, covering the book's short) booked as
+    # the book's exit at the hand's prices (_book_hand_reduce: the
+    # standing row, the ledger, realized), the adopted shares recorded
+    # per hand order id in ingestion_state so no read books them twice.
+    # `hand_unread`: the log could not be read (raises, truncated, the
+    # book's open clock or the adoption record unreadable).
+    # `hand_ambiguous`: a self-trade, a hand fill the log does not price
+    # or name an order for, one order id printed with disagreeing
+    # figures, the record naming more than the log, or a hand net that
+    # leaves the comparison outside the tolerance either way -- nothing
+    # adopted, the freeze as today (E5's register is the road). Before
+    # E19's `drift_smaller_open` (keys[-13]) and `registered_no_increase`
+    # (keys[-12]), after E23's six, by the convention every lane followed
+    # (keys[-17:-13]; the tail pins moved by four)
+    "hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -1406,6 +1430,25 @@ _CANCEL_REREAD_TRIES = 3
 _cancel_reread_pending: dict[int, dict] = {}
 _disagree_fill_read_at: dict[int, float] = {}
 _disagree_fill_write_logged = False
+# E24 (2026-09-09, FILL lane 24): the desk's hand. The per-process memo of
+# the last trade-log read _hand_net made per book -- {at: the clock,
+# residual: venue - ledger - manual - registered as it stood, hand: the
+# verdict record} -- beside the plan's own `hand` (the durable memo; this
+# one covers a quiet skip, whose plan carries _SKIP_CARRIED alone). The
+# read repeats no more often than rules.MIRROR_LOST_FILL_REREAD_S per
+# book ON THE SAME RESIDUAL; a residual that moved past
+# mi.VENUE_LEDGER_TOL_SHARES is a new reading (the desk traded again:
+# book 1156's second hand short 3 min 20 s after the first) and reads
+# at once, at most once per book per tick. Bounded at
+# _LOST_FILL_MEMO_MAX books. The adopted shares are recorded per hand
+# order id in ingestion_state (`_HAND_STATE_PREFIX` + the book id) IN THE
+# BOOKING'S TRANSACTION, so a later read of the same log never books them
+# twice; the record write or the booking failing is logged once per
+# process.
+_HAND_STATE_PREFIX = "mirror_hand:"
+_HAND_EXPLAINS = frozenset({"explained", "adopted"})
+_hand_read_at: dict[int, dict] = {}
+_hand_write_logged = False
 # FILL lane 5: the closed book's plan write (`reopen_refused`) failing is
 # logged once per process, counted every time (`reopen_refused_write_failed`)
 _reopen_write_logged = False
@@ -5771,6 +5814,12 @@ class _Reading:
     # beside `manual` and, on a book, counted only when its sign is the
     # book's leg's (_tick_book)
     registered: float = 0.0
+    # E24 (FILL lane 24): the desk's hand fills that ADD to the book's
+    # side on the slug, signed in long-token terms, as _tick_book judged
+    # them this tick (the plan's `hand.adds` while its memo holds) --
+    # the fourth explained term; _frozen_venue_own subtracts it so no
+    # frozen reduce ever sells or buys back a hand share. 0 until judged
+    hand_adds: int = 0
 
 
 async def _read_market(t: _Tick, whale: str, cid: str, slug: str, la: str, oa: str | None,
@@ -8043,6 +8092,9 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         plan = {"kind": "closing", "market_live": market_live}
         if venue_ended is not None:
             plan["venue_terminal"] = venue_ended
+        # E24: a closing book the desk reduced or covered by hand (book
+        # 1075) adopts the hand's exit before the close reads the ledger
+        await _hand_closing(t, book, plan)
         why = await _maybe_close_episode(t, book, False if venue_ended is not None else market_live, False,
                                          0 if abs(float(book.get("ledger_net") or 0)) < FLAT_TOL_SHARES else None,
                                          plan)
@@ -8629,12 +8681,57 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # wrong-sign trip below keeps its one-read trip (an inversion is
     # not a lag). A book already frozen re-freezes as before (V3-2)
     delta = venue_int - explained
+    # E24 (FILL lane 24): THE DESK'S HAND IS THE FOURTH EXPLAINED TERM.
+    # On a disagreement past the tolerance (after the desk's `manual`
+    # rows and the register: the existing terms first) the venue's trade
+    # log is read for the account's own MANUAL fills on the slug
+    # (_hand_net: a fresh walk, once per E22's wait on the same residual;
+    # the record carried on the plan while the wait holds). Hand fills on
+    # the book's side explain the venue (`hand.adds`: never sized, never
+    # sold or bought back -- the frozen seat and the wrong-sign hold read
+    # the venue net of them); hand fills that REDUCED the book's own
+    # shares are adopted as the book's exit and the book is judged on its
+    # new ledger NEXT tick (the plan above sized on the old one)
+    hand = None
+    hand_adds = 0
+    if abs(delta) > mi.VENUE_LEDGER_TOL_SHARES:
+        hand = await _hand_net(t, book, venue_int, ledger, float(r.manual or 0.0), registered, prior_plan, plan)
+        if hand is not None and hand.get("verdict") == "order_open":
+            # the hand REDUCED the book under an order of ours: the order
+            # is cancelled (in _hand_net), nothing is adopted and nothing
+            # is planned this tick -- the ledger may have moved under the
+            # cancel's settle while the walk did not; the next fresh walk
+            # reads the hand again with nothing standing
+            await _write_plan(t, book, r, target, tg["raw"], drift.drift, plan.get("his_level"),
+                              "hand_order_open", {**plan, "kind": "hand_order_open"})
+            return
+        if hand is not None and hand.get("verdict") in _HAND_EXPLAINS:
+            hand_adds = int(round(_num(hand.get("adds")) or 0.0))
+            if (_num(hand.get("adopted")) or 0.0) > 0.0 and _num(hand.get("at")) == float(t.now):
+                # the adoption moved the ledger THIS tick: the plan sized
+                # above is the old ledger's; nothing more is placed or
+                # frozen on it, and the next tick reads the book as the
+                # hand left it (flat -> the flat path; else the live plan)
+                await _write_plan(t, book, r, target, tg["raw"], drift.drift, plan.get("his_level"),
+                                  "hand_adopted", {**plan, "kind": "hand_adopted"})
+                return
+            # the comparison the book was explained on: the UNROUNDED
+            # adds (the seat below takes the whole-share figure); a
+            # fractional manual row beside a fractional hand fill could
+            # otherwise leave the rounded delta past the tolerance on a
+            # book the hand explained (gap 0.7, delta 1.2: E16's suspect)
+            delta = venue_int - explained - float(_num(hand.get("adds")) or 0.0)
+    r.hand_adds = hand_adds
+    venue_own = venue_int - hand_adds                     # the book's own venue reading, net of the hand
+    venue_seat = float(venue_int - r.manual - registered) - float(hand_adds)
     prior_suspect = prior_plan.get("venue_ledger_suspect")
     prior_suspect = prior_suspect if isinstance(prior_suspect, dict) else None
     suspect_hold = False
     if abs(delta) > mi.VENUE_LEDGER_TOL_SHARES:
         detail = {"venue": venue_int, "ledger": ledger, "manual": r.manual, "registered": registered}
-        if r.venue != 0 and ledger != 0 and (r.venue < 0) != (ledger < 0):
+        if hand_adds:
+            detail["hand"] = hand_adds
+        if venue_own != 0 and ledger != 0 and (venue_own < 0) != (ledger < 0):
             # SYMMETRIC (brief B5): the venue holds the OTHER sign of
             # what the book booked, on either book. On a short book it
             # is also the position-sign proof's negative verdict -- the
@@ -8662,7 +8759,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             # freeze, the E13 may-hold list), the desk keeps trading, and
             # the plan carries the reading. Fail closed on the book, never
             # on the desk for a reading that is not the inversion
-            genuine = abs(abs(r.venue) - abs(ledger)) <= mi.VENUE_LEDGER_TOL_SHARES
+            genuine = abs(abs(venue_own) - abs(ledger)) <= mi.VENUE_LEDGER_TOL_SHARES
             if genuine:
                 if short:
                     await le._record_short_proof(t.pool, ok=False, net=r.venue, slug=slug)
@@ -8790,7 +8887,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # the venue saying our BUY_SHORT holds the short side -- the same
     # reading the per-fill lane's echo tallies, recorded ONCE per
     # episode into the same key the short gate reads
-    if (short and ledger < 0 and r.venue < 0 and r.manual == 0 and registered == 0
+    if (short and ledger < 0 and r.venue < 0 and r.manual == 0 and registered == 0 and hand_adds == 0
             and prior_plan.get("short_proof") is None):
         await le._record_short_proof(t.pool, ok=True, net=r.venue, slug=slug)
         plan["short_proof"] = "ok"
@@ -8850,7 +8947,10 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # mi.plan's own venue check would refuse every plan, the exit with
     # it, and the reading is exactly what is not yet believed; the add
     # is already refused by name above
-    seat_venue = float(ledger) if suspect_hold else float(venue_int - r.manual - registered)
+    # E24: the venue seat is the book's OWN reading -- net of the desk's
+    # hand fills on its side (venue_seat) -- so a hand short beside a
+    # short book never reads as the book's, on every re-plan below
+    seat_venue = float(ledger) if suspect_hold else venue_seat
     p = mi.plan(target, float(ledger), seat_venue, mi.Book(r.bid, r.ask),
                 his_px, None if plan.get("short_share_cap") is not None else r.mark)
     kind = None
@@ -8914,7 +9014,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                                          cap_usd=rules.MIRROR_NET_CAP_USD, allow_short=shorts)
             wp = None
             if not ref_tg.get("refusal") and ref_tg.get("target") is not None:
-                wp = mi.plan(int(ref_tg["target"]), float(ledger), float(venue_int - r.manual - registered),
+                wp = mi.plan(int(ref_tg["target"]), float(ledger), venue_seat,
                              mi.Book(r.bid, r.ask), his_px,
                              None if plan.get("short_share_cap") is not None else r.mark)
             held = t.open_by_book.get(book["id"])
@@ -8980,7 +9080,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                 plan[mi.REDUCE_UNWITNESSED] = {"from": ref_target, "to": target, "cause": cause}
                 wp = None
                 if isinstance(ref_target, int) and ref_target != 0:
-                    wp = mi.plan(int(ref_target), float(ledger), float(venue_int - r.manual - registered),
+                    wp = mi.plan(int(ref_target), float(ledger), venue_seat,
                                  mi.Book(r.bid, r.ask), his_px,
                                  None if plan.get("short_share_cap") is not None else r.mark)
                 held = t.open_by_book.get(book["id"])
@@ -9041,7 +9141,8 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             reason = await _act(t, book, r, p, kind, his_px, plan, cancel_reason) or reason
     finally:
         why = await _maybe_close_episode(t, book, r.market_live, vanished, target, plan,
-                                         venue_flat=abs(float(r.venue or 0.0)) < FLAT_TOL_SHARES,
+                                         # E24: the book's OWN venue reading, net of the desk's hand
+                                         venue_flat=abs(float(r.venue or 0.0) - hand_adds) < FLAT_TOL_SHARES,
                                          flow_wait=flow_wait,
                                          # FILL lane 5: his fills' sizes on the book's own axis,
                                          # the flat clock's guard (the quiet skip hands None)
@@ -9851,11 +9952,355 @@ def _frozen_clock(plan: dict, prior_plan: dict, fills: list, now: float) -> floa
 def _frozen_venue_own(r: _Reading) -> int:
     """The book's OWN position as the venue reports it: the slug's
     signed net less the desk's `manual` shares (explained, the desk's
-    to manage), whole shares. THE REGISTER IS NOT SUBTRACTED (E5 review
-    F3, option b): registered shares are the book's to exit toward his
-    net -- the register explains them to the freeze comparison, it does
-    not hand them to anyone else."""
-    return int(r.venue) - int(round(float(r.manual or 0.0)))
+    to manage) and less the desk's HAND fills that add to the book's
+    side (E24, `r.hand_adds`: the venue's own MANUAL indicator on the
+    account's side of the fill -- book 1156's two $1,000 hand shorts of
+    16:17:34Z / 16:20:55Z were bought back by this seat inside a minute),
+    whole shares. THE REGISTER IS NOT SUBTRACTED (E5 review F3, option
+    b): registered shares are the book's to exit toward his net -- the
+    register explains them to the freeze comparison, it does not hand
+    them to anyone else."""
+    return int(r.venue) - int(round(float(r.manual or 0.0))) - int(getattr(r, "hand_adds", 0) or 0)
+
+
+# --------------- E24 (FILL lane 24): the desk's hand
+#
+# 2026-09-09 (task 91; hard2/vt_1156_1639.txt, manual_own_1648.tsv): the
+# venue marks an order placed through its app MANUAL_ORDER_INDICATOR_MANUAL
+# on the account's OWN side of every fill (the aggressor order when the
+# trade's isAggressor is true, else the passive one -- pmus.trade_own_order;
+# a counterparty aggressor's order is printed with its own intent and
+# indicator, so 'has an intent' is not ours). Since the mirror's first
+# day the venue's positions walk was read as the BOOK's position: book
+# 1156 (BUY_SHORT, ledger -246.82 by 16:17:59Z) read venue -2049 against
+# ledger -247 after the desk's hand short CCZ08XN74SX4 (SELL / BUY_SHORT
+# 1802.11 DAY @0.36, filled 1802 @0.46, cost 999.9994 at 16:17:34.997Z),
+# froze venue_ledger_disagree at 16:18:36Z, and the frozen exit -- sized
+# on venue_own -- bought the desk's short back (7065: BUY 1813 IOC filled
+# @0.565 at 16:19:22Z, "sold 1566 past the ledger"); the second hand short
+# CCZ2TT1YCT3P (1980.22 @0.41, filled 1980 @0.51 at 16:20:55Z) was bought
+# back the same way (7076 @0.52 at 16:21:11Z). Book 986's 802 surplus was
+# the hand buy CCX413N48SX0 (802.67 DAY @0.70, 713 @0.61 + 20 @0.60 + 25 +
+# 25 @0.60 + 20 @0.59 at 14:03:24Z), not E23's unbooked cancelled rests;
+# book 1075 (BUY_SHORT, ledger -3966) was covered whole by hand
+# (CCYC06E66SJH, 3966.24 IOC @0.99, 1000 + 1000 + 1000 + 109 + 157 + 700
+# @0.97 at 15:32:36Z) with the ledger still holding -3966; book 1129
+# (BUY_LONG 4852) was sold by hand 5038 @0.41 at 14:43:57Z (CCXMNEBPRSJH)
+# -- the book's 4,852 and 186 more of the desk's own. THE RULE: on the
+# venue-vs-ledger disagreement (past mi.VENUE_LEDGER_TOL_SHARES after the
+# desk's `manual` rows and E5's register: the existing terms first) of a
+# live, frozen or closing book, on a FRESH walk, the venue's trade log for
+# the slug over [the book's open - le._ORPHAN_SKEW_S, now] is read once
+# per rules.MIRROR_LOST_FILL_REREAD_S per book on the same residual (a
+# moved residual reads at once) and the account's own MANUAL fills are
+# walked in time order against the book's ledger in long-token terms (a
+# hand BUY of the long / cover of a short is +, a hand SELL / short is -):
+# the part that ADDS to the book's side (or lands past the book's shares
+# on the other side: the desk's own opposite position) is `adds` -- the
+# fourth explained term, never sized, never sold or bought back (the
+# frozen seat subtracts it, the wrong-sign hold reads the venue net of
+# it); the part that REDUCES the book's own shares is ADOPTED as the
+# book's exit at the hand's fill-weighted price (_book_hand_reduce: the
+# standing row's sale, the ledger, realized -- the same primitives a
+# terminal exit fill books through, no order row: a hand order is not
+# ours to record under 059), the adopted shares recorded per hand order
+# id in ingestion_state inside the booking's transaction so the same log
+# never books them twice, and the book is judged on its new ledger the
+# next tick (a whole-book hand reduce leaves the ledger flat: the
+# closing branch's own close, the live path's flat clock / vanish /
+# flip, exactly as today -- never a thaw, never a new close path). The
+# adoption and the explanation are one judgement: the hand net must
+# leave the whole-share comparison inside the tolerance in EITHER
+# direction, else `hand_ambiguous` and nothing is adopted. No rail of
+# the lane's own: E22's wait, the freeze's own tolerance, no knob, no
+# migration, no decision word.
+
+
+async def _hand_log_fills(t: _Tick, slug: str, since: float) -> list | None:
+    """The venue's trade log for one market since `since`, as
+    pmus.recent_trades hands it (E24's `manual` / `own_*` / `self` keys
+    beside E22's); None when it could not be read (raises, truncated)."""
+    try:
+        fills = await _venue_read(t, t.pmus.recent_trades, slug, since)
+    except Exception as exc:  # noqa: BLE001 — unreadable is not "no hand fills"
+        log.warning("mirror_live: trade log for %s unreadable (%s); the hand is unread",
+                    slug, type(exc).__name__)
+        return None
+    return list(fills or [])
+
+
+async def _hand_adopted_record(t: _Tick, book: dict) -> dict | None:
+    """The shares already adopted from the desk's hand on this book, per
+    hand order id (ingestion_state `mirror_hand:<book>` -> {"adopted":
+    {order id: shares}}). {} when none; None when the key cannot be read
+    or is malformed (nothing is judged without it: `hand_unread`)."""
+    value, err = await _state(t.pool, f"{_HAND_STATE_PREFIX}{book['id']}")
+    if err is not None:
+        return None
+    if value is None:
+        return {}
+    if not isinstance(value, dict):
+        return None
+    ad = value.get("adopted")
+    if ad is None:
+        return {}
+    if not isinstance(ad, dict):
+        return None
+    out: dict[str, float] = {}
+    for k, v in ad.items():
+        q = _num(v)
+        if q is None or q < 0.0:
+            return None
+        out[str(k)] = q
+    return out
+
+
+async def _book_hand_reduce(t: _Tick, book: dict, shares: float, px: float,
+                            adopted: dict[str, float], orders: list) -> str:
+    """Book the desk's hand REDUCE of the book's own shares as the book's
+    exit (E24): ONE transaction -- the standing row's sale
+    (le._book_mirror_sell: min(shares, the leg, the row's shares), the
+    row's pnl), the book's ledger / gross_sell / realized
+    (rules.book_sell, _SQL_BOOK_LEDGER_SELL) and the adoption record
+    (`mirror_hand:<book>`: the adopted shares per hand order id, summed
+    onto what earlier reads recorded) -- so a read after a crash between
+    the two never books the same fill twice. No mirror_orders row: the
+    hand order is not a placement of ours (migration 059 records the
+    word that placed a row; a hand order carries none). Returns 'booked',
+    'refused:<why>' (nothing written) or 'write_failed' (rolled back,
+    counted, the book frozen under it as _book_delta's failure is)."""
+    global _hand_write_logged
+    intent = _book_intent(book)
+    sid = book["standing_row_id"]
+    ns = None
+    try:
+        async with t.pool.acquire() as conn:
+            async with conn.transaction():
+                res = await le._book_mirror_sell(conn, sid, float(shares), float(px),
+                                                 float(book.get("ledger_net") or 0.0), intent=intent)
+                if res.get("refusal"):
+                    raise _Refused(str(res["refusal"]))
+                if res.get("overfill"):
+                    raise _Refused("overfill")          # never: the part adopted is inside the leg
+                booked = float(res.get("booked") or 0.0)
+                booking = rules.book_sell(_book_state(book), booked, float(px))
+                if booking.refusal:
+                    raise _Refused(str(booking.refusal))
+                ns = booking.state
+                await conn.execute(_SQL_BOOK_LEDGER_SELL, book["id"], int(round(ns.ledger_net)),
+                                   ns.gross_sell_usd, ns.realized_pnl)
+                await _write_state(conn, f"{_HAND_STATE_PREFIX}{book['id']}",
+                                   {"adopted": adopted, "at": t.now, "orders": orders, "px": px})
+    except _Refused as exc:
+        log.error("mirror_live: book %s: the desk's hand reduce of %s @ %s refused by the ledger (%s); "
+                  "nothing booked", book["id"], shares, px, exc.why)
+        return f"refused:{exc.why}"
+    except Exception as exc:  # noqa: BLE001 — a write failure is named; nothing moved
+        _mirror_stop("write_failed", book.get("whale"))
+        if not _hand_write_logged:
+            _hand_write_logged = True
+            log.error("mirror_live: book %s: booking the desk's hand reduce failed (%s); nothing booked",
+                      book["id"], type(exc).__name__, exc_info=True)
+        await _freeze(t, book, "write_failed")
+        return "write_failed"
+    book.update(ledger_net=int(round(ns.ledger_net)), avg_cost=ns.avg_cost,
+                gross_sell_usd=ns.gross_sell_usd, realized_pnl=ns.realized_pnl)
+    t.filled_books.add(book["id"])
+    return "booked"
+
+
+async def _hand_net(t: _Tick, book: dict, venue_int: int, ledger: int, manual: float,
+                    registered: float, prior_plan: dict, plan: dict) -> dict | None:
+    """The paragraph above. Called on a book whose venue reading
+    disagrees with ledger + manual + registered past the tolerance;
+    returns the hand record -- {net, adds, reduces, fills, at, verdict,
+    residual, orders, adopted, px} -- the last one carried while its
+    wait holds on the same residual, a new one after a read; None when
+    nothing is known (no read yet on a cached walk or inside the wait
+    with no carried record). The record rides on plan['hand']; the
+    adoption, when the hand REDUCED the book's own shares, is booked
+    here and the caller judges the book on its new ledger next tick.
+    Every fail-closed reading names a hold and adopts nothing."""
+    w = book.get("whale")
+    bid = book["id"]
+    prior = prior_plan.get("hand") if isinstance(prior_plan.get("hand"), dict) else None
+    memo = _hand_read_at.get(bid)
+    residual = int(round(float(venue_int) - float(ledger) - float(manual or 0.0) - float(registered or 0.0)))
+    # the newer of the plan's record and the process memo's (the memo
+    # covers a quiet skip, the plan a restart)
+    carried, last_at, last_res = None, None, None
+    for cand, at, res in ((prior, _num((prior or {}).get("at")), _num((prior or {}).get("residual"))),
+                          ((memo or {}).get("hand"), _num((memo or {}).get("at")), _num((memo or {}).get("residual")))):
+        if at is not None and (last_at is None or at > last_at):
+            carried, last_at, last_res = (cand if isinstance(cand, dict) else None), at, res
+    if carried is not None:
+        plan["hand"] = carried                              # the last verdict, until a new one
+    inside = (last_at is not None and t.now - last_at < float(rules.MIRROR_LOST_FILL_REREAD_S)
+              and last_res is not None and abs(float(residual) - float(last_res)) <= mi.VENUE_LEDGER_TOL_SHARES)
+    if t.walk_at is None or inside:
+        return carried                                      # a cached read proves nothing; the memo
+    if int(t.venue_calls) + int(getattr(t, "fast_calls", 0) or 0) >= VENUE_CALLS_PER_TICK:
+        return carried                                      # the budget spent: nothing this tick
+    rec: dict[str, Any] = {"net": 0.0, "adds": 0.0, "reduces": 0.0, "fills": 0, "at": t.now,
+                           "residual": residual, "orders": [], "adopted": 0.0, "px": None}
+
+    def _verdict(word: str) -> dict:
+        rec["verdict"] = word
+        plan["hand"] = rec
+        _hand_read_at[bid] = {"at": t.now, "residual": residual, "hand": rec}
+        if len(_hand_read_at) > _LOST_FILL_MEMO_MAX:
+            for k in sorted(_hand_read_at, key=lambda k: _hand_read_at[k]["at"])[:len(_hand_read_at) // 2]:
+                _hand_read_at.pop(k, None)
+        return rec
+
+    opened = _num(book.get("opened_ts"))
+    if opened is None:
+        _mirror_stop("hand_unread", w)                      # no window without the book's clock
+        return _verdict("unread")
+    since = float(opened) - le._ORPHAN_SKEW_S
+    record = await _hand_adopted_record(t, book)          # the record first: an unreadable one spends no venue call
+    if record is None:
+        _mirror_stop("hand_unread", w)
+        return _verdict("unread")
+    fills = await _hand_log_fills(t, book["us_market_slug"], since)
+    if fills is None:
+        _mirror_stop("hand_unread", w)
+        return _verdict("unread")
+    hand: list[tuple[float, float, float, str]] = []      # (ts, signed shares, price, own order id)
+    shapes: dict[str, tuple] = {}
+    for f in fills:
+        if not isinstance(f, dict) or f.get("manual") is not True:
+            continue                                        # an API fill, or ownership the venue did not mark
+        ts = _num(f.get("ts"))
+        if ts is None or ts < since:
+            # dated before the window: not counted. No bound at the tick's
+            # clock: t.now is the tick's START and the walk (step R) runs
+            # seconds later, so a hand fill the venue dates inside the tick
+            # is in the walk; the gap check below refuses what the walk
+            # does not hold
+            continue
+        oid = f.get("own_order_id")
+        side = str(f.get("own_side") or "").upper()
+        q, px = _num(f.get("qty")), _num(f.get("price"))
+        if q is None or q <= 0.0:
+            continue                                        # a zero-quantity print (986's 0 @0.59 row): nothing to attribute
+        if (f.get("self") is True or not oid or side not in ("BUY", "SELL")
+                or px is None or not (0.0 < px < 1.0)):
+            # a self-trade, a hand fill without its order, its side or
+            # its price: nothing to attribute it by
+            _mirror_stop("hand_ambiguous", w)
+            return _verdict("ambiguous")
+        shape = (side, f.get("own_qty"), f.get("own_price"), f.get("own_tif"))
+        if shapes.setdefault(str(oid), shape) != shape:
+            _mirror_stop("hand_ambiguous", w)               # one order id printed with disagreeing figures
+            return _verdict("ambiguous")
+        hand.append((float(ts), q if side == "BUY" else -q, px, str(oid)))
+    hand.sort(key=lambda x: x[0])
+    remaining = dict(record)                                # the shares an earlier read already adopted
+    leg = float(ledger)
+    adds = reduces = nom = 0.0
+    adopt: dict[str, float] = {}
+    for _ts, s, px, oid in hand:
+        q, sign = abs(s), (1.0 if s > 0.0 else -1.0)
+        done = float(remaining.get(oid, 0.0))
+        if done > 0.0:
+            take = min(done, q)
+            remaining[oid] = done - take
+            q -= take
+        if q <= FLAT_TOL_SHARES:
+            continue
+        if abs(leg) < FLAT_TOL_SHARES or (sign > 0.0) == (leg > 0.0):
+            adds += sign * q                                # the desk's own, on the book's side
+            continue
+        red = min(q, abs(leg))                              # the book's own shares, sold or covered by hand
+        reduces += sign * red
+        nom += red * px
+        adopt[oid] = adopt.get(oid, 0.0) + red
+        leg += sign * red
+        if q - red > FLAT_TOL_SHARES:
+            adds += sign * (q - red)                        # past the book: the desk's own opposite position
+    if any(v > FLAT_TOL_SHARES for v in remaining.values()):
+        _mirror_stop("hand_ambiguous", w)                   # the record names more than the log
+        return _verdict("ambiguous")
+    rec.update(net=round(adds + reduces, 4), adds=round(adds, 4), reduces=round(reduces, 4),
+               fills=len(hand), orders=sorted({oid for _t, _s, _p, oid in hand}))
+    after = int(round(float(ledger) + reduces))
+    gap = float(venue_int) - after - float(manual or 0.0) - float(registered or 0.0) - adds
+    if abs(gap) > mi.VENUE_LEDGER_TOL_SHARES:
+        _mirror_stop("hand_ambiguous", w)                   # the hand does not explain it, either way
+        return _verdict("ambiguous")
+    if abs(reduces) > FLAT_TOL_SHARES:
+        if book["id"] in t.open_by_book or book["id"] in t.nonterminal or book.get("open_order_id"):
+            # AN ORDER OF OURS STANDS ON THE BOOK (a rest, or a row the
+            # status read left non-terminal). A hand reduce adopted under
+            # it leaves that row sized on the OLD ledger, and its fill past
+            # the new one is a SALE past the ledger -- _book_fill's
+            # overfill: the freeze and the desk trip (the 20:57:19Z class;
+            # the venue fills a SELL_LONG past the holding into a short,
+            # 1129's own 5,038 on 4,852). So nothing is adopted this tick:
+            # what rests is cancelled under the hand's name (E23's part A
+            # books what it filled; a cancel the budget refuses stands and
+            # is tried again), the reading rides the plan with NO memo --
+            # the next fresh walk, with nothing standing, reads again at
+            # once -- and the caller plans nothing on a ledger the cancel's
+            # settle may have moved (the walk is stale by it)
+            await _cancel_open_for(t, book, "hand_reduce")
+            rec["verdict"] = "order_open"
+            plan["hand_order_open"] = rec
+            return rec
+        shares = round(abs(reduces), 4)
+        px = round(nom / abs(reduces), 6)
+        merged = {k: round(float(v), 4) for k, v in record.items() if float(v) > 0.0}
+        for oid, q in adopt.items():
+            merged[oid] = round(merged.get(oid, 0.0) + q, 4)
+        out = await _book_hand_reduce(t, book, shares, px, merged, sorted(adopt))
+        if out != "booked":
+            log.warning("mirror_live: book %s: the desk's hand reduce of %s @ %s answered %s; nothing adopted",
+                        bid, shares, px, out)
+            return _verdict("adopt_write_failed")
+        rec.update(adopted=shares, px=px)
+        _mirror_stop("hand_adopted", w)
+        _recent(bid, "hand_adopted", shares=shares, px=px, orders=sorted(adopt), ledger=book.get("ledger_net"),
+                realized=book.get("realized_pnl"))
+        log.warning("mirror_live: book %s: the desk's hand reduced the book by %s @ %s (orders %s); adopted as "
+                    "the book's exit, ledger now %s, realized %s", bid, shares, px, sorted(adopt),
+                    book.get("ledger_net"), book.get("realized_pnl"))
+    if abs(adds) > FLAT_TOL_SHARES:
+        _mirror_stop("hand_explained", w)
+    return _verdict("adopted" if abs(reduces) > FLAT_TOL_SHARES else "explained")
+
+
+async def _hand_closing(t: _Tick, book: dict, plan: dict) -> None:
+    """The desk's hand on a CLOSING book (E24; book 1075: state closing,
+    ledger -3966, the venue flat since the desk covered the short by
+    hand at 15:32:36Z, the ledger's cover never to be bought): with
+    shares held, a FRESH walk, no order in flight and the walk's
+    position disagreeing with ledger + manual + registered past the
+    tolerance, the hand is read as on the live path -- a hand reduce is
+    adopted and the book's own close (the flat row, this branch's
+    _maybe_close_episode) takes it; a hand add is recorded and explains
+    nothing here (a closing book places nothing). Nothing read on a
+    cached walk, on a flat book or with an order open."""
+    ledger = int(book.get("ledger_net") or 0)
+    if abs(ledger) < FLAT_TOL_SHARES or t.walk_at is None or t.positions is None:
+        return
+    if book["id"] in t.open_by_book or book["id"] in t.nonterminal or book.get("open_order_id"):
+        return
+    slug, w = book["us_market_slug"], book["whale"]
+    venue = _num((t.positions or {}).get(slug.lower(), 0.0))
+    if venue is None:
+        return
+    try:
+        manual = float(await t.pool.fetchval(_SQL_MANUAL_SHARES, slug) or 0.0)
+    except Exception:  # noqa: BLE001 — the desk's shares unreadable: explained nothing
+        manual = 0.0
+    registered = await _registered_shares(t, w, slug)
+    if registered != 0.0 and (registered < 0.0) != _book_short(book):
+        registered = 0.0                                    # the register's sign rule (_tick_book)
+    if abs(int(round(venue)) - (ledger + manual + registered)) <= mi.VENUE_LEDGER_TOL_SHARES:
+        return
+    prior_plan = _jsonish(book.get("last_plan")) or {}
+    await _hand_net(t, book, int(round(venue)), ledger, manual, registered, prior_plan, plan)
 
 
 async def _lost_bound(t: _Tick, book: dict) -> int | None:
