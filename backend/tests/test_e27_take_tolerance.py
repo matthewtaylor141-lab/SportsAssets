@@ -104,8 +104,12 @@ UNTOUCHED = {
     "_sell_qty": ("95533ab0c37193ae", ml._sell_qty),
 }
 # migration 059 on 52e1d52 (sha256[:16]): untouched. render-ops.yml AS THIS LANE LEAVES IT (the review's HIGH-2
-# fold: take-band's third statement, the SHORT add's own table, both places) -- 2ea1e1f7fd9a35b0 on 52e1d52
-RENDER_OPS_SHA = "a7fcb124867ad420"
+# fold: take-band's third statement, the SHORT add's own table, both places) -- 2ea1e1f7fd9a35b0 on 52e1d52,
+# a7fcb124867ad420 as the lane landed (4ee4e08); 6969bae6aa1536c1 after the mirror-tick preset (and the hourly's
+# copy) gained the chain_listener and poller heartbeats (2026-09-09 23:4xZ, the read of FILL lane 26's sweep
+# block and page_overflow: no preset read service_heartbeats for either worker) -- the take-band statements this
+# lane pins are byte for byte the same; test_render_ops_take_band.py reads them by text.
+RENDER_OPS_SHA = "6969bae6aa1536c1"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',
