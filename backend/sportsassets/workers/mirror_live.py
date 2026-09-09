@@ -12472,7 +12472,6 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
     acquire waits on."""
     global _current_stats, _last_tick_at, _last_loss, _last_sleeve
     global _full_tick, _fast_calls, _fast_guard_calls, _fast_ops, _last_filled
-    now = time.time() if now_ts is None else float(now_ts)
     started = time.monotonic()          # the real clock: `now` may be the caller's
     _last_loss = None                   # L1: never a stale window on the mode line
     _last_sleeve = None                 # L2: nor a stale sleeve reading
@@ -12481,6 +12480,20 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
         stats.update(status="overlap", skipped_overlap=True, tick_s=0.0)
         return stats
     async with _TICK_LOCK:
+        # FILL lane 7 (docs section 51): the tick's clock is stamped
+        # HERE, once the lock is held. A full tick that waited on a
+        # fast tick's hold would otherwise carry a `now` OLDER than the
+        # rest the fast tick placed while it waited, and
+        # rules.rest_decision would read that rest's age as negative ->
+        # `replace` cause `future` -> the cancel and the same cent and
+        # quantity re-placed (order 4731 placed 22:44:07.64 against a
+        # tick started 22:44:05.68, cancelled `replace`, 4732 at the
+        # same 6 @0.41: tick_2245 393-394 / 331 / 336). A caller's clock
+        # (`now_ts`) is used as given, byte for byte; `started` stays
+        # before the lock so `tick_s` keeps counting the wait; the
+        # `future` clause itself stands (a row genuinely placed after
+        # `now` is still unreadable and still replaces).
+        now = time.time() if now_ts is None else float(now_ts)
         _current_stats = stats
         t = _Tick(pool=pool, pmus=pmus, http=http, now=now, stats=stats, started=started)
         # E9: the fast ticks since the last full tick -- their venue calls

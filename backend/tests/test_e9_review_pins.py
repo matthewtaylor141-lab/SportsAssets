@@ -415,7 +415,7 @@ def test_review_q4_the_fast_tick_reads_through_the_same_functions_with_no_fast_b
     assert "t.fast" not in read_path and "fast_tick" not in read_path, "no fast-tick branch on the read or the placement"
     assert "await asyncio.to_thread(ms._paced_bbo, t.pmus, slug)" in inspect.getsource(ml._bbo)
     assert "abs(t.now - ts) > ms.SNAP_MAX_AGE_S" in inspect.getsource(ml._market_snap)
-    # the fast tick's `now` is the real clock at its start, as tick_once's
+    # the fast tick's `now` is the real clock at its start; tick_once's is the real clock once it holds the lock (FILL lane 7)
     assert "now = time.time() if now_ts is None else float(now_ts)" in inspect.getsource(ml.fast_tick_once)
     assert "now = time.time() if now_ts is None else float(now_ts)" in inspect.getsource(ml.tick_once)
 
