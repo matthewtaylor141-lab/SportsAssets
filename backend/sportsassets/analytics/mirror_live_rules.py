@@ -1014,6 +1014,13 @@ MIRROR_FLATTEN_SLIP = 0.02
 # the slippage path (critic C16). A wait like the take's: the
 # environment may only lengthen it.
 MIRROR_FLATTEN_REST_S = min_wait_env("MIRROR_FLATTEN_REST_S", 300.0)
+# E22 (2026-09-09, FILL lane 22): a FROZEN placement_lost book whose
+# venue position proves its lost row's fill (the position less the
+# ledger less the register equals the row's quantity on its side)
+# re-reads the venue's trade log for that row no more often than this,
+# per book (mirror_live._lost_fill_adopt; the plan's `lost_fill_at`).
+# A wait before a venue read: the environment may only LENGTHEN it.
+MIRROR_LOST_FILL_REREAD_S = min_wait_env("MIRROR_LOST_FILL_REREAD_S", 300.0)
 # A book flat at target 0 on a live market closes after this long.
 MIRROR_FLAT_CLOSE_S = capped_env("MIRROR_FLAT_CLOSE_S", 3600.0)
 # Derived-vs-snapshot disagreement above this refuses increases.
@@ -2989,7 +2996,7 @@ __all__ = [
     "MIRROR_EXIT_TOL", "exit_terms", "MIRROR_EXIT_TAKE_BAND", "EXIT_BAND_INERT_AT",
     "MIRROR_TAKE_BAND", "band_cent", "take_in_band",
     "MIRROR_FLATTEN_SLIP",
-    "MIRROR_FLATTEN_REST_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
+    "MIRROR_FLATTEN_REST_S", "MIRROR_LOST_FILL_REREAD_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAMILIES",
     "FLAT_TOL_SHARES", "SELL_DUST_SHARES",
     "P2_MAKER_SHARE_MIN", "P2_TAKE_SLIP_MAX", "P2_FROZEN_TICK_FRAC_MAX", "P2_CAPTURE_MIN",

@@ -904,9 +904,9 @@ def test_x1_the_shadow_exit_census_reports_the_bands_rate_and_unfilled_share_bes
 
 def test_x1_the_census_names_sit_before_drift_smaller_open_the_pins_hold_and_every_name_is_emitted():
     keys = ml.CENSUS_KEYS
-    # T2 (FILL lane 4, two names) and FILL lane 5 (three) landed after this lane and sit nearer the key (-16:-13 -> -21:-18)
-    assert keys[-21:-18] == NEW_NAMES
-    assert keys[-22] == "take_in_band" and keys[-23] == "exit_take_rested" and keys[-24] == "wrong_sign_hold"
+    # T2 (FILL lane 4, two names), FILL lane 5 (three) and E22 (FILL lane 22, four) landed after this lane and sit nearer the key (-16:-13 -> -25:-22)
+    assert keys[-25:-22] == NEW_NAMES
+    assert keys[-26] == "take_in_band" and keys[-27] == "exit_take_rested" and keys[-28] == "wrong_sign_hold"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert len(set(keys)) == len(keys)

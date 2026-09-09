@@ -980,6 +980,25 @@ CENSUS_KEYS: tuple[str, ...] = (
     # the convention every lane followed (keys[-16:-13]; the tail pins
     # moved by three)
     "he_holds", "he_holds_unread", "reopen_refused",
+    # E22 (2026-09-09; FILL lane 22): a lost placement the venue filled
+    # AFTER le._LOST_FILL_WINDOW_S, adopted from the trade log when the
+    # venue position proves it (_lost_fill_adopt, on a FROZEN
+    # placement_lost book with one 'lost' row without an id, never on
+    # the transition tick). `lost_fill_adopted`: the log named exactly
+    # one order whose fills sum to the lost quantity -- the row adopted
+    # and booked as _reconcile_placing's trade-log branch books one; the
+    # book thaws on the NEXT tick's own venue == ledger rule.
+    # `lost_fill_unread`: the log could not be read (raises, truncated,
+    # the protected or ledger ids unreadable). `lost_fill_unexplained`:
+    # the venue's surplus is not the lost row's size on its side (a
+    # partial fill, a second lost row, a manual trade, the other token),
+    # no log read; or the log named no order for a surplus that matches.
+    # `lost_fill_ambiguous`: two or more order ids, or fills summing to a
+    # different size. Before E19's `drift_smaller_open` (keys[-13]) and
+    # `registered_no_increase` (keys[-12]), after FILL lane 5's three, by
+    # the convention every lane followed (keys[-17:-13]; the tail pins
+    # moved by four)
+    "lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -1241,6 +1260,17 @@ _fill_pending: dict[tuple[str, str], dict] = {}
 _fill_hwm: dict[int, float] = {}
 _fill_write_logged = False
 _fill_answers_absent_logged = False
+# E22 (2026-09-09, FILL lane 22): the clock of the last trade-log read
+# a frozen placement_lost book made for its lost row (_lost_fill_adopt),
+# beside the plan's own `lost_fill_at` (the durable memo; this one
+# covers a quiet skip, whose plan carries _SKIP_CARRIED alone). The read
+# repeats no more often than rules.MIRROR_LOST_FILL_REREAD_S per book
+# and only while the venue's delta matches the lost row. Bounded at
+# _LOST_FILL_MEMO_MAX books (a book dropped re-reads its clock off its
+# own plan). The adopt UPDATE failing is logged once per process.
+_LOST_FILL_MEMO_MAX = 4000
+_lost_fill_read_at: dict[int, float] = {}
+_lost_fill_write_logged = False
 # FILL lane 5: the closed book's plan write (`reopen_refused`) failing is
 # logged once per process, counted every time (`reopen_refused_write_failed`)
 _reopen_write_logged = False
@@ -1862,6 +1892,29 @@ SELECT o.id, o.book_id, o.whale, o.us_market_slug, o.kind, o.side, o.tif, o.post
 _SQL_ORDERS_OPEN = _SQL_ORDERS_OPEN_047.replace(
     "o.taker_at_placement, o.pre_ids, o.reason, o.receipt,",
     "o.taker_at_placement, o.pre_ids, o.reason, o.receipt, o.intent,")
+# E22 (2026-09-09, FILL lane 22): a frozen placement_lost book's 'lost'
+# rows WITHOUT an order id -- the row _mark_lost wrote past
+# le._LOST_FILL_WINDOW_S with nothing on the venue named for it -- in
+# the open-orders read's own projection (the same columns, so the row
+# goes through _trade_log_fills, _book_delta and _finish_order exactly as
+# a 'placing' row does), the 047 shape and the 050 shape derived from
+# the statements above so the projections can never drift apart. A lost
+# row WITH an id was marked lost by another road (a status read) and is
+# not this statement's. Only a row marked lost BEFORE this tick began
+# ($2, the tick's clock): a 'placing' row step O marks lost on this very
+# tick is _reconcile_placing's byte for byte on this tick and this
+# road's on the next -- the mark and the adoption never share a tick
+# (E5 review F1's spirit for the row).
+_SQL_LOST_ROWS_047 = _SQL_ORDERS_OPEN_047.replace(
+    " WHERE o.state IN ('placing', 'open', 'unknown')",
+    " WHERE o.book_id = $1 AND o.state = 'lost' AND o.order_id IS NULL"
+    " AND o.done_at < to_timestamp($2)").replace(
+    "ml-orders-open", "ml-lost-rows")
+_SQL_LOST_ROWS = _SQL_ORDERS_OPEN.replace(
+    " WHERE o.state IN ('placing', 'open', 'unknown')",
+    " WHERE o.book_id = $1 AND o.state = 'lost' AND o.order_id IS NULL"
+    " AND o.done_at < to_timestamp($2)").replace(
+    "ml-orders-open", "ml-lost-rows")
 # The order's cumulative SELL dust (rules.SELL_DUST_SHARES), kept on the
 # row's own receipt JSON so it survives the poll: the worker re-reads
 # every open order from the table each tick, and a per-poll delta that
@@ -8003,6 +8056,12 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             # before step O booked this tick's fills, so a disagreement
             # that is one tick old may be that fill, not a lost response)
             if was_frozen:
+                # E22: the lost fill the venue position proves is adopted
+                # from the trade log BEFORE the frozen exit sizes on that
+                # position (the adoption books the fill; the exit then
+                # holds `frozen_fill_this_tick` and the next tick's
+                # venue == ledger thaws the book)
+                await _lost_fill_adopt(t, book, r, ledger, registered, prior_plan, plan)
                 await _frozen_exit(t, book, r, target, fills, registered, plan)
             else:
                 plan["frozen_exit"] = {"held": "transition_tick"}
@@ -8663,6 +8722,167 @@ async def _thaw_agrees(t: _Tick, book: dict, plan: dict) -> None:
     book.update(state="live", frozen_reason=None, frozen_ts=None, frozen_ticks=0)
     plan["thawed_venue_agrees"] = True
     _recent(book["id"], "thawed", why="venue_agrees")
+
+
+# ------------------------------- E22: the lost fill the venue position proves
+#
+# Book 863 (2026-09-09, aec-itfme-ryotan-naohon; the owner's 02:55Z "No
+# trades firing" read): order 4965, an increase SELL_LONG GTC 28 @0.30
+# placed 01:47:37 whose response was lost, was searched by
+# _reconcile_placing every tick inside le._LOST_FILL_WINDOW_S with the
+# trade log naming nothing for it on any tick inside the window, marked
+# 'lost' at 02:07:51, and the rest FILLED on the venue: the venue read
+# -30 against the ledger's -2 (as of 02:56:52; WHEN it turned -30 is in
+# no row -- his fills put the long token's bid at or above our 0.30 from
+# 01:48 to 01:59, so the fill may have been inside the window with the
+# log not naming it, in which case this road reads
+# `lost_fill_unexplained` and E5's register is 863's road), nothing
+# re-read the log for a 'lost' row, the book never thawed (the thaw
+# needs venue == ledger) and 28 shares of a real short sat unbooked
+# while his position grew past -1,168. Round eight's rule ("anything
+# later at our cent on this shared account is the owner's") is kept for
+# the 'placing' road byte for byte; THIS road widens the window to
+# [placed - _ORPHAN_SKEW_S, now] only when the venue's POSITION already
+# proves a fill of exactly the lost row's size on its side -- the
+# shared-account concern is answered by the delta, not assumed.
+
+
+def _lost_fill_delta(o: dict, venue_int: int, ledger: int, registered: float) -> tuple[int, int]:
+    """(the venue's surplus over the ledger and the register, the
+    surplus the lost row would leave if it filled whole) -- signed in
+    ledger space: a SELL row (a long book's reduce, a short book's add)
+    takes the ledger DOWN by its quantity, a BUY row up. The desk's
+    `manual` shares are not subtracted (the rule names the ledger and
+    the register): a manual position on the slug makes the surplus
+    something else than the row, named `lost_fill_unexplained`, and E5's
+    register is the road for it."""
+    qty = int(o["qty"])
+    expected = -qty if _order_side_of(o) == "SELL" else qty
+    return int(round(float(venue_int) - float(ledger) - float(registered))), expected
+
+
+async def _lost_fill_adopt(t: _Tick, book: dict, r: _Reading, ledger: int, registered: float,
+                           prior_plan: dict, plan: dict) -> str | None:
+    """A FROZEN placement_lost book with ONE 'lost' row without an order
+    id, on a tick with a FRESH venue read (t.walk_at, the thaw's own
+    guard), whose venue position less the ledger less the register equals
+    the row's quantity on the row's side: re-read the venue's trade log
+    for that market BY ORDER (_trade_log_fills: exact quantity, exact
+    wire, our side, unknown to every ledger and protected id) over
+    [placed - le._ORPHAN_SKEW_S, t.now] and, when the log names exactly
+    one order whose fills sum to the lost quantity, adopt it exactly as
+    _reconcile_placing's trade-log branch does. The book stays frozen
+    THIS tick; the next tick's own venue == ledger rule thaws it
+    (_thaw_verdict returns None for placement_lost). Every other reading
+    names a hold and books nothing. Returns the verdict word, or None
+    when nothing was read (not this lane's shape, a cached read, the
+    memo, the rows unreadable). Called from _tick_book's disagree branch
+    on a book that was frozen when its tick began (E5 review F1: never on
+    the transition tick), before the frozen exit."""
+    global _lost_fill_write_logged
+    if book.get("state") != "frozen" or book.get("frozen_reason") != "placement_lost":
+        return None
+    prior_at = _num(prior_plan.get("lost_fill_at"))
+    memo_at = _num(_lost_fill_read_at.get(book["id"]))
+    last_read = max([x for x in (prior_at, memo_at) if x is not None], default=None)
+    if last_read is not None:
+        plan["lost_fill_at"] = last_read                  # carried until a new read moves it
+    if isinstance(prior_plan.get("lost_fill"), dict):
+        plan["lost_fill"] = prior_plan["lost_fill"]        # the last verdict, until a new one
+    if t.walk_at is None:
+        return None                                       # a cached read proves nothing
+    w = book["whale"]
+    try:
+        rows = [dict(x) for x in await t.pool.fetch(_SQL_LOST_ROWS if t.short_col
+                                                    else _SQL_LOST_ROWS_047, book["id"], float(t.now))]
+    except Exception as exc:  # noqa: BLE001 — the rows unreadable: nothing this tick
+        log.warning("mirror_live: lost rows of book %s unreadable (%s); nothing adopted",
+                    book["id"], type(exc).__name__)
+        return None
+    if not rows:
+        return None                   # a 'placing' row is _reconcile_placing's; a lost row with an id another road's
+    venue_int = int(r.venue)
+
+    def _verdict(word: str, o: dict | None, delta: int, order=None) -> str:
+        plan["lost_fill"] = {"row": None if o is None else o["id"],
+                             "qty": (sum(int(x["qty"]) for x in rows) if o is None else int(o["qty"])),
+                             "delta": delta, "verdict": word, "at": t.now, "order": order}
+        return word
+
+    if len(rows) != 1:
+        # a second lost row: the surplus is not ONE row's size
+        delta, _exp = _lost_fill_delta(rows[0], venue_int, ledger, registered)
+        _mirror_stop("lost_fill_unexplained", w)
+        return _verdict("unexplained", None, delta)
+    o = rows[0]
+    if o.get("tif") == "CLOSE":
+        return None                   # a legacy CLOSE row has no cent of its own: E5 / P3's `close: unattributed` road
+    delta, expected = _lost_fill_delta(o, venue_int, ledger, registered)
+    if abs(delta - expected) > FLAT_TOL_SHARES:
+        # a partial fill, a manual trade, the OTHER token: no log read
+        _mirror_stop("lost_fill_unexplained", w)
+        return _verdict("unexplained", o, delta)
+    if last_read is not None and t.now - last_read < float(rules.MIRROR_LOST_FILL_REREAD_S):
+        return None                                       # the memo: no more than one read per the wait
+    placed = float(o.get("placed_ts") or t.now)
+    fills = await _trade_log_fills(t, o, placed - 30.0, (placed - le._ORPHAN_SKEW_S, t.now))
+    plan["lost_fill_at"] = t.now
+    _lost_fill_read_at[book["id"]] = t.now
+    if len(_lost_fill_read_at) > _LOST_FILL_MEMO_MAX:
+        for k in sorted(_lost_fill_read_at, key=_lost_fill_read_at.get)[:len(_lost_fill_read_at) // 2]:
+            _lost_fill_read_at.pop(k, None)
+    if fills is None:
+        _mirror_stop("lost_fill_unread", w)
+        return _verdict("unread", o, delta)
+    by_id: dict[str, tuple[float, float]] = {}
+    for f in fills:
+        q, px = _num(f.get("qty")), _num(f.get("price"))
+        if not q or not px:
+            continue
+        tot, nom = by_id.get(str(f.get("order_id")), (0.0, 0.0))
+        by_id[str(f.get("order_id"))] = (tot + q, nom + q * px)
+    if not by_id:
+        # the venue holds the shares, the log does not name them: E5's
+        # register is the road (the line names the miss; bounded by the
+        # same wait as the read itself)
+        log.warning("mirror_live: lost row %s of book %s: the venue's surplus %s matches the row but the "
+                    "trade log names no order of %s @ %s in [%.0f, %.0f]; nothing adopted (E5's register is the road)",
+                    o["id"], book["id"], delta, o["qty"], o["wire"], placed - le._ORPHAN_SKEW_S, t.now)
+        _mirror_stop("lost_fill_unexplained", w)
+        return _verdict("unexplained", o, delta)
+    if len(by_id) != 1:
+        _mirror_stop("lost_fill_ambiguous", w)
+        return _verdict("ambiguous", o, delta)
+    oid, (total, notional) = next(iter(by_id.items()))
+    if abs(total - float(o["qty"])) > FLAT_TOL_SHARES:
+        _mirror_stop("lost_fill_ambiguous", w)
+        return _verdict("ambiguous", o, delta, order=oid)
+    reason = _adopt_reason(o, "adopted from the trade log after the window")
+    try:
+        await t.pool.execute(_SQL_ORDER_ADOPT, o["id"], oid, reason)
+    except Exception as exc:  # noqa: BLE001 — the row is left; the next matching tick retries after the memo
+        if not _lost_fill_write_logged:
+            _lost_fill_write_logged = True
+            log.warning("mirror_live: could not adopt venue order %s on lost row %s (%s); "
+                        "the row is left for the next read", oid, o["id"], type(exc).__name__,
+                        exc_info=True)
+        return _verdict("adopt_write_failed", o, delta, order=oid)
+    o["order_id"], o["state"], o["reason"] = oid, "open", reason
+    px = round(notional / total, 6)
+    st = {"state": "filled", "filled_shares": total, "avg_px": px}
+    await _book_delta(t, o, book, st, maker=True)
+    state = await _finish_order(t, o, book, st, "booked from the trade log after the window")
+    if state != "filled":
+        # the booking failed (`write_failed`, counted and frozen by
+        # _book_delta; the row 'unknown' with its id): step O re-reads
+        # the adopted order next tick and books it off the cursor
+        return _verdict("adopt_write_failed", o, delta, order=oid)
+    _mirror_stop("lost_fill_adopted", w)
+    _recent(book["id"], "lost_fill_adopted", order_row=o["id"], order=oid, shares=total, px=px)
+    log.warning("mirror_live: lost row %s of book %s adopted venue order %s from the trade log "
+                "after the window (%s @ %s; the venue's position proved it)",
+                o["id"], book["id"], oid, total, px)
+    return _verdict("adopted", o, delta, order=oid)
 
 
 # The frozen exit's holds that refuse BEFORE _frozen_reduce_on_fill runs:

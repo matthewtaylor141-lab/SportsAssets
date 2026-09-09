@@ -425,6 +425,19 @@ class _Pool(_ShadowPool):
                 for o in rows:
                     o.pop("intent", None)
             return rows
+        if "ml-lost-rows" in s:
+            # E22 (FILL lane 22): the book's 'lost' rows WITHOUT an order
+            # id marked lost BEFORE the tick's clock ($2; the worker's
+            # `o.done_at < to_timestamp($2)`), in the open-orders read's
+            # projection (the worker derives the statement from it),
+            # placed_at then id
+            rows = [dict(o) for o in sorted(self.orders.values(), key=lambda o: (o["placed_ts"], o["id"]))
+                    if o["book_id"] == a[0] and o["state"] == "lost" and o["order_id"] is None
+                    and o.get("done_at") is not None and float(o["done_at"]) < float(a[1])]
+            if "o.intent" not in s:
+                for o in rows:
+                    o.pop("intent", None)
+            return rows
         if "ml-books-open" in s:
             rows = [dict(b) for b in sorted(self.books.values(), key=lambda b: (b["updated_ts"], b["id"]))
                     if b["state"] != "closed"]
@@ -1231,6 +1244,10 @@ def _armed(monkeypatch):
     monkeypatch.setattr(ml, "_fill_write_logged", False, raising=False)
     monkeypatch.setattr(ml, "_fill_answers_absent_logged", False, raising=False)
     monkeypatch.setattr(ml, "_reopen_write_logged", False, raising=False)   # FILL lane 5: the reopen record's one line
+    # E22 (FILL lane 22): the lost fill's per-process read memo (book ids
+    # repeat across this file's pools) and the adopt write's one line
+    monkeypatch.setattr(ml, "_lost_fill_read_at", {}, raising=False)
+    monkeypatch.setattr(ml, "_lost_fill_write_logged", False, raising=False)
     # E6: the quiet rotation's clock and memos (book ids repeat across
     # this file's pools), and the terminal memos' boot read, already made
     # (test_e6_tick_budget drives the read itself)
@@ -4946,8 +4963,9 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
     # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89;
     # E20 by its one, E14b (FILL lane 1) by its one and E14 (FILL lane 2) by its one `take_in_band`: -89 -> -92;
-    # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95; T2 (FILL lane 4) by its two: -95 -> -97; FILL lane 5 by its three: -97 -> -100)
-    assert keys[-100:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95; T2 (FILL lane 4) by its two: -95 -> -97; FILL lane 5 by its three: -97 -> -100;
+    # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104)
+    assert keys[-104:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -5045,6 +5063,13 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # and `registered_no_increase` (keys[-12]), after E14's
                           # (keys[-16:-13])
                           "he_holds", "he_holds_unread", "reopen_refused",
+                          # E22 (FILL lane 22): a lost placement the venue filled after
+                          # the window, adopted from the trade log when the venue
+                          # position proves it; the log unreadable; the surplus not the
+                          # row's or the log naming nothing; two ids or another size --
+                          # before E19's name (keys[-13]) and `registered_no_increase`
+                          # (keys[-12]), after FILL lane 5's (keys[-17:-13])
+                          "lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5061,7 +5086,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-101] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three before the tail
+    assert keys[-105] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (

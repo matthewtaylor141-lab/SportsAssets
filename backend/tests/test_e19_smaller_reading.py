@@ -576,18 +576,24 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     # immediately before this key; T2 (FILL lane 4) and FILL lane 3 before those,
     # E14, E14b and E20 before them (the chain from this key, the convention
     # every lane follows)
-    assert keys[keys.index("drift_smaller_open") - 1] == "reopen_refused"
-    assert keys[keys.index("drift_smaller_open") - 2] == "he_holds_unread"
-    assert keys[keys.index("drift_smaller_open") - 3] == "he_holds"
-    assert keys[keys.index("drift_smaller_open") - 4] == "fill_answers_absent"
-    assert keys[keys.index("drift_smaller_open") - 5] == "fill_answer_write_failed"
-    assert keys[keys.index("drift_smaller_open") - 6] == "order_open_his_exit"
-    assert keys[keys.index("drift_smaller_open") - 7] == "cover_in_band"
-    assert keys[keys.index("drift_smaller_open") - 8] == "exit_take_in_band"
-    assert keys[keys.index("drift_smaller_open") - 9] == "take_in_band"
-    assert keys[keys.index("drift_smaller_open") - 10] == "exit_take_rested"
-    assert keys[keys.index("drift_smaller_open") - 11] == "wrong_sign_hold"
-    assert keys[keys.index("drift_smaller_open") - 12] == "adopt_prior_venue_settled"
+    # E22 (FILL lane 22, 2026-09-09) placed its four lost_fill_* names immediately
+    # before this key, after FILL lane 5's three (the chain grows by four)
+    assert keys[keys.index("drift_smaller_open") - 1] == "lost_fill_ambiguous"
+    assert keys[keys.index("drift_smaller_open") - 2] == "lost_fill_unexplained"
+    assert keys[keys.index("drift_smaller_open") - 3] == "lost_fill_unread"
+    assert keys[keys.index("drift_smaller_open") - 4] == "lost_fill_adopted"
+    assert keys[keys.index("drift_smaller_open") - 5] == "reopen_refused"
+    assert keys[keys.index("drift_smaller_open") - 6] == "he_holds_unread"
+    assert keys[keys.index("drift_smaller_open") - 7] == "he_holds"
+    assert keys[keys.index("drift_smaller_open") - 8] == "fill_answers_absent"
+    assert keys[keys.index("drift_smaller_open") - 9] == "fill_answer_write_failed"
+    assert keys[keys.index("drift_smaller_open") - 10] == "order_open_his_exit"
+    assert keys[keys.index("drift_smaller_open") - 11] == "cover_in_band"
+    assert keys[keys.index("drift_smaller_open") - 12] == "exit_take_in_band"
+    assert keys[keys.index("drift_smaller_open") - 13] == "take_in_band"
+    assert keys[keys.index("drift_smaller_open") - 14] == "exit_take_rested"
+    assert keys[keys.index("drift_smaller_open") - 15] == "wrong_sign_hold"
+    assert keys[keys.index("drift_smaller_open") - 16] == "adopt_prior_venue_settled"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     src = inspect.getsource(rules)
     # the knob count of the tip (lane 1's MIRROR_CATCHUP_PCT and
@@ -599,7 +605,9 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     # MIRROR_TAKE_BAND (21 -> 22), pinned by name in test_e14_take_band; FILL
     # lane 3 (2026-09-08) adds ONE more downward-only rail, MIRROR_EXIT_TAKE_BAND
     # (22 -> 23, inert at its default), pinned by name in test_fill_x1_exit_band
-    assert src.count("capped_env(") == 23 and src.count("min_wait_env(") == 4
+    # E22 (FILL lane 22, 2026-09-09) adds ONE wait that may only LENGTHEN,
+    # MIRROR_LOST_FILL_REREAD_S (min_wait_env 4 -> 5), pinned by name in test_e22_lost_fill_adopt
+    assert src.count("capped_env(") == 23 and src.count("min_wait_env(") == 5
     assert "MIRROR_DRIFT_MAX = capped_env" in src and "E19" in inspect.getsource(rules.admission)
     for name in ("MIRROR_SMALLER", "SMALLER_READING", "DRIFT_SMALLER"):
         assert name not in src, "no knob"
