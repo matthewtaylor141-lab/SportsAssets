@@ -149,7 +149,8 @@ def test_fills_missed_reads_the_record_first_through_a_guarded_cte_on_every_chai
     assert "'refused:' || COALESCE(o.e->>'name', 'unnamed')" not in chain and "WHEN o.e IS NULL THEN 'unseen'" not in chain
     # lane 0b's blocks untouched: the state CASE and its LATERALs, ostate, the (class, decision) statement
     assert fm.STATE in chain and fm.BW in chain and "ord.state AS ostate" in chain and chain.count("ord.state") == 1
-    assert st[2].endswith(" FROM g WHERE class IN ('filled', 'partial', 'missed_expired_ioc') GROUP BY 1, 2 ORDER BY 1, 4 DESC")
+    assert st[2].endswith(" FROM g WHERE class IN ('filled', 'partial', 'missed_expired_ioc', 'missed_replace')"
+                          " GROUP BY 1, 2 ORDER BY 1, 4 DESC")      # FILL lane 8: missed_replace joins the word
     # the guard: the table is named only inside the CASE's ELSE arm, never in a bare FROM
     literal = ("query_to_xml('SELECT fill_id, name, order_id, book_id FROM mirror_fill_answers WHERE whale = ''rn1''"
                " AND fill_ts >= extract(epoch FROM now() - interval ''25 hours'')', false, false, '')")

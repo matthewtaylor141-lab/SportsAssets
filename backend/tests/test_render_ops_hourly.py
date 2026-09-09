@@ -60,3 +60,19 @@ def test_the_help_line_is_the_case_labels_with_hourly_last():
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)
     assert names == labels
     assert names[-1] == "hourly", "the last case label, after every preset it joins"
+
+
+def test_the_hourly_carries_fill_lane_8s_two_edits_in_its_copies():
+    """FILL lane 8 (2026-09-09): fills-missed's (class, decision) WHERE word
+    carries missed_replace in the hourly's copy as in the standalone case
+    (one word, TWO places), and take-band's second statement -- the replaced
+    rows paired with their replacement -- rides the hourly bounded at
+    2 x 24 + 3 rows; still nine presets."""
+    text = YML.read_text()
+    word = "WHERE class IN ('filled', 'partial', 'missed_expired_ioc', 'missed_replace')"
+    assert text.count(word) == 2 and _sql(text, "hourly").count(word) == 1
+    h = _sql(text, "hourly")
+    tb = h[h.index("SELECT '== take-band' AS section; "):h.index("SELECT '== on-target-why' AS section; ")]
+    assert tb.count(";") == 3 and "FROM z GROUP BY ROLLUP (side, hour) ORDER BY 1, 2 DESC;" in tb
+    assert "'rest_replaced'" in tb and "AS touch_moved" in tb and "AS future_clock" in tb
+    assert len(PARTS) == 9 and h.count("AS section;") == 9

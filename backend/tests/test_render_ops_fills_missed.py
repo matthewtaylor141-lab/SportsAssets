@@ -20,6 +20,17 @@ and filled / rest with their band.
 Also the scratch-database helper the sibling lane 0b pins share
 (`World`): the migrations in order on a scratch database, a fixture, the
 preset's own text run statement by statement.
+
+FILL lane 8 (2026-09-09; h2225 996: missed_replace 745 fills / $381,750.75,
+the largest class, with no cause row -- the (class, decision) block read
+filled / partial / missed_expired_ioc only, 1061-1080): `'missed_replace'`
+joins that WHERE word in BOTH places (the standalone case and the hourly's
+copy; `grep -o | wc -l` reads 2), so the class prints missed_replace x
+{replace_cent, replace_qty, replace_side, ttl, replace_unread}; the word
+printed is the row's own (COALESCE(decision, 'unrecorded')), never a list.
+Book 816's shape on its own scratch fixture: a 1,403 rest cancelled
+`replace_qty` after 11 s with 0 filled -> missed_replace | replace_qty, and
+the 1,403 with 631.85 filled -> partial | replace_qty.
 """
 from __future__ import annotations
 
@@ -171,7 +182,8 @@ def test_fills_missed_state_and_decision_statements_carry_the_class_rows_measure
     assert st[2].endswith(" SELECT class, COALESCE(decision, 'unrecorded') AS decision, count(*) AS n,"
                           " round(sum(usd)::numeric, 2) AS his_usd, count(payoff) AS n_resolved, " + roi +
                           ", round(percentile_cont(0.5) WITHIN GROUP (ORDER BY band_c)::numeric, 1) AS band_med_c, " + lag +
-                          " FROM g WHERE class IN ('filled', 'partial', 'missed_expired_ioc') GROUP BY 1, 2 ORDER BY 1, 4 DESC")
+                          " FROM g WHERE class IN ('filled', 'partial', 'missed_expired_ioc', 'missed_replace')"
+                          " GROUP BY 1, 2 ORDER BY 1, 4 DESC")      # FILL lane 8: missed_replace joins the word
     # the first statement's ALL rollup and the per-book statement read as before
     assert st[0].endswith(lag + " FROM g GROUP BY ROLLUP (class) ORDER BY 3 DESC")
     assert "GROUP BY 1, 2, 3 ORDER BY 5 DESC LIMIT 60" in st[3]
@@ -264,3 +276,79 @@ def test_fills_missed_on_book_347s_shape_splits_the_states_and_reads_the_decisio
     # plan held and no order answered has no book to key on (book NULL, as today)
     per = world.rows(st[3])
     assert {(r["book"], r["class"]): r["n"] for r in per} == {(32, "filled"): 2, (None, "unseen"): 3}
+
+
+# ------------------------------------------------------------ FILL lane 8 (2026-09-09)
+
+WHERE_WORD = "WHERE class IN ('filled', 'partial', 'missed_expired_ioc', 'missed_replace')"
+
+
+def test_fills_missed_decision_block_carries_missed_replace_in_both_places_and_prints_the_rows_own_word():
+    text = YML.read_text()
+    st = _stmts(_preset(text, "fills-missed")[0])
+    assert WHERE_WORD + " GROUP BY 1, 2 ORDER BY 1, 4 DESC" in st[2]
+    assert "WHERE class IN ('filled', 'partial', 'missed_expired_ioc')" not in text, "the old three-word clause is gone everywhere"
+    assert text.count(WHERE_WORD) == 2, "one word in TWO places: the standalone case and the hourly's copy"
+    hourly, _ = _preset(text, "hourly")
+    assert hourly.count(WHERE_WORD) == 1
+    # the word printed is whatever the row carries: no list of decision words anywhere in the chain
+    assert "COALESCE(decision, 'unrecorded') AS decision" in st[2] and "decision IN (" not in st[2]
+    assert "'take_on_add'" not in st[2] and "'rest_held'" not in st[2]
+    block = text[text.index("# THE MIRROR'S OWN FILLED-VS-MISSED"):text.index("fills-missed) SQL=")]
+    for word in ("FILL lane 8", "missed_replace to that WHERE word", "hourly's copy", "745 fills / $381,750.75",
+                 "replace_cent", "replace_unread", "COALESCE(decision, 'unrecorded')"):
+        assert word in block, word
+
+
+# book 816's shape (aec-wta-enakoi-nadpod, SHORT, target -1746; h2225 872-882): his
+# adding fill on the short axis is a BUY of the OTHER token; 4689 answered the
+# 22:14:12 fill 23 s later with 1,403 sh, cancelled `replace` after 11 s with 0
+# filled (its cause word replace_qty) -> missed_replace | replace_qty; 4692
+# answered a second fill with 1,403 sh, filled 631.85, cancelled `replace` after
+# 140 s -> partial | replace_qty. The market is unresolved: no roi.
+FIXTURE_816 = """
+INSERT INTO whales (id, address, username) VALUES (99, '0xrn1-l0', 'RN1');
+INSERT INTO markets (condition_id, title, slug, event_title, sport, resolved_prices, resolved) VALUES
+ ('c816', 'Enakoi v Nadpod', 'wta-enakoi-nadpod-2026-09-08', 'ev', 'tennis', NULL, false);
+INSERT INTO market_tokens (token_id, condition_id, outcome, outcome_index) VALUES ('L16', 'c816', 'e', 0), ('O16', 'c816', 'n', 1);
+INSERT INTO trades (id, whale_id, tx_hash, asset, condition_id, side, size, price, notional, market_slug, sport, ts, source, detected_at, dedupe_key) VALUES
+ (981, 99, '0xg1', 'O16', 'c816', 'BUY', 14030, 0.50, 7015, 'wta-enakoi-nadpod-2026-09-08', 'tennis', now() - interval '3 hours', 'chain', now() - interval '3 hours' + interval '2 seconds', 'g1'),
+ (982, 99, '0xg2', 'O16', 'c816', 'BUY', 14030, 0.50, 7015, 'wta-enakoi-nadpod-2026-09-08', 'tennis', now() - interval '3 hours' + interval '600 seconds', 'chain', now() - interval '3 hours' + interval '602 seconds', 'g2');
+INSERT INTO mirror_books (id, whale, condition_id, us_market_slug, long_asset, other_asset, intent, ratio, state, target, target_raw, his_net, ledger_net, last_plan, peak_exposure_usd, avg_cost, settled_pnl, opened_at, closed_at, last_reason, flow_base) VALUES
+ (816, 'rn1', 'c816', 'aec-wta-enakoi-nadpod-2026-09-08', 'L16', 'O16', 'ORDER_INTENT_BUY_SHORT', 0.1, 'live', -1746, -1746.0, -17460, -631, '{}'::jsonb, 315.9, 0.50, NULL, now() - interval '4 hours', NULL, 'on target', 0);
+INSERT INTO mirror_orders (id, book_id, whale, us_market_slug, kind, side, tif, his_level, price, wire, qty, state, filled, avg_px, bid_at_place, ask_at_place, placed_at, done_at, reason, decision) VALUES
+ (4689, 816, 'rn1', 'aec-wta-enakoi-nadpod-2026-09-08', 'increase', 'SELL_LONG', 'GTC', 0.50, 0.50, 0.50, 1403, 'cancelled', 0, NULL, 0.49, 0.51, now() - interval '3 hours' + interval '23 seconds', now() - interval '3 hours' + interval '34 seconds', 'replace', 'replace_qty'),
+ (4692, 816, 'rn1', 'aec-wta-enakoi-nadpod-2026-09-08', 'increase', 'SELL_LONG', 'GTC', 0.50, 0.50, 0.50, 1403, 'cancelled', 631.85, 0.50, 0.49, 0.51, now() - interval '3 hours' + interval '635 seconds', now() - interval '3 hours' + interval '775 seconds', 'replace', 'replace_qty');
+"""
+
+
+@pytest.fixture(scope="module")
+def world_816():
+    w = World(FIXTURE_816, "fills-missed lane 8")
+    try:
+        yield w
+    finally:
+        w.close()
+
+
+def test_fills_missed_on_book_816s_shape_prints_the_missed_replace_cause_row(world_816):
+    text = YML.read_text()
+    sql, _ = _preset(text, "fills-missed")
+    st = _stmts(sql)
+    world_816.run(sql)
+    by = {r["class"]: r for r in world_816.rows(st[0])}
+    assert by["ALL"]["n"] == 2 and by["missed_replace"]["n"] == 1 and by["partial"]["n"] == 1
+    assert _f(by["missed_replace"]["his_usd"]) == 7015.0 and by["missed_replace"]["n_resolved"] == 0
+    dec = {(r["class"], r["decision"]): r for r in world_816.rows(st[2])}
+    assert set(dec) == {("missed_replace", "replace_qty"), ("partial", "replace_qty")}, "the cause row prints (was absent)"
+    assert dec[("missed_replace", "replace_qty")]["n"] == 1 and _f(dec[("missed_replace", "replace_qty")]["lag_med_s"]) == 23.0
+    assert dec[("missed_replace", "replace_qty")]["roi"] is None, "unresolved: no roi, never a guess"
+    assert _f(dec[("partial", "replace_qty")]["lag_med_s"]) == 35.0
+    # the hourly's copy of the statement prints the same row (the whole hourly is not run here: take-band's
+    # fill_pct divides by count(*) and a world with no long-book entry row raises division by zero -- lane 0b's
+    # statement as it stands, pre-existing, not this lane's)
+    hourly, _ = _preset(text, "hourly")
+    copy = _stmts(hourly[hourly.index("SELECT '== fills-missed' AS section; ") + len("SELECT '== fills-missed' AS section; "):])[2]
+    assert copy == st[2]
+    dec2 = {(r["class"], r["decision"]): r["n"] for r in world_816.rows(copy)}
+    assert dec2 == {("missed_replace", "replace_qty"): 1, ("partial", "replace_qty"): 1}
