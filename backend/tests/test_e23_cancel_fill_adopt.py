@@ -787,10 +787,10 @@ def test_e23_part_a_only_a_rest_with_an_id_is_re_read_and_the_site_sits_before_t
 def test_e23_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob():
     keys = ml.CENSUS_KEYS
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-19:-13 -> -23:-17, -27 -> -31, -31:-27 -> -35:-31, -34:-31 -> -38:-35, -40 -> -44)
-    assert keys[-23:-17] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-27:-21] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     # FILL lane 16 (one name) and E21 / FILL lane 10 (six) landed first and sit between lane 11's one and these six (-20 -> -27)
-    assert keys[-31] == "cand_market_closed_db" and keys[-35:-31] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert keys[-38:-35] == ("he_holds", "he_holds_unread", "reopen_refused") and keys[-44] == "take_in_band"
+    assert keys[-35] == "cand_market_closed_db" and keys[-39:-35] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert keys[-42:-39] == ("he_holds", "he_holds_unread", "reopen_refused") and keys[-48] == "take_in_band"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)
@@ -832,7 +832,8 @@ def test_e23_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     # no knob, no rail of the lane's own: E22's wait alone
     rsrc = inspect.getsource(rules)
     assert "CANCEL_FILL" not in rsrc and "DISAGREE_FILL" not in rsrc and "E23" not in rsrc
-    assert rsrc.count("min_wait_env(") == 5 and rsrc.count("capped_env(") == 22  # the per-trade cap (2026-09-09 ~21:05Z, owner order): MIRROR_NET_CAP_USD reads unbounded_env, one capped_env fewer (23 -> 22)
+    # E25 (FILL lane 25) added three capped_env rails and two min_wait_env waits (22 -> 25 on the tip that carries the per-trade cap: 23 -> 22 there, then E25's three, 5 -> 7)
+    assert rsrc.count("min_wait_env(") == 7 and rsrc.count("capped_env(") == 25
 
 
 def test_e23_the_untouched_functions_are_byte_identical_to_the_tip():

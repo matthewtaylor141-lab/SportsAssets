@@ -1135,6 +1135,26 @@ CENSUS_KEYS: tuple[str, ...] = (
     # (keys[-12]), after E23's six, by the convention every lane followed
     # (keys[-17:-13]; the tail pins moved by four)
     "hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous",
+    # E25 (2026-09-09; FILL lane 25): an exit sized from a SUDDEN DROP in
+    # our reading of his net is confirmed against his venue position
+    # before it fires (task 93; book 1177: the reading fell 8,597.6 ->
+    # 3,262.8 and was back at 8,473.8 four minutes later; the book sold
+    # 393 @0.295 on the drop and bought 521 @0.29 on the recovery).
+    # `exit_unconfirmed`: a reduce / the paired flatten that is not the
+    # flip's (the flip close is never guarded) sized from a sudden drop
+    # (rules.his_net_drop) HELD this tick: the per-market read still
+    # shows the old net, or could not be read.
+    # `exit_confirmed`: the venue's own position shows the drop
+    # (rules.exit_confirmed) -- the exit fires this tick, no delay.
+    # `exit_confirm_expired`: the drop persisted in our reading past
+    # rules.MIRROR_EXIT_CONFIRM_MAX_TICKS held ticks -- the exit fires
+    # anyway (never a permanent hold). `exit_flap_averted`: a held drop
+    # reversed in our reading before it fired -- no order, the plan and
+    # the recent list carry the two readings. Before E19's
+    # `drift_smaller_open` (keys[-13]) and `registered_no_increase`
+    # (keys[-12]), after E24's four, by the convention every lane
+    # followed (keys[-17:-13]; the tail pins moved by four)
+    "exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -2915,6 +2935,12 @@ class _Tick:
     # per market per tick (Phase 1); a refused or unreadable read is
     # cached as the fail-closed tuple so it is not retried in the tick
     mkts: dict = field(default_factory=dict)
+    # E25 (FILL lane 25): (whale, condition_id) -> the instant (our
+    # clock, the callee's `ts`) of the per-market read that read FRESH
+    # this tick; absent for a refused or unreadable read. The exit
+    # confirmation compares it to the newest fill's ingest clock: a
+    # snapshot older than the fill that made the drop confirms nothing
+    mkt_at: dict = field(default_factory=dict)
     addrs: dict = field(default_factory=dict)   # whale -> address, read once per tick
     mkt_reads: int = 0                          # every per-market read this tick, books and candidates
     cand_mkt_reads: int = 0                     # the CANDIDATES' per-market reads: the budgeted ones (U12)
@@ -6103,6 +6129,7 @@ async def _market_snap(t: _Tick, whale: str, cid: str, la: str, oa: str | None,
         return out
     out = (True, lo, ot, mi.his_net(lo, ot))
     t.mkts[key] = out
+    t.mkt_at[key] = float(ts)             # E25: the fresh read's instant, for the exit confirmation
     t.stats["snap_market_fresh_reads"] = int(t.stats.get("snap_market_fresh_reads") or 0) + 1
     return out
 
@@ -7144,6 +7171,59 @@ def _exit_plan_stands(book: dict) -> bool:
     return bool(names & QUIET_EXIT_PLANS)
 
 
+def _exit_ref(prior: dict) -> tuple[float, float] | None:
+    """E25 (FILL lane 25): the reading the plan before sized on and its
+    clock -- (net, at) -- the reference this tick's reading is judged a
+    sudden drop against (rules.his_net_drop). A read plan carries them
+    as `net` / `at`; a quiet skip's plan has no reading of its own and
+    carries the last read's as `exit_ref` (the skip path below). None
+    when neither reads -- a book's first plan, a plan written with no
+    reading (market_unreadable, the terminal skip, the grammar echo),
+    a restart onto such a row: no drop can be judged, today's path."""
+    try:
+        n, a = _num(prior.get("net")), _num(prior.get("at"))
+        if n is not None and a is not None:
+            return n, a
+        er = prior.get("exit_ref")
+        if isinstance(er, dict):
+            n, a = _num(er.get("net")), _num(er.get("at"))
+            if n is not None and a is not None:
+                return n, a
+    except Exception:  # noqa: BLE001 — an unreadable plan is no reference
+        return None
+    return None
+
+
+def _exit_snap(t: _Tick, r: _Reading, fills: list) -> dict:
+    """E25: the per-market read this tick as the exit confirmation reads
+    it -- {snap: his net on the market or None, snap_age_s, snap_at,
+    fills_at, why}. The venue's figure counts ONLY when the read was
+    fresh this tick (`snap_market_fresh` True, the instant in t.mkt_at)
+    AND was made no earlier than the newest fill's ingest clock less
+    le._ORPHAN_SKEW_S (the fills are read before the snapshot inside
+    the tick, so this bites only under a clock skew between the
+    ingestion host and this one): a snapshot older than the fill that
+    made the drop can neither confirm nor deny it. Anything short of
+    that is `snap` None -- unread, and the caller holds by name."""
+    out: dict = {"snap": None, "snap_age_s": None, "snap_at": None,
+                 "fills_at": mi.fills_clock(fills, None), "why": None}
+    if r.snap_market_fresh is not True or _num(r.mkt_net) is None:
+        out["why"] = "snap_unread"
+        return out
+    ts = _num(t.mkt_at.get((str(r.whale or "").lower(), str(r.cid))))
+    if ts is None:
+        out["why"] = "snap_unstamped"
+        return out
+    out["snap_at"] = float(ts)
+    out["snap_age_s"] = round(abs(float(t.now) - float(ts)), 1)
+    fa = _num(out["fills_at"])
+    if fa is not None and float(ts) < fa - float(le._ORPHAN_SKEW_S):
+        out["why"] = "snap_before_fill"
+        return out
+    out["snap"] = float(r.mkt_net)
+    return out
+
+
 def _his_fill_since(fills: list, since: float) -> bool:
     """A fill of his at or after `since` (the rows the tick already
     holds). A row with no readable `ts` counts as one: fail closed."""
@@ -8114,9 +8194,20 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     if market_live is not True:
         _mirror_stop("market_unreadable", w)
         await _cancel_open_for(t, book, "market_unreadable")
+        mu: dict[str, Any] = {"kind": "no_plan", "market_unreadable": True, "at": t.now}
+        # E25: a standing exit hold and its reference ride an unreadable
+        # markets row exactly as they ride a quiet skip, so a blip inside a
+        # hold never turns the next admitted reduce into an unconfirmed sale
+        # (the hold's count unmoved: no exit was judged on this tick)
+        mu_prior = _jsonish(book.get("last_plan")) or {}
+        er = _exit_ref(mu_prior)
+        if er is not None:
+            mu["exit_ref"] = {"net": er[0], "at": er[1]}
+        ec = mu_prior.get("exit_confirm")
+        if isinstance(ec, dict) and ec.get("verdict") == "unconfirmed":
+            mu["exit_confirm"] = dict(ec)
         await _write_plan(t, book, None, book.get("target"), None, None, book.get("his_level"),
-                          "market_unreadable", {"kind": "no_plan", "market_unreadable": True,
-                                                "at": t.now})
+                          "market_unreadable", mu)
         return
     if (_terminal_book_until.get((w, cid), 0.0) > t.now
             and book["id"] not in t.open_by_book and book["id"] not in t.nonterminal
@@ -8155,6 +8246,12 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         plan = {k: prior[k] for k in _SKIP_CARRIED if prior.get(k) is not None}
         if isinstance(prior.get("reduce_ref"), dict):
             plan["reduce_ref"] = prior["reduce_ref"]       # E15: the witness's reference rides the skip
+        er = _exit_ref(prior)
+        if er is not None:
+            # E25: the reading the last READ sized on rides the skip too
+            # (the skip's plan has no reading of its own), so a drop found
+            # on the read after a quiet spell is judged against it
+            plan["exit_ref"] = {"net": er[0], "at": er[1]}
         plan.update(kind="no_plan", at=t.now, read_on=int(read_on), tick=int(t.seq),
                     last_read=int(_quiet_memo[book["id"]]["seq"]))
         if _num(plan.get("mark")) is not None:
@@ -8316,6 +8413,69 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # plans as today; its first plan writes the reference. A plan that
     # stands but reads no clock holds (`no_reference`, below)
     e15_ref = bool(prior_plan) or ref is not None
+    # E25 (FILL lane 25; task 93): THE DROP. Book 1177 (aec-wta-qinzhe-
+    # eleryb-2026-09-08, BUY_LONG 0.1): our reading of his net was
+    # 8,597.6 at 17:15:05Z, 3,262.8 at 17:16:34Z / 17:17:30Z / 17:18:11Z
+    # and 8,473.8 from 17:19:09Z -- a fall of 5,334.8 shares (62 %) that
+    # lasted under four minutes and that the venue's own position record
+    # never showed (fills-vs-venue at 17:43Z: our 15,370.9 equal to the
+    # venue's 15,370.9 to the share). On the drop the book SOLD 393
+    # @0.295 (7250, take, 17:16:29Z); on the recovery it BOUGHT 521 @0.29
+    # (7257, take, 17:18:51Z): a round trip on a phantom. The reference
+    # is the reading the plan before sized on (`net` / `at` on the row's
+    # last plan; a quiet skip carries them as `exit_ref`: _exit_ref) or,
+    # while a hold stands (the last plan's `exit_confirm` reads
+    # `unconfirmed`), the reading BEFORE the drop -- the held plan's own
+    # `net` is the dropped reading, and judged against it the next tick
+    # would read no drop at all. rules.his_net_drop judges this tick's
+    # reading against it on the book's leg: a fall past
+    # max(MIRROR_EXIT_CONFIRM_SHARES, MIRROR_EXIT_CONFIRM_PCT x |prev|)
+    # inside MIRROR_EXIT_CONFIRM_S of the reference is SUDDEN, and the
+    # reduce / paired flatten that is not the flip's it sizes goes out
+    # only when the venue's own per-market position confirms it (the
+    # flip close is never guarded: a sign flip's flatten fires as today;
+    # the reduce
+    # branch below, AFTER E12b's and E15's holds: the drop is judged on
+    # a reduce those admitted, never instead of them). No reference (a
+    # first plan, a plan with no reading, a restart onto one) -> no drop
+    # judged -> today's path. A RISE is never judged: entries stay as
+    # today. THE FLAP AVERTED (C): a held drop whose reading is back
+    # inside the threshold of the reference before it fired ends the
+    # hold here, counted `exit_flap_averted`, the two readings on the
+    # plan and the recent list -- the number this lane is judged by
+    ec_prior = prior_plan.get("exit_confirm")
+    ec_prior = ec_prior if isinstance(ec_prior, dict) and ec_prior.get("verdict") == "unconfirmed" else None
+    ec_ref = None
+    if ec_prior is not None:
+        pv, sc = _num(ec_prior.get("prev")), _num(ec_prior.get("since"))
+        if pv is not None and sc is not None:
+            ec_ref = (pv, sc)
+        else:
+            ec_prior = None                 # a malformed hold record is no hold: today's reference
+    ec_ticks = 0
+    ec_target = prior_plan.get("target")
+    if ec_prior is not None:
+        ec_ticks = int(_num(ec_prior.get("ticks")) or 0)
+        ec_target = ec_prior.get("prev_target")
+    else:
+        ec_ref = _exit_ref(prior_plan)
+    ec_target = ec_target if isinstance(ec_target, int) and not isinstance(ec_target, bool) else None
+    exit_drop = None
+    if ec_ref is not None:
+        # a standing hold re-judges the same drop (its window was judged
+        # when it was first seen); a fresh reference judges the window
+        exit_drop = rules.his_net_drop(ec_ref[0], net, 0.0 if ec_prior is not None else t.now - ec_ref[1],
+                                       short=short)
+    exit_held = False
+    if ec_prior is not None and (exit_drop is None or not exit_drop.sudden):
+        sn = _exit_snap(t, r, fills)
+        plan["exit_confirm"] = {"prev": ec_ref[0], "net": net,
+                                "drop": None if exit_drop is None else exit_drop.drop,
+                                "snap": sn["snap"], "snap_age_s": sn["snap_age_s"], "verdict": "averted",
+                                "ticks": ec_ticks, "since": ec_ref[1], "prev_target": ec_target}
+        _mirror_stop("exit_flap_averted", w)
+        _recent(book["id"], "exit_flap_averted", prev=ec_ref[0], net=net, ticks=ec_ticks, ledger=ledger)
+        exit_drop = None
     # the flat clock carries only while the book IS flat: a re-bought
     # book that flattens again starts a new MIRROR_FLAT_CLOSE_S wait,
     # never closes cashed_out at once off the clock of an earlier flat
@@ -9111,6 +9271,78 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                 else:
                     cancel_reason = mi.REDUCE_UNWITNESSED
                     p = None
+        if (exit_drop is not None and exit_drop.sudden and p is not None and not t.flatten_all
+                and kind in ("reduce", "flatten_paired") and plan.get("sign_flip") is not True
+                and plan.get("flow_hold") is None and plan.get(mi.REDUCE_UNWITNESSED) is None):
+            # E25 (FILL lane 25): THE CONFIRMATION. The exit this plan
+            # sizes is a reduce or the paired flatten that is NOT the
+            # sign flip's, admitted by E12b's hold and E15's witness (the
+            # flip close is never guarded -- the flip is the reopen
+            # mechanism, so a flip's flatten fires as today; a confirmed
+            # vanish keeps its own reader: the data API's `_confirm_gone`;
+            # the operator's flatten-all is never held), and it is sized
+            # from a SUDDEN DROP of the reading. It fires
+            # ONLY when the venue's own position for him on this market
+            # -- the per-market read of THIS tick (_market_snap, book=True,
+            # never budgeted, on E10's priority lane; _exit_snap: fresh,
+            # stamped, read no earlier than the newest fill's ingest
+            # clock) -- shows him at or below the new reading within
+            # rules.MIRROR_EXIT_CONFIRM_TOL_PCT of the drop
+            # (rules.exit_confirmed): `exit_confirmed`, the same tick, no
+            # delay (the 17:04:57Z shape: his 12,960 buy of the other
+            # token read 11,393.3 -> -1,566.7 and the venue showed it, so
+            # the flatten goes out as today). A snapshot still at the OLD
+            # net, or one that could not be read (stale, unreadable,
+            # unstamped, before the fill), HOLDS the exit this tick under
+            # `exit_unconfirmed`: nothing new is sold; the plan before's
+            # standing exit keeps its life exactly as under E15's hold
+            # (the plan handed to _act capped at the plan before's target,
+            # `cap`, a reducing side only; nothing standing: nothing sent,
+            # a resting add cancelled under the hold's name); the book is
+            # HOT next tick (its reason is not on_target: E6's rule reads
+            # it every tick, its per-market read with it), so the next
+            # tick re-reads the snapshot and fires when it confirms. A
+            # drop that persists past rules.MIRROR_EXIT_CONFIRM_MAX_TICKS
+            # held ticks fires anyway, `exit_confirm_expired` -- fail
+            # toward following him, never a permanent hold
+            sn = _exit_snap(t, r, fills)
+            confirmed = rules.exit_confirmed(net, exit_drop.drop, sn["snap"], short=short)
+            ec_ticks += 1
+            rec = {"prev": ec_ref[0], "net": net, "drop": exit_drop.drop, "threshold": exit_drop.threshold,
+                   "snap": sn["snap"], "snap_age_s": sn["snap_age_s"], "snap_why": sn["why"],
+                   "ticks": ec_ticks, "since": ec_ref[1], "prev_target": ec_target, "kind": kind}
+            if confirmed is True:
+                rec["verdict"] = "confirmed"
+                _mirror_stop("exit_confirmed", w)
+            elif ec_ticks > int(rules.MIRROR_EXIT_CONFIRM_MAX_TICKS):
+                rec["verdict"] = "expired"
+                _mirror_stop("exit_confirm_expired", w)
+                _recent(book["id"], "exit_confirm_expired", prev=ec_ref[0], net=net, snap=sn["snap"],
+                        ticks=ec_ticks, qty=p.qty)
+            else:
+                rec["verdict"] = "unconfirmed"
+                exit_held = True
+                _mirror_stop("exit_unconfirmed", w)
+                _recent(book["id"], "exit_unconfirmed", prev=ec_ref[0], net=net, snap=sn["snap"],
+                        ticks=ec_ticks, qty=p.qty)
+                rec["held"] = {"kind": kind, "qty": p.qty, "price": p.price}
+                wp = None
+                if ec_target is not None and ec_target != 0 and ((ec_target > ledger) if short else (ec_target < ledger)):
+                    wp = mi.plan(int(ec_target), float(ledger), venue_seat,
+                                 mi.Book(r.bid, r.ask), his_px,
+                                 None if plan.get("short_share_cap") is not None else r.mark)
+                held = t.open_by_book.get(book["id"])
+                if held is not None and rules.leg_action(book.get("intent"), held[0]["side"]) == "reduce":
+                    plan["open_order"] = held[0]["id"]
+                if (wp is not None and wp.side is not None
+                        and rules.leg_action(book.get("intent"), wp.side) == "reduce"):
+                    rec["cap"] = wp.qty
+                    kind = "reduce"
+                    p = wp
+                else:
+                    cancel_reason = "exit_unconfirmed"
+                    p = None
+            plan["exit_confirm"] = rec
     else:
         _mirror_stop(rules.plan_reason_key(p.reason), w)
         if (target == 0 and abs(ledger) < FLAT_TOL_SHARES
@@ -9129,12 +9361,23 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         # re-enters (step-9 review)
         since = _num(prior_plan.get("vanish_since")) if prior_plan.get("kind") == "flatten_vanished" else None
         plan["vanish_since"] = t.now if since is None else since
+    if (ec_prior is not None and exit_drop is not None and exit_drop.sudden
+            and plan.get("exit_confirm") is None):
+        # E25: the drop still stands in our reading but no exit was judged
+        # this tick (an increase, E12b's or E15's own hold, a flatten
+        # that keeps its own reader): the hold's record rides on, its
+        # reference and its count unmoved, so the next reduce is still
+        # judged against the reading BEFORE the drop
+        plan["exit_confirm"] = dict(ec_prior)
     plan.update(kind=kind, side=(p.side if p else None), qty=(p.qty if p else 0),
                 price=(p.price if p else None), his_level=his_px,
                 reason=(p.reason if p else inc_refusal))
     reason = p.reason if p else (inc_refusal or "no plan")
     if plan.get("flow_hold") is not None and p is None:
         reason = mi.FLOW_FILLS_SHRANK
+        plan["reason"] = reason
+    if exit_held and p is None:
+        reason = "exit_unconfirmed"          # E25: the hold's name on the row when nothing of his exit rests
         plan["reason"] = reason
     if plan.get(mi.REDUCE_UNWITNESSED) is not None:
         # E15: the hold's name on the row when nothing of his exit rests;
@@ -9145,6 +9388,11 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             plan["reason"] = reason
         if ref is None:
             plan["reduce_ref"] = {"target": int(ledger), "at": mi.fills_clock(fills, t.now)}
+    elif exit_held and ref is not None:
+        # E25: a plan held under exit_unconfirmed is not a witnessed
+        # state either -- the reference stands, exactly as under E15's
+        # hold, and the drop is re-witnessed against it next tick
+        plan["reduce_ref"] = ref
     elif not t.flatten_all:
         # the reference moves with every un-held plan: the target it sized
         # and the newest ingest clock among the fills it counted

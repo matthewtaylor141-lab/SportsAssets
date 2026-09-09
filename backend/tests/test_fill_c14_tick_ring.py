@@ -414,18 +414,23 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # E24 (FILL lane 24: the desk's hand read on the disagree and closing branches of _tick_book) landed
     # after E23 and moved _tick_book -- re-cut at E24 (859d33ff50b22047 -> d1b7103a1fcfe2e1)
     # (the E24 review's HIGH-1 / LOW-1: the order-open return and the unrounded delta -- d1b7103a1fcfe2e1 -> ce2e3dccbb4140f4)
-    # (the per-trade cap, 2026-09-09 ~21:05Z owner order: the plan's game_room written null under
-    # the unbounded cap -- ce2e3dccbb4140f4 -> d75c15c0a117974b)
-    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "9280b3d3d3d3937b"
+    # E25 (FILL lane 25: the exit confirmation -- the drop judged and the hold in _tick_book's reduce
+    # branch, the reference and the skip's `exit_ref`) landed after E24 and moved _tick_book again --
+    # re-cut at E25 (ce2e3dccbb4140f4 -> 6a592b14a88d5558); the E25 review's HIGH-1 (the sign flip's
+    # flatten excluded: the flip close is never guarded) and HIGH-2 (the hold and its reference carried
+    # on the market_unreadable plan) moved it again at the fold (6a592b14a88d5558 -> baf5cd361a5a02c0);
+    # landed over the per-trade cap (52e1d52: the game_room null write, the game_unreadable guard) -> 78d2c4f096b70c00
+    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "78d2c4f096b70c00"
     assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "a766496554ff357e"
     # 219f140 read 9898ac1e343b5e41; the owner's $10,000 loss stop (863ad77, docs 62) landed ahead of
     # this lane and moved the module's hash to 308fd0c45fb78448 -- the lane itself touches nothing in
     # rules; the loss stop switched off by owner order (docs 65: rules.MIRROR_LOSS_STOP, an
-    # env_switch beside MIRROR_LOSS_STOP_USD) moved it again, re-cut at that landing
-    # (the loss-stop switch re-cut this to 756873bcab495fab; the per-trade cap of 2026-09-09
-    # ~21:05Z -- MIRROR_NET_CAP_USD unbounded, game_room / mirror_target admitting math.inf --
-    # re-cuts it again: 756873bcab495fab -> c1ba120e4b4c93e9)
-    assert h(rules) == "dd7e132f616861b6", "mirror_live_rules untouched by this lane"
+    # env_switch beside MIRROR_LOSS_STOP_USD) moved it again (756873bcab495fab), re-cut at that
+    # landing; E25 (docs 66: the five MIRROR_EXIT_CONFIRM_* rails, his_net_drop, exit_confirmed)
+    # moved it once more, re-cut at E25 (12ebaf8122b0e874); the E25 review's MEDIUM-3 re-wrote the rails'
+    # comment block (the flap's reference is the plan before, 8,473.8; the 76.9 s tick) -- re-cut at the fold
+    # (c5c1fb34b4d381e0); landed over the per-trade cap (52e1d52, dd7e132f616861b6 there) -> a765a9b2160f11a8
+    assert h(rules) == "a765a9b2160f11a8", "mirror_live_rules untouched by this lane"
     for f in (ml._act, ml._place, ml._place_reserved, ml._entry_take, ml._fast_gate, ml._fast_book,
               ml._fast_candidate, ml._tick_book, ml._walk_candidate, ml._tick):
         s = inspect.getsource(f)

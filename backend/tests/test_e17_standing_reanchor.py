@@ -424,7 +424,7 @@ def test_e17_the_census_names_sit_before_registered_no_increase():
     # and E22 (FILL lane 22) its four lost_fill_* names (-> -36:-28) and FILL lane 11 its one `cand_market_closed_db` (-> -37:-29) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # and E23 (FILL lane 23) its six cancel_fill_* / disagree_fill_* names (-> -43:-35)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-50:-42 -> -54:-46)
-    assert keys[-54:-46] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
+    assert keys[-58:-50] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
                              "adopted_prior_episode", "venue_dust_ours", "adopt_prior_unreadable",
                              "adopt_no_fill_since_close", "adopt_prior_venue_settled")
     assert keys[-13] == "drift_smaller_open"

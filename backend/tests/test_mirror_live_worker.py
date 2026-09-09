@@ -5001,7 +5001,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104) and FILL lane 11 by its one (-> -105);
     # E23 (FILL lane 23) by its six `cancel_fill_*` / `disagree_fill_*` names (-> -111) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E24 (FILL lane 24) by its four `hand_*` names (-118 -> -122)
-    assert keys[-122:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-126:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -5146,6 +5146,14 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # (keys[-13]) and `registered_no_increase` (keys[-12]), after
                           # E23's six (keys[-17:-13])
                           "hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous",
+                          # E25 (FILL lane 25): an exit sized from a sudden drop of our
+                          # reading of his net held until the venue's own position
+                          # confirms it; confirmed the same tick; the hold expired past
+                          # MIRROR_EXIT_CONFIRM_MAX_TICKS; the drop reversed before it
+                          # fired -- before E19's name (keys[-13]) and
+                          # `registered_no_increase` (keys[-12]), after E24's four
+                          # (keys[-17:-13])
+                          "exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5162,7 +5170,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-123] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
+    # E25 (FILL lane 25) by its four `exit_*` exit-confirmation names (-122 -> -126, -123 -> -127)
+    assert keys[-127] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -13234,6 +13243,17 @@ def test_e24_the_hand_names_are_emitted_here_too(monkeypatch, caplog):
     from tests import test_e24_hand_fills as e24
     e24.test_e24_every_name_is_emitted_here(monkeypatch, caplog)
     for name in e24.NEW_NAMES:
+        assert name in SEEN, name
+
+
+def test_e25_the_exit_confirm_names_are_emitted_here_too(monkeypatch):
+    """E25's four names (FILL lane 25) are driven in tests/test_e25_exit_confirm.py
+    (book 1177's phantom drop held then averted; the 17:04:57Z cut confirmed;
+    the stale snapshot expiring); run here as well so the coverage read below
+    sees them when this file runs alone (E13's convention)."""
+    from tests import test_e25_exit_confirm as e25
+    e25.test_e25_every_name_is_emitted_here(monkeypatch)
+    for name in e25.NEW_NAMES:
         assert name in SEEN, name
 def test_t1_the_turn_names_are_emitted_here_too(monkeypatch, caplog):
     """FILL lane 5's three names are driven in tests/test_fill_t1_turn.py;

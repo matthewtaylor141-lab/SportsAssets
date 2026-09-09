@@ -1080,6 +1080,58 @@ MIRROR_FLATTEN_REST_S = min_wait_env("MIRROR_FLATTEN_REST_S", 300.0)
 # per book (mirror_live._lost_fill_adopt; the plan's `lost_fill_at`).
 # A wait before a venue read: the environment may only LENGTHEN it.
 MIRROR_LOST_FILL_REREAD_S = min_wait_env("MIRROR_LOST_FILL_REREAD_S", 300.0)
+# E25 (2026-09-09, FILL lane 25): AN EXIT SIZED FROM A SUDDEN DROP IN
+# OUR READING OF HIS NET IS CONFIRMED AGAINST HIS VENUE POSITION BEFORE
+# IT FIRES (task 93; book 1177 aec-wta-qinzhe-eleryb-2026-09-08: the
+# reading read 8,597.6 at 17:15:05Z, 8,473.8 at 17:15:57Z and 3,262.8 at
+# 17:16:34Z -- against the plan before, a drop of 5,211.0 shares / 61.5 %
+# in 37 s, the one s1 row fills-vs-venue names -- and was back at
+# 8,473.8 by 17:19:09Z; the book sold 393 @0.295 on the drop and bought
+# 521 @0.29 on the recovery, a round trip on a reading the venue's own
+# position record never showed -- fills-vs-venue at 17:43Z read our
+# 15,370.9 equal to the venue's 15,370.9 to the share). his_net_drop
+# below judges the fall of the reading between the plan before and this
+# tick's, on the book's leg; exit_confirmed judges the venue's own
+# per-market position against it. THE FIVE RAILS, each pointing the ONE
+# way the environment may move it, which is toward MORE confirmation
+# (more holds, never fewer): a lower SHARES / PCT threshold judges more
+# falls sudden (capped_env: the default is the ceiling); a longer window
+# S counts an older reference as this fall's (min_wait_env: only
+# lengthened); a lower TOL_PCT asks the venue to show more of the drop
+# (capped_env); a higher MAX_TICKS holds an unconfirmed drop longer
+# before it fires anyway (min_wait_env: only raised). Today's behaviour
+# -- no confirmation at all -- is NOT reachable from a shell: reaching it
+# would raise a threshold, shorten the window or cut the wait, each a
+# code change with a review; at the defaults a fall the venue shows
+# fires on the same tick, so his real exits are today's. The defaults,
+# from the day's rows (hard2/book_1177_1740, book_1156_1624,
+# book_1075_1651, book_1138_1728): the flap 5,211.0 / 61.5 % is sudden;
+# his real cuts of 5,398 / 75 % (1156, 16:12Z), 8,300 / 31 % (1138,
+# 16:54-16:55Z) and 12,960 / 113.8 % of 11,393.3 (1177, 17:04:57Z:
+# 11,393.3 -> -1,566.7) are judged and confirmed by the venue's
+# position the tick it shows them; the 2,880 / 25.3 % first step of the
+# 17:04:57Z cut (11,393.3 -> 8,513.3) and 1075's 7,372.9 / 23 %
+# (15:37-15:38Z) are under 30 % and take today's path with no hold; a
+# rise is never judged. 1,000 shares is the floor under which a
+# fall is not judged at all (at ratio 0.1 a 100-share reduce). The
+# window 600 s: 1177's judged plans were 37-58 s apart (book_1177_1740
+# rows 148-153), so the flap's 37 s is well inside it; a quiet book's
+# rotation (QUIET_EVERY_TICKS 9) lands inside it only while the tick is
+# under 66.7 s -- at the 76.9 s tick of hourly_2030 row 426 (54-64
+# books) the rotation is 9 x 76.9 = 692 s, PAST the window, and a quiet
+# book's drop found on the read after its rotation is NOT judged (today's
+# path, no hold): the window covers hot books, which are read every tick.
+# The tolerance 0.5: the venue must show at least half of the drop on
+# the leg. MAX_TICKS 3: the third held tick is the last; the fourth
+# fires (`exit_confirm_expired`) whatever the venue reads -- never a
+# permanent hold; 1177's flap was read low on exactly three judged plans
+# (rows 151-149) and recovered on the fourth (row 148), so the default
+# has NO margin on that fixture -- a phantom one read longer sells.
+MIRROR_EXIT_CONFIRM_SHARES = capped_env("MIRROR_EXIT_CONFIRM_SHARES", 1000.0, floor=1.0)
+MIRROR_EXIT_CONFIRM_PCT = capped_env("MIRROR_EXIT_CONFIRM_PCT", 0.30, floor=0.0)
+MIRROR_EXIT_CONFIRM_S = min_wait_env("MIRROR_EXIT_CONFIRM_S", 600.0)
+MIRROR_EXIT_CONFIRM_TOL_PCT = capped_env("MIRROR_EXIT_CONFIRM_TOL_PCT", 0.5, floor=0.0)
+MIRROR_EXIT_CONFIRM_MAX_TICKS = int(min_wait_env("MIRROR_EXIT_CONFIRM_MAX_TICKS", 3))
 # A book flat at target 0 on a live market closes after this long.
 MIRROR_FLAT_CLOSE_S = capped_env("MIRROR_FLAT_CLOSE_S", 3600.0)
 # Derived-vs-snapshot disagreement above this refuses increases.
@@ -1474,6 +1526,70 @@ def smaller_reading(fills_net: Any, venue_net: Any) -> float | None:
         return None
     m = min(abs(a), abs(b))
     return -m if a < 0.0 else m
+
+
+class ExitDrop(NamedTuple):
+    """E25: the change of our reading of his net between the plan before
+    and this tick, ON THE BOOK'S LEG (positive: he holds more on the
+    book's side; negative: less), the fall it carries (never negative),
+    the threshold it was judged against and whether it is SUDDEN."""
+    change: float
+    drop: float
+    threshold: float
+    sudden: bool
+
+
+def his_net_drop(prev_net: Any, net: Any, elapsed_s: Any, short: Any = False,
+                 shares: Any = None, pct: Any = None, window_s: Any = None) -> ExitDrop | None:
+    """E25 (2026-09-09, FILL lane 25; task 93): is this tick's reading
+    of his net a SUDDEN DROP from the plan before's? `prev_net` is the
+    reading the last plan sized on (its `net`), `net` this tick's,
+    `elapsed_s` the seconds between the two plans. On the book's leg
+    (`short`: anything truthy is the short axis, where a fall of his
+    holding is the net RISING toward zero) the fall is judged against
+    max(MIRROR_EXIT_CONFIRM_SHARES, MIRROR_EXIT_CONFIRM_PCT x |prev_net|)
+    and is sudden only when it exceeds that AND the two plans are no more
+    than MIRROR_EXIT_CONFIRM_S apart (the rails read at call time unless
+    a caller hands its own). Book 1177's 8,473.8 -> 3,262.8 in 37 s (the
+    17:15:57Z plan to the 17:16:34Z one) reads change -5,211.0, drop
+    5,211.0, threshold 2,542.14, sudden; a RISE
+    reads drop 0 and is never sudden (entries are not this rule's).
+    None when either reading or the elapsed time is not a number, or
+    the elapsed time is negative: a drop that cannot be judged is no
+    drop -- the caller takes today's path. Pure."""
+    a, b, e = _num(prev_net), _num(net), _num(elapsed_s)
+    if a is None or b is None or e is None or e < 0.0:
+        return None
+    sh = _num(MIRROR_EXIT_CONFIRM_SHARES if shares is None else shares)
+    pc = _num(MIRROR_EXIT_CONFIRM_PCT if pct is None else pct)
+    win = _num(MIRROR_EXIT_CONFIRM_S if window_s is None else window_s)
+    if sh is None or pc is None or win is None:
+        return None
+    leg = -1.0 if short else 1.0
+    change = round((b - a) * leg, 6)
+    drop = max(0.0, -change)
+    thr = round(max(sh, pc * abs(a)), 6)
+    return ExitDrop(change, drop, thr, bool(drop > thr and e <= win))
+
+
+def exit_confirmed(net: Any, drop: Any, snap_net: Any, short: Any = False,
+                   tol_pct: Any = None) -> bool | None:
+    """E25: does the venue's OWN per-market position for him confirm the
+    drop our reading shows? `net` is this tick's reading, `drop` the
+    fall on the leg (his_net_drop), `snap_net` the per-market read's net
+    (mirror_live._market_snap, read this tick, or None when it could not
+    be read). Confirmed when, on the book's leg, the venue shows him at
+    or below the new reading plus MIRROR_EXIT_CONFIRM_TOL_PCT of the
+    drop -- the venue has moved at least (1 - tol) of the way; a
+    snapshot still at the OLD net is not confirmation. True / False on a
+    readable snapshot; None when the snapshot or any input is not a
+    number (unread: the caller holds by name, never fires on it). Pure."""
+    b, d, s = _num(net), _num(drop), _num(snap_net)
+    tol = _num(MIRROR_EXIT_CONFIRM_TOL_PCT if tol_pct is None else tol_pct)
+    if b is None or d is None or d < 0.0 or s is None or tol is None or tol < 0.0:
+        return None
+    leg = -1.0 if short else 1.0
+    return bool(s * leg <= b * leg + tol * d + 1e-9)
 
 
 def prior_episode_adoption(venue_net: Any, prior_ledger: Any) -> bool:
@@ -3101,6 +3217,9 @@ __all__ = [
     "MIRROR_TAKE_BAND", "band_cent", "take_in_band",
     "MIRROR_FLATTEN_SLIP",
     "MIRROR_FLATTEN_REST_S", "MIRROR_LOST_FILL_REREAD_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
+    "MIRROR_EXIT_CONFIRM_SHARES", "MIRROR_EXIT_CONFIRM_PCT", "MIRROR_EXIT_CONFIRM_S",
+    "MIRROR_EXIT_CONFIRM_TOL_PCT", "MIRROR_EXIT_CONFIRM_MAX_TICKS", "ExitDrop", "his_net_drop",
+    "exit_confirmed",
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAST_ADD_REPLAN",
     "MIRROR_FAMILIES",
     "FLAT_TOL_SHARES", "SELL_DUST_SHARES",

@@ -554,9 +554,9 @@ def test_t2_the_census_names_sit_before_drift_smaller_open_the_emit_sites_and_no
     # FILL lane 5 (three names), E22 (FILL lane 22, four) and FILL lane 11 (one) landed after this lane and placed theirs nearer the key (-15/-14 -> -23/-22) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names nearer the key (-23 / -22 -> -29 / -28, -27 / -26 / -24 -> -33 / -32 / -30)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-36 / -35 -> -40 / -39, -40 / -39 / -37 -> -44 / -43 / -41)
-    assert keys[-40] == "fill_answer_write_failed" and keys[-39] == "fill_answers_absent"
+    assert keys[-44] == "fill_answer_write_failed" and keys[-43] == "fill_answers_absent"
     # FILL lane 3 landed first and sits between E14's name and these two (take_in_band -16 -> -27)
-    assert keys[-44] == "take_in_band" and keys[-43] == "exit_take_in_band" and keys[-41] == "order_open_his_exit"
+    assert keys[-48] == "take_in_band" and keys[-47] == "exit_take_in_band" and keys[-45] == "order_open_his_exit"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
