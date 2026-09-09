@@ -270,7 +270,9 @@ CAND_MIN_PER_TICK = 10
 # candidates keep, for the same reason (a share of zero for as long as
 # the hot books outnumber the budget is a quiet book never read again)
 DEFERRED_MIN_PER_TICK = 10
-QUIET_EXIT_PLANS = frozenset({"exit_take", "take_at_his_level", "reduce_unfilled"})
+QUIET_EXIT_PLANS = frozenset({"exit_take", "take_at_his_level", "reduce_unfilled",
+                              # FILL lane 3: a band IOC is an exit plan, not noise
+                              "exit_take_in_band", "cover_in_band"})
 # the prior plan's fields a quiet skip's plan carries (the next read and
 # a sibling's game room read them off the row: _tick_book, _held_exposure)
 _SKIP_CARRIED = ("flat_since", "short_proof", "mark", "bid", "ask", "exit_px_src")
@@ -937,6 +939,21 @@ CENSUS_KEYS: tuple[str, ...] = (
     # `drift_smaller_open` (keys[-13]) by the convention E13 / E17 / E19 /
     # E20 / E14b followed (keys[-14]; the tail pins moved by one)
     "take_in_band",
+    # FILL lane 3 (2026-09-08; the exit take named, inert at its default
+    # -- owner decision D2 keeps the exit within 1c): a long book's exit
+    # IOC sent at the band cent (`exit_take_in_band`: the bid past the
+    # take cent but at or through rules.exit_terms' take_band) and a
+    # short book's cover IOC at its band cent (`cover_in_band`), both
+    # counted at the decision as `take_in_band` is; at the default band
+    # (0.01 = the tolerance) neither can fire. `order_open_his_exit`: the
+    # fast tick's wake on a book with an ENTRY rest standing while the
+    # woken fill of his REDUCES the leg (mi.reducing_on past the book's
+    # reduce_ref) -- a `fast_tick_skipped` reason and a count, never a
+    # cancel (the full tick's `qty` clause replaces the rest within
+    # POLL_S). Before E19's `drift_smaller_open` (keys[-13]) and
+    # `registered_no_increase` (keys[-12]) by the convention every lane
+    # since E13 followed (keys[-16:-13]; the tail pins moved by three)
+    "exit_take_in_band", "cover_in_band", "order_open_his_exit",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -2648,6 +2665,10 @@ class _Tick:
     fast_calls: int = 0
     # E9: the fast tick's own record -- cid -> the reason it was skipped
     fast_skipped: dict = field(default_factory=dict)
+    # FILL lane 3: the open order rows this FAST tick read, by book id
+    # (the full tick keeps them on open_by_book; the fast tick makes no
+    # step O) -- read by _fast_gate's order_open split alone
+    fast_open: dict = field(default_factory=dict)
     # E10: the books stage's wall-time deltas (_WallClock.delta around
     # the walk; a fast tick's around its markets): data / venue / plan
     wall: dict = field(default_factory=dict)
@@ -8909,6 +8930,23 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                         # left bare until the next plan
                         return await _exit_take(t, book, r, p, ex, left, his_px, plan, kind)
                     return "take"
+                elif _exit_band_take(t, SELL, r, ex, plan):
+                    # THE EXIT'S BAND TAKE off the standing rest (FILL
+                    # lane 3; inert at the default band): the bid past
+                    # the take cent but at or through the band cent --
+                    # the same cancel, the one IOC at the band cent
+                    # through _exit_take (its remainder rests at his cent
+                    # the same tick), the row's decision exit_take_in_band
+                    res = await _cancel_and_settle(t, o, book, "take", exit=True)
+                    named = _cancel_outcome(t, book, o, res)
+                    if named is not None:
+                        return named
+                    left = _sell_qty(book, int(min(p.qty, max(0.0, float(o["qty"])
+                                                              - float(o.get("booked_filled") or 0.0)))))
+                    if left >= 1:
+                        _exit_band_mark(t, r, SELL, ex, plan, w)
+                        return await _exit_take(t, book, r, p, ex, left, his_px, plan, kind, in_band=True)
+                    return "take"
                 # outside the cent: the rest stands at his cent, and a
                 # rest past its TTL at the same cent is the no-op the
                 # TTL re-quote would have been (rule 3)
@@ -8935,6 +8973,25 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                     if left >= 1:
                         return await _place(t, book, r, "take", BUY, ex["cover"], left, his_px, p,
                                             plan, tif="IOC")
+                    return "take"
+                elif _exit_band_take(t, BUY, r, ex, plan):
+                    # THE COVER'S BAND TAKE off its standing rest (FILL
+                    # lane 3; inert at the default band): the ask over
+                    # the cover cent but at or under the band cent -- the
+                    # same cancel, the one IOC at the band cent exactly
+                    # as the cover's tolerance IOC goes (S4's path: its
+                    # partial rests nothing this tick), decision
+                    # cover_in_band
+                    res = await _cancel_and_settle(t, o, book, "take", exit=True)
+                    named = _cancel_outcome(t, book, o, res)
+                    if named is not None:
+                        return named
+                    left = _cover_qty(book, int(min(p.qty, max(0.0, float(o["qty"])
+                                                               - float(o.get("booked_filled") or 0.0)))))
+                    if left >= 1:
+                        _exit_band_mark(t, r, BUY, ex, plan, w)
+                        return await _place(t, book, r, "take", BUY, ex["cover_band"], left, his_px, p,
+                                            plan, tif="IOC", in_band=True)
                     return "take"
                 _exit_held(t, r, ex, plan, w)
                 if t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S):
@@ -9080,6 +9137,18 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 _mirror_stop("under_one_share", w)
                 return "under_one_share"
             return await _exit_take(t, book, r, p, ex, qty, his_px, plan, kind)
+        elif _exit_band_take(t, SELL, r, ex, plan):
+            # THE EXIT'S BAND TAKE with no rest standing (FILL lane 3;
+            # inert at the default band): the bid past the take cent but
+            # at or through the band cent -- the one IOC at the band
+            # cent through _exit_take, its remainder resting at his cent
+            # the same tick; decision exit_take_in_band
+            qty = _sell_qty(book, p.qty)
+            if qty < 1:
+                _mirror_stop("under_one_share", w)
+                return "under_one_share"
+            _exit_band_mark(t, r, SELL, ex, plan, w)
+            return await _exit_take(t, book, r, p, ex, qty, his_px, plan, kind, in_band=True)
         _exit_held(t, r, ex, plan, w)
     elif short_exit:
         # THE COVER WITH NO REST STANDING (S4): the ask at or under the
@@ -9096,6 +9165,18 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 _mirror_stop("under_one_share", w)
                 return "under_one_share"
             return await _place(t, book, r, "take", BUY, ex["cover"], qty, his_px, p, plan, tif="IOC")
+        elif _exit_band_take(t, BUY, r, ex, plan):
+            # THE COVER'S BAND TAKE with no rest standing (FILL lane 3;
+            # inert at the default band): the one IOC at the band cent
+            # exactly as the cover's tolerance IOC goes (S4's path, a
+            # partial rests nothing this tick); decision cover_in_band
+            qty = _cover_qty(book, p.qty)
+            if qty < 1:
+                _mirror_stop("under_one_share", w)
+                return "under_one_share"
+            _exit_band_mark(t, r, BUY, ex, plan, w)
+            return await _place(t, book, r, "take", BUY, ex["cover_band"], qty, his_px, p, plan,
+                                tif="IOC", in_band=True)
         _exit_held(t, r, ex, plan, w)
     else:
         # the take armed by a post-only rejection, with no rest standing.
@@ -9771,11 +9852,74 @@ def _exit_terms(t: _Tick, book: dict, side: str | None, his_px: float | None,
         plan.update(exit_px=_num(his_px), exit_px_src="none")
         return None
     plan.update(exit_px=ex["px"], exit_px_src="his_fill")
+    # FILL lane 3: the band's cent and bound beside E4's (inert at the
+    # default: exit_take_band == exit_take, exit_cover_band == exit_cover)
     if "floor" in ex:
         plan.update(exit_floor=round(ex["floor"], 6), exit_rest=ex["rest"], exit_take=ex["take"])
+        if "take_band" in ex:
+            plan.update(exit_take_band=ex["take_band"], exit_band_floor=round(ex["band_floor"], 6))
     else:
         plan.update(exit_ceiling=round(ex["ceiling"], 6), exit_cover=ex["cover"], exit_rest=ex["rest"])
+        if "cover_band" in ex:
+            plan.update(exit_cover_band=ex["cover_band"], exit_band_ceiling=round(ex["band_ceiling"], 6))
     return ex
+
+
+def _exit_band_at(side: str, r: _Reading, ex: dict) -> bool:
+    """THE EXIT'S BAND TEST (FILL lane 3), read AFTER the tolerance test
+    failed: on a SELL the bid at or through `take_band`, on a BUY the
+    ask at or under `cover_band` -- and ONLY when that cent is strictly
+    past the tolerance cent (`take_band` under `take`, `cover_band`
+    over `cover`). At the default band the cents are equal, so this is
+    False whenever the tolerance test was: no band IOC, no band word,
+    E4 byte for byte. A missing or unreadable band cent is False."""
+    try:
+        if side == SELL:
+            tb, take = _num(ex.get("take_band")), _num(ex.get("take"))
+            if tb is None or take is None or not (tb < take - 1e-9):
+                return False
+            return rules.at_or_through(SELL, r.bid, r.ask, tb)
+        if side == BUY:
+            cb, cover = _num(ex.get("cover_band")), _num(ex.get("cover"))
+            if cb is None or cover is None or not (cb > cover + 1e-9):
+                return False
+            return rules.at_or_through(BUY, r.bid, r.ask, cb)
+    except Exception:  # noqa: BLE001 — an unreadable term is no band
+        return False
+    return False
+
+
+def _exit_band_take(t: _Tick, side: str, r: _Reading, ex: dict, plan: dict) -> bool:
+    """THE BAND TEST AND ITS COUNT GUARD (FILL lane 3; the review's
+    HIGH-1): a band IOC is sent only when the 059 columns are present
+    this tick (`t.order_cols` True), so its row carries the band word --
+    an uncounted band take is not allowed (FILL_plan section 4; lane 2's
+    `uncounted` verdict on the entry band). With the columns absent and
+    the touch inside the band, the plan says so (`exit_band_uncounted`)
+    and the tolerance rule alone governs: held by name, the rest at his
+    cent. At the default band _exit_band_at is False first, so nothing
+    is stamped and nothing changes."""
+    if not _exit_band_at(side, r, ex):
+        return False
+    if t.order_cols is True:
+        return True
+    plan["exit_band_uncounted"] = True
+    return False
+
+
+def _exit_band_mark(t: _Tick, r: _Reading, side: str, ex: dict, plan: dict, whale: str) -> None:
+    """A band IOC is to go (FILL lane 3): counted at the decision --
+    `exit_take_in_band` on a long book's SELL, `cover_in_band` on a
+    short's cover -- and the plan carries `exit_band` {bid, ask, his,
+    cents_off_his, at}: how many cents past his price the touch sat."""
+    px = _num(ex.get("px"))
+    if side == SELL:
+        _mirror_stop("exit_take_in_band", whale)
+        off = None if px is None or _num(r.bid) is None else round((px - float(r.bid)) * 100, 1)
+    else:
+        _mirror_stop("cover_in_band", whale)
+        off = None if px is None or _num(r.ask) is None else round((float(r.ask) - px) * 100, 1)
+    plan["exit_band"] = {"bid": r.bid, "ask": r.ask, "his": px, "cents_off_his": off, "at": t.now}
 
 
 def _exit_held(t: _Tick, r: _Reading, ex: dict, plan: dict, whale: str,
@@ -9784,13 +9928,20 @@ def _exit_held(t: _Tick, r: _Reading, ex: dict, plan: dict, whale: str,
     census and on the plan with the quote and the bound it was read
     against. Nothing chases. `quote` is a fresher (bid, ask) than the
     tick's, when one was read (the priced cover's read before its
-    close)."""
+    close). FILL lane 3: the plan also carries the BAND's bound
+    (`band_floor` / `band_ceiling`) when the terms hold one, so the held
+    tick records both bounds it was read against."""
     _mirror_stop("exit_out_of_tol", whale)
     if "ceiling" in ex:
         _mirror_stop("short_cover_out_of_tol", whale)     # S4: the cover held outside the cent
     bound = ("floor", round(ex["floor"], 6)) if "floor" in ex else ("ceiling", round(ex["ceiling"], 6))
     bid, ask = quote if quote is not None else (r.bid, r.ask)
-    plan["exit_out_of_tol"] = {"bid": bid, "ask": ask, bound[0]: bound[1], "at": t.now}
+    held = {"bid": bid, "ask": ask, bound[0]: bound[1]}
+    band_key = "band_floor" if "floor" in ex else "band_ceiling"
+    if _num(ex.get(band_key)) is not None:
+        held[band_key] = round(float(ex[band_key]), 6)
+    held["at"] = t.now
+    plan["exit_out_of_tol"] = held
 
 
 # the names under which an IOC is NOT sent (E18): the entry's remainder
@@ -9966,13 +10117,18 @@ async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: flo
 
 
 async def _exit_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ex: dict, qty: int,
-                     his_px: float | None, plan: dict, kind: str | None) -> str:
+                     his_px: float | None, plan: dict, kind: str | None,
+                     in_band: bool = False) -> str:
     """A LONG book's exit take (E14b, FILL program lane 1; the mirror
     image of _entry_take): ONE IOC at the take cent (`ex["take"]`, the
     lowest cent at or above his price less rules.MIRROR_EXIT_TOL) for
     `qty`, then the unfilled quantity RESTS post-only at his cent
     (`ex["rest"]`, ceil(his)) on the SAME tick -- never a second IOC,
-    never a cent outside his. Before this the IOC withheld at the send
+    never a cent outside his. FILL lane 3: with `in_band` the IOC is
+    limited at the band cent (`ex["take_band"]`, the same cent as the
+    take at the default band) and its row's decision reads
+    'exit_take_in_band'; the rest that follows is the same rest at his
+    cent, decision 'exit_rest'. Before this the IOC withheld at the send
     (`bid_moved`, `ioc_quote_unread`: E18's re-read) or filled in part
     left the book with NO exit order until the next full tick planned
     again (book 334: his 0.549, our 358, filled 0.50 at a lag of 279 s;
@@ -10007,7 +10163,9 @@ async def _exit_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ex: dict, qt
     nothing. An exit's ops are exempt from the ops budget
     and the replace budget (M-1, _exit_or_flip), so the extra rest is
     never `ops_capped`. Any other IOC result is returned as today."""
-    res = await _place(t, book, r, "take", SELL, ex["take"], qty, his_px, p, plan, tif="IOC")
+    ioc_px = ex["take_band"] if in_band else ex["take"]
+    res = await _place(t, book, r, "take", SELL, ioc_px, qty, his_px, p, plan, tif="IOC",
+                       in_band=bool(in_band))
     if t.cancel_all or t.abandoned or book.get("state") == "frozen" or book["id"] in t.nonterminal:
         return res
     if res in IOC_SKIPPED:
@@ -10025,12 +10183,12 @@ async def _exit_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ex: dict, qt
         # standing row) reads NONE to sell: held by name, the hold on the
         # plan (`rested` 0), never a rest sized past the ledger
         _mirror_stop("under_one_share", r.whale)
-        plan["exit_take_rested"] = {"take": ex["take"], "rest": ex["rest"], "qty": int(qty),
+        plan["exit_take_rested"] = {"take": ioc_px, "rest": ex["rest"], "qty": int(qty),
                                     "filled": filled, "rested": 0}
         return res
     rest = await _place(t, book, r, kind or "reduce", SELL, ex["rest"], left, his_px, p, plan)
     rested = rest in ("rest_placed", "filled_at_create")
-    plan["exit_take_rested"] = {"take": ex["take"], "rest": ex["rest"], "qty": int(qty),
+    plan["exit_take_rested"] = {"take": ioc_px, "rest": ex["rest"], "qty": int(qty),
                                 "filled": filled, "rested": left if rested else 0}
     if rested:
         _mirror_stop("exit_take_rested", r.whale)
@@ -12397,7 +12555,53 @@ def _fast_skip_all(t: _Tick, cids: list, why: str) -> None:
             _fast_skip(t, cid, why)
 
 
-def _fast_gate(t: _Tick, book: dict) -> str | None:
+def _fast_open_entry_rest(t: _Tick, book: dict) -> bool:
+    """Is the open row this fast tick read for the book an ENTRY rest
+    (its side's leg action on the book's intent 'add', not an IOC)? The
+    only shape _order_open_his_exit can name, read BEFORE the fills so a
+    reduce rest, a cover rest, an IOC row or a stale open_order_id costs
+    no table read (the review's LOW-1). Unreadable is False."""
+    try:
+        row = t.fast_open.get(int(book["id"]))
+        if not isinstance(row, dict) or row.get("side") not in (BUY, SELL):
+            return False
+        return rules.leg_action(book.get("intent"), row["side"]) == "add" and row.get("tif") != "IOC"
+    except Exception:  # noqa: BLE001 — an unreadable row is not an entry rest
+        return False
+
+
+def _order_open_his_exit(t: _Tick, book: dict, fills: list | None) -> bool:
+    """THE ORDER-OPEN SPLIT'S READING (FILL lane 3): the woken fill of
+    his REDUCES the leg while an ENTRY rest of ours stands on the book.
+    True only when every fact reads: `fills` is a list (the market's
+    fills of his, read for this gate); the open row this fast tick read
+    for the book (`t.fast_open`) is an entry rest -- its side's leg
+    action on the book's intent is 'add' -- and its state is not the
+    IOC's; the book's prior plan carries E15's reference clock
+    (`reduce_ref.at`); and mi.reducing_on over the fills clocked after
+    that reference is positive. Anything unreadable, missing or raising
+    is False: the gate then names `order_open` exactly as before."""
+    try:
+        if not isinstance(fills, list):
+            return False
+        row = t.fast_open.get(int(book["id"]))
+        if not isinstance(row, dict) or row.get("side") not in (BUY, SELL):
+            return False
+        if rules.leg_action(book.get("intent"), row["side"]) != "add" or row.get("tif") == "IOC":
+            return False
+        prior = _jsonish(book.get("last_plan")) or {}
+        ref = prior.get("reduce_ref") if isinstance(prior, dict) else None
+        ref_at = _num(ref.get("at")) if isinstance(ref, dict) else None
+        if ref_at is None:
+            return False
+        witnessed = mi.reducing_on(fills, book.get("long_asset"), book.get("other_asset"),
+                                   _book_short(book), ref_at)
+        return float(witnessed) > 0.0
+    except Exception:  # noqa: BLE001 — an unreadable fact is the old name
+        return False
+
+
+def _fast_gate(t: _Tick, book: dict, fills: list | None = None) -> str | None:
     """Why the fast tick may NOT plan this book now, or None (the
     paragraph over FAST_TICK_MAX, the fail-closed clauses in order):
     the per-book lock held (step O or the full tick's walk has the
@@ -12412,7 +12616,18 @@ def _fast_gate(t: _Tick, book: dict) -> str | None:
     tick is in flight beside a fast tick and no per-book lock is held by
     one, so the lock, `walk_done` and `full_tick_pending` clauses are
     dead -- kept, harmless, as the fail-closed floor under a hand that
-    holds either without the tick lock."""
+    holds either without the tick lock.
+
+    THE ORDER-OPEN CLAUSE IS SPLIT (FILL lane 3): with `fills` given --
+    the market's fills of his, read by _fast_book once the bare gate
+    said `order_open` -- a woken REDUCING fill of his on a book with an
+    ENTRY rest standing (_order_open_his_exit) is named
+    `order_open_his_exit`: a `fast_tick_skipped` reason and a COUNT,
+    never a cancel and never a placement (the full tick's `qty` clause
+    replaces the rest within POLL_S -- rules.rest_decision, 'a FALL
+    never waits' -- and a cancel here would discard queue position on
+    adds still wanted). With no fills, or any fact unreadable, the
+    clause reads `order_open` exactly as before."""
     bid = book["id"]
     if _lock_for(bid).locked():
         return "book_locked"
@@ -12426,6 +12641,8 @@ def _fast_gate(t: _Tick, book: dict) -> str | None:
     if book.get("state") != "live":
         return "not_live"
     if bid in t.nonterminal or book.get("open_order_id"):
+        if fills is not None and _order_open_his_exit(t, book, fills):
+            return "order_open_his_exit"
         return "order_open"
     if t.positions is None:
         return "walk_stale"
@@ -12437,9 +12654,22 @@ def _fast_gate(t: _Tick, book: dict) -> str | None:
 async def _fast_book(t: _Tick, book: dict) -> None:
     """One woken BOOK through _tick_book, under its lock, after the
     gate -- the row re-read under the lock so the plan is made on the
-    row as it stands, and the gate read again on it."""
+    row as it stands, and the gate read again on it. FILL lane 3: a
+    bare `order_open` is read once more with the market's fills of his
+    (one table read, no venue call) so a woken reducing fill of his on
+    a book with an entry rest standing is counted `order_open_his_exit`;
+    the fills unreadable -> `order_open` as before."""
     cid, bid = str(book.get("condition_id")), book["id"]
     why = _fast_gate(t, book)
+    if why == "order_open" and _fast_open_entry_rest(t, book):
+        try:
+            fills = await ms.his_fills(t.pool, book["whale"], cid)
+            _count_fills_dedup(t)
+        except Exception:  # noqa: BLE001 — unreadable fills: the old name
+            fills = None
+        why = _fast_gate(t, book, fills)
+        if why == "order_open_his_exit":
+            _mirror_stop("order_open_his_exit", book.get("whale"))
     if why is not None:
         return _fast_skip(t, cid, why)
     lk = _lock_for(bid)
@@ -12583,6 +12813,7 @@ async def _fast_tick(t: _Tick, cids: list) -> None:
     # its book is non-terminal -- the gate refuses it and every sibling's
     # game room reads unreadable (no increase sized beside it)
     t.nonterminal = {int(r["book_id"]) for r in rows}
+    t.fast_open = {int(r["book_id"]): dict(r) for r in rows}     # FILL lane 3: the gate's split reads them
     stats["orders_open"] = len(rows)
     t.cand_budget = _cand_budget(t)
     t.map_budget.cap = _map_cap(t.cand_budget)

@@ -158,7 +158,8 @@ def test_e14b_book_419_the_bid_under_the_floor_sends_no_ioc_and_rests_at_his_cen
     assert [c[2:6] for c in _places(v)] == [(0.18, 152, True, GTC_TIF)] and _bbos(v).count(SLUG) == 1
     assert _census(st, "exit_out_of_tol") == 1 and _census(st, "exit_take") == 0
     assert _census(st, "exit_take_rested") == 0 and _census(st, "bid_moved") == 0
-    assert lp["exit_out_of_tol"] == {"bid": 0.16, "ask": 0.19, "floor": 0.17, "at": NOW}
+    # (FILL lane 3 re-pinned: the held tick records the band bound beside the floor; equal at the default)
+    assert lp["exit_out_of_tol"] == {"bid": 0.16, "ask": 0.19, "floor": 0.17, "band_floor": 0.17, "at": NOW}
     assert "exit_take_rested" not in lp and "bid_moved" not in lp and "take_qty" not in lp
     assert [a[20] for a in _inserts(p)] == ["exit_rest"] and b["ledger_net"] == 304
 
@@ -246,7 +247,8 @@ class _Fake:
     def __init__(self, results):
         self.results, self.calls = list(results), []
 
-    async def __call__(self, t, book, r, kind, side, wire, qty, his_px, p, plan, tif="GTC", take_first=False):
+    async def __call__(self, t, book, r, kind, side, wire, qty, his_px, p, plan, tif="GTC", take_first=False,
+                       in_band=False):
         self.calls.append((kind, side, wire, int(qty), tif))
         res, filled = self.results.pop(0)
         if res == "take":
@@ -348,9 +350,11 @@ def test_e14b_the_short_cover_emits_none_of_the_new_names_and_the_flatten_send_i
     assert "exit_take_rested" not in b["last_plan"]
     # the call sites: the two long-exit sites of _act, and nowhere else
     src = inspect.getsource(ml)
-    assert src.count("_exit_take(") == 3, "the def and the two long-exit sites"
+    # FILL lane 3 (2026-09-08) re-pinned: the two long-exit BAND sites of _act route through it
+    # too (3 -> 5, 2 -> 4); the cover sites do not
+    assert src.count("_exit_take(") == 5, "the def, the two long-exit sites and their two band sites"
     act = inspect.getsource(ml._act)
-    assert act.count("_exit_take(") == 2
+    assert act.count("_exit_take(") == 4
     for fn in (ml._flatten_send, ml._flatten_vanished, ml._frozen_exit, ml._frozen_reduce_on_fill,
                ml._exit_held, ml._cover_qty, ml._s4_refusal, ml._entry_take, ml._sell_qty):
         s = inspect.getsource(fn)
@@ -358,8 +362,11 @@ def test_e14b_the_short_cover_emits_none_of_the_new_names_and_the_flatten_send_i
     assert "sell_limit_price" in inspect.getsource(ml._flatten_send), "the co-held IOC priced as before"
     assert "exit_take_rested" not in inspect.getsource(rules)
     # the exit terms are the rule's: E4's cents on both sides
-    assert rules.exit_terms(SELL, 0.549) == {"px": 0.549, "floor": 0.539, "take": 0.54, "rest": 0.55}
-    assert rules.exit_terms(BUY, 0.31) == {"px": 0.31, "ceiling": 0.32, "cover": 0.32, "take": 0.32, "rest": 0.31}
+    # (FILL lane 3 re-pinned: the band keys, equal to the take / the cover at the default band)
+    assert rules.exit_terms(SELL, 0.549) == {"px": 0.549, "floor": 0.539, "take": 0.54, "rest": 0.55,
+                                             "band_floor": 0.539, "take_band": 0.54}
+    assert rules.exit_terms(BUY, 0.31) == {"px": 0.31, "ceiling": 0.32, "cover": 0.32, "take": 0.32, "rest": 0.31,
+                                           "band_ceiling": 0.32, "cover_band": 0.32}
     assert ml.IOC_SKIPPED == ("ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread")
 
 
@@ -368,14 +375,18 @@ def test_e14b_the_short_cover_emits_none_of_the_new_names_and_the_flatten_send_i
 def test_e14b_the_census_name_sits_before_drift_smaller_open_and_the_tail_pins_hold():
     keys = ml.CENSUS_KEYS
     assert keys.count("exit_take_rested") == 1 and len(set(keys)) == len(keys)
-    # E14 (FILL lane 2) landed after this lane and placed `take_in_band` nearer the key (-14 -> -15)
-    assert keys[-15] == "exit_take_rested" and keys[-14] == "take_in_band"
+    # E14 (FILL lane 2) landed after this lane and placed `take_in_band` nearer the key (-14 -> -15);
+    # FILL lane 3 placed its three names after that (-15 -> -18, -14 -> -17)
+    assert keys[-18] == "exit_take_rested" and keys[-17] == "take_in_band"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert ml._new_stats()["census"]["exit_take_rested"] == 0
     # no knob of the lane's own: no env read added to the worker or the rules
     assert "_env_float(" not in inspect.getsource(ml._exit_take) and "capped_env" not in inspect.getsource(ml._exit_take)
-    assert 'capped_env("MIRROR_EXIT_TAKE' not in inspect.getsource(rules)
+    # (FILL lane 3, 2026-09-08, re-pinned: the exit band rail MIRROR_EXIT_TAKE_BAND is lane 3's, one
+    # downward-only capped_env; this lane still adds none of its own)
+    assert inspect.getsource(rules).count('capped_env("MIRROR_EXIT_TAKE') == 1
+    assert 'capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)' in inspect.getsource(rules)
     assert '_mirror_stop("exit_take_rested"' in inspect.getsource(ml._exit_take)
 
 

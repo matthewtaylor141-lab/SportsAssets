@@ -196,8 +196,10 @@ def test_e14_the_band_constant_only_lowers_from_the_environment(monkeypatch):
     assert 'MIRROR_TAKE_AFTER_S = min_wait_env("MIRROR_TAKE_AFTER_S", 0.0)' in src
     # the decisions' words: 'take_in_band' only on an add's IOC in band
     assert rules.order_decision("add", True, False, True) == "take_in_band"
-    assert rules.order_decision("add", True, True, True) == "cover", "a short cover wins"
-    assert rules.order_decision("reduce", True, False, True) == "take", "a reduce's IOC is never the entry band's"
+    # FILL lane 3 (2026-09-08) re-pinned: a short cover's IOC in band is 'cover_in_band' and a
+    # reduce's IOC in band 'exit_take_in_band' -- the exit band's own words; neither is the entry's
+    assert rules.order_decision("add", True, True, True) == "cover_in_band", "a short cover wins"
+    assert rules.order_decision("reduce", True, False, True) == "exit_take_in_band", "a reduce's IOC is never the entry band's"
     assert rules.order_decision("add", False, False, True) == "rest", "not an IOC: never 'take_in_band'"
     assert rules.order_decision("reduce", False, False, True) == "exit_rest"
     assert rules.order_decision("add", True, False, "yes") == "take", "in_band is a bool, not a truthy string"
@@ -347,7 +349,12 @@ def test_e14_martinez_534s_shape_rests_out_of_band_and_the_admission_is_untouche
                rules.rest_decision, rules.take_allowed, rules.at_or_through, rules.buy_price):
         s = inspect.getsource(fn)
         for name in ("band_cent", "take_in_band", "MIRROR_TAKE_BAND", "take_band"):
-            # a whole word: open_catchup's own `_catchup_band_cents` is not the lane's
+            # a whole word: open_catchup's own `_catchup_band_cents` is not the lane's;
+            # FILL lane 3 (2026-09-08) gave exit_terms its OWN `take_band` key (the
+            # exit's band cent, the plan's name for it) -- the entry band's three
+            # names stay absent from it
+            if fn is rules.exit_terms and name == "take_band":
+                continue
             assert not re.search(rf"(?<![\w]){name}(?![\w])", s), (fn.__name__, name)
 
 
@@ -375,8 +382,9 @@ def test_e14_book_347s_short_shape_rests_at_the_short_wire_never_in_band(monkeyp
     st2 = _tick(p2, v2, http=_short_http())
     assert [c[1:6] for c in _places(v2)] == [(SLUG, 0.32, 200, False, GTC_TIF)]
     assert _census(st2, "take_in_band") == 0 and _census(st2, "short_add") == 1 and "take_band" not in b2["last_plan"]
-    # the S4 cover's decision word stands
-    assert rules.order_decision("reduce", True, True, True) == "cover"
+    # the S4 cover's decision word stands (FILL lane 3 re-pinned: in band it is the cover's own band word)
+    assert rules.order_decision("reduce", True, True, True) == "cover_in_band"
+    assert rules.order_decision("reduce", True, True, False) == "cover"
 
 
 def test_e14_book_661s_shape_a_standing_rest_is_never_converted_and_the_requote_band_takes():
@@ -668,12 +676,15 @@ def test_e14_the_band_off_and_his_cent_unreadable_rest_as_today(monkeypatch):
 def test_e14_the_census_name_sits_before_drift_smaller_open_and_the_pins_hold():
     keys = ml.CENSUS_KEYS
     assert keys.count("take_in_band") == 1
-    assert keys[keys.index("take_in_band") + 1] == "drift_smaller_open"
+    # FILL lane 3 (2026-09-08) placed its three names between this one and E19's key
+    assert keys[keys.index("take_in_band") + 1] == "exit_take_in_band"
+    assert keys[keys.index("take_in_band") + 4] == "drift_smaller_open"
     # landed after E20 (`wrong_sign_hold`) and E14b (`exit_take_rested`), which sit before it by the same convention
     assert keys[keys.index("take_in_band") - 1] == "exit_take_rested"
     assert keys[keys.index("take_in_band") - 2] == "wrong_sign_hold"
     assert keys[keys.index("take_in_band") - 3] == "adopt_prior_venue_settled"
-    assert keys[-14] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    # FILL lane 3 (2026-09-08) placed its three names after this one (-14 -> -17)
+    assert keys[-17] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert ml._new_stats()["census"]["take_in_band"] == 0
     # the one emit site, at the decision, beside the at-level take's
@@ -688,7 +699,10 @@ def test_e14_the_census_name_sits_before_drift_smaller_open_and_the_pins_hold():
     i_band = asrc.index('_mirror_stop("take_in_band", w)')
     i_rest = asrc.index('return await _place(t, book, r, "increase", p.side, wire, qty, his_px, p, plan)')
     assert i_lvl < i_band < i_rest
-    assert "in_band=True" in asrc and asrc.count("in_band=True") == 1
+    # the entry's one band site; FILL lane 3 (2026-09-08) added the exit band's four (1 -> 5), each
+    # on a reduce leg -- the entry's stays the one _entry_take call
+    assert "in_band=True" in asrc and asrc.count("in_band=True") == 5
+    assert asrc.count("_entry_take(t, book, r, p, band, wire, qty, his_px, plan, first=True,\n                                     in_band=True)") == 1
     # the at-level take's own test line reads nothing of the band: it fires
     # FIRST and unchanged (the review's M23, pinned by text)
     assert 'if rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, take_lvl, p.side):\n' in asrc

@@ -2088,7 +2088,9 @@ def test_paired_out_target_zero_rests_at_his_cent_and_takes_within_a_cent_of_him
     lp = b["last_plan"]
     assert lp["exit_px"] == pytest.approx(0.28) and lp["exit_px_src"] == "his_fill"
     assert lp["exit_floor"] == pytest.approx(0.27) and lp["exit_rest"] == 0.28 and lp["exit_take"] == 0.27
-    assert lp["exit_out_of_tol"] == {"bid": 0.25, "ask": 0.32, "floor": 0.27, "at": NOW}
+    # (FILL lane 3, 2026-09-08, re-pinned: the held tick records the band bound beside the floor;
+    # equal to it at the default band, so nothing else on the plan or the wire moves)
+    assert lp["exit_out_of_tol"] == {"bid": 0.25, "ask": 0.32, "floor": 0.27, "band_floor": 0.27, "at": NOW}
     # his equivalent above the ask (0.60 -> 0.40): the rest at his cent, as before
     p2 = _pool(fills=_his(300, other_size=300, other_px=0.60), snap={M: 300.0, N: 300.0})
     p2.add_book(ledger=300)
@@ -4668,7 +4670,8 @@ def test_the_incident_book_flattens_at_the_ledger_books_the_dust_and_reaches_the
     act = inspect.getsource(ml._act)
     # three SELL legs size through it: the exit's take within a cent of
     # him (E4), the take at the wire with no price of his, the rest
-    assert act.count("_sell_qty(book, p.qty)") == 3 and 'int(book.get("ledger_net") or 0)) if p.side == SELL' not in act
+    # (FILL lane 3, 2026-09-08: the no-rest long exit's band site sizes the same way, 3 -> 4)
+    assert act.count("_sell_qty(book, p.qty)") == 4 and 'int(book.get("ledger_net") or 0)) if p.side == SELL' not in act
     assert "math.floor" not in inspect.getsource(ml._sell_qty)
 
 
@@ -4864,8 +4867,9 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # after those, LAST
     assert keys[keys.index("ledger_dust") + 1] == "short_open"
     # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89;
-    # E20 by its one, E14b (FILL lane 1) by its one and E14 (FILL lane 2) by its one `take_in_band`: -89 -> -92)
-    assert keys[-92:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # E20 by its one, E14b (FILL lane 1) by its one and E14 (FILL lane 2) by its one `take_in_band`: -89 -> -92;
+    # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95)
+    assert keys[-95:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -4947,6 +4951,11 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # before E19's name and `registered_no_increase` (keys[-12]),
                           # after E20's and E14b's, which landed first (keys[-14])
                           "take_in_band",
+                          # FILL lane 3: the exit's band IOC on a long book / the cover's on a
+                          # short (both inert at the default band) and the fast gate's
+                          # order-open split on his reducing fill -- before E19's name and
+                          # `registered_no_increase` (keys[-12]), after E14's (keys[-16:-13])
+                          "exit_take_in_band", "cover_in_band", "order_open_his_exit",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -4963,7 +4972,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-93] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one and E14's one before the tail
+    assert keys[-96] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -9768,7 +9777,7 @@ def test_e4_a_long_reduce_takes_within_a_cent_of_his_price_and_rests_at_his_cent
     assert b2["ledger_net"] == 300 and b2["state"] == "live"
     o2 = next(iter(p2.orders.values()))
     assert o2["kind"] == "reduce" and o2["state"] == "open" and o2["wire"] == 0.31 and o2["tif"] == "GTC"
-    assert b2["last_plan"]["exit_out_of_tol"] == {"bid": 0.29, "ask": 0.32, "floor": 0.30, "at": NOW}
+    assert b2["last_plan"]["exit_out_of_tol"] == {"bid": 0.29, "ask": 0.32, "floor": 0.30, "band_floor": 0.30, "at": NOW}    # FILL lane 3: the band bound beside the floor
     assert b2["last_plan"]["exit_floor"] == 0.30 and b2["last_plan"]["exit_px_src"] == "his_fill"
     # (c) five seconds later the bid is at 0.30: cancelled and taken, no wait
     v3 = _Venue(bid=0.30, ask=0.32, held={SLUG: 300}, ioc_fill=200.0)
@@ -9808,7 +9817,7 @@ def test_e4_book_29_replay_the_sign_flip_flatten_rests_at_his_cent_and_stands_fi
     assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v)
     assert lp["exit_px"] == 0.4595 and lp["exit_floor"] == 0.4495
     assert lp["exit_rest"] == 0.46 and lp["exit_take"] == 0.45 and lp["exit_px_src"] == "his_fill"
-    assert lp["exit_out_of_tol"] == {"bid": 0.01, "ask": 0.02, "floor": 0.4495, "at": NOW}
+    assert lp["exit_out_of_tol"] == {"bid": 0.01, "ask": 0.02, "floor": 0.4495, "band_floor": 0.4495, "at": NOW}    # FILL lane 3: the band bound beside the floor
     o = next(iter(p.orders.values()))
     assert o["kind"] == "flatten_paired" and o["state"] == "open" and o["wire"] == 0.46
     ttl = float(rules.MIRROR_REST_TTL_S)
@@ -9884,7 +9893,7 @@ def test_e4_s4_a_short_cover_rests_at_floor_his_outside_the_ceiling_and_takes_at
     assert lp["exit_px"] == pytest.approx(0.30) and lp["exit_px_src"] == "his_fill"
     assert lp["exit_ceiling"] == pytest.approx(0.31) and lp["exit_cover"] == 0.31 and lp["exit_rest"] == 0.30
     assert "exit_floor" not in lp
-    assert lp["exit_out_of_tol"] == {"bid": 0.30, "ask": 0.32, "ceiling": 0.31, "at": NOW}
+    assert lp["exit_out_of_tol"] == {"bid": 0.30, "ask": 0.32, "ceiling": 0.31, "band_ceiling": 0.31, "at": NOW}    # FILL lane 3: the band bound beside the ceiling
     # re-checked next tick with the ask at the ceiling: the rest cancelled
     # under `take`, the one IOC at the cover cent, filled, the book flat
     v2 = _NoClose(bid=0.30, ask=0.31, held={SLUG: -300}, ioc_fill=300.0)
@@ -10468,7 +10477,8 @@ def test_e4_r3_an_exit_is_exempt_from_the_ops_budget_so_its_take_at_the_last_op_
     assert "if not exit and t.ops + t.ops_pending >= rules.MIRROR_MAX_ORDER_OPS_PER_TICK:" in src
     assert 'exit=rules.leg_action(book.get("intent"), side) == "reduce"' in inspect.getsource(ml._place)
     act = inspect.getsource(ml._act)
-    assert act.count('"take", exit=') == 3 and '"replace", exit=is_exit' in act and "decision, exit=is_exit" in act
+    # (FILL lane 3, 2026-09-08: the two keep-branch band sites cancel under "take" too, 3 -> 5)
+    assert act.count('"take", exit=') == 5 and '"replace", exit=is_exit' in act and "decision, exit=is_exit" in act
     assert "slot = _op_slot(t, w, exit=True)" in inspect.getsource(ml._flatten_vanished)
 
 
@@ -12974,6 +12984,18 @@ def test_e14_the_take_in_band_name_is_emitted_here_too(monkeypatch):
     from tests import test_e14_take_band as e14
     e14.test_e14_every_name_is_emitted_here(monkeypatch)
     assert "take_in_band" in SEEN
+
+
+def test_fill_x1_the_exit_band_names_are_emitted_here_too(monkeypatch):
+    """FILL lane 3's three names are driven in tests/test_fill_x1_exit_band.py
+    (the band at a monkeypatched 0.02 for the two band words -- at the code
+    default they can never fire -- and the fast gate's count on his
+    reducing fill); run here as well so the coverage read below sees them
+    when this file runs alone (E13's convention)."""
+    from tests import test_fill_x1_exit_band as x1
+    x1.test_x1_every_name_is_emitted_here(monkeypatch)
+    for k in ("exit_take_in_band", "cover_in_band", "order_open_his_exit"):
+        assert k in SEEN, k
 def test_l7_event_stale_is_emitted_on_a_dated_candidate_with_no_fill_of_his_in_a_day():
     """L7 (2026-09-08): a candidate whose slug's own date is more than one
     day past with no fill of his in a day is refused `event_stale` --

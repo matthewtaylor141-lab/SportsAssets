@@ -798,7 +798,10 @@ def test_exit_terms_price_every_exit_off_his_price_within_the_tolerance():
     tolerance: None, never a guess."""
     assert r.MIRROR_EXIT_TOL == 0.01
     ex = r.exit_terms(r.SELL, 0.4595)
-    assert ex == {"px": 0.4595, "floor": pytest.approx(0.4495), "rest": 0.46, "take": 0.45}
+    # FILL lane 3 (2026-09-08): the dict gains the band's two keys, equal to
+    # the floor / the take at the default band (inert); re-pinned, not weakened
+    assert ex == {"px": 0.4595, "floor": pytest.approx(0.4495), "rest": 0.46, "take": 0.45,
+                  "band_floor": pytest.approx(0.4495), "take_band": 0.45}
     ex = r.exit_terms(r.SELL, 0.31)
     assert ex["floor"] == pytest.approx(0.30) and ex["rest"] == 0.31 and ex["take"] == 0.30
     assert r.exit_terms(r.SELL, 0.46)["take"] == 0.45 and r.exit_terms(r.SELL, 0.46)["rest"] == 0.46
@@ -817,11 +820,13 @@ def test_exit_terms_price_every_exit_off_his_price_within_the_tolerance():
             assert r.at_or_through(r.SELL, ex["take"], 0.99, ex["take"]) is True
             assert r.at_or_through(r.SELL, round(ex["take"] - 0.01, 2), 0.99, ex["take"]) is False
     # the ladder's edges
-    assert r.exit_terms(r.SELL, 0.015) == {"px": 0.015, "floor": pytest.approx(0.005), "rest": 0.02, "take": 0.01}
+    assert r.exit_terms(r.SELL, 0.015) == {"px": 0.015, "floor": pytest.approx(0.005), "rest": 0.02, "take": 0.01,
+                                           "band_floor": pytest.approx(0.005), "take_band": 0.01}
     assert r.exit_terms(r.SELL, 0.995)["rest"] == 0.99 and r.exit_terms(r.SELL, 0.995)["take"] == 0.99
     # the short cover
     cv = r.exit_terms(r.BUY, 0.30)
-    assert cv == {"px": 0.30, "ceiling": pytest.approx(0.31), "cover": 0.31, "rest": 0.30, "take": 0.31}
+    assert cv == {"px": 0.30, "ceiling": pytest.approx(0.31), "cover": 0.31, "rest": 0.30, "take": 0.31,
+                  "band_ceiling": pytest.approx(0.31), "cover_band": 0.31}
     # S4: the cover's rest is floor(his) to the cent, never above him, never under 0.01
     assert r.exit_terms(r.BUY, 0.4595)["rest"] == 0.45 and r.exit_terms(r.BUY, 0.005)["rest"] == 0.01
     assert r.exit_terms(r.BUY, 0.995)["rest"] == 0.99 and r.exit_terms(r.BUY, 0.31)["take"] == r.exit_terms(r.BUY, 0.31)["cover"]
@@ -830,7 +835,13 @@ def test_exit_terms_price_every_exit_off_his_price_within_the_tolerance():
     assert r.at_or_through(r.BUY, 0.29, 0.31, cv["cover"]) is True
     assert r.at_or_through(r.BUY, 0.29, 0.32, cv["cover"]) is False
     # the tolerance is a parameter (the environment may only tighten it)
-    assert r.exit_terms(r.SELL, 0.31, tol=0.0) == {"px": 0.31, "floor": 0.31, "rest": 0.31, "take": 0.31}
+    # (FILL lane 3: with the tolerance at 0 the band at its default 0.01 is INERT too --
+    # a lowered tolerance tightens the take exactly as before the band: E4 LOW-6)
+    assert r.exit_terms(r.SELL, 0.31, tol=0.0) == {"px": 0.31, "floor": 0.31, "rest": 0.31, "take": 0.31,
+                                                   "band_floor": 0.31, "take_band": 0.31}
+    assert r.exit_terms(r.SELL, 0.31, tol=0.0, band=0.02)["take_band"] == 0.29, "a band raised in code widens"
+    assert r.exit_terms(r.SELL, 0.31, tol=0.0, band=0.0) == {"px": 0.31, "floor": 0.31, "rest": 0.31, "take": 0.31,
+                                                             "band_floor": 0.31, "take_band": 0.31}
     assert r.exit_terms(r.SELL, 0.31, tol=0.005)["take"] == 0.31 and r.exit_terms(r.SELL, 0.31, tol=0.02)["take"] == 0.29
     # nothing to price off, or nothing to price with: None
     for bad in (None, 0.0, 1.0, 1.5, -0.3, True, False, "0.31", math.nan, math.inf):
@@ -848,7 +859,9 @@ def test_the_exit_tolerance_is_read_at_call_time(monkeypatch):
     """LOW-6: a tightened constant reaches every caller that passes no
     tolerance -- the worker's -- without a reload."""
     monkeypatch.setattr(r, "MIRROR_EXIT_TOL", 0.0)
-    assert r.exit_terms(r.SELL, 0.31) == {"px": 0.31, "floor": 0.31, "rest": 0.31, "take": 0.31}
+    monkeypatch.setattr(r, "MIRROR_EXIT_TAKE_BAND", 0.0)      # FILL lane 3: the band read at call time too
+    assert r.exit_terms(r.SELL, 0.31) == {"px": 0.31, "floor": 0.31, "rest": 0.31, "take": 0.31,
+                                          "band_floor": 0.31, "take_band": 0.31}
     monkeypatch.setattr(r, "MIRROR_EXIT_TOL", 0.02)
     assert r.exit_terms(r.SELL, 0.31)["take"] == 0.29 and r.exit_terms(r.BUY, 0.31)["cover"] == 0.33
 

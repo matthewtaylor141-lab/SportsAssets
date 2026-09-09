@@ -938,6 +938,41 @@ MIRROR_TAKE_AFTER_S = min_wait_env("MIRROR_TAKE_AFTER_S", 0.0)
 # to settlement. Under this rule it takes at 0.45+ while the bid is
 # there and, once the market has fallen, HOLDS at his cent.
 MIRROR_EXIT_TOL = capped_env("MIRROR_EXIT_TOL", 0.01, floor=0.0)
+# THE EXIT'S TAKE BAND (FILL program lane 3, 2026-09-08; owner decision
+# D2: "exits stay within 1c" -- the machinery lands INERT). How far past
+# his exit price the exit's ONE IOC may be limited: on a long book's
+# SELL the take_band cent is the lowest cent at or above his price less
+# max(MIRROR_EXIT_TOL, this band); on a short book's cover the
+# cover_band cent is the highest cent at or under his buy-back price
+# plus the same. exit_terms reads it at call time like the tolerance,
+# and the effective band is max(tol, band): a band at or under the
+# tolerance changes NOTHING (take_band == take, cover_band == cover, and
+# the tolerance branch of _act fires first), so at this default the
+# rule is E4's byte for byte and the lane lands the names alone --
+# decision 'exit_take_in_band' / 'cover_in_band' on a band IOC's row,
+# census exit_take_in_band / cover_in_band, the band bounds on the plan
+# -- so that the second cent, if the owner grants it, is ONE reviewed
+# constant change here and not a new lane. The closed-in-24h rows
+# (post_exits_1707 335-353, FILL_plan lane 3): 694 shares on eleven
+# single-episode long books never exited, settled -340.80, worth 401.79
+# at his price less 1c; a second cent's whole cost on them is 694 x
+# 0.01 = 6.94. A CONTRACT PRICE, capped_env floor 0.0: the environment
+# may only LOWER it (at or under the tolerance it is inert); the default
+# IS the ceiling, so a wider band is a code change with a review, never
+# a shell's. Read at call time by exit_terms (a test's monkeypatch and
+# the operator's lowering apply without a restart of the rule).
+MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)
+# The band is INERT at or under the tolerance's own code default (0.01),
+# whatever the tolerance reads at call time: an operator who LOWERS
+# MIRROR_EXIT_TOL under it (E4 review LOW-6: a tolerance of 0 is "at his
+# cent, nothing worse") tightens the exit exactly as before this band
+# existed -- the plan's bare max(tol, band) would have let the band's
+# default stand over a lowered tolerance, an environment change that
+# did not lower. Only a band raised ABOVE this figure in code (owner
+# decision D2 granted) widens the take, to max(tol, band); the operator
+# turns that off with the band's own rail. Not a knob: the tolerance's
+# default, restated so exit_terms can read it beside the band.
+EXIT_BAND_INERT_AT = 0.01
 # THE ENTRY'S TAKE BAND (E14, 2026-09-08; FILL program lane 2; owner
 # order ~17:45Z: "We are being filled on his losers and missing his
 # winners ... E14 (take at once when the ask is inside the band) is the
@@ -1944,13 +1979,23 @@ def order_decision(action: str | None, is_take: bool, short_cover: bool,
     059): 'cover' for a short book's buy-back (its rest or its IOC),
     'take_in_band' for an ENTRY's IOC sent at the band cent (E14, FILL
     lane 2: `in_band` True on an add's IOC -- the word 059 reserved,
-    written here and nowhere else; a cover wins over it, a reduce's IOC
-    is 'take' whatever the caller says), 'take' for any other IOC,
-    'exit_rest' for a rest that shrinks the leg, 'rest' for an entry's."""
+    written here and nowhere else; a cover wins over it), 'take' for any
+    other IOC, 'exit_rest' for a rest that shrinks the leg, 'rest' for an
+    entry's. FILL lane 3 (the exit band, inert at its default): a
+    reduce's IOC with `in_band` True is 'exit_take_in_band' and a short
+    cover's IOC with it 'cover_in_band' -- the two words a band IOC's
+    row carries so its cents past his price are readable per row; the
+    band words are written on an IOC alone (`is_take`), on a readable
+    leg action alone, and only for `in_band` exactly True -- anything
+    else lands on the word the row carried before the band."""
     if short_cover:
-        return "cover"
+        return "cover_in_band" if (in_band is True and is_take) else "cover"
     if is_take:
-        return "take_in_band" if (in_band is True and action == "add") else "take"
+        if in_band is True and action == "add":
+            return "take_in_band"
+        if in_band is True and action == "reduce":
+            return "exit_take_in_band"
+        return "take"
     return "exit_rest" if action == "reduce" else "rest"
 
 
@@ -2039,7 +2084,7 @@ def take_allowed(rest_age_s: float | None, take_armed_at: float | None, now: flo
 
 
 def exit_terms(side: str, his_px: float | None,
-               tol: float | None = None) -> dict[str, float] | None:
+               tol: float | None = None, band: float | None = None) -> dict[str, float] | None:
     """THE EXIT'S PRICES FROM HIS EXIT PRICE (E4, owner order 2026-09-06
     "we should exit when he exits at his price or within 1c variance
     (tolerance)"), for the one figure the worker already hands the exit
@@ -2076,6 +2121,27 @@ def exit_terms(side: str, his_px: float | None,
                 never under 0.01): never above him, and under the ask
                 whenever the take did not fire.
 
+      THE BAND (FILL lane 3, 2026-09-08; owner decision D2 keeps the
+      exit within 1c, so the band lands INERT): `band` is read at call
+      time like `tol` (MIRROR_EXIT_TAKE_BAND with none given) and the
+      effective band is b = max(tol, band) when the band is above the
+      tolerance's own code default (EXIT_BAND_INERT_AT, 0.01) and b = tol
+      otherwise, so a band at or under that figure is no band at all --
+      and a tolerance the environment lowered tightens the take exactly
+      as before (E4 review LOW-6). SELL adds
+        band_floor  his price - b
+        take_band   the lowest cent AT OR ABOVE band_floor (the same
+                    ceiled reading as `take`, so every fill is inside b
+                    of him at any precision); equal to `take` whenever
+                    the band is inert
+      and BUY adds
+        band_ceiling  his price + b
+        cover_band    the highest cent AT OR UNDER band_ceiling (capped
+                      at 0.99); equal to `cover` whenever inert.
+      `take` / `rest` / `cover` are byte for byte E4's whatever the
+      band reads. An unreadable, negative or bool band is the
+      tolerance (inert), never a wider cent.
+
     None when he gave no exit price -- `his_px` missing, not a number,
     a bool, or off (0, 1) -- when the side is not BUY or SELL, or when
     the tolerance is unreadable or negative: the rule cannot apply and
@@ -2090,20 +2156,34 @@ def exit_terms(side: str, his_px: float | None,
         return None
     if not isinstance(side, str):
         return None
+    bd = _num(MIRROR_EXIT_TAKE_BAND if band is None else band)
+    if bd is None or bd < 0.0 or isinstance(band, bool) or bd <= float(EXIT_BAND_INERT_AT) + 1e-12:
+        bd = tl                         # unreadable, or at / under the tolerance's default: inert
+    b = max(tl, bd)
     if side == SELL:
         floor = h - tl
         take = sell_wire(max(floor, 0.01))
         rest = sell_wire(h)
         if take is None or rest is None:
             return None
-        return {"px": h, "floor": floor, "rest": rest, "take": take}
+        band_floor = h - b
+        take_band = sell_wire(max(band_floor, 0.01))
+        if take_band is None or take_band > take + 1e-9:
+            band_floor, take_band = floor, take       # never a cent above the take: inert
+        return {"px": h, "floor": floor, "rest": rest, "take": take,
+                "band_floor": band_floor, "take_band": take_band}
     if side == BUY:
         ceiling = h + tl
         cover = buy_wire(min(ceiling, 0.99))
         rest = buy_wire(max(h, 0.01))
         if cover is None or rest is None:
             return None
-        return {"px": h, "ceiling": ceiling, "cover": cover, "rest": rest, "take": cover}
+        band_ceiling = h + b
+        cover_band = buy_wire(min(band_ceiling, 0.99))
+        if cover_band is None or cover_band < cover - 1e-9:
+            band_ceiling, cover_band = ceiling, cover   # never a cent under the cover: inert
+        return {"px": h, "ceiling": ceiling, "cover": cover, "rest": rest, "take": cover,
+                "band_ceiling": band_ceiling, "cover_band": cover_band}
     return None
 
 
@@ -2866,7 +2946,8 @@ __all__ = [
     "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
     "MIRROR_BOOK_CONCURRENCY", "MIRROR_VENUE_CALLS_PER_TICK",
     "MIRROR_MAX_REPLACES_PER_HOUR", "MIRROR_REST_TTL_S", "MIRROR_TAKE_AFTER_S",
-    "MIRROR_EXIT_TOL", "exit_terms", "MIRROR_TAKE_BAND", "band_cent", "take_in_band",
+    "MIRROR_EXIT_TOL", "exit_terms", "MIRROR_EXIT_TAKE_BAND", "EXIT_BAND_INERT_AT",
+    "MIRROR_TAKE_BAND", "band_cent", "take_in_band",
     "MIRROR_FLATTEN_SLIP",
     "MIRROR_FLATTEN_REST_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAMILIES",

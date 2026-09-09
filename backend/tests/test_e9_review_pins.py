@@ -785,8 +785,9 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     # its one (-68 -> -69, -69 -> -70), E16 by its four, E18 by its six, E17 by its
     # eight, E19 by its one and L7 by its one `event_stale` (-69 -> -89, -70 -> -90), E20 by its one `wrong_sign_hold`, E14b (FILL lane 1) by its one
     # `exit_take_rested` and E14 (FILL lane 2) by its one `take_in_band` (-89 -> -92, -90 -> -93), the convention every builder followed; E9's four stay keys[-8:-4]
-    assert keys[-92:-88] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-93] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # FILL lane 3 by its three (exit_take_in_band / cover_in_band / order_open_his_exit: -92 -> -95, -93 -> -96)
+    assert keys[-95:-91] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-96] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence

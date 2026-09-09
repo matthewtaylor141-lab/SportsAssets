@@ -264,8 +264,9 @@ def test_e20_an_agreeing_sign_never_reaches_either_arm():
 
 def test_e20_census_place_may_hold_list_and_the_source_shape():
     keys = ml.CENSUS_KEYS
-    assert keys[-16] == "wrong_sign_hold" and keys[-15] == "exit_take_rested" and keys[-13] == "drift_smaller_open"    # E14b and E14 landed after E20 and sit nearer the key
-    assert keys[-14] == "take_in_band"
+    # E14b, E14 and FILL lane 3 (three names) landed after E20 and sit nearer the key (-16/-15/-14 -> -19/-18/-17)
+    assert keys[-19] == "wrong_sign_hold" and keys[-18] == "exit_take_rested" and keys[-13] == "drift_smaller_open"
+    assert keys[-17] == "take_in_band"
     assert keys[-12] == "registered_no_increase" and len(set(keys)) == len(keys)
     assert "wrong_sign_hold" in ml._VENUE_MAY_HOLD_REASONS and "wrong_sign_trip" in ml._VENUE_MAY_HOLD_REASONS
     src = inspect.getsource(ml._tick_book)

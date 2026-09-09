@@ -96,7 +96,9 @@ def _busy(seconds):
 def test_e6_the_constants_and_the_env_can_only_lower_the_budget(monkeypatch):
     assert ml.TICK_TARGET_S == 25.0 and ml.HOT_S == 600.0 and ml.QUIET_EVERY_TICKS == 9   # E11: 3 -> 9
     assert ml.CAND_MIN_PER_TICK == 10 and ml.VENUE_CALLS_PER_TICK == 60
-    assert ml.QUIET_EXIT_PLANS == frozenset({"exit_take", "take_at_his_level", "reduce_unfilled"})
+    # (FILL lane 3, 2026-09-08, re-pinned: the exit band's two names are exit plans, not noise)
+    assert ml.QUIET_EXIT_PLANS == frozenset({"exit_take", "take_at_his_level", "reduce_unfilled",
+                                             "exit_take_in_band", "cover_in_band"})
     # capped_env: within [floor 20, default 60]; unreadable is the default
     for env, want in (("30", 30.0), ("100", 60.0), ("5", 20.0), ("0", 20.0), ("x", 60.0), ("", 60.0)):
         monkeypatch.setenv("MIRROR_TICK_VENUE_CALLS", env)

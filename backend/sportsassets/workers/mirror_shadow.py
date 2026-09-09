@@ -1903,6 +1903,10 @@ def exit_leg(ev: dict | None, ledger: float, venue: float | None,
         ex = rules.exit_terms(rules.SELL, his_px)
         if ex is not None:
             out.update(exit_floor=round(ex["floor"], 6), exit_rest_px=ex["rest"], exit_take_px=ex["take"])
+            # FILL lane 3: the band cent beside the take cent (equal at
+            # the default band), the cent the band judge reads
+            if ex.get("take_band") is not None:
+                out.update(exit_take_band_px=ex["take_band"], exit_band_floor=round(ex["band_floor"], 6))
         return out
     if p.side is None and str(p.reason or "") in _EXIT_HOLD_REASONS:
         out.update(exit_plan="hold", exit_reason=p.reason)
@@ -1949,6 +1953,9 @@ def _pct(vals: list[float], q: float) -> float | None:
 _SQL_EXIT_CENSUS = """
 SELECT DISTINCT ON (whale, condition_id)
        whale, condition_id, would_fill, would_qty, would_px,
+       CASE WHEN detail ? 'would_fill_band' THEN (detail->>'would_fill_band')::boolean
+            WHEN detail ? 'exit_take_band_px' THEN would_fill
+            ELSE NULL END AS would_fill_band,
        detail->>'exit_kind'   AS exit_kind,
        detail->>'exit_plan'   AS exit_plan,
        detail->>'exit_reason' AS exit_reason,
@@ -2019,7 +2026,15 @@ def summarize_exit_rows(rows: list[dict], window_h: float = EXIT_WINDOW_H,
     def _blank() -> dict[str, Any]:
         return {"n": 0, "reduced": 0, "left": 0, "rest": 0, "hold": 0, "no_plan": 0,
                 "resolved": 0, "fills": 0, "misses": 0, "unresolved": 0,
-                "resolved_usd": 0.0, "unfilled_usd": 0.0}
+                "resolved_usd": 0.0, "unfilled_usd": 0.0,
+                # FILL lane 3: the same rest rows judged at the exit's
+                # BAND cent (would_fill_band: the band's own verdict; a
+                # row the rest judge resolved with a band cent recorded
+                # inherits it -- the rest cent touched is the band cent
+                # touched, and the plan expired is both expired; a row
+                # with no band cent is unjudged for the band)
+                "resolved_band": 0, "fills_band": 0, "resolved_usd_band": 0.0,
+                "unfilled_usd_band_usd": 0.0}
 
     by: dict[str, dict[str, Any]] = {}
     rest_rows: dict[str, list[dict]] = {}
@@ -2036,16 +2051,24 @@ def summarize_exit_rows(rows: list[dict], window_h: float = EXIT_WINDOW_H,
             continue
         b["rest"] += 1
         wf = r.get("would_fill")
+        try:
+            usd = abs(float(r.get("would_qty") or 0.0)) * float(r.get("would_px") or 0.0)
+        except (TypeError, ValueError):
+            usd = 0.0
+        wfb = r.get("would_fill_band")
+        if wfb is not None:
+            b["resolved_band"] += 1
+            b["resolved_usd_band"] += usd
+            if wfb:
+                b["fills_band"] += 1
+            else:
+                b["unfilled_usd_band_usd"] += usd
         if wf is None:
             b["unresolved"] += 1
             continue
         b["resolved"] += 1
         rest_rows.setdefault(w, []).append({"would_fill": bool(wf),
                                             "condition_id": r.get("condition_id")})
-        try:
-            usd = abs(float(r.get("would_qty") or 0.0)) * float(r.get("would_px") or 0.0)
-        except (TypeError, ValueError):
-            usd = 0.0
         b["resolved_usd"] += usd
         fk = f"{w}/{str(r.get('family') or '-')}"
         fb = fam.setdefault(fk, {"n": 0, "fills": 0, "touch": [], "whale": w})
@@ -2077,6 +2100,16 @@ def summarize_exit_rows(rows: list[dict], window_h: float = EXIT_WINDOW_H,
         b["lo"] = (ci["ci95"][0] if b["ready"] and ci.get("ci95") else None)
         b["unfilled_usd_share"] = (round(b["unfilled_usd"] / b["resolved_usd"], 4)
                                    if b["ready"] and b["resolved_usd"] > 0 else None)
+        # FILL lane 3: the band's rate and unfilled-dollar share beside
+        # the rest's, under the SAME gate (the whale's judged-market
+        # floor) and over the rows the band judge resolved; both None
+        # below the floor or with nothing resolved for the band
+        b["resolved_usd_band"] = round(b["resolved_usd_band"], 2)
+        b["unfilled_usd_band_usd"] = round(b["unfilled_usd_band_usd"], 2)
+        b["rate_band"] = (round(b["fills_band"] / b["resolved_band"], 4)
+                          if b["ready"] and b["resolved_band"] else None)
+        b["unfilled_usd_band"] = (round(b["unfilled_usd_band_usd"] / b["resolved_usd_band"], 4)
+                                  if b["ready"] and b["resolved_usd_band"] > 0 else None)
         # THE PERCENTILES TAKE THE SAME FLOOR AS THE RATE. They are
         # descriptive and carry no confidence claim, which is why an
         # earlier version let them print at any n with `touch_n` beside
@@ -2498,6 +2531,27 @@ async def _resolve_previous(pool, row: dict, census: dict | None = None,
                 whale, cid, float(bid), float(JUDGE_TTL_S)))
             resolved += n
             filled += n
+        if bid is not None and 0.0 < float(bid) < 1.0:
+            # FILL lane 3: THE BAND'S JUDGE beside the rest's -- the bid
+            # came up to the exit's band cent (exit_leg's
+            # exit_take_band_px, the take cent at the default band)
+            # inside the same life. Its verdict rides the detail
+            # (`would_fill_band`, `touched_s_band`, `touch_px_band`),
+            # never the live-compared column, and never the long-only
+            # rate P1 is gated on; a row with no band cent is not
+            # judged (the cast of a missing key is NULL: no match)
+            band_ctx = ("COALESCE(detail, '{}'::jsonb) || jsonb_build_object("
+                        "'would_fill_band', true, "
+                        "'touched_s_band', round(extract(epoch FROM (now() - at)))::int, "
+                        "'touch_px_band', $3::float8)")
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = " + band_ctx + " "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'would_fill_band' IS NULL "
+                "AND would_side = 'SELL_LONG' "
+                "AND (detail->>'exit_take_band_px')::float8 <= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-band */",
+                whale, cid, float(bid), float(JUDGE_TTL_S))
         if bid is not None or ask is not None:
             # still being read, and the plan outlived a resting order
             resolved += _rowcount(await pool.execute(
