@@ -421,9 +421,9 @@ def test_e17_the_census_names_sit_before_registered_no_increase():
     # (FILL lane 2) placed `take_in_band` after both (-23:-15 -> -24:-16);
     # FILL lane 3 placed its three names after that (-24:-16 -> -27:-19),
     # T2 (FILL lane 4) its two (-> -29:-21), FILL lane 5 its three (-> -32:-24)
-    # and E22 (FILL lane 22) its four lost_fill_* names (-> -36:-28) and FILL lane 11 its one `cand_market_closed_db` (-> -37:-29) -- FILL lane 16 (one name, turn_woke_fast) landed first, so every index here moved by one more
-    # and E21 (FILL lane 10) its six fast_* names (-> -43:-35)
-    assert keys[-44:-36] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
+    # and E22 (FILL lane 22) its four lost_fill_* names (-> -36:-28) and FILL lane 11 its one `cand_market_closed_db` (-> -37:-29) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
+    # and E23 (FILL lane 23) its six cancel_fill_* / disagree_fill_* names (-> -43:-35)
+    assert keys[-50:-42] == ("standing_row_reanchored", "standing_row_ambiguous", "standing_row_reanchor_failed",
                              "adopted_prior_episode", "venue_dust_ours", "adopt_prior_unreadable",
                              "adopt_no_fill_since_close", "adopt_prior_venue_settled")
     assert keys[-13] == "drift_smaller_open"

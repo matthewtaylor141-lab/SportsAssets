@@ -421,10 +421,11 @@ def test_c9_no_census_name_the_three_heartbeat_keys_the_plan_field_and_no_order_
     # E22's four (lost_fill_*) and lane 11's one (cand_market_closed_db) between, both landed ahead of this lane;
     # E21 (FILL lane 10) placed its six fast_* names between lane 11's one and the key (-14 -> -20) -- FILL lane 16 (one name, turn_woke_fast) landed first, so every index here moved by one more
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-21] == "cand_market_closed_db"
-    assert tuple(keys[-25:-21]) == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert tuple(keys[-28:-25]) == ("he_holds", "he_holds_unread", "reopen_refused")
-    assert keys[-20] == "turn_woke_fast"
+    # E23 (FILL lane 23) placed its six names between lane 11's and the key (-14 -> -20, -18:-14 -> -24:-20, -21:-18 -> -27:-24) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
+    assert keys[-27] == "cand_market_closed_db"
+    assert tuple(keys[-31:-27]) == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert tuple(keys[-34:-31]) == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-26] == "turn_woke_fast" and keys[-25] == "fast_order_open" and keys[-20] == "fast_status_unread"
     assert not any(k in keys for k in HEARTBEAT) and not any(k in keys for k in ("rest_cause", "fill_cols", "fast_col"))
     src = inspect.getsource(ml)
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))

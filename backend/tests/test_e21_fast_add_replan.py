@@ -79,7 +79,9 @@ UNTOUCHED = {
     "_tick_candidate": ("199a7d617e704397", ml._tick_candidate), "_lost_fill_adopt": ("61c67ae8946f3af4", ml._lost_fill_adopt),
     "_exit_take": ("750acd709c826566", ml._exit_take), "_ioc_reread": ("cd3dbab5e5819257", ml._ioc_reread),
     "_requotes_this_hour": ("f45f581625d2dea8", ml._requotes_this_hour),
-    "_cancel_and_settle": ("ca65dea6b7703ba4", ml._cancel_and_settle), "_freeze": ("2fc0334b92c9c352", ml._freeze),
+    # _cancel_and_settle read ca65dea6b7703ba4 on 219f140; E23 (FILL lane 23, the cancel's final
+    # status re-read) landed after this lane and moved it -- re-cut at E23's landing, not this lane's
+    "_cancel_and_settle": ("953ba5587d2ad423", ml._cancel_and_settle), "_freeze": ("2fc0334b92c9c352", ml._freeze),
     "restored_block": ("4ad2364970b35ec1", mi.restored_block), "adding_since": ("0b83e6c13d44caad", mi.adding_since),
     "reducing_on": ("1d8174a6e061b4a9", mi.reducing_on),
 }
@@ -657,9 +659,10 @@ def test_e21_order_decision_writes_take_on_add_on_an_adds_ioc_alone_and_only_for
 
 def test_e21_the_census_place_new_stats_the_emit_sites_the_switch_the_untouched_functions_and_no_knob():
     keys = ml.CENSUS_KEYS
-    assert keys[-19:-13] == NEW_NAMES
+    # E23 (FILL lane 23, six names) landed after this lane and sits between these six and the key (-19:-13 -> -25:-19)
+    assert keys[-25:-19] == NEW_NAMES
     # FILL lane 16 (one name, turn_woke_fast) landed first and sits between lane 11's one and these six
-    assert keys[-20] == "turn_woke_fast" and keys[-21] == "cand_market_closed_db"
+    assert keys[-26] == "turn_woke_fast" and keys[-27] == "cand_market_closed_db"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert len(set(keys)) == len(keys) and all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)

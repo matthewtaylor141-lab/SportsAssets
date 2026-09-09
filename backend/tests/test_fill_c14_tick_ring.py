@@ -406,8 +406,11 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     assert h(ml._act) == "42e08939276dcd0a" and h(ml._place) == "ab568476817cf795"
     assert h(ml._place_reserved) == "6c83b8e547c83e0a" and h(ml._entry_take) == "2266c2b346674491"
     assert h(ml._fast_gate) == "1932811194268668" and h(ml._fast_book) == "286e6fa4663c3887"
-    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "a0061ad32302a610"
-    assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "51b72e7567d9f197"
+    # _tick_book read a0061ad32302a610 and _tick 51b72e7567d9f197 after E21; E23 (FILL lane 23:
+    # the disagree adoption arm in _tick_book, the memoed cancel re-read after step O in _tick)
+    # landed after and moved both -- re-cut at E23's landing
+    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "859d33ff50b22047"
+    assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "a766496554ff357e"
     # 219f140 read 9898ac1e343b5e41; the owner's $10,000 loss stop (863ad77, docs 62) landed ahead of
     # this lane and moved the module's hash -- the lane itself touches nothing in rules
     assert h(rules) == "308fd0c45fb78448", "mirror_live_rules untouched by this lane"

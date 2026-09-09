@@ -1076,6 +1076,40 @@ CENSUS_KEYS: tuple[str, ...] = (
     # followed (keys[-19:-13]; the tail pins moved by six)
     "fast_order_open", "fast_his_add", "fast_add_kept", "fast_add_replaced", "fast_add_took",
     "fast_status_unread",
+    # E23 (2026-09-09; FILL lane 23): a cancelled rest whose venue fills
+    # outran the cancel. Book 986 (aec-atp-ugobla-danrin): ten GTC rests
+    # of 2,467 @0.56 cancelled `ttl` / `snapshot_stale` / `loss_breaker`
+    # between 11:55:31 and 13:22:18 each written filled 0 off the
+    # cancel's own terminal status read, the venue holding 1,215 against
+    # the ledger's 413 -- frozen venue_ledger_disagree at 14:03:49 for
+    # the market's life (E16's thaw needs two agreeing reads the venue
+    # can never give). PART A, the cancel (_cancel_and_settle):
+    # `cancel_fill_late`: the one extra status read after the cancel's
+    # terminal read -- or the next tick's memo re-read
+    # (_cancel_reread) -- carried MORE filled than the cancel's answer,
+    # booked as a terminal fill is booked. `cancel_fill_unread`: that
+    # final read could not be made (None, no figure, non-terminal): the
+    # row written cancelled off the cancel's answer and memoed for the
+    # next tick's re-read, never a freeze. PART B, the cure
+    # (_disagree_fill_adopt, on a FROZEN venue_ledger_disagree book with
+    # a fresh walk, never on the transition tick): `disagree_fill_adopted`:
+    # the venue's trade log named, by OUR cancelled rows' own order ids,
+    # unbooked fills summing exactly to the surplus -- each row's fills
+    # booked at the log's prices, the book left to the existing thaw.
+    # `disagree_fill_unread`: the log could not be read.
+    # `disagree_fill_unexplained`: the surplus is not the rows' (manual
+    # shares on the slug, the other token, more than the rows could
+    # fill, a partial, the log naming nothing for our ids).
+    # `disagree_fill_ambiguous`: the two readings of one id disagree
+    # (the log under the row's booked figure, over its quantity, on the
+    # other side, an unreadable price) or the log names more than the
+    # venue holds. Before E19's `drift_smaller_open` (keys[-13]) and
+    # `registered_no_increase` (keys[-12]), after FILL lane 11's one, by
+    # the convention every lane followed (keys[-19:-13]; the tail pins
+    # moved by six)
+    "cancel_fill_late", "cancel_fill_unread",
+    "disagree_fill_adopted", "disagree_fill_unread", "disagree_fill_unexplained",
+    "disagree_fill_ambiguous",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -1354,6 +1388,24 @@ _fill_answers_absent_logged = False
 _LOST_FILL_MEMO_MAX = 4000
 _lost_fill_read_at: dict[int, float] = {}
 _lost_fill_write_logged = False
+# E23 (2026-09-09, FILL lane 23). PART A: a cancel whose final status read
+# could not be made (`cancel_fill_unread`) is memoed here by the order
+# row's id -- {oid, book, whale, seq, at, tries} -- and re-read ONCE on
+# each following tick by _cancel_reread (after step O, before the books),
+# at most _CANCEL_REREAD_TRIES reads, then dropped with a warning (the
+# book's own venue-vs-ledger freeze and part B are the road from there).
+# Bounded at _CANCEL_REREAD_MEMO_MAX rows: past it the OLDEST is dropped
+# and named. PART B: the clock of the last trade-log read a frozen
+# venue_ledger_disagree book made for its cancelled rows
+# (_disagree_fill_adopt), beside the plan's own `disagree_fill_at` --
+# E22's memo shape, its own dict, the same bound and the same wait
+# (rules.MIRROR_LOST_FILL_REREAD_S). The reason UPDATE failing is logged
+# once per process.
+_CANCEL_REREAD_MEMO_MAX = 200
+_CANCEL_REREAD_TRIES = 3
+_cancel_reread_pending: dict[int, dict] = {}
+_disagree_fill_read_at: dict[int, float] = {}
+_disagree_fill_write_logged = False
 # FILL lane 5: the closed book's plan write (`reopen_refused`) failing is
 # logged once per process, counted every time (`reopen_refused_write_failed`)
 _reopen_write_logged = False
@@ -2003,6 +2055,37 @@ _SQL_LOST_ROWS = _SQL_ORDERS_OPEN.replace(
     " WHERE o.book_id = $1 AND o.state = 'lost' AND o.order_id IS NULL"
     " AND o.done_at < to_timestamp($2)").replace(
     "ml-orders-open", "ml-lost-rows")
+# E23 (2026-09-09, FILL lane 23): a frozen venue_ledger_disagree book's
+# CANCELLED rows WITH an order id whose booked figure is below their
+# quantity, done BEFORE this tick began ($2, the tick's clock: a cancel
+# this tick wrote is part A's on this tick and this road's on the next),
+# in the open-orders read's own projection (the row goes through
+# _book_delta exactly as an open row does), both shapes derived from the
+# statements above so the projections can never drift apart. A row whose
+# booked figure already equals its quantity is not a candidate (E22's
+# _SQL_LOST_ROWS shape, for 'cancelled' rows with an id).
+_SQL_CANCELLED_ROWS_047 = _SQL_ORDERS_OPEN_047.replace(
+    " WHERE o.state IN ('placing', 'open', 'unknown')",
+    " WHERE o.book_id = $1 AND o.state = 'cancelled' AND o.order_id IS NOT NULL"
+    " AND o.done_at < to_timestamp($2) AND o.booked_filled < o.qty - 0.000001").replace(
+    "ml-orders-open", "ml-cancelled-rows")
+_SQL_CANCELLED_ROWS = _SQL_ORDERS_OPEN.replace(
+    " WHERE o.state IN ('placing', 'open', 'unknown')",
+    " WHERE o.book_id = $1 AND o.state = 'cancelled' AND o.order_id IS NOT NULL"
+    " AND o.done_at < to_timestamp($2) AND o.booked_filled < o.qty - 0.000001").replace(
+    "ml-orders-open", "ml-cancelled-rows")
+# E23 part A: ONE cancelled row by its id, for the memo re-read
+# (_cancel_reread) -- the same projection, so the row books through
+# _book_delta; a row no longer 'cancelled' reads as nothing and the memo
+# entry is dropped
+_SQL_ORDER_ROW_047 = _SQL_ORDERS_OPEN_047.replace(
+    " WHERE o.state IN ('placing', 'open', 'unknown')",
+    " WHERE o.id = $1 AND o.state = 'cancelled' AND o.order_id IS NOT NULL").replace(
+    "ml-orders-open", "ml-order-row")
+_SQL_ORDER_ROW = _SQL_ORDERS_OPEN.replace(
+    " WHERE o.state IN ('placing', 'open', 'unknown')",
+    " WHERE o.id = $1 AND o.state = 'cancelled' AND o.order_id IS NOT NULL").replace(
+    "ml-orders-open", "ml-order-row")
 # The order's cumulative SELL dust (rules.SELL_DUST_SHARES), kept on the
 # row's own receipt JSON so it survives the poll: the worker re-reads
 # every open order from the table each tick, and a per-poll delta that
@@ -5366,6 +5449,12 @@ async def _cancel_and_settle(t: _Tick, o: dict, book: dict, reason: str,
         if le._rest_terminal(st):
             break
         await _sleep(CANCEL_READ_GAP_S)
+    if le._rest_terminal(st) and _cancel_reread_wanted(o):
+        # E23 (FILL lane 23): the row's FINAL figure -- one more paced
+        # status read after the cancel's terminal one, BEFORE the row is
+        # written cancelled (book 986: ten rests written filled 0 off
+        # the terminal read while the venue held their 802)
+        st = await _cancel_final_figure(t, o, book, st, reason)
     if st:
         await _book_delta(t, o, book, st, maker=(o.get("kind") != "take"
                                                  and not o.get("taker_at_placement")))
@@ -5391,6 +5480,175 @@ async def _cancel_and_settle(t: _Tick, o: dict, book: dict, reason: str,
             log.warning("mirror_live: order %s decision %r not written (%s)", o["id"], decision,
                         type(exc).__name__)
     return out
+
+
+# ------------------------- E23 part A: the cancel re-reads the final figure
+#
+# Book 986 (2026-09-09, aec-atp-ugobla-danrin, ORDER_INTENT_BUY_LONG, ratio
+# 0.1, target 2,876 at his 0.56): after 5823 (cancel_pending, filled 6.13)
+# and 5908 (ttl, filled 405.82) had booked the ledger's 413, TEN GTC rests
+# of 2,467 @0.56 -- 5966, 5998, 6056, 6126, 6180, 6218, 6250
+# (snapshot_stale), 6263, 6292, 6326 (loss_breaker) -- were cancelled by
+# this path between 11:55:31 and 13:22:18, each written `cancelled` with
+# venue_state `canceled`, filled 0 and avg_px NULL: the status read after
+# the cancel WAS terminal (else the row would read 'unknown' under
+# cancel_pending) and carried no fill. The venue held 1,215 at the
+# 14:03:49 walk -- 802 shares the ledger never booked, on our side at our
+# cent, no manual and no registered shares -- and the book froze
+# venue_ledger_disagree for the market's life (E16's thaw needs two
+# agreeing reads the venue can never give). WHEN the venue matched those
+# fills against a cancelled order is in no row; what the rows prove is
+# that the cancel's own terminal read is not the row's final figure. So
+# every cancel of a rest that could have filled makes ONE more paced
+# status read after the terminal one and books what it carries beyond the
+# cancel's answer as any terminal fill is booked (_book_delta); a final
+# read that cannot be made writes the row off the cancel's answer, as
+# before, and memos the row for the next tick's re-read (never a freeze);
+# a final read past the row's quantity is a reading nothing can book:
+# named, the book frozen `overfill` by the E5 freeze path, nothing booked
+# off that read. A cancelled row booked late keeps its state and its
+# cancel word: the fill is booked, the record says what the cancel was.
+
+def _cancel_reread_wanted(o: dict) -> bool:
+    """A GTC / GTD rest with an order id -- an increase, a reduce, an
+    exit rest, a cover rest: any row that could have filled on the book
+    between the cancel and its answer. A take (an IOC) has no rest to
+    outrun."""
+    return (str(o.get("tif") or "") in ("GTC", "GTD") and bool(o.get("order_id"))
+            and o.get("kind") != "take")
+
+
+def _cancel_reread_note(t: _Tick, o: dict, book: dict, reason: str) -> None:
+    """The memo for the next tick's re-read, bounded: past the bound the
+    OLDEST entry is dropped and named (part B is its road)."""
+    if o["id"] not in _cancel_reread_pending and len(_cancel_reread_pending) >= _CANCEL_REREAD_MEMO_MAX:
+        oldest = min(_cancel_reread_pending, key=lambda k: float(_cancel_reread_pending[k].get("at") or 0.0))
+        _cancel_reread_pending.pop(oldest, None)
+        log.warning("mirror_live: the cancel re-read memo is full (%s rows); row %s dropped unread",
+                    _CANCEL_REREAD_MEMO_MAX, oldest)
+    _cancel_reread_pending[o["id"]] = {"oid": str(o["order_id"]), "book": book["id"], "whale": o["whale"],
+                                       "seq": int(t.seq), "at": float(t.now), "tries": 0,
+                                       "reason": str(reason)}
+
+
+async def _cancel_final_figure(t: _Tick, o: dict, book: dict, st: dict, reason: str) -> dict:
+    """One paced status read after the cancel's terminal read: the
+    figure the row is booked and written off. Returns the read to book
+    from -- the final one when it carries more than the cancel's answer
+    (`cancel_fill_late`), the cancel's answer when the final read could
+    not be made (`cancel_fill_unread`: the row memoed for the next
+    tick's re-read), when it reads past the row's quantity
+    (`cancel_fill_overfill`: the book frozen `overfill`, nothing booked
+    off it), or when it carries no more."""
+    w = o["whale"]
+    final = await _order_status(t, str(o["order_id"]))
+    f_final = _num(final.get("filled_shares")) if final else None
+    if f_final is None or not le._rest_terminal(final):
+        _mirror_stop("cancel_fill_unread", w)
+        _cancel_reread_note(t, o, book, reason)
+        log.warning("mirror_live: cancel of row %s (%s): the final status read could not be made; the row "
+                    "is written off the cancel's answer and re-read next tick", o["id"], reason)
+        return st
+    f_ack = float(_num(st.get("filled_shares")) or 0.0)
+    if f_final > float(o["qty"]) + FLAT_TOL_SHARES:
+        detail = {"book": book["id"], "order": o["id"], "final": round(f_final, 4), "answer": round(f_ack, 4),
+                  "qty": int(o["qty"])}
+        _mirror_stop("cancel_fill_overfill", w)
+        log.error("mirror_live: cancel of row %s: the final status reads %s filled on a row of %s; nothing "
+                  "booked off that read, the book %s frozen overfill", o["id"], f_final, o["qty"], book["id"])
+        await _freeze(t, book, "overfill", detail)
+        _recent(book["id"], "cancel_fill_overfill", order_row=o["id"], final=round(f_final, 4),
+                answer=round(f_ack, 4))
+        return st
+    if f_final > f_ack + FLAT_TOL_SHARES:
+        _mirror_stop("cancel_fill_late", w)
+        _recent(book["id"], "cancel_fill_late", order_row=o["id"], answer=round(f_ack, 4),
+                final=round(f_final, 4), px=_num(final.get("avg_px")))
+        log.warning("mirror_live: cancel of row %s (%s): the final status reads %s filled against the "
+                    "cancel's answer %s; booked off the final read", o["id"], reason, f_final, f_ack)
+        return final
+    return st
+
+
+async def _cancel_reread_row(t: _Tick, o: dict, book: dict, ent: dict) -> None:
+    """The memo's one read for a cancelled row: what the venue reports
+    filled beyond the row's booked figure is booked as a terminal fill
+    is booked; the row keeps its state and its cancel word."""
+    w = o["whale"]
+    st = await _order_status(t, str(o["order_id"]))
+    filled = _num(st.get("filled_shares")) if st else None
+    if filled is None or not le._rest_terminal(st):
+        ent["tries"] = int(ent.get("tries") or 0) + 1
+        _mirror_stop("cancel_fill_unread", w)
+        if ent["tries"] >= _CANCEL_REREAD_TRIES:
+            _cancel_reread_pending.pop(o["id"], None)
+            log.warning("mirror_live: cancelled row %s of book %s: the final status could not be read in %s "
+                        "re-reads; dropped from the memo (the book's own freeze and the trade-log adoption "
+                        "are the road)", o["id"], book["id"], _CANCEL_REREAD_TRIES)
+        return
+    _cancel_reread_pending.pop(o["id"], None)
+    booked = float(o.get("booked_filled") or 0.0)
+    if filled > float(o["qty"]) + FLAT_TOL_SHARES:
+        detail = {"book": book["id"], "order": o["id"], "final": round(filled, 4), "answer": round(booked, 4),
+                  "qty": int(o["qty"])}
+        _mirror_stop("cancel_fill_overfill", w)
+        log.error("mirror_live: cancelled row %s re-read: the status reads %s filled on a row of %s; nothing "
+                  "booked off that read, the book %s frozen overfill", o["id"], filled, o["qty"], book["id"])
+        await _freeze(t, book, "overfill", detail)
+        _recent(book["id"], "cancel_fill_overfill", order_row=o["id"], final=round(filled, 4),
+                answer=round(booked, 4))
+        return
+    if filled <= booked + FLAT_TOL_SHARES:
+        return                                   # the cancel's answer was the final figure
+    out = await _book_delta(t, o, book, st, maker=(o.get("kind") != "take"
+                                                    and not o.get("taker_at_placement")))
+    if out == "booked":
+        _mirror_stop("cancel_fill_late", w)
+        _recent(book["id"], "cancel_fill_late", order_row=o["id"], answer=round(booked, 4),
+                final=round(filled, 4), px=_num(st.get("avg_px")))
+        log.warning("mirror_live: cancelled row %s of book %s re-read: %s filled against the booked %s; "
+                    "booked off the re-read", o["id"], book["id"], filled, booked)
+    else:
+        log.warning("mirror_live: cancelled row %s of book %s re-read %s filled against the booked %s but "
+                    "the booking answered %s; the cursor stands", o["id"], book["id"], filled, booked, out)
+
+
+async def _cancel_reread(t: _Tick) -> None:
+    """The memo's road, after step O and before any book is planned:
+    every row memoed on an EARLIER tick (never the tick that noted it)
+    is read once, under its book's lock, off the same projection step O
+    reads. A row no longer 'cancelled', or gone, drops out; an
+    unreadable row or book waits for the next tick."""
+    for rid in list(_cancel_reread_pending):
+        ent = _cancel_reread_pending.get(rid)
+        if ent is None or int(ent.get("seq", -1)) >= int(t.seq):
+            continue
+        try:
+            row = await t.pool.fetchrow(_SQL_ORDER_ROW if t.short_col else _SQL_ORDER_ROW_047, rid)
+        except Exception as exc:  # noqa: BLE001 — the row unreadable: the next tick
+            log.warning("mirror_live: cancelled row %s unreadable for the re-read (%s)", rid,
+                        type(exc).__name__)
+            continue
+        if not row:
+            _cancel_reread_pending.pop(rid, None)
+            continue
+        o = dict(row)
+        try:
+            book = await t.pool.fetchrow(_sql_book_read(t), o["book_id"])
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mirror_live: book %s unreadable for the re-read (%s)", o["book_id"],
+                        type(exc).__name__)
+            continue
+        if not book:
+            _cancel_reread_pending.pop(rid, None)
+            continue
+        book = dict(book)
+        async with _lock_for(book["id"]):
+            try:
+                await _cancel_reread_row(t, o, book, ent)
+            except Exception as exc:  # noqa: BLE001 — one row, not the tick
+                _mirror_stop("book_error", o.get("whale"))
+                log.exception("mirror_live: cancelled row %s re-read failed (%s)", rid, type(exc).__name__)
 
 
 async def _reconcile_orders(t: _Tick, count: bool = True) -> None:
@@ -8434,6 +8692,11 @@ async def _tick_book(t: _Tick, book: dict) -> None:
                 # holds `frozen_fill_this_tick` and the next tick's
                 # venue == ledger thaws the book)
                 await _lost_fill_adopt(t, book, r, ledger, registered, prior_plan, plan)
+                # E23: the disagreement that is our own cancelled rows'
+                # unbooked fills (book 986) is adopted from the trade
+                # log BY OUR ORDER IDS before the frozen exit sizes on
+                # the position; the existing thaw takes the book after
+                await _disagree_fill_adopt(t, book, r, ledger, registered, prior_plan, plan)
                 await _frozen_exit(t, book, r, target, fills, registered, plan)
             else:
                 plan["frozen_exit"] = {"held": "transition_tick"}
@@ -9255,6 +9518,235 @@ async def _lost_fill_adopt(t: _Tick, book: dict, r: _Reading, ledger: int, regis
                 "after the window (%s @ %s; the venue's position proved it)",
                 o["id"], book["id"], oid, total, px)
     return _verdict("adopted", o, delta, order=oid)
+
+
+# --------------- E23 part B: the disagreement that is our own cancelled rows
+#
+# Book 986 (2026-09-09; the paragraph over _cancel_reread_wanted): frozen
+# venue_ledger_disagree at 14:03:49 with the venue 1,215 against the
+# ledger 413, manual 0, registered 0, his_net 28,764.9, target 2,876, the
+# frozen exit holding `frozen_no_his_exit` with venue_own 1,215 -- 802
+# shares on our side at our cent that ten cancelled rests of 2,467 @0.56
+# (filled 0 recorded) could have filled, and nothing that could ever book
+# them: E16's thaw needs venue == ledger, the ledger could never move, and
+# E22 (placement_lost, a 'lost' row without an id) names this class in
+# its DOES NOT FIX. THIS road: on a book that was FROZEN when its tick
+# began under venue_ledger_disagree, with a FRESH walk, no manual shares
+# and the surplus (venue - ledger - registered) on the book's own side,
+# when the book has cancelled rows WITH an order id booked below their
+# quantity, the venue's trade log is read for the market over [the
+# earliest such row's placed_at - le._ORPHAN_SKEW_S, now], at most once
+# per rules.MIRROR_LOST_FILL_REREAD_S per book, and matched BY OUR OWN
+# ORDER IDS (never a fingerprint: the ids are the venue's own answer to
+# our placements); when the log's fills for those ids, less what the rows
+# already booked, sum EXACTLY to the surplus, each row's unbooked fills
+# are booked at the log's prices through _book_delta (the standing row,
+# the ledger, avg_cost, the row's cursor), the row's reason says so and
+# the row keeps its state and its cancel word; the book stays frozen this
+# tick (the frozen exit holds `frozen_fill_this_tick`) and the EXISTING
+# thaw takes it -- for venue_ledger_disagree that is E16's two agreeing
+# fresh reads (`one_read` on the next tick, `thawed` on the one after);
+# this lane calls no thaw. Every other reading names a hold and books
+# nothing.
+
+
+async def _cancelled_log_fills(t: _Tick, slug: str, since: float) -> list | None:
+    """The venue's trade log for one market since `since`, as
+    pmus.recent_trades hands it (order_id, qty, price, side, ts); None
+    when it could not be read (raises, truncated). The matching -- by
+    OUR order ids -- is the caller's."""
+    try:
+        fills = await _venue_read(t, t.pmus.recent_trades, slug, since)
+    except Exception as exc:  # noqa: BLE001 — unreadable is not "no fills"
+        log.warning("mirror_live: trade log for %s unreadable (%s)", slug, type(exc).__name__)
+        return None
+    return list(fills or [])
+
+
+async def _disagree_fill_adopt(t: _Tick, book: dict, r: _Reading, ledger: int, registered: float,
+                               prior_plan: dict, plan: dict) -> str | None:
+    """The paragraph above. Returns the verdict word, or None when
+    nothing was read (not this lane's shape, a cached read, the memo,
+    the rows unreadable, no candidate row). Called from _tick_book's
+    disagree branch inside its `was_frozen` arm, after E22's call and
+    before the frozen exit."""
+    global _disagree_fill_write_logged
+    if book.get("state") != "frozen" or book.get("frozen_reason") != "venue_ledger_disagree":
+        return None
+    prior_at = _num(prior_plan.get("disagree_fill_at"))
+    memo_at = _num(_disagree_fill_read_at.get(book["id"]))
+    last_read = max([x for x in (prior_at, memo_at) if x is not None], default=None)
+    if last_read is not None:
+        plan["disagree_fill_at"] = last_read              # carried until a new read moves it
+    if isinstance(prior_plan.get("disagree_fill"), dict):
+        plan["disagree_fill"] = prior_plan["disagree_fill"]  # the last verdict, until a new one
+    if t.walk_at is None:
+        return None                                       # a cached read proves nothing
+    w = book["whale"]
+    try:
+        rows = [dict(x) for x in await t.pool.fetch(_SQL_CANCELLED_ROWS if t.short_col
+                                                    else _SQL_CANCELLED_ROWS_047, book["id"], float(t.now))]
+    except Exception as exc:  # noqa: BLE001 — the rows unreadable: nothing this tick
+        log.warning("mirror_live: cancelled rows of book %s unreadable (%s); nothing adopted",
+                    book["id"], type(exc).__name__)
+        return None
+    # the statement's own predicate, read again here so a drifted
+    # statement can never widen the candidate set
+    rows = [o for o in rows if o.get("order_id")
+            and float(o.get("booked_filled") or 0.0) < float(o["qty"]) - FLAT_TOL_SHARES]
+    if not rows:
+        return None                   # no cancelled row could explain it: E5's register is the road
+    surplus = int(round(float(r.venue) - float(ledger) - float(registered)))
+    ids = [int(o["id"]) for o in rows]
+
+    def _verdict(word: str, shares: float = 0.0) -> str:
+        plan["disagree_fill"] = {"rows": ids, "shares": round(float(shares), 4), "delta": surplus,
+                                 "verdict": word, "at": t.now}
+        return word
+
+    if abs(float(r.manual or 0.0)) > FLAT_TOL_SHARES:
+        # the desk's shares on the slug: the surplus is not the rows' alone (E5's register is the road)
+        _mirror_stop("disagree_fill_unexplained", w)
+        return _verdict("unexplained")
+    short = _book_short(book)
+    if surplus == 0 or (surplus < 0) != short:
+        # nothing, or the OTHER token's side: a long book's own surplus is
+        # positive, a short book's negative (its adds take the ledger down)
+        _mirror_stop("disagree_fill_unexplained", w)
+        return _verdict("unexplained")
+    want = abs(surplus)
+    room = sum(float(o["qty"]) - float(o.get("booked_filled") or 0.0) for o in rows)
+    if want > room + FLAT_TOL_SHARES:
+        # more than the rows could ever have filled: no log read
+        _mirror_stop("disagree_fill_unexplained", w)
+        return _verdict("unexplained")
+    if last_read is not None and t.now - last_read < float(rules.MIRROR_LOST_FILL_REREAD_S):
+        return None                                       # the memo: no more than one read per the wait
+    earliest = min(float(o.get("placed_ts") or t.now) for o in rows)
+    lo = earliest - le._ORPHAN_SKEW_S
+    fills = await _cancelled_log_fills(t, book["us_market_slug"], lo)
+    plan["disagree_fill_at"] = t.now
+    _disagree_fill_read_at[book["id"]] = t.now
+    if len(_disagree_fill_read_at) > _LOST_FILL_MEMO_MAX:
+        for k in sorted(_disagree_fill_read_at, key=_disagree_fill_read_at.get)[:len(_disagree_fill_read_at) // 2]:
+            _disagree_fill_read_at.pop(k, None)
+    if fills is None:
+        _mirror_stop("disagree_fill_unread", w)
+        return _verdict("unread")
+    by_oid = {str(o["order_id"]): o for o in rows}
+    by_row: dict[int, tuple[float, float]] = {}
+    disagree = False
+    for f in fills:
+        o = by_oid.get(str(f.get("order_id") or ""))
+        if o is None:
+            continue                  # not one of our cancelled rows: never booked
+        try:
+            ts = float(f.get("ts") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if not (lo <= ts <= float(t.now)):
+            continue
+        if _order_side_of(o) not in str(f.get("side") or "").upper():
+            disagree = True           # our id on the other side: the two readings of one id disagree
+            continue
+        q, px = _num(f.get("qty")), _num(f.get("price"))
+        if not q or q <= 0.0 or px is None or not (0.0 < px < 1.0):
+            disagree = True           # a fill of ours the log does not price: nothing to book it at
+            continue
+        tot, nom = by_row.get(int(o["id"]), (0.0, 0.0))
+        by_row[int(o["id"])] = (tot + q, nom + q * px)
+    if disagree:
+        _mirror_stop("disagree_fill_ambiguous", w)
+        return _verdict("ambiguous")
+    if not by_row:
+        log.warning("mirror_live: book %s frozen venue_ledger_disagree: the surplus %s sits inside its %s "
+                    "cancelled rows' unfilled room %s but the trade log names no fill for their order ids "
+                    "in [%.0f, %.0f]; nothing adopted (E5's register is the road)",
+                    book["id"], surplus, len(rows), round(room, 4), lo, float(t.now))
+        _mirror_stop("disagree_fill_unexplained", w)
+        return _verdict("unexplained")
+    parts: list[tuple[dict, float, float, float]] = []
+    unbooked = 0.0
+    for o in rows:
+        tot, nom = by_row.get(int(o["id"]), (0.0, 0.0))
+        if tot <= FLAT_TOL_SHARES:
+            continue
+        booked = float(o.get("booked_filled") or 0.0)
+        if tot < booked - FLAT_TOL_SHARES or tot > float(o["qty"]) + FLAT_TOL_SHARES:
+            # the log under what the row booked, or over what the row asked for
+            _mirror_stop("disagree_fill_ambiguous", w)
+            return _verdict("ambiguous")
+        inc = tot - booked
+        if inc <= FLAT_TOL_SHARES:
+            continue                  # the log's fills for this id are already booked: nothing new
+        booked_px = _num(o.get("avg_px"))
+        if booked > FLAT_TOL_SHARES and (booked_px is None or not (0.0 < booked_px < 1.0)):
+            booked_px = _num(o.get("wire"))               # a rest books at its own cent
+        px = (nom - booked * float(booked_px or 0.0)) / inc
+        if not (0.0 < px < 1.0):
+            _mirror_stop("disagree_fill_ambiguous", w)
+            return _verdict("ambiguous")
+        parts.append((o, tot, inc, round(px, 6)))
+        unbooked += inc
+    if not parts:
+        _mirror_stop("disagree_fill_unexplained", w)
+        return _verdict("unexplained")
+    # THE LEDGER THE BOOKING WOULD LEAVE, judged as the freeze judges the
+    # book. The ledger column is whole shares and carries the rounding of
+    # every booking it took (_book_fill writes int(round(...)) on each
+    # delta): book 986's column read 413 over a standing row of 411.95
+    # (book_986_1426 lines 998 / 1019), so the surplus the freeze named
+    # (1215 - 413 = 802) is not the fractional truth the venue's log names
+    # (1215 - 411.95 = 803.05), and an exact match against the column's
+    # surplus refuses the very book this road exists for. The adoption is
+    # the surplus's when the column it leaves agrees with the venue inside
+    # the freeze's own tolerance (mi.VENUE_LEDGER_TOL_SHARES) -- the one
+    # condition under which E16's thaw can take the book at all -- each
+    # row's late fills signed by its leg action (a cancelled reduce's take
+    # the ledger down), the short book's leg in ledger space
+    signed = sum((inc if _order_action(o, book) == "add" else -inc) for o, _tot, inc, _px in parts)
+    if short:
+        signed = -signed
+    after = int(round(float(ledger) + signed))
+    gap = (int(r.venue) - after - float(registered)) * (-1.0 if short else 1.0)
+    if gap < -mi.VENUE_LEDGER_TOL_SHARES:
+        # the log names more than the venue holds: the readings disagree
+        _mirror_stop("disagree_fill_ambiguous", w)
+        return _verdict("ambiguous", unbooked)
+    if gap > mi.VENUE_LEDGER_TOL_SHARES:
+        # a partial: the log explains some of the surplus, something else the rest
+        _mirror_stop("disagree_fill_unexplained", w)
+        return _verdict("unexplained", unbooked)
+    booked_total = 0.0
+    for o, tot, inc, px in parts:
+        st = {"state": str(o.get("venue_state") or "canceled"), "filled_shares": tot, "avg_px": px}
+        out = await _book_delta(t, o, book, st, maker=(o.get("kind") != "take"
+                                                        and not o.get("taker_at_placement")))
+        if out != "booked":
+            # the booking refused or failed (`write_failed` counted and
+            # frozen by _book_delta, the cursor unmoved): the rows booked
+            # before it stand on their cursors, the next read after the
+            # wait re-evaluates the surplus against them
+            log.warning("mirror_live: book %s: cancelled row %s's %s unbooked fills answered %s; the "
+                        "adoption stops here", book["id"], o["id"], round(inc, 4), out)
+            return _verdict("adopt_write_failed", booked_total)
+        booked_total += inc
+        reason = _adopt_reason(o, "adopted from the trade log after the cancel")
+        try:
+            await t.pool.execute(_SQL_ORDER_REASON, o["id"], reason)
+            o["reason"] = reason
+        except Exception as exc:  # noqa: BLE001 — the record, never the money
+            if not _disagree_fill_write_logged:
+                _disagree_fill_write_logged = True
+                log.warning("mirror_live: could not write the adopt reason on row %s (%s)", o["id"],
+                            type(exc).__name__, exc_info=True)
+        _recent(book["id"], "disagree_fill_adopted", order_row=o["id"], order=str(o["order_id"]),
+                shares=round(inc, 4), px=px)
+    _mirror_stop("disagree_fill_adopted", w)
+    log.warning("mirror_live: book %s frozen venue_ledger_disagree: %s shares on %s cancelled row(s) adopted "
+                "from the trade log after the cancel (the venue's surplus %s proved them); ledger now %s",
+                book["id"], round(booked_total, 4), len(parts), surplus, book.get("ledger_net"))
+    return _verdict("adopted", booked_total)
 
 
 # The frozen exit's holds that refuse BEFORE _frozen_reduce_on_fill runs:
@@ -13485,6 +13977,9 @@ async def _tick(t: _Tick, woken: list) -> None:
     # O: the orders first
     t0 = time.monotonic()
     await _reconcile_orders(t)
+    # E23 part A: the cancels whose final status read could not be made
+    # on an earlier tick, re-read once each before any book is planned
+    await _cancel_reread(t)
     t.timing["orders"] += time.monotonic() - t0
     if t.cancel_all:
         # a trip while booking (an overfill): the tick is cancel-only

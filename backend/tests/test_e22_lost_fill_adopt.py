@@ -501,11 +501,11 @@ def test_e22_a_long_books_lost_buy_adopts_the_same_way(monkeypatch):
 
 def test_e22_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob():
     keys = ml.CENSUS_KEYS
-    # FILL lane 11 landed after this lane and placed its one name nearer the key (-17:-13 -> -18:-14); -- FILL lane 16 (one name, turn_woke_fast) landed first, so every index here moved by one more
-    # E21 (FILL lane 10) its six fast_* names after that (-18:-14 -> -24:-20)
-    assert keys[-25:-21] == NEW_NAMES and keys[-21] == "cand_market_closed_db"
-    assert keys[-26] == "reopen_refused" and keys[-28] == "he_holds" and keys[-34] == "take_in_band"
-    assert keys[-20] == "turn_woke_fast"
+    # FILL lane 11 landed after this lane and placed its one name nearer the key (-17:-13 -> -18:-14); -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
+    # E23 (FILL lane 23) its six after that one (-18:-14 -> -24:-20, -14 -> -20, -19 / -21 / -27 -> -25 / -27 / -33)
+    assert keys[-31:-27] == NEW_NAMES and keys[-27] == "cand_market_closed_db"
+    assert keys[-32] == "reopen_refused" and keys[-34] == "he_holds" and keys[-40] == "take_in_band"
+    assert keys[-26] == "turn_woke_fast" and keys[-25] == "fast_order_open" and keys[-20] == "fast_status_unread"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)

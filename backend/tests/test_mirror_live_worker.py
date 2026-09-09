@@ -438,6 +438,30 @@ class _Pool(_ShadowPool):
                 for o in rows:
                     o.pop("intent", None)
             return rows
+        if "ml-cancelled-rows" in s:
+            # E23 (FILL lane 23): the book's CANCELLED rows WITH an order
+            # id booked below their quantity, done BEFORE the tick's
+            # clock ($2; the worker's `o.done_at < to_timestamp($2)` and
+            # `o.booked_filled < o.qty - 0.000001`), in the open-orders
+            # read's projection, placed_at then id
+            rows = [dict(o) for o in sorted(self.orders.values(), key=lambda o: (o["placed_ts"], o["id"]))
+                    if o["book_id"] == a[0] and o["state"] == "cancelled" and o["order_id"] is not None
+                    and o.get("done_at") is not None and float(o["done_at"]) < float(a[1])
+                    and float(o["booked_filled"]) < float(o["qty"]) - 0.000001]
+            if "o.intent" not in s:
+                for o in rows:
+                    o.pop("intent", None)
+            return rows
+        if "ml-order-row" in s:
+            # E23 part A: ONE cancelled row with an id, by its id, in the
+            # open-orders read's projection (None when it is not such a row)
+            o = self.orders.get(a[0])
+            if o is None or o["state"] != "cancelled" or o["order_id"] is None:
+                return None
+            row = dict(o)
+            if "o.intent" not in s:
+                row.pop("intent", None)
+            return row
         if "ml-books-open" in s:
             rows = [dict(b) for b in sorted(self.books.values(), key=lambda b: (b["updated_ts"], b["id"]))
                     if b["state"] != "closed"]
@@ -1248,6 +1272,12 @@ def _armed(monkeypatch):
     # repeat across this file's pools) and the adopt write's one line
     monkeypatch.setattr(ml, "_lost_fill_read_at", {}, raising=False)
     monkeypatch.setattr(ml, "_lost_fill_write_logged", False, raising=False)
+    # E23 (FILL lane 23): the cancel re-read memo (order row ids repeat
+    # across this file's pools), the disagree fill's per-process read
+    # memo and the reason write's one line
+    monkeypatch.setattr(ml, "_cancel_reread_pending", {}, raising=False)
+    monkeypatch.setattr(ml, "_disagree_fill_read_at", {}, raising=False)
+    monkeypatch.setattr(ml, "_disagree_fill_write_logged", False, raising=False)
     # E6: the quiet rotation's clock and memos (book ids repeat across
     # this file's pools), and the terminal memos' boot read, already made
     # (test_e6_tick_budget drives the read itself)
@@ -4965,8 +4995,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # E20 by its one, E14b (FILL lane 1) by its one and E14 (FILL lane 2) by its one `take_in_band`: -89 -> -92;
     # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95; T2 (FILL lane 4) by its two: -95 -> -97; FILL lane 5 by its three: -97 -> -100;
     # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104) and FILL lane 11 by its one (-> -105);
-    # E21 (FILL lane 10) by its six fast_* names (-> -111) -- FILL lane 16 (one name, turn_woke_fast) landed first, so every index here moved by one more
-    assert keys[-112:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # E23 (FILL lane 23) by its six `cancel_fill_*` / `disagree_fill_*` names (-> -111) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
+    assert keys[-118:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -5080,16 +5110,30 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # FILL lane 16: a book closed under a sign flip handed its
                           # market to the fast path's woken set (`turn.woke` True) --
                           # before E19's name (keys[-13]) and `registered_no_increase`
-                          # (keys[-12]), after FILL lane 11's one (keys[-14])
+                          # (keys[-12]), after FILL lane 11's one (keys[-20])
                           "turn_woke_fast",
                           # E21 (FILL lane 10): the fast tick's bare order_open refusal
                           # counted by name; the adding wake admitted with an entry rest
                           # standing; which branch _act took on it (kept / replaced /
                           # took); the fast step O's blank status read (no freeze) --
                           # before E19's name (keys[-13]) and `registered_no_increase`
-                          # (keys[-12]), after FILL lane 11's one (keys[-19:-13])
+                          # (keys[-12]), after FILL lane 16's one (keys[-25:-19])
                           "fast_order_open", "fast_his_add", "fast_add_kept", "fast_add_replaced",
                           "fast_add_took", "fast_status_unread",
+                          # E23 (FILL lane 23): a cancelled rest whose venue fills outran
+                          # the cancel -- the cancel's final status read carried more
+                          # (booked late) / could not be made (memoed for the next tick);
+                          # a frozen venue_ledger_disagree book's surplus adopted from the
+                          # trade log by its own cancelled rows' order ids / the log
+                          # unreadable / the surplus not the rows' / the readings
+                          # disagreeing -- before E19's name (keys[-13]) and
+                          # `registered_no_increase` (keys[-12]), after E21's six
+                          # (keys[-19:-13]); FILL lane 16 (one name) and E21 (six)
+                          # landed first, so every index past this lane's six moved
+                          # by seven more than the lane's own worktree read
+                          "cancel_fill_late", "cancel_fill_unread",
+                          "disagree_fill_adopted", "disagree_fill_unread", "disagree_fill_unexplained",
+                          "disagree_fill_ambiguous",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5106,7 +5150,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-113] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E21's six before the tail
+    assert keys[-119] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -13157,6 +13201,17 @@ def test_c11_the_terminal_pre_check_name_is_emitted_here_too():
     from tests import test_fill_c11_cand_terminal_db as c11
     c11.test_c11_every_name_is_emitted_here()
     assert "cand_market_closed_db" in SEEN and "market_closed" in SEEN
+def test_e23_the_cancel_fill_and_disagree_fill_names_are_emitted_here_too(caplog):
+    """E23's six names (FILL lane 23) are driven in tests/test_e23_cancel_fill_adopt.py
+    (book 986's shape: the cancelled rests' unbooked fills adopted from the trade
+    log by their own order ids; the cancel's final status read); run here as
+    well so the coverage read below sees them when this file runs alone (E13's
+    convention)."""
+    from tests import test_e23_cancel_fill_adopt as e23
+    e23.test_e23_every_name_is_emitted_here(caplog)
+    for name in ("cancel_fill_late", "cancel_fill_unread", "disagree_fill_adopted", "disagree_fill_unread",
+                 "disagree_fill_unexplained", "disagree_fill_ambiguous"):
+        assert name in SEEN, name
 def test_t1_the_turn_names_are_emitted_here_too(monkeypatch, caplog):
     """FILL lane 5's three names are driven in tests/test_fill_t1_turn.py;
     run here as well so the coverage read below sees them when this file
