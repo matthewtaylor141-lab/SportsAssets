@@ -79,7 +79,9 @@ def test_t2_060_exists_sorts_last_and_is_one_create_table_if_not_exists_with_the
     assert SQL_060.exists()
     files = [x.name for x in sorted(MIG_DIR.glob("*.sql"))]
     i = files.index("059_mirror_orders_send_record.sql")
-    assert files[i + 1] == "060_mirror_fill_answers.sql" == files[-1] and sum(f.startswith("060_") for f in files) == 1
+    # FILL lane 9 (2026-09-09) added 061 after this one: 060 sorts after 059, 061 last
+    assert files[i + 1] == "060_mirror_fill_answers.sql" and sum(f.startswith("060_") for f in files) == 1
+    assert files[i + 2] == "061_fill_answers_cause_orders_fast.sql" == files[-1]
     sql = SQL_060.read_text()
     assert sql.splitlines()[0].startswith("-- 060: MIRROR FILL ANSWERS (T2, 2026-09-08; FILL program lane 4")
     body = "\n".join(ln.split("--", 1)[0] for ln in sql.splitlines())
@@ -203,7 +205,10 @@ def test_t2_book_611s_shape_forty_fills_on_one_tick_write_forty_rows_the_list_ke
     assert all(r["whale"] == "rn1" and r["condition_id"] == CID and r["book_id"] == b["id"] for r in rows)
     assert all(r["detected_at"] == r["fill_ts"] + 1 and r["at"] == NOW and r["tick"] == 1 for r in rows)
     assert all(r["order_id"] is None and r["name"] == "on_target" for r in rows)
-    assert set(rows[0]) == set(COLUMNS) - {"id"}
+    # FILL lane 9 (migration 061): the row also carries cause / rest_id / fast (NULL / NULL / false here:
+    # `on_target` names no rest, a full tick)
+    assert set(rows[0]) == (set(COLUMNS) - {"id"}) | {"cause", "rest_id", "fast"}
+    assert all(r["cause"] is None and r["rest_id"] is None and r["fast"] is False for r in rows)
     assert ml._fill_hwm == {b["id"]: NOW - 3000 + 39 + 1} and ml._fill_pending == {}
     assert "fills_hwm" not in b["last_plan"], "the first plan is written before its own flush"
     # three new fills: three rows, the plan carries the hwm the last flush left
@@ -352,7 +357,10 @@ def test_t2_a_hung_write_is_bounded_by_the_candidate_flushs_timeout_and_counted_
     assert st["status"] == "ok" and not st["abandoned"] and _census(st, "fill_answer_write_failed") == 1
     assert p.fill_answers == {} and list(ml._fill_pending) == [("rn1", str(NOW - 3000))] and ml._fill_hwm == {}
     src = inspect.getsource(ml._flush_fill_answers)
-    assert "asyncio.wait_for(t.pool.execute(_SQL_FILL_ANSWERS" in src and "CAND_REFUSAL_WRITE_TIMEOUT_S)" in src
+    # FILL lane 9 (061): the statement is chosen by this tick's column probe (the 061 shape only when
+    # t.fill_cols is True, lane 4's else), still under the one bounded wait_for
+    assert "stmt = _SQL_FILL_ANSWERS_061 if t.fill_cols is True else _SQL_FILL_ANSWERS" in src
+    assert "asyncio.wait_for(t.pool.execute(stmt" in src and "CAND_REFUSAL_WRITE_TIMEOUT_S)" in src
 
 
 def test_t2_the_batch_and_the_pending_memo_are_bounded(monkeypatch):
@@ -547,9 +555,12 @@ def test_t2_the_census_names_sit_before_drift_smaller_open_the_emit_sites_and_no
     assert "MIRROR_FILL" not in src and "fill_answer" not in inspect.getsource(rules) and "fills_hwm" not in inspect.getsource(rules)
     # the table is named by the two statements alone; the INSERT is sent by the flush alone
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
-    assert code.count("FROM mirror_fill_answers") == 1, "the guard's probe is the only read of the table"
-    assert code.count("INSERT INTO mirror_fill_answers") == 1 and code.count("NULL::mirror_fill_answers") == 1
-    assert code.count("_SQL_FILL_ANSWERS,") == 1 and code.count("_SQL_FILL_ANSWERS)") == 0
+    # FILL lane 9 (061): the second read is the lane's own column probe (_SQL_FILL_CAUSE_GUARD), the second
+    # INSERT its three-column shape (_SQL_FILL_ANSWERS_061); both sent by the guard / the flush alone
+    assert code.count("FROM mirror_fill_answers") == 2, "the two probes are the only reads of the table"
+    assert code.count("INSERT INTO mirror_fill_answers") == 2 and code.count("NULL::mirror_fill_answers") == 2
+    assert code.count("else _SQL_FILL_ANSWERS\n") == 1 and code.count("_SQL_FILL_ANSWERS,") == 0
+    assert code.count("_SQL_FILL_ANSWERS)") == 0 and code.count("t.pool.execute(stmt,") == 1
     assert code.count("_SQL_FILL_ANSWERS_GUARD)") == 1
     assert code.count("_flush_fill_answers(t)") == 2, "the full tick's tail and the fast tick's"
     assert code.count("_fill_answers_guard(t, stats)") == 2

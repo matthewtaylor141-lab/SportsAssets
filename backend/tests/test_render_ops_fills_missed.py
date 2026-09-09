@@ -128,7 +128,9 @@ def test_fills_missed_has_six_statements_on_one_chain_read_only_on_its_own_timeo
     for bad in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "need_confirm", "$ARG"):
         assert bad not in sql, bad
     st = _stmts(sql)
-    assert len(st) == 6
+    # FILL lane 9 (2026-09-09; migration 061): a SEVENTH statement, last -- the cause block over
+    # refused:open_order_pending (COALESCE(cause, 'unrecorded') x path) on the SAME chain plus a `fc` CTE
+    assert len(st) == 7
     heads = (" SELECT COALESCE(class, 'ALL') AS class, ", " SELECT class, state, count(*) AS n, ",
              " SELECT class, COALESCE(decision, 'unrecorded') AS decision, count(*) AS n, ",
              " SELECT book, his_slug, class, count(*) AS n, ")
@@ -139,6 +141,10 @@ def test_fills_missed_has_six_statements_on_one_chain_read_only_on_its_own_timeo
     assert len(set(chains)) == 1, "the four fill statements carry ONE chain, byte for byte"
     assert st[4].startswith("SELECT COALESCE(kind, 'ALL') AS kind, count(*) AS orders, count(band_c) AS with_band")
     assert st[5].startswith("SELECT date_trunc('hour', o.placed_at)::time(0) AS hour, o.kind, count(*) AS n")
+    cause_head = " SELECT COALESCE(fc.cause, 'unrecorded') AS cause, COALESCE(fc.fast::text, 'unrecorded') AS path, count(*) AS n, "
+    assert cause_head in st[6] and st[6].startswith(chains[0] + ", fc AS (SELECT x.fill_id, x.cause, x.fast FROM xmltable(")
+    assert st[6].rstrip(";").endswith(" FROM g LEFT JOIN fc ON fc.fill_id = g.id::text WHERE g.class = 'refused:open_order_pending'"
+                                      " GROUP BY 1, 2 ORDER BY 4 DESC")
     assert st[3].endswith("GROUP BY 1, 2, 3 ORDER BY 5 DESC LIMIT 60") and st[0].endswith("GROUP BY ROLLUP (class) ORDER BY 3 DESC")
 
 
@@ -198,7 +204,8 @@ def test_fills_missed_keeps_its_case_label_and_the_hourly_carries_the_six_statem
     hourly, _ = _preset(text, "hourly")
     sql, _ = _preset(text, "fills-missed")
     assert "SELECT '== fills-missed' AS section; " + sql.rstrip().rstrip(";") + ";" in hourly
-    assert hourly.count(STATE) == 4 and hourly.count("AS band_c, CASE WHEN m.resolved_prices") == 4
+    # FILL lane 9 (061): the seventh statement carries the chain once more -- five copies in the hourly
+    assert hourly.count(STATE) == 5 and hourly.count("AS band_c, CASE WHEN m.resolved_prices") == 5
     # the comment block names the states and the decision read
     block = text[text.index("# THE MIRROR'S OWN FILLED-VS-MISSED"):text.index("fills-missed) SQL=")]
     for word in ("in_book", "before_open", "after_close", "no_book", "`decision`", "'unrecorded'", "$517,203.44"):

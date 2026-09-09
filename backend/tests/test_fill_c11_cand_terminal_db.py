@@ -474,7 +474,9 @@ def test_c11_the_census_place_the_emit_site_the_source_shape_and_no_knob():
     # no knob, no rail, no migration, no decision word
     assert "MIRROR_CAND_TERMINAL" not in whole and "MIRROR_CAND_MARKET" not in whole and 'capped_env("MIRROR_CAND' not in whole
     assert "cand_market_closed_db" not in inspect.getsource(rules)
-    assert not sorted(pathlib.Path(ml.__file__).resolve().parents[3].joinpath("backend", "migrations").glob("061_*"))
+    # no migration from this lane: 061 is lane 9's (landed after), nothing sorts past it
+    migs = sorted(p.name for p in pathlib.Path(ml.__file__).resolve().parents[3].joinpath("backend", "migrations").glob("*.sql"))
+    assert migs[-1] == "061_fill_answers_cause_orders_fast.sql" and "cand" not in migs[-1]
     assert "cand_market_closed_db" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
 
 

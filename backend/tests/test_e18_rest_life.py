@@ -243,8 +243,10 @@ def test_e18_the_worker_keeps_a_young_entry_rest_over_a_one_cent_move_and_replac
     assert _census(st2, "kept_min_life") == 0 and st2["requotes"] == 1
     # the new rest's row: decision 'rest', ask_at_send NULL, his fill answered
     ins = _inserts(p)
-    assert len(ins) == 1 and len(ins[0]) == 22 and ins[0][18] == "ORDER_INTENT_BUY_LONG"
-    assert ins[0][19] is None and ins[0][20] == "rest" and ins[0][21] == str(NOW - 3000)
+    # FILL lane 9 (migration 061): the fake pool reads the `fast` column present, so the row is the 061
+    # shape -- the 059 arguments in their places plus `fast` false (a full tick) as the twenty-third
+    assert len(ins) == 1 and len(ins[0]) == 23 and ins[0][18] == "ORDER_INTENT_BUY_LONG"
+    assert ins[0][19] is None and ins[0][20] == "rest" and ins[0][21] == str(NOW - 3000) and ins[0][22] is False
     # the 1c move DOWN at 20 s: the rest at 0.30 would stand above the new
     # wire 0.29 -- replaced at once, `replace_cent`, the fresh rest at 0.29
     p2 = _pool()
@@ -474,8 +476,10 @@ def test_e18_059_exists_sorts_last_and_is_three_nullable_add_column_if_not_exist
     assert SQL_059.exists()
     files = [x.name for x in sorted(MIG_DIR.glob("*.sql"))]
     i = files.index("058_mirror_books_flow_clock.sql")
-    # T2 (FILL lane 4, 2026-09-08) added 060 after this one: 059 sorts after 058, 060 last
-    assert files[i + 1] == "059_mirror_orders_send_record.sql" and files[-1] == "060_mirror_fill_answers.sql"
+    # T2 (FILL lane 4, 2026-09-08) added 060 after this one, FILL lane 9 (2026-09-09) 061 after that:
+    # 059 sorts after 058, 060 after 059, 061 last
+    assert files[i + 1] == "059_mirror_orders_send_record.sql" and files[i + 2] == "060_mirror_fill_answers.sql"
+    assert files[-1] == "061_fill_answers_cause_orders_fast.sql"
     assert sum(f.startswith("059_") for f in files) == 1
     sql = SQL_059.read_text()
     assert sql.splitlines()[0].startswith("-- 059: MIRROR ORDERS SEND RECORD (E18, 2026-09-08")

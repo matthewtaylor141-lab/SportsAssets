@@ -2191,6 +2191,21 @@ VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'placing', $13::jsonb
         $14, $15, $16, $17, $18, $19, $20, $21, $22)
 RETURNING id /* ml-order-insert */
 """
+# THE 061 SHAPE (FILL lane 9): the 059 statement plus the path that
+# placed the row -- `fast` true on a FAST tick, false on a FULL one --
+# as the LAST parameter, so every positional reader of the 059
+# statement keeps its meaning; sent only when the 059 probe AND this
+# lane's own probe (t.fast_col, _SQL_FAST_COL_GUARD) read present, the
+# 059 shape else. A measurement column: no reader in the worker
+_SQL_ORDER_INSERT_061 = """
+INSERT INTO mirror_orders (book_id, whale, us_market_slug, kind, side, tif, post_only,
+                           good_till, his_level, price, wire, qty, state, pre_ids,
+                           target_at_place, ledger_at_place, bid_at_place, ask_at_place,
+                           reason, intent, ask_at_send, decision, his_fill_id, fast)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, 'placing', $13::jsonb,
+        $14, $15, $16, $17, $18, $19, $20, $21, $22, $23)
+RETURNING id /* ml-order-insert */
+"""
 # the cancel's word on the row it cancelled (E18): 'replace_cent',
 # 'replace_qty', 'replace_side', 'ttl', 'replace_unread' -- written
 # after the row is terminal, under the 059 probe alone
@@ -2207,6 +2222,17 @@ _SQL_ORDER_COLS_GUARD = ("SELECT ask_at_send, decision, his_fill_id FROM mirror_
 # FILL_ANSWERS_FLUSH_MAX): once per tick after the 059 probe; absent,
 # nothing is queued this tick and the tick goes on
 _SQL_FILL_ANSWERS_GUARD = "SELECT fill_id FROM mirror_fill_answers LIMIT 0 /* ml-fill-answers-guard */"
+# THE 061 COLUMN PROBES (FILL lane 9; the paragraph over
+# FILL_ANSWERS_FLUSH_MAX): once per tick after the 060 probe on both
+# tick paths. The fill record's three columns (cause / rest_id / fast):
+# absent, the 060-shaped INSERT (`fill_answer_cause_absent`); the order
+# row's `fast`: absent, the 059-shaped INSERT (`fast_col_absent`); either
+# probe failing for any other reason -> the same INSERT and
+# `fast_col_unreadable`, the tick NEVER refused -- measurement columns on
+# no order path (_order_cols_guard's refusal rule is NOT extended: an
+# absent `fast` must never read as "059 columns absent")
+_SQL_FILL_CAUSE_GUARD = "SELECT cause, rest_id, fast FROM mirror_fill_answers LIMIT 0 /* ml-fill-cause-guard */"
+_SQL_FAST_COL_GUARD = "SELECT fast FROM mirror_orders LIMIT 0 /* ml-fast-col-guard */"
 _SQL_ORDER_PERSIST_ID = """
 UPDATE mirror_orders SET order_id = $2, state = 'open', venue_state = $3,
        receipt = $4::jsonb, updated_at = now()
@@ -2478,6 +2504,19 @@ SELECT r.whale, r.condition_id, r.fill_id, r.fill_ts, r.detected_at, r.at, r.boo
   FROM json_populate_recordset(NULL::mirror_fill_answers, $1::json) AS r
     ON CONFLICT (whale, fill_id) DO NOTHING /* ml-fill-answers */
 """
+# THE 061 SHAPE OF THE SAME WRITE (FILL lane 9): the 060 statement plus
+# the cause that kept the rest the fill stood behind, that rest's id and
+# the path that named the fill; sent only when this lane's own probe read
+# the three columns (t.fill_cols), the 060 shape byte for byte else
+_SQL_FILL_ANSWERS_061 = """
+INSERT INTO mirror_fill_answers
+       (whale, condition_id, fill_id, fill_ts, detected_at, at, book_id, order_id, name, tick,
+        cause, rest_id, fast)
+SELECT r.whale, r.condition_id, r.fill_id, r.fill_ts, r.detected_at, r.at, r.book_id, r.order_id,
+       r.name, r.tick, r.cause, r.rest_id, r.fast
+  FROM json_populate_recordset(NULL::mirror_fill_answers, $1::json) AS r
+    ON CONFLICT (whale, fill_id) DO NOTHING /* ml-fill-answers */
+"""
 _SQL_SHADOW_LATEST = """
 SELECT target, target_raw::float8 AS target_raw, capped, ratio::float8 AS ratio,
        his_net::float8 AS his_net, extract(epoch FROM at)::float8 AS at_ts
@@ -2712,6 +2751,16 @@ class _Tick:
     # has read, False when the table is absent or the probe failed
     fill_answers: bool | None = None
     fill_rows: list = field(default_factory=list)
+    # FILL lane 9 (migration 061): the record's cause / rest_id / fast
+    # columns exist this tick (read by _fill_cause_guard after the 060
+    # probe; only the bool True sends the 061-shaped fill INSERT, the
+    # 060 shape else) and mirror_orders.fast exists this tick (read by
+    # _fast_col_guard; only the bool True sends the 061-shaped order
+    # INSERT, the 059 shape else). None until the guards have read;
+    # False on absence OR on any other probe failure -- neither probe
+    # ever refuses a tick: measurement columns on no order path
+    fill_cols: bool | None = None
+    fast_col: bool | None = None
     # the tick's venue budget for the exact mapping lane (C1): the
     # shadow's own MapBudget, ms.MAP_READS_PER_TICK resolver calls a
     # tick across every candidate, past which a candidate is
@@ -5944,7 +5993,8 @@ def _fill_key(f: dict) -> str | None:
     return None
 
 
-def _fills_seen(t: _Tick, book: dict, reason: str, fills: list | None = None) -> list:
+def _fills_seen(t: _Tick, book: dict, reason: str, fills: list | None = None,
+                plan: dict | None = None) -> list:
     """PART 1 of E9 (the paragraph over FAST_TICK_MAX): the plan's
     `his_fills_seen`, the prior row's entries plus ONE new entry for
     every fill of his the tick holds on this market that no earlier plan
@@ -5954,7 +6004,18 @@ def _fills_seen(t: _Tick, book: dict, reason: str, fills: list | None = None) ->
     Written once per fill and never renamed: the tick that first planned
     with the fill in hand is its answer. Bounded at HIS_FILLS_SEEN_MAX,
     the newest fills kept (by stamp, then id). An unreadable prior list
-    is an empty one (fail closed toward naming, never a raise)."""
+    is an empty one (fail closed toward naming, never a raise).
+    FILL lane 9 (migration 061): every NEW entry also carries `cause`
+    (the plan's `rest_cause` -- why the standing rest was kept -- when
+    the name is one under which a rest of ours STOOD: `open_order_pending`,
+    or the two refusals that stood in for a replace, `take_capped` /
+    `replace_capped`; None else), `rest` (the plan's `open_order`: the
+    standing rest's row id, None when none) and `fast` (True when a FAST
+    tick named it, False on a FULL one: `t.fast`, the E9 field the fast
+    tick's _Tick is built with). The three ride the entry so a row the
+    record writes LATER (a failed flush re-queued, a late clock) carries
+    what its NAMING tick knew, never a later tick's plan; an entry
+    without them (pre-061) writes NULL. `plan` unreadable -> None, None."""
     prior = _jsonish(book.get("last_plan")) or {}
     seen = prior.get("his_fills_seen") if isinstance(prior, dict) else None
     out: list = [e for e in seen if isinstance(e, dict) and e.get("id") is not None] \
@@ -5963,6 +6024,18 @@ def _fills_seen(t: _Tick, book: dict, reason: str, fills: list | None = None) ->
     ent = t.open_by_book.get(book["id"]) if book["id"] in t.placed_books else None
     order = int(ent[0]["id"]) if ent and _num(ent[0].get("id")) is not None else None
     name = rules.plan_reason_key(reason)
+    cause = rest = None
+    if isinstance(plan, dict):
+        # the names under which a rest stood -- and a FROZEN book's plan,
+        # whose fills are named under the freeze's own word (E5: the
+        # plan's reason is `frozen_reason`, never `open_order_pending`)
+        # while its kept slot is the record's `frozen`
+        if name in _REST_STOOD_NAMES or plan.get("kind") == "frozen":
+            rc = plan.get("rest_cause")
+            cause = str(rc) if isinstance(rc, str) and rc else None
+        ro = _num(plan.get("open_order"))
+        rest = int(ro) if ro is not None else None
+    fast = bool(t.fast)
     appended: set = set()
     for f in (fills if fills is not None else book.get("_fills")) or []:
         if not isinstance(f, dict):
@@ -5973,7 +6046,8 @@ def _fills_seen(t: _Tick, book: dict, reason: str, fills: list | None = None) ->
         known.add(key)
         appended.add(key)
         out.append({"id": key, "ts": _num(f.get("ts")), "det": _num(f.get("detected_at")),
-                    "at": float(t.now), "order": order, "name": name})
+                    "at": float(t.now), "order": order, "name": name,
+                    "cause": cause, "rest": rest, "fast": fast})
     kept = out
     if len(out) > HIS_FILLS_SEEN_MAX:
         kept = sorted(out, key=lambda e: (float(_num(e.get("ts")) or 0.0), str(e.get("id"))))[-HIS_FILLS_SEEN_MAX:]
@@ -6024,7 +6098,39 @@ def _fill_answer_row(t: _Tick, book: dict, e: dict) -> dict:
             "fill_id": str(e.get("id")), "fill_ts": _num(e.get("ts")), "detected_at": _num(e.get("det")),
             "at": float(t.now) if at is None else float(at), "book_id": int(book["id"]),
             "order_id": None if order is None else int(order),
-            "name": str(e.get("name") or "unnamed"), "tick": int(t.seq)}
+            "name": str(e.get("name") or "unnamed"), "tick": int(t.seq),
+            # FILL lane 9 (061): the entry's own three, NULL when the entry
+            # never carried them (pre-061) or carries junk (never a guess)
+            "cause": e.get("cause") if isinstance(e.get("cause"), str) and e.get("cause") else None,
+            "rest_id": None if _num(e.get("rest")) is None else int(_num(e.get("rest"))),
+            "fast": e.get("fast") if isinstance(e.get("fast"), bool) else None}
+
+
+# FILL lane 9: the plan names under which a rest of ours STOOD behind
+# his fill -- the keep branch's word, and the two refusals that stand in
+# for a replace with the rest kept standing; a fill named so carries the
+# plan's `rest_cause` on the record (the cause column), every other name
+# carries none
+_REST_STOOD_NAMES = frozenset(("open_order_pending", "take_capped", "replace_capped"))
+
+
+def _rest_cause(book: dict, plan: dict, why: dict | None) -> str | None:
+    """FILL lane 9: the word the record's `cause` column carries for a
+    fill named against a rest the keep branch KEPT. In order: `frozen`
+    when the book is frozen (E5's kept slot -- the frozen reduce standing
+    through the keep branch, the placement_lost row keeping the one-open
+    index); `flow_grew` when this tick restored a rise of his fills' net
+    to the block (E12b's `flow_fills_grew` on the plan: the add the rise
+    would have been was never bought, so the rest stood); else
+    rest_decision's own clause (`same` inside the hysteresis, `min_life`
+    under the rest-life floor, ...). None when nothing readable -- a
+    record, never a guess, read by no order path."""
+    if book.get("state") == "frozen":
+        return "frozen"
+    if isinstance(plan, dict) and plan.get("flow_fills_grew") is not None:
+        return "flow_grew"
+    c = why.get("cause") if isinstance(why, dict) else None
+    return str(c) if isinstance(c, str) and c else None
 
 
 def _carry_fills_hwm(book: dict, plan: dict) -> None:
@@ -6078,7 +6184,7 @@ async def _write_plan(t: _Tick, book: dict, r: _Reading | None, target, target_r
     # E9 part 1: every fill of his the tick holds, answered or named on
     # the row; the reading's fills when there is one, else the ones the
     # book's tick read before step M (book["_fills"])
-    plan["his_fills_seen"] = _fills_seen(t, book, reason, r.fills if r is not None else None)
+    plan["his_fills_seen"] = _fills_seen(t, book, reason, r.fills if r is not None else None, plan=plan)
     _carry_fills_hwm(book, plan)            # T2: the record's high-water mark rides beside it
     await t.pool.execute(
         _SQL_BOOK_PLAN, book["id"], target, target_raw, net,
@@ -7470,7 +7576,7 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             # by the skip (a fill inside HOT_S or a wake makes the book
             # hot, so this names only a fill older than that)
             book["last_reason"] = "book_quiet_skipped"
-            plan["his_fills_seen"] = _fills_seen(t, book, "book_quiet_skipped", fills)
+            plan["his_fills_seen"] = _fills_seen(t, book, "book_quiet_skipped", fills, plan=plan)
             _carry_fills_hwm(book, plan)    # T2: the skip carries the record's hwm too
             await t.pool.execute(_SQL_BOOK_SKIP, book["id"], "book_quiet_skipped",
                                  json.dumps(plan, default=str))
@@ -9374,6 +9480,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 if t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S):
                     _mirror_stop("requote_same_wire", w)
                     plan["requote_same_wire"] = True
+                plan["rest_cause"] = _rest_cause(book, plan, why)    # FILL lane 9: the exit rest stood (the paragraph below)
                 return "open_order_pending"
             if short_exit:
                 # THE COVER'S TAKE off its standing rest (S4): the ask
@@ -9417,6 +9524,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 if t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S):
                     _mirror_stop("requote_same_wire", w)
                     plan["requote_same_wire"] = True
+                plan["rest_cause"] = _rest_cause(book, plan, why)    # FILL lane 9: the cover rest stood (the paragraph below)
                 return "open_order_pending"
             # THE TAKE off a rest at his level (E2; no wait since the E4
             # addendum, unless the environment lengthened it). The
@@ -9444,6 +9552,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 if (not _exit_or_flip(book, p, o)
                         and await _requotes_this_hour(t, book) >= rules.MIRROR_MAX_REPLACES_PER_HOUR):
                     _mirror_stop("take_capped", w)
+                    plan["rest_cause"] = "take_capped"      # FILL lane 9: the refusal that kept the rest
                     return "take_capped"
                 # the book is at his level (E2): the one IOC at the same
                 # wire follows the cancel
@@ -9469,8 +9578,25 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 # take's price verdict by its own name (E2)
                 _mirror_stop("resting_above_level", w)
                 _mirror_stop("take_refused_price", w)
+            # FILL lane 9 (migration 061): the rest STOOD to the end of the
+            # branch -- WHY, for the record's `cause`: a FROZEN book's slot
+            # is the freeze's (E5: the frozen reduce stands through this
+            # branch), a rise of his fills' net restored to the block this
+            # tick (E12b's `flow_fills_grew`, written before _act) is
+            # `flow_grew`, else rest_decision's own clause (`same`,
+            # `min_life`, ...). Stamped here and not at the branch's top so
+            # a keep that ends in the take or a cancel above never carries
+            # it. A record, read by no order path; never a guess (None when
+            # the clause cannot be read as text)
+            plan["rest_cause"] = _rest_cause(book, plan, why)
             return "open_order_pending"
         if decision == "replace":
+            # FILL lane 9 (061): the rest this plan replaces -- or keeps
+            # standing under `replace_capped` below -- is the rest his
+            # fill STOOD BEHIND, so the record's `rest_id` names it on a
+            # `rest_placed` row (the new rest is `order`) as on a capped
+            # one. A record: nothing in the worker reads `open_order`
+            plan["open_order"] = o["id"]
             # a SIDE CHANGE or an exit plan replaces whatever the hour's
             # count (E2 review, MEDIUM-2a; E4 rule 4 is this same
             # exemption -- an exit's rest is never held at the old cent
@@ -9479,6 +9605,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             if (not _exit_or_flip(book, p, o)
                     and await _requotes_this_hour(t, book) >= rules.MIRROR_MAX_REPLACES_PER_HOUR):
                 _mirror_stop("replace_capped", w)
+                plan["rest_cause"] = "replace_capped"   # FILL lane 9: the refusal that kept the rest
                 return "replace_capped"
             # an exit plan's replace -- its rest moving to his cent, or
             # a BUY rest standing over the reduce -- is never
@@ -9535,6 +9662,10 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         # an unknown cancel): the partial unique index would refuse the
         # INSERT below, and the name is the same
         _mirror_stop("open_order_pending", w)
+        if book.get("state") == "frozen":
+            # FILL lane 9: E5's kept slot -- the placement_lost row keeps
+            # the one-open index on the frozen book (no rest to name)
+            plan["rest_cause"] = "frozen"
         return "open_order_pending"
     if wire is None:
         _mirror_stop("no_price", w)
@@ -10960,7 +11091,15 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
                                     in_band=bool(in_band) and is_take)
     plan["decision"] = decision
     try:
-        if t.order_cols is True:
+        if t.order_cols is True and t.fast_col is True:
+            # FILL lane 9 (migration 061): the path that placed the row --
+            # the tick's E9 `fast` field, the one the fast tick's _Tick is
+            # built with -- as the 059 statement's one extra parameter, a
+            # value RECORDED and never a branch; only when this lane's own
+            # probe read the column, the 059 shape else
+            row_id = await t.pool.fetchval(_SQL_ORDER_INSERT_061, *args, wire_intent, ask_at_send,
+                                           decision, _his_fill_id(book, r), bool(t.fast))
+        elif t.order_cols is True:
             row_id = await t.pool.fetchval(_SQL_ORDER_INSERT_059, *args, wire_intent, ask_at_send,
                                            decision, _his_fill_id(book, r))
         elif t.short_col:
@@ -10971,6 +11110,8 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
         _room_give(t, est)
         if le._names_constraint(exc, "mirror_orders_one_open_per_book"):
             _mirror_stop("open_order_pending", w)
+            if book.get("state") == "frozen":
+                plan["rest_cause"] = "frozen"   # FILL lane 9: E5's kept slot, the index's own refusal
             return "open_order_pending"
         raise
     slot.commit()
@@ -12392,7 +12533,13 @@ async def _flush_fill_answers(t: _Tick) -> None:
         # bounded as the candidate flush is: the pool carries no
         # command_timeout and the write runs under _TICK_LOCK, so a hung
         # write must not hold the tick
-        await asyncio.wait_for(t.pool.execute(_SQL_FILL_ANSWERS, json.dumps(batch, default=str)),
+        # FILL lane 9 (061): the three-column shape only when this tick's
+        # own probe read the columns; the 060 statement byte for byte
+        # else (json_populate_recordset reads the table's own row type,
+        # so a pending row carrying the three keys writes cleanly either
+        # way -- the 060 shape simply never selects them)
+        stmt = _SQL_FILL_ANSWERS_061 if t.fill_cols is True else _SQL_FILL_ANSWERS
+        await asyncio.wait_for(t.pool.execute(stmt, json.dumps(batch, default=str)),
                                CAND_REFUSAL_WRITE_TIMEOUT_S)
     except Exception as exc:  # noqa: BLE001 — measurement never blocks the tick
         _mirror_stop("fill_answer_write_failed")
@@ -12767,6 +12914,76 @@ async def _fill_answers_guard(t: _Tick, stats: dict) -> None:
                         "carries them", type(exc).__name__)
 
 
+_fill_cause_absent_logged = False
+_fast_col_absent_logged = False
+
+
+async def _fill_cause_guard(t: _Tick, stats: dict) -> None:
+    """THE 061 FILL-COLUMN PROBE (FILL lane 9; the paragraph over
+    _SQL_FILL_CAUSE_GUARD), made once per tick after the 060 probe on
+    both tick paths and only once THAT read present (no table, no
+    columns to ask about). Present: `t.fill_cols` True and the flush
+    sends the 061-shaped INSERT. Absent -- or the probe failing for ANY
+    reason: measurement columns on no order path, so a blip here is
+    named and the tick goes on, never refused -- `t.fill_cols` False,
+    lane 4's INSERT byte for byte (the cause dropped, the row written,
+    the hwm advanced), `fill_answer_cause_absent` on the heartbeat with
+    the error's name, logged once per process."""
+    global _fill_cause_absent_logged
+    if t.fill_answers is not True:
+        t.fill_cols = False
+        return
+    try:
+        await t.pool.fetch(_SQL_FILL_CAUSE_GUARD)
+        t.fill_cols = True
+    except Exception as exc:  # noqa: BLE001 — a column that is not there is a fact; nothing is sent on it
+        t.fill_cols = False
+        stats["fill_answer_cause_absent"] = type(exc).__name__
+        if not _fill_cause_absent_logged:
+            _fill_cause_absent_logged = True
+            log.warning("mirror_live: mirror_fill_answers.cause / rest_id / fast are absent or unreadable "
+                        "(migration 061 not applied yet? %s); the fill record is written without them",
+                        type(exc).__name__)
+
+
+async def _fast_col_guard(t: _Tick, stats: dict) -> None:
+    """THE 061 ORDER-COLUMN PROBE (FILL lane 9; the paragraph over
+    _SQL_FAST_COL_GUARD), made once per tick beside _fill_cause_guard
+    on both tick paths and only once the 059 probe read present (the
+    061 INSERT is the 059 one plus `fast`). Present: `t.fast_col` True
+    and _place_reserved sends the 061-shaped INSERT. Absent
+    (rules.column_missing on `fast`): `t.fast_col` False, the 059
+    INSERT as today, `fast_col_absent` on the heartbeat, logged once
+    per process. Failing for any OTHER reason: `t.fast_col` False, the
+    059 INSERT, `fast_col_unreadable` on the heartbeat -- and the tick
+    is NOT refused. That is a departure from _order_cols_guard's rule,
+    made on purpose and pinned: 059's columns are the record the fills
+    census keys on and a tick that cannot say whether it can write them
+    must not place; this column is a measurement flag whose absence
+    loses a split and nothing else (docs section 49's rule for a
+    measurement probe), so its probe never gates the money path, and
+    _order_cols_guard is NOT extended -- an absent `fast` must never
+    read as "059 columns absent" and drop the 059 record."""
+    global _fast_col_absent_logged
+    if t.order_cols is not True:
+        t.fast_col = False
+        return
+    try:
+        await t.pool.fetch(_SQL_FAST_COL_GUARD)
+        t.fast_col = True
+    except Exception as exc:  # noqa: BLE001 — a column that is not there is a fact; a blip is named, never refused
+        t.fast_col = False
+        if not rules.column_missing(exc, "fast"):
+            stats["fast_col_unreadable"] = type(exc).__name__
+            return
+        stats["fast_col_absent"] = type(exc).__name__
+        if not _fast_col_absent_logged:
+            _fast_col_absent_logged = True
+            log.warning("mirror_live: mirror_orders.fast is absent (migration 061 not applied yet: %s); "
+                        "every order row is written through the 059 INSERT, no path recorded",
+                        type(exc).__name__)
+
+
 async def _tick(t: _Tick, woken: list) -> None:
     global _last_mode, _last_whales, _last_walk
     stats = t.stats
@@ -12829,6 +13046,10 @@ async def _tick(t: _Tick, woken: list) -> None:
         return
     # T2: the 060 table, named when absent, never a refusal
     await _fill_answers_guard(t, stats)
+    # FILL lane 9: the 061 columns on both tables, named when absent or
+    # unreadable, never a refusal (measurement columns)
+    await _fill_cause_guard(t, stats)
+    await _fast_col_guard(t, stats)
     stats.setdefault("short", {})["on"] = _shorts_on(t)
     # E6: this tick's number in the process (the quiet rotation's clock),
     # and the terminal memos' one boot read (part 3) -- once per process,
@@ -13414,6 +13635,8 @@ async def _fast_tick(t: _Tick, cids: list) -> None:
     if not await _order_cols_guard(t, stats):      # E18: the same reading as _tick's
         return _fast_skip_all(t, cids, "order_cols_guard_unreadable")
     await _fill_answers_guard(t, stats)            # T2: the same reading as _tick's
+    await _fill_cause_guard(t, stats)              # FILL lane 9: the same reading as _tick's
+    await _fast_col_guard(t, stats)                # FILL lane 9: the same reading as _tick's
     stats.setdefault("short", {})["on"] = _shorts_on(t)
     await _read_mode(t)
     if t.mode != MODE_SAFE and le.active_venue() != "polymarket-us":

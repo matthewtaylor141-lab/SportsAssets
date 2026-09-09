@@ -106,10 +106,12 @@ def test_fill_answers_reads_the_table_his_collapsed_fills_and_the_plans_list():
             " AS plan_oldest_kept") in sql
     assert ("CASE WHEN NOT ((last_plan->>'fills_hwm') ~ '[^0-9.]') THEN (last_plan->>'fills_hwm')::float8 END AS fills_hwm"
             " FROM mirror_books WHERE whale = 'rn1' ORDER BY condition_id, id DESC)") in sql
+    # FILL lane 9 (migration 061): `causes` (cause=n, left 60) beside `names`, read through the guarded CTE `c`
     assert ("SELECT b.book, b.slug, b.state, COALESCE(h.held, 0) AS held_24h, COALESCE(a.written, 0) AS written,"
-            " COALESCE(a.with_order, 0) AS with_order, left(a.names, 120) AS names,"
+            " COALESCE(a.with_order, 0) AS with_order, left(a.names, 120) AS names, left(c.causes, 60) AS causes,"
             " to_timestamp(a.oldest_written)::time(0) AS oldest_written,"
             " to_timestamp(b.plan_oldest_kept)::time(0) AS plan_oldest_kept, to_timestamp(b.fills_hwm)::time(0) AS fills_hwm") in sql
+    assert " LEFT JOIN c ON c.condition_id = b.condition_id WHERE COALESCE(h.held, 0) > 0" in sql
     assert "string_agg(name || '=' || n, ' ' ORDER BY n DESC, name) AS names" in sql
 
 
@@ -129,8 +131,11 @@ def test_fill_answers_sits_after_closed_while_he_traded_before_hourly_and_stays_
     hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()
     hourly.test_the_hourly_preset_is_read_only_with_its_own_output_cap_and_timeout()
     hourly.test_the_help_line_is_the_case_labels_with_hourly_last()
-    # the record read rides the hourly's copy of fills-missed, guarded, on all four chain statements
-    assert h.count(FA) == 4 and h.count("to_regclass('mirror_fill_answers')") == 4
+    # the record read rides the hourly's copy of fills-missed, guarded, on all four chain statements -- and
+    # (FILL lane 9, 061) on the seventh, the cause block, whose own `fc` CTE and latency-census's `fr` CTE
+    # (keep_to_replace by rest_id) test to_regclass too: 5 chains, 7 to_regclass reads, 5 column-existence tests
+    assert h.count(FA) == 5 and h.count("to_regclass('mirror_fill_answers')") == 7
+    assert h.count("information_schema.columns") == 5
 
 
 def test_fills_missed_reads_the_record_first_through_a_guarded_cte_on_every_chain_statement():
@@ -138,7 +143,13 @@ def test_fills_missed_reads_the_record_first_through_a_guarded_cte_on_every_chai
     sql, to = _preset(text, "fills-missed")
     assert to == 120000
     st = _stmts(sql)
-    assert len(st) == 6 and all(s.startswith(FA) for s in st[:4]) and not any("mirror_fill_answers" in s for s in st[4:])
+    # FILL lane 9 (061): seven statements -- the seventh (the cause block) carries the chain's `fa` and its own
+    # guarded `fc`; the band table and the fill rate by hour (st[4], st[5]) still name the table nowhere
+    assert len(st) == 7 and all(s.startswith(FA) for s in st[:4]) and not any("mirror_fill_answers" in s for s in st[4:6])
+    assert st[6].startswith(FA) and st[6].count("to_regclass('mirror_fill_answers')") == 2
+    assert ("column_name = 'cause') THEN '<table/>'::xml ELSE query_to_xml('SELECT fill_id, cause, fast FROM mirror_fill_answers"
+            " WHERE whale = ''rn1'' AND fill_ts >= extract(epoch FROM now() - interval ''25 hours'')', false, false, '') END)"
+            " COLUMNS fill_id text PATH 'fill_id', cause text PATH 'cause', fast boolean PATH 'fast') x)") in st[6]
     chain = st[0]
     # fa joined before the his_fills_seen LATERAL; `aorder` = the record's order, else the plan's readable one
     assert S_HEAD in chain and chain.index("LEFT JOIN fa ON fa.fill_id = f.id::text") < chain.index("jsonb_array_elements(")

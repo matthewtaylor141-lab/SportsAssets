@@ -229,7 +229,8 @@ def test_e14_book_544s_shape_first_sight_sends_one_ioc_at_the_band_cent_and_rest
                                "verdict": "in_band"}
     assert lp["take_qty"] == 300 and lp["take_filled"] == 300.0
     ins = _inserts(p)
-    assert len(ins) == 1 and len(ins[0]) == 22
+    # FILL lane 9 (061): the 059 shape plus `fast` (false: a full tick) as the twenty-third argument
+    assert len(ins) == 1 and len(ins[0]) == 23 and ins[0][22] is False
     assert (ins[0][3], ins[0][5], ins[0][8], ins[0][10], ins[0][11]) == ("take", "IOC", 0.52, 0.53, 300)
     assert ins[0][16] == 0.53 and ins[0][19] == 0.53 and ins[0][20] == "take_in_band" and ins[0][21] == str(NOW - 3000)
     # the cents paid over him, readable off the row: wire - floor(his_level * 100) / 100 = 0.01

@@ -5567,8 +5567,9 @@ def test_the_050_column_absent_keeps_the_knob_off_by_name_and_sends_the_047_stat
     _tick(p4, _Venue())
     ins4 = [a for k, s, a in p4.sent if "ml-order-insert" in s]
     # E18 (migration 059, the fixture's database carries it): the 050
-    # INSERT's nineteenth parameter stands, the send record after it
-    assert ins4 and all(len(a) == 22 and a[18] == INTENT for a in ins4)
+    # INSERT's nineteenth parameter stands, the send record after it;
+    # FILL lane 9 (061, the fixture carries it too): `fast` false after that
+    assert ins4 and all(len(a) == 23 and a[18] == INTENT and a[22] is False for a in ins4)
     # the guard is the shadow's statement: both lanes probe with one text
     assert ml._SQL_INTENT_GUARD == ms.INTENT_GUARD_SQL and "ml-intent-guard" in ms.INTENT_GUARD_SQL
 
@@ -5619,7 +5620,8 @@ def test_a_transient_intent_guard_error_refuses_the_tick_and_never_flattens_a_sh
     assert "close" not in _kinds(v3) and [c[2:6] for c in _places(v3)] == [(0.32, 300, True, IOC_TIF)]
     assert b2["ledger_net"] == 0
     ins = [a for k, s, a in p2.sent if "ml-order-insert" in s]
-    assert ins and all(len(a) == 22 and a[18] == "ORDER_INTENT_SELL_SHORT" for a in ins)    # E18: 059's three after
+    # E18: 059's three after the intent; FILL lane 9 (061): `fast` false (a full tick) after those
+    assert ins and all(len(a) == 23 and a[18] == "ORDER_INTENT_SELL_SHORT" and a[22] is False for a in ins)
     assert _census(st3, "short_flatten_close") == 1
 
 

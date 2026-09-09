@@ -412,7 +412,14 @@ def test_review_q4_the_fast_tick_reads_through_the_same_functions_with_no_fast_b
     read_path = "".join(inspect.getsource(f) for f in (ml._tick_book, ml._read_market, ml._bbo,
                                                        ml._market_snap, ml._snapshot, ml._act, ml._place,
                                                        ml._place_reserved))
-    assert "t.fast" not in read_path and "fast_tick" not in read_path, "no fast-tick branch on the read or the placement"
+    # FILL lane 9 (migration 061): the placement RECORDS which path placed the row -- `bool(t.fast)` as the
+    # 061 INSERT's last argument, chosen by the column probe `t.fast_col is True` -- and that is the only
+    # reading of the fast flag on the read or the placement: a value written, never a branch on the path
+    # (the tick's `t.fast` decides nothing about what is read, sized, priced or sent)
+    recorded = read_path.replace("t.order_cols is True and t.fast_col is True", "").replace("bool(t.fast)", "")
+    assert "t.fast" not in recorded and "fast_tick" not in read_path, "no fast-tick branch on the read or the placement"
+    assert "if t.fast" not in read_path and "not t.fast" not in read_path
+    assert read_path.count("bool(t.fast)") == 1 and read_path.count("t.fast_col is True") == 1
     assert "await asyncio.to_thread(ms._paced_bbo, t.pmus, slug)" in inspect.getsource(ml._bbo)
     assert "abs(t.now - ts) > ms.SNAP_MAX_AGE_S" in inspect.getsource(ml._market_snap)
     # the fast tick's `now` is the real clock at its start; tick_once's is the real clock once it holds the lock (FILL lane 7)
