@@ -677,6 +677,34 @@ UNMAPPED_TTL_MAX_S = 3600.0
 EVENT_STALE_DAY_S = 86400.0
 EVENT_STALE_FILL_S = 86400.0
 _STATE_CAND_MEMO = "mirror_cand_memo"
+# THE TICK'S RECORD (FILL lane 14, 2026-09-09; docs section 58). The
+# heartbeat carries ONE tick -- tick_s 38.0 at 15 books with candidates
+# 16.2 / books 11.3 / fast_wait 2.3 / fast_work 8.4 (tick_2245 320 /
+# 331), 76.9 s at 54-64 books (hourly_2030 426), 12.4 s at 22:29Z
+# (tick_2229 330) -- and the distribution the owner's "as fast as his"
+# line is judged on is in no file. THE RULE: the full tick appends its
+# timing to a bounded in-memory ring, `_tick_ring` (deque, maxlen
+# TICK_RING_MAX = 240 ticks, about 2 h at POLL_S 30 s; a constant, no
+# knob), one entry per full tick from the blocks the tick just built:
+# [at, tick_s, walk, orders, books, candidates, books_live, venue_calls,
+# cand_cap, cand_reads, yielded, fast_n, fast_wait, fast_work,
+# fast_prelude] -- and persists the ring under ONE ingestion_state key
+# of its own, `mirror_tick_ring` = {"ticks": [[...], ...], "at": ISO},
+# the way the candidate memo is persisted (never before the boot read,
+# at most once per TERMINAL_MEMO_WRITE_S, a failed write logged and
+# retried on a later tick, the ring kept in memory meanwhile) and with
+# NO boot read: the ring is the process's own record, a deploy starts
+# it empty and the hourly's tick-ring section prints no rows for the
+# hours before it. The fast tick measures its PRELUDE -- the seconds
+# from the lock's acquire to the first _fast_book / _fast_candidate:
+# the guards, the mode, the venue, the books and open-rows reads --
+# and both tick paths publish `short.speed`, a SIBLING of E10's
+# `short.wall` and E9's `short.fast` (each pinned "these keys and no
+# others"). Measurement only: nothing here reads a rail, sizes, places
+# or cancels; an entry that cannot be built is dropped, never a raise
+# inside the tick's `finally`.
+_STATE_TICK_RING = "mirror_tick_ring"
+TICK_RING_MAX = 240
 MODE_SAFE, MODE_EXITS, MODE_ON = "safe", "exits", "on"
 _OFF_VALUES = frozenset({"off", "0", "false", "no"})
 
@@ -1088,6 +1116,12 @@ _no_mark_memo: dict[tuple[str, str], float] = {}
 # the candidate memos' last persisted write (the instant and the
 # signature), the terminal memos' idiom (_terminal_memo_last)
 _cand_memo_last: dict[str, Any] = {"at": 0.0, "sig": None}
+# FILL lane 14: the tick ring (the paragraph over _STATE_TICK_RING) --
+# the last TICK_RING_MAX full ticks' entries, process-local, no boot
+# read -- and its last persisted write's instant (the cadence gate; no
+# signature: every full tick appends, so every eligible write is a change)
+_tick_ring: deque = deque(maxlen=TICK_RING_MAX)
+_tick_ring_last: dict[str, Any] = {"at": 0.0}
 # THE TERMINAL MEMO (D1, 2026-09-06). The candidate walk spends its
 # MAX_MARKETS_PER_TICK quote reads newest-touched first, and his
 # newest-touched mapped markets are matches he trades to settlement:
@@ -1457,6 +1491,11 @@ _WALL = _WallClock()
 # split -- the wait for _TICK_LOCK and the work after the acquire (E9's
 # `fast` is their sum); reset on publish like _fast_seconds
 _fast_wall = {"wait": 0.0, "work": 0.0}
+# FILL lane 14: the fast ticks' PRELUDE seconds since the last full tick
+# published them (the lock's acquire to the first _fast_book /
+# _fast_candidate; a fast tick that never reached its loop counts its
+# whole work), the _fast_wall shape: summed, reset on the take
+_fast_speed = {"prelude": 0.0}
 # The venue IGNORED the post-only flag once (executions on a post-only
 # create): the flag is off for the rest of the process and the maker
 # thesis is measured by price selection alone (spec X.L).
@@ -2876,6 +2915,11 @@ class _Tick:
     # E10: the books stage's wall-time deltas (_WallClock.delta around
     # the walk; a fast tick's around its markets): data / venue / plan
     wall: dict = field(default_factory=dict)
+    # FILL lane 14: the instant (time.monotonic) a FAST tick acquired
+    # _TICK_LOCK, handed in by fast_tick_once so _fast_tick can stamp
+    # its prelude (t.timing["fast_prelude"]) just before its per-market
+    # loop; None on a full tick (no prelude of its own)
+    fast_acquired: float | None = None
     # E11: what this lane's venue claims had spent on the gate when the
     # tick began (_gate_snapshot); `short.gate` is the delta (_gate_block)
     gate0: dict = field(default_factory=lambda: _gate_snapshot())
@@ -6956,6 +7000,41 @@ def _gate_block(t: _Tick) -> dict:
             "claims": max(0, now["claims"] - int(g0.get("claims") or 0))}
 
 
+def _fast_speed_take() -> float:
+    """The fast ticks' prelude seconds since the last full tick published
+    them; reset on the take (the _fast_wall_take shape)."""
+    out = float(_fast_speed["prelude"])
+    _fast_speed["prelude"] = 0.0
+    return out
+
+
+def _speed_block(t: _Tick, fast_prelude: float | None = None) -> dict:
+    """The speed record (FILL lane 14), a sibling of `short.wall` and
+    `short.fast` (whose keys the E10 / E9 pins fix exactly), served as
+    `short.speed` on both tick paths: `cand_yielded`, the census count
+    of candidate stages this tick ended for a pending fast wake (lane
+    15's name; 0 until it lands -- read off the census, never invented);
+    `fast_prelude`, the fast ticks' seconds from the lock's acquire to
+    the first _fast_book / _fast_candidate -- a full tick's block the
+    fast ticks since the last publish (`fast_prelude` handed in from
+    _fast_speed_take, as `short.wall`'s fast_wait / fast_work are), a
+    fast tick's own block its own (t.timing["fast_prelude"], which
+    fast_tick_once settles to the whole work when the loop was never
+    reached); `fast_walk`, 0 -- the fast tick's own positions walk is
+    NOT built (the plan's "Not built" list; the key is the block's
+    settled shape); `ring`, the tick ring's length. One decimal.
+    Bounded: these keys and no others. Measurement only."""
+    if fast_prelude is None:
+        tm = t.timing if isinstance(t.timing, dict) else {}
+        fast_prelude = _num(tm.get("fast_prelude"))
+    census = t.stats.get("census") if isinstance(t.stats, dict) else None
+    yielded = _num((census or {}).get("cand_yielded")) if isinstance(census, dict) else None
+    return {"cand_yielded": max(0, int(yielded or 0)),
+            "fast_prelude": round(max(0.0, float(fast_prelude or 0.0)), 1),
+            "fast_walk": 0,
+            "ring": len(_tick_ring)}
+
+
 def _terminal_memo_snapshot(now: float) -> dict:
     """Both terminal memos, bounded: every entry whose `until` has
     passed dropped, at most _TERMINAL_MEMO_MAX kept (the soonest to
@@ -7375,6 +7454,85 @@ async def _persist_cand_memo(t: _Tick) -> None:
         log.warning("mirror_live: %s write failed (%s)", _STATE_CAND_MEMO, type(exc).__name__)
         return
     _cand_memo_last.update(at=float(t.now), sig=sig)
+
+
+# ------------------------------------------- FILL lane 14: the tick ring
+
+# the ring entry's fields, by index (the tick-ring preset reads them by
+# these positions: e->>1 tick_s, e->>4 books, e->>5 candidates, e->>10
+# yielded, e->>12 fast_wait, e->>14 fast_prelude)
+TICK_RING_FIELDS: tuple[str, ...] = (
+    "at", "tick_s", "walk", "orders", "books", "candidates", "books_live", "venue_calls",
+    "cand_cap", "cand_reads", "yielded", "fast_n", "fast_wait", "fast_work", "fast_prelude")
+
+
+def _tick_ring_entry(t: _Tick, stats: dict) -> list:
+    """One full tick's ring entry, read off the blocks the tick's
+    `finally` just built (`short.timing`, `short.wall`, `short.fast`,
+    `short.speed`) and the census the heartbeat carries -- never
+    re-measured: [at (the tick's clock, one decimal), tick_s, walk,
+    orders, books, candidates, books_live, venue_calls, cand_cap,
+    cand_reads (t.cand_reads: the candidate walk's own reads, the
+    number the refusal rows record), yielded (1 when the heartbeat's
+    `yielded_tick` reads True -- lane 15's key; 0 until it lands),
+    fast_n, fast_wait, fast_work, fast_prelude]. A block missing (an
+    abandoned or refused tick) or a field unreadable reads 0 / 0.0."""
+    def block(d: Any, k: str) -> dict:
+        v = d.get(k) if isinstance(d, dict) else None
+        return v if isinstance(v, dict) else {}
+
+    def f(d: dict, k: str) -> float:
+        v = _num(d.get(k))
+        return round(float(v), 1) if v is not None else 0.0
+
+    def i(d: dict, k: str) -> int:
+        v = _num(d.get(k))
+        return int(v) if v is not None else 0
+
+    sh = block(stats, "short")
+    tm, wl, fb, sp = block(sh, "timing"), block(sh, "wall"), block(sh, "fast"), block(sh, "speed")
+    return [round(float(t.now), 1), f(stats, "tick_s"), f(tm, "walk"), f(tm, "orders"), f(tm, "books"),
+            f(tm, "candidates"), i(stats, "books_live"), i(tm, "venue_calls"), i(tm, "cand_cap"),
+            max(0, int(t.cand_reads)), 1 if stats.get("yielded_tick") is True else 0,
+            i(fb, "n"), f(wl, "fast_wait"), f(wl, "fast_work"), f(sp, "fast_prelude")]
+
+
+def _tick_ring_append(t: _Tick, stats: dict) -> None:
+    """Append this full tick's entry to the ring (the deque drops the
+    oldest past TICK_RING_MAX), then refresh the speed block's `ring`
+    so the heartbeat reads the ring as this tick LEAVES it (the block
+    is built before the append: the entry reads its fast_prelude).
+    Never raises: an entry that cannot be built is logged and dropped
+    -- the ring is a record, and this runs inside tick_once's
+    `finally`."""
+    try:
+        _tick_ring.append(_tick_ring_entry(t, stats))
+        sp = stats.get("short", {}).get("speed") if isinstance(stats.get("short"), dict) else None
+        if isinstance(sp, dict):
+            sp["ring"] = len(_tick_ring)
+    except Exception as exc:  # noqa: BLE001 — the record never breaks the tick
+        log.warning("mirror_live: tick ring entry dropped (%s)", type(exc).__name__)
+
+
+async def _persist_tick_ring(t: _Tick) -> None:
+    """The ring, written under _STATE_TICK_RING as {"ticks": [...],
+    "at": ISO} the way the candidate memo is persisted: never before
+    the boot read (E6 review MEDIUM-5's rule, kept: a first tick
+    refused ahead of it writes nothing), at most once per
+    TERMINAL_MEMO_WRITE_S, a failed write logged and retried on a later
+    tick, the ring kept in memory meanwhile. NO boot read: the ring is
+    the process's own record and a deploy starts it empty. An empty
+    ring writes nothing. Never raises."""
+    if not _terminal_memo_loaded or not _tick_ring:
+        return
+    if float(t.now) - float(_tick_ring_last.get("at") or 0.0) < TERMINAL_MEMO_WRITE_S:
+        return
+    try:
+        await _write_state(t.pool, _STATE_TICK_RING, {"ticks": list(_tick_ring), "at": _iso(float(t.now))})
+    except Exception as exc:  # noqa: BLE001 — a ring that did not persist is kept in memory and retried
+        log.warning("mirror_live: %s write failed (%s)", _STATE_TICK_RING, type(exc).__name__)
+        return
+    _tick_ring_last.update(at=float(t.now))
 
 
 def _memo_terminal_book(t: _Tick, book: dict, r: _Reading) -> None:
@@ -12749,9 +12907,19 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             # E11 part 3: this lane's venue claims on the gate this tick,
             # a sibling of `short.wall` (whose keys the E10 pins fix)
             stats["short"]["gate"] = _gate_block(t)
+            # FILL lane 14: the speed record -- the fast ticks' prelude
+            # since the last publish (taken, as `short.wall`'s split is),
+            # a sibling of `short.wall` / `short.fast` (their keys pinned)
+            stats["short"]["speed"] = _speed_block(t, _fast_speed_take())
             _publish_fills_dedup(t)
             await _persist_terminal_memo(t)     # E6 part 3: bounded, once per 60 s, on change
             await _persist_cand_memo(t)         # E7: the candidate memos, the same rules, their own key
+            # FILL lane 14, last: this tick's entry onto the ring, read off
+            # the blocks above (every block is built before it, so an
+            # abandoned tick's entry carries 0.0 where the block does),
+            # then the ring persisted under the candidate memo's rules
+            _tick_ring_append(t, stats)
+            await _persist_tick_ring(t)
             _last_loss = t.loss         # L1: the mode line's `loss=` fragment
             _last_sleeve = t.sleeve     # L2: its `sleeve=` fragment
             _current_stats = None
@@ -13668,6 +13836,14 @@ async def _fast_tick(t: _Tick, cids: list) -> None:
     t.cand_budget = _cand_budget(t)
     t.map_budget.cap = _map_cap(t.cand_budget)
     t.cand_cap = _cand_cap(t)
+    # FILL lane 14: the PRELUDE, stamped here and nowhere earlier -- the
+    # seconds from the lock's acquire (t.fast_acquired, fast_tick_once's
+    # `acquired`) to the first _fast_book / _fast_candidate: the probes,
+    # the mode, the venue, the guards, the ratios, the books and the
+    # open rows above. Measured, never branched on.
+    if t.fast_acquired is not None:
+        t.timing["fast_prelude"] = float(t.timing.get("fast_prelude") or 0.0) \
+            + max(0.0, time.monotonic() - float(t.fast_acquired))
     for cid in cids:
         if t.abandoned or t.cancel_all:
             _fast_skip(t, cid, str(t.cancel_all or "tick_abandoned"))
@@ -13735,6 +13911,7 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
             if own:
                 _current_stats = stats
             t = _Tick(pool=pool, pmus=pmus, http=http, now=now, stats=stats, started=started, fast=True)
+            t.fast_acquired = acquired      # FILL lane 14: the prelude's start, for _fast_tick's stamp
             t.fast_calls, t.guard_calls, t.ops = int(_fast_calls), int(_fast_guard_calls), int(_fast_ops)
             seed_guard, seed_ops = t.guard_calls, t.ops
             t.seq = int(_tick_seq)
@@ -13763,6 +13940,13 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
                 # E10: the split -- the wait for _TICK_LOCK, the work after it
                 _fast_wall["wait"] += acquired - started
                 _fast_wall["work"] += end - acquired
+                # FILL lane 14: a fast tick that never reached its per-market
+                # loop (nothing woken, a guard refused it, or it raised before
+                # the loop) is prelude alone -- its whole work; the prelude
+                # then rides to the next full tick's `short.speed`
+                if "fast_prelude" not in t.timing:
+                    t.timing["fast_prelude"] = max(0.0, end - acquired)
+                _fast_speed["prelude"] += float(t.timing.get("fast_prelude") or 0.0)
                 if own:
                     for k, v in stats["census"].items():
                         if v:
@@ -13777,6 +13961,7 @@ async def fast_tick_once(pool, pmus, http, cids: list | None = None,
                 stats["short"]["data_api"] = _data_api_block(t)
                 stats["short"]["wall"] = _wall_block(t, acquired - started, end - acquired)
                 stats["short"]["gate"] = _gate_block(t)     # E11: the fast tick's own claims
+                stats["short"]["speed"] = _speed_block(t)   # FILL lane 14: its own prelude
                 _publish_fills_dedup(t)
                 if _current_stats is stats:
                     _current_stats = None

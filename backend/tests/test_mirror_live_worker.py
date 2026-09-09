@@ -7614,9 +7614,10 @@ def _comparable(st):
     the data-API block beside it)."""
     out = {k: v for k, v in st.items() if k not in ("recent", "tick_s")}
     if isinstance(out.get("short"), dict):
-        # E9: and the fast ticks' block beside them (seconds); E10: the wall block too
+        # E9: and the fast ticks' block beside them (seconds); E10: the wall block too;
+        # FILL lane 14: the speed block (the ring's length grows on every full tick)
         out["short"] = {k: v for k, v in out["short"].items()
-                        if k not in ("timing", "data_api", "fast", "wall", "gate")}
+                        if k not in ("timing", "data_api", "fast", "wall", "gate", "speed")}
     return out
 
 

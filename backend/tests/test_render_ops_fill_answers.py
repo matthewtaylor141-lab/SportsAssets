@@ -125,8 +125,9 @@ def test_fill_answers_sits_after_closed_while_he_traded_before_hourly_and_stays_
     assert "|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
     h, _ = _preset(text, "hourly")
     assert "'== fill-answers'" not in h and "rows_24h" not in h and "plan_oldest_kept" not in h
-    # the hourly is still the nine presets, joined -- its own pins, re-run here
-    assert hourly.PARTS == ("mirror-tick", "mirror-pnl", "paired-day", "paired-ratio", "latency-census",
+    # the hourly is the ten presets joined (nine until FILL lane 14 put tick-ring after
+    # mirror-tick; fill-answers itself still rides no hourly) -- its own pins, re-run here
+    assert hourly.PARTS == ("mirror-tick", "tick-ring", "mirror-pnl", "paired-day", "paired-ratio", "latency-census",
                             "fills-answered", "fills-missed", "take-band", "on-target-why")
     hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()
     hourly.test_the_hourly_preset_is_read_only_with_its_own_output_cap_and_timeout()

@@ -804,10 +804,12 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
 def test_review_q10_nothing_new_is_persisted_and_a_deploy_leaves_the_market_to_the_full_tick():
     src = inspect.getsource(ml)
     keys = sorted(set(re.findall(r"^(_STATE_[A-Z0-9_]+)\s*=", src, re.M)))
-    # (E13 added _STATE_TERMINAL_CONFIRM, the book memo's confirmation beside the E6 memo)
+    # (E13 added _STATE_TERMINAL_CONFIRM, the book memo's confirmation beside the E6 memo;
+    # FILL lane 14 added _STATE_TICK_RING, the tick ring -- written by the FULL tick's
+    # `finally` alone, never by the fast path, which the e9 pin below still holds)
     assert keys == ["_STATE_CAND_MEMO", "_STATE_DEMOTED", "_STATE_FLATTEN", "_STATE_LIVE", "_STATE_LOSS_REARM",
                     "_STATE_LOSS_STOP", "_STATE_OPEN", "_STATE_S4", "_STATE_SIDE_ECHO", "_STATE_TERMINAL_CONFIRM",
-                    "_STATE_TERMINAL_MEMO",
+                    "_STATE_TERMINAL_MEMO", "_STATE_TICK_RING",
                     "_STATE_WHALES"], "no new ingestion_state key (E9 adds none; _STATE_OPEN is the venue's word)"
     e9 = "".join(inspect.getsource(f) for f in (ml.notify, ml._fast_wake, ml._fast_run, ml._fast_requeue,
                                                 ml._fast_tick, ml.fast_tick_once, ml._fast_book,
