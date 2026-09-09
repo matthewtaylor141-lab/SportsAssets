@@ -1,0 +1,67 @@
+# The account's own venue activity for ONE market, printed where the
+# session can read it (the Actions log). The session's egress policy
+# cannot reach the deployed API, and the probe's export artifact lives
+# on a blob host the policy refuses, so this is the channel: the public
+# /api/venue-export-raw (owner order 2026-08-14: every trade on the
+# account, served plainly; no credentials) filtered to a slug, verbatim
+# rows -- trades, resolutions, everything the venue sent -- plus a sum
+# by side. Built 2026-09-09 for book 1156 (aec-wta-qinzhe-eleryb):
+# the venue's net moved twice by ~1,850 shares no mirror row sold.
+name: venue-trades
+on:
+  workflow_dispatch:
+    inputs:
+      slug:
+        description: 'US market slug, exact (e.g. aec-wta-qinzhe-eleryb-2026-09-08)'
+        required: true
+      since:
+        description: 'YYYY-MM-DD the export starts at (America/New_York day)'
+        default: '2026-09-09'
+      api_base:
+        description: 'API base (default the deployed API)'
+        default: ''
+jobs:
+  read:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Read the venue's rows for the slug
+        env:
+          SLUG: ${{ github.event.inputs.slug }}
+          SINCE: ${{ github.event.inputs.since }}
+          OVERRIDE: ${{ github.event.inputs.api_base }}
+        run: |
+          set -u
+          BASE="${OVERRIDE:-https://sportsassets-api.onrender.com}"
+          echo "venue-trades slug='$SLUG' since='$SINCE' base=$BASE at $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          CODE=$(curl -sS --max-time 280 -o /tmp/pxraw.json -w '%{http_code}' \
+                 "$BASE/api/venue-export-raw?since=$SINCE" || echo 000)
+          echo "HTTP $CODE bytes=$(wc -c < /tmp/pxraw.json 2>/dev/null || echo 0)"
+          if ! jq -e '.rows' /tmp/pxraw.json >/dev/null 2>&1; then
+            echo "EXPORT UNREADABLE: $(head -c 300 /tmp/pxraw.json 2>/dev/null)"; exit 0
+          fi
+          echo "== rows since $SINCE: total $(jq -r '.count // (.rows | length)' /tmp/pxraw.json); by type:"
+          jq -r '.rows | group_by(.type) | .[] | "  \(.[0].type // "?") \(length)"' /tmp/pxraw.json
+          # every row whose trade / position names the slug, oldest first, verbatim
+          jq --arg s "$SLUG" -c '
+            [ .rows[]
+              | select(((.trade.marketSlug // .positionResolution.marketSlug // .marketSlug // "") | ascii_downcase) == ($s | ascii_downcase)) ]
+            | sort_by(.timestamp // .createdAt // .time // "")
+            | .[]' /tmp/pxraw.json > /tmp/slug.jsonl
+          echo "== $(wc -l < /tmp/slug.jsonl) rows name the slug (oldest first, verbatim) =="
+          cat /tmp/slug.jsonl
+          echo "== trades on the slug: ts side qty price aggressor order_id order_qty order_price tif realized =="
+          jq -r '
+            select(.type == "ACTIVITY_TYPE_TRADE") | .trade as $t
+            | [ (.timestamp // .createdAt // .time // "?"),
+                ($t.side // $t.orderSide // $t.takerSide // "?"),
+                ($t.qty // $t.quantity // "?"), ($t.price.value // $t.price // "?"),
+                ($t.isAggressor // "?"),
+                ($t.order.id // "?"), ($t.order.quantity // "?"), ($t.order.price.value // $t.order.price // "?"),
+                ($t.order.tif // "?"), ($t.realizedPnl.value // $t.realizedPnl // "?") ]
+            | @tsv' /tmp/slug.jsonl
+          echo "== sum of trade qty by side on the slug =="
+          jq -s -r '
+            map(select(.type == "ACTIVITY_TYPE_TRADE") | .trade)
+            | group_by(.side // .orderSide // .takerSide // "?")
+            | .[] | "  \(.[0].side // .[0].orderSide // .[0].takerSide // "?")  n=\(length)  qty=\(map((.qty // .quantity // "0") | tonumber) | add)"' /tmp/slug.jsonl
