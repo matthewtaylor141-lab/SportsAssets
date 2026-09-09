@@ -412,8 +412,10 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "859d33ff50b22047"
     assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "a766496554ff357e"
     # 219f140 read 9898ac1e343b5e41; the owner's $10,000 loss stop (863ad77, docs 62) landed ahead of
-    # this lane and moved the module's hash -- the lane itself touches nothing in rules
-    assert h(rules) == "308fd0c45fb78448", "mirror_live_rules untouched by this lane"
+    # this lane and moved the module's hash to 308fd0c45fb78448 -- the lane itself touches nothing in
+    # rules; the loss stop switched off by owner order (docs 65: rules.MIRROR_LOSS_STOP, an
+    # env_switch beside MIRROR_LOSS_STOP_USD) moved it again, re-cut at that landing
+    assert h(rules) == "756873bcab495fab", "mirror_live_rules untouched by this lane"
     for f in (ml._act, ml._place, ml._place_reserved, ml._entry_take, ml._fast_gate, ml._fast_book,
               ml._fast_candidate, ml._tick_book, ml._walk_candidate, ml._tick):
         s = inspect.getsource(f)

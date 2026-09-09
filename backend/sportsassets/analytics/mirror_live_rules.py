@@ -828,6 +828,24 @@ MIRROR_DAY_USD = unbounded_env("MIRROR_DAY_USD")
 # PMUS_LOSS_BREAKER_USD, which the mirror reads as its limit); still
 # downward-only from the environment; still realized only.
 MIRROR_LOSS_STOP_USD = capped_env("MIRROR_LOSS_STOP_USD", 10000.0)
+# THE STOP SWITCHED OFF BY OWNER ORDER (2026-09-09 ~18:45Z, verbatim:
+# "Remove the stop loss for the time being so that we are not down
+# when it turns"). ON in code, as every switch is; the environment may
+# only turn it OFF (MIRROR_LOSS_STOP=off / 0) -- never a knob that
+# raises a limit, and the limits above do not move. OFF, neither stop
+# refuses an increase: the mirror's own realized-loss stop (_loss_stop)
+# never writes the stop key and a STANDING stop key does not hold, and
+# the copy sleeve's breaker read (le.PMUS_LOSS_BREAKER_USD, L2's rule)
+# never blocks; an unreadable sum blocks nothing either (there is no
+# stop to fail closed toward). The sums are still read every tick and
+# printed on the mode line as `loss=<sum>/off` / `sleeve=<sum>/off`,
+# with `"stop": "off"` on the published reading, so the day's figure
+# stays in view. Turning it back on is an env-del and a restart (no
+# deploy) -- on the owner's word, as the re-arm always was; a stop key
+# that stood before the switch went off holds again the tick it is
+# back on. The exits carve-out is unchanged (nothing here ever blocked
+# an exit). Read through the module at tick time (rules.MIRROR_LOSS_STOP).
+MIRROR_LOSS_STOP = env_switch("MIRROR_LOSS_STOP", True)
 # Venue writes per tick, replaces per book per hour: the venue 429s a
 # board walk above ~3 req/s and the copy lane shares the budget. The
 # ops budget floors at ONE (review finding): a SAFE or exits-only tick
@@ -3033,7 +3051,7 @@ __all__ = [
     "MIRROR_CATCHUP_TOL_CENTS", "MIRROR_CATCHUP_PCT", "MIRROR_CATCHUP_MAX_CENTS", "open_catchup",
     "LIVE_SIDE_PRICE_BAND_MAX",
     "MIRROR_NET_CAP_USD", "MIRROR_MAX_LIVE_BOOKS", "MIRROR_MAX_BOOKS_PER_DAY",
-    "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_MAX_ORDER_OPS_PER_TICK",
+    "MIRROR_DAY_USD", "MIRROR_LOSS_STOP_USD", "MIRROR_LOSS_STOP", "MIRROR_MAX_ORDER_OPS_PER_TICK",
     "MIRROR_BOOK_CONCURRENCY", "MIRROR_VENUE_CALLS_PER_TICK",
     "MIRROR_MAX_REPLACES_PER_HOUR", "MIRROR_REST_TTL_S", "MIRROR_TAKE_AFTER_S",
     "MIRROR_EXIT_TOL", "exit_terms", "MIRROR_EXIT_TAKE_BAND", "EXIT_BAND_INERT_AT",

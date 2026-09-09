@@ -3873,12 +3873,24 @@ async def _global_guards(t: _Tick) -> None:
             since = _loss_window_start(t.now, _rearm_at(rearm_val, rearm_err, t.now))
     lost = await le._loss_breaker_sum(t.pool, None if since is None else _utc(since))
     limit = float(le.PMUS_LOSS_BREAKER_USD)
+    # THE STOP SWITCHED OFF (owner order 2026-09-09 ~18:45Z, "Remove the
+    # stop loss for the time being"; rules.MIRROR_LOSS_STOP, ON in code,
+    # OFF from the environment): the sum is still read and published --
+    # `"stop": "off"` on the reading, `sleeve=<sum>/off` on the mode
+    # line -- and nothing here blocks, an unreadable sum included
+    armed = bool(rules.MIRROR_LOSS_STOP)
     if lost is None:
-        t.increase_block = "loss_breaker_unreadable"
+        if armed:
+            t.increase_block = "loss_breaker_unreadable"
+        else:
+            t.sleeve = {"sum": None, "limit": limit,
+                        "since": None if since is None else _iso(since), "stop": "off"}
     else:
         t.sleeve = {"sum": round(lost, 4), "limit": limit,
                     "since": None if since is None else _iso(since)}
-        if lost <= -limit:
+        if not armed:
+            t.sleeve["stop"] = "off"
+        elif lost <= -limit:
             log.warning("LOSS BREAKER: copy sleeve realized %.2f since %s (threshold -%.0f)"
                         " -- the mirror refuses increases", lost,
                         t.sleeve["since"] or "24h", limit)
@@ -3943,7 +3955,14 @@ async def _global_guards(t: _Tick) -> None:
     if t.increase_block is None:
         # L2: the stop key was read once already for the sleeve (t.stop)
         stop, err = t.stop if t.stop is not None else await _state(t.pool, _STATE_LOSS_STOP)
-        if err is not None or stop is not None:
+        if not rules.MIRROR_LOSS_STOP:
+            # the stop switched OFF (owner order 2026-09-09 ~18:45Z): a
+            # standing or unreadable stop key does not hold, and the sum
+            # is read for the mode line alone (_loss_stop never trips
+            # while the switch is off); the key is left as it stands, so
+            # it holds again the tick the switch is back on
+            await _loss_stop(t)
+        elif err is not None or stop is not None:
             t.increase_block = "mirror_loss_stop"
         else:
             await _loss_stop(t)
@@ -3974,9 +3993,19 @@ async def _loss_stop(t: _Tick) -> None:
     same reading (t.loss) for the mode line. The limit and the exit
     carve-out are as they were. L2: the re-arm key is read ONCE per tick
     (_read_rearm; _global_guards' sleeve read is reused)."""
+    # the stop switched OFF (owner order 2026-09-09 ~18:45Z; the rules
+    # module's paragraph over the switch): the window is read and
+    # published with `"stop": "off"` and nothing here refuses -- not a
+    # sum past the limit, not an unreadable re-arm key, not an
+    # unreadable sum (an unreadable reading publishes `sum` None)
+    armed = bool(rules.MIRROR_LOSS_STOP)
     rearm, err = await _read_rearm(t)
     if err is not None and err != "malformed":
-        t.increase_block = "mirror_loss_stop"
+        if armed:
+            t.increase_block = "mirror_loss_stop"
+        else:
+            t.loss = {"sum": None, "books": None, "limit": float(rules.MIRROR_LOSS_STOP_USD),
+                      "since": None, "rearmed_at": None, "stop": "off"}
         return
     rearm_at = _rearm_at(rearm, err, t.now)
     since = _loss_window_start(t.now, rearm_at)
@@ -3986,11 +4015,19 @@ async def _loss_stop(t: _Tick) -> None:
         books = int((row or {})["books"] or 0) if row else 0
     except Exception as exc:  # noqa: BLE001 — a stop that cannot be read is a stop
         log.warning("mirror_live: loss stop unreadable (%s)", type(exc).__name__)
-        t.increase_block = "mirror_loss_stop"
+        if armed:
+            t.increase_block = "mirror_loss_stop"
+        else:
+            t.loss = {"sum": None, "books": None, "limit": float(rules.MIRROR_LOSS_STOP_USD),
+                      "since": _iso(since), "rearmed_at": None if rearm_at is None else _iso(rearm_at),
+                      "stop": "off"}
         return
     window = {"sum": round(lost, 4), "books": books, "limit": float(rules.MIRROR_LOSS_STOP_USD),
               "since": _iso(since), "rearmed_at": None if rearm_at is None else _iso(rearm_at)}
     t.loss = dict(window)
+    if not armed:
+        t.loss["stop"] = "off"
+        return
     if lost <= -float(rules.MIRROR_LOSS_STOP_USD):
         try:
             await _write_state(t.pool, _STATE_LOSS_STOP, {"at": _iso(t.now), **window})
@@ -14846,11 +14883,15 @@ def _mode_line(stats: dict, ticks: int, loss: dict | None = None,
     if stats.get("skipped_backoff"):
         extra += " backoff=%s" % (stats.get("backoff_left_s"),)
     rail = ""
+    # the stop switched off (owner order 2026-09-09 ~18:45Z) prints
+    # `off` where the limit was: `loss=<sum>/off`, `sleeve=<sum>/off`
     if isinstance(loss, dict):
-        rail = " loss=%s/%s since %s" % (loss.get("sum"), loss.get("limit"),
+        rail = " loss=%s/%s since %s" % (loss.get("sum"),
+                                         "off" if loss.get("stop") == "off" else loss.get("limit"),
                                          str(loss.get("since") or "")[11:16])
     if isinstance(sleeve, dict):
-        rail += " sleeve=%s/%s" % (sleeve.get("sum"), sleeve.get("limit"))
+        rail += " sleeve=%s/%s" % (sleeve.get("sum"),
+                                   "off" if sleeve.get("stop") == "off" else sleeve.get("limit"))
     # `day=none` under an unbounded day cap (the default since
     # 2026-09-06): the room is null, and there is no cap to print
     day = stats.get("mirror_day_room")
