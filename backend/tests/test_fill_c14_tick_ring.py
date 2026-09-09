@@ -403,7 +403,9 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # sha256[:16] of the sources on the landing tip after lane 16 and E21 (FILL lane 10, the add's take: _act / _place /
     # _place_reserved / _entry_take / _fast_gate / _fast_book and rules.order_decision are its), re-cut at landing from
     # 219f140's: nothing here reads the ring or the prelude, and this lane touches none of them
-    assert h(ml._act) == "42e08939276dcd0a" and h(ml._place) == "ab568476817cf795"
+    # _act re-cut 42e08939276dcd0a -> bbe3cae4167edb41 (the cap is per trade, docs 67: an add's standing rest
+        # is compared against the plan as MIRROR_CLIP_USD would size it, p_cmp)
+        assert h(ml._act) == "bbe3cae4167edb41" and h(ml._place) == "ab568476817cf795"
     assert h(ml._place_reserved) == "6c83b8e547c83e0a" and h(ml._entry_take) == "2266c2b346674491"
     assert h(ml._fast_gate) == "1932811194268668" and h(ml._fast_book) == "286e6fa4663c3887"
     # _tick_book read a0061ad32302a610 and _tick 51b72e7567d9f197 after E21; E23 (FILL lane 23:
@@ -412,13 +414,18 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # E24 (FILL lane 24: the desk's hand read on the disagree and closing branches of _tick_book) landed
     # after E23 and moved _tick_book -- re-cut at E24 (859d33ff50b22047 -> d1b7103a1fcfe2e1)
     # (the E24 review's HIGH-1 / LOW-1: the order-open return and the unrounded delta -- d1b7103a1fcfe2e1 -> ce2e3dccbb4140f4)
-    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "ce2e3dccbb4140f4"
+    # (the per-trade cap, 2026-09-09 ~21:05Z owner order: the plan's game_room written null under
+    # the unbounded cap -- ce2e3dccbb4140f4 -> d75c15c0a117974b)
+    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "9280b3d3d3d3937b"
     assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "a766496554ff357e"
     # 219f140 read 9898ac1e343b5e41; the owner's $10,000 loss stop (863ad77, docs 62) landed ahead of
     # this lane and moved the module's hash to 308fd0c45fb78448 -- the lane itself touches nothing in
     # rules; the loss stop switched off by owner order (docs 65: rules.MIRROR_LOSS_STOP, an
     # env_switch beside MIRROR_LOSS_STOP_USD) moved it again, re-cut at that landing
-    assert h(rules) == "756873bcab495fab", "mirror_live_rules untouched by this lane"
+    # (the loss-stop switch re-cut this to 756873bcab495fab; the per-trade cap of 2026-09-09
+    # ~21:05Z -- MIRROR_NET_CAP_USD unbounded, game_room / mirror_target admitting math.inf --
+    # re-cuts it again: 756873bcab495fab -> c1ba120e4b4c93e9)
+    assert h(rules) == "dd7e132f616861b6", "mirror_live_rules untouched by this lane"
     for f in (ml._act, ml._place, ml._place_reserved, ml._entry_take, ml._fast_gate, ml._fast_book,
               ml._fast_candidate, ml._tick_book, ml._walk_candidate, ml._tick):
         s = inspect.getsource(f)

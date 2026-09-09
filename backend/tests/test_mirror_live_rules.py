@@ -58,7 +58,14 @@ def _p2_numbers(**over):
 def test_caps_carry_the_spec_defaults_and_reuse_the_shared_ones(monkeypatch):
     # THE RAILS OF 2026-09-06 (owner orders 13:36Z, ~14:00Z, ~14:10Z):
     # $2,500 per event at the mark, scaling never refusing
-    assert r.MIRROR_NET_CAP_USD == mi.MARKET_NET_CAP_USD == 2500.0
+    # $2,500 per event at the mark -> PER TRADE (owner order 2026-09-09 ~21:05Z): the
+    # per-market / per-game cap is unbounded by code default (the suite's autouse
+    # fixture sets the module attribute to 2,500 for the tests written under it;
+    # test_cap_per_trade pins the production default); the shadow keeps its $2,500
+    # (the module attribute reads 2,500 HERE only because the fixture set
+    # it; the code default is the unbounded reading on the next line)
+    assert math.isinf(r.unbounded_env("MIRROR_NET_CAP_USD")) and mi.MARKET_NET_CAP_USD == 2500.0
+    assert r.unbounded_env("MIRROR_NET_CAP_USD") == math.inf
     # NO COUNT CAP on books ("I don't want to cap books opened at all"):
     # unbounded is math.inf and nothing else -- never a large int a
     # reader would take for a number of books
@@ -160,7 +167,7 @@ def test_env_override_only_lowers_a_cap(monkeypatch):
         monkeypatch.delenv("MIRROR_NET_CAP_USD")
         importlib.reload(r)
     assert r.MIRROR_MAX_LIVE_BOOKS == r.MIRROR_MAX_BOOKS_PER_DAY == math.inf
-    assert r.MIRROR_NET_CAP_USD == 2500.0
+    assert r.MIRROR_NET_CAP_USD == math.inf, "per trade since 2026-09-09: the reload reads the real default"
     # the same helper carries the day cap and the short share cap (U12b,
     # U12c): a shell lowers, never raises, and a lowered day cap BITES
     # in the worker by name (test_mirror_live_worker, section 18)
@@ -240,7 +247,7 @@ def test_a_zero_or_negative_net_cap_env_never_removes_the_cap(monkeypatch):
         finally:
             monkeypatch.delenv("MIRROR_NET_CAP_USD")
             importlib.reload(r)
-    assert r.MIRROR_NET_CAP_USD == 2500.0
+    assert r.MIRROR_NET_CAP_USD == math.inf, "per trade since 2026-09-09: the reload reads the real default"
 
 
 def test_env_override_only_raises_a_wait(monkeypatch):
@@ -373,11 +380,19 @@ def test_a_zero_or_negative_cap_is_no_exposure_never_no_cap():
     # read 12,211 shares, because mi.target_shares caps only while
     # cap_usd > 0. Here a cap at or under zero is NO PLAN, by name,
     # before target_shares runs
-    for cap in (0.0, 0, -1, -1.0, -250.0, math.nan, math.inf, None, "x", False):
+    # (math.inf left this list on 2026-09-09: positive infinity is
+    # unbounded_env's spelling of NO CAP -- the code default since the
+    # owner's per-trade order -- and reads as the module's cap, which the
+    # suite fixture holds at $2,500 here; -inf and NaN are still no cap)
+    for cap in (0.0, 0, -1, -1.0, -250.0, math.nan, -math.inf, "x", False):
         t = r.mirror_target(0.5, 24423.0, 0.4574, 50.0, cap_usd=cap)
         assert t["target"] is None, (cap, t)
         assert t["refusal"] == "net_cap_zero", (cap, t)
         assert t["raw"] == 0.0 and t["capped"] is False and t["intent"] == INTENT
+    # None and +inf both read the module's cap (the fixture's $2,500 here): a plan, capped at it
+    for cap in (None, math.inf):
+        inf_t = r.mirror_target(0.5, 24423.0, 0.4574, 50.0, cap_usd=cap)
+        assert inf_t["refusal"] is None and inf_t["capped"] is True and inf_t["target"] == int(2500.0 / 0.4574), cap
     # never a target above 0 from a zero cap, whatever the book
     for net in (24423.0, 1.0, -5000.0, 0.0):
         assert r.mirror_target(0.5, net, 0.4574, 50.0, cap_usd=0.0)["target"] is None
@@ -390,7 +405,9 @@ def test_a_zero_or_negative_cap_is_no_exposure_never_no_cap():
     assert one["capped"] is True and one["target"] == int(1.0 / 0.4574) == 2
     # and the module default is that positive floor or above
     assert r.MIRROR_NET_CAP_USD >= r.MIRROR_NET_CAP_FLOOR_USD > 0
-    assert inspect.signature(r.mirror_target).parameters["cap_usd"].default == r.MIRROR_NET_CAP_USD
+    # cap_usd None reads the module's cap AT CALL TIME (per trade since 2026-09-09: the
+    # import-time default would have frozen a reload's reading)
+    assert inspect.signature(r.mirror_target).parameters["cap_usd"].default is None
 
 
 def test_an_unreadable_or_zero_clip_is_no_plan_never_a_flatten():
@@ -450,6 +467,9 @@ def test_an_unread_position_is_no_plan_never_a_flatten():
         for args in ((bad, 1000.0, 0.5, 50.0), (0.5, bad, 0.5, 50.0),
                      (0.5, 1000.0, bad, 50.0), (0.5, 1000.0, 0.5, bad)):
             assert r.mirror_target(*args)["target"] is None, args
+        if bad is None or bad is math.inf:
+            # None reads the module's cap, +inf IS the unbounded cap (2026-09-09): a plan
+            continue
         assert r.mirror_target(0.5, 1000.0, 0.5, 50.0, cap_usd=bad)["target"] is None
 
 

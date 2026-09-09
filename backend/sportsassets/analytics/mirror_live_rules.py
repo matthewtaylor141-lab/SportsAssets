@@ -338,8 +338,33 @@ def _bounded(cap: Any) -> int | None:
 # `net_cap_zero` before mi.target_shares ever sees it, should one
 # reach it by another road.
 MIRROR_NET_CAP_FLOOR_USD = 1.0
-MIRROR_NET_CAP_USD = capped_env("MIRROR_NET_CAP_USD", MARKET_NET_CAP_USD,
-                                floor=MIRROR_NET_CAP_FLOOR_USD)
+# THE CAP IS PER TRADE, NOT PER MATCH OR PER MARKET (owner order
+# 2026-09-09 ~21:05Z, verbatim: "I need the 2500 cap to be on a per
+# trade basis not on a per match or market basis. Meaning we could have
+# more than 2500 on an individual match if there are more than one
+# trades in the same match"). Galatasaray / Sporting (books 1221 and
+# 1267): his 39,446-share short on one moneyline and 28,851 on the
+# other read 3,945 and 2,885 shares at 10%, $4,515 of collateral in
+# total (3,945 x (1 - 0.3596) + 2,885 x (1 - 0.3107)); the per-game $2,500 went to the book that opened first
+# ($2,025.65) and the second got the $445 left (645 shares,
+# `game_cap_scaled`) -- 80% and 22% of his proportion where the mandate
+# is 10% and 10%. So the per-market cap at the mark (mi.target_shares)
+# and the per-game room built on it (game_room / game_capped, E1) are
+# UNBOUNDED by code default -- math.inf, unbounded_env's spelling, the
+# only one -- and the $2,500 lives on the ORDER: MIRROR_CLIP_USD below,
+# the mirror lane's own per-order clip (room_scale), so a target past
+# $2,500 at the mark is reached across more than one rest, each at
+# most $2,500. The environment may still LOWER this cap to a finite
+# figure (the 1-share probe's $25; a lowered cap re-arms the per-game
+# room and every `game_cap_*` name exactly as E1 built them); an
+# override at or under 0 lands on the $1 floor as before (a zero cap
+# is `net_cap_zero`, no exposure -- the switch is the tool for that);
+# 'inf' or an unparseable value is the default (unbounded, not a
+# lowering). mi.MARKET_NET_CAP_USD ($2,500) stays the SHADOW's own
+# number for its would_orders column; the live check (_shadow_check)
+# reconstructs the shadow's raw from its `capped` rows and re-caps at
+# the cap THIS lane sized at, so the two still agree.
+MIRROR_NET_CAP_USD = max(MIRROR_NET_CAP_FLOOR_USD, unbounded_env("MIRROR_NET_CAP_USD"))
 
 
 # THE CAP IS PER GAME, ACROSS EVERY MARKET OF THE GAME (E1, owner orders
@@ -410,8 +435,16 @@ def game_room(other_exposure: Any, cap_usd: Any = None) -> float:
     """The dollars a game has left for one of its books: cap less the
     exposure of the game's OTHER books, clamped to [0, cap]. `cap_usd`
     None is MIRROR_NET_CAP_USD (read at call time); a cap at or under
-    zero, or an unreadable exposure, is no room -- 0, fail closed."""
-    cap = _num(MIRROR_NET_CAP_USD if cap_usd is None else cap_usd)
+    zero, or an unreadable exposure, is no room -- 0, fail closed.
+    Positive math.inf is the ONE spelling of no cap (the cap is per
+    trade, owner order 2026-09-09): the room is math.inf whatever the
+    siblings hold; NaN and -inf are no room."""
+    raw = MIRROR_NET_CAP_USD if cap_usd is None else cap_usd
+    if isinstance(raw, float) and raw == math.inf:
+        # the cap is per trade (owner order 2026-09-09): no per-game
+        # room at all -- unbounded, math.inf, whatever the siblings hold
+        return math.inf
+    cap = _num(raw)
     if cap is None or cap <= 0:
         return 0.0
     e = _num(other_exposure)
@@ -1138,7 +1171,7 @@ P2_INTEGRITY_COUNTERS = ("frozen_unresolved", "wrong_sign_trip", "order_lost", "
 
 def mirror_target(ratio: float | None, net: float | None, mark: float | None,
                   per_fill_usd: float | None,
-                  cap_usd: float = MIRROR_NET_CAP_USD,
+                  cap_usd: float | None = None,
                   allow_short: bool = False) -> dict[str, Any]:
     """Our target in long-token shares for this book, or the reason
     there is no plan.
@@ -1185,10 +1218,12 @@ def mirror_target(ratio: float | None, net: float | None, mark: float | None,
     no argument raises exposure past the constants the environment
     can only lower (review finding: cap_usd=1e9 read uncapped).
 
-      `net_cap_zero`     cap_usd at or under 0, non-finite or
+      `net_cap_zero`     cap_usd at or under 0, NaN, -inf or
                          unreadable: NO exposure allowed. Refused HERE,
                          before mi.target_shares -- there a zero cap
-                         is no cap
+                         is no cap. Positive math.inf (the module's
+                         own default since the cap is per trade, owner
+                         order 2026-09-09) is admitted as UNBOUNDED
       `no_ratio`         no ratio, or one at or under 0
       `no_mark`          no mark ON THE LADDER, 0.01 <= mark <= 0.99: a
                          subnormal mark (1e-320) would loosen the cap
@@ -1209,11 +1244,19 @@ def mirror_target(ratio: float | None, net: float | None, mark: float | None,
     """
     out: dict[str, Any] = {"target": None, "raw": 0.0, "capped": False, "ratio_eff": None,
                            "refusal": None, "intent": ORDER_INTENT}
-    cap = _num(cap_usd)
+    # `cap_usd` None reads the module's cap at call time; positive
+    # math.inf -- unbounded_env's one spelling of NO CAP, the code
+    # default since the owner's per-trade order of 2026-09-09 -- is
+    # admitted as unbounded (mi.target_shares then caps nothing: the
+    # $2,500 is the per-order clip, room_scale's). Every other
+    # non-finite or unreadable value is still `net_cap_zero`
+    raw_cap = MIRROR_NET_CAP_USD if cap_usd is None else cap_usd
+    cap = math.inf if (isinstance(raw_cap, float) and raw_cap == math.inf) else _num(raw_cap)
+    if cap is not None:
+        cap = min(cap, float(MIRROR_NET_CAP_USD))
     if cap is None or cap <= 0:
         out["refusal"] = "net_cap_zero"
         return out
-    cap = min(cap, float(MIRROR_NET_CAP_USD))
     rt = _num(ratio)
     if rt is None or rt <= 0:
         out["refusal"] = "no_ratio"

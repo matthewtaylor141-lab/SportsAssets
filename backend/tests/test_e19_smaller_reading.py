@@ -634,7 +634,7 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     # (22 -> 23, inert at its default), pinned by name in test_fill_x1_exit_band
     # E22 (FILL lane 22, 2026-09-09) adds ONE wait that may only LENGTHEN,
     # MIRROR_LOST_FILL_REREAD_S (min_wait_env 4 -> 5), pinned by name in test_e22_lost_fill_adopt
-    assert src.count("capped_env(") == 23 and src.count("min_wait_env(") == 5
+    assert src.count("capped_env(") == 22 and src.count("min_wait_env(") == 5  # the per-trade cap (2026-09-09 ~21:05Z, owner order): MIRROR_NET_CAP_USD reads unbounded_env, one capped_env fewer (23 -> 22)
     assert "MIRROR_DRIFT_MAX = capped_env" in src and "E19" in inspect.getsource(rules.admission)
     for name in ("MIRROR_SMALLER", "SMALLER_READING", "DRIFT_SMALLER"):
         assert name not in src, "no knob"

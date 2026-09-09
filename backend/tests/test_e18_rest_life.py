@@ -177,7 +177,9 @@ def test_e18_an_exit_rest_never_reads_the_floor_e4_unchanged():
         == ("keep", {"cause": "same"})
     # the worker passes the leg action
     src = inspect.getsource(ml._act)
-    assert "entry=not is_exit" in src and "rules.rest_decision(oo, p, t.now" in src
+    # the plan handed in is the CLIPPED plan on an add (the cap is per
+    # trade, docs 67: p_cmp is p sized as MIRROR_CLIP_USD would place it)
+    assert "entry=not is_exit" in src and "rules.rest_decision(oo, p_cmp, t.now" in src
 
 
 def test_e18_the_floor_constant_only_lengthens_from_the_environment(monkeypatch):

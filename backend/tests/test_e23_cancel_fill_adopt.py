@@ -832,7 +832,7 @@ def test_e23_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     # no knob, no rail of the lane's own: E22's wait alone
     rsrc = inspect.getsource(rules)
     assert "CANCEL_FILL" not in rsrc and "DISAGREE_FILL" not in rsrc and "E23" not in rsrc
-    assert rsrc.count("min_wait_env(") == 5 and rsrc.count("capped_env(") == 23
+    assert rsrc.count("min_wait_env(") == 5 and rsrc.count("capped_env(") == 22  # the per-trade cap (2026-09-09 ~21:05Z, owner order): MIRROR_NET_CAP_USD reads unbounded_env, one capped_env fewer (23 -> 22)
 
 
 def test_e23_the_untouched_functions_are_byte_identical_to_the_tip():

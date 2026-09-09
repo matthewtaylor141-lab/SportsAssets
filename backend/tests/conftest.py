@@ -21,6 +21,26 @@ def _lift_emergency_halt(monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _legacy_net_cap(request, monkeypatch):
+    """The per-market / per-game cap at $2,500 for every test written
+    under it (2026-09-09 ~21:05Z, owner order: the $2,500 is per TRADE
+    -- rules.MIRROR_CLIP_USD -- and rules.MIRROR_NET_CAP_USD is
+    UNBOUNDED by code default; the environment may still lower it, and
+    that lowered reading is exactly what these fixtures exercise: the
+    E1 game room, game_cap_scaled / game_cap_full, the cap at the mark).
+    The module attribute is set the way an operator's lowering lands
+    it, at tick time; the reader and the import default are untouched.
+    A module that declares `NET_CAP_UNBOUNDED = True` (test_cap_per_trade
+    pins the production default and the per-trade behaviour) runs on
+    the real default."""
+    if getattr(request.module, "NET_CAP_UNBOUNDED", False):
+        return
+    from sportsassets.analytics import mirror_live_rules as rules
+
+    monkeypatch.setattr(rules, "MIRROR_NET_CAP_USD", 2500.0)
+
+
+@pytest.fixture(autouse=True)
 def _no_clob_from_tests(monkeypatch):
     """C7 (2026-09-07): premap.resolve asks edge_marks._game_start for
     his kickoff when a condition_id is handed in, and that read falls

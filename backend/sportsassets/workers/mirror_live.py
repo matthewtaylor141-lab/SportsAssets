@@ -69,6 +69,7 @@ shapes, the to-a-tee program's Phase 7 rung 1 seam).
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import json
 import logging
 import math
@@ -4409,7 +4410,15 @@ def _book_short(book: dict) -> bool:
 #
 # The $2,500 cap is per GAME across every market of the game (owner
 # orders 2026-09-06 ~14:00Z and ~22:3xZ; rules.book_exposure, game_room,
-# game_capped carry the arithmetic). The tick indexes every non-closed
+# game_capped carry the arithmetic) -- SINCE 2026-09-09 ~21:05Z ONLY
+# WHEN THE ENVIRONMENT LOWERS rules.MIRROR_NET_CAP_USD to a finite
+# figure: the owner's order "the 2500 cap ... on a per trade basis not
+# on a per match or market basis" made the cap unbounded by code
+# default (the paragraph over the constant), the $2,500 living on the
+# order (rules.MIRROR_CLIP_USD, room_scale). Under the unbounded cap the
+# room reads math.inf, the plan's `game_room` is null, and no
+# `game_cap_*` name is ever emitted; the exposure index below still
+# runs, so a lowered cap re-arms all of it. The tick indexes every non-closed
 # book by game_key before the walk -- EVERY whale's books of one game
 # share the $2,500: the order is "no single EVENT having more than
 # $2.5k on it", not one event per whale -- walks a game's books in id
@@ -8501,11 +8510,20 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     cap = float(rules.MIRROR_NET_CAP_USD)
     game_exposure = _game_exposure(t, book)
     room = rules.game_room(game_exposure, cap)
-    plan.update(game_exposure=game_exposure, game_room=room)
-    if game_exposure is None:
+    # the cap is per TRADE (owner order 2026-09-09; rules.MIRROR_NET_CAP_USD
+    # unbounded by default): an unbounded room is written as null on the
+    # plan -- the row is JSON and jsonb refuses an infinity -- and the
+    # clauses below (`room < cap`) never bind; the exposure is still read
+    # and recorded, and a cap the environment lowered reads as E1 built it
+    plan.update(game_exposure=game_exposure, game_room=(room if math.isfinite(room) else None))
+    if game_exposure is None and math.isfinite(room):
         # named ONCE per book, here, and told apart from a game that is
         # full (re-review LOW-3): the plan's null `game_exposure` says
-        # which, the census counts them separately
+        # which, the census counts them separately. Under the unbounded
+        # cap (per trade, owner order 2026-09-09, docs 67) there is no
+        # room to fail toward, so nothing is named: the book is sized in
+        # full and the plan's null `game_exposure` still records the
+        # unreadable sum
         _mirror_stop("game_unreadable", w)
     # E19 (PNL lane 8; the review's CRITICAL-1): THE OPENING TICK SIZES
     # ON THE SMALLER READING TOO. Admission judged this open on the
@@ -10694,7 +10712,24 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         # E18: the rest-life floor reads an ENTRY rest alone -- `entry` is
         # the plan's leg action, so an unpriced reduce rest (an exit at
         # the ask, `stands` False) never waits on it
-        decision, why = rules.rest_decision(oo, p, t.now, cancel_reason=(t.cancel_all or cancel_reason),
+        # The cap is per trade (owner order 2026-09-09, docs 67; the
+        # review's HIGH-1): an ADD's rest is compared against the plan AS
+        # THE PER-ORDER CLIP WOULD SIZE IT (rules.MIRROR_CLIP_USD through
+        # room_scale, the same collateral it was placed on -- (1 - wire)
+        # on a short). A target past $2,500 at the wire is placed in
+        # rests of at most $2,500, so the plan's whole quantity is never
+        # what the rest was sized to: compared raw, a clipped rest read
+        # `qty` (grew) every tick past the rest-life floor and was
+        # cancelled and re-placed as its own twin at the same cent and
+        # quantity, twelve times an hour to replace_capped. The sleeve
+        # rooms are NOT in the comparison (they move with reservations
+        # tick to tick); the clip alone is the stable bound.
+        p_cmp = p
+        if p is not None and not is_exit and rules.leg_action(book.get("intent"), p.side) == "add":
+            clip_sh = rules.room_scale(int(p.qty), wire, rules.MIRROR_CLIP_USD, 1e12, 1e12, 1e12, intent=intent)
+            if 1 <= clip_sh < int(p.qty):
+                p_cmp = dataclasses.replace(p, qty=clip_sh)
+        decision, why = rules.rest_decision(oo, p_cmp, t.now, cancel_reason=(t.cancel_all or cancel_reason),
                                             wire=wire, intent=(want[0] if want else None),
                                             stands=priced_exit, entry=not is_exit)
         # E21 (FILL lane 10): the fast tick's admitted add -- the plan's
