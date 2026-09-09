@@ -193,7 +193,8 @@ def test_t1_book_467s_shape_a_short_flipped_long_closes_under_a_turn_and_the_lon
     st2 = _tick(p, _Venue(held={}), now=NOW + 30)
     lp = b["last_plan"]
     assert b["state"] == "closed" and lp["close"] == "cashed_out" and _census(st2, "closed_cashed_out") == 1
-    assert lp["sign_flip"] is True and lp["turn"] == {"from": SHORT, "to": INTENT, "his_net": 300.0, "at": NOW + 30}
+    # FILL lane 16: the flip close hands the market to the fast path's woken set (`turn.woke`)
+    assert lp["sign_flip"] is True and lp["turn"] == {"from": SHORT, "to": INTENT, "his_net": 300.0, "at": NOW + 30, "woke": True}
     assert lp["turn"]["his_net"] == lp["net"]
     assert _census(st2, "he_holds") == 0 and _census(st2, "he_holds_unread") == 0, "the flip is never guarded"
     # book 309's row shape (post_booksnew_1707 385): the close tick's plan write lands AFTER the
@@ -229,7 +230,7 @@ def test_t1_the_long_to_short_turn_and_the_e15_flip_witness_pin_re_run(monkeypat
     st2 = _tick(p, v2, now=NOW + 30, http=_mkt(100.0, 400.0))
     lp = b["last_plan"]
     assert b["state"] == "closed" and lp["close"] == "cashed_out" and _census(st2, "closed_cashed_out") == 1
-    assert lp["turn"] == {"from": INTENT, "to": SHORT, "his_net": -300.0, "at": NOW + 30}
+    assert lp["turn"] == {"from": INTENT, "to": SHORT, "his_net": -300.0, "at": NOW + 30, "woke": True}    # FILL lane 16: woke
     assert _census(st2, "he_holds") == 0 and _census(st2, "he_holds_unread") == 0
     st4 = _tick(p, _Venue(held={}), now=NOW + 60, http=_mkt(100.0, 400.0))
     books = sorted(p.books.values(), key=lambda x: x["id"])
@@ -591,10 +592,10 @@ def test_t1_live_flow_books_611_and_661_are_never_touched(monkeypatch):
 
 def test_t1_the_census_place_the_emit_sites_the_call_sites_and_no_knob():
     keys = ml.CENSUS_KEYS
-    # E22 (FILL lane 22, four names) and FILL lane 11 (one) placed theirs after these three, nearer the key (-16:-13 -> -21:-18)
-    assert keys[-21:-18] == NEW_NAMES
-    # FILL lane 3 (three names) and T2 (two) landed ahead of this lane and sit between E14's name and these three (take_in_band -17 -> -22 -> -27)
-    assert keys[-27] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    # E22 (FILL lane 22, four names), FILL lane 11 (one) and FILL lane 16 (one) placed theirs after these three, nearer the key (-16:-13 -> -21:-18 -> -22:-19)
+    assert keys[-22:-19] == NEW_NAMES
+    # FILL lane 3 (three names) and T2 (two) landed ahead of this lane and sit between E14's name and these three (take_in_band -17 -> -22 -> -27 -> -28)
+    assert keys[-28] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)

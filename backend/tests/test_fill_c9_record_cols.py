@@ -418,11 +418,12 @@ def test_c9_a_fast_named_fill_reads_fast_true_on_its_row_and_its_order_row_reads
 def test_c9_no_census_name_the_three_heartbeat_keys_the_plan_field_and_no_order_path_reads_the_columns():
     keys = ml.CENSUS_KEYS
     # 0 census names: drift_smaller_open still sits at keys[-13]; lane 5's block sits before it with
-    # E22's four (lost_fill_*) and lane 11's one (cand_market_closed_db) between, both landed ahead of this lane
+    # E22's four (lost_fill_*) and lane 11's one (cand_market_closed_db) between, both landed ahead of this lane;
+    # FILL lane 16 placed its one (turn_woke_fast) after lane 11's (-14 -> -15, -18:-14 -> -19:-15, -21:-18 -> -22:-19)
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-14] == "cand_market_closed_db"
-    assert tuple(keys[-18:-14]) == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert tuple(keys[-21:-18]) == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-15] == "cand_market_closed_db" and keys[-14] == "turn_woke_fast"
+    assert tuple(keys[-19:-15]) == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert tuple(keys[-22:-19]) == ("he_holds", "he_holds_unread", "reopen_refused")
     assert not any(k in keys for k in HEARTBEAT) and not any(k in keys for k in ("rest_cause", "fill_cols", "fast_col"))
     src = inspect.getsource(ml)
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))

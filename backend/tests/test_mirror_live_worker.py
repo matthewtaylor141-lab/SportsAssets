@@ -4964,8 +4964,9 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # (E16 moved the tail by its four names, E18 by its six, E17 by its eight, E19 by its one, L7 by its one: -69 -> -89;
     # E20 by its one, E14b (FILL lane 1) by its one and E14 (FILL lane 2) by its one `take_in_band`: -89 -> -92;
     # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95; T2 (FILL lane 4) by its two: -95 -> -97; FILL lane 5 by its three: -97 -> -100;
-    # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104) and FILL lane 11 by its one (-> -105)
-    assert keys[-105:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104) and FILL lane 11 by its one (-> -105);
+    # FILL lane 16 by its one `turn_woke_fast` (-> -106)
+    assert keys[-106:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -5076,6 +5077,11 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # `registered_no_increase` (keys[-12]), after FILL
                           # lane 5's three (keys[-14])
                           "cand_market_closed_db",
+                          # FILL lane 16: a book closed under a sign flip handed its
+                          # market to the fast path's woken set (`turn.woke` True) --
+                          # before E19's name (keys[-13]) and `registered_no_increase`
+                          # (keys[-12]), after FILL lane 11's one (keys[-14])
+                          "turn_woke_fast",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5092,7 +5098,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-106] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one before the tail
+    assert keys[-107] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and FILL lane 16's one before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -13151,6 +13157,15 @@ def test_t1_the_turn_names_are_emitted_here_too(monkeypatch, caplog):
     t1.test_t1_every_name_is_emitted_here(monkeypatch, caplog)
     for name in ("he_holds", "he_holds_unread", "reopen_refused"):
         assert name in SEEN, name
+def test_c16_the_turn_wake_name_is_emitted_here_too(monkeypatch):
+    """FILL lane 16's one name is driven in tests/test_fill_c16_turn_wakes.py
+    (book 467's shape closed under the flip on a fast tick: the market put
+    back for the next fast tick, which opens the other side); run here as
+    well so the coverage read below sees it when this file runs alone
+    (E13's convention)."""
+    from tests import test_fill_c16_turn_wakes as c16
+    c16.test_c16_every_name_is_emitted_here(monkeypatch)
+    assert "turn_woke_fast" in SEEN
 def test_l7_event_stale_is_emitted_on_a_dated_candidate_with_no_fill_of_his_in_a_day():
     """L7 (2026-09-08): a candidate whose slug's own date is more than one
     day past with no fill of his in a day is refused `event_stale` --

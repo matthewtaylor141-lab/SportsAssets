@@ -1040,6 +1040,21 @@ CENSUS_KEYS: tuple[str, ...] = (
     # (keys[-12]), after FILL lane 5's three, by the convention every
     # lane followed (keys[-14]; the tail pins moved by one)
     "cand_market_closed_db",
+    # FILL lane 16 (2026-09-09): the turn wakes the fast path.
+    # `turn_woke_fast`: a book closed under a sign flip (lane 5's
+    # `plan.turn`) handed its market to _fast_wake once the close's
+    # state write succeeded -- the market sits in the fast path's woken
+    # set (plan `turn.woke` True) and the reopen's admission runs on the
+    # next fast tick through _fast_candidate -> _walk_candidate exactly
+    # as his fill's wake runs it (nothing admitted that is refused
+    # today; a refusal at the wake is lane 5's `reopen_refused`). Not
+    # counted when the wake was refused by _WOKEN_MAX (`turn.woke`
+    # False), on a flat-clock or settle close (no turn), or when the
+    # state write failed (the book is not closed). Before E19's
+    # `drift_smaller_open` (keys[-13]) and `registered_no_increase`
+    # (keys[-12]), after FILL lane 11's one, by the convention every
+    # lane followed (keys[-14]; the tail pins moved by one)
+    "turn_woke_fast",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -6324,7 +6339,22 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
     to, his_net, at}` -- before the state write, so the closed row's
     last plan (the read path's _write_plan runs after this close) names
     the market as turned and the candidate's refusals can be written on
-    it (`reopen_refused`, _walk_candidate)."""
+    it (`reopen_refused`, _walk_candidate).
+
+    FILL lane 16 (2026-09-09): THE TURN WAKES THE FAST PATH. Once the
+    flip close's state write has succeeded, the market is handed to
+    _fast_wake exactly as his fill hands it (notify's fast half: the
+    woken set, bounded by _WOKEN_MAX; one fast tick scheduled when
+    main() has armed the path, nothing otherwise), so the reopen's
+    admission runs on the next fast tick through _fast_candidate ->
+    _walk_candidate -- every clause and refusal exactly as today --
+    instead of the full tick's candidate rotation or his next fill's
+    wake. `turn.woke` records whether the market sits in the woken set
+    after the call; `turn_woke_fast` counts the same. The wake is a
+    courtesy, never a condition: it follows the write (a failed write
+    leaves the book open and wakes nothing), it is the flip's path alone
+    (a flat-clock close, a settle close and the market's end carry no
+    turn and wake nothing), and its own failure is logged and dropped."""
     if (book["id"] in t.open_by_book or book["id"] in t.nonterminal
             or book.get("state") == "closed"):
         return "orders_open"
@@ -6373,12 +6403,48 @@ async def _maybe_close_episode(t: _Tick, book: dict, market_live: bool | None,
                         "his_net": _num(plan.get("net")), "at": t.now}
     await t.pool.execute(_SQL_BOOK_STATE, book["id"], "closed", f"closed_{verdict}")
     book["state"] = "closed"
+    if plan.get("sign_flip") is True:
+        # FILL lane 16: the turn wakes the fast path -- AFTER the state
+        # write (a failed write raised above: the book is open, nothing
+        # woken), the flip's path alone. The market joins the fast
+        # path's woken set exactly as his fill does; `turn.woke` says
+        # whether it did (False: refused by _WOKEN_MAX, as his fill's
+        # wake is), and the reopen's admission runs on the next fast
+        # tick through _fast_candidate with every clause as today
+        plan["turn"]["woke"] = _turn_wake(book)
+        if plan["turn"]["woke"]:
+            _mirror_stop("turn_woke_fast", book["whale"])
     _forget_quiet(book["id"])
     _forget_terminal_confirm(book)
     t.stats["closed_books"] += 1
     _mirror_stop(f"closed_{verdict}", book["whale"])
     _recent(book["id"], "closed", how=verdict)
     return verdict
+
+
+def _turn_wake(book: dict) -> bool:
+    """FILL lane 16: hand a turned market to the fast path's woken set
+    (_fast_wake, notify's fast half: bounded by _WOKEN_MAX, one fast
+    tick scheduled only when main() has armed the path and a loop is
+    running -- outside that the market waits for the full tick's
+    candidate stage as before). Returns whether the market sits in the
+    woken set after the call: True is `turn.woke` and one
+    `turn_woke_fast`; False is the bound's refusal, a blank condition,
+    or the wake's own failure (logged, never the close's exception: the
+    book is closed and its state written by the time this runs). On a
+    FAST tick's own close the market was taken off the woken set at the
+    tick's start; this puts it back for the NEXT fast tick, where the
+    open books are re-read and the market has none -> _fast_candidate.
+    A wake never places, cancels or admits anything."""
+    try:
+        cid = str(book.get("condition_id") or "").strip()
+        if not cid:
+            return False
+        _fast_wake(cid)
+        return cid in _FAST_WOKEN
+    except Exception:  # noqa: BLE001 — a lost wake is the full tick's candidate stage, never a lost close
+        log.debug("mirror_live: turn wake for book %s dropped", book.get("id"), exc_info=True)
+        return False
 
 
 # --------------------------- E17: a standing row retired on a live market

@@ -376,10 +376,10 @@ def test_e14b_the_census_name_sits_before_drift_smaller_open_and_the_tail_pins_h
     keys = ml.CENSUS_KEYS
     assert keys.count("exit_take_rested") == 1 and len(set(keys)) == len(keys)
     # E14 (FILL lane 2) landed after this lane and placed `take_in_band` nearer the key (-14 -> -15);
-    # FILL lane 3 (three names), T2 (two), FILL lane 5 (three), E22 (FILL lane 22, four) and FILL lane 11 (one) placed theirs after these (-15 -> -28, -14 -> -27)
-    assert keys[-28] == "exit_take_rested" and keys[-27] == "take_in_band"
-    assert keys[-21:-18] == ("he_holds", "he_holds_unread", "reopen_refused")
-    assert keys[-14] == "cand_market_closed_db"
+    # FILL lane 3 (three names), T2 (two), FILL lane 5 (three), E22 (FILL lane 22, four), FILL lane 11 (one) and FILL lane 16 (one) placed theirs after these (-15 -> -29, -14 -> -28)
+    assert keys[-29] == "exit_take_rested" and keys[-28] == "take_in_band"
+    assert keys[-22:-19] == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-15] == "cand_market_closed_db" and keys[-14] == "turn_woke_fast"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert ml._new_stats()["census"]["exit_take_rested"] == 0

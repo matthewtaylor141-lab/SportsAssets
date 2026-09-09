@@ -501,9 +501,9 @@ def test_e22_a_long_books_lost_buy_adopts_the_same_way(monkeypatch):
 
 def test_e22_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob():
     keys = ml.CENSUS_KEYS
-    # FILL lane 11 landed after this lane and placed its one name nearer the key (-17:-13 -> -18:-14)
-    assert keys[-18:-14] == NEW_NAMES and keys[-14] == "cand_market_closed_db"
-    assert keys[-19] == "reopen_refused" and keys[-21] == "he_holds" and keys[-27] == "take_in_band"
+    # FILL lane 11 and FILL lane 16 landed after this lane and placed one name each nearer the key (-17:-13 -> -18:-14 -> -19:-15)
+    assert keys[-19:-15] == NEW_NAMES and keys[-15] == "cand_market_closed_db" and keys[-14] == "turn_woke_fast"
+    assert keys[-20] == "reopen_refused" and keys[-22] == "he_holds" and keys[-28] == "take_in_band"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
