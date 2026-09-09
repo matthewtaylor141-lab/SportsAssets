@@ -14,12 +14,23 @@ from typing import Any
 
 import httpx
 
+from ..analytics import mirror_live_rules as _rules
 from ..config import settings
 from ..db import get_pool, heartbeat
 from .dedupe import key_fields_valid
 from .pipeline import TradeEvent, ingest_trade_result
 
 log = logging.getLogger(__name__)
+
+# E26 (FILL lane 26, 2026-09-09): THE HONEST PAGE. /trades takes limit
+# and offset (the reconciler's own walk, reconciler.py: limit 100,
+# offset N, takerOnly false) and no cursor. A full page whose EVERY key
+# is new is the only page that can hide an older new row behind it, so
+# that page -- and only that page -- is followed with the same params
+# plus offset, at most POLL_OVERFLOW_PAGES more, stopping at the first
+# page that holds a seen key or fewer than 100 rows. The environment
+# may only LOWER the bound; 0 is today's one page with the count below.
+POLL_OVERFLOW_PAGES = _rules.capped_env("POLL_OVERFLOW_PAGES", 2.0, floor=0.0)
 
 # A most-recent page whose newest row sits this far behind a fill this
 # poller itself venue-stamped is a frozen index, not a quiet wallet
@@ -135,6 +146,20 @@ def page_full_counts() -> dict:
     return dict(_PAGE_FULL)
 
 
+# Polls whose full all-new page could NOT be walked to a row already
+# seen, per whale (E26): the bound POLL_OVERFLOW_PAGES was reached with
+# every page all-new, or an overflow page was unreadable. This is the
+# count that means the venue may hold older rows the poll did not
+# reach; a full page alone (_PAGE_FULL) is his newest 100 whatever
+# their age and is counted, never logged.
+_PAGE_OVERFLOW: dict[str, int] = {}
+
+
+def page_overflow_counts() -> dict:
+    """Per-whale count of polls whose all-new page overflowed the walk."""
+    return dict(_PAGE_OVERFLOW)
+
+
 class Poller:
     def __init__(self) -> None:
         cfg = settings()
@@ -167,6 +192,26 @@ class Poller:
                 timeout=ROSTER_TIMEOUT_S,
             )
         return [dict(r) for r in rows]
+
+    @staticmethod
+    def _parse_page(page: list, whale: dict) -> tuple[list[TradeEvent], int]:
+        """The first page's per-row containment (fleet rounds 12-15), for
+        the overflow pages E26 walks: one junk row costs one row, never
+        the page. Returns (events, bad). The first page's own loop in
+        poll_wallet is left byte for byte where the round pins read it."""
+        events: list[TradeEvent] = []
+        bad = 0
+        for raw in page:
+            try:
+                ev = parse_data_api_trade(raw, whale["id"], whale["username"])
+                if not key_fields_valid(ev):
+                    bad += 1
+                    continue
+            except Exception:  # noqa: BLE001 — one junk row costs one row
+                bad += 1
+                continue
+            events.append(ev)
+        return events, bad
 
     async def poll_wallet(self, whale: dict) -> int:
         """One poll cycle for one wallet. Returns count of NEW trades ingested."""
@@ -235,13 +280,17 @@ class Poller:
         # then rest on a denominator missing its busiest minutes. A
         # full page is not proof of loss — exactly 100 could be exactly
         # 100 — so this counts a SUSPICION, and the name says so.
+        #
+        # E26 (2026-09-09): COUNTED, NO LONGER LOGGED. The page is his
+        # newest 100 whatever their age, so this fired on every poll
+        # of every whale with 100 lifetime trades (22 lines in 7 s of
+        # the 17:34Z log, RN1 every ~3.4 s) and said nothing. The line
+        # that says something is the overflow walk's below: a full
+        # page whose every key is NEW is followed to a row already
+        # seen, and only a walk that could not reach one is logged.
         if len(page) >= 100:
             _PAGE_FULL[whale.get("username") or "?"] = (
                 _PAGE_FULL.get(whale.get("username") or "?", 0) + 1)
-            log.warning(
-                "POLLER page full (%d) for %s — the venue may hold "
-                "older trades this poll did not see; limit=100 has no "
-                "cursor", len(page), whale.get("username"))
         if page and bad == len(page):
             # the round-23 shape one level down: a LIST page whose
             # every element is unusable (nulls, junk dicts) is the
@@ -289,6 +338,7 @@ class Poller:
         # 2026-08-21 evening; masked because chain carried the sports
         # whales and the hourly reconciler back-filled the rest).
         keys = [ev.dedupe_key for ev in events]
+        probe_failed = False                # E26 review: an unreadable probe is not an all-new page
         try:
             # an UNSTAMPED s1 row is deliberately NOT "known": the poll
             # duplicate must flow through ingest once so the conflict
@@ -302,6 +352,86 @@ class Poller:
                 keys)}
         except Exception:  # noqa: BLE001 — pre-filter is an optimization
             seen = set()
+            probe_failed = True
+        # THE HONEST PAGE (E26, 2026-09-09). A full page with NO seen key
+        # is the only page that can hide an older new row behind it: the
+        # newest 100 are all new, so the 101st may be too. Follow it with
+        # the same params plus offset (the reconciler's own request
+        # shape), at most POLL_OVERFLOW_PAGES more, stopping at the first
+        # page holding a seen key or fewer than 100 rows; every row walks
+        # the same per-row containment, pre-probe and ingest as the first
+        # page's. A page that holds one seen key makes no second request.
+        # FAIL CLOSED: an overflow page that raises or is not a list
+        # leaves the first page's rows standing, counts page_overflow,
+        # and never raises out of the cycle -- the round-23 / 24 / 36 /
+        # 37 guards above and below read the FIRST page only. The
+        # WARNING below fires ONLY when the bound was reached with every
+        # page all-new; page_overflow counts both. A raised page is a
+        # log line of its own. An UNREADABLE pre-probe (review
+        # MEDIUM-1) is not knowledge that the page is all-new: the
+        # first page's probe raising -> one page, as today; an
+        # overflow page's probe raising -> the walk ends there, its
+        # rows standing (ingest's ON CONFLICT is the gate), counted.
+        pages_walked = 0
+        if len(page) >= 100 and keys and not probe_failed and not any(k in seen for k in keys):
+            name = whale.get("username") or "?"
+            offset = 100
+            ended = None        # 'seen' / 'short' / 'unreadable' / None (the bound)
+            while pages_walked < int(POLL_OVERFLOW_PAGES):
+                why = None
+                try:
+                    more = await polite_get(
+                        self._http, "/trades",
+                        params={"user": whale["address"], "limit": 100,
+                                "offset": offset, "takerOnly": "false"})
+                    more.raise_for_status()
+                    page2 = more.json()
+                except Exception as exc:  # noqa: BLE001 — the first page stands
+                    page2, why = [], f"{type(exc).__name__}: {exc}"
+                if why is None and not isinstance(page2, list):
+                    page2, why = [], "non-list body: " + type(page2).__name__
+                if why is not None:
+                    log.warning(
+                        "POLLER overflow page at offset %d for %s unreadable "
+                        "(%s) -- the first page's rows stand", offset, name, why)
+                    ended = "unreadable"
+                    break
+                pages_walked += 1
+                events2, _bad2 = self._parse_page(page2, whale)
+                keys2 = [ev.dedupe_key for ev in events2]
+                try:
+                    seen2 = {r["dedupe_key"] for r in await pool.fetch(
+                        "SELECT dedupe_key FROM trades "
+                        "WHERE dedupe_key = ANY($1::text[]) "
+                        "AND NOT (source = 's1' AND venue_seen_at IS NULL)",
+                        keys2)} if keys2 else set()
+                except Exception:  # noqa: BLE001 — unreadable: the walk ends here
+                    seen2 = None
+                events.extend(events2)
+                keys.extend(keys2)
+                if seen2 is None:
+                    log.warning(
+                        "POLLER overflow page at offset %d for %s: pre-probe unreadable "
+                        "-- the walk ends here, its rows stand", offset, name)
+                    ended = "unreadable"
+                    break
+                seen |= seen2
+                if any(k in seen2 for k in keys2):
+                    ended = "seen"
+                    break
+                if len(page2) < 100:
+                    ended = "short"
+                    break
+                offset += 100
+            if ended is None:
+                # the bound was reached with every page all-new: the ONE
+                # shape that says the venue may hold older rows unread
+                log.warning(
+                    "POLLER page overflow for %s: %d pages, no row seen -- "
+                    "the venue may hold older rows this poll did not reach",
+                    name, pages_walked + 1)
+            if ended in (None, "unreadable"):
+                _PAGE_OVERFLOW[name] = _PAGE_OVERFLOW.get(name, 0) + 1
         new = 0
         attempted = 0
         ingest_bad = 0
@@ -599,6 +729,9 @@ class Poller:
                         await self._beat("ok",
                                          {"last_wallet": whale["address"],
                                           "new": new,
+                                          # E26: this whale's overflow count
+                                          "page_overflow": _PAGE_OVERFLOW.get(
+                                              whale.get("username") or "?", 0),
                                           "detect_lag_s": self.last_lag_s})
                     except Exception as exc:  # noqa: BLE001 — one bad wallet/payload
                         # must never kill live detection for the others

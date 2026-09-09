@@ -1381,8 +1381,12 @@ def test_the_poller_is_untouched_and_the_walk_still_asks_taker_only_false():
     /trades request keeps takerOnly=false and knows nothing of the
     census; the walk's own page request is unchanged."""
     psrc = pathlib.Path(poller_mod.__file__).read_text()
-    assert psrc.count("takerOnly") == 1
-    assert '"takerOnly": "false"' in psrc
+    # E26 (FILL lane 26, 2026-09-09): the poller makes TWO /trades
+    # request shapes now -- the first page and the overflow walk's
+    # `offset` page (docs section 68) -- both takerOnly=false, never
+    # the census's true (was: one request, `count("takerOnly") == 1`)
+    assert psrc.count('"takerOnly": "false"') == 2
+    assert '"takerOnly": "true"' not in psrc
     assert "taker_census" not in psrc and "TAKER" not in psrc
     rsrc = pathlib.Path(rec.__file__).read_text()
     assert rsrc.count('"takerOnly": "false"') == 1, "the walk's page request"

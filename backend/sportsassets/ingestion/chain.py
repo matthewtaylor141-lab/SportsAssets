@@ -31,6 +31,7 @@ from typing import Any
 import httpx
 import websockets
 
+from ..analytics import mirror_live_rules as _rules
 from ..config import settings
 from ..db import get_pool, heartbeat
 from . import claim_registry
@@ -39,6 +40,47 @@ from .s1_emitter import emitter_beat, emitter_observe, ensure_emitter_task
 from .shadow_v2 import beat_summary as _shadow_beat, ensure_shadow_task, shadow_observe
 
 log = logging.getLogger(__name__)
+
+# ── E26 (FILL lane 26, 2026-09-09): THE SWEEP ─────────────────────────
+# The socket is the only path that hands a v3 fill log to the receipt
+# decoder, and it sweeps nothing between reconnects: `backfill` runs
+# once at (re)connect and a quiet socket is only re-subscribed after
+# 60 s of silence. On 2026-09-09 17:04:57Z his 12,960-share buy settled
+# in more than one transaction; the listener handled one (2,880
+# @0.7105) and the other two (4,869 and 5,211) reached the table only
+# through the poller at 17:08:24Z, 207 s later -- the venue's own
+# publication lag, not ours -- so the book was sized on a third of his
+# order and exited twice (docs section 68). The sweep is a side task
+# that every CHAIN_SWEEP_S seconds reads the tip and the cursor and
+# runs eth_getLogs over the confirmed span behind the tip with the
+# listener's OWN filter (same addresses, same topics), handing a v3
+# log whose tx the socket did not handle to `_handle_v3` directly --
+# never through `_handle_log`'s observe calls, so the emitter and the
+# shadow see only what the socket delivered and a swept log is never
+# a second decoder's input -- and a legacy / v2 log to `_handle_log`
+# as `backfill` does. `_v3_seen` drops every tx the socket handled
+# BEFORE any RPC; a tx it did not handle takes the whole existing path
+# (claim, one receipt, decode, the (tx, whale, asset, chain/s1)
+# pre-probe, ingest, the E9 wake). Cost: two RPC calls per sweep when
+# the socket is healthy (eth_blockNumber + eth_getLogs, ~480/h at
+# 15 s) plus one receipt per found tx.
+#
+# The rails read through the mirror's three readers (analytics/
+# mirror_live_rules.py): the environment may turn the sweep OFF
+# (today, byte for byte: no task), LENGTHEN the period or DEEPEN the
+# confirmation, and LOWER the span -- never the other direction.
+CHAIN_SWEEP = _rules.env_switch("CHAIN_SWEEP", True)
+CHAIN_SWEEP_S = _rules.min_wait_env("CHAIN_SWEEP_S", 15.0)
+CHAIN_SWEEP_CONFIRM_BLOCKS = _rules.min_wait_env("CHAIN_SWEEP_CONFIRM_BLOCKS", 2.0)
+# `backfill`'s own step (2000); a lower span leaves an older gap to the
+# reconnect backfill and the reconciler, as today
+CHAIN_SWEEP_MAX_BLOCKS = _rules.capped_env("CHAIN_SWEEP_MAX_BLOCKS", 2000.0, floor=1.0)
+
+
+def _sweep_block() -> dict:
+    """The heartbeat's `sweep` block, zeroed: every key the docs name."""
+    return {"runs": 0, "found": 0, "handled": 0, "failed": 0,
+            "skipped_throttled": 0, "last_span": None, "last_at": None}
 
 ORDER_FILLED_SIG = "OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)"
 USDC_DECIMALS = 10**6
@@ -662,9 +704,28 @@ class ChainListener:
         # on-chain SETTLEMENT, which itself lags the off-chain CLOB
         # match — the poller's detect_lag_s is the comparable number.
         self.last_lag_s: float | None = None
+        # E26: the sweep's counters, task and lock (lazily re-created by
+        # `_sweep_state` for a listener built without __init__); the
+        # socket's subscription state, which the sweep reads
+        self._sweep = _sweep_block()
+        self._sweep_task: asyncio.Task | None = None
+        self._sweep_lock = asyncio.Lock()
+        self._sweep_end: int | None = None   # the last swept end (review HIGH-1)
+        self._subscribed = False
+
+    def _sweep_state(self) -> dict:
+        st = getattr(self, "_sweep", None)
+        if not isinstance(st, dict):
+            st = self._sweep = _sweep_block()
+        for k, v in _sweep_block().items():
+            st.setdefault(k, v)
+        if getattr(self, "_sweep_lock", None) is None:
+            self._sweep_lock = asyncio.Lock()
+        return st
 
     def _beat_detail(self) -> dict:
         return {"subscribed": True,
+                "sweep": dict(self._sweep_state()),
                 "last_event_age_s": round(time.time() - self.last_event_at),
                 "events_seen": self.events_seen,
                 "decoded": self.decoded,
@@ -974,12 +1035,152 @@ class ChainListener:
         resp.raise_for_status()
         return int(str(resp.json()["result"]), 16)
 
+    # ── E26: the sweep ────────────────────────────────────────────────
+    def ensure_sweep_task(self) -> asyncio.Task | None:
+        """Start the sweep loop once (idempotent; restarted only if a
+        prior loop ended). CHAIN_SWEEP off is today byte for byte: no
+        task. Called from run() after every successful subscribe."""
+        if not CHAIN_SWEEP:
+            return None
+        self._sweep_state()
+        t = getattr(self, "_sweep_task", None)
+        if t is not None and not t.done():
+            return t
+        t = asyncio.create_task(self._sweep_loop(), name="chain.sweep")
+        self._sweep_task = t
+        return t
+
+    async def _sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(CHAIN_SWEEP_S)
+            try:
+                await self._sweep_once()
+            except Exception as exc:  # noqa: BLE001 — the loop never dies
+                self._sweep_state()["failed"] += 1
+                log.warning("chain sweep failed: %s", exc)
+
+    async def _sweep_once(self) -> None:
+        """One sweep over [start, min(tip - CHAIN_SWEEP_CONFIRM_BLOCKS,
+        start + CHAIN_SWEEP_MAX_BLOCKS - 1)] with the listener's own filter,
+        where start is the block after the sweep's own last end (the
+        cursor block itself on the first sweep and after a lag past
+        CHAIN_SWEEP_MAX_BLOCKS).
+
+        FAIL CLOSED by input: a tip or cursor that cannot be read, a
+        getLogs that raises, a non-list body -> `failed` + 1, the
+        cursor unchanged, no row (the next sweep re-reads the same
+        span); a handler that raises on one entry -> `failed` + 1 and
+        the cursor is NOT advanced past the span; a tx the socket
+        already handled -> no RPC, no row (`_v3_seen`, before any I/O);
+        a swept log whose receipt cannot be fetched or decoded ->
+        today's refusal path inside `_handle_v3` (no retry; the poller
+        carries it). Skipped -- counted `skipped_throttled` -- while the
+        provider is throttling us (the reconnect's own rule: DO NOT
+        SPEND RPC CALLS WHILE BEING RATE-LIMITED), and silently while
+        the socket is not subscribed (the reconnect's catch-up owns
+        that gap). A swept v3 log goes to `_handle_v3` DIRECTLY: not
+        through `_handle_log`, so `emitter_observe` / `shadow_observe`
+        never see it, and NOT under `backfill`'s listener-wide
+        `_shadow_replay` flag, which would make the emitter abstain on
+        a live socket log landing mid-sweep."""
+        st = self._sweep_state()
+        if getattr(self, "_last_throttled", False):
+            st["skipped_throttled"] += 1
+            return
+        if not getattr(self, "_subscribed", False):
+            return
+        st["runs"] += 1
+        async with self._sweep_lock:
+            try:
+                cursor = await self._load_cursor()
+                tip = await self._current_block()
+                if cursor is None or isinstance(cursor, bool) or isinstance(tip, bool):
+                    raise ValueError("cursor or tip unreadable")
+                cursor = int(cursor)
+                tip = int(tip)
+            except Exception as exc:  # noqa: BLE001 — no span, no row
+                st["failed"] += 1
+                log.warning("chain sweep: tip or cursor unreadable (%s)", exc)
+                return
+            # THE SWEEP'S OWN END (review HIGH-1). The cursor is the
+            # block of the newest log ANY path handled: a socket log
+            # landing after the last sweep moves it past blocks the
+            # sweep never read, and a log the socket dropped in one of
+            # them -- or in the SAME block as the one it delivered --
+            # would sit behind it for good. So the sweep is contiguous
+            # with its OWN last end (`_sweep_end`, this process's
+            # memory), never with the socket's high-water mark: the
+            # first sweep opens at the cursor block itself (its
+            # siblings), every later one at the block after the last
+            # swept end, and a lag past CHAIN_SWEEP_MAX_BLOCKS (the
+            # catch-up backfill owns that gap, as today) resumes at the
+            # cursor block. Re-reading a block the socket handled is
+            # free: `_v3_seen` drops its txs before any RPC and the
+            # pre-probe blocks a second row across a restart.
+            last = getattr(self, "_sweep_end", None)
+            if last is None or cursor - last > int(CHAIN_SWEEP_MAX_BLOCKS):
+                start = cursor
+            else:
+                start = last + 1
+            end = min(tip - int(CHAIN_SWEEP_CONFIRM_BLOCKS),
+                      start + int(CHAIN_SWEEP_MAX_BLOCKS) - 1)
+            if end < start:
+                return                      # nothing confirmed past the last sweep yet
+            try:
+                entries = await self._get_logs(start, end)
+            except Exception as exc:  # noqa: BLE001 — cursor unchanged
+                st["failed"] += 1
+                log.warning("chain sweep %s..%s failed: %s", start, end, exc)
+                return
+            if not isinstance(entries, list):
+                st["failed"] += 1
+                log.warning("chain sweep %s..%s: non-list body %s",
+                            start, end, type(entries).__name__)
+                return
+            found = 0
+            ingested_before = self.ingested
+            broke = False
+            roster = set(self._roster)
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                topics = entry.get("topics") or []
+                t0 = str(topics[0]).lower() if topics else ""
+                try:
+                    if t0 == FILL_V3_TOPIC:
+                        tx = str(entry.get("transactionHash", "")).lower()
+                        if not tx or not (v3_owner_candidates(entry) & roster):
+                            continue
+                        if tx in (getattr(self, "_v3_seen", None) or {}):
+                            continue        # the socket handled it: no RPC, no row
+                        found += 1
+                        await self._handle_v3(entry)
+                    else:
+                        await self._handle_log(entry)   # legacy / v2, as backfill does
+                except Exception as exc:  # noqa: BLE001 — one entry, counted
+                    st["failed"] += 1
+                    broke = True
+                    log.warning("chain sweep: entry in %s failed: %s",
+                                str(entry.get("transactionHash", ""))[:14], exc)
+            st["found"] += found
+            st["handled"] += max(0, self.ingested - ingested_before)
+            st["last_span"] = [start, end]
+            st["last_at"] = round(time.time())
+            if found:
+                log.info("chain sweep %s..%s: %s tx the socket did not hand over",
+                         start, end, found)
+            if not broke:
+                await self._save_cursor(end)
+                self._sweep_end = end       # the next sweep opens at end + 1
+
     async def run(self) -> None:
         if not self._ws_url:
             log.error("POLYGON_WS_URL not set — Path A disabled, Path B carries detection")
             await heartbeat("chain_listener", "disabled", {"reason": "no POLYGON_WS_URL"})
             return
         while True:
+            # E26: not subscribed until the ack below; the sweep skips
+            self._subscribed = False
             try:
                 await self.refresh_roster()
                 ensure_shadow_task(self)  # S0 shadow: idempotent, never raises
@@ -1024,10 +1225,14 @@ class ChainListener:
                     if cursor is not None:
                         tip = await self._current_block()
                         if tip > cursor:
-                            n = await self.backfill(cursor + 1, tip)
-                            log.info("backfilled %s logs over blocks %s..%s",
-                                     n, cursor + 1, tip)
-                            await self._save_cursor(tip)
+                            # E26: the same lock the sweep holds, so the
+                            # catch-up and a sweep never interleave
+                            self._sweep_state()
+                            async with self._sweep_lock:
+                                n = await self.backfill(cursor + 1, tip)
+                                log.info("backfilled %s logs over blocks %s..%s",
+                                         n, cursor + 1, tip)
+                                await self._save_cursor(tip)
                 except Exception as exc:  # noqa: BLE001
                     log.warning("catch-up failed (%s) — skipping, "
                                 "subscribing live", exc)
@@ -1069,6 +1274,11 @@ class ChainListener:
                     # which is why skipping it while blocked loses
                     # nothing.
                     self._last_throttled = False
+                    # E26: subscribed, so the sweep may run; started here
+                    # (after the ack, beside the emitter's own task) and
+                    # never while CHAIN_SWEEP is off
+                    self._subscribed = True
+                    self.ensure_sweep_task()
                     roster_refreshed = time.time()
                     while True:
                         raw = await asyncio.wait_for(ws.recv(), timeout=60)
@@ -1084,11 +1294,13 @@ class ChainListener:
                             await heartbeat("chain_listener", "ok",
                                             self._beat_detail())
             except asyncio.TimeoutError:
+                self._subscribed = False          # E26: the sweep skips until the re-subscribe
                 # No events for 60s can be legitimate quiet time; heartbeat + resubscribe
                 # to be safe (subscription may have silently died).
                 log.info("no WS traffic for 60s — resubscribing")
                 await heartbeat("chain_listener", "ok", {"resubscribe": "quiet"})
             except Exception as exc:  # noqa: BLE001
+                self._subscribed = False          # E26: the sweep skips until the re-subscribe
                 # Exponential backoff, capped at 2 minutes. A fixed 2s
                 # retry against a rate-limiting provider (429, 2026-08-11)
                 # is a denial-of-service on our own quota: ~1,800 rejected
