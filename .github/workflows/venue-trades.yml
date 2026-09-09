@@ -67,17 +67,19 @@ jobs:
             | .[] | "  \(.[0].side // .[0].orderSide // .[0].takerSide // "?")  n=\(length)  qty=\(map((.qty // .quantity // "0") | tonumber) | add)"' /tmp/slug.jsonl
           # EVERY market: the account's own orders the venue marks
           # MANUAL_ORDER_INDICATOR_MANUAL (placed by hand through the
-          # venue's app; an API order reads AUTOMATIC, a counterparty's
-          # order carries no intent at all) -- one line per fill, oldest
-          # first, then a sum per market. The mirror's frozen exit
-          # bought two such shorts back inside a minute on 2026-09-09.
-          echo "== HAND-PLACED orders on the account since $SINCE (either side of a fill, ours by intent): time slug side/intent fill_qty fill_px tif order_qty order_px order_id cost =="
+          # venue's app; an API order reads AUTOMATIC). The account's own
+          # side of a fill is the aggressor order when the trade's
+          # isAggressor is true, else the passive order -- the venue
+          # also prints a counterparty AGGRESSOR's order with its intent
+          # and indicator, so 'has an intent' does not mean ours. One
+          # line per fill, oldest first, then a sum per market. The
+          # mirror's frozen exit bought two such shorts back inside a
+          # minute on 2026-09-09 (book 1156).
+          echo "== HAND-PLACED orders on the account since $SINCE (the account\x27s own side of each fill: the aggressor order when isAggressor, else the passive one): time slug side/intent fill_qty fill_px tif order_qty order_px order_id cost =="
           jq -r '
             .rows[] | select(.type == "ACTIVITY_TYPE_TRADE") | .trade as $t
-            | [ ($t.aggressorExecution.order // {}), ($t.passiveExecution.order // {}) ]
-            | map(select(((.manualOrderIndicator // "") == "MANUAL_ORDER_INDICATOR_MANUAL")
-                         and ((.intent // "ORDER_INTENT_UNDEFINED") != "ORDER_INTENT_UNDEFINED")))
-            | .[]
+            | (if $t.isAggressor == true then ($t.aggressorExecution.order // {}) else ($t.passiveExecution.order // {}) end)
+            | select((.manualOrderIndicator // "") == "MANUAL_ORDER_INDICATOR_MANUAL")
             | [ ($t.createTime // "?"), ($t.marketSlug // .marketSlug // "?"),
                 (((.side // "?") | sub("ORDER_SIDE_"; "")) + "/" + ((.intent // "?") | sub("ORDER_INTENT_"; ""))),
                 ($t.qty // "?"), ($t.price.value // "?"), ((.tif // "?") | sub("TIME_IN_FORCE_"; "")),
