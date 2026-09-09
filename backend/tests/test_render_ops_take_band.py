@@ -59,7 +59,15 @@ def _statements(sql: str) -> list[str]:
     by one)."""
     parts = sql.split("; WITH e AS (")
     assert len(parts) == 2, "two statements since FILL lane 8 (was one)"
-    return [parts[0] + ";", "WITH e AS (" + parts[1]]
+    # E27 (FILL lane 27): a THIRD statement, the SHORT add's own table, sits after the pairs table; the two
+    # lane-8 statements come back as before and _short_statement reads the third
+    pairs, _sep, short = ("WITH e AS (" + parts[1]).partition("; WITH s AS (")
+    assert short, "E27 (FILL lane 27): the SHORT add's (decision, bucket) table is the third statement"
+    return [parts[0] + ";", pairs + ";"]
+
+
+def _short_statement(sql: str) -> str:
+    return "WITH s AS (" + sql.split("; WITH s AS (")[1]
 
 
 def test_take_band_is_two_read_only_statements_on_its_own_timeout():
@@ -70,8 +78,9 @@ def test_take_band_is_two_read_only_statements_on_its_own_timeout():
         assert bad not in block, bad
     sql, to = _preset(text, "take-band")
     assert to == 60000 and block.rstrip().endswith('"; TO=60000 ;;')
-    # FILL lane 8: was `sql.count(";") == 1 and sql.endswith("ORDER BY 1, 2;")` -- the pairs statement is the second
-    assert sql.count(";") == 2
+    # FILL lane 8: was `sql.count(";") == 1 and sql.endswith("ORDER BY 1, 2;")` -- the pairs statement is the second;
+    # E27 (FILL lane 27): the SHORT add's own table is the third (2 -> 3)
+    assert sql.count(";") == 3 and sql.endswith("FROM y GROUP BY ROLLUP (decision, bucket) ORDER BY 2, 3;")
     table, pairs = _statements(sql)
     assert table.endswith("FROM x GROUP BY ROLLUP (decision, bucket) ORDER BY 1, 2;")
     assert pairs.endswith("FROM z GROUP BY ROLLUP (side, hour) ORDER BY 1, 2 DESC;")
@@ -92,7 +101,8 @@ def test_take_band_reads_long_book_entries_of_24h_at_our_price_against_the_long_
             " AND o.placed_at >= now() - interval '24 hours')") in sql
     # FILL lane 8: the pin reads the grading TABLE (was the whole preset) -- the pairs statement reads both intents
     table, pairs = _statements(sql)
-    assert "'SELL_LONG'" not in table and "ORDER_INTENT_BUY_SHORT" not in table, "a short book's add is never band-graded"
+    assert "'SELL_LONG'" not in table and "ORDER_INTENT_BUY_SHORT" not in table, \
+        "the LONG table grades long adds alone; the short add's rows are the third statement's (E27, FILL lane 27)"
     assert "resolved_prices" not in pairs and "payoff" not in pairs, "the pairs statement grades nothing"
     # payoff = the long token's resolved price, NULL until the market resolves (no 1 - p: long books only)
     assert ("CASE WHEN m.resolved_prices IS NULL OR mt.outcome_index IS NULL THEN NULL ELSE"
@@ -133,6 +143,61 @@ def test_take_band_measures_fill_rate_dollars_roi_ci95_and_the_cents_paid_per_de
         assert needle in head, needle
     # graded at OUR price: the wire, never his level, in the roi
     assert "(payoff - his_level)" not in sql and "avg_px" not in sql
+
+
+def test_take_band_third_statement_grades_the_short_adds_rows_on_the_bid_under_his_sell_cent():
+    """E27 (FILL lane 27, 2026-09-09): the SHORT add's band take -- a
+    SELL_LONG IOC on a BUY_SHORT book, decision take_in_band, its wire a
+    cent or two UNDER ceil(his_level) -- had no read: the first statement
+    grades BUY_LONG rows on BUY_LONG books alone. The third statement is
+    its mirror image: band_c = ceil-cent(his_level) - bid_at_place (the
+    bid under his SELL cent at placement), given_c = ceil-cent(his_level)
+    - wire (the cents given up under him; 0 on a take at his cent),
+    our_usd the collateral, roi = (wire - payoff) / (1 - wire) over the
+    filled rows on resolved markets, the same buckets and ROLLUP, side
+    'short'; read-only, both places."""
+    text = YML.read_text()
+    sql, _ = _preset(text, "take-band")
+    short = _short_statement(sql)
+    assert short.count(";") == 1 and short.endswith("FROM y GROUP BY ROLLUP (decision, bucket) ORDER BY 2, 3;")
+    assert ("FROM mirror_orders o JOIN mirror_books b ON b.id = o.book_id LEFT JOIN market_tokens mt ON"
+            " mt.token_id = b.long_asset LEFT JOIN markets m ON m.condition_id = b.condition_id WHERE b.whale = 'rn1'"
+            " AND b.intent = 'ORDER_INTENT_BUY_SHORT' AND o.side = 'SELL_LONG' AND o.kind IN ('increase', 'take')"
+            " AND o.placed_at >= now() - interval '24 hours')") in short
+    his_sell_cent = "ceil(round((o.his_level * 100)::numeric, 6)) / 100"
+    assert ("CASE WHEN o.his_level IS NULL OR o.bid_at_place IS NULL THEN NULL ELSE round(((" + his_sell_cent +
+            " - o.bid_at_place::numeric) * 100)::numeric, 0) END AS band_c") in short
+    assert ("CASE WHEN o.his_level IS NULL THEN NULL ELSE round(((" + his_sell_cent +
+            " - o.wire::numeric) * 100)::numeric, 1) END AS given_c") in short
+    assert "ask_at_place" not in short and "ask_at_send" not in short, "the SELL side reads the bid; the row's ask_at_send is the ask"
+    assert ("CASE WHEN band_c IS NULL THEN 'unread' WHEN band_c <= 0 THEN '<=0' WHEN band_c = 1 THEN '1'"
+            " WHEN band_c = 2 THEN '2' ELSE '3+' END AS bucket") in short
+    assert ("CASE WHEN o.decision IN " + CAUSES + " THEN 'rest_replaced' ELSE COALESCE(o.decision, 'unrecorded') END AS decision") in short
+    for needle in ("SELECT 'short' AS side, COALESCE(decision, 'ALL') AS decision, COALESCE(bucket, 'ALL') AS bucket, count(*) AS n",
+                   "count(*) FILTER (WHERE filled > 0) AS filled_n",
+                   # NULLIF: with no short row in the window the ROLLUP's grand total is one row of count 0
+                   "round(100.0 * count(*) FILTER (WHERE filled > 0) / NULLIF(count(*), 0), 1) AS fill_pct",
+                   "round(sum(filled * (1 - wire))::numeric, 2) AS our_usd",
+                   "count(*) FILTER (WHERE " + RESOLVED + ") AS n_resolved",
+                   "round((sum(filled * (wire - payoff)) FILTER (WHERE " + RESOLVED + ") / NULLIF(sum(filled * (1 - wire))"
+                   " FILTER (WHERE " + RESOLVED + "), 0))::numeric, 4) AS roi",
+                   "round((1.96 * stddev_samp((wire - payoff) / NULLIF(1 - wire, 0)) FILTER (WHERE " + RESOLVED + ")"
+                   " / sqrt(NULLIF(count(*) FILTER (WHERE " + RESOLVED + "), 0)))::numeric, 4) AS ci95",
+                   "round(percentile_cont(0.5) WITHIN GROUP (ORDER BY given_c) FILTER (WHERE filled > 0)::numeric, 1)"
+                   " AS given_med_c"):
+        assert needle in short, needle
+    assert "(payoff - wire)" not in short and "'take_in_band'" not in short, "graded at OUR collateral; no word list"
+    for bad in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER", "$ARG"):
+        assert bad not in short, bad
+    pglast = pytest.importorskip("pglast")
+    assert len(pglast.parse_sql(short)) == 1
+    # both places: the standalone case and the hourly's copy carry the third statement byte for byte
+    assert text.count("; " + short) == 2
+    h, _ = _preset(text, "hourly")
+    assert h.count(short) == 1
+    block = text[text.index("# REST VS TAKE, BY DECISION AND BAND"):text.index("take-band) SQL=")]
+    for word in ("E27", "THIRD STATEMENT", "SELL_LONG IOC on a BUY_SHORT book", "bid_at_place", "given_c", "collateral"):
+        assert word in block, word
 
 
 def test_take_band_sits_after_exits_paired_and_rides_the_hourly_after_fills_missed():

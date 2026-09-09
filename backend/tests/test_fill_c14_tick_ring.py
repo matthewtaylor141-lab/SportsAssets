@@ -404,8 +404,13 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # _place_reserved / _entry_take / _fast_gate / _fast_book and rules.order_decision are its), re-cut at landing from
     # 219f140's: nothing here reads the ring or the prelude, and this lane touches none of them
     # _act re-cut 42e08939276dcd0a -> bbe3cae4167edb41 (the cap is per trade, docs 67: an add's standing rest
-        # is compared against the plan as MIRROR_CLIP_USD would size it, p_cmp)
-        assert h(ml._act) == "bbe3cae4167edb41" and h(ml._place) == "ab568476817cf795"
+    # is compared against the plan as MIRROR_CLIP_USD would size it, p_cmp); E27 (FILL lane 27, 2026-09-09: the
+    # short add's band read on the no-order path's band arm) landed after and moved it -- re-cut at E27
+    # (bbe3cae4167edb41 -> f32e41b85c44b038). The per-trade cap's re-cut had left this line indented under
+    # `h`'s body after its return (dead code: neither hash was read); E27 de-indents it so both are read again.
+    # E27's review (HIGH-1 fold: the short's at-level take at his sell cent on the no-order path) re-cuts it
+    # once more: f32e41b85c44b038 -> 59efb48ba79f793c
+    assert h(ml._act) == "59efb48ba79f793c" and h(ml._place) == "ab568476817cf795"
     assert h(ml._place_reserved) == "6c83b8e547c83e0a" and h(ml._entry_take) == "2266c2b346674491"
     assert h(ml._fast_gate) == "1932811194268668" and h(ml._fast_book) == "286e6fa4663c3887"
     # _tick_book read a0061ad32302a610 and _tick 51b72e7567d9f197 after E21; E23 (FILL lane 23:
@@ -430,7 +435,10 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # moved it once more, re-cut at E25 (12ebaf8122b0e874); the E25 review's MEDIUM-3 re-wrote the rails'
     # comment block (the flap's reference is the plan before, 8,473.8; the 76.9 s tick) -- re-cut at the fold
     # (c5c1fb34b4d381e0); landed over the per-trade cap (52e1d52, dd7e132f616861b6 there) -> a765a9b2160f11a8
-    assert h(rules) == "a765a9b2160f11a8", "mirror_live_rules untouched by this lane"
+    # (E27, FILL lane 27, 2026-09-09 -- the take's tolerance: MIRROR_TAKE_BAND 0.02, MIRROR_TAKE_BAND_FRAC,
+    # take_band_width / short_band_cent / short_take_in_band -- re-cuts it again on the merged tree:
+    # a765a9b2160f11a8 -> 6dd4e43300f04676)
+    assert h(rules) == "6dd4e43300f04676", "mirror_live_rules untouched by this lane"
     for f in (ml._act, ml._place, ml._place_reserved, ml._entry_take, ml._fast_gate, ml._fast_book,
               ml._fast_candidate, ml._tick_book, ml._walk_candidate, ml._tick):
         s = inspect.getsource(f)

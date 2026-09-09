@@ -71,7 +71,10 @@ IOC_TIF = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
 UNTOUCHED = {
     "rest_decision": ("b1962f2cbb21c6c4", rules.rest_decision), "take_allowed": ("dc3079622052b6ff", rules.take_allowed),
     "at_or_through": ("4aece58b61ee21bc", rules.at_or_through),
-    "_take_band": ("972e473fcdf4a2c0", ml._take_band), "_short_wire": ("25efb8c189941579", ml._short_wire),
+    # _take_band read 972e473fcdf4a2c0 on 219f140; E27 (FILL lane 27, 2026-09-09: the band's width
+    # stamped as `band` with `frac` {his_px, cost, width}) landed after this lane and moved it --
+    # re-cut at E27's landing, not this lane's (the verdicts and the arm this lane pins are unchanged)
+    "_take_band": ("bd745846c0afd55d", ml._take_band), "_short_wire": ("25efb8c189941579", ml._short_wire),
     "_order_open_his_exit": ("1af54b54e3e0dd16", ml._order_open_his_exit),
     "_fast_open_entry_rest": ("618ec2943215df41", ml._fast_open_entry_rest),
     "_fast_candidate": ("922585ffb6856f70", ml._fast_candidate), "_reconcile_open": ("7c3bc726438693ce", ml._reconcile_open),
@@ -710,7 +713,9 @@ def test_e21_the_census_place_new_stats_the_emit_sites_the_switch_the_untouched_
     assert (rules.REST_MIN_LIFE_CENT_MOVE, mi.MIN_MOVE_FRAC, rules.MIRROR_REST_TTL_S, rules.MIRROR_REST_MIN_LIFE_S) == (0.02, 0.02, 600.0, 45.0)
     assert (ml.FAST_TICK_MAX, ml.FAST_TICK_MIN_S, ml.VENUE_CALLS_PER_TICK, rules.MIRROR_MAX_REPLACES_PER_HOUR) == (5, 2.0, 60, 12)
     assert (rules.MIRROR_TAKE_AFTER_S, rules.MIRROR_CLIP_USD) == (0.0, 2500.0)
-    assert 'MIRROR_TAKE_BAND = capped_env("MIRROR_TAKE_BAND", 0.01, floor=0.0)' in rsrc, "lane 2's band untouched"
+    # E27 (FILL lane 27, 2026-09-09, owner order) re-pinned: the band's default is 0.02 (capped at 5% of the
+    # cost per share); the rail's shape is lane 2's and this lane still touches neither
+    assert 'MIRROR_TAKE_BAND = capped_env("MIRROR_TAKE_BAND", 0.02, floor=0.0)' in rsrc, "the band's rail untouched by this lane"
     assert "reason IN ('replace', 'take') AND tif IN ('GTC', 'GTD')" in ml._SQL_REPLACES
     assert '    if age < 0:\n        return "replace", {"cause": "future"}\n' in inspect.getsource(rules.rest_decision)
     assert "if (not _exit_or_flip(book, p, o)\n                    and await _requotes_this_hour(t, book) >= rules.MIRROR_MAX_REPLACES_PER_HOUR):" in asrc

@@ -10917,7 +10917,24 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
     _take_band, census `take_in_band`), re-read at the send like every
     IOC, the remainder resting at his cent as today. The at-level take
     above fires first and unchanged; the keep branch is never converted
-    by the band; a short's add and every reduce never read it."""
+    by the band; every reduce never reads it.
+
+    THE TOLERANCE (E27, 2026-09-09, FILL lane 27; owner order ~21:1xZ,
+    item 1 of the seven-item proportionality list: "1. Yes, lets take
+    it immediately with a tolerance that you feel wont impact
+    profitability"): the band is TWO cents capped at 5% of the cost
+    per share (rules.take_band_width: MIRROR_TAKE_BAND 0.02 and
+    MIRROR_TAKE_BAND_FRAC 0.05, both capped_env -- env may only lower
+    them, 0 = off), floored at lane 2's cent on a LONG add and with no
+    floor on a SHORT add, where for the first time an add is
+    band-taken too: the bid STRICTLY under his sell cent but at or
+    above rules.short_band_cent(his) = sell_wire(his - band) sends ONE
+    SELL IOC at that cent through the same _entry_take, sized on the
+    collateral at the band cent, re-read on the bid, its row's decision
+    the same word 'take_in_band', the remainder resting at the short
+    wire as today (_short_take_band). Exits, reduces, covers, flattens
+    and the frozen exit never read either band (lane 3's exit band
+    stays inert at 0.01, D2)."""
     w = r.whale
     short = _book_short(book)
     intent = _book_intent(book)
@@ -11377,10 +11394,18 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         # too -- AFTER the arm's clearing above, so the wait it honours
         # is the one the at-level take honours -- and stamps the plan's
         # `take_band` whatever the verdict; the band cent comes back only
-        # when its IOC is to go (_take_band)
+        # when its IOC is to go (_take_band).
+        # E27 (FILL lane 27, owner order 2026-09-09 ~21:1xZ): a SHORT
+        # book's add reads ITS band beside it (_short_take_band: the
+        # SELL-side reads, the bid under his sell cent but at or above
+        # sell_wire(his - band)); the same `band` arm below sends its
+        # one SELL IOC through the same _entry_take call. A reduce, a
+        # cover, a flatten and the frozen exit never reach either read
         band = None
         if p.side == BUY and not short and rules.leg_action(book.get("intent"), p.side) == "add":
             band = _take_band(t, book, r, his_px, plan)
+        elif p.side == SELL and short and rules.leg_action(book.get("intent"), p.side) == "add":
+            band = _short_take_band(t, book, r, his_px, plan)
         if rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, take_lvl, p.side):
             if rules.leg_action(book.get("intent"), p.side) == "add":
                 qty = _room_qty(t, p.qty, wire, intent)
@@ -11414,7 +11439,17 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         # at-level take is (`take_in_band` beside `take_at_his_level`):
         # the decision, whether or not the re-read lets the IOC out.
         # An uncounted band take is not allowed: with the 059 columns
-        # absent this tick _take_band reads `uncounted` and the rest goes
+        # absent this tick _take_band reads `uncounted` and the rest goes.
+        # E27 (FILL lane 27): the band is rules.take_band_width's --
+        # MIRROR_TAKE_BAND 0.02 capped at MIRROR_TAKE_BAND_FRAC 0.05 of
+        # the cost per share -- and on a SHORT book's add `band` is the
+        # short's cent (sell_wire(his - band), _short_take_band): the
+        # ONE SELL IOC goes out here exactly as the long's BUY IOC does,
+        # sized on the collateral at the band cent (_room_qty's
+        # (1 - wire) on a short, the per-order clip), re-read at the
+        # send on the bid (E18's bid_moved), its row's decision the same
+        # word 'take_in_band' (the side / intent tell the sides apart),
+        # the unfilled remainder resting at the short wire as today
         if band is not None:
             qty = _room_qty(t, p.qty, band, intent)
             if qty < 1:
@@ -11423,6 +11458,32 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             _mirror_stop("take_in_band", w)
             return await _entry_take(t, book, r, p, band, wire, qty, his_px, plan, first=True,
                                      in_band=True)
+        # E27 fold (the review's HIGH-1): THE SHORT'S AT-LEVEL TAKE. A short
+        # book's add whose bid is at or OVER his sell cent (the plan's
+        # take_band verdict `at_level`: sell_wire(his)) but under the short
+        # wire ceil(max(his, ask)) -- so the take-at-wire above did not
+        # fire -- sends ONE SELL IOC limited at his cent, a sale at his
+        # price or better, through the same _entry_take (decision 'take',
+        # census take_at_his_level, the remainder resting at the short
+        # wire as today). Without it the band paid a cent for the fill at
+        # 0.64 and left the free fill at 0.65 to a rest at 0.66. Behind
+        # the 059 columns like the band (an uncounted take is not sent),
+        # the same wait (rules.take_allowed), the same re-read (bid_moved
+        # rests the whole quantity), and OFF with the band: MIRROR_TAKE_BAND
+        # at 0 is the short side byte for byte today
+        tb = plan.get("take_band")
+        if (short and p.side == SELL and isinstance(tb, dict) and tb.get("verdict") == "at_level"
+                and t.order_cols is True and (_num(rules.MIRROR_TAKE_BAND) or 0.0) > 0.0
+                and rules.leg_action(book.get("intent"), p.side) == "add"):
+            lvl = _num(tb.get("his_cent"))
+            if (lvl is not None and 0.01 <= lvl <= 0.99
+                    and rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, lvl, SELL)):
+                qty = _room_qty(t, p.qty, lvl, intent)
+                if qty < 1:
+                    _mirror_stop("over_room", w)
+                    return "over_room"
+                _mirror_stop("take_at_his_level", w)
+                return await _entry_take(t, book, r, p, lvl, wire, qty, his_px, plan, first=True)
     if rules.leg_action(book.get("intent"), p.side) == "add":
         qty = _room_qty(t, p.qty, wire, intent)
         if qty < 1:
@@ -12186,11 +12247,24 @@ def _take_band(t: _Tick, book: dict, r: _Reading, his_px: float | None, plan: di
     MIRROR_TAKE_AFTER_S makes the band rest-first exactly as it makes
     the at-level take; at the default wait of 0 never read). The band
     is judged here on the tick's quote and again at the send on the
-    re-read (_ioc_reread at the band cent); both must hold."""
+    re-read (_ioc_reread at the band cent); both must hold.
+
+    E27 (FILL lane 27, owner order 2026-09-09 ~21:1xZ): the band is
+    rules.take_band_width(his) -- rules.MIRROR_TAKE_BAND (0.02) capped
+    at rules.MIRROR_TAKE_BAND_FRAC (0.05) of his price, floored at lane
+    2's cent -- and the plan's `band` is that width, with `frac`
+    {his_px, cost, width} beside it so book=<id> shows why the cent is
+    what it is (his 0.30: cost 0.30, width 0.015, the cent 0.31; his
+    0.42: width 0.02, the cent 0.44). The verdicts and the cent's rule
+    (rules.band_cent) are lane 2's byte for byte; a SHORT book's add
+    reads its own band through _short_take_band below."""
     his_cent = rules.buy_wire(his_px)
+    width = rules.take_band_width(his_px)          # the LONG add's width: rules.MIRROR_TAKE_BAND capped
     bc = rules.band_cent(his_px)
-    tb: dict = {"his_cent": his_cent, "band": _num(rules.MIRROR_TAKE_BAND), "band_cent": bc,
-                "bid": r.bid, "ask": r.ask}
+    hp = _num(his_px)
+    tb: dict = {"his_cent": his_cent, "band": width, "band_cent": bc,
+                "bid": r.bid, "ask": r.ask,
+                "frac": {"his_px": hp, "cost": hp, "width": width}}
     plan["take_band"] = tb
     ask = _num(r.ask)
     if his_cent is None or ask is None or not (0.01 <= ask <= 0.99):
@@ -12204,6 +12278,64 @@ def _take_band(t: _Tick, book: dict, r: _Reading, his_px: float | None, plan: di
     elif not rules.take_in_band(r.bid, r.ask, his_cent, bc):
         tb["verdict"] = "out"
     elif not rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, bc, BUY):
+        tb["verdict"] = "waiting"
+    else:
+        tb["verdict"] = "in_band"
+        return bc
+    return None
+
+
+def _short_take_band(t: _Tick, book: dict, r: _Reading, his_px: float | None, plan: dict) -> float | None:
+    """THE SHORT ADD'S BAND READ (E27, FILL lane 27; owner order
+    2026-09-09 ~21:1xZ: "lets take it immediately with a tolerance"),
+    _take_band's mirror image on a SHORT book's add (the SELL_LONG plan
+    whose wire is _short_wire's contract cent), made on every
+    first-sight add plan and stamped on the plan as `take_band`
+    {his_cent, band, band_cent, bid, ask, frac, verdict} -- the SAME key
+    and the SAME verdict words, the row's side / intent telling the
+    sides apart. The SELL-side reads: his cent is rules.sell_wire(his)
+    (his level in LONG space, the price the contract is sold at); the
+    band is rules.take_band_width(his, BUY_SHORT) -- MIRROR_TAKE_BAND
+    capped at MIRROR_TAKE_BAND_FRAC of the COLLATERAL 1 - his, no floor
+    -- and the cent rules.short_band_cent(his) = sell_wire(his - band),
+    strictly UNDER his cent; the BID is the quote read (never the ask);
+    rules.short_take_in_band is the band test and rules.take_allowed is
+    asked on the SELL side at the band cent. Returns the band cent ONLY
+    under `in_band` -- ONE SELL IOC at that cent is to go through
+    _entry_take exactly as the long's does -- and None under every
+    other, which is today's rest at the short wire: `unread` (his level
+    not a price in (0, 1), or the tick's bid missing or off the ladder),
+    `at_level` (the bid at or over his cent: today's rule governs -- the
+    rest at the short wire, ceil(max(his, ask)), sells at his price or
+    better, and the at-level take fires in a locked book as before),
+    `off` (rules.short_band_cent None: the band off, under a cent, or no
+    cent under his), `uncounted` (the 059 columns absent), `out` (the bid
+    under the band cent), `waiting` (a LENGTHENED MIRROR_TAKE_AFTER_S).
+    Judged again at the send on the re-read (_ioc_reread on the SELL
+    side reads the bid: `bid_moved` withholds the IOC and the whole
+    quantity rests at the short wire as today)."""
+    hp = _num(his_px)
+    if hp is None or not (0.0 < hp < 1.0):
+        hp = None
+    his_cent = None if hp is None else rules.sell_wire(hp)
+    width = rules.take_band_width(his_px, ORDER_INTENT_SHORT)
+    bc = rules.short_band_cent(his_px)
+    tb: dict = {"his_cent": his_cent, "band": width, "band_cent": bc,
+                "bid": r.bid, "ask": r.ask,
+                "frac": {"his_px": hp, "cost": None if hp is None else round(1.0 - hp, 6), "width": width}}
+    plan["take_band"] = tb
+    bid = _num(r.bid)
+    if his_cent is None or bid is None or not (0.01 <= bid <= 0.99):
+        tb["verdict"] = "unread"
+    elif rules.at_or_through(SELL, r.bid, r.ask, his_cent):
+        tb["verdict"] = "at_level"
+    elif bc is None:
+        tb["verdict"] = "off"
+    elif t.order_cols is not True:
+        tb["verdict"] = "uncounted"
+    elif not rules.short_take_in_band(r.bid, r.ask, his_cent, bc):
+        tb["verdict"] = "out"
+    elif not rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, bc, SELL):
         tb["verdict"] = "waiting"
     else:
         tb["verdict"] = "in_band"

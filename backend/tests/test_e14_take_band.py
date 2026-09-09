@@ -35,6 +35,22 @@ for 'a rest standing, the ask a cent above').
 Driven against the worker file's fakes (its autouse rails are
 imported), test_e18_rest_life's moving venue and test_e9_fast_path's
 fast tick.
+
+E27 (2026-09-09, FILL lane 27; owner order ~21:1xZ "lets take it
+immediately with a tolerance") widened the band's DEFAULT to 0.02
+capped at 5% of the cost per share and gave the SHORT add its own read
+(tests/test_e27_take_tolerance.py). The fixture below holds
+MIRROR_TAKE_BAND at 0.01 by name, under which rules.take_band_width
+reads exactly 0.01 at every long price (min(0.01, max(0.01, 5% x his))
+= 0.01), so every behavioural pin here is lane 2's byte for byte: the
+same cents, the same rows, the same verdicts. Re-pinned where the
+DEFAULT or the plan's SHAPE is read: the source line (0.01 -> 0.02),
+the env-reload table (junk / inf / blank / 0.02 / 1e400 now land on
+0.02, the ceiling), the plan's `take_band` dict (E27 adds `frac`
+{his_px, cost, width} and `band` is the width, None when off), and
+book 347's short shape (the short add now carries the read, verdict
+`at_level` on that shape: the bid 0.31 sits over his sell cent 0.28,
+so today's rest at the short wire governs and nothing is band-taken).
 """
 import hashlib
 import importlib
@@ -165,24 +181,32 @@ def test_e14_take_in_band_is_strictly_above_his_cent_and_at_or_under_the_band_ce
 
 def test_e14_the_band_constant_only_lowers_from_the_environment(monkeypatch):
     src = inspect.getsource(rules)
-    assert 'MIRROR_TAKE_BAND = capped_env("MIRROR_TAKE_BAND", 0.01, floor=0.0)' in src
+    # E27 (FILL lane 27) re-pinned: the DEFAULT is 0.02 (the owner's tolerance,
+    # 2026-09-09 ~21:1xZ); the rail's shape is lane 2's -- capped_env, floor 0.0
+    assert 'MIRROR_TAKE_BAND = capped_env("MIRROR_TAKE_BAND", 0.02, floor=0.0)' in src
     assert src.count('capped_env("MIRROR_TAKE_BAND"') == 1 and 'min_wait_env("MIRROR_TAKE_BAND' not in src
     assert '_env_float("MIRROR_TAKE_BAND' not in src
     for name in ("MIRROR_TAKE_BAND", "band_cent", "take_in_band"):
         assert name in rules.__all__, name
     try:
-        # env may only LOWER: 0.02 lands on the default (the ceiling); 0.005
-        # and 0 are honoured; junk / inf are the default; a NEGATIVE value
-        # lands on the FLOOR (capped_env: "an override under the floor lands
-        # on the floor, never past it") -- 0.0, the band off
-        for raw, want in (("0.02", 0.01), ("0.005", 0.005), ("0", 0.0), ("0.01", 0.01), ("junk", 0.01),
-                          ("inf", 0.01), ("", 0.01), ("-1", 0.0), ("1e400", 0.01)):
+        # env may only LOWER: 0.03 lands on the default (the ceiling, 0.02 since
+        # E27); 0.02, 0.01, 0.005 and 0 are honoured; junk / inf are the
+        # default; a NEGATIVE value lands on the FLOOR (capped_env: "an
+        # override under the floor lands on the floor, never past it") -- 0.0,
+        # the band off. E27 re-pinned: ("0.02", 0.01) -> ("0.02", 0.02) and
+        # ("0.03", 0.02); junk / inf / blank / 1e400 0.01 -> 0.02
+        for raw, want in (("0.03", 0.02), ("0.02", 0.02), ("0.005", 0.005), ("0", 0.0), ("0.01", 0.01),
+                          ("junk", 0.02), ("inf", 0.02), ("", 0.02), ("-1", 0.0), ("1e400", 0.02)):
             monkeypatch.setenv("MIRROR_TAKE_BAND", raw)
             mod = importlib.reload(rules)
             assert mod.MIRROR_TAKE_BAND == want, (raw, mod.MIRROR_TAKE_BAND)
-            # band_cent reads the constant at call time
+            # band_cent reads the constant at call time (through E27's
+            # take_band_width: at 0.01 lane 2's cent, at 0.02 two cents over
+            # his 0.52 -- 5% of 0.52 is 2.6c, above the cap)
             if want == 0.01:
                 assert mod.band_cent(0.52) == 0.53
+            elif want == 0.02:
+                assert mod.band_cent(0.52) == 0.54
             elif want == 0.005:
                 assert mod.band_cent(0.52) is None and mod.band_cent(0.529) == 0.53
             else:
@@ -190,7 +214,10 @@ def test_e14_the_band_constant_only_lowers_from_the_environment(monkeypatch):
     finally:
         monkeypatch.delenv("MIRROR_TAKE_BAND", raising=False)
         importlib.reload(rules)
-    assert rules.MIRROR_TAKE_BAND == 0.01 and rules.band_cent(0.52) == 0.53
+    assert rules.MIRROR_TAKE_BAND == 0.02 and rules.band_cent(0.52) == 0.54
+    # lane 2's band, one line of the environment away (E27's rail table)
+    monkeypatch.setattr(rules, "MIRROR_TAKE_BAND", 0.01)
+    assert rules.band_cent(0.52) == 0.53
     # MIRROR_TAKE_AFTER_S and MIRROR_EXIT_TOL untouched
     assert rules.MIRROR_TAKE_AFTER_S == 0.0 and rules.MIRROR_EXIT_TOL == 0.01
     assert 'MIRROR_TAKE_AFTER_S = min_wait_env("MIRROR_TAKE_AFTER_S", 0.0)' in src
@@ -225,8 +252,10 @@ def test_e14_book_544s_shape_first_sight_sends_one_ioc_at_the_band_cent_and_rest
     assert b["ledger_net"] == 300 and b["open_order_id"] is None
     lp = b["last_plan"]
     assert lp["decision"] == "take_in_band"
+    # E27 re-pinned: the plan's `band` is the width take_band_width read (0.01 under this
+    # file's fixture) and `frac` {his_px, cost, width} sits beside it
     assert lp["take_band"] == {"his_cent": 0.52, "band": 0.01, "band_cent": 0.53, "bid": 0.52, "ask": 0.53,
-                               "verdict": "in_band"}
+                               "frac": {"his_px": 0.52, "cost": 0.52, "width": 0.01}, "verdict": "in_band"}
     assert lp["take_qty"] == 300 and lp["take_filled"] == 300.0
     ins = _inserts(p)
     # FILL lane 9 (061): the 059 shape plus `fast` (false: a full tick) as the twenty-third argument
@@ -310,7 +339,8 @@ def test_e14_an_ask_at_his_cent_takes_at_his_level_never_in_band():
     assert _census(st, "take_at_his_level") == 1 and _census(st, "take_in_band") == 0
     assert _inserts(p)[0][20] == "take" and b["last_plan"]["decision"] == "take"
     assert b["last_plan"]["take_band"] == {"his_cent": 0.52, "band": 0.01, "band_cent": 0.53, "bid": 0.51,
-                                           "ask": 0.52, "verdict": "at_level"}
+                                           "ask": 0.52, "frac": {"his_px": 0.52, "cost": 0.52, "width": 0.01},
+                                           "verdict": "at_level"}      # E27: `frac` beside the width
     # through his cent: the same
     p2, b2, v2 = _band_world(bid=0.50, ask=0.51, ioc_fill=300.0)
     st2 = _tick(p2, v2)
@@ -332,7 +362,8 @@ def test_e14_martinez_534s_shape_rests_out_of_band_and_the_admission_is_untouche
     assert _census(st, "take_in_band") == 0 and _census(st, "take_placed") == 0 and _census(st, "rest_placed") == 1
     assert _bbos(v).count(SLUG) == 1, "no re-read: no IOC was decided"
     assert b["last_plan"]["take_band"] == {"his_cent": 0.61, "band": 0.01, "band_cent": 0.62, "bid": 0.81,
-                                           "ask": 0.82, "verdict": "out"}
+                                           "ask": 0.82, "frac": {"his_px": 0.61, "cost": 0.61, "width": 0.01},
+                                           "verdict": "out"}          # E27: `frac` beside the width
     assert _inserts(p)[0][20] == "rest" and b["last_plan"]["decision"] == "rest"
     # two cents above: out as well (the band is one cent, never two)
     p2 = _his_at(0.52)
@@ -363,26 +394,37 @@ def test_e14_book_347s_short_shape_rests_at_the_short_wire_never_in_band(monkeyp
     """Book 347 (aec-wta-julpar-lucste, ORDER_INTENT_BUY_SHORT; book_347_1750
     398: 30 `replace` cancels, 0 filled): a SELL_LONG add plan on a short
     book with the contract bid a cent inside the short wire -> the rest
-    at _short_wire (0.32), decision 'rest', no `take_in_band`, no
-    `take_band` on the plan (the band is a long book's read)."""
+    at _short_wire (0.32), decision 'rest', no `take_in_band`. E27 (FILL
+    lane 27) re-pinned: the short add now CARRIES the band's read
+    (`take_band`, _short_take_band), and on this shape its verdict is
+    `at_level` -- the bid 0.31 sits OVER his sell cent 0.28 (his level
+    1 - 0.72 in long space). E27's review (HIGH-1) re-pinned AGAIN: at
+    level the short takes AT HIS CENT first, as the long has since E4 --
+    ONE SELL IOC at 0.28 (a sale at his price or better: the venue fills
+    it at the bid 0.31; this fixture's venue expires it 0) with decision
+    'take', never the band's word, and the unfilled 300 rest at the short
+    wire 0.32 as before (the rest row is lane 2's byte for byte)."""
     _shorts_on(monkeypatch)
     p = _short_world()
     v = _Venue(bid=0.31, ask=0.32)
     st = _tick(p, v, http=_short_http())
     b = next(iter(p.books.values()))
     assert b["intent"] == "ORDER_INTENT_BUY_SHORT" and b["target"] == -300
-    assert [c[1:6] for c in _places(v)] == [(SLUG, 0.32, 300, False, GTC_TIF)]
-    assert _census(st, "take_in_band") == 0 and _census(st, "take_placed") == 0 and _census(st, "rest_placed") == 1
-    assert _census(st, "short_open") == 1
-    assert "take_band" not in b["last_plan"] and b["last_plan"]["decision"] == "rest"
-    assert _inserts(p)[0][20] == "rest" and _inserts(p)[0][18] == "ORDER_INTENT_BUY_SHORT"
+    assert [c[1:6] for c in _places(v)] == [(SLUG, 0.28, 300, False, IOC_TIF), (SLUG, 0.32, 300, False, GTC_TIF)]
+    assert _census(st, "take_in_band") == 0 and _census(st, "take_placed") == 1 and _census(st, "rest_placed") == 1
+    assert _census(st, "take_at_his_level") == 1 and _census(st, "short_open") == 2, "the IOC and the rest each pass the doors"
+    assert b["last_plan"]["take_band"]["verdict"] == "at_level" and b["last_plan"]["decision"] == "rest"
+    assert b["last_plan"]["take_band"]["his_cent"] == 0.28 and b["last_plan"]["take_band"]["bid"] == 0.31
+    assert [(a[5], a[10], a[18], a[20]) for a in _inserts(p)] == [("IOC", 0.28, "ORDER_INTENT_BUY_SHORT", "take"),
+                                                                 ("GTC", 0.32, "ORDER_INTENT_BUY_SHORT", "rest")]
     # an ADD onto a held short: the same
     p2 = _short_world()
     b2 = _short_book(p2, ledger=-100)
     v2 = _Venue(bid=0.31, ask=0.32, held={SLUG: -100})
     st2 = _tick(p2, v2, http=_short_http())
-    assert [c[1:6] for c in _places(v2)] == [(SLUG, 0.32, 200, False, GTC_TIF)]
-    assert _census(st2, "take_in_band") == 0 and _census(st2, "short_add") == 1 and "take_band" not in b2["last_plan"]
+    assert [c[1:6] for c in _places(v2)] == [(SLUG, 0.28, 200, False, IOC_TIF), (SLUG, 0.32, 200, False, GTC_TIF)]
+    assert _census(st2, "take_in_band") == 0 and _census(st2, "short_add") == 2 and _census(st2, "take_at_his_level") == 1
+    assert b2["last_plan"]["take_band"]["verdict"] == "at_level"
     # the S4 cover's decision word stands (FILL lane 3 re-pinned: in band it is the cover's own band word)
     assert rules.order_decision("reduce", True, True, True) == "cover_in_band"
     assert rules.order_decision("reduce", True, True, False) == "cover"
@@ -606,8 +648,10 @@ def test_e14_the_band_off_and_his_cent_unreadable_rest_as_today(monkeypatch):
     p, b, v = _band_world(ioc_fill=300.0)
     st = _tick(p, v)
     assert [c[2:6] for c in _places(v)] == [(0.52, 300, False, GTC_TIF)] and _census(st, "take_in_band") == 0
-    assert b["last_plan"]["take_band"] == {"his_cent": 0.52, "band": 0.0, "band_cent": None, "bid": 0.52,
-                                           "ask": 0.53, "verdict": "off"}
+    # E27 re-pinned: with the constant at 0 the width is None (no band) and the plan says so
+    assert b["last_plan"]["take_band"] == {"his_cent": 0.52, "band": None, "band_cent": None, "bid": 0.52,
+                                           "ask": 0.53, "frac": {"his_px": 0.52, "cost": 0.52, "width": None},
+                                           "verdict": "off"}
     assert _inserts(p)[0][20] == "rest"
     # 0.005: under a cent, no band
     monkeypatch.setattr(rules, "MIRROR_TAKE_BAND", 0.005)
@@ -651,7 +695,8 @@ def test_e14_the_band_off_and_his_cent_unreadable_rest_as_today(monkeypatch):
     assert _read(0.52, 0.53, cols=False)[:2] == (None, "uncounted") and _read(0.52, 0.53, cols=None)[:2] == (None, "uncounted")
     got, verdict, tb = _read(0.52, 0.53)
     assert (got, verdict) == (0.53, "in_band")
-    assert tb == {"his_cent": 0.52, "band": 0.01, "band_cent": 0.53, "bid": 0.52, "ask": 0.53, "verdict": "in_band"}
+    assert tb == {"his_cent": 0.52, "band": 0.01, "band_cent": 0.53, "bid": 0.52, "ask": 0.53,
+                  "frac": {"his_px": 0.52, "cost": 0.52, "width": 0.01}, "verdict": "in_band"}   # E27: `frac`
     monkeypatch.setattr(rules, "MIRROR_TAKE_BAND", 0.0)
     assert _read(0.52, 0.53)[:2] == (None, "off") and _read(0.51, 0.52)[:2] == (None, "at_level")
     monkeypatch.setattr(rules, "MIRROR_TAKE_BAND", 0.01)
@@ -707,7 +752,11 @@ def test_e14_the_census_name_sits_before_drift_smaller_open_and_the_pins_hold():
     assert src.count('_mirror_stop("take_in_band", w)') == 1 and '_mirror_stop("take_in_band", w)' in inspect.getsource(ml._act)
     # the worker reads the band through the rules module alone: no env knob of its own
     assert 'capped_env("MIRROR_TAKE_BAND' not in src and '_env_float("MIRROR_TAKE_BAND' not in src
-    assert "rules.MIRROR_TAKE_BAND" in inspect.getsource(ml._take_band) and "rules.band_cent(his_px)" in inspect.getsource(ml._take_band)
+    # E27 re-pinned: the worker reads the width through rules.take_band_width (which reads
+    # rules.MIRROR_TAKE_BAND and rules.MIRROR_TAKE_BAND_FRAC at call time), the cent through band_cent
+    assert "rules.take_band_width(his_px)" in inspect.getsource(ml._take_band) and "rules.band_cent(his_px)" in inspect.getsource(ml._take_band)
+    wsrc = inspect.getsource(rules.take_band_width)
+    assert "_num(MIRROR_TAKE_BAND), _num(MIRROR_TAKE_BAND_FRAC)" in wsrc, "both constants read at call time"
     # the band arm sits AFTER the at-level take and BEFORE the rest, on the no-order path
     asrc = inspect.getsource(ml._act)
     i_lvl = asrc.index('_mirror_stop("take_at_his_level", w)\n                return await _entry_take(')

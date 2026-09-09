@@ -82,7 +82,9 @@ def test_the_hourly_carries_fill_lane_8s_two_edits_in_its_copies():
     assert text.count(word) == 2 and _sql(text, "hourly").count(word) == 1
     h = _sql(text, "hourly")
     tb = h[h.index("SELECT '== take-band' AS section; "):h.index("SELECT '== on-target-why' AS section; ")]
-    assert tb.count(";") == 3 and "FROM z GROUP BY ROLLUP (side, hour) ORDER BY 1, 2 DESC;" in tb
+    # E27 (FILL lane 27): take-band's THIRD statement, the SHORT add's own table (3 -> 4)
+    assert tb.count(";") == 4 and "FROM z GROUP BY ROLLUP (side, hour) ORDER BY 1, 2 DESC;" in tb
+    assert "b.intent = 'ORDER_INTENT_BUY_SHORT' AND o.side = 'SELL_LONG' AND o.kind IN ('increase', 'take')" in tb
     assert "'rest_replaced'" in tb and "AS touch_moved" in tb and "AS future_clock" in tb
     assert len(PARTS) == 10 and h.count("AS section;") == 10
     tr = h[h.index("SELECT '== tick-ring' AS section; "):h.index("SELECT '== mirror-pnl' AS section; ")]

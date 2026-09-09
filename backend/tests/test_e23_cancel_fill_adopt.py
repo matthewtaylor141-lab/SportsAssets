@@ -832,8 +832,8 @@ def test_e23_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     # no knob, no rail of the lane's own: E22's wait alone
     rsrc = inspect.getsource(rules)
     assert "CANCEL_FILL" not in rsrc and "DISAGREE_FILL" not in rsrc and "E23" not in rsrc
-    # E25 (FILL lane 25) added three capped_env rails and two min_wait_env waits (22 -> 25 on the tip that carries the per-trade cap: 23 -> 22 there, then E25's three, 5 -> 7)
-    assert rsrc.count("min_wait_env(") == 7 and rsrc.count("capped_env(") == 25
+    # E25 (FILL lane 25) added three capped_env rails and two min_wait_env waits (22 -> 25 on the tip that carries the per-trade cap: 23 -> 22 there, then E25's three, 5 -> 7; then E27's MIRROR_TAKE_BAND_FRAC, 25 -> 26)
+    assert rsrc.count("min_wait_env(") == 7 and rsrc.count("capped_env(") == 26
 
 
 def test_e23_the_untouched_functions_are_byte_identical_to_the_tip():

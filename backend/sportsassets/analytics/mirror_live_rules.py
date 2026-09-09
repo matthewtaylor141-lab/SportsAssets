@@ -1060,7 +1060,32 @@ EXIT_BAND_INERT_AT = 0.01
 # capped 5c: FILL_R5's table turns negative at 4c (-276) and 5c (-440).
 # Read at call time by band_cent (tests and the operator's 0 apply
 # without a restart of the rule).
-MIRROR_TAKE_BAND = capped_env("MIRROR_TAKE_BAND", 0.01, floor=0.0)
+# E27 (2026-09-09, FILL lane 27; owner order ~21:1xZ, item 1 of the
+# seven-item proportionality list, verbatim: "1. Yes, lets take it
+# immediately with a tolerance that you feel wont impact
+# profitability"): the band is TWO cents, CAPPED AT 5% OF THE COST PER
+# SHARE (MIRROR_TAKE_BAND_FRAC below), on a LONG add and -- for the
+# first time -- on a SHORT add (take_band_width, short_band_cent,
+# short_take_in_band). The tolerance is decided from the rows on file
+# (FILL_R5_counterfactuals.md 75-78, at the missed classes' +3.46% ROI
+# at his price): a 1c band converts 38.2% of the unfilled rests for
+# +130 of P&L, 2c 57.7% for +52, 4c 80.6% for -276, 5c 87.1% for -440
+# -- 2c is the widest band whose converted dollars stay non-negative
+# after the spread, and the 5% cap keeps a cheap contract from paying
+# a fifth of its stake for a fill. The LONG side keeps lane 2's 1c
+# floor (D1 is never narrowed by the cap; the floor never exceeds this
+# constant, so a lowering under a cent is honoured); the SHORT side has
+# no floor (a band under a cent is no band: today's rest). The default
+# is still the ceiling: 0.01 is lane 2's long band byte for byte, 0 is
+# the band off on both sides.
+MIRROR_TAKE_BAND = capped_env("MIRROR_TAKE_BAND", 0.02, floor=0.0)
+# The band's cap as a FRACTION of the cost per share (E27): his price
+# on a long, one minus it on a short (room_scale's own collateral rule).
+# capped_env floor 0.0: the environment may only LOWER it (a narrower
+# band on cheap contracts); at 0 the short side's band is off and the
+# long side reads its 1c floor alone (min(MIRROR_TAKE_BAND, 0.01)).
+# Read at call time by take_band_width.
+MIRROR_TAKE_BAND_FRAC = capped_env("MIRROR_TAKE_BAND_FRAC", 0.05, floor=0.0)
 # THE FLATTEN'S SLIPPAGE (S4, 2026-09-07): the one bound an UNPRICED
 # flatten IOC may slip past the touch -- the long flatten's co-held IOC
 # at le.sell_limit_price (the bid less 2c, floored at 0.01) and, mirrored
@@ -1782,13 +1807,54 @@ def buy_wire(px: float | None) -> float | None:
     return w if w >= 0.01 else None
 
 
+def take_band_width(his_px: float | None, intent: Any = None) -> float | None:
+    """THE ENTRY BAND'S WIDTH for this add, in price (E27, FILL lane 27):
+    MIRROR_TAKE_BAND capped at MIRROR_TAKE_BAND_FRAC of the COST PER
+    SHARE -- his price on a LONG add, one minus it on a SHORT add (the
+    collateral a short ties up, room_scale's own rule; `intent` is the
+    BOOK's intent and only the exact BUY_SHORT spelling is the short
+    formula). On a LONG add the width floors at one cent, lane 2's band
+    (D1 is never narrowed by the cap) -- min(MIRROR_TAKE_BAND, max(0.01,
+    frac x his)), the floor never above the constant itself, so an
+    environment that LOWERS the constant under a cent is honoured and
+    nothing here raises. On a SHORT add there is no floor: min(
+    MIRROR_TAKE_BAND, frac x (1 - his)); short_band_cent reads a width
+    under a cent as no band. Both constants are read at call time (a
+    test's monkeypatch and the operator's lowering apply without a
+    restart of the rule). None -- no band, the rest as today -- when his
+    price is not a price in (0, 1) or a bool, when MIRROR_TAKE_BAND is
+    unreadable or at or under 0 (off), when MIRROR_TAKE_BAND_FRAC is
+    unreadable, or when the width is not a positive finite number.
+    MIRROR_TAKE_BAND_FRAC at or under 0 is the frac's own OFF: the
+    short side reads no band and the long side its floor alone
+    (min(MIRROR_TAKE_BAND, 0.01))."""
+    h = _num(his_px)
+    if h is None or not (0.0 < h < 1.0):
+        return None
+    cap, frac = _num(MIRROR_TAKE_BAND), _num(MIRROR_TAKE_BAND_FRAC)
+    if cap is None or cap <= 0.0 or frac is None:
+        return None
+    frac = max(frac, 0.0)
+    if is_short(intent):
+        width = min(cap, frac * round(1.0 - h, 6))
+    else:
+        width = min(cap, max(0.01, frac * h))
+    width = round(width, 6)
+    if not math.isfinite(width) or width <= 0.0:
+        return None
+    return width
+
+
 def band_cent(his_px: float | None, band: float | None = None) -> float | None:
     """THE ENTRY BAND'S CENT (E14, FILL lane 2): buy_wire(his price +
     band) -- floor-to-cent of his UNROUNDED price plus the band, so the
     IOC limited here can never fill more than the band over what he
     paid (his 0.471 + 0.01 = 0.481 -> 0.48; his 0.479 -> 0.489 -> 0.48:
-    the same cent, at most 0.9c over him). `band` None reads
-    MIRROR_TAKE_BAND at call time. None -- no band, the rest as today --
+    the same cent, at most 0.9c over him). `band` None reads the LONG
+    add's width at call time (E27: take_band_width -- MIRROR_TAKE_BAND
+    capped at MIRROR_TAKE_BAND_FRAC of his price, floored at a cent --
+    so every caller of this function reads the widened band through
+    it). None -- no band, the rest as today --
     when his price is not a price in (0, 1) or a bool, when the band is
     unreadable, negative or zero, when the sum has no cent on the
     ladder, and when the cent is not STRICTLY above his own cent
@@ -1797,7 +1863,7 @@ def band_cent(his_px: float | None, band: float | None = None) -> float | None:
     h = _num(his_px)
     if h is None or not (0.0 < h < 1.0):
         return None
-    b = _num(MIRROR_TAKE_BAND if band is None else band)
+    b = _num(take_band_width(h) if band is None else band)
     if b is None or b <= 0.0:
         return None
     base = buy_wire(h)
@@ -1805,6 +1871,38 @@ def band_cent(his_px: float | None, band: float | None = None) -> float | None:
         return None
     w = buy_wire(h + b)
     if w is None or w <= base + 1e-9:
+        return None
+    return w
+
+
+def short_band_cent(his_px: float | None, band: float | None = None) -> float | None:
+    """THE SHORT ADD'S BAND CENT (E27, FILL lane 27): sell_wire(his price
+    - band) -- the lowest cent at or above his UNROUNDED level less the
+    band, so the SELL IOC limited here can never give up more than the
+    band under what he sold at (his 0.65 less 0.0175 = 0.6325 -> 0.64:
+    a cent under him, 1.75c the most). `his_px` is his level in LONG
+    space (one minus what he paid for the other token, _his_level's
+    figure -- the price the contract is sold at); `band` None reads the
+    SHORT add's width at call time (take_band_width: MIRROR_TAKE_BAND
+    capped at MIRROR_TAKE_BAND_FRAC of the collateral 1 - his). None --
+    no band, the rest as today -- when his price is not a price in
+    (0, 1) or a bool, when the band is unreadable, negative, zero or
+    UNDER A CENT (the short side has no floor: a band under a cent is
+    no band, whatever cent the subtraction happens to cross), when the
+    difference has no cent on the ladder, and when the cent is not
+    STRICTLY under his own sell cent (sell_wire(his)); at 0 the lane is
+    off."""
+    h = _num(his_px)
+    if h is None or not (0.0 < h < 1.0):
+        return None
+    b = _num(take_band_width(h, ORDER_INTENT_SHORT) if band is None else band)
+    if b is None or b < 0.01 - 1e-9:
+        return None
+    base = sell_wire(h)
+    if base is None:
+        return None
+    w = sell_wire(h - b)
+    if w is None or w >= base - 1e-9:
         return None
     return w
 
@@ -2279,6 +2377,24 @@ def take_in_band(bid: float | None, ask: float | None, his_cent: float | None,
     if hc is None or bc is None or not (0.01 <= hc <= 0.99) or not (bc > hc + 1e-9):
         return False
     return (not at_or_through(BUY, bid, ask, hc)) and at_or_through(BUY, bid, ask, bc)
+
+
+def short_take_in_band(bid: float | None, ask: float | None, his_cent: float | None,
+                       band_cent: float | None) -> bool:
+    """Is the bid STRICTLY under his sell cent and at or above the short
+    add's band cent (E27, FILL lane 27)? `not at_or_through(SELL,
+    his_cent) and at_or_through(SELL, band_cent)`: a bid at or over his
+    cent is today's rule (the rest at the short wire, or the at-level
+    take), which governs first and is never this; a bid under the band
+    cent is the rest. Both cents must be readable numbers on the ladder
+    with the band cent UNDER his (else False: no band on a cent nobody
+    read), and at_or_through's own quote rules hold -- a missing,
+    unreadable or impossible bid is never in band. The ask is not
+    read."""
+    hc, bc = _num(his_cent), _num(band_cent)
+    if hc is None or bc is None or not (0.01 <= hc <= 0.99) or not (bc < hc - 1e-9):
+        return False
+    return (not at_or_through(SELL, bid, ask, hc)) and at_or_through(SELL, bid, ask, bc)
 
 
 def take_allowed(rest_age_s: float | None, take_armed_at: float | None, now: float,
@@ -3215,6 +3331,7 @@ __all__ = [
     "MIRROR_MAX_REPLACES_PER_HOUR", "MIRROR_REST_TTL_S", "MIRROR_TAKE_AFTER_S",
     "MIRROR_EXIT_TOL", "exit_terms", "MIRROR_EXIT_TAKE_BAND", "EXIT_BAND_INERT_AT",
     "MIRROR_TAKE_BAND", "band_cent", "take_in_band",
+    "MIRROR_TAKE_BAND_FRAC", "take_band_width", "short_band_cent", "short_take_in_band",
     "MIRROR_FLATTEN_SLIP",
     "MIRROR_FLATTEN_REST_S", "MIRROR_LOST_FILL_REREAD_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
     "MIRROR_EXIT_CONFIRM_SHARES", "MIRROR_EXIT_CONFIRM_PCT", "MIRROR_EXIT_CONFIRM_S",

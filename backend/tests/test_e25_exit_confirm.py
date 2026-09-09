@@ -620,8 +620,10 @@ def test_e25_the_frozen_exit_the_act_and_the_vanish_keep_their_readers_byte_for_
     machinery this lane does not touch. `_act` re-cut at landing over the
     per-trade cap (52e1d52, docs 67: an add's standing rest compared against
     the clipped plan, p_cmp -- an entry change, not this lane's):
-    42e08939276dcd0a -> bbe3cae4167edb41."""
-    for name, digest in {"_act": "bbe3cae4167edb41", "_exit_take": "750acd709c826566",
+    42e08939276dcd0a -> bbe3cae4167edb41; then E27 (FILL lane 27, docs 69:
+    the take's tolerance, the short's band arm and at-level take in _act)
+    -> 59efb48ba79f793c."""
+    for name, digest in {"_act": "59efb48ba79f793c", "_exit_take": "750acd709c826566",
                          "_flatten_vanished": "22930dc6e3e85816", "_frozen_exit": "ef478fabdfa2ccc0",
                          "_maybe_close_episode": "59e28ff01f960660", "_fast_gate": "1932811194268668",
                          "_fast_book": "286e6fa4663c3887", "_confirm_gone": "61e425dcf38e1285",

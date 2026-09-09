@@ -818,8 +818,8 @@ def test_e24_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     assert "t.filled_books.add(book[\"id\"])" in bk
     # no rail of the lane's own: E22's wait and the freeze's tolerance; no knob, no migration, no decision word
     rsrc = inspect.getsource(rules)
-    # E25 (FILL lane 25) added three capped_env rails and two min_wait_env waits (22 -> 25 on the tip that carries the per-trade cap: 23 -> 22 there, then E25's three, 5 -> 7)
-    assert rsrc.count("min_wait_env(") == 7 and rsrc.count("capped_env(") == 25 and "MIRROR_HAND" not in rsrc
+    # E25 (FILL lane 25) added three capped_env rails and two min_wait_env waits (22 -> 25 on the tip that carries the per-trade cap: 23 -> 22 there, then E25's three, 5 -> 7; then E27's MIRROR_TAKE_BAND_FRAC, 25 -> 26)
+    assert rsrc.count("min_wait_env(") == 7 and rsrc.count("capped_env(") == 26 and "MIRROR_HAND" not in rsrc
     assert '"MIRROR_LOST_FILL_REREAD_S"' not in inspect.getsource(ml)
     assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("061_")
     assert "hand" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()

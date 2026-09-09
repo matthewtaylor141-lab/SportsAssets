@@ -642,8 +642,8 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     # MIRROR_LOST_FILL_REREAD_S (min_wait_env 4 -> 5), pinned by name in test_e22_lost_fill_adopt
     # E25 (FILL lane 25, 2026-09-09) adds THREE downward-only rails (MIRROR_EXIT_CONFIRM_SHARES / _PCT /
     # _TOL_PCT: 22 -> 25 on the tip that carries the per-trade cap, which had read 23 -> 22) and TWO waits that may only LENGTHEN (MIRROR_EXIT_CONFIRM_S / _MAX_TICKS:
-    # 5 -> 7), each pinned by name and direction in test_e25_exit_confirm
-    assert src.count("capped_env(") == 25 and src.count("min_wait_env(") == 7
+    # 5 -> 7), each pinned by name and direction in test_e25_exit_confirm; E27 (FILL lane 27) adds ONE downward-only rail, MIRROR_TAKE_BAND_FRAC (25 -> 26), pinned in test_e27_take_tolerance
+    assert src.count("capped_env(") == 26 and src.count("min_wait_env(") == 7
     assert "MIRROR_DRIFT_MAX = capped_env" in src and "E19" in inspect.getsource(rules.admission)
     for name in ("MIRROR_SMALLER", "SMALLER_READING", "DRIFT_SMALLER"):
         assert name not in src, "no knob"
