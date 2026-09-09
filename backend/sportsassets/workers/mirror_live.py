@@ -1055,6 +1055,27 @@ CENSUS_KEYS: tuple[str, ...] = (
     # (keys[-12]), after FILL lane 11's one, by the convention every
     # lane followed (keys[-14]; the tail pins moved by one)
     "turn_woke_fast",
+    # E21 (2026-09-09; FILL lane 10): the add's take. `fast_order_open`:
+    # the fast tick's bare `order_open` refusal, counted per day (before
+    # this lane only `fast_tick_skipped` summed it) -- the denominator
+    # every claim of the lane needs. `fast_his_add`: the gate admitted an
+    # ADDING wake of his on a book with an ENTRY rest standing
+    # (_order_open_his_add, behind rules.MIRROR_FAST_ADD_REPLAN and after
+    # lane 3's _order_open_his_exit test) and the fast tick's own step O
+    # read the rest open with no new fill. `fast_add_kept` /
+    # `fast_add_replaced` / `fast_add_took`: which branch _act took on
+    # that plan -- the keep (the rise inside the hysteresis, or the rest
+    # under the floor with the growth carried as add_pending), the
+    # replace past the floor, or the take off the rest at the plan's
+    # grown quantity (decision `take_on_add`). `fast_status_unread`: the
+    # fast step O's status read returned nothing -- the row untouched,
+    # no freeze; the full tick's _reconcile_open applies
+    # `order_state_unknown` at its own step O. Before E19's
+    # `drift_smaller_open` (keys[-13]) and `registered_no_increase`
+    # (keys[-12]), after FILL lane 11's one, by the convention every lane
+    # followed (keys[-19:-13]; the tail pins moved by six)
+    "fast_order_open", "fast_his_add", "fast_add_kept", "fast_add_replaced", "fast_add_took",
+    "fast_status_unread",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -2927,6 +2948,11 @@ class _Tick:
     # (the full tick keeps them on open_by_book; the fast tick makes no
     # step O) -- read by _fast_gate's order_open split alone
     fast_open: dict = field(default_factory=dict)
+    # E21 (FILL lane 10): the book ids the fast gate admitted on his
+    # ADDING wake with an entry rest standing (_order_open_his_add) --
+    # _fast_book makes its one status read for them, _act stamps the
+    # plan's `fast_add`. Always empty on a full tick
+    fast_add: set = field(default_factory=set)
     # E10: the books stage's wall-time deltas (_WallClock.delta around
     # the walk; a fast tick's around its markets): data / venue / plan
     wall: dict = field(default_factory=dict)
@@ -9542,6 +9568,61 @@ async def _frozen_reduce_on_fill(t: _Tick, book: dict, r: _Reading, fills: list,
     return res
 
 
+def _fast_add_field(t: _Tick, book: dict, o: dict, r: _Reading) -> dict | None:
+    """E21 (FILL lane 10): the plan's `fast_add` on a book the fast gate
+    admitted on his ADDING wake -- {rest: the standing rest's row id,
+    rest_age_s, his_add_sh: his adds on the book's axis since the rest
+    went out (mi.adding_since over the tick's fills), since: the rest's
+    placed_ts, branch: None until _act names it}. None on a full tick,
+    on a book the gate did not admit, or on any unreadable figure (a
+    record, never a guess)."""
+    try:
+        if book["id"] not in t.fast_add:
+            return None
+        placed = _num(o.get("placed_ts"))
+        if placed is None:
+            return None
+        short = _book_short(book)
+        added = mi.adding_since(r.fills, book.get("long_asset"), book.get("other_asset"),
+                                -1.0 if short else 1.0, placed)
+        return {"rest": int(o["id"]), "rest_age_s": round(float(t.now) - placed, 1),
+                "his_add_sh": round(float(added), 6), "since": placed, "branch": None}
+    except Exception:  # noqa: BLE001 — the record, never a guess
+        return None
+
+
+_FAST_ADD_COUNTED = {"kept": "fast_add_kept", "replaced": "fast_add_replaced", "took": "fast_add_took"}
+
+
+def _fast_add_branch(plan: dict, branch: str, whale: str | None) -> None:
+    """E21: the branch _act took on a fast-admitted add's plan, on the
+    plan's `fast_add` and -- for the three the census names -- counted
+    (`fast_add_kept` / `fast_add_replaced` / `fast_add_took`); a refusal
+    (`take_capped`, `replace_capped`, `over_room`, a cancel's name) is
+    the field's word alone. Nothing on a plan without the field."""
+    fa = plan.get("fast_add")
+    if not isinstance(fa, dict):
+        return
+    fa["branch"] = str(branch)
+    name = _FAST_ADD_COUNTED.get(str(branch))
+    if name is not None:
+        _mirror_stop(name, whale)
+
+
+def _plan_grew_past_rest(p: mi.Plan | None, leaves: float | None) -> bool:
+    """E21: did the plan's quantity GROW past the standing rest's leaves
+    by more than rules.rest_decision's hysteresis (a share, and
+    MIN_MOVE_FRAC of the plan) -- the same numbers, the same test, so
+    `on_add` is exactly the keep branch's `add_pending` reading. False
+    on anything unreadable."""
+    q = _num(p.qty) if p is not None else None
+    lv = _num(leaves)
+    if q is None or lv is None or q <= lv:
+        return False
+    diff = q - lv
+    return diff >= 1.0 and diff > mi.MIN_MOVE_FRAC * abs(q)
+
+
 async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str | None,
                his_px: float | None, plan: dict, cancel_reason: str | None = None) -> str | None:
     """Step X for a live book: keep / cancel-replace the resting
@@ -9642,6 +9723,11 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         decision, why = rules.rest_decision(oo, p, t.now, cancel_reason=(t.cancel_all or cancel_reason),
                                             wire=wire, intent=(want[0] if want else None),
                                             stands=priced_exit, entry=not is_exit)
+        # E21 (FILL lane 10): the fast tick's admitted add -- the plan's
+        # record of the rest it re-planned against; the branch below
+        fa = _fast_add_field(t, book, o, r)
+        if fa is not None:
+            plan["fast_add"] = fa
         if decision == "keep":
             _mirror_stop("open_order_pending", w)
             plan["open_order"] = o["id"]
@@ -9704,6 +9790,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 if t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S):
                     _mirror_stop("requote_same_wire", w)
                     plan["requote_same_wire"] = True
+                _fast_add_branch(plan, "kept", w)
                 plan["rest_cause"] = _rest_cause(book, plan, why)    # FILL lane 9: the exit rest stood (the paragraph below)
                 return "open_order_pending"
             if short_exit:
@@ -9748,6 +9835,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 if t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S):
                     _mirror_stop("requote_same_wire", w)
                     plan["requote_same_wire"] = True
+                _fast_add_branch(plan, "kept", w)
                 plan["rest_cause"] = _rest_cause(book, plan, why)    # FILL lane 9: the cover rest stood (the paragraph below)
                 return "open_order_pending"
             # THE TAKE off a rest at his level (E2; no wait since the E4
@@ -9777,6 +9865,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                         and await _requotes_this_hour(t, book) >= rules.MIRROR_MAX_REPLACES_PER_HOUR):
                     _mirror_stop("take_capped", w)
                     plan["rest_cause"] = "take_capped"      # FILL lane 9: the refusal that kept the rest
+                    _fast_add_branch(plan, "take_capped", w)
                     return "take_capped"
                 # the book is at his level (E2): the one IOC at the same
                 # wire follows the cancel
@@ -9784,16 +9873,43 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 res = await _cancel_and_settle(t, o, book, "take", exit=is_exit)
                 named = _cancel_outcome(t, book, o, res)
                 if named is not None:
+                    _fast_add_branch(plan, named, w)
                     return named
-                left = int(min(p.qty, max(0.0, float(o["qty"]) - float(o.get("booked_filled") or 0.0))))
+                if rules.MIRROR_FAST_ADD_REPLAN and not is_exit and not short:
+                    # E21 (FILL lane 10): a LONG book's ENTRY take off the
+                    # rest is sized at the PLAN's quantity -- his add
+                    # included -- through the room the no-rest take reads
+                    # (the $2,500 clip and the game cap by construction;
+                    # the rest's remainder was given back by the cancel),
+                    # never at the rest's own leaves; under a share the
+                    # take is refused `over_room` with the rest already
+                    # cancelled (a rest at his cent would be over the same
+                    # room -- the next plan rests when room returns). An
+                    # exit's take keeps min(plan, leaves) byte for byte
+                    # (E14b's _sell_qty / _cover_qty rule), and so does a
+                    # SHORT book's add (no take-first is built for it: the
+                    # lane changes its cadence only); the switch OFF is the
+                    # same line on every leg
+                    left = _room_qty(t, int(p.qty), take_lvl, intent)
+                    if left < 1:
+                        _mirror_stop("over_room", w)
+                        _fast_add_branch(plan, "over_room", w)
+                        return "over_room"
+                else:
+                    left = int(min(p.qty, max(0.0, float(o["qty"]) - float(o.get("booked_filled") or 0.0))))
                 if left >= 1:
                     if is_exit:
                         return await _place(t, book, r, "take", p.side, wire, left, his_px, p,
                                             plan, tif="IOC")
                     # an entry: the IOC at his cent, then the unfilled
-                    # part rests again at the wire (addendum 4)
+                    # part rests again at the wire (addendum 4). E21: a
+                    # plan his add GREW past the rest's leaves (the keep
+                    # branch's add_pending reading) writes `take_on_add`
+                    # on the IOC, behind the switch, on a LONG book alone
+                    grew = rules.MIRROR_FAST_ADD_REPLAN and not short and _plan_grew_past_rest(p, leaves)
+                    _fast_add_branch(plan, "took", w)
                     return await _entry_take(t, book, r, p, take_lvl, wire, left, his_px, plan,
-                                             first=False)
+                                             first=False, on_add=grew)
                 return "take"
             if (p is not None and t.now - float(o["placed_ts"]) >= float(rules.MIRROR_TAKE_AFTER_S)
                     and not rules.at_or_through(p.side, r.bid, r.ask, take_lvl)):
@@ -9812,6 +9928,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             # a keep that ends in the take or a cancel above never carries
             # it. A record, read by no order path; never a guess (None when
             # the clause cannot be read as text)
+            _fast_add_branch(plan, "kept", w)
             plan["rest_cause"] = _rest_cause(book, plan, why)
             return "open_order_pending"
         if decision == "replace":
@@ -9830,6 +9947,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                     and await _requotes_this_hour(t, book) >= rules.MIRROR_MAX_REPLACES_PER_HOUR):
                 _mirror_stop("replace_capped", w)
                 plan["rest_cause"] = "replace_capped"   # FILL lane 9: the refusal that kept the rest
+                _fast_add_branch(plan, "replace_capped", w)
                 return "replace_capped"
             # an exit plan's replace -- its rest moving to his cent, or
             # a BUY rest standing over the reduce -- is never
@@ -9842,7 +9960,9 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                                            decision=plan["replaced"])
             named = _cancel_outcome(t, book, o, res)
             if named is not None:
+                _fast_add_branch(plan, named, w)
                 return named
+            _fast_add_branch(plan, "replaced", w)     # E21: the re-plan below is today's
             # re-plan against the ledger the cancel's booking left (or,
             # on a frozen exit, the venue's own position: _plan_seat)
             target = int(plan.get("target") or 0)
@@ -9873,6 +9993,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         else:
             # a named cancel: the plan is no order, or has no price, or
             # the tick tripped (on an exit plan's path: exempt, M-1)
+            _fast_add_branch(plan, decision, w)
             await _cancel_and_settle(t, o, book, decision, exit=is_exit)
             if p is None or p.side is None or t.cancel_all:
                 return decision
@@ -10835,7 +10956,7 @@ def _take_band(t: _Tick, book: dict, r: _Reading, his_px: float | None, plan: di
 
 async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: float, rest_px: float,
                       qty: int, his_px: float | None, plan: dict, first: bool,
-                      in_band: bool = False) -> str:
+                      in_band: bool = False, on_add: bool = False) -> str:
     """An ENTRY's take (E4 addendum): ONE IOC at HIS cent (`ioc_px`,
     rules.buy_wire(his): the ask at or under it is at or through his
     level, and the IOC can never fill above him) for `qty`, then the
@@ -10851,6 +10972,9 @@ async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: flo
     MIRROR_TAKE_BAND over his unrounded price) and its row's decision
     'take_in_band'; the remainder and the withheld quantity rest at
     `rest_px` -- his cent -- with decision 'rest', exactly as below.
+    `on_add` (E21, FILL lane 10): the IOC is the keep branch's take off
+    a standing rest for a plan his ADD grew, its row's decision
+    'take_on_add'; nothing else about the placement or the rests differs.
 
     THE RE-QUOTE CREDIT (E2 review round 3, LOW-6) MEETS THE TAKE-FIRST:
     a TTL or replace cancel of this book this tick covers ONE rest
@@ -10861,7 +10985,7 @@ async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: flo
     on the credit instead: the cohort's book is not left bare for the
     tick with its rest cancelled, which is what the credit is for."""
     res = await _place(t, book, r, "take", p.side, ioc_px, qty, his_px, p, plan, tif="IOC",
-                       take_first=first, in_band=in_band)
+                       take_first=first, in_band=in_band, on_add=on_add)
     # E14 (the review's LOW-1): the band IOC was sized on the room at the
     # BAND cent; its rest is sized on the room at HIS cent by
     # _place_reserved's own re-read (every non-take add is re-scaled
@@ -11138,7 +11262,8 @@ async def _record_orphan(pool, row_id: int, fut) -> None:
 
 async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: float,
                  qty: int, his_px: float | None, p: mi.Plan | None, plan: dict,
-                 tif: str = "GTC", take_first: bool = False, in_band: bool = False) -> str:
+                 tif: str = "GTC", take_first: bool = False, in_band: bool = False,
+                 on_add: bool = False) -> str:
     """Step L (and T when tif is IOC): INSERT the 'placing' row with
     the pre-placement snapshot BEFORE the venue call, place, persist
     the id IMMEDIATELY, book what executed on create.
@@ -11152,7 +11277,10 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
     rest behind it: sized on the room as it stands like a rest, and
     counted `take_first`. `in_band` (E14, FILL lane 2) is the entry
     band's IOC: its row's decision reads 'take_in_band'
-    (rules.order_decision); nothing else about the placement differs."""
+    (rules.order_decision); nothing else about the placement differs.
+    `on_add` (E21, FILL lane 10) is the keep branch's take off a rest
+    for a plan his add grew: its row's decision reads 'take_on_add';
+    nothing else differs."""
     w = r.whale
     if t.cancel_all:
         # a tick that tripped mid-way (an overfill booked by the cancel
@@ -11184,7 +11312,7 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
         return "ops_capped"
     try:
         return await _place_reserved(t, slot, book, r, kind, side, wire, qty, his_px, p, plan, tif,
-                                     take_first, in_band)
+                                     take_first, in_band, on_add)
     finally:
         slot.release()
 
@@ -11192,7 +11320,7 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
 async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind: str, side: str,
                           wire: float, qty: int, his_px: float | None, p: mi.Plan | None,
                           plan: dict, tif: str, take_first: bool = False,
-                          in_band: bool = False) -> str:
+                          in_band: bool = False, on_add: bool = False) -> str:
     global _POST_ONLY_OK
     w, slug = r.whale, r.slug
     # THE WIRE-SIDE MAP (P2 rung S0, brief 3.3): the book's intent and
@@ -11310,9 +11438,12 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
     # E18 (migration 059): the decision that places the row and the fill
     # of his it answers, beside the re-read's ask (NULL on a rest).
     # E14: the entry band's IOC writes the word 059 reserved,
-    # 'take_in_band' (an add's IOC with `in_band`; a cover stays 'cover')
+    # 'take_in_band' (an add's IOC with `in_band`; a cover stays 'cover').
+    # E21 (FILL lane 10): the keep branch's take off a rest for a plan
+    # his add grew writes 'take_on_add' (an add's IOC with `on_add`; the
+    # band's word wins, a cover stays 'cover')
     decision = rules.order_decision(action, is_take, wire_intent == "ORDER_INTENT_SELL_SHORT",
-                                    in_band=bool(in_band) and is_take)
+                                    in_band=bool(in_band) and is_take, on_add=bool(on_add) and is_take)
     plan["decision"] = decision
     try:
         if t.order_cols is True and t.fast_col is True:
@@ -13625,6 +13756,10 @@ def _fast_skip(t: _Tick, cid: str, why: str) -> None:
     it (the lock, the walk not yet past its game) goes back for the
     next fast tick, at most FAST_RETRIES times."""
     _mirror_stop("fast_tick_skipped")
+    if why == "order_open":
+        # E21 (FILL lane 10): the bare refusal counted by its own name --
+        # the denominator of every claim the lane makes
+        _mirror_stop("fast_order_open")
     t.fast_skipped[cid] = why
     if why in _FAST_REQUEUE:
         _fast_requeue(cid, int(((t.stats.get("fast") or {}).get("tries") or {}).get(cid, 0)))
@@ -13682,6 +13817,67 @@ def _order_open_his_exit(t: _Tick, book: dict, fills: list | None) -> bool:
         return False
 
 
+def _order_open_his_add(t: _Tick, book: dict, fills: list | None) -> bool:
+    """THE ADD'S TAKE (E21, FILL lane 10): the woken fill of his GROWS
+    the leg while an ENTRY rest of ours stands on the book. True only
+    when every fact reads: `fills` is a list (the market's fills of his,
+    read for this gate); the open row this fast tick read for the book
+    (`t.fast_open`) is an ENTRY rest -- its state 'open' (never
+    'placing' / 'unknown'), its kind 'increase', not an IOC, an order id
+    on it, its side's leg action on the book's intent 'add'; its
+    `placed_ts` a number at or before this tick's clock (a rest placed
+    after the fast tick stamped its clock is the full tick's to read,
+    with a clock stamped after the lock -- section 51; read here it
+    would be `future`); mi.reducing_on over the fills clocked after the
+    placement is ZERO (a reducing wake is lane 3's, tested first) and
+    mi.adding_since over them is POSITIVE (an add on the book's axis
+    ingested after our rest went out and not older than LATE_FILL_S: a
+    backfilled row of his history reads 0). Anything unreadable, missing
+    or raising is False: the gate then names `order_open` as before."""
+    try:
+        if not isinstance(fills, list):
+            return False
+        row = t.fast_open.get(int(book["id"]))
+        if not isinstance(row, dict) or row.get("side") not in (BUY, SELL):
+            return False
+        if row.get("state") != "open" or row.get("kind") != "increase" or row.get("tif") == "IOC":
+            return False
+        if not row.get("order_id"):
+            return False
+        if not isinstance(book.get("intent"), str) or rules.leg_action(book["intent"], row["side"]) != "add":
+            return False
+        placed = _num(row.get("placed_ts"))
+        if placed is None or placed > float(t.now):
+            return False
+        short = _book_short(book)
+        la, oa = book.get("long_asset"), book.get("other_asset")
+        if float(mi.reducing_on(fills, la, oa, short, placed)) != 0.0:
+            return False
+        return float(mi.adding_since(fills, la, oa, -1.0 if short else 1.0, placed)) > 0.0
+    except Exception:  # noqa: BLE001 — an unreadable fact is the old name
+        return False
+
+
+def _game_siblings_readable(t: _Tick, book: dict) -> bool:
+    """E21 (FILL lane 10, the review's CRITICAL-1): may the fast tick
+    size this book's GAME? The fast tick makes step O for the admitted
+    book ALONE, so every OTHER book of the game with a non-terminal
+    order is a figure this tick did not read -- _resting_add_usd None,
+    _game_exposure None, rules.game_room 0 -- and the plan's target is
+    clamped to the ledger (`game_unreadable`), which _act answers on a
+    book with a rest standing by CANCELLING that rest under `on_target`:
+    a cancel the full tick, whose step O reads every sibling, never
+    makes (books 825 / 829 are one game, lib-flu-cpa-2026-09-08). True
+    when no other book of the game is on t.nonterminal; anything
+    unreadable is False -- the wake is left to the full tick."""
+    try:
+        bid = int(book["id"])
+        return all(int(b["id"]) == bid or int(b["id"]) not in t.nonterminal
+                   for b in t.game_books.get(_game_key_of(book), []))
+    except Exception:  # noqa: BLE001 — an unreadable game is the full tick's
+        return False
+
+
 def _fast_gate(t: _Tick, book: dict, fills: list | None = None) -> str | None:
     """Why the fast tick may NOT plan this book now, or None (the
     paragraph over FAST_TICK_MAX, the fail-closed clauses in order):
@@ -13708,7 +13904,16 @@ def _fast_gate(t: _Tick, book: dict, fills: list | None = None) -> str | None:
     replaces the rest within POLL_S -- rules.rest_decision, 'a FALL
     never waits' -- and a cancel here would discard queue position on
     adds still wanted). With no fills, or any fact unreadable, the
-    clause reads `order_open` exactly as before."""
+    clause reads `order_open` exactly as before.
+
+    THE ADDING WAKE IS ADMITTED (E21, FILL lane 10): AFTER lane 3's
+    test, behind rules.MIRROR_FAST_ADD_REPLAN (env may only turn it
+    OFF), a woken ADDING fill of his on a book with an ENTRY rest
+    standing (_order_open_his_add) is not refused: the book is noted on
+    `t.fast_add` and the gate's remaining clauses (the walk, a fill
+    booked after it) decide as for a bare book -- _fast_book then makes
+    the fast tick's own step O on that one rest before it plans. The
+    switch OFF, or any fact unreadable, is `order_open` byte for byte."""
     bid = book["id"]
     if _lock_for(bid).locked():
         return "book_locked"
@@ -13724,11 +13929,55 @@ def _fast_gate(t: _Tick, book: dict, fills: list | None = None) -> str | None:
     if bid in t.nonterminal or book.get("open_order_id"):
         if fills is not None and _order_open_his_exit(t, book, fills):
             return "order_open_his_exit"
-        return "order_open"
+        if not (fills is not None and rules.MIRROR_FAST_ADD_REPLAN and _order_open_his_add(t, book, fills)):
+            return "order_open"
+        if not _game_siblings_readable(t, book):
+            # E21 (the review's CRITICAL-1): another book of the game has
+            # an order this fast tick did not read -- its game room would
+            # read unreadable and the re-plan would cancel THIS book's
+            # rest under `on_target`; the full tick reads every sibling
+            return "order_open_game_unread"
+        t.fast_add.add(bid)
     if t.positions is None:
         return "walk_stale"
     if bid in _last_filled or (full is not None and bid in full.filled_books):
         return "fill_after_walk"
+    return None
+
+
+async def _fast_step_o(t: _Tick, fresh: dict) -> str | None:
+    """E21 (FILL lane 10): the fast tick's one status read of the entry
+    rest standing on a book the gate admitted, under the book's lock.
+    None when the rest reads OPEN with no fill past the row's booked
+    figure -- the row then sits on t.open_by_book and off t.nonterminal
+    for this book alone -- else the skip's name: `order_open` when the
+    row the lock re-read is not the one the gate read (the id moved, no
+    order id) or the venue reads it terminal (the full tick's
+    _finish_order books it); `fill_after_walk` when the venue's filled
+    figure is past the booked one (the ledger moved: the full tick
+    sizes it); `fast_status_unread` when the read returns nothing or
+    carries no filled figure -- the row UNTOUCHED, no state write, no
+    t.nonterminal entry, never _freeze (the full tick's _reconcile_open
+    names `order_state_unknown` at its own step O). Books nothing."""
+    bid = fresh["id"]
+    row = t.fast_open.get(int(bid))
+    oid_row = _num(fresh.get("open_order_id"))
+    if (not isinstance(row, dict) or oid_row is None or _num(row.get("id")) is None
+            or int(_num(row.get("id"))) != int(oid_row) or not row.get("order_id")):
+        return "order_open"
+    st = await _order_status(t, str(row["order_id"]))
+    venue_filled = _num(st.get("filled_shares")) if isinstance(st, dict) and st else None
+    if not st or venue_filled is None:
+        _mirror_stop("fast_status_unread", fresh.get("whale"))
+        return "fast_status_unread"
+    if venue_filled > float(row.get("booked_filled") or 0.0) + 1e-9:
+        return "fill_after_walk"
+    if le._rest_terminal(st):
+        return "order_open"
+    o = dict(row)
+    t.open_by_book[bid] = (o, st)
+    t.nonterminal.discard(bid)
+    _mirror_stop("fast_his_add", fresh.get("whale"))
     return None
 
 
@@ -13739,7 +13988,24 @@ async def _fast_book(t: _Tick, book: dict) -> None:
     bare `order_open` is read once more with the market's fills of his
     (one table read, no venue call) so a woken reducing fill of his on
     a book with an entry rest standing is counted `order_open_his_exit`;
-    the fills unreadable -> `order_open` as before."""
+    the fills unreadable -> `order_open` as before.
+
+    THE FAST TICK'S OWN STEP O (E21, FILL lane 10): for a book the gate
+    admitted on his ADDING wake (`t.fast_add`), under the lock, ONE
+    paced status read of the standing rest on the shared budget
+    (_order_status), and nothing booked: the read returning nothing ->
+    `fast_status_unread`, the row UNTOUCHED (no state write, no
+    t.nonterminal entry, NEVER a freeze -- the full tick's
+    _reconcile_open applies `order_state_unknown` at its own step O a
+    poll later, byte-identical; a freeze here would fire at WAKE
+    cadence on a venue blip, so this is the one place the fast tick does
+    not inherit the full tick's rule, by name); a fill past the row's
+    booked figure -> `fill_after_walk` (the ledger moved, the full tick
+    sizes it); a terminal state -> `order_open` (the full tick's
+    _finish_order books it); open with no new fill -> the row goes on
+    t.open_by_book and off t.nonterminal for THIS book only, census
+    `fast_his_add`, then _tick_book as today: _act's keep branch reads
+    t.open_by_book exactly as on the full tick."""
     cid, bid = str(book.get("condition_id")), book["id"]
     why = _fast_gate(t, book)
     if why == "order_open" and _fast_open_entry_rest(t, book):
@@ -13764,7 +14030,11 @@ async def _fast_book(t: _Tick, book: dict) -> None:
         if fresh.get("state") != "live":
             return _fast_skip(t, cid, "not_live")
         if fresh.get("open_order_id"):
-            return _fast_skip(t, cid, "order_open")
+            if bid not in t.fast_add:
+                return _fast_skip(t, cid, "order_open")
+            why = await _fast_step_o(t, fresh)
+            if why is not None:
+                return _fast_skip(t, cid, why)
         if _full_tick is not None and bid in _full_tick.filled_books:
             return _fast_skip(t, cid, "fill_after_walk")
         _WALL.move("books", 1)          # E10: a book in flight (its planner steps)

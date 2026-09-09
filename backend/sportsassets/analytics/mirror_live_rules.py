@@ -1048,6 +1048,20 @@ MIRROR_FROZEN_NAME_TICKS = int(capped_env("MIRROR_FROZEN_NAME_TICKS", 3))
 # import, as every switch here (a change in the environment needs a
 # restart); the worker reads it through the module at call time.
 MIRROR_FROZEN_EXITS = env_switch("MIRROR_FROZEN_EXITS", True)
+# THE ADD'S TAKE (E21, 2026-09-09; FILL lane 10). On, his ADDING fill on
+# a market where an ENTRY rest of ours stands is re-planned by the fast
+# tick (one paced status read on that rest, then _act as the full tick
+# runs it: keep under the floor or inside the hysteresis, replace past
+# it, or the take off the rest when the ask is at or through his cent),
+# and the take off a standing entry rest is sized at the PLAN's quantity
+# through the room (the clip, the game cap) instead of the rest's own
+# leaves -- on BOTH tick paths; its IOC writes the decision word
+# `take_on_add`. Off, the fast tick refuses such a wake `order_open` and
+# the take off the rest sizes min(plan, leaves), exactly as before the
+# lane. The environment may only turn it OFF: a knob may lower a rail,
+# never raise one. A module constant read at import, as every switch
+# here; the worker reads it through the module at call time.
+MIRROR_FAST_ADD_REPLAN = env_switch("MIRROR_FAST_ADD_REPLAN", True)
 # Market families a book may open on (copy_sports.market_type_of).
 # P1 opened on moneylines alone and refused derivatives at admission
 # by the name `family` (program decision 19: totals, spreads and props
@@ -2003,7 +2017,7 @@ def replace_decision(detail: dict | None) -> str:
 
 
 def order_decision(action: str | None, is_take: bool, short_cover: bool,
-                   in_band: bool = False) -> str:
+                   in_band: bool = False, on_add: bool = False) -> str:
     """The `decision` an order row records at its INSERT (E18; migration
     059): 'cover' for a short book's buy-back (its rest or its IOC),
     'take_in_band' for an ENTRY's IOC sent at the band cent (E14, FILL
@@ -2016,7 +2030,12 @@ def order_decision(action: str | None, is_take: bool, short_cover: bool,
     row carries so its cents past his price are readable per row; the
     band words are written on an IOC alone (`is_take`), on a readable
     leg action alone, and only for `in_band` exactly True -- anything
-    else lands on the word the row carried before the band."""
+    else lands on the word the row carried before the band. E21 (FILL
+    lane 10, the add's take): an ENTRY's IOC the keep branch sends for a
+    plan his ADD grew past the standing rest's leaves carries `on_add`
+    True and writes 'take_on_add' -- on an add's IOC alone, never inside
+    the band (the band's word wins), never on a cover or a reduce, and
+    only for `on_add` exactly True; anything else is 'take' as before."""
     if short_cover:
         return "cover_in_band" if (in_band is True and is_take) else "cover"
     if is_take:
@@ -2024,6 +2043,8 @@ def order_decision(action: str | None, is_take: bool, short_cover: bool,
             return "take_in_band"
         if in_band is True and action == "reduce":
             return "exit_take_in_band"
+        if on_add is True and action == "add" and not in_band:
+            return "take_on_add"
         return "take"
     return "exit_rest" if action == "reduce" else "rest"
 
@@ -3019,7 +3040,8 @@ __all__ = [
     "MIRROR_TAKE_BAND", "band_cent", "take_in_band",
     "MIRROR_FLATTEN_SLIP",
     "MIRROR_FLATTEN_REST_S", "MIRROR_LOST_FILL_REREAD_S", "MIRROR_FLAT_CLOSE_S", "MIRROR_DRIFT_MAX",
-    "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAMILIES",
+    "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAST_ADD_REPLAN",
+    "MIRROR_FAMILIES",
     "FLAT_TOL_SHARES", "SELL_DUST_SHARES",
     "P2_MAKER_SHARE_MIN", "P2_TAKE_SLIP_MAX", "P2_FROZEN_TICK_FRAC_MAX", "P2_CAPTURE_MIN",
     "P2_INTEGRITY_COUNTERS",

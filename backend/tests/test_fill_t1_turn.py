@@ -66,7 +66,7 @@ WALK_ELSEWHERE = _Http(rows=[{"asset": "tok-elsewhere", "size": 900}])
 # lane was built on (84317ae): a change to any of them is not this lane's
 UNTOUCHED = {
     "admission": "a10630d6d3a3a62c", "select_flatten": "00e5b189ccb84bdb",
-    "_flip_since": "3cdab3ea4d75e7c5", "_open_flow": "66c52fc21b5af319", "_fast_gate": "83032baf48677574",    # FILL lane 3 (landed first) split its order_open clause; lane 5 does not touch it
+    "_flip_since": "3cdab3ea4d75e7c5", "_open_flow": "66c52fc21b5af319", "_fast_gate": "1932811194268668",    # FILL lane 3 (landed first) split its order_open clause; E21 (FILL lane 10) admits the adding wake in that clause behind its switch, and its review added the sibling-game clause; lane 5 does not touch it
     "_venue_market_ended": "1a02ebcd800fe3c0", "_memo_terminal_book": "78bd691a2807a7a8",
     "_close_settled": "086987c757c5c3df",
 }
@@ -592,10 +592,10 @@ def test_t1_live_flow_books_611_and_661_are_never_touched(monkeypatch):
 
 def test_t1_the_census_place_the_emit_sites_the_call_sites_and_no_knob():
     keys = ml.CENSUS_KEYS
-    # E22 (FILL lane 22, four names), FILL lane 11 (one) and FILL lane 16 (one) placed theirs after these three, nearer the key (-16:-13 -> -21:-18 -> -22:-19)
-    assert keys[-22:-19] == NEW_NAMES
-    # FILL lane 3 (three names) and T2 (two) landed ahead of this lane and sit between E14's name and these three (take_in_band -17 -> -22 -> -27 -> -28)
-    assert keys[-28] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    # E22 (FILL lane 22, four names), FILL lane 11 (one) and E21 (FILL lane 10, six) placed theirs after these three, nearer the key (-16:-13 -> -27:-24) -- FILL lane 16 (one name, turn_woke_fast) landed first, so every index here moved by one more
+    assert keys[-28:-25] == NEW_NAMES
+    # FILL lane 3 (three names) and T2 (two) landed ahead of this lane and sit between E14's name and these three (take_in_band -17 -> -22 -> -33)
+    assert keys[-34] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)

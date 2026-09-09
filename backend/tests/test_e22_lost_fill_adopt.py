@@ -501,9 +501,11 @@ def test_e22_a_long_books_lost_buy_adopts_the_same_way(monkeypatch):
 
 def test_e22_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob():
     keys = ml.CENSUS_KEYS
-    # FILL lane 11 and FILL lane 16 landed after this lane and placed one name each nearer the key (-17:-13 -> -18:-14 -> -19:-15)
-    assert keys[-19:-15] == NEW_NAMES and keys[-15] == "cand_market_closed_db" and keys[-14] == "turn_woke_fast"
-    assert keys[-20] == "reopen_refused" and keys[-22] == "he_holds" and keys[-28] == "take_in_band"
+    # FILL lane 11 landed after this lane and placed its one name nearer the key (-17:-13 -> -18:-14); -- FILL lane 16 (one name, turn_woke_fast) landed first, so every index here moved by one more
+    # E21 (FILL lane 10) its six fast_* names after that (-18:-14 -> -24:-20)
+    assert keys[-25:-21] == NEW_NAMES and keys[-21] == "cand_market_closed_db"
+    assert keys[-26] == "reopen_refused" and keys[-28] == "he_holds" and keys[-34] == "take_in_band"
+    assert keys[-20] == "turn_woke_fast"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)

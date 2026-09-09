@@ -59,10 +59,10 @@ OPEN = "MARKET_STATE_OPEN"
 # was built on (219f140): a change to any of them is not this lane's
 UNTOUCHED = {
     "_fast_candidate": "922585ffb6856f70", "_walk_candidate": "9c990feba5fdeb57",
-    "_flip_since": "3cdab3ea4d75e7c5", "_fast_gate": "83032baf48677574",
+    "_flip_since": "3cdab3ea4d75e7c5", "_fast_gate": "1932811194268668",
     "_fast_wake": "5e5b0cc324a652fe", "_fast_run": "cbd93bdfdf69d254",
     # fast_tick_once: 219f140 read 1aac535d56cae681; lane 14 (41d5e40) hands t_acquired in -- landed ahead, not this lane
-    "fast_tick_once": "f0489ca714e21973", "_fast_book": "108393236e7e6f3f",
+    "fast_tick_once": "f0489ca714e21973", "_fast_book": "286e6fa4663c3887",
     # _fast_tick: 219f140 read 89893be25bcee246; lane 14 (41d5e40) stamps the prelude there -- landed ahead, not this lane
     "_fast_tick": "ce6e086b18c28200", "notify": "ea431c3f6159798c",
     "_fast_requeue": "cb24c3ac1c0c7273", "_close_settled": "086987c757c5c3df",
@@ -566,10 +566,11 @@ def test_c16_the_turn_wake_never_sets_the_full_ticks_wake_or_its_woken_set(monke
 
 def test_c16_the_census_place_the_emit_site_no_rail_no_decision_word_no_migration():
     keys = ml.CENSUS_KEYS
-    assert keys[-14] == NEW_NAME and keys[-15] == "cand_market_closed_db"
+    # E21 (FILL lane 10, six fast_* names) landed after this lane, between this name and the key (-14 -> -20)
+    assert keys[-20] == NEW_NAME and keys[-21] == "cand_market_closed_db" and keys[-19] == "fast_order_open"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-19:-15] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert keys[-22:-19] == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-25:-21] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert keys[-28:-25] == ("he_holds", "he_holds_unread", "reopen_refused")
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert keys.count(NEW_NAME) == 1 and len(set(keys)) == len(keys)
     assert ml._new_stats()["census"][NEW_NAME] == 0 and NEW_NAME not in ml._INTEG_CENSUS_KEYS

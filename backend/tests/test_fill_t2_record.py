@@ -397,15 +397,30 @@ def test_t2_book_661s_shape_a_fast_tick_on_a_book_with_an_order_open_writes_noth
     st0 = _tick(p, v)
     assert _census(st0, "rest_placed") == 1 and b["open_order_id"] and p.fill_writes == [1]
     # the rest standing (book 661's shape): a woken fill finds the order open, the fast tick leaves the
-    # book to the full tick -- no plan, nothing queued, nothing written
+    # book to the full tick -- no plan, nothing queued, nothing written. Since E21 (FILL lane 10) that
+    # is the reading under MIRROR_FAST_ADD_REPLAN OFF only (pinned first, byte for byte); ON, the
+    # ADDING wake is admitted and the fast tick names the fill itself (below)
     p.fills.append(_fill(M, "BUY", 100.0, 0.31, NOW + 10, detected_at=NOW + 11))
     _walk({M: 0.0, N: 0.0}, NOW + 12)
-    fs = _fast(p, v, now=NOW + 13, http=_mkt(400.0))
+    rules.MIRROR_FAST_ADD_REPLAN = False
+    try:
+        fs = _fast(p, v, now=NOW + 13, http=_mkt(400.0))
+    finally:
+        rules.MIRROR_FAST_ADD_REPLAN = True
     assert _skips(fs) == {CID: "order_open"} and p.fill_writes == [1] and ml._fill_pending == {}
     assert _census(fs, "fill_answers_absent") == 0 and _census(fs, "fill_answer_write_failed") == 0
-    # the full tick after it answers the fill (the order standing: open_order_pending) and writes it once
+    # E21 ON: the fast tick plans the book (the rest 13 s old: kept under the floor, his add carried),
+    # names the fill open_order_pending itself and its own flush writes the row once, `fast` true
+    _walk({M: 0.0, N: 0.0}, NOW + 12)
+    fs = _fast(p, v, now=NOW + 13, http=_mkt(400.0))
+    assert _skips(fs) == {} and _census(fs, "fast_his_add") == 1 and _census(fs, "open_order_pending") == 1
+    assert p.fill_writes == [1, 1] and ml._fill_pending == {}
+    fast_row = p.fill_answers[("rn1", str(NOW + 10))]
+    assert fast_row["name"] == "open_order_pending" and fast_row["fast"] is True and fast_row["cause"] == "min_life"
+    # the full tick after it answers the fill by the same name and writes nothing more (named once);
+    # its census reads 2: its own count plus the fast tick's, folded in (E9's fold)
     st = _tick(p, v, now=NOW + 30, http=_mkt(400.0))
-    assert _census(st, "open_order_pending") == 1 and p.fill_writes == [1, 1]
+    assert _census(st, "open_order_pending") == 2 and _census(st, "fast_his_add") == 1 and p.fill_writes == [1, 1]
     assert p.fill_answers[("rn1", str(NOW + 10))]["name"] == "open_order_pending"
     _tick(p, v, now=NOW + 60, http=_mkt(400.0))
     assert p.fill_writes == [1, 1]
@@ -536,10 +551,10 @@ def test_t2_the_census_names_sit_before_drift_smaller_open_the_emit_sites_and_no
     keys = ml.CENSUS_KEYS
     for k in NEW_NAMES:
         assert keys.count(k) == 1 and ml._new_stats()["census"][k] == 0, k
-    # FILL lane 5 (three names), E22 (FILL lane 22, four), FILL lane 11 (one) and FILL lane 16 (one) landed after this lane and placed theirs nearer the key (-15/-14 -> -24/-23)
-    assert keys[-24] == "fill_answer_write_failed" and keys[-23] == "fill_answers_absent"
-    # FILL lane 3 landed first and sits between E14's name and these two (take_in_band -16 -> -28)
-    assert keys[-28] == "take_in_band" and keys[-27] == "exit_take_in_band" and keys[-25] == "order_open_his_exit"
+    # FILL lane 5 (three names), E22 (FILL lane 22, four), FILL lane 11 (one) and E21 (FILL lane 10, six) landed after this lane and placed theirs nearer the key (-15/-14 -> -29/-28) -- FILL lane 16 (one name, turn_woke_fast) landed first, so every index here moved by one more
+    assert keys[-30] == "fill_answer_write_failed" and keys[-29] == "fill_answers_absent"
+    # FILL lane 3 landed first and sits between E14's name and these two (take_in_band -16 -> -33)
+    assert keys[-34] == "take_in_band" and keys[-33] == "exit_take_in_band" and keys[-31] == "order_open_his_exit"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")

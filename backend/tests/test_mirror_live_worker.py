@@ -4965,8 +4965,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # E20 by its one, E14b (FILL lane 1) by its one and E14 (FILL lane 2) by its one `take_in_band`: -89 -> -92;
     # FILL lane 3 by its three `exit_take_in_band` / `cover_in_band` / `order_open_his_exit`: -92 -> -95; T2 (FILL lane 4) by its two: -95 -> -97; FILL lane 5 by its three: -97 -> -100;
     # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104) and FILL lane 11 by its one (-> -105);
-    # FILL lane 16 by its one `turn_woke_fast` (-> -106)
-    assert keys[-106:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    # E21 (FILL lane 10) by its six fast_* names (-> -111) -- FILL lane 16 (one name, turn_woke_fast) landed first, so every index here moved by one more
+    assert keys[-112:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -5082,6 +5082,14 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # before E19's name (keys[-13]) and `registered_no_increase`
                           # (keys[-12]), after FILL lane 11's one (keys[-14])
                           "turn_woke_fast",
+                          # E21 (FILL lane 10): the fast tick's bare order_open refusal
+                          # counted by name; the adding wake admitted with an entry rest
+                          # standing; which branch _act took on it (kept / replaced /
+                          # took); the fast step O's blank status read (no freeze) --
+                          # before E19's name (keys[-13]) and `registered_no_increase`
+                          # (keys[-12]), after FILL lane 11's one (keys[-19:-13])
+                          "fast_order_open", "fast_his_add", "fast_add_kept", "fast_add_replaced",
+                          "fast_add_took", "fast_status_unread",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5098,7 +5106,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "book_quiet_skipped",
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
-    assert keys[-107] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and FILL lane 16's one before the tail
+    assert keys[-113] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E21's six before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -13166,6 +13174,15 @@ def test_c16_the_turn_wake_name_is_emitted_here_too(monkeypatch):
     from tests import test_fill_c16_turn_wakes as c16
     c16.test_c16_every_name_is_emitted_here(monkeypatch)
     assert "turn_woke_fast" in SEEN
+def test_e21_the_fast_add_names_are_emitted_here_too(monkeypatch):
+    """E21's six names (FILL lane 10) are driven in tests/test_e21_fast_add_replan.py
+    (book 760's three wakes, the E9 order_open fixture, the blank status
+    read); run here as well so the coverage read below sees them when this
+    file runs alone (E13's convention)."""
+    from tests import test_e21_fast_add_replan as e21
+    e21.test_e21_every_name_is_emitted_here(monkeypatch)
+    for name in e21.NEW_NAMES:
+        assert name in SEEN, name
 def test_l7_event_stale_is_emitted_on_a_dated_candidate_with_no_fill_of_his_in_a_day():
     """L7 (2026-09-08): a candidate whose slug's own date is more than one
     day past with no fill of his in a day is refused `event_stale` --
@@ -13184,6 +13201,24 @@ def test_l7_event_stale_is_emitted_on_a_dated_candidate_with_no_fill_of_his_in_a
     assert ml._event_stale_memo.pop(("rn1", CID)) == NOW
     assert [r["refusal"] for r in p.cand_refusals] == ["event_stale"]
     assert "event_stale" in SEEN
+
+
+def test_e22_the_lost_fill_names_are_emitted_here_too(monkeypatch):
+    """E22's four names (FILL lane 22) are driven in tests/test_e22_lost_fill_adopt.py
+    (book 863's shape adopted; the log naming nothing; the log unreadable;
+    two order ids at the lost size); run here as well so the coverage read
+    below sees them when this file runs alone (E13's convention; the hook
+    E22's landing left out -- task 89's class, added at FILL lane 10's landing)."""
+    from tests import test_e22_lost_fill_adopt as e22
+    for scenario in (e22.test_e22_book_863_the_lost_row_is_adopted_when_the_position_proves_it_and_the_book_thaws_next_tick,
+                     e22.test_e22_the_log_naming_nothing_is_unexplained_and_books_nothing,
+                     e22.test_e22_the_log_unreadable_is_unread_and_books_nothing,
+                     e22.test_e22_two_order_ids_at_the_lost_size_is_ambiguous):
+        ml._lost_fill_read_at.clear()                  # book ids repeat across that file's pools (its own reset)
+        scenario(monkeypatch)
+    ml._lost_fill_read_at.clear()
+    for name in e22.NEW_NAMES:
+        assert name in SEEN, name
 
 
 def test_every_census_key_was_emitted_at_least_once_across_this_file():

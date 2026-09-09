@@ -400,15 +400,17 @@ def test_c14_a_fast_tick_that_skipped_everything_is_prelude_alone(monkeypatch):
 def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_stamp_never_branches():
     def h(f):
         return hashlib.sha256(inspect.getsource(f).encode()).hexdigest()[:16]
-    # sha256[:16] of the sources on 219f140 (the batch's tip): nothing here reads the ring or the prelude
-    assert h(ml._act) == "e12f1473638f8669" and h(ml._place) == "cda203e2cef0e179"
-    assert h(ml._place_reserved) == "ff3f806a5ff00b2a" and h(ml._entry_take) == "c54fe79f062ec55e"
-    assert h(ml._fast_gate) == "83032baf48677574" and h(ml._fast_book) == "108393236e7e6f3f"
+    # sha256[:16] of the sources on the landing tip after lane 16 and E21 (FILL lane 10, the add's take: _act / _place /
+    # _place_reserved / _entry_take / _fast_gate / _fast_book and rules.order_decision are its), re-cut at landing from
+    # 219f140's: nothing here reads the ring or the prelude, and this lane touches none of them
+    assert h(ml._act) == "42e08939276dcd0a" and h(ml._place) == "ab568476817cf795"
+    assert h(ml._place_reserved) == "6c83b8e547c83e0a" and h(ml._entry_take) == "2266c2b346674491"
+    assert h(ml._fast_gate) == "1932811194268668" and h(ml._fast_book) == "286e6fa4663c3887"
     assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "a0061ad32302a610"
     assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "51b72e7567d9f197"
     # 219f140 read 9898ac1e343b5e41; the owner's $10,000 loss stop (863ad77, docs 62) landed ahead of
     # this lane and moved the module's hash -- the lane itself touches nothing in rules
-    assert h(rules) == "eccc04d1d7108d28", "mirror_live_rules untouched by this lane"
+    assert h(rules) == "308fd0c45fb78448", "mirror_live_rules untouched by this lane"
     for f in (ml._act, ml._place, ml._place_reserved, ml._entry_take, ml._fast_gate, ml._fast_book,
               ml._fast_candidate, ml._tick_book, ml._walk_candidate, ml._tick):
         s = inspect.getsource(f)

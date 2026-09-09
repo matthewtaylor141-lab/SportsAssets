@@ -755,11 +755,25 @@ def test_x1_the_fast_gate_names_order_open_his_exit_on_his_reducing_fill_with_an
     _walk()
     fs2 = _fast(p2, v2)
     assert _skips(fs2) == {CID: "order_open"} and _census(fs2, "order_open_his_exit") == 0 and not _cancels(v2)
-    # book 611's shape: his net still GROWING on the wake (adds only after the clock): `order_open`
+    # book 611's shape: his net still GROWING on the wake (adds only after the clock): never this
+    # lane's name. Before E21 (FILL lane 10) the wake was `order_open`; E21 admits the ADDING wake
+    # behind rules.MIRROR_FAST_ADD_REPLAN (the rest 30 s old is kept under the floor, nothing
+    # cancelled) -- re-pinned under the switch OFF (today byte for byte) and ON (admitted)
     p3, b3, v3 = _rest_book([_fill(M, "BUY", 300, 0.31, NOW - 3000), _fill(M, "BUY", 50, 0.32, NOW - 5)])
     _walk()
-    fs3 = _fast(p3, v3)
+    rules.MIRROR_FAST_ADD_REPLAN = False
+    try:
+        fs3 = _fast(p3, v3)
+    finally:
+        rules.MIRROR_FAST_ADD_REPLAN = True
     assert _skips(fs3) == {CID: "order_open"} and _census(fs3, "order_open_his_exit") == 0
+    # (the same shape with his add at his cent 0.31 -- the ask 0.32 above it, so no take -- and the
+    # per-market read agreeing with his 350: the rest 30 s old is kept under the floor)
+    p3b, b3b, v3b = _rest_book([_fill(M, "BUY", 300, 0.31, NOW - 3000), _fill(M, "BUY", 50, 0.31, NOW - 5)])
+    _walk()
+    fs3b = _fast(p3b, v3b, http=_mkt(350.0))
+    assert _skips(fs3b) == {} and _census(fs3b, "order_open_his_exit") == 0 and _census(fs3b, "fast_his_add") == 1
+    assert _census(fs3b, "kept_min_life") == 1 and not _cancels(v3b) and not _places(v3b)
     # his sale clocked AT or BEFORE the reference: no witness, `order_open`
     p4, b4, v4 = _rest_book(fills, ref_at=NOW - 5)
     _walk()
@@ -797,9 +811,13 @@ def test_x1_the_fast_gates_split_fails_closed_to_order_open_when_the_fills_canno
     assert ml._order_open_his_exit(t, {**book, "last_plan": {"reduce_ref": {"at": "soon"}}}, fills) is False
     assert ml._order_open_his_exit(t, {**book, "last_plan": None}, fills) is False
     assert ml._order_open_his_exit(t, book, [fills[0]]) is False, "no reducing fill after the clock"
-    # the gate itself: with no fills the clause is `order_open` byte for byte; the split reads fills only
+    # the gate itself: with no fills the clause is `order_open` byte for byte; the split reads fills only.
+    # E21 (FILL lane 10) re-pinned the clause's text: this lane's exit test still runs FIRST, and the
+    # adding wake's admission sits after it behind rules.MIRROR_FAST_ADD_REPLAN, else `order_open`
     gsrc = inspect.getsource(ml._fast_gate)
-    assert 'if fills is not None and _order_open_his_exit(t, book, fills):\n            return "order_open_his_exit"\n        return "order_open"' in gsrc
+    assert ('if fills is not None and _order_open_his_exit(t, book, fills):\n            return "order_open_his_exit"\n'
+            '        if not (fills is not None and rules.MIRROR_FAST_ADD_REPLAN and _order_open_his_add(t, book, fills)):\n'
+            '            return "order_open"') in gsrc
     gbody = gsrc.split('"""')[2]
     assert "take_band" not in gbody and "band_cent" not in gbody
     assert "_cancel_and_settle" not in gbody and "_place(" not in gbody, "the gate reads; it never cancels or places"
@@ -904,9 +922,9 @@ def test_x1_the_shadow_exit_census_reports_the_bands_rate_and_unfilled_share_bes
 
 def test_x1_the_census_names_sit_before_drift_smaller_open_the_pins_hold_and_every_name_is_emitted():
     keys = ml.CENSUS_KEYS
-    # T2 (FILL lane 4, two names), FILL lane 5 (three), E22 (FILL lane 22, four), FILL lane 11 (one) and FILL lane 16 (one) landed after this lane and sit nearer the key (-16:-13 -> -27:-24)
-    assert keys[-27:-24] == NEW_NAMES
-    assert keys[-28] == "take_in_band" and keys[-29] == "exit_take_rested" and keys[-30] == "wrong_sign_hold"
+    # T2 (FILL lane 4, two names), FILL lane 5 (three), E22 (FILL lane 22, four), FILL lane 11 (one) and E21 (FILL lane 10, six) landed after this lane and sit nearer the key (-16:-13 -> -32:-29) -- FILL lane 16 (one name, turn_woke_fast) landed first, so every index here moved by one more
+    assert keys[-33:-30] == NEW_NAMES
+    assert keys[-34] == "take_in_band" and keys[-35] == "exit_take_rested" and keys[-36] == "wrong_sign_hold"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert len(set(keys)) == len(keys)
