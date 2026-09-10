@@ -131,6 +131,7 @@ WITH t AS (
    WHERE lower(w.username) = 'rn1'
 ), s AS (
   SELECT tx_hash, asset, side, source, count(*) AS n, sum(sh) AS shares, sum(usd) AS usd,
+         min(ts) AS ts0,
          string_agg(round(px::numeric, 6)::text || '@' || round(sh::numeric, 4)::text,
                     '|' ORDER BY px, sh) AS ms
     FROM t GROUP BY 1, 2, 3, 4
@@ -142,7 +143,7 @@ WITH t AS (
          (array_agg(ms ORDER BY source))[1] AS ms1,
          (array_agg(ms ORDER BY source))[2] AS ms2,
          string_agg(DISTINCT source, '+' ORDER BY source) AS srcs,
-         min(ts)::date AS d
+         min(ts0)::date AS d
     FROM s GROUP BY 1, 2, 3
 )
 SELECT srcs AS sources, n_sources,
