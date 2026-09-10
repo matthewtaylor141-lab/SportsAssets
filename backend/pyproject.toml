@@ -18,6 +18,11 @@ dependencies = [
     "reportlab>=4.0",
     "py-clob-client>=0.17",
     "polymarket-us>=0.1.2",
+    # E35 (2026-09-10): the institutional preprod adapter (sportsassets/pmx.py)
+    # signs its RS256 client assertion with PyJWT (cryptography above is
+    # its backend) and speaks REST through requests
+    "PyJWT>=2.7",
+    "requests>=2.31",
 ]
 
 [project.optional-dependencies]

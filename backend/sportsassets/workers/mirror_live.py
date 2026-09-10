@@ -16269,18 +16269,47 @@ def _mode_line(stats: dict, ticks: int, loss: dict | None = None,
              extra, {k: v for k, v in stats.items() if k not in ("census", "recent")})
 
 
+VENUE_RETAIL = "retail"
+VENUE_PMX_PREPROD = "pmx_preprod"
+
+
+def _venue_module() -> tuple[str, Any]:
+    """E35 (2026-09-10): the venue adapter module the loop binds as
+    `pmus` -- (name, module) by the MIRROR_VENUE environment value.
+    `retail` (the default: unset or blank) is today's `from .. import
+    pmus`, so with the variable unset the loop's behaviour is byte for
+    byte what it was; `pmx_preprod` is the institutional PRE-PRODUCTION
+    adapter (sportsassets.pmx), which implements the same attribute
+    contract (inst/VENUE_CONTRACT.md) and has no production host. Any
+    other word REFUSES at startup by name: a venue the operator
+    misspelt must never run as a silent retail."""
+    name = str(os.environ.get("MIRROR_VENUE") or "").strip().lower() or VENUE_RETAIL
+    if name == VENUE_RETAIL:
+        from .. import pmus
+        return name, pmus
+    if name == VENUE_PMX_PREPROD:
+        from .. import pmx
+        return name, pmx
+    raise RuntimeError(f"mirror_live: MIRROR_VENUE={name!r} is neither "
+                       f"{VENUE_RETAIL!r} nor {VENUE_PMX_PREPROD!r}")
+
+
 async def main() -> None:
     """The loop. PMUS_MIRROR=off is a running cancel-only loop, never an
     idle one: a deploy that drops the flag must still cancel what the
     previous process left resting."""
     import httpx
 
-    from .. import pmus
+    venue, pmus = _venue_module()
 
     pool = await get_pool()
     cfg = settings()
     log.info("mirror_live up: PMUS_MIRROR=%s allowlist=%s poll=%ss",
              os.environ.get("PMUS_MIRROR", "off"), sorted(le.mirror_allowlist()), POLL_S)
+    if venue != VENUE_RETAIL:
+        # E35: said once at startup and on every heartbeat (below); the
+        # retail default logs and publishes exactly what it did before
+        log.info("mirror_live: venue=%s adapter=%s", venue, getattr(pmus, "__name__", "?"))
     async with httpx.AsyncClient(base_url=cfg.data_api_base, timeout=25.0) as http:
         _arm_fast(pool, pmus, http)     # E9: a wake may now run a fast tick before the next poll
         ticks = 0
@@ -16288,6 +16317,12 @@ async def main() -> None:
             try:
                 stats = await tick_once(pool, pmus, http)
                 ticks += 1
+                if venue != VENUE_RETAIL:
+                    # E35: the heartbeat names the venue the tick ran on,
+                    # appended AFTER the base block (`integ` keeps its place
+                    # under the health endpoint's 40-key cap); absent, as
+                    # before, under the retail default
+                    stats["venue"] = venue
                 try:
                     await heartbeat(SERVICE, str(stats.get("status") or "ok"), stats)
                 except Exception:  # noqa: BLE001
