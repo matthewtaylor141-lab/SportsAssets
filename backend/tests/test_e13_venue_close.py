@@ -157,11 +157,14 @@ def test_e13_a_frozen_book_with_shares_held_is_never_closed_on_the_venues_word_a
     p = _e5_pool(fills=_his(300, sold=200), snap=None)
     b = _frozen_long(p)
     _seed(NOW - 2000, confirmed=EXPIRED)
-    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=500)
+    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, lift=500)
     st = _tick(p, v, http=_mkt(100))
     assert b["state"] == "frozen" and b["frozen_reason"] == "placement_lost"
     assert _census(st, "venue_market_ended") == 0 and _census(st, "frozen_reduce") == 1
-    assert [c[2:5] for c in _places(v)] == [(0.30, 500, True)]
+    # E31 (FILL lane 31, 2026-09-10): the frozen exit is a post-only rest at the
+    # maker wire max(sell_wire(his 0.31), bid 0.30 + MAKER_TICK) = 0.31, lifted at
+    # create -- where it was ONE IOC at the take cent 0.30
+    assert [c[2:5] for c in _places(v)] == [(0.31, 500, True)]
     assert ml._terminal_book_seen == {} and ml._terminal_book_confirmed == {}, "OPEN clears it"
     assert not _state_writes(p, b["id"])
     # the market read EXPIRED on the held frozen book (43 itself): memo, no close, still frozen

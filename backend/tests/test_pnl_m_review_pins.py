@@ -235,9 +235,11 @@ def test_every_lane_m_statement_runs_on_the_real_schema_and_the_hourly_is_one_st
             world.rows(s)
         world.run(sql)
     hourly = _preset("hourly")[0]
-    # nine since FILL lane 0b's take-band (was eight); ten since FILL lane 14's tick-ring
-    assert hourly.count("AS section;") == 10 and "'== paired-ratio'" in hourly and "'== fills-missed'" in hourly \
-        and "'== on-target-why'" in hourly and "'== take-band'" in hourly and "'== tick-ring'" in hourly
+    # nine since FILL lane 0b's take-band (was eight); ten since FILL lane 14's
+    # tick-ring; ELEVEN since FILL lane 31's maker-rests (E31, 2026-09-10)
+    assert hourly.count("AS section;") == 11 and "'== paired-ratio'" in hourly and "'== fills-missed'" in hourly \
+        and "'== on-target-why'" in hourly and "'== take-band'" in hourly and "'== tick-ring'" in hourly \
+        and "'== maker-rests'" in hourly
     for bad in ("INSERT", "UPDATE", "DELETE", "DROP", "TRUNCATE", "ALTER"):
         for name in PRESETS + ("hourly",):
             assert bad not in _preset(name)[0], (name, bad)

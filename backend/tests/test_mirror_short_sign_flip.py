@@ -16,7 +16,7 @@ import pytest
 from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.workers import mirror_live as ml
 from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse fixture arms every tick
-    BUY, COVER_AT_CEILING_BIPS, INTENT, M, N, NOW, SELL, SHORT, SLUG, _armed, _census, _his, _kinds, _mkt, _places, _pool,
+    BUY, COVER_AT_CEILING_BIPS, GTC_TIF, INTENT, M, N, NOW, SELL, SHORT, SLUG, _armed, _census, _his, _kinds, _mkt, _places, _pool,
     _short_book, _shorts_on, _tick, _Venue,
 )
 
@@ -74,13 +74,17 @@ def test_a_short_book_flattens_by_its_priced_cover_on_his_flip_to_long_and_the_l
     # an open short book of 300, and his net now +300 (the default fixture: 300 long, none other)
     p = _pool()
     b = _short_book(p, ledger=-300)
-    v = _Venue(held={SLUG: -300}, ioc_fill=300.0)
+    v = _Venue(held={SLUG: -300}, lift=300.0)
     st = _tick(p, v)
     assert _census(st, "sign_flip") == 1 and b["target"] == 0 and b["last_plan"]["sign_flip"] is True
-    # the cover (S4): one IOC at the ceiling cent (his BUY 0.31 + 0.01), never close_position
-    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.32, 300, True, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")]
+    # the cover (S4) RE-PINNED AT E31 (FILL lane 31, 2026-09-10): a POST-ONLY
+    # REST at the maker wire min(floor(his 0.31), ask 0.32 - MAKER_TICK) = 0.31,
+    # GTC, lifted at create -- where it was ONE IOC at the ceiling cent 0.32
+    # (his BUY 0.31 + a cent). Still never close_position, and the cover costs a
+    # cent less: the realized P&L is (0.32 - 0.31) x 300 where it was zero
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)]
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
-    assert b["realized_pnl"] == pytest.approx((0.32 - 0.32) * 300)
+    assert b["realized_pnl"] == pytest.approx((0.32 - 0.31) * 300)
     # flat by the cover inside the tick: the venue was read at -300
     # BEFORE the cover, so the close waits for the venue's own 0 (review
     # M-1) -- the book stays live, not_due, this tick

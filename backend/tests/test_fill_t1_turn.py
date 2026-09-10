@@ -185,7 +185,7 @@ def test_t1_book_467s_shape_a_short_flipped_long_closes_under_a_turn_and_the_lon
     _shorts_on(monkeypatch)
     p = _pool()                                   # his net +300: the default fixture
     b = _short_book(p, ledger=-300)
-    v = _Venue(held={SLUG: -300}, ioc_fill=300.0)
+    v = _Venue(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st = _tick(p, v)
     assert _census(st, "sign_flip") == 1 and b["last_plan"]["sign_flip"] is True and b["ledger_net"] == 0
     assert b["state"] == "live" and "turn" not in b["last_plan"], "the close waits for the venue's own 0"
@@ -272,7 +272,7 @@ def test_t1_the_turn_carries_the_close_ticks_net_never_the_rows_last_written_one
     _shorts_on(monkeypatch)
     p = _pool()                                   # his +300: the default fixture
     b = _short_book(p, ledger=-300)
-    _tick(p, _Venue(held={SLUG: -300}, ioc_fill=300.0))
+    _tick(p, _Venue(held={SLUG: -300}, ioc_fill=300.0, lift=300.0))
     assert b["last_plan"]["sign_flip"] is True and b["ledger_net"] == 0 and b["last_plan"]["net"] == 300.0
     p.fills, p.snap = _his(500), {M: 500.0, N: 0.0}
     st2 = _tick(p, _Venue(held={}), now=NOW + 30, http=_mkt(500.0, 0.0))
@@ -595,9 +595,9 @@ def test_t1_the_census_place_the_emit_sites_the_call_sites_and_no_knob():
     # E22 (FILL lane 22, four names) and FILL lane 11 (one) placed theirs after these three, nearer the key (-16:-13 -> -21:-18) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names nearer the key (-21:-18 -> -27:-24, -27 -> -33)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-34:-31 -> -38:-35, -40 -> -44)
-    assert keys[-52:-49] == NEW_NAMES
+    assert keys[-62:-59] == NEW_NAMES
     # FILL lane 3 (three names) and T2 (two) landed ahead of this lane and sit between E14's name and these three (take_in_band -17 -> -22 -> -27)
-    assert keys[-58] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-68] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)

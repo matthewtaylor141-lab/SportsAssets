@@ -76,7 +76,16 @@ def test_review_l6_c1_worker_his_witnessed_sale_re_quotes_the_young_rest_down_at
     was NOT cancelled (`kept_min_life`, `add_pending` 200, the row open
     for 300 against a target of 200 for the floor's life). Now it is
     cancelled and re-placed at 200 this tick, `replace_qty` on the row,
-    as before the patch."""
+    as before the patch.
+
+    RE-PINNED at E31 (FILL lane 31, 2026-09-10) -- the re-placed cent
+    0.30 -> 0.31. The book is 0.30 / 0.32 and his level is 0.31. Before
+    this lane a BUY rested at buy_price(his, bid) = floor(min(0.31,
+    0.30)) = 0.30, JOINING THE BID; the maker wire is min(buy_wire(0.31),
+    0.32 - 0.01) = 0.31 -- his own cent, inside the spread and a tick
+    under the ask. Nothing else moves: the cancel, the 200, the
+    `replace_qty` and the two census readings are this test's subject and
+    are byte for byte."""
     p = _pool(fills=_his(300, sold=100), snap={M: 200.0, N: 0.0})
     b = p.add_book(ledger=0)
     o = p.add_order(b, wire=0.30, qty=300, placed_ts=NOW - 20)
@@ -84,7 +93,7 @@ def test_review_l6_c1_worker_his_witnessed_sale_re_quotes_the_young_rest_down_at
     v.rest("oid-1", "BUY", 0.30, 300)
     st = _tick(p, v, http=_mkt(200.0))
     assert b["target"] == 200 and b["drift"] == 0.0, "no drift: the readings agree at 200"
-    assert [c[1] for c in _cancels(v)] == ["oid-1"] and [c[2:6] for c in _places(v)] == [(0.30, 200, False, GTC_TIF)]
+    assert [c[1] for c in _cancels(v)] == ["oid-1"] and [c[2:6] for c in _places(v)] == [(0.31, 200, False, GTC_TIF)]
     assert p.orders[o["id"]]["state"] == "cancelled" and b["last_plan"]["replaced"] == "replace_qty"
     assert _census(st, "kept_min_life") == 0 and "add_pending" not in b["last_plan"]
 
@@ -97,9 +106,17 @@ def test_review_l6_h1_the_re_read_precedes_the_rooms_read_FIX():
     the builder's pin read "refused before the room" against _room_take
     alone; E2's invariant is on the READ, and an await between the two
     let two games' IOCs both spend the last clip. Now the re-read sits
-    before the room's read."""
+    before the room's read.
+
+    RE-PINNED at E31 (FILL lane 31, 2026-09-10): `_ioc_reread` is gone
+    with the IOC, and `_rest_reread` -- the touch-bound rest's one paced
+    read (E31 D) -- stands at exactly the same site, for exactly this
+    reason. The ORDER this test pins is the finding, and it is unchanged:
+    the re-read, then the room's read, then the reservation, with no
+    await between the last two."""
     src = inspect.getsource(ml._place_reserved)
-    assert src.index("held = await _ioc_reread(") < src.index("qty = _room_qty(") < src.index("_room_take(t, est)")
+    assert "_ioc_reread" not in src, "E31: no IOC, no IOC re-read"
+    assert src.index("wire = await _rest_reread(") < src.index("qty = _room_qty(") < src.index("_room_take(t, est)")
     # the E2 rule the order once broke, in the worker's own words
     assert "nothing between this read and the take" in src and "No await between the read and the reservation" in inspect.getsource(ml._op_slot)
 
@@ -110,22 +127,35 @@ def test_review_l6_m1_a_one_sided_re_read_is_named_unread_FIX():
     """Folded 2026-09-08. The re-read hands back a bid and NO ask (a
     one-sided book, a half-failed read). Before the fold: `ask_moved`
     with ask_at_send None -- the name said the ask moved when it was
-    never read. Now `ioc_quote_unread`; still no IOC, the rest placed."""
+    never read. Now the read is named unread; still no take, the rest
+    placed.
+
+    RE-PINNED at E31 (FILL lane 31, 2026-09-10). The finding is the
+    naming of a HALF-READ QUOTE at the send, and the send that carries it
+    moved: `_ioc_reread` (the IOC's) -> `_rest_reread` (the touch-bound
+    rest's, E31 D), so `ioc_quote_unread` -> `rest_quote_unread`. E18's
+    world lands on the new site unchanged -- his 0.30 on a 0.29 / 0.30
+    book makes the maker wire min(0.30, 0.30 - 0.01) = 0.29, which IS the
+    touch bound, so the re-read fires exactly where the IOC's did. The
+    third leg's outcome is the one that changes: with the ask read at
+    0.30 the old code sent an IOC AT 0.30 (through the ask); the maker
+    rest goes out at 0.29, a tick under it, and `ask_at_send` on the row
+    still records the 0.30 the re-read saw."""
     p, b, v = _take_world([(0.29, 0.30), (0.29, None)])
     st = _tick(p, v)
-    assert _census(st, "ioc_quote_unread") == 1 and _census(st, "ask_moved") == 0
-    assert "ask_moved" not in b["last_plan"]
+    assert _census(st, "rest_quote_unread") == 1 and _census(st, "ask_moved") == 0
+    assert "ask_moved" not in b["last_plan"] and _census(st, "ioc_quote_unread") == 0
     assert [c[2:6] for c in _places(v)] == [(0.29, 300, False, GTC_TIF)] and b["ledger_net"] == 0
     assert len(_inserts(p)) == 1 and _inserts(p)[0][5] == "GTC"
     # a re-read with NEITHER side is unread as before
     p2, b2, v2 = _take_world([(0.29, 0.30), (None, None)])
     st2 = _tick(p2, v2)
-    assert _census(st2, "ioc_quote_unread") == 1 and _census(st2, "ask_moved") == 0
-    # the ask present and at his cent, the bid absent: a BUY needs the ask alone -- sent
+    assert _census(st2, "rest_quote_unread") == 1 and _census(st2, "ask_moved") == 0
+    # the ask present, the bid absent: a BUY's clamp needs the ask alone -- read, not unread
     p3, b3, v3 = _take_world([(0.29, 0.30), (None, 0.30)])
     st3 = _tick(p3, v3)
-    assert _census(st3, "ioc_quote_unread") == 0 and _census(st3, "ask_moved") == 0
-    assert [c[2:6] for c in _places(v3)] == [(0.30, 300, False, IOC_TIF)] and _inserts(p3)[0][19] == 0.30
+    assert _census(st3, "rest_quote_unread") == 0 and _census(st3, "ask_moved") == 0
+    assert [c[2:6] for c in _places(v3)] == [(0.29, 300, False, GTC_TIF)] and _inserts(p3)[0][19] == 0.30
 
 
 # ------------------------------------------------------------------ M2

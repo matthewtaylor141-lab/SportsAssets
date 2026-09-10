@@ -204,7 +204,9 @@ def test_l2_an_unreadable_re_arm_read_is_the_full_window_and_the_stop(monkeypatc
     assert ml._last_sleeve == {"sum": -10.0, "limit": 5000.0, "since": None}
     assert ("cancel", "oid-1", SLUG) in v.calls
     pl = _places(v)
-    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl   # the IOC that filled nothing, then its same-tick rest at his cent (E14b; the reduce, as L1 pinned it)
+    # E31: ONE post-only rest of 200 at his cent (the reduce, as L1 pinned it),
+    # where it was the IOC that filled nothing and then E14b's same-tick rest
+    assert [c[3:6] for c in pl] == [(200, True, GTC_TIF)], pl
 
 
 def test_l2_an_unreadable_ledger_still_refuses_by_name(monkeypatch):

@@ -71,17 +71,27 @@ def test_e30r_the_warning_is_once_per_book_and_per_status_code(monkeypatch, capl
 
 
 def test_e30r_the_exit_rest_at_his_cent_goes_out_on_a_long_book_whose_add_streak_is_three_deep():
-    """e14b's book 334 shape (his 0.549: take 0.54, rest 0.55; the IOC
-    withheld `bid_moved` -> the 358 REST at 0.55, a SELL GTC) with the
-    book's ADD streak seeded three deep five seconds ago (side BUY, the
-    long's add side): the exit rest goes out exactly as e14b pins it --
-    a reduce is never judged, never held; post_only_backoff 0."""
+    """e14b's book 334 shape (his 0.549 -> the 358 REST at 0.55, a SELL
+    GTC) with the book's ADD streak seeded three deep five seconds ago
+    (side BUY, the long's add side): the exit rest goes out exactly as
+    e14b pins it -- a reduce is never judged, never held;
+    post_only_backoff 0.
+
+    RE-PINNED at E31 (FILL lane 31, 2026-09-10) -- the CENT and the TIF
+    are unmoved (0.55, a SELL GTC: his 0.549 ceils to 0.55 and the bid at
+    0.54 puts the maker bound at 0.55 too, so the clamp does not bite),
+    but the two names that said WHY it rested are gone with the take:
+    `exit_take_rested` 1 -> 0 and `bid_moved` 1 -> 0 were the withheld
+    IOC's words, and no IOC is considered any more. This lane's own
+    `maker_rest_at_touch` is 0 because his cent, not the touch, set the
+    wire; `rest_placed` 1 is unchanged."""
     p, b = _exit_world(0.549, 358)
     _seed(b, side=BUY, wire=0.60, ledger=716.0)
     v = _MovingVenue([(0.54, 0.56), (0.53, 0.56)], held={SLUG: 716}, ioc_fill=358.0)
     st = _tick(p, v, http=_mkt(358.0))
     assert [c[2:6] for c in _places(v)] == [(0.55, 358, True, GTC_TIF)], "the exit rest at his cent, a GTC"
-    assert _census(st, "rest_placed") == 1 and _census(st, "exit_take_rested") == 1 and _census(st, "bid_moved") == 1
+    assert _census(st, "rest_placed") == 1 and _census(st, "exit_take_rested") == 0 and _census(st, "bid_moved") == 0
+    assert _census(st, "maker_rest_at_touch") == 0, "his cent set the wire, not the touch"
     assert _census(st, "post_only_backoff") == 0 and "hold" not in b["last_plan"]
     assert b["last_reason"] != "post_only_backoff" and b["open_order_id"] is not None and b["ledger_net"] == 716
 

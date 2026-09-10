@@ -188,8 +188,10 @@ def test_exits_band_sits_after_take_band_with_the_help_line_regenerated_and_stay
     line = next(ln for ln in text.splitlines() if ln.lstrip().startswith('*) echo "sql: arg must be one of'))
     names = line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)
-    assert names == labels and names.index("exits-band") == names.index("take-band") + 1
-    assert names[-1] == "hourly" and "|exits-paired|take-band|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
+    # E31 (FILL lane 31, 2026-09-10): `maker-rests` was added between take-band and exits-band
+    assert names == labels and names.index("exits-band") == names.index("take-band") + 2
+    assert names[names.index("take-band") + 1] == "maker-rests"
+    assert names[-1] == "hourly" and "|exits-paired|take-band|maker-rests|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
     h, _ = _preset(text, "hourly")
     assert "exits-band" not in h and "settled_when_unfilled" not in h and "usd_unfilled" not in h
     hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()

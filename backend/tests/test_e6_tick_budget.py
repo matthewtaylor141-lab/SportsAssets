@@ -236,7 +236,11 @@ def test_e6_a_book_with_an_open_order_is_never_skipped():
     v = _Venue()
     for i in range(4):
         st = _tick(p, v, now=NOW + 30 * i)
-        assert _census(st, "book_quiet_skipped") == 0 and _bbos(v).count(SLUG) == i + 1, i
+        # E31 (C): a book that PLACES reads its market twice -- the rest's cent
+        # is the touch bound (min(buy_wire(0.31), ask 0.32 - MAKER_TICK) = 0.31),
+        # so one more paced read goes out before the send. The first tick places
+        # and reads twice; the ticks after keep the rest and read once
+        assert _census(st, "book_quiet_skipped") == 0 and _bbos(v).count(SLUG) == i + 2, i
         assert b["open_order_id"] is not None and b["id"] not in ml._quiet_deferred
         assert ml._quiet_memo[b["id"]]["quiet"] is False
 
@@ -267,8 +271,10 @@ def test_e6_a_not_on_target_book_is_never_skipped():
     st = _tick(p2, v2)
     assert _places(v2) and _timing(st)["placed"] == 1 and _census(st, "book_quiet_skipped") == 0
     st2 = _tick(p2, v2, now=NOW + 30)
-    # E18: each tick's exit IOC re-reads the quote once before its send (two reads a tick)
-    assert _census(st2, "book_quiet_skipped") == 0 and len(_bbos(v2)) == 4
+    # E18 RE-PINNED AT E31: the exit's IOC and its own re-read are gone. Tick 1
+    # reads twice (the plan's read, then the touch-bound re-read before the
+    # rest goes out at 0.31); tick 2 keeps that rest and reads once -- 4 -> 3
+    assert _census(st2, "book_quiet_skipped") == 0 and len(_bbos(v2)) == 3
 
 
 def test_e6_a_book_with_his_fill_inside_hot_s_is_never_skipped():
@@ -674,8 +680,21 @@ def test_e6_quiet_exit_plans_are_census_names_and_money_is_covered_by_the_other_
     with the exit clause emptied a book that reduced last tick is still
     hot by row."""
     src = inspect.getsource(ml)
+    # E31 (FILL lane 31, 2026-09-10): FOUR OF THE FIVE NAMES ARE RETIRED WORDS
+    # AND STAY IN THE SET ON PURPOSE. `exit_take`, `take_at_his_level`,
+    # `exit_take_in_band` and `cover_in_band` left with the take paths and have
+    # no emit site left -- but a ROW WRITTEN BEFORE THIS LANE still carries one
+    # as its last_reason, and _exit_plan_stands reads rows, not this process's
+    # census: dropping them would make yesterday's reduced book read QUIET and
+    # skip its read. So the pin splits: the one name still emitted must have its
+    # site, and the four retired ones must have NONE (which is what says the
+    # take is gone) while staying in the set
+    live_names = {"reduce_unfilled"}
+    assert ml.QUIET_EXIT_PLANS - live_names == {"exit_take", "take_at_his_level",
+                                                "exit_take_in_band", "cover_in_band"}
     for name in sorted(ml.QUIET_EXIT_PLANS):
-        assert f'_mirror_stop("{name}"' in src, name
+        has_site = f'_mirror_stop("{name}"' in src
+        assert has_site is (name in live_names), name
         for field in ("kind", "reason", "last_reason"):
             assert f'{field}="{name}"' not in src and f'"{field}": "{name}"' not in src, (field, name)
     assert ml._exit_plan_stands({"last_reason": "exit_take"}) and ml._exit_plan_stands({"last_plan": {"kind": "reduce_unfilled"}})

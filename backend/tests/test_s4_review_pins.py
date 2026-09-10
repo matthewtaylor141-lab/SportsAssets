@@ -100,7 +100,7 @@ def test_F1_the_read_back_reads_the_venues_own_side_and_a_sell_side_echo_is_refu
                                 "price": {"value": "0.25"}, "quantity": 1, "state": "ORDER_STATE_NEW"})
         assert row["side"] == "SELL" and row["venue_side"] == venue_side
     assert pmus._norm_order({"id": "x", "intent": SELL_SHORT})["venue_side"] is None
-    p, b, v = _unproven_world(ioc_fill=300.0)
+    p, b, v = _unproven_world(ioc_fill=300.0, lift=300.0)
     v.__class__ = _Echo
     v.echo, v.probe_state = {"side": "SELL"}, "new"
     st = _tick(p, v)
@@ -182,7 +182,7 @@ def test_F3_a_429_on_the_probe_in_both_shapes_is_the_circuit_and_writes_the_hour
                                               "error_type": "RateLimitError", "body": None}}
     for shape in ("raise", "raw"):
         venue_kw = {"place_raises": RateLimitError("429")} if shape == "raise" else {"place": _raw}
-        p, b, v = _cover_world(_his(), snap={M: 300.0, N: 0.0}, ioc_fill=300.0, **venue_kw)
+        p, b, v = _cover_world(_his(), snap={M: 300.0, N: 0.0}, ioc_fill=300.0, lift=300.0, **venue_kw)
         _s4_unproven(p, why="wrong_price", at=NOW - 7200)
         st = _tick(p, v)
         rec = p.state[KEY]
@@ -225,18 +225,24 @@ def test_F4_a_lost_cover_rest_is_adopted_by_its_wire_intent_and_a_lost_cover_ioc
         assert not ml._on_book_matches(row, {**ours, "intent": bad}, 0.40, 300), bad
     assert not ml._on_book_matches(row, {**ours, "price": 0.41}, 0.40, 300)
     assert not ml._on_book_matches(row, {**ours, "quantity": 299.0}, 0.40, 300)
-    # the IOC take, lost with nothing resting: frozen placement_lost, the row 'placing';
-    # past the window the trade log names our order (a contract BUY of 300 at 0.41) and books it
+    # THE COVER lost with nothing resting: frozen placement_lost, the row 'placing'; past the
+    # window the trade log names our order (a contract BUY of 300) and books it.
+    # E31: the order that is lost here is no longer the ceiling-cent IOC at 0.41 -- there is
+    # no cover take. It is the MAKER REST at min(floor(his 0.40), ask 0.41 - MAKER_TICK) =
+    # 0.40, GTC, post_only, and the row's `tif` reads GTC where it read IOC. Everything the
+    # test is about -- the lost placement, the freeze, the trade-log adoption by our own
+    # (price, quantity, contract side) and the SELL control -- is unchanged, at the new cent
     p2, b2, v2 = _cover_world(HIS_SELL_N_060, snap=None, bid=0.38, ask=0.41,
                               place_raises=RuntimeError("read timeout"), rest_on_raise=False)
     st2 = _tick(p2, v2, http=_gone())
-    assert [c[2:6] for c in _places(v2)] == [(0.41, 300, True, IOC_TIF)]
+    assert [c[2:6] for c in _places(v2)] == [(0.40, 300, True, GTC_TIF)]
     o2 = next(iter(p2.orders.values()))
-    assert o2["state"] == "placing" and o2["order_id"] is None and o2["tif"] == "IOC"
+    assert o2["state"] == "placing" and o2["order_id"] is None and o2["tif"] == "GTC"
+    assert o2["wire"] == 0.40 and o2["intent"] == SELL_SHORT
     assert b2["state"] == "frozen" and b2["frozen_reason"] == "placement_lost" and b2["ledger_net"] == -300
     assert _census(st2, "placement_lost") == 1
-    trade = {"qty": 300.0, "price": 0.41, "side": "ORDER_SIDE_BUY", "ts": NOW + 1, "realized_pnl": 0.0,
-             "order_id": "venue-77", "order_qty": 300.0, "order_price": 0.41}
+    trade = {"qty": 300.0, "price": 0.40, "side": "ORDER_SIDE_BUY", "ts": NOW + 1, "realized_pnl": 0.0,
+             "order_id": "venue-77", "order_qty": 300.0, "order_price": 0.40}
     v3 = _NoClose(bid=0.38, ask=0.41, held={SLUG: -300}, trades=[trade])
     st3 = _tick(p2, v3, now=NOW + 1300, http=_gone())
     assert o2["order_id"] == "venue-77" and o2["state"] == "filled" and b2["ledger_net"] == 0
@@ -279,7 +285,7 @@ def test_the_proof_semantics_only_a_contract_buy_with_the_closing_intent_at_our_
         ("h: another slug", {"slug": "other-slug"}, "wrong_slug"),
     ]
     for label, echo, why in table:
-        p, b, v = _unproven_world(ioc_fill=300.0)
+        p, b, v = _unproven_world(ioc_fill=300.0, lift=300.0)
         v.__class__ = _Echo
         v.echo, v.probe_state = echo, "new"
         st = _tick(p, v)
@@ -292,7 +298,11 @@ def test_the_proof_semantics_only_a_contract_buy_with_the_closing_intent_at_our_
             assert rec["echo"]["venue_side"] == "ORDER_SIDE_BUY" and rec["echo"]["intent"] == SELL_SHORT, label
             assert rec["echo"]["price"] == px and rec["echo"]["quantity"] == 1.0, label
             assert rec["bid"] == 0.30 and rec["ask"] == 0.32 and rec["price"] == px, label
-            assert covers == [("place", SLUG, 0.32, 300, True, IOC_TIF, SHORT, False, None)], label
+            # E31: the proved cover is no longer the IOC at the CEILING cent 0.32, through
+            # the ask. It is the post-only rest at min(buy_wire(his 0.31), ask - MAKER_TICK)
+            # = 0.31 -- his own cent, GTC, post_only True, never at or through the ask. The
+            # ledger still reaches 0 because this world's taker lifts the fresh rest
+            assert covers == [("place", SLUG, 0.31, 300, True, GTC_TIF, SHORT, True, None)], label
             assert b["ledger_net"] == 0 and _census(st, "s4_proved") == 1, label
         else:
             assert rec["proved"] is False and rec["why"] == why, label
@@ -316,7 +326,7 @@ def test_the_proof_reads_the_orders_state_and_not_its_tif(monkeypatch):
     _shorts_on(monkeypatch)
     for state, proved in (("pending_risk", True), ("new", True), ("pending_new", True),
                           ("filled", False), ("canceled", False)):
-        p, b, v = _unproven_world(ioc_fill=300.0)
+        p, b, v = _unproven_world(ioc_fill=300.0, lift=300.0)
         v.__class__ = _Echo
         v.echo, v.probe_state = {}, state
         v.open_orders = lambda slugs=None, v=v: [v._norm(o) for o in v.orders.values()]   # the venue lists it
@@ -332,8 +342,8 @@ def test_the_proof_reads_the_orders_state_and_not_its_tif(monkeypatch):
 
 def test_every_cover_path_hands_the_adapter_sell_true_with_the_books_buy_short_and_the_real_adapter_wires_sell_short(monkeypatch):
     """For a short book (ledger -300) every cover -- the rest at
-    floor(his), the IOC at the ceiling, the unpriced-vanish IOC, the
-    sign-flip IOC, the partial reduce -- is (slug, price, qty,
+    floor(his), the cover the ceiling cent used to take, the unpriced
+    vanish, the sign flip, the partial reduce -- is (slug, price, qty,
     sell=True, tif, intent=BUY_SHORT, post_only, None); the real
     pmus.submit_fok builds from exactly that call a body whose intent is
     SELL_SHORT, never BUY_LONG, with no side field and no preview, and
@@ -360,12 +370,24 @@ def test_every_cover_path_hands_the_adapter_sell_true_with_the_books_buy_short_a
                                                        [(0.40, 300, GTC_TIF, True)]),
         "rest at floor(his): his BUY of M at 0.40": (HIS_BUY_M_040, None, _gone(), dict(bid=0.38, ask=0.45),
                                                       [(0.40, 300, GTC_TIF, True)]),
-        "IOC at the ceiling cent": (HIS_SELL_N_060, None, _gone(), dict(bid=0.38, ask=0.41, ioc_fill=300.0),
-                                    [(0.41, 300, IOC_TIF, False)]),
-        "unpriced vanish IOC at ask + 2c": (_unpriced(), None, _gone(), dict(bid=0.30, ask=0.40, ioc_fill=300.0),
-                                            [(0.42, 300, IOC_TIF, False)]),
-        "sign flip IOC": (_his(), {M: 300.0, N: 0.0}, None, dict(bid=0.30, ask=0.32, ioc_fill=300.0),
-                          [(0.32, 300, IOC_TIF, False)]),
+        # E31: THE THREE IOC ROADS ARE THE SAME REST NOW. Each was a cover that crossed --
+        # the ceiling cent 0.41 AT the ask, the vanish's 0.42 = ask + 2c, the sign flip's
+        # 0.32 AT the ask -- and each is a post-only GTC rest at min(buy_wire(his), ask -
+        # MAKER_TICK), or at the touch's own inside tick where there is no level of his:
+        #   0.41 IOC  -> 0.40 rest   his 0.40 is under ask - a tick (0.40): HIS cent
+        #   0.42 IOC  -> 0.39 rest   unpriced: ask 0.40 - a tick, `unpriced_touch`
+        #   0.32 IOC  -> 0.31 rest   his 0.31 is at ask - a tick (0.31): HIS cent
+        # `post_only` False -> True on all three, the tif IOC -> GTC. Each world's taker
+        # still lifts the fresh rest, so every ledger this test reads is unmoved
+        "the ceiling cent's cover, now a rest": (HIS_SELL_N_060, None, _gone(),
+                                                 dict(bid=0.38, ask=0.41, ioc_fill=300.0, lift=300.0),
+                                                 [(0.40, 300, GTC_TIF, True)]),
+        "unpriced vanish, now a rest at the touch": (_unpriced(), None, _gone(),
+                                                     dict(bid=0.30, ask=0.40, ioc_fill=300.0, lift=300.0),
+                                                     [(0.39, 300, GTC_TIF, True)]),
+        "sign flip, now a rest": (_his(), {M: 300.0, N: 0.0}, None,
+                                  dict(bid=0.30, ask=0.32, ioc_fill=300.0, lift=300.0),
+                                  [(0.31, 300, GTC_TIF, True)]),
         "partial reduce rest": (_his(300, other_size=400, other_px=0.72), {M: 300.0, N: 400.0},
                                 _mkt(300.0, 400.0), dict(bid=0.30, ask=0.40), [(0.31, 200, GTC_TIF, True)]),
     }
@@ -403,15 +425,23 @@ def test_every_cover_path_hands_the_adapter_sell_true_with_the_books_buy_short_a
 
 def test_after_a_cover_fill_the_ledger_moves_toward_zero_never_past_it_realized_is_the_short_formula_and_the_shadow_agrees(monkeypatch):
     _shorts_on(monkeypatch)
-    # the whole cover at 0.31 on avg 0.32: ledger 0, realized (0.32 - 0.31) x 300 = +3
+    # E31: the whole cover on avg 0.32 covers at 0.30, not 0.31 -- and the ledger arithmetic
+    # is unchanged, so realized moves with the cent. Before this lane the cover took at the
+    # CEILING cent (his 0.30 + MIRROR_EXIT_TOL = 0.31, THROUGH the ask of 0.31) and realized
+    # (0.32 - 0.31) x 300 = +3. It now rests at min(buy_wire(his 0.30), ask - MAKER_TICK) =
+    # 0.30 -- HIS OWN cent, one tick under the ask -- and the taker who comes there lifts it,
+    # so realized is (0.32 - 0.30) x 300 = +6 and gross_sell_usd 300 x (1 - 0.30) = 210.
+    # THE CENT MOVED IN OUR FAVOUR: this is the spread the lane exists to stop paying
     p, b, v = _cover_world([_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
-                            _fill(N, "SELL", 400, 0.70, NOW - 2000)], snap=None, bid=0.30, ask=0.31, ioc_fill=300.0)
+                            _fill(N, "SELL", 400, 0.70, NOW - 2000)], snap=None, bid=0.30, ask=0.31, ioc_fill=300.0, lift=300.0)
     st = _tick(p, v, http=_gone())
-    assert b["ledger_net"] == 0 and b["realized_pnl"] == pytest.approx(3.0) and b["avg_cost"] == 0.32
-    assert b["gross_sell_usd"] == pytest.approx(300 * (1 - 0.31), abs=1e-3)
+    assert [c[2:6] for c in _places(v)] == [(0.30, 300, True, GTC_TIF)]
+    assert b["ledger_net"] == 0 and b["realized_pnl"] == pytest.approx(6.0) and b["avg_cost"] == 0.32
+    assert b["gross_sell_usd"] == pytest.approx(300 * (1 - 0.30), abs=1e-3)
     assert _census(st, "short_flatten_close") == 1 and _census(st, "shadow_live_disagree") == 0
+    assert _census(st, "maker_fill_at_create") == 1, "the venue's own aggressor bool: we were the maker"
     o = next(iter(p.orders.values()))
-    assert o["state"] == "filled" and o["realized"] == pytest.approx(3.0)
+    assert o["state"] == "filled" and o["realized"] == pytest.approx(6.0) and o["wire"] == 0.30
     # the book closes once flat for MIRROR_FLAT_CLOSE_S with the venue read at 0 (the long
     # book's own rule), never on the fill report alone
     assert b["state"] == "live"
@@ -429,13 +459,15 @@ def test_after_a_cover_fill_the_ledger_moves_toward_zero_never_past_it_realized_
         if b["state"] == "closed":
             break
     assert b["state"] == "closed" and _census(st2, "closed_cashed_out") == 1 and _census(st2, "he_holds") == 0
-    # a partial cover: ledger -100, avg untouched, realized on the 200
-    # (his newest cover-direction fill at 0.30: the ceiling 0.31, the IOC at that cent)
+    # a partial cover: ledger -100, avg untouched, realized on the 200.
+    # E31, the same substitution: his newest cover-direction fill is 0.30, whose ceiling 0.31
+    # was the IOC's cent AT the ask; the rest goes at min(buy_wire(0.30), 0.31 - MAKER_TICK)
+    # = 0.30, so realized on the 200 is (0.32 - 0.30) x 200 = +4, not +2
     fills = [_fill(M, "BUY", 300, 0.30, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2000)]
-    p2, b2, v2 = _cover_world(fills, snap={M: 300.0, N: 400.0}, bid=0.30, ask=0.31, ioc_fill=200.0)
+    p2, b2, v2 = _cover_world(fills, snap={M: 300.0, N: 400.0}, bid=0.30, ask=0.31, ioc_fill=200.0, lift=200.0)
     st2 = _tick(p2, v2, http=_mkt(300.0, 400.0))
-    assert b2["target"] == -100 and [c[2:6] for c in _places(v2)] == [(0.31, 200, True, IOC_TIF)]
-    assert b2["ledger_net"] == -100 and b2["avg_cost"] == 0.32 and b2["realized_pnl"] == pytest.approx(2.0)
+    assert b2["target"] == -100 and [c[2:6] for c in _places(v2)] == [(0.30, 200, True, GTC_TIF)]
+    assert b2["ledger_net"] == -100 and b2["avg_cost"] == 0.32 and b2["realized_pnl"] == pytest.approx(4.0)
     assert _census(st2, "short_flatten_close") == 0 and _census(st2, "shadow_live_disagree") == 0
     # the quantity: min(plan, |ledger|, ceil(held)); never the whole slug
     assert ml._cover_qty({"intent": SHORT, "ledger_net": -300, "_held": 300.0}, 500) == 300
@@ -464,7 +496,7 @@ def test_the_probe_runs_at_most_once_an_hour_on_the_clock_never_on_a_frozen_book
     _shorts_on(monkeypatch)
     # the clock: a mismatch 3599 s ago holds; 3600 s ago probes
     for age, probes in ((3599.0, 0), (3600.0, 1), (10.0, 0), (86400.0, 1)):
-        p, b, v = _cover_world(_his(), snap={M: 300.0, N: 0.0}, ioc_fill=300.0)
+        p, b, v = _cover_world(_his(), snap={M: 300.0, N: 0.0}, ioc_fill=300.0, lift=300.0)
         _s4_unproven(p, why="not_found", at=NOW - age)
         st = _tick(p, v)
         assert _census(st, "s4_probe_placed") == probes and (p.state[KEY]["proved"] is bool(probes)), age
@@ -472,13 +504,13 @@ def test_the_probe_runs_at_most_once_an_hour_on_the_clock_never_on_a_frozen_book
     assert ml.S4_PROBE_GAP_S == 3600.0
     # frozen: a book frozen by the venue reading this tick (held -250 vs ledger -300) and one
     # frozen from before: no probe, the key untouched, no cover
-    p2, b2, v2 = _unproven_world(held={SLUG: -250}, ioc_fill=300.0)
+    p2, b2, v2 = _unproven_world(held={SLUG: -250}, ioc_fill=300.0, lift=300.0)
     st1 = _tick(p2, v2)          # E16: the first disagreeing read is a suspect -- no probe on it either
     assert b2["state"] == "live" and KEY not in p2.state and not _places(v2) and _census(st1, "s4_probe_placed") == 0
     st2 = _tick(p2, v2, now=NOW + 15)
     assert b2["state"] == "frozen" and b2["frozen_reason"] == "venue_ledger_disagree"
     assert KEY not in p2.state and not _places(v2) and _census(st2, "s4_probe_placed") == 0
-    p3, b3, v3 = _unproven_world(ioc_fill=300.0)
+    p3, b3, v3 = _unproven_world(ioc_fill=300.0, lift=300.0)
     b3.update(state="frozen", frozen_reason="placement_lost", frozen_ts=NOW - 100)
     p3.add_order(b3, side=BUY, wire=0.31, qty=300, kind="reduce", state="placing", order_id=None,
                  placed_ts=NOW - 100, intent=SELL_SHORT)
@@ -487,17 +519,17 @@ def test_the_probe_runs_at_most_once_an_hour_on_the_clock_never_on_a_frozen_book
     assert _census(st3, "s4_probe_placed") == 0
     # the key is state: tick 1 proves and writes; tick 2 on the SAME pool (a fresh _Tick) reads it
     # and probes nothing; a brand-new pool seeded with the record alone probes nothing either
-    p4, b4, v4 = _unproven_world(ioc_fill=300.0)
+    p4, b4, v4 = _unproven_world(ioc_fill=300.0, lift=300.0)
     st4 = _tick(p4, v4)
     assert _census(st4, "s4_probe_placed") == 1 and p4.state[KEY]["proved"] is True and b4["ledger_net"] == 0
     assert p4.state[KEY]["at"] == NOW and p4.state[KEY]["order_id"] == "oid-1"
     rec = json.loads(json.dumps(p4.state[KEY]))
     b4["ledger_net"] = -300                    # the same book, short again (the fixture's shortcut)
     p4.rows[b4["standing_row_id"]]["filled_shares"] = 300.0
-    v4b = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+    v4b = _NoClose(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st4b = _tick(p4, v4b, now=NOW + 5)
     assert _census(st4b, "s4_probe_placed") == 0 and [c[3] for c in _places(v4b)] == [300]
-    p5, b5, v5 = _cover_world(_his(), snap={M: 300.0, N: 0.0}, ioc_fill=300.0)
+    p5, b5, v5 = _cover_world(_his(), snap={M: 300.0, N: 0.0}, ioc_fill=300.0, lift=300.0)
     p5.state[KEY] = rec
     st5 = _tick(p5, v5, now=NOW + 5)
     assert _census(st5, "s4_probe_placed") == 0 and b5["ledger_net"] == 0
@@ -512,7 +544,7 @@ def test_a_standing_cover_rest_is_not_taken_while_the_key_reads_unproven_this_ti
     stands, no IOC, no cancel."""
     _shorts_on(monkeypatch)
     p, b, v = _cover_world([_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
-                            _fill(N, "SELL", 400, 0.70, NOW - 2000)], snap=None, bid=0.30, ask=0.31, ioc_fill=300.0)
+                            _fill(N, "SELL", 400, 0.70, NOW - 2000)], snap=None, bid=0.30, ask=0.31, ioc_fill=300.0, lift=300.0)
     p.add_order(b, side=BUY, wire=0.30, qty=300, kind="flatten_paired", intent=SELL_SHORT)
     v.rest("oid-1", "BUY", 0.30, 300, intent=SELL_SHORT)
     _s4_unproven(p, why="wrong_price", at=NOW - 10)
@@ -548,7 +580,7 @@ def test_GAP_a_filled_probe_is_booked_and_the_next_cover_is_sized_off_the_ledger
             self.rest(oid, "BUY", price, qty, slug, state="filled", filled=1.0, avg=self.ask, intent=SELL_SHORT)
             return {"ok": True, "order_id": oid, "status": "filled", "fill_price": self.ask,
                     "filled_shares": 1.0, "raw": {}}
-    p, b, v = _unproven_world(ioc_fill=300.0)
+    p, b, v = _unproven_world(ioc_fill=300.0, lift=300.0)
     v.__class__ = _ProbeFills
     st = _tick(p, v)
     rec = p.state[KEY]
@@ -557,7 +589,7 @@ def test_GAP_a_filled_probe_is_booked_and_the_next_cover_is_sized_off_the_ledger
     assert _census(st, "s4_unproven") == 1 and not _cancels(v)
     assert b["ledger_net"] == -299 and _census(st, "s4_probe_filled") == 1, "v3: the share booked"
     # the venue now holds -299 against a ledger of -299: the book stays live
-    v2 = _NoClose(held={SLUG: -299}, ioc_fill=300.0)
+    v2 = _NoClose(held={SLUG: -299}, ioc_fill=300.0, lift=300.0)
     _tick(p, v2, now=NOW + 3600)
     assert b["state"] == "live" and p.state[KEY]["proved"] is True
     assert [c[3] for c in _places(v2)] == [1, 299], "the cover is 299 on a venue short of 299 (v3)"
@@ -584,14 +616,14 @@ def test_GAP_a_probe_the_venue_keeps_after_a_failed_cancel_is_retried_every_tick
     no probe, the old order cancelled, the record's id None). The spec
     line at the end is the round-2 one, verbatim."""
     _shorts_on(monkeypatch)
-    p, b, v = _unproven_world(ioc_fill=300.0, cancel_ok=False)
+    p, b, v = _unproven_world(ioc_fill=300.0, lift=300.0, cancel_ok=False)
     st = _tick(p, v)
     rec = p.state[KEY]
     assert rec["proved"] is False and rec["why"] == "cancel_failed" and rec["order_id"] == "oid-1"
     assert rec["cancel"]["ok"] is False and rec["cancel"]["error"] == "boom" and v.orders["oid-1"]["state"] == "new"
     assert _census(st, "s4_unproven") == 1 and _census(st, "rate_limited") == 0
     # an hour on: NO second probe; the first is cancelled again, and this time the venue accepts
-    v2 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+    v2 = _NoClose(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     v2.orders, v2.n = v.orders, v.n                     # the venue still lists oid-1; ids continue
     _tick(p, v2, now=NOW + 3600)
     assert not _places(v2) and v2.orders["oid-1"]["state"] == "cancelled"
@@ -620,7 +652,7 @@ def test_GAP_a_429_on_the_probe_holds_it_for_the_hour_so_the_probe_abandons_one_
 
     class RateLimitError(Exception):
         status_code = 429
-    p, b, v = _unproven_world(ioc_fill=300.0, place_raises=RateLimitError("429"))
+    p, b, v = _unproven_world(ioc_fill=300.0, lift=300.0, place_raises=RateLimitError("429"))
     abandoned = 0
     for i in range(4):
         st = _tick(p, v, now=NOW + 5 * i)
@@ -631,7 +663,7 @@ def test_GAP_a_429_on_the_probe_holds_it_for_the_hour_so_the_probe_abandons_one_
     assert abandoned == 1 and p.state[KEY]["why"] == "rate_limited" and p.state[KEY]["at"] == NOW
     venue_pace._penalty_until = 0.0
     # the control: a mismatch holds the probe for the hour and abandons nothing
-    p2, b2, v2 = _unproven_world(ioc_fill=300.0, place=lambda *a: {
+    p2, b2, v2 = _unproven_world(ioc_fill=300.0, lift=300.0, place=lambda *a: {
         "ok": False, "order_id": None, "status": "post_only_rejected", "fill_price": None,
         "filled_shares": 0.0, "raw": {"status_code": 400, "error": "would cross"}})
     st_a = _tick(p2, v2)
@@ -645,13 +677,31 @@ def test_GAP_a_429_on_the_probe_holds_it_for_the_hour_so_the_probe_abandons_one_
 # ----------------------------------------------------- 6. legacy / paths
 
 def test_close_position_is_reachable_from_the_long_slippage_leg_alone_and_the_legacy_close_reader_stands():
+    """RE-PINNED AT E31 (FILL lane 31, 2026-09-10). This test's subject --
+    the ONE reader of `close_position`, the long flatten's slippage leg in
+    `_flatten_send` -- is retired: E31 deletes `_flatten_send` and the
+    flatten rests at the touch's own inside tick instead (E31 B). So the
+    count goes 1 -> 0 and the pin is STRONGER than it was: no path of this
+    worker can send an unpriced market order at all. The adapter's
+    `pmus.close_position` is untouched (it is the P1 flatten's own
+    function and other callers may exist), and the LEGACY CLOSE READER
+    stands exactly as it did -- a row written `tif == 'CLOSE'` before this
+    lane can still be in flight and must still be reconciled."""
     src = inspect.getsource(ml)
-    assert src.count("t.pmus.close_position") == 1
-    fs = inspect.getsource(ml._flatten_send)
-    assert fs.index('return "book_error"') < fs.index("t.pmus.close_position")
+    assert src.count("t.pmus.close_position") == 0, "1 -> 0: the slippage leg is gone"
+    assert not hasattr(ml, "_flatten_send"), "E31: the slippage leg's own function"
+    from tests.test_e31_maker_only import _code
     for fn in (ml._act, ml._flatten_vanished, ml._s4_probe, ml._s4_probe_rate_limited, ml._place_reserved,
-               ml._lost_response, ml._reconcile_placing):
-        assert "t.pmus.close_position" not in inspect.getsource(fn), fn.__name__
+               ml._lost_response, ml._reconcile_placing, ml._place):
+        # the paragraphs may still NAME the retired leg (that is the record); no line of
+        # code may reach it
+        assert "close_position" not in _code(fn), fn.__name__
+    # what stands at the slippage leg's site: the flatten is a post-only rest like any other
+    assert "return await _place(t, book, r, kind, BUY, limit, qty, his_px, p, plan)" in \
+        inspect.getsource(ml._flatten_vanished)
+    # the adapter keeps the call; nothing in the worker reaches it
+    assert callable(pmus.close_position)
+    # the legacy reader, byte for byte
     assert 'if o.get("tif") == "CLOSE":' in inspect.getsource(ml._reconcile_placing)
     assert "_reconcile_lost_close" in inspect.getsource(ml._reconcile_placing)
 
@@ -665,7 +715,7 @@ def test_the_probe_is_placed_on_a_high_priced_book_too_where_only_the_side_tells
     (0.30/0.32) the other-space reading crosses (buy at <= 0.75 vs ask
     0.32) and the post-only refusal fails closed on its own."""
     _shorts_on(monkeypatch)
-    p, b, v = _unproven_world(bid=0.90, ask=0.92, ioc_fill=300.0)
+    p, b, v = _unproven_world(bid=0.90, ask=0.92, ioc_fill=300.0, lift=300.0)
     _tick(p, v)
     assert [c[2:4] for c in _places(v)][0] == (0.85, 1) and p.state[KEY]["proved"] is True
     assert p.state[KEY]["bid"] == 0.90 and round(1 - 0.85, 2) < 0.92

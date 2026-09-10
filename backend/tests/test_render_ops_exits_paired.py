@@ -263,11 +263,17 @@ def test_the_exits_paired_help_line_is_the_case_labels_after_nf_venue_with_hourl
     assert len(names) == len(set(names))
     assert names.index("exits-paired") == names.index("nf-venue") + 1
     # FILL lane 0b's three read presets sit between exits-paired and hourly (was "nf-venue|exits-paired|hourly")
-    assert names[-1] == "hourly" and "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
+    # E31 (FILL lane 31): `maker-rests` joins them between take-band and exits-band
+    assert names[-1] == "hourly" and ("nf-venue|exits-paired|take-band|maker-rests|exits-band"
+                                      "|closed-while-he-traded|fill-answers|hourly (got") in line
     # the hourly line joins the five it always joined: this preset is not one of them
     hourly_sql, _ = _preset(text, "hourly")
     assert "exits-paired" not in hourly_sql and STUCK not in hourly_sql and "his_exit_from" not in hourly_sql
-    assert "AS leg," not in hourly_sql
+    # E31 (FILL lane 31, 2026-09-10): `AS leg,` no longer tells this preset apart --
+    # the lane's own `maker-rests` section, which DOES ride the hourly, names a leg
+    # too (add / reduce beside each rest's cent). The three fingerprints above are
+    # this preset's own; here the pin is the section marker, which cannot collide
+    assert "'== exits-paired'" not in hourly_sql and "'== maker-rests'" in hourly_sql
     hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()
     hourly.test_the_hourly_preset_is_read_only_with_its_own_output_cap_and_timeout()
     hourly.test_the_help_line_is_the_case_labels_with_hourly_last()

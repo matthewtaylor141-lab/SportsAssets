@@ -1248,6 +1248,32 @@ MIRROR_HAND_EXIT = env_switch("MIRROR_HAND_EXIT", True)
 # call time.
 MIRROR_POST_ONLY_BACKOFF = env_switch("MIRROR_POST_ONLY_BACKOFF", True)
 MIRROR_POST_ONLY_BACKOFF_S = min_wait_env("MIRROR_POST_ONLY_BACKOFF_S", 60.0)
+# THE RAILS THAT GOVERNED A TAKE ARE DOCUMENTARY FROM E31 (2026-09-10,
+# FILL lane 31; owner order ~03:3xZ "become a maker not taker ... mirror
+# him to a tee"). Every order the mirror sends is now a post-only rest at
+# his price or better that never crosses the touch (maker_wire below), and
+# every path that took -- the at-level take, the two band takes, the take
+# off a standing rest, the exit's and the cover's takes, the flatten's
+# slippage leg -- left the worker's code path with that lane. These
+# constants are NOT deleted: their defaults, their directions and their
+# unit tests stand as the record of the rule they governed, and the
+# reviewers' from-end and count pins (capped_env 26, min_wait_env 8,
+# env_switch 8) are unmoved by this lane. What changed is that NO VALUE
+# OF ANY OF THEM CAN SEND AN ORDER THAT CROSSES: there is no reader left
+# on the money path, so a shell cannot re-arm a take by lowering,
+# lengthening or switching anything.
+#   MIRROR_TAKE_AFTER_S (979), MIRROR_TAKE_BAND (1081),
+#   MIRROR_TAKE_BAND_FRAC (1088), MIRROR_EXIT_TAKE_BAND (1023),
+#   EXIT_BAND_INERT_AT (1034), MIRROR_FLATTEN_REST_S (1100),
+#   MIRROR_FLATTEN_SLIP (1096)
+# MIRROR_EXIT_TOL (999) keeps ONE reader: exit_terms still computes the
+# plan's record (`exit_take` / `exit_floor` / `exit_cover` /
+# `exit_ceiling`), which the exits presets read; the maker exit rest is
+# never placed under ceil(his) (docs 75, decision 3). The pure helpers
+# take_allowed / take_in_band / short_take_in_band / band_cent /
+# short_band_cent / take_band_width / buy_price / sell_price stay pure and
+# tested; take_arms stays as the reader of the venue's CROSSING SHAPE that
+# E31's re-price consults (it no longer arms anything).
 # Market families a book may open on (copy_sports.market_type_of).
 # P1 opened on moneylines alone and refused derivatives at admission
 # by the name `family` (program decision 19: totals, spreads and props
@@ -2046,6 +2072,149 @@ def sell_price(his_equiv: float | None, ask: float | None) -> float | None:
     return w
 
 
+# ------------------------------------------------- E31: the maker wire
+#
+# THE LADDER THE CLAMP ASSUMES IS THE WHOLE CENT. pmus._amount formats
+# every price "%.2f", so the only price the mirror can express is a
+# cent; buy_wire floors to it and sell_wire ceils to it, and the ladder
+# is 0.01 .. 0.99 (at_or_through). MAKER_TICK names that assumption where
+# the clamp reads it. It is NOT a knob: the environment cannot move it in
+# either direction (a smaller tick would send a price the wire cannot
+# carry; a larger one would rest further from him than he is). 42.9 % of
+# his mapped markets are on the venue's own orderPriceMinTickSize 0.005
+# (docs/mirror-to-a-tee-program.md:27) and no code reads that field, so on
+# such a market "A - MAKER_TICK" can still leave half a tick between the
+# rest and the touch -- a maker still, and the venue's own
+# participateDontInitiate flag is the backstop against a sub-cent cross
+# the cent grid cannot see. The venue tick reader is a follow-up (docs 75,
+# DOES NOT FIX).
+MAKER_TICK = 0.01
+
+
+def maker_wire(side: str | None, his_px: float | None, bid: float | None, ask: float | None,
+               unpriced: bool = False) -> float | None:
+    """THE MAKER'S CENT (E31, 2026-09-10, FILL lane 31; owner order
+    2026-09-10 ~03:3xZ "become a maker not taker ... mirror him to a
+    tee"): the cent this order rests at so that it is AT HIS PRICE OR
+    BETTER and NEVER at or through the far touch.
+
+    Per side, with H his cent on this side (buy_wire's floor on a BUY --
+    never above him at any precision; sell_wire's ceiling on a SELL --
+    never under him, capped 0.99), A the best ask and B the best bid:
+
+      BUY  (a long add; a short book's cover at his buy-back price):
+           min(H, A - MAKER_TICK). At his cent INSIDE the spread while
+           his cent is under the ask; one tick under the ask when his
+           cent is at or above it. Never above him, never at or through
+           the ask.
+      SELL (a long exit at his exit cent; a short add's offer):
+           max(H, B + MAKER_TICK), capped at 0.99. At his cent while it
+           is over the bid; one tick over the bid when it is at or under
+           it. Never under him, never at or through the bid.
+
+    `unpriced` is the exit with NO level of his to honour (a
+    snapshot-driven reduce, a vanish with no fill of his, the operator's
+    flatten: `exit_px_src: 'none'`): the touch's INSIDE tick alone --
+    B + tick on a SELL, A - tick on a BUY -- read again every tick, never
+    a take.
+
+    None -- NO ORDER, the caller names it `maker_no_cent` -- when the
+    touch the clamp needs is missing or not a price in (0, 1) (a BUY
+    reads the ASK, a SELL the BID: the side the rest must not cross),
+    when there is no cent left on the ladder (A - tick under 0.01;
+    B + tick over 0.99), or when the level is unreadable on a priced
+    order (the caller's `no_price` as today). Never a guess.
+
+    The clamp reads the OTHER side's touch, which no wire of this module
+    read before this lane: buy_price never read the ask and sell_price
+    /_short_wire never the bid, so a LOCKED or INVERTED book (bid >= ask)
+    could cross with the flag as the only guard (buy_wire's paragraph).
+    Here the BUY sits strictly under the ask and the SELL strictly over
+    the bid by construction, in every book."""
+    bound = maker_bound(side, bid, ask)
+    if bound is None:
+        return None
+    if unpriced is True:
+        return bound
+    h = buy_wire(his_px) if side == BUY else sell_wire(his_px)
+    if h is None:
+        return None
+    w = min(h, bound) if side == BUY else max(h, bound)
+    return w if 0.01 <= w <= 0.99 else None
+
+
+def maker_bound(side: str | None, bid: float | None, ask: float | None) -> float | None:
+    """The INSIDE tick of the far touch on this order's side (E31): the
+    highest cent strictly under the ask on a BUY, the lowest cent strictly
+    over the bid on a SELL. None when that touch is missing or not a price
+    in (0, 1), or when no such cent exists on the ladder (an ask at 0.01,
+    a bid at 0.99). The strictness is checked against the QUOTE ITSELF,
+    not against the arithmetic: a touch a hair off a cent still yields a
+    cent that cannot cross it, and one that cannot is no bound at all."""
+    if side not in (BUY, SELL):
+        return None
+    if side == BUY:
+        a = _num(ask)
+        if a is None or not (0.0 < a < 1.0):
+            return None
+        w = buy_wire(a - MAKER_TICK)
+        return w if w is not None and 0.01 <= w <= 0.99 and w < a - 1e-9 else None
+    b = _num(bid)
+    if b is None or not (0.0 < b < 1.0):
+        return None
+    w = sell_wire(b + MAKER_TICK)
+    return w if w is not None and 0.01 <= w <= 0.99 and w > b + 1e-9 else None
+
+
+def maker_compare_wire(side: str | None, standing: float | None, his_cent: float | None,
+                       maker: float | None) -> float | None:
+    """THE WIRE rest_decision COMPARES A STANDING REST AGAINST (E31), so
+    that a rest is re-priced when HIS LEVEL moves (today's cent clause,
+    byte for byte) and when THE TOUCH MOVES SO THE REST CAN SIT NEARER
+    HIS LEVEL -- and NEVER moved away from his level to follow a touch
+    that came TO it.
+
+    On a BUY the maker wire is returned (so the cent clause sees the
+    move) when the standing wire is ABOVE his cent -- past him: replaced
+    at once, as today -- or when `maker` is above the standing wire (the
+    ask rose: there is room toward him now). Otherwise the STANDING wire
+    is returned, which reads as no move: the ask has come down to or
+    through the rest (it is being filled, or the read is stale) and a
+    rest is never re-quoted down with a falling ask. On a SELL the
+    mirror image (the maker wire when the standing wire is UNDER his
+    cent, or when `maker` is under the standing wire; the standing wire
+    when the bid has risen to the rest).
+
+    Fail closed: anything unreadable -- a side that is not BUY or SELL,
+    a maker wire of None (no cent: the caller holds the book by name),
+    a standing wire that is not a number -- returns the maker wire
+    unchanged, so rest_decision reads it exactly as it read the plan's
+    wire before this lane (None -> `no_price`)."""
+    m, s = _num(maker), _num(standing)
+    if side not in (BUY, SELL) or m is None or s is None:
+        return maker if maker is None or isinstance(maker, (int, float)) else None
+    h = _num(his_cent)
+    if h is None:
+        # AN UNPRICED EXIT HAS NO LEVEL TO HONOUR AND ITS REST IS THE TOUCH
+        # (E31 C: "re-quoted on the touch by the same cent clause at tick
+        # cadence"), so BOTH directions are moves toward the only thing it
+        # tracks. Without this the rest never followed a touch that ran AWAY
+        # from it: a SELL left at bid + a tick sat two cents UNDER a risen bid
+        # and would be lifted there, giving away the spread this lane exists
+        # to collect -- and a BUY cover left above a fallen ask would cross.
+        # There is no level here to be "past", so the keep clause below (which
+        # exists to stop a rest chasing a touch that came TO his cent) has
+        # nothing to protect
+        return m
+    if side == BUY:
+        if h is not None and s > h + 1e-9:
+            return m                     # the rest sits above him: replace at once (today's rule)
+        return m if m > s + 1e-9 else s
+    if h is not None and s < h - 1e-9:
+        return m
+    return m if m < s - 1e-9 else s
+
+
 def plan_wire(p: Plan | None) -> float | None:
     """The cent of a shadow plan's price, by side. plan.price is
     ROUNDED to 4 places by mi.plan, so this is the shadow's figure for
@@ -2163,7 +2332,8 @@ def rest_decision(order: OpenOrder, p: Plan | None, now: float,
                   intent: str | None = None,
                   stands: bool = False,
                   min_life_s: float = MIRROR_REST_MIN_LIFE_S,
-                  entry: bool | None = None) -> tuple[str, dict]:
+                  entry: bool | None = None,
+                  ttl_stands: bool = False) -> tuple[str, dict]:
     """keep_or_replace's verdict WITH ITS CAUSE: (verdict, detail).
     `detail["cause"]` names the clause that decided -- 'cancel_reason',
     'unreadable', 'no_plan', 'future', 'ttl', 'side', 'intent',
@@ -2187,7 +2357,20 @@ def rest_decision(order: OpenOrder, p: Plan | None, now: float,
     price, the rest sits at the ask -- is an exit, not an entry, and
     keeps E4's rule whole); `min_life_s` can only LENGTHEN the floor
     (max(min_life_s, MIRROR_REST_MIN_LIFE_S); unreadable is the
-    constant), the mirror of take_allowed's wait. Everything else is
+    constant), the mirror of take_allowed's wait.
+
+    `ttl_stands` (E31, 2026-09-10, FILL lane 31; default False = byte for
+    byte) skips THE TTL CLAUSE ALONE: an ENTRY rest already at the maker
+    wire, of the same quantity, past MIRROR_REST_TTL_S is not cancelled
+    and re-placed as its own twin -- the worker counts `requote_same_wire`
+    (E4's word, now on entries too) and the rest keeps its queue. In the
+    24 h to 03:09Z 322 of 1,036 replaces were the identical order
+    re-placed at the TTL (hard2/h0309_short.txt:1311) and a replaced rest
+    filled 5.7 % against a kept rest's 47.2 % (:1300 / :1295). Every
+    other clause is unchanged -- a cent move, a side or intent change, a
+    quantity fall, a cancel_reason all replace as before -- and the
+    caller alone decides when the wire is "the same" (the worker's
+    `_maker_rest_stands` reads the book's last plan). Everything else is
     keep_or_replace's docstring, byte for byte."""
     if cancel_reason is not None:
         name = cancel_reason if isinstance(cancel_reason, str) and cancel_reason.strip() else "cancel_unnamed"
@@ -2203,7 +2386,7 @@ def rest_decision(order: OpenOrder, p: Plan | None, now: float,
     age = t - placed
     if age < 0:
         return "replace", {"cause": "future"}
-    if age >= ttl and stands is not True:
+    if age >= ttl and stands is not True and ttl_stands is not True:
         return "replace", {"cause": "ttl", "rest_age_s": age}
     if (not isinstance(p.side, str) or not isinstance(order.side, str)
             or p.side not in (BUY, SELL) or p.side != order.side):
@@ -3406,6 +3589,7 @@ __all__ = [
     "mirror_target", "AdmissionFacts", "admission", "market_closed_fact", "prior_episode_adoption", "adopted_block",
     "venue_dust_is_ours",
     "buy_wire", "sell_wire", "buy_price", "sell_price", "plan_wire", "room_scale",
+    "MAKER_TICK", "maker_wire", "maker_bound", "maker_compare_wire",
     "OpenOrder", "plan_reason_key", "keep_or_replace", "rest_decision", "replace_decision",
     "order_decision", "MIRROR_REST_MIN_LIFE_S", "REST_MIN_LIFE_CENT_MOVE",
     "at_or_through", "take_allowed", "take_arms", "select_flatten",

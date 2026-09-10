@@ -72,9 +72,12 @@ def test_e5r_the_desks_manual_shares_are_subtracted_from_the_frozen_seat():
     100 under this book."""
     p = _pool(fills=_his(300, sold=300), snap=None, manual=100.0)
     b = _frozen_long(p)
-    v = _Venue(held={SLUG: 700}, bid=0.30, ask=0.32, ioc_fill=600)
+    v = _Venue(held={SLUG: 700}, bid=0.30, ask=0.32, lift=600)
     st = _tick(p, v, http=_gone())
-    assert [c[2:6] for c in _places(v)] == [(0.30, 600, True, IOC_TIF)]
+    # E31 (FILL lane 31, 2026-09-10): the reduce is a post-only rest at the maker
+    # wire max(sell_wire(his 0.31), bid 0.30 + MAKER_TICK) = 0.31, GTC, lifted at
+    # create -- where it was ONE IOC at the take cent 0.30. The SIZE is the subject
+    assert [c[2:6] for c in _places(v)] == [(0.31, 600, True, GTC_TIF)]
     assert _plan_exit(b)["venue_own"] == 600 and b["last_plan"]["manual"] == 100.0
     assert b["last_plan"]["registered"] == 0.0 and _census(st, "frozen_reduce") == 1
     # E5 review F3, the owner's option (b): the register is NOT subtracted
@@ -220,9 +223,10 @@ def test_e5r_exits_only_mode_still_lets_the_frozen_book_reduce():
     p = _pool(fills=_his(300, sold=300), snap=None)
     p.state["mirror_live"] = False
     b = _frozen_long(p)
-    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=600)
+    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, lift=600)
     st = _tick(p, v, http=_gone())
-    assert st["mode"] == "exits" and [c[2:6] for c in _places(v)] == [(0.30, 600, True, IOC_TIF)]
+    # E31: the maker rest at 0.31, lifted at create, where it was the IOC at 0.30
+    assert st["mode"] == "exits" and [c[2:6] for c in _places(v)] == [(0.31, 600, True, GTC_TIF)]
     assert b["ledger_net"] == 0 and _census(st, "frozen_reduce") == 1
 
 
@@ -234,9 +238,10 @@ def test_e5r_his_sign_flip_flattens_the_frozen_long_book_and_never_opens_the_oth
     fills = _his(300, sold=300) + [_fill(N, "BUY", 500, 0.72, NOW - 500)]
     p = _pool(fills=fills, snap=None)
     b = _frozen_long(p)
-    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=600)
+    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, lift=600)
     st = _tick(p, v, http=_mkt(0.0, 500.0))
-    assert [(c[3], c[4], c[5], c[6]) for c in _places(v)] == [(600, True, IOC_TIF, "ORDER_INTENT_BUY_LONG")]
+    # E31: the flip's exit is the maker rest, GTC, never an IOC
+    assert [(c[3], c[4], c[5], c[6]) for c in _places(v)] == [(600, True, GTC_TIF, "ORDER_INTENT_BUY_LONG")]
     assert b["last_plan"].get("sign_flip") is True and _plan_exit(b)["target"] == 0
     assert _census(st, "short_add") == 0 and _census(st, "short_open") == 0
     assert b["ledger_net"] == 0 and _plan_exit(b)["qty"] == 600 and st["books_live"] == 0

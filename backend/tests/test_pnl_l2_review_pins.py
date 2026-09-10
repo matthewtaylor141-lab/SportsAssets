@@ -112,13 +112,21 @@ def test_r2_his_sale_landing_on_the_freeze_tick_is_witnessed_next_tick_folded():
     assert b["state"] == "frozen" and b["frozen_reason"] == "venue_ledger_disagree" and not _places(v2)
     assert _plan_exit(b) == {"held": "transition_tick"}
     assert b["last_plan"]["fills_at"] == NOW - 3000, "the last LIVE plan's fills' clock: the sale stays witnessable"
-    v3 = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=90)
+    # E31 (FILL lane 31, 2026-09-10): the frozen exit is a post-only rest, not an
+    # IOC, so `lift` (the taker who hits the fresh rest at create, aggressor False)
+    # stands where `ioc_fill` filled it
+    v3 = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st3 = _tick(p, v3, now=NOW + 30, http=_unread())
-    # folded: the sale witnessed, 90 sold at his cent off the LEDGER, marked
-    assert [c[1:] for c in _places(v3)] == [(SLUG, 0.30, 90, True, IOC_TIF, "ORDER_INTENT_BUY_LONG", False, None)]
+    # folded: the sale witnessed, 90 sold at his cent off the LEDGER, marked.
+    # RE-PINNED at E31: 0.30 IOC -> 0.31 GTC post-only. His cent is 0.31 (his SELL
+    # at 0.31, sell_wire's ceiling) and the maker SELL wire is max(0.31, bid 0.30 +
+    # 0.01) = 0.31, so the exit rests AT HIS CENT one tick over the bid instead of
+    # crossing down to it. The row's kind and reason follow: 'take' / 'IOC' /
+    # 'frozen_reduce_on_fill: take' -> 'reduce' / 'GTC' / 'frozen_reduce_on_fill: reduce'
+    assert [c[1:] for c in _places(v3)] == [(SLUG, 0.31, 90, True, GTC_TIF, "ORDER_INTENT_BUY_LONG", True, None)]
     o = _placed(p)[0]
     assert (o["kind"], o["side"], o["tif"], o["reason"], o["qty"], o["state"]) == (
-        "take", SELL, "IOC", "frozen_reduce_on_fill: take", 90, "filled")
+        "reduce", SELL, "GTC", "frozen_reduce_on_fill: reduce", 90, "filled")
     assert _census(st3, "frozen_reduce_on_fill") == 1 and _census(st3, "frozen_venue_unread") == 0
     assert b["ledger_net"] == 210 and b["state"] == "frozen" and b["frozen_reason"] == "venue_ledger_disagree"
     fx = _plan_exit(b)

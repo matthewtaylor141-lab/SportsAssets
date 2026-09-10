@@ -289,7 +289,12 @@ def test_fold2_q2_the_release_window_a_full_tick_arriving_as_a_fast_ticks_wait_e
 
 # --------------------------------------------- Q3: what else places
 
-PLACERS = ("_place", "_place_reserved", "_cancel_and_settle", "_flatten_send", "_close_settled",
+# E31 (FILL lane 31, 2026-09-10): `_flatten_send` is deleted -- the flatten's
+# slippage leg (close_position, the co-held IOC) went with the take, and the
+# flatten is now an ordinary post-only rest through _place. Nothing replaced it
+# as a root: the list is one shorter, and the pin below still walks every path
+# that places or cancels up to the two locked roots
+PLACERS = ("_place", "_place_reserved", "_cancel_and_settle", "_close_settled",
            "_cancel_frozen_open", "_cancel_open_for")
 ROOTS = {"tick_once", "fast_tick_once"}
 

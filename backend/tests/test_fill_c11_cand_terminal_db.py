@@ -441,11 +441,11 @@ def test_c11_the_census_place_the_emit_site_the_source_shape_and_no_knob():
     # one name, immediately before E19's key, after FILL lane 5's three -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names between this one and the key (-14 -> -20, -18:-14 -> -24:-20, -21:-18 -> -27:-24)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-27 -> -31, -31:-27 -> -35:-31, -34:-31 -> -38:-35, -26 / -25 / -20 -> -30 / -29 / -24)
-    assert keys[-45] == NEW_NAME and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-55] == NEW_NAME and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     # E22 (FILL lane 22) landed ahead of this lane and sits between FILL lane 5's three and this name (-17:-14 -> -21:-18)
-    assert keys[-49:-45] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert keys[-52:-49] == ("he_holds", "he_holds_unread", "reopen_refused")
-    assert keys[-44] == "turn_woke_fast" and keys[-43] == "fast_order_open" and keys[-38] == "fast_status_unread"
+    assert keys[-59:-55] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert keys[-62:-59] == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-54] == "turn_woke_fast" and keys[-53] == "fast_order_open" and keys[-48] == "fast_status_unread"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert ml._new_stats()["census"][NEW_NAME] == 0
     assert NEW_NAME not in ml._INTEG_CENSUS_KEYS and "market_closed" not in ml._CAND_NOT_RECORDED

@@ -75,9 +75,16 @@ def _state_reads(p):
 
 
 def _reduce_went_out(v):
+    """RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the reduce is ONE order,
+    not two. It was an IOC at the bid that filled nothing and then E14b's
+    same-tick re-rest of the same 200 at his cent; it is now a single
+    post-only GTC rest of 200 at the maker wire (his cent 0.31, a tick inside
+    the ask). The subject of every caller -- that the guard let the REDUCE
+    out and the standing BUY was cancelled -- is unchanged."""
     pl = _places(v)
     assert ("cancel", "oid-1", SLUG) in v.calls, "the BUY rest is gone"
-    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl   # the IOC that filled nothing, then its same-tick rest at his cent (E14b)
+    assert [c[2:6] for c in pl] == [(0.31, 200, True, GTC_TIF)], pl
+    assert [c[7] for c in pl] == [True], "post-only"
 
 
 # ------------------------------------------------ 1. the decision order

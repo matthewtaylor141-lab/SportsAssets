@@ -127,8 +127,9 @@ def test_fill_answers_sits_after_closed_while_he_traded_before_hourly_and_stays_
     assert "'== fill-answers'" not in h and "rows_24h" not in h and "plan_oldest_kept" not in h
     # the hourly is the ten presets joined (nine until FILL lane 14 put tick-ring after
     # mirror-tick; fill-answers itself still rides no hourly) -- its own pins, re-run here
+    # E31 (FILL lane 31, 2026-09-10): ELEVEN, with `maker-rests` after take-band
     assert hourly.PARTS == ("mirror-tick", "tick-ring", "mirror-pnl", "paired-day", "paired-ratio", "latency-census",
-                            "fills-answered", "fills-missed", "take-band", "on-target-why")
+                            "fills-answered", "fills-missed", "take-band", "maker-rests", "on-target-why")
     hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()
     hourly.test_the_hourly_preset_is_read_only_with_its_own_output_cap_and_timeout()
     hourly.test_the_help_line_is_the_case_labels_with_hourly_last()

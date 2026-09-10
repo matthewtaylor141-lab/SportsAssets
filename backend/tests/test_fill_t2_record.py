@@ -554,9 +554,9 @@ def test_t2_the_census_names_sit_before_drift_smaller_open_the_emit_sites_and_no
     # FILL lane 5 (three names), E22 (FILL lane 22, four) and FILL lane 11 (one) landed after this lane and placed theirs nearer the key (-15/-14 -> -23/-22) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names nearer the key (-23 / -22 -> -29 / -28, -27 / -26 / -24 -> -33 / -32 / -30)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-36 / -35 -> -40 / -39, -40 / -39 / -37 -> -44 / -43 / -41)
-    assert keys[-54] == "fill_answer_write_failed" and keys[-53] == "fill_answers_absent"
+    assert keys[-64] == "fill_answer_write_failed" and keys[-63] == "fill_answers_absent"
     # FILL lane 3 landed first and sits between E14's name and these two (take_in_band -16 -> -27)
-    assert keys[-58] == "take_in_band" and keys[-57] == "exit_take_in_band" and keys[-55] == "order_open_his_exit"
+    assert keys[-68] == "take_in_band" and keys[-67] == "exit_take_in_band" and keys[-65] == "order_open_his_exit"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
@@ -582,8 +582,10 @@ def test_t2_the_census_names_sit_before_drift_smaller_open_the_emit_sites_and_no
     assert code.count("_flush_fill_answers(t)") == 2, "the full tick's tail and the fast tick's"
     assert code.count("_fill_answers_guard(t, stats)") == 2
     assert code.count("_carry_fills_hwm(book, plan)") == 2, "_write_plan and the quiet skip"
-    for fn in (ml._act, ml._place_reserved, ml._entry_take, ml._exit_take, ml._tick_candidate, ml._fast_gate,
-               ml._maybe_close_episode, ml._flatten_send):
+    # E31 (FILL lane 31): `_entry_take`, `_exit_take` and `_flatten_send` are DELETED with the take
+    # paths, so the three that carried no fill-answers word are gone rather than checked
+    for fn in (ml._act, ml._place_reserved, ml._tick_candidate, ml._fast_gate,
+               ml._maybe_close_episode, ml._flatten_vanished):
         s = inspect.getsource(fn)
         assert "fill_answers" not in s and "fill_rows" not in s and "fills_hwm" not in s and "_fill_hwm" not in s, fn.__name__
     # the queue reads the UNBOUNDED list (`for e in out`) inside _fills_seen, only on the bool True; the

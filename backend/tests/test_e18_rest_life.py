@@ -58,8 +58,22 @@ DSN_BASE = os.environ.get(
     "MIRROR_SQL_PIN_DSN",
     os.environ.get("S1_SQL_PIN_DSN",
                    "postgresql://sportsassets:sportsassets@localhost:5432/postgres"))
-NEW_NAMES = ("kept_min_life", "ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread",
-             "order_cols_guard_unreadable")
+# E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never crosses) RE-PINNED
+# this file. Two things moved and nothing else:
+#   (a) THE ENTRY CENT. A BUY rested at buy_price(his, bid) = floor(min(his, bid)), JOINING THE
+#       BID; the maker wire is min(buy_wire(his), ask - 0.01) -- his own cent inside the spread
+#       while it is under the ask, one tick under the ask when it is not. So on this file's
+#       default 0.30 / 0.32 book with his 0.31 the rest is 0.31, not 0.30, and a world that
+#       wanted the wire to MOVE now moves the ASK, not the bid.
+#   (b) THE RE-READ. `_ioc_reread` (the IOC's) is `_rest_reread` (the touch-bound rest's, E31 D)
+#       at the same site, so `ioc_reread_capped` -> `rest_reread_capped`, `ioc_quote_unread` ->
+#       `rest_quote_unread`, `ioc_quote_at_send` -> `rest_quote_at_send`, and `ask_moved` /
+#       `bid_moved` are gone with the take they withheld: a rest is never withheld, it is
+#       RE-PRICED on the fresher quote and goes out.
+# The rule this file exists for -- the 45 s floor, `add_pending`, the 2c move, the TTL, and
+# migration 059's three columns -- is untouched.
+NEW_NAMES = ("kept_min_life", "rest_reread_capped", "rest_quote_unread", "order_cols_guard_unreadable")
+RETIRED = ("ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread")   # E31: declared zeros
 
 
 class _MovingVenue(_Venue):
@@ -250,11 +264,18 @@ def test_e18_the_worker_keeps_a_young_entry_rest_over_a_one_cent_move_and_replac
     assert len(ins) == 1 and len(ins[0]) == 23 and ins[0][18] == "ORDER_INTENT_BUY_LONG"
     assert ins[0][19] is None and ins[0][20] == "rest" and ins[0][21] == str(NOW - 3000) and ins[0][22] is False
     # the 1c move DOWN at 20 s: the rest at 0.30 would stand above the new
-    # wire 0.29 -- replaced at once, `replace_cent`, the fresh rest at 0.29
-    p2 = _pool()
+    # wire 0.29 -- replaced at once, `replace_cent`, the fresh rest at 0.29.
+    # E31 (FILL lane 31): the wire falls because HIS OWN LEVEL is 0.29 and
+    # our rest at 0.30 is a cent PAST HIM. (The other way of falling -- the
+    # ask coming down onto a rest that is still at or under his cent -- is
+    # exactly what rules.maker_compare_wire refuses to chase: a rest is
+    # never re-quoted down with a falling ask, because a falling ask is the
+    # rest being filled or a stale read. Past HIM is replaced at once, as
+    # it always was.)
+    p2 = _pool(fills=[_fill(M, "BUY", 300, 0.29, NOW - 3000)])
     b2 = p2.add_book(ledger=0)
     o2 = p2.add_order(b2, wire=0.30, qty=300, placed_ts=NOW - 20)
-    v2 = _Venue(bid=0.29, ask=0.32)
+    v2 = _Venue(bid=0.28, ask=0.32)
     v2.rest("oid-1", "BUY", 0.30, 300)
     st3 = _tick(p2, v2)
     assert [c[1] for c in _cancels(v2)] == ["oid-1"] and [c[2:6] for c in _places(v2)] == [(0.29, 300, False, GTC_TIF)]
@@ -263,10 +284,15 @@ def test_e18_the_worker_keeps_a_young_entry_rest_over_a_one_cent_move_and_replac
 
 
 def test_e18_the_worker_keeps_a_young_rest_over_a_quantity_move_carries_add_pending_and_regrows_past_the_floor():
+    # E31 (FILL lane 31): the book is 0.29 / 0.31 so the maker wire is
+    # min(buy_wire(his 0.31), 0.31 - 0.01) = 0.30, the rest's own cent --
+    # a QUANTITY-ONLY move, which is this test's subject. (The file's
+    # default 0.30 / 0.32 book would price the rest at 0.31 and make it a
+    # cent move too, which is a different clause.)
     p = _pool()
     b = p.add_book(ledger=0)
     o = p.add_order(b, wire=0.30, qty=100, placed_ts=NOW - 20)     # his 300: the plan wants 300
-    v = _Venue()
+    v = _Venue(bid=0.29, ask=0.31)
     v.rest("oid-1", "BUY", 0.30, 100)
     st = _tick(p, v)
     assert not _cancels(v) and not _places(v) and _census(st, "kept_min_life") == 1
@@ -277,10 +303,12 @@ def test_e18_the_worker_keeps_a_young_rest_over_a_quantity_move_carries_add_pend
     assert _decisions(p) == [(o["id"], "replace_qty")] and _census(st2, "kept_min_life") == 0
     assert "add_pending" not in b["last_plan"]
     # a 2c move on a young rest: replaced at once, `replace_cent`
-    p2 = _pool()
+    # (E31: HIS level is 0.28 and our rest at 0.30 is two cents past him --
+    # the direction rules.maker_compare_wire always chases)
+    p2 = _pool(fills=[_fill(M, "BUY", 300, 0.28, NOW - 3000)])
     b2 = p2.add_book(ledger=0)
     o2 = p2.add_order(b2, wire=0.30, qty=300, placed_ts=NOW - 20)
-    v2 = _Venue(bid=0.28, ask=0.32)
+    v2 = _Venue(bid=0.27, ask=0.32)
     v2.rest("oid-1", "BUY", 0.30, 300)
     st3 = _tick(p2, v2)
     assert [c[2:6] for c in _places(v2)] == [(0.28, 300, False, GTC_TIF)] and _census(st3, "kept_min_life") == 0
@@ -309,48 +337,69 @@ def test_e18_the_worker_replaces_a_young_priced_exit_rest_at_once_and_writes_ttl
     v2.rest("oid-1", "BUY", 0.30, 300)
     _tick(p2, v2)
     assert p2.orders[o2["id"]]["state"] == "cancelled" and p2.orders[o2["id"]]["reason"] == "ttl"
-    assert _decisions(p2) == [(o2["id"], "ttl")] and [c[2:6] for c in _places(v2)] == [(0.30, 300, False, GTC_TIF)]
+    assert _decisions(p2) == [(o2["id"], "ttl")] and [c[2:6] for c in _places(v2)] == [(0.31, 300, False, GTC_TIF)]
 
 
 def _take_world(seq, **kw):
     """His 300 @0.30; the book flat; the tick's quote read at the ask ON
-    his cent (the entry take fires), the IOC's re-read as `seq[1]`."""
+    his cent, the re-read as `seq[1]`. E31: the maker wire is min(0.30,
+    0.30 - 0.01) = 0.29 -- AT the touch bound, so `_rest_reread` fires at
+    exactly the site the IOC's re-read did, on the same worlds."""
     p = _pool(fills=[_fill(M, "BUY", 300, 0.30, NOW - 3000)])
     b = p.add_book(ledger=0)
     v = _MovingVenue(seq, bid=0.29, ask=0.30, ioc_fill=300.0, **kw)
     return p, b, v
 
 
-def test_e18_the_entry_ioc_is_withheld_when_the_ask_left_his_cent_between_the_read_and_the_send_and_the_rest_is_placed():
+def test_e18_the_touch_bound_rest_is_re_priced_when_the_ask_rose_between_the_read_and_the_send():
+    """RE-PINNED at E31 (FILL lane 31, 2026-09-10). E18 pinned here that
+    the entry IOC was WITHHELD (`ask_moved`) when the ask left his cent
+    between the tick's read and the send, and the rest went out at the
+    tick's own wire 0.29. There is no IOC to withhold: the rest at the
+    touch bound is RE-PRICED on the fresher quote and goes out. The ask
+    ROSE from 0.30 to 0.31, so there is a cent of room toward him that
+    was not there at the plan: the rest goes out at HIS OWN cent 0.30 --
+    min(buy_wire(0.30), 0.31 - 0.01) -- inside the new spread, still a
+    tick under the ask. Old: 0.29 with `ask_moved` 1 and ask_at_send
+    NULL. New: 0.30, `ask_moved` 0, ask_at_send 0.31 (the read that
+    priced it). The two bbo reads, the one op and the GTC row are E18's,
+    unchanged."""
     p, b, v = _take_world([(0.29, 0.30), (0.29, 0.31)])
     st = _tick(p, v)
     assert _bbos(v).count(SLUG) == 2, "the tick's read and the one re-read before the send"
-    assert [c[2:6] for c in _places(v)] == [(0.29, 300, False, GTC_TIF)], "no IOC; the rest as today"
-    assert _census(st, "ask_moved") == 1 and _census(st, "take_placed") == 0 and _census(st, "rest_placed") == 1
+    assert [c[2:6] for c in _places(v)] == [(0.30, 300, False, GTC_TIF)], "no IOC; the rest at his cent"
+    assert _census(st, "ask_moved") == 0 and _census(st, "take_placed") == 0 and _census(st, "rest_placed") == 1
     lp = b["last_plan"]
-    assert lp["ask_moved"] == {"ask_at_plan": 0.30, "ask_at_send": 0.31, "wire": 0.30}
-    assert lp["ioc_quote_at_send"] == {"bid": 0.29, "ask": 0.31, "bid_at_plan": 0.29, "ask_at_plan": 0.30}
-    assert b["ledger_net"] == 0 and st["ops"] == 1, "the withheld IOC spent no op"
+    assert "ask_moved" not in lp and lp["maker"]["clause"] == "his_cent" and lp["maker"]["reread"] is True
+    assert lp["rest_quote_at_send"] == {"bid": 0.29, "ask": 0.31, "bid_at_plan": 0.29, "ask_at_plan": 0.30}
+    assert b["ledger_net"] == 0 and st["ops"] == 1, "one op: the rest"
     ins = _inserts(p)
-    assert len(ins) == 1 and ins[0][5] == "GTC" and ins[0][19] is None and ins[0][20] == "rest"
+    assert len(ins) == 1 and ins[0][5] == "GTC" and ins[0][19] == 0.31 and ins[0][20] == "rest"
     assert ins[0][21] == str(NOW - 3000)
     # the re-read is charged to the tick's call budget like a write
     assert _census(st, "venue_calls") >= 3
 
 
-def test_e18_the_entry_ioc_goes_when_the_ask_still_stands_and_the_row_records_ask_at_send():
+def test_e18_the_touch_bound_rest_goes_at_the_tick_cent_when_the_ask_still_stands_and_the_row_records_ask_at_send():
+    """RE-PINNED at E31: E18's "the entry IOC GOES at 0.30 when the ask
+    still stands" is now "the rest goes at 0.29, a tick under the ask
+    that still stands" -- an unchanged re-read recomputes the same wire
+    and returns it, so nothing is re-quoted and ask_at_send still records
+    the read. The second leg is the mirror of the first test: the ask
+    FELL to 0.29, so the bound falls with it and the rest goes out at
+    0.28 rather than crossing at 0.30."""
     p, b, v = _take_world([(0.29, 0.30), (0.29, 0.30)])
     st = _tick(p, v)
-    assert [c[2:6] for c in _places(v)] == [(0.30, 300, False, IOC_TIF)] and _census(st, "take_first") == 1
-    assert _census(st, "ask_moved") == 0 and b["ledger_net"] == 300
+    assert [c[2:6] for c in _places(v)] == [(0.29, 300, False, GTC_TIF)] and _census(st, "take_first") == 0
+    assert _census(st, "ask_moved") == 0 and b["ledger_net"] == 0
     ins = _inserts(p)
-    assert len(ins) == 1 and ins[0][5] == "IOC" and ins[0][19] == 0.30 and ins[0][20] == "take"
-    assert ins[0][21] == str(NOW - 3000) and b["last_plan"]["decision"] == "take"
-    assert b["last_plan"]["ioc_quote_at_send"]["ask"] == 0.30 and "ask_moved" not in b["last_plan"]
-    # through his cent on the re-read (the ask fell further): still sent
+    assert len(ins) == 1 and ins[0][5] == "GTC" and ins[0][19] == 0.30 and ins[0][20] == "rest"
+    assert ins[0][21] == str(NOW - 3000) and b["last_plan"]["decision"] == "rest"
+    assert b["last_plan"]["rest_quote_at_send"]["ask"] == 0.30 and "ask_moved" not in b["last_plan"]
+    # the ask fell further on the re-read: the rest follows it down a tick, never through it
     p2, b2, v2 = _take_world([(0.29, 0.30), (0.28, 0.29)])
     _tick(p2, v2)
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 300, False, IOC_TIF)] and _inserts(p2)[0][19] == 0.29
+    assert [c[2:6] for c in _places(v2)] == [(0.28, 300, False, GTC_TIF)] and _inserts(p2)[0][19] == 0.29
 
 
 def test_e18_the_re_read_is_refused_by_the_call_budget_and_the_rest_is_still_placed(monkeypatch):
@@ -359,8 +408,9 @@ def test_e18_the_re_read_is_refused_by_the_call_budget_and_the_rest_is_still_pla
     st = _tick(p, v)
     assert _bbos(v).count(SLUG) == 1, "no re-read under an exhausted budget"
     assert [c[2:6] for c in _places(v)] == [(0.29, 300, False, GTC_TIF)] and b["ledger_net"] == 0
-    assert _census(st, "ioc_reread_capped") == 1 and _census(st, "take_placed") == 0
-    assert b["last_plan"]["ioc_reread_capped"] == {"guard_calls": 0, "budget": 0}
+    assert _census(st, "rest_reread_capped") == 1 and _census(st, "take_placed") == 0
+    assert b["last_plan"]["rest_reread_capped"] == {"guard_calls": 0, "budget": 0}
+    assert _census(st, "ioc_reread_capped") == 0, "E31: the retired name stays a declared zero"
 
 
 def test_e18_an_unreadable_re_read_withholds_the_ioc_and_the_rest_is_still_placed():
@@ -369,19 +419,25 @@ def test_e18_an_unreadable_re_read_withholds_the_ioc_and_the_rest_is_still_place
     p2, b2, v2 = _take_world([(0.29, 0.30), (None, None)])
     st2 = _tick(p2, v2)
     assert _bbos(v2).count(SLUG) == 2
-    assert [c[2:6] for c in _places(v2)] == [(0.29, 300, False, GTC_TIF)] and _census(st2, "ioc_quote_unread") == 1
+    assert [c[2:6] for c in _places(v2)] == [(0.29, 300, False, GTC_TIF)] and _census(st2, "rest_quote_unread") == 1
     assert b2["ledger_net"] == 0 and _census(st2, "take_placed") == 0 and _census(st2, "ask_moved") == 0
-    assert b2["last_plan"]["ioc_quote_at_send"] == {"bid": None, "ask": None, "bid_at_plan": 0.29, "ask_at_plan": 0.30}
+    assert _census(st2, "ioc_quote_unread") == 0, "E31: the retired name stays a declared zero"
+    assert b2["last_plan"]["rest_quote_at_send"] == {"bid": None, "ask": None, "bid_at_plan": 0.29, "ask_at_plan": 0.30}
 
 
-def test_e18_an_exit_ioc_is_withheld_when_the_bid_fell_and_is_re_read_whatever_the_budget(monkeypatch):
-    """His 300 @0.31, his SELL of 200 @0.31: the take cent is 0.30 (his
-    price less the tolerance, E4); the bid at 0.30 on the tick's read
-    fires the exit take, the re-read at 0.28 withholds it (`bid_moved`);
-    the whole 200 rests at his cent 0.31 on the SAME tick (E14b, FILL
-    lane 1: the pin read "nothing rests this tick" before it -- the rest
-    came with the next tick's plan). The exit's re-read is made with the
-    budget spent; the rest is not re-read (only an IOC is)."""
+def test_e18_an_exit_rest_at_the_touch_is_re_read_whatever_the_budget_and_never_crosses(monkeypatch):
+    """His 300 @0.31, his SELL of 200 @0.31. RE-PINNED at E31 (FILL lane
+    31, 2026-09-10): E18 pinned here that the exit TAKE at 0.30 (his
+    price less E4's tolerance) fired on the tick's bid of 0.30 and was
+    WITHHELD by the re-read at 0.28 (`bid_moved`), the 200 resting at his
+    cent 0.31 on the same tick. There is no exit take: the exit rests at
+    max(sell_wire(0.31), bid 0.30 + 0.01) = 0.31 -- his own cent, one tick
+    over the bid, which is the SAME 0.31 rest and the same row E18 pinned.
+    Because that cent IS the touch bound, the exit's re-read still fires,
+    and still fires with the call budget spent (an exit is never capped,
+    the L6 review's M-1). The re-read at 0.28 moves the bound DOWN to 0.29
+    and max(0.31, 0.29) is 0.31: nothing to re-quote, the rest goes.
+    `bid_moved` and `exit_take_rested` are gone with the take."""
     monkeypatch.setattr(rules, "MIRROR_VENUE_CALLS_PER_TICK", 0)
     p = _pool(fills=[_fill(M, "BUY", 300, 0.31, NOW - 3000), _fill(M, "SELL", 200, 0.31, NOW - 1000)],
               snap={M: 100.0, N: 0.0})
@@ -390,33 +446,42 @@ def test_e18_an_exit_ioc_is_withheld_when_the_bid_fell_and_is_re_read_whatever_t
     st = _tick(p, v)
     assert _bbos(v).count(SLUG) == 2 and b["ledger_net"] == 300
     assert [c[2:6] for c in _places(v)] == [(0.31, 200, True, GTC_TIF)], "the rest at his cent this tick (E14b)"
-    assert _census(st, "bid_moved") == 1 and _census(st, "exit_take") == 0 and _census(st, "exit_take_rested") == 1
-    assert b["last_plan"]["bid_moved"] == {"bid_at_plan": 0.30, "bid_at_send": 0.28, "wire": 0.30}
+    assert _census(st, "bid_moved") == 0 and _census(st, "exit_take") == 0 and _census(st, "exit_take_rested") == 0
+    assert "bid_moved" not in b["last_plan"] and b["last_plan"]["maker"]["clause"] == "his_cent"
+    assert b["last_plan"]["rest_quote_at_send"] == {"bid": 0.28, "ask": 0.32, "bid_at_plan": 0.30, "ask_at_plan": 0.32}
     assert _inserts(p)[0][20] == "exit_rest"
-    # the next tick, the bid still away: the rest stands at his cent, held by name, nothing more
+    # the next tick, the bid still away: the same rest stands at his cent, nothing more sent
     st2 = _tick(p, v, now=NOW + 30)
-    assert len(_places(v)) == 1 and _census(st2, "bid_moved") == 0 and _census(st2, "exit_out_of_tol") == 1
-    assert _census(st2, "exit_take_rested") == 0
-    # the bid holding on the re-read: the exit IOC goes, ask_at_send recorded
+    assert len(_places(v)) == 1 and _census(st2, "bid_moved") == 0 and not _cancels(v)
+    assert _census(st2, "exit_take_rested") == 0 and b["ledger_net"] == 300
+    # the bid holding on the re-read: the same exit rest goes, ask_at_send recorded
     p2 = _pool(fills=[_fill(M, "BUY", 300, 0.31, NOW - 3000), _fill(M, "SELL", 200, 0.31, NOW - 1000)],
                snap={M: 100.0, N: 0.0})
     b2 = p2.add_book(ledger=300, avg_cost=0.31)
     v2 = _MovingVenue([(0.30, 0.32), (0.30, 0.33)], held={SLUG: 300}, ioc_fill=200.0)
     st3 = _tick(p2, v2)
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 200, True, IOC_TIF)] and _census(st3, "exit_take") == 1
-    assert b2["ledger_net"] == 100 and _inserts(p2)[0][19] == 0.33 and _inserts(p2)[0][20] == "take"
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 200, True, GTC_TIF)] and _census(st3, "exit_take") == 0
+    assert b2["ledger_net"] == 300 and _inserts(p2)[0][19] == 0.33 and _inserts(p2)[0][20] == "exit_rest"
 
 
-def test_e18_the_take_off_a_standing_rest_re_reads_too_and_re_rests_the_remainder_when_withheld():
-    # a rest standing at 0.29 (his 0.30), the ask arriving at 0.30: the rest is
-    # cancelled and taken; the re-read finds the ask gone -> no IOC, the rest back
+def test_e18_a_standing_rest_at_the_maker_wire_is_kept_and_never_taken_off():
+    """RE-PINNED at E31 (FILL lane 31, 2026-09-10). E18 pinned here the
+    TAKE OFF A STANDING REST: a rest at 0.29 with the ask arriving at his
+    cent 0.30 was cancelled, the take sent, the re-read found the ask gone
+    and the rest went back. E31 retired that arm with every other take
+    (_act's keep branch no longer cancels a rest to cross), so the rest --
+    which IS the maker wire, 0.29 -- is simply KEPT: no cancel, no send,
+    no re-read (the re-read happens at the SEND and there is none), and
+    the ledger unmoved. The book's own quote is the same world; the venue
+    is asked for nothing beyond the tick's read."""
     p, b, v = _take_world([(0.29, 0.30), (0.29, 0.31)])
     o = p.add_order(b, wire=0.29, qty=300, placed_ts=NOW - 100)
     v.rest("oid-1", "BUY", 0.29, 300)
     st = _tick(p, v)
-    assert [c[1] for c in _cancels(v)] == ["oid-1"] and p.orders[o["id"]]["reason"] == "take"
-    assert [c[2:6] for c in _places(v)] == [(0.29, 300, False, GTC_TIF)] and _census(st, "ask_moved") == 1
+    assert not _cancels(v) and p.orders[o["id"]]["state"] == "open"
+    assert not _places(v) and _census(st, "ask_moved") == 0 and _bbos(v).count(SLUG) == 1
     assert _census(st, "take_placed") == 0 and b["ledger_net"] == 0
+    assert _census(st, "open_order_pending") == 1
 
 
 # ---------------------------------------------- the column, the migration
@@ -433,7 +498,7 @@ def test_e18_059_absent_sends_the_050_insert_writes_no_decision_says_so_once_and
         st = _tick(p, v)
     assert st["order_cols_absent"] == "UndefinedColumnError" and st["status"] == "ok"
     assert _census(st, "order_cols_guard_unreadable") == 0
-    assert p.orders[o["id"]]["state"] == "cancelled" and [c[2:6] for c in _places(v)] == [(0.29, 300, False, GTC_TIF)]
+    assert p.orders[o["id"]]["state"] == "cancelled" and [c[2:6] for c in _places(v)] == [(0.31, 300, False, GTC_TIF)]
     ins = _inserts(p)
     assert len(ins) == 1 and len(ins[0]) == 19 and ins[0][18] == "ORDER_INTENT_BUY_LONG"
     assert _decisions(p) == [] and b["last_plan"]["decision"] == "rest"
@@ -605,16 +670,21 @@ def test_e18_the_census_names_sit_before_registered_no_increase_and_the_pins_hol
     assert keys.index("venue_market_ended") < keys.index("kept_min_life")
     assert keys[-12] == "registered_no_increase" and keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
-    assert ml.IOC_SKIPPED == ("ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread")
+    # RE-PINNED at E31: `IOC_SKIPPED` named the two withholdings and the two unread/capped
+    # names; the take is gone, so the tuple that survives is the re-read's own two
+    assert ml.REST_REREAD_SKIPPED == ("rest_reread_capped", "rest_quote_unread")
+    assert not hasattr(ml, "IOC_SKIPPED")
+    for k in RETIRED:                       # the four retired names stay DECLARED, at zero
+        assert k in keys and ml._new_stats()["census"][k] == 0, k
     # no env knob of the lane's own beyond the floor: the cent move is a constant
     src = inspect.getsource(ml)
     assert '"MIRROR_REST_MIN_LIFE_S"' not in src and 'capped_env("MIRROR_IOC' not in src, "the worker reads no env of its own"
     psrc = inspect.getsource(ml._place_reserved)
-    assert "_ioc_reread(t, book, r, side, wire, action, plan)" in psrc
+    assert "_rest_reread(t, book, r, side, float(wire), action," in psrc and "_ioc_reread" not in psrc
     # the re-read (an await) sits BEFORE the room's read, so E2's "nothing
     # between this read and the take" holds (the review's HIGH-1, folded
     # 2026-09-08: the pin once read against _room_take alone)
-    assert psrc.index("held = await _ioc_reread(") < psrc.index("qty = _room_qty(") < psrc.index("_room_take(t, est)"), \
+    assert psrc.index("wire = await _rest_reread(") < psrc.index("qty = _room_qty(") < psrc.index("_room_take(t, est)"), \
         "refused before the room's read"
 
 
@@ -622,10 +692,10 @@ def test_e18_every_name_is_emitted_here(monkeypatch, caplog):
     """The lane's six names, each driven once (the worker file's coverage
     read imports this)."""
     test_e18_the_worker_keeps_a_young_entry_rest_over_a_one_cent_move_and_replaces_it_past_the_floor()
-    test_e18_the_entry_ioc_is_withheld_when_the_ask_left_his_cent_between_the_read_and_the_send_and_the_rest_is_placed()
+    test_e18_the_touch_bound_rest_is_re_priced_when_the_ask_rose_between_the_read_and_the_send()
     test_e18_an_unreadable_re_read_withholds_the_ioc_and_the_rest_is_still_placed()
     test_e18_the_re_read_is_refused_by_the_call_budget_and_the_rest_is_still_placed(monkeypatch)
-    test_e18_an_exit_ioc_is_withheld_when_the_bid_fell_and_is_re_read_whatever_the_budget(monkeypatch)
+    test_e18_an_exit_rest_at_the_touch_is_re_read_whatever_the_budget_and_never_crosses(monkeypatch)
     test_e18_the_059_probe_failing_for_any_other_reason_refuses_the_tick_by_name()
 
 

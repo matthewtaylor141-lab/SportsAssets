@@ -1,6 +1,23 @@
 """E9 (2026-09-07): the wake fast path; every fill of his on a market we
 hold answered or named.
 
+# RE-PINNED at E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never
+# crosses; owner order ~03:3xZ "become a maker not taker ... mirror him to a tee"). The
+# rule this file exists for is untouched; the EXECUTION under it moves the same way on
+# every pin below, and only these ways:
+#   the cent 0.30 -> 0.31   this world's book is 0.30 / 0.32 and his level 0.31. An ENTRY
+#                           rested at buy_price(his, bid) = the BID 0.30; the maker wire is
+#                           min(buy_wire(0.31), 0.32 - 0.01) = 0.31, HIS OWN cent inside
+#                           the spread. An EXIT took at ceil(his) - MIRROR_EXIT_TOL = 0.30,
+#                           THROUGH the bid; the maker wire is max(sell_wire(0.31), 0.30 +
+#                           0.01) = 0.31, his own cent one tick over the bid.
+#   IOC -> GTC, post-only   there is no take path left in the worker.
+#   `exit_take` 1 -> 0      the counter counted the exit's IOC and is a declared zero from
+#                           E31; `rest_placed` counts in its place.
+#   `lift=` beside `ioc_fill=`  the shares a TAKER lifts off the fresh rest at create
+#                           (`aggressor` False: a maker fill), booking the ledger the IOC
+#                           booked, so every ledger figure below is unchanged.
+
 Owner 22:4xZ: "I need it being proportional, directional and only taking
 buys within 1c of him and sells (or exits) within 1c of his price. This
 means latency must be flawless and exceptional." With E6 + E7 live the
@@ -260,8 +277,8 @@ def test_e9_the_fast_tick_reads_and_places_the_woken_market_inside_the_floor_and
     took = _run(_drive())
     assert took < ml.FAST_TICK_MIN_S and slept == [], "no floor to wait out: the first wake runs at once"
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][1] == SLUG and pl[0][2] == 0.30 and pl[0][3] == 300, pl
-    assert _bbos(v) == [SLUG], "the woken market alone: the other book is not read"
+    assert len(pl) == 1 and pl[0][1] == SLUG and pl[0][2] == 0.31 and pl[0][3] == 300, pl
+    assert _bbos(v) == [SLUG, SLUG], "the woken market alone: the other book is not read"  # E31: the tick's read and the touch-bound rest's re-read at the send
     assert b["open_order_id"] is not None and other["last_plan"] is None
     assert ml._FAST_WOKEN == {} and ml._fast_census["fast_tick"] == 1 and ml._fast_census["fast_tick_placed"] == 1
     assert ml._fast_census["rest_placed"] == 1
@@ -335,7 +352,7 @@ def test_e9_the_budget_is_shared_with_the_full_tick():
     p3.add_book(ledger=0)
     v3 = _Venue()
     fs3 = _fast(p3, v3)
-    assert _places(v3) and ml._fast_calls == _census(fs3, "venue_calls") == fs3["short"]["timing"]["venue_calls"] == 4
+    assert _places(v3) and ml._fast_calls == _census(fs3, "venue_calls") == fs3["short"]["timing"]["venue_calls"] == 5
 
 
 def test_e9_the_e2_guard_and_the_ops_budget_are_seeded_with_the_fast_ticks_spend():
@@ -355,11 +372,11 @@ def test_e9_the_e2_guard_and_the_ops_budget_are_seeded_with_the_fast_ticks_spend
     v2 = _Venue()
     fs2 = _fast(p2, v2)
     assert _census(fs2, "ops_capped") == 1 and not _places(v2) and _bbos(v2) == [SLUG]
-    p3, b3, v3, http3 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+    p3, b3, v3, http3 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
     _walk({SLUG: 300.0})
     fs3 = _fast(p3, v3, http=http3)
     pl = _places(v3)
-    assert len(pl) == 1 and pl[0][4] is True and pl[0][2] == 0.30 and _census(fs3, "exit_take") == 1
+    assert len(pl) == 1 and pl[0][4] is True and pl[0][2] == 0.31 and _census(fs3, "exit_take") == 0
     assert _census(fs3, "fast_tick_placed") == 1 and b3["ledger_net"] == 100
 
 
@@ -383,7 +400,7 @@ def test_e9_a_fast_tick_is_refused_while_the_full_tick_holds_the_books_lock_and_
     assert _bbos(v) == [] and b["last_plan"] is None
     # the lock free: read and placed, the wake answered
     fs4 = _fast(p, v)
-    assert _skips(fs4) == {} and _bbos(v) == [SLUG] and _places(v) and _census(fs4, "fast_tick_placed") == 1
+    assert _skips(fs4) == {} and _bbos(v) == [SLUG, SLUG] and _places(v) and _census(fs4, "fast_tick_placed") == 1  # E31: the tick's read and the touch-bound rest's re-read at the send
     # the source: the lock is asked, never awaited, before the row is re-read under it
     src = inspect.getsource(ml._fast_gate)
     assert "_lock_for(bid).locked()" in src and "async with" not in src
@@ -404,7 +421,7 @@ def test_e9_a_fast_tick_beside_a_full_tick_in_flight_waits_for_its_walk_to_pass_
     full.walk_done = {b["id"]}                      # the walk is past the book's whole game
     ml._FAST_WOKEN.clear()
     fs2 = _fast(p, v)
-    assert _skips(fs2) == {} and _bbos(v) == [SLUG] and _places(v)
+    assert _skips(fs2) == {} and _bbos(v) == [SLUG, SLUG] and _places(v)  # E31: the tick's read and the touch-bound rest's re-read at the send
     # a cancel-only full tick in flight: nothing placed beside it
     p2 = _pool()
     p2.add_book(ledger=0)
@@ -482,7 +499,7 @@ def test_e9_the_fast_tick_leaves_to_the_full_tick_by_name_a_frozen_book_an_open_
     assert _skips(fs4) == {CID: "walk_stale"} and _bbos(v) == []
     _walk(at=NOW + 1 - ml.FAST_WALK_MAX_S)
     fs5 = _fast(p3, v)
-    assert _skips(fs5) == {} and _bbos(v) == [SLUG], "inside the bound: read"
+    assert _skips(fs5) == {} and _bbos(v) == [SLUG, SLUG], "inside the bound: read"  # E31: the tick's read and the touch-bound rest's re-read at the send
     # a fill the last full tick booked after its walk: the venue reading is stale by it
     v.calls.clear()
     p4 = _pool()
@@ -509,7 +526,7 @@ def test_e9_a_sibling_with_an_order_open_makes_the_games_room_unreadable_no_incr
     assert _census(fs, "game_unreadable") == 1 and not _places(v) and _bbos(v) == [SLUG]
     assert b["last_plan"]["game_exposure"] is None and b["last_plan"]["game_room"] == 0
     # the exit: a reduce is never touched by the game cap
-    p2, b2, v2, http2 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+    p2, b2, v2, http2 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
     p2.markets["0xsib"] = {"closed": False, "resolved": False, "resolved_prices": None}
     sib2 = p2.add_book(ledger=0, target=300, condition_id="0xsib", us_market_slug="aec-atp-branak-alemic-2026-09-02-total",
                        long_asset="tokLs", other_asset="tokOs", game_key=GAME_KEY)
@@ -517,7 +534,7 @@ def test_e9_a_sibling_with_an_order_open_makes_the_games_room_unreadable_no_incr
     v2.rest("oid-1", slug="aec-atp-branak-alemic-2026-09-02-total")
     _walk({SLUG: 300.0})
     fs2 = _fast(p2, v2, http=http2)
-    assert _census(fs2, "exit_take") == 1 and len(_places(v2)) == 1 and b2["ledger_net"] == 100
+    assert _census(fs2, "exit_take") == 0 and len(_places(v2)) == 1 and b2["ledger_net"] == 100
 
 
 def test_e9_the_fast_tick_reads_the_mode_ladder_and_the_loss_rails_exactly_as_the_full_tick(monkeypatch):
@@ -568,7 +585,7 @@ def test_e9_the_fast_tick_reads_the_mode_ladder_and_the_loss_rails_exactly_as_th
     ml._backoff_until = 0.0
     # exits-only: his SELL is still answered by a fast tick (a reduce is an exit)
     monkeypatch.setenv("PMUS_MIRROR", "exits")
-    p5, b5, v5, http5 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+    p5, b5, v5, http5 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
     _walk({SLUG: 300.0})
     fs5 = _fast(p5, v5, http=http5)
     assert fs5["mode"] == "exits" and len(_places(v5)) == 1 and _places(v5)[0][4] is True
@@ -592,10 +609,10 @@ def _world(kind):
         p.state["mirror_live"] = False
         return p, p.add_book(ledger=0), _Venue(), _Http(), {}
     if kind == "exit_take":
-        p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+        p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
         return p, b, v, http, {SLUG: 300.0}
     if kind == "exit_out_of_tol":
-        p, b, v, http = _reduce_world(bid=0.29, ask=0.32, ioc_fill=200.0)
+        p, b, v, http = _reduce_world(bid=0.29, ask=0.32, ioc_fill=200.0, lift=200.0)
         return p, b, v, http, {SLUG: 300.0}
     raise AssertionError(kind)
 
@@ -630,19 +647,31 @@ def test_e9_every_name_and_plan_the_full_tick_writes_is_the_one_the_fast_tick_wr
 
 def test_e9_entries_at_his_cent_and_exits_within_the_tolerance_are_the_same_wires_in_a_fast_tick():
     assert rules.MIRROR_EXIT_TOL == 0.01
-    p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)     # the bid a cent under his 0.31
+    p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)     # the bid a cent under his 0.31
     _walk({SLUG: 300.0})
     fs = _fast(p, v, http=http)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][2] == 0.30 and pl[0][5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+    assert len(pl) == 1 and pl[0][2] == 0.31 and pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL"
     assert b["last_plan"]["exit_px"] == 0.31 and b["last_plan"]["exit_px_src"] == "his_fill"
-    assert _census(fs, "exit_take") == 1 and _census(fs, "exit_out_of_tol") == 0
-    p2, b2, v2, http2 = _reduce_world(bid=0.29, ask=0.32, ioc_fill=200.0)  # two cents under: the rest at HIS cent
+    assert _census(fs, "exit_take") == 0 and _census(fs, "exit_out_of_tol") == 0
+    p2, b2, v2, http2 = _reduce_world(bid=0.29, ask=0.32, ioc_fill=200.0, lift=200.0)  # two cents under: the rest at HIS cent
     _walk({SLUG: 300.0})
     fs2 = _fast(p2, v2, http=http2)
     pl2 = _places(v2)
     assert len(pl2) == 1 and pl2[0][2] == 0.31 and pl2[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL"
-    assert _census(fs2, "exit_out_of_tol") == 1
+    # E31: `exit_take` 0 -> 0 (the take is gone with `_exit_take`), but `exit_out_of_tol`
+    # 0 -> 1: E4's HELD RECORD travelled with the take branch and is kept on the road that
+    # PLACES the exit (mirror_live.py `_exit_held(t, r, ex, plan, w)` under
+    # `not rules.at_or_through(SELL, r.bid, r.ask, ex["take"])`), because the exits presets
+    # read it and docs 75 lists the name as reachable. Here his take cent is
+    # sell_wire(0.31 - MIRROR_EXIT_TOL) = 0.30 and the bid is 0.29, so the touch IS outside
+    # his tolerance cent and the tick records the quote and the FLOOR it was read against.
+    # In the first world (bid 0.30) the take cent is AT the bid, so nothing is recorded.
+    # The rest itself, at his cent 0.31, is what both worlds send either way
+    assert _census(fs2, "exit_out_of_tol") == 1 and _census(fs2, "exit_take") == 0
+    assert b2["last_plan"]["exit_out_of_tol"]["bid"] == 0.29
+    assert b2["last_plan"]["exit_out_of_tol"]["ask"] == 0.32
+    assert b2["last_plan"]["exit_out_of_tol"]["floor"] == 0.30
     # the entry rests at his level's cent, post-only, exactly as the full tick's
     p3 = _pool()
     p3.add_book(ledger=0)
@@ -650,7 +679,7 @@ def test_e9_entries_at_his_cent_and_exits_within_the_tolerance_are_the_same_wire
     _walk()
     _fast(p3, v3)
     pl3 = _places(v3)
-    assert len(pl3) == 1 and pl3[0][2] == 0.30 and pl3[0][7] is True and pl3[0][6] == "ORDER_INTENT_BUY_LONG"
+    assert len(pl3) == 1 and pl3[0][2] == 0.31 and pl3[0][7] is True and pl3[0][6] == "ORDER_INTENT_BUY_LONG"
 
 
 # ---------------------------------------------------- part 1: his_fills_seen
@@ -740,7 +769,7 @@ def test_e9_short_fast_is_published_beside_the_timing_block_and_served_whole():
     assert tuple(fb) == FAST_KEYS, "bounded: these keys and no others"
     assert isinstance(fb["fast"], float) and fb["fast"] >= 0.0 and fb["fast"] == round(fb["fast"], 1)
     assert fb["n"] == 2 and fb["markets"] == 2 and fb["placed"] == 1 and fb["skipped"] == 1 and fb["failed"] == 0
-    assert fb["calls"] == 4 and all(isinstance(fb[k], int) for k in FAST_KEYS[1:])
+    assert fb["calls"] == 5 and all(isinstance(fb[k], int) for k in FAST_KEYS[1:])
     assert tuple(st["short"]["timing"]) == TIMING_KEYS, "E6's block keeps exactly its keys"
     assert tuple(st["short"]["data_api"]) == ("books_data_wait", "books_data_req", "data_rps")
     # the census folded: the fast ticks' names ride this tick's census

@@ -452,17 +452,18 @@ HIS_FILLS_SEEN_MAX = 20
 # response was lost with the process (step O); younger, the placement
 # may still be the one in flight under this very tick's lock.
 PLACING_ORPHAN_S = 60.0
-# A take arm older than this many MIRROR_TAKE_AFTER_S waits is stale
-# evidence of a crossing (the arm is read in _act before the room and
-# the clip, so nothing else bounds its age): the take is refused by
-# name and the book rests first. A multiplier of the rules' wait, never
-# a wait of its own, so lengthening the wait lengthens the bound.
-TAKE_ARM_STALE_WAITS = 2
-# ... with a FLOOR (E2 review, MEDIUM-2b): at the 20 s wait twice the
-# wait is 40 s, and at a 0 s wait (E4's owner order) it is 0 -- every
-# armed take would be stale on the next tick and never fire. The stale
-# bound is max(TAKE_ARM_STALE_WAITS x wait, this many seconds).
-TAKE_ARM_STALE_MIN_S = 60.0
+# E31 (FILL lane 31): THE CROSS HINT'S TWO BOUNDS. A post-only rejection
+# this lane reads as a CROSS (the venue's own post_only_cross field, or
+# our own quote at or through the wire the rest was sent against) re-prices
+# the next rest ONE TICK FURTHER FROM THE TOUCH, never re-sends the same
+# wire and never arms a take. The hint steps at most this many ticks; past
+# it the rest is HELD by name (`maker_cross_held`) until the quote read
+# differs from the hint's or MAKER_CROSS_HOLD_S passes. Both are BOUNDS,
+# not knobs: no environment value moves them, in either direction (a
+# larger step would rest further from him than he is; a longer hold would
+# leave the book unmanaged). E30's own wait is the streak's, not this one's.
+MAKER_CROSS_MAX_TICKS = 3
+MAKER_CROSS_HOLD_S = 60.0
 # The cancel/read discipline of the rest lane (_rest_cycle): two cancel
 # attempts, then up to three reads a short gap apart until terminal.
 CANCEL_ATTEMPTS = 2
@@ -501,6 +502,21 @@ _STATE_LIVE = "mirror_live"
 _STATE_WHALES = "mirror_live_whales"
 _STATE_DEMOTED = "mirror_live_demoted"
 _STATE_LOSS_STOP = "mirror_loss_stop"
+# E31 (FILL lane 31): THE DURABLE POST-ONLY BLOCK, the _STATE_LOSS_STOP
+# pattern. The venue filling a post-only rest AT CREATE with any
+# execution's `aggressor` True (or an executions list this process cannot
+# read) is the venue telling us the flag did not hold. Before this lane
+# that turned post-only OFF for the whole process (`_POST_ONLY_OK`) and
+# every later rest went out crossable -- the opposite of the maker rule.
+# Now the flag NEVER leaves the send and the ADDS stop instead: this key
+# is written {at, book, order, slug, filled, aggressor} and read at every
+# tick's start into the increase refusal `post_only_block`. Every add is
+# refused by that name and a standing add rest is cancelled under it;
+# every EXIT still places (a reduce rest at his cent or better, still
+# post-only). An operator clears it with the `mirror-post-only-rearm`
+# preset (need_confirm), the loss stop's re-arm pattern: there is no
+# automatic re-probe.
+_STATE_POST_ONLY_BLOCK = "mirror_post_only_block"
 # THE RE-ARM RESTARTS THE WINDOW (L1, 2026-09-07). The operator's
 # `mirror-rearm` (render-ops, confirm=DO) deleted the stop at 16:51Z and
 # the worker re-tripped itself at 17:07:45Z ({"sum": -5023.9545,
@@ -1210,6 +1226,45 @@ CENSUS_KEYS: tuple[str, ...] = (
     # (keys[-12]), after E29's four, by the convention every lane
     # followed (keys[-14]; the tail pins moved by one)
     "post_only_backoff",
+    # E31 (2026-09-10; FILL lane 31, docs 75; owner order ~03:3xZ "become
+    # a maker not taker ... mirror him to a tee"): EVERY ORDER IS A
+    # POST-ONLY REST AT HIS PRICE OR BETTER THAT NEVER CROSSES THE TOUCH.
+    # `maker_rest_at_touch`: the rest sat at the touch bound (the ask less
+    # a tick on a BUY, the bid plus one on a SELL) because his own cent
+    # would have crossed. `maker_rest_repriced`: a standing rest replaced
+    # because the touch moved so the rest can sit nearer his level (the
+    # plan's `replaced_by` 'touch'). `maker_cross_repriced`: the venue
+    # refused a rest as a CROSS (its own field, or our quote at or through
+    # the wire), the book's hint written and the next rest one tick
+    # further off the touch. `maker_cross_held`: the hint at
+    # MAKER_CROSS_MAX_TICKS -- the rest held by name, no send.
+    # `maker_no_cent`: no non-crossing cent on the ladder, or the touch
+    # side the clamp needs unreadable -- no order, the book held.
+    # `maker_fill_at_create`: a post-only rest filled at create with every
+    # execution's `aggressor` False -- a MAKER fill, booked as one.
+    # `post_only_block`: an add refused because the durable block stands
+    # (the venue ignored the flag once; a human re-arms). `ioc_refused`:
+    # _place refused a tif 'IOC' by name -- the fail-closed guard over a
+    # path that no longer exists. `rest_reread_capped` / `rest_quote_unread`:
+    # a touch-bound rest's pre-send re-read refused by the call budget, or
+    # back without the side the clamp needs -- the rest goes on the tick's
+    # read, counted. Before E19's `drift_smaller_open` (keys[-13]) and
+    # `registered_no_increase` (keys[-12]), after E30's one, by the
+    # convention every lane followed (keys[-23:-13]; the tail pins moved
+    # by ten).
+    # EIGHTEEN NAMES ABOVE ARE DOCUMENTARY ZEROS FROM THIS LANE and are
+    # never emitted again: `take_placed`, `take_first`, `take_at_his_level`,
+    # `take_refused_price`, `take_capped`, `take_arm_stale`, `filled_take`,
+    # `take_in_band`, `exit_take`, `exit_take_rested`, `exit_take_in_band`,
+    # `cover_in_band`, `short_cover_take`, `fast_add_took`, `ask_moved`,
+    # `bid_moved`, `ioc_reread_capped`, `ioc_quote_unread`. They stay
+    # DECLARED -- the honest removal would re-cut a hundred from-end pins
+    # in twenty files, and a reader of an older heartbeat still needs the
+    # name -- and they join the coverage hook's `unreachable` set with
+    # this lane named beside them
+    "maker_rest_at_touch", "maker_rest_repriced", "maker_cross_repriced", "maker_cross_held",
+    "maker_no_cent", "maker_fill_at_create", "post_only_block", "ioc_refused",
+    "rest_reread_capped", "rest_quote_unread",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -1807,10 +1862,21 @@ _fast_wall = {"wait": 0.0, "work": 0.0}
 # _fast_candidate; a fast tick that never reached its loop counts its
 # whole work), the _fast_wall shape: summed, reset on the take
 _fast_speed = {"prelude": 0.0}
-# The venue IGNORED the post-only flag once (executions on a post-only
-# create): the flag is off for the rest of the process and the maker
-# thesis is measured by price selection alone (spec X.L).
-_POST_ONLY_OK = True
+# E31 (FILL lane 31): THE BOOK'S CROSS HINT. A post-only rejection this
+# lane reads as a CROSS writes {wire, n, quote, at} here, and the book's
+# next rest is priced n ticks further from the touch than the rejected
+# wire -- always at his price or better by construction. Popped by an
+# accepted placement (beside E30's streak), by a quote that differs from
+# the hint's, or after MAKER_CROSS_HOLD_S. Bounded like E30's streak: the
+# oldest entry is dropped past the cap.
+_cross_hint: dict[int, dict] = {}
+_CROSS_HINT_MAX = 500
+# E31: the durable post-only block, read once per tick into the tick's
+# increase refusal; None until a tick has read the key (fail closed on an
+# unreadable read: the adds are refused).
+_post_only_block_logged = False
+# E31: the IOC guard's ONE line per process (the count is every time)
+_ioc_refused_logged = False
 # The _copy_stop shape (live_executor:386-398), bounded the same way and
 # for the same reason: the key space includes the whale.
 _MIRROR_CENSUS: dict[str, int] = {}
@@ -2061,9 +2127,17 @@ def _no_nan(obj: Any) -> Any:
     return obj
 
 
-def _post_only_enabled() -> bool:
-    return (_POST_ONLY_OK and os.environ.get("PMUS_MIRROR_POST_ONLY", "on")
-            .strip().lower() not in _OFF_VALUES)
+# E31 (FILL lane 31): THE FLAG IS NOT A KNOB AND NOT A LATCH. Before this
+# lane `_post_only_enabled()` read a process latch (`_POST_ONLY_OK`,
+# flipped False the first time the venue filled a post-only rest at
+# create) AND a shell variable (`PMUS_MIRROR_POST_ONLY`), and either could
+# turn `participateDontInitiate` off for every later rest -- i.e. turn
+# the mirror into a taker without a review, the aggressive direction the
+# rails forbid (mirror_live_rules:14-20, 269-271). Both are gone: every
+# send passes `post_only=True` by the literal at the call, and the venue
+# ignoring the flag writes the DURABLE BLOCK (_STATE_POST_ONLY_BLOCK)
+# that refuses ADDS by name until a human re-arms, while the exits keep
+# running and the flag keeps going out.
 
 
 def _gtd_enabled() -> bool:
@@ -2344,6 +2418,188 @@ def _post_only_held(t: _Tick, book: dict, p: "mi.Plan", wire: float | None) -> d
         ent["hold_since"] = t.now
         _recent(book["id"], "post_only_backoff", n=n, code=ent.get("code"), until=round(until, 1))
     return {"since": ent["hold_since"], "until": until, "n": n, "code": ent.get("code")}
+
+
+# ------------------------------------------- E31: the maker's cross hint
+
+def _maker_cross(raw: Any, side: str, bid: float | None, ask: float | None,
+                 wire: float | None) -> bool:
+    """Was this post-only rejection a CROSS (E31 D)? Two readings, either
+    of which is the venue's or our own evidence that the rest was
+    marketable when it was sent:
+      (i) THE VENUE'S OWN FIELD -- the adapter's second shape, a 200 whose
+          order came back REJECTED with an EXECUTION_TYPE_REJECTED
+          execution (`post_only_cross` True, read by rules.take_arms):
+          E30's ':cross' word, the same predicate;
+      (ii) OUR OWN QUOTE -- the wire was at or through the touch on the
+          read the rest was sent against (rules.at_or_through: the ask at
+          or under a BUY's cent, the bid at or over a SELL's).
+    Anything else is NOT a cross -- book 1383's nine 400s at 0.89 over an
+    ask of 0.76 are the shape E30 alone covers (the same wire, three
+    identical rejections, the bounded wait) -- and this returns False, so
+    the lane re-prices nothing and E30's path runs byte for byte."""
+    if _post_only_word(raw) == ":cross":
+        return True
+    return rules.at_or_through(side, bid, ask, wire)
+
+
+def _cross_hint_live(t: _Tick, book: dict, r: _Reading) -> dict | None:
+    """The book's live cross hint, or None (E31 D). The hint is DROPPED --
+    tried again from the touch bound -- when the tick's quote differs from
+    the quote the rejection was read against (the book moved: the cross is
+    no longer evidence of anything) or when MAKER_CROSS_HOLD_S has passed
+    since it was written. An entry this process cannot read holds nothing."""
+    ent = _cross_hint.get(book["id"])
+    if not isinstance(ent, dict):
+        _cross_hint.pop(book["id"], None)
+        return None
+    at = _num(ent.get("at"))
+    if at is None or t.now - at >= MAKER_CROSS_HOLD_S:
+        _cross_hint.pop(book["id"], None)
+        return None
+    q = ent.get("quote")
+    if not (isinstance(q, (list, tuple)) and len(q) == 2
+            and _num(q[0]) == _num(r.bid) and _num(q[1]) == _num(r.ask)):
+        _cross_hint.pop(book["id"], None)
+        return None
+    return ent
+
+
+def _cross_hint_note(t: _Tick, book: dict, side: str, wire: float | None,
+                     r: _Reading) -> dict:
+    """The venue refused this wire as a cross (E31 D): the book's hint
+    steps one, and the next plan prices one tick FURTHER FROM THE TOUCH
+    than `wire` -- never the same wire again, never a take, never past
+    his own cent (the wire is min/max'd with his cent by maker_wire, so
+    the step can only improve on him). `n` counts the steps; at more than
+    MAKER_CROSS_MAX_TICKS the rest is held by name. Bounded at
+    _CROSS_HINT_MAX books (the oldest dropped), the streak's own shape."""
+    ent = _cross_hint.get(book["id"])
+    n = int(_num(ent.get("n")) or 0) if isinstance(ent, dict) else 0
+    ent = {"wire": _num(wire), "n": n + 1, "quote": (_num(r.bid), _num(r.ask)),
+           "side": side, "at": t.now}
+    if book["id"] not in _cross_hint and len(_cross_hint) >= _CROSS_HINT_MAX:
+        oldest = min(_cross_hint, key=lambda k: (_num(_cross_hint[k].get("at"))
+                                                 if isinstance(_cross_hint[k], dict) else None) or 0.0)
+        _cross_hint.pop(oldest, None)
+    _cross_hint[book["id"]] = ent
+    return ent
+
+
+def _ioc_refused_log(book: dict, kind: str, side: str, wire: float, tif: str) -> None:
+    """ONE ERROR per process naming the guard that fired (E31): no order
+    of this mirror takes, so a caller that asked for one is a defect, not
+    a market event. The count is on the census every time."""
+    global _ioc_refused_logged
+    if _ioc_refused_logged:
+        return
+    _ioc_refused_logged = True
+    log.error("mirror_live: book %s asked for a %s order (%s %s @%s, kind %s): REFUSED -- this "
+              "mirror sends post-only rests only (E31)", book.get("id"), tif, side,
+              book.get("us_market_slug"), wire, kind)
+
+
+def _aggressor_maker(raw: Any) -> bool:
+    """Did a post-only order that FILLED AT CREATE fill as a MAKER (E31
+    D2)? True only when the adapter attached execution records, at least
+    one of them is a FILL or PARTIAL_FILL, and EVERY such record carries
+    `aggressor` as the bool False -- the venue saying a taker hit our
+    fresh rest inside the synchronous window. False for everything else:
+    a raw that is not a dict, no `executions` list, a list this process
+    cannot read, no filling record in it, a record whose `aggressor` is
+    True, and a record whose `aggressor` is None (the field the SDK types
+    as a bool came back unreadable). Fail closed: an unread aggressor is
+    the block, never a maker claim -- the flag itself cannot be read back
+    from the venue (the desk's own note), so this bool is the only witness
+    there is."""
+    if not isinstance(raw, dict):
+        return False
+    recs = raw.get("executions")
+    if not isinstance(recs, list) or not recs:
+        return False
+    seen = 0
+    for rec in recs:
+        if not isinstance(rec, dict):
+            return False
+        kind = str(rec.get("type") or "")
+        if "FILL" not in kind.upper():
+            continue
+        seen += 1
+        if rec.get("aggressor") is not False:
+            return False
+    return seen > 0
+
+
+async def _write_post_only_block(t: _Tick, book: dict, oid: Any, filled: float, raw: Any) -> None:
+    """THE DURABLE BLOCK (E31 D2), the loss stop's own pattern: the venue
+    filled a post-only rest at create and its `aggressor` did not read as
+    a maker, so every ADD stops until a human clears the key with the
+    `mirror-post-only-rearm` preset. The flag is NOT turned off and the
+    exits keep running. A write that raises is logged and the tick still
+    refuses (t.increase_block is set by the caller's read next tick; this
+    tick's own status is already degraded)."""
+    ag = None
+    if isinstance(raw, dict) and isinstance(raw.get("executions"), list):
+        ag = [rec.get("aggressor") for rec in raw["executions"] if isinstance(rec, dict)]
+    try:
+        await _write_state(t.pool, _STATE_POST_ONLY_BLOCK,
+                           {"at": _iso(t.now), "book": book.get("id"),
+                            "order": (str(oid) if oid else None),
+                            "slug": book.get("us_market_slug"), "filled": round(float(filled), 4),
+                            "aggressor": ag})
+    except Exception:  # noqa: BLE001 -- the record, never the money
+        log.error("mirror_live: the post-only block receipt could not be written", exc_info=True)
+    t.increase_block = t.increase_block or "post_only_block"
+
+
+def _maker_rest_stands(o: dict, book: dict) -> bool:
+    """Is `o` an ADD rest AT THE MAKER WIRE the book's last plan priced
+    (E31 C)? Step O runs before any book is planned, so it reads the wire
+    off the last plan's `maker` record -- the mirror of _priced_exit_rest,
+    which reads `exit_px_src` there for an exit. Such a rest past its TTL
+    is the plan's to decide (`ttl_stands`, `requote_same_wire`), never
+    step O's TTL clause: 322 of 1,036 replaces in 24 h were the identical
+    order re-placed at the clock, each to the back of the queue, and a
+    replaced rest filled 5.7 % against a kept rest's 47.2 %. With NO plan
+    on file, no `maker` field (a row from before this lane) or a wire that
+    differs, the answer is False and today's `ttl` re-quote runs -- the
+    fail-closed side."""
+    if _order_action(o, book) != "add":
+        return False
+    m = (_jsonish(book.get("last_plan")) or {}).get("maker")
+    if not isinstance(m, dict):
+        return False
+    w, mw = _num(o.get("wire")), _num(m.get("wire"))
+    return w is not None and mw is not None and abs(w - mw) < 1e-9
+
+
+def _maker_hint_wire(side: str, w: float | None, hint: dict | None) -> float | None:
+    """`w` stepped one tick further from the touch than the wire the venue
+    refused as a cross (E31 D), or `w` when there is no hint and when the
+    step has no cent on the ladder. On a BUY the step is DOWN (further
+    under the ask, cheaper than him); on a SELL UP (further over the bid,
+    dearer than him): either way the rest is at his price or better.
+
+    THE HINT BELONGS TO THE SIDE IT WAS WRITTEN ON (review HIGH-1):
+    `_cross_hint_note` records that side, and a wire the venue refused on
+    a SELL is no evidence at all about a BUY of the same contract. A SHORT
+    book alternates a SELL add and a BUY cover on one slug, often on one
+    quote inside MAKER_CROSS_HOLD_S: stepping the cover a tick from the
+    ADD's refused 0.89 priced it at 0.88, seven cents under his own
+    buy-back, and the short never covered. No hint for this side: the
+    maker wire stands."""
+    if hint is None or w is None:
+        return w
+    if hint.get("side") != side:
+        return w
+    hw = _num(hint.get("wire"))
+    if hw is None:
+        return w
+    step = (rules.buy_wire(hw - rules.MAKER_TICK) if side == BUY
+            else rules.sell_wire(hw + rules.MAKER_TICK))
+    if step is None or not (0.01 <= step <= 0.99):
+        return w
+    return min(w, step) if side == BUY else max(w, step)
 
 
 # ------------------------------------------------------------------- SQL
@@ -3153,6 +3409,7 @@ class _Tick:
     mode_db_refusal: str = "mode_db_off"
     cancel_all: str | None = None          # every open order is cancelled under this name
     increase_block: str | None = None      # a global increase-only refusal
+    post_only_block: bool = False          # E31: the durable block stands (the heartbeat's bool)
     allow: set = field(default_factory=set)
     narrow: set | None = None
     narrow_unreadable: bool = False
@@ -4062,7 +4319,14 @@ def _new_stats() -> dict:
             # this is what an operator watches stretch as books grow --
             # the 0.35 s pacer (D29) bounds the venue rate, not the tick
             "tick_s": None, "woken": [],
-            "reaper_touched_mirror": 0, "post_only": _POST_ONLY_OK,
+            # E31 (FILL lane 31): the flag is on every send BY CODE, so a
+            # `post_only` bool would read True for ever and carry nothing.
+            # It is REPLACED here, one key for one key, by the only bool
+            # that can vary -- the DURABLE BLOCK the venue's own aggressor
+            # wrote (E31 D2) -- which leaves the heartbeat's top level one
+            # key SHORTER than before this lane, under the health
+            # endpoint's 40-key cap it is pinned never to breach
+            "reaper_touched_mirror": 0, "post_only_block": False,
             # MIRRORSNAP, always present so a reader can tell "never
             # read" from "read and never fresh". THE DENOMINATOR IS
             # `snap_market_planned` -- every distinct market this tick
@@ -4215,6 +4479,20 @@ async def _global_guards(t: _Tick) -> None:
     t.s4_proof = proof if isinstance(proof, dict) else None
     if t.mode != MODE_ON:
         return
+    # E31 (D2): THE DURABLE POST-ONLY BLOCK, read once per tick. The venue
+    # filled a post-only rest at create and its own `aggressor` did not
+    # read as a maker, so the flag did not hold: every ADD is refused by
+    # name (`post_only_block`, the increase refusal a standing add rest is
+    # cancelled under) until an operator clears the key with the
+    # `mirror-post-only-rearm` preset. Every EXIT still runs -- a reduce
+    # rest at his cent or better, still post-only -- and the flag still
+    # goes out on every send. An UNREADABLE key is the block too (a stop
+    # that cannot be read is a stop, the loss stop's own stance)
+    blocked, err = await _state(t.pool, _STATE_POST_ONLY_BLOCK)
+    t.post_only_block = bool(err is not None or blocked is not None)
+    t.stats["post_only_block"] = t.post_only_block
+    if t.post_only_block:
+        t.increase_block = "post_only_block"
     # THE SLEEVE'S BREAKER OVER THE MIRROR'S WINDOW (L2, 2026-09-07).
     # le._loss_breaker_tripped sums EVERY settled live_orders row of the
     # last 24 h, and the mirror's standing rows settle there too, so the
@@ -5883,7 +6161,7 @@ async def _reconcile_open(t: _Tick, o: dict, book: dict, cancel_reason: str | No
             # read it as they read any reduce rest)
             cancel_reason = book.get("frozen_reason") or "frozen"
         elif (t.now - float(o.get("placed_ts") or t.now) >= float(rules.MIRROR_REST_TTL_S)
-              and not _priced_exit_rest(o, book)):
+              and not _priced_exit_rest(o, book) and not _maker_rest_stands(o, book)):
             # A PRICED EXIT REST PAST ITS TTL IS THE PLAN'S TO DECIDE (E4
             # rule 3, "never chase past the cent"): book 29 was cancelled
             # and re-quoted 14 times by this clause at the SAME cent while
@@ -5893,12 +6171,20 @@ async def _reconcile_open(t: _Tick, o: dict, book: dict, cancel_reason: str | No
             # (`requote_same_wire`); at another cent or quantity it is
             # replaced there -- exempt from the replace budget. An
             # UNPRICED reduce rest (he gave no exit price: the rest sits
-            # at the ask, not at a cent of his) keeps this clause's `ttl`
-            # re-quote -- the reason `ttl`, never `replace`, so
-            # _SQL_REPLACES does not count it against the book's entry
-            # budget -- and is TTL'd through an abandoned tick as before
-            # (E4 review round 3, D-1/D-2). An entry's TTL re-quote is
-            # unchanged
+            # at the touch's inside tick, not at a cent of his) keeps this
+            # clause's `ttl` re-quote -- the reason `ttl`, never
+            # `replace`, so _SQL_REPLACES does not count it against the
+            # book's entry budget -- and is TTL'd through an abandoned
+            # tick as before (E4 review round 3, D-1/D-2).
+            # E31 (C): AN ENTRY REST AT THE MAKER WIRE ALSO STANDS
+            # (_maker_rest_stands, the mirror of the predicate above). The
+            # TTL re-quote of an unchanged entry was 322 of 1,036 replaces
+            # in 24 h, each one the same order sent again at the back of
+            # the queue; the plan decides it now (rest_decision's
+            # `ttl_stands`, `requote_same_wire`), and a rest whose cent or
+            # quantity HAS moved is replaced there as before. A row from
+            # before this lane -- no `maker` on the book's last plan --
+            # keeps this clause
             cancel_reason = "ttl"
     if cancel_reason:
         # the TTL re-quote of a reduce rest is the first half of an
@@ -9588,11 +9874,16 @@ async def _tick_book(t: _Tick, book: dict) -> None:
             # this plan's side and wire inside rules.MIRROR_POST_ONLY_BACKOFF_S
             # of the last one holds the REST (the plan's `hold`, its
             # {since, until, n, code}; _place_reserved refuses the GTC add
-            # by the name), and _act still runs: the take inside E27's band
-            # and the at-level take are IOCs and fire as today. A reduce, a
+            # by the name), and _act still runs. E31 re-worded what follows:
+            # E30 read here that "the take inside E27's band and the
+            # at-level take are IOCs and fire as today" -- both are retired
+            # by code, so under the hold NOTHING goes out for the held
+            # wire, and a wire E31 re-priced off a proven cross is a
+            # different wire, a fresh count and no hold at all. A reduce, a
             # cover, a flatten, the flip close and E25's confirmation never
             # reach this branch. OFF: 66144cf's rest, retried every tick
-            po_hold = _post_only_held(t, book, p, _wire_for(p, his_px, r, book.get("intent"), None))
+            po_hold = _post_only_held(t, book, p, _wire_for(p, his_px, r, book.get("intent"), None,
+                                                hint=_cross_hint_live(t, book, r)))
             if po_hold is not None:
                 plan["hold"] = "post_only_backoff"
                 plan["post_only_backoff"] = po_hold
@@ -11543,109 +11834,124 @@ def _plan_grew_past_rest(p: mi.Plan | None, leaves: float | None) -> bool:
 
 async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str | None,
                his_px: float | None, plan: dict, cancel_reason: str | None = None) -> str | None:
-    """Step X for a live book: keep / cancel-replace the resting
-    order, place the rest, or fire the take. `cancel_reason`
-    is the increase refusal a BUY plan was refused under; a tick that
-    tripped mid-way (t.cancel_all) cancels the resting order under the
-    trip's name and places nothing.
+    """Step X for a live book: keep / cancel-replace the resting order,
+    or place the rest. `cancel_reason` is the increase refusal a BUY plan
+    was refused under; a tick that tripped mid-way (t.cancel_all) cancels
+    the resting order under the trip's name and places nothing.
 
-    THE EXIT AT HIS PRICE (E4, owner order 2026-09-06 ~23:24Z: "we
-    should exit when he exits at his price or within 1c variance
-    (tolerance)"). Every exit of a LONG book -- a reduce, the paired
-    flatten, the vanish flatten, the sign-flip flatten -- with a price
-    of his (`_exit_terms`, rules.exit_terms off `his_px`) is priced off
-    HIM alone: the rest at the cent ceil(his price), post-only, never
-    lifted to the ask; the take ONE IOC at the lowest cent at or above
-    his price less rules.MIRROR_EXIT_TOL, fired on the SAME tick the
-    bid is at or through that cent, with no wait, whether a rest stands
-    (cancelled first) or not. Outside the tolerance NOTHING chases: the
-    rest stands (`exit_out_of_tol`, the plan carries bid/ask/floor),
-    and a rest past its TTL at the same cent is not cancelled and
-    re-placed (`requote_same_wire`: keep_or_replace's `stands`). An
-    exit is exempt from the replace budget (rule 4) and, as before,
-    from every increase refusal (rule 5), and since review round 3
-    (M-1) from the tick's OPS BUDGET too: every cancel, IOC and rest on
-    an exit's path takes its slot whatever the count (_op_slot's
-    `exit`; _place reads it off the side's leg action), so the take at
-    the budget's last op can no longer cancel the rest and shed the
-    IOC. A cancel that IS refused (an entry's at the cap) names the
-    plan `cancel_refused:<reason>`, never 'take' (_cancel_outcome,
-    L-4). A short book's cover is priced by the same terms in
-    _flatten_send (a ceiling); a short's partial reduce stays
-    `short_reduce_unproven`. He gave no exit price (a snapshot-driven
-    reduce, a vanish with no fill of his, the admin flatten): today's
-    behaviour under `exit_px_src: 'none'`.
+    EVERY ORDER THIS FUNCTION SENDS IS A POST-ONLY REST AT HIS PRICE OR
+    BETTER THAT NEVER CROSSES THE TOUCH (E31, 2026-09-10, FILL lane 31;
+    owner order ~03:3xZ, on the desk's study of RN1's book: "Make all
+    changes based on the case study and ensure we are proportional and
+    directional with the same rules we have now (become a maker not
+    taker) mirror him to a tee"). The study (docs/rn1-book-anatomy.md):
+    he rests small bids on both outcomes near the mid, is filled by
+    takers, never crosses the spread and never sells -- 248 sells in
+    4,615,101 fills -- so his edge is a maker's pair discount, and a
+    one-sided copier that TAKES inherits his directional residual AND
+    pays the spread he was paid. Our own 24 h rows said the same: the
+    `take` cohort 298 orders at roi -0.4418, `take_in_band` 189 at
+    -0.1180, the `rest` cohort 381 at -0.0313 (the take-band table), and
+    what we got filled on returned +1.8 % against +35.9 % on what we
+    missed (the probe's FVM line).
 
-    THE ENTRY TAKES FIRST (E4 addendum, ~23:38Z: "Remove the 20 second
-    wait on entires too"): rules.MIRROR_TAKE_AFTER_S is 0 by default,
-    so an increase with the ask at or through his level (the entry
-    price rule, unchanged: never above him, no tolerance) sends ONE IOC
-    at the wire for the plannable quantity FIRST (`take_first`) and
-    rests the remainder post-only at the same wire; a rest already
-    standing is cancelled and taken the tick the ask arrives, with no
-    age condition. Under a LENGTHENED wait (env) the rest-first take of
-    E2 is back exactly as it was, arm bounds included.
+    SO EVERY TAKE PATH IS RETIRED BY CODE DEFAULT and no environment
+    value can re-arm one: the at-level take-first and its arm, the entry
+    bands (long and short), the take off a standing rest (E21), the
+    exit's tolerance IOC and the cover's, the two exit bands, E2's
+    unpriced-exit take, and the vanish's slippage leg (close_position /
+    the IOC at the touch plus two cents) all left this file with that
+    lane. The rails they read stay declared as documentary constants with
+    no reader on the money path (mirror_live_rules, the E31 paragraph),
+    and _place refuses a `tif == "IOC"` by name (`ioc_refused`) so a later
+    edit that wires one gets a refusal, never a send.
 
-    THE ENTRY TAKES INSIDE THE BAND (E14, 2026-09-08, FILL lane 2; owner
-    decision D1 (a)): on a LONG book with NO order of ours standing, an
-    add whose ask is above his cent but at or under rules.band_cent(his)
-    -- his unrounded price plus rules.MIRROR_TAKE_BAND (0.01, env may
-    only lower it; 0 = off), floored to the cent -- sends ONE IOC at that
-    cent (decision 'take_in_band', the plan's `take_band` read by
-    _take_band, census `take_in_band`), re-read at the send like every
-    IOC, the remainder resting at his cent as today. The at-level take
-    above fires first and unchanged; the keep branch is never converted
-    by the band; every reduce never reads it.
+    THE PRICE, per side (_wire_for -> rules.maker_wire): a BUY (a long
+    add; a short book's cover) at min(his cent, ask - a tick) -- AT HIS
+    CENT INSIDE THE SPREAD while his cent is under the ask, one tick under
+    the ask when it is not; a SELL (a long exit at his exit cent; a short
+    book's add, an offer of the contract) at max(his cent, bid + a tick),
+    capped 0.99. Never above him on a BUY, never under him on a SELL,
+    never at or through the far touch in any book -- locked and inverted
+    included, which no wire of this file could say before (buy_price
+    never read the ask, _short_wire never the bid). An exit he gave no
+    price for rests at the touch's own inside tick and is re-read every
+    tick. No cent, or the touch side unreadable: NO ORDER, held
+    `maker_no_cent`, never a guess.
 
-    THE TOLERANCE (E27, 2026-09-09, FILL lane 27; owner order ~21:1xZ,
-    item 1 of the seven-item proportionality list: "1. Yes, lets take
-    it immediately with a tolerance that you feel wont impact
-    profitability"): the band is TWO cents capped at 5% of the cost
-    per share (rules.take_band_width: MIRROR_TAKE_BAND 0.02 and
-    MIRROR_TAKE_BAND_FRAC 0.05, both capped_env -- env may only lower
-    them, 0 = off), floored at lane 2's cent on a LONG add and with no
-    floor on a SHORT add, where for the first time an add is
-    band-taken too: the bid STRICTLY under his sell cent but at or
-    above rules.short_band_cent(his) = sell_wire(his - band) sends ONE
-    SELL IOC at that cent through the same _entry_take, sized on the
-    collateral at the band cent, re-read on the bid, its row's decision
-    the same word 'take_in_band', the remainder resting at the short
-    wire as today (_short_take_band). Exits, reduces, covers, flattens
-    and the frozen exit never read either band (lane 3's exit band
-    stays inert at 0.01, D2)."""
+    THE REQUOTE (rules.maker_compare_wire): a standing rest is re-priced
+    when HIS LEVEL moves (today's cent clause, the E18 floor and its
+    one-direction rule byte for byte) and when THE TOUCH MOVES SO THE REST
+    CAN SIT NEARER HIS LEVEL (the ask rose over a BUY clamped at the
+    bound; the bid fell under a SELL clamped at it, `replaced_by` 'touch',
+    census `maker_rest_repriced`). It is NEVER moved away from his level
+    to follow a touch that came TO it: the rest is being filled, or the
+    read is stale. An ENTRY rest at the maker wire past its TTL STANDS
+    (`requote_same_wire`, rest_decision's `ttl_stands`) instead of being
+    re-placed as its own twin at the back of the queue.
+
+    THE EXIT AT HIS PRICE (E4, owner order 2026-09-06 ~23:24Z: "we should
+    exit when he exits at his price or within 1c variance (tolerance)")
+    keeps its rest at ceil(his) -- now bounded a tick over the bid -- and
+    its record: `exit_out_of_tol` while the touch is outside the
+    tolerance cent, `requote_same_wire` past the TTL, the rest exempt from
+    the replace budget and from the ops budget (M-1). What it no longer
+    does is spend the tolerance on a CROSS: the 1c variance is a maker's
+    bound, not a taker's licence (docs 75, decision 3). A short book's
+    cover is the same rule mirrored (S4's shape, the read-back proof in
+    front); a partial reduce with no price of his stays held `no_price`.
+
+    E12's flow from first sight, E12b's ratchet and hold, E15's witness,
+    E25's confirmation, E24 / E29's hand rules, E28's guarded writes,
+    E30's rejection receipt and backoff, the ratio, the $10 exact copy,
+    the $2,500 clip and the whole-share floor are UNTOUCHED: this lane
+    changes execution only."""
     w = r.whale
     short = _book_short(book)
     intent = _book_intent(book)
     ex = _exit_terms(t, book, p.side if p is not None else None, his_px, plan)
-    wire = _wire_for(p, his_px, r, book.get("intent"), ex)
+    # E31 (D): the book's cross hint -- the venue refused the last wire as
+    # a cross, so this one is priced at least a tick further from the touch
+    hint = _cross_hint_live(t, book, r)
+    wire = _wire_for(p, his_px, r, book.get("intent"), ex, hint=hint, plan=plan, now=t.now)
+    mk = plan.get("maker") if isinstance(plan.get("maker"), dict) else {}
+    his_cent = _num(mk.get("his_cent"))
     is_exit = p is not None and rules.leg_action(book.get("intent"), p.side) == "reduce"
-    # the exit rule's two prices on a LONG book's SELL (floor / rest /
-    # take) and, since S4, on a SHORT book's BUY -- the cover, a priced
-    # order through this same path: the rest at floor(his) to the
-    # cent, the IOC at the ceiling cent whenever the ask is at or under
-    # it, held outside; gated by the read-back proof (_s4_refusal)
+    # the exit rule's cents on a LONG book's SELL (floor / rest / take)
+    # and, since S4, on a SHORT book's BUY -- the cover, a priced order
+    # through this same path; gated by the read-back proof (_s4_refusal).
+    # Under E31 the `take` / `cover` cents are the RECORD alone: the rest
+    # at his cent is the only order either side sends
     long_exit = ex is not None and not short
     short_exit = ex is not None and short and is_exit
     priced_exit = long_exit or short_exit
-    # THE ENTRY'S TAKE CENT IS HIS CENT (E4 review, HIGH-1). An entry's
-    # rest sits at buy_price(his, bid) -- floor-to-cent of min(his, bid),
-    # at or under the bid -- and a book with bid < ask is never "at or
-    # through" its own rest, so a take judged at the rest's wire fired
-    # only in a locked book (placed_take 0 all night). The take's
-    # trigger and the IOC's limit are HIS cent, buy_wire(his): floored,
-    # never above him, and the ask at or under it IS at or through his
-    # level. The rest keeps its wire, keep_or_replace compares the
-    # rest's wire. A short book's add stays on the rest path (its wire
-    # is _short_wire's contract cent and no take-first is built for it);
-    # a long exit's take-at-wire with no price of his is E2's, as before
-    take_lvl = wire
-    if p is not None and p.side == BUY and not short:
-        lvl = rules.buy_wire(his_px)
-        if lvl is not None:
-            take_lvl = lvl
     ent = t.open_by_book.get(book["id"])
     if ent is not None:
         o, st = ent
+        if (wire is None and not t.cancel_all and cancel_reason is None
+                and (plan.get("maker") or {}).get("clause") == "no_cent"):
+            # E31 (review CRITICAL-2): NO CENT IS NOT A REASON TO CANCEL A
+            # REST THAT IS ALREADY RESTING. The clamp reads the NEAR touch
+            # -- the ask on a BUY, the bid on a SELL -- which no wire of
+            # this file read before this lane, and a one-sided book (_bbo
+            # returns a None side and names `no_quote` only when BOTH are
+            # None), an ask at 0.01 or a bid at 0.99 leave it with no cent
+            # to price a NEW order at. The standing rest cannot cross: it
+            # is already on the book at a cent an earlier tick read as
+            # non-crossing. Cancelling it would cost the queue this whole
+            # lane exists to keep AND leave the book with no order at all
+            # -- an exit taken off the market at the exact moment the bid
+            # reached it, the mandate's directional rule broken while he
+            # is out. Held by name; the wire is read again next tick. A
+            # trip (t.cancel_all), an increase refusal (cancel_reason) and
+            # step O's own clauses are unchanged and still cancel it.
+            _mirror_stop("maker_no_cent", w)
+            plan["no_cent"] = {"side": (p.side if p is not None else None),
+                               "bid": r.bid, "ask": r.ask, "rest": o["id"]}
+            plan["open_order"] = o["id"]
+            plan["rest_cause"] = "maker_no_cent"
+            _mirror_stop("open_order_pending", w)
+            return "maker_no_cent"
         leaves = _num(st.get("leaves"))
         if leaves is None:
             leaves = float(o["qty"]) - float(o.get("booked_filled") or 0.0)
@@ -11654,7 +11960,7 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         want = rules.wire_side(book.get("intent"), p.side) if p is not None else None
         # E18: the rest-life floor reads an ENTRY rest alone -- `entry` is
         # the plan's leg action, so an unpriced reduce rest (an exit at
-        # the ask, `stands` False) never waits on it
+        # the touch, `stands` False) never waits on it
         # The cap is per trade (owner order 2026-09-09, docs 67; the
         # review's HIGH-1): an ADD's rest is compared against the plan AS
         # THE PER-ORDER CLIP WOULD SIZE IT (rules.MIRROR_CLIP_USD through
@@ -11672,9 +11978,25 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             clip_sh = rules.room_scale(int(p.qty), wire, rules.MIRROR_CLIP_USD, 1e12, 1e12, 1e12, intent=intent)
             if 1 <= clip_sh < int(p.qty):
                 p_cmp = dataclasses.replace(p, qty=clip_sh)
+        # E31 (C): THE WIRE THE STANDING REST IS COMPARED AGAINST. His
+        # level moving is today's cent clause; the TOUCH moving is a
+        # re-price only when it makes room TOWARD his level. A touch that
+        # came to the rest reads as no move at all (the standing wire
+        # comes back), so a rest the market is lifting is never cancelled
+        # out from under its own fill.
+        cmp_wire = (rules.maker_compare_wire(p.side, _num(o.get("wire")), his_cent, wire)
+                    if p is not None and p.side in (BUY, SELL) else wire)
+        # E31 (C): an ADD rest at the maker wire does not spend its queue
+        # on the TTL. 322 of 1,036 replaces in 24 h were the identical
+        # order re-placed at the clock, and a replaced rest filled 5.7 %
+        # against a kept rest's 47.2 %
+        ow_now = _num(o.get("wire"))
+        ttl_stands = bool(p is not None and not is_exit and ow_now is not None
+                          and _num(wire) is not None and abs(ow_now - float(wire)) < 1e-9)
         decision, why = rules.rest_decision(oo, p_cmp, t.now, cancel_reason=(t.cancel_all or cancel_reason),
-                                            wire=wire, intent=(want[0] if want else None),
-                                            stands=priced_exit, entry=not is_exit)
+                                            wire=cmp_wire, intent=(want[0] if want else None),
+                                            stands=priced_exit, entry=not is_exit,
+                                            ttl_stands=ttl_stands)
         # E21 (FILL lane 10): the fast tick's admitted add -- the plan's
         # record of the rest it re-planned against; the branch below
         fa = _fast_add_field(t, book, o, r)
@@ -11691,195 +12013,57 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 # were re-quoted at 15-30 s and filled nothing). The plan
                 # says so, and carries the growth (`add_pending`) the tick
                 # past the floor re-plans through the replace branch below.
-                # An exit rest never reads the floor (`stands`, E4); the
-                # take below still fires the tick the ask arrives
+                # An exit rest never reads the floor (`stands`, E4)
                 _mirror_stop("kept_min_life", w)
                 plan["decision"] = "kept_min_life"
                 plan["rest_life"] = {"age_s": round(float(why.get("rest_age_s") or 0.0), 1),
                                      "floor_s": why.get("floor_s"), "cent_moved": why.get("cent_moved")}
                 if isinstance(why.get("add_pending"), dict):
                     plan["add_pending"] = dict(why["add_pending"])
-            if long_exit:
-                # THE EXIT'S TAKE off the standing rest (E4): the bid at
-                # or through the take cent -- inside the tolerance of his
-                # price -- cancels the rest and sends the one IOC there,
-                # this tick, whatever the rest's age and whatever the
-                # replace budget says (an exit is never blocked by it)
-                if rules.at_or_through(SELL, r.bid, r.ask, ex["take"]):
-                    res = await _cancel_and_settle(t, o, book, "take", exit=True)
-                    named = _cancel_outcome(t, book, o, res)
-                    if named is not None:
-                        return named
-                    left = _sell_qty(book, int(min(p.qty, max(0.0, float(o["qty"])
-                                                              - float(o.get("booked_filled") or 0.0)))))
-                    if left >= 1:
-                        # E14b: the IOC's withheld or unfilled part rests
-                        # back at his cent THIS tick (_exit_take), never
-                        # left bare until the next plan
-                        return await _exit_take(t, book, r, p, ex, left, his_px, plan, kind)
-                    return "take"
-                elif _exit_band_take(t, SELL, r, ex, plan):
-                    # THE EXIT'S BAND TAKE off the standing rest (FILL
-                    # lane 3; inert at the default band): the bid past
-                    # the take cent but at or through the band cent --
-                    # the same cancel, the one IOC at the band cent
-                    # through _exit_take (its remainder rests at his cent
-                    # the same tick), the row's decision exit_take_in_band
-                    res = await _cancel_and_settle(t, o, book, "take", exit=True)
-                    named = _cancel_outcome(t, book, o, res)
-                    if named is not None:
-                        return named
-                    left = _sell_qty(book, int(min(p.qty, max(0.0, float(o["qty"])
-                                                              - float(o.get("booked_filled") or 0.0)))))
-                    if left >= 1:
-                        _exit_band_mark(t, r, SELL, ex, plan, w)
-                        return await _exit_take(t, book, r, p, ex, left, his_px, plan, kind, in_band=True)
-                    return "take"
-                # outside the cent: the rest stands at his cent, and a
-                # rest past its TTL at the same cent is the no-op the
-                # TTL re-quote would have been (rule 3)
-                _exit_held(t, r, ex, plan, w)
+            if priced_exit:
+                # E31: THE EXIT REST STANDS AND IS FILLED WHERE IT IS.
+                # Before this lane the bid at or through the take cent
+                # (his price less rules.MIRROR_EXIT_TOL) cancelled this
+                # rest and crossed with ONE IOC, and the cover's ask did
+                # the same -- 298 such orders in 24 h at roi -0.4418. Now
+                # the taker who came to his cent fills our rest there and
+                # pays us the spread. Outside the tolerance the record is
+                # E4's, byte for byte: `exit_out_of_tol` with the quote and
+                # the bound it was read against, and a rest past its TTL at
+                # the same cent is the no-op the TTL re-quote would have been
+                side_at = SELL if long_exit else BUY
+                bound_cent = ex["take"] if long_exit else ex["cover"]
+                if not rules.at_or_through(side_at, r.bid, r.ask, bound_cent):
+                    _exit_held(t, r, ex, plan, w)
+                if short_exit:
+                    refusal = _s4_refusal(t, book, kind, plan, w)
+                    if refusal is not None:
+                        return refusal
                 if t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S):
                     _mirror_stop("requote_same_wire", w)
                     plan["requote_same_wire"] = True
                 _fast_add_branch(plan, "kept", w)
-                plan["rest_cause"] = _rest_cause(book, plan, why)    # FILL lane 9: the exit rest stood (the paragraph below)
+                plan["rest_cause"] = _rest_cause(book, plan, why)    # FILL lane 9: the exit rest stood
                 return "open_order_pending"
-            if short_exit:
-                # THE COVER'S TAKE off its standing rest (S4): the ask
-                # at or under the ceiling cent cancels the rest and
-                # sends the one IOC there, this tick; outside it the
-                # rest stands at floor(his) and nothing chases
-                refusal = _s4_refusal(t, book, kind, plan, w)
-                if refusal is not None:
-                    return refusal
-                if rules.at_or_through(BUY, r.bid, r.ask, ex["cover"]):
-                    res = await _cancel_and_settle(t, o, book, "take", exit=True)
-                    named = _cancel_outcome(t, book, o, res)
-                    if named is not None:
-                        return named
-                    left = _cover_qty(book, int(min(p.qty, max(0.0, float(o["qty"])
-                                                               - float(o.get("booked_filled") or 0.0)))))
-                    if left >= 1:
-                        return await _place(t, book, r, "take", BUY, ex["cover"], left, his_px, p,
-                                            plan, tif="IOC")
-                    return "take"
-                elif _exit_band_take(t, BUY, r, ex, plan):
-                    # THE COVER'S BAND TAKE off its standing rest (FILL
-                    # lane 3; inert at the default band): the ask over
-                    # the cover cent but at or under the band cent -- the
-                    # same cancel, the one IOC at the band cent exactly
-                    # as the cover's tolerance IOC goes (S4's path: its
-                    # partial rests nothing this tick), decision
-                    # cover_in_band
-                    res = await _cancel_and_settle(t, o, book, "take", exit=True)
-                    named = _cancel_outcome(t, book, o, res)
-                    if named is not None:
-                        return named
-                    left = _cover_qty(book, int(min(p.qty, max(0.0, float(o["qty"])
-                                                               - float(o.get("booked_filled") or 0.0)))))
-                    if left >= 1:
-                        _exit_band_mark(t, r, BUY, ex, plan, w)
-                        return await _place(t, book, r, "take", BUY, ex["cover_band"], left, his_px, p,
-                                            plan, tif="IOC", in_band=True)
-                    return "take"
-                _exit_held(t, r, ex, plan, w)
-                if t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S):
-                    _mirror_stop("requote_same_wire", w)
-                    plan["requote_same_wire"] = True
-                _fast_add_branch(plan, "kept", w)
-                plan["rest_cause"] = _rest_cause(book, plan, why)    # FILL lane 9: the cover rest stood (the paragraph below)
-                return "open_order_pending"
-            # THE TAKE off a rest at his level (E2; no wait since the E4
-            # addendum, unless the environment lengthened it). The
-            # rest's OWN age is the wait: the arm a post-only 400 set
-            # is for the no-rest case below, and every placed rest or
-            # finished order clears it (_disarm_take)
-            if (p is not None and rules.take_allowed(t.now - float(o["placed_ts"]), None, t.now,
-                                                     r.bid, r.ask, take_lvl, p.side)):
-                # THE TAKE SPENDS THE REPLACE BUDGET BEFORE IT CANCELS.
-                # Counting the take's cancel (_SQL_REPLACES) bounds the
-                # re-quotes that follow a take, but the take itself
-                # never passed through the replace branch: the rest it
-                # leaves behind is placed on the no-order path below,
-                # so rest -> wait -> take -> rest ran on with the
-                # budget spent and nothing refusing it. The same read
-                # the replace branch makes, refused under its own name
-                # and the rest kept standing, as replace_capped keeps
-                # it (adversarial pre-flight 2026-09-05, before the
-                # owner's "switch on the mirror system 100%" order).
-                # AN EXIT IS NEVER BUDGET-GATED (E2 review, MEDIUM-2a;
-                # E4 rule 4 is this same exemption): a take that reduces
-                # or flattens, or a plan on the other side of the rest,
-                # goes out whatever the hour's count -- the budget
-                # bounds ENTRY churn only
-                if (not _exit_or_flip(book, p, o)
-                        and await _requotes_this_hour(t, book) >= rules.MIRROR_MAX_REPLACES_PER_HOUR):
-                    _mirror_stop("take_capped", w)
-                    plan["rest_cause"] = "take_capped"      # FILL lane 9: the refusal that kept the rest
-                    _fast_add_branch(plan, "take_capped", w)
-                    return "take_capped"
-                # the book is at his level (E2): the one IOC at the same
-                # wire follows the cancel
-                _mirror_stop("take_at_his_level", w)
-                res = await _cancel_and_settle(t, o, book, "take", exit=is_exit)
-                named = _cancel_outcome(t, book, o, res)
-                if named is not None:
-                    _fast_add_branch(plan, named, w)
-                    return named
-                if rules.MIRROR_FAST_ADD_REPLAN and not is_exit and not short:
-                    # E21 (FILL lane 10): a LONG book's ENTRY take off the
-                    # rest is sized at the PLAN's quantity -- his add
-                    # included -- through the room the no-rest take reads
-                    # (the $2,500 clip and the game cap by construction;
-                    # the rest's remainder was given back by the cancel),
-                    # never at the rest's own leaves; under a share the
-                    # take is refused `over_room` with the rest already
-                    # cancelled (a rest at his cent would be over the same
-                    # room -- the next plan rests when room returns). An
-                    # exit's take keeps min(plan, leaves) byte for byte
-                    # (E14b's _sell_qty / _cover_qty rule), and so does a
-                    # SHORT book's add (no take-first is built for it: the
-                    # lane changes its cadence only); the switch OFF is the
-                    # same line on every leg
-                    left = _room_qty(t, int(p.qty), take_lvl, intent)
-                    if left < 1:
-                        _mirror_stop("over_room", w)
-                        _fast_add_branch(plan, "over_room", w)
-                        return "over_room"
-                else:
-                    left = int(min(p.qty, max(0.0, float(o["qty"]) - float(o.get("booked_filled") or 0.0))))
-                if left >= 1:
-                    if is_exit:
-                        return await _place(t, book, r, "take", p.side, wire, left, his_px, p,
-                                            plan, tif="IOC")
-                    # an entry: the IOC at his cent, then the unfilled
-                    # part rests again at the wire (addendum 4). E21: a
-                    # plan his add GREW past the rest's leaves (the keep
-                    # branch's add_pending reading) writes `take_on_add`
-                    # on the IOC, behind the switch, on a LONG book alone
-                    grew = rules.MIRROR_FAST_ADD_REPLAN and not short and _plan_grew_past_rest(p, leaves)
-                    _fast_add_branch(plan, "took", w)
-                    return await _entry_take(t, book, r, p, take_lvl, wire, left, his_px, plan,
-                                             first=False, on_add=grew)
-                return "take"
-            if (p is not None and t.now - float(o["placed_ts"]) >= float(rules.MIRROR_TAKE_AFTER_S)
-                    and not rules.at_or_through(p.side, r.bid, r.ask, take_lvl)):
-                # the wait elapsed and the market never came to him:
-                # held under target, never chased (critic C15); the
-                # take's price verdict by its own name (E2)
+            if (p is not None and his_cent is not None
+                    and not rules.at_or_through(p.side, r.bid, r.ask, his_cent)):
+                # the market never came to his level: held under target,
+                # never chased (critic C15). Under E31 this is the NORMAL
+                # state of a maker's rest, not a refusal -- the record
+                # stays so the reader can see how long a rest waits
                 _mirror_stop("resting_above_level", w)
-                _mirror_stop("take_refused_price", w)
+            if (ttl_stands and t.now - float(o["placed_ts"]) >= float(rules.MIRROR_REST_TTL_S)):
+                # E31 (C): the entry rest at the maker wire past the TTL
+                _mirror_stop("requote_same_wire", w)
+                plan["requote_same_wire"] = True
             # FILL lane 9 (migration 061): the rest STOOD to the end of the
             # branch -- WHY, for the record's `cause`: a FROZEN book's slot
             # is the freeze's (E5: the frozen reduce stands through this
             # branch), a rise of his fills' net restored to the block this
             # tick (E12b's `flow_fills_grew`, written before _act) is
             # `flow_grew`, else rest_decision's own clause (`same`,
-            # `min_life`, ...). Stamped here and not at the branch's top so
-            # a keep that ends in the take or a cancel above never carries
-            # it. A record, read by no order path; never a guess (None when
-            # the clause cannot be read as text)
+            # `min_life`, ...). A record, read by no order path; never a
+            # guess (None when the clause cannot be read as text)
             _fast_add_branch(plan, "kept", w)
             plan["rest_cause"] = _rest_cause(book, plan, why)
             return "open_order_pending"
@@ -11906,8 +12090,16 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             # `ops_capped` (M-1); a refused entry replace is named (L-4).
             # E18: the cancelled row records the replace's cause
             # (rules.replace_decision: replace_cent / replace_qty /
-            # replace_side / ttl / replace_unread) under the 059 probe
+            # replace_side / ttl / replace_unread)
             plan["replaced"] = rules.replace_decision(why)
+            # E31: WHAT MOVED. `his_level` when his own cent moved the
+            # wire (the mandate's re-quote), `touch` when the rest already
+            # sat at his unchanged cent and the touch bound made room
+            # toward him (census `maker_rest_repriced`), else the clause's
+            # own word. A record, read by the maker-rests preset
+            plan["replaced_by"] = _replaced_by(why, o, his_cent, book)
+            if plan["replaced_by"] == "touch":
+                _mirror_stop("maker_rest_repriced", w)
             res = await _cancel_and_settle(t, o, book, "replace", exit=is_exit,
                                            decision=plan["replaced"])
             named = _cancel_outcome(t, book, o, res)
@@ -11932,13 +12124,12 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
                 p = mi.Plan(p.side, min(int(p.qty), int(hold["cap"])), p.price, p.reason,
                             p.would_fill, p.detail)
             ex = _exit_terms(t, book, p.side, his_px, plan)
-            wire = _wire_for(p, his_px, r, book.get("intent"), ex)
+            wire = _wire_for(p, his_px, r, book.get("intent"), ex, hint=hint, plan=plan, now=t.now)
+            mk = plan.get("maker") if isinstance(plan.get("maker"), dict) else {}
+            his_cent = _num(mk.get("his_cent"))
             is_exit = rules.leg_action(book.get("intent"), p.side) == "reduce"
             long_exit = ex is not None and not short
             short_exit = ex is not None and short and is_exit
-            take_lvl = wire
-            if p.side == BUY and not short and rules.buy_wire(his_px) is not None:
-                take_lvl = rules.buy_wire(his_px)
             if (rules.leg_action(book.get("intent"), p.side) == "add"
                     and (kind != "increase" or _increases_refusal(t, w))):
                 return "no plan after replace"
@@ -11949,8 +12140,8 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             await _cancel_and_settle(t, o, book, decision, exit=is_exit)
             if p is None or p.side is None or t.cancel_all:
                 return decision
-            if decision == "no_price":
-                _mirror_stop("no_price", w)
+            if decision in ("no_price", "maker_no_cent"):
+                _mirror_stop(decision, w)
                 return decision
     if p is None or p.side is None:
         return None
@@ -11965,203 +12156,36 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             plan["rest_cause"] = "frozen"
         return "open_order_pending"
     if wire is None:
+        # E31: NO CENT IS A NAMED HOLD, NEVER A GUESS AND NEVER A TAKE.
+        # `maker_no_cent` when the touch the clamp needs is unreadable or
+        # the ladder has no cent left under the ask / over the bid;
+        # `no_price` when his own level is unreadable (the name this
+        # branch always carried) or the short model is disarmed
+        if (plan.get("maker") or {}).get("clause") == "no_cent":
+            _mirror_stop("maker_no_cent", w)
+            plan["no_cent"] = {"side": p.side, "bid": r.bid, "ask": r.ask}
+            if short and is_exit:
+                plan["cover"] = "unpriced_held"
+            return "maker_no_cent"
         _mirror_stop("no_price", w)
         if short and is_exit:
             # S4: a cover with no buy-back price of his is HELD, named
             # (exit_px_src 'none' is on the plan), never a guessed level
             plan["cover"] = "unpriced_held"
         return "no_price"
-    if long_exit:
-        # THE EXIT WITH NO REST STANDING (E4): the bid at or through the
-        # take cent sends the one IOC there now -- no wait, no arm, no
-        # MIN_MOVE_FRAC test. E14b (FILL lane 1): a partial fill, or an
-        # IOC withheld at the send, leaves its unfilled quantity RESTING
-        # at his cent this same tick (_exit_take), where it used to leave
-        # nothing until the next tick planned again; outside the cent
-        # the rest goes at his cent below, held by name
-        if rules.at_or_through(SELL, r.bid, r.ask, ex["take"]):
-            qty = _sell_qty(book, p.qty)
-            if qty < 1:
-                _mirror_stop("under_one_share", w)
-                return "under_one_share"
-            return await _exit_take(t, book, r, p, ex, qty, his_px, plan, kind)
-        elif _exit_band_take(t, SELL, r, ex, plan):
-            # THE EXIT'S BAND TAKE with no rest standing (FILL lane 3;
-            # inert at the default band): the bid past the take cent but
-            # at or through the band cent -- the one IOC at the band
-            # cent through _exit_take, its remainder resting at his cent
-            # the same tick; decision exit_take_in_band
-            qty = _sell_qty(book, p.qty)
-            if qty < 1:
-                _mirror_stop("under_one_share", w)
-                return "under_one_share"
-            _exit_band_mark(t, r, SELL, ex, plan, w)
-            return await _exit_take(t, book, r, p, ex, qty, his_px, plan, kind, in_band=True)
-        _exit_held(t, r, ex, plan, w)
-    elif short_exit:
-        # THE COVER WITH NO REST STANDING (S4): the ask at or under the
-        # ceiling cent (his buy-back plus the tolerance, buy_wire'd)
-        # sends the one IOC there now -- no wait, no arm; a partial fill
-        # leaves NOTHING resting (the next tick plans again). Outside
-        # the cent the rest goes at floor(his) below, held by name
-        refusal = _s4_refusal(t, book, kind, plan, w)
-        if refusal is not None:
-            return refusal
-        if rules.at_or_through(BUY, r.bid, r.ask, ex["cover"]):
-            qty = _cover_qty(book, p.qty)
-            if qty < 1:
-                _mirror_stop("under_one_share", w)
-                return "under_one_share"
-            return await _place(t, book, r, "take", BUY, ex["cover"], qty, his_px, p, plan, tif="IOC")
-        elif _exit_band_take(t, BUY, r, ex, plan):
-            # THE COVER'S BAND TAKE with no rest standing (FILL lane 3;
-            # inert at the default band): the one IOC at the band cent
-            # exactly as the cover's tolerance IOC goes (S4's path, a
-            # partial rests nothing this tick); decision cover_in_band
-            qty = _cover_qty(book, p.qty)
-            if qty < 1:
-                _mirror_stop("under_one_share", w)
-                return "under_one_share"
-            _exit_band_mark(t, r, BUY, ex, plan, w)
-            return await _place(t, book, r, "take", BUY, ex["cover_band"], qty, his_px, p, plan,
-                                tif="IOC", in_band=True)
-        _exit_held(t, r, ex, plan, w)
-    else:
-        # the take armed by a post-only rejection, with no rest standing.
-        # THE ARM'S EVIDENCE IS BOUNDED: the arm says "the book was
-        # crossing when the rest was refused", and it is read here BEFORE
-        # the room and the clip, so it once survived every tick where this
-        # step never reached _place (the room refused the clip, the
-        # increase refused by name) and fired one IOC an hour later with
-        # no rest ever at the level -- IOC-first, past the rest-first wait
-        # (critic C15; the residual the step-9 minors re-review left, task
-        # 7; owner order 2026-09-02, "mirror the whales to a tee"). Two
-        # bounds: a book NOT at or through his level now has left the
-        # crossing spell the arm witnessed, so the arm is cleared and the
-        # next refusal starts its own clock; under a LENGTHENED wait an
-        # arm older than TAKE_ARM_STALE_WAITS waits is stale evidence, the
-        # take is refused by name and the book RESTS FIRST (a rest the
-        # venue accepts clears the arm; a rest it refuses arms afresh from
-        # this tick); the window floors at TAKE_ARM_STALE_MIN_S (E2
-        # review MEDIUM-2b) so a short wait does not make every arm
-        # stale at once. At the default wait of 0 (E4 addendum) the
-        # arm is no longer what fires the IOC -- the take below fires
-        # on the price alone -- so a stale arm only clears itself
-        wait = float(rules.MIRROR_TAKE_AFTER_S)
-        if book.get("take_armed_ts") and book["id"] not in t.open_by_book:
-            armed = _num(book.get("take_armed_ts"))
-            age = None if armed is None else t.now - armed
-            if not rules.at_or_through(p.side, r.bid, r.ask, take_lvl):
-                await _disarm_take(t, book)
-                if age is not None and age >= wait:
-                    _mirror_stop("take_refused_price", w)     # waited, the book left his level (E2)
-                _recent(book["id"], "take_disarmed", why="market_away", armed_for=age)
-            elif age is None or age > max(float(TAKE_ARM_STALE_WAITS) * float(rules.MIRROR_TAKE_AFTER_S),
-                                          float(TAKE_ARM_STALE_MIN_S)):
-                await _disarm_take(t, book)
-                _mirror_stop("take_arm_stale", w)
-                _recent(book["id"], "take_disarmed", why="take_arm_stale", armed_for=age)
-        # THE TAKE FIRST (E4 addendum): with no wait a plan whose book is
-        # at or through his level takes NOW -- an entry's IOC at the
-        # wire for the plannable quantity, the remainder resting after
-        # it (_entry_take); a long exit with no price of his takes at
-        # its wire as before. Under a lengthened wait this is E2's armed
-        # take: the arm's age is the wait (take_allowed reads it beside
-        # a rest age of 0), the price rule is the same.
-        # E14 (FILL lane 2): a LONG book's add reads the entry band here
-        # too -- AFTER the arm's clearing above, so the wait it honours
-        # is the one the at-level take honours -- and stamps the plan's
-        # `take_band` whatever the verdict; the band cent comes back only
-        # when its IOC is to go (_take_band).
-        # E27 (FILL lane 27, owner order 2026-09-09 ~21:1xZ): a SHORT
-        # book's add reads ITS band beside it (_short_take_band: the
-        # SELL-side reads, the bid under his sell cent but at or above
-        # sell_wire(his - band)); the same `band` arm below sends its
-        # one SELL IOC through the same _entry_take call. A reduce, a
-        # cover, a flatten and the frozen exit never reach either read
-        band = None
-        if p.side == BUY and not short and rules.leg_action(book.get("intent"), p.side) == "add":
-            band = _take_band(t, book, r, his_px, plan)
-        elif p.side == SELL and short and rules.leg_action(book.get("intent"), p.side) == "add":
-            band = _short_take_band(t, book, r, his_px, plan)
-        if rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, take_lvl, p.side):
-            if rules.leg_action(book.get("intent"), p.side) == "add":
-                qty = _room_qty(t, p.qty, wire, intent)
-                if qty < 1:
-                    _mirror_stop("over_room", w)
-                    return "over_room"
-                _mirror_stop("take_at_his_level", w)
-                return await _entry_take(t, book, r, p, take_lvl, wire, qty, his_px, plan, first=True)
-            if not short:
-                qty = _sell_qty(book, p.qty)
-                if qty >= 1:
-                    _mirror_stop("take_at_his_level", w)
-                    return await _place(t, book, r, "take", p.side, wire, qty, his_px, p, plan, tif="IOC")
-            # a short REDUCE take is a SELL_SHORT IOC -- unproven before
-            # rung S4 (brief G2): the reduce path below decides
-        # THE TAKE INSIDE THE BAND (E14, 2026-09-08, FILL program lane 2;
-        # owner decision D1 (a)): the at-level take did not fire and the
-        # ask sits ABOVE his cent but at or under rules.band_cent(his) --
-        # his unrounded price plus rules.MIRROR_TAKE_BAND (0.01, env may
-        # only lower it; 0 = off), floored to the cent -- on a LONG book's
-        # add with NO order of ours standing (this path alone: the keep
-        # branch above is never converted by the band, a short's add
-        # never band-takes, a reduce never reads it). ONE IOC limited at
-        # the band cent, sized on the room AT THAT CENT, re-read at the
-        # send as every IOC is (E18: the ask above the band cent at the
-        # re-read withholds it, `ask_moved`, and the whole quantity rests
-        # at his cent), the unfilled remainder resting at the wire --
-        # his cent -- exactly as the at-level take's does (_entry_take).
-        # The row: decision 'take_in_band' (the word 059 reserved), wire
-        # the band cent, his_level his price. Counted here as the
-        # at-level take is (`take_in_band` beside `take_at_his_level`):
-        # the decision, whether or not the re-read lets the IOC out.
-        # An uncounted band take is not allowed: with the 059 columns
-        # absent this tick _take_band reads `uncounted` and the rest goes.
-        # E27 (FILL lane 27): the band is rules.take_band_width's --
-        # MIRROR_TAKE_BAND 0.02 capped at MIRROR_TAKE_BAND_FRAC 0.05 of
-        # the cost per share -- and on a SHORT book's add `band` is the
-        # short's cent (sell_wire(his - band), _short_take_band): the
-        # ONE SELL IOC goes out here exactly as the long's BUY IOC does,
-        # sized on the collateral at the band cent (_room_qty's
-        # (1 - wire) on a short, the per-order clip), re-read at the
-        # send on the bid (E18's bid_moved), its row's decision the same
-        # word 'take_in_band' (the side / intent tell the sides apart),
-        # the unfilled remainder resting at the short wire as today
-        if band is not None:
-            qty = _room_qty(t, p.qty, band, intent)
-            if qty < 1:
-                _mirror_stop("over_room", w)
-                return "over_room"
-            _mirror_stop("take_in_band", w)
-            return await _entry_take(t, book, r, p, band, wire, qty, his_px, plan, first=True,
-                                     in_band=True)
-        # E27 fold (the review's HIGH-1): THE SHORT'S AT-LEVEL TAKE. A short
-        # book's add whose bid is at or OVER his sell cent (the plan's
-        # take_band verdict `at_level`: sell_wire(his)) but under the short
-        # wire ceil(max(his, ask)) -- so the take-at-wire above did not
-        # fire -- sends ONE SELL IOC limited at his cent, a sale at his
-        # price or better, through the same _entry_take (decision 'take',
-        # census take_at_his_level, the remainder resting at the short
-        # wire as today). Without it the band paid a cent for the fill at
-        # 0.64 and left the free fill at 0.65 to a rest at 0.66. Behind
-        # the 059 columns like the band (an uncounted take is not sent),
-        # the same wait (rules.take_allowed), the same re-read (bid_moved
-        # rests the whole quantity), and OFF with the band: MIRROR_TAKE_BAND
-        # at 0 is the short side byte for byte today
-        tb = plan.get("take_band")
-        if (short and p.side == SELL and isinstance(tb, dict) and tb.get("verdict") == "at_level"
-                and t.order_cols is True and (_num(rules.MIRROR_TAKE_BAND) or 0.0) > 0.0
-                and rules.leg_action(book.get("intent"), p.side) == "add"):
-            lvl = _num(tb.get("his_cent"))
-            if (lvl is not None and 0.01 <= lvl <= 0.99
-                    and rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, lvl, SELL)):
-                qty = _room_qty(t, p.qty, lvl, intent)
-                if qty < 1:
-                    _mirror_stop("over_room", w)
-                    return "over_room"
-                _mirror_stop("take_at_his_level", w)
-                return await _entry_take(t, book, r, p, lvl, wire, qty, his_px, plan, first=True)
+    if hint is not None and int(_num(hint.get("n")) or 0) > MAKER_CROSS_MAX_TICKS:
+        # E31 (D): the venue has refused this book's rest as a cross at
+        # MAKER_CROSS_MAX_TICKS successive wires, each further from the
+        # touch than the last, and the quote has not moved since. There is
+        # no cent left this lane trusts: the rest is HELD by name -- no
+        # send, the plan carrying the hint -- until the quote read differs
+        # from the hint's or MAKER_CROSS_HOLD_S passes, and then the bound
+        # is tried again from the top
+        at = _num(hint.get("at")) or t.now
+        _mirror_stop("maker_cross_held", w)
+        plan["cross_hint"] = {"wire": _num(hint.get("wire")), "n": int(_num(hint.get("n")) or 0),
+                              "since": at, "until": at + MAKER_CROSS_HOLD_S}
+        return "maker_cross_held"
     if rules.leg_action(book.get("intent"), p.side) == "add":
         qty = _room_qty(t, p.qty, wire, intent)
         if qty < 1:
@@ -12178,11 +12202,12 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
         # limit order"; 11 CLOSE rows, 0 executed on 2026-09-07). Gated
         # by the read-back proof (`s4_unproven` on a flatten,
         # `short_reduce_unproven` on a partial reduce until the proof
-        # has passed). With his buy-back price: the rest at floor(his)
-        # to the cent (the take above fired if the ask was inside the
-        # ceiling). With none: the flatten kinds decide below (the
-        # bounded IOC when he is gone, else held); a partial reduce
-        # with no price of his is held `no_price`, never guessed
+        # has passed). With his buy-back price: the rest at
+        # min(floor(his), ask - a tick), his price or better and never at
+        # or through the ask (E31). With none: the flatten kinds decide
+        # below (a post-only rest at the touch's inside tick when he is
+        # gone, E31 B); a partial reduce with no price of his is held
+        # `no_price`, never guessed
         refusal = _s4_refusal(t, book, kind, plan, w)
         if refusal is not None:
             return refusal
@@ -12194,16 +12219,68 @@ async def _act(t: _Tick, book: dict, r: _Reading, p: mi.Plan | None, kind: str |
             log.warning("mirror_live: book %s short reduce held: no buy-back price of his to cover at "
                         "(exit_px_src none)", book["id"])
             return "no_price"
+        if not rules.at_or_through(BUY, r.bid, r.ask, ex["cover"]):
+            # E4's HELD RECORD, kept on the road that PLACES the cover as
+            # well as the one that keeps it standing (docs 75: reachable).
+            # It travelled with the take branch this lane deleted, and the
+            # exits presets read it: the touch outside his tolerance cent
+            # with the quote and the bound it was read against
+            _exit_held(t, r, ex, plan, w)
         qty = _cover_qty(book, p.qty)
         if qty < 1:
             _mirror_stop("under_one_share", w)
             return "under_one_share"
-        return await _place(t, book, r, kind or "reduce", BUY, ex["rest"], qty, his_px, p, plan)
+        return await _place(t, book, r, kind or "reduce", BUY, wire, qty, his_px, p, plan)
+    if ex is not None and not rules.at_or_through(SELL, r.bid, r.ask, ex["take"]):
+        _exit_held(t, r, ex, plan, w)          # the same record on the long exit's own road
     qty = _sell_qty(book, p.qty)
     if qty < 1:
         _mirror_stop("under_one_share", w)
         return "under_one_share"
     return await _place(t, book, r, kind or "reduce", SELL, wire, qty, his_px, p, plan)
+
+
+def _replaced_by(why: dict | None, o: dict, his_cent: float | None,
+                 book: dict | None = None) -> str:
+    """WHAT moved the standing rest (E31), beside rules.replace_decision's
+    own word: 'his_level' when HIS CENT moved the wire (the mandate's
+    re-quote, every tick it moves), 'touch' when his cent did NOT move and
+    the touch bound did -- the class this lane adds, census
+    `maker_rest_repriced` -- else the clause's own word ('qty', 'side',
+    'ttl', 'unread'). A record, read by the maker-rests preset.
+
+    THE DISCRIMINATOR IS HIS CENT ACROSS THE TWO TICKS (review MEDIUM-5,
+    widened): the cent the standing rest was priced against is on the
+    book's LAST PLAN (`maker.his_cent`, the mirror of _maker_rest_stands'
+    read of `maker.wire`), and this tick's is `his_cent`. Equal -> the
+    wire moved because the BOUND moved, which on a BUY is the ask rising
+    over a rest clamped at ask - a tick and on a SELL the bid falling
+    under one clamped at bid + a tick: the touch made room TOWARD him.
+    An UNPRICED exit has no cent of his at all -- its rest IS the touch's
+    inside tick -- so every cent move of it is the touch's, and it is the
+    one rest this lane re-quotes on the touch every tick. With no plan on
+    file, no `maker` record and no cent to compare (a row from before this
+    lane), the standing wire at his cent is the fallback reading and
+    anything else is 'his_level' -- the record's conservative side."""
+    cause = (why or {}).get("cause")
+    if cause == "cent":
+        if his_cent is None:
+            return "touch"
+        prior = (_jsonish((book or {}).get("last_plan")) or {}).get("maker")
+        was = _num(prior.get("his_cent")) if isinstance(prior, dict) else None
+        if was is not None:
+            return "touch" if abs(was - his_cent) < 1e-9 else "his_level"
+        ow = _num(o.get("wire"))
+        if ow is not None and abs(ow - his_cent) < 1e-9:
+            return "touch"
+        return "his_level"
+    if cause in ("side", "intent"):
+        return "side"
+    if cause in ("qty", "under_one_share"):
+        return "qty"
+    if cause == "ttl":
+        return "ttl"
+    return "unread"
 
 
 async def _requotes_this_hour(t: _Tick, book: dict) -> int:
@@ -12378,9 +12455,19 @@ async def _s4_probe(t: _Tick, book: dict, r: _Reading) -> None:
         return
     if not _s4_probe_due(t, book, r):
         return
+    # E31 (review LOW-3): THE PROBE IS AN ORDER THIS MIRROR SENDS, so its
+    # cent goes through the same clamp as every other -- the off-market
+    # BUY off the bid, bounded a tick under the ask. On a normal book the
+    # clamp does not bind (bid 0.30 / ask 0.32 -> 0.25, the pinned cent);
+    # on an INVERTED book (bid over ask) the off-bid cent could sit at or
+    # over the ask, which is the post-only rejection loop E30 exists to
+    # bound. No cent on the ladder: the probe waits a tick, named.
+    price = rules.maker_wire(BUY, _s4_probe_price(float(r.bid)), r.bid, r.ask)
+    if price is None:
+        _mirror_stop("maker_no_cent", r.whale)
+        return
     t.s4_probed = True
     w, slug = r.whale, r.slug
-    price = _s4_probe_price(float(r.bid))
     intent = _book_intent(book)
     rec: dict = {"proved": False, "at": t.now, "slug": slug, "price": price, "order_id": None,
                  "echo": None, "why": None, "bid": _num(r.bid), "ask": _num(r.ask)}
@@ -12757,63 +12844,6 @@ def _exit_terms(t: _Tick, book: dict, side: str | None, his_px: float | None,
     return ex
 
 
-def _exit_band_at(side: str, r: _Reading, ex: dict) -> bool:
-    """THE EXIT'S BAND TEST (FILL lane 3), read AFTER the tolerance test
-    failed: on a SELL the bid at or through `take_band`, on a BUY the
-    ask at or under `cover_band` -- and ONLY when that cent is strictly
-    past the tolerance cent (`take_band` under `take`, `cover_band`
-    over `cover`). At the default band the cents are equal, so this is
-    False whenever the tolerance test was: no band IOC, no band word,
-    E4 byte for byte. A missing or unreadable band cent is False."""
-    try:
-        if side == SELL:
-            tb, take = _num(ex.get("take_band")), _num(ex.get("take"))
-            if tb is None or take is None or not (tb < take - 1e-9):
-                return False
-            return rules.at_or_through(SELL, r.bid, r.ask, tb)
-        if side == BUY:
-            cb, cover = _num(ex.get("cover_band")), _num(ex.get("cover"))
-            if cb is None or cover is None or not (cb > cover + 1e-9):
-                return False
-            return rules.at_or_through(BUY, r.bid, r.ask, cb)
-    except Exception:  # noqa: BLE001 — an unreadable term is no band
-        return False
-    return False
-
-
-def _exit_band_take(t: _Tick, side: str, r: _Reading, ex: dict, plan: dict) -> bool:
-    """THE BAND TEST AND ITS COUNT GUARD (FILL lane 3; the review's
-    HIGH-1): a band IOC is sent only when the 059 columns are present
-    this tick (`t.order_cols` True), so its row carries the band word --
-    an uncounted band take is not allowed (FILL_plan section 4; lane 2's
-    `uncounted` verdict on the entry band). With the columns absent and
-    the touch inside the band, the plan says so (`exit_band_uncounted`)
-    and the tolerance rule alone governs: held by name, the rest at his
-    cent. At the default band _exit_band_at is False first, so nothing
-    is stamped and nothing changes."""
-    if not _exit_band_at(side, r, ex):
-        return False
-    if t.order_cols is True:
-        return True
-    plan["exit_band_uncounted"] = True
-    return False
-
-
-def _exit_band_mark(t: _Tick, r: _Reading, side: str, ex: dict, plan: dict, whale: str) -> None:
-    """A band IOC is to go (FILL lane 3): counted at the decision --
-    `exit_take_in_band` on a long book's SELL, `cover_in_band` on a
-    short's cover -- and the plan carries `exit_band` {bid, ask, his,
-    cents_off_his, at}: how many cents past his price the touch sat."""
-    px = _num(ex.get("px"))
-    if side == SELL:
-        _mirror_stop("exit_take_in_band", whale)
-        off = None if px is None or _num(r.bid) is None else round((px - float(r.bid)) * 100, 1)
-    else:
-        _mirror_stop("cover_in_band", whale)
-        off = None if px is None or _num(r.ask) is None else round((float(r.ask) - px) * 100, 1)
-    plan["exit_band"] = {"bid": r.bid, "ask": r.ask, "his": px, "cents_off_his": off, "at": t.now}
-
-
 def _exit_held(t: _Tick, r: _Reading, ex: dict, plan: dict, whale: str,
                quote: tuple | None = None) -> None:
     """The exit is HELD outside the cent (E4 rule 3): named on the
@@ -12836,10 +12866,71 @@ def _exit_held(t: _Tick, r: _Reading, ex: dict, plan: dict, whale: str,
     plan["exit_out_of_tol"] = held
 
 
-# the names under which an IOC is NOT sent (E18): the entry's remainder
-# rests as today; a long exit's whole quantity rests at his cent the
-# same tick (E14b, _exit_take), a short cover's with the next tick's plan
-IOC_SKIPPED = ("ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread")
+# E31 (FILL lane 31): the names under which a touch-bound REST goes out
+# on the tick's own quote rather than on a fresher read (the re-read was
+# refused by the call budget, or came back without the side the clamp
+# needs). The rest is still placed -- a read fact, never a guess, and the
+# venue's own post-only flag is the backstop -- and counted.
+REST_REREAD_SKIPPED = ("rest_reread_capped", "rest_quote_unread")
+
+
+async def _rest_reread(t: _Tick, book: dict, r: _Reading, side: str, wire: float, action: str,
+                       short_add: bool, plan: dict) -> float:
+    """ONE paced quote read immediately before a TOUCH-BOUND rest's send
+    (E31 D; E18's `_ioc_reread` shape at the site that replaced it), and
+    the wire that goes out on it.
+
+    A rest whose cent sits AT the touch bound -- the ask less a tick on a
+    BUY, the bid plus one on a SELL -- is one tick from crossing, and the
+    tick's quote is as old as the book walk. So the quote is read once
+    more through the E11 gate, charged to the tick's call budget like a
+    write, and the wire is RECOMPUTED on it: min(his cent, the new bound)
+    on a BUY, max(his cent, the new bound) on a SELL, through the
+    executor's own arithmetic on a short add. A rest a tick or more
+    inside the bound makes NO re-read: a one-tick move cannot cross it.
+
+    FAIL CLOSED TOWARD SENDING THE READ FACT, never a guess: an ENTRY's
+    re-read past rules.MIRROR_VENUE_CALLS_PER_TICK is refused
+    (`rest_reread_capped`; an EXIT's is never capped, M-1) and a read
+    that comes back without the side the clamp needs, or with no cent
+    left on the ladder, is `rest_quote_unread` -- in both cases the rest
+    goes out at the tick's own wire, which is a cent the tick's read said
+    does not cross, and the venue's own post-only flag is the backstop.
+    The cross hint is NOT re-applied here: a quote that moved is exactly
+    the fact that drops it (_cross_hint_live)."""
+    w0 = _num(wire)
+    m = plan.get("maker") if isinstance(plan.get("maker"), dict) else {}
+    if action != "reduce" and t.guard_calls >= rules.MIRROR_VENUE_CALLS_PER_TICK:
+        plan["rest_reread_capped"] = {"guard_calls": int(t.guard_calls),
+                                      "budget": int(rules.MIRROR_VENUE_CALLS_PER_TICK)}
+        _mirror_stop("rest_reread_capped", r.whale)
+        return wire
+    bid2, ask2 = await _bbo(t, r.slug, book=True)
+    t.guard_calls += 1                  # charged like a write: the books' reads never are
+    plan["rest_quote_at_send"] = {"bid": bid2, "ask": ask2, "bid_at_plan": r.bid, "ask_at_plan": r.ask}
+    bound2 = rules.maker_bound(side, bid2, ask2)
+    if (ask2 if side == BUY else bid2) is None or bound2 is None:
+        plan["rest_quote_unread"] = {"side": side, "bid": bid2, "ask": ask2, "wire": wire}
+        _mirror_stop("rest_quote_unread", r.whale)
+        return wire
+    hc = _num(m.get("his_cent"))
+    if m.get("clause") == "unpriced_touch" or hc is None:
+        w2 = bound2
+    else:
+        w2 = min(hc, bound2) if side == BUY else max(hc, bound2)
+    if short_add:
+        w2 = _short_wire(w2)
+        if w2 is None:
+            plan["rest_quote_unread"] = {"side": side, "bid": bid2, "ask": ask2, "wire": wire}
+            _mirror_stop("rest_quote_unread", r.whale)
+            return wire
+    if w0 is not None and abs(float(w2) - w0) < 1e-9:
+        return wire
+    m["wire"], m["bound"], m["reread"] = w2, bound2, True
+    m["clause"] = ("unpriced_touch" if m.get("clause") == "unpriced_touch"
+                   else ("his_cent" if hc is not None and abs(float(w2) - hc) < 1e-9 else "touch"))
+    plan["maker"] = m
+    return float(w2)
 
 
 def _his_fill_id(book: dict, r: _Reading | None) -> str | None:
@@ -12868,373 +12959,126 @@ def _his_fill_id(book: dict, r: _Reading | None) -> str | None:
     return None
 
 
-async def _ioc_reread(t: _Tick, book: dict, r: _Reading, side: str, wire: float, action: str,
-                      plan: dict) -> str | None:
-    """ONE paced quote read immediately before an IOC's send (E18), and
-    the verdict on it. None: the level is still at or through the wire
-    (rules.at_or_through on the RE-READ, the same rule the tick fired
-    on) and the IOC may go; the plan carries `ioc_quote_at_send`
-    {bid, ask, bid_at_plan, ask_at_plan}. A name: the IOC is withheld --
-    `ask_moved` (a BUY: the ask left his cent) / `bid_moved` (a SELL:
-    the bid fell under the take cent), the plan carrying {ask_at_plan,
-    ask_at_send} (bid on a SELL); `ioc_reread_capped`: an ENTRY's
-    re-read would pass the tick's call budget
-    (rules.MIRROR_VENUE_CALLS_PER_TICK, the soft guard), so no read and
-    no IOC -- the rest is still placed; an EXIT's re-read is made
-    whatever the count, as every exit's op is (M-1); `ioc_quote_unread`:
-    the re-read failed, came back empty, or came back WITHOUT the side
-    the IOC needs -- the ask on a BUY, the bid on a SELL (a one-sided
-    book, a half-failed read: the level was never read, it did not
-    move; the E18 review's MEDIUM-1, folded 2026-09-08) -- no IOC
-    (fails closed toward not sending, never toward a send on the
-    tick's stale figure). The read is charged to the budget
-    (t.guard_calls) like a write."""
-    if action != "reduce" and t.guard_calls >= rules.MIRROR_VENUE_CALLS_PER_TICK:
-        plan["ioc_reread_capped"] = {"guard_calls": int(t.guard_calls),
-                                     "budget": int(rules.MIRROR_VENUE_CALLS_PER_TICK)}
-        return "ioc_reread_capped"
-    bid2, ask2 = await _bbo(t, r.slug, book=True)
-    t.guard_calls += 1                  # charged like a write: the books' reads never are
-    plan["ioc_quote_at_send"] = {"bid": bid2, "ask": ask2, "bid_at_plan": r.bid, "ask_at_plan": r.ask}
-    if (bid2 if side == SELL else ask2) is None:
-        return "ioc_quote_unread"
-    if rules.at_or_through(side, bid2, ask2, wire):
-        return None
-    if side == SELL:
-        plan["bid_moved"] = {"bid_at_plan": r.bid, "bid_at_send": bid2, "wire": wire}
-        return "bid_moved"
-    plan["ask_moved"] = {"ask_at_plan": r.ask, "ask_at_send": ask2, "wire": wire}
-    return "ask_moved"
-
-
-def _take_band(t: _Tick, book: dict, r: _Reading, his_px: float | None, plan: dict) -> float | None:
-    """THE ENTRY BAND'S READ (E14, FILL lane 2), made on every first-sight
-    entry plan of a long book and stamped on the plan as `take_band`
-    {his_cent, band, band_cent, bid, ask, verdict}. Returns the band
-    cent ONLY under the verdict `in_band` -- the one IOC at that cent is
-    to go -- and None under every other, which is the rest as today:
-    `unread` (his cent unreadable: rules.buy_wire(his) None; or the
-    tick's ask missing or off the ladder -- a non-quote is never in
-    band), `at_level` (the ask at or under his cent: today's take rule
-    governs, whether it fires now or waits), `off` (rules.band_cent None:
-    MIRROR_TAKE_BAND at 0, under a cent, or no cent on the ladder),
-    `uncounted` (the 059 columns absent this tick, `t.order_cols` not
-    True: an uncounted band take is not allowed, the rest goes by the
-    050 INSERT), `out` (the ask above the band cent), `waiting` (the ask
-    inside the band but rules.take_allowed not yet -- a LENGTHENED
-    MIRROR_TAKE_AFTER_S makes the band rest-first exactly as it makes
-    the at-level take; at the default wait of 0 never read). The band
-    is judged here on the tick's quote and again at the send on the
-    re-read (_ioc_reread at the band cent); both must hold.
-
-    E27 (FILL lane 27, owner order 2026-09-09 ~21:1xZ): the band is
-    rules.take_band_width(his) -- rules.MIRROR_TAKE_BAND (0.02) capped
-    at rules.MIRROR_TAKE_BAND_FRAC (0.05) of his price, floored at lane
-    2's cent -- and the plan's `band` is that width, with `frac`
-    {his_px, cost, width} beside it so book=<id> shows why the cent is
-    what it is (his 0.30: cost 0.30, width 0.015, the cent 0.31; his
-    0.42: width 0.02, the cent 0.44). The verdicts and the cent's rule
-    (rules.band_cent) are lane 2's byte for byte; a SHORT book's add
-    reads its own band through _short_take_band below."""
-    his_cent = rules.buy_wire(his_px)
-    width = rules.take_band_width(his_px)          # the LONG add's width: rules.MIRROR_TAKE_BAND capped
-    bc = rules.band_cent(his_px)
-    hp = _num(his_px)
-    tb: dict = {"his_cent": his_cent, "band": width, "band_cent": bc,
-                "bid": r.bid, "ask": r.ask,
-                "frac": {"his_px": hp, "cost": hp, "width": width}}
-    plan["take_band"] = tb
-    ask = _num(r.ask)
-    if his_cent is None or ask is None or not (0.01 <= ask <= 0.99):
-        tb["verdict"] = "unread"
-    elif rules.at_or_through(BUY, r.bid, r.ask, his_cent):
-        tb["verdict"] = "at_level"
-    elif bc is None:
-        tb["verdict"] = "off"
-    elif t.order_cols is not True:
-        tb["verdict"] = "uncounted"
-    elif not rules.take_in_band(r.bid, r.ask, his_cent, bc):
-        tb["verdict"] = "out"
-    elif not rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, bc, BUY):
-        tb["verdict"] = "waiting"
-    else:
-        tb["verdict"] = "in_band"
-        return bc
-    return None
-
-
-def _short_take_band(t: _Tick, book: dict, r: _Reading, his_px: float | None, plan: dict) -> float | None:
-    """THE SHORT ADD'S BAND READ (E27, FILL lane 27; owner order
-    2026-09-09 ~21:1xZ: "lets take it immediately with a tolerance"),
-    _take_band's mirror image on a SHORT book's add (the SELL_LONG plan
-    whose wire is _short_wire's contract cent), made on every
-    first-sight add plan and stamped on the plan as `take_band`
-    {his_cent, band, band_cent, bid, ask, frac, verdict} -- the SAME key
-    and the SAME verdict words, the row's side / intent telling the
-    sides apart. The SELL-side reads: his cent is rules.sell_wire(his)
-    (his level in LONG space, the price the contract is sold at); the
-    band is rules.take_band_width(his, BUY_SHORT) -- MIRROR_TAKE_BAND
-    capped at MIRROR_TAKE_BAND_FRAC of the COLLATERAL 1 - his, no floor
-    -- and the cent rules.short_band_cent(his) = sell_wire(his - band),
-    strictly UNDER his cent; the BID is the quote read (never the ask);
-    rules.short_take_in_band is the band test and rules.take_allowed is
-    asked on the SELL side at the band cent. Returns the band cent ONLY
-    under `in_band` -- ONE SELL IOC at that cent is to go through
-    _entry_take exactly as the long's does -- and None under every
-    other, which is today's rest at the short wire: `unread` (his level
-    not a price in (0, 1), or the tick's bid missing or off the ladder),
-    `at_level` (the bid at or over his cent: today's rule governs -- the
-    rest at the short wire, ceil(max(his, ask)), sells at his price or
-    better, and the at-level take fires in a locked book as before),
-    `off` (rules.short_band_cent None: the band off, under a cent, or no
-    cent under his), `uncounted` (the 059 columns absent), `out` (the bid
-    under the band cent), `waiting` (a LENGTHENED MIRROR_TAKE_AFTER_S).
-    Judged again at the send on the re-read (_ioc_reread on the SELL
-    side reads the bid: `bid_moved` withholds the IOC and the whole
-    quantity rests at the short wire as today)."""
-    hp = _num(his_px)
-    if hp is None or not (0.0 < hp < 1.0):
-        hp = None
-    his_cent = None if hp is None else rules.sell_wire(hp)
-    width = rules.take_band_width(his_px, ORDER_INTENT_SHORT)
-    bc = rules.short_band_cent(his_px)
-    tb: dict = {"his_cent": his_cent, "band": width, "band_cent": bc,
-                "bid": r.bid, "ask": r.ask,
-                "frac": {"his_px": hp, "cost": None if hp is None else round(1.0 - hp, 6), "width": width}}
-    plan["take_band"] = tb
-    bid = _num(r.bid)
-    if his_cent is None or bid is None or not (0.01 <= bid <= 0.99):
-        tb["verdict"] = "unread"
-    elif rules.at_or_through(SELL, r.bid, r.ask, his_cent):
-        tb["verdict"] = "at_level"
-    elif bc is None:
-        tb["verdict"] = "off"
-    elif t.order_cols is not True:
-        tb["verdict"] = "uncounted"
-    elif not rules.short_take_in_band(r.bid, r.ask, his_cent, bc):
-        tb["verdict"] = "out"
-    elif not rules.take_allowed(0.0, book.get("take_armed_ts"), t.now, r.bid, r.ask, bc, SELL):
-        tb["verdict"] = "waiting"
-    else:
-        tb["verdict"] = "in_band"
-        return bc
-    return None
-
-
-async def _entry_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ioc_px: float, rest_px: float,
-                      qty: int, his_px: float | None, plan: dict, first: bool,
-                      in_band: bool = False, on_add: bool = False) -> str:
-    """An ENTRY's take (E4 addendum): ONE IOC at HIS cent (`ioc_px`,
-    rules.buy_wire(his): the ask at or under it is at or through his
-    level, and the IOC can never fill above him) for `qty`, then the
-    unfilled remainder rests post-only at the rest's wire (`rest_px`,
-    buy_price(his, bid)) -- the only standing order the plan leaves,
-    never a second IOC (addendum 4). `first` is the take with no rest
-    to cancel (`take_first`); the room the IOC reserved and did not
-    fill is given back before the rest is sized (_place_reserved), so
-    the plan spends its room once. A take the venue refused, a tick
-    that tripped or abandoned, a book frozen by the take's own booking:
-    nothing more this tick. `in_band` (E14, FILL lane 2): the IOC is
-    the band's, `ioc_px` the band cent (rules.band_cent(his): at most
-    MIRROR_TAKE_BAND over his unrounded price) and its row's decision
-    'take_in_band'; the remainder and the withheld quantity rest at
-    `rest_px` -- his cent -- with decision 'rest', exactly as below.
-    `on_add` (E21, FILL lane 10): the IOC is the keep branch's take off
-    a standing rest for a plan his ADD grew, its row's decision
-    'take_on_add'; nothing else about the placement or the rests differs.
-
-    THE RE-QUOTE CREDIT (E2 review round 3, LOW-6) MEETS THE TAKE-FIRST:
-    a TTL or replace cancel of this book this tick covers ONE rest
-    (_Tick.requote_credit, spent in _place by a non-IOC alone). The IOC
-    never rides it -- it is its own op -- and the remainder's rest
-    spends it: cancel + IOC + rest is two ops. An IOC the budget refused
-    (`ops_capped`) with the credit standing rests the plannable quantity
-    on the credit instead: the cohort's book is not left bare for the
-    tick with its rest cancelled, which is what the credit is for."""
-    res = await _place(t, book, r, "take", p.side, ioc_px, qty, his_px, p, plan, tif="IOC",
-                       take_first=first, in_band=in_band, on_add=on_add)
-    # E14 (the review's LOW-1): the band IOC was sized on the room at the
-    # BAND cent; its rest is sized on the room at HIS cent by
-    # _place_reserved's own re-read (every non-take add is re-scaled
-    # there), so the plan's quantity goes in and today's rest comes out
-    # -- never more shares than the rest at his cent would have been
-    rest_qty = int(p.qty) if in_band else qty
-    if (res == "ops_capped" and book["id"] in t.requote_credit
-            and not (t.cancel_all or t.abandoned) and book.get("state") != "frozen"):
-        rest = await _place(t, book, r, "increase", p.side, rest_px, rest_qty, his_px, p, plan)
-        return rest if rest == "rest_placed" else res
-    if (res in IOC_SKIPPED and not (t.cancel_all or t.abandoned)
-            and book.get("state") != "frozen" and book["id"] not in t.nonterminal):
-        # THE IOC WAS NOT SENT (E18): the quote re-read immediately
-        # before the send was no longer at or through his cent
-        # (`ask_moved`), or could not be made (`ioc_reread_capped`,
-        # `ioc_quote_unread`). Nothing executed, so the whole plannable
-        # quantity rests post-only at the wire as the remainder would
-        # have -- the rest is placed as today, the IOC alone is withheld
-        rest = await _place(t, book, r, "increase", p.side, rest_px, rest_qty, his_px, p, plan)
-        return rest if rest == "rest_placed" else res
-    if res != "take" or t.cancel_all or t.abandoned or book.get("state") == "frozen":
-        return res
-    left = int(math.floor(float(rest_qty) - float(_num(plan.get("take_filled")) or 0.0) + 1e-9))
-    if left < 1 or book["id"] in t.nonterminal:
-        return res
-    rest = await _place(t, book, r, "increase", p.side, rest_px, left, his_px, p, plan)
-    return rest if rest == "rest_placed" else res
-
-
-async def _exit_take(t: _Tick, book: dict, r: _Reading, p: mi.Plan, ex: dict, qty: int,
-                     his_px: float | None, plan: dict, kind: str | None,
-                     in_band: bool = False) -> str:
-    """A LONG book's exit take (E14b, FILL program lane 1; the mirror
-    image of _entry_take): ONE IOC at the take cent (`ex["take"]`, the
-    lowest cent at or above his price less rules.MIRROR_EXIT_TOL) for
-    `qty`, then the unfilled quantity RESTS post-only at his cent
-    (`ex["rest"]`, ceil(his)) on the SAME tick -- never a second IOC,
-    never a cent outside his. FILL lane 3: with `in_band` the IOC is
-    limited at the band cent (`ex["take_band"]`, the same cent as the
-    take at the default band) and its row's decision reads
-    'exit_take_in_band'; the rest that follows is the same rest at his
-    cent, decision 'exit_rest'. Before this the IOC withheld at the send
-    (`bid_moved`, `ioc_quote_unread`: E18's re-read) or filled in part
-    left the book with NO exit order until the next full tick planned
-    again (book 334: his 0.549, our 358, filled 0.50 at a lag of 279 s;
-    book 467: his 0.250, our 570, filled 0.43). The prices are E4's,
-    byte for byte: the take cent and the rest cent are rules.exit_terms'
-    and nothing here chases.
-
-    THE REMAINDER IS BOUNDED TWICE: never more than the plan's own
-    unfilled quantity (`qty - floor(take_filled)`, the IOC's booking
-    read off the plan) AND never more than the ledger reads NOW
-    (_sell_qty over that remainder: the IOC's fill is booked into the
-    ledger by _book_delta before _finish_order returns, and a booking
-    that failed froze the book and left the row non-terminal, which the
-    guards below refuse). The rest is placed only when the IOC's result
-    is one of IOC_SKIPPED (nothing executed: the whole `qty` is the
-    remainder) or 'take' with a remainder of at least one share, and
-    never on a tick that tripped or abandoned, on a frozen book, or
-    with a row of the book non-terminal (_entry_take's guards). Its row
-    writes decision 'exit_rest' (rules.order_decision: the existing
-    word at a new site); the IOC's row keeps 'take'. Census
-    `exit_take_rested`; the plan carries `exit_take_rested`
-    {take, rest, qty, filled, rested} whenever a rest was attempted
-    (`rested` 0 when the placement was refused by name -- the refusal
-    is on the census as today: `open_order_pending`; a remainder under
-    `rules.MIRROR_MIN_ORDER_USD` at the rest cent on a reduce that is
-    not a flatten -> `under_min_notional`, a flatten exempt as every
-    flatten rest is). A remainder of a share or more that _sell_qty
-    reads NONE to sell (the ledger or the standing row under it) ->
-    `under_one_share` on the census and `rested` 0 on the plan before
-    any rest is sent: never a rest sized past the ledger. The IOC
-    filling the whole quantity leaves nothing to rest and writes
-    nothing. An exit's ops are exempt from the ops budget
-    and the replace budget (M-1, _exit_or_flip), so the extra rest is
-    never `ops_capped`. Any other IOC result is returned as today."""
-    ioc_px = ex["take_band"] if in_band else ex["take"]
-    res = await _place(t, book, r, "take", SELL, ioc_px, qty, his_px, p, plan, tif="IOC",
-                       in_band=bool(in_band))
-    if t.cancel_all or t.abandoned or book.get("state") == "frozen" or book["id"] in t.nonterminal:
-        return res
-    if res in IOC_SKIPPED:
-        filled = 0.0
-    elif res == "take":
-        filled = float(_num(plan.get("take_filled")) or 0.0)
-    else:
-        return res
-    unfilled = max(0, int(math.floor(float(qty) - filled + 1e-9)))
-    if unfilled < 1:
-        return res                      # the IOC filled the whole quantity: nothing to rest
-    left = min(unfilled, _sell_qty(book, unfilled))
-    if left < 1:
-        # the plan's remainder is a share or more but the ledger (or the
-        # standing row) reads NONE to sell: held by name, the hold on the
-        # plan (`rested` 0), never a rest sized past the ledger
-        _mirror_stop("under_one_share", r.whale)
-        plan["exit_take_rested"] = {"take": ioc_px, "rest": ex["rest"], "qty": int(qty),
-                                    "filled": filled, "rested": 0}
-        return res
-    rest = await _place(t, book, r, kind or "reduce", SELL, ex["rest"], left, his_px, p, plan)
-    rested = rest in ("rest_placed", "filled_at_create")
-    plan["exit_take_rested"] = {"take": ioc_px, "rest": ex["rest"], "qty": int(qty),
-                                "filled": filled, "rested": left if rested else 0}
-    if rested:
-        _mirror_stop("exit_take_rested", r.whale)
-    return rest if rest == "rest_placed" else res
-
-
 def _wire_for(p: mi.Plan | None, his_px: float | None, r: _Reading,
-              intent: str | None = None, ex: dict | None = None) -> float | None:
-    """The cent on the wire from the UNROUNDED facts (addendum section
-    10: never plan.price). A BUY joins HIS level: with no level there is
-    nothing to join and buy_price says so. A SELL is a reduction of
-    what we hold: WITH HIS EXIT PRICE (E4: `ex`, rules.exit_terms) the
-    rest is HIS cent, ceil(his price), and the ask never lifts it;
-    without one his equivalent is one of the plan's two candidates
-    and the ask alone is the plan's price when he gave none (mi.plan's
-    cands) -- the admin flatten and a snapshot-driven reduction have no
-    fill of his to price off, and the ask is a read fact, never a guess
-    under it.
+              intent: str | None = None, ex: dict | None = None,
+              hint: dict | None = None, plan: dict | None = None,
+              now: float | None = None) -> float | None:
+    """THE MAKER'S CENT ON THE WIRE (E31, 2026-09-10, FILL lane 31; owner
+    order ~03:3xZ "become a maker not taker ... mirror him to a tee"),
+    from the UNROUNDED facts (addendum section 10: never plan.price).
 
-    ON A SHORT BOOK (P2 rung S0, brief C4, Q6 (a)) the SELL_LONG plan
-    is an ADD to the short and its wire is the BUY_SHORT wire
-    (_short_wire); the BUY_LONG plan is a COVER (S4, 2026-09-07): with
-    his buy-back price it rests at floor(his) to the cent
-    (rules.exit_terms(BUY)["rest"]); with none, buy_price's figure is
-    returned for the record and the cover is held by name (`no_price`),
-    never sent at a guessed level."""
+    Every order this file sends is now a post-only rest AT HIS PRICE OR
+    BETTER that NEVER crosses the touch, and this is the one function
+    that prices it -- rules.maker_wire per side, with the order's side on
+    the contract's one ladder read off the plan (a BUY for a long add and
+    for a short book's cover; a SELL for a long exit and for a short
+    book's add, which is an OFFER of the contract at the wire):
+
+      BUY  min(buy_wire(his level), ask - MAKER_TICK): at his cent inside
+           the spread while his cent is under the ask, one tick under the
+           ask when it is not. Before this lane a BUY rested at
+           buy_price(his, bid) -- floor(min(his, bid)) -- which JOINED THE
+           BID and never sat inside the spread: with his level above the
+           bid we queued behind every resting bid at his cent's own
+           market. The bid is no longer read for a BUY's wire.
+      SELL max(sell_wire(his level), bid + MAKER_TICK), capped 0.99: at
+           his cent while it is over the bid, one tick over the bid when
+           it is not. Before this lane a long exit rested at ex["rest"] =
+           ceil(his) with no touch read at all, and a short add at
+           ceil(max(his, ask)), which JOINED THE ASK.
+
+    THE UNPRICED EXIT (`exit_px_src: 'none'` -- a snapshot-driven reduce,
+    a vanish with no fill of his, the operator's flatten: `ex` None on a
+    reduce) has no level to honour and rests at the touch's own inside
+    tick, re-read every tick: bid + tick on a SELL, ask - tick on a BUY.
+    It never takes and never runs a slippage leg (E31 B).
+
+    `hint` is the book's CROSS HINT (E31 D): the venue refused the last
+    wire as a cross, so this one is at least one tick further from the
+    touch -- and, being min/max'd with his cent above, never worse for us
+    than his own price.
+
+    None -- NO ORDER, named `maker_no_cent` by the caller -- when the
+    touch the clamp needs is missing or off the ladder, when no
+    non-crossing cent exists (an ask at 0.01, a bid at 0.99), or when the
+    level is unreadable on a priced order (`no_price` as before). Never a
+    guess and never a take.
+
+    ON A SHORT BOOK the SELL_LONG plan is an ADD to the short and its
+    wire goes through the executor's own arithmetic (_short_wire:
+    rest_tick(wire_limit(1 - T)), the contract price the contract is sold
+    at or above), so the collateral, the day cap and the short-model gate
+    read exactly what they read before; the BUY_LONG plan is the COVER
+    (S4), a BUY of the long token at min(floor(his buy-back), ask - tick).
+
+    `plan` (when given) receives the record `maker` {wire, bound,
+    his_cent, clause, side, bid, ask, at}: `clause` is 'his_cent' when the
+    rest sits at his own cent, 'touch' when the bound moved it,
+    'unpriced_touch' when there was no level, 'cross_hint' when the hint
+    did -- the word book=<id> and the maker-rests preset read."""
     if p is None or p.side is None:
         return None
-    if rules.is_short(intent):
-        if p.side == SELL:
-            return _short_wire(his_px, r.ask)
-        if ex is not None and ex.get("rest") is not None:
-            # S4: the cover rests at floor(his buy-back) to the cent --
-            # never above him, and under the ask whenever the take did
-            # not fire (the ask is then above his price plus the
-            # tolerance, so above the rest): rules.exit_terms(BUY)
-            return float(ex["rest"])
-        return rules.buy_price(his_px, r.bid)
-    if p.side == BUY:
-        return rules.buy_price(his_px, r.bid)
-    if ex is not None and ex.get("rest") is not None:
-        return float(ex["rest"])
-    return rules.sell_price(his_px if his_px is not None else r.ask, r.ask)
+    side = p.side
+    short = rules.is_short(intent)
+    unpriced = bool(rules.leg_action(intent, side) == "reduce" and ex is None)
+    bound = rules.maker_bound(side, r.bid, r.ask)
+    his_cent = None if unpriced else (rules.buy_wire(his_px) if side == BUY
+                                      else rules.sell_wire(his_px))
+    w = rules.maker_wire(side, his_px, r.bid, r.ask, unpriced=unpriced)
+    if w is None:
+        # WHY there is no cent, so the caller names the hold: the touch
+        # the clamp needs is unreadable or has no cent left on the ladder
+        # (`maker_no_cent`), or his own level is unreadable (`no_price`,
+        # as before this lane)
+        clause = "no_cent" if bound is None else "no_level"
+    elif unpriced:
+        clause = "unpriced_touch"
+    elif his_cent is not None and abs(w - his_cent) < 1e-9:
+        clause = "his_cent"
+    else:
+        clause = "touch"
+    hw = _maker_hint_wire(side, w, hint)
+    if w is not None and hw is not None and abs(hw - w) > 1e-9:
+        w, clause = hw, "cross_hint"
+    if short and side == SELL and w is not None:
+        # the offer's number on the wire is the executor's for that cost
+        w = _short_wire(w)
+        if w is None:
+            clause = "short_unwired"    # the short model disarmed: `no_price`, as before
+    if plan is not None:
+        plan["maker"] = {"wire": w, "bound": bound, "his_cent": his_cent, "clause": clause,
+                         "side": side, "bid": r.bid, "ask": r.ask, "at": now,
+                         "hint": (None if hint is None else _num(hint.get("wire")))}
+    return w
 
 
-def _short_wire(his_px: float | None, ask: float | None) -> float | None:
-    """The cent a BUY_SHORT rests at, from the UNROUNDED facts, in the
-    denomination the venue reads (P2 rung S0, brief 3.2 step 4; Q6 (a)
-    pinned on the 19-cent table).
+def _short_wire(px_long: float | None) -> float | None:
+    """The cent a BUY_SHORT rests at, in the denomination the venue reads
+    (P2 rung S0, brief 3.2 step 4; Q6 (a) pinned on the 19-cent table),
+    for the maker cent `px_long` in LONG space (E31: rules.maker_wire's
+    SELL figure -- max(ceil(his level), bid + a tick) -- where before this
+    lane it was ceil(max(his level, ask)), the ask's own queue).
 
     THE ORDER, IN HIS TERMS: we bid for the other side at his price or
-    better. `his_px` is his level in LONG space -- one minus what he
-    paid for the other token (_his_level) -- and the plan's price is
-    max(his level, ask) in long space, exactly the shadow's
-    `would_px_short`; so the most we pay a share for the short leg is
-    `cost = 1 - max(his, ask) = min(his other-token price, 1 - ask)`,
-    his level in the short leg's own price, at or under the short
-    leg's bid (1 - bestAsk).
-
-    THE NUMBER ON THE WIRE is the executor's own for that cost, the one
-    every per-fill BUY_SHORT has been sent since 2026-08-25 (386 fills
-    side-verified, 0 mismatch): `rest_tick(wire_limit(cost, BUY_SHORT))`
-    = ceil(1 - cost) to the cent = the CONTRACT price the contract is
-    sold at or above ("sell at >= 0.78 means pay <= 0.22", le.wire_limit).
-    Stored AS SENT; the collateral it commits is 1 - wire a share
-    (le.cost_per_share), which the day cap, the room, the reserve and
-    the overspend tripwire all read. It differs from rules.sell_price's
-    ceiling at 19 of 98 exact cents (float noise a hair above the cent
-    steps sell_price UP; the executor's round(..., 6) reads it as the
-    cent) and the executor's rounding is the one pinned. None when the
-    short model is disarmed (le.wire_limit would then return the cost
-    unchanged -- a limit in the wrong space, tee R7), when the ask is
-    not a price, or when the cent is off the ladder."""
+    better. The most we pay a share for the short leg is
+    `cost = 1 - px_long`, and the number on the wire is the executor's own
+    for that cost, the one every per-fill BUY_SHORT has been sent since
+    2026-08-25 (386 fills side-verified, 0 mismatch):
+    `rest_tick(wire_limit(cost, BUY_SHORT))` = ceil(1 - cost) to the cent
+    = the CONTRACT price the contract is sold at or above ("sell at
+    >= 0.78 means pay <= 0.22", le.wire_limit). Stored AS SENT; the
+    collateral it commits is 1 - wire a share (le.cost_per_share), which
+    the day cap, the room, the reserve and the overspend tripwire all
+    read. None when the short model is disarmed (le.wire_limit would then
+    return the cost unchanged -- a limit in the wrong space, tee R7), when
+    the maker cent could not be priced, or when the cent is off the
+    ladder."""
     if not le.short_model_confirmed():
         return None
-    h, a = _num(his_px), _num(ask)
-    if a is None or not (0.0 < a < 1.0):
+    px = _num(px_long)
+    if px is None or not (0.0 < px < 1.0):
         return None
-    px_long = a if (h is None or not (0.0 < h < 1.0)) else max(h, a)
-    cost = round(1.0 - px_long, 6)
+    cost = round(1.0 - px, 6)
     if not (0.0 < cost < 1.0):
         return None
     w = le.rest_tick(le.wire_limit(cost, ORDER_INTENT_SHORT), ORDER_INTENT_SHORT)
@@ -13329,8 +13173,7 @@ async def _record_orphan(pool, row_id: int, fut) -> None:
 
 async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: float,
                  qty: int, his_px: float | None, p: mi.Plan | None, plan: dict,
-                 tif: str = "GTC", take_first: bool = False, in_band: bool = False,
-                 on_add: bool = False) -> str:
+                 tif: str = "GTC") -> str:
     """Step L (and T when tif is IOC): INSERT the 'placing' row with
     the pre-placement snapshot BEFORE the venue call, place, persist
     the id IMMEDIATELY, book what executed on create.
@@ -13340,15 +13183,25 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
     read and the row INSERT between them, and under the parallel walk
     two books could pass the check on the same last op. The slot is
     released on every refusal before the write, so `ops` still counts
-    writes alone. `take_first` (E4 addendum) is an entry's IOC with no
-    rest behind it: sized on the room as it stands like a rest, and
-    counted `take_first`. `in_band` (E14, FILL lane 2) is the entry
-    band's IOC: its row's decision reads 'take_in_band'
-    (rules.order_decision); nothing else about the placement differs.
-    `on_add` (E21, FILL lane 10) is the keep branch's take off a rest
-    for a plan his add grew: its row's decision reads 'take_on_add';
-    nothing else differs."""
+    writes alone.
+
+    NO ORDER OF THIS MIRROR TAKES (E31, FILL lane 31). `tif` is GTC on
+    every caller left in this file, and an IOC is REFUSED BY NAME here --
+    before the op slot, the open-orders read, the row and the venue call
+    -- so that a later edit which wires one gets a named refusal
+    (`ioc_refused`) and a log line, never a send. The three flags the
+    take path passed (`take_first`, `in_band`, `on_add`) are gone with
+    it: an order's row decision is now 'rest', 'exit_rest' or 'cover'
+    (rules.order_decision, unchanged: its take words are simply never
+    written)."""
     w = r.whale
+    if tif != "GTC":
+        # E31: the fail-closed guard over a path that no longer exists.
+        # Counted, logged once per process per book, and NOTHING is sent
+        _mirror_stop("ioc_refused", w)
+        plan["ioc_refused"] = {"tif": tif, "side": side, "wire": wire, "kind": kind}
+        _ioc_refused_log(book, kind, side, wire, tif)
+        return "ioc_refused"
     if t.cancel_all:
         # a tick that tripped mid-way (an overfill booked by the cancel
         # this placement follows, a wrong sign on another book) places
@@ -13362,9 +13215,13 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
         # and the next tick walks its game first (E1's round-robin)
         _mirror_stop("abandoned_in_flight", w)
         return "tick_abandoned"
-    if book["id"] in t.requote_credit and tif != "IOC":
+    if book["id"] in t.requote_credit:
         # the rest after this tick's TTL/replace cancel of this book:
-        # the cancel's op covers it (E2 review round 3, LOW-6)
+        # the cancel's op covers it (E2 review round 3, LOW-6). E31
+        # (review LOW-2): the ` and tif != "IOC"` this clause carried is
+        # DEAD under the guard eleven lines above, which refuses every
+        # non-GTC time in force by name before any op is taken -- no line
+        # of this file reads a take any more
         t.requote_credit.discard(book["id"])
         slot: _OpSlot | None = _OpSlot(t, credited=True)
     else:
@@ -13378,17 +13235,15 @@ async def _place(t: _Tick, book: dict, r: _Reading, kind: str, side: str, wire: 
     if slot is None:
         return "ops_capped"
     try:
-        return await _place_reserved(t, slot, book, r, kind, side, wire, qty, his_px, p, plan, tif,
-                                     take_first, in_band, on_add)
+        return await _place_reserved(t, slot, book, r, kind, side, wire, qty, his_px, p, plan, tif)
     finally:
         slot.release()
 
 
 async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind: str, side: str,
                           wire: float, qty: int, his_px: float | None, p: mi.Plan | None,
-                          plan: dict, tif: str, take_first: bool = False,
-                          in_band: bool = False, on_add: bool = False) -> str:
-    global _POST_ONLY_OK, _post_only_receipt_logged
+                          plan: dict, tif: str) -> str:
+    global _post_only_receipt_logged
     w, slug = r.whale, r.slug
     # THE WIRE-SIDE MAP (P2 rung S0, brief 3.3): the book's intent and
     # the plan side name the wire intent the row records, the sell flag
@@ -13402,15 +13257,19 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
         return "book_error"
     wire_intent, sell, action = ws
     intent = _book_intent(book)
-    if action == "add" and tif != "IOC" and plan.get("hold") == "post_only_backoff":
+    if action == "add" and plan.get("hold") == "post_only_backoff":
         # E30 (FILL lane 30): THE REST IS HELD UNDER THE BACKOFF -- the
         # planner judged the book's third consecutive post_only_rejected
         # at this side and wire inside the wait (_post_only_held, the
         # plan's `hold`), so no GTC add goes out this tick: refused here
         # by the hold's name before any read or op is spent (the census
-        # is the planner's, once per held plan). An IOC is not post-only
-        # (the venue refused the REST): the take inside the band and the
-        # at-level take pass; a reduce never reads this
+        # is the planner's, once per held plan). A reduce never reads
+        # this. E31 re-worded the clause: E30 exempted an IOC here
+        # because the take inside E27's band and the at-level take were
+        # IOCs and fired under the hold -- there is no IOC left to
+        # exempt, so under the hold NO order goes out for the held wire,
+        # and a wire this lane RE-PRICED off a cross is a different wire
+        # and a fresh count (_post_only_note)
         return "post_only_backoff"
     # THE SMALLEST ORDER (review of U12c, FIX-2): under
     # rules.MIRROR_MIN_ORDER_USD of notional -- wire x qty on a long,
@@ -13447,46 +13306,49 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
         return "open_orders_unreadable"
     pre_ids = sorted({str(o.get("order_id")) for o in orders
                       if o.get("order_id") and str(o.get("us_market_slug") or "").lower() == slug.lower()})
-    is_take = tif == "IOC"
-    post_only = bool(_post_only_enabled()) and not is_take
+    # E31 (FILL lane 31): EVERY SEND CARRIES THE FLAG, UNCONDITIONALLY.
+    # The literal is here, at the call: there is no latch to flip and no
+    # shell variable to read (`_POST_ONLY_OK` and `PMUS_MIRROR_POST_ONLY`
+    # are gone), because either could turn the mirror into a taker
+    # without a review. The venue ignoring the flag writes the durable
+    # block below instead, and the flag keeps going out.
+    post_only = True
     # AN EXIT REST AT HIS CENT STANDS UNTIL HIS CENT MOVES (E4 rule 3):
     # it carries no good-till, whatever the GTD flag says, so the venue
     # never expires it into the re-quote the rule forbids
     stands = action == "reduce" and plan.get("exit_px_src") == "his_fill"
     good_till = (_iso(t.now + float(rules.MIRROR_REST_TTL_S))
-                 if (_gtd_enabled() and not is_take and not stands) else None)
-    tif_rec = "IOC" if is_take else ("GTD" if good_till else "GTC")
-    venue_tif = ("TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" if is_take
-                 else "TIME_IN_FORCE_GOOD_TILL_CANCEL")
-    # THE IOC RE-READS THE QUOTE BEFORE THE SEND (E18): book 509's two
-    # cover IOCs (2726, 2727) expired 0 filled because the ask moved
-    # between the tick's quote read and the send. One paced read through
-    # the E11 gate immediately before ANY IOC -- the entry take, the
-    # exit's take, the cover -- charged to the tick's call budget; the
-    # IOC goes only while the level is still at or through the wire.
-    # Refused by name before the room's READ, the row and the op are
-    # spent: the re-read is an await, and E2's room invariant below
-    # ("nothing between this read and the take") admits none between
-    # _room_qty and _room_take (the E18 review's HIGH-1, folded
-    # 2026-09-08)
+                 if (_gtd_enabled() and not stands) else None)
+    tif_rec = "GTD" if good_till else "GTC"
+    venue_tif = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+    # THE TOUCH-BOUND REST RE-READS THE QUOTE BEFORE THE SEND (E31 D,
+    # E18's shape at the site the IOC's re-read left). A rest whose cent
+    # sits AT the touch bound is one tick from crossing and the tick's
+    # quote is as old as the book walk: one paced read through the E11
+    # gate, charged to the tick's call budget, and the wire recomputed on
+    # it. A rest a tick or more inside the bound is not re-read (a
+    # one-tick move cannot cross it), and a re-read that is capped or
+    # comes back unreadable sends the tick's own cent, counted. Made
+    # before the room's READ so the room is scaled at the cent that goes
+    # out (E2's invariant: nothing between _room_qty and _room_take)
     ask_at_send: float | None = None
-    if is_take:
-        held = await _ioc_reread(t, book, r, side, wire, action, plan)
-        if held is not None:
-            _mirror_stop(held, w)
-            return held
-        ask_at_send = _num(plan.get("ioc_quote_at_send", {}).get("ask"))
-    if action == "add" and (kind != "take" or take_first):
+    mk = plan.get("maker") if isinstance(plan.get("maker"), dict) else {}
+    bnd, mw = _num(mk.get("bound")), _num(mk.get("wire"))
+    if (bnd is not None and mw is not None and _num(wire) is not None
+            and abs(mw - float(wire)) < 1e-9 and abs(mw - bnd) < 1e-9):
+        wire = await _rest_reread(t, book, r, side, float(wire), action,
+                                  wire_intent == ORDER_INTENT_SHORT, plan)
+        ask_at_send = _num(plan.get("rest_quote_at_send", {}).get("ask"))
+    if action == "add":
         # THE ROOM, READ AGAIN AND TAKEN NOW (E2): _act sized this add
         # off the tick's room across awaits another book may have spent
         # it through; the same scaling on the room as it stands, with
         # nothing between this read and the take, so two books in one
         # tick cannot each spend the last clip. Sequentially the same
         # figure (room_scale is idempotent on its own answer). A take
-        # off a cancelled rest was sized under _room_qty too and is not
-        # re-scaled here: its quantity is what the rest left. A take
-        # with NO rest behind it (`take_first`, E4 addendum) is sized
-        # here like the rest it stands in for
+        # E31: every add is a rest, so every add is re-scaled here at the
+        # cent that goes out (the touch-bound re-read above may have
+        # moved it a tick)
         qty = _room_qty(t, int(qty), wire, intent)
         if qty < 1:
             _mirror_stop("over_room", w)
@@ -13513,14 +13375,12 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
             int(_num(plan.get("target")) or 0), int(book.get("ledger_net") or 0), r.bid, r.ask,
             reason_col]
     # E18 (migration 059): the decision that places the row and the fill
-    # of his it answers, beside the re-read's ask (NULL on a rest).
-    # E14: the entry band's IOC writes the word 059 reserved,
-    # 'take_in_band' (an add's IOC with `in_band`; a cover stays 'cover').
-    # E21 (FILL lane 10): the keep branch's take off a rest for a plan
-    # his add grew writes 'take_on_add' (an add's IOC with `on_add`; the
-    # band's word wins, a cover stays 'cover')
-    decision = rules.order_decision(action, is_take, wire_intent == "ORDER_INTENT_SELL_SHORT",
-                                    in_band=bool(in_band) and is_take, on_add=bool(on_add) and is_take)
+    # of his it answers, beside the re-read's ask (NULL unless the
+    # touch-bound rest was re-read at the send, E31). rules.order_decision
+    # is unchanged and its take words -- 'take', 'take_in_band',
+    # 'take_on_add', 'exit_take_in_band', 'cover_in_band' -- are simply
+    # never written: `is_take` is False on every order this file sends
+    decision = rules.order_decision(action, False, wire_intent == "ORDER_INTENT_SELL_SHORT")
     plan["decision"] = decision
     try:
         if t.order_cols is True and t.fast_col is True:
@@ -13612,19 +13472,30 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
         # E30 (B): the consecutive count at this side and wire (the hold is
         # the planner's, _post_only_held; nothing here holds or sends)
         _post_only_note(t, book, side, wire, o.get("price"), code)
-        # THE RULE READS THE WHOLE RAW DICT, never the bare code alone:
-        # the crossing refusal comes in two shapes (an HTTP 400; a 200
-        # with post_only_cross True and execution_type REJECTED), and
-        # only the dict carries the second one's facts. A raw that is
-        # not a dict is read as the bare code it always was (to-a-tee
-        # program Phase 7 rung 1, owner order 2026-09-02 "mirror the
-        # whales to a tee"; wave 2b, the worker seam)
-        if rules.take_arms(raw if isinstance(raw, dict) else code):
-            # the statement's COALESCE: the first arm of this crossing
-            # spell stands, so the clock the take rule reads is the
-            # first refusal's, not this tick's
-            await t.pool.execute(_SQL_BOOK_ARM, book["id"], True)
-            book["take_armed_ts"] = book.get("take_armed_ts") or t.now
+        # E31 (D): A REST THE VENUE REJECTS AS A CROSS IS RE-PRICED, NOT
+        # RETRIED, AND NEVER ARMS A TAKE. Before this lane a 400 armed the
+        # book (`_SQL_BOOK_ARM`, `take_armed_ts`) and the next tick fired
+        # ONE IOC at his cent -- so a PREOPEN or SUSPENDED 400 bought the
+        # spread. Now the rejection is read as a CROSS on the venue's own
+        # field (the 200 + REJECTED shape) or on our own quote at or
+        # through the wire the rest was sent against, and the book's HINT
+        # is written: the next plan prices one tick further from the
+        # touch, which is a NEW wire, so E30's streak starts afresh and
+        # its backoff never fires on a re-priced rest. A 400 the quote
+        # does NOT explain (book 1383's 0.89 over an ask of 0.76) is NOT
+        # a cross: E30's path byte for byte -- the same wire, three
+        # identical rejections, the bounded wait -- which is now the case
+        # E30 alone covers
+        q = plan.get("rest_quote_at_send") if isinstance(plan.get("rest_quote_at_send"), dict) else {}
+        bid_used = _num(q.get("bid")) if q else r.bid
+        ask_used = _num(q.get("ask")) if q else r.ask
+        if _maker_cross(raw, side, bid_used, ask_used, wire):
+            ent = _cross_hint_note(t, book, side, wire, r)
+            _mirror_stop("maker_cross_repriced", w)
+            plan["post_only_cross"] = {"wire": wire, "n": int(ent["n"]), "bid": bid_used,
+                                       "ask": ask_used}
+            _recent(book["id"], "post_only_cross", wire=wire, n=int(ent["n"]),
+                    side=side, code=code)
         if _raw_rate_limit(raw):
             # the venue's 429 on the create, by the raw's NAMED fields
             # (status_code / error_type / the error's head; round 4,
@@ -13653,31 +13524,26 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
     await t.pool.execute(_SQL_ORDER_PERSIST_ID, o["id"], str(oid), status,
                          json.dumps(raw, default=str))
     o.update(order_id=str(oid), state="open")
-    # E30: an ACCEPTED placement (a rest, an IOC) ends the book's
-    # post-only streak -- the venue took an order at this side again
+    # E30: an ACCEPTED placement ends the book's post-only streak -- the
+    # venue took an order at this side again -- and with it (E31) the
+    # book's cross hint: the wire the venue just accepted is the wire
+    # this book prices from next tick
     _post_only_streak.pop(book["id"], None)
+    _cross_hint.pop(book["id"], None)
     await t.pool.execute(_SQL_BOOK_OPEN_ORDER, book["id"], o["id"])
     book["open_order_id"] = o["id"]
     t.nonterminal.add(book["id"])
     t.placed_books.add(book["id"])              # E6: the outcome class, the quiet verdict
-    if is_take:
-        _mirror_stop("take_placed", w)
-        t.stats["placed_take"] += 1
-        if take_first:
-            _mirror_stop("take_first", w)
-        if action == "reduce":
-            # an exit's IOC, counted where it is SENT (E4 review LOW-4:
-            # counted at the decision it named a take an ops-capped
-            # cancel never let out)
-            _mirror_stop("exit_take", w)
-            if wire_intent == "ORDER_INTENT_SELL_SHORT":
-                _mirror_stop("short_cover_take", w)      # S4: the cover's IOC
-    else:
-        _mirror_stop("flatten_rested" if kind in ("flatten_paired", "flatten_vanished")
-                     else "rest_placed", w)
-        t.stats["placed_rest"] += 1
-        if wire_intent == "ORDER_INTENT_SELL_SHORT":
-            _mirror_stop("short_cover_rest", w)          # S4: the cover's rest at floor(his)
+    _mirror_stop("flatten_rested" if kind in ("flatten_paired", "flatten_vanished")
+                 else "rest_placed", w)
+    t.stats["placed_rest"] += 1
+    if (plan.get("maker") or {}).get("clause") in ("touch", "unpriced_touch", "cross_hint"):
+        # E31: the rest sat at the touch bound (or one tick further off it
+        # under a cross hint) because his own cent would have crossed --
+        # the class the maker-rests preset reads beside `his_cent`
+        _mirror_stop("maker_rest_at_touch", w)
+    if wire_intent == "ORDER_INTENT_SELL_SHORT":
+        _mirror_stop("short_cover_rest", w)          # S4: the cover's rest at his cent or better
     if wire_intent == ORDER_INTENT_SHORT:
         # the short side's own names beside the lane's (brief G4): an
         # OPEN onto a flat book, an ADD onto a held one
@@ -13692,33 +13558,45 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
             intent=(wire_intent if wire_intent in (ORDER_INTENT_SHORT, "ORDER_INTENT_SELL_SHORT")
                     else None))
     filled = float(_num(resp.get("filled_shares")) or 0.0)
-    if is_take:
-        # THE IOC CONSUMES WHAT IT FILLED AND NO MORE (E4 addendum 3):
-        # the room was taken for the whole quantity before the call; the
-        # part the venue did not fill rests nowhere, so it goes back
-        # before the remainder's rest is sized -- one reservation for
-        # the plan, never two. The plan carries the figures for the
-        # caller that rests the remainder
-        plan["take_qty"], plan["take_filled"] = int(qty), filled
-        if est:
-            _room_give(t, max(0.0, float(qty) - filled) * _cost_px(wire, book))
     if filled > 0:
+        # E31: A POST-ONLY REST THAT FILLS AT CREATE IS READ BY THE
+        # VENUE'S OWN `aggressor` BOOL, never by our order's kind. Every
+        # execution the adapter parsed present and every `aggressor` the
+        # bool False is a MAKER fill -- a taker hit the fresh rest inside
+        # the synchronous window, which is exactly what this lane wants --
+        # so it books as a maker and nothing else happens. Any record with
+        # `aggressor` True, a missing list or one this process cannot read
+        # is the venue telling us the flag did not hold: booked as before
+        # (maker False, taker_at_placement True, so _book_delta's
+        # overspend check stands), `post_only_ignored`, the process
+        # degraded, and the DURABLE BLOCK written -- every ADD refused by
+        # name until an operator re-arms, every EXIT still placed, and the
+        # flag still on the next send. Before this lane the flag was
+        # turned OFF for the whole process instead, and every later rest
+        # went out crossable (task 30, order 153 at 17:36Z)
+        maker_at_create = _aggressor_maker(raw)
         st = {"state": status, "filled_shares": filled, "avg_px": resp.get("fill_price")}
-        await _book_delta(t, o, book, st, maker=False, taker_at_placement=True)
-        o["taker_at_placement"] = True
-        if post_only:
+        await _book_delta(t, o, book, st, maker=maker_at_create,
+                          taker_at_placement=not maker_at_create)
+        o["taker_at_placement"] = not maker_at_create
+        if maker_at_create:
+            _mirror_stop("maker_fill_at_create", w)
+            _recent(book["id"], "maker_fill_at_create", order=(str(oid) if oid else None),
+                    filled=filled, wire=wire)
+        else:
             _mirror_stop("post_only_ignored", w)
-            _POST_ONLY_OK = False
             t.stats["status"] = "degraded"
-            t.stats["post_only"] = False
-            log.error("mirror_live: the venue IGNORED post-only on order %s (%s filled at "
-                      "create); the flag is off for this process", oid, filled)
-    if is_take or filled >= float(qty) - FLAT_TOL_SHARES or le._rest_terminal(
+            t.stats["post_only_block"] = True
+            await _write_post_only_block(t, book, oid, filled, raw)
+            log.error("mirror_live: the venue IGNORED post-only on order %s (%s filled at create, "
+                      "aggressor not read as maker); the flag is NOT turned off -- adds are blocked "
+                      "until mirror-post-only-rearm", oid, filled)
+    if filled >= float(qty) - FLAT_TOL_SHARES or le._rest_terminal(
             {"state": status} if status else None):
         st = {"state": status or ("filled" if filled >= qty else "cancelled"),
               "filled_shares": filled, "avg_px": resp.get("fill_price")}
         await _finish_order(t, o, book, st, kind)
-        return "take" if is_take else "filled_at_create"
+        return "filled_at_create"
     t.open_by_book[book["id"]] = (o, {"state": status, "filled_shares": filled,
                                       "leaves": float(qty) - filled})
     return "rest_placed"
@@ -13834,24 +13712,38 @@ async def _lost_response(t: _Tick, o: dict, book: dict, r: _Reading, exc: BaseEx
 
 async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_px, plan: dict,
                             kind: str = "flatten_vanished") -> str:
-    """Step F: he has LEFT the market (or the admin forced it). Rest
-    the SELL at his equivalent for rules.MIRROR_FLATTEN_REST_S first; then
-    mirror_exit's rules verbatim: sole holder -> close_position with
-    EXIT_SLIPPAGE_BIPS; co-held -> one IOC at sell_limit_price(bid),
-    refused by name when the bid is unreadable.
+    """Step F: he has LEFT the market (or the admin forced it). THE
+    FLATTEN IS A MAKER'S REST, EVERY TICK (E31, FILL lane 31): with a
+    price of his it is _act's priced exit (the rest at his cent, bounded a
+    tick inside the far touch); with none -- a vanish he gave no fill
+    for, the operator's flatten_all -- it is _act's UNPRICED exit at the
+    touch's own inside tick, re-quoted as the touch moves, for as long as
+    the position is held.
+
+    WHAT THIS STEP NO LONGER DOES: after rules.MIRROR_FLATTEN_REST_S
+    (300 s) it used to cancel that rest and hand the position to a
+    slippage leg -- pmus.close_position at le.EXIT_SLIPPAGE_BIPS (300
+    bips: an unpriced MARKET order on the whole slug) when we were the
+    sole holder, and one IOC at the bid less rules.MIRROR_FLATTEN_SLIP
+    when another row of the desk's shared it. Both crossed the spread by
+    construction, which is the one thing this mirror no longer does; the
+    clock, the rail and _SQL_FLATTEN_REST_SINCE stay declared and unread,
+    and close_position stays in the adapter for the desk's other callers
+    (docs 75).
 
     ON A SHORT BOOK (S4, 2026-09-07) the flatten is the COVER, a priced
     BUY of the long token with the closing intent through _act and
     _place -- never close_position, which the venue refuses as an
     unpriced limit order ("Price is required for limit order"). With
-    his buy-back price it is _act's priced cover (the rest at floor(his),
-    the IOC at the ceiling cent). With NO price of his the rule cannot
+    his buy-back price it is _act's priced cover (the rest at
+    min(floor(his), ask - a tick)). With NO price of his the rule cannot
     apply and the book is held `no_price` under `exit_px_src: 'none'`,
     with ONE exception: a vanish (he is gone) or the sign flip (his
-    position on our side is gone) covers by one IOC at the ask bounded
-    by le.buy_limit_price (the long flatten's own slippage, mirrored) for
-    our quantity. Every cover passes the read-back gate first
-    (_s4_refusal)."""
+    position on our side is gone) covers with a POST-ONLY REST at the
+    highest cent strictly under the ask -- where before E31 it sent one
+    IOC at the ask plus two cents (le.buy_limit_price). Every cover
+    passes the read-back gate first (_s4_refusal), and the standing
+    BUY_SHORT add is cancelled before it as before."""
     w = r.whale
     short = _book_short(book)
     if kind == "flatten_vanished":
@@ -13897,14 +13789,28 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
         if t.abandoned:
             _mirror_stop("abandoned_in_flight", w)
             return "tick_abandoned"
-        limit = le.buy_limit_price(float(ask))
-        plan["cover"] = {"ioc_at_ask": ask, "limit": limit, "why": "vanished" if kind == "flatten_vanished"
-                         else "sign_flip"}
+        # E31 (B): THE UNPRICED COVER IS A POST-ONLY REST AT THE TOUCH'S
+        # OWN INSIDE TICK, re-quoted every tick, never the bounded IOC at
+        # the ask plus two cents (le.buy_limit_price) this branch sent
+        # before. He is gone and gave no buy-back price, so there is no
+        # level to honour: the highest cent strictly under the ask is the
+        # best a maker can offer, and the rest is read again next tick as
+        # the touch moves
+        limit = rules.maker_wire(BUY, None, r.bid, ask, unpriced=True)
+        if limit is None:
+            _mirror_stop("maker_no_cent", w)
+            plan["no_cent"] = {"side": BUY, "bid": r.bid, "ask": ask}
+            return "maker_no_cent"
+        plan["cover"] = {"rest_under_ask": ask, "limit": limit,
+                         "why": "vanished" if kind == "flatten_vanished" else "sign_flip"}
+        plan["maker"] = {"wire": limit, "bound": limit, "his_cent": None,
+                         "clause": "unpriced_touch", "side": BUY, "bid": r.bid, "ask": ask,
+                         "at": t.now, "hint": None}
         qty = _cover_qty(book, _leg_of(book))
         if qty < 1:
             _mirror_stop("under_one_share", w)
             return "under_one_share"
-        return await _place(t, book, r, kind, BUY, limit, qty, his_px, p, plan, tif="IOC")
+        return await _place(t, book, r, kind, BUY, limit, qty, his_px, p, plan)
     else:
         if _exit_terms(t, book, p.side, his_px, plan) is not None:
             # HIS EXIT PRICE IS KNOWN (E4): the rest stands at his cent
@@ -13918,257 +13824,26 @@ async def _flatten_vanished(t: _Tick, book: dict, r: _Reading, p: mi.Plan, his_p
             # gave no price for and for the admin flatten
             # (`exit_px_src: 'none'`)
             return await _act(t, book, r, p, "flatten_vanished", his_px, plan) or "flatten_rested"
-        # the reference rest is one of THIS vanish (the plan's vanish_since,
-        # set by _tick_book): with none, the vanish begins now and rests
-        vanish_since = _num(plan.get("vanish_since"))
-        vanish_since = t.now if vanish_since is None else vanish_since
-        try:
-            since = _num(await t.pool.fetchval(_SQL_FLATTEN_REST_SINCE, book["id"], vanish_since))
-        except Exception:  # noqa: BLE001 — unreadable: rest again, never slip
-            since = t.now
-        if since is None or t.now - since < float(rules.MIRROR_FLATTEN_REST_S):
-            return await _act(t, book, r, p, "flatten_vanished", his_px, plan) or "flatten_rested"
-        # the rest stood its wait: cancel it, then the slippage path
-        await _cancel_open_for(t, book, "flatten_vanished", exit=True)
-        if book["id"] in t.open_by_book:
-            return "cancel_pending"
-        if t.cancel_all:
-            return t.cancel_all          # the cancel's booking tripped the tick: nothing more
+        # E31 (B): THE UNPRICED LONG VANISH RESTS, EVERY TICK, FOR GOOD.
+        # He gave no exit price (or the operator forced the flatten), so
+        # _act prices the rest at the touch's own inside tick -- the lowest
+        # cent strictly over the bid -- and re-quotes it as the bid moves.
+        # What used to follow is gone: after rules.MIRROR_FLATTEN_REST_S
+        # (300 s) this branch cancelled the rest and handed the position to
+        # a SLIPPAGE LEG -- close_position at le.EXIT_SLIPPAGE_BIPS (300
+        # bips, an unpriced market order on the whole slug) when we were
+        # the sole holder, and one IOC at the bid less MIRROR_FLATTEN_SLIP
+        # when we were not. Both crossed the spread by construction, which
+        # is the one thing this mirror no longer does; the rail and the
+        # clock stay declared and unread (docs 75)
+        return await _act(t, book, r, p, "flatten_vanished", his_px, plan) or "flatten_rested"
     if t.abandoned:
         # another book abandoned the tick while this one ran (E2):
         # named, no plan written (see _place)
         _mirror_stop("abandoned_in_flight", w)
         return "tick_abandoned"
-    # the op is reserved here and committed at the write (E2): the
-    # bid read, the position read and the row INSERT sit between. A
-    # flatten's close or IOC is an exit: never `ops_capped` (M-1)
-    slot = _op_slot(t, w, exit=True)
-    if slot is None:
-        return "ops_capped"
-    try:
-        return await _flatten_send(t, slot, book, r, his_px, plan, kind)
-    finally:
-        slot.release()
+    return f"{kind}: rested"
 
-
-async def _flatten_send(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, his_px, plan: dict,
-                        kind: str) -> str:
-    """The slippage leg of _flatten_vanished, on a reserved op: sole ->
-    close_position, co-held -> one IOC at sell_limit_price(bid). A LONG
-    book's leg alone since S4: a short book's flatten is its priced
-    cover (_flatten_vanished, _act) and never reaches here."""
-    w = r.whale
-    short = _book_short(book)
-    if short:
-        _mirror_stop("book_error", w)
-        log.error("mirror_live: book %s (short) reached the close_position leg; the cover is a priced "
-                  "order (S4)", book["id"])
-        return "book_error"
-    # the LEG, whole shares, after the cancel's booking: what a close
-    # must account for on either sign
-    ledger = _leg_of(book)
-    if ledger < 1:
-        return f"{kind}: flat"
-    # THE SLIPPAGE LEG READS THE VENUE'S STATE BEFORE IT READS A BID.
-    # The co-held IOC prices off slug_bid, which reads through
-    # _bbo_quotes -- a feed that carries no market state -- so a CLOSED
-    # market with a stale resting book (the 2026-09-05 probe: bid 0.01,
-    # ask 0.20 on a settled CFB market) yielded a tradeable bid and an
-    # IOC SELL went out on it in the same tick whose quote read had
-    # counted the slug venue_halted; the sole-holder branch sent
-    # close_position with no quote read at all (review of U9,
-    # 2026-09-06). The tick's OWN read of this slug decides, by the
-    # name _bbo gave it: a state that is present and not OPEN refuses
-    # here, before the position read and before either order, and the
-    # tick after the venue reads OPEN takes the leg as before. A state
-    # of None (the read failed, or the payload carried none) is not a
-    # refusal, exactly as it is not one in _bbo; the bid read below
-    # still refuses a book it cannot price.
-    if r.venue_state is not None and r.venue_state != _STATE_OPEN:
-        _mirror_stop("venue_halted", w)
-        return "venue_halted"
-    close_bips = int(le.EXIT_SLIPPAGE_BIPS)
-    try:
-        held, _avg = await _pm_held(t, r.slug)
-    except Exception as exc:  # noqa: BLE001 — cannot size: refuse, retry next tick
-        _mirror_stop("no_bid_for_flatten", w)
-        log.warning("mirror_live: venue position for %s unreadable (%s)", r.slug, type(exc).__name__)
-        return "no_bid_for_flatten"
-    # THE ONE ORDER THIS WORKER SENDS WITH NO CLAMP TO ITS OWN BOOK.
-    # close_position closes the WHOLE slug, so "am I the sole holder" must
-    # be certain, and it was decided by `ledger >= int(held)`. Two things
-    # were wrong with that. _pm_held returns int(qty) -- it FLOORS the
-    # venue's number before we ever see it -- so a foreign holding of any
-    # fraction under one share read as sole and our close took it with us:
-    # deterministic, no race. And the unfloored number was already in
-    # hand: step R's paced walk keeps fractions (r.venue), so no second
-    # whole-account walk is needed to see it (the step-9 re-review removed
-    # exactly such a walk from the lost-close path; it is not coming back).
-    # Sole now needs BOTH readings to say so -- the tick's fractional walk
-    # and this fresh floored read -- and a disagreement between two
-    # independent sources is not a reading of the account.
-    # AND THE EXPLAINED-SHARE QUERY IS DELIBERATELY NOT FED IN HERE.
-    # R7's text asks for it (`_SQL_MANUAL_SHARES`, widened or not); it
-    # must not be done, and this is written so that a later builder does
-    # not "complete" the unit. Both readings compare the ledger against
-    # the TOTAL venue holding, which already includes any foreign shares,
-    # so a foreign holding correctly reads NOT sole today. Subtracting
-    # the explained shares could only ever make `sole` MORE likely -- and
-    # `sole` is what sends `close_position`, the one order this worker
-    # sends with no clamp to its own book. That is the exact direction R3
-    # exists to close.
-    venue_now = math.ceil(abs(float(r.venue)))
-    sole_walk = ledger >= venue_now
-    sole_read = ledger >= int(held)
-    # (The short book's sign clause that sat here -- a mixed-sign co-hold
-    # read "sole" by magnitude -- went with close_position: a short's
-    # cover is a clamped order of our own quantity, S4.)
-    if sole_walk != sole_read:
-        # Two readings that disagree are EVIDENCE OF CO-HOLDING, not an
-        # unreadable account: the walk keeps the fraction and the fresh
-        # read floors it away, so `ledger < venue < ledger + 1` -- exactly
-        # the sub-share case -- disagrees on every tick, deterministically
-        # and forever. Refusing here would leave the book unable to exit
-        # by any route (and the admin flatten inert, since it lands in
-        # this same function), so the disagreement means NOT SOLE and
-        # falls through to the co-held IOC below, which sells only our
-        # own quantity. Counted and logged because a standing
-        # disagreement is worth an operator's eye.
-        _mirror_stop("flatten_holding_disagrees", w)
-        log.warning("mirror_live: %s sole-holder reads disagree (walk %s, held %s, ledger %s): "
-                    "treating as co-held", r.slug, r.venue, held, ledger)
-    # What this gate does and does not close. The DETERMINISTIC hole is
-    # closed: _pm_held floors the venue's number before we see it, so it
-    # can never report a foreign fraction, while step R's paced walk keeps
-    # it -- the walk is what decides. The residual is that the walk is
-    # taken earlier in the tick, so a foreign fraction landing between the
-    # walk and here still reads sole; that window is one tick, and the
-    # close's own booking catches it afterwards (a fill above our ledger
-    # is `overfill`, which freezes the book and trips the live switch).
-    sole = sole_walk and sole_read
-    # THE QUANTITY, decided BELOW `sole`. The sole close is
-    # close_position: it closes the WHOLE slug, fraction included, so it
-    # is never clamped to the row and never gated under_one_share -- a
-    # sole holder at ledger 1 / row 0.76 sends the close (the withdrawn
-    # first cut sat the gate above this decision, and that book could
-    # never leave). Its mirror_orders row keeps qty = ledger, so
-    # _reconcile_lost_close's `sold = qty - int(held)` is the whole
-    # ledger. The co-held IOC sells OUR quantity only: min(ledger,
-    # ceil(held)) (_sell_qty), refused under one share by name.
-    qty = ledger
-    if not sole:
-        qty = _sell_qty(book, ledger)
-        if qty < 1:
-            _mirror_stop("under_one_share", w)
-            return "under_one_share"
-        # a venue READ, behind the pacer like every other (step-9 review)
-        bid = await _venue_read(t, t.pmus.slug_bid, r.slug, True)
-        if bid is None or not (0.0 < float(bid) < 1.0):
-            _mirror_stop("no_bid_for_flatten", w)
-            return "no_bid_for_flatten"
-        limit = le.sell_limit_price(float(bid))
-    orders = await _read_open(t)
-    pre_ids = sorted({str(o.get("order_id")) for o in (orders or [])
-                      if o.get("order_id") and str(o.get("us_market_slug") or "").lower() == r.slug.lower()})
-    tif_rec = "CLOSE" if sole else "IOC"
-    if book["id"] in t.nonterminal:
-        _mirror_stop("open_order_pending", w)
-        return "open_order_pending"
-    # the row: the PLAN side of a reduce on this (long) book and the
-    # WIRE intent the exit maps to (brief 3.3); a CLOSE carries no cent
-    # of its own
-    side = SELL
-    ws = rules.wire_side(book.get("intent"), side)
-    if ws is None:
-        _mirror_stop("book_error", w)
-        log.error("mirror_live: book %s carries an intent this lane cannot wire (%r)",
-                  book["id"], book.get("intent"))
-        return "book_error"
-    wire_intent = ws[0]
-    args = [book["id"], w, r.slug, kind, side, tif_rec, False,
-            None, his_px, (None if sole else limit) or 0.0, (None if sole else limit) or 0.0,
-            qty, json.dumps(pre_ids), 0, int(book.get("ledger_net") or 0), r.bid, r.ask, kind]
-    try:
-        if t.short_col:
-            row_id = await t.pool.fetchval(_SQL_ORDER_INSERT, *args, wire_intent)
-        else:
-            row_id = await t.pool.fetchval(_SQL_ORDER_INSERT_047, *args)
-    except Exception as exc:  # noqa: BLE001 — the unique index: one open order per book
-        if le._names_constraint(exc, "mirror_orders_one_open_per_book"):
-            _mirror_stop("open_order_pending", w)
-            return "open_order_pending"
-        raise
-    slot.commit()
-    # the in-memory row carries what the INSERT wrote: a CLOSE has no
-    # wire and the column holds 0.0, never None (step-9 review: a None
-    # here was a TypeError in the lost-placement search)
-    o = {"id": int(row_id), "book_id": book["id"], "whale": w, "us_market_slug": r.slug,
-         "kind": kind, "side": side, "tif": tif_rec, "post_only": False,
-         "his_level": his_px, "price": 0.0 if sole else limit, "wire": 0.0 if sole else limit,
-         "qty": qty, "order_id": None, "state": "placing", "filled": 0.0, "booked_filled": 0.0,
-         "avg_px": None, "taker_at_placement": True, "pre_ids": pre_ids, "placed_ts": t.now,
-         "reason": kind, "intent": wire_intent}
-    try:
-        if sole:
-            resp = await _guarded(t, o["id"], t.pmus.close_position, r.slug,
-                                  slippage_bips=close_bips)
-        else:
-            resp = await _guarded(t, o["id"], t.pmus.submit_fok, r.slug, limit, qty, True,
-                                  "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL", ORDER_INTENT)
-    except asyncio.CancelledError:
-        raise
-    except Exception as exc:  # noqa: BLE001
-        if ms.is_rate_limit(exc):
-            # the co-held IOC's create raised the SDK's RateLimitError
-            # (sell=True: no preview, post_only False, no 4xx wrapper):
-            # the venue's refusal by name, never a lost response and
-            # never a freeze (round 5, c3) -- the same road as
-            # _place_reserved's
-            return await _place_rate_limited(t, o, book, r, exc, 0.0)
-        return await _lost_response(t, o, book, r, exc)
-    resp = resp if isinstance(resp, dict) else {}
-    oid = resp.get("order_id")
-    status = str(resp.get("status") or "")
-    filled = float(_num(resp.get("filled_shares")) or 0.0)
-    if oid:
-        await t.pool.execute(_SQL_ORDER_PERSIST_ID, o["id"], str(oid), status,
-                             json.dumps(resp.get("raw") or {}, default=str))
-        o.update(order_id=str(oid), state="open")
-    if filled > 0:
-        # booked = min(filled, ledger) is the primitive's own ceiling
-        await _book_delta(t, o, book, {"state": status, "filled_shares": filled,
-                                       "avg_px": resp.get("fill_price")}, maker=False,
-                          taker_at_placement=True)
-    st = {"state": status or ("filled" if filled >= qty else "cancelled"),
-          "filled_shares": filled, "avg_px": resp.get("fill_price")}
-    if not oid:
-        if sole and status == "close_failed":
-            raw = resp.get("raw") or {}
-            if _raw_rate_limit(raw):
-                # the adapter caught the SDK's RateLimitError into this
-                # raw (`error_type`, `error`; no int status): the venue
-                # REFUSED the close before it processed anything, so
-                # nothing may have executed -- the named refusal, the
-                # circuit, the book held live for the next tick's
-                # flatten; never the lost-close freeze (round 5, c2)
-                return await _place_rate_limited(t, o, book, r, None, 0.0, raw=raw)
-            # the adapter turns an exception INSIDE the close call into
-            # this status (pmus.close_position); a request that timed
-            # out may have executed at the venue, so it is the lost
-            # response of the CLOSE row, never a refusal to retry
-            return await _lost_response(t, o, book, r, RuntimeError(
-                str(raw.get("error") or "close_failed")[:80]))
-        await t.pool.execute(_SQL_ORDER_REFUSED, o["id"], status,
-                             f"place_refused:{status or 'no_id'}",
-                             _refusal_receipt(resp.get("raw") or {}))
-        _mirror_stop(f"place_refused:{status or 'no_id'}", w)
-        return f"place_refused:{status}"
-    await _finish_order(t, o, book, st, kind)
-    _recent(book["id"], "flattened", how="close_position" if sole else "ioc", filled=filled)
-    return kind
-
-
-# ----------------------------------------------------- step A: admission
 
 async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = None) -> str | None:
     """A market with no book: read everything admission wants, refuse
@@ -15194,7 +14869,15 @@ async def tick_once(pool, pmus, http, now_ts: float | None = None) -> dict:
             stats["ops"], stats["reads"] = t.ops, t.reads
             stats["tick_s"] = round(time.monotonic() - started, 1)
             stats["recent"] = list(_RECENT)[-20:]
-            stats["post_only"] = _POST_ONLY_OK
+            # E31: the flag is on every send by code; what an operator
+            # watches is the DURABLE BLOCK the venue's own aggressor wrote
+            # -- INCLUDING the block THIS tick wrote (review MEDIUM-1):
+            # `t.post_only_block` is the key as the tick's START read it, and
+            # `_place_reserved` sets the stat True the moment it writes the
+            # key, so the tick that discovers the venue ignoring the flag must
+            # not publish False over its own discovery -- it is the tick a
+            # human is paged on
+            stats["post_only_block"] = bool(t.post_only_block) or bool(stats.get("post_only_block"))
             # last, and in the `finally`: an abandoned or raising tick
             # publishes the counters it did reach, never a stale block
             stats["integ"] = _integ_block(stats)

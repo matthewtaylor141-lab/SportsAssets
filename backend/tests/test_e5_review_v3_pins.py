@@ -108,21 +108,26 @@ def test_e5v3_F1_the_transition_tick_places_nothing_even_with_no_fill_booked():
     standing -- sells the venue's 300 at his cent."""
     p = _pool(fills=_his(300, sold=300), snap=None)
     b = p.add_book(ledger=300, avg_cost=0.31)
-    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=600)
+    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, lift=600)
     st = _tick(p, v, http=_gone())
     assert b["state"] == "live" and _census(st, "venue_ledger_suspect") == 1 and _census(st, "venue_ledger_disagree") == 0
-    assert [c[2:6] for c in _places(v)] == [(0.30, 300, True, IOC_TIF)] and b["ledger_net"] == 0
+    # E31 (FILL lane 31, 2026-09-10): every exit is a POST-ONLY REST at the
+    # maker wire max(sell_wire(his 0.31), bid 0.30 + MAKER_TICK) = 0.31, GTC and
+    # post_only True, filled by the taker who came to it (`lift`, the fixture's
+    # stand-in for `ioc_fill`) -- never ONE IOC at the take cent 0.30.
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)] and b["ledger_net"] == 0
     assert _census(st, "frozen_reduce") == 0 and b["last_plan"]["venue_ledger_suspect"]["delta"] == 300.0
-    v1 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300)
+    v1 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, lift=300)
     st1 = _tick(p, v1, now=NOW + 15, http=_gone())
     assert b["state"] == "frozen" and b["frozen_reason"] == "venue_ledger_disagree"
     assert not _places(v1) and _plan_exit(b) == {"held": "transition_tick"}
     assert _census(st1, "frozen_reduce") == 0 and _census(st1, "frozen_fill_this_tick") == 0
     assert _census(st1, "venue_ledger_disagree") == 1 and b["ledger_net"] == 0
-    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300)
+    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, lift=300)
     st2 = _tick(p, v2, now=NOW + 30, http=_gone())
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 300, True, IOC_TIF)] and b["ledger_net"] == 0
-    assert _census(st2, "frozen_reduce") == 1 and _plan_exit(b)["result"] == "take"
+    # E31: the post-only rest at the maker wire 0.31, lifted at create
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 300, True, GTC_TIF)] and b["ledger_net"] == 0
+    assert _census(st2, "frozen_reduce") == 1 and _plan_exit(b)["result"] == "filled_at_create"
 
 
 # ------------------------------------------------ F2, exercised on both legs
@@ -200,20 +205,26 @@ def test_e5v3_L2_the_sleeve_breaker_never_blocks_a_frozen_exit_and_step_o_keeps_
     """The sleeve's breaker tripped over the mirror's window (-6,000,
     no re-arm): `loss_breaker` on the census, and the frozen reduce
     still goes -- step O keeps the standing rest (the increase block
-    cancels ADD rests alone), the bid inside the cent cancels it under
-    `take` and sends the one IOC. With no rest standing the rest goes
-    out under the same block."""
+    cancels ADD rests alone) and the taker who comes to it fills it there.
+    With no rest standing the rest goes out under the same block.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the bid arriving inside the
+    cent used to cancel that rest under `take` and send ONE IOC at 0.30. The
+    rest stands at its own 0.31 and is HIT: no cancel, no second order, and
+    the tick names `frozen_fill_this_tick`. The breaker's rule -- it blocks
+    increases only -- is the subject and is unchanged."""
     _breaker(monkeypatch, -6000.0)
     p = _pool(fills=_his(300, sold=300), snap=None)
     b = _frozen_long(p)
     o = _frozen_rest(p, b)
-    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=600)
+    v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, fills={"oid-1": (600.0, 0.31)})
     v.rest("oid-1", "SELL", 0.31, 600)
     st = _tick(p, v, http=_gone())
     assert _census(st, "loss_breaker") >= 1 and _census(st, "mirror_loss_stop") == 0
-    assert _cancels(v) == [("cancel", "oid-1", SLUG)] and o["reason"] == "frozen_reduce: take"
-    assert [c[2:6] for c in _places(v)] == [(0.30, 600, True, IOC_TIF)] and b["ledger_net"] == 0
-    assert _census(st, "frozen_reduce") == 1 and _plan_exit(b)["result"] == "take"
+    assert not _cancels(v) and not _places(v) and o["state"] == "filled"
+    assert o["reason"] == "frozen_reduce: frozen_reduce" and o["wire"] == 0.31
+    assert b["ledger_net"] == 0 and _census(st, "filled_rest") == 1
+    assert _census(st, "frozen_excess_sold") == 1 and _plan_exit(b) == {"held": "frozen_fill_this_tick"}
     p2 = _pool(fills=_his(300, sold=300), snap=None)
     b2 = _frozen_long(p2)
     v2 = _Venue(held={SLUG: 600}, bid=0.28, ask=0.32)
@@ -251,23 +262,29 @@ def test_e5v3_the_money_path_venue_300_ledger_100_his_300_to_0_sells_the_venues_
     """Frozen placement_lost LONG book: ledger 100, the venue reports
     300 (a lost BUY of 200 filled unbooked), his net 300 -> 0. The
     reduce is 300 -- the VENUE's number, never the ledger's 100 nor the
-    plan's target -- at his price within 1c (his SELL at 0.31: take
-    cent 0.30) taken at once with the bid at 0.30; the fill books 100
-    to the ledger and names 200 excess on the receipt; the next tick
-    reads venue 0 == ledger 0, thaws and closes flat. With the bid at
-    0.29 (outside the cent) the rest goes at 0.31 and nothing chases."""
+    plan's target -- at his cent; the fill books 100 to the ledger and names
+    200 excess on the receipt; the next tick reads venue 0 == ledger 0, thaws
+    and closes flat. With the bid at 0.29 (outside the cent) the rest goes at
+    0.31 and nothing chases.
+
+    RE-PINNED AT E31: the 300 leave as a POST-ONLY REST at the maker wire
+    max(sell_wire(0.31), bid 0.30 + MAKER_TICK) = 0.31, GTC, lifted at create
+    -- where it was ONE IOC at the take cent 0.30. The declared `exit_take`
+    still reads 0.30 on the plan and no order reads it; the excess is priced
+    at the cent we sold at, so 200 shares at 0.31."""
     p = _pool(fills=_his(300, sold=300), snap=None)
     b = _frozen_long(p, ledger=100, lost=200)
-    v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300)
+    v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, lift=300)
     st = _tick(p, v, http=_gone())
-    assert [c[1:] for c in _places(v)] == [(SLUG, 0.30, 300, True, IOC_TIF, "ORDER_INTENT_BUY_LONG", False, None)]
+    assert [c[1:] for c in _places(v)] == [(SLUG, 0.31, 300, True, GTC_TIF, "ORDER_INTENT_BUY_LONG", True, None)]
     o = _placed(p)[0]
-    assert o["qty"] == 300 and o["state"] == "filled" and o["reason"] == "frozen_reduce: take"
+    assert o["qty"] == 300 and o["state"] == "filled" and o["reason"] == "frozen_reduce: reduce"
     assert b["ledger_net"] == 0 and o["receipt"]["frozen_excess"]["shares"] == pytest.approx(200.0)
+    assert o["receipt"]["frozen_excess"]["px"] == pytest.approx(0.31)
     assert b["last_plan"]["his_level"] == pytest.approx(0.31) and b["last_plan"]["exit_take"] == 0.30
     assert abs(0.30 - 0.31) <= rules.MIRROR_EXIT_TOL + 1e-9
     fx = _plan_exit(b)
-    assert (fx["venue_own"], fx["target"], fx["qty"], fx["result"]) == (300, 0, 300, "take")
+    assert (fx["venue_own"], fx["target"], fx["qty"], fx["result"]) == (300, 0, 300, "filled_at_create")
     assert _census(st, "overfill") == 0 and p.state["mirror_live"] is True and st["books_live"] == 0
     v2 = _Venue(held={SLUG: 0}, bid=0.30, ask=0.32)
     _tick(p, v2, now=NOW + 30, http=_gone())
@@ -291,9 +308,10 @@ def test_e5v3_option_b_after_the_sale_the_registered_book_stays_frozen_venue_fla
     the book thaws and closes flat."""
     p = _pool(fills=_his(300, sold=300), snap=None, registered={SLUG: 1128.0})
     b = _frozen_long(p, ledger=0, reason="venue_ledger_disagree")
-    v = _Venue(held={SLUG: 1128}, bid=0.30, ask=0.32, ioc_fill=1128)
+    v = _Venue(held={SLUG: 1128}, bid=0.30, ask=0.32, lift=1128)
     _tick(p, v, http=_gone())
-    assert [c[2:6] for c in _places(v)] == [(0.30, 1128, True, IOC_TIF)]
+    # E31: the post-only rest at the maker wire 0.31, lifted at create
+    assert [c[2:6] for c in _places(v)] == [(0.31, 1128, True, GTC_TIF)]
     v2 = _Venue(held={SLUG: 0}, bid=0.30, ask=0.32)
     st2 = _tick(p, v2, now=NOW + 30, http=_gone())
     assert not _places(v2) and b["state"] == "frozen" and _census(st2, "frozen_venue_flat") == 1
@@ -356,13 +374,22 @@ def test_e5v3_V3_2_after_the_lost_mark_the_book_re_emits_nothing_and_counts_no_n
     b = _frozen_long(p)
     o = p.add_order(b, side=SELL, wire=0.0, qty=300, kind="flatten_vanished", tif="CLOSE",
                     order_id=None, state="placing", placed_ts=NOW - 30 * 60)
-    _tick(p, _Venue(held={SLUG: 100}, trades=trades), http=_gone())
+    v0 = _Venue(held={SLUG: 100}, trades=trades)
+    _tick(p, v0, http=_gone())
     assert o["state"] == "lost"
-    _tick(p, _Venue(held={SLUG: 100}, bid=0.30, ask=0.32, ioc_fill=100), now=NOW + 30, http=_gone())
-    assert b["ledger_net"] == 200
+    # E31: the remaining 100 RESTED at the maker wire 0.31 on the tick the CLOSE
+    # row was marked lost (the slot freed in the same tick, where the old road
+    # sent its IOC the tick after), and the taker comes for it here
+    assert [c[2:6] for c in _places(v0)] == [(0.31, 100, True, GTC_TIF)]
+    v1 = _Venue(held={SLUG: 100}, bid=0.30, ask=0.32, fills={"oid-1": (100.0, 0.31)})
+    v1.orders = v0.orders
+    _tick(p, v1, now=NOW + 30, http=_gone())
+    assert b["ledger_net"] == 200 and not _places(v1)
     for i in (2, 3):
         ml._RECENT.clear()
-        st = _tick(p, _Venue(held={SLUG: 0}, bid=0.30, ask=0.32), now=NOW + 30 * i, http=_gone())
+        vv = _Venue(held={SLUG: 0}, bid=0.30, ask=0.32)
+        vv.orders = v0.orders
+        st = _tick(p, vv, now=NOW + 30 * i, http=_gone())
         assert b["state"] == "frozen" and _plan_exit(b)["held"] == "frozen_venue_flat"
         assert not [x for x in ml._RECENT if x["what"] == "frozen"], list(ml._RECENT)
         assert _census(st, "venue_ledger_disagree") == 0

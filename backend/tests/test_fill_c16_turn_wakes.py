@@ -82,7 +82,7 @@ def _short_flipped_long(monkeypatch):
     _shorts_on(monkeypatch)
     p = _pool()                                   # his net +300: the default fixture
     b = _short_book(p, ledger=-300)
-    st = _tick(p, _Venue(held={SLUG: -300}, ioc_fill=300.0))
+    st = _tick(p, _Venue(held={SLUG: -300}, ioc_fill=300.0, lift=300.0))
     assert _census(st, "sign_flip") == 1 and b["last_plan"]["sign_flip"] is True and b["ledger_net"] == 0
     assert b["state"] == "live" and "turn" not in b["last_plan"] and ml._FAST_WOKEN == {}
     return p, b
@@ -570,10 +570,10 @@ def test_c16_the_census_place_the_emit_site_no_rail_no_decision_word_no_migratio
     # E21 (FILL lane 10, six fast_* names) landed after this lane, between this name and the key (-14 -> -20)
     # E23 (FILL lane 23, six names) landed after this lane, between E21's six and the key (-20 -> -26)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-26 / -27 / -25 -> -30 / -31 / -29, -31:-27 -> -35:-31, -34:-31 -> -38:-35)
-    assert keys[-44] == NEW_NAME and keys[-45] == "cand_market_closed_db" and keys[-43] == "fast_order_open"
+    assert keys[-54] == NEW_NAME and keys[-55] == "cand_market_closed_db" and keys[-53] == "fast_order_open"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-49:-45] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert keys[-52:-49] == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-59:-55] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert keys[-62:-59] == ("he_holds", "he_holds_unread", "reopen_refused")
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert keys.count(NEW_NAME) == 1 and len(set(keys)) == len(keys)
     assert ml._new_stats()["census"][NEW_NAME] == 0 and NEW_NAME not in ml._INTEG_CENSUS_KEYS

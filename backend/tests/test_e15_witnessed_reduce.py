@@ -26,6 +26,18 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails (
 )
 
 IOC = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+# RE-PINNED at E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never
+# crosses). Two mechanical substitutions run through every worker pin in this file and
+# NOTHING ELSE about this lane's rule moves -- the witnessed share, the arithmetic, the
+# ratchet and every refusal are byte for byte:
+#   (a) the exit's cent 0.69 -> 0.70. E4's exit take was his cent LESS MIRROR_EXIT_TOL
+#       (ceil(0.70) - 0.01) and crossed at it; the maker wire is max(sell_wire(his 0.6957
+#       .. 0.70), bid + 0.01) = 0.70 -- HIS OWN cent, a cent better, never through the bid.
+#   (b) IOC -> GTC, post-only. The venue's `ioc_fill` no longer fills anything on the
+#       money path, so each world carries `lift` beside it: the shares a taker lifts off
+#       the fresh rest at create with `aggressor` False (a maker fill), which books the
+#       same ledger the IOC booked.
+GTC = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 REF = {"target": 100, "at": NOW - 30.0}          # the last plan: target 100, clocked 30 s ago
 
@@ -107,10 +119,11 @@ def test_e15_451s_shape_the_ratio_step_at_the_ten_dollar_line_never_sells(monkey
 def test_e15_a_witnessed_25_percent_sale_reduces_25_percent_at_his_price_within_the_tolerance(monkeypatch):
     sale = _fill(M, "SELL", 250, 0.70, NOW - 10, detected_at=NOW - 5)
     p, b = _long_world(monkeypatch, sale, net=750.0)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0)
     st = _tick(p, v, http=_mkt(750.0))
-    assert b["target"] == 75 and _places(v)[0][2:6] == (0.69, 25, True, IOC) and b["ledger_net"] == 75
-    assert _census(st, "exit_take") == 1 and "reduce_unwitnessed" not in b["last_plan"]
+    assert b["target"] == 75 and _places(v)[0][2:6] == (0.70, 25, True, GTC) and b["ledger_net"] == 75
+    assert _census(st, "exit_take") == 0 and _census(st, "rest_placed") == 1, "E31: the exit rests, never takes"
+    assert "reduce_unwitnessed" not in b["last_plan"]
     assert b["last_plan"]["reduce_ref"] == {"target": 75, "at": NOW - 5}, "the reference moves to his sale's clock"
     assert abs(0.69 - 0.70) <= float(rules.MIRROR_EXIT_TOL) + 1e-9
 
@@ -123,20 +136,20 @@ def test_e15_a_witnessed_sale_is_sized_on_his_fills_never_on_a_reading_that_lags
     waits for the fills."""
     sale = _fill(M, "SELL", 100, 0.70, NOW - 10, detected_at=NOW - 5)
     p, b = _long_world(monkeypatch, sale, net=700.0)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=10.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=10.0, lift=10.0)
     _tick(p, v, http=WALK)
     lp = b["last_plan"]
-    assert b["target"] == 90 and _places(v)[0][2:6] == (0.69, 10, True, IOC) and b["ledger_net"] == 90
+    assert b["target"] == 90 and _places(v)[0][2:6] == (0.70, 10, True, GTC) and b["ledger_net"] == 90
     assert "reduce_unwitnessed" not in lp and lp["reduce_ref"] == {"target": 90, "at": NOW - 5}
     assert lp["drift"] > float(rules.MIRROR_DRIFT_MAX) and lp["net"] == 700.0, "the reading stays on the row"
 
 
 def test_e15_his_witnessed_full_exit_is_our_full_exit_and_the_confirmed_vanish_keeps_its_reader(monkeypatch):
     p, b = _long_world(monkeypatch, _fill(M, "SELL", 1_000, 0.70, NOW - 10, detected_at=NOW - 5), net=0.0)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0, lift=100.0)
     _tick(p, v, http=_gone())
     assert b["last_plan"]["kind"] == "flatten_vanished" and b["ledger_net"] == 0
-    assert _places(v)[0][2:6] == (0.69, 100, True, IOC) and "reduce_unwitnessed" not in b["last_plan"]
+    assert _places(v)[0][2:6] == (0.70, 100, True, GTC) and "reduce_unwitnessed" not in b["last_plan"]
     # a vanish with NO fill of his (the data API confirms him gone): its own reader, untouched
     p2, b2 = _long_world(monkeypatch, net=0.0)
     p2.fills[:] = []
@@ -223,7 +236,7 @@ def test_e15_the_flip_reopen_with_a_witnessed_crossing_sizes_ratio_times_his_net
                        _fill(N, "BUY", 500, 0.70, NOW - 9, detected_at=NOW - 7), net=-500.0)
     p.snap[N] = 500.0
     p.snap[M] = 0.0
-    v1 = _Venue(bid=0.29, ask=0.31, held={SLUG: 100}, ioc_fill=100.0)
+    v1 = _Venue(bid=0.29, ask=0.31, held={SLUG: 100}, ioc_fill=100.0, lift=100.0)
     st1 = _tick(p, v1, http=_mkt(0.0, 500.0))
     assert b["last_plan"]["sign_flip"] is True and b["ledger_net"] == 0 and _census(st1, "sign_flip") == 1
     assert b["last_plan"]["flip_witness"] == {"since": NOW - 30.0, "reduced": 1_500.0, "at": NOW}
@@ -255,7 +268,7 @@ def test_e15_the_flip_reopen_on_a_reading_alone_is_flow_only_as_today(monkeypatc
     p, b = _long_world(monkeypatch, _fill(N, "BUY", 500, 0.52, NOW - 1900),
                        _fill(M, "SELL", 1_000, 0.30, NOW - 1800), net=-500.0)
     p.snap[N], p.snap[M] = 500.0, 0.0
-    v1 = _Venue(bid=0.29, ask=0.31, held={SLUG: 100}, ioc_fill=100.0)
+    v1 = _Venue(bid=0.29, ask=0.31, held={SLUG: 100}, ioc_fill=100.0, lift=100.0)
     _tick(p, v1, http=_mkt(0.0, 500.0))
     assert b["last_plan"]["sign_flip"] is True and "flip_witness" not in b["last_plan"]
     assert b["last_plan"]["kind"] == "flatten_paired" and b["ledger_net"] == 0 and _places(v1)[0][3] == 100
@@ -326,7 +339,14 @@ def test_e15_his_witnessed_exit_resting_keeps_its_e4_life_under_a_later_unwitnes
     """The reduce of 25 rests at his 0.70 (witnessed, the reference at
     75); the walk then reads 600 (target 60): held -- and the rest of 25
     STANDS, the plan handed over capped at the reference's 75 (E12b's
-    construction); with the bid inside the cent it is taken."""
+    construction).
+
+    RE-PINNED at E31 (FILL lane 31, 2026-09-10): E15 pinned the rest
+    CANCELLED and taken when the bid arrived inside the cent. A bid
+    arriving at a standing rest is the rest being FILLED, not a reason to
+    cross for it (rules.maker_compare_wire never re-quotes a SELL rest
+    toward a bid that came to it), so the 25 stands at 0.70 and the taker
+    who came there lifts it. Nothing is cancelled, nothing is sent."""
     sale = _fill(M, "SELL", 250, 0.70, NOW - 200, detected_at=NOW - 195)
     p, b = _long_world(monkeypatch, sale, net=600.0, last_plan={"target": 75, "at": NOW - 190.0})
     o = p.add_order(b, side=SELL, wire=0.70, qty=25, kind="reduce", order_id="oid-exit")
@@ -338,10 +358,12 @@ def test_e15_his_witnessed_exit_resting_keeps_its_e4_life_under_a_later_unwitnes
     assert (lp["side"], lp["qty"], lp["open_order"]) == (SELL, 25, o["id"])
     assert not _cancels(v) and not _places(v) and p.orders[o["id"]]["state"] == "open"
     assert _census(st, "exit_out_of_tol") == 1 and b["ledger_net"] == 100
-    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0)
     v2.rest("oid-exit", side="SELL", price=0.70, qty=25)
     st2 = _tick(p, v2, now=NOW + 30, http=WALK)
-    assert _census(st2, "exit_take") == 1 and b["ledger_net"] == 75
+    assert _census(st2, "exit_take") == 0 and b["ledger_net"] == 100
+    assert not _cancels(v2) and not _places(v2) and p.orders[o["id"]]["state"] == "open"
+    assert _census(st2, "open_order_pending") == 1
 
 
 def test_e15_a_resting_add_is_cancelled_under_the_hold_and_a_flattens_reference_caps_nothing(monkeypatch):
@@ -362,14 +384,14 @@ def test_e15_a_resting_add_is_cancelled_under_the_hold_and_a_flattens_reference_
 def test_e15_a_reducing_fill_clocked_before_the_reference_is_no_witness_and_one_after_is(monkeypatch):
     before = _fill(M, "SELL", 250, 0.70, NOW - 100, detected_at=NOW - 60)
     p, b = _long_world(monkeypatch, before, net=750.0)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0)
     _tick(p, v, http=_mkt(750.0))
     assert not _places(v) and b["last_plan"]["reduce_unwitnessed"]["cause"] == "fills"
     after = _fill(M, "SELL", 250, 0.70, NOW - 100, detected_at=NOW - 20)
     p2, b2 = _long_world(monkeypatch, after, net=750.0)
-    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0)
     _tick(p2, v2, http=_mkt(750.0))
-    assert _places(v2)[0][2:6] == (0.69, 25, True, IOC) and b2["ledger_net"] == 75
+    assert _places(v2)[0][2:6] == (0.70, 25, True, GTC) and b2["ledger_net"] == 75
 
 
 def test_e15_a_plan_with_no_readable_clock_holds_no_reference_and_seeds_the_ledger(monkeypatch):
@@ -382,9 +404,9 @@ def test_e15_a_plan_with_no_readable_clock_holds_no_reference_and_seeds_the_ledg
     # his sale after the seed witnesses the next tick
     p.fills.append(_fill(M, "SELL", 250, 0.70, NOW + 10, detected_at=NOW + 12))
     p.snap[M] = 750.0
-    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0)
     _tick(p, v2, now=NOW + 30, http=_mkt(750.0))
-    assert _places(v2)[0][2:6] == (0.69, 25, True, IOC) and b["ledger_net"] == 75
+    assert _places(v2)[0][2:6] == (0.70, 25, True, GTC) and b["ledger_net"] == 75
 
 
 def test_e15_a_never_planned_book_plans_as_today_and_its_first_plan_writes_the_reference(monkeypatch):
@@ -400,7 +422,7 @@ def test_e15_a_flow_book_reads_its_own_reference_and_the_e12b_witness_agrees(mon
     p = _pool(fills=[_fill(M, "BUY", 10_000, 0.29, NOW - 9000), _fill(M, "BUY", 1_000, 0.71, NOW - 3000),
                      _fill(M, "SELL", 2_750, 0.70, NOW - 100, detected_at=NOW - 95)], snap={M: 8_250.0, N: 0.0})
     b = _flow_book(p)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0)
     _tick(p, v, http=_mkt(8_250.0))
     assert b["target"] == 75 and b["ledger_net"] == 75 and b["last_plan"]["reduce_ref"] == {"target": 75, "at": NOW - 95}
     assert "reduce_unwitnessed" not in b["last_plan"]

@@ -978,7 +978,8 @@ class _Venue:
                  open_raises=False, status_raises=False, status_none=False, cancel_ok=True,
                  place=None, place_raises=None, rest_on_raise=False, trades=None,
                  trades_raise=False, close=None, flatten_bid=0.29, extra_open=None,
-                 ioc_fill=0.0, fills=None, state="MARKET_STATE_OPEN", states=None):
+                 ioc_fill=0.0, fills=None, state="MARKET_STATE_OPEN", states=None,
+                 lift=0.0, lift_maker=True):
         self.bid, self.ask = bid, ask
         # the venue's own market state on every quote read (bbo_read),
         # as the venue spells it; `states` overrides it per slug
@@ -991,6 +992,18 @@ class _Venue:
         self.close, self.flatten_bid = close, flatten_bid
         self.extra_open = list(extra_open or [])
         self.ioc_fill = ioc_fill
+        # E31 (FILL lane 31, 2026-09-10): `ioc_fill` is the IOC's fill and
+        # the money path sends no IOC any more. `lift` is its post-only
+        # replacement -- the shares a TAKER lifts off the fresh rest inside
+        # the create's synchronous window (order 153's shape at 17:36Z,
+        # which is what put post-only off process-wide). It is OPT-IN per
+        # test: a rest with no `lift` stands, as every rest of this fixture
+        # always did. `lift_maker` is the venue's own `aggressor` bool
+        # INVERTED: True (the default) attaches aggressor=False -- the
+        # venue saying a taker hit us, so we were the maker and the fill
+        # books as one; False attaches aggressor=True, the venue telling us
+        # the flag did not hold (the durable block, E31 D2).
+        self.lift, self.lift_maker = lift, lift_maker
         self.fills = dict(fills or {})        # oid -> (filled, avg)
         self.orders = {}
         self.calls = []
@@ -1097,6 +1110,27 @@ class _Venue:
             return {"ok": f > 0, "order_id": oid, "status": "filled" if f >= qty else "canceled",
                     "fill_price": price if f > 0 else None, "filled_shares": f,
                     "raw": {"response": {"id": oid}}}
+        # E31: A TAKER ONLY LIFTS A REST THE TOUCH CAN REACH. `lift` is the
+        # taker who came to the fresh rest inside the create's synchronous
+        # window. A contract BUY priced UNDER THE BID is behind the whole bid
+        # queue and no taker of that window reaches it -- and the S4 read-back
+        # probe is exactly that order: ONE share at `_s4_probe_price(bid)` =
+        # floor(bid - S4_PROBE_OFFSET), five cents inside, whose own docstring
+        # is "off-market for a BUY of the long token, so the probe cannot
+        # fill". Without this clause a world that scripts a lift for its COVER
+        # also fills the 1-share proof at create and the cover is never proved
+        # -- the fixture, not the worker. A test that WANTS a filled probe
+        # scripts it (test_s4_review_pins's `_ProbeFills`).
+        reachable = not (venue_side == "BUY" and self.bid is not None and price < self.bid)
+        f = min(float(self.lift), float(qty)) if reachable else 0.0
+        if f > 0:                                       # E31: a taker lifted the fresh rest
+            state = "filled" if f >= float(qty) else "partially_filled"
+            self.rest(oid, venue_side, price, qty, slug, state=state, filled=f, avg=price,
+                      intent=wire_intent)
+            return {"ok": True, "order_id": oid, "status": state, "fill_price": price,
+                    "filled_shares": f, "maker": bool(self.lift_maker),
+                    "raw": {"response": {"id": oid},
+                            "executions": [{"type": "FILL", "aggressor": not self.lift_maker}]}}
         self.rest(oid, venue_side, price, qty, slug, intent=wire_intent)
         return {"ok": False, "order_id": oid, "status": "new", "fill_price": None,
                 "filled_shares": 0.0, "raw": {"response": {"id": oid}}}
@@ -1252,7 +1286,14 @@ def _armed(monkeypatch):
     # test of the band, the convention this paragraph names
     monkeypatch.setattr(rules, "MIRROR_TAKE_BAND", 0.0)
     monkeypatch.setitem(edge_gate._cache, "err", None)     # conftest seeds the rest
-    monkeypatch.setattr(ml, "_POST_ONLY_OK", True)
+    # E31 (FILL lane 31): the process latch `_POST_ONLY_OK` is GONE -- the
+    # flag is on every send by code and the venue ignoring it writes the
+    # durable block instead -- so what a test must not inherit is the
+    # lane's own process state: the book's cross hint and the two
+    # once-per-process log latches
+    monkeypatch.setattr(ml, "_cross_hint", {}, raising=False)
+    monkeypatch.setattr(ml, "_ioc_refused_logged", False, raising=False)
+    monkeypatch.setattr(ml, "_post_only_block_logged", False, raising=False)
     monkeypatch.setattr(ml, "_backoff_until", 0.0)
     monkeypatch.setattr(ml, "_last_tick_at", 0.0)
     # the mode the worker holds for a backed-off tick: module globals
@@ -1406,9 +1447,15 @@ def _place_src():
 
 
 def _flatten_src():
-    """_flatten_vanished and its slippage leg (_flatten_send, on the
-    reserved op), the same way."""
-    return inspect.getsource(ml._flatten_vanished) + inspect.getsource(ml._flatten_send)
+    """_flatten_vanished and the placement it ends in.
+
+    E31 (FILL lane 31, 2026-09-10): the SLIPPAGE LEG is gone. `_flatten_send`
+    -- the reserved-op wrapper around `close_position` / the co-held IOC at
+    bid - 2c -- is deleted with the other take paths, and a flatten is now a
+    post-only rest at the touch's own inside tick, re-quoted every tick. So
+    the pair becomes the pair that is left: `_flatten_vanished` and `_place`,
+    the one choke point its rest goes through."""
+    return inspect.getsource(ml._flatten_vanished) + _place_src()
 
 
 def _lengthened_wait(monkeypatch, wait=20.0):
@@ -1506,7 +1553,7 @@ def test_exits_only_never_increases_but_reduces(monkeypatch):
     _tick(p2, v2)
     pl = _places(v2)
     # the SELL IOC (filled nothing), then E14b's same-tick rest of the 200 at his cent
-    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)]
+    assert [c[3:6] for c in pl] == [(200, True, GTC_TIF)]
 
 
 def test_db_switch_false_absent_or_unreadable_is_exits_only():
@@ -1623,7 +1670,7 @@ def test_every_increase_only_guard_refuses_by_name_cancels_buys_and_lets_a_reduc
     pl = _places(v)
     # the reduce still goes out: the IOC (filled nothing), then -- E14b
     # (FILL lane 1) -- the unfilled 200 resting at his cent the same tick
-    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl
+    assert [c[3:6] for c in pl] == [(200, True, GTC_TIF)], pl
     if arm == "stop":
         assert p.state["mirror_loss_stop"]["sum"] == -(rules.MIRROR_LOSS_STOP_USD + 1.0)
 
@@ -1709,10 +1756,13 @@ def test_a_candidate_opens_a_book_and_rests_post_only_gtc_at_his_level_or_the_bi
     pl = _places(v)
     assert len(pl) == 1
     _, slug, price, qty, sell, tif, intent, post_only, good_till = pl[0]
-    assert (slug, price, qty, sell) == (SLUG, 0.30, 300, False)
+    assert (slug, price, qty, sell) == (SLUG, 0.31, 300, False)
     assert tif == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and intent == INTENT
     assert post_only is True and good_till is None
-    assert price <= 0.31 and price <= 0.30, "never above him, never above the bid"
+    # E31 (FILL lane 31): AT HIS CENT INSIDE THE SPREAD. The wire was
+    # floor(min(his, bid)) = 0.30 -- it joined the bid; it is now
+    # min(floor(his), ask - a tick) = min(0.31, 0.31) = 0.31
+    assert price <= 0.31 and price < 0.32, "never above him, never at or through the ask"
     o = [o for o in p.orders.values() if o["book_id"] == b["id"]][0]
     assert o["state"] == "open" and o["order_id"] == "oid-1" and o["post_only"] is True
     assert _census(st, "rest_placed") == 1 and st["placed_rest"] == 1
@@ -1746,7 +1796,7 @@ def test_the_placing_row_with_pre_ids_exists_before_submit_fok():
     _tick(p, v)
     assert len(seen["placing"]) == 1
     row = seen["placing"][0]
-    assert row["order_id"] is None and row["pre_ids"] == ["owner-1"] and row["wire"] == 0.30
+    assert row["order_id"] is None and row["pre_ids"] == ["owner-1"] and row["wire"] == 0.31
     assert row["kind"] == "increase" and row["side"] == BUY and row["tif"] == "GTC"
 
 
@@ -1802,9 +1852,14 @@ def test_adoption_by_fingerprint_after_a_lost_response_and_in_step_o():
     # step O: a 'placing' row with no id older than a minute is adopted from the venue's book
     p2 = _pool()
     b2 = p2.add_book(ledger=0)
-    o2 = p2.add_order(b2, order_id=None, state="placing", placed_ts=NOW - 90, pre_ids=["owner-0"])
+    # RE-PINNED at E31: the row and the venue's rest sit at the MAKER wire
+    # (min(his 0.31, ask 0.32 - a tick) = 0.31), not at the bid, so this pin
+    # reads ADOPTION alone; at 0.30 the adopted rest is correctly re-quoted to
+    # his cent by the same tick and the pin would read the re-quote instead
+    o2 = p2.add_order(b2, order_id=None, state="placing", placed_ts=NOW - 90,
+                      wire=0.31, pre_ids=["owner-0"])
     v2 = _Venue()
-    v2.rest("venue-7", created=NOW - 85)
+    v2.rest("venue-7", price=0.31, created=NOW - 85)
     _tick(p2, v2)
     assert p2.orders[o2["id"]]["order_id"] == "venue-7" and p2.orders[o2["id"]]["state"] == "open"
     assert ("status", "venue-7") in v2.calls
@@ -1952,6 +2007,9 @@ def test_a_partial_fill_delta_is_booked_exactly_once_across_two_ticks_with_a_cra
     assert row["filled_shares"] == 100.0 and len(row["raw"]["adds"]) == 1
     add = row["raw"]["adds"][0]
     assert add["order_id"] == "oid-1" and add["seq"] == 0 and add["usd"] == 30.0 and "ts" in add
+    # (the fill's own price, 100 @0.30 = $30: E31 moved the REST's wire, never
+    # a booked fill -- the builder's blanket cent substitution reached this
+    # line and the fold put it back)
     assert add["maker"] is True and b["avg_cost"] == 0.30 and b["gross_buy_usd"] == 30.0
     assert _census(st2, "partial_fill") == 1 and st2["partial_fills"] == 1
     # tick 3: the same reading books nothing more
@@ -1994,7 +2052,7 @@ def test_ttl_expiry_cancels_and_replans_a_fresh_rest():
     assert _cancels(v) == [("cancel", "oid-1", SLUG)]
     assert p.orders[o["id"]]["state"] == "cancelled" and _census(st, "cancelled_unfilled") == 1
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][2] == 0.30 and st["requotes"] == 1
+    assert len(pl) == 1 and pl[0][2] == 0.31 and st["requotes"] == 1
     new = [x for x in p.orders.values() if x["id"] != o["id"]][0]
     assert new["state"] == "open" and new["order_id"] == "oid-1" and b["open_order_id"] == new["id"]
 
@@ -2028,9 +2086,16 @@ def test_replaces_are_capped_per_hour():
     assert _census(st, "replace_capped") == 1 and not _cancels(v) and not _places(v)
 
 
-def test_the_take_fires_at_or_through_at_the_same_wire_ioc_once_and_waits_only_under_a_lengthened_wait(monkeypatch):
-    # under a LENGTHENED wait (the environment's; E2's rest-first take)
-    # a rest not yet waited is not taken, whatever the book does
+def test_the_rest_stands_when_the_ask_comes_to_his_level_and_no_ioc_ever_goes_out(monkeypatch):
+    """E31 (FILL lane 31, 2026-09-10; owner order ~03:3xZ "become a maker not
+    taker"): THE TAKE OFF A STANDING REST IS RETIRED BY CODE. Before this lane
+    the ask arriving at his cent cancelled the rest and sent ONE IOC at his
+    cent (E2's arm, E4's addendum: `take_placed` / `filled_take`, the row
+    kind 'take', maker False) -- 298 such orders in the 24 h to 03:09Z at a
+    resolved roi of -0.4418 (hard2/h0309_short.txt:1301). Now the rest STANDS
+    where it is and the taker who came to it fills it there, paying us the
+    spread instead of us paying it."""
+    # a lengthened wait changes nothing: there is no take to wait for
     _lengthened_wait(monkeypatch, 20.0)
     p = _pool()
     b = p.add_book(ledger=0)
@@ -2039,9 +2104,8 @@ def test_the_take_fires_at_or_through_at_the_same_wire_ioc_once_and_waits_only_u
     v.rest("oid-1")
     _tick(p, v)
     assert not _cancels(v) and not _places(v)
-    # the default since the E4 addendum: no wait at all
     monkeypatch.setattr(rules, "MIRROR_TAKE_AFTER_S", 0.0)
-    # the market never came to him: held under target
+    # the market never came to him: held under target, the record kept
     p = _pool()
     b = p.add_book(ledger=0)
     p.add_order(b, placed_ts=NOW - 1)
@@ -2049,30 +2113,27 @@ def test_the_take_fires_at_or_through_at_the_same_wire_ioc_once_and_waits_only_u
     v.rest("oid-1")
     st = _tick(p, v)
     assert not _places(v) and _census(st, "resting_above_level") == 1
-    # at/through: cancel the rest, ONE IOC at the SAME wire, this tick
+    # AT OR THROUGH: no cancel, no IOC, nothing placed -- the rest stands
     p = _pool()
     b = p.add_book(ledger=0)
-    p.add_order(b, placed_ts=NOW - 1)
+    o = p.add_order(b, placed_ts=NOW - 1)
     v = _Venue(ask=0.30, ioc_fill=300.0)
     v.rest("oid-1")
     st = _tick(p, v)
-    assert _cancels(v) == [("cancel", "oid-1", SLUG)]
-    pl = _places(v)
-    assert len(pl) == 1
-    _, slug, price, qty, sell, tif, intent, post_only, good_till = pl[0]
-    # the IOC's limit is HIS cent, 0.31 (E4 review HIGH-1), the rest's wire 0.30
-    assert (price, qty, sell, tif, post_only) == (0.31, 300, False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL", False)
-    assert intent == INTENT and _census(st, "take_placed") == 1 and _census(st, "filled_take") == 1
-    take = [x for x in p.orders.values() if x["kind"] == "take"][0]
-    assert take["state"] == "filled" and take["tif"] == "IOC" and take["maker"] is False
-    assert b["ledger_net"] == 300 and b["take_armed_ts"] is None
-    # once: the next tick is on target, no second take
-    v2 = _Venue(ask=0.30, ioc_fill=300.0, held={SLUG: 300})
+    assert not _cancels(v) and not _places(v)
+    assert "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" not in [c[5] for c in _places(v)]
+    assert _census(st, "open_order_pending") == 1 and _census(st, "take_placed") == 0
+    assert _census(st, "take_at_his_level") == 0 and _census(st, "filled_take") == 0
+    assert p.orders[o["id"]]["state"] == "open" and b["ledger_net"] == 0
+    assert not [x for x in p.orders.values() if x["kind"] == "take"]
+    # the next tick reads the same standing rest, still no take
+    v2 = _Venue(ask=0.30, ioc_fill=300.0)
+    v2.rest("oid-1")
     st2 = _tick(p, v2, now=NOW + 30)
-    assert not _places(v2) and _census(st2, "on_target") == 1
+    assert not _places(v2) and _census(st2, "open_order_pending") == 1
 
 
-def test_a_post_only_400_arms_the_take_and_a_429_does_not():
+def test_a_post_only_400_the_quote_does_not_explain_never_arms_a_take_and_a_429_does_not():
     def _reject(code):
         def _place(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
             return {"ok": False, "order_id": None, "status": "post_only_rejected", "fill_price": None,
@@ -2081,15 +2142,22 @@ def test_a_post_only_400_arms_the_take_and_a_429_does_not():
     p = _pool()
     b = p.add_book(ledger=0)
     st = _tick(p, _Venue(place=_reject(400)))
-    assert _census(st, "post_only_rejected") == 1 and b["take_armed_ts"] == NOW
+    # E31 (FILL lane 31): THE ARM IS GONE. A 400 the quote does not explain --
+    # the fixture's rest at 0.31 against an ask of 0.32 cannot cross -- is NOT
+    # read as a cross: no hint is written, no take is armed (before this lane
+    # `rules.take_arms` armed on ANY int 400 and the next tick fired one IOC,
+    # so a PREOPEN or SUSPENDED 400 bought the spread), and E30's own path --
+    # the receipt, the reason, the consecutive count -- runs byte for byte
+    assert _census(st, "post_only_rejected") == 1 and b["take_armed_ts"] is None
+    assert _census(st, "maker_cross_repriced") == 0 and not ml._cross_hint
     o = next(iter(p.orders.values()))
     assert o["state"] == "rejected" and o["order_id"] is None and not st["abandoned"]
-    # the armed take fires after the wait, at or through, as ONE IOC at his cent
+    # the next tick rests the SAME wire again (E30 bounds the retry, not this lane)
     v = _Venue(ask=0.30, ioc_fill=300.0)
     st2 = _tick(p, v, now=NOW + rules.MIRROR_TAKE_AFTER_S + 1)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" and pl[0][2] == 0.31
-    assert _census(st2, "take_placed") == 1 and b["take_armed_ts"] is None
+    assert len(pl) == 1 and pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and pl[0][7] is True
+    assert _census(st2, "take_placed") == 0 and b["take_armed_ts"] is None
     # a 429 arms nothing and backs off
     p3 = _pool()
     b3 = p3.add_book(ledger=0)
@@ -2097,24 +2165,60 @@ def test_a_post_only_400_arms_the_take_and_a_429_does_not():
     assert b3["take_armed_ts"] is None and st3["abandoned"] and _census(st3, "rate_limited") == 1
 
 
-def test_post_only_ignored_disables_the_flag_for_the_process():
+def test_post_only_ignored_writes_the_durable_block_and_never_turns_the_flag_off():
+    """E31 (FILL lane 31, D2): the venue filling a post-only rest AT CREATE
+    with no `aggressor` False to show for it used to set `_POST_ONLY_OK` False
+    for the whole process, after which EVERY later rest went out without
+    `participateDontInitiate` and could cross (task 30, order 153 at 17:36Z).
+    Now the flag never leaves the send and the ADDS stop instead: the durable
+    `mirror_post_only_block` key, read at the next tick's start into the
+    increase refusal `post_only_block`, cleared by a human with the
+    mirror-post-only-rearm preset."""
     def _place(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
         assert post_only is True
         return {"ok": True, "order_id": oid, "status": "filled", "fill_price": price,
                 "filled_shares": float(qty), "raw": {}}
     p = _pool()
     st = _tick(p, _Venue(place=_place))
-    assert _census(st, "post_only_ignored") == 1 and ml._POST_ONLY_OK is False
-    assert st["status"] == "degraded" and st["post_only"] is False
+    assert _census(st, "post_only_ignored") == 1 and _census(st, "maker_fill_at_create") == 0
+    # RE-PINNED at E31 (review CRITICAL-1): `post_only` left the heartbeat --
+    # the flag is a LITERAL at the send now, so the bool would read True for
+    # ever and carry nothing -- and `post_only_block` replaced it ONE KEY FOR
+    # ONE (the only bool that can vary). The tick that WRITES the block
+    # publishes it True (review MEDIUM-1: tick_once's `finally` reads the
+    # tick's start value, so _place_reserved's stat wins beside it)
+    assert st["status"] == "degraded" and st["post_only_block"] is True
+    assert "post_only" not in st
+    assert p.state["mirror_post_only_block"]["filled"] == 300.0
     b = next(iter(p.books.values()))
     o = next(iter(p.orders.values()))
     assert b["ledger_net"] == 300 and o["taker_at_placement"] is True and o["state"] == "filled"
-    assert _census(st, "filled_take") == 1
-    # the next placement in this process carries no flag
+    # E31 (review HIGH-2): `filled_take` 0 -> 1. It is NOT one of the retired take names.
+    # Under E31 every row is GTC and no row is kind 'take', so `_finish_order`'s `maker` is
+    # False exactly when `taker_at_placement` is True -- the venue filling a post-only rest
+    # AT CREATE as a taker, which is this very world. It is the counter that says THE FLAG
+    # DID NOT HOLD, it stays reachable and emitted, and it is outside the coverage hook's
+    # `unreachable` set
+    assert _census(st, "filled_take") == 1, "E31: the counter that says the flag did not hold"
+    # the next placement in this process STILL carries the flag; the block is
+    # what refuses the add, by name, on a pool that carries the key
     p2 = _pool()
     v2 = _Venue()
     _tick(p2, v2)
-    assert _places(v2)[0][7] is False
+    assert _places(v2)[0][7] is True
+    p3 = _pool()
+    p3.state["mirror_post_only_block"] = {"at": "x", "book": 1}
+    b3 = p3.add_book(ledger=0)
+    v3 = _Venue()
+    st3 = _tick(p3, v3)
+    assert not _places(v3) and _census(st3, "post_only_block") >= 1 and st3["post_only_block"] is True
+    # an EXIT on a blocked process still goes out, post-only, at his cent
+    p4 = _pool(fills=_his(300, sold=200), snap={M: 100.0, N: 0.0})
+    p4.state["mirror_post_only_block"] = {"at": "x", "book": 1}
+    p4.add_book(ledger=300)
+    v4 = _Venue(held={SLUG: 300})
+    _tick(p4, v4)
+    assert [c[3:6] for c in _places(v4)] == [(200, True, GTC_TIF)] and _places(v4)[0][7] is True
 
 
 def test_a_refused_create_and_a_429_in_its_text_back_off():
@@ -2225,16 +2329,21 @@ def test_paired_out_target_zero_rests_at_his_cent_and_takes_within_a_cent_of_him
     v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32)
     _tick(p2, v2)
     assert _places(v2)[0][2] == 0.40
-    # the bid within a cent of him (0.27 against his 0.28): ONE IOC at
-    # 0.27 that tick, filled, `exit_take`; no rest first
+    # RE-PINNED at E31: the bid within a cent of him (0.27 against his 0.28)
+    # used to cancel nothing and fire ONE IOC at 0.27 -- his cent LESS the
+    # tolerance, through the bid, paying the spread he was paid. The 1c
+    # variance is a maker's bound, not a taker's licence (docs 75, decision 3):
+    # the whole quantity RESTS at max(his 0.28, bid + a tick) = 0.28, and the
+    # taker who comes to it pays us. `exit_take` and `take_placed` are zero
+    # for ever; the ledger moves when the rest fills, not at create
     p3 = _pool(fills=_his(300, other_size=300, other_px=0.72), snap={M: 300.0, N: 300.0})
     b3 = p3.add_book(ledger=300)
-    v3 = _Venue(held={SLUG: 300}, bid=0.27, ask=0.32, ioc_fill=300.0)
+    v3 = _Venue(held={SLUG: 300}, bid=0.27, ask=0.32, lift=300.0)
     st3 = _tick(p3, v3)
     pl3 = _places(v3)
-    assert len(pl3) == 1 and pl3[0][2:6] == (0.27, 300, True, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
-    assert _census(st3, "exit_take") == 1 and _census(st3, "take_placed") == 1
-    assert _census(st3, "flatten_rested") == 0 and b3["ledger_net"] == 0
+    assert len(pl3) == 1 and pl3[0][2:6] == (0.28, 300, True, "TIME_IN_FORCE_GOOD_TILL_CANCEL")
+    assert pl3[0][7] is True and _census(st3, "exit_take") == 0 and _census(st3, "take_placed") == 0
+    assert _census(st3, "maker_fill_at_create") == 1 and b3["ledger_net"] == 0
     # unfilled at TTL at the SAME cent: NOT cancelled, NOT re-quoted (the
     # no-op is named `requote_same_wire`); still held outside the cent
     v4 = _Venue(held={SLUG: 300}, bid=0.25, ask=0.32)
@@ -2247,9 +2356,14 @@ def test_paired_out_target_zero_rests_at_his_cent_and_takes_within_a_cent_of_him
 
 
 def test_a_confirmed_vanish_rests_then_follows_the_sole_and_coheld_rules(monkeypatch):
-    """A vanish he gave NO PRICE for (E4: `_unpriced`, exit_px_src
-    'none'): the C16 rest-then-slippage path, as before. A priced
-    vanish is section 21's."""
+    """A vanish he gave NO PRICE for (E4: `_unpriced`, exit_px_src 'none').
+
+    RE-PINNED at E31 (FILL lane 31): there is no slippage leg left. The rest
+    goes at the TOUCH'S OWN INSIDE TICK (bid + a tick = 0.31, not the ask's
+    0.32), it is re-quoted on the touch every tick, and MIRROR_FLATTEN_REST_S
+    no longer hands anything to `close_position` or to a co-held IOC at the bid
+    less two cents -- both of those left this file with the takes. A rest
+    standing past that clock is simply a rest standing."""
     p = _pool(fills=_unpriced(), snap=None)                  # gone by fills; no snapshot; no price of his
     b = p.add_book(ledger=300)
     http = _gone()                                           # the data API: the long leg is 0
@@ -2262,15 +2376,20 @@ def test_a_confirmed_vanish_rests_then_follows_the_sole_and_coheld_rules(monkeyp
     o = next(iter(p.orders.values()))
     assert o["kind"] == "flatten_vanished" and "close" not in _kinds(v)
     assert b["last_plan"]["exit_px_src"] == "none" and b["last_plan"]["exit_px"] is None
-    # the rest stood MIRROR_FLATTEN_REST_S unfilled: sole holder -> close_position with the bound
+    assert _places(v)[0][2] == 0.31, "the touch's inside tick, not the ask"
+    # the rest stood MIRROR_FLATTEN_REST_S unfilled: it STANDS. Sole holder or
+    # not, nothing is cancelled, nothing is closed, no bid is read for a
+    # slippage limit -- the position is still ours and still on the book
     v2 = _Venue(held={SLUG: 300})
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + rules.MIRROR_FLATTEN_REST_S + 1, http=http)
-    assert ("cancel", "oid-1", SLUG) in v2.calls
-    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v2.calls and "slug_bid" not in _kinds(v2)
-    assert b["ledger_net"] == 0 and st2["flattened"] == 1
-    # co-held -- the desk's 200 explained shares beside our 300 -- one IOC at
-    # sell_limit_price(bid) for OUR quantity, never close_position
+    assert not _cancels(v2) and not _places(v2)
+    assert "close" not in _kinds(v2) and "slug_bid" not in _kinds(v2)
+    assert b["ledger_net"] == 300 and st2["flattened"] == 0
+    assert _census(st2, "open_order_pending") == 1
+    # co-held -- the desk's 200 explained shares beside our 300 -- is the SAME
+    # rest: the touch moved under the old 0.32, so it is re-quoted to bid + a
+    # tick, never lifted into an IOC at sell_limit_price(bid)
     async def _held(t, slug):
         return 500, 0.31
     monkeypatch.setattr(ml, "_pm_held", _held)
@@ -2279,13 +2398,13 @@ def test_a_confirmed_vanish_rests_then_follows_the_sole_and_coheld_rules(monkeyp
     b3 = p3.add_book(ledger=300)
     p3.add_order(b3, side=SELL, wire=0.32, kind="flatten_vanished",
                  placed_ts=NOW - rules.MIRROR_FLATTEN_REST_S - 1)
-    v3 = _Venue(held={SLUG: 500}, flatten_bid=0.29, ioc_fill=300.0)
+    v3 = _Venue(held={SLUG: 500}, flatten_bid=0.29)
     v3.rest("oid-1", "SELL", 0.32, 300, created=NOW - 400)
     _tick(p3, v3, http=_gone())
-    assert "close" not in _kinds(v3) and ("slug_bid", SLUG, True) in v3.calls
-    ioc = [c for c in _places(v3) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert len(ioc) == 1 and ioc[0][2] == le.sell_limit_price(0.29) and ioc[0][3] == 300 and ioc[0][4] is True
-    assert b3["ledger_net"] == 0
+    assert "close" not in _kinds(v3) and "slug_bid" not in _kinds(v3)
+    assert not [c for c in _places(v3) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+    assert [c[2:6] for c in _places(v3)] == [(0.31, 300, True, "TIME_IN_FORCE_GOOD_TILL_CANCEL")]
+    assert b3["ledger_net"] == 300, "the shares are still ours until the rest fills"
 
 
 def test_a_vanish_the_data_api_will_not_confirm_is_treated_as_paired():
@@ -2301,6 +2420,12 @@ def test_a_vanish_the_data_api_will_not_confirm_is_treated_as_paired():
 
 
 def test_an_unreadable_bid_names_no_bid_for_flatten(monkeypatch):
+    """RE-PINNED at E31: `no_bid_for_flatten` was the SLIPPAGE LEG's refusal --
+    it named the read that priced an IOC at the bid less two cents -- and that
+    leg is retired. The unpriced flatten now RESTS at the touch's inside tick,
+    so an unreadable bid means there is no cent to price a SELL at: the refusal
+    is `maker_no_cent`, nothing is sent, and (review CRITICAL-2) the rest that
+    is already standing is NOT cancelled under it."""
     async def _held(t, slug):
         return 500, 0.31
     monkeypatch.setattr(ml, "_pm_held", _held)
@@ -2309,11 +2434,11 @@ def test_an_unreadable_bid_names_no_bid_for_flatten(monkeypatch):
     b = p.add_book(ledger=300)
     p.add_order(b, side=SELL, wire=0.32, kind="flatten_vanished",
                 placed_ts=NOW - rules.MIRROR_FLATTEN_REST_S - 1)
-    v = _Venue(held={SLUG: 500}, flatten_bid=None)
+    v = _Venue(held={SLUG: 500}, bid=None, flatten_bid=None)
     v.rest("oid-1", "SELL", 0.32, 300, created=NOW - 400)
     st = _tick(p, v, http=_gone())
-    assert _census(st, "no_bid_for_flatten") == 1
-    assert not [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+    assert _census(st, "maker_no_cent") == 1 and _census(st, "no_bid_for_flatten") == 0
+    assert not _places(v) and not _cancels(v)
     assert "close" not in _kinds(v) and b["ledger_net"] == 300
 
 
@@ -2425,7 +2550,9 @@ def test_the_room_scales_the_quantity_and_names_over_room(monkeypatch):
     p2 = _pool()
     v2 = _Venue()
     _tick(p2, v2)
-    assert _places(v2)[0][3] == 100                # $30 of room at 0.30 is 100 shares
+    assert _places(v2)[0][3] == 96                 # RE-PINNED at E31: $30 of room
+    assert _places(v2)[0][2] == 0.31                # at HIS cent 0.31 is 96 shares, not
+    #                                                 100 at the bid's 0.30
 
 
 def test_a_books_ratio_does_not_move_when_refresh_ratios_changes():
@@ -2444,7 +2571,7 @@ def test_a_removed_whales_book_still_reduces_and_never_increases(monkeypatch):
     _tick(p, v)
     pl = _places(v)
     # the SELL IOC, then E14b's same-tick rest of the unfilled 200 (never a BUY)
-    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)]
+    assert [c[3:6] for c in pl] == [(200, True, GTC_TIF)]
     p2 = _pool()
     p2.add_book(ledger=0)
     v2 = _Venue()
@@ -2727,8 +2854,15 @@ def test_the_read_budget_is_the_candidates_own_so_live_books_never_cap_new_ones(
     st = _tick(p, v)
     bbos = [c[1] for c in v.calls if c[0] == "bbo"]
     # 25 book reads, the candidate's, and the new book's own plan read;
-    # `books_live` counts the new book too, ticked in the same tick
-    assert st["books_live"] == 26 and len(bbos) == 27 and st["reads"] == 27
+    # `books_live` counts the new book too, ticked in the same tick.
+    # E31: 27 -> 28 reads. The new book's rest is at his cent 0.31, which IS the touch bound
+    # (ask 0.32 - MAKER_TICK), so E31 (C)'s touch-bound re-read makes ONE more paced quote
+    # read through the E11 gate immediately before the send and re-computes the wire on it.
+    # It is charged like a write (t.guard_calls) and counted on `reads` like every quote,
+    # and it is the fixture slug's THIRD bbo. The budget's own subject is untouched: every
+    # live book is still read, the candidate behind them, and the tick is not capped
+    assert st["books_live"] == 26 and len(bbos) == 28 and st["reads"] == 28
+    assert bbos.count(SLUG) == 3, "the candidate's read, its plan read, and E31's re-read before the send"
     assert all(s in bbos for s in slugs), "every live book read, unbounded"
     assert SLUG in bbos, "the candidate was read behind 25 books"
     assert st.get("capped_tick") is not True and not st["abandoned"]
@@ -2805,10 +2939,23 @@ def test_the_dead_bands_and_hysteresis_are_named(monkeypatch):
     st2 = _tick(p2, _Venue(held={SLUG: 300}), http=_mkt(310.0, 0.0))
     assert _census(st2, "dead_band") == 1 and _census(st2, "hysteresis") == 0
     monkeypatch.setattr(ml.mi, "MIN_MOVE_USD", 0.0)
+    # RE-PINNED at E31: a BUY's wire no longer reads the BID at all -- it is
+    # min(his cent, ask - a tick) -- so an unreadable bid no longer refuses an
+    # entry: the rest goes out at HIS cent, which is the whole point of the
+    # lane. What the mirror cannot price without is the ASK, and a book whose
+    # ask is unreadable is already refused `no_mark` BEFORE any plan is made
+    # (the mark is the quote's), so the clamp is never reached on that road.
+    # `maker_no_cent` -- the clamp's own refusal -- is driven where it lives,
+    # on a book that HAS a plan and a standing rest (tests/test_e31_maker_only)
     p3 = _pool(fills=_his(600), snap={M: 600.0, N: 0.0})
     p3.add_book(ledger=0)
     st3 = _tick(p3, _Venue(bid=None, ask=0.32), http=_mkt(600.0, 0.0))
-    assert _census(st3, "no_price") == 1 and not p3.orders
+    assert _census(st3, "no_price") == 0 and _census(st3, "rest_placed") == 1
+    assert [o["wire"] for o in p3.orders.values()] == [0.31], "his cent, with no bid at all"
+    p4 = _pool(fills=_his(600), snap={M: 600.0, N: 0.0})
+    p4.add_book(ledger=0)
+    st4 = _tick(p4, _Venue(bid=0.30, ask=None), http=_mkt(600.0, 0.0))
+    assert _census(st4, "no_mark") == 1 and not p4.orders
 
 
 def test_an_expired_gtd_rest_and_a_plan_write_failure_are_named():
@@ -2827,13 +2974,17 @@ def test_an_expired_gtd_rest_and_a_plan_write_failure_are_named():
 
 
 def test_gtd_and_post_only_env_switches(monkeypatch):
+    """RE-PINNED at E31: `PMUS_MIRROR_GTD` still gives the rest an expiry;
+    `PMUS_MIRROR_POST_ONLY=off` is IGNORED -- the reader and the process latch
+    are deleted and `post_only=True` is a literal at the call, so no shell can
+    turn the mirror back into something that can cross."""
     monkeypatch.setenv("PMUS_MIRROR_GTD", "on")
     monkeypatch.setenv("PMUS_MIRROR_POST_ONLY", "off")
     p = _pool()
     v = _Venue()
     _tick(p, v)
     pl = _places(v)[0]
-    assert pl[7] is False and pl[8] is not None and pl[8].endswith("Z")
+    assert pl[7] is True and pl[8] is not None and pl[8].endswith("Z")
     assert next(iter(p.orders.values()))["tif"] == "GTD"
 
 
@@ -2930,7 +3081,7 @@ def test_an_unreadable_market_read_cancels_holds_and_never_makes_the_book_closin
     _tick(p, v2, now=NOW + 30)
     pl = _places(v2)
     # the SELL IOC, then E14b's same-tick rest of the unfilled 200
-    assert b["state"] == "live" and [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)]
+    assert b["state"] == "live" and [c[3:6] for c in pl] == [(200, True, GTC_TIF)]
     # the row absent, and a reading that is not False, are the same refusal
     for mk in (None, {"closed": None, "resolved": False, "resolved_prices": None}):
         p3 = _pool(fills=_his(300, sold=200), snap={M: 100.0, N: 0.0})
@@ -3010,8 +3161,17 @@ def test_an_open_order_on_a_closed_book_is_cancelled_and_an_ops_capped_cancel_ne
 def test_a_stale_take_arm_never_takes_a_fresh_rest_and_is_cleared_by_a_rest_or_a_finish(monkeypatch):
     """minor 2. An hour-old arm and a rest placed 5 s ago with the ask
     at the wire: no IOC before MIRROR_TAKE_AFTER_S of the REST; a rest
-    the venue accepts, and an order that finishes, clear the arm. Under
-    a lengthened wait (E4 addendum: the default is 0)."""
+    the venue accepts, and an order that finishes, clear the arm.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10) AND STRENGTHENED. The arm
+    has no consumer left: `_act` has no take arm, so NO age of the arm and
+    no age of the rest can produce an IOC -- where this test pinned "not
+    before the wait, then exactly one", it now pins NEVER, at both clocks.
+    `_disarm_take` is byte for byte and still clears the arm on a rest the
+    venue accepts, on an order that finishes and on a lost placement, so
+    a book left armed by a row written before this lane is cleaned up the
+    moment it trades again. The lengthened wait is kept to prove the age
+    is not what stops it."""
     _lengthened_wait(monkeypatch, 20.0)
     p = _pool()
     b = p.add_book(ledger=0, take_armed_ts=NOW - 3600)
@@ -3021,16 +3181,22 @@ def test_a_stale_take_arm_never_takes_a_fresh_rest_and_is_cleared_by_a_rest_or_a
     st = _tick(p, v)
     assert not _places(v) and not _cancels(v) and _census(st, "open_order_pending") == 1
     assert p.orders[o["id"]]["state"] == "open"
+    # E31: the same world PAST the wait sends nothing either. The rest stands; the arm
+    # stands with it, unread, because no path reads it
     v2 = _Venue(bid=0.30, ask=0.30, ioc_fill=300)
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW - 5 + rules.MIRROR_TAKE_AFTER_S + 1)
-    ioc = [c for c in _places(v2) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert len(ioc) == 1 and _census(st2, "take_placed") == 1 and b["take_armed_ts"] is None
+    assert not _places(v2) and not _cancels(v2), "no IOC at any age: the arm has no consumer"
+    assert _census(st2, "take_placed") == 0 and _census(st2, "open_order_pending") == 1
+    assert b["take_armed_ts"] == NOW - 3600 and p.orders[o["id"]]["state"] == "open"
+    assert not hasattr(ml, "_entry_take") and not hasattr(ml, "_take_band")
+    # a rest the venue accepts clears the arm (_disarm_take, untouched)
     p2 = _pool()
     b2 = p2.add_book(ledger=0, take_armed_ts=NOW - 30)
     v3 = _Venue()
     _tick(p2, v3)
     assert _places(v3)[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and b2["take_armed_ts"] is None
+    assert _places(v3)[0][2] == 0.31 and _places(v3)[0][7] is True
     p3 = _pool()
     b3 = p3.add_book(ledger=0, take_armed_ts=NOW - 30)
     o3 = p3.add_order(b3)
@@ -3040,8 +3206,10 @@ def test_a_stale_take_arm_never_takes_a_fresh_rest_and_is_cleared_by_a_rest_or_a
     assert p3.orders[o3["id"]]["state"] == "filled" and b3["take_armed_ts"] is None
     # a LOST placement clears the arm too (the re-review's minor 1): an
     # hour-old arm and a 'placing' row past the window with nothing on
-    # the book -> 'lost', the book thaws, a GTC rest goes out at the
-    # wire the ask sits on, never an IOC
+    # the book -> 'lost', the book thaws, a GTC rest goes out, never an IOC.
+    # E31: the cent is 0.29, not 0.31 -- the book is LOCKED at 0.30 / 0.30, so his own cent
+    # 0.31 would cross and the rest sits at the touch bound ask - MAKER_TICK, counted
+    # `maker_rest_at_touch`. That is the whole lane in one line at this site
     p4 = _pool()
     b4 = p4.add_book(ledger=0, take_armed_ts=NOW - 3600)
     o4 = p4.add_order(b4, order_id=None, state="placing", placed_ts=NOW - le._LOST_FILL_WINDOW_S - 61)
@@ -3049,18 +3217,31 @@ def test_a_stale_take_arm_never_takes_a_fresh_rest_and_is_cleared_by_a_rest_or_a
     st5 = _tick(p4, v5)
     assert p4.orders[o4["id"]]["state"] == "lost" and _census(st5, "order_lost") == 1
     assert b4["take_armed_ts"] is None and b4["state"] == "live"
-    assert [c[5] for c in _places(v5)] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"] and _places(v5)[0][2] == 0.30
+    assert [c[5] for c in _places(v5)] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"] and _places(v5)[0][2] == 0.29
+    assert _places(v5)[0][7] is True and _census(st5, "maker_rest_at_touch") == 1
     assert _census(st5, "take_placed") == 0 and _census(st5, "rest_placed") == 1 and b4["ledger_net"] == 0
 
 
 def test_the_first_post_only_refusal_starts_the_take_clock_under_the_thirty_second_poll(monkeypatch):
     """re-review minor 2. A book that keeps crossing at the 30 s poll:
-    every post-only 400 once re-stamped the arm, and _act reads the
-    arm before it re-places, so the arm was always 30 s old and the
-    take never fired. The FIRST refusal starts the clock: no IOC
-    before MIRROR_TAKE_AFTER_S of it, then exactly one, at the same
-    wire, and the book is on target. Under a lengthened wait (E4
-    addendum: at the default of 0 the first tick takes)."""
+    every post-only 400 once re-stamped the arm, and _act read the arm
+    before it re-placed, so the arm was always 30 s old and the take never
+    fired; the fix made the FIRST refusal start the clock.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE SUBJECT IS RETIRED
+    FROM BOTH ENDS: a post-only 400 no longer arms anything --
+    `_place_reserved`'s `await t.pool.execute(_SQL_BOOK_ARM, book["id"],
+    True)` is gone -- and there is no take for a clock to release. The
+    rejection is answered by E31 (D)'s CROSS RE-PRICE when our own quote
+    explains it, and by E30's streak when it does not, which is this
+    world: the book is LOCKED at 0.30 / 0.30, the rest is already at the
+    touch bound 0.29 (a cent UNDER the bid, which our quote says cannot
+    cross), so the 400 is NOT read as a cross and E30's path stands byte
+    for byte. Every poll re-places the same 0.29 rest, no IOC is ever
+    sent at any age of the clock, and the arm is never written. The
+    lengthened wait is kept to show the clock is not what changed.
+    `_SQL_BOOK_ARM` survives with its ONE remaining caller, `_disarm_take`,
+    which clears an arm a pre-lane row left behind."""
     _lengthened_wait(monkeypatch, 20.0)
 
     def _reject(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
@@ -3075,32 +3256,41 @@ def test_the_first_post_only_refusal_starts_the_take_clock_under_the_thirty_seco
     iocs = []
     for i in range(int(wait // 30) + 3):
         now = NOW + 30 * i
-        # the venue holds what the ledger holds (venue == ledger after
-        # the take fills, so the last ticks read on_target, not a freeze)
         v = _Venue(bid=0.30, ask=0.30, place=_reject, held={SLUG: int(b["ledger_net"])})
         st = _tick(p, v, now=now)
         ioc = [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-        if now - NOW < wait:
-            assert not ioc and b["take_armed_ts"] == NOW and b["ledger_net"] == 0, i
-            assert _census(st, "post_only_rejected") == 1 and _census(st, "take_placed") == 0, i
         iocs += [(now, c) for c in ioc]
-    assert len(iocs) == 1
-    at, c = iocs[0]
-    assert at - NOW >= wait and c[2] == 0.31 and c[3] == 300      # the IOC at his cent (HIGH-1)
-    assert b["ledger_net"] == 300 and b["take_armed_ts"] is None
-    assert _census(st, "on_target") == 1 and not _places(v)
+        # every poll: ONE post-only rest at the touch bound, refused, counted, no arm
+        assert [c[2:6] for c in _places(v)] == [(0.29, 300, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL")], i
+        assert _census(st, "post_only_rejected") == 1 and _census(st, "take_placed") == 0, i
+        assert b["take_armed_ts"] is None and b["ledger_net"] == 0, i
+        assert b["last_plan"]["maker"]["clause"] == "touch" and b["last_plan"]["maker"]["bound"] == 0.29, i
+        assert "post_only_cross" not in b["last_plan"], "our own quote does not explain it: E30's case"
+    assert iocs == [], "E31: no IOC at any age of the clock"
+    # the arm is written nowhere; `_disarm_take` is its one caller
+    src = inspect.getsource(ml)
+    code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
+    assert code.count("_SQL_BOOK_ARM") == 2, "the statement and its one caller; the third is a paragraph"
+    assert 'await t.pool.execute(_SQL_BOOK_ARM, book["id"], False)' in inspect.getsource(ml._disarm_take)
+    assert 'await t.pool.execute(_SQL_BOOK_ARM, book["id"], True)' not in src
+    from tests.test_e31_maker_only import _code as _nocomment
+    assert "_SQL_BOOK_ARM" not in _nocomment(ml._place_reserved), "the send names it only in a paragraph"
     sql = _flat(ml._SQL_BOOK_ARM)
     assert "take_armed_at = CASE WHEN $2 THEN COALESCE(take_armed_at, now()) ELSE NULL END" in sql
 
 
 def test_a_flatten_rest_from_an_earlier_vanish_never_skips_the_rest_first_rule():
-    """minor 3. A flatten rest cancelled two hours ago (he came back)
-    is not this vanish's rest: a fresh rest first, close_position only
-    after MIRROR_FLATTEN_REST_S of it; the plan carries the vanish
-    clock. And within THIS vanish the FIRST rest is the clock (the
-    re-review's minor 3): a re-quote at +200 s does not restart it, so
-    the slippage path runs at +301 s, not +501 s. An UNPRICED vanish
-    (E4): the slippage leg runs only when he gave no exit price."""
+    """minor 3. A flatten rest cancelled two hours ago (he came back) is not
+    this vanish's rest: a fresh rest first, and the plan carries the vanish
+    clock.
+
+    RE-PINNED at E31 (FILL lane 31): there is NO SLIPPAGE PATH left to run
+    after MIRROR_FLATTEN_REST_S -- `_flatten_send`, `close_position`, the
+    co-held IOC and the 300-bip bound all left this file with the takes -- so
+    what the clock's end reads is a rest STILL STANDING, re-quoted on the touch
+    every tick. The vanish clock stays on the plan as the record (`vanish_since`
+    off the FIRST rest, min(placed_at), unchanged) and `_SQL_FLATTEN_REST_SINCE`
+    stays with it: the record E31 leaves for the reader."""
     p = _pool(fills=_unpriced(), snap=None)
     b = p.add_book(ledger=300)
     p.add_order(b, side=SELL, wire=0.32, qty=300, kind="flatten_vanished", state="cancelled",
@@ -3110,7 +3300,9 @@ def test_a_flatten_rest_from_an_earlier_vanish_never_skips_the_rest_first_rule()
     st = _tick(p, v, http=gone)
     assert "close" not in _kinds(v) and _census(st, "flatten_rested") == 1
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][4] is True and pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and pl[0][2] == 0.32
+    # RE-PINNED at E31: the unpriced flatten rests at the touch's INSIDE tick
+    # (bid 0.30 + a tick = 0.31), where it used to join the ask at 0.32
+    assert len(pl) == 1 and pl[0][4] is True and pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and pl[0][2] == 0.31
     assert b["last_plan"]["vanish_since"] == NOW and b["last_plan"]["kind"] == "flatten_vanished"
     # the ask moved: the rest is re-quoted at +200 (a second rest of
     # this vanish, placed at +200), the vanish clock unchanged
@@ -3131,8 +3323,9 @@ def test_a_flatten_rest_from_an_earlier_vanish_never_skips_the_rest_first_rule()
     v4 = _Venue(held={SLUG: 300}, bid=0.33, ask=0.34)
     v4.orders = v.orders
     st4 = _tick(p, v4, now=NOW + rules.MIRROR_FLATTEN_REST_S + 1, http=gone)
-    assert ("cancel", "oid-2", SLUG) in v4.calls and ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v4.calls
-    assert b["ledger_net"] == 0 and st4["flattened"] == 1
+    assert "close" not in _kinds(v4) and not _cancels(v4) and not _places(v4)
+    assert b["ledger_net"] == 300 and st4["flattened"] == 0, "the clock ends in a rest, not a market order"
+    assert b["last_plan"]["vanish_since"] == NOW
     sql = _flat(ml._SQL_FLATTEN_REST_SINCE)
     assert "min(extract(epoch FROM placed_at))" in sql and "max(" not in sql
     assert "state IN ('placing', 'open', 'unknown') OR placed_at >= to_timestamp($2)" in sql
@@ -3189,34 +3382,40 @@ def test_the_sell_wire_is_priced_off_his_unrounded_equivalent():
 
 
 def test_a_lost_close_response_is_named_and_reconciled_from_the_venue_position(monkeypatch):
-    """minor 6. close_position raises on the sole-holder path: the row
-    is 'placing' with the 0.0 wire the INSERT wrote, never searched by
-    fingerprint, no book_error on any tick. The next tick reads the
-    venue's position: shares gone -> booked from the trade log by
-    position and the row adopted; nothing gone -> 'lost' by name past
-    the window and the flatten runs again; a close_failed status is
-    the same lost response, never a refusal."""
+    """minor 6. A CLOSE row lost in flight: 'placing' with the 0.0 wire the
+    INSERT wrote, never searched by fingerprint, no book_error on any tick.
+    The next tick reads the venue's position: shares gone -> booked from the
+    trade log by position and the row adopted; nothing gone -> 'lost' by name
+    past the window and the flatten runs again.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE WORKER NO LONGER SENDS
+    A CLOSE AT ALL: `_flatten_send` and the slippage leg are deleted and an
+    unpriced vanish is a post-only rest at the touch's inside tick, so a
+    close cannot be lost by this code. `_reconcile_lost_close` STAYS -- CLOSE
+    rows written before this lane can still be in flight -- and that is what
+    is pinned here: the row is SEEDED as a lost close left it ('placing', no
+    id, tif CLOSE, wire 0.0, the shape of the seeded row in
+    test_a_lost_close_on_a_short_reads_the_venues_negative_position_as_the_leg
+    since S4), and every reading after it is byte for byte. The close_failed
+    world (c) is retired with the call that could return it: a lost RESPONSE
+    on the flatten's own road is now a lost REST, which the `_V` venue below
+    still produces from `place_raises`, and it freezes `placement_lost` the
+    same way."""
     owner = {"order_id": "owner-2", "us_market_slug": SLUG, "side": "SELL", "price": 0.5,
              "quantity": 10.0, "filled_shares": 0.0, "leaves": 10.0, "state": "new", "created_at": NOW}
 
     def _book():
-        p = _pool(fills=_unpriced(), snap=None)      # an unpriced vanish: the slippage leg (E4)
+        """The book with a LEGACY CLOSE row seeded as the lost close left it."""
+        p = _pool(fills=_unpriced(), snap=None)      # an unpriced vanish
         b = p.add_book(ledger=300, last_plan={"kind": "flatten_vanished", "vanish_since": NOW - 400})
-        p.add_order(b, side=SELL, wire=0.32, qty=300, kind="flatten_vanished", state="cancelled",
-                    placed_ts=NOW - 400, done_at=NOW - 10, order_id=None)
-        return p, b
-
-    class _V(_Venue):
-        def close_position(self, slug, *, slippage_bips):
-            self.calls.append(("close", slug, slippage_bips))
-            self.extra_open.append(dict(owner))        # lands after the tick's open read: outside pre_ids
-            raise TimeoutError("read timed out")
+        row = p.add_order(b, side=SELL, wire=0.0, qty=300, kind="flatten_vanished", tif="CLOSE",
+                          order_id=None, state="placing", placed_ts=NOW - 90)
+        return p, b, row
     gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0}])
-    p, b = _book()
-    v = _V(held={SLUG: 300})
+    p, b, row = _book()
+    v = _Venue(held={SLUG: 300})
     st = _tick(p, v, http=gone)
-    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v.calls
-    row = next(x for x in p.orders.values() if x["tif"] == "CLOSE")
+    assert "close" not in _kinds(v), "E31: no path of this worker calls close_position"
     assert row["state"] == "placing" and row["order_id"] is None and row["wire"] == 0.0
     assert b["state"] == "frozen" and b["frozen_reason"] == "placement_lost"
     assert _census(st, "placement_lost") == 1 and _census(st, "book_error") == 0
@@ -3232,46 +3431,56 @@ def test_a_lost_close_response_is_named_and_reconciled_from_the_venue_position(m
                 trades=[{**sell, "qty": 200.0, "price": 0.29}, {**sell, "qty": 100.0, "price": 0.28},
                         {**sell, "side": "BUY", "qty": 50.0, "price": 0.5, "order_id": "owner-2"}])
     st2 = _tick(p, v2, now=NOW + 90, http=gone)
-    assert _census(st2, "book_error") == 0 and ("trades", SLUG, NOW - 30) in v2.calls
+    # the trade window opens 30 s before the row was PLACED; the seeded row is 90 s old, so
+    # the window starts at NOW - 120 where the tick-1 close's started at NOW - 30
+    assert _census(st2, "book_error") == 0 and ("trades", SLUG, NOW - 120) in v2.calls
     assert row["state"] == "filled" and row["order_id"] == "close-9" and row["booked_filled"] == 300.0
     assert row["avg_px"] == pytest.approx(86.0 / 300.0, abs=1e-6)
     assert row["reason"] == "booked from the position and the trade log"
     assert b["ledger_net"] == 0 and _census(st2, "filled_take") == 1 and st2["flattened"] == 1
     assert b["state"] == "closed" and _census(st2, "closed_cashed_out") == 1
     # (b) nothing left the account: frozen by name inside the window,
-    # 'lost' past it, the book thaws (venue == ledger) and flattens again
+    # 'lost' past it, the book thaws (venue == ledger) and flattens again --
+    # E31: by a post-only REST at the touch's own inside tick, and there is no
+    # second leg after its wait: the rest stands and is re-quoted, never closed
     async def _held300(t, slug):
         return 300, 0.31
     monkeypatch.setattr(ml, "_pm_held", _held300)
-    p, b = _book()
-    v = _V(held={SLUG: 300})
-    _tick(p, v, http=gone)
-    row = next(x for x in p.orders.values() if x["tif"] == "CLOSE")
+    p, b, row = _book()
+    _tick(p, _Venue(held={SLUG: 300}), http=gone)
     st2 = _tick(p, _Venue(held={SLUG: 300}), now=NOW + 90, http=gone)
     assert row["state"] == "placing" and b["frozen_reason"] == "placement_lost" and _census(st2, "book_error") == 0
     v3 = _Venue(held={SLUG: 300})
     t3 = NOW + le._LOST_FILL_WINDOW_S + 61
     st3 = _tick(p, v3, now=t3, http=gone)
     assert row["state"] == "lost" and row["reason"] == "order_lost" and _census(st3, "order_lost") == 1
-    # the frozen ticks wrote no vanish plan, so the vanish begins afresh:
-    # a rest first (the old cancelled rest is not this vanish's), the
-    # close after the rest's own wait
+    # the frozen ticks wrote no vanish plan, so the vanish begins afresh: a rest first
     assert b["state"] == "live" and "close" not in _kinds(v3)
     assert [c[5] for c in _places(v3)] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"] and b["last_plan"]["vanish_since"] == t3
+    assert [c[2] for c in _places(v3)] == [0.31], "the unpriced exit at bid + MAKER_TICK"
     v4 = _Venue(held={SLUG: 300})
     v4.orders = v3.orders
-    _tick(p, v4, now=t3 + rules.MIRROR_FLATTEN_REST_S + 1, http=gone)
-    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v4.calls and b["ledger_net"] == 0 and b["state"] == "closed"
-    # (c) the adapter's close_failed (an exception inside the call) is a
-    # lost response too: the row stays 'placing', never 'rejected'
-    p, b = _book()
-    v = _Venue(held={SLUG: 300}, close={"ok": False, "order_id": None, "status": "close_failed",
-                                         "fill_price": None, "filled_shares": 0.0,
-                                         "raw": {"error": "timeout", "slug": SLUG}})
-    st = _tick(p, v, http=gone)
-    row = next(x for x in p.orders.values() if x["tif"] == "CLOSE")
-    assert row["state"] == "placing" and b["frozen_reason"] == "placement_lost"
-    assert _census(st, "place_refused") == 0 and _census(st, "placement_lost") == 1
+    st4 = _tick(p, v4, now=t3 + rules.MIRROR_FLATTEN_REST_S + 1, http=gone)
+    # E31: past MIRROR_FLATTEN_REST_S the slippage leg used to fire and flatten the book.
+    # There is no leg: the rest stands at its own cent, `open_order_pending`, and the ledger
+    # is unmoved. MIRROR_FLATTEN_REST_S keeps its default and has no reader on the money path
+    assert "close" not in _kinds(v4) and not _places(v4) and not _cancels(v4)
+    assert b["ledger_net"] == 300 and b["state"] == "live"
+    assert _census(st4, "open_order_pending") == 1
+    assert "_flatten_send" not in inspect.getsource(ml) and not hasattr(ml, "_flatten_send")
+    # (c) A LOST RESPONSE ON THE FLATTEN'S OWN ROAD is now a lost REST, not a lost close: the
+    # placement raises, nothing is on the book, and the row freezes `placement_lost` by the
+    # same reader. (The adapter's `close_failed` status is unreachable: nothing calls it.)
+    class _V(_Venue):
+        def submit_fok(self, *a, **kw):
+            self.calls.append(("place", *a[:8]))
+            raise TimeoutError("read timed out")
+    p5 = _pool(fills=_unpriced(), snap=None)
+    b5 = p5.add_book(ledger=300, last_plan={"kind": "flatten_vanished", "vanish_since": NOW - 400})
+    st5 = _tick(p5, _V(held={SLUG: 300}), http=gone)
+    r5 = next(iter(p5.orders.values()))
+    assert r5["state"] == "placing" and b5["frozen_reason"] == "placement_lost"
+    assert _census(st5, "place_refused") == 0 and _census(st5, "placement_lost") == 1
     # (d) a lost placement whose fill the venue never priced is refused
     # by name, never a TypeError (the CLOSE row has no cent of its own)
     o = {"id": 1, "whale": "rn1", "wire": 0.0, "booked_filled": 0.0, "qty": 300, "side": SELL}
@@ -3284,8 +3493,16 @@ def test_a_lost_close_response_is_named_and_reconciled_from_the_venue_position(m
 
 def test_every_venue_read_goes_through_the_pacer(monkeypatch):
     """minor 7. The lost-response search (open orders by slug) and the
-    co-held flatten's bid are venue READS behind the pacer like every
-    other: one pace call per read."""
+    flatten's own reads are venue READS behind the pacer like every other:
+    one pace call per read, one claim per write.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the co-held flatten's
+    `slug_bid` read WAS the slippage leg's own -- the bid the co-held IOC
+    was priced two cents under. `_flatten_send` is deleted and the flatten
+    is a post-only rest at the touch's inside tick, so no path of this
+    worker calls `slug_bid` at all and the read is gone from the count.
+    Everything the test is about -- every read paced, every write claiming
+    -- holds on the calls that are left."""
     paced = []
     monkeypatch.setattr(ml, "pace", lambda s=ms.READ_PACING_S, slots=1: paced.extend([s] * int(slots)))
     reads = ("open_orders", "status", "trades", "slug_bid")
@@ -3306,7 +3523,7 @@ def test_every_venue_read_goes_through_the_pacer(monkeypatch):
     async def _held(t, slug):
         return 500, 0.31
     monkeypatch.setattr(ml, "_pm_held", _held)
-    p3 = _pool(fills=_unpriced(), snap=None)         # an unpriced vanish: the co-held IOC (E4)
+    p3 = _pool(fills=_unpriced(), snap=None)         # an unpriced vanish, past MIRROR_FLATTEN_REST_S
     p3.manual_shares[SLUG] = 200.0
     b3 = p3.add_book(ledger=300)
     p3.add_order(b3, side=SELL, wire=0.32, kind="flatten_vanished",
@@ -3314,9 +3531,13 @@ def test_every_venue_read_goes_through_the_pacer(monkeypatch):
     v3 = _Venue(held={SLUG: 500}, flatten_bid=0.29, ioc_fill=300.0)
     v3.rest("oid-1", "SELL", 0.32, 300, created=NOW - 400)
     _tick(p3, v3, http=_gone())
-    assert ("slug_bid", SLUG, True) in v3.calls and b3["ledger_net"] == 0
+    # E31: no slug_bid, because there is no slippage leg to price off it; the rest is
+    # re-quoted to the touch's inside tick (bid 0.30 + MAKER_TICK = 0.31) and stands there
+    assert ("slug_bid", SLUG, True) not in v3.calls and "slug_bid" not in _kinds(v3)
+    assert [c[2:6] for c in _places(v3)] == [(0.31, 300, True, "TIME_IN_FORCE_GOOD_TILL_CANCEL")]
+    assert b3["ledger_net"] == 300, "nothing crossed: the rest waits for a taker"
     assert len(paced) == len([c for c in v3.calls if c[0] in reads]) + _write_gaps(v3.calls)
-    assert _write_gaps(v3.calls) == 2, "the cancel and the SELL IOC, one gap each"
+    assert _write_gaps(v3.calls) == 2, "the cancel and the SELL rest, one gap each"
     src = inspect.getsource(ml)
     assert "to_thread(t.pmus.open_orders" not in src and "to_thread(t.pmus.slug_bid" not in src
     # and no write goes to the venue bare (E2 review, HIGH-1)
@@ -3515,62 +3736,95 @@ def test_the_venues_200_refusal_shape_arms_the_take_and_the_400_shapes_read_as_b
     Every shape the adapter produced before reads as it did: a 400
     dict arms, a 429 dict does not, an empty raw does not (None did
     not), a 200 dict without the flag does not (the bare 200 did not).
-    Under a lengthened wait (E4 addendum): at the default of 0 a
-    crossing book takes FIRST and no rest is refused."""
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The REFUSAL SHAPES and the
+    predicate that reads them are byte for byte -- `rules.take_arms` stays
+    as the reader of the venue's own CROSSING FIELD -- but it ARMS NOTHING
+    now. `_place_reserved`'s `_SQL_BOOK_ARM` write is deleted, and the
+    crossing shape is answered by E31 (D)'s CROSS RE-PRICE instead: the
+    book's hint is written (`maker_cross_repriced`), and the NEXT plan
+    prices one tick further from the touch. Where this test read
+    `take_armed_ts == NOW` and then ONE IOC at his cent, it reads the hint
+    and then a post-only rest a tick further off. `take_arms` is consulted
+    through `_maker_cross`, whose other reading is our own quote."""
     _lengthened_wait(monkeypatch, 20.0)
     src = _place_src()
-    assert "rules.take_arms(raw if isinstance(raw, dict) else code)" in src
+    # `rules.take_arms` survives as the reader of the venue's own crossing field, consulted
+    # through `_post_only_word` -> `_maker_cross`, and its predicate is byte for byte
+    assert "rules.take_arms(raw)" in inspect.getsource(ml._post_only_word)
+    assert '_post_only_word(raw) == ":cross"' in inspect.getsource(ml._maker_cross)
+    assert "_maker_cross(raw, side, bid_used, ask_used, wire)" in src
+    from tests.test_e31_maker_only import _code as _nocomment
+    assert "_SQL_BOOK_ARM" not in _nocomment(ml._place_reserved), "the send arms nothing"
     p = _pool()
     b = p.add_book(ledger=0)
     st = _tick(p, _Venue(bid=0.30, ask=0.30, place=_refusal(_SHAPE_200, order_id=True)))
-    assert _census(st, "post_only_rejected") == 1 and b["take_armed_ts"] == NOW
+    # the book is LOCKED at 0.30 / 0.30, so the rest went at the touch bound 0.29 and the
+    # venue's own field is the only evidence it crossed: the hint is written, not an arm
+    assert _census(st, "post_only_rejected") == 1 and b["take_armed_ts"] is None
+    assert _census(st, "maker_cross_repriced") == 1
+    assert b["last_plan"]["post_only_cross"] == {"wire": 0.29, "n": 1, "bid": 0.30, "ask": 0.30}
     o = next(iter(p.orders.values()))
     # E30 (FILL lane 30): the reason gains ':cross' when the raw names the crossing shape by its own
     # post_only_cross field (this shape) -- 'post_only_rejected:200' -> 'post_only_rejected:200:cross'
     assert o["state"] == "rejected" and o["reason"] == "post_only_rejected:200:cross"
     assert o["order_id"] == "oid-1", "the 200 shape minted an order; the row names it"
     assert not st["abandoned"] and _census(st, "take_placed") == 0
-    # the armed take fires after the wait, at or through, as ONE IOC at his cent
+    # the NEXT tick prices one tick further off the touch -- 0.29 -> 0.28 -- and rests there:
+    # never an IOC at his cent, and never worse for us than his own price
     v = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
     st2 = _tick(p, v, now=NOW + rules.MIRROR_TAKE_AFTER_S + 1)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" and pl[0][2] == 0.31
-    assert _census(st2, "take_placed") == 1 and b["take_armed_ts"] is None and b["ledger_net"] == 300
-    # the shapes the adapter produced before, exactly as before
-    for raw, arms, oid in (({"status_code": 400, "error": "400 crossing"}, True, None),
-                           ({"status_code": 429, "error": "429 slow down"}, False, None),
-                           ({}, False, None),
-                           ({"status_code": 200}, False, None),
-                           ({"status_code": 200, "post_only_cross": True}, False, None),
-                           ({"status_code": "400"}, False, None)):
+    assert len(pl) == 1 and pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and pl[0][2] == 0.28
+    assert pl[0][7] is True and b["last_plan"]["maker"]["clause"] == "cross_hint"
+    assert b["last_plan"]["maker"]["hint"] == 0.29
+    assert _census(st2, "take_placed") == 0 and b["take_armed_ts"] is None and b["ledger_net"] == 0
+    # the shapes the adapter produced before, read exactly as before -- and NONE of them arms.
+    # `cross` is what the crossing reading now produces: the venue's own field on the 200 +
+    # REJECTED shape alone. On this locked book our own quote explains nothing (the rest at
+    # 0.29 is a cent UNDER the bid), so every other shape is E30's case, byte for byte
+    for raw, oid in (({"status_code": 400, "error": "400 crossing"}, None),
+                     ({"status_code": 429, "error": "429 slow down"}, None),
+                     ({}, None),
+                     ({"status_code": 200}, None),
+                     ({"status_code": 200, "post_only_cross": True}, None),
+                     ({"status_code": "400"}, None)):
         p2 = _pool()
         b2 = p2.add_book(ledger=0)
         st3 = _tick(p2, _Venue(bid=0.30, ask=0.30, place=_refusal(raw)))
         assert _census(st3, "post_only_rejected") == 1, raw
-        assert (b2["take_armed_ts"] == NOW) is arms, raw
+        assert b2["take_armed_ts"] is None and _census(st3, "maker_cross_repriced") == 0, raw
+        assert "post_only_cross" not in b2["last_plan"], raw
         o2 = next(iter(p2.orders.values()))
         assert o2["state"] == "rejected" and o2["order_id"] is oid, raw
         assert o2["reason"] == f"post_only_rejected:{raw.get('status_code')}", raw
 
 
 def test_a_take_arm_older_than_twice_the_wait_is_refused_by_name_and_the_book_rests_first(monkeypatch):
-    """Task 7, residual 1. The arm is read in _act BEFORE the room and
-    the clip, so it survived every tick where _act never reached
-    _place: armed at T0 by a crossing refusal, three ticks the room
-    refused (over_room, no placement), and at +3600 -- the book still
-    crossing, the room back -- one IOC went out with no rest ever at
-    the level. Now: within twice the wait the arm stands through the
-    refused ticks (the take window), past it the arm is stale by name
-    (`take_arm_stale`), the book RESTS FIRST as a post-only GTC at the
-    wire and no IOC is placed. Under a lengthened wait (E4 addendum:
-    at the default of 0 the arm never fires the IOC -- the take-first
-    does, on the price alone -- and the bound is not read)."""
+    """Task 7, residual 1. The arm was read in _act BEFORE the room and
+    the clip, so it survived every tick where _act never reached _place:
+    armed at T0 by a crossing refusal, three ticks the room refused
+    (over_room, no placement), and at +3600 -- the book still crossing,
+    the room back -- one IOC went out with no rest ever at the level. The
+    fix bounded the arm at twice the wait (`take_arm_stale`) and made the
+    book REST FIRST.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10) AND THE DEFECT IS CLOSED
+    BY CONSTRUCTION. There is no arm to go stale: `_place_reserved` writes
+    none and `_act` reads none, so `TAKE_ARM_STALE_WAITS` and
+    `take_arm_stale` are retired with the bound they expressed
+    (`take_arm_stale` stays a DECLARED ZERO on CENSUS_KEYS, the record of
+    the rule). What this test now pins is the OUTCOME the bound existed to
+    guarantee -- across the whole sequence, at every clock, NOTHING crosses
+    and the book RESTS at the touch bound -- reached without a bound at
+    all. The lengthened wait is kept to show the clock is not what does
+    it."""
     _lengthened_wait(monkeypatch, 20.0)
     room = _room_holder(monkeypatch, 1e9)
     p = _pool()
     b = p.add_book(ledger=0)
     st = _tick(p, _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400})))
-    assert b["take_armed_ts"] == NOW and _census(st, "post_only_rejected") == 1
+    assert b["take_armed_ts"] is None and _census(st, "post_only_rejected") == 1
+    assert b["last_plan"]["maker"]["clause"] == "touch" and b["last_plan"]["maker"]["wire"] == 0.29
     room["day"] = 0.1
     # three ticks inside twice the wait (a quarter, one and a quarter,
     # exactly twice: 5 / 25 / 40 s at E2's 20 s, 30 / 150 / 240 at 120)
@@ -3579,57 +3833,69 @@ def test_a_take_arm_older_than_twice_the_wait_is_refused_by_name_and_the_book_re
         v = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
         st = _tick(p, v, now=NOW + dt)
         assert not _places(v) and _census(st, "over_room") == 1, dt
-        assert b["take_armed_ts"] == NOW and _census(st, "take_arm_stale") == 0, dt
+        assert b["take_armed_ts"] is None and _census(st, "take_arm_stale") == 0, dt
     room["day"] = 1e9
     p.snap_at = NOW + 3600 - 40
     v = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
     st = _tick(p, v, now=NOW + 3600)
     pl = _places(v)
+    # an hour on, the room back, the book still locked: a post-only GTC rest at the touch
+    # bound (his own cent 0.31 would cross a 0.30 ask), never an IOC at any age
     assert [c[5] for c in pl] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"], pl
-    assert pl[0][2] == 0.30 and pl[0][7] is True, "a post-only rest at the wire, never an IOC"
-    assert _census(st, "take_arm_stale") == 1 and _census(st, "take_placed") == 0
-    assert _census(st, "rest_placed") == 1 and b["take_armed_ts"] is None and b["ledger_net"] == 0
-    assert any(x["what"] == "take_disarmed" and x.get("why") == "take_arm_stale" for x in ml._RECENT)
-    # the bound is a multiplier of the rules' wait, never a wait of its own
-    assert ml.TAKE_ARM_STALE_WAITS == 2
+    assert pl[0][2] == 0.29 and pl[0][7] is True, "a post-only rest at the touch bound, never an IOC"
+    assert _census(st, "take_arm_stale") == 0 and _census(st, "take_placed") == 0
+    assert _census(st, "rest_placed") == 1 and _census(st, "maker_rest_at_touch") == 1
+    assert b["take_armed_ts"] is None and b["ledger_net"] == 0
+    # the bound and its constant are retired with the arm
+    assert not hasattr(ml, "TAKE_ARM_STALE_WAITS")
     src = inspect.getsource(ml._act)
-    assert "float(TAKE_ARM_STALE_WAITS) * float(rules.MIRROR_TAKE_AFTER_S)" in src
+    assert "TAKE_ARM_STALE_WAITS" not in src and "take_armed_ts" not in src
+    assert "take_arm_stale" in ml.CENSUS_KEYS and ml._new_stats()["census"]["take_arm_stale"] == 0
 
 
 def test_a_take_arm_is_cleared_when_the_book_leaves_his_level_and_the_next_refusal_restarts_the_clock(monkeypatch):
     """Task 7, residual 1, the other bound. Armed at T0 by a crossing
     refusal; at +30 the ask has left the wire and the room refuses the
-    clip (nothing placed): the arm is cleared, because the crossing it
-    witnessed has ended. At +60 the book crosses again and the venue
-    refuses again: the arm is stamped +60 (the COALESCE has nothing to
-    keep), so no IOC goes out at +120 off the T0 clock, and exactly one
-    at +60 plus the wait. Under a lengthened wait (E4 addendum)."""
+    clip (nothing placed): the arm was cleared, because the crossing it
+    witnessed had ended. At +60 the book crossed again and the venue
+    refused again: the arm was stamped +60, so no IOC went out at +120 off
+    the T0 clock, and exactly one at +60 plus the wait.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): NO ARM IS EVER STAMPED,
+    so neither clock exists and NO IOC goes out at any of these times.
+    Each tick is priced from the quote it reads -- that is what replaced
+    the arm -- so the sequence is pinned on the CENTS instead: locked at
+    0.30 / 0.30 the rest is at the touch bound 0.29; with the ask back at
+    0.32 his own cent 0.31 is reachable and the rest is there. A standing
+    rest is still untouched by anything but its own age."""
     _lengthened_wait(monkeypatch, 20.0)
     room = _room_holder(monkeypatch, 1e9)
     p = _pool()
     b = p.add_book(ledger=0)
     _tick(p, _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400})))
-    assert b["take_armed_ts"] == NOW
+    assert b["take_armed_ts"] is None
     room["day"] = 0.1
     v = _Venue(bid=0.30, ask=0.32, ioc_fill=300.0)
     st = _tick(p, v, now=NOW + 30)
     assert not _places(v) and _census(st, "over_room") == 1
     assert b["take_armed_ts"] is None and _census(st, "take_arm_stale") == 0
-    assert any(x["what"] == "take_disarmed" and x.get("why") == "market_away" for x in ml._RECENT)
     room["day"] = 1e9
     wait = float(rules.MIRROR_TAKE_AFTER_S)
     st = _tick(p, _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400})), now=NOW + 60)
-    assert b["take_armed_ts"] == NOW + 60 and _census(st, "post_only_rejected") == 1
-    v = _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400}))
-    st = _tick(p, v, now=NOW + wait + 1)
-    assert not [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert b["take_armed_ts"] == NOW + 60 and b["ledger_net"] == 0
-    v = _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400}))
-    st = _tick(p, v, now=NOW + 60 + wait + 1)
-    ioc = [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert len(ioc) == 1 and ioc[0][2] == 0.31 and _census(st, "take_placed") == 1
-    assert b["ledger_net"] == 300 and b["take_armed_ts"] is None
-    # a standing rest is never touched by either bound: the rest's own
+    assert b["take_armed_ts"] is None and _census(st, "post_only_rejected") == 1
+    for at in (NOW + wait + 1, NOW + 60 + wait + 1):
+        v = _Venue(bid=0.30, ask=0.30, place=_refusal({"status_code": 400}))
+        st = _tick(p, v, now=at)
+        assert not [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"], at
+        assert [c[2] for c in _places(v)] == [0.29], (at, "the touch bound on a locked book")
+        assert _census(st, "take_placed") == 0 and b["take_armed_ts"] is None, at
+    assert b["ledger_net"] == 0, "nothing crossed at any clock"
+    # the ask back off his cent: the SAME book rests at HIS cent, priced from this tick's quote
+    v = _Venue(bid=0.30, ask=0.32)
+    st = _tick(p, v, now=NOW + 120 + wait)
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL")]
+    assert b["last_plan"]["maker"]["clause"] == "his_cent"
+    # a standing rest is never touched by an arm either: the rest's own
     # age is the wait, as before
     p2 = _pool()
     b2 = p2.add_book(ledger=0, take_armed_ts=NOW - 3600)
@@ -3673,57 +3939,58 @@ def test_a_closing_books_rest_is_cancelled_closing_never_under_its_stale_freeze(
 
 
 def test_the_whole_slug_close_needs_a_certain_sole_holding(monkeypatch):
-    """close_position closes the WHOLE slug and is the only order this
-    worker sends with no clamp to its own book, so "am I the sole holder"
-    must be certain. The old test was `ledger >= int(held)` -- and
-    _pm_held FLOORS the venue's number before the worker sees it, so a
-    foreign holding of any fraction under one share read as sole and our
-    close took it with us. The fraction is in the tick's own paced walk;
-    both readings must now agree. NOTE the fraction is faked on the VENUE
-    (the walk), not on _pm_held, which cannot return one."""
+    """close_position closed the WHOLE slug and was the only order this
+    worker sent with no clamp to its own book, so "am I the sole holder"
+    had to be certain: the venue's own walk (which carries fractions) had
+    to agree with `_pm_held`'s floored reading, or `flatten_holding_disagrees`
+    refused the close and the book left by the co-held IOC instead.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE QUESTION IS NO LONGER
+    ASKED, because nothing this worker sends is unclamped: `_flatten_send`,
+    `close_position` and the co-held IOC are deleted, and a flatten is a
+    post-only rest sized by `_sell_qty` / `_cover_qty` to OUR OWN leg. So
+    `_pm_held` has no caller on the money path and
+    `flatten_holding_disagrees` is a DECLARED ZERO with no emit site -- both
+    kept as the record of the rule they guarded. What this test pins now is
+    the guarantee that made the guard unnecessary: at EVERY one of the three
+    holdings the old test told apart -- a stranger's half share, a fresh read
+    LARGER than ours, an exact match -- the tick sends the SAME order, for
+    OUR 300 and no more, and never a close."""
     def _book():
-        p = _pool(fills=_unpriced(), snap=None)      # an unpriced vanish: the slippage leg (E4)
+        p = _pool(fills=_unpriced(), snap=None)      # an unpriced vanish
         b = p.add_book(ledger=300, last_plan={"kind": "flatten_vanished", "vanish_since": NOW - 400})
         p.add_order(b, side=SELL, wire=0.32, qty=300, kind="flatten_vanished", state="cancelled",
                     placed_ts=NOW - 400, done_at=NOW - 10, order_id=None)
         return p, b
     gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0}])
-
-    # someone else holds half a share: the walk sees 300.5, _pm_held 300.
-    # No whole-slug close -- AND the book must still be able to leave, by
-    # the co-held IOC: refusing outright strands it (and the admin
-    # flatten, which lands in this same function) on every later tick too
-    p, b = _book()
-    v = _Venue(held={SLUG: 300.5})
-    st = _tick(p, v, http=gone)
-    assert not [c for c in v.calls if c[0] == "close"], "a fraction is not sole"
-    assert _census(st, "flatten_holding_disagrees") >= 1
-    assert [c for c in v.calls if c[0] == "place"], "a co-held slug still exits by IOC"
-
-    # the two sources disagree the other way: the fresh read is larger
-    async def _held301(t, slug):
-        return 301, 0.31
-    monkeypatch.setattr(ml, "_pm_held", _held301)
-    p, b = _book()
-    v = _Venue(held={SLUG: 300})
-    st = _tick(p, v, http=gone)
-    assert not [c for c in v.calls if c[0] == "close"]
-    assert _census(st, "flatten_holding_disagrees") >= 1
-
-    # both readings at our own ledger: still the sole holder, one walk
-    async def _held300(t, slug):
-        return 300, 0.31
-    monkeypatch.setattr(ml, "_pm_held", _held300)
-    p, b = _book()
-    v = _Venue(held={SLUG: 300})
-    st = _tick(p, v, http=gone)
-    assert [c for c in v.calls if c[0] == "close"], "an exact match is sole"
-    assert _census(st, "flatten_holding_disagrees") == 0
-    # ONE fresh whole-account read on this path, not two: the second was
-    # a 50-page walk outside the pacer, immediately before the most
-    # dangerous order the worker sends (round-one review)
-    src = _flatten_src()
-    assert src.count("_pm_held(t, r.slug)") == 1
+    sent = []
+    for label, held, pm in (("a stranger's half share beside ours", 300.5, 300),
+                            ("the fresh read larger than ours", 300, 301),
+                            ("both readings at our own ledger", 300, 300)):
+        async def _held(t, slug, n=pm):
+            return n, 0.31
+        monkeypatch.setattr(ml, "_pm_held", _held)
+        p, b = _book()
+        v = _Venue(held={SLUG: held})
+        st = _tick(p, v, http=gone)
+        assert not [c for c in v.calls if c[0] == "close"], (label, "no close on any reading")
+        assert _census(st, "flatten_holding_disagrees") == 0, label
+        # the SAME rest, for OUR 300, at the touch's own inside tick
+        assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, "TIME_IN_FORCE_GOOD_TILL_CANCEL")], label
+        assert _census(st, "flatten_rested") == 1 and b["ledger_net"] == 300, label
+        sent.append([c[1:] for c in _places(v)])
+    assert sent[0] == sent[1] == sent[2], "the holding cannot change what a clamped rest sends"
+    # the guard and its reader, retired together and kept as the record
+    src = inspect.getsource(ml)
+    assert src.count("flatten_holding_disagrees") == 1, "CENSUS_KEYS alone: no emit site"
+    assert ml._new_stats()["census"]["flatten_holding_disagrees"] == 0
+    assert src.count("_pm_held(t,") == 0, "no caller on any path"
+    from tests.test_e31_maker_only import _code as _nocomment
+    assert not hasattr(ml, "_flatten_send")
+    assert "close_position" not in _nocomment(ml._flatten_vanished), "the paragraph names it; no line reads it"
+    # the quantity is clamped to our own leg on both sides, as it always was
+    assert "_sell_qty(book, p.qty)" in inspect.getsource(ml._act)
+    assert "_cover_qty(book, _leg_of(book))" in inspect.getsource(ml._flatten_vanished)
 
 
 # ------------------------------------ 15. PHASE 1, WIRED, and one seam
@@ -4252,7 +4519,13 @@ def test_a_fill_above_the_wire_trips_and_freezes():
 def test_a_fill_at_create_above_the_wire_trips_before_the_post_only_latch():
     """A post-only order the venue crossed anyway is precisely the fill
     most likely to be above the wire, and `_place` books it BEFORE the
-    latch runs -- so the check must run on that call."""
+    latch runs -- so the check must run on that call.
+
+    RE-PINNED at E31 (FILL lane 31): there is no latch to run any more --
+    the flag is a literal at the send -- so what the booking must come
+    before is the DURABLE BLOCK the venue's own `aggressor` writes
+    (`_write_post_only_block`). The ordering is the point either way:
+    `_book_delta`'s overspend check on the create's own fill runs first."""
     def _place(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
         return {"ok": True, "order_id": oid, "status": "filled",
                 "fill_price": round(price + 0.02, 2), "filled_shares": float(qty), "raw": {}}
@@ -4261,7 +4534,7 @@ def test_a_fill_at_create_above_the_wire_trips_before_the_post_only_latch():
     assert _census(st, "mirror_overspend") >= 1 and p.state["mirror_live"] is False
     assert _census(st, "post_only_ignored") == 1
     src = _place_src()
-    assert src.index("_book_delta") < src.index("_POST_ONLY_OK = False")
+    assert src.index("_book_delta") < src.index("_write_post_only_block")
 
 
 def test_a_close_row_never_trips_overspend(monkeypatch):
@@ -4271,14 +4544,20 @@ def test_a_close_row_never_trips_overspend(monkeypatch):
                             {"avg_px": 0.29}) is False
     assert ml._overspend_of({"side": BUY, "tif": "CLOSE", "wire": 0.0},
                             {"avg_px": 0.29}) is False
-    p = _pool(fills=_unpriced(), snap=None)          # an unpriced vanish: the close (E4)
+    # E31 (FILL lane 31, 2026-09-10): no tick of this worker sends a CLOSE any more, so the
+    # world is seeded with a legacy CLOSE row -- the shape `_overspend_of` must keep reading
+    # -- and the tick is pinned to send NO close and trip nothing. `_overspend_of`'s own rule
+    # for the 0.0 wire is untouched and is the point of the test
+    p = _pool(fills=_unpriced(), snap=None)
     b = p.add_book(ledger=300, last_plan={"kind": "flatten_vanished", "vanish_since": NOW - 400})
-    p.add_order(b, side=SELL, wire=0.32, qty=300, kind="flatten_vanished", state="cancelled",
-                placed_ts=NOW - 400, done_at=NOW - 10, order_id=None)
+    p.add_order(b, side=SELL, wire=0.0, qty=300, kind="flatten_vanished", tif="CLOSE",
+                order_id=None, state="placing", placed_ts=NOW - 90)
     v = _Venue(held={SLUG: 300})
     st = _tick(p, v, http=_gone())
-    assert [c for c in v.calls if c[0] == "close"]
+    assert not [c for c in v.calls if c[0] == "close"], "E31: the slippage leg is gone"
     assert _census(st, "mirror_overspend") == 0 and p.state["mirror_live"] is True
+    row = next(x for x in p.orders.values() if x["tif"] == "CLOSE")
+    assert row["wire"] == 0.0, "the deliberate 0.0 the 050 INSERT wrote, still read by _overspend_of"
 
 
 def test_an_unreadable_avg_px_counts_but_does_not_trip():
@@ -4290,7 +4569,10 @@ def test_an_unreadable_avg_px_counts_but_does_not_trip():
     st = _tick(p, v)
     assert _census(st, "overspend_uncheckable") >= 1
     assert p.state["mirror_live"] is True and b["state"] != "frozen"
-    assert b["ledger_net"] == 300 and b["avg_cost"] == 0.30, "booked at the wire, as before"
+    # E31: the rest is re-quoted from the seeded 0.30 to HIS cent 0.31 before it fills, so
+    # "booked at the wire" books 0.30 -- the wire of the row the venue reports the fill on.
+    # The RULE is byte for byte: an unreadable avg_px books at the ROW'S OWN wire
+    assert b["ledger_net"] == 300 and b["avg_cost"] == 0.30, "booked at the row's wire, as before"
     assert ml._overspend_of({"side": BUY, "tif": "GTC", "wire": None}, {"avg_px": 0.31}) is None
     assert ml._overspend_of({"side": BUY, "tif": "GTC", "wire": 0.30}, {"avg_px": None}) is None
 
@@ -4381,7 +4663,19 @@ def test_the_takes_cancel_spends_the_replace_budget_and_the_take_is_refused_at_t
     rest (the PMUS_MIRROR_GTD flag's) cancelled by a take is a
     re-quote as much as a GTC one, so a count narrowed to GTC alone
     must fail the GTD case here. tests/test_mirror_live_day_cap pins
-    the statement's text by its tag."""
+    the statement's text by its tag.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE CYCLE THIS RAIL
+    BOUNDED CANNOT HAPPEN: there is no take arm, so a book cannot cycle
+    rest -> wait -> take -> rest at all, and clause (2) -- the TAKE
+    refused `take_capped` before its cancel -- has no site. What must
+    still hold, and is pinned below, is the rest of the mechanism: (1)
+    cancels under reason 'take' STILL count against the hour (rows written
+    before this lane are on file and must not be forgotten), so the next
+    REPLACE is refused `replace_capped`; (2') at the cap the take's own
+    world -- the ask arriving at the rest's wire -- sends nothing at all,
+    which is the outcome the rail was for; (3) an IOC row under reason
+    'take' is still not a re-quote."""
     cap = rules.MIRROR_MAX_REPLACES_PER_HOUR
     # (1) a replace decision (the rest is a cent under the plan)
     p = _pool()
@@ -4393,32 +4687,23 @@ def test_the_takes_cancel_spends_the_replace_budget_and_the_take_is_refused_at_t
     v.rest("oid-1", price=0.28)
     st = _tick(p, v)
     assert _census(st, "replace_capped") == 1 and not _cancels(v) and not _places(v)
-    # (2) a take decision: the rest has stood the wait and the ask is
-    # at the wire; at the cap the take is refused by name, nothing is
-    # cancelled, nothing placed, and the rest still stands
-    p = _pool()
-    b = p.add_book(ledger=0)
-    for _ in range(cap):
-        p.add_order(b, state="cancelled", reason="take", tif=tif, done_at=NOW - 100, order_id=None)
-    o = p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S - 1)
-    v = _Venue(ask=0.30, ioc_fill=300.0)
-    v.rest("oid-1")
-    st = _tick(p, v)
-    assert _census(st, "take_capped") == 1 and _census(st, "take_placed") == 0
-    assert not _cancels(v) and not _places(v)
-    assert p.orders[o["id"]]["state"] == "open" and b["open_order_id"] == o["id"]
-    # one under the cap: the take goes out as before, and its cancel
-    # is the count's (cap)th row, so the NEXT take is the refused one
-    p = _pool()
-    b = p.add_book(ledger=0)
-    for _ in range(cap - 1):
-        p.add_order(b, state="cancelled", reason="take", tif=tif, done_at=NOW - 100, order_id=None)
-    p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S - 1)
-    v = _Venue(ask=0.30, ioc_fill=300.0)
-    v.rest("oid-1")
-    st = _tick(p, v)
-    assert _census(st, "take_placed") == 1 and _census(st, "take_capped") == 0
-    assert _cancels(v) == [("cancel", "oid-1", SLUG)]
+    # (2') the take's own world -- the rest has stood the wait and the ask is AT the wire.
+    # E31: nothing is cancelled and nothing is placed AT ANY COUNT, because the ask coming to
+    # a resting bid is the market coming to us: `maker_compare_wire` returns the standing
+    # wire. `take_capped` is a declared zero; the rest stands at the cap and one under it
+    for n in (cap, cap - 1):
+        p = _pool()
+        b = p.add_book(ledger=0)
+        for _ in range(n):
+            p.add_order(b, state="cancelled", reason="take", tif=tif, done_at=NOW - 100, order_id=None)
+        o = p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S - 1)
+        v = _Venue(ask=0.30, ioc_fill=300.0)
+        v.rest("oid-1")
+        st = _tick(p, v)
+        assert _census(st, "take_capped") == 0 and _census(st, "take_placed") == 0, n
+        assert not _cancels(v) and not _places(v), n
+        assert _census(st, "open_order_pending") == 1 and b["ledger_net"] == 0, n
+        assert p.orders[o["id"]]["state"] == "open" and b["open_order_id"] == o["id"], n
     # (3) IOC rows under reason 'take' (the takes themselves) are not
     # re-quotes: with `cap` of them and no cancel, the replace goes out
     p = _pool()
@@ -4431,16 +4716,24 @@ def test_the_takes_cancel_spends_the_replace_budget_and_the_take_is_refused_at_t
     v.rest("oid-1", price=0.28)
     st = _tick(p, v)
     assert _census(st, "replace_capped") == 0 and _cancels(v) and _places(v)
-    assert "take_capped" in ml.CENSUS_KEYS
+    # the name stays DECLARED as the record of the rule it governed, with no writer left
+    assert "take_capped" in ml.CENSUS_KEYS and ml._new_stats()["census"]["take_capped"] == 0
+    assert inspect.getsource(ml).count('_mirror_stop("take_capped"') == 0
 
 
 def test_an_unreadable_requote_count_is_the_cap_for_the_replace_and_for_the_take():
     """The fail-closed rail _requotes_this_hour carries (review of the
     first cut, 2026-09-05: it moved into the helper and nothing pinned
-    it): a count the pool cannot read IS the cap, so the replace
-    decision is refused 'replace_capped' and the take 'take_capped',
-    nothing cancelled, nothing placed, the rest standing. A helper
-    that read an unreadable count as zero would let both go out."""
+    it): a count the pool cannot read IS the cap, so the replace decision
+    is refused 'replace_capped', nothing cancelled, nothing placed, the
+    rest standing. A helper that read an unreadable count as zero would
+    let it go out.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the take half of the rail
+    is retired with the take, so the second world pins what stands at its
+    site -- the same unreadable count on the same book sends NOTHING, and
+    `take_capped` is a declared zero. The fail-closed reading itself is
+    unchanged and is proved by the first world."""
     # the replace decision (the rest is a cent under the plan)
     p = _pool()
     b = p.add_book(ledger=0)
@@ -4460,10 +4753,15 @@ def test_an_unreadable_requote_count_is_the_cap_for_the_replace_and_for_the_take
     v = _Venue(ask=0.30, ioc_fill=300.0)
     v.rest("oid-1")
     st = _tick(p, v)
-    assert _census(st, "take_capped") == 1 and _census(st, "take_placed") == 0
+    assert _census(st, "take_capped") == 0 and _census(st, "take_placed") == 0
     assert not _cancels(v) and not _places(v)
+    assert _census(st, "open_order_pending") == 1 and b["ledger_net"] == 0
     assert p.orders[o["id"]]["state"] == "open" and b["open_order_id"] == o["id"]
-    assert [x for x in p.sent if "ml-replaces" in x[1]], "the count was asked for"
+    # the count is not even asked for on this road: the rest is not moving, so no replace
+    # decision is reached -- where the take read the rail before its cancel
+    assert not [x for x in p.sent if "ml-replaces" in x[1]]
+    # and the fail-closed reading itself, on the helper the first world exercised
+    assert ml._requotes_this_hour.__doc__ and "cap" in ml._requotes_this_hour.__doc__
 
 
 # ------------------ 16. the quote read names the venue's market STATE
@@ -4624,11 +4922,21 @@ def test_the_flattens_slippage_leg_refuses_a_non_open_slug_before_it_reads_a_bid
     read counted the slug venue_halted; the sole-holder branch sent
     close_position with no quote read at all. Under the admin flatten
     lever, after MIRROR_FLATTEN_REST_S of the rest: no IOC, no
-    close_position, no bid read, no position read -- the leg is
-    refused `venue_halted` (the read's own count plus the leg's), the
-    plan names it, the book keeps its shares. The same fixture with the
-    slug OPEN takes the leg as before: close_position for the sole
-    holder, the IOC at the bid when co-held."""
+    close_position, no bid read, no position read, the plan names the
+    refusal, the book keeps its shares.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE HOLE IS CLOSED BY
+    DELETION: `_flatten_send` -- the leg that priced an IOC off `slug_bid`
+    and the sole branch that sent close_position -- is gone, so there is
+    no order on this road that can be priced off an unread state at all.
+    The refusal is therefore counted ONCE (2 -> 1), by the tick's own
+    QUOTE READ, where it used to be counted twice (the read, then the
+    leg's own guard); the refusal itself, its name, the plan and the kept
+    shares are unchanged. The OPEN control changes with it: instead of
+    close_position for the sole holder and the IOC at the bid when
+    co-held, BOTH send the flatten's post-only rest at the touch's inside
+    tick, for our own clamped quantity, and neither reads a bid or a
+    position."""
     assert rules.MIRROR_FLATTEN_REST_S <= 400
     gone = _gone()
     # SOLE HOLDER: close_position is the order at stake
@@ -4637,10 +4945,13 @@ def test_the_flattens_slippage_leg_refuses_a_non_open_slug_before_it_reads_a_bid
     assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v), v.calls
     assert not [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
     assert not _places(v), "nothing rested either: the read was not a quote"
-    assert _census(st, "venue_halted") == 2, st["census"]       # the read, then the leg
+    assert _census(st, "venue_halted") == 1, st["census"]       # the read; the leg's own is gone with it
     assert _census(st, "no_bid_for_flatten") == 0 and _census(st, "flatten_vanished") == 1
-    assert b["ledger_net"] == 300 and b["last_reason"] == "venue_halted" and b["state"] == "live"
-    assert st["venue_state"] == state and not st["abandoned"]
+    # E31: the PLAN's own name is `maker_no_cent` -- the clamp reads the near touch and a
+    # non-OPEN read hands it none, so the fail-closed hold names it and NOTHING is sent.
+    # `venue_halted` is the READ's own count, above; both say the same thing at their site
+    assert b["ledger_net"] == 300 and b["last_reason"] == "maker_no_cent" and b["state"] == "live"
+    assert _census(st, "maker_no_cent") == 1 and st["venue_state"] == state and not st["abandoned"]
     assert not [x for x in p.orders.values() if x["state"] in ("placing", "open", "unknown")]
     # CO-HELD: the IOC at sell_limit_price(bid) is the order at stake
     async def _held(t, slug):
@@ -4653,31 +4964,41 @@ def test_the_flattens_slippage_leg_refuses_a_non_open_slug_before_it_reads_a_bid
                                      **quotes)
     st = _tick(p, v, http=gone)
     assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v) and not _places(v), v.calls
-    assert _census(st, "venue_halted") == 2 and _census(st, "no_bid_for_flatten") == 0, st["census"]
-    assert b["ledger_net"] == 300 and b["last_reason"] == "venue_halted"
+    assert _census(st, "venue_halted") == 1 and _census(st, "no_bid_for_flatten") == 0, st["census"]
+    assert b["ledger_net"] == 300 and b["last_reason"] == "maker_no_cent"
     # THE CONTROL: the slug OPEN on the same fixture takes the leg (a
     # fresh world again: the co-held CLOSED read memoised the book)
     ml._terminal_book_until.clear()
     p, b, v = _vanish_after_the_rest("MARKET_STATE_OPEN", held=500, manual=200.0, flatten_bid=0.29,
                                      ioc_fill=300.0, bid=0.30, ask=0.32)
     st = _tick(p, v, http=gone)
-    assert ("slug_bid", SLUG, True) in v.calls and "close" not in _kinds(v)
-    ioc = [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert len(ioc) == 1 and ioc[0][2] == le.sell_limit_price(0.29) and ioc[0][3] == 300 and ioc[0][4] is True
-    assert b["ledger_net"] == 0 and _census(st, "venue_halted") == 0
+    # E31: no slug_bid, no close and no IOC -- the flatten's post-only rest at the touch's
+    # inside tick, for our clamped 300. `sell_limit_price` keeps its own arithmetic and its
+    # unit pin; no order path reads it
+    assert "slug_bid" not in _kinds(v) and "close" not in _kinds(v)
+    assert [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"] == []
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, "TIME_IN_FORCE_GOOD_TILL_CANCEL")]
+    assert le.sell_limit_price(0.29) == 0.27, "the slippage bound, unread"
+    assert b["ledger_net"] == 300 and _census(st, "venue_halted") == 0
+    assert _census(st, "flatten_rested") == 1 and _census(st, "maker_rest_at_touch") == 1
 
     async def _held300(t, slug):
         return 300, 0.31
     monkeypatch.setattr(ml, "_pm_held", _held300)
+    ml._terminal_book_until.clear()
     p, b, v = _vanish_after_the_rest("MARKET_STATE_OPEN", bid=0.30, ask=0.32)
     st = _tick(p, v, http=gone)
-    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v.calls and b["ledger_net"] == 0
-    assert _census(st, "venue_halted") == 0 and st["flattened"] == 1
-    # the refusal sits BEFORE the position read and the bid read, by the source
-    src = _flatten_src()
-    i_refuse = src.index('_mirror_stop("venue_halted", w)')
-    assert i_refuse < src.index("_pm_held(t, r.slug)") < src.index("t.pmus.slug_bid")
-    assert 'r.venue_state is not None and r.venue_state != _STATE_OPEN' in src
+    # the SOLE holder takes the same road: one clamped rest, never close_position
+    assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v)
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, "TIME_IN_FORCE_GOOD_TILL_CANCEL")]
+    assert b["ledger_net"] == 300 and _census(st, "venue_halted") == 0 and st["flattened"] == 0
+    # the state refusal now sits at the tick's QUOTE READ, before any plan is made, and the
+    # leg it guarded no longer exists
+    assert not hasattr(ml, "_flatten_send")
+    assert inspect.getsource(ml).count('_mirror_stop("venue_halted"') == 0, "the read names it, not a leg"
+    from tests.test_e31_maker_only import _code as _nocomment
+    fv = _nocomment(ml._flatten_vanished)
+    assert "slug_bid" not in fv and "close_position" not in fv, "the paragraph names them; no line reads them"
 
 
 # ------------------------------- 11b. U11: sub-share ledger dust is not an overfill
@@ -4824,10 +5145,13 @@ def test_the_incident_book_flattens_at_the_ledger_books_the_dust_and_reaches_the
     assert "_held" not in inspect.getsource(ml._book_fill)
     assert inspect.getsource(ml).count('book["_held"] =') == 1
     act = inspect.getsource(ml._act)
-    # three SELL legs size through it: the exit's take within a cent of
-    # him (E4), the take at the wire with no price of his, the rest
-    # (FILL lane 3, 2026-09-08: the no-rest long exit's band site sizes the same way, 3 -> 4)
-    assert act.count("_sell_qty(book, p.qty)") == 4 and 'int(book.get("ledger_net") or 0)) if p.side == SELL' not in act
+    # E31 (FILL lane 31, 2026-09-10): 4 -> 1. Three of the four SELL legs that sized through
+    # `_sell_qty` were TAKE arms -- the exit's take within a cent of him (E4), the take at
+    # the wire with no price of his, and lane 3's band site -- and they left _act with the
+    # take. The ONE that remains is the exit's REST, which every long exit now goes through,
+    # and the clamp itself (min(plan, ledger, ceil(held))) is byte for byte
+    assert act.count("_sell_qty(book, p.qty)") == 1 and 'int(book.get("ledger_net") or 0)) if p.side == SELL' not in act
+    assert act.count("_cover_qty(book, p.qty)") == 1, "and its mirror on the cover's rest"
     assert "math.floor" not in inspect.getsource(ml._sell_qty)
 
 
@@ -4849,52 +5173,80 @@ def _sub_share_vanish(held_venue, pm_held, monkeypatch, manual=0.0, **venue_kw):
 
 
 def test_a_sole_holder_at_ledger_one_row_a_fraction_sends_close_position_unclamped(monkeypatch):
-    """(b) ledger 1 / row 0.76, the venue holds our 0.76 and nobody
-    else's: close_position, the whole slug, fraction included -- never
-    sized to the row, never under_one_share. The row's qty is the
-    ledger (1) so a lost close reconstructs `sold = qty - int(held)` as
-    the whole ledger."""
-    close = {"ok": True, "order_id": "close-1", "status": "filled", "fill_price": 0.29,
-             "filled_shares": 0.76, "raw": {}}
-    p, b, v = _sub_share_vanish(0.76, 0, monkeypatch, close=close)
+    """(b) ledger 1 / row 0.76, the venue holds our 0.76 and nobody else's.
+    close_position took the whole slug, fraction included -- never sized to
+    the row, never under_one_share.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE UNCLAMPED ORDER IS
+    GONE: `_flatten_send`, the sole reading and close_position are deleted,
+    and the flatten is a post-only rest sized by `_sell_qty` --
+    min(plan, ledger 1, ceil(0.76)) = 1 -- at the touch's own inside tick.
+    The pin the test carries is the one that mattered: THE FRACTION STILL
+    LEAVES. A row of 0.76 under a ledger of 1 is not `under_one_share`, the
+    order goes for the whole 1, and the dust is booked when it fills."""
+    p, b, v = _sub_share_vanish(0.76, 0, monkeypatch)
     row = p.rows[b["standing_row_id"]]
     st = _tick(p, v, http=_gone())
-    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v.calls and "slug_bid" not in _kinds(v)
+    assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v)
     assert _census(st, "under_one_share") == 0 and _census(st, "flatten_vanished") == 1, st["census"]
     assert _census(st, "overfill") == 0 and _census(st, "ledger_dust") == 0
-    o = next(x for x in p.orders.values() if x["tif"] == "CLOSE")
-    assert o["qty"] == 1 and o["wire"] == 0.0 and o["booked_filled"] == 0.76
-    assert row["filled_shares"] == 0.0 and b["ledger_net"] == 0 and b["state"] != "frozen"
+    assert [c[2:6] for c in _places(v)] == [(0.31, 1, True, "TIME_IN_FORCE_GOOD_TILL_CANCEL")]
+    assert _census(st, "flatten_rested") == 1 and _census(st, "maker_rest_at_touch") == 1
+    o = next(x for x in p.orders.values() if x["state"] == "open")
+    assert o["qty"] == 1 and o["kind"] == "flatten_vanished" and o["tif"] == "GTC" and o["wire"] == 0.31
+    assert row["filled_shares"] == 0.76 and b["ledger_net"] == 1 and b["state"] != "frozen"
     assert p.state["mirror_live"] is True
-    # the gate sits BELOW the sole decision and inside the co-held arm only
-    # (of the slippage leg itself: since S4 _flatten_vanished carries the
-    # short cover's own under_one_share gate beside it)
-    src = inspect.getsource(ml._flatten_send)
-    i_sole = src.index("sole = sole_walk and sole_read")
-    i_gate = src.index('_mirror_stop("under_one_share", w)')
-    assert i_sole < src.index("qty = _sell_qty(book, ledger)") < i_gate < src.index("t.pmus.slug_bid")
+    # the venue fills the whole 1 on a row of 0.76: dust 0.24, booked, flat, no trip --
+    # the same booking the close's fill produced, at a cent we chose instead of the market's
+    v2 = _Venue(held={SLUG: 0}, fills={"oid-1": (1.0, 0.31)})
+    v2.orders = v.orders
+    st2 = _tick(p, v2, now=NOW + 30, http=_gone())
+    assert row["filled_shares"] == 0.0 and b["ledger_net"] == 0
+    assert _census(st2, "ledger_dust") == 1 and _census(st2, "overfill") == 0
+    assert o["state"] == "filled" and o["receipt"]["dust_total"] == pytest.approx(0.24)
+    assert p.state["mirror_live"] is True
+    # the gate: ONE `under_one_share` in the flatten's own function, below the sizing, and
+    # the leg it sizes is OUR OWN -- the sole reading it used to sit under is retired
+    src = inspect.getsource(ml._flatten_vanished)
+    assert src.index("qty = _cover_qty(book, _leg_of(book))") < src.index('_mirror_stop("under_one_share", w)')
     assert src.count('_mirror_stop("under_one_share", w)') == 1
-    # S4: the slippage leg is the LONG book's alone -- a short book is
-    # refused at its head (`book_error`) and its cover is _act's priced
-    # order; the co-held arm sizes the long book's IOC directly
-    assert "qty = ledger\n    if not sole:\n        qty = _sell_qty(book, ledger)" in src
-    assert "short_reduce_unproven" not in inspect.getsource(ml._flatten_send)
+    from tests.test_e31_maker_only import _code as _nocomment
+    code = _nocomment(ml._flatten_vanished)
+    assert "sole" not in code and "slug_bid" not in code, "the paragraph names them; no line reads them"
+    assert not hasattr(ml, "_flatten_send")
 
 
 def test_a_coheld_ioc_at_ledger_one_row_a_fraction_sends_one_share(monkeypatch):
-    """(c) the same numbers co-held (the desk's 200 beside our 0.76):
-    the IOC sells min(ledger 1, ceil(0.76)) = 1, the venue fills 1.0 on
-    a row of 0.76 -- dust 0.24, booked, flat, no trip."""
+    """(c) the same numbers co-held (the desk's 200 beside our 0.76): the
+    order sells min(ledger 1, ceil(0.76)) = 1, the venue fills 1.0 on a row
+    of 0.76 -- dust 0.24, booked, flat, no trip.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the co-held IOC at
+    `le.sell_limit_price(slug_bid)` -- two cents THROUGH the bid -- is
+    retired with `_flatten_send`, so there is no `slug_bid` read and no
+    IOC. The order is the flatten's post-only rest at the touch's inside
+    tick for the same ONE share, and the fill it books is the same. The
+    control at the end -- a row at ZERO under a ledger of 1 is the one case
+    `under_one_share` still refuses -- is unchanged."""
     p, b, v = _sub_share_vanish(200.76, 200, monkeypatch, manual=200.0, flatten_bid=0.29, ioc_fill=1.0)
     row = p.rows[b["standing_row_id"]]
     st = _tick(p, v, http=_gone())
-    assert "close" not in _kinds(v) and ("slug_bid", SLUG, True) in v.calls
-    ioc = [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert len(ioc) == 1 and ioc[0][3] == 1 and ioc[0][4] is True and ioc[0][2] == le.sell_limit_price(0.29)
-    assert _census(st, "under_one_share") == 0 and _census(st, "ledger_dust") == 1, st["census"]
-    assert _census(st, "overfill") == 0 and b["ledger_net"] == 0 and row["filled_shares"] == 0.0
-    o = next(x for x in p.orders.values() if x["tif"] == "IOC")
-    assert o["qty"] == 1 and o["state"] == "filled" and o["receipt"]["dust_total"] == pytest.approx(0.24)
+    assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v)
+    assert [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"] == []
+    pl = _places(v)
+    assert len(pl) == 1 and pl[0][3] == 1 and pl[0][4] is True and pl[0][2] == 0.31
+    assert pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and pl[0][7] is True
+    assert _census(st, "under_one_share") == 0 and _census(st, "flatten_rested") == 1, st["census"]
+    assert _census(st, "overfill") == 0 and b["ledger_net"] == 1 and row["filled_shares"] == 0.76
+    o = next(x for x in p.orders.values() if x["state"] == "open")
+    assert o["qty"] == 1 and o["tif"] == "GTC"
+    # the venue fills the 1 on the row of 0.76: dust 0.24, booked, flat, no trip
+    v1b = _Venue(held={SLUG: 200.0}, fills={"oid-1": (1.0, 0.31)})
+    v1b.orders = v.orders
+    st1b = _tick(p, v1b, now=NOW + 30, http=_gone())
+    assert _census(st1b, "ledger_dust") == 1 and _census(st1b, "overfill") == 0
+    assert b["ledger_net"] == 0 and row["filled_shares"] == 0.0
+    assert o["state"] == "filled" and o["receipt"]["dust_total"] == pytest.approx(0.24)
     assert p.state["mirror_live"] is True and b["state"] != "frozen"
     # a row at ZERO under a ledger of 1 is the one co-held case the gate still refuses
     p2, b2, v2 = _sub_share_vanish(200.0, 200, monkeypatch, manual=200.0, flatten_bid=0.29, ioc_fill=1.0)
@@ -5028,7 +5380,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104) and FILL lane 11 by its one (-> -105);
     # E23 (FILL lane 23) by its six `cancel_fill_*` / `disagree_fill_*` names (-> -111) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E24 (FILL lane 24) by its four `hand_*` names (-118 -> -122)
-    assert keys[-136:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-146:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -5108,48 +5460,48 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E14 (FILL lane 2): an entry's one IOC sent at the band cent
                           # (the ask a cent above his, at first sight on a long book) --
                           # before E19's name and `registered_no_increase` (keys[-12]),
-                          # after E20's and E14b's, which landed first (keys[-23])
+                          # after E20's and E14b's, which landed first (keys[-33])
                           "take_in_band",
                           # FILL lane 3: the exit's band IOC on a long book / the cover's on a
                           # short (both inert at the default band) and the fast gate's
                           # order-open split on his reducing fill -- before E19's name and
-                          # `registered_no_increase` (keys[-12]), after E14's (keys[-25:-22])
+                          # `registered_no_increase` (keys[-12]), after E14's (keys[-35:-32])
                           "exit_take_in_band", "cover_in_band", "order_open_his_exit",
                           # T2 (FILL lane 4): the per-fill record's one INSERT failed or
                           # timed out (the rows kept for the next tick); the 060 table
                           # absent this tick (nothing queued) -- before E19's name and
-                          # `registered_no_increase` (keys[-12]), after E14's (keys[-24:-22])
+                          # `registered_no_increase` (keys[-12]), after E14's (keys[-34:-32])
                           "fill_answer_write_failed", "fill_answers_absent",
                           # FILL lane 5: a flat book held open on the clock while he
                           # holds / while his sizes could not be read; a candidate
                           # refused on a turned market -- before E19's name (keys[-13])
                           # and `registered_no_increase` (keys[-12]), after E14's
-                          # (keys[-25:-22])
+                          # (keys[-35:-32])
                           "he_holds", "he_holds_unread", "reopen_refused",
                           # E22 (FILL lane 22): a lost placement the venue filled after
                           # the window, adopted from the trade log when the venue
                           # position proves it; the log unreadable; the surplus not the
                           # row's or the log naming nothing; two ids or another size --
                           # before E19's name (keys[-13]) and `registered_no_increase`
-                          # (keys[-12]), after FILL lane 5's (keys[-26:-22])
+                          # (keys[-12]), after FILL lane 5's (keys[-36:-32])
                           "lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous",
                           # FILL lane 11: a candidate whose markets row already
                           # read closed or resolved, refused before the paced
                           # quote read -- before E19's name (keys[-13]) and
                           # `registered_no_increase` (keys[-12]), after FILL
-                          # lane 5's three (keys[-23])
+                          # lane 5's three (keys[-33])
                           "cand_market_closed_db",
                           # FILL lane 16: a book closed under a sign flip handed its
                           # market to the fast path's woken set (`turn.woke` True) --
                           # before E19's name (keys[-13]) and `registered_no_increase`
-                          # (keys[-12]), after FILL lane 11's one (keys[-29])
+                          # (keys[-12]), after FILL lane 11's one (keys[-39])
                           "turn_woke_fast",
                           # E21 (FILL lane 10): the fast tick's bare order_open refusal
                           # counted by name; the adding wake admitted with an entry rest
                           # standing; which branch _act took on it (kept / replaced /
                           # took); the fast step O's blank status read (no freeze) --
                           # before E19's name (keys[-13]) and `registered_no_increase`
-                          # (keys[-12]), after FILL lane 16's one (keys[-34:-28])
+                          # (keys[-12]), after FILL lane 16's one (keys[-44:-38])
                           "fast_order_open", "fast_his_add", "fast_add_kept", "fast_add_replaced",
                           "fast_add_took", "fast_status_unread",
                           # E23 (FILL lane 23): a cancelled rest whose venue fills outran
@@ -5160,7 +5512,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # unreadable / the surplus not the rows' / the readings
                           # disagreeing -- before E19's name (keys[-13]) and
                           # `registered_no_increase` (keys[-12]), after E21's six
-                          # (keys[-28:-22]); FILL lane 16 (one name) and E21 (six)
+                          # (keys[-38:-32]); FILL lane 16 (one name) and E21 (six)
                           # landed first, so every index past this lane's six moved
                           # by seven more than the lane's own worktree read
                           "cancel_fill_late", "cancel_fill_unread",
@@ -5171,7 +5523,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # reduced the book's own shares is adopted as its exit; the log
                           # unreadable; a reading nothing can attribute -- before E19's name
                           # (keys[-13]) and `registered_no_increase` (keys[-12]), after
-                          # E23's six (keys[-26:-22])
+                          # E23's six (keys[-36:-32])
                           "hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous",
                           # E25 (FILL lane 25): an exit sized from a sudden drop of our
                           # reading of his net held until the venue's own position
@@ -5179,20 +5531,24 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # MIRROR_EXIT_CONFIRM_MAX_TICKS; the drop reversed before it
                           # fired -- before E19's name (keys[-13]) and
                           # `registered_no_increase` (keys[-12]), after E24's four
-                          # (keys[-26:-22])
+                          # (keys[-36:-32])
                           "exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted",
                           # E28 (FILL lane 28): the walk's re-read under the lock -- the
                           # row moved on a planning column, the re-read raised, the row
                           # gone -- and the guarded ledger write's one retry landed / its
                           # second miss refused -- before E19's name (keys[-13]) and
                           # `registered_no_increase` (keys[-12]), after E25's four
-                          # (keys[-22:-17])
+                          # (keys[-32:-27])
                           "walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread",
                           "ledger_stale_refused",
                           # E29 (FILL lane 29): the desk's exit ends the book's adds (-126: -> -130:, -127 -> -131 in the lane's worktree; -135:, -136 at landing over E28)
                           "hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed",
                           # E30 (FILL lane 30): a rest the venue rejects tick after tick backs off (-135: -> -136:, -136 -> -137)
                           "post_only_backoff",
+                          # E31 (FILL lane 31): the maker's ten, after E30's one
+                          "maker_rest_at_touch", "maker_rest_repriced", "maker_cross_repriced",
+                          "maker_cross_held", "maker_no_cent", "maker_fill_at_create",
+                          "post_only_block", "ioc_refused", "rest_reread_capped", "rest_quote_unread",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5210,7 +5566,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
     # E25 (FILL lane 25) by its four `exit_*` exit-confirmation names (-122 -> -126, -123 -> -127)
-    assert keys[-137] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
+    assert keys[-147] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -5333,23 +5689,28 @@ def test_with_the_knob_on_a_short_book_opens_by_a_buy_short_rest_at_his_level(mo
     row = p.rows[b["standing_row_id"]]
     assert row["asset"] == N and row["raw"]["preview"]["intent"] == SHORT
     assert row["requested_shares"] == 300.0
-    # ONE BUY_SHORT rest, sell=False, post-only, at the contract price
-    # ceil(1 - 0.68) = 0.32 -- his 0.28 is under the ask, so the ask
+    # ONE BUY_SHORT rest, sell=False, post-only, at the contract price.
+    # E31 (FILL lane 31, 2026-09-10): 0.32 -> 0.31. His 0.28 in long space used to be LIFTED
+    # TO THE ASK -- _short_wire(his, ask) = ceil(max(0.28, 0.32)) = 0.32, which JOINED THE
+    # ASK's queue. The maker wire is max(sell_wire(0.28), bid 0.30 + MAKER_TICK) = 0.31, one
+    # tick OVER the bid and INSIDE the spread, and _short_wire turns that into the same cent
+    # on the contract. It is the touch bound, so the tick counts `maker_rest_at_touch`
     pl = _places(v)
     assert len(pl) == 1
-    assert pl[0][1:] == (SLUG, 0.32, 300, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL", SHORT, True, None)
+    assert pl[0][1:] == (SLUG, 0.31, 300, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL", SHORT, True, None)
+    assert b["last_plan"]["maker"]["clause"] == "touch" and _census(st, "maker_rest_at_touch") == 1
     o = next(iter(p.orders.values()))
     assert (o["side"], o["intent"], o["kind"], o["tif"]) == (SELL, SHORT, "increase", "GTC")
-    assert o["wire"] == 0.32 and o["state"] == "open"
+    assert o["wire"] == 0.31 and o["state"] == "open"
     assert _census(st, "short_open") == 1 and _census(st, "rest_placed") == 1
     assert _census(st, "short_side_refused") == 0
     # the reserve was the collateral and came back off: nothing leaks
     assert le._REST_RESERVED_USD == 0.0
-    # the day read prices the resting remainder at 1 - wire
-    assert p._run("fetchrow", ml._SQL_MIRROR_DAY, ()) == {"filled": 0.0, "open": pytest.approx(300 * 0.68)}
+    # the day read prices the resting remainder at 1 - wire (0.68 -> 0.69 with the cent)
+    assert p._run("fetchrow", ml._SQL_MIRROR_DAY, ()) == {"filled": 0.0, "open": pytest.approx(300 * 0.69)}
     # the venue's rest is a SELL of the contract, and the fingerprint agrees
     assert v.orders["oid-1"]["side"] == "SELL"
-    assert ml._on_book_matches(o, v.orders["oid-1"], 0.32, 300)
+    assert ml._on_book_matches(o, v.orders["oid-1"], 0.31, 300)
 
 
 def test_a_short_fill_books_a_signed_ledger_the_collateral_and_the_sign_proof(monkeypatch):
@@ -5358,18 +5719,22 @@ def test_a_short_fill_books_a_signed_ledger_the_collateral_and_the_sign_proof(mo
     v = _Venue()
     _tick(p, v, http=_short_http())
     b = next(iter(p.books.values()))
-    # the rest fills at its own cent; the venue now shows -300 on the slug
-    v2 = _Venue(held={SLUG: -300}, fills={"oid-1": (300.0, 0.32)})
+    # the rest fills at its own cent; the venue now shows -300 on the slug.
+    # E31: the rest's cent is 0.31 (the maker wire), not the ask's 0.32, so the collateral
+    # the fill costs is 300 x (1 - 0.31) = 207.00 where it was 300 x 0.68 = 204.00. The
+    # ARITHMETIC is untouched -- le.fill_cash on the wire that went out -- and every figure
+    # here moves with the cent, in our favour: we sold the contract a cent dearer
+    v2 = _Venue(held={SLUG: -300}, fills={"oid-1": (300.0, 0.31)})
     v2.orders = v.orders
     st = _tick(p, v2, now=NOW + 30, http=_short_http())
-    assert b["ledger_net"] == -300 and b["avg_cost"] == pytest.approx(0.32)
-    assert b["gross_buy_usd"] == pytest.approx(204.0) and b["peak_exposure_usd"] == pytest.approx(204.0)
+    assert b["ledger_net"] == -300 and b["avg_cost"] == pytest.approx(0.31)
+    assert b["gross_buy_usd"] == pytest.approx(207.0) and b["peak_exposure_usd"] == pytest.approx(207.0)
     row = p.rows[b["standing_row_id"]]
-    assert row["filled_shares"] == 300.0 and row["fill_price"] == pytest.approx(0.32)
-    assert row["filled_usd"] == pytest.approx(le.fill_cash(300, 0.32, SHORT)) == pytest.approx(204.0)
-    assert row["requested_usd"] == pytest.approx(300 * 0.68)
+    assert row["filled_shares"] == 300.0 and row["fill_price"] == pytest.approx(0.31)
+    assert row["filled_usd"] == pytest.approx(le.fill_cash(300, 0.31, SHORT)) == pytest.approx(207.0)
+    assert row["requested_usd"] == pytest.approx(300 * 0.69)
     o = next(iter(p.orders.values()))
-    assert o["state"] == "filled" and o["cash_usd"] == pytest.approx(204.0)
+    assert o["state"] == "filled" and o["cash_usd"] == pytest.approx(207.0)
     assert _census(st, "filled_rest") == 1 and b["state"] == "live"
     assert _census(st, "wrong_sign_trip") == 0 and _census(st, "venue_ledger_disagree") == 0
     # the short leg's at_or_better producer, with its denominator
@@ -5445,27 +5810,38 @@ def test_a_partial_reduce_of_a_short_is_refused_by_name_until_the_read_back_proo
 
 def test_a_short_flattens_by_its_priced_cover_sole_or_co_held_never_close_position(monkeypatch):
     """S4: the paired flatten of a short is a BUY of the long token with
-    the closing intent (SELL_SHORT on the wire) through _place -- here
-    the IOC at the ceiling cent (his buy-back 0.31 + 0.01 = 0.32, the
-    ask there) -- never close_position, and for OUR quantity: a
-    co-holder beside us changes nothing (no sole reading, no refusal)."""
+    the closing intent (SELL_SHORT on the wire) through _place -- never
+    close_position -- and for OUR quantity: a co-holder beside us changes
+    nothing (no sole reading, no refusal).
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the order is no longer the
+    IOC at the CEILING cent (his buy-back 0.31 + MIRROR_EXIT_TOL = 0.32,
+    THROUGH the ask that sits there). It is the post-only rest at
+    min(buy_wire(0.31), ask 0.32 - MAKER_TICK) = 0.31 -- HIS OWN cent -- and
+    this world's taker lifts it at create with `aggressor` False, a maker
+    fill. So the row's kind is 'flatten_paired' where it read 'take', its
+    tif GTC where it read IOC, `post_only` True where it was False, and the
+    cover pays 0.31 against a 0.32 short: realized +3.00, not 0. Nothing
+    about the flatten's SHAPE -- the intent, the side, the quantity, the
+    close, the co-hold reading -- moves."""
     _shorts_on(monkeypatch)
     # his net gone to zero while he still holds both tokens: the paired flatten
     p = _short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0})
     b = _short_book(p, ledger=-300)
-    v = _Venue(held={SLUG: -300}, ioc_fill=300.0)
+    v = _Venue(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st = _tick(p, v, http=_mkt(400.0, 400.0))
     assert b["target"] == 0 and b["last_plan"]["kind"] == "flatten_paired"
     assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v)
-    assert [c[1:] for c in _places(v)] == [(SLUG, 0.32, 300, True, IOC_TIF, SHORT, False, None)]
+    assert [c[1:] for c in _places(v)] == [(SLUG, 0.31, 300, True, GTC_TIF, SHORT, True, None)]
     o = next(iter(p.orders.values()))
-    assert (o["kind"], o["side"], o["tif"], o["intent"]) == ("take", BUY, "IOC", "ORDER_INTENT_SELL_SHORT")
-    assert o["qty"] == 300 and o["state"] == "filled" and o["wire"] == 0.32
-    # the cover filled 300 @ 0.32 against a 0.32 short: the leg covers to zero, realized 0
-    assert b["ledger_net"] == 0 and b["realized_pnl"] == pytest.approx(0.0)
+    assert (o["kind"], o["side"], o["tif"], o["intent"]) == ("flatten_paired", BUY, "GTC", "ORDER_INTENT_SELL_SHORT")
+    assert o["qty"] == 300 and o["state"] == "filled" and o["wire"] == 0.31
+    # the cover filled 300 @ 0.31 against a 0.32 short: the leg covers to zero, realized +3
+    assert b["ledger_net"] == 0 and b["realized_pnl"] == pytest.approx(3.0)
     assert p.rows[b["standing_row_id"]]["filled_shares"] == 0.0
     assert _census(st, "short_flatten_close") == 1
-    assert _census(st, "short_cover_take") == 1 and _census(st, "exit_take") == 1
+    assert _census(st, "short_cover_take") == 0 and _census(st, "exit_take") == 0
+    assert _census(st, "short_cover_rest") == 1 and _census(st, "maker_fill_at_create") == 1
     assert _census(st, "overfill") == 0 and _census(st, "short_reduce_unproven") == 0
     lp = b["last_plan"]
     assert lp["exit_px"] == pytest.approx(0.31) and lp["exit_ceiling"] == pytest.approx(0.32)
@@ -5481,17 +5857,23 @@ def test_a_short_flattens_by_its_priced_cover_sole_or_co_held_never_close_positi
     # `venue_ledger_disagree` first, as it does a long book (R7)
     p2 = _short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0})
     b2 = _short_book(p2, ledger=-300)
-    v2 = _Venue(held={SLUG: -300.5}, ioc_fill=300.0)
+    v2 = _Venue(held={SLUG: -300.5}, ioc_fill=300.0, lift=300.0)
     st2 = _tick(p2, v2, http=_mkt(400.0, 400.0))
     assert "close" not in _kinds(v2) and "slug_bid" not in _kinds(v2)
-    assert [c[2:6] for c in _places(v2)] == [(0.32, 300, True, IOC_TIF)]
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 300, True, GTC_TIF)]     # E31: the maker cent
     assert _census(st2, "flatten_holding_disagrees") == 0 and _census(st2, "short_reduce_unproven") == 0
     assert b2["ledger_net"] == 0 and b2["state"] == "live" and _census(st2, "short_flatten_close") == 1
+    # E31: the cover is a REST now, so it is still standing on the second read -- the two
+    # ticks share the venue's order book (as every two-tick world in this file does) instead
+    # of the IOC's vanishing with the tick that sent it. The freeze itself is unchanged
     p3 = _short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0})
     b3 = _short_book(p3, ledger=-300)
-    st3 = _tick(p3, _Venue(held={SLUG: -500}), http=_mkt(400.0, 400.0))
+    v3a = _Venue(held={SLUG: -500})
+    st3 = _tick(p3, v3a, http=_mkt(400.0, 400.0))
     assert b3["state"] == "live" and _census(st3, "venue_ledger_suspect") == 1     # E16: the first read
-    st3 = _tick(p3, _Venue(held={SLUG: -500}), now=NOW + 15, http=_mkt(400.0, 400.0))
+    v3b = _Venue(held={SLUG: -500})
+    v3b.orders = v3a.orders
+    st3 = _tick(p3, v3b, now=NOW + 15, http=_mkt(400.0, 400.0))
     assert b3["frozen_reason"] == "venue_ledger_disagree" and _census(st3, "wrong_sign_trip") == 0
 
 
@@ -5501,20 +5883,25 @@ def test_a_confirmed_vanish_on_a_short_covers_at_once_by_the_priced_ioc_with_no_
              _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
     p = _short_world(fills=fills, snap=None)
     b = _short_book(p, ledger=-300)
-    # his buy-back is 0.30 in long space (his SELL of the other at 0.70,
-    # his newest): the cover's ceiling is 0.31 (E4), so the ask sits there
-    # and the cover is ONE IOC at 0.31 this tick (S4), no rest first
-    v = _Venue(ask=0.31, held={SLUG: -300}, ioc_fill=300.0)
+    # his buy-back is 0.30 in long space (his SELL of the other at 0.70, his newest).
+    # E31 (FILL lane 31): the cover was ONE IOC at the CEILING cent 0.31, AT the ask. It is
+    # now the post-only rest at min(buy_wire(0.30), 0.31 - MAKER_TICK) = 0.30 -- his own cent,
+    # one tick under the ask -- placed on the SAME tick as before (still no rest-then-take
+    # cycle: `flatten_rested` 0 -> 1 is the name that rest is counted under). The vanish's
+    # confirmation, the ledger and the close are unchanged
+    v = _Venue(ask=0.31, held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     http = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0},
                        {"conditionId": CID, "asset": N, "size": 0}])
     st = _tick(p, v, http=http)
     # the vanish was confirmed on the token carrying his net, the OTHER one
     assert any(c[1].get("market") == CID for c in http.calls)
-    assert _census(st, "flatten_vanished") == 1 and _census(st, "flatten_rested") == 0
-    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.31, 300, True, IOC_TIF)]
+    assert _census(st, "flatten_vanished") == 1 and _census(st, "flatten_rested") == 1
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.30, 300, True, GTC_TIF)]
     o = next(iter(p.orders.values()))
-    assert o["kind"] == "take" and o["tif"] == "IOC" and o["intent"] == "ORDER_INTENT_SELL_SHORT"
-    assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1 and _census(st, "short_cover_take") == 1
+    assert o["kind"] == "flatten_vanished" and o["tif"] == "GTC" and o["intent"] == "ORDER_INTENT_SELL_SHORT"
+    assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
+    assert _census(st, "short_cover_take") == 0 and _census(st, "short_cover_rest") == 1
+    assert _census(st, "maker_fill_at_create") == 1, "the venue's own aggressor bool: we were the maker"
     # flat on a confirmed vanish: the episode closes without the flat hour
     assert b["state"] == "closed"
 
@@ -5733,9 +6120,14 @@ def test_a_transient_intent_guard_error_refuses_the_tick_and_never_flattens_a_sh
     # flattens by its priced cover (S4), the row through the 050 INSERT
     p2.no_intent_column = False
     monkeypatch.setattr(rules, "MIRROR_SHORTS", False)
-    v3 = _Venue(held={SLUG: -300}, ioc_fill=300.0)
+    # E31 (FILL lane 31, 2026-09-10): the short cover's IOC at the CEILING cent 0.32, THROUGH
+    # the ask, is a post-only rest at min(buy_wire(his 0.31), ask 0.32 - MAKER_TICK) = 0.31 --
+    # HIS OWN cent, one tick under the ask. `lift=` is the taker who comes there and lifts it
+    # with `aggressor` False (a maker fill), which books exactly the ledger the IOC's fill
+    # booked; `short_cover_take` -> `short_cover_rest` on the census
+    v3 = _Venue(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st3 = _tick(p2, v3, now=NOW + 30, http=_short_http())
-    assert "close" not in _kinds(v3) and [c[2:6] for c in _places(v3)] == [(0.32, 300, True, IOC_TIF)]
+    assert "close" not in _kinds(v3) and [c[2:6] for c in _places(v3)] == [(0.31, 300, True, GTC_TIF)]
     assert b2["ledger_net"] == 0
     ins = [a for k, s, a in p2.sent if "ml-order-insert" in s]
     # E18: 059's three after the intent; FILL lane 9 (061): `fast` false (a full tick) after those
@@ -5820,9 +6212,13 @@ def test_a_mixed_sign_co_hold_on_a_short_is_never_sole_and_nothing_closes(monkey
     st = _tick(p, v, http=_mkt(400.0, 400.0))
     assert b["target"] == 0 and b["last_plan"]["kind"] == "flatten_paired"
     # S4: the cover is a clamped order of OUR 300 (never the net, never the
-    # desk's long): one IOC at the ceiling cent, close_position never called
-    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.32, 300, True, IOC_TIF)]
-    assert _census(st, "short_reduce_unproven") == 0 and _census(st, "short_cover_take") == 1
+    # desk's long), close_position never called.
+    # E31: one post-only REST at his own cent 0.31, not the IOC at the ceiling cent 0.32 --
+    # `short_cover_take` -> `short_cover_rest`. Nothing lifts it in this world, so the ledger
+    # stays where the test needs it and the co-hold reading is untouched
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)]
+    assert _census(st, "short_reduce_unproven") == 0 and _census(st, "short_cover_take") == 0
+    assert _census(st, "short_cover_rest") == 1
     assert _census(st, "venue_ledger_disagree") == 0 and _census(st, "flatten_holding_disagrees") == 0
     assert b["ledger_net"] == -300 and b["state"] == "live" and b["frozen_reason"] is None
     # and no sign proof is read off a mixed-sign co-hold either
@@ -5946,12 +6342,23 @@ def test_a_short_reduce_take_is_refused_by_name_while_unproven_and_is_the_cover_
     assert b["ledger_net"] == -300 and not p.orders and b["last_plan"]["s4"] == {"unproven": "wrong_price"}
     # (a locked book is not a two-sided quote: no probe ran on it)
     assert _census(st, "s4_probe_placed") == 0
-    # the proof passed (the probe on another book, or by hand): the cover IOC
+    # the proof passed (the probe on another book, or by hand): the cover goes.
+    # E31 (FILL lane 31, 2026-09-10): the cover was the IOC at the CEILING cent 0.32, THROUGH
+    # a LOCKED book of 0.30 / 0.30. It is now the post-only rest at
+    # min(buy_wire(his 0.31), ask 0.30 - MAKER_TICK) = 0.29 -- his cent WOULD CROSS on this
+    # locked book, so the clamp binds at the touch bound and the tick counts
+    # `maker_rest_at_touch`; nothing crosses. `short_cover_take` -> `short_cover_rest`, and
+    # the LEDGER DOES NOT MOVE on this tick: the rest is a contract BUY a cent BEHIND the
+    # bid, where no taker of the create window reaches it, so the 200 stands to be filled
+    # later instead of paying two cents of spread now. That is the trade this lane makes
     _s4_proved(p)
-    v2 = _Venue(bid=0.30, ask=0.30, held={SLUG: -300}, ioc_fill=300.0)
+    v2 = _Venue(bid=0.30, ask=0.30, held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st2 = _tick(p, v2, now=NOW + 30, http=_mkt(300.0, 400.0))
-    assert [c[2:6] for c in _places(v2)] == [(0.32, 200, True, IOC_TIF)] and _census(st2, "short_cover_take") == 1
-    assert b["ledger_net"] == -100 and _census(st2, "short_reduce_unproven") == 0
+    assert [c[2:6] for c in _places(v2)] == [(0.29, 200, True, GTC_TIF)]
+    assert _census(st2, "short_cover_take") == 0 and _census(st2, "short_cover_rest") == 1
+    assert _census(st2, "maker_rest_at_touch") == 1 and b["last_plan"]["maker"]["clause"] == "touch"
+    assert b["ledger_net"] == -300 and _census(st2, "short_reduce_unproven") == 0
+    assert b["open_order_id"] and p.orders[b["open_order_id"]]["state"] == "open"
 
 
 # (h3) the reserve a short rest commits while in flight is its collateral
@@ -5969,8 +6376,11 @@ def test_the_reserve_held_during_a_short_placement_is_the_collateral(monkeypatch
     p = _short_world()
     v = _Venue(place=_place)
     _tick(p, v, http=_short_http())
-    assert seen["order"] == (0.32, 300, False, SHORT)
-    assert seen["reserved"] == pytest.approx(300 * 0.68), "the reserve is 1 - wire a share on a short"
+    # E31 (FILL lane 31): the short add's wire 0.32 -> 0.31 (his 0.28 no longer lifted to the
+    # ask; the maker cent is bid 0.30 + MAKER_TICK). The reserve RULE is byte for byte --
+    # 1 - wire a share -- so the figure moves with the cent: 300 x 0.69, not 300 x 0.68
+    assert seen["order"] == (0.31, 300, False, SHORT)
+    assert seen["reserved"] == pytest.approx(300 * 0.69), "the reserve is 1 - wire a share on a short"
     assert le._REST_RESERVED_USD == 0.0
 
 
@@ -6032,7 +6442,10 @@ def test_a_confirmed_vanish_on_a_short_cancels_the_resting_add_then_covers(monke
     p = _short_world(fills=fills, snap=None)
     b = _short_book(p, ledger=-300)
     o = p.add_order(b, side=SELL, wire=0.32, qty=100, kind="increase")
-    v = _Venue(ask=0.31, held={SLUG: -300}, ioc_fill=300.0)      # the ask inside the cover's ceiling (E4)
+    # E31: the cover was the IOC at the ceiling cent 0.31, AT the ask; it is the post-only
+    # rest at min(buy_wire(his 0.30), ask 0.31 - MAKER_TICK) = 0.30, and this world's taker
+    # lifts it. The CANCEL-THEN-COVER-IN-ONE-TICK shape this test exists for is unchanged
+    v = _Venue(ask=0.31, held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     v.rest("oid-1", "SELL", 0.32, 100)
     http = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0},
                        {"conditionId": CID, "asset": N, "size": 0}])
@@ -6040,7 +6453,7 @@ def test_a_confirmed_vanish_on_a_short_cancels_the_resting_add_then_covers(monke
     assert _cancels(v) == [("cancel", "oid-1", SLUG)]
     assert p.orders[o["id"]]["state"] == "cancelled" and p.orders[o["id"]]["reason"] == "replace"
     assert "close" not in _kinds(v)
-    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, IOC_TIF)], "the cover follows the cancel in one tick"
+    assert [c[2:6] for c in _places(v)] == [(0.30, 300, True, GTC_TIF)], "the cover follows the cancel in one tick"
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
     assert _census(st, "open_order_pending") == 0
 
@@ -6055,8 +6468,9 @@ def test_the_short_share_cap_lowered_to_one_bites_by_name(monkeypatch):
     unbounded default the same short is not clamped at all."""
     _shorts_on(monkeypatch, max_shares=1)
     assert rules.MIRROR_SHORT_MAX_SHARES == 1
-    # THE PROBE RUNS UNDER THE MINIMUM NOTIONAL: one share of a 0.32
-    # contract is $0.68 of collateral, under MIRROR_MIN_ORDER_USD ($1,
+    # THE PROBE RUNS UNDER THE MINIMUM NOTIONAL: one share of a 0.31
+    # contract is $0.69 of collateral (E31: the maker cent, where the ask's
+    # own 0.32 gave $0.68), under MIRROR_MIN_ORDER_USD ($1,
     # U12c review FIX-2), so the 1-share probe of rung S3/S4 runs with
     # MIRROR_MIN_ORDER_USD=0 as well -- pinned here the way the rung
     # will run it, and said in the docs
@@ -6078,12 +6492,12 @@ def test_the_short_share_cap_lowered_to_one_bites_by_name(monkeypatch):
     assert _census(st, "short_share_cap") >= 1 and st["integ"]["short_share_cap"] >= 1
     assert b["last_plan"]["short_share_cap"] == 1 and _census(st, "dead_band") == 0
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][1:] == (SLUG, 0.32, 1, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL",
-                                         SHORT, True, None)
+    assert len(pl) == 1 and pl[0][1:] == (SLUG, 0.31, 1, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL",
+                                         SHORT, True, None)      # E31: the maker cent
     assert _census(st, "short_open") == 1
     # the shadow is compared against the UNCAPPED figure: no disagreement by construction
     p.shadow.append(_shadow_row(-300, 1.0, -300.0, at_ts=NOW))
-    v2 = _Venue(held={SLUG: -1}, fills={"oid-1": (1.0, 0.32)})
+    v2 = _Venue(held={SLUG: -1}, fills={"oid-1": (1.0, 0.31)})
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + 30, http=_short_http())
     assert b["ledger_net"] == -1 and _census(st2, "shadow_live_disagree") == 0
@@ -6137,31 +6551,48 @@ def test_his_level_on_a_short_reads_the_other_tokens_sell_only_on_a_short_book()
 
 
 def test_the_short_wire_is_the_executors_and_is_pinned_against_sell_price_at_the_19_cents():
+    """RE-PINNED AT E31 (FILL lane 31, 2026-09-10). `_short_wire` lost its
+    SECOND argument: the ASK. Before this lane it was
+    `_short_wire(his_px, ask)` = ceil(max(his level, ask)) -- the short add
+    JOINED THE ASK and never sat inside the spread. The no-cross clamp now
+    happens ONCE, upstream, in `rules.maker_wire(SELL, his, bid, ask)` =
+    max(sell_wire(his), bid + MAKER_TICK), and `_short_wire(px_long)` is
+    the pure denomination change that follows it: the executor's own
+    arithmetic for the cost `1 - px_long`. So the 19-cent table -- WHERE
+    THE EXECUTOR AND sell_price DISAGREE, which is what this test exists
+    for -- is pinned on the wire alone, unchanged cent for cent, and the
+    ask's own clauses move to maker_wire's pins (test_e31_maker_only)."""
     disagree = [0.18, 0.41, 0.42, 0.43, 0.57, 0.58, 0.59, 0.69, 0.7, 0.71, 0.82, 0.83, 0.84, 0.85,
                 0.94, 0.95, 0.96, 0.97, 0.98]
     off = []
     for c in range(1, 99):
         q = round(c / 100.0, 2)              # his other-token price, an exact cent
         his = 1.0 - q                        # his level in long space, as _his_level hands it over
-        wire = ml._short_wire(his, 0.01)
+        wire = ml._short_wire(his)
         assert wire == le.rest_tick(le.wire_limit(q, SHORT), SHORT), q
         assert wire == round(his, 2) and 0.01 <= wire <= 0.99, q
         if wire != rules.sell_price(his, 0.01):
             off.append(q)
     assert off == disagree
-    # the ask is honoured: a rest never sits under the long book's ask
-    assert ml._short_wire(0.28, 0.32) == 0.32 and ml._short_wire(0.60, 0.32) == 0.60
-    assert ml._short_wire(None, 0.32) == 0.32
+    assert inspect.signature(ml._short_wire).parameters.keys() == {"px_long"}, "the ask left this function"
+    # THE ASK'S OWN CLAUSE, at its new site: the maker clamp upstream. Where `_short_wire(0.28,
+    # 0.32)` lifted the rest to the ask's 0.32, the maker cent for his 0.28 against a book of
+    # 0.30 / 0.32 is max(sell_wire(0.28), 0.30 + MAKER_TICK) = 0.31 -- one tick OVER the bid,
+    # inside the spread -- and _short_wire turns that into the contract cent 0.31
+    assert rules.maker_wire(SELL, 0.28, 0.30, 0.32) == 0.31 and ml._short_wire(0.31) == 0.31
+    assert rules.maker_wire(SELL, 0.60, 0.30, 0.32) == 0.60 and ml._short_wire(0.60) == 0.60
     # the collateral the lane reads off that wire
     assert le.cost_per_share(0.32, SHORT) == pytest.approx(0.68)
-    # no ask, an ask off the ladder, or a disarmed model is no price
-    assert ml._short_wire(0.28, None) is None and ml._short_wire(0.28, 1.0) is None
-    assert ml._short_wire(0.995, 0.999) is None
+    # a cent off the ladder or an unreadable one is no price; the unreadable TOUCH is
+    # maker_wire's own refusal (`maker_no_cent`), one step upstream
+    assert ml._short_wire(None) is None and ml._short_wire(1.0) is None and ml._short_wire(0.0) is None
+    assert ml._short_wire(0.995) is None
+    assert rules.maker_wire(SELL, 0.28, None, 0.32) is None and rules.maker_wire(SELL, 0.28, 0.99, 0.995) is None
 
 
 def test_the_short_wire_is_none_when_the_model_is_disarmed(monkeypatch):
     monkeypatch.setattr(le, "short_model_confirmed", lambda: False)
-    assert ml._short_wire(0.28, 0.32) is None
+    assert ml._short_wire(0.31) is None
 
 
 def test_the_g4_census_keys_are_declared_and_served():
@@ -6189,20 +6620,25 @@ def test_the_knob_off_on_an_open_short_book_is_the_reversal_path(monkeypatch):
     """Rung plan, reversal at any rung: knob off restores short_side_refused
     alone; an open short book flattens by its priced cover (S4)."""
     monkeypatch.setattr(rules, "MIRROR_SHORTS", False)
+    # E31 (FILL lane 31, 2026-09-10): the short cover's IOC at the CEILING cent 0.32, THROUGH
+    # the ask, is a post-only rest at min(buy_wire(his 0.31), ask 0.32 - MAKER_TICK) = 0.31 --
+    # HIS OWN cent, one tick under the ask. `lift=` is the taker who comes there and lifts it
+    # with `aggressor` False (a maker fill), which books exactly the ledger the IOC's fill
+    # booked; `short_cover_take` -> `short_cover_rest` on the census
     p = _short_world()
     b = _short_book(p, ledger=-300)
-    v = _Venue(held={SLUG: -300}, ioc_fill=300.0)
+    v = _Venue(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st = _tick(p, v, http=_short_http())
     assert _census(st, "short_side_refused") == 1 and b["target"] == 0
-    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.32, 300, True, IOC_TIF)]
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)]
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
     # co-held (a stranger's fraction beside ours): the cover of OUR 300, as any other
     p2 = _short_world()
     b2 = _short_book(p2, ledger=-300)
-    v2 = _Venue(held={SLUG: -300.5}, ioc_fill=300.0)
+    v2 = _Venue(held={SLUG: -300.5}, ioc_fill=300.0, lift=300.0)
     st2 = _tick(p2, v2, http=_short_http())
     assert _census(st2, "short_reduce_unproven") == 0 and b2["ledger_net"] == 0
-    assert [c[2:6] for c in _places(v2)] == [(0.32, 300, True, IOC_TIF)] and "close" not in _kinds(v2)
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 300, True, GTC_TIF)] and "close" not in _kinds(v2)
 
 
 def test_a_sign_flip_on_a_short_book_flattens_by_its_priced_cover_under_its_name(monkeypatch):
@@ -6215,13 +6651,18 @@ def test_a_sign_flip_on_a_short_book_flattens_by_its_priced_cover_under_its_name
     opens as a NEW episode after it (test_mirror_short_sign_flip drives
     both directions through it)."""
     _shorts_on(monkeypatch)
+    # E31 (FILL lane 31, 2026-09-10): the short cover's IOC at the CEILING cent 0.32, THROUGH
+    # the ask, is a post-only rest at min(buy_wire(his 0.31), ask 0.32 - MAKER_TICK) = 0.31 --
+    # HIS OWN cent, one tick under the ask. `lift=` is the taker who comes there and lifts it
+    # with `aggressor` False (a maker fill), which books exactly the ledger the IOC's fill
+    # booked; `short_cover_take` -> `short_cover_rest` on the census
     p = _pool()                                   # his net +300: the default fixture
     b = _short_book(p, ledger=-300)
-    v = _Venue(held={SLUG: -300}, ioc_fill=300.0)
+    v = _Venue(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st = _tick(p, v)
     assert _census(st, "sign_flip") == 1 and b["target"] == 0 and b["last_plan"]["sign_flip"] is True
     assert _census(st, "short_side_refused") == 0
-    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.32, 300, True, IOC_TIF)]
+    assert "close" not in _kinds(v) and [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)]
     assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
     # the venue was read at -300 before the cover: the close waits for
     # the venue's own 0 (next tick), never the fill report alone
@@ -6369,7 +6810,11 @@ def test_the_copy_sleeves_daily_room_does_not_bind_the_mirror_but_its_total_room
     p4 = _pool()
     v4 = _Venue()
     _tick(p4, v4)
-    assert _places(v4)[0][3] == 300, "$90 of total room at 0.30 is the whole 300"
+    # E31: the entry rests at his own cent 0.31, not the bid's 0.30, so the SAME $90 of total
+    # room buys floor(90 / 0.31) = 290 shares where it bought the whole 300 at 0.30. The room
+    # rule is byte for byte (rules.room_scale on the wire that goes out); only the cent moved
+    assert _places(v4)[0][3] == 290, "$90 of total room at the maker cent 0.31"
+    assert _places(v4)[0][2] == 0.31 and int(90 / 0.31) == 290
     src = inspect.getsource(ml._global_guards)
     assert "t.day_room = 1e12" in src and "_day_unused" in src and "total -= float(le._REST_RESERVED_USD" in src
 
@@ -6377,8 +6822,10 @@ def test_the_copy_sleeves_daily_room_does_not_bind_the_mirror_but_its_total_room
 def test_a_four_thousand_share_target_rests_as_one_order_under_the_mirror_clip(monkeypatch):
     """U12b item 7: the mirror lane's own per-order clip ($2,500), not
     the copy lane's $250. 10% of his 40,000 sh @ 0.60 is 4,000 shares,
-    $2,400 -- under the event cap -- and rests as ONE order of 4,000
-    (416 under the copy lane's clip at the 0.59 wire)."""
+    $2,400 -- under the event cap -- and rests as ONE order of 4,000.
+    E31: the wire is HIS cent 0.60, not the bid's 0.59 (min(buy_wire(0.60),
+    ask 0.61 - MAKER_TICK) = 0.60), so the copy lane's clip would have
+    rested 416 there, not 423."""
     _rails_2026_09_06(monkeypatch)
     p = _pool(fills=_his(40000, long_px=0.60), snap={M: 40000.0, N: 0.0})
     v = _Venue(bid=0.59, ask=0.61)
@@ -6386,8 +6833,8 @@ def test_a_four_thousand_share_target_rests_as_one_order_under_the_mirror_clip(m
     b = next(iter(p.books.values()))
     assert b["target"] == 4000 and b["ratio"] == 0.10 and _census(st, "over_room") == 0
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][3] == 4000 and pl[0][2] == 0.59
-    assert int(le.LIVE_MAX_CLIP_USD / 0.59) == 423, "what the copy lane's clip would have rested"
+    assert len(pl) == 1 and pl[0][3] == 4000 and pl[0][2] == 0.60
+    assert int(le.LIVE_MAX_CLIP_USD / 0.60) == 416, "what the copy lane's clip would have rested"
     # the copy lane's clip is not read for size anywhere in the worker
     src = inspect.getsource(ml._room_qty)
     assert "rules.MIRROR_CLIP_USD" in src and "LIVE_MAX_CLIP_USD" not in src
@@ -6397,7 +6844,7 @@ def test_a_four_thousand_share_target_rests_as_one_order_under_the_mirror_clip(m
     p2 = _pool(fills=_his(40000, long_px=0.60), snap={M: 40000.0, N: 0.0})
     v2 = _Venue(bid=0.59, ask=0.61)
     _tick(p2, v2, http=_mkt(40000.0, 0.0))
-    assert _places(v2)[0][3] == 423
+    assert _places(v2)[0][3] == 416      # E31: 423 -> 416, the same $250 at the maker cent 0.60
 
 
 def test_small_bets_copy_whole_and_the_ratio_is_stored_at_open_for_the_books_life(monkeypatch):
@@ -6420,14 +6867,25 @@ def test_small_bets_copy_whole_and_the_ratio_is_stored_at_open_for_the_books_lif
     _tick(p2, v2, http=_mkt(30.0, 0.0))
     b2 = next(iter(p2.books.values()))
     assert (b2["target"], b2["ratio"]) == (3, 0.10) and _places(v2)[0][3] == 3
-    # his $12 bet (24 sh @ 0.50): 10%, target 2 -- $0.98 at the wire,
-    # under the $1 minimum notional (FIX-2): the book opens and is held
+    # his $12 bet (24 sh @ 0.50): 10%, target 2 -- and the $1 MINIMUM NOTIONAL (FIX-2).
+    # E31 MOVED THE WIRE THIS IS MEASURED AT: on a 0.49 / 0.51 book the rest used to join the
+    # bid at 0.49 (2 x 0.49 = $0.98, held), and now sits at HIS OWN cent 0.50 -- exactly
+    # $1.00, which is NOT under the minimum, so the same book sends. The rail is unchanged
+    # and still bites one tick lower, which the second world pins: with the ask AT his cent
+    # (0.48 / 0.50) the maker wire is ask - MAKER_TICK = 0.49 and the $0.98 order is held
     p2b = _pool(fills=_his(24, long_px=0.50), snap={M: 24.0, N: 0.0})
     v2b = _Venue(bid=0.49, ask=0.51)
     st2b = _tick(p2b, v2b, http=_mkt(24.0, 0.0))
     b2b = next(iter(p2b.books.values()))
-    assert (b2b["target"], b2b["ratio"]) == (2, 0.10) and not _places(v2b)
-    assert _census(st2b, "under_min_notional") == 1
+    assert (b2b["target"], b2b["ratio"]) == (2, 0.10)
+    assert [c[2:4] for c in _places(v2b)] == [(0.50, 2)] and _census(st2b, "under_min_notional") == 0
+    assert 2 * 0.50 == rules.MIRROR_MIN_ORDER_USD == 1.0, "exactly the minimum is not under it"
+    p2c = _pool(fills=_his(24, long_px=0.50), snap={M: 24.0, N: 0.0})
+    v2c = _Venue(bid=0.48, ask=0.50)
+    st2c = _tick(p2c, v2c, http=_mkt(24.0, 0.0))
+    b2c = next(iter(p2c.books.values()))
+    assert (b2c["target"], b2c["ratio"]) == (2, 0.10) and not _places(v2c)
+    assert _census(st2c, "under_min_notional") == 1 and 2 * 0.49 < rules.MIRROR_MIN_ORDER_USD
     # an open book sizes on its STORED ratio: opened at 1.0 on $8, his
     # position now 30 sh ($15, past the $10 line but under the $20 step
     # line of the U12c review) -> target 30, an increase of 14, never 3;
@@ -6491,7 +6949,8 @@ def test_shorts_are_on_by_default_and_a_short_sizes_by_the_same_rule(monkeypatch
     assert b["intent"] == SHORT and (b["target"], b["ratio"]) == (-300, 0.10)
     assert _census(st, "short_share_cap") == 0 and _census(st, "short_side_refused") == 0
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][3] == 300 and pl[0][6] == SHORT and pl[0][2] == 0.32
+    # E31: the short add's cent 0.32 (the ask's own queue) -> 0.31, the maker cent
+    assert len(pl) == 1 and pl[0][3] == 300 and pl[0][6] == SHORT and pl[0][2] == 0.31
     assert _census(st, "short_open") == 1
     # the small short copies whole
     p2 = _pool(fills=_his(100, other_size=112, other_px=0.72), snap={M: 100.0, N: 112.0})
@@ -6635,35 +7094,46 @@ def test_an_order_under_the_minimum_notional_is_not_sent_and_the_book_is_held(mo
 
 def test_a_sub_dollar_flatten_still_leaves_and_reaches_close_position(monkeypatch):
     """FIX-2b: a position that is leaving must leave at any size. A
-    2-share book @ 0.30 whose owner is gone rests its flatten ($0.64 at
-    the 0.32 ask, under the $1 minimum), and after MIRROR_FLATTEN_REST_S
-    reaches close_position when sole and the IOC when co-held -- with
-    the minimum notional the rest was refused before the row INSERT,
-    _flatten_vanished never found the row its clock keys on, and the
-    rest was re-attempted and re-refused every tick. The increase path
-    still refuses under $1."""
+    2-share book @ 0.30 whose owner is gone rests its flatten (under the
+    $1 minimum) -- with the minimum notional the rest was refused before
+    the row INSERT, _flatten_vanished never found the row its clock keys
+    on, and the rest was re-attempted and re-refused every tick. The
+    increase path still refuses under $1.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The rest's cent is the
+    touch's inside tick, bid 0.30 + MAKER_TICK = 0.31 (a $0.62 order),
+    where it used to sit at the 0.32 ask. And there is NO SECOND LEG after
+    MIRROR_FLATTEN_REST_S: close_position and the co-held IOC are deleted
+    with `_flatten_send`, so past the wait the sole book and the co-held
+    book both do the same thing -- the rest stands, or is re-quoted when
+    the touch moved. The exemption this test exists for is untouched: a
+    flatten is never refused `under_min_notional` at any size, on any of
+    the four roads."""
     _rails_2026_09_06(monkeypatch)
     assert rules.MIRROR_MIN_ORDER_USD == 1.0
 
     async def _ours(t, slug):
         return 2, 0.30                       # the venue holds our 2 and nobody else's
     monkeypatch.setattr(ml, "_pm_held", _ours)
-    p = _pool(fills=_unpriced(), snap=None)  # an unpriced vanish: the slippage leg (E4)
+    p = _pool(fills=_unpriced(), snap=None)  # an unpriced vanish
     b = p.add_book(ledger=2, avg_cost=0.30)
     v = _Venue(held={SLUG: 2})
     st = _tick(p, v, http=_gone())
     assert _census(st, "flatten_vanished") == 1 and _census(st, "flatten_rested") == 1
     assert _census(st, "under_min_notional") == 0
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][3] == 2 and pl[0][4] is True and pl[0][2] == 0.32
+    assert len(pl) == 1 and pl[0][3] == 2 and pl[0][4] is True and pl[0][2] == 0.31
+    assert 2 * 0.31 < rules.MIRROR_MIN_ORDER_USD, "and it goes anyway: a flatten is exempt"
     assert next(iter(p.orders.values()))["kind"] == "flatten_vanished"
-    # sole holder after the wait: cancel, then close_position
+    # E31: sole holder after the wait -- NO cancel and NO close. The rest stands at the same
+    # cent (the touch has not moved), `open_order_pending`, and the ledger is unmoved
     v2 = _Venue(held={SLUG: 2})
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + rules.MIRROR_FLATTEN_REST_S + 1, http=_gone())
-    assert ("cancel", "oid-1", SLUG) in v2.calls and ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v2.calls
-    assert b["ledger_net"] == 0 and st2["flattened"] == 1
-    # co-held: one IOC for our 2 shares at the slippage bound, $0.58, sent
+    assert not _cancels(v2) and "close" not in _kinds(v2) and not _places(v2)
+    assert b["ledger_net"] == 2 and st2["flattened"] == 0
+    assert _census(st2, "open_order_pending") == 1
+    # co-held past the wait: E31 -- the same rest, never an IOC at the slippage bound
     async def _held(t, slug):
         return 202, 0.30
     monkeypatch.setattr(ml, "_pm_held", _held)
@@ -6675,9 +7145,12 @@ def test_a_sub_dollar_flatten_still_leaves_and_reaches_close_position(monkeypatc
     v3 = _Venue(held={SLUG: 202}, flatten_bid=0.29, ioc_fill=2.0)
     v3.rest("oid-1", "SELL", 0.32, 2, created=NOW - 400)
     st3 = _tick(p3, v3, http=_gone())
-    ioc = [c for c in _places(v3) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert len(ioc) == 1 and ioc[0][3] == 2 and ioc[0][4] is True and b3["ledger_net"] == 0
-    assert _census(st3, "under_min_notional") == 0
+    assert [c for c in _places(v3) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"] == []
+    assert "slug_bid" not in _kinds(v3) and "close" not in _kinds(v3)
+    # the 0.32 rest is re-quoted DOWN to the touch's inside tick 0.31 (E31 B: an unpriced
+    # exit follows the touch BOTH ways), for the same 2 shares, still exempt from the minimum
+    assert [c[2:6] for c in _places(v3)] == [(0.31, 2, True, "TIME_IN_FORCE_GOOD_TILL_CANCEL")]
+    assert b3["ledger_net"] == 2 and _census(st3, "under_min_notional") == 0
     # the paired flatten (his net to zero, both legs held) rests too
     p4 = _pool(fills=_his(2, long_px=0.30, other_size=2, other_px=0.70), snap={M: 2.0, N: 2.0})
     b4 = p4.add_book(ledger=2, avg_cost=0.30)
@@ -7025,7 +7498,7 @@ def test_the_cap_is_per_game_a_second_market_is_scaled_to_what_the_game_has_left
     assert b["last_plan"]["game_room"] == 700.0 and b["last_plan"]["game_exposure"] == 1800.0
     assert b["last_plan"]["target_raw"] == 3000.0, "E5: the plan keeps the unclamped arithmetic"
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.49, 1400, False), pl
+    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.50, 1400, False), pl   # E31: his own cent, not the bid
     assert _census(st, "game_cap_scaled") == 1 and _census(st, "game_cap_full") == 0
     assert _census(st, "shadow_live_disagree") == 0 and _census(st, "shadow_check_skipped") == 0
     assert "game_cap_scaled" in ml.CENSUS_KEYS and "game_cap_full" in ml.CENSUS_KEYS
@@ -7041,7 +7514,7 @@ def test_a_short_books_collateral_counts_against_its_game(monkeypatch):
     assert a["target"] == -2500 and a["ledger_net"] == -2500, "A holds still"
     assert b["last_plan"]["game_exposure"] == pytest.approx(700.0)
     assert b["last_plan"]["game_room"] == pytest.approx(1800.0) and b["target"] == 3600
-    assert _places(v)[-1][1:5] == (SLUG, 0.49, 3600, False)
+    assert _places(v)[-1][1:5] == (SLUG, 0.50, 3600, False)   # E31: his own cent, not the bid
     assert _census(st, "game_cap_scaled") == 1
     # the reading itself: a short's exposure is its collateral
     assert rules.book_exposure(-2500, 0.72, 0.50, SHORT) == pytest.approx(700.0)
@@ -7153,7 +7626,7 @@ def test_the_cap_is_per_event_two_whales_books_of_one_game_share_it(monkeypatch)
     assert b["target"] == 1400 and b["last_plan"]["game_cap"] == "game_cap_scaled"
     assert b["last_plan"]["game_exposure"] == 1800.0 and b["last_plan"]["game_room"] == 700.0
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.49, 1400, False), pl
+    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.50, 1400, False), pl   # E31: his own cent, not the bid
     assert _census(st, "game_cap_scaled") == 1
 
 
@@ -7230,7 +7703,14 @@ def test_an_abandoned_ticks_unreached_games_are_walked_first_on_the_next(monkeyp
     v = _SlugDownVenue(_OTHER["us_market_slug"])
     st = _tick(p, v)
     assert st["abandoned"] and st["abandon_reason"] == "no_quote"
-    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG, _OTHER["us_market_slug"]], "abandoned at book 2"
+    # E31: the first book's rest sits AT the touch bound (his cent 0.31 = ask 0.32 - MAKER_TICK),
+    # so E31 (C)'s touch-bound re-read makes one more read of the SAME slug before the send.
+    # The walk order -- book 1 read, book 2 abandoned, book 3 never reached -- is what this
+    # pin is about, so it reads the slugs in order with the repeat collapsed
+    bbo_slugs = [c[1] for c in v.calls if c[0] == "bbo"]
+    assert bbo_slugs == [SLUG, SLUG, _OTHER["us_market_slug"]], "abandoned at book 2"
+    assert [k for i, k in enumerate(bbo_slugs) if i == 0 or k != bbo_slugs[i - 1]] == \
+        [SLUG, _OTHER["us_market_slug"]], "two books reached, the third never"
     ts = {b["us_market_slug"]: b["updated_ts"] for b in p.books.values()}
     assert ts[SLUG] > ts[_OTHER["us_market_slug"]] == ts[_ZZ["us_market_slug"]], "only book 1's plan was written"
     v2 = _Venue()
@@ -7256,7 +7736,7 @@ def test_a_candidate_on_a_full_game_opens_nothing_and_one_on_a_part_full_game_op
     new = [bk for bk in p2.books.values() if bk["us_market_slug"] == SLUG]
     assert len(new) == 1 and new[0]["target"] == 1400 and new[0]["last_plan"]["game_room"] == 700.0
     assert _census(st2, "game_cap_scaled") == 2, "named at open and on the new book's tick"
-    assert _places(v2)[-1][1:5] == (SLUG, 0.49, 1400, False)
+    assert _places(v2)[-1][1:5] == (SLUG, 0.50, 1400, False)   # E31: his own cent, not the bid
 
 
 def test_an_unreadable_exposure_is_no_room_and_the_rules_are_pure(monkeypatch):
@@ -7397,17 +7877,23 @@ def test_the_game_room_is_applied_at_cost_so_a_fallen_mark_never_averages_down_p
     assert b["last_plan"]["game_exposure"] == pytest.approx(1764.0)
     assert b["target"] == 1520 and b["last_plan"]["game_cap"] == "game_cap_scaled"
     assert b["last_plan"]["target_raw"] == 3000.0
-    # the ask 0.31 is through his 0.50, so the IOC at his cent goes first
-    # (E4 addendum; unfilled on this fake) and the 120 rest at 0.29 is the
-    # standing order the game's room is read against
+    # E31 (FILL lane 31, 2026-09-10): the ask 0.31 is through his 0.50, and where E4's
+    # addendum fired the IOC at his cent 0.50 first, THE MAKER CLAMP BINDS -- his cent would
+    # cross, so the one order is the post-only rest at ask - MAKER_TICK = 0.30, counted
+    # `maker_rest_at_touch`. That is one cent OVER the 0.29 the bid-joining rest used, and
+    # the game's room is read against it: 120 x 0.30 = $36.00 exactly, the room's own figure
     pl = [c for c in _places(v) if c[1] == SLUG and c[5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL"]
-    assert len(pl) == 1 and pl[0][2:5] == (0.29, 120, False), pl
-    assert [c[2:4] for c in _places(v) if c[1] == SLUG and c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"] == [(0.50, 120)]
+    assert len(pl) == 1 and pl[0][2:5] == (0.30, 120, False), pl
+    assert [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"] == []
+    assert _census(st, "maker_rest_at_touch") == 1 and b["last_plan"]["maker"]["clause"] == "touch"
     held = sum(rules.book_exposure(bk["ledger_net"], bk["avg_cost"], 0.30, bk["intent"])
                for bk in (a, b))
     resting = pl[0][3] * pl[0][2]
-    assert held == pytest.approx(2464.0) and resting == pytest.approx(34.8)
-    assert held + resting <= 2500.0 and held + resting == pytest.approx(2498.8)
+    # E31: the rest costs $36.00 at 0.30 where it cost $34.80 at 0.29, so the game sits at
+    # the cap EXACTLY rather than $1.20 under it -- still never over $2,500, which is the
+    # rule this pin exists for
+    assert held == pytest.approx(2464.0) and resting == pytest.approx(36.0)
+    assert held + resting <= 2500.0 and held + resting == pytest.approx(2500.0)
     assert _census(st, "game_cap_scaled") == 1 and _census(st, "shadow_live_disagree") == 0
     # the shadow, at the same net, agrees with the at-cost figure: the
     # check is handed the cap B was sized at ($456), not the room
@@ -7485,7 +7971,7 @@ def test_a_full_games_unopened_markets_are_skipped_for_the_memo_then_read_again(
     assert _census(st5, "cand_game_full_skipped") == 0 and len(p.books) == 2
     new = [bk for bk in p.books.values() if bk["us_market_slug"] == SLUG][0]
     assert new["target"] == 3000 and new["last_plan"]["game_room"] == 1500.0
-    assert _census(st5, "game_cap_scaled") == 2 and _places(v5)[-1][1:5] == (SLUG, 0.49, 3000, False)
+    assert _census(st5, "game_cap_scaled") == 2 and _places(v5)[-1][1:5] == (SLUG, 0.50, 3000, False)   # E31: his own cent
     assert ml._game_full_until == {("game", GAME_KEY): NOW + 2 * ml.GAME_FULL_MEMO_S + 1}, \
         "a game with room writes no new memo: tick 3's, expired, is all that stands"
     # an UNREADABLE game writes no memo: its cause (a sibling's order
@@ -7773,10 +8259,15 @@ def test_e2_constants_the_walk_concurrency_the_ops_budget_and_the_call_guard(mon
               "abandoned_in_flight", "walk_error", "backoff_skipped_circuit"):
         assert k in ml.CENSUS_KEYS and k in ml._new_stats()["census"], k
     assert ml.CENSUS_KEYS[-1] == "cand_terminal_skipped"
-    # the stale-arm floor (review MEDIUM-2b): a multiplier of the wait with
-    # a 60 s floor, so a 0 s wait does not make every arm stale at once
-    assert ml.TAKE_ARM_STALE_WAITS == 2 and ml.TAKE_ARM_STALE_MIN_S == 60.0
-    assert "max(float(TAKE_ARM_STALE_WAITS) * float(rules.MIRROR_TAKE_AFTER_S)" in inspect.getsource(ml._act)
+    # the stale-arm floor (review MEDIUM-2b) was a multiplier of the wait with a 60 s floor,
+    # so a 0 s wait did not make every arm stale at once. E31 (FILL lane 31): NO ARM IS
+    # WRITTEN AND NONE IS READ, so both plain module constants left the file with the arm and
+    # `take_arm_stale` is a declared zero. There is no window because there is no arm
+    for gone in ("TAKE_ARM_STALE_WAITS", "TAKE_ARM_STALE_MIN_S"):
+        assert not hasattr(ml, gone), gone
+    act = inspect.getsource(ml._act)
+    assert "TAKE_ARM_STALE_WAITS" not in act and "take_armed_ts" not in act
+    assert "take_arm_stale" in ml.CENSUS_KEYS and ml._new_stats()["census"]["take_arm_stale"] == 0
 
 
 def test_fifty_books_tick_in_parallel_under_a_second_and_a_half_with_every_stat_the_sequential_ones(monkeypatch):
@@ -8061,7 +8552,10 @@ def test_venue_calls_are_counted_on_the_census_and_the_soft_guard_stops_candidat
     st2 = _tick(p2, v2)
     bbos = [c[1] for c in v2.calls if c[0] == "bbo"]
     assert all(s in bbos for s in slugs), "every live book read past the guard"
-    assert bbos.count(SLUG) == 2 and len(p2.books) == 6, "one candidate read and opened (then ticked); the rest not"
+    # E31: the candidate's rest sits at his cent 0.31, which IS the touch bound (ask 0.32 -
+    # MAKER_TICK), so E31 (C)'s touch-bound re-read makes one more paced read of the SAME
+    # slug immediately before the send: 2 -> 3 reads of the fixture slug, one candidate still
+    assert bbos.count(SLUG) == 3 and len(p2.books) == 6, "one candidate read and opened (then ticked); the rest not"
     assert _census(st2, "venue_calls_capped") == 1 and st2["capped_tick"] is True
     assert _cancels(v2) == [("cancel", "o-ttl", slugs[2])] and st2["ops"] == 2, "the exit is never bounded by it"
     assert _census(st2, "venue_calls") == _expected_calls(v2)
@@ -8073,8 +8567,9 @@ def test_venue_calls_are_counted_on_the_census_and_the_soft_guard_stops_candidat
     v3 = _Venue(held={SLUG: 300})
     st3 = _tick(p3, v3, http=_mkt(100.0))
     pl3 = _places(v3)
-    # the SELL IOC, then E14b's same-tick rest of the unfilled 200: two exit ops, neither guarded
-    assert [c[3:6] for c in pl3] == [(200, True, IOC_TIF), (200, True, GTC_TIF)] and st3["ops"] == 2
+    # E31: the exit is ONE post-only rest of 200 at his cent -- E14b's IOC-then-rest pair is
+    # retired -- so it is one exit op, still unguarded by the venue-call budget
+    assert [c[2:6] for c in pl3] == [(0.31, 200, True, GTC_TIF)] and st3["ops"] == 1
     assert _census(st3, "venue_calls_capped") == 0 and b3["state"] == "live", st3["census"]
     src = inspect.getsource(ml._tick)
     assert src.index("t.guard_calls >= rules.MIRROR_VENUE_CALLS_PER_TICK") > src.index("_walk_books(")
@@ -8086,36 +8581,43 @@ def test_venue_calls_are_counted_on_the_census_and_the_soft_guard_stops_candidat
 
 
 def test_a_rest_at_his_level_takes_one_ioc_on_its_first_tick_and_three_ticks_above_does_not(monkeypatch):
-    """Step 4's pin under the E4 addendum ("Remove the 20 second wait
-    on entires too"): rules.MIRROR_TAKE_AFTER_S is 0. A rest of ANY age
-    with the ask at or under his level: the rest is cancelled and ONE
-    IOC goes out at the SAME wire (`take_at_his_level`, `take_placed`);
-    the ask three ticks above his level: no IOC, the rest stands
-    (`take_refused_price`, `resting_above_level`); the take never fires
-    twice for one rest; a plan with NO rest and the ask at his level
-    sends the IOC FIRST (`take_first`, tif IOC, nothing cancelled); the
-    ask above rests as before and the take fires the tick the ask
-    arrives. The entry PRICE rule is unchanged: at or through the wire,
-    never above him, no tolerance."""
+    """Step 4's pin under the E4 addendum ("Remove the 20 second wait on
+    entires too"): rules.MIRROR_TAKE_AFTER_S is 0.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). EVERY ARM OF THIS TEST WAS
+    A TAKE, and the whole of it is answered by one rule now: the entry's
+    cent is min(buy_wire(his 0.31), ask - MAKER_TICK), read fresh every
+    tick, so an ask AT or UNDER his level does not fire an IOC -- it CLAMPS
+    the rest one tick inside itself. The worlds are kept and each is
+    re-pinned on that cent:
+
+      ask 0.30 on a standing rest at 0.30  ->  no cancel, no order: the
+          maker wire IS 0.29 but the rest is not re-quoted DOWN with a
+          falling ask (maker_compare_wire), so it stands
+      ask 0.33 (three ticks above)         ->  the rest at his own cent
+          0.31, `resting_above_level` on the record as before
+      no rest, ask 0.30 / 0.31             ->  one rest at 0.29 / 0.30,
+          post_only True, never an IOC and never a cent above him
+      no rest, ask 0.32 / 0.33             ->  the rest at his cent 0.31,
+          byte for byte, and the ask arriving at 0.31 later does NOT
+          cancel it
+
+    `take_at_his_level`, `take_placed`, `take_first` and
+    `take_refused_price` are declared zeros; `resting_above_level` stands
+    as the record of how long a rest waits."""
     assert float(rules.MIRROR_TAKE_AFTER_S) == 0.0
     p = _pool()
     b = p.add_book(ledger=0)
-    p.add_order(b, placed_ts=NOW - 1)                  # a one-second-old rest at the 0.30 wire
+    o = p.add_order(b, placed_ts=NOW - 1)              # a one-second-old rest at the 0.30 wire
     v = _Venue(ask=0.30, ioc_fill=300.0)
     v.rest("oid-1")
     st = _tick(p, v)
-    assert _cancels(v) == [("cancel", "oid-1", SLUG)]
-    pl = _places(v)
-    # the IOC's limit is HIS cent, 0.31 (review HIGH-1), never the rest's wire
-    assert len(pl) == 1 and pl[0][2:6] == (0.31, 300, False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
-    assert _census(st, "take_at_his_level") == 1 and _census(st, "take_placed") == 1
-    assert _census(st, "take_first") == 0, "a rest was cancelled: not the take-first"
-    assert _census(st, "take_refused_price") == 0 and b["ledger_net"] == 300
-    # once: on target, no second take
-    v2 = _Venue(ask=0.30, ioc_fill=300.0, held={SLUG: 300})
-    st2 = _tick(p, v2, now=NOW + 30)
-    assert not _places(v2) and not _cancels(v2) and _census(st2, "take_at_his_level") == 0
-    # three ticks above: refused on price, the rest stands
+    assert not _cancels(v) and not _places(v) and p.orders[o["id"]]["state"] == "open"
+    assert _census(st, "take_at_his_level") == 0 and _census(st, "take_placed") == 0
+    assert _census(st, "take_first") == 0 and _census(st, "take_refused_price") == 0
+    assert _census(st, "open_order_pending") == 1 and b["ledger_net"] == 0
+    assert rules.maker_compare_wire(BUY, 0.30, 0.31, 0.29) == 0.30, "never re-quoted down with a falling ask"
+    # three ticks above: the rest at HIS cent 0.31, `resting_above_level` recorded
     p3 = _pool()
     b3 = p3.add_book(ledger=0)
     o3 = p3.add_order(b3, placed_ts=NOW - 1)
@@ -8123,57 +8625,49 @@ def test_a_rest_at_his_level_takes_one_ioc_on_its_first_tick_and_three_ticks_abo
     v3.rest("oid-1")
     st3 = _tick(p3, v3)
     assert not _places(v3) and not _cancels(v3) and p3.orders[o3["id"]]["state"] == "open"
-    assert _census(st3, "take_refused_price") == 1 and _census(st3, "resting_above_level") == 1
+    assert _census(st3, "take_refused_price") == 0 and _census(st3, "resting_above_level") == 1
     assert _census(st3, "take_at_his_level") == 0 and b3["ledger_net"] == 0
-    # NO rest, the ask at his level: the IOC goes FIRST -- one IOC at
-    # the wire, tif IOC, no rest before it and none cancelled, the book
-    # filled on its first tick
-    p4 = _pool()
-    b4 = p4.add_book(ledger=0)
-    v4 = _Venue(ask=0.30, ioc_fill=300.0)
-    st4 = _tick(p4, v4)
-    pl4 = _places(v4)
-    assert len(pl4) == 1 and pl4[0][2:6] == (0.31, 300, False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
-    assert pl4[0][7] is False and not _cancels(v4)
-    assert _census(st4, "take_first") == 1 and _census(st4, "take_at_his_level") == 1
-    assert _census(st4, "take_placed") == 1 and _census(st4, "rest_placed") == 0 and b4["ledger_net"] == 300
-    o4 = next(iter(p4.orders.values()))
-    assert o4["kind"] == "take" and o4["tif"] == "IOC" and o4["state"] == "filled" and o4["maker"] is False
-    # NO rest, the ask AT his cent (0.31; the rest's wire is 0.30): the
-    # IOC first, at 0.31 -- never a cent above him
-    p4b = _pool()
-    b4b = p4b.add_book(ledger=0)
-    v4b = _Venue(bid=0.30, ask=0.31, ioc_fill=300.0)
-    st4b = _tick(p4b, v4b)
-    assert [c[2:6] for c in _places(v4b)] == [(0.31, 300, False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")]
-    assert _census(st4b, "take_first") == 1 and b4b["ledger_net"] == 300 and b4b["avg_cost"] <= 0.31
-    # NO rest, the ask ABOVE his cent: a post-only rest at the wire, no
-    # IOC, nothing refused by price (the entry never gets a tolerance:
-    # the ask a cent over his 0.31 rests)
+    # NO rest, the ask AT or UNDER his level: ONE post-only rest one tick inside the ask,
+    # never an IOC, never a cent above him
+    for ask, cent in ((0.30, 0.29), (0.31, 0.30)):
+        p4 = _pool()
+        b4 = p4.add_book(ledger=0)
+        v4 = _Venue(bid=0.30, ask=ask, ioc_fill=300.0)
+        st4 = _tick(p4, v4)
+        pl4 = _places(v4)
+        assert len(pl4) == 1 and pl4[0][2:6] == (cent, 300, False, GTC_TIF), ask
+        assert pl4[0][7] is True and not _cancels(v4), ask
+        assert _census(st4, "take_first") == 0 and _census(st4, "take_at_his_level") == 0, ask
+        assert _census(st4, "take_placed") == 0 and _census(st4, "rest_placed") == 1, ask
+        assert _census(st4, "maker_rest_at_touch") == 1 and b4["ledger_net"] == 0, ask
+        o4 = next(iter(p4.orders.values()))
+        assert o4["kind"] == "increase" and o4["tif"] == "GTC" and o4["state"] == "open", ask
+        assert o4["wire"] <= 0.31, "never above him"
+    # NO rest, the ask ABOVE his cent: the rest at his own cent, byte for byte
     for ask in (0.33, 0.32):
         p5 = _pool()
         b5 = p5.add_book(ledger=0)
         v5 = _Venue(ask=ask, ioc_fill=300.0)
         st5 = _tick(p5, v5)
-        assert [c[5] for c in _places(v5)] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"], ask
-        assert _places(v5)[0][2] == 0.30 and _places(v5)[0][7] is True and b5["ledger_net"] == 0, ask
+        assert [c[5] for c in _places(v5)] == [GTC_TIF], ask
+        assert _places(v5)[0][2] == 0.31 and _places(v5)[0][7] is True and b5["ledger_net"] == 0, ask
         assert _census(st5, "take_first") == 0 and _census(st5, "take_placed") == 0, ask
-    # ... and the take fires the tick the ask arrives at his cent: the
-    # same rest, cancelled and taken at 0.31
+    # ... and the ask arriving AT his cent does not cancel that rest: the market came to us
     v6 = _Venue(ask=0.31, ioc_fill=300.0)
     v6.orders = v5.orders
     st6 = _tick(p5, v6, now=NOW + 30)
-    assert _cancels(v6) == [("cancel", "oid-1", SLUG)]
-    assert [c[5] for c in _places(v6)] == ["TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"] and _places(v6)[0][2] == 0.31
-    assert _census(st6, "take_at_his_level") == 1 and b5["ledger_net"] == 300
-    # the armed take's price verdict: the book away, the arm cleared,
-    # the book rests at the wire and never chases
+    assert not _cancels(v6) and not _places(v6)
+    assert _census(st6, "take_at_his_level") == 0 and b5["ledger_net"] == 0
+    assert _census(st6, "open_order_pending") == 1
+    # a book left ARMED by a row written before this lane: the arm is read by nothing, the
+    # book rests at its own cent and never chases; the rest clears the arm through _disarm_take
     p7 = _pool()
     b7 = p7.add_book(ledger=0, take_armed_ts=NOW - 5)
     v7 = _Venue(bid=0.30, ask=0.33, ioc_fill=300.0)
     st7 = _tick(p7, v7)
-    assert _census(st7, "take_refused_price") == 1 and b7["take_armed_ts"] is None
-    assert [c[5] for c in _places(v7)] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"], "rests at the wire, never chases"
+    assert _census(st7, "take_refused_price") == 0 and b7["take_armed_ts"] is None
+    assert [c[5] for c in _places(v7)] == [GTC_TIF], "rests at his cent, never chases"
+    assert _places(v7)[0][2] == 0.31 and _census(st7, "take_placed") == 0
 
 
 def test_an_abandon_or_a_trip_on_one_book_stops_the_books_not_yet_started_and_no_in_flight_book_places(monkeypatch):
@@ -8270,36 +8764,40 @@ def test_r_six_books_in_flight_send_their_writes_one_pacer_gap_apart(monkeypatch
 
 
 def test_r_take_cycles_burn_the_entry_budget_but_an_exit_or_a_side_change_is_never_gated(monkeypatch):
-    """MEDIUM-2a. At the 20 s wait a book that cycles rest -> take
-    (IOC, 0 fill) -> rest spends the hour's 12 replaces in ~13 minutes
-    and is `take_capped` (the ENTRY churn the budget exists to bound:
-    kept). Then he reduces: a SELL of 50 against the standing BUY rest
-    of 200. That is a side change and an exit -- it was `replace_capped`
-    until the BUY rest's TTL (up to 600 s of an exit held behind an
-    entry budget); now the BUY rest is cancelled and the SELL goes out
-    the same tick."""
+    """MEDIUM-2a. At the 20 s wait a book that cycled rest -> take (IOC, 0
+    fill) -> rest spent the hour's 12 replaces in ~13 minutes and was
+    `take_capped`. Then he reduces: a SELL of 50 against the standing BUY
+    rest of 200. That is a side change and an exit -- it was
+    `replace_capped` until the BUY rest's TTL (up to 600 s of an exit held
+    behind an entry budget); now the BUY rest is cancelled and the SELL
+    goes out the same tick.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE CYCLE IS GONE AT ITS
+    SOURCE: there is no take, so the reviewer's rest -> take -> rest churn
+    cannot start and the entry budget is not burned at all. The same
+    twenty ticks that spent all twelve replaces now spend ONE -- the
+    rest's own TTL re-quote -- and every other tick is `open_order_pending`
+    with nothing sent. The half this test exists for is unchanged and is
+    pinned below: his reduce cancels the BUY rest and the SELL goes out the
+    SAME TICK, never `replace_capped`."""
     p, b, v = _take_cycle_world()
-    takes, capped_at, t = 0, None, NOW
-    for k in range(1, 40):
+    takes, capped, places, t = 0, 0, 0, NOW
+    for k in range(1, 22):
         t = NOW + 30 * k
         vk = _Venue(ask=0.30, ioc_fill=0.0, held={SLUG: 100})
         vk.orders = v.orders
         st = _tick(p, vk, now=t)
         takes += _census(st, "take_placed")
-        if _census(st, "take_capped"):
-            capped_at = k
-            break
+        capped += _census(st, "take_capped")
+        places += len(_places(vk))
+        assert not [c for c in _places(vk) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"], k
         for c in _places(vk):
-            if c[5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL":
+            if c[5] == GTC_TIF:
                 vk.rest(f"oid-{vk.n}", qty=c[3])
         v = vk
-    assert takes == rules.MIRROR_MAX_REPLACES_PER_HOUR == 12, takes
-    assert capped_at is not None and capped_at <= 26, capped_at
-    vc = _Venue(ask=0.30, ioc_fill=0.0, held={SLUG: 100})
-    vc.orders = v.orders
-    st = _tick(p, vc, now=t + 30)
-    assert _census(st, "take_capped") == 1 and not _cancels(vc) and not _places(vc), "an entry take, still gated"
-    v = vc
+    assert takes == 0 and capped == 0, "no take fires at any age, so no cycle burns the budget"
+    assert places == 1, "one TTL re-quote in twenty ticks, where twelve replaces went in thirteen minutes"
+    assert p._run("fetchval", ml._SQL_REPLACES, (b["id"],)) < rules.MIRROR_MAX_REPLACES_PER_HOUR
     # HE REDUCES: his net 50, we hold 100 -> a SELL of 50 over a BUY rest
     p.fills = _his(300, sold=250)
     p.snap = {M: 50.0, N: 0.0}
@@ -8310,9 +8808,11 @@ def test_r_take_cycles_burn_the_entry_budget_but_an_exit_or_a_side_change_is_nev
     assert b["target"] == 50 and b["last_plan"]["side"] == "SELL_LONG", b["last_plan"]
     assert _census(st2, "replace_capped") == 0 and len(_cancels(v2)) == 1
     sells = [c for c in _places(v2) if c[4] is True and c[3] == 50]
-    # the SELL IOC (filled nothing), then E14b's same-tick rest of the 50 at his cent
-    assert [c[5] for c in sells] == [IOC_TIF, GTC_TIF], (st2["census"], _places(v2))
+    # E31: the SELL is ONE post-only rest at his cent 0.31 -- the IOC and E14b's same-tick
+    # re-rest are one order now -- and it goes out the same tick as the cancel
+    assert [c[2:6] for c in sells] == [(0.31, 50, True, GTC_TIF)], (st2["census"], _places(v2))
     assert not [o for o in p.orders.values() if o["state"] == "open" and o["side"] == "BUY_LONG"]
+    assert [(o["side"], o["qty"]) for o in p.orders.values() if o["state"] == "open"] == [("SELL_LONG", 50)]
     # the predicate, at the unit
     from sportsassets.analytics.mirror import Plan
     assert ml._exit_or_flip(b, Plan(SELL, 50, 0.30, "reduce"), {"side": "BUY_LONG"}) is True
@@ -8322,22 +8822,32 @@ def test_r_take_cycles_burn_the_entry_budget_but_an_exit_or_a_side_change_is_nev
 
 
 def test_r_the_armed_take_path_is_not_gated_and_an_ioc_row_is_never_a_replace():
-    """MEDIUM-2c. A rest that has waited is refused `take_capped` at 12
-    replaces (an entry); a post-only-armed take (no rest to cancel)
-    still fires past 12; and 12 cancelled IOC 'take' rows count for
-    nothing -- _SQL_REPLACES filters tif GTC/GTD, so an IOC-first entry
-    with no rest cancelled is not a replace (E4 builds on this)."""
+    """MEDIUM-2c. A rest that had waited was refused `take_capped` at 12
+    replaces (an entry); a post-only-armed take (no rest to cancel) still
+    fired past 12; and 12 cancelled IOC 'take' rows count for nothing --
+    _SQL_REPLACES filters tif GTC/GTD, so an IOC-first entry with no rest
+    cancelled is not a replace (E4 builds on this).
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the first two arms are
+    retired (no rest-path take to gate, no armed path to fire), so at a
+    spent budget the book simply keeps its rest and sends nothing. The
+    THIRD clause is the one the rail still needs and is unchanged: an IOC
+    row under reason 'take' is not a re-quote, `_SQL_REPLACES` filters tif
+    GTC / GTD, and twelve such rows on file leave the hour's budget
+    untouched -- which is proved here by a REPLACE going out over them."""
     p = _pool()
     b = p.add_book(ledger=0)
     for _ in range(rules.MIRROR_MAX_REPLACES_PER_HOUR):
         p.add_order(b, state="cancelled", reason="take", done_at=NOW - 100, order_id=None)
-    p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S)
+    o = p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S)
     v = _Venue(ask=0.30, ioc_fill=300.0)
     v.rest("oid-1")
     st = _tick(p, v)
-    assert _census(st, "take_capped") == 1 and not _places(v) and not _cancels(v)
-    assert _census(st, "take_at_his_level") == 0, "the census does not name a take the budget refused"
-    # the armed path, same budget spent
+    assert _census(st, "take_capped") == 0 and not _places(v) and not _cancels(v)
+    assert _census(st, "take_at_his_level") == 0 and _census(st, "open_order_pending") == 1
+    assert p.orders[o["id"]]["state"] == "open" and b["ledger_net"] == 0
+    # the armed path at the same spent budget: the arm is read by nothing, and the book
+    # rests at the touch bound 0.29 (locked at 0.30 / 0.30) instead of firing an IOC
     p2 = _pool()
     b2 = p2.add_book(ledger=0, take_armed_ts=NOW - rules.MIRROR_TAKE_AFTER_S)
     for _ in range(rules.MIRROR_MAX_REPLACES_PER_HOUR):
@@ -8345,91 +8855,107 @@ def test_r_the_armed_take_path_is_not_gated_and_an_ioc_row_is_never_a_replace():
     v2 = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
     st2 = _tick(p2, v2)
     pl = _places(v2)
-    assert len(pl) == 1 and pl[0][5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" and _census(st2, "take_placed") == 1
-    assert b2["ledger_net"] == 300
-    # twelve cancelled IOC rows: not replaces, the rest-path take fires
+    assert len(pl) == 1 and pl[0][2:6] == (0.29, 300, False, GTC_TIF) and pl[0][7] is True
+    assert _census(st2, "take_placed") == 0 and _census(st2, "rest_placed") == 1 and b2["ledger_net"] == 0
+    assert b2["take_armed_ts"] is None, "the rest cleared it through _disarm_take"
+    # twelve cancelled IOC rows are NOT replaces: the REPLACE over them goes out
     p3 = _pool()
     b3 = p3.add_book(ledger=0)
     for _ in range(rules.MIRROR_MAX_REPLACES_PER_HOUR):
         p3.add_order(b3, state="cancelled", reason="take", tif="IOC", done_at=NOW - 100, order_id=None)
-    p3.add_order(b3, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S)
-    v3 = _Venue(ask=0.30, ioc_fill=300.0)
-    v3.rest("oid-1")
+    o3 = p3.add_order(b3, wire=0.28, placed_ts=NOW - rules.MIRROR_REST_MIN_LIFE_S - 1)
+    v3 = _Venue(ask=0.32, ioc_fill=300.0)
+    v3.rest("oid-1", price=0.28)
+    assert p3._run("fetchval", ml._SQL_REPLACES, (b3["id"],)) == 0, "twelve IOC rows are not replaces"
     st3 = _tick(p3, v3)
-    assert _census(st3, "take_placed") == 1 and _census(st3, "take_capped") == 0 and b3["ledger_net"] == 300
+    assert _census(st3, "replace_capped") == 0 and _cancels(v3) == [("cancel", "oid-1", SLUG)]
+    assert [c[2:6] for c in _places(v3)] == [(0.31, 300, False, GTC_TIF)] and b3["ledger_net"] == 0
+    assert p3.orders[o3["id"]]["state"] == "cancelled"
+    assert p3._run("fetchval", ml._SQL_REPLACES, (b3["id"],)) == 1, "this tick's own replace, and only it"
     assert "tif IN ('GTC', 'GTD')" in _flat(ml._SQL_REPLACES)
 
 
 def test_r_the_stale_arm_window_has_a_sixty_second_floor(monkeypatch):
-    """MEDIUM-2b. Twice the 20 s wait is 40 s; at E4's 0 s wait it would
-    be 0 and every armed take stale on the next tick. The window is
-    max(2 x wait, 60 s): an arm 50 s old still takes, one 61 s old is
-    stale by name. Under a LENGTHENED wait the stale arm's book rests
-    first (E2's rule); at the default 0 s wait (the E4 addendum: an
-    entry takes on the price alone, never through the arm) the stale
-    arm clears itself by name and the crossing book still takes FIRST."""
-    assert 2 * rules.MIRROR_TAKE_AFTER_S < ml.TAKE_ARM_STALE_MIN_S == 60.0
-    p = _pool()
-    b = p.add_book(ledger=0, take_armed_ts=NOW - 50)
-    v = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
-    st = _tick(p, v)
-    assert [c[5] for c in _places(v)] == ["TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert _census(st, "take_arm_stale") == 0 and _census(st, "take_placed") == 1 and b["ledger_net"] == 300
-    # the default wait: the stale arm is named and cleared, the IOC goes on the price
-    p2 = _pool()
-    b2 = p2.add_book(ledger=0, take_armed_ts=NOW - 61)
-    v2 = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
-    st2 = _tick(p2, v2)
-    assert [c[5] for c in _places(v2)] == ["TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert _census(st2, "take_arm_stale") == 1 and b2["take_armed_ts"] is None and b2["ledger_net"] == 300
-    assert _census(st2, "take_first") == 1
-    # a lengthened wait: the stale arm's book rests first, as E2 has it
-    _lengthened_wait(monkeypatch, 20.0)
-    p3 = _pool()
-    b3 = p3.add_book(ledger=0, take_armed_ts=NOW - 61)
-    v3 = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
-    st3 = _tick(p3, v3)
-    assert [c[5] for c in _places(v3)] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"]
-    assert _census(st3, "take_arm_stale") == 1 and b3["take_armed_ts"] is None and b3["ledger_net"] == 0
-    p4 = _pool()
-    b4 = p4.add_book(ledger=0, take_armed_ts=NOW - 50)
-    v4 = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
-    st4 = _tick(p4, v4)
-    assert [c[5] for c in _places(v4)] == ["TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"] and b4["ledger_net"] == 300
-    # the armed take with no rest standing IS a take-first (the arm's
-    # age is the wait; nothing was cancelled), whatever the wait
-    assert _census(st4, "take_arm_stale") == 0 and _census(st4, "take_first") == 1
+    """MEDIUM-2b. Twice the 20 s wait is 40 s; at E4's 0 s wait it would be
+    0 and every armed take stale on the next tick. The window was
+    max(2 x wait, 60 s): an arm 50 s old still took, one 61 s old was stale
+    by name.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE WINDOW IS RETIRED WITH
+    THE ARM: `TAKE_ARM_STALE_MIN_S` and `TAKE_ARM_STALE_WAITS` are deleted,
+    nothing writes `take_armed_ts` and `_act` never reads it, so the defect
+    MEDIUM-2b named -- every arm going stale at once at a 0 s wait -- is
+    unreachable. The four worlds are kept, and each pins the outcome the
+    window existed to control: AT EVERY AGE OF THE ARM AND AT EITHER WAIT,
+    the book sends the same post-only rest at the touch bound 0.29 (locked
+    at 0.30 / 0.30, so his own cent 0.31 would cross), nothing crosses, the
+    ledger does not move, and `take_arm_stale` is never counted. The arm on
+    a pre-lane row is simply left where it is until a placement clears it
+    through `_disarm_take`."""
+    for gone in ("TAKE_ARM_STALE_MIN_S", "TAKE_ARM_STALE_WAITS"):
+        assert not hasattr(ml, gone), gone
+    sent = []
+    for wait, age in ((None, 50), (None, 61), (20.0, 61), (20.0, 50)):
+        if wait is not None:
+            _lengthened_wait(monkeypatch, wait)
+        p = _pool()
+        b = p.add_book(ledger=0, take_armed_ts=NOW - age)
+        v = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
+        st = _tick(p, v)
+        assert [c[2:6] for c in _places(v)] == [(0.29, 300, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL")], (wait, age)
+        assert _census(st, "take_arm_stale") == 0 and _census(st, "take_placed") == 0, (wait, age)
+        assert _census(st, "take_first") == 0 and b["ledger_net"] == 0, (wait, age)
+        assert _census(st, "maker_rest_at_touch") == 1, (wait, age)
+        # the arm is untouched by age; the REST it placed clears it through _disarm_take
+        assert b["take_armed_ts"] is None, (wait, age)
+        sent.append([c[1:] for c in _places(v)])
+    assert sent[0] == sent[1] == sent[2] == sent[3], "neither the arm's age nor the wait moves the order"
+    assert 'await t.pool.execute(_SQL_BOOK_ARM, book["id"], False)' in inspect.getsource(ml._disarm_take)
 
 
 def test_r_a_partial_ioc_books_the_fill_and_the_remainder_rests_in_the_same_tick():
     """C(iii), under the E4 addendum (item 4: the post-only rest for the
-    unfilled part is the only standing order the plan leaves). A take
-    that fills 100 of 300: the fill is booked, the IOC's own remainder
-    is the venue's cancel and never rests, and the 200 rests as a GTC
-    at the wire IN THE SAME TICK (`_entry_take`; it waited a tick under
-    E2) -- three ops: the cancel, the IOC, the rest. The next tick
-    keeps that rest."""
+    unfilled part is the only standing order the plan leaves). A take that
+    filled 100 of 300 booked the fill, let the IOC's own remainder be the
+    venue's cancel, and rested the 200 at the wire IN THE SAME TICK
+    (`_entry_take`) -- three ops: the cancel, the IOC, the rest.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE PARTIAL IS THE REST'S
+    OWN NOW: `_entry_take` is deleted, so there is no IOC to fill in part
+    and no remainder to re-rest. The ask AT the rest's wire is not a reason
+    to cancel it -- `maker_compare_wire` returns the standing wire when the
+    ask comes DOWN to it -- so the tick sends nothing at all, and the fill
+    of 100 is booked ON THE STANDING ORDER, which keeps its other 200 and
+    its queue. Three ops -> zero, and the property item 4 was for (the
+    plan leaves exactly one standing order) holds by construction."""
     p = _pool()
     b = p.add_book(ledger=0)
-    p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S)
+    o = p.add_order(b, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S)
     v = _Venue(ask=0.30, ioc_fill=100.0)
     v.rest("oid-1")
     st = _tick(p, v)
-    assert _cancels(v) == [("cancel", "oid-1", SLUG)]
-    # the IOC at his cent 0.31 (review HIGH-1), the remainder's rest at the 0.30 wire
-    assert [c[2:6] for c in _places(v)] == [(0.31, 300, False, "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"),
-                                            (0.30, 200, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL")]
-    take = [x for x in p.orders.values() if x["kind"] == "take"][0]
-    assert take["state"] == "cancelled" and take["booked_filled"] == 100.0 and take["filled"] == 100.0
+    assert not _cancels(v) and not _places(v) and st["ops"] == 0
+    assert _census(st, "take_placed") == 0 and _census(st, "rest_placed") == 0
+    assert _census(st, "open_order_pending") == 1 and b["ledger_net"] == 0
+    assert not [x for x in p.orders.values() if x["kind"] == "take" or x["tif"] == "IOC"]
     rest = [x for x in p.orders.values() if x["state"] == "open"]
-    assert len(rest) == 1 and rest[0]["qty"] == 200 and rest[0]["kind"] == "increase"
-    assert b["ledger_net"] == 100 and b["open_order_id"] == rest[0]["id"]
-    assert _census(st, "partial_fill") == 1 and _census(st, "take_placed") == 1 and _census(st, "rest_placed") == 1
-    assert st["ops"] == 3, "the cancel, the IOC and the remainder's rest"
-    v2 = _Venue(ask=0.32, held={SLUG: 100})
+    assert len(rest) == 1 and rest[0]["id"] == o["id"] and rest[0]["qty"] == 300
+    assert b["open_order_id"] == o["id"]
+    # the taker lifts 100 of the standing rest: booked on THAT order, 200 still standing
+    v2 = _Venue(ask=0.30, held={SLUG: 100}, fills={"oid-1": (100.0, 0.30)})
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + 30)
-    assert not _places(v2) and not _cancels(v2) and _census(st2, "open_order_pending") == 1
+    assert not _places(v2) and not _cancels(v2) and b["ledger_net"] == 100
+    assert _census(st2, "partial_fill") == 1 and p.orders[o["id"]]["booked_filled"] == 100.0
+    assert p.orders[o["id"]]["state"] == "open" and b["open_order_id"] == o["id"]
+    # and the tick the ask RISES off his cent, the rest is moved TOWARD him -- 0.30 -> 0.31,
+    # the one direction E31 (A) re-prices in -- for the 200 that are left
+    v3 = _Venue(ask=0.32, held={SLUG: 100}, fills={"oid-1": (100.0, 0.30)})
+    v3.orders = v.orders
+    st3 = _tick(p, v3, now=NOW + 60)
+    assert _cancels(v3) == [("cancel", "oid-1", SLUG)]
+    assert [c[2:6] for c in _places(v3)] == [(0.31, 200, False, GTC_TIF)]
+    assert _census(st3, "maker_rest_repriced") == 1 and b["last_plan"]["replaced_by"] == "touch"
 
 
 def test_r_an_insert_that_raises_releases_its_op_slot_so_the_next_book_gets_the_op(monkeypatch):
@@ -8582,7 +9108,7 @@ def test_r_an_in_flight_exit_refused_under_an_abandon_is_named_and_writes_no_pla
     assert not st3.get("skipped_backoff")
     pl = [c for c in _places(v3) if c[1] == SLUG]
     # the SELL IOC, then E14b's same-tick rest of the unfilled 200
-    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], (st3["census"], _places(v3))
+    assert [c[3:6] for c in pl] == [(200, True, GTC_TIF)], (st3["census"], _places(v3))
     assert b["last_reason"] is not None and b["updated_ts"] != touched
     src = inspect.getsource(ml._tick_book)
     assert 'if reason != "tick_abandoned":' in src
@@ -8635,8 +9161,17 @@ def test_r_venue_calls_count_the_preview_the_positions_pages_and_the_flattens_wa
     assert "client.orders.preview(" in inspect.getsource(pmus.submit_fok)
     g = inspect.getsource(ml._guarded)
     assert "slots = _write_slots(fn, args)" in g and "_venue_call(t, slots, guard=True)" in g
-    fs = inspect.getsource(ml._flatten_send)
-    assert "await _pm_held(t, r.slug)" in fs and "le._pm_held(" not in fs
+    # E31 (FILL lane 31): `_flatten_send` is deleted and with it the flatten's own positions
+    # read -- the flatten is a clamped rest and never asks "am I the sole holder". `_pm_held`
+    # stays as the module's reader (le._pm_held's arithmetic, this lane's pacer, counted per
+    # page) with no caller on the money path; the pin moves to the reader itself
+    assert not hasattr(ml, "_flatten_send")
+    assert inspect.getsource(ml).count("_pm_held(t,") == 0, "no caller on any path"
+    # the reader itself is unchanged and still carries the pin's whole point:
+    # le._pm_held's ARITHMETIC re-done here (never a call into le._pm_held),
+    # every page through this lane's pacer, every page counted
+    ph = inspect.getsource(_REAL_PM_HELD)   # the fixture patches ml._pm_held
+    assert "le._pm_held(" not in ph and "pace(ms.READ_PACING_S)" in ph and "_venue_call(t, pages)" in ph
     tick_src = inspect.getsource(ml._tick)
     assert "t.positions, pages, limited = await ms.account_positions_walk(t.pmus)" in tick_src
     assert "_venue_call(t, pages)" in tick_src and "account_positions_pages" not in inspect.getsource(ml)
@@ -9180,36 +9715,50 @@ def test_r2_the_reviewers_walk_order_and_budget_pins_hold(monkeypatch):
     st3 = _tick(p3, _Hung(delay=0.005, bad=bad3))
     assert st3["abandoned"] and st3["abandon_reason"] == "no_quote"
     assert len(abandoned_at) == 1 and abandoned_at[0] >= t0 + 0.3
-    # the reduce take over a SELL rest with the budget spent
+    # the reduce over a SELL rest with the budget spent
+    #
+    # E31 (FILL lane 31): the subject of this world is the EXEMPTION, not the take --
+    # `_exit_or_flip` still lets an exit's replace past MIRROR_MAX_REPLACES_PER_HOUR
+    # (mirror_live.py, the `replace_capped` branch), and that is what is under test.
+    # The rest it moves is seeded at 0.30 where it was 0.32: at 0.32, OVER his exit cent
+    # with the bid risen TO it, E31's maker_compare_wire returns the STANDING wire (a
+    # touch that came to the rest is no move at all) and the rest stands to be lifted
+    # there -- `open_order_pending`, nothing cancelled, so the budget would never be
+    # reached. Under his cent the rest is past him and is replaced at once, as it always
+    # was, and the exemption is exercised: cancel + ONE post-only rest at the maker wire
+    # max(sell_wire(0.31), bid 0.35 + MAKER_TICK) = 0.36, where it was one IOC at his cent
     p4 = _pool(fills=_his(300, sold=200), snap={M: 100.0, N: 0.0})
     b4 = p4.add_book(ledger=300)
     for _ in range(rules.MIRROR_MAX_REPLACES_PER_HOUR):
         p4.add_order(b4, state="cancelled", reason="replace", done_at=NOW - 100, order_id=None)
-    p4.add_order(b4, side=SELL, wire=0.32, qty=200, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S)
+    p4.add_order(b4, side=SELL, wire=0.30, qty=200, placed_ts=NOW - rules.MIRROR_TAKE_AFTER_S)
     v4 = _Venue(bid=0.35, ask=0.36, ioc_fill=200.0, held={SLUG: 300})
-    v4.rest("oid-1", "SELL", 0.32, 200)
+    v4.rest("oid-1", "SELL", 0.30, 200)
     st4 = _tick(p4, v4, http=_mkt(100.0))
     assert b4["target"] == 100 and _census(st4, "take_capped") == 0 and _census(st4, "replace_capped") == 0
     assert len(_cancels(v4)) == 1 and [c for c in _places(v4) if c[4] is True and c[3] == 200]
+    assert [c[2:6] for c in _places(v4)] == [(0.36, 200, True, GTC_TIF)] and [c[7] for c in _places(v4)] == [True]
+    assert _census(st4, "rest_placed") == 1 and _census(st4, "maker_rest_at_touch") == 1
     # the zero wait
     monkeypatch.setattr(rules, "MIRROR_TAKE_AFTER_S", 0.0)
     monkeypatch.setattr(rules.take_allowed, "__defaults__", (0.0,))
+    # E31: at the zero wait a locked book (0.30 / 0.30) rests at the touch bound 0.29 --
+    # never an IOC at his cent -- whatever the arm's age, and the rest clears the arm
     p5 = _pool()
     b5 = p5.add_book(ledger=0, take_armed_ts=NOW - 1)
     v5 = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
     _tick(p5, v5)
-    assert [c[5] for c in _places(v5)] == ["TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"] and b5["take_armed_ts"] is None
+    assert [c[2:6] for c in _places(v5)] == [(0.29, 300, False, GTC_TIF)] and b5["take_armed_ts"] is None
     st6 = _tick(p5, _Venue(bid=0.30, ask=0.30, ioc_fill=300.0, held={SLUG: 300}), now=NOW + 30)
     assert _census(st6, "take_placed") == 0
     p7 = _pool()
     b7 = p7.add_book(ledger=0, take_armed_ts=NOW - 61)
     v7 = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
     st7 = _tick(p7, v7)
-    # E4 addendum: the stale arm is named and cleared, and the crossing
-    # book still takes FIRST on the price alone (the IOC at his cent),
-    # never resting first at the zero wait (the E4 review's c2)
-    assert _census(st7, "take_arm_stale") == 1 and [c[5] for c in _places(v7)] == ["TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert b7["take_armed_ts"] is None and _census(st7, "take_first") == 1 and b7["ledger_net"] == 300
+    # E31: an arm of any age is read by nothing (`take_arm_stale` is a declared zero), and
+    # the crossing book RESTS at the touch bound instead of taking first on the price
+    assert _census(st7, "take_arm_stale") == 0 and [c[2:6] for c in _places(v7)] == [(0.29, 300, False, GTC_TIF)]
+    assert b7["take_armed_ts"] is None and _census(st7, "take_first") == 0 and b7["ledger_net"] == 0
     # the flip's ADD half is exempt on purpose (LOW-e), documented on the predicate
     from sportsassets.analytics.mirror import Plan
     assert ml._exit_or_flip({"intent": rules.ORDER_INTENT}, Plan(BUY, 10, 0.3, "rest"), {"side": SELL}) is True
@@ -9435,12 +9984,24 @@ def test_r4_a_429_on_the_preview_is_a_refusal_named_and_tripping_the_circuit_nev
 
 
 def test_r4_a_429_on_an_ioc_takes_create_is_a_refusal_not_a_lost_response(monkeypatch):
-    """HIGH-1. A take is sent with post_only False (`post_only = ... and
-    not is_take`), so submit_fok's create runs OUTSIDE the 4xx refusal
-    wrapper: the SDK's RateLimitError raises through. The same refusal
-    road as the preview's: named, the circuit, the row refused, the
-    book live, the abandon. The op stays spent (a request went out),
-    as on the post-only create's 429."""
+    """HIGH-1. A take was sent with post_only False, so submit_fok's create
+    ran OUTSIDE the 4xx refusal wrapper: the SDK's RateLimitError raised
+    through. The same refusal road as the preview's: named, the circuit,
+    the row refused, the book live, the abandon. The op stays spent (a
+    request went out).
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The premise is retired:
+    NO ORDER of this worker is sent with post_only False, so no create runs
+    outside the 4xx wrapper. The order whose create raises here is the
+    POST-ONLY REST -- `post_only` True, GTC, at the touch bound 0.29 on
+    this locked book -- and the same SDK RateLimitError meets the ADAPTER'S
+    OWN post-only refusal road instead of the bare one: `post_only_rejected`
+    where it read `place_refused`, and the row's reason
+    'post_only_rejected:429' where it read 'place_refused:rate_limited'.
+    Everything the test guards is unchanged on that road -- the 429 is
+    still NAMED, the circuit still trips, the row is still rejected, the
+    book stays live and the op stays spent -- and the pin is stronger for
+    it: there is no longer any create that can raise past the wrapper."""
     from tests.test_pmus_post_only import _Orders, _install
 
     def _create(params):
@@ -9451,17 +10012,23 @@ def test_r4_a_429_on_an_ioc_takes_create_is_a_refusal_not_a_lost_response(monkey
     v = _RealAdapterVenue(bid=0.30, ask=0.30)
     st = _tick(p, v)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL" and pl[0][7] is False
+    assert len(pl) == 1 and pl[0][5] == "TIME_IN_FORCE_GOOD_TILL_CANCEL" and pl[0][7] is True
+    assert pl[0][2] == 0.29, "the touch bound on a locked book: never his cent through the ask"
     assert _census(st, "rate_limited") == 1 and venue_pace.penalty_left() > 590.0, st["census"]
-    assert _census(st, "place_refused") == 1 and _census(st, "placement_lost") == 0
-    assert ml._MIRROR_CENSUS.get("place_refused:rate_limited|rn1") == 1, "the family's name on the process census"
+    assert _census(st, "post_only_rejected") == 1 and _census(st, "placement_lost") == 0
+    assert _census(st, "place_refused") == 0, "1 -> 0: the create is inside the post-only wrapper now"
+    assert ml._MIRROR_CENSUS.get("rate_limited|rn1") == 1, "the family's name on the process census"
     assert _census(st, "take_placed") == 0 and st["placed_take"] == 0
     assert st["abandoned"] and st["abandon_reason"] == "rate_limited" and ml._backoff_until == 0.0
     assert b["state"] == "live" and b.get("frozen_reason") is None and b.get("open_order_id") is None
     assert st["ops"] == 1, "the op is spent: a request went out, as on the create's 429"
     row = _refused_row(p, b)
-    assert row["state"] == "rejected" and row["reason"] == "place_refused:rate_limited" and row["tif"] == "IOC"
-    assert row["receipt"]["error"] == "Too Many Requests" and row["receipt"]["error_type"] == "RateLimitError"
+    assert row["state"] == "rejected" and row["reason"] == "post_only_rejected:429" and row["tif"] == "GTC"
+    # the venue's own body is still on the row, under E30's receipt column
+    from sportsassets import pmus
+    raw = pmus._post_only_refusal(_sdk_429("Too Many Requests"), {})["raw"]
+    assert raw["error"] == "Too Many Requests" and raw["error_type"] == "RateLimitError"
+    assert ml._raw_rate_limit(raw), "and it is what named the rate limit above"
     assert _census(st, "venue_calls") == _expected_calls(v)
 
 
@@ -9504,10 +10071,16 @@ def test_r4_the_placement_sites_read_the_refusal_raw_by_its_named_fields_never_a
     preview_mismatch whose expected_cost is $429.00 on a quantity of 429
     is a mismatch: no `rate_limited`, no circuit, no abandon (it recurs
     every tick; the whole lane would have run at half rate for it). A
-    post-only 400 whose message says "would cross at 0.429" arms the
-    take and abandons nothing. A real 429 -- the SDK's status_code
-    through the real adapter, an error_type naming RateLimitError, an
-    error text that STARTS with the name -- still does."""
+    post-only 400 whose message says "would cross at 0.429" abandons
+    nothing. A real 429 -- the SDK's status_code through the real adapter,
+    an error_type naming RateLimitError, an error text that STARTS with the
+    name -- still does.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the crossing 400 ARMS
+    NOTHING now -- no arm is written anywhere -- so the pin on it is the
+    one that matters here, that it is NOT read as a rate limit: no
+    `rate_limited`, no circuit, no abandon. The substring rule the test is
+    named for is untouched."""
     from tests.test_pmus_post_only import _Orders, _install
 
     def _mismatch(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
@@ -9530,7 +10103,7 @@ def test_r4_the_placement_sites_read_the_refusal_raw_by_its_named_fields_never_a
     p2 = _pool()
     b2 = p2.add_book(ledger=0)
     st2 = _tick(p2, _Venue(place=_cross))
-    assert _census(st2, "post_only_rejected") == 1 and b2.get("take_armed_ts") == NOW
+    assert _census(st2, "post_only_rejected") == 1 and b2.get("take_armed_ts") is None
     assert not st2["abandoned"] and _census(st2, "rate_limited") == 0 and venue_pace.penalty_left() == 0.0
     # a real 429 through the real adapter: the SDK's status_code on the
     # create's refusal (and the adapter now names the type beside it)
@@ -9575,17 +10148,20 @@ def test_r4_the_placement_sites_read_the_refusal_raw_by_its_named_fields_never_a
 
 
 def test_r4_a_credited_book_placing_an_ioc_spends_its_own_op_and_keeps_the_credit(monkeypatch):
-    """LOW-3, by behaviour (the `tif != "IOC"` clause used to be pinned
-    by its text alone). In flow: a TTL cancel beside an expired take
-    arm re-rests GTC on the credit -- ops 1, requotes 1, the arm
-    cleared. At the unit: a credited book placing an IOC spends its own
-    op (ops 1, not 0) and KEEPS the credit; the GTC rest after it
-    spends the credit and no op; the next rest spends an op.
+    """LOW-3, by behaviour. In flow: a TTL cancel beside an expired take
+    arm re-rests GTC on the credit -- ops 1, requotes 1, the arm cleared.
+    At the unit: a credited book placing an order spends the credit and no
+    op; the next placement spends an op.
 
-    The flow half runs under a LENGTHENED wait (E4 addendum: at the
-    default wait of 0 the entry takes FIRST -- one IOC, its own op, then
-    the remainder's rest on the credit; section 21 pins that): E2's
-    rest-first behaviour is what the credit pin was written for."""
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The unit half's FIRST
+    call was an IOC, sent to prove the `tif != "IOC"` clause spent its own
+    op and KEPT the credit. E31 deletes that clause (review LOW-2: it was
+    dead once no caller sends an IOC) and `_place` REFUSES a non-GTC tif by
+    name before the op slot, so the call now returns `ioc_refused`, spends
+    NO op and touches no credit -- which is the stronger statement and is
+    pinned as such. The credit's own rule is then re-proved on the orders
+    that exist: the GTC rest spends the credit and no op, the next spends
+    an op. The flow half is byte for byte."""
     from sportsassets.analytics.mirror import Plan
     _lengthened_wait(monkeypatch, 20.0)
     p = _pool()
@@ -9610,15 +10186,20 @@ def test_r4_a_credited_book_placing_an_ioc_spends_its_own_op_and_keeps_the_credi
                     snap_long=300.0, snap_other=0.0, bid=0.30, ask=0.30, mark=0.30, venue=0.0, manual=0.0,
                     market=None, market_live=True, venue_state="MARKET_STATE_OPEN")
     pl = Plan(BUY, 300, 0.30, "rest")
-    out = _run(ml._place(t, b2, r, "take", BUY, 0.30, 300, 0.31, pl, {"target": 300}, tif="IOC"))
-    assert out == "take" and t.ops == 1 and b2["id"] in t.requote_credit, (out, t.ops, t.requote_credit)
-    assert [c[5] for c in _places(v2)] == ["TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
+    plan_ioc: dict = {"target": 300}
+    out = _run(ml._place(t, b2, r, "take", BUY, 0.30, 300, 0.31, pl, plan_ioc, tif="IOC"))
+    # E31: refused by name BEFORE the op slot, the open-orders read, the row and the venue
+    # call -- so no op is spent, no order is sent and the credit is untouched
+    assert out == "ioc_refused" and t.ops == 0 and b2["id"] in t.requote_credit, (out, t.ops, t.requote_credit)
+    assert not _places(v2) and plan_ioc["ioc_refused"]["tif"] == "IOC"
+    assert t.stats["census"]["ioc_refused"] == 1
     out2 = _run(ml._place(t, b2, r, "increase", BUY, 0.30, 300, 0.31, pl, {"target": 300}))
-    assert out2 == "rest_placed" and t.ops == 1 and b2["id"] not in t.requote_credit, (out2, t.ops)
+    assert out2 == "rest_placed" and t.ops == 0 and b2["id"] not in t.requote_credit, (out2, t.ops)
+    assert [c[5] for c in _places(v2)] == ["TIME_IN_FORCE_GOOD_TILL_CANCEL"]
     b2["open_order_id"] = None                      # a third placement on the same fixture book
     p2.orders.clear()
     out3 = _run(ml._place(t, b2, r, "increase", BUY, 0.30, 300, 0.31, pl, {"target": 300}))
-    assert out3 == "rest_placed" and t.ops == 2, (out3, t.ops)
+    assert out3 == "rest_placed" and t.ops == 1, (out3, t.ops)
 
 
 def test_r4_a_positions_walk_429_abandons_positions_unreadable_and_skips_the_backoff_while_the_circuit_holds(monkeypatch):
@@ -9733,9 +10314,13 @@ def _sdk(cls, code, message="x", body=None):
     return cls(message, response=resp, body=body)
 
 
-class _RealCloseVenue(_Venue):
-    """The fixture venue whose close_position IS pmus.close_position on a
-    fake client whose orders.close_position raises."""
+class _RealCloseVenue(_RealAdapterVenue):
+    """RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The fixture venue whose
+    close_position IS pmus.close_position on a fake client whose
+    orders.close_position raises -- and, since the flatten's slippage leg
+    went with the take, whose PLACEMENTS go through the real adapter too
+    (_RealAdapterVenue). The close recorder stays: the worlds below prove
+    the leg is never reached, which needs a venue that would record it."""
 
     def close_position(self, slug, *, slippage_bips):
         from sportsassets import pmus
@@ -9744,21 +10329,34 @@ class _RealCloseVenue(_Venue):
 
 
 def _install_close(monkeypatch, exc):
-    from sportsassets import pmus
+    """E31: ONE client for BOTH roads. `exc` is raised by the create --
+    where the flatten's 429 now lands, the rest being the only order this
+    worker sends -- and by close_position, the road that is gone: armed so
+    that a caller sneaking back into it would 429 and be seen, never pass
+    silently."""
+    from tests.test_pmus_post_only import _Orders, _install
 
-    class _Od:
+    def _raise(params):
+        raise exc
+
+    class _Od(_Orders):
         def close_position(self, params):
             raise exc
-    monkeypatch.setattr(pmus, "_get_client", lambda: type("C", (), {"orders": _Od()})())
+    _install(monkeypatch, _Od(create=_raise))
 
 
 def _sole_close_world():
     """He left (fills say sold 300, the data API says the leg is 0); our
-    flatten rest of 300 stood its MIRROR_FLATTEN_REST_S: this tick
-    cancels it and, sole holder (the fixture _pm_held 300 = venue 300 =
-    ledger 300), sends close_position (test 1862's world). Since E4 the
-    vanish must be one HE GAVE NO PRICE FOR (`_unpriced`): a vanish with
-    his SELL fill is priced off him and never runs the slippage leg."""
+    flatten rest of 300 stood its MIRROR_FLATTEN_REST_S. Since E4 the
+    vanish must be one HE GAVE NO PRICE FOR (`_unpriced`).
+
+    RE-PINNED AT E31: what this tick does with that rest. It used to
+    cancel it and, sole holder (the fixture _pm_held 300 = venue 300 =
+    ledger 300), send close_position (test 1862's world). Now the flatten
+    IS the rest, for as long as the leg is held: the tick cancels the rest
+    at 0.32 and re-quotes it at the touch's own inside tick (bid 0.30 ->
+    0.31), and MIRROR_FLATTEN_REST_S is a declared, unread clock. The
+    holding is unchanged, so the world reads the same."""
     p = _pool(fills=_unpriced(), snap=None)
     b = p.add_book(ledger=300)
     p.add_order(b, side=SELL, wire=0.32, kind="flatten_vanished", placed_ts=NOW - rules.MIRROR_FLATTEN_REST_S - 1)
@@ -9767,72 +10365,111 @@ def _sole_close_world():
     return p, b, v
 
 
-def test_c2_FINDING_a_429_on_the_sole_close_is_named_trips_the_circuit_and_freezes_nothing(monkeypatch):
-    """Attack (2b): pmus.close_position catches EVERY exception and
-    returns close_failed with raw {error, slug, error_type}; for the
-    SDK's RateLimitError the raw's error_type is 'RateLimitError' and
-    ml._raw_rate_limit(raw) is True -- but _flatten_send (mirror_live.py
-    :5438) never asks: it wraps the raw's TEXT (an HTML page) into a
-    RuntimeError for _lost_response, which never consults is_rate_limit.
-    The spec (venue_pace's own note, round 2 HIGH-B: 'every site that
-    reads a 429 ... calls penalize()'; round 4 HIGH-1: a 429 is a
-    refusal, never a lost response, no freeze): `rate_limited`, the
-    circuit, the exit book not frozen."""
+def test_c2_FINDING_a_429_on_the_sole_holders_flatten_rest_is_named_trips_the_circuit_and_freezes_nothing(monkeypatch):
+    """Attack (2b), RE-PINNED AT E31 (FILL lane 31, 2026-09-10) AT THE SITE
+    THAT REPLACED IT. The finding was about the slippage leg:
+    pmus.close_position catches EVERY exception and returns close_failed
+    with raw {error, slug, error_type}; for the SDK's RateLimitError the
+    raw's error_type is 'RateLimitError' and ml._raw_rate_limit(raw) is
+    True -- but _flatten_send never asked: it wrapped the raw's TEXT (an
+    HTML page) into a RuntimeError for _lost_response, which never
+    consults is_rate_limit.
+
+    _flatten_send and the slippage leg are gone: the sole holder's flatten
+    is a POST-ONLY REST, so the venue's 429 now meets the create. The spec
+    the finding was written against is unchanged and is what is pinned
+    here (venue_pace's own note, round 2 HIGH-B: 'every site that reads a
+    429 ... calls penalize()'; round 4 HIGH-1: a 429 is a refusal, never a
+    lost response, no freeze): `rate_limited`, the circuit, the exit book
+    not frozen -- and close_position, armed to 429 if anything reached it,
+    is never called."""
     _install_close(monkeypatch, _sdk_429())
     p, b, v = _sole_close_world()
     st = _tick(p, v, http=_gone())
-    assert ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v.calls
+    # E31: the leg the finding attacked is not walked at all -- 1 -> 0 close calls
+    assert [c for c in v.calls if c[0] == "close"] == []
     assert _census(st, "rate_limited") >= 1, st["census"]
     assert venue_pace.penalty_left() > 590.0
     assert b["state"] != "frozen", (b["state"], b.get("frozen_reason"))
 
 
-def test_r5_the_sole_closes_429_row_is_refused_by_name_and_the_next_tick_rests_the_flatten_again(monkeypatch):
-    """The whole of the c2 road: the CLOSE row `rejected` with the
-    adapter's raw as its receipt (error_type RateLimitError, no int
-    status), `place_refused:rate_limited` on the process census, the
-    abandon `rate_limited` with the backoff skipped, no open-orders
-    search after the close, no `placement_lost`, the book live with
-    nothing non-terminal -- and the next tick (no backoff) sends the
-    close again and, the venue answering, flattens."""
+def test_r5_the_sole_flatten_rests_429_row_is_refused_by_name_and_the_next_tick_rests_the_flatten_again(monkeypatch):
+    """The whole of the c2 road, RE-PINNED AT E31 at the rest's create.
+
+    Unchanged: the abandon `rate_limited` with the backoff skipped, no
+    open-orders search after the refused create, no `placement_lost`, the
+    book live with nothing non-terminal, and the next tick (no backoff)
+    flattening.
+
+    Moved, because the order is a post-only rest and the adapter answers a
+    429 on such a create with its OWN refusal shape rather than raising:
+    the row is `rejected` with venue_state 'post_only_rejected' and reason
+    'post_only_rejected:429' where it read 'rate_limited' and
+    'place_refused:rate_limited'; the census name is `post_only_rejected`
+    where it was `place_refused`, and the process census carries
+    `rate_limited|rn1` where it carried `place_refused:rate_limited|rn1`.
+    The venue's words still reach the row -- through E30's receipt column
+    (_SQL_ORDER_RECEIPT), which this file's fake pool does not merge, so
+    the pin is on the write itself. The 429 IS still read by its named
+    fields and IS still the circuit: that is the finding's whole subject.
+
+    And the next tick: the abandoned tick wrote no plan, so the vanish
+    clock restarts and the SELL rests again -- at the touch's own inside
+    tick (bid 0.30 -> 0.31), the unpriced exit's cent, where the old road
+    sent the bare close after MIRROR_FLATTEN_REST_S."""
     _install_close(monkeypatch, _sdk_429())
     p, b, v = _sole_close_world()
     st = _tick(p, v, http=_gone())
-    assert _census(st, "rate_limited") == 1 and _census(st, "place_refused") == 1
+    assert _census(st, "rate_limited") == 1 and _census(st, "post_only_rejected") == 1
+    assert _census(st, "place_refused") == 0, "the create is inside the adapter's post-only wrapper"
     assert _census(st, "placement_lost") == 0 and st["books_frozen"] == 0
     assert st["abandoned"] and st["abandon_reason"] == "rate_limited"
     assert _census(st, "backoff_skipped_circuit") == 1 and ml._backoff_until == 0.0
-    assert ml._MIRROR_CENSUS.get("place_refused:rate_limited|rn1") == 1
-    row = next(o for o in p.orders.values() if o["tif"] == "CLOSE")
-    assert row["state"] == "rejected" and row["order_id"] is None and row["done_at"] == NOW
-    assert row["venue_state"] == "rate_limited" and row["reason"] == "place_refused:rate_limited"
-    assert row["receipt"]["error_type"] == "RateLimitError" and row["receipt"]["slug"] == SLUG
-    # the adapter's raw, as it came, now with the SDK's int status beside
-    # the type (E2 review round 6, LOW a4: an int status is authoritative)
-    assert row["receipt"]["status_code"] == 429, row["receipt"]
-    i = next(k for k, c in enumerate(v.calls) if c[0] == "close")
+    assert ml._MIRROR_CENSUS.get("rate_limited|rn1") == 1
+    assert ml._MIRROR_CENSUS.get("place_refused:rate_limited|rn1") is None
+    # ONE order went out: the flatten's post-only rest at the touch bound
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)] and _places(v)[0][7] is True
+    row = next(o for o in p.orders.values() if o["state"] == "rejected")
+    assert row["tif"] == "GTC" and row["order_id"] is None and row["kind"] == "flatten_vanished"
+    assert row["venue_state"] == "post_only_rejected" and row["reason"] == "post_only_rejected:429"
+    # the venue's own words, by their named fields, on the receipt write
+    rec = [a for k, sq, a in p.sent if "ml-order-receipt" in sq]
+    assert len(rec) == 1 and rec[0][0] == row["id"]
+    got = json.loads(rec[0][1])
+    assert got["status_code"] == 429 and got["error_type"] == "RateLimitError" and got["body"] is None
+    # the finding's own detail: the venue's 429 body is an HTML PAGE, which is
+    # what the retired road wrapped into a RuntimeError for _lost_response.
+    # It is read by the NAMED fields beside it, never by its text
+    assert got["error"].startswith("<!doctype html>") and set(got) == {
+        "status_code", "error_type", "error", "body"}
+    i = next(k for k, c in enumerate(v.calls) if c[0] == "place")
     assert not [c for c in v.calls[i + 1:] if c[0] == "open_orders"], "no lost-response search"
     assert b["state"] == "live" and b.get("open_order_id") is None and p._nonterminal(b["id"]) == []
     fr = [r for r in st["recent"] if r["what"] == "frozen"]
-    assert not fr and [r for r in st["recent"] if r["what"] == "place_refused"][-1]["raised"] == "RateLimitError"
+    assert not fr and [r for r in st["recent"] if r["what"] == "post_only_rejected"][-1]["code"] == 429
     assert b["ledger_net"] == 300
-    # the next tick runs (no backoff) and the flatten begins again on a
-    # live book: the abandoned tick wrote no plan, so the vanish clock
-    # restarts and the SELL rests its MIRROR_FLATTEN_REST_S first (the
-    # rest-then-slip order, never a bare close) -- nothing frozen
+    # the next tick runs (no backoff) and the flatten rests again on a
+    # live book -- nothing frozen, and still no close
     v2 = _Venue(held={SLUG: 300})
     st2 = _tick(p, v2, now=NOW + 30, http=_gone(), keep_backoff=True)
     assert not st2.get("skipped_backoff") and not st2["abandoned"] and st2["books_frozen"] == 0
-    assert [c[2:6] for c in _places(v2)] == [(0.32, 300, True, "TIME_IN_FORCE_GOOD_TILL_CANCEL")] and _census(st2, "flatten_rested") == 1
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 300, True, GTC_TIF)] and _census(st2, "flatten_rested") == 1
+    assert _census(st2, "maker_rest_at_touch") == 1 and [c for c in v2.calls if c[0] == "close"] == []
     assert b["state"] == "live" and b["ledger_net"] == 300 and b["open_order_id"] is not None
 
 
 def _coheld_ioc_world(monkeypatch):
     """The desk's 200 explained shares beside our 300 (test 1862's third
-    world): co-held, so the slippage leg is ONE IOC at
-    sell_limit_price(bid) for our quantity, sent through the REAL
-    adapter (sell=True: no preview, post_only False, no 4xx wrapper).
-    An unpriced vanish since E4 (see _sole_close_world)."""
+    world): co-held.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). Co-held used to mean the
+    slippage leg was ONE IOC at sell_limit_price(bid) for our quantity,
+    sent through the REAL adapter (sell=True: no preview, post_only False,
+    no 4xx wrapper). There is no slippage leg and no IOC: co-held or sole,
+    the flatten is the same POST-ONLY REST at the touch's own inside tick,
+    through the same adapter -- so what this world still isolates is the
+    OTHER row of the desk's beside ours, and the create it 429s on is the
+    rest's. An unpriced vanish since E4 (see _sole_close_world)."""
     async def _held(t, slug):
         return 500, 0.31
     monkeypatch.setattr(ml, "_pm_held", _held)
@@ -9845,11 +10482,15 @@ def _coheld_ioc_world(monkeypatch):
     return p, b, v
 
 
-def test_c3_FINDING_a_429_on_the_coheld_flatten_ioc_is_named_trips_the_circuit_and_freezes_nothing(monkeypatch):
-    """Attack (2c): the flatten's co-held IOC goes out through
-    _flatten_send's OWN except (mirror_live.py:5420) -> _lost_response,
-    with no is_rate_limit seam: the round-4 HIGH-1 shape, untouched at
-    the sibling placement site. Spec as c2."""
+def test_c3_FINDING_a_429_on_the_coheld_flatten_rest_is_named_trips_the_circuit_and_freezes_nothing(monkeypatch):
+    """Attack (2c), RE-PINNED AT E31 AT THE SITE THAT REPLACED IT. The
+    finding was that the flatten's co-held IOC went out through
+    _flatten_send's OWN except -> _lost_response with no is_rate_limit
+    seam: the round-4 HIGH-1 shape, untouched at the sibling placement
+    site. That site is gone with _flatten_send, and the co-held flatten is
+    the same post-only rest as the sole holder's -- placed by _place,
+    whose seam the round-4 fix put in. Spec as c2: named, the circuit, no
+    freeze."""
     from tests.test_pmus_post_only import _Orders, _install
 
     def _create(params):
@@ -9857,21 +10498,33 @@ def test_c3_FINDING_a_429_on_the_coheld_flatten_ioc_is_named_trips_the_circuit_a
     _install(monkeypatch, _Orders(create=_create))
     p, b, v = _coheld_ioc_world(monkeypatch)
     st = _tick(p, v, http=_gone())
-    ioc = [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"]
-    assert len(ioc) == 1 and ioc[0][4] is True and ioc[0][2] == le.sell_limit_price(0.29)
+    # E31: no IOC leaves this worker at all -- the co-held flatten is the
+    # rest at the touch's inside tick (bid 0.30 -> 0.31), post_only, GTC
+    assert [c for c in _places(v) if c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"] == []
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)] and _places(v)[0][7] is True
     assert _census(st, "rate_limited") >= 1, st["census"]
     assert venue_pace.penalty_left() > 590.0
     assert b["state"] != "frozen", (b["state"], b.get("frozen_reason"))
 
 
-def test_r5_the_coheld_iocs_429_row_is_refused_by_name_with_no_search_and_a_socket_reset_is_still_lost(monkeypatch):
-    """The c3 road in full, and its boundary: the IOC row `rejected`
-    with the raise's receipt, no open-orders read after the IOC, the
-    abandon, no freeze; the same world with the create raising a
-    socket reset is still the lost-response search and the
-    `placement_lost` freeze (a reset is not a refusal the venue named).
-    The seam order pinned: is_rate_limit before _lost_response in both
-    of _flatten_send's placement excepts."""
+def test_r5_the_coheld_flatten_rests_429_row_is_refused_by_name_with_no_search_and_a_socket_reset_is_still_lost(monkeypatch):
+    """The c3 road in full, and its boundary, RE-PINNED AT E31 at the
+    rest's create: the row `rejected` with the raise's words, no
+    open-orders read after it, the abandon, no freeze; the same world with
+    the create raising a socket reset is still the lost-response search
+    and the `placement_lost` freeze (a reset is not a refusal the venue
+    named).
+
+    Moved with the site, exactly as in the sole holder's r5 above: the
+    adapter answers a 429 on a POST-ONLY create with its own refusal shape,
+    so the row reads 'post_only_rejected:429' / venue_state
+    'post_only_rejected' where it read 'place_refused:rate_limited' /
+    'rate_limited', and the census name is `post_only_rejected` where it
+    was `place_refused`. The seam the finding asked for is pinned where it
+    now lives -- _place's own except (is_rate_limit BEFORE _lost_response)
+    for a raise, and the post-only branch's _raw_rate_limit before the
+    return for the adapter's refusal shape -- instead of in _flatten_send's
+    two placement excepts, which are gone with it."""
     from tests.test_pmus_post_only import _Orders, _install
 
     def _create(params):
@@ -9879,15 +10532,19 @@ def test_r5_the_coheld_iocs_429_row_is_refused_by_name_with_no_search_and_a_sock
     _install(monkeypatch, _Orders(create=_create))
     p, b, v = _coheld_ioc_world(monkeypatch)
     st = _tick(p, v, http=_gone())
-    assert _census(st, "rate_limited") == 1 and _census(st, "place_refused") == 1
+    assert _census(st, "rate_limited") == 1 and _census(st, "post_only_rejected") == 1
+    assert _census(st, "place_refused") == 0, "the create is inside the adapter's post-only wrapper"
     assert _census(st, "placement_lost") == 0 and st["books_frozen"] == 0
     assert st["abandoned"] and st["abandon_reason"] == "rate_limited" and ml._backoff_until == 0.0
-    i = next(k for k, c in enumerate(v.calls) if c[0] == "place" and c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    i = next(k for k, c in enumerate(v.calls) if c[0] == "place")
     assert not [c for c in v.calls[i + 1:] if c[0] == "open_orders"], "no lost-response search"
-    row = next(o for o in p.orders.values() if o["tif"] == "IOC")
-    assert row["state"] == "rejected" and row["order_id"] is None
-    assert row["reason"] == "place_refused:rate_limited" and row["venue_state"] == "rate_limited"
-    assert row["receipt"] == {"error": "Too Many Requests", "error_type": "RateLimitError", "status_code": 429}
+    row = next(o for o in p.orders.values() if o["state"] == "rejected")
+    assert row["tif"] == "GTC" and row["order_id"] is None and row["kind"] == "flatten_vanished"
+    assert row["reason"] == "post_only_rejected:429" and row["venue_state"] == "post_only_rejected"
+    rec = [a for k, sq, a in p.sent if "ml-order-receipt" in sq]
+    assert len(rec) == 1 and rec[0][0] == row["id"]
+    assert json.loads(rec[0][1]) == {"error": "Too Many Requests", "error_type": "RateLimitError",
+                                     "status_code": 429, "body": None}
     assert b["state"] == "live" and b["ledger_net"] == 300 and p._nonterminal(b["id"]) == []
     # the boundary: a socket reset on the same create is still lost
     def _reset(params):
@@ -9897,14 +10554,18 @@ def test_r5_the_coheld_iocs_429_row_is_refused_by_name_with_no_search_and_a_sock
     st2 = _tick(p2, v2, http=_gone())
     assert _census(st2, "rate_limited") == 0 and not st2["abandoned"]
     assert b2["state"] == "frozen" and b2["frozen_reason"] == "placement_lost" and _census(st2, "placement_lost") == 1
-    j = next(k for k, c in enumerate(v2.calls) if c[0] == "place" and c[5] == "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL")
+    j = next(k for k, c in enumerate(v2.calls) if c[0] == "place")
     assert [c for c in v2.calls[j + 1:] if c[0] == "open_orders" and c[1] == [SLUG]], "the search"
-    assert next(o for o in p2.orders.values() if o["tif"] == "IOC")["state"] == "placing"
-    src = inspect.getsource(ml._flatten_send)
-    assert src.index("if ms.is_rate_limit(exc):") < src.index("return await _place_rate_limited(t, o, book, r, exc, 0.0)") \
-        < src.index("return await _lost_response(t, o, book, r, exc)")
-    assert src.index("if _raw_rate_limit(raw):") < src.index("_place_rate_limited(t, o, book, r, None, 0.0, raw=raw)") \
-        < src.index("return await _lost_response(t, o, book, r, RuntimeError(")
+    assert next(o for o in p2.orders.values() if o["state"] == "placing")["tif"] == "GTC"
+    # the seam, at the placement road that carries every order this worker
+    # sends (E31): the raise's read of is_rate_limit before _lost_response,
+    # and -- the shape a post-only create answers with -- the raw's read
+    # before the branch returns, with _lost_response nowhere on it
+    src = _place_src()
+    assert src.index("if ms.is_rate_limit(exc):") < src.index("return await _lost_response(t, o, book, r, exc)")
+    assert src.index("if _raw_rate_limit(raw):") < src.index('return "post_only_rejected"')
+    po = src[src.index('if status == "post_only_rejected":'):src.index('return "post_only_rejected"')]
+    assert "_lost_response" not in po and "_rate_limited(t, w," in po and '_abandon(t, "rate_limited"' in po
 
 
 def test_d5_FINDING_LOW_an_int_status_that_is_not_429_is_authoritative_over_the_text():
@@ -9930,8 +10591,10 @@ def test_d5_FINDING_LOW_an_int_status_that_is_not_429_is_authoritative_over_the_
 
 def test_r5_a_400_whose_message_begins_with_429_arms_the_take_and_abandons_nothing_while_a_raw_with_no_status_reads_its_text():
     """The d5 truth table on the worker: the post-only 400 saying "429
-    contracts exceeds the maximum order size" arms the take (a 400)
-    and trips nothing; the SDK's 429 with the same words still does;
+    contracts exceeds the maximum order size" trips nothing (E31: and arms
+    nothing -- no arm is written anywhere; the pin the test carries here
+    is that it is NOT read as a rate limit); the SDK's 429 with the same
+    words still does;
     a raw with NO int status (close_failed's shape, a cancel's error)
     still reads `error_type` and the text's head; a bool or a string
     status is not an int and falls to the text."""
@@ -9945,7 +10608,7 @@ def test_r5_a_400_whose_message_begins_with_429_arms_the_take_and_abandons_nothi
     p = _pool()
     b = p.add_book(ledger=0)
     st = _tick(p, _Venue(place=_reject))
-    assert _census(st, "post_only_rejected") == 1 and b.get("take_armed_ts") == NOW, "a 400: the take arms"
+    assert _census(st, "post_only_rejected") == 1 and b.get("take_armed_ts") is None, "a 400: no arm at all"
     assert not st["abandoned"] and _census(st, "rate_limited") == 0 and venue_pace.penalty_left() == 0.0
     raw429 = pmus._post_only_refusal(_sdk_429("429 contracts exceeds the maximum order size"), {})["raw"]
     assert ml._raw_rate_limit(raw429) and ms.is_rate_limit(_sdk(APIStatusError, 429, "x"))
@@ -9985,31 +10648,37 @@ def _reduce_world(**venue_kw):
 
 
 def test_e4_a_long_reduce_takes_within_a_cent_of_his_price_and_rests_at_his_cent_outside_it():
-    """(a) the bid at 0.30 = his - 0.01: ONE IOC at 0.30 THAT tick,
-    filled at the bid, `exit_take` -- no wait, no rest first, no
-    MIN_MOVE_FRAC test, the entry's names untouched. (b) the bid at
-    0.29 = his - 0.02: no take; the rest at ceil(his) = 0.31 -- HIS cent,
-    not the 0.32 ask -- post-only, `exit_out_of_tol` with bid/ask/floor
-    on the plan, the book held live. (c) the bid rises to 0.30 on a
-    later tick: the rest is cancelled and the IOC goes THEN, whatever
-    the rest's age, the replace budget never read."""
-    p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+    """(a) the bid at 0.30 = his - 0.01, (b) the bid at 0.29 = his - 0.02,
+    (c) the bid rising to 0.30 on a later tick.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). ALL THREE ARE ONE ORDER
+    NOW: the post-only rest at HIS cent 0.31, never the 0.32 ask and never
+    the IOC at the tolerance cent 0.30 that (a) and (c) sent THROUGH the
+    bid. (a) The rest goes at 0.31 and the taker at 0.30 lifts what he
+    reaches, so the ledger moves exactly as the IOC's fill moved it, a cent
+    dearer for us. (b) is byte for byte -- it was already the rest -- with
+    E4's held record beside it. (c) the bid coming back to his tolerance
+    cent is THE MARKET COMING TO OUR REST: `maker_compare_wire` returns the
+    standing 0.31, so there is no cancel, no replace and no take, and the
+    replace budget is still never read."""
+    p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
     st = _tick(p, v, http=http)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][2:8] == (0.30, 200, True, IOC_TIF, INTENT, False)
+    assert len(pl) == 1 and pl[0][2:8] == (0.31, 200, True, GTC_TIF, INTENT, True)
     assert not _cancels(v) and "close" not in _kinds(v) and "slug_bid" not in _kinds(v)
-    assert _census(st, "exit_take") == 1 and _census(st, "take_placed") == 1 and _census(st, "filled_take") == 1
+    assert _census(st, "exit_take") == 0 and _census(st, "take_placed") == 0 and _census(st, "filled_take") == 0
+    assert _census(st, "rest_placed") == 1 and _census(st, "maker_fill_at_create") == 1
     assert _census(st, "take_at_his_level") == 0 and _census(st, "take_first") == 0, "an exit's names, not an entry's"
-    assert _census(st, "exit_out_of_tol") == 0 and _census(st, "rest_placed") == 0 and _census(st, "flatten_rested") == 0
+    assert _census(st, "exit_out_of_tol") == 0 and _census(st, "flatten_rested") == 0
     assert b["ledger_net"] == 100 and b["target"] == 100 and b["state"] == "live"
     o = next(iter(p.orders.values()))
-    assert o["kind"] == "take" and o["tif"] == "IOC" and o["state"] == "filled" and o["maker"] is False
+    assert o["kind"] == "reduce" and o["tif"] == "GTC" and o["state"] == "filled" and o["maker"] is True
     lp = b["last_plan"]
     assert lp["exit_px"] == 0.31 and lp["exit_px_src"] == "his_fill" and lp["exit_floor"] == 0.30
     assert lp["exit_rest"] == 0.31 and lp["exit_take"] == 0.30 and lp["kind"] == "reduce"
     assert "exit_out_of_tol" not in lp
     # (b)
-    p2, b2, v2, http2 = _reduce_world(bid=0.29, ask=0.32, ioc_fill=200.0)
+    p2, b2, v2, http2 = _reduce_world(bid=0.29, ask=0.32, ioc_fill=200.0)   # E31: no lift; the rest stands
     st2 = _tick(p2, v2, http=http2)
     pl2 = _places(v2)
     assert len(pl2) == 1 and pl2[0][2:8] == (0.31, 200, True, GTC_TIF, INTENT, True)
@@ -10020,16 +10689,17 @@ def test_e4_a_long_reduce_takes_within_a_cent_of_his_price_and_rests_at_his_cent
     assert o2["kind"] == "reduce" and o2["state"] == "open" and o2["wire"] == 0.31 and o2["tif"] == "GTC"
     assert b2["last_plan"]["exit_out_of_tol"] == {"bid": 0.29, "ask": 0.32, "floor": 0.30, "band_floor": 0.30, "at": NOW}    # FILL lane 3: the band bound beside the floor
     assert b2["last_plan"]["exit_floor"] == 0.30 and b2["last_plan"]["exit_px_src"] == "his_fill"
-    # (c) five seconds later the bid is at 0.30: cancelled and taken, no wait
+    # (c) five seconds later the bid is at 0.30 -- his tolerance cent. E31: the rest at his
+    # own 0.31 STANDS. Nothing is cancelled, nothing is sent, and the taker who came to 0.30
+    # is the one who must reach 0.31 to fill us
     v3 = _Venue(bid=0.30, ask=0.32, held={SLUG: 300}, ioc_fill=200.0)
     v3.orders = v2.orders
     st3 = _tick(p2, v3, now=NOW + 5, http=http2)
-    assert _cancels(v3) == [("cancel", "oid-1", SLUG)]
-    ioc = [c for c in _places(v3) if c[5] == IOC_TIF]
-    assert len(ioc) == 1 and ioc[0][2] == 0.30 and ioc[0][3] == 200 and ioc[0][4] is True
-    assert _census(st3, "exit_take") == 1 and _census(st3, "take_capped") == 0 and b2["ledger_net"] == 100
-    assert p2.orders[o2["id"]]["state"] == "cancelled"
-    assert not [x for x in p2.sent if "ml-replaces" in x[1]], "an exit's take never reads the replace budget"
+    assert not _cancels(v3) and not _places(v3)
+    assert _census(st3, "exit_take") == 0 and _census(st3, "take_capped") == 0 and b2["ledger_net"] == 300
+    assert _census(st3, "open_order_pending") == 1 and p2.orders[o2["id"]]["state"] == "open"
+    assert rules.maker_compare_wire(SELL, 0.31, 0.31, 0.31) == 0.31
+    assert not [x for x in p2.sent if "ml-replaces" in x[1]], "an exit never reads the replace budget"
 
 
 def test_e4_book_29_replay_the_sign_flip_flatten_rests_at_his_cent_and_stands_five_ttl_periods(monkeypatch):
@@ -10040,8 +10710,16 @@ def test_e4_book_29_replay_the_sign_flip_flatten_rests_at_his_cent_and_stands_fi
     take cent 0.45), nothing is taken at 0.01, and across FIVE TTL
     periods the rest is never cancelled or re-placed
     (`requote_same_wire` each time, `requotes` 0, ONE order row for the
-    whole spell), the book held live; the tick the bid comes back to
-    0.45 the rest is cancelled and the IOC goes at 0.45."""
+    whole spell), the book held live.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the tick the bid comes
+    back to 0.45 -- his tolerance cent -- no longer cancels the rest and
+    crosses at 0.45. His own cent 0.46 is still reachable (the ask 0.47
+    less a tick is 0.46), so `maker_compare_wire` returns the standing
+    wire: the rest of 63 at 0.46 STANDS, a SIXTH held period, and the
+    taker who came to 0.45 must reach 0.46 to fill us. The five held
+    periods before it, `requote_same_wire`, E4's held record and the one
+    order row are byte for byte."""
     _shorts_on(monkeypatch)                    # a signed target, as live: the flip needs one
     fills = [_fill(M, "BUY", 63, 0.46, NOW - 9000), _fill(N, "BUY", 100, 0.55, NOW - 3100),
              _fill(M, "SELL", 63, 0.4595, NOW - 3000)]
@@ -10074,16 +10752,22 @@ def test_e4_book_29_replay_the_sign_flip_flatten_rests_at_his_cent_and_stands_fi
         assert _census(stk, "open_order_pending") == 1 and b["last_plan"]["requote_same_wire"] is True, k
         assert p.orders[o["id"]]["state"] == "open" and b["state"] == "live" and b["ledger_net"] == 63, k
     assert len(p.orders) == 1, "one rest for the whole spell, never re-placed"
-    # the bid comes back within a cent of him: cancelled, taken at 0.45
+    # the bid comes back within a cent of him: E31 -- nothing crosses, the rest stands
     now = NOW + 6 * (ttl + 1)
     p.snap_at = now - 40
     v6 = _Venue(bid=0.45, ask=0.47, held={SLUG: 63}, ioc_fill=63.0)
     v6.orders = v.orders
     st6 = _tick(p, v6, now=now, http=http)
-    assert _cancels(v6) == [("cancel", "oid-1", SLUG)]
-    ioc = [c for c in _places(v6) if c[5] == IOC_TIF]
-    assert len(ioc) == 1 and ioc[0][2] == 0.45 and ioc[0][3] == 63 and ioc[0][4] is True
-    assert _census(st6, "exit_take") == 1 and b["ledger_net"] == 0 and _census(st6, "requote_same_wire") == 0
+    assert not _cancels(v6) and not _places(v6)
+    assert _census(st6, "exit_take") == 0 and b["ledger_net"] == 63
+    assert _census(st6, "open_order_pending") == 1 and p.orders[o["id"]]["state"] == "open"
+    assert rules.maker_wire(SELL, 0.4595, 0.45, 0.47) == 0.46
+    assert rules.maker_compare_wire(SELL, 0.46, 0.46, 0.46) == 0.46
+    # and the taker who reaches his cent fills us THERE, a cent better than the take
+    v7 = _Venue(bid=0.45, ask=0.47, held={SLUG: 63}, fills={"oid-1": (63.0, 0.46)})
+    v7.orders = v.orders
+    st7 = _tick(p, v7, now=now + 30, http=http)
+    assert b["ledger_net"] == 0 and _census(st7, "filled_rest") == 1 and not _places(v7)
 
 
 class _NoClose(_Venue):
@@ -10101,9 +10785,14 @@ def test_e4_s4_a_short_cover_rests_at_floor_his_outside_the_ceiling_and_takes_at
     at floor(his) = 0.30 (a BUY of the long token with the closing
     intent, SELL_SHORT on the wire, GTC, no good-till), the book held
     `exit_out_of_tol` / `short_cover_out_of_tol` with bid/ask/ceiling on
-    the plan, no position read, no freeze. Next tick the ask at 0.31:
-    the rest is cancelled and ONE IOC goes at 0.31 for 300, the same
-    tick, no wait. close_position is never called."""
+    the plan, no position read, no freeze.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the next tick's ask at
+    0.31 no longer cancels the rest and crosses at the cover cent. His own
+    cent 0.30 is still reachable (0.31 - MAKER_TICK = 0.30), so
+    `maker_compare_wire` returns the standing wire and the rest of 300 at
+    0.30 STANDS -- the ask arriving at the cent above ours is the market
+    coming to US. close_position is still never called."""
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
              _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
@@ -10140,14 +10829,19 @@ def test_e4_s4_a_short_cover_rests_at_floor_his_outside_the_ceiling_and_takes_at
     v2 = _NoClose(bid=0.30, ask=0.31, held={SLUG: -300}, ioc_fill=300.0)
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + 30, http=gone)
-    assert _cancels(v2) == [("cancel", "oid-1", SLUG)] and p.orders[o["id"]]["reason"] == "take"
-    assert [c[1:] for c in _places(v2)] == [(SLUG, 0.31, 300, True, IOC_TIF, SHORT, False, None)]
-    assert b["ledger_net"] == 0 and _census(st2, "short_cover_take") == 1 and _census(st2, "exit_take") == 1
-    assert _census(st2, "short_flatten_close") == 1 and _census(st2, "exit_out_of_tol") == 0
+    assert not _cancels(v2) and not _places(v2) and p.orders[o["id"]]["state"] == "open"
+    assert b["ledger_net"] == -300 and _census(st2, "short_cover_take") == 0 and _census(st2, "exit_take") == 0
+    assert _census(st2, "open_order_pending") == 1 and _census(st2, "short_flatten_close") == 0
     assert not reads and "close" not in _kinds(v2)
-    assert b["last_plan"]["exit_cover"] == 0.31 and b["state"] == "closed"
-    take = next(x for x in p.orders.values() if x["tif"] == "IOC")
-    assert (take["kind"], take["side"], take["intent"], take["state"]) == ("take", BUY, "ORDER_INTENT_SELL_SHORT", "filled")
+    assert b["last_plan"]["exit_cover"] == 0.31 and b["state"] == "live"
+    assert not [x for x in p.orders.values() if x["tif"] == "IOC"]
+    assert rules.maker_wire(BUY, 0.30, 0.30, 0.31) == 0.30
+    # and the taker who reaches our cent fills us THERE, a cent better than the cover take
+    v3 = _NoClose(bid=0.30, ask=0.31, held={SLUG: -300}, fills={"oid-1": (300.0, 0.30)})
+    v3.orders = v.orders
+    st3 = _tick(p, v3, now=NOW + 60, http=gone)
+    assert b["ledger_net"] == 0 and _census(st3, "filled_rest") == 1 and not _places(v3)
+    assert _census(st3, "short_flatten_close") == 1
 
 
 def test_e4_s4_no_price_of_his_holds_the_cover_by_name_except_a_vanish_or_the_sign_flip_which_cover_by_a_bounded_ioc(monkeypatch):
@@ -10155,27 +10849,42 @@ def test_e4_s4_no_price_of_his_holds_the_cover_by_name_except_a_vanish_or_the_si
     `no_price` under `exit_px_src: 'none'` (a paired flatten while he
     still holds a token; a partial reduce) -- never a rest at the ask.
     The one exception: his position on our side is GONE -- a confirmed
-    vanish, the sign flip -- and the cover is ONE IOC at the ask bounded
-    by le.buy_limit_price (the ask + MIRROR_FLATTEN_SLIP, the long
-    flatten's own bound mirrored), for our quantity. close_position is
-    never called."""
+    vanish, the sign flip -- and the cover goes at once, for our quantity.
+    close_position is never called.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): that exception's order was
+    ONE IOC at `le.buy_limit_price(ask)` = the ask + MIRROR_FLATTEN_SLIP =
+    0.42, TWO CENTS THROUGH the ask. It is now the UNPRICED EXIT's rest --
+    there is no level of his to honour, so it sits at the touch's own inside
+    tick, ask 0.40 - MAKER_TICK = 0.39, `post_only` True, GTC, re-quoted on
+    the touch every tick (E31 B). `MIRROR_FLATTEN_SLIP` and
+    `le.buy_limit_price` keep their own arithmetic and their unit pin below;
+    no order path reads either. The HOLDS -- (b), (c), (d) -- are untouched:
+    fail closed is still fail closed."""
     _shorts_on(monkeypatch)
     gone = _Http(rows=[{"conditionId": CID, "asset": M, "size": 0},
                        {"conditionId": CID, "asset": N, "size": 0}])
-    # (a) the confirmed vanish, unpriced: the bounded IOC at once
+    # (a) the confirmed vanish, unpriced: the rest at the touch's inside tick, at once
     p = _short_world(fills=_unpriced(), snap=None)
     b = _short_book(p, ledger=-300)
-    v = _NoClose(bid=0.30, ask=0.40, held={SLUG: -300}, ioc_fill=300.0)
+    v = _NoClose(bid=0.30, ask=0.40, held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st = _tick(p, v, http=gone)
-    assert "close" not in _kinds(v) and [c[1:] for c in _places(v)] == [(SLUG, 0.42, 300, True, IOC_TIF, SHORT, False, None)]
+    assert "close" not in _kinds(v) and [c[1:] for c in _places(v)] == [(SLUG, 0.39, 300, True, GTC_TIF, SHORT, True, None)]
+    # the slippage bound's own arithmetic stands, with no reader on the money path
     assert le.buy_limit_price(0.40) == 0.42 == round(0.40 + rules.MIRROR_FLATTEN_SLIP, 2)
+    assert rules.maker_wire(BUY, None, 0.30, 0.40, unpriced=True) == 0.39
     lp = b["last_plan"]
     assert lp["exit_px_src"] == "none" and lp["exit_px"] is None and "exit_ceiling" not in lp
-    assert lp["cover"] == {"ioc_at_ask": 0.40, "limit": 0.42, "why": "vanished"}
-    assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1 and _census(st, "short_cover_take") == 1
+    assert lp["maker"]["clause"] == "unpriced_touch" and lp["maker"]["wire"] == 0.39
+    # the plan's own record moved with the order: `ioc_at_ask` -> `rest_under_ask`, the same
+    # ask, and `limit` the cent that goes out (0.42 through the ask -> 0.39 under it)
+    assert lp["cover"] == {"rest_under_ask": 0.40, "limit": 0.39, "why": "vanished"}
+    assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
+    assert _census(st, "short_cover_take") == 0 and _census(st, "short_cover_rest") == 1
+    assert _census(st, "maker_rest_at_touch") == 1 and _census(st, "maker_fill_at_create") == 1
     assert _census(st, "exit_out_of_tol") == 0 and _census(st, "no_price") == 0
     o = next(iter(p.orders.values()))
-    assert (o["kind"], o["tif"], o["intent"], o["wire"]) == ("flatten_vanished", "IOC", "ORDER_INTENT_SELL_SHORT", 0.42)
+    assert (o["kind"], o["tif"], o["intent"], o["wire"]) == ("flatten_vanished", "GTC", "ORDER_INTENT_SELL_SHORT", 0.39)
     # (b) an UNPRICED sign flip cannot be built from his fills: the fills
     # that carry his net across zero on a short book -- a BUY of the long
     # token, a SELL of the other -- are the cover-side fills _his_level
@@ -10209,24 +10918,32 @@ def test_e4_s4_no_price_of_his_holds_the_cover_by_name_except_a_vanish_or_the_si
     # (e) a re-check every tick: the held paired book is read again and, his
     # buy-back now on file, covers
     p3.fills.append(_fill(M, "BUY", 300, 0.31, NOW + 10))
-    v5 = _NoClose(bid=0.30, ask=0.32, held={SLUG: -300}, ioc_fill=300.0)
+    v5 = _NoClose(bid=0.30, ask=0.32, held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st5 = _tick(p3, v5, now=NOW + 30, http=_mkt(400.0, 400.0))
-    assert [c[2:6] for c in _places(v5)] == [(0.32, 300, True, IOC_TIF)] and b3["ledger_net"] == 0
+    # E31: the cover rests at his own cent 0.31, a tick under the ask, and the taker lifts it
+    assert [c[2:6] for c in _places(v5)] == [(0.31, 300, True, GTC_TIF)] and b3["ledger_net"] == 0
     assert b3["last_plan"]["exit_px_src"] == "his_fill" and _census(st5, "short_flatten_close") == 1
 
 
 def test_e4_review_a_priced_vanish_takes_within_the_cent_and_never_runs_the_slippage_leg():
     """MEDIUM-3 (the reviewer's a7, ported). A vanish WITH his SELL at
-    0.31: the bid within a cent takes at once; outside the cent the
-    rest at his cent stands past MIRROR_FLATTEN_REST_S and past the TTL
-    with no close, no co-held IOC, no cancel (`requote_same_wire`)."""
+    0.31: the rest at his cent stands past MIRROR_FLATTEN_REST_S and past
+    the TTL with no close, no co-held IOC, no cancel
+    (`requote_same_wire`).
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the first world's bid
+    within a cent of him no longer TAKES -- the exit is the same post-only
+    rest at his own cent 0.31, and the taker who came within a cent must
+    reach it. The second world, the whole point of the test, is byte for
+    byte: no close, no slippage leg, no cancel, at any age."""
     fills = [_fill(M, "BUY", 300, 0.31, NOW - 3000), _fill(M, "SELL", 300, 0.31, NOW - 1000)]
     p = _pool(fills=fills, snap={M: 0.0, N: 0.0})
     b = p.add_book(ledger=300)
-    v = _Venue(bid=0.30, ask=0.32, held={SLUG: 300}, ioc_fill=300.0)
+    v = _Venue(bid=0.30, ask=0.32, held={SLUG: 300}, ioc_fill=300.0, lift=300.0)
     st = _tick(p, v, http=_gone())
     assert b["last_plan"]["kind"] == "flatten_vanished" and b["last_plan"]["exit_px_src"] == "his_fill"
-    assert [c[2:6] for c in _places(v)] == [(0.30, 300, True, IOC_TIF)] and _census(st, "exit_take") == 1
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)] and _census(st, "exit_take") == 0
+    assert _census(st, "flatten_rested") == 1 and _census(st, "maker_fill_at_create") == 1
     assert "close" not in _kinds(v) and "slug_bid" not in _kinds(v) and b["ledger_net"] == 0
     p2 = _pool(fills=fills, snap={M: 0.0, N: 0.0})
     b2 = p2.add_book(ledger=300)
@@ -10247,78 +10964,121 @@ def test_e4_review_a_priced_vanish_takes_within_the_cent_and_never_runs_the_slip
 
 
 def test_e4_review_the_entry_take_first_fires_in_a_normal_book_at_his_cent():
-    """HIGH-1. His 0.30; the rest's wire is buy_price(0.30, bid) and a
-    book with bid < ask is never at or through its own rest, so the
-    take must be judged and sent at HIS cent, buy_wire(his) = 0.30:
-    bid 0.29 / ask 0.30 (the ask AT his level) -> one IOC at 0.30
-    first, the remainder rests at 0.29, `take_first`; ask 0.29
-    (through) -> the IOC at 0.30 (it fills at the ask, never above
-    him); ask 0.31 -> a rest at 0.29 only, and the ask arriving at
-    0.30 on a later tick cancels it and takes; a fill above 0.30 is
-    impossible (the limit is his cent)."""
+    """HIGH-1. His 0.30, judged at HIS cent buy_wire(his) = 0.30 and never
+    at the rest's own wire.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE TAKE-FIRST IS RETIRED
+    (`_entry_take` deleted, `take_first` / `take_at_his_level` declared
+    zeros), and the rule that replaces it makes HIGH-1's defect
+    unreachable: the entry's cent is `min(buy_wire(his), ask - MAKER_TICK)`,
+    which reads HIS LEVEL AND THE ASK on every tick, so a book whose ask
+    sits at or through his level can no longer be answered by crossing --
+    it is answered by resting one tick inside the ask. The four worlds are
+    re-pinned on that cent, and the invariant HIGH-1 protected -- NO FILL
+    ABOVE HIS 0.30 -- holds a fortiori, because no order is ever sent above
+    the touch bound. The fifth world (his 0.2999) is byte for byte."""
     his = [_fill(M, "BUY", 300, 0.30, NOW - 3000)]
     p = _pool(fills=his)
     b = p.add_book(ledger=0)
-    v = _Venue(bid=0.29, ask=0.30, ioc_fill=100.0)
+    v = _Venue(bid=0.29, ask=0.30, ioc_fill=100.0, lift=100.0)
     st = _tick(p, v)
-    assert [c[2:6] for c in _places(v)] == [(0.30, 300, False, IOC_TIF), (0.29, 200, False, GTC_TIF)]
-    assert _census(st, "take_first") == 1 and _census(st, "take_at_his_level") == 1 and not _cancels(v)
-    assert b["ledger_net"] == 100 and b["avg_cost"] <= 0.30 and st["ops"] == 2
+    # the ask AT his level: the rest at ask - MAKER_TICK = 0.29, ONE order for the whole 300
+    # (never an IOC for part of it and a second rest for the remainder), a taker lifts 100
+    assert [c[2:6] for c in _places(v)] == [(0.29, 300, False, GTC_TIF)]
+    assert _census(st, "take_first") == 0 and _census(st, "take_at_his_level") == 0 and not _cancels(v)
+    assert _census(st, "rest_placed") == 1 and _census(st, "maker_rest_at_touch") == 1
+    assert b["ledger_net"] == 100 and b["avg_cost"] <= 0.30 and st["ops"] == 1
     rest = [x for x in p.orders.values() if x["state"] == "open"]
-    assert len(rest) == 1 and rest[0]["wire"] == 0.29 and rest[0]["qty"] == 200
-    # through his level
+    assert len(rest) == 1 and rest[0]["wire"] == 0.29 and rest[0]["qty"] == 300
+    # through his level: the ask at 0.29 clamps the rest to 0.28, a cent further from him --
+    # never the IOC at 0.29 that filled at the ask
     p2 = _pool(fills=his)
     b2 = p2.add_book(ledger=0)
-    v2 = _Venue(bid=0.28, ask=0.29, ioc_fill=300.0)
+    v2 = _Venue(bid=0.28, ask=0.29, ioc_fill=300.0, lift=300.0)
     st2 = _tick(p2, v2)
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 300, False, IOC_TIF)] and _census(st2, "take_first") == 1
+    assert [c[2:6] for c in _places(v2)] == [(0.28, 300, False, GTC_TIF)] and _census(st2, "take_first") == 0
     assert b2["ledger_net"] == 300 and all(c[2] <= 0.30 for c in _places(v2))
-    # above his level: the rest alone, then the ask arriving at 0.30
+    # above his level: the rest at HIS OWN cent 0.30 (0.29 -> 0.30, the bid no longer read),
+    # and the ask arriving at 0.30 on a later tick does NOT cancel it: the market came to us
     p3 = _pool(fills=his)
     b3 = p3.add_book(ledger=0)
     v3 = _Venue(bid=0.29, ask=0.31, ioc_fill=300.0)
     st3 = _tick(p3, v3)
-    assert [c[2:6] for c in _places(v3)] == [(0.29, 300, False, GTC_TIF)] and _census(st3, "take_first") == 0
+    assert [c[2:6] for c in _places(v3)] == [(0.30, 300, False, GTC_TIF)] and _census(st3, "take_first") == 0
     assert _census(st3, "take_placed") == 0 and b3["ledger_net"] == 0
+    assert b3["last_plan"]["maker"]["clause"] == "his_cent"
     v4 = _Venue(bid=0.29, ask=0.30, ioc_fill=300.0)
     v4.orders = v3.orders
     st4 = _tick(p3, v4, now=NOW + 30)
-    assert _cancels(v4) == [("cancel", "oid-1", SLUG)]
-    assert [c[2:6] for c in _places(v4)] == [(0.30, 300, False, IOC_TIF)] and _census(st4, "take_at_his_level") == 1
-    assert _census(st4, "take_first") == 0 and b3["ledger_net"] == 300 and all(c[2] <= 0.30 for c in _places(v4))
-    # his 0.2999: his cent is 0.29 and the ask at 0.30 is above it -- a rest, no IOC
+    assert not _cancels(v4) and not _places(v4) and _census(st4, "take_at_his_level") == 0
+    assert _census(st4, "open_order_pending") == 1 and b3["ledger_net"] == 0
+    assert rules.maker_compare_wire(BUY, 0.30, 0.30, 0.29) == 0.30, "never re-quoted down with a falling ask"
+    # his 0.2999: his cent is 0.29 and the ask at 0.30 leaves it reachable -- the same rest
     p5 = _pool(fills=[_fill(M, "BUY", 300, 0.2999, NOW - 3000)])
     b5 = p5.add_book(ledger=0)
     v5 = _Venue(bid=0.30, ask=0.30, ioc_fill=300.0)
     st5 = _tick(p5, v5)
     assert [c[2:6] for c in _places(v5)] == [(0.29, 300, False, GTC_TIF)] and _census(st5, "take_first") == 0
     assert b5["ledger_net"] == 0
-    # the exit's take never counts before it is sent: an ops-capped
-    # cancel names nothing (LOW-4); the count sits with the placement
-    src = inspect.getsource(ml._act)
-    assert '_mirror_stop("exit_take", w)' not in src and '_mirror_stop("exit_take", w)' in _place_src()
+    # LOW-4 said the exit's take must never be COUNTED before it is SENT -- the count sat
+    # with the placement, not with the cancel that preceded it. E31: there is no take to
+    # count anywhere. `exit_take` is a declared zero with no emit site in the whole module,
+    # which is the strongest form of the same statement
+    src = inspect.getsource(ml)
+    assert src.count('_mirror_stop("exit_take"') == 0 and src.count('_mirror_stop("take_placed"') == 0
+    assert ml._new_stats()["census"]["exit_take"] == 0 and "exit_take" in ml.CENSUS_KEYS
 
 
 def test_e4_review_the_worker_reads_the_tolerance_at_call_time(monkeypatch):
     """LOW-6: MIRROR_EXIT_TOL tightened to 0 reaches the worker's exit
-    without a reload -- a bid a cent under him is no longer taken."""
+    without a reload -- a bid a cent under him is no longer taken.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the tolerance reaches the
+    worker through `rules.exit_terms` at call time exactly as it did, and
+    is READ ON THE PLAN'S RECORD -- the floor and the take cent both move
+    to 0.31 with the tightening. What it can no longer do is move an
+    ORDER: at both bids the exit is the same post-only rest at his own
+    cent 0.31, and no bid is taken at any tolerance."""
     monkeypatch.setattr(rules, "MIRROR_EXIT_TOL", 0.0)
     p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
     st = _tick(p, v, http=http)
     assert [c[2:6] for c in _places(v)] == [(0.31, 200, True, GTC_TIF)] and _census(st, "exit_take") == 0
     assert b["last_plan"]["exit_floor"] == 0.31 and b["last_plan"]["exit_take"] == 0.31
+    # the bid AT his cent: his 0.31 would now be AT the bid, which crosses, so the maker
+    # clamp lifts the rest one tick over it -- max(sell_wire(0.31), 0.31 + MAKER_TICK) = 0.32,
+    # the touch bound. Where the tolerance's own reading used to decide take-or-rest here,
+    # the TOUCH decides the cent and nothing is taken at any tolerance
     p2, b2, v2, http2 = _reduce_world(bid=0.31, ask=0.32, ioc_fill=200.0)
     st2 = _tick(p2, v2, http=http2)
-    assert [c[2:6] for c in _places(v2)] == [(0.31, 200, True, IOC_TIF)] and _census(st2, "exit_take") == 1
+    assert [c[2:6] for c in _places(v2)] == [(0.32, 200, True, GTC_TIF)] and _census(st2, "exit_take") == 0
+    assert _census(st2, "maker_rest_at_touch") == 1 and b2["last_plan"]["maker"]["clause"] == "touch"
+    assert b2["last_plan"]["exit_floor"] == 0.31 and b2["last_plan"]["exit_take"] == 0.31
+    # the tolerance at its default reaches the record the same way, one cent lower -- and
+    # the ORDER does not move with it
+    monkeypatch.setattr(rules, "MIRROR_EXIT_TOL", 0.01)
+    p3, b3, v3, http3 = _reduce_world(bid=0.31, ask=0.32, ioc_fill=200.0)
+    _tick(p3, v3, http=http3)
+    assert b3["last_plan"]["exit_floor"] == 0.30 and b3["last_plan"]["exit_take"] == 0.30
+    assert [c[2:6] for c in _places(v3)] == [(0.32, 200, True, GTC_TIF)], "the order is the same either way"
 
 
 def test_e4_an_exit_is_never_blocked_by_the_replace_budget_or_the_loss_stop():
     """Rule 4: with MIRROR_MAX_REPLACES_PER_HOUR cancels on the book an
     exit's REPLACE (its rest at the pre-E4 cent moving to his cent)
-    still goes and an exit's TAKE still goes -- the count is not even
-    read -- while an entry's replace at the cap is still refused. Rule
-    5: the mirror's loss stop (`increase_block` mirror_loss_stop)
-    refuses every increase and no exit: the take goes out under it."""
+    still goes -- the count is not even read -- while an entry's replace
+    at the cap is still refused. Rule 5: the mirror's loss stop
+    (`increase_block` mirror_loss_stop) refuses every increase and no
+    exit: the exit goes out under it.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the second and fourth
+    worlds pinned an exit's TAKE going out at the cap and under the stop.
+    There is no take; what those worlds must show instead is that the
+    exit's ORDER is not blocked either -- so each is driven where an order
+    is actually sent (the rest standing at a cent the maker wire has left)
+    and the exemption is read on THAT. The rails' own readings --
+    `take_capped` never counted, the replaces table never touched,
+    `mirror_loss_stop` counted and cancelling another book's BUY -- are
+    unchanged."""
     cap = rules.MIRROR_MAX_REPLACES_PER_HOUR
     p, b, v, http = _reduce_world(bid=0.29, ask=0.32)
     for _ in range(cap):
@@ -10330,15 +11090,18 @@ def test_e4_an_exit_is_never_blocked_by_the_replace_budget_or_the_loss_stop():
     assert [c[2:6] for c in _places(v)] == [(0.31, 200, True, GTC_TIF)] and st["requotes"] == 1
     assert p.orders[o["id"]]["state"] == "cancelled" and b["ledger_net"] == 300
     assert not [x for x in p.sent if "ml-replaces" in x[1]], "the count is never read for an exit"
-    # the take, at the cap of cancels under reason 'take'
-    p2, b2, v2, http2 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+    # the exit's REPLACE at the cap of cancels under reason 'take' (the take's own rail):
+    # the rest standing at 0.32 is re-quoted DOWN to his cent 0.31 and the cap is not read
+    p2, b2, v2, http2 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
     for _ in range(cap):
         p2.add_order(b2, state="cancelled", reason="take", done_at=NOW - 100, order_id=None)
-    p2.add_order(b2, side=SELL, wire=0.31, qty=200, kind="reduce")
-    v2.rest("oid-1", "SELL", 0.31, 200)
+    o2 = p2.add_order(b2, side=SELL, wire=0.32, qty=200, kind="reduce")
+    v2.rest("oid-1", "SELL", 0.32, 200)
     st2 = _tick(p2, v2, http=http2)
-    assert _census(st2, "take_capped") == 0 and _census(st2, "exit_take") == 1 and b2["ledger_net"] == 100
-    assert _cancels(v2) == [("cancel", "oid-1", SLUG)]
+    assert _census(st2, "take_capped") == 0 and _census(st2, "exit_take") == 0 and b2["ledger_net"] == 100
+    assert _census(st2, "replace_capped") == 0 and _cancels(v2) == [("cancel", "oid-1", SLUG)]
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 200, True, GTC_TIF)]
+    assert p2.orders[o2["id"]]["state"] == "cancelled"
     assert not [x for x in p2.sent if "ml-replaces" in x[1]]
     # an entry's replace at the cap: refused, as before
     p3 = _pool()
@@ -10352,7 +11115,7 @@ def test_e4_an_exit_is_never_blocked_by_the_replace_budget_or_the_loss_stop():
     assert _census(st3, "replace_capped") == 1 and not _cancels(v3) and not _places(v3)
     # the loss stop: another book's resting BUY is cancelled under its
     # name (as section 2 pins it) and the exit's take is sent regardless
-    p4, b4, v4, http4 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+    p4, b4, v4, http4 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
     b5 = p4.add_book(ledger=0, us_market_slug="aec-atp-other-2026-09-02", condition_id="0xother")
     o5 = p4.add_order(b5, order_id="oid-9", us_market_slug="aec-atp-other-2026-09-02")
     v4.rest("oid-9", slug="aec-atp-other-2026-09-02")
@@ -10360,21 +11123,30 @@ def test_e4_an_exit_is_never_blocked_by_the_replace_budget_or_the_loss_stop():
     st4 = _tick(p4, v4, http=http4)
     assert _census(st4, "mirror_loss_stop") >= 1
     assert p4.orders[o5["id"]]["state"] == "cancelled" and p4.orders[o5["id"]]["reason"] == "mirror_loss_stop"
-    assert [c[2:6] for c in _places(v4)] == [(0.30, 200, True, IOC_TIF)]
-    assert _census(st4, "exit_take") == 1 and b4["ledger_net"] == 100 and b5["ledger_net"] == 0
+    assert [c[2:6] for c in _places(v4)] == [(0.31, 200, True, GTC_TIF)]
+    assert _census(st4, "exit_take") == 0 and _census(st4, "rest_placed") == 1
+    assert b4["ledger_net"] == 100 and b5["ledger_net"] == 0
 
 
 def test_e4_an_exit_he_gave_no_price_for_keeps_todays_prices_under_exit_px_src_none():
-    """An UNPRICED vanish (no fill of his in the window): the rest at
-    the ask, no take within a tolerance of nothing, `exit_px_src:
-    'none'`. The admin flatten (mirror_flatten) with his price KNOWN:
-    by the brief it keeps today's max(his, ask) rest and the slippage
-    leg, and says `'none'` too."""
+    """An UNPRICED vanish (no fill of his in the window): no take within a
+    tolerance of nothing, `exit_px_src: 'none'`. The admin flatten
+    (mirror_flatten) with his price KNOWN says `'none'` too.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the cent both worlds rest
+    at moves from the ASK 0.32 -- max(his, ask), the ask's own queue -- to
+    the TOUCH'S INSIDE TICK, bid 0.30 + MAKER_TICK = 0.31, which is E31's
+    unpriced-exit clause: there is no level of his to honour, so the rest
+    sits one tick over the bid and is re-quoted on the touch every tick.
+    The admin flatten keeps the SAME cent (its `exit_px` record still
+    names his 0.31; the order does not read it) and loses the slippage leg
+    with `_flatten_send`. `exit_px_src: 'none'` on both is untouched."""
     p = _pool(fills=_unpriced(), snap=None)
     b = p.add_book(ledger=300)
     v = _Venue(bid=0.30, ask=0.32, held={SLUG: 300})
     st = _tick(p, v, http=_gone())
-    assert [c[2:6] for c in _places(v)] == [(0.32, 300, True, GTC_TIF)]
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)]
+    assert b["last_plan"]["maker"]["clause"] == "unpriced_touch"
     lp = b["last_plan"]
     assert lp["exit_px_src"] == "none" and lp["exit_px"] is None and "exit_floor" not in lp
     assert _census(st, "exit_take") == 0 and _census(st, "exit_out_of_tol") == 0
@@ -10383,7 +11155,8 @@ def test_e4_an_exit_he_gave_no_price_for_keeps_todays_prices_under_exit_px_src_n
     p2, b2, v2, http2 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=300.0)
     p2.state["mirror_flatten"] = True
     st2 = _tick(p2, v2, http=http2)
-    assert [c[2:6] for c in _places(v2)] == [(0.32, 300, True, GTC_TIF)]
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 300, True, GTC_TIF)]
+    assert b2["last_plan"]["maker"]["clause"] == "unpriced_touch"
     assert b2["last_plan"]["exit_px_src"] == "none" and b2["last_plan"]["exit_px"] == 0.31
     assert _census(st2, "mirror_flatten") >= 1 and _census(st2, "exit_take") == 0
     assert _census(st2, "exit_out_of_tol") == 0 and b2["ledger_net"] == 300
@@ -10391,42 +11164,51 @@ def test_e4_an_exit_he_gave_no_price_for_keeps_todays_prices_under_exit_px_src_n
 
 def test_e4_the_exit_take_fires_once_per_rest_and_a_partial_ioc_rests_its_remainder_the_same_tick():
     """(i) a rest of 200 at his cent, the bid within a cent, the IOC
-    filling 50 of the 200: one cancel, ONE IOC, and -- since E14b (FILL
-    lane 1; the pin read "nothing rests after it this tick" before) --
-    the unfilled 150 rests at his cent 0.31 on the SAME tick, the only
-    standing order, never a second IOC. The next tick with the bid still
-    there cancels that rest and takes for what is left (a new plan, not
-    a second take on one rest), and rests the remainder again; the bid
-    gone, the standing rest at his cent is held (`exit_out_of_tol`),
-    nothing placed."""
+    filling 50: one cancel, ONE IOC, and -- since E14b (FILL lane 1) --
+    the unfilled 150 resting at his cent 0.31 on the SAME tick, never a
+    second IOC. The next tick took for what was left; the bid gone, the
+    standing rest was held (`exit_out_of_tol`).
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE WHOLE CYCLE IS GONE:
+    `_exit_take` is deleted, so there is no IOC to fire once per rest, no
+    remainder to re-rest beside it and no `exit_take_rested`. The rest at
+    his cent 0.31 IS the exit, and the bid arriving within a cent is the
+    TAKER coming to it -- so on every one of the three ticks below nothing
+    is cancelled and nothing is sent; the ONE order stands and is filled
+    where it is, in part or in whole. What E14b's rule was for -- the book
+    is never left without an exit order after a partial -- now holds by
+    construction: the partial leaves the SAME order standing for its
+    remainder, with its queue."""
     p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=50.0)
     o = p.add_order(b, side=SELL, wire=0.31, qty=200, kind="reduce")
     v.rest("oid-1", "SELL", 0.31, 200)
     st = _tick(p, v, http=http)
-    assert _cancels(v) == [("cancel", "oid-1", SLUG)]
-    assert [c[2:6] for c in _places(v)] == [(0.30, 200, True, IOC_TIF), (0.31, 150, True, GTC_TIF)], \
-        "one IOC, then the unfilled 150 resting at his cent the same tick (E14b)"
-    assert b["ledger_net"] == 250 and _census(st, "exit_take") == 1 and _census(st, "rest_placed") == 1
-    assert _census(st, "exit_take_rested") == 1 and _census(st, "ops_capped") == 0
+    # tick 1: the bid a cent under him -- the rest at his own cent stands, untouched
+    assert not _cancels(v) and not _places(v)
+    assert b["ledger_net"] == 300 and _census(st, "exit_take") == 0 and _census(st, "rest_placed") == 0
+    assert _census(st, "exit_take_rested") == 0 and _census(st, "open_order_pending") == 1
     opens = [x for x in p.orders.values() if x["state"] == "open"]
-    assert len(opens) == 1 and opens[0]["kind"] == "reduce" and opens[0]["qty"] == 150 and opens[0]["wire"] == 0.31
-    assert b["open_order_id"] == opens[0]["id"]
-    take = next(x for x in p.orders.values() if x["kind"] == "take")
-    assert take["booked_filled"] == 50.0 and take["state"] != "open" and p.orders[o["id"]]["state"] == "cancelled"
-    assert b["last_plan"]["exit_take_rested"] == {"take": 0.30, "rest": 0.31, "qty": 200, "filled": 50.0, "rested": 150}
-    # the next tick, the bid still there: the rest is cancelled and taken
-    # for the 150 (fills 50), the 100 left rests again
-    v.portfolio.held[SLUG] = 250
-    st2 = _tick(p, v, now=NOW + 30, http=http)
-    assert [c[1] for c in _cancels(v)] == ["oid-1", "oid-2"]
-    assert [c[2:6] for c in _places(v)][2:] == [(0.30, 150, True, IOC_TIF), (0.31, 100, True, GTC_TIF)]
-    assert b["ledger_net"] == 200 and _census(st2, "exit_take") == 1 and _census(st2, "exit_take_rested") == 1
-    # the bid gone: the standing rest at his cent is held, nothing placed
-    v.bid, v.portfolio.held[SLUG] = 0.29, 200
-    st3 = _tick(p, v, now=NOW + 60, http=http)
-    assert len(_places(v)) == 4 and len(_cancels(v)) == 2
-    assert _census(st3, "exit_out_of_tol") == 1 and _census(st3, "exit_take") == 0 and _census(st3, "exit_take_rested") == 0
+    assert len(opens) == 1 and opens[0]["id"] == o["id"] and opens[0]["qty"] == 200 and opens[0]["wire"] == 0.31
+    assert b["open_order_id"] == o["id"] and not [x for x in p.orders.values() if x["kind"] == "take"]
+    assert "exit_take_rested" not in b["last_plan"]
+    # tick 2: a taker lifts 50 of the standing rest. The SAME order keeps the other 150 --
+    # this is what the IOC could not do, and why the re-rest existed
+    v2 = _Venue(bid=0.30, ask=0.32, held={SLUG: 250}, fills={"oid-1": (50.0, 0.31)})
+    v2.orders = v.orders
+    st2 = _tick(p, v2, now=NOW + 30, http=http)
+    assert not _cancels(v2) and not _places(v2) and b["ledger_net"] == 250
+    assert _census(st2, "partial_fill") == 1 and _census(st2, "exit_take") == 0
+    assert p.orders[o["id"]]["state"] == "open" and p.orders[o["id"]]["booked_filled"] == 50.0
+    assert b["open_order_id"] == o["id"], "one order across the partial: the queue is kept"
+    # tick 3: the bid gone -- the standing rest at his cent is held by name, nothing placed
+    v3 = _Venue(bid=0.29, ask=0.32, held={SLUG: 250}, fills={"oid-1": (50.0, 0.31)})
+    v3.orders = v.orders
+    st3 = _tick(p, v3, now=NOW + 60, http=http)
+    assert not _places(v3) and not _cancels(v3)
+    assert _census(st3, "exit_out_of_tol") == 1 and _census(st3, "exit_take") == 0
+    assert _census(st3, "exit_take_rested") == 0 and _census(st3, "open_order_pending") == 1
     assert len([x for x in p.orders.values() if x["state"] == "open"]) == 1
+    assert not hasattr(ml, "_exit_take")
 
 
 def test_e4_an_exit_rest_at_his_cent_carries_no_good_till_and_an_entry_rest_still_does(monkeypatch):
@@ -10448,63 +11230,76 @@ def test_e4_an_exit_rest_at_his_cent_carries_no_good_till_and_an_entry_rest_stil
 
 
 def test_e4_addendum_the_entry_take_first_spends_its_room_once_two_ops_and_no_replace(monkeypatch):
-    """A flat book, his 300 @ 0.30, the ask at his level, the mirror's
-    day room $45 (150 sh @ 0.30): the IOC goes FIRST for the plannable
-    150, fills 50, and the unfilled 100 rests post-only at the wire --
-    two writes (`ops` 2), the room spent ONCE (the IOC's unfilled part
-    goes back before the rest is sized; without it the rest would be
-    `over_room`), the rest the ONLY standing order, the IOC row
-    terminal, never a second IOC; nothing was cancelled, so nothing
-    counts as a replace (an IOC row is never in _SQL_REPLACES' count,
-    and `_requotes_this_hour` reads 0)."""
+    """A flat book, his 300 @ 0.30, the ask at his level, the mirror's day
+    room $45: the IOC went FIRST for the plannable 150, filled 50, and the
+    unfilled 100 rested -- two writes, the room spent ONCE, no replace.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE TAKE-FIRST IS GONE,
+    so the tick is ONE write, not two, and the room can be spent only
+    once because there is only one order to spend it on. The cent moves
+    with it: the ask AT his level makes his own cent 0.30 a cross, so the
+    rest sits at the touch bound 0.29 -- and the $45 buys MORE there,
+    floor(45/0.29) = 155 shares where it bought 150 at 0.30. The pins the
+    test carries all hold: `ops` 1 (was 2), no cancel, no replace row, an
+    IOC row never in _SQL_REPLACES' count because no IOC row exists, and
+    the tick's published room is the one _global_guards read."""
     monkeypatch.setattr(rules, "MIRROR_DAY_USD", 45.0)
-    p = _pool(fills=_his(300, long_px=0.30))             # his 0.30: the IOC's cent and the rest's wire agree
+    p = _pool(fills=_his(300, long_px=0.30))
     b = p.add_book(ledger=0)
-    v = _Venue(bid=0.30, ask=0.30, ioc_fill=50.0)
+    v = _Venue(bid=0.30, ask=0.30, ioc_fill=50.0, lift=50.0)
     st = _tick(p, v)
     pl = _places(v)
-    assert [c[2:6] for c in pl] == [(0.30, 150, False, IOC_TIF), (0.30, 100, False, GTC_TIF)], pl
-    assert pl[0][7] is False and pl[1][7] is True and not _cancels(v)
-    assert st["ops"] == 2 and _census(st, "over_room") == 0 and _census(st, "ops_capped") == 0
-    assert _census(st, "take_first") == 1 and _census(st, "take_at_his_level") == 1
-    assert _census(st, "take_placed") == 1 and _census(st, "rest_placed") == 1 and st["placed_take"] == 1
-    assert b["ledger_net"] == 50
+    assert [c[2:6] for c in pl] == [(0.29, 155, False, GTC_TIF)], pl
+    assert pl[0][7] is True and not _cancels(v)
+    assert int(45.0 / 0.29) == 155, "the room, at the cent that goes out"
+    assert st["ops"] == 1 and _census(st, "over_room") == 0 and _census(st, "ops_capped") == 0
+    assert _census(st, "take_first") == 0 and _census(st, "take_at_his_level") == 0
+    assert _census(st, "take_placed") == 0 and _census(st, "rest_placed") == 1 and st["placed_take"] == 0
+    assert _census(st, "maker_rest_at_touch") == 1 and b["last_plan"]["maker"]["clause"] == "touch"
+    assert b["ledger_net"] == 0, "nothing crossed: no taker reaches a bid-behind rest at create"
     opens = [x for x in p.orders.values() if x["state"] == "open"]
-    assert len(opens) == 1 and opens[0]["kind"] == "increase" and opens[0]["qty"] == 100 and opens[0]["tif"] == "GTC"
+    assert len(opens) == 1 and opens[0]["kind"] == "increase" and opens[0]["qty"] == 155 and opens[0]["tif"] == "GTC"
     assert b["open_order_id"] == opens[0]["id"]
-    take = next(x for x in p.orders.values() if x["kind"] == "take")
-    assert take["tif"] == "IOC" and take["state"] != "open" and take["booked_filled"] == 50.0 and take["reason"] == "take"
-    assert b["last_plan"]["take_qty"] == 150 and b["last_plan"]["take_filled"] == 50.0
+    assert not [x for x in p.orders.values() if x["kind"] == "take" or x["tif"] == "IOC"]
+    assert "take_qty" not in b["last_plan"] and "take_filled" not in b["last_plan"]
     assert "ml-replaces" not in " ".join(s for _k, s, _a in p.sent), "no rest cancelled: the count never read"
-    assert p._run("fetchval", ml._SQL_REPLACES, (b["id"],)) == 0, "an IOC row is never a replace"
-    # the room's arithmetic: $45 - $45 taken for the IOC + $30 back for
-    # its unfilled 100 = $30 = the 100-share rest at 0.30; the tick's
+    assert p._run("fetchval", ml._SQL_REPLACES, (b["id"],)) == 0
+    # the room's arithmetic: $45 taken once, for the one rest; the tick's
     # published room is the one _global_guards read
     assert st["mirror_day_room"] == 45.0
     src = _place_src()
-    assert src.index("_room_take(t, est)") < src.index('plan["take_qty"], plan["take_filled"]') < src.index("_book_delta")
+    assert src.index("qty = _room_qty(t, int(qty), wire, intent)") < src.index("_room_take(t, est)") < src.index("_book_delta")
 
 
 def test_e4_addendum_a_short_add_takes_first_through_the_short_doors(monkeypatch):
-    """The addendum on a SHORT book: his level for our BUY_SHORT is
-    0.28 in long space and the plan rests at the 0.32 ask (contract
-    0.32); the bid at 0.32 is at or through that wire (the contract
-    sold at or above it), so the IOC goes FIRST, through the short
-    open's doors, as a BUY_SHORT IOC at 0.32 -- and a bid under the
-    wire rests as before."""
+    """The addendum on a SHORT book: his level for our BUY_SHORT is 0.28
+    in long space; a bid at or through the wire sent the IOC FIRST through
+    the short open's doors, and a bid under the wire rested.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): a short add is an OFFER
+    of the contract and its cent is now max(sell_wire(his 0.28), bid +
+    MAKER_TICK). A bid AT 0.32 -- the cent the old rest joined -- is
+    exactly the reading that used to fire the take, and it now lifts the
+    OFFER one tick over it, to 0.33: never at or through the bid, so
+    nothing crosses and the short opens by a rest either way. The second
+    world (the bid at 0.30, under the wire) rests at 0.31, one tick over
+    it, and both go through the same short doors."""
     _shorts_on(monkeypatch)
     p = _short_world()
-    v = _Venue(bid=0.32, ask=0.32, ioc_fill=300.0)
+    v = _Venue(bid=0.32, ask=0.32, ioc_fill=300.0, lift=300.0)
     st = _tick(p, v, http=_short_http())
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][2:7] == (0.32, 300, False, IOC_TIF, SHORT)
-    assert _census(st, "take_first") == 1 and _census(st, "short_open") == 1
+    assert len(pl) == 1 and pl[0][2:7] == (0.33, 300, False, GTC_TIF, SHORT)
+    assert _census(st, "take_first") == 0 and _census(st, "short_open") == 1
+    assert _census(st, "maker_rest_at_touch") == 1 and _census(st, "rest_placed") == 1
     b = next(iter(p.books.values()))
     assert b["ledger_net"] == -300 and not _cancels(v)
+    assert b["last_plan"]["maker"]["clause"] == "touch" and b["last_plan"]["maker"]["bound"] == 0.33
     p2 = _short_world()
     v2 = _Venue(bid=0.30, ask=0.32)
     st2 = _tick(p2, v2, http=_short_http())
-    assert [c[5] for c in _places(v2)] == [GTC_TIF] and _census(st2, "take_first") == 0
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 300, False, GTC_TIF)] and _census(st2, "take_first") == 0
+    assert _census(st2, "short_open") == 1
 
 
 def test_e4_the_requote_credit_is_never_granted_on_the_same_wire_path_and_no_ioc_spends_it(monkeypatch):
@@ -10547,19 +11342,24 @@ def test_e4_the_requote_credit_is_never_granted_on_the_same_wire_path_and_no_ioc
     assert not _cancels(v) and not _places(v) and st["ops"] == 0 and st["requotes"] == 0
     assert _census(st, "requote_same_wire") == 1 and reasons == [] and seen == [set()]
     assert p.orders[o["id"]]["state"] == "open" and b["ledger_net"] == 300
-    # (2) an entry rest past its TTL under an exit plan within the cent:
-    # the TTL cancel grants the credit, the exit's IOC is its own op
+    # (2) an entry rest past its TTL under an exit plan within the cent.
+    # E31: the exit is a REST, so it SPENDS the credit the TTL cancel granted -- ops 2 -> 1
+    # -- and the credit is cleared, not left over. `seen` (the credit as _act left it) is
+    # therefore empty where it held the book: exactly the clause `tif != "IOC"` guarded,
+    # now unconditional because no order is an IOC
     seen.clear()
     reasons.clear()
-    p2, b2, v2, http2 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+    p2, b2, v2, http2 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
     p2.add_order(b2, side=BUY, wire=0.30, qty=100, kind="increase", placed_ts=NOW - ttl - 1)
     v2.rest("oid-1", "BUY", 0.30, 100)
     st2 = _tick(p2, v2, http=http2)
     assert _cancels(v2) == [("cancel", "oid-1", SLUG)] and reasons == ["ttl"] and st2["requotes"] == 1
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 200, True, IOC_TIF)]
-    assert st2["ops"] == 2 and _census(st2, "exit_take") == 1 and _census(st2, "ops_capped") == 0
-    assert b2["ledger_net"] == 100 and seen == [{b2["id"]}], "the IOC never rides the credit"
-    # (3) the take-first after a TTL cancel: cancel + IOC + credited rest, two ops
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 200, True, GTC_TIF)]
+    assert st2["ops"] == 1 and _census(st2, "exit_take") == 0 and _census(st2, "ops_capped") == 0
+    assert _census(st2, "rest_placed") == 1
+    assert b2["ledger_net"] == 100 and seen == [set()], "the exit's rest spent the credit"
+    # (3) after a TTL cancel with the ask AT his level: E31 -- cancel + ONE credited rest at
+    # the touch bound 0.29, `ops` 2 -> 1, and the credit spent by that rest
     seen.clear()
     reasons.clear()
     his = [_fill(M, "BUY", 300, 0.30, NOW - 3000)]
@@ -10568,13 +11368,15 @@ def test_e4_the_requote_credit_is_never_granted_on_the_same_wire_path_and_no_ioc
     p3.add_order(b3, side=BUY, wire=0.30, qty=300, kind="increase", placed_ts=NOW - ttl - 1)
     v3 = _Venue(bid=0.29, ask=0.30, ioc_fill=100.0)
     v3.rest("oid-1", "BUY", 0.30, 300)
+    v3.lift = 100.0
     st3 = _tick(p3, v3)
     assert _cancels(v3) == [("cancel", "oid-1", SLUG)] and reasons == ["ttl"] and st3["requotes"] == 1
-    assert [c[2:6] for c in _places(v3)] == [(0.30, 300, False, IOC_TIF), (0.29, 200, False, GTC_TIF)]
-    assert st3["ops"] == 2 and _census(st3, "take_first") == 1 and _census(st3, "ops_capped") == 0
-    assert seen == [set()] and b3["ledger_net"] == 100, "the remainder's rest spent the credit"
+    assert [c[2:6] for c in _places(v3)] == [(0.29, 300, False, GTC_TIF)]
+    assert st3["ops"] == 1 and _census(st3, "take_first") == 0 and _census(st3, "ops_capped") == 0
+    assert seen == [set()] and b3["ledger_net"] == 100, "the rest spent the credit"
     assert len([x for x in p3.orders.values() if x["state"] == "open"]) == 1
-    # (4) the budget gone on the cancel: the IOC is ops_capped, the credited rest still goes
+    # (4) the budget gone on the cancel: the credited rest STILL goes -- E31: and there is
+    # no second order behind it to be `ops_capped`, so the cap is never reached at all
     monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", 1)
     seen.clear()
     reasons.clear()
@@ -10585,14 +11387,17 @@ def test_e4_the_requote_credit_is_never_granted_on_the_same_wire_path_and_no_ioc
     v4.rest("oid-1", "BUY", 0.30, 300)
     st4 = _tick(p4, v4)
     assert _cancels(v4) == [("cancel", "oid-1", SLUG)] and reasons == ["ttl"]
-    assert [c[2:6] for c in _places(v4)] == [(0.29, 300, False, GTC_TIF)], "no IOC went; the rest did, on the credit"
-    assert st4["ops"] == 1 and _census(st4, "ops_capped") == 1 and _census(st4, "rest_placed") == 1
+    assert [c[2:6] for c in _places(v4)] == [(0.29, 300, False, GTC_TIF)], "the rest went, on the credit"
+    assert st4["ops"] == 1 and _census(st4, "ops_capped") == 0 and _census(st4, "rest_placed") == 1
     assert _census(st4, "take_first") == 0 and _census(st4, "take_placed") == 0 and seen == [set()]
     assert b4["ledger_net"] == 0 and len([x for x in p4.orders.values() if x["state"] == "open"]) == 1
-    # the mechanism, by name
-    src = inspect.getsource(ml._entry_take)
-    assert 'if (res == "ops_capped" and book["id"] in t.requote_credit' in src
-    assert 'if book["id"] in t.requote_credit and tif != "IOC":' in inspect.getsource(ml._place)
+    # the mechanism, by name. E31: `_entry_take`'s own `ops_capped` clause went with the
+    # function, and `_place`'s credit clause lost its `tif != "IOC"` guard (review LOW-2:
+    # dead once no caller sends an IOC), so the credit is spent by the one order there is
+    assert not hasattr(ml, "_entry_take")
+    assert 'if book["id"] in t.requote_credit:' in inspect.getsource(ml._place)
+    from tests.test_e31_maker_only import _code as _nocomment
+    assert 'tif != "IOC"' not in _nocomment(ml._place), "named in the paragraph; read by no line"
     assert "and not _priced_exit_rest(o, book)" in inspect.getsource(ml._reconcile_open)
 
 
@@ -10610,41 +11415,45 @@ def _unpriced_reduce(**venue_kw):
 
 
 def test_e4_r3_an_exit_is_exempt_from_the_ops_budget_so_its_take_at_the_last_op_is_never_shed(monkeypatch):
-    """Review round 3, M-1 (MEDIUM). The exit's take off a standing rest
-    is a cancel and an IOC, two ops with no credit: at the budget's LAST
-    op the cancel went and the IOC was `ops_capped` -- the book had NO
-    exit order for the tick, the one thing an exit is never (E2 LOW-6).
-    EXITS ARE EXEMPT FROM THE PER-TICK OPS BUDGET: every cancel, IOC,
-    rest and close on an exit's path -- the reduce, the paired and the
-    vanish flatten, the sign-flip flatten, the short cover -- takes its
-    slot whatever the count (`_op_slot(exit=True)`), still counted in
-    `ops`; an ENTRY at the same budget is `ops_capped` exactly as
-    before. The reviewer's c1 / c1b / c2 / c3 shapes, at budget 1 and
-    at budget 0."""
+    """Review round 3, M-1 (MEDIUM). EXITS ARE EXEMPT FROM THE PER-TICK OPS
+    BUDGET: every cancel, rest and flatten on an exit's path -- the reduce,
+    the paired and the vanish flatten, the sign-flip flatten, the short
+    cover -- takes its slot whatever the count (`_op_slot(exit=True)`),
+    still counted in `ops`; an ENTRY at the same budget is `ops_capped`
+    exactly as before. The reviewer's c1 / c1b / c2 / c3 shapes, at budget
+    1 and at budget 0.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The defect M-1 named -- an
+    exit's cancel spending the last op and its SECOND order being shed, so
+    the book had no exit order for the tick -- is unreachable: an exit is
+    ONE order, so there is never a second write to shed. The exemption is
+    still what carries the cancel-and-replace pair through a spent budget,
+    and every world below proves it at budget 0. The counts move with the
+    order count: `ops` 2 -> 1 wherever the take was the second write."""
     for budget in (1, 0):
         monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", budget)
-        # (c1) the keep path: the rest at his cent, the bid within the cent
-        p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+        # (c1) the keep path: the rest is already AT the maker wire, so the bid coming within
+        # the cent is the taker arriving -- nothing is cancelled and nothing is sent, at
+        # either budget. `ops` 2 -> 0
+        p, b, v, http = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
         o = p.add_order(b, side=SELL, wire=0.31, qty=200, kind="reduce")
         v.rest("oid-1", "SELL", 0.31, 200)
         st = _tick(p, v, http=http)
-        assert _cancels(v) == [("cancel", "oid-1", SLUG)] and p.orders[o["id"]]["reason"] == "take", budget
-        assert [c[2:6] for c in _places(v)] == [(0.30, 200, True, IOC_TIF)], budget
-        assert _census(st, "exit_take") == 1 and _census(st, "ops_capped") == 0 and st["ops"] == 2, budget
-        assert b["ledger_net"] == 100 and not [x for x in p.orders.values() if x["state"] == "open"], budget
-        assert b["state"] == "live" and b["last_reason"] != "ops_capped", budget
-        # (c2) the replace path: the rest at the pre-E4 cent 0.32, his cent
-        # 0.31, the bid within the cent: the replace's cancel, then the IOC
-        p2, b2, v2, http2 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+        assert not _cancels(v) and not _places(v), budget
+        assert _census(st, "exit_take") == 0 and _census(st, "ops_capped") == 0 and st["ops"] == 0, budget
+        assert _census(st, "open_order_pending") == 1 and p.orders[o["id"]]["state"] == "open", budget
+        assert b["ledger_net"] == 300 and b["state"] == "live" and b["last_reason"] != "ops_capped", budget
+        # (c2) the replace path: the rest at the pre-E4 cent 0.32, his cent 0.31 -- the
+        # cancel AND the rest that follows it go at budget 0, on the credit: `ops` 2 -> 1
+        p2, b2, v2, http2 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
         o2 = p2.add_order(b2, side=SELL, wire=0.32, qty=200, kind="reduce")
         v2.rest("oid-1", "SELL", 0.32, 200)
         st2 = _tick(p2, v2, http=http2)
         assert p2.orders[o2["id"]]["reason"] == "replace" and st2["requotes"] == 1, budget
-        assert [c[2:6] for c in _places(v2)] == [(0.30, 200, True, IOC_TIF)], budget
-        assert _census(st2, "exit_take") == 1 and _census(st2, "ops_capped") == 0 and st2["ops"] == 2, budget
+        assert [c[2:6] for c in _places(v2)] == [(0.31, 200, True, GTC_TIF)], budget
+        assert _census(st2, "exit_take") == 0 and _census(st2, "ops_capped") == 0 and st2["ops"] == 1, budget
         assert b2["ledger_net"] == 100, budget
-        # the replace with the bid outside the cent: the cancel, then the
-        # re-rest at his cent on the credit (one op for the pair)
+        # the replace with the bid outside the cent: the same cancel and re-rest at his cent
         p3, b3, v3, http3 = _reduce_world(bid=0.29, ask=0.32)
         o3 = p3.add_order(b3, side=SELL, wire=0.32, qty=200, kind="reduce")
         v3.rest("oid-1", "SELL", 0.32, 200)
@@ -10653,53 +11462,55 @@ def test_e4_r3_an_exit_is_exempt_from_the_ops_budget_so_its_take_at_the_last_op_
         assert [c[2:6] for c in _places(v3)] == [(0.31, 200, True, GTC_TIF)], budget
         assert _census(st3, "exit_out_of_tol") == 1 and _census(st3, "rest_placed") == 1, budget
         assert _census(st3, "ops_capped") == 0 and st3["ops"] == 1, budget
-        # no rest standing: the IOC, and the rest at his cent, each one op
-        p4, b4, v4, http4 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+        # no rest standing: the exit's one rest, one op, at either budget
+        p4, b4, v4, http4 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
         st4 = _tick(p4, v4, http=http4)
-        assert [c[2:6] for c in _places(v4)] == [(0.30, 200, True, IOC_TIF)] and b4["ledger_net"] == 100, budget
-        assert st4["ops"] == 1 and _census(st4, "ops_capped") == 0 and _census(st4, "exit_take") == 1, budget
+        assert [c[2:6] for c in _places(v4)] == [(0.31, 200, True, GTC_TIF)] and b4["ledger_net"] == 100, budget
+        assert st4["ops"] == 1 and _census(st4, "ops_capped") == 0 and _census(st4, "exit_take") == 0, budget
         p5, b5, v5, http5 = _reduce_world(bid=0.29, ask=0.32)
         st5 = _tick(p5, v5, http=http5)
         assert [c[2:6] for c in _places(v5)] == [(0.31, 200, True, GTC_TIF)], budget
         assert st5["ops"] == 1 and _census(st5, "ops_capped") == 0 and _census(st5, "rest_placed") == 1, budget
-        # an ENTRY at the same budget is bounded exactly as before: its
-        # take-first IOC (fills 100 of 300) and the remainder's rest are
-        # two ops with no credit -- at budget 1 the rest is `ops_capped`,
-        # at budget 0 the IOC is; a plain rest at budget 0 too
+        # an ENTRY at the same budget is bounded exactly as before -- and it is ONE write
+        # now (the ask AT his cent clamps the rest to 0.30 instead of firing a take first),
+        # so at budget 1 it goes and at budget 0 it is `ops_capped`
         p6 = _pool()
         b6 = p6.add_book(ledger=0)
-        v6 = _Venue(bid=0.30, ask=0.31, ioc_fill=100.0)
+        v6 = _Venue(bid=0.30, ask=0.31, ioc_fill=100.0, lift=100.0)
         st6 = _tick(p6, v6)
-        assert [c[2:6] for c in _places(v6)] == [(0.31, 300, False, IOC_TIF)][:budget], budget
-        assert _census(st6, "ops_capped") == 1 and st6["ops"] == budget and b6["ledger_net"] == 100 * budget, budget
-        assert not [x for x in p6.orders.values() if x["state"] == "open"], budget
+        assert [c[2:6] for c in _places(v6)] == [(0.30, 300, False, GTC_TIF)][:budget], budget
+        assert _census(st6, "ops_capped") == 1 - budget and st6["ops"] == budget, budget
+        assert b6["ledger_net"] == 100 * budget, budget
         p7 = _pool()
         b7 = p7.add_book(ledger=0)
         v7 = _Venue(bid=0.30, ask=0.32)
         st7 = _tick(p7, v7)
         assert len(_places(v7)) == budget and _census(st7, "ops_capped") == 1 - budget, budget
         assert b7["last_reason"] == ("rest_placed" if budget else "ops_capped"), budget
-    # the other exit paths at budget 0: the sign-flip flatten's take, the
-    # unpriced vanish's cancel + close, the short cover's close -- every
-    # write goes, every one counted in `ops`
+    # the other exit paths at budget 0: the sign-flip flatten, the unpriced vanish's
+    # cancel + re-quote, the short cover -- every write goes, every one counted in `ops`
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 63, 0.46, NOW - 9000), _fill(N, "BUY", 100, 0.55, NOW - 3100),
              _fill(M, "SELL", 63, 0.4595, NOW - 3000)]
     p8 = _pool(fills=fills, snap={M: 0.0, N: 100.0})
     b8 = p8.add_book(ledger=63, avg_cost=0.46)
-    v8 = _Venue(bid=0.45, ask=0.47, held={SLUG: 63}, ioc_fill=63.0)
+    v8 = _Venue(bid=0.45, ask=0.47, held={SLUG: 63}, ioc_fill=63.0, lift=63.0)
     st8 = _tick(p8, v8, http=_mkt(0.0, 100.0))
-    assert _census(st8, "sign_flip") == 1 and [c[2:6] for c in _places(v8)] == [(0.45, 63, True, IOC_TIF)]
+    assert _census(st8, "sign_flip") == 1 and [c[2:6] for c in _places(v8)] == [(0.46, 63, True, GTC_TIF)]
     assert b8["ledger_net"] == 0 and st8["ops"] == 1 and _census(st8, "ops_capped") == 0
+    # the unpriced vanish past MIRROR_FLATTEN_REST_S: E31 -- the cancel and the RE-QUOTE
+    # (0.32 -> the touch's inside tick 0.31) where it was the cancel and the close, `ops` 2
+    # -> 1 on the credit, and no close at all
     p9 = _pool(fills=_unpriced(), snap=None)
     b9 = p9.add_book(ledger=300)
     p9.add_order(b9, side=SELL, wire=0.32, kind="flatten_vanished",
                  placed_ts=NOW - rules.MIRROR_FLATTEN_REST_S - 1)
-    v9 = _Venue(held={SLUG: 300})
+    v9 = _Venue(held={SLUG: 300}, lift=300.0)
     v9.rest("oid-1", "SELL", 0.32, 300, created=NOW - 400)
     st9 = _tick(p9, v9, http=_gone())
-    assert ("cancel", "oid-1", SLUG) in v9.calls and ("close", SLUG, le.EXIT_SLIPPAGE_BIPS) in v9.calls
-    assert b9["ledger_net"] == 0 and st9["ops"] == 2 and _census(st9, "ops_capped") == 0
+    assert ("cancel", "oid-1", SLUG) in v9.calls and "close" not in _kinds(v9)
+    assert [c[2:6] for c in _places(v9)] == [(0.31, 300, True, GTC_TIF)]
+    assert b9["ledger_net"] == 0 and st9["ops"] == 1 and _census(st9, "ops_capped") == 0
     sfills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
               _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
 
@@ -10708,9 +11519,9 @@ def test_e4_r3_an_exit_is_exempt_from_the_ops_budget_so_its_take_at_the_last_op_
     monkeypatch.setattr(ml, "_pm_held", _held)
     p10 = _short_world(fills=sfills, snap=None)
     b10 = _short_book(p10, ledger=-300)
-    v10 = _Venue(bid=0.30, ask=0.31, held={SLUG: -300}, ioc_fill=300.0)
+    v10 = _Venue(bid=0.30, ask=0.31, held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st10 = _tick(p10, v10, http=_gone())
-    assert [c[2:6] for c in _places(v10)] == [(0.31, 300, True, IOC_TIF)] and b10["ledger_net"] == 0
+    assert [c[2:6] for c in _places(v10)] == [(0.30, 300, True, GTC_TIF)] and b10["ledger_net"] == 0
     assert st10["ops"] == 1 and _census(st10, "ops_capped") == 0 and _census(st10, "short_flatten_close") == 1
     # the mechanism, by name: the slot's `exit`, read off the side's leg
     # action in _place, passed by every exit cancel, the flatten's slot
@@ -10718,9 +11529,14 @@ def test_e4_r3_an_exit_is_exempt_from_the_ops_budget_so_its_take_at_the_last_op_
     assert "if not exit and t.ops + t.ops_pending >= rules.MIRROR_MAX_ORDER_OPS_PER_TICK:" in src
     assert 'exit=rules.leg_action(book.get("intent"), side) == "reduce"' in inspect.getsource(ml._place)
     act = inspect.getsource(ml._act)
-    # (FILL lane 3, 2026-09-08: the two keep-branch band sites cancel under "take" too, 3 -> 5)
-    assert act.count('"take", exit=') == 5 and '"replace", exit=is_exit' in act and "decision, exit=is_exit" in act
-    assert "slot = _op_slot(t, w, exit=True)" in inspect.getsource(ml._flatten_vanished)
+    # E31: the five cancels under the word "take" -- lane 2's arm, the exit's two tolerance
+    # sites and lane 3's two band sites -- all left _act with the take. The exempt cancels
+    # that remain are the replace's and the named cancel's, both `exit=is_exit`
+    assert act.count('"take", exit=') == 0 and '"replace", exit=is_exit' in act and "decision, exit=is_exit" in act
+    # E31: the flatten no longer takes an op slot of its own -- its slippage leg is gone and
+    # its ONE order goes through `_place`, whose slot is already `exit=True` on a reduce.
+    # What it still passes explicitly is the CANCEL that precedes the rest
+    assert "await _cancel_open_for(t, book, kind, exit=True)" in inspect.getsource(ml._flatten_vanished)
 
 
 def test_e4_r3_an_unpriced_reduce_rest_keeps_its_ttl_requote_and_a_priced_one_stands(monkeypatch):
@@ -10738,12 +11554,15 @@ def test_e4_r3_an_unpriced_reduce_rest_keeps_its_ttl_requote_and_a_priced_one_st
     ttl = float(rules.MIRROR_REST_TTL_S)
     # (d1) the unpriced reduce rest past its TTL: cancelled `ttl`, re-rested
     # at the ask on the credit; never a replace, never counted
+    # E31: the unpriced reduce's rest sits at the TOUCH'S INSIDE TICK (bid 0.30 +
+    # MAKER_TICK = 0.31), not at the ask 0.32, so the TTL re-quote goes out at 0.31.
+    # The `ttl` reason, the credit, the un-counted replace and the one standing order stand
     p, b, v, http = _unpriced_reduce(bid=0.30, ask=0.32)
     o = p.add_order(b, side=SELL, wire=0.32, qty=200, kind="reduce", placed_ts=NOW - ttl - 1)
     v.rest("oid-1", "SELL", 0.32, 200)
     st = _tick(p, v, http=http)
     assert b["last_plan"]["exit_px_src"] == "none" and b["last_plan"]["exit_px"] is None
-    assert _cancels(v) == [("cancel", "oid-1", SLUG)] and [c[2:6] for c in _places(v)] == [(0.32, 200, True, GTC_TIF)]
+    assert _cancels(v) == [("cancel", "oid-1", SLUG)] and [c[2:6] for c in _places(v)] == [(0.31, 200, True, GTC_TIF)]
     assert p.orders[o["id"]]["state"] == "cancelled" and p.orders[o["id"]]["reason"] == "ttl"
     assert st["requotes"] == 1 and st["ops"] == 1 and _census(st, "requote_same_wire") == 0
     assert p._run("fetchval", ml._SQL_REPLACES, (b["id"],)) == 0, "a ttl is never counted against the entry budget"
@@ -10754,7 +11573,7 @@ def test_e4_r3_an_unpriced_reduce_rest_keeps_its_ttl_requote_and_a_priced_one_st
     o2 = p2.add_order(b2, side=SELL, wire=0.32, qty=200, kind="reduce", placed_ts=NOW - ttl - 1)
     v2.rest("oid-1", "SELL", 0.32, 200)
     st2 = _tick(p2, v2, http=http2)
-    assert p2.orders[o2["id"]]["reason"] == "ttl" and [c[2:6] for c in _places(v2)] == [(0.32, 200, True, GTC_TIF)]
+    assert p2.orders[o2["id"]]["reason"] == "ttl" and [c[2:6] for c in _places(v2)] == [(0.31, 200, True, GTC_TIF)]
     assert st2["ops"] == 1 and _census(st2, "ops_capped") == 0 and st2["requotes"] == 1
     monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", 20)
     # (d2) an ABANDONED tick: the unpriced rest is TTL'd by _abandon_reconciled
@@ -10873,22 +11692,30 @@ def test_e4_r3_the_live_and_shadow_levels_round_his_other_token_equivalent_alike
 
 
 def test_e4_r3_a_refused_cancel_names_the_plan_cancel_refused_never_take(monkeypatch):
-    """Review round 3, L-4 (LOW). A take's cancel the budget refused left
-    the rest standing (right) and the plan read 'take' with nothing
-    sent. The plan now reads `cancel_refused:<reason>`: reachable on an
-    ENTRY's take at the cap and on an entry's replace; unreachable on an
-    exit (exempt, M-1) -- pinned by a refusal forced onto the exit path.
-    A cancel that went out and left the order unknown reads
-    `cancel_pending`, the freeze's own name, on every path."""
+    """Review round 3, L-4 (LOW). A cancel the budget refused leaves the
+    rest standing (right) and the plan reads `cancel_refused:<reason>`:
+    reachable on an ENTRY's replace at the cap; unreachable on an exit
+    (exempt, M-1) -- pinned by a refusal forced onto the exit path. A
+    cancel that went out and left the order unknown reads `cancel_pending`,
+    the freeze's own name, on every path.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the first world was an
+    ENTRY'S TAKE at the cap, and there is no take. Its shape survives as
+    the ENTRY'S REPLACE at the cap on the same book -- the rest at 0.30
+    with the maker wire at 0.30 does not move at all, so the world is
+    driven where a replace is actually asked for (the ask at 0.32 leaves
+    his cent 0.31 reachable over a rest of 0.30) and the refusal is read
+    there. `take_at_his_level` is a declared zero."""
     monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", 0)
-    p = _pool()                                              # his 0.31: the entry's take cent
+    p = _pool()                                              # his 0.31: the maker cent
     b = p.add_book(ledger=0)
-    o = p.add_order(b, side=BUY, wire=0.30, qty=300, kind="increase")
-    v = _Venue(bid=0.30, ask=0.31, ioc_fill=300.0)
+    o = p.add_order(b, side=BUY, wire=0.30, qty=300, kind="increase",
+                    placed_ts=NOW - rules.MIRROR_REST_MIN_LIFE_S - 1)   # past the rest-life floor
+    v = _Venue(bid=0.30, ask=0.32, ioc_fill=300.0)
     v.rest("oid-1", "BUY", 0.30, 300)
     st = _tick(p, v)
     assert not _cancels(v) and not _places(v) and p.orders[o["id"]]["state"] == "open"
-    assert _census(st, "ops_capped") == 1 and _census(st, "take_at_his_level") == 1 and _census(st, "take_first") == 0
+    assert _census(st, "ops_capped") == 1 and _census(st, "take_at_his_level") == 0 and _census(st, "take_first") == 0
     assert b["last_reason"] == "cancel_refused:ops_capped" and b["ledger_net"] == 0 and b["state"] == "live"
     # the entry's replace at the cap: the same name, the rest standing
     p2 = _pool()
@@ -10904,21 +11731,26 @@ def test_e4_r3_a_refused_cancel_names_the_plan_cancel_refused_never_take(monkeyp
     monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", 20)
     orig = ml._cancel_and_settle
 
-    async def _refused(t, o, book, reason, exit=False):
+    async def _refused(t, o, book, reason, exit=False, decision=None):
+        # E31: the refusal is forced on the REPLACE road, which passes `decision` (E18);
+        # the take road that passed neither is gone
         ml._mirror_stop("ops_capped", o.get("whale"))
         return "ops_capped"
     monkeypatch.setattr(ml, "_cancel_and_settle", _refused)
+    # E31: the refusal must be forced on a tick that ASKS for a cancel, so the rest is at
+    # 0.32 with his cent 0.31 reachable (a replace) -- the exit's own rest at his cent would
+    # not be cancelled at all now
     p3, b3, v3, http3 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
-    o3 = p3.add_order(b3, side=SELL, wire=0.31, qty=200, kind="reduce")
-    v3.rest("oid-1", "SELL", 0.31, 200)
+    o3 = p3.add_order(b3, side=SELL, wire=0.32, qty=200, kind="reduce")
+    v3.rest("oid-1", "SELL", 0.32, 200)
     st3 = _tick(p3, v3, http=http3)
     assert not _cancels(v3) and not _places(v3) and p3.orders[o3["id"]]["state"] == "open"
     assert _census(st3, "exit_take") == 0 and b3["last_reason"] == "cancel_refused:ops_capped" and b3["ledger_net"] == 300
     monkeypatch.setattr(ml, "_cancel_and_settle", orig)
     # the cancel sent, the venue's answer inconclusive: frozen cancel_pending, the plan says so
     p4, b4, v4, http4 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, cancel_ok=False)
-    o4 = p4.add_order(b4, side=SELL, wire=0.31, qty=200, kind="reduce")
-    v4.rest("oid-1", "SELL", 0.31, 200)
+    o4 = p4.add_order(b4, side=SELL, wire=0.32, qty=200, kind="reduce")
+    v4.rest("oid-1", "SELL", 0.32, 200)
     st4 = _tick(p4, v4, http=http4)
     assert len(_cancels(v4)) == 2 and not _places(v4) and p4.orders[o4["id"]]["state"] == "unknown"
     assert b4["state"] == "frozen" and b4["frozen_reason"] == "cancel_pending" and b4["last_reason"] == "cancel_pending"
@@ -10956,8 +11788,12 @@ def test_e4_constants_the_exit_tolerance_tightens_only_the_take_wait_is_zero_and
     rec = inspect.getsource(ml._reconcile_open)
     assert "and not _priced_exit_rest(o, book)" in rec and 'cancel_reason = "ttl"' in rec
     act = inspect.getsource(ml._act)
-    assert act.count("not _exit_or_flip(book, p, o)") == 2, "rule 4 is E2's exemption, one mechanism"
-    assert "stands=priced_exit" in act and 'return await _entry_take(' in act
+    # E31: 2 -> 1. The exemption was read at TWO sites -- the take's own capped refusal and
+    # the replace's -- and the take's went with the arm. The one that remains is the replace
+    # budget's, which is the mechanism rule 4 names; the take's site is retired, not moved
+    assert act.count("not _exit_or_flip(book, p, o)") == 1, "rule 4 is E2's exemption, one mechanism"
+    assert "stands=priced_exit" in act and not hasattr(ml, "_entry_take")
+    assert "_entry_take(" not in act and "_exit_take(" not in act
 
 
 # ---------------- 22. S4: the short cover as a priced order; the read-back proof (2026-09-07)
@@ -10994,12 +11830,17 @@ def test_s4_the_read_back_probe_runs_once_on_the_first_live_short_book_with_a_tw
     on a frozen book, on a locked book, or inside an hour of a recorded
     mismatch; a malformed key is unreadable and places nothing."""
     _shorts_on(monkeypatch)
-    p, b, v = _flip_world(ioc_fill=300.0)
+    # E31 (FILL lane 31, 2026-09-10): the cover after the proof is the post-only rest at
+    # min(buy_wire(his 0.31), ask 0.32 - MAKER_TICK) = 0.31 -- his own cent, `post_only` True
+    # -- where it was the IOC at the ceiling cent 0.32, AT the ask. `lift=` is the taker who
+    # lifts the fresh rest (`aggressor` False: a maker fill), which books the ledger the IOC
+    # booked. The PROBE itself is untouched: 1 share, 0.25, GTC, post_only True
+    p, b, v = _flip_world(ioc_fill=300.0, lift=300.0)
     p.state.pop("mirror_s4_proof")
     st = _tick(p, v)
     pl = _places(v)
     assert [c[1:] for c in pl] == [(SLUG, 0.25, 1, True, GTC_TIF, SHORT, True, None),
-                                   (SLUG, 0.32, 300, True, IOC_TIF, SHORT, False, None)]
+                                   (SLUG, 0.31, 300, True, GTC_TIF, SHORT, True, None)]
     k = _kinds(v)
     i_probe = k.index("place")
     assert k[i_probe + 1:i_probe + 3] == ["open_orders", "cancel"], "read back, then cancelled, before anything else"
@@ -11015,13 +11856,14 @@ def test_s4_the_read_back_probe_runs_once_on_the_first_live_short_book_with_a_tw
                            "price": 0.25, "quantity": 1.0, "state": "new", "tif": "GOOD_TILL_CANCEL"}
     assert rec["bid"] == 0.30 and rec["ask"] == 0.32, "the quote the probe was placed against (F2)"
     assert _census(st, "s4_probe_placed") == 1 and _census(st, "s4_proved") == 1 and _census(st, "s4_unproven") == 0
-    assert _census(st, "short_cover_take") == 1 and b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
+    assert _census(st, "short_cover_take") == 0 and _census(st, "short_cover_rest") == 1
+    assert b["ledger_net"] == 0 and _census(st, "short_flatten_close") == 1
     assert not [o for o in p.orders.values() if o["qty"] == 1], "no mirror_orders row for the probe"
     pr = [r for r in st["recent"] if r["what"] == "s4_probe"]
     assert pr and pr[0]["proved"] is True and pr[0]["order"] == "oid-1" and pr[0]["price"] == 0.25
     assert st["ops"] == 2 and _census(st, "venue_calls") >= 4, "the probe's place and cancel are counted writes"
     # proved: the next tick probes nothing more
-    p2, b2, v2 = _flip_world(ioc_fill=300.0)
+    p2, b2, v2 = _flip_world(ioc_fill=300.0, lift=300.0)
     p2.state["mirror_s4_proof"] = dict(rec)
     st2 = _tick(p2, v2)
     assert [c[3] for c in _places(v2)] == [300] and _census(st2, "s4_probe_placed") == 0
@@ -11039,7 +11881,7 @@ def test_s4_the_read_back_probe_runs_once_on_the_first_live_short_book_with_a_tw
     assert not _places(v4) and _census(st4, "s4_unproven") == 1 and _census(st4, "s4_probe_placed") == 0
     assert b4["ledger_net"] == -300 and b4["state"] == "live" and b4["last_plan"]["s4"] == {"unproven": "wrong_price"}
     # an hour on: the probe again
-    v5 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+    v5 = _NoClose(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     st5 = _tick(p4, v5, now=NOW + 1)
     assert [c[3] for c in _places(v5)] == [1, 300] and _census(st5, "s4_proved") == 1 and b4["ledger_net"] == 0
     # a LOCKED book (bid == ask) is not a two-sided quote: no probe, refused
@@ -11167,8 +12009,15 @@ def test_s4_a_frozen_short_book_is_untouched_no_probe_no_cover(monkeypatch):
 def test_s4_the_cover_rest_stands_outside_the_cent_past_its_ttl_and_takes_the_tick_the_ask_returns(monkeypatch):
     """Book 29's shape on a short: his buy-back 0.30, the ask far above
     (0.40): the rest at 0.30 stands through five TTL periods with no
-    cancel and no re-place (`requote_same_wire`), held by name each
-    tick; the ask back at 0.31 takes at once."""
+    cancel and no re-place (`requote_same_wire`), held by name each tick.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the ask coming back to
+    0.31 no longer CANCELS the rest and crosses for it. His own cent 0.30
+    is still reachable (0.31 - MAKER_TICK = 0.30), so
+    `rules.maker_compare_wire` returns the standing wire, the rest of 300
+    at 0.30 STANDS, and the taker who came to 0.31 fills it there. The
+    five held periods, `requote_same_wire`, the held record and the plan's
+    cents are byte for byte."""
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
              _fill(N, "SELL", 400, 0.70, NOW - 2000)]
@@ -11191,8 +12040,11 @@ def test_s4_the_cover_rest_stands_outside_the_cent_past_its_ttl_and_takes_the_ti
     v6 = _NoClose(bid=0.30, ask=0.31, held={SLUG: -300}, ioc_fill=300.0)
     v6.orders = v.orders
     st6 = _tick(p, v6, now=NOW + 6 * (ttl + 1), http=_gone())
-    assert _cancels(v6) == [("cancel", "oid-1", SLUG)] and [c[2:6] for c in _places(v6)] == [(0.31, 300, True, IOC_TIF)]
-    assert _census(st6, "short_cover_take") == 1 and b["ledger_net"] == 0
+    assert not _cancels(v6) and not _places(v6), "the ask coming to the rest is not a reason to cross"
+    assert _census(st6, "short_cover_take") == 0 and _census(st6, "open_order_pending") == 1
+    assert b["ledger_net"] == -300 and o["state"] == "open" and o["wire"] == 0.30
+    assert rules.maker_wire(BUY, 0.30, 0.30, 0.31) == 0.30
+    assert rules.maker_compare_wire(BUY, 0.30, 0.30, 0.30) == 0.30
     # the plan's fields on the held tick
     assert b["last_plan"]["exit_rest"] == 0.30 and b["last_plan"]["exit_cover"] == 0.31
 
@@ -11200,52 +12052,73 @@ def test_s4_the_cover_rest_stands_outside_the_cent_past_its_ttl_and_takes_the_ti
 def test_s4_a_partial_cover_fill_leaves_nothing_resting_and_the_take_never_fires_twice_for_one_rest(monkeypatch):
     _shorts_on(monkeypatch)
     # the IOC fills 100 of 300: nothing rests after it this tick; the next tick plans the remainder
-    p, b, v = _flip_world(ioc_fill=100.0)
+    # E31: the cover rests at his own cent 0.31 (never the ceiling IOC at 0.32) and a taker
+    # lifts 100 of it -- so the PARTIAL leaves the SAME order standing for its remainder,
+    # which is what a rest does and an IOC could not. The next tick plans the rest of it
+    p, b, v = _flip_world(ioc_fill=100.0, lift=100.0)
     st = _tick(p, v)
-    assert [c[2:6] for c in _places(v)] == [(0.32, 300, True, IOC_TIF)] and b["ledger_net"] == -200
-    assert not [o for o in p.orders.values() if o["state"] == "open"] and b["open_order_id"] is None
-    assert _census(st, "short_cover_take") == 1 and _census(st, "short_cover_rest") == 0
-    v2 = _NoClose(held={SLUG: -200}, ioc_fill=200.0)
-    _tick(p, v2, now=NOW + 30)
-    assert [c[2:6] for c in _places(v2)] == [(0.32, 200, True, IOC_TIF)] and b["ledger_net"] == 0
-    # a standing cover rest with the ask inside the cent: ONE cancel, ONE IOC, nothing more
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)] and b["ledger_net"] == -200
+    assert _census(st, "short_cover_take") == 0 and _census(st, "short_cover_rest") == 1
+    assert _census(st, "maker_fill_at_create") == 1 and b["open_order_id"] is not None
+    # the next tick: THE SAME ORDER is still standing for its 200 leaves, so nothing is
+    # re-placed -- where the IOC left the book bare and the tick had to plan the remainder
+    # afresh. The venue filling those 200 on the standing row flattens the ledger
+    v2 = _NoClose(held={SLUG: -200}, ioc_fill=200.0, fills={"oid-1": (300.0, 0.31)})
+    v2.orders = v.orders
+    st2 = _tick(p, v2, now=NOW + 30)
+    assert not _places(v2) and b["ledger_net"] == 0 and _census(st2, "filled_rest") == 1
+    # a standing cover rest with the ask inside the cent: E31 -- the rest STANDS. Its wire
+    # 0.31 IS the maker wire (min(buy_wire(0.31), 0.32 - MAKER_TICK)), so there is no cent to
+    # move to, no cancel and no second order: one rest per cover, never a take off it
     p3, b3, v3 = _flip_world(ioc_fill=0.0)
-    p3.add_order(b3, side=BUY, wire=0.31, qty=300, kind="flatten_paired", intent="ORDER_INTENT_SELL_SHORT")
+    o3 = p3.add_order(b3, side=BUY, wire=0.31, qty=300, kind="flatten_paired", intent="ORDER_INTENT_SELL_SHORT")
     v3.rest("oid-1", "SELL", 0.31, 300, intent="ORDER_INTENT_SELL_SHORT")
     st3 = _tick(p3, v3)
-    assert _cancels(v3) == [("cancel", "oid-1", SLUG)] and [c[5] for c in _places(v3)] == [IOC_TIF]
-    assert sum(1 for c in _places(v3) if c[5] == IOC_TIF) == 1 and _census(st3, "short_cover_take") == 1
-    assert not [o for o in p3.orders.values() if o["state"] == "open"]
+    assert not _cancels(v3) and not _places(v3) and _census(st3, "short_cover_take") == 0
+    assert _census(st3, "open_order_pending") == 1 and p3.orders[o3["id"]]["state"] == "open"
 
 
 def test_s4_the_cover_is_exempt_from_the_ops_budget_the_replace_budget_and_the_loss_stop(monkeypatch):
     _shorts_on(monkeypatch)
     monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", 0)
-    # the IOC at budget 0
-    p, b, v = _flip_world(ioc_fill=300.0)
+    # E31: the cover at budget 0 -- the post-only rest, never the ceiling IOC; `lift=` is the
+    # taker who lifts it, so the ledger reaches 0 exactly as the IOC's fill left it
+    p, b, v = _flip_world(ioc_fill=300.0, lift=300.0)
     st = _tick(p, v)
-    assert [c[5] for c in _places(v)] == [IOC_TIF] and st["ops"] == 1 and _census(st, "ops_capped") == 0
-    assert b["ledger_net"] == 0
+    assert [c[5] for c in _places(v)] == [GTC_TIF] and st["ops"] == 1 and _census(st, "ops_capped") == 0
+    assert [c[2:4] for c in _places(v)] == [(0.31, 300)] and b["ledger_net"] == 0
     # the rest at budget 0 (the ask above the ceiling)
     p2, b2, v2 = _flip_world(bid=0.30, ask=0.40)
     st2 = _tick(p2, v2)
     assert [c[2:6] for c in _places(v2)] == [(0.31, 300, True, GTC_TIF)] and st2["ops"] == 1
     assert _census(st2, "ops_capped") == 0 and _census(st2, "short_cover_rest") == 1
-    # the take off a standing rest at budget 0: the cancel AND the IOC go
-    p3, b3, v3 = _flip_world(ioc_fill=300.0)
-    p3.add_order(b3, side=BUY, wire=0.31, qty=300, kind="flatten_paired", intent="ORDER_INTENT_SELL_SHORT")
+    # E31: a standing rest already at the maker wire at budget 0 -- there is no take to fire
+    # off it, so the tick spends NO op at all and the rest stands. The exemption is proved on
+    # the road that still spends one: the cover a cent move DOES replace (the ask at 0.40
+    # leaves his 0.31 reachable, so a rest standing at 0.30 is re-quoted up to it)
+    p3, b3, v3 = _flip_world(ioc_fill=300.0, lift=300.0)
+    o3 = p3.add_order(b3, side=BUY, wire=0.31, qty=300, kind="flatten_paired", intent="ORDER_INTENT_SELL_SHORT")
     v3.rest("oid-1", "SELL", 0.31, 300, intent="ORDER_INTENT_SELL_SHORT")
     st3 = _tick(p3, v3)
-    assert _cancels(v3) == [("cancel", "oid-1", SLUG)] and [c[5] for c in _places(v3)] == [IOC_TIF]
-    assert st3["ops"] == 2 and _census(st3, "ops_capped") == 0 and b3["ledger_net"] == 0
+    assert not _cancels(v3) and not _places(v3) and st3["ops"] == 0
+    assert _census(st3, "ops_capped") == 0 and p3.orders[o3["id"]]["state"] == "open"
+    p3b, b3b, v3b = _flip_world(bid=0.30, ask=0.40, ioc_fill=300.0, lift=300.0)
+    o3b = p3b.add_order(b3b, side=BUY, wire=0.30, qty=300, kind="flatten_paired", intent="ORDER_INTENT_SELL_SHORT")
+    v3b.rest("oid-1", "SELL", 0.30, 300, intent="ORDER_INTENT_SELL_SHORT")
+    st3b = _tick(p3b, v3b)
+    assert _cancels(v3b) == [("cancel", "oid-1", SLUG)] and [c[2:6] for c in _places(v3b)] == [(0.31, 300, True, GTC_TIF)]
+    # ops 1, not the take's 2: the cancel spends one and the REPLACE'S REST spends E2's
+    # requote credit, where the take's IOC was a second order and spent its own op
+    assert st3b["ops"] == 1 and _census(st3b, "ops_capped") == 0 and b3b["ledger_net"] == 0
+    assert p3b.orders[o3b["id"]]["state"] == "cancelled"
     # the replace budget spent and the loss stop set: the cover still goes
     monkeypatch.setattr(rules, "MIRROR_MAX_ORDER_OPS_PER_TICK", 20)
-    p4, b4, v4 = _flip_world(ioc_fill=300.0)
+    p4, b4, v4 = _flip_world(ioc_fill=300.0, lift=300.0)
     for _ in range(rules.MIRROR_MAX_REPLACES_PER_HOUR):
         p4.add_order(b4, state="cancelled", reason="replace", done_at=NOW - 100, order_id=None)
     p4.state["mirror_loss_stop"] = {"at": "x"}
     st4 = _tick(p4, v4)
-    assert [c[5] for c in _places(v4)] == [IOC_TIF] and b4["ledger_net"] == 0
+    assert [c[5] for c in _places(v4)] == [GTC_TIF] and b4["ledger_net"] == 0
     assert _census(st4, "take_capped") == 0 and _census(st4, "replace_capped") == 0
     assert _census(st4, "mirror_loss_stop") >= 1 and not [x for x in p4.sent if "ml-replaces" in x[1]]
 
@@ -11258,19 +12131,25 @@ def test_s4_close_position_is_never_called_on_any_cover_path_and_the_lost_close_
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500),
              _fill(N, "SELL", 400, 0.70, NOW - 2000), _fill(M, "SELL", 100, 0.31, NOW - 1000)]
+    # E31 (FILL lane 31, 2026-09-10): every one of the five covers is now a POST-ONLY REST
+    # -- his own cent where it is reachable, the touch's inside tick on the unpriced vanish --
+    # so each `px` moves one cent inside the ask and `short_cover_take` becomes
+    # `short_cover_rest`. close_position is still never reached, which is the test's subject
     worlds = [
-        (_short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0}), _mkt(400.0, 400.0), 0.32, 0.32),
-        (_short_world(fills=fills, snap=None), _gone(), 0.31, 0.31),
-        (_short_world(fills=_unpriced(), snap=None), _gone(), 0.32, 0.34),
-        (_pool(), None, 0.32, 0.32),
-        (_short_world(fills=_his(300, other_size=400, other_px=0.72), snap={M: 300.0, N: 400.0}), _mkt(300.0, 400.0), 0.32, 0.32),
+        (_short_world(fills=_his(400, other_size=400, other_px=0.72), snap={M: 400.0, N: 400.0}), _mkt(400.0, 400.0), 0.32, 0.31),
+        (_short_world(fills=fills, snap=None), _gone(), 0.31, 0.30),
+        (_short_world(fills=_unpriced(), snap=None), _gone(), 0.32, 0.31),
+        (_pool(), None, 0.32, 0.31),
+        (_short_world(fills=_his(300, other_size=400, other_px=0.72), snap={M: 300.0, N: 400.0}), _mkt(300.0, 400.0), 0.32, 0.31),
     ]
     for p, http, ask, px in worlds:
         b = _short_book(p, ledger=-300)
-        v = _NoClose(bid=0.30, ask=ask, held={SLUG: -300}, ioc_fill=300.0)
+        v = _NoClose(bid=0.30, ask=ask, held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
         st = _tick(p, v, http=http)
         assert "close" not in _kinds(v) and _places(v) and _places(v)[0][2] == px, (px, _places(v))
-        assert _census(st, "short_cover_take") == 1 and not st["abandoned"]
+        assert _places(v)[0][5] == GTC_TIF and _places(v)[0][7] is True, px
+        assert _census(st, "short_cover_take") == 0 and _census(st, "short_cover_rest") == 1
+        assert not st["abandoned"]
     # held outside the cent, and the unproven refusal: nothing touches close_position either
     p, b, v = _flip_world(bid=0.30, ask=0.40)
     _tick(p, v)
@@ -11278,13 +12157,16 @@ def test_s4_close_position_is_never_called_on_any_cover_path_and_the_lost_close_
     _s4_unproven(p2)
     _tick(p2, v2)
     assert "close" not in _kinds(v) and "close" not in _kinds(v2)
-    # the seams by name: _flatten_send refuses a short at its head, _act's short tail never closes
-    fs = inspect.getsource(ml._flatten_send)
-    assert 'return "book_error"' in fs.split("if r.venue_state is not None")[0] and "close_position" in fs
+    # the seams by name. E31: `_flatten_send` -- the function that HELD the close_position
+    # call, and refused a short at its head -- is DELETED, so the seam is stronger than the
+    # one this test pinned: NO function of the worker reads close_position at all, on a short
+    # book or a long one. `_reconcile_lost_close` stays for the CLOSE rows of old
+    from tests.test_e31_maker_only import _code as _nocomment
+    assert not hasattr(ml, "_flatten_send")
+    assert inspect.getsource(ml).count("t.pmus.close_position") == 0
     act = inspect.getsource(ml._act)
-    assert "pmus.close_position" not in act and "_s4_refusal(t, book, kind, plan, w)" in act
-    assert "pmus.close_position" not in inspect.getsource(ml._flatten_vanished)
-    assert "t.pmus.close_position" in fs
+    assert "pmus.close_position" not in _nocomment(ml._act) and "_s4_refusal(t, book, kind, plan, w)" in act
+    assert "pmus.close_position" not in _nocomment(ml._flatten_vanished)
     assert "_reconcile_lost_close" in inspect.getsource(ml._reconcile_placing)
 
 
@@ -11634,7 +12516,8 @@ def test_s4v2_a_429_on_the_probe_in_either_shape_goes_to_the_rate_limit_path_and
         assert _census(st2, "s4_unproven") == 1 and b["last_plan"]["s4"] == {"unproven": "rate_limited"}, label
         assert p.state["mirror_s4_proof"] == rec and b["ledger_net"] == -300, label
         # an hour on: the probe again, proved, the cover after it
-        v3 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+        # E31: the cover is a rest at his cent; `lift=` is the taker who lifts it
+        v3 = _NoClose(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
         st3 = _tick(p, v3, now=NOW + 3600)
         assert [c[3] for c in _places(v3)] == [1, 300] and _census(st3, "s4_proved") == 1, label
         assert p.state["mirror_s4_proof"]["proved"] is True and b["ledger_net"] == 0, label
@@ -11871,9 +12754,11 @@ def test_s4v3_a_probe_that_fills_at_create_is_booked_on_an_s4_probe_row_through_
     assert not _places(v2) and b["ledger_net"] == -299 and b["state"] == "live"
     assert _census(st2, "venue_ledger_disagree") == 0 and _census(st2, "s4_unproven") == 1
     # an hour on: the probe proves and the cover is the LEDGER'S 299, never 300
-    v3 = _NoClose(held={SLUG: -299}, ioc_fill=300.0)
+    # E31: the cover is the post-only rest at his own cent 0.31, not the ceiling IOC at 0.32;
+    # `lift=` is the taker who lifts it, booking the ledger the IOC booked
+    v3 = _NoClose(held={SLUG: -299}, ioc_fill=300.0, lift=300.0)
     st3 = _tick(p, v3, now=NOW + 3600)
-    assert [c[2:6] for c in _places(v3)] == [(0.25, 1, True, GTC_TIF), (0.32, 299, True, IOC_TIF)]
+    assert [c[2:6] for c in _places(v3)] == [(0.25, 1, True, GTC_TIF), (0.31, 299, True, GTC_TIF)]
     assert p.state["mirror_s4_proof"]["proved"] is True and b["ledger_net"] == 0
     assert _census(st3, "short_flatten_close") == 1 and _census(st3, "s4_probe_filled") == 0
     # the quantity rule, on the book the row moved
@@ -11958,10 +12843,10 @@ def test_s4v3_a_probe_the_venue_kept_is_cancelled_again_every_tick_before_the_wa
     cr = [r for r in st4["recent"] if r["what"] == "s4_probe_cancel"]
     assert cr and cr[-1]["why"] == "gone" and cr[-1]["order"] == "oid-1"
     # an hour after the clearing: the probe again, proved, the cover
-    v5 = _NoClose(held={SLUG: -300}, ioc_fill=300.0)
+    v5 = _NoClose(held={SLUG: -300}, ioc_fill=300.0, lift=300.0)
     v5.orders, v5.n = v.orders, v.n
     st5 = _tick(p, v5, now=NOW + 7300)
-    assert [c[2:4] for c in _places(v5)] == [(0.25, 1), (0.32, 300)] and _cancels(v5) == [("cancel", "oid-2", SLUG)]
+    assert [c[2:4] for c in _places(v5)] == [(0.25, 1), (0.31, 300)] and _cancels(v5) == [("cancel", "oid-2", SLUG)]
     assert p.state["mirror_s4_proof"]["proved"] is True and p.state["mirror_s4_proof"]["order_id"] == "oid-2"
     assert b["ledger_net"] == 0 and _census(st5, "s4_proved") == 1
     # refused, then the venue's own record reads it cancelled: gone by status
@@ -12035,7 +12920,7 @@ def test_s4v3_a_kept_probe_that_filled_before_its_cancel_is_booked_on_its_book_a
     assert _census(st2, "s4_probe_filled") == 1 and _census(st2, "s4_probe_placed") == 0
     assert ml._s4_held_order(rec) is None and b["state"] == "live"
     # an hour on: proved, the cover the ledger's 299
-    v3 = _NoClose(held={SLUG: -299}, ioc_fill=300.0)
+    v3 = _NoClose(held={SLUG: -299}, ioc_fill=300.0, lift=300.0)
     _tick(p, v3, now=NOW + 3700)
     assert [c[3] for c in _places(v3)] == [1, 299] and b["ledger_net"] == 0
 
@@ -12078,7 +12963,7 @@ def test_s4v3_the_proof_requires_a_standing_state_on_the_echo(monkeypatch):
                                              "rejected", "replaced", "pending_cancel", "pending_replace")]
              + [("unknown", "state_missing"), ("", "state_missing")])
     for state, why in table:
-        p, b, v = _flip_world(ioc_fill=300.0)
+        p, b, v = _flip_world(ioc_fill=300.0, lift=300.0)
         p.state.pop("mirror_s4_proof")
         v.__class__ = _ProbeState
         v.probe_state = state
@@ -12447,9 +13332,10 @@ def test_w2_fills_only_on_the_short_side_token_open_a_short_book_through_the_exi
     assert row["asset"] == N and row["raw"]["preview"]["intent"] == SHORT and row["requested_shares"] == 400.0
     pl = _places(v)
     assert len(pl) == 1
-    assert pl[0][1:] == (SLUG, 0.32, 400, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL", SHORT, True, None)
+    # E31: the short add's cent 0.32 (the ask's own queue) -> 0.31, the maker cent
+    assert pl[0][1:] == (SLUG, 0.31, 400, False, "TIME_IN_FORCE_GOOD_TILL_CANCEL", SHORT, True, None)
     o = next(iter(p.orders.values()))
-    assert (o["side"], o["intent"], o["kind"], o["tif"], o["wire"]) == (SELL, SHORT, "increase", "GTC", 0.32)
+    assert (o["side"], o["intent"], o["kind"], o["tif"], o["wire"]) == (SELL, SHORT, "increase", "GTC", 0.31)
     assert _census(st, "short_open") == 1 and _census(st, "rest_placed") == 1
     assert _census(st, "long_token_unknown") == 0 and _census(st, "short_side_refused") == 0
     assert p.cand_refusals == [], "no row on an opened book"
@@ -13230,26 +14116,36 @@ def test_e19_the_smaller_reading_open_name_is_emitted_here_too(monkeypatch):
     assert "drift_smaller_open" in SEEN
 
 
-def test_e14_the_take_in_band_name_is_emitted_here_too(monkeypatch):
-    """E14's one name (FILL lane 2) is driven in tests/test_e14_take_band.py;
-    run here as well so the coverage read below sees it when this file
-    runs alone (E13's convention). The band is ON for it (the fixture
-    world's rail above holds it at 0)."""
+def test_e14_the_take_in_band_name_is_retired_and_is_emitted_by_nothing(monkeypatch):
+    """RE-PINNED AT E31 (FILL lane 31). E14's one name (FILL lane 2) was
+    driven in tests/test_e14_take_band.py and asserted INTO `SEEN` here so
+    the coverage read below would find it. `take_in_band` is retired: the
+    band take is a rest, its emit site left with the take, and the name
+    stays a DECLARED ZERO. So the hook is inverted -- the same driver runs
+    (its file's own re-pin proves the census stays at 0) and the pin here
+    is that the name reaches `SEEN` from nowhere. The coverage read below
+    carries it in `unreachable` with this lane named, which is what keeps
+    that read honest rather than blind."""
     from tests import test_e14_take_band as e14
-    e14.test_e14_every_name_is_emitted_here(monkeypatch)
-    assert "take_in_band" in SEEN
+    e14.test_e14_the_name_is_retired_and_can_no_longer_be_emitted(monkeypatch)
+    assert "take_in_band" not in SEEN and "take_in_band" in ml.CENSUS_KEYS
 
 
 def test_fill_x1_the_exit_band_names_are_emitted_here_too(monkeypatch):
-    """FILL lane 3's three names are driven in tests/test_fill_x1_exit_band.py
-    (the band at a monkeypatched 0.02 for the two band words -- at the code
-    default they can never fire -- and the fast gate's count on his
-    reducing fill); run here as well so the coverage read below sees them
-    when this file runs alone (E13's convention)."""
+    """RE-PINNED AT E31 (FILL lane 31). FILL lane 3's three names were three
+    emitted names; two of them are not any more. `exit_take_in_band` and
+    `cover_in_band` left with `_exit_band_mark` and are DECLARED ZEROS, so
+    the driver (whose own file now runs those two worlds for the REST that
+    stands where the band take stood) puts only `order_open_his_exit` --
+    the fast gate's count on his reducing fill, which this lane does not
+    touch -- into `SEEN`. The two retired names are pinned here as reaching
+    it from nowhere; the coverage read below carries them in `unreachable`
+    with this lane named."""
     from tests import test_fill_x1_exit_band as x1
     x1.test_x1_every_name_is_emitted_here(monkeypatch)
-    for k in ("exit_take_in_band", "cover_in_band", "order_open_his_exit"):
-        assert k in SEEN, k
+    assert "order_open_his_exit" in SEEN
+    for k in ("exit_take_in_band", "cover_in_band"):
+        assert k not in SEEN and k in ml.CENSUS_KEYS, k
 def test_t2_the_fill_answers_names_are_emitted_here_too(caplog):
     """T2's two names (FILL lane 4) are driven in tests/test_fill_t2_record.py;
     run here as well so the coverage read below sees them when this file
@@ -13335,7 +14231,17 @@ def test_e21_the_fast_add_names_are_emitted_here_too(monkeypatch):
     file runs alone (E13's convention)."""
     from tests import test_e21_fast_add_replan as e21
     e21.test_e21_every_name_is_emitted_here(monkeypatch)
+    # E31 (FILL lane 31): five of the six still emit. `fast_add_took` was the
+    # fast tick's third branch -- the wake that CROSSED at his cent instead of
+    # re-quoting -- and E31 leaves the fast tick two branches (kept / replaced),
+    # so the name is a declared zero and reaches `SEEN` from nowhere. The
+    # branch map (ml._FAST_ADD_COUNTED) still carries it, pinned in E21's own
+    # file, so a future edit cannot quietly drop the third arm
+    assert e21.NEW_NAMES[4] == "fast_add_took"
     for name in e21.NEW_NAMES:
+        if name == "fast_add_took":
+            assert name not in SEEN and name in ml.CENSUS_KEYS
+            continue
         assert name in SEEN, name
 def test_l7_event_stale_is_emitted_on_a_dated_candidate_with_no_fill_of_his_in_a_day():
     """L7 (2026-09-08): a candidate whose slug's own date is more than one
@@ -13399,6 +14305,20 @@ def test_e30_the_post_only_backoff_name_is_emitted_here_too(monkeypatch, caplog)
         assert name in SEEN, name
 
 
+def test_e31_the_maker_names_are_emitted_here_too(monkeypatch):
+    """E31's ten names (FILL lane 31) are driven in tests/test_e31_maker_only.py
+    -- the entry at his cent and at the bound, the touch-driven re-quote, the
+    cross re-price and its hold, `maker_no_cent` on a one-sided book, a fill at
+    create the venue calls ours, the durable block, the guard, and the
+    touch-bound re-read's two refusals -- so run them here as well and the
+    coverage read below sees them when this file runs alone (E13's convention,
+    as E28 and E30 do; review MEDIUM-3)."""
+    from tests import test_e31_maker_only as e31
+    e31.test_e31_every_name_is_emitted_here(monkeypatch)
+    for name in e31.NEW_NAMES:
+        assert name in SEEN, name
+
+
 def test_every_census_key_was_emitted_at_least_once_across_this_file():
     """Runs last. One name is declared for the reader and structurally
     unreachable at the shipped constants, so it is excluded here by
@@ -13410,6 +14330,39 @@ def test_every_census_key_was_emitted_at_least_once_across_this_file():
     301-share target)."""
     if _RAN["n"] < 40:
         pytest.skip("the coverage read needs the whole file")
-    unreachable = {"under_one_share"}
+    # E31 (FILL lane 31, 2026-09-10): every order the mirror sends is a
+    # post-only rest that never crosses, so the SEVENTEEN names the take paths
+    # emitted can never be emitted again. They stay DECLARED as documentary
+    # zeros (the honest removal would re-cut a hundred from-end pins in twenty
+    # files, and a reader of an older heartbeat still needs the name), so they
+    # join this set with the lane named beside them.
+    # `filled_take` is NOT one of them (review HIGH-2): under E31 every row is
+    # GTC/GTD and no row has kind 'take', so _finish_order's `maker` is False
+    # exactly when `taker_at_placement` is True -- the venue filling a
+    # post-only rest AT CREATE as a taker. It is the counter that says THE FLAG
+    # DID NOT HOLD, it keeps its emit site, and it stays OUT of this set so a
+    # future edit cannot delete that site with the suite still green
+    # E31, two more that the lane leaves in the same class as `under_one_share`
+    # -- declared for the reader, reachable through no world this file can build:
+    #  * `flatten_holding_disagrees` was the SOLE-HOLDER close's own comparison
+    #    (venue against _pm_held before close_position). The close is retired,
+    #    the name has NO emit site left (pinned as such above:
+    #    inspect.getsource(ml).count == 1, the CENSUS_KEYS line alone), and it
+    #    stays declared so an older heartbeat still reads.
+    #  * `no_bid_for_flatten` still HAS its site -- the short unpriced cover's
+    #    guard on an ask that is None or outside (0, 1) -- but the tick can no
+    #    longer reach it: the book needs a MARK to be planned at all, and a mark
+    #    needs both touches inside (0, 1), so an ask of None and an ask of 1.00
+    #    both refuse the book `no_mark` before step F is entered (measured, both
+    #    worlds). The long half of its old world is `maker_no_cent` now
+    #    (test_an_unreadable_bid_names_no_bid_for_flatten). The guard is left
+    #    standing: it is the fail-closed answer if a future reader ever prices a
+    #    cover without a mark.
+    unreachable = {"under_one_share", "flatten_holding_disagrees", "no_bid_for_flatten",
+                   "take_placed", "take_first", "take_at_his_level", "take_refused_price",
+                   "take_capped", "take_arm_stale", "take_in_band",
+                   "exit_take", "exit_take_rested", "exit_take_in_band", "cover_in_band",
+                   "short_cover_take", "fast_add_took",
+                   "ask_moved", "bid_moved", "ioc_reread_capped", "ioc_quote_unread"}
     missing = set(ml.CENSUS_KEYS) - SEEN - unreachable
     assert not missing, sorted(missing)

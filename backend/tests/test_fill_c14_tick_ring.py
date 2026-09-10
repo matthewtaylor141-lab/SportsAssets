@@ -410,12 +410,21 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # `h`'s body after its return (dead code: neither hash was read); E27 de-indents it so both are read again.
     # E27's review (HIGH-1 fold: the short's at-level take at his sell cent on the no-order path) re-cuts it
     # once more: f32e41b85c44b038 -> 59efb48ba79f793c
-    assert h(ml._act) == "59efb48ba79f793c" and h(ml._place) == "ab568476817cf795"
+    # E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never crosses; every take path
+    # retired by code) re-cuts both -- _act lost its six take arms, its arm block and its take_lvl
+    # (59efb48ba79f793c -> 2e7043299fbf834a, and the fold's `maker_no_cent` hold on a standing rest)
+# and _place gained the fail-closed IOC guard and lost the
+    # three take flags (ab568476817cf795 -> f559a52bfb610ef3)
+    assert h(ml._act) == "2e7043299fbf834a" and h(ml._place) == "f559a52bfb610ef3"
     # E30 (FILL lane 30, 2026-09-10: the post-only rejection read and kept -- the receipt, the log, the reason's
     # word and the consecutive count on the post_only_rejected branch, the backoff's guard before any read, the
     # streak reset on an accepted placement) moved _place_reserved (6c83b8e547c83e0a -> d55d0d4a63c71c23); _place
     # (the wrapper) and _act are untouched; test_e30 hashes _place_reserved with the lane's lines excised at 66144cf's
-    assert h(ml._place_reserved) == "d55d0d4a63c71c23" and h(ml._entry_take) == "2266c2b346674491"
+    # E31: _place_reserved sends the flag unconditionally, re-reads a touch-bound rest before the send,
+    # reads the venue's own `aggressor` on a fill at create and writes the durable block, and re-prices
+    # a proven cross (d55d0d4a63c71c23 -> a83a3e9473eb7112); `_entry_take` is DELETED with the take paths
+    # (2266c2b346674491 on the E30 tree), so the pin is its absence
+    assert h(ml._place_reserved) == "a83a3e9473eb7112" and not hasattr(ml, "_entry_take")
     assert h(ml._fast_gate) == "1932811194268668" and h(ml._fast_book) == "286e6fa4663c3887"
     # _tick_book read a0061ad32302a610 and _tick 51b72e7567d9f197 after E21; E23 (FILL lane 23:
     # the disagree adoption arm in _tick_book, the memoed cancel re-read after step O in _tick)
@@ -436,7 +445,9 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # moved) re-cut _tick_book once more (fd374d414a559684 -> f8b3aa98172bf578)
     # E30 (FILL lane 30: the post-only backoff's hold judged LAST on _tick_book's add branch, after E29's hand
     # hold) moved _tick_book (f8b3aa98172bf578 -> a9193e21be233a95); _tick untouched
-    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "a9193e21be233a95"
+    # E31: _tick_book's E30 hold comment is re-worded (there is no IOC left to exempt under it)
+    # -- a9193e21be233a95 -> d121406c0c55e65b; _fast_candidate untouched
+    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "d121406c0c55e65b"
     assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "265461d33df59da6"
     # 219f140 read 9898ac1e343b5e41; the owner's $10,000 loss stop (863ad77, docs 62) landed ahead of
     # this lane and moved the module's hash to 308fd0c45fb78448 -- the lane itself touches nothing in
@@ -457,8 +468,14 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # (pinned in the lane's worktree on 6c0830d as d2512139ce710b52)
     # E30 (FILL lane 30: the one switch line MIRROR_POST_ONLY_BACKOFF, the one wait line
     # MIRROR_POST_ONLY_BACKOFF_S and their comment) -> 68d94eb379d99563 (test_e28 excises the block too)
-    assert h(rules) == "68d94eb379d99563", "mirror_live_rules untouched by this lane"
-    for f in (ml._act, ml._place, ml._place_reserved, ml._entry_take, ml._fast_gate, ml._fast_book,
+    # E31 (FILL lane 31: MAKER_TICK, maker_wire / maker_bound / maker_compare_wire, rest_decision's
+    # `ttl_stands` and the retired rails' paragraph) -> f0dd755348ee82d2, and the FOLD's one clause in
+    # maker_compare_wire (an UNPRICED exit's rest IS the touch, so it follows the touch in BOTH
+    # directions -- without it a SELL left at bid + a tick sat under a risen bid and gave away the
+    # spread this lane exists to collect) -> 59f12823b66e44e7
+    assert h(rules) == "59f12823b66e44e7", "mirror_live_rules moved only by the maker lane"
+    # E31: `_entry_take` is DELETED with the take paths it served
+    for f in (ml._act, ml._place, ml._place_reserved, ml._fast_gate, ml._fast_book,
               ml._fast_candidate, ml._tick_book, ml._walk_candidate, ml._tick):
         s = inspect.getsource(f)
         assert "_tick_ring" not in s and "fast_prelude" not in s and "_speed_block" not in s and "fast_acquired" not in s
@@ -490,8 +507,10 @@ def test_c14_the_tick_ring_label_sits_after_mirror_tick_in_the_case_order_the_he
     h, _ = _preset(text, "hourly")
     assert "SELECT '== tick-ring' AS section; " + sql + " SELECT '== mirror-pnl' AS section; " in h
     assert h.index("'== mirror-tick'") < h.index("'== tick-ring'") < h.index("'== mirror-pnl'")
+    # E31 (FILL lane 31): the read-only maker-rests preset rides after take-band (ten -> eleven)
     assert hourly.PARTS == ("mirror-tick", "tick-ring", "mirror-pnl", "paired-day", "paired-ratio", "latency-census",
-                            "fills-answered", "fills-missed", "take-band", "on-target-why") and len(hourly.PARTS) == 10
+                            "fills-answered", "fills-missed", "take-band", "maker-rests",
+                            "on-target-why") and len(hourly.PARTS) == 11
     hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()
     hourly.test_the_hourly_preset_is_read_only_with_its_own_output_cap_and_timeout()
     hourly.test_the_help_line_is_the_case_labels_with_hourly_last()

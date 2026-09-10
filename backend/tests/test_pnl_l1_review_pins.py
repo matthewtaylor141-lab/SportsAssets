@@ -101,19 +101,27 @@ def test_r3_an_at_or_better_block_is_sized_at_the_whole_net_and_never_past_the_2
     assert b["last_plan"]["catchup"]["why"] == "at_or_better" and b["flow_base"] == 0.0
     assert b["target"] == 5_555 and b["target"] * 0.45 <= 2_500.0 and b["target"] < 10_000
     assert _census(st, "open_catchup") == 1
-    # E4's arm, unchanged: the IOC take at his cent for the clip ($2,500 at 0.50 = 5,000), then the
-    # rest for what the IOC left -- the whole target when it filled nothing; never more than the target
+    # E4's arm RE-PINNED AT E31 (FILL lane 31, 2026-09-10): ONE ORDER, NOT TWO.
+    # It was an IOC take at his cent for the clip ($2,500 at 0.50 = 5,000) and
+    # then a GTC rest at the bid 0.44 for what the IOC left. Every order is a
+    # post-only rest now, priced at the maker wire min(buy_wire(his 0.50),
+    # ask 0.46 - MAKER_TICK) = 0.45 -- a cent BETTER for us than the old rest's
+    # 0.44 and still at or under his cent. At 0.45 the per-order clip is
+    # $2,500 / 0.45 = 5,555, which is the whole target, so one rest carries it
     pl = _places(v)
-    assert [(c[2], c[3], c[5][14:17]) for c in pl] == [(0.50, 5_000, "IMM"), (0.44, 5_555, "GOO")]
+    assert [(c[2], c[3], c[5][14:17]) for c in pl] == [(0.45, 5_555, "GOO")]
     assert all(c[2] <= 0.50 for c in pl) and max(c[3] for c in pl) <= b["target"]
     assert sum(o["qty"] for o in p.orders.values() if o["state"] == "open") == 5_555
-    # the IOC filled in full: the rest is the remainder, filled + resting = the target, never past it
+    # a taker lifting 5,000 of that rest at create: the ledger books them and the
+    # SAME order keeps the 555 still resting -- filled + resting = the target
     p2, v2, http2 = _long_block_world(monkeypatch, 100_000, 0.50, 0.44, 0.46)
-    v2.ioc_fill = 5_000.0
+    v2.lift = 5_000.0
     _tick(p2, v2, http=http2)
     b2 = _one_book(p2)
-    assert b2["ledger_net"] == 5_000 and [(c[3], c[5][14:17]) for c in _places(v2)] == [(5_000, "IMM"), (555, "GOO")]
-    assert b2["ledger_net"] + sum(o["qty"] for o in p2.orders.values() if o["state"] == "open") == 5_555
+    assert b2["ledger_net"] == 5_000 and [(c[3], c[5][14:17]) for c in _places(v2)] == [(5_555, "GOO")]
+    row = next(o for o in p2.orders.values() if o["state"] == "open")
+    assert row["qty"] == 5_555 and row["booked_filled"] == 5_000.0
+    assert b2["ledger_net"] + (row["qty"] - row["booked_filled"]) == 5_555
     assert rules.MIRROR_NET_CAP_USD == 2_500.0 and mi.MARKET_NET_CAP_USD == 2_500.0
 
 

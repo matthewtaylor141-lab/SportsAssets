@@ -69,19 +69,22 @@ IOC_TIF = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
 # the functions the plan names as NOT touched, hashed on the tip this lane
 # was built on (219f140): a change to any of them is not this lane's
 UNTOUCHED = {
-    "rest_decision": ("b1962f2cbb21c6c4", rules.rest_decision), "take_allowed": ("dc3079622052b6ff", rules.take_allowed),
+    "rest_decision": ("2f8b8feef14fbd62", rules.rest_decision), "take_allowed": ("dc3079622052b6ff", rules.take_allowed),
     "at_or_through": ("4aece58b61ee21bc", rules.at_or_through),
     # _take_band read 972e473fcdf4a2c0 on 219f140; E27 (FILL lane 27, 2026-09-09: the band's width
     # stamped as `band` with `frac` {his_px, cost, width}) landed after this lane and moved it --
     # re-cut at E27's landing, not this lane's (the verdicts and the arm this lane pins are unchanged)
-    "_take_band": ("bd745846c0afd55d", ml._take_band), "_short_wire": ("25efb8c189941579", ml._short_wire),
+    # E31 (FILL lane 31, 2026-09-10): `_take_band` is DELETED with the band arm this lane's
+    # fast-tick admission fed, and `_short_wire` is re-cut for the maker cent
+    "_short_wire": ("12afe5fcd5b0c248", ml._short_wire),
     "_order_open_his_exit": ("1af54b54e3e0dd16", ml._order_open_his_exit),
     "_fast_open_entry_rest": ("618ec2943215df41", ml._fast_open_entry_rest),
-    "_fast_candidate": ("922585ffb6856f70", ml._fast_candidate), "_reconcile_open": ("7c3bc726438693ce", ml._reconcile_open),
+    "_fast_candidate": ("922585ffb6856f70", ml._fast_candidate), "_reconcile_open": ("2b76640dec2d3bd3", ml._reconcile_open),
     "_order_status": ("04620411d1d55e0e", ml._order_status), "_finish_order": ("1db222463610e38c", ml._finish_order),
     # E29 (FILL lane 29): the hand_held refusal before the mapping moved _tick_candidate 199a7d617e704397 -> c4fd4eb511c20f75
     "_tick_candidate": ("c4fd4eb511c20f75", ml._tick_candidate), "_lost_fill_adopt": ("61c67ae8946f3af4", ml._lost_fill_adopt),
-    "_exit_take": ("750acd709c826566", ml._exit_take), "_ioc_reread": ("cd3dbab5e5819257", ml._ioc_reread),
+    # E31: `_exit_take` and `_ioc_reread` are DELETED (no caller left); `_reconcile_open` is re-cut
+    # for the maker rest that stands past its TTL
     "_requotes_this_hour": ("f45f581625d2dea8", ml._requotes_this_hour),
     # _cancel_and_settle read ca65dea6b7703ba4 on 219f140; E23 (FILL lane 23, the cancel's final
     # status re-read) landed after this lane and moved it -- re-cut at E23's landing, not this lane's
@@ -114,8 +117,15 @@ def _freeze_writes(p):
 def _rested(p, v, his=300.0):
     """A long book with an ENTRY rest standing, placed by a FULL tick at
     NOW: his `his` shares @0.31 (the fixture's default 300), bid 0.30 /
-    ask 0.32 -> the rest at buy_price(0.31, 0.30) = 0.30 for the plan's
-    whole quantity. Returns (book, the rest's row id)."""
+    ask 0.32 -> the rest for the plan's whole quantity.
+
+    E31 (FILL lane 31, 2026-09-10) MOVED THE CENT, ONE WAY, FOR EVERY
+    WORLD IN THIS FILE: a long add rested at buy_price(0.31, 0.30) =
+    floor(min(his, bid)) = 0.30, which JOINED THE BID a cent under him.
+    It now rests at rules.maker_wire(BUY, 0.31, 0.30, 0.32) =
+    min(buy_wire(0.31), 0.32 - MAKER_TICK) = 0.31 -- HIS OWN CENT, inside
+    the spread. The quantity, the leg, the intent and the row are
+    unchanged. Returns (book, the rest's row id)."""
     b = p.add_book(ledger=0)
     _tick(p, v, http=_mkt(his))
     assert b["open_order_id"] and len(_places(v)) == 1 and p.orders[b["open_order_id"]]["kind"] == "increase"
@@ -139,18 +149,35 @@ def test_e21_book_760s_shape_kept_under_the_floor_then_replaced_through_the_band
     """h2225 983-985 / 1119 / 1128: three adds against one standing rest.
     Wake 1 with the rest 20 s old -> the gate admits (`fast_his_add`),
     keep `min_life` + add_pending, `fast_add_kept`, NO cancel, nothing
-    placed. Wake 2 at 93 s (past the floor) with the ask a cent over his
-    cent -> `replace_qty`, the cancel, lane 2's band IOC first
-    (`take_in_band`) then one rest for the grown quantity at his cent,
-    `fast_add_replaced`, _SQL_REPLACES + 1. Wake 3 with the ask AT his
-    cent on the young new rest -> the cancel under 'take', ONE IOC for
-    the GROWN quantity with decision `take_on_add`, `fast_add_took`,
-    the remainder resting 'rest' at 0.30."""
+    placed. Wake 2 at 93 s (past the floor) -> `replace_qty`, the cancel,
+    one rest for the GROWN quantity at his cent, `fast_add_replaced`,
+    _SQL_REPLACES + 1. Wake 3 with the ask arriving AT his cent on the
+    young new rest.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The gate, the three
+    branches, the ages, the grown quantity, the replace's rail and lane
+    9's stamps are byte for byte; what moved is the EXECUTION:
+
+      * every rest is at his own cent 0.31, not the bid's 0.30
+        (`_rested`'s note);
+      * wake 2's `take_in_band` IOC at 0.32 is GONE -- lane 2's band arm
+        left _act with the other five, so the wake places ONE order, the
+        rest for the grown 497 at his cent, and nothing crosses;
+      * wake 3 is the clause this lane exists for. The ask falling to
+        0.31 IS THE MARKET COMING TO OUR REST, not a reason to buy the
+        spread: `rules.maker_compare_wire(BUY, standing 0.31, his cent
+        0.31, maker wire 0.30)` returns the STANDING wire, so there is no
+        cent move, and the rest of 497 at 0.31 stands to be lifted by the
+        taker who came there. `fast_add_took` / `take_at_his_level` /
+        `take_on_add` are retired; the branch is `kept`, the rest is
+        untouched and the ledger does not move on this fixture, which
+        never scripts a lift."""
     ml._fill_hwm.clear()
     p = _pool()
     v = _Venue()
     b, o1 = _rested(p, v)
-    assert p.orders[o1]["qty"] == 300 and p.orders[o1]["wire"] == 0.30
+    # E31: the rest's wire 0.30 -> 0.31 (his own cent inside the spread)
+    assert p.orders[o1]["qty"] == 300 and p.orders[o1]["wire"] == 0.31
     # wake 1: his add of 97 at NOW + 10; the rest 20 s old
     _add(p, 97, NOW + 10)
     _walk({M: 0.0, N: 0.0}, NOW + 12)
@@ -161,7 +188,10 @@ def test_e21_book_760s_shape_kept_under_the_floor_then_replaced_through_the_band
     assert not _cancels(v) and not _places(v) and len(_status_calls(v)) == 1, "one status read, nothing cancelled, nothing placed"
     lp = b["last_plan"]
     assert lp["fast_add"] == {"rest": o1, "rest_age_s": 20.0, "his_add_sh": 97.0, "since": NOW, "branch": "kept"}
-    assert lp["add_pending"] == {"qty": 397, "wire": 0.3, "since": NOW + 20} and lp["rest_cause"] == "min_life"
+    # E31: the pending add's wire 0.30 -> 0.31, the maker cent it will be placed at
+    assert lp["add_pending"] == {"qty": 397, "wire": 0.31, "since": NOW + 20} and lp["rest_cause"] == "min_life"
+    assert lp["maker"] == {"wire": 0.31, "bound": 0.31, "his_cent": 0.31, "clause": "his_cent",
+                           "side": BUY, "bid": 0.30, "ask": 0.32, "at": NOW + 20, "hint": None}
     assert lp["decision"] == "kept_min_life" and lp["open_order"] == o1 and lp["rest_life"]["age_s"] == 20.0
     assert p.orders[o1]["state"] == "open" and b["open_order_id"] == o1 and _state_writes(p) == []
     r1 = _row(p, NOW + 10)
@@ -176,36 +206,53 @@ def test_e21_book_760s_shape_kept_under_the_floor_then_replaced_through_the_band
     assert _census(fs2, "fast_add_kept") == 0 and _census(fs2, "fast_add_took") == 0 and fs2["requotes"] == 1
     assert _cancels(v) == [("cancel", "oid-1", SLUG)] and p.orders[o1]["state"] == "cancelled" and p.orders[o1]["reason"] == "replace"
     assert [tuple(a) for k, s, a in p.sent if "ml-order-decision" in s] == [(o1, "replace_qty")]
-    assert [c[1:6] for c in _places(v)] == [(SLUG, 0.32, 497, False, IOC_TIF), (SLUG, 0.30, 497, False, GTC_TIF)], \
-        "the band IOC at 0.32 for the grown 497 first, then the rest at his cent"
-    assert _census(fs2, "take_in_band") == 1 and _census(fs2, "rest_placed") == 1
+    # E31: the two orders become ONE. Lane 2's band IOC at 0.32 (`take_in_band`) left _act
+    # with the six take arms, so the wake places only the rest for the grown 497 -- and at
+    # HIS cent 0.31, not the bid's 0.30. post_only True, GTC, never at or through the ask
+    assert [c[1:6] for c in _places(v)] == [(SLUG, 0.31, 497, False, GTC_TIF)], \
+        "one post-only rest for the grown 497 at his own cent; no band IOC"
+    assert [c[7] for c in _places(v)] == [True]
+    assert _census(fs2, "take_in_band") == 0 and _census(fs2, "rest_placed") == 1
     o2 = b["open_order_id"]
-    assert o2 and o2 != o1 and p.orders[o2]["qty"] == 497 and p.orders[o2]["wire"] == 0.30
+    assert o2 and o2 != o1 and p.orders[o2]["qty"] == 497 and p.orders[o2]["wire"] == 0.31
     lp2 = b["last_plan"]
     assert lp2["fast_add"]["branch"] == "replaced" and lp2["fast_add"]["rest"] == o1 and lp2["fast_add"]["rest_age_s"] == 93.0
     assert lp2["replaced"] == "replace_qty" and lp2["open_order"] == o1 and lp2["decision"] == "rest"
     assert _run(ml._requotes_this_hour(types.SimpleNamespace(pool=p), b)) == 1, "_SQL_REPLACES counts the fast tick's replace"
     r2 = _row(p, NOW + 80)
     assert (r2["name"], r2["order_id"], r2["cause"], r2["rest_id"], r2["fast"]) == ("rest_placed", o2, None, o1, True)
-    # wake 3: a third add at NOW + 95; the new rest 7 s old, the ask AT his cent; the IOC fills 100
+    # wake 3: a third add at NOW + 95; the new rest 7 s old, the ask ARRIVING AT his cent
     monkeypatch.setattr(rules, "MIRROR_TAKE_BAND", 0.0)
     _add(p, 100, NOW + 95)
     _walk({M: 0.0, N: 0.0}, NOW + 97)
     v.calls.clear()
     v.ask, v.ioc_fill = 0.31, 100.0
     fs3 = _fast(p, v, now=NOW + 100, http=_mkt(597.0))
-    assert _skips(fs3) == {} and _census(fs3, "fast_his_add") == 1 and _census(fs3, "fast_add_took") == 1
-    assert _census(fs3, "take_at_his_level") == 1 and _census(fs3, "kept_min_life") == 1 and _census(fs3, "fast_add_kept") == 0
-    assert _cancels(v) == [("cancel", "oid-3", SLUG)] and p.orders[o2]["state"] == "cancelled" and p.orders[o2]["reason"] == "take"
-    assert [c[1:6] for c in _places(v)] == [(SLUG, 0.31, 597, False, IOC_TIF), (SLUG, 0.30, 497, False, GTC_TIF)], \
-        "ONE IOC for the GROWN quantity at his cent (today: the rest's 497 leaves), the remainder resting"
+    # E31: the ask coming DOWN to his cent used to cancel the rest and fire one IOC at 0.31
+    # for the grown 597 (`take_at_his_level` / `fast_add_took` / decision `take_on_add`).
+    # Every one of those is retired. The ask arriving at our resting bid is THE MARKET COMING
+    # TO US: maker_compare_wire(BUY, standing 0.31, his cent 0.31, maker 0.30) returns the
+    # STANDING 0.31 -- a rest is never re-quoted DOWN with a falling ask, and the taker who
+    # came to 0.31 lifts it there. So: nothing cancelled, nothing placed, the branch `kept`
+    assert _skips(fs3) == {} and _census(fs3, "fast_his_add") == 1 and _census(fs3, "fast_add_took") == 0
+    assert _census(fs3, "take_at_his_level") == 0 and _census(fs3, "kept_min_life") == 1 and _census(fs3, "fast_add_kept") == 1
+    assert not _cancels(v) and not _places(v)
+    assert p.orders[o2]["state"] == "open" and p.orders[o2]["kind"] == "increase" and b["open_order_id"] == o2
+    # the maker record says WHY: his cent is still 0.31, the touch bound has fallen to 0.30,
+    # and the standing rest is not moved away from him to follow it
+    assert b["last_plan"]["maker"]["his_cent"] == 0.31 and b["last_plan"]["maker"]["bound"] == 0.30
+    assert rules.maker_compare_wire(BUY, 0.31, 0.31, 0.30) == 0.31
     ins = _inserts(p)
-    ioc, rest = ins[-2], ins[-1]
-    assert (ioc[3], ioc[5], ioc[10], ioc[11], ioc[20], ioc[22]) == ("take", "IOC", 0.31, 597, "take_on_add", True)
-    assert (rest[3], rest[5], rest[10], rest[11], rest[20], rest[22]) == ("increase", "GTC", 0.30, 497, "rest", True)
-    assert b["ledger_net"] == 100 and b["last_plan"]["fast_add"]["branch"] == "took"
-    assert b["last_plan"]["take_filled"] == 100.0 and b["last_plan"]["decision"] == "rest"
-    assert _run(ml._requotes_this_hour(types.SimpleNamespace(pool=p), b)) == 2, "the take's cancel spends the same rail"
+    # the last two rows written are the two RESTS of wakes 0 and 2; no `take` row exists
+    assert (ins[-2][3], ins[-2][5], ins[-2][10], ins[-2][11], ins[-2][20], ins[-2][22]) == \
+        ("increase", "GTC", 0.31, 300, "rest", False)
+    assert (ins[-1][3], ins[-1][5], ins[-1][10], ins[-1][11], ins[-1][20], ins[-1][22]) == \
+        ("increase", "GTC", 0.31, 497, "rest", True)
+    assert not any(x[3] == "take" or x[5] == "IOC" or x[20] == "take_on_add" for x in ins)
+    assert b["ledger_net"] == 0 and b["last_plan"]["fast_add"]["branch"] == "kept"
+    assert b["last_plan"].get("take_filled") is None and b["last_plan"]["decision"] == "kept_min_life"
+    assert _run(ml._requotes_this_hour(types.SimpleNamespace(pool=p), b)) == 1, \
+        "1 -> was 2: the take's own cancel spent a replace of the hour's rail and there is no take"
 
 
 # ------------------------------------------------------ (2) / (3) books 825 / 826
@@ -288,8 +335,21 @@ def test_e21_on_a_short_book_the_gate_passes_for_the_short_axis_add_and_the_plan
     assert b["last_plan"]["fast_add"]["his_add_sh"] == 100.0 and b["last_plan"]["fast_add"]["branch"] == "kept"
     assert "take_band" not in b["last_plan"]
     asrc = inspect.getsource(ml._act)
-    assert "if rules.MIRROR_FAST_ADD_REPLAN and not is_exit and not short:" in asrc
-    assert "grew = rules.MIRROR_FAST_ADD_REPLAN and not short and _plan_grew_past_rest(p, leaves)" in asrc
+    # E31: the two source pins here were the TAKE ARM's own gate and its grown-quantity
+    # sizing (`if rules.MIRROR_FAST_ADD_REPLAN and not is_exit and not short:` and
+    # `grew = rules.MIRROR_FAST_ADD_REPLAN and not short and _plan_grew_past_rest(p, leaves)`).
+    # Both left _act with the arm. The pin they carried -- A SHORT BOOK'S ADD NEVER TAKES --
+    # now holds for EVERY book by construction, which is strictly stronger: no arm of _act
+    # can send a take at all, and `_place` refuses a non-GTC time in force by name
+    assert "if rules.MIRROR_FAST_ADD_REPLAN and not is_exit and not short:" not in asrc
+    assert "_plan_grew_past_rest(p, leaves)" not in asrc
+    assert "take_on_add" not in asrc and "IMMEDIATE_OR_CANCEL" not in asrc
+    for gone in ("_entry_take", "_exit_take", "_take_band", "_short_take_band"):
+        assert not hasattr(ml, gone), gone
+    assert '_mirror_stop("ioc_refused", ' in inspect.getsource(ml._place)
+    # `_plan_grew_past_rest` stays a PURE helper with its own unit pins below (the record of
+    # the rule the arm governed), with no reader left on the money path
+    assert "_plan_grew_past_rest" not in asrc
     # the pure reading on a short book: the SELL row is the add leg; his SELL of the long token adds too
     t = types.SimpleNamespace(fast_open={7: {"side": SELL, "tif": "GTC", "state": "open", "kind": "increase",
                                              "order_id": "x", "placed_ts": NOW - 30}}, now=NOW)
@@ -416,7 +476,15 @@ def test_e21_the_rails_replace_capped_take_capped_over_room_the_switch_off_and_b
     assert _census(fs, "fast_add_replaced") == 0 and not _cancels(v) and not _places(v)
     assert p.orders[o1]["state"] == "open" and b["open_order_id"] == o1
     assert b["last_plan"]["fast_add"]["branch"] == "replace_capped" and b["last_plan"]["rest_cause"] == "replace_capped"
-    # (b) the take at the budget: `take_capped`, nothing cancelled, the rest stands
+    # (b) THE BUDGET WITH THE ASK AT HIS CENT. E31 RETIRED THE SECOND CAPPED REFUSAL.
+    # Before this lane the ask arriving at his cent on a young rest went down the take arm,
+    # and the hour's rail refused it there under its own name `take_capped` (the branch and
+    # the rest_cause both read that word). There is no take arm, so there is no second
+    # refusal: the hour's rail is ONE rail, `replace_capped`, and it bites on the replace the
+    # grown quantity asks for. The wake is moved past MIRROR_REST_MIN_LIFE_S (20 s -> 60 s,
+    # (a)'s own clock) so the replace is actually reached rather than held by the rest-life
+    # floor first -- otherwise the rail would not be exercised at all. `take_capped` stays
+    # DECLARED on CENSUS_KEYS and in _REST_STOOD_NAMES as the record of the rule it governed
     p2 = _pool()
     v2 = _Venue()
     b2 = p2.add_book(ledger=0)
@@ -427,23 +495,34 @@ def test_e21_the_rails_replace_capped_take_capped_over_room_the_switch_off_and_b
     v2.calls.clear()
     v2.ask = 0.31
     _add(p2, 100, NOW + 10)
-    _walk({M: 0.0, N: 0.0}, NOW + 12)
-    fs2 = _fast(p2, v2, now=NOW + 20, http=_mkt(400.0))
-    assert _skips(fs2) == {} and _census(fs2, "take_capped") == 1 and _census(fs2, "fast_add_took") == 0
+    _walk({M: 0.0, N: 0.0}, NOW + 52)
+    fs2 = _fast(p2, v2, now=NOW + 60, http=_mkt(400.0))
+    assert _skips(fs2) == {} and _census(fs2, "take_capped") == 0 and _census(fs2, "fast_add_took") == 0
+    assert _census(fs2, "replace_capped") == 1, "one rail, under its own name"
     assert not _cancels(v2) and not _places(v2) and p2.orders[o2]["state"] == "open"
-    assert b2["last_plan"]["fast_add"]["branch"] == "take_capped" and b2["last_plan"]["rest_cause"] == "take_capped"
-    # (c) the room under a share at his cent after the cancel: `over_room`, nothing placed
+    assert p2.orders[o2]["wire"] == 0.31 and b2["open_order_id"] == o2, "the rest stands, at his cent"
+    assert b2["last_plan"]["fast_add"]["branch"] == "replace_capped" and b2["last_plan"]["rest_cause"] == "replace_capped"
+    assert '_fast_add_branch(plan, "take_capped", w)' not in inspect.getsource(ml._act)
+    # (c) the room under a share at his cent after the cancel: `over_room`, nothing placed.
+    # The wake moves 20 s -> 60 s for the same reason as (b): the take arm reached the room
+    # read on a young rest, the replace arm reaches it past the rest-life floor. The refusal,
+    # the cancel that precedes it and the empty placement list are unchanged
     p3 = _pool()
     v3 = _Venue()
     b3, o3 = _rested(p3, v3)
     monkeypatch.setattr(rules, "MIRROR_CLIP_USD", 0.15)
     v3.ask = 0.31
     _add(p3, 100, NOW + 10)
-    _walk({M: 0.0, N: 0.0}, NOW + 12)
-    fs3 = _fast(p3, v3, now=NOW + 20, http=_mkt(400.0))
+    _walk({M: 0.0, N: 0.0}, NOW + 52)
+    fs3 = _fast(p3, v3, now=NOW + 60, http=_mkt(400.0))
     assert _skips(fs3) == {} and _census(fs3, "over_room") == 1 and _census(fs3, "fast_add_took") == 0
     assert _cancels(v3) == [("cancel", "oid-1", SLUG)] and not _places(v3) and p3.orders[o3]["state"] == "cancelled"
-    assert b3["last_plan"]["fast_add"]["branch"] == "over_room" and b3["open_order_id"] is None
+    # E31: the branch word is `replaced`, not `over_room`. The take arm stamped `over_room`
+    # itself; on the replace road the room is read inside _place_reserved, AFTER the branch
+    # is stamped, so the census name is the one that carries the refusal
+    assert b3["last_plan"]["fast_add"]["branch"] == "replaced" and b3["open_order_id"] is None
+    assert b3["last_plan"]["replaced"] == "replace_qty"
+    assert '_fast_add_branch(plan, "over_room", w)' not in inspect.getsource(ml._act)
     monkeypatch.setattr(rules, "MIRROR_CLIP_USD", 2500.0)
     # (d) the switch OFF: `order_open`, no status read, no venue call
     monkeypatch.setattr(rules, "MIRROR_FAST_ADD_REPLAN", False)
@@ -536,72 +615,122 @@ def test_e21_a_blank_status_read_is_fast_status_unread_with_the_row_untouched_an
 
 
 def test_e21_the_take_off_the_rest_sizes_at_the_plans_grown_quantity_through_the_room_and_an_exit_keeps_the_min(monkeypatch):
-    """Rest 200 leaves 200, his add grows the plan to 260, the ask at his
-    cent -> the cancel, IOC 260 (today 200), fills 100 -> 160 rests; the
-    room worth 230 shares at his cent -> IOC 230, the remainder 130; the
-    switch OFF -> today's 200 and the word 'take'. On the FULL tick (the
-    sizing is behind the switch on both paths). An exit's take keeps
-    min(plan, leaves) by source (E14b's pins re-run in their file)."""
-    # ON: 260
+    """Rest 200 leaves 200, his add grows the plan to 260; the room worth
+    230 shares clamps it; the switch OFF; the exit's and the cover's
+    min(plan, leaves). On the FULL tick.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The SUBJECT of this test
+    -- the TAKE off the rest, sized at the plan's grown quantity -- is
+    retired: `_entry_take` is deleted, `_act` has no take arm, `_place`
+    refuses a non-GTC time in force by name, and `take_at_his_level` /
+    `take_on_add` / `fast_add_took` are declared zeros. What the rule
+    HALF that survives says is that THE ORDER IS SIZED AT THE PLAN'S GROWN
+    QUANTITY THROUGH _room_qty, and under E31 that order is the REST --
+    every add is re-scaled inside `_place_reserved` at the cent that goes
+    out. So each world here now pins the rest where it pinned the IOC:
+
+      ON      cancel + ONE post-only rest of 260 (was: IOC 260 at 0.31
+              then a rest of 160 at 0.30)
+      ROOM    the same, clamped by the clip (was: IOC 230 + rest 130)
+      OFF     identical to ON -- MIRROR_FAST_ADD_REPLAN's only reader is
+              now the FAST gate, so it cannot change a full tick at all
+              (was: today's min(plan, leaves) = 200 and the word 'take')
+
+    The cent moved too, and the OTHER way from the entry's: with the ask
+    at 0.31 his own cent 0.31 WOULD CROSS, so the rest sits at the touch
+    bound 0.32 - ... = ask - MAKER_TICK = 0.30 and the tick counts
+    `maker_rest_at_touch`. And the clock moved: the wake is at NOW + 60,
+    past rules.MIRROR_REST_MIN_LIFE_S, because the take arm reached the
+    room read on a YOUNG rest and the replace arm reaches it past the
+    rest-life floor -- at NOW + 20 the rest is simply kept (pinned below,
+    so the floor is not silently skipped)."""
+    # ON: the rest for the grown 260
     p = _pool(fills=[_fill(M, "BUY", 200, 0.31, NOW - 3000)])
     v = _Venue()
     b, o1 = _rested(p, v, his=200.0)
-    assert p.orders[o1]["qty"] == 200
+    assert p.orders[o1]["qty"] == 200 and p.orders[o1]["wire"] == 0.31
     _add(p, 60, NOW + 10)
     v.ask, v.ioc_fill = 0.31, 100.0
-    st = _tick(p, v, now=NOW + 20, http=_mkt(260.0))
-    assert _census(st, "take_at_his_level") == 1 and _census(st, "kept_min_life") == 1 and _census(st, "fast_add_took") == 0
-    assert [c[1:6] for c in _places(v)] == [(SLUG, 0.31, 260, False, IOC_TIF), (SLUG, 0.30, 160, False, GTC_TIF)]
-    ioc, rest = _inserts(p)[-2], _inserts(p)[-1]
-    assert (ioc[11], ioc[20], ioc[22]) == (260, "take_on_add", False) and (rest[11], rest[20]) == (160, "rest")
-    assert b["ledger_net"] == 100 and "fast_add" not in b["last_plan"], "a full tick's plan carries no fast_add"
-    assert rules.rest_decision(rules.OpenOrder(BUY, 0.30, 200, 200.0, NOW, "ORDER_INTENT_BUY_LONG"),
-                               mi.Plan(BUY, 260, 0.31, "x"), NOW + 20, wire=0.30)[1]["add_pending"]["qty"] == 260
+    st = _tick(p, v, now=NOW + 60, http=_mkt(260.0))
+    assert _census(st, "take_at_his_level") == 0 and _census(st, "fast_add_took") == 0
+    assert _census(st, "rest_placed") == 1 and _census(st, "maker_rest_at_touch") == 1
+    assert [c[1:6] for c in _places(v)] == [(SLUG, 0.30, 260, False, GTC_TIF)], "one rest, the grown quantity"
+    assert [c[7] for c in _places(v)] == [True] and _cancels(v) == [("cancel", "oid-1", SLUG)]
+    rest = _inserts(p)[-1]
+    assert (rest[3], rest[5], rest[10], rest[11], rest[20], rest[22]) == ("increase", "GTC", 0.30, 260, "rest", False)
+    assert not any(x[3] == "take" or x[5] == "IOC" for x in _inserts(p)), "no take row on any road"
+    assert b["ledger_net"] == 0 and "fast_add" not in b["last_plan"], "a full tick's plan carries no fast_add"
+    assert b["last_plan"]["maker"]["clause"] == "touch" and b["last_plan"]["maker"]["his_cent"] == 0.31
+    assert b["last_plan"]["replaced"] == "replace_qty"
+    # the rest-life floor still governs: the same world at NOW + 20 keeps the rest, sends nothing
+    p0 = _pool(fills=[_fill(M, "BUY", 200, 0.31, NOW - 3000)])
+    v0 = _Venue()
+    b0, oo = _rested(p0, v0, his=200.0)
+    _add(p0, 60, NOW + 10)
+    v0.ask = 0.31
+    st0 = _tick(p0, v0, now=NOW + 20, http=_mkt(260.0))
+    assert _census(st0, "kept_min_life") == 1 and not _places(v0) and not _cancels(v0)
+    assert p0.orders[oo]["state"] == "open" and p0.orders[oo]["qty"] == 200
+    # the plan the rest is sized from is unchanged, and so is the hysteresis it reads
+    assert rules.rest_decision(rules.OpenOrder(BUY, 0.31, 200, 200.0, NOW, "ORDER_INTENT_BUY_LONG"),
+                               mi.Plan(BUY, 260, 0.31, "x"), NOW + 20, wire=0.31)[1]["add_pending"]["qty"] == 260
     assert ml._plan_grew_past_rest(mi.Plan(BUY, 260, 0.31, "x"), 200.0) is True
     # the hysteresis: 200 -> 203 is inside 2%, no growth (and rest_decision agrees: keep `same`)
     assert ml._plan_grew_past_rest(mi.Plan(BUY, 203, 0.31, "x"), 200.0) is False
-    assert rules.rest_decision(rules.OpenOrder(BUY, 0.30, 200, 200.0, NOW, "ORDER_INTENT_BUY_LONG"),
-                               mi.Plan(BUY, 203, 0.31, "x"), NOW + 20, wire=0.30) == ("keep", {"cause": "same"})
+    assert rules.rest_decision(rules.OpenOrder(BUY, 0.31, 200, 200.0, NOW, "ORDER_INTENT_BUY_LONG"),
+                               mi.Plan(BUY, 203, 0.31, "x"), NOW + 20, wire=0.31) == ("keep", {"cause": "same"})
     assert ml._plan_grew_past_rest(mi.Plan(BUY, 201, 0.31, "x"), 200.0) is False, "a share under 2% of 201 (4.02)"
     assert ml._plan_grew_past_rest(mi.Plan(BUY, 30, 0.31, "x"), 29.0) is True, "a share, over 2% of 30 (0.6)"
     assert ml._plan_grew_past_rest(None, 200.0) is False and ml._plan_grew_past_rest(mi.Plan(BUY, 260, 0.31, "x"), None) is False
-    # the room worth 230 at his cent: IOC 230, the remainder 130
+    # THE ROOM: a clip worth 230 shares at his cent 0.31 is $71.30, and the rest goes out at
+    # the touch bound 0.30 -- so the room is read AT THE CENT THAT GOES OUT and buys 237, not
+    # 230. That is E2's invariant kept under E31: `_place_reserved` re-scales the add through
+    # _room_qty after the touch-bound re-read, never at the cent the plan was made on
     p2 = _pool(fills=[_fill(M, "BUY", 200, 0.31, NOW - 3000)])
     v2 = _Venue()
     b2, o2 = _rested(p2, v2, his=200.0)
     monkeypatch.setattr(rules, "MIRROR_CLIP_USD", round(230 * 0.31, 2))
     _add(p2, 60, NOW + 10)
     v2.ask, v2.ioc_fill = 0.31, 100.0
-    st2 = _tick(p2, v2, now=NOW + 20, http=_mkt(260.0))
-    assert [c[1:6] for c in _places(v2)] == [(SLUG, 0.31, 230, False, IOC_TIF), (SLUG, 0.30, 130, False, GTC_TIF)]
-    assert _census(st2, "over_room") == 0 and _inserts(p2)[-2][20] == "take_on_add"
+    st2 = _tick(p2, v2, now=NOW + 60, http=_mkt(260.0))
+    assert [c[1:6] for c in _places(v2)] == [(SLUG, 0.30, 237, False, GTC_TIF)]
+    assert int(round(230 * 0.31, 2) / 0.30) == 237, "the clip divided by the cent that went out"
+    assert _census(st2, "over_room") == 0 and _inserts(p2)[-1][20] == "rest"
     monkeypatch.setattr(rules, "MIRROR_CLIP_USD", 2500.0)
-    # OFF: today's min(plan, leaves) = 200 and the word 'take'
+    # OFF: E31 leaves MIRROR_FAST_ADD_REPLAN one reader, the FAST gate, so a FULL tick is
+    # byte for byte the ON tick -- where before this lane OFF sent min(plan, leaves) = 200
+    # under the word 'take'
     monkeypatch.setattr(rules, "MIRROR_FAST_ADD_REPLAN", False)
     p3 = _pool(fills=[_fill(M, "BUY", 200, 0.31, NOW - 3000)])
     v3 = _Venue()
     b3, o3 = _rested(p3, v3, his=200.0)
     _add(p3, 60, NOW + 10)
     v3.ask, v3.ioc_fill = 0.31, 100.0
-    _tick(p3, v3, now=NOW + 20, http=_mkt(260.0))
-    assert [c[1:6] for c in _places(v3)] == [(SLUG, 0.31, 200, False, IOC_TIF), (SLUG, 0.30, 100, False, GTC_TIF)]
-    assert _inserts(p3)[-2][20] == "take"
+    _tick(p3, v3, now=NOW + 60, http=_mkt(260.0))
+    assert [c[1:6] for c in _places(v3)] == [(SLUG, 0.30, 260, False, GTC_TIF)]
+    assert _inserts(p3)[-1][20] == "rest" and _inserts(p3)[-1][11] == 260
     monkeypatch.setattr(rules, "MIRROR_FAST_ADD_REPLAN", True)
-    # the source: the OFF line is today's, once; the exit's min and the cover's min stand byte for byte
+    # THE SOURCE. Every `left = ...` line pinned here lived inside a take arm and left with
+    # it, and so did the switch's second and third readers. What stands in their place is the
+    # ONE sizing every order now goes through, in _place_reserved, at the wire that goes out
     asrc = inspect.getsource(ml._act)
-    assert asrc.count('left = int(min(p.qty, max(0.0, float(o["qty"]) - float(o.get("booked_filled") or 0.0))))') == 1
-    assert asrc.count('left = _sell_qty(book, int(min(p.qty, max(0.0, float(o["qty"])') == 2
-    assert asrc.count('left = _cover_qty(book, int(min(p.qty, max(0.0, float(o["qty"])') == 2
-    assert asrc.count("left = _room_qty(t, int(p.qty), take_lvl, intent)") == 1
-    assert asrc.index("if rules.MIRROR_FAST_ADD_REPLAN and not is_exit and not short:") < asrc.index("left = _room_qty(t, int(p.qty), take_lvl, intent)")
-    assert 'return await _entry_take(t, book, r, p, take_lvl, wire, left, his_px, plan,\n                                             first=False, on_add=grew)' in asrc
-    esrc = inspect.getsource(ml._entry_take)
-    assert "in_band: bool = False, on_add: bool = False) -> str:" in esrc
-    assert "take_first=first, in_band=in_band, on_add=on_add)" in esrc and esrc.count("on_add=on_add") == 1
-    assert "rest_px, rest_qty, his_px, p, plan)" in esrc and "on_add" not in esrc.split("rest_qty = int(p.qty)")[1], \
-        "the rests never carry the word"
+    for gone in ('left = int(min(p.qty, max(0.0, float(o["qty"]) - float(o.get("booked_filled") or 0.0))))',
+                 'left = _sell_qty(book, int(min(p.qty, max(0.0, float(o["qty"])',
+                 'left = _cover_qty(book, int(min(p.qty, max(0.0, float(o["qty"])',
+                 "left = _room_qty(t, int(p.qty), take_lvl, intent)",
+                 "if rules.MIRROR_FAST_ADD_REPLAN and not is_exit and not short:",
+                 "take_lvl", "_entry_take", "on_add"):
+        assert gone not in asrc, gone
+    assert not hasattr(ml, "_entry_take"), "E31: the entry take's wrapper is gone"
     psrc = inspect.getsource(ml._place_reserved)
-    assert "on_add=bool(on_add) and is_take)" in psrc and psrc.count("on_add=bool(on_add)") == 1
+    assert psrc.count("qty = _room_qty(t, int(qty), wire, intent)") == 1, "every add, re-scaled once"
+    assert psrc.index("wire = await _rest_reread(") < psrc.index("qty = _room_qty(t, int(qty), wire, intent)"), \
+        "the room is scaled at the cent that goes out, after the touch-bound re-read"
+    from tests.test_e31_maker_only import _code
+    assert psrc.count("on_add=bool(on_add)") == 0
+    assert "is_take" not in _code(ml._place_reserved), "no code line reads a take flag; the paragraph names it"
+    # the exit's and the cover's min(plan, leaves) survive on the rest roads they always had
+    assert asrc.count("_sell_qty(book, p.qty)") == 1 and asrc.count("_cover_qty(book, p.qty)") == 1
 
 
 # ------------------------------------------------ (11) the E9 pin unchanged
@@ -665,9 +794,9 @@ def test_e21_the_census_place_new_stats_the_emit_sites_the_switch_the_untouched_
     keys = ml.CENSUS_KEYS
     # E23 (FILL lane 23, six names) landed after this lane and sits between these six and the key (-19:-13 -> -25:-19)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-25:-19 -> -29:-23, -26 / -27 -> -30 / -31)
-    assert keys[-43:-37] == NEW_NAMES
+    assert keys[-53:-47] == NEW_NAMES
     # FILL lane 16 (one name, turn_woke_fast) landed first and sits between lane 11's one and these six
-    assert keys[-44] == "turn_woke_fast" and keys[-45] == "cand_market_closed_db"
+    assert keys[-54] == "turn_woke_fast" and keys[-55] == "cand_market_closed_db"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert len(set(keys)) == len(keys) and all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
@@ -680,15 +809,30 @@ def test_e21_the_census_place_new_stats_the_emit_sites_the_switch_the_untouched_
     assert "_mirror_stop(name, whale)" in inspect.getsource(ml._fast_add_branch)
     for name in ("fast_add_kept", "fast_add_replaced", "fast_add_took"):
         assert src.count(f'"{name}"') == 2, name        # CENSUS_KEYS and _FAST_ADD_COUNTED
-    # the branch sites in _act: the three keep returns, take_capped, replace_capped, the take, the replace, the named cancel
+    # THE BRANCH SITES IN _act, RE-PINNED AT E31. Every site that belonged to a take arm
+    # left with the arm; every site on a rest road stands:
+    #   kept          3 -> 2   the exit rest's arm and the cover rest's arm merged into one
+    #                          `priced_exit` arm (both now hold the same maker rest at his
+    #                          cent); the entry's keep is the other
+    #   took          1 -> 0   there is no take to take
+    #   take_capped   1 -> 0   the take's own capped refusal; `replace_capped` is now the
+    #                          hour's only rail (pinned end to end in the rails test)
+    #   over_room     1 -> 0   the take arm's own room refusal; the rest's room is read in
+    #                          _place_reserved, after the branch is stamped
+    #   named         2 -> 1   the take's cancel-outcome arm went with the take
+    #   replaced / replace_capped / decision   unmoved
     asrc = inspect.getsource(ml._act)
-    assert asrc.count('_fast_add_branch(plan, "kept", w)') == 3 and asrc.count('_fast_add_branch(plan, "took", w)') == 1
-    assert asrc.count('_fast_add_branch(plan, "replaced", w)') == 1 and asrc.count('_fast_add_branch(plan, "take_capped", w)') == 1
-    assert asrc.count('_fast_add_branch(plan, "replace_capped", w)') == 1 and asrc.count('_fast_add_branch(plan, "over_room", w)') == 1
-    assert asrc.count("_fast_add_branch(plan, named, w)") == 2 and asrc.count("_fast_add_branch(plan, decision, w)") == 1
-    # lane 9's stamps stand: rest_cause at the keep returns and on the capped refusals
-    assert asrc.count('plan["rest_cause"] = _rest_cause(book, plan, why)') == 3
-    assert asrc.count('plan["rest_cause"] = "take_capped"') == 1 and asrc.count('plan["rest_cause"] = "replace_capped"') == 1
+    assert asrc.count('_fast_add_branch(plan, "kept", w)') == 2 and '_fast_add_branch(plan, "took", w)' not in asrc
+    assert asrc.count('_fast_add_branch(plan, "replaced", w)') == 1 and '_fast_add_branch(plan, "take_capped", w)' not in asrc
+    assert asrc.count('_fast_add_branch(plan, "replace_capped", w)') == 1 and '_fast_add_branch(plan, "over_room", w)' not in asrc
+    assert asrc.count("_fast_add_branch(plan, named, w)") == 1 and asrc.count("_fast_add_branch(plan, decision, w)") == 1
+    # `fast_add_took` keeps its place in _FAST_ADD_COUNTED and on CENSUS_KEYS as a DECLARED
+    # ZERO -- the record of the branch it counted -- with no writer left
+    assert ml._new_stats()["census"]["fast_add_took"] == 0 and "fast_add_took" in ml.CENSUS_KEYS
+    # lane 9's stamps stand: rest_cause at the keep returns and on the refusals that keep a rest
+    assert asrc.count('plan["rest_cause"] = _rest_cause(book, plan, why)') == 2
+    assert 'plan["rest_cause"] = "take_capped"' not in asrc and asrc.count('plan["rest_cause"] = "replace_capped"') == 1
+    assert asrc.count('plan["rest_cause"] = "maker_no_cent"') == 1, "E31's own hold, at take_capped's site"
     # the switch: env_switch, default ON, read through the rules module alone; no numeric constant, no wait
     rsrc = inspect.getsource(rules)
     assert rsrc.count('MIRROR_FAST_ADD_REPLAN = env_switch("MIRROR_FAST_ADD_REPLAN", True)') == 1
@@ -696,10 +840,16 @@ def test_e21_the_census_place_new_stats_the_emit_sites_the_switch_the_untouched_
     assert 'capped_env("MIRROR_FAST' not in rsrc and 'min_wait_env("MIRROR_FAST' not in rsrc and "MIRROR_FAST_ADD" not in src.replace("rules.MIRROR_FAST_ADD_REPLAN", "")
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#") and "rules.MIRROR_FAST_ADD_REPLAN" in ln
                      and ("if " in ln or "grew = " in ln))
-    assert code.count("rules.MIRROR_FAST_ADD_REPLAN") == 3, "the gate, the sizing, the word -- read at call time, nowhere else"
+    # E31: 3 -> 1. The switch had three readers -- the FAST GATE, the take's grown-quantity
+    # SIZING and the take row's WORD (`take_on_add`). The last two lived inside the take arm
+    # and left with it, so the gate is the only reader that survives and the rail can no
+    # longer change what a FULL tick sends at all (pinned end to end in the sizing test).
+    # Its default, its direction (env may only turn it OFF) and its shape are untouched
+    assert code.count("rules.MIRROR_FAST_ADD_REPLAN") == 1, "the gate alone -- read at call time, nowhere else"
+    assert "_order_open_his_add(t, book, fills)" in code, "and that reader IS the gate"
     assert inspect.getsource(ml._fast_gate).split('"""')[2].count("rules.MIRROR_FAST_ADD_REPLAN") == 1
-    assert asrc.split('"""')[2].count("rules.MIRROR_FAST_ADD_REPLAN") == 2
-    for fn in (ml._fast_book, ml._fast_step_o, ml._place_reserved, ml._entry_take, ml._order_open_his_add, ml._fast_add_field):
+    assert asrc.split('"""')[2].count("rules.MIRROR_FAST_ADD_REPLAN") == 0, "2 -> 0: _act reads no switch"
+    for fn in (ml._fast_book, ml._fast_step_o, ml._place_reserved, ml._order_open_his_add, ml._fast_add_field):
         assert "MIRROR_FAST_ADD_REPLAN" not in inspect.getsource(fn), fn.__name__
     # the gate's order: lane 3's exit test first, the add test after it, the walk and fill clauses after both
     gsrc = inspect.getsource(ml._fast_gate)

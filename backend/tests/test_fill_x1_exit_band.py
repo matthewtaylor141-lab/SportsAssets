@@ -226,29 +226,57 @@ def test_x1_order_decision_writes_the_two_band_words_on_an_exit_ioc_alone():
 
 def test_x1_at_the_default_the_e4_shapes_place_decide_and_count_exactly_as_before_the_lane(monkeypatch):
     """Books 334 / 419 / 285 (post_exits_1707 335 / 336 / 334) and the S4
-    cover at the default band: the placements, the decisions and the
-    census are the pre-lane expectations byte for byte (test_e14b's and
-    test_mirror_live_worker's), and no 'exit_take_in_band' /
-    'cover_in_band' row is ever written."""
+    cover at the default band: no 'exit_take_in_band' / 'cover_in_band' row
+    is ever written and the band cents on the plan equal E4's.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The band is INERT at the
+    default and stays inert -- that is what this test is for and it still
+    holds. What moved is the EXECUTION under it: the tolerance IOC these
+    worlds used to send at the take cent is retired with `_exit_take`, so
+    every world here places the SAME post-only rest at his own cent and
+    nothing crosses. Per world:
+
+      334 (his 0.549, rest 0.55): the moving venue's IOC is gone, so the
+          re-read that produced `bid_moved` / `exit_take_rested` is gone
+          with it -- the rest at 0.55 was always what went out and now it
+          is ALL that goes out. The touch-bound re-read (E31 C) still runs
+          because 0.55 IS bid + a tick on the first read, so the bbo count
+          stays 2 where a moving venue is used;
+      285 (his 0.84) at a bid of 0.83: the ONE IOC at 0.83 -- a cent under
+          him on the tolerance -- becomes the rest at 0.84, HIS cent. This
+          is the mandate's own line: we sell at his price or not at all;
+      the S4 flip: the IOC at the ceiling 0.32, THROUGH the ask, becomes
+          the cover rest at min(buy_wire(0.31), 0.32 - MAKER_TICK) = 0.31.
+
+    `exit_take` / `short_cover_take` / `exit_take_rested` / `bid_moved` are
+    declared zeros; `rest_placed` / `flatten_rested` / `short_cover_rest`
+    count in their place, with `maker_fill_at_create` wherever this world's
+    taker lifts the fresh rest. E4's held record `exit_out_of_tol` still
+    rides the placement road and still carries the BAND BOUND beside the
+    floor / the ceiling -- which is the half of this lane the worker still
+    reads, and the half this test most needs to keep."""
     assert rules.MIRROR_EXIT_TAKE_BAND == 0.01
-    # book 334: the tick's bid 0.54, the re-read 0.53 -> bid_moved -> the 358 rest at 0.55 (E14b)
+    # book 334: the rest at 0.55 (his own cent), whatever the moving venue's second read says
     p, b = _exit_world(0.549, 358)
-    v = _MovingVenue([(0.54, 0.56), (0.53, 0.56)], held={SLUG: 716}, ioc_fill=358.0)
+    v = _MovingVenue([(0.54, 0.56), (0.53, 0.56)], held={SLUG: 716}, ioc_fill=358.0, lift=358.0)
     st = _tick(p, v, http=_mkt(358.0))
     assert [c[2:6] for c in _places(v)] == [(0.55, 358, True, GTC_TIF)] and _decisions(p) == ["exit_rest"]
-    assert _census(st, "bid_moved") == 1 and _census(st, "exit_take_rested") == 1 and _census(st, "exit_take") == 0
-    assert b["last_plan"]["exit_take_rested"] == {"take": 0.54, "rest": 0.55, "qty": 358, "filled": 0.0, "rested": 358}
+    assert [c[7] for c in _places(v)] == [True]
+    assert _census(st, "bid_moved") == 0 and _census(st, "exit_take_rested") == 0 and _census(st, "exit_take") == 0
+    assert _census(st, "rest_placed") == 1 and "exit_take_rested" not in b["last_plan"]
+    assert b["last_plan"]["maker"] == {"wire": 0.55, "bound": 0.55, "his_cent": 0.55, "clause": "his_cent",
+                                       "side": SELL, "bid": 0.54, "ask": 0.56, "at": NOW, "hint": None}
     _no_band_word(p, st, b)
-    # book 334 with the bid a cent further (0.53): HELD, the rest at 0.55, the band bound recorded = the floor
+    # book 334 with the bid a cent further (0.53): the same rest at 0.55, the band bound recorded = the floor
     p, b = _exit_world(0.549, 358)
-    v = _Venue(bid=0.53, ask=0.56, held={SLUG: 716}, ioc_fill=358.0)
+    v = _Venue(bid=0.53, ask=0.56, held={SLUG: 716}, ioc_fill=358.0, lift=358.0)
     st = _tick(p, v, http=_mkt(358.0))
     assert [c[2:6] for c in _places(v)] == [(0.55, 358, True, GTC_TIF)] and _decisions(p) == ["exit_rest"]
     assert _census(st, "exit_out_of_tol") == 1 and _census(st, "exit_take") == 0 and _bbos(v).count(SLUG) == 1
     assert b["last_plan"]["exit_out_of_tol"] == {"bid": 0.53, "ask": 0.56, "floor": 0.539, "band_floor": 0.539, "at": NOW}
     assert (b["last_plan"]["exit_take_band"], b["last_plan"]["exit_band_floor"]) == (0.54, 0.539)
     _no_band_word(p, st, b)
-    # book 419: the bid 0.16 under the floor 0.17 -> no IOC, the rest at 0.18
+    # book 419: the bid 0.16 under the floor 0.17 -> the rest at 0.18
     p, b = _exit_world(0.18, 152, entry=0.20)
     v = _Venue(bid=0.16, ask=0.19, held={SLUG: 304})
     st = _tick(p, v, http=_mkt(152.0))
@@ -256,28 +284,33 @@ def test_x1_at_the_default_the_e4_shapes_place_decide_and_count_exactly_as_befor
     assert _census(st, "exit_out_of_tol") == 1 and _census(st, "exit_take") == 0 and b["ledger_net"] == 304
     assert b["last_plan"]["exit_out_of_tol"] == {"bid": 0.16, "ask": 0.19, "floor": 0.17, "band_floor": 0.17, "at": NOW}
     _no_band_word(p, st, b)
-    # book 285: bids 0.70 / 0.71 / 0.82 -> the rest at 0.84; 0.83 -> the one IOC at 0.83 (decision 'take')
+    # book 285: bids 0.70 / 0.71 / 0.82 -> the rest at 0.84, and E31: 0.83 too. The one IOC
+    # at 0.83 (decision 'take') is retired; at every bid the exit rests at HIS cent 0.84
     for bid in (0.70, 0.71, 0.82):
         p, b = _exit_world(0.84, 432, entry=0.80)
-        v = _Venue(bid=bid, ask=0.86, held={SLUG: 864}, ioc_fill=432.0)
+        v = _Venue(bid=bid, ask=0.86, held={SLUG: 864}, ioc_fill=432.0, lift=432.0)
         st = _tick(p, v, http=_mkt(432.0))
         assert [c[2:6] for c in _places(v)] == [(0.84, 432, True, GTC_TIF)] and _decisions(p) == ["exit_rest"], bid
         assert _census(st, "exit_take") == 0 and _census(st, "exit_out_of_tol") == 1, bid
         _no_band_word(p, st, b)
     p, b = _exit_world(0.84, 432, entry=0.80)
-    v = _Venue(bid=0.83, ask=0.86, held={SLUG: 864}, ioc_fill=432.0)
+    v = _Venue(bid=0.83, ask=0.86, held={SLUG: 864}, ioc_fill=432.0, lift=432.0)
     st = _tick(p, v, http=_mkt(432.0))
-    assert [c[2:6] for c in _places(v)] == [(0.83, 432, True, IOC_TIF)] and _decisions(p) == ["take"]
-    assert _census(st, "exit_take") == 1 and b["ledger_net"] == 432
+    # E31: (0.83, 432, True, IOC_TIF) / decision 'take' / exit_take 1 -> the rest at HIS 0.84
+    assert [c[2:6] for c in _places(v)] == [(0.84, 432, True, GTC_TIF)] and _decisions(p) == ["exit_rest"]
+    assert _census(st, "exit_take") == 0 and _census(st, "rest_placed") == 1 and b["ledger_net"] == 432
+    assert _census(st, "maker_fill_at_create") == 1, "the taker at 0.83 lifted our 0.84 rest and paid the spread"
     _no_band_word(p, st, b)
-    # the S4 cover: his 0.31, the ask at the ceiling 0.32 -> the one IOC, decision 'cover'; a partial rests nothing
+    # the S4 cover: his 0.31, the ask at the ceiling 0.32. E31: the IOC at 0.32 THROUGH the
+    # ask becomes the post-only rest at 0.31, decision 'cover' either way
     _shorts_on(monkeypatch)
-    p, b, v = _flip_world(ioc_fill=100.0)
+    p, b, v = _flip_world(ioc_fill=100.0, lift=100.0)
     st = _tick(p, v)
-    assert [c[2:6] for c in _places(v)] == [(0.32, 300, True, IOC_TIF)] and _decisions(p) == ["cover"]
-    assert _census(st, "short_cover_take") == 1 and b["ledger_net"] == -200 and not _opens(p)
+    assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)] and _decisions(p) == ["cover"]
+    assert _census(st, "short_cover_take") == 0 and _census(st, "short_cover_rest") == 1
+    assert b["ledger_net"] == -200 and len(_opens(p)) == 1, "the partial's remainder stands as the rest it is"
     _no_band_word(p, st, b)
-    # the S4 cover held outside the ceiling: the rest at floor(his), the band bound = the ceiling
+    # the S4 cover held outside the ceiling: the rest at his cent, the band bound = the ceiling
     p, b, v = _flip_world(ask=0.33)
     st = _tick(p, v)
     assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)] and _decisions(p) == ["cover"]
@@ -290,50 +323,75 @@ def test_x1_at_the_default_the_e4_shapes_place_decide_and_count_exactly_as_befor
 
 def test_x1_book_334_at_band_two_the_standing_rest_is_cancelled_and_one_ioc_goes_at_the_band_cent(monkeypatch):
     """His 0.549: rest 0.55, take 0.54, take_band 0.53. A rest at 0.55
-    standing, the bid at 0.53: the rest cancelled under 'take', ONE IOC
-    at 0.53 for 358, decision exit_take_in_band, census
-    exit_take_in_band, the plan's exit_band.cents_off_his 1.9."""
+    standing, the bid at 0.53.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE WHOLE SUBJECT OF THIS
+    TEST IS RETIRED: `_exit_band_at`, `_exit_band_take`, `_exit_band_mark`
+    and `_exit_take` are DELETED and no arm of `_act` can send an IOC, so
+    the band cent 0.53 never reaches a wire at any value of the rail. What
+    stands at its site is the pin this file most needs to keep: THE BAND
+    CANNOT MOVE AN ORDER. At band two, on the very tick that used to cancel
+    the rest and cross at 0.53, the rest at his own cent 0.55 STANDS --
+    nothing cancelled, nothing placed, `open_order_pending` -- and the band
+    is visible only where it always belonged, on the RECORD: exit_take_band
+    0.53, exit_band_floor 0.529, and `exit_out_of_tol` carrying band_floor
+    beside the floor. The taker who reaches 0.55 fills us there instead."""
     _band_two(monkeypatch)
     p, b = _exit_world(0.549, 358)
     o = p.add_order(b, side=SELL, wire=0.55, qty=358, kind="reduce", placed_ts=NOW - 100)
-    v = _Venue(bid=0.53, ask=0.56, held={SLUG: 716}, ioc_fill=358.0)
+    v = _Venue(bid=0.53, ask=0.56, held={SLUG: 716}, ioc_fill=358.0, lift=358.0)
     v.rest("oid-1", "SELL", 0.55, 358)
     st = _tick(p, v, http=_mkt(358.0))
     lp = b["last_plan"]
+    # the terms are byte for byte E4's + lane 3's: exit_terms is untouched by E31
     assert (lp["exit_take"], lp["exit_take_band"], lp["exit_rest"]) == (0.54, 0.53, 0.55)
     assert lp["exit_floor"] == 0.539 and lp["exit_band_floor"] == 0.529
-    assert [c[1] for c in _cancels(v)] == ["oid-1"] and p.orders[o["id"]]["reason"] == "take"
-    assert [c[2:6] for c in _places(v)] == [(0.53, 358, True, IOC_TIF)]
-    assert _decisions(p) == ["exit_take_in_band"] and b["ledger_net"] == 358
-    assert _census(st, "exit_take_in_band") == 1 and _census(st, "exit_take") == 1 and _census(st, "take_placed") == 1
-    assert _census(st, "exit_out_of_tol") == 0 and _census(st, "cover_in_band") == 0 and _census(st, "exit_take_rested") == 0
-    assert lp["exit_band"] == {"bid": 0.53, "ask": 0.56, "his": 0.549, "cents_off_his": 1.9, "at": NOW}
-    assert lp["decision"] == "exit_take_in_band" and not _opens(p)
-    take = next(x for x in p.orders.values() if x["tif"] == "IOC")
-    assert (take["kind"], take["side"], take["wire"], take["qty"], take["his_level"], take["state"]) == (
-        "take", SELL, 0.53, 358, 0.549, "filled")
+    # E31: the cancel under 'take' and the IOC at 0.53 are both gone
+    assert not _cancels(v) and p.orders[o["id"]]["state"] == "open" and p.orders[o["id"]]["reason"] is None
+    assert not _places(v) and _decisions(p) == [] and b["ledger_net"] == 716
+    assert _census(st, "exit_take_in_band") == 0 and _census(st, "exit_take") == 0 and _census(st, "take_placed") == 0
+    assert _census(st, "open_order_pending") == 1 and _census(st, "cover_in_band") == 0
+    assert _census(st, "exit_out_of_tol") == 1, "the band's own bound, on E4's held record"
+    assert lp["exit_out_of_tol"] == {"bid": 0.53, "ask": 0.56, "floor": 0.539, "band_floor": 0.529, "at": NOW}
+    assert "exit_band" not in lp, "no band mark: the mark left with _exit_band_mark"
+    assert [(x["wire"], x["qty"], x["tif"]) for x in _opens(p)] == [(0.55, 358, "GTC")]
+    assert not any(x["tif"] == "IOC" for x in p.orders.values()), "no IOC row on any road"
+    for gone in ("_exit_band_at", "_exit_band_take", "_exit_band_mark", "_exit_take"):
+        assert not hasattr(ml, gone), gone
 
 
 def test_x1_book_334_at_band_two_the_re_read_withholds_the_band_ioc_and_the_rest_goes_the_same_tick(monkeypatch):
-    """The same tick with the re-read's bid at 0.52: bid_moved {0.53,
-    0.52, wire 0.53}, no IOC -- and lane 1's rule: the whole 358 rests
-    at his cent 0.55 the same tick, decision exit_rest."""
+    """The same tick with a venue whose SECOND read is 0.52.
+
+    RE-PINNED AT E31: the withholding this test pinned was `_ioc_reread`'s
+    -- the band IOC's own re-read, which named `bid_moved` and rested the
+    withheld quantity the same tick. `_ioc_reread` is deleted with the IOC.
+    The rest at his cent 0.55 is now the ONLY thing that ever went out, and
+    on this tick it is not even re-placed: it stands. So the venue's second
+    quote is never read at all -- ONE bbo read, where the IOC's re-read made
+    two -- and that is the honest pin at this site: E31's own touch-bound
+    re-read (E31 C) runs immediately before a SEND, and this tick sends
+    nothing. Whatever the second read would have said, no order crosses."""
     _band_two(monkeypatch)
     p, b = _exit_world(0.549, 358)
     p.add_order(b, side=SELL, wire=0.55, qty=358, kind="reduce", placed_ts=NOW - 100)
-    v = _MovingVenue([(0.53, 0.56), (0.52, 0.56)], held={SLUG: 716}, ioc_fill=358.0)
+    v = _MovingVenue([(0.53, 0.56), (0.52, 0.56)], held={SLUG: 716}, ioc_fill=358.0, lift=358.0)
     v.rest("oid-1", "SELL", 0.55, 358)
     st = _tick(p, v, http=_mkt(358.0))
     lp = b["last_plan"]
-    assert [c[1] for c in _cancels(v)] == ["oid-1"]
-    assert [c[2:6] for c in _places(v)] == [(0.55, 358, True, GTC_TIF)] and _decisions(p) == ["exit_rest"]
-    assert lp["bid_moved"] == {"bid_at_plan": 0.53, "bid_at_send": 0.52, "wire": 0.53}
-    assert _census(st, "bid_moved") == 1 and _census(st, "exit_take_in_band") == 1, "the decision is counted; the IOC withheld"
-    assert _census(st, "exit_take") == 0 and _census(st, "exit_take_rested") == 1 and _census(st, "take_placed") == 0
-    assert lp["exit_take_rested"] == {"take": 0.53, "rest": 0.55, "qty": 358, "filled": 0.0, "rested": 358}
-    assert lp["exit_band"]["cents_off_his"] == 1.9 and b["ledger_net"] == 716
+    assert not _cancels(v) and not _places(v) and _decisions(p) == []
+    assert _bbos(v).count(SLUG) == 1, "2 -> 1: no send, so no re-read"
+    assert "bid_moved" not in lp and _census(st, "bid_moved") == 0
+    assert _census(st, "exit_take_in_band") == 0 and _census(st, "exit_take") == 0
+    assert _census(st, "exit_take_rested") == 0 and _census(st, "take_placed") == 0
+    assert "exit_take_rested" not in lp and b["ledger_net"] == 716
+    assert lp["exit_out_of_tol"] == {"bid": 0.53, "ask": 0.56, "floor": 0.539, "band_floor": 0.529, "at": NOW}
     opens = _opens(p)
     assert len(opens) == 1 and (opens[0]["wire"], opens[0]["qty"], opens[0]["tif"]) == (0.55, 358, "GTC")
+    assert not hasattr(ml, "_ioc_reread"), "E31: the IOC's re-read is deleted with the IOC"
+    # what stands at its site: the touch-bound re-read, made before a SEND alone
+    assert "await _bbo(t, r.slug, book=True)" in inspect.getsource(ml._rest_reread)
+    assert "wire = await _rest_reread(" in inspect.getsource(ml._place_reserved)
 
 
 def test_x1_book_334_at_the_default_the_same_tick_is_held_with_the_band_bound_on_the_plan():
@@ -341,7 +399,7 @@ def test_x1_book_334_at_the_default_the_same_tick_is_held_with_the_band_bound_on
     {bid 0.53, floor 0.539, band_floor 0.539}, the rest stands."""
     p, b = _exit_world(0.549, 358)
     p.add_order(b, side=SELL, wire=0.55, qty=358, kind="reduce", placed_ts=NOW - 100)
-    v = _Venue(bid=0.53, ask=0.56, held={SLUG: 716}, ioc_fill=358.0)
+    v = _Venue(bid=0.53, ask=0.56, held={SLUG: 716}, ioc_fill=358.0, lift=358.0)
     v.rest("oid-1", "SELL", 0.55, 358)
     st = _tick(p, v, http=_mkt(358.0))
     assert not _cancels(v) and not _places(v) and _bbos(v).count(SLUG) == 1
@@ -354,29 +412,42 @@ def test_x1_book_334_at_the_default_the_same_tick_is_held_with_the_band_bound_on
 # ------------------------------------------------------ (4) book 419's shape
 
 def test_x1_book_419_at_band_two_the_take_then_the_band_take_then_the_hold(monkeypatch):
-    """His 0.180: floor 0.17 / take 0.17, band_floor 0.16 / take_band
-    0.16, rest 0.18. Bid 0.17: today's take (decision 'take'). Bid 0.16:
-    the band IOC at 0.16 for 152, decision exit_take_in_band; it fills
-    14 (the row's 0.09) and the 138 rest at 0.18 the same tick (lane
-    1). Bid 0.15: held, exit_out_of_tol {floor 0.17, band_floor 0.16},
-    the rest at 0.18."""
+    """His 0.180: floor 0.17 / take 0.17, band_floor 0.16 / take_band 0.16,
+    rest 0.18. Bids 0.17, 0.16 and 0.15.
+
+    RE-PINNED AT E31: all three bids now send THE SAME ORDER -- the
+    post-only rest at HIS cent 0.18 -- where lane 3 sent today's take at
+    0.17, the band IOC at 0.16 (plus the withheld 138 resting at 0.18) and
+    a hold. The band cent 0.16 and the tolerance cent 0.17 survive on the
+    plan's record and reach no wire. What separates the three bids now is
+    only what E4's held record says and how much of the rest a taker
+    lifts."""
     _band_two(monkeypatch)
+    # bid 0.17 (at the tolerance cent): the rest at 0.18, the whole 152 lifted there
     p, b = _exit_world(0.18, 152, entry=0.20)
-    v = _Venue(bid=0.17, ask=0.19, held={SLUG: 304}, ioc_fill=152.0)
+    v = _Venue(bid=0.17, ask=0.19, held={SLUG: 304}, ioc_fill=152.0, lift=152.0)
     st = _tick(p, v, http=_mkt(152.0))
-    assert [c[2:6] for c in _places(v)] == [(0.17, 152, True, IOC_TIF)] and _decisions(p) == ["take"]
-    assert _census(st, "exit_take") == 1 and _census(st, "exit_take_in_band") == 0 and b["ledger_net"] == 152
+    assert [c[2:6] for c in _places(v)] == [(0.18, 152, True, GTC_TIF)] and _decisions(p) == ["exit_rest"]
+    assert _census(st, "exit_take") == 0 and _census(st, "exit_take_in_band") == 0 and b["ledger_net"] == 152
+    assert _census(st, "maker_fill_at_create") == 1 and _census(st, "exit_out_of_tol") == 0
     assert (b["last_plan"]["exit_take"], b["last_plan"]["exit_take_band"]) == (0.17, 0.16)
+    # bid 0.16 (inside the band, past the tolerance): the SAME rest at 0.18. Where lane 3
+    # crossed at 0.16 for 152 and rested the 138 remainder, the 152 rest stands and the
+    # taker lifts 14 of it AT 0.18 -- the ledger reaches the same 290, two cents better
     p, b = _exit_world(0.18, 152, entry=0.20)
-    v = _Venue(bid=0.16, ask=0.19, held={SLUG: 304}, ioc_fill=14.0)
+    v = _Venue(bid=0.16, ask=0.19, held={SLUG: 304}, ioc_fill=14.0, lift=14.0)
     st = _tick(p, v, http=_mkt(152.0))
-    assert [c[2:6] for c in _places(v)] == [(0.16, 152, True, IOC_TIF), (0.18, 138, True, GTC_TIF)]
-    assert _decisions(p) == ["exit_take_in_band", "exit_rest"] and b["ledger_net"] == 290
-    assert _census(st, "exit_take_in_band") == 1 and _census(st, "exit_take") == 1 and _census(st, "exit_take_rested") == 1
-    assert b["last_plan"]["exit_take_rested"] == {"take": 0.16, "rest": 0.18, "qty": 152, "filled": 14.0, "rested": 138}
-    assert b["last_plan"]["exit_band"] == {"bid": 0.16, "ask": 0.19, "his": 0.18, "cents_off_his": 2.0, "at": NOW}
+    assert [c[2:6] for c in _places(v)] == [(0.18, 152, True, GTC_TIF)]
+    assert _decisions(p) == ["exit_rest"] and b["ledger_net"] == 290
+    assert _census(st, "exit_take_in_band") == 0 and _census(st, "exit_take") == 0 and _census(st, "exit_take_rested") == 0
+    assert _census(st, "partial_fill") == 1 and "exit_take_rested" not in b["last_plan"]
+    assert [(x["wire"], x["qty"], x["tif"]) for x in _opens(p)] == [(0.18, 152, "GTC")], \
+        "the remainder is the SAME order, holding its queue -- never a second rest"
+    assert "exit_band" not in b["last_plan"] and _census(st, "maker_fill_at_create") == 1
+    assert b["last_plan"]["exit_out_of_tol"] == {"bid": 0.16, "ask": 0.19, "floor": 0.17, "band_floor": 0.16, "at": NOW}
+    # bid 0.15 (outside the band): held by E4's record, the rest at 0.18, one bbo read
     p, b = _exit_world(0.18, 152, entry=0.20)
-    v = _Venue(bid=0.15, ask=0.19, held={SLUG: 304}, ioc_fill=152.0)
+    v = _Venue(bid=0.15, ask=0.19, held={SLUG: 304}, ioc_fill=152.0, lift=152.0)
     st = _tick(p, v, http=_mkt(152.0))
     assert [c[2:6] for c in _places(v)] == [(0.18, 152, True, GTC_TIF)] and _decisions(p) == ["exit_rest"]
     assert _census(st, "exit_out_of_tol") == 1 and _census(st, "exit_take_in_band") == 0 and _bbos(v).count(SLUG) == 1
@@ -387,10 +458,16 @@ def test_x1_book_419_at_band_two_the_take_then_the_band_take_then_the_hold(monke
 
 def test_x1_book_285_the_band_is_measured_from_his_newest_reducing_fill_never_the_presets_vwap(monkeypatch):
     """His reducing fills step 0.84 then 0.72 (the preset's size-weighted
-    0.840 against our 0.718): _his_level picks the NEWEST, so the band
-    reads 0.72 -- floor 0.71 / take 0.71, band_floor 0.70 / take_band
-    0.70. Bid 0.69: held. Bid 0.70: the band IOC at 0.70, never under.
-    Bid 0.71: today's take."""
+    0.840 against our 0.718): _his_level picks the NEWEST, so the terms
+    read 0.72 -- floor 0.71 / take 0.71, band_floor 0.70 / take_band 0.70.
+
+    RE-PINNED AT E31 AND THE SUBJECT SURVIVES INTACT: the level his exit is
+    priced from is still HIS NEWEST REDUCING FILL and never the preset's
+    VWAP -- it is now on the WIRE and not only on the record, because the
+    exit rests AT that level. At every one of the three bids (0.69 outside
+    the band, 0.70 at the band cent, 0.71 at the tolerance cent) the order
+    is the same post-only rest at 0.72, and `min(place price) >= 0.70`
+    holds a fortiori: the exit never leaves 0.72."""
     _band_two(monkeypatch)
 
     def world():
@@ -398,24 +475,18 @@ def test_x1_book_285_the_band_is_measured_from_his_newest_reducing_fill_never_th
                          _fill(M, "SELL", 216, 0.72, NOW - 500)],
                   snap={M: 432.0, N: 0.0})
         return p, p.add_book(ledger=864, avg_cost=0.80)
-    p, b = world()
-    v = _Venue(bid=0.69, ask=0.74, held={SLUG: 864}, ioc_fill=432.0)
-    st = _tick(p, v, http=_mkt(432.0))
-    lp = b["last_plan"]
-    assert lp["exit_px"] == 0.72 and (lp["exit_take"], lp["exit_take_band"], lp["exit_rest"]) == (0.71, 0.70, 0.72)
-    assert [c[2:6] for c in _places(v)] == [(0.72, 432, True, GTC_TIF)] and _census(st, "exit_out_of_tol") == 1
-    assert lp["exit_out_of_tol"]["band_floor"] == 0.70 and _census(st, "exit_take_in_band") == 0
-    p, b = world()
-    v = _Venue(bid=0.70, ask=0.74, held={SLUG: 864}, ioc_fill=432.0)
-    st = _tick(p, v, http=_mkt(432.0))
-    assert [c[2:6] for c in _places(v)] == [(0.70, 432, True, IOC_TIF)] and _decisions(p) == ["exit_take_in_band"]
-    assert _census(st, "exit_take_in_band") == 1 and b["ledger_net"] == 432
-    assert min(c[2] for c in _places(v)) >= 0.70, "never a cent under his newest fill less the band"
-    p, b = world()
-    v = _Venue(bid=0.71, ask=0.74, held={SLUG: 864}, ioc_fill=432.0)
-    st = _tick(p, v, http=_mkt(432.0))
-    assert [c[2:6] for c in _places(v)] == [(0.71, 432, True, IOC_TIF)] and _decisions(p) == ["take"]
-    assert _census(st, "exit_take_in_band") == 0 and _census(st, "exit_take") == 1
+    for bid, tol_rec in ((0.69, True), (0.70, True), (0.71, False)):
+        p, b = world()
+        v = _Venue(bid=bid, ask=0.74, held={SLUG: 864}, ioc_fill=432.0, lift=432.0)
+        st = _tick(p, v, http=_mkt(432.0))
+        lp = b["last_plan"]
+        assert lp["exit_px"] == 0.72 and (lp["exit_take"], lp["exit_take_band"], lp["exit_rest"]) == (0.71, 0.70, 0.72), bid
+        assert [c[2:6] for c in _places(v)] == [(0.72, 432, True, GTC_TIF)], bid
+        assert _decisions(p) == ["exit_rest"] and b["ledger_net"] == 432, bid
+        assert _census(st, "exit_take_in_band") == 0 and _census(st, "exit_take") == 0, bid
+        assert (_census(st, "exit_out_of_tol") == 1) is tol_rec, bid
+        assert min(c[2] for c in _places(v)) >= 0.72, "never a cent under his newest fill AT ALL"
+        assert lp["exit_band_floor"] == 0.70 and "exit_band" not in lp, bid
 
 
 # ------------------------------------------------------ (6) book 467's shape
@@ -423,23 +494,28 @@ def test_x1_book_285_the_band_is_measured_from_his_newest_reducing_fill_never_th
 def test_x1_book_467_the_band_reads_the_long_legs_own_newest_reducing_fill_not_the_flattened_short_side(monkeypatch):
     """A SHORT episode's fills (his BUY then SELL of the other token,
     1 - 0.70 = 0.30 in long space) sit before the long episode's (his BUY
-    1140 at 0.50, his SELL 570 at 0.25): the band prices off 0.25, the
-    long leg's own newest reducing fill -- take_band 0.23 -- never the
-    old episode's 0.30. The IOC fills 245 of 570 and the 325 rest at
-    0.25 the same tick."""
+    1140 at 0.50, his SELL 570 at 0.25): the exit prices off 0.25, the long
+    leg's own newest reducing fill, never the old episode's 0.30.
+
+    RE-PINNED AT E31: the level is unchanged and the subject stands. The
+    band IOC at 0.23 is retired, so the 570 rests at 0.25 -- HIS cent --
+    and the taker lifts 245 of that one order. The ledger reaches the same
+    895 without a second rest and without crossing two cents."""
     _band_two(monkeypatch)
     p = _pool(fills=[_fill(N, "BUY", 400, 0.72, NOW - 6000), _fill(N, "SELL", 400, 0.70, NOW - 5000),
                      _fill(M, "BUY", 1140, 0.50, NOW - 3000), _fill(M, "SELL", 570, 0.25, NOW - 1000)],
               snap={M: 570.0, N: 0.0})
     b = p.add_book(ledger=1140, avg_cost=0.50)
-    v = _Venue(bid=0.23, ask=0.27, held={SLUG: 1140}, ioc_fill=245.0)
+    v = _Venue(bid=0.23, ask=0.27, held={SLUG: 1140}, ioc_fill=245.0, lift=245.0)
     st = _tick(p, v, http=_mkt(570.0))
     lp = b["last_plan"]
     assert lp["exit_px"] == 0.25 and (lp["exit_take"], lp["exit_take_band"], lp["exit_rest"]) == (0.24, 0.23, 0.25)
-    assert [c[2:6] for c in _places(v)] == [(0.23, 570, True, IOC_TIF), (0.25, 325, True, GTC_TIF)]
-    assert _decisions(p) == ["exit_take_in_band", "exit_rest"] and b["ledger_net"] == 895
-    assert _census(st, "exit_take_in_band") == 1 and _census(st, "exit_take_rested") == 1
-    assert lp["exit_take_rested"] == {"take": 0.23, "rest": 0.25, "qty": 570, "filled": 245.0, "rested": 325}
+    assert [c[2:6] for c in _places(v)] == [(0.25, 570, True, GTC_TIF)]
+    assert _decisions(p) == ["exit_rest"] and b["ledger_net"] == 895
+    assert _census(st, "exit_take_in_band") == 0 and _census(st, "exit_take_rested") == 0
+    assert _census(st, "partial_fill") == 1 and "exit_take_rested" not in lp
+    assert [(x["wire"], x["qty"], x["tif"]) for x in _opens(p)] == [(0.25, 570, "GTC")]
+    assert lp["exit_out_of_tol"] == {"bid": 0.23, "ask": 0.27, "floor": 0.24, "band_floor": 0.23, "at": NOW}
 
 
 # ------------------------------------------------------ (7) book 347's shape
@@ -448,96 +524,123 @@ def test_x1_book_347_a_frozen_short_under_e16_is_unclocked_first_then_covers_in_
     """SHORT, venue_ledger_disagree, his per-market read down. Tick 1: no
     clock on the prior plan -> `unclocked`, NOTHING sent (fail closed,
     unchanged). Tick 2: his SELL of 120 of the other token (a buy-back,
-    0.30 in long space) after the clock -> the cover of 120 through
-    _act: ceiling 0.31 / cover 0.31, band_ceiling 0.32 / cover_band 0.32;
-    the ask at 0.32 -> `cover_in_band` IOC at 0.32 sized by _cover_qty
-    on the frozen clamp `_frozen_venue` (the LEDGER -300 on E16's
-    on-fill path, the walk unread), never more than the witnessed 120.
-    At the default the same tick rests at floor(his) 0.30 (E16)."""
+    0.30 in long space) after the clock -> the cover of 120 through _act,
+    sized by _cover_qty on the frozen clamp `_frozen_venue` (the LEDGER
+    -300 on E16's on-fill path, the walk unread), never more than the
+    witnessed 120.
+
+    RE-PINNED AT E31: the band arm is retired, so the two arms this test
+    compared -- `cover_in_band` at band two (an IOC at 0.32, AT the ask)
+    and the rest at floor(his) 0.30 at the default -- are now ONE. At both
+    band values the frozen book covers with the same post-only rest at
+    min(buy_wire(his 0.30), ask 0.32 - MAKER_TICK) = 0.30, decision
+    'cover', census `short_cover_rest`, and the taker lifts the 120 there:
+    ledger -180 at BOTH values, where lane 3 reached -180 only by crossing.
+    THAT IS THE PIN THIS TEST NOW CARRIES: no value of MIRROR_EXIT_TAKE_BAND
+    changes a single byte of what a frozen short sends. E16's freeze, the
+    witness clamp, the quantity and the book's state are untouched."""
     _thaw_off(monkeypatch)
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 100, 0.31, NOW - 3000), _fill(N, "BUY", 400, 0.72, NOW - 2500)]
-    for band, want in ((0.02, "ioc"), (0.01, "rest")):
+    seen = []
+    for band, ceiling in ((0.02, 0.32), (0.01, 0.31)):
         monkeypatch.setattr(rules, "MIRROR_EXIT_TAKE_BAND", band)
         p = _e16_pool(fills=fills, snap=None)
         b = _short_book(p, ledger=-300, state="frozen", frozen_reason="venue_ledger_disagree", frozen_ts=NOW - 100)
         st = _tick(p, _NoClose(held={SLUG: -300}, bid=0.30, ask=0.32), http=_unread())
-        assert _plan_exit(b) == {"held": "frozen_venue_unread", "why": "his_market_read"} and not _places(p and _NoClose())
+        assert _plan_exit(b) == {"held": "frozen_venue_unread", "why": "his_market_read"}
         assert b["last_plan"]["frozen_witness"] == {"why": "his_market_read", "held": "unclocked"}
         assert _census(st, "cover_in_band") == 0 and _census(st, "frozen_reduce_on_fill") == 0
         p.fills = fills + [_fill(N, "SELL", 120, 0.70, NOW - 1000)]
-        v2 = _NoClose(held={SLUG: -300}, bid=0.30, ask=0.32, ioc_fill=120.0)
+        v2 = _NoClose(held={SLUG: -300}, bid=0.30, ask=0.32, ioc_fill=120.0, lift=120.0)
         st2 = _tick(p, v2, now=NOW + 15, http=_unread())
         assert "close" not in _kinds(v2)
         lp = b["last_plan"]
+        # E4's / lane 3's terms are on the record at both band values, unchanged
         assert lp["exit_px"] == pytest.approx(0.30) and lp["exit_cover"] == 0.31 and lp["exit_rest"] == 0.30
-        if want == "ioc":
-            assert lp["exit_cover_band"] == 0.32 and lp["exit_band_ceiling"] == pytest.approx(0.32)
-            assert [c[1:] for c in _places(v2)] == [(SLUG, 0.32, 120, True, IOC_TIF, SHORT, False, None)]
-            assert _decisions(p) == ["cover_in_band"] and _census(st2, "cover_in_band") == 1
-            assert _census(st2, "short_cover_take") == 1 and _census(st2, "frozen_reduce_on_fill") == 1
-            assert lp["exit_band"] == {"bid": 0.30, "ask": 0.32, "his": pytest.approx(0.30), "cents_off_his": 2.0, "at": NOW + 15}
-            assert b["ledger_net"] == -180 and b["state"] == "frozen"
-        else:
-            assert lp["exit_cover_band"] == 0.31 and lp["exit_band_ceiling"] == pytest.approx(0.31)
-            assert [c[1:] for c in _places(v2)] == [(SLUG, 0.30, 120, True, GTC_TIF, SHORT, True, None)]
-            assert _decisions(p) == ["cover"] and _census(st2, "cover_in_band") == 0
-            assert _census(st2, "short_cover_rest") == 1 and _census(st2, "frozen_reduce_on_fill") == 1
-            assert lp["exit_out_of_tol"] == {"bid": 0.30, "ask": 0.32, "ceiling": 0.31, "band_ceiling": 0.31, "at": NOW + 15}
-            assert b["ledger_net"] == -300
+        assert lp["exit_cover_band"] == ceiling and lp["exit_band_ceiling"] == pytest.approx(ceiling), band
+        # and the ORDER is the same at both: one post-only rest at his own cent, 120 shares
+        assert [c[1:] for c in _places(v2)] == [(SLUG, 0.30, 120, True, GTC_TIF, SHORT, True, None)], band
+        assert _decisions(p) == ["cover"] and _census(st2, "cover_in_band") == 0, band
+        assert _census(st2, "short_cover_take") == 0 and _census(st2, "short_cover_rest") == 1, band
+        assert _census(st2, "frozen_reduce_on_fill") == 1 and "exit_band" not in lp, band
+        assert lp["exit_out_of_tol"] == {"bid": 0.30, "ask": 0.32, "ceiling": 0.31,
+                                         "band_ceiling": ceiling, "at": NOW + 15}, band
+        assert b["ledger_net"] == -180 and b["state"] == "frozen", band
+        seen.append((tuple(c[1:] for c in _places(v2)), b["ledger_net"], _decisions(p)))
+    assert seen[0] == seen[1], "the band cannot move a frozen short's cover, its size or its ledger"
 
 
 # ------------------------------------------- (8) book 661's shape, (9) Martinez 534's
 
 def test_x1_book_661_a_partially_filled_cover_rest_re_quoted_carries_its_booked_fill_into_the_band_ioc(monkeypatch):
     """A cover rest of 300 at floor(his) 0.31 filled 89.24 (the row's
-    shape), his 0.31: cover 0.32, cover_band 0.33. The ask at 0.33
-    (outside the ceiling, inside the band): the standing rest is
-    cancelled, its 89.24 booked, and the band IOC goes at 0.33 for the
-    remainder -- 300 - 89.24 floored, sized by _cover_qty on the leg --
-    never for 300; decision cover_in_band."""
+    shape), his 0.31: cover 0.32, cover_band 0.33, the ask at 0.33.
+
+    RE-PINNED AT E31. The band IOC is retired, and with it the re-quote
+    this test was named for: the ask reaching 0.33 is NOT a reason to
+    cancel a rest that already sits at his own cent. `maker_compare_wire`
+    returns the standing 0.31 (a BUY rest is never re-quoted with a rising
+    ask that has not made room toward him), so the rest STANDS, its 89.24
+    is booked at the walk exactly as before, and the queue this whole lane
+    exists to keep is kept. The review's HIGH-2 / mutant M10 pin -- THE
+    SIZE COMES FROM THE ROW'S REMAINDER, NEVER THE PLAN'S QUANTITY -- is
+    kept below at the site where a cover is actually SENT: the no-rest
+    cover, sized by _cover_qty at min(plan 300, leg, ceil(299.0)) = 299 at
+    BOTH band values (mutant M22's site), where lane 3 could only pin it
+    on an IOC."""
     _shorts_on(monkeypatch)
     _band_two(monkeypatch)
-    p, b, v = _flip_world(ask=0.33, held={SLUG: -(300 - 89.24)}, ioc_fill=210.0)
+    p, b, v = _flip_world(ask=0.33, held={SLUG: -(300 - 89.24)}, ioc_fill=210.0, lift=210.0)
     o = p.add_order(b, side=BUY, wire=0.31, qty=300, kind="flatten_paired", placed_ts=NOW - 100)
     v.rest("oid-1", "BUY", 0.31, 300, filled=89.24, avg=0.31)
     st = _tick(p, v)
-    assert [c[1] for c in _cancels(v)] == ["oid-1"] and p.orders[o["id"]]["state"] == "cancelled"
-    assert p.orders[o["id"]]["booked_filled"] == 89.24
-    iocs = [c for c in _places(v) if c[5] == IOC_TIF]
-    assert len(iocs) == 1 and iocs[0][2] == 0.33 and iocs[0][3] <= 211 and iocs[0][3] < 300, iocs
-    assert "cover_in_band" in _decisions(p) and _census(st, "cover_in_band") == 1 and _census(st, "short_cover_take") == 1
-    assert b["last_plan"]["exit_band"]["cents_off_his"] == 2.0 and b["last_plan"]["exit_cover_band"] == 0.33
-    assert _census(st, "exit_take_rested") == 0, "the cover's partial rests nothing this tick (S4's path)"
-    # THE REMAINDER, NOT THE PLAN (the review's HIGH-2; mutant M10): the same row with the
-    # venue still reading the whole -300 at the walk. The standing row's 89.24 is booked at
-    # the walk before the plan is made, so the plan flattens the ledger -300 + 89.24 =
-    # -210.76 -> qty 211 (the venue -300 on the plan); the band IOC is sized on the ROW's
-    # remainder 300 - 89.24 = 210.76 floored -> 210 through _cover_qty -- never the plan's
-    # 211 (the mutant's size) and never the row's 300
-    pw, bw, vw = _flip_world(ask=0.33, held={SLUG: -300}, ioc_fill=210.0)
+    # E31: no cancel, no IOC -- the rest at his cent stands and keeps its place in the queue
+    assert not _cancels(v) and not _places(v) and p.orders[o["id"]]["state"] == "open"
+    assert p.orders[o["id"]]["booked_filled"] == 89.24, "the partial is still booked at the walk"
+    assert _census(st, "partial_fill") == 1 and _census(st, "open_order_pending") == 1
+    assert _census(st, "cover_in_band") == 0 and _census(st, "short_cover_take") == 0
+    assert not any(x["tif"] == "IOC" for x in p.orders.values())
+    assert b["last_plan"]["exit_cover_band"] == 0.33 and "exit_band" not in b["last_plan"]
+    assert b["last_plan"]["maker"]["wire"] == 0.31 and b["last_plan"]["maker"]["clause"] == "his_cent"
+    assert b["last_plan"]["exit_out_of_tol"] == {"bid": 0.30, "ask": 0.33, "ceiling": 0.32,
+                                                 "band_ceiling": 0.33, "at": NOW}
+    # the ask at 0.33 leaves his own cent 0.31 reachable, so the maker wire IS the standing
+    # wire and there is no cent to move to; and a wire that HAS moved past him would still
+    # not drag the rest up with a rising ask
+    assert rules.maker_wire(BUY, 0.31, 0.30, 0.33) == 0.31
+    assert rules.maker_compare_wire(BUY, 0.31, 0.31, 0.31) == 0.31, "the standing wire is the maker wire"
+    assert _census(st, "exit_take_rested") == 0, "no second rest: the one order keeps its queue"
+    # THE SAME ROW WITH THE VENUE STILL READING THE WHOLE -300 AT THE WALK: the standing
+    # row's 89.24 is booked before the plan is made, so the plan flattens -300 + 89.24 =
+    # -210.76 -> qty 211 against a venue of -300. E31: the rest still stands; the plan's
+    # quantity is the record it always was and no order is sent on it
+    pw, bw, vw = _flip_world(ask=0.33, held={SLUG: -300}, ioc_fill=210.0, lift=210.0)
     ow = pw.add_order(bw, side=BUY, wire=0.31, qty=300, kind="flatten_paired", placed_ts=NOW - 100)
     vw.rest("oid-1", "BUY", 0.31, 300, filled=89.24, avg=0.31)
     stw = _tick(pw, vw)
     assert bw["last_plan"]["qty"] == 211 and bw["last_plan"]["venue"] == -300.0
-    assert pw.orders[ow["id"]]["booked_filled"] == 89.24 and pw.orders[ow["id"]]["state"] == "cancelled"
-    iocw = [c for c in _places(vw) if c[5] == IOC_TIF]
-    assert [(c[2], c[3]) for c in iocw] == [(0.33, 210)], iocw
-    assert _decisions(pw) == ["cover_in_band"] and _census(stw, "cover_in_band") == 1
-    # THE NO-REST COVER BAND SITE SIZES THROUGH _cover_qty TOO (the review's HIGH-2 sibling;
-    # mutant M22): a live short, no rest standing, the ledger -300 and the standing row reading
-    # 299.0 (one share under, inside VENUE_LEDGER_TOL_SHARES: no freeze) -> the plan asks 300,
-    # the band IOC at 0.33 is min(300, leg 300, ceil(299.0)) = 299 -- never the plan's 300; the
-    # tolerance IOC (ask 0.32 at the default) is 299 by the same clamp, decision 'cover'
-    for band, ask, word in ((0.02, 0.33, "cover_in_band"), (0.01, 0.32, "cover")):
+    assert pw.orders[ow["id"]]["booked_filled"] == 89.24 and pw.orders[ow["id"]]["state"] == "open"
+    assert not _places(vw) and not _cancels(vw) and _decisions(pw) == []
+    assert _census(stw, "cover_in_band") == 0 and _census(stw, "venue_ledger_suspect") == 1
+    # THE SIZING SURVIVES WHERE AN ORDER IS SENT (the review's HIGH-2 sibling; mutant M22):
+    # a live short, no rest standing, the ledger -300 and the standing row reading 299.0 (one
+    # share under, inside VENUE_LEDGER_TOL_SHARES: no freeze) -> the plan asks 300 and the
+    # cover is min(300, leg 300, ceil(299.0)) = 299, never the plan's 300. E31: it is now a
+    # post-only REST at min(buy_wire(his 0.31), ask - MAKER_TICK) = 0.31 at BOTH band values,
+    # where lane 3 crossed at 0.33 / 0.32 -- so the band cannot change the cent OR the size
+    sent = []
+    for band, ask in ((0.02, 0.33), (0.01, 0.32)):
         monkeypatch.setattr(rules, "MIRROR_EXIT_TAKE_BAND", band)
-        pn, bn, vn = _flip_world(ask=ask, held={SLUG: -299.0}, ioc_fill=299.0)
+        pn, bn, vn = _flip_world(ask=ask, held={SLUG: -299.0}, ioc_fill=299.0, lift=299.0)
         pn.rows[bn["standing_row_id"]]["filled_shares"] = 299.0
         stn = _tick(pn, vn)
         assert bn["last_plan"]["qty"] == 300 and bn["state"] == "live"
-        assert [c[2:6] for c in _places(vn)] == [(ask, 299, True, IOC_TIF)], _places(vn)
-        assert _decisions(pn) == [word] and _census(stn, "cover_in_band") == (1 if word == "cover_in_band" else 0)
-        assert _census(stn, "short_cover_take") == 1
+        assert [c[2:6] for c in _places(vn)] == [(0.31, 299, True, GTC_TIF)], _places(vn)
+        assert _decisions(pn) == ["cover"] and _census(stn, "cover_in_band") == 0
+        assert _census(stn, "short_cover_take") == 0 and _census(stn, "short_cover_rest") == 1
+        sent.append([c[1:] for c in _places(vn)])
+    assert sent[0] == sent[1], "no value of the band moves the cover's cent or its size"
     _band_two(monkeypatch)
     # Martinez 534's shape: a cover placed at the REST cent writes 'cover', never the band word
     p2, b2, v2 = _flip_world(ask=0.34)
@@ -565,167 +668,211 @@ def test_x1_book_611_an_add_leg_never_sees_a_band(monkeypatch):
 # ---------------------------------------------- (11) the rails and the guards
 
 class _Fake:
+    """E31: `_place`'s signature lost `take_first` / `in_band` / `on_add`
+    with the take arms, so the stand-in that records what _act asks for
+    records the shape that is left -- and the `tif` it records is the one
+    _place refuses anything but."""
+
     def __init__(self, results):
         self.results, self.calls = list(results), []
 
-    async def __call__(self, t, book, r, kind, side, wire, qty, his_px, p, plan, tif="GTC", take_first=False,
-                       in_band=False):
-        self.calls.append((kind, side, wire, int(qty), tif, in_band))
+    async def __call__(self, t, book, r, kind, side, wire, qty, his_px, p, plan, tif="GTC"):
+        self.calls.append((kind, side, wire, int(qty), tif))
         res, filled = self.results.pop(0)
-        if res == "take":
-            plan["take_qty"], plan["take_filled"] = int(qty), float(filled)
         return res
 
 
-def _unit(monkeypatch, results, *, state="live", cancel_all=None, abandoned=False, nonterminal=(),
-          ledger=300, held=300.0, qty=200, in_band=True):
-    fake = _Fake(results)
-    monkeypatch.setattr(ml, "_place", fake)
-    stats = ml._new_stats()
-    monkeypatch.setattr(ml, "_current_stats", stats)
-    ex = rules.exit_terms(SELL, 0.31)
-    book = {"id": 7, "state": state, "ledger_net": ledger, "_held": held, "intent": "ORDER_INTENT_BUY_LONG"}
-    t = types.SimpleNamespace(cancel_all=cancel_all, abandoned=abandoned, nonterminal=set(nonterminal))
-    r = types.SimpleNamespace(whale="rn1")
-    plan = {}
-    res = _run(ml._exit_take(t, book, r, mi.Plan(SELL, qty, 0.31, "reduce"), ex, qty, 0.31, plan, "reduce",
-                             in_band=in_band))
-    return res, fake.calls, plan, stats["census"]
-
-
 def test_x1_a_frozen_tripped_abandoned_or_non_terminal_book_sends_no_rest_after_a_band_ioc_and_the_prices_are_the_terms(monkeypatch):
+    """RE-PINNED AT E31 (FILL lane 31, 2026-09-10). THE WHOLE SUBJECT IS
+    RETIRED. This test drove `ml._exit_take` -- the band IOC followed, on a
+    live book, by the withheld quantity resting at his cent the same tick
+    -- and pinned that on a FROZEN, TRIPPED, ABANDONED or NON-TERMINAL book
+    the second rest is never sent. `_exit_take`, `_exit_band_at`,
+    `_exit_band_take` and `_exit_band_mark` are all deleted, and there is
+    no first order for a second one to follow: an exit is ONE post-only
+    rest.
+
+    What stands at the site is stronger, and it is what this test now
+    pins:
+      (a) the four guards did not go with the arm -- they live at the ONE
+          choke point every order passes, `_place` (t.cancel_all,
+          t.abandoned) and `_act` (frozen, non-terminal), BEFORE any op, and
+          `_place` refuses a non-GTC tif by name before all of them;
+      (b) the exit's cent is `rules.maker_wire`'s, off his level and the
+          TOUCH -- no line of `_wire_for` reads ex["take"], ex["take_band"]
+          or ex["rest"], which is the mirror of the old pin that _exit_take
+          read the terms and never the quote;
+      (c) `exit_take_rested` can no longer be written at all: one exit,
+          one order."""
     _band_two(monkeypatch)
     ex = rules.exit_terms(SELL, 0.31)
-    assert (ex["take"], ex["take_band"], ex["rest"]) == (0.30, 0.29, 0.31)
-    for kw in ({"state": "frozen"}, {"cancel_all": "overfill"}, {"abandoned": True}, {"nonterminal": (7,)}):
-        for res0, filled in (("bid_moved", 0.0), ("ioc_quote_unread", 0.0), ("take", 50.0)):
-            res, calls, plan, census = _unit(monkeypatch, [(res0, filled)], **kw)
-            assert res == res0 and calls == [("take", SELL, 0.29, 200, "IOC", True)], (kw, res0)
-            assert "exit_take_rested" not in plan and census["exit_take_rested"] == 0, (kw, res0)
-    # a live book: the band IOC at 0.29, the remainder at his cent 0.31 the same tick (lane 1)
-    res, calls, plan, census = _unit(monkeypatch, [("take", 50.0), ("rest_placed", 0.0)], ledger=250, held=250.0)
-    assert res == "rest_placed" and calls == [("take", SELL, 0.29, 200, "IOC", True), ("reduce", SELL, 0.31, 150, "GTC", False)]
-    assert plan["exit_take_rested"] == {"take": 0.29, "rest": 0.31, "qty": 200, "filled": 50.0, "rested": 150}
-    # without the band the same call prices at the take cent, in_band False on the wire
-    res, calls, plan, census = _unit(monkeypatch, [("take", 200.0)], in_band=False)
-    assert res == "take" and calls == [("take", SELL, 0.30, 200, "IOC", False)]
-    # _exit_take prices off the terms alone: never the quote
-    src = inspect.getsource(ml._exit_take)
-    assert 'ex["take_band"] if in_band else ex["take"]' in src and 'ex["rest"]' in src
-    assert "r.bid" not in src and "r.ask" not in src and "sell_wire" not in src
-    # the band test reads the band cent only when it is strictly past the tolerance cent
-    bsrc = inspect.getsource(ml._exit_band_at)
-    assert "tb < take - 1e-9" in bsrc and "cb > cover + 1e-9" in bsrc
-    r = types.SimpleNamespace(bid=0.53, ask=0.56)
-    assert ml._exit_band_at(SELL, r, rules.exit_terms(SELL, 0.549, band=0.02)) is True
-    assert ml._exit_band_at(SELL, r, rules.exit_terms(SELL, 0.549, band=0.01)) is False
-    assert ml._exit_band_at(SELL, types.SimpleNamespace(bid=None, ask=0.56), rules.exit_terms(SELL, 0.549, band=0.02)) is False
-    assert ml._exit_band_at(SELL, r, {"take": 0.54}) is False and ml._exit_band_at("X", r, {}) is False
-    rb = types.SimpleNamespace(bid=0.50, ask=0.53)
-    assert ml._exit_band_at(BUY, rb, rules.exit_terms(BUY, 0.514, band=0.02)) is True
-    assert ml._exit_band_at(BUY, rb, rules.exit_terms(BUY, 0.514, band=0.01)) is False
-    assert ml._exit_band_at(BUY, types.SimpleNamespace(bid=0.50, ask=None), rules.exit_terms(BUY, 0.514, band=0.02)) is False
+    assert (ex["take"], ex["take_band"], ex["rest"]) == (0.30, 0.29, 0.31), "exit_terms is untouched by E31"
+    for gone in ("_exit_take", "_exit_band_at", "_exit_band_take", "_exit_band_mark", "_ioc_reread"):
+        assert not hasattr(ml, gone), gone
+    # (a) the guards, at the one choke point
+    psrc = inspect.getsource(ml._place)
+    assert psrc.index('if tif != "GTC":') < psrc.index("if t.cancel_all:") < psrc.index("if t.abandoned:")
+    assert psrc.index('_mirror_stop("ioc_refused", w)') < psrc.index("if t.cancel_all:")
+    asrc = inspect.getsource(ml._act)
+    assert 'if book["id"] in t.nonterminal:' in asrc and 'plan["rest_cause"] = "frozen"' in asrc
+    assert asrc.index('if book["id"] in t.nonterminal:') < asrc.index("wire = await _wire_for(p, his_px, r") \
+        if "wire = await _wire_for(p, his_px, r" in asrc else True
+    # driven: a tripped tick and an abandoned tick place NOTHING, by name, at any band
+    for kw, want in (({"cancel_all": "overfill"}, "overfill"), ({"abandoned": True}, "tick_abandoned")):
+        stats = ml._new_stats()
+        monkeypatch.setattr(ml, "_current_stats", stats)
+        t = types.SimpleNamespace(cancel_all=kw.get("cancel_all"), abandoned=kw.get("abandoned", False),
+                                  nonterminal=set(), stats=stats)
+        book = {"id": 7, "state": "live", "ledger_net": 300, "_held": 300.0, "intent": "ORDER_INTENT_BUY_LONG",
+                "whale": "rn1"}
+        r = types.SimpleNamespace(whale="rn1")
+        plan = {}
+        res = _run(ml._place(t, book, r, "reduce", SELL, 0.31, 200, 0.31, mi.Plan(SELL, 200, 0.31, "reduce"), plan))
+        assert res == want, kw
+        assert "ioc_refused" not in plan, kw
+    # and a non-GTC tif is refused BEFORE either of them, on a tick that is neither
+    stats = ml._new_stats()
+    monkeypatch.setattr(ml, "_current_stats", stats)
+    t = types.SimpleNamespace(cancel_all="overfill", abandoned=True, nonterminal={7}, stats=stats)
+    plan = {}
+    res = _run(ml._place(t, {"id": 7, "state": "live", "whale": "rn1"}, types.SimpleNamespace(whale="rn1"),
+                         "take", SELL, 0.29, 200, 0.31, mi.Plan(SELL, 200, 0.31, "reduce"), plan, tif="IOC"))
+    assert res == "ioc_refused" and stats["census"]["ioc_refused"] == 1
+    assert plan["ioc_refused"] == {"tif": "IOC", "side": SELL, "wire": 0.29, "kind": "take"}
+    # (b) the exit's cent comes from the maker clamp, never from a cent of exit_terms
+    from tests.test_e31_maker_only import _code
+    wsrc = inspect.getsource(ml._wire_for)
+    assert "rules.maker_wire(side, his_px, r.bid, r.ask" in wsrc
+    code = _code(ml._wire_for)
+    for cent in ('ex [ "take" ]', 'ex [ "take_band" ]', 'ex [ "rest" ]', 'ex [ "cover_band" ]'):
+        assert cent not in code, cent
+    # (c) no second rest exists to be counted
+    assert ml._new_stats()["census"]["exit_take_rested"] == 0
+    assert 'plan["exit_take_rested"]' not in inspect.getsource(ml)
+    assert '_mirror_stop("exit_take_rested"' not in inspect.getsource(ml)
 
 
 def test_x1_the_band_sites_sit_after_the_tolerance_sites_and_the_witness_ratchet_and_re_read_are_untouched():
-    """The band test is a second `elif` AFTER the tolerance test on both
-    long-exit sites and both cover sites; the tolerance IOC's own lines
-    are byte for byte E4's / E14b's / S4's; _ioc_reread, _exit_terms'
-    rule, the E15 witness clause and the E12 ratchet name nothing of
-    the band."""
+    """RE-PINNED AT E31 (FILL lane 31, 2026-09-10). This test pinned the
+    SHAPE of the band's four sites in `_act`: a second `elif
+    _exit_band_take(...)` after each of the two long-exit and two cover
+    tolerance sites, each band call through `in_band=True`, each marked by
+    `_exit_band_mark`. Every one of those sites left `_act` with the take
+    arms, so counting them is no longer a statement about anything. What
+    is left to pin -- and what this test now pins -- is that the band, and
+    E4's tolerance with it, survive ONLY AS THE RECORD, at ONE site, and
+    that the ratchet, the witness and the re-read still name nothing of
+    the band:
+
+      * the four `at_or_through` tolerance tests collapse to ONE, on the
+        held record's guard, read through `side_at` / `bound_cent` so the
+        long exit and the cover share it;
+      * `_exit_held` -- which carries band_floor / band_ceiling onto the
+        plan -- is called on THREE roads (the merged keep branch, the
+        cover's placement road, the long exit's placement road);
+      * the worker reads no band constant of its own, exactly as before:
+        `rules.exit_terms` is its only reader;
+      * `_ioc_reread` is gone and `_rest_reread` stands at its site, and
+        neither the ratchet nor the witness ever named the band."""
     asrc = inspect.getsource(ml._act)
-    tol_long_keep = 'if rules.at_or_through(SELL, r.bid, r.ask, ex["take"]):\n'
-    tol_cover_keep = 'if rules.at_or_through(BUY, r.bid, r.ask, ex["cover"]):\n'
-    assert asrc.count(tol_long_keep) == 2 and asrc.count(tol_cover_keep) == 2
-    assert asrc.count("elif _exit_band_take(t, SELL, r, ex, plan):") == 2 and asrc.count("elif _exit_band_take(t, BUY, r, ex, plan):") == 2
-    assert "_exit_band_at(" not in asrc, "the sites read the band through its count guard alone"
-    for tol, band in ((tol_long_keep, "elif _exit_band_take(t, SELL, r, ex, plan):"), (tol_cover_keep, "elif _exit_band_take(t, BUY, r, ex, plan):")):
-        i1 = asrc.index(tol)
-        j1 = asrc.index(band)
-        i2 = asrc.index(tol, i1 + 1)
-        j2 = asrc.index(band, j1 + 1)
-        assert i1 < j1 < i2 < j2, "each band site follows its own tolerance site"
-    # the tolerance IOC's call lines, unchanged
-    assert 'return await _exit_take(t, book, r, p, ex, left, his_px, plan, kind)\n' in asrc
-    assert 'return await _exit_take(t, book, r, p, ex, qty, his_px, plan, kind)\n' in asrc
-    assert 'return await _place(t, book, r, "take", BUY, ex["cover"], qty, his_px, p, plan, tif="IOC")\n' in asrc
-    assert asrc.count('return await _place(t, book, r, "take", BUY, ex["cover"], left, his_px, p,\n') == 1
-    # the band's own calls: through _exit_take on the long sites, the cover's IOC on the short
-    assert asrc.count("in_band=True)") == 5 and asrc.count('ex["cover_band"]') == 2
-    assert asrc.count("_exit_band_mark(t, r, SELL, ex, plan, w)") == 2 and asrc.count("_exit_band_mark(t, r, BUY, ex, plan, w)") == 2
-    # untouched by the lane, by name
-    for fn in (ml._ioc_reread, ml._flatten_send, ml._flatten_vanished, ml._frozen_exit, ml._frozen_reduce_on_fill,
-               ml._s4_refusal, ml._cover_qty, ml._sell_qty, ml._entry_take, rules.take_allowed,
+    # the four band sites and their marks: gone with the arms
+    for gone in ("_exit_band_take(t, SELL, r, ex, plan)", "_exit_band_take(t, BUY, r, ex, plan)",
+                 "_exit_band_at(", "_exit_band_mark(", "in_band=True)", 'ex["cover_band"]',
+                 'ex["take_band"]', "_exit_take(", 'tif="IOC"'):
+        assert gone not in asrc, gone
+    for gone in ("_exit_band_at", "_exit_band_take", "_exit_band_mark", "_exit_take", "_ioc_reread",
+                 "_take_band", "_short_take_band", "_entry_take", "_flatten_send"):
+        assert not hasattr(ml, gone), gone
+    # ONE tolerance test, shared by the long exit and the cover through side_at / bound_cent
+    assert asrc.count("side_at = SELL if long_exit else BUY") == 1
+    assert asrc.count('bound_cent = ex["take"] if long_exit else ex["cover"]') == 1
+    assert asrc.count("if not rules.at_or_through(side_at, r.bid, r.ask, bound_cent):") == 1
+    # E4's held record -- the band's own bound on the plan -- on all three roads
+    assert asrc.count("_exit_held(t, r, ex, plan, w)") == 3
+    hsrc = inspect.getsource(ml._exit_held)
+    assert 'band_key = "band_floor" if "floor" in ex else "band_ceiling"' in hsrc
+    # the worker reads no band constant of its own; exit_terms is the one reader
+    assert "MIRROR_EXIT_TAKE_BAND" not in inspect.getsource(ml)
+    assert '"MIRROR_EXIT_TAKE_BAND"' not in inspect.getsource(ml)
+    assert 'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)' in inspect.getsource(rules)
+    # untouched by lane 3, and still untouched: no band word anywhere near them
+    for fn in (ml._flatten_vanished, ml._frozen_exit, ml._frozen_reduce_on_fill,
+               ml._s4_refusal, ml._cover_qty, ml._sell_qty, ml._rest_reread, rules.take_allowed,
                rules.at_or_through, rules.rest_decision, rules.band_cent, rules.take_in_band):
         s = inspect.getsource(fn)
         for name in ("take_band", "cover_band", "exit_band", "_exit_band_at", "MIRROR_EXIT_TAKE_BAND"):
             assert not re.search(rf"(?<![\w]){name}(?![\w])", s), (fn.__name__, name)
-    # E14's own reader names its own `take_band` (the entry's plan field) and nothing of the exit's
-    tb = inspect.getsource(ml._take_band)
-    for name in ("cover_band", "exit_band", "_exit_band_at", "MIRROR_EXIT_TAKE_BAND", "exit_take_in_band"):
-        assert name not in tb, name
     for name in ("witnessed_ratchet", "reducing_since", "reducing_on"):
         assert "band" not in inspect.getsource(getattr(mi, name)), name
-    # no wait added, the tolerance's line as it was, the day stop read by no site of the lane
-    assert "MIRROR_EXIT_TAKE_BAND" not in inspect.getsource(ml), "the worker reads the band through exit_terms alone"
-    for fn in (ml._exit_band_at, ml._exit_band_mark, ml._exit_take, ml._order_open_his_exit):
+    # the re-read: E18's IOC re-read is gone, E31's touch-bound re-read stands at its site and
+    # names nothing of the band, no wait and no day stop
+    for fn in (ml._rest_reread, ml._exit_held, ml._order_open_his_exit, ml._wire_for):
         s = inspect.getsource(fn)
         assert "loss_stop" not in s and "min_wait_env" not in s and "_env_float" not in s, fn.__name__
 
 
 def test_x1_059_absent_sends_no_band_ioc_the_exit_is_held_by_name_and_the_rest_goes_uncounted(monkeypatch):
-    """The review's HIGH-1 (FILL_plan section 4: 'an uncounted band take
-    is not sent'). The E18 fixture that hides the 059 columns, the band
-    at 0.02: book 419's shape with the bid 0.16 (inside the band, past
-    the take) -> NO band IOC, `exit_out_of_tol` {floor 0.17, band_floor
-    0.16}, the rest at 0.18 by the 050 INSERT (19 args), no band word,
-    no band count, `exit_band_uncounted` on the plan; the S4 cover with
-    the ask 0.33 (inside the band 0.33, over the ceiling 0.32) -> the
-    rest at 0.31, `cover_in_band` 0; the tolerance take under the same
-    absence goes as before; at the default nothing is stamped."""
+    """The review's HIGH-1 (FILL_plan section 4: 'an uncounted band take is
+    not sent'). The E18 fixture that hides the 059 columns, the band at
+    0.02.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10). The rule this test guards
+    -- NO BAND TAKE WITHOUT ITS WORD -- is kept by a stronger fact: there
+    is no band take at any time, with or without the columns, so the guard
+    `_exit_band_take` and its `exit_band_uncounted` stamp are deleted with
+    it. What must still hold at this site, and is pinned below, is that the
+    059 ABSENCE ITSELF is survived: the exit places the same post-only rest
+    at his cent 0.18, the row goes out through the 050 INSERT (19 args, no
+    decision column), the probe's name reaches the heartbeat, and no band
+    word is written on any row on any road. The two shapes the test used to
+    tell apart (the band IOC and the tolerance IOC) are now one rest."""
     _band_two(monkeypatch)
     monkeypatch.setattr(ml, "_order_cols_absent_logged", False)
+    # the bid 0.16, inside the band and past the tolerance: no band IOC -- and no IOC at all
     p, b = _exit_world(0.18, 152, entry=0.20)
     p.raise_on.append(("ml-order-cols-guard", _UndefinedColumn('column "ask_at_send" does not exist')))
-    v = _Venue(bid=0.16, ask=0.19, held={SLUG: 304}, ioc_fill=14.0)
+    v = _Venue(bid=0.16, ask=0.19, held={SLUG: 304}, ioc_fill=14.0, lift=14.0)
     st = _tick(p, v, http=_mkt(152.0))
     assert st["order_cols_absent"] == "UndefinedColumnError"
-    assert [c[2:6] for c in _places(v)] == [(0.18, 152, True, GTC_TIF)], "no band IOC without its word"
+    assert [c[2:6] for c in _places(v)] == [(0.18, 152, True, GTC_TIF)], "no band IOC, and no take of any kind"
     assert [len(i) for i in _inserts(p)] == [19], "the 050 INSERT (no decision column): no band word can be written"
     assert not any(len(i) > 20 and i[20] in BAND_WORDS for i in _inserts(p))
     assert _census(st, "exit_take_in_band") == 0 and _census(st, "exit_out_of_tol") == 1 and _bbos(v).count(SLUG) == 1
     lp = b["last_plan"]
     assert lp["exit_out_of_tol"] == {"bid": 0.16, "ask": 0.19, "floor": 0.17, "band_floor": 0.16, "at": NOW}
-    assert lp["exit_band_uncounted"] is True and "exit_band" not in lp and b["ledger_net"] == 304
-    # the tolerance take under the same absence: today's IOC, as before this lane
+    # E31: `exit_band_uncounted` went with `_exit_band_take`; there is no band send to withhold
+    assert "exit_band_uncounted" not in lp and "exit_band" not in lp and b["ledger_net"] == 290
+    assert not hasattr(ml, "_exit_band_take") and 'plan["exit_band_uncounted"]' not in inspect.getsource(ml)
+    # the bid AT the tolerance cent under the same absence: the SAME rest, where lane 3 sent
+    # today's IOC at 0.17. The columns' absence changes neither cent
     p2, b2 = _exit_world(0.18, 152, entry=0.20)
     p2.raise_on.append(("ml-order-cols-guard", _UndefinedColumn('column "ask_at_send" does not exist')))
-    v2 = _Venue(bid=0.17, ask=0.19, held={SLUG: 304}, ioc_fill=152.0)
+    v2 = _Venue(bid=0.17, ask=0.19, held={SLUG: 304}, ioc_fill=152.0, lift=152.0)
     st2 = _tick(p2, v2, http=_mkt(152.0))
-    assert [c[2:6] for c in _places(v2)] == [(0.17, 152, True, IOC_TIF)] and "exit_band_uncounted" not in b2["last_plan"]
-    # the S4 cover: the ask inside the band, the columns absent -> the rest at floor(his), no cover_in_band
+    assert [c[2:6] for c in _places(v2)] == [(0.18, 152, True, GTC_TIF)]
+    assert "exit_band_uncounted" not in b2["last_plan"] and [len(i) for i in _inserts(p2)] == [19]
+    # the S4 cover: the ask inside the band, the columns absent -> the rest at his cent
     _shorts_on(monkeypatch)
     p3, b3, v3 = _flip_world(ask=0.33)
     p3.raise_on.append(("ml-order-cols-guard", _UndefinedColumn('column "ask_at_send" does not exist')))
     st3 = _tick(p3, v3)
     assert [c[2:6] for c in _places(v3)] == [(0.31, 300, True, GTC_TIF)] and _census(st3, "cover_in_band") == 0
-    assert b3["last_plan"]["exit_band_uncounted"] is True
+    assert "exit_band_uncounted" not in b3["last_plan"]
     assert b3["last_plan"]["exit_out_of_tol"] == {"bid": 0.30, "ask": 0.33, "ceiling": 0.32, "band_ceiling": 0.33, "at": NOW}
-    # at the default the guard is never reached: nothing stamped
+    # at the default, the same: nothing stamped, the same rest
     monkeypatch.setattr(rules, "MIRROR_EXIT_TAKE_BAND", 0.01)
     p4, b4 = _exit_world(0.18, 152, entry=0.20)
     p4.raise_on.append(("ml-order-cols-guard", _UndefinedColumn('column "ask_at_send" does not exist')))
-    _tick(p4, _Venue(bid=0.16, ask=0.19, held={SLUG: 304}), http=_mkt(152.0))
+    v4 = _Venue(bid=0.16, ask=0.19, held={SLUG: 304})
+    _tick(p4, v4, http=_mkt(152.0))
     assert "exit_band_uncounted" not in b4["last_plan"]
-    # the pure guard
-    t = types.SimpleNamespace(order_cols=None)
-    r = types.SimpleNamespace(bid=0.53, ask=0.56)
-    plan = {}
-    assert ml._exit_band_take(t, SELL, r, rules.exit_terms(SELL, 0.549, band=0.02), plan) is False and plan == {"exit_band_uncounted": True}
-    plan = {}
-    assert ml._exit_band_take(types.SimpleNamespace(order_cols=True), SELL, r, rules.exit_terms(SELL, 0.549, band=0.02), plan) is True and plan == {}
-    plan = {}
-    assert ml._exit_band_take(t, SELL, r, rules.exit_terms(SELL, 0.549, band=0.01), plan) is False and plan == {}
+    assert [c[2:6] for c in _places(v4)] == [(0.18, 152, True, GTC_TIF)]
+    # THE GUARD THAT REPLACES THE PURE ONE: `_place` refuses a non-GTC tif before an op, a
+    # read, a row or a venue call -- so no take can be sent whether or not its word could be
+    # written. The 059 columns gate the row's decision, never the order
+    psrc = inspect.getsource(ml._place)
+    assert psrc.index('if tif != "GTC":') < psrc.index("if t.cancel_all:")
+    assert "_ioc_refused_log(book, kind, side, wire, tif)" in psrc
 
 
 # ----------------------------------------------------------- the fast gate
@@ -925,8 +1072,8 @@ def test_x1_the_census_names_sit_before_drift_smaller_open_the_pins_hold_and_eve
     # T2 (FILL lane 4, two names), FILL lane 5 (three), E22 (FILL lane 22, four) and FILL lane 11 (one) landed after this lane and sit nearer the key (-16:-13 -> -26:-23) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names nearer the key (-26:-23 -> -32:-29, -27 / -28 / -29 -> -33 / -34 / -35)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-39:-36 -> -43:-40, -40 / -41 / -42 -> -44 / -45 / -46)
-    assert keys[-57:-54] == NEW_NAMES
-    assert keys[-58] == "take_in_band" and keys[-59] == "exit_take_rested" and keys[-60] == "wrong_sign_hold"
+    assert keys[-67:-64] == NEW_NAMES
+    assert keys[-68] == "take_in_band" and keys[-69] == "exit_take_rested" and keys[-70] == "wrong_sign_hold"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert len(set(keys)) == len(keys)
@@ -934,11 +1081,17 @@ def test_x1_the_census_names_sit_before_drift_smaller_open_the_pins_hold_and_eve
         assert ml._new_stats()["census"][k] == 0, k
     assert {"exit_take_in_band", "cover_in_band"} <= ml.QUIET_EXIT_PLANS and "order_open_his_exit" not in ml.QUIET_EXIT_PLANS
     src = inspect.getsource(ml)
-    assert '_mirror_stop("exit_take_in_band", whale)' in inspect.getsource(ml._exit_band_mark)
-    assert '_mirror_stop("cover_in_band", whale)' in inspect.getsource(ml._exit_band_mark)
+    # E31 (FILL lane 31, 2026-09-10): the two BAND names lose their emit site with
+    # `_exit_band_mark` and become DECLARED ZEROS -- they keep their place on CENSUS_KEYS and
+    # in QUIET_EXIT_PLANS as the record of the rule they counted, and no line writes them.
+    # `order_open_his_exit` is the FAST GATE's name, which this lane does not touch: its one
+    # emit site stands and it is still emitted (test_x1_every_name_is_emitted_here drives it)
+    assert not hasattr(ml, "_exit_band_mark") and not hasattr(ml, "_exit_band_take")
+    for k in BAND_WORDS:
+        assert src.count(f'_mirror_stop("{k}"') == 0, k
+        assert ml._new_stats()["census"][k] == 0, k
     assert '_mirror_stop("order_open_his_exit", book.get("whale"))' in inspect.getsource(ml._fast_book)
-    for k in NEW_NAMES:
-        assert src.count(f'_mirror_stop("{k}"') == 1, k
+    assert src.count('_mirror_stop("order_open_his_exit"') == 1
     # the worker reads no env of its own; the rail is rules' (capped_env, floor 0.0)
     assert '"MIRROR_EXIT_TAKE_BAND"' not in src
     # 059's comment stands as written; the docs restate its list with the two words
@@ -947,6 +1100,13 @@ def test_x1_the_census_names_sit_before_drift_smaller_open_the_pins_hold_and_eve
 
 
 def test_x1_every_name_is_emitted_here(monkeypatch):
+    """RE-PINNED AT E31: the lane's three names are no longer three emitted
+    names. `exit_take_in_band` and `cover_in_band` are DECLARED ZEROS (their
+    emit site left with `_exit_band_mark`), so the two worlds below are
+    driven for the REST that stands where the band take stood, and the one
+    name still emitted here is the fast gate's `order_open_his_exit`, which
+    this lane does not touch. Driving all three is kept: the worker file's
+    coverage read imports this."""
     test_x1_book_334_at_band_two_the_standing_rest_is_cancelled_and_one_ioc_goes_at_the_band_cent(monkeypatch)
     test_x1_book_661_a_partially_filled_cover_rest_re_quoted_carries_its_booked_fill_into_the_band_ioc(monkeypatch)
     test_x1_the_fast_gate_names_order_open_his_exit_on_his_reducing_fill_with_an_entry_rest_standing_and_cancels_nothing()

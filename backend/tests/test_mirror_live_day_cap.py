@@ -121,7 +121,13 @@ def test_a_standing_unfilled_rest_counts_against_the_day_on_the_next_tick(
     v = _Venue(bid=0.30, ask=0.32)
     st1 = _tick(p, v, http=http)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][3] == 300 and pl[0][2] == 0.30 and pl[0][4] is False
+    # E31 (FILL lane 31, 2026-09-10): THE ENTRY'S CENT MOVED. A long entry no
+    # longer JOINS THE BID at 0.30; it rests at the maker wire
+    # min(buy_wire(his 0.31), ask 0.32 - MAKER_TICK) = 0.31, so every quantity
+    # this file derives from a dollar room is that room divided by 0.31, not 0.30.
+    # $90 + `little` at 0.31 is 290 shares, where 0.30 bought 300; the rail under
+    # test is the DAY ROOM and the rest still spends all of it
+    assert len(pl) == 1 and pl[0][3] == 290 and pl[0][2] == 0.31 and pl[0][4] is False
     assert _census(st1, "rest_placed") == 1 and b1["open_order_id"] is not None
     rest = p.orders[b1["open_order_id"]]
     assert rest["state"] == "open" and rest["booked_filled"] == 0.0 and rest["cash_usd"] == 0.0
@@ -135,7 +141,10 @@ def test_a_standing_unfilled_rest_counts_against_the_day_on_the_next_tick(
     assert not [o for o in p.orders.values() if o["book_id"] == b2["id"]]
     assert p.orders[rest["id"]]["state"] == "open" and not _cancels(v)
     assert _census(st2, "open_order_pending") >= 1
-    assert _census(st2, "mirror_day_cap") == 0 and st2["mirror_day_room"] == pytest.approx(little)
+    # E31: the rest spent $89.90 of the $90 (290 at 0.31), so a dime is left over
+    # and above `little` -- too little for a share at any cent, which is why the
+    # second book is refused `over_room` all the same
+    assert _census(st2, "mirror_day_cap") == 0 and st2["mirror_day_room"] == pytest.approx(little + 0.1)
 
 
 def test_a_day_full_by_rests_does_not_block_and_the_rests_stand_across_ticks(monkeypatch):
@@ -154,14 +163,23 @@ def test_a_day_full_by_rests_does_not_block_and_the_rests_stand_across_ticks(mon
     the published room reads 0.00 and survives the health endpoint's
     sanitizer at the top level."""
     from sportsassets.api import app as api_app
-    monkeypatch.setattr(rules, "MIRROR_DAY_USD", 90.0)
+    # E31 (FILL lane 31, 2026-09-10): THE ENTRY'S CENT MOVED, so the day that ONE
+    # rest fills is $93 where it was $90 -- a long entry no longer joins the bid
+    # at 0.30, it rests at the maker wire min(buy_wire(his 0.31), ask 0.32 -
+    # MAKER_TICK) = 0.31, and 300 x 0.31 = $93.00. The cap is a fixture figure,
+    # not this test's subject: at $90 the room would buy 290 and the rest would
+    # be ROOM-CLIPPED, which is a different world with a finding of its own
+    # (pinned in the test below). At the cap the whole plan fits, and every pin
+    # of this test then reads exactly as it read before the lane
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", 93.0)
     p, http = _two_markets()
     b1 = p.add_book(ledger=0)
     v = _Venue(bid=0.30, ask=0.32)
     st1 = _tick(p, v, http=http)
     assert _census(st1, "rest_placed") == 1 and len(_places(v)) == 1
     rest = p.orders[b1["open_order_id"]]
-    assert rest["qty"] * rest["wire"] == pytest.approx(90.0) and rest["cash_usd"] == 0.0
+    assert rest["qty"] == 300 and rest["wire"] == 0.31
+    assert rest["qty"] * rest["wire"] == pytest.approx(93.0) and rest["cash_usd"] == 0.0
     b2 = _other_book(p)
     for n in (2, 3, 4):
         st = _tick(p, v, now=NOW + 30 * (n - 1), http=http)
@@ -217,6 +235,62 @@ def test_a_day_filled_to_the_cap_still_blocks_and_cancels_the_rests(monkeypatch)
     assert st["mirror_day_room"] == pytest.approx(90.0 - 89.0 - 90.0)
 
 
+def test_a_room_clipped_rest_is_replaced_at_its_own_cent_and_quantity_once_past_the_life_floor(
+        monkeypatch):
+    """E31 FINDING, pinned so it cannot pass unseen. When the DAY ROOM sizes a
+    rest BELOW the plan's quantity, the rest and the plan disagree on `qty`
+    for as long as the room stays short: past rules.MIRROR_REST_MIN_LIFE_S
+    rest_decision reads a quantity move and replaces, and the replacement is
+    the SAME cent and the SAME room-limited quantity -- the rest's own twin.
+    The tick after that keeps the new rest under the life floor, so the shape
+    is a replace every other tick, up to MIRROR_MAX_REPLACES_PER_HOUR.
+
+    The road is not this lane's: any room that clips a rest reaches it, and
+    the per-trade clip has an exemption for exactly this (`p_cmp` in
+    mirror_live's step O, which compares an ADD's rest against the plan AS
+    THE CLIP WOULD SIZE IT) that covers rules.MIRROR_CLIP_USD alone, not the
+    day or sleeve rooms. What the lane changed is which worlds reach it: at
+    0.30 a $90 day bought the plan's whole 300 and the rest never disagreed;
+    at the maker cent 0.31 the same $90 buys 290 and it always does.
+
+    Pinned as measured, not asserted away: the cancel, the twin, and the
+    counters that see it."""
+    monkeypatch.setattr(rules, "MIRROR_DAY_USD", 90.0)
+    p, http = _two_markets()
+    b1 = p.add_book(ledger=0)
+    v = _Venue(bid=0.30, ask=0.32)
+    st1 = _tick(p, v, http=http)
+    rest = p.orders[b1["open_order_id"]]
+    assert rest["qty"] == 290 and rest["wire"] == 0.31, "$90 / 0.31, the plan wanted 300"
+    assert st1["mirror_day_room"] == pytest.approx(90.0), "the room the tick READ, before the rest"
+    # under the life floor the rest stands, growth recorded and not acted on
+    st2 = _tick(p, v, now=NOW + 30, http=http)
+    assert st2["mirror_day_room"] == pytest.approx(0.1), "a dime that buys no share"
+    assert not _cancels(v) and _census(st2, "kept_min_life") == 1
+    assert b1["last_plan"]["rest_life"]["floor_s"] == rules.MIRROR_REST_MIN_LIFE_S
+    assert p.orders[rest["id"]]["state"] == "open"
+    # past it: cancelled and re-placed at the same cent and the same quantity
+    st3 = _tick(p, v, now=NOW + 60, http=http)
+    assert _cancels(v) == [("cancel", "oid-1", SLUG)]
+    assert p.orders[rest["id"]]["state"] == "cancelled" and _census(st3, "cancelled_unfilled") == 1
+    assert b1["last_plan"]["replaced"] == "replace_qty" and b1["last_plan"]["replaced_by"] == "qty"
+    twin = p.orders[b1["open_order_id"]]
+    assert (twin["qty"], twin["wire"]) == (rest["qty"], rest["wire"]), "its own twin"
+    assert _census(st3, "rest_placed") == 1 and _census(st3, "replace_capped") == 0
+    # REVIEW 2: the SHAPE, measured rather than described -- the tick after the
+    # twin keeps it under the life floor and the tick after that replaces it
+    # again, so the churn is one cancel + one place EVERY OTHER TICK for as
+    # long as the room stays short, bounded only by rules.MIRROR_MAX_REPLACES_PER_HOUR
+    shape = []
+    for n in (3, 4, 5, 6):
+        vn = _Venue(bid=0.30, ask=0.32)
+        vn.orders = v.orders
+        stn = _tick(p, vn, now=NOW + 30 * n, http=http)
+        shape.append((len(_cancels(vn)), len(_places(vn)), _census(stn, "kept_min_life")))
+        v = vn
+    assert shape == [(0, 0, 1), (1, 1, 0), (0, 0, 1), (1, 1, 0)], shape
+
+
 def test_a_ttl_cancel_gives_the_rests_remainder_back_and_the_requote_is_at_full_size(
         monkeypatch):
     """THE GIVE-BACK (review of the first cut, 2026-09-05). The day
@@ -238,7 +312,13 @@ def test_a_ttl_cancel_gives_the_rests_remainder_back_and_the_requote_is_at_full_
     assert _cancels(v) == [("cancel", "oid-1", SLUG)]
     assert p.orders[o["id"]]["state"] == "cancelled" and st["requotes"] == 1
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][3] == 300 and pl[0][2] == 0.30, pl
+    # E31 (FILL lane 31, 2026-09-10): THE ENTRY'S CENT MOVED. A long entry no
+    # longer JOINS THE BID at 0.30; it rests at the maker wire
+    # min(buy_wire(his 0.31), ask 0.32 - MAKER_TICK) = 0.31, so every quantity
+    # this file derives from a dollar room is that room divided by 0.31, not 0.30.
+    # the give-back is the whole $90 of a rest seeded at 0.30, so the re-quote is
+    # the full 300 as before -- at the maker cent 0.31 ($93 of the $105 room)
+    assert len(pl) == 1 and pl[0][3] == 300 and pl[0][2] == 0.31, pl
     assert _census(st, "rest_placed") == 1 and _census(st, "over_room") == 0
     new = [x for x in p.orders.values() if x["id"] != o["id"]][0]
     assert new["state"] == "open" and new["qty"] == 300 and b["open_order_id"] == new["id"]
@@ -276,7 +356,12 @@ def test_a_partial_fills_give_back_is_the_remainder_and_the_requote_is_room_limi
     assert p.orders[o["id"]]["state"] == "cancelled" and b["ledger_net"] == 100
     assert _census(st, "partial_fill") == 1 and b["state"] == "live"
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][3] == 150, pl
+    # E31 (FILL lane 31, 2026-09-10): THE ENTRY'S CENT MOVED. A long entry no
+    # longer JOINS THE BID at 0.30; it rests at the maker wire
+    # min(buy_wire(his 0.31), ask 0.32 - MAKER_TICK) = 0.31, so every quantity
+    # this file derives from a dollar room is that room divided by 0.31, not 0.30.
+    # the room is the same $45; 45 / 0.31 = 145 shares where 45 / 0.30 was 150
+    assert len(pl) == 1 and pl[0][3] == 145, pl
 
 
 def test_a_cancelled_sell_rest_gives_nothing_back(monkeypatch):
@@ -300,7 +385,12 @@ def test_a_cancelled_sell_rest_gives_nothing_back(monkeypatch):
     assert ("cancel", "oid-s", OTHER_SLUG) in _cancels(v)
     assert p.orders[s["id"]]["state"] == "cancelled"
     mine = [c for c in _places(v) if c[1] == SLUG and c[4] is False]
-    assert len(mine) == 1 and mine[0][3] == 33, (mine, st["census"])
+    # E31 (FILL lane 31, 2026-09-10): THE ENTRY'S CENT MOVED. A long entry no
+    # longer JOINS THE BID at 0.30; it rests at the maker wire
+    # min(buy_wire(his 0.31), ask 0.32 - MAKER_TICK) = 0.31, so every quantity
+    # this file derives from a dollar room is that room divided by 0.31, not 0.30.
+    # the $10 left buys 32 shares at 0.31 where it bought 33 at 0.30
+    assert len(mine) == 1 and mine[0][3] == 32, (mine, st["census"])
     assert b["open_order_id"] is not None
 
 
@@ -342,7 +432,13 @@ def test_a_rest_older_than_the_reads_window_gives_nothing_back(monkeypatch):
     assert ("cancel", "oid-1", SLUG) in _cancels(v)
     assert p.orders[o["id"]]["state"] == "cancelled"
     pl = _places(v)
-    assert [(c[1], c[3]) for c in pl] == [(SLUG, 300), (OTHER_SLUG, 50)], (pl, st["census"])
+    # E31 (FILL lane 31, 2026-09-10): THE ENTRY'S CENT MOVED. A long entry no
+    # longer JOINS THE BID at 0.30; it rests at the maker wire
+    # min(buy_wire(his 0.31), ask 0.32 - MAKER_TICK) = 0.31, so every quantity
+    # this file derives from a dollar room is that room divided by 0.31, not 0.30.
+    # A re-quotes its 300 at 0.31 ($93 of the $105), so B gets the $12 left --
+    # 38 shares at 0.31 -- where at 0.30 A spent $90 and B got the $15's 50
+    assert [(c[1], c[3]) for c in pl] == [(SLUG, 300), (OTHER_SLUG, 38)], (pl, st["census"])
     assert a["open_order_id"] is not None and b["open_order_id"] is not None
 
 
@@ -379,7 +475,9 @@ def test_the_per_tick_decrement_in_place_refuses_the_second_book_in_the_same_tic
     v = _Venue(bid=0.30, ask=0.32)
     st = _tick(p, v, http=http)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][3] == 300, pl
+    # E31: $90.10 at the maker cent 0.31 is 290 shares, where 0.30 bought 300;
+    # the within-tick decrement is the subject and refuses the second book as before
+    assert len(pl) == 1 and pl[0][3] == 290, pl
     assert _census(st, "rest_placed") == 1 and _census(st, "over_room") == 1, st["census"]
     assert sum(1 for b in (b1, b2) if b["open_order_id"] is not None) == 1
     assert len([o for o in p.orders.values() if o["side"] == BUY]) == 1
@@ -517,32 +615,49 @@ def test_a_resting_buy_short_consumes_the_day_room_and_gives_its_collateral_back
     st = _tick(p, v, http=_mkt(100.0, 400.0))
     assert _census(st, "short_open") == 1 and _places(v)[0][3] == 300
     o = next(iter(p.orders.values()))
-    assert o["intent"] == "ORDER_INTENT_BUY_SHORT" and o["wire"] == 0.32
+    # E31 (FILL lane 31, 2026-09-10): a short's ADD no longer JOINS THE ASK at
+    # 0.32; it rests at the maker wire ask - MAKER_TICK = 0.31, so its collateral
+    # is (1 - 0.31) = 0.69 a share where it was 0.68. The rail under test -- the
+    # day room counting the rest at its COLLATERAL, not its notional -- is unchanged
+    assert o["intent"] == "ORDER_INTENT_BUY_SHORT" and o["wire"] == 0.31
     # the day room the tick read before the rest was placed
     assert st["mirror_day_room"] == pytest.approx(rules.MIRROR_DAY_USD)
-    # the next tick's read counts the resting remainder at its collateral, 300 x 0.68
+    # the next tick's read counts the resting remainder at its collateral, 300 x 0.69
     v2 = _Venue(held={})
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + 30, http=_mkt(100.0, 400.0))
-    assert st2["mirror_day_room"] == pytest.approx(rules.MIRROR_DAY_USD - 300 * 0.68)
+    assert st2["mirror_day_room"] == pytest.approx(rules.MIRROR_DAY_USD - 300 * 0.69)
     assert o["state"] == "open"
-    # a TTL cancel gives the remainder back at the collateral, and the
-    # re-quote that follows in the same tick is at full size
+    # E31 (C): PAST THE TTL A REST AT THE MAKER WIRE DOES NOT SPEND ITS QUEUE.
+    # This tick used to cancel the rest at its TTL and re-quote the same 300 in
+    # the same tick, which is the churn the lane measured (322 of 1,036 replaces
+    # in 24 h were the identical order re-placed at the clock, filling 5.7 %
+    # against a kept rest's 47.2 %). The plan's wire is the rest's own 0.31, so
+    # `ttl_stands` holds it: nothing cancelled, nothing re-placed, and the tick
+    # says so by name. The give-back this test exists for is the CANCEL road's
+    # and is driven above (the day room already read the collateral back at
+    # 300 x 0.69 on the tick before)
     v3 = _Venue(held={})
     v3.orders = v.orders
     st3 = _tick(p, v3, now=NOW + rules.MIRROR_REST_TTL_S + 1, http=_mkt(100.0, 400.0))
-    assert _census(st3, "cancelled_unfilled") == 1 and o["state"] == "cancelled"
-    requote = [x for x in _places(v3)]
-    assert len(requote) == 1 and requote[0][3] == 300 and requote[0][6] == "ORDER_INTENT_BUY_SHORT"
+    assert _census(st3, "cancelled_unfilled") == 0 and o["state"] == "open"
+    assert _census(st3, "requote_same_wire") == 1 and _census(st3, "open_order_pending") == 1
+    assert not _cancels(v3) and not _places(v3)
 
 
 def test_a_second_short_book_in_the_same_tick_is_sized_off_the_room_net_of_the_firsts_collateral(monkeypatch):
     """The within-tick half of the rail on the SHORT side (mutation
-    lens, mutant h3): _place takes the first short rest's COLLATERAL
-    (300 x 0.68 = $204) off t.mirror_day, not its contract notional
-    (300 x 0.32 = $96), so with $250 of day room the second short book
-    on a second market is sized off $46 -- 67 shares of a 0.68 leg --
-    not off $154."""
+    lens, mutant h3): _place takes the first short rest's COLLATERAL off
+    t.mirror_day, not its contract notional, so with $250 of day room the
+    second short book on a second market is sized off what is LEFT, not off
+    the whole room less the contract notional.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the short add rests at the
+    maker wire ask - MAKER_TICK = 0.31 where it joined the ask at 0.32, so
+    the collateral is 0.69 a share. The first rest takes 300 x 0.69 = $207
+    (was $204), the second is sized off the $43 left -- 62 shares of a 0.69
+    leg, where it was 67 of a 0.68 one -- and off $154 either way it would
+    have been 226."""
     from tests.test_mirror_live_worker import _short_book, _shorts_on
     _shorts_on(monkeypatch)
     monkeypatch.setattr(rules, "MIRROR_DAY_USD", 250.0)
@@ -567,14 +682,14 @@ def test_a_second_short_book_in_the_same_tick_is_sized_off_the_room_net_of_the_f
     pl = _places(v)
     assert len(pl) == 2 and [x[6] for x in pl] == ["ORDER_INTENT_BUY_SHORT"] * 2, pl
     assert [x[1] for x in pl] == [SLUG, OTHER_SLUG]
-    assert [x[3] for x in pl] == [300, int((250.0 - 300 * 0.68) / 0.68)] == [300, 67], pl
+    assert [x[3] for x in pl] == [300, int((250.0 - 300 * 0.69) / 0.69)] == [300, 62], pl
     assert _census(st, "short_open") == 2 and _census(st, "rest_placed") == 2
     assert st["mirror_day_room"] == pytest.approx(250.0)
     # and the next tick's read counts both rests at their collateral
     v2 = _Venue(bid=0.30, ask=0.32)
     v2.orders = v.orders
     st2 = _tick(p, v2, now=NOW + 30, http=http)
-    assert st2["mirror_day_room"] == pytest.approx(250.0 - (300 + 67) * 0.68)
+    assert st2["mirror_day_room"] == pytest.approx(250.0 - (300 + 62) * 0.69)
 
 
 # ---------------------------------------------------------- 3. the mode line
@@ -712,7 +827,12 @@ def test_a_mixed_tick_two_halted_books_then_an_open_quoted_one_does_not_abandon(
                     long_asset=M3, other_asset=N3)
     v = _Venue(bid=0.30, ask=0.32, states={SLUG: HALTED, OTHER_SLUG: HALTED})
     st = _tick(p, v, http=http)
-    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG, OTHER_SLUG, THIRD_SLUG]
+    # E31 (FILL lane 31, 2026-09-10): THE TOUCH-BOUND RE-READ. A rest whose cent
+    # IS the touch bound (here min(buy_wire(0.31), ask 0.32 - MAKER_TICK) = 0.31,
+    # the bound itself) is sent only after ONE more paced quote read of its own
+    # slug, so a book that PLACES reads its market twice. The extra read is the
+    # placing book's, at the end of its own plan.
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG, OTHER_SLUG, THIRD_SLUG, THIRD_SLUG]
     assert not st["abandoned"] and "abandon_reason" not in st
     assert _census(st, "venue_halted") == 2 and _census(st, "no_quote") == 0, st["census"]
     assert st["venue_state"] == HALTED, "two of three reads: the most common state"
@@ -841,7 +961,13 @@ def test_three_open_empty_candidates_are_refused_no_quote_and_the_walk_goes_on(c
         st = _tick(p, v)
     # five reads: c1..c3, the fourth candidate, and the book it opened
     # planned in the same tick (its own read of the slug)
-    assert [c for c in v.calls if c[0] == "bbo"] == [("bbo", SLUG)] * 5 and st["reads"] == 5
+    # E31 (FILL lane 31, 2026-09-10): THE TOUCH-BOUND RE-READ. A rest whose cent
+    # IS the touch bound (here min(buy_wire(0.31), ask 0.32 - MAKER_TICK) = 0.31,
+    # the bound itself) is sent only after ONE more paced quote read of its own
+    # slug, so a book that PLACES reads its market twice. The extra read is the
+    # placing book's, at the end of its own plan.
+    # so the opened book's rest adds a SIXTH: 5 -> 6, all of the same slug
+    assert [c for c in v.calls if c[0] == "bbo"] == [("bbo", SLUG)] * 6 and st["reads"] == 6
     assert not st["abandoned"] and "abandon_reason" not in st and st["status"] == "ok"
     assert _census(st, "no_quote") == 3 and _census(st, "venue_halted") == 0, st["census"]
     assert _census(st, "tick_abandoned") == 0 and _census(st, "no_mark") == 3, st["census"]
@@ -869,7 +995,13 @@ def test_three_open_empty_candidates_are_refused_no_quote_and_the_walk_goes_on(c
     b = p.add_book(ledger=0)
     v = _SeqVenue([_Q, _E, _E, _E])
     st = _tick(p, v)
-    assert not st["abandoned"] and _census(st, "no_quote") == 3 and st["reads"] == 4
+    # E31 (C): the book's rest is at the touch bound 0.31, so it is sent only
+    # after ONE more paced read of its own slug -- and the sequence's next
+    # answer is an EMPTY book. An unreadable re-read does not hold the rest
+    # (`rest_quote_unread`, the lane's own name: the quote the plan was made on
+    # stands); it is one more read and one more `no_quote`: 3 -> 4 and 4 -> 5
+    assert not st["abandoned"] and _census(st, "no_quote") == 4 and st["reads"] == 5
+    assert _census(st, "rest_quote_unread") == 1
     assert b["open_order_id"] is not None and st["books_live"] == 1
     assert [(c[1], c[3]) for c in _places(v)] == [(SLUG, 300)]
 
@@ -938,7 +1070,13 @@ def test_a_non_open_read_on_an_existing_book_never_counts_toward_the_streak(capl
     with caplog.at_level(logging.WARNING, logger=ml.log.name):
         st = _tick(p, v)
     # the book, c1, c2, the fixture candidate, and the book it opened planned in-tick
-    assert [c[1] for c in v.calls if c[0] == "bbo"] == [OTHER_SLUG, SLUG, SLUG, SLUG, SLUG]
+    # E31 (FILL lane 31, 2026-09-10): THE TOUCH-BOUND RE-READ. A rest whose cent
+    # IS the touch bound (here min(buy_wire(0.31), ask 0.32 - MAKER_TICK) = 0.31,
+    # the bound itself) is sent only after ONE more paced quote read of its own
+    # slug, so a book that PLACES reads its market twice. The extra read is the
+    # placing book's, at the end of its own plan.
+    # so the opened book's rest adds one more read of SLUG: five reads -> six
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [OTHER_SLUG, SLUG, SLUG, SLUG, SLUG, SLUG]
     assert not st["abandoned"] and "abandon_reason" not in st and st["status"] == "ok"
     assert _census(st, "venue_halted") == 3 and _census(st, "no_quote") == 0, st["census"]
     assert _census(st, "tick_abandoned") == 0 and ml._backoff_until == 0.0
@@ -1126,7 +1264,17 @@ def test_the_book_memo_is_written_off_the_books_own_read_not_the_ticks_state(mon
     b2 = _other_book(p)
     v = _Venue(states={SLUG: "MARKET_STATE_EXPIRED", OTHER_SLUG: "MARKET_STATE_OPEN"})
     st = _tick(p, v, http=http)
-    assert st["venue_state"] == "MARKET_STATE_EXPIRED", "the tick's word is the first read's"
+    # E31 (FILL lane 31, 2026-09-10): THE TOUCH-BOUND RE-READ. A rest whose cent
+    # IS the touch bound (here min(buy_wire(0.31), ask 0.32 - MAKER_TICK) = 0.31,
+    # the bound itself) is sent only after ONE more paced quote read of its own
+    # slug, so a book that PLACES reads its market twice. The extra read is the
+    # placing book's, at the end of its own plan.
+    # The subject of this test is the MEMO, which still follows each book's OWN
+    # read and is untouched below. The tick's published word is the most common
+    # of the reads, and the OPEN book now reads its slug TWICE (it rests): two
+    # OPEN against one EXPIRED, so the word is OPEN where the tie went to the
+    # first read's EXPIRED
+    assert st["venue_state"] == "MARKET_STATE_OPEN", "the most common of three reads"
     assert ml._terminal_book_until == {("rn1", CID): NOW + ms.UNMAPPED_TTL_S}
     assert ml._terminal_book_state == {("rn1", CID): "MARKET_STATE_EXPIRED"}
     assert b2["last_reason"] != "no_mark"

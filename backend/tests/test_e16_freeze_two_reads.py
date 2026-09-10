@@ -2,6 +2,23 @@
 frozen exit follows his witnessed sale; the D2 thaw ON (owner decision
 D2 = YES, 13:3xZ), a switch that may only turn it off.
 
+# RE-PINNED at E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never
+# crosses; owner order ~03:3xZ "become a maker not taker ... mirror him to a tee"). The
+# rule this file exists for is untouched; the EXECUTION under it moves the same way on
+# every pin below, and only these ways:
+#   the cent 0.30 -> 0.31   this world's book is 0.30 / 0.32 and his level 0.31. An ENTRY
+#                           rested at buy_price(his, bid) = the BID 0.30; the maker wire is
+#                           min(buy_wire(0.31), 0.32 - 0.01) = 0.31, HIS OWN cent inside
+#                           the spread. An EXIT took at ceil(his) - MIRROR_EXIT_TOL = 0.30,
+#                           THROUGH the bid; the maker wire is max(sell_wire(0.31), 0.30 +
+#                           0.01) = 0.31, his own cent one tick over the bid.
+#   IOC -> GTC, post-only   there is no take path left in the worker.
+#   `exit_take` 1 -> 0      the counter counted the exit's IOC and is a declared zero from
+#                           E31; `rest_placed` counts in its place.
+#   `lift=` beside `ioc_fill=`  the shares a TAKER lifts off the fresh rest at create
+#                           (`aggressor` False: a maker fill), booking the ledger the IOC
+#                           booked, so every ledger figure below is unchanged.
+
 Book 266 (hard2/book_266_1152.log): our 1,940 @0.50 filled 22:39:50Z; the
 book froze `venue_ledger_disagree` on ONE walk that had not caught up with
 that fill; while his net went 19,400 -> 30,900 the frozen book never
@@ -135,10 +152,10 @@ def test_e16_one_disagreeing_read_is_a_suspect_no_freeze_no_increase_the_exit_st
     # (b) the exit plans on the suspect tick, on the LEDGER
     p2 = _pool(fills=_his(300, sold=100), snap={M: 200.0, N: 0.0})
     b2 = p2.add_book(ledger=300, avg_cost=0.31)
-    v2 = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=100)
+    v2 = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=100, lift=100)
     st2 = _tick(p2, v2, http=_mkt(200))
     assert b2["state"] == "live" and _census(st2, "venue_ledger_suspect") == 1
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 100, True, IOC_TIF)] and b2["ledger_net"] == 200
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 100, True, GTC_TIF)] and b2["ledger_net"] == 200
     assert _suspect(b2)["delta"] == 300.0 and _census(st2, "venue_ledger_disagree") == 0
 
 
@@ -272,9 +289,9 @@ def test_e16_a_suspect_book_flat_on_his_vanish_is_not_closed_on_the_suspect_tick
     def _world():
         p = _pool(fills=_his(300, sold=300), snap=None)
         b = p.add_book(ledger=300, avg_cost=0.31)
-        v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=600)
+        v = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=600, lift=600)
         st = _tick(p, v, http=_gone())
-        assert [c[2:6] for c in _places(v)] == [(0.30, 300, True, IOC_TIF)] and b["ledger_net"] == 0
+        assert [c[2:6] for c in _places(v)] == [(0.31, 300, True, GTC_TIF)] and b["ledger_net"] == 0
         assert b["state"] == "live" and b["last_plan"]["close"] == "venue_ledger_suspect"
         assert _census(st, "venue_ledger_suspect") == 1 and _census(st, "venue_ledger_disagree") == 0
         assert _census(st, "closed_cashed_out") == 0 and st["books_live"] == 1
@@ -283,14 +300,14 @@ def test_e16_a_suspect_book_flat_on_his_vanish_is_not_closed_on_the_suspect_tick
     p2, b2 = _world()
     st2 = _tick(p, _Venue(held={SLUG: 0}, bid=0.30, ask=0.32), now=NOW + 15, http=_gone())
     assert b["state"] == "closed" and _census(st2, "closed_cashed_out") == 1 and "venue_ledger_suspect" not in b["last_plan"]
-    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300)
+    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300, lift=300)
     st3 = _tick(p2, v2, now=NOW + 15, http=_gone())
     assert b2["state"] == "frozen" and b2["frozen_reason"] == "venue_ledger_disagree" and not _places(v2)
     assert _plan_exit(b2) == {"held": "transition_tick"} and _census(st3, "venue_ledger_disagree") == 1
-    v3 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300)
+    v3 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300, lift=300)
     st4 = _tick(p2, v3, now=NOW + 30, http=_gone())
-    assert [c[2:6] for c in _places(v3)] == [(0.30, 300, True, IOC_TIF)] and _census(st4, "frozen_reduce") == 1
-    assert _plan_exit(b2)["result"] == "take" and b2["state"] == "frozen"
+    assert [c[2:6] for c in _places(v3)] == [(0.31, 300, True, GTC_TIF)] and _census(st4, "frozen_reduce") == 1
+    assert _plan_exit(b2)["result"] == "filled_at_create" and b2["state"] == "frozen"
 
 
 # ------------------------------------------------- the D2 thaw (YES, on)
@@ -357,9 +374,9 @@ def test_e16_a_held_venue_ledger_disagree_book_that_agrees_stays_frozen_with_the
     # the exit still follows him while frozen: he sold 100 -> SELL 100 at his cent
     p2 = _pool(fills=_his(300, sold=100), snap={M: 200.0, N: 0.0})
     b2 = _frozen_long(p2, reason="venue_ledger_disagree")
-    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=100)
+    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=100, lift=100)
     st2 = _tick(p2, v2, http=_mkt(200))
-    assert b2["state"] == "frozen" and [c[2:6] for c in _places(v2)] == [(0.30, 100, True, IOC_TIF)]
+    assert b2["state"] == "frozen" and [c[2:6] for c in _places(v2)] == [(0.31, 100, True, GTC_TIF)]
     assert _census(st2, "frozen_reduce") == 1 and b2["last_plan"]["thaw_held"] == "thaw_off"
     assert not any("ml-book-thaw-agrees" in s for _k, s, _a in p.sent + p2.sent)
     monkeypatch.setattr(ml, "MIRROR_FROZEN_THAW", True)
@@ -587,18 +604,18 @@ def test_e16_the_default_thaw_takes_over_from_the_frozen_exit_on_the_second_agre
     assert ml.MIRROR_FROZEN_THAW is True
     p = _pool(snap=None)
     b = _frozen_long(p, reason="venue_ledger_disagree")
-    v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90)
+    v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st = _tick(p, v, http=_unread())
     assert not _places(v) and b["state"] == "frozen" and b["last_plan"]["thaw_held"] == "one_read"
     assert _census(st, "frozen_venue_unread") == 1 and _census(st, "thaw_held") == 1
     assert _plan_exit(b) == {"held": "frozen_venue_unread", "why": "his_market_read"}
     p.fills = _his(300, sold=90)
-    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90)
+    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st2 = _tick(p, v2, now=NOW + 15, http=_unread())
     assert b["state"] == "live" and b["frozen_reason"] is None and b["last_plan"]["thawed_venue_agrees"] is True
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 90, True, IOC_TIF)] and b["ledger_net"] == 210
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 90, True, GTC_TIF)] and b["ledger_net"] == 210
     o = _placed(p)[0]
-    assert (o["kind"], o["side"], o["reason"], o["qty"], o["state"]) == ("take", SELL, "take", 90, "filled")
+    assert (o["kind"], o["side"], o["reason"], o["qty"], o["state"]) == ("reduce", SELL, "reduce", 90, "filled")
     assert _census(st2, "frozen_reduce_on_fill") == 0 and _census(st2, "frozen_venue_unread") == 0
     assert _census(st2, "thaw_held") == 0 and "frozen_exit" not in b["last_plan"] and "frozen_witness" not in b["last_plan"]
     assert not _recent("frozen_reduce_on_fill") and [x for x in _recent("thawed") if x.get("why") == "venue_agrees"]
@@ -622,28 +639,29 @@ def test_e16_frozen_plus_his_witnessed_sale_with_the_walk_unread_reduces_on_the_
     _thaw_off(monkeypatch)
     p = _pool(snap=None)
     b = _frozen_long(p, reason="venue_ledger_disagree")
-    v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90)
+    v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st = _tick(p, v, http=_unread())
     assert not _places(v) and _census(st, "frozen_venue_unread") == 1
     assert _plan_exit(b) == {"held": "frozen_venue_unread", "why": "his_market_read"}
     assert _witness(b) == {"why": "his_market_read", "held": "unclocked"} and b["last_plan"]["fills_at"] == NOW - 3000
     p.fills = _his(300, sold=90)
-    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90)
+    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st2 = _tick(p, v2, now=NOW + 15, http=_unread())
-    assert [c[1:] for c in _places(v2)] == [(SLUG, 0.30, 90, True, IOC_TIF, "ORDER_INTENT_BUY_LONG", False, None)]
+    assert [c[1:] for c in _places(v2)] == [(SLUG, 0.31, 90, True, GTC_TIF, "ORDER_INTENT_BUY_LONG", True, None)]
     o = _placed(p)[0]
     assert (o["kind"], o["side"], o["tif"], o["reason"], o["qty"], o["state"]) == (
-        "take", SELL, "IOC", "frozen_reduce_on_fill: take", 90, "filled")
+        "reduce", SELL, "GTC", "frozen_reduce_on_fill: reduce", 90, "filled")
     assert b["ledger_net"] == 210 and b["state"] == "frozen" and b["frozen_reason"] == "venue_ledger_disagree"
     assert _census(st2, "frozen_reduce_on_fill") == 1 and _census(st2, "frozen_venue_unread") == 0
     assert _census(st2, "frozen_reduce") == 0 and _census(st2, "overfill") == 0 and p.state["mirror_live"] is True
     fx = _plan_exit(b)
     assert (fx["why"], fx["witnessed"], fx["fills_net"], fx["target"], fx["ledger"], fx["side"], fx["qty"],
-            fx["reduce_on_fill"], fx["result"]) == ("his_market_read", 90.0, 210.0, 210, 300, SELL, 90, True, "take")
+            fx["reduce_on_fill"], fx["result"]) == ("his_market_read", 90.0, 210.0, 210, 300, SELL, 90, True,
+                                                   "filled_at_create")
     assert fx["since"] == NOW - 3000 and _witness(b)["placed"] is True and b["last_plan"]["fills_at"] == NOW - 1000
     assert b["last_plan"]["his_level"] == pytest.approx(0.31) and b["last_plan"]["exit_take"] == 0.30
     assert _recent("frozen_reduce_on_fill")[-1]["qty"] == 90 and "frozen_excess" not in (o["receipt"] or {})
-    v3 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90)
+    v3 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st3 = _tick(p, v3, now=NOW + 30, http=_unread())
     assert not _places(v3) and _census(st3, "frozen_venue_unread") == 1 and _census(st3, "frozen_reduce_on_fill") == 0
     assert _plan_exit(b) == {"held": "frozen_venue_unread", "why": "his_market_read"} and "frozen_witness" not in b["last_plan"]
@@ -660,15 +678,15 @@ def test_e16_the_on_fill_reduce_is_ratio_x_his_sale_never_more_than_his_proporti
     b = _frozen_long(p, ledger=30, reason="venue_ledger_disagree", ratio=0.1)
     _tick(p, _Venue(held={SLUG: 30}, bid=0.30, ask=0.32), http=_unread())
     p.fills = _his(300, sold=90)
-    v2 = _Venue(held={SLUG: 30}, bid=0.30, ask=0.32, ioc_fill=9)
+    v2 = _Venue(held={SLUG: 30}, bid=0.30, ask=0.32, ioc_fill=9, lift=9)
     st2 = _tick(p, v2, now=NOW + 15, http=_unread())
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 9, True, IOC_TIF)] and b["ledger_net"] == 21
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 9, True, GTC_TIF)] and b["ledger_net"] == 21
     assert _plan_exit(b)["target"] == 21 and _census(st2, "frozen_reduce_on_fill") == 1
     p3 = _pool(snap=None)
     b3 = _frozen_long(p3, ledger=100, reason="venue_ledger_disagree")
     _tick(p3, _Venue(held={SLUG: 100}, bid=0.30, ask=0.32), http=_unread())
     p3.fills = _his(300, sold=90)
-    v3 = _Venue(held={SLUG: 100}, bid=0.30, ask=0.32, ioc_fill=90)
+    v3 = _Venue(held={SLUG: 100}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st3 = _tick(p3, v3, now=NOW + 15, http=_unread())
     assert not _places(v3) and _census(st3, "frozen_venue_unread") == 1 and _census(st3, "frozen_reduce_on_fill") == 0
     assert _witness(b3)["held"] == "under_proportion" and _witness(b3)["target"] == 210 and _witness(b3)["witnessed"] == 90.0
@@ -683,13 +701,13 @@ def test_e16_a_stale_walk_with_no_reducing_fill_refuses_frozen_venue_unread_as_b
     p = _pool(snap=None)
     b = _frozen_long(p, reason="venue_ledger_disagree")
     for i in range(2):
-        v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300)
+        v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300, lift=300)
         st = _tick(p, v, now=NOW + 15 * i, http=_unread())
         assert not _places(v) and _census(st, "frozen_venue_unread") == 1 and _census(st, "frozen_reduce_on_fill") == 0
         assert _plan_exit(b) == {"held": "frozen_venue_unread", "why": "his_market_read"}
     assert "frozen_witness" not in b["last_plan"]
     p.fills = _his(300) + [_fill(M, "BUY", 200, 0.33, NOW - 5)]
-    v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300)
+    v = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=300, lift=300)
     st = _tick(p, v, now=NOW + 30, http=_unread())
     assert not _places(v) and _census(st, "frozen_venue_unread") == 1 and "frozen_witness" not in b["last_plan"]
     # the other two unread reasons refuse the same way with no witness
@@ -708,21 +726,21 @@ def test_e16_a_reducing_fill_older_than_the_plan_clock_is_no_witness(monkeypatch
     b = _frozen_long(p, reason="venue_ledger_disagree")
     _tick(p, _Venue(held={SLUG: 300}, bid=0.30, ask=0.32), http=_unread())
     assert b["last_plan"]["fills_at"] == NOW - 1000, "the clock is the SELL's, the newest fill counted"
-    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90)
+    v2 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st2 = _tick(p, v2, now=NOW + 15, http=_unread())
     assert not _places(v2) and _census(st2, "frozen_venue_unread") == 1 and _census(st2, "frozen_reduce_on_fill") == 0
     p2 = _pool(snap=None)
     b2 = _frozen_long(p2, reason="venue_ledger_disagree")
     _tick(p2, _Venue(held={SLUG: 300}, bid=0.30, ask=0.32), http=_unread())
     p2.fills = _his(300) + [_fill(M, "SELL", 90, 0.31, NOW - 5000)]
-    v3 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90)
+    v3 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st3 = _tick(p2, v3, now=NOW + 15, http=_unread())
     assert not _places(v3) and _census(st3, "frozen_reduce_on_fill") == 0 and b2["ledger_net"] == 300
     # an ingest clock AFTER the plan's clock on an old stamp IS a witness (E12b's rule: his sale happened)
     p2.fills = _his(300) + [_fill(M, "SELL", 90, 0.31, NOW - 5000, detected_at=NOW + 10)]
-    v4 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90)
+    v4 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st4 = _tick(p2, v4, now=NOW + 30, http=_unread())
-    assert [c[2:6] for c in _places(v4)] == [(0.30, 90, True, IOC_TIF)] and _census(st4, "frozen_reduce_on_fill") == 1
+    assert [c[2:6] for c in _places(v4)] == [(0.31, 90, True, GTC_TIF)] and _census(st4, "frozen_reduce_on_fill") == 1
 
 
 def test_e16_the_frozen_exit_on_fill_never_exceeds_the_ledger_and_never_buys(monkeypatch):
@@ -737,9 +755,9 @@ def test_e16_the_frozen_exit_on_fill_never_exceeds_the_ledger_and_never_buys(mon
     b = _frozen_long(p, ledger=100, reason="venue_ledger_disagree")
     _tick(p, _Venue(held={SLUG: 100}, bid=0.30, ask=0.32), http=_unread())
     p.fills = _his(300, sold=300)
-    v2 = _Venue(held={SLUG: 100}, bid=0.30, ask=0.32, ioc_fill=300)
+    v2 = _Venue(held={SLUG: 100}, bid=0.30, ask=0.32, ioc_fill=300, lift=300)
     st2 = _tick(p, v2, now=NOW + 15, http=_unread())
-    assert [c[2:6] for c in _places(v2)] == [(0.30, 100, True, IOC_TIF)] and b["ledger_net"] == 0
+    assert [c[2:6] for c in _places(v2)] == [(0.31, 100, True, GTC_TIF)] and b["ledger_net"] == 0
     assert _plan_exit(b)["target"] == 0 and _plan_exit(b)["qty"] == 100 and _census(st2, "frozen_reduce_on_fill") == 1
     assert _census(st2, "frozen_excess_sold") == 0 and _census(st2, "overfill") == 0
     # the placement_lost surplus: 90 off the ledger's 300, the 300 unbooked untouched, still frozen
@@ -748,11 +766,11 @@ def test_e16_the_frozen_exit_on_fill_never_exceeds_the_ledger_and_never_buys(mon
     _tick(p3, _Venue(held={SLUG: 600}, bid=0.30, ask=0.32), http=_unread())
     assert _plan_exit(b3) == {"held": "frozen_venue_unread", "why": "his_market_read"} and b3["last_plan"]["fills_at"] == NOW - 3000
     p3.fills = _his(300, sold=90)
-    v4 = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=90)
+    v4 = _Venue(held={SLUG: 600}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st4 = _tick(p3, v4, now=NOW + 15, http=_unread())
-    assert [c[2:6] for c in _places(v4)] == [(0.30, 90, True, IOC_TIF)] and b3["ledger_net"] == 210
+    assert [c[2:6] for c in _places(v4)] == [(0.31, 90, True, GTC_TIF)] and b3["ledger_net"] == 210
     assert _census(st4, "frozen_reduce_on_fill") == 1 and b3["state"] == "frozen" and b3["frozen_reason"] == "placement_lost"
-    assert _placed(p3)[0]["reason"] == "frozen_reduce_on_fill: take" and _census(st4, "frozen_excess_sold") == 0
+    assert _placed(p3)[0]["reason"] == "frozen_reduce_on_fill: reduce" and _census(st4, "frozen_excess_sold") == 0
     # the mutant: a BUY plan out of the seat -> refused, nothing sent, the witness kept for the next tick
     p2 = _pool(snap=None)
     b2 = _frozen_long(p2, reason="venue_ledger_disagree")
@@ -764,7 +782,7 @@ def test_e16_the_frozen_exit_on_fill_never_exceeds_the_ledger_and_never_buys(mon
         pl = orig(target, ledger, venue, book, his, mark)
         return mi.Plan(BUY, 100, 0.30, "increase toward target") if pl.side == SELL else pl
     monkeypatch.setattr(ml.mi, "plan", _buy)
-    v3 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90)
+    v3 = _Venue(held={SLUG: 300}, bid=0.30, ask=0.32, ioc_fill=90, lift=90)
     st3 = _tick(p2, v3, now=NOW + 15, http=_unread())
     assert not _places(v3) and _census(st3, "frozen_reduce_only") == 1 and _census(st3, "frozen_reduce_on_fill") == 0
     assert _plan_exit(b2)["held"] == "frozen_reduce_only" and b2["last_plan"]["fills_at"] == NOW - 3000
@@ -839,7 +857,7 @@ def test_e16_every_new_name_is_a_census_key_before_the_pinned_tail_and_the_docs_
     # the reason prefix every reader of the marker matches; the row's own marker survives an adoption
     assert "frozen_reduce_on_fill".startswith("frozen_reduce")
     assert ml._adopt_reason({"reason": "frozen_reduce_on_fill"}, "adopted by fingerprint") == "frozen_reduce_on_fill: adopted by fingerprint"
-    assert ml._adopt_reason({"reason": "frozen_reduce_on_fill: take"}, "order_lost") == "frozen_reduce_on_fill: order_lost"
+    assert ml._adopt_reason({"reason": "frozen_reduce_on_fill: reduce"}, "order_lost") == "frozen_reduce_on_fill: order_lost"
     assert ml._adopt_reason({"reason": "frozen_reduce: take"}, "order_lost") == "frozen_reduce: order_lost"
     assert ml._adopt_reason({"reason": "reduce"}, "order_lost") == "order_lost"
     doc = (REPO / "docs" / "mirror-coverage.md").read_text()

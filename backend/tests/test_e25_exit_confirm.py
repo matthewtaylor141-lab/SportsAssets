@@ -65,6 +65,7 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails (
 )
 
 IOC = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+GTC = "TIME_IN_FORCE_GOOD_TILL_CANCEL"   # E31 (FILL lane 31): the only tif the money path sends
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NEW_NAMES = ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
 WALK = _Http(rows=[])                     # no per-market answer: the snapshot cannot be read
@@ -254,7 +255,7 @@ def test_e25_book_1177s_flap_is_held_unconfirmed_then_averted_with_no_order_and_
     flap averted; the increase it asks for is refused as any increase
     without a fresh read is; nothing bought, nothing sold, 719 held."""
     p, b = _world(monkeypatch, [BUILT, DROP_FILL], PLAN_1715)
-    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st = _tick(p, v, http=_mkt(NET_1715, 0.0))
     assert not _places(v) and not _cancels(v) and b["ledger_net"] == LEDGER_1177 and b["target"] == 326
     assert _census(st, "exit_unconfirmed") == 1 and all(_census(st, k) == 0 for k in NEW_NAMES[1:])
@@ -289,14 +290,18 @@ def test_e25_book_1177s_flap_is_held_unconfirmed_then_averted_with_no_order_and_
 
 def test_e25_a_held_drop_fires_the_tick_the_venue_confirms_it_one_tick_late_never_more(monkeypatch):
     p, b = _world(monkeypatch, [BUILT, DROP_FILL], PLAN_1715)
-    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st = _tick(p, v, http=_mkt(NET_1715, 0.0))
     assert not _places(v) and _census(st, "exit_unconfirmed") == 1 and b["ledger_net"] == LEDGER_1177
-    v2 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v2 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st2 = _tick(p, v2, now=NOW + 45, http=_mkt(NET_DROP, 0.0))
     assert _census(st2, "exit_confirmed") == 1 and _census(st2, "exit_unconfirmed") == 0
-    assert len(_places(v2)) == 1 and _places(v2)[0][3] == 393 and _places(v2)[0][5] == IOC
-    assert b["ledger_net"] == 326 and _census(st2, "exit_take") == 1
+    # RE-PINNED at E31 (FILL lane 31, 2026-09-10): the confirmed exit is a post-only
+    # GTC rest at his cent, not an IOC at the take cent, and it books here because the
+    # venue lifts it at create (`lift`, `aggressor` False: a maker fill). The 393 shares,
+    # the ledger 326 and everything this file pins about the CONFIRMATION are unchanged
+    assert len(_places(v2)) == 1 and _places(v2)[0][3] == 393 and _places(v2)[0][5] == GTC
+    assert b["ledger_net"] == 326 and _census(st2, "exit_take") == 0 and _census(st2, "rest_placed") == 1
     ec = b["last_plan"]["exit_confirm"]
     assert ec["verdict"] == "confirmed" and ec["ticks"] == 2 and ec["snap"] == NET_DROP and ec["prev"] == NET_1715
     assert b["last_plan"]["reduce_ref"] == {"target": 326, "at": NOW - 5}, "the reference moves with the fired exit"
@@ -312,11 +317,11 @@ def test_e25_the_1704_cut_the_venue_shows_is_a_sign_flip_and_fires_as_today(monk
     p, b = _world(monkeypatch, [_fill(M, "BUY", NET_1704, 0.31, NOW - 3000),
                                 _fill(N, "BUY", CUT, 0.70, NOW - 10, detected_at=NOW - 5)],
                   PLAN_1704, ledger=LEDGER_1704)
-    v = _Venue(bid=0.29, ask=0.31, held={SLUG: LEDGER_1704}, ioc_fill=float(LEDGER_1704))
+    v = _Venue(bid=0.29, ask=0.31, held={SLUG: LEDGER_1704}, ioc_fill=float(LEDGER_1704), lift=float(LEDGER_1704))
     st = _tick(p, v, http=_mkt(NET_1704, CUT))
     lp = b["last_plan"]
     assert lp["sign_flip"] is True and lp["kind"] == "flatten_paired" and b["ledger_net"] == 0
-    assert len(_places(v)) == 1 and _places(v)[0][3] == LEDGER_1704 and _places(v)[0][5] == IOC
+    assert len(_places(v)) == 1 and _places(v)[0][3] == LEDGER_1704 and _places(v)[0][5] == GTC
     # the flip close is never guarded (plan_C section 4; FILL_plan 120): nothing of this rule's on a sign flip
     assert "exit_confirm" not in lp and all(_census(st, k) == 0 for k in NEW_NAMES)
 
@@ -330,7 +335,7 @@ def test_e25_the_1704_cut_with_the_venue_one_tick_behind_holds_the_target_zero_f
     p, b = _world(monkeypatch, [_fill(M, "BUY", NET_1704, 0.31, NOW - 3000),
                                 _fill(N, "BUY", CUT, 0.70, NOW - 10, detected_at=NOW - 5)],
                   PLAN_1704, ledger=LEDGER_1704)
-    v = _Venue(bid=0.29, ask=0.31, held={SLUG: LEDGER_1704}, ioc_fill=float(LEDGER_1704))
+    v = _Venue(bid=0.29, ask=0.31, held={SLUG: LEDGER_1704}, ioc_fill=float(LEDGER_1704), lift=float(LEDGER_1704))
     st = _tick(p, v, http=_mkt(NET_1704, 0.0))
     assert not _places(v) and b["ledger_net"] == LEDGER_1704 and _census(st, "exit_unconfirmed") == 1
     lp = b["last_plan"]
@@ -340,7 +345,7 @@ def test_e25_the_1704_cut_with_the_venue_one_tick_behind_holds_the_target_zero_f
     assert lp["exit_confirm"]["kind"] == "flatten_paired" and lp["exit_confirm"]["snap"] == NET_1704
     assert lp["exit_confirm"]["drop"] == NET_1704 and lp["exit_confirm"]["held"]["qty"] == LEDGER_1704
     assert b["last_reason"] == "exit_unconfirmed" and b["state"] == "live"
-    v2 = _Venue(bid=0.29, ask=0.31, held={SLUG: LEDGER_1704}, ioc_fill=float(LEDGER_1704))
+    v2 = _Venue(bid=0.29, ask=0.31, held={SLUG: LEDGER_1704}, ioc_fill=float(LEDGER_1704), lift=float(LEDGER_1704))
     st2 = _tick(p, v2, now=NOW + 45, http=_mkt(NET_1704, CUT))
     # the reading now crosses: a SIGN FLIP -- the flip close is never guarded, the flatten fires as today
     assert b["last_plan"]["sign_flip"] is True and b["ledger_net"] == 0 and len(_places(v2)) == 1
@@ -351,7 +356,7 @@ def test_e25_the_1704_cut_with_the_venue_one_tick_behind_holds_the_target_zero_f
 def test_e25_a_snapshot_that_cannot_be_read_holds_three_ticks_then_the_exit_fires_expired(monkeypatch):
     p, b = _world(monkeypatch, [BUILT, DROP_FILL], PLAN_1715)
     for i, now in enumerate((NOW, NOW + 45, NOW + 90), start=1):
-        v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+        v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
         st = _tick(p, v, now=now, http=WALK)
         assert not _places(v) and b["ledger_net"] == LEDGER_1177, i
         assert _census(st, "exit_unconfirmed") == 1 and _census(st, "exit_confirm_expired") == 0, i
@@ -360,7 +365,7 @@ def test_e25_a_snapshot_that_cannot_be_read_holds_three_ticks_then_the_exit_fire
         assert ec["prev"] == NET_1715 and ec["since"] == NOW - 89.0, "the reference stands across the hold"
         assert b["last_plan"]["reduce_ref"] == {"target": TARGET_1715, "at": NOW - 100.0}
     assert int(rules.MIRROR_EXIT_CONFIRM_MAX_TICKS) == 3
-    v4 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v4 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st4 = _tick(p, v4, now=NOW + 135, http=WALK)
     assert _census(st4, "exit_confirm_expired") == 1 and _census(st4, "exit_unconfirmed") == 0
     assert len(_places(v4)) == 1 and _places(v4)[0][3] == 393 and b["ledger_net"] == 326
@@ -377,10 +382,10 @@ def test_e25_a_lengthened_wait_holds_longer_never_shorter(monkeypatch):
     monkeypatch.setattr(rules, "MIRROR_EXIT_CONFIRM_MAX_TICKS", 4)
     p, b = _world(monkeypatch, [BUILT, DROP_FILL], PLAN_1715)
     for i, now in enumerate((NOW, NOW + 45, NOW + 90, NOW + 135), start=1):
-        v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+        v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
         _tick(p, v, now=now, http=WALK)
         assert not _places(v) and b["last_plan"]["exit_confirm"]["ticks"] == i
-    v5 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v5 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st5 = _tick(p, v5, now=NOW + 180, http=WALK)
     assert _census(st5, "exit_confirm_expired") == 1 and b["ledger_net"] == 326
 
@@ -388,7 +393,7 @@ def test_e25_a_lengthened_wait_holds_longer_never_shorter(monkeypatch):
 def test_e25_a_drop_under_the_threshold_is_todays_reduce_with_no_hold_and_no_name(monkeypatch):
     plan = {**PLAN_1715, "target": 900, "reduce_ref": {"target": 900, "at": NOW - 100.0}}
     p, b = _world(monkeypatch, [BUILT, BACK_FILL], plan, ledger=900)
-    v = _Venue(bid=0.295, ask=0.30, held={SLUG: 900}, ioc_fill=53.0)
+    v = _Venue(bid=0.295, ask=0.30, held={SLUG: 900}, ioc_fill=53.0, lift=53.0)
     st = _tick(p, v, http=_mkt(NET_BACK, 0.0))
     assert b["target"] == 847 and len(_places(v)) == 1 and _places(v)[0][3] == 53 and b["ledger_net"] == 847
     assert "exit_confirm" not in b["last_plan"] and all(_census(st, k) == 0 for k in NEW_NAMES)
@@ -398,7 +403,7 @@ def test_e25_a_rise_is_never_judged_the_entry_goes_as_today(monkeypatch):
     plan = {"kind": "reduce", "reason": "take", "target": 326, "at": NOW - 52.0, "net": NET_DROP,
             "reduce_ref": {"target": 326, "at": NOW - 60.0}}
     p, b = _world(monkeypatch, [BUILT], plan, ledger=326)
-    v = _Venue(bid=0.30, ask=0.31, held={SLUG: 326}, ioc_fill=533.0)
+    v = _Venue(bid=0.30, ask=0.31, held={SLUG: 326}, ioc_fill=533.0, lift=533.0)
     st = _tick(p, v, http=_mkt(NET_1715, 0.0))
     assert b["target"] == 859 and len(_places(v)) == 1 and _places(v)[0][6] == "ORDER_INTENT_BUY_LONG"
     assert b["ledger_net"] > 326
@@ -410,7 +415,7 @@ def test_e25_e15s_witness_is_asked_first_a_reading_drop_with_no_fill_of_his_hold
     it): E15 holds the reduce `reduce_unwitnessed: reading` and E25 never
     judges it -- the drop is judged AFTER E15 admits, never instead."""
     p, b = _world(monkeypatch, [BUILT], PLAN_1715)
-    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st = _tick(p, v, http=_mkt(NET_DROP, 0.0))
     lp = b["last_plan"]
     assert not _places(v) and b["ledger_net"] == LEDGER_1177 and lp["net"] == NET_DROP
@@ -438,18 +443,24 @@ def test_e25_the_witnessed_exit_resting_before_the_drop_keeps_its_life_under_the
     assert (b["last_plan"]["side"], b["last_plan"]["qty"]) == (SELL, 40), "the witnessed 40, never the phantom 433"
     assert not _cancels(v) and not _places(v) and p.orders[o["id"]]["state"] == "open" and b["ledger_net"] == 759
     assert _census(st, "exit_out_of_tol") == 1
-    # the bid arrives inside the cent: the rest is taken for the 40, the phantom 433 still held
-    v2 = _Venue(bid=0.295, ask=0.31, held={SLUG: 759}, ioc_fill=40.0)
+    # the bid arrives inside the cent. E25 pinned the rest CANCELLED and taken for the 40
+    # here. RE-PINNED at E31 (FILL lane 31, 2026-09-10): a bid arriving at a standing rest
+    # is the rest being filled, not a reason to cross for it -- rules.maker_compare_wire
+    # refuses to re-quote a SELL rest toward a bid that came to it -- so the 40 STANDS at
+    # 0.30 and the taker who came to that cent lifts it there. Nothing is cancelled,
+    # nothing is sent, the ledger is unmoved, and the phantom 433 is still held
+    v2 = _Venue(bid=0.295, ask=0.31, held={SLUG: 759}, ioc_fill=40.0, lift=40.0)
     v2.rest("oid-exit", side="SELL", price=0.30, qty=40)
     st2 = _tick(p, v2, now=NOW + 45, http=_mkt(NET_1715, 0.0))
-    assert _census(st2, "exit_take") == 1 and b["ledger_net"] == LEDGER_1177 and _places(v2)[0][3] == 40
+    assert _census(st2, "exit_take") == 0 and b["ledger_net"] == 759 and not _places(v2)
+    assert not _cancels(v2) and _census(st2, "open_order_pending") == 1
     assert _census(st2, "exit_unconfirmed") == 1 and b["last_plan"]["exit_confirm"]["ticks"] == 2
 
 
 def test_e25_the_hold_cancels_a_resting_add_under_its_name_and_the_row_carries_the_name(monkeypatch):
     p, b = _world(monkeypatch, [BUILT, DROP_FILL], PLAN_1715)
     o = p.add_order(b, side=BUY, wire=0.31, qty=140, kind="increase", order_id="oid-add")
-    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     v.rest("oid-add", side="BUY", price=0.31, qty=140)
     st = _tick(p, v, http=_mkt(NET_1715, 0.0))
     assert [c[:2] for c in _cancels(v)] == [("cancel", "oid-add")] and p.orders[o["id"]]["state"] == "cancelled"
@@ -462,7 +473,7 @@ def test_e25_a_plan_with_no_reading_before_it_judges_no_drop_todays_path(monkeyp
     market_unreadable tick): no reference, the reduce fires as today."""
     p, b = _world(monkeypatch, [BUILT, DROP_FILL], {"kind": "no_plan", "at": NOW - 89.0, "market_unreadable": True,
                                                     "reduce_ref": {"target": TARGET_1715, "at": NOW - 100.0}})
-    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st = _tick(p, v, http=_mkt(NET_1715, 0.0))
     assert len(_places(v)) == 1 and b["ledger_net"] == 326 and "exit_confirm" not in b["last_plan"]
     assert all(_census(st, k) == 0 for k in NEW_NAMES)
@@ -484,7 +495,7 @@ def test_e25_the_reference_rides_a_quiet_skip_and_the_drop_after_it_is_judged(mo
     assert b["last_reason"] == "book_quiet_skipped" and b["last_plan"]["exit_ref"] == {"net": NET_1715, "at": NOW}
     p.fills = [_fill(M, "BUY", NET_1715, 0.31, NOW - 3000),
                _fill(N, "BUY", DROP, 0.70, NOW + 50, detected_at=NOW + 55, source="s1")]
-    v3 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=500.0)
+    v3 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=500.0, lift=500.0)
     st3 = _tick(p, v3, now=NOW + 90, http=_mkt(NET_1715, 0.0))
     assert not _places(v3) and _census(st3, "exit_unconfirmed") == 1
     assert b["last_plan"]["exit_confirm"]["prev"] == NET_1715 and b["last_plan"]["exit_confirm"]["since"] == NOW
@@ -493,7 +504,7 @@ def test_e25_the_reference_rides_a_quiet_skip_and_the_drop_after_it_is_judged(mo
 def test_e25_the_fast_tick_plans_the_same_function_and_holds_the_same_way(monkeypatch):
     p, b = _world(monkeypatch, [BUILT, DROP_FILL], PLAN_1715)
     _walk({SLUG: LEDGER_1177})
-    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     fs = _fast(p, v, http=_mkt(NET_1715, 0.0))
     assert _skips(fs) == {} and not _places(v) and b["ledger_net"] == LEDGER_1177
     assert b["last_reason"] == "exit_unconfirmed" and _census(fs, "exit_unconfirmed") == 1
@@ -511,11 +522,11 @@ def test_e25_a_market_unreadable_tick_inside_a_hold_carries_the_hold_and_his_nex
     carry that tick sold 394 @0.29 with none of this rule's names
     (the review's HIGH-2)."""
     p, b = _world(monkeypatch, [BUILT, DROP_FILL], PLAN_1715)
-    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     _tick(p, v, http=_mkt(NET_1715, 0.0))
     assert not _places(v) and b["last_plan"]["exit_confirm"]["ticks"] == 1
     p.raise_on.append(("ml-market", RuntimeError("blip")))
-    v2 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v2 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st2 = _tick(p, v2, now=NOW + 45, http=_mkt(NET_1715, 0.0))
     assert b["last_reason"] == "market_unreadable" and not _places(v2) and _census(st2, "market_unreadable") == 1
     lp2 = b["last_plan"]
@@ -523,12 +534,12 @@ def test_e25_a_market_unreadable_tick_inside_a_hold_carries_the_hold_and_his_nex
     assert lp2["exit_confirm"]["verdict"] == "unconfirmed" and lp2["exit_confirm"]["ticks"] == 1
     assert all(_census(st2, k) == 0 for k in NEW_NAMES)
     p.raise_on.clear()
-    v3 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v3 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st3 = _tick(p, v3, now=NOW + 90, http=_mkt(NET_1715, 0.0))
     assert not _places(v3) and b["last_reason"] == "reduce_unwitnessed", "E15's reset reference holds first"
     assert b["last_plan"]["exit_confirm"]["ticks"] == 1, "the record rides on through E15's hold"
     p.fills = [BUILT, DROP_FILL, _fill(N, "BUY", 10.0, 0.70, NOW + 100, detected_at=NOW + 100, source="s1")]
-    v4 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=400.0)
+    v4 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=400.0, lift=400.0)
     st4 = _tick(p, v4, now=NOW + 135, http=_mkt(NET_1715, 0.0))
     assert not _places(v4) and b["ledger_net"] == LEDGER_1177 and _census(st4, "exit_unconfirmed") == 1
     ec4 = b["last_plan"]["exit_confirm"]
@@ -544,7 +555,7 @@ def test_e25_a_standing_hold_is_never_re_judged_on_the_window(monkeypatch):
     ticks = (NOW, NOW + 300, NOW + 520)
     assert ticks[-1] - (NOW - 89.0) > float(rules.MIRROR_EXIT_CONFIRM_S), "the third held tick is past the window"
     for i, now in enumerate(ticks, start=1):
-        v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+        v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
         st = _tick(p, v, now=now, http=WALK)
         assert not _places(v) and b["ledger_net"] == LEDGER_1177, i
         assert _census(st, "exit_unconfirmed") == 1 and _census(st, "exit_flap_averted") == 0, i
@@ -567,7 +578,7 @@ def test_e25_a_short_books_cover_sized_from_a_sudden_fall_of_his_short_is_held_o
     plan = {"kind": "increase", "reason": "on target", "target": -723, "at": NOW - 51.0, "net": -7234.2,
             "reduce_ref": {"target": -723, "at": NOW - 100.0}}
     b = _short_book(p, ledger=-723, avg=0.43, ratio=0.10, last_plan=plan)
-    v = _Venue(bid=0.36, ask=0.38, held={SLUG: -723}, ioc_fill=540.0)
+    v = _Venue(bid=0.36, ask=0.38, held={SLUG: -723}, ioc_fill=540.0, lift=540.0)
     st = _tick(p, v, http=_mkt(0.0, 7234.2))
     assert not _places(v) and b["ledger_net"] == -723
     assert _census(st, "exit_unconfirmed") == 1 and all(_census(st, k) == 0 for k in NEW_NAMES[1:])
@@ -595,11 +606,11 @@ def test_e25_the_hold_rides_through_a_tick_that_judged_no_exit_and_the_next_redu
     would be tick 2's own 3,262.8, no drop, and the 393 sells (the
     review's MEDIUM-2, mutant M17)."""
     p, b = _world(monkeypatch, [BUILT, DROP_FILL], PLAN_1715)
-    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st = _tick(p, v, http=_mkt(NET_1715, 0.0))
     assert not _places(v) and _census(st, "exit_unconfirmed") == 1 and b["last_plan"]["exit_confirm"]["ticks"] == 1
     p.fills = [_fill(M, "BUY", NET_DROP, 0.31, NOW - 3000)]        # the same low reading, no witness after the reference
-    v2 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v2 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st2 = _tick(p, v2, now=NOW + 45, http=_mkt(NET_1715, 0.0))
     lp2 = b["last_plan"]
     assert not _places(v2) and b["ledger_net"] == LEDGER_1177
@@ -608,7 +619,7 @@ def test_e25_the_hold_rides_through_a_tick_that_judged_no_exit_and_the_next_redu
     assert lp2["exit_confirm"]["verdict"] == "unconfirmed" and lp2["exit_confirm"]["ticks"] == 1
     assert lp2["exit_confirm"]["prev"] == NET_1715, "the record rides on, unmoved"
     p.fills = [BUILT, DROP_FILL]                                     # his fill back in the read: E15 admits
-    v3 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0)
+    v3 = _Venue(bid=0.295, ask=0.30, held={SLUG: LEDGER_1177}, ioc_fill=393.0, lift=393.0)
     st3 = _tick(p, v3, now=NOW + 90, http=_mkt(NET_1715, 0.0))
     assert not _places(v3) and b["ledger_net"] == LEDGER_1177 and _census(st3, "exit_unconfirmed") == 1
     ec3 = b["last_plan"]["exit_confirm"]
@@ -622,25 +633,38 @@ def test_e25_the_frozen_exit_the_act_and_the_vanish_keep_their_readers_byte_for_
     the clipped plan, p_cmp -- an entry change, not this lane's):
     42e08939276dcd0a -> bbe3cae4167edb41; then E27 (FILL lane 27, docs 69:
     the take's tolerance, the short's band arm and at-level take in _act)
-    -> 59efb48ba79f793c."""
-    for name, digest in {"_act": "59efb48ba79f793c", "_exit_take": "750acd709c826566",
-                         "_flatten_vanished": "22930dc6e3e85816", "_frozen_exit": "ef478fabdfa2ccc0",
+    -> 59efb48ba79f793c.
+
+    RE-PINNED at E31 (FILL lane 31, 2026-09-10: every order a post-only
+    rest that never crosses). Two of the ten moved and one is DELETED:
+      _act              59efb48ba79f793c -> 2e7043299fbf834a (the six take arms gone,
+                        and the fold's `maker_no_cent` hold: a standing rest is never
+                        cancelled because this tick has no cent -- review CRITICAL-2)
+      _flatten_vanished 22930dc6e3e85816 -> 7f27e3b041da0c76 (the slippage leg gone;
+                                            the unpriced vanish rests at the touch)
+      _exit_take        750acd709c826566 -> DELETED with the exit's IOC
+    The other seven -- the frozen exit, the close, the two fast readers,
+    the gone-confirmation and the two readings this lane's rule is built
+    on -- are byte for byte 09b35cd's through six lanes."""
+    for name, digest in {"_act": "2e7043299fbf834a",
+                         "_flatten_vanished": "7f27e3b041da0c76", "_frozen_exit": "ef478fabdfa2ccc0",
                          "_maybe_close_episode": "59e28ff01f960660", "_fast_gate": "1932811194268668",
                          "_fast_book": "286e6fa4663c3887", "_confirm_gone": "61e425dcf38e1285",
                          "_net_for": "7d9cea6364462ac6", "_drift_for": "0b124feab3c8f6a3"}.items():
         assert _sha(getattr(ml, name)) == digest, name
+    assert not hasattr(ml, "_exit_take"), "E31: the exit take's wrapper is gone"
 
 
 # ------------------------------------------------------------ (4) the census place, the emit sites, no knob
 
 def test_e25_the_census_place_the_emit_sites_and_no_knob_no_migration_no_decision_word():
     keys = ml.CENSUS_KEYS
-    assert keys[-27:-23] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-31:-27] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
-    assert keys[-37:-31] == ("cancel_fill_late", "cancel_fill_unread", "disagree_fill_adopted", "disagree_fill_unread",
+    assert keys[-37:-33] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-41:-37] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
+    assert keys[-47:-41] == ("cancel_fill_late", "cancel_fill_unread", "disagree_fill_adopted", "disagree_fill_unread",
                              "disagree_fill_unexplained", "disagree_fill_ambiguous")
     # E29 (FILL lane 29): four names before drift_smaller_open, 237 -> 241 (this block -17:-13 -> -21:-17); E28's five then land between E25's and E29's: 246 keys, this block -26:-22
-    assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys) and len(keys) == 247
+    assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys) and len(keys) == 257
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     tb = inspect.getsource(ml._tick_book)
     for name in NEW_NAMES:

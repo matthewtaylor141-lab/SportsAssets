@@ -28,6 +28,27 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails (
 
 GTC = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
 IOC = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+GTC = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+# RE-PINNED at E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never
+# crosses; owner order ~03:3xZ "become a maker not taker ... mirror him to a tee"). This
+# lane's rule -- the flow reading, the witness, the ratchet, the arithmetic and every
+# refusal -- is untouched. What moves is the EXECUTION under it, mechanically and in one
+# direction, and it moves the same way on every pin below:
+#   the exit's cent 0.69 -> 0.70   E4's exit take was ceil(his) less MIRROR_EXIT_TOL and
+#                                  CROSSED at it; the maker wire is max(sell_wire(his),
+#                                  bid + 0.01) = 0.70, HIS OWN cent, a cent better and
+#                                  never through the bid.
+#   the entry's cent, where the bid was under his level: joined the BID
+#                                  (buy_price(his, bid)); now min(buy_wire(his), ask -
+#                                  0.01), his own cent inside the spread.
+#   IOC -> GTC, post-only          there is no take path left in the worker.
+#   `exit_take` 1 -> 0             the counter counted the exit's IOC; it is a declared
+#                                  zero from E31, and `rest_placed` counts in its place.
+#   `lift=` beside `ioc_fill=`     the shares a TAKER lifts off the fresh rest at create
+#                                  (`aggressor` False: a maker fill), which books exactly
+#                                  the ledger the IOC booked, so every ledger figure and
+#                                  every target below is unchanged.
+
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 
 
@@ -85,7 +106,9 @@ def test_q1_addendum_a_a_market_mapped_three_minutes_after_his_first_fills_is_al
     p2, v2, http2 = _world(monkeypatch, fills, 10_000, 0.61, 0.63)   # mark 0.62: 1c over
     st2 = _tick(p2, v2, http=http2)
     b2 = _one_book(p2)
-    assert (b2["flow_base"], b2["target"]) == (0.0, 1_000) and _places(v2)[0][1:5] == (SLUG, 0.61, 1_000, False)
+    # E31: 0.61 -> 0.62. The entry rested at buy_price(his, bid) = the BID 0.61; the maker
+    # wire is min(buy_wire(his 0.62), 0.63 - 0.01) = 0.62, his own cent inside the spread
+    assert (b2["flow_base"], b2["target"]) == (0.0, 1_000) and _places(v2)[0][1:5] == (SLUG, 0.62, 1_000, False)
     assert _census(st2, "open_catchup") == 1 and b2["last_plan"]["catchup"]["why"] == "within_tol"
 
 
@@ -185,10 +208,10 @@ def test_q2_his_sale_to_100_of_21000_is_our_full_exit_at_his_price(monkeypatch):
              _fill(M, "SELL", 20_900, 0.70, NOW - 100)]
     p = _pool(fills=fills, snap={M: 100.0, N: 0.0})
     b = _flow_book(p, ledger=100, flow_base=20_000.0, flow_last_net=21_000.0)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0, lift=100.0)
     st = _tick(p, v, http=_mkt(100.0))
     assert b["target"] == 0 and round(b["flow_base"], 3) == round(20_000 * 100 / 21_000, 3)
-    assert _places(v)[0][2:6] == (0.69, 100, True, IOC) and _census(st, "exit_take") == 1
+    assert _places(v)[0][2:6] == (0.70, 100, True, GTC) and _census(st, "exit_take") == 0
     assert b["last_plan"]["exit_px"] == 0.70 and b["ledger_net"] == 0
 
 
@@ -430,10 +453,10 @@ def test_fold_h2_his_25_percent_sale_witnessed_by_his_fill_ratchets_25_percent_a
         _rails_2026_09_06(monkeypatch)
         p = _pool(fills=fills, snap={M: 8_250.0, N: 0.0})
         b = _flow_book(p)
-        v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+        v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0)
         st = _tick(p, v, http=_mkt(reading))
         assert (b["flow_base"], b["flow_last_net"], b["target"]) == (7_500.0, 8_250.0, 75), reading
-        assert _places(v)[0][2:6] == (0.69, 25, True, IOC) and _census(st, "exit_take") == 1, reading
+        assert _places(v)[0][2:6] == (0.70, 25, True, GTC) and _census(st, "exit_take") == 0, reading
         lp = b["last_plan"]
         assert lp["flow_ratchet"] == {"from": 10_000.0, "to": 7_500.0} and lp["exit_px"] == 0.70, reading
         assert lp.get("flow_reading", {}).get("why") == named and lp["kind"] == "reduce", reading
@@ -449,13 +472,13 @@ def test_fold_h2_his_full_exit_witnessed_by_his_fill_is_our_full_exit(monkeypatc
              _fill(M, "SELL", 11_000, 0.70, NOW - 100)]
     p = _pool(fills=fills, snap={M: 0.0, N: 0.0})
     b = _flow_book(p)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0, lift=100.0)
     st = _tick(p, v, http=_gone())
     assert (b["flow_base"], b["flow_last_net"], b["target"], b["ledger_net"]) == (0.0, 0.0, 0, 0)
     lp = b["last_plan"]
     assert lp["kind"] == "flatten_vanished" and lp["flow_ratchet"] == {"from": 10_000.0, "to": 0.0}
     assert "flow_reading" not in lp and lp["exit_px_src"] == "his_fill" and lp.get("flow_wait") is None
-    assert _places(v)[0][2:6] == (0.69, 100, True, IOC) and _census(st, "exit_take") == 1
+    assert _places(v)[0][2:6] == (0.70, 100, True, GTC) and _census(st, "exit_take") == 0
 
 
 def test_fold_h2_the_reference_at_open_is_his_fills_net_not_the_reading(monkeypatch):
@@ -569,16 +592,16 @@ def test_fold_review_h2_a_sale_the_venue_shows_before_his_fill_lands_reduces_on_
     fills = [_fill(M, "BUY", 10_000, 0.29, NOW - 9000), _fill(M, "BUY", 1_000, 0.71, NOW - 3000)]
     p = _pool(fills=fills, snap={M: 8_250.0, N: 0.0})
     b = _flow_book(p)
-    v1 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v1 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0)
     st1 = _tick(p, v1, http=_mkt(8_250.0))
     assert (b["flow_base"], b["flow_last_net"], b["target"]) == (10_000.0, 11_000.0, 100)
     assert b["last_plan"]["flow_reading"] == {"why": "flow_reading_disagree", "reading": 8_250.0, "fills": 11_000.0}
     assert not _places(v1) and not _sent(p, "ml-book-flow") and _census(st1, "exit_take") == 0
     p.fills.append(_fill(M, "SELL", 2_750, 0.70, NOW - 100, detected_at=NOW + 115, source="poll"))
-    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0)
     st2 = _tick(p, v2, now=NOW + 120, http=_mkt(8_250.0))
     assert (b["flow_base"], b["flow_last_net"], b["target"]) == (7_500.0, 8_250.0, 75)
-    assert _places(v2)[0][2:6] == (0.69, 25, True, IOC) and _census(st2, "exit_take") == 1
+    assert _places(v2)[0][2:6] == (0.70, 25, True, GTC) and _census(st2, "exit_take") == 0
     assert b["last_plan"]["flow_ratchet"] == {"from": 10_000.0, "to": 7_500.0} and "flow_reading" not in b["last_plan"]
 
 
@@ -604,7 +627,7 @@ def test_fold_review_h2_two_reducing_fills_in_one_tick_telescope_and_a_reduce_wi
     p2 = _pool(fills=fills[:2] + [_fill(M, "SELL", 2_000, 0.70, NOW - 100), _fill(M, "SELL", 750, 0.70, NOW - 90)],
                snap={M: 8_250.0, N: 0.0})
     b2 = _flow_book(p2)
-    _tick(p2, _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0), http=_mkt(8_250.0))
+    _tick(p2, _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0), http=_mkt(8_250.0))
     assert (b2["flow_base"], b2["target"]) == (7_500.0, 75) and len(_sent(p2, "ml-book-flow")) == 1
 
 
@@ -616,7 +639,7 @@ def test_fold_review_h2_the_witnessed_fall_is_applied_once_the_next_tick_writes_
              _fill(M, "SELL", 2_750, 0.70, NOW - 100)]
     p = _pool(fills=fills, snap={M: 8_250.0, N: 0.0})
     b = _flow_book(p)
-    _tick(p, _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0), http=_mkt(8_250.0))
+    _tick(p, _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0, lift=25.0), http=_mkt(8_250.0))
     assert (b["flow_base"], b["flow_last_net"], b["ledger_net"]) == (7_500.0, 8_250.0, 75)
     writes = len(_sent(p, "ml-book-flow"))
     v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 75})
@@ -635,7 +658,7 @@ def test_fold_review_h2_the_vanish_confirmation_still_reads_the_venue_but_never_
     fills = [_fill(M, "BUY", 10_000, 0.29, NOW - 9000), _fill(M, "BUY", 1_000, 0.71, NOW - 3000)]
     p = _pool(fills=fills, snap={M: 0.0, N: 0.0})
     b = _flow_book(p)
-    v1 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0)
+    v1 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0, lift=100.0)
     _tick(p, v1, http=_gone())
     assert b["flow_base"] == 10_000.0 and not _sent(p, "ml-book-flow")
     assert b["last_plan"].get("flow_reading", {}).get("why") == "flow_reading_zero"

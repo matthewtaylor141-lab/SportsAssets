@@ -294,7 +294,10 @@ def test_e12_the_same_market_with_the_mark_within_two_cents_of_his_cost_catches_
     b = _one_book(p)
     assert (b["flow_base"], b["flow_last_net"], b["target"]) == (0.0, 11_000.0, 1_100)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.29, 1_100, False) and pl[0][5] == GTC_TIF
+    # E31 (FILL lane 31, 2026-09-10): the entry rests at the maker wire
+    # min(buy_wire(his 0.30), ask 0.31 - MAKER_TICK) = 0.30, where it joined the
+    # bid at 0.29. The catch-up verdict and the size are the subject and hold
+    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.30, 1_100, False) and pl[0][5] == GTC_TIF
     assert _census(st, "open_catchup") == 1 and _census(st, "open_flow_only") == 0
     lp = b["last_plan"]
     assert lp["catchup"] == {"vwap": 0.29, "mark": 0.30, "tol": 2.0, "allowed": True,
@@ -310,7 +313,7 @@ def test_e12_the_tolerance_lowered_to_zero_never_catches_up(monkeypatch):
     st = _tick(p, v, http=http)
     b = _one_book(p)
     assert (b["flow_base"], b["target"]) == (10_000.0, 100)
-    assert _places(v)[0][1:5] == (SLUG, 0.29, 100, False)
+    assert _places(v)[0][1:5] == (SLUG, 0.30, 100, False)   # E31: the maker wire, was the bid 0.29
     assert _census(st, "open_flow_only") == 1 and _census(st, "open_catchup") == 0
     assert b["last_plan"]["catchup"]["why"] == "tol_zero" and b["last_plan"]["catchup"]["tol"] == 0.0
 
@@ -383,12 +386,19 @@ def test_e12_his_25_percent_sale_after_a_flow_only_open_is_our_25_percent_reduce
     fills = _block_and_add(add_at=NOW - 3000) + [_fill(M, "SELL", 2_750, 0.70, NOW - 100)]
     p = _pool(fills=fills, snap={M: 8_250.0, N: 0.0})
     b = _flow_book(p)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, lift=25.0)
     st = _tick(p, v, http=_mkt(8_250.0))
     assert (b["flow_base"], b["flow_last_net"], b["target"]) == (7_500.0, 8_250.0, 75)
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][2:6] == (0.69, 25, True, IOC_TIF)
-    assert _census(st, "exit_take") == 1 and _census(st, "filled_take") == 1 and b["ledger_net"] == 75
+    # E31: the reduce is a post-only rest at the maker wire
+    # max(sell_wire(his 0.70), bid 0.69 + MAKER_TICK) = 0.70, GTC, lifted at
+    # create by the taker who came for it -- never an IOC at the bid 0.69.
+    # `exit_take` is retired and `filled_take` now counts only a rest the venue
+    # filled AS A TAKER (aggressor True); this fill is ours as the maker
+    assert len(pl) == 1 and pl[0][2:6] == (0.70, 25, True, GTC_TIF)
+    assert _census(st, "exit_take") == 0 and _census(st, "filled_take") == 0
+    assert _census(st, "filled_rest") == 1 and _census(st, "maker_fill_at_create") == 1
+    assert b["ledger_net"] == 75
     lp = b["last_plan"]
     assert lp["flow_ratchet"] == {"from": 10_000.0, "to": 7_500.0}
     assert lp["flow_base"] == 7_500.0 and lp["flow_net"] == 750.0 and lp["kind"] == "reduce"
@@ -413,11 +423,13 @@ def test_e12_his_full_exit_is_our_full_exit_and_the_block_is_zero(monkeypatch):
     fills = _block_and_add(add_at=NOW - 3000) + [_fill(M, "SELL", 11_000, 0.70, NOW - 100)]
     p = _pool(fills=fills, snap={M: 0.0, N: 0.0})
     b = _flow_book(p)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, lift=100.0)
     st = _tick(p, v, http=_gone())
     assert (b["flow_base"], b["flow_last_net"], b["target"]) == (0.0, 0.0, 0)
     assert b["last_plan"]["kind"] == "flatten_vanished" and b["last_plan"]["exit_px_src"] == "his_fill"
-    assert [c[2:6] for c in _places(v)] == [(0.69, 100, True, IOC_TIF)] and _census(st, "exit_take") == 1
+    # E31: the whole exit is one post-only rest at his cent 0.70, lifted at create
+    assert [c[2:6] for c in _places(v)] == [(0.70, 100, True, GTC_TIF)] and _census(st, "exit_take") == 0
+    assert _census(st, "filled_rest") == 1
     assert b["ledger_net"] == 0 and b["last_plan"]["flow_ratchet"] == {"from": 10_000.0, "to": 0.0}
     assert b["last_plan"].get("flow_wait") is None, "the block is gone: the flat clock is the close's"
 
@@ -508,8 +520,10 @@ def test_e12_the_sign_flip_keeps_its_rule_on_a_flow_book(monkeypatch):
     lp = b["last_plan"]
     assert lp["sign_flip"] is True and b["target"] == 0 and b["flow_base"] == 0.0
     assert lp["kind"] == "flatten_paired" and _census(st, "sign_flip") == 1
-    # the flip's SELL IOC (filled nothing), then E14b's same-tick rest of the 100 at his cent
-    assert [c[2:6] for c in _places(v)] == [(0.69, 100, True, IOC_TIF), (0.70, 100, True, GTC_TIF)]
+    # E31: the flip's half is ONE post-only rest of the 100 at his cent 0.70 --
+    # where it was a SELL IOC at the bid that filled nothing and then E14b's
+    # same-tick re-rest of the same 100. One order now, not two
+    assert [c[2:6] for c in _places(v)] == [(0.70, 100, True, GTC_TIF)]
 
 
 # ------------------------------------------------ the old rule, byte for byte
@@ -522,7 +536,9 @@ def test_e12_an_existing_book_with_flow_base_null_behaves_exactly_as_before():
     assert b["flow_base"] is None and b["flow_last_net"] is None
     v = _Venue(bid=0.30, ask=0.32)
     st = _tick(p, v)
-    assert b["target"] == 300 and _places(v)[0][1:5] == (SLUG, 0.30, 300, False)
+    # E31: the fixture world's entry rests at his cent 0.31 (the maker wire
+    # min(buy_wire(0.31), ask 0.32 - MAKER_TICK)), where it joined the bid at 0.30
+    assert b["target"] == 300 and _places(v)[0][1:5] == (SLUG, 0.31, 300, False)
     lp = b["last_plan"]
     assert not ({"flow_base", "flow_net", "flow_ratchet", "flow_wait", "catchup"} & set(lp))
     assert not _sent(p, "ml-book-flow") and _census(st, "open_flow_only") == 0 == _census(st, "open_catchup")
@@ -532,7 +548,7 @@ def test_e12_an_existing_book_with_flow_base_null_behaves_exactly_as_before():
     b2 = p2.add_book(ledger=0, flow_base=0.0, flow_last_net=300.0)
     v2 = _Venue(bid=0.30, ask=0.32)
     _tick(p2, v2)
-    assert b2["target"] == 300 and _places(v2)[0][1:5] == (SLUG, 0.30, 300, False)
+    assert b2["target"] == 300 and _places(v2)[0][1:5] == (SLUG, 0.31, 300, False)   # E31: the maker wire
     assert b2["last_plan"]["flow_base"] == 0.0 and b2["last_plan"]["flow_net"] == 300.0
     assert b2["last_plan"].get("flow_wait") is None and not _sent(p2, "ml-book-flow")
 

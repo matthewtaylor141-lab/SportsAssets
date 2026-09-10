@@ -61,6 +61,9 @@ def test_flow_books_is_read_only_and_sits_after_books_new_with_the_order_pins_un
     assert names.index("flow-books") == names.index("books-new") + 1
     assert names.index("exits-paired") == names.index("nf-venue") + 1 and names[-1] == "hourly"
     assert "books-new|flow-books|nf-his|" in line
-    assert "nf-venue|exits-paired|take-band|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line   # FILL lane 0b's three
+    # E31 (FILL lane 31, 2026-09-10): `maker-rests` is one more read preset and
+    # sits between take-band and exits-band, so the tail gains it
+    assert ("nf-venue|exits-paired|take-band|maker-rests|exits-band|closed-while-he-traded"
+            "|fill-answers|hourly (got") in line   # FILL lane 0b's three, plus lane 31's
     hourly, _ = _preset(text, "hourly")
     assert "catchup_side" not in hourly and "flow_last_net" not in hourly, "the hourly line is its presets' SQL and no more"

@@ -74,10 +74,14 @@ def test_r2_a_sale_and_a_readd_in_one_tick_apply_the_fall_and_under_mirror_the_r
              _fill(M, "BUY", 2_000, 0.72, NOW - 90, detected_at=NOW - 85)]
     p = _pool(fills=fills, snap={M: 10_000.0, N: 0.0})
     b = _flow_book(p)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=10.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, lift=10.0)
     _tick(p, v, http=_mkt(10_000.0))
     assert (b["flow_base"], b["flow_last_net"], b["target"]) == (round(10_000 * 10 / 11, 6), 10_000.0, 90)
-    assert _places(v)[0][2:6] == (0.69, 10, True, IOC) and "flow_fills_shrank" not in b["last_plan"]
+    # E31 (FILL lane 31, 2026-09-10): the exit is a POST-ONLY REST at the maker
+    # wire max(sell_wire(his 0.70), bid 0.69 + MAKER_TICK) = 0.70, GTC, and the
+    # fill is a taker lifting it at create -- where it was ONE IOC at the bid
+    # 0.69. The ratchet arithmetic this test pins is untouched
+    assert _places(v)[0][2:6] == (0.70, 10, True, GTC) and "flow_fills_shrank" not in b["last_plan"]
 
 
 def test_r3_finding_an_inflated_reducing_leg_corrected_by_its_chain_row_reads_the_correction_as_flow_and_buys(monkeypatch):
@@ -100,7 +104,7 @@ def test_r3_finding_an_inflated_reducing_leg_corrected_by_its_chain_row_reads_th
     leg = _fill(M, "SELL", 2_750, 0.70, NOW - 100, detected_at=NOW - 95, source="poll")
     p = _pool(fills=[block, add, leg], snap={M: 8_250.0, N: 0.0})
     b = _flow_book(p)
-    v1 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v1 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, lift=25.0)
     _tick(p, v1, http=_mkt(8_250.0))
     assert (b["flow_base"], b["flow_last_net"], b["ledger_net"]) == (7_500.0, 8_250.0, 75)
     # the chain row: the same tx's true size, the poll leg collapsed away
@@ -148,31 +152,48 @@ def test_r4_finding_the_sticky_hold_stalls_the_take_of_his_witnessed_exit_while_
     the shrink still named; the ticks after, with no rest standing and
     the fall still unwitnessed, place nothing. The name is the review's;
     the pin is the fix."""
+    # E31 (FILL lane 31, 2026-09-10): THE STANDING EXIT IS NOT TAKEN, IT IS HIT.
+    # The bid coming to 0.69, within MIRROR_EXIT_TOL of his 0.70, used to cancel
+    # this rest and cross with ONE IOC at 0.69. The rest now STANDS at his cent
+    # and the taker who came to it fills it there: no cancel, no second order,
+    # `open_order_pending` where it read `exit_take`, and the ledger moves on the
+    # tick the venue reports the fill. What this test exists for -- that the
+    # HOLD does not take the standing reduce's life away, and that the plan is
+    # capped at the rest's own quantity -- is read below exactly as before.
     p, b, o = _rest_world(monkeypatch, 10_000)
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100})
     v.rest("oid-exit", side="SELL", price=0.70, qty=25)
     st = _tick(p, v, http=_mkt(8_250.0))
-    assert _census(st, "exit_take") == 1 and b["ledger_net"] == 75 and "flow_hold" not in b["last_plan"]
-    assert [c[:2] for c in _cancels(v)] == [("cancel", "oid-exit")] and _places(v)[0][2:6] == (0.69, 25, True, IOC)
-    # the hold: the take fires on the first tick, capped at the rest's 25
+    assert _census(st, "exit_take") == 0 and _census(st, "open_order_pending") == 1
+    assert not _cancels(v) and not _places(v) and b["ledger_net"] == 100
+    assert "flow_hold" not in b["last_plan"]
+    # and the tick the taker comes: filled where it stood, the ledger to 75
+    va = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, fills={"oid-exit": (25.0, 0.70)})
+    va.orders = v.orders
+    sta = _tick(p, va, now=NOW + 30, http=_mkt(8_250.0))
+    assert _census(sta, "filled_rest") == 1 and b["ledger_net"] == 75 and not _places(va)
+    # the hold: the plan is capped at the rest's 25 on the first tick
     p2, b2, o2 = _rest_world(monkeypatch, 9_500)
-    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v2 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100})
     v2.rest("oid-exit", side="SELL", price=0.70, qty=25)
     st2 = _tick(p2, v2, http=_mkt(7_750.0))
     lp = b2["last_plan"]
-    assert _census(st2, "exit_take") == 1 and _places(v2)[0][2:6] == (0.69, 25, True, IOC)
-    assert [c[:2] for c in _cancels(v2)] == [("cancel", "oid-exit")] and b2["ledger_net"] == 75
+    assert _census(st2, "exit_take") == 0 and _census(st2, "open_order_pending") == 1
+    assert not _places(v2) and not _cancels(v2) and b2["ledger_net"] == 100
     assert (lp["flow_hold"]["kind"], lp["flow_hold"]["qty"], lp["flow_hold"]["cap"]) == ("reduce", 75, 25)
     assert lp["open_order"] == o2["id"] and (lp["side"], lp["qty"]) == (SELL, 25) and b2["flow_base"] == 7_500.0
     assert lp["flow_fills_shrank"] == {"from": 8_250.0, "to": 7_750.0, "unexplained": 500.0, "witnessed": 0.0}
-    # the ticks after: nothing rests, the fall is still unwitnessed -- the reduce of 50 is held, nothing placed
+    # the ticks after: the rest keeps standing at the cap, the fall still
+    # unwitnessed -- nothing new placed and nothing cancelled, which is what
+    # the fold's "the hold suppresses NEW reduces only" means with a maker rest
     for i in (1, 2):
-        v3 = _Venue(bid=0.69, ask=0.71, held={SLUG: 75}, ioc_fill=50.0)
+        v3 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100})
+        v3.orders = v2.orders
         st3 = _tick(p2, v3, now=NOW + 30 * i, http=_mkt(7_750.0))
         lp3 = b2["last_plan"]
         assert _census(st3, "exit_take") == 0 and not _places(v3) and not _cancels(v3), i
-        assert (lp3["flow_hold"]["kind"], lp3["flow_hold"]["qty"]) == ("reduce", 50) and "cap" not in lp3["flow_hold"], i
-        assert b2["last_reason"] == "flow_fills_shrank" and b2["ledger_net"] == 75 and b2["flow_base"] == 7_500.0, i
+        assert (lp3["flow_hold"]["kind"], lp3["flow_hold"]["qty"], lp3["flow_hold"]["cap"]) == ("reduce", 75, 25), i
+        assert b2["last_reason"] == "open_order_pending" and b2["ledger_net"] == 100 and b2["flow_base"] == 7_500.0, i
     assert abs(0.69 - 0.70) <= float(rules.MIRROR_EXIT_TOL) + 1e-9
     # by source: the hold's standing exit goes through _act with its capped plan; no branch skips it
     src = inspect.getsource(ml._tick_book)
@@ -196,13 +217,16 @@ def test_r5_two_ticks_of_collapses_then_his_sale_apply_the_witnessed_share_and_n
     p.fills[:] = [OLD, _fill(M, "BUY", 10_500, 0.71, NOW - 100, source="chain"),
                   _fill(M, "SELL", 2_750, 0.70, NOW + 80, detected_at=NOW + 85)]
     p.snap[M] = 107_750.0
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 1_164}, ioc_fill=200.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 1_164}, lift=200.0)
     _tick(p, v, now=NOW + 90, http=_mkt(107_750.0))
     fb = round(100_000 * (111_640 - 2_750) / 111_640, 6)
     assert (b["flow_base"], b["flow_last_net"], b["flow_last_at"]) == (fb, 107_750.0, NOW + 85)
     assert b["last_plan"]["flow_fills_shrank"] == {"from": 111_640.0, "to": 107_750.0, "unexplained": 1_140.0, "witnessed": 2_750.0}
     assert b["target"] == int(rules.mirror_target(0.10, 107_750.0 - fb, 0.70, 2500.0, cap_usd=2500.0)["target"])
-    assert _places(v)[0][2:6] == (0.69, 1_164 - b["target"], True, IOC)
+    # E31: the reduce is a post-only rest at the maker wire
+    # max(sell_wire(his 0.70), bid 0.69 + MAKER_TICK) = 0.70, GTC, lifted at
+    # create -- where it was ONE IOC at the bid 0.69
+    assert _places(v)[0][2:6] == (0.70, 1_164 - b["target"], True, GTC)
 
 
 def test_r6_the_residual_block_after_a_part_witnessed_crossing_under_mirrors_his_rebuy():
@@ -253,7 +277,7 @@ def test_r8_the_reference_clock_reads_a_stamp_only_newest_fill_and_the_row_carri
              _fill(M, "SELL", 2_750, 0.70, NOW - 100, detected_at=NOW - 95)]
     p = _pool(fills=fills, snap={M: 8_250.0, N: 0.0})
     b = _flow_book(p, flow_last_at=NOW - 2995)          # the row as a restarted process reads it
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=25.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, lift=25.0)
     _tick(p, v, http=_mkt(8_250.0))
     assert (b["flow_base"], b["flow_last_net"], b["flow_last_at"], b["ledger_net"]) == (7_500.0, 8_250.0, NOW - 95, 75)
     assert _sent(p, "ml-book-flow")[0][1] == (b["id"], 7_500.0, 8_250.0, NOW - 95)
@@ -347,13 +371,16 @@ def test_f3_the_holds_cap_is_the_outstanding_of_the_last_witnessed_state_after_a
     sale = _fill(M, "SELL", 2_750, 0.70, NOW - 100, detected_at=NOW - 95)
     p = _pool(fills=[block, add, sale], snap={M: 8_250.0, N: 0.0})
     b = _flow_book(p)
-    v1 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=10.0)
+    v1 = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, lift=10.0)
     _tick(p, v1, http=_mkt(8_250.0))
     assert (b["flow_base"], b["flow_last_net"], b["ledger_net"], b["target"]) == (7_500.0, 8_250.0, 90, 75)
-    # E14b (FILL lane 1): the IOC's unfilled 15 rests at his cent 0.70 the
-    # SAME tick (the pin read "nothing rests" before it), and it is the
-    # standing rest the hold's cap reads on the next tick
-    assert [c[2:6] for c in _places(v1)] == [(0.69, 25, True, IOC), (0.70, 15, True, GTC)]
+    # E14b (FILL lane 1) RE-PINNED AT E31: there is no IOC and no unfilled
+    # remainder to re-rest. ONE post-only rest of 25 goes out at his cent 0.70
+    # (the maker wire max(sell_wire(0.70), bid 0.69 + MAKER_TICK)); a taker
+    # lifts 10 of it at create and the other 15 STAY ON THE BOOK in the same
+    # order -- which is the rest the hold's cap reads on the next tick, exactly
+    # as the re-rested 15 were
+    assert [c[2:6] for c in _places(v1)] == [(0.70, 25, True, GTC)]
     p.fills[:] = [_fill(M, "BUY", 9_500, 0.29, NOW - 9000), add, sale]     # the block's row 500 smaller
     p.snap[M] = 7_750.0
     v2 = _Venue(bid=0.68, ask=0.71, held={SLUG: 90})
@@ -363,6 +390,7 @@ def test_f3_the_holds_cap_is_the_outstanding_of_the_last_witnessed_state_after_a
     assert (b["flow_base"], b["flow_last_net"], b["ledger_net"]) == (7_500.0, 8_250.0, 90)
     assert lp["flow_fills_shrank"]["witnessed"] == 0.0 and lp["flow_hold"]["cap"] == 15 and (lp["side"], lp["qty"]) == (SELL, 15)
     assert not _places(v2) and not _cancels(v2), "the 15 already rest at his cent; the hold keeps them"
+    assert p.orders[b["open_order_id"]]["qty"] == 25 and p.orders[b["open_order_id"]]["booked_filled"] == 10.0
 
 
 def test_f4_a_witnessed_full_exit_under_a_hold_is_the_full_exit(monkeypatch):
@@ -378,10 +406,15 @@ def test_f4_a_witnessed_full_exit_under_a_hold_is_the_full_exit(monkeypatch):
     assert b["last_reason"] == "flow_fills_shrank" and (b["flow_base"], b["flow_last_net"]) == (10_000.0, 11_000.0)
     p.fills[:] = [_fill(M, "BUY", 9_500, 0.29, NOW - 9000), add, _fill(M, "SELL", 10_500, 0.70, NOW + 10, detected_at=NOW + 15)]
     p.snap[M] = 0.0
-    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, ioc_fill=100.0)
+    v = _Venue(bid=0.69, ask=0.71, held={SLUG: 100}, lift=100.0)
     st = _tick(p, v, now=NOW + 30, http=_gone())
-    assert b["ledger_net"] == 0 and b["target"] == 0 and _census(st, "exit_take") == 1
-    assert _places(v)[0][2:6] == (0.69, 100, True, IOC) and b["last_plan"]["kind"] == "flatten_vanished"
+    # E31: the whole 100 leave as ONE post-only rest at his cent 0.70, lifted at
+    # create -- `filled_rest` beside `maker_fill_at_create` where it was
+    # `exit_take`, and the vanish is `flatten_rested` as every flatten now is
+    assert b["ledger_net"] == 0 and b["target"] == 0 and _census(st, "exit_take") == 0
+    assert _census(st, "filled_rest") == 1 and _census(st, "maker_fill_at_create") == 1
+    assert _census(st, "flatten_rested") == 1
+    assert _places(v)[0][2:6] == (0.70, 100, True, GTC) and b["last_plan"]["kind"] == "flatten_vanished"
 
 
 def test_f5_the_references_target_moves_with_the_mark_on_a_capped_book_the_caps_own_rule():

@@ -112,7 +112,11 @@ def test_a_second_market_of_a_game_over_2500_is_sized_at_the_full_ten_percent(mo
     assert b["last_plan"]["game_room"] is None and b["last_plan"]["game_exposure"] == 1800.0
     assert b["last_plan"]["target_raw"] == 3000.0
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.49, 3000, False), pl
+    # E31 (FILL lane 31, 2026-09-10): the entry rests at the maker wire
+    # min(buy_wire(his 0.50), ask - MAKER_TICK) = 0.50, where it joined the bid
+    # at 0.49. The SIZING is this test's subject and is untouched ($1,500 at the
+    # wire now, still under the per-order clip)
+    assert len(pl) == 1 and pl[0][1:5] == (SLUG, 0.50, 3000, False), pl
     for k in ("game_cap_scaled", "game_cap_full", "game_unreadable"):
         assert _census(st, k) == 0, k
     json.dumps(b["last_plan"], default=str, allow_nan=False)
@@ -124,8 +128,13 @@ def test_a_market_whose_ten_percent_is_over_2500_at_the_mark_is_reached_across_m
     10% = 10,000 sh at 0.50 = $5,000 at the mark. The per-market cap
     once scaled it to 5,000 sh; per trade the target is 10,000 and the
     per-order clip (MIRROR_CLIP_USD $2,500 at the wire) sizes the FIRST
-    rest at 5,102 sh -- the rest of the target follows on later ticks,
-    each rest at most $2,500."""
+    rest -- the rest of the target follows on later ticks, each rest at
+    most $2,500.
+
+    RE-PINNED AT E31 (FILL lane 31, 2026-09-10): the wire the clip divides is
+    the maker wire min(buy_wire(his 0.50), ask - MAKER_TICK) = 0.50, not the
+    bid 0.49, so the first rest is $2,500 / 0.50 = 5,000 shares where it was
+    5,102. The clip's rule is the subject and is unchanged."""
     p, a, b, v, http = _game_world(monkeypatch, his_b=100000.0)
     # the shadow's own row is CAPPED at its $2,500 (5,000 sh at 0.50): the
     # live check reconstructs the raw and re-caps at this lane's cap, so
@@ -135,10 +144,10 @@ def test_a_market_whose_ten_percent_is_over_2500_at_the_mark_is_reached_across_m
     assert b["target"] == 10000 and b["last_plan"]["target_raw"] == 10000.0
     assert "game_cap" not in b["last_plan"] and b["last_plan"]["game_room"] is None
     pl = _places(v)
-    assert len(pl) == 1 and pl[0][1] == SLUG and pl[0][2] == 0.49
+    assert len(pl) == 1 and pl[0][1] == SLUG and pl[0][2] == 0.50
     qty = pl[0][3]
-    assert qty == int(2500.0 / 0.49) == 5102, "one rest, clipped per order at $2,500"
-    assert qty * 0.49 <= 2500.0 and qty < 10000
+    assert qty == int(2500.0 / 0.50) == 5000, "one rest, clipped per order at $2,500"
+    assert qty * 0.50 <= 2500.0 and qty < 10000
     assert _census(st, "game_cap_scaled") == 0 and _census(st, "shadow_live_disagree") == 0
     assert _census(st, "shadow_check_skipped") == 0
 
@@ -149,23 +158,24 @@ def _decisions(p):
 
 def test_a_standing_clipped_rest_stands_past_the_floor_it_is_not_replaced_by_its_own_twin(monkeypatch):
     """The review's HIGH-1. His 100,000 @0.50: the target is 10,000, the
-    first rest 5,102 (the $2,500 clip at 0.49). That rest standing 60 s
+    first rest 5,000 (the $2,500 clip at the maker wire 0.50 -- E31, FILL
+    lane 31: 5,102 at the bid 0.49 before this lane). That rest standing 60 s
     (past the 45 s rest-life floor, under the TTL) at the same cent is
     KEPT: no cancel, no place, `open_order_pending`; never `replace_qty`
     for a quantity the clip can never place. Young (20 s) it is kept
     with no `add_pending` either: the rest is compared against the plan
     as the clip would size it (_act's p_cmp)."""
     p, a, b, v, http = _game_world(monkeypatch, his_b=100000.0)
-    o = p.add_order(b, wire=0.49, qty=5102, placed_ts=NOW - 60)
-    v.rest("oid-1", "BUY", 0.49, 5102)
+    o = p.add_order(b, wire=0.50, qty=5000, placed_ts=NOW - 60)
+    v.rest("oid-1", "BUY", 0.50, 5000)
     st = _tick(p, v, http=http)
     assert not _cancels(v) and not _places(v), (_cancels(v), _places(v))
     assert _decisions(p) == [] and b["last_plan"].get("replaced") is None
     assert b["last_plan"]["open_order"] == o["id"] and _census(st, "open_order_pending") == 1
     assert p.orders[o["id"]]["state"] == "open"
     p2, a2, b2, v2, http2 = _game_world(monkeypatch, his_b=100000.0)
-    p2.add_order(b2, wire=0.49, qty=5102, placed_ts=NOW - 20)
-    v2.rest("oid-1", "BUY", 0.49, 5102)
+    p2.add_order(b2, wire=0.50, qty=5000, placed_ts=NOW - 20)
+    v2.rest("oid-1", "BUY", 0.50, 5000)
     _tick(p2, v2, http=http2)
     assert not _cancels(v2) and not _places(v2) and "add_pending" not in b2["last_plan"]
     src = inspect.getsource(ml._act)

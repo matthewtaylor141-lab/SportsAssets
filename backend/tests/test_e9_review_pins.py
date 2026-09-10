@@ -36,6 +36,23 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails
 )
 
 IOC_TIF = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+# RE-PINNED at E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never
+# crosses; owner order ~03:3xZ "become a maker not taker ... mirror him to a tee"). The
+# rule this file exists for is untouched; the EXECUTION under it moves the same way on
+# every pin below, and only these ways:
+#   the cent 0.30 -> 0.31   this world's book is 0.30 / 0.32 and his level 0.31. An ENTRY
+#                           rested at buy_price(his, bid) = the BID 0.30; the maker wire is
+#                           min(buy_wire(0.31), 0.32 - 0.01) = 0.31, HIS OWN cent inside
+#                           the spread. An EXIT took at ceil(his) - MIRROR_EXIT_TOL = 0.30,
+#                           THROUGH the bid; the maker wire is max(sell_wire(0.31), 0.30 +
+#                           0.01) = 0.31, his own cent one tick over the bid.
+#   IOC -> GTC, post-only   there is no take path left in the worker.
+#   `exit_take` 1 -> 0      the counter counted the exit's IOC and is a declared zero from
+#                           E31; `rest_placed` counts in its place.
+#   `lift=` beside `ioc_fill=`  the shares a TAKER lifts off the fresh rest at create
+#                           (`aggressor` False: a maker fill), booking the ledger the IOC
+#                           booked, so every ledger figure below is unchanged.
+
 GTC_TIF = "TIME_IN_FORCE_GOOD_TILL_CANCEL"
 YML = pathlib.Path(__file__).resolve().parents[2] / ".github" / "workflows" / "render-ops.yml"
 
@@ -125,13 +142,19 @@ def test_review_q1_a_full_tick_started_beside_a_fast_ticks_take_sizes_the_book_a
     p = _pool(fills=his)
     b = p.add_book(ledger=0)
 
-    def _ioc(venue, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
-        assert tif == IOC_TIF and not sell
-        f = min(float(venue.ioc_fill), float(qty))
+    def _lifted(venue, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
+        # E31 (FILL lane 31, 2026-09-10): the fast tick's order is a POST-ONLY GTC rest,
+        # never an IOC, and a taker lifts it at create (`aggressor` False: a maker fill).
+        # The venue's own position moves with it exactly as it moved with the IOC's fill,
+        # which is what this race is about
+        assert tif == GTC_TIF and post_only is True and not sell
+        f = min(float(venue.lift), float(qty))
         venue.portfolio.held[slug] = float(venue.portfolio.held.get(slug, 0.0)) + f
-        return {"ok": f > 0, "order_id": oid, "status": "filled" if f >= qty else "canceled",
-                "fill_price": price if f > 0 else None, "filled_shares": f, "raw": {"response": {"id": oid}}}
-    v = _Venue(bid=0.28, ask=0.29, ioc_fill=300.0, place=_ioc)
+        venue.rest(oid, "BUY", price, qty, slug, state="filled", filled=f, avg=price, intent=intent)
+        return {"ok": True, "order_id": oid, "status": "filled", "fill_price": price,
+                "filled_shares": f, "maker": True,
+                "raw": {"response": {"id": oid}, "executions": [{"type": "FILL", "aggressor": False}]}}
+    v = _Venue(bid=0.28, ask=0.29, ioc_fill=300.0, lift=300.0, place=_lifted)
     http = _Http()
     _walk()
     events = _pause_read(monkeypatch, lambda t, cid: t.fast)
@@ -151,12 +174,15 @@ def test_review_q1_a_full_tick_started_beside_a_fast_ticks_take_sizes_the_book_a
         return await fast, await full
     fs, st = _run(_drive())
     pl = _places(v)
+    # RE-PINNED at E31 (FILL lane 31, 2026-09-10): the fast tick's order is a post-only
+    # GTC rest, not an IOC, and this world's venue lifts it at create (`lift`) so THE
+    # MONEY is identical -- one order of 300 for one fill of his, 300 held against his
+    # 300, and the full tick behind it reads it booked and sizes nothing
     assert fs["fast"]["placed"] == 1 and st["status"] != "overlap"
-    assert [c[5] for c in pl] == [IOC_TIF] * len(pl), pl
-    # THE MONEY: one take of 300 for one fill of his, 300 held against his 300
+    assert [c[5] for c in pl] == [GTC_TIF] * len(pl), pl
     assert sum(c[3] for c in pl) == 300, pl
-    assert b["ledger_net"] == 300 and _census(st, "on_target") == 1 and _census(st, "take_first") == 1, \
-        "the full tick read the take booked (the fast tick's name folded in) and sized nothing"
+    assert b["ledger_net"] == 300 and _census(st, "on_target") == 1 and _census(st, "take_first") == 0, \
+        "the full tick read the rest's fill booked and sized nothing"
 
 
 def test_review_q1_the_full_tick_reads_the_fast_ticks_rest_standing_and_never_reaches_a_second_insert(monkeypatch):
@@ -234,7 +260,8 @@ def test_review_q1_two_wakes_two_seconds_apart_the_second_fast_tick_sees_the_fir
     assert fs["fast"]["placed"] == 1 and b["open_order_id"] is not None
     fs2 = _fast(p, v, now=NOW + 3)
     assert _skips(fs2) == {CID: "order_open"} and len(_places(v)) == 1
-    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG], "the second fast tick read nothing"
+    assert [c[1] for c in v.calls if c[0] == "bbo"] == [SLUG, SLUG], \
+        "the second fast tick read nothing; the two are the first tick's read and E31's re-read at the send"
     # a requeued market the full tick answered meanwhile: order_open too
     ml._FAST_WOKEN[CID] = 1
     fs3 = _run(ml.fast_tick_once(p, v, _Http(), now_ts=NOW + 5))
@@ -286,14 +313,17 @@ def test_review_q2_a_fast_ticks_increase_beside_the_full_ticks_candidate_stage_i
     a_rest = [o for o in p.orders.values() if o["book_id"] == a["id"] and o["state"] == "open"]
     assert len(a_rest) == 1 and a_rest[0]["qty"] == 3500 and a["target"] == 3800
     assert st["status"] != "overlap" and st["orders_open"] == 1, "the full tick's step O read A's rest"
-    assert a_rest[0]["wire"] == 0.49 and a["last_reason"] == "open_order_pending", "kept standing by the full tick"
+    # E31: the rest is at HIS cent 0.50 (min(buy_wire(his), ask - 0.01)), not the bid's 0.49
+    assert a_rest[0]["wire"] == 0.50 and a["last_reason"] == "open_order_pending", "kept standing by the full tick"
     new = [bk for bk in p.books.values() if bk["us_market_slug"] == SLUG]
     assert len(new) == 1 and new[0]["last_plan"]["game_exposure"] == 1900.0, "A's $150 held and its rest at the mark"
     assert new[0]["last_plan"]["game_cap"] == "game_cap_scaled" and new[0]["last_plan"]["game_room"] == 600.0
     assert new[0]["target"] == 1200 and new[0]["target"] < new[0]["last_plan"]["target_raw"]
     assert _census(st, "game_cap_scaled") >= 1
     # THE MONEY: the game holds and rests inside the per-game cap
-    assert _game_usd(p) == 2453.0 and _game_usd(p) <= float(rules.MIRROR_NET_CAP_USD), _game_usd(p)
+    # E31: the cents are his own, not the bid's, so the game's dollars land at the cap
+    # instead of $47 under it -- still inside it, which is what this pin is for
+    assert _game_usd(p) == 2500.0 and _game_usd(p) <= float(rules.MIRROR_NET_CAP_USD), _game_usd(p)
 
 
 def test_review_q2_a_siblings_open_order_in_the_rows_makes_the_room_unreadable_and_a_booked_fill_reads_fresh():
@@ -343,9 +373,17 @@ def test_review_q3_the_day_stop_the_post_only_latch_and_a_venue_ledger_disagreem
     fs = _fast(p2, _Venue())
     assert b1["last_reason"] == b2["last_reason"] == "mirror_day_cap"
     assert _census(st, "mirror_day_cap") >= 1 and _census(fs, "mirror_day_cap") >= 1 and _skips(fs) == {}
-    # the post-only latch: off, both rest without it
+    # the post-only latch: RE-PINNED at E31 (review HIGH-3). The process latch
+    # `_POST_ONLY_OK`, `_post_only_enabled` and the `PMUS_MIRROR_POST_ONLY`
+    # reader are DELETED, so writing the name here would only CREATE it on the
+    # module -- an inert assignment that voids this pin AND leaks the attribute
+    # into every later test in the process (it made the lane's own DELETED
+    # guard order-dependent). What replaces it is the real statement: there is
+    # nothing left to turn off, the shell variable that used to do it is unread
+    # on either road, and both roads still send the flag
     monkeypatch.setattr(rules, "MIRROR_DAY_USD", 1250.0)
-    ml._POST_ONLY_OK = False
+    assert not hasattr(ml, "_POST_ONLY_OK") and not hasattr(ml, "_post_only_enabled")
+    monkeypatch.setenv("PMUS_MIRROR_POST_ONLY", "off")
     p3 = _pool()
     p3.add_book(ledger=0)
     v3 = _Venue()
@@ -355,8 +393,8 @@ def test_review_q3_the_day_stop_the_post_only_latch_and_a_venue_ledger_disagreem
     v4 = _Venue()
     _walk()
     _fast(p4, v4)
-    assert _places(v3)[0][7] is False and _places(v4)[0][7] is False
-    ml._POST_ONLY_OK = True
+    assert _places(v3)[0][7] is True and _places(v4)[0][7] is True, "E31: post-only on every send"
+    assert 'os.environ.get("PMUS_MIRROR_POST_ONLY"' not in inspect.getsource(ml)
     # venue vs ledger: the walk says 300 held, the ledger 0 -> a SUSPECT by
     # the same name on both (E16: the first read never freezes; the fast
     # tick's is a cached walk, so it can never be the second)
@@ -572,10 +610,10 @@ def test_review_q7_the_full_ticks_e2_guard_and_ops_budget_start_from_the_fast_ti
     assert _census(st2, "ops_capped") == 1 and not _places(v2)
     assert ml._fast_guard_calls == 0 and ml._fast_ops == 0, "seeded, then the counters start over"
     # an exit is exempt from the seeded ops budget as from its own
-    p3, b3, v3, http3 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0)
+    p3, b3, v3, http3 = _reduce_world(bid=0.30, ask=0.32, ioc_fill=200.0, lift=200.0)
     ml._fast_ops = int(rules.MIRROR_MAX_ORDER_OPS_PER_TICK)
     st3 = _tick(p3, v3, http=http3)
-    assert _census(st3, "exit_take") == 1 and len(_places(v3)) == 1 and b3["ledger_net"] == 100
+    assert _census(st3, "exit_take") == 0 and len(_places(v3)) == 1 and b3["ledger_net"] == 100
     src = inspect.getsource(ml.tick_once)
     assert "t.guard_calls, t.ops = int(_fast_guard_calls), int(_fast_ops)" in src
     assert src.index("int(_fast_ops)") < src.index("_fast_calls = _fast_guard_calls = _fast_ops = 0")
@@ -628,8 +666,8 @@ def test_review_q7_a_burst_spends_at_most_the_rail_plus_one_markets_overshoot_an
     v = _Venue()
     _walk()
     fs = _fast(p, v, cids=cids, http=http)
-    assert fs["short"]["timing"]["venue_calls"] == 4 and len(_places(v)) == 1
-    assert _skips(fs) == {"0xw1": "budget_spent", "0xw2": "budget_spent"} and ml._fast_calls == 62
+    assert fs["short"]["timing"]["venue_calls"] == 5 and len(_places(v)) == 1  # E31 (FILL lane 31): the touch-bound rest re-reads the quote at the send
+    assert _skips(fs) == {"0xw1": "budget_spent", "0xw2": "budget_spent"} and ml._fast_calls == 63
     # the full tick: hot books read, the shares at their floors
     p2 = _pool()
     p2.add_book(ledger=300)
@@ -669,11 +707,13 @@ def test_review_q8_a_take_that_filled_is_named_by_its_plan_never_answered_by_an_
     his = [_fill(M, "BUY", 300, 0.30, NOW - 3000)]
     p = _pool(fills=his)
     b = p.add_book(ledger=0)
-    v = _Venue(bid=0.28, ask=0.29, ioc_fill=300.0)
+    v = _Venue(bid=0.28, ask=0.29, ioc_fill=300.0, lift=300.0)
     st = _tick(p, v)
-    assert _census(st, "take_first") == 1 and b["ledger_net"] == 300
+    # E31: the entry is a rest, and this world's venue lifts it at create -- the ledger
+    # moves the same 300, `take_first` is a declared zero
+    assert _census(st, "take_first") == 0 and b["ledger_net"] == 300
     seen = b["last_plan"]["his_fills_seen"]
-    assert len(seen) == 1 and seen[0]["order"] is None and seen[0]["name"] == "take", seen
+    assert len(seen) == 1 and seen[0]["order"] is None and seen[0]["name"] == "filled_at_create", seen
 
 
 def _preset_sql():
@@ -798,8 +838,8 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     # E23 (FILL lane 23) by its six cancel_fill_* / disagree_fill_* names (-105 -> -111, -106 -> -112) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-118:-114 -> -122:-118, -119 -> -123)
     # E25 by its four (-> -126:-122, -127); E29 (FILL lane 29, the hand exit) by its four (-> -130:-126, -131); E28's five land between at landing (-> -135:-131, -136)
-    assert keys[-136:-132] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-137] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    assert keys[-146:-142] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-147] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence
@@ -813,9 +853,13 @@ def test_review_q10_nothing_new_is_persisted_and_a_deploy_leaves_the_market_to_t
     # E29 (FILL lane 29) added _STATE_HAND_EXIT, the hand-exit memo (ONE key, read once per tick at its start,
     # written on the mark by the full tick and the fast tick alike; the e9 pin below reads the fast path's own
     # sources, which read it through _load_hand_exits and write it only inside _hand_exit_mark)
+    # E31 (FILL lane 31) added _STATE_POST_ONLY_BLOCK, the durable block the venue's own
+    # aggressor writes (E31 D2) -- read once per tick by _global_guards and written only
+    # inside _write_post_only_block, neither of them on the fast path, so the e9 pin below
+    # (the fast path writes no state at all) still holds
     assert keys == ["_STATE_CAND_MEMO", "_STATE_DEMOTED", "_STATE_FLATTEN", "_STATE_HAND_EXIT", "_STATE_LIVE", "_STATE_LOSS_REARM",
-                    "_STATE_LOSS_STOP", "_STATE_OPEN", "_STATE_S4", "_STATE_SIDE_ECHO", "_STATE_TERMINAL_CONFIRM",
-                    "_STATE_TERMINAL_MEMO", "_STATE_TICK_RING",
+                    "_STATE_LOSS_STOP", "_STATE_OPEN", "_STATE_POST_ONLY_BLOCK", "_STATE_S4", "_STATE_SIDE_ECHO",
+                    "_STATE_TERMINAL_CONFIRM", "_STATE_TERMINAL_MEMO", "_STATE_TICK_RING",
                     "_STATE_WHALES"], "no new ingestion_state key (E9 adds none; _STATE_OPEN is the venue's word)"
     e9 = "".join(inspect.getsource(f) for f in (ml.notify, ml._fast_wake, ml._fast_run, ml._fast_requeue,
                                                 ml._fast_tick, ml.fast_tick_once, ml._fast_book,
@@ -892,7 +936,7 @@ def test_review_fold_a_wake_during_the_full_ticks_step_o_waits_and_reads_the_mar
     assert st["status"] != "overlap" and len(_places(v)) == 1 and b["open_order_id"] is not None
     assert _census(st, "rest_placed") == 1 and st["woken"] == [], "the full tick answered it (the wake came after its start)"
     assert fs["woken"] == [CID] and fs["fast"]["tries"] == {CID: 0} and _skips(fs) == {CID: "order_open"}
-    assert fs["fast"]["placed"] == 0 and _bbos(v) == [SLUG] and ml._FAST_WOKEN == {}, "read once, by the full tick"
+    assert fs["fast"]["placed"] == 0 and _bbos(v) == [SLUG, SLUG] and ml._FAST_WOKEN == {}, "read once, by the full tick"
     assert CID in ml._WOKEN, "the next full tick still reads it woken"
     assert ml._fast_holding is False and not ml._TICK_LOCK.locked() and not ml._FAST_LOCK.locked()
 
@@ -931,11 +975,12 @@ def test_review_fold_a_full_tick_waits_on_a_fast_ticks_hold_and_still_returns_ov
             st2 = await ml.tick_once(p, v, http, now_ts=NOW + 3)
         return fs, st, st2
     fs, st, st2 = _run(_drive())
-    assert fs["fast"]["placed"] == 1 and _bbos(v) == [SLUG, SLUG], "the fast tick's read, then the full tick's own"
+    assert fs["fast"]["placed"] == 1 and _bbos(v) == [SLUG, SLUG, SLUG], \
+        "the fast tick's read and E31's re-read at the send, then the full tick's own"
     assert st["status"] != "overlap" and not st.get("skipped_overlap") and st["tick_s"] >= 0.0
     assert st["orders_open"] == 1 and len(_places(v)) == 1 and b["open_order_id"] is not None
     assert st2["status"] == "overlap" and st2["skipped_overlap"] is True and st2["tick_s"] == 0.0
-    assert len(_places(v)) == 1 and _bbos(v) == [SLUG, SLUG], "the overlap tick read nothing"
+    assert len(_places(v)) == 1 and _bbos(v) == [SLUG, SLUG, SLUG], "the overlap tick read nothing"
 
 
 def test_review_fold_the_fast_tick_that_waited_finds_its_markets_drained_by_the_full_tick_and_places_nothing(monkeypatch):
@@ -980,7 +1025,7 @@ def test_review_fold_the_fast_tick_that_waited_finds_its_markets_drained_by_the_
         return await full, await fast2
     st, fs2 = _run(_drive())
     assert st["woken"] == [CID] and len(_places(v)) == 1 and b["open_order_id"] is not None
-    assert fs2["woken"] == [] and _skips(fs2) == {} and fs2["fast"]["placed"] == 0 and _bbos(v) == [SLUG]
+    assert fs2["woken"] == [] and _skips(fs2) == {} and fs2["fast"]["placed"] == 0 and _bbos(v) == [SLUG, SLUG]
     assert ml._fast_acc["n"] == 0, "no fast tick counted for an empty take"
     # the source: the pop sits under the lock, after the flag is raised
     src = inspect.getsource(ml.fast_tick_once)

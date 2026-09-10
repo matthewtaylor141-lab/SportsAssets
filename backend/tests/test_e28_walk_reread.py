@@ -56,6 +56,7 @@ from tests.test_mirror_live_worker import (  # noqa: F401 -- the autouse rails (
 )
 
 IOC = "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"
+GTC = "TIME_IN_FORCE_GOOD_TILL_CANCEL"   # E31 (FILL lane 31): the only tif the money path sends
 ROOT = pathlib.Path(__file__).resolve().parents[2]
 NEW_NAMES = ("walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread", "ledger_stale_refused")
 # book 1333's figures (the module docstring)
@@ -73,13 +74,22 @@ WITNESS = _fill(N, "BUY", HIS_REDUCE, 0.10, NOW - 10, detected_at=NOW - 5, sourc
 # the hand exit) landed after and moved two of them -- _tick_book (78d2c4f096b70c00 -> f8b3aa98172bf578, the
 # hand_held hold), _tick (a766496554ff357e -> 265461d33df59da6, the memo read at the tick's start) and _fast_tick
 # (ce6e086b18c28200 -> c364a8f6ed7f9b3b) -- re-pinned at E29's landing; this lane touched none of the three
+# E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never crosses) landed after and moved
+# five of them -- _act (59efb48ba79f793c -> 2e7043299fbf834a, the six take arms gone and the fold's
+# `maker_no_cent` hold on a standing rest, review CRITICAL-2), _place
+# (ab568476817cf795 -> f559a52bfb610ef3, the fail-closed IOC guard, its dead IOC clause dropped), _place_reserved (d55d0d4a63c71c23 ->
+# a83a3e9473eb7112, the unconditional flag, the touch-bound re-read, the aggressor read, the cross
+# re-price), _reconcile_open (7c3bc726438693ce -> 2b76640dec2d3bd3, the maker rest that stands past its
+# TTL) and _tick_book (a9193e21be233a95 -> d121406c0c55e65b, E30's hold comment re-worded) -- and DELETED
+# three: `_entry_take`, `_exit_take` and `_ioc_reread` have no caller left. THIS LANE'S OWN SITES
+# (_book_fill, _book_hand_reduce, _walk_books, _walk_reread) are untouched by E31.
 UNTOUCHED = {
-    "_fast_book": "286e6fa4663c3887", "_fast_gate": "1932811194268668", "_act": "59efb48ba79f793c",
-    "_entry_take": "2266c2b346674491", "_place": "ab568476817cf795", "_place_reserved": "d55d0d4a63c71c23",
-    "_exit_take": "750acd709c826566", "_frozen_exit": "ef478fabdfa2ccc0", "_reconcile_open": "7c3bc726438693ce",
+    "_fast_book": "286e6fa4663c3887", "_fast_gate": "1932811194268668", "_act": "2e7043299fbf834a",
+    "_place": "f559a52bfb610ef3", "_place_reserved": "a83a3e9473eb7112",
+    "_frozen_exit": "ef478fabdfa2ccc0", "_reconcile_open": "2b76640dec2d3bd3",
     "_reconcile_placing": "76ab1b2931ee0f33", "_cancel_reread_row": "594f788a96e60268",
-    "_tick_book": "a9193e21be233a95", "_finish_order": "1db222463610e38c", "_book_delta": "e5363576f6d0a575",
-    "_ioc_reread": "cd3dbab5e5819257", "_fast_candidate": "922585ffb6856f70", "_walk_candidate": "9c990feba5fdeb57",
+    "_tick_book": "d121406c0c55e65b", "_finish_order": "1db222463610e38c", "_book_delta": "e5363576f6d0a575",
+    "_fast_candidate": "922585ffb6856f70", "_walk_candidate": "9c990feba5fdeb57",
     "_fast_tick": "c364a8f6ed7f9b3b", "fast_tick_once": "f0489ca714e21973", "_tick": "265461d33df59da6",
 }
 # the standing-row statements (live_executor) byte for byte, and the rules module on 6c0830d
@@ -124,8 +134,19 @@ def _world(monkeypatch, ledger=LEDGER_BEFORE):
     return p, b
 
 
-def _venue(held):
-    return _Venue(bid=0.89, ask=0.91, held={SLUG: held}, ioc_fill=93.0)
+def _venue(held, lift=93.0):
+    """The 1333 book: 0.89 / 0.91. E31's (FILL lane 31, 2026-09-10) maker
+    SELL rests at max(sell_wire(his 0.89), 0.89 + 0.01) = 0.90 -- one tick
+    over the bid, inside the spread, never through it (on 6c0830d the same
+    cycle sent a SELL IOC at 0.89, THROUGH the bid).
+
+    `ioc_fill` no longer fills anything on the money path, so the 93 come
+    through `lift`: the venue fills the fresh post-only rest at create and
+    its execution's `aggressor` reads the bool False -- a TAKER hit our
+    rest, so we were the maker (`maker_fill_at_create`) and the fill books
+    exactly as the IOC's fill booked before this lane. E28's guard, the
+    subject of this file, reads the same 93 shares either way."""
+    return _Venue(bid=0.89, ask=0.91, held={SLUG: held}, ioc_fill=93.0, lift=lift)
 
 
 def _other_booking_between_step_b_and_the_lock(monkeypatch, p, b, ledger=LEDGER_AFTER_ONE, state=None):
@@ -152,16 +173,28 @@ def _other_booking_between_step_b_and_the_lock(monkeypatch, p, b, ledger=LEDGER_
 
 # ------------------------------------------------------------ (1) the 1333 shape on the walk
 
-def test_e28_todays_first_cycle_is_one_sell_ioc_of_93_at_089_and_the_ledger_692(monkeypatch):
+def test_e28_todays_first_cycle_is_one_sell_rest_of_93_at_090_and_the_ledger_692(monkeypatch):
     """8147's cycle: the dict and the row agree at 785, his net 6,920 ->
-    target 692, ONE SELL_LONG IOC of 93 at 0.89, booked to 692. Nothing of
-    this lane's counts (the row did not move)."""
+    target 692, ONE SELL_LONG of 93, booked to 692. Nothing of this lane's
+    counts (the row did not move).
+
+    RE-PINNED at E31 (FILL lane 31, 2026-09-10) -- 0.89 IOC -> 0.90 GTC
+    post-only: the exit no longer takes. 8147 went out at 0.89, THROUGH
+    the bid of 0.89; the maker wire is max(0.89, 0.89 + 0.01) = 0.90, one
+    tick over the bid and inside the 0.89 / 0.91 spread. The venue lifts
+    it at create as a maker (`_lifted`), so E28's booking -- the subject
+    of this file -- is reached on the same 93 shares, the same target and
+    the same ledger."""
     p, b = _world(monkeypatch)
     v = _venue(LEDGER_BEFORE)
     st = _tick(p, v, http=_mkt(NET_1333, 0.0))
     assert b["target"] == LEDGER_AFTER_ONE and len(_places(v)) == 1
-    assert _places(v)[0][2:6] == (0.89, 93, True, IOC)
-    assert b["ledger_net"] == LEDGER_AFTER_ONE and _census(st, "exit_take") == 1
+    assert _places(v)[0][2:6] == (0.90, 93, True, GTC)
+    assert _places(v)[0][7] is True, "post-only on the wire (E31)"
+    assert not [c for c in v.calls if c[0] == "place" and c[5] == IOC], "no IOC left on the money path"
+    assert b["ledger_net"] == LEDGER_AFTER_ONE and _census(st, "exit_take") == 0
+    assert _census(st, "rest_placed") == 1 and _census(st, "maker_fill_at_create") == 1
+    assert _census(st, "post_only_ignored") == 0 and _census(st, "post_only_block") == 0
     assert all(_census(st, k) == 0 for k in NEW_NAMES)
     assert not _recent("walk_row_moved", b["id"])
 
@@ -188,17 +221,22 @@ def test_e28_the_1333_shape_with_the_switch_on_plans_on_the_row_as_it_stands_and
 
 def test_e28_the_1333_shape_with_the_switch_off_sends_the_second_93_as_on_6c0830d_and_the_guard_still_books_599(monkeypatch):
     """The pin that names today's defect: OFF is 6c0830d's walk byte for
-    byte -- the plan is made on the 785 dict and the second 93 IOC goes
-    out (8148). What (A) still guarantees: the booking's guarded write
-    misses (the row reads 692, the dict read 785), the row is re-read and
-    the fill re-booked at 692 - 93 = 599 -- never 692 twice -- so the
-    ledger reads the venue's figure and the book does not freeze."""
+    byte -- the plan is made on the 785 dict and the second 93 goes out
+    (8148). What (A) still guarantees: the booking's guarded write misses
+    (the row reads 692, the dict read 785), the row is re-read and the
+    fill re-booked at 692 - 93 = 599 -- never 692 twice -- so the ledger
+    reads the venue's figure and the book does not freeze.
+
+    RE-PINNED at E31 -- 0.89 IOC -> 0.90 GTC post-only, lifted at create
+    as a maker. The WALK is byte for byte 6c0830d's with the switch off,
+    which is what this test pins; what the walk hands the venue is this
+    lane's rest, and the guard reads the same 93 shares either way."""
     monkeypatch.setattr(rules, "MIRROR_WALK_REREAD", False)
     p, b = _world(monkeypatch)
     fired = _other_booking_between_step_b_and_the_lock(monkeypatch, p, b)
     v = _venue(LEDGER_AFTER_ONE)
     st = _tick(p, v, http=_mkt(NET_1333, 0.0))
-    assert fired["n"] == 1 and len(_places(v)) == 1 and _places(v)[0][2:6] == (0.89, 93, True, IOC)
+    assert fired["n"] == 1 and len(_places(v)) == 1 and _places(v)[0][2:6] == (0.90, 93, True, GTC)
     assert _census(st, "walk_row_moved") == 0 and not _recent("walk_row_moved", b["id"])
     assert b["ledger_net"] == LEDGER_AFTER_TWO, "785 - 93 would have been written over 692 on 6c0830d"
     assert _census(st, "ledger_stale_reread") == 1 and _census(st, "ledger_stale_refused") == 0
@@ -518,6 +556,22 @@ def test_e28_the_fast_ticks_own_re_read_the_act_the_takes_and_the_exit_path_are_
     # the rules module with this lane's one block excised -- and E29's one block, landed after -- hashes to
     # 6c0830d's: no rule of sizing, pricing or refusal moved (the E26 pattern)
     src = inspect.getsource(rules)
+    # E31 (FILL lane 31, the newest): the maker wire, the paragraph that makes the take rails
+    # documentary, rest_decision's `ttl_stands` and the four exported names -- excised the same way
+    s31 = src.index("# THE RAILS THAT GOVERNED A TAKE ARE DOCUMENTARY FROM E31")
+    src = src[:s31] + src[src.index("# Market families a book may open on", s31):]
+    s31 = src.index("# ------------------------------------------------- E31: the maker wire")
+    src = src[:s31] + src[src.index("def plan_wire(p: Plan | None)", s31):]
+    src = src.replace('    "MAKER_TICK", "maker_wire", "maker_bound", "maker_compare_wire",\n', "")
+    src = src.replace("                  entry: bool | None = None,\n"
+                      "                  ttl_stands: bool = False) -> tuple[str, dict]:\n",
+                      "                  entry: bool | None = None) -> tuple[str, dict]:\n")
+    t31 = src.index("    constant), the mirror of take_allowed's wait.\n")
+    t31e = src.index("reads the book's last plan). Everything else is\n", t31) + len(
+        "reads the book's last plan). Everything else is\n")
+    src = src[:t31] + "    constant), the mirror of take_allowed's wait. Everything else is\n" + src[t31e:]
+    src = src.replace("    if age >= ttl and stands is not True and ttl_stands is not True:\n",
+                      "    if age >= ttl and stands is not True:\n")
     # E30 (FILL lane 30): the backoff's switch and wait, landed after E29 -- excised the same way
     s30 = src.index("# A REST THE VENUE REJECTS TICK AFTER TICK BACKS OFF (E30")
     e30 = src.index('MIRROR_POST_ONLY_BACKOFF_S = min_wait_env("MIRROR_POST_ONLY_BACKOFF_S", 60.0)\n') + len(
@@ -542,12 +596,12 @@ def test_e28_the_fast_ticks_own_re_read_the_act_the_takes_and_the_exit_path_are_
 def test_e28_the_census_place_the_emit_sites_and_the_docs():
     keys = ml.CENSUS_KEYS
     # E29 (FILL lane 29) landed after with four names between these and E19's: -18:-13 -> -22:-17, 242 -> 246
-    assert keys[-23:-18] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-18:-14] == ("hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed")
-    assert keys[-27:-23] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
-    assert keys[-31:-27] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
-    assert keys[-58] == "take_in_band" and keys[-1] == "cand_terminal_skipped"
-    assert len(keys) == 247 and len(set(keys)) == len(keys)
+    assert keys[-33:-28] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-28:-24] == ("hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed")
+    assert keys[-37:-33] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
+    assert keys[-41:-37] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
+    assert keys[-68] == "take_in_band" and keys[-1] == "cand_terminal_skipped"
+    assert len(keys) == 257 and len(set(keys)) == len(keys)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)
     src = inspect.getsource(ml)
     for name, sites in (("walk_row_moved", 1), ("walk_row_unread", 1), ("walk_row_gone", 1),

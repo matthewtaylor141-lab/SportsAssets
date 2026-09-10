@@ -80,28 +80,54 @@ WAIT = 60.0                       # MIRROR_POST_ONLY_BACKOFF_S's default
 # exception's class name in raw (pmus._post_only_refusal); the venue's real words are not on file
 BODY = {"message": "order rejected", "code": "ORDER_REJECTED"}
 RAW_400 = {"status_code": 400, "error": "order rejected", "error_type": "BadRequestError", "body": BODY}
-# the functions this lane leaves byte for byte, hashed on 66144cf
+# the functions this lane leaves byte for byte, hashed on 66144cf.
+# E31 (FILL lane 31, 2026-09-10: every order a post-only rest that never
+# crosses) landed after and DELETED five of them outright -- _exit_take
+# (750acd709c826566), _entry_take (2266c2b346674491), _ioc_reread
+# (cd3dbab5e5819257), _take_band (bd745846c0afd55d) and _short_take_band
+# (cef97e6aacfd6875) were the take paths themselves -- and moved five more:
+#   _act               59efb48ba79f793c -> 2e7043299fbf834a  (the six take arms gone; and the
+#                      fold's `maker_no_cent` hold, review CRITICAL-2: a standing rest is never
+#                      cancelled because THIS tick has no cent to price a new order at)
+#   _place             ab568476817cf795 -> f559a52bfb610ef3  (the fail-closed IOC guard; the
+#                      fold dropped the dead ` and tif != "IOC"` under it, review LOW-2)
+#   _wire_for          a2d57ccd3742dc61 -> ca4de29c9c20fd7d  (the maker clamp + plan["maker"])
+#   _flatten_vanished  22930dc6e3e85816 -> 7f27e3b041da0c76  (the slippage leg gone; the unpriced rest)
+#   _short_wire        25efb8c189941579 -> 12afe5fcd5b0c248  (the maker cent alone)
+# E30's own rule -- the receipt, the reason word, the streak, the bounded
+# wait -- reads none of the five deleted names and is untouched by any of
+# the five moves; what this map is for is the OTHER twenty-five, still byte
+# for byte on 66144cf through two lanes.
 UNTOUCHED = {
-    "_act": "59efb48ba79f793c", "_exit_take": "750acd709c826566", "_frozen_exit": "ef478fabdfa2ccc0",
-    "_entry_take": "2266c2b346674491", "_flatten_vanished": "22930dc6e3e85816", "_maybe_close_episode": "59e28ff01f960660",
+    "_act": "2e7043299fbf834a", "_frozen_exit": "ef478fabdfa2ccc0",
+    "_flatten_vanished": "7f27e3b041da0c76", "_maybe_close_episode": "59e28ff01f960660",
     "_fast_book": "286e6fa4663c3887", "_fast_gate": "1932811194268668", "_fast_candidate": "922585ffb6856f70",
     "_walk_candidate": "9c990feba5fdeb57", "_tick": "265461d33df59da6", "_fast_tick": "c364a8f6ed7f9b3b",
-    "_place": "ab568476817cf795", "_wire_for": "a2d57ccd3742dc61", "_book_delta": "e5363576f6d0a575",
+    "_place": "f559a52bfb610ef3", "_wire_for": "ca4de29c9c20fd7d", "_book_delta": "e5363576f6d0a575",
     "_finish_order": "1db222463610e38c", "_cancel_open_for": "639e841a3d2109eb", "_cancel_and_settle": "953ba5587d2ad423",
-    "_ioc_reread": "cd3dbab5e5819257", "_write_plan": "dadc0a9064f21d53", "_disarm_take": "fd41b2f10a4ba39d",
+    "_write_plan": "dadc0a9064f21d53", "_disarm_take": "fd41b2f10a4ba39d",
     "_hand_exited": "2a446c318de4efa5", "_raw_rate_limit": "13bbb840a5cc60fc", "_refusal_receipt": "fdeaa22b213451f9",
-    "_short_take_band": "cef97e6aacfd6875", "_take_band": "bd745846c0afd55d", "_short_wire": "25efb8c189941579",
+    "_short_wire": "12afe5fcd5b0c248",
     "_room_qty": "458b3fea5e2d235b", "_walk_reread": "e52eb75d62004a4a", "_book_fill": "60251768f66c9816",
     "_hand_net": "b3c3f0b2d40cbf06", "_increases_refusal": "f984cc09584bd265", "_increase_recheck": "8803d82bd627354e",
     "_lost_response": "14ebcadc6c89e457", "_place_rate_limited": "2b636c25d73a3b9c",
 }
+E31_GONE = ("_exit_take", "_entry_take", "_ioc_reread", "_take_band", "_short_take_band")
 RULES_UNTOUCHED = {
     "take_arms": "b0712205d38eeea7", "take_allowed": "dc3079622052b6ff", "at_or_through": "4aece58b61ee21bc",
-    "order_decision": "b22c4fbc29d68662", "rest_decision": "b1962f2cbb21c6c4", "env_switch": "68fcff0553b43e26",
+    "order_decision": "b22c4fbc29d68662",
+    # rest_decision b1962f2cbb21c6c4 -> 2f8b8feef14fbd62 at E31: the `ttl_stands` parameter,
+    # its docstring paragraph and the one word it adds to the TTL clause. Every other clause
+    # -- and E30's reading of the verdict -- is byte for byte
+    "rest_decision": "2f8b8feef14fbd62", "env_switch": "68fcff0553b43e26",
     "min_wait_env": "1f815d26a9e3faeb", "capped_env": "ccda6c0b56efa53c", "wire_side": "281caf3a1cbe3520",
     "leg_action": "780780069c3a8eb4", "exit_terms": "2e4cd4a9edeb10a9",
 }
-PLACE_RESERVED_ON_TIP = "6c83b8e547c83e0a"    # _place_reserved on 66144cf (the lane's lines excised below)
+PLACE_RESERVED_ON_TIP = "6c83b8e547c83e0a"    # _place_reserved on 66144cf, this lane's lines excised (E30's own proof)
+# _place_reserved as E31 (FILL lane 31) left it: E30's five edits still stand verbatim inside a send that
+# E31 rewrote around them (d55d0d4a63c71c23 on b57929e -> a83a3e9473eb7112). The composed excision back to
+# 66144cf is retired -- see the test below
+PLACE_RESERVED_ON_E31 = "a83a3e9473eb7112"
 TICK_BOOK_ON_TIP = "f8b3aa98172bf578"         # _tick_book on 66144cf (the lane's block excised below)
 RULES_ON_TIP = "7e521ec5ffa67f5f"             # mirror_live_rules on 66144cf (the lane's block excised below)
 PMUS_UNTOUCHED = {"_post_only_refusal": "7becc8060b5ec9de", "_post_only_cross": "41341b4b46075c53"}
@@ -118,11 +144,20 @@ def _sha_text(s: str) -> str:
 # ---------------------------------------------------------------- fixtures
 
 
-def _reject(raw=None, ioc_fill=None):
+def _reject(raw=None, ioc_fill=None, lift_exits=0.0):
     """A venue whose every REST is the adapter's post_only_rejected shape
     carrying `raw` (the HTTP 400 path, pmus._post_only_refusal's keys) and
     whose every IOC fills at the wire (`ioc_fill` None: the whole
-    quantity; a number: that many)."""
+    quantity; a number: that many).
+
+    `lift_exits` (E31, FILL lane 31, 2026-09-10): the shares a taker lifts
+    off a CLOSING rest at create -- a long reduce (SELL_LONG on the wire)
+    or a short cover (SELL_SHORT) -- with `aggressor` False, the venue's
+    word that we were the maker. It exists because this lane retired the
+    IOC: an exit that used to fill through the `ioc_fill` branch is now a
+    GTC, and a fixture that rejects EVERY rest would reject the exits this
+    file pins as going out untouched under the hold. Opening rests (the
+    adds) are rejected exactly as before, whatever this is set to."""
     raw = RAW_400 if raw is None else raw
 
     def _place(v, oid, slug, price, qty, sell, tif, intent, post_only, good_till):
@@ -130,6 +165,15 @@ def _reject(raw=None, ioc_fill=None):
             f = float(qty) if ioc_fill is None else min(float(ioc_fill), float(qty))
             return {"ok": f > 0, "order_id": oid, "status": "filled" if f >= qty else "canceled",
                     "fill_price": price if f > 0 else None, "filled_shares": f, "raw": {"response": {"id": oid}}}
+        exit_leg = bool(sell) or intent == "ORDER_INTENT_SELL_SHORT"
+        f = min(float(lift_exits), float(qty)) if exit_leg else 0.0
+        if f > 0:
+            state = "filled" if f >= float(qty) else "partially_filled"
+            v.rest(oid, "SELL" if (sell or intent == "ORDER_INTENT_BUY_SHORT") else "BUY", price, qty,
+                   slug, state=state, filled=f, avg=price, intent=intent)
+            return {"ok": True, "order_id": oid, "status": state, "fill_price": price,
+                    "filled_shares": f, "maker": True,
+                    "raw": {"response": {"id": oid}, "executions": [{"type": "FILL", "aggressor": False}]}}
         return {"ok": False, "order_id": None, "status": "post_only_rejected", "fill_price": None,
                 "filled_shares": 0.0, "raw": (dict(raw, preview={"marketSlug": slug, "price": price, "quantity": qty})
                                               if isinstance(raw, dict) else raw)}
@@ -296,52 +340,73 @@ def test_e30_with_the_switch_off_the_fourth_tick_places_the_rest_as_66144cf_does
 # -------------------------------------------- (2) under the hold: the takes and the exits fire
 
 
-def test_e30_the_at_level_take_fires_under_the_hold_and_the_accepted_ioc_resets_the_count(monkeypatch):
-    """Held after three rejections; the fifth tick's book is locked at
-    0.89 / 0.89 (the short wire ceil(max(0.89, 0.89)) = 0.89, so the plan's
-    wire is the streak's and the hold stands) -> the take at the wire is
-    an IOC, not post-only: ONE SELL IOC at 0.89 for 145 goes out
-    (decision 'take'), no GTC, the ledger -145, the accepted placement
-    resets the count (the streak entry gone); the plan of that tick still
-    reads the hold. A partial fill (45): the IOC goes, the remainder's
-    rest is NOT placed under the held plan; the next tick (the count
-    reset, the quote back at 0.75 / 0.76) rests the 100 at 0.89 as today
-    (a remainder of 45 at 0.11 of collateral a share is $4.95, under
-    mi.plan's $5 dead band, so the fixture fills 45 and leaves 100)."""
-    p = _p1383()
-    v = _v()
-    b = _three(p, v, monkeypatch)
-    v5 = _Venue(bid=HIS, ask=HIS, place=_reject())
-    st5 = _tick(p, v5, now=NOW + 90, http=_http_1383())
-    assert [c[1:6] for c in _places(v5)] == [(SLUG, HIS, QTY, False, IOC_TIF)]
-    assert _census(st5, "post_only_backoff") == 1 and _census(st5, "take_placed") == 1 and _census(st5, "take_first") == 1
-    assert _census(st5, "rest_placed") == 0 and b["ledger_net"] == -QTY and b["open_order_id"] is None
-    assert b["last_plan"]["hold"] == "post_only_backoff" and b["last_plan"]["decision"] == "take"
-    assert _streak(b) is None, "the accepted IOC ends the streak"
-    o = [x for x in _rows(p) if x["tif"] == "IOC"]
-    assert len(o) == 1 and o[0]["state"] == "filled" and o[0]["kind"] == "take" and o[0]["wire"] == HIS
-    # the partial fill: the IOC goes, the remainder rests on the NEXT tick, not under the held plan
+def test_e30_no_take_fires_under_the_hold_at_e31_and_an_accepted_rest_at_a_new_wire_resets_the_count(monkeypatch):
+    """RE-PINNED at E31 (FILL lane 31, 2026-09-10). E30 pinned here that
+    the at-level TAKE fired under the hold -- the hold refused the GTC add
+    and the take went out as an IOC at 0.89, which reset the count. There
+    is no take left in the worker (E31 D1: `is_take` is gone from
+    _place_reserved and every take arm is gone from _act), so the two
+    halves of that pin are re-cut as the two things that are true now:
+
+    (1) UNDER THE HOLD, AT THE HELD WIRE, NOTHING GOES OUT. The fifth tick
+        on the same 0.75 / 0.76 book plans the same short wire 0.89 as the
+        three rejections -- _post_only_held matches side and wire -- so the
+        add is refused `post_only_backoff` and the venue is never called.
+        Old: one SELL IOC at 0.89, take_placed 1, take_first 1, the ledger
+        -145. New: no placement at all, take_placed 0, the ledger 0.
+    (2) A WIRE THIS LANE MOVED IS A DIFFERENT WIRE AND A FRESH COUNT. The
+        book then LOCKS at 0.89 / 0.89: the short's offer may not sit at or
+        through the bid, so the maker clamp lifts it one tick to
+        max(sell_wire(0.89), 0.89 + 0.01) = 0.90. That is not the streak's
+        wire, so no hold applies; ONE post-only GTC at 0.90 goes out and,
+        ACCEPTED, ends the streak -- E30's rule, unchanged, reached by a
+        rest instead of an IOC."""
+    # (2) first, because the accepted rest below is what leaves the module's
+    # streak clean for (1): the locked book moves the clamp a tick
     p2 = _p1383()
-    v2 = _v()
-    b2 = _three(p2, v2, monkeypatch)
-    v5b = _Venue(bid=HIS, ask=HIS, place=_reject(ioc_fill=45.0))
-    st = _tick(p2, v5b, now=NOW + 90, http=_http_1383())
-    assert [c[1:6] for c in _places(v5b)] == [(SLUG, HIS, QTY, False, IOC_TIF)] and b2["ledger_net"] == -45
-    assert _census(st, "take_placed") == 1 and _census(st, "rest_placed") == 0 and _streak(b2) is None
-    v6 = _Venue(bid=BID, ask=ASK, held={SLUG: -45})                 # the venue accepting, holding the 45, the quote as before
-    st6 = _tick(p2, v6, now=NOW + 120, http=_http_1383())
-    assert [c[1:6] for c in _places(v6)] == [(SLUG, WIRE, QTY - 45, False, GTC_TIF)]
-    assert _census(st6, "rest_placed") == 1 and _census(st6, "post_only_backoff") == 0 and "hold" not in b2["last_plan"]
-    assert b2["open_order_id"] is not None and _streak(b2) is None
+    b2 = _three(p2, _v(), monkeypatch)
+    v6 = _Venue(bid=HIS, ask=HIS)
+    st6 = _tick(p2, v6, now=NOW + 90, http=_http_1383())
+    assert [c[1:6] for c in _places(v6)] == [(SLUG, 0.90, QTY, False, GTC_TIF)]
+    assert _places(v6)[0][7] is True, "post-only on the wire"
+    assert _census(st6, "rest_placed") == 1 and _census(st6, "post_only_backoff") == 0
+    assert _census(st6, "maker_rest_at_touch") == 1, "the touch, not his cent, set the wire"
+    assert "hold" not in b2["last_plan"] and b2["open_order_id"] is not None
+    assert _streak(b2) is None, "the accepted rest ends the streak"
+    # (1) the held wire: nothing of any kind goes out
+    p = _p1383()
+    b = _three(p, _v(), monkeypatch)
+    v5 = _Venue(bid=BID, ask=ASK, place=_reject())
+    st5 = _tick(p, v5, now=NOW + 90, http=_http_1383())
+    assert not _places(v5), "the held wire: no order of any kind"
+    assert _census(st5, "post_only_backoff") == 1 and _census(st5, "take_placed") == 0
+    assert _census(st5, "rest_placed") == 0 and b["ledger_net"] == 0 and b["open_order_id"] is None
+    assert b["last_plan"]["hold"] == "post_only_backoff" and "decision" not in b["last_plan"]
+    assert _streak(b)["n"] == 3, "the held tick neither adds to the streak nor clears it"
+    assert not [x for x in _rows(p) if x["tif"] == "IOC"], "no IOC row was ever written"
 
 
-def test_e30_the_band_take_on_a_long_book_fires_under_the_hold(monkeypatch):
-    """E27's band on a LONG add: his 0.52, the ask three cents over
-    (0.55 / 0.56: `out`, the rest at his cent 0.52) rejected 400 three
-    times -> held; the ask then inside the band (0.53 / 0.54, the rest's
-    wire still 0.52) -> ONE BUY IOC at the band cent 0.54 for 300
-    (take_in_band 1, decision 'take_in_band'), no GTC, the ledger 300, the
-    count reset."""
+def test_e30_no_band_take_fires_under_the_hold_at_e31_the_ask_inside_the_band_changes_nothing(monkeypatch):
+    """RE-PINNED at E31 (FILL lane 31, 2026-09-10). E30 pinned here that
+    E27's BAND TAKE fired under the hold: his 0.52 with the ask three
+    cents over (0.55 / 0.56) rested at his cent 0.52, was rejected 400
+    three times and held; the ask then INSIDE the band (0.53 / 0.54) sent
+    ONE BUY IOC at the band cent 0.54 and reset the count. E31 retired the
+    band with every other take (docs 75; MIRROR_TAKE_BAND and
+    MIRROR_TAKE_BAND_FRAC keep their defaults but nothing on the money
+    path reads them), so what changes is:
+
+      - no `take_band` verdict is written on the plan at all (E27's block
+        is gone from _act), where E30 read 'out' on each of the three;
+      - the ask coming inside the band sends NOTHING. The maker BUY wire
+        is min(buy_wire(his 0.52), buy_wire(0.54 - 0.01) = 0.53) = 0.52 --
+        the SAME wire the three rejections were at -- so the hold stands
+        and the venue is never called. Old: one BUY IOC at 0.54,
+        take_in_band 1, the ledger 300, the streak cleared. New: no
+        placement, take_in_band 0, the ledger 0, the streak still 3.
+
+    The rest at his cent 0.52 on the 0.55 / 0.56 book, and the three
+    rejections that build the streak, are byte for byte E30's."""
     monkeypatch.setattr(rules, "MIRROR_TAKE_BAND", 0.02)
     monkeypatch.setattr(rules, "MIRROR_TAKE_BAND_FRAC", 0.05)
     p = _E5Pool(fills=_his(300.0, long_px=0.52), snap={M: 300.0, N: 0.0}, snap_at=NOW - 40, ratio_fills=_ratio_fills())
@@ -349,15 +414,15 @@ def test_e30_the_band_take_on_a_long_book_fires_under_the_hold(monkeypatch):
     v = _Venue(bid=0.55, ask=0.56, place=_reject())
     for now in (NOW, NOW + 30, NOW + 60):
         st = _tick(p, v, now=now)
-        assert _census(st, "post_only_rejected") == 1 and b["last_plan"]["take_band"]["verdict"] == "out"
+        assert _census(st, "post_only_rejected") == 1 and "take_band" not in b["last_plan"]
     assert [c[1:6] for c in _places(v)] == [(SLUG, 0.52, 300, False, GTC_TIF)] * 3 and _streak(b)["n"] == 3
     st4 = _tick(p, v, now=NOW + 90)
     assert _census(st4, "post_only_backoff") == 1 and len(_places(v)) == 3 and b["last_plan"]["hold"] == "post_only_backoff"
     v5 = _Venue(bid=0.53, ask=0.54, place=_reject())
     st5 = _tick(p, v5, now=NOW + 100)
-    assert [c[1:6] for c in _places(v5)] == [(SLUG, 0.54, 300, False, IOC_TIF)]
-    assert _census(st5, "take_in_band") == 1 and _census(st5, "post_only_backoff") == 1 and _census(st5, "rest_placed") == 0
-    assert b["ledger_net"] == 300 and b["last_plan"]["decision"] == "take_in_band" and _streak(b) is None
+    assert not _places(v5), "the ask inside the old band sends nothing: the wire is his cent either way"
+    assert _census(st5, "take_in_band") == 0 and _census(st5, "post_only_backoff") == 1 and _census(st5, "rest_placed") == 0
+    assert b["ledger_net"] == 0 and "decision" not in b["last_plan"] and _streak(b)["n"] == 3
 
 
 def test_e30_his_reduce_under_the_hold_covers_as_today(monkeypatch):
@@ -366,14 +431,21 @@ def test_e30_his_reduce_under_the_hold_covers_as_today(monkeypatch):
     -1,457.4 -> -500 on his SELL of 957.4 of the other token (witnessed,
     the venue's per-market read confirming) -> the target -50 and the
     cover of 50 -- a BUY of the long token, a reduce -- goes out as
-    today: never judged, never held; post_only_backoff 0."""
+    today: never judged, never held; post_only_backoff 0.
+
+    RE-PINNED at E31 (FILL lane 31, 2026-09-10): the cover is a post-only
+    GTC rest, not an IOC, so the fixture's IOC branch no longer fills it --
+    `lift_exits` does, a taker lifting the fresh rest at create with
+    `aggressor` False (a maker fill, booked exactly as the IOC's fill
+    booked). Nothing else in this test moves: the cover still goes out,
+    still for 50, still never judged and never held."""
     _shorts_on(monkeypatch)
     fills = [_fill(M, "BUY", 100.0, 0.31, NOW - 3000), _fill(N, "BUY", OTHER, 1.0 - HIS, NOW - 2000),
              _fill(N, "SELL", 957.4, 1.0 - HIS, NOW - 10, detected_at=NOW - 5, source="s1")]
     p = _p1383(fills=fills, snap={M: 100.0, N: OTHER - 957.4})
     b = _b1383(p, ledger=-100)
     _seed(b, ledger=-100.0)
-    v = _Venue(bid=BID, ask=ASK, held={SLUG: -100}, place=_reject())
+    v = _Venue(bid=BID, ask=ASK, held={SLUG: -100}, place=_reject(lift_exits=50.0))
     st = _tick(p, v, http=_mkt(100.0, OTHER - 957.4))
     assert b["last_plan"]["target"] == -50 and b["last_plan"]["kind"] == "reduce"
     assert len(_buys(v)) == 1 and _buys(v)[0][3] == 50 and not _sells(v)
@@ -384,13 +456,17 @@ def test_e30_his_flip_under_the_hold_flattens_and_closes_as_today(monkeypatch):
     """Lane 5's flip on a held book: his net flips to +3,000 against our
     short of 100 (his last move the other token at 0.72: his buy-back in
     long space 0.28, the ask at his cent) -> the paired flatten covers 100
-    by ONE BUY IOC as today (never held); the venue at 0 next tick -> the
-    flip IS the close (cashed_out)."""
+    by ONE BUY as today (never held); the venue at 0 next tick -> the
+    flip IS the close (cashed_out).
+
+    RE-PINNED at E31: that BUY is a post-only rest, not an IOC."""
     _shorts_on(monkeypatch)
     p = _p1383(fills=_his(3100.0, other_size=100.0), snap={M: 3100.0, N: 100.0})
     b = _b1383(p, ledger=-100)
     _seed(b, ledger=-100.0)
-    v = _NoClose(held={SLUG: -100}, bid=0.27, ask=0.28, ioc_fill=100.0)
+    # E31: the paired flatten is a post-only rest -- `lift` is the taker who
+    # lifts it at create with `aggressor` False, where `ioc_fill` filled it
+    v = _NoClose(held={SLUG: -100}, bid=0.27, ask=0.28, ioc_fill=100.0, lift=100.0)
     st = _tick(p, v, http=_mkt(3100.0, 100.0))
     assert _census(st, "sign_flip") == 1 and b["last_plan"]["sign_flip"] is True and b["ledger_net"] == 0
     assert len(_buys(v)) == 1 and _buys(v)[0][3] == 100 and _census(st, "post_only_backoff") == 0
@@ -629,13 +705,13 @@ def test_e30_the_wait_only_lengthens_in_process(monkeypatch):
 
 def test_e30_the_census_place_the_emit_sites_and_the_records():
     keys = ml.CENSUS_KEYS
-    assert keys[-14] == "post_only_backoff" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-18:-14] == ("hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed")
-    assert keys[-23:-18] == ("walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread", "ledger_stale_refused")
-    assert keys[-27:-23] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
-    assert keys[-31:-27] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
-    assert keys[-58] == "take_in_band" and keys[-1] == "cand_terminal_skipped"
-    assert len(keys) == 247 and len(set(keys)) == len(keys) and keys.count("post_only_backoff") == 1
+    assert keys[-24] == "post_only_backoff" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-28:-24] == ("hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed")
+    assert keys[-33:-28] == ("walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread", "ledger_stale_refused")
+    assert keys[-37:-33] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
+    assert keys[-41:-37] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
+    assert keys[-68] == "take_in_band" and keys[-1] == "cand_terminal_skipped"
+    assert len(keys) == 257 and len(set(keys)) == len(keys) and keys.count("post_only_backoff") == 1
     assert ml._new_stats()["census"]["post_only_backoff"] == 0
     assert "post_only_backoff" not in rules.P2_INTEGRITY_COUNTERS
     src = inspect.getsource(ml)
@@ -645,31 +721,42 @@ def test_e30_the_census_place_the_emit_sites_and_the_records():
     # judged LAST among the holds: after E29's hand hold, on the add branch, with the plan's side and wire
     assert tb.index("hand_hold = _hand_exited(t, book, prior_plan)") < tb.index('if action == "add":') \
         < tb.index('plan["hold"] = inc_refusal') < tb.index("elif inc_refusal is None:") \
-        < tb.index('po_hold = _post_only_held(t, book, p, _wire_for(p, his_px, r, book.get("intent"), None))') \
+        < tb.index('po_hold = _post_only_held(t, book, p, _wire_for(p, his_px, r, book.get("intent"), None,') \
         < tb.index('plan["hold"] = "post_only_backoff"') < tb.index('plan["post_only_backoff"] = po_hold')
     assert tb.count("_post_only_held(") == 1 and "post_only" not in tb[:tb.index('if action == "add":')]
-    # the guard in _place_reserved: a GTC add under the hold refused before any read; an IOC passes
+    # the guard in _place_reserved: an add under the hold refused before any read.
+    # RE-PINNED at E31 (FILL lane 31, 2026-09-10): E30 wrote `and tif != "IOC"` here to let
+    # the two takes through the hold; there is no IOC left on the money path to exempt, so the
+    # clause is the shorter one and NOTHING goes out for a held wire
     pr = inspect.getsource(ml._place_reserved)
-    guard = 'if action == "add" and tif != "IOC" and plan.get("hold") == "post_only_backoff":'
+    guard = 'if action == "add" and plan.get("hold") == "post_only_backoff":'
     assert pr.count(guard) == 1 and pr.index(guard) < pr.index("_short_open_refusal(t)") < pr.index("orders = await _read_open(t)")
+    assert 'tif != "IOC"' not in pr
     assert pr.index(guard) < pr.index("_room_take(t, est)") and 'return "post_only_backoff"' in pr
     # the branch: the receipt through _refusal_receipt's bound onto the receipt merge, the word, the log, the count
     assert "await t.pool.execute(_SQL_ORDER_RECEIPT, o[\"id\"], _refusal_receipt(body))" in pr
     assert 'f"post_only_rejected:{code}{_post_only_word(raw)}"' in pr and "_post_only_log_once(book, side, wire, int(qty), code, raw)" in pr
     assert 'code = raw.get("status_code") if isinstance(raw, dict) else None' in pr
     assert "_post_only_note(t, book, side, wire, o.get(\"price\"), code)" in pr and pr.count("_post_only_streak.pop(book[\"id\"], None)") == 1
-    assert pr.index("rules.take_arms(raw if isinstance(raw, dict) else code)") > pr.index("_SQL_ORDER_REASON"), "the arm as today"
-    assert "_SQL_BOOK_ARM" in pr and "_raw_rate_limit(raw)" in pr, "the take arm and the 429 circuit stand"
+    # RE-PINNED at E31: where E30 read the arm (rules.take_arms -> _SQL_BOOK_ARM -> one IOC next
+    # tick) E31 reads the CROSS and re-prices the rest instead (_maker_cross -> _cross_hint_note).
+    # The site is the same, after the reason is written; the 429 circuit beside it is untouched
+    assert pr.index("_maker_cross(raw, side, bid_used, ask_used, wire)") > pr.index("_SQL_ORDER_REASON")
+    assert "if rules.take_arms(" not in pr and "await t.pool.execute(_SQL_BOOK_ARM" not in pr, \
+        "E31: a rejection never arms a take (the two names survive only in the paragraph that says so)"
+    assert "_raw_rate_limit(raw)" in pr, "the 429 circuit stands"
     # the reset sits on the accepted placement, right after the id is persisted
     assert pr.index("_SQL_ORDER_PERSIST_ID") < pr.index("_post_only_streak.pop(book[\"id\"], None)") < pr.index("_SQL_BOOK_OPEN_ORDER")
     # the receipt: the named fields alone, never the preview / a header / a key
     assert ml._POST_ONLY_RECEIPT_KEYS == ("status_code", "error_type", "error", "post_only_cross", "execution_type",
                                           "order_state", "reject_reason", "text", "order_id")
     assert "preview" not in ml._POST_ONLY_RECEIPT_KEYS
-    # _POST_ONLY_OK / _post_only_enabled untouched; the statements untouched
-    assert inspect.getsource(ml._post_only_enabled) == ('def _post_only_enabled() -> bool:\n'
-                                                        '    return (_POST_ONLY_OK and os.environ.get("PMUS_MIRROR_POST_ONLY", "on")\n'
-                                                        '            .strip().lower() not in _OFF_VALUES)\n')
+    # RE-PINNED at E31: E30 pinned _post_only_enabled byte for byte (the process latch AND the
+    # PMUS_MIRROR_POST_ONLY shell variable). E31 DELETED the reader entirely -- the flag is the
+    # literal `post_only = True` at the call -- so neither the latch nor the variable can turn the
+    # mirror into a taker. E30's own rule reads neither
+    assert not hasattr(ml, "_post_only_enabled") and not hasattr(ml, "_POST_ONLY_OK")
+    assert 'os.environ.get("PMUS_MIRROR_POST_ONLY"' not in src, "no reader of the variable is left"
     assert ml._SQL_ORDER_REASON == "UPDATE mirror_orders SET reason = $2, updated_at = now() WHERE id = $1 /* ml-order-reason */"
     assert "ml-order-receipt" in ml._SQL_ORDER_RECEIPT and "COALESCE(receipt, '{}'::jsonb) || $2::jsonb" in ml._SQL_ORDER_RECEIPT
     assert "receipt = $4::jsonb" in ml._SQL_ORDER_REFUSED and ml._REFUSAL_RECEIPT_MAX == 4000
@@ -694,28 +781,40 @@ def test_e30_the_untouched_functions_are_byte_for_byte_66144cf_and_the_touched_o
     import sportsassets.pmus as pm
     for name, digest in PMUS_UNTOUCHED.items():
         assert _sha(getattr(pm, name)) == digest, name
-    # _place_reserved: the six edits reversed
+    # _place_reserved: RE-PINNED at E31 (FILL lane 31, 2026-09-10). E30's
+    # claim here was "the placement is byte for byte 66144cf, this lane's
+    # five edits aside", proved by reversing those five and hashing back to
+    # PLACE_RESERVED_ON_TIP. E31 rewrote the send around them -- the
+    # unconditional post-only literal, the touch-bound re-read where the
+    # IOC's re-read stood, `is_take` gone from every branch, the cross
+    # re-price where the take's arm stood, the aggressor read at the fill --
+    # so no reversal of E30's five lines can reach 66144cf's text any more
+    # and the composed excision is retired here (E31's own file carries the
+    # byte-for-byte proof of THAT rewrite against b57929e, E30's tip:
+    # tests/test_e31_maker_only.py). What is pinned instead is stronger for
+    # E30's purpose and does not weaken: EVERY ONE of this lane's five edits
+    # still stands verbatim in the placement, in order, and the whole
+    # function is pinned at E31's hash.
     pr = inspect.getsource(ml._place_reserved)
-    pr = pr.replace("    global _POST_ONLY_OK, _post_only_receipt_logged\n", "    global _POST_ONLY_OK\n", 1)
-    a = pr.index('    if action == "add" and tif != "IOC" and plan.get("hold") == "post_only_backoff":\n')
-    b = pr.index('        return "post_only_backoff"\n', a) + len('        return "post_only_backoff"\n')
-    pr = pr[:a] + pr[b:]
-    a = pr.index("        # E30 (FILL lane 30): a raw that is not a dict carries no code and\n")
-    b = pr.index('        code = raw.get("status_code") if isinstance(raw, dict) else None\n', a) + len(
-        '        code = raw.get("status_code") if isinstance(raw, dict) else None\n')
-    pr = pr[:a] + '        code = (raw or {}).get("status_code")\n' + pr[b:]
-    a = pr.index("        # E30: the reason keeps its shape and gains ':cross' when the raw\n")
-    b = pr.index('f"post_only_rejected:{code}{_post_only_word(raw)}")\n', a) + len('f"post_only_rejected:{code}{_post_only_word(raw)}")\n')
-    pr = pr[:a] + '        await t.pool.execute(_SQL_ORDER_REASON, o["id"], f"post_only_rejected:{code}")\n' + pr[b:]
-    a = pr.index("        # E30 (A): THE BODY IS KEPT.")
-    b = pr.index('        _post_only_note(t, book, side, wire, o.get("price"), code)\n', a) + len(
-        '        _post_only_note(t, book, side, wire, o.get("price"), code)\n')
-    pr = pr[:a] + pr[b:]
-    a = pr.index("    # E30: an ACCEPTED placement (a rest, an IOC) ends the book's\n")
-    b = pr.index('    _post_only_streak.pop(book["id"], None)\n', a) + len('    _post_only_streak.pop(book["id"], None)\n')
-    pr = pr[:a] + pr[b:]
-    assert "post_only_backoff" not in pr and "_post_only_note" not in pr and "_post_only_word" not in pr
-    assert _sha_text(pr) == PLACE_RESERVED_ON_TIP, "the placement byte for byte 66144cf, the lane's lines aside"
+    assert "    global _post_only_receipt_logged\n" in pr, "(the receipt's once-per-process latch)"
+    for line in ('    if action == "add" and plan.get("hold") == "post_only_backoff":\n',
+                 '        return "post_only_backoff"\n',
+                 "        # E30 (FILL lane 30): a raw that is not a dict carries no code and\n",
+                 '        code = raw.get("status_code") if isinstance(raw, dict) else None\n',
+                 "        # E30: the reason keeps its shape and gains ':cross' when the raw\n",
+                 'f"post_only_rejected:{code}{_post_only_word(raw)}")\n',
+                 "        # E30 (A): THE BODY IS KEPT.",
+                 '        _post_only_note(t, book, side, wire, o.get("price"), code)\n',
+                 "    # E30: an ACCEPTED placement ends the book's post-only streak -- the\n",
+                 '    _post_only_streak.pop(book["id"], None)\n'):
+        assert line in pr, line
+    assert (pr.index('plan.get("hold") == "post_only_backoff"')
+            < pr.index('        code = raw.get("status_code") if isinstance(raw, dict) else None\n')
+            < pr.index('        _post_only_note(t, book, side, wire, o.get("price"), code)\n')
+            < pr.index('    _post_only_streak.pop(book["id"], None)\n')), "the five in E30's own order"
+    assert "    post_only = True\n" in pr and "_post_only_enabled" not in pr, \
+        "E31: the flag is a literal at the call -- no latch to flip and no shell variable behind it"
+    assert _sha_text(pr) == PLACE_RESERVED_ON_E31
     # _tick_book: the one block excised
     tb = inspect.getsource(ml._tick_book)
     a = tb.index("        elif inc_refusal is None:\n            # E30 (FILL lane 30; book 1383)")
@@ -724,6 +823,23 @@ def test_e30_the_untouched_functions_are_byte_for_byte_66144cf_and_the_touched_o
     assert "post_only" not in tb and _sha_text(tb) == TICK_BOOK_ON_TIP
     # the rules module: the switch, the wait and their comment excised (test_e28 does the same for 6c0830d's)
     src = inspect.getsource(rules)
+    # E31 (FILL lane 31, the newest) landed after: the maker wire, the paragraph that makes the take
+    # rails documentary, rest_decision's `ttl_stands` and the four exported names -- excised the same
+    # way, in the same words as tests/test_e28_walk_reread.py's
+    s31 = src.index("# THE RAILS THAT GOVERNED A TAKE ARE DOCUMENTARY FROM E31")
+    src = src[:s31] + src[src.index("# Market families a book may open on", s31):]
+    s31 = src.index("# ------------------------------------------------- E31: the maker wire")
+    src = src[:s31] + src[src.index("def plan_wire(p: Plan | None)", s31):]
+    src = src.replace('    "MAKER_TICK", "maker_wire", "maker_bound", "maker_compare_wire",\n', "")
+    src = src.replace("                  entry: bool | None = None,\n"
+                      "                  ttl_stands: bool = False) -> tuple[str, dict]:\n",
+                      "                  entry: bool | None = None) -> tuple[str, dict]:\n")
+    t31 = src.index("    constant), the mirror of take_allowed's wait.\n")
+    t31e = src.index("reads the book's last plan). Everything else is\n", t31) + len(
+        "reads the book's last plan). Everything else is\n")
+    src = src[:t31] + "    constant), the mirror of take_allowed's wait. Everything else is\n" + src[t31e:]
+    src = src.replace("    if age >= ttl and stands is not True and ttl_stands is not True:\n",
+                      "    if age >= ttl and stands is not True:\n")
     a = src.index("# A REST THE VENUE REJECTS TICK AFTER TICK BACKS OFF (E30")
     b = src.index('MIRROR_POST_ONLY_BACKOFF_S = min_wait_env("MIRROR_POST_ONLY_BACKOFF_S", 60.0)\n') + len(
         'MIRROR_POST_ONLY_BACKOFF_S = min_wait_env("MIRROR_POST_ONLY_BACKOFF_S", 60.0)\n')

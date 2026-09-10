@@ -146,7 +146,10 @@ def test_review_a_standing_stop_holds_and_the_re_arm_key_is_not_even_read(rearm,
     assert not _warned(caplog) and ml._last_loss is None
     assert ("cancel", "oid-1", SLUG) in v.calls
     pl = _places(v)
-    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], "the reduce goes out: the IOC, then its same-tick rest at his cent (E14b)"
+    # E31 (FILL lane 31, 2026-09-10): ONE post-only rest of 200 at his cent,
+    # where it was an IOC at the bid that filled nothing and then E14b's
+    # same-tick re-rest of the same 200. The guard under test is unchanged
+    assert [c[3:6] for c in pl] == [(200, True, GTC_TIF)], "the reduce goes out, as one maker rest"
 
 
 def test_review_an_unreadable_re_arm_key_behind_a_standing_stop_is_still_the_stop(monkeypatch):

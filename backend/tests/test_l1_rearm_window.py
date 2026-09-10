@@ -273,7 +273,9 @@ def test_l1_an_unreadable_re_arm_key_is_a_stop_and_a_reduce_still_passes(monkeyp
     assert not _loss_reads(p), "no sum was read"
     assert ("cancel", "oid-1", SLUG) in v.calls
     pl = _places(v)
-    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl   # the IOC that filled nothing, then its same-tick rest at his cent (E14b)
+    # E31: ONE post-only rest of 200 at his cent, where it was the IOC that
+    # filled nothing and then E14b's same-tick rest of the same 200
+    assert [c[3:6] for c in pl] == [(200, True, GTC_TIF)], pl
 
 
 def test_l1_a_standing_stop_holds_against_a_newer_re_arm_key_and_a_reduce_passes():
@@ -291,7 +293,9 @@ def test_l1_a_standing_stop_holds_against_a_newer_re_arm_key_and_a_reduce_passes
     assert not _loss_reads(p)
     assert ("cancel", "oid-1", SLUG) in v.calls
     pl = _places(v)
-    assert [c[3:6] for c in pl] == [(200, True, IOC_TIF), (200, True, GTC_TIF)], pl   # the IOC that filled nothing, then its same-tick rest at his cent (E14b)
+    # E31: ONE post-only rest of 200 at his cent, where it was the IOC that
+    # filled nothing and then E14b's same-tick rest of the same 200
+    assert [c[3:6] for c in pl] == [(200, True, GTC_TIF)], pl
 
 
 # ---------------------------------------------------------- 4. the preset

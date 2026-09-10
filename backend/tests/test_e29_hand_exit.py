@@ -69,20 +69,23 @@ COVER_2 = 1421.0                    # the rest of the leg: 2,460 - 1,039
 # the functions this lane leaves byte-identical, hashed on 6c0830d in the lane's worktree; re-pinned at landing
 # over E28 (cdf0742) where E28's guarded ledger write moved _book_hand_reduce (676757a66cee3a0a -> 9e883d268cdb80c4)
 UNTOUCHED = {
-    "_book_hand_reduce": "9e883d268cdb80c4", "_hand_closing": "533d514f88e0dd1d", "_act": "59efb48ba79f793c",
-    "_frozen_exit": "ef478fabdfa2ccc0", "_exit_take": "750acd709c826566", "_flatten_vanished": "22930dc6e3e85816",
+    "_book_hand_reduce": "9e883d268cdb80c4", "_hand_closing": "533d514f88e0dd1d", "_act": "2e7043299fbf834a",
+    "_frozen_exit": "ef478fabdfa2ccc0", "_flatten_vanished": "7f27e3b041da0c76",
     "_maybe_close_episode": "59e28ff01f960660", "_fast_book": "286e6fa4663c3887",
     "_fast_candidate": "922585ffb6856f70", "_fast_gate": "1932811194268668", "_walk_candidate": "9c990feba5fdeb57",
     "_note_candidate_refusal": "03294f12328e88af", "_note_reopen_refused": "7cd3a2894da0516c",
     "_reopen_of": "db0a83b7629c4254", "_flip_since": "3cdab3ea4d75e7c5", "_cancel_open_for": "639e841a3d2109eb",
-    "_place": "ab568476817cf795", "_place_reserved": "d55d0d4a63c71c23", "_entry_take": "2266c2b346674491",
-    "_ioc_reread": "cd3dbab5e5819257", "_lost_fill_adopt": "61c67ae8946f3af4",
+    "_place": "f559a52bfb610ef3", "_place_reserved": "a83a3e9473eb7112",
+    "_lost_fill_adopt": "61c67ae8946f3af4",
     "_disagree_fill_adopt": "4f1f100ae137d248", "_thaw": "62950633c3de6c96", "_quiet_skip": "d32699f6460eb856",
     "_hand_log_fills": "c101574ac7409810", "_hand_adopted_record": "2622dd2388dd7fe9",
     "_load_cand_memo": "297e1bf68db09237", "_persist_cand_memo": "d6ff73ade8bba13c",
 }
 HAND_NET_ON_TIP = "dc37d19b62d8c6fd"      # _hand_net on 6c0830d and on cdf0742 (E28 left it), the ONE new call site excised
-RENDER_OPS_ON_TIP = "dea4c2e5a9b03439"    # render-ops.yml minus this lane's block: 0b09a1ed2074c6fd on cdf0742 (the landing tip), then
+# E31 (FILL lane 31, 2026-09-10): the read-only `maker-rests` preset beside take-band (and its copy in the
+# hourly) and the need_confirm `mirror-post-only-rearm` beside mirror-rearm -- dea4c2e5a9b03439 ->
+# e6d09c17b185163b with this lane's block still excised; every other read-only preset byte for byte
+RENDER_OPS_ON_TIP = "e6d09c17b185163b"    # render-ops.yml minus this lane's block: 0b09a1ed2074c6fd on cdf0742 (the landing tip), then
                                           # 95b58cdb2a82406f when the heartbeat value column widened 2,400 -> 8,000 (2026-09-10 02:1xZ),
                                           # then re-cut for the read-only nfl-team preset beside nfl-rows (02:5xZ; b7d553a6aa4204c2)
                                           # and again for mirror-by-league / his-matched beside it (03:1xZ)
@@ -323,7 +326,13 @@ def test_e29_his_flip_flattens_and_closes_as_today_and_the_reopen_is_refused_han
     p = _pool_1317(fills=_his(30000.0, other_size=100.0), snap={M: 30000.0, N: 100.0})
     p.state["mirror_hand_exit"] = {KEY: _memo_entry()}
     b = _book_1317(p, ledger=-1421, last_plan=_held_plan())
-    v = _NoClose(held={SLUG: -1421}, bid=0.30, ask=0.31, ioc_fill=1421.0)
+    # E31 (FILL lane 31, 2026-09-10): the flip's paired flatten is a POST-ONLY
+    # REST, not an IOC, so `ioc_fill` no longer fills it -- `lift` does, the
+    # venue filling the fresh rest at create with `aggressor` False (a taker
+    # hit us: a maker fill, booked as the IOC's fill booked). What this test
+    # pins -- the flip covers, is never held, closes on the venue's zero and
+    # the reopen is refused hand_held -- is unchanged.
+    v = _NoClose(held={SLUG: -1421}, bid=0.30, ask=0.31, ioc_fill=1421.0, lift=1421.0)
     st = _tick(p, v, http=_mkt(30000.0, 100.0))
     assert _census(st, "sign_flip") == 1 and b["last_plan"]["sign_flip"] is True and b["ledger_net"] == 0
     assert len(_buys(v)) == 1 and _buys(v)[0][3] == 1421 and _census(st, "hand_held") == 0
@@ -666,11 +675,11 @@ def test_e29_the_release_statement_runs_on_a_real_postgres_and_removes_both_reco
 def test_e29_the_census_place_the_emit_sites_the_rails_and_no_migration():
     keys = ml.CENSUS_KEYS
     # landed over E28 (cdf0742): E28's five names sit between E25's four and these (241 in the worktree -> 246)
-    assert keys[-18:-14] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-23:-18] == ("walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread", "ledger_stale_refused")
-    assert keys[-27:-23] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
-    assert keys[-31:-27] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
-    assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys) and len(keys) == 247
+    assert keys[-28:-24] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-33:-28] == ("walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread", "ledger_stale_refused")
+    assert keys[-37:-33] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
+    assert keys[-41:-37] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
+    assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys) and len(keys) == 257
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)
     src = inspect.getsource(ml)

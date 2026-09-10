@@ -31,7 +31,9 @@ def test_r_kill_a_stale_flip_witness_reopens_flow_only(monkeypatch):
     p, b = _long_world(monkeypatch, _fill(N, "BUY", 500, 0.52, NOW - 10, detected_at=NOW - 8),
                        _fill(M, "SELL", 1_000, 0.30, NOW - 9, detected_at=NOW - 7), net=-500.0)
     p.snap[N], p.snap[M] = 500.0, 0.0
-    v1 = _Venue(bid=0.29, ask=0.31, held={SLUG: 100}, ioc_fill=100.0)
+    # E31 (FILL lane 31, 2026-09-10): the flip's exit is a POST-ONLY REST, so the
+    # taker who lifts it at create (`lift`) is what books the 100, not an IOC fill
+    v1 = _Venue(bid=0.29, ask=0.31, held={SLUG: 100}, lift=100.0)
     _tick(p, v1, http=_mkt(0.0, 500.0))
     assert b["last_plan"]["flip_witness"]["at"] == NOW
     v2 = _Venue(bid=0.29, ask=0.31, held={SLUG: 0})

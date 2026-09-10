@@ -33,7 +33,7 @@ from sportsassets.analytics import mirror_live_rules as rules
 from sportsassets.workers import mirror_live as ml
 from tests.test_l1_rearm_window import TRIPPED, H24, _rearm, _reduce_world
 from tests.test_l2_sleeve_window import _recorder
-from tests.test_mirror_live_worker import IOC_TIF, NOW, SLUG, _armed  # noqa: F401 — the fixture
+from tests.test_mirror_live_worker import GTC_TIF, IOC_TIF, NOW, SLUG, _armed  # noqa: F401 — the fixture
 from tests.test_mirror_live_worker import _ZZ, _census, _places, _pool, _settled_book, _tick, _Venue
 
 DOCS = pathlib.Path(__file__).resolve().parents[2] / "docs" / "mirror-coverage.md"
@@ -282,7 +282,8 @@ def test_on_the_readings_carry_no_stop_key_and_reduces_pass_either_way(monkeypat
         p.state["mirror_loss_stop"] = dict(TRIPPED)
         st = _tick(p, v)
         # the reduce's IOC at his cent (the L1 every-guard pin's shape), either way
-        assert (200, True, IOC_TIF) in [c[3:6] for c in _places(v)], ("the reduce passes", off)
+        # E31: the reduce passes as a post-only GTC rest, never an IOC
+        assert (200, True, GTC_TIF) in [c[3:6] for c in _places(v)], ("the reduce passes", off)
         assert (_census(st, "mirror_loss_stop") == 0) is off
 
 

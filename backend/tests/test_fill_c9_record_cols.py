@@ -288,8 +288,15 @@ def test_c9_a_replace_capped_tick_names_the_cause_replace_capped_and_the_standin
     r = _row(p, NOW - 3000)
     assert (r["name"], r["cause"], r["rest_id"], r["fast"]) == ("replace_capped", "replace_capped", o["id"], False)
     src = inspect.getsource(ml._act)
-    assert src.count('plan["rest_cause"] = "take_capped"') == 1 and src.count('plan["rest_cause"] = "replace_capped"') == 1
-    assert src.index('plan["rest_cause"] = "take_capped"') < src.index('return "take_capped"')
+    # E31: the take-arm's own capped refusal went out of _act with the six take arms, so
+    # `plan["rest_cause"] = "take_capped"` 1 -> 0 (`take_capped` stays DECLARED on
+    # CENSUS_KEYS and in _REST_STOOD_NAMES as the record of the rule it governed, but no
+    # line of _act writes it). What stands at that site is E31's OWN capped refusal that
+    # keeps a rest: `maker_no_cent`, stamped before its return exactly as take_capped was
+    assert 'plan["rest_cause"] = "take_capped"' not in src and 'return "take_capped"' not in src
+    assert src.count('plan["rest_cause"] = "maker_no_cent"') == 1
+    assert src.index('plan["rest_cause"] = "maker_no_cent"') < src.index('return "maker_no_cent"')
+    assert src.count('plan["rest_cause"] = "replace_capped"') == 1
     assert src.index('plan["rest_cause"] = "replace_capped"') < src.index('return "replace_capped"')
     assert ml._REST_STOOD_NAMES == frozenset(("open_order_pending", "take_capped", "replace_capped"))
     # a fill named under any other word carries no cause
@@ -423,10 +430,10 @@ def test_c9_no_census_name_the_three_heartbeat_keys_the_plan_field_and_no_order_
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     # E23 (FILL lane 23) placed its six names between lane 11's and the key (-14 -> -20, -18:-14 -> -24:-20, -21:-18 -> -27:-24) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-27 -> -31, -31:-27 -> -35:-31, -34:-31 -> -38:-35, -26 / -25 / -20 -> -30 / -29 / -24)
-    assert keys[-45] == "cand_market_closed_db"
-    assert tuple(keys[-49:-45]) == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert tuple(keys[-52:-49]) == ("he_holds", "he_holds_unread", "reopen_refused")
-    assert keys[-44] == "turn_woke_fast" and keys[-43] == "fast_order_open" and keys[-38] == "fast_status_unread"
+    assert keys[-55] == "cand_market_closed_db"
+    assert tuple(keys[-59:-55]) == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert tuple(keys[-62:-59]) == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-54] == "turn_woke_fast" and keys[-53] == "fast_order_open" and keys[-48] == "fast_status_unread"
     assert not any(k in keys for k in HEARTBEAT) and not any(k in keys for k in ("rest_cause", "fill_cols", "fast_col"))
     src = inspect.getsource(ml)
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))
@@ -437,21 +444,47 @@ def test_c9_no_census_name_the_three_heartbeat_keys_the_plan_field_and_no_order_
     assert 'stats["fast_col_unreadable"]' in inspect.getsource(ml._fast_col_guard)
     assert code.count("fetch(_SQL_FILL_CAUSE_GUARD)") == 1 and code.count("fetch(_SQL_FAST_COL_GUARD)") == 1
     assert code.count("_fill_cause_guard(t, stats)") == 2 and code.count("_fast_col_guard(t, stats)") == 2
-    # the plan field: seven stamps -- the keep branch's three `open_order_pending` returns (the exit rest held,
-    # the cover rest held, the entry rest kept: each through _rest_cause), the two capped refusals, the
-    # frozen kept slot's two paths (the non-terminal row, the index's own refusal)
-    assert code.count('plan["rest_cause"]') == 7
+    # the plan field: SEVEN stamps -> SIX at E31, and every one of the seven's readers still
+    # gets a cause. Two came off and one went on:
+    #   -1  the keep branch's three `_rest_cause` returns became TWO. E31 merged the exit
+    #       rest's branch and the cover rest's branch into ONE `priced_exit` arm
+    #       (`long_exit or short_exit`), because both now hold the identical maker rest at
+    #       his cent; the cover rest is stamped by the very same line
+    #   -1  `plan["rest_cause"] = "take_capped"` left with the six take arms
+    #   +1  `plan["rest_cause"] = "maker_no_cent"` -- the review's CRITICAL-2 hold, the one
+    #       refusal this lane ADDS that keeps a standing rest instead of cancelling it
+    # So: the keep branch's two `open_order_pending` returns through _rest_cause, the two
+    # capped/held refusals (replace_capped, maker_no_cent), the frozen kept slot's two paths
+    assert code.count('plan["rest_cause"]') == 6
     act = inspect.getsource(ml._act)
-    assert act.count('plan["rest_cause"] = _rest_cause(book, plan, why)') == 3 and act.count('plan["rest_cause"] = "frozen"') == 1
+    assert act.count('plan["rest_cause"] = _rest_cause(book, plan, why)') == 2 and act.count('plan["rest_cause"] = "frozen"') == 1
+    assert act.count('plan["rest_cause"] = "maker_no_cent"') == 1
+    # the merged arm serves BOTH priced exits, so neither reader lost its cause
+    assert "long_exit = ex is not None and not short" in act
+    assert "short_exit = ex is not None and short and is_exit" in act
+    assert "priced_exit = long_exit or short_exit" in act
+    assert act.index("if priced_exit:") < act.index('plan["rest_cause"] = _rest_cause(book, plan, why)')
     assert inspect.getsource(ml._place_reserved).count('plan["rest_cause"] = "frozen"') == 1
     assert act.index('plan["open_order"] = o["id"]') < act.index('plan["rest_cause"] = _rest_cause(book, plan, why)')
-    assert act.count('plan["open_order"] = o["id"]') == 2, "the keep branch and, since this lane, the replace branch"
+    # E31: 2 -> 3. The keep branch and the replace branch as before, plus the `maker_no_cent`
+    # hold, which names the STANDING rest it refuses to cancel so the record still says which
+    # order stood (the same field, the same reader, one more site)
+    assert act.count('plan["open_order"] = o["id"]') == 3, "the keep branch, the replace branch, E31's no-cent hold"
+    assert act.index('plan["rest_cause"] = "maker_no_cent"') > act.index('plan["open_order"] = o["id"]')
     # the 061 INSERT sent only under BOTH probes; the 059 shape else
     assert "if t.order_cols is True and t.fast_col is True:" in inspect.getsource(ml._place_reserved)
     assert "elif t.order_cols is True:" in inspect.getsource(ml._place_reserved)
-    # NO order path READS any of the new columns: the words appear on the record's side alone
-    for fn in (ml._act, ml._place_reserved, ml._entry_take, ml._exit_take, ml._tick_candidate, ml._fast_gate,
-               ml._maybe_close_episode, ml._flatten_send, ml._tick_book, ml._fast_book, ml._frozen_exit):
+    # NO order path READS any of the new columns: the words appear on the record's side alone.
+    # E31: `_entry_take`, `_exit_take` and `_flatten_send` are DELETED from the money path,
+    # so the sweep names them by absence and sweeps what stands at their sites instead --
+    # `_wire_for` (the one maker clamp, where both takes priced), `_place` (the fail-closed
+    # IOC guard), `_rest_reread` (the touch-bound re-read at _ioc_reread's site) and
+    # `_flatten_vanished` (the flatten's rest, where _flatten_send's slippage leg was)
+    for gone in ("_entry_take", "_exit_take", "_flatten_send", "_ioc_reread", "_exit_band_take"):
+        assert not hasattr(ml, gone), gone
+    for fn in (ml._act, ml._place_reserved, ml._wire_for, ml._place, ml._rest_reread,
+               ml._flatten_vanished, ml._tick_candidate, ml._fast_gate,
+               ml._maybe_close_episode, ml._tick_book, ml._fast_book, ml._frozen_exit):
         s = "\n".join(ln for ln in inspect.getsource(fn).splitlines() if not ln.lstrip().startswith("#"))
         for word in ('get("rest_cause")', '["rest_cause"]:', "rest_id", 'get("cause")', '["cause"]', 'get("fast")',
                      '["fast"]', "fill_cols", "_REST_STOOD_NAMES", "fill_rows"):
@@ -485,13 +518,20 @@ def test_c9_no_census_name_the_three_heartbeat_keys_the_plan_field_and_no_order_
     out = ml._fills_seen(t, b, "placement_lost", plan={"rest_cause": "frozen", "open_order": 41, "kind": "frozen"})
     assert (out[0]["cause"], out[0]["rest"]) == ("frozen", 41)
     assert ml._fills_seen(t, b, "placement_lost", plan={"rest_cause": "frozen", "open_order": 41})[0]["cause"] is None
-    # the keep branch stamps at its RETURN, after the take and the exit's take: a keep that ends in a take
-    # never carries the cause (the stamp is the last statement before `return "open_order_pending"`)
+    # the keep branch stamps at its RETURN: the stamp is the last statement before
+    # `return "open_order_pending"`. E31: 3 -> 2 stamps, because the exit rest's arm and the
+    # cover rest's arm merged into one `priced_exit` arm (both hold the same maker rest at
+    # his cent); the entry's own stamp is the second and last
     stamps = [m.start() for m in re.finditer(re.escape('plan["rest_cause"] = _rest_cause(book, plan, why)'), act)]
-    assert len(stamps) == 3
+    assert len(stamps) == 2
     for i in stamps:
         assert act[i:].split("\n")[1].strip() == 'return "open_order_pending"', "every stamp sits on a keep return"
-    assert act.index('_mirror_stop("take_at_his_level", w)') < stamps[-1], "the entry's stamp after the take path"
+    # E31: `take_at_his_level` was the entry take's own name and is retired with the arm, so
+    # the ordering is pinned on what stands at that site -- `resting_above_level`, the record
+    # that the market never came to his level, which under a maker is the NORMAL state of the
+    # rest the entry's stamp then names
+    assert '_mirror_stop("take_at_his_level", w)' not in act
+    assert act.index('_mirror_stop("resting_above_level", w)') < stamps[-1], "the entry's stamp after the wait record"
     t.fast = True
     assert ml._fills_seen(t, b, "on_target")[0]["fast"] is True
     # 059's decision list stands: this lane writes no word
