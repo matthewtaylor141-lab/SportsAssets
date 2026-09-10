@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "whoami | health | refdata | instruments (arg=JSON body) | bbo (arg=symbol) | book (arg=symbol) | positions (arg=account name) | open-orders | report-orders (arg=JSON) | order-preview (arg=JSON) | order (arg=JSON, needs confirm=DO)"
+        description: "whoami | health | refdata | instruments (arg=JSON body) | bbo (arg=symbol) | book (arg=symbol) | positions (arg=account name) | open-orders | report-orders (arg=JSON) | order-preview (arg=JSON) | order (arg=JSON, needs confirm=DO) | cancel (arg=JSON {orderId|clordId, symbol}, needs confirm=DO)"
         required: true
         type: string
       arg:
@@ -84,7 +84,7 @@ jobs:
           set -euo pipefail
           case "$ACTION" in
             whoami|health|refdata|instruments|bbo|book|positions|open-orders|report-orders|order-preview) ;;
-            order) if [ "$CONFIRM" != "DO" ]; then echo "refused: order needs confirm=DO"; exit 1; fi ;;
+            order|cancel) if [ "$CONFIRM" != "DO" ]; then echo "refused: $ACTION needs confirm=DO"; exit 1; fi ;;
             *) echo "refused: unknown action '$ACTION'"; exit 1 ;;
           esac
           echo "== pmx-preprod $ACTION at $(date -u +%FT%TZ) base=$PMX_BASE_URL =="
@@ -175,6 +175,15 @@ jobs:
               body = json.loads(arg)
               path = "/v1/trading/orders/preview" if act == "order-preview" else "/v1/trading/orders"
               show(requests.post(f"{base}{path}", headers=H, json=body, timeout=30))
+              if act == "order":
+                  # read the order back at once so the run records what the venue holds
+                  show(requests.get(f"{base}/v1/trading/orders/open", headers=H, timeout=30))
+          elif act == "cancel":
+              # arg = JSON CancelOrderRequest {orderId | clordId, symbol}; the open orders are
+              # read back after the cancel so the run records the venue's answer
+              body = json.loads(arg)
+              show(requests.post(f"{base}/v1/trading/orders/cancel", headers=H, json=body, timeout=30))
+              show(requests.get(f"{base}/v1/trading/orders/open", headers=H, timeout=30))
           PY
       - name: Scrub
         if: always()
