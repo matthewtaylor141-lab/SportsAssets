@@ -60,6 +60,10 @@ THE RULES, EXACTLY (docs/mirror-coverage.md section 72):
   venue's names as codes and defers to C3's own refusal. The
   attribution the next lane must certify is pinned from the venue's
   words (THE SIDE TABLE below), never bound here.
+- C10 (2026-09-10, docs section 74) then bound the spreads from the aec
+  row's own team field; on THIS file's team-less board the spread
+  refusal under the switch is `spread:team-absent` (re-pinned below),
+  the binding itself in tests/test_c10_nfl_spreads.py.
 """
 from __future__ import annotations
 
@@ -607,6 +611,16 @@ class TestTheSpreads:
         assert not any(v[0].count("-neg-") for v in SIDE_TABLE.values())
 
     def test_c9_the_spreads_refuse_by_name_and_never_bind_neg(self, armed):
+        # RE-PINNED by C10 (2026-09-10, coverage lane C10; docs section 74):
+        # this board's aec sides carry NO team dict (the C9 fixtures were
+        # built before the nfl-team read), and on nfl the spread's subject
+        # is now read from the aec row's own team field INSTEAD of the C4
+        # code chain -- so under the switch the refusal on a team-less
+        # board is `spread:team-absent` (nothing binds: fail closed), where
+        # it was `spread:names-unreadable`. The switch-OFF branch below is
+        # unchanged: today's refusal, byte for byte. The binding itself,
+        # on the rows carrying the venue's team field, is pinned in
+        # tests/test_c10_nfl_spreads.py (THE SIDE TABLE above holds).
         rows = _board(_venue())
         for (tail, outcome), (ident, _side, _intent) in SIDE_TABLE.items():
             slug = f"{HIS_ML}-{tail}"
@@ -615,10 +629,13 @@ class TestTheSpreads:
                 assert _resolve(rows, slug, title, outcome, ev) is None, (tail, outcome, ev)
                 ex = _explain(rows, slug, title, outcome, ev)
                 assert ex["step"] == "no_side_match", (tail, outcome, ev, ex)
-                assert ex["split"] == "spread:names-unreadable" and ex["c3"]["refusal"] == "spread:names-unreadable"
+                assert ex["split"] == "spread:team-absent" and ex["c3"]["refusal"] == "spread:team-absent"
                 assert ex["c3"]["venue_names"] == ["new england patriots", "seattle seahawks"]
+                assert ex["c3"]["aec"] == {"identifier": AEC, "sides": ["patriots", "seahawks"]}
                 assert ex["date_shift"] == {"his": HIS_DATE, "venue": VENUE_DATE}
                 assert "admitted" not in ex["c3"] and "-neg-" not in str(ex.get("matched_by") or "")
+                # the C4 chain is never consulted on nfl: no code reading on the trace
+                assert "code_hits" not in ex["c3"] and "code_school" not in ex["c3"]
         # the switch off (the identity switch): the same rows, today's refusal
         os.environ.pop(premap.PREMAP_YN_IDENTITY_ENV, None)
         ex = _explain(rows, f"{HIS_ML}-spread-home-3pt5", "Spread: Seahawks (-3.5)", "Seahawks")
@@ -626,14 +643,16 @@ class TestTheSpreads:
 
     def test_c9_the_c3_pick_on_the_shifted_slug_is_the_same_verdict(self, armed):
         # the pick itself, pure, on the venue's own identifiers: the name
-        # step reads nothing ('seahawks' is not 'seattle seahawks'), the
-        # code chain reads the venue's names AS codes and defers
+        # step reads nothing ('seahawks' is not 'seattle seahawks'); C10:
+        # on nfl the team-field reader runs instead of the code chain, and
+        # this board's aec sides state no team -> spread:team-absent
+        # (re-pinned from spread:names-unreadable, the reason above)
         rows = _board(_venue())
         tr: dict = {}
         hit = premap.c3_pick([r for r in rows if r["identifier"].startswith("asc-")], "Seahawks",
                              "Spread: Seahawks (-3.5)", f"nfl-ne-sea-{VENUE_DATE}-spread-home-3pt5", tr,
                              board=rows, cert={}, his_event_title=HIS_TITLE)
-        assert hit is None and tr["refusal"] == "spread:names-unreadable"
+        assert hit is None and tr["refusal"] == "spread:team-absent"
 
 
 # ------------------------------------------ (F) the football set (C6-ML)
@@ -753,7 +772,10 @@ def _h(fn) -> str:
 
 def test_c9_the_untouched_arms_hash_as_6509878():
     assert _h(premap.match_side) == "6894ea0ebb90cefc"
-    assert _h(premap._c3_pick_spread) == "31522f233c535a4a"
+    # RE-PINNED by C10 (docs section 74): _c3_pick_spread gained the nfl
+    # team-field branch (31522f233c535a4a on 0b24564 -> the value below);
+    # every other function here is 0b24564 byte for byte
+    assert _h(premap._c3_pick_spread) == "354668be1edc3d2d"
     assert _h(premap._c3_pick_total) == "c07814e34a74b0b6"
     assert _h(premap._c4_subject_by_code) == "6a7ae0f56c7ae4e2"
     assert _h(premap._c6_team_subject) == "403035d6c15a74bb"

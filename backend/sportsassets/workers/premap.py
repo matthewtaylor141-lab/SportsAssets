@@ -4587,6 +4587,138 @@ def _c4_subject_by_code(his: dict, code: str, names: tuple[str, str], on: str,
     return pos[0], tpos[0]
 
 
+# ---------------------------------------------------------------- C10
+# THE NFL SPREAD BY THE VENUE'S OWN TEAM FIELD (2026-09-10, coverage
+# lane C10; owner ~02:5xZ "make sure future games in nfl map spreads,
+# alternate spreads, shorts of spreads"). C9 bound the NFL moneyline
+# and totals and left every spread refused spread:names-unreadable:
+# his feed says 'Seahawks', the venue's asc question 'Seattle
+# Seahawks', token-set equality is the bar, and the C4 chain reads the
+# venue's FULL names as codes ('Seattle Seahawks' names sea by its
+# first word) -- the wrong instrument. The nfl-team read (hard2/
+# nflteam_0256_tables.txt, 02:55:42Z) shows the witness on the venue's
+# own rows, per side, as migration 055 stores it: EVERY aec-nfl side
+# carries team_abbr = THE SLUG CODE, team_name = the FULL NAME (city +
+# mascot) and side_norm = the MASCOT (aec-nfl-ne-sea-2026-09-09:
+# 'patriots' / 'ne' / 'new england patriots'; 'seahawks' / 'sea' /
+# 'seattle seahawks' -- table 1 lines 22-23, the same shape on all 15
+# games), and EVERY asc-nfl side states the team it backs (table 2:
+# asc-nfl-ne-sea-2026-09-09-pos-3pt5 side 'no' BUY_SHORT team_abbr
+# 'sea', side 'yes' BUY_LONG team_abbr 'ne'). So on nfl, when C3's
+# name step reads nothing, a position is read from the aec row's own
+# team field and the chosen asc side is held to its own team field --
+# the venue's words on the venue's rows, token-set equality
+# (pmus._yn_name_match) or exact equality, never a prefix, every
+# disagreement a named refusal (spread:team-*, spread:subject-conflict,
+# spread:side-team-*). cfb keeps the C4 / C6 chain byte for byte: its
+# asc questions name mascots and C6 certifies the school; this reader
+# runs on the literal league token alone. Never a nickname table,
+# never the city (team_safe_name -- 'los angeles c' is not a name),
+# never home/away, never `ordering`.
+C10_TEAM_LEAGUE = "nfl"
+C10_SPREAD_LABEL = "premap_spread_team"
+
+
+def _c10_side_reads(name: str, sn: str, team_name: str, abbr: str) -> bool:
+    """One of his words names one aec side: token-set equality with the
+    side's description (the mascot) or with its team_name (the full
+    name), or his feed's abbreviation exactly equal to team_abbr. The
+    city (team_safe_name) is never read: his feed never names it."""
+    nm = pmus._yn_name_match
+    return bool(name) and (nm(name, sn) or nm(name, team_name) or name == abbr)
+
+
+def _c10_team_subject(his: dict, code: str, names: tuple[str, str], board: list[dict],
+                      on: str, title_team: str, trace: dict) -> tuple[int, int] | None:
+    """C10: (his team's position, his title's team's position) certified
+    from the venue's OWN team field on the event's aec row, or None with
+    the refusal named. Pure. `board` is the event's unfiltered rows; a
+    side's POSITION is its team_abbr's index in (a, b) -- never its
+    listing order. In order: the aec row aec-<code>-<a>-<b>-<date> with
+    EXACTLY two sides each carrying side_norm, team_abbr and team_name
+    (else spread:team-absent) whose abbreviations are exactly {a, b},
+    one each (else spread:team-unnamed) and whose description is the
+    tail of its own team_name -- the mascot inside city + mascot, the
+    row agreeing with itself (else spread:team-mascot-conflict: the
+    sea dict on the patriots side); his outcome reading exactly one
+    side (spread:team-outcome-unread / -ambiguous); his title's team
+    likewise (spread:team-title-unread / -ambiguous); the question's
+    names each reading exactly one side, the subject the side at a and
+    the opponent the side at b -- the grammar puts a in the subject
+    slot -- else spread:subject-conflict (a name reading no side:
+    spread:team-question-unread)."""
+    a, b = his["a"], his["b"]
+    trace["venue_names"] = list(names)
+    aec_id = f"aec-{code}-{a}-{b}-{his['date']}"
+    aec = [r for r in board if str(r.get("identifier") or "").lower() == aec_id]
+    trace["aec"] = {"identifier": aec_id, "sides": sorted({_c3_norm(r.get("side_norm")) for r in aec})}
+    if not aec:
+        trace["refusal"] = "spread:team-absent"
+        return None
+    sides: list[tuple[str, str, str]] = []          # (abbr, side_norm, team_name)
+    for r in aec:
+        abbr = str(r.get("team_abbr") or "").strip().lower()
+        sn, tn = _c3_norm(r.get("side_norm")), _c3_norm(r.get("team_name"))
+        if not abbr or not sn or not tn:
+            trace["refusal"] = "spread:team-absent"
+            return None
+        sides.append((abbr, sn, tn))
+    if sorted(s[0] for s in sides) != sorted((a, b)):
+        trace["refusal"] = "spread:team-unnamed"
+        trace["team_abbrs"] = sorted(s[0] for s in sides)
+        return None
+    by_pos = {(a, b).index(abbr): (abbr, sn, tn) for abbr, sn, tn in sides}
+    trace["team"] = {k: {"abbr": by_pos[i][0], "side_norm": by_pos[i][1], "team_name": by_pos[i][2]}
+                     for k, i in (("a", 0), ("b", 1))}
+    for abbr, sn, tn in sides:
+        st, tt = sn.split(), tn.split()
+        if tt[-len(st):] != st:
+            trace["refusal"] = "spread:team-mascot-conflict"
+            return None
+
+    def reads(i: int, name: str) -> bool:
+        abbr, sn, tn = by_pos[i]
+        return _c10_side_reads(name, sn, tn, abbr)
+
+    pos = [i for i in (0, 1) if reads(i, on)]
+    trace["team_hits"] = [(a, b)[i] for i in pos]
+    if len(pos) != 1:
+        trace["refusal"] = "spread:team-outcome-ambiguous" if pos else "spread:team-outcome-unread"
+        return None
+    tpos = [i for i in (0, 1) if reads(i, title_team)]
+    trace["title_hits"] = [(a, b)[i] for i in tpos]
+    if len(tpos) != 1:
+        trace["refusal"] = "spread:team-title-ambiguous" if tpos else "spread:team-title-unread"
+        return None
+    nm = pmus._yn_name_match
+    for j, name in enumerate(names):            # 0: the question's subject (a), 1: its opponent (b)
+        qpos = [i for i in (0, 1) if nm(name, by_pos[i][2]) or nm(name, by_pos[i][1])]
+        if not qpos:
+            trace["refusal"] = "spread:team-question-unread"
+            trace["question_name"] = name
+            return None
+        if qpos != [j]:
+            trace["subject"] = {"certified": name, "code": [(a, b)[i] for i in qpos], "slot": j, "via": "team"}
+            trace["refusal"] = "spread:subject-conflict"
+            return None
+    trace["subject"] = {"certified": by_pos[0][1], "code": a, "via": "team"}
+    return pos[0], tpos[0]
+
+
+def _c10_side_team(row: dict, code: str, trace: dict) -> str | None:
+    """C10, the second witness: the chosen asc row's chosen side must
+    itself state, in its own team_abbr, the team it backs -- HIS team's
+    code -- else spread:side-team-conflict; a side stating no team is
+    spread:side-team-absent (every NFL asc row on file states it)."""
+    abbr = str(row.get("team_abbr") or "").strip().lower()
+    trace["side_team"] = abbr or None
+    if not abbr:
+        return "spread:side-team-absent"
+    if abbr != code:
+        return "spread:side-team-conflict"
+    return None
+
+
 def _c3_pick_spread(rows: list[dict], his: dict, outcome: str | None,
                     his_title: str | None, trace: dict, board: list[dict] | tuple = (),
                     cert: dict | None = None, his_event_title: str | None = None) -> dict | None:
@@ -4650,6 +4782,17 @@ def _c3_pick_spread(rows: list[dict], his: dict, outcome: str | None,
             trace["refusal"] = "spread:title-unreadable"
             trace["venue_names"] = list(names)
             return None
+    elif his["lg"] == C10_TEAM_LEAGUE:
+        # C10 (2026-09-10): on nfl the venue's asc question names the
+        # FULL names and his feed the mascot (or his abbreviation), so
+        # the name step reads nothing and the C4 chain's code reading is
+        # the wrong instrument (the block comment at C10_TEAM_LEAGUE);
+        # the positions are certified from the aec row's own team field
+        # INSTEAD, and the C4 chain is never consulted on nfl
+        by_team = _c10_team_subject(his, code, names, list(board), on, title_team, trace)
+        if by_team is None:
+            return None
+        mine, titled, label = [by_team[0]], [by_team[1]], C10_SPREAD_LABEL
     else:
         # C4: the question names neither team his outcome names (the
         # mascot rows) -- the code chain, certified by the venue's own
@@ -4659,7 +4802,7 @@ def _c3_pick_spread(rows: list[dict], his: dict, outcome: str | None,
         if by_code is None:
             return None
         mine, titled, label = [by_code[0]], [by_code[1]], "premap_spread_code"
-    trace["subject_via"] = "code" if label == "premap_spread_code" else "name"
+    trace["subject_via"] = {"premap_spread_code": "code", C10_SPREAD_LABEL: "team"}.get(label, "name")
     gives = tm.group("sign") == "-"
     if titled[0] != mine[0]:
         gives = not gives            # the title's sign is the other team's
@@ -4692,6 +4835,14 @@ def _c3_pick_spread(rows: list[dict], his: dict, outcome: str | None,
         trace["refusal"] = "spread:ambiguous"
         return None
     r = hits[0]
+    if label == C10_SPREAD_LABEL:
+        # C10, the second, independent witness of the side: the sign
+        # table derived it from the grammar, the asc row STATES it --
+        # the chosen side's own team_abbr must be his team's code
+        why = _c10_side_team(r, (his["a"], his["b"])[mine[0]], trace)
+        if why:
+            trace["refusal"] = why
+            return None
     if r.get("intent") != want_intent:
         trace["refusal"] = "spread:intent"
         return None
