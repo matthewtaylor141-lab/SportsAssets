@@ -91,7 +91,7 @@ HAND_NET_ON_TIP = "dc37d19b62d8c6fd"      # _hand_net on 6c0830d and on cdf0742 
 # THE PAIR PROBE (2026-09-10): the read-only `pair-candidates` preset beside his-matched and its one help
 # token -- bbc132a2bb0a7980 -> 63b8c5f373ca7383; mirror-hand-release's own block and every other read-only
 # preset byte for byte, which is exactly what this assertion is here to prove
-RENDER_OPS_ON_TIP = "206fb2f32dc6b32d"    # render-ops.yml minus this lane's block: 0b09a1ed2074c6fd on cdf0742 (the landing tip), then
+RENDER_OPS_ON_TIP = "73645b261022ad41"    # render-ops.yml minus this lane's block: 0b09a1ed2074c6fd on cdf0742 (the landing tip), then
                                           # 95b58cdb2a82406f when the heartbeat value column widened 2,400 -> 8,000 (2026-09-10 02:1xZ),
                                           # then re-cut for the read-only nfl-team preset beside nfl-rows (02:5xZ; b7d553a6aa4204c2)
                                           # and again for mirror-by-league / his-matched beside it (03:1xZ)
