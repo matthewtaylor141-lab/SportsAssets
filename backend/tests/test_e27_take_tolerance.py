@@ -142,7 +142,7 @@ E31_GONE = ("_exit_take", "_ioc_reread", "_entry_take", "_take_band", "_short_ta
 # two-token markets with no mirror book, none of RN1's flow and ne-sea-2026-09-09 excluded by name, from
 # which the desk picks the one market it buys both outcomes of) plus its one help token --
 # e302a4af41e1f7c1 -> 4b792097e975775f; every existing preset and the take-band statements byte for byte
-RENDER_OPS_SHA = "801ede95da2beaf4"
+RENDER_OPS_SHA = "45e82c1b12f8dbd5"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',
