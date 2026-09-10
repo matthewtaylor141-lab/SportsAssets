@@ -791,11 +791,15 @@ class TestTheSeams:
             assert "his_event_title=event_title" in inspect.getsource(fn)
             assert "await team_select_cols(pool)" in inspect.getsource(fn)
         assert "team_abbr, team_safe_name" in premap.TEAM_SELECT_COLS
-        # the three C6-ML sites read the switch (HIGH-1) and the league (LOW-2)
-        assert 'lg == "cfb" and _identity_on()' in inspect.getsource(map_lane.aec_code_side)
+        # the three C6-ML sites read the switch (HIGH-1) and the league (LOW-2);
+        # C9 (2026-09-10): the two map_lane sites read the league against
+        # FOOTBALL_LEAGUES (cfb and nfl) -- the live lane's winner-row
+        # admission stays the cfb literal (docs section 72)
+        assert map_lane.FOOTBALL_LEAGUES == frozenset({"cfb", "nfl"})
+        assert "lg in FOOTBALL_LEAGUES and _identity_on()" in inspect.getsource(map_lane.aec_code_side)
         assert 'lg == "cfb" and map_lane._identity_on()' in inspect.getsource(ml._contract_candidates)
         src = inspect.getsource(map_lane.grammar_truth)
-        assert "aec_head(m) if code and _identity_on() else None" in src and 'head[0] == "cfb"' in src
+        assert "aec_head(m) if code and _identity_on() else None" in src and "head[0] in FOOTBALL_LEAGUES" in src
 
     def test_the_refusal_names(self):
         src = inspect.getsource(premap._c4_subject_by_code) + inspect.getsource(premap._c6_pair_by_event) \

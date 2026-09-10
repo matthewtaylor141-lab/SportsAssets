@@ -190,6 +190,126 @@ def date_of(slug: str | None) -> str:
 # feed does not. Kept next to event_keys_for because that is the only
 # place the asymmetry has to be reconciled.
 _KIND_PREFIXES = frozenset({"aec", "atc", "asc", "tsc", "astatc"})
+
+# THE FOOTBALL DATE KEY (C9, 2026-09-10; owner ~00:37Z "he has a ton of
+# NFL trades and we have zero of them mirrored"). His feed dates the
+# Patriots/Seahawks game 2026-09-10 (nfl-ne-sea-2026-09-10, the Thursday
+# game, kickoff 2026-09-11 ~00:20Z); the venue's identifiers date the
+# SAME event 2026-09-09 (aec-nfl-ne-sea-2026-09-09, asc-…-neg-3pt5,
+# tsc-…-total-41pt5: hard2/nflrows_0041.txt table 4) while ari-lac, the
+# Sunday game, reads 2026-09-13 on both feeds. Same league code, same two
+# team codes in the same order, one day apart -- and every key both
+# sides emit ends in ITS OWN date (event_keys_for, _dated_admissible), so
+# the kindless key and R1's pair key could never meet: 12 markets, every
+# one no_key_intersection ($26,628 of his flow in 24 h, hisboard_0034
+# row 575). So HIS key set -- and his alone -- also carries the kindless
+# key and the pair key on the two calendar-adjacent dates when the
+# league token is literally 'nfl'. His alone: the two resolvers add
+# nfl_date_keys to his side of the lookup (resolve / resolve_explain),
+# NEVER event_keys_for, which the sweep also calls on the venue's EVENT
+# slug, and that slug is kindless (premap_rows_1909.log:58 stores
+# {els-kbk-tro-2026-09-06, ...} on a real row, no kind-prefixed
+# sibling), so a key built there would shift the venue's rows too and
+# the two shifts would meet two days apart (C9 review CRITICAL-1); the
+# venue's stored rows keep 6509878's keys. A LOOKUP, never a decision
+# (R1's own words): the rows those keys fetch answer to the same arms
+# as before, and the resolver reads
+# the venue's date off the rows it fetched (nfl_date_read): his pair
+# under ONE adjacent date binds as if the date matched (the trace's
+# `date_shift`); his pair under MORE THAN ONE date is the venue
+# contradicting itself (an NFL pair plays once a week) and refuses by
+# name, `date_ambiguous`, binding nothing. Not cfb (its Saturday dates
+# matched on every row of the census: aec-cfb-abc-houbap-2026-09-12),
+# not soccer, tennis or esports (a pair can play on adjacent days in a
+# tournament): the literal league token, nothing wider. ON by default;
+# the environment may only turn it OFF (PREMAP_NFL_DATE_TOL=off), and
+# OFF is the key set and the refusal of 6509878 byte for byte.
+PREMAP_NFL_DATE_TOL_ENV = "PREMAP_NFL_DATE_TOL"
+_NFL_DATE_TOL_ON = frozenset({"", "on", "1", "true", "yes"})
+NFL_DATE_TOL_LEAGUE = "nfl"
+_NFL_SLUG_HEAD_RE = re.compile(
+    r"^(?P<lg>[a-z0-9]+)-(?P<a>[a-z0-9]+)-(?P<b>[a-z0-9]+)-(?P<date>\d{4}-\d{2}-\d{2})(?:-|$)")
+
+
+def nfl_date_tol_on() -> bool:
+    """The football date key's switch: ON unless the environment says
+    otherwise (absent / on / 1 / true / yes -> ON; any other word ->
+    OFF), read at call time like yn_identity_on."""
+    return os.getenv(PREMAP_NFL_DATE_TOL_ENV, "").strip().lower() in _NFL_DATE_TOL_ON
+
+
+def _nfl_slug_parts(slug: str | None) -> dict | None:
+    """{lg, a, b, date} of HIS kindless `<lg>-<a>-<b>-<date>…` slug when
+    the league token is 'nfl'; None for a kind-prefixed slug (the venue's
+    own identifier), any other league, a shared code or any other
+    shape."""
+    m = _NFL_SLUG_HEAD_RE.match((slug or "").lower())
+    if m is None:
+        return None
+    p = m.groupdict()
+    if p["lg"] != NFL_DATE_TOL_LEAGUE or p["lg"] in _KIND_PREFIXES or p["a"] == p["b"]:
+        return None
+    return p
+
+
+def _adjacent_dates(d: str) -> tuple[str, str] | None:
+    """(the day before, the day after) on the calendar -- month and year
+    roll -- or None for a date the calendar refuses ('2026-13-40')."""
+    from datetime import date as _date, timedelta as _td
+
+    try:
+        day = _date.fromisoformat(d)
+    except (TypeError, ValueError):
+        return None
+    return (day - _td(days=1)).isoformat(), (day + _td(days=1)).isoformat()
+
+
+def nfl_date_keys(slug: str | None) -> list[str]:
+    """The four extra keys HIS nfl slug emits -- the kindless key and the
+    pair key on each adjacent date -- sorted; [] for every other league,
+    for a kind-prefixed slug, for an unreadable date, and with the
+    switch OFF."""
+    if not nfl_date_tol_on():
+        return []
+    p = _nfl_slug_parts(slug)
+    if p is None:
+        return []
+    adj = _adjacent_dates(p["date"])
+    if adj is None:
+        return []
+    return sorted({f"{p['lg']}-{p['a']}-{p['b']}-{x}" for x in adj}
+                  | {f"{p['a']}-{p['b']}-{x}" for x in adj})
+
+
+def nfl_date_read(rows: list[dict], global_slug: str | None) -> tuple[str | None, dict]:
+    """The venue's date for HIS pair, read off the rows the keys fetched:
+    (the slug the arms read, the trace). His slug byte for byte and an
+    empty trace when the tolerance does not apply, when no fetched row
+    carries his pair, or when the venue dates it as he does; his slug
+    with the venue's date and `date_shift` {his, venue} when the venue
+    lists his pair under exactly ONE adjacent date; (None,
+    `date_candidates` [dates]) -- the date_ambiguous refusal, nothing
+    bound -- when the rows carry his pair (his two codes, his order)
+    under more than one date. A row whose identifier is not the
+    <kind>-<lg>-<a>-<b>-<date> grammar carries no date witness and is
+    not read. Pure."""
+    extra = nfl_date_keys(global_slug)
+    p = _nfl_slug_parts(global_slug)
+    if not extra or p is None:
+        return global_slug, {}
+    dates: set[str] = set()
+    for r in rows:
+        m = _C3_IDENT_RE.match(str(r.get("identifier") or "").lower())
+        if m is not None and m.group("a") == p["a"] and m.group("b") == p["b"]:
+            dates.add(m.group("date"))
+    if len(dates) > 1:
+        return None, {"date_candidates": sorted(dates)}
+    adj = _adjacent_dates(p["date"])
+    if not dates or p["date"] in dates or adj is None or next(iter(dates)) not in adj:
+        return global_slug, {}
+    venue = next(iter(dates))
+    return str(global_slug).lower().replace(p["date"], venue, 1), {
+        "date_shift": {"his": p["date"], "venue": venue}}
 # the feed's attested draw wording (C3): the matchup inside it is the
 # event, the rest is the question
 _DRAW_TITLE_MATCHUP_RE = re.compile(
@@ -569,7 +689,7 @@ def his_kick_keys(market_title: str | None, event_title: str | None,
     return sorted(f"{x}@{minute}" for x in names if x)
 
 
-def _dated_admissible(keys: set[str], d: str) -> set[str]:
+def _dated_admissible(keys: set[str], d: str, slug: str | None = None) -> set[str]:
     """Which keys a DATED whale signal may match on.
 
     The rule is game agreement: a dated signal must never match another
@@ -598,11 +718,20 @@ def _dated_admissible(keys: set[str], d: str) -> set[str]:
     "@" stamp and is admitted as a title key is -- an instant is game
     agreement by construction, stronger than the date (the venue's slug
     date is not the game date: docs §24).
+
+    C9 (2026-09-10): with `slug`, the football date keys HIS nfl slug
+    emits (nfl_date_keys: the kindless key and the pair key on the two
+    adjacent dates, and nothing else) are admitted too -- game agreement
+    is then read off the fetched rows by nfl_date_read (one adjacent
+    date binds, two refuse by name). Without `slug`, byte for byte the
+    rule above.
     """
     ok = set(dated_keys(keys))
     ok |= {k for k in keys if k.startswith(
         tuple(f"{p}-" for p in _KIND_PREFIXES))}
     ok |= {k for k in keys if d and k.endswith(d)}
+    if slug:
+        ok |= keys & set(nfl_date_keys(slug))
     return {k for k in ok if k}
 
 
@@ -6441,6 +6570,8 @@ async def resolve_explain(pool, market_title: str | None,
         keys.update(event_keys_for(t, global_slug if d else None))
     if global_slug:
         keys.update(event_keys_for(None, global_slug))
+    # C9: his side of the football date key (the block comment in resolve)
+    keys.update(nfl_date_keys(global_slug))
     keys.update(his_name_keys(market_title, event_title, global_slug))
     # C7: his instant and his kickoff keys; the census's C7 trace
     # (yn_c7) starts here. The shadow's re-judge (fetch_kick, E2-paced)
@@ -6456,7 +6587,7 @@ async def resolve_explain(pool, market_title: str | None,
             out["yn_c7"]["refusal"] = _C7_UNKNOWN
     keys = {k for k in keys if k}
     if d:
-        keys = _dated_admissible(keys, d)
+        keys = _dated_admissible(keys, d, slug=global_slug)
     out["keys"] = len(keys)
     if not keys:
         out["step"] = "no_keys_built"
@@ -6513,8 +6644,16 @@ async def resolve_explain(pool, market_title: str | None,
         try:
             parts = _yn_slug_parts(global_slug) or _c5_slug_parts(global_slug)
             if parts is not None:
-                pat = (f"^atc-[a-z0-9]+-({parts['a']}-[a-z0-9]+|[a-z0-9]+-{parts['b']})"
-                       f"-{d}-")
+                # C9 (2026-09-10): the football moneyline is the aec-
+                # two-sided shape and the venue lists NO plain atc- per-team
+                # row for it (nflrows_0041 table 3), so an '^atc-' probe read
+                # 'venue:league-unlisted' on a listed game; the probe asks
+                # both moneyline kinds, and an aec identifier ENDS at its
+                # date (aec-nfl-ne-sea-2026-09-09), so the tail admits the
+                # end of the string beside the atc rows' suffix dash. A
+                # read, never a binding.
+                pat = (f"^(atc|aec)-[a-z0-9]+-({parts['a']}-[a-z0-9]+|[a-z0-9]+-{parts['b']})"
+                       f"-{d}(-|$)")
                 alt = await pool.fetch(
                     "SELECT identifier FROM us_premap WHERE identifier ~ $1::text LIMIT 25",
                     pat)
@@ -6556,6 +6695,25 @@ async def resolve_explain(pool, market_title: str | None,
                     out["split"] = _C7_UNKNOWN
             except Exception as exc:  # noqa: BLE001 — diagnostics never
                 out.setdefault("yn_c7", {})["at_instant_error"] = type(exc).__name__
+        return out
+    # C9 (2026-09-10): the same date read resolve makes (the block
+    # comment at PREMAP_NFL_DATE_TOL_ENV). His nfl pair under ONE
+    # adjacent date: every arm below reads his slug as the venue dates
+    # it, `date_shift` {his, venue} on the trace whatever the arms then
+    # say; under MORE THAN ONE date: the step `date_ambiguous` with
+    # `date_candidates` naming them, nothing bound. Every other slug,
+    # and the switch OFF: his own slug and no trace, byte for byte.
+    global_slug, date_trace = nfl_date_read(rows, global_slug)
+    out.update(date_trace)
+    if global_slug is None:
+        # the split is the venue's own word (the dates its identifiers
+        # carry), so explain_unmapped prints it as it prints every split
+        # the venue's rows certified -- 'date_ambiguous:2026-09-09,
+        # 2026-09-11' -- and never the exact lane's 404 trail on it
+        out["step"] = "date_ambiguous"
+        out["split"] = ",".join(date_trace["date_candidates"])
+        out["detail"] = (f"the venue lists his pair under {date_trace['date_candidates']} -- "
+                         f"more than one date; an NFL pair plays once a week, so nothing binds")
         return out
     from ..copy_sports import family_of
 
@@ -6602,6 +6760,19 @@ async def resolve_explain(pool, market_title: str | None,
             out["refusal"] = out["split"]
             out["detail"] = (f"no {C3_PREFIX[his_c3['family']]}- row on segment "
                              f"{his_c3['seg']!r} for this event")
+            return out
+    elif nfl_date_keys(global_slug):
+        # C9 (review HIGH-1): his segment or nothing on the football date
+        # key's rows, on either identity setting (the block comment in
+        # resolve)
+        from ..copy_sports import segment_of
+        seg = segment_of(global_slug)
+        kept = c3_same_segment(kept, seg)
+        if not kept:
+            out["step"] = "unknown_market_type"
+            out["split"] = f"{out['family']}:segment-absent"
+            out["refusal"] = out["split"]
+            out["detail"] = f"no row on segment {seg!r} for this event"
             return out
     # E2: a map winner is read by its own pick alone, as a segmented C3
     # family is -- the wording arm never sees its rows; C6 (the exact
@@ -7122,6 +7293,17 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         keys.update(event_keys_for(t, global_slug if d else None))
     if global_slug:
         keys.update(event_keys_for(None, global_slug))
+    # C9 (2026-09-10): HIS side of the football date key -- the kindless
+    # key and the R1 pair key on the two adjacent dates (nfl_date_keys), a
+    # lookup only, added HERE and in the explainer and NEVER in
+    # event_keys_for: the sweep hands event_keys_for the venue's EVENT
+    # slug, and that slug is kindless (the stored keys of a real row,
+    # premap_rows_1909.log:58, are {els-kbk-tro-2026-09-06, ...} with no
+    # kind-prefixed sibling), so a key built there shifted the venue's
+    # rows too and the two shifts met two days apart through the wording
+    # arm, which reads no identifier date (C9 review CRITICAL-1). The
+    # venue's rows keep 6509878's keys byte for byte.
+    keys.update(nfl_date_keys(global_slug))
     # C6-N: his side of the per-club dated name key (a lookup only)
     keys.update(his_name_keys(market_title, event_title, global_slug))
     # C7: his side of the kickoff key at HIS instant (a lookup only;
@@ -7130,7 +7312,7 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     keys.update(his_kick_keys(market_title, event_title, global_slug, kick))
     keys = {k for k in keys if k}
     if d:
-        keys = _dated_admissible(keys, d)
+        keys = _dated_admissible(keys, d, slug=global_slug)
     if not keys:
         return None
     try:
@@ -7143,6 +7325,16 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     except Exception:  # noqa: BLE001 — table absent/degraded: fall through
         return None
     if not rows:
+        return None
+    # C9 (2026-09-10): the venue's date for his nfl pair, read off the
+    # rows (the block comment at PREMAP_NFL_DATE_TOL_ENV): one adjacent
+    # date and every arm below reads his slug AS THE VENUE DATES IT --
+    # the same arms, the same refusals, the venue's own identifiers;
+    # more than one date is the venue contradicting itself, nothing
+    # bound (the explainer names it date_ambiguous). Any other slug:
+    # his own, byte for byte, and an empty trace.
+    global_slug, date_trace = nfl_date_read(rows, global_slug)
+    if global_slug is None:
         return None
     # MARKET-TYPE AGREEMENT (leak-hunt round 2): every market on an
     # event shares one key set, so without this the candidate pool is
@@ -7171,6 +7363,19 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
     his_c3 = c3_his(global_slug) if yn_identity_on() else None
     if his_c3 is not None:
         kept = c3_same_segment(kept, his_c3["seg"])
+        if not kept:
+            return None
+    elif nfl_date_keys(global_slug):
+        # C9 (review HIGH-1): the venue's NFL ladders carry 1h / 2h /
+        # 1q..4q rows under the same event keys (nflrows_0041 table 5: 276
+        # tsc and 374 asc rows on ne-sea) and the wording arm reads no
+        # segment, so without the identity switch a full-game total whose
+        # line the venue lists on a HALF ladder alone bound the half row.
+        # His segment or nothing -- the filter C3 applies under the
+        # switch, never a decision -- on the football date key's rows;
+        # with PREMAP_NFL_DATE_TOL off nothing here runs (6509878).
+        from ..copy_sports import segment_of
+        kept = c3_same_segment(kept, segment_of(global_slug))
         if not kept:
             return None
     # E2 (2026-09-07): the map winner (the block comment at map_his),
@@ -7334,6 +7539,10 @@ async def resolve(pool, market_title: str | None, event_title: str | None,
         out["game_start"] = hit["game_start"]
         out["club_by_exclusion"] = dict(hit["club_by_exclusion"])
         out["witness"] = hit["witness"]
+    if date_trace.get("date_shift"):
+        # C9: the binding rode the venue's date -- his and the venue's on
+        # the record (the plan's why for this identifier), never stored
+        out["date_shift"] = dict(date_trace["date_shift"])
     return out
 
 

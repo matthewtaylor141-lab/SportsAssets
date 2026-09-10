@@ -67,6 +67,19 @@ EXACT_BOX_S = 20.0
 # below, certified by the mirror's own venue-truth checks (mirror_live)
 SRC_EXACT, SRC_YESNO, SRC_GRAMMAR = "exact", "yesno", "grammar"
 # refusal names the grammar step answers with (fail closed, by name)
+# THE FOOTBALL SET (C9, 2026-09-10; docs/mirror-coverage.md sections 23
+# and 72). The two C6-ML reads below -- the aec side's own team field in
+# aec_code_side and the segment-winner truth in grammar_truth -- were
+# confined to the literal 'cfb' (M5 review LOW-2: "college football only
+# for now"). The venue files the NFL under 'nfl' with the same grammar
+# (aec-nfl-ne-sea-2026-09-09, sides patriots/seahawks: nflrows_0041
+# table 4), so both sites read the league against this set; still dark
+# without the identity switch. The live lane's winner-row admission
+# (mirror_live._contract_candidates) is NOT widened here: the NFL
+# moneyline binds to the aec two-sided market itself through premap's
+# wording arm, as tennis does.
+FOOTBALL_LEAGUES = frozenset({"cfb", "nfl"})
+
 REFUSE_CODE_UNMATCHED = "side_code_unmatched"
 REFUSE_CODE_AMBIGUOUS = "side_code_ambiguous"
 REFUSE_CODE_CONFLICT = "side_code_conflict"
@@ -500,14 +513,14 @@ def aec_code_side(global_slug: str | None, outcome: str | None, market: dict,
     # a multi-word school code (scarst) only where neither code is
     # named by those rules (C4, code_reads)
     hits = [i for i, c in enumerate((a, b)) if code_reads(c, outcome, (b, a)[i])]
-    if not hits and lg == "cfb" and _identity_on():
+    if not hits and lg in FOOTBALL_LEAGUES and _identity_on():
         # C6 (2026-09-07): where no code rule reads his outcome (the
         # two-letter `nd`; 'Notre Dame'), the venue's OWN team field on
         # the aec side -- abbreviation the code, safeName the school --
         # names his position; a side stating a code at the other index
-        # is the venue's contradiction, refused. College football only
-        # for now (the soccer builder lands its own reader of the same
-        # columns) and dark without the identity switch (M5 review).
+        # is the venue's contradiction, refused. Football only (cfb, and
+        # nfl since C9 -- the soccer builder lands its own reader of the
+        # same columns) and dark without the identity switch (M5 review).
         hits = _team_hits(a, b, outcome, market)
         if hits is None:
             return None, REFUSE_CODE_CONFLICT
@@ -652,8 +665,8 @@ def grammar_truth(contract: dict | None, market: dict | None, i: int, *,
     if _equal_names(c, other):
         return "mismatch", (f"contract {c.get('slug')} names {other!r}, the OTHER side; the aec "
                             f"side at position {i} is {desc!r}")
-    if head is not None and head[0] == "cfb":
-        # C6-ML: college football only for now, under the identity switch
+    if head is not None and head[0] in FOOTBALL_LEAGUES:
+        # C6-ML: football only (cfb; nfl since C9), under the identity switch
         c6 = _team_truth(c, head, sides, i, str(code).lower(), school)
         if c6 is not None:
             return c6
