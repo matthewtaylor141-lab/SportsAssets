@@ -109,10 +109,10 @@ UNTOUCHED = {
 # copy) gained the chain_listener and poller heartbeats (2026-09-09 23:4xZ, the read of FILL lane 26's sweep
 # block and page_overflow: no preset read service_heartbeats for either worker) -- the take-band statements this
 # lane pins are byte for byte the same; test_render_ops_take_band.py reads them by text.
-# 791309dcc6841f2c after the read-only `nfl-rows` preset (2026-09-10 00:4xZ, the owner's NFL question: his
+# 791309dcc6841f2c then 0b09a1ed2074c6fd (full-game tails, the ne-sea rows verbatim) after the read-only `nfl-rows` preset (2026-09-10 00:4xZ, the owner's NFL question: his
 # NFL rows with the shadow's verdict, the venue's league-code census on the Sep 10-15 dates, the '-nfl-'
 # suffix shapes, the team-code witness) -- no existing preset changed.
-RENDER_OPS_SHA = "791309dcc6841f2c"
+RENDER_OPS_SHA = "0b09a1ed2074c6fd"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',
