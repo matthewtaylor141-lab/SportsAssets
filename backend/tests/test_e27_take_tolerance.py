@@ -121,7 +121,9 @@ UNTOUCHED = {
 # then the read-only `nfl-team` preset beside nfl-rows (2026-09-10 02:5xZ, the owner's NFL spreads order: the C6 team
 # columns on every aec-nfl row, the asc 3.5 rows, the venue's NFL team records, his spread slugs over 14 days) --
 # 7528f10180c12e27 -> 33505a5187599535; no existing preset changed
-RENDER_OPS_SHA = "33505a5187599535"
+# then the read-only mirror-by-league and his-matched presets (2026-09-10 03:1xZ, the desk's forensic study of
+# RN1's book measured on our own data: docs/rn1-book-anatomy.md) -- 33505a5187599535 -> 11933c8251b294dc
+RENDER_OPS_SHA = "11933c8251b294dc"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',
