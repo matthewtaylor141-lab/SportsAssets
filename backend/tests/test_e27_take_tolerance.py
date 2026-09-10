@@ -134,7 +134,15 @@ E31_GONE = ("_exit_take", "_ioc_reread", "_entry_take", "_take_band", "_short_ta
 # E31 (FILL lane 31, 2026-09-10): the read-only `maker-rests` preset beside take-band (and its copy in
 # the hourly after take-band) and the need_confirm `mirror-post-only-rearm` beside mirror-rearm --
 # 11933c8251b294dc -> d98a89e0a421735d; every existing preset and the take-band statements byte for byte
-RENDER_OPS_SHA = "d98a89e0a421735d"
+# then the ops secrets commit (2026-09-10 13:51Z, 605cef3: `arg` and `render_key` read from the event
+# payload on disk and masked before anything else, because the runner prints a step's env block and its
+# rendered script in the log header first) moved the file and did NOT re-pin here, so this constant was
+# already red on the clean tip -- d98a89e0a421735d -> e302a4af41e1f7c1, measured, no preset touched
+# THE PAIR PROBE (2026-09-10): the read-only `pair-candidates` preset beside his-matched (the OPEN
+# two-token markets with no mirror book, none of RN1's flow and ne-sea-2026-09-09 excluded by name, from
+# which the desk picks the one market it buys both outcomes of) plus its one help token --
+# e302a4af41e1f7c1 -> 4b792097e975775f; every existing preset and the take-band statements byte for byte
+RENDER_OPS_SHA = "323e0e866d73ad77"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',

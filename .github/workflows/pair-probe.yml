@@ -1,0 +1,410 @@
+name: pair-probe
+
+# THE PAIR PROBE. One question, one dollar, answered on the live retail
+# venue and nowhere else.
+#
+# RN1's edge is buying BOTH outcomes of one market for a combined price
+# under $1.00 and collecting $1.00 at settlement (his-matched, 2026-09-10:
+# 0.9325 in Soccer, 1.0136 in Tennis -- a 1.4c-to-6.75c gross pair margin
+# either way). Whether that is a business turns on TWO numbers nobody here
+# has measured:
+#
+#   (A) THE ALL-IN COST of one matched pair -- what actually LEAVES the
+#       account against the sum of the two fill prices. The venue names
+#       commission fields (pmus.py:2492 _commission_fields:
+#       commissionNotionalCollected / commissionNotionalTotalCollected /
+#       commissionSpreadPx) but no VALUE has ever been observed on them,
+#       and the desk's own order path never even parses them (they ride
+#       only under the mirror's post_only flag, pmus.py:2873-2881). So (A) is
+#       answered by the CASH DELTA on the account: cash BEFORE minus cash
+#       AFTER, against the fills the venue printed. That is why this
+#       workflow prints the account state on both sides of the order and
+#       the verbatim response in between.
+#
+#   (B) THE SETTLEMENT MECHANIC -- does holding both outcomes pay exactly
+#       $1.00 per pair, and when. Read after the market resolves; this
+#       workflow's `read` action prints the venue's own activity rows,
+#       which is where a POSITION_RESOLUTION lands.
+#
+# THE RAILS.
+#   * READS ARE FREE. `read` (the account, the book, the ledger) and
+#     `settle-read` need NO confirm, so the whole probe can be rehearsed
+#     for nothing before a cent moves.
+#   * ANY ORDER NEEDS confirm=DO. `leg` (one order) and `unwind` (sell one
+#     leg back) refuse without it.
+#   * THE SIZE IS CAPPED IN THIS SCRIPT, not only upstream. MAX_USD below
+#     is a literal: a `usd` input above it is REFUSED here, before the API
+#     is called, so a fat finger cannot spend more than a few dollars even
+#     if the server-side per-order cap (MANUAL_MAX_PER_ORDER_USD, $250 by
+#     default) would have allowed it.
+#   * THE TARGET IS AN INPUT. No market, token or slug is hard-coded --
+#     the coordinator picks it from the render-ops `pair-candidates`
+#     preset, whose WHERE drops every market with a mirror book, every
+#     market carrying RN1's flow, and ne-sea-2026-09-09 by name.
+#   * ONE LEG PER DISPATCH. The two legs of a pair are two runs. The
+#     account is printed before and after EACH of them, so a fee shows up
+#     per leg and not only on the pair, and a half-filled pair is visible
+#     the moment it happens instead of after the second order.
+#
+# THE SECRET. ADMIN_TOKEN is a repository secret: it is mapped through the
+# step's `env:` (where GitHub prints it as *** and masks it everywhere) and
+# re-masked as the script's first act. It is NEVER interpolated into the
+# rendered `run:` script with ${{ }} -- the runner prints that script in the
+# log header before any ::add-mask:: could run. The dispatch INPUTS are read
+# from the event payload on disk with jq for the same reason (ops 605cef3).
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "read (free) | leg (one BUY, needs confirm=DO) | unwind (sell one leg back, needs confirm=DO) | settle-read (free)"
+        required: true
+        type: choice
+        options:
+          - read
+          - leg
+          - unwind
+          - settle-read
+      asset:
+        description: "leg: the outcome TOKEN ID to buy (token_0 or token_1 from the pair-candidates preset). read: quoted if given."
+        required: false
+        type: string
+        default: ""
+      asset_other:
+        description: "read: the SIBLING token id, so the rehearsal prints both sides of the pair and their sum"
+        required: false
+        type: string
+        default: ""
+      usd:
+        description: "leg: the dollar budget for THIS leg. shares = int(usd / limit), limit = ask + 2c; so usd must be >= one whole contract and < two."
+        required: false
+        type: string
+        default: ""
+      us_slug:
+        description: "unwind: the venue market slug of the leg to sell back (printed by the leg's response as us_market_slug)"
+        required: false
+        type: string
+        default: ""
+      qty:
+        description: "unwind: contracts to sell (omit = the whole held position)"
+        required: false
+        type: string
+        default: ""
+      note:
+        description: "leg: the note written onto the live_orders row (e.g. 'PAIR PROBE leg 1 of 2')"
+        required: false
+        type: string
+        default: "PAIR PROBE"
+      search:
+        description: "read: a market-search query (title / slug / outcome substring), so the rehearsal can find a target's token ids"
+        required: false
+        type: string
+        default: ""
+      since:
+        description: "read / settle-read: the day the venue activity read starts from (YYYY-MM-DD). Its value is the API's cache key, so a DIFFERENT day forces a fresh crawl."
+        required: false
+        type: string
+        default: ""
+      confirm:
+        description: "Type DO to allow leg or unwind. Anything else refuses."
+        required: false
+        type: string
+        default: ""
+      api_base:
+        description: "Override the API base URL"
+        required: false
+        type: string
+        default: ""
+
+# ONE PROBE AT A TIME. Two runs overlapping would interleave their BEFORE
+# and AFTER account reads and the cash delta -- the whole measurement --
+# would be unattributable. Nothing is cancelled mid-run: a cancelled run
+# after an order is exactly the log we cannot afford to lose.
+concurrency:
+  group: pair-probe
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Run
+        env:
+          DEFAULT_BASE: https://sportsassets-api.onrender.com
+          ACTION: ${{ inputs.action }}
+          CONFIRM: ${{ inputs.confirm }}
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+        run: |
+          set +e
+          set -u
+          # The token is a repository secret (already masked by the runner);
+          # masked again here before its first use, and never rendered into
+          # this script through ${{ }}.
+          [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
+          if [ -z "${ADMIN_TOKEN:-}" ]; then
+            echo "refused: the ADMIN_TOKEN repository secret is not set; every endpoint here is admin-gated"
+            exit 1
+          fi
+          # Every input is read from the event payload on disk, not mapped
+          # through env: and not interpolated into this script -- the runner
+          # prints both in the log header before the script runs.
+          TMP="${RUNNER_TEMP:-/tmp}"
+          EV="$GITHUB_EVENT_PATH"
+          ASSET="$(jq -r '.inputs.asset // empty' "$EV")"
+          OTHER="$(jq -r '.inputs.asset_other // empty' "$EV")"
+          USD="$(jq -r '.inputs.usd // empty' "$EV")"
+          US_SLUG="$(jq -r '.inputs.us_slug // empty' "$EV")"
+          QTY="$(jq -r '.inputs.qty // empty' "$EV")"
+          NOTE="$(jq -r '.inputs.note // empty' "$EV")"
+          SEARCH="$(jq -r '.inputs.search // empty' "$EV")"
+          SINCE="$(jq -r '.inputs.since // empty' "$EV")"
+          OVERRIDE="$(jq -r '.inputs.api_base // empty' "$EV")"
+          BASE="${OVERRIDE:-$DEFAULT_BASE}"
+
+          # ── THE HARD CAP, A LITERAL IN THIS SCRIPT ──────────────────────
+          # The whole probe is authorised at about one dollar. ONE contract
+          # of the dearest leg the candidate query will ever offer costs
+          # 0.95 + the 2c protection = 0.97, so $1.50 admits every honest
+          # leg and nothing else: a pair is bounded at $3.00 even if BOTH
+          # inputs are wrong, and a fat finger cannot reach the server's own
+          # per-order cap (MANUAL_MAX_PER_ORDER_USD, $250) at all. Refused
+          # HERE, before the API is called.
+          MAX_USD=1.50
+          # ────────────────────────────────────────────────────────────────
+
+          echo "== pair-probe action=$ACTION base=$BASE at $(date -u +%FT%TZ) =="
+          echo "hard cap in this script: \$$MAX_USD per leg"
+
+          need_confirm() {
+            if [ "$CONFIRM" != "DO" ]; then
+              echo "refused: $ACTION needs confirm=DO (got '$CONFIRM'); nothing was sent"
+              exit 1
+            fi
+          }
+          # Admin GET. Prints the status and the body; never the header.
+          ag() {
+            local path="$1"; local budget="${2:-90}"
+            echo ""
+            echo "──────────────────────────────────────────────────────────"
+            echo "GET $path"
+            echo "──────────────────────────────────────────────────────────"
+            : > "$TMP/b.json"; : > "$TMP/e.txt"
+            code=$(curl -sS --max-time "$budget" -o "$TMP/b.json" -w '%{http_code}' \
+                        -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE$path" 2>"$TMP/e.txt")
+            echo "HTTP ${code:-000}  ($(wc -c <"$TMP/b.json" 2>/dev/null || echo 0) bytes)"
+            [ -s "$TMP/e.txt" ] && echo "transport: $(cat "$TMP/e.txt")"
+            jq . "$TMP/b.json" 2>/dev/null || head -c 4000 "$TMP/b.json"
+            echo ""
+          }
+          # THE ACCOUNT, AS THE VENUE STATES IT. cash is the venue's
+          # currentBalance and buying_power its buyingPower
+          # (api/pmus_account.py:168, :321). THE SNAPSHOT IS CACHED 30s
+          # (pmus_account.py:18 _CACHE_TTL), so an AFTER read taken sooner
+          # than that would print the BEFORE numbers again and read as a
+          # zero fee. Every AFTER read here therefore waits past the TTL and
+          # is taken TWICE, ~40s apart, and both are printed: if the two
+          # agree the number is settled, and if they do not the cash was
+          # still moving and the delta is not yet the answer.
+          account() {
+            echo ""
+            echo "=========================================================="
+            echo "ACCOUNT $1  ($(date -u +%FT%TZ))"
+            echo "=========================================================="
+            : > "$TMP/a.json"; : > "$TMP/e.txt"
+            code=$(curl -sS --max-time 90 -o "$TMP/a.json" -w '%{http_code}' \
+                        -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE/api/desk/accounts" 2>"$TMP/e.txt")
+            echo "HTTP ${code:-000}"
+            [ -s "$TMP/e.txt" ] && echo "transport: $(cat "$TMP/e.txt")"
+            jq -r '.polymarket | "  cash          = \(.cash)\n  buying_power  = \(.buying_power)\n  unsettled     = \(.unsettled_funds)\n  account_value = \(.account_value)\n  open_value    = \(.open_value)\n  realized_pnl  = \(.realized_pnl)\n  error         = \(.error // "none")"' "$TMP/a.json" 2>/dev/null \
+              || { echo "(accounts body not JSON)"; head -c 1500 "$TMP/a.json"; }
+            echo "  -- our open positions (market_slug qty cost value):"
+            jq -r '.polymarket.positions[]? | "     \(.market_slug)  qty=\(.qty)  cost=\(.cost)  value=\(.value)"' "$TMP/a.json" 2>/dev/null
+            echo "  -- external positions (the owner's own; MUST NOT MOVE):"
+            jq -r '.polymarket.external_positions[]? | "     \(.market_slug)  qty=\(.qty)  cost=\(.cost)  value=\(.value)"' "$TMP/a.json" 2>/dev/null
+            echo "  as_of=$(jq -r '.as_of // "?"' "$TMP/a.json" 2>/dev/null)"
+          }
+          account_after() {
+            echo ""
+            echo "(waiting past the 30s account-snapshot cache before the AFTER read)"
+            sleep 40
+            account "AFTER (read 1)"
+            sleep 40
+            account "AFTER (read 2, confirms the first)"
+          }
+          open_orders() {
+            ag "/api/admin/open-orders" 90
+          }
+
+          case "$ACTION" in
+            read)
+              # THE FREE REHEARSAL. Everything the live run will print,
+              # printed without sending anything: the account, the target's
+              # two books, the desk blotter, the working orders, and the
+              # venue's own activity rows (the surface a per-trade fee or a
+              # settlement would appear on, if either does).
+              account "BEFORE (rehearsal)"
+              if [ -n "$SEARCH" ]; then
+                ag "/api/admin/market-search?q=$(jq -rn --arg v "$SEARCH" '$v|@uri')" 90
+              fi
+              if [ -n "$ASSET" ]; then
+                echo ""
+                echo "== leg A book (token $ASSET) =="
+                ag "/api/admin/book?venue=polymarket&id=$ASSET" 60
+              fi
+              if [ -n "$OTHER" ]; then
+                echo ""
+                echo "== leg B book (token $OTHER) =="
+                ag "/api/admin/book?venue=polymarket&id=$OTHER" 60
+              fi
+              if [ -n "$ASSET" ] && [ -n "$OTHER" ]; then
+                echo ""
+                echo "== THE PAIR AT THE TOUCH =="
+                A=$(curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE/api/admin/book?venue=polymarket&id=$ASSET" | jq -r '.asks[0][0] // empty')
+                B=$(curl -sS --max-time 60 -H "X-Admin-Token: $ADMIN_TOKEN" "$BASE/api/admin/book?venue=polymarket&id=$OTHER" | jq -r '.asks[0][0] // empty')
+                echo "  ask A = ${A:-none}   ask B = ${B:-none}"
+                if [ -n "$A" ] && [ -n "$B" ]; then
+                  awk -v a="$A" -v b="$B" 'BEGIN{printf "  ask sum = %.4f   gross pair edge at the touch = %.4f\n", a+b, 1-(a+b)}'
+                  # The order path pays at most the PROTECTED limit, not the
+                  # touch: limit = round(min(ask + 0.02, 0.99), 2) per leg
+                  # (live_executor.py:4697). This is the worst case the two
+                  # tickets can cost, and it is what decides whether the pair
+                  # is still under $1.00 when it actually fills.
+                  awk -v a="$A" -v b="$B" 'BEGIN{la=a+0.02; lb=b+0.02; if(la>0.99)la=0.99; if(lb>0.99)lb=0.99;
+                        la=int(la*100+0.5)/100; lb=int(lb*100+0.5)/100;
+                        printf "  protected limits = %.2f + %.2f = %.2f  (worst-case pair cost before any fee)\n", la, lb, la+lb;
+                        printf "  usd that buys EXACTLY ONE contract: leg A in [%.2f, %.2f)   leg B in [%.2f, %.2f)\n", la, 2*la, lb, 2*lb}'
+                fi
+              fi
+              ag "/api/admin/manual-trades" 90
+              open_orders
+              if [ -n "$SINCE" ]; then
+                echo ""
+                echo "== the venue's OWN activity rows, verbatim, since $SINCE =="
+                echo "(this is the only surface that would carry a per-trade fee field; the account"
+                echo " snapshot's cash is the fallback and the measurement (A) actually relies on)"
+                ag "/api/venue-export-raw?since=$SINCE" 280
+              fi
+              echo ""
+              echo "REHEARSAL COMPLETE. Nothing was sent. Re-dispatch with action=leg and confirm=DO to buy one leg."
+              ;;
+
+            leg)
+              need_confirm
+              [ -z "$ASSET" ] && { echo "refused: leg needs an asset (the outcome token id)"; exit 1; }
+              [ -z "$USD" ] && { echo "refused: leg needs a usd budget"; exit 1; }
+              # The cap, checked in awk so a non-numeric or negative input
+              # cannot slip past a string comparison. Refuse, never clamp:
+              # a clamped order is not the order that was asked for.
+              OK=$(awk -v u="$USD" -v m="$MAX_USD" 'BEGIN{ if (u+0 <= 0 || u+0 > m || u !~ /^[0-9]*\.?[0-9]+$/) print "no"; else print "yes" }')
+              if [ "$OK" != "yes" ]; then
+                echo "refused: usd='$USD' is not a number in (0, $MAX_USD] -- the hard cap in this script. Nothing was sent."
+                exit 1
+              fi
+              account "BEFORE"
+              BODY=$(jq -nc --arg a "$ASSET" --arg n "$NOTE" --argjson u "$USD" \
+                        '{asset:$a, usd:$u, note:$n, venue:"polymarket-us"}')
+              echo ""
+              echo "=========================================================="
+              echo "REQUEST  POST /api/admin/manual-trade"
+              echo "=========================================================="
+              echo "$BODY"
+              echo ""
+              echo "=========================================================="
+              echo "VERBATIM RESPONSE  ($(date -u +%FT%TZ))"
+              echo "=========================================================="
+              : > "$TMP/o.json"; : > "$TMP/e.txt"
+              code=$(curl -sS --max-time 280 -o "$TMP/o.json" -w '%{http_code}' -X POST \
+                          -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+                          -d "$BODY" "$BASE/api/admin/manual-trade" 2>"$TMP/e.txt")
+              echo "HTTP ${code:-000}"
+              [ -s "$TMP/e.txt" ] && echo "transport: $(cat "$TMP/e.txt")"
+              cat "$TMP/o.json"; echo
+              echo ""
+              echo "-- the row, as the executor wrote it --"
+              jq -r '"  ok             = \(.ok)\n  row_id         = \(.row_id // "none")\n  filled_shares  = \(.filled_shares // "none")\n  fill_price     = \(.fill_price // "none")\n  limit_price    = \(.limit_price // "none")\n  quoted_ask     = \(.quoted_ask // "none")\n  us_market_slug = \(.us_market_slug // "none")\n  outcome        = \(.outcome // "none")\n  error          = \(.error // "none")"' "$TMP/o.json" 2>/dev/null
+              ROW=$(jq -r '.row_id // empty' "$TMP/o.json" 2>/dev/null)
+              if [ -n "$ROW" ]; then
+                echo ""
+                echo "-- the ledger row read back (status, filled_usd = filled_shares x fill_price) --"
+                ag "/api/admin/manual-order?id=$ROW&venue=polymarket" 60
+              fi
+              account_after
+              open_orders
+              echo ""
+              echo "=========================================================="
+              echo "(A) THE FEE, FROM THE NUMBERS ABOVE"
+              echo "=========================================================="
+              echo "  paid_to_book  = filled_shares x fill_price   (a BUY_LONG leg)"
+              echo "                = filled_shares x (1 - fill_price)   (a BUY_SHORT leg:"
+              echo "                  the venue takes the COLLATERAL, pmus.py:2757-2771)"
+              echo "  fee_this_leg  = (cash BEFORE - cash AFTER) - paid_to_book"
+              echo "  Both AFTER reads must agree before the delta is read as final."
+              ;;
+
+            unwind)
+              # ONE LEG FILLED AND THE OTHER DID NOT. Sell the filled leg
+              # back through the desk's own cash-out: an IOC at a protective
+              # limit under the live bid, clamped to the HELD quantity (the
+              # retail module refuses a sell past the position,
+              # live_executor.py:5440). The cost of the unwind is the round
+              # trip -- the spread, twice -- and it is measured the same way
+              # as the buy: the cash delta around it.
+              need_confirm
+              [ -z "$US_SLUG" ] && { echo "refused: unwind needs the us_slug of the leg to sell"; exit 1; }
+              if [ -n "$QTY" ]; then
+                # A whole contract count, or refuse. The server clamps to the
+                # held quantity anyway; this stops a malformed qty becoming a
+                # malformed request body instead of a named refusal.
+                QOK=$(awk -v q="$QTY" 'BEGIN{ if (q !~ /^[0-9]+$/ || q+0 < 1 || q+0 > 100) print "no"; else print "yes" }')
+                [ "$QOK" != "yes" ] && { echo "refused: qty='$QTY' is not a whole contract count in [1, 100]"; exit 1; }
+              fi
+              account "BEFORE (unwind)"
+              if [ -n "$QTY" ]; then
+                BODY=$(jq -nc --arg s "$US_SLUG" --argjson q "$QTY" '{venue:"polymarket-us", us_slug:$s, qty:$q}')
+              else
+                BODY=$(jq -nc --arg s "$US_SLUG" '{venue:"polymarket-us", us_slug:$s}')
+              fi
+              echo ""
+              echo "REQUEST  POST /api/desk/cash-out"
+              echo "$BODY"
+              echo ""
+              echo "VERBATIM RESPONSE  ($(date -u +%FT%TZ))"
+              : > "$TMP/o.json"; : > "$TMP/e.txt"
+              code=$(curl -sS --max-time 280 -o "$TMP/o.json" -w '%{http_code}' -X POST \
+                          -H "X-Admin-Token: $ADMIN_TOKEN" -H "Content-Type: application/json" \
+                          -d "$BODY" "$BASE/api/desk/cash-out" 2>"$TMP/e.txt")
+              echo "HTTP ${code:-000}"
+              [ -s "$TMP/e.txt" ] && echo "transport: $(cat "$TMP/e.txt")"
+              cat "$TMP/o.json"; echo
+              account_after
+              open_orders
+              ;;
+
+            settle-read)
+              # (B) THE SETTLEMENT MECHANIC, after the market resolves.
+              # The account card carries the position and its realized
+              # figure; the venue's own activity rows carry the
+              # ACTIVITY_TYPE_POSITION_RESOLUTION object verbatim
+              # (beforePosition / afterPosition / realized), which is where
+              # "$1.00 per pair, at settlement" is either shown or refuted.
+              # A pair that was NETTED instead would never produce a
+              # resolution row at all -- it would show as the position
+              # going flat with the collateral returned at once.
+              [ -z "$SINCE" ] && { echo "refused: settle-read needs since=YYYY-MM-DD (it is also the API's cache key)"; exit 1; }
+              account "AT SETTLEMENT"
+              ag "/api/admin/manual-trades" 90
+              echo ""
+              echo "== the venue's OWN rows, verbatim, since $SINCE =="
+              ag "/api/venue-export-raw?since=$SINCE" 280
+              ;;
+
+            *)
+              echo "refused: unknown action '$ACTION'"
+              exit 1
+              ;;
+          esac
+          exit 0

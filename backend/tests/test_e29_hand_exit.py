@@ -85,7 +85,13 @@ HAND_NET_ON_TIP = "dc37d19b62d8c6fd"      # _hand_net on 6c0830d and on cdf0742 
 # E31 (FILL lane 31, 2026-09-10): the read-only `maker-rests` preset beside take-band (and its copy in the
 # hourly) and the need_confirm `mirror-post-only-rearm` beside mirror-rearm -- dea4c2e5a9b03439 ->
 # e6d09c17b185163b with this lane's block still excised; every other read-only preset byte for byte
-RENDER_OPS_ON_TIP = "e6d09c17b185163b"    # render-ops.yml minus this lane's block: 0b09a1ed2074c6fd on cdf0742 (the landing tip), then
+# then the ops secrets commit (2026-09-10 13:51Z, 605cef3: `arg` and `render_key` read from the event payload
+# on disk and masked first) moved the file without re-pinning here, so this constant was already red on the
+# clean tip -- e6d09c17b185163b -> bbc132a2bb0a7980, measured; this lane's block still excised, no preset moved
+# THE PAIR PROBE (2026-09-10): the read-only `pair-candidates` preset beside his-matched and its one help
+# token -- bbc132a2bb0a7980 -> 63b8c5f373ca7383; mirror-hand-release's own block and every other read-only
+# preset byte for byte, which is exactly what this assertion is here to prove
+RENDER_OPS_ON_TIP = "655ade85563ffa94"    # render-ops.yml minus this lane's block: 0b09a1ed2074c6fd on cdf0742 (the landing tip), then
                                           # 95b58cdb2a82406f when the heartbeat value column widened 2,400 -> 8,000 (2026-09-10 02:1xZ),
                                           # then re-cut for the read-only nfl-team preset beside nfl-rows (02:5xZ; b7d553a6aa4204c2)
                                           # and again for mirror-by-league / his-matched beside it (03:1xZ)
