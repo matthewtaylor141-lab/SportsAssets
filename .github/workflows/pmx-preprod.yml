@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "whoami | health | refdata | bbo | positions | open-orders | order-preview | order (needs confirm=DO)"
+        description: "whoami | health | refdata | instruments (arg=JSON body) | bbo (arg=symbol) | book (arg=symbol) | positions (arg=account name) | open-orders | report-orders (arg=JSON) | order-preview (arg=JSON) | order (arg=JSON, needs confirm=DO)"
         required: true
         type: string
       arg:
@@ -83,7 +83,7 @@ jobs:
         run: |
           set -euo pipefail
           case "$ACTION" in
-            whoami|health|refdata|bbo|positions|open-orders|order-preview) ;;
+            whoami|health|refdata|instruments|bbo|book|positions|open-orders|report-orders|order-preview) ;;
             order) if [ "$CONFIRM" != "DO" ]; then echo "refused: order needs confirm=DO"; exit 1; fi ;;
             *) echo "refused: unknown action '$ACTION'"; exit 1 ;;
           esac
@@ -137,11 +137,37 @@ jobs:
                   print(path, "->", r.status_code); print(r.text[:6000])
           elif act == "bbo":
               show(requests.get(f"{base}/v1/orderbook/{arg.strip()}/bbo", headers=H, timeout=30))
+          elif act == "book":
+              show(requests.get(f"{base}/v1/orderbook/{arg.strip()}", headers=H, timeout=30))
+          elif act == "instruments":
+              # arg = the JSON body of POST /v1/refdata/instruments (pageSize, symbols,
+              # clearingSym, tradableFilter, states, startTimeGte ...); {} lists the first page
+              body = json.loads(arg) if arg.strip() else {"pageSize": 20}
+              r = requests.post(f"{base}/v1/refdata/instruments", headers=H, json=body, timeout=60)
+              print("POST /v1/refdata/instruments ->", r.status_code)
+              try:
+                  j = r.json()
+                  for i in j.get("instruments", []):
+                      md = i.get("metadata") or {}
+                      print(i.get("symbol"), i.get("state"), "px_scale", i.get("priceScale"), "tick", i.get("tickSize"),
+                            "fq_scale", i.get("fractionalQtyScale"), "minqty", i.get("minimumTradeQty"),
+                            "|", md.get("market_sport_type"), md.get("event_id"), md.get("long_participant_id"),
+                            md.get("outcome_strike"), md.get("event_start_time"), "|", (i.get("description") or "")[:80])
+                  print("nextPageToken:", j.get("nextPageToken"))
+                  print(json.dumps(j.get("instruments", [])[:1], indent=1)[:6000])
+              except Exception as e:
+                  print(r.text[:4000], e)
           elif act == "positions":
-              show(requests.get(f"{base}/v1/positions", headers=H, timeout=30))
-              show(requests.post(f"{base}/v1/positions/balances", headers=H, json={}, timeout=30))
+              # arg = the account resource name (firms/<firm>/accounts/<account>)
+              acct = arg.strip()
+              show(requests.get(f"{base}/v1/positions", headers=H, params={"name": acct} if acct else None, timeout=30))
+              show(requests.post(f"{base}/v1/positions/balance", headers=H, json={"account": acct} if acct else {}, timeout=30))
+              show(requests.get(f"{base}/v1/accounts/accounts", headers=H, timeout=30))
           elif act == "open-orders":
               show(requests.get(f"{base}/v1/trading/orders/open", headers=H, timeout=30))
+          elif act == "report-orders":
+              body = json.loads(arg) if arg.strip() else {"stateFilter": "ORDER_STATE_FILTER_OPEN"}
+              show(requests.post(f"{base}/v1/report/orders/search", headers=H, json=body, timeout=30))
           elif act in ("order-preview", "order"):
               body = json.loads(arg)
               path = "/v1/trading/orders/preview" if act == "order-preview" else "/v1/trading/orders"
