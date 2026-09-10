@@ -1,0 +1,116 @@
+name: research-sql
+
+# A READ-ONLY RESEARCH SURFACE, separate from render-ops on purpose.
+#
+# render-ops.yml sits at a file-size ceiling GitHub enforces with
+# startup_failure, and it is the operational surface: it can set env, restart
+# services and flip the mirror's switches. Research queries do not belong in
+# it. This workflow runs a versioned .sql file from research/ against the
+# read replica of the production database and prints the result.
+#
+# IT CANNOT WRITE. The guard below refuses to run any file containing a
+# mutating keyword, so a research query cannot alter production data even by
+# accident. That is a property of the workflow, not a promise about the SQL.
+
+on:
+  workflow_dispatch:
+    inputs:
+      file:
+        description: "SQL file under research/ (basename only, e.g. us_band_pilot.sql)"
+        required: true
+        type: string
+      service:
+        description: "database name"
+        required: false
+        type: string
+        default: "sportsassets-db"
+      timeout_ms:
+        description: "statement_timeout in ms"
+        required: false
+        type: string
+        default: "600000"
+      head:
+        description: "max output lines"
+        required: false
+        type: string
+        default: "800"
+      render_key:
+        description: "Render API key (only if the RENDER_API_KEY secret is not set)"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: research-sql
+  cancel-in-progress: false
+
+jobs:
+  research:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - name: Run
+        shell: bash
+        env:
+          SERVICE: ${{ inputs.service }}
+          KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+        run: |
+          set +e
+          set -u
+          # `file` and `render_key` are read from the event payload on disk, not
+          # mapped through `env:`: the runner prints a step's env block in the log
+          # header BEFORE any ::add-mask:: in this script runs, so a key mapped
+          # there would be exposed before it could be masked.
+          FILE="$(jq -r '.inputs.file // empty' "$GITHUB_EVENT_PATH")"
+          KEY_INPUT="$(jq -r '.inputs.render_key // empty' "$GITHUB_EVENT_PATH")"
+          TO="$(jq -r '.inputs.timeout_ms // "600000"' "$GITHUB_EVENT_PATH")"
+          HEAD="$(jq -r '.inputs.head // "800"' "$GITHUB_EVENT_PATH")"
+          [ -n "$KEY_INPUT" ] && echo "::add-mask::$KEY_INPUT"
+
+          # basename only: no traversal, no absolute paths, no other directory
+          case "$FILE" in
+            *[!A-Za-z0-9_.-]* | "" | .* ) echo "refused: bad file name '$FILE'"; exit 1 ;;
+          esac
+          case "$FILE" in *.sql) ;; *) echo "refused: not a .sql file"; exit 1 ;; esac
+          SRC="research/$FILE"
+          [ -f "$SRC" ] || { echo "refused: no such file $SRC"; exit 1; }
+
+          # THE READ-ONLY GUARD, first of two. Word-boundary match,
+          # case-insensitive, over the file with `--` comments STRIPPED -- the
+          # keyword list contains ordinary English words ("do", "create",
+          # "copy"), so scanning prose would refuse every documented query and
+          # teach the next person to weaken the guard. Comments cannot execute,
+          # so removing them loses nothing.
+          KW='\b(insert|update|delete|drop|alter|truncate|grant|revoke|create|copy|vacuum|reindex|refresh|call|do|merge|lock|set[[:space:]]+role)\b'
+          sed -e 's/--.*$//' "$SRC" > /tmp/stripped.sql
+          if grep -qiE "$KW" /tmp/stripped.sql; then
+            echo "refused: $SRC contains a mutating keyword outside a comment; this surface is read-only"
+            grep -niE "$KW" /tmp/stripped.sql | head -20
+            exit 1
+          fi
+          case "$TO" in ''|*[!0-9]*) echo "refused: timeout_ms must be digits"; exit 1 ;; esac
+          case "$HEAD" in ''|*[!0-9]*) echo "refused: head must be digits"; exit 1 ;; esac
+
+          KEY="$KEY_SECRET"; [ -z "$KEY" ] && KEY="$KEY_INPUT"
+          [ -z "$KEY" ] && { echo "no Render key: set the RENDER_API_KEY secret or pass render_key"; exit 1; }
+          echo "::add-mask::$KEY"
+          API=https://api.render.com/v1
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$1"; }
+          PG=$(get "/postgres?name=$SERVICE&limit=20" | jq -r --arg n "$SERVICE" '.[]? | select(.postgres.name==$n) | .postgres.id' 2>/dev/null | head -1)
+          [ -z "$PG" ] && { echo "no database named $SERVICE"; exit 1; }
+
+          command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+          get "/postgres/$PG/connection-info" > /tmp/ci.json
+          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
+          PW=$(jq -r '.password // empty' /tmp/ci.json)
+          [ -n "$PW" ] && echo "::add-mask::$PW"; [ -n "$EXT" ] && echo "::add-mask::$EXT"
+          [ -z "$EXT" ] && { echo "no external connection string returned"; exit 1; }
+
+          echo "== $SRC on $SERVICE ($PG) at $(date -u +%FT%TZ), statement_timeout ${TO}ms =="
+          echo "== sha256 $(sha256sum "$SRC" | cut -d' ' -f1) =="
+          PGOPTIONS="-c statement_timeout=$TO -c default_transaction_read_only=on" \
+            timeout $(( TO / 1000 + 120 )) \
+            psql "$EXT" -X -v ON_ERROR_STOP=1 -f "$SRC" 2>&1 \
+            | grep -v -F "$PW" | head -"$HEAD"
+          echo "psql exit=${PIPESTATUS[0]}"
