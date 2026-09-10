@@ -83,9 +83,23 @@ jobs:
           # teach the next person to weaken the guard. Comments cannot execute,
           # so removing them loses nothing.
           KW='\b(insert|update|delete|drop|alter|truncate|grant|revoke|create|copy|vacuum|reindex|refresh|call|do|merge|lock|set[[:space:]]+role)\b'
-          sed -e 's/--.*$//' "$SRC" > /tmp/stripped.sql
+          # psql BACKSLASH META-COMMANDS ARE CHECKED FIRST, and separately. The
+          # keyword scan alone would never have seen `\i other.sql` (which runs
+          # another file) or `\o |sh` (which pipes to a shell), because neither
+          # contains a SQL verb. Only `\echo` is admitted here.
+          if grep -qE '^[[:space:]]*\\' "$SRC" && grep -qEv '^[[:space:]]*(\\echo([[:space:]]|$)|[^\\]|$)' "$SRC"; then
+            echo "refused: $SRC uses a psql meta-command other than \\echo"
+            grep -nE '^[[:space:]]*\\' "$SRC" | grep -vE ':[[:space:]]*\\echo([[:space:]]|$)' | head -20
+            exit 1
+          fi
+          # Then the keyword scan, over the file with `--` comments AND `\echo`
+          # lines removed. Both are inert text, and both routinely contain the
+          # ordinary English words in the list ("do", "create", "copy"); scanning
+          # them refuses honestly-documented queries and teaches the next person
+          # to weaken the guard rather than respect it.
+          sed -e 's/--.*$//' -e '/^[[:space:]]*\\echo/d' "$SRC" > /tmp/stripped.sql
           if grep -qiE "$KW" /tmp/stripped.sql; then
-            echo "refused: $SRC contains a mutating keyword outside a comment; this surface is read-only"
+            echo "refused: $SRC contains a mutating keyword in executable SQL; this surface is read-only"
             grep -niE "$KW" /tmp/stripped.sql | head -20
             exit 1
           fi
