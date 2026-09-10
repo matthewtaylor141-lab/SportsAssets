@@ -78,8 +78,11 @@ WITH t AS (
 ), s AS (
   SELECT tx_hash, asset, side, source,
          count(*) AS n, sum(sh) AS shares, sum(usd) AS usd,
-         array_agg(round(px::numeric, 6)::text || '@' || round(sh::numeric, 4)::text
-                   ORDER BY px, sh) AS ms
+         -- the multiset as ONE delimited string: array_agg of a text[] flattens
+         -- in Postgres, so the per-source multiset is carried as text and the
+         -- array is rebuilt with string_to_array where containment is needed
+         string_agg(round(px::numeric, 6)::text || '@' || round(sh::numeric, 4)::text,
+                    '|' ORDER BY px, sh) AS ms
     FROM t GROUP BY 1, 2, 3, 4
 ), g AS (
   SELECT tx_hash, asset, side,
@@ -97,7 +100,9 @@ WITH t AS (
            WHEN n_sources = 1 AND rows_total = 1 THEN 'S1 single source, one row'
            WHEN n_sources = 1                    THEN 'S2 single source, MULTI-ROW sweep'
            WHEN ms1 = ms2                        THEN 'A exact source duplicate'
-           WHEN ms1 <@ ms2 OR ms2 <@ ms1         THEN 'B one source a subset'
+           WHEN string_to_array(ms1, '|') <@ string_to_array(ms2, '|')
+             OR string_to_array(ms2, '|') <@ string_to_array(ms1, '|')
+                                                 THEN 'B one source a subset'
            WHEN abs(sh_max - sh_min) < 0.01
                 AND abs(usd_max - usd_min) < 0.01
                 AND n_min <> n_max               THEN 'C aggregated vs split'
@@ -126,8 +131,8 @@ WITH t AS (
    WHERE lower(w.username) = 'rn1'
 ), s AS (
   SELECT tx_hash, asset, side, source, count(*) AS n, sum(sh) AS shares, sum(usd) AS usd,
-         array_agg(round(px::numeric, 6)::text || '@' || round(sh::numeric, 4)::text
-                   ORDER BY px, sh) AS ms
+         string_agg(round(px::numeric, 6)::text || '@' || round(sh::numeric, 4)::text,
+                    '|' ORDER BY px, sh) AS ms
     FROM t GROUP BY 1, 2, 3, 4
 ), g AS (
   SELECT tx_hash, asset, side, count(*) AS n_sources, sum(n) AS rows_total,
@@ -144,7 +149,9 @@ SELECT srcs AS sources, n_sources,
        CASE WHEN n_sources = 1 AND rows_total = 1 THEN 'S1 one row'
             WHEN n_sources = 1                    THEN 'S2 multi-row sweep'
             WHEN ms1 = ms2                        THEN 'A exact duplicate'
-            WHEN ms1 <@ ms2 OR ms2 <@ ms1         THEN 'B subset'
+            WHEN string_to_array(ms1, '|') <@ string_to_array(ms2, '|')
+              OR string_to_array(ms2, '|') <@ string_to_array(ms1, '|')
+                                                  THEN 'B subset'
             WHEN abs(sh_max - sh_min) < 0.01 AND n_min <> n_max THEN 'C aggregated vs split'
             WHEN abs(sh_max - sh_min) >= 0.01     THEN 'D complementary'
             ELSE 'E irreconcilable' END AS class,
