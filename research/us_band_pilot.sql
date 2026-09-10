@@ -36,6 +36,11 @@
 -- reads strictly at > t0. Settlement is only credited to markets that resolved
 -- after the entry.
 --
+-- SHAPE NOTE. The future of each entry is found with ONE join on the slug and
+-- an aggregate, never a correlated subquery per entry: a CTE carries no index,
+-- so a per-entry subquery re-scans the whole panel and the first build of this
+-- file ran past a ten-minute statement timeout. Same arithmetic, one hash join.
+--
 -- Read-only: five SELECTs. Nothing here writes.
 -- ============================================================================
 
@@ -88,21 +93,22 @@ e AS (
     FROM p JOIN b ON p.ask >= b.lo AND p.ask < b.hi
    ORDER BY p.slug, b.lo, p.at
 ),
+j AS (
+  SELECT e.slug, e.long_asset, e.condition_id, e.lo, e.hi, e.t0, e.px,
+         min(f.at) FILTER (WHERE f.bid >= e.px + 0.05) AS t_tgt,
+         min(f.at) FILTER (WHERE f.bid <= e.px - 0.05) AS t_stp,
+         (array_agg(f.bid ORDER BY f.at) FILTER (WHERE f.bid <= e.px - 0.05))[1] AS stp_bid
+    FROM e LEFT JOIN p f ON f.slug = e.slug AND f.at > e.t0
+   GROUP BY e.slug, e.long_asset, e.condition_id, e.lo, e.hi, e.t0, e.px
+),
 x AS (
-  SELECT e.*,
-    (SELECT min(f.at) FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid >= e.px + 0.05) AS t_tgt,
-    (SELECT min(f.at) FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid <= e.px - 0.05) AS t_stp,
-    (SELECT f.bid FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid <= e.px - 0.05
-      ORDER BY f.at LIMIT 1) AS stp_bid,
+  SELECT j.*,
     (SELECT max((m.resolved_prices ->> kt.outcome_index)::float8)
        FROM market_tokens kt JOIN markets m ON m.condition_id = kt.condition_id
-      WHERE kt.token_id = e.long_asset AND m.resolved
+      WHERE kt.token_id = j.long_asset AND m.resolved
         AND jsonb_typeof(m.resolved_prices) = 'array'
-        AND (m.resolved_at IS NULL OR m.resolved_at > e.t0)) AS payout
-    FROM e
+        AND (m.resolved_at IS NULL OR m.resolved_at > j.t0)) AS payout
+    FROM j
 ),
 o AS (
   SELECT x.*,
@@ -115,6 +121,13 @@ o AS (
          WHEN payout IS NOT NULL THEN payout - px
          ELSE NULL END AS gross
     FROM x
+),
+z AS (
+  SELECT o.*,
+         gross - 0.06 * px * (1 - px)
+               - CASE WHEN outcome = 'stop' THEN 0.06 * stp_bid * (1 - stp_bid)
+                      ELSE 0 END AS net
+    FROM o
 )
 SELECT lo, hi,
        count(*) AS entries,
@@ -128,14 +141,10 @@ SELECT lo, hi,
          AS target_first_pct,
        round(avg(px)::numeric, 4) AS avg_entry_px,
        round(avg(gross)::numeric, 4) AS gross_per_share,
-       round(avg(gross - 0.06 * px * (1 - px)
-                 - CASE WHEN outcome = 'stop' THEN 0.06 * stp_bid * (1 - stp_bid)
-                        ELSE 0 END)::numeric, 4) AS net_per_share,
-       round((100.0 * avg(gross - 0.06 * px * (1 - px)
-                 - CASE WHEN outcome = 'stop' THEN 0.06 * stp_bid * (1 - stp_bid)
-                        ELSE 0 END)
-              / NULLIF(avg(px) FILTER (WHERE gross IS NOT NULL), 0))::numeric, 2) AS net_roi_pct
-  FROM o GROUP BY 1, 2 ORDER BY 1;
+       round(avg(net)::numeric, 4) AS net_per_share,
+       round((100.0 * avg(net) / NULLIF(avg(px) FILTER (WHERE net IS NOT NULL), 0))::numeric, 2)
+         AS net_roi_pct
+  FROM z GROUP BY 1, 2 ORDER BY 1;
 
 
 -- ---------------------------------------------------------------------------
@@ -166,21 +175,23 @@ g (tgt, stp) AS (VALUES
   (0.40,0.30),(0.40,0.25),(0.40,0.20),(0.40,0.15),
   (0.45,0.25),(0.45,0.20),
   (0.50,0.25),(0.50,0.20)),
+eg AS (SELECT e.*, g.tgt, g.stp FROM e CROSS JOIN g),
+j AS (
+  SELECT eg.slug, eg.long_asset, eg.condition_id, eg.t0, eg.px, eg.tgt, eg.stp,
+         min(f.at) FILTER (WHERE f.bid >= eg.tgt) AS t_tgt,
+         min(f.at) FILTER (WHERE f.bid <= eg.stp) AS t_stp,
+         (array_agg(f.bid ORDER BY f.at) FILTER (WHERE f.bid <= eg.stp))[1] AS stp_bid
+    FROM eg LEFT JOIN p f ON f.slug = eg.slug AND f.at > eg.t0
+   GROUP BY eg.slug, eg.long_asset, eg.condition_id, eg.t0, eg.px, eg.tgt, eg.stp
+),
 x AS (
-  SELECT e.*, g.tgt, g.stp,
-    (SELECT min(f.at) FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid >= g.tgt) AS t_tgt,
-    (SELECT min(f.at) FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid <= g.stp) AS t_stp,
-    (SELECT f.bid FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid <= g.stp
-      ORDER BY f.at LIMIT 1) AS stp_bid,
+  SELECT j.*,
     (SELECT max((m.resolved_prices ->> kt.outcome_index)::float8)
        FROM market_tokens kt JOIN markets m ON m.condition_id = kt.condition_id
-      WHERE kt.token_id = e.long_asset AND m.resolved
+      WHERE kt.token_id = j.long_asset AND m.resolved
         AND jsonb_typeof(m.resolved_prices) = 'array'
-        AND (m.resolved_at IS NULL OR m.resolved_at > e.t0)) AS payout
-    FROM e CROSS JOIN g
+        AND (m.resolved_at IS NULL OR m.resolved_at > j.t0)) AS payout
+    FROM j
 ),
 o AS (
   SELECT x.*,
@@ -206,7 +217,7 @@ SELECT tgt, stp,
        count(*) FILTER (WHERE outcome = 'stop')     AS stop_first,
        count(*) FILTER (WHERE outcome = 'settled')  AS settled,
        count(*) FILTER (WHERE outcome = 'censored') AS censored,
-       round(avg(net) FILTER (WHERE outcome = 'target')::numeric, 4) AS avg_win,
+       round((avg(net) FILTER (WHERE outcome = 'target'))::numeric, 4) AS avg_win,
        round((-avg(net) FILTER (WHERE outcome = 'stop'))::numeric, 4) AS avg_loss,
        round((100.0 * (-avg(net) FILTER (WHERE outcome = 'stop'))
               / NULLIF(avg(net) FILTER (WHERE outcome = 'target')
@@ -216,7 +227,8 @@ SELECT tgt, stp,
               / NULLIF(count(*) FILTER (WHERE outcome IN ('target','stop')), 0))::numeric, 1)
          AS observed_pct,
        round(avg(net)::numeric, 4) AS net_per_share,
-       round((100.0 * avg(net) / NULLIF(avg(px) FILTER (WHERE net IS NOT NULL), 0))::numeric, 2) AS net_roi_pct
+       round((100.0 * avg(net) / NULLIF(avg(px) FILTER (WHERE net IS NOT NULL), 0))::numeric, 2)
+         AS net_roi_pct
   FROM n GROUP BY 1, 2 ORDER BY 1, 2;
 
 
@@ -241,25 +253,25 @@ e AS (
     FROM p WHERE p.ask >= 0.30 AND p.ask < 0.35
    ORDER BY p.slug, p.at
 ),
+j AS (
+  SELECT e.slug, e.long_asset, e.condition_id, e.t0, e.px,
+         min(f.at) FILTER (WHERE f.bid >= 0.40) AS t_tgt,
+         min(f.at) FILTER (WHERE f.bid <= 0.20) AS t_stp,
+         (array_agg(f.bid ORDER BY f.at) FILTER (WHERE f.bid <= 0.20))[1] AS stp_bid
+    FROM e LEFT JOIN p f ON f.slug = e.slug AND f.at > e.t0
+   GROUP BY e.slug, e.long_asset, e.condition_id, e.t0, e.px
+),
 x AS (
-  SELECT e.*,
+  SELECT j.*,
     COALESCE(NULLIF(mk.sport, 'unclassified'), 'unclassified') AS sport,
-    split_part(e.slug, '-', 1) AS family,
-    (SELECT min(f.at) FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid >= 0.40) AS t_tgt,
-    (SELECT min(f.at) FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid <= 0.20) AS t_stp,
-    (SELECT f.bid FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid <= 0.20
-      ORDER BY f.at LIMIT 1) AS stp_bid,
     (SELECT max((m.resolved_prices ->> kt.outcome_index)::float8)
        FROM market_tokens kt JOIN markets m ON m.condition_id = kt.condition_id
-      WHERE kt.token_id = e.long_asset AND m.resolved
+      WHERE kt.token_id = j.long_asset AND m.resolved
         AND jsonb_typeof(m.resolved_prices) = 'array'
-        AND (m.resolved_at IS NULL OR m.resolved_at > e.t0)) AS payout
-    FROM e LEFT JOIN markets mk ON mk.condition_id = e.condition_id
+        AND (m.resolved_at IS NULL OR m.resolved_at > j.t0)) AS payout
+    FROM j LEFT JOIN markets mk ON mk.condition_id = j.condition_id
 ),
-n AS (
+o AS (
   SELECT x.*,
     CASE WHEN t_tgt IS NOT NULL AND (t_stp IS NULL OR t_tgt < t_stp) THEN 'target'
          WHEN t_stp IS NOT NULL AND (t_tgt IS NULL OR t_stp < t_tgt) THEN 'stop'
@@ -267,15 +279,15 @@ n AS (
          ELSE 'censored' END AS outcome
     FROM x
 ),
-z AS (
-  SELECT n.*,
+n AS (
+  SELECT o.*,
     CASE outcome
       WHEN 'target'  THEN  0.40 - px - 0.06 * px * (1 - px)
       WHEN 'stop'    THEN  stp_bid - px - 0.06 * px * (1 - px)
                             - 0.06 * stp_bid * (1 - stp_bid)
       WHEN 'settled' THEN  payout - px - 0.06 * px * (1 - px)
       ELSE NULL END AS net
-    FROM n
+    FROM o
 )
 SELECT COALESCE(sport, 'ALL') AS sport,
        count(*) AS entries,
@@ -288,8 +300,9 @@ SELECT COALESCE(sport, 'ALL') AS sport,
               / NULLIF(count(*) FILTER (WHERE outcome IN ('target','stop')), 0))::numeric, 1)
          AS observed_pct,
        round(avg(net)::numeric, 4) AS net_per_share,
-       round((100.0 * avg(net) / NULLIF(avg(px) FILTER (WHERE net IS NOT NULL), 0))::numeric, 2) AS net_roi_pct
-  FROM z GROUP BY ROLLUP (sport) ORDER BY 2 DESC;
+       round((100.0 * avg(net) / NULLIF(avg(px) FILTER (WHERE net IS NOT NULL), 0))::numeric, 2)
+         AS net_roi_pct
+  FROM n GROUP BY ROLLUP (sport) ORDER BY 2 DESC;
 
 
 -- ---------------------------------------------------------------------------
@@ -300,26 +313,23 @@ SELECT COALESCE(sport, 'ALL') AS sport,
 -- ---------------------------------------------------------------------------
 \echo '== 5. SAME CELL BY MARKET-TYPE FAMILY, with time to exit =='
 WITH q AS (
-  SELECT us_market_slug AS slug, long_asset, condition_id, at,
-         bid::float8 AS bid, ask::float8 AS ask
+  SELECT us_market_slug AS slug, at, bid::float8 AS bid, ask::float8 AS ask
     FROM mirror_shadow
    WHERE us_market_slug IS NOT NULL AND bid IS NOT NULL AND ask IS NOT NULL
      AND bid > 0 AND ask < 1 AND ask > bid
 ), k AS (SELECT slug FROM q GROUP BY 1 HAVING count(*) >= 30),
 p AS (SELECT q.* FROM q JOIN k USING (slug)),
 e AS (
-  SELECT DISTINCT ON (p.slug) p.slug, p.long_asset, p.condition_id,
-         p.at AS t0, p.ask AS px
+  SELECT DISTINCT ON (p.slug) p.slug, p.at AS t0, p.ask AS px
     FROM p WHERE p.ask >= 0.30 AND p.ask < 0.35
    ORDER BY p.slug, p.at
 ),
-x AS (
-  SELECT e.*, split_part(e.slug, '-', 1) AS family,
-    (SELECT min(f.at) FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid >= 0.40) AS t_tgt,
-    (SELECT min(f.at) FROM p f
-      WHERE f.slug = e.slug AND f.at > e.t0 AND f.bid <= 0.20) AS t_stp
-    FROM e
+j AS (
+  SELECT e.slug, e.t0, e.px, split_part(e.slug, '-', 1) AS family,
+         min(f.at) FILTER (WHERE f.bid >= 0.40) AS t_tgt,
+         min(f.at) FILTER (WHERE f.bid <= 0.20) AS t_stp
+    FROM e LEFT JOIN p f ON f.slug = e.slug AND f.at > e.t0
+   GROUP BY e.slug, e.t0, e.px
 )
 SELECT family,
        count(*) AS entries,
@@ -333,4 +343,4 @@ SELECT family,
                               ELSE extract(epoch FROM LEAST(COALESCE(t_tgt, t_stp),
                                                             COALESCE(t_stp, t_tgt)) - t0) END))::numeric, 0)
          AS median_seconds_to_exit
-  FROM x GROUP BY 1 ORDER BY 2 DESC;
+  FROM j GROUP BY 1 ORDER BY 2 DESC;
