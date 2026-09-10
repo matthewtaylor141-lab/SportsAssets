@@ -1,0 +1,148 @@
+name: pmx-preprod
+
+# PREPRODUCTION ONLY. Talks to the institutional PRE-PRODUCTION exchange
+# (api.preprod.polymarketexchange.com / pmx-preprod.us.auth0.com) from the
+# runner, which has open internet. No production host is ever contacted:
+# the base URLs are fixed to preprod below and are not inputs. The private
+# key arrives base64 in an input, is masked at once, written 0600 to the
+# runner's temp dir and deleted at the end. Read-only actions (whoami,
+# health, refdata, bbo, positions, open-orders) need no confirm; any action
+# that could send an order needs confirm=DO.
+
+on:
+  workflow_dispatch:
+    inputs:
+      action:
+        description: "whoami | health | refdata | bbo | positions | open-orders | order-preview | order (needs confirm=DO)"
+        required: true
+        type: string
+      arg:
+        description: "action argument: symbol for bbo; JSON body for order-preview / order; refdata filter text"
+        required: false
+        type: string
+        default: ""
+      client_id:
+        description: "preprod client id"
+        required: true
+        type: string
+      participant_id:
+        description: "x-participant-id (firms/<firm>/users/<user>)"
+        required: true
+        type: string
+      key_id:
+        description: "preprod key id (JWT kid header)"
+        required: true
+        type: string
+      private_key_b64:
+        description: "the preprod RSA private key PEM, base64 (single line)"
+        required: true
+        type: string
+      confirm:
+        description: "DO to allow an action that can send an order"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: pmx-preprod
+  cancel-in-progress: false
+
+jobs:
+  preprod:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      PMX_AUTH0_DOMAIN: pmx-preprod.us.auth0.com
+      PMX_BASE_URL: https://api.preprod.polymarketexchange.com
+      PMX_AUDIENCE: https://api.preprod.polymarketexchange.com
+    steps:
+      - name: Mask and stage the key
+        env:
+          KEY_B64: ${{ inputs.private_key_b64 }}
+        run: |
+          set -euo pipefail
+          echo "::add-mask::$KEY_B64"
+          umask 077
+          echo "$KEY_B64" | base64 -d > "$RUNNER_TEMP/pk.pem"
+          head -c 32 "$RUNNER_TEMP/pk.pem" | grep -q "BEGIN" || { echo "refused: key is not a PEM"; exit 1; }
+          echo "key staged ($(wc -c < "$RUNNER_TEMP/pk.pem") bytes)"
+      - name: Install
+        run: pip install -q pyjwt cryptography requests
+      - name: Run
+        env:
+          ACTION: ${{ inputs.action }}
+          ARG: ${{ inputs.arg }}
+          CONFIRM: ${{ inputs.confirm }}
+          PMX_CLIENT_ID: ${{ inputs.client_id }}
+          PMX_PARTICIPANT_ID: ${{ inputs.participant_id }}
+          PMX_KEY_ID: ${{ inputs.key_id }}
+        run: |
+          set -euo pipefail
+          case "$ACTION" in
+            whoami|health|refdata|bbo|positions|open-orders|order-preview) ;;
+            order) if [ "$CONFIRM" != "DO" ]; then echo "refused: order needs confirm=DO"; exit 1; fi ;;
+            *) echo "refused: unknown action '$ACTION'"; exit 1 ;;
+          esac
+          echo "== pmx-preprod $ACTION at $(date -u +%FT%TZ) base=$PMX_BASE_URL =="
+          python3 - <<'PY'
+          import json, os, sys, time, uuid
+          import jwt, requests
+          act = os.environ["ACTION"]; arg = os.environ.get("ARG", "")
+          cid = os.environ["PMX_CLIENT_ID"]; kid = os.environ["PMX_KEY_ID"]
+          dom = os.environ["PMX_AUTH0_DOMAIN"]; base = os.environ["PMX_BASE_URL"].rstrip("/")
+          aud = os.environ["PMX_AUDIENCE"]; pid = os.environ["PMX_PARTICIPANT_ID"]
+          pk = open(os.path.join(os.environ["RUNNER_TEMP"], "pk.pem")).read()
+          if act == "health":
+              r = requests.get(f"{base}/v1/health", timeout=30)
+              print("health", r.status_code, r.text[:500]); sys.exit(0)
+          def token():
+              now = int(time.time())
+              # the venue's own helper: aud = https://<domain>/ and a form-encoded token call
+              a = jwt.encode({"iss": cid, "sub": cid, "aud": f"https://{dom}/", "iat": now,
+                              "exp": now + 60, "jti": str(uuid.uuid4())}, pk, algorithm="RS256",
+                             headers={"kid": kid})
+              r = requests.post(f"https://{dom}/oauth/token", data={
+                  "client_id": cid,
+                  "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
+                  "client_assertion": a, "audience": aud, "grant_type": "client_credentials"},
+                  headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=30)
+              print("token", r.status_code, {k: v for k, v in r.json().items() if k != "access_token"} if r.headers.get("content-type", "").startswith("application/json") else r.text[:300])
+              r.raise_for_status()
+              return r.json()["access_token"]
+          t = token()
+          try:
+              import base64
+              p = t.split(".")[1]; p += "=" * (-len(p) % 4)
+              print("scopes:", json.loads(base64.urlsafe_b64decode(p)).get("scope"))
+          except Exception as e:
+              print("scope decode failed", e)
+          H = {"Authorization": f"Bearer {t}", "X-Client-Id": cid, "X-Request-Id": str(uuid.uuid4()),
+               "x-participant-id": pid}
+          def show(r):
+              print(r.request.method, r.url, "->", r.status_code)
+              try: print(json.dumps(r.json(), indent=1)[:12000])
+              except Exception: print(r.text[:2000])
+          if act == "whoami":
+              show(requests.get(f"{base}/v1/whoami", headers=H, timeout=30))
+              show(requests.get(f"{base}/v1/users", headers=H, timeout=30))
+          elif act == "refdata":
+              body = {}
+              if arg.strip(): body = {"filter": arg.strip()}
+              for path in ("/v1/refdata/symbols", "/v1/refdata/instruments", "/v1/refdata/metadata"):
+                  r = requests.post(f"{base}{path}", headers=H, json=body, timeout=60)
+                  print(path, "->", r.status_code); print(r.text[:6000])
+          elif act == "bbo":
+              show(requests.get(f"{base}/v1/orderbook/{arg.strip()}/bbo", headers=H, timeout=30))
+          elif act == "positions":
+              show(requests.get(f"{base}/v1/positions", headers=H, timeout=30))
+              show(requests.post(f"{base}/v1/positions/balances", headers=H, json={}, timeout=30))
+          elif act == "open-orders":
+              show(requests.get(f"{base}/v1/trading/orders/open", headers=H, timeout=30))
+          elif act in ("order-preview", "order"):
+              body = json.loads(arg)
+              path = "/v1/trading/orders/preview" if act == "order-preview" else "/v1/trading/orders"
+              show(requests.post(f"{base}{path}", headers=H, json=body, timeout=30))
+          PY
+      - name: Scrub
+        if: always()
+        run: rm -f "$RUNNER_TEMP/pk.pem"; echo scrubbed
