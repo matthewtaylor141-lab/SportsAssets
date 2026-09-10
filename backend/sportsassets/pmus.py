@@ -2535,6 +2535,81 @@ def _commission_fields(rec: Any) -> tuple[float | None, float | None]:
     return _read(usd_raw), _read(spread_raw)
 
 
+def position_basis(p: Any) -> dict:
+    """THE ALL-IN BASIS OF ONE VENUE POSITION, from the venue's own
+    numbers: {net, cost, base_cost, fees, basis_px, fee_px, source}.
+    Every figure is None where the venue did not state it and nothing
+    here is ever derived from a fee model.
+
+    WHY THIS EXISTS, AND WHY IT IS NOT `_commission_fields`. That reader
+    is correct and stays: it reports the per-execution commission the
+    venue names on an execution or order record, and refuses to guess.
+    The trouble is the venue has never named one -- the 2026-09-02
+    21:52Z probe printed every execution carrying
+    commissionNotionalCollected and commissionSpreadPx as KEYS with no
+    value, and the same holds today. `_opt_float` already unwraps the
+    Amount shape, so this is the venue withholding the number, not us
+    misreading it, and no change to that reader can produce a fee that
+    was never sent.
+
+    The venue does state the fee -- on the POSITION, where `cost` is the
+    all-in figure and `baseCost` is the same position before fees, so
+
+        fees = cost - baseCost
+
+    is the venue's own arithmetic rather than ours. That is the number
+    the owner's standing-order rule needs: holding at all-in basis `c`
+    and closing at complement price `q`, the pair pays iff `c + q <
+    1.00`, and `c` must be the venue's `cost / |netPosition|` because our
+    ledger has drifted from it repeatedly (books 1333, 534, 863).
+
+    `source` names which reading produced `fees`: 'stated' when the
+    venue sent a fees field outright, 'cost_minus_base' when it was
+    subtracted from the two costs, None when neither was available. A
+    reader that needs to know whether a fee is real checks that word,
+    never a zero -- unknown is None here, never 0.0, because a zero fee
+    and an unread fee price a sell differently.
+
+    `basis_px` is cost / |net| and `fee_px` is fees / |net|: per-share,
+    unsigned, so a short's basis reads like a long's. Both are None on a
+    flat position (no shares, no per-share anything) and on a non-finite
+    reading -- those reach json.dumps and the jsonb column rejects the
+    bare NaN / Infinity tokens they write (the pmus re-review's rule for
+    `_commission_fields`, and it applies identically here)."""
+    out: dict[str, Any] = {"net": None, "cost": None, "base_cost": None,
+                           "fees": None, "basis_px": None, "fee_px": None,
+                           "source": None}
+    if not isinstance(p, dict):
+        return out
+
+    def _read(v: Any) -> float | None:
+        if isinstance(v, bool):
+            return None
+        if isinstance(v, dict) and isinstance(v.get("value"), bool):
+            return None
+        f = _opt_float(v)
+        if f is None or not math.isfinite(f):
+            return None
+        return f
+
+    net = _read(p.get("netPosition"))
+    cost = _read(p.get("cost"))
+    base = _read(p.get("baseCost"))
+    fees = _read(p.get("fees"))
+    out["net"], out["cost"], out["base_cost"] = net, cost, base
+    if fees is not None:
+        out["fees"], out["source"] = fees, "stated"
+    elif cost is not None and base is not None:
+        out["fees"], out["source"] = cost - base, "cost_minus_base"
+    qty = abs(net) if net is not None else 0.0
+    if qty > 0:
+        if cost is not None:
+            out["basis_px"] = cost / qty
+        if out["fees"] is not None:
+            out["fee_px"] = out["fees"] / qty
+    return out
+
+
 def _execution_record(ex: Any) -> dict:
     """One venue execution -> the mirror's execution record: the fields
     the fill reader already uses (type, price, shares, the order's

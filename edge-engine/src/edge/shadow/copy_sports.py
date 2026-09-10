@@ -771,6 +771,26 @@ def _tennis_candidates(title: str | None, global_slug: str) -> list[str]:
     return out
 
 
+def _us_line_token(suffix: list[str]) -> str | None:
+    """The LINE a spread or total is stated at, normalised to the
+    venue's own '2pt5' spelling, or None when the suffix does not state
+    one.
+
+    The feed spells the same line several ways -- 'o2pt5', 'u10',
+    'over-2pt5', 'neg-1pt5', 'total-2pt5', a bare '3pt5' -- and every
+    one of them is the same number. The direction (over/under,
+    pos/neg) is NOT part of this token: on the venue the line names the
+    MARKET and the direction is which of its two outcomes you hold, the
+    same way a moneyline market names the game and the outcome names
+    the team."""
+    for t in suffix:
+        if _TOTAL_RE.match(t):
+            return t[1:]                       # 'o2pt5' -> '2pt5'
+        if _LINE_RE.match(t):
+            return _re.sub(r"^(pos|neg)", "", t)
+    return None
+
+
 def _us_slug_candidates(global_slug: str, outcome: str) -> list[str]:
     """US-venue slug candidates for a global market, most exact first.
 
@@ -780,7 +800,38 @@ def _us_slug_candidates(global_slug: str, outcome: str) -> list[str]:
     'aec-<league>-<a>-<b>-<date>' (the two-outcome event contract). The
     side code is chosen only when exactly ONE of the slug's two codes
     matches the outcome name — ambiguity falls through to the aec form,
-    whose own outcome-similarity floor disambiguates."""
+    whose own outcome-similarity floor disambiguates.
+
+    THE MARKET TYPE GATES THE KIND PREFIX (2026-09-10). This function
+    used to emit the moneyline pair for EVERY slug whose head was three
+    tokens — and a spread's head is three tokens, because the feed
+    states the line in the POST-DATE suffix, not before it:
+
+        epl-mun-che-2026-09-10            head=[epl,mun,che]  moneyline
+        epl-mun-che-2026-09-10-neg-1pt5   head=[epl,mun,che]  SPREAD
+        epl-mun-che-2026-09-10-o2pt5      head=[epl,mun,che]  TOTAL
+
+    All three produced 'aec-epl-mun-che-2026-09-10', and that slug is a
+    real market at the venue — the MONEYLINE. So a spread or a total
+    resolved exactly onto the moneyline of the same game. That is not a
+    refusal to map, which is a missed copy; it is a WRONG-MARKET route,
+    which is a real position in a market he is not in, at a price that
+    means something else. `market_type_of` has always known the
+    difference (it reads the same post-date suffix) and this function
+    simply never asked it.
+
+    So the kind prefix now follows the type, on premap's own
+    PREFIX_FOR_TYPE mapping: moneyline -> atc/aec, spread -> asc,
+    total -> tsc. A type this parser cannot name emits NO constructed
+    candidate at all — unknown has never been tradeable anywhere else
+    in this file and it is not tradeable here.
+
+    Spread and total candidates carry the line token the venue spells
+    as '2pt5' ('tsc-<lg>-<a>-<b>-<date>-tot-2pt5' is the venue's own
+    shape, quoted in market_type_of from esports_chi_rows_1403.log). A
+    line the suffix does not state yields no candidate rather than a
+    guessed one: a fabricated line is a live probe into a market that
+    exists and is the wrong bet."""
     out: list[str] = []
     s = (global_slug or "").lower()
     m = _re.search(r"\d{4}-\d{2}-\d{2}", s)
@@ -789,18 +840,33 @@ def _us_slug_candidates(global_slug: str, outcome: str) -> list[str]:
         if len(head) == 3:
             lg, a, b = head
             date = m.group(0)
-            ol = (outcome or "").lower()
-            words = ol.split()
+            kind = market_type_of(s)
+            parts = [p for p in s.split("-") if p]
+            suffix = _post_date_tokens(parts) or []
+            if kind == "moneyline":
+                ol = (outcome or "").lower()
+                words = ol.split()
 
-            def _hits(code: str) -> bool:
-                return code in ol or any(w.startswith(code)
-                                         or code.startswith(w)
-                                         for w in words)
+                def _hits(code: str) -> bool:
+                    return code in ol or any(w.startswith(code)
+                                             or code.startswith(w)
+                                             for w in words)
 
-            sides = [c for c in (a, b) if _hits(c)]
-            if len(sides) == 1:
-                out.append(f"atc-{lg}-{a}-{b}-{date}-{sides[0]}")
-            out.append(f"aec-{lg}-{a}-{b}-{date}")
+                sides = [c for c in (a, b) if _hits(c)]
+                if len(sides) == 1:
+                    out.append(f"atc-{lg}-{a}-{b}-{date}-{sides[0]}")
+                out.append(f"aec-{lg}-{a}-{b}-{date}")
+            elif kind in ("spread", "total"):
+                line = _us_line_token(suffix)
+                if line:
+                    if kind == "total":
+                        out.append(f"tsc-{lg}-{a}-{b}-{date}-tot-{line}")
+                    else:
+                        out.append(f"asc-{lg}-{a}-{b}-{date}-{line}")
+            # every other type (btts, prop, crypto, unknown) constructs
+            # nothing: this function only knows the three grammars above,
+            # and a slug it cannot build is left to the premap and
+            # identity lanes rather than guessed at here
     if s:
         out.append(s)
     return out

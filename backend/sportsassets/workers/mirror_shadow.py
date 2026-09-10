@@ -1215,26 +1215,45 @@ async def ledger_net(pool, us_slug: str) -> int:
     return round(net, 4)               # fractional fills kept; the plan compares within a share
 
 
-async def account_positions(pmus) -> dict[str, float] | None:
+async def account_positions(pmus, basis_out: dict | None = None) -> dict[str, float] | None:
     """ONE paced walk of the venue account's positions per tick:
     {slug (lower): signed netPosition}. None when the walk failed -- a
-    market absent from a successful walk is simply not held (0)."""
-    positions, _pages, _rate_limited = await account_positions_walk(pmus)
+    market absent from a successful walk is simply not held (0).
+
+    `basis_out`, when a dict is passed, is filled with the SAME walk's
+    all-in basis per slug (pmus.position_basis) -- no second venue read.
+    Omit it and the walk behaves exactly as it always has."""
+    positions, _pages, _rate_limited = await account_positions_walk(
+        pmus, basis_out=basis_out)
     return positions
 
 
-async def account_positions_walk(pmus) -> tuple[dict[str, float] | None, int, bool]:
+async def account_positions_walk(pmus, basis_out: dict | None = None
+                                 ) -> tuple[dict[str, float] | None, int, bool]:
     """account_positions with its own accounting, PER CALL (E2 review
     round 2, LOW-b: a module-level page count was shared with the shadow
     on the same loop): (positions or None, the pages the walk read --
     every one a venue request, failed or truncated walks included --
     and whether the walk failed on a 429). A 429 also trips the
-    process-wide pacer's circuit (venue_pace.penalize)."""
+    process-wide pacer's circuit (venue_pace.penalize).
+
+    `basis_out` (2026-09-10, the fee-capture fix) collects the venue's
+    OWN all-in basis for each slug off the same position objects this
+    walk already reads -- {slug: pmus.position_basis(p)} -- so the
+    number the owner's standing-order rule needs costs no extra venue
+    call. It is filled ONLY on a walk that completes; a failed or
+    truncated walk leaves whatever the caller passed untouched, for the
+    same reason the positions map is None there: a partial reading of
+    the account is not a reading of the account. NOTHING ON AN ORDER
+    PATH READS IT -- the shadow records it and that is all, exactly as
+    migration 061's measurement columns are recorded and never sized
+    on."""
     pages = [0]
 
     def _walk() -> dict[str, float]:
         client = pmus._get_client()
         out: dict[str, float] = {}
+        basis: dict[str, dict] = {}
         cursor = ""
         complete = False
         for _ in range(POSITIONS_PAGES_MAX):
@@ -1268,6 +1287,20 @@ async def account_positions_walk(pmus) -> tuple[dict[str, float] | None, int, bo
                     # a NaN reaches int() downstream and wedges the book
                     raise RuntimeError(f"positions walk carries a non-finite netPosition for {key}")
                 out[key] = net
+                if basis_out is not None:
+                    # measurement only, and it must never be able to
+                    # fail the walk: an unreadable basis is a missing
+                    # number, not an unreadable account. Read off the
+                    # pmus module rather than the injected client --
+                    # `position_basis` is a pure dict reader and the E35
+                    # pmx adapter's position carries the same
+                    # netPosition / cost keys (pmx.py:959), so one
+                    # reader serves both venues.
+                    try:
+                        from ..pmus import position_basis
+                        basis[key] = position_basis(p)
+                    except Exception:  # noqa: BLE001
+                        basis[key] = {"error": "unreadable"}
             cursor = resp.get("nextCursor") or ""
             if resp.get("eof") or not cursor:
                 complete = True
@@ -1279,6 +1312,11 @@ async def account_positions_walk(pmus) -> tuple[dict[str, float] | None, int, bo
             # invented by us -- or worse, a position the plan trades
             # against. Truncated is unreadable.
             raise RuntimeError(f"positions walk truncated at {POSITIONS_PAGES_MAX} pages")
+        if basis_out is not None:
+            # only a COMPLETE walk publishes a basis, and it is published
+            # in one step at the end so a raise midway can never leave the
+            # caller's dict holding half an account
+            basis_out.update(basis)
         return out
 
     try:
@@ -2372,7 +2410,8 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
                         snap_age_s: float | None = None,
                         allow_short: bool = False,
                         snap_partial: bool = False,
-                        map_budget: MapBudget | None = None) -> dict:
+                        map_budget: MapBudget | None = None,
+                        basis: dict | None = None) -> dict:
     """One (whale, market) reading. `positions` is this tick's account
     walk (None = the walk failed: venue unreadable, plan frozen). `snap`
     is the exit worker's raw positions read; a token ABSENT from a fresh
@@ -2380,8 +2419,10 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
     exact case drift exists to catch -- fills say he holds, the venue
     says he merged out (review round two). Absent from a PARTIAL read is
     unknown (None). `map_budget` is the tick's venue budget for the exact
-    mapping lane (C1); None is a fresh per-call budget. Returns the row
-    that was written."""
+    mapping lane (C1); None is a fresh per-call budget. `basis` is the
+    same walk's all-in basis per slug (account_positions' `basis_out`);
+    absent or empty, the row simply carries no basis keys. Returns the
+    row that was written."""
     fills = await his_fills(pool, whale, condition_id)
     dedup = his_fills_dedup()
     pos = mi.net_positions(fills)
@@ -2535,6 +2576,25 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
                                        state=row["detail"].get("state"),
                                        per_side=bool(m.get("per_side"))))
     venue = None if positions is None else float(positions.get(slug.lower(), 0.0))
+    # THE VENUE'S OWN ALL-IN BASIS on what we hold here (the fee-capture
+    # fix, 2026-09-10). `cost` is fees-included and `baseCost` is the
+    # same position before them, so `venue_fee_px` is the venue's
+    # arithmetic and not a fee model of ours -- the per-execution
+    # commission keys have never carried a value. RECORDED ONLY: the
+    # owner's standing-order rule (a sell that never rests below
+    # basis + margin + fee) will read `venue_basis_px`, and until that
+    # rule is built and armed nothing sizes, places or cancels on any
+    # of these keys.
+    if basis:
+        b = basis.get(slug.lower())
+        if isinstance(b, dict) and not b.get("error"):
+            for k, name in (("basis_px", "venue_basis_px"), ("fee_px", "venue_fee_px"),
+                            ("cost", "venue_cost_usd"), ("fees", "venue_fees_usd")):
+                v = b.get(k)
+                if v is not None and math.isfinite(float(v)):
+                    row["detail"][name] = round(float(v), 6)
+            if b.get("source"):
+                row["detail"]["venue_fee_src"] = str(b["source"])
     try:
         ledger = await ledger_net(pool, slug)
     except Exception:  # noqa: BLE001
@@ -2988,7 +3048,11 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
     ratios = await refresh_ratios(pool, whales)
     # ONE positions walk for the whole tick, before any market read; a
     # failed walk is the venue saying no -- back off before adding load
-    positions = await account_positions(pmus)
+    # the SAME walk also yields the venue's all-in basis per slug (the
+    # fee-capture fix): no extra venue call, and nothing on an order
+    # path reads it -- the shadow records it and that is all
+    venue_basis: dict[str, dict] = {}
+    positions = await account_positions(pmus, basis_out=venue_basis)
     if positions is None:
         _backoff_until = now_ts + BACKOFF_S
         stats.update(positions_unreadable=True, abandoned=True, status="degraded")
@@ -3030,7 +3094,8 @@ async def tick_once(pool, pmus, now_ts: float | None = None,
             try:
                 row = await shadow_market(pool, pmus, w, cid, r.get("ratio"), snap,
                                           positions, snap_age, allow_short=allow_short,
-                                          snap_partial=snap_partial, map_budget=map_budget)
+                                          snap_partial=snap_partial, map_budget=map_budget,
+                                          basis=venue_basis)
             except Exception as exc:  # noqa: BLE001 — one market, not the tick
                 log.warning("mirror_shadow: %s/%s failed (%s)", w, cid, type(exc).__name__)
                 continue
