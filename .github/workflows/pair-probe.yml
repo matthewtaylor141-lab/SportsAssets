@@ -143,7 +143,8 @@ jobs:
           set -u
           # The token is a repository secret (already masked by the runner);
           # masked again here before its first use, and never rendered into
-          # this script through ${{ }}.
+          # this script through a workflow expression -- the runner prints
+          # the rendered script in the log header before it runs.
           [ -n "${ADMIN_TOKEN:-}" ] && echo "::add-mask::$ADMIN_TOKEN"
           if [ -z "${ADMIN_TOKEN:-}" ]; then
             echo "refused: the ADMIN_TOKEN repository secret is not set; every endpoint here is admin-gated"
