@@ -580,20 +580,20 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     # E23 (FILL lane 23) placed its six names immediately before the key (the chain moves by six more)
     # E23 (FILL lane 23, 2026-09-09) placed its six cancel_fill_* / disagree_fill_*
     # (E24 / FILL lane 24 placed its four hand_* names nearer the key: every link below moves by four)
-    assert keys[keys.index("drift_smaller_open") - 18] == "disagree_fill_ambiguous"
-    assert keys[keys.index("drift_smaller_open") - 19] == "disagree_fill_unexplained"
-    assert keys[keys.index("drift_smaller_open") - 20] == "disagree_fill_unread"
-    assert keys[keys.index("drift_smaller_open") - 21] == "disagree_fill_adopted"
-    assert keys[keys.index("drift_smaller_open") - 22] == "cancel_fill_unread"
-    assert keys[keys.index("drift_smaller_open") - 23] == "cancel_fill_late"
+    assert keys[keys.index("drift_smaller_open") - 19] == "disagree_fill_ambiguous"
+    assert keys[keys.index("drift_smaller_open") - 20] == "disagree_fill_unexplained"
+    assert keys[keys.index("drift_smaller_open") - 21] == "disagree_fill_unread"
+    assert keys[keys.index("drift_smaller_open") - 22] == "disagree_fill_adopted"
+    assert keys[keys.index("drift_smaller_open") - 23] == "cancel_fill_unread"
+    assert keys[keys.index("drift_smaller_open") - 24] == "cancel_fill_late"
     # E21 (FILL lane 10, 2026-09-09) placed its six fast_* names immediately before this key,
     # after FILL lane 11's one (the chain grows by six)
-    assert keys[keys.index("drift_smaller_open") - 24] == "fast_status_unread"
-    assert keys[keys.index("drift_smaller_open") - 25] == "fast_add_took"
-    assert keys[keys.index("drift_smaller_open") - 26] == "fast_add_replaced"
-    assert keys[keys.index("drift_smaller_open") - 27] == "fast_add_kept"
-    assert keys[keys.index("drift_smaller_open") - 28] == "fast_his_add"
-    assert keys[keys.index("drift_smaller_open") - 29] == "fast_order_open"
+    assert keys[keys.index("drift_smaller_open") - 25] == "fast_status_unread"
+    assert keys[keys.index("drift_smaller_open") - 26] == "fast_add_took"
+    assert keys[keys.index("drift_smaller_open") - 27] == "fast_add_replaced"
+    assert keys[keys.index("drift_smaller_open") - 28] == "fast_add_kept"
+    assert keys[keys.index("drift_smaller_open") - 29] == "fast_his_add"
+    assert keys[keys.index("drift_smaller_open") - 30] == "fast_order_open"
     # FILL lane 11 (2026-09-09) placed its one name immediately before this key, after E22's four (the chain grows by one)
     # FILL lane 16 placed its one `turn_woke_fast` before E21's six (the chain moves by one more)
     # FILL lane 24 (E24, the desk's hand) placed its four names immediately before this key (the chain grows by four)
@@ -601,45 +601,48 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     # every older link move by four
     # E29 (FILL lane 29): the desk's exit ends the book's adds -- four names before drift_smaller_open,
     # after E28's five; every older link by four
-    assert keys[keys.index("drift_smaller_open") - 1] == "hand_exit_write_failed"
-    assert keys[keys.index("drift_smaller_open") - 2] == "hand_held_unread"
-    assert keys[keys.index("drift_smaller_open") - 3] == "hand_held"
-    assert keys[keys.index("drift_smaller_open") - 4] == "hand_exit"
+    # E30 (FILL lane 30): a rest the venue rejects tick after tick backs off -- one name before
+    # drift_smaller_open, after E29's four; every older link by one
+    assert keys[keys.index("drift_smaller_open") - 1] == "post_only_backoff"
+    assert keys[keys.index("drift_smaller_open") - 2] == "hand_exit_write_failed"
+    assert keys[keys.index("drift_smaller_open") - 3] == "hand_held_unread"
+    assert keys[keys.index("drift_smaller_open") - 4] == "hand_held"
+    assert keys[keys.index("drift_smaller_open") - 5] == "hand_exit"
     # E28 (FILL lane 28): the five walk / ledger-guard names sit right before the E19 name; E25's four
     # and every older link move by five
-    assert keys[keys.index("drift_smaller_open") - 5] == "ledger_stale_refused"
-    assert keys[keys.index("drift_smaller_open") - 6] == "ledger_stale_reread"
-    assert keys[keys.index("drift_smaller_open") - 7] == "walk_row_gone"
-    assert keys[keys.index("drift_smaller_open") - 8] == "walk_row_unread"
-    assert keys[keys.index("drift_smaller_open") - 9] == "walk_row_moved"
-    assert keys[keys.index("drift_smaller_open") - 10] == "exit_flap_averted"
-    assert keys[keys.index("drift_smaller_open") - 11] == "exit_confirm_expired"
-    assert keys[keys.index("drift_smaller_open") - 12] == "exit_confirmed"
-    assert keys[keys.index("drift_smaller_open") - 13] == "exit_unconfirmed"
-    assert keys[keys.index("drift_smaller_open") - 14] == "hand_ambiguous"
-    assert keys[keys.index("drift_smaller_open") - 15] == "hand_unread"
-    assert keys[keys.index("drift_smaller_open") - 16] == "hand_adopted"
-    assert keys[keys.index("drift_smaller_open") - 17] == "hand_explained"
-    assert keys[keys.index("drift_smaller_open") - 30] == "turn_woke_fast"
-    assert keys[keys.index("drift_smaller_open") - 31] == "cand_market_closed_db"
+    assert keys[keys.index("drift_smaller_open") - 6] == "ledger_stale_refused"
+    assert keys[keys.index("drift_smaller_open") - 7] == "ledger_stale_reread"
+    assert keys[keys.index("drift_smaller_open") - 8] == "walk_row_gone"
+    assert keys[keys.index("drift_smaller_open") - 9] == "walk_row_unread"
+    assert keys[keys.index("drift_smaller_open") - 10] == "walk_row_moved"
+    assert keys[keys.index("drift_smaller_open") - 11] == "exit_flap_averted"
+    assert keys[keys.index("drift_smaller_open") - 12] == "exit_confirm_expired"
+    assert keys[keys.index("drift_smaller_open") - 13] == "exit_confirmed"
+    assert keys[keys.index("drift_smaller_open") - 14] == "exit_unconfirmed"
+    assert keys[keys.index("drift_smaller_open") - 15] == "hand_ambiguous"
+    assert keys[keys.index("drift_smaller_open") - 16] == "hand_unread"
+    assert keys[keys.index("drift_smaller_open") - 17] == "hand_adopted"
+    assert keys[keys.index("drift_smaller_open") - 18] == "hand_explained"
+    assert keys[keys.index("drift_smaller_open") - 31] == "turn_woke_fast"
+    assert keys[keys.index("drift_smaller_open") - 32] == "cand_market_closed_db"
     # E22 (FILL lane 22, 2026-09-09) placed its four lost_fill_* names immediately
     # before this key, after FILL lane 5's three (the chain grows by four)
-    assert keys[keys.index("drift_smaller_open") - 32] == "lost_fill_ambiguous"
-    assert keys[keys.index("drift_smaller_open") - 33] == "lost_fill_unexplained"
-    assert keys[keys.index("drift_smaller_open") - 34] == "lost_fill_unread"
-    assert keys[keys.index("drift_smaller_open") - 35] == "lost_fill_adopted"
-    assert keys[keys.index("drift_smaller_open") - 36] == "reopen_refused"
-    assert keys[keys.index("drift_smaller_open") - 37] == "he_holds_unread"
-    assert keys[keys.index("drift_smaller_open") - 38] == "he_holds"
-    assert keys[keys.index("drift_smaller_open") - 39] == "fill_answers_absent"
-    assert keys[keys.index("drift_smaller_open") - 40] == "fill_answer_write_failed"
-    assert keys[keys.index("drift_smaller_open") - 41] == "order_open_his_exit"
-    assert keys[keys.index("drift_smaller_open") - 42] == "cover_in_band"
-    assert keys[keys.index("drift_smaller_open") - 43] == "exit_take_in_band"
-    assert keys[keys.index("drift_smaller_open") - 44] == "take_in_band"
-    assert keys[keys.index("drift_smaller_open") - 45] == "exit_take_rested"
-    assert keys[keys.index("drift_smaller_open") - 46] == "wrong_sign_hold"
-    assert keys[keys.index("drift_smaller_open") - 47] == "adopt_prior_venue_settled"
+    assert keys[keys.index("drift_smaller_open") - 33] == "lost_fill_ambiguous"
+    assert keys[keys.index("drift_smaller_open") - 34] == "lost_fill_unexplained"
+    assert keys[keys.index("drift_smaller_open") - 35] == "lost_fill_unread"
+    assert keys[keys.index("drift_smaller_open") - 36] == "lost_fill_adopted"
+    assert keys[keys.index("drift_smaller_open") - 37] == "reopen_refused"
+    assert keys[keys.index("drift_smaller_open") - 38] == "he_holds_unread"
+    assert keys[keys.index("drift_smaller_open") - 39] == "he_holds"
+    assert keys[keys.index("drift_smaller_open") - 40] == "fill_answers_absent"
+    assert keys[keys.index("drift_smaller_open") - 41] == "fill_answer_write_failed"
+    assert keys[keys.index("drift_smaller_open") - 42] == "order_open_his_exit"
+    assert keys[keys.index("drift_smaller_open") - 43] == "cover_in_band"
+    assert keys[keys.index("drift_smaller_open") - 44] == "exit_take_in_band"
+    assert keys[keys.index("drift_smaller_open") - 45] == "take_in_band"
+    assert keys[keys.index("drift_smaller_open") - 46] == "exit_take_rested"
+    assert keys[keys.index("drift_smaller_open") - 47] == "wrong_sign_hold"
+    assert keys[keys.index("drift_smaller_open") - 48] == "adopt_prior_venue_settled"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     src = inspect.getsource(rules)
     # the knob count of the tip (lane 1's MIRROR_CATCHUP_PCT and
@@ -656,7 +659,7 @@ def test_e19_the_census_name_the_docs_and_no_knob():
     # E25 (FILL lane 25, 2026-09-09) adds THREE downward-only rails (MIRROR_EXIT_CONFIRM_SHARES / _PCT /
     # _TOL_PCT: 22 -> 25 on the tip that carries the per-trade cap, which had read 23 -> 22) and TWO waits that may only LENGTHEN (MIRROR_EXIT_CONFIRM_S / _MAX_TICKS:
     # 5 -> 7), each pinned by name and direction in test_e25_exit_confirm; E27 (FILL lane 27) adds ONE downward-only rail, MIRROR_TAKE_BAND_FRAC (25 -> 26), pinned in test_e27_take_tolerance
-    assert src.count("capped_env(") == 26 and src.count("min_wait_env(") == 7
+    assert src.count("capped_env(") == 26 and src.count("min_wait_env(") == 8
     assert "MIRROR_DRIFT_MAX = capped_env" in src and "E19" in inspect.getsource(rules.admission)
     for name in ("MIRROR_SMALLER", "SMALLER_READING", "DRIFT_SMALLER"):
         assert name not in src, "no knob"

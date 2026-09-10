@@ -1224,6 +1224,30 @@ MIRROR_WALK_REREAD = env_switch("MIRROR_WALK_REREAD", True)
 # never raise one. A module constant read at import, as every switch
 # here; the worker reads it through the module at call time.
 MIRROR_HAND_EXIT = env_switch("MIRROR_HAND_EXIT", True)
+# A REST THE VENUE REJECTS TICK AFTER TICK BACKS OFF (E30, 2026-09-10;
+# FILL lane 30). Book 1383 aec-itfme-sanshi-saktan-2026-09-10
+# (BUY_SHORT, target -145 on his -1,457.4, his level 0.89, the venue
+# 0.75 / 0.76): NINE 'increase SELL_LONG GTC 145 @0.89' rows rejected
+# post_only_rejected:400 in 2.5 minutes (8561 .. 8574, one per tick,
+# book_1383_0234 rows 8-16), then the SAME order at the SAME wire
+# accepted (8576, row 17) -- a sell at 0.89 above an ask of 0.76 cannot
+# cross, so the 400s were not the crossing refusal, and the rows carried
+# no receipt to say what they were. On, the worker counts CONSECUTIVE
+# post_only_rejected placements per book at one side, wire and status
+# code (three IDENTICAL rejections; mirror_live.POST_ONLY_BACKOFF_N, 3)
+# and holds the book's REST for
+# MIRROR_POST_ONLY_BACKOFF_S after the last rejection (the plan's
+# `hold: post_only_backoff`, no GTC placed; the take inside E27's band
+# and every exit run as today); after the wait the rest is tried once
+# more. Off, 66144cf byte for byte for the backoff: the rest retried
+# every tick. The body on the rejected row's receipt and the
+# once-per-process WARNING are NOT behind the switch (a record is not a
+# knob). The environment may only turn it OFF; the wait may only be
+# LENGTHENED (min_wait_env). Module constants read at import, as every
+# switch and wait here; the worker reads both through the module at
+# call time.
+MIRROR_POST_ONLY_BACKOFF = env_switch("MIRROR_POST_ONLY_BACKOFF", True)
+MIRROR_POST_ONLY_BACKOFF_S = min_wait_env("MIRROR_POST_ONLY_BACKOFF_S", 60.0)
 # Market families a book may open on (copy_sports.market_type_of).
 # P1 opened on moneylines alone and refused derivatives at admission
 # by the name `family` (program decision 19: totals, spreads and props
@@ -3374,6 +3398,7 @@ __all__ = [
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAST_ADD_REPLAN",
     "MIRROR_WALK_REREAD",
     "MIRROR_HAND_EXIT",
+    "MIRROR_POST_ONLY_BACKOFF", "MIRROR_POST_ONLY_BACKOFF_S",
     "MIRROR_FAMILIES",
     "FLAT_TOL_SHARES", "SELL_DUST_SHARES",
     "P2_MAKER_SHARE_MIN", "P2_TAKE_SLIP_MAX", "P2_FROZEN_TICK_FRAC_MAX", "P2_CAPTURE_MIN",

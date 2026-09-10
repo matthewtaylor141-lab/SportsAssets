@@ -1198,6 +1198,18 @@ CENSUS_KEYS: tuple[str, ...] = (
     # convention every lane followed (keys[-17:-13]; the tail pins moved
     # by four)
     "hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed",
+    # E30 (2026-09-10; FILL lane 30): a rest the venue rejects tick after
+    # tick backs off (book 1383: nine post_only_rejected:400 rows in 2.5
+    # minutes at one wire, then the same order accepted).
+    # `post_only_backoff`: a rest held under the backoff -- the book's
+    # third consecutive post_only_rejected at one side, wire and code holds its
+    # REST for MIRROR_POST_ONLY_BACKOFF_S after the last rejection (the
+    # plan's `hold`, the row's reason; the take inside the band and every
+    # exit run as today); counted once per held plan. Before E19's
+    # `drift_smaller_open` (keys[-13]) and `registered_no_increase`
+    # (keys[-12]), after E29's four, by the convention every lane
+    # followed (keys[-14]; the tail pins moved by one)
+    "post_only_backoff",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -1562,6 +1574,61 @@ _hand_exit_read_logged = False
 # one lock serves both paths; a write waits for the write before it and
 # reads the dict that write left on the tick
 _HAND_EXIT_LOCK = asyncio.Lock()
+# E30 (2026-09-10; FILL lane 30): A POST-ONLY REJECTION IS READ AND KEPT,
+# AND A REST THE VENUE REJECTS TICK AFTER TICK BACKS OFF. Book 1383
+# aec-itfme-sanshi-saktan-2026-09-10 (BUY_SHORT, the flip reopen after
+# 1360 closed at 02:31:12Z; target -145 on his -1,457.4, his level 0.89,
+# the venue 0.75 / 0.76): NINE 'increase SELL_LONG GTC 145 @0.89' rows
+# rejected post_only_rejected:400 between 02:31:20 and 02:33:53
+# (8561 .. 8574, one per tick; book_1383_0234 rows 8-16), then 8576 --
+# the SAME order at the SAME wire -- accepted 'open / new' at 02:34:05
+# (row 17). A SELL at 0.89 above an ask of 0.76 cannot cross the book,
+# so the nine 400s were not the venue's crossing refusal, and nothing on
+# file says what they were: mirror-refusals at 02:34:40Z printed the
+# receipt column EMPTY on every rejected row (row 29) and the workers'
+# log filtered 'post_only' over three hours carried no line naming the
+# venue's body (row 33). The adapter's raw DOES carry it
+# (pmus._post_only_refusal: status_code, error_type, error -- the SDK's
+# message -- and body, the response JSON); the post_only_rejected branch
+# of _place_reserved never wrote it to the row.
+# (A) THE BODY IS KEPT: the rejected row's receipt is written from the
+# adapter's raw through _refusal_receipt's bound (_post_only_receipt:
+# only the named fields -- status_code, error_type, error, the body's
+# head, post_only_cross, execution_type, order_state, reject_reason,
+# text, order_id -- never the preview, a header or a key), ONE WARNING
+# per process per (book, status code) naming the book, the side, the
+# wire, the code and the body's head, and the reason gains ':cross' when
+# rules.take_arms reads the crossing shape AND the raw's own
+# post_only_cross is True (the adapter's second shape); nothing in the
+# installed SDK spells a crossing text (types/orders.py names only the
+# REJECTED enums and orderRejectReason), so no word is read off the
+# message and a 400's reason stays ':400' as today.
+# (B) THE BACKOFF (rules.MIRROR_POST_ONLY_BACKOFF): _post_only_streak
+# counts CONSECUTIVE post_only_rejected placements per book at one side,
+# wire and status code (three IDENTICAL rejections: a 429 is its own
+# circuit and never counts toward a 400's) -- reset by an accepted
+# placement (the one path every fill
+# and every cancel of ours passes through first), by a plan whose side
+# or wire differs, by a ledger that moved since the last rejection (a
+# fill, the desk's or ours) -- and at POST_ONLY_BACKOFF_N the book's
+# REST is held for rules.MIRROR_POST_ONLY_BACKOFF_S after the last
+# rejection: the plan's `hold: post_only_backoff` and
+# `post_only_backoff` {since, until, n, code} (_post_only_held, on
+# _tick_book's add branch AFTER every other hold -- hand_held, the
+# whale-level refusals, the recheck: a hand_held book is never also
+# post_only_backoff), _place_reserved refusing the GTC add by that name
+# before any read (the take inside E27's band is an IOC: not held;
+# every exit is a reduce: never judged), census `post_only_backoff` once
+# per held plan, the recent entry once per hold. When the wait has
+# passed the rest is tried once more; a further rejection restarts the
+# wait. Bounded at POST_ONLY_STREAK_MAX books (the oldest dropped).
+POST_ONLY_BACKOFF_N = 3
+POST_ONLY_STREAK_MAX = 500
+POST_ONLY_BODY_HEAD = 600
+_post_only_streak: dict[int, dict] = {}
+_post_only_logged: set[tuple[int, Any]] = set()
+_POST_ONLY_LOGGED_MAX = 2000
+_post_only_receipt_logged = False
 # FILL lane 5: the closed book's plan write (`reopen_refused`) failing is
 # logged once per process, counted every time (`reopen_refused_write_failed`)
 _reopen_write_logged = False
@@ -2150,6 +2217,133 @@ def _raw_rate_limit(raw: Any) -> bool:
     if isinstance(code, int) and not isinstance(code, bool):
         return code == 429
     return ms.is_rate_limit(raw.get("error_type")) or ms.is_rate_limit(raw.get("error"))
+
+
+# ------------------------------------------ E30: the post-only rejection
+
+_POST_ONLY_RECEIPT_KEYS = ("status_code", "error_type", "error", "post_only_cross", "execution_type",
+                           "order_state", "reject_reason", "text", "order_id")
+
+
+def _post_only_receipt(raw: Any) -> dict | None:
+    """The venue's words on a post-only rejection as the row's receipt:
+    the adapter's NAMED fields (pmus._post_only_refusal's status_code /
+    error_type / error / body; _post_only_cross's post_only_cross /
+    execution_type / order_state / reject_reason / text / order_id) and
+    the body's HEAD (its JSON, at most POST_ONLY_BODY_HEAD characters),
+    never the preview, a header or a key. None when the raw is not a
+    dict (the receipt keeps NULL, as before). The caller bounds the
+    whole through _refusal_receipt (U13's cap)."""
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {k: raw[k] for k in _POST_ONLY_RECEIPT_KEYS if k in raw}
+    if "body" in raw:
+        body = raw.get("body")
+        if body is None or isinstance(body, str):
+            head = body
+        else:
+            try:
+                head = json.dumps(body, default=str, allow_nan=False)
+            except (TypeError, ValueError):
+                head = str(body)
+        if isinstance(head, str) and len(head) > POST_ONLY_BODY_HEAD:
+            head = head[:POST_ONLY_BODY_HEAD]
+            out["body_truncated"] = True
+        out["body"] = head
+    return out
+
+
+def _post_only_word(raw: Any) -> str:
+    """The one word the reason gains from the body: ':cross' when
+    rules.take_arms reads the crossing shape AND the raw's own
+    post_only_cross is the bool True (the adapter's second shape, built
+    off the SDK's EXECUTION_TYPE_REJECTED); '' else. Nothing in the
+    installed SDK spells a crossing message, so no text is read."""
+    if isinstance(raw, dict) and raw.get("post_only_cross") is True and rules.take_arms(raw):
+        return ":cross"
+    return ""
+
+
+def _post_only_body_head(raw: Any) -> str:
+    rec = _post_only_receipt(raw)
+    if rec is None:
+        return "<raw not a dict>"
+    return json.dumps({k: rec[k] for k in ("error_type", "error", "body", "reject_reason", "text")
+                       if k in rec}, default=str)[:POST_ONLY_BODY_HEAD]
+
+
+def _post_only_log_once(book: dict, side: str, wire: float, qty: int, code: Any, raw: Any) -> None:
+    """ONE WARNING per process per (book, status code) naming the book,
+    the side, the wire, the code and the body's head."""
+    global _post_only_logged
+    # the key must hash: a code the adapter never sends (not an int, a str
+    # or None) is keyed by its repr, so the record never raises out of the
+    # placement (the review's LOW-3)
+    key = (int(book["id"]), code if (code is None or isinstance(code, (int, str))) else repr(code))
+    if key in _post_only_logged:
+        return
+    if len(_post_only_logged) >= _POST_ONLY_LOGGED_MAX:
+        _post_only_logged = set()
+    _post_only_logged.add(key)
+    log.warning("mirror_live: book %s post-only REJECTED %s %s x%s @%s (%s): status %s, the venue's body: %s",
+                book["id"], side, book.get("us_market_slug"), qty, wire, book.get("intent"), code,
+                _post_only_body_head(raw))
+
+
+def _post_only_note(t: _Tick, book: dict, side: str, wire: float, price: float | None, code: Any) -> dict:
+    """One more consecutive post_only_rejected on this book at this side
+    and wire WITH THIS STATUS CODE: the streak entry {n, side, wire,
+    price, code, last_at, ledger, hold_since}. A different side, wire or
+    code starts a fresh count (three IDENTICAL rejections: a 429 is its
+    own circuit and never counts toward a 400's streak); a raw that
+    carried no code counts under None (a rejection is a rejection).
+    Bounded at POST_ONLY_STREAK_MAX books."""
+    ent = _post_only_streak.get(book["id"])
+    if not (isinstance(ent, dict) and ent.get("side") == side and _num(ent.get("wire")) == _num(wire)
+            and ent.get("code") == code):
+        ent = {"n": 0, "side": side, "wire": _num(wire)}
+    ent.update(n=int(ent.get("n") or 0) + 1, price=_num(price), code=code, last_at=t.now,
+               ledger=_num(book.get("ledger_net")), hold_since=None)
+    if book["id"] not in _post_only_streak and len(_post_only_streak) >= POST_ONLY_STREAK_MAX:
+        oldest = min(_post_only_streak, key=lambda k: (_num(_post_only_streak[k].get("last_at"))
+                                                       if isinstance(_post_only_streak[k], dict) else None) or 0.0)
+        _post_only_streak.pop(oldest, None)
+    _post_only_streak[book["id"]] = ent
+    return ent
+
+
+def _post_only_held(t: _Tick, book: dict, p: "mi.Plan", wire: float | None) -> dict | None:
+    """Is this book's REST held under the backoff this tick? The hold
+    {since, until, n, code} when the switch is on, the streak entry
+    names this plan's side and wire, the ledger has not moved since the
+    last rejection, the count is at POST_ONLY_BACKOFF_N or more and the
+    wait since the last rejection has not passed; None else -- and a
+    plan whose side or wire differs, or a ledger that moved, RESETS the
+    count (the venue was refusing another order). An entry this process
+    cannot read holds nothing (today's behaviour)."""
+    if not rules.MIRROR_POST_ONLY_BACKOFF:
+        return None
+    ent = _post_only_streak.get(book["id"])
+    if ent is None:
+        return None
+    if not isinstance(ent, dict):
+        _post_only_streak.pop(book["id"], None)
+        return None
+    if (ent.get("side") != p.side or _num(ent.get("wire")) != _num(wire)
+            or _num(ent.get("ledger")) != _num(book.get("ledger_net"))):
+        _post_only_streak.pop(book["id"], None)
+        return None
+    n = int(_num(ent.get("n")) or 0)
+    last = _num(ent.get("last_at"))
+    if n < int(POST_ONLY_BACKOFF_N) or last is None:
+        return None
+    until = last + float(rules.MIRROR_POST_ONLY_BACKOFF_S)
+    if t.now >= until:
+        return None                      # the wait has passed: the rest is tried once more
+    if ent.get("hold_since") is None:
+        ent["hold_since"] = t.now
+        _recent(book["id"], "post_only_backoff", n=n, code=ent.get("code"), until=round(until, 1))
+    return {"since": ent["hold_since"], "until": until, "n": n, "code": ent.get("code")}
 
 
 # ------------------------------------------------------------------- SQL
@@ -9385,6 +9579,24 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         if hand_hold is not None:
             # E29: the held add says so on the plan beside the target
             plan["hold"] = inc_refusal
+        elif inc_refusal is None:
+            # E30 (FILL lane 30; book 1383): A REST THE VENUE REJECTS TICK
+            # AFTER TICK BACKS OFF. Judged LAST among the holds -- after
+            # E29's hand hold, the whale-level refusals and the recheck
+            # (a hand_held book is never also post_only_backoff) -- on the
+            # add alone: the book's third consecutive post_only_rejected at
+            # this plan's side and wire inside rules.MIRROR_POST_ONLY_BACKOFF_S
+            # of the last one holds the REST (the plan's `hold`, its
+            # {since, until, n, code}; _place_reserved refuses the GTC add
+            # by the name), and _act still runs: the take inside E27's band
+            # and the at-level take are IOCs and fire as today. A reduce, a
+            # cover, a flatten, the flip close and E25's confirmation never
+            # reach this branch. OFF: 66144cf's rest, retried every tick
+            po_hold = _post_only_held(t, book, p, _wire_for(p, his_px, r, book.get("intent"), None))
+            if po_hold is not None:
+                plan["hold"] = "post_only_backoff"
+                plan["post_only_backoff"] = po_hold
+                _mirror_stop("post_only_backoff", w)
         if inc_refusal:
             # the refusal is the name a resting order is cancelled
             # under (drift, snapshot_stale, the re-check's clause),
@@ -13176,7 +13388,7 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
                           wire: float, qty: int, his_px: float | None, p: mi.Plan | None,
                           plan: dict, tif: str, take_first: bool = False,
                           in_band: bool = False, on_add: bool = False) -> str:
-    global _POST_ONLY_OK
+    global _POST_ONLY_OK, _post_only_receipt_logged
     w, slug = r.whale, r.slug
     # THE WIRE-SIDE MAP (P2 rung S0, brief 3.3): the book's intent and
     # the plan side name the wire intent the row records, the sell flag
@@ -13190,6 +13402,16 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
         return "book_error"
     wire_intent, sell, action = ws
     intent = _book_intent(book)
+    if action == "add" and tif != "IOC" and plan.get("hold") == "post_only_backoff":
+        # E30 (FILL lane 30): THE REST IS HELD UNDER THE BACKOFF -- the
+        # planner judged the book's third consecutive post_only_rejected
+        # at this side and wire inside the wait (_post_only_held, the
+        # plan's `hold`), so no GTC add goes out this tick: refused here
+        # by the hold's name before any read or op is spent (the census
+        # is the planner's, once per held plan). An IOC is not post-only
+        # (the venue refused the REST): the take inside the band and the
+        # at-level take pass; a reduce never reads this
+        return "post_only_backoff"
     # THE SMALLEST ORDER (review of U12c, FIX-2): under
     # rules.MIRROR_MIN_ORDER_USD of notional -- wire x qty on a long,
     # (1 - wire) x qty of collateral on a short (_cost_px) -- the order
@@ -13357,15 +13579,39 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
     oid = resp.get("order_id")
     raw = resp.get("raw") or {}
     if status == "post_only_rejected":
-        code = (raw or {}).get("status_code")
+        # E30 (FILL lane 30): a raw that is not a dict carries no code and
+        # no body (the receipt keeps NULL, the reason ':None'); the count
+        # below advances whatever it carried -- a rejection is a rejection
+        code = raw.get("status_code") if isinstance(raw, dict) else None
         # the venue's SECOND refusal shape is a 200 whose order came
         # back REJECTED (the adapter's _post_only_cross): the venue
         # minted an order there, so the rejected row names it -- the
         # 400 shape has none and the row keeps NULL, as before
         await t.pool.execute(_SQL_ORDER_STATE, o["id"], "rejected", status, "post_only_rejected",
                              None, (str(oid) if oid else None))
-        await t.pool.execute(_SQL_ORDER_REASON, o["id"], f"post_only_rejected:{code}")
+        # E30: the reason keeps its shape and gains ':cross' when the raw
+        # names the crossing shape by its own field (_post_only_word)
+        await t.pool.execute(_SQL_ORDER_REASON, o["id"], f"post_only_rejected:{code}{_post_only_word(raw)}")
         _mirror_stop("post_only_rejected", w)
+        # E30 (A): THE BODY IS KEPT. Book 1383's nine rejected rows carried
+        # no receipt and the log no line naming the venue's body; the
+        # adapter's raw carries both. The named fields and the body's head
+        # onto the row's receipt through U13's bound (never the preview, a
+        # header or a key), ONE WARNING per process per (book, code); the
+        # write failing is logged once and changes nothing else
+        body = _post_only_receipt(raw)
+        if body is not None:
+            try:
+                await t.pool.execute(_SQL_ORDER_RECEIPT, o["id"], _refusal_receipt(body))
+            except Exception as exc:  # noqa: BLE001 -- the record, never the money
+                if not _post_only_receipt_logged:
+                    _post_only_receipt_logged = True
+                    log.warning("mirror_live: the post-only receipt write failed on order %s: %s: %s",
+                                o["id"], type(exc).__name__, str(exc)[:200])
+        _post_only_log_once(book, side, wire, int(qty), code, raw)
+        # E30 (B): the consecutive count at this side and wire (the hold is
+        # the planner's, _post_only_held; nothing here holds or sends)
+        _post_only_note(t, book, side, wire, o.get("price"), code)
         # THE RULE READS THE WHOLE RAW DICT, never the bare code alone:
         # the crossing refusal comes in two shapes (an HTTP 400; a 200
         # with post_only_cross True and execution_type REJECTED), and
@@ -13407,6 +13653,9 @@ async def _place_reserved(t: _Tick, slot: _OpSlot, book: dict, r: _Reading, kind
     await t.pool.execute(_SQL_ORDER_PERSIST_ID, o["id"], str(oid), status,
                          json.dumps(raw, default=str))
     o.update(order_id=str(oid), state="open")
+    # E30: an ACCEPTED placement (a rest, an IOC) ends the book's
+    # post-only streak -- the venue took an order at this side again
+    _post_only_streak.pop(book["id"], None)
     await t.pool.execute(_SQL_BOOK_OPEN_ORDER, book["id"], o["id"])
     book["open_order_id"] = o["id"]
     t.nonterminal.add(book["id"])

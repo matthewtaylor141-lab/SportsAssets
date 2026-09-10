@@ -95,7 +95,7 @@ UNTOUCHED = {
     "sell_wire": ("a9cae307d9e6f2b2", rules.sell_wire), "buy_price": ("f9b961a63c4d2dc4", rules.buy_price),
     "_exit_take": ("750acd709c826566", ml._exit_take), "_ioc_reread": ("cd3dbab5e5819257", ml._ioc_reread),
     "_entry_take": ("2266c2b346674491", ml._entry_take), "_short_wire": ("25efb8c189941579", ml._short_wire),
-    "_room_qty": ("458b3fea5e2d235b", ml._room_qty), "_place_reserved": ("6c83b8e547c83e0a", ml._place_reserved),
+    "_room_qty": ("458b3fea5e2d235b", ml._room_qty), "_place_reserved": ("d55d0d4a63c71c23", ml._place_reserved),
     "_place": ("ab568476817cf795", ml._place), "_fast_gate": ("1932811194268668", ml._fast_gate),
     "_fast_book": ("286e6fa4663c3887", ml._fast_book), "_wire_for": ("a2d57ccd3742dc61", ml._wire_for),
     "_flatten_send": ("001aa6d18a24e943", ml._flatten_send), "_flatten_vanished": ("22930dc6e3e85816", ml._flatten_vanished),
@@ -348,7 +348,7 @@ def test_e27_the_two_rails_only_lower_from_the_environment_in_a_fresh_interprete
         assert name in rules.__all__, name
     # the rail count: E27 adds ONE downward-only rail (capped_env 22 -> 23 on 52e1d52; landed over E25's
     # three rails and two waits, 0e72120: 25 -> 26, min_wait_env 7); no wait, no switch
-    assert src.count("capped_env(") == 26 and src.count("min_wait_env(") == 7
+    assert src.count("capped_env(") == 26 and src.count("min_wait_env(") == 8
     code = ("import json, sys; from sportsassets.analytics import mirror_live_rules as r;"
             " print(json.dumps([r.MIRROR_TAKE_BAND, r.MIRROR_TAKE_BAND_FRAC, r.band_cent(0.52),"
             " r.short_band_cent(0.65), r.band_cent(0.10), r.short_band_cent(0.90)]))")
@@ -996,7 +996,7 @@ def test_e27_no_census_name_no_migration_render_ops_hashed_as_left_and_the_sites
     # book's adds: hand_exit / hand_held / hand_held_unread / hand_exit_write_failed before drift_smaller_open)
     # moves it once more: 237 -> 241, -48 -> -52 (pinned in the lane's worktree on 6c0830d; E28's five names land
     # between E25's and E29's and re-cut it by five more at landing)
-    assert len(keys) == 246 and keys[-57] == "take_in_band" and keys[-13] == "drift_smaller_open"
+    assert len(keys) == 247 and keys[-58] == "take_in_band" and keys[-13] == "drift_smaller_open"
     assert keys[-12] == "registered_no_increase" and keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     src = inspect.getsource(ml)
     for name in ("short_take_in_band", "take_band_short", "short_band", "take_tolerance"):

@@ -925,8 +925,8 @@ def test_x1_the_census_names_sit_before_drift_smaller_open_the_pins_hold_and_eve
     # T2 (FILL lane 4, two names), FILL lane 5 (three), E22 (FILL lane 22, four) and FILL lane 11 (one) landed after this lane and sit nearer the key (-16:-13 -> -26:-23) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names nearer the key (-26:-23 -> -32:-29, -27 / -28 / -29 -> -33 / -34 / -35)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-39:-36 -> -43:-40, -40 / -41 / -42 -> -44 / -45 / -46)
-    assert keys[-56:-53] == NEW_NAMES
-    assert keys[-57] == "take_in_band" and keys[-58] == "exit_take_rested" and keys[-59] == "wrong_sign_hold"
+    assert keys[-57:-54] == NEW_NAMES
+    assert keys[-58] == "take_in_band" and keys[-59] == "exit_take_rested" and keys[-60] == "wrong_sign_hold"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert len(set(keys)) == len(keys)

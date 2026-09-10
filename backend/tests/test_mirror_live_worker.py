@@ -1300,6 +1300,12 @@ def _armed(monkeypatch):
     # E29 (FILL lane 29): the hand-exit memo's two once-per-process log latches
     monkeypatch.setattr(ml, "_hand_exit_write_logged", False, raising=False)
     monkeypatch.setattr(ml, "_hand_exit_read_logged", False, raising=False)
+    # E30 (FILL lane 30): the post-only streak (book ids repeat across
+    # this file's pools), the once-per-process log keys and the receipt
+    # write's one line
+    monkeypatch.setattr(ml, "_post_only_streak", {}, raising=False)
+    monkeypatch.setattr(ml, "_post_only_logged", set(), raising=False)
+    monkeypatch.setattr(ml, "_post_only_receipt_logged", False, raising=False)
     # E6: the quiet rotation's clock and memos (book ids repeat across
     # this file's pools), and the terminal memos' boot read, already made
     # (test_e6_tick_budget drives the read itself)
@@ -3519,7 +3525,9 @@ def test_the_venues_200_refusal_shape_arms_the_take_and_the_400_shapes_read_as_b
     st = _tick(p, _Venue(bid=0.30, ask=0.30, place=_refusal(_SHAPE_200, order_id=True)))
     assert _census(st, "post_only_rejected") == 1 and b["take_armed_ts"] == NOW
     o = next(iter(p.orders.values()))
-    assert o["state"] == "rejected" and o["reason"] == "post_only_rejected:200"
+    # E30 (FILL lane 30): the reason gains ':cross' when the raw names the crossing shape by its own
+    # post_only_cross field (this shape) -- 'post_only_rejected:200' -> 'post_only_rejected:200:cross'
+    assert o["state"] == "rejected" and o["reason"] == "post_only_rejected:200:cross"
     assert o["order_id"] == "oid-1", "the 200 shape minted an order; the row names it"
     assert not st["abandoned"] and _census(st, "take_placed") == 0
     # the armed take fires after the wait, at or through, as ONE IOC at his cent
@@ -5020,7 +5028,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104) and FILL lane 11 by its one (-> -105);
     # E23 (FILL lane 23) by its six `cancel_fill_*` / `disagree_fill_*` names (-> -111) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E24 (FILL lane 24) by its four `hand_*` names (-118 -> -122)
-    assert keys[-135:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-136:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -5183,6 +5191,8 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           "ledger_stale_refused",
                           # E29 (FILL lane 29): the desk's exit ends the book's adds (-126: -> -130:, -127 -> -131 in the lane's worktree; -135:, -136 at landing over E28)
                           "hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed",
+                          # E30 (FILL lane 30): a rest the venue rejects tick after tick backs off (-135: -> -136:, -136 -> -137)
+                          "post_only_backoff",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5200,7 +5210,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
     # E25 (FILL lane 25) by its four `exit_*` exit-confirmation names (-122 -> -126, -123 -> -127)
-    assert keys[-136] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
+    assert keys[-137] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -13375,6 +13385,17 @@ def test_e28_the_walk_reread_and_ledger_guard_names_are_emitted_here_too(monkeyp
     ml._ledger_stale_logged = ml._walk_unread_logged = False    # the E28 file's own autouse fixture, here by hand
     e28.test_e28_every_name_is_emitted_here(monkeypatch, caplog)
     for name in e28.NEW_NAMES:
+        assert name in SEEN, name
+
+
+def test_e30_the_post_only_backoff_name_is_emitted_here_too(monkeypatch, caplog):
+    """E30's one name (FILL lane 30) is driven in tests/test_e30_post_only_body.py
+    (book 1383's shape: three post_only_rejected:400 rests at 0.89, the fourth
+    tick held); run here as well so the coverage read below sees it when this
+    file runs alone (E13's convention)."""
+    from tests import test_e30_post_only_body as e30
+    e30.test_e30_every_name_is_emitted_here(monkeypatch, caplog)
+    for name in e30.NEW_NAMES:
         assert name in SEEN, name
 
 

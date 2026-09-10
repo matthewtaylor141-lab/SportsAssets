@@ -423,10 +423,10 @@ def test_c9_no_census_name_the_three_heartbeat_keys_the_plan_field_and_no_order_
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     # E23 (FILL lane 23) placed its six names between lane 11's and the key (-14 -> -20, -18:-14 -> -24:-20, -21:-18 -> -27:-24) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-27 -> -31, -31:-27 -> -35:-31, -34:-31 -> -38:-35, -26 / -25 / -20 -> -30 / -29 / -24)
-    assert keys[-44] == "cand_market_closed_db"
-    assert tuple(keys[-48:-44]) == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert tuple(keys[-51:-48]) == ("he_holds", "he_holds_unread", "reopen_refused")
-    assert keys[-43] == "turn_woke_fast" and keys[-42] == "fast_order_open" and keys[-37] == "fast_status_unread"
+    assert keys[-45] == "cand_market_closed_db"
+    assert tuple(keys[-49:-45]) == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert tuple(keys[-52:-49]) == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-44] == "turn_woke_fast" and keys[-43] == "fast_order_open" and keys[-38] == "fast_status_unread"
     assert not any(k in keys for k in HEARTBEAT) and not any(k in keys for k in ("rest_cause", "fill_cols", "fast_col"))
     src = inspect.getsource(ml)
     code = "\n".join(ln for ln in src.splitlines() if not ln.lstrip().startswith("#"))

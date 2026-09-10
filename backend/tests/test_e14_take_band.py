@@ -742,13 +742,15 @@ def test_e14_the_census_name_sits_before_drift_smaller_open_and_the_pins_hold():
     assert keys[keys.index("take_in_band") + 35] == "walk_row_moved"
     # E29 (FILL lane 29): four names before drift_smaller_open, after E28's five; + 40 -> + 44
     assert keys[keys.index("take_in_band") + 40] == "hand_exit"
-    assert keys[keys.index("take_in_band") + 44] == "drift_smaller_open"
+    # E30 (FILL lane 30): one name (post_only_backoff) before drift_smaller_open, after E29's four; + 44 -> + 45
+    assert keys[keys.index("take_in_band") + 44] == "post_only_backoff"
+    assert keys[keys.index("take_in_band") + 45] == "drift_smaller_open"
     # landed after E20 (`wrong_sign_hold`) and E14b (`exit_take_rested`), which sit before it by the same convention
     assert keys[keys.index("take_in_band") - 1] == "exit_take_rested"
     assert keys[keys.index("take_in_band") - 2] == "wrong_sign_hold"
     assert keys[keys.index("take_in_band") - 3] == "adopt_prior_venue_settled"
     # FILL lane 3 (three names), T2 (two), FILL lane 5 (three), E22 (FILL lane 22, four), FILL lane 11 (one) and E23 (FILL lane 23, six) placed theirs after this one (-14 -> -33) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
-    assert keys[-57] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-58] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert ml._new_stats()["census"]["take_in_band"] == 0
     # the one emit site, at the decision, beside the at-level take's

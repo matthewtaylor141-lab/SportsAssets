@@ -521,9 +521,9 @@ def test_e22_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     # FILL lane 11 landed after this lane and placed its one name nearer the key (-17:-13 -> -18:-14); -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) its six after that one (-18:-14 -> -24:-20, -14 -> -20, -19 / -21 / -27 -> -25 / -27 / -33)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-31:-27 -> -35:-31, -27 / -32 / -34 / -40 -> -31 / -36 / -38 / -44, -26 / -25 / -20 -> -30 / -29 / -24)
-    assert keys[-48:-44] == NEW_NAMES and keys[-44] == "cand_market_closed_db"
-    assert keys[-49] == "reopen_refused" and keys[-51] == "he_holds" and keys[-57] == "take_in_band"
-    assert keys[-43] == "turn_woke_fast" and keys[-42] == "fast_order_open" and keys[-37] == "fast_status_unread"
+    assert keys[-49:-45] == NEW_NAMES and keys[-45] == "cand_market_closed_db"
+    assert keys[-50] == "reopen_refused" and keys[-52] == "he_holds" and keys[-58] == "take_in_band"
+    assert keys[-44] == "turn_woke_fast" and keys[-43] == "fast_order_open" and keys[-38] == "fast_status_unread"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)

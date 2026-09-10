@@ -75,7 +75,7 @@ UNTOUCHED = {
     "_fast_candidate": "922585ffb6856f70", "_fast_gate": "1932811194268668", "_walk_candidate": "9c990feba5fdeb57",
     "_note_candidate_refusal": "03294f12328e88af", "_note_reopen_refused": "7cd3a2894da0516c",
     "_reopen_of": "db0a83b7629c4254", "_flip_since": "3cdab3ea4d75e7c5", "_cancel_open_for": "639e841a3d2109eb",
-    "_place": "ab568476817cf795", "_place_reserved": "6c83b8e547c83e0a", "_entry_take": "2266c2b346674491",
+    "_place": "ab568476817cf795", "_place_reserved": "d55d0d4a63c71c23", "_entry_take": "2266c2b346674491",
     "_ioc_reread": "cd3dbab5e5819257", "_lost_fill_adopt": "61c67ae8946f3af4",
     "_disagree_fill_adopt": "4f1f100ae137d248", "_thaw": "62950633c3de6c96", "_quiet_skip": "d32699f6460eb856",
     "_hand_log_fills": "c101574ac7409810", "_hand_adopted_record": "2622dd2388dd7fe9",
@@ -516,7 +516,7 @@ def test_e29_the_switch_reads_off_from_the_environment_only_in_a_fresh_interpret
     false -> False. The environment may only turn it OFF."""
     src = inspect.getsource(rules)
     # env_switch 5 -> 6 in the lane's worktree; 7 on the landed tree (E28's MIRROR_WALK_REREAD landed first)
-    assert src.count('env_switch("MIRROR_HAND_EXIT", True)') == 1 and src.count("env_switch(") == 7
+    assert src.count('env_switch("MIRROR_HAND_EXIT", True)') == 1 and src.count("env_switch(") == 8
     assert "MIRROR_HAND_EXIT" in rules.__all__ and rules.MIRROR_HAND_EXIT is True
     code = "import json; from sportsassets.analytics import mirror_live_rules as r; print(json.dumps(r.MIRROR_HAND_EXIT))"
     for raw, want in ((None, True), ("on", True), ("1", True), ("true", True), ("junk", True), ("", True),
@@ -666,11 +666,11 @@ def test_e29_the_release_statement_runs_on_a_real_postgres_and_removes_both_reco
 def test_e29_the_census_place_the_emit_sites_the_rails_and_no_migration():
     keys = ml.CENSUS_KEYS
     # landed over E28 (cdf0742): E28's five names sit between E25's four and these (241 in the worktree -> 246)
-    assert keys[-17:-13] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-22:-17] == ("walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread", "ledger_stale_refused")
-    assert keys[-26:-22] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
-    assert keys[-30:-26] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
-    assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys) and len(keys) == 246
+    assert keys[-18:-14] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-23:-18] == ("walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread", "ledger_stale_refused")
+    assert keys[-27:-23] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
+    assert keys[-31:-27] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
+    assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys) and len(keys) == 247
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)
     src = inspect.getsource(ml)
@@ -700,7 +700,7 @@ def test_e29_the_census_place_the_emit_sites_the_rails_and_no_migration():
     assert 'if "hand_exit" not in plan:' in wp and "released = (rules.MIRROR_HAND_EXIT" in wp
     # the rails: one switch, no capped_env / min_wait_env moved, the bound a module constant, no migration, 059 stands
     rsrc = inspect.getsource(rules)
-    assert rsrc.count("capped_env(") == 26 and rsrc.count("min_wait_env(") == 7 and rsrc.count("env_switch(") == 7
+    assert rsrc.count("capped_env(") == 26 and rsrc.count("min_wait_env(") == 8 and rsrc.count("env_switch(") == 8
     assert "HAND_EXIT_MEMO_MAX" not in rsrc and ml.HAND_EXIT_MEMO_MAX == 500
     assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("061_")
     assert "hand" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()

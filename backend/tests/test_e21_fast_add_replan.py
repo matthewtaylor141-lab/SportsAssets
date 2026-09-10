@@ -665,9 +665,9 @@ def test_e21_the_census_place_new_stats_the_emit_sites_the_switch_the_untouched_
     keys = ml.CENSUS_KEYS
     # E23 (FILL lane 23, six names) landed after this lane and sits between these six and the key (-19:-13 -> -25:-19)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-25:-19 -> -29:-23, -26 / -27 -> -30 / -31)
-    assert keys[-42:-36] == NEW_NAMES
+    assert keys[-43:-37] == NEW_NAMES
     # FILL lane 16 (one name, turn_woke_fast) landed first and sits between lane 11's one and these six
-    assert keys[-43] == "turn_woke_fast" and keys[-44] == "cand_market_closed_db"
+    assert keys[-44] == "turn_woke_fast" and keys[-45] == "cand_market_closed_db"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert len(set(keys)) == len(keys) and all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
