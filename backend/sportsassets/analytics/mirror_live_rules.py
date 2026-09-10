@@ -1207,6 +1207,23 @@ MIRROR_FAST_ADD_REPLAN = env_switch("MIRROR_FAST_ADD_REPLAN", True)
 # module at call time. The guard on the ledger WRITE (the same lane) has
 # no switch: a guard on a write is not a knob.
 MIRROR_WALK_REREAD = env_switch("MIRROR_WALK_REREAD", True)
+# THE DESK'S EXIT ENDS THE BOOK'S ADDS (E29, 2026-09-10; FILL lane 29;
+# owner ~00:20Z: "I've manually cashed out the same play 4 different
+# times and money keeps getting added to it (Tormo)" -- book 1317, the
+# four re-entries after the desk's hand covers). On, a hand reduce E24
+# adopts marks the book HAND-EXITED (mirror_live._hand_exit_mark: the
+# plan's `hand_exit`, the process flag, the durable memo
+# `mirror_hand_exit`): the book never increases again (`hand_held`, an
+# add held by name, a standing add rest cancelled under it), the market
+# opens no new book for the same whale while the memo holds (the
+# candidate refused `hand_held` before any venue read), his exits still
+# move ours (a reduce, a cover, a flatten, the flip close as today); the
+# operator's mirror-hand-release preset lifts the hold by book id. Off,
+# cdf0742 byte for byte: no mark, no memo read or written, the re-add as
+# today. The environment may only turn it OFF: a knob may lower a rail,
+# never raise one. A module constant read at import, as every switch
+# here; the worker reads it through the module at call time.
+MIRROR_HAND_EXIT = env_switch("MIRROR_HAND_EXIT", True)
 # Market families a book may open on (copy_sports.market_type_of).
 # P1 opened on moneylines alone and refused derivatives at admission
 # by the name `family` (program decision 19: totals, spreads and props
@@ -3356,6 +3373,7 @@ __all__ = [
     "exit_confirmed",
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAST_ADD_REPLAN",
     "MIRROR_WALK_REREAD",
+    "MIRROR_HAND_EXIT",
     "MIRROR_FAMILIES",
     "FLAT_TOL_SHARES", "SELL_DUST_SHARES",
     "P2_MAKER_SHARE_MIN", "P2_TAKE_SLIP_MAX", "P2_FROZEN_TICK_FRAC_MAX", "P2_CAPTURE_MIN",

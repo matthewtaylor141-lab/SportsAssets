@@ -387,7 +387,8 @@ def test_e24_book_1129_the_hand_sale_adopts_the_books_4852_and_explains_the_desk
     -186), nothing placed on the adoption tick; the next tick judges the
     book on its ledger 0 (the residual -186 moved -> a read at once; the
     record takes the 4,852 off the sale; the 186 explained) and plans
-    live toward his 2,876 at his cent."""
+    live toward his 2,876 -- HELD `hand_held` since E29 (the desk's exit
+    ends the book's adds; before E29 the increase rested at his cent)."""
     p = _long_pool()
     b = p.add_book(ledger=4852, avg_cost=0.3116, ratio=0.1, target=2876)
     v = _NoClose(held={SLUG: -186}, bid=0.60, ask=0.61, trades=[_sale_1129()])
@@ -411,15 +412,19 @@ def test_e24_book_1129_the_hand_sale_adopts_the_books_4852_and_explains_the_desk
     assert _hand_of(b) == {"net": -186.0, "adds": -186.0, "reduces": 0.0, "fills": 1, "at": NOW + 30, "residual": -186,
                            "orders": ["CCXMNEBPRSJH"], "adopted": 0.0, "px": None, "verdict": "explained"}
     assert _record(p, b)["adopted"] == {"CCXMNEBPRSJH": 4852.0}, "never booked twice"
-    assert b["last_plan"]["kind"] == "increase" and b["last_plan"]["price"] == 0.56
-    pl = _places(v)
-    assert len(pl) == 1 and pl[0][1:3] == (SLUG, 0.56) and pl[0][4] is False and 0 < pl[0][3] <= 2876
+    # E29 (FILL lane 29; book 1317's four re-entries): the desk's exit ends the book's adds -- the plan still
+    # reads the increase toward 2,876 on the ledger 0 (kind increase, target 2876) but it is HELD `hand_held`,
+    # nothing placed; before E29 this tick placed the increase at 0.56 (re-pinned: the rule changed)
+    assert b["last_plan"]["kind"] == "increase" and b["last_plan"]["target"] == 2876 and b["last_plan"]["hold"] == "hand_held"
+    assert not _places(v) and _census(st2, "hand_held") == 1 and b["last_plan"]["hand_exit"]["shares"] == 4852.0
 
 
 def test_e24_a_hand_reduce_of_part_of_the_book_is_adopted_and_the_rest_of_the_leg_stands(monkeypatch):
     """A short of 300 covered by hand 100 @0.30: adopted 100 (the ledger
     -200, realized (0.32 - 0.30) x 100), no hand_adds, the book judged on
-    -200 next tick (his -300: an increase of 100 at his cent)."""
+    -200 next tick (his -300: the increase of 100 HELD `hand_held` since
+    E29 -- the desk's exit ends the book's adds; it rested at his cent
+    before)."""
     _shorts_on(monkeypatch)
     p = _short_pool()
     b = _short_book(p, ledger=-300, avg=0.32)
@@ -433,7 +438,11 @@ def test_e24_a_hand_reduce_of_part_of_the_book_is_adopted_and_the_rest_of_the_le
     st2 = _tick(p, v, now=NOW + 30, http=_mkt(100.0, 400.0))
     assert len(_reads(v)) == 1, "venue -200 == ledger -200: no disagreement, no read"
     assert all(_census(st2, k) == 0 for k in NEW_NAMES) and b["state"] == "live"
-    assert [c[1:] for c in _places(v)] == [(SLUG, 0.28, 100, False, GTC_TIF, SHORT, True, None)]
+    # E29 (FILL lane 29): the desk covered 100 by hand, so the book is hand-exited -- the increase of 100 toward
+    # his -300 is HELD `hand_held` (target -300, ledger -200, nothing placed); before E29 it rested at his cent
+    # 0.28 (re-pinned: the rule changed -- book 1317's re-entries after four hand covers)
+    assert not _places(v) and _census(st2, "hand_held") == 1 and b["last_plan"]["hold"] == "hand_held"
+    assert b["last_plan"]["target"] == -300 and b["last_plan"]["ledger"] == -200
 
 
 # ------------------------------------------------ (5) the reads that explain nothing
@@ -787,10 +796,10 @@ def test_e24_the_self_rule_is_the_counterparty_being_one_of_our_own_orders_or_a_
 def test_e24_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob():
     keys = ml.CENSUS_KEYS
     # E25 (FILL lane 25) landed its four names after this block: -17:-13 -> -21:-17, every older index by four
-    assert keys[-26:-22] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-32:-26] == ("cancel_fill_late", "cancel_fill_unread", "disagree_fill_adopted", "disagree_fill_unread",
+    assert keys[-30:-26] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-36:-30] == ("cancel_fill_late", "cancel_fill_unread", "disagree_fill_adopted", "disagree_fill_unread",
                              "disagree_fill_unexplained", "disagree_fill_ambiguous")
-    assert keys[-40] == "cand_market_closed_db" and keys[-44:-40] == ("lost_fill_adopted", "lost_fill_unread",
+    assert keys[-44] == "cand_market_closed_db" and keys[-48:-44] == ("lost_fill_adopted", "lost_fill_unread",
                                                                       "lost_fill_unexplained", "lost_fill_ambiguous")
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
@@ -819,7 +828,10 @@ def test_e24_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     # no rail of the lane's own: E22's wait and the freeze's tolerance; no knob, no migration, no decision word
     rsrc = inspect.getsource(rules)
     # E25 (FILL lane 25) added three capped_env rails and two min_wait_env waits (22 -> 25 on the tip that carries the per-trade cap: 23 -> 22 there, then E25's three, 5 -> 7; then E27's MIRROR_TAKE_BAND_FRAC, 25 -> 26)
-    assert rsrc.count("min_wait_env(") == 7 and rsrc.count("capped_env(") == 26 and "MIRROR_HAND" not in rsrc
+    # E29 (FILL lane 29) adds the one switch line MIRROR_HAND_EXIT (env_switch, the environment may only turn it OFF):
+    # no knob of the hand's own besides it, no capped_env / min_wait_env moved (26 / 7 stand)
+    assert rsrc.count("min_wait_env(") == 7 and rsrc.count("capped_env(") == 26
+    assert "MIRROR_HAND" not in rsrc.replace("MIRROR_HAND_EXIT", "") and rsrc.count("env_switch(\"MIRROR_HAND_EXIT\"") == 1
     assert '"MIRROR_LOST_FILL_REREAD_S"' not in inspect.getsource(ml)
     assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("061_")
     assert "hand" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()

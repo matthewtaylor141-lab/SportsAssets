@@ -379,10 +379,10 @@ def test_e14b_the_census_name_sits_before_drift_smaller_open_and_the_tail_pins_h
     # FILL lane 3 (three names), T2 (two), FILL lane 5 (three), E22 (FILL lane 22, four) and FILL lane 11 (one) placed theirs after these (-15 -> -28, -14 -> -27) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names nearer the key (-28 / -27 -> -34 / -33, -21:-18 -> -27:-24, -14 -> -20)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-41 / -40 -> -45 / -44, -34:-31 -> -38:-35, -27 / -26 / -25 / -20 -> -31 / -30 / -29 / -24)
-    assert keys[-54] == "exit_take_rested" and keys[-53] == "take_in_band"
-    assert keys[-47:-44] == ("he_holds", "he_holds_unread", "reopen_refused")
-    assert keys[-40] == "cand_market_closed_db"
-    assert keys[-39] == "turn_woke_fast" and keys[-38] == "fast_order_open" and keys[-33] == "fast_status_unread"
+    assert keys[-58] == "exit_take_rested" and keys[-57] == "take_in_band"
+    assert keys[-51:-48] == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-44] == "cand_market_closed_db"
+    assert keys[-43] == "turn_woke_fast" and keys[-42] == "fast_order_open" and keys[-37] == "fast_status_unread"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert ml._new_stats()["census"]["exit_take_rested"] == 0

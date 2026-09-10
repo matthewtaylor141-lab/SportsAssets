@@ -69,15 +69,18 @@ PLAN_BEFORE = {"kind": "reduce", "reason": "take", "target": LEDGER_BEFORE, "at"
                "reduce_ref": {"target": LEDGER_BEFORE, "at": NOW - 100.0}}
 BUILT = _fill(M, "BUY", NET_BEFORE, 0.90, NOW - 3000)                                    # his long as the reading held it
 WITNESS = _fill(N, "BUY", HIS_REDUCE, 0.10, NOW - 10, detected_at=NOW - 5, source="chain")   # his reducing row
-# the functions this lane does NOT touch, hashed on 6c0830d (the tip this lane was built on)
+# the functions this lane does NOT touch, hashed on 6c0830d (the tip this lane was built on); E29 (FILL lane 29,
+# the hand exit) landed after and moved two of them -- _tick_book (78d2c4f096b70c00 -> f8b3aa98172bf578, the
+# hand_held hold), _tick (a766496554ff357e -> 265461d33df59da6, the memo read at the tick's start) and _fast_tick
+# (ce6e086b18c28200 -> c364a8f6ed7f9b3b) -- re-pinned at E29's landing; this lane touched none of the three
 UNTOUCHED = {
     "_fast_book": "286e6fa4663c3887", "_fast_gate": "1932811194268668", "_act": "59efb48ba79f793c",
     "_entry_take": "2266c2b346674491", "_place": "ab568476817cf795", "_place_reserved": "6c83b8e547c83e0a",
     "_exit_take": "750acd709c826566", "_frozen_exit": "ef478fabdfa2ccc0", "_reconcile_open": "7c3bc726438693ce",
     "_reconcile_placing": "76ab1b2931ee0f33", "_cancel_reread_row": "594f788a96e60268",
-    "_tick_book": "78d2c4f096b70c00", "_finish_order": "1db222463610e38c", "_book_delta": "e5363576f6d0a575",
+    "_tick_book": "f8b3aa98172bf578", "_finish_order": "1db222463610e38c", "_book_delta": "e5363576f6d0a575",
     "_ioc_reread": "cd3dbab5e5819257", "_fast_candidate": "922585ffb6856f70", "_walk_candidate": "9c990feba5fdeb57",
-    "_fast_tick": "ce6e086b18c28200", "fast_tick_once": "f0489ca714e21973", "_tick": "a766496554ff357e",
+    "_fast_tick": "c364a8f6ed7f9b3b", "fast_tick_once": "f0489ca714e21973", "_tick": "265461d33df59da6",
 }
 # the standing-row statements (live_executor) byte for byte, and the rules module on 6c0830d
 LE_UNTOUCHED = {"_book_mirror_sell": "c69f72f67be190cf", "_book_mirror_buy": "f435f319bcc5ded8"}
@@ -482,7 +485,8 @@ def test_e28_the_walk_reread_switch_only_turns_off_from_the_environment_in_a_fre
     for bad in ('capped_env("MIRROR_WALK_REREAD', 'min_wait_env("MIRROR_WALK_REREAD', 'unbounded_env("MIRROR_WALK_REREAD'):
         assert bad not in src, bad
     # the rail counts: one switch added (5 -> 6), no cap, no wait
-    assert src.count("env_switch(") == 6 and src.count("capped_env(") == 26 and src.count("min_wait_env(") == 7
+    # env_switch 6 -> 7 at E29's landing (MIRROR_HAND_EXIT)
+    assert src.count("env_switch(") == 7 and src.count("capped_env(") == 26 and src.count("min_wait_env(") == 7
     code = ("import json; from sportsassets.analytics import mirror_live_rules as r;"
             " print(json.dumps(r.MIRROR_WALK_REREAD))")
     # env_switch's own rule (rules 99-112): on/1/true/yes -> True, off/0/false/no -> False, anything else --
@@ -511,9 +515,13 @@ def test_e28_the_fast_ticks_own_re_read_the_act_the_takes_and_the_exit_path_are_
     # the fast tick's re-read stands as E9 built it: the row under the lock, then _tick_book on it
     fsrc = inspect.getsource(ml._fast_book)
     assert "row = await t.pool.fetchrow(_sql_book_read(t), bid)" in fsrc and "await _tick_book(t, fresh)" in fsrc
-    # the rules module with this lane's one block excised hashes to 6c0830d's: no rule of sizing, pricing or
-    # refusal moved (the E26 pattern)
+    # the rules module with this lane's one block excised -- and E29's one block, landed after -- hashes to
+    # 6c0830d's: no rule of sizing, pricing or refusal moved (the E26 pattern)
     src = inspect.getsource(rules)
+    s29 = src.index("# THE DESK'S EXIT ENDS THE BOOK'S ADDS (E29")
+    e29 = src.index('MIRROR_HAND_EXIT = env_switch("MIRROR_HAND_EXIT", True)\n') + len(
+        'MIRROR_HAND_EXIT = env_switch("MIRROR_HAND_EXIT", True)\n')
+    src = (src[:s29] + src[e29:]).replace('    "MIRROR_HAND_EXIT",\n', "")
     start = src.index("# THE WALK PLANS ON THE ROW AS IT STANDS (E28")
     end = src.index('MIRROR_WALK_REREAD = env_switch("MIRROR_WALK_REREAD", True)\n') + len(
         'MIRROR_WALK_REREAD = env_switch("MIRROR_WALK_REREAD", True)\n')
@@ -528,11 +536,13 @@ def test_e28_the_fast_ticks_own_re_read_the_act_the_takes_and_the_exit_path_are_
 
 def test_e28_the_census_place_the_emit_sites_and_the_docs():
     keys = ml.CENSUS_KEYS
-    assert keys[-18:-13] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-22:-18] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
-    assert keys[-26:-22] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
-    assert keys[-53] == "take_in_band" and keys[-1] == "cand_terminal_skipped"
-    assert len(keys) == 242 and len(set(keys)) == len(keys)
+    # E29 (FILL lane 29) landed after with four names between these and E19's: -18:-13 -> -22:-17, 242 -> 246
+    assert keys[-22:-17] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-17:-13] == ("hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed")
+    assert keys[-26:-22] == ("exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted")
+    assert keys[-30:-26] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
+    assert keys[-57] == "take_in_band" and keys[-1] == "cand_terminal_skipped"
+    assert len(keys) == 246 and len(set(keys)) == len(keys)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)
     src = inspect.getsource(ml)
     for name, sites in (("walk_row_moved", 1), ("walk_row_unread", 1), ("walk_row_gone", 1),

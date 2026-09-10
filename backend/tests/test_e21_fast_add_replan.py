@@ -79,7 +79,8 @@ UNTOUCHED = {
     "_fast_open_entry_rest": ("618ec2943215df41", ml._fast_open_entry_rest),
     "_fast_candidate": ("922585ffb6856f70", ml._fast_candidate), "_reconcile_open": ("7c3bc726438693ce", ml._reconcile_open),
     "_order_status": ("04620411d1d55e0e", ml._order_status), "_finish_order": ("1db222463610e38c", ml._finish_order),
-    "_tick_candidate": ("199a7d617e704397", ml._tick_candidate), "_lost_fill_adopt": ("61c67ae8946f3af4", ml._lost_fill_adopt),
+    # E29 (FILL lane 29): the hand_held refusal before the mapping moved _tick_candidate 199a7d617e704397 -> c4fd4eb511c20f75
+    "_tick_candidate": ("c4fd4eb511c20f75", ml._tick_candidate), "_lost_fill_adopt": ("61c67ae8946f3af4", ml._lost_fill_adopt),
     "_exit_take": ("750acd709c826566", ml._exit_take), "_ioc_reread": ("cd3dbab5e5819257", ml._ioc_reread),
     "_requotes_this_hour": ("f45f581625d2dea8", ml._requotes_this_hour),
     # _cancel_and_settle read ca65dea6b7703ba4 on 219f140; E23 (FILL lane 23, the cancel's final
@@ -664,9 +665,9 @@ def test_e21_the_census_place_new_stats_the_emit_sites_the_switch_the_untouched_
     keys = ml.CENSUS_KEYS
     # E23 (FILL lane 23, six names) landed after this lane and sits between these six and the key (-19:-13 -> -25:-19)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-25:-19 -> -29:-23, -26 / -27 -> -30 / -31)
-    assert keys[-38:-32] == NEW_NAMES
+    assert keys[-42:-36] == NEW_NAMES
     # FILL lane 16 (one name, turn_woke_fast) landed first and sits between lane 11's one and these six
-    assert keys[-39] == "turn_woke_fast" and keys[-40] == "cand_market_closed_db"
+    assert keys[-43] == "turn_woke_fast" and keys[-44] == "cand_market_closed_db"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert len(set(keys)) == len(keys) and all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)

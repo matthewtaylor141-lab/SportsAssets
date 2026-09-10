@@ -112,7 +112,11 @@ UNTOUCHED = {
 # 791309dcc6841f2c then 0b09a1ed2074c6fd (full-game tails, the ne-sea rows verbatim) after the read-only `nfl-rows` preset (2026-09-10 00:4xZ, the owner's NFL question: his
 # NFL rows with the shadow's verdict, the venue's league-code census on the Sep 10-15 dates, the '-nfl-'
 # suffix shapes, the team-code witness) -- no existing preset changed.
-RENDER_OPS_SHA = "0b09a1ed2074c6fd"
+# E29 (FILL lane 29, 2026-09-10): the mirror-hand-release preset beside mirror-register and its help-arm token --
+# 0b09a1ed2074c6fd -> 2cb5a0a793839493 at landing over E28 and the nfl-rows read (pinned in the lane's worktree
+# on 6c0830d as 6969bae6aa1536c1 -> 296c4007776a0b82); every read-only preset and the take-band statements byte
+# for byte the same
+RENDER_OPS_SHA = "2cb5a0a793839493"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',
@@ -981,8 +985,11 @@ def test_e27_a_short_add_with_the_bid_at_or_over_his_sell_cent_takes_at_his_cent
 def test_e27_no_census_name_no_migration_render_ops_hashed_as_left_and_the_sites_by_source():
     keys = ml.CENSUS_KEYS
     # no name added: the tail pins hold (test_e14's keys[-44] on 52e1d52 is keys[-48] over E25's four
-    # names, 0e72120: 233 -> 237 keys; E19's keys[-13] / [-12])
-    assert len(keys) == 242 and keys[-53] == "take_in_band" and keys[-13] == "drift_smaller_open"
+    # names, 0e72120: 233 -> 237 keys; E19's keys[-13] / [-12]); E29 (FILL lane 29, the desk's exit ends the
+    # book's adds: hand_exit / hand_held / hand_held_unread / hand_exit_write_failed before drift_smaller_open)
+    # moves it once more: 237 -> 241, -48 -> -52 (pinned in the lane's worktree on 6c0830d; E28's five names land
+    # between E25's and E29's and re-cut it by five more at landing)
+    assert len(keys) == 246 and keys[-57] == "take_in_band" and keys[-13] == "drift_smaller_open"
     assert keys[-12] == "registered_no_increase" and keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     src = inspect.getsource(ml)
     for name in ("short_take_in_band", "take_band_short", "short_band", "take_tolerance"):

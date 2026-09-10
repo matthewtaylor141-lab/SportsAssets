@@ -797,8 +797,9 @@ def test_review_q9_the_collapse_rule_never_reads_detected_at_and_the_pins_moved_
     # E22 (FILL lane 22) by its four lost_fill_* names and FILL lane 11 by its one (-100 -> -105, -101 -> -106);
     # E23 (FILL lane 23) by its six cancel_fill_* / disagree_fill_* names (-105 -> -111, -106 -> -112) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-118:-114 -> -122:-118, -119 -> -123)
-    assert keys[-131:-127] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
-    assert keys[-132] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
+    # E25 by its four (-> -126:-122, -127); E29 (FILL lane 29, the hand exit) by its four (-> -130:-126, -131); E28's five land between at landing (-> -135:-131, -136)
+    assert keys[-135:-131] == ("books_unreadable", "ratio_stepped", "under_min_notional", "shadow_check_skipped")
+    assert keys[-136] == "short_share_cap" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
 
 
 # --------------------------------------------- Q10: persistence
@@ -809,7 +810,10 @@ def test_review_q10_nothing_new_is_persisted_and_a_deploy_leaves_the_market_to_t
     # (E13 added _STATE_TERMINAL_CONFIRM, the book memo's confirmation beside the E6 memo;
     # FILL lane 14 added _STATE_TICK_RING, the tick ring -- written by the FULL tick's
     # `finally` alone, never by the fast path, which the e9 pin below still holds)
-    assert keys == ["_STATE_CAND_MEMO", "_STATE_DEMOTED", "_STATE_FLATTEN", "_STATE_LIVE", "_STATE_LOSS_REARM",
+    # E29 (FILL lane 29) added _STATE_HAND_EXIT, the hand-exit memo (ONE key, read once per tick at its start,
+    # written on the mark by the full tick and the fast tick alike; the e9 pin below reads the fast path's own
+    # sources, which read it through _load_hand_exits and write it only inside _hand_exit_mark)
+    assert keys == ["_STATE_CAND_MEMO", "_STATE_DEMOTED", "_STATE_FLATTEN", "_STATE_HAND_EXIT", "_STATE_LIVE", "_STATE_LOSS_REARM",
                     "_STATE_LOSS_STOP", "_STATE_OPEN", "_STATE_S4", "_STATE_SIDE_ECHO", "_STATE_TERMINAL_CONFIRM",
                     "_STATE_TERMINAL_MEMO", "_STATE_TICK_RING",
                     "_STATE_WHALES"], "no new ingestion_state key (E9 adds none; _STATE_OPEN is the venue's word)"

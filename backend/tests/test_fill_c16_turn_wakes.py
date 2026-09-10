@@ -64,7 +64,8 @@ UNTOUCHED = {
     # fast_tick_once: 219f140 read 1aac535d56cae681; lane 14 (41d5e40) hands t_acquired in -- landed ahead, not this lane
     "fast_tick_once": "f0489ca714e21973", "_fast_book": "286e6fa4663c3887",
     # _fast_tick: 219f140 read 89893be25bcee246; lane 14 (41d5e40) stamps the prelude there -- landed ahead, not this lane
-    "_fast_tick": "ce6e086b18c28200", "notify": "ea431c3f6159798c",
+    # E29 (FILL lane 29): the hand-exit memo read at the fast tick's start (_load_hand_exits) -- ce6e086b18c28200 -> c364a8f6ed7f9b3b
+    "_fast_tick": "c364a8f6ed7f9b3b", "notify": "ea431c3f6159798c",
     "_fast_requeue": "cb24c3ac1c0c7273", "_close_settled": "086987c757c5c3df",
 }
 RULES_UNTOUCHED = {"admission": "a10630d6d3a3a62c"}
@@ -569,10 +570,10 @@ def test_c16_the_census_place_the_emit_site_no_rail_no_decision_word_no_migratio
     # E21 (FILL lane 10, six fast_* names) landed after this lane, between this name and the key (-14 -> -20)
     # E23 (FILL lane 23, six names) landed after this lane, between E21's six and the key (-20 -> -26)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-26 / -27 / -25 -> -30 / -31 / -29, -31:-27 -> -35:-31, -34:-31 -> -38:-35)
-    assert keys[-39] == NEW_NAME and keys[-40] == "cand_market_closed_db" and keys[-38] == "fast_order_open"
+    assert keys[-43] == NEW_NAME and keys[-44] == "cand_market_closed_db" and keys[-42] == "fast_order_open"
     assert keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-44:-40] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
-    assert keys[-47:-44] == ("he_holds", "he_holds_unread", "reopen_refused")
+    assert keys[-48:-44] == ("lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous")
+    assert keys[-51:-48] == ("he_holds", "he_holds_unread", "reopen_refused")
     assert keys[-1] == "cand_terminal_skipped" and keys[-8:-4] == ("fast_tick", "fast_tick_placed", "fast_tick_skipped", "fast_tick_failed")
     assert keys.count(NEW_NAME) == 1 and len(set(keys)) == len(keys)
     assert ml._new_stats()["census"][NEW_NAME] == 0 and NEW_NAME not in ml._INTEG_CENSUS_KEYS

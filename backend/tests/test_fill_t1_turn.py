@@ -595,9 +595,9 @@ def test_t1_the_census_place_the_emit_sites_the_call_sites_and_no_knob():
     # E22 (FILL lane 22, four names) and FILL lane 11 (one) placed theirs after these three, nearer the key (-16:-13 -> -21:-18) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names nearer the key (-21:-18 -> -27:-24, -27 -> -33)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-34:-31 -> -38:-35, -40 -> -44)
-    assert keys[-47:-44] == NEW_NAMES
+    assert keys[-51:-48] == NEW_NAMES
     # FILL lane 3 (three names) and T2 (two) landed ahead of this lane and sit between E14's name and these three (take_in_band -17 -> -22 -> -27)
-    assert keys[-53] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-57] == "take_in_band" and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
     assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     assert all(k not in ml._INTEG_CENSUS_KEYS for k in NEW_NAMES)

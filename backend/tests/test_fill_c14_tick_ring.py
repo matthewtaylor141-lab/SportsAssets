@@ -425,8 +425,13 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # flatten excluded: the flip close is never guarded) and HIGH-2 (the hold and its reference carried
     # on the market_unreadable plan) moved it again at the fold (6a592b14a88d5558 -> baf5cd361a5a02c0);
     # landed over the per-trade cap (52e1d52: the game_room null write, the game_unreadable guard) -> 78d2c4f096b70c00
-    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "78d2c4f096b70c00"
-    assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "a766496554ff357e"
+    # E29 (FILL lane 29, 2026-09-10: the desk's exit ends the book's adds -- the hand hold judged before the
+    # increase recheck in _tick_book and its `hold` on the add branch; the hand-exit memo read at _tick's start)
+    # moved _tick_book (78d2c4f096b70c00 -> fd374d414a559684) and _tick (a766496554ff357e -> 265461d33df59da6);
+    # the E29 review's LOW-1 (the recheck makes no venue call: the hold's comment corrected, no code line
+    # moved) re-cut _tick_book once more (fd374d414a559684 -> f8b3aa98172bf578)
+    assert h(ml._fast_candidate) == "922585ffb6856f70" and h(ml._tick_book) == "f8b3aa98172bf578"
+    assert h(ml._walk_candidate) == "9c990feba5fdeb57" and h(ml._tick) == "265461d33df59da6"
     # 219f140 read 9898ac1e343b5e41; the owner's $10,000 loss stop (863ad77, docs 62) landed ahead of
     # this lane and moved the module's hash to 308fd0c45fb78448 -- the lane itself touches nothing in
     # rules; the loss stop switched off by owner order (docs 65: rules.MIRROR_LOSS_STOP, an
@@ -442,7 +447,9 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # and its comment block) landed after and moved the module -- re-cut at E28 (6dd4e43300f04676 ->
     # 5f6996a0218e16ba); no rule of sizing, pricing or refusal moved (test_e28 hashes the module with
     # that line excised against 6c0830d)
-    assert h(rules) == "5f6996a0218e16ba", "mirror_live_rules untouched by this lane"
+    # E29 (FILL lane 29: the one switch line MIRROR_HAND_EXIT and its comment) landed over E28 -> 7e521ec5ffa67f5f
+    # (pinned in the lane's worktree on 6c0830d as d2512139ce710b52)
+    assert h(rules) == "7e521ec5ffa67f5f", "mirror_live_rules untouched by this lane"
     for f in (ml._act, ml._place, ml._place_reserved, ml._entry_take, ml._fast_gate, ml._fast_book,
               ml._fast_candidate, ml._tick_book, ml._walk_candidate, ml._tick):
         s = inspect.getsource(f)

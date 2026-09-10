@@ -1181,6 +1181,23 @@ CENSUS_KEYS: tuple[str, ...] = (
     # (keys[-12]), after E25's four, by the convention every lane
     # followed (keys[-18:-13]; the tail pins moved by five)
     "walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread", "ledger_stale_refused",
+    # E29 (2026-09-10; FILL lane 29): the desk's exit ends the book's adds
+    # (book 1317: four re-entries after four hand cash-outs). `hand_exit`:
+    # an adopted hand reduce marked the book hand-exited and wrote the memo
+    # (_hand_exit_mark: the plan's `hand_exit`, the process flag, the
+    # `mirror_hand_exit` entry). `hand_held`: an add refused on a
+    # hand-exited book (the plan's `hold`, the row's reason, a standing add
+    # rest cancelled under it), or a candidate refused on a hand-exited
+    # market before any venue read. `hand_held_unread`: an add held, or a
+    # candidate refused, because neither the memo nor the row could be
+    # read (a read that cannot be made buys nothing).
+    # `hand_exit_write_failed`: the memo write failed -- the hold stands on
+    # the row and in the process, the write is made again on a later tick.
+    # Before E19's `drift_smaller_open` (keys[-13]) and
+    # `registered_no_increase` (keys[-12]), after E28's five, by the
+    # convention every lane followed (keys[-17:-13]; the tail pins moved
+    # by four)
+    "hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -1496,6 +1513,55 @@ _HAND_STATE_PREFIX = "mirror_hand:"
 _HAND_EXPLAINS = frozenset({"explained", "adopted"})
 _hand_read_at: dict[int, dict] = {}
 _hand_write_logged = False
+# E29 (2026-09-10; FILL lane 29): THE DESK'S EXIT ENDS THE BOOK'S ADDS.
+# Book 1317 aec-wta-kaique-sartor-2026-09-09 (his wta-quevedo-tormo;
+# BUY_SHORT, target -2,460 on his -24,600.6): the desk cashed the play
+# out by hand four times and the mirror re-entered after each -- 8285
+# 2,136 @0.28, 8320 1,404 @0.31, 8322 1,602 avg 0.3802, 8323 the whole
+# 2,460 avg 0.41 (book_1317_0022 rows 270-276; the 106 s between the desk's
+# last cover and 8323 is the brief's figure -- the cover's clock is in the
+# venue's trade log, not in the file).
+# E24 adopts the hand reduce as the book's exit and the target stands
+# (his net unchanged), so the next plan read `increase toward target`.
+# Now an adopted hand reduce MARKS the book hand-exited (_hand_exit_mark):
+# the plan's `hand_exit` {at, shares, px, orders, ledger_after, memo}
+# carried onto every later plan, the process flag book["_hand_exit"], and
+# ONE durable memo -- ingestion_state `mirror_hand_exit` = {"<whale>:
+# <condition_id>": {at, book_id, slug, shares, px}}, at most
+# HAND_EXIT_MEMO_MAX entries (the oldest `at` dropped past it), read ONCE
+# per tick at the tick's start into t.hand_exits (_load_hand_exits; the
+# E7 candidate memo's read idiom: unreadable or malformed -> None, named
+# once per process) and written through _write_state right after the
+# booking. A hand-exited book never ADDS again (_hand_exited in
+# _tick_book: the add held `hand_held`, the plan's `hold`, a standing
+# add rest cancelled under it) and the market opens no new book for the
+# same whale while the memo holds (_hand_held_candidate: refused before
+# the mapping and before any venue read; the memo unreadable -> the
+# newest closed book's plan, lane 5's row; that unreadable too ->
+# `hand_held_unread`). The memo is the durable authority while it reads;
+# the row's plan holds on its own while the memo cannot be read or while
+# its own memo write is still pending (`memo` False: written again on a
+# later tick, `hand_exit_write_failed` on each failure); a row whose
+# memo write landed and whose key the readable memo no longer names was
+# RELEASED (the operator's mirror-hand-release preset removes both in one
+# statement) and is not held. A reduce, a cover, a flatten, the flip
+# close, E25's confirmed exit and E5's frozen exit run as today. OFF
+# (rules.MIRROR_HAND_EXIT): nothing here runs.
+_STATE_HAND_EXIT = "mirror_hand_exit"
+HAND_EXIT_MEMO_MAX = 500
+_hand_exit_write_logged = False
+_hand_exit_read_logged = False
+# THE MEMO WRITE IS ONE READ-MODIFY-WRITE UNDER A LOCK (the review of
+# FILL lane 29, HIGH-1): the walk ticks games in parallel
+# (MIRROR_BOOK_CONCURRENCY), and two books marked in ONE tick each
+# copied t.hand_exits before the other's write had landed -- the second
+# write dropped the first's entry, and a lost entry is a RELEASE of that
+# market by the rule above (`memo` True on the row while the readable
+# memo names nothing): the whole target re-bought with nobody's
+# release. The fast tick never runs beside a full tick (_TICK_LOCK), so
+# one lock serves both paths; a write waits for the write before it and
+# reads the dict that write left on the tick
+_HAND_EXIT_LOCK = asyncio.Lock()
 # FILL lane 5: the closed book's plan write (`reopen_refused`) failing is
 # logged once per process, counted every time (`reopen_refused_write_failed`)
 _reopen_write_logged = False
@@ -2976,6 +3042,12 @@ class _Tick:
     # confirmation compares it to the newest fill's ingest clock: a
     # snapshot older than the fill that made the drop confirms nothing
     mkt_at: dict = field(default_factory=dict)
+    # E29 (FILL lane 29): the hand-exit memo as this tick read it at its
+    # start (_load_hand_exits: {"<whale>:<condition_id>": entry}); None
+    # when it could not be read this tick, or with rules.MIRROR_HAND_EXIT
+    # off -- a book's own row then holds on its own record, a candidate
+    # falls to the newest closed book's plan
+    hand_exits: dict | None = None
     addrs: dict = field(default_factory=dict)   # whale -> address, read once per tick
     mkt_reads: int = 0                          # every per-market read this tick, books and candidates
     cand_mkt_reads: int = 0                     # the CANDIDATES' per-market reads: the budgeted ones (U12)
@@ -6778,6 +6850,21 @@ async def _write_plan(t: _Tick, book: dict, r: _Reading | None, target, target_r
     sm = book.pop("_drift_smaller", None)
     if sm is not None:
         plan["drift_sized_smaller"] = sm
+    # E29 (FILL lane 29): the hand-exit record rides onto every later plan
+    # of the book from the prior plan, the way `catchup` does -- unless
+    # the memo this tick read no longer names the market while the row's
+    # own memo write had landed (`memo` True): the operator's release
+    # (mirror-hand-release) removed both, and the record is not carried
+    # back onto the row by a tick that read it before the release
+    if "hand_exit" not in plan:
+        prior = _jsonish(book.get("last_plan")) or {}
+        he = prior.get("hand_exit") if isinstance(prior, dict) else None
+        if isinstance(he, dict):
+            memo = t.hand_exits
+            released = (rules.MIRROR_HAND_EXIT and isinstance(memo, dict) and he.get("memo") is True
+                        and _hand_exit_key(book.get("whale"), book.get("condition_id")) not in memo)
+            if not released:
+                plan["hand_exit"] = he
     # E9 part 1: every fill of his the tick holds, answered or named on
     # the row; the reading's fills when there is one, else the ones the
     # book's tick read before step M (book["_fills"])
@@ -8378,6 +8465,8 @@ async def _tick_book(t: _Tick, book: dict) -> None:
         plan = {k: prior[k] for k in _SKIP_CARRIED if prior.get(k) is not None}
         if isinstance(prior.get("reduce_ref"), dict):
             plan["reduce_ref"] = prior["reduce_ref"]       # E15: the witness's reference rides the skip
+        if isinstance(prior.get("hand_exit"), dict):
+            plan["hand_exit"] = prior["hand_exit"]         # E29: the hand-exit record rides the skip too
         er = _exit_ref(prior)
         if er is not None:
             # E25: the reading the last READ sized on rides the skip too
@@ -9213,6 +9302,26 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     # rung S0, brief C3 / G1): above the ledger on a long book, below it
     # on a short one
     inc_refusal = _increases_refusal(t, w)
+    # E29 (FILL lane 29; book 1317): A HAND-EXITED BOOK NEVER ADDS. The
+    # desk cashed the play out by hand and E24 adopted the cover; the
+    # target stands (his net unchanged) and the next plan read `increase
+    # toward target` -- four re-entries on 1317 (8285, 8320, 8322, 8323).
+    # The hold is judged here, BEFORE the recheck's reads (the source
+    # admission, the edge / cell gates, the short gate: database reads, no
+    # venue call; nothing spent on a book that will not add): the process flag, the memo this
+    # tick read, or the row's own `hand_exit` (_hand_exited). Its name
+    # governs the row (`hand_held`; `hand_held_unread` when neither the
+    # memo nor the row could be read), so the add branch below holds the
+    # plan by that name exactly as drift / venue_suspect_hold hold it: no
+    # rest, no IOC, no band take, a standing add rest cancelled under it,
+    # the plan's `hold` beside the target. A reduce, a cover, a flatten,
+    # the flip close and E25's confirmation run below as today: the desk
+    # sold; his exits still move ours
+    hand_hold = _hand_exited(t, book, prior_plan)
+    if hand_hold is not None:
+        inc_refusal = "hand_held" if hand_hold == "held" else "hand_held_unread"
+        if hand_hold == "held":
+            await _hand_exit_retry(t, book, prior_plan, plan)     # a memo write still pending, made again
     if inc_refusal is None and registered != 0.0:
         # E5 review F3 (option b): a book whose slug carries a register
         # row never grows -- the slug already holds the registered
@@ -9273,6 +9382,9 @@ async def _tick_book(t: _Tick, book: dict) -> None:
     action = rules.leg_action(book.get("intent"), p.side) if p.side else None
     if action == "add":
         kind = "increase"
+        if hand_hold is not None:
+            # E29: the held add says so on the plan beside the target
+            plan["hold"] = inc_refusal
         if inc_refusal:
             # the refusal is the name a resting order is cancelled
             # under (drift, snapshot_stale, the re-check's clause),
@@ -10684,6 +10796,12 @@ async def _hand_net(t: _Tick, book: dict, venue_int: int, ledger: int, manual: f
         log.warning("mirror_live: book %s: the desk's hand reduced the book by %s @ %s (orders %s); adopted as "
                     "the book's exit, ledger now %s, realized %s", bid, shares, px, sorted(adopt),
                     book.get("ledger_net"), book.get("realized_pnl"))
+        if rules.MIRROR_HAND_EXIT:
+            # E29 (FILL lane 29): the desk's exit ends the book's adds --
+            # the book is marked hand-exited on the booking (the plan, the
+            # process flag, the memo); a frozen book is marked too, so the
+            # market stays off after a thaw
+            await _hand_exit_mark(t, book, shares, px, sorted(adopt), plan)
     if abs(adds) > FLAT_TOL_SHARES:
         _mirror_stop("hand_explained", w)
     return _verdict("adopted" if abs(reduces) > FLAT_TOL_SHARES else "explained")
@@ -10720,6 +10838,201 @@ async def _hand_closing(t: _Tick, book: dict, plan: dict) -> None:
         return
     prior_plan = _jsonish(book.get("last_plan")) or {}
     await _hand_net(t, book, int(round(venue)), ledger, manual, registered, prior_plan, plan)
+
+
+# ------------------------- E29 (FILL lane 29): the desk's exit ends the adds
+
+
+def _hand_exit_key(whale: Any, cid: Any) -> str:
+    """The memo's key for one market of one whale: '<whale>:<condition_id>'
+    (the preset builds the same text from the book row)."""
+    return f"{whale}:{cid}"
+
+
+async def _load_hand_exits(t: _Tick) -> None:
+    """The hand-exit memo, read ONCE at the tick's start into t.hand_exits
+    (E29; the E7 candidate memo's read idiom): the `mirror_hand_exit`
+    dict as it stands, or None when the key could not be read or is not
+    an object -- named once per process, never a guess (a book's row
+    then holds on its own record; a candidate falls to the closed row).
+    With rules.MIRROR_HAND_EXIT off nothing is read (None)."""
+    global _hand_exit_read_logged
+    if not rules.MIRROR_HAND_EXIT:
+        t.hand_exits = None
+        return
+    value, err = await _state(t.pool, _STATE_HAND_EXIT)
+    if err is not None or (value is not None and not isinstance(value, dict)):
+        t.hand_exits = None
+        if not _hand_exit_read_logged:
+            _hand_exit_read_logged = True
+            log.warning("mirror_live: %s unreadable (%s); hand-exited books hold on their own rows this tick",
+                        _STATE_HAND_EXIT, err or type(value).__name__)
+        return
+    t.hand_exits = dict(value or {})
+
+
+async def _hand_exit_memo_write(t: _Tick, key: str, entry: dict) -> bool:
+    """The memo entry written through _write_state: the whole dict this
+    tick read plus the entry, bounded at HAND_EXIT_MEMO_MAX (the oldest
+    `at` dropped past it). A memo this tick could not read is read once
+    more here, so a write never lands on a dict nobody read (an entry of
+    another market would be lost); that read failing, or the write, is
+    False -- the caller names it and the row holds on its own. The whole
+    read-modify-write runs under _HAND_EXIT_LOCK (the review's HIGH-1):
+    two marks in one tick are written one after the other, the second on
+    the dict the first left, never over it."""
+    async with _HAND_EXIT_LOCK:                         # the review's HIGH-1: one writer at a time
+        memo = t.hand_exits
+        if memo is None:
+            value, err = await _state(t.pool, _STATE_HAND_EXIT)
+            if err is not None or (value is not None and not isinstance(value, dict)):
+                return False
+            memo = dict(value or {})
+        memo = dict(memo)
+        memo[key] = entry
+        while len(memo) > int(HAND_EXIT_MEMO_MAX):
+            oldest = min(memo, key=lambda k: (_num((memo[k] or {}).get("at")) if isinstance(memo[k], dict) else None) or 0.0)
+            memo.pop(oldest, None)
+        try:
+            await _write_state(t.pool, _STATE_HAND_EXIT, memo)
+        except Exception:  # noqa: BLE001 — a memo that did not persist: the row and the process hold
+            return False
+        t.hand_exits = memo
+        return True
+
+
+def _hand_exit_write_failed(w: Any, bid: Any, key: str) -> None:
+    """The memo write failed: counted every time, logged once per process;
+    the hold stands on the row's plan and in the process, the write is
+    made again on a later tick (_hand_exit_retry)."""
+    global _hand_exit_write_logged
+    _mirror_stop("hand_exit_write_failed", w)
+    if not _hand_exit_write_logged:
+        _hand_exit_write_logged = True
+        log.warning("mirror_live: book %s: the hand-exit memo %s write for %s failed; the hold stands on the "
+                    "row and in the process, written again next tick", bid, _STATE_HAND_EXIT, key)
+
+
+async def _hand_exit_mark(t: _Tick, book: dict, shares: float, px: float, orders: list, plan: dict) -> None:
+    """THE MARK (E29, rule A): an adopted hand reduce -- booked -- on a
+    live or closing book marks the book hand-exited: the plan's
+    `hand_exit` {at, shares, px, orders, ledger_after, memo} (carried by
+    _write_plan onto every later plan of the book), the process flag
+    book["_hand_exit"] for the rest of this tick, and the durable memo
+    entry under '<whale>:<condition_id>'. Census `hand_exit` once per
+    adoption that marks; the memo write failing is `hand_exit_write_failed`
+    (the row and the flag hold, the write retried)."""
+    w, bid, cid = book.get("whale"), book["id"], book.get("condition_id")
+    key = _hand_exit_key(w, cid)
+    rec = {"at": float(t.now), "shares": shares, "px": px, "orders": list(orders),
+           "ledger_after": book.get("ledger_net"), "memo": False}
+    book["_hand_exit"] = True
+    plan["hand_exit"] = rec
+    _mirror_stop("hand_exit", w)
+    ok = await _hand_exit_memo_write(t, key, {"at": float(t.now), "book_id": bid, "slug": book.get("us_market_slug"),
+                                              "shares": shares, "px": px})
+    rec["memo"] = bool(ok)
+    if not ok:
+        _hand_exit_write_failed(w, bid, key)
+    _recent(bid, "hand_exit", shares=shares, px=px, orders=list(orders), ledger=book.get("ledger_net"),
+            memo=bool(ok), key=key)
+    log.warning("mirror_live: book %s: HAND-EXITED -- the desk's hand reduced it by %s @ %s; no add on it and no "
+                "new book on %s while the memo holds (memo key %s, written %s)", bid, shares, px,
+                book.get("us_market_slug"), key, ok)
+
+
+def _hand_exited(t: _Tick, book: dict, prior_plan: dict) -> str | None:
+    """Is this book hand-exited (E29, rule B)? 'held' when the process flag
+    is set, when the memo this tick read names the market, or when the
+    row's last plan carries `hand_exit` and the memo either could not be
+    read this tick or does not yet carry the row's entry (the row's own
+    memo write still pending: `memo` not True); 'unread' when the memo
+    could not be read AND the row's plan cannot be read (a read that
+    cannot be made buys nothing); None otherwise -- including a row whose
+    memo write landed and whose key the readable memo no longer names:
+    RELEASED by the operator's preset. Off: None."""
+    if not rules.MIRROR_HAND_EXIT:
+        return None
+    if book.get("_hand_exit"):
+        return "held"
+    key = _hand_exit_key(book.get("whale"), book.get("condition_id"))
+    memo = t.hand_exits
+    if isinstance(memo, dict) and key in memo:
+        return "held"
+    rec = prior_plan.get("hand_exit") if isinstance(prior_plan, dict) else None
+    if isinstance(rec, dict):
+        if memo is None or rec.get("memo") is not True:
+            return "held"
+        return None
+    raw = book.get("last_plan")
+    if memo is None and raw is not None and not isinstance(_jsonish(raw), dict):
+        return "unread"
+    return None
+
+
+async def _hand_exit_retry(t: _Tick, book: dict, prior_plan: dict, plan: dict) -> None:
+    """A held book whose row records a memo write still pending (`memo`
+    not True) and whose key the memo this tick read does not carry: the
+    entry is written again; landed, the carried record reads `memo`
+    True; failed, `hand_exit_write_failed` again and the row holds on."""
+    rec = prior_plan.get("hand_exit") if isinstance(prior_plan, dict) else None
+    if not isinstance(rec, dict) or rec.get("memo") is True or not isinstance(t.hand_exits, dict):
+        return
+    w, bid = book.get("whale"), book["id"]
+    key = _hand_exit_key(w, book.get("condition_id"))
+    if key in t.hand_exits:
+        plan["hand_exit"] = {**rec, "memo": True}
+        return
+    ok = await _hand_exit_memo_write(t, key, {"at": _num(rec.get("at")) or float(t.now), "book_id": bid,
+                                              "slug": book.get("us_market_slug"), "shares": rec.get("shares"),
+                                              "px": rec.get("px")})
+    if ok:
+        plan["hand_exit"] = {**rec, "memo": True}
+    else:
+        _hand_exit_write_failed(w, bid, key)
+
+
+async def _hand_held_candidate(t: _Tick, whale: str, cid: str, d: dict) -> str | None:
+    """THE MARKET STAYS OFF (E29, rule C): a candidate on a market the memo
+    names for this whale is refused `hand_held` BEFORE the mapping and
+    before any venue read (no budget spent; the 054 row through
+    _walk_candidate's _note_candidate_refusal, never reopen_refused: no
+    quote read, `mark` absent). When the memo could not be read this tick
+    the newest CLOSED book's plan decides (lane 5's _SQL_BOOK_FLIP row, one
+    read bounded like the refusal flush, cached on the context): its
+    `hand_exit` -> `hand_held`; the read or the plan unreadable ->
+    `hand_held_unread`; no closed book, or one without the mark -> None
+    (the candidate as today). Both sides of the market: the whole market
+    is off. Off: None."""
+    if not rules.MIRROR_HAND_EXIT:
+        return None
+    key = _hand_exit_key(whale, cid)
+    memo = t.hand_exits
+    if isinstance(memo, dict):
+        e = memo.get(key)
+        if e is None:
+            return None
+        d["hand_exit"] = e
+        if isinstance(e, dict) and e.get("slug"):
+            d["slug"] = str(e["slug"])
+        return "hand_held"
+    if "hand_row" not in d:
+        try:
+            row = await asyncio.wait_for(t.pool.fetchrow(_SQL_BOOK_FLIP, whale, cid), CAND_REFUSAL_WRITE_TIMEOUT_S)
+            if not row:
+                d["hand_row"] = ("none", None)
+            else:
+                lp = _jsonish(row["last_plan"])
+                d["hand_row"] = ("plan", lp) if isinstance(lp, dict) else ("unread", None)
+        except Exception:  # noqa: BLE001 — a read that cannot be made opens nothing
+            d["hand_row"] = ("unread", None)
+    kind, lp = d["hand_row"]
+    if kind == "unread":
+        return "hand_held_unread"
+    if kind == "plan" and isinstance(lp.get("hand_exit"), dict):
+        d["hand_exit"] = lp["hand_exit"]
+        return "hand_held"
+    return None
 
 
 async def _lost_bound(t: _Tick, book: dict) -> int | None:
@@ -13637,6 +13950,17 @@ async def _tick_candidate(t: _Tick, whale: str, cid: str, ctx: dict | None = Non
         _memo_event_stale(t, w, cid)
         d.update(stale)
         return "event_stale"
+    # E29 (FILL lane 29): THE MARKET STAYS OFF. A market the desk cashed
+    # out by hand (the hand-exit memo names it for this whale, or -- the
+    # memo unreadable -- the newest closed book's plan carries the mark)
+    # opens no new book, on either side, before the mapping and before
+    # any venue read; the 054 row is written by the walk as for every
+    # refusal, never reopen_refused (no quote read). The operator's
+    # mirror-hand-release lifts it by book id
+    held = await _hand_held_candidate(t, w, cid, d)
+    if held is not None:
+        _mirror_stop(held, w)
+        return held
     # the shadow's own mapper, venue module and all (C1): ledger, premap,
     # then the copy lane's exact steps -- paced, cached per market,
     # bounded per tick by t.map_budget
@@ -14969,6 +15293,7 @@ async def _tick(t: _Tick, woken: list) -> None:
         _terminal_memo_loaded = True
         await _load_terminal_memo(t)
         await _load_cand_memo(t)            # E7: the candidate memos, the same one boot read
+    await _load_hand_exits(t)               # E29: the hand-exit memo, ONE read per tick, at its start
     await _read_mode(t)
     if t.mode != MODE_SAFE and le.active_venue() != "polymarket-us":
         _mirror_stop("no_venue")
@@ -15758,6 +16083,7 @@ async def _fast_tick(t: _Tick, cids: list) -> None:
     await _fill_cause_guard(t, stats)              # FILL lane 9: the same reading as _tick's
     await _fast_col_guard(t, stats)                # FILL lane 9: the same reading as _tick's
     stats.setdefault("short", {})["on"] = _shorts_on(t)
+    await _load_hand_exits(t)                      # E29: the hand-exit memo, the same one read at the start
     await _read_mode(t)
     if t.mode != MODE_SAFE and le.active_venue() != "polymarket-us":
         _mirror_stop("no_venue")

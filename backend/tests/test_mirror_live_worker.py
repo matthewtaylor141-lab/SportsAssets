@@ -1297,6 +1297,9 @@ def _armed(monkeypatch):
     # (book ids repeat across this file's pools) and the booking's one line
     monkeypatch.setattr(ml, "_hand_read_at", {}, raising=False)
     monkeypatch.setattr(ml, "_hand_write_logged", False, raising=False)
+    # E29 (FILL lane 29): the hand-exit memo's two once-per-process log latches
+    monkeypatch.setattr(ml, "_hand_exit_write_logged", False, raising=False)
+    monkeypatch.setattr(ml, "_hand_exit_read_logged", False, raising=False)
     # E6: the quiet rotation's clock and memos (book ids repeat across
     # this file's pools), and the terminal memos' boot read, already made
     # (test_e6_tick_budget drives the read itself)
@@ -1321,6 +1324,7 @@ def _armed(monkeypatch):
     # test) -- both locks fresh per test, the hold flag down
     monkeypatch.setattr(ml, "_TICK_LOCK", asyncio.Lock())
     monkeypatch.setattr(ml, "_FAST_LOCK", asyncio.Lock(), raising=False)
+    monkeypatch.setattr(ml, "_HAND_EXIT_LOCK", asyncio.Lock(), raising=False)   # E29 review: the memo write's lock
     monkeypatch.setattr(ml, "_fast_holding", False, raising=False)
     # E9: the fast path's state -- the woken set, the loop's context (a
     # wake schedules nothing unless a test arms it), the pending run, the
@@ -5016,7 +5020,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104) and FILL lane 11 by its one (-> -105);
     # E23 (FILL lane 23) by its six `cancel_fill_*` / `disagree_fill_*` names (-> -111) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E24 (FILL lane 24) by its four `hand_*` names (-118 -> -122)
-    assert keys[-131:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-135:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -5096,48 +5100,48 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # E14 (FILL lane 2): an entry's one IOC sent at the band cent
                           # (the ask a cent above his, at first sight on a long book) --
                           # before E19's name and `registered_no_increase` (keys[-12]),
-                          # after E20's and E14b's, which landed first (keys[-14])
+                          # after E20's and E14b's, which landed first (keys[-23])
                           "take_in_band",
                           # FILL lane 3: the exit's band IOC on a long book / the cover's on a
                           # short (both inert at the default band) and the fast gate's
                           # order-open split on his reducing fill -- before E19's name and
-                          # `registered_no_increase` (keys[-12]), after E14's (keys[-16:-13])
+                          # `registered_no_increase` (keys[-12]), after E14's (keys[-25:-22])
                           "exit_take_in_band", "cover_in_band", "order_open_his_exit",
                           # T2 (FILL lane 4): the per-fill record's one INSERT failed or
                           # timed out (the rows kept for the next tick); the 060 table
                           # absent this tick (nothing queued) -- before E19's name and
-                          # `registered_no_increase` (keys[-12]), after E14's (keys[-15:-13])
+                          # `registered_no_increase` (keys[-12]), after E14's (keys[-24:-22])
                           "fill_answer_write_failed", "fill_answers_absent",
                           # FILL lane 5: a flat book held open on the clock while he
                           # holds / while his sizes could not be read; a candidate
                           # refused on a turned market -- before E19's name (keys[-13])
                           # and `registered_no_increase` (keys[-12]), after E14's
-                          # (keys[-16:-13])
+                          # (keys[-25:-22])
                           "he_holds", "he_holds_unread", "reopen_refused",
                           # E22 (FILL lane 22): a lost placement the venue filled after
                           # the window, adopted from the trade log when the venue
                           # position proves it; the log unreadable; the surplus not the
                           # row's or the log naming nothing; two ids or another size --
                           # before E19's name (keys[-13]) and `registered_no_increase`
-                          # (keys[-12]), after FILL lane 5's (keys[-17:-13])
+                          # (keys[-12]), after FILL lane 5's (keys[-26:-22])
                           "lost_fill_adopted", "lost_fill_unread", "lost_fill_unexplained", "lost_fill_ambiguous",
                           # FILL lane 11: a candidate whose markets row already
                           # read closed or resolved, refused before the paced
                           # quote read -- before E19's name (keys[-13]) and
                           # `registered_no_increase` (keys[-12]), after FILL
-                          # lane 5's three (keys[-14])
+                          # lane 5's three (keys[-23])
                           "cand_market_closed_db",
                           # FILL lane 16: a book closed under a sign flip handed its
                           # market to the fast path's woken set (`turn.woke` True) --
                           # before E19's name (keys[-13]) and `registered_no_increase`
-                          # (keys[-12]), after FILL lane 11's one (keys[-20])
+                          # (keys[-12]), after FILL lane 11's one (keys[-29])
                           "turn_woke_fast",
                           # E21 (FILL lane 10): the fast tick's bare order_open refusal
                           # counted by name; the adding wake admitted with an entry rest
                           # standing; which branch _act took on it (kept / replaced /
                           # took); the fast step O's blank status read (no freeze) --
                           # before E19's name (keys[-13]) and `registered_no_increase`
-                          # (keys[-12]), after FILL lane 16's one (keys[-25:-19])
+                          # (keys[-12]), after FILL lane 16's one (keys[-34:-28])
                           "fast_order_open", "fast_his_add", "fast_add_kept", "fast_add_replaced",
                           "fast_add_took", "fast_status_unread",
                           # E23 (FILL lane 23): a cancelled rest whose venue fills outran
@@ -5148,7 +5152,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # unreadable / the surplus not the rows' / the readings
                           # disagreeing -- before E19's name (keys[-13]) and
                           # `registered_no_increase` (keys[-12]), after E21's six
-                          # (keys[-19:-13]); FILL lane 16 (one name) and E21 (six)
+                          # (keys[-28:-22]); FILL lane 16 (one name) and E21 (six)
                           # landed first, so every index past this lane's six moved
                           # by seven more than the lane's own worktree read
                           "cancel_fill_late", "cancel_fill_unread",
@@ -5159,7 +5163,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # reduced the book's own shares is adopted as its exit; the log
                           # unreadable; a reading nothing can attribute -- before E19's name
                           # (keys[-13]) and `registered_no_increase` (keys[-12]), after
-                          # E23's six (keys[-17:-13])
+                          # E23's six (keys[-26:-22])
                           "hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous",
                           # E25 (FILL lane 25): an exit sized from a sudden drop of our
                           # reading of his net held until the venue's own position
@@ -5167,16 +5171,18 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # MIRROR_EXIT_CONFIRM_MAX_TICKS; the drop reversed before it
                           # fired -- before E19's name (keys[-13]) and
                           # `registered_no_increase` (keys[-12]), after E24's four
-                          # (keys[-17:-13])
+                          # (keys[-26:-22])
                           "exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted",
                           # E28 (FILL lane 28): the walk's re-read under the lock -- the
                           # row moved on a planning column, the re-read raised, the row
                           # gone -- and the guarded ledger write's one retry landed / its
                           # second miss refused -- before E19's name (keys[-13]) and
                           # `registered_no_increase` (keys[-12]), after E25's four
-                          # (keys[-18:-13])
+                          # (keys[-22:-17])
                           "walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread",
                           "ledger_stale_refused",
+                          # E29 (FILL lane 29): the desk's exit ends the book's adds (-126: -> -130:, -127 -> -131 in the lane's worktree; -135:, -136 at landing over E28)
+                          "hand_exit", "hand_held", "hand_held_unread", "hand_exit_write_failed",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5194,7 +5200,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
     # E25 (FILL lane 25) by its four `exit_*` exit-confirmation names (-122 -> -126, -123 -> -127)
-    assert keys[-132] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
+    assert keys[-136] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -13271,6 +13277,18 @@ def test_e24_the_hand_names_are_emitted_here_too(monkeypatch, caplog):
     from tests import test_e24_hand_fills as e24
     e24.test_e24_every_name_is_emitted_here(monkeypatch, caplog)
     for name in e24.NEW_NAMES:
+        assert name in SEEN, name
+
+
+def test_e29_the_hand_exit_names_are_emitted_here_too(monkeypatch):
+    """E29's four names (FILL lane 29) are driven in tests/test_e29_hand_exit.py
+    (book 1317's hand cover marked and the next add held; both records
+    unreadable on a live book; the memo write failing then landing); run
+    here as well so the coverage read below sees them when this file runs
+    alone (E13's convention)."""
+    from tests import test_e29_hand_exit as e29
+    e29.test_e29_every_name_is_emitted_here(monkeypatch)
+    for name in e29.NEW_NAMES:
         assert name in SEEN, name
 
 

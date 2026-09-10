@@ -267,8 +267,8 @@ def test_e20_census_place_may_hold_list_and_the_source_shape():
     # E14b, E14, FILL lane 3 (three), T2 (two), FILL lane 5 (three), E22 (FILL lane 22, four) and FILL lane 11 (one) landed after E20 and sit nearer the key (-16/-15/-14 -> -29/-28/-27) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E23 (FILL lane 23) placed its six names nearer the key (-29 / -28 / -27 -> -35 / -34 / -33)
     # FILL lane 24 (E24, the desk's hand) placed its four names nearer the key (-42 / -41 / -40 -> -46 / -45 / -44)
-    assert keys[-55] == "wrong_sign_hold" and keys[-54] == "exit_take_rested" and keys[-13] == "drift_smaller_open"
-    assert keys[-53] == "take_in_band"
+    assert keys[-59] == "wrong_sign_hold" and keys[-58] == "exit_take_rested" and keys[-13] == "drift_smaller_open"
+    assert keys[-57] == "take_in_band"
     assert keys[-12] == "registered_no_increase" and len(set(keys)) == len(keys)
     assert "wrong_sign_hold" in ml._VENUE_MAY_HOLD_REASONS and "wrong_sign_trip" in ml._VENUE_MAY_HOLD_REASONS
     src = inspect.getsource(ml._tick_book)
