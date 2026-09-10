@@ -145,12 +145,15 @@ E31_GONE = ("_exit_take", "_ioc_reread", "_entry_take", "_take_band", "_short_ta
 # E38 THE TWO-LEGGED SHADOW (2026-09-10): the read-only `two-legged` preset REPLACES `pair-when`
 # (same question, asked against our own achievable rest prices instead of his fills alone) and the
 # spent `pair-candidates` preset is dropped, so the help token list moves too -- 0847c9185809260c ->
-# 139c20e220d75bd3; the file shrinks 510,054 -> 502,667 bytes, which is the point: it sits at a size
+# 0ad40506f7460915; the file shrinks 510,054 -> 502,667 bytes, which is the point: it sits at a size
 # ceiling GitHub enforces with startup_failure. Every other preset and the take-band statements byte
 # for byte. The same edit removes a stray `|pair-candidates` an earlier commit today appended AFTER the
 # help line's `patterns:` trailer instead of into the label list, which had left this file and six other
 # render-ops position tests red on the clean tip
-RENDER_OPS_SHA = "139c20e220d75bd3"
+# THE DATA-AVAILABILITY AUDIT (2026-09-10): the read-only `data-audit` preset (five SELECTs over the
+# tables that could carry a price observation, plus its one help token) -- 139c20e220d75bd3 ->
+# 0ad40506f7460915; no existing preset moved and the take-band statements are byte for byte
+RENDER_OPS_SHA = "0ad40506f7460915"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',
