@@ -164,7 +164,8 @@ jobs:
               # arg = the account resource name (firms/<firm>/accounts/<account>)
               acct = arg.strip()
               show(requests.get(f"{base}/v1/positions", headers=H, params={"name": acct} if acct else None, timeout=30))
-              show(requests.post(f"{base}/v1/positions/balance", headers=H, json={"account": acct} if acct else {}, timeout=30))
+              show(requests.post(f"{base}/v1/positions/balance", headers=H, json={"account": acct, "currency": "USD"} if acct else {}, timeout=30))
+              show(requests.post(f"{base}/v1/positions/balances", headers=H, json={"account": acct} if acct else {}, timeout=30))
               show(requests.get(f"{base}/v1/accounts/accounts", headers=H, timeout=30))
           elif act == "open-orders":
               show(requests.get(f"{base}/v1/trading/orders/open", headers=H, timeout=30))
