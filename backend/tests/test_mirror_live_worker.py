@@ -394,6 +394,13 @@ class _Pool(_ShadowPool):
             return None
         return r
 
+    def _ledger_guard_misses(self, bid, guard):
+        """E28 (FILL lane 28): the guarded ledger statement's `AND ledger_net =
+        $N` -- the row's ledger against the figure the booking read, rounded
+        as the write rounds; a NULL ledger matches no row, as in Postgres."""
+        stored = self.books[bid]["ledger_net"]
+        return stored is None or int(round(float(stored))) != int(guard)
+
     def _run(self, kind, sql, a):  # noqa: C901 — one dispatcher, by tag
         s = _flat(sql)
         self.sent.append((kind, s, a))
@@ -804,10 +811,18 @@ class _Pool(_ShadowPool):
             b["take_armed_ts"] = (b["take_armed_ts"] or self.clock) if a[1] else None
             return "UPDATE 1"
         if "ml-book-ledger-buy" in s:
+            # E28 (FILL lane 28): the statement's guard -- the last parameter
+            # is the ledger figure the booking read; a row that moved since
+            # updates nothing, as Postgres answers `AND ledger_net = $6`
+            # (a NULL ledger matches no guard, as `ledger_net = $6` on NULL matches no row)
+            if "ledger_net = $6" in s and self._ledger_guard_misses(a[0], a[5]):
+                return "UPDATE 0"
             self.books[a[0]].update(ledger_net=a[1], avg_cost=a[2], gross_buy_usd=a[3],
                                     peak_exposure_usd=a[4])
             return "UPDATE 1"
         if "ml-book-ledger-sell" in s:
+            if "ledger_net = $5" in s and self._ledger_guard_misses(a[0], a[4]):
+                return "UPDATE 0"
             self.books[a[0]].update(ledger_net=a[1], gross_sell_usd=a[2], realized_pnl=a[3])
             return "UPDATE 1"
         if "ml-book-settled" in s:
@@ -5001,7 +5016,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
     # E22 (FILL lane 22) by its four `lost_fill_*` names: -100 -> -104) and FILL lane 11 by its one (-> -105);
     # E23 (FILL lane 23) by its six `cancel_fill_*` / `disagree_fill_*` names (-> -111) -- FILL lane 16 (one name) and E21 (FILL lane 10, six) landed first, so every index past this lane's six moved by seven more
     # E24 (FILL lane 24) by its four `hand_*` names (-118 -> -122)
-    assert keys[-126:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
+    assert keys[-131:] == ("books_unreadable", "ratio_stepped", "under_min_notional",
                           "shadow_check_skipped", "map_reads_capped", "map_source_unverified",
                           "map_venue_read", "map_cache_hit",
                           # C1 round 2: the grammar class's certification names
@@ -5154,6 +5169,14 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # `registered_no_increase` (keys[-12]), after E24's four
                           # (keys[-17:-13])
                           "exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted",
+                          # E28 (FILL lane 28): the walk's re-read under the lock -- the
+                          # row moved on a planning column, the re-read raised, the row
+                          # gone -- and the guarded ledger write's one retry landed / its
+                          # second miss refused -- before E19's name (keys[-13]) and
+                          # `registered_no_increase` (keys[-12]), after E25's four
+                          # (keys[-18:-13])
+                          "walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread",
+                          "ledger_stale_refused",
                           "drift_smaller_open",
                           "registered_no_increase",
                           # E12: a book opened on his flow (the block never bought), one
@@ -5171,7 +5194,7 @@ def test_ledger_dust_is_the_last_census_key_and_no_served_index_moved():
                           # D1: the terminal memo's skip, LAST
                           "cand_terminal_skipped")
     # E25 (FILL lane 25) by its four `exit_*` exit-confirmation names (-122 -> -126, -123 -> -127)
-    assert keys[-127] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
+    assert keys[-132] == "short_share_cap" and keys.count("books_unreadable") == 1    # E16's four, E18's six, E17's eight, E19's one, L7's one, E20's one, E14b's one, E14's one and FILL lane 3's three and T2's two and FILL lane 5's three and E22's four and FILL lane 11's one and E23's six and E24's four before the tail
     assert keys.index("venue_halted") == 24 and keys.index("side_band") == 40
     assert keys.index("overfill") < keys.index("ledger_dust")
     assert keys[:api_app._DETAIL_MAX_KEYS] == (
@@ -12249,7 +12272,12 @@ def test_the_book_memo_never_writes_over_a_rest_step_o_did_not_see_and_never_ski
     p.raise_on.append(("ml-book-read", RuntimeError("blip")))
     st = _tick(p, v)
     assert p.orders[o["id"]]["state"] == "open" and not _cancels(v), "step O never saw the order"
-    assert _census(st, "venue_halted") == 1 and b["open_order_id"] == o["id"]
+    # E28 (FILL lane 28): the same `ml-book-read` blip that blinded step O blinds the walk's
+    # re-read under the lock, so the book is SKIPPED this tick by name (walk_row_unread) and
+    # its venue is not read -- venue_halted 0 where 6c0830d's walk read EXPIRED off step B's
+    # dict; the row keeps its open_order_id and the memo is still not written
+    assert _census(st, "walk_row_unread") == 1 and _census(st, "venue_halted") == 0
+    assert b["open_order_id"] == o["id"]
     assert ml._terminal_book_until == {} and ml._terminal_book_state == {}, \
         "the memo was written while the book had an order open"
     p.raise_on.clear()
@@ -13316,6 +13344,19 @@ def test_e22_the_lost_fill_names_are_emitted_here_too(monkeypatch):
         scenario(monkeypatch)
     ml._lost_fill_read_at.clear()
     for name in e22.NEW_NAMES:
+        assert name in SEEN, name
+
+
+def test_e28_the_walk_reread_and_ledger_guard_names_are_emitted_here_too(monkeypatch, caplog):
+    """E28's five names (FILL lane 28) are driven in tests/test_e28_walk_reread.py
+    (book 1333's shape: the row moved between step B and the lock, the re-read
+    raising, the row gone; the guarded ledger write's one retry landed and its
+    second miss refused); run here as well so the coverage read below sees them
+    when this file runs alone (E13's convention)."""
+    from tests import test_e28_walk_reread as e28
+    ml._ledger_stale_logged = ml._walk_unread_logged = False    # the E28 file's own autouse fixture, here by hand
+    e28.test_e28_every_name_is_emitted_here(monkeypatch, caplog)
+    for name in e28.NEW_NAMES:
         assert name in SEEN, name
 
 

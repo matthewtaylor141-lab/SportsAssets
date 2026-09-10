@@ -438,7 +438,11 @@ def test_c14_the_order_path_and_the_rules_are_byte_identical_to_the_tip_and_the_
     # (E27, FILL lane 27, 2026-09-09 -- the take's tolerance: MIRROR_TAKE_BAND 0.02, MIRROR_TAKE_BAND_FRAC,
     # take_band_width / short_band_cent / short_take_in_band -- re-cuts it again on the merged tree:
     # a765a9b2160f11a8 -> 6dd4e43300f04676)
-    assert h(rules) == "6dd4e43300f04676", "mirror_live_rules untouched by this lane"
+    # E28 (FILL lane 28, 2026-09-09: the walk's re-read behind rules.MIRROR_WALK_REREAD, one env_switch line
+    # and its comment block) landed after and moved the module -- re-cut at E28 (6dd4e43300f04676 ->
+    # 5f6996a0218e16ba); no rule of sizing, pricing or refusal moved (test_e28 hashes the module with
+    # that line excised against 6c0830d)
+    assert h(rules) == "5f6996a0218e16ba", "mirror_live_rules untouched by this lane"
     for f in (ml._act, ml._place, ml._place_reserved, ml._entry_take, ml._fast_gate, ml._fast_book,
               ml._fast_candidate, ml._tick_book, ml._walk_candidate, ml._tick):
         s = inspect.getsource(f)

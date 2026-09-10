@@ -982,7 +982,7 @@ def test_e27_no_census_name_no_migration_render_ops_hashed_as_left_and_the_sites
     keys = ml.CENSUS_KEYS
     # no name added: the tail pins hold (test_e14's keys[-44] on 52e1d52 is keys[-48] over E25's four
     # names, 0e72120: 233 -> 237 keys; E19's keys[-13] / [-12])
-    assert len(keys) == 237 and keys[-48] == "take_in_band" and keys[-13] == "drift_smaller_open"
+    assert len(keys) == 242 and keys[-53] == "take_in_band" and keys[-13] == "drift_smaller_open"
     assert keys[-12] == "registered_no_increase" and keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys)
     src = inspect.getsource(ml)
     for name in ("short_take_in_band", "take_band_short", "short_band", "take_tolerance"):

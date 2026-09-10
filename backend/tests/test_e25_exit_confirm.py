@@ -635,11 +635,11 @@ def test_e25_the_frozen_exit_the_act_and_the_vanish_keep_their_readers_byte_for_
 
 def test_e25_the_census_place_the_emit_sites_and_no_knob_no_migration_no_decision_word():
     keys = ml.CENSUS_KEYS
-    assert keys[-17:-13] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
-    assert keys[-21:-17] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
-    assert keys[-27:-21] == ("cancel_fill_late", "cancel_fill_unread", "disagree_fill_adopted", "disagree_fill_unread",
+    assert keys[-22:-18] == NEW_NAMES and keys[-13] == "drift_smaller_open" and keys[-12] == "registered_no_increase"
+    assert keys[-26:-22] == ("hand_explained", "hand_adopted", "hand_unread", "hand_ambiguous")
+    assert keys[-32:-26] == ("cancel_fill_late", "cancel_fill_unread", "disagree_fill_adopted", "disagree_fill_unread",
                              "disagree_fill_unexplained", "disagree_fill_ambiguous")
-    assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys) and len(keys) == 237
+    assert keys[-1] == "cand_terminal_skipped" and len(set(keys)) == len(keys) and len(keys) == 242
     assert all(ml._new_stats()["census"][k] == 0 for k in NEW_NAMES)
     tb = inspect.getsource(ml._tick_book)
     for name in NEW_NAMES:

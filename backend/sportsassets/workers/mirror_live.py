@@ -1155,6 +1155,32 @@ CENSUS_KEYS: tuple[str, ...] = (
     # (keys[-12]), after E24's four, by the convention every lane
     # followed (keys[-17:-13]; the tail pins moved by four)
     "exit_unconfirmed", "exit_confirmed", "exit_confirm_expired", "exit_flap_averted",
+    # E28 (2026-09-09; FILL lane 28): the full tick's walk plans on the
+    # row AS IT STANDS under the book's lock (re-read, as the fast tick
+    # has since E9), and a fill booking never overwrites a ledger figure
+    # it did not read (book 1333: two 93-share SELL_LONG IOC takes two
+    # seconds apart, 8147 at 22:49:59Z and 8148 at 22:50:01Z, both
+    # filled at the venue, the ledger written twice with the same 692
+    # because the second booking's dict still carried 785; the book
+    # frozen venue_ledger_disagree for the market's life).
+    # `walk_row_moved`: the walk's re-read differed from step B's dict on
+    # a planning column (ledger_net, open_order_id, state, frozen_reason,
+    # venue_net) -- the plan is made on the fresh row.
+    # `walk_row_unread`: the re-read raised -- the book skipped this tick
+    # (a read that cannot be made buys and sells nothing).
+    # `walk_row_gone`: the re-read found no row, or one that left the
+    # walk's population (state 'closed') -- skipped this tick.
+    # `ledger_stale_reread`: a guarded ledger write missed once (the row's
+    # ledger_net was not the figure the booking was computed from), the
+    # row was re-read inside the booking's own function and the re-booked
+    # write landed on the fresh figure.
+    # `ledger_stale_refused`: the second write missed too, or the re-read
+    # could not be made -- nothing booked; the order row keeps its booked
+    # figure and the next tick's step O re-reads it. Before E19's
+    # `drift_smaller_open` (keys[-13]) and `registered_no_increase`
+    # (keys[-12]), after E25's four, by the convention every lane
+    # followed (keys[-18:-13]; the tail pins moved by five)
+    "walk_row_moved", "walk_row_unread", "walk_row_gone", "ledger_stale_reread", "ledger_stale_refused",
     "drift_smaller_open",
     "registered_no_increase",
     # E12 (2026-09-08; program decision 13 (A), Rule LE): a book opened on
@@ -2827,15 +2853,24 @@ UPDATE mirror_books SET take_armed_at = CASE WHEN $2 THEN COALESCE(take_armed_at
        updated_at = now()
  WHERE id = $1 /* ml-book-arm */
 """
+# THE LEDGER WRITE IS GUARDED (E28, FILL lane 28): the last parameter is
+# the integer ledger figure the booking was COMPUTED FROM (the dict's
+# ledger_net as read, int(round(...)) -- the same rounding the write
+# uses), never the target or the venue. A row whose ledger_net is not
+# that figure was moved by another booking since the dict was read;
+# the statement then updates nothing, the booking rolls back, re-reads
+# the row once and re-books on the fresh figure (_book_fill,
+# _book_hand_reduce). Book 1333 (2026-09-09 22:50Z) wrote 785 - 93 = 692
+# twice from two bookings that had each read 785.
 _SQL_BOOK_LEDGER_BUY = """
 UPDATE mirror_books SET ledger_net = $2, avg_cost = $3, gross_buy_usd = $4,
        peak_exposure_usd = $5, updated_at = now()
- WHERE id = $1 /* ml-book-ledger-buy */
+ WHERE id = $1 AND ledger_net = $6 /* ml-book-ledger-buy */
 """
 _SQL_BOOK_LEDGER_SELL = """
 UPDATE mirror_books SET ledger_net = $2, gross_sell_usd = $3, realized_pnl = $4,
        updated_at = now()
- WHERE id = $1 /* ml-book-ledger-sell */
+ WHERE id = $1 AND ledger_net = $5 /* ml-book-ledger-sell */
 """
 _SQL_BOOK_SETTLED = """
 UPDATE mirror_books SET settled_pnl = $2, own_book_pnl = $3, settle_disagree = $4,
@@ -4403,6 +4438,59 @@ class _RowNotLive(Exception):
     pass
 
 
+class _LedgerStale(Exception):
+    """The guarded ledger write updated no row (E28): the row's
+    ledger_net is not the figure this booking was computed from. Roll
+    back, re-read the row, re-book once."""
+
+
+# E28: the once-per-process log lines of the ledger guard and the walk's
+# re-read (the census counts every occurrence; the log names the first)
+_ledger_stale_logged = False
+_walk_unread_logged = False
+
+
+def _ledger_guard(bk: dict) -> int:
+    """The figure a ledger write is guarded on: the dict's ledger_net AS
+    READ (before this fill), rounded exactly as the write rounds it."""
+    return int(round(_book_state(bk).ledger_net))
+
+
+async def _ledger_reread(t: _Tick, book: dict) -> dict | None:
+    """The row as it stands, for a booking whose guarded write missed
+    (E28): None when the read raises, finds no row, or the row's
+    ledger_net cannot be read as a number -- nothing is booked on a
+    figure nobody read."""
+    try:
+        row = await t.pool.fetchrow(_sql_book_read(t), book["id"])
+    except Exception as exc:  # noqa: BLE001 — unreadable: nothing booked, the next tick re-reads
+        log.warning("mirror_live: book %s unreadable for the ledger re-read (%s)", book["id"],
+                    type(exc).__name__)
+        return None
+    if not row:
+        return None
+    fresh = dict(row)
+    if _num(fresh.get("ledger_net")) is None:
+        return None
+    return fresh
+
+
+def _ledger_stale_refused(t: _Tick, book: dict, bk: dict, fresh: dict | None, what: str) -> None:
+    """The second miss, or a re-read that could not be made: counted
+    `ledger_stale_refused`, logged once per process with the book and the
+    two figures (the dict's and the row's, when the row was read)."""
+    global _ledger_stale_logged
+    _mirror_stop("ledger_stale_refused", book.get("whale"))
+    _recent(book["id"], "ledger_stale_refused", ledger_was=_num(book.get("ledger_net")),
+            ledger_now=None if fresh is None else _num(fresh.get("ledger_net")), via=what)
+    if not _ledger_stale_logged:
+        _ledger_stale_logged = True
+        log.error("mirror_live: book %s: the guarded ledger write missed twice on %s (the dict read %s, the row "
+                  "reads %s); nothing booked -- the row keeps its booked figure and step O re-reads it",
+                  book["id"], what, book.get("ledger_net"),
+                  "unread" if fresh is None else fresh.get("ledger_net"))
+
+
 class _Refused(Exception):
     def __init__(self, why: str):
         super().__init__(why)
@@ -4638,16 +4726,27 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
     So the order's `dust_total` (kept on its receipt JSON, re-read with
     the row each tick) is the figure judged: the first delta that takes
     it past SELL_DUST_SHARES is the overfill, frozen and tripped with
-    `dust_total` on the receipt; a single 0.24 never is."""
+    `dust_total` on the receipt; a single 0.24 never is.
+
+    THE LEDGER WRITE IS GUARDED (E28, FILL lane 28; book 1333, 2026-09-09
+    22:50Z: two bookings that had each read the dict at 785 wrote 692
+    twice, the second sale of 93 never reaching the ledger). The book's
+    ledger statement carries the figure this booking was computed from
+    (`_ledger_guard`: the dict's ledger_net as read, rounded as the
+    write rounds); 0 rows means another booking moved the row since the
+    dict was read: the transaction is rolled back (the cursor's own
+    shape), the row is re-read ONCE (`_ledger_reread`, under the lock
+    the caller holds), the booking is recomputed on the fresh state and
+    written once more with the fresh guard (`ledger_stale_reread`, the
+    fresh figures carried through the dict); a second miss, or a re-read
+    that cannot be made, books nothing (`ledger_stale_refused`,
+    'refused:ledger_stale'): the order row keeps its booked figure and
+    _finish_order's unbooked-fill path carries it to the next tick's
+    step O. The guard has no switch: a guard on a write is not a knob."""
     expected = float(o.get("booked_filled") or 0.0)
     new_filled = expected + inc
     side = o["side"]
     sid = book["standing_row_id"]
-    booking = None
-    overfill = False
-    dust = 0.0
-    dust_total = _dust_total(o)
-    held = None
     # THE LEG DECIDES THE BOOKING (P2 rung S0, brief A5 / B3): a row
     # that grows the leg books as a buy -- the cash it cost is
     # le.fill_cash on the BOOK's intent, (1 - px) x q on a short -- and
@@ -4655,78 +4754,111 @@ async def _book_fill(t: _Tick, o: dict, book: dict, inc: float, px: float | None
     # book that is exactly `side == BUY`, as before
     action = _order_action(o, book)
     intent = _book_intent(book)
-    try:
-        async with t.pool.acquire() as conn:
-            async with conn.transaction():
-                tag = await conn.execute(_SQL_ORDER_CURSOR, o["id"], inc, new_filled, px,
-                                         expected)
-                if _rowcount(tag) == 0:
-                    raise _Rebook()
-                if action == "add":
-                    usd = float(le.fill_cash(inc, px, intent))
-                    seq = int(await conn.fetchval(_SQL_ADDS_SEQ, sid, str(o["order_id"])) or 0)
-                    row = await le._book_mirror_buy(
-                        conn, sid, str(o["order_id"]), seq, inc, px, usd,
-                        inc * _cost_px(float(o.get("wire") or 0.0), book), o.get("his_level"),
-                        maker)
-                    if row is None:
-                        st = await conn.fetchrow(_SQL_STANDING_READ, sid)
-                        if st is not None and st["status"] == "filled" and st["lane"] == "mirror":
-                            # already on raw.adds: the cursor advance is
-                            # kept, nothing else moves (addendum section 9)
-                            await conn.execute(_SQL_ORDER_CASH, o["id"], 0.0, 0.0,
-                                               bool(taker_at_placement))
-                            return "duplicate"
-                        raise _RowNotLive()
-                    booking = rules.book_buy(_book_state(book), inc, px, usd)
-                    if booking.refusal:
-                        raise _Refused(booking.refusal)
-                    ns = booking.state
-                    await conn.execute(_SQL_BOOK_LEDGER_BUY, book["id"], int(round(ns.ledger_net)),
-                                       ns.avg_cost, ns.gross_buy_usd, ns.peak_exposure_usd)
-                    await conn.execute(_SQL_ORDER_CASH, o["id"], booking.usd, 0.0,
-                                       bool(taker_at_placement))
-                else:
-                    res = await le._book_mirror_sell(conn, sid, inc, px,
-                                                     float(book.get("ledger_net") or 0.0),
-                                                     intent=intent)
-                    if res.get("refusal") == "row_not_live":
-                        raise _RowNotLive()
-                    overfill = bool(res.get("overfill"))
-                    dust = float(_num(res.get("dust")) or 0.0)
-                    held = _num(res.get("held"))
-                    if res.get("refusal") in ("bad_fill", "no_entry_price"):
-                        raise _Refused(str(res["refusal"]))
-                    booking = rules.book_sell(_book_state(book), inc, px)
-                    overfill = overfill or booking.overfill
-                    dust = max(dust, float(_num(booking.dust) or 0.0))
-                    if booking.refusal:
-                        raise _Refused(booking.refusal)
-                    ns = booking.state
-                    await conn.execute(_SQL_BOOK_LEDGER_SELL, book["id"], int(round(ns.ledger_net)),
-                                       ns.gross_sell_usd, ns.realized_pnl)
-                    await conn.execute(_SQL_ORDER_CASH, o["id"], booking.usd,
-                                       booking.realized or 0.0, bool(taker_at_placement))
-                    if dust > 0.0:
-                        # the order's cumulative dust, written with the
-                        # booking it belongs to: more than a lot on one
-                        # order is the overfill, whatever each delta read
-                        dust_total = round(dust_total + dust, 6)
-                        await conn.execute(_SQL_ORDER_DUST, o["id"], dust_total)
-                        overfill = overfill or dust_total > rules.SELL_DUST_SHARES
-    except _Rebook:
-        return "rebooked"
-    except _RowNotLive:
-        await _freeze(t, book, "row_not_live")
-        return "row_not_live"
-    except _Refused as exc:
-        log.error("mirror_live: fill on order %s refused by the ledger (%s); nothing booked",
-                  o["id"], exc.why)
-        return f"refused:{exc.why}"
+    # E28: `bk` is the state the booking is computed from and guarded on
+    # -- the dict as read on the first attempt, the row as re-read on the
+    # one retry; `book` (the id, the standing row, the intent) never moves
+    bk = book
+    fresh = None
+    for attempt in (0, 1):
+        booking = None
+        overfill = False
+        dust = 0.0
+        dust_total = _dust_total(o)
+        held = None
+        try:
+            async with t.pool.acquire() as conn:
+                async with conn.transaction():
+                    tag = await conn.execute(_SQL_ORDER_CURSOR, o["id"], inc, new_filled, px,
+                                             expected)
+                    if _rowcount(tag) == 0:
+                        raise _Rebook()
+                    if action == "add":
+                        usd = float(le.fill_cash(inc, px, intent))
+                        seq = int(await conn.fetchval(_SQL_ADDS_SEQ, sid, str(o["order_id"])) or 0)
+                        row = await le._book_mirror_buy(
+                            conn, sid, str(o["order_id"]), seq, inc, px, usd,
+                            inc * _cost_px(float(o.get("wire") or 0.0), book), o.get("his_level"),
+                            maker)
+                        if row is None:
+                            st = await conn.fetchrow(_SQL_STANDING_READ, sid)
+                            if st is not None and st["status"] == "filled" and st["lane"] == "mirror":
+                                # already on raw.adds: the cursor advance is
+                                # kept, nothing else moves (addendum section 9)
+                                await conn.execute(_SQL_ORDER_CASH, o["id"], 0.0, 0.0,
+                                                   bool(taker_at_placement))
+                                return "duplicate"
+                            raise _RowNotLive()
+                        booking = rules.book_buy(_book_state(bk), inc, px, usd)
+                        if booking.refusal:
+                            raise _Refused(booking.refusal)
+                        ns = booking.state
+                        tag = await conn.execute(_SQL_BOOK_LEDGER_BUY, book["id"], int(round(ns.ledger_net)),
+                                                 ns.avg_cost, ns.gross_buy_usd, ns.peak_exposure_usd,
+                                                 _ledger_guard(bk))
+                        if _rowcount(tag) == 0:
+                            raise _LedgerStale()
+                        await conn.execute(_SQL_ORDER_CASH, o["id"], booking.usd, 0.0,
+                                           bool(taker_at_placement))
+                    else:
+                        res = await le._book_mirror_sell(conn, sid, inc, px,
+                                                         float(bk.get("ledger_net") or 0.0),
+                                                         intent=intent)
+                        if res.get("refusal") == "row_not_live":
+                            raise _RowNotLive()
+                        overfill = bool(res.get("overfill"))
+                        dust = float(_num(res.get("dust")) or 0.0)
+                        held = _num(res.get("held"))
+                        if res.get("refusal") in ("bad_fill", "no_entry_price"):
+                            raise _Refused(str(res["refusal"]))
+                        booking = rules.book_sell(_book_state(bk), inc, px)
+                        overfill = overfill or booking.overfill
+                        dust = max(dust, float(_num(booking.dust) or 0.0))
+                        if booking.refusal:
+                            raise _Refused(booking.refusal)
+                        ns = booking.state
+                        tag = await conn.execute(_SQL_BOOK_LEDGER_SELL, book["id"], int(round(ns.ledger_net)),
+                                                 ns.gross_sell_usd, ns.realized_pnl, _ledger_guard(bk))
+                        if _rowcount(tag) == 0:
+                            raise _LedgerStale()
+                        await conn.execute(_SQL_ORDER_CASH, o["id"], booking.usd,
+                                           booking.realized or 0.0, bool(taker_at_placement))
+                        if dust > 0.0:
+                            # the order's cumulative dust, written with the
+                            # booking it belongs to: more than a lot on one
+                            # order is the overfill, whatever each delta read
+                            dust_total = round(dust_total + dust, 6)
+                            await conn.execute(_SQL_ORDER_DUST, o["id"], dust_total)
+                            overfill = overfill or dust_total > rules.SELL_DUST_SHARES
+        except _Rebook:
+            return "rebooked"
+        except _RowNotLive:
+            await _freeze(t, book, "row_not_live")
+            return "row_not_live"
+        except _Refused as exc:
+            log.error("mirror_live: fill on order %s refused by the ledger (%s); nothing booked",
+                      o["id"], exc.why)
+            return f"refused:{exc.why}"
+        except _LedgerStale:
+            # E28: the row's ledger is not the figure this booking read.
+            # Rolled back; ONE re-read and one retry on the fresh row,
+            # then nothing (the row keeps its booked figure; step O)
+            if attempt == 0:
+                fresh = await _ledger_reread(t, book)
+                if fresh is not None:
+                    bk = fresh
+                    continue
+            _ledger_stale_refused(t, book, bk, fresh, f"order {o['id']}")
+            return "refused:ledger_stale"
+        break
     # committed: carry the new figures through the rest of the tick
     o["booked_filled"] = new_filled
     o["filled"] = new_filled
     o["avg_px"] = px
+    if bk is not book:
+        # E28: the retry landed on the row as re-read
+        _mirror_stop("ledger_stale_reread", book.get("whale"))
+        _recent(book["id"], "ledger_stale_reread", order_row=o["id"], ledger_was=_num(book.get("ledger_net")),
+                ledger_now=_num(bk.get("ledger_net")))
     if booking is not None:
         ns = booking.state
         book.update(ledger_net=int(round(ns.ledger_net)), avg_cost=ns.avg_cost,
@@ -10339,36 +10471,57 @@ async def _book_hand_reduce(t: _Tick, book: dict, shares: float, px: float,
     intent = _book_intent(book)
     sid = book["standing_row_id"]
     ns = None
-    try:
-        async with t.pool.acquire() as conn:
-            async with conn.transaction():
-                res = await le._book_mirror_sell(conn, sid, float(shares), float(px),
-                                                 float(book.get("ledger_net") or 0.0), intent=intent)
-                if res.get("refusal"):
-                    raise _Refused(str(res["refusal"]))
-                if res.get("overfill"):
-                    raise _Refused("overfill")          # never: the part adopted is inside the leg
-                booked = float(res.get("booked") or 0.0)
-                booking = rules.book_sell(_book_state(book), booked, float(px))
-                if booking.refusal:
-                    raise _Refused(str(booking.refusal))
-                ns = booking.state
-                await conn.execute(_SQL_BOOK_LEDGER_SELL, book["id"], int(round(ns.ledger_net)),
-                                   ns.gross_sell_usd, ns.realized_pnl)
-                await _write_state(conn, f"{_HAND_STATE_PREFIX}{book['id']}",
-                                   {"adopted": adopted, "at": t.now, "orders": orders, "px": px})
-    except _Refused as exc:
-        log.error("mirror_live: book %s: the desk's hand reduce of %s @ %s refused by the ledger (%s); "
-                  "nothing booked", book["id"], shares, px, exc.why)
-        return f"refused:{exc.why}"
-    except Exception as exc:  # noqa: BLE001 — a write failure is named; nothing moved
-        _mirror_stop("write_failed", book.get("whale"))
-        if not _hand_write_logged:
-            _hand_write_logged = True
-            log.error("mirror_live: book %s: booking the desk's hand reduce failed (%s); nothing booked",
-                      book["id"], type(exc).__name__, exc_info=True)
-        await _freeze(t, book, "write_failed")
-        return "write_failed"
+    # E28: the ledger write is guarded on the figure this booking read
+    # (`bk`: the dict, then the row as re-read on the one retry), exactly
+    # as _book_fill's is; a second miss books nothing
+    bk = book
+    fresh = None
+    for attempt in (0, 1):
+        try:
+            async with t.pool.acquire() as conn:
+                async with conn.transaction():
+                    res = await le._book_mirror_sell(conn, sid, float(shares), float(px),
+                                                     float(bk.get("ledger_net") or 0.0), intent=intent)
+                    if res.get("refusal"):
+                        raise _Refused(str(res["refusal"]))
+                    if res.get("overfill"):
+                        raise _Refused("overfill")          # never: the part adopted is inside the leg
+                    booked = float(res.get("booked") or 0.0)
+                    booking = rules.book_sell(_book_state(bk), booked, float(px))
+                    if booking.refusal:
+                        raise _Refused(str(booking.refusal))
+                    ns = booking.state
+                    tag = await conn.execute(_SQL_BOOK_LEDGER_SELL, book["id"], int(round(ns.ledger_net)),
+                                             ns.gross_sell_usd, ns.realized_pnl, _ledger_guard(bk))
+                    if _rowcount(tag) == 0:
+                        raise _LedgerStale()
+                    await _write_state(conn, f"{_HAND_STATE_PREFIX}{book['id']}",
+                                       {"adopted": adopted, "at": t.now, "orders": orders, "px": px})
+        except _Refused as exc:
+            log.error("mirror_live: book %s: the desk's hand reduce of %s @ %s refused by the ledger (%s); "
+                      "nothing booked", book["id"], shares, px, exc.why)
+            return f"refused:{exc.why}"
+        except _LedgerStale:
+            if attempt == 0:
+                fresh = await _ledger_reread(t, book)
+                if fresh is not None:
+                    bk = fresh
+                    continue
+            _ledger_stale_refused(t, book, bk, fresh, "the desk's hand reduce")
+            return "refused:ledger_stale"
+        except Exception as exc:  # noqa: BLE001 — a write failure is named; nothing moved
+            _mirror_stop("write_failed", book.get("whale"))
+            if not _hand_write_logged:
+                _hand_write_logged = True
+                log.error("mirror_live: book %s: booking the desk's hand reduce failed (%s); nothing booked",
+                          book["id"], type(exc).__name__, exc_info=True)
+            await _freeze(t, book, "write_failed")
+            return "write_failed"
+        break
+    if bk is not book:
+        _mirror_stop("ledger_stale_reread", book.get("whale"))
+        _recent(book["id"], "ledger_stale_reread", ledger_was=_num(book.get("ledger_net")),
+                ledger_now=_num(bk.get("ledger_net")), via="hand_reduce")
     book.update(ledger_net=int(round(ns.ledger_net)), avg_cost=ns.avg_cost,
                 gross_sell_usd=ns.gross_sell_usd, realized_pnl=ns.realized_pnl)
     t.filled_books.add(book["id"])
@@ -15033,6 +15186,66 @@ async def _tick(t: _Tick, woken: list) -> None:
     await _instruments(t)
 
 
+# E28 (FILL lane 28): the columns the walk's re-read is judged on -- the
+# ones a plan is SIZED or GATED by. A dict and a row that differ on any
+# of them were planned over on 6c0830d (book 1333: ledger 785 in the
+# dict, 692 on the row after the fast tick's booking)
+_WALK_REREAD_COLS = ("ledger_net", "open_order_id", "state", "frozen_reason", "venue_net")
+
+
+def _walk_col_moved(a: Any, b: Any) -> bool:
+    """Two readings of one planning column differ (None-safe; numbers
+    compared as numbers so 692 and 692.0 are one figure)."""
+    if a is None or b is None:
+        return (a is None) != (b is None)
+    na, nb = _num(a), _num(b)
+    if na is not None and nb is not None:
+        return abs(na - nb) > 1e-9
+    return str(a) != str(b)
+
+
+async def _walk_reread(t: _Tick, book: dict) -> str | None:
+    """THE WALK PLANS ON THE ROW AS IT STANDS (E28, FILL lane 28; behind
+    rules.MIRROR_WALK_REREAD). Under the book's lock, before _tick_book:
+    the row is read again (`_sql_book_read`, the fast tick's own read at
+    _fast_book) and its DB columns replace the dict's IN PLACE (the same
+    object the game index holds, so a sibling's room reads the fresh
+    figure too); the walk-time keys the dict carries stay -- on 6c0830d
+    step B's dict carries only the columns (`_held`, `_fills`,
+    `_frozen_venue` and the rest are written inside _tick_book). Returns
+    None when the book may be planned, else the census name it was
+    skipped under (already counted): `walk_row_unread` -- the read raised
+    (a read that cannot be made buys and sells nothing; logged once per
+    process); `walk_row_gone` -- no row, or a row that left the walk's
+    population (state 'closed': the next tick's step B reads the truth).
+    A frozen row is walked as today (the frozen exit is the walk's).
+    When ledger_net, open_order_id, state, frozen_reason or venue_net
+    differ between the dict and the row -> `walk_row_moved` and a
+    `recent` entry naming both ledgers; unchanged -> no census, no log."""
+    global _walk_unread_logged
+    w = book.get("whale")
+    try:
+        row = await t.pool.fetchrow(_sql_book_read(t), book["id"])
+    except Exception as exc:  # noqa: BLE001 — unreadable: skipped by name, never a send
+        _mirror_stop("walk_row_unread", w)
+        if not _walk_unread_logged:
+            _walk_unread_logged = True
+            log.warning("mirror_live: book %s unreadable for the walk's re-read (%s); skipped this tick",
+                        book["id"], type(exc).__name__)
+        return "walk_row_unread"
+    if not row or dict(row).get("state") == "closed":
+        _mirror_stop("walk_row_gone", w)
+        return "walk_row_gone"
+    fresh = dict(row)
+    moved = [c for c in _WALK_REREAD_COLS if _walk_col_moved(book.get(c), fresh.get(c))]
+    if moved:
+        _mirror_stop("walk_row_moved", w)
+        _recent(book["id"], "walk_row_moved", ledger_was=_num(book.get("ledger_net")),
+                ledger_now=_num(fresh.get("ledger_net")), cols=moved)
+    book.update(fresh)
+    return None
+
+
 async def _walk_books(t: _Tick, ordered: list) -> None:
     """THE BOOK WALK, IN PARALLEL (E2, 2026-09-06; owner order "I want
     this firing as frequently as his ... make the latency as low as
@@ -15074,6 +15287,17 @@ async def _walk_books(t: _Tick, ordered: list) -> None:
                 async with _lock_for(book["id"]):
                     _WALL.move("books", 1)      # E10: a book in flight (its planner steps)
                     try:
+                        # E28 (FILL lane 28): the plan is made on the row AS
+                        # IT STANDS under the lock, as the fast tick's is
+                        # (_fast_book) -- step B's dict is refreshed in place,
+                        # or the book is skipped this tick by name; OFF is
+                        # the dict as read at step B
+                        if rules.MIRROR_WALK_REREAD and await _walk_reread(t, book) is not None:
+                            # the market has a book row this tick's step B listed: the
+                            # candidate stage must not read it as bookless (t.books_seen
+                            # is _tick_book's first line, which a skipped book never reaches)
+                            t.books_seen.add((book["whale"], book["condition_id"]))
+                            continue
                         await _tick_book(t, book)
                     except Exception as exc:  # noqa: BLE001 — one book, not the tick
                         _mirror_stop("book_error", book.get("whale"))

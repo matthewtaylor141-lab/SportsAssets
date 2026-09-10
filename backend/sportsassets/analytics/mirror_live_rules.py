@@ -1190,6 +1190,23 @@ MIRROR_FROZEN_EXITS = env_switch("MIRROR_FROZEN_EXITS", True)
 # never raise one. A module constant read at import, as every switch
 # here; the worker reads it through the module at call time.
 MIRROR_FAST_ADD_REPLAN = env_switch("MIRROR_FAST_ADD_REPLAN", True)
+# THE WALK PLANS ON THE ROW AS IT STANDS (E28, 2026-09-09; FILL lane 28).
+# The full tick read every open book once at its step B and planned each
+# under its lock off THAT dict, so a fill another actor booked on the
+# book between the read and the lock was planned over (book 1333:
+# two 93-share SELL_LONG IOC takes two seconds apart, 8147 at 22:49:59Z
+# and 8148 at 22:50:01Z, both filled at the venue, the ledger moved
+# once, the book frozen venue_ledger_disagree for the market's life).
+# On, the walk re-reads the row under the lock before it plans, as the
+# fast tick has since E9 (mirror_live._walk_reread: a row that moved is
+# counted `walk_row_moved`, a row that cannot be read or is gone skips
+# the book this tick, never a send). Off, the walk is the dict as read
+# at step B, byte for byte the old walk. The environment may only turn
+# it OFF: a knob may lower a rail, never raise one. A module constant
+# read at import, as every switch here; the worker reads it through the
+# module at call time. The guard on the ledger WRITE (the same lane) has
+# no switch: a guard on a write is not a knob.
+MIRROR_WALK_REREAD = env_switch("MIRROR_WALK_REREAD", True)
 # Market families a book may open on (copy_sports.market_type_of).
 # P1 opened on moneylines alone and refused derivatives at admission
 # by the name `family` (program decision 19: totals, spreads and props
@@ -3338,6 +3355,7 @@ __all__ = [
     "MIRROR_EXIT_CONFIRM_TOL_PCT", "MIRROR_EXIT_CONFIRM_MAX_TICKS", "ExitDrop", "his_net_drop",
     "exit_confirmed",
     "MIRROR_FROZEN_ALERT_S", "MIRROR_FROZEN_NAME_TICKS", "MIRROR_FROZEN_EXITS", "MIRROR_FAST_ADD_REPLAN",
+    "MIRROR_WALK_REREAD",
     "MIRROR_FAMILIES",
     "FLAT_TOL_SHARES", "SELL_DUST_SHARES",
     "P2_MAKER_SHARE_MIN", "P2_TAKE_SLIP_MAX", "P2_FROZEN_TICK_FRAC_MAX", "P2_CAPTURE_MIN",

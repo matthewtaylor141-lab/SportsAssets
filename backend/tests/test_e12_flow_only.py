@@ -664,8 +664,10 @@ def test_e12_057_exists_sorts_after_056_and_is_two_nullable_add_column_if_not_ex
     src = inspect.getsource(ml)
     # E12b: the six read sites go through the pair that reads BOTH probes (056 / 057 / 058 shapes);
     # E23 (FILL lane 23) added a seventh -- the cancel re-read's book read (_cancel_reread), through
-    # the same pair (3 -> 4 fetchrow sites)
-    assert src.count("t.pool.fetch(_sql_books_open(t))") == 3 and src.count("fetchrow(_sql_book_read(t),") == 4
+    # the same pair (3 -> 4 fetchrow sites); E28 (FILL lane 28) added two more through the same pair --
+    # the walk's re-read under the lock (_walk_reread) and the ledger guard's re-read (_ledger_reread)
+    # (4 -> 6 fetchrow sites)
+    assert src.count("t.pool.fetch(_sql_books_open(t))") == 3 and src.count("fetchrow(_sql_book_read(t),") == 6
     assert "t.pool.fetch(_SQL_BOOKS_OPEN)" not in src and "fetchrow(_SQL_BOOK_READ," not in src
     assert not re.findall(r"_SQL_BOOKS_OPEN(?:_057)? if t\.flow_col", src) and "_SQL_BOOK_READ if t.flow_col" not in src
     # the mirror_orders CHECK stands: no new order kind
