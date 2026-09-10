@@ -191,7 +191,11 @@ def test_exits_band_sits_after_take_band_with_the_help_line_regenerated_and_stay
     # E31 (FILL lane 31, 2026-09-10): `maker-rests` was added between take-band and exits-band
     assert names == labels and names.index("exits-band") == names.index("take-band") + 2
     assert names[names.index("take-band") + 1] == "maker-rests"
-    assert names[-1] == "hourly" and "|exits-paired|take-band|maker-rests|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
+    # NOTE (E38, 2026-09-10): the tail was `|fill-answers|hourly (got` until today's measurement presets
+    # (sleeve-48h, sleeve-vs-him-48h, rests-and-fees, round-trips) landed between them, which left this pin
+    # red on the clean tip. What this assertion is for is the RELATIVE order of the presets it names, so it
+    # no longer pins what follows fill-answers; hourly-last is proven by test_render_ops_hourly.py
+    assert names[-1] == "hourly" and "|exits-paired|take-band|maker-rests|exits-band|closed-while-he-traded|fill-answers|" in line
     h, _ = _preset(text, "hourly")
     assert "exits-band" not in h and "settled_when_unfilled" not in h and "usd_unfilled" not in h
     hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()

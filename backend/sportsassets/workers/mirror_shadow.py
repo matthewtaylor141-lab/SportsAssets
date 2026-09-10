@@ -1437,6 +1437,148 @@ def outcome_null_count(fills: list[dict]) -> int:
     return sum(1 for f in fills if not str(f.get("outcome") or "").strip())
 
 
+# ------------------------------------------- E38: the two-legged reading
+#
+# MEASUREMENT ONLY, AND NOT EVEN A PLAN. Everything below is written
+# into the row's JSONB detail and read by an operator. The live lane's
+# order paths are untouched by this lane and are pinned byte-identical
+# by hash (test_e38_two_legged.py); the two-legged target is never sent,
+# never compared against a book, and never reaches mirror_live. The live
+# switch is a later lane, after the owner has read these numbers.
+#
+# THE OBJECTIVE IS HIS MATCHED PAIRS WHERE THE PAIR CLEARS -- not his
+# net (which erases the matched book: 58.6% of his cost buys BOTH
+# outcomes) and not his gross (which would buy his losing tennis pairs
+# alongside his winning soccer ones). analytics/mirror_two_legged.py
+# carries the arithmetic and the evidence; this function only records.
+#
+# NO EXTRA VENUE READ. The other leg's quote is the complement of the
+# one book the tick already read (rules_2l.leg_quotes), so the tick's
+# venue budget is exactly what it was. A per-side market, whose second
+# leg lives on a slug this worker never read, records NO pair price at
+# all rather than a guessed one.
+
+TWO_LEG_KEYS_ALWAYS = ("two_leg_both_sides", "two_leg_mapped", "two_leg_his_cost_usd",
+                       "two_leg_tokens_held")
+
+
+def two_leg_block(fills: list[dict], long_asset: str | None, other_asset: str | None, *,
+                  mark: float | None = None, ratio: float | None = None,
+                  bid: float | None = None, ask: float | None = None,
+                  state: Any = None, per_side: bool = False,
+                  fee_per_contract: float | None = None) -> dict:
+    """The two-legged census for ONE market, as JSONB detail keys.
+
+    Called twice from `shadow_market`: on the UNMAPPED branch with no
+    assets and no quote (only the four TWO_LEG_KEYS_ALWAYS, which give
+    the coverage question its denominator), and on the mapped branch
+    with the pair and this tick's book.
+
+    It answers three questions, and each has ONE column:
+
+      (1) how often BOTH legs would have been obtainable
+          -> `two_leg_both_obtainable`, filled in later by the judge in
+             `_resolve_previous` when the two post-only rests recorded
+             here (`two_leg_rest_long_px`, `two_leg_rest_other_wire`)
+             have both been reached inside JUDGE_TTL_S -- the same
+             window, the same rule and the same clock the shadow
+             already judges its one-legged plan on.
+
+      (2) what pair cost we would actually have achieved, against his
+          -> `two_leg_pair_cost` (ask on leg A + ask on leg B: what one
+             pair costs if we CROSS both touches now) and
+             `two_leg_rest_pair_cost` (bid A + bid B: the POST-ONLY
+             pair, and the achievable one -- see below), with his own
+             figure beside them as `two_leg_his_pair_cost` and the
+             difference as `two_leg_pair_edge`. `two_leg_pair_clears`
+             is the crossing cost under 1.00 before any fee and
+             `two_leg_take_admissible` is it under 1.00 less two fees:
+             BOTH ARE FALSE ON EVERY BOOK, because the two outcomes
+             share one book and ask_long + (1 - bid_long) is 1 + the
+             spread exactly. `two_leg_rest_admissible` is the gate that
+             means anything, and `two_leg_breakeven_fee` is the fee per
+             contract the pair could bear -- half the margin, since a
+             pair is two contracts -- so an operator reads what we can
+             afford rather than a fee nobody has measured yet.
+
+      (3) what share of his gross book we can even see
+          -> `two_leg_his_cost_usd`, his dollars on this market at HIS
+             OWN fill prices, split by `two_leg_mapped`. It is read
+             from the fills alone, so it exists on the unmapped rows
+             too -- those rows ARE the denominator, and a coverage
+             figure without them would be a numerator over itself.
+
+    HIS RESIDUAL (`two_leg_residual_sh`, `two_leg_residual_side`) is
+    recorded and is NEVER a target: it is today's `his_net` under
+    another name, and it is the directional bet the diagnosis blames.
+
+    Pure but for its own arithmetic; writes nothing, reads nothing,
+    sends nothing. Every failure is a named key, never an exception:
+    this rides the census, and a census that raises loses the tick."""
+    from ..analytics import mirror_two_legged as rules_2l
+
+    both, cost_usd, held = rules_2l.both_sides_cost(fills)
+    out: dict[str, Any] = {"two_leg_both_sides": bool(both),
+                           "two_leg_mapped": bool(long_asset and other_asset),
+                           "two_leg_his_cost_usd": round(float(cost_usd), 2),
+                           "two_leg_tokens_held": int(held)}
+    if not out["two_leg_mapped"]:
+        return out
+    legs = rules_2l.his_legs(fills, long_asset, other_asset)
+    q = rules_2l.leg_quotes(bid, ask, per_side=bool(per_side))
+    fee = rules_2l.FEE_PER_CONTRACT if fee_per_contract is None else fee_per_contract
+    r = ratio if ratio is not None else rules_2l.two_leg_open_ratio(legs, mark)
+    p = rules_2l.our_pair(legs, r, q, fee_per_contract=fee)
+    out.update(
+        two_leg_his_long_sh=round(legs.long_shares, 4),
+        two_leg_his_other_sh=round(legs.other_shares, 4),
+        two_leg_his_long_vwap=legs.long_vwap, two_leg_his_other_vwap=legs.other_vwap,
+        two_leg_his_pair_cost=legs.his_pair_cost,
+        two_leg_matched_sh=round(legs.matched_shares, 4),
+        # NEVER A TARGET: his directional part, recorded so the operator
+        # sees exactly what the matched-only objective declines to copy
+        two_leg_residual_sh=round(legs.residual_shares, 4),
+        two_leg_residual_side=("long" if legs.residual_asset == legs.long_asset
+                               else "other" if legs.residual_asset else None),
+        two_leg_quote_src=q.src, two_leg_state=(str(state) if state is not None else None),
+        two_leg_bid_long=q.bid_long, two_leg_ask_long=q.ask_long,
+        two_leg_bid_other=q.bid_other, two_leg_ask_other=q.ask_other,
+        # THE TAKE PAIR (ask A + ask B): what a pair costs if we cross
+        # both touches now. On this venue's single complementary book
+        # that is 1 + the spread EXACTLY, so `two_leg_pair_clears` is
+        # False on every book that has ever existed and
+        # `two_leg_take_admissible` is False by arithmetic rather than
+        # by market conditions. Both are recorded so the identity is
+        # visible in the data instead of assumed.
+        two_leg_pair_cost=p.take_pair_cost,
+        two_leg_pair_clears=(None if p.take_pair_cost is None else bool(p.take_pair_cost < 1.0)),
+        two_leg_take_admissible=p.take_admissible, two_leg_take_edge=p.take_edge,
+        # THE POST-ONLY PAIR (bid A + bid B = 1 - the spread): the only
+        # pair that can clear, the only pair a maker could form (E31),
+        # and the price the target is sized and admitted on. Obtainable
+        # only if BOTH rests fill -- `two_leg_both_obtainable`, judged
+        # below over the same window as every other plan.
+        two_leg_rest_pair_cost=p.our_pair_cost,
+        two_leg_rest_admissible=p.admissible,
+        two_leg_pair_edge=p.pair_edge, two_leg_margin=p.margin,
+        two_leg_breakeven_fee=p.breakeven_fee_pc, two_leg_fee_pc=p.fee_per_contract,
+        two_leg_ratio=p.ratio, two_leg_pair_target=int(p.pair_target),
+        two_leg_pair_usd=p.our_pair_usd, two_leg_clipped=bool(p.clipped),
+        two_leg_refusal=p.refusal)
+    # THE TWO POST-ONLY RESTS, in the terms the judge below reads. The
+    # long leg rests at its own touch (the bid); the other leg rests at
+    # ITS touch, which on this one complementary book is a SELL of the
+    # long token at the long ask -- so the judge compares the long
+    # book's bid against `two_leg_rest_other_wire`. Recorded only when
+    # both legs have a touch: half a pair is not a pair.
+    if q.bid_long is not None and q.ask_long is not None:
+        out["two_leg_rest_long_px"] = q.bid_long
+        out["two_leg_rest_other_px"] = q.bid_other
+        out["two_leg_rest_other_wire"] = q.ask_long
+        out["two_leg_both_obtainable"] = None
+    return out
+
+
 def _first_context(fills: list[dict]) -> dict:
     """The market context the mapper reads: the first fill that carries
     a title, else the first fill."""
@@ -2294,6 +2436,12 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
         if n404 > 0:
             # L7: the exact lane's 404 trail, whatever the explain says
             row["detail"]["exact_404"] = n404
+        # E38 QUESTION 3, the DENOMINATOR half: his dollars on a market
+        # we could not map. It is read at HIS OWN fill prices, so it
+        # needs no venue quote and exists on exactly the rows that have
+        # none. `two_leg_mapped` false is what makes this row the
+        # denominator and a mapped row the numerator.
+        row["detail"].update(two_leg_block(fills, None, None))
         return row
     la, oa, slug = m["long_asset"], m["other_asset"], m["us_slug"]
     his_long = float(pos.get(la, 0.0)) if la else 0.0
@@ -2370,6 +2518,22 @@ async def shadow_market(pool, pmus, whale: str, condition_id: str,
         # at one minus it -- the denominator the coverage gate is read
         # against (a net mirror can never hold the paired part)
         row["detail"]["his_gross_usd"] = round(his_long * mark + his_other * (1.0 - mark), 2)
+    # E38, THE TWO-LEGGED READING -- RECORDED, NEVER SENT. Written here,
+    # BEFORE the no-ratio and no-mark returns below, so a market he holds
+    # both sides of is counted whether or not the mirror had a plan for
+    # it: a closed or unquoted book is exactly the row the coverage
+    # question needs, and dropping it would count only the markets that
+    # went well.
+    # the ratio is the E1 / U12 RULE'S, not this tick's measured one:
+    # mirror_target's own note says the shadow's measured ratio sizes
+    # nothing live any more, and a reading the owner will judge a live
+    # switch on must be sized by the rule the live lane would use
+    # (rules_2l.two_leg_open_ratio, which is open_ratio read against his
+    # gross rather than his net -- see that function)
+    row["detail"].update(two_leg_block(fills, la, oa, mark=mark,
+                                       bid=bid, ask=ask,
+                                       state=row["detail"].get("state"),
+                                       per_side=bool(m.get("per_side"))))
     venue = None if positions is None else float(positions.get(slug.lower(), 0.0))
     try:
         ledger = await ledger_net(pool, slug)
@@ -2599,6 +2763,60 @@ async def _resolve_previous(pool, row: dict, census: dict | None = None,
                 "AND detail->>'would_px_short' IS NOT NULL "
                 "AND at < now() - ($3::float8 * interval '1 second') /* judge-short-expire */",
                 whale, cid, float(JUDGE_TTL_S)))
+        # E38: THE TWO-LEGGED JUDGE -- would BOTH post-only rests have
+        # filled inside the SAME window? Same rule, same clock, same
+        # TTL as every plan above; its verdict rides the detail alone
+        # and never touches would_fill, so the long-only rate P1 is
+        # gated on is byte-identical to before this lane. The long
+        # leg's rest fills when the ask comes DOWN to it; the OTHER
+        # leg's rest is a sale of the long token on this one
+        # complementary book, so it fills when the bid comes UP to
+        # `two_leg_rest_other_wire`. A pair is obtainable only when
+        # BOTH have happened -- which is the whole question.
+        if ask is not None and 0.0 < float(ask) < 1.0:
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('two_leg_fill_long', true, "
+                "'two_leg_touched_s_long', round(extract(epoch FROM (now() - at)))::int) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail ? 'two_leg_rest_long_px' "
+                "AND detail->>'two_leg_fill_long' IS NULL "
+                "AND (detail->>'two_leg_rest_long_px')::float8 >= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-two-leg-long */",
+                whale, cid, float(ask), float(JUDGE_TTL_S))
+        if bid is not None and 0.0 < float(bid) < 1.0:
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('two_leg_fill_other', true, "
+                "'two_leg_touched_s_other', round(extract(epoch FROM (now() - at)))::int) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail ? 'two_leg_rest_other_wire' "
+                "AND detail->>'two_leg_fill_other' IS NULL "
+                "AND (detail->>'two_leg_rest_other_wire')::float8 <= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-two-leg-other */",
+                whale, cid, float(bid), float(JUDGE_TTL_S))
+        if bid is not None or ask is not None:
+            # BOTH legs reached inside the life: the pair was obtainable
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('two_leg_both_obtainable', true) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'two_leg_both_obtainable' IS NULL "
+                "AND detail->>'two_leg_fill_long' = 'true' "
+                "AND detail->>'two_leg_fill_other' = 'true' /* judge-two-leg-both */",
+                whale, cid)
+            # and a pair still unresolved past the life was NOT
+            # obtainable -- unobserved stays NULL, exactly as the
+            # one-legged judge treats a market we stopped reading
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('two_leg_both_obtainable', false, "
+                "'two_leg_expired_s', round(extract(epoch FROM (now() - at)))::int) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail ? 'two_leg_rest_long_px' "
+                "AND detail->>'two_leg_both_obtainable' IS NULL "
+                "AND at < now() - ($3::float8 * interval '1 second') /* judge-two-leg-expire */",
+                whale, cid, float(JUDGE_TTL_S))
         if filled + filled_s > 0:
             depth = None
             if pmus is not None and row.get("us_market_slug"):

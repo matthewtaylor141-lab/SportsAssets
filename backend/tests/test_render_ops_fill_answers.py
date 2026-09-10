@@ -121,8 +121,12 @@ def test_fill_answers_sits_after_closed_while_he_traded_before_hourly_and_stays_
     names = line.split("one of ", 1)[1].split(" (got", 1)[0].split("|")
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)
     assert names == labels and len(names) == len(set(names))
-    assert names[-1] == "hourly" and names[-2] == "fill-answers" and names[-3] == "closed-while-he-traded"
-    assert "|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
+    assert names[-1] == "hourly" and names.index("fill-answers") == names.index("closed-while-he-traded") + 1
+    # NOTE (E38, 2026-09-10): the tail was `|fill-answers|hourly (got` until today's measurement presets
+    # (sleeve-48h, sleeve-vs-him-48h, rests-and-fees, round-trips) landed between them, which left this pin
+    # red on the clean tip. What this assertion is for is the RELATIVE order of the presets it names, so it
+    # no longer pins what follows fill-answers; hourly-last is proven by test_render_ops_hourly.py
+    assert "|exits-band|closed-while-he-traded|fill-answers|" in line
     h, _ = _preset(text, "hourly")
     assert "'== fill-answers'" not in h and "rows_24h" not in h and "plan_oldest_kept" not in h
     # the hourly is the ten presets joined (nine until FILL lane 14 put tick-ring after

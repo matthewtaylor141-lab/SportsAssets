@@ -64,6 +64,10 @@ def test_flow_books_is_read_only_and_sits_after_books_new_with_the_order_pins_un
     # E31 (FILL lane 31, 2026-09-10): `maker-rests` is one more read preset and
     # sits between take-band and exits-band, so the tail gains it
     assert ("nf-venue|exits-paired|take-band|maker-rests|exits-band|closed-while-he-traded"
-            "|fill-answers|hourly (got") in line   # FILL lane 0b's three, plus lane 31's
+            # NOTE (E38, 2026-09-10): the tail was `|fill-answers|hourly (got` until today's measurement presets
+            # (sleeve-48h, sleeve-vs-him-48h, rests-and-fees, round-trips) landed between them, which left this pin
+            # red on the clean tip. What this assertion is for is the RELATIVE order of the presets it names, so it
+            # no longer pins what follows fill-answers; hourly-last is proven by test_render_ops_hourly.py
+            "|fill-answers|") in line   # FILL lane 0b's three, plus lane 31's
     hourly, _ = _preset(text, "hourly")
     assert "catchup_side" not in hourly and "flow_last_net" not in hourly, "the hourly line is its presets' SQL and no more"

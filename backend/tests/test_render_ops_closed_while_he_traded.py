@@ -118,7 +118,7 @@ def test_closed_while_he_traded_sits_after_exits_band_before_hourly_and_stays_ou
     labels = re.findall(r"^ {16}([a-z0-9-]+)\) ", text[text.index('case "$ARG" in'):text.index(line)], re.M)
     assert names == labels and names.index("closed-while-he-traded") == names.index("exits-band") + 1
     # FILL lane 4 (2026-09-08): fill-answers sits after this label, hourly still last (names[-2] -> names[-3])
-    assert names[-1] == "hourly" and names[-2] == "fill-answers" and names[-3] == "closed-while-he-traded"
+    assert names[-1] == "hourly" and names.index("fill-answers") == names.index("closed-while-he-traded") + 1
     h, _ = _preset(text, "hourly")
     assert "closed-while-he-traded" not in h and "later_pnl_at_his_px" not in h and "first_refusal" not in h
     hourly.test_the_hourly_preset_is_the_nine_presets_sql_joined_under_section_markers()

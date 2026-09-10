@@ -209,7 +209,11 @@ def test_take_band_sits_after_exits_paired_and_rides_the_hourly_after_fills_miss
     assert names.index("take-band") == names.index("exits-paired") + 1
     # E31 (FILL lane 31, 2026-09-10): `maker-rests` was added between take-band and exits-band
     assert names.index("maker-rests") == names.index("take-band") + 1
-    assert names[-1] == "hourly" and "nf-venue|exits-paired|take-band|maker-rests|exits-band|closed-while-he-traded|fill-answers|hourly (got" in line
+    # NOTE (E38, 2026-09-10): the tail was `|fill-answers|hourly (got` until today's measurement presets
+    # (sleeve-48h, sleeve-vs-him-48h, rests-and-fees, round-trips) landed between them, which left this pin
+    # red on the clean tip. What this assertion is for is the RELATIVE order of the presets it names, so it
+    # no longer pins what follows fill-answers; hourly-last is proven by test_render_ops_hourly.py
+    assert names[-1] == "hourly" and "nf-venue|exits-paired|take-band|maker-rests|exits-band|closed-while-he-traded|fill-answers|" in line
     h, _ = _preset(text, "hourly")
     sql, _ = _preset(text, "take-band")
     markers = re.findall(r"SELECT '== ([a-z-]+)' AS section;", h)

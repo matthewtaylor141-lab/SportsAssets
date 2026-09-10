@@ -265,7 +265,11 @@ def test_the_exits_paired_help_line_is_the_case_labels_after_nf_venue_with_hourl
     # FILL lane 0b's three read presets sit between exits-paired and hourly (was "nf-venue|exits-paired|hourly")
     # E31 (FILL lane 31): `maker-rests` joins them between take-band and exits-band
     assert names[-1] == "hourly" and ("nf-venue|exits-paired|take-band|maker-rests|exits-band"
-                                      "|closed-while-he-traded|fill-answers|hourly (got") in line
+                                      # NOTE (E38, 2026-09-10): the tail was `|fill-answers|hourly (got` until today's measurement presets
+                                      # (sleeve-48h, sleeve-vs-him-48h, rests-and-fees, round-trips) landed between them, which left this pin
+                                      # red on the clean tip. What this assertion is for is the RELATIVE order of the presets it names, so it
+                                      # no longer pins what follows fill-answers; hourly-last is proven by test_render_ops_hourly.py
+                                      "|closed-while-he-traded|fill-answers|") in line
     # the hourly line joins the five it always joined: this preset is not one of them
     hourly_sql, _ = _preset(text, "hourly")
     assert "exits-paired" not in hourly_sql and STUCK not in hourly_sql and "his_exit_from" not in hourly_sql

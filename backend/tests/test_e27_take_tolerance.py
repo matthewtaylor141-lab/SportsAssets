@@ -142,7 +142,15 @@ E31_GONE = ("_exit_take", "_ioc_reread", "_entry_take", "_take_band", "_short_ta
 # two-token markets with no mirror book, none of RN1's flow and ne-sea-2026-09-09 excluded by name, from
 # which the desk picks the one market it buys both outcomes of) plus its one help token --
 # e302a4af41e1f7c1 -> 4b792097e975775f; every existing preset and the take-band statements byte for byte
-RENDER_OPS_SHA = "0847c9185809260c"
+# E38 THE TWO-LEGGED SHADOW (2026-09-10): the read-only `two-legged` preset REPLACES `pair-when`
+# (same question, asked against our own achievable rest prices instead of his fills alone) and the
+# spent `pair-candidates` preset is dropped, so the help token list moves too -- 0847c9185809260c ->
+# 139c20e220d75bd3; the file shrinks 510,054 -> 502,667 bytes, which is the point: it sits at a size
+# ceiling GitHub enforces with startup_failure. Every other preset and the take-band statements byte
+# for byte. The same edit removes a stray `|pair-candidates` an earlier commit today appended AFTER the
+# help line's `patterns:` trailer instead of into the label list, which had left this file and six other
+# render-ops position tests red on the clean tip
+RENDER_OPS_SHA = "139c20e220d75bd3"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',
