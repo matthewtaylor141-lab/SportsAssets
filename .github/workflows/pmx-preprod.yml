@@ -142,21 +142,24 @@ jobs:
           elif act == "instruments":
               # arg = the JSON body of POST /v1/refdata/instruments (pageSize, symbols,
               # clearingSym, tradableFilter, states, startTimeGte ...); {} lists the first page
-              body = json.loads(arg) if arg.strip() else {"pageSize": 20}
-              r = requests.post(f"{base}/v1/refdata/instruments", headers=H, json=body, timeout=60)
-              print("POST /v1/refdata/instruments ->", r.status_code)
-              try:
-                  j = r.json()
-                  for i in j.get("instruments", []):
-                      md = i.get("metadata") or {}
-                      print(i.get("symbol"), i.get("state"), "px_scale", i.get("priceScale"), "tick", i.get("tickSize"),
-                            "fq_scale", i.get("fractionalQtyScale"), "minqty", i.get("minimumTradeQty"),
-                            "|", md.get("market_sport_type"), md.get("event_id"), md.get("long_participant_id"),
-                            md.get("outcome_strike"), md.get("event_start_time"), "|", (i.get("description") or "")[:80])
-                  print("nextPageToken:", j.get("nextPageToken"))
-                  print(json.dumps(j.get("instruments", [])[:1], indent=1)[:6000])
-              except Exception as e:
-                  print(r.text[:4000], e)
+              # a JSON list runs each body in turn (ListInstruments is capped at 6 req/min)
+              bodies = json.loads(arg) if arg.strip() else {"pageSize": 20}
+              if isinstance(bodies, dict): bodies = [bodies]
+              for body in bodies[:5]:
+                  r = requests.post(f"{base}/v1/refdata/instruments", headers=H, json=body, timeout=60)
+                  print("POST /v1/refdata/instruments", json.dumps(body), "->", r.status_code)
+                  try:
+                      j = r.json()
+                      for i in j.get("instruments", []):
+                          md = i.get("metadata") or {}
+                          print(" ", i.get("symbol"), i.get("state"), "px_scale", i.get("priceScale"), "tick", i.get("tickSize"),
+                                "fq_scale", i.get("fractionalQtyScale"), "minqty", i.get("minimumTradeQty"),
+                                "|", md.get("market_sport_type"), md.get("event_id"), md.get("long_participant_id"),
+                                md.get("outcome_strike"), md.get("event_start_time"), "|", (i.get("description") or "")[:80])
+                      print("  count", len(j.get("instruments", [])), "nextPageToken:", j.get("nextPageToken"))
+                      print(json.dumps(j.get("instruments", [])[:1], indent=1)[:5000])
+                  except Exception as e:
+                      print(r.text[:3000], e)
           elif act == "positions":
               # arg = the account resource name (firms/<firm>/accounts/<account>)
               acct = arg.strip()
