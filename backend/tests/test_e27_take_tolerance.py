@@ -118,7 +118,10 @@ UNTOUCHED = {
 # for byte the same
 # then the heartbeat value column widened 2,400 -> 8,000 characters in mirror-tick and hourly (2026-09-10 02:1xZ: the
 # 246-name census JSON runs past 4,000 and the newest lanes' names sit at its tail) -- 2cb5a0a793839493 -> 7528f10180c12e27
-RENDER_OPS_SHA = "7528f10180c12e27"
+# then the read-only `nfl-team` preset beside nfl-rows (2026-09-10 02:5xZ, the owner's NFL spreads order: the C6 team
+# columns on every aec-nfl row, the asc 3.5 rows, the venue's NFL team records, his spread slugs over 14 days) --
+# 7528f10180c12e27 -> 33505a5187599535; no existing preset changed
+RENDER_OPS_SHA = "33505a5187599535"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',

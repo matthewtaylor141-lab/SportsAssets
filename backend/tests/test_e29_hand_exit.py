@@ -82,8 +82,9 @@ UNTOUCHED = {
     "_load_cand_memo": "297e1bf68db09237", "_persist_cand_memo": "d6ff73ade8bba13c",
 }
 HAND_NET_ON_TIP = "dc37d19b62d8c6fd"      # _hand_net on 6c0830d and on cdf0742 (E28 left it), the ONE new call site excised
-RENDER_OPS_ON_TIP = "95b58cdb2a82406f"    # render-ops.yml minus this lane's block: 0b09a1ed2074c6fd on cdf0742 (the landing tip), then
-                                          # re-cut when the heartbeat value column widened 2,400 -> 8,000 (2026-09-10 02:1xZ)
+RENDER_OPS_ON_TIP = "b7d553a6aa4204c2"    # render-ops.yml minus this lane's block: 0b09a1ed2074c6fd on cdf0742 (the landing tip), then
+                                          # 95b58cdb2a82406f when the heartbeat value column widened 2,400 -> 8,000 (2026-09-10 02:1xZ),
+                                          # then re-cut for the read-only nfl-team preset beside nfl-rows (02:5xZ)
 
 
 def _sha(fn):
