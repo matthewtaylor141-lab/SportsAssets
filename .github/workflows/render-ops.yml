@@ -67,13 +67,21 @@ jobs:
         env:
           ACTION: ${{ inputs.action }}
           SERVICE: ${{ inputs.service }}
-          ARG: ${{ inputs.arg }}
           CONFIRM: ${{ inputs.confirm }}
           KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
-          KEY_INPUT: ${{ inputs.render_key }}
         run: |
           set +e
           set -u
+          # arg and render_key are read from the event payload on disk, not
+          # mapped through `env:`: the runner prints a step's env block in the
+          # log header BEFORE any ::add-mask:: in the script runs, so a value
+          # mapped there (an env-set secret, a pasted key) would be exposed.
+          ARG="$(jq -r '.inputs.arg // empty' "$GITHUB_EVENT_PATH")"
+          KEY_INPUT="$(jq -r '.inputs.render_key // empty' "$GITHUB_EVENT_PATH")"
+          [ -n "$KEY_INPUT" ] && echo "::add-mask::$KEY_INPUT"
+          if [ "$ACTION" = "env-set" ]; then
+            _V="${ARG#*=}"; [ -n "$_V" ] && [ "$_V" != "$ARG" ] && echo "::add-mask::$_V"
+          fi
           KEY="$KEY_SECRET"; [ -z "$KEY" ] && KEY="$KEY_INPUT"
           if [ -z "$KEY" ]; then echo "no Render key: set the RENDER_API_KEY secret or pass render_key"; exit 1; fi
           echo "::add-mask::$KEY"

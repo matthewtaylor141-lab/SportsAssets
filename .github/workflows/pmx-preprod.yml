@@ -57,12 +57,16 @@ jobs:
       PMX_AUDIENCE: https://api.preprod.polymarketexchange.com
     steps:
       - name: Mask and stage the key
-        env:
-          KEY_B64: ${{ inputs.private_key_b64 }}
+        # The key is NOT mapped through `env:` or `${{ }}` in `run:`: the runner
+        # prints a step's env block and its rendered script in the log header
+        # BEFORE the script's ::add-mask:: runs, which would expose the key.
+        # It is read from the event payload on disk instead and masked first.
         run: |
           set -euo pipefail
-          echo "::add-mask::$KEY_B64"
           umask 077
+          KEY_B64="$(jq -r '.inputs.private_key_b64 // empty' "$GITHUB_EVENT_PATH")"
+          [ -n "$KEY_B64" ] || { echo "refused: no key"; exit 1; }
+          echo "::add-mask::$KEY_B64"
           echo "$KEY_B64" | base64 -d > "$RUNNER_TEMP/pk.pem"
           head -c 32 "$RUNNER_TEMP/pk.pem" | grep -q "BEGIN" || { echo "refused: key is not a PEM"; exit 1; }
           echo "key staged ($(wc -c < "$RUNNER_TEMP/pk.pem") bytes)"
