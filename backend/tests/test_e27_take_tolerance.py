@@ -116,7 +116,9 @@ UNTOUCHED = {
 # 0b09a1ed2074c6fd -> 2cb5a0a793839493 at landing over E28 and the nfl-rows read (pinned in the lane's worktree
 # on 6c0830d as 6969bae6aa1536c1 -> 296c4007776a0b82); every read-only preset and the take-band statements byte
 # for byte the same
-RENDER_OPS_SHA = "2cb5a0a793839493"
+# then the heartbeat value column widened 2,400 -> 8,000 characters in mirror-tick and hourly (2026-09-10 02:1xZ: the
+# 246-name census JSON runs past 4,000 and the newest lanes' names sit at its tail) -- 2cb5a0a793839493 -> 7528f10180c12e27
+RENDER_OPS_SHA = "7528f10180c12e27"
 MIGRATION_059_SHA = "a17a94df3a646918"
 EXIT_LINES = (
     'MIRROR_EXIT_TAKE_BAND = capped_env("MIRROR_EXIT_TAKE_BAND", 0.01, floor=0.0)',
