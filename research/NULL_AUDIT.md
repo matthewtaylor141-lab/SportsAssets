@@ -55,6 +55,37 @@ is from reading the consumption path, and the two NULL_BUG findings are
    `LEAST` defect — the same family through a different door, which is why the
    audit could not stop at `LEAST`/`GREATEST`. Being measured in run 70.
 
+## The blast radius, kept in the permanent record
+
+Measured by run 71 statement 2 — what the retracted non-matched calculation
+silently omitted:
+
+| | conditions omitted | % of cohort | acq cost omitted | % acq cost | % of abs P&L |
+|---|---|---|---|---|---|
+| BRIDGED | 531 | 28.89% | $191,833 | 2.00% | 3.06% |
+| UNBRIDGED | **5,729** | **45.95%** | $1,993,574 | 6.17% | **10.96%** |
+| **total** | **6,260** | | **$2,185,407** | | |
+
+**Omitting 45.95% of unbridged settled conditions from a calculation presented
+as the non-matched economics** is the fact that settles the process question.
+It was invisible: no value looked wrong, no error was raised, and the figure was
+quoted in a verdict.
+
+## Row/population closure is now MANDATORY, not optional QA
+
+Every decomposition from here forward must, in its own output:
+
+1. state each term's row count so population equality is **visible**, never
+   asserted in a header;
+2. measure the closure identity **per row and in aggregate**, expecting zero
+   violations;
+3. COALESCE every term to its economically correct zero rather than leaving a
+   NULL that `sum()` will drop.
+
+This is not a quality gate to be run when convenient. A decomposition without
+closure is not a weaker result — it is an **unverified** one, and both retracted
+figures passed every other kind of review while failing this.
+
 ## The permanent guard
 
 `research/check_sql.py` now flags `LEAST`/`GREATEST` over nullable leg

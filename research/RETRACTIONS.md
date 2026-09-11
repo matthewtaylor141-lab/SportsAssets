@@ -45,28 +45,76 @@ required identity could not hold across them.
 
 ---
 
-## 3. Verdict 4 — reset to INDETERMINATE
+## 2b. RESOLVED by run 71 — the corrected figures
 
-> `NON_MATCHED_REALIZED_MECHANISM_GENERALIZABLE?` = **INDETERMINATE**
+Run 71 passed every gate: aggregate closure `0.000000`, per-condition closure
+max gap `0.000000000` with **0 violations of 14,306**, cost closure `0.000000`
+with **0 violations**, all five single-leg invariants **0** on 6,260 conditions,
+and every term's row count identical (1,838 / 12,468 / 14,306) — **visible in
+the output, not asserted**.
 
-Previously NOT SUPPORTED. **The old NOT SUPPORTED is not retained**, because its
-load-bearing statistic — the sign flip across bridge status — was computed on
-the invalid basis above. A dramatic result computed wrongly is not weak
-evidence; it is **no evidence**, and keeping the verdict because the number was
-striking would be reasoning from an artifact.
+| | matched ROI | remainder ROI | total ROI |
+|---|---|---|---|
+| BRIDGED | 1.905% | **−1.568%** | 0.756% |
+| UNBRIDGED | 1.944% | **+0.975%** | 1.569% |
+| ALL SETTLED ELIGIBLE | 1.934% | 0.460% | 1.383% |
 
-The other two grounds given at the time (settled-subset non-representativeness;
-unquantified contamination) survive on their own merits but were **not** what
-the verdict was rested on.
+**Run 71 is closed.** The remainder arithmetic is not to be reopened unless
+another upstream defect is found.
 
-**Resolution rule, decided before the numbers arrive:**
+---
 
-- corrected non-matched economics still materially different or sign-unstable
-  across bridge status → **NOT SUPPORTED**
-- the divergence disappears → **withdraw that reasoning**
-- settlement/attribution limits prevent a conclusion → **INDETERMINATE**
+## 2c. ESTIMATOR HIERARCHY — which figure is primary, and why
 
-Data decides.
+**PRIMARY — the settlement-free matched mechanism.** Matched payoff does not
+require settlement observation, so these are the primary matched-mechanism
+figures:
+
+| | matched gross ROI |
+|---|---|
+| ALL ELIGIBLE | **1.383%** |
+| BRIDGED | **0.804%** |
+| UNBRIDGED | **1.556%** |
+
+**SECONDARY — the settled accounting decomposition** (§2b). It is *valid
+accounting for the retained population*, but **not the primary estimator of the
+general RN1 matched mechanism, because settlement retention is selected**
+(verdict 2: 54.47% of conditions, retention non-monotonic at 65.72% → 39.01% →
+86.99% across consecutive weeks).
+
+### A numerical coincidence that must never be exploited
+
+    ALL_ELIGIBLE_MATCHED_GROSS_ROI  = 1.383%   (settlement-free, matched only)
+    ALL_SETTLED_TOTAL_TRADING_ROI   = 1.383%   (settled, total)
+
+**Different numerators, different denominators, different populations.** The
+equality is coincidence. Neither may ever be substituted for the other, and a
+later reader finding "1.383%" in two places must check which one it is.
+
+---
+
+## 3. Verdict 4 — RESOLVED: NOT SUPPORTED
+
+The verdict was reset to INDETERMINATE when its supporting statistic was
+retracted, and a resolution rule was fixed **before** the corrected numbers
+arrived. Run 71 supplied them; the first branch fires.
+
+**The verdict, in the owner's words, which are binding and not to be
+paraphrased:**
+
+> **Verdict 4 — NON_MATCHED_REALIZED_MECHANISM_GENERALIZABLE: NOT SUPPORTED.**
+> On the population-consistent settled accounting cohort, NON_MATCHED_REMAINDER
+> is −1.568% for bridged conditions and +0.975% for unbridged conditions. This
+> establishes that the remainder economics differ materially across these two
+> retained cohorts. It does not establish that RN1 employs a different
+> directional strategy in bridged markets. Mapper selection, settlement
+> selection, and unobserved conversions/redemptions remain alternative
+> explanations.
+
+The earlier NOT SUPPORTED was **not** carried over: its load-bearing statistic
+was computed on the invalid basis, and a dramatic result computed wrongly is not
+weak evidence but **no evidence**. This verdict is re-earned on corrected
+arithmetic, not restored.
 
 ---
 
