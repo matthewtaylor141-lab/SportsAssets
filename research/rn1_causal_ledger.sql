@@ -4895,34 +4895,34 @@ WITH base AS MATERIALIZED (
               ELSE 'TIER_4_TEMPORAL_SENSITIVITY_ONLY (never primary)'
          END AS attribution_tier
     FROM percmd p
-), g AS MATERIALIZED (
+), gate24 AS MATERIALIZED (
   SELECT * FROM lkf WHERE attribution_window = '4 24 h'
 )
 SELECT
   -- 1. exactly one lineage status per harmful command
-  (SELECT count(*) FROM g) AS gate1_witness_harmful_commands,
-  (SELECT count(*) FROM g WHERE lineage_status IS NULL) AS gate1_missing_expected_0,
-  (SELECT count(*) FROM (SELECT fill_id FROM g GROUP BY 1 HAVING count(*) > 1) d)
+  (SELECT count(*) FROM gate24) AS gate1_witness_harmful_commands,
+  (SELECT count(*) FROM gate24 WHERE lineage_status IS NULL) AS gate1_missing_expected_0,
+  (SELECT count(*) FROM (SELECT fill_id FROM gate24 GROUP BY 1 HAVING count(*) > 1) d)
     AS gate1_duplicated_expected_0,
   -- 2. exactly one attribution tier per EXECUTED harmful command
-  (SELECT count(*) FROM g WHERE executions > 0)
+  (SELECT count(*) FROM gate24 WHERE executions > 0)
     AS gate2_witness_executed_commands,
-  (SELECT count(*) FROM g WHERE executions > 0 AND attribution_tier IS NULL)
+  (SELECT count(*) FROM gate24 WHERE executions > 0 AND attribution_tier IS NULL)
     AS gate2_missing_expected_0,
   -- 3. tier 1A attributed quantity may not exceed the commanded quantity
   --    unless a later command on the same condition documented an increase
-  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_1A%')
+  (SELECT count(*) FROM gate24 WHERE attribution_tier LIKE 'TIER_1A%')
     AS gate3_witness_tier_1a_commands,
-  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_1A%'
+  (SELECT count(*) FROM gate24 WHERE attribution_tier LIKE 'TIER_1A%'
      AND tier1a_progress > 1.01 * commanded_change
      AND max_later_commands = 0) AS gate3_overattributed_expected_0,
   -- 4. a superseded command must never sit in the primary tier
-  (SELECT count(*) FROM g WHERE any_superseded)
+  (SELECT count(*) FROM gate24 WHERE any_superseded)
     AS gate4_witness_commands_with_supersession,
-  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_1A%' AND NOT has_1a)
+  (SELECT count(*) FROM gate24 WHERE attribution_tier LIKE 'TIER_1A%' AND NOT has_1a)
     AS gate4_primary_without_unsuperseded_evidence_expected_0,
   -- 5. the sensitivity tier must never be counted as primary
-  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_4%')
+  (SELECT count(*) FROM gate24 WHERE attribution_tier LIKE 'TIER_4%')
     AS gate5_witness_temporal_only_commands,
-  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_4%'
+  (SELECT count(*) FROM gate24 WHERE attribution_tier LIKE 'TIER_4%'
      AND tier1a_shares > 0) AS gate5_temporal_in_primary_expected_0;

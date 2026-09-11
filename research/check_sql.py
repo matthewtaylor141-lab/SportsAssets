@@ -101,6 +101,35 @@ def walk(node, fn):
             walk(x, fn)
 
 
+def check_duplicate_ctes(stmt, path, idx):
+    """A CTE name declared twice in one statement.
+
+    WHY. Run 77 died on statement 12 with
+
+        ERROR: WITH query name "g" specified more than once
+
+    after ten statements and eight minutes of database time. The shared event
+    core declares a CTE `g`, and a later statement appended its own `g`. Every
+    existing layer passed it: it parses, and the column resolver only asks
+    whether a referenced column exists in SOME CTE of that name -- with two, it
+    silently resolved against the first. A generated file that pastes a common
+    prefix into every statement makes this collision easy and invisible, so it
+    gets its own check rather than being left to the runner.
+    """
+    names, dupes = {}, []
+    def collect(n):
+        if isinstance(n, ast.WithClause):
+            seen = set()
+            for cte in (n.ctes or []):
+                if cte.ctename in seen:
+                    dupes.append(cte.ctename)
+                seen.add(cte.ctename)
+    walk(stmt, collect)
+    return [f"{path}: statement {idx}: CTE name {d!r} is declared more than once "
+            f"in the same WITH clause -- PostgreSQL refuses this at run time"
+            for d in sorted(set(dupes))]
+
+
 def check_statement(stmt, path, idx):
     ctes = {}
     def collect(n):
@@ -559,6 +588,7 @@ def main(paths):
             continue
         for i, raw in enumerate(stmts, 1):
             cte_map, alias_map = _cte_and_aliases(raw.stmt)
+            problems += check_duplicate_ctes(raw.stmt, path, i)
             problems += check_statement(raw.stmt, path, i)
             problems += check_missing_leg(raw.stmt, path, i, cte_map, alias_map,
                                           allow_lines=allowed)
