@@ -1,5 +1,19 @@
 #!/usr/bin/env python3
-"""THE CODE-SIDE HALF OF THE EVIDENCE-TIER PRECONDITION GATE.
+"""THE EVIDENCE-TIER PRECONDITION GATE -- the code-side stages, and the registry.
+
+THE RULE, PERMANENT AND NOT TO BE COLLAPSED:
+
+    COLUMN EXISTS
+      -> PRODUCTION WRITE SITE EXISTS
+        -> HISTORICAL POPULATION EXISTS
+          -> SEMANTIC CONTENT VERIFIED
+            -> ELIGIBLE FOR ATTRIBUTION
+
+Five stages, each a separate question, each able to fail on its own. Collapsing
+any two of them is how a column that merely EXISTS becomes a primary tier.
+Stages 1-2 and the semantic REGISTRY live here; stages 3-5 are measured by
+statement 0 of research/rn1_causal_ledger.sql, which is generated from the
+registry below so the two cannot drift.
 
 Run:  python3 research/evidence_tiers.py
 Exit 0 if every field used as causal linkage has at least one write site.
@@ -43,6 +57,39 @@ ROOT = "backend"
 # Every field this research uses, or could use, as causal linkage. Adding a
 # field to an attribution tier without adding it here is the defect this file
 # exists to prevent.
+# SEMANTIC VERIFICATION -- stage 4. A field is UNVERIFIED until something has
+# established WHAT ITS VALUES NAME. Population is not semantics: a column can be
+# 100% populated with identifiers that join to nothing we can use. Promoting an
+# unverified field into a tier is how a join gets invented.
+#
+# "verified_by" must cite the evidence, not an intention. Anything else is
+# UNVERIFIED and stays out of causal attribution.
+SEMANTICS = {
+    "intent":          ("VERIFIED", "migration 050 defines the four wire values "
+                                    "and the CHECK constraint enforces them"),
+    "kind":            ("VERIFIED", "migration 047 CHECK constraint enumerates "
+                                    "the six roles"),
+    "target":          ("VERIFIED", "migration 046: ratio x his_net, whole "
+                                    "shares, as production computed it"),
+    "ledger_net":      ("VERIFIED", "migration 046/047: long-token shares by "
+                                    "our own booking"),
+    "his_net":         ("VERIFIED", "migration 046: long minus other, in "
+                                    "long-token shares"),
+    "mark":            ("VERIFIED", "migration 046: the venue quote at the tick"),
+    "target_at_place": ("VERIFIED", "migration 047: the target the order was "
+                                    "placed against"),
+    "ledger_at_place": ("VERIFIED", "migration 047: our ledger at placement"),
+    "bid_at_place":    ("VERIFIED", "migration 047: the book as we saw it"),
+    "ask_at_place":    ("VERIFIED", "migration 047: the book as we saw it"),
+    "his_fill_id":     ("UNVERIFIED", "a write site exists, but what the value "
+                                      "NAMES is not established -- statement 0b "
+                                      "probes format, join to trades.id, "
+                                      "coverage and cardinality"),
+    "trigger_trade_id": ("UNVERIFIED", "no population to verify"),
+    "his_fill_ts":      ("UNVERIFIED", "no population to verify"),
+    "first_fill_at":    ("UNVERIFIED", "no population to verify"),
+}
+
 FIELDS = [
     ("mirror_orders", "trigger_trade_id", "tier 1 direct source-fill lineage"),
     ("mirror_orders", "his_fill_id", "tier 1 alternative source-fill lineage"),
@@ -111,14 +158,25 @@ def main():
     print("EVIDENCE-TIER PRECONDITION GATE -- CODE SIDE")
     print("a write site is the field inside a SQL string that also has "
           "INSERT or UPDATE\n")
-    print(f"{'field':<20} {'table':<15} {'write':<6} {'read':<5}  purpose")
-    print("-" * 96)
+    print(f"{'field':<20} {'write':<6} {'read':<5} {'stage 2':<14} "
+          f"{'stage 4 semantics':<12}  purpose")
+    print("-" * 110)
     missing = []
     for tbl, field, why in FIELDS:
         w, r = len(writes.get(field, ())), len(reads.get(field, ()))
         if w == 0:
             missing.append((tbl, field, why))
-        print(f"{field:<20} {tbl:<15} {w:<6} {r:<5}  {why}")
+        stage2 = "WRITE_SITE" if w else "NO_WRITE_SITE"
+        stage4 = SEMANTICS.get(field, ("UNVERIFIED", ""))[0]
+        print(f"{field:<20} {w:<6} {r:<5} {stage2:<14} {stage4:<12}  {why}")
+    print()
+    print("stages 3 and 5 (historical population, final eligibility) are "
+          "measured by")
+    print("statement 0 of research/rn1_causal_ledger.sql -- a write site with "
+          "no rows is")
+    print("still UNAVAILABLE, and a populated field with UNVERIFIED semantics "
+          "is still")
+    print("ineligible for attribution.")
     print()
     if missing:
         print("NO WRITE SITE ANYWHERE IN PRODUCTION CODE -- these fields are "

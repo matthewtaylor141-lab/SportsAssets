@@ -118,44 +118,58 @@
 --   distinction cannot be lost again.
 --
 -- ---------------------------------------------------------------------------
--- THE EVIDENCE-TIER PRECONDITION GATE, and why it is statement 0.
+-- THE EVIDENCE-TIER PRECONDITION GATE. FIVE STAGES, NEVER COLLAPSED.
 --
--- Run 76 built its PRIMARY attribution tier on mirror_orders.trigger_trade_id,
--- because migration 049 creates the column and documents precisely what it
--- means. THE COLUMN HAS NEVER BEEN WRITTEN -- there is no write site anywhere
--- in the worker or app code. So TIER_1_DIRECT could not match a single row,
--- and "zero directly linked liquidations" was not a measurement. It was a
--- filter that cannot fire, reported as a finding: the fifth time this work has
--- hit that failure.
+--     COLUMN EXISTS
+--       -> PRODUCTION WRITE SITE EXISTS
+--         -> HISTORICAL POPULATION EXISTS
+--           -> SEMANTIC CONTENT VERIFIED
+--             -> ELIGIBLE FOR ATTRIBUTION
 --
--- A SCHEMA COLUMN IS NOT EVIDENCE MERELY BECAUSE IT EXISTS.
+-- Each stage is a separate question and each can fail on its own. Collapsing
+-- any two is how a column that merely EXISTS becomes a primary tier, which is
+-- precisely what happened in run 76: it built its primary attribution tier on
+-- mirror_orders.trigger_trade_id because migration 049 creates the column and
+-- documents what it means. THE COLUMN HAS NEVER BEEN WRITTEN. TIER_1_DIRECT
+-- could not match a row, and "zero directly linked liquidations" was not a
+-- measurement but a filter that cannot fire, reported as a finding.
 --
--- Every field used as causal linkage now passes a gate with TWO halves,
--- because either can be empty on its own:
---     CODE SIDE   research/evidence_tiers.py -- is there a write site at all?
---     DATA SIDE   statement 0 -- populated rows, percentage of the relevant
---                 universe, and the first and last populated timestamps.
--- Classified AVAILABLE / PARTIALLY_AVAILABLE (populated but under 99.5% of the
--- universe) / UNAVAILABLE (zero populated rows).
+-- Statement 0 prints all five stages per field, BEFORE any attribution result:
+-- the field, the code-side write-site verdict, the populated count, the
+-- populated percentage, the first and last populated timestamps, the semantic
+-- status, and the final eligibility. Stages 1-2 and the semantic registry come
+-- from research/evidence_tiers.py, which generates statement 0's literal blocks
+-- so the two halves cannot drift.
 --
--- AN UNAVAILABLE TIER DOES NOT EMIT A ZERO. Its result is NOT IDENTIFIABLE
--- FROM RETAINED DATA, which is a different statement with a different meaning
--- and cannot be mistaken for evidence of absence. The tier assignment itself is
--- GUARDED on the populated count, so an unpopulated field can never become a
--- tier in the first place, and every attribution row carries the tier-1 verdict
--- beside it so a silence cannot be misread as a zero.
+-- STATUS GOING IN:
+--     trigger_trade_id, his_fill_ts, first_fill_at   UNAVAILABLE (no write site)
+--     his_fill_id                  AVAILABLE AS DATA, SEMANTICS UNVERIFIED
+--     target_at_place, ledger_at_place, intent, kind, and the shadow target and
+--     state fields   eligible ONLY after statement 0's population check
 --
--- KNOWN AT THE CODE SIDE BEFORE THIS RUN: trigger_trade_id, his_fill_ts and
--- first_fill_at have NO write site. target_at_place, ledger_at_place,
--- bid_at_place and ask_at_place each have one. his_fill_id has one, but what it
--- CONTAINS is unverified against trades.id, so it is measured here and not used
--- as a tier until its content is established.
+-- his_fill_id IS NOT PROMOTED TO A TIER, and statement 0b is why: before it may
+-- carry causal weight it must answer what object the ID names, whether it is
+-- stable across ingestion sources, whether it joins to canonical trades.id,
+-- what the join coverage is on the relevant population, and whether one-to-many
+-- or many-to-one mappings exist. Any of those failing keeps it out.
 --
--- THE RUN-76 NEGATIVE RESULT SURVIVES THIS, and is preserved separately: on the
--- ACTUALLY POPULATED evidence tiers, P1-consistent commands show ZERO observed
--- liquidation across every tested window. That zero rests on tiers 2, 3 and 4,
--- all of which demonstrably fire elsewhere in the same run, so it is an
--- empirical zero rather than a vacuous one.
+-- AN UNAVAILABLE OR INELIGIBLE TIER DOES NOT EMIT A ZERO. Its result is NOT
+-- IDENTIFIABLE FROM RETAINED DATA -- a different statement with a different
+-- meaning that cannot be mistaken for evidence of absence. The tier assignment
+-- is guarded on the populated count so an unpopulated field cannot become a
+-- tier at all, and EVERY attribution row carries the eligibility of every tier
+-- beside it, so a silence can never be read as a zero.
+--
+-- THE RUN-76 NEGATIVE RESULT SURVIVES, and is preserved in this wording
+-- deliberately:
+--
+--     No liquidation attributable through the populated retained evidence
+--     paths was observed for the P1-consistent commands across the tested
+--     windows.
+--
+-- NOT "zero observed liquidation". Tier 1 is unavailable and the retained
+-- telemetry is incomplete, so the stronger phrasing would imply an
+-- observability we do not have. The economic conclusion is unchanged.
 --
 -- ---------------------------------------------------------------------------
 -- WIDENING A WINDOW IS NOT CAUSAL IDENTIFICATION, AND NEITHER IS DIRECT
@@ -242,95 +256,178 @@
 -- times, so a zero violation count next to a zero witness count is to be read
 -- as NOT TESTED, never as PASS.
 --
--- Read-only: fourteen SELECTs, the first of which is the precondition gate.
+-- Read-only: fifteen SELECTs. Statements 0 and 0b are the precondition gate
+-- and the semantic probe, and both run before any attribution result.
 -- ============================================================================
 
 
-\echo '== 0. EVIDENCE-TIER PRECONDITION GATE -- a column is not evidence because it exists =='
+\echo '== 0. EVIDENCE-TIER PRECONDITION GATE -- five stages, never collapsed =='
 
 WITH o AS MATERIALIZED (
   SELECT * FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), s AS MATERIALIZED (
   SELECT * FROM mirror_shadow WHERE lower(whale) = 'rn1'
+), sem AS (
+  -- STAGE 4, generated from research/evidence_tiers.py SEMANTICS so the code
+  -- side and the data side cannot drift apart.
+  SELECT * FROM (VALUES
+                        ('trigger_trade_id', 'UNVERIFIED', 'no population to verify'),
+                        ('his_fill_id', 'UNVERIFIED', 'a write site exists, but what the value NAMES is not established -- st'),
+                        ('his_fill_ts', 'UNVERIFIED', 'no population to verify'),
+                        ('first_fill_at', 'UNVERIFIED', 'no population to verify'),
+                        ('target_at_place', 'VERIFIED', 'migration 047: the target the order was placed against'),
+                        ('ledger_at_place', 'VERIFIED', 'migration 047: our ledger at placement'),
+                        ('bid_at_place', 'VERIFIED', 'migration 047: the book as we saw it'),
+                        ('ask_at_place', 'VERIFIED', 'migration 047: the book as we saw it'),
+                        ('intent', 'VERIFIED', 'migration 050 defines the four wire values and the CHECK constraint en'),
+                        ('kind', 'VERIFIED', 'migration 047 CHECK constraint enumerates the six roles'),
+                        ('target', 'VERIFIED', 'migration 046: ratio x his_net, whole shares, as production computed i'),
+                        ('ledger_net', 'VERIFIED', 'migration 046/047: long-token shares by our own booking'),
+                        ('his_net', 'VERIFIED', 'migration 046: long minus other, in long-token shares'),
+                        ('mark', 'VERIFIED', 'migration 046: the venue quote at the tick')
+       ) v(field, semantic_status, verified_by)
+), w AS (
+  -- STAGE 2, the code-side verdict, likewise from that file's scan.
+  SELECT * FROM (VALUES ('trigger_trade_id', 'NO_WRITE_SITE'),
+                        ('his_fill_id',      'WRITE_SITE'),
+                        ('his_fill_ts',      'NO_WRITE_SITE'),
+                        ('first_fill_at',    'NO_WRITE_SITE'),
+                        ('target_at_place',  'WRITE_SITE'),
+                        ('ledger_at_place',  'WRITE_SITE'),
+                        ('bid_at_place',     'WRITE_SITE'),
+                        ('ask_at_place',     'WRITE_SITE'),
+                        ('intent',           'WRITE_SITE'),
+                        ('kind',             'WRITE_SITE'),
+                        ('target',           'WRITE_SITE'),
+                        ('ledger_net',       'WRITE_SITE'),
+                        ('his_net',          'WRITE_SITE'),
+                        ('mark',             'WRITE_SITE')
+       ) v(field, write_site)
 ), f AS (
-  SELECT 'mirror_orders.trigger_trade_id' AS evidence_field,
+  SELECT 'trigger_trade_id' AS field, 'mirror_orders' AS tbl,
          'TIER 1 direct source-fill lineage' AS used_as,
          count(*) AS universe_rows, count(trigger_trade_id) AS populated_rows,
          min(placed_at) FILTER (WHERE trigger_trade_id IS NOT NULL) AS first_pop,
          max(placed_at) FILTER (WHERE trigger_trade_id IS NOT NULL) AS last_pop
     FROM o
-  UNION ALL
-  SELECT 'mirror_orders.his_fill_id', 'TIER 1 alternative (content unverified)',
+  UNION ALL SELECT 'his_fill_id', 'mirror_orders', 'TIER 1 alternative',
          count(*), count(his_fill_id),
          min(placed_at) FILTER (WHERE his_fill_id IS NOT NULL),
          max(placed_at) FILTER (WHERE his_fill_id IS NOT NULL) FROM o
-  UNION ALL
-  SELECT 'mirror_orders.his_fill_ts', 'reaction timing',
+  UNION ALL SELECT 'his_fill_ts', 'mirror_orders', 'reaction timing',
          count(*), count(his_fill_ts),
          min(placed_at) FILTER (WHERE his_fill_ts IS NOT NULL),
          max(placed_at) FILTER (WHERE his_fill_ts IS NOT NULL) FROM o
-  UNION ALL
-  SELECT 'mirror_orders.first_fill_at', 'our time-to-fill',
+  UNION ALL SELECT 'first_fill_at', 'mirror_orders', 'our time-to-fill',
          count(*), count(first_fill_at),
          min(placed_at) FILTER (WHERE first_fill_at IS NOT NULL),
          max(placed_at) FILTER (WHERE first_fill_at IS NOT NULL) FROM o
-  UNION ALL
-  SELECT 'mirror_orders.target_at_place', 'TIER 2/3 target lineage',
+  UNION ALL SELECT 'target_at_place', 'mirror_orders', 'TIER 2/3 target lineage',
          count(*), count(target_at_place),
          min(placed_at) FILTER (WHERE target_at_place IS NOT NULL),
          max(placed_at) FILTER (WHERE target_at_place IS NOT NULL) FROM o
-  UNION ALL
-  SELECT 'mirror_orders.ledger_at_place', 'TIER 2 ledger lineage',
+  UNION ALL SELECT 'ledger_at_place', 'mirror_orders', 'TIER 2 ledger lineage',
          count(*), count(ledger_at_place),
          min(placed_at) FILTER (WHERE ledger_at_place IS NOT NULL),
          max(placed_at) FILTER (WHERE ledger_at_place IS NOT NULL) FROM o
-  UNION ALL
-  SELECT 'mirror_orders.bid_at_place', 'execution-quality reference',
+  UNION ALL SELECT 'bid_at_place', 'mirror_orders', 'execution-quality reference',
          count(*), count(bid_at_place),
          min(placed_at) FILTER (WHERE bid_at_place IS NOT NULL),
          max(placed_at) FILTER (WHERE bid_at_place IS NOT NULL) FROM o
-  UNION ALL
-  SELECT 'mirror_orders.ask_at_place', 'execution-quality reference',
+  UNION ALL SELECT 'ask_at_place', 'mirror_orders', 'execution-quality reference',
          count(*), count(ask_at_place),
          min(placed_at) FILTER (WHERE ask_at_place IS NOT NULL),
          max(placed_at) FILTER (WHERE ask_at_place IS NOT NULL) FROM o
-  UNION ALL
-  SELECT 'mirror_orders.intent', 'signed wire direction',
+  UNION ALL SELECT 'intent', 'mirror_orders', 'signed wire direction',
          count(*), count(intent),
          min(placed_at) FILTER (WHERE intent IS NOT NULL),
          max(placed_at) FILTER (WHERE intent IS NOT NULL) FROM o
-  UNION ALL
-  SELECT 'mirror_shadow.target', 'the recorded commanded target',
+  UNION ALL SELECT 'kind', 'mirror_orders', 'order role',
+         count(*), count(kind),
+         min(placed_at) FILTER (WHERE kind IS NOT NULL),
+         max(placed_at) FILTER (WHERE kind IS NOT NULL) FROM o
+  UNION ALL SELECT 'target', 'mirror_shadow', 'the recorded commanded target',
          count(*), count(target),
          min(at) FILTER (WHERE target IS NOT NULL),
          max(at) FILTER (WHERE target IS NOT NULL) FROM s
-  UNION ALL
-  SELECT 'mirror_shadow.ledger_net', 'the recorded pre-command position',
+  UNION ALL SELECT 'ledger_net', 'mirror_shadow', 'recorded pre-command position',
          count(*), count(ledger_net),
          min(at) FILTER (WHERE ledger_net IS NOT NULL),
          max(at) FILTER (WHERE ledger_net IS NOT NULL) FROM s
-  UNION ALL
-  SELECT 'mirror_shadow.his_net', 'RN1 signed state as production read it',
+  UNION ALL SELECT 'his_net', 'mirror_shadow', 'RN1 signed state as read',
          count(*), count(his_net),
          min(at) FILTER (WHERE his_net IS NOT NULL),
          max(at) FILTER (WHERE his_net IS NOT NULL) FROM s
-  UNION ALL
-  SELECT 'mirror_shadow.mark', 'valuation horizon price',
+  UNION ALL SELECT 'mark', 'mirror_shadow', 'valuation horizon price',
          count(*), count(mark),
          min(at) FILTER (WHERE mark IS NOT NULL),
          max(at) FILTER (WHERE mark IS NOT NULL) FROM s
 )
-SELECT evidence_field, used_as, universe_rows, populated_rows,
-       round((100.0 * populated_rows / NULLIF(universe_rows, 0))::numeric, 3)
-         AS pct_populated,
-       to_char(first_pop, 'YYYY-MM-DD HH24:MI') AS first_populated,
-       to_char(last_pop,  'YYYY-MM-DD HH24:MI') AS last_populated,
-       CASE WHEN populated_rows = 0
-              THEN 'UNAVAILABLE -- NOT IDENTIFIABLE FROM RETAINED DATA'
-            WHEN populated_rows < 0.995 * universe_rows
-              THEN 'PARTIALLY_AVAILABLE'
-            ELSE 'AVAILABLE' END AS availability
-  FROM f ORDER BY 1;
+SELECT f.tbl || '.' || f.field AS evidence_field,
+       f.used_as,
+       'yes (this query reads it)' AS stage1_column_exists,
+       w.write_site AS stage2_write_site,
+       f.populated_rows AS stage3_populated_rows,
+       f.universe_rows,
+       round((100.0 * f.populated_rows / NULLIF(f.universe_rows, 0))::numeric, 3)
+         AS stage3_pct_populated,
+       to_char(f.first_pop, 'YYYY-MM-DD HH24:MI') AS first_populated,
+       to_char(f.last_pop,  'YYYY-MM-DD HH24:MI') AS last_populated,
+       sem.semantic_status AS stage4_semantics,
+       CASE WHEN w.write_site = 'NO_WRITE_SITE' OR f.populated_rows = 0
+              THEN 'NOT IDENTIFIABLE FROM RETAINED DATA'
+            WHEN sem.semantic_status <> 'VERIFIED'
+              THEN 'INELIGIBLE -- semantics unverified'
+            WHEN f.populated_rows < 0.995 * f.universe_rows
+              THEN 'ELIGIBLE (partially populated)'
+            ELSE 'ELIGIBLE' END AS stage5_attribution_eligibility
+  FROM f JOIN w ON w.field = f.field JOIN sem ON sem.field = f.field
+ ORDER BY 1;
+
+\echo '== 0b. his_fill_id SEMANTIC PROBE -- five questions before it may be a tier =='
+
+WITH o AS MATERIALIZED (
+  SELECT id, his_fill_id, placed_at FROM mirror_orders
+   WHERE lower(whale) = 'rn1' AND his_fill_id IS NOT NULL
+), t AS MATERIALIZED (
+  SELECT t.id, t.tx_hash, t.source FROM trades t JOIN whales wh ON wh.id = t.whale_id
+   WHERE lower(wh.username) = 'rn1'
+), j_id AS MATERIALIZED (
+  SELECT o.id AS order_id, o.his_fill_id, t.id AS trade_id, t.source
+    FROM o LEFT JOIN t ON t.id::text = o.his_fill_id
+), j_tx AS MATERIALIZED (
+  SELECT o.id AS order_id, o.his_fill_id, t.id AS trade_id
+    FROM o LEFT JOIN t ON t.tx_hash = o.his_fill_id
+)
+SELECT
+  (SELECT count(*) FROM o) AS q0_rows_with_a_value,
+  (SELECT count(DISTINCT his_fill_id) FROM o) AS q0_distinct_values,
+  -- 1. WHAT OBJECT DOES THE ID NAME? read the shape rather than assume
+  (SELECT min(length(his_fill_id)) FROM o) AS q1_min_len,
+  (SELECT max(length(his_fill_id)) FROM o) AS q1_max_len,
+  (SELECT count(*) FROM o WHERE his_fill_id ~ '^[0-9]+$') AS q1_all_digits,
+  (SELECT count(*) FROM o WHERE his_fill_id ~ '^0x[0-9a-fA-F]+$') AS q1_hex_0x,
+  (SELECT left(min(his_fill_id), 24) FROM o) AS q1_sample_min,
+  -- 3. DOES IT JOIN TO CANONICAL trades.id?
+  (SELECT count(*) FROM j_id WHERE trade_id IS NOT NULL) AS q3_joins_to_trades_id,
+  (SELECT count(*) FROM j_tx WHERE trade_id IS NOT NULL) AS q3_joins_to_tx_hash,
+  -- 4. JOIN COVERAGE on the population that has a value at all
+  round((100.0 * (SELECT count(*) FROM j_id WHERE trade_id IS NOT NULL)
+         / NULLIF((SELECT count(*) FROM o), 0))::numeric, 3)
+    AS q4_pct_joining_trades_id,
+  -- 2. STABLE ACROSS INGESTION SOURCES? (how many feeds the matched rows span)
+  (SELECT count(DISTINCT source) FROM j_id WHERE trade_id IS NOT NULL)
+    AS q2_distinct_trade_sources_matched,
+  -- 5. CARDINALITY both ways
+  (SELECT max(c) FROM (SELECT count(*) AS c FROM o GROUP BY his_fill_id) z)
+    AS q5_max_orders_per_id,
+  (SELECT count(*) FROM (SELECT his_fill_id FROM o GROUP BY his_fill_id
+                          HAVING count(*) > 1) z) AS q5_ids_used_by_many_orders,
+  (SELECT max(c) FROM (SELECT count(DISTINCT his_fill_id) AS c FROM j_id
+                        WHERE trade_id IS NOT NULL GROUP BY trade_id) z)
+    AS q5_max_ids_per_matched_trade,
+  'NOT PROMOTED TO A TIER UNTIL ALL FIVE ANSWER CLEANLY'
+    AS verdict_rule;
 
 \echo '== 1. THE CAUSAL LEDGER: reach -> command -> execution -> damage =='
 WITH base AS MATERIALIZED (
@@ -2872,9 +2969,15 @@ WITH base AS MATERIALIZED (
     FROM percmd p
 )
 SELECT attribution_window, attribution_tier,
-       CASE WHEN (SELECT n_trigger FROM availt) = 0
-            THEN 'TIER_1 NOT IDENTIFIABLE FROM RETAINED DATA'
-            ELSE 'TIER_1 available' END AS tier_1_precondition,
+       (CASE WHEN (SELECT n_trigger FROM availt) = 0
+             THEN 'T1=NOT_IDENTIFIABLE_FROM_RETAINED_DATA'
+             ELSE 'T1=eligible' END
+        || CASE WHEN (SELECT n_target_at_place FROM availt) > 0
+                 AND (SELECT n_ledger_at_place FROM availt) > 0
+                THEN ' T2=eligible' ELSE ' T2=NOT_IDENTIFIABLE' END
+        || CASE WHEN (SELECT n_target_at_place FROM availt) > 0
+                THEN ' T3=eligible' ELSE ' T3=NOT_IDENTIFIABLE' END
+        || ' T4=sensitivity_only') AS tier_eligibility,
        count(*) AS harmful_commands,
        count(DISTINCT condition_id) AS conditions,
        sum(executions) AS executions,
@@ -3281,9 +3384,15 @@ WITH base AS MATERIALIZED (
     FROM percmd p
 )
 SELECT attribution_window, attribution_tier,
-       CASE WHEN (SELECT n_trigger FROM availt) = 0
-            THEN 'TIER_1 NOT IDENTIFIABLE FROM RETAINED DATA'
-            ELSE 'TIER_1 available' END AS tier_1_precondition,
+       (CASE WHEN (SELECT n_trigger FROM availt) = 0
+             THEN 'T1=NOT_IDENTIFIABLE_FROM_RETAINED_DATA'
+             ELSE 'T1=eligible' END
+        || CASE WHEN (SELECT n_target_at_place FROM availt) > 0
+                 AND (SELECT n_ledger_at_place FROM availt) > 0
+                THEN ' T2=eligible' ELSE ' T2=NOT_IDENTIFIABLE' END
+        || CASE WHEN (SELECT n_target_at_place FROM availt) > 0
+                THEN ' T3=eligible' ELSE ' T3=NOT_IDENTIFIABLE' END
+        || ' T4=sensitivity_only') AS tier_eligibility,
        count(*) AS p1_consistent_commands,
        count(DISTINCT condition_id) AS conditions,
        sum(executions) AS executions,
