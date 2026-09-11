@@ -1,106 +1,37 @@
 -- ============================================================================
--- CHECK B: the required action, derived from the signed target
--- (2026-09-11, read-only.)
+-- CHECK B PRE-FLIGHT: PLAN ONLY. Nothing here is executed.
 --
--- WHAT THE DIAGNOSTIC (run 38) CHANGED, before any of this was dispatched.
--- Three facts, measured in seven seconds, that the design has to obey:
+-- GENERATED from research/rn1_checkB_states.sql by prefixing each statement
+-- with EXPLAIN. Do not hand-edit: regenerate it, so the two files cannot
+-- drift and a plan proved here is the plan the real run will use.
 --
---   1  THE ANCHOR CANNOT REACH THE WINDOW. mirror_shadow's independent
---      snapshot series begins 2026-09-02 18:45. The dM window begins 08-05.
---      conditions_anchorable_at_window_start = ZERO. Anchoring "as of the
---      window start" returns an EMPTY set. The anchor is therefore taken AS
---      OF THE EVENT, and the anchored population is reported with its true
---      reach rather than implied: 1,064 conditions of 26,188 (4.06%), and
---      only from 09-02 onward.
---   2  DESIGNATION COVERS A QUARTER. 6,547 of 26,188 RN1 conditions (25.00%)
---      ever receive a causal long_asset. DESIGNATION_UNKNOWN is therefore the
---      majority state, not an edge case.
---   3  BOTH PER-ROW LOOKUPS WERE FATAL. mirror_shadow is 257,930 rows with
---      239,362 designation rows; a LATERAL over the designation CTE union
---      would have been ~356k events x ~264k rows. It would never have
---      finished. mirror_orders is small (11,183 rows) but has no index on
---      us_market_slug, so the position lookup had the same shape.
+-- WHY IT EXISTS. Check A cost three twenty-minute timeouts because the plan
+-- was never looked at. Run 36 planned it in ten seconds and the cause was a
+-- nested-loop rescan nobody had guessed -- the planner estimated a CTE at ONE
+-- row when the true figure was ~356,000, and re-ran a whole sort-and-window
+-- pass once per outer row. Check B's statement 2 has the same ingredients: a
+-- CTE union the planner cannot estimate, feeding window aggregates.
 --
--- SO EVERY LOOKUP HERE IS AN AS-OF CARRY-FORWARD, the same class of fix that
--- took check A from three twenty-minute timeouts to twenty-three seconds:
--- union the events with the designation (or position, or snapshot) rows, sort
--- ONCE per condition, and carry the last value forward with a window. O(n log
--- n) instead of O(n x m). Non-event rows sort BEFORE a same-timestamp event
--- (pri 0 vs 1) so `designation_at <= event_at` holds exactly, by construction
--- rather than by a filter that could be written the wrong way round.
+-- SO THIS RUNS FIRST, and it answers two questions for a few seconds of
+-- compute:
+--   1  DO ALL THE NAMES RESOLVE? EXPLAIN performs full parse analysis, so a
+--      misspelled column or an ambiguous reference fails HERE, cheaply,
+--      instead of aborting the real file under ON_ERROR_STOP after the
+--      expensive statements have already burned the timeout.
+--   2  IS ANY INNER SIDE GOING TO BE RESCANNED? Read each plan for a Nested
+--      Loop whose inner side is a Sort/WindowAgg with no Materialize above
+--      it, and for row estimates of 1 on anything built from the canonical
+--      feed CASE. Either is the check A failure returning.
 --
--- THE TWO STATE MACHINES, never mixed:
---   CONTINUOUS_TARGET_STATE  what a corrected mirror CONTINUOUSLY TRACKING the
---       signed target would request. cf state propagates in RN1 event order,
---       cf_position_after := cf_target_after. Reported over the full window on
---       COVERAGE_SUPPORTED reconstruction, because anchored data does not
---       reach it, and separately on the anchored subset as validation.
---   ACTUAL_STATE             what a corrected decision would have requested
---       FROM THE HISTORICAL STATE THE DEFECTIVE PRODUCTION SYSTEM ACTUALLY
---       CREATED. Confined to 09-06..09-10.
--- NEITHER IS THE A->D P&L COUNTERFACTUAL. Both classify a REQUESTED action;
--- execution -- depth, fills, slippage -- comes later and is not modelled here.
---
--- THE ACTION COMES FROM ONE SIGNED COMPARISON AND ITS SIGN ALONE. dM, incoming
--- token identity and "opposite leg" determine nothing:
---     rn1_net = long_shares - other_shares          (analytics/mirror.py:125)
---     cf_target_after = trunc(ratio x rn1_net_after)
---     required_change = cf_target_after - cf_position_before
--- trunc() toward zero matches analytics/mirror.py:280
---     tgt = int(raw) if raw >= 0 else -int(-raw)      # toward zero, whole shares
--- so both operands are integers and HOLD is exact equality, not a band. A fill
--- too small to move the integer target is a real venue state.
---
--- cf_position_before is the PREVIOUS event's cf_target_after via lag(), NOT
--- recomputed from this event's designation, so a designation or ratio that
--- CHANGED between two events surfaces as a disagreement in the algebra test
--- instead of being silently smoothed over.
---
--- ---------------------------------------------------------------------------
--- FOUR DEFECTS FOUND IN THE GUARD-CHECK OF THE PREVIOUS DRAFT, all fixed here.
--- Recorded because three of them would have produced plausible-looking numbers
--- rather than an error, which is the dangerous kind:
---
---   a  LEG IDENTITY WAS TAKEN FROM min(asset)/max(asset). On a condition with
---      only ONE traded leg that yields a1 = a2, so the two running counters
---      count the SAME token, LEAST(c1,c2) = c1, and every fill manufactures
---      phantom dM. Check A excluded these with `qy > 0 AND qn > 0`; this draft
---      had no such guard, and run 36 measured single-leg conditions at 7.6% of
---      rows. Counters are now keyed on outcome_index, which cannot collide,
---      and asset identity is used ONLY to orient the designation.
---   b  A DESIGNATED long_asset THAT IS NEITHER TRADED LEG produced a NULL
---      net, hence a NULL difference, which the classification CASE swept into
---      its ELSE branch and reported as HOLD. It now has its own bucket.
---   c  THE RATIO 0.10 WAS INVENTED. mirror_candidate_refusals has no ratio
---      column, and the draft hardcoded COALESCE(ratio, 0.10) for all three
---      sources. The ratio determines how often trunc() collapses a move to
---      HOLD, so a fabricated one directly manufactures the headline. The
---      ratio is now ITS OWN carry-forward from the sources that actually
---      record one (mirror_books, mirror_shadow); an event with no observed
---      ratio is reported as RATIO_UNKNOWN, not assumed.
---   d  THE ANCHOR WAS THE EARLIEST SNAPSHOT, held for every later event --
---      exactly the "reuse a stale snapshot indefinitely" the owner ruled out.
---      The anchor is now as-of: at each snapshot the seed is rebased
---      (seed := snap - running_fills), so state = seed + running_fills always
---      restarts from the MOST RECENT independent observation. Anchor age is
---      reported at p50 and p90 so staleness is visible rather than assumed
---      away.
---
--- WHAT A SNAPSHOT IS AND IS NOT. An independent venue snapshot at t_snap
--- establishes RN1 INVENTORY AT t_snap. It does not establish that earlier
--- fills were captured: omitted offsetting fills leave the same net. So
--- statement 5 compares snapshot against fills-derived inventory as a
--- VALIDATION DIAGNOSTIC only. Exact agreement there is reported as STATE
--- RECONCILIATION PASSED and must never be restated as fill history proven
--- complete.
---
--- Read-only: five SELECTs. Nothing here writes.
+-- The local pglast parse already proved the file is five pure SELECTs under
+-- the PostgreSQL 16 grammar. A grammar parse does not resolve names against
+-- the catalogue; this does.
 -- ============================================================================
 
-
-\echo '== 1. COVERAGE: designation and anchor reach over the dM population =='
+\echo '== PLAN ONLY -- 1. COVERAGE: designation and anchor reach over the dM population =='
 -- dM here is computed from outcome_index only, so a single-leg condition
 -- yields LEAST(cy,cn) = 0 for every row and drops out on its own.
+EXPLAIN
 WITH base AS (
   SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
          t.size::float8 AS sh, t.price::float8 AS px,
@@ -160,8 +91,7 @@ SELECT CASE WHEN a.first_anchor IS NOT NULL AND d.ts >= a.first_anchor
  WHERE d.ts >= timestamptz '2026-08-05 00:00Z' AND d.d_m > 0.000001
  GROUP BY 1 ORDER BY 1;
 
-
-\echo '== 2. CONTINUOUS_TARGET_STATE: action mix, designation source, algebra test =='
+\echo '== PLAN ONLY -- 2. CONTINUOUS_TARGET_STATE: action mix, designation source, algebra test =='
 -- ONE pass over the merged stream serves all three report blocks. They were
 -- three separate statements in the draft, each rebuilding the same ~620k-row
 -- stream and re-sorting it; check A's lesson is that the plan shape, not the
@@ -172,6 +102,7 @@ SELECT CASE WHEN a.first_anchor IS NOT NULL AND d.ts >= a.first_anchor
 --   block 2 SOURCE   the same events split by which table named the long token
 --   block 3 ALGEBRA  sign(required_change) vs sign(rn1_net_after - before),
 --                    over ALL causally designated events, not only dM ones
+EXPLAIN
 WITH base AS (
   SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
          t.size::float8 AS sh, t.price::float8 AS px,
@@ -299,8 +230,7 @@ SELECT label,
        round(sum(d_m * px)::numeric, 0) AS matched_notional
   FROM lab GROUP BY blk, label ORDER BY blk, label;
 
-
-\echo '== 3. ANCHORED SUBSET as validation: as-of snapshot, forward replay only =='
+\echo '== PLAN ONLY -- 3. ANCHORED SUBSET as validation: as-of snapshot, forward replay only =='
 -- Restricted FIRST to conditions that actually have an independent snapshot,
 -- so the population is ~4% and the plan cannot blow up.
 --
@@ -315,6 +245,7 @@ SELECT label,
 -- at or before them are dropped (ga = 0), not back-filled. The snapshot is not
 -- required to be zero -- a nonzero independent observation is a perfectly
 -- valid starting state.
+EXPLAIN
 WITH ac AS (
   SELECT DISTINCT condition_id FROM mirror_shadow
    WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL AND long_asset IS NOT NULL
@@ -413,8 +344,7 @@ SELECT CASE WHEN net_after   IS NULL THEN '4 ANCHOR LONG IS NEITHER TRADED LEG'
  WHERE d_m > 0.000001 OR net_after IS NULL OR as_of_ratio IS NULL
  GROUP BY 1 ORDER BY 1;
 
-
-\echo '== 4. ACTUAL_STATE 09-06..09-10: corrected rule from the real book =='
+\echo '== PLAN ONLY -- 4. ACTUAL_STATE 09-06..09-10: corrected rule from the real book =='
 -- Our booked position is an AS-OF CARRY-FORWARD over the same stream, not a
 -- correlated subquery: mirror_orders has no index on us_market_slug, so the
 -- per-event lookup would have scanned the table once per event.
@@ -422,6 +352,7 @@ SELECT CASE WHEN net_after   IS NULL THEN '4 ANCHOR LONG IS NEITHER TRADED LEG'
 -- Our fills sort with pri = 0, so a fill completing at exactly an event's
 -- timestamp counts as ALREADY BOOKED at that event. That is the conservative
 -- reading and it matters only on exact-millisecond collisions.
+EXPLAIN
 WITH bk AS (
   SELECT DISTINCT ON (condition_id) condition_id, us_market_slug AS slug,
          long_asset, ratio
@@ -495,8 +426,7 @@ SELECT CASE WHEN tgt_after IS NULL
  WHERE d_m > 0.000001 OR tgt_after IS NULL
  GROUP BY 1, 2 ORDER BY 1, 2;
 
-
-\echo '== 5. STATE RECONCILIATION: independent snapshot vs fills-derived inventory =='
+\echo '== PLAN ONLY -- 5. STATE RECONCILIATION: independent snapshot vs fills-derived inventory =='
 -- A VALIDATION DIAGNOSTIC, NOT THE ANCHOR CRITERION AND NOT A COMPLETENESS
 -- PROOF. Even an exact match only shows that our cumulative fill
 -- reconstruction lands on the same net the venue reports; omitted offsetting
@@ -507,6 +437,7 @@ SELECT CASE WHEN tgt_after IS NULL
 -- from his earliest retained fill up to the snapshot instant -- which is
 -- exactly the quantity statement 2 relies on. So this measures the reliability
 -- of statement 2's state, which is the reason to run it.
+EXPLAIN
 WITH ac AS (
   SELECT DISTINCT condition_id FROM mirror_shadow
    WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL AND long_asset IS NOT NULL
@@ -571,3 +502,4 @@ SELECT CASE WHEN fills_long IS NULL
        round(max(abs(snap_long - fills_long))::numeric, 1) AS max_abs_long_diff,
        round(max(abs(snap_other - fills_other))::numeric, 1) AS max_abs_other_diff
   FROM r GROUP BY 1 ORDER BY 1;
+
