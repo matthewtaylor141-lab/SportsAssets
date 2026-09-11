@@ -60,7 +60,62 @@
 --
 -- NO COMBINED BUY+SELL PROFITABILITY NUMBER IS PRODUCED.
 --
--- Read-only: five SELECTs. Nothing here writes.
+-- ---------------------------------------------------------------------------
+-- WHY RUNS 51 AND 53 NEVER RETURNED -- MEASURED, NOT REASONED (runs 52, 54).
+--
+-- I guessed twice and was wrong twice, so run 54 measured instead, and it
+-- REFUTED MY OWN STATED SUSPECT. I had written that the killer was the direct
+-- join to copy_probes on the unindexed trade_id column. There is indeed no
+-- index on trade_id (run 54 statement 2: only pkey(id), probe_at, and
+-- whale_id+probe_at), but run 52's plan shows the planner already choosing a
+-- HASH RIGHT JOIN -- one sequential pass over copy_probes hashed against the
+-- events. That is the shape check A settled on. The probe join was never the
+-- problem and is UNCHANGED here.
+--
+-- THE ACTUAL CAUSE IS A CARDINALITY COLLAPSE. Run 52's plan estimates the
+-- canon CTE at rows=1. Run 54 statement 3 measures it at 368,544. The old
+-- canon was a three-column self-join whose third condition was
+--     b.feed = (CASE WHEN bool_or(base.feed = 'venue') THEN 'venue' ELSE ... )
+-- a CASE over an aggregate, for which the planner has no statistics; the
+-- selectivities multiplied down and clamped to the floor of 1.
+--
+-- rows=1 then propagated into every node above it, and the fatal consequence
+-- is visible verbatim in run 52's plan for statement 2:
+--     Nested Loop Left Join (rows=1)
+--       -> CTE Scan on ev                       <- the OUTER side
+--       -> GroupAggregate -> Merge Join -> WindowAgg -> Nested Loop
+--            -> Function Scan on jsonb_array_elements
+-- With a one-row outer estimate a nested loop is free, so the planner put the
+-- ENTIRE LADDER WALK -- sort, window, group over 7.5M ladder levels -- on the
+-- INNER side, to be re-executed once per event. At ~31k real events that does
+-- not finish, which is exactly what runs 51 and 53 did.
+--
+-- THREE FIXES, none of which changes a definition, a denominator, a cohort or
+-- a measured quantity:
+--   1 canon becomes a ONE-PASS WINDOW dedup with identical semantics, phrased
+--     as "drop the losers" so the planner's default lands near 1.0 rather than
+--     near 0. (The equality phrasing would have estimated 0.005 and clamped
+--     again -- the point is the ESTIMATE, not the tidiness.)
+--   2 lad / cum / walk are AS MATERIALIZED. This is the belt to the braces:
+--     a materialized CTE is computed ONCE into a tuplestore and physically
+--     CANNOT be re-driven per outer row, whatever the estimate turns out to
+--     be. Fixing the estimate alone would leave the same trap one bad
+--     selectivity guess away.
+--   3 the event window gains an UPPER bound, ts < 2026-09-11 12:00Z. The read
+--     replica is live and RN1 is still trading: run 54 counted the SAME
+--     canonical population twice in one file and got 368,544 then 368,549,
+--     seconds apart. Without a fixed upper edge no two runs measure the same
+--     population and no figure here is reproducible. This cut is EARLIER than
+--     run 47, so the TTI counts below will be slightly SMALLER than run 47's
+--     31,265 -- that is the bound, not a discrepancy.
+--
+-- base itself is deliberately NOT time-filtered: legs are derived from it, and
+-- a condition whose second token last traded before the window would lose its
+-- leg identity and manufacture phantom dM. That is check B defect (a), fixed
+-- once already, and it is not being reintroduced for a speed gain.
+-- ---------------------------------------------------------------------------
+--
+-- Read-only: three SELECTs. Nothing here writes.
 -- ============================================================================
 
 
@@ -72,12 +127,22 @@ WITH base AS (
     FROM trades t JOIN whales w ON w.id = t.whale_id
    WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
      AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
-), env AS (
-  SELECT tx_hash, asset, CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS cf
-    FROM base GROUP BY 1, 2
 ), canon AS (
-  SELECT b.condition_id, b.ts, b.id, b.outcome_index, b.sh, b.px, b.source
-    FROM base b JOIN env e ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.cf = b.feed
+  -- THE CROSS-FEED DEDUP, NOW A ONE-PASS WINDOW INSTEAD OF A THREE-COLUMN
+  -- SELF-JOIN. Identical rows out: a 'cash' row is dropped only when the same
+  -- (tx_hash, asset) also carries a 'venue' row. The JOIN FORM WAS THE WHOLE
+  -- PROBLEM. Its third condition was a CASE over an aggregate, which the
+  -- planner has no statistics for, so it multiplied the selectivities down and
+  -- CLAMPED canon TO rows=1 -- against 368,544 actual (run 54 statement 3).
+  -- Run 52's plan shows every downstream node inheriting that rows=1.
+  -- Written as "drop the losers" rather than "keep the winners" deliberately:
+  -- NOT (cash AND a venue row exists) estimates near 1.0, which is the truth,
+  -- where the equality form would have estimated 0.005 and clamped again.
+  SELECT z.condition_id, z.ts, z.id, z.outcome_index, z.sh, z.px, z.source
+    FROM (SELECT b.*, bool_or(b.feed = 'venue')
+                        OVER (PARTITION BY b.tx_hash, b.asset) AS any_venue
+            FROM base b) z
+   WHERE NOT (z.feed = 'cash' AND z.any_venue)
 ), legs AS (
   SELECT condition_id,
          max(asset) FILTER (WHERE outcome_index = 0) AS ay,
@@ -153,6 +218,7 @@ WITH base AS (
               - round((abs(y.as_of_ratio * y.signed_dn))::numeric)::float8) < 1e-9) AS d_int
     FROM l1 y
    WHERE y.ts >= timestamptz '2026-08-05 00:00Z'
+     AND y.ts <  timestamptz '2026-09-11 12:00Z'
      AND y.as_of_long IS NOT NULL AND y.as_of_ratio IS NOT NULL AND y.as_of_ratio > 0
      AND y.signed_dn IS NOT NULL AND y.sh > 0
      AND NOT (y.prev_ev IS NOT NULL AND y.prev_long  IS DISTINCT FROM y.as_of_long)
@@ -177,17 +243,17 @@ WITH base AS (
     LEFT JOIN copy_probes p ON p.trade_id = q.ev
     LEFT JOIN pair pr ON pr.condition_id = q.condition_id
     LEFT JOIN markets mk ON mk.condition_id = q.condition_id
-), lad AS (
+), lad AS MATERIALIZED (
   SELECT e.ev, lv.ord,
          (lv.lvl->>0)::float8 AS lvl_px,
          (lv.lvl->>1)::float8 AS lvl_sz
     FROM ev e
     CROSS JOIN LATERAL jsonb_array_elements(e.depth) WITH ORDINALITY AS lv(lvl, ord)
    WHERE e.probe_available
-), cum AS (
+), cum AS MATERIALIZED (
   SELECT l.*, sum(l.lvl_sz) OVER w AS cum_sz
     FROM lad l WINDOW w AS (PARTITION BY l.ev ORDER BY l.ord ROWS UNBOUNDED PRECEDING)
-), walk AS (
+), walk AS MATERIALIZED (
   -- Walk the ACTUAL stored ladder to the event's own required quantity.
   -- take(Q) at a level = LEAST(level_size, GREATEST(Q - shares_above, 0)).
   -- No fixed $1k/$5k proxy is used anywhere.
@@ -271,12 +337,22 @@ WITH base AS (
     FROM trades t JOIN whales w ON w.id = t.whale_id
    WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
      AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
-), env AS (
-  SELECT tx_hash, asset, CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS cf
-    FROM base GROUP BY 1, 2
 ), canon AS (
-  SELECT b.condition_id, b.ts, b.id, b.outcome_index, b.sh, b.px, b.source
-    FROM base b JOIN env e ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.cf = b.feed
+  -- THE CROSS-FEED DEDUP, NOW A ONE-PASS WINDOW INSTEAD OF A THREE-COLUMN
+  -- SELF-JOIN. Identical rows out: a 'cash' row is dropped only when the same
+  -- (tx_hash, asset) also carries a 'venue' row. The JOIN FORM WAS THE WHOLE
+  -- PROBLEM. Its third condition was a CASE over an aggregate, which the
+  -- planner has no statistics for, so it multiplied the selectivities down and
+  -- CLAMPED canon TO rows=1 -- against 368,544 actual (run 54 statement 3).
+  -- Run 52's plan shows every downstream node inheriting that rows=1.
+  -- Written as "drop the losers" rather than "keep the winners" deliberately:
+  -- NOT (cash AND a venue row exists) estimates near 1.0, which is the truth,
+  -- where the equality form would have estimated 0.005 and clamped again.
+  SELECT z.condition_id, z.ts, z.id, z.outcome_index, z.sh, z.px, z.source
+    FROM (SELECT b.*, bool_or(b.feed = 'venue')
+                        OVER (PARTITION BY b.tx_hash, b.asset) AS any_venue
+            FROM base b) z
+   WHERE NOT (z.feed = 'cash' AND z.any_venue)
 ), legs AS (
   SELECT condition_id,
          max(asset) FILTER (WHERE outcome_index = 0) AS ay,
@@ -352,6 +428,7 @@ WITH base AS (
               - round((abs(y.as_of_ratio * y.signed_dn))::numeric)::float8) < 1e-9) AS d_int
     FROM l1 y
    WHERE y.ts >= timestamptz '2026-08-05 00:00Z'
+     AND y.ts <  timestamptz '2026-09-11 12:00Z'
      AND y.as_of_long IS NOT NULL AND y.as_of_ratio IS NOT NULL AND y.as_of_ratio > 0
      AND y.signed_dn IS NOT NULL AND y.sh > 0
      AND NOT (y.prev_ev IS NOT NULL AND y.prev_long  IS DISTINCT FROM y.as_of_long)
@@ -376,17 +453,17 @@ WITH base AS (
     LEFT JOIN copy_probes p ON p.trade_id = q.ev
     LEFT JOIN pair pr ON pr.condition_id = q.condition_id
     LEFT JOIN markets mk ON mk.condition_id = q.condition_id
-), lad AS (
+), lad AS MATERIALIZED (
   SELECT e.ev, lv.ord,
          (lv.lvl->>0)::float8 AS lvl_px,
          (lv.lvl->>1)::float8 AS lvl_sz
     FROM ev e
     CROSS JOIN LATERAL jsonb_array_elements(e.depth) WITH ORDINALITY AS lv(lvl, ord)
    WHERE e.probe_available
-), cum AS (
+), cum AS MATERIALIZED (
   SELECT l.*, sum(l.lvl_sz) OVER w AS cum_sz
     FROM lad l WINDOW w AS (PARTITION BY l.ev ORDER BY l.ord ROWS UNBOUNDED PRECEDING)
-), walk AS (
+), walk AS MATERIALIZED (
   -- Walk the ACTUAL stored ladder to the event's own required quantity.
   -- take(Q) at a level = LEAST(level_size, GREATEST(Q - shares_above, 0)).
   -- No fixed $1k/$5k proxy is used anywhere.
@@ -461,12 +538,22 @@ WITH base AS (
     FROM trades t JOIN whales w ON w.id = t.whale_id
    WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
      AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
-), env AS (
-  SELECT tx_hash, asset, CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS cf
-    FROM base GROUP BY 1, 2
 ), canon AS (
-  SELECT b.condition_id, b.ts, b.id, b.outcome_index, b.sh, b.px, b.source
-    FROM base b JOIN env e ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.cf = b.feed
+  -- THE CROSS-FEED DEDUP, NOW A ONE-PASS WINDOW INSTEAD OF A THREE-COLUMN
+  -- SELF-JOIN. Identical rows out: a 'cash' row is dropped only when the same
+  -- (tx_hash, asset) also carries a 'venue' row. The JOIN FORM WAS THE WHOLE
+  -- PROBLEM. Its third condition was a CASE over an aggregate, which the
+  -- planner has no statistics for, so it multiplied the selectivities down and
+  -- CLAMPED canon TO rows=1 -- against 368,544 actual (run 54 statement 3).
+  -- Run 52's plan shows every downstream node inheriting that rows=1.
+  -- Written as "drop the losers" rather than "keep the winners" deliberately:
+  -- NOT (cash AND a venue row exists) estimates near 1.0, which is the truth,
+  -- where the equality form would have estimated 0.005 and clamped again.
+  SELECT z.condition_id, z.ts, z.id, z.outcome_index, z.sh, z.px, z.source
+    FROM (SELECT b.*, bool_or(b.feed = 'venue')
+                        OVER (PARTITION BY b.tx_hash, b.asset) AS any_venue
+            FROM base b) z
+   WHERE NOT (z.feed = 'cash' AND z.any_venue)
 ), legs AS (
   SELECT condition_id,
          max(asset) FILTER (WHERE outcome_index = 0) AS ay,
@@ -542,6 +629,7 @@ WITH base AS (
               - round((abs(y.as_of_ratio * y.signed_dn))::numeric)::float8) < 1e-9) AS d_int
     FROM l1 y
    WHERE y.ts >= timestamptz '2026-08-05 00:00Z'
+     AND y.ts <  timestamptz '2026-09-11 12:00Z'
      AND y.as_of_long IS NOT NULL AND y.as_of_ratio IS NOT NULL AND y.as_of_ratio > 0
      AND y.signed_dn IS NOT NULL AND y.sh > 0
      AND NOT (y.prev_ev IS NOT NULL AND y.prev_long  IS DISTINCT FROM y.as_of_long)
@@ -566,17 +654,17 @@ WITH base AS (
     LEFT JOIN copy_probes p ON p.trade_id = q.ev
     LEFT JOIN pair pr ON pr.condition_id = q.condition_id
     LEFT JOIN markets mk ON mk.condition_id = q.condition_id
-), lad AS (
+), lad AS MATERIALIZED (
   SELECT e.ev, lv.ord,
          (lv.lvl->>0)::float8 AS lvl_px,
          (lv.lvl->>1)::float8 AS lvl_sz
     FROM ev e
     CROSS JOIN LATERAL jsonb_array_elements(e.depth) WITH ORDINALITY AS lv(lvl, ord)
    WHERE e.probe_available
-), cum AS (
+), cum AS MATERIALIZED (
   SELECT l.*, sum(l.lvl_sz) OVER w AS cum_sz
     FROM lad l WINDOW w AS (PARTITION BY l.ev ORDER BY l.ord ROWS UNBOUNDED PRECEDING)
-), walk AS (
+), walk AS MATERIALIZED (
   -- Walk the ACTUAL stored ladder to the event's own required quantity.
   -- take(Q) at a level = LEAST(level_size, GREATEST(Q - shares_above, 0)).
   -- No fixed $1k/$5k proxy is used anywhere.
