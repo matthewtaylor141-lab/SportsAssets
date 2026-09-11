@@ -220,22 +220,45 @@ WITH base AS (
            ELSE 'B1 PARTIALLY_FILLABLE_BUY (book genuinely thinner than required)'
          END AS measurability
     FROM ev e LEFT JOIN walk w ON w.ev = e.ev
+), lab AS (
+  SELECT 1 AS blk, measurability AS label, d_m, px, condition_id, sh,
+         required_qty_max, pair_edge, side_forced, reaction_s, sport, source
+    FROM b WHERE local_side = 'BUY '
+  UNION ALL
+  SELECT 2, CASE WHEN measurability LIKE 'A %' THEN '1 MEASURABLE (own ladder covers required qty)'
+                 WHEN measurability LIKE 'D %' THEN '3 NO_USABLE_PROBE'
+                 ELSE '2 PARTIAL or DEPTH-TRUNCATED' END,
+         d_m, px, condition_id, sh, required_qty_max, pair_edge, side_forced,
+         reaction_s, sport, source
+    FROM b WHERE local_side = 'BUY '
+  UNION ALL
+  SELECT 3, CASE WHEN px < 0.10 THEN 'band 1 <10c' WHEN px < 0.25 THEN 'band 2 10-25c'
+                 WHEN px < 0.50 THEN 'band 3 25-50c' WHEN px < 0.75 THEN 'band 4 50-75c'
+                 WHEN px < 0.90 THEN 'band 5 75-90c' ELSE 'band 6 >=90c' END,
+         d_m, px, condition_id, sh, required_qty_max, pair_edge, side_forced,
+         reaction_s, sport, source
+    FROM b WHERE local_side = 'BUY '
 )
-SELECT measurability,
+SELECT blk, label,
        count(*) AS events,
-       round((100.0 * count(*) / sum(count(*)) OVER ())::numeric, 2) AS pct_events,
+       round((100.0 * count(*) / sum(count(*)) OVER (PARTITION BY blk))::numeric, 2) AS pct_in_block,
        count(DISTINCT condition_id) AS conditions,
        round(sum(d_m)::numeric, 0) AS dM_shares,
-       round((100.0 * sum(d_m) / NULLIF(sum(sum(d_m)) OVER (), 0))::numeric, 2) AS pct_dM,
        round(sum(d_m * px)::numeric, 0) AS dm_leg_notional,
-       round((100.0 * sum(d_m * px) / NULLIF(sum(sum(d_m * px)) OVER (), 0))::numeric, 2)
-         AS pct_leg_notional,
-       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s)::numeric, 2)
-         AS p50_reaction_s,
-       round(percentile_cont(0.9) WITHIN GROUP (ORDER BY reaction_s)::numeric, 2)
-         AS p90_reaction_s
-  FROM b WHERE local_side = 'BUY '
- GROUP BY 1 ORDER BY 1;
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY px)::numeric, 4) AS p50_rn1_price,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY sh)::numeric, 1) AS p50_rn1_size,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY d_m)::numeric, 1) AS p50_dM,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY required_qty_max)::numeric, 1)
+         AS p50_required_qty,
+       round((100.0 * percentile_cont(0.5) WITHIN GROUP (ORDER BY pair_edge))::numeric, 3)
+         AS p50_pair_edge_pct,
+       round((100.0 * count(*) FILTER (WHERE side_forced) / NULLIF(count(*), 0))::numeric, 2)
+         AS pct_side_forced,
+       round((100.0 * count(*) FILTER (WHERE source IN ('poll','backfill'))
+              / NULLIF(count(*), 0))::numeric, 2) AS pct_detect_venue_feed,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s)::numeric, 2) AS p50_reaction_s,
+       count(DISTINCT sport) AS distinct_sports
+  FROM lab GROUP BY blk, label ORDER BY blk, label;
 
 
 \echo '== 2. BUY EXECUTION on the fully measurable subset: drag, fill, fee vs pair edge =='
@@ -586,365 +609,16 @@ WITH base AS (
            ELSE 'B1 PARTIALLY_FILLABLE_BUY (book genuinely thinner than required)'
          END AS measurability
     FROM ev e LEFT JOIN walk w ON w.ev = e.ev
-)
-SELECT CASE WHEN measurability LIKE 'A %' THEN '1 MEASURABLE (own ladder covers required qty)'
-            WHEN measurability LIKE 'D %' THEN '3 NO_USABLE_PROBE'
-            ELSE '2 PARTIAL or DEPTH-TRUNCATED' END AS subset,
-       count(*) AS events,
-       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY px)::numeric, 4) AS p50_rn1_price,
-       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY sh)::numeric, 1) AS p50_rn1_size_sh,
-       round(percentile_cont(0.9) WITHIN GROUP (ORDER BY sh)::numeric, 1) AS p90_rn1_size_sh,
-       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY d_m)::numeric, 1) AS p50_dM_sh,
-       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY required_qty_max)::numeric, 1)
-         AS p50_required_qty,
-       round((100.0 * percentile_cont(0.5) WITHIN GROUP (ORDER BY pair_edge))::numeric, 3)
-         AS p50_pair_edge_pct,
-       round((100.0 * count(*) FILTER (WHERE source IN ('poll', 'backfill'))
-              / NULLIF(count(*), 0))::numeric, 2) AS pct_detect_venue_feed,
-       round((100.0 * count(*) FILTER (WHERE side_forced) / NULLIF(count(*), 0))::numeric, 2)
-         AS pct_side_forced,
-       count(DISTINCT sport) AS distinct_sports,
-       mode() WITHIN GROUP (ORDER BY sport) AS modal_sport
-  FROM b WHERE local_side = 'BUY '
- GROUP BY 1 ORDER BY 1;
-
-
-\echo '== 4. BUY price-band and sport detail, measurable vs not =='
-WITH base AS (
-  SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
-         t.size::float8 AS sh, t.price::float8 AS px, t.source,
-         CASE WHEN t.source IN ('poll', 'backfill') THEN 'venue' ELSE 'cash' END AS feed
-    FROM trades t JOIN whales w ON w.id = t.whale_id
-   WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
-     AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
-), env AS (
-  SELECT tx_hash, asset, CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS cf
-    FROM base GROUP BY 1, 2
-), canon AS (
-  SELECT b.condition_id, b.ts, b.id, b.outcome_index, b.sh, b.px, b.source
-    FROM base b JOIN env e ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.cf = b.feed
-), legs AS (
-  SELECT condition_id,
-         max(asset) FILTER (WHERE outcome_index = 0) AS ay,
-         max(asset) FILTER (WHERE outcome_index = 1) AS an
-    FROM base GROUP BY 1
-), pair AS (
-  -- RN1's condition-level matched PAIR edge, on the same canonical rows Check A
-  -- used: 1 - (vwap_yes + vwap_no). Compared against execution drag below.
-  SELECT condition_id,
-         1.0 - ( sum(sh * px) FILTER (WHERE outcome_index = 0)
-                 / NULLIF(sum(sh) FILTER (WHERE outcome_index = 0), 0)
-               + sum(sh * px) FILTER (WHERE outcome_index = 1)
-                 / NULLIF(sum(sh) FILTER (WHERE outcome_index = 1), 0) ) AS pair_edge
-    FROM canon GROUP BY 1
-), desig_rows AS (
-  SELECT condition_id, opened_at AS at, long_asset, ratio FROM mirror_books
-   WHERE long_asset IS NOT NULL
-  UNION ALL
-  SELECT condition_id, at, long_asset, NULL::float8 FROM mirror_candidate_refusals
-   WHERE long_asset IS NOT NULL
-  UNION ALL
-  SELECT condition_id, at, long_asset, ratio FROM mirror_shadow
-   WHERE long_asset IS NOT NULL
-), stream AS (
-  SELECT condition_id, at AS ts, 0 AS pri, NULL::bigint AS ev, long_asset, ratio,
-         NULL::int AS oi, 0::float8 AS sh, NULL::float8 AS px, NULL::text AS source
-    FROM desig_rows
-  UNION ALL
-  SELECT condition_id, ts, 1, id, NULL, NULL, outcome_index, sh, px, source FROM canon
-), run AS (
-  SELECT s.*, l.ay, l.an,
-         count(s.long_asset) OVER wc AS gd,
-         count(s.ratio)      OVER wc AS gr,
-         sum(CASE WHEN s.oi = 0 THEN s.sh ELSE 0 END) OVER wc AS cy,
-         sum(CASE WHEN s.oi = 1 THEN s.sh ELSE 0 END) OVER wc AS cn
-    FROM stream s JOIN legs l ON l.condition_id = s.condition_id
-  WINDOW wc AS (PARTITION BY s.condition_id ORDER BY s.ts, s.pri, s.ev
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-), carried AS (
-  SELECT r.*,
-         first_value(r.long_asset) OVER wd AS as_of_long,
-         first_value(r.ratio)      OVER wr AS as_of_ratio
-    FROM run r
-  WINDOW wd AS (PARTITION BY r.condition_id, r.gd ORDER BY r.ts, r.pri, r.ev),
-         wr AS (PARTITION BY r.condition_id, r.gr ORDER BY r.ts, r.pri, r.ev)
-), evr AS (
-  SELECT c.*,
-         c.cy - CASE WHEN c.oi = 0 THEN c.sh ELSE 0 END AS py,
-         c.cn - CASE WHEN c.oi = 1 THEN c.sh ELSE 0 END AS pn
-    FROM carried c WHERE c.ev IS NOT NULL
-), l0 AS (
-  SELECT e.*,
-         GREATEST(LEAST(e.cy, e.cn) - LEAST(e.py, e.pn), 0) AS d_m,
-         CASE WHEN e.as_of_long IS NULL THEN NULL
-              WHEN e.oi = 0 AND e.as_of_long = e.ay THEN  e.sh
-              WHEN e.oi = 1 AND e.as_of_long = e.an THEN  e.sh
-              WHEN e.oi = 0 AND e.as_of_long = e.an THEN -e.sh
-              WHEN e.oi = 1 AND e.as_of_long = e.ay THEN -e.sh
-              END AS signed_dn
-    FROM evr e
-), l1 AS (
-  SELECT x.*,
-         lag(x.as_of_long)  OVER w AS prev_long,
-         lag(x.as_of_ratio) OVER w AS prev_ratio,
-         lag(x.ev)          OVER w AS prev_ev
-    FROM l0 x WINDOW w AS (PARTITION BY x.condition_id ORDER BY x.ts, x.ev)
-), tti AS (
-  -- TARGET_TRANSITION_IDENTIFIED only: the primary causal cohort.
-  SELECT y.*,
-         abs(y.as_of_ratio * y.signed_dn) AS d_cont,
-         floor(abs(y.as_of_ratio * y.signed_dn)) AS m,
-         (abs(abs(y.as_of_ratio * y.signed_dn)
-              - round((abs(y.as_of_ratio * y.signed_dn))::numeric)::float8) < 1e-9) AS d_int
-    FROM l1 y
-   WHERE y.ts >= timestamptz '2026-08-05 00:00Z'
-     AND y.as_of_long IS NOT NULL AND y.as_of_ratio IS NOT NULL AND y.as_of_ratio > 0
-     AND y.signed_dn IS NOT NULL AND y.sh > 0
-     AND NOT (y.prev_ev IS NOT NULL AND y.prev_long  IS DISTINCT FROM y.as_of_long)
-     AND NOT (y.prev_ev IS NOT NULL AND y.prev_ratio IS DISTINCT FROM y.as_of_ratio)
-), q AS (
-  SELECT z.condition_id, z.ts, z.ev, z.sh, z.px, z.source, z.d_m, z.signed_dn, z.d_cont,
-         GREATEST(0, z.m - 1) AS required_qty_min,
-         CASE WHEN z.d_int THEN z.m ELSE z.m + 1 END AS required_qty_max,
-         CASE WHEN z.signed_dn > 0 THEN 'BUY ' ELSE 'SELL' END AS local_side,
-         (z.d_cont >= 2.0) AS side_forced
-    FROM tti z WHERE z.signed_dn <> 0
-), ev AS (
-  -- THE EXACT OWN-FILL PROBE AND NOTHING ELSE. p.trade_id = this fill's id.
-  -- No envelope borrowing, no nearest-fill substitution, no later snapshot.
-  SELECT q.*, pr.pair_edge, mk.sport,
-         p.probe_at, p.reaction_s, p.book_ok, p.best_ask, p.depth,
-         (p.trade_id IS NOT NULL AND p.book_ok AND p.best_ask IS NOT NULL
-          AND p.depth IS NOT NULL AND jsonb_typeof(p.depth) = 'array'
-          AND jsonb_array_length(p.depth) > 0) AS probe_available,
-         COALESCE(jsonb_array_length(p.depth), 0) AS n_levels
-    FROM q
-    LEFT JOIN copy_probes p ON p.trade_id = q.ev
-    LEFT JOIN pair pr ON pr.condition_id = q.condition_id
-    LEFT JOIN markets mk ON mk.condition_id = q.condition_id
-), lad AS (
-  SELECT e.ev, lv.ord,
-         (lv.lvl->>0)::float8 AS lvl_px,
-         (lv.lvl->>1)::float8 AS lvl_sz
-    FROM ev e
-    CROSS JOIN LATERAL jsonb_array_elements(e.depth) WITH ORDINALITY AS lv(lvl, ord)
-   WHERE e.probe_available
-), cum AS (
-  SELECT l.*, sum(l.lvl_sz) OVER w AS cum_sz
-    FROM lad l WINDOW w AS (PARTITION BY l.ev ORDER BY l.ord ROWS UNBOUNDED PRECEDING)
-), walk AS (
-  -- Walk the ACTUAL stored ladder to the event's own required quantity.
-  -- take(Q) at a level = LEAST(level_size, GREATEST(Q - shares_above, 0)).
-  -- No fixed $1k/$5k proxy is used anywhere.
-  SELECT c.ev,
-         sum(LEAST(c.lvl_sz, GREATEST(e.required_qty_min - (c.cum_sz - c.lvl_sz), 0)))
-           AS sh_at_min,
-         sum(LEAST(c.lvl_sz, GREATEST(e.required_qty_min - (c.cum_sz - c.lvl_sz), 0))
-             * c.lvl_px) AS cost_at_min,
-         sum(LEAST(c.lvl_sz, GREATEST(e.required_qty_max - (c.cum_sz - c.lvl_sz), 0)))
-           AS sh_at_max,
-         sum(LEAST(c.lvl_sz, GREATEST(e.required_qty_max - (c.cum_sz - c.lvl_sz), 0))
-             * c.lvl_px) AS cost_at_max,
-         sum(c.lvl_sz) AS depth_total_sh
-    FROM cum c JOIN ev e ON e.ev = c.ev
-   GROUP BY c.ev
-), b AS (
-  SELECT e.*, w.sh_at_min, w.cost_at_min, w.sh_at_max, w.cost_at_max, w.depth_total_sh,
-         CASE WHEN w.sh_at_min > 0 THEN w.cost_at_min / w.sh_at_min END AS vwap_at_min,
-         CASE WHEN w.sh_at_max > 0 THEN w.cost_at_max / w.sh_at_max END AS vwap_at_max,
-         CASE WHEN e.required_qty_max > 0
-              THEN LEAST(1.0, w.sh_at_max / e.required_qty_max) END AS fill_fraction_at_max,
-         GREATEST(e.required_qty_max - COALESCE(w.sh_at_max, 0), 0) AS unfilled_qty,
-         CASE
-           WHEN NOT e.probe_available THEN 'D NO_USABLE_PROBE (no own-fill probe, or book unreadable)'
-           WHEN e.required_qty_max = 0 THEN 'C ZERO REQUIRED QTY (truncation absorbs it)'
-           WHEN w.sh_at_max >= e.required_qty_max - 1e-9
-             THEN 'A FULLY_MEASURABLE_BUY (ladder covers the conservative qty)'
-           WHEN e.n_levels >= 8
-             THEN 'B2 DEPTH_TRUNCATED_AT_8 (stored ladder ran out; NOT proven unfillable)'
-           ELSE 'B1 PARTIALLY_FILLABLE_BUY (book genuinely thinner than required)'
-         END AS measurability
-    FROM ev e LEFT JOIN walk w ON w.ev = e.ev
-)
-SELECT CASE WHEN px < 0.10 THEN '1 <10c' WHEN px < 0.25 THEN '2 10-25c'
-            WHEN px < 0.50 THEN '3 25-50c' WHEN px < 0.75 THEN '4 50-75c'
-            WHEN px < 0.90 THEN '5 75-90c' ELSE '6 >=90c' END AS price_band,
-       count(*) AS events,
-       round((100.0 * count(*) FILTER (WHERE measurability LIKE 'A %')
-              / NULLIF(count(*), 0))::numeric, 2) AS PCT_MEASURABLE,
-       round((100.0 * count(*) FILTER (WHERE measurability LIKE 'D %')
-              / NULLIF(count(*), 0))::numeric, 2) AS pct_no_probe,
-       round(sum(d_m)::numeric, 0) AS dM_shares,
-       round(sum(d_m * px)::numeric, 0) AS dm_leg_notional,
-       round((100.0 * percentile_cont(0.5) WITHIN GROUP (ORDER BY pair_edge))::numeric, 3)
-         AS p50_pair_edge_pct
-  FROM b WHERE local_side = 'BUY '
- GROUP BY 1 ORDER BY 1;
-
-
-\echo '== 5. SELL side: PARTIALLY IDENTIFIED against a contemporaneous neutral bid =='
--- The only retained neutral quote is mirror_shadow's US top-of-book bid for the
--- long side (_paced_bbo). It is per shadow TICK, not per fill, so it is joined
--- AS-OF: the most recent shadow bid at or before the event, with its age
--- reported. No depth exists, therefore NO fillability, NO VWAP, NO queue
--- position, NO fill probability and NO realised SELL P&L is inferred here.
-WITH base AS (
-  SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
-         t.size::float8 AS sh, t.price::float8 AS px, t.source,
-         CASE WHEN t.source IN ('poll', 'backfill') THEN 'venue' ELSE 'cash' END AS feed
-    FROM trades t JOIN whales w ON w.id = t.whale_id
-   WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
-     AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
-), env AS (
-  SELECT tx_hash, asset, CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS cf
-    FROM base GROUP BY 1, 2
-), canon AS (
-  SELECT b.condition_id, b.ts, b.id, b.outcome_index, b.sh, b.px, b.source
-    FROM base b JOIN env e ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.cf = b.feed
-), legs AS (
-  SELECT condition_id,
-         max(asset) FILTER (WHERE outcome_index = 0) AS ay,
-         max(asset) FILTER (WHERE outcome_index = 1) AS an
-    FROM base GROUP BY 1
-), pair AS (
-  -- RN1's condition-level matched PAIR edge, on the same canonical rows Check A
-  -- used: 1 - (vwap_yes + vwap_no). Compared against execution drag below.
-  SELECT condition_id,
-         1.0 - ( sum(sh * px) FILTER (WHERE outcome_index = 0)
-                 / NULLIF(sum(sh) FILTER (WHERE outcome_index = 0), 0)
-               + sum(sh * px) FILTER (WHERE outcome_index = 1)
-                 / NULLIF(sum(sh) FILTER (WHERE outcome_index = 1), 0) ) AS pair_edge
-    FROM canon GROUP BY 1
-), desig_rows AS (
-  SELECT condition_id, opened_at AS at, long_asset, ratio FROM mirror_books
-   WHERE long_asset IS NOT NULL
-  UNION ALL
-  SELECT condition_id, at, long_asset, NULL::float8 FROM mirror_candidate_refusals
-   WHERE long_asset IS NOT NULL
-  UNION ALL
-  SELECT condition_id, at, long_asset, ratio FROM mirror_shadow
-   WHERE long_asset IS NOT NULL
-), stream AS (
-  SELECT condition_id, at AS ts, 0 AS pri, NULL::bigint AS ev, long_asset, ratio,
-         NULL::int AS oi, 0::float8 AS sh, NULL::float8 AS px, NULL::text AS source
-    FROM desig_rows
-  UNION ALL
-  SELECT condition_id, ts, 1, id, NULL, NULL, outcome_index, sh, px, source FROM canon
-), run AS (
-  SELECT s.*, l.ay, l.an,
-         count(s.long_asset) OVER wc AS gd,
-         count(s.ratio)      OVER wc AS gr,
-         sum(CASE WHEN s.oi = 0 THEN s.sh ELSE 0 END) OVER wc AS cy,
-         sum(CASE WHEN s.oi = 1 THEN s.sh ELSE 0 END) OVER wc AS cn
-    FROM stream s JOIN legs l ON l.condition_id = s.condition_id
-  WINDOW wc AS (PARTITION BY s.condition_id ORDER BY s.ts, s.pri, s.ev
-                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
-), carried AS (
-  SELECT r.*,
-         first_value(r.long_asset) OVER wd AS as_of_long,
-         first_value(r.ratio)      OVER wr AS as_of_ratio
-    FROM run r
-  WINDOW wd AS (PARTITION BY r.condition_id, r.gd ORDER BY r.ts, r.pri, r.ev),
-         wr AS (PARTITION BY r.condition_id, r.gr ORDER BY r.ts, r.pri, r.ev)
-), evr AS (
-  SELECT c.*,
-         c.cy - CASE WHEN c.oi = 0 THEN c.sh ELSE 0 END AS py,
-         c.cn - CASE WHEN c.oi = 1 THEN c.sh ELSE 0 END AS pn
-    FROM carried c WHERE c.ev IS NOT NULL
-), l0 AS (
-  SELECT e.*,
-         GREATEST(LEAST(e.cy, e.cn) - LEAST(e.py, e.pn), 0) AS d_m,
-         CASE WHEN e.as_of_long IS NULL THEN NULL
-              WHEN e.oi = 0 AND e.as_of_long = e.ay THEN  e.sh
-              WHEN e.oi = 1 AND e.as_of_long = e.an THEN  e.sh
-              WHEN e.oi = 0 AND e.as_of_long = e.an THEN -e.sh
-              WHEN e.oi = 1 AND e.as_of_long = e.ay THEN -e.sh
-              END AS signed_dn
-    FROM evr e
-), l1 AS (
-  SELECT x.*,
-         lag(x.as_of_long)  OVER w AS prev_long,
-         lag(x.as_of_ratio) OVER w AS prev_ratio,
-         lag(x.ev)          OVER w AS prev_ev
-    FROM l0 x WINDOW w AS (PARTITION BY x.condition_id ORDER BY x.ts, x.ev)
-), tti AS (
-  -- TARGET_TRANSITION_IDENTIFIED only: the primary causal cohort.
-  SELECT y.*,
-         abs(y.as_of_ratio * y.signed_dn) AS d_cont,
-         floor(abs(y.as_of_ratio * y.signed_dn)) AS m,
-         (abs(abs(y.as_of_ratio * y.signed_dn)
-              - round((abs(y.as_of_ratio * y.signed_dn))::numeric)::float8) < 1e-9) AS d_int
-    FROM l1 y
-   WHERE y.ts >= timestamptz '2026-08-05 00:00Z'
-     AND y.as_of_long IS NOT NULL AND y.as_of_ratio IS NOT NULL AND y.as_of_ratio > 0
-     AND y.signed_dn IS NOT NULL AND y.sh > 0
-     AND NOT (y.prev_ev IS NOT NULL AND y.prev_long  IS DISTINCT FROM y.as_of_long)
-     AND NOT (y.prev_ev IS NOT NULL AND y.prev_ratio IS DISTINCT FROM y.as_of_ratio)
-), q AS (
-  SELECT z.condition_id, z.ts, z.ev, z.sh, z.px, z.source, z.d_m, z.signed_dn, z.d_cont,
-         GREATEST(0, z.m - 1) AS required_qty_min,
-         CASE WHEN z.d_int THEN z.m ELSE z.m + 1 END AS required_qty_max,
-         CASE WHEN z.signed_dn > 0 THEN 'BUY ' ELSE 'SELL' END AS local_side,
-         (z.d_cont >= 2.0) AS side_forced
-    FROM tti z WHERE z.signed_dn <> 0
-), ev AS (
-  -- THE EXACT OWN-FILL PROBE AND NOTHING ELSE. p.trade_id = this fill's id.
-  -- No envelope borrowing, no nearest-fill substitution, no later snapshot.
-  SELECT q.*, pr.pair_edge, mk.sport,
-         p.probe_at, p.reaction_s, p.book_ok, p.best_ask, p.depth,
-         (p.trade_id IS NOT NULL AND p.book_ok AND p.best_ask IS NOT NULL
-          AND p.depth IS NOT NULL AND jsonb_typeof(p.depth) = 'array'
-          AND jsonb_array_length(p.depth) > 0) AS probe_available,
-         COALESCE(jsonb_array_length(p.depth), 0) AS n_levels
-    FROM q
-    LEFT JOIN copy_probes p ON p.trade_id = q.ev
-    LEFT JOIN pair pr ON pr.condition_id = q.condition_id
-    LEFT JOIN markets mk ON mk.condition_id = q.condition_id
-), lad AS (
-  SELECT e.ev, lv.ord,
-         (lv.lvl->>0)::float8 AS lvl_px,
-         (lv.lvl->>1)::float8 AS lvl_sz
-    FROM ev e
-    CROSS JOIN LATERAL jsonb_array_elements(e.depth) WITH ORDINALITY AS lv(lvl, ord)
-   WHERE e.probe_available
-), cum AS (
-  SELECT l.*, sum(l.lvl_sz) OVER w AS cum_sz
-    FROM lad l WINDOW w AS (PARTITION BY l.ev ORDER BY l.ord ROWS UNBOUNDED PRECEDING)
-), walk AS (
-  -- Walk the ACTUAL stored ladder to the event's own required quantity.
-  -- take(Q) at a level = LEAST(level_size, GREATEST(Q - shares_above, 0)).
-  -- No fixed $1k/$5k proxy is used anywhere.
-  SELECT c.ev,
-         sum(LEAST(c.lvl_sz, GREATEST(e.required_qty_min - (c.cum_sz - c.lvl_sz), 0)))
-           AS sh_at_min,
-         sum(LEAST(c.lvl_sz, GREATEST(e.required_qty_min - (c.cum_sz - c.lvl_sz), 0))
-             * c.lvl_px) AS cost_at_min,
-         sum(LEAST(c.lvl_sz, GREATEST(e.required_qty_max - (c.cum_sz - c.lvl_sz), 0)))
-           AS sh_at_max,
-         sum(LEAST(c.lvl_sz, GREATEST(e.required_qty_max - (c.cum_sz - c.lvl_sz), 0))
-             * c.lvl_px) AS cost_at_max,
-         sum(c.lvl_sz) AS depth_total_sh
-    FROM cum c JOIN ev e ON e.ev = c.ev
-   GROUP BY c.ev
-), b AS (
-  SELECT e.*, w.sh_at_min, w.cost_at_min, w.sh_at_max, w.cost_at_max, w.depth_total_sh,
-         CASE WHEN w.sh_at_min > 0 THEN w.cost_at_min / w.sh_at_min END AS vwap_at_min,
-         CASE WHEN w.sh_at_max > 0 THEN w.cost_at_max / w.sh_at_max END AS vwap_at_max,
-         CASE WHEN e.required_qty_max > 0
-              THEN LEAST(1.0, w.sh_at_max / e.required_qty_max) END AS fill_fraction_at_max,
-         GREATEST(e.required_qty_max - COALESCE(w.sh_at_max, 0), 0) AS unfilled_qty,
-         CASE
-           WHEN NOT e.probe_available THEN 'D NO_USABLE_PROBE (no own-fill probe, or book unreadable)'
-           WHEN e.required_qty_max = 0 THEN 'C ZERO REQUIRED QTY (truncation absorbs it)'
-           WHEN w.sh_at_max >= e.required_qty_max - 1e-9
-             THEN 'A FULLY_MEASURABLE_BUY (ladder covers the conservative qty)'
-           WHEN e.n_levels >= 8
-             THEN 'B2 DEPTH_TRUNCATED_AT_8 (stored ladder ran out; NOT proven unfillable)'
-           ELSE 'B1 PARTIALLY_FILLABLE_BUY (book genuinely thinner than required)'
-         END AS measurability
-    FROM ev e LEFT JOIN walk w ON w.ev = e.ev
+), sell_conds AS (
+  -- RESTRICT FIRST. Previously this unioned EVERY mirror_shadow row carrying a
+  -- bid (~250k) against the SELL events, so conditions with no SELL event at
+  -- all still formed window partitions and were sorted. Same shape as the
+  -- check B landmine; reintroduced by me and removed here.
+  SELECT DISTINCT condition_id FROM b WHERE local_side = 'SELL'
 ), bidrows AS (
-  SELECT condition_id, at, bid FROM mirror_shadow WHERE bid IS NOT NULL
+  SELECT ms.condition_id, ms.at, ms.bid
+    FROM mirror_shadow ms JOIN sell_conds sc ON sc.condition_id = ms.condition_id
+   WHERE ms.bid IS NOT NULL
 ), s AS (
   SELECT condition_id, at AS ts, 0 AS pri, NULL::bigint AS ev, bid,
          NULL::float8 AS px, NULL::float8 AS dm, NULL::float8 AS rq
