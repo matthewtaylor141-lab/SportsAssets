@@ -118,34 +118,50 @@
 --   distinction cannot be lost again.
 --
 -- ---------------------------------------------------------------------------
--- WIDENING A WINDOW IS NOT CAUSAL IDENTIFICATION.
+-- WIDENING A WINDOW IS NOT CAUSAL IDENTIFICATION, AND NEITHER IS DIRECT
+-- LINEAGE ON ITS OWN.
 --
 -- Run 74 found zero liquidations against the P1-consistent flatten commands
 -- within 900 s. The temptation is to widen until something appears; that
--- manufactures attribution rather than finding it, because a wider window
--- catches unrelated fills. ATTRIBUTION IS THEREFORE BY LINKAGE, IN THIS ORDER,
--- and temporal proximity is the LAST tier and a sensitivity only:
+-- manufactures attribution rather than finding it. But the sharper point is
+-- the second one: mirror_orders.trigger_trade_id says an order was CREATED
+-- from a given RN1 fill. IT DOES NOT SAY the fill that eventually landed is
+-- still economically attributable to the ORIGINAL harmful command. If anything
+-- replaced that command in between, the chain is broken and the execution
+-- belongs to whatever superseded it.
 --
---   1 DIRECT          mirror_orders.trigger_trade_id names THIS RN1 fill
---                     (migration 049 -- an explicit order-to-source reference)
---   2 TARGET LINEAGE  target_at_place = the post-transition target AND
---                     ledger_at_place = the pre-transition ledger
---   3 TARGET STATE    target_at_place = the post-transition target
---   4 TEMPORAL ONLY   inside the window, no lineage evidence at all
+-- SUPERSESSION, read from retained production state, three ways:
+--     a conflicting target change on this condition before the execution
+--     a cancellation / replacement on this book before the execution
+--     a later qualifying command on this condition before the execution
 --
--- Every window also prints CONFLICTING INTERVENING TARGET CHANGES and
--- INTERVENING CANCELLATIONS/REPLACEMENTS. A fill after a different target has
--- already been recorded is not evidence for the earlier command, and is not
--- attributed to it without more.
+-- ATTRIBUTION TIERS, one per executed command, resolved to strongest evidence:
+--     TIER_1A_DIRECT_UNSUPERSEDED     trigger_trade_id names this RN1 fill AND
+--                                     nothing superseded it. PRIMARY -- the
+--                                     only tier that enters identified damage.
+--     TIER_1B_DIRECT_SUPERSEDED       trigger matches, but something replaced
+--                                     the command first. REPORTED SEPARATELY
+--                                     and never automatically attributed.
+--     TIER_2 / TIER_3                 target+ledger or target-state lineage,
+--                                     SECONDARY evidence, with their own
+--                                     superseded variants.
+--     TIER_4_TEMPORAL_SENSITIVITY_ONLY  inside the window, no lineage at all.
+--                                     NEVER added to the primary estimate.
+--
+-- EXACTLY ONE STATUS PER COMMAND. Attribution is resolved PER COMMAND, not per
+-- order: a command with three executions would otherwise be counted under
+-- three tiers at once and the damage denominators would stop being
+-- populations. Statement 12 gates both uniqueness properties directly.
 --
 -- WHAT A PERSISTENT ZERO WOULD MEAN, stated before the numbers arrive so it
--- cannot be reshaped afterwards: if zero DIRECTLY LINKED liquidations survive
--- at 900 s, 1 h, 6 h and 24 h, the correct conclusion is that the
--- P1-consistent target-collapse defect was present IN COMMANDED STATE but
--- retained production evidence does not show those commands liquidating
--- existing long positions in this observed window -- which materially weakens
--- the hypothesis that P1 forced flattening explains the historical losses. The
--- hypothesis is not to be rescued by widening until unrelated fills appear.
+-- cannot be reshaped afterwards: if zero TIER_1A liquidations survive at
+-- 900 s, 1 h, 6 h and 24 h, the correct conclusion is that the P1-consistent
+-- target-collapse defect was present IN COMMANDED STATE but retained
+-- production evidence does not show those commands liquidating existing long
+-- positions in this observed window -- which materially weakens the hypothesis
+-- that P1 forced flattening explains the historical losses. The hypothesis is
+-- not to be rescued by widening until unrelated fills appear, nor by promoting
+-- superseded or temporal-only evidence into the primary estimate.
 --
 -- ---------------------------------------------------------------------------
 -- THE COUNTERFACTUAL, and its horizon stated rather than implied.
@@ -186,7 +202,7 @@
 -- times, so a zero violation count next to a zero witness count is to be read
 -- as NOT TESTED, never as PASS.
 --
--- Read-only: twelve SELECTs.
+-- Read-only: thirteen SELECTs.
 -- ============================================================================
 
 
@@ -2262,7 +2278,7 @@ SELECT to_char((SELECT t0 FROM win), 'YYYY-MM-DD HH24:MI') AS first_shadow_tick,
          AS shape_part_rn1_net_negative
   FROM p1;
 
-\echo '== 7. LINKAGE, not proximity: how each execution is tied to its command =='
+\echo '== 7. ATTRIBUTION TIER per harmful command -- exactly one, by strongest evidence =='
 WITH base AS MATERIALIZED (
   SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
          t.size::float8 AS sh, t.price::float8 AS px, t.side,
@@ -2554,63 +2570,105 @@ WITH base AS MATERIALIZED (
          w.label AS attribution_window,
          o.order_id, o.placed_at, o.signed_long_delta, o.filled, o.avg_px,
          CASE WHEN o.order_id IS NULL THEN NULL
-              WHEN o.trigger_trade_id = c.fill_id
-                THEN '1 DIRECT: the order names this RN1 fill as its trigger'
+              WHEN o.trigger_trade_id = c.fill_id THEN 1
               WHEN o.target_at_place = c.target_after
-                   AND o.ledger_at_place = c.ledger_before
-                THEN '2 TARGET LINEAGE: post-transition target AND pre-transition ledger'
-              WHEN o.target_at_place = c.target_after
-                THEN '3 TARGET STATE ONLY: post-transition target'
-              ELSE '4 TEMPORAL ONLY: no lineage evidence' END AS linkage_tier
+                   AND o.ledger_at_place = c.ledger_before THEN 2
+              WHEN o.target_at_place = c.target_after THEN 3
+              ELSE 4 END AS raw_tier
     FROM hsel c CROSS JOIN wins w
     LEFT JOIN ords o ON o.condition_id = c.condition_id
                     AND o.placed_at >= c.event_ts
                     AND o.placed_at <  c.event_ts + make_interval(secs => w.secs)
                     AND o.filled > 0
-), conf AS MATERIALIZED (
-  SELECT l.fill_id, l.attribution_window, l.order_id,
-         count(t.at) FILTER (WHERE t.target IS DISTINCT FROM l.target_after)
-           AS intervening_target_changes
-    FROM lk l
-    LEFT JOIN shx t ON t.condition_id = l.condition_id
-                   AND t.at > l.event_ts AND t.at < l.placed_at
-   GROUP BY 1, 2, 3
-), canc AS MATERIALIZED (
-  SELECT l.fill_id, l.attribution_window, l.order_id,
-         count(x.order_id) AS intervening_cancels_or_replacements
-    FROM lk l
-    LEFT JOIN ords x ON x.condition_id = l.condition_id
-                    AND x.placed_at > l.event_ts AND x.placed_at < l.placed_at
-                    AND x.order_state IN ('cancelled', 'expired', 'rejected', 'lost')
-   GROUP BY 1, 2, 3
-), lkf AS MATERIALIZED (
-  SELECT l.*, COALESCE(cf2.intervening_target_changes, 0)
+), sup AS MATERIALIZED (
+  -- THREE WAYS A COMMAND IS SUPERSEDED BEFORE ITS EXECUTION. Direct lineage
+  -- says an order was CREATED from this RN1 fill; it does not say the fill that
+  -- eventually landed is still economically attributable to the ORIGINAL
+  -- harmful command. Anything that replaced that command in between breaks the
+  -- chain, and all three are read from retained production state.
+  SELECT l.fill_id, l.attribution_window, l.order_id, l.raw_tier,
+         l.condition_id, l.event_ts, l.placed_at, l.signed_long_delta,
+         l.filled, l.avg_px, l.commanded_change, l.commanded_direction,
+         (SELECT count(*) FROM shx t
+           WHERE t.condition_id = l.condition_id
+             AND t.at > l.event_ts AND t.at < l.placed_at
+             AND t.target IS DISTINCT FROM l.target_after)
            AS intervening_target_changes,
-         COALESCE(cn.intervening_cancels_or_replacements, 0)
-           AS intervening_cancels_or_replacements
-    FROM lk l
-    LEFT JOIN conf cf2 ON cf2.fill_id = l.fill_id
-                      AND cf2.attribution_window = l.attribution_window
-                      AND cf2.order_id IS NOT DISTINCT FROM l.order_id
-    LEFT JOIN canc cn ON cn.fill_id = l.fill_id
-                     AND cn.attribution_window = l.attribution_window
-                     AND cn.order_id IS NOT DISTINCT FROM l.order_id
+         (SELECT count(*) FROM ords x
+           WHERE x.condition_id = l.condition_id
+             AND x.placed_at > l.event_ts AND x.placed_at < l.placed_at
+             AND x.order_state IN ('cancelled', 'expired', 'rejected', 'lost'))
+           AS intervening_cancels_or_replacements,
+         (SELECT count(*) FROM ev e2
+           WHERE e2.condition_id = l.condition_id
+             AND e2.ts > l.event_ts AND e2.ts < l.placed_at)
+           AS intervening_later_commands
+    FROM lk l WHERE l.order_id IS NOT NULL
+), supf AS MATERIALIZED (
+  SELECT s.*,
+         (s.intervening_target_changes > 0
+          OR s.intervening_cancels_or_replacements > 0
+          OR s.intervening_later_commands > 0) AS superseded
+    FROM sup s
+), percmd AS MATERIALIZED (
+  -- EXACTLY ONE lineage status and EXACTLY ONE attribution tier per command,
+  -- resolved to the STRONGEST evidence it has. Without this a single command
+  -- with three executions could be counted under three tiers at once and the
+  -- damage denominators would stop being populations.
+  SELECT c.fill_id, c.condition_id, c.event_ts, c.commanded_change,
+         c.commanded_direction, w.label AS attribution_window,
+         min(f.raw_tier) AS best_raw_tier,
+         count(f.order_id) AS executions,
+         bool_or(f.raw_tier = 1 AND NOT f.superseded) AS has_1a,
+         bool_or(f.raw_tier = 1) AS has_t1,
+         bool_or(f.raw_tier = 2 AND NOT f.superseded) AS has_2u,
+         bool_or(f.raw_tier = 2) AS has_t2,
+         bool_or(f.raw_tier = 3 AND NOT f.superseded) AS has_3u,
+         bool_or(f.raw_tier = 3) AS has_t3,
+         bool_or(f.superseded) AS any_superseded,
+         COALESCE(sum(f.filled) FILTER (WHERE f.raw_tier = 1 AND NOT f.superseded),
+                  0) AS tier1a_shares,
+         COALESCE(sum(f.signed_long_delta * c.commanded_direction)
+                  FILTER (WHERE f.raw_tier = 1 AND NOT f.superseded), 0)
+           AS tier1a_progress,
+         COALESCE(sum(f.filled * COALESCE(f.avg_px, 0))
+                  FILTER (WHERE f.raw_tier = 1 AND NOT f.superseded), 0)
+           AS tier1a_notional,
+         max(f.intervening_later_commands) AS max_later_commands
+    FROM hsel c CROSS JOIN wins w
+    LEFT JOIN supf f ON f.fill_id = c.fill_id
+                    AND f.attribution_window = w.label
+   GROUP BY 1, 2, 3, 4, 5, 6
+), lkf AS MATERIALIZED (
+  SELECT p.*,
+         CASE WHEN p.executions = 0 THEN '0 NO_EXECUTION'
+              WHEN p.best_raw_tier = 1 THEN '1 DIRECT_SOURCE_FILL_LINEAGE'
+              WHEN p.best_raw_tier = 2 THEN '2 TARGET_AND_LEDGER_LINEAGE'
+              WHEN p.best_raw_tier = 3 THEN '3 TARGET_STATE_ONLY'
+              ELSE '4 TEMPORAL_ONLY' END AS lineage_status,
+         CASE WHEN p.executions = 0 THEN '0 NO_EXECUTION'
+              WHEN p.has_1a THEN 'TIER_1A_DIRECT_UNSUPERSEDED (primary)'
+              WHEN p.has_t1 THEN 'TIER_1B_DIRECT_SUPERSEDED (NOT primary)'
+              WHEN p.has_2u THEN 'TIER_2_TARGET_LINEAGE (secondary)'
+              WHEN p.has_t2 THEN 'TIER_2S_TARGET_LINEAGE_SUPERSEDED (NOT primary)'
+              WHEN p.has_3u THEN 'TIER_3_TARGET_STATE (secondary)'
+              WHEN p.has_t3 THEN 'TIER_3S_TARGET_STATE_SUPERSEDED (NOT primary)'
+              ELSE 'TIER_4_TEMPORAL_SENSITIVITY_ONLY (never primary)'
+         END AS attribution_tier
+    FROM percmd p
 )
-SELECT attribution_window,
-       COALESCE(linkage_tier, '0 NO EXECUTION IN THIS WINDOW') AS linkage_tier,
-       count(DISTINCT fill_id) AS qualifying_commands_touched,
-       count(order_id) AS executions,
-       round(sum(filled)::numeric, 0) AS executed_shares,
-       round(sum(filled * COALESCE(avg_px, 0))::numeric, 2) AS executed_notional,
-       count(order_id) FILTER (WHERE intervening_target_changes > 0)
-         AS with_a_CONFLICTING_intervening_target_change,
-       count(order_id) FILTER (WHERE intervening_cancels_or_replacements > 0)
-         AS with_an_intervening_cancel_or_replacement,
-       round(avg(EXTRACT(epoch FROM (placed_at - event_ts)))::numeric, 1)
-         AS mean_seconds_command_to_execution
+SELECT attribution_window, attribution_tier,
+       count(*) AS harmful_commands,
+       count(DISTINCT condition_id) AS conditions,
+       sum(executions) AS executions,
+       round(sum(tier1a_shares)::numeric, 0) AS tier_1a_shares,
+       round(sum(tier1a_notional)::numeric, 2) AS tier_1a_notional,
+       count(*) FILTER (WHERE any_superseded) AS commands_with_any_supersession,
+       round((100.0 * count(*) / sum(count(*)) OVER (PARTITION BY attribution_window))
+             ::numeric, 2) AS pct_of_window
   FROM lkf GROUP BY 1, 2 ORDER BY 1, 2;
 
-\echo '== 8. CONSISTENT_WITH_P1_LONG_ONLY: liquidations BY LINKAGE TIER and window =='
+\echo '== 8. CONSISTENT_WITH_P1_LONG_ONLY: attribution tier by window =='
 WITH base AS MATERIALIZED (
   SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
          t.size::float8 AS sh, t.price::float8 AS px, t.side,
@@ -2900,65 +2958,102 @@ WITH base AS MATERIALIZED (
          w.label AS attribution_window,
          o.order_id, o.placed_at, o.signed_long_delta, o.filled, o.avg_px,
          CASE WHEN o.order_id IS NULL THEN NULL
-              WHEN o.trigger_trade_id = c.fill_id
-                THEN '1 DIRECT: the order names this RN1 fill as its trigger'
+              WHEN o.trigger_trade_id = c.fill_id THEN 1
               WHEN o.target_at_place = c.target_after
-                   AND o.ledger_at_place = c.ledger_before
-                THEN '2 TARGET LINEAGE: post-transition target AND pre-transition ledger'
-              WHEN o.target_at_place = c.target_after
-                THEN '3 TARGET STATE ONLY: post-transition target'
-              ELSE '4 TEMPORAL ONLY: no lineage evidence' END AS linkage_tier
+                   AND o.ledger_at_place = c.ledger_before THEN 2
+              WHEN o.target_at_place = c.target_after THEN 3
+              ELSE 4 END AS raw_tier
     FROM psel c CROSS JOIN wins w
     LEFT JOIN ords o ON o.condition_id = c.condition_id
                     AND o.placed_at >= c.event_ts
                     AND o.placed_at <  c.event_ts + make_interval(secs => w.secs)
                     AND o.filled > 0
-), conf AS MATERIALIZED (
-  SELECT l.fill_id, l.attribution_window, l.order_id,
-         count(t.at) FILTER (WHERE t.target IS DISTINCT FROM l.target_after)
-           AS intervening_target_changes
-    FROM lk l
-    LEFT JOIN shx t ON t.condition_id = l.condition_id
-                   AND t.at > l.event_ts AND t.at < l.placed_at
-   GROUP BY 1, 2, 3
-), canc AS MATERIALIZED (
-  SELECT l.fill_id, l.attribution_window, l.order_id,
-         count(x.order_id) AS intervening_cancels_or_replacements
-    FROM lk l
-    LEFT JOIN ords x ON x.condition_id = l.condition_id
-                    AND x.placed_at > l.event_ts AND x.placed_at < l.placed_at
-                    AND x.order_state IN ('cancelled', 'expired', 'rejected', 'lost')
-   GROUP BY 1, 2, 3
-), lkf AS MATERIALIZED (
-  SELECT l.*, COALESCE(cf2.intervening_target_changes, 0)
+), sup AS MATERIALIZED (
+  -- THREE WAYS A COMMAND IS SUPERSEDED BEFORE ITS EXECUTION. Direct lineage
+  -- says an order was CREATED from this RN1 fill; it does not say the fill that
+  -- eventually landed is still economically attributable to the ORIGINAL
+  -- harmful command. Anything that replaced that command in between breaks the
+  -- chain, and all three are read from retained production state.
+  SELECT l.fill_id, l.attribution_window, l.order_id, l.raw_tier,
+         l.condition_id, l.event_ts, l.placed_at, l.signed_long_delta,
+         l.filled, l.avg_px, l.commanded_change, l.commanded_direction,
+         (SELECT count(*) FROM shx t
+           WHERE t.condition_id = l.condition_id
+             AND t.at > l.event_ts AND t.at < l.placed_at
+             AND t.target IS DISTINCT FROM l.target_after)
            AS intervening_target_changes,
-         COALESCE(cn.intervening_cancels_or_replacements, 0)
-           AS intervening_cancels_or_replacements
-    FROM lk l
-    LEFT JOIN conf cf2 ON cf2.fill_id = l.fill_id
-                      AND cf2.attribution_window = l.attribution_window
-                      AND cf2.order_id IS NOT DISTINCT FROM l.order_id
-    LEFT JOIN canc cn ON cn.fill_id = l.fill_id
-                     AND cn.attribution_window = l.attribution_window
-                     AND cn.order_id IS NOT DISTINCT FROM l.order_id
+         (SELECT count(*) FROM ords x
+           WHERE x.condition_id = l.condition_id
+             AND x.placed_at > l.event_ts AND x.placed_at < l.placed_at
+             AND x.order_state IN ('cancelled', 'expired', 'rejected', 'lost'))
+           AS intervening_cancels_or_replacements,
+         (SELECT count(*) FROM ev e2
+           WHERE e2.condition_id = l.condition_id
+             AND e2.ts > l.event_ts AND e2.ts < l.placed_at)
+           AS intervening_later_commands
+    FROM lk l WHERE l.order_id IS NOT NULL
+), supf AS MATERIALIZED (
+  SELECT s.*,
+         (s.intervening_target_changes > 0
+          OR s.intervening_cancels_or_replacements > 0
+          OR s.intervening_later_commands > 0) AS superseded
+    FROM sup s
+), percmd AS MATERIALIZED (
+  -- EXACTLY ONE lineage status and EXACTLY ONE attribution tier per command,
+  -- resolved to the STRONGEST evidence it has. Without this a single command
+  -- with three executions could be counted under three tiers at once and the
+  -- damage denominators would stop being populations.
+  SELECT c.fill_id, c.condition_id, c.event_ts, c.commanded_change,
+         c.commanded_direction, w.label AS attribution_window,
+         min(f.raw_tier) AS best_raw_tier,
+         count(f.order_id) AS executions,
+         bool_or(f.raw_tier = 1 AND NOT f.superseded) AS has_1a,
+         bool_or(f.raw_tier = 1) AS has_t1,
+         bool_or(f.raw_tier = 2 AND NOT f.superseded) AS has_2u,
+         bool_or(f.raw_tier = 2) AS has_t2,
+         bool_or(f.raw_tier = 3 AND NOT f.superseded) AS has_3u,
+         bool_or(f.raw_tier = 3) AS has_t3,
+         bool_or(f.superseded) AS any_superseded,
+         COALESCE(sum(f.filled) FILTER (WHERE f.raw_tier = 1 AND NOT f.superseded),
+                  0) AS tier1a_shares,
+         COALESCE(sum(f.signed_long_delta * c.commanded_direction)
+                  FILTER (WHERE f.raw_tier = 1 AND NOT f.superseded), 0)
+           AS tier1a_progress,
+         COALESCE(sum(f.filled * COALESCE(f.avg_px, 0))
+                  FILTER (WHERE f.raw_tier = 1 AND NOT f.superseded), 0)
+           AS tier1a_notional,
+         max(f.intervening_later_commands) AS max_later_commands
+    FROM psel c CROSS JOIN wins w
+    LEFT JOIN supf f ON f.fill_id = c.fill_id
+                    AND f.attribution_window = w.label
+   GROUP BY 1, 2, 3, 4, 5, 6
+), lkf AS MATERIALIZED (
+  SELECT p.*,
+         CASE WHEN p.executions = 0 THEN '0 NO_EXECUTION'
+              WHEN p.best_raw_tier = 1 THEN '1 DIRECT_SOURCE_FILL_LINEAGE'
+              WHEN p.best_raw_tier = 2 THEN '2 TARGET_AND_LEDGER_LINEAGE'
+              WHEN p.best_raw_tier = 3 THEN '3 TARGET_STATE_ONLY'
+              ELSE '4 TEMPORAL_ONLY' END AS lineage_status,
+         CASE WHEN p.executions = 0 THEN '0 NO_EXECUTION'
+              WHEN p.has_1a THEN 'TIER_1A_DIRECT_UNSUPERSEDED (primary)'
+              WHEN p.has_t1 THEN 'TIER_1B_DIRECT_SUPERSEDED (NOT primary)'
+              WHEN p.has_2u THEN 'TIER_2_TARGET_LINEAGE (secondary)'
+              WHEN p.has_t2 THEN 'TIER_2S_TARGET_LINEAGE_SUPERSEDED (NOT primary)'
+              WHEN p.has_3u THEN 'TIER_3_TARGET_STATE (secondary)'
+              WHEN p.has_t3 THEN 'TIER_3S_TARGET_STATE_SUPERSEDED (NOT primary)'
+              ELSE 'TIER_4_TEMPORAL_SENSITIVITY_ONLY (never primary)'
+         END AS attribution_tier
+    FROM percmd p
 )
-SELECT attribution_window,
-       COALESCE(linkage_tier, '0 NO EXECUTION IN THIS WINDOW') AS linkage_tier,
-       count(DISTINCT fill_id) AS p1_consistent_commands_touched,
-       count(order_id) AS executions,
-       count(order_id) FILTER (WHERE signed_long_delta < 0)
-         AS executions_that_REMOVE_long_exposure,
-       round(sum(CASE WHEN signed_long_delta < 0 THEN -signed_long_delta
-                      ELSE 0 END)::numeric, 0) AS shares_liquidated,
-       round(sum(CASE WHEN signed_long_delta < 0
-                      THEN -signed_long_delta * COALESCE(avg_px, 0)
-                      ELSE 0 END)::numeric, 2) AS liquidation_proceeds,
-       count(order_id) FILTER (WHERE intervening_target_changes > 0)
-         AS with_a_CONFLICTING_intervening_target_change,
-       count(order_id) FILTER (WHERE intervening_cancels_or_replacements > 0)
-         AS with_an_intervening_cancel_or_replacement,
-       round(avg(EXTRACT(epoch FROM (placed_at - event_ts)))::numeric, 1)
-         AS mean_seconds_command_to_execution
+SELECT attribution_window, attribution_tier,
+       count(*) AS p1_consistent_commands,
+       count(DISTINCT condition_id) AS conditions,
+       sum(executions) AS executions,
+       round(sum(tier1a_shares)::numeric, 0) AS tier_1a_shares,
+       round(sum(tier1a_notional)::numeric, 2) AS tier_1a_notional,
+       round(sum(tier1a_progress)::numeric, 0) AS tier_1a_progress_toward_target,
+       round(sum(commanded_change)::numeric, 0) AS commanded_change_shares,
+       count(*) FILTER (WHERE any_superseded) AS commands_with_any_supersession
   FROM lkf GROUP BY 1, 2 ORDER BY 1, 2;
 
 \echo '== 9. NO_P1_FORCED_FLATTEN_COUNTERFACTUAL, one row per WINDOW x HORIZON =='
@@ -4026,3 +4121,413 @@ SELECT
   (SELECT count(*) FROM lc WHERE recorded_target_transition = 'UNCLASSIFIED'
      OR (target_classifiable AND recorded_target_transition IS NULL))
     AS chk7_unclassified_transition_expected_0;
+
+\echo '== 12. ATTRIBUTION ACCEPTANCE GATES, each with a NON-ZERO witness denominator =='
+WITH base AS MATERIALIZED (
+  SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
+         t.size::float8 AS sh, t.price::float8 AS px, t.side,
+         CASE WHEN t.source IN ('poll', 'backfill') THEN 'venue' ELSE 'cash' END AS feed
+    FROM trades t JOIN whales w ON w.id = t.whale_id
+   WHERE lower(w.username) = 'rn1'
+     AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
+), canon AS MATERIALIZED (
+  SELECT z.* FROM (
+    SELECT b.*, bool_or(b.feed = 'venue')
+                  OVER (PARTITION BY b.tx_hash, b.asset) AS any_venue
+      FROM base b) z
+   WHERE NOT (z.feed = 'cash' AND z.any_venue)
+), buys AS MATERIALIZED (
+  SELECT condition_id, id, ts, outcome_index, sh, px FROM canon
+   WHERE side = 'BUY'
+     AND ts >= timestamptz '2026-08-05 00:00Z'
+     AND ts <  timestamptz '2026-09-11 12:00Z'
+), blk AS MATERIALIZED (
+  SELECT condition_id, ts,
+         sum(CASE WHEN outcome_index = 0 THEN sh ELSE 0 END) AS ytot,
+         sum(CASE WHEN outcome_index = 1 THEN sh ELSE 0 END) AS ntot
+    FROM buys GROUP BY 1, 2
+), bs AS MATERIALIZED (
+  SELECT b.*,
+         sum(b.ytot - b.ntot) OVER (PARTITION BY b.condition_id ORDER BY b.ts
+                                    ROWS UNBOUNDED PRECEDING) AS d_after,
+         sum(b.ytot - b.ntot) OVER (PARTITION BY b.condition_id ORDER BY b.ts
+                                    ROWS UNBOUNDED PRECEDING)
+           - (b.ytot - b.ntot) AS d_before
+    FROM blk b
+), proof AS MATERIALIZED (
+  SELECT condition_id,
+         CASE WHEN (bool_or(d_after > 1e-9) OR bool_or(d_before > 1e-9))
+               AND (bool_or(d_after < -1e-9) OR bool_or(d_before < -1e-9)) THEN 1
+              WHEN NOT (((bool_or(d_after > 1e-9) OR bool_or(d_before > 1e-9))
+                          OR bool_or(d_before + ytot >  1e-9))
+                    AND ((bool_or(d_after < -1e-9) OR bool_or(d_before < -1e-9))
+                          OR bool_or(d_before - ntot < -1e-9))) THEN 2
+              ELSE 3 END AS proof_class
+    FROM bs GROUP BY 1
+), acq AS MATERIALIZED (
+  SELECT condition_id, sum(sh * px) AS acq_cost FROM buys GROUP BY 1
+), w AS MATERIALIZED (
+  SELECT b.*,
+         row_number() OVER (PARTITION BY b.condition_id ORDER BY b.ts, b.id) AS rn,
+         sum(CASE WHEN b.outcome_index = 0 THEN b.sh ELSE 0 END)
+           OVER (PARTITION BY b.condition_id ORDER BY b.ts, b.id
+                 ROWS UNBOUNDED PRECEDING) AS cum_y,
+         sum(CASE WHEN b.outcome_index = 1 THEN b.sh ELSE 0 END)
+           OVER (PARTITION BY b.condition_id ORDER BY b.ts, b.id
+                 ROWS UNBOUNDED PRECEDING) AS cum_n
+    FROM buys b JOIN proof p ON p.condition_id = b.condition_id
+   WHERE p.proof_class = 1
+), sg AS MATERIALIZED (
+  SELECT w.*,
+         CASE WHEN abs(w.cum_y - w.cum_n) > 1e-9 THEN sign(w.cum_y - w.cum_n) END AS nz,
+         count(CASE WHEN abs(w.cum_y - w.cum_n) > 1e-9 THEN 1 END)
+           OVER (PARTITION BY w.condition_id ORDER BY w.rn ROWS UNBOUNDED PRECEDING) AS grp
+    FROM w
+), carry AS MATERIALIZED (
+  SELECT sg.*,
+         first_value(sg.nz) OVER (PARTITION BY sg.condition_id, sg.grp ORDER BY sg.rn)
+           AS sign_after
+    FROM sg
+), ev AS MATERIALIZED (
+  SELECT z.condition_id, z.id AS fill_id, z.ts, z.sh AS fsh, z.px AS fpx,
+         z.sign_before, z.sign_after
+    FROM (SELECT c.*, lag(c.sign_after) OVER (PARTITION BY c.condition_id ORDER BY c.rn)
+                        AS sign_before FROM carry c) z
+   WHERE z.sign_before IS NOT NULL AND z.sign_after IS NOT NULL
+     AND z.sign_before <> z.sign_after
+), sh AS MATERIALIZED (
+  SELECT condition_id, at, target, his_net, ledger_net, mark
+    FROM mirror_shadow WHERE lower(whale) = 'rn1'
+), win AS MATERIALIZED (
+  SELECT min(at) AS t0, max(at) AS t1,
+         min(at) FILTER (WHERE target < 0) AS short_cap_at
+    FROM sh
+), seen AS MATERIALIZED (
+  SELECT condition_id, min(at) AS first_seen, max(at) AS last_seen FROM sh GROUP BY 1
+), capcond AS MATERIALIZED (
+  -- a NEGATIVE TARGET recorded on THIS condition: short capability, witnessed
+  -- on the market itself rather than inferred from a fleet-wide timestamp
+  SELECT condition_id, min(at) AS first_neg_target_at
+    FROM sh WHERE target < 0 GROUP BY 1
+), capord AS MATERIALIZED (
+  -- a SHORT-INTENT ORDER on this condition's book: the same capability
+  -- witnessed on the order path instead of the target path
+  SELECT bk.condition_id, min(o.placed_at) AS first_short_intent_at
+    FROM mirror_orders o JOIN mirror_books bk ON bk.id = o.book_id
+   WHERE lower(o.whale) = 'rn1'
+     AND o.intent IN ('ORDER_INTENT_BUY_SHORT', 'ORDER_INTENT_SELL_SHORT')
+   GROUP BY 1
+), capflow AS MATERIALIZED (
+  -- E12 flow sizing, witnessed per BOOK by flow_base being populated at all
+  SELECT condition_id,
+         min(opened_at) FILTER (WHERE flow_base IS NOT NULL) AS first_flow_book_at
+    FROM mirror_books WHERE lower(whale) = 'rn1' GROUP BY 1
+), mix AS MATERIALIZED (
+  SELECT condition_id, at AS t, 0 AS kind, target, his_net, ledger_net, mark,
+         NULL::bigint AS fill_id, NULL::float8 AS fsh, NULL::float8 AS fpx
+    FROM sh WHERE condition_id IN (SELECT condition_id FROM ev)
+  UNION ALL
+  SELECT condition_id, ts, 1, NULL::int, NULL::float8, NULL::int, NULL::float8,
+         fill_id, fsh, fpx
+    FROM ev
+), g AS MATERIALIZED (
+  SELECT m.*,
+         count(CASE WHEN m.kind = 0 THEN 1 END)
+           OVER (PARTITION BY m.condition_id ORDER BY m.t, m.kind
+                 ROWS UNBOUNDED PRECEDING) AS grp_prev,
+         count(CASE WHEN m.kind = 0 THEN 1 END)
+           OVER (PARTITION BY m.condition_id ORDER BY m.t DESC, m.kind DESC
+                 ROWS UNBOUNDED PRECEDING) AS grp_next
+    FROM mix m
+), nb AS MATERIALIZED (
+  SELECT g.*,
+         first_value(g.target)     OVER pv AS tb,
+         first_value(g.ledger_net) OVER pv AS lb,
+         first_value(g.target)     OVER nx AS ta,
+         first_value(g.his_net)    OVER nx AS na,
+         first_value(g.mark)       OVER nx AS ma,
+         first_value(g.t)          OVER nx AS ata
+    FROM g
+  WINDOW pv AS (PARTITION BY g.condition_id, g.grp_prev ORDER BY g.t, g.kind),
+         nx AS (PARTITION BY g.condition_id, g.grp_next ORDER BY g.t DESC, g.kind DESC)
+), evx AS MATERIALIZED (
+  SELECT nb.condition_id, nb.fill_id, nb.t AS event_ts, nb.fsh, nb.fpx,
+         (nb.grp_prev > 0) AS has_tick_before,
+         (nb.grp_next > 0) AS has_tick_after,
+         CASE WHEN nb.grp_prev > 0 THEN nb.tb END AS target_before,
+         CASE WHEN nb.grp_prev > 0 THEN nb.lb END AS ledger_before,
+         CASE WHEN nb.grp_next > 0 THEN nb.ta END AS target_after,
+         CASE WHEN nb.grp_next > 0 THEN nb.na END AS net_after,
+         CASE WHEN nb.grp_next > 0 THEN nb.ma END AS mark_after
+    FROM nb WHERE nb.kind = 1
+), rch AS MATERIALIZED (
+  -- REACH NOW REQUIRES A RECORDED TARGET ON BOTH SIDES, not merely a tick on
+  -- both sides. Run 74 exposed the difference: 1,509 of 3,183 reach events
+  -- printed as "no straddling tick" when the ticks plainly existed -- my own
+  -- reach test guaranteed them -- and what was actually NULL was
+  -- mirror_shadow.target itself. An event whose straddling ticks carry no
+  -- target cannot yield a commanded transition, so it is a coverage
+  -- limitation and belongs OUTSIDE reach, with its own reason.
+  -- REACH IS A STATEMENT ABOUT PRODUCTION, NOT ABOUT OUR TELEMETRY.
+  -- Run 75 made reach require a non-null recorded target. That was wrong and
+  -- the error is load-bearing: production can be perfectly capable of acting
+  -- while mirror_shadow.target happens to be NULL, so folding those events
+  -- into OUTSIDE_REACH shrinks the denominator exactly when telemetry is
+  -- missing and inflates apparent identification coverage. A NULL target means
+  -- TARGET_TRANSITION_NOT_OBSERVABLE, never "the architecture could not act".
+  --
+  -- So reach asks only whether production held contemporaneous state it could
+  -- have acted from: a tick on THIS condition at or before the event, inside
+  -- the operating window. Observability is a separate, nested question.
+  SELECT e.*, s.first_seen, s.last_seen,
+         CASE WHEN e.has_tick_before THEN '1 IN_CAUSAL_REACH'
+              WHEN e.event_ts < (SELECT t0 FROM win)
+                OR e.event_ts > (SELECT t1 FROM win)
+                THEN '2 OUTSIDE_REACH: outside the mirror operating window'
+              WHEN s.condition_id IS NULL
+                THEN '3 OUTSIDE_REACH: market never observed'
+              ELSE '4 OUTSIDE_REACH: observed, but only after the event'
+         END AS reach,
+         (e.has_tick_before AND e.has_tick_after
+          AND e.target_before IS NOT NULL AND e.target_after IS NOT NULL)
+           AS target_classifiable,
+         CASE WHEN NOT e.has_tick_before THEN NULL
+              WHEN e.has_tick_after AND e.target_before IS NOT NULL
+                   AND e.target_after IS NOT NULL THEN NULL
+              WHEN NOT e.has_tick_after
+                THEN '1 NOT_OBSERVABLE: no tick after the event'
+              ELSE '2 NOT_OBSERVABLE: straddling ticks carry no recorded target'
+         END AS not_observable_reason
+    FROM evx e LEFT JOIN seen s ON s.condition_id = e.condition_id
+), tcl AS MATERIALIZED (
+  SELECT r.*,
+         CASE WHEN r.target_before IS NULL OR r.target_after IS NULL THEN NULL
+              WHEN r.target_before = r.target_after THEN 'HOLD'
+              WHEN r.target_before > 0 AND r.target_after = 0 THEN 'LONG_TO_FLAT'
+              WHEN r.target_before < 0 AND r.target_after = 0 THEN 'SHORT_TO_FLAT'
+              WHEN r.target_before > 0 AND r.target_after < 0 THEN 'LONG_TO_SHORT'
+              WHEN r.target_before < 0 AND r.target_after > 0 THEN 'SHORT_TO_LONG'
+              WHEN r.target_after > r.target_before AND r.target_after > 0
+                   AND r.target_before >= 0 THEN 'INCREASE_LONG'
+              WHEN r.target_before > 0 AND r.target_after < r.target_before
+                   AND r.target_after > 0 THEN 'REDUCE_LONG'
+              WHEN r.target_after < r.target_before AND r.target_after < 0
+                   AND r.target_before <= 0 THEN 'INCREASE_SHORT'
+              WHEN r.target_before < 0 AND r.target_after > r.target_before
+                   AND r.target_after < 0 THEN 'REDUCE_SHORT'
+              ELSE 'UNCLASSIFIED' END AS recorded_target_transition
+    FROM rch r
+), cmd AS MATERIALIZED (
+  SELECT t.*,
+         (t.target_classifiable
+          AND t.recorded_target_transition IN ('LONG_TO_FLAT', 'SHORT_TO_FLAT',
+                                               'LONG_TO_SHORT', 'SHORT_TO_LONG')
+          AND abs(COALESCE(t.ledger_before, 0)) > 0) AS harmful_command,
+         CASE WHEN t.recorded_target_transition IN ('LONG_TO_FLAT', 'SHORT_TO_FLAT',
+                                                    'LONG_TO_SHORT', 'SHORT_TO_LONG')
+              THEN abs(COALESCE(t.ledger_before, 0)) ELSE 0 END AS commanded_shed_shares,
+         abs(COALESCE(t.target_after, 0) - COALESCE(t.ledger_before, 0))
+           AS commanded_change,
+         sign(COALESCE(t.target_after, 0) - COALESCE(t.ledger_before, 0))
+           AS commanded_direction,
+         (t.event_ts < COALESCE((SELECT short_cap_at FROM win),
+                                'infinity'::timestamptz))
+           AS before_short_capability_observed_anywhere,
+         (LEAST(COALESCE(cc.first_neg_target_at, 'infinity'::timestamptz),
+                COALESCE(co.first_short_intent_at, 'infinity'::timestamptz))
+            <= t.event_ts) AS short_capability_observed_on_this_condition,
+         (cf.first_flow_book_at IS NOT NULL
+          AND cf.first_flow_book_at <= t.event_ts)
+           AS e12_flow_sizing_observed_on_this_book
+    FROM tcl t
+    LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
+    LEFT JOIN capord  co ON co.condition_id = t.condition_id
+    LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), ords AS MATERIALIZED (
+  SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
+         o.trigger_trade_id, o.state AS order_state,
+         o.side AS plan_side, o.intent AS wire_intent, o.kind, o.qty,
+         o.filled, o.avg_px, o.realized, o.cash_usd,
+         o.target_at_place, o.ledger_at_place, o.bid_at_place, o.ask_at_place,
+         CASE o.intent WHEN 'ORDER_INTENT_BUY_LONG'   THEN  o.filled
+                       WHEN 'ORDER_INTENT_SELL_LONG'  THEN -o.filled
+                       WHEN 'ORDER_INTENT_BUY_SHORT'  THEN -o.filled
+                       WHEN 'ORDER_INTENT_SELL_SHORT' THEN  o.filled END
+           AS signed_long_delta
+    FROM mirror_orders o JOIN mirror_books bk ON bk.id = o.book_id
+   WHERE lower(o.whale) = 'rn1'
+), exj AS MATERIALIZED (
+  SELECT c.condition_id, c.fill_id, c.event_ts, c.fsh, c.fpx, c.reach,
+         c.recorded_target_transition, c.harmful_command, c.commanded_shed_shares,
+         c.target_classifiable, c.not_observable_reason,
+         c.before_short_capability_observed_anywhere,
+         c.short_capability_observed_on_this_condition,
+         c.e12_flow_sizing_observed_on_this_book,
+         c.target_before, c.target_after, c.ledger_before,
+         c.net_after, c.mark_after, c.commanded_change, c.commanded_direction,
+         COALESCE(sum(o.filled), 0) AS exec_shares,
+         COALESCE(sum(o.filled) FILTER (WHERE o.avg_px IS NOT NULL), 0)
+           AS exec_priced_shares,
+         COALESCE(sum(o.signed_long_delta), 0) AS exec_signed_delta,
+         COALESCE(sum(CASE WHEN o.signed_long_delta < 0 THEN -o.signed_long_delta
+                           ELSE 0 END), 0) AS exec_shed_shares,
+         COALESCE(sum(o.filled * COALESCE(o.avg_px, 0)), 0) AS exec_notional,
+         COALESCE(sum(o.realized), 0) AS exec_realized,
+         count(o.order_id) AS orders_in_window,
+         count(o.order_id) FILTER (WHERE o.filled > 0) AS executions
+    FROM cmd c
+    LEFT JOIN ords o ON o.condition_id = c.condition_id
+                    AND o.placed_at >= c.event_ts
+                    AND o.placed_at <  c.event_ts + interval '900 seconds'
+   GROUP BY 1,2,3,4,5,6,7,8,9,10,11,12,13,14,15,16,17,18,19,20,21
+), lc AS MATERIALIZED (
+  SELECT e.*,
+         CASE WHEN e.reach <> '1 IN_CAUSAL_REACH'
+                THEN '1 OUTSIDE_BETTOR_CAUSAL_REACH'
+              WHEN NOT e.target_classifiable
+                THEN '2 IN_CAUSAL_REACH_TARGET_NOT_RECORDED'
+              WHEN NOT e.harmful_command
+                THEN '3 TARGET_CLASSIFIABLE_NO_HARMFUL_COMMAND'
+              WHEN e.exec_shares = 0 THEN '4 HARMFUL_COMMAND_NO_EXECUTION'
+              WHEN e.exec_priced_shares < e.exec_shares
+                THEN '7 EXECUTION_EFFECT_UNIDENTIFIED'
+              WHEN e.exec_signed_delta * e.commanded_direction
+                   >= 0.99 * e.commanded_change
+                THEN '5 IDENTIFIED_REALIZED_DAMAGE'
+              ELSE '6 PARTIALLY_IDENTIFIED_DAMAGE' END AS causal_class
+    FROM exj e
+), wins AS MATERIALIZED (
+  SELECT * FROM (VALUES (900, '1 900 s (the run-74 window)'),
+                        (3600, '2 1 h'),
+                        (21600, '3 6 h'),
+                        (86400, '4 24 h'),
+                        (2592000, '5 30 d (effectively unbounded)'))
+         v(secs, label)
+), hsel AS MATERIALIZED (
+  SELECT * FROM lc WHERE harmful_command
+), shx AS MATERIALIZED (
+  SELECT s.condition_id, s.at, s.target FROM sh s
+   WHERE s.condition_id IN (SELECT condition_id FROM hsel)
+), lk AS MATERIALIZED (
+  SELECT c.fill_id, c.condition_id, c.event_ts, c.target_after, c.ledger_before,
+         c.commanded_change, c.commanded_direction,
+         w.label AS attribution_window,
+         o.order_id, o.placed_at, o.signed_long_delta, o.filled, o.avg_px,
+         CASE WHEN o.order_id IS NULL THEN NULL
+              WHEN o.trigger_trade_id = c.fill_id THEN 1
+              WHEN o.target_at_place = c.target_after
+                   AND o.ledger_at_place = c.ledger_before THEN 2
+              WHEN o.target_at_place = c.target_after THEN 3
+              ELSE 4 END AS raw_tier
+    FROM hsel c CROSS JOIN wins w
+    LEFT JOIN ords o ON o.condition_id = c.condition_id
+                    AND o.placed_at >= c.event_ts
+                    AND o.placed_at <  c.event_ts + make_interval(secs => w.secs)
+                    AND o.filled > 0
+), sup AS MATERIALIZED (
+  -- THREE WAYS A COMMAND IS SUPERSEDED BEFORE ITS EXECUTION. Direct lineage
+  -- says an order was CREATED from this RN1 fill; it does not say the fill that
+  -- eventually landed is still economically attributable to the ORIGINAL
+  -- harmful command. Anything that replaced that command in between breaks the
+  -- chain, and all three are read from retained production state.
+  SELECT l.fill_id, l.attribution_window, l.order_id, l.raw_tier,
+         l.condition_id, l.event_ts, l.placed_at, l.signed_long_delta,
+         l.filled, l.avg_px, l.commanded_change, l.commanded_direction,
+         (SELECT count(*) FROM shx t
+           WHERE t.condition_id = l.condition_id
+             AND t.at > l.event_ts AND t.at < l.placed_at
+             AND t.target IS DISTINCT FROM l.target_after)
+           AS intervening_target_changes,
+         (SELECT count(*) FROM ords x
+           WHERE x.condition_id = l.condition_id
+             AND x.placed_at > l.event_ts AND x.placed_at < l.placed_at
+             AND x.order_state IN ('cancelled', 'expired', 'rejected', 'lost'))
+           AS intervening_cancels_or_replacements,
+         (SELECT count(*) FROM ev e2
+           WHERE e2.condition_id = l.condition_id
+             AND e2.ts > l.event_ts AND e2.ts < l.placed_at)
+           AS intervening_later_commands
+    FROM lk l WHERE l.order_id IS NOT NULL
+), supf AS MATERIALIZED (
+  SELECT s.*,
+         (s.intervening_target_changes > 0
+          OR s.intervening_cancels_or_replacements > 0
+          OR s.intervening_later_commands > 0) AS superseded
+    FROM sup s
+), percmd AS MATERIALIZED (
+  -- EXACTLY ONE lineage status and EXACTLY ONE attribution tier per command,
+  -- resolved to the STRONGEST evidence it has. Without this a single command
+  -- with three executions could be counted under three tiers at once and the
+  -- damage denominators would stop being populations.
+  SELECT c.fill_id, c.condition_id, c.event_ts, c.commanded_change,
+         c.commanded_direction, w.label AS attribution_window,
+         min(f.raw_tier) AS best_raw_tier,
+         count(f.order_id) AS executions,
+         bool_or(f.raw_tier = 1 AND NOT f.superseded) AS has_1a,
+         bool_or(f.raw_tier = 1) AS has_t1,
+         bool_or(f.raw_tier = 2 AND NOT f.superseded) AS has_2u,
+         bool_or(f.raw_tier = 2) AS has_t2,
+         bool_or(f.raw_tier = 3 AND NOT f.superseded) AS has_3u,
+         bool_or(f.raw_tier = 3) AS has_t3,
+         bool_or(f.superseded) AS any_superseded,
+         COALESCE(sum(f.filled) FILTER (WHERE f.raw_tier = 1 AND NOT f.superseded),
+                  0) AS tier1a_shares,
+         COALESCE(sum(f.signed_long_delta * c.commanded_direction)
+                  FILTER (WHERE f.raw_tier = 1 AND NOT f.superseded), 0)
+           AS tier1a_progress,
+         COALESCE(sum(f.filled * COALESCE(f.avg_px, 0))
+                  FILTER (WHERE f.raw_tier = 1 AND NOT f.superseded), 0)
+           AS tier1a_notional,
+         max(f.intervening_later_commands) AS max_later_commands
+    FROM hsel c CROSS JOIN wins w
+    LEFT JOIN supf f ON f.fill_id = c.fill_id
+                    AND f.attribution_window = w.label
+   GROUP BY 1, 2, 3, 4, 5, 6
+), lkf AS MATERIALIZED (
+  SELECT p.*,
+         CASE WHEN p.executions = 0 THEN '0 NO_EXECUTION'
+              WHEN p.best_raw_tier = 1 THEN '1 DIRECT_SOURCE_FILL_LINEAGE'
+              WHEN p.best_raw_tier = 2 THEN '2 TARGET_AND_LEDGER_LINEAGE'
+              WHEN p.best_raw_tier = 3 THEN '3 TARGET_STATE_ONLY'
+              ELSE '4 TEMPORAL_ONLY' END AS lineage_status,
+         CASE WHEN p.executions = 0 THEN '0 NO_EXECUTION'
+              WHEN p.has_1a THEN 'TIER_1A_DIRECT_UNSUPERSEDED (primary)'
+              WHEN p.has_t1 THEN 'TIER_1B_DIRECT_SUPERSEDED (NOT primary)'
+              WHEN p.has_2u THEN 'TIER_2_TARGET_LINEAGE (secondary)'
+              WHEN p.has_t2 THEN 'TIER_2S_TARGET_LINEAGE_SUPERSEDED (NOT primary)'
+              WHEN p.has_3u THEN 'TIER_3_TARGET_STATE (secondary)'
+              WHEN p.has_t3 THEN 'TIER_3S_TARGET_STATE_SUPERSEDED (NOT primary)'
+              ELSE 'TIER_4_TEMPORAL_SENSITIVITY_ONLY (never primary)'
+         END AS attribution_tier
+    FROM percmd p
+), g AS MATERIALIZED (
+  SELECT * FROM lkf WHERE attribution_window = '4 24 h'
+)
+SELECT
+  -- 1. exactly one lineage status per harmful command
+  (SELECT count(*) FROM g) AS gate1_witness_harmful_commands,
+  (SELECT count(*) FROM g WHERE lineage_status IS NULL) AS gate1_missing_expected_0,
+  (SELECT count(*) FROM (SELECT fill_id FROM g GROUP BY 1 HAVING count(*) > 1) d)
+    AS gate1_duplicated_expected_0,
+  -- 2. exactly one attribution tier per EXECUTED harmful command
+  (SELECT count(*) FROM g WHERE executions > 0)
+    AS gate2_witness_executed_commands,
+  (SELECT count(*) FROM g WHERE executions > 0 AND attribution_tier IS NULL)
+    AS gate2_missing_expected_0,
+  -- 3. tier 1A attributed quantity may not exceed the commanded quantity
+  --    unless a later command on the same condition documented an increase
+  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_1A%')
+    AS gate3_witness_tier_1a_commands,
+  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_1A%'
+     AND tier1a_progress > 1.01 * commanded_change
+     AND max_later_commands = 0) AS gate3_overattributed_expected_0,
+  -- 4. a superseded command must never sit in the primary tier
+  (SELECT count(*) FROM g WHERE any_superseded)
+    AS gate4_witness_commands_with_supersession,
+  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_1A%' AND NOT has_1a)
+    AS gate4_primary_without_unsuperseded_evidence_expected_0,
+  -- 5. the sensitivity tier must never be counted as primary
+  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_4%')
+    AS gate5_witness_temporal_only_commands,
+  (SELECT count(*) FROM g WHERE attribution_tier LIKE 'TIER_4%'
+     AND tier1a_shares > 0) AS gate5_temporal_in_primary_expected_0;
