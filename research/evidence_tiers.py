@@ -88,6 +88,68 @@ SEMANTICS = {
     "trigger_trade_id": ("UNVERIFIED", "no population to verify"),
     "his_fill_ts":      ("UNVERIFIED", "no population to verify"),
     "first_fill_at":    ("UNVERIFIED", "no population to verify"),
+
+    # THE LATENCY / EDGE-DECAY ESTIMATOR (run 79 onward). Stage 5 is narrower
+    # here than for attribution: a field can be eligible to attribute and
+    # useless to price with. mirror_shadow.mark is a verified quote and still
+    # not a depth, so it can never stand in for an executable price.
+    "ts":              ("VERIFIED_BUT_MIXED_DOMAIN",
+                        "migration 001 calls it the fill time, but it is the "
+                        "BLOCK timestamp on source='chain' and the venue API's "
+                        "timestamp on source='poll' -- two clock domains in one "
+                        "column, so it is only usable split by source"),
+    "detected_at":     ("VERIFIED", "ingestion/pipeline.py:128 stamps "
+                                    "datetime.now(utc) in the APP process, not "
+                                    "the database"),
+    "venue_seen_at":   ("UNVERIFIED", "migration 034 adds it; no write site "
+                                      "found in backend/sportsassets"),
+    "probe_at":        ("VERIFIED_AS_A_LOWER_BOUND",
+                        "copy_probe.py:110 stamps it BEFORE the semaphore and "
+                        "BEFORE the book GET, and fetch completion was never "
+                        "retained -- so it is when we STARTED looking, not when "
+                        "the book was observable"),
+    "fill_ts":         ("VERIFIED", "copy_probe.py carries the source payload's "
+                                    "ts through unchanged -- same domain as "
+                                    "trades.ts, and inherits its mixture"),
+    "reaction_s":      ("VERIFIED_AS_A_CROSS_DOMAIN_DIFFERENCE",
+                        "probe_at (app) minus fill_ts (chain/venue): median "
+                        "-0.73 s, which is proof the two clocks are not "
+                        "comparable, not evidence of speed"),
+    "best_ask":        ("VERIFIED", "copy_probe.compute_book_metrics: the top "
+                                    "ask level of the probed book"),
+    "depth":           ("VERIFIED_BUT_TRUNCATED",
+                        "copy_probe.py:158 stores asks[:8] -- the TOP EIGHT "
+                        "levels only, so any size consuming more is "
+                        "DEPTH_EXHAUSTED and never 'filled at the last price'"),
+    "book_ok":         ("VERIFIED", "bool(asks) at the probe"),
+    "t_s":             ("VERIFIED", "workers/price_path.py: the nominal offset, "
+                                    "taken only inside its own window"),
+    "ask":             ("VERIFIED", "price_path: the PMUS ask at that offset, "
+                                    "anchored at live_orders.placed_at -- NOT "
+                                    "at his fill"),
+    "sampled_at":      ("VERIFIED", "price_path: the database clock at the "
+                                    "sample"),
+    "placed_at":       ("VERIFIED_AS_PRE_SEND",
+                        "mirror_orders: DEFAULT now() at the INSERT, which "
+                        "writes state='placing' BEFORE the venue send -- it is "
+                        "not a submit time and not an acknowledgement"),
+    "updated_at":      ("UNVERIFIED_BECAUSE_MUTABLE",
+                        "the state='open' write is the nearest thing to an ack, "
+                        "and every later update overwrites it, so no "
+                        "acknowledgement time survives"),
+    "done_at":         ("VERIFIED", "mirror_orders: the terminal stamp only"),
+    "ask_at_send":     ("VERIFIED", "migration 059: the re-read's ask "
+                                    "immediately before an IOC send; NULL on a "
+                                    "rest BY DESIGN, which is most rows since "
+                                    "the MAKER lane"),
+    "receipt":         ("UNVERIFIED", "the venue's placement response as JSON; "
+                                      "whether it carries ANY venue-side "
+                                      "timestamp is unknown -- run 79 probes "
+                                      "its keys"),
+    "beat_at":         ("VERIFIED", "db.py:194 writes now() server-side; a "
+                                    "candidate half of an independent C2/C3 "
+                                    "bridge IF the same statement's detail "
+                                    "carries an app-stamped time"),
 }
 
 FIELDS = [
@@ -105,6 +167,26 @@ FIELDS = [
     ("mirror_shadow", "ledger_net", "the recorded pre-command position"),
     ("mirror_shadow", "his_net", "RN1 signed state as production read it"),
     ("mirror_shadow", "mark", "valuation horizon price"),
+
+    # the latency / edge-decay estimator's own fields
+    ("trades", "ts", "C1 source fill clock -- MIXED DOMAIN"),
+    ("trades", "detected_at", "C2 detection clock"),
+    ("trades", "venue_seen_at", "claimed venue-feed clock"),
+    ("copy_probes", "probe_at", "C2 observation-START clock"),
+    ("copy_probes", "fill_ts", "C1 source clock, carried"),
+    ("copy_probes", "reaction_s", "the cross-domain difference"),
+    ("copy_probes", "best_ask", "best_ask_at_action"),
+    ("copy_probes", "depth", "the depth walk -- top 8 levels"),
+    ("copy_probes", "book_ok", "was a book observed at all"),
+    ("price_path", "t_s", "the delay bucket"),
+    ("price_path", "ask", "PMUS ask at the offset"),
+    ("price_path", "sampled_at", "C3 sample clock"),
+    ("mirror_orders", "placed_at", "C3 PRE-SEND clock"),
+    ("mirror_orders", "updated_at", "mutable; nearest ack proxy"),
+    ("mirror_orders", "done_at", "C3 terminal clock"),
+    ("mirror_orders", "ask_at_send", "the ask re-read immediately before a send"),
+    ("mirror_orders", "receipt", "possible C4 venue timestamp"),
+    ("service_heartbeats", "beat_at", "C3 half of a possible clock bridge"),
 ]
 
 def sql_strings(text):
@@ -127,6 +209,54 @@ def sql_strings(text):
         if isinstance(node, ast.Constant) and isinstance(node.value, str):
             if len(node.value) > 12:
                 yield node.value
+
+
+MIGRATIONS = os.path.join(ROOT, "migrations")
+
+# A COLUMN DEFAULT IS A WRITE SITE, AND THE APP'S SQL NEVER NAMES IT.
+#
+# Found by this file's own first run over the latency fields: price_path.ask is
+# written by name, price_path.sampled_at is not -- the worker sends
+#     INSERT INTO price_path (row_id, t_s, ask) VALUES ($1, $2, $3)
+# and the column carries DEFAULT now(). By the name rule alone that reads
+# NO_WRITE_SITE, and the field would have been declared UNAVAILABLE while being
+# populated on every single row. That is the exact failure this gate exists to
+# prevent, pointed the other way: a FALSE UNAVAILABLE is not the safe direction,
+# it silently deletes real evidence.
+#
+# So there are three stage-2 verdicts, not two. DB_DEFAULT is a real write with
+# a DIFFERENT AUTHOR -- the database, at commit, on the server's clock, not the
+# application on the app container's clock. For a clock field that distinction
+# IS the measurement (C2 vs C3), so it is carried into the output rather than
+# folded into "written".
+_DEFAULT_COL = re.compile(
+    r"^\s*(?:ADD\s+COLUMN\s+(?:IF\s+NOT\s+EXISTS\s+)?)?"
+    r"([a-z_][a-z0-9_]*)\s+[^,;]*?\bDEFAULT\b", re.I)
+
+
+def default_written():
+    """Columns the migrations give a DEFAULT, by name."""
+    out = {}
+    try:
+        names = sorted(os.listdir(MIGRATIONS))
+    except OSError:
+        return out
+    for fn in names:
+        if not fn.endswith(".sql"):
+            continue
+        path = os.path.join(MIGRATIONS, fn)
+        try:
+            text = open(path, errors="ignore").read()
+        except OSError:
+            continue
+        for raw in text.splitlines():
+            line = raw.split("--", 1)[0]          # a comment is not a column
+            if "DEFAULT" not in line.upper():
+                continue
+            m = _DEFAULT_COL.match(line)
+            if m:
+                out.setdefault(m.group(1), set()).add(fn)
+    return out
 
 
 def scan():
@@ -155,18 +285,22 @@ def scan():
 
 def main():
     writes, reads = scan()
+    defaults = default_written()
     print("EVIDENCE-TIER PRECONDITION GATE -- CODE SIDE")
     print("a write site is the field inside a SQL string that also has "
-          "INSERT or UPDATE\n")
+          "INSERT or UPDATE,")
+    print("or a DEFAULT in the migrations -- which the database writes and the "
+          "app never names\n")
     print(f"{'field':<20} {'write':<6} {'read':<5} {'stage 2':<14} "
           f"{'stage 4 semantics':<12}  purpose")
     print("-" * 110)
     missing = []
     for tbl, field, why in FIELDS:
         w, r = len(writes.get(field, ())), len(reads.get(field, ()))
-        if w == 0:
+        d = len(defaults.get(field, ()))
+        if w == 0 and d == 0:
             missing.append((tbl, field, why))
-        stage2 = "WRITE_SITE" if w else "NO_WRITE_SITE"
+        stage2 = "WRITE_SITE" if w else ("DB_DEFAULT" if d else "NO_WRITE_SITE")
         stage4 = SEMANTICS.get(field, ("UNVERIFIED", ""))[0]
         print(f"{field:<20} {w:<6} {r:<5} {stage2:<14} {stage4:<12}  {why}")
     print()
