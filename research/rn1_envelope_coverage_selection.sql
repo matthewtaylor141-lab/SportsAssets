@@ -45,21 +45,32 @@ WITH base AS (
    WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
      AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
      AND t.ts >= timestamptz '2026-08-05 00:00Z'
+), rowprobe AS (
+  -- PER ROW, tied to the exact fill that generated it. This is the only flag
+  -- a reconstruction may use.
+  SELECT b.id, EXISTS (SELECT 1 FROM copy_probes p
+                        WHERE p.trade_id = b.id AND p.book_ok
+                          AND p.best_ask IS NOT NULL) AS row_has_usable_probe
+    FROM base b
 ), env AS (
-  -- THE ECONOMIC ENVELOPE, and whether ANY of its rows was probed.
-  SELECT tx_hash, asset, side,
-         CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed,
-         bool_or(EXISTS (SELECT 1 FROM copy_probes p
-                          WHERE p.trade_id = base.id AND p.book_ok
-                            AND p.best_ask IS NOT NULL)) AS has_valid_probe
-    FROM base GROUP BY 1, 2, 3
+  -- PER ENVELOPE. Answers only "did this execution have any fast-path
+  -- representation". It must NEVER be attached to a row that was not itself
+  -- probed -- borrowing another row's book and assigning it to this event is
+  -- exactly the lookahead this file exists to avoid.
+  SELECT b.tx_hash, b.asset, b.side,
+         CASE WHEN bool_or(b.feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed,
+         bool_or(r.row_has_usable_probe) AS envelope_probe_covered
+    FROM base b JOIN rowprobe r ON r.id = b.id GROUP BY 1, 2, 3
 ), canon AS (
-  SELECT b.*, e.has_valid_probe
+  SELECT b.*, e.envelope_probe_covered,
+         r.row_has_usable_probe AS has_valid_probe   -- the FILL-SPECIFIC flag
     FROM base b JOIN env e
       ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.side = b.side
      AND e.canon_feed = b.feed
+    JOIN rowprobe r ON r.id = b.id
 ), r AS (
   SELECT condition_id, tx_hash, asset, side, ts, sh, px, has_valid_probe,
+         envelope_probe_covered,
          sum(CASE WHEN outcome_index = 0 THEN sh ELSE 0 END)
            OVER (PARTITION BY condition_id ORDER BY ts, tx_hash, asset
                  ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS y,
@@ -69,11 +80,14 @@ WITH base AS (
     FROM canon
 ), dm AS (
   SELECT condition_id, tx_hash, asset, side, sh, px, has_valid_probe,
+         envelope_probe_covered,
          GREATEST(LEAST(y, n)
                   - COALESCE(LEAST(lag(y) OVER w, lag(n) OVER w), 0), 0) AS d_m
     FROM r WINDOW w AS (PARTITION BY condition_id ORDER BY ts, tx_hash, asset)
 ), agg AS (
-  SELECT tx_hash, asset, side, max(has_valid_probe::int)::boolean AS has_valid_probe,
+  SELECT tx_hash, asset, side,
+         max(envelope_probe_covered::int)::boolean AS envelope_probe_covered,
+         max(has_valid_probe::int)::boolean AS has_valid_probe,
          sum(sh) AS shares, sum(sh * px) AS notional,
          sum(d_m) AS d_m, sum(d_m * px) AS matched_notional
     FROM dm GROUP BY 1, 2, 3
@@ -83,9 +97,12 @@ SELECT count(*) AS economic_envelopes,
        round(sum(shares)::numeric, 0) AS rn1_shares,
        round(sum(d_m)::numeric, 0) AS dM_shares,
        round(sum(matched_notional)::numeric, 0) AS matched_notional,
-       count(*) FILTER (WHERE has_valid_probe) AS probe_covered_envelopes,
+       count(*) FILTER (WHERE envelope_probe_covered) AS ENVELOPE_probe_covered,
+       count(*) FILTER (WHERE has_valid_probe) AS dM_FILL_has_usable_probe,
+       round((100.0 * count(*) FILTER (WHERE envelope_probe_covered) / count(*))::numeric, 2)
+         AS pct_envelope_covered,
        round((100.0 * count(*) FILTER (WHERE has_valid_probe) / count(*))::numeric, 2)
-         AS pct_envelopes_covered,
+         AS PCT_FILL_SPECIFIC_COVERED,
        round((100.0 * sum(notional) FILTER (WHERE has_valid_probe)
               / NULLIF(sum(notional), 0))::numeric, 2) AS PCT_NOTIONAL_COVERED,
        round(sum(d_m) FILTER (WHERE has_valid_probe)::numeric, 0) AS probe_covered_dM,
@@ -109,17 +126,23 @@ WITH base AS (
    WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
      AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
      AND t.ts >= timestamptz '2026-08-05 00:00Z'
+), rowprobe AS (
+  -- FILL-SPECIFIC. The probe must be tied to the exact RN1 fill that generated
+  -- this event; an envelope-level flag would borrow another row's book.
+  SELECT b.id, EXISTS (SELECT 1 FROM copy_probes p
+                        WHERE p.trade_id = b.id AND p.book_ok
+                          AND p.best_ask IS NOT NULL) AS row_has_usable_probe
+    FROM base b
 ), env AS (
-  SELECT tx_hash, asset, side,
-         CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed,
-         bool_or(EXISTS (SELECT 1 FROM copy_probes p
-                          WHERE p.trade_id = base.id AND p.book_ok
-                            AND p.best_ask IS NOT NULL)) AS has_valid_probe
-    FROM base GROUP BY 1, 2, 3
+  SELECT b.tx_hash, b.asset, b.side,
+         CASE WHEN bool_or(b.feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed
+    FROM base b GROUP BY 1, 2, 3
 ), canon AS (
-  SELECT b.*, e.has_valid_probe FROM base b JOIN env e
-    ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.side = b.side
-   AND e.canon_feed = b.feed
+  SELECT b.*, r.row_has_usable_probe AS has_valid_probe
+    FROM base b JOIN env e
+      ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.side = b.side
+     AND e.canon_feed = b.feed
+    JOIN rowprobe r ON r.id = b.id
 ), r AS (
   SELECT condition_id, tx_hash, asset, ts, sh, px, has_valid_probe,
          sum(CASE WHEN outcome_index = 0 THEN sh ELSE 0 END)
@@ -153,7 +176,7 @@ SELECT CASE WHEN d_m > 0.000001 AND NOT has_valid_probe
   FROM dm GROUP BY 1 ORDER BY 1;
 
 
-\echo '== 3. EDGE SELECTION: are covered envelopes economically different? =='
+\echo '== 3. EDGE SELECTION (ex-post diagnostic, three weightings + medians) =='
 -- The question that decides whether section 3 may generalise at all. RN1's own
 -- pair economics are a CONDITION-level quantity, so each envelope inherits the
 -- economics of the condition it sits in, and covered and missing envelopes are
@@ -166,17 +189,23 @@ WITH base AS (
    WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
      AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
      AND t.ts >= timestamptz '2026-08-05 00:00Z'
+), rowprobe AS (
+  -- FILL-SPECIFIC. The probe must be tied to the exact RN1 fill that generated
+  -- this event; an envelope-level flag would borrow another row's book.
+  SELECT b.id, EXISTS (SELECT 1 FROM copy_probes p
+                        WHERE p.trade_id = b.id AND p.book_ok
+                          AND p.best_ask IS NOT NULL) AS row_has_usable_probe
+    FROM base b
 ), env AS (
-  SELECT tx_hash, asset, side,
-         CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed,
-         bool_or(EXISTS (SELECT 1 FROM copy_probes p
-                          WHERE p.trade_id = base.id AND p.book_ok
-                            AND p.best_ask IS NOT NULL)) AS has_valid_probe
-    FROM base GROUP BY 1, 2, 3
+  SELECT b.tx_hash, b.asset, b.side,
+         CASE WHEN bool_or(b.feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed
+    FROM base b GROUP BY 1, 2, 3
 ), canon AS (
-  SELECT b.*, e.has_valid_probe FROM base b JOIN env e
-    ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.side = b.side
-   AND e.canon_feed = b.feed
+  SELECT b.*, r.row_has_usable_probe AS has_valid_probe
+    FROM base b JOIN env e
+      ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.side = b.side
+     AND e.canon_feed = b.feed
+    JOIN rowprobe r ON r.id = b.id
 ), cond AS (
   SELECT condition_id,
          sum(sh) FILTER (WHERE outcome_index = 0) AS qY,
@@ -211,20 +240,39 @@ WITH base AS (
 SELECT CASE WHEN has_valid_probe THEN 'PROBE-COVERED' ELSE 'PROBE-MISSING' END AS cohort,
        count(*) AS events,
        round(sum(sh * px)::numeric, 0) AS notional,
-       round(avg(gross_pair_cost)::numeric, 5) AS mean_gross_pair_cost,
-       round(avg(gross_pair_edge)::numeric, 5) AS mean_gross_pair_edge,
+       round(sum(d_m)::numeric, 0) AS dM_shares,
+       round(sum(d_m * px)::numeric, 0) AS matched_notional,
+       -- EX_POST_SELECTION_DIAGNOSTIC below this line. gross_pair_cost is the
+       -- CONDITION's completed pair cost and is NOT knowable at the timestamp
+       -- of an early fill in that condition. It diagnoses selection after the
+       -- fact and must never filter, classify or feed the execution replay.
+       round(avg(gross_pair_edge)::numeric, 5) AS ep_EVENT_weighted_edge,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY gross_pair_edge)::numeric, 5)
+         AS ep_EVENT_MEDIAN_edge,
+       round((sum(gross_pair_edge * d_m) / NULLIF(sum(d_m), 0))::numeric, 5)
+         AS ep_dM_WEIGHTED_edge,
+       round((sum(gross_pair_edge * d_m * px) / NULLIF(sum(d_m * px), 0))::numeric, 5)
+         AS ep_MATCHED_NOTIONAL_weighted_edge,
        round((sum(gross_pair_edge * sh * px) / NULLIF(sum(sh * px), 0))::numeric, 5)
-         AS CAPITAL_WEIGHTED_pair_edge,
-       round(avg(d_m / NULLIF(sh, 0))::numeric, 4) AS mean_dM_over_fill_size,
+         AS ep_capital_weighted_edge,
+       round(avg(gross_pair_cost)::numeric, 5) AS ep_mean_gross_pair_cost,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY gross_pair_cost)::numeric, 5)
+         AS ep_MEDIAN_gross_pair_cost,
+       -- DECISION_TIME_AVAILABLE below: size and match shape are visible as the
+       -- fills arrive; they are not reconstructed from the completed pair.
+       round(avg(d_m / NULLIF(sh, 0))::numeric, 4) AS dt_mean_dM_over_fill,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY d_m / NULLIF(sh, 0))::numeric, 4)
+         AS dt_MEDIAN_dM_over_fill,
        round((100.0 * count(*) FILTER (WHERE d_m > 0.000001 AND d_m < sh - 0.000001)
-              / count(*))::numeric, 2) AS partial_match_rate_pct,
-       round(avg(sh)::numeric, 0) AS mean_clip_shares,
-       round(avg(px)::numeric, 4) AS mean_price,
-       round(sum(d_m)::numeric, 0) AS dM_shares
+              / count(*))::numeric, 2) AS dt_partial_match_rate_pct,
+       round(avg(sh)::numeric, 0) AS dt_mean_clip_shares,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY sh)::numeric, 0)
+         AS dt_MEDIAN_clip_shares,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY px)::numeric, 4) AS dt_median_price
   FROM j GROUP BY 1 ORDER BY 1;
 
 
-\echo '== 4. EDGE SELECTION stratified -- where does the difference live? =='
+\echo '== 4. EDGE SELECTION stratified -- EX_POST_SELECTION_DIAGNOSTIC only =='
 WITH base AS (
   SELECT t.id, t.tx_hash, t.asset, t.side, t.ts, t.condition_id, t.outcome_index,
          t.sport, t.size::float8 AS sh, t.price::float8 AS px,
@@ -233,17 +281,23 @@ WITH base AS (
    WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
      AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
      AND t.ts >= timestamptz '2026-08-05 00:00Z'
+), rowprobe AS (
+  -- FILL-SPECIFIC. The probe must be tied to the exact RN1 fill that generated
+  -- this event; an envelope-level flag would borrow another row's book.
+  SELECT b.id, EXISTS (SELECT 1 FROM copy_probes p
+                        WHERE p.trade_id = b.id AND p.book_ok
+                          AND p.best_ask IS NOT NULL) AS row_has_usable_probe
+    FROM base b
 ), env AS (
-  SELECT tx_hash, asset, side,
-         CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed,
-         bool_or(EXISTS (SELECT 1 FROM copy_probes p
-                          WHERE p.trade_id = base.id AND p.book_ok
-                            AND p.best_ask IS NOT NULL)) AS has_valid_probe
-    FROM base GROUP BY 1, 2, 3
+  SELECT b.tx_hash, b.asset, b.side,
+         CASE WHEN bool_or(b.feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed
+    FROM base b GROUP BY 1, 2, 3
 ), canon AS (
-  SELECT b.*, e.has_valid_probe FROM base b JOIN env e
-    ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.side = b.side
-   AND e.canon_feed = b.feed
+  SELECT b.*, r.row_has_usable_probe AS has_valid_probe
+    FROM base b JOIN env e
+      ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.side = b.side
+     AND e.canon_feed = b.feed
+    JOIN rowprobe r ON r.id = b.id
 ), cond AS (
   SELECT condition_id,
          sum(sh * px) FILTER (WHERE outcome_index = 0)
