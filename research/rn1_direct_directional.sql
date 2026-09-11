@@ -653,3 +653,130 @@ SELECT count(*) AS clean_conditions,
        round((100.0 * sum(abs(recon)) / NULLIF(sum(acq_cost), 0))::numeric, 9)
          AS sum_abs_recon_pct_of_acq_cost
   FROM r;
+
+
+\echo '== 6. ATTRIBUTION SENSITIVITY: spread across methods, and sign stability =='
+-- Owner-specified. The residual leg was acquired at MULTIPLE PRICES in ~84% of
+-- residual conditions (run 65 statement 1: 6,777 of 8,031; p50 4 distinct
+-- prices, p90 15-16), so the matched/directional split is a live accounting
+-- choice rather than a formality, and the size of that choice must be reported
+-- rather than assumed small.
+--
+-- THE TOTAL IS INVARIANT ACROSS METHODS BY CONSTRUCTION:
+--     matched_gross(rule) + direct_directional(rule)
+--       = M + residual_settlement - acquisition_cost
+-- which contains no rule. Only the ATTRIBUTION between the two components
+-- moves. So every spread below is the size of a bookkeeping convention, never
+-- uncertainty about RN1's total economics.
+--
+-- Two different questions are asked, because they can disagree:
+--   AGGREGATE STABILITY  -- do the dollar totals barely move? If so a robust
+--                           AGGREGATE statement survives.
+--   PER-CONDITION SIGN STABILITY -- does any individual condition's directional
+--                           P&L change SIGN across methods? If that is common,
+--                           per-condition directional attribution is
+--                           METHOD-SENSITIVE and must be described that way,
+--                           EVEN IF the aggregate is stable. A stable total is
+--                           not evidence of stable attribution.
+WITH base AS MATERIALIZED (
+  SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
+         t.size::float8 AS sh, t.price::float8 AS px, t.side,
+         CASE WHEN t.source IN ('poll', 'backfill') THEN 'venue' ELSE 'cash' END AS feed
+    FROM trades t JOIN whales w ON w.id = t.whale_id
+   WHERE lower(w.username) = 'rn1'
+     AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
+), canon AS MATERIALIZED (
+  SELECT z.* FROM (
+    SELECT b.*, bool_or(b.feed = 'venue')
+                  OVER (PARTITION BY b.tx_hash, b.asset) AS any_venue
+      FROM base b) z
+   WHERE NOT (z.feed = 'cash' AND z.any_venue)
+), inwin AS MATERIALIZED (
+  SELECT * FROM canon
+   WHERE ts >= timestamptz '2026-08-05 00:00Z'
+     AND ts <  timestamptz '2026-09-11 12:00Z'
+), leg AS MATERIALIZED (
+  SELECT condition_id, outcome_index,
+         sum(sh)      FILTER (WHERE side = 'BUY') AS qbuy,
+         sum(sh * px) FILTER (WHERE side = 'BUY') AS cbuy
+    FROM inwin GROUP BY 1, 2
+), cond AS MATERIALIZED (
+  SELECT l.condition_id,
+         sum(COALESCE(l.cbuy, 0)) AS acq_cost,
+         COALESCE(max(CASE WHEN l.outcome_index = 0 THEN COALESCE(l.qbuy, 0) END), 0) AS qy,
+         COALESCE(max(CASE WHEN l.outcome_index = 1 THEN COALESCE(l.qbuy, 0) END), 0) AS qn,
+         COALESCE(max(CASE WHEN l.outcome_index = 0 THEN COALESCE(l.cbuy, 0) END), 0) AS cy,
+         COALESCE(max(CASE WHEN l.outcome_index = 1 THEN COALESCE(l.cbuy, 0) END), 0) AS cn
+    FROM leg l GROUP BY 1
+), tok AS MATERIALIZED (
+  SELECT mt.condition_id
+    FROM market_tokens mt GROUP BY mt.condition_id
+   HAVING count(*) = 2 AND count(DISTINCT mt.outcome_index) = 2
+      AND count(*) FILTER (WHERE mt.outcome_index IS NULL) = 0
+      AND bool_or(mt.outcome_index = 0) AND bool_or(mt.outcome_index = 1)
+      AND max(mt.outcome_index) = 1
+), cl AS MATERIALIZED (
+  SELECT c.condition_id, c.acq_cost, c.qy, c.qn, c.cy, c.cn,
+         LEAST(c.qy, c.qn) AS mq,
+         c.qy - LEAST(c.qy, c.qn) AS ry,
+         c.qn - LEAST(c.qy, c.qn) AS rn_,
+         (mk.resolved_prices->>0)::float8 AS py,
+         (mk.resolved_prices->>1)::float8 AS pn
+    FROM cond c
+    JOIN tok t ON t.condition_id = c.condition_id
+    JOIN markets mk ON mk.condition_id = c.condition_id
+   WHERE mk.resolved AND mk.resolved_prices IS NOT NULL
+     AND c.qy > 0 AND c.qn > 0
+), bw AS MATERIALIZED (
+  SELECT i.condition_id, i.outcome_index, i.sh, i.px,
+         sum(i.sh) OVER (PARTITION BY i.condition_id, i.outcome_index
+                         ORDER BY i.ts, i.id ROWS UNBOUNDED PRECEDING) AS cum
+    FROM inwin i JOIN cl ON cl.condition_id = i.condition_id
+   WHERE i.side = 'BUY'
+), alloc AS MATERIALIZED (
+  SELECT b.condition_id,
+         sum(b.px * greatest(0.0, least(b.sh, b.cum - cl.mq))) AS rc_fifo,
+         sum(b.px * greatest(0.0, least(b.sh,
+               (CASE WHEN b.outcome_index = 0 THEN cl.ry ELSE cl.rn_ END)
+               - (b.cum - b.sh)))) AS rc_lifo
+    FROM bw b JOIN cl ON cl.condition_id = b.condition_id
+   GROUP BY 1
+), d AS MATERIALIZED (
+  SELECT cl.condition_id, cl.acq_cost,
+         cl.py * cl.qy + cl.pn * cl.qn - cl.acq_cost AS trading_pnl,
+         (cl.py * cl.ry + cl.pn * cl.rn_)
+           - (cl.ry * (cl.cy / cl.qy) + cl.rn_ * (cl.cn / cl.qn)) AS dir_avg,
+         (cl.py * cl.ry + cl.pn * cl.rn_) - a.rc_fifo AS dir_fifo,
+         (cl.py * cl.ry + cl.pn * cl.rn_) - a.rc_lifo AS dir_lifo
+    FROM cl JOIN alloc a ON a.condition_id = cl.condition_id
+), s AS MATERIALIZED (
+  SELECT d.*,
+         greatest(dir_avg, dir_fifo, dir_lifo) AS dir_hi,
+         least(dir_avg, dir_fifo, dir_lifo)    AS dir_lo
+    FROM d
+)
+SELECT count(*) AS conditions,
+       round(sum(trading_pnl)::numeric, 0) AS total_trading_pnl_usd,
+       round(sum(dir_avg)::numeric, 0)  AS directional_pnl_avg_cost_usd,
+       round(sum(dir_fifo)::numeric, 0) AS directional_pnl_fifo_usd,
+       round(sum(dir_lifo)::numeric, 0) AS directional_pnl_lifo_usd,
+       round((greatest(sum(dir_avg), sum(dir_fifo), sum(dir_lifo))
+              - least(sum(dir_avg), sum(dir_fifo), sum(dir_lifo)))::numeric, 0)
+         AS aggregate_spread_usd,
+       round((100.0 * (greatest(sum(dir_avg), sum(dir_fifo), sum(dir_lifo))
+                       - least(sum(dir_avg), sum(dir_fifo), sum(dir_lifo)))
+              / NULLIF(abs(sum(trading_pnl)), 0))::numeric, 3)
+         AS aggregate_spread_pct_of_total_trading_pnl,
+       count(*) FILTER (WHERE dir_lo < -1e-9 AND dir_hi > 1e-9)
+         AS conditions_whose_directional_pnl_changes_sign,
+       round((100.0 * count(*) FILTER (WHERE dir_lo < -1e-9 AND dir_hi > 1e-9)
+              / count(*))::numeric, 3) AS pct_conditions_sign_unstable,
+       round((100.0 * sum(acq_cost) FILTER (WHERE dir_lo < -1e-9 AND dir_hi > 1e-9)
+              / NULLIF(sum(acq_cost), 0))::numeric, 3)
+         AS pct_acq_cost_sign_unstable,
+       round(sum(dir_hi - dir_lo)::numeric, 0) AS sum_per_condition_spread_usd,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY dir_hi - dir_lo)::numeric, 2)
+         AS p50_per_condition_spread_usd,
+       round(percentile_cont(0.9) WITHIN GROUP (ORDER BY dir_hi - dir_lo)::numeric, 2)
+         AS p90_per_condition_spread_usd
+  FROM s;
