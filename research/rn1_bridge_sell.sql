@@ -236,7 +236,6 @@ WITH base AS (
      AND NOT (y.prev_ev IS NOT NULL AND y.prev_ratio IS DISTINCT FROM y.as_of_ratio)
 ), q AS (
   SELECT z.condition_id, z.ts, z.ev, z.sh, z.px, z.source, z.d_m, z.signed_dn, z.d_cont,
-         z.oi, z.ay, z.an, z.as_of_long,
          GREATEST(0, z.m - 1) AS required_qty_min,
          CASE WHEN z.d_int THEN z.m ELSE z.m + 1 END AS required_qty_max,
          CASE WHEN z.signed_dn > 0 THEN 'BUY ' ELSE 'SELL' END AS local_side,
@@ -244,6 +243,16 @@ WITH base AS (
          -- signed coordinate is negative precisely BECAUSE his fill was on the
          -- token that is NOT the designated long. So px is the COMPLEMENT's
          -- price and is NOT comparable to a bid quoted on the long.
+         --
+         -- ONLY THE BOOLEAN IS PROJECTED. Run 58 carried oi/ay/an/as_of_long
+         -- through as well, and ay/an/as_of_long are ~77-byte CTF token id
+         -- strings. Three of those per row widened ev, then b, then the UNION
+         -- in `s`, whose window sorts every SELL event together with every
+         -- retained shadow bid row for those conditions. A sort's width is set
+         -- by its widest row, so the extra ~230 bytes pushed a sort that fit in
+         -- work_mem at run 57 (10m19s) out to disk: run 58 passed 23 minutes
+         -- and was killed by the job ceiling having computed the same answer.
+         -- The boolean is all the reference needs, so the strings stay behind.
          (CASE WHEN z.oi = 0 THEN z.ay ELSE z.an END = z.as_of_long) AS fill_on_long,
          (z.d_cont >= 2.0) AS side_forced
     FROM tti z WHERE z.signed_dn <> 0
