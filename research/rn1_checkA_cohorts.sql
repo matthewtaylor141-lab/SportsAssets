@@ -1,79 +1,89 @@
 -- ============================================================================
--- CHECK A, REVISED: condition cohorts that no threshold can manufacture
+-- CHECK A: condition cohorts that no threshold can manufacture
 -- (2026-09-11, read-only.)
 --
--- WHY THE FIRST ATTEMPT TIMED OUT, and the fix. Run 33 died on statement 1 at
--- the 600 s statement timeout, so it produced NOTHING. The cause is a schema
--- gap, not query size: copy_probes carries NO INDEX ON trade_id. Migration 005
--- declares `trade_id BIGINT REFERENCES trades (id)` and PostgreSQL does NOT
--- create an index for a foreign key, and the only indexes ever added are
--- (whale_id, probe_at DESC) and (probe_at). So the per-row
---     EXISTS (SELECT 1 FROM copy_probes p WHERE p.trade_id = b.id ...)
--- was a SEQUENTIAL SCAN OF copy_probes FOR EVERY ONE of ~350k canonical fills.
--- That is also the likeliest cause of the earlier exit=124 on the envelope
--- file. It is worth fixing in the schema, but this file must not write, so the
--- query is restructured instead: the probed trade_ids are collected ONCE into
--- a set and hash-joined, turning 350k scans into one.
+-- WHY THIS TOOK FOUR ATTEMPTS, and what the cause actually was. Runs 33, 34 and
+-- 35 all timed out (600 s, 1200 s, 1200 s) and produced nothing. I fixed three
+-- things I had REASONED to -- a missing copy_probes(trade_id) index, a
+-- single-leg prefilter, a doubled window pass -- and re-ran each time without
+-- measuring. Run 36 finally measured, with counts and an EXPLAIN that plans
+-- without running, and the real cause was none of them:
 --
--- AND THE WHOLE FILE IS NOW ONE STATEMENT. The previous version repeated the
--- same nine-CTE chain three times -- once per statement -- so the expensive
--- part was computed three times over. Cohorts, coverage bins and sensitivities
--- are all aggregations over the SAME per-condition table, so they are produced
--- from one pass and stacked with a label column.
+--   Nested Loop  (rows=1)
+--     Join Filter: (canon.condition_id = canon_1.condition_id)
+--     ->  HashAggregate (rows=1)        [the per-condition price aggregate]
+--     ->  GroupAggregate (rows=1)       [the per-condition dM aggregate]
+--           ->  WindowAgg -> Sort -> CTE Scan on canon
 --
--- THAT WAS STILL NOT ENOUGH. Run 34 timed out again at 1200 s, so the probe
--- scan was not the only cost and buying more wall clock is the wrong answer.
--- Three structural costs are removed rather than waited out, marked COST FIX
--- 1-3 at their sites below:
---   1  conditions where he only ever bought ONE leg are dropped BEFORE the
---      window functions. They cannot produce matched inventory and are thrown
---      away at the end anyway, so carrying them through the sort was pure loss.
---   2  ONE window level instead of two. The pre-fill running totals are the
---      running totals minus this row's own contribution, so lag() -- and the
---      entire second window pass over the same partition -- was unnecessary.
---   3  the sort key is (condition_id, ts, id) rather than
---      (condition_id, ts, tx_hash, asset). Sorting several hundred thousand
---      rows on two long hex strings is expensive; `id` is a unique bigint and
---      is an equally deterministic tiebreak at equal timestamps.
--- None of the three changes what is measured; they change what it costs.
+-- The planner estimates `canon` at ONE ROW. It cannot estimate the join
+-- condition `b.feed = (CASE WHEN bool_or(...) THEN 'venue' ELSE 'cash' END)`,
+-- so it guesses 1; the true figure is ~356,000. On that estimate it chose a
+-- NESTED LOOP between the two aggregates over canon, with no Materialize. In a
+-- nested loop the inner side is re-executed once per outer row, the inner side
+-- here is a SORT AND WINDOW PASS OVER THE WHOLE 356k-ROW SET, and the outer
+-- side produces ~14,346 conditions.
 --
--- WHAT CHANGED IN THE METHOD. My first disjoint cohort rule was "a majority of
+-- So the sort and window were running roughly fourteen thousand times. That is
+-- the twenty minutes. It was a plan-shape problem, not a volume problem, and
+-- the three earlier fixes were shaving percentages off a quantity that was
+-- being multiplied by 14,000.
+--
+-- THE FIX IS STRUCTURAL. `cond` and `coh` were both GROUP BY condition_id over
+-- the same rows; they were only separate because one of them needed the
+-- window-derived dM. Computing dM inside the window pass and then doing ONE
+-- GROUP BY that emits both sets removes the join entirely -- no nested loop, no
+-- rescan -- and leaves `canon` with a single reference so it can be inlined.
+--
+-- WHAT RUN 36 ALSO SETTLED, measured rather than assumed:
+--   * 385,201 base rows across both feeds, 26,154 conditions, 14,346 two-leg.
+--     My "~350k" was right, so scale was never the problem.
+--   * the two-leg prefilter removes only 7.6% of rows, so it is dropped here:
+--     the final qy > 0 AND qn > 0 already excludes those conditions and the
+--     prefilter was buying almost nothing for an extra aggregate and join.
+--   * no pathological condition -- the largest is 675 rows, p50 is 4.
+--   * copy_probes is 963,364 rows / 588 MB, and among usable probes trade_id
+--     is already unique (955,396 rows, 955,396 distinct), so the DISTINCT is
+--     belt-and-braces rather than a real dedup.
+--
+-- THE METHOD IS UNCHANGED. My first disjoint cohort rule was "a majority of
 -- this condition's dM shares sit on probe-covered fills". That is disjoint, but
 -- the 50% cut is arbitrary: conditions at 49% and 51% are economically
 -- indistinguishable and would land on opposite sides of a selection
 -- comparison, so the rule itself could create the difference. It is demoted to
 -- a sensitivity.
 --
--- THE PRIMARY RULE, over dM-GENERATING FILLS ONLY -- fills that actually create
--- matched inventory, not every fill in the condition:
---   COVERED_ONLY   every dM-generating fill has row_has_usable_probe = TRUE
---   MISSING_ONLY   no dM-generating fill has one
+-- PRIMARY, over dM-GENERATING FILLS ONLY -- fills that actually create matched
+-- inventory, not every fill in the condition:
+--   COVERED_ONLY   every dM-generating fill has a fill-specific usable probe
+--   MISSING_ONLY   none does
 --   MIXED          at least one of each
 -- Every condition appears exactly once, no threshold is involved, and MIXED is
--- reported as itself rather than forced onto one side.
+-- reported as itself rather than forced onto a side.
 --
 -- THE PROBE FLAG IS PER ROW, tied to the exact fill that generated the dM. An
 -- envelope-level bool_or would let a dM event inherit a book snapshot taken for
--- a DIFFERENT fill of the same transaction, which is the lookahead this work
--- exists to avoid; that defect was found and removed once already.
+-- a DIFFERENT fill of the same transaction -- the lookahead this work exists to
+-- avoid, and a defect already found and removed once.
 --
 -- THE MONOTONICITY TEST is the question behind the cohorts:
 -- coverage_fraction_dM = covered_dM / total_dM per condition, binned, with
 -- matched ROI and median pair edge per bin. A real association shows as a trend
 -- across bins, not merely as a gap between two cohorts a rule carved out.
+-- condition_count is reported per bin so a swing on a handful of conditions is
+-- visible as sampling noise rather than read as a trend.
 --
 -- EVERY FIGURE IS ONE ROW PER CONDITION. The statistic being replaced attached
 -- a condition-level pair edge to every fill row and weighted by that fill's dM
--- notional, so a condition with 40 fills stated its edge 40 times and a
--- condition with some fills probed and some not contributed to BOTH cohorts.
--- The -1.77% / -2.10% figures from that statistic are withdrawn.
+-- notional, so a condition with 40 fills stated its edge 40 times and one with
+-- some fills probed and some not contributed to BOTH cohorts. The -1.77% /
+-- -2.10% figures from that statistic are withdrawn.
 --
 -- Read-only: one SELECT. Nothing here writes.
 -- ============================================================================
 
 
 \echo '== COHORTS, COVERAGE BINS AND SENSITIVITIES, one row per condition =='
-WITH raw AS (
+WITH base AS (
   SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
          t.size::float8 AS sh, t.price::float8 AS px,
          CASE WHEN t.source IN ('poll', 'backfill') THEN 'venue' ELSE 'cash' END AS feed
@@ -81,96 +91,82 @@ WITH raw AS (
    WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
      AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
      AND t.ts >= timestamptz '2026-08-05 00:00Z'
-), two_leg AS (
-  -- COST FIX 1. A condition where he only ever bought ONE leg can never
-  -- produce matched inventory, and is discarded at the end anyway by
-  -- qy > 0 AND qn > 0. Dropping those conditions BEFORE the window functions
-  -- removes their rows from the sort entirely instead of carrying them all the
-  -- way through it.
-  SELECT condition_id FROM raw
-   GROUP BY 1 HAVING count(*) FILTER (WHERE outcome_index = 0) > 0
-                AND count(*) FILTER (WHERE outcome_index = 1) > 0
-), base AS (
-  SELECT r.* FROM raw r JOIN two_leg tl ON tl.condition_id = r.condition_id
 ), probed AS (
-  -- ONE pass over copy_probes, not one per fill. There is no index on
-  -- trade_id, so a correlated EXISTS scans the whole table per row.
+  -- ONE pass over copy_probes. There is no index on trade_id, so a correlated
+  -- EXISTS would scan all 588 MB per fill. Measured: trade_id is already unique
+  -- among usable probes, so the DISTINCT costs a hash but removes nothing.
   SELECT DISTINCT p.trade_id
     FROM copy_probes p
    WHERE p.book_ok AND p.best_ask IS NOT NULL AND p.trade_id IS NOT NULL
 ), env AS (
-  -- `side` is not in the key: base is already filtered to BUY, so carrying it
-  -- only widens the hash key and the join condition for nothing.
   SELECT tx_hash, asset,
          CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed
     FROM base GROUP BY 1, 2
 ), canon AS (
-  SELECT b.*, (pr.trade_id IS NOT NULL) AS covered
+  -- REFERENCED ONCE, deliberately. Two references made PostgreSQL materialise
+  -- it and then join two aggregates over it, which is what produced the
+  -- nested-loop rescan.
+  SELECT b.condition_id, b.ts, b.id, b.outcome_index, b.sh, b.px,
+         (pr.trade_id IS NOT NULL) AS covered
     FROM base b
     JOIN env e ON e.tx_hash = b.tx_hash AND e.asset = b.asset
               AND e.canon_feed = b.feed
     LEFT JOIN probed pr ON pr.trade_id = b.id
-), dm AS (
-  -- COST FIX 2. ONE window level, not two. The previous form computed cy/cn in
-  -- one pass and then lag(cy)/lag(cn) in a second. The pre-fill totals are just
-  -- the running totals minus THIS row's own contribution, so the lag -- and the
-  -- whole second window pass -- is unnecessary.
-  --
-  -- COST FIX 3. The sort key is (condition_id, ts, id), not
-  -- (condition_id, ts, tx_hash, asset). Ordering ~n hundred thousand rows on
-  -- two long hex strings is what this query was actually spending its time on;
-  -- `id` is a bigint, unique, and gives the same deterministic order at equal
-  -- timestamps (insertion order, which is if anything the more natural
-  -- tiebreak). dM is unchanged by the choice of a deterministic tiebreak.
-  SELECT condition_id, covered,
+), win AS (
+  -- ONE window level. The pre-fill running totals are the running totals minus
+  -- this row's own contribution, so no lag() and no second sort is needed. The
+  -- sort key is (condition_id, ts, id): `id` is a unique bigint and an equally
+  -- deterministic tiebreak at equal timestamps, and dM is invariant to which
+  -- deterministic tiebreak is used.
+  SELECT condition_id, covered, outcome_index, sh, px,
+         CASE WHEN outcome_index = 0 THEN sh ELSE 0 END AS y_now,
+         CASE WHEN outcome_index = 1 THEN sh ELSE 0 END AS n_now,
+         sum(CASE WHEN outcome_index = 0 THEN sh ELSE 0 END) OVER w AS cy,
+         sum(CASE WHEN outcome_index = 1 THEN sh ELSE 0 END) OVER w AS cn
+    FROM canon
+  WINDOW w AS (PARTITION BY condition_id ORDER BY ts, id
+               ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+), d AS (
+  SELECT condition_id, covered, outcome_index, sh, px,
          GREATEST(LEAST(cy, cn) - LEAST(cy - y_now, cn - n_now), 0) AS d_m
-    FROM (
-      SELECT condition_id, covered,
-             CASE WHEN outcome_index = 0 THEN sh ELSE 0 END AS y_now,
-             CASE WHEN outcome_index = 1 THEN sh ELSE 0 END AS n_now,
-             sum(CASE WHEN outcome_index = 0 THEN sh ELSE 0 END) OVER w AS cy,
-             sum(CASE WHEN outcome_index = 1 THEN sh ELSE 0 END) OVER w AS cn
-        FROM canon
-      WINDOW w AS (PARTITION BY condition_id ORDER BY ts, id
-                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) s
-), coh AS (
-  -- dM-GENERATING FILLS ONLY for the primary rule. A fill that creates no
-  -- matched inventory says nothing about whether a completion was observable.
+    FROM win
+), percond AS (
+  -- THE FIX: ONE GROUP BY emitting BOTH the dM aggregates and the price
+  -- aggregates. Previously these were two separate GROUP BYs joined on
+  -- condition_id, and that join is what the planner turned into a nested loop
+  -- that re-ran the whole window pass per condition.
   SELECT condition_id,
          count(*) FILTER (WHERE d_m > 0.000001) AS dm_fills,
          count(*) FILTER (WHERE d_m > 0.000001 AND covered) AS dm_fills_covered,
          sum(d_m) AS dm_total,
          COALESCE(sum(d_m) FILTER (WHERE covered), 0) AS dm_covered,
          bool_and(covered) AS all_fills_covered,
-         bool_or(covered) AS any_fill_covered
-    FROM dm GROUP BY 1
-), cond AS (
-  SELECT condition_id,
+         bool_or(covered) AS any_fill_covered,
          sum(sh) FILTER (WHERE outcome_index = 0) AS qy,
          sum(sh) FILTER (WHERE outcome_index = 1) AS qn,
          sum(sh * px) FILTER (WHERE outcome_index = 0)
            / NULLIF(sum(sh) FILTER (WHERE outcome_index = 0), 0) AS vy,
          sum(sh * px) FILTER (WHERE outcome_index = 1)
            / NULLIF(sum(sh) FILTER (WHERE outcome_index = 1), 0) AS vn
-    FROM canon GROUP BY 1
+    FROM d GROUP BY 1
 ), m AS (
-  SELECT c.condition_id, LEAST(c.qy, c.qn) AS mm,
-         (c.vy + c.vn) AS pair_cost, (1.0 - (c.vy + c.vn)) AS pair_edge,
-         LEAST(c.qy, c.qn) * (c.vy + c.vn) AS matched_cost,
-         LEAST(c.qy, c.qn) * (1.0 - (c.vy + c.vn)) AS matched_pnl,
-         CASE WHEN k.dm_fills = 0 THEN 'D NO_dM_GENERATING_FILL (guard bucket)'
-              WHEN k.dm_fills_covered = k.dm_fills THEN 'A COVERED_ONLY'
-              WHEN k.dm_fills_covered = 0          THEN 'B MISSING_ONLY'
-              ELSE                                      'C MIXED' END AS cohort,
-         CASE WHEN k.dm_total IS NULL OR k.dm_total <= 0 THEN NULL
-              ELSE k.dm_covered / k.dm_total END AS cov_frac,
-         CASE WHEN k.dm_total > 0 AND k.dm_covered / k.dm_total >= 0.5
+  SELECT condition_id, LEAST(qy, qn) AS mm,
+         (vy + vn) AS pair_cost, (1.0 - (vy + vn)) AS pair_edge,
+         LEAST(qy, qn) * (vy + vn) AS matched_cost,
+         LEAST(qy, qn) * (1.0 - (vy + vn)) AS matched_pnl,
+         CASE WHEN dm_fills = 0 THEN 'D NO_dM_GENERATING_FILL (guard bucket)'
+              WHEN dm_fills_covered = dm_fills THEN 'A COVERED_ONLY'
+              WHEN dm_fills_covered = 0        THEN 'B MISSING_ONLY'
+              ELSE                                  'C MIXED' END AS cohort,
+         CASE WHEN dm_total IS NULL OR dm_total <= 0 THEN NULL
+              ELSE dm_covered / dm_total END AS cov_frac,
+         CASE WHEN dm_total > 0 AND dm_covered / dm_total >= 0.5
                 THEN 'covered' ELSE 'missing' END AS s1,
-         CASE WHEN k.all_fills_covered THEN 'covered'
-              WHEN NOT k.any_fill_covered THEN 'missing'
+         CASE WHEN all_fills_covered THEN 'covered'
+              WHEN NOT any_fill_covered THEN 'missing'
               ELSE 'mixed' END AS s2
-    FROM cond c JOIN coh k ON k.condition_id = c.condition_id
-   WHERE c.qy > 0 AND c.qn > 0
+    FROM percond
+   WHERE qy > 0 AND qn > 0
 ), lab AS (
   SELECT '1 PRIMARY cohort: ' || cohort AS label, * FROM m
   UNION ALL
