@@ -59,6 +59,8 @@ WITH t AS (
    WHERE lower(w.username) = 'rn1'
 ), p AS (
   SELECT tx_hash, asset, side,
+         count(*) FILTER (WHERE source = 'chain') AS n_chain,
+         count(*) FILTER (WHERE source = 'poll')  AS n_poll,
          sum(sh) FILTER (WHERE source = 'chain') AS sh_chain,
          sum(sh) FILTER (WHERE source = 'poll')  AS sh_poll,
          max(px) FILTER (WHERE source = 'chain') AS px_chain,
@@ -73,6 +75,13 @@ WITH t AS (
     FROM p
    WHERE px_chain IS NOT NULL AND px_poll > 0 AND px_poll < 1
      AND abs(COALESCE(sh_chain, 0) - COALESCE(sh_poll, 0)) < 0.01
+     -- LIKE FOR LIKE ONLY. A class C group has chain at one fill and poll at
+     -- ~2.31, so comparing max(price) per source pits chain's single price
+     -- against poll's HIGHEST -- not a measurement of the same execution.
+     -- Those rows were landing in the 'maker' bucket as an artifact, so the
+     -- residual test is restricted to groups where BOTH sources carry
+     -- exactly one fill.
+     AND n_chain = 1 AND n_poll = 1
 ), c AS (
   SELECT r.*,
          CASE WHEN abs(eps_maker) <= abs(eps_taker) THEN 'maker (inferred)'
@@ -137,6 +146,8 @@ WITH t AS (
    WHERE lower(w.username) = 'rn1'
 ), p AS (
   SELECT tx_hash, asset, side,
+         count(*) FILTER (WHERE source = 'chain') AS n_chain,
+         count(*) FILTER (WHERE source = 'poll')  AS n_poll,
          sum(sh) FILTER (WHERE source = 'chain') AS sh_chain,
          sum(sh) FILTER (WHERE source = 'poll')  AS sh_poll,
          max(px) FILTER (WHERE source = 'chain') AS px_chain,
@@ -150,6 +161,11 @@ WITH t AS (
     FROM p
    WHERE px_chain IS NOT NULL AND px_poll > 0 AND px_poll < 1
      AND abs(COALESCE(sh_chain, 0) - COALESCE(sh_poll, 0)) < 0.01
+     -- LIKE FOR LIKE ONLY (same restriction as statement 1): a class C group
+     -- has chain at one fill and poll at ~2.31, so max(price) per source
+     -- would pit chain's single price against poll's HIGHEST. Restricted to
+     -- groups where BOTH sources carry exactly one fill.
+     AND n_chain = 1 AND n_poll = 1
 )
 SELECT width_bucket(px_poll, 0, 1, 10) AS price_decile,
        round(min(px_poll)::numeric, 3) AS px_from, round(max(px_poll)::numeric, 3) AS px_to,
@@ -172,6 +188,8 @@ WITH t AS (
    WHERE lower(w.username) = 'rn1'
 ), p AS (
   SELECT tx_hash, asset, side,
+         count(*) FILTER (WHERE source = 'chain') AS n_chain,
+         count(*) FILTER (WHERE source = 'poll')  AS n_poll,
          sum(sh) FILTER (WHERE source = 'chain') AS sh_chain,
          sum(sh) FILTER (WHERE source = 'poll')  AS sh_poll,
          max(px) FILTER (WHERE source = 'chain') AS px_chain,
@@ -184,6 +202,11 @@ WITH t AS (
     FROM p
    WHERE px_chain IS NOT NULL AND px_poll > 0 AND px_poll < 1
      AND abs(COALESCE(sh_chain, 0) - COALESCE(sh_poll, 0)) < 0.01
+     -- LIKE FOR LIKE ONLY (same restriction as statement 1): a class C group
+     -- has chain at one fill and poll at ~2.31, so max(price) per source
+     -- would pit chain's single price against poll's HIGHEST. Restricted to
+     -- groups where BOTH sources carry exactly one fill.
+     AND n_chain = 1 AND n_poll = 1
 )
 SELECT count(*) AS rows,
        count(*) FILTER (WHERE abs_eps <= 5e-7)  AS within_half_a_6dp_step,
@@ -192,7 +215,8 @@ SELECT count(*) AS rows,
        count(*) FILTER (WHERE abs_eps >  1e-3)  AS BEYOND_A_TENTH_OF_A_CENT,
        round((100.0 * count(*) FILTER (WHERE abs_eps <= 5e-7) / count(*))::numeric, 3)
          AS pct_EXACT_within_rounding,
-       round(max(abs_eps)::numeric, 9) AS worst_residual;
+       round(max(abs_eps)::numeric, 9) AS worst_residual
+  FROM r;
 
 
 \echo '== 5. CLASS D RE-TESTED ON FEE-NORMALISED PRICES =='
