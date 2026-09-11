@@ -143,12 +143,12 @@ WITH base AS (
   SELECT l.condition_id,
          sum(COALESCE(l.cbuy, 0))  AS acq_cost,
          sum(COALESCE(l.qsell, 0)) AS sell_qty,
-         max(CASE WHEN l.outcome_index = 0 THEN COALESCE(l.qbuy, 0) END) AS qy,
-         max(CASE WHEN l.outcome_index = 1 THEN COALESCE(l.qbuy, 0) END) AS qn,
-         max(CASE WHEN l.outcome_index = 0 THEN COALESCE(l.cbuy, 0) END) AS cy,
-         max(CASE WHEN l.outcome_index = 1 THEN COALESCE(l.cbuy, 0) END) AS cn,
-         max(CASE WHEN l.outcome_index = 0 THEN COALESCE(l.n_px, 0) END) AS npx_y,
-         max(CASE WHEN l.outcome_index = 1 THEN COALESCE(l.n_px, 0) END) AS npx_n
+         COALESCE(max(CASE WHEN l.outcome_index = 0 THEN COALESCE(l.qbuy, 0) END), 0) AS qy,
+         COALESCE(max(CASE WHEN l.outcome_index = 1 THEN COALESCE(l.qbuy, 0) END), 0) AS qn,
+         COALESCE(max(CASE WHEN l.outcome_index = 0 THEN COALESCE(l.cbuy, 0) END), 0) AS cy,
+         COALESCE(max(CASE WHEN l.outcome_index = 1 THEN COALESCE(l.cbuy, 0) END), 0) AS cn,
+         COALESCE(max(CASE WHEN l.outcome_index = 0 THEN COALESCE(l.n_px, 0) END), 0) AS npx_y,
+         COALESCE(max(CASE WHEN l.outcome_index = 1 THEN COALESCE(l.n_px, 0) END), 0) AS npx_n
     FROM leg l GROUP BY 1
 ), edges AS (
   SELECT condition_id, count(*) AS n_out FROM canon
@@ -294,7 +294,8 @@ WITH base AS (
    GROUP BY 1
 ), f AS (
   SELECT cl.*,
-         a.resid_cost_fifo, a.resid_cost_lifo, a.resid_shares_fifo_check,
+         a.resid_cost_fifo, a.resid_cost_lifo,
+         a.resid_shares_fifo, a.resid_shares_lifo,
          cl.py * cl.ry + cl.pn * cl.rn_ AS resid_settlement,
          CASE WHEN cl.qy > 0 THEN cl.cy / cl.qy END AS vy,
          CASE WHEN cl.qn > 0 THEN cl.cn / cl.qn END AS vn
