@@ -132,3 +132,58 @@ prove a later fill. Telescoped `M` is invariant under reordering; path labels
 are not.
 
 `mirror_live=false`.
+
+---
+
+## 5. Path results — section 4 SUPERSEDED for the FLIPPED boolean only
+
+Run 72 proved the invariance of the `FLIPPED` boolean over **every** admissible
+ordering, so the freeze in section 4 is lifted for that boolean and for nothing
+else. The other names in that list — `REBUILT`, reduction-event counts, peak
+path statistics — stay frozen, because a proof about *whether* a crossing
+happens says nothing about *how many*, *how large*, or *in what order*.
+
+### 5a. The primary behavioural result, locked in the owner's wording
+
+> RN1 deploys the majority of capital into conditions whose directional exposure
+> is provably observed on both sides of flat at least once: **7,924 / 26,248
+> conditions**, carrying **$50.021M / 66.75%** of acquisition cost and
+> **$37.094M / 78.97%** of matched cost. Flip behaviour is therefore
+> concentrated in larger-capital conditions.
+
+**Two wording limits are part of the result, not commentary on it.**
+
+1. `PROVABLY_FLIPPED` proves **at least one** directional sign reversal, not
+   repeated reversals. "Repeatedly" is not to be used until rebuild/flip-count
+   invariance is established. I had used it; that was an overreach.
+2. The 61.22% `DIRECTIONAL_ADD` notional statistic describes **flow
+   composition**. It does not independently prove flipping, and it was wrong of
+   me to present it as corroboration. Run 72 supplies the flip proof; that
+   statistic supplies nothing to it.
+
+### 5b. The 7,953 / 7,924 reconciliation
+
+Two different quantities were being compared, and the difference is not an
+error in either:
+
+| figure | meaning | n |
+|---|---|---|
+| chosen-order `FLIPPED` | flips under the `(ts, id ASC)` tiebreak | 7,953 |
+| `PROVABLY_FLIPPED` | flips under **every** admissible ordering | 7,924 |
+
+The 29-condition gap is **derived from gates 2 and 3, not assumed**. Gate 2
+found 0 conditions where `PROVABLY_FLIPPED` failed to flip under either
+ordering, and gate 3 found 0 where `PROVABLY_NO_FLIP` flipped under either. So
+every chosen-order flip outside the proven set must sit in the third class:
+
+- **29** of the 50 `ORDER_NOT_PROVEN_INVARIANT` conditions flip under the chosen
+  tiebreak only.
+- **21** do not flip under it.
+- **None of the 29 are proof-certified**, and none may be counted as such. They
+  are reported inside `ORDER_NOT_PROVEN_INVARIANT` and nowhere else.
+
+`ORDER_NOT_PROVEN_INVARIANT` remains 50 conditions / $121,605 / 0.162% of
+acquisition cost — and the name still means *no proof either way*, never
+*proven order-sensitive*.
+
+`mirror_live=false`.
