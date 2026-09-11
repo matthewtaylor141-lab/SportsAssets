@@ -236,9 +236,15 @@ WITH base AS (
      AND NOT (y.prev_ev IS NOT NULL AND y.prev_ratio IS DISTINCT FROM y.as_of_ratio)
 ), q AS (
   SELECT z.condition_id, z.ts, z.ev, z.sh, z.px, z.source, z.d_m, z.signed_dn, z.d_cont,
+         z.oi, z.ay, z.an, z.as_of_long,
          GREATEST(0, z.m - 1) AS required_qty_min,
          CASE WHEN z.d_int THEN z.m ELSE z.m + 1 END AS required_qty_max,
          CASE WHEN z.signed_dn > 0 THEN 'BUY ' ELSE 'SELL' END AS local_side,
+         -- WHICH TOKEN DID HE ACTUALLY FILL? For a SELL-required transition the
+         -- signed coordinate is negative precisely BECAUSE his fill was on the
+         -- token that is NOT the designated long. So px is the COMPLEMENT's
+         -- price and is NOT comparable to a bid quoted on the long.
+         (CASE WHEN z.oi = 0 THEN z.ay ELSE z.an END = z.as_of_long) AS fill_on_long,
          (z.d_cont >= 2.0) AS side_forced
     FROM tti z WHERE z.signed_dn <> 0
 ), ev AS (
@@ -309,10 +315,10 @@ WITH base AS (
    WHERE ms.bid IS NOT NULL
 ), s AS (
   SELECT condition_id, at AS ts, 0 AS pri, NULL::bigint AS ev, bid,
-         NULL::float8 AS px, NULL::float8 AS dm, NULL::float8 AS rq
+         NULL::float8 AS px, NULL::float8 AS dm, NULL::float8 AS rq, NULL::boolean AS fol
     FROM bidrows
   UNION ALL
-  SELECT condition_id, ts, 1, ev, NULL, px, d_m, required_qty_max
+  SELECT condition_id, ts, 1, ev, NULL, px, d_m, required_qty_max, fill_on_long
     FROM b WHERE local_side = 'SELL'
 ), sr AS (
   SELECT s.*, count(s.bid) OVER wq AS gb,
@@ -322,19 +328,32 @@ WITH base AS (
 ), sc AS (
   SELECT sr.*,
          first_value(sr.bid) OVER wg AS as_of_bid,
-         first_value(sr.ts)  OVER wg AS as_of_bid_ts
+         first_value(sr.ts)  OVER wg AS as_of_bid_ts,
+         -- THE REFERENCE MUST BE QUOTED ON THE TOKEN WE WOULD SELL. We reduce a
+         -- LONG, so we sell the DESIGNATED LONG, and mirror_shadow.bid is the
+         -- venue's quote for the long side (migration 046:25) -- the bid is the
+         -- right one. px was not: on a SELL-required transition his fill is on
+         -- the COMPLEMENT, so bid - px compared p against 1-p and produced the
+         -- +33c / -39c medians of the first run, which measure the price level
+         -- and nothing about execution. Where he filled the long itself, px IS
+         -- the reference; otherwise the long-side reference is 1 - px, which
+         -- RESTS ON PAIR PARITY and is labelled as an assumption, not a quote.
+         CASE WHEN sr.fol THEN sr.px
+              WHEN sr.px IS NOT NULL THEN 1.0 - sr.px END AS ref_long
     FROM sr WINDOW wg AS (PARTITION BY sr.condition_id, sr.gb ORDER BY sr.ts, sr.pri, sr.ev)
 )
 SELECT CASE WHEN ev IS NULL THEN NULL
             WHEN as_of_bid IS NULL THEN 'D NO NEUTRAL BID RETAINED BEFORE THE EVENT'
-            WHEN as_of_bid > px + 0.0001 THEN 'A BID ABOVE his fill price'
-            WHEN as_of_bid < px - 0.0001 THEN 'C BID BELOW his fill price'
-            ELSE 'B BID AT his fill price (within 1bp)' END AS bid_vs_reference,
+            WHEN fol IS NOT TRUE AND ref_long IS NULL
+              THEN 'E REFERENCE NOT AVAILABLE ON THE LONG TOKEN'
+            WHEN as_of_bid > ref_long + 0.0001 THEN 'A BID ABOVE the long-side reference'
+            WHEN as_of_bid < ref_long - 0.0001 THEN 'C BID BELOW the long-side reference'
+            ELSE 'B BID AT the long-side reference (within 1bp)' END AS bid_vs_reference,
        count(*) AS events,
        round((100.0 * count(*) / sum(count(*)) OVER ())::numeric, 2) AS pct_events,
        round(sum(dm)::numeric, 0) AS dM_shares,
        round(sum(dm * px)::numeric, 0) AS dm_leg_notional,
-       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (as_of_bid - px) * 100.0)::numeric, 3)
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY (as_of_bid - ref_long) * 100.0)::numeric, 3)
          AS p50_bid_minus_ref_cents,
        round(percentile_cont(0.5) WITHIN GROUP (
          ORDER BY extract(epoch FROM ts - as_of_bid_ts) / 60.0)::numeric, 2) AS p50_bid_age_min,
