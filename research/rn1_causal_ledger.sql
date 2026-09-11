@@ -118,6 +118,46 @@
 --   distinction cannot be lost again.
 --
 -- ---------------------------------------------------------------------------
+-- THE EVIDENCE-TIER PRECONDITION GATE, and why it is statement 0.
+--
+-- Run 76 built its PRIMARY attribution tier on mirror_orders.trigger_trade_id,
+-- because migration 049 creates the column and documents precisely what it
+-- means. THE COLUMN HAS NEVER BEEN WRITTEN -- there is no write site anywhere
+-- in the worker or app code. So TIER_1_DIRECT could not match a single row,
+-- and "zero directly linked liquidations" was not a measurement. It was a
+-- filter that cannot fire, reported as a finding: the fifth time this work has
+-- hit that failure.
+--
+-- A SCHEMA COLUMN IS NOT EVIDENCE MERELY BECAUSE IT EXISTS.
+--
+-- Every field used as causal linkage now passes a gate with TWO halves,
+-- because either can be empty on its own:
+--     CODE SIDE   research/evidence_tiers.py -- is there a write site at all?
+--     DATA SIDE   statement 0 -- populated rows, percentage of the relevant
+--                 universe, and the first and last populated timestamps.
+-- Classified AVAILABLE / PARTIALLY_AVAILABLE (populated but under 99.5% of the
+-- universe) / UNAVAILABLE (zero populated rows).
+--
+-- AN UNAVAILABLE TIER DOES NOT EMIT A ZERO. Its result is NOT IDENTIFIABLE
+-- FROM RETAINED DATA, which is a different statement with a different meaning
+-- and cannot be mistaken for evidence of absence. The tier assignment itself is
+-- GUARDED on the populated count, so an unpopulated field can never become a
+-- tier in the first place, and every attribution row carries the tier-1 verdict
+-- beside it so a silence cannot be misread as a zero.
+--
+-- KNOWN AT THE CODE SIDE BEFORE THIS RUN: trigger_trade_id, his_fill_ts and
+-- first_fill_at have NO write site. target_at_place, ledger_at_place,
+-- bid_at_place and ask_at_place each have one. his_fill_id has one, but what it
+-- CONTAINS is unverified against trades.id, so it is measured here and not used
+-- as a tier until its content is established.
+--
+-- THE RUN-76 NEGATIVE RESULT SURVIVES THIS, and is preserved separately: on the
+-- ACTUALLY POPULATED evidence tiers, P1-consistent commands show ZERO observed
+-- liquidation across every tested window. That zero rests on tiers 2, 3 and 4,
+-- all of which demonstrably fire elsewhere in the same run, so it is an
+-- empirical zero rather than a vacuous one.
+--
+-- ---------------------------------------------------------------------------
 -- WIDENING A WINDOW IS NOT CAUSAL IDENTIFICATION, AND NEITHER IS DIRECT
 -- LINEAGE ON ITS OWN.
 --
@@ -202,9 +242,95 @@
 -- times, so a zero violation count next to a zero witness count is to be read
 -- as NOT TESTED, never as PASS.
 --
--- Read-only: thirteen SELECTs.
+-- Read-only: fourteen SELECTs, the first of which is the precondition gate.
 -- ============================================================================
 
+
+\echo '== 0. EVIDENCE-TIER PRECONDITION GATE -- a column is not evidence because it exists =='
+
+WITH o AS MATERIALIZED (
+  SELECT * FROM mirror_orders WHERE lower(whale) = 'rn1'
+), s AS MATERIALIZED (
+  SELECT * FROM mirror_shadow WHERE lower(whale) = 'rn1'
+), f AS (
+  SELECT 'mirror_orders.trigger_trade_id' AS evidence_field,
+         'TIER 1 direct source-fill lineage' AS used_as,
+         count(*) AS universe_rows, count(trigger_trade_id) AS populated_rows,
+         min(placed_at) FILTER (WHERE trigger_trade_id IS NOT NULL) AS first_pop,
+         max(placed_at) FILTER (WHERE trigger_trade_id IS NOT NULL) AS last_pop
+    FROM o
+  UNION ALL
+  SELECT 'mirror_orders.his_fill_id', 'TIER 1 alternative (content unverified)',
+         count(*), count(his_fill_id),
+         min(placed_at) FILTER (WHERE his_fill_id IS NOT NULL),
+         max(placed_at) FILTER (WHERE his_fill_id IS NOT NULL) FROM o
+  UNION ALL
+  SELECT 'mirror_orders.his_fill_ts', 'reaction timing',
+         count(*), count(his_fill_ts),
+         min(placed_at) FILTER (WHERE his_fill_ts IS NOT NULL),
+         max(placed_at) FILTER (WHERE his_fill_ts IS NOT NULL) FROM o
+  UNION ALL
+  SELECT 'mirror_orders.first_fill_at', 'our time-to-fill',
+         count(*), count(first_fill_at),
+         min(placed_at) FILTER (WHERE first_fill_at IS NOT NULL),
+         max(placed_at) FILTER (WHERE first_fill_at IS NOT NULL) FROM o
+  UNION ALL
+  SELECT 'mirror_orders.target_at_place', 'TIER 2/3 target lineage',
+         count(*), count(target_at_place),
+         min(placed_at) FILTER (WHERE target_at_place IS NOT NULL),
+         max(placed_at) FILTER (WHERE target_at_place IS NOT NULL) FROM o
+  UNION ALL
+  SELECT 'mirror_orders.ledger_at_place', 'TIER 2 ledger lineage',
+         count(*), count(ledger_at_place),
+         min(placed_at) FILTER (WHERE ledger_at_place IS NOT NULL),
+         max(placed_at) FILTER (WHERE ledger_at_place IS NOT NULL) FROM o
+  UNION ALL
+  SELECT 'mirror_orders.bid_at_place', 'execution-quality reference',
+         count(*), count(bid_at_place),
+         min(placed_at) FILTER (WHERE bid_at_place IS NOT NULL),
+         max(placed_at) FILTER (WHERE bid_at_place IS NOT NULL) FROM o
+  UNION ALL
+  SELECT 'mirror_orders.ask_at_place', 'execution-quality reference',
+         count(*), count(ask_at_place),
+         min(placed_at) FILTER (WHERE ask_at_place IS NOT NULL),
+         max(placed_at) FILTER (WHERE ask_at_place IS NOT NULL) FROM o
+  UNION ALL
+  SELECT 'mirror_orders.intent', 'signed wire direction',
+         count(*), count(intent),
+         min(placed_at) FILTER (WHERE intent IS NOT NULL),
+         max(placed_at) FILTER (WHERE intent IS NOT NULL) FROM o
+  UNION ALL
+  SELECT 'mirror_shadow.target', 'the recorded commanded target',
+         count(*), count(target),
+         min(at) FILTER (WHERE target IS NOT NULL),
+         max(at) FILTER (WHERE target IS NOT NULL) FROM s
+  UNION ALL
+  SELECT 'mirror_shadow.ledger_net', 'the recorded pre-command position',
+         count(*), count(ledger_net),
+         min(at) FILTER (WHERE ledger_net IS NOT NULL),
+         max(at) FILTER (WHERE ledger_net IS NOT NULL) FROM s
+  UNION ALL
+  SELECT 'mirror_shadow.his_net', 'RN1 signed state as production read it',
+         count(*), count(his_net),
+         min(at) FILTER (WHERE his_net IS NOT NULL),
+         max(at) FILTER (WHERE his_net IS NOT NULL) FROM s
+  UNION ALL
+  SELECT 'mirror_shadow.mark', 'valuation horizon price',
+         count(*), count(mark),
+         min(at) FILTER (WHERE mark IS NOT NULL),
+         max(at) FILTER (WHERE mark IS NOT NULL) FROM s
+)
+SELECT evidence_field, used_as, universe_rows, populated_rows,
+       round((100.0 * populated_rows / NULLIF(universe_rows, 0))::numeric, 3)
+         AS pct_populated,
+       to_char(first_pop, 'YYYY-MM-DD HH24:MI') AS first_populated,
+       to_char(last_pop,  'YYYY-MM-DD HH24:MI') AS last_populated,
+       CASE WHEN populated_rows = 0
+              THEN 'UNAVAILABLE -- NOT IDENTIFIABLE FROM RETAINED DATA'
+            WHEN populated_rows < 0.995 * universe_rows
+              THEN 'PARTIALLY_AVAILABLE'
+            ELSE 'AVAILABLE' END AS availability
+  FROM f ORDER BY 1;
 
 \echo '== 1. THE CAUSAL LEDGER: reach -> command -> execution -> damage =='
 WITH base AS MATERIALIZED (
@@ -427,6 +553,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -730,6 +866,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -1022,6 +1168,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -1310,6 +1466,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -1600,6 +1766,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -1887,6 +2063,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -2199,6 +2385,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -2499,6 +2695,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -2569,11 +2775,19 @@ WITH base AS MATERIALIZED (
          c.commanded_change, c.commanded_direction,
          w.label AS attribution_window,
          o.order_id, o.placed_at, o.signed_long_delta, o.filled, o.avg_px,
+         -- A TIER WHOSE KEY IS NEVER POPULATED CANNOT BE ASSIGNED. Without
+         -- these guards tier 1 matches nothing and emits a zero that reads as
+         -- a finding; with them tier 1 is simply never assigned and the gate
+         -- statement says why.
          CASE WHEN o.order_id IS NULL THEN NULL
-              WHEN o.trigger_trade_id = c.fill_id THEN 1
-              WHEN o.target_at_place = c.target_after
+              WHEN (SELECT n_trigger FROM availt) > 0
+                   AND o.trigger_trade_id = c.fill_id THEN 1
+              WHEN (SELECT n_target_at_place FROM availt) > 0
+                   AND (SELECT n_ledger_at_place FROM availt) > 0
+                   AND o.target_at_place = c.target_after
                    AND o.ledger_at_place = c.ledger_before THEN 2
-              WHEN o.target_at_place = c.target_after THEN 3
+              WHEN (SELECT n_target_at_place FROM availt) > 0
+                   AND o.target_at_place = c.target_after THEN 3
               ELSE 4 END AS raw_tier
     FROM hsel c CROSS JOIN wins w
     LEFT JOIN ords o ON o.condition_id = c.condition_id
@@ -2658,6 +2872,9 @@ WITH base AS MATERIALIZED (
     FROM percmd p
 )
 SELECT attribution_window, attribution_tier,
+       CASE WHEN (SELECT n_trigger FROM availt) = 0
+            THEN 'TIER_1 NOT IDENTIFIABLE FROM RETAINED DATA'
+            ELSE 'TIER_1 available' END AS tier_1_precondition,
        count(*) AS harmful_commands,
        count(DISTINCT condition_id) AS conditions,
        sum(executions) AS executions,
@@ -2889,6 +3106,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -2957,11 +3184,19 @@ WITH base AS MATERIALIZED (
          c.commanded_change, c.commanded_direction,
          w.label AS attribution_window,
          o.order_id, o.placed_at, o.signed_long_delta, o.filled, o.avg_px,
+         -- A TIER WHOSE KEY IS NEVER POPULATED CANNOT BE ASSIGNED. Without
+         -- these guards tier 1 matches nothing and emits a zero that reads as
+         -- a finding; with them tier 1 is simply never assigned and the gate
+         -- statement says why.
          CASE WHEN o.order_id IS NULL THEN NULL
-              WHEN o.trigger_trade_id = c.fill_id THEN 1
-              WHEN o.target_at_place = c.target_after
+              WHEN (SELECT n_trigger FROM availt) > 0
+                   AND o.trigger_trade_id = c.fill_id THEN 1
+              WHEN (SELECT n_target_at_place FROM availt) > 0
+                   AND (SELECT n_ledger_at_place FROM availt) > 0
+                   AND o.target_at_place = c.target_after
                    AND o.ledger_at_place = c.ledger_before THEN 2
-              WHEN o.target_at_place = c.target_after THEN 3
+              WHEN (SELECT n_target_at_place FROM availt) > 0
+                   AND o.target_at_place = c.target_after THEN 3
               ELSE 4 END AS raw_tier
     FROM psel c CROSS JOIN wins w
     LEFT JOIN ords o ON o.condition_id = c.condition_id
@@ -3046,6 +3281,9 @@ WITH base AS MATERIALIZED (
     FROM percmd p
 )
 SELECT attribution_window, attribution_tier,
+       CASE WHEN (SELECT n_trigger FROM availt) = 0
+            THEN 'TIER_1 NOT IDENTIFIABLE FROM RETAINED DATA'
+            ELSE 'TIER_1 available' END AS tier_1_precondition,
        count(*) AS p1_consistent_commands,
        count(DISTINCT condition_id) AS conditions,
        sum(executions) AS executions,
@@ -3277,6 +3515,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -3619,6 +3867,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -3997,6 +4255,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -4343,6 +4611,16 @@ WITH base AS MATERIALIZED (
     LEFT JOIN capcond cc ON cc.condition_id = t.condition_id
     LEFT JOIN capord  co ON co.condition_id = t.condition_id
     LEFT JOIN capflow cf ON cf.condition_id = t.condition_id
+), availt AS MATERIALIZED (
+  -- THE DATA SIDE OF THE EVIDENCE-TIER PRECONDITION GATE, consumed by the tier
+  -- assignment below so a field with zero populated rows CANNOT become a tier.
+  -- research/evidence_tiers.py is the code side; both halves must pass.
+  SELECT count(*) AS n_orders,
+         count(trigger_trade_id) AS n_trigger,
+         count(his_fill_id)      AS n_his_fill_id,
+         count(target_at_place)  AS n_target_at_place,
+         count(ledger_at_place)  AS n_ledger_at_place
+    FROM mirror_orders WHERE lower(whale) = 'rn1'
 ), ords AS MATERIALIZED (
   SELECT bk.condition_id, o.id AS order_id, o.book_id, o.placed_at,
          o.trigger_trade_id, o.state AS order_state,
@@ -4413,11 +4691,19 @@ WITH base AS MATERIALIZED (
          c.commanded_change, c.commanded_direction,
          w.label AS attribution_window,
          o.order_id, o.placed_at, o.signed_long_delta, o.filled, o.avg_px,
+         -- A TIER WHOSE KEY IS NEVER POPULATED CANNOT BE ASSIGNED. Without
+         -- these guards tier 1 matches nothing and emits a zero that reads as
+         -- a finding; with them tier 1 is simply never assigned and the gate
+         -- statement says why.
          CASE WHEN o.order_id IS NULL THEN NULL
-              WHEN o.trigger_trade_id = c.fill_id THEN 1
-              WHEN o.target_at_place = c.target_after
+              WHEN (SELECT n_trigger FROM availt) > 0
+                   AND o.trigger_trade_id = c.fill_id THEN 1
+              WHEN (SELECT n_target_at_place FROM availt) > 0
+                   AND (SELECT n_ledger_at_place FROM availt) > 0
+                   AND o.target_at_place = c.target_after
                    AND o.ledger_at_place = c.ledger_before THEN 2
-              WHEN o.target_at_place = c.target_after THEN 3
+              WHEN (SELECT n_target_at_place FROM availt) > 0
+                   AND o.target_at_place = c.target_after THEN 3
               ELSE 4 END AS raw_tier
     FROM hsel c CROSS JOIN wins w
     LEFT JOIN ords o ON o.condition_id = c.condition_id
