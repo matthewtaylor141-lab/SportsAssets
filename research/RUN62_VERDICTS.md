@@ -109,7 +109,7 @@ bridged, nothing after 2026-09-05) and long-dated markets in Aug 24–31 (~59%
 unresolved). Pre-settlement variables also differ: p50 fill size 42.0 settled
 vs 61.0 not-yet-resolved vs 31.1 no-markets-row.
 
-### 3. `MATCHED_MECHANISM_GENERALIZABLE?` → **INDETERMINATE**
+### 3. `MATCHED_MECHANISM_GENERALIZABLE?` → **SUPPORTED** (updated by run 63)
 
 The payoff invariant holds overwhelmingly **where it can be observed**:
 101,734 of 101,757 retained settled payout vectors sum to 1 (**99.9774%**), 23
@@ -123,6 +123,48 @@ slots, no malformed pairing, no contract type where YES+NO is not a $1
 complementary pair — **has not been run**. Until it is, matched gross economics
 on unresolved conditions are **structurally assumed, not empirically verified**,
 and the verdict stays INDETERMINATE.
+
+**UPDATE — run 63 resolves this.** The structural check is done, without
+settlement.
+
+| eligibility | conditions | % | acquisition cost | % | matched cost | % |
+|---|---|---|---|---|---|---|
+| STRUCTURALLY_ELIGIBLE (exactly two slots, index 0 and 1) | 22,686 | **86.429** | $67,542,815 | **90.134** | $42,578,503 | **90.643** |
+| STRUCTURALLY_INELIGIBLE | **0** | 0.000 | — | — | — | — |
+| STRUCTURE_UNKNOWN (no catalogue rows) | 3,562 | 13.571 | $7,393,299 | 9.866 | $4,395,183 | 9.357 |
+
+**Not one malformed condition.** Every RN1 condition that has catalogue rows is
+a clean two-slot `{0,1}` pair — no >2-outcome conditions, no duplicate or
+missing index, no null slot. And on RN1's own conditions specifically,
+**14,305 of 14,305 retained payout vectors sum to exactly 1 (100%)**, with zero
+exceptions and zero non-2-element arrays. (Run 62's 23 exceptions were in other
+markets, not RN1's.)
+
+So matched gross economics are legitimate on **90.134% of acquisition cost**
+without any settlement — against the 55.93% the settled subset allows. The
+remaining 9.866% is `STRUCTURE_UNKNOWN` and stays **excluded, not assumed**.
+
+Matched mechanism on STRUCTURALLY_ELIGIBLE only, settlement-free:
+
+| | conditions | acq cost | matched cost | matched qty | matched % of acq | p50 pair cost | matched gross P&L | **matched gross ROI** |
+|---|---|---|---|---|---|---|---|---|
+| BRIDGED | 2,565 | $14,404,722 | $9,828,983 | 10,492,139 | 68.23 | 0.9843 | $79,034 | **0.804%** |
+| UNBRIDGED | 20,121 | $53,138,093 | $32,749,520 | 40,621,675 | 61.63 | 0.9811 | $509,743 | **1.556%** |
+| **ALL ELIGIBLE** | **22,686** | **$67,542,815** | **$42,578,503** | **51,113,813** | **63.04** | **0.9817** | **$588,777** | **1.383%** |
+
+### A consequence for verdict 2, now quantified
+
+Matched ROI on the **settled subset** (run 62) against the **full eligible
+population** (run 63), same formula:
+
+| | settled subset | all eligible | overstatement |
+|---|---|---|---|
+| BRIDGED | 1.905% | 0.804% | **2.37×** |
+| UNBRIDGED | 1.944% | 1.556% | 1.25× |
+
+**The settled subset overstates the matched mechanism**, and on the bridged
+population it more than doubles it. That is verdict 2's non-representativeness
+expressed directly in the economics rather than in covariates.
 
 ### 4. `NON_MATCHED_REALIZED_MECHANISM_GENERALIZABLE?` → **NOT SUPPORTED**
 
