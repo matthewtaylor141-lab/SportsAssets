@@ -17,6 +17,21 @@ name: engine-diagnostic
 on:
   push:
     branches: ["claude/**"]
+    # RESEARCH-ONLY COMMITS DO NOT PROBE THE LIVE VENUE. research/*.sql files
+    # are read-only queries against the database replica; they say nothing
+    # about engine health, so firing an 16-19 minute live probe for them spends
+    # venue reads on a question nobody asked. Those reads are not free: the
+    # probe's venue walk was present in two of the three 429 clusters logged on
+    # 2026-09-08 (task 47), and the mirror is paused, so the probe is currently
+    # reading a system that is not trading.
+    #
+    # paths-ignore skips the run ONLY when EVERY changed file matches, so a
+    # commit touching code and research together still probes. workflow_dispatch
+    # is untouched, so the probe can always be fired on demand -- and every
+    # lever input below is dispatch-only, so nothing here changes what the
+    # probe is ABLE to do, only when it runs itself.
+    paths-ignore:
+      - "research/**"
   workflow_dispatch:
     inputs:
       api_base:
