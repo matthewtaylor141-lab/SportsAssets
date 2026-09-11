@@ -306,6 +306,211 @@ def check_missing_leg(stmt, path, idx, ctes, aliases, allow_lines=frozenset()):
 
 
 
+# ---------------------------------------------------------------------------
+# THE BASE-TABLE COLUMN GUARD
+#
+# WHY THIS EXISTS. The CTE guard above says, in its own header, "Base tables are
+# skipped -- their columns are not knowable without a catalogue". That sentence
+# was true and the gap it admits is real: run 74 was written referencing
+# live_orders.created_at, which does not exist (the column is placed_at). Every
+# layer passed it -- it parses, and no CTE is involved -- and it would have died
+# on the runner after minutes of database time, exactly as run 65 did.
+#
+# There IS a catalogue in this repository: backend/migrations/*.sql. It is
+# parsed here with pglast rather than regex, so CREATE TABLE and
+# ALTER TABLE ... ADD COLUMN are read the way PostgreSQL reads them.
+#
+# CONSERVATIVE BY CONSTRUCTION, because a false positive here teaches the next
+# person to switch the guard off:
+#   * only tables the migrations actually define are checked; anything else
+#     (views, tables made elsewhere) is skipped entirely
+#   * an alias bound to more than one thing anywhere in the statement is skipped
+#   * an unqualified column is checked ONLY at a query level whose FROM has
+#     exactly one known base table and, besides it, only CTEs whose projections
+#     are fully known -- otherwise the column could belong to something else
+#   * output aliases of the level are admitted, since GROUP BY / ORDER BY may
+#     legitimately name them rather than any table column
+#   * the walk stops at a nested SelectStmt or SubLink, so an inner scope's
+#     columns are never judged against an outer scope's tables
+
+MIGRATIONS = "backend/migrations"
+
+
+ALTER_ELSEWHERE = re.compile(
+    r"ALTER\s+TABLE\s+(?:IF\s+EXISTS\s+)?[\"']?(\w+)[\"']?\s+ADD\s+COLUMN", re.I)
+
+
+def load_schema(root=MIGRATIONS, repo="backend"):
+    """table -> set of column names, from the repository's own migrations.
+
+    A table is KNOWN only if (a) its CREATE TABLE is in the migrations, so the
+    full column list was seen, and (b) no CREATE TABLE for it exists anywhere
+    else in the tree. Both conditions are load-bearing:
+
+      * a table reached only by ALTER TABLE ... ADD COLUMN yields a PARTIAL
+        column set, and checking against a partial set invents defects. That is
+        real here: us_premap is created in workers/premap.py and only extended
+        by migrations 031 and 055, so the migrations know 8 of its columns and
+        the first version of this guard reported four healthy queries broken.
+      * a table whose columns are ALTERed outside the migrations has a column
+        set the migrations cannot see, so it is dropped too.
+
+    The second rule is deliberately narrow. An earlier version excluded any
+    table with a CREATE TABLE anywhere else in the tree, which removed
+    live_orders and mirror_orders themselves -- test fixtures re-create them,
+    which says nothing about whether the migrations' definition is complete --
+    and left the guard unable to fire on the very bug it was written for.
+
+    Skipping is always the safe direction: an unknown table is simply not
+    checked, which is where this guard stood before it existed.
+    """
+    import os
+    schema, created_here = {}, set()
+    if not os.path.isdir(root):
+        return schema
+    for fn in sorted(os.listdir(root)):
+        if not fn.endswith(".sql"):
+            continue
+        try:
+            stmts = pglast.parse_sql(open(os.path.join(root, fn)).read())
+        except Exception:
+            continue                      # a migration we cannot parse is skipped
+        for raw in stmts:
+            n = raw.stmt
+            if isinstance(n, ast.CreateStmt) and n.relation is not None:
+                created_here.add(n.relation.relname)
+                cols = schema.setdefault(n.relation.relname, set())
+                for el in (n.tableElts or []):
+                    if isinstance(el, ast.ColumnDef) and el.colname:
+                        cols.add(el.colname)
+            elif isinstance(n, ast.AlterTableStmt) and n.relation is not None:
+                cols = schema.setdefault(n.relation.relname, set())
+                for cmd in (n.cmds or []):
+                    d = getattr(cmd, "def_", None) or getattr(cmd, "def", None)
+                    if isinstance(d, ast.ColumnDef) and d.colname:
+                        cols.add(d.colname)
+    altered_elsewhere = set()
+    for dirpath, dirnames, filenames in os.walk(repo):
+        if "migrations" in dirpath:
+            continue
+        dirnames[:] = [d for d in dirnames if not d.startswith(".")]
+        for fn in filenames:
+            if not fn.endswith((".py", ".sql")):
+                continue
+            try:
+                body = open(os.path.join(dirpath, fn), errors="ignore").read()
+            except OSError:
+                continue
+            altered_elsewhere.update(
+                m.group(1) for m in ALTER_ELSEWHERE.finditer(body))
+    return {t: c for t, c in schema.items()
+            if t in created_here and t not in altered_elsewhere}
+
+
+def walk_level(node, fn):
+    """walk(), but stopping at anything that opens a new naming scope."""
+    if isinstance(node, ast.Node):
+        if isinstance(node, (ast.SelectStmt, ast.SubLink)):
+            return
+        fn(node)
+        for name in node:
+            walk_level(getattr(node, name, None), fn)
+    elif isinstance(node, (list, tuple)):
+        for x in node:
+            walk_level(x, fn)
+
+
+def check_base_columns(stmt, path, idx, ctes, schema):
+    if not schema:
+        return []
+    problems, seen = [], set()
+
+    # statement-global alias map, same conservative rule as the CTE guard
+    bindings = {}
+    def bind(n):
+        if isinstance(n, ast.RangeVar) and n.schemaname is None:
+            key = n.alias.aliasname if n.alias else n.relname
+            bindings.setdefault(key, set()).add(n.relname)
+    walk(stmt, bind)
+    base_alias = {
+        a: next(iter(t)) for a, t in bindings.items()
+        if len(t) == 1 and next(iter(t)) not in ctes and next(iter(t)) in schema
+    }
+
+    def report(alias, col, table):
+        key = (idx, alias, col, table)
+        if key in seen:
+            return
+        seen.add(key)
+        near = sorted(c for c in schema[table]
+                      if c.startswith(col[:4]) or col.startswith(c[:4]))
+        problems.append(
+            f"{path}: statement {idx}: {alias}.{col} -- table {table!r} has no "
+            f"such column"
+            + (f" (did you mean: {', '.join(near[:4])}?)" if near else "")
+        )
+
+    # qualified: alias.column
+    def qualified(n):
+        if not isinstance(n, ast.ColumnRef) or len(n.fields) != 2:
+            return
+        a, c = n.fields
+        if isinstance(a, ast.A_Star) or isinstance(c, ast.A_Star):
+            return
+        alias, col = str(a.sval), str(c.sval)
+        table = base_alias.get(alias)
+        if table and col not in schema[table]:
+            report(alias, col, table)
+    walk(stmt, qualified)
+
+    # unqualified, only where the level's FROM leaves exactly one candidate
+    levels = []
+    def collect(n):
+        if isinstance(n, ast.SelectStmt):
+            levels.append(n)
+    walk(stmt, collect)
+
+    for sel in levels:
+        rels = []
+        walk_level(sel.fromClause, lambda n: rels.append(n)
+                   if isinstance(n, ast.RangeVar) else None)
+        if not rels:
+            continue
+        tables = [r.relname for r in rels if r.schemaname is None]
+        base = [t for t in tables if t not in ctes]
+        if len(base) != 1 or base[0] not in schema:
+            continue
+        others = [t for t in tables if t in ctes]
+        if any(ctes.get(t) is None for t in others):
+            continue                       # an unknown CTE projection: cannot tell
+        allowed = set(schema[base[0]])
+        for t in others:
+            allowed |= ctes[t]
+        for t in (sel.targetList or []):    # output aliases are legal references
+            if t.name:
+                allowed.add(t.name)
+        def unqualified(n):
+            if not isinstance(n, ast.ColumnRef) or len(n.fields) != 1:
+                return
+            f = n.fields[0]
+            if isinstance(f, ast.A_Star):
+                return
+            col = str(f.sval)
+            if col not in allowed:
+                report(base[0], col, base[0])
+        # NOT walk_level(sel, ...): walk_level stops AT a SelectStmt, so handing
+        # it this level's own node makes it return immediately and the check
+        # cannot fire. The first version did exactly that and reported the
+        # live_orders.created_at file clean -- the vacuous guard again, in the
+        # tool written to prevent vacuous guards. The level's clauses are walked
+        # individually instead, which is also what keeps a nested scope out.
+        for clause in (sel.targetList, sel.fromClause, sel.whereClause,
+                       sel.groupClause, sel.havingClause, sel.sortClause,
+                       sel.distinctClause, sel.windowClause):
+            walk_level(clause, unqualified)
+    return problems
+
+
 def _cte_and_aliases(stmt):
     """CTE names present, and the conservative alias -> CTE map (see above)."""
     ctes = {}
@@ -327,6 +532,7 @@ def _cte_and_aliases(stmt):
 
 def main(paths):
     bad = False
+    schema = load_schema()
     for path in paths:
         text = open(path).read()
         problems = workflow_guards(path, text)
@@ -352,17 +558,19 @@ def main(paths):
             bad = True
             continue
         for i, raw in enumerate(stmts, 1):
+            cte_map, alias_map = _cte_and_aliases(raw.stmt)
             problems += check_statement(raw.stmt, path, i)
-            problems += check_missing_leg(raw.stmt, path, i,
-                                          *_cte_and_aliases(raw.stmt),
+            problems += check_missing_leg(raw.stmt, path, i, cte_map, alias_map,
                                           allow_lines=allowed)
+            problems += check_base_columns(raw.stmt, path, i, cte_map, schema)
         if problems:
             bad = True
             for p in problems:
                 print(p)
         else:
-            print(f"{path}: OK -- {len(stmts)} statements, guards pass, "
-                  f"CTE column references resolve")
+            print(f"{path}: OK -- {len(stmts)} statements, guards pass, CTE and "
+                  f"base-table column references resolve "
+                  f"({len(schema)} tables known)")
     return 1 if bad else 0
 
 
