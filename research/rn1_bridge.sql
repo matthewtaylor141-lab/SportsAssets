@@ -19,12 +19,22 @@
 -- THE PROBE LADDER IS RN1'S VENUE, NOT BETTOR'S. copy_probes.depth is written
 -- as json.dumps(asks[:8]) from GET /book against clob_api_base =
 -- "https://clob.polymarket.com" (copy_probe.py:115-120, :158; config.py:37) --
--- POLYMARKET, HIS venue, not Polymarket US where BETTOR executes. Walking it
--- therefore measures THE COST OF REPLICATING HIS FILL ON HIS OWN BOOK AT OUR
--- DETECTION LATENCY. That is the SELECTION + LATENCY component with the VENUE
--- component excluded, and it is named RN1_VENUE_REPLICATION_DRAG for exactly
--- that reason. It is NOT BETTOR execution drag and must never be relabelled as
--- such.
+-- POLYMARKET, HIS venue, not Polymarket US where BETTOR executes.
+--
+-- AND IT IS STAMPED AT HIS PRINT, NOT AT OUR ORDER. I had this wrong in the
+-- run-49 header, which called it "at our detection latency". copy_probe.py:135
+-- computes reaction_s = probe_at - fill_ts, and probe_at is stamped BEFORE the
+-- semaphore (:107-110) precisely so the figure measures detection lag alone.
+-- Run 56 measures that median at -0.73 s: the ladder is captured essentially
+-- AT his fill, a hair before its recorded timestamp.
+--
+-- So walking it measures THE COST OF TAKING HIS OWN BOOK AT HIS OWN MOMENT.
+-- BOTH the venue component AND the latency component are EXCLUDED -- and the
+-- latency excluded is not small: whale-fill-to-our-fill was measured at 86.8 s
+-- median (E6). Whatever his book does in that minute and a half is not in
+-- these numbers. RN1_VENUE_REPLICATION_DRAG is therefore a LOWER BOUND on the
+-- cost of replication, and a generous one. It is NOT BETTOR execution drag and
+-- must never be relabelled as such.
 --
 -- AND THERE IS NO SUBSTITUTE. Grepping every migration for a stored ladder
 -- returns ONE hit -- that column. mirror_shadow keeps bid/ask/mark from
