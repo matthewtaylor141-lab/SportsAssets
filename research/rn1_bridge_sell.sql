@@ -244,15 +244,29 @@ WITH base AS (
          -- token that is NOT the designated long. So px is the COMPLEMENT's
          -- price and is NOT comparable to a bid quoted on the long.
          --
-         -- ONLY THE BOOLEAN IS PROJECTED. Run 58 carried oi/ay/an/as_of_long
-         -- through as well, and ay/an/as_of_long are ~77-byte CTF token id
-         -- strings. Three of those per row widened ev, then b, then the UNION
-         -- in `s`, whose window sorts every SELL event together with every
-         -- retained shadow bid row for those conditions. A sort's width is set
-         -- by its widest row, so the extra ~230 bytes pushed a sort that fit in
-         -- work_mem at run 57 (10m19s) out to disk: run 58 passed 23 minutes
-         -- and was killed by the job ceiling having computed the same answer.
-         -- The boolean is all the reference needs, so the strings stay behind.
+         -- ONLY THE BOOLEAN IS PROJECTED, and the reason is HYGIENE, NOT A
+         -- MEASURED FAULT. Read the correction below before citing this.
+         --
+         -- ay / an / as_of_long are ~77-byte CTF token id strings. Carrying
+         -- three of them per row widens ev, then b, then the UNION in `s`,
+         -- whose window sorts every SELL event together with every retained
+         -- shadow bid row for those conditions, and a sort's row width is set
+         -- by its widest input row. That is a real cost and a good reason to
+         -- project the boolean instead of the strings it was computed from.
+         --
+         -- IT IS NOT, HOWEVER, WHY RUN 58 WAS CANCELLED, AND I SAID IT WAS.
+         -- I claimed run 58 had passed 23 minutes and blown its ceiling. It
+         -- had not. Its step started 14:40:06Z and I cancelled it at 14:50:44Z
+         -- -- NINE AND A HALF MINUTES IN, against run 57's 10m19s on the same
+         -- statement. It was almost certainly about to finish, and I killed it.
+         -- I had been inferring elapsed wall-clock from my own progress through
+         -- the work instead of reading a clock, so the "23 minutes" that this
+         -- fix was justified by never existed.
+         --
+         -- So: the change is harmless and probably worth keeping, but it is an
+         -- UNTESTED HYPOTHESIS about width, not a diagnosis. Nothing here
+         -- measured a spill. If this statement is ever slow again, measure it
+         -- -- read the clock, read the plan -- before changing anything.
          (CASE WHEN z.oi = 0 THEN z.ay ELSE z.an END = z.as_of_long) AS fill_on_long,
          (z.d_cont >= 2.0) AS side_forced
     FROM tti z WHERE z.signed_dn <> 0
