@@ -127,4 +127,25 @@ jobs:
             timeout $(( TO / 1000 + 120 )) \
             psql "$EXT" -X -v ON_ERROR_STOP=1 -f "$SRC" 2>&1 \
             | grep -v -F "$PW" | head -"$HEAD"
-          echo "psql exit=${PIPESTATUS[0]}"
+          RC=${PIPESTATUS[0]}
+          echo "psql exit=$RC"
+
+          # FAILURE MUST PROPAGATE. This step used to end on the echo above, so
+          # the job exited 0 whatever psql did, and a run that produced NO
+          # RESULT rendered as a green tick. That is exactly what happened on
+          # run 33 (2026-09-11): statement 1 hit the statement timeout,
+          # ON_ERROR_STOP=1 aborted the file, psql exited 3, and the run was
+          # reported successful with no rows. Research that died must look dead.
+          #
+          # 141 is the one tolerated non-zero: `head -$HEAD` closes the pipe once
+          # it has its lines, psql takes SIGPIPE, and that is OUTPUT TRUNCATION,
+          # not a query failure. It is called out rather than swallowed so a
+          # truncated result is never mistaken for a complete one.
+          # 124 is `timeout` killing the wall clock and is a real failure, as is
+          # every psql status (1 fatal, 2 connection, 3 script error).
+          if [ "$RC" = "141" ]; then
+            echo "::warning::output truncated at head -$HEAD (psql SIGPIPE); the query itself completed"
+          elif [ "$RC" != "0" ]; then
+            echo "::error::research SQL failed with exit $RC -- the results above are incomplete or absent"
+            exit "$RC"
+          fi
