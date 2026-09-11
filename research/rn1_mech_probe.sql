@@ -1,3 +1,19 @@
+-- ############################################################################
+-- HISTORICAL / NON-RERUNNABLE -- references nonexistent markets.us_market_slug
+--
+-- Statements 2 and 3 read `mk.us_market_slug` from the `markets` table. NO
+-- MIGRATION DEFINES OR ADDS THAT COLUMN: migration 001 creates `markets` with
+-- condition_id, title, slug, event_slug, event_title, sport, tags, closed,
+-- resolved, resolved_prices, resolved_at, updated_at, and no later migration
+-- alters it. Dispatching this file will abort on statement 2 under
+-- ON_ERROR_STOP=1.
+--
+-- Found on 2026-09-11 by the base-table column layer added to
+-- research/check_sql.py. Left in place as a record of what was asked, NOT as an
+-- executable query: living under research/ is not evidence that a file runs.
+-- Anything needed from it must be rewritten against columns that exist, and the
+-- US slug for a condition read from a surface that actually carries one.
+-- ############################################################################
 -- ============================================================================
 -- WHAT CAN THE MECHANISM DECOMPOSITION ACTUALLY BE BUILT FROM?
 -- (2026-09-11, read-only.)
