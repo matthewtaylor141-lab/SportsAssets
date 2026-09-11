@@ -189,45 +189,82 @@ Let `p_h` = his fill price, `q_h` = his shares, `N_h = p_h·q_h`, `q` = the
 shares BETTOR would have wanted (the copy ratio applied to `N_h`, then the same
 production clip rules), `payout_i ∈ {0,1}` from settlement.
 
-    RN1_GROSS_EDGE_i            = (payout_i − p_h) · q
+**THE DECOMPOSITION — owner's form, 2026-09-11, and the only one used.** The two
+execution components are **disjoint** and are subtracted separately. An earlier
+draft of this file subtracted a total drag AND a slippage term, which counted
+the depth cost twice; that draft is superseded here.
 
-    P_exec_i(d)                 = depth-walked VWAP for q shares from the book
-                                  observed at the defensible time t_i + d
+    BASE_MARGIN_i               = (payout_i − p_h) · q
+
+    best_ask_at_action_i(d)     = top-of-book ask on the book observed at the
+                                  defensible action time t_i + d
+
+    depth_walked_vwap_i(d)      = VWAP to fill q from that same book
                                   (top-8 ceiling applies)
 
-    OBSERVABLE_REPLICATION_DRAG_i(d)
-                                = (P_exec_i(d) − p_h) · q
+    TOP_OF_BOOK_MOVE_i(d)       = (best_ask_at_action_i(d) − p_h) · q
 
-    IDENTIFIABLE_SLIPPAGE_i(d)  = (P_exec_i(d) − best_ask_i(d)) · q
-                                  -- depth cost ALONE, top-of-book vs VWAP
+    DEPTH_SLIPPAGE_i(d)         = (depth_walked_vwap_i(d)
+                                   − best_ask_at_action_i(d)) · q
 
-    CROSS_VENUE_BASIS_i(d)      = (PMUS_best_i(d) − RN1venue_best_i(d)) · q
-                                  -- only where BOTH observations exist at a
-                                     defensible common time
+    TOTAL_EXECUTION_DRAG_i(d)   = TOP_OF_BOOK_MOVE_i(d) + DEPTH_SLIPPAGE_i(d)
+                                = (depth_walked_vwap_i(d) − p_h) · q
 
     IDENTIFIABLE_FEES_i         = UNKNOWN (no retained fee field)
 
-    REMAINING_CAPTURABLE_EDGE_i(d)
-        = RN1_GROSS_EDGE_i
-          − OBSERVABLE_REPLICATION_DRAG_i(d)
-          − IDENTIFIABLE_SLIPPAGE_i(d)
+    REMAINING_MARGIN_i(d)
+        = BASE_MARGIN_i
+          − TOP_OF_BOOK_MOVE_i(d)
+          − DEPTH_SLIPPAGE_i(d)
           − IDENTIFIABLE_FEES_i
 
-**Unknown propagation, mandatory:** any UNKNOWN term makes
-`REMAINING_CAPTURABLE_EDGE` an **UPPER BOUND**, labelled as such with the
-direction stated. An unknown is never zero. With fees unknown today, every
-remaining-edge figure this study produces is an upper bound, and will say so.
+`TOTAL_EXECUTION_DRAG` is a reporting convenience only. It is **never** a fourth
+subtraction; `REMAINING_MARGIN` subtracts the two components, and any statement
+that subtracts both a total and a component is wrong by construction.
 
-**Note on double counting:** drag measured against `P_exec` already contains the
-depth term. The decomposition therefore reports drag split as
-`drag = top_of_book_move + depth_cost`, and the sum is checked to close exactly
-per event — our own identity test, not one borrowed from TRUEEDGE:
+Reported alongside, never inside the subtraction:
 
-    Σ_i [ RN1_GROSS_EDGE_i − top_move_i − depth_cost_i ]
-        = Σ_i REMAINING_CAPTURABLE_EDGE_i   (fees excluded, flagged)
+    CROSS_VENUE_BASIS_i(d)      = (PMUS_best_i(d) − RN1venue_best_i(d)) · q
+                                  -- only where BOTH observations exist at a
+                                     defensible common time. It is a VENUE
+                                     CHOICE term, not an execution cost: it says
+                                     which book the above should have been
+                                     measured on, and double-counts against
+                                     TOP_OF_BOOK_MOVE if added to it.
 
-on the identical event set. If it does not close to the cent, nothing
-downstream is reported.
+**Definitional choice, stated openly.** `BASE_MARGIN` is settlement-based:
+`payout ∈ {0,1}` on the `U4` cohort. That is ex-post by construction, so it may
+be used as the *size of the prize* and never as a decision-time predictor or a
+segmentation variable (§6's last rule). A mark-based alternative at a defensible
+horizon is possible and would change every remaining-margin figure; it is not
+used unless the owner asks.
+
+**Sign convention.** Positive `TOP_OF_BOOK_MOVE` and positive `DEPTH_SLIPPAGE`
+both mean *worse for us*. Both are written on the **ask**, so both are BUY-side;
+the SELL-side mirror image on the bid is out of scope here because the retained
+instrument (`copy_probes`) is BUY-only (§4).
+
+**One `q`, four terms.** The same `q` appears in all four. Where the retained
+book cannot fill `q`:
+
+- if the top-8 book fills only `q' < q`, the event is `DEPTH_EXHAUSTED` and is
+  reported at `q'` **with every term recomputed at `q'`**, never a blend;
+- a `q'`-based row is carried in its own bucket and is never pooled with
+  full-size rows in a per-share or percentage figure.
+
+**Unknown propagation, mandatory.** Any UNKNOWN term makes `REMAINING_MARGIN` an
+**UPPER BOUND**, labelled with the direction. An unknown is never zero. Fees are
+unknown today, so **every remaining-margin figure this study produces is an
+upper bound and will say so.**
+
+**What the identity check does and does not prove.** Per event,
+`TOP_OF_BOOK_MOVE + DEPTH_SLIPPAGE = (vwap − p_h)·q` telescopes — it is
+algebraically true whatever the inputs are. Running it therefore verifies **data
+handling**, not economics: that both components came from the *same* book
+snapshot, at the *same* `q`, on the *same* event, with no borrowed row and no
+silent NULL. It is worth running for exactly that and is not evidence that the
+components are the right ones. If it fails to close to the cent the cause is a
+join or a NULL, and nothing downstream is reported until it is named.
 
 **Percentages** are only ever the ratio of two dollar figures **on the same
 event set**. The prior comparison error is pre-registered as forbidden: RN1's
