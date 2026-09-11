@@ -33,8 +33,19 @@
 -- relying on that, because construction arguments are exactly what the last two
 -- defects survived behind.
 --
--- SINGLE-LEG INVARIANTS, expected violations 0:
---     M = 0,  MATCHED_GROSS_PNL = 0,  NON_MATCHED_REMAINDER_PNL = TOTAL.
+-- SINGLE-LEG INVARIANTS, owner-stated, expected violations 0 on each:
+--     M               = 0
+--     matched_cost    = 0
+--     matched_pnl     = 0
+--     remainder_cost  = acquisition_cost
+--     remainder_pnl   = total_trading_pnl
+--
+-- The COST side matters as much as the P&L side and was missing from the first
+-- draft of this file. A single-leg condition has no pair, so NONE of its
+-- acquisition cost is matched capital and ALL of it is the denominator of the
+-- non-matched return. Getting matched_cost right but leaving remainder_cost
+-- untested would leave the remainder ROI's denominator unverified -- which is
+-- precisely the half of the retracted statistic that went wrong.
 --
 -- POPULATION: settled (resolved with a retained payout vector) AND
 -- structurally eligible (exactly two outcome slots, index 0 and 1). Fixed once
@@ -86,7 +97,9 @@ WITH base AS MATERIALIZED (
    WHERE mk.resolved AND mk.resolved_prices IS NOT NULL
 ), k AS MATERIALIZED (
   SELECT u.*,
+         COALESCE(u.m * u.pair_cost, 0)         AS matched_cost,
          COALESCE(u.m * (1.0 - u.pair_cost), 0) AS matched_pnl,
+         u.acq_cost - COALESCE(u.m * u.pair_cost, 0) AS remainder_cost,
          u.total_pnl - COALESCE(u.m * (1.0 - u.pair_cost), 0) AS remainder_pnl,
          (u.qy = 0 OR u.qn = 0) AS single_leg
     FROM u
@@ -102,12 +115,25 @@ SELECT count(*) AS conditions,
          AS max_abs_per_condition_closure_gap,
        count(*) FILTER (WHERE abs(total_pnl - matched_pnl - remainder_pnl) > 1e-6)
          AS closure_violations_expected_0,
+       round(sum(matched_cost)::numeric, 2) AS matched_cost,
+       round(sum(remainder_cost)::numeric, 2) AS remainder_cost,
+       round(sum(acq_cost - matched_cost - remainder_cost)::numeric, 6)
+         AS cost_closure_gap,
+       count(*) FILTER (WHERE abs(acq_cost - matched_cost - remainder_cost) > 1e-6)
+         AS cost_closure_violations_expected_0,
+       -- the four single-leg invariants, stated by the owner and each counted
+       -- separately so a failure names which one broke rather than just that
+       -- something did
        count(*) FILTER (WHERE single_leg AND abs(m) > 1e-9)
-         AS single_leg_m_not_zero_expected_0,
+         AS sl_m_not_zero_expected_0,
+       count(*) FILTER (WHERE single_leg AND abs(matched_cost) > 1e-9)
+         AS sl_matched_cost_not_zero_expected_0,
        count(*) FILTER (WHERE single_leg AND abs(matched_pnl) > 1e-9)
-         AS single_leg_matched_not_zero_expected_0,
+         AS sl_matched_pnl_not_zero_expected_0,
+       count(*) FILTER (WHERE single_leg AND abs(remainder_cost - acq_cost) > 1e-6)
+         AS sl_remainder_cost_ne_acq_cost_expected_0,
        count(*) FILTER (WHERE single_leg AND abs(remainder_pnl - total_pnl) > 1e-6)
-         AS single_leg_remainder_ne_total_expected_0
+         AS sl_remainder_pnl_ne_total_expected_0
   FROM k;
 
 

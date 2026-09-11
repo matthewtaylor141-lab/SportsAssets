@@ -80,11 +80,14 @@ def condition(fills, payout_yes):
 
     matched_old = mul(mq_old, NULL if pair_cost is NULL else 1 - pair_cost)
     matched_new = 0 if pair_cost is NULL else mq_new * (1 - pair_cost)
+    mcost_new = 0 if pair_cost is NULL else mq_new * pair_cost
 
     return {
         "qy": qy, "qn": qn, "acq": acq, "trading": trading,
         "mq_old": mq_old, "mq_new": mq_new,
         "matched_old": matched_old, "matched_new": matched_new,
+        "matched_cost_new": mcost_new,
+        "remainder_cost_new": acq - mcost_new,
         "remainder_old": sub(trading, matched_old),   # <- FAMILY 2 defect
         "remainder_new": trading - matched_new,
         "single_leg": qy == 0 or qn == 0,
@@ -126,10 +129,22 @@ for label, fills, payout in (("two-leg ", TWO_LEG, 1.0),
     check(f"{label}: CORRECTED closes (total = matched + remainder)", ok,
           f"total={c['trading']:.4f} matched={c['matched_new']:.4f} "
           f"remainder={c['remainder_new']:.4f}")
+    okc = abs(c["acq"] - (c["matched_cost_new"] + c["remainder_cost_new"])) < 1e-9
+    check(f"{label}: CORRECTED cost closes (acq = matched_cost + remainder_cost)",
+          okc, f"acq={c['acq']:.4f} matched_cost={c['matched_cost_new']:.4f} "
+               f"remainder_cost={c['remainder_cost_new']:.4f}")
     if c["single_leg"]:
+        # the five owner-stated single-leg invariants, cost side included --
+        # the remainder ROI's DENOMINATOR is the half of the retracted
+        # statistic that went wrong, so testing only the P&L side would leave
+        # the actual failure mode unchecked
         check(f"{label}: M = 0", c["mq_new"] == 0)
-        check(f"{label}: MATCHED_GROSS_PNL = 0", c["matched_new"] == 0)
-        check(f"{label}: REMAINDER = TOTAL",
+        check(f"{label}: matched_cost = 0", c["matched_cost_new"] == 0)
+        check(f"{label}: matched_pnl = 0", c["matched_new"] == 0)
+        check(f"{label}: remainder_cost = acquisition_cost",
+              abs(c["remainder_cost_new"] - c["acq"]) < 1e-9,
+              f"remainder_cost={c['remainder_cost_new']:.4f} acq={c['acq']:.4f}")
+        check(f"{label}: remainder_pnl = total_trading_pnl",
               abs(c["remainder_new"] - c["trading"]) < 1e-9)
 
 print()
