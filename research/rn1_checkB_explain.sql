@@ -91,7 +91,7 @@ SELECT CASE WHEN a.first_anchor IS NOT NULL AND d.ts >= a.first_anchor
  WHERE d.ts >= timestamptz '2026-08-05 00:00Z' AND d.d_m > 0.000001
  GROUP BY 1 ORDER BY 1;
 
-\echo '== PLAN ONLY -- 2. CONTINUOUS_TARGET_STATE: action mix, designation source, algebra test =='
+\echo '== PLAN ONLY -- 2. COVERAGE_SUPPORTED_UNANCHORED_37D: action mix, designation source, algebra =='
 -- ONE pass over the merged stream serves all three report blocks. They were
 -- three separate statements in the draft, each rebuilding the same ~620k-row
 -- stream and re-sorting it; check A's lesson is that the plan shape, not the
@@ -230,21 +230,18 @@ SELECT label,
        round(sum(d_m * px)::numeric, 0) AS matched_notional
   FROM lab GROUP BY blk, label ORDER BY blk, label;
 
-\echo '== PLAN ONLY -- 3. ANCHORED SUBSET as validation: as-of snapshot, forward replay only =='
--- Restricted FIRST to conditions that actually have an independent snapshot,
--- so the population is ~4% and the plan cannot blow up.
+\echo '== PLAN ONLY -- 3. ANCHORED MODELS on the 09-02+ overlap: ONCE-FORWARD vs RECONCILED vs UNANCHORED =='
+-- All three models over ONE population and ONE causal designation, so any
+-- difference between them is a difference of STATE and nothing else.
 --
--- THE ANCHOR IS AS-OF, NOT FIXED. At every snapshot row the seed is rebased:
---     seed := snap - running_fills_at_that_row
--- and state is then always seed + running_fills. Because the seed is carried
--- forward only until the NEXT snapshot rebases it, state restarts from the
--- most recent independent observation instead of compounding one stale
--- snapshot across unknown intervening activity. Anchor age is reported.
+-- THE EVENT SET is every causally designated RN1 fill, at or after that
+-- condition's first independent snapshot, at which ANY of the three models
+-- registers matched-inventory growth (GREATEST(dm2,dm3,dm4) > 0). Using one
+-- model's dM to select the events would bias the comparison toward it.
 --
--- Nothing before an anchor is reconstructed from it: events with no snapshot
--- at or before them are dropped (ga = 0), not back-filled. The snapshot is not
--- required to be zero -- a nonzero independent observation is a perfectly
--- valid starting state.
+-- Block 0 states the reach before any mix is read: how much of the population
+-- every model can classify, and how much is lost to an unknown designation, an
+-- unknown ratio, or a designated token that is neither traded leg.
 EXPLAIN
 WITH ac AS (
   SELECT DISTINCT condition_id FROM mirror_shadow
@@ -267,27 +264,55 @@ WITH ac AS (
          max(asset) FILTER (WHERE outcome_index = 0) AS ay,
          max(asset) FILTER (WHERE outcome_index = 1) AS an
     FROM base GROUP BY 1
+), desig_rows AS (
+  SELECT condition_id, opened_at AS at, long_asset, ratio FROM mirror_books
+   WHERE long_asset IS NOT NULL
+  UNION ALL
+  SELECT condition_id, at, long_asset, NULL::float8 FROM mirror_candidate_refusals
+   WHERE long_asset IS NOT NULL
+  UNION ALL
+  SELECT condition_id, at, long_asset, ratio FROM mirror_shadow
+   WHERE long_asset IS NOT NULL
 ), snaps AS (
-  SELECT condition_id, at, long_asset AS anchor_long, snap_long, snap_other, ratio
+  SELECT condition_id, at, long_asset AS anchor_long, snap_long, snap_other
     FROM mirror_shadow
    WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL AND long_asset IS NOT NULL
 ), stream AS (
+  -- THREE row kinds in ONE causal order. pri orders them within a timestamp:
+  -- a designation (0) and a snapshot (1) both take effect BEFORE an event (2)
+  -- that shares their instant, so no event is ever classified with information
+  -- that did not exist at it. That is the causality rule, enforced by the sort
+  -- key rather than by a filter that could be written the wrong way round.
   SELECT condition_id, at AS ts, 0 AS pri, NULL::bigint AS ev,
-         anchor_long, snap_long, snap_other, ratio, at AS anchor_ts,
+         long_asset, ratio,
+         NULL::text AS anchor_long, NULL::float8 AS snap_long,
+         NULL::float8 AS snap_other, NULL::timestamptz AS anchor_ts,
          NULL::int AS oi, 0::float8 AS sh, NULL::float8 AS px
+    FROM desig_rows
+  UNION ALL
+  SELECT condition_id, at, 1, NULL, NULL, NULL,
+         anchor_long, snap_long, snap_other, at, NULL, 0::float8, NULL
     FROM snaps
   UNION ALL
-  SELECT condition_id, ts, 1, id, NULL, NULL, NULL, NULL, NULL::timestamptz,
-         outcome_index, sh, px FROM canon
+  SELECT condition_id, ts, 2, id, NULL, NULL, NULL, NULL, NULL, NULL,
+         outcome_index, sh, px
+    FROM canon
 ), run AS (
   SELECT s.*, l.ay, l.an,
-         count(s.anchor_ts) OVER wc AS ga,
+         count(s.long_asset) OVER wc AS gd,
+         count(s.ratio)      OVER wc AS gr,
+         count(s.anchor_ts)  OVER wc AS ga,
          sum(CASE WHEN s.oi = 0 THEN s.sh ELSE 0 END) OVER wc AS fy,
          sum(CASE WHEN s.oi = 1 THEN s.sh ELSE 0 END) OVER wc AS fn
     FROM stream s JOIN legs l ON l.condition_id = s.condition_id
   WINDOW wc AS (PARTITION BY s.condition_id ORDER BY s.ts, s.pri, s.ev
                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
 ), seeded AS (
+  -- A snapshot's seed is the OFFSET that makes the replay reproduce it:
+  --     seed := observed_snapshot - running_fills_at_that_instant
+  -- so that state = seed + running_fills at every later row. Carrying the
+  -- seed rather than the state is what lets one window pass express both
+  -- anchoring policies.
   SELECT r.*,
          CASE WHEN r.anchor_ts IS NULL THEN NULL
               WHEN r.anchor_long = r.ay THEN r.snap_long  - r.fy
@@ -298,51 +323,106 @@ WITH ac AS (
     FROM run r
 ), carried AS (
   SELECT s.*,
-         first_value(s.seed_y_row)  OVER wa AS seed_y,
-         first_value(s.seed_n_row)  OVER wa AS seed_n,
-         first_value(s.anchor_ts)   OVER wa AS as_of_anchor,
-         first_value(s.anchor_long) OVER wa AS as_of_long,
-         first_value(s.ratio)       OVER wa AS as_of_ratio
+         first_value(s.long_asset) OVER wd AS as_of_long,
+         first_value(s.ratio)      OVER wr AS as_of_ratio,
+         -- SNAPSHOT_RECONCILED: group on ga, which advances at EVERY snapshot,
+         -- so the seed is replaced by each new independent observation.
+         first_value(s.seed_y_row) OVER wa AS seed_y_rec,
+         first_value(s.seed_n_row) OVER wa AS seed_n_rec,
+         first_value(s.anchor_ts)  OVER wa AS anchor_ts_rec,
+         -- ANCHOR_ONCE_FORWARD: group on (ga > 0), a single group covering
+         -- every row from the FIRST snapshot onward. Its first row IS that
+         -- first snapshot, so first_value pins the seed there and it never
+         -- moves again. Later snapshots are observations only, never state.
+         first_value(s.seed_y_row) OVER wo AS seed_y_once,
+         first_value(s.seed_n_row) OVER wo AS seed_n_once,
+         first_value(s.anchor_ts)  OVER wo AS anchor_ts_once
     FROM seeded s
-  WINDOW wa AS (PARTITION BY s.condition_id, s.ga ORDER BY s.ts, s.pri, s.ev)
-), evr AS (
+  WINDOW wd AS (PARTITION BY s.condition_id, s.gd        ORDER BY s.ts, s.pri, s.ev),
+         wr AS (PARTITION BY s.condition_id, s.gr        ORDER BY s.ts, s.pri, s.ev),
+         wa AS (PARTITION BY s.condition_id, s.ga        ORDER BY s.ts, s.pri, s.ev),
+         wo AS (PARTITION BY s.condition_id, (s.ga > 0)  ORDER BY s.ts, s.pri, s.ev)
+), sta AS (
   SELECT c.*,
-         c.seed_y + c.fy AS sy,
-         c.seed_n + c.fn AS sn,
-         c.seed_y + c.fy - CASE WHEN c.oi = 0 THEN c.sh ELSE 0 END AS py,
-         c.seed_n + c.fn - CASE WHEN c.oi = 1 THEN c.sh ELSE 0 END AS pn
+         CASE WHEN c.oi = 0 THEN c.sh ELSE 0 END AS dy,
+         CASE WHEN c.oi = 1 THEN c.sh ELSE 0 END AS dn,
+         c.fy                 AS y4, c.fn                 AS n4,
+         c.seed_y_once + c.fy AS y2, c.seed_n_once + c.fn AS n2,
+         c.seed_y_rec  + c.fy AS y3, c.seed_n_rec  + c.fn AS n3
     FROM carried c WHERE c.ev IS NOT NULL AND c.ga > 0
-), st AS (
-  SELECT e.*,
-         GREATEST(LEAST(e.sy, e.sn) - LEAST(e.py, e.pn), 0) AS d_m,
-         CASE WHEN e.as_of_long = e.ay THEN e.sy - e.sn
-              WHEN e.as_of_long = e.an THEN e.sn - e.sy END AS net_after,
-         CASE WHEN e.as_of_long = e.ay THEN e.py - e.pn
-              WHEN e.as_of_long = e.an THEN e.pn - e.py END AS net_before
-    FROM evr e
+), q AS (
+  SELECT s.*,
+         GREATEST(LEAST(s.y2, s.n2) - LEAST(s.y2 - s.dy, s.n2 - s.dn), 0) AS dm2,
+         GREATEST(LEAST(s.y3, s.n3) - LEAST(s.y3 - s.dy, s.n3 - s.dn), 0) AS dm3,
+         GREATEST(LEAST(s.y4, s.n4) - LEAST(s.y4 - s.dy, s.n4 - s.dn), 0) AS dm4,
+         CASE WHEN s.as_of_long = s.ay THEN s.y2 - s.n2
+              WHEN s.as_of_long = s.an THEN s.n2 - s.y2 END AS net2,
+         CASE WHEN s.as_of_long = s.ay THEN s.y3 - s.n3
+              WHEN s.as_of_long = s.an THEN s.n3 - s.y3 END AS net3,
+         CASE WHEN s.as_of_long = s.ay THEN s.y4 - s.n4
+              WHEN s.as_of_long = s.an THEN s.n4 - s.y4 END AS net4,
+         CASE WHEN s.as_of_long = s.ay THEN (s.y2 - s.dy) - (s.n2 - s.dn)
+              WHEN s.as_of_long = s.an THEN (s.n2 - s.dn) - (s.y2 - s.dy) END AS pre2,
+         CASE WHEN s.as_of_long = s.ay THEN (s.y3 - s.dy) - (s.n3 - s.dn)
+              WHEN s.as_of_long = s.an THEN (s.n3 - s.dn) - (s.y3 - s.dy) END AS pre3,
+         CASE WHEN s.as_of_long = s.ay THEN (s.y4 - s.dy) - (s.n4 - s.dn)
+              WHEN s.as_of_long = s.an THEN (s.n4 - s.dn) - (s.y4 - s.dy) END AS pre4
+    FROM sta s
 ), f AS (
-  SELECT st.*, trunc(st.as_of_ratio * st.net_after) AS tgt_after,
-         COALESCE(lag(trunc(st.as_of_ratio * st.net_after)) OVER w,
-                  trunc(st.as_of_ratio * st.net_before)) AS pos_before
-    FROM st WINDOW w AS (PARTITION BY st.condition_id ORDER BY st.ts, st.ev)
+  -- Each model propagates ITS OWN cf position: pos_before is that model's
+  -- previous cf_target_after, never recomputed from this event.
+  SELECT q.*,
+         trunc(q.as_of_ratio * q.net2) AS t2,
+         trunc(q.as_of_ratio * q.net3) AS t3,
+         trunc(q.as_of_ratio * q.net4) AS t4,
+         COALESCE(lag(trunc(q.as_of_ratio * q.net2)) OVER w,
+                  trunc(q.as_of_ratio * q.pre2)) AS p2,
+         COALESCE(lag(trunc(q.as_of_ratio * q.net3)) OVER w,
+                  trunc(q.as_of_ratio * q.pre3)) AS p3,
+         COALESCE(lag(trunc(q.as_of_ratio * q.net4)) OVER w,
+                  trunc(q.as_of_ratio * q.pre4)) AS p4
+    FROM q WINDOW w AS (PARTITION BY q.condition_id ORDER BY q.ts, q.ev)
+), a AS (
+  SELECT f.*,
+         f.t2 - f.p2 AS qty2, f.t3 - f.p3 AS qty3, f.t4 - f.p4 AS qty4,
+         CASE WHEN f.t2 - f.p2 > 0 THEN 'BUY '
+              WHEN f.t2 - f.p2 < 0 THEN 'SELL' ELSE 'HOLD' END AS a2,
+         CASE WHEN f.t3 - f.p3 > 0 THEN 'BUY '
+              WHEN f.t3 - f.p3 < 0 THEN 'SELL' ELSE 'HOLD' END AS a3,
+         CASE WHEN f.t4 - f.p4 > 0 THEN 'BUY '
+              WHEN f.t4 - f.p4 < 0 THEN 'SELL' ELSE 'HOLD' END AS a4,
+         GREATEST(f.dm2, f.dm3, f.dm4) AS dmw,
+         extract(epoch FROM f.ts - f.anchor_ts_rec) / 3600.0 AS age_h,
+         (f.as_of_long IS NOT NULL AND f.as_of_ratio IS NOT NULL
+          AND f.net2 IS NOT NULL AND f.net3 IS NOT NULL
+          AND f.net4 IS NOT NULL) AS classifiable
+    FROM f
+), lab AS (
+  SELECT 0 AS blk, CASE WHEN classifiable
+                          THEN '0 POPULATION  classifiable by ALL THREE models'
+                        ELSE '0 POPULATION  NOT classifiable (designation/ratio/leg unknown)'
+                   END AS label, dmw, px, condition_id FROM a
+   WHERE dmw > 0.000001
+  UNION ALL
+  SELECT 1, '1 ANCHOR_ONCE_FORWARD                      ' || a2, dmw, px, condition_id
+    FROM a WHERE dmw > 0.000001 AND classifiable
+  UNION ALL
+  SELECT 2, '2 SNAPSHOT_RECONCILED                      ' || a3, dmw, px, condition_id
+    FROM a WHERE dmw > 0.000001 AND classifiable
+  UNION ALL
+  SELECT 3, '3 UNANCHORED (same 09-02+ overlap)         ' || a4, dmw, px, condition_id
+    FROM a WHERE dmw > 0.000001 AND classifiable
 )
-SELECT CASE WHEN net_after   IS NULL THEN '4 ANCHOR LONG IS NEITHER TRADED LEG'
-            WHEN as_of_ratio IS NULL THEN '5 RATIO_UNKNOWN'
-            WHEN tgt_after - pos_before > 0 THEN '1 BUY'
-            WHEN tgt_after - pos_before < 0 THEN '2 SELL'
-            ELSE '3 HOLD (target move under one whole share)' END AS required_action,
+SELECT label,
        count(*) AS dM_events,
        count(DISTINCT condition_id) AS conditions,
-       round((100.0 * count(*) / sum(count(*)) OVER ())::numeric, 2) AS pct_events,
-       round(sum(d_m)::numeric, 0) AS dM_shares,
-       round(sum(d_m * px)::numeric, 0) AS matched_notional,
-       round(percentile_cont(0.5) WITHIN GROUP (
-         ORDER BY extract(epoch FROM ts - as_of_anchor) / 3600.0)::numeric, 2) AS p50_anchor_age_h,
-       round(percentile_cont(0.9) WITHIN GROUP (
-         ORDER BY extract(epoch FROM ts - as_of_anchor) / 3600.0)::numeric, 2) AS p90_anchor_age_h
-  FROM f
- WHERE d_m > 0.000001 OR net_after IS NULL OR as_of_ratio IS NULL
- GROUP BY 1 ORDER BY 1;
+       round((100.0 * count(*) / sum(count(*)) OVER (PARTITION BY blk))::numeric, 2)
+         AS PCT_EVENTS_IN_BLOCK,
+       round(sum(dmw)::numeric, 0) AS dM_shares,
+       round((100.0 * sum(dmw) / NULLIF(sum(sum(dmw)) OVER (PARTITION BY blk), 0))::numeric, 2)
+         AS PCT_dM_IN_BLOCK,
+       round(sum(dmw * px)::numeric, 0) AS matched_notional
+  FROM lab GROUP BY blk, label ORDER BY blk, label;
 
 \echo '== PLAN ONLY -- 4. ACTUAL_STATE 09-06..09-10: corrected rule from the real book =='
 -- Our booked position is an AS-OF CARRY-FORWARD over the same stream, not a
@@ -502,4 +582,334 @@ SELECT CASE WHEN fills_long IS NULL
        round(max(abs(snap_long - fills_long))::numeric, 1) AS max_abs_long_diff,
        round(max(abs(snap_other - fills_other))::numeric, 1) AS max_abs_other_diff
   FROM r GROUP BY 1 ORDER BY 1;
+
+\echo '== PLAN ONLY -- 6. RECONSTRUCTION ERROR at each re-anchor point, by time since the previous anchor =='
+-- THE DIRECT MEASUREMENT OF ACCUMULATED RECONSTRUCTION ERROR, and the reason
+-- SNAPSHOT_RECONCILED exists. At every snapshot after a condition's first,
+-- compare
+--     predicted_state_before_reanchor = previous observed snapshot
+--                                     + RN1 fills captured in between
+-- against
+--     observed_snapshot_state         = this independent snapshot
+-- and band the discrepancy by how long the interval was. A growing error with
+-- elapsed time is fill capture drifting; a flat one is a constant offset.
+--
+-- LONG AND OTHER ARE IN THE SNAPSHOT'S OWN FRAME. If the designated long token
+-- FLIPPED between two snapshots, "long" names different tokens at each end and
+-- the two are not comparable; those points get their own bucket rather than a
+-- fabricated difference.
+--
+-- The economic version of this -- how often the error is large enough to
+-- CHANGE the required action -- is statement 7's block 4, which compares
+-- ANCHOR_ONCE_FORWARD against SNAPSHOT_RECONCILED at dM events in the same
+-- elapsed bands. Shares are the cause; that is the cost.
+EXPLAIN
+WITH ac AS (
+  SELECT DISTINCT condition_id FROM mirror_shadow
+   WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL AND long_asset IS NOT NULL
+), base AS (
+  SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
+         t.size::float8 AS sh,
+         CASE WHEN t.source IN ('poll', 'backfill') THEN 'venue' ELSE 'cash' END AS feed
+    FROM trades t JOIN whales w ON w.id = t.whale_id
+    JOIN ac ON ac.condition_id = t.condition_id
+   WHERE lower(w.username) = 'rn1' AND t.side = 'BUY' AND t.outcome_index IN (0, 1)
+), env AS (
+  SELECT tx_hash, asset, CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS cf
+    FROM base GROUP BY 1, 2
+), canon AS (
+  SELECT b.condition_id, b.ts, b.id, b.outcome_index, b.sh
+    FROM base b JOIN env e ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.cf = b.feed
+), legs AS (
+  SELECT condition_id,
+         max(asset) FILTER (WHERE outcome_index = 0) AS ay,
+         max(asset) FILTER (WHERE outcome_index = 1) AS an
+    FROM base GROUP BY 1
+), snaps AS (
+  SELECT condition_id, at, long_asset AS anchor_long, snap_long, snap_other
+    FROM mirror_shadow
+   WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL AND long_asset IS NOT NULL
+), stream AS (
+  SELECT condition_id, at AS ts, 0 AS pri, NULL::bigint AS ev,
+         anchor_long, snap_long, snap_other, NULL::int AS oi, 0::float8 AS sh
+    FROM snaps
+  UNION ALL
+  SELECT condition_id, ts, 1, id, NULL, NULL, NULL, outcome_index, sh FROM canon
+), run AS (
+  SELECT s.*, l.ay, l.an,
+         sum(CASE WHEN s.oi = 0 THEN s.sh ELSE 0 END) OVER wc AS fy,
+         sum(CASE WHEN s.oi = 1 THEN s.sh ELSE 0 END) OVER wc AS fn
+    FROM stream s JOIN legs l ON l.condition_id = s.condition_id
+  WINDOW wc AS (PARTITION BY s.condition_id ORDER BY s.ts, s.pri, s.ev
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+), o AS (
+  -- Snapshot rows only, with cumulative captured fills ON THAT SNAPSHOT'S OWN
+  -- long and other tokens at the instant it was taken.
+  SELECT condition_id, ts, anchor_long, snap_long, snap_other,
+         CASE WHEN anchor_long = ay THEN fy WHEN anchor_long = an THEN fn END AS fl,
+         CASE WHEN anchor_long = ay THEN fn WHEN anchor_long = an THEN fy END AS fo
+    FROM run WHERE anchor_long IS NOT NULL
+), g AS (
+  SELECT o.*,
+         lag(snap_long)  OVER w AS p_long,
+         lag(snap_other) OVER w AS p_other,
+         lag(fl)         OVER w AS p_fl,
+         lag(fo)         OVER w AS p_fo,
+         lag(ts)         OVER w AS p_ts,
+         lag(anchor_long) OVER w AS p_anchor_long
+    FROM o WINDOW w AS (PARTITION BY condition_id ORDER BY ts)
+), e AS (
+  SELECT g.*,
+         (p_long  + (fl - p_fl)) - snap_long  AS err_long,
+         (p_other + (fo - p_fo)) - snap_other AS err_other,
+         ((p_long + (fl - p_fl)) - (p_other + (fo - p_fo)))
+           - (snap_long - snap_other)         AS err_net,
+         extract(epoch FROM ts - p_ts) / 3600.0 AS age_h
+    FROM g WHERE p_ts IS NOT NULL
+)
+SELECT CASE WHEN fl IS NULL OR p_fl IS NULL
+              THEN 'X SNAPSHOT LONG IS NEITHER TRADED LEG (not comparable)'
+            WHEN p_anchor_long IS DISTINCT FROM anchor_long
+              THEN 'Y DESIGNATED LONG FLIPPED BETWEEN ANCHORS (not comparable)'
+            WHEN age_h <= 1  THEN 'A <=1h'
+            WHEN age_h <= 6  THEN 'B 1-6h'
+            WHEN age_h <= 24 THEN 'C 6-24h'
+            ELSE                  'D >24h' END AS anchor_age_band,
+       count(*) AS reanchor_points,
+       count(DISTINCT condition_id) AS conditions,
+       round((100.0 * count(*) FILTER (WHERE abs(err_long) < 0.5 AND abs(err_other) < 0.5)
+              / NULLIF(count(*), 0))::numeric, 2) AS EXACT_STATE_MATCH_PCT,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(err_long))::numeric, 1)
+         AS p50_abs_long_err,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(err_other))::numeric, 1)
+         AS p50_abs_other_err,
+       round(percentile_cont(0.9) WITHIN GROUP (ORDER BY abs(err_long))::numeric, 1)
+         AS p90_abs_long_err,
+       round(percentile_cont(0.9) WITHIN GROUP (ORDER BY abs(err_other))::numeric, 1)
+         AS p90_abs_other_err,
+       round(percentile_cont(0.5) WITHIN GROUP (ORDER BY err_net)::numeric, 1)
+         AS p50_SIGNED_NET_ERR,
+       round(percentile_cont(0.9) WITHIN GROUP (ORDER BY abs(err_net))::numeric, 1)
+         AS p90_abs_net_err
+  FROM e GROUP BY 1 ORDER BY 1;
+
+\echo '== PLAN ONLY -- 7. CROSS-MODEL AGREEMENT: does the unanchored model decide the same thing? =='
+-- THE VALIDATION QUESTION IS NOT WHETHER THE SHARE COUNTS MATCH. It is whether
+-- the models produce THE SAME REQUIRED ACTION and approximately the same
+-- REQUIRED QUANTITY at dM events. Share counts can differ by a constant offset
+-- and still decide identically; they can also agree closely and still invert a
+-- decision at the truncation boundary. So actions and quantities are what is
+-- reported.
+--
+-- x is the CANDIDATE model, y the REFERENCE it is judged against:
+--   block 1  ANCHOR_ONCE_FORWARD judged against SNAPSHOT_RECONCILED
+--            -- the cost of accumulated reconstruction error
+--   block 2  UNANCHORED judged against ANCHOR_ONCE_FORWARD
+--   block 3  UNANCHORED judged against SNAPSHOT_RECONCILED
+--            -- THE DECIDING BLOCK for whether the 37-day model may be used
+--   block 4  block 1 again, banded by time since the previous anchor
+--            -- the economic form of statement 6: how often accumulated error
+--            is large enough to change BUY/SELL/HOLD at a dM event
+--
+-- "quantity error as % of intended order" is sum|qx - qy| / sum|qy|: the error
+-- measured against the size the reference model would actually have ordered.
+-- An inversion is one model saying BUY where the other says SELL -- the only
+-- disagreement that trades in the wrong direction rather than the wrong size.
+--
+-- IF BLOCK 3 AGREES STRONGLY, the unanchored model has empirical support for
+-- the earlier 37-day period. IF IT DOES NOT, action conclusions are restricted
+-- to the anchored period and must be reported that way.
+EXPLAIN
+WITH ac AS (
+  SELECT DISTINCT condition_id FROM mirror_shadow
+   WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL AND long_asset IS NOT NULL
+), base AS (
+  SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
+         t.size::float8 AS sh, t.price::float8 AS px,
+         CASE WHEN t.source IN ('poll', 'backfill') THEN 'venue' ELSE 'cash' END AS feed
+    FROM trades t JOIN whales w ON w.id = t.whale_id
+    JOIN ac ON ac.condition_id = t.condition_id
+   WHERE lower(w.username) = 'rn1' AND t.side = 'BUY' AND t.outcome_index IN (0, 1)
+), env AS (
+  SELECT tx_hash, asset, CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS cf
+    FROM base GROUP BY 1, 2
+), canon AS (
+  SELECT b.condition_id, b.ts, b.id, b.outcome_index, b.sh, b.px
+    FROM base b JOIN env e ON e.tx_hash = b.tx_hash AND e.asset = b.asset AND e.cf = b.feed
+), legs AS (
+  SELECT condition_id,
+         max(asset) FILTER (WHERE outcome_index = 0) AS ay,
+         max(asset) FILTER (WHERE outcome_index = 1) AS an
+    FROM base GROUP BY 1
+), desig_rows AS (
+  SELECT condition_id, opened_at AS at, long_asset, ratio FROM mirror_books
+   WHERE long_asset IS NOT NULL
+  UNION ALL
+  SELECT condition_id, at, long_asset, NULL::float8 FROM mirror_candidate_refusals
+   WHERE long_asset IS NOT NULL
+  UNION ALL
+  SELECT condition_id, at, long_asset, ratio FROM mirror_shadow
+   WHERE long_asset IS NOT NULL
+), snaps AS (
+  SELECT condition_id, at, long_asset AS anchor_long, snap_long, snap_other
+    FROM mirror_shadow
+   WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL AND long_asset IS NOT NULL
+), stream AS (
+  -- THREE row kinds in ONE causal order. pri orders them within a timestamp:
+  -- a designation (0) and a snapshot (1) both take effect BEFORE an event (2)
+  -- that shares their instant, so no event is ever classified with information
+  -- that did not exist at it. That is the causality rule, enforced by the sort
+  -- key rather than by a filter that could be written the wrong way round.
+  SELECT condition_id, at AS ts, 0 AS pri, NULL::bigint AS ev,
+         long_asset, ratio,
+         NULL::text AS anchor_long, NULL::float8 AS snap_long,
+         NULL::float8 AS snap_other, NULL::timestamptz AS anchor_ts,
+         NULL::int AS oi, 0::float8 AS sh, NULL::float8 AS px
+    FROM desig_rows
+  UNION ALL
+  SELECT condition_id, at, 1, NULL, NULL, NULL,
+         anchor_long, snap_long, snap_other, at, NULL, 0::float8, NULL
+    FROM snaps
+  UNION ALL
+  SELECT condition_id, ts, 2, id, NULL, NULL, NULL, NULL, NULL, NULL,
+         outcome_index, sh, px
+    FROM canon
+), run AS (
+  SELECT s.*, l.ay, l.an,
+         count(s.long_asset) OVER wc AS gd,
+         count(s.ratio)      OVER wc AS gr,
+         count(s.anchor_ts)  OVER wc AS ga,
+         sum(CASE WHEN s.oi = 0 THEN s.sh ELSE 0 END) OVER wc AS fy,
+         sum(CASE WHEN s.oi = 1 THEN s.sh ELSE 0 END) OVER wc AS fn
+    FROM stream s JOIN legs l ON l.condition_id = s.condition_id
+  WINDOW wc AS (PARTITION BY s.condition_id ORDER BY s.ts, s.pri, s.ev
+                ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
+), seeded AS (
+  -- A snapshot's seed is the OFFSET that makes the replay reproduce it:
+  --     seed := observed_snapshot - running_fills_at_that_instant
+  -- so that state = seed + running_fills at every later row. Carrying the
+  -- seed rather than the state is what lets one window pass express both
+  -- anchoring policies.
+  SELECT r.*,
+         CASE WHEN r.anchor_ts IS NULL THEN NULL
+              WHEN r.anchor_long = r.ay THEN r.snap_long  - r.fy
+              WHEN r.anchor_long = r.an THEN r.snap_other - r.fy END AS seed_y_row,
+         CASE WHEN r.anchor_ts IS NULL THEN NULL
+              WHEN r.anchor_long = r.ay THEN r.snap_other - r.fn
+              WHEN r.anchor_long = r.an THEN r.snap_long  - r.fn END AS seed_n_row
+    FROM run r
+), carried AS (
+  SELECT s.*,
+         first_value(s.long_asset) OVER wd AS as_of_long,
+         first_value(s.ratio)      OVER wr AS as_of_ratio,
+         -- SNAPSHOT_RECONCILED: group on ga, which advances at EVERY snapshot,
+         -- so the seed is replaced by each new independent observation.
+         first_value(s.seed_y_row) OVER wa AS seed_y_rec,
+         first_value(s.seed_n_row) OVER wa AS seed_n_rec,
+         first_value(s.anchor_ts)  OVER wa AS anchor_ts_rec,
+         -- ANCHOR_ONCE_FORWARD: group on (ga > 0), a single group covering
+         -- every row from the FIRST snapshot onward. Its first row IS that
+         -- first snapshot, so first_value pins the seed there and it never
+         -- moves again. Later snapshots are observations only, never state.
+         first_value(s.seed_y_row) OVER wo AS seed_y_once,
+         first_value(s.seed_n_row) OVER wo AS seed_n_once,
+         first_value(s.anchor_ts)  OVER wo AS anchor_ts_once
+    FROM seeded s
+  WINDOW wd AS (PARTITION BY s.condition_id, s.gd        ORDER BY s.ts, s.pri, s.ev),
+         wr AS (PARTITION BY s.condition_id, s.gr        ORDER BY s.ts, s.pri, s.ev),
+         wa AS (PARTITION BY s.condition_id, s.ga        ORDER BY s.ts, s.pri, s.ev),
+         wo AS (PARTITION BY s.condition_id, (s.ga > 0)  ORDER BY s.ts, s.pri, s.ev)
+), sta AS (
+  SELECT c.*,
+         CASE WHEN c.oi = 0 THEN c.sh ELSE 0 END AS dy,
+         CASE WHEN c.oi = 1 THEN c.sh ELSE 0 END AS dn,
+         c.fy                 AS y4, c.fn                 AS n4,
+         c.seed_y_once + c.fy AS y2, c.seed_n_once + c.fn AS n2,
+         c.seed_y_rec  + c.fy AS y3, c.seed_n_rec  + c.fn AS n3
+    FROM carried c WHERE c.ev IS NOT NULL AND c.ga > 0
+), q AS (
+  SELECT s.*,
+         GREATEST(LEAST(s.y2, s.n2) - LEAST(s.y2 - s.dy, s.n2 - s.dn), 0) AS dm2,
+         GREATEST(LEAST(s.y3, s.n3) - LEAST(s.y3 - s.dy, s.n3 - s.dn), 0) AS dm3,
+         GREATEST(LEAST(s.y4, s.n4) - LEAST(s.y4 - s.dy, s.n4 - s.dn), 0) AS dm4,
+         CASE WHEN s.as_of_long = s.ay THEN s.y2 - s.n2
+              WHEN s.as_of_long = s.an THEN s.n2 - s.y2 END AS net2,
+         CASE WHEN s.as_of_long = s.ay THEN s.y3 - s.n3
+              WHEN s.as_of_long = s.an THEN s.n3 - s.y3 END AS net3,
+         CASE WHEN s.as_of_long = s.ay THEN s.y4 - s.n4
+              WHEN s.as_of_long = s.an THEN s.n4 - s.y4 END AS net4,
+         CASE WHEN s.as_of_long = s.ay THEN (s.y2 - s.dy) - (s.n2 - s.dn)
+              WHEN s.as_of_long = s.an THEN (s.n2 - s.dn) - (s.y2 - s.dy) END AS pre2,
+         CASE WHEN s.as_of_long = s.ay THEN (s.y3 - s.dy) - (s.n3 - s.dn)
+              WHEN s.as_of_long = s.an THEN (s.n3 - s.dn) - (s.y3 - s.dy) END AS pre3,
+         CASE WHEN s.as_of_long = s.ay THEN (s.y4 - s.dy) - (s.n4 - s.dn)
+              WHEN s.as_of_long = s.an THEN (s.n4 - s.dn) - (s.y4 - s.dy) END AS pre4
+    FROM sta s
+), f AS (
+  -- Each model propagates ITS OWN cf position: pos_before is that model's
+  -- previous cf_target_after, never recomputed from this event.
+  SELECT q.*,
+         trunc(q.as_of_ratio * q.net2) AS t2,
+         trunc(q.as_of_ratio * q.net3) AS t3,
+         trunc(q.as_of_ratio * q.net4) AS t4,
+         COALESCE(lag(trunc(q.as_of_ratio * q.net2)) OVER w,
+                  trunc(q.as_of_ratio * q.pre2)) AS p2,
+         COALESCE(lag(trunc(q.as_of_ratio * q.net3)) OVER w,
+                  trunc(q.as_of_ratio * q.pre3)) AS p3,
+         COALESCE(lag(trunc(q.as_of_ratio * q.net4)) OVER w,
+                  trunc(q.as_of_ratio * q.pre4)) AS p4
+    FROM q WINDOW w AS (PARTITION BY q.condition_id ORDER BY q.ts, q.ev)
+), a AS (
+  SELECT f.*,
+         f.t2 - f.p2 AS qty2, f.t3 - f.p3 AS qty3, f.t4 - f.p4 AS qty4,
+         CASE WHEN f.t2 - f.p2 > 0 THEN 'BUY '
+              WHEN f.t2 - f.p2 < 0 THEN 'SELL' ELSE 'HOLD' END AS a2,
+         CASE WHEN f.t3 - f.p3 > 0 THEN 'BUY '
+              WHEN f.t3 - f.p3 < 0 THEN 'SELL' ELSE 'HOLD' END AS a3,
+         CASE WHEN f.t4 - f.p4 > 0 THEN 'BUY '
+              WHEN f.t4 - f.p4 < 0 THEN 'SELL' ELSE 'HOLD' END AS a4,
+         GREATEST(f.dm2, f.dm3, f.dm4) AS dmw,
+         extract(epoch FROM f.ts - f.anchor_ts_rec) / 3600.0 AS age_h,
+         (f.as_of_long IS NOT NULL AND f.as_of_ratio IS NOT NULL
+          AND f.net2 IS NOT NULL AND f.net3 IS NOT NULL
+          AND f.net4 IS NOT NULL) AS classifiable
+    FROM f
+), pair AS (
+  SELECT 1 AS blk, '1 ANCHOR_ONCE_FORWARD  vs  SNAPSHOT_RECONCILED' AS comparison,
+         'all' AS anchor_age_band, a2 AS x, a3 AS y, qty2 AS qx, qty3 AS qy, dmw
+    FROM a WHERE dmw > 0.000001 AND classifiable
+  UNION ALL
+  SELECT 2, '2 UNANCHORED_37D_MODEL  vs  ANCHOR_ONCE_FORWARD',
+         'all', a4, a2, qty4, qty2, dmw
+    FROM a WHERE dmw > 0.000001 AND classifiable
+  UNION ALL
+  SELECT 3, '3 UNANCHORED_37D_MODEL  vs  SNAPSHOT_RECONCILED',
+         'all', a4, a3, qty4, qty3, dmw
+    FROM a WHERE dmw > 0.000001 AND classifiable
+  UNION ALL
+  SELECT 4, '4 ANCHOR_ONCE  vs  RECONCILED, by anchor age',
+         CASE WHEN age_h IS NULL  THEN 'z unknown'
+              WHEN age_h <= 1     THEN 'A <=1h'
+              WHEN age_h <= 6     THEN 'B 1-6h'
+              WHEN age_h <= 24    THEN 'C 6-24h'
+              ELSE                     'D >24h' END,
+         a2, a3, qty2, qty3, dmw
+    FROM a WHERE dmw > 0.000001 AND classifiable
+)
+SELECT comparison, anchor_age_band,
+       count(*) AS dM_events,
+       round((100.0 * count(*) FILTER (WHERE x = y) / NULLIF(count(*), 0))::numeric, 2)
+         AS ACTION_AGREEMENT_PCT,
+       round((100.0 * sum(dmw) FILTER (WHERE x = y) / NULLIF(sum(dmw), 0))::numeric, 2)
+         AS dM_WEIGHTED_AGREEMENT_PCT,
+       round(avg(abs(qx - qy))::numeric, 2) AS quantity_MAE_shares,
+       round((100.0 * sum(abs(qx - qy)) / NULLIF(sum(abs(qy)), 0))::numeric, 2)
+         AS QTY_ERR_PCT_OF_INTENDED,
+       count(*) FILTER (WHERE (x = 'BUY ' AND y = 'SELL')
+                           OR (x = 'SELL' AND y = 'BUY ')) AS BUY_SELL_INVERSIONS,
+       round(sum(dmw) FILTER (WHERE (x = 'BUY ' AND y = 'SELL')
+                                 OR (x = 'SELL' AND y = 'BUY '))::numeric, 0)
+         AS inversion_dM_shares
+  FROM pair GROUP BY blk, comparison, anchor_age_band
+ ORDER BY blk, comparison, anchor_age_band;
 
