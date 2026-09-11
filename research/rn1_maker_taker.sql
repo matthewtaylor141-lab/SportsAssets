@@ -249,13 +249,17 @@ WITH t AS (
          sum(sh * px) / NULLIF(sum(sh), 0) AS vwap
     FROM t GROUP BY 1, 2, 3, 4, 5
 ), g AS (
-  SELECT condition_id, outcome_index,
+  -- PER ENVELOPE, not per condition. Collapsing to (condition, outcome) here
+  -- would make max(vwap) the HIGHEST price he ever paid on that leg rather
+  -- than the size-weighted average, and the pair cost would read above $1.00
+  -- as an artifact. The size weighting belongs in `m`, below.
+  SELECT condition_id, outcome_index, tx_hash, asset,
          max(n)      FILTER (WHERE feed = 'venue') AS n_venue,
          max(shares) FILTER (WHERE feed = 'venue') AS sh_venue,
          max(shares) FILTER (WHERE feed = 'cash')  AS sh_cash,
          max(vwap)   FILTER (WHERE feed = 'venue') AS v,
          max(vwap)   FILTER (WHERE feed = 'cash')  AS c
-    FROM f GROUP BY 1, 2
+    FROM f GROUP BY 1, 2, 3, 4
 ), leg AS (
   SELECT condition_id, outcome_index,
          COALESCE(sh_venue, sh_cash) AS shares,
