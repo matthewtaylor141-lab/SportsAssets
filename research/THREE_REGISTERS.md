@@ -41,13 +41,30 @@ number from this register is quoted:
 
 So the headline of this register —
 
-> **6.094%** of deployed total cost (3.957% price drag + 2.137% estimated fee)
-> on the fully-measurable side-forced BUY cohort, 27,071 events, $5,399,109
+> **3.957%** of deployed in PRICE DRAG on the fully-measurable side-forced BUY
+> cohort, 27,071 events, $5,399,109
 
 — is **the cost of taking his own book at his own moment with a perfect
 zero-latency fill**. It is a LOWER BOUND on replication cost and a generous
 one. It is not our execution cost, and it is not a statement about whether his
 strategy works.
+
+**THE 6.094% I FIRST REPORTED IS WITHDRAWN AS A SINGLE FIGURE.** It was
+3.957% drag + 2.137% fee, and that fee is the `polymarket-us` schedule
+(`0.06 * shares * price * (1 - price)`, proof2.py:97/107/111) applied to a
+replication priced off **Polymarket's** book. That is a fee schedule carried
+across venues by analogy, which the owner has ruled out (2026-09-11), and I
+summed it into the headline before the rule existed. The two components stay
+separate from here:
+
+| component | value | venue it belongs to | status |
+|---|---|---|---|
+| price drag | 3.957% of deployed | Polymarket (his) | measured from his own ladder |
+| fee | 2.137% of deployed | **Polymarket US (ours)** | schedule estimate, CROSS-VENUE BY ANALOGY — not additive to the drag |
+
+The RN1-side fee treatment that would make a combined figure legitimate is not
+in retained data. Until it is, quote the drag, and quote the fee only with its
+venue named and never added to a his-venue cost.
 
 Never relabel a number from this register as "BETTOR execution drag".
 
@@ -72,6 +89,45 @@ register 2's venue. `mirror_shadow` keeps US **top-of-book only** (bid/ask/mark
 from `_paced_bbo`), no depth, per tick rather than per fill. PMUS-venue depth
 economics are **not historically measurable** and cannot be reconstructed from
 retained data.
+
+---
+
+## Locked terminology — SELL side (owner, 2026-09-11)
+
+    gross_parity_long_reference = 1 - rn1_complement_fill_px
+
+It is the **gross parity-equivalent long-side reference implied by RN1's
+complement fill**. It is NOT "RN1's long quote" and NOT an exact
+contemporaneous "value of the position". Every SELL-required event uses it,
+because a SELL-required transition has signed_dn < 0 by construction, which
+means the fill was on the complement: no event in that cohort has a direct
+same-token reference.
+
+Buckets A / B / C therefore mean exactly one thing:
+
+> **the PMUS best bid was above / at / below the gross parity-equivalent
+> reference.**
+
+They do **not** mean profitable / breakeven / unprofitable execution. The
+gross comparison stays as run 59 reports it.
+
+A net economic SELL threshold, if one is ever built, is SEPARATE FIELDS with
+explicit provenance, never a re-labelling of the gross buckets:
+
+    gross_parity_reference
+    pmus_fee_schedule_estimate
+    net_pmus_sell_proceeds_estimate
+    <RN1-side fee treatment, only as actually supported by retained data>
+
+**Fee schedules are never combined across Polymarket and Polymarket US by
+analogy.** This is what invalidated the 6.094% BUY headline above.
+
+### The hard identification boundary — preserve verbatim
+
+    retained PMUS bid present:        20,054 / 32,847 SELL events = 61.05%
+    no usable contemporaneous bid:    12,793 / 32,847 SELL events = 38.95%
+
+Nothing about the 38.95% is inferred from the 61.05%.
 
 ---
 
