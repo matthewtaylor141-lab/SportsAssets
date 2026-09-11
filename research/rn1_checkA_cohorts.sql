@@ -21,6 +21,22 @@
 -- are all aggregations over the SAME per-condition table, so they are produced
 -- from one pass and stacked with a label column.
 --
+-- THAT WAS STILL NOT ENOUGH. Run 34 timed out again at 1200 s, so the probe
+-- scan was not the only cost and buying more wall clock is the wrong answer.
+-- Three structural costs are removed rather than waited out, marked COST FIX
+-- 1-3 at their sites below:
+--   1  conditions where he only ever bought ONE leg are dropped BEFORE the
+--      window functions. They cannot produce matched inventory and are thrown
+--      away at the end anyway, so carrying them through the sort was pure loss.
+--   2  ONE window level instead of two. The pre-fill running totals are the
+--      running totals minus this row's own contribution, so lag() -- and the
+--      entire second window pass over the same partition -- was unnecessary.
+--   3  the sort key is (condition_id, ts, id) rather than
+--      (condition_id, ts, tx_hash, asset). Sorting several hundred thousand
+--      rows on two long hex strings is expensive; `id` is a unique bigint and
+--      is an equally deterministic tiebreak at equal timestamps.
+-- None of the three changes what is measured; they change what it costs.
+--
 -- WHAT CHANGED IN THE METHOD. My first disjoint cohort rule was "a majority of
 -- this condition's dM shares sit on probe-covered fills". That is disjoint, but
 -- the 50% cut is arbitrary: conditions at 49% and 51% are economically
@@ -57,14 +73,25 @@
 
 
 \echo '== COHORTS, COVERAGE BINS AND SENSITIVITIES, one row per condition =='
-WITH base AS (
-  SELECT t.id, t.tx_hash, t.asset, t.side, t.ts, t.condition_id, t.outcome_index,
+WITH raw AS (
+  SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
          t.size::float8 AS sh, t.price::float8 AS px,
          CASE WHEN t.source IN ('poll', 'backfill') THEN 'venue' ELSE 'cash' END AS feed
     FROM trades t JOIN whales w ON w.id = t.whale_id
    WHERE lower(w.username) = 'rn1' AND t.side = 'BUY'
      AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
      AND t.ts >= timestamptz '2026-08-05 00:00Z'
+), two_leg AS (
+  -- COST FIX 1. A condition where he only ever bought ONE leg can never
+  -- produce matched inventory, and is discarded at the end anyway by
+  -- qy > 0 AND qn > 0. Dropping those conditions BEFORE the window functions
+  -- removes their rows from the sort entirely instead of carrying them all the
+  -- way through it.
+  SELECT condition_id FROM raw
+   GROUP BY 1 HAVING count(*) FILTER (WHERE outcome_index = 0) > 0
+                AND count(*) FILTER (WHERE outcome_index = 1) > 0
+), base AS (
+  SELECT r.* FROM raw r JOIN two_leg tl ON tl.condition_id = r.condition_id
 ), probed AS (
   -- ONE pass over copy_probes, not one per fill. There is no index on
   -- trade_id, so a correlated EXISTS scans the whole table per row.
@@ -72,29 +99,40 @@ WITH base AS (
     FROM copy_probes p
    WHERE p.book_ok AND p.best_ask IS NOT NULL AND p.trade_id IS NOT NULL
 ), env AS (
-  SELECT tx_hash, asset, side,
+  -- `side` is not in the key: base is already filtered to BUY, so carrying it
+  -- only widens the hash key and the join condition for nothing.
+  SELECT tx_hash, asset,
          CASE WHEN bool_or(feed = 'venue') THEN 'venue' ELSE 'cash' END AS canon_feed
-    FROM base GROUP BY 1, 2, 3
+    FROM base GROUP BY 1, 2
 ), canon AS (
   SELECT b.*, (pr.trade_id IS NOT NULL) AS covered
     FROM base b
     JOIN env e ON e.tx_hash = b.tx_hash AND e.asset = b.asset
-              AND e.side = b.side AND e.canon_feed = b.feed
+              AND e.canon_feed = b.feed
     LEFT JOIN probed pr ON pr.trade_id = b.id
-), rn AS (
-  SELECT condition_id, covered, ts, tx_hash, asset,
-         sum(CASE WHEN outcome_index = 0 THEN sh ELSE 0 END)
-           OVER (PARTITION BY condition_id ORDER BY ts, tx_hash, asset
-                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cy,
-         sum(CASE WHEN outcome_index = 1 THEN sh ELSE 0 END)
-           OVER (PARTITION BY condition_id ORDER BY ts, tx_hash, asset
-                 ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS cn
-    FROM canon
 ), dm AS (
+  -- COST FIX 2. ONE window level, not two. The previous form computed cy/cn in
+  -- one pass and then lag(cy)/lag(cn) in a second. The pre-fill totals are just
+  -- the running totals minus THIS row's own contribution, so the lag -- and the
+  -- whole second window pass -- is unnecessary.
+  --
+  -- COST FIX 3. The sort key is (condition_id, ts, id), not
+  -- (condition_id, ts, tx_hash, asset). Ordering ~n hundred thousand rows on
+  -- two long hex strings is what this query was actually spending its time on;
+  -- `id` is a bigint, unique, and gives the same deterministic order at equal
+  -- timestamps (insertion order, which is if anything the more natural
+  -- tiebreak). dM is unchanged by the choice of a deterministic tiebreak.
   SELECT condition_id, covered,
-         GREATEST(LEAST(cy, cn)
-                  - COALESCE(LEAST(lag(cy) OVER w, lag(cn) OVER w), 0), 0) AS d_m
-    FROM rn WINDOW w AS (PARTITION BY condition_id ORDER BY ts, tx_hash, asset)
+         GREATEST(LEAST(cy, cn) - LEAST(cy - y_now, cn - n_now), 0) AS d_m
+    FROM (
+      SELECT condition_id, covered,
+             CASE WHEN outcome_index = 0 THEN sh ELSE 0 END AS y_now,
+             CASE WHEN outcome_index = 1 THEN sh ELSE 0 END AS n_now,
+             sum(CASE WHEN outcome_index = 0 THEN sh ELSE 0 END) OVER w AS cy,
+             sum(CASE WHEN outcome_index = 1 THEN sh ELSE 0 END) OVER w AS cn
+        FROM canon
+      WINDOW w AS (PARTITION BY condition_id ORDER BY ts, id
+                   ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)) s
 ), coh AS (
   -- dM-GENERATING FILLS ONLY for the primary rule. A fill that creates no
   -- matched inventory says nothing about whether a completion was observable.
