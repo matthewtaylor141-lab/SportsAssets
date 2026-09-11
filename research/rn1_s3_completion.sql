@@ -273,16 +273,23 @@ WITH his AS (
      AND t.outcome_index IN (0, 1) AND t.side = 'BUY'
      AND t.ts >= timestamptz '2026-09-06 00:00Z' AND t.ts < timestamptz '2026-09-11 00:00Z'
 ), q AS (
+  -- LATERAL with LIMIT 1, not a range join plus row_number(). The window form
+  -- materialises every shadow row inside each fill's 15-minute box before
+  -- discarding all but the first; the lateral stops at the first one. Same
+  -- answer, and it is the difference between finishing and timing out.
   SELECT h.condition_id, h.ts, h.sh, h.px, (1.0 - h.px) AS completion_price,
          s.bid, s.ask,
-         extract(epoch FROM s.at - h.detected_at) AS observation_delay_s,
-         row_number() OVER (PARTITION BY h.condition_id, h.ts, h.px
-                            ORDER BY s.at) AS rn
-    FROM his h JOIN mirror_shadow s
-      ON s.condition_id = h.condition_id
-     AND s.at >= h.detected_at
-     AND s.at < h.detected_at + interval '15 minutes'
-     AND s.bid IS NOT NULL
+         extract(epoch FROM s.at - h.detected_at) AS observation_delay_s
+    FROM his h
+    CROSS JOIN LATERAL (
+      SELECT sh2.bid, sh2.ask, sh2.at
+        FROM mirror_shadow sh2
+       WHERE sh2.condition_id = h.condition_id
+         AND sh2.at >= h.detected_at
+         AND sh2.at < h.detected_at + interval '15 minutes'
+         AND sh2.bid IS NOT NULL
+       ORDER BY sh2.at
+       LIMIT 1) s
 )
 SELECT CASE WHEN bid > completion_price + 1e-9 THEN '1 TRADE-THROUGH (bid above his level)'
             WHEN bid >= completion_price - 1e-9 THEN '2 TOUCH (bid AT his level -- fill UNPROVEN)'
