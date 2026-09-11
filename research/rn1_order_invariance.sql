@@ -61,7 +61,50 @@
 -- reordered walk, and the endpoint M is algebraically order-invariant. THE
 -- FREEZE APPLIES ONLY TO ORDER-DEPENDENT BEHAVIOURAL CLAIMS.
 --
--- Read-only: three SELECTs.
+-- ---------------------------------------------------------------------------
+-- THE SCOPE OF THE PROOF, stated as a boundary rather than left to be assumed.
+--
+-- WHAT IT COVERS. The invariance of the FLIPPED boolean, and therefore --
+-- together with the order-invariant endpoint M and peak/end comparison it
+-- feeds -- the condition-level class NEVER_REDUCED / REDUCED_NOT_FLIPPED /
+-- FLIPPED, on conditions where the classification is proved.
+--
+-- WHAT IT DOES NOT COVER, and none of these may borrow the proof:
+--     number of reduction fills
+--     number of rebuild episodes
+--     peak directional exposure
+--     the timing or order of reductions
+--     any other within-path shape statistic
+-- Each needs its own invariance argument, or must be reported ONLY on
+-- timestamp-order-clean conditions, or as an explicit sensitivity. A proof
+-- about whether a crossing happens says nothing about how many times, how
+-- large, or in what order -- those vary across orderings that agree on the
+-- boolean.
+--
+-- TWO POPULATIONS THAT MUST NOT BE EQUATED, and statements 1 and 2 report them
+-- separately for exactly this reason:
+--     CROSS_LEG_TIMESTAMP_TIE_PRESENT  a structural property of the fills
+--     ORDER_NOT_PROVEN_INVARIANT       an outcome of the proof
+-- A condition with a cross-leg tie may still be PROVABLY_FLIPPED or
+-- PROVABLY_NO_FLIP -- the tie is what makes order *conceivably* matter, not
+-- what makes it matter. And ORDER_NOT_PROVEN_INVARIANT is NOT evidence of
+-- actual order dependence; it is the absence of a proof either way.
+--
+-- ---------------------------------------------------------------------------
+-- TWO KINDS OF EVIDENCE, kept apart because they support different claims.
+--
+--   THE MATHEMATICAL PROOF is the interval/boundary argument above. It is what
+--   generalizes: it holds for every block shape and every ordering, not only
+--   the ones anyone enumerated.
+--
+--   THE EXHAUSTIVE HARNESS (research/test_order_invariance.py) is
+--   IMPLEMENTATION VALIDATION over its tested state space, and nothing more:
+--     940 nonzero-boundary blocks   -> 0 mismatches
+--     1,056 multi-block conditions  -> 1,054 exact, 2 conservative, 0 unsafe
+--   It shows the code agrees with the proof on those inputs. It does not
+--   supply the generality, and must never be cited as if it did.
+--
+-- Read-only: four SELECTs.
 -- ============================================================================
 
 
@@ -275,4 +318,152 @@ SELECT count(*) AS conditions,
               / count(*))::numeric, 3) AS pct_flipped_corrected,
        round((100.0 * sum(acq_cost) FILTER (WHERE flipped_corrected)
               / NULLIF(sum(acq_cost), 0))::numeric, 3) AS pct_acq_cost_flipped_corrected
+  FROM c;
+
+
+\echo '== 4. ACCEPTANCE CHECKS: the proof implementation against both orderings =='
+-- Owner-specified gates. #4 is the load-bearing one: if any ASC/DESC
+-- disagreement falls OUTSIDE ORDER_NOT_PROVEN_INVARIANT, the proof
+-- implementation is unsafe and behavioural interpretation stays frozen.
+--
+-- #6 CAN PASS VACUOUSLY AND IS REPORTED SO IT CANNOT. It asks whether the
+-- fixed classifier counts + -> 0 -> - as a flip. If NO condition in the data
+-- ever passes exactly through flat and changes sign, the check is satisfied by
+-- an empty set and has tested nothing -- the same vacuity that made the
+-- SELL-based clean cohort look reassuring, the FuncCall guard look installed,
+-- and the test harness look passed. So the WITNESS COUNT is printed beside it:
+-- a zero witness count means VACUOUS ON THIS DATA, not PASS.
+WITH base AS MATERIALIZED (
+  SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
+         t.size::float8 AS sh, t.price::float8 AS px, t.side,
+         CASE WHEN t.source IN ('poll', 'backfill') THEN 'venue' ELSE 'cash' END AS feed
+    FROM trades t JOIN whales w ON w.id = t.whale_id
+   WHERE lower(w.username) = 'rn1'
+     AND t.condition_id IS NOT NULL AND t.outcome_index IN (0, 1)
+), canon AS MATERIALIZED (
+  SELECT z.* FROM (
+    SELECT b.*, bool_or(b.feed = 'venue')
+                  OVER (PARTITION BY b.tx_hash, b.asset) AS any_venue
+      FROM base b) z
+   WHERE NOT (z.feed = 'cash' AND z.any_venue)
+), buys AS MATERIALIZED (
+  SELECT condition_id, id, ts, outcome_index, sh, px FROM canon
+   WHERE side = 'BUY'
+     AND ts >= timestamptz '2026-08-05 00:00Z'
+     AND ts <  timestamptz '2026-09-11 12:00Z'
+), w AS MATERIALIZED (
+  SELECT b.*,
+         sum(CASE WHEN b.outcome_index = 0 THEN b.sh ELSE -b.sh END)
+           OVER (PARTITION BY b.condition_id ORDER BY b.ts, b.id
+                 ROWS UNBOUNDED PRECEDING) AS d_asc,
+         sum(CASE WHEN b.outcome_index = 0 THEN b.sh ELSE -b.sh END)
+           OVER (PARTITION BY b.condition_id ORDER BY b.ts, b.id DESC
+                 ROWS UNBOUNDED PRECEDING) AS d_desc,
+         sum(CASE WHEN b.outcome_index = 0 THEN b.sh ELSE 0 END)
+           OVER (PARTITION BY b.condition_id ORDER BY b.ts, b.id
+                 ROWS UNBOUNDED PRECEDING) AS cy_asc,
+         sum(CASE WHEN b.outcome_index = 1 THEN b.sh ELSE 0 END)
+           OVER (PARTITION BY b.condition_id ORDER BY b.ts, b.id
+                 ROWS UNBOUNDED PRECEDING) AS cn_asc,
+         sum(CASE WHEN b.outcome_index = 0 THEN b.sh ELSE 0 END)
+           OVER (PARTITION BY b.condition_id ORDER BY b.ts, b.id DESC
+                 ROWS UNBOUNDED PRECEDING) AS cy_desc,
+         sum(CASE WHEN b.outcome_index = 1 THEN b.sh ELSE 0 END)
+           OVER (PARTITION BY b.condition_id ORDER BY b.ts, b.id DESC
+                 ROWS UNBOUNDED PRECEDING) AS cn_desc
+    FROM buys b
+), dm AS MATERIALIZED (
+  SELECT w.*,
+         LEAST(w.cy_asc, w.cn_asc)
+           - LEAST(w.cy_asc - CASE WHEN w.outcome_index = 0 THEN w.sh ELSE 0 END,
+                   w.cn_asc - CASE WHEN w.outcome_index = 1 THEN w.sh ELSE 0 END)
+           AS dm_asc,
+         LEAST(w.cy_desc, w.cn_desc)
+           - LEAST(w.cy_desc - CASE WHEN w.outcome_index = 0 THEN w.sh ELSE 0 END,
+                   w.cn_desc - CASE WHEN w.outcome_index = 1 THEN w.sh ELSE 0 END)
+           AS dm_desc,
+         -- a WITNESS for check 6: this fill lands exactly flat while the
+         -- previous state was nonzero, i.e. the path touches zero mid-walk
+         (abs(w.d_asc) <= 1e-9
+          AND abs(w.d_asc - CASE WHEN w.outcome_index = 0 THEN w.sh ELSE -w.sh END)
+              > 1e-9) AS touches_flat_asc
+    FROM w
+), per AS MATERIALIZED (
+  SELECT condition_id,
+         (bool_or(d_asc  >  1e-9) AND bool_or(d_asc  < -1e-9)) AS flipped_asc,
+         (bool_or(d_desc >  1e-9) AND bool_or(d_desc < -1e-9)) AS flipped_desc,
+         bool_or(touches_flat_asc) AS touches_flat,
+         sum(dm_asc)  AS dm_total_asc,
+         sum(dm_desc) AS dm_total_desc,
+         sum(sh * px) AS acq_cost,
+         COALESCE(sum(sh) FILTER (WHERE outcome_index = 0), 0) AS qy,
+         COALESCE(sum(sh) FILTER (WHERE outcome_index = 1), 0) AS qn,
+         COALESCE(sum(sh * px) FILTER (WHERE outcome_index = 0), 0) AS cy,
+         COALESCE(sum(sh * px) FILTER (WHERE outcome_index = 1), 0) AS cn
+    FROM dm GROUP BY 1
+), blk AS MATERIALIZED (
+  SELECT condition_id, ts,
+         sum(CASE WHEN outcome_index = 0 THEN sh ELSE 0 END) AS ytot,
+         sum(CASE WHEN outcome_index = 1 THEN sh ELSE 0 END) AS ntot
+    FROM buys GROUP BY 1, 2
+), bs AS MATERIALIZED (
+  SELECT b.*,
+         sum(b.ytot - b.ntot) OVER (PARTITION BY b.condition_id ORDER BY b.ts
+                                    ROWS UNBOUNDED PRECEDING) AS d_after,
+         sum(b.ytot - b.ntot) OVER (PARTITION BY b.condition_id ORDER BY b.ts
+                                    ROWS UNBOUNDED PRECEDING)
+           - (b.ytot - b.ntot) AS d_before
+    FROM blk b
+), proof AS MATERIALIZED (
+  SELECT condition_id,
+         (bool_or(d_after > 1e-9) OR bool_or(d_before > 1e-9)) AS gpos,
+         (bool_or(d_after < -1e-9) OR bool_or(d_before < -1e-9)) AS gneg,
+         bool_or(d_before + ytot >  1e-9) AS rpos,
+         bool_or(d_before - ntot < -1e-9) AS rneg
+    FROM bs GROUP BY 1
+), k AS MATERIALIZED (
+  SELECT p.*, pr.gpos, pr.gneg,
+         (pr.gpos OR pr.rpos) AS ppos, (pr.gneg OR pr.rneg) AS pneg,
+         COALESCE(LEAST(p.qy, p.qn)
+                  * (CASE WHEN p.qy > 0 AND p.qn > 0
+                          THEN p.cy / p.qy + p.cn / p.qn END), 0) AS matched_cost,
+         LEAST(p.qy, p.qn) AS endpoint_m
+    FROM per p JOIN proof pr ON pr.condition_id = p.condition_id
+), c AS MATERIALIZED (
+  SELECT k.*,
+         CASE WHEN gpos AND gneg THEN 1
+              WHEN NOT (ppos AND pneg) THEN 2
+              ELSE 3 END AS proof_class
+    FROM k
+)
+SELECT count(*) AS conditions,
+       -- 1. exactly one proof class per condition
+       count(*) FILTER (WHERE proof_class NOT IN (1, 2, 3))
+         AS chk1_unclassified_expected_0,
+       count(*) FILTER (WHERE (gpos AND gneg) AND NOT (ppos AND pneg))
+         AS chk1_overlapping_classes_expected_0,
+       -- 2. PROVABLY_FLIPPED must be FLIPPED under both orderings
+       count(*) FILTER (WHERE proof_class = 1 AND NOT (flipped_asc AND flipped_desc))
+         AS chk2_provably_flipped_not_flipped_expected_0,
+       -- 3. PROVABLY_NO_FLIP must be non-FLIPPED under both
+       count(*) FILTER (WHERE proof_class = 2 AND (flipped_asc OR flipped_desc))
+         AS chk3_provably_no_flip_flipped_expected_0,
+       -- 4. every ASC/DESC disagreement must sit inside ORDER_NOT_PROVEN_INVARIANT
+       count(*) FILTER (WHERE flipped_asc <> flipped_desc) AS chk4_disagreements_observed,
+       count(*) FILTER (WHERE flipped_asc <> flipped_desc AND proof_class <> 3)
+         AS chk4_disagreement_outside_not_proven_expected_0,
+       -- 5. the order-invariant quantities must be identical across orderings
+       count(*) FILTER (WHERE abs(dm_total_asc - dm_total_desc) > 1e-6)
+         AS chk5_dm_total_differs_expected_0,
+       round(max(abs(dm_total_asc - dm_total_desc))::numeric, 9) AS chk5_max_dm_gap,
+       round(sum(endpoint_m)::numeric, 3) AS chk5_endpoint_m,
+       round(sum(acq_cost)::numeric, 2) AS chk5_acq_cost,
+       round(sum(matched_cost)::numeric, 2) AS chk5_matched_cost,
+       -- 6. the flat-pass fix -- WITNESS COUNT FIRST; zero witnesses means the
+       --    check is VACUOUS ON THIS DATA, not passed
+       count(*) FILTER (WHERE touches_flat) AS chk6_conditions_touching_flat,
+       count(*) FILTER (WHERE touches_flat AND flipped_asc)
+         AS chk6_witnesses_flat_pass_with_sign_change,
+       count(*) FILTER (WHERE touches_flat AND flipped_asc AND proof_class = 2)
+         AS chk6_flat_flip_called_no_flip_expected_0
   FROM c;
