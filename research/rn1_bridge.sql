@@ -603,7 +603,8 @@ SELECT CASE WHEN measurability LIKE 'A %' THEN '1 MEASURABLE (own ladder covers 
               / NULLIF(count(*), 0))::numeric, 2) AS pct_detect_venue_feed,
        round((100.0 * count(*) FILTER (WHERE side_forced) / NULLIF(count(*), 0))::numeric, 2)
          AS pct_side_forced,
-       count(DISTINCT sport) AS distinct_sports
+       count(DISTINCT sport) AS distinct_sports,
+       mode() WITHIN GROUP (ORDER BY sport) AS modal_sport
   FROM b WHERE local_side = 'BUY '
  GROUP BY 1 ORDER BY 1;
 

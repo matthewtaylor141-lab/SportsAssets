@@ -126,9 +126,26 @@ jobs:
           PGOPTIONS="-c statement_timeout=$TO -c default_transaction_read_only=on" \
             timeout $(( TO / 1000 + 120 )) \
             psql "$EXT" -X -v ON_ERROR_STOP=1 -f "$SRC" 2>&1 \
-            | grep -v -F "$PW" | head -"$HEAD"
+            | grep -v -F "$PW" | awk -v n="$HEAD" 'NR<=n'
           RC=${PIPESTATUS[0]}
           echo "psql exit=$RC"
+
+          # TRUNCATION MUST NOT MASQUERADE AS FAILURE EITHER (2026-09-11).
+          # This was `| head -"$HEAD"`, and head CLOSES THE PIPE as soon as it
+          # has its lines. That SIGPIPEs grep, grep dies with "write error:
+          # Broken pipe", psql's own write then fails and psql exits 3 -- the
+          # SAME code as a real script error. Run 48 hit exactly that: a plan
+          # longer than head -200, reported as "research SQL failed with exit
+          # 3", and the SQL was fine (run 49 at head -3000 passed on the same
+          # commit). That is the mirror image of the run-33 bug below: there a
+          # dead run looked alive, here a live run looked dead, and the second
+          # is just as expensive because it sends you hunting a defect that
+          # does not exist.
+          #
+          # awk reads its input to EOF and prints only the first n lines, so
+          # nothing upstream is ever signalled and RC is always psql's true
+          # status. The 141 branch below can no longer fire from this pipeline;
+          # it is kept because `timeout` can still deliver a signal.
 
           # FAILURE MUST PROPAGATE. This step used to end on the echo above, so
           # the job exited 0 whatever psql did, and a run that produced NO
