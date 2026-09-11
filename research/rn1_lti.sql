@@ -41,13 +41,28 @@
 -- exception is either the truncation case the theorem permits or a violation
 -- of conditions 3/4. Statement 3 re-tests it directly against the bounds.
 --
--- A NOTE ON CONDITIONS 3 AND 4. They are NOT required for identification: the
--- local formulation never references the previous event's target, so a
--- designation or ratio that changed BETWEEN events cannot break it. That was
--- an artifact of Check B's cross-event lag(). They are required only to make
--- the comparison against the modeled state meaningful. Both populations are
--- therefore reported -- LTI_STRICT (all six conditions, the validation set)
--- and LTI_LOCAL (1, 2, 5, 6 -- everything the theorem actually needs).
+-- TWO DISTINCT CLAIMS, NOT ONE. An earlier draft of this header conflated
+-- them; the theorem proves the weaker one only.
+--
+--   LOCAL_FILL_EFFECT_IDENTIFIED  the MARGINAL effect of this fill at a FROZEN
+--       event-time coordinate: L(N) = trunc(r(N+dN)) - trunc(rN) over unknown
+--       N. Needs the designation and r in force AT THE FILL, and nothing else.
+--       No history, no cross-event continuity.
+--   TARGET_TRANSITION_IDENTIFIED  the STRONGER claim that L equals the clean
+--       continuous mirror's transition FROM ITS PRECEDING TARGET. This needs
+--       coordinate and ratio COMPATIBILITY ACROSS the transition, because:
+--         * if r moved, trunc(r_after*N_after) - trunc(r_before*N_before) is
+--           not a function of dN alone -- the theorem says nothing about it;
+--         * if the designation moved, the signed coordinate is remapped, so
+--           N_before and N_after are not even the same quantity.
+--       A ratio- or designation-changing event therefore MUST NOT inherit the
+--       state-free local result as an executable target transition without
+--       separate proof.
+--
+-- Both are reported so the economic cost of the stronger definition is
+-- visible. TARGET_TRANSITION_IDENTIFIED is the primary causal execution
+-- cohort; LOCAL_FILL_EFFECT_IDENTIFIED is the larger marginal-execution
+-- sensitivity cohort.
 --
 -- THIS IS STATE-FREE AND USES NO SCAN. The scan finding stands separately and
 -- is NOT used here: SCAN_ANCHORED_STATE cannot establish exact historical
@@ -163,10 +178,11 @@ WITH base AS (
          -- the six conditions, each named so the refusals are countable
          (y.as_of_long  IS NOT NULL)                                AS c1_designation,
          (y.as_of_ratio IS NOT NULL AND y.as_of_ratio > 0)           AS c2_ratio,
-         (y.prev_ev IS NULL OR y.prev_long IS NOT DISTINCT FROM y.as_of_long)
-                                                                     AS c3_desig_stable,
-         (y.prev_ev IS NULL OR y.prev_ratio IS NOT DISTINCT FROM y.as_of_ratio)
-                                                                     AS c4_ratio_stable,
+         (y.prev_ev IS NOT NULL AND y.prev_long IS DISTINCT FROM y.as_of_long)
+                                                            AS desig_changed_here,
+         (y.prev_ev IS NOT NULL AND y.prev_ratio IS DISTINCT FROM y.as_of_ratio)
+                                                            AS ratio_changed_here,
+         (y.prev_ev IS NULL)                                AS no_preceding_event,
          (y.sh IS NOT NULL AND y.sh > 0 AND y.oi IN (0, 1))          AS c5_fill_known,
          (y.signed_dn IS NOT NULL)                                   AS c6_effect_known
     FROM l1 y
@@ -177,41 +193,73 @@ WITH base AS (
          -- [max(0, m-1), m+1], and in [max(0, m-1), m] when |r*dN| is an
          -- integer. sign is sign(dN) or zero. Verified by enumeration:
          -- d=0.5 -> {0,1}; d=2.5 -> {1,2,3}; d=2 -> {1,2}.
-         GREATEST(0, z.m - 1) AS min_abs_qty,
-         CASE WHEN z.d_is_integer THEN z.m ELSE z.m + 1 END AS max_abs_qty,
+         GREATEST(0, z.m - 1) AS min_abs_local_qty,
+         CASE WHEN z.d_is_integer THEN z.m ELSE z.m + 1 END AS max_abs_local_qty,
          -- HOLD is possible exactly when the lower bound is zero, i.e. when
          -- |r*dN| < 2. At or above 2 the side is FORCED with no state at all.
          (GREATEST(0, z.m - 1) = 0) AS hold_possible,
+         (abs(z.d_cont) >= 2.0) AS side_forced,
          CASE WHEN z.signed_dn > 0 THEN 'BUY '
-              WHEN z.signed_dn < 0 THEN 'SELL' END AS required_side_identified,
-         (z.c1_designation AND z.c2_ratio AND z.c3_desig_stable
-          AND z.c4_ratio_stable AND z.c5_fill_known AND z.c6_effect_known)
-           AS lti_strict,
+              WHEN z.signed_dn < 0 THEN 'SELL' END AS local_side,
+         -- LOCAL_FILL_EFFECT_IDENTIFIED: L(N) = trunc(r(N+dN)) - trunc(rN) at a
+         -- FROZEN event-time coordinate. The marginal effect of THIS fill. No
+         -- history, no cross-event continuity.
          (z.c1_designation AND z.c2_ratio AND z.c5_fill_known AND z.c6_effect_known)
-           AS lti_local
+           AS lfei,
+         -- TARGET_TRANSITION_IDENTIFIED: the STRONGER claim that the local
+         -- effect equals the clean mirror's transition FROM ITS PRECEDING
+         -- TARGET. Needs coordinate and ratio compatibility ACROSS the
+         -- transition: a changed r makes
+         --   trunc(r_after*N_after) - trunc(r_before*N_before)
+         -- not a function of dN at all, and a changed designation remaps the
+         -- signed coordinate so the two nets are not even the same quantity.
+         (z.c1_designation AND z.c2_ratio AND z.c5_fill_known AND z.c6_effect_known
+          AND NOT z.desig_changed_here AND NOT z.ratio_changed_here)
+           AS tti
     FROM lti z
    WHERE z.ts >= timestamptz '2026-08-05 00:00Z'
+), tot AS (
+  SELECT count(*)::float8 AS ev, sum(d_m) AS dm, sum(d_m * px) AS notional
+    FROM q WHERE d_m > 0.000001 AND c1_designation
+), lab AS (
+  SELECT 1 AS blk,
+         CASE WHEN lfei THEN 'A LOCAL_FILL_EFFECT_IDENTIFIED'
+              WHEN NOT c6_effect_known
+                THEN 'B refused: designated token is neither traded leg'
+              WHEN NOT c2_ratio
+                THEN 'C refused: no observed ratio (never recorded)'
+              WHEN NOT c5_fill_known
+                THEN 'D refused: fill quantity or outcome unusable'
+              ELSE 'E refused: other' END AS label, d_m, px, condition_id
+    FROM q WHERE d_m > 0.000001 AND c1_designation
+  UNION ALL
+  SELECT 2,
+         CASE WHEN tti AND no_preceding_event
+                THEN 'F TARGET_TRANSITION_IDENTIFIED (no preceding event in window)'
+              WHEN tti
+                THEN 'G TARGET_TRANSITION_IDENTIFIED (preceding target, same coordinate and ratio)'
+              WHEN ratio_changed_here
+                THEN 'H LOCAL ONLY: ratio moved -- cross-event target not a function of dN'
+              WHEN desig_changed_here
+                THEN 'I LOCAL ONLY: designation moved -- signed coordinate remapped'
+              ELSE 'J LOCAL ONLY: other' END, d_m, px, condition_id
+    FROM q WHERE d_m > 0.000001 AND c1_designation AND lfei
 )
-SELECT CASE WHEN lti_strict THEN '1 LOCAL_TRANSITION_IDENTIFIED (all six conditions)'
-            WHEN lti_local  THEN '2 LTI_LOCAL only (identified; designation or ratio moved between events)'
-            WHEN NOT c1_designation THEN '3 refused: no causal designation at the event'
-            WHEN NOT c2_ratio       THEN '4 refused: no observed ratio (never recorded)'
-            WHEN NOT c6_effect_known THEN '5 refused: designated token is neither traded leg'
-            WHEN NOT c5_fill_known  THEN '6 refused: fill quantity or outcome unusable'
-            ELSE                         '7 refused: other' END AS classification,
+SELECT lab.label,
        count(*) AS dM_events,
-       round((100.0 * count(*) / sum(count(*)) OVER ())::numeric, 2) AS PCT_dM_EVENTS,
-       count(DISTINCT condition_id) AS conditions,
-       round(sum(d_m)::numeric, 0) AS dM_shares,
-       round((100.0 * sum(d_m) / NULLIF(sum(sum(d_m)) OVER (), 0))::numeric, 2) AS PCT_dM_SHARES,
-       round(sum(d_m * px)::numeric, 0) AS matched_notional,
-       round((100.0 * sum(d_m * px) / NULLIF(sum(sum(d_m * px)) OVER (), 0))::numeric, 2)
-         AS PCT_MATCHED_NOTIONAL
-  FROM q WHERE d_m > 0.000001
- GROUP BY 1 ORDER BY 1;
+       round((100.0 * count(*) / t.ev)::numeric, 2) AS PCT_OF_DESIGNATED_EVENTS,
+       count(DISTINCT lab.condition_id) AS conditions,
+       round(sum(lab.d_m)::numeric, 0) AS dM_shares,
+       round((100.0 * sum(lab.d_m) / NULLIF(t.dm, 0))::numeric, 2) AS PCT_OF_DESIGNATED_dM,
+       round(sum(lab.d_m * lab.px)::numeric, 0) AS matched_notional,
+       round((100.0 * sum(lab.d_m * lab.px) / NULLIF(t.notional, 0))::numeric, 2)
+         AS PCT_OF_DESIGNATED_NOTIONAL
+  FROM lab CROSS JOIN tot t
+ GROUP BY lab.blk, lab.label, t.ev, t.dm, t.notional
+ ORDER BY lab.blk, lab.label;
 
 
-\echo '== 2. LTI SIDE AND STATE-FREE QUANTITY BOUNDS, with the HOLD ambiguity =='
+\echo '== 2. SIDE AND EXACT STATE-FREE QUANTITY RANGE, per population =='
 WITH base AS (
   SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
          t.size::float8 AS sh, t.price::float8 AS px,
@@ -309,10 +357,11 @@ WITH base AS (
          -- the six conditions, each named so the refusals are countable
          (y.as_of_long  IS NOT NULL)                                AS c1_designation,
          (y.as_of_ratio IS NOT NULL AND y.as_of_ratio > 0)           AS c2_ratio,
-         (y.prev_ev IS NULL OR y.prev_long IS NOT DISTINCT FROM y.as_of_long)
-                                                                     AS c3_desig_stable,
-         (y.prev_ev IS NULL OR y.prev_ratio IS NOT DISTINCT FROM y.as_of_ratio)
-                                                                     AS c4_ratio_stable,
+         (y.prev_ev IS NOT NULL AND y.prev_long IS DISTINCT FROM y.as_of_long)
+                                                            AS desig_changed_here,
+         (y.prev_ev IS NOT NULL AND y.prev_ratio IS DISTINCT FROM y.as_of_ratio)
+                                                            AS ratio_changed_here,
+         (y.prev_ev IS NULL)                                AS no_preceding_event,
          (y.sh IS NOT NULL AND y.sh > 0 AND y.oi IN (0, 1))          AS c5_fill_known,
          (y.signed_dn IS NOT NULL)                                   AS c6_effect_known
     FROM l1 y
@@ -323,44 +372,61 @@ WITH base AS (
          -- [max(0, m-1), m+1], and in [max(0, m-1), m] when |r*dN| is an
          -- integer. sign is sign(dN) or zero. Verified by enumeration:
          -- d=0.5 -> {0,1}; d=2.5 -> {1,2,3}; d=2 -> {1,2}.
-         GREATEST(0, z.m - 1) AS min_abs_qty,
-         CASE WHEN z.d_is_integer THEN z.m ELSE z.m + 1 END AS max_abs_qty,
+         GREATEST(0, z.m - 1) AS min_abs_local_qty,
+         CASE WHEN z.d_is_integer THEN z.m ELSE z.m + 1 END AS max_abs_local_qty,
          -- HOLD is possible exactly when the lower bound is zero, i.e. when
          -- |r*dN| < 2. At or above 2 the side is FORCED with no state at all.
          (GREATEST(0, z.m - 1) = 0) AS hold_possible,
+         (abs(z.d_cont) >= 2.0) AS side_forced,
          CASE WHEN z.signed_dn > 0 THEN 'BUY '
-              WHEN z.signed_dn < 0 THEN 'SELL' END AS required_side_identified,
-         (z.c1_designation AND z.c2_ratio AND z.c3_desig_stable
-          AND z.c4_ratio_stable AND z.c5_fill_known AND z.c6_effect_known)
-           AS lti_strict,
+              WHEN z.signed_dn < 0 THEN 'SELL' END AS local_side,
+         -- LOCAL_FILL_EFFECT_IDENTIFIED: L(N) = trunc(r(N+dN)) - trunc(rN) at a
+         -- FROZEN event-time coordinate. The marginal effect of THIS fill. No
+         -- history, no cross-event continuity.
          (z.c1_designation AND z.c2_ratio AND z.c5_fill_known AND z.c6_effect_known)
-           AS lti_local
+           AS lfei,
+         -- TARGET_TRANSITION_IDENTIFIED: the STRONGER claim that the local
+         -- effect equals the clean mirror's transition FROM ITS PRECEDING
+         -- TARGET. Needs coordinate and ratio compatibility ACROSS the
+         -- transition: a changed r makes
+         --   trunc(r_after*N_after) - trunc(r_before*N_before)
+         -- not a function of dN at all, and a changed designation remaps the
+         -- signed coordinate so the two nets are not even the same quantity.
+         (z.c1_designation AND z.c2_ratio AND z.c5_fill_known AND z.c6_effect_known
+          AND NOT z.desig_changed_here AND NOT z.ratio_changed_here)
+           AS tti
     FROM lti z
    WHERE z.ts >= timestamptz '2026-08-05 00:00Z'
+), pop AS (
+  SELECT '1 LOCAL_FILL_EFFECT_IDENTIFIED' AS population, * FROM q
+   WHERE d_m > 0.000001 AND lfei
+  UNION ALL
+  SELECT '2 TARGET_TRANSITION_IDENTIFIED', * FROM q
+   WHERE d_m > 0.000001 AND tti
 )
-SELECT CASE WHEN hold_possible
-              THEN 'B ' || required_side_identified || ' -- HOLD AMBIGUOUS (|r*dN| < 2)'
-              ELSE 'A ' || required_side_identified || ' -- SIDE FORCED, order required' END
-         AS required_action,
+SELECT population, local_side,
        count(*) AS dM_events,
-       round((100.0 * count(*) / sum(count(*)) OVER ())::numeric, 2) AS pct_events,
        count(DISTINCT condition_id) AS conditions,
        round(sum(d_m)::numeric, 0) AS dM_shares,
-       round((100.0 * sum(d_m) / NULLIF(sum(sum(d_m)) OVER (), 0))::numeric, 2) AS PCT_dM,
        round(sum(d_m * px)::numeric, 0) AS matched_notional,
+       round((100.0 * count(*) FILTER (WHERE side_forced) / NULLIF(count(*), 0))::numeric, 2)
+         AS PCT_SIDE_FORCED_d_GE_2,
+       round((100.0 * count(*) FILTER (WHERE hold_possible) / NULLIF(count(*), 0))::numeric, 2)
+         AS pct_hold_possible,
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY ideal_continuous_qty)::numeric, 2)
-         AS p50_ideal_qty,
+         AS p50_d_shares,
        round(percentile_cont(0.9) WITHIN GROUP (ORDER BY ideal_continuous_qty)::numeric, 2)
-         AS p90_ideal_qty,
-       round(sum(min_abs_qty)::numeric, 0) AS SUM_MIN_REQUIRED_SHARES,
-       round(sum(max_abs_qty)::numeric, 0) AS SUM_MAX_REQUIRED_SHARES
-  FROM q
- WHERE d_m > 0.000001 AND lti_strict AND required_side_identified IS NOT NULL
- GROUP BY 1 ORDER BY 1;
+         AS p90_d_shares,
+       round(sum(min_abs_local_qty)::numeric, 0) AS SUM_MIN_ABS_LOCAL_QTY,
+       round(sum(max_abs_local_qty)::numeric, 0) AS SUM_MAX_ABS_LOCAL_QTY
+  FROM pop WHERE local_side IS NOT NULL
+ GROUP BY 1, 2 ORDER BY 1, 2;
 
 
-\echo '== 3. VALIDATION: the modelled state must never contradict the state-free result =='
--- Any row in a VIOLATION bucket is a derivation bug, not a finding.
+\echo '== 3. VALIDATION: the modelled state may never oppose the local sign =='
+-- Ratio and designation transitions are EXCLUDED, not counted as violations:
+-- for those the cross-event modelled change is legitimately not L(N).
+-- Anything left in an X bucket is a derivation bug.
 WITH base AS (
   SELECT t.id, t.tx_hash, t.asset, t.ts, t.condition_id, t.outcome_index,
          t.size::float8 AS sh, t.price::float8 AS px,
@@ -458,10 +524,11 @@ WITH base AS (
          -- the six conditions, each named so the refusals are countable
          (y.as_of_long  IS NOT NULL)                                AS c1_designation,
          (y.as_of_ratio IS NOT NULL AND y.as_of_ratio > 0)           AS c2_ratio,
-         (y.prev_ev IS NULL OR y.prev_long IS NOT DISTINCT FROM y.as_of_long)
-                                                                     AS c3_desig_stable,
-         (y.prev_ev IS NULL OR y.prev_ratio IS NOT DISTINCT FROM y.as_of_ratio)
-                                                                     AS c4_ratio_stable,
+         (y.prev_ev IS NOT NULL AND y.prev_long IS DISTINCT FROM y.as_of_long)
+                                                            AS desig_changed_here,
+         (y.prev_ev IS NOT NULL AND y.prev_ratio IS DISTINCT FROM y.as_of_ratio)
+                                                            AS ratio_changed_here,
+         (y.prev_ev IS NULL)                                AS no_preceding_event,
          (y.sh IS NOT NULL AND y.sh > 0 AND y.oi IN (0, 1))          AS c5_fill_known,
          (y.signed_dn IS NOT NULL)                                   AS c6_effect_known
     FROM l1 y
@@ -472,32 +539,47 @@ WITH base AS (
          -- [max(0, m-1), m+1], and in [max(0, m-1), m] when |r*dN| is an
          -- integer. sign is sign(dN) or zero. Verified by enumeration:
          -- d=0.5 -> {0,1}; d=2.5 -> {1,2,3}; d=2 -> {1,2}.
-         GREATEST(0, z.m - 1) AS min_abs_qty,
-         CASE WHEN z.d_is_integer THEN z.m ELSE z.m + 1 END AS max_abs_qty,
+         GREATEST(0, z.m - 1) AS min_abs_local_qty,
+         CASE WHEN z.d_is_integer THEN z.m ELSE z.m + 1 END AS max_abs_local_qty,
          -- HOLD is possible exactly when the lower bound is zero, i.e. when
          -- |r*dN| < 2. At or above 2 the side is FORCED with no state at all.
          (GREATEST(0, z.m - 1) = 0) AS hold_possible,
+         (abs(z.d_cont) >= 2.0) AS side_forced,
          CASE WHEN z.signed_dn > 0 THEN 'BUY '
-              WHEN z.signed_dn < 0 THEN 'SELL' END AS required_side_identified,
-         (z.c1_designation AND z.c2_ratio AND z.c3_desig_stable
-          AND z.c4_ratio_stable AND z.c5_fill_known AND z.c6_effect_known)
-           AS lti_strict,
+              WHEN z.signed_dn < 0 THEN 'SELL' END AS local_side,
+         -- LOCAL_FILL_EFFECT_IDENTIFIED: L(N) = trunc(r(N+dN)) - trunc(rN) at a
+         -- FROZEN event-time coordinate. The marginal effect of THIS fill. No
+         -- history, no cross-event continuity.
          (z.c1_designation AND z.c2_ratio AND z.c5_fill_known AND z.c6_effect_known)
-           AS lti_local
+           AS lfei,
+         -- TARGET_TRANSITION_IDENTIFIED: the STRONGER claim that the local
+         -- effect equals the clean mirror's transition FROM ITS PRECEDING
+         -- TARGET. Needs coordinate and ratio compatibility ACROSS the
+         -- transition: a changed r makes
+         --   trunc(r_after*N_after) - trunc(r_before*N_before)
+         -- not a function of dN at all, and a changed designation remaps the
+         -- signed coordinate so the two nets are not even the same quantity.
+         (z.c1_designation AND z.c2_ratio AND z.c5_fill_known AND z.c6_effect_known
+          AND NOT z.desig_changed_here AND NOT z.ratio_changed_here)
+           AS tti
     FROM lti z
    WHERE z.ts >= timestamptz '2026-08-05 00:00Z'
 )
 SELECT CASE
-         WHEN req_modeled IS NULL THEN 'D no modelled state to compare'
+         WHEN req_modeled IS NULL THEN 'E no modelled state to compare'
+         WHEN ratio_changed_here
+           THEN 'C EXCLUDED: ratio moved here (cross-event target not a function of dN)'
+         WHEN desig_changed_here
+           THEN 'D EXCLUDED: designation moved here (signed coordinate remapped)'
          WHEN req_modeled = 0 AND hold_possible
            THEN 'A modelled HOLD, inside the permitted truncation ambiguity'
-         WHEN req_modeled = 0 AND NOT hold_possible
-           THEN 'X VIOLATION: modelled HOLD where |r*dN| >= 2 forbids it'
+         WHEN req_modeled = 0 AND side_forced
+           THEN 'X VIOLATION: modelled HOLD where d >= 2 forbids it'
          WHEN sign(req_modeled) <> sign(signed_dn)
-           THEN 'X VIOLATION: modelled side OPPOSES the state-free side'
-         WHEN abs(req_modeled) < min_abs_qty OR abs(req_modeled) > max_abs_qty
-           THEN 'X VIOLATION: modelled quantity OUTSIDE the state-free bounds'
-         ELSE 'B modelled side agrees AND quantity inside the bounds'
+           THEN 'X VIOLATION: modelled side OPPOSES the locally identified sign'
+         WHEN abs(req_modeled) < min_abs_local_qty OR abs(req_modeled) > max_abs_local_qty
+           THEN 'X VIOLATION: modelled quantity OUTSIDE the exact integer range'
+         ELSE 'B modelled side agrees AND quantity inside the exact range'
        END AS verdict,
        count(*) AS events,
        round((100.0 * count(*) / sum(count(*)) OVER ())::numeric, 4) AS pct_events,
@@ -505,5 +587,5 @@ SELECT CASE
        round(max(abs(req_modeled - d_cont))::numeric, 4) AS max_abs_dev_from_r_dN,
        round(percentile_cont(0.5) WITHIN GROUP (ORDER BY abs(req_modeled - d_cont))::numeric, 4)
          AS p50_abs_dev_from_r_dN
-  FROM q WHERE lti_strict AND signed_dn IS NOT NULL
+  FROM q WHERE lfei
  GROUP BY 1 ORDER BY 1;
