@@ -17,30 +17,62 @@
 -- Execution -- depth, fills, slippage -- comes later and is not modelled here.
 -- This pass does not reduce state for missing depth or failed fills.
 --
--- VALIDITY FLAG 1, INITIALIZATION. "Earliest available fill" is NOT a known
--- zero-inventory start. Absence of an earlier fill is evidence of absence only
--- INSIDE complete retained coverage. So:
---   INIT_KNOWN          the condition's first retained fill lands at or after
---                       the coverage-complete boundary. Any earlier fill would
---                       have been retained; none exists; therefore RN1 held
---                       zero immediately before it. This is a proof, not a
---                       convention.
---   INIT_LEFT_CENSORED  the first fill predates that boundary but sits inside
---                       retained data: earlier fills MAY be missing.
---   INIT_UNKNOWN        the first fill sits at the very edge of all retained
---                       data: prior inventory may predate the record entirely.
--- Zero is never assumed. Statement 1 MEASURES where coverage actually becomes
--- complete instead of asserting it, and statement 2 classifies at two candidate
--- boundaries so the choice of boundary is visible rather than buried.
+-- VALIDITY FLAG 1, INITIALIZATION. CALENDAR COVERAGE IS NOT PROVEN ZERO. A
+-- first retained fill after a boundary with no missing days proves only that
+-- NO EARLIER RETAINED FILL EXISTS DURING A CALENDAR-COVERED INTERVAL. It does
+-- NOT prove RN1's inventory was zero, because this system has already been
+-- shown to undercount fills WHILE the calendar looked complete -- D1, where
+-- one whale's position read 92,145 from our fills against the venue's 55,993.
+-- Calendar completeness and fill-level completeness are different claims.
+--
+-- So initialization is graded by EVIDENCE LEVEL:
+--   INIT_PROVEN_ZERO         requires an INDEPENDENT fill-completeness proof,
+--                            not merely a calendar. See below for what that is
+--                            here, and why it is scarce.
+--   INIT_COVERAGE_SUPPORTED  first retained fill is after the calendar-complete
+--                            boundary, but fill-level completeness is NOT
+--                            independently proven.
+--   INIT_LEFT_CENSORED       the condition or the exposure may predate complete
+--                            coverage.
+--   INIT_UNKNOWN             insufficient evidence.
+--
+-- WHAT PROOF IS ACTUALLY AVAILABLE, established by reading the schema and the
+-- worker rather than assumed. There is NO condition_created_at and NO market
+-- open/start timestamp anywhere for these conditions: `markets` carries only
+-- title/slug/sport/closed/resolved/resolved_at/updated_at, and updated_at is
+-- OUR upsert clock (DEFAULT now()), not market creation. Statement 2 proves
+-- that from information_schema rather than from my reading of a migration.
+-- Requirement (1) as stated -- condition did not exist before capture was
+-- complete -- therefore cannot be met from stored data at all.
+--
+-- That leaves the alternative: an independent fill-completeness proof. One
+-- exists, and exactly one. In _read_market (mirror_live.py:6555) his_long /
+-- his_other are `mi.net_positions(fills)` -- OUR OWN FILLS, so they prove
+-- nothing about themselves -- while `snap` comes from _snapshot(), a genuine
+-- independent read of his positions. Both land on the same mirror_books row as
+-- his_long/his_other and snap_long/snap_other. Where they AGREE, our fill
+-- reconstruction equals an independently observed position, which is a real
+-- fill-completeness proof for that condition: a missing earlier fill would
+-- leave the fills-derived figure short of the observed one. The caveat is
+-- stated rather than hidden -- exactly offsetting errors would also agree --
+-- and the comparison uses SIGNED all-fill positions (net_positions counts
+-- SELLs as negative), not the BUY-only cumulative the dM construction uses.
+--
+-- Expect this to be scarce: snapshots exist only for markets we actually
+-- opened, over 09-06..09-10, and only when the read was fresh. If
+-- INIT_PROVEN_ZERO is tiny or empty, that is reported as such and
+-- COVERAGE_SUPPORTED is NOT promoted to known.
 --
 -- VALIDITY FLAG 2, DESIGNATION. designation_at <= event_at, always. Where no
 -- causal long_asset existed by the event, the action stays DESIGNATION_UNKNOWN
 -- and is NEVER synthesised from a later book or refusal row.
 --
--- THE HEADLINE POPULATION is therefore causal-designation AND INIT_KNOWN. The
--- broader populations are reported beside it as sensitivities, and the excluded
--- initialization-uncertain population is carried with its own event count, dM
--- shares and matched notional so nothing disappears silently.
+-- THE HEADLINE is reported TWICE where the sample permits: PROVEN_ZERO with
+-- causal designation, and PROVEN_ZERO-or-COVERAGE_SUPPORTED with causal
+-- designation. The broader populations sit beside them as labelled
+-- sensitivities, and the excluded initialization-uncertain population is
+-- carried with its own event count, dM shares and matched notional so nothing
+-- disappears silently.
 --
 -- THE GRANULARITY, from code. analytics/mirror.py:280 in target_shares:
 --     tgt = int(raw) if raw >= 0 else -int(-raw)      # toward zero, whole shares
@@ -57,7 +89,7 @@
 -- over. Any non-HOLD disagreement is a bug or a state/designation
 -- discontinuity, and statement 6 splits it by whether the designation moved.
 --
--- Read-only: seven SELECTs. Nothing here writes.
+-- Read-only: ten SELECTs. Nothing here writes.
 -- ============================================================================
 
 
@@ -78,11 +110,72 @@ SELECT t.source,
  GROUP BY 1 ORDER BY 2;
 
 
-\echo '== 2. VALIDITY FLAG 1: initialization class at two candidate boundaries =='
+\echo '== 2a. DOES MARKET-OPEN METADATA EXIST AT ALL? (from information_schema) =='
+-- Proving the absence from the catalogue itself, not from my reading of a
+-- migration file. If no creation/open/start column is listed here, then
+-- PROVEN_ZERO requirement (1) cannot be satisfied from stored data and the
+-- independent-completeness route in 2b is the only one available.
+SELECT c.table_name, c.column_name, c.data_type,
+       (c.column_name ~* '(creat|open|start|begin|launch)') AS looks_like_market_open
+  FROM information_schema.columns c
+ WHERE c.table_schema = 'public'
+   AND c.table_name IN ('markets', 'market_tokens')
+ ORDER BY c.table_name, c.ordinal_position;
+
+
+\echo '== 2b. COVERAGE RATE of what metadata does exist, over RN1 conditions =='
+WITH rn AS (
+  SELECT DISTINCT t.condition_id
+    FROM trades t JOIN whales w ON w.id = t.whale_id
+   WHERE lower(w.username) = 'rn1' AND t.condition_id IS NOT NULL
+     AND t.ts >= timestamptz '2026-08-05 00:00Z'
+)
+SELECT count(*) AS rn1_conditions_in_window,
+       count(m.condition_id) AS present_in_markets,
+       round((100.0 * count(m.condition_id) / NULLIF(count(*), 0))::numeric, 2) AS pct_in_markets,
+       count(m.resolved_at) AS with_resolved_at,
+       count(m.updated_at) AS with_updated_at_OUR_UPSERT_CLOCK,
+       0 AS with_condition_created_at_NO_SUCH_COLUMN,
+       count(*) FILTER (WHERE m.condition_id IS NULL) AS missing_from_catalogue
+  FROM rn LEFT JOIN markets m ON m.condition_id = rn.condition_id;
+
+
+\echo '== 2c. THE ONLY INDEPENDENT FILL-COMPLETENESS EVIDENCE: fills vs snapshot =='
+-- his_long/his_other = mi.net_positions(OUR fills). snap_long/snap_other = an
+-- independent position read. Agreement is the proof; disagreement is the D1
+-- failure mode restated. Tolerance: 1 whole share or 0.5%, whichever is larger.
+SELECT count(*) AS book_rows,
+       count(*) FILTER (WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL)
+         AS rows_with_independent_snapshot,
+       count(DISTINCT condition_id) FILTER (WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL)
+         AS CONDITIONS_WITH_ANY_SNAPSHOT,
+       count(DISTINCT condition_id) FILTER (
+         WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL
+           AND abs(COALESCE(his_long, 0) - snap_long)
+                 <= GREATEST(1.0, 0.005 * abs(snap_long))
+           AND abs(COALESCE(his_other, 0) - snap_other)
+                 <= GREATEST(1.0, 0.005 * abs(snap_other)))
+         AS CONDITIONS_WHERE_FILLS_AGREE_WITH_SNAPSHOT,
+       round(percentile_cont(0.5) WITHIN GROUP (
+         ORDER BY abs(COALESCE(his_long, 0) - snap_long))::numeric, 2) AS p50_abs_long_gap,
+       round(percentile_cont(0.95) WITHIN GROUP (
+         ORDER BY abs(COALESCE(his_long, 0) - snap_long))::numeric, 2) AS p95_abs_long_gap,
+       to_char(min(opened_at), 'MM-DD') AS snapshot_window_from,
+       to_char(max(opened_at), 'MM-DD') AS snapshot_window_to
+  FROM mirror_books;
+
+
+\echo '== 3. VALIDITY FLAG 1: initialization EVIDENCE LEVEL, two boundaries =='
 -- b1 = 2026-07-24, the venue poll feed's start: the first moment a continuous
 --      feed exists, so absence of an earlier fill is informative from there.
 -- b2 = 2026-08-10, the chain feed's start: stricter, two independent feeds.
-WITH f AS (
+-- PROVEN_ZERO additionally requires the independent snapshot agreement of 2c.
+WITH proven AS (
+  SELECT DISTINCT condition_id FROM mirror_books
+   WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL
+     AND abs(COALESCE(his_long, 0) - snap_long) <= GREATEST(1.0, 0.005 * abs(snap_long))
+     AND abs(COALESCE(his_other, 0) - snap_other) <= GREATEST(1.0, 0.005 * abs(snap_other))
+), f AS (
   SELECT t.condition_id, t.ts, t.size::float8 AS sh, t.price::float8 AS px,
          t.tx_hash, t.asset, t.outcome_index
     FROM trades t JOIN whales w ON w.id = t.whale_id
@@ -112,10 +205,14 @@ WITH f AS (
     ('b2 2026-08-10 chain start',      timestamptz '2026-08-10 00:00Z')) AS v(label, cut)
 )
 SELECT b.label AS coverage_complete_boundary,
-       CASE WHEN pc.first_fill >= b.cut THEN 'A INIT_KNOWN (zero inventory proven)'
+       CASE WHEN pc.first_fill >= b.cut
+                 AND pc.condition_id IN (SELECT condition_id FROM proven)
+              THEN 'A INIT_PROVEN_ZERO (independent fill-completeness proof)'
+            WHEN pc.first_fill >= b.cut
+              THEN 'B INIT_COVERAGE_SUPPORTED (calendar only, NOT proven)'
             WHEN pc.first_fill <= (SELECT data_start FROM gs) + interval '24 hours'
-              THEN 'C INIT_UNKNOWN (at the edge of all retained data)'
-            ELSE 'B INIT_LEFT_CENSORED (earlier fills may be missing)' END AS init_class,
+              THEN 'D INIT_UNKNOWN (at the edge of all retained data)'
+            ELSE 'C INIT_LEFT_CENSORED (exposure may predate complete coverage)' END AS init_class,
        count(DISTINCT pc.condition_id) AS conditions,
        count(d.*) AS events_in_window,
        round(sum(d.d_m)::numeric, 0) AS dM_shares,
@@ -128,11 +225,16 @@ SELECT b.label AS coverage_complete_boundary,
  GROUP BY 1, 2 ORDER BY 1, 2;
 
 
-\echo '== 3. VALIDITY FLAG 2: causal-designation coverage, and then with INIT_KNOWN =='
+\echo '== 4. VALIDITY FLAG 2: causal-designation coverage, by initialization level =='
 WITH desig_rows AS (
   SELECT condition_id, long_asset, opened_at AS at FROM mirror_books WHERE long_asset IS NOT NULL
   UNION ALL
   SELECT condition_id, long_asset, at FROM mirror_candidate_refusals WHERE long_asset IS NOT NULL
+), proven AS (
+  SELECT DISTINCT condition_id FROM mirror_books
+   WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL
+     AND abs(COALESCE(his_long, 0) - snap_long) <= GREATEST(1.0, 0.005 * abs(snap_long))
+     AND abs(COALESCE(his_other, 0) - snap_other) <= GREATEST(1.0, 0.005 * abs(snap_other))
 ), f AS (
   SELECT t.id, t.condition_id, t.ts, t.tx_hash, t.asset, t.outcome_index,
          t.size::float8 AS sh, t.price::float8 AS px,
@@ -164,7 +266,9 @@ WITH desig_rows AS (
   SELECT e.*, pc.first_fill,
          EXISTS (SELECT 1 FROM desig_rows d
                   WHERE d.condition_id = e.condition_id AND d.at <= e.ts) AS causal_desig,
-         (pc.first_fill >= timestamptz '2026-07-24 00:00Z') AS init_known
+         (pc.first_fill >= timestamptz '2026-07-24 00:00Z'
+          AND e.condition_id IN (SELECT condition_id FROM proven)) AS init_proven,
+         (pc.first_fill >= timestamptz '2026-07-24 00:00Z') AS init_cov_supported
     FROM ev e JOIN pc ON pc.condition_id = e.condition_id
    WHERE e.ts >= timestamptz '2026-08-05 00:00Z'
 )
@@ -176,26 +280,38 @@ SELECT 'ALL causally classifiable' AS population,
        round(sum(d_m * px)::numeric, 0) AS matched_notional
   FROM g
 UNION ALL
-SELECT 'INIT_KNOWN only',
+SELECT 'INIT_PROVEN_ZERO only',
        round((100.0 * count(*) FILTER (WHERE causal_desig) / NULLIF(count(*), 0))::numeric, 2),
        round((100.0 * sum(d_m) FILTER (WHERE causal_desig) / NULLIF(sum(d_m), 0))::numeric, 2),
        round((100.0 * sum(d_m * px) FILTER (WHERE causal_desig) / NULLIF(sum(d_m * px), 0))::numeric, 2),
        count(*), round(sum(d_m)::numeric, 0), round(sum(d_m * px)::numeric, 0)
-  FROM g WHERE init_known
+  FROM g WHERE init_proven
+UNION ALL
+SELECT 'PROVEN_ZERO or COVERAGE_SUPPORTED',
+       round((100.0 * count(*) FILTER (WHERE causal_desig) / NULLIF(count(*), 0))::numeric, 2),
+       round((100.0 * sum(d_m) FILTER (WHERE causal_desig) / NULLIF(sum(d_m), 0))::numeric, 2),
+       round((100.0 * sum(d_m * px) FILTER (WHERE causal_desig) / NULLIF(sum(d_m * px), 0))::numeric, 2),
+       count(*), round(sum(d_m)::numeric, 0), round(sum(d_m * px)::numeric, 0)
+  FROM g WHERE init_cov_supported
 UNION ALL
 SELECT 'EXCLUDED: initialization-uncertain',
        NULL, NULL, NULL,
        count(*), round(sum(d_m)::numeric, 0), round(sum(d_m * px)::numeric, 0)
-  FROM g WHERE NOT init_known;
+  FROM g WHERE NOT init_cov_supported;
 
 
-\echo '== 4. HEADLINE: CONTINUOUS_TARGET_STATE action mix, by population =='
+\echo '== 5. HEADLINE: CONTINUOUS_TARGET_STATE action mix, by evidence population =='
 WITH desig_rows AS (
   SELECT condition_id, long_asset, COALESCE(ratio, 0.10) AS ratio, opened_at AS at
     FROM mirror_books WHERE long_asset IS NOT NULL
   UNION ALL
   SELECT condition_id, long_asset, 0.10, at
     FROM mirror_candidate_refusals WHERE long_asset IS NOT NULL
+), proven AS (
+  SELECT DISTINCT condition_id FROM mirror_books
+   WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL
+     AND abs(COALESCE(his_long, 0) - snap_long) <= GREATEST(1.0, 0.005 * abs(snap_long))
+     AND abs(COALESCE(his_other, 0) - snap_other) <= GREATEST(1.0, 0.005 * abs(snap_other))
 ), f AS (
   SELECT t.id, t.condition_id, t.ts, t.tx_hash, t.asset,
          t.size::float8 AS sh, t.price::float8 AS px,
@@ -243,15 +359,20 @@ WITH desig_rows AS (
   SELECT t.*, trunc(t.ratio * t.net_after) AS cf_target_after,
          COALESCE(lag(trunc(t.ratio * t.net_after)) OVER w,
                   trunc(t.ratio * t.net_before)) AS cf_position_before,
-         (t.first_fill >= timestamptz '2026-07-24 00:00Z') AS init_known
+         (t.first_fill >= timestamptz '2026-07-24 00:00Z'
+          AND t.condition_id IN (SELECT condition_id FROM proven)) AS init_proven,
+         (t.first_fill >= timestamptz '2026-07-24 00:00Z') AS init_cov_supported
     FROM t WINDOW w AS (PARTITION BY t.condition_id ORDER BY t.ts, t.tx_hash, t.asset)
 ), u AS (
-  SELECT 'A HEADLINE causal designation + INIT_KNOWN' AS population, * FROM c
-   WHERE long_asset IS NOT NULL AND init_known
+  SELECT 'A HEADLINE-1 causal designation + PROVEN_ZERO' AS population, * FROM c
+   WHERE long_asset IS NOT NULL AND init_proven
   UNION ALL
-  SELECT 'B sensitivity: causal designation, any init', * FROM c WHERE long_asset IS NOT NULL
+  SELECT 'B HEADLINE-2 causal designation + PROVEN_or_COVERAGE_SUPPORTED', * FROM c
+   WHERE long_asset IS NOT NULL AND init_cov_supported
   UNION ALL
-  SELECT 'C sensitivity: every event in window', * FROM c
+  SELECT 'C sensitivity: causal designation, any init', * FROM c WHERE long_asset IS NOT NULL
+  UNION ALL
+  SELECT 'D sensitivity: every event in window', * FROM c
 )
 SELECT population,
        CASE WHEN long_asset IS NULL THEN '0 DESIGNATION_UNKNOWN'
@@ -267,7 +388,7 @@ SELECT population,
  GROUP BY 1, 2 ORDER BY 1, 2;
 
 
-\echo '== 5. ACTUAL_STATE 09-06..09-10: corrected rule from the real book =='
+\echo '== 6. ACTUAL_STATE 09-06..09-10: corrected rule from the real book =='
 WITH desig_rows AS (
   SELECT condition_id, long_asset, us_market_slug AS slug, COALESCE(ratio, 0.10) AS ratio,
          opened_at AS at FROM mirror_books WHERE long_asset IS NOT NULL
@@ -315,7 +436,7 @@ WITH desig_rows AS (
                      FROM mirror_orders o
                     WHERE o.us_market_slug = e.slug AND o.filled > 0
                       AND o.done_at IS NOT NULL AND o.done_at <= e.ts), 0) AS bpp,
-         (e.first_fill >= timestamptz '2026-07-24 00:00Z') AS init_known
+         (e.first_fill >= timestamptz '2026-07-24 00:00Z') AS init_cov_supported
     FROM ev e
 )
 SELECT CASE WHEN long_asset IS NULL THEN '0 DESIGNATION_UNKNOWN'
@@ -327,13 +448,13 @@ SELECT CASE WHEN long_asset IS NULL THEN '0 DESIGNATION_UNKNOWN'
        count(*) AS dM_events,
        round(sum(d_m)::numeric, 0) AS dM_shares,
        round(sum(d_m * px)::numeric, 0) AS matched_notional,
-       count(*) FILTER (WHERE init_known) AS of_which_INIT_KNOWN,
+       count(*) FILTER (WHERE init_cov_supported) AS of_which_COVERAGE_SUPPORTED,
        round(avg(bpp)::numeric, 1) AS mean_actual_pre_position
   FROM a WHERE d_m > 0.000001
  GROUP BY 1, 2 ORDER BY 1, 2;
 
 
-\echo '== 6. THE ALGEBRA TEST: sign(required_change) vs sign(net_after - net_before) =='
+\echo '== 7. THE ALGEBRA TEST: sign(required_change) vs sign(net_after - net_before) =='
 -- Truncation may turn a small move into HOLD; that is expected and is reported
 -- separately. Any NON-HOLD disagreement is a bug or a state/designation
 -- discontinuity, so the split by "did the designation change at this event"
@@ -344,6 +465,11 @@ WITH desig_rows AS (
   UNION ALL
   SELECT condition_id, long_asset, 0.10, at
     FROM mirror_candidate_refusals WHERE long_asset IS NOT NULL
+), proven AS (
+  SELECT DISTINCT condition_id FROM mirror_books
+   WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL
+     AND abs(COALESCE(his_long, 0) - snap_long) <= GREATEST(1.0, 0.005 * abs(snap_long))
+     AND abs(COALESCE(his_other, 0) - snap_other) <= GREATEST(1.0, 0.005 * abs(snap_other))
 ), f AS (
   SELECT t.id, t.condition_id, t.ts, t.tx_hash, t.asset,
          t.size::float8 AS sh, t.price::float8 AS px,
@@ -397,10 +523,13 @@ SELECT sign(cf_target_after - cf_position_before) AS sign_required_change,
               THEN 'DESIGNATION CHANGED at this event'
             ELSE 'designation stable' END AS designation_continuity,
        CASE WHEN sign(cf_target_after - cf_position_before) = sign(net_after - net_before)
-              THEN 'AGREES'
+              THEN 'A AGREES'
             WHEN cf_target_after - cf_position_before = 0
-              THEN 'HOLD from whole-share truncation (expected)'
-            ELSE 'NON-HOLD DISAGREEMENT -- bug or discontinuity' END AS verdict,
+              THEN 'B HOLD from whole-share truncation (expected)'
+            WHEN prev_long_asset IS DISTINCT FROM long_asset
+              THEN 'C NON-HOLD DISAGREEMENT: DESIGNATION_CHANGED (explained)'
+            ELSE 'D NON-HOLD DISAGREEMENT: UNEXPLAINED -- TREAT AS A BUG UNTIL RECONCILED'
+       END AS verdict,
        count(*) AS events,
        round(sum(d_m)::numeric, 0) AS dM_shares,
        round(sum(d_m * px)::numeric, 0) AS matched_notional
@@ -408,7 +537,7 @@ SELECT sign(cf_target_after - cf_position_before) AS sign_required_change,
  GROUP BY 1, 2, 3, 4 ORDER BY 4, 1, 2;
 
 
-\echo '== 7. HEADLINE population: dM action mix by designation class =='
+\echo '== 8. HEADLINE population: dM action mix by designation class =='
 WITH desig_rows AS (
   SELECT condition_id, long_asset, COALESCE(ratio, 0.10) AS ratio, opened_at AS at,
          'book row -- branch not recorded' AS long_from
@@ -419,6 +548,11 @@ WITH desig_rows AS (
               WHEN long_from IS NULL OR long_from = '' THEN 'mapper -- unlabelled'
               ELSE long_from END
     FROM mirror_candidate_refusals WHERE long_asset IS NOT NULL
+), proven AS (
+  SELECT DISTINCT condition_id FROM mirror_books
+   WHERE snap_long IS NOT NULL AND snap_other IS NOT NULL
+     AND abs(COALESCE(his_long, 0) - snap_long) <= GREATEST(1.0, 0.005 * abs(snap_long))
+     AND abs(COALESCE(his_other, 0) - snap_other) <= GREATEST(1.0, 0.005 * abs(snap_other))
 ), first_desig AS (
   SELECT condition_id, min(at) AS first_at FROM desig_rows GROUP BY 1
 ), f AS (
@@ -489,4 +623,5 @@ SELECT CASE WHEN long_from = 'catalogue' THEN '3 CATALOGUE_LONG'
   FROM c
  WHERE d_m > 0.000001 AND long_asset IS NOT NULL
    AND first_fill >= timestamptz '2026-07-24 00:00Z'
+   AND condition_id IN (SELECT condition_id FROM proven)
  GROUP BY 1, 2 ORDER BY 1, 2;
