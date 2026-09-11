@@ -228,8 +228,13 @@ SELECT wk AS week, count(*) AS envelopes,
 \echo '== 5. THE PAIR ECONOMICS REDONE with the maker share respected =='
 -- The gross-vs-net test again, but the fee is applied ONLY where the cash
 -- feed shows he actually paid it. Where he was a maker the fee is zero, not
--- modelled at 5%. Where neither is known the row is reported separately and
--- never blended into a headline.
+-- modelled at 5%. Where a leg was never seen in cash the fee is genuinely
+-- UNKNOWN and is NOT modelled at all: that basis is reported with a BRACKET
+-- -- the best case (every unseen leg was a maker, fee zero) and the worst
+-- case (every unseen leg was a taker, full wedge) -- so a single invented
+-- number can never be mistaken for a measurement. The earlier test's
+-- -$160,531 was exactly that mistake: it applied the full taker wedge to a
+-- population now known to be about half maker.
 WITH t AS (
   SELECT t.condition_id, t.outcome_index, t.tx_hash, t.asset, t.side, t.ts,
          t.size::float8 AS sh, t.price::float8 AS px,
@@ -250,49 +255,49 @@ WITH t AS (
          max(shares) FILTER (WHERE feed = 'cash')  AS sh_cash,
          max(vwap)   FILTER (WHERE feed = 'venue') AS v,
          max(vwap)   FILTER (WHERE feed = 'cash')  AS c
-    FROM f GROUP BY 1, 2, 3, 4
+    FROM f GROUP BY 1, 2
 ), leg AS (
   SELECT condition_id, outcome_index,
          COALESCE(sh_venue, sh_cash) AS shares,
          COALESCE(v, c) AS venue_price,
-         CASE WHEN v IS NOT NULL AND c IS NOT NULL THEN c
-              WHEN v IS NOT NULL THEN NULL
-              ELSE c END AS cash_price,
-         CASE WHEN v IS NOT NULL AND c IS NOT NULL
-                THEN CASE WHEN ((c - v) / NULLIF(0.05 * v * (1 - v), 0)) < 0.05
-                          THEN 'maker, fee observed at zero'
-                          ELSE 'taker, fee observed' END
-              WHEN v IS NOT NULL THEN 'UNKNOWN, cash never seen'
-              ELSE 'cash only, venue price inferred' END AS fee_status
+         -- BEST CASE for an unseen leg: he was a maker and paid nothing.
+         CASE WHEN c IS NOT NULL THEN c ELSE v END AS cash_best,
+         -- WORST CASE for an unseen leg: he was a taker and paid the wedge.
+         CASE WHEN c IS NOT NULL THEN c
+              ELSE v + 0.05 * v * (1 - v) END AS cash_worst,
+         (v IS NOT NULL AND c IS NULL) AS fee_unknown
     FROM g
 ), m AS (
   SELECT condition_id,
-         bool_or(fee_status = 'UNKNOWN, cash never seen') AS any_unknown,
+         bool_or(fee_unknown) AS any_unknown,
          sum(shares) FILTER (WHERE outcome_index = 0) AS y,
          sum(shares) FILTER (WHERE outcome_index = 1) AS n,
          sum(shares * venue_price) FILTER (WHERE outcome_index = 0)
            / NULLIF(sum(shares) FILTER (WHERE outcome_index = 0), 0) AS v0,
          sum(shares * venue_price) FILTER (WHERE outcome_index = 1)
            / NULLIF(sum(shares) FILTER (WHERE outcome_index = 1), 0) AS v1,
-         sum(shares * COALESCE(cash_price, venue_price)) FILTER (WHERE outcome_index = 0)
-           / NULLIF(sum(shares) FILTER (WHERE outcome_index = 0), 0) AS c0,
-         sum(shares * COALESCE(cash_price, venue_price)) FILTER (WHERE outcome_index = 1)
-           / NULLIF(sum(shares) FILTER (WHERE outcome_index = 1), 0) AS c1
+         sum(shares * cash_best) FILTER (WHERE outcome_index = 0)
+           / NULLIF(sum(shares) FILTER (WHERE outcome_index = 0), 0) AS b0,
+         sum(shares * cash_best) FILTER (WHERE outcome_index = 1)
+           / NULLIF(sum(shares) FILTER (WHERE outcome_index = 1), 0) AS b1,
+         sum(shares * cash_worst) FILTER (WHERE outcome_index = 0)
+           / NULLIF(sum(shares) FILTER (WHERE outcome_index = 0), 0) AS w0,
+         sum(shares * cash_worst) FILTER (WHERE outcome_index = 1)
+           / NULLIF(sum(shares) FILTER (WHERE outcome_index = 1), 0) AS w1
     FROM leg GROUP BY 1
 )
-SELECT CASE WHEN any_unknown THEN 'B some legs never seen in cash (fee UNKNOWN)'
-            ELSE 'A fee observed on every leg' END AS basis,
+SELECT CASE WHEN any_unknown THEN 'B some legs never seen in cash -- BRACKETED'
+            ELSE 'A fee OBSERVED on every leg -- measured' END AS basis,
        count(*) AS markets,
        round(sum(LEAST(y, n))::numeric, 0) AS matched_sh,
        round(avg(v0 + v1)::numeric, 5) AS gross_pair_cost,
-       round(avg(c0 + c1)::numeric, 5) AS effective_pair_cost,
        round(avg(1 - (v0 + v1))::numeric, 5) AS gross_matched_edge,
-       round(avg(1 - (c0 + c1))::numeric, 5) AS net_matched_edge,
+       round(avg(1 - (b0 + b1))::numeric, 5) AS net_edge_BEST_all_maker,
+       round(avg(1 - (w0 + w1))::numeric, 5) AS net_edge_WORST_all_taker,
        count(*) FILTER (WHERE v0 + v1 < 1) AS gross_under_one,
-       count(*) FILTER (WHERE c0 + c1 < 1) AS net_under_one,
-       round((100.0 * count(*) FILTER (WHERE c0 + c1 < 1)
-              / NULLIF(count(*) FILTER (WHERE v0 + v1 < 1), 0))::numeric, 1)
-         AS pct_of_gross_winners_surviving,
+       count(*) FILTER (WHERE b0 + b1 < 1) AS under_one_BEST,
+       count(*) FILTER (WHERE w0 + w1 < 1) AS under_one_WORST,
        round(sum(LEAST(y, n) * (1 - (v0 + v1)))::numeric, 0) AS gross_matched_pnl,
-       round(sum(LEAST(y, n) * (1 - (c0 + c1)))::numeric, 0) AS NET_matched_pnl
+       round(sum(LEAST(y, n) * (1 - (b0 + b1)))::numeric, 0) AS net_pnl_BEST,
+       round(sum(LEAST(y, n) * (1 - (w0 + w1)))::numeric, 0) AS net_pnl_WORST
   FROM m WHERE y > 0 AND n > 0 GROUP BY 1 ORDER BY 2 DESC;
