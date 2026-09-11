@@ -29,6 +29,7 @@ import sys
 try:
     import pglast
     from pglast import ast
+    from pglast.enums import MinMaxOp
 except ImportError:  # pragma: no cover
     sys.exit("pglast is required: pip install pglast")
 
@@ -160,12 +161,190 @@ def check_statement(stmt, path, idx):
     return problems
 
 
+
+# ---------------------------------------------------------------------------
+# THE MISSING-LEG SEMANTIC GUARD
+#
+# WHY THIS EXISTS. Run 68's telescoping self-check failed because of
+#
+#     LEAST(sum(sh) FILTER (WHERE outcome_index = 0),
+#           sum(sh) FILTER (WHERE outcome_index = 1))
+#
+# PostgreSQL's LEAST and GREATEST IGNORE NULL arguments -- the result is NULL
+# only if EVERY argument is NULL. So on a condition with only one outcome leg,
+# one FILTER aggregate is NULL and LEAST silently returns THE OTHER LEG'S FULL
+# QUANTITY where the intended value is zero. Nothing errors; a wrong number is
+# produced and propagates.
+#
+# The name-resolution guard above catches renames. This is its counterpart for
+# MISSING-LEG ARITHMETIC: wherever absence of a leg means ZERO economically,
+# the aggregate must say so explicitly rather than leaving NULL to be swallowed.
+#
+# Two aggregate shapes are nullable over a NON-EMPTY group, and they are the
+# ones that matter here:
+#     agg(...) FILTER (WHERE ...)      -- NULL when no row passes the filter
+#     max/min(CASE WHEN ... THEN ...)  -- NULL when no row matches and there is
+#                                         no ELSE branch
+# By contrast sum(CASE WHEN ... THEN x ELSE 0 END) is non-null over a non-empty
+# group, which is why the walk was correct while its yardstick was not.
+#
+# Flagged only inside LEAST/GREATEST, where the swallowing is silent. A nullable
+# leg aggregate used in ordinary arithmetic propagates NULL instead, which is
+# visible rather than wrong -- a different and far less dangerous failure.
+
+NULLABLE_AGGS = {"max", "min", "sum", "count", "avg", "bool_or", "bool_and"}
+
+
+def _fname(node):
+    try:
+        return ".".join(str(x.sval) for x in node.funcname).lower()
+    except Exception:
+        return ""
+
+
+def _is_nullable_leg_agg(node, cte_nullable, aliases):
+    """True if this expression can be NULL because a leg is absent."""
+    if isinstance(node, ast.CoalesceExpr):
+        return False                      # explicitly made zero-safe
+    if isinstance(node, ast.TypeCast):
+        return _is_nullable_leg_agg(node.arg, cte_nullable, aliases)
+    if isinstance(node, ast.FuncCall):
+        name = _fname(node)
+        if name == "coalesce":
+            return False
+        if node.agg_filter is not None:
+            return True                   # agg(...) FILTER (...)
+        if name in ("max", "min") and node.args:
+            a = node.args[0]
+            if isinstance(a, ast.CaseExpr) and a.defresult is None:
+                return True               # max/min(CASE WHEN ... THEN ... END)
+        return False
+    if isinstance(node, ast.ColumnRef) and len(node.fields) == 2:
+        a, c = node.fields
+        if isinstance(a, ast.A_Star) or isinstance(c, ast.A_Star):
+            return False
+        cte = aliases.get(str(a.sval))
+        if cte is None:
+            return False
+        return cte_nullable.get(cte, {}).get(str(c.sval), False)
+    return False
+
+
+def check_missing_leg(stmt, path, idx, ctes, aliases, allow_lines=frozenset()):
+    # nullability of each CTE's output columns, resolved in declaration order so
+    # a later CTE can see an earlier one's columns
+    cte_nullable = {}
+    order = []
+
+    def collect(n):
+        if isinstance(n, ast.CommonTableExpr):
+            order.append(n)
+    walk(stmt, collect)
+
+    for cte in order:
+        q = cte.ctequery
+        while isinstance(q, ast.SelectStmt) and q.larg is not None:
+            q = q.larg
+        cols = {}
+        if isinstance(q, ast.SelectStmt) and q.targetList:
+            inner = {}
+            def bind_inner(n):
+                if isinstance(n, ast.RangeVar) and n.schemaname is None:
+                    key = n.alias.aliasname if n.alias else n.relname
+                    inner.setdefault(key, set()).add(
+                        n.relname if n.relname in cte_nullable else None)
+            walk(q.fromClause, bind_inner)
+            inner_alias = {a: next(iter(t)) for a, t in inner.items()
+                           if len(t) == 1 and next(iter(t)) is not None}
+            for t in q.targetList:
+                nm = t.name
+                if nm is None and isinstance(t.val, ast.ColumnRef):
+                    last = t.val.fields[-1]
+                    if not isinstance(last, ast.A_Star):
+                        nm = str(last.sval)
+                if nm:
+                    cols[nm] = _is_nullable_leg_agg(t.val, cte_nullable, inner_alias)
+        cte_nullable[cte.ctename] = cols
+
+    problems = []
+    seen = set()
+
+    # LEAST/GREATEST are NOT FuncCall nodes. PostgreSQL parses them into a
+    # dedicated MinMaxExpr (op IS_LEAST / IS_GREATEST). The first version of
+    # this guard looked for FuncCall and therefore COULD NEVER FIRE -- it
+    # reported every file clean, including the one carrying the run-68 defect.
+    # That is the vacuous-filter error in tooling form, so the regression test
+    # below is not optional: a guard is not installed until it has been seen to
+    # fail on the bug it was written for.
+    def visit(n):
+        if not isinstance(n, ast.MinMaxExpr) or not n.args:
+            return
+        op = "LEAST" if int(n.op) == int(MinMaxOp.IS_LEAST) else "GREATEST"
+        bad = [i for i, a in enumerate(n.args)
+               if _is_nullable_leg_agg(a, cte_nullable, aliases)]
+        if not bad:
+            return
+        # An intentional reproduction of the defect -- needed to measure a
+        # correction against the published figure -- is marked in the SQL with
+        # `lint: allow-missing-leg` on the construct's line or just above it.
+        # Without this, the only way to measure the bug would be to delete the
+        # guard.
+        if getattr(n, "location", None) is not None and n.location in allow_lines:
+            return
+        key = (idx, str(n.args[0])[:120], tuple(bad))
+        if key in seen:
+            return
+        seen.add(key)
+        problems.append(
+            f"{path}: statement {idx}: MISSING-LEG HAZARD -- {op}() argument(s) "
+            f"{bad} can be NULL when a leg is absent, and {op} IGNORES NULL, so "
+            f"the other argument is returned where zero is meant. Wrap each "
+            f"operand in COALESCE(..., 0)."
+        )
+    walk(stmt, visit)
+    return problems
+
+
+
+def _cte_and_aliases(stmt):
+    """CTE names present, and the conservative alias -> CTE map (see above)."""
+    ctes = {}
+    def collect(n):
+        if isinstance(n, ast.CommonTableExpr):
+            ctes[n.ctename] = cte_columns(n)
+    walk(stmt, collect)
+    bindings = {}
+    def bind(n):
+        if isinstance(n, ast.RangeVar):
+            key = n.alias.aliasname if n.alias else n.relname
+            target = n.relname if (n.relname in ctes and n.schemaname is None) else None
+            bindings.setdefault(key, set()).add(target)
+    walk(stmt, bind)
+    aliases = {a: next(iter(t)) for a, t in bindings.items()
+               if len(t) == 1 and next(iter(t)) is not None}
+    return ctes, aliases
+
+
 def main(paths):
     bad = False
     for path in paths:
         text = open(path).read()
         problems = workflow_guards(path, text)
         sql = re.sub(r"^\s*\\echo.*$", "", text, flags=re.M)
+        # character offsets of every construct on (or just below) a line
+        # carrying the allow pragma, so the AST node's `location` can be matched
+        allowed = set()
+        starts, off = [], 0
+        for ln in sql.splitlines(True):
+            starts.append(off)
+            off += len(ln)
+        lines = sql.splitlines()
+        for i, ln in enumerate(lines):
+            if "lint: allow-missing-leg" not in ln:
+                continue
+            for j in (i, i + 1, i + 2, i + 3):
+                if j < len(lines):
+                    allowed.update(range(starts[j], starts[j] + len(lines[j]) + 1))
         try:
             stmts = pglast.parse_sql(sql)
         except Exception as exc:
@@ -174,6 +353,9 @@ def main(paths):
             continue
         for i, raw in enumerate(stmts, 1):
             problems += check_statement(raw.stmt, path, i)
+            problems += check_missing_leg(raw.stmt, path, i,
+                                          *_cte_and_aliases(raw.stmt),
+                                          allow_lines=allowed)
         if problems:
             bad = True
             for p in problems:
