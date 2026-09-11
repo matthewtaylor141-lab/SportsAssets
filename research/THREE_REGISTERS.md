@@ -144,3 +144,17 @@ Nothing about the 38.95% is inferred from the 61.05%.
 
 `mirror_live=false` throughout this work. Nothing in any register has changed
 live trading behaviour.
+
+---
+
+## Register status — 2026-09-11
+
+- The **BETTOR causal bridge is closed**: `CAUSAL_BRIDGE_CLOSED.md`. Its
+  conclusions are locked by owner order and a contradicting result is a
+  retraction, never a silent overwrite.
+- The open study is the **edge-decay / latency-cost audit**:
+  `LATENCY_AUDIT_DESIGN.md`, awaiting owner approval of the measurement design
+  before any expensive run. It produces register-2 figures on RN1's venue and
+  register-3 figures on PMUS, and the two are never added together.
+- `NATIVE_PAIR_ARCHITECTURE_NOTE.md` is a **research note only** — not
+  approved, not built, not scheduled.
