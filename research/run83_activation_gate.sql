@@ -23,13 +23,27 @@ SELECT
 
 \echo
 \echo == 2. THE DECIDING SPLIT: captured vs missed, with the miss reasons ==
+--
+-- GROUPING ON THE RAW miss_reason DESTROYED THIS QUERY ON ITS FIRST RUN
+-- (2026-09-12 16:04Z). The reason string ends ", now +72.727s" -- an elapsed
+-- measurement, distinct per row -- so `GROUP BY miss_reason` made one group per
+-- row: ~125,000 one-row groups, 3,000 of which printed and consumed the whole
+-- head -3000 budget of the runner. Statements 3 through 13 never ran into the
+-- log at all, and the seven gate items they answer went unverified.
+--
+-- The elapsed tail is the very thing being measured, so it cannot stay in a
+-- grouping key. split_part cuts at ", now " and keeps the invariant half --
+-- "window closed unread: due at +0s, window 0.05s" -- which is bounded by the
+-- ten-offset ladder. The LIMIT is a second line of defence: a grouping key that
+-- explodes again truncates ITSELF rather than the statements below it.
 SELECT status,
-       COALESCE(miss_reason, '(none)')            AS miss_reason,
+       split_part(COALESCE(miss_reason, '(none)'), ', now ', 1) AS miss_reason,
        count(*)                                   AS rows,
        round(100.0 * count(*) / SUM(count(*)) OVER (), 2) AS pct
 FROM rn1_obs_snapshots
-GROUP BY status, miss_reason
-ORDER BY rows DESC;
+GROUP BY 1, 2
+ORDER BY rows DESC
+LIMIT 40;
 
 \echo
 \echo == 3. ACTUAL VENUE READS: rows that carry a response instant ==
