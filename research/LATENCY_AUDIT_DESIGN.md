@@ -1,464 +1,410 @@
-# Edge-decay / latency-cost audit — MEASUREMENT DESIGN, awaiting owner approval
+# Edge-decay / latency audit — MEASUREMENT DESIGN, revision 2
 
-**Owner question:** at the earliest moment BETTOR could realistically act, how
-much of RN1's economic edge still existed?
+**Supersedes revision 1 in full.** Revision 1 tried to estimate one quantity
+called "latency". Run 79 showed that quantity does not exist in retained data as
+a single measurable thing, so the audit is now **two separate estimators** that
+are never added, netted, or presented as one number.
 
-**Status: DESIGN ONLY. No expensive query has been run. No number in this file
-is a result.** `mirror_live=false`. No production change, no data repair.
+**Status: DESIGN ONLY, awaiting approval. Run 80 is NOT approved and has not
+run.** No economics executed. `ai_trades` / TRUEEDGE untouched.
+`mirror_live=false`. No production change, no data repair.
 
-`lat_cost = $41,430.00` is a **claim to be tested**, not a target to reproduce.
-The independent estimator below never reads `ai_trades`. Runs 79–83 may not use
-it, or any TRUEEDGE-derived field, to repair clocks, select population, define
-prices, define quantities, or calculate economics (§3, the independence rule).
-It becomes readable in run 84 only, as the thing being compared against.
-
-**Run 79 is APPROVED and no further.** Runs 80–84 are designed, not approved;
-run 79's findings are returned for review before anything else is dispatched.
+`lat_cost = $41,430.00` remains a **claim to be tested**, in run 84 only.
 
 ---
 
-## 1. The exact raw tables and fields proposed
+## 0. LOCKED — the run-79 findings
 
-### Source side — RN1's own fills (register 1)
+Owner order 2026-09-12. These are not re-opened; a contradicting later result is
+a retraction with its own heading, never a silent overwrite.
 
-| table | fields | role |
+**0.1 `trades.ts` is not one clock population.** Four lanes, four semantics:
+
+| lane | what the `detected_at − ts` difference actually is | may it become physical reaction time? |
 |---|---|---|
-| `trades` | `id, whale_id, tx_hash, asset, condition_id, side, outcome, outcome_index, size, price, notional, market_slug, event_slug, sport, ts, source, detected_at, enriched_at, venue_seen_at, dedupe_key` | the source event; `ts` is his fill clock, `detected_at` ours |
-| `positions` | `condition_id, token_id, net_shares, avg_cost, realized_pnl, notional_in, resolved` | his state, for cohort definition only |
+| `backfill` | archive ingestion (p50 ≈ 241 days) | **never a latency observation** |
+| `chain` | clock-corrupted C1→C2 comparison; **91.7%** negative lag | **no** |
+| `poll` | polling / sweep cadence | **no — never called execution latency** |
+| `s1` | positive, tight, zero negatives, still crosses C1→C2 | **shape evidence only; CLOCK_UNRESOLVED as an absolute** unless independently calibrated |
 
-### Observation side — the books actually retained
+**0.2 The original `U1` source filter is withdrawn** and is **not** replaced by
+another guessed list. Every lane carries explicit semantics and is admitted only
+to estimators for which those semantics are valid (§3).
 
-| table | fields | role |
-|---|---|---|
-| `copy_probes` | `trade_id, asset, side, his_price, his_size, his_notional, fill_ts, probe_at, reaction_s, book_ok, best_ask, best_ask_usd, slippage_cents, vwap_1k, vwap_5k, fillable_1k, fillable_5k, residual_roi_1k, residual_roi_5k, depth (jsonb), error` | **the only fill-level book snapshot we retain**; `depth` = top 8 ask levels from `GET /book` on `clob_api_base` — **RN1's venue, not PMUS** |
-| `price_path` | `row_id -> live_orders.id, t_s, ask, sampled_at` | the only retained *post-event* price series; offsets `(0, 30, 60, 120, 281, 600)` s |
-| `mirror_shadow` | tick clock, `target, ledger_net, his_net, mark` | our reading of his state + a PMUS mark |
-| `mirror_orders` | `bid_at_place, ask_at_place, ask_at_send, wire, price, qty` | PMUS book as we saw it at placement / immediately before an IOC send |
+**0.3 `price_path` does not overlap the mirror-trading period.**
+`price_path` 2026-09-02 05:05 → 2026-09-04 23:15; `mirror_books` begins
+2026-09-06 00:40. It may be analysed **only** as a separate pre-mirror /
+entry-sleeve cohort and its decay curve is **never** generalised to the mirror
+period.
 
-### Our own execution side
+**0.4 `t_detect` / `t_send` / `t_reply` (925 rows) are OUR timestamps, not PMUS
+venue timestamps**, and pass the provenance and population gates in §7 before
+any use. Non-mirror ⇒ engineering diagnostic / sensitivity only, unless
+transportability is demonstrated.
 
-| table | fields | role |
-|---|---|---|
-| `mirror_orders` | `id, book_id, kind, side, intent, tif, post_only, his_level, price, wire, qty, order_id, state, venue_state, filled, booked_filled, avg_px, cash_usd, realized, maker, taker_at_placement, decision, fast, receipt (jsonb), placed_at, updated_at, done_at` | the live PMUS order record |
-| `mirror_fill_answers` | `whale, condition_id, fill_id, fill_ts, detected_at, at, tick, book_id, order_id, name, cause, rest_id, fast` | **which fill of his the tick named, and when** — the best retained source→named clock |
-| `mirror_books` | `flow_last_at`, book lifecycle | anchor clocks |
-| `live_orders` | `trade_id, us_market_slug, lane, his_price, reaction_s, limit_price, requested_usd, requested_shares, order_id, status, filled_shares, fill_price, filled_usd, raw (jsonb), placed_at, payout, pnl, settled_at` | the pre-mirror entry sleeve; `price_path`'s anchor |
+**0.5 There is no retained PMUS venue timestamp.** submit→venue-ack and
+venue-ack→fill are **NOT IDENTIFIABLE from venue-clock evidence.**
 
-### Settlement
+**0.6 Every future run is pinned to one immutable `AUDIT_CUTOFF_TS`** (§2) and
+prints it. No population is ever compared across two drifting live reads.
 
-`markets.resolved, markets.resolved_prices, markets.resolved_at`,
-`market_tokens.token_id, outcome_index` — the payout that turns a price
-difference into dollars.
-
-### Mapping
-
-`us_premap` (PMUS mapping state). **Caveat already established:** `us_premap` is
-CREATEd outside `backend/migrations/`, so the migration catalogue knows only a
-fraction of its columns; `research/check_sql.py` treats it as UNRESOLVED by
-design (test fixture 6). Any use of it must name its columns from the worker,
-not from the catalogue.
-
-### The audit target — READ IN RUN 84 ONLY
-
-**Out of bounds for runs 79-83 under the independence rule in §3.**
-
-`ai_trades` (`trade_id, whale_username, asset, condition_id, side, his_price,
-his_notional, reaction_s, clip_target, filled_notional, fill_vwap, shares,
-slippage_cents, status, placed_at, payout, pnl, counterfactual_pnl,
-settled_at`). **This is TRUEEDGE's entire input.** It is not an input to the
-independent estimator.
+**0.7 The 120 s gate discrepancy is investigated before `reaction_s` is used as
+a selection descriptor** (§6).
 
 ---
 
-## 2. Evidence / provenance status of each field
+## 1. THE TWO ESTIMATORS — and why they are separate
 
-The Run 78 discipline applies unchanged and is not collapsed:
-
-    COLUMN EXISTS -> PRODUCTION WRITE SITE EXISTS -> HISTORICAL POPULATION
-      EXISTS -> SEMANTICS VERIFIED -> ELIGIBLE FOR **THIS SPECIFIC ESTIMATOR**
-
-The last stage is narrower than Run 78's. A field can be eligible for
-attribution and ineligible here: `mirror_shadow.mark` is a verified PMUS quote
-and still cannot serve as an *executable* price, because a mark is not a depth.
-
-**Stages 1–2 (code side)** are extended in `research/evidence_tiers.py` — the
-`FIELDS` list and the `SEMANTICS` registry grow to cover every field in §1, and
-statement 0 of the run-79 SQL is generated from the registry so the two halves
-cannot drift.
-
-**Stages 3–5 (data side)** are measured by run 79's statement 0 before any
-economics. Nothing below is a measurement; it is what the code read says, and
-each row is a prediction the gate will confirm or refute.
-
-| field | stage-2 read from code | note |
+| | **Estimator A** | **Estimator B** |
 |---|---|---|
-| `trades.ts` | WRITE_SITE (`ingestion/pipeline.py`, `ingestion/history.py`) | **mixed domain**: block timestamp on `source='chain'`, API timestamp on `source='poll'` — must be split by `source`, never pooled |
-| `trades.detected_at` | WRITE_SITE — `datetime.now(tz=utc)` in the app process (`pipeline.py:128`) | app clock, **not** DB `now()` |
-| `trades.venue_seen_at` | **WRITE_SITE** — `ingestion/pipeline.py:184`, inside `ON CONFLICT DO UPDATE`: `now()` stamped only when `EXCLUDED.source='poll'` AND the same whale, first stamp wins | **I predicted "no write site" and was wrong** — an earlier hand grep filtered too narrowly and the code-side gate caught it. Semantics stay UNVERIFIED: it is stamped only on the poll lane, so its NULLs mean "chain-only, or never re-seen", never "not seen by the venue" |
-| `copy_probes.probe_at` | WRITE_SITE (`copy_probe.py:110`) | stamped **before** the semaphore and **before** the HTTP book GET |
-| `copy_probes.depth` | WRITE_SITE | **top 8 ask levels only** — a hard ceiling on measurable depth |
-| `copy_probes.reaction_s` | WRITE_SITE | `probe_at − fill_ts`: a **cross-domain subtraction** (see §3) |
-| `price_path.ask` / `t_s` | WRITE_SITE (`workers/price_path.py`) | anchored at `live_orders.placed_at`, **not** at his fill |
-| `price_path.sampled_at` | **DB_DEFAULT** — `DEFAULT now()` (migration 042); the worker's INSERT never names it | a third stage-2 verdict, added because the name rule alone called this UNAVAILABLE while it is populated on every row (see below) |
-| `mirror_orders.placed_at` | WRITE_SITE, `DEFAULT now()` at the INSERT | written with `state='placing'` — **before the venue send** |
-| `mirror_orders.updated_at` | WRITE_SITE, but **mutable** | the `state='open'` write is the nearest ack proxy and is overwritten by every later update -> ack time not durably retained |
-| `mirror_orders.done_at` | WRITE_SITE, terminal only | |
-| `mirror_orders.ask_at_send` | WRITE_SITE (059) | NULL on every rest by design; after the MAKER lane nearly everything is a rest -> population predicted thin |
-| `mirror_orders.receipt` | WRITE_SITE | **unprobed**: whether the venue's response carries any venue-side timestamp is unknown and is a run-79 probe |
-| `mirror_fill_answers.*` | WRITE_SITE (060/061) | populated only from 2026-09-08 |
-| **fees** | **no fee column exists in `backend/migrations/`** | **NOT IDENTIFIABLE FROM RETAINED DATA.** The $1 pair probe (task #126) is the only path to a measured fee |
-| `mirror_orders.trigger_trade_id`, `his_fill_ts`, `first_fill_at` | NO_WRITE_SITE (Run 78) | remain NOT IDENTIFIABLE; not resurrected here |
-| `his_fill_id` | WRITE_SITE, semantics UNVERIFIED (Run 78 §5) | **not promoted** for this estimator either |
+| name | `FIRST_RETAINED_OBSERVATION_DRAG` | physical / engineering latency |
+| question | at the first exact fill-level book we actually retained, how much worse was the independently observable executable price than RN1's fill price? | which pieces of elapsed time can be measured or bounded from retained clocks? |
+| needs a physical reaction time? | **no** | that *is* the question |
+| needs settlement? | **no** | no |
+| unit | cents/share and dollars | seconds, per clock-domain pair |
+| may be called "latency cost"? | **NO** | only where a component is POINT_IDENTIFIED |
 
-**A COLUMN DEFAULT IS A WRITE SITE, AND THE APP'S SQL NEVER NAMES IT.** Running
-the extended code-side gate turned up `price_path.sampled_at` as NO_WRITE_SITE:
-the worker sends `INSERT INTO price_path (row_id, t_s, ask) VALUES ($1,$2,$3)`
-and the column carries `DEFAULT now()`. By the name rule alone the field would
-have been declared UNAVAILABLE while being populated on every row — **a false
-UNAVAILABLE, which is not the safe direction: it silently deletes real
-evidence.** `evidence_tiers.py` now emits three stage-2 verdicts —
-`WRITE_SITE` / `DB_DEFAULT` / `NO_WRITE_SITE`. `DB_DEFAULT` is kept distinct
-rather than folded into "written" because **the author is different**: the
-database, at commit, on the server's clock (C3), not the application on the app
-container's clock (C2) — and for a clock field that distinction *is* the
-measurement.
-
-Re-checked against Run 78: `trigger_trade_id`, `his_fill_ts` and `first_fill_at`
-have no DEFAULT either, so they remain NO_WRITE_SITE and
-**`CAUSAL_BRIDGE_CLOSED.md` conclusion 4 is unaffected.**
-
-Any stage failing leaves its component **NOT IDENTIFIABLE**, printed as such.
-No component is allowed to appear as `0.00`.
+A measures *how much*; B measures *how long*. Multiplying or narrating one as
+the cause of the other is the error revision 1 built in.
 
 ---
 
-## 3. The clock domains
+## 2. `AUDIT_CUTOFF_TS` — immutable, printed, per-table
 
-Four domains, and they are not interchangeable.
+    AUDIT_CUTOFF_TS = 2026-09-12T00:00:00Z
 
-| id | domain | generated by | represents |
+Chosen because it is after run 79 completed (23:55:42Z) and before run 80, on a
+round boundary. **It never moves.** Changing it creates a new named cutoff and
+obliges a re-run of every statement that used the old one; results from two
+cutoffs are never compared.
+
+Applied as a predicate on **each table's own arrival clock**, not one global
+filter:
+
+| table | cutoff predicate | why this column |
+|---|---|---|
+| `trades` | `ts <= CUTOFF AND detected_at <= CUTOFF` | both the event and our sight of it must precede the cutoff |
+| `copy_probes` | `probe_at <= CUTOFF` | the observation's own clock |
+| `price_path` | `sampled_at <= CUTOFF` | the sample's own clock |
+| `mirror_orders` | `placed_at <= CUTOFF` | the row's creation, not its mutable `updated_at` |
+| `mirror_books` / `mirror_shadow` | `opened_at` / `at <= CUTOFF` | the tick's own clock |
+| `markets` (settlement) | `resolved_at <= CUTOFF` | settlement **as known at the cutoff** — a market resolved after it counts as unsettled, so U4 cannot grow between runs |
+| `live_orders` | `placed_at <= CUTOFF` | |
+
+Run 79's U0 read 962,459 in one statement and 962,454 in another because five
+rows arrived mid-run. Under this rule that cannot recur.
+
+Every run prints the cutoff in its header **and** re-prints U0 beside it, so a
+drift is visible rather than inferred.
+
+---
+
+## 3. REVISED UNIVERSES
+
+The old chain `U0 ⊃ U1 ⊃ U2 ⊃ U3 ⊃ U4` is wrong because it made every estimator
+inherit a source-clock filter that **Estimator A does not need**. Replaced by a
+base population plus *per-estimator admission*.
+
+    U0      RN1 fills at or before the cutoff.
+            The denominator for every coverage percentage. No filter but the
+            cutoff and the whale.
+
+    LANE    Every row carries its ingestion lane verbatim (backfill / chain /
+            poll / s1 / anything new). NOT a filter -- a CARRIED ATTRIBUTE.
+            A lane that appears and is not in the matrix below halts the run
+            rather than being silently pooled.
+
+    U2      THE OBSERVATION UNIVERSE, and Estimator A's primary population:
+              exact trade_id linkage to a copy_probes row
+              AND book_ok
+              AND error IS NULL
+              AND p_h valid (> 0 and < 1)
+              AND a depth array present
+              AND probe_at <= CUTOFF
+            U2 DOES NOT REQUIRE A DEFENSIBLE SOURCE CLOCK, and does not
+            require settlement. It is defined by what we OBSERVED, not by what
+            we can time.
+
+    U3      PMUS-mappable. Run 79 used "ever mapped", a COARSE PROXY, and it is
+            labelled as such until a time-causal mapping state is built.
+
+    U4      Settlement known as at the cutoff. SECONDARY ONLY (§9).
+
+    UB      Estimator B's populations, one per component, each defined by the
+            clocks that component needs (§5). There is no single UB.
+
+**`U1` no longer exists.** The concept it tried to express — "rows whose source
+clock is defensible" — is not a property of a row; it is a property of a
+(lane, estimator) pair, and it lives in the matrix below.
+
+---
+
+## 4. LANE × ESTIMATOR ELIGIBILITY MATRIX
+
+`A` = `FIRST_RETAINED_OBSERVATION_DRAG`. `B-*` = Estimator B components.
+
+| lane | A: drag | B: source→detection | B: detection→send | B: send→reply | notes |
+|---|---|---|---|---|---|
+| `backfill` | **ADMITTED** | **EXCLUDED** | EXCLUDED | EXCLUDED | A needs no source clock; the probe either exists or it does not. If a backfill row carries an exact probe it is a real observation. **Reported as its own stratum** so it can never silently dominate. |
+| `chain` | **ADMITTED** | **EXCLUDED** — clock-corrupted, 91.7% negative | admitted (C2→C2) | admitted | `ts → detected_at` must never be rendered as seconds here |
+| `poll` | **ADMITTED** | **CADENCE ONLY** — labelled `POLL_SWEEP_CADENCE`, never execution latency | admitted | admitted | |
+| `s1` | **ADMITTED** | **SHAPE ONLY** — `S1_CROSS_CLOCK_SHAPE`, CLOCK_UNRESOLVED as an absolute | admitted | admitted | the only positive, tight, zero-negative lane |
+| unknown/new | **HALT** | HALT | HALT | HALT | an unrecognised lane stops the run |
+
+Admitting `backfill` to A is deliberate and is the point of separating the
+estimators: A asks what the book looked like at a retained observation, and that
+question does not care when we learned of the fill. **Its lane mix is printed in
+every A output**, so if the drag is being carried by backfill rows that is
+visible immediately rather than discovered later.
+
+---
+
+## 5. ESTIMATOR A — `FIRST_RETAINED_OBSERVATION_DRAG`
+
+Per event *i* in U2, from **one exact probe snapshot**, never a borrowed book.
+
+    p_h                  = RN1's source fill price (trades.price)
+    OBSERVED_BEST_ASK    = copy_probes.best_ask from THAT probe
+    DEPTH_WALK_VWAP(q)   = VWAP to fill q from THAT probe's depth array,
+                           top-8 levels only
+
+    TOP_OF_BOOK_MOVE          = (OBSERVED_BEST_ASK  − p_h) · q
+    DEPTH_SLIPPAGE            = (DEPTH_WALK_VWAP − OBSERVED_BEST_ASK) · q
+    TOTAL_OBSERVED_REPLICATION_DRAG
+                              = (DEPTH_WALK_VWAP − p_h) · q
+                              = TOP_OF_BOOK_MOVE + DEPTH_SLIPPAGE
+
+**Closure assertion**, same event / same q / same snapshot, printed with a
+witness count before any figure:
+
+    | (TOP_OF_BOOK_MOVE + DEPTH_SLIPPAGE) − TOTAL_OBSERVED_REPLICATION_DRAG |
+        <= $0.005     per event AND in aggregate
+
+Zero violations beside zero witnesses is **NOT TESTED**. The identity
+telescopes, so it proves *data handling* — one snapshot, one q, one event, no
+borrowed row, no silent NULL — not the economics.
+
+**It is `FIRST_RETAINED_OBSERVATION_DRAG`. It is not a latency cost.** It
+contains whatever happened before the retained observation and says nothing
+about how many physical seconds caused it.
+
+### The size `q` — a decision I am flagging, not burying
+
+`TOP_OF_BOOK_MOVE` per share is q-free; `DEPTH_SLIPPAGE` is not. Production's
+sizing rule changed repeatedly across the window (ratio, $2,500 clip, per-game
+cap added then removed), so using "the production rule" would inject that rule's
+history into the measurement.
+
+Proposed: **cents per share is the primary unit**, and dollars are reported at
+three explicitly hypothetical sizes, none blessed:
+
+    q_a = 10% of RN1's notional at p_h, uncapped   (the standing ratio, no clips)
+    q_b = RN1's own shares                          (full-size replication)
+    q_c = a fixed $1,000 clip                       (a small constant)
+
+If you want one canonical q instead, say which and I will make it primary and
+demote the rest to sensitivities.
+
+**Depth exhaustion:** if the top-8 book fills only `q' < q`, the event is
+`DEPTH_EXHAUSTED`, every term is recomputed at `q'`, and those rows are bucketed
+apart — never pooled into a per-share or percentage figure with full-size rows.
+
+**Fees remain UNKNOWN and separate** (no fee column exists anywhere in
+`backend/migrations/`). A is a drag figure, not a net-of-cost figure.
+
+### A's reporting block
+
+Event count · conditions · source notional · shares · cents/share deterioration
+· dollar deterioration · median / p25 / p75 / p10 / p90 · positive / zero /
+negative deterioration fractions · depth-exhausted fraction · **source-lane
+mix** · sport and market-type segmentation where decision-time-valid.
+
+A **negative** drag (the book was better than his price) is a real, reportable
+outcome and is never floored at zero.
+
+---
+
+## 6. ESTIMATOR B — physical / engineering latency
+
+Every component carries one of exactly five labels, and no common timeline is
+forced across incompatible clocks:
+
+    POINT_IDENTIFIED · INTERVAL_IDENTIFIED · SHAPE_ONLY ·
+    CLOCK_UNRESOLVED · NOT_IDENTIFIABLE
+
+| component | clocks | proposed label | basis |
 |---|---|---|---|
-| **C1** | RN1 venue / chain | Polygon block producer, or the whale venue's API | `trades.ts` — block time on `source='chain'`, server time on `source='poll'`. **Two different things in one column.** |
-| **C2** | BETTOR app process | `datetime.now()` inside the worker/API container | `trades.detected_at`, `copy_probes.probe_at`, the mirror tick's own clock |
-| **C3** | Postgres server | `now()` / `DEFAULT now()` | `mirror_orders.placed_at / updated_at / done_at`, `live_orders.placed_at`, `price_path.sampled_at`, `service_heartbeats.beat_at` (`ai_trades.placed_at` is also C3 and is **out of bounds until run 84**) |
-| **C4** | PMUS venue | the venue | **nothing retained today** — possibly inside `receipt` / `raw`; unprobed |
+| source → detection, `chain` | C1→C2 | **CLOCK_UNRESOLVED** | 91.7% negative; never rendered as seconds |
+| source → detection, `poll` | C1→C2 | **CLOCK_UNRESOLVED**, reported as `POLL_SWEEP_CADENCE` | measures the sweep, not a reaction |
+| source → detection, `s1` | C1→C2 | **SHAPE_ONLY**, reported as `S1_CROSS_CLOCK_SHAPE` | positive, tight, zero negatives — a shape, not "4.159 seconds of latency" |
+| source → detection, `backfill` | — | **EXCLUDED** | not a detection |
+| detection → send | C2→C2, **two processes** | **INTERVAL_IDENTIFIED** (pending §7) | `t_send − t_detect`; same clock *kind*, different container |
+| send → reply | C2→C2, **one process** | **POINT_IDENTIFIED** (pending §7) | `t_reply − t_send`, both `time.time()` in the executor |
+| submit → venue ack | C4 | **NOT_IDENTIFIABLE** | no venue timestamp retained anywhere |
+| venue ack → fill | C4 | **NOT_IDENTIFIABLE** | ditto; `first_fill_at` has no write site (Run 78) |
+| mirror decision → placement | C3 | **NOT_IDENTIFIABLE as a send time** | `mirror_orders.placed_at` is stamped pre-send; `updated_at` is mutable |
+| app ↔ DB skew | C2↔C3 | **FOUND BUT UNDERPOWERED** | n = 2, present-day only; constrains C2↔C3 only and cannot explain a C1 artifact |
 
-Known skew and known ambiguity, carried forward verbatim:
-
-- `reaction_s = probe_at(C2) − fill_ts(C1)` has **median −0.73 s**. A negative
-  reaction time is not a fast reaction; it is proof the two clocks are not
-  comparable at sub-second resolution.
-- `probe_at` is stamped **before** the HTTP fetch and the fetch's completion
-  time was never retained. `probe_at` is therefore **not** the moment the
-  displayed book was observable — it is a lower bound on it.
-- `mirror_shadow` snapshots carry scan-completion / page-walk ambiguity: the
-  tick clock is not the instant each market in the tick was read.
-- C2 vs C3 skew is unmeasured (it is the same skew that makes the
-  `test_l2_review_pins` since-label flaky, task #72).
-
-**Rules, enforced in the SQL, not in prose:**
-
-1. Every derived duration carries the pair of domains it crossed.
-2. A same-domain subtraction may produce a point estimate.
-3. A cross-domain subtraction produces an **interval** and the label
-   `CLOCK_UNRESOLVED`, and may never be reported to sub-second precision.
-4. Run 79 measures two things that may partially repair this and are cheap:
-   (a) **a search for an INDEPENDENT C2↔C3 bridge** — a table carrying an
-   app-supplied timestamp AND a DB-defaulted timestamp written by the SAME
-   statement. Run 79 enumerates the candidates and reports the skew only from
-   one that qualifies. **If none qualifies, the answer is `CLOCK_UNRESOLVED`** —
-   the skew is not repaired by guessing and not repaired by the audited system;
-   (b) the C1 domain split, by profiling `detected_at − ts` separately for
-   `source='chain'` and `source='poll'`.
-5. No latency figure is quoted more precisely than its worst input's
-   uncertainty.
-
-**THE INDEPENDENCE RULE — owner correction, 2026-09-11, runs 79 through 83.**
-
-> Runs 79–83 must not use `ai_trades`, or any TRUEEDGE-derived field, to repair
-> clocks, select population, define prices, define quantities, or calculate
-> economics.
-
-An earlier draft of this file proposed bridging C2↔C3 with
-`copy_probes.probe_at` vs `ai_trades.placed_at` on the same `trade_id`. **That
-is withdrawn.** It would have calibrated the independent estimator's clock using
-a column written by the system under audit — the estimator would then share a
-failure mode with its subject, and a systematic error in the paper-trader's
-write path would be invisible to exactly the check meant to catch it. An
-unrepaired clock reported as `CLOCK_UNRESOLVED` is a weaker result and an honest
-one; a repaired clock borrowed from the audited system is a stronger-looking
-result that proves less.
-
-`ai_trades` becomes readable in **run 84 only**, for external comparison. An
-`ai_trades`-based clock diagnostic computed there is labelled
-**CORROBORATING / AUDIT-SIDE EVIDENCE** and never folded back into the
-independent estimator or into runs 79–83's figures.
+**`t_reply − t_send` is a venue round trip, not an acknowledgement time.** It
+bounds submit→ack from above; it does not identify it.
 
 ---
 
-## 4. The exact population definition
+## 7. THE 120 s / `reaction_s` DISCREPANCY — RESOLVED FROM CODE
 
-Nested, each step printed with count, conditions and **dollars**, so attrition
-is visible rather than absorbed:
+Not a plan. Read from the write sites:
 
-    U0  RN1 fills in the retained window
-    U1  ∩ a defensible source clock (source known, ts non-null)
-    U2  ∩ an exact fill-level book observation
-          (copy_probes.trade_id = trades.id, book_ok, error IS NULL)
-    U3  ∩ PMUS-mappable at the time of the event
-    U4  ∩ settlement known (markets.resolved with a payout for the token)
+    ingestion/pipeline.py:76
+        latency = detected_at.timestamp() − ev.ts_epoch
+        "latency_s": round(max(latency, 0.0), 3)          <-- CLAMPED AT ZERO
 
-The **common-unit cohort** for Phase 5 is `U2 ∩ U4`: both settlement-realized counterfactual margin and
-post-detection price deterioration measurable on **the same events**.
+    copy_probe.py:104
+        if latency is not None and float(latency) > MAX_REACTION_S: return
+        MAX_REACTION_S = 120.0
 
-Inherited selections, printed every time, never silently carried:
+    copy_probe.py:110,135
+        probe_at = datetime.now(utc)                      <-- stamped later
+        reaction = (probe_at − fill_dt).total_seconds()   <-- the STORED column
 
-- `copy_probes` fires on **BUY only** (`copy_probe.py:101`) — the SELL side of
-  his flow is absent from this instrument entirely.
-- `copy_probes` fires only when `latency_s <= MAX_REACTION_S = 120 s` — late
-  detections are structurally missing, which **biases the cohort toward our
-  fastest detections**. This is the single most important selection in the study
-  and it cuts in the direction that flatters us.
-- Both `copy_probe_enabled` and `ai_trader_enabled` are env switches; periods
-  with either off are absent.
-- Whale must be in `source_whales() | vetting_whales()` at the time.
+**They are two different quantities and the gate tests the earlier one:**
 
-**No borrowing.** One fill never uses another fill's probe, book, or price path.
-A missing observation is a `missingness_reason`, never a substitution from a
-neighbour. (This is the exact-fill-coverage rule that already bit us once.)
+1. The gate variable is `latency_s = max(detected_at − ts, 0)` — **floored at
+   zero**. Every one of the 180,958 negative-lag `chain` rows presents `0.000`
+   to the gate, so **the gate never rejects a negative-lag row**, and
+   `latency_s` is not the same quantity as `detected_at − ts` for that lane.
+2. The stored column is `reaction_s = probe_at − ts`, and `probe_at` is stamped
+   **after** the payload was built, downstream of detection. So
+   `reaction_s ≥ detected_at − ts` always, by the detection→probe dispatch
+   interval.
+3. Therefore a row can pass at `latency_s = 119.8` and store
+   `reaction_s = 127.189`. **127.189 is not a gate violation; it is the gate
+   measuring a different, floored, earlier variable.**
 
----
-
-## 5. The equations
-
-All per event *i*, in **cents per share** and **dollars**, on one size.
-
-Let `p_h` = his fill price, `q_h` = his shares, `N_h = p_h·q_h`, `q` = the
-shares BETTOR would have wanted (the copy ratio applied to `N_h`, then the same
-production clip rules), `payout_i ∈ {0,1}` from settlement.
-
-**THE DECOMPOSITION — owner's form, 2026-09-11, and the only one used.** The two
-execution components are **disjoint** and are subtracted separately. An earlier
-draft of this file subtracted a total drag AND a slippage term, which counted
-the depth cost twice; that draft is superseded here.
-
-    SETTLEMENT_REALIZED_CF_MARGIN_i
-                                = (payout_i − p_h) · q
-
-    best_ask_at_action_i(d)     = top-of-book ask on the book observed at the
-                                  defensible action time t_i + d
-
-    depth_walked_vwap_i(d)      = VWAP to fill q from that same book
-                                  (top-8 ceiling applies)
-
-    TOP_OF_BOOK_MOVE_i(d)       = (best_ask_at_action_i(d) − p_h) · q
-
-    DEPTH_SLIPPAGE_i(d)         = (depth_walked_vwap_i(d)
-                                   − best_ask_at_action_i(d)) · q
-
-    TOTAL_EXECUTION_DRAG_i(d)   = TOP_OF_BOOK_MOVE_i(d) + DEPTH_SLIPPAGE_i(d)
-                                = (depth_walked_vwap_i(d) − p_h) · q
-
-    IDENTIFIABLE_FEES_i         = UNKNOWN (no retained fee field)
-
-**The two permitted downstream forms, and only these two:**
-
-    REMAINING_MARGIN_i(d) = SETTLEMENT_REALIZED_CF_MARGIN_i
-                            − TOTAL_EXECUTION_DRAG_i(d)
-                            − IDENTIFIABLE_FEES_i
-
-    REMAINING_MARGIN_i(d) = SETTLEMENT_REALIZED_CF_MARGIN_i
-                            − TOP_OF_BOOK_MOVE_i(d)
-                            − DEPTH_SLIPPAGE_i(d)
-                            − IDENTIFIABLE_FEES_i
-
-They are equal by construction. **Never subtract the total AND its components** —
-that is the double count this correction removes, and any expression carrying
-`TOTAL_EXECUTION_DRAG` beside either component is wrong by construction.
-
-**CLOSURE ASSERTION (run 81, before any economic figure is printed).** Per event
-and in aggregate, to the cent:
-
-    |  (TOP_OF_BOOK_MOVE + DEPTH_SLIPPAGE)
-       − (depth_walked_vwap − p_h) · q  |            <= $0.005
-
-    |  form-1 REMAINING_MARGIN − form-2 REMAINING_MARGIN  |  <= $0.005
-
-Printed with a **witness count** — the number of events actually asserted on. A
-zero violation count beside a zero witness count is **NOT TESTED**, never PASS.
-If either assertion fails, no downstream economic figure is reported until the
-cause is named.
-
-Reported alongside, never inside the subtraction:
-
-    CROSS_VENUE_BASIS_i(d)      = (PMUS_best_i(d) − RN1venue_best_i(d)) · q
-                                  -- only where BOTH observations exist at a
-                                     defensible common time. It is a VENUE
-                                     CHOICE term, not an execution cost: it says
-                                     which book the above should have been
-                                     measured on, and double-counts against
-                                     TOP_OF_BOOK_MOVE if added to it.
-
-**THE NAME IS LOAD-BEARING — owner correction, 2026-09-11.**
-`(payout − p_h)·q` is **not** "RN1's gross edge" and must never be called that.
-It is settlement-dependent and directional: it is what one directional position
-happened to realize once the market resolved. It is named
-`SETTLEMENT_REALIZED_CF_MARGIN` everywhere, and an earlier draft's
-`RN1_GROSS_EDGE` is retired.
-
-It is **categorically separate** from the settlement-independent matched-pair
-mechanism already established in register 1:
-
-    MATCHED_PAIR_GROSS_PNL = M · (1 − v_Y − v_N)
-
-`MATCHED_PAIR_GROSS_PNL` is a structural property of a completed pair — it does
-not depend on which side wins. `SETTLEMENT_REALIZED_CF_MARGIN` depends on
-nothing else. **They are never added, netted, compared as though commensurable,
-or merged into one "edge" figure merely because both are denominated in
-dollars.** Any statement that treats the second as evidence about the first is a
-register violation (`THREE_REGISTERS.md`).
-
-The TRUEEDGE audit (run 84) **may** use `SETTLEMENT_REALIZED_CF_MARGIN`, because
-that is the quantity TRUEEDGE's `counterfactual_pnl` appears to compute — but it
-is then a statement about what TRUEEDGE evaluates, and must never be presented
-as RN1's structural matched-pair edge.
-
-**Definitional consequence.** `SETTLEMENT_REALIZED_CF_MARGIN` is ex-post by
-construction, so it is the *size of the prize* and never a decision-time
-predictor or a segmentation variable (§6's last rule). A mark-based alternative
-at a defensible horizon is possible and would change every remaining-margin
-figure; it is not used unless the owner asks.
-
-**Sign convention.** Positive `TOP_OF_BOOK_MOVE` and positive `DEPTH_SLIPPAGE`
-both mean *worse for us*. Both are written on the **ask**, so both are BUY-side;
-the SELL-side mirror image on the bid is out of scope here because the retained
-instrument (`copy_probes`) is BUY-only (§4).
-
-**One `q`, four terms.** The same `q` appears in all four. Where the retained
-book cannot fill `q`:
-
-- if the top-8 book fills only `q' < q`, the event is `DEPTH_EXHAUSTED` and is
-  reported at `q'` **with every term recomputed at `q'`**, never a blend;
-- a `q'`-based row is carried in its own bucket and is never pooled with
-  full-size rows in a per-share or percentage figure.
-
-**Unknown propagation, mandatory.** Any UNKNOWN term makes `REMAINING_MARGIN` an
-**UPPER BOUND**, labelled with the direction. An unknown is never zero. Fees are
-unknown today, so **every remaining-margin figure this study produces is an
-upper bound and will say so.**
-
-**What the identity check does and does not prove.** Per event,
-`TOP_OF_BOOK_MOVE + DEPTH_SLIPPAGE = (vwap − p_h)·q` telescopes — it is
-algebraically true whatever the inputs are. Running it therefore verifies **data
-handling**, not economics: that both components came from the *same* book
-snapshot, at the *same* `q`, on the *same* event, with no borrowed row and no
-silent NULL. It is worth running for exactly that and is not evidence that the
-components are the right ones. If it fails to close to the cent the cause is a
-join or a NULL, and nothing downstream is reported until it is named.
-
-**Percentages** are only ever the ratio of two dollar figures **on the same
-event set**. The prior comparison error is pre-registered as forbidden: RN1's
-1.383% (structurally eligible matched cohort) and the 3.957% replication drag
-(side-forced BUY cohort) have different populations and different denominators
-and **may not be subtracted**; run 81 rebuilds both on `U2 ∩ U4` or reports
-neither.
+Run 80 measures, rather than assumes: how many U2 rows have
+`reaction_s > 120`, their notional share, their lane mix, and the distribution
+of `reaction_s − max(detected_at − ts, 0)` (the dispatch interval, C2→C2,
+same-domain, so a legitimate point estimate). **The gate is not silently
+redefined**; both variables are printed side by side wherever either is used as
+a descriptor.
 
 ---
 
-## 6. Known historical coverage limitations
+## 8. PROVENANCE PLAN FOR `t_detect` / `t_send` / `t_reply`
 
-- **Delay buckets.** `price_path`'s offsets are `(0, 30, 60, 120, 281, 600)` s.
-  Therefore: `+1 s`, `+2 s`, `+5 s`, `+10 s` and `+300 s` are **NOT IDENTIFIABLE
-  from price_path**. 281 s is 281 s and is not rounded to 5 minutes. The
-  requested `+1/+2/+5/+10 s` buckets can only come from the probe snapshot at
-  its own single instant, which is one observation, not a series — so those
-  buckets will be marked NOT IDENTIFIABLE unless a second instrument is found.
-- **`price_path` is anchored at `live_orders.placed_at`, not at his fill**, and
-  is keyed to the pre-mirror entry sleeve. Re-anchoring to the source event
-  requires `live_orders.trade_id -> trades.id`, and the result carries the
-  anchor difference as an uncertainty, not as zero.
-- **The probe book is RN1's venue**, not PMUS. Every replication figure from it
-  is a register-2 figure and must say so (`THREE_REGISTERS.md`).
-- **Depth is the top 8 ask levels.** Any `q` that consumes more than 8 levels is
-  `DEPTH_EXHAUSTED`, not "filled at the last price".
-- Mirror books span **5 of 36 days** (2026-09-06 00:40 → 09-10 16:45);
-  `mirror_shadow` from 09-02 18:44; `mirror_fill_answers` from 09-08.
-- **No fee data. No PMUS venue-side timestamps. No Kalshi book.**
-- `game_start` / pregame-vs-live segmentation is only attempted if `game_start`
-  is legitimately available; the mapper-selected **1.15%** sample is **not**
-  representative and will not be used as if it were.
-- No ex-post variable (settlement outcome, later price, final position) may be
-  used as a decision-time predictor. Segments are defined on decision-time
-  information only.
+Write site found — `live_executor.py:9465-9471`:
 
----
+    _timing = {"t_send": time.time(), "t_detect": payload.get("detected_at")}
+    result  = await _ioc_guarded(pool, row_id, pmus.submit_fok, ...)
+    _timing["t_reply"] = time.time()
 
-## 7. Identifiable vs unknown, by funnel component
-
-Preliminary, from the code read; every row is confirmed or refuted by run 79's
-gate before any economics.
-
-| | component | status | what it rests on |
+| field | author | clock | meaning |
 |---|---|---|---|
-| A | source -> detection | **PARTIAL, CLOCK_UNRESOLVED** | `detected_at(C2) − ts(C1)`, split by `source` |
-| B | detection -> decision | **PARTIAL** | `mirror_fill_answers.at − detected_at`, tick-granular |
-| C | mapping / internal processing | **PARTIAL** | tick timing block; per-market read time not retained per market |
-| D | decision -> submit | **PARTIAL** | `mirror_orders.placed_at` is the **pre-send** stamp; the send itself is unstamped |
-| E | submit -> ack | **NOT IDENTIFIABLE** | no ack column; `updated_at` is mutable. Upgradeable only if the `receipt` probe finds a venue timestamp |
-| F | ack -> fill | **NOT IDENTIFIABLE** | `first_fill_at` has no write site (Run 78) |
-| G | market movement / replication drag | **IDENTIFIABLE at the probe instant** on his venue; PARTIAL on PMUS | `copy_probes.depth`, `price_path` |
-| H | cross-venue basis | **PARTIAL** | needs two observations at a defensible common time; retained rarely |
-| I | depth / size slippage | **IDENTIFIABLE, bounded** | top-8 ceiling; `DEPTH_EXHAUSTED` above it |
-| J | fees | **NOT IDENTIFIABLE** | no field; awaits the pair probe |
+| `t_send` | executor process | C2, `time.time()` | the instant the IOC call was made |
+| `t_reply` | **same** executor process | C2, same clock instance | the instant the venue call returned |
+| `t_detect` | **ingestion** process, carried through the payload | C2, **different container** | our first sight of the fill |
 
-These are **not** to be summed into one number called "latency" merely because
-TRUEEDGE's output has one name.
+So `t_reply − t_send` is a **same-process** difference — a legitimate point
+estimate of the venue round trip. `t_send − t_detect` crosses two app processes
+and is an **interval**, not a point, unless co-location is demonstrated.
 
-### Pre-registered tests of the $41,430 claim — hypotheses, not findings
+**Population — the gate that decides whether it may be used at all.** The same
+file writes `_lane = "ioc"` (and a `rest` lane) and its own reads exclude
+`COALESCE(lane,'') <> 'mirror'` (live_executor.py:1018, 6341). That is strong
+code evidence the 925 rows are the **entry-sleeve lane, not the mirror** — but
+run 80 **measures** the lane mix rather than asserting it, and also prints the
+date span, the whale mix, and coverage against the lane's own denominator.
 
-Read from the write site (`copy_probe._place_ai_trade`,
-`analytics/engine.settle_ai_trades`, `api/app.py:9811`). **None has been
-evaluated against data.** Each is a falsifiable check run in Phase 8:
-
-1. **Venue.** TRUEEDGE's book is `GET /book` on `clob_api_base` — RN1's own
-   venue. Test: does `lat_cost` contain any PMUS observation at all?
-2. **Population.** `cf_on_filled` filters `filled_notional > 0` with **no**
-   status filter; `paper_actual` filters `status='settled' AND filled_notional
-   > 0`. Test: how many rows are filled-but-unsettled, and what do they
-   contribute to the difference?
-3. **Algebra.** On a fully-filled row, `cf − pnl` reduces to
-   `payout · clip · (1/p_h − 1/p_us)`. Test: is the aggregate therefore carried
-   entirely by winning rows, and does it contain any clock term at all?
-4. **Size.** `counterfactual_pnl` uses `clip_target`; `pnl` uses actual
-   `shares`. Test: what does the partial-fill size mismatch contribute?
-5. **Fees.** Test: confirm no fee enters either side.
-
-The verdict vocabulary is fixed in advance: **VALIDATED / PARTIALLY VALIDATED /
-OVERSTATED / UNDERSTATED / NOT IDENTIFIABLE.** Agreement is not forced and
-disagreement is not explained away.
+**If the population is non-mirror**, these fields are an **ENGINEERING
+DIAGNOSTIC / SENSITIVITY ONLY** and are not promoted to the primary mirror
+estimator merely because they exist. `analytics/lane_exec.py` already reads them
+as `send_s` and `venue_rtt_s`; that existing reader is a use, not a validation.
 
 ---
 
-## 8. The proposed sequence of runs
+## 9. SETTLEMENT-SELECTION TREATMENT
 
-Serialized, cheapest first; each run's output gates the next. Every file passes
-`research/check_sql.py` (all four layers, including the duplicate-CTE check)
-before dispatch.
+**U4 does not select Estimator A's population.** Execution-price deterioration
+does not require settlement.
 
-| run | contents | cost |
+    PRIMARY    U2                for FIRST_RETAINED_OBSERVATION_DRAG
+    SECONDARY  U2 ∩ U4           only where SETTLEMENT_REALIZED_CF_MARGIN
+                                 = (payout − p_h) · q  is needed
+
+`SETTLEMENT_REALIZED_CF_MARGIN` stays settlement-dependent and directional, and
+stays categorically apart from the settlement-independent matched-pair
+mechanism `MATCHED_PAIR_GROSS_PNL = M · (1 − v_Y − v_N)`. The two are never
+added, netted, compared as commensurable, or merged because both are dollars.
+
+Whenever the settlement-selected cohort is used, print beside it so the
+selection stays visible: U2 count and notional · U2 ∩ U4 count and notional ·
+**retention %** · sport mix · source-lane mix · price distribution · size
+distribution.
+
+**Settlement-dependent economics are never generalised back to U2 without
+evidence.** Run 79 already shows the selection is not neutral: U3→U4 dropped
+26,121 events and $7.29M, and settlement coverage varies by sport and horizon.
+
+---
+
+## 10. DECAY-CURVE RULE
+
+No single historical decay curve is built. Two populations, temporally
+disjoint, kept apart:
+
+- **A. pre-mirror `price_path` cohort** — 5,734 rows, 2026-09-02 05:05 →
+  09-04 23:15. Every output from it is labelled
+  **`PRE_MIRROR_PRICE_PATH_SENSITIVITY`**. It cannot answer "how fast did edge
+  decay while BETTOR was trading?"
+- **B. mirror-period cohort** — 2026-09-06 00:40 onward.
+
+If no repeated post-detection book series exists for the mirror period, the
+answer is printed verbatim:
+
+    MIRROR_PERIOD_TIME_DECAY_CURVE = NOT IDENTIFIABLE FROM RETAINED DATA
+
+and the pre-mirror cohort is **not** substituted. Run 80 establishes which of
+these holds by censusing repeated observations per event in the mirror window,
+rather than assuming from `price_path` alone.
+
+Offsets remain `(0, 30, 60, 120, 281, 600)` s: `+1 / +2 / +5 / +10 s` and
+`+300 s` are NOT IDENTIFIABLE, and 281 s is 281 s, never rounded to five
+minutes.
+
+---
+
+## 11. PROPOSED RUN 80 STATEMENTS — no economics, still
+
+Run 80 is the **population and provenance run for the two estimators**. It
+computes no drag and no latency figure. Economics begin at run 81, separately
+approved.
+
+| # | statement | output |
 |---|---|---|
-| **79** | Evidence gate only: statement 0 over every §1 field; the raw clock-domain inventory; the `receipt`/`raw` key probe for a venue timestamp; the **search** for an independent C2↔C3 bridge (`CLOCK_UNRESOLVED` if none); the C1 domain split by `source`; the U0→U4 population attrition with dollars. Every test prints its witness count. **No economics, no `ai_trades`.** | small |
-| **80** | The funnel A–J decomposed where run 79 says identifiable, each with its clock-domain pair and `CLOCK_UNRESOLVED` where it applies. | medium |
-| **81** | The common-unit cohort (`U2 ∩ U4`): per event, dollars, with the decomposition identity closing to the cent. Rebuilds 1.383% and 3.957% on one population or reports neither. | medium |
-| **82** | The edge-decay curve at the **supported buckets only**; count / notional / gross edge / executable edge / deterioration \$ / deterioration ¢-per-share / % remaining / % still positive / median / p25–p75 / p10–p90 / depth coverage / missingness, then the segments. | large |
-| **83** | ENGINEERING-FIXABLE vs VENUE/NETWORK-LIMITED vs MARKET-STRUCTURAL vs UNKNOWN, each classification carrying the code site or the measurement that proves where the time went. Nothing is called fixable merely for happening after detection. | medium |
-| **84** | The TRUEEDGE independent audit: population overlap, missing rows each direction, dollar/sign/price/quantity/timing differences, fee treatment, depth treatment, cross-venue treatment; then the verdict. | medium |
+| 0 | cutoff header: `AUDIT_CUTOFF_TS`, U0 at the cutoff, and the same count re-read at end-of-run | a drift of 0 rows, proven not assumed |
+| 1 | **lane census at the cutoff**: every distinct `trades.source`, count, notional, date span — and a HALT row if any lane is not in §4's matrix | no silent pooling |
+| 2 | **U2 construction, step by step**: each admission predicate's effect in events / conditions / notional, so U2's definition is auditable rather than a single number | attrition with dollars |
+| 3 | **U2 lane mix and coverage**, including the `backfill` stratum reported separately | |
+| 4 | **depth-array census**: levels retained per probe, distribution, and the fraction where `q_a` / `q_b` / `q_c` would exhaust the top 8 | sizes A can honestly price |
+| 5 | **the 120 s / `reaction_s` split** (§7): rows over 120, notional share, lane mix, and the dispatch-interval distribution | both variables side by side |
+| 6 | **`t_*` population gate** (§8): lane mix, whale mix, date span, coverage of the 925 rows against their lane's denominator | mirror vs non-mirror, measured |
+| 7 | **mirror-period repeated-observation census**: per event in the mirror window, how many distinct book observations exist at distinct times | decides whether §10's B cohort exists at all |
+| 8 | **U2 ∩ U4 selection profile** (§9): retention %, sport mix, lane mix, price and size distributions | settlement selection made visible |
+| 9 | **witness ledger** — every test beside the rows it examined; zero witnesses prints NOT TESTED with the reason | as run 79 |
 
-Phase 9's decision test (OUTCOME A / B / C) is stated only after run 84, and
-only with X and Y measured rather than invented.
+Estimated cost: comparable to run 79 (~5 minutes), no JSONB dragged through any
+materialised set.
 
-If any run returns a vacuous result — a zero violation count beside a zero
-witness count — it is reported as **NOT TESTED**, exactly as gate 3 was in
-Run 78.
+---
 
-`mirror_live=false` throughout. Nothing here changes production.
+## 12. What has NOT changed
+
+The independence rule (runs 79–83 may not use `ai_trades` or any
+TRUEEDGE-derived field to repair clocks, select population, define prices,
+define quantities, or calculate economics; run 84 only, labelled
+audit-side evidence). The five-stage evidence chain, never collapsed, with
+stage 2's three verdicts `WRITE_SITE` / `DB_DEFAULT` / `NO_WRITE_SITE`. The
+witness discipline. The unknown-propagation rule: an UNKNOWN term makes a result
+an upper bound, never a zero. No ex-post variable as a decision-time predictor.
+The 1.15% mapper sample is not representative.
+
+`mirror_live=false`. Run 80 does not execute until approved.
