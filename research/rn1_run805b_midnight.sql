@@ -108,7 +108,8 @@ SELECT count(*)                                                AS conditions,
                 'reading is supported and no anomaly needs another explanation'
          ELSE 'MIXED -- some anomalies carry a real time of day and are NOT '
               'explained by the midnight mechanism; those are the residual'
-       END                                                     AS verdict;
+       END                                                     AS verdict
+  FROM cond;
 
 \echo ''
 \echo '== 3. THE RESIDUAL -- anomalies that midnight does NOT explain =='
@@ -209,7 +210,85 @@ SELECT count(*) FILTER (WHERE in_cohort)                       AS cohort_events,
   FROM s;
 
 \echo ''
-\echo '== 5. WITNESS LEDGER =='
+\echo '== 5. PAYOUT-VECTOR INTEGRITY -- a SEPARATE question from timestamp integrity =='
+-- OWNER CORRECTION 2026-09-12: a resolved_at timing anomaly is NOT an invalid
+-- resolved_prices, and the two must not be equated unless independently
+-- demonstrated. This statement demonstrates, or fails to. It tests the PAYOUT
+-- VECTOR on its own terms and compares the rate on anomalous conditions against
+-- the rate on clean ones -- the control that makes the comparison mean
+-- anything.
+WITH rn1 AS MATERIALIZED (
+  SELECT id FROM whales WHERE lower(username) = 'rn1'
+), u0 AS MATERIALIZED (
+  SELECT condition_id, ts FROM trades
+   WHERE whale_id IN (SELECT id FROM rn1)
+     AND ts <= timestamptz '2026-09-12 00:00:00+00'
+     AND detected_at <= timestamptz '2026-09-12 00:00:00+00'
+), res AS MATERIALIZED (
+  SELECT condition_id, resolved_at, resolved_prices FROM markets
+   WHERE resolved AND resolved_at IS NOT NULL
+     AND resolved_at <= timestamptz '2026-09-12 00:00:00+00'
+), tok AS MATERIALIZED (
+  SELECT condition_id, count(*) AS token_count
+    FROM market_tokens GROUP BY condition_id
+), cond AS MATERIALIZED (
+  SELECT r.condition_id, r.resolved_prices,
+         COALESCE(k.token_count, 0)                         AS token_count,
+         (max(t.ts) > r.resolved_at)                        AS anomalous
+    FROM res r
+    JOIN u0 t ON t.condition_id = r.condition_id
+    LEFT JOIN tok k ON k.condition_id = r.condition_id
+   GROUP BY r.condition_id, r.resolved_prices, k.token_count
+), v AS (
+  SELECT c.condition_id, c.anomalous, c.token_count, c.resolved_prices,
+         (c.resolved_prices IS NULL)                                AS p_null,
+         (c.resolved_prices IS NOT NULL
+          AND jsonb_typeof(c.resolved_prices) <> 'array')           AS p_not_array,
+         CASE WHEN jsonb_typeof(c.resolved_prices) = 'array'
+              THEN jsonb_array_length(c.resolved_prices) END        AS p_len,
+         CASE WHEN jsonb_typeof(c.resolved_prices) = 'array' THEN (
+              SELECT count(*) FROM jsonb_array_elements(c.resolved_prices) e
+               WHERE jsonb_typeof(e) <> 'number') END               AS p_nonnumeric,
+         CASE WHEN jsonb_typeof(c.resolved_prices) = 'array' THEN (
+              SELECT COALESCE(sum((e #>> '{}')::float8), 0)
+                FROM jsonb_array_elements(c.resolved_prices) e
+               WHERE jsonb_typeof(e) = 'number') END                AS p_sum,
+         CASE WHEN jsonb_typeof(c.resolved_prices) = 'array' THEN (
+              SELECT count(*) FROM jsonb_array_elements(c.resolved_prices) e
+               WHERE jsonb_typeof(e) = 'number'
+                 AND (e #>> '{}')::float8 = 1.0) END                AS p_winners
+    FROM cond c
+)
+SELECT CASE WHEN anomalous THEN 'ANOMALOUS conditions'
+            ELSE 'clean resolved conditions (the control)' END      AS cohort,
+       count(*)                                                     AS conditions,
+       count(*) FILTER (WHERE p_null)                               AS prices_null,
+       count(*) FILTER (WHERE p_not_array)                          AS prices_not_an_array,
+       count(*) FILTER (WHERE COALESCE(p_nonnumeric, 0) > 0)        AS prices_non_numeric,
+       count(*) FILTER (WHERE p_len IS NOT NULL AND token_count > 0
+                          AND p_len <> token_count)                 AS length_vs_token_mismatch,
+       count(*) FILTER (WHERE p_sum IS NOT NULL
+                          AND abs(p_sum - 1.0) > 0.000001)          AS payout_sum_not_one,
+       count(*) FILTER (WHERE p_len = 2 AND p_winners <> 1)          AS binary_no_unique_winner,
+       count(*) FILTER (WHERE p_null OR p_not_array
+                          OR COALESCE(p_nonnumeric, 0) > 0
+                          OR (p_len IS NOT NULL AND token_count > 0
+                              AND p_len <> token_count)
+                          OR (p_sum IS NOT NULL
+                              AND abs(p_sum - 1.0) > 0.000001)
+                          OR (p_len = 2 AND p_winners <> 1))         AS any_payout_defect,
+       round(100.0 * count(*) FILTER (WHERE p_null OR p_not_array
+                          OR COALESCE(p_nonnumeric, 0) > 0
+                          OR (p_len IS NOT NULL AND token_count > 0
+                              AND p_len <> token_count)
+                          OR (p_sum IS NOT NULL
+                              AND abs(p_sum - 1.0) > 0.000001)
+                          OR (p_len = 2 AND p_winners <> 1))
+             / NULLIF(count(*), 0), 4)                              AS payout_defect_rate_pct
+  FROM v GROUP BY 1 ORDER BY 1;
+
+\echo ''
+\echo '== 6. WITNESS LEDGER =='
 WITH rn1 AS MATERIALIZED (
   SELECT id FROM whales WHERE lower(username) = 'rn1'
 ), w(ord, test_name, witnesses, why_if_zero) AS (

@@ -29,7 +29,7 @@ import sys
 try:
     import pglast
     from pglast import ast
-    from pglast.enums import MinMaxOp
+    from pglast.enums import MinMaxOp, SetOperation
 except ImportError:  # pragma: no cover
     sys.exit("pglast is required: pip install pglast")
 
@@ -449,6 +449,58 @@ def walk_level(node, fn):
             walk_level(x, fn)
 
 
+def check_no_from(stmt, path, idx):
+    """A SELECT level that names columns but has no FROM clause.
+
+    WHY THIS LAYER EXISTS. Run 80.5b died on statement 2 with
+        ERROR: column "anomalous" does not exist
+    after eight minutes of queue and one completed statement. The cause was not
+    a wrong column name at all -- the final SELECT simply had no `FROM cond`,
+    so every CTE column it referenced resolved against nothing.
+
+    ALL FOUR EXISTING LAYERS PASSED IT. The CTE layer only checks columns
+    against a relation the query actually references; with no FROM there is no
+    relation, so it had nothing to check and stayed silent. The base-table layer
+    behaved the same way. A guard that cannot see the absence of a thing is the
+    vacuity failure again, in the checker rather than the query.
+
+    The rule is narrow on purpose: fire only when a level has NO fromClause and
+    still carries at least one plain ColumnRef. `SELECT 1`, `SELECT now()` and
+    `SELECT 'x' AS label` are legitimate and silent, and so is
+    `SELECT (SELECT count(*) FROM t) AS n` -- walk_level stops at SubLink, so
+    the inner query's columns are not attributed to this level.
+    """
+    problems = []
+
+    def check_select(sel):
+        if not isinstance(sel, ast.SelectStmt):
+            return
+        # a set operation has no target list of its own; its arms are visited
+        if sel.op is not None and sel.op != SetOperation.SETOP_NONE:
+            return
+        if sel.fromClause or sel.valuesLists:
+            return
+        named = []
+
+        def note(n):
+            if isinstance(n, ast.ColumnRef) and n.fields:
+                parts = [f.sval for f in n.fields if isinstance(f, ast.String)]
+                if parts:
+                    named.append(".".join(parts))
+
+        for clause in (sel.targetList, sel.whereClause, sel.groupClause,
+                       sel.havingClause, sel.sortClause):
+            walk_level(clause, note)
+        if named:
+            problems.append(
+                f"{path}:stmt {idx}: SELECT has no FROM clause but references "
+                f"{sorted(set(named))[:6]} -- every one of those resolves "
+                f"against nothing")
+
+    walk(stmt, check_select)
+    return problems
+
+
 def check_base_columns(stmt, path, idx, ctes, schema):
     if not schema:
         return []
@@ -593,6 +645,7 @@ def main(paths):
             problems += check_missing_leg(raw.stmt, path, i, cte_map, alias_map,
                                           allow_lines=allowed)
             problems += check_base_columns(raw.stmt, path, i, cte_map, schema)
+            problems += check_no_from(raw.stmt, path, i)
         if problems:
             bad = True
             for p in problems:

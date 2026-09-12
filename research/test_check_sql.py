@@ -144,3 +144,56 @@ if FAILURES:
     print(f"{len(FAILURES)} FIXTURE(S) FAILED: {', '.join(FAILURES)}")
     sys.exit(1)
 print("all base-table column fixtures pass")
+
+print()
+print("NO-FROM LAYER (added after run 80.5b died on a SELECT with no FROM clause)")
+
+
+def nf(sql):
+    out = []
+    for i, raw in enumerate(pglast.parse_sql(sql), 1):
+        out += check_sql.check_no_from(raw.stmt, "<fixture>", i)
+    return out
+
+
+def expect_nf(name, sql, should_fire, must_mention=None):
+    got = nf(sql)
+    ok = bool(got) == should_fire
+    if ok and should_fire and must_mention:
+        ok = any(must_mention in g for g in got)
+    verb = "FIRES" if should_fire else "stays silent"
+    print(f"  {'PASS' if ok else 'FAIL'}  {name} -- must {verb}")
+    if not ok:
+        FAILURES.append(name)
+        for g in got:
+            print(f"        got: {g}")
+        if should_fire and not got:
+            print("        got: nothing")
+
+
+# THE RUN-80.5b BUG, verbatim in shape: a CTE is declared, the final SELECT
+# references its columns, and the FROM clause is simply absent. All four earlier
+# layers pass it -- with no relation in scope there is nothing for them to check.
+expect_nf("7 the run-80.5b shape: CTE columns with no FROM",
+          "WITH cond AS (SELECT 1 AS anomalous, true AS midnight_utc) "
+          "SELECT count(*) FILTER (WHERE anomalous) AS n;",
+          should_fire=True, must_mention="anomalous")
+
+expect_nf("8 the same query WITH its FROM restored",
+          "WITH cond AS (SELECT 1 AS anomalous) "
+          "SELECT count(*) FILTER (WHERE anomalous) AS n FROM cond;",
+          should_fire=False)
+
+expect_nf("9 a literal-only SELECT is legitimate",
+          "SELECT 'markets.raw' AS field, 'NOT RETAINED' AS availability;",
+          should_fire=False)
+
+expect_nf("10 a scalar subquery carries its own FROM",
+          "SELECT (SELECT count(*) FROM live_orders) AS n;",
+          should_fire=False)
+
+print()
+if FAILURES:
+    print(f"{len(FAILURES)} FIXTURE(S) FAILED: {', '.join(FAILURES)}")
+    sys.exit(1)
+print("all fixtures pass, base-table and no-FROM layers")
