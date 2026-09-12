@@ -177,18 +177,50 @@ def test_setting_the_shadow_flag_does_not_change_any_trading_switch(monkeypatch)
     )
 
 
-def test_the_worker_returns_rather_than_degrading_when_the_flag_is_off(monkeypatch):
-    """Inert by code default, and inert by RETURNING -- not by looping quietly.
+def test_the_worker_parks_rather_than_degrading_when_the_flag_is_off(monkeypatch):
+    """Inert by code default: it opens nothing, reads nothing, and never spins.
 
-    A loop that runs and collects nothing looks identical in the logs to a loop
-    that is collecting and failing.
+    THIS TEST USED TO ASSERT THE BUG. It read "inert by RETURNING -- not by
+    looping quietly", and `asyncio.run(main())` completing was its whole pass
+    condition. Returning is precisely what span in production on 2026-09-12:
+    workers/all.py restarts any loop that returns, so the inert collector
+    respawned every five seconds and filled the log with warnings.
+
+    The concern behind the old wording was right -- a loop that runs and collects
+    nothing is indistinguishable in the log from one that is collecting and
+    failing -- and parking satisfies it BETTER than returning did. A parked
+    coroutine logs its one line and then emits nothing whatsoever; the returning
+    version emitted a WARNING twelve times a minute, which is the very noise the
+    old docstring was trying to avoid.
+
+    So the claim is now the two things that actually matter: it touches no pool
+    and no venue, and it does not complete.
     """
     import asyncio
 
     monkeypatch.delenv("RN1_OBSERVABILITY_SHADOW", raising=False)
     from sportsassets.workers import rn1_observability
-    # No pool, no http client: if main() tried to do anything it would raise.
-    asyncio.run(rn1_observability.main())
+
+    opened = []
+    monkeypatch.setattr(rn1_observability, "get_pool",
+                        lambda *a, **k: opened.append("pool"))
+    monkeypatch.setattr(rn1_observability.httpx, "AsyncClient",
+                        lambda *a, **k: opened.append("http"))
+
+    async def drive():
+        task = asyncio.ensure_future(rn1_observability.main())
+        done, pending = await asyncio.wait({task}, timeout=0.5)
+        for p in pending:
+            p.cancel()
+            await asyncio.gather(p, return_exceptions=True)
+        return done
+
+    finished = asyncio.new_event_loop().run_until_complete(drive())
+    assert not opened, f"the inert worker reached for: {opened}"
+    assert not finished, (
+        "main() completed with the flag off. workers/all.py restarts a loop that "
+        "returns, so completing here is a five-second spin in production."
+    )
 
 
 def test_instrumentation_failure_cannot_enable_trading():

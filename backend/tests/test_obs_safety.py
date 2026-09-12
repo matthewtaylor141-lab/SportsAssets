@@ -227,3 +227,91 @@ def test_importing_obs_calls_no_order_api(monkeypatch):
         importlib.import_module(dotted)
 
     assert not calls, f"order API called during import: {calls}"
+
+
+# ---------------------------------------------------------------- the spin
+#
+# THE DEFECT THIS PINS (2026-09-12, found by the run 83 deployment gate, not by
+# a test -- which is the point). With the flag off, main() logged one line and
+# RETURNED. workers/all.py's supervisor is written for loops that only ever end
+# by raising, so it read the clean return as an anomaly: WARNING, sleep 5s,
+# start again. The inert collector span twelve times a minute in production,
+# about 17,000 warnings a day into the log every incident is diagnosed from.
+#
+# The original test asserted main() "does nothing", and returning immediately
+# satisfies that reading perfectly. It never asked what the CALLER does next.
+# These two do, against the supervisor's real contract rather than a docstring.
+
+def test_the_inert_collector_does_not_return_because_the_supervisor_restarts_it():
+    """With the flag off, main() must not complete -- it parks."""
+    import asyncio as _asyncio
+
+    from sportsassets.workers import rn1_observability
+
+    async def drive():
+        task = _asyncio.ensure_future(rn1_observability.main())
+        # Generous next to a 5s restart delay: if main() returns at all it
+        # returns immediately, so anything that is still pending here is parked.
+        done, pending = await _asyncio.wait({task}, timeout=0.5)
+        for p in pending:
+            p.cancel()
+            await _asyncio.gather(p, return_exceptions=True)
+        return done
+
+    finished = _asyncio.new_event_loop().run_until_complete(drive())
+    assert not finished, (
+        "rn1_observability.main() returned with the shadow flag off. "
+        "workers/all.py logs a WARNING and restarts any loop that returns, so "
+        "this is a 5-second spin in production, not an inert worker."
+    )
+
+
+def test_the_supervisor_really_does_restart_a_loop_that_returns():
+    """Pin the contract the test above exists BECAUSE of.
+
+    An earlier draft of this second test tried to prove the general property --
+    "no registered loop can run to completion" -- by walking each loop's AST for
+    an await. It PASSED ON THE BROKEN CODE: the defective main() still contained
+    `await collector.run(...)` further down the function, on a branch the flag-off
+    path never reaches. Proving the general property soundly means following the
+    call into collector.run() to find the real `while True`, which this file is
+    not the place for.
+
+    So this pins the narrow thing that is true and checkable, read from source
+    rather than imported (workers/all.py pulls in every worker): inside
+    supervise's `while True`, a factory that simply RETURNS falls through to a
+    warning and a sleep, and goes round again. There is no break and no return.
+    If someone later teaches the supervisor to retire a loop that finishes, this
+    test fails and the test above should be revisited with it.
+    """
+    import ast
+    import pathlib
+
+    all_py = (pathlib.Path(__file__).resolve().parents[1]
+              / "sportsassets" / "workers" / "all.py")
+    tree = ast.parse(all_py.read_text())
+    fn = next((n for n in ast.walk(tree)
+               if isinstance(n, (ast.AsyncFunctionDef, ast.FunctionDef))
+               and n.name == "supervise"), None)
+    assert fn is not None, "workers/all.py no longer defines supervise"
+
+    forever = [s for s in fn.body
+               if isinstance(s, ast.While)
+               and isinstance(s.test, ast.Constant) and s.test.value is True]
+    assert forever, "supervise's `while True` is gone; the restart contract changed"
+
+    body = forever[0]
+    escapes = [s for s in ast.walk(body)
+               if isinstance(s, (ast.Break, ast.Return))]
+    assert not escapes, (
+        "supervise can now leave its restart loop, so a worker that returns may "
+        "no longer respawn -- re-check why rn1_observability.main() parks."
+    )
+
+    awaits_factory = any(
+        isinstance(s, ast.Expr) and isinstance(s.value, ast.Await)
+        and isinstance(s.value.value, ast.Call)
+        and isinstance(s.value.value.func, ast.Name)
+        and s.value.value.func.id == "factory"
+        for s in ast.walk(body))
+    assert awaits_factory, "supervise no longer awaits factory() inside its loop"

@@ -6,9 +6,23 @@ the build if one appears. It shares the wording with mirror_shadow.py,
 price_path.py and edge_marks.py because it is the same kind of thing.
 
 INERT UNTIL SWITCHED ON. With RN1_OBSERVABILITY_SHADOW unset -- the code default
--- main() logs one line and returns. Registering it in workers/all.py therefore
-changes nothing about a running deployment until someone sets the flag, and
-setting the flag enables DATA COLLECTION ONLY.
+-- main() logs one line and then PARKS FOREVER. Registering it in workers/all.py
+therefore changes nothing about a running deployment until someone sets the flag,
+and setting the flag enables DATA COLLECTION ONLY.
+
+IT PARKS RATHER THAN RETURNS, and that is not a stylistic choice -- it was a
+production defect (2026-09-12, found in the run 83 deployment gate). Every other
+entry in workers/all.py's LOOPS is a `while True` that only ever ends by raising,
+so the supervisor reads a CLEAN RETURN as an anomaly: it logs a WARNING and
+restarts the loop after RESTART_DELAY_SECONDS. An inert main() that returned
+therefore span -- start, log, return, warn, sleep 5s, repeat -- twelve times a
+minute for as long as the flag stayed off, burying the worker log that every
+incident is diagnosed from under about 17,000 warnings a day.
+
+The collector cannot be woken by a flag flip in a running process either way: a
+Render env change restarts the service. So parking costs nothing that polling
+would buy, and it says the true thing to the supervisor -- this loop is alive and
+has nothing to do -- instead of a false one.
 
 WHY IT EXISTS. Run 82: physical actionable latency is NOT IDENTIFIABLE from
 retained data, because every boundary anchored at RN1's fill crosses from a clock
@@ -104,8 +118,12 @@ def _host_sync() -> tuple[str | None, float | None, float | None, str]:
 async def main() -> None:
     if not shadow_enabled():
         log.info("rn1 observability collector: RN1_OBSERVABILITY_SHADOW is off "
-                 "(code default) -- collecting nothing, exiting the loop")
-        return
+                 "(code default) -- collecting nothing, parking")
+        # Park, do not return: the supervisor restarts a loop that returns.
+        # asyncio.Event() that nobody sets waits forever without a timer, so
+        # this costs one suspended coroutine and no wakeups at all.
+        await asyncio.Event().wait()
+        return                                     # unreachable; kept explicit
 
     pool = await get_pool()
     async with httpx.AsyncClient(timeout=10) as http:
