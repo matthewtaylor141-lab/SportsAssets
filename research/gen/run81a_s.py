@@ -182,7 +182,13 @@ def main(path):
         for key in (r["_stratum"],) + (("A_ONLINE_COMBINED",)
                                        if r["source"] in ONLINE else ()):
             tob[key].append(cps)
-            tmeta[key]["cond"].add(r["condition_id"])
+            # count(DISTINCT x) IGNORES NULL in SQL; a Python set does not.
+            # Adding None inflated every condition count by exactly one and made
+            # A_CHAIN read 15,398 against 81A ORIGINAL's 15,397 on a population
+            # that is otherwise identical row for row. Found by the replication
+            # check, which is what it is for.
+            if r["condition_id"] is not None:
+                tmeta[key]["cond"].add(r["condition_id"])
             tmeta[key]["notional"] += r["_notional"]
     hdr = (f"{'stratum':22}{'events':>9}{'conds':>8}{'src notional':>16}"
            f"{'mean':>9}{'p50':>9}{'p10':>9}{'p25':>9}{'p75':>9}{'p90':>9}"
@@ -245,7 +251,8 @@ def main(path):
                 s["tob_usd"] += tob_u
                 s["dep_usd"] += dep_u
                 s["tot_usd"] += tot_u
-                s["cond"].add(r["condition_id"])
+                if r["condition_id"] is not None:      # NULL is not a value
+                    s["cond"].add(r["condition_id"])
                 s["notional"] += r["_notional"]
             cl = closure[sc]
             cl["w"] += 1
@@ -374,51 +381,99 @@ def main(path):
               f"{len(qa):>9,}{100*len(qa)/s['n']:>10.2f}"
               f"{(sum(qa)/len(qa) if qa else 0):>10.4f}"
               f"{(pct(qa,.50) if qa else 0):>10.4f}")
-    # ---- 8. cross-implementation replication check ----------------------
-    # THE POINT OF THIS SECTION. 81A ORIGINAL is SQL against live tables; 81A-S
-    # is Python against sealed bytes. Where the populations agree, the metrics
-    # SHOULD agree, and a discrepancy is an IMPLEMENTATION finding -- not
-    # something to wave away as drift.
+    # ---- 8. HISTORICAL POPULATION COMPARISON ---------------------------
+    # THIS IS NOT AN IMPLEMENTATION TEST, and it is labelled so it cannot be
+    # mistaken for one. RUN 81A ORIGINAL measured a different population, so a
+    # difference here cannot distinguish "the Python is wrong" from "the
+    # population moved". The implementation test is validate_81a_s.py, which
+    # recomputes from the SAME sealed bytes.
     #
-    # THE DECISION RULE IS STATED BEFORE THE NUMBERS, so it cannot be chosen to
-    # suit them. Population drift of d events out of N can move a sum by at most
-    # about |d|/N in relative terms. So:
-    #   * a relative difference at or below the population's own relative
-    #     difference is CONSISTENT WITH DRIFT;
-    #   * a relative difference materially above it is NOT explicable by drift
-    #     and is flagged INVESTIGATE.
-    # Two metrics are near-immune to drift of this size and so are the sharpest
-    # evidence: the CLOSURE assertion, which must hold on any population at all,
-    # and the MEDIANS, which 42 rows in 214,651 cannot move off a whole cent.
+    # A RETRACTED RULE, RECORDED SO IT IS NOT REINTRODUCED. An earlier version
+    # of this file classified differences using a tolerance of |d|/N, the
+    # fraction of events deleted. THAT BOUND IS INVALID: it silently assumes
+    # every event contributes comparably, and this book is heavy-tailed -- 81A
+    # itself found 214 events of >= $10k carrying $3.2M, so a handful of deleted
+    # rows can move a dollar total by far more than their share of the count.
+    # Means, weighted means and sums are all exposed to it. No count-based
+    # tolerance is used anywhere below.
+    #
+    # ALSO RETRACTED: "42 rows cannot move a median off a whole cent." A few
+    # deletions CAN move a median when observations sit near the rank boundary.
+    # The median is probably robust here, but that is an empirical guess and is
+    # not used as a criterion.
+    #
+    # So each row is classified only as EXACT_MATCH, or as
+    # DIFFERENT_POPULATION -- CAUSE NOT DECOMPOSABLE. Nothing in between.
     ref_path = __file__.rsplit("/", 1)[0] + "/run81a_original.json"
     try:
         with open(ref_path) as fh:
             ref = json.load(fh)
     except OSError:
-        print("== 8. REPLICATION CHECK -- reference file absent, NOT TESTED ==")
+        print("== 8. HISTORICAL POPULATION COMPARISON -- reference absent, NOT TESTED ==")
         ref = None
 
     if ref:
-        drift = abs(n_events - ref["controls"]["events"]) / ref["controls"]["events"]
-        print("== 8. ORIGINAL vs SNAPSHOT_REPLICATION -- cross-implementation check ==")
-        print(f"population relative drift = {drift:.3e} "
-              f"({n_events - ref['controls']['events']:+,} of "
-              f"{ref['controls']['events']:,} events)")
-        print("a relative difference at or below that is consistent with drift; "
-              "materially above it is an implementation finding")
-        print(f"\n{'metric':46}{'ORIGINAL':>16}{'REPLICATION':>16}"
-              f"{'ABS DIFF':>15}{'REL DIFF':>12}  verdict")
+        c = ref["controls"]
+        identical = (n_events == c["events"] and len(conditions) == c["conditions"]
+                     and abs(notional - c["notional"]) < 0.005)
+        print("== 8. HISTORICAL POPULATION COMPARISON (RUN 81A ORIGINAL vs V1) ==")
+        print("NOT an implementation test. See validate_81a_s.py for that.\n")
+        print(f"{'control':22}{'ORIGINAL':>18}{'U2_SNAPSHOT_V1':>18}{'DELTA':>16}")
+        print(f"{'events':22}{c['events']:>18,}{n_events:>18,}"
+              f"{n_events - c['events']:>+16,}")
+        print(f"{'conditions':22}{c['conditions']:>18,}{len(conditions):>18,}"
+              f"{len(conditions) - c['conditions']:>+16,}")
+        print(f"{'source notional':22}{c['notional']:>18,.2f}{notional:>18,.2f}"
+              f"{notional - c['notional']:>+16,.2f}")
+        print()
+        print("DELETED_EVENT_ECONOMICS = NOT IDENTIFIABLE")
+        print("  RUN 81A ORIGINAL did not freeze its event ids, so the deleted")
+        print("  set cannot be reconstructed and its economics cannot be")
+        print("  inferred from the count delta.")
+        if identical:
+            print("\nPOPULATION CONTROLS MATCH; EVENT IDENTITY NOT PROVEN.")
+            print("  Matching aggregates are not identical populations. 81A")
+            print("  ORIGINAL retained no event-identity digest to compare, so")
+            print("  this is NOT upgraded to a cross-implementation test.")
+            mode = "EXACT_MATCH"
+        else:
+            print("\nPOPULATIONS DIFFER. Every economic difference below is")
+            print("  DIFFERENT_POPULATION -- CAUSE NOT DECOMPOSABLE.")
+            mode = "DIFFERENT_POPULATION -- CAUSE NOT DECOMPOSABLE"
 
-        def cmp_row(label, o, r):
+        print(f"\n{'metric':44}{'ORIGINAL':>16}{'REPLICATION':>16}"
+              f"{'ABS DIFF':>15}{'REL DIFF':>12}  classification")
+
+        def cmp_row(label, o, r, dp=None):
+            """dp = the number of decimals RUN 81A ORIGINAL was PRINTED with.
+
+            A third classification is needed and it is NOT a tolerance. The
+            reference values were transcribed from 81A's printed output, which
+            SQL had already rounded -- notional to 2 decimals, cents-per-share
+            to 4, percentages to 3. A replication that agrees with the reference
+            at every digit the reference actually carries has not been shown to
+            differ: the comparison is limited by the REFERENCE'S PRECISION, not
+            by a disagreement. Calling that a population difference would report
+            a fact about rounding as a fact about the data.
+
+            This is a property of the reference, not a fudge factor chosen from
+            the results, and it is emphatically NOT the retracted |d|/N rule:
+            it says nothing about how many events moved and cannot excuse a
+            difference that the reference is precise enough to see.
+            """
             if o is None or r is None:
-                print(f"{label:46}{'n/a':>16}{'n/a':>16}{'':>15}{'':>12}  NOT TESTED")
+                print(f"{label:44}{'n/a':>16}{'n/a':>16}{'':>15}{'':>12}  NOT TESTED")
                 return
             ad = r - o
             rd = abs(ad) / abs(o) if o else (0.0 if ad == 0 else float("inf"))
-            # 10x the population drift, with a floor for pure rounding noise
-            tol = max(10 * drift, 1e-6)
-            verdict = "ok" if rd <= tol else "INVESTIGATE"
-            print(f"{label:46}{o:>16,.4f}{r:>16,.4f}{ad:>+15,.4f}{rd:>12.3e}  {verdict}")
+            if ad == 0:
+                cls = "EXACT_MATCH"
+            elif dp is not None and round(r, dp) == round(o, dp):
+                cls = "AGREES_TO_REFERENCE_PRECISION"
+            else:
+                cls = mode
+            print(f"{label:44}{o:>16,.4f}{r:>16,.4f}{ad:>+15,.4f}"
+                  f"{rd:>12.3e}  {cls}")
 
         for lane, o in ref["top_of_book"].items():
             v = tob.get(lane)
@@ -429,41 +484,36 @@ def main(path):
             cmp_row(f"ToB {lane} conditions", float(o["conditions"]),
                     float(len(tmeta[lane]["cond"])))
             cmp_row(f"ToB {lane} source notional", o["notional"],
-                    tmeta[lane]["notional"])
-            cmp_row(f"ToB {lane} mean cps", o["mean"], sum(v) / n)
-            cmp_row(f"ToB {lane} median cps", o["p50"], pct(v, .50))
-            cmp_row(f"ToB {lane} p25 cps", o["p25"], pct(v, .25))
-            cmp_row(f"ToB {lane} p75 cps", o["p75"], pct(v, .75))
-            cmp_row(f"ToB {lane} p90 cps", o["p90"], pct(v, .90))
+                    tmeta[lane]["notional"], dp=2)
+            cmp_row(f"ToB {lane} mean cps", o["mean"], sum(v) / n, dp=4)
+            cmp_row(f"ToB {lane} median cps", o["p50"], pct(v, .50), dp=4)
+            cmp_row(f"ToB {lane} p25 cps", o["p25"], pct(v, .25), dp=4)
+            cmp_row(f"ToB {lane} p75 cps", o["p75"], pct(v, .75), dp=4)
+            cmp_row(f"ToB {lane} p90 cps", o["p90"], pct(v, .90), dp=4)
             cmp_row(f"ToB {lane} % positive", o["pos"],
-                    100 * sum(1 for x in v if x > 0) / n)
-            cmp_row(f"ToB {lane} % zero", o["zero"],
-                    100 * sum(1 for x in v if x == 0) / n)
+                    100 * sum(1 for x in v if x > 0) / n, dp=3)
             cmp_row(f"ToB {lane} % negative", o["neg"],
-                    100 * sum(1 for x in v if x < 0) / n)
-
+                    100 * sum(1 for x in v if x < 0) / n, dp=3)
         for sc, lanes in ref["support"].items():
             for lane, o in lanes.items():
                 k = (sc, lane)
-                req = sup[k]["req"]
-                if not req:
+                if not sup[k]["req"]:
                     continue
                 cmp_row(f"{sc} {lane} supported", float(o["sup"]),
-                        float(req - exhausted[k]["n"]))
+                        float(sup[k]["req"] - exhausted[k]["n"]))
                 cmp_row(f"{sc} {lane} exhausted", float(o["exh"]),
                         float(exhausted[k]["n"]))
-
         for sc, lanes in ref["drag"].items():
             for lane, o in lanes.items():
                 s = sup[(sc, lane)]
                 v = s["tot"]
                 if not v:
                     continue
-                cmp_row(f"{sc} {lane} mean drag cps", o["mean"], sum(v) / len(v))
-                cmp_row(f"{sc} {lane} median drag cps", o["p50"], pct(v, .50))
-                cmp_row(f"{sc} {lane} ToB dollars", o["tob_usd"], s["tob_usd"])
-                cmp_row(f"{sc} {lane} depth dollars", o["dep_usd"], s["dep_usd"])
-                cmp_row(f"{sc} {lane} total drag dollars", o["tot_usd"], s["tot_usd"])
+                cmp_row(f"{sc} {lane} mean drag cps", o["mean"], sum(v) / len(v), dp=4)
+                cmp_row(f"{sc} {lane} median drag cps", o["p50"], pct(v, .50), dp=4)
+                cmp_row(f"{sc} {lane} ToB dollars", o["tob_usd"], s["tob_usd"], dp=2)
+                cmp_row(f"{sc} {lane} depth dollars", o["dep_usd"], s["dep_usd"], dp=2)
+                cmp_row(f"{sc} {lane} total drag dollars", o["tot_usd"], s["tot_usd"], dp=2)
         print()
 
     print("== RUN 81A-S ENDS. Sealed inputs only. No database. mirror_live=false. ==")
