@@ -1,28 +1,37 @@
 name: research-snapshot
 
-# DRAW THE FROZEN_U2_CONDITION_UNIVERSE SETTLEMENT SNAPSHOT. Read-only.
+# DRAW AND SEAL AUDIT SNAPSHOT V1 (U2_SNAPSHOT_V1 + SETTLEMENT_SNAPSHOT_V1).
 #
-# This workflow performs NO production mutation. It runs exactly one SQL file,
-# from a HARDCODED path, under a read-only repeatable-read transaction, and
-# writes the result to an Actions artifact. It never writes to the database and
-# never pushes to the repository -- committing the drawn snapshot is a separate,
-# reviewed step, so the artifact and the commit cannot diverge silently.
+# READ-ONLY AGAINST THE DATABASE. No production mutation of any kind: one SQL
+# file from a HARDCODED path, under a read-only repeatable-read transaction.
+#
+# IT DOES WRITE TO THE REPOSITORY, and that is deliberate. The owner's
+# requirement is that the durable evidence must not rely only on an expiring
+# Actions artifact, and ~100 MB of canonical bytes cannot sensibly be round
+# tripped through a chat session. So the runner commits the sealed files to the
+# research branch itself, under research/snapshots/ ONLY -- `git add` names that
+# one path, so nothing else in the tree can ride along. The artifact is still
+# uploaded, as the provenance record.
 #
 # WHY A SEPARATE WORKFLOW FROM research-sql.yml. That one takes a caller-supplied
-# file name and formats output for human reading (aligned columns, head -N). Here
-# stdout IS the artifact: the format is `-A -t` and a single truncated line would
-# corrupt a hash that is meant to be permanent. Mixing the two would mean one of
-# them gets the wrong defaults.
+# file name and formats output for human reading (aligned columns, head -N).
+# Here stdout IS the evidence: the format is `-A -t` and a single truncated line
+# would corrupt a hash meant to be permanent. There is NO truncation anywhere in
+# this pipeline. Mixing the two would mean one of them gets the wrong defaults.
 
 on:
   workflow_dispatch:
     inputs:
       confirm:
-        description: 'type DRAW to draw the snapshot'
+        description: 'type DRAW to draw and seal the snapshot'
         required: true
         default: ''
+      commit:
+        description: 'type COMMIT to also commit the sealed files (else artifact only)'
+        required: false
+        default: ''
       render_key:
-        description: 'Render API key (leave blank to use the RENDER_API_KEY secret)'
+        description: 'Render API key (blank uses the RENDER_API_KEY secret)'
         required: false
         default: ''
 
@@ -31,7 +40,7 @@ concurrency:
   cancel-in-progress: false
 
 permissions:
-  contents: read
+  contents: write
 
 jobs:
   draw:
@@ -41,23 +50,26 @@ jobs:
       KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
 
-      - name: draw
+      - name: draw and seal
         run: |
           set +e
           set -u
-          # `render_key` and `confirm` are read from the event payload on disk,
-          # not mapped through `env:`: the runner prints a step's env block in
-          # the log header BEFORE any ::add-mask:: in this script runs, so a key
-          # mapped there would be exposed before it could be masked.
+          # `render_key`, `confirm` and `commit` are read from the event payload
+          # on disk, not mapped through `env:`: the runner prints a step's env
+          # block in the log header BEFORE any ::add-mask:: in this script runs,
+          # so a key mapped there would be exposed before it could be masked.
           CONFIRM="$(jq -r '.inputs.confirm // empty' "$GITHUB_EVENT_PATH")"
+          DOCOMMIT="$(jq -r '.inputs.commit // empty' "$GITHUB_EVENT_PATH")"
           KEY_INPUT="$(jq -r '.inputs.render_key // empty' "$GITHUB_EVENT_PATH")"
           [ -n "$KEY_INPUT" ] && echo "::add-mask::$KEY_INPUT"
           [ "$CONFIRM" = "DRAW" ] || { echo "refused: confirm must be DRAW"; exit 1; }
 
           # THE FILE IS HARDCODED. No caller-supplied path, so there is no file
           # name to validate and no traversal to defend against.
-          SRC=research/gen/draw_settlement_snapshot.sql
+          SRC=research/gen/draw_audit_snapshot.sql
           [ -f "$SRC" ] || { echo "refused: no such file $SRC"; exit 1; }
 
           # The same two read-only guards research-sql.yml uses, unchanged.
@@ -90,64 +102,187 @@ jobs:
           [ -n "$PW" ] && echo "::add-mask::$PW"; [ -n "$EXT" ] && echo "::add-mask::$EXT"
           [ -z "$EXT" ] && { echo "no external connection string returned"; exit 1; }
 
-          mkdir -p out
-          # -A -t  : stdout IS the artifact -- unaligned, tuples only, no headers
-          # -1     : one transaction, so every read shares one MVCC snapshot
-          # NO head/awk truncation anywhere in this pipeline. research-sql.yml
-          # caps output for readability; here a truncated line would silently
-          # corrupt a hash that is meant to be permanent, so the full result is
-          # written and the log shows only the header.
-          PGOPTIONS="-c statement_timeout=900000 -c default_transaction_read_only=on -c default_transaction_isolation=repeatable\ read" \
-            timeout 1200 \
+          OUT=research/snapshots
+          mkdir -p "$OUT"
+          # -A -t : stdout IS the evidence -- unaligned, tuples only, no headers
+          # -1    : one transaction, so every read shares one MVCC snapshot
+          PGOPTIONS="-c statement_timeout=1800000 -c default_transaction_read_only=on -c default_transaction_isolation=repeatable\ read" \
+            timeout 2400 \
             psql "$EXT" -X -A -t -q -v ON_ERROR_STOP=1 -1 \
-                 -f "$SRC" > out/settlement_snapshot.txt 2> out/draw.err
+                 -f "$SRC" > /tmp/raw.txt 2> /tmp/draw.err
           RC=$?
           echo "psql exit=$RC"
           if [ "$RC" != "0" ]; then
             echo "::error::snapshot draw failed with exit $RC"
-            grep -v -F "$PW" out/draw.err | head -40
+            grep -v -F "$PW" /tmp/draw.err | head -40
             exit "$RC"
           fi
 
-          echo "== HEADER =="
-          grep '^#' out/settlement_snapshot.txt
+          # SPLIT THE TAGGED STREAM. The tag is stripped so each committed file
+          # contains only its own canonical payload lines -- which is exactly
+          # what the database hashed.
+          grep '^#'      /tmp/raw.txt                  > /tmp/hdr.txt
+          grep '^E	' /tmp/raw.txt | cut -f2- > "$OUT/u2_events_v1.jsonl"
+          grep '^C	' /tmp/raw.txt | cut -f2- > "$OUT/settlement_v1.jsonl"
+
+          echo "== MANIFEST HEADER =="
+          cat /tmp/hdr.txt
+
+          hv() { grep "^#$1	" /tmp/hdr.txt | cut -f2-; }
 
           # EVERY GUARD MUST BE ZERO OR NOTHING IS PUBLISHED. A snapshot that
           # fails a guard is not a snapshot with a caveat; it is a snapshot whose
-          # canonical form is not what this spec says it is, and pinning it would
+          # canonical form is not what the spec says it is, and pinning it would
           # pin the defect.
           fail=0
-          for g in GUARD_COUNT_MISMATCH GUARD_PAYOUT_NON_NUMBER \
-                   GUARD_PAYOUT_ROUNDTRIP_LOSSY GUARD_ROW_HAS_NEWLINE; do
-            v=$(grep "^#$g	" out/settlement_snapshot.txt | cut -f2)
+          for g in GUARD_EVENT_COUNT_MISMATCH GUARD_COND_COUNT_MISMATCH \
+                   GUARD_DEPTH_NOT_ARRAY GUARD_DEPTH_MALFORMED \
+                   GUARD_DEPTH_NON_NUMBER GUARD_PAYOUT_NON_NUMBER \
+                   GUARD_ROW_HAS_NEWLINE; do
+            v=$(hv "$g")
             [ -z "$v" ] && { echo "::error::$g missing from the header"; fail=1; continue; }
             [ "$v" = "0" ] || { echo "::error::$g = $v (must be 0)"; fail=1; }
           done
-          [ "$fail" = "0" ] || { echo "::error::guards failed; nothing published"; exit 1; }
 
-          # RE-DERIVE THE DATABASE HASH FROM THE WRITTEN BYTES. The database
-          # hashed the rows it built; this proves the file on disk contains those
-          # same bytes, which is the whole point of a pin. If the two disagree
-          # the file is corrupt in transit and must not be committed.
-          DB=$(grep '^#DB_CANONICAL_CONTENT_SHA256	' out/settlement_snapshot.txt | cut -f2)
-          RE=$(grep -v '^#' out/settlement_snapshot.txt | perl -0pe 's/\n\z//' | sha256sum | cut -d' ' -f1)
-          echo "DB_CANONICAL_CONTENT_SHA256   $DB"
-          echo "RECOMPUTED_FROM_FILE          $RE"
-          [ "$DB" = "$RE" ] || { echo "::error::hash mismatch -- the written file is not what the database hashed"; exit 1; }
+          # RE-DERIVE EACH DATABASE HASH FROM THE BYTES ACTUALLY WRITTEN. The
+          # database hashed the rows it built; this proves the files on disk
+          # contain those same bytes. A pin never checked against the bytes on
+          # disk is not a pin.
+          EDB=$(hv U2_EVENT_DB_CANONICAL_SHA256)
+          CDB=$(hv SETTLEMENT_DB_CANONICAL_SHA256)
+          ERE=$(perl -0pe 's/\n\z//' "$OUT/u2_events_v1.jsonl"   | sha256sum | cut -d' ' -f1)
+          CRE=$(perl -0pe 's/\n\z//' "$OUT/settlement_v1.jsonl"  | sha256sum | cut -d' ' -f1)
+          echo "U2_EVENT_DB_CANONICAL_SHA256    $EDB"
+          echo "  recomputed from written file  $ERE"
+          echo "SETTLEMENT_DB_CANONICAL_SHA256  $CDB"
+          echo "  recomputed from written file  $CRE"
+          [ "$EDB" = "$ERE" ] || { echo "::error::event hash mismatch -- the written file is not what the database hashed"; fail=1; }
+          [ "$CDB" = "$CRE" ] || { echo "::error::settlement hash mismatch -- the written file is not what the database hashed"; fail=1; }
 
-          FILE_SHA=$(sha256sum out/settlement_snapshot.txt | cut -d' ' -f1)
-          echo "COMMITTED_FILE_SHA256         $FILE_SHA"
+          # Line counts must match the declared counts too, independently of the
+          # hashes: a hash agreeing on zero rows would otherwise look like a pass.
+          EN=$(wc -l < "$OUT/u2_events_v1.jsonl")
+          CN=$(wc -l < "$OUT/settlement_v1.jsonl")
+          [ "$EN" = "$(hv U2_SNAPSHOT_V1_EVENT_COUNT)" ] || { echo "::error::event line count $EN != declared"; fail=1; }
+          [ "$CN" = "$(hv SETTLEMENT_SNAPSHOT_ROW_COUNT)" ] || { echo "::error::condition line count $CN != declared"; fail=1; }
+          [ "$EN" -gt 0 ] || { echo "::error::zero event lines"; fail=1; }
+          [ "$CN" -gt 0 ] || { echo "::error::zero condition lines"; fail=1; }
+
+          [ "$fail" = "0" ] || { echo "::error::guards failed; nothing sealed"; exit 1; }
+
+          # SIZE, MEASURED AND PRINTED BEFORE ANY DECISION ABOUT STORAGE.
+          EU=$(wc -c < "$OUT/u2_events_v1.jsonl")
+          CU=$(wc -c < "$OUT/settlement_v1.jsonl")
+          # gzip -9 -n: -n drops the name and mtime, which are the
+          # non-deterministic parts of the container.
+          gzip -9 -n -c "$OUT/u2_events_v1.jsonl"  > "$OUT/u2_events_v1.jsonl.gz"
+          gzip -9 -n -c "$OUT/settlement_v1.jsonl" > "$OUT/settlement_v1.jsonl.gz"
+          EZ=$(wc -c < "$OUT/u2_events_v1.jsonl.gz")
+          CZ=$(wc -c < "$OUT/settlement_v1.jsonl.gz")
+          echo "== SIZE =="
+          printf 'events      uncompressed %s bytes   gzip -9 %s bytes\n' "$EU" "$EZ"
+          printf 'settlement  uncompressed %s bytes   gzip -9 %s bytes\n' "$CU" "$CZ"
+
+          EFILE=$(sha256sum "$OUT/u2_events_v1.jsonl"  | cut -d' ' -f1)
+          CFILE=$(sha256sum "$OUT/settlement_v1.jsonl" | cut -d' ' -f1)
+          EGZ=$(sha256sum "$OUT/u2_events_v1.jsonl.gz"  | cut -d' ' -f1)
+          CGZ=$(sha256sum "$OUT/settlement_v1.jsonl.gz" | cut -d' ' -f1)
+          SPEC=$(sha256sum research/SNAPSHOT_CANONICAL_SPEC.md | cut -d' ' -f1)
+
+          # THE MANIFEST binds cutoff, drawn-at, isolation, counts, every
+          # component hash and the spec's own hash. It cannot contain its own
+          # hash, so AUDIT_SNAPSHOT_MANIFEST_SHA256 is computed over it
+          # afterwards and lives in HASHES.txt, the log and the commit message --
+          # never inside the file it describes.
           {
-            echo "DB_CANONICAL_CONTENT_SHA256=$DB"
-            echo "COMMITTED_FILE_SHA256=$FILE_SHA"
-            echo "BYTES=$(wc -c < out/settlement_snapshot.txt)"
-            echo "LINES=$(wc -l < out/settlement_snapshot.txt)"
-          } > out/HASHES.txt
-          cat out/HASHES.txt
+            cat /tmp/hdr.txt
+            echo "#U2_EVENT_COMMITTED_FILE_SHA256	$EFILE"
+            echo "#SETTLEMENT_COMMITTED_FILE_SHA256	$CFILE"
+            echo "#U2_EVENT_GZ_TRANSPORT_SHA256	$EGZ"
+            echo "#SETTLEMENT_GZ_TRANSPORT_SHA256	$CGZ"
+            echo "#GZ_HASH_SCOPE	a .gz sha256 is a TRANSPORT checksum only; gzip output can differ between implementations and versions, so the authoritative identity is always the uncompressed canonical hash"
+            echo "#CANONICAL_SPEC_SHA256	$SPEC"
+            echo "#EVENTS_UNCOMPRESSED_BYTES	$EU"
+            echo "#EVENTS_GZIP9_BYTES	$EZ"
+            echo "#SETTLEMENT_UNCOMPRESSED_BYTES	$CU"
+            echo "#SETTLEMENT_GZIP9_BYTES	$CZ"
+            echo "#SOURCE_COMMIT	$GITHUB_SHA"
+          } > "$OUT/manifest_v1.txt"
+          MAN=$(sha256sum "$OUT/manifest_v1.txt" | cut -d' ' -f1)
+          {
+            echo "AUDIT_SNAPSHOT_MANIFEST_SHA256=$MAN"
+            echo "U2_EVENT_DB_CANONICAL_SHA256=$EDB"
+            echo "U2_EVENT_COMMITTED_FILE_SHA256=$EFILE"
+            echo "SETTLEMENT_DB_CANONICAL_SHA256=$CDB"
+            echo "SETTLEMENT_COMMITTED_FILE_SHA256=$CFILE"
+            echo "CANONICAL_SPEC_SHA256=$SPEC"
+          } > "$OUT/HASHES.txt"
+          echo "== HASHES =="
+          cat "$OUT/HASHES.txt"
+
+          # DECIDE STORAGE FROM THE MEASURED SIZE, not from a guess made before
+          # the draw. Under 45 MB a file is committed plain and stays greppable
+          # and diffable; at or above it only the deterministic .gz is committed,
+          # because GitHub refuses a 100 MB blob outright and warns past 50 MB.
+          LIMIT=$((45 * 1024 * 1024))
+          if [ "$EU" -lt "$LIMIT" ]; then
+            rm -f "$OUT/u2_events_v1.jsonl.gz"
+            echo "events: committed PLAIN ($EU bytes)"
+          else
+            rm -f "$OUT/u2_events_v1.jsonl"
+            echo "events: committed GZIPPED ($EZ bytes; $EU uncompressed)"
+          fi
+          if [ "$CU" -lt "$LIMIT" ]; then
+            rm -f "$OUT/settlement_v1.jsonl.gz"
+            echo "settlement: committed PLAIN ($CU bytes)"
+          else
+            rm -f "$OUT/settlement_v1.jsonl"
+            echo "settlement: committed GZIPPED ($CZ bytes; $CU uncompressed)"
+          fi
+
+          if [ "$DOCOMMIT" = "COMMIT" ]; then
+            git config user.name  "Claude"
+            git config user.email "noreply@anthropic.com"
+            # ONLY research/snapshots/. Naming the one path means nothing else in
+            # the tree can ride along in this commit.
+            git add research/snapshots/
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+            else
+              git commit -q -m "research: seal AUDIT SNAPSHOT V1 (U2_SNAPSHOT_V1 + settlement)
+
+[skip render]
+
+Drawn read-only under one repeatable-read transaction by
+research/gen/draw_audit_snapshot.sql. Canonical rules:
+research/SNAPSHOT_CANONICAL_SPEC.md@v1.
+
+AUDIT_SNAPSHOT_MANIFEST_SHA256=$MAN
+U2_EVENT_DB_CANONICAL_SHA256=$EDB
+SETTLEMENT_DB_CANONICAL_SHA256=$CDB
+
+U2_SNAPSHOT_V1 is the immutable evidence population observed at
+U2_SNAPSHOT_V1_DRAWN_AT. It is NOT the Run-81A population: that event set was
+never materialised and copy_probes retention has deleted rows oldest-first
+since, so it is NOT RECONSTRUCTIBLE. The deltas against RUN 81A ORIGINAL are in
+the manifest.
+
+Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC"
+              n=0
+              until git push origin HEAD:claude/session-njaewf; do
+                n=$((n+1)); [ "$n" -ge 4 ] && { echo "::error::push failed"; exit 1; }
+                sleep $((2 ** n)); git pull --rebase origin claude/session-njaewf || true
+              done
+              echo "sealed and pushed"
+            fi
+          else
+            echo "commit not requested -- artifact only"
+          fi
 
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: settlement-snapshot
-          path: out/
+          name: audit-snapshot-v1
+          path: research/snapshots/
           retention-days: 90

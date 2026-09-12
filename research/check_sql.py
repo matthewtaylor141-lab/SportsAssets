@@ -611,7 +611,7 @@ def check_group_by(stmt, path, idx, cte_aliases):
 
 SEALED_PREFIXES = ("rn1_run81b",)
 
-SEALED_TABLES = frozenset({"markets", "market_tokens"})
+SEALED_TABLES = frozenset({"markets", "market_tokens", "copy_probes"})
 
 
 def check_sealed_inputs(path, stmts):
@@ -621,8 +621,15 @@ def check_sealed_inputs(path, stmts):
     the settlement cohort from textually identical SQL at the same immutable
     cutoff and disagreed by one event and $7.28, because `markets` is upserted
     with no history and `copy_probes` is actively DELETEd by the retention loop
-    (37-day floor). 81B exists to read a committed, hash-pinned snapshot
-    instead. Nothing about the SQL's shape distinguishes the right source from
+    (37-day floor, workers/retention.py). 81B exists to read a committed,
+    hash-pinned snapshot instead.
+
+    ALL THREE SEALED TABLES ARE MUTABLE IN A DIFFERENT WAY, which is why the
+    list is exactly these three: `markets` and `market_tokens` are upserted with
+    no history, and `copy_probes` is DELETED outright on a 37-day clock. A
+    sealed file that reached any of them would not merely be reading stale data
+    -- it would be reading a DIFFERENT POPULATION from the one its own snapshot
+    describes. Nothing about the SQL's shape distinguishes the right source from
     the wrong one -- only the table name does -- so the rule is mechanical:
 
         a file whose name starts with a sealed prefix may not name
