@@ -1,0 +1,54 @@
+name: commit-guard
+
+# BACKSTOP, NOT PREVENTION. Render deploys ON PUSH, so by the time this job runs
+# the deploy has already begun. .githooks/pre-push is what actually prevents one;
+# this exists because core.hooksPath is local config and a fresh clone has no
+# hooks until scripts/install-hooks.sh runs. Its job is to make an untagged
+# commit loud and permanent in the run history rather than invisible.
+#
+# THIS WORKFLOW MUST NOT DEPLOY ANYTHING. It reads commit messages and exits.
+
+on:
+  push:
+    branches: ['**']
+
+permissions:
+  contents: read
+
+jobs:
+  tags:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: every pushed commit declares its deploy intent
+        env:
+          BEFORE: ${{ github.event.before }}
+          AFTER: ${{ github.sha }}
+        run: |
+          ZERO=0000000000000000000000000000000000000000
+          if [ "$BEFORE" = "$ZERO" ] || ! git cat-file -e "$BEFORE^{commit}" 2>/dev/null; then
+            # A new branch, or a force-push whose old tip is gone: check only the
+            # tip rather than re-litigating history that predates this guard.
+            RANGE="$AFTER -1"
+            LIST=$(git rev-list -1 "$AFTER")
+          else
+            LIST=$(git rev-list "$BEFORE..$AFTER")
+          fi
+          bad=0
+          for sha in $LIST; do
+            msg=$(git log -1 --format=%B "$sha")
+            case "$msg" in
+              *'[skip render]'*|*'[deploy-approved]'*) ;;
+              *)
+                bad=1
+                echo "::error::$sha carries neither [skip render] nor [deploy-approved] -- pushing it auto-deployed it: $(git log -1 --format=%s "$sha")"
+                ;;
+            esac
+          done
+          if [ "$bad" -ne 0 ]; then
+            echo "::error::A commit reached the service branch without declaring deploy intent. Render deploys on push, so this deploy has ALREADY STARTED -- read 'deploys' in render-ops and decide whether to act. Prevention is scripts/install-hooks.sh."
+            exit 1
+          fi
+          echo "all pushed commits declare their deploy intent"
