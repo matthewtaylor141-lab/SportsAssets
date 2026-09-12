@@ -30,6 +30,8 @@ from collections import defaultdict
 
 EV = "research/snapshots/u2_events_v1.jsonl.gz"
 ST = "research/snapshots/settlement_v1.jsonl"
+W_GZ = "research/snapshots/u0_timing_witness_v1.jsonl.gz"
+W_PL = "research/snapshots/u0_timing_witness_v1.jsonl"
 TOL = 1e-9
 
 STAGES = ["U2_SNAPSHOT_V1", "LINKABLE_TO_CONDITION",
@@ -86,12 +88,11 @@ def load_settlement():
 def main():
     S = load_settlement()
 
-    # PASS 1: the latest retained U2 fill per effective condition, for the
-    # timing quarantine. Note the LIMIT this creates, stated rather than buried:
-    # the approved quarantine predicate witnesses ANY retained RN1 fill (U0);
-    # the sealed snapshot carries only U2 events, so the quarantine computed
-    # here can only see U2 fills and is therefore WEAKER than the approved rule.
-    # It can miss a condition whose only post-resolution fill was un-probed.
+    # PASS 1a: the latest retained U2 fill per effective condition. This alone
+    # gives the WEAK quarantine -- weaker than the approved rule, because the
+    # approved predicate witnesses ANY qualifying U0 fill and U2 is only the
+    # probe-backed subset. It is computed here so the two can be compared, not
+    # because it is the one used: the ladder below applies the STRONG rule.
     latest = {}
     n_events = 0
     notional = 0.0
@@ -109,9 +110,53 @@ def main():
                 if c not in latest or ts > latest[c]:
                     latest[c] = ts
 
+    # PASS 1b: THE U0 TIMING WITNESS -- the sealed supplemental artifact whose
+    # sole purpose is to make the approved (stronger) predicate reproducible.
+    # A U0 row with a NULL condition cannot witness an anomaly on any condition
+    # and is skipped here; it is still counted in the witness's own manifest.
+    w_path = None
+    for cand in (W_GZ, W_PL):
+        try:
+            open(cand, "rb").close()
+            w_path = cand
+            break
+        except OSError:
+            continue
+    latest_u0 = {}
+    n_witness = 0
+    if w_path:
+        op = gzip.open if w_path.endswith(".gz") else open
+        with op(w_path, "rt") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                n_witness += 1
+                c = r.get("condition_id")
+                if c:
+                    ts = r["ts"]
+                    if c not in latest_u0 or ts > latest_u0[c]:
+                        latest_u0[c] = ts
+
+    # THE TWO QUARANTINE SETS, over the conditions the settlement snapshot can
+    # date. STRONG is a superset of WEAK by construction: U2 is a subset of U0,
+    # so any condition the U2 witness catches the U0 witness catches too.
+    weak_q, strong_q = set(), set()
+    for c, d in S.items():
+        ra = d.get("resolved_at")
+        if ra is None:
+            continue
+        if latest.get(c, "") > ra:
+            weak_q.add(c)
+        if latest_u0.get(c, "") > ra:
+            strong_q.add(c)
+    quarantine = strong_q if w_path else weak_q
+
     stage_ev = defaultdict(int)
     stage_no = defaultdict(float)
     stage_cond = defaultdict(set)
+    qc_ev, qc_no = {}, {}
     fail_ev = defaultdict(int)
     fail_no = defaultdict(float)
     sub = defaultdict(int)
@@ -167,9 +212,10 @@ def main():
                 sub[f"px_type={d.get('resolved_prices_type')}"] += 1
                 continue
             hit(4, c, n)
+            qc_ev[c] = qc_ev.get(c, 0) + 1
+            qc_no[c] = qc_no.get(c, 0.0) + n
 
-            ra = d.get("resolved_at")
-            if ra is not None and latest.get(c, "") > ra:
+            if c in quarantine:
                 fail_ev["TIMING_QUARANTINE"] += 1
                 fail_no["TIMING_QUARANTINE"] += n
                 continue
@@ -198,6 +244,25 @@ def main():
     print("NOT what BETTOR knew. NOT the database state at AUDIT_CUTOFF_TS.")
     print("NOT settlement arrival. Structural well-formedness is NOT correctness.")
     print("No economics computed. Sealed bytes only; no database.\n")
+
+    if w_path:
+        print(f"== U0 TIMING WITNESS: {w_path} ==")
+        print(f"  rows read {n_witness:,}; conditions datable {len(latest_u0):,}")
+        print("  the STRONG (approved) predicate is in force below\n")
+    else:
+        print("== NO U0 WITNESS PRESENT -- the WEAK U2-only quarantine is in")
+        print("== force, which is NOT the approved rule. Findings are provisional.\n")
+
+    print("== QUARANTINE COMPARISON ==")
+
+    print(f"{'rule':40}{'conditions':>12}{'U2 events':>12}{'U2 notional':>18}")
+    for nm, qs in (("WEAK_U2_ONLY_QUARANTINE", weak_q),
+                   ("STRONG_U0_WITNESS_QUARANTINE", strong_q),
+                   ("INCREMENTAL_STRONG_ONLY_EXCLUSIONS", strong_q - weak_q)):
+        e = sum(qc_ev.get(c, 0) for c in qs)
+        n = sum(qc_no.get(c, 0.0) for c in qs)
+        print(f"{nm:40}{len(qs):>12,}{e:>12,}{n:>18,.2f}")
+    print()
 
     print("== A. THE LADDER ==")
     print(f"{'stage':52}{'events':>10}{'conds':>9}{'notional':>16}"

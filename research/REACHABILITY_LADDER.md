@@ -1,5 +1,13 @@
 # SETTLEMENT ANALYZABILITY FROM THE SEALED SNAPSHOT
 
+> **REVISION — the STRONG quarantine is now in force.** The first version of
+> this document used a U2-only timing witness, which was *weaker* than the
+> approved predicate. `U0_SETTLEMENT_TIMING_WITNESS_V1` was drawn and sealed to
+> close that gap. **The two rules select the identical set** — 209 conditions /
+> 1,694 events / $303,303.16, incremental strong-only exclusions **zero** — so
+> every ladder figure below is unchanged. The rule in force is now the approved
+> one, and it is reproducible offline. See §G.
+
 Observed at `U2_SNAPSHOT_V1_DRAWN_AT = 2026-09-12T02:53:56.653273Z`.
 
 Produced by `research/gen/reachability_ladder.py` from two committed files and
@@ -120,17 +128,72 @@ sealed snapshot, evaluated in this order:
    list, that token's `outcome_index` is a valid index into the payout vector,
    and the vector has exactly one element equal to 1.
 
-### Two limits of this definition, stated rather than discovered later
+### One limit of this definition, stated rather than discovered later
 
-- **The quarantine here is WEAKER than the approved rule.** The approved
-  predicate witnesses *any* retained RN1 fill (U0). The sealed snapshot carries
-  only U2 events, so this computation can only see U2 fills and could miss a
-  condition whose sole post-resolution fill was never probed. It nonetheless
-  reproduces run 80.5's figures exactly — see below — so on this cohort the two
-  agree; that is an observation, not a proof they always would.
-- **Condition (6) requires a unique winning outcome.** A binary that genuinely
-  settled 0.5/0.5 would be excluded by it. Zero such rows exist here, so nothing
-  is lost in this snapshot, but the rule would bite if one appeared.
+- **Condition (6) requires a unique winning outcome.** *Unique-winner
+  eligibility would reject a genuine 0.5/0.5 terminal vector; no such vector
+  exists in the sealed analyzable population.* The rule is kept as implemented
+  for this audit rather than redesigned around a zero-witness edge case.
+
+The quarantine limit that stood here in the first version is **closed** — see
+§G. Condition (5) now reads against the U0 witness, which is the approved
+predicate.
+
+---
+
+## G. THE STRONG QUARANTINE
+
+`U0_SETTLEMENT_TIMING_WITNESS_V1` is a sealed supplemental artifact whose only
+purpose is to make the approved predicate reproducible offline. It **supplements
+and does not replace** `U2_SNAPSHOT_V1`, which was not redrawn.
+
+| | |
+|---|---|
+| `U0_WITNESS_DRAWN_AT` | 2026-09-12T11:57:18.899518Z |
+| isolation (read from the server) | `repeatable read`, `transaction_read_only=on` |
+| `U0_WITNESS_EVENT_COUNT` | **962,509** |
+| `U0_EXPECTED_CONTROL` / delta | 962,509 / **0 — REPRODUCES** |
+| `U0_WITNESS_CONDITION_COUNT` | 46,309 |
+| `U0_WITNESS_NULL_CONDITION_ROWS` | 18,068 |
+| guards | both zero |
+| gzip determinism | `byte_identical_on_repeat` |
+| `U0_WITNESS_UNCOMPRESSED_CANONICAL_SHA256` *(authoritative identity)* | `83ad6a7e8b0e1c33368f86471352a0d014fe4fc02ae8c712335c76234e9dd7a5` |
+| `U0_WITNESS_COMPRESSED_TRANSPORT_SHA256` *(not an identity)* | `62b1d9cd62f3b2982f8d11e6db8bfc50d57876336b307f799c3315d86d327521` |
+| `U0_WITNESS_MANIFEST_SHA256` | `d42d06a33b17ff590afee3230d67c203ae8eae21747ccca75d3bc0a2d0c8e8e5` |
+| size | 163,544,050 B uncompressed / 9,734,327 B gzip (committed gzipped) |
+
+**The U0 control reproduces exactly.** Run 80 measured 962,509 at 00:16Z and run
+81A re-read it at 02:04Z; this witness, drawn at 11:57Z — nearly twelve hours
+later — returns 962,509 with delta 0. The workflow would have refused to seal on
+a mismatch.
+
+### The comparison
+
+| rule | conditions | U2 events | U2 source notional |
+|---|---|---|---|
+| `WEAK_U2_ONLY_QUARANTINE` | 209 | 1,694 | $303,303.16 |
+| `STRONG_U0_WITNESS_QUARANTINE` | **209** | **1,694** | **$303,303.16** |
+| `INCREMENTAL_STRONG_ONLY_EXCLUSIONS` | **0** | **0** | **$0.00** |
+
+**The stronger rule adds nothing on this cohort.** Every condition the U0
+witness catches was already caught by the U2 witness. The gap I flagged was real
+as a possibility and is empirically empty here.
+
+Read that precisely, and not as more than it is:
+
+- It is **not** a proof that the two rules are equivalent in general. It is a
+  measurement on the conditions this cohort can reach.
+- **28,557 of the U0 witness's 46,309 conditions are not datable from sealed
+  bytes at all** — they have no row in the settlement snapshot, because that
+  snapshot's universe is derived from U2. They carry no U2 events, so they
+  cannot affect the U2 cohort either way; but the stronger rule's reach over
+  them is untested and is not claimed.
+- Of the 17,752 conditions the snapshot does carry, only **9,545 have a
+  `resolved_at`** at all — the rest cannot witness a timing anomaly because
+  there is no resolution instant to compare against.
+
+I am not offering a mechanism for why the incremental is zero. The figure is
+measured; the cause is not tested.
 
 ---
 
