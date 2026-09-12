@@ -25,8 +25,8 @@ from .. import procmem
 from ..db import heartbeat
 from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
                metadata_refresher, mirror_live, mirror_shadow, poller, premap,
-               price_path, reconciler, retention, roster, roster_auto, underdog,
-               whale_exits)
+               price_path, reconciler, retention, rn1_observability, roster,
+               roster_auto, underdog, whale_exits)
 
 # THE ARENA CAP, AT IMPORT (2026-09-05). sportsassets-workers was
 # OOM-killed at 2 GiB thirteen times between 17:59:41 and 20:21:49:
@@ -319,6 +319,19 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # existing loop's boot delay is unchanged; its first reading -- the
     # 'boot' figure on its lines -- is taken about thirteen seconds into
     # the process, after the other seventeen have started.
+    # RN1 FORWARD OBSERVABILITY (2026-09-12, run 83). MEASUREMENT ONLY -- no
+    # order path exists in its import graph and a test fails the build if one
+    # appears. INERT BY CODE DEFAULT: with RN1_OBSERVABILITY_SHADOW unset its
+    # main() logs one line and returns, so registering it here changes nothing
+    # about a running deployment until the flag is set.
+    #
+    # SECOND TO LAST, immediately BEFORE the memory watch rather than after it.
+    # The watch is last on purpose -- it wants its first RSS reading taken once
+    # the other loops have started -- and putting anything after it would quietly
+    # take that away. Every earlier loop keeps its index and its boot delay; only
+    # the watch's own moves, by one stagger step, in the direction it already
+    # wants.
+    ("rn1_obs", rn1_observability.main),
     ("memory", memory_watch),
 ]
 

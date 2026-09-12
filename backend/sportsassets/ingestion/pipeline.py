@@ -60,6 +60,15 @@ class TradeEvent:
     event_slug: str | None = None
     event_title: str | None = None
     sport: str = "unclassified"
+    # CLOCK PROVENANCE (2026-09-12, run 83B). Optional and defaulted, so no
+    # existing construction site changes. A lane that knows which clock produced
+    # ts_epoch says so here; ts_fallback=True means OUR wall clock was
+    # substituted for a missing source timestamp, which the observability record
+    # then stores as FALLBACK_SUBSTITUTED rather than as a source value. These
+    # are NOT part of dedupe_key and NOT written to trades -- they are
+    # provenance, carried in memory to the collector.
+    ts_provenance: str | None = None
+    ts_fallback: bool = False
 
     @property
     def notional(self) -> float:
@@ -70,6 +79,74 @@ class TradeEvent:
         return make_dedupe_key(
             self.tx_hash, self.asset, self.side, self.size, self.price, self.ts_epoch
         )
+
+
+def _obs_receipt(ev: TradeEvent) -> None:
+    """Hand the arriving event to the observability collector. Never raises.
+
+    The lane decides the source timestamp's provenance and clock domain, because
+    they genuinely differ: chain and s1 carry a Polygon block timestamp, poll
+    carries the Data API's own. What they have in common is that NONE of them is
+    our clock -- and the collector records that fact beside the value rather than
+    leaving a later reader to infer it, which is the whole lesson of run 82.
+
+    ts_provenance / ts_fallback ride on the event when the lane knows them; the
+    chain lane sets ts_fallback=True when BlockTimestampCache had to substitute
+    our wall clock, so a substituted value declares itself as
+    FALLBACK_SUBSTITUTED instead of travelling as though the chain supplied it.
+    """
+    try:
+        from ..obs import clock as _clock                      # noqa: PLC0415
+        from ..obs.collector import observe as _observe        # noqa: PLC0415
+
+        domain = {
+            "chain": _clock.ClockDomain.SOURCE_CHAIN,
+            "s1": _clock.ClockDomain.SOURCE_CHAIN,
+            "poll": _clock.ClockDomain.SOURCE_VENUE,
+            "backfill": _clock.ClockDomain.SOURCE_VENUE,
+        }.get(ev.source, _clock.ClockDomain.UNKNOWN)
+        provenance = getattr(ev, "ts_provenance", None) or {
+            "chain": "polygon_block_timestamp",
+            "s1": "polygon_block_timestamp_hash_verified",
+            "poll": "data_api_trade_timestamp",
+            "backfill": "data_api_activity_timestamp",
+        }.get(ev.source, "unknown")
+        fallback = bool(getattr(ev, "ts_fallback", False))
+
+        if not ev.ts_epoch:
+            source_ts = _clock.SourceTimestamp.missing(provenance, domain)
+        elif fallback:
+            source_ts = _clock.SourceTimestamp(
+                value=datetime.fromtimestamp(ev.ts_epoch, tz=timezone.utc),
+                provenance="local_wall_fallback",
+                clock_domain=_clock.ClockDomain.BETTOR_WALL,
+                status=_clock.TimestampStatus.FALLBACK_SUBSTITUTED,
+                fallback=True,
+            )
+        else:
+            source_ts = _clock.SourceTimestamp(
+                value=datetime.fromtimestamp(ev.ts_epoch, tz=timezone.utc),
+                provenance=provenance, clock_domain=domain)
+
+        _observe(
+            source_event_id=ev.dedupe_key,
+            source_lane=ev.source,
+            source_venue="polymarket",
+            source_token_id=str(ev.asset) if ev.asset else None,
+            source_ts=source_ts,
+            ingest_worker="ingestion.pipeline.ingest_trade_result",
+            source_tx_hash=ev.tx_hash,
+            source_market_id=ev.condition_id,
+            source_outcome_index=ev.outcome_index,
+            source_price=ev.price,
+            source_size=ev.size,
+            source_side=ev.side,
+        )
+    except Exception:                                          # noqa: BLE001
+        # Instrumentation must never break ingestion. Silent here on purpose:
+        # observe() already counts its own failures, and a log line on a hot
+        # path that is failing would itself become the incident.
+        pass
 
 
 def _feed_payload(trade_id: int, ev: TradeEvent, detected_at: datetime, enriched: bool) -> dict:
@@ -124,6 +201,20 @@ async def ingest_trade_result(ev: TradeEvent,
     Callers asking "did I just see something new?" read the second
     element. The first is non-None for duplicates too.
     """
+    # THE OBSERVABILITY RECEIPT STAMP (2026-09-12, run 83).
+    #
+    # FIRST STATEMENT IN THE FUNCTION, deliberately: the receipt instant has to
+    # be taken at arrival. Stamping it after the pool round-trip would measure
+    # the pool, which is exactly the error that makes copy_probes.reaction_s
+    # unusable as a latency figure -- run 82.
+    #
+    # It is synchronous, does no I/O, and cannot raise into this function: every
+    # failure mode inside observe() increments a counter and returns. An
+    # instrument that can break ingestion is not an instrument, it is a new way
+    # to lose fills. With RN1_OBSERVABILITY_SHADOW off -- the code default -- it
+    # returns immediately.
+    _obs_receipt(ev)
+
     pool = await get_pool()
     detected_at = datetime.now(tz=timezone.utc)
     ts = datetime.fromtimestamp(ev.ts_epoch, tz=timezone.utc)

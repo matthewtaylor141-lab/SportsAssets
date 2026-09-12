@@ -93,3 +93,14 @@ def reads_per_second() -> float:
 
 
 COLLECTOR_VERSION = "rn1-obs/1"
+
+
+def clob_base() -> str:
+    """Read-only book endpoint.
+
+    Defaulted to the same host copy_probe.py reads, because U2 -- the sealed
+    population every historical run measured -- was built from that endpoint's
+    ladders. Reading anywhere else would make the forward curve a different
+    quantity from the one it is meant to be compared against.
+    """
+    return os.environ.get("CLOB_BASE_URL", "https://clob.polymarket.com").rstrip("/")

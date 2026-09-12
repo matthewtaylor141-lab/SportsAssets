@@ -667,8 +667,17 @@ def test_the_decoders_the_guard_and_the_rpc_helpers_are_09b35cds():
     assert _h(ch.v3_owner_candidates) == "39e0181a06b0fad1"
     assert _h(ch.decode_order_filled_v2) == "f6008f8f0cb6c74b"
     assert _h(ch.decode_order_filled) == "aa9fbbd17d806da5"
-    assert _h(ChainListener._handle_v3) == "6d914233c2672704"
-    assert _h(ChainListener._handle_log) == "62df9c56014112a6"
+    # RE-PINNED 2026-09-12 (run 83B), was 6d914233c2672704. _handle_v3's
+    # TradeEvent now also carries ts_provenance and ts_fallback, so a block
+    # timestamp our own wall clock had to substitute declares itself instead of
+    # travelling as though the chain supplied it. Nothing about the decode, the
+    # guard or the no-retry rule moved -- the fill's economics are byte for byte
+    # what they were, and the two new arguments are provenance only.
+    assert _h(ChainListener._handle_v3) == "b3897175ed074ddb"
+    # RE-PINNED 2026-09-12 (run 83B), was 62df9c56014112a6. Same reason as
+    # _handle_v3 above: its TradeEvent carries the two provenance arguments now.
+    # The observe calls, the filter and the roster match are untouched.
+    assert _h(ChainListener._handle_log) == "bedc1322c3edfa8e"
     assert _h(ChainListener._get_logs) == "9610f8ed1e7dce3f"
     assert _h(ChainListener.backfill) == "d2926b27f8d23f86"
     assert _h(ChainListener._save_cursor) == "0ca320e7d88bbb93"

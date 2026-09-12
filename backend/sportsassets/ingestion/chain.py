@@ -624,6 +624,17 @@ class BlockTimestampCache:
         self._url = rpc_url
         self._cache: dict[int, int] = {}
         self._max = max_size
+        # THE FALLBACK LEDGER (run 82 / 83B). Which blocks got our own wall
+        # clock instead of a real block timestamp. Bounded the same way the
+        # cache is, and read by the observability collector so a substituted
+        # value can declare itself as FALLBACK_SUBSTITUTED rather than travel
+        # as though the chain had supplied it.
+        self._fallback_blocks: set[int] = set()
+        self.fallback_count: int = 0
+
+    def was_fallback(self, block_number: int) -> bool:
+        """Did this block's timestamp come from OUR clock rather than the chain?"""
+        return block_number in self._fallback_blocks
 
     async def get(self, block_number: int) -> int:
         if block_number in self._cache:
@@ -639,7 +650,33 @@ class BlockTimestampCache:
         )
         resp.raise_for_status()
         result = resp.json().get("result") or {}
-        ts = int(str(result.get("timestamp", hex(int(time.time())))), 16)
+        # THE SUBSTITUTION IS DECLARED, NOT SILENT (run 82, 2026-09-12).
+        #
+        # This used to read result.get("timestamp", hex(int(time.time()))) --
+        # one expression in which an RPC returning 200 with no timestamp (an
+        # unsynced or eventually-consistent node) silently put OUR WALL CLOCK
+        # into trades.ts, indistinguishable forever afterwards from a real block
+        # time. Run 82 could not rule that out as a contributor to the 92.04% of
+        # chain-lane rows whose detected_at - ts is negative, precisely because
+        # nothing recorded which rows it happened to.
+        #
+        # THE VALUE IS UNCHANGED. int(time.time()) is what hex(int(time.time()))
+        # parsed back to. Only the bookkeeping is new.
+        raw_ts = result.get("timestamp")
+        if raw_ts is None:
+            ts = int(time.time())
+            if len(self._fallback_blocks) >= self._max:
+                self._fallback_blocks.pop()
+            self._fallback_blocks.add(block_number)
+            self.fallback_count += 1
+            log.warning(
+                "block %s returned no timestamp; substituting the local wall "
+                "clock (%s). This row's trades.ts is NOT a chain timestamp. "
+                "fallbacks this process: %d",
+                block_number, ts, self.fallback_count,
+            )
+        else:
+            ts = int(str(raw_ts), 16)
         if len(self._cache) >= self._max:
             self._cache.pop(next(iter(self._cache)))
         self._cache[block_number] = ts
@@ -782,6 +819,12 @@ class ChainListener:
             price=fill.price,
             ts_epoch=ts_epoch,
             source="chain",
+            # Run 83B: declare which clock produced ts_epoch. ts_fallback=True
+            # means the RPC gave no block timestamp and our own wall clock was
+            # substituted -- the observability record then stores it as
+            # FALLBACK_SUBSTITUTED instead of as a chain value.
+            ts_provenance="polygon_block_timestamp",
+            ts_fallback=self._blocks.was_fallback(fill.block_number),
         )
         # `if trade_id:` was a dedupe test in effect, and stopped being
         # one when ingest_trade switched to ON CONFLICT DO UPDATE — it
@@ -932,6 +975,10 @@ class ChainListener:
                 price=fill.price,
                 ts_epoch=ts_epoch,
                 source="chain",
+                ts_provenance="polygon_block_timestamp",
+                ts_fallback=self._blocks.was_fallback(
+                    fill.block_number
+                    or int(str(log_entry.get("blockNumber", "0x0")), 16)),
             )
             trade_id, was_new = await ingest_trade_result(ev)
             claim_registry.finish(tx, wallet, "receipt", "ingested")
