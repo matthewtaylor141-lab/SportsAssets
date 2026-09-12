@@ -508,6 +508,58 @@ def test_14c_the_subscribe_frame_is_the_current_sdk_frame(capture):
     assert manifest["current_surface_source"] == "polymarket-client 0.10.0"
 
 
+def test_14e_the_event_type_tally_is_literal_and_keeps_the_heartbeat_apart(capture):
+    """Item 6 of the return list: a count of strings, not a classification.
+
+    The tally must reproduce exactly what sat in each frame's own
+    event_type/type key. A PONG is counted under its own name so transport
+    maintenance can never be read as market data or as a venue error, and the
+    totals must add up to the frame count -- a tally that dropped frames would
+    under-report the capture.
+    """
+    out, proc = capture
+    manifest = json.loads((out / "manifest.json").read_text())
+    counts = manifest["raw_event_type_counts"]
+
+    assert counts.get("book"), counts
+    assert counts.get("price_change"), counts
+    assert counts.get("<PONG heartbeat>") == manifest["pong_frames"], counts
+    assert "<unparsed>" in counts, "the bad JSON / binary frames were not tallied"
+    assert sum(counts.values()) >= manifest["websocket_frames"], (
+        f"tally {counts} does not account for "
+        f"{manifest['websocket_frames']} frames")
+
+    # No invented names: every key is either a literal wire string or one of
+    # the three explicitly bracketed placeholders.
+    for k in counts:
+        assert k.startswith("<") or k.islower(), f"unexpected tally key {k!r}"
+
+
+def test_14f_the_archive_is_built_after_the_checksums(capture):
+    """Item 12: a transport wrapper around the frozen directory.
+
+    It is built after checksums.sha256 exists, so it carries its own integrity
+    record inside it, and it is NOT listed in the manifest's files -- the
+    checksummed files remain the evidence, the archive is only how they travel.
+    """
+    out, proc = capture
+    archive = out.parent / f"{out.name}.tar.gz"
+    assert archive.exists(), proc.stdout + proc.stderr
+
+    import tarfile
+
+    with tarfile.open(archive) as tf:
+        names = {Path(n).name for n in tf.getnames()}
+    assert "checksums.sha256" in names, names
+    assert "manifest.json" in names and "websocket_frames.jsonl" in names, names
+
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert archive.name not in manifest["files"]
+
+    printed = hashlib.sha256(archive.read_bytes()).hexdigest()
+    assert printed in proc.stdout, "the archive sha256 was not reported"
+
+
 def test_14d_the_venues_pong_is_recorded_not_swallowed(capture):
     """A PONG is part of the record. Nothing on this socket is filtered out."""
     out, proc = capture

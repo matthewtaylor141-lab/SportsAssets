@@ -170,6 +170,14 @@ class Capture:
         self.opened_sessions = 0
         self.rest_ok = 0
         self.rest_fail = 0
+        # Literal tallies only. These COUNT the exact string sitting in the
+        # frame's own "event_type"/"type" key and the exact heartbeat reply
+        # text. Nothing here decides what any of those words MEAN -- no frame
+        # is classified, grouped, or given a semantic reading. The tally exists
+        # so the run can be reported without anyone having to open and read the
+        # raw file, and it is derived from the file, never a substitute for it.
+        self.event_type_counts: dict = {}
+        self.pong_count = 0
 
     # ---------------------------------------------------------------- errors
     def error(self, where: str, exc: BaseException | str, **extra) -> None:
@@ -303,12 +311,48 @@ class Capture:
             row["raw_is_base64"] = False
             text = raw
 
+        is_pong = False
         if text is not None:
+            if text == HEARTBEAT_REPLY_TEXT:
+                self.pong_count += 1
+                is_pong = True
             try:
                 row["parsed_json"] = json.loads(text)
             except ValueError as exc:
                 row["parse_error"] = str(exc)
+        # A PONG is still stored as a frame -- nothing on this socket is
+        # filtered out of the record -- but it is tallied under its own name
+        # rather than lumped in with malformed market data. It is transport
+        # maintenance, and the tally must not let it look like either a
+        # market-data frame or a venue error.
+        self._tally(row.get("parsed_json"), is_pong=is_pong)
         self.frames.write(row)
+
+    def _tally(self, parsed, *, is_pong: bool = False) -> None:
+        """Count the literal event_type/type strings. No interpretation.
+
+        A frame may be a bare object or an array of them; both are counted the
+        same way. A frame with neither key counts under "<no event_type key>",
+        a heartbeat reply under "<PONG heartbeat>", and any other non-JSON
+        frame under "<unparsed>" -- the record says what was there, it never
+        guesses what was meant.
+        """
+        if is_pong:
+            self.event_type_counts["<PONG heartbeat>"] = (
+                self.event_type_counts.get("<PONG heartbeat>", 0) + 1)
+            return
+        if parsed is None:
+            self.event_type_counts["<unparsed>"] = (
+                self.event_type_counts.get("<unparsed>", 0) + 1)
+            return
+        items = parsed if isinstance(parsed, list) else [parsed]
+        for item in items:
+            if isinstance(item, dict):
+                key = item.get("event_type", item.get("type"))
+                key = key if isinstance(key, str) else "<no event_type key>"
+            else:
+                key = "<not an object>"
+            self.event_type_counts[key] = self.event_type_counts.get(key, 0) + 1
 
     # ------------------------------------------------------------------ REST
     async def poll_rest(self, stop: asyncio.Event) -> None:
@@ -437,6 +481,11 @@ class Capture:
             "sessions_attempted": self.session_count,
             "sessions_opened": self.opened_sessions,
             "websocket_frames": self.frames.count,
+            # A literal count of the strings in the frames' own event_type/type
+            # keys, and of the exact heartbeat reply text. Not a semantic
+            # classification of any frame.
+            "raw_event_type_counts": dict(sorted(self.event_type_counts.items())),
+            "pong_frames": self.pong_count,
             "rest_requests": self.rest.count,
             "rest_successful": self.rest_ok,
             "rest_failed": self.rest_fail,
@@ -629,7 +678,7 @@ def main(argv=None) -> int:
     print(f"  sessions : {args.sessions} x {args.session_seconds:.0f}s "
           f"(pause {args.pause_seconds:.0f}s)")
     print(f"  REST poll: every {args.rest_interval:.0f}s per token")
-    print(f"  heartbeat: {HEARTBEAT_TEXT} every {args.heartbeat_interval:.0f}s"
+    print(f"  heartbeat: {HEARTBEAT_TEXT} every {args.heartbeat_interval:g}s"
           if args.heartbeat_interval > 0 else "  heartbeat: DISABLED")
     print(f"  custom_feature_enabled: {bool(args.custom_feature_enabled)}")
     try:
@@ -639,17 +688,60 @@ def main(argv=None) -> int:
         print("\ninterrupted; finalising")
     manifest = cap.finalise()
 
-    print("\n--- capture finished ---")
-    print(f"  sessions opened : {manifest['sessions_opened']}/{manifest['sessions_attempted']}")
-    print(f"  ws frames       : {manifest['websocket_frames']}")
-    print(f"  REST ok/failed  : {manifest['rest_successful']}/{manifest['rest_failed']}")
-    print(f"  errors          : {manifest['errors_recorded']}")
-    print(f"  CAPTURE_COMPLETE_FOR_RECONSTRUCTION = "
+    # The archive is built AFTER checksums.sha256, from the frozen directory,
+    # and is not itself listed in the manifest. It is a transport wrapper; the
+    # checksummed files inside it remain the evidence.
+    archive, archive_sha = _pack(cap.out)
+
+    print("\n" + "=" * 62)
+    print("RUN 83.6B CAPTURE -- REPORT THESE ITEMS VERBATIM. DO NOT INTERPRET.")
+    print("=" * 62)
+    print(f" 1. CAPTURE_COMPLETE_FOR_RECONSTRUCTION = "
           f"{manifest['CAPTURE_COMPLETE_FOR_RECONSTRUCTION']}")
     for r in manifest["incomplete_reasons"]:
-        print(f"    - {r}")
-    print(f"\n  files in {cap.out}/ (checksummed; do not edit)")
+        print(f"       missing: {r}")
+    print(f" 2. start UTC = {manifest['start_utc']}")
+    print(f"    end   UTC = {manifest['end_utc']}")
+    print(" 3. token ids used:")
+    for t in manifest["token_ids"]:
+        print(f"       {t}")
+    print(f" 4. websocket sessions opened/attempted = "
+          f"{manifest['sessions_opened']}/{manifest['sessions_attempted']}")
+    print(f" 5. total raw websocket frames = {manifest['websocket_frames']}")
+    print(" 6. counts by raw event_type (literal key tally, no interpretation):")
+    for k, v in manifest["raw_event_type_counts"].items():
+        print(f"       {k}: {v}")
+    print(f" 7. PONG frames received = {manifest['pong_frames']}")
+    print(f" 8. REST witness successful/failed = "
+          f"{manifest['rest_successful']}/{manifest['rest_failed']}")
+    print(f" 9. errors recorded = {manifest['errors_recorded']}"
+          f"  (see errors.jsonl)")
+    print(f"10. output directory = {cap.out}")
+    print("11. checksums.sha256:")
+    for line in (cap.out / "checksums.sha256").read_text().splitlines():
+        print(f"       {line}")
+    print(f"12. archive = {archive.name}")
+    print(f"    archive sha256 = {archive_sha}")
+    print("=" * 62)
+    print("subscribe frame sent: "
+          f"{json.dumps({'type': SUBSCRIBE_TYPE, SUBSCRIBE_IDENTIFIER_FIELD: manifest['token_ids'], 'custom_feature_enabled': manifest['custom_feature_enabled']})}")
+    print("Do not draw conclusions about book semantics, price_change "
+          "semantics, reconstruction, continuity or hashes from this summary.")
     return 0 if manifest["CAPTURE_COMPLETE_FOR_RECONSTRUCTION"] == "YES" else 1
+
+
+def _pack(out: Path) -> tuple[Path, str]:
+    """tar.gz the frozen directory and return (path, sha256).
+
+    Built after checksums.sha256 exists, so the archive carries its own
+    integrity record inside it. stdlib only -- no new dependency.
+    """
+    import tarfile
+
+    archive = out.parent / f"{out.name}.tar.gz"
+    with tarfile.open(archive, "w:gz") as tf:
+        tf.add(out, arcname=out.name)
+    return archive, _sha256_file(archive)
 
 
 if __name__ == "__main__":
