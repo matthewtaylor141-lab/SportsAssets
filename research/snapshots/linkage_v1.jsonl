@@ -1,0 +1,10 @@
+{"row" : "linkage_class", "method" : "CONDITION_DIRECT", "events" : 196787, "notional" : "45408210.18"}
+{"row" : "linkage_class", "method" : "CONDITION_TOKEN_UNMAPPED", "events" : 17822, "notional" : "2919083.58"}
+{"row" : "direct_arm_validation", "check" : "direct_token_agrees", "events" : 192824, "notional" : "44941381.00"}
+{"row" : "direct_arm_validation", "check" : "direct_token_unmapped", "events" : 3963, "notional" : "466829.18"}
+{"row" : "null_condition_arm", "lane" : "chain", "sport" : "unclassified", "price_band" : "p1 [0.00,0.10)", "method" : "CONDITION_TOKEN_UNMAPPED", "events" : 2795, "notional" : "27911.08"}
+{"row" : "null_condition_arm", "lane" : "chain", "sport" : "unclassified", "price_band" : "p2 [0.10,0.25)", "method" : "CONDITION_TOKEN_UNMAPPED", "events" : 2821, "notional" : "127986.59"}
+{"row" : "null_condition_arm", "lane" : "chain", "sport" : "unclassified", "price_band" : "p3 [0.25,0.50)", "method" : "CONDITION_TOKEN_UNMAPPED", "events" : 3761, "notional" : "493037.25"}
+{"row" : "null_condition_arm", "lane" : "chain", "sport" : "unclassified", "price_band" : "p4 [0.50,0.75)", "method" : "CONDITION_TOKEN_UNMAPPED", "events" : 3833, "notional" : "836175.19"}
+{"row" : "null_condition_arm", "lane" : "chain", "sport" : "unclassified", "price_band" : "p5 [0.75,0.90)", "method" : "CONDITION_TOKEN_UNMAPPED", "events" : 2436, "notional" : "807992.37"}
+{"row" : "null_condition_arm", "lane" : "chain", "sport" : "unclassified", "price_band" : "p6 [0.90,1.00)", "method" : "CONDITION_TOKEN_UNMAPPED", "events" : 2176, "notional" : "625981.11"}

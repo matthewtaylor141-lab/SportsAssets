@@ -3,7 +3,7 @@
 #SNAPSHOT_MEANING	U2_SNAPSHOT_V1 is the immutable evidence population observed at U2_SNAPSHOT_V1_DRAWN_AT. SETTLEMENT_SNAPSHOT_V1 is settlement metadata state observed at that same instant for the condition universe derived from it. Neither is what BETTOR knew at AUDIT_CUTOFF_TS, nor the database state at that cutoff, nor settlement arrival, nor a verified outcome. The historical-at-cutoff state is NOT RECONSTRUCTIBLE.
 #RUN_81A_ORIGINAL_NOTE	RUN 81A ORIGINAL is a historical result on the live U2 population that existed while it ran; that event set was never materialised and copy_probes retention has since deleted rows oldest-first, so it is NOT RECONSTRUCTIBLE and is never called identical to U2_SNAPSHOT_V1.
 #AUDIT_CUTOFF_TS	2026-09-12T00:00:00.000000Z
-#U2_SNAPSHOT_V1_DRAWN_AT	2026-09-12T02:40:30.136123Z
+#U2_SNAPSHOT_V1_DRAWN_AT	2026-09-12T02:53:56.653273Z
 #TRANSACTION_ISOLATION	repeatable read
 #TRANSACTION_READ_ONLY	on
 #U2_SNAPSHOT_V1_EVENT_COUNT	214609
@@ -23,6 +23,10 @@
 #U2_MAX_PROBES_PER_TRADE	1
 #U2_ROWS_FROM_GT1_TRADES	0
 #U2_PROBE_SELECTION_RULE	none -- run 81A joined trades to copy_probes with no deduplication, so every qualifying probe is its own row and the snapshot is keyed on copy_probes.id; the event count counts (trade, probe) pairs
+#UNLINKED_EVENT_COUNT	17822
+#UNLINKED_EVENT_NOTIONAL	2919083.58
+#CONDITION_CONFLICT_COUNT	0
+#TOKEN_RECOVERY_NOTE	a null trades.condition_id is NOT assumed unmatchable; linkage is classified per event and a conflict is never silently repaired -- the original is kept as effective and flagged. See the L rows.
 #SETTLEMENT_SNAPSHOT_ROW_COUNT	17752
 #GUARD_EVENT_COUNT_MISMATCH	0
 #GUARD_COND_COUNT_MISMATCH	0
@@ -31,17 +35,22 @@
 #GUARD_DEPTH_NON_NUMBER	0
 #GUARD_PAYOUT_NON_NUMBER	0
 #GUARD_ROW_HAS_NEWLINE	0
-#U2_EVENT_DB_CANONICAL_SHA256	f2042fc11d7c6c7ef385f9e100b8cde579f1011de23623ff4afdde8e25eec8c6
-#SETTLEMENT_DB_CANONICAL_SHA256	fb46249e1496c841f45e727eb5dc3377d0c55757bfc6f3823d2fdb2fc1820837
+#U2_EVENT_DB_CANONICAL_SHA256	a9f0e1140f081713f3ff5a62d9af3b95859627e6ae6ecf8201093b7ae5068134
+#SETTLEMENT_DB_CANONICAL_SHA256	c449dc5f94fb4605f584677ff5c0eccc0d396b292a647f7ba267200ddd83bb3f
 #DB_CANONICAL_SCOPE	each DB hash covers ONLY its own payload lines, newline-joined, no trailing newline, in canonical order; the manifest lines are NOT covered by either
-#U2_EVENT_COMMITTED_FILE_SHA256	f94ec7105acfd205c838b73ac5e6d0af1dd5a7c9e0315fc30a57c60085f3abf7
-#SETTLEMENT_COMMITTED_FILE_SHA256	04bf9a5b2999a2efeaf35723d5a55e2bc58a6a52c494fc5a899a52c450b5ae0e
-#U2_EVENT_GZ_TRANSPORT_SHA256	74551ced04cd68a2dd35f826b43ca03fe9ec2996aa5b7547e64278da4c77d13b
-#SETTLEMENT_GZ_TRANSPORT_SHA256	0cd5d02988218bac749f90b0b7f7fbabce08078dd4b34e7cf6884709e132ccae
-#GZ_HASH_SCOPE	a .gz sha256 is a TRANSPORT checksum only; gzip output can differ between implementations and versions, so the authoritative identity is always the uncompressed canonical hash
+#U2_EVENT_COMMITTED_FILE_SHA256	183c63177de448cda233945692bd1e8ebc11a9302c26371280fdb5046a87dfef
+#SETTLEMENT_COMMITTED_FILE_SHA256	4d81cc0d11b9baebccd3b5cd215c376ab7e381ac61a0d3f7c040cbfcc8403a97
+#U2_EVENT_GZ_TRANSPORT_SHA256	bdae12aa971df3efe4a3f732d48ecc6d94dee513d87d8d9b4315c91739979308
+#SETTLEMENT_GZ_TRANSPORT_SHA256	ff03797c180dceeca3751e01913b1bbe43cb5a3c9ef1e3b53cb2cad07fb7240e
+#U2_EVENT_UNCOMPRESSED_CANONICAL_SHA256	a9f0e1140f081713f3ff5a62d9af3b95859627e6ae6ecf8201093b7ae5068134
+#SETTLEMENT_UNCOMPRESSED_CANONICAL_SHA256	c449dc5f94fb4605f584677ff5c0eccc0d396b292a647f7ba267200ddd83bb3f
+#U2_EVENT_COMPRESSED_TRANSPORT_SHA256	bdae12aa971df3efe4a3f732d48ecc6d94dee513d87d8d9b4315c91739979308
+#SETTLEMENT_COMPRESSED_TRANSPORT_SHA256	ff03797c180dceeca3751e01913b1bbe43cb5a3c9ef1e3b53cb2cad07fb7240e
+#GZIP_DETERMINISM	byte_identical_on_repeat
+#HASH_SCOPES	UNCOMPRESSED_CANONICAL_SHA256 is the AUTHORITATIVE IDENTITY and covers the payload lines newline-joined with no trailing newline; COMPRESSED_TRANSPORT_SHA256 covers the .gz container and is a transport checksum only, never an identity, because gzip output can differ between implementations and versions
 #CANONICAL_SPEC_SHA256	db8bb8c50eaaf7a295ffd3adf988d12f4f8c24ce5925d182b0ffeb47f49c0aa6
-#EVENTS_UNCOMPRESSED_BYTES	217251934
-#EVENTS_GZIP9_BYTES	28102935
-#SETTLEMENT_UNCOMPRESSED_BYTES	12711538
-#SETTLEMENT_GZIP9_BYTES	2925518
-#SOURCE_COMMIT	8db1ccd970a82f58e1ae7c674918a306fae713b2
+#EVENTS_UNCOMPRESSED_BYTES	273272225
+#EVENTS_GZIP9_BYTES	30046171
+#SETTLEMENT_UNCOMPRESSED_BYTES	12711848
+#SETTLEMENT_GZIP9_BYTES	2925521
+#SOURCE_COMMIT	49511cad49a557989d09fcea4a5ef48cbad0dd52
