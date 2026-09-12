@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""RUN 81B POPULATION GATE -- the HALT check, and nothing past it.
+"""RUN 81B POPULATION GATE -- the HALT checks, and the sealed loader behind them.
 
     python3 research/gen/run81b_population_gate.py
 
@@ -9,17 +9,20 @@ NO DATABASE. Opens exactly the three sealed artifacts and nothing else:
     research/snapshots/u0_timing_witness_v1.jsonl.gz
 
 WHAT THIS FILE DOES:
-  1. Re-derives SETTLEMENT_ANALYZABLE_STRONG from sealed bytes, applying the
+  1. Verifies each artifact against its sealed UNCOMPRESSED_CANONICAL_SHA256 --
+     the authoritative identity, not the .gz transport checksum.
+  2. Re-derives SETTLEMENT_ANALYZABLE_STRONG from those bytes, applying the
      ladder predicate unchanged, and compares its three controls against the
      approved expectations. A mismatch is a HALT, not a note.
-  2. Reports the side and source census of that population.
-  3. Measures how much of U0 the sealed U2 population covers on exactly those
+  3. Reports the side and source census of that population.
+  4. Measures how much of U0 the sealed U2 population covers on exactly those
      conditions -- a ROW COUNT ONLY.
 
-WHAT THIS FILE DOES NOT DO: any economics whatsoever. No settlement-realized
-margin, no matched register, no directional remainder, no drag bridge, no P&L.
-The 81B bridge specification has not been received in full and nothing that
-depends on it is computed, sketched or approximated here.
+It is also the single definition of the population that run81b.py consumes, so
+the analysis and the gate cannot drift apart into two predicates wearing one
+name.
+
+WHAT THIS FILE DOES NOT DO: any economics whatsoever.
 
 WHY THE COVERAGE MEASUREMENT CANNOT BE VALUED. The U0 timing witness carries
 trade_id, condition_id, ts and source -- deliberately no prices and no sizes,
@@ -29,6 +32,7 @@ PRICED from them. Any per-condition acquisition pool built from these inputs is
 a PARTIAL pool by construction, and this file says so rather than computing one.
 """
 import gzip
+import hashlib
 import json
 import sys
 from collections import defaultdict
@@ -36,7 +40,10 @@ from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
-from reachability_ladder import load_settlement, EV, W_GZ  # noqa: E402
+from reachability_ladder import load_settlement, EV, ST, W_GZ  # noqa: E402
+
+HASHES = "research/snapshots/HASHES.txt"
+U0_HASHES = "research/snapshots/U0_HASHES.txt"
 
 # The approved controls. Source: research/REACHABILITY_LADDER.md section F.
 EXPECTED_EVENTS = 112543
@@ -44,89 +51,176 @@ EXPECTED_CONDITIONS = 9336
 EXPECTED_NOTIONAL_2DP = Decimal("24727133.10")
 
 
-def main():
-    S = load_settlement()
+# ---------------------------------------------------------------- hash gate
+def _canonical_sha256(path):
+    """sha256 over the payload lines, newline-joined, NO trailing newline.
 
-    # --- the STRONG quarantine, from the sealed U0 witness ----------------
-    # A U0 row with a NULL condition witnesses nothing about any condition and
-    # is skipped; it is still counted in the witness's own manifest.
-    latest_u0 = {}
-    u0_by_cond = defaultdict(int)
-    n_witness = 0
-    with gzip.open(W_GZ, "rt") as fh:
+    That is the sealed scope, quoted from the manifest: the committed file's own
+    trailing newline is outside it, and so is the manifest. Reconstructing the
+    scope rather than hashing the file is the point -- it is what makes the
+    identity survive recompression.
+    """
+    opener = gzip.open if str(path).endswith(".gz") else open
+    lines = []
+    with opener(path, "rt") as fh:
+        for line in fh:
+            if line.endswith("\n"):
+                line = line[:-1]
+            if line:
+                lines.append(line)
+    h = hashlib.sha256("\n".join(lines).encode("utf-8")).hexdigest()
+    return h, len(lines)
+
+
+def _read_kv(path):
+    out = {}
+    with open(path) as fh:
         for line in fh:
             line = line.strip()
-            if not line:
-                continue
-            r = json.loads(line)
-            n_witness += 1
-            c = r.get("condition_id")
-            if c:
-                u0_by_cond[c] += 1
-                if c not in latest_u0 or r["ts"] > latest_u0[c]:
-                    latest_u0[c] = r["ts"]
+            if "=" in line:
+                k, v = line.split("=", 1)
+                out[k] = v
+    return out
 
-    strong_q = {c for c, d in S.items()
-                if d.get("resolved_at") is not None
-                and latest_u0.get(c, "") > d["resolved_at"]}
 
-    # --- the population: the ladder predicate, applied unchanged ----------
-    pop_ev = 0
-    pop_cond = set()
+def verify_sealed_hashes():
+    """[(artifact, expected, got, lines, ok)] against the AUTHORITATIVE identity."""
+    h1, h0 = _read_kv(HASHES), _read_kv(U0_HASHES)
+    checks = [
+        ("u2_events_v1", EV, h1["U2_EVENT_DB_CANONICAL_SHA256"]),
+        ("settlement_v1", ST, h1["SETTLEMENT_DB_CANONICAL_SHA256"]),
+        ("u0_timing_witness_v1", W_GZ,
+         h0["U0_WITNESS_UNCOMPRESSED_CANONICAL_SHA256"]),
+    ]
+    out = []
+    for name, path, expected in checks:
+        got, n = _canonical_sha256(path)
+        out.append((name, expected, got, n, got == expected))
+    return out
+
+
+# ------------------------------------------------------------ sealed loader
+class SealedInputs:
+    """The three sealed artifacts, loaded once. No database anywhere in here."""
+
+    def __init__(self):
+        self.settlement = load_settlement()
+        self.latest_u0 = {}
+        self.u0_by_cond = defaultdict(int)
+        self.n_witness = 0
+        with gzip.open(W_GZ, "rt") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                self.n_witness += 1
+                c = r.get("condition_id")
+                if c:
+                    # A U0 row with a NULL condition witnesses nothing about any
+                    # condition. It is skipped here and still counted in the
+                    # witness's own manifest.
+                    self.u0_by_cond[c] += 1
+                    if c not in self.latest_u0 or r["ts"] > self.latest_u0[c]:
+                        self.latest_u0[c] = r["ts"]
+
+        self.strong_quarantine = {
+            c for c, d in self.settlement.items()
+            if d.get("resolved_at") is not None
+            and self.latest_u0.get(c, "") > d["resolved_at"]}
+
+    def population(self):
+        """Yield (event_row, S) for every SETTLEMENT_ANALYZABLE_STRONG event.
+
+        The ladder predicate, applied unchanged and in its order. S is the
+        sealed terminal payout for the outcome the event actually bought --
+        payouts[outcome_index(asset)] -- which the payout-mapping condition
+        below has already proved unambiguous on every row it yields.
+        """
+        S = self.settlement
+        with gzip.open(EV, "rt") as fh:
+            for line in fh:
+                line = line.strip()
+                if not line:
+                    continue
+                r = json.loads(line)
+                c = r.get("condition_id_effective")
+                if not c:
+                    continue
+                d = S.get(c)
+                if d is None or not d.get("market_row_present"):
+                    continue
+                if not d.get("token_metadata_present") or not d["_binary"]:
+                    continue
+                if not d.get("resolved") or not d["_px_valid"]:
+                    continue
+                if c in self.strong_quarantine:
+                    continue
+                oi = d["_tokidx"].get(r.get("asset"))
+                if oi is None or not isinstance(oi, int) \
+                   or not (0 <= oi < len(d["payouts"])):
+                    continue
+                if not d["_unique_winner"]:
+                    continue
+                yield r, float(d["payouts"][oi])
+
+
+def population_controls(sealed):
+    """(events, conditions, exact Decimal notional, sides, sources, u2_by_cond)."""
+    n = 0
+    conds = set()
     # Decimal over the retained text, never float: the sealed rows carry six
     # decimal places and summing 112,543 of them in binary floating point would
     # make the control a function of addition order.
-    pop_notional = Decimal("0")
-    sides = defaultdict(int)
-    sources = defaultdict(int)
-    u2_by_cond = defaultdict(int)
+    notional = Decimal("0")
+    sides, sources, u2_by_cond = defaultdict(int), defaultdict(int), defaultdict(int)
+    for r, _s in sealed.population():
+        n += 1
+        c = r["condition_id_effective"]
+        conds.add(c)
+        notional += Decimal(r["notional"])
+        sides[r.get("side")] += 1
+        sources[r.get("source")] += 1
+        u2_by_cond[c] += 1
+    return n, conds, notional, sides, sources, u2_by_cond
 
-    with gzip.open(EV, "rt") as fh:
-        for line in fh:
-            line = line.strip()
-            if not line:
-                continue
-            r = json.loads(line)
-            c = r.get("condition_id_effective")
-            if not c:
-                continue
-            d = S.get(c)
-            if d is None or not d.get("market_row_present"):
-                continue
-            if not d.get("token_metadata_present") or not d["_binary"]:
-                continue
-            if not d.get("resolved") or not d["_px_valid"]:
-                continue
-            if c in strong_q:
-                continue
-            oi = d["_tokidx"].get(r.get("asset"))
-            if oi is None or not isinstance(oi, int) \
-               or not (0 <= oi < len(d["payouts"])):
-                continue
-            if not d["_unique_winner"]:
-                continue
-            pop_ev += 1
-            pop_cond.add(c)
-            pop_notional += Decimal(r["notional"])
-            sides[r.get("side")] += 1
-            sources[r.get("source")] += 1
-            u2_by_cond[c] += 1
 
-    pop_2dp = pop_notional.quantize(Decimal("0.01"))
-    checks = [
-        ("events", pop_ev, EXPECTED_EVENTS),
-        ("conditions", len(pop_cond), EXPECTED_CONDITIONS),
+def control_checks(n, conds, notional):
+    pop_2dp = notional.quantize(Decimal("0.01"))
+    return [
+        ("events", n, EXPECTED_EVENTS),
+        ("conditions", len(conds), EXPECTED_CONDITIONS),
         ("source notional", pop_2dp, EXPECTED_NOTIONAL_2DP),
     ]
-    halted = [nm for nm, got, exp in checks if got != exp]
 
+
+def main():
     print("== RUN 81B POPULATION GATE ==")
     print("== SETTLEMENT_ANALYZABLE_STRONG, re-derived from sealed bytes ==")
     print("No database. No economics of any kind computed in this file.\n")
 
-    print(f"U0 timing witness rows read {n_witness:,}; "
-          f"conditions datable {len(latest_u0):,}")
-    print(f"STRONG quarantine conditions {len(strong_q):,}\n")
+    print("== SEALED HASH GATE -- AUTHORITATIVE IDENTITY, not the .gz checksum ==")
+    hashes = verify_sealed_hashes()
+    for name, exp, got, nlines, ok in hashes:
+        print(f"  {name:<24}{nlines:>10,} lines  "
+              f"{'MATCH' if ok else '*** MISMATCH ***'}")
+        if not ok:
+            print(f"      expected {exp}")
+            print(f"      got      {got}")
+    if not all(ok for *_, ok in hashes):
+        print("\n== HALT -- sealed hash failure. The bytes are not the sealed")
+        print("== artifacts. Nothing downstream may be computed from them.")
+        return 1
+    print("  all three artifacts match their sealed canonical identity\n")
+
+    sealed = SealedInputs()
+    print(f"U0 timing witness rows read {sealed.n_witness:,}; "
+          f"conditions datable {len(sealed.latest_u0):,}")
+    print(f"STRONG quarantine conditions {len(sealed.strong_quarantine):,}\n")
+
+    n, conds, notional, sides, sources, u2_by_cond = population_controls(sealed)
+    checks = control_checks(n, conds, notional)
+    halted = [nm for nm, got, exp in checks if got != exp]
 
     print("== CONTROLS ==")
     for nm, got, exp in checks:
@@ -134,8 +228,7 @@ def main():
         e = f"{exp:,.2f}" if isinstance(exp, Decimal) else f"{exp:,}"
         flag = "MATCH" if got == exp else "*** MISMATCH ***"
         print(f"  {nm:<18}{g:>16}   expected {e:>16}   {flag}")
-    print(f"  {'(exact notional at full retained precision)':<18} "
-          f"{pop_notional}")
+    print(f"  exact notional at full retained precision: {notional}")
     print("  The approved control is the 2 dp rounding of that exact sum; the")
     print("  comparison is made at 2 dp for that reason and not by truncation.")
     print()
@@ -155,29 +248,29 @@ def main():
         print(f"  source  {k!s:<10}{sources[k]:>12,}")
     print()
 
-    # --- U2 coverage of U0, on exactly these conditions -------------------
-    u0_ev = sum(u0_by_cond[c] for c in pop_cond)
-    complete = sum(1 for c in pop_cond if u2_by_cond[c] == u0_by_cond[c])
-    impossible = sum(1 for c in pop_cond if u2_by_cond[c] > u0_by_cond[c])
+    u0_ev = sum(sealed.u0_by_cond[c] for c in conds)
+    complete = sum(1 for c in conds if u2_by_cond[c] == sealed.u0_by_cond[c])
+    impossible = sum(1 for c in conds if u2_by_cond[c] > sealed.u0_by_cond[c])
 
     print("== U2 COVERAGE OF U0 ON THE ANALYZABLE CONDITIONS ==")
     print("   ROW COUNTS ONLY. The U0 witness carries no prices and no sizes,")
     print("   so the uncovered rows can be counted here and can never be")
     print("   valued from the locked inputs.")
     print(f"  U0 events on these conditions         {u0_ev:>12,}")
-    print(f"  U2 events on the same conditions      {pop_ev:>12,}")
-    print(f"  U2 share of U0 events                 "
-          f"{100.0 * pop_ev / u0_ev:>11.3f}%")
-    print(f"  U0 events NOT in the population       {u0_ev - pop_ev:>12,}")
+    print(f"  U2 events on the same conditions      {n:>12,}")
+    print(f"  U2 share of U0 events                 {100.0 * n / u0_ev:>11.3f}%")
+    print(f"  U0 events NOT in the population       {u0_ev - n:>12,}")
     print(f"  conditions with COMPLETE U2 coverage  {complete:>12,} of "
-          f"{len(pop_cond):,} ({100.0 * complete / len(pop_cond):.2f}%)")
+          f"{len(conds):,} ({100.0 * complete / len(conds):.2f}%)")
+    print(f"  conditions WITHOUT complete coverage  {len(conds) - complete:>12,}")
     print(f"  conditions where U2 > U0 (impossible) {impossible:>12,}")
     print()
-    print("CONSEQUENCE, STATED AND NOT COMPUTED AROUND: a per-condition")
-    print("acquisition pool built from these inputs is a PARTIAL pool. An")
-    print("average cost derived from one is NOT RN1's average cost, and a")
-    print("matched quantity derived from one is NOT RN1's matched quantity.")
-    print("This file computes neither.")
+    print("FULL_RN1_MATCHED_BOOK_RECONSTRUCTION =")
+    print("    NOT IDENTIFIABLE FROM CURRENT SEALED INPUTS")
+    print("The 4,770-condition complete-coverage set is a COVERAGE DIAGNOSTIC")
+    print("and is not a cohort. A per-condition acquisition pool built from")
+    print("these inputs is a PARTIAL pool; an average cost from one is NOT")
+    print("RN1's average cost. This file computes neither.")
     return 0
 
 
