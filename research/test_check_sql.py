@@ -197,3 +197,80 @@ if FAILURES:
     print(f"{len(FAILURES)} FIXTURE(S) FAILED: {', '.join(FAILURES)}")
     sys.exit(1)
 print("all fixtures pass, base-table and no-FROM layers")
+
+print()
+print("GROUP BY LAYER (added after run 80.5b's rerun died on statement 5)")
+
+
+def gb(sql):
+    out = []
+    for i, raw in enumerate(pglast.parse_sql(sql), 1):
+        _, aliases = check_sql._cte_and_aliases(raw.stmt)
+        out += check_sql.check_group_by(raw.stmt, "<fixture>", i, aliases)
+    return out
+
+
+def expect_gb(name, sql, should_fire, must_mention=None):
+    got = gb(sql)
+    ok = bool(got) == should_fire
+    if ok and should_fire and must_mention:
+        ok = any(must_mention in g for g in got)
+    verb = "FIRES" if should_fire else "stays silent"
+    print(f"  {'PASS' if ok else 'FAIL'}  {name} -- must {verb}")
+    if not ok:
+        FAILURES.append(name)
+        for g in got:
+            print(f"        got: {g}")
+        if should_fire and not got:
+            print("        got: nothing")
+
+
+# THE RUN-80.5b STATEMENT-5 BUG, verbatim in shape: a CTE column is selected
+# outside an aggregate while the GROUP BY names only its siblings.
+expect_gb("11 the run-80.5b shape: an ungrouped CTE column beside an aggregate",
+          "WITH r AS (SELECT 1 AS condition_id, now() AS resolved_at), "
+          "t AS (SELECT 1 AS condition_id, now() AS ts) "
+          "SELECT r.condition_id, (max(t.ts) > r.resolved_at) AS anomalous "
+          "FROM r JOIN t ON t.condition_id = r.condition_id "
+          "GROUP BY r.condition_id;",
+          should_fire=True, must_mention="r.resolved_at")
+
+expect_gb("12 the same query with resolved_at added to the GROUP BY",
+          "WITH r AS (SELECT 1 AS condition_id, now() AS resolved_at), "
+          "t AS (SELECT 1 AS condition_id, now() AS ts) "
+          "SELECT r.condition_id, (max(t.ts) > r.resolved_at) AS anomalous "
+          "FROM r JOIN t ON t.condition_id = r.condition_id "
+          "GROUP BY r.condition_id, r.resolved_at;",
+          should_fire=False)
+
+# THE FALSE POSITIVE THAT COST 15 FINDINGS. A FILTER predicate is evaluated per
+# input row, exactly like an aggregate's arguments, so an ungrouped column in it
+# is legal. If this ever starts firing the guard has regressed to the version
+# that condemned files which had already run clean.
+expect_gb("13 a FILTER predicate may reference an ungrouped column",
+          "WITH c AS (SELECT 1 AS lane, true AS anomalous) "
+          "SELECT c.lane, count(*) FILTER (WHERE c.anomalous) AS n "
+          "FROM c GROUP BY c.lane;",
+          should_fire=False)
+
+# THE SECOND FALSE POSITIVE. ROLLUP/CUBE/GROUPING SETS wrap the column in a
+# GroupingSet node, so a top-level-only read of the clause does not see it.
+expect_gb("14 GROUP BY ROLLUP still counts as grouped",
+          "WITH c AS (SELECT 'NFL' AS sport, 1 AS n) "
+          "SELECT c.sport, sum(c.n) FROM c GROUP BY ROLLUP (c.sport);",
+          should_fire=False)
+
+expect_gb("15 a base-table column is never judged (functional dependency)",
+          "SELECT o.id, o.lane, count(*) FROM live_orders o GROUP BY o.id;",
+          should_fire=False)
+
+expect_gb("16 GROUP BY by ordinal position: abstain rather than guess",
+          "WITH c AS (SELECT 1 AS a, 2 AS b) "
+          "SELECT c.a, c.b, count(*) FROM c GROUP BY 1;",
+          should_fire=False)
+
+print()
+if FAILURES:
+    print(f"{len(FAILURES)} FIXTURE(S) FAILED: {', '.join(FAILURES)}")
+    sys.exit(1)
+print("all fixtures pass: base-table, no-FROM and GROUP BY layers")

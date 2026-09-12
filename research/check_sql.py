@@ -501,6 +501,114 @@ def check_no_from(stmt, path, idx):
     return problems
 
 
+AGGREGATES = frozenset("""
+count sum avg min max string_agg array_agg jsonb_agg json_agg jsonb_object_agg
+json_object_agg bool_and bool_or every bit_and bit_or corr covar_pop covar_samp
+stddev stddev_pop stddev_samp variance var_pop var_samp mode percentile_cont
+percentile_disc rank dense_rank xmlagg range_agg
+""".split())
+
+
+def check_group_by(stmt, path, idx, cte_aliases):
+    """A CTE column selected beside an aggregate but absent from GROUP BY.
+
+    WHY. Run 80.5b's second failure, on statement 5:
+
+        ERROR: column "r.resolved_at" must appear in the GROUP BY clause or be
+               used in an aggregate function
+
+    The level selected `(max(t.ts) > r.resolved_at)` while grouping only by
+    condition_id, resolved_prices and token_count. Four statements had already
+    run; the fifth died and took the run with it.
+
+    THE CHECK IS DELIBERATELY LIMITED TO CTE ALIASES, and that is not timidity
+    -- it is the only case where the rule is unconditional. PostgreSQL allows
+    selecting any column of a BASE TABLE whose primary key is grouped
+    (functional dependency), so flagging base-table columns would produce false
+    positives on a legitimate and common pattern. A CTE HAS NO PRIMARY KEY, so
+    functional dependency never applies to one: an ungrouped CTE column outside
+    an aggregate is always an error. That is exactly the shape that failed.
+
+    Levels whose GROUP BY uses ordinal positions (GROUP BY 1, 2) are skipped --
+    resolving a position back to a target entry is guesswork, and a guard that
+    guesses is worse than one that abstains and says so.
+
+    KNOWN LIMIT, stated rather than discovered later: only QUALIFIED references
+    (alias.column) are checked. An unqualified `foo` cannot be attributed to a
+    CTE without full scope resolution, so it is skipped. The failure this guard
+    exists for was qualified (`r.resolved_at`), and an unqualified miss is left
+    to the runner rather than guessed at here.
+    """
+    problems, seen = [], set()
+
+    def check_select(sel):
+        if not isinstance(sel, ast.SelectStmt) or not sel.groupClause:
+            return
+        # The grouped set is collected by WALKING the clause, not by reading
+        # its top-level entries. GROUP BY ROLLUP (c.sport) / CUBE / GROUPING
+        # SETS wrap the columns in a GroupingSet node, and a top-level-only
+        # read missed them -- one false positive on a file that had already
+        # run clean, found by the same sweep.
+        grouped, ordinal = set(), []
+
+        def collect(n):
+            if isinstance(n, ast.A_Const):
+                ordinal.append(True)
+            elif isinstance(n, ast.ColumnRef) and n.fields:
+                parts = [f.sval for f in n.fields if isinstance(f, ast.String)]
+                if parts:
+                    grouped.add(".".join(parts))
+                    grouped.add(parts[-1])
+        walk(sel.groupClause, collect)
+        if ordinal:
+            return                # GROUP BY <ordinal>: abstain on this level
+
+        def scan(node):
+            """walk the level, but NOT into a plain aggregate's arguments."""
+            if isinstance(node, ast.Node):
+                if isinstance(node, (ast.SelectStmt, ast.SubLink)):
+                    return
+                if (isinstance(node, ast.FuncCall) and node.over is None
+                        and node.funcname
+                        and str(node.funcname[-1].sval).lower() in AGGREGATES):
+                    # THE FILTER PREDICATE IS NOT SCANNED, and I had this
+                    # backwards on the first pass. FILTER (WHERE ...) is
+                    # evaluated PER INPUT ROW, exactly like the aggregate's own
+                    # arguments, so it may reference ungrouped columns
+                    # legitimately. Scanning it produced 15 findings across
+                    # files that had ALREADY RUN CLEAN against the database --
+                    # every one a false positive, caught only by sweeping the
+                    # guard over known-good SQL before trusting it.
+                    return
+                if isinstance(node, ast.ColumnRef) and node.fields:
+                    parts = [f.sval for f in node.fields
+                             if isinstance(f, ast.String)]
+                    if len(parts) == 2 and parts[0] in cte_aliases:
+                        dotted = ".".join(parts)
+                        if dotted not in grouped and parts[1] not in grouped:
+                            key = (idx, dotted)
+                            if key not in seen:
+                                seen.add(key)
+                                problems.append(
+                                    f"{path}: statement {idx}: {dotted} is "
+                                    f"selected outside an aggregate but is not "
+                                    f"in GROUP BY, and {parts[0]!r} is a CTE "
+                                    f"(no primary key, so no functional "
+                                    f"dependency) -- PostgreSQL refuses this")
+                    return
+                for name in node:
+                    scan(getattr(node, name, None))
+            elif isinstance(node, (list, tuple)):
+                for x in node:
+                    scan(x)
+
+        scan(sel.targetList)
+        scan(sel.havingClause)
+
+    walk(stmt, check_select)
+    return problems
+
+
 def check_base_columns(stmt, path, idx, ctes, schema):
     if not schema:
         return []
@@ -646,6 +754,7 @@ def main(paths):
                                           allow_lines=allowed)
             problems += check_base_columns(raw.stmt, path, i, cte_map, schema)
             problems += check_no_from(raw.stmt, path, i)
+            problems += check_group_by(raw.stmt, path, i, alias_map)
         if problems:
             bad = True
             for p in problems:
