@@ -609,6 +609,57 @@ def check_group_by(stmt, path, idx, cte_aliases):
     return problems
 
 
+SEALED_PREFIXES = ("rn1_run81b",)
+
+SEALED_TABLES = frozenset({"markets", "market_tokens"})
+
+
+def check_sealed_inputs(path, stmts):
+    """A sealed analysis file may not read live settlement metadata.
+
+    WHY THIS IS FILE-SCOPED AND NOT A REVIEW HABIT. Runs 80.5 and 80.5b built
+    the settlement cohort from textually identical SQL at the same immutable
+    cutoff and disagreed by one event and $7.28, because `markets` is upserted
+    with no history and `copy_probes` is actively DELETEd by the retention loop
+    (37-day floor). 81B exists to read a committed, hash-pinned snapshot
+    instead. Nothing about the SQL's shape distinguishes the right source from
+    the wrong one -- only the table name does -- so the rule is mechanical:
+
+        a file whose name starts with a sealed prefix may not name
+        `markets` or `market_tokens` ANYWHERE, in any clause, at any depth.
+
+    A fallback to production metadata would not error, would not look wrong in
+    review, and would quietly reintroduce the exact drift the snapshot was built
+    to remove. That is the failure mode this guard exists for: silent, plausible
+    and invisible in the output.
+
+    Scope is deliberately narrow. Only files matching SEALED_PREFIXES are
+    judged; every other research file reads production freely, as it must.
+    """
+    name = path.rsplit("/", 1)[-1]
+    if not name.startswith(SEALED_PREFIXES):
+        return []
+    problems, seen = [], set()
+
+    def look(node):
+        if isinstance(node, ast.RangeVar) and node.relname:
+            rel = node.relname.lower()
+            if rel in SEALED_TABLES and rel not in seen:
+                seen.add(rel)
+                problems.append(
+                    f"{path}: SEALED INPUT VIOLATION -- this file names the "
+                    f"live table {rel!r}. A sealed analysis file reads only the "
+                    f"frozen trade/U2 population, the committed settlement "
+                    f"snapshot, and approved immutable research inputs. "
+                    f"Fallback to production metadata is not permitted: it "
+                    f"reintroduces the population drift the snapshot removes, "
+                    f"and it does so silently.")
+
+    for raw in stmts:
+        walk(raw.stmt, look)
+    return problems
+
+
 def check_base_columns(stmt, path, idx, ctes, schema):
     if not schema:
         return []
@@ -746,6 +797,7 @@ def main(paths):
             print(f"{path}: PARSE FAILED: {exc}")
             bad = True
             continue
+        problems += check_sealed_inputs(path, stmts)
         for i, raw in enumerate(stmts, 1):
             cte_map, alias_map = _cte_and_aliases(raw.stmt)
             problems += check_duplicate_ctes(raw.stmt, path, i)

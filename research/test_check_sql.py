@@ -274,3 +274,63 @@ if FAILURES:
     print(f"{len(FAILURES)} FIXTURE(S) FAILED: {', '.join(FAILURES)}")
     sys.exit(1)
 print("all fixtures pass: base-table, no-FROM and GROUP BY layers")
+
+print()
+print("SEALED-INPUT LAYER (81B may not read live settlement metadata)")
+
+
+def seal(name, sql):
+    return check_sql.check_sealed_inputs(name, pglast.parse_sql(sql))
+
+
+def expect_seal(label, name, sql, should_fire, must_mention=None):
+    got = seal(name, sql)
+    ok = bool(got) == should_fire
+    if ok and should_fire and must_mention:
+        ok = any(must_mention in g for g in got)
+    verb = "FIRES" if should_fire else "stays silent"
+    print(f"  {'PASS' if ok else 'FAIL'}  {label} -- must {verb}")
+    if not ok:
+        FAILURES.append(label)
+        for g in got:
+            print(f"        got: {g}")
+        if should_fire and not got:
+            print("        got: nothing")
+
+
+expect_seal("17 a sealed file joining live markets", "rn1_run81b_x.sql",
+            "WITH s AS (SELECT 1 AS c) SELECT s.c FROM s "
+            "JOIN markets m ON m.condition_id = s.c;",
+            should_fire=True, must_mention="markets")
+
+# THE ONE THAT MATTERS MOST: a fallback buried in a subquery looks like nothing
+# in review. The walk goes to any depth, so depth buys no exemption.
+expect_seal("18 a sealed file reaching market_tokens from a subquery",
+            "rn1_run81b_x.sql",
+            "WITH s AS (SELECT 1 AS c) SELECT s.c FROM s WHERE s.c IN "
+            "(SELECT mt.condition_id FROM market_tokens mt);",
+            should_fire=True, must_mention="market_tokens")
+
+expect_seal("19 a sealed file reading only its frozen inputs",
+            "rn1_run81b_x.sql",
+            "WITH s AS (SELECT 1 AS c) SELECT s.c FROM s "
+            "JOIN trades t ON t.condition_id = s.c;",
+            should_fire=False)
+
+# The rule is scoped to sealed files ONLY. Every other research file reads
+# production freely and must not be touched by this guard.
+expect_seal("20 an UNSEALED file may read markets freely",
+            "rn1_run80_population.sql",
+            "SELECT m.condition_id FROM markets m;",
+            should_fire=False)
+
+expect_seal("21 a sealed file naming a column called markets is not a table ref",
+            "rn1_run81b_x.sql",
+            "WITH s AS (SELECT 1 AS markets) SELECT s.markets FROM s;",
+            should_fire=False)
+
+print()
+if FAILURES:
+    print(f"{len(FAILURES)} FIXTURE(S) FAILED: {', '.join(FAILURES)}")
+    sys.exit(1)
+print("all fixtures pass: base-table, no-FROM, GROUP BY and sealed-input layers")

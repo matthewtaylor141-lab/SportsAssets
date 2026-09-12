@@ -1,0 +1,153 @@
+name: research-snapshot
+
+# DRAW THE FROZEN_U2_CONDITION_UNIVERSE SETTLEMENT SNAPSHOT. Read-only.
+#
+# This workflow performs NO production mutation. It runs exactly one SQL file,
+# from a HARDCODED path, under a read-only repeatable-read transaction, and
+# writes the result to an Actions artifact. It never writes to the database and
+# never pushes to the repository -- committing the drawn snapshot is a separate,
+# reviewed step, so the artifact and the commit cannot diverge silently.
+#
+# WHY A SEPARATE WORKFLOW FROM research-sql.yml. That one takes a caller-supplied
+# file name and formats output for human reading (aligned columns, head -N). Here
+# stdout IS the artifact: the format is `-A -t` and a single truncated line would
+# corrupt a hash that is meant to be permanent. Mixing the two would mean one of
+# them gets the wrong defaults.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'type DRAW to draw the snapshot'
+        required: true
+        default: ''
+      render_key:
+        description: 'Render API key (leave blank to use the RENDER_API_KEY secret)'
+        required: false
+        default: ''
+
+concurrency:
+  group: research-snapshot
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  draw:
+    runs-on: ubuntu-latest
+    env:
+      SERVICE: sportsassets-db
+      KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: draw
+        run: |
+          set +e
+          set -u
+          # `render_key` and `confirm` are read from the event payload on disk,
+          # not mapped through `env:`: the runner prints a step's env block in
+          # the log header BEFORE any ::add-mask:: in this script runs, so a key
+          # mapped there would be exposed before it could be masked.
+          CONFIRM="$(jq -r '.inputs.confirm // empty' "$GITHUB_EVENT_PATH")"
+          KEY_INPUT="$(jq -r '.inputs.render_key // empty' "$GITHUB_EVENT_PATH")"
+          [ -n "$KEY_INPUT" ] && echo "::add-mask::$KEY_INPUT"
+          [ "$CONFIRM" = "DRAW" ] || { echo "refused: confirm must be DRAW"; exit 1; }
+
+          # THE FILE IS HARDCODED. No caller-supplied path, so there is no file
+          # name to validate and no traversal to defend against.
+          SRC=research/gen/draw_settlement_snapshot.sql
+          [ -f "$SRC" ] || { echo "refused: no such file $SRC"; exit 1; }
+
+          # The same two read-only guards research-sql.yml uses, unchanged.
+          # Comments and \echo lines are stripped first: both are inert text and
+          # both routinely contain the ordinary English words in the keyword list
+          # ("do", "create", "copy"), so scanning them would refuse honest
+          # queries and teach the next person to weaken the guard.
+          if grep -qE '^[[:space:]]*\\' "$SRC" && grep -qEv '^[[:space:]]*(\\echo([[:space:]]|$)|[^\\]|$)' "$SRC"; then
+            echo "refused: $SRC uses a psql meta-command other than \\echo"; exit 1
+          fi
+          KW='\b(insert|update|delete|drop|alter|truncate|grant|revoke|create|copy|vacuum|reindex|refresh|call|do|merge|lock|set[[:space:]]+role)\b'
+          sed -e 's/--.*$//' -e '/^[[:space:]]*\\echo/d' "$SRC" > /tmp/stripped.sql
+          if grep -qiE "$KW" /tmp/stripped.sql; then
+            echo "refused: $SRC contains a mutating keyword in executable SQL"
+            grep -niE "$KW" /tmp/stripped.sql | head -20
+            exit 1
+          fi
+
+          KEY="$KEY_SECRET"; [ -z "$KEY" ] && KEY="$KEY_INPUT"
+          [ -z "$KEY" ] && { echo "no Render key"; exit 1; }
+          echo "::add-mask::$KEY"
+          API=https://api.render.com/v1
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$1"; }
+          PG=$(get "/postgres?name=$SERVICE&limit=20" | jq -r --arg n "$SERVICE" '.[]? | select(.postgres.name==$n) | .postgres.id' 2>/dev/null | head -1)
+          [ -z "$PG" ] && { echo "no database named $SERVICE"; exit 1; }
+          command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+          get "/postgres/$PG/connection-info" > /tmp/ci.json
+          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
+          PW=$(jq -r '.password // empty' /tmp/ci.json)
+          [ -n "$PW" ] && echo "::add-mask::$PW"; [ -n "$EXT" ] && echo "::add-mask::$EXT"
+          [ -z "$EXT" ] && { echo "no external connection string returned"; exit 1; }
+
+          mkdir -p out
+          # -A -t  : stdout IS the artifact -- unaligned, tuples only, no headers
+          # -1     : one transaction, so every read shares one MVCC snapshot
+          # NO head/awk truncation anywhere in this pipeline. research-sql.yml
+          # caps output for readability; here a truncated line would silently
+          # corrupt a hash that is meant to be permanent, so the full result is
+          # written and the log shows only the header.
+          PGOPTIONS="-c statement_timeout=900000 -c default_transaction_read_only=on -c default_transaction_isolation=repeatable\ read" \
+            timeout 1200 \
+            psql "$EXT" -X -A -t -q -v ON_ERROR_STOP=1 -1 \
+                 -f "$SRC" > out/settlement_snapshot.txt 2> out/draw.err
+          RC=$?
+          echo "psql exit=$RC"
+          if [ "$RC" != "0" ]; then
+            echo "::error::snapshot draw failed with exit $RC"
+            grep -v -F "$PW" out/draw.err | head -40
+            exit "$RC"
+          fi
+
+          echo "== HEADER =="
+          grep '^#' out/settlement_snapshot.txt
+
+          # EVERY GUARD MUST BE ZERO OR NOTHING IS PUBLISHED. A snapshot that
+          # fails a guard is not a snapshot with a caveat; it is a snapshot whose
+          # canonical form is not what this spec says it is, and pinning it would
+          # pin the defect.
+          fail=0
+          for g in GUARD_COUNT_MISMATCH GUARD_PAYOUT_NON_NUMBER \
+                   GUARD_PAYOUT_ROUNDTRIP_LOSSY GUARD_ROW_HAS_NEWLINE; do
+            v=$(grep "^#$g	" out/settlement_snapshot.txt | cut -f2)
+            [ -z "$v" ] && { echo "::error::$g missing from the header"; fail=1; continue; }
+            [ "$v" = "0" ] || { echo "::error::$g = $v (must be 0)"; fail=1; }
+          done
+          [ "$fail" = "0" ] || { echo "::error::guards failed; nothing published"; exit 1; }
+
+          # RE-DERIVE THE DATABASE HASH FROM THE WRITTEN BYTES. The database
+          # hashed the rows it built; this proves the file on disk contains those
+          # same bytes, which is the whole point of a pin. If the two disagree
+          # the file is corrupt in transit and must not be committed.
+          DB=$(grep '^#DB_CANONICAL_CONTENT_SHA256	' out/settlement_snapshot.txt | cut -f2)
+          RE=$(grep -v '^#' out/settlement_snapshot.txt | perl -0pe 's/\n\z//' | sha256sum | cut -d' ' -f1)
+          echo "DB_CANONICAL_CONTENT_SHA256   $DB"
+          echo "RECOMPUTED_FROM_FILE          $RE"
+          [ "$DB" = "$RE" ] || { echo "::error::hash mismatch -- the written file is not what the database hashed"; exit 1; }
+
+          FILE_SHA=$(sha256sum out/settlement_snapshot.txt | cut -d' ' -f1)
+          echo "COMMITTED_FILE_SHA256         $FILE_SHA"
+          {
+            echo "DB_CANONICAL_CONTENT_SHA256=$DB"
+            echo "COMMITTED_FILE_SHA256=$FILE_SHA"
+            echo "BYTES=$(wc -c < out/settlement_snapshot.txt)"
+            echo "LINES=$(wc -l < out/settlement_snapshot.txt)"
+          } > out/HASHES.txt
+          cat out/HASHES.txt
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: settlement-snapshot
+          path: out/
+          retention-days: 90
