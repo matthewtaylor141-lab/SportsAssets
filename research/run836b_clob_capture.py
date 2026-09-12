@@ -20,7 +20,7 @@ are public. The script refuses any host outside a two-entry allow-list.
 WHAT THE ANALYSIS WILL BE ABLE TO DO WITH THIS (recorded here so the capture is
 known to be sufficient, NOT applied by this script):
 
-    The venue's order-book hash algorithm is published, in py-clob-client
+    A book-summary hash algorithm is published, in the ARCHIVED py-clob-client
     0.34.6 `utilities.generate_orderbook_summary_hash`: SHA-1 over a compact
     JSON payload, key order
         market, asset_id, timestamp, hash, bids, asks,
@@ -28,11 +28,24 @@ known to be sufficient, NOT applied by this script):
     with "hash" set to "" while hashing, separators (",", ":"), ensure_ascii
     False, UTF-8.
 
-    That means a reconstructed book can be hashed and compared against the
-    venue's OWN hash, per message -- a far stronger reconstruction check than
-    periodic REST comparison alone. For that to be possible the capture must
-    preserve every field that feeds the hash, which is why raw frames and raw
-    REST bodies are stored verbatim and nothing is normalised away.
+    That algorithm is LEGACY evidence. The current unified SDK ships no hash
+    helper at all, so whether the production stream still hashes this way is
+    unverified and is one of the things the offline analysis may test -- it is
+    not an assumption this capture relies on. If the recomputation matches the
+    venue's own `hash` field, that is a finding; if it does not, the legacy
+    algorithm simply no longer describes the surface, and the REST witness
+    still stands on its own.
+
+    Either way the capture must preserve every field that could feed such a
+    hash, which is why raw frames and raw REST bodies are stored verbatim and
+    nothing is normalised away.
+
+CURRENT-SURFACE FIDELITY. The subscribe frame, the identifier field, the two
+hosts, the REST book path and the application-level PING/PONG heartbeat below
+are taken from the CURRENT unified SDK (polymarket-client 0.10.0), not from the
+archived client. The heartbeat matters for the science as well as for liveness:
+without it a venue-initiated idle close would be recorded as an involuntary
+disconnect and would contaminate the reconnect experiment.
 
 USAGE
     pip install websockets httpx
@@ -56,7 +69,32 @@ from datetime import datetime, timezone
 from pathlib import Path
 from urllib.parse import urlparse
 
-CAPTURE_VERSION = "run836b/1"
+CAPTURE_VERSION = "run836b/2"
+
+# ------------------------------------------------- current-surface constants
+# Every value here is copied from the CURRENT unified SDK, polymarket-client
+# 0.10.0, so the capture speaks the protocol the venue serves today:
+#
+#   _internal/streams/clob/market_protocol.py:41  build_initial_frame ->
+#       {"type": "market", "assets_ids": [...], "custom_feature_enabled": bool}
+#   _internal/streams/clob/heartbeat.py           CLOB_HEARTBEAT_INTERVAL_S =
+#       10.0, CLOB_HEARTBEAT_STALE_S = 30.0, text "PING" -> text "PONG"
+#   _internal/actions/clob.py:148                 ("/book", {"token_id": ...})
+#
+# The SDK's own default for custom_feature_enabled is False, so False is this
+# script's default too: the frame we send is byte-for-byte the frame the
+# official client sends by default. Setting it True is offered as a switch
+# because the flag gates the best_bid_ask / new_market / market_resolved event
+# classes, but it is NOT the default -- changing a flag whose server-side
+# effect on `book` and `price_change` is unestablished would be changing the
+# thing under study.
+SUBSCRIBE_TYPE = "market"
+SUBSCRIBE_IDENTIFIER_FIELD = "assets_ids"
+HEARTBEAT_TEXT = "PING"
+HEARTBEAT_REPLY_TEXT = "PONG"
+HEARTBEAT_INTERVAL_S = 10.0
+REST_BOOK_PATH = "/book"
+REST_BOOK_PARAM = "token_id"
 
 # ---------------------------------------------------------------- allow-list
 # THE ONLY TWO HOSTS THIS SCRIPT MAY CONTACT. Enforced by _assert_allowed on
@@ -165,6 +203,8 @@ class Capture:
             "opened": False,
         }
         frame_index = 0
+        heartbeat_sent = 0
+        heartbeat_task = None
         try:
             async with websockets.connect(url, open_timeout=self.args.open_timeout,
                                           max_size=None) as ws:
@@ -173,11 +213,35 @@ class Capture:
                 row["open_monotonic_ns"] = _now_mono_ns()
                 self.opened_sessions += 1
 
-                sub = {"assets_ids": list(self.args.token_id), "type": "market"}
+                # The CURRENT SDK's initial frame, field for field.
+                sub = {
+                    "type": SUBSCRIBE_TYPE,
+                    SUBSCRIBE_IDENTIFIER_FIELD: list(self.args.token_id),
+                    "custom_feature_enabled": bool(self.args.custom_feature_enabled),
+                }
                 row["subscribe_payload"] = sub
                 row["subscribe_sent_wall_utc"] = _now_wall()
                 row["subscribe_sent_monotonic_ns"] = _now_mono_ns()
                 await ws.send(json.dumps(sub))
+
+                # Application-level heartbeat, as the current SDK sends it. The
+                # venue's PONG replies arrive on the same socket and are
+                # recorded as ordinary frames -- they are part of the record,
+                # not filtered out of it.
+                async def _beat() -> None:
+                    nonlocal heartbeat_sent
+                    try:
+                        while True:
+                            await asyncio.sleep(self.args.heartbeat_interval)
+                            await ws.send(HEARTBEAT_TEXT)
+                            heartbeat_sent += 1
+                    except asyncio.CancelledError:
+                        return
+                    except Exception as exc:           # noqa: BLE001 -- recorded
+                        self.error("heartbeat", exc, session_id=session_id)
+
+                if self.args.heartbeat_interval > 0:
+                    heartbeat_task = asyncio.create_task(_beat())
 
                 deadline = time.monotonic() + self.args.session_seconds
                 while time.monotonic() < deadline:
@@ -195,6 +259,15 @@ class Capture:
             row["error"] = str(exc)[:2000]
             self.error("websocket_session", exc, session_id=session_id)
         finally:
+            if heartbeat_task is not None:
+                heartbeat_task.cancel()
+                try:
+                    await heartbeat_task
+                except (asyncio.CancelledError, Exception):   # noqa: BLE001
+                    pass
+            row["heartbeat_text"] = HEARTBEAT_TEXT
+            row["heartbeat_interval_seconds"] = self.args.heartbeat_interval
+            row["heartbeats_sent"] = heartbeat_sent
             row["frames_recorded"] = frame_index
             row["close_wall_utc"] = _now_wall()
             row["close_monotonic_ns"] = _now_mono_ns()
@@ -247,7 +320,7 @@ class Capture:
         """
         import httpx
 
-        url = f"{self.args.rest_url.rstrip('/')}/book"
+        url = f"{self.args.rest_url.rstrip('/')}{REST_BOOK_PATH}"
         _assert_allowed(url, allow_local=self.allow_local)
 
         # follow_redirects=False: a redirect to another host would be a way
@@ -276,7 +349,7 @@ class Capture:
             "local_request_start_monotonic_ns": _now_mono_ns(),
         }
         try:
-            resp = await client.get(url, params={"token_id": token})
+            resp = await client.get(url, params={REST_BOOK_PARAM: token})
             row["local_response_wall_utc"] = _now_wall()
             row["local_response_monotonic_ns"] = _now_mono_ns()
             row["http_status"] = resp.status_code
@@ -346,6 +419,16 @@ class Capture:
             "token_ids": list(self.args.token_id),
             "websocket_url": self.args.ws_url,
             "rest_url": self.args.rest_url,
+            # What surface this capture spoke, so the analysis never has to
+            # guess which protocol shape produced these bytes.
+            "subscribe_type": SUBSCRIBE_TYPE,
+            "subscribe_identifier_field": SUBSCRIBE_IDENTIFIER_FIELD,
+            "custom_feature_enabled": bool(self.args.custom_feature_enabled),
+            "heartbeat_text": HEARTBEAT_TEXT,
+            "heartbeat_interval_seconds": self.args.heartbeat_interval,
+            "rest_book_path": REST_BOOK_PATH,
+            "rest_book_param": REST_BOOK_PARAM,
+            "current_surface_source": "polymarket-client 0.10.0",
             "configured_sessions": self.args.sessions,
             "configured_session_seconds": self.args.session_seconds,
             "configured_pause_seconds": self.args.pause_seconds,
@@ -408,12 +491,26 @@ def _dependency_versions() -> dict:
 
 # ------------------------------------------------------------------ discover
 def discover(args) -> int:
-    """List candidate token ids from the PUBLIC sampling-markets endpoint.
+    """PUBLIC_MARKET_DISCOVERY_CANDIDATES -- a convenience, not evidence.
 
-    `/sampling-markets` is the venue's own list of markets with reward
-    programmes, which is a reasonable public proxy for "has liquidity". It is
-    unauthenticated like everything else here. This mode captures nothing and
-    writes nothing -- it prints candidates for you to choose from.
+    This mode captures nothing and writes nothing. It prints token ids for you
+    to choose from; you can equally paste ids you already have and skip it.
+
+    Two honest caveats, neither of which affects the capture itself:
+
+    * `/sampling-markets` appears in the ARCHIVED py-clob-client. The current
+      unified SDK does not reference it at all, so whether the venue still
+      serves it is NOT_IDENTIFIED. If it 404s, that is the answer, and this
+      mode reports the status rather than falling back anywhere.
+    * Whatever it returns is a list of PUBLIC MARKET DISCOVERY CANDIDATES.
+      "Sampling" is the venue's own word and its current meaning is not
+      established here. These rows are NOT claimed to be liquid, rewarded, or
+      actively traded -- you judge that yourself before choosing tokens.
+
+    The current SDK's own market discovery runs against a DIFFERENT host
+    (gamma-api.polymarket.com, `/markets/keyset`). That host is deliberately
+    not in this script's two-entry allow-list: discovery is a convenience and
+    is not worth widening the network surface of the instrument.
     """
     import httpx
 
@@ -427,13 +524,18 @@ def discover(args) -> int:
         return 2
     if resp.status_code != 200:
         print(f"discovery failed: HTTP {resp.status_code}")
+        if resp.status_code == 404:
+            print("this endpoint is in the ARCHIVED client and is not in the "
+                  "current SDK; a 404 means the venue no longer serves it. "
+                  "Pass --token-id values directly instead.")
         print(resp.text[:500])
         return 2
 
     body = resp.json()
     markets = body.get("data") or body.get("markets") or []
     shown = 0
-    print(f"{len(markets)} markets returned. Sports-looking, still open:\n")
+    print(f"{len(markets)} PUBLIC_MARKET_DISCOVERY_CANDIDATES returned "
+          f"(not a liquidity claim). Sports-looking, still open:\n")
     for m in markets:
         if not m.get("active", True) or m.get("closed"):
             continue
@@ -475,6 +577,18 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--out-dir", default=None)
     p.add_argument("--ws-url", default=DEFAULT_WS_URL)
     p.add_argument("--rest-url", default=DEFAULT_REST_URL)
+    p.add_argument("--heartbeat-interval", type=float, default=HEARTBEAT_INTERVAL_S,
+                   help=("seconds between application-level PING frames, as the "
+                         "current SDK sends them (default %(default)s). 0 disables "
+                         "the heartbeat; the venue may then close an idle socket, "
+                         "which would contaminate the reconnect experiment."))
+    p.add_argument("--custom-feature-enabled", action="store_true",
+                   help=("send custom_feature_enabled=true in the subscribe frame. "
+                         "The current SDK's own default is false, which is this "
+                         "script's default too. The flag gates the best_bid_ask / "
+                         "new_market / market_resolved event classes; its effect on "
+                         "book and price_change is not established, so turning it "
+                         "on is a second, separate capture, not the baseline one."))
     p.add_argument("--discover", action="store_true",
                    help="list candidate token ids and exit (captures nothing)")
     p.add_argument("--discover-limit", type=int, default=12)
@@ -515,6 +629,9 @@ def main(argv=None) -> int:
     print(f"  sessions : {args.sessions} x {args.session_seconds:.0f}s "
           f"(pause {args.pause_seconds:.0f}s)")
     print(f"  REST poll: every {args.rest_interval:.0f}s per token")
+    print(f"  heartbeat: {HEARTBEAT_TEXT} every {args.heartbeat_interval:.0f}s"
+          if args.heartbeat_interval > 0 else "  heartbeat: DISABLED")
+    print(f"  custom_feature_enabled: {bool(args.custom_feature_enabled)}")
     try:
         asyncio.run(cap.run())
     except KeyboardInterrupt:

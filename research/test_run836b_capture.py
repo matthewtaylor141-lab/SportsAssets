@@ -68,7 +68,18 @@ def _start_rest():
 
 
 async def _ws_handler(ws):
-    """Send a book, a price_change, an unknown type, bad JSON, and bytes."""
+    """Send a book, a price_change, an unknown type, bad JSON, and bytes.
+
+    The frame shapes here are the CURRENT ones (polymarket-client 0.10.0
+    models/clob/market_events.py): `price_change` carries a `price_changes`
+    LIST, each entry naming its own asset_id, so one frame can move several
+    tokens at once. The archived client's single-asset `changes[]` shape is
+    not what the venue sends today, and a fake that used it would be testing
+    the recorder against a protocol that no longer exists.
+
+    This fake also answers the application-level text PING with PONG, as the
+    venue's own client expects, so the capture's heartbeat path is exercised.
+    """
     try:
         await ws.recv()                                  # the subscribe frame
     except Exception:                                    # noqa: BLE001
@@ -81,14 +92,27 @@ async def _ws_handler(ws):
         "an_unknown_field": {"kept": True},
     }]))
     await ws.send(json.dumps({
-        "event_type": "price_change", "asset_id": "TOK1",
-        "changes": [{"price": "0.41", "size": "120", "side": "BUY"}],
-        "timestamp": "1700000000500", "hash": "def456",
+        "event_type": "price_change", "market": "0xmarket",
+        "price_changes": [
+            {"asset_id": "TOK1", "price": "0.41", "size": "120",
+             "side": "BUY", "hash": "def456", "best_bid": "0.41",
+             "best_ask": "0.42"},
+            {"asset_id": "TOK2", "price": "0.59", "size": "120",
+             "side": "SELL", "hash": "def457"},
+        ],
+        "timestamp": "1700000000500",
     }))
     await ws.send("this is not json {{{")
     await ws.send(b"\x00\x01binary-frame")
     while True:
-        await asyncio.sleep(0.2)
+        try:
+            msg = await asyncio.wait_for(ws.recv(), timeout=0.2)
+        except asyncio.TimeoutError:
+            continue
+        except Exception:                                # noqa: BLE001
+            return
+        if msg == "PING":
+            await ws.send("PONG")
 
 
 def _start_ws():
@@ -115,7 +139,7 @@ def _start_ws():
 
 
 def _run_capture(tmp_path, ws_port, rest_port, tokens, sessions=2,
-                 seconds=2.0, pause=0.4, interval=1.0):
+                 seconds=2.0, pause=0.4, interval=1.0, heartbeat=0.5):
     out = tmp_path / "cap"
     cmd = [sys.executable, str(SCRIPT),
            "--ws-url", f"ws://127.0.0.1:{ws_port}/ws/market",
@@ -125,6 +149,7 @@ def _run_capture(tmp_path, ws_port, rest_port, tokens, sessions=2,
            "--session-seconds", str(seconds),
            "--pause-seconds", str(pause),
            "--rest-interval", str(interval),
+           "--heartbeat-interval", str(heartbeat),
            "--i-am-running-the-self-tests"]
     for t in tokens:
         cmd += ["--token-id", t]
@@ -201,7 +226,7 @@ def test_3_and_4_every_frame_carries_both_clocks_and_a_session(capture):
         assert isinstance(f["local_receive_monotonic_ns"], int)
         assert f["local_receive_wall_utc"].endswith("+00:00")
         assert f["session_id"]
-        assert f["capture_version"] == "run836b/1"
+        assert f["capture_version"] == "run836b/2"
 
 
 # =====================================================================
@@ -404,11 +429,17 @@ def test_13b_no_pmus_or_order_path_in_the_executable_code():
 
 
 def test_14_no_order_or_trading_method_in_the_runtime_path():
-    """The only outbound operations are: ws connect, ws send(subscribe), GET."""
+    """The only outbound operations are: ws connect, two ws sends, GET.
+
+    The two sends are the subscribe frame and the heartbeat PING. The
+    heartbeat send is enumerated here rather than exempted, so a third send
+    appearing later still fails this test and has to be justified.
+    """
     import ast
 
     tree = ast.parse(SCRIPT.read_text())
     sends = []
+    send_args = []
     for node in ast.walk(tree):
         if isinstance(node, ast.Call):
             fn = node.func
@@ -416,10 +447,75 @@ def test_14_no_order_or_trading_method_in_the_runtime_path():
                                                              "put", "delete",
                                                              "patch"):
                 sends.append(fn.attr)
+                if fn.attr == "send" and node.args:
+                    send_args.append(ast.dump(node.args[0]))
     assert "post" not in sends and "put" not in sends
     assert "delete" not in sends and "patch" not in sends
-    assert sends.count("send") == 1, (
-        f"expected exactly one ws send (the subscribe), found {sends}")
+    assert sends.count("send") == 2, (
+        f"expected exactly two ws sends (subscribe, heartbeat), found {sends}")
+    # One is json.dumps(sub); the other is the bare heartbeat constant.
+    heartbeats = [a for a in send_args if "HEARTBEAT_TEXT" in a]
+    assert len(heartbeats) == 1, (
+        f"expected exactly one heartbeat send, found {send_args}")
+
+
+def test_14b_the_heartbeat_matches_the_current_sdk():
+    """The application-level PING/PONG the current unified SDK sends.
+
+    Without it the venue may close an idle socket, and that close would be
+    recorded as an involuntary disconnect -- contaminating the very reconnect
+    experiment this capture exists to run.
+    """
+    import importlib.util
+
+    spec = importlib.util.spec_from_file_location("run836b_cap", SCRIPT)
+    mod = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(mod)
+    assert mod.HEARTBEAT_TEXT == "PING"
+    assert mod.HEARTBEAT_REPLY_TEXT == "PONG"
+    assert mod.HEARTBEAT_INTERVAL_S == 10.0
+    assert mod.SUBSCRIBE_TYPE == "market"
+    assert mod.SUBSCRIBE_IDENTIFIER_FIELD == "assets_ids"
+    assert mod.REST_BOOK_PATH == "/book"
+    assert mod.REST_BOOK_PARAM == "token_id"
+
+
+def test_14c_the_subscribe_frame_is_the_current_sdk_frame(capture):
+    """type + assets_ids + custom_feature_enabled, and the flag defaults off.
+
+    The current SDK's own default for custom_feature_enabled is False, so the
+    frame this script sends by default is the frame the official client sends
+    by default. Turning it on changes which event classes the venue emits and
+    is therefore a separate capture, not the baseline.
+    """
+    out, proc = capture
+    sessions = _jsonl(out / "sessions.jsonl")
+    assert sessions, proc.stdout + proc.stderr
+    opened = [s for s in sessions if s.get("opened")]
+    assert opened, "no session opened"
+    for s in opened:
+        sub = s["subscribe_payload"]
+        assert set(sub) == {"type", "assets_ids", "custom_feature_enabled"}, sub
+        assert sub["type"] == "market"
+        assert sub["custom_feature_enabled"] is False
+        assert s["heartbeats_sent"] >= 1, (
+            f"the heartbeat never fired in a {s.get('frames_recorded')}-frame "
+            f"session: {s}")
+
+    manifest = json.loads((out / "manifest.json").read_text())
+    assert manifest["custom_feature_enabled"] is False
+    assert manifest["heartbeat_text"] == "PING"
+    assert manifest["current_surface_source"] == "polymarket-client 0.10.0"
+
+
+def test_14d_the_venues_pong_is_recorded_not_swallowed(capture):
+    """A PONG is part of the record. Nothing on this socket is filtered out."""
+    out, proc = capture
+    frames = _jsonl(out / "websocket_frames.jsonl")
+    pongs = [f for f in frames if f.get("raw_frame") == "PONG"]
+    assert pongs, (
+        "the fake venue answered PING with PONG and no PONG frame was "
+        f"recorded: {proc.stdout + proc.stderr}")
 
 
 # =====================================================================
