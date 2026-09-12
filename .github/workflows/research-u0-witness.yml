@@ -1,0 +1,212 @@
+name: research-u0-witness
+
+# DRAW AND SEAL U0_SETTLEMENT_TIMING_WITNESS_V1.
+#
+# READ-ONLY AGAINST THE DATABASE. One SQL file from a HARDCODED path, under a
+# read-only repeatable-read transaction.
+#
+# THIS ARTIFACT SUPPLEMENTS AND DOES NOT REPLACE U2_SNAPSHOT_V1, which stays
+# authoritative and is NOT redrawn. Its sole purpose is to make the STRONGER
+# timing quarantine -- the approved predicate, which witnesses any qualifying U0
+# fill -- reproducible offline with no database.
+#
+# IT REFUSES TO SEAL IF THE U0 CONTROL HAS MOVED. Runs 80 and 81A both measured
+# U0 at 962,509 and it held exactly across that window. A witness drawn from a
+# drifted U0 would silently change which conditions the quarantine catches, so a
+# mismatch stops the run and reports rather than sealing something that looks
+# fine and is not.
+
+on:
+  workflow_dispatch:
+    inputs:
+      confirm:
+        description: 'type DRAW to draw and seal the snapshot'
+        required: true
+        default: ''
+      commit:
+        description: 'type COMMIT to also commit the sealed witness (else artifact only)'
+        required: false
+        default: ''
+      render_key:
+        description: 'Render API key (blank uses the RENDER_API_KEY secret)'
+        required: false
+        default: ''
+
+concurrency:
+  group: research-u0-witness
+  cancel-in-progress: false
+
+permissions:
+  contents: write
+
+jobs:
+  draw:
+    runs-on: ubuntu-latest
+    env:
+      SERVICE: sportsassets-db
+      KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - name: draw and seal
+        run: |
+          set +e
+          set -u
+          CONFIRM="$(jq -r '.inputs.confirm // empty' "$GITHUB_EVENT_PATH")"
+          DOCOMMIT="$(jq -r '.inputs.commit // empty' "$GITHUB_EVENT_PATH")"
+          KEY_INPUT="$(jq -r '.inputs.render_key // empty' "$GITHUB_EVENT_PATH")"
+          [ -n "$KEY_INPUT" ] && echo "::add-mask::$KEY_INPUT"
+          [ "$CONFIRM" = "DRAW" ] || { echo "refused: confirm must be DRAW"; exit 1; }
+
+          SRC=research/gen/draw_u0_timing_witness.sql
+          [ -f "$SRC" ] || { echo "refused: no such file $SRC"; exit 1; }
+
+          if grep -qE '^[[:space:]]*\\' "$SRC" && grep -qEv '^[[:space:]]*(\\echo([[:space:]]|$)|[^\\]|$)' "$SRC"; then
+            echo "refused: $SRC uses a psql meta-command other than \\echo"; exit 1
+          fi
+          KW='\b(insert|update|delete|drop|alter|truncate|grant|revoke|create|copy|vacuum|reindex|refresh|call|do|merge|lock|set[[:space:]]+role)\b'
+          sed -e 's/--.*$//' -e '/^[[:space:]]*\\echo/d' "$SRC" > /tmp/stripped.sql
+          if grep -qiE "$KW" /tmp/stripped.sql; then
+            echo "refused: $SRC contains a mutating keyword in executable SQL"
+            grep -niE "$KW" /tmp/stripped.sql | head -20
+            exit 1
+          fi
+
+          KEY="$KEY_SECRET"; [ -z "$KEY" ] && KEY="$KEY_INPUT"
+          [ -z "$KEY" ] && { echo "no Render key"; exit 1; }
+          echo "::add-mask::$KEY"
+          API=https://api.render.com/v1
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" -H "Accept: application/json" "$API$1"; }
+          PG=$(get "/postgres?name=$SERVICE&limit=20" | jq -r --arg n "$SERVICE" '.[]? | select(.postgres.name==$n) | .postgres.id' 2>/dev/null | head -1)
+          [ -z "$PG" ] && { echo "no database named $SERVICE"; exit 1; }
+          command -v psql >/dev/null 2>&1 || { sudo apt-get update -qq >/dev/null 2>&1; sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+          get "/postgres/$PG/connection-info" > /tmp/ci.json
+          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
+          PW=$(jq -r '.password // empty' /tmp/ci.json)
+          [ -n "$PW" ] && echo "::add-mask::$PW"; [ -n "$EXT" ] && echo "::add-mask::$EXT"
+          [ -z "$EXT" ] && { echo "no external connection string returned"; exit 1; }
+
+          OUT=research/snapshots
+          mkdir -p "$OUT"
+          PGOPTIONS="-c statement_timeout=1800000 -c default_transaction_read_only=on -c default_transaction_isolation=repeatable\ read" \
+            timeout 2400 \
+            psql "$EXT" -X -A -t -q -v ON_ERROR_STOP=1 -1 \
+                 -f "$SRC" > /tmp/raw.txt 2> /tmp/draw.err
+          RC=$?
+          echo "psql exit=$RC"
+          if [ "$RC" != "0" ]; then
+            echo "::error::witness draw failed with exit $RC"
+            grep -v -F "$PW" /tmp/draw.err | head -40
+            exit "$RC"
+          fi
+
+          grep '^#'      /tmp/raw.txt                  > /tmp/hdr.txt
+          grep '^W	' /tmp/raw.txt | cut -f2- > "$OUT/u0_timing_witness_v1.jsonl"
+          echo "== MANIFEST HEADER =="
+          cat /tmp/hdr.txt
+          hv() { grep "^#$1	" /tmp/hdr.txt | cut -f2-; }
+
+          fail=0
+          for g in GUARD_ROW_HAS_NEWLINE GUARD_COUNT_MISMATCH; do
+            v=$(hv "$g")
+            [ -z "$v" ] && { echo "::error::$g missing"; fail=1; continue; }
+            [ "$v" = "0" ] || { echo "::error::$g = $v (must be 0)"; fail=1; }
+          done
+
+          # THE CONTROL GATE. A witness drawn from a drifted U0 would quietly
+          # change which conditions the quarantine catches, and would look
+          # perfectly well-formed while doing it.
+          REPRO=$(hv U0_CONTROL_REPRODUCES)
+          DELTA=$(hv U0_CONTROL_DELTA)
+          echo "U0 control: $(hv U0_WITNESS_EVENT_COUNT) vs expected 962509 (delta $DELTA) -> $REPRO"
+          if [ "$REPRO" != "yes" ]; then
+            echo "::error::U0 CONTROL DID NOT REPRODUCE (delta $DELTA) -- stopping before seal"
+            fail=1
+          fi
+
+          DB=$(hv U0_WITNESS_UNCOMPRESSED_CANONICAL_SHA256)
+          RE=$(perl -0pe 's/\n\z//' "$OUT/u0_timing_witness_v1.jsonl" | sha256sum | cut -d' ' -f1)
+          echo "U0_WITNESS_UNCOMPRESSED_CANONICAL_SHA256  $DB"
+          echo "  recomputed from written file            $RE"
+          [ "$DB" = "$RE" ] || { echo "::error::hash mismatch"; fail=1; }
+          N=$(wc -l < "$OUT/u0_timing_witness_v1.jsonl")
+          [ "$N" = "$(hv U0_WITNESS_EVENT_COUNT)" ] || { echo "::error::line count $N != declared"; fail=1; }
+          [ "$fail" = "0" ] || { echo "::error::guards failed; nothing sealed"; exit 1; }
+
+          U=$(wc -c < "$OUT/u0_timing_witness_v1.jsonl")
+          gzip -9 -n -c "$OUT/u0_timing_witness_v1.jsonl" > "$OUT/u0_timing_witness_v1.jsonl.gz"
+          gzip -9 -n -c "$OUT/u0_timing_witness_v1.jsonl" > /tmp/again.gz
+          if cmp -s "$OUT/u0_timing_witness_v1.jsonl.gz" /tmp/again.gz; then
+            GZDET=byte_identical_on_repeat
+          else
+            GZDET=NOT_DETERMINISTIC; echo "::error::gzip not reproducible"; exit 1
+          fi
+          rm -f /tmp/again.gz
+          Z=$(wc -c < "$OUT/u0_timing_witness_v1.jsonl.gz")
+          echo "== SIZE =="
+          printf 'witness  uncompressed %s bytes   gzip -9 %s bytes\n' "$U" "$Z"
+          FILE=$(sha256sum "$OUT/u0_timing_witness_v1.jsonl" | cut -d' ' -f1)
+          GZ=$(sha256sum "$OUT/u0_timing_witness_v1.jsonl.gz" | cut -d' ' -f1)
+
+          {
+            cat /tmp/hdr.txt
+            echo "#U0_WITNESS_COMMITTED_FILE_SHA256	$FILE"
+            echo "#U0_WITNESS_COMPRESSED_TRANSPORT_SHA256	$GZ"
+            echo "#GZIP_DETERMINISM	$GZDET"
+            echo "#HASH_SCOPES	UNCOMPRESSED_CANONICAL is the AUTHORITATIVE IDENTITY; COMPRESSED_TRANSPORT covers the .gz container and is a transport checksum only, never an identity"
+            echo "#WITNESS_UNCOMPRESSED_BYTES	$U"
+            echo "#WITNESS_GZIP9_BYTES	$Z"
+            echo "#SOURCE_COMMIT	$GITHUB_SHA"
+          } > "$OUT/u0_witness_manifest_v1.txt"
+          MAN=$(sha256sum "$OUT/u0_witness_manifest_v1.txt" | cut -d' ' -f1)
+          echo "U0_WITNESS_MANIFEST_SHA256=$MAN"
+          echo "U0_WITNESS_MANIFEST_SHA256=$MAN" > "$OUT/U0_HASHES.txt"
+          echo "U0_WITNESS_UNCOMPRESSED_CANONICAL_SHA256=$DB" >> "$OUT/U0_HASHES.txt"
+          echo "U0_WITNESS_COMMITTED_FILE_SHA256=$FILE" >> "$OUT/U0_HASHES.txt"
+          echo "U0_WITNESS_COMPRESSED_TRANSPORT_SHA256=$GZ" >> "$OUT/U0_HASHES.txt"
+
+          LIMIT=$((45 * 1024 * 1024))
+          if [ "$U" -lt "$LIMIT" ]; then
+            rm -f "$OUT/u0_timing_witness_v1.jsonl.gz"; echo "witness: committed PLAIN ($U bytes)"
+          else
+            rm -f "$OUT/u0_timing_witness_v1.jsonl"; echo "witness: committed GZIPPED ($Z bytes; $U uncompressed)"
+          fi
+
+          if [ "$DOCOMMIT" = "COMMIT" ]; then
+            git config user.name  "Claude"
+            git config user.email "noreply@anthropic.com"
+            git add research/snapshots/
+            if git diff --cached --quiet; then
+              echo "nothing to commit"
+            else
+              : > /tmp/msg.txt
+              printf '%s\n' "research: seal U0_SETTLEMENT_TIMING_WITNESS_V1" "" >> /tmp/msg.txt
+              printf '%s\n' "[skip render]" "" >> /tmp/msg.txt
+              printf '%s\n' "Supplemental artifact. It SUPPLEMENTS and does not replace U2_SNAPSHOT_V1," >> /tmp/msg.txt
+              printf '%s\n' "which remains authoritative and was not redrawn. Sole purpose: make the" >> /tmp/msg.txt
+              printf '%s\n' "STRONGER timing quarantine reproducible offline with no database." "" >> /tmp/msg.txt
+              printf '%s\n' "U0_WITNESS_MANIFEST_SHA256=$MAN" >> /tmp/msg.txt
+              printf '%s\n' "U0_WITNESS_UNCOMPRESSED_CANONICAL_SHA256=$DB" >> /tmp/msg.txt
+              printf '%s\n' "U0 control: $(hv U0_WITNESS_EVENT_COUNT) vs expected 962509, delta $DELTA" "" >> /tmp/msg.txt
+              printf '%s\n' "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>" >> /tmp/msg.txt
+              printf '%s\n' "Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC" >> /tmp/msg.txt
+              git commit -q -F /tmp/msg.txt
+              n=0
+              until git push origin HEAD:claude/session-njaewf; do
+                n=$((n+1)); [ "$n" -ge 4 ] && { echo "::error::push failed"; exit 1; }
+                sleep $((2 ** n)); git pull --rebase origin claude/session-njaewf || true
+              done
+              echo "sealed and pushed"
+            fi
+          else
+            echo "commit not requested -- artifact only"
+          fi
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: u0-timing-witness-v1
+          path: research/snapshots/
+          retention-days: 90
