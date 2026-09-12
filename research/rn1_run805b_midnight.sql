@@ -238,7 +238,7 @@ WITH rn1 AS MATERIALIZED (
     FROM res r
     JOIN u0 t ON t.condition_id = r.condition_id
     LEFT JOIN tok k ON k.condition_id = r.condition_id
-   GROUP BY r.condition_id, r.resolved_prices, k.token_count
+   GROUP BY r.condition_id, r.resolved_at, r.resolved_prices, k.token_count
 ), v AS (
   SELECT c.condition_id, c.anomalous, c.token_count, c.resolved_prices,
          (c.resolved_prices IS NULL)                                AS p_null,
