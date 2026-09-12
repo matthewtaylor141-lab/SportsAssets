@@ -88,7 +88,7 @@ filter:
 | `price_path` | `sampled_at <= CUTOFF` | the sample's own clock |
 | `mirror_orders` | `placed_at <= CUTOFF` | the row's creation, not its mutable `updated_at` |
 | `mirror_books` / `mirror_shadow` | `opened_at` / `at <= CUTOFF` | the tick's own clock |
-| `markets` (settlement) | `resolved_at <= CUTOFF` | settlement **as known at the cutoff** — a market resolved after it counts as unsettled, so U4 cannot grow between runs |
+| `markets` (settlement) | `resolved_at <= CUTOFF` | the event **RESOLVED** by the cutoff — *not* settlement known to us then (§9). A market resolving later stays out, so the cohort cannot grow between runs |
 | `live_orders` | `placed_at <= CUTOFF` | |
 
 Run 79's U0 read 962,459 in one statement and 962,454 in another because five
@@ -101,7 +101,7 @@ drift is visible rather than inferred.
 
 ## 3. REVISED UNIVERSES
 
-The old chain `U0 ⊃ U1 ⊃ U2 ⊃ U3 ⊃ U4` is wrong because it made every estimator
+The old chain `U0 ⊃ U1 ⊃ U2 ⊃ U3 ⊃ U4` (revision 1's) is wrong because it made every estimator
 inherit a source-clock filter that **Estimator A does not need**. Replaced by a
 base population plus *per-estimator admission*.
 
@@ -128,7 +128,12 @@ base population plus *per-estimator admission*.
     U3      PMUS-mappable. Run 79 used "ever mapped", a COARSE PROXY, and it is
             labelled as such until a time-causal mapping state is built.
 
-    U4      Settlement known as at the cutoff. SECONDARY ONLY (§9).
+    EVENT_RESOLVED_BY_CUTOFF
+            (formerly "U4 -- settlement known".) RENAMED BY OWNER ORDER
+            2026-09-12 and the old name is retired everywhere.
+            markets.resolved_at <= CUTOFF proves the EVENT RESOLVED by the
+            cutoff. It does NOT prove BETTOR KNEW the settlement at that
+            instant. SECONDARY ONLY (SS9).
 
     UB      Estimator B's populations, one per component, each defined by the
             clocks that component needs (§5). There is no single UB.
@@ -151,11 +156,25 @@ clock is defensible" — is not a property of a row; it is a property of a
 | `s1` | **ADMITTED** | **SHAPE ONLY** — `S1_CROSS_CLOCK_SHAPE`, CLOCK_UNRESOLVED as an absolute | admitted | admitted | the only positive, tight, zero-negative lane |
 | unknown/new | **HALT** | HALT | HALT | HALT | an unrecognised lane stops the run |
 
-Admitting `backfill` to A is deliberate and is the point of separating the
-estimators: A asks what the book looked like at a retained observation, and that
-question does not care when we learned of the fill. **Its lane mix is printed in
-every A output**, so if the drag is being carried by backfill rows that is
-visible immediately rather than discovered later.
+Admitting `backfill` to A is a **retrospective price comparison only**, and is
+fenced by owner order 2026-09-12:
+
+> `BACKFILL_OBSERVATION_DIAGNOSTIC` = a valid retrospective price comparison at
+> the retained probe, but **NOT an operationally actionable observation**.
+
+An archival backfill observation is not something BETTOR could have reacted to.
+So Estimator A reports **five figures, and the pooling is one-way**:
+
+    A_CHAIN
+    A_POLL
+    A_S1
+    A_ONLINE_COMBINED       = chain + poll + s1        <- the operational set
+    A_BACKFILL_DIAGNOSTIC   = backfill, ALONE          <- never pooled in
+
+**`backfill` is never inside `A_ONLINE_COMBINED`.** No aggregate containing
+backfill may be called "reactive replicability", "live first observation", or
+any equivalent. When run 81 is approved, the primary economic headline is the
+**online** population, with backfill displayed separately beside it.
 
 ---
 
@@ -323,12 +342,50 @@ as `send_s` and `venue_rtt_s`; that existing reader is a use, not a validation.
 
 ## 9. SETTLEMENT-SELECTION TREATMENT
 
-**U4 does not select Estimator A's population.** Execution-price deterioration
-does not require settlement.
+**`EVENT_RESOLVED_BY_CUTOFF` does not select Estimator A's population.**
+Execution-price deterioration does not require settlement.
 
-    PRIMARY    U2                for FIRST_RETAINED_OBSERVATION_DRAG
-    SECONDARY  U2 ∩ U4           only where SETTLEMENT_REALIZED_CF_MARGIN
-                                 = (payout − p_h) · q  is needed
+### THE RENAME, AND WHY — owner order 2026-09-12, resolved from code
+
+`markets.resolved_at <= CUTOFF` proves `EVENT_RESOLVED_BY_CUTOFF`. It does
+**not** prove `SETTLEMENT_KNOWN_TO_BETTOR_BY_CUTOFF`, and **no column in the
+schema does**, because:
+
+    gamma.py:233   resolved_at = CASE WHEN $9 THEN COALESCE($11, now()) END
+                   ON CONFLICT ... resolved_at = COALESCE(markets.resolved_at,
+                                                          EXCLUDED.resolved_at)
+
+`$11` is parsed from the venue's own `closedTime` / `closed_time` / `endDate` /
+`end_date_iso`. So the column carries **two different semantics in one field** —
+the same defect class as `trades.ts`:
+
+- **venue-clock branch** (the venue supplied a time): when the EVENT resolved,
+  on the VENUE's clock. Says nothing about when we learned it.
+- **`now()` branch** (the venue supplied none): our fetch clock at the first
+  upsert that saw it resolved — an *upper bound* on arrival, for that subset
+  only, against an unknown fetch cadence.
+
+`markets.updated_at` cannot substitute: it is `now()` on **every** upsert and is
+overwritten, so it bounds nothing.
+
+**There is therefore no durable, semantically valid settlement-arrival
+timestamp, and no point-in-time known-settlement cohort can be defined.** The
+universe is renamed `EVENT_RESOLVED_BY_CUTOFF` everywhere and the old name is
+retired.
+
+Retrospective settlement-dependent analysis may still use it. It is **never**
+described as information BETTOR held at that historical instant, and the current
+`resolved_prices` state is **never** used to imply point-in-time knowledge.
+
+Run 80 censuses `resolved_at` — nulls, distribution, and any row whose
+`resolved_at` precedes a fill on the same condition (an impossibility marker) —
+and reports the two write branches as **NOT SEPARABLE from retained data**
+unless a marker is found.
+
+    PRIMARY    U2                              for FIRST_RETAINED_OBSERVATION_DRAG
+    SECONDARY  U2 ∩ EVENT_RESOLVED_BY_CUTOFF   only where
+                                               SETTLEMENT_REALIZED_CF_MARGIN
+                                               = (payout − p_h) · q is needed
 
 `SETTLEMENT_REALIZED_CF_MARGIN` stays settlement-dependent and directional, and
 stays categorically apart from the settlement-independent matched-pair
@@ -336,13 +393,14 @@ mechanism `MATCHED_PAIR_GROSS_PNL = M · (1 − v_Y − v_N)`. The two are never
 added, netted, compared as commensurable, or merged because both are dollars.
 
 Whenever the settlement-selected cohort is used, print beside it so the
-selection stays visible: U2 count and notional · U2 ∩ U4 count and notional ·
+selection stays visible: U2 count and notional · U2 ∩ EVENT_RESOLVED_BY_CUTOFF
+count and notional ·
 **retention %** · sport mix · source-lane mix · price distribution · size
 distribution.
 
 **Settlement-dependent economics are never generalised back to U2 without
-evidence.** Run 79 already shows the selection is not neutral: U3→U4 dropped
-26,121 events and $7.29M, and settlement coverage varies by sport and horizon.
+evidence.** Run 79 already shows the selection is not neutral: the settlement step dropped
+26,121 events and $7.29M, and coverage varies by sport and horizon.
 
 ---
 
@@ -388,7 +446,7 @@ approved.
 | 5 | **the 120 s / `reaction_s` split** (§7): rows over 120, notional share, lane mix, and the dispatch-interval distribution | both variables side by side |
 | 6 | **`t_*` population gate** (§8): lane mix, whale mix, date span, coverage of the 925 rows against their lane's denominator | mirror vs non-mirror, measured |
 | 7 | **mirror-period repeated-observation census**: per event in the mirror window, how many distinct book observations exist at distinct times | decides whether §10's B cohort exists at all |
-| 8 | **U2 ∩ U4 selection profile** (§9): retention %, sport mix, lane mix, price and size distributions | settlement selection made visible |
+| 8 | **U2 ∩ EVENT_RESOLVED_BY_CUTOFF selection profile** (§9): retention %, sport mix, lane mix, price and size distributions, plus the `resolved_at` provenance census | settlement selection made visible |
 | 9 | **witness ledger** — every test beside the rows it examined; zero witnesses prints NOT TESTED with the reason | as run 79 |
 
 Estimated cost: comparable to run 79 (~5 minutes), no JSONB dragged through any
