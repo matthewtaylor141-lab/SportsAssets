@@ -303,6 +303,20 @@ def test_9d_the_gate_uses_only_field_names_the_current_sdk_declares():
     assert "acceptingOrders" in reads
 
 
+def test_9e_the_notebook_and_the_workflow_share_one_selection_rule():
+    """One rule, one file. Two copies would be two rules.
+
+    The Actions workflow runs research/run836b_select_tokens.py directly and
+    the notebook embeds that same file as its selection cell. If they were
+    separate copies, "which rule chose the markets" would be a question rather
+    than a fact, and they could drift apart silently.
+    """
+    module = (HERE / "run836b_select_tokens.py").read_text(encoding="utf-8")
+    cell = _cell_with("SELECTION_RECORD")
+    assert cell.strip() == module.strip(), (
+        "the notebook's selection cell is not the shared rule file verbatim")
+
+
 def test_10_the_selection_rule_cannot_see_the_feed():
     """Ranking must use pre-capture market metadata only.
 

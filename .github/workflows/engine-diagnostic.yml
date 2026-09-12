@@ -32,6 +32,18 @@ on:
     # probe is ABLE to do, only when it runs itself.
     paths-ignore:
       - "research/**"
+      # The Run 83.6B capture workflow is a standalone public-data research
+      # job. Landing or editing it says nothing about engine health, so it
+      # must not spend a 16-19 minute live venue probe either -- same reasoning
+      # as research/** above, and the mirror is still paused.
+      - ".github/workflows/run836b-capture.yml"
+      # And this file. paths-ignore skips a run only when EVERY changed file
+      # matches, so without this line a commit that merely edits the probe's
+      # own trigger config fires the probe -- which is exactly the spend the
+      # list above exists to prevent. Editing the probe's configuration is not
+      # evidence about engine health; workflow_dispatch still fires it on
+      # demand, so nothing here reduces what the probe can do.
+      - ".github/workflows/engine-diagnostic.yml"
   workflow_dispatch:
     inputs:
       api_base:

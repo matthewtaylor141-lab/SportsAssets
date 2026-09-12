@@ -1,0 +1,197 @@
+# RUN 83.6E -- ephemeral public CLOB capture on a GitHub-hosted runner.
+#
+# The owner has no terminal and no Colab. This runs the ALREADY FROZEN Run
+# 83.6B capture on a clean ubuntu runner with ordinary outbound internet, and
+# hands back one artifact.
+#
+# THIS WORKFLOW IS A LAUNCHER, NOT THE INSTRUMENT. research/run836b_clob_capture.py
+# is not edited, imported, wrapped or patched here. Its SHA-256 is checked on
+# the runner and it is then executed as a CHILD PROCESS with command-line
+# arguments. Arguments are the entire interface.
+#
+# PUBLIC DATA ONLY. No credential of any kind is used or needed: no PMUS, no
+# API key, no wallet, no signature. The job reads NO repository secret, and
+# `permissions: contents: read` is the whole grant -- artifact upload does not
+# require write. Nothing is deployed, no database is touched, no order exists.
+#
+# This is a research workflow with its own dispatch trigger. It is NOT a
+# production deploy path and shares nothing with one.
+
+name: run836b-capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      note:
+        description: "optional free-text label recorded in the run metadata"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+concurrency:
+  # One capture at a time. Two concurrent captures would put two unrelated
+  # cohorts in flight against the same public feed for no scientific gain.
+  group: run836b-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+
+    steps:
+      - name: Check out the frozen instrument
+        uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the two public dependencies
+        run: python -m pip install --quiet "websockets>=14,<18" "httpx>=0.27"
+
+      - name: Verify the frozen instrument's SHA-256
+        id: frozen
+        env:
+          FROZEN_SHA256: 7931b54aef42f31b5f4118bf410340eddd71549125153ccbd9b33df29794760b
+        run: |
+          set -euo pipefail
+          ACTUAL="$(sha256sum research/run836b_clob_capture.py | cut -d' ' -f1)"
+          echo "expected $FROZEN_SHA256"
+          echo "actual   $ACTUAL"
+          if [ "$ACTUAL" != "$FROZEN_SHA256" ]; then
+            echo "FROZEN_INSTRUMENT_HASH_MISMATCH"
+            exit 1
+          fi
+          echo "FROZEN_INSTRUMENT_HASH_VERIFIED"
+          echo "sha256=$ACTUAL" >> "$GITHUB_OUTPUT"
+
+      - name: Select token ids (public discovery; NOT part of the evidence)
+        id: select
+        run: |
+          set -euo pipefail
+          echo "start_utc=$(date -u +%Y-%m-%dT%H:%M:%SZ)" >> "$GITHUB_OUTPUT"
+          # The SAME rule the approved browser launcher uses -- one file, run
+          # directly here and embedded verbatim there. Selection completes and
+          # the ids are frozen BEFORE any scientific websocket observation.
+          python research/run836b_select_tokens.py --out tokens.json \
+            2>&1 | tee run836b_selection.txt
+          python - <<'PY' >> "$GITHUB_OUTPUT"
+          import json
+          ids = json.load(open("tokens.json"))["token_ids"]
+          assert 3 <= len(ids) <= 5, f"expected 3-5 token ids, got {len(ids)}"
+          print("token_ids=" + " ".join(ids))
+          PY
+
+      - name: Public reachability preflight (discarded; never evidence)
+        run: |
+          set -euo pipefail
+          # Runs in its own directory and its own process. Nothing it observes
+          # is kept: the capture that follows creates its own output directory
+          # and its own sessions, so no preflight byte can reach the archive.
+          mkdir -p preflight_scratch
+          cd preflight_scratch
+          python - <<'PY'
+          import asyncio, json, sys
+          import httpx, websockets
+
+          WS   = "wss://ws-subscriptions-clob.polymarket.com/ws/market"
+          REST = "https://clob.polymarket.com/book"
+          ids  = json.load(open("../tokens.json"))["token_ids"]
+
+          async def check_ws():
+              async with websockets.connect(WS, open_timeout=25, max_size=None) as ws:
+                  await ws.send(json.dumps({"type": "market",
+                                            "assets_ids": ids,
+                                            "custom_feature_enabled": False}))
+                  return "connected"
+
+          ws_state = rest_state = None
+          try:
+              ws_state = asyncio.run(asyncio.wait_for(check_ws(), timeout=45))
+          except Exception as exc:
+              ws_state = f"FAILED: {type(exc).__name__}: {exc}"
+          try:
+              with httpx.Client(timeout=25, follow_redirects=False) as c:
+                  r = c.get(REST, params={"token_id": ids[0]})
+                  rest_state = f"HTTP {r.status_code}"
+          except Exception as exc:
+              rest_state = f"FAILED: {type(exc).__name__}: {exc}"
+
+          print("websocket :", ws_state)
+          print("rest book :", rest_state)
+          if ws_state != "connected" or not str(rest_state).startswith("HTTP"):
+              print("CLOB_CAPTURE_RUNTIME_REACHABLE = NO")
+              print("Nothing is substituted. The job stops here.")
+              sys.exit(1)
+          print("CLOB_CAPTURE_RUNTIME_REACHABLE = YES")
+          PY
+
+      - name: Run the frozen capture as a child process
+        run: |
+          set -euo pipefail
+          ARGS=""
+          for t in ${{ steps.select.outputs.token_ids }}; do
+            ARGS="$ARGS --token-id $t"
+          done
+          # --custom-feature-enabled is deliberately NOT passed, so
+          # custom_feature_enabled = false, the authorised baseline.
+          set +e
+          python research/run836b_clob_capture.py \
+            $ARGS \
+            --sessions 3 \
+            --session-seconds 75 \
+            --pause-seconds 5 \
+            --rest-interval 15 \
+            --heartbeat-interval 10 \
+            > run836b_terminal_report.txt 2>&1
+          RC=$?
+          set -e
+          cat run836b_terminal_report.txt
+          echo "capture exit code: $RC"
+          if [ "$RC" -ne 0 ]; then
+            echo "CAPTURE_COMPLETE_FOR_RECONSTRUCTION was not YES."
+            echo "The evidence is still uploaded: an incomplete run is a result."
+          fi
+
+      - name: Record non-secret provenance
+        if: always()
+        run: |
+          set -euo pipefail
+          ARCHIVE="$(ls -1 run836b_capture_*.tar.gz 2>/dev/null | tail -n1 || true)"
+          {
+            echo "workflow_run_id     = ${{ github.run_id }}"
+            echo "workflow_run_number = ${{ github.run_number }}"
+            echo "commit_sha          = ${{ github.sha }}"
+            echo "ref                 = ${{ github.ref }}"
+            echo "runner_os           = $(uname -srmo)"
+            echo "runner_image        = ${ImageOS:-unknown}"
+            echo "python_version      = $(python -V 2>&1)"
+            echo "frozen_script_sha256= ${{ steps.frozen.outputs.sha256 }}"
+            echo "start_utc           = ${{ steps.select.outputs.start_utc }}"
+            echo "end_utc             = $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "selected_token_ids  = ${{ steps.select.outputs.token_ids }}"
+            echo "note                = ${{ inputs.note }}"
+            if [ -n "$ARCHIVE" ]; then
+              echo "archive             = $ARCHIVE"
+              echo "archive_sha256      = $(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+            else
+              echo "archive             = NONE PRODUCED"
+            fi
+          } > runner_metadata.txt
+          cat runner_metadata.txt
+
+      - name: Upload the evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: RUN836B_CAPTURE_EVIDENCE
+          if-no-files-found: warn
+          retention-days: 30
+          path: |
+            run836b_capture_*.tar.gz
+            run836b_terminal_report.txt
+            run836b_selection.txt
+            runner_metadata.txt
