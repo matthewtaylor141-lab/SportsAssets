@@ -120,13 +120,22 @@ does not invert — not because 387 events establish anything.
 5. **Split:** top-of-book **76.695%**, depth **23.305%**.
 6. **The narrow hypothesis — "by the first retained observation, the economics
    available to a reactive copier are materially worse than RN1's source-fill
-   economics" — is SUPPORTED on this selected cohort.** Decision rule, stated
-   in the code and applied as written: deterioration > 0, removing ≥ 10% of the
-   source-price counterfactual P&L, with > 50% of events deteriorating. Measured:
-   $111,352.42, **229.694%**, **89.595%**. The rule is mine, not owner-approved,
-   and it was not blind — 81A had already established the direction. Every raw
-   number is printed so a different rule can be applied to the same figures.
-   **This does not establish that physical latency caused the deterioration.**
+   economics" — is SUPPORTED on this selected cohort**, because the same-event
+   counterfactual economics are materially worse at the first retained
+   observation **and change sign**: +$45,437.46 → −$42,856.87 at the top of
+   book on a deterioration of $88,294.33, and ≈ −$62,873.80 on the
+   depth-supported subset.
+
+   > **Retired by owner correction.** An earlier version of this file attached a
+   > decision rule to that conclusion — deterioration > 0, removing ≥ 10% of
+   > source P&L, > 50% of events deteriorating. That rule was never
+   > pre-specified, and a threshold chosen after the direction is known adds
+   > nothing the measured quantities do not already carry. It is withdrawn and
+   > must not be re-attached.
+
+   **Permanent caveat: this does NOT establish physical latency causation, and
+   does NOT establish that the settlement-selected cohort represents all U2
+   economics.**
 7. **What remains unidentified** — fees and rebates; the clock
    (`TIMESTAMP_INTEGRITY` unresolved, and "first retained observation" is a
    property of probe cadence, not elapsed time); what a copier would actually

@@ -627,39 +627,32 @@ def answers(top, dep, exhausted, n_pop, n_cond, notional):
     print(f"      depth walking        {fmt_r(ds)}   "
           f"({'n/a' if ds is None else f'{100 * ds:.3f}%'})\n")
 
-    # THE DECISION RULE, STATED BEFORE THE VERDICT AND NOT TUNED TO IT. It is
-    # my rule, not an owner-approved one, and the raw numbers above let any
-    # other rule be applied instead. It is NOT a blind rule: run 81A already
-    # established that top-of-book movement is positive on about 89.5% of U2
-    # events, so the direction was known before the threshold was written.
-    frac_lost = ratio(d.total, d.pnl_src) if d.pnl_src > 0 else None
-    share_pos = ratio(a.pos_det, a.n)
-    if d.total <= 0:
-        verdict = "CONTRADICTED"
-    elif (frac_lost is not None and frac_lost >= 0.10
-          and share_pos is not None and share_pos > 0.50):
-        verdict = "SUPPORTED"
-    else:
-        verdict = "INDETERMINATE"
+    # NO NUMERICAL THRESHOLD IS APPLIED HERE. An earlier version of this file
+    # invented one -- deterioration > 0, removing >= 10% of source P&L, > 50%
+    # of events deteriorating -- and it was retired by owner correction: it was
+    # never pre-specified, and a threshold chosen after the direction is known
+    # adds no information the measured quantities do not already carry. The
+    # conclusion below rests on the figures themselves.
     print("6. The narrow hypothesis:")
     print('      "By the first retained observation, the economics available')
     print('       to a reactive copier are materially worse than RN1\'s')
     print('       source-fill economics."')
     print()
-    print("   DECISION RULE, stated here and applied as written: SUPPORTED")
-    print("   requires (a) total deterioration > 0, (b) it removes at least")
-    print("   10% of the source-price counterfactual P&L on the same rows,")
-    print("   and (c) more than half of events show positive per-event")
-    print("   deterioration. Deterioration <= 0 is CONTRADICTED. Anything")
-    print("   else is INDETERMINATE.")
-    print(f"      (a) total deterioration            {d.total:>18,.2f}")
-    print(f"      (b) share of source CF P&L removed "
-          f"{'n/a' if frac_lost is None else f'{100 * frac_lost:17.3f}%'}")
-    print(f"      (c) share of events deteriorating  "
-          f"{'n/a' if share_pos is None else f'{100 * share_pos:17.3f}%'}")
-    print(f"\n   VERDICT ON THIS SELECTED COHORT: {verdict}")
-    print("   This does NOT establish that physical latency caused the")
-    print("   deterioration.\n")
+    print("   The measured quantities, on this cohort at Q_A:")
+    print(f"      source-fill counterfactual P&L         {a.pnl_src:>18,.2f}")
+    print(f"      first-retained-top counterfactual P&L  {a.pnl_fot:>18,.2f}")
+    print(f"      top-of-book deterioration              {a.det:>18,.2f}")
+    print("      first-observation result on the depth-supported subset"
+          f"  {d.pnl_fod:>,.2f}")
+    print()
+    print("   VERDICT ON THIS SELECTED COHORT: SUPPORTED -- because the")
+    print("   same-event counterfactual economics are materially worse at the")
+    print("   first retained observation AND CHANGE SIGN. No threshold rule is")
+    print("   attached to that conclusion; the figures above are the evidence.")
+    print()
+    print("   PERMANENT CAVEAT: this does NOT establish physical latency")
+    print("   causation, and does NOT establish that the settlement-selected")
+    print("   cohort represents all U2 economics.\n")
 
     print("7. What remains unidentified before deciding whether reactive")
     print("   copying is engineering-fixable, fundamentally too late, or")

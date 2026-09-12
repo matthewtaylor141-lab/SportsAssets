@@ -129,40 +129,59 @@ class SealedInputs:
             if d.get("resolved_at") is not None
             and self.latest_u0.get(c, "") > d["resolved_at"]}
 
-    def population(self):
-        """Yield (event_row, S) for every SETTLEMENT_ANALYZABLE_STRONG event.
+    def classify(self, r):
+        """(FIRST-FAIL BUCKET, S) for one sealed event row.
 
-        The ladder predicate, applied unchanged and in its order. S is the
-        sealed terminal payout for the outcome the event actually bought --
-        payouts[outcome_index(asset)] -- which the payout-mapping condition
-        below has already proved unambiguous on every row it yields.
+        THE LADDER PREDICATE, APPLIED UNCHANGED AND IN ITS ORDER. The order is
+        load-bearing: a bucket answers "where did this event FIRST fail", so
+        reordering the tests would move events between buckets without changing
+        any of them. S is the sealed terminal payout for the outcome the event
+        actually bought -- payouts[outcome_index(asset)] -- and is None for
+        anything that does not reach the end of the ladder.
+
+        This is the single definition. population() below is written in terms of
+        it, so the analysis cohort and the bucket census cannot drift apart.
         """
-        S = self.settlement
+        c = r.get("condition_id_effective")
+        if not c:
+            return "UNLINKED_CONDITION", None
+        d = self.settlement.get(c)
+        if d is None or not d.get("market_row_present"):
+            return "NO_SETTLEMENT_METADATA", None
+        if not d.get("token_metadata_present"):
+            return "TOKEN_METADATA_MISSING", None
+        if not d["_binary"]:
+            return "NOT_STRUCTURALLY_BINARY", None
+        if not d.get("resolved"):
+            return "UNRESOLVED", None
+        if not d["_px_valid"]:
+            return "RESOLVED_PRICES_INVALID", None
+        if c in self.strong_quarantine:
+            return "TIMING_QUARANTINE", None
+        oi = d["_tokidx"].get(r.get("asset"))
+        if oi is None or not isinstance(oi, int) \
+           or not (0 <= oi < len(d["payouts"])):
+            return "PAYOUT_MAPPING_AMBIGUOUS", None
+        if not d["_unique_winner"]:
+            return "PAYOUT_MAPPING_AMBIGUOUS", None
+        return "SETTLEMENT_ANALYZABLE_STRONG", float(d["payouts"][oi])
+
+    def events(self):
+        """Yield (event_row, bucket, S) for every row of U2_SNAPSHOT_V1."""
         with gzip.open(EV, "rt") as fh:
             for line in fh:
                 line = line.strip()
                 if not line:
                     continue
                 r = json.loads(line)
-                c = r.get("condition_id_effective")
-                if not c:
-                    continue
-                d = S.get(c)
-                if d is None or not d.get("market_row_present"):
-                    continue
-                if not d.get("token_metadata_present") or not d["_binary"]:
-                    continue
-                if not d.get("resolved") or not d["_px_valid"]:
-                    continue
-                if c in self.strong_quarantine:
-                    continue
-                oi = d["_tokidx"].get(r.get("asset"))
-                if oi is None or not isinstance(oi, int) \
-                   or not (0 <= oi < len(d["payouts"])):
-                    continue
-                if not d["_unique_winner"]:
-                    continue
-                yield r, float(d["payouts"][oi])
+                bucket, S = self.classify(r)
+                yield r, bucket, S
+
+    def population(self):
+        """Yield (event_row, S) for every SETTLEMENT_ANALYZABLE_STRONG event."""
+        for r, bucket, S in self.events():
+            if bucket == "SETTLEMENT_ANALYZABLE_STRONG":
+                yield r, S
 
 
 def population_controls(sealed):
