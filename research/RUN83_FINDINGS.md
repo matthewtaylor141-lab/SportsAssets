@@ -128,6 +128,26 @@ tests/test_obs_collector.py          18 passed
                                      38 passed
 ```
 
+**Full backend suite: 42 failed / 7,634 passed / 99 skipped / 3 xfailed (5m58s).**
+None of the 42 is run 83's. Attributed rather than assumed, by running the three
+affected files at the **pre-run-83 commit `8dd4e6e`** in a separate worktree and
+at `HEAD`, in isolation:
+
+| | `8dd4e6e` (before run 83) | `HEAD` (after) |
+|---|---|---|
+| `test_mirror_live_worker.py` + `test_pnl_l34_review_pins.py` + `test_pmus_account.py` | **1 failed / 389 passed** | **1 failed / 389 passed** |
+
+Identical, and the single failure is
+`test_pmus_account::test_a_position_we_sold_is_settled_on_the_day_of_the_sale` —
+the known date-dependent pin (task #90), which fails on the clean tip too. The
+other 13 named failures pass in isolation at **both** commits, so they are the
+order- and load-dependent class already recorded as task #124 (the same tree has
+given 183 and 112 failures on different runs) and task #89. Run 83 adds none of
+them.
+
+The targeted regression that *does* cover the changed code — memory_watch,
+boot_stagger, pipeline, chain, e26, dedupe, obs — is **264 passed / 9 skipped**.
+
 | # | acceptance condition | proved by |
 |---|---|---|
 | 1 | `mirror_live=false` throughout | `test_the_collector_never_reads_or_writes_mirror_live` (AST, not prose) |
