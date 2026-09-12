@@ -300,16 +300,28 @@ def test_stale_state_beyond_tolerance_is_invalid_not_selected():
     assert sel.state_age_at_receipt_ms == pytest.approx(9000.0, abs=1e-6)
 
 
-def test_the_history_is_bounded_and_drops_the_oldest_first():
+def test_the_history_is_bounded_by_time_not_by_a_message_count():
+    """REWRITTEN IN RUN 83.4. This used to pin `retain=4`, a message count.
+
+    A count has no temporal meaning while the stream's message rate is unknown,
+    which is the defect Run 83.4 removed: at a high enough rate the genuine
+    pre-receipt state is evicted before the 0 ms rule reads it. Retention is now
+    stated in seconds, and the scientific guarantee comes from capture at due
+    time rather than from the buffer surviving at all
+    (see test_run834_retention_and_races.py).
+    """
     base = clock.now()
     hist = streamstate.TokenStateHistory(
-        channel=StreamChannel.PMUS_FAST_STREAM_PATH, token_id="m", retain=4)
+        channel=StreamChannel.PMUS_FAST_STREAM_PATH, token_id="m",
+        retain_horizon_s=0.05)
     for i in range(10):
         hist.append(streamstate.StreamState(
             channel=hist.channel, token_id="m", receive=_at(base, i * 0.01),
             feed_session_id="s", best_bid=float(i)))
-    assert len(hist) == 4
+    # 10 states 10 ms apart under a 50 ms horizon: the oldest are gone by AGE.
+    assert len(hist) == 6, len(hist)
     assert hist.latest.best_bid == 9.0
+    assert hist.pruned == 4
     # And selection still works against what remains.
     assert streamstate.select_state_at(hist, _at(base, 0.075),
                                        stale_tolerance_s=5.0).state.best_bid == 7.0

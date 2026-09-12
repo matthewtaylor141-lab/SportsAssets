@@ -161,6 +161,37 @@ class StreamState:
         return cost / taken, taken < q
 
 
+# ------------------------------------------------------- retention, by TIME
+#
+# THE 256-MESSAGE CAP IS GONE, AND IT SHOULD NEVER HAVE BEEN A SCIENTIFIC
+# DEPENDENCY. The stream's message rate is unknown -- that is one of the things
+# passive observation is meant to measure -- so "the last 256 states" has no
+# defensible temporal meaning. At 50 messages/second it is five seconds of
+# history; at 500 it is half a second, and the genuine pre-receipt state for an
+# event whose admission took 100 ms would be evicted by later churn before the
+# 0 ms rule ever read it. The instrument would then answer from a post-receipt
+# book and there would be nothing in the row to say so.
+#
+# TWO INDEPENDENT CHANGES REPLACE IT, AND THE SECOND IS THE REAL ONE:
+#
+#   1. retention is by TIME HORIZON with explicit headroom (below), so what is
+#      kept is stated in seconds rather than in messages; and
+#   2. A DUE OBSERVATION IS CAPTURED OUT OF THE BUFFER AT DUE TIME, into an
+#      immutable SlotObservation. Once captured it does not depend on the buffer
+#      at all, so later churn -- however fast -- cannot erase it.
+#
+# Because of (2), a buffer overflow is no longer a scientific loss. That is what
+# makes it safe to bound memory at all: the guarantee comes from capture, not
+# from retention.
+RETENTION_HEADROOM_S: float = 15.0
+
+# An absolute memory guard, not a scientific parameter. If it ever binds, the
+# history says so (`overflow_events`) rather than dropping quietly -- see
+# `append`. It is deliberately large enough that binding means something
+# abnormal happened.
+DEFAULT_OVERFLOW_CAP: int = 100_000
+
+
 @dataclass
 class TokenStateHistory:
     """The retained states for one token on one channel, ordered by arrival.
@@ -170,11 +201,18 @@ class TokenStateHistory:
     time the sampler runs -- so a cell holding only the newest frame answers the
     wrong question whenever a frame lands between receipt and sampling. That is
     not a rare race; at RN1's p99 of 10 fills in a second it is the normal case.
+
+    RETAINED BY TIME, NOT BY COUNT. `retain_horizon_s` must cover the whole
+    pre-registered ladder plus headroom, so that a slot still pending at 60 s can
+    resolve against state that was already present at its anchor.
     """
 
     channel: str
     token_id: str
-    retain: int = 256
+    retain_horizon_s: float = 75.0          # 60 s ladder + 15 s headroom
+    overflow_cap: int = DEFAULT_OVERFLOW_CAP
+    overflow_events: int = 0
+    pruned: int = 0
     _states: list[StreamState] = field(default_factory=list)
     _keys: list[float] = field(default_factory=list)
 
@@ -185,10 +223,29 @@ class TokenStateHistory:
         # backwards inside one process, so the key list stays sorted.
         self._states.append(state)
         self._keys.append(state.receive.monotonic)
-        if len(self._states) > self.retain:
-            drop = len(self._states) - self.retain
+        self._prune(now_monotonic=state.receive.monotonic)
+
+    def _prune(self, *, now_monotonic: float) -> None:
+        """Drop everything older than the horizon. Time first, cap second."""
+        cutoff = now_monotonic - self.retain_horizon_s
+        keep_from = bisect.bisect_left(self._keys, cutoff)
+        if keep_from:
+            del self._states[:keep_from]
+            del self._keys[:keep_from]
+            self.pruned += keep_from
+
+        if len(self._states) > self.overflow_cap:
+            # INSIDE the horizon and still over the cap. This is a memory
+            # guard firing, not a retention policy, so it is COUNTED and
+            # visible. It is not a scientific loss: every slot already due has
+            # been captured into its own immutable observation, and one not yet
+            # due will be answered from a state at least as recent as the ones
+            # being dropped.
+            drop = len(self._states) - self.overflow_cap
             del self._states[:drop]
             del self._keys[:drop]
+            self.overflow_events += 1
+            self.pruned += drop
 
     @property
     def latest(self) -> StreamState | None:
@@ -262,3 +319,157 @@ def select_state_at(history: TokenStateHistory | None,
             f"({age_ms:.1f} ms > {stale_tolerance_s * 1000:.0f} ms)")
 
     return Selection(SelectionOutcome.SELECTED, state, age_ms, "selected")
+
+
+# =====================================================================
+# CAPTURE -- where a scientific observation stops depending on the buffer
+# =====================================================================
+@dataclass(frozen=True)
+class CapturedState:
+    """A deep, immutable copy of one StreamState. Tuples, not lists.
+
+    StreamState is frozen but its ladders are LISTS, so two references share one
+    mutable object. That is fine for live state and wrong for evidence: an
+    observation must be a fact about an instant, not a view onto something that
+    can still change. Capture converts the ladders to tuples so the record is
+    immutable all the way down.
+    """
+
+    channel: str
+    token_id: str
+    receive_monotonic: float
+    receive_wall: object
+    process_boot_id: str
+    feed_session_id: str
+    best_bid: float | None
+    best_ask: float | None
+    bids: tuple[tuple[float, float], ...]
+    asks: tuple[tuple[float, float], ...]
+    depth_authority: str
+    validity: str
+    continuity: str
+    venue_timestamp_raw: str | None
+    venue_book_hash: str | None
+    venue_sequence: str | None
+    pending_unapplied_updates: int
+
+    @classmethod
+    def of(cls, s: StreamState) -> "CapturedState":
+        return cls(
+            channel=s.channel, token_id=s.token_id,
+            receive_monotonic=s.receive.monotonic, receive_wall=s.receive.wall,
+            process_boot_id=s.receive.process_boot_id,
+            feed_session_id=s.feed_session_id,
+            best_bid=s.best_bid, best_ask=s.best_ask,
+            bids=tuple(s.bids), asks=tuple(s.asks),
+            depth_authority=s.depth_authority, validity=s.validity,
+            continuity=s.continuity,
+            venue_timestamp_raw=s.venue_timestamp_raw,
+            venue_book_hash=s.venue_book_hash, venue_sequence=s.venue_sequence,
+            pending_unapplied_updates=s.pending_unapplied_updates,
+        )
+
+
+@dataclass(frozen=True)
+class SlotObservation:
+    """ONE IMMUTABLE RESULT FOR ONE SLOT. Written once, never revised.
+
+    This is the object that makes the retention question a memory question
+    rather than a scientific one. It is taken AT DUE TIME out of whatever valid
+    state the channel then holds, and from that moment it is self-contained:
+    every later frame, prune, overflow, disconnect or reconnect is irrelevant to
+    it. A stress test that pushes tens of thousands of updates through the
+    channel cannot disturb an observation already captured.
+    """
+
+    observation_slot_id: str
+    observation_channel: str
+    target_offset_ms: int
+    status: str
+    outcome: str
+    reason: str
+    captured_at_monotonic: float
+    anchor_monotonic: float
+    state_age_at_receipt_ms: float | None
+    state: CapturedState | None
+
+    @property
+    def captured(self) -> bool:
+        return self.status == "CAPTURED_STREAM"
+
+
+def capture_for_slot(history: TokenStateHistory | None, *,
+                     observation_slot_id: str, observation_channel: str,
+                     target_offset_ms: int, anchor: clock.Instant,
+                     captured_at: clock.Instant,
+                     stale_tolerance_s: float) -> SlotObservation:
+    """Resolve one slot against the channel's CURRENT state and freeze it.
+
+    Two different questions, deliberately, depending on the offset:
+
+      * 0 ms asks what was in memory AT THE ANCHOR, so it selects at-or-before
+        the anchor and its age is measured from the anchor.
+      * every later offset asks what the channel holds AT DUE TIME, so it takes
+        the then-current valid state -- which is the state BETTOR would have
+        been acting on at that instant.
+
+    Both record `state_age_at_receipt_ms` against the ANCHOR, because that is
+    the quantity the experiment is about, and both use the local monotonic clock
+    for it. No venue timestamp is an operand anywhere in this function.
+    """
+    if target_offset_ms == 0:
+        sel = select_state_at(history, anchor,
+                              stale_tolerance_s=stale_tolerance_s)
+    else:
+        sel = select_state_at(history, captured_at,
+                              stale_tolerance_s=stale_tolerance_s)
+
+    if sel.selected and sel.state is not None:
+        # Age is always measured from the anchor, never from the due instant.
+        age_ms = clock.elapsed_between(sel.state.receive, anchor) * 1000.0
+        return SlotObservation(
+            observation_slot_id=observation_slot_id,
+            observation_channel=observation_channel,
+            target_offset_ms=target_offset_ms,
+            status="CAPTURED_STREAM", outcome=sel.outcome, reason=sel.reason,
+            captured_at_monotonic=captured_at.monotonic,
+            anchor_monotonic=anchor.monotonic,
+            state_age_at_receipt_ms=age_ms,
+            state=CapturedState.of(sel.state),
+        )
+
+    # Not a capture. The slot still gets exactly one immutable result, so a
+    # missing observation is a fact about a known slot rather than an absence.
+    status = (SelectionOutcome.NO_VALID_PRE_RECEIPT_STATE
+              if sel.outcome == SelectionOutcome.NO_VALID_PRE_RECEIPT_STATE
+              else sel.outcome)
+    return SlotObservation(
+        observation_slot_id=observation_slot_id,
+        observation_channel=observation_channel,
+        target_offset_ms=target_offset_ms,
+        status=status, outcome=sel.outcome, reason=sel.reason,
+        captured_at_monotonic=captured_at.monotonic,
+        anchor_monotonic=anchor.monotonic,
+        state_age_at_receipt_ms=sel.state_age_at_receipt_ms,
+        state=CapturedState.of(sel.state) if sel.state is not None else None,
+    )
+
+
+def capture_zero_ms(history: TokenStateHistory | None, *,
+                    observation_slot_id: str, observation_channel: str,
+                    anchor: clock.Instant,
+                    stale_tolerance_s: float) -> SlotObservation:
+    """Freeze the 0 ms observation AT STAMP TIME, before admission runs.
+
+    THIS IS THE ANSWER TO THE ADMISSION-DELAY RACE. The canonical `was_insert`
+    answer comes back from Postgres, and between stamping the anchor and getting
+    it, an unbounded number of frames can arrive -- at RN1's p99 burst, many. If
+    the 0 ms state were selected after admission, it would be selected out of a
+    buffer that had moved on, and a long enough delay combined with a bounded
+    buffer could leave nothing at or before the anchor at all.
+    """
+    return capture_for_slot(
+        history, observation_slot_id=observation_slot_id,
+        observation_channel=observation_channel, target_offset_ms=0,
+        anchor=anchor, captured_at=anchor,
+        stale_tolerance_s=stale_tolerance_s)

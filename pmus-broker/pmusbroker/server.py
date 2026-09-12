@@ -26,6 +26,8 @@ import hmac
 import json
 import logging
 import os
+import threading
+import time
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any
 
@@ -47,6 +49,51 @@ SIGNING_SHAPED_KEYS = frozenset({
     "message", "payload", "body", "sign", "signature", "capability",
     "key_id", "secret", "secret_key",
 })
+
+
+class RateLimiter:
+    """A token bucket over mint operations. Bounds a loop, not a patient caller.
+
+    WHAT IT IS FOR. One handshake per connection, and a connection lasts as long
+    as the socket does, so a healthy collector mints a handful of times an hour.
+    A caller minting thirty times a minute is a retry loop that has lost its
+    backoff, or something enumerating. Either way the answer is to stop signing.
+
+    WHAT IT IS NOT FOR, and this belongs in the same comment so the limit is not
+    mistaken for a defence it isn't: it does NOT stop a caller who holds the
+    token and paces itself under the limit. Nothing here can. What bounds that
+    caller is the capability -- everything it can ever obtain is a market-socket
+    handshake -- not the rate.
+    """
+
+    def __init__(self, *, capacity: int = 30, per_seconds: float = 60.0) -> None:
+        self.capacity = capacity
+        self.per_seconds = per_seconds
+        self._tokens = float(capacity)
+        self._last = time.monotonic()
+        self._lock = threading.Lock()
+        self.refused = 0
+
+    def allow(self) -> bool:
+        with self._lock:
+            now = time.monotonic()
+            self._tokens = min(
+                self.capacity,
+                self._tokens + (now - self._last) * self.capacity / self.per_seconds)
+            self._last = now
+            if self._tokens < 1.0:
+                self.refused += 1
+                return False
+            self._tokens -= 1.0
+            return True
+
+
+def _rate_limit_settings() -> tuple[int, float]:
+    try:
+        cap = max(1, int(os.environ.get("PMUS_BROKER_MINTS_PER_MINUTE", "30")))
+    except ValueError:
+        cap = 30
+    return cap, 60.0
 
 
 def _caller_token() -> str:
@@ -111,6 +158,8 @@ def screen_body(raw: bytes) -> tuple[bool, str, str]:
 class MintHandler(BaseHTTPRequestHandler):
     server_version = "pmusbroker/1"
     ledger: MintLedger = MintLedger()
+    limiter: RateLimiter = RateLimiter(capacity=_rate_limit_settings()[0],
+                                       per_seconds=_rate_limit_settings()[1])
 
     def _reply(self, status: int, payload: dict) -> None:
         body = json.dumps(payload).encode()
@@ -142,6 +191,7 @@ class MintHandler(BaseHTTPRequestHandler):
                 "exposed_capability": capability.COLLECTOR_SIGNING_CAPABILITY,
                 "signature_host_binding": capability.SIGNATURE_HOST_BINDING,
                 "mints": self.ledger.stats(),
+                "rate_limited": self.limiter.refused,
             })
             return
         self._reply(404, {"error": "NOT_FOUND"})
@@ -172,6 +222,14 @@ class MintHandler(BaseHTTPRequestHandler):
         if not ok:
             log.warning("mint refused: %s", screen_reason)
             self._reply(400, {"error": screen_reason})
+            return
+
+        if not self.limiter.allow():
+            # A healthy collector mints a handful of times an hour: one per
+            # connection. This many means a retry loop that has lost its
+            # backoff, and the right answer is to stop signing.
+            log.warning("mint refused: RATE_LIMIT_EXCEEDED")
+            self._reply(429, {"error": "RATE_LIMIT_EXCEEDED"})
             return
 
         key_id, secret = _credential()

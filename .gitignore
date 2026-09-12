@@ -38,3 +38,4 @@ backend/fleet*_repros/
 # into itself — and it can be locked and in use while a round is still
 # running. Tooling scratch, never project state.
 .claude/worktrees/
+rn1-collector/build/

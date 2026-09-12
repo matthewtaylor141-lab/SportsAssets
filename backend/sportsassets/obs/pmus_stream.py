@@ -38,7 +38,9 @@ from __future__ import annotations
 from typing import Any
 
 from . import clock
+from .config import OFFSETS
 from .streamstate import (
+    RETENTION_HEADROOM_S,
     Continuity,
     DepthAuthority,
     StateValidity,
@@ -48,6 +50,13 @@ from .streamstate import (
 )
 
 CHANNEL = StreamChannel.PMUS_FAST_STREAM_PATH
+
+# Retention horizon for this channel: the whole pre-registered ladder plus
+# headroom. Derived from OFFSETS rather than written as a number, so an
+# amendment to the ladder cannot leave the buffer too short for its own
+# longest slot.
+RETAIN_HORIZON_S = max(t for _, t in OFFSETS) + RETENTION_HEADROOM_S
+
 
 # The one place PMUS depth authority is decided. Promoting this to
 # FULL_REPLACEMENT_CONFIRMED requires passive observation establishing that every
@@ -135,9 +144,10 @@ class PmusStreamState:
     arbitrarily far while we were not listening.
     """
 
-    def __init__(self, *, feed_session_id: str, retain: int = 256) -> None:
+    def __init__(self, *, feed_session_id: str,
+                 retain_horizon_s: float = RETAIN_HORIZON_S) -> None:
         self.feed_session_id = feed_session_id
-        self.retain = retain
+        self.retain_horizon_s = retain_horizon_s
         self.histories: dict[str, TokenStateHistory] = {}
         self.frames = 0
         self.reconnects = 0
@@ -155,7 +165,7 @@ class PmusStreamState:
         hist = self.histories.get(state.token_id)
         if hist is None:
             hist = TokenStateHistory(channel=CHANNEL, token_id=state.token_id,
-                                     retain=self.retain)
+                                     retain_horizon_s=self.retain_horizon_s)
             self.histories[state.token_id] = hist
         hist.append(state)
         self.frames += 1
