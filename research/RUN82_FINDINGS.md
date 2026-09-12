@@ -162,29 +162,54 @@ exists.
 
 ---
 
-# THE FOUR PROPOSITIONS
+# RUN 82 CONCLUSIONS — LOCKED
 
-**A. Reactive-copy economics are materially worse by first retained
-observation — SUPPORTED.** 81B's figures, robust to selection per 82A.
+Each is judged on its own evidence. None is inferred from another.
 
-**B. The deterioration is primarily caused by BETTOR's internal processing
-latency — NOT IDENTIFIED.** The one measurable internal interval is ~7 ms, far
-too small to be a primary cause of anything. But the segment *before* it —
-venue fill reaching us — is exactly the cross-domain boundary. If B were true,
-the cause would have to lie entirely in the unmeasured segment.
+**A. By first retained observation, economics are materially worse than RN1
+source-fill economics. — SUPPORTED.**
+81B at Q_A: +$45,437.46 at his fill prices against −$42,856.87 at the first
+retained ask on the same events; a change of sign.
 
-**C. Reducing internal latency to 1–2 seconds would recover the edge —
-CONTRADICTED, on the segment that is measurable.** BETTOR already goes from
-ingest to first book read in **7 ms** — over two orders of magnitude faster than
-the proposed target — and **the full deterioration is already present in the book
-read taken at that instant**. A 1–2 second target is not an improvement on this
-segment; it is a regression. Whether the unmeasured venue-to-ingest segment can
-be shortened remains NOT IDENTIFIED.
+**B. Settlement selection manufactures the observed price deterioration. —
+CONTRADICTED**, by the broadly similar deterioration distributions across FULL
+U2 (3.6658%), SETTLEMENT_ANALYZABLE_STRONG (3.5707%) and UNRESOLVED (3.6697%),
+with per-share distributions identical from p10 to p90. *Descriptive:* this does
+not establish that all forms of selection bias are absent — only that this one
+does not manufacture the effect.
 
-**D. The opportunity is already gone before BETTOR could possibly observe his
-fill — NOT IDENTIFIED.** This needs our first observation dated against the
-*venue's* clock, which is the crossing the data does not contain. "Already gone"
-cannot be separated from "gone while we were getting there."
+**C. BETTOR's measured post-detection internal processing is the primary cause. —
+NOT IDENTIFIED as a causal proposition.** Observed detection → probe dispatch is
+approximately **7 ms**.
+
+> **The locked narrow conclusion, and nothing wider:** *BETTOR's measured
+> post-detection probe-dispatch interval is already approximately milliseconds,
+> so that measured segment is not evidence of a multi-second internal-processing
+> bottleneck.*
+>
+> That segment is `detected_at → probe dispatch` **only**. It is **not** an
+> end-to-end latency conclusion and must never be converted into one.
+
+**D. A true source-fill → action system operating within 1–2 seconds would
+recover the economics. — NOT IDENTIFIED.** Source fill → BETTOR detection crosses
+unresolved clock domains, so the economics 1–2 seconds after the *true* source
+fill cannot be inferred from retained data.
+
+**E. The economics are already gone before BETTOR could possibly observe RN1. —
+NOT IDENTIFIED.** Needs our first observation dated against the *venue's* clock.
+
+**F. At first retained observation the deterioration is primarily top-of-book
+rather than depth at Q_A. — SUPPORTED descriptively** on the measured
+population: 76.695% on the analyzable cohort, 77.228% on FULL U2. The depth share
+rises with size (43.46% at Q_B, 57.20% at the Q_C stress), so this is a statement
+about Q_A and not about size in general.
+
+> **Superseded.** An earlier version of this file recorded proposition C as
+> *"reducing internal latency to 1–2 seconds would recover the edge —
+> CONTRADICTED."* That converted a measurement of one internal segment into an
+> end-to-end claim. Corrected above by owner instruction: the ~7 ms figure bears
+> only on `detected_at → probe dispatch`, and the source-fill boundary remains
+> unidentified.
 
 # DECISION TABLE
 
@@ -194,8 +219,8 @@ cannot be separated from "gone while we were getting there."
 | 2 | Robust to settlement selection? | **SUPPORTED — broadly similar**; selected cohort is milder | already identified |
 | 3 | Top-of-book or depth? | **IDENTIFIED**: 76.7% top-of-book at Q_A (77.2% full U2); depth co-dominant only far above copy size | depth beyond what was retained: NOT IDENTIFIED |
 | 4 | Elapsed physical latency, historically? | **NOT IDENTIFIED** | paired timestamps in one domain + recorded clock-sync quality |
-| 5 | Did engineering latency cause it? | **NOT IDENTIFIED** | as (4), plus a market-data snapshot stamped in our own domain |
-| 6 | Would a 1–2 second system solve it? | **CONTRADICTED** on the measurable segment; NOT IDENTIFIED on venue→ingest | a measured venue-to-ingest time |
+| 5 | Is BETTOR's measured post-detection processing the primary cause? | **NOT IDENTIFIED as a causal proposition.** The locked narrow reading: ~7 ms means that *measured segment* is not evidence of a multi-second internal bottleneck — not that internal handling is exonerated end to end | as (4), plus a market-data snapshot stamped in our own domain |
+| 6 | Would a system acting 1–2 s after the **true source fill** recover it? | **NOT IDENTIFIED.** The ~7 ms figure bears only on the post-detection segment and does not transfer to this question | a measured source-fill-to-receipt time — run 83 |
 | 7 | Is reactive copying fundamentally too late? | **NOT IDENTIFIED** | forward A/B: same signal, two arrival paths, one-domain stamps, and *fills* not just book reads |
 | 8 | What new data resolves 4–7? | the instrumentation spec below | — |
 

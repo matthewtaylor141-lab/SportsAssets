@@ -390,48 +390,60 @@ def propositions(d_probe, order):
     allv = [v for lane in order for v in d_probe[lane]]
     med = pct(allv, 0.5) if allv else None
     print("=" * 78)
-    print("THE FOUR PROPOSITIONS, CLASSIFIED INDEPENDENTLY")
+    print("RUN 82 CONCLUSIONS -- LOCKED")
     print("=" * 78)
-    print("Each is judged on its own evidence. B, C and D are NOT inferred from")
-    print("A; that inference is exactly the error this section exists to avoid.")
-    print()
-    print("A. 'By first retained observation, reactive-copy economics are")
-    print("    materially worse than RN1 source-fill economics.'")
-    print("   VERDICT: SUPPORTED")
-    print("   Evidence: 81B measured +$45,437.46 at his prices against")
-    print("   -$42,856.87 at the first retained ask on the same events, and 82A")
-    print("   showed the effect is not a product of settlement selection.")
-    print()
-    print("B. 'The deterioration is primarily caused by BETTOR's internal")
-    print("    processing latency.'")
-    print("   VERDICT: NOT IDENTIFIED")
-    print("   The only internal interval the retained data can measure is")
-    print(f"   ingest -> book read, whose median is {med:.3f} s across all lanes.")
-    print("   That segment is far too small to be a primary cause of anything.")
-    print("   But the segment BEFORE it -- venue fill reaching us -- is exactly")
-    print("   the cross-domain boundary that is not identifiable, so B cannot be")
-    print("   ruled in or out. What can be said: if B were true, the cause would")
-    print("   have to lie entirely in the unmeasured segment.")
-    print()
-    print("C. 'Reducing internal latency to 1-2 seconds would recover the edge.'")
-    print("   VERDICT: CONTRADICTED, on the segment that is measurable")
-    print(f"   BETTOR already goes from ingest to first book read in {med:.3f} s")
-    print("   at the median -- two orders of magnitude FASTER than the 1-2 s the")
-    print("   proposition proposes as a target -- and the full deterioration is")
-    print("   already present in the book read at that instant. A target of 1-2 s")
-    print("   is not an improvement on this segment; it is a regression. What")
-    print("   remains NOT IDENTIFIED is whether the unmeasured venue-to-ingest")
-    print("   segment could be shortened, and what that would be worth.")
-    print()
-    print("D. 'The opportunity is already gone before BETTOR could possibly")
-    print("    observe RN1's fill.'")
-    print("   VERDICT: NOT IDENTIFIED")
-    print("   This requires dating BETTOR's first observation against the VENUE's")
-    print("   clock, which is the crossing that does not exist in retained data.")
-    print("   The deterioration is real at the first observation; when that")
-    print("   instant fell relative to his fill is unmeasured, so 'already gone'")
-    print("   cannot be separated from 'gone while we were getting there'.")
-    print()
+    print("Each proposition is judged on its own evidence. None is inferred")
+    print("from another; that inference is the error this section exists to")
+    print("prevent.\n")
+
+    print("A. By first retained observation, economics are materially worse")
+    print("   than RN1 source-fill economics.")
+    print("   SUPPORTED.")
+    print("   81B, Q_A: +$45,437.46 at his fill prices against -$42,856.87 at")
+    print("   the first retained ask on the same events -- a change of sign.\n")
+
+    print("B. Settlement selection manufactures the observed price")
+    print("   deterioration.")
+    print("   CONTRADICTED by the broadly similar deterioration distributions")
+    print("   across FULL U2, SETTLEMENT_ANALYZABLE_STRONG and UNRESOLVED.")
+    print("   82A: 3.6658% / 3.5707% / 3.6697% of Q_A source cost, with the")
+    print("   per-share distributions identical from p10 to p90.")
+    print("   DESCRIPTIVE. This does not establish that all forms of selection")
+    print("   bias are absent -- only that this one does not manufacture it.\n")
+
+    print("C. BETTOR's measured post-detection internal processing is the")
+    print("   primary cause.")
+    print("   NOT IDENTIFIED as a causal proposition.")
+    print(f"   Observed detection -> probe dispatch is about {med:.3f} s.")
+    print("   THE LOCKED NARROW CONCLUSION, AND NOTHING WIDER:")
+    print("     BETTOR's measured post-detection probe-dispatch interval is")
+    print("     already approximately milliseconds, so that measured segment")
+    print("     is not evidence of a multi-second internal-processing")
+    print("     bottleneck.")
+    print("   That segment is detected_at -> probe dispatch ONLY. It is NOT an")
+    print("   end-to-end latency conclusion and must never be converted into")
+    print("   one.\n")
+
+    print("D. A true source-fill -> action system operating within 1-2 seconds")
+    print("   would recover the economics.")
+    print("   NOT IDENTIFIED.")
+    print("   source fill -> BETTOR detection crosses unresolved clock domains,")
+    print("   so what the economics would have been 1-2 seconds after the TRUE")
+    print("   source fill cannot be inferred from retained data.\n")
+
+    print("E. The economics are already gone before BETTOR could possibly")
+    print("   observe RN1.")
+    print("   NOT IDENTIFIED.")
+    print("   This needs BETTOR's first observation dated against the VENUE's")
+    print("   clock -- the crossing the retained data does not contain.\n")
+
+    print("F. At first retained observation the deterioration is primarily")
+    print("   top-of-book rather than depth at Q_A.")
+    print("   SUPPORTED descriptively on the measured population.")
+    print("   76.695% top-of-book on the analyzable cohort, 77.228% on FULL U2.")
+    print("   The depth share rises with size -- 43.46% at Q_B, 57.20% at the")
+    print("   Q_C stress -- so this is a statement about Q_A, not about size in")
+    print("   general.\n")
 
 
 def decision_table():
@@ -465,21 +477,23 @@ def decision_table():
          "NO -- NOT IDENTIFIED",
          "Paired timestamps in ONE domain, plus recorded clock-sync quality. "
          "See the instrumentation spec."),
-        ("5. Can we say engineering latency caused the deterioration?",
-         "82B: the one measurable internal interval (ingest -> book read) has a "
-         "median of about 7 ms; the segment that could matter is the "
+        ("5. Is BETTOR's measured post-detection processing the primary cause?",
+         "82B: detection -> probe dispatch has a median of about 7 ms. The "
+         "locked narrow reading is that this measured segment is not evidence "
+         "of a multi-second internal bottleneck -- NOT that internal handling "
+         "is exonerated end to end, since the segment before detection is the "
          "unmeasurable one",
-         "NOT IDENTIFIED",
+         "NOT IDENTIFIED as a causal proposition",
          "The same instrumentation as (4), plus a market-data snapshot stamped "
          "in our own domain at a known instant."),
-        ("6. Can we say a 1-2 second system would solve it?",
-         "82B: the measurable internal segment is ALREADY about 7 ms at the "
-         "median, and the full deterioration is present in the book read taken "
-         "at that instant",
-         "CONTRADICTED on the measurable segment; NOT IDENTIFIED on the "
-         "venue-to-ingest segment",
-         "A measured venue-to-ingest time, which needs a venue-side timestamp "
-         "in a domain we can compare against."),
+        ("6. Would a system acting 1-2 s after the TRUE source fill recover it?",
+         "82B: source fill -> BETTOR detection crosses unresolved clock "
+         "domains, so the economics 1-2 s after the true fill are not "
+         "reconstructible. The ~7 ms figure speaks only to the post-detection "
+         "segment and does not transfer to this question",
+         "NOT IDENTIFIED",
+         "A measured source-fill-to-receipt time, which needs a venue-side "
+         "timestamp in a domain we can compare against -- run 83."),
         ("7. Can we say reactive copying is fundamentally too late?",
          "82B: dating our first observation against the venue clock is exactly "
          "the crossing the data does not contain",
