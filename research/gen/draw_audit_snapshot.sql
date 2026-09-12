@@ -69,6 +69,56 @@ WITH rn1 AS MATERIALIZED (
      AND c.whale_id IN (SELECT id FROM rn1)
      AND c.probe_at <= timestamptz '2026-09-12 00:00:00+00'
      AND c.book_ok AND c.error IS NULL AND c.depth IS NOT NULL
+), assets AS MATERIALIZED (
+  SELECT DISTINCT asset FROM sel WHERE asset IS NOT NULL
+), tokmap AS MATERIALIZED (
+  -- THE TOKEN -> CONDITION MAP, read in THIS transaction snapshot. It is
+  -- deliberately NOT restricted to the conditions trades already name: a
+  -- null-condition event's token may belong to a condition that would not
+  -- otherwise be in the universe, and restricting the map would make the
+  -- recovery test unable to find exactly the cases it exists to find.
+  SELECT a.asset,
+         count(DISTINCT mt.condition_id)              AS n_cond,
+         min(mt.condition_id)                         AS one_cond,
+         array_agg(DISTINCT mt.condition_id)          AS conds
+    FROM assets a JOIN market_tokens mt ON mt.token_id = a.asset
+   GROUP BY a.asset
+), lk AS MATERIALIZED (
+  -- THE CONDITION LINKAGE GATE. A null trades.condition_id does NOT by itself
+  -- mean an event is unmatchable -- that was an inference, not a measurement,
+  -- and it is tested here rather than asserted. Every event is classified, and
+  -- A CONFLICT IS NEVER SILENTLY REPAIRED: where the direct condition and the
+  -- token's unique mapping disagree, the ORIGINAL is kept as effective and the
+  -- row is flagged, so no token mapping can overwrite a recorded fact.
+  SELECT s.probe_id, s.condition_id AS cond_orig, s.notional,
+         s.source, s.sport, s.price,
+         COALESCE(tm.n_cond, 0) AS n_cond,
+         CASE
+           WHEN s.condition_id IS NOT NULL AND tm.n_cond = 1
+                AND tm.one_cond <> s.condition_id     THEN 'CONDITION_CONFLICT'
+           WHEN s.condition_id IS NOT NULL            THEN 'CONDITION_DIRECT'
+           WHEN tm.n_cond = 1                THEN 'CONDITION_RECOVERED_UNIQUE_TOKEN'
+           WHEN tm.n_cond > 1                THEN 'CONDITION_TOKEN_AMBIGUOUS'
+           ELSE                                   'CONDITION_TOKEN_UNMAPPED'
+         END                                          AS method,
+         CASE
+           WHEN s.condition_id IS NOT NULL AND tm.n_cond = 1
+                AND tm.one_cond <> s.condition_id     THEN s.condition_id
+           WHEN s.condition_id IS NOT NULL            THEN s.condition_id
+           WHEN tm.n_cond = 1                         THEN tm.one_cond
+           ELSE NULL
+         END                                          AS cond_eff,
+         -- the direct arm doubles as the VALIDATION SET for token recovery
+         CASE
+           WHEN s.condition_id IS NULL                THEN NULL
+           WHEN tm.n_cond IS NULL OR tm.n_cond = 0    THEN 'direct_token_unmapped'
+           WHEN tm.n_cond = 1 AND tm.one_cond = s.condition_id
+                                                      THEN 'direct_token_agrees'
+           WHEN tm.n_cond = 1                         THEN 'direct_token_conflict'
+           WHEN s.condition_id = ANY(tm.conds)   THEN 'direct_token_ambiguous_contains'
+           ELSE                             'direct_token_ambiguous_excludes'
+         END                                          AS direct_check
+    FROM sel s LEFT JOIN tokmap tm ON tm.asset = s.asset
 ), dlv AS (
   -- Depth levels, one row per retained ask level, ordinality preserved as the
   -- stored array order. Only probes whose depth IS an array are expanded; one
@@ -99,9 +149,13 @@ WITH rn1 AS MATERIALIZED (
 ), ev AS (
   SELECT s.probe_id,
          json_build_object(
-           'probe_id',      s.probe_id,
-           'trade_id',      s.trade_id,
-           'condition_id',  s.condition_id,
+           'probe_id',              s.probe_id,
+           'trade_id',              s.trade_id,
+           'condition_id',          s.condition_id,
+           'condition_id_original', lk.cond_orig,
+           'condition_id_effective', lk.cond_eff,
+           'condition_linkage_method', lk.method,
+           'token_condition_count', lk.n_cond,
            'asset',         s.asset,
            'outcome',       s.outcome,
            'outcome_index', s.outcome_index,
@@ -131,11 +185,16 @@ WITH rn1 AS MATERIALIZED (
            'depth_levels',  COALESCE(dep.levels, 0),
            'depth',         COALESCE(dep.levels_json, '[]'::json)
          )::text                                                   AS ev_json
-    FROM sel s LEFT JOIN dep ON dep.probe_id = s.probe_id
+    FROM sel s JOIN lk ON lk.probe_id = s.probe_id
+    LEFT JOIN dep ON dep.probe_id = s.probe_id
 ), univ AS MATERIALIZED (
-  -- DERIVED FROM THE SELECTED EVENT ROWS, in this same statement and therefore
-  -- this same snapshot. It is never re-derived from live copy_probes.
-  SELECT DISTINCT condition_id FROM sel WHERE condition_id IS NOT NULL
+  -- DERIVED FROM THE SELECTED EVENT ROWS' EFFECTIVE CONDITION, in this same
+  -- statement and therefore this same snapshot. Never re-derived from live
+  -- copy_probes, and never from the raw trades.condition_id alone -- an event
+  -- whose condition was recovered from a unique token mapping brings its
+  -- condition into the settlement universe, which is the whole point of the
+  -- linkage gate.
+  SELECT DISTINCT cond_eff AS condition_id FROM lk WHERE cond_eff IS NOT NULL
 ), pxe AS (
   SELECT u.condition_id, e.ordinality AS ix, e.value AS el
     FROM univ u
@@ -215,7 +274,12 @@ WITH rn1 AS MATERIALIZED (
          (SELECT COALESCE(sum(malformed), 0) FROM dep)             AS dep_malformed,
          (SELECT count(*) FROM sel
            WHERE jsonb_typeof(depth) IS DISTINCT FROM 'array')     AS dep_not_array,
-         (SELECT COALESCE(sum(non_number), 0) FROM px)             AS px_non_number
+         (SELECT COALESCE(sum(non_number), 0) FROM px)             AS px_non_number,
+         (SELECT count(*) FROM lk WHERE cond_eff IS NULL)           AS n_unlinked,
+         (SELECT COALESCE(sum(notional), 0) FROM lk
+           WHERE cond_eff IS NULL)                                  AS unlinked_notional,
+         (SELECT count(*) FROM lk
+           WHERE method = 'CONDITION_CONFLICT')                     AS n_conflict
 ), hdr AS (
   SELECT 1 AS ord, '#SNAPSHOT_NAME' || E'\t' || 'AUDIT_SNAPSHOT_V1' AS line FROM meta
   UNION ALL SELECT 2, '#CANONICAL_SPEC_VERSION' || E'\t'
@@ -288,6 +352,17 @@ WITH rn1 AS MATERIALIZED (
                       || 'deduplication, so every qualifying probe is its own '
                       || 'row and the snapshot is keyed on copy_probes.id; the '
                       || 'event count counts (trade, probe) pairs' FROM meta
+  UNION ALL SELECT 26, '#UNLINKED_EVENT_COUNT' || E'\t'
+                      || meta.n_unlinked::text FROM meta
+  UNION ALL SELECT 27, '#UNLINKED_EVENT_NOTIONAL' || E'\t'
+                      || round(meta.unlinked_notional, 2)::text FROM meta
+  UNION ALL SELECT 28, '#CONDITION_CONFLICT_COUNT' || E'\t'
+                      || meta.n_conflict::text FROM meta
+  UNION ALL SELECT 29, '#TOKEN_RECOVERY_NOTE' || E'\t'
+                      || 'a null trades.condition_id is NOT assumed unmatchable; '
+                      || 'linkage is classified per event and a conflict is '
+                      || 'never silently repaired -- the original is kept as '
+                      || 'effective and flagged. See the L rows.' FROM meta
   UNION ALL SELECT 30, '#SETTLEMENT_SNAPSHOT_ROW_COUNT' || E'\t'
                       || cagg.n::text FROM cagg
   UNION ALL SELECT 31, '#GUARD_EVENT_COUNT_MISMATCH' || E'\t'
@@ -313,9 +388,50 @@ WITH rn1 AS MATERIALIZED (
                       || 'newline-joined, no trailing newline, in canonical '
                       || 'order; the manifest lines are NOT covered by either'
              FROM meta
+), lcls AS (
+  SELECT json_build_object(
+           'row', 'linkage_class', 'method', method,
+           'events', count(*),
+           'notional', round(sum(notional), 2)::text)::text AS j
+    FROM lk GROUP BY method
+), lnull AS (
+  -- the null-condition arm, broken out as the order asks: lane, sport, price
+  -- band, and what recovery did or did not reach.
+  SELECT json_build_object(
+           'row', 'null_condition_arm', 'lane', source,
+           'sport', COALESCE(sport, '(null)'),
+           'price_band', CASE WHEN price < 0.10 THEN 'p1 [0.00,0.10)'
+                              WHEN price < 0.25 THEN 'p2 [0.10,0.25)'
+                              WHEN price < 0.50 THEN 'p3 [0.25,0.50)'
+                              WHEN price < 0.75 THEN 'p4 [0.50,0.75)'
+                              WHEN price < 0.90 THEN 'p5 [0.75,0.90)'
+                              ELSE 'p6 [0.90,1.00)' END,
+           'method', method,
+           'events', count(*),
+           'notional', round(sum(notional), 2)::text)::text AS j
+    FROM lk WHERE cond_orig IS NULL
+   GROUP BY source, COALESCE(sport, '(null)'),
+            CASE WHEN price < 0.10 THEN 'p1 [0.00,0.10)'
+                 WHEN price < 0.25 THEN 'p2 [0.10,0.25)'
+                 WHEN price < 0.50 THEN 'p3 [0.25,0.50)'
+                 WHEN price < 0.75 THEN 'p4 [0.50,0.75)'
+                 WHEN price < 0.90 THEN 'p5 [0.75,0.90)'
+                 ELSE 'p6 [0.90,1.00)' END,
+            method
+), ldir AS (
+  -- THE VALIDATION SET. Token recovery is only trustworthy if, where trades
+  -- already knows the condition, the token map agrees with it.
+  SELECT json_build_object(
+           'row', 'direct_arm_validation', 'check', direct_check,
+           'events', count(*),
+           'notional', round(sum(notional), 2)::text)::text AS j
+    FROM lk WHERE direct_check IS NOT NULL GROUP BY direct_check
 )
 SELECT o.line FROM (
   SELECT hdr.ord, 0::bigint AS nkey, ''::text AS tkey, hdr.line FROM hdr
+  UNION ALL SELECT 500, 0::bigint, lcls.j, 'L' || E'\t' || lcls.j FROM lcls
+  UNION ALL SELECT 501, 0::bigint, ldir.j, 'L' || E'\t' || ldir.j FROM ldir
+  UNION ALL SELECT 502, 0::bigint, lnull.j, 'L' || E'\t' || lnull.j FROM lnull
   UNION ALL
   SELECT 1000, ev.probe_id, '', 'E' || E'\t' || ev.ev_json FROM ev
   UNION ALL

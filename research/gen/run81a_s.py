@@ -374,7 +374,98 @@ def main(path):
               f"{len(qa):>9,}{100*len(qa)/s['n']:>10.2f}"
               f"{(sum(qa)/len(qa) if qa else 0):>10.4f}"
               f"{(pct(qa,.50) if qa else 0):>10.4f}")
-    print()
+    # ---- 8. cross-implementation replication check ----------------------
+    # THE POINT OF THIS SECTION. 81A ORIGINAL is SQL against live tables; 81A-S
+    # is Python against sealed bytes. Where the populations agree, the metrics
+    # SHOULD agree, and a discrepancy is an IMPLEMENTATION finding -- not
+    # something to wave away as drift.
+    #
+    # THE DECISION RULE IS STATED BEFORE THE NUMBERS, so it cannot be chosen to
+    # suit them. Population drift of d events out of N can move a sum by at most
+    # about |d|/N in relative terms. So:
+    #   * a relative difference at or below the population's own relative
+    #     difference is CONSISTENT WITH DRIFT;
+    #   * a relative difference materially above it is NOT explicable by drift
+    #     and is flagged INVESTIGATE.
+    # Two metrics are near-immune to drift of this size and so are the sharpest
+    # evidence: the CLOSURE assertion, which must hold on any population at all,
+    # and the MEDIANS, which 42 rows in 214,651 cannot move off a whole cent.
+    ref_path = __file__.rsplit("/", 1)[0] + "/run81a_original.json"
+    try:
+        with open(ref_path) as fh:
+            ref = json.load(fh)
+    except OSError:
+        print("== 8. REPLICATION CHECK -- reference file absent, NOT TESTED ==")
+        ref = None
+
+    if ref:
+        drift = abs(n_events - ref["controls"]["events"]) / ref["controls"]["events"]
+        print("== 8. ORIGINAL vs SNAPSHOT_REPLICATION -- cross-implementation check ==")
+        print(f"population relative drift = {drift:.3e} "
+              f"({n_events - ref['controls']['events']:+,} of "
+              f"{ref['controls']['events']:,} events)")
+        print("a relative difference at or below that is consistent with drift; "
+              "materially above it is an implementation finding")
+        print(f"\n{'metric':46}{'ORIGINAL':>16}{'REPLICATION':>16}"
+              f"{'ABS DIFF':>15}{'REL DIFF':>12}  verdict")
+
+        def cmp_row(label, o, r):
+            if o is None or r is None:
+                print(f"{label:46}{'n/a':>16}{'n/a':>16}{'':>15}{'':>12}  NOT TESTED")
+                return
+            ad = r - o
+            rd = abs(ad) / abs(o) if o else (0.0 if ad == 0 else float("inf"))
+            # 10x the population drift, with a floor for pure rounding noise
+            tol = max(10 * drift, 1e-6)
+            verdict = "ok" if rd <= tol else "INVESTIGATE"
+            print(f"{label:46}{o:>16,.4f}{r:>16,.4f}{ad:>+15,.4f}{rd:>12.3e}  {verdict}")
+
+        for lane, o in ref["top_of_book"].items():
+            v = tob.get(lane)
+            if not v:
+                continue
+            n = len(v)
+            cmp_row(f"ToB {lane} events", float(o["events"]), float(n))
+            cmp_row(f"ToB {lane} conditions", float(o["conditions"]),
+                    float(len(tmeta[lane]["cond"])))
+            cmp_row(f"ToB {lane} source notional", o["notional"],
+                    tmeta[lane]["notional"])
+            cmp_row(f"ToB {lane} mean cps", o["mean"], sum(v) / n)
+            cmp_row(f"ToB {lane} median cps", o["p50"], pct(v, .50))
+            cmp_row(f"ToB {lane} p25 cps", o["p25"], pct(v, .25))
+            cmp_row(f"ToB {lane} p75 cps", o["p75"], pct(v, .75))
+            cmp_row(f"ToB {lane} p90 cps", o["p90"], pct(v, .90))
+            cmp_row(f"ToB {lane} % positive", o["pos"],
+                    100 * sum(1 for x in v if x > 0) / n)
+            cmp_row(f"ToB {lane} % zero", o["zero"],
+                    100 * sum(1 for x in v if x == 0) / n)
+            cmp_row(f"ToB {lane} % negative", o["neg"],
+                    100 * sum(1 for x in v if x < 0) / n)
+
+        for sc, lanes in ref["support"].items():
+            for lane, o in lanes.items():
+                k = (sc, lane)
+                req = sup[k]["req"]
+                if not req:
+                    continue
+                cmp_row(f"{sc} {lane} supported", float(o["sup"]),
+                        float(req - exhausted[k]["n"]))
+                cmp_row(f"{sc} {lane} exhausted", float(o["exh"]),
+                        float(exhausted[k]["n"]))
+
+        for sc, lanes in ref["drag"].items():
+            for lane, o in lanes.items():
+                s = sup[(sc, lane)]
+                v = s["tot"]
+                if not v:
+                    continue
+                cmp_row(f"{sc} {lane} mean drag cps", o["mean"], sum(v) / len(v))
+                cmp_row(f"{sc} {lane} median drag cps", o["p50"], pct(v, .50))
+                cmp_row(f"{sc} {lane} ToB dollars", o["tob_usd"], s["tob_usd"])
+                cmp_row(f"{sc} {lane} depth dollars", o["dep_usd"], s["dep_usd"])
+                cmp_row(f"{sc} {lane} total drag dollars", o["tot_usd"], s["tot_usd"])
+        print()
+
     print("== RUN 81A-S ENDS. Sealed inputs only. No database. mirror_live=false. ==")
 
 

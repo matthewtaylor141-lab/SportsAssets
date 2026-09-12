@@ -1,0 +1,26 @@
+{
+  "_note": "RUN 81A ORIGINAL, transcribed from job 103479683577 (commit d4a69f4, sha256 d14799d1b80b4323052ad5ef01dbff00d57a70500dd8dc14b302d28a29afe5ed). Historical measurement of a population that is NOT RECONSTRUCTIBLE. Used ONLY as a comparison reference; never as a target.",
+  "controls": {"events": 214651, "conditions": 17755, "notional": 48327388.19},
+  "top_of_book": {
+    "A_CHAIN":           {"events":195648,"conditions":15397,"notional":42097682.56,"mean":2.2890,"p50":1.0000,"p10":0.1705,"p25":1.0000,"p75":2.0000,"p90":4.0000,"pos":91.227,"zero":4.897,"neg":3.877},
+    "A_POLL":            {"events":17407,"conditions":4051,"notional":4418024.37,"mean":2.7800,"p50":2.0000,"p10":-3.0000,"p25":0.0000,"p75":4.6000,"p90":9.0000,"pos":70.828,"zero":8.089,"neg":21.083},
+    "A_S1":              {"events":1596,"conditions":754,"notional":1811681.26,"mean":1.6755,"p50":1.0000,"p10":0.0000,"p25":1.0000,"p75":2.0000,"p90":3.0000,"pos":85.526,"zero":11.779,"neg":2.694},
+    "A_ONLINE_COMBINED": {"events":214651,"conditions":17755,"notional":48327388.19,"mean":2.3243,"p50":1.0000,"p10":0.0000,"p25":1.0000,"p75":2.0000,"p90":4.0000,"pos":89.530,"zero":5.207,"neg":5.263}
+  },
+  "support": {
+    "Q_A": {"A_CHAIN":{"sup":195314,"exh":334},"A_POLL":{"sup":17365,"exh":42},"A_S1":{"sup":1593,"exh":3}},
+    "Q_B": {"A_CHAIN":{"sup":193098,"exh":2550},"A_POLL":{"sup":17098,"exh":309},"A_S1":{"sup":1567,"exh":29}},
+    "Q_C": {"A_CHAIN":{"sup":160190,"exh":35458},"A_POLL":{"sup":14223,"exh":3184},"A_S1":{"sup":1416,"exh":180}}
+  },
+  "drag": {
+    "Q_A": {"A_CHAIN":{"events":195314,"mean":2.4158,"p50":1.0000,"tob_usd":148122.13,"dep_usd":45588.71,"tot_usd":193710.84},
+            "A_POLL":{"events":17365,"mean":2.8993,"p50":2.0000,"tob_usd":18160.98,"dep_usd":3859.25,"tot_usd":22020.23},
+            "A_S1":{"events":1593,"mean":1.8878,"p50":1.0000,"tob_usd":4304.07,"dep_usd":851.64,"tot_usd":5155.71}},
+    "Q_B": {"A_CHAIN":{"events":193098,"mean":2.7042,"p50":1.0000,"tob_usd":1216413.78,"dep_usd":908369.50,"tot_usd":2124783.28},
+            "A_POLL":{"events":17098,"mean":3.2105,"p50":2.0000,"tob_usd":141277.24,"dep_usd":98236.01,"tot_usd":239513.25},
+            "A_S1":{"events":1567,"mean":2.2741,"p50":1.5246,"tob_usd":41351.31,"dep_usd":20083.15,"tot_usd":61434.46}},
+    "Q_C": {"A_CHAIN":{"events":160190,"mean":3.2372,"p50":1.4821,"tob_usd":7909389.57,"dep_usd":12168927.84,"tot_usd":20078317.41},
+            "A_POLL":{"events":14223,"mean":3.8624,"p50":2.0966,"tob_usd":800600.62,"dep_usd":1098790.37,"tot_usd":1899390.99},
+            "A_S1":{"events":1416,"mean":2.5859,"p50":1.6623,"tob_usd":58976.43,"dep_usd":45915.70,"tot_usd":104892.13}}
+  }
+}

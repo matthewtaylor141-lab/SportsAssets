@@ -124,9 +124,12 @@ jobs:
           grep '^#'      /tmp/raw.txt                  > /tmp/hdr.txt
           grep '^E	' /tmp/raw.txt | cut -f2- > "$OUT/u2_events_v1.jsonl"
           grep '^C	' /tmp/raw.txt | cut -f2- > "$OUT/settlement_v1.jsonl"
+          grep '^L	' /tmp/raw.txt | cut -f2- > "$OUT/linkage_v1.jsonl"
 
           echo "== MANIFEST HEADER =="
           cat /tmp/hdr.txt
+          echo "== CONDITION LINKAGE =="
+          cat "$OUT/linkage_v1.jsonl"
 
           hv() { grep "^#$1	" /tmp/hdr.txt | cut -f2-; }
 
@@ -135,6 +138,7 @@ jobs:
           # canonical form is not what the spec says it is, and pinning it would
           # pin the defect.
           fail=0
+          GZDET=unchecked
           for g in GUARD_EVENT_COUNT_MISMATCH GUARD_COND_COUNT_MISMATCH \
                    GUARD_DEPTH_NOT_ARRAY GUARD_DEPTH_MALFORMED \
                    GUARD_DEPTH_NON_NUMBER GUARD_PAYOUT_NON_NUMBER \
@@ -177,6 +181,25 @@ jobs:
           # non-deterministic parts of the container.
           gzip -9 -n -c "$OUT/u2_events_v1.jsonl"  > "$OUT/u2_events_v1.jsonl.gz"
           gzip -9 -n -c "$OUT/settlement_v1.jsonl" > "$OUT/settlement_v1.jsonl.gz"
+          # GZIP DETERMINISM IS PROVEN, NOT ASSERTED. -n drops the filename and
+          # mtime, which are the non-deterministic parts of the container. That
+          # is the reason to expect determinism; compressing a second time and
+          # comparing is the evidence for it. Still only a TRANSPORT property:
+          # the authoritative identity stays the uncompressed canonical hash,
+          # because gzip output can differ across implementations and versions
+          # and this check can only speak for the one on this runner.
+          gzip -9 -n -c "$OUT/u2_events_v1.jsonl"  > /tmp/again_e.gz
+          gzip -9 -n -c "$OUT/settlement_v1.jsonl" > /tmp/again_c.gz
+          if cmp -s "$OUT/u2_events_v1.jsonl.gz" /tmp/again_e.gz \
+             && cmp -s "$OUT/settlement_v1.jsonl.gz" /tmp/again_c.gz; then
+            GZDET=byte_identical_on_repeat
+          else
+            GZDET=NOT_DETERMINISTIC
+            echo "::error::gzip output is not reproducible on this runner"
+            fail=1
+          fi
+          echo "gzip determinism: $GZDET"
+          rm -f /tmp/again_e.gz /tmp/again_c.gz
           EZ=$(wc -c < "$OUT/u2_events_v1.jsonl.gz")
           CZ=$(wc -c < "$OUT/settlement_v1.jsonl.gz")
           echo "== SIZE =="
@@ -200,7 +223,12 @@ jobs:
             echo "#SETTLEMENT_COMMITTED_FILE_SHA256	$CFILE"
             echo "#U2_EVENT_GZ_TRANSPORT_SHA256	$EGZ"
             echo "#SETTLEMENT_GZ_TRANSPORT_SHA256	$CGZ"
-            echo "#GZ_HASH_SCOPE	a .gz sha256 is a TRANSPORT checksum only; gzip output can differ between implementations and versions, so the authoritative identity is always the uncompressed canonical hash"
+            echo "#U2_EVENT_UNCOMPRESSED_CANONICAL_SHA256	$EDB"
+            echo "#SETTLEMENT_UNCOMPRESSED_CANONICAL_SHA256	$CDB"
+            echo "#U2_EVENT_COMPRESSED_TRANSPORT_SHA256	$EGZ"
+            echo "#SETTLEMENT_COMPRESSED_TRANSPORT_SHA256	$CGZ"
+            echo "#GZIP_DETERMINISM	$GZDET"
+            echo "#HASH_SCOPES	UNCOMPRESSED_CANONICAL_SHA256 is the AUTHORITATIVE IDENTITY and covers the payload lines newline-joined with no trailing newline; COMPRESSED_TRANSPORT_SHA256 covers the .gz container and is a transport checksum only, never an identity, because gzip output can differ between implementations and versions"
             echo "#CANONICAL_SPEC_SHA256	$SPEC"
             echo "#EVENTS_UNCOMPRESSED_BYTES	$EU"
             echo "#EVENTS_GZIP9_BYTES	$EZ"
