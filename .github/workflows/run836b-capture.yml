@@ -22,6 +22,14 @@ name: run836b-capture
 on:
   workflow_dispatch:
     inputs:
+      mode:
+        description: "diagnose (list candidate markets and stop) | capture (the real run)"
+        required: true
+        type: choice
+        options:
+          - diagnose
+          - capture
+        default: diagnose
       note:
         description: "optional free-text label recorded in the run metadata"
         required: false
@@ -76,6 +84,15 @@ jobs:
           # The SAME rule the approved browser launcher uses -- one file, run
           # directly here and embedded verbatim there. Selection completes and
           # the ids are frozen BEFORE any scientific websocket observation.
+          if [ "${{ inputs.mode }}" = "diagnose" ]; then
+            # Look before capturing. Prints the candidate markets, the signal
+            # that classified each as sport, and how they group -- then stops
+            # without freezing ids or recording anything.
+            python research/run836b_select_tokens.py --diagnose 2>&1 \
+              | tee run836b_selection.txt
+            echo "token_ids=" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
           python research/run836b_select_tokens.py --out tokens.json \
             2>&1 | tee run836b_selection.txt
           python - <<'PY' >> "$GITHUB_OUTPUT"
@@ -86,6 +103,7 @@ jobs:
           PY
 
       - name: Public reachability preflight (discarded; never evidence)
+        if: inputs.mode == 'capture'
         run: |
           set -euo pipefail
           # Runs in its own directory and its own process. Nothing it observes
@@ -130,6 +148,7 @@ jobs:
           PY
 
       - name: Run the frozen capture as a child process
+        if: inputs.mode == 'capture'
         run: |
           set -euo pipefail
           ARGS=""
