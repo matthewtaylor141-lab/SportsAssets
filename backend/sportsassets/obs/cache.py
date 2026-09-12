@@ -5,17 +5,27 @@ BETTOR ALREADY HOLDS at each scheduled instant. This module holds that state and
 keeps it fresh. The scheduled sample is a dictionary lookup: no request, no
 await on a socket, no pacing.
 
-IT IS NOT A STREAM, AND IT IS NOT NAMED ONE. Owner decision 2 called the channel
-FAST_STREAM_PATH. Established from py-clob-client 0.34.6 (fetched and read
-2026-09-12): THE VENDOR SDK HAS NO WEBSOCKET CLIENT -- zero files matching
-websocket/wss/ws_. There is no pushed market-data feed to subscribe to. What
-exists is `POST /books`, which takes a LIST of token ids and returns a full
-ladder for each. So the cache is fed by batched polling, and the channel is
-LOCAL_CACHE_BATCH_POLL_PATH.
+IT IS NOT A STREAM, AND IT IS NOT NAMED ONE. This module polls `POST /books`,
+which takes a LIST of token ids and returns a full ladder for each, so the
+channel is LOCAL_CACHE_BATCH_POLL_PATH. Calling a polled cache a stream would be
+the same error as calling the legacy read FASTEST_AVAILABLE_BOOK_PATH, which
+this project explicitly refused.
 
-Calling a polled cache FAST_STREAM_PATH would be the same error as calling the
-legacy read FASTEST_AVAILABLE_BOOK_PATH, which this project explicitly refused.
-FAST_STREAM_PATH stays declared and unimplemented, reserved for a real feed.
+CORRECTED 2026-09-12 (run 83.2A/83.2C). The paragraph that stood here justified
+the name with a further claim: that py-clob-client 0.34.6 has no websocket
+client and therefore "there is no pushed market-data feed to subscribe to". THE
+SECOND HALF DID NOT FOLLOW FROM THE FIRST. By provenance:
+
+  * py-clob-client 0.34.6 has no websocket implementation -- true of that
+    package, and the reason this cache is polled rather than pushed.
+  * polymarket-us 0.1.2, also pinned in backend/pyproject.toml, ships an
+    AUTHENTICATED PMUS market websocket (websocket/markets.py).
+  * an unauthenticated CLOB market websocket exists separately.
+
+So pushed feeds do exist; this module simply is not one of them, and that is the
+only claim its name ever needed. The two real feeds are implemented in
+obs/pmus_stream.py and obs/clob_stream.py under their own channel names, and
+this cache remains DIAGNOSTIC ONLY -- never an economic input.
 
 WHAT THE VENUE GIVES US, AND WHAT IT DOES NOT. OrderBookSummary carries
 `timestamp` and `hash`; there is NO sequence number. The hash proves a book

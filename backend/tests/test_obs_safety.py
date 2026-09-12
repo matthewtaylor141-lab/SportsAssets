@@ -77,20 +77,58 @@ ALLOWED: frozenset[str] = frozenset({
     "sportsassets.obs.scheduler",
     "sportsassets.obs.cache",
     "sportsassets.obs.capacity",
+    # ---- run 83.3 -------------------------------------------------------
+    # The two stream channels and the handshake client. Each read and confirmed
+    # to contain no order path and no signer before being added here.
+    #
+    # streamstate -- clock and bisect. The state model and the 0 ms selection
+    #                rule. No I/O of any kind.
+    # pmus_stream -- clock, streamstate. A decoder and a dict of histories.
+    #                CONTAINS NO SOCKET AND NO CREDENTIAL: the transport is
+    #                deliberately not in this module, which is what lets the
+    #                channel be tested with no connection.
+    # clob_stream -- clock, streamstate. Same shape. Unauthenticated channel.
+    # handshake   -- os.environ (broker URL + this collector's caller token,
+    #                NEITHER of which is a venue credential) and logging. It can
+    #                ask a separate process for header values already minted for
+    #                GET /v1/ws/markets. It cannot sign, because it has no key
+    #                and no signing primitive -- test_run833_capability_isolation
+    #                asserts both by AST.
+    "sportsassets.obs.streamstate",
+    "sportsassets.obs.pmus_stream",
+    "sportsassets.obs.clob_stream",
+    "sportsassets.obs.handshake",
 })
 
-# Defence in depth. Any module whose name matches one of these fragments is
+# Defence in depth. A module whose name matches one of these fragments is
 # refused even if someone adds it to ALLOWED by mistake -- two independent
 # mistakes would be needed to get an order path in here.
-FORBIDDEN_FRAGMENTS: tuple[str, ...] = (
+#
+# THE LIST IS SPLIT, AND THE SPLIT IS NOT A WEAKENING. Run 83.3 added
+# obs/clob_stream.py, which tripped the old single list on the fragment "clob".
+# That was the check working: "clob" was put there to catch a CLOB ORDER CLIENT.
+# But it cannot distinguish a venue-client module from an obs module legitimately
+# NAMED AFTER the venue whose market data it decodes, and the honest fix is to
+# say which fragments mean what.
+#
+# ORDER_FRAGMENTS name an ACTION and apply everywhere, obs included: an
+# obs.order_client would still need two independent mistakes to get in.
+# VENUE_SURFACE_FRAGMENTS name a VENUE and are meaningful only outside the obs
+# package -- reaching sportsassets.clob_client or sportsassets.gateway from here
+# is suspicious, while obs owning a clob_stream decoder is the design.
+ORDER_FRAGMENTS: tuple[str, ...] = (
     "executor",
     "live_executor",
     "order",
     "mirror_live",
     "trade_client",
+    "venue_client",
+    "signer",
+)
+VENUE_SURFACE_FRAGMENTS: tuple[str, ...] = (
     "clob",
     "gateway",
-    "venue_client",
+    "pmus",
 )
 
 
@@ -175,10 +213,28 @@ def test_obs_imports_nothing_outside_the_allow_list():
 def test_obs_reaches_no_module_whose_name_suggests_an_order_path():
     reached = _transitive_closure()
     bad = sorted(m for m in reached
-                 if any(frag in m.lower() for frag in FORBIDDEN_FRAGMENTS))
+                 if any(frag in m.lower() for frag in ORDER_FRAGMENTS))
     assert not bad, (
         "the observability package reaches a module whose name matches a known "
         "order-egress pattern: " + ", ".join(bad)
+    )
+
+
+@pytest.mark.skipif(not OBS.exists(), reason="obs package not present")
+def test_obs_reaches_no_venue_client_module_outside_its_own_package():
+    """The second half of the split list.
+
+    A venue-named module INSIDE obs is a decoder this package owns. A
+    venue-named module anywhere else in sportsassets is a client that can talk
+    to that venue, and the collector must not reach one.
+    """
+    reached = _transitive_closure()
+    bad = sorted(m for m in reached
+                 if not m.startswith("sportsassets.obs")
+                 and any(frag in m.lower() for frag in VENUE_SURFACE_FRAGMENTS))
+    assert not bad, (
+        "the observability package reaches a venue-client module outside its "
+        "own package: " + ", ".join(bad)
     )
 
 

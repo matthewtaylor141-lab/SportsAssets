@@ -585,7 +585,7 @@ def test_c16_the_census_place_the_emit_site_no_rail_no_decision_word_no_migratio
     assert "turn_woke" not in inspect.getsource(rules.order_decision) and "woke" not in inspect.getsource(rules)
     mig = ROOT / "backend" / "migrations"
     assert "turn_woke" not in (mig / "059_mirror_orders_send_record.sql").read_text()
-    assert sorted(p.name for p in mig.glob("*.sql"))[-1] == "062_rn1_observability.sql"  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
+    assert sorted(p.name for p in mig.glob("*.sql"))[-1] == "064_run833_stream_channels.sql"  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
     # the render-ops presets are untouched by this lane: lane 0b's closed-while-he-traded already prints the turn
     yml = (ROOT / ".github" / "workflows" / "render-ops.yml").read_text()
     assert "turn_woke" not in yml and "b.last_plan->'turn'" in yml

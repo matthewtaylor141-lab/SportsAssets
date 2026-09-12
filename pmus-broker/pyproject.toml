@@ -1,0 +1,32 @@
+[project]
+name = "pmus-broker"
+version = "0.1.0"
+description = "Fixed-function PMUS market-websocket handshake broker"
+requires-python = ">=3.11"
+
+# THE DEPENDENCY LIST IS THE CONTAINMENT STORY, so it is one line long.
+#
+# Deliberately ABSENT, and asserted absent by
+# test_run833_capability_isolation.py::test_broker_manifest_excludes_the_order_client:
+#
+#   polymarket-us  -- ships resources/orders.py, the order client. The broker
+#                     reimplements four lines of Ed25519 instead of importing a
+#                     distribution that contains order placement.
+#   httpx / requests / aiohttp -- no outbound HTTP capability. Signing needs no
+#                     network access, so the process that holds the secret has
+#                     no way to reach the venue at all.
+#   asyncpg / psycopg -- no database access.
+#   websockets     -- the broker never connects to anything.
+dependencies = [
+    "pynacl>=1.5.0",
+]
+
+[project.scripts]
+pmus-broker = "pmusbroker.server:serve"
+
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools]
+packages = ["pmusbroker"]

@@ -505,19 +505,44 @@ def test_no_row_claims_to_be_a_stream(subject_on):
             "out and continuity stays unverified by standing rule.")
 
 
-def test_the_fast_stream_path_is_named_but_not_implemented():
-    """The channel constant exists; no module claims it, and none opens a socket.
+def test_the_polled_cache_never_labels_itself_a_stream():
+    """REWRITTEN IN RUN 83.3, because its old premise was retracted.
 
-    Checked over the AST, not the text: cache.py's docstring EXPLAINS that the
-    SDK has no websocket client, and a substring scan of prose cannot tell an
-    explanation from an implementation. (The first version of this test failed
-    on exactly that.)
+    What this used to assert was "FAST_STREAM_PATH is named but not
+    implemented", and it justified that with the claim that no pushed feed
+    exists. THAT CLAIM WAS FALSE -- polymarket-us 0.1.2 ships an authenticated
+    PMUS market websocket and the CLOB market websocket exists separately -- so
+    the old test was pinning a wrong conclusion in place. Two real channels are
+    now implemented in obs/pmus_stream.py and obs/clob_stream.py.
+
+    What survives is the part that was always true and is still worth pinning:
+    THIS cache is a polled cache and must never label its rows as a stream. The
+    distinction the original test was reaching for was never about whether feeds
+    exist; it was about not letting a polled reading be recorded as a pushed one.
     """
     cache_py = BACKEND / "sportsassets" / "obs" / "cache.py"
     literals = _module_literals(cache_py)
-    assert "FAST_STREAM_PATH" not in literals, (
-        "cache.py labels its rows FAST_STREAM_PATH. It is a polled cache.")
-    # No websocket client anywhere in the package, and no ws endpoint literal.
+    for stream_label in ("FAST_STREAM_PATH", "PMUS_FAST_STREAM_PATH",
+                         "CLOB_FAST_STREAM_PATH"):
+        assert stream_label not in literals, (
+            f"cache.py labels its rows {stream_label}. It is a polled cache, "
+            "and a polled reading recorded as a pushed one would overstate the "
+            "instrument's short-horizon resolution.")
+
+
+def test_no_obs_module_opens_a_socket_and_the_transport_stays_out_of_the_decoders():
+    """The capability property that replaced the old absence-of-feed claim.
+
+    The decoders are pure functions of (frame, local receive instant) and the
+    handshake module holds no key. Neither imports a websocket client, which is
+    what keeps the whole channel exercisable with no connection -- the only kind
+    of testing Run 83.3 is permitted.
+
+    handshake.py is allowed ONE wss:// literal: INTENDED_WS_URL, which is
+    documentation of the destination a network policy must enforce. It is
+    asserted to be exactly that, so the exemption cannot widen into an endpoint
+    the code actually dials.
+    """
     obs = BACKEND / "sportsassets" / "obs"
     for path in sorted(obs.glob("*.py")):
         tree = ast.parse(path.read_text())
@@ -528,11 +553,14 @@ def test_the_fast_stream_path_is_named_but_not_implemented():
             elif isinstance(node, ast.ImportFrom) and node.module:
                 imported.add(node.module.split(".")[0])
         assert "websockets" not in imported and "websocket" not in imported, (
-            f"{path.name} imports a websocket client. FAST_STREAM_PATH stays "
-            f"unimplemented until a real pushed feed is established.")
-        assert not [s for s in _module_literals(path)
-                    if s.startswith("wss://")], (
-            f"{path.name} carries a wss:// endpoint literal")
+            f"{path.name} imports a websocket client. The transport is kept out "
+            f"of the obs package so the channel can be tested without one.")
+
+        wss = [s for s in _module_literals(path) if s.startswith("wss://")]
+        if path.name == "handshake.py":
+            assert wss == ["wss://api.polymarket.us/v1/ws/markets"], wss
+        else:
+            assert not wss, f"{path.name} carries a wss:// endpoint literal"
 
 
 def test_the_cache_sample_performs_no_io():

@@ -833,7 +833,7 @@ def test_e24_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     assert rsrc.count("min_wait_env(") == 8 and rsrc.count("capped_env(") == 26
     assert "MIRROR_HAND" not in rsrc.replace("MIRROR_HAND_EXIT", "") and rsrc.count("env_switch(\"MIRROR_HAND_EXIT\"") == 1
     assert '"MIRROR_LOST_FILL_REREAD_S"' not in inspect.getsource(ml)
-    assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("062_")  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
+    assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("064_")  # re-pinned 2026-09-12 (run 83.3): run 83.3's 064 is the newest; this lane still adds none
     assert "hand" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "hand" not in ml._SKIP_CARRIED
     assert mi.VENUE_LEDGER_TOL_SHARES == 1.0

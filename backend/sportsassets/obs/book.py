@@ -52,14 +52,25 @@ class ObservationChannel:
     # started after receipt is INSIDE its own round trip (measured p50 170 ms).
     LOCAL_CACHE_BATCH_POLL_PATH = "LOCAL_CACHE_BATCH_POLL_PATH"
 
-    # STILL DECLARED, STILL NOT IMPLEMENTED, AND DELIBERATELY NOT REUSED FOR THE
-    # CACHE. Established 2026-09-12 from py-clob-client 0.34.6: the vendor SDK
-    # contains NO websocket client -- zero files matching websocket/wss/ws_ --
-    # so there is no pushed feed to subscribe to. The V2 primary channel is a
-    # POLLED cache, and naming a polled cache FAST_STREAM_PATH would be the same
-    # error as naming the legacy read FASTEST_AVAILABLE_BOOK_PATH, which this
-    # module refuses two lines below. This constant waits for a real feed.
-    FAST_STREAM_PATH = "FAST_STREAM_PATH"          # declared, not implemented
+    # CORRECTED 2026-09-12 (run 83.2A/83.2C). The comment that stood here said
+    # the vendor SDK contains no websocket client and concluded "there is no
+    # pushed feed to subscribe to". THE CONCLUSION WAS INVALID and the premise
+    # was too narrow. Stated by provenance:
+    #
+    #   * py-clob-client 0.34.6 -- the SDK that was inspected -- has no
+    #     websocket implementation. That part was accurate about that package.
+    #   * polymarket-us 0.1.2, ALSO PINNED IN backend/pyproject.toml, ships an
+    #     authenticated PMUS market websocket (websocket/markets.py,
+    #     wss://api.polymarket.us/v1/ws/markets).
+    #   * the CLOB market websocket exists separately and unauthenticated at
+    #     wss://ws-subscriptions-clob.polymarket.com/ws/market.
+    #
+    # Absence from one inspected package never established absence from the
+    # venue. The generic FAST_STREAM_PATH name is retired in favour of the two
+    # CHANNEL-SPECIFIC names in obs/streamstate.py, because the two feeds have
+    # different identifier spaces, different continuity evidence and different
+    # depth authority, and one shared label would have pooled them.
+    FAST_STREAM_PATH = "FAST_STREAM_PATH"          # retired; see streamstate.py
 
 
 class Transport:
