@@ -256,11 +256,42 @@ if not rows:
         "STEP 4 FAILED: the public market list returned nothing. Nothing is "
         "substituted. Report this and stop.")
 
+# ---- THE ACCEPTING-ORDERS GATE ------------------------------------------
+# "acceptingOrders" and "enableOrderBook" are REAL field names on the current
+# discovery surface -- they are declared on the current SDK's own gamma Market
+# model (models/gamma/market.py:71-78, validation_alias "acceptingOrders" /
+# "enableOrderBook"). Neither name is invented here.
+#
+# Both are declared OPTIONAL (bool | None), so a given response may or may not
+# carry them. That is decided per run, from the response in hand, rather than
+# assumed either way:
+#
+#   carried by at least one row -> ENFORCED, and a market must be
+#                                  acceptingOrders == True to qualify
+#   carried by no row at all    -> NOT_IDENTIFIED, the gate is not applied,
+#                                  and the public CLOB preflight + capture are
+#                                  left to fail closed on their own
+ACCEPTING_FIELD = "acceptingOrders"
+_carrying = sum(1 for m in rows if ACCEPTING_FIELD in m)
+DISCOVERY_ACCEPTING_ORDERS_GATE = "ENFORCED" if _carrying else "NOT_IDENTIFIED"
+print("\\nDISCOVERY_ACCEPTING_ORDERS_GATE = " + DISCOVERY_ACCEPTING_ORDERS_GATE
+      + "  (" + str(_carrying) + " of " + str(len(rows))
+      + " rows carry '" + ACCEPTING_FIELD + "')")
+if DISCOVERY_ACCEPTING_ORDERS_GATE == "NOT_IDENTIFIED":
+    print("  the discovery surface did not report accepting-orders status, so")
+    print("  it is not used as a filter. Nothing is assumed in its place: the")
+    print("  public feed and price-book checks still have to succeed.")
+
+dropped_not_accepting = 0
 eligible = []
 for m in rows:
     if m.get("closed") or m.get("active") is False:
         continue
-    if m.get("acceptingOrders") is False or m.get("enableOrderBook") is False:
+    if DISCOVERY_ACCEPTING_ORDERS_GATE == "ENFORCED":
+        if m.get(ACCEPTING_FIELD) is not True:
+            dropped_not_accepting += 1
+            continue
+    if m.get("enableOrderBook") is False:
         continue
     toks = _tokens(m)
     if not toks or not _is_sport(m):
@@ -304,9 +335,13 @@ SELECTION_RECORD = {
     "chosen_at_utc": datetime.now(tz=timezone.utc).isoformat(),
     "discovery_source": source,
     "rule": "open sports markets, ranked by 24h volume, top one per event",
+    "accepting_orders_gate": DISCOVERY_ACCEPTING_ORDERS_GATE,
+    "dropped_not_accepting_orders": dropped_not_accepting,
     "eligible_count": len(eligible),
     "selected": chosen,
 }
+print("\\nDISCOVERY_ACCEPTING_ORDERS_GATE = " + DISCOVERY_ACCEPTING_ORDERS_GATE
+      + " | dropped for not accepting orders: " + str(dropped_not_accepting))
 print("\\nSTEP 4 OK -- these token ids are now fixed and will not change.")
 '''.replace("__TARGET_TOKENS__", str(TARGET_TOKENS))
 

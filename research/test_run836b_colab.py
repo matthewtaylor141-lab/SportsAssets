@@ -223,6 +223,86 @@ def test_9_too_few_eligible_markets_is_a_refusal_not_a_smaller_capture(tmp_path)
     assert "not weakened" in out
 
 
+def test_9b_the_accepting_orders_gate_is_enforced_when_the_surface_reports_it(tmp_path):
+    """acceptingOrders is a REAL current field, so when present it must bind.
+
+    Field name confirmed on the current SDK's own gamma Market model
+    (models/gamma/market.py:71-73, validation_alias "acceptingOrders"). It is
+    declared bool | None, so its presence is decided per response rather than
+    assumed -- when rows carry it, a market that is not accepting orders is
+    dropped rather than merely un-penalised.
+    """
+    rows = [
+        _market(1, vol=9999, event="E1", accepting=False),   # busiest, but halted
+        _market(2, vol=500, event="E2"),
+        _market(3, vol=400, event="E3"),
+        _market(4, vol=300, event="E4"),
+    ]
+    r = _run_selection(rows, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "DISCOVERY_ACCEPTING_ORDERS_GATE = ENFORCED" in r.stdout
+    tokens = json.loads(r.stdout.split("TOKENS=")[1].splitlines()[0])
+    assert "tok1a" not in tokens, "a market that is not accepting orders was taken"
+    assert tokens == ["tok2a", "tok3a", "tok4a"], tokens
+
+
+def test_9c_the_gate_labels_itself_not_identified_when_the_surface_omits_it(tmp_path):
+    """No field, no invented substitute -- and no silent pass either.
+
+    If the response carries no accepting-orders field at all, the launcher says
+    so in those words and does not apply the filter. Nothing is assumed in its
+    place: the public feed and price-book preflight still have to succeed, and
+    the capture itself still has to produce both evidence streams.
+    """
+    rows = []
+    for i, (vol, ev) in enumerate([(500, "E1"), (400, "E2"), (300, "E3")], start=1):
+        m = _market(i, vol=vol, event=ev)
+        del m["acceptingOrders"]
+        rows.append(m)
+    r = _run_selection(rows, tmp_path)
+    assert r.returncode == 0, r.stdout + r.stderr
+    assert "DISCOVERY_ACCEPTING_ORDERS_GATE = NOT_IDENTIFIED" in r.stdout
+    tokens = json.loads(r.stdout.split("TOKENS=")[1].splitlines()[0])
+    assert tokens == ["tok1a", "tok2a", "tok3a"], tokens
+
+
+def test_9d_the_gate_uses_only_field_names_the_current_sdk_declares():
+    """Every VENUE field the launcher reads must be a real current name.
+
+    Only reads from the venue payload count: m/ev/tag/payload .get("...") and
+    the names passed to _num(m, ...). The launcher's own internal dict keys
+    (vol24, liq, token, event) are its own vocabulary, not the venue's, and
+    sweeping them in would be checking the wrong thing.
+
+    Names below are declared on the current SDK's gamma models -- Market
+    (models/gamma/market.py) for the market fields, and the keyset envelope
+    keys for the response wrapper. Nothing here is invented.
+    """
+    src = _cell_with("SELECTION_RECORD")
+
+    reads = set(re.findall(r'\b(?:m|ev|tag|payload)\.get\(\s*["\']([^"\']+)["\']', src))
+    for call in re.findall(r"_num\(m,([^)]*)\)", src):
+        reads |= set(re.findall(r'["\']([^"\']+)["\']', call))
+    reads |= set(re.findall(r'ACCEPTING_FIELD\s*=\s*["\']([^"\']+)["\']', src))
+
+    declared_by_current_sdk = {
+        # gamma Market
+        "acceptingOrders", "enableOrderBook", "active", "closed",
+        "clobTokenIds", "clob_token_ids", "volume24hr", "volume24hrClob",
+        "volumeNum", "volume", "liquidityNum", "liquidity",
+        "gameStartTime", "sportsMarketType", "events", "tags",
+        "slug", "question", "description", "category", "seriesSlug",
+        # nested event / tag
+        "id", "title", "label",
+        # keyset / list response envelopes
+        "data", "markets", "results",
+    }
+    unknown = reads - declared_by_current_sdk
+    assert not unknown, f"discovery reads undeclared venue field name(s): {unknown}"
+    # the gate's own field must actually be among them
+    assert "acceptingOrders" in reads
+
+
 def test_10_the_selection_rule_cannot_see_the_feed():
     """Ranking must use pre-capture market metadata only.
 
