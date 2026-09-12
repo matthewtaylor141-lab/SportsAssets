@@ -55,6 +55,28 @@ ALLOWED: frozenset[str] = frozenset({
     # db is the connection pool only -- it executes SQL that the caller supplies
     # and reaches no venue.
     "sportsassets.db",
+    # ---- run 83.2 -------------------------------------------------------
+    # Each read and confirmed to contain no order path before being added, as
+    # the failure message above requires. None of them imports a venue client,
+    # an executor or a signer; the only network call in the whole set is
+    # cache.refresh_once's POST to the read-only /books endpoint.
+    #
+    # subject   -- os.environ only. Pure eligibility arithmetic, no imports
+    #              beyond `os`.
+    # slot      -- hashlib only. Derives an id string; touches nothing.
+    # scheduler -- clock, config, slot, and cache (inside one function, to
+    #              break the import cycle). A heap and a decision table; no I/O
+    #              of any kind, which test_run832_scheduler.py asserts.
+    # cache     -- clock, book, config. Holds book state and refreshes it with
+    #              a POST to /books. READ-ONLY: it posts a list of token ids and
+    #              parses ladders. No order fields, no auth, no signer.
+    # capacity  -- config only. Arithmetic over measured rates; returns a
+    #              report object and performs no action.
+    "sportsassets.obs.subject",
+    "sportsassets.obs.slot",
+    "sportsassets.obs.scheduler",
+    "sportsassets.obs.cache",
+    "sportsassets.obs.capacity",
 })
 
 # Defence in depth. Any module whose name matches one of these fragments is

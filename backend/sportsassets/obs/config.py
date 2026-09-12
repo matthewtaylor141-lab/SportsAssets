@@ -71,12 +71,26 @@ def shadow_enabled() -> bool:
 
 
 def max_inflight() -> int:
-    """Cap on events being sampled concurrently.
+    """Cap on SIMULTANEOUS NETWORK OPERATIONS. Not on pending observations.
 
-    The collector shares a venue and an HTTP client with the rest of the process,
-    and the venue has 429'd a board walk above roughly 3 req/s before. A cap here
-    is the difference between an instrument and a second source of rate-limit
-    incidents.
+    THIS CAP MEANT SOMETHING ELSE IN V1, AND THAT IS WHAT BROKE THE INSTRUMENT.
+    collector.py::run held one semaphore slot per event for the event's whole
+    60-second horizon, so the cap was really `events being tracked at once` and
+    the collector's ceiling was 8 / 60 s = 0.133 events/s -- against an RN1-only
+    arrival rate of 0.187 to 0.255/s. It failed by 1.4x to 1.9x even after the
+    population was corrected, which is why the scheduler was replaced and not
+    just the filter (owner decision 6).
+
+    A slot is now held only while an HTTP request is actually executing. By
+    Little's law the sustained requirement is arrival x duration: at the design
+    rate of 3 reads/s and the measured p95 duration of 0.227 s that is 0.68
+    concurrent, so 8 is roughly twelve times what the secondary channel needs.
+
+    The "roughly 3 req/s" figure the old docstring cited here has been removed:
+    `git log -S` traced it to run 83's own commits and nowhere else, and no 429
+    against clob.polymarket.com is recorded anywhere in this repository. The
+    limit is UNESTABLISHED and is reported as such rather than quoted as if
+    measured.
     """
     try:
         return max(1, int(os.environ.get("RN1_OBSERVABILITY_MAX_INFLIGHT", "8")))
@@ -85,14 +99,94 @@ def max_inflight() -> int:
 
 
 def reads_per_second() -> float:
-    """Pacing ceiling for this collector's own book reads."""
+    """Pacing ceiling for the collector's own HTTP book reads.
+
+    Governs the cache refresher and the secondary diagnostic channel. It does
+    NOT govern the primary channel at all: a primary sample reads local state
+    and makes no request, which is the whole of owner decision 2.
+    """
     try:
         return max(0.1, float(os.environ.get("RN1_OBSERVABILITY_RPS", "2.0")))
     except ValueError:
         return 2.0
 
 
-COLLECTOR_VERSION = "rn1-obs/1"
+# ------------------------------------------------------- the local-state cache
+# The primary channel samples a continuously maintained local cache. These
+# govern how that cache is kept, and therefore the instrument's real
+# short-horizon resolution: TWO OFFSETS CLOSER TOGETHER THAN THE REFRESH
+# INTERVAL RETURN THE SAME STATE. That is a property of the mechanism, not a
+# tuning parameter to be optimised against interim data, and it is why every
+# sample carries cache_age_ms and the venue's book hash.
+
+def cache_refresh_interval_s() -> float:
+    """Target interval between refreshes of one HOT token."""
+    try:
+        return max(0.05, float(
+            os.environ.get("RN1_OBSERVABILITY_CACHE_REFRESH_S", "0.25")))
+    except ValueError:
+        return 0.25
+
+
+def cache_batch_size() -> int:
+    """Tokens per POST /books request.
+
+    The batch endpoint is what makes a maintained cache affordable: refreshing
+    N tokens costs one request rather than N. Established from
+    py-clob-client 0.34.6 -- GET_ORDER_BOOKS = "/books", posted a list of
+    {"token_id": ...}. The batch SIZE the venue will accept is NOT documented
+    anywhere reachable, so this starts small and is raised only on evidence.
+    """
+    try:
+        return max(1, int(os.environ.get("RN1_OBSERVABILITY_CACHE_BATCH", "20")))
+    except ValueError:
+        return 20
+
+
+def cache_hot_tokens() -> int:
+    """How many tokens may be in the hot set at once."""
+    try:
+        return max(1, int(os.environ.get("RN1_OBSERVABILITY_HOT_TOKENS", "40")))
+    except ValueError:
+        return 40
+
+
+def cache_hot_ttl_s() -> float:
+    """How long a token stays hot after the last event that promoted it.
+
+    Slightly over the 60 s horizon so a token stays warm for the whole of its
+    own event's schedule and a little beyond.
+    """
+    try:
+        return max(1.0, float(os.environ.get("RN1_OBSERVABILITY_HOT_TTL_S", "75")))
+    except ValueError:
+        return 75.0
+
+
+def cache_stale_tolerance_s() -> float:
+    """Beyond this age, local state is STALE_BEYOND_TOLERANCE, not a reading.
+
+    A sample older than this is recorded with its age and marked invalid rather
+    than being served as though it were the state at the scheduled instant.
+    """
+    try:
+        return max(0.1, float(
+            os.environ.get("RN1_OBSERVABILITY_STALE_TOLERANCE_S", "5.0")))
+    except ValueError:
+        return 5.0
+
+
+def legacy_http_channel_enabled() -> bool:
+    """Is the SECONDARY diagnostic HTTP channel collecting?
+
+    Off by code default. The primary curve must never depend on REST capacity
+    (owner decision 3), and the cheapest way to guarantee that is for the
+    secondary channel to be absent unless somebody switches it on.
+    """
+    return _flag("RN1_OBSERVABILITY_LEGACY_HTTP", False)
+
+
+COLLECTOR_VERSION = "rn1-obs/2"
 
 
 def clob_base() -> str:

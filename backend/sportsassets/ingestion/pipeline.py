@@ -81,8 +81,23 @@ class TradeEvent:
         )
 
 
-def _obs_receipt(ev: TradeEvent) -> None:
-    """Hand the arriving event to the observability collector. Never raises.
+def _obs_stamp(ev: TradeEvent):
+    """STEP 1 AND 2 of the run 83.2 admission path. Never raises.
+
+    Stamps FIRST_BETTOR_RECEIPT_WALL and FIRST_BETTOR_RECEIPT_MONOTONIC, then
+    decides subject eligibility from ev.whale_id with NO I/O. Returns an opaque
+    pending handle, or None when there is nothing to observe.
+
+    NOTHING IS ADMITTED HERE. Admission needs the canonical dedupe answer, which
+    does not exist until the INSERT below has run. So this call only stamps and
+    screens; _obs_admit() finishes the job afterwards with the real was_insert.
+
+    WHY THE STAMP COMES FIRST, BEFORE EVEN THE CHEAP SUBJECT CHECK. The anchor
+    must never be later than the moment the event entered this function. Putting
+    any branch in front of it -- even a dictionary lookup -- makes the anchor a
+    function of how long the branch took, and the whole experiment is anchored on
+    this instant. clock.now() is two syscalls; at the all-wallet arrival rate of
+    ~0.7 events/s that is not a cost worth trading an invariant for.
 
     The lane decides the source timestamp's provenance and clock domain, because
     they genuinely differ: chain and s1 carry a Polygon block timestamp, poll
@@ -97,7 +112,7 @@ def _obs_receipt(ev: TradeEvent) -> None:
     """
     try:
         from ..obs import clock as _clock                      # noqa: PLC0415
-        from ..obs.collector import observe as _observe        # noqa: PLC0415
+        from ..obs.collector import stamp as _stamp            # noqa: PLC0415
 
         domain = {
             "chain": _clock.ClockDomain.SOURCE_CHAIN,
@@ -128,13 +143,20 @@ def _obs_receipt(ev: TradeEvent) -> None:
                 value=datetime.fromtimestamp(ev.ts_epoch, tz=timezone.utc),
                 provenance=provenance, clock_domain=domain)
 
-        _observe(
+        return _stamp(
             source_event_id=ev.dedupe_key,
             source_lane=ev.source,
             source_venue="polymarket",
             source_token_id=str(ev.asset) if ev.asset else None,
             source_ts=source_ts,
             ingest_worker="ingestion.pipeline.ingest_trade_result",
+            # THE SUBJECT'S IMMUTABLE IDENTITY, which run 83.1 found was in hand
+            # at this exact point and simply never passed along. whale_id is a
+            # non-defaulted field on TradeEvent, set by every one of the four
+            # lanes before the object exists, so there is no path here that
+            # lacks it and no I/O needed to obtain it.
+            subject_whale_id=ev.whale_id,
+            subject_username=ev.whale_username,
             source_tx_hash=ev.tx_hash,
             source_market_id=ev.condition_id,
             source_outcome_index=ev.outcome_index,
@@ -144,8 +166,31 @@ def _obs_receipt(ev: TradeEvent) -> None:
         )
     except Exception:                                          # noqa: BLE001
         # Instrumentation must never break ingestion. Silent here on purpose:
-        # observe() already counts its own failures, and a log line on a hot
+        # stamp() already counts its own failures, and a log line on a hot
         # path that is failing would itself become the incident.
+        return None
+
+
+def _obs_admit(pending, *, was_insert: bool) -> None:
+    """STEP 4 of the admission path: admit iff subject AND first receipt.
+
+    was_insert IS THE CANONICAL PRODUCTION DEDUPE ANSWER, passed through
+    untouched. Owner decision 4 rejected a per-lane `first_seen` flag so that
+    the research instrument would not own a second first-receipt authority, and
+    this is the whole of the alternative: one boolean, produced by the same
+    `RETURNING (xmax = 0)` that already gates the fan-out and the copy order.
+
+    A duplicate that the DO UPDATE's WHERE matched nothing for returns NO ROW at
+    all, and the caller passes was_insert=False for it -- so "no row" and
+    "was_insert false" both mean not-first-receipt, which is what they are.
+    """
+    if pending is None:
+        return
+    try:
+        from ..obs.collector import admit as _admit            # noqa: PLC0415
+
+        _admit(pending, was_insert=was_insert)
+    except Exception:                                          # noqa: BLE001
         pass
 
 
@@ -201,7 +246,7 @@ async def ingest_trade_result(ev: TradeEvent,
     Callers asking "did I just see something new?" read the second
     element. The first is non-None for duplicates too.
     """
-    # THE OBSERVABILITY RECEIPT STAMP (2026-09-12, run 83).
+    # THE OBSERVABILITY RECEIPT STAMP (2026-09-12, run 83; reshaped run 83.2).
     #
     # FIRST STATEMENT IN THE FUNCTION, deliberately: the receipt instant has to
     # be taken at arrival. Stamping it after the pool round-trip would measure
@@ -209,11 +254,24 @@ async def ingest_trade_result(ev: TradeEvent,
     # unusable as a latency figure -- run 82.
     #
     # It is synchronous, does no I/O, and cannot raise into this function: every
-    # failure mode inside observe() increments a counter and returns. An
+    # failure mode inside stamp() increments a counter and returns. An
     # instrument that can break ingestion is not an instrument, it is a new way
     # to lose fills. With RN1_OBSERVABILITY_SHADOW off -- the code default -- it
-    # returns immediately.
-    _obs_receipt(ev)
+    # returns None immediately.
+    #
+    # RUN 83.2 SPLIT THIS IN TWO, and the split is the fix for the largest
+    # defect in RUN83_ACTIVATION_FAILED_V1. The old single call observed the
+    # event HERE, before the insert -- so a fill the ledger had already held for
+    # up to 36.9 days, re-presented by the poll lane's page walk, was observed as
+    # a brand-new event with a fresh anchor. 94.6% of that cohort was exactly
+    # this. The dedupe that would have caught it lives in the statement below,
+    # one statement too late to be consulted.
+    #
+    # So: stamp the anchor now, screen the subject now, and ADMIT NOTHING until
+    # the canonical insert has said whether this is BETTOR's first sight of the
+    # fill. The anchor stays the pre-insert instant; the insert's cost is
+    # recorded separately as admission_delay_ms and is never folded into it.
+    _obs_pending = _obs_stamp(ev)
 
     pool = await get_pool()
     detected_at = datetime.now(tz=timezone.utc)
@@ -316,8 +374,14 @@ async def ingest_trade_result(ev: TradeEvent,
     if row is None:
         # The WHERE on the DO UPDATE matched nothing: a duplicate with
         # no holes to fill. Not new, and no id to hand back.
+        _obs_admit(_obs_pending, was_insert=False)
         return None, False
     trade_id = row["id"]
+    # THE ONE CANONICAL FIRST-RECEIPT ANSWER, handed to the research instrument
+    # before it is used for anything else. Both callers of this fact -- the
+    # fan-out below and run 83's admission -- now read the same boolean from the
+    # same statement, which is what owner decision 4 asked for.
+    _obs_admit(_obs_pending, was_insert=bool(row["was_insert"]))
     # An enrichment pass filling in a NULL condition_id is not a new
     # fill. It returns the id — the row is real and callers want it —
     # but it must never reach the fan-out below, or every hourly pass

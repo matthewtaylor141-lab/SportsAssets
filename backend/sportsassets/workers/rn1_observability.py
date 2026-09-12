@@ -41,6 +41,7 @@ from ..db import get_pool
 from ..obs import collector, record
 from ..obs.clock import boot_reference
 from ..obs.config import shadow_enabled
+from ..obs.subject import configured_subject_whale_id
 
 log = logging.getLogger(__name__)
 
@@ -116,9 +117,20 @@ def _host_sync() -> tuple[str | None, float | None, float | None, str]:
 
 
 async def main() -> None:
-    if not shadow_enabled():
-        log.info("rn1 observability collector: RN1_OBSERVABILITY_SHADOW is off "
-                 "(code default) -- collecting nothing, parking")
+    # INERT TWICE OVER (run 83.2, owner decision 5). The flag alone is no longer
+    # enough: a subject must also be named. RUN83_ACTIVATION_FAILED_V1 had no
+    # subject filter, and 94.671% of its 12,535 events belonged to the other
+    # nineteen wallets on the ingestion roster. A collector that observes
+    # everyone when nobody configured it produces a cohort that looks full and
+    # answers a different question, so an unnamed subject parks exactly as a
+    # switched-off flag does.
+    if not shadow_enabled() or configured_subject_whale_id() is None:
+        reason = ("RN1_OBSERVABILITY_SHADOW is off (code default)"
+                  if not shadow_enabled()
+                  else "OBSERVABILITY_SUBJECT_NOT_CONFIGURED "
+                       "(RN1_OBSERVABILITY_SUBJECT_WHALE_ID unset or malformed)")
+        log.info("rn1 observability collector: %s -- collecting nothing, parking",
+                 reason)
         # Park, do not return: the supervisor restarts a loop that returns.
         # asyncio.Event() that nobody sets waits forever without a timer, so
         # this costs one suspended coroutine and no wakeups at all.

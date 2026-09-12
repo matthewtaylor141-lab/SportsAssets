@@ -45,6 +45,20 @@ class ObservationChannel:
     """
 
     LEGACY_COMPARABLE_BOOK_PATH = "LEGACY_COMPARABLE_BOOK_PATH"
+
+    # RUN 83.2 PRIMARY. State BETTOR already holds locally at the scheduled
+    # instant, kept fresh by batched POST /books. The scheduled sample makes no
+    # request, which is what lets the 0-500 ms offsets exist at all: a request
+    # started after receipt is INSIDE its own round trip (measured p50 170 ms).
+    LOCAL_CACHE_BATCH_POLL_PATH = "LOCAL_CACHE_BATCH_POLL_PATH"
+
+    # STILL DECLARED, STILL NOT IMPLEMENTED, AND DELIBERATELY NOT REUSED FOR THE
+    # CACHE. Established 2026-09-12 from py-clob-client 0.34.6: the vendor SDK
+    # contains NO websocket client -- zero files matching websocket/wss/ws_ --
+    # so there is no pushed feed to subscribe to. The V2 primary channel is a
+    # POLLED cache, and naming a polled cache FAST_STREAM_PATH would be the same
+    # error as naming the legacy read FASTEST_AVAILABLE_BOOK_PATH, which this
+    # module refuses two lines below. This constant waits for a real feed.
     FAST_STREAM_PATH = "FAST_STREAM_PATH"          # declared, not implemented
 
 
