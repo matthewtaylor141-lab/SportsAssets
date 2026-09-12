@@ -249,37 +249,31 @@ jobs:
             if git diff --cached --quiet; then
               echo "nothing to commit"
             else
-              # THE COMMIT MESSAGE GOES THROUGH A FILE, not an inline -m.
-              # An inline multi-line message has to sit at column 0 to keep its
-              # own line breaks, and that TERMINATES the YAML block scalar this
-              # script lives in -- the workflow then parses as a mapping with no
-              # `on:` key and registers with NO TRIGGERS AT ALL, so dispatch is
-              # refused with "does not have workflow_dispatch trigger" and
-              # nothing in the log explains why. A quoted heredoc keeps the
-              # message indented inside the block and passes it through verbatim.
-              cat > /tmp/seal_msg.txt <<MSGEOF
-              research: seal AUDIT SNAPSHOT V1 (U2_SNAPSHOT_V1 + settlement)
-
-              [skip render]
-
-              Drawn read-only under one repeatable-read transaction by
-              research/gen/draw_audit_snapshot.sql.
-              Canonical rules: research/SNAPSHOT_CANONICAL_SPEC.md@v1.
-
-              AUDIT_SNAPSHOT_MANIFEST_SHA256=$MAN
-              U2_EVENT_DB_CANONICAL_SHA256=$EDB
-              SETTLEMENT_DB_CANONICAL_SHA256=$CDB
-
-              U2_SNAPSHOT_V1 is the immutable evidence population observed at
-              U2_SNAPSHOT_V1_DRAWN_AT. It is NOT the Run-81A population: that
-              event set was never materialised and copy_probes retention has
-              deleted rows oldest-first since, so it is NOT RECONSTRUCTIBLE.
-              The deltas against RUN 81A ORIGINAL are in the manifest.
-
-              Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
-              Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC
-              MSGEOF
-              sed -i 's/^              //' /tmp/seal_msg.txt
+              # THE COMMIT MESSAGE IS BUILT WITH printf, NOT A HEREDOC AND
+              # NOT AN INLINE -m. Both of those have bitten this file already:
+              # an inline multi-line -m has to reach column 0, which TERMINATES
+              # the YAML block scalar and registers the workflow with no
+              # triggers at all; and a heredoc needs its terminator at column 0
+              # too, so indenting it to stay inside the block means bash never
+              # finds it and the script dies at end-of-file -- AFTER the draw
+              # has already run and the storage decision has already deleted
+              # the plain file. printf has no terminator and no column rule.
+              : > /tmp/seal_msg.txt
+              printf '%s\n' "research: seal AUDIT SNAPSHOT V1 (U2_SNAPSHOT_V1 + settlement)" "" >> /tmp/seal_msg.txt
+              printf '%s\n' "[skip render]" "" >> /tmp/seal_msg.txt
+              printf '%s\n' "Drawn read-only under one repeatable-read transaction by" >> /tmp/seal_msg.txt
+              printf '%s\n' "research/gen/draw_audit_snapshot.sql." >> /tmp/seal_msg.txt
+              printf '%s\n' "Canonical rules: research/SNAPSHOT_CANONICAL_SPEC.md@v1." "" >> /tmp/seal_msg.txt
+              printf '%s\n' "AUDIT_SNAPSHOT_MANIFEST_SHA256=$MAN" >> /tmp/seal_msg.txt
+              printf '%s\n' "U2_EVENT_DB_CANONICAL_SHA256=$EDB" >> /tmp/seal_msg.txt
+              printf '%s\n' "SETTLEMENT_DB_CANONICAL_SHA256=$CDB" "" >> /tmp/seal_msg.txt
+              printf '%s\n' "U2_SNAPSHOT_V1 is the immutable evidence population observed at" >> /tmp/seal_msg.txt
+              printf '%s\n' "U2_SNAPSHOT_V1_DRAWN_AT. It is NOT the Run-81A population: that event" >> /tmp/seal_msg.txt
+              printf '%s\n' "set was never materialised and copy_probes retention has deleted rows" >> /tmp/seal_msg.txt
+              printf '%s\n' "oldest-first since, so it is NOT RECONSTRUCTIBLE. The deltas against" >> /tmp/seal_msg.txt
+              printf '%s\n' "RUN 81A ORIGINAL are in the manifest." "" >> /tmp/seal_msg.txt
+              printf '%s\n' "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>" >> /tmp/seal_msg.txt
+              printf '%s\n' "Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC" >> /tmp/seal_msg.txt
               git commit -q -F /tmp/seal_msg.txt
               n=0
               until git push origin HEAD:claude/session-njaewf; do
