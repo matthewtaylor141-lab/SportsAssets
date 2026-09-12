@@ -223,6 +223,23 @@ upsert, so a row's `resolved` / `resolved_at` can move under a pinned cutoff.
 U0 is, and any settlement-dependent figure must be stamped with the instant its
 cohort was drawn. Run 81A opens with a cheap measurement of this.
 
+### DETERMINED BY RUN 81A — it is `copy_probes`, and it is a deliberate DELETE
+
+Run 81A's statement 0 re-read both controls at 02:04Z: **U0 held at 962,509
+exactly, and U2 came back at 214,651 against run 80's 214,708 — down 57 events
+in 1 h 48 m.** The mechanism is in the code, not inferred:
+`backend/sportsassets/workers/retention.py` runs an hourly loop that `DELETE`s
+from `copy_probes` oldest-first by `probe_at`, with
+`COPY_PROBES_FLOOR_DAYS = 30 + 7` — **a 37-day horizon** — and migration
+`053_copy_probes_probe_at_idx.sql` exists specifically to index `probe_at` for
+that loop and quotes the `DELETE` verbatim.
+
+So the open question above is closed in one direction: `copy_probes` is
+demonstrably shrinking, and every cohort built on it inherits that. Whether
+`markets` *also* drifts remains untested and is claimed neither way. See
+RUN81A_FINDINGS §0 — the consequence is larger than this one figure: Estimator
+A's evidence base has a hard 37-day horizon and erodes oldest-first.
+
 ---
 
 ## 9. WHAT IS NOT AFFECTED
