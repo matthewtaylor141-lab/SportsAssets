@@ -784,7 +784,15 @@ def test_e21_order_decision_writes_take_on_add_on_an_adds_ioc_alone_and_only_for
     # 059's comment stands as written (the list it names is restated in docs section 54)
     mig = (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "take_on_add" not in mig and "'take_in_band' is\n-- reserved" in mig
-    assert not any(x.name.startswith("062_") for x in (ROOT / "backend" / "migrations").glob("*.sql")), "no migration in this wave"
+    # re-pinned 2026-09-12: 062 now exists and is run 83's observability, not
+    # this lane's. The guard is rewritten to check what it actually means -- no
+    # migration belongs to THIS wave -- which is stronger than "062 is absent"
+    # and does not need re-pinning every time a later lane adds a file.
+    migs = sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))
+    assert not [m for m in migs
+                if "on_add" in m or "fast_add" in m or "replan" in m], \
+        "no migration in this wave"
+    assert "062_rn1_observability.sql" in migs, "062 is run 83's, not this lane's"
 
 
 # --------------------------------- (13) the census, the emit sites, the docs
