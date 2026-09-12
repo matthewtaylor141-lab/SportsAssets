@@ -654,7 +654,8 @@ def test_e12_057_exists_sorts_after_056_and_is_two_nullable_add_column_if_not_ex
     assert files[i + 2] == "058_mirror_books_flow_clock.sql"    # E12b
     assert files[i + 3] == "059_mirror_orders_send_record.sql"    # E18 (PNL lane 6)
     assert files[i + 4] == "060_mirror_fill_answers.sql"    # T2 (FILL lane 4): the per-fill record
-    assert files[i + 5] == "061_fill_answers_cause_orders_fast.sql" == files[-1]    # FILL lane 9: the record's columns, last
+    assert files[i + 5] == "061_fill_answers_cause_orders_fast.sql"    # FILL lane 9: the record's columns
+    assert files[-1] == "062_rn1_observability.sql"  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
     sql = SQL_057.read_text()
     assert sql.splitlines()[0].startswith("-- 057: MIRROR BOOKS FLOW BASE (E12, 2026-09-08")
     body = "\n".join(ln.split("--", 1)[0] for ln in sql.splitlines())

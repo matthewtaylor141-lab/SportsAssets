@@ -992,7 +992,7 @@ class TestTheSeams:
         import pathlib
         from sportsassets.scripts import migrate
         files = [f.name for f in sorted(pathlib.Path(migrate.MIGRATIONS_DIR).glob("*.sql"))]
-        assert files[-1].startswith("061_"), files[-1]
+        assert files[-1].startswith("062_"), files[-1]  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
         # the docs section, in the house header form, and its words
         doc = (pathlib.Path(__file__).resolve().parents[2] / "docs" / "mirror-coverage.md").read_text()
         assert re.search(r"^## \d+\. C10 -- .* \(2026-09-10, coverage lane C10\)", doc, re.M), "the C10 section header"

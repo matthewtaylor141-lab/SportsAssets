@@ -589,7 +589,7 @@ def test_e28_the_fast_ticks_own_re_read_the_act_the_takes_and_the_exit_path_are_
     assert hashlib.sha256(excised.encode()).hexdigest()[:16] == RULES_SHA_6C0830D
     # no migration (061 the newest), no decision word
     mig = sorted(p.name for p in (ROOT / "backend" / "migrations").glob("*.sql"))
-    assert mig[-1].startswith("061_")
+    assert mig[-1].startswith("062_")  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
     assert "decision" not in inspect.getsource(ml._walk_reread) and "decision" not in inspect.getsource(ml._ledger_reread)
 
 

@@ -762,7 +762,7 @@ def test_e30_the_census_place_the_emit_sites_and_the_records():
     assert "receipt = $4::jsonb" in ml._SQL_ORDER_REFUSED and ml._REFUSAL_RECEIPT_MAX == 4000
     # no migration (061 the newest), no decision word, render-ops.yml untouched
     mig = sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))
-    assert mig[-1].startswith("061_")
+    assert mig[-1].startswith("062_")  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
     assert "backoff" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "post_only_backoff" not in inspect.getsource(rules.order_decision)
     assert hashlib.sha256((ROOT / ".github" / "workflows" / "render-ops.yml").read_bytes()).hexdigest()[:16] == e27.RENDER_OPS_SHA

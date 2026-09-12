@@ -135,8 +135,8 @@ def test_the_immediate_snapshot_is_captured(fast_offsets):
 
     zero = [a for a in pool.rows("rn1_obs_snapshots") if a[2] == "0ms"]
     assert len(zero) == 1
-    assert zero[0][5] == schedule.SnapshotStatus.CAPTURED
-    assert zero[0][16] == pytest.approx(0.50), "the first ask is the 0ms ask"
+    assert zero[0][8] == schedule.SnapshotStatus.CAPTURED
+    assert zero[0][21] == pytest.approx(0.50), "the first ask is the 0ms ask"
 
 
 def test_the_forward_offsets_are_all_captured(fast_offsets):
@@ -145,12 +145,12 @@ def test_the_forward_offsets_are_all_captured(fast_offsets):
 
     snaps = pool.rows("rn1_obs_snapshots")
     assert {a[2] for a in snaps} == {"0ms", "a", "b"}, "one row per offset"
-    assert all(a[5] == schedule.SnapshotStatus.CAPTURED for a in snaps)
+    assert all(a[8] == schedule.SnapshotStatus.CAPTURED for a in snaps)
     # The measured offsets increase -- acceptance test 5 at the event level.
-    by_label = {a[2]: a[11] for a in snaps}
+    by_label = {a[2]: a[16] for a in snaps}
     assert by_label["0ms"] <= by_label["a"] <= by_label["b"]
     # And the curve moved, which is the point of the whole instrument.
-    asks = {a[2]: a[16] for a in snaps}
+    asks = {a[2]: a[21] for a in snaps}
     assert asks["b"] > asks["0ms"]
 
 
@@ -160,9 +160,9 @@ def test_the_depth_ladder_is_stored_exactly(fast_offsets):
     asyncio.run(collector._handle(pool, http, _obs(), collector.Pacer(1000.0), ""))
 
     zero = [a for a in pool.rows("rn1_obs_snapshots") if a[2] == "0ms"][0]
-    ladder = json.loads(zero[17])
+    ladder = json.loads(zero[22])
     assert ladder == [[0.5, 100.0], [0.51, 250.0]]
-    assert zero[18] == 2, "depth_levels matches the ladder length"
+    assert zero[23] == 2, "depth_levels matches the ladder length"
 
 
 def test_a_malformed_level_is_skipped_not_coerced_to_zero():
@@ -178,10 +178,10 @@ def test_an_exhausted_ladder_is_recorded_as_exhausted_not_as_a_price(fast_offset
     asyncio.run(collector._handle(pool, http, _obs(size=10000.0),
                                   collector.Pacer(1000.0), ""))
     zero = [a for a in pool.rows("rn1_obs_snapshots") if a[2] == "0ms"][0]
-    vwap_qb, qb_exhausted = zero[21], zero[22]
+    vwap_qb, qb_exhausted = zero[26], zero[27]
     assert vwap_qb is None and qb_exhausted is True
     # Q_A = 1,000 is also beyond the 350 on the book.
-    assert zero[19] is None and zero[20] is True
+    assert zero[24] is None and zero[25] is True
 
 
 # ------------------------------------------------------------------------ 10
@@ -328,8 +328,8 @@ def test_a_venue_error_is_recorded_as_an_error_not_as_a_missing_row(fast_offsets
                                   collector.Pacer(1000.0), ""))
     snaps = pool.rows("rn1_obs_snapshots")
     assert len(snaps) == 3, "every offset still produced a row"
-    assert all(a[5] == schedule.SnapshotStatus.VENUE_ERROR for a in snaps)
-    assert all("ConnectionError" in (a[6] or "") for a in snaps)
+    assert all(a[8] == schedule.SnapshotStatus.VENUE_ERROR for a in snaps)
+    assert all("ConnectionError" in (a[9] or "") for a in snaps)
 
 
 def test_a_book_read_that_fails_carries_no_prices():
@@ -349,3 +349,45 @@ def test_the_source_token_id_reaches_the_event_row(fast_offsets):
     pool, http = FakePool(), FakeHttp()
     asyncio.run(collector._handle(pool, http, _obs(), collector.Pacer(1000.0), ""))
     assert pool.rows("rn1_obs_events")[0][11] == "token-1"
+
+
+# ------------------------------------------- CORRECTION 2: the channel label
+def test_every_snapshot_names_its_observation_channel(fast_offsets):
+    """LEGACY_COMPARABLE_BOOK_PATH is a label, not a claim about speed.
+
+    It exists so this curve is the SAME QUANTITY as U2 -- which 81A, 81B and 82
+    all measured from this endpoint. It is NOT the fastest available path and NOT
+    the earliest actionable market state, and naming it on every row is what lets
+    a streaming channel later be COMPARED against it rather than pooled with it.
+    """
+    from sportsassets.obs.book import ObservationChannel, Transport
+    pool, http = FakePool(), FakeHttp()
+    asyncio.run(collector._handle(pool, http, _obs(), collector.Pacer(1000.0), ""))
+    snaps = pool.rows("rn1_obs_snapshots")
+    assert snaps
+    for a in snaps:
+        assert a[5] == ObservationChannel.LEGACY_COMPARABLE_BOOK_PATH
+        assert a[6] == Transport.HTTP_GET
+        assert a[7] and a[7].endswith("/book"), "the feed identity is recorded"
+        # A polled channel records a request/response pair and NO stream receive.
+        assert a[14] is None and a[15] is None
+
+
+def test_the_fast_stream_path_is_named_but_not_implemented():
+    """Declared so the schema and the analysis have a name for it. Nothing
+    implements it and nothing activates it in run 83."""
+    from sportsassets.obs import book
+    assert book.ObservationChannel.FAST_STREAM_PATH == "FAST_STREAM_PATH"
+    assert book.Transport.WEBSOCKET_STREAM == "websocket_stream"
+    src = (BACKEND / "sportsassets" / "obs").rglob("*.py")
+    for f in src:
+        text = f.read_text()
+        assert "websockets" not in text and "websocket.connect" not in text, (
+            f"{f.name} appears to implement a stream channel; run 83 declares it only")
+
+
+def test_the_migration_refuses_an_unnamed_channel():
+    sql = (BACKEND / "migrations" / "062_rn1_observability.sql").read_text()
+    assert "rn1_obs_snapshots_channel_ck" in sql
+    assert "'LEGACY_COMPARABLE_BOOK_PATH'" in sql and "'FAST_STREAM_PATH'" in sql
+    assert "observation_channel TEXT        NOT NULL" in sql

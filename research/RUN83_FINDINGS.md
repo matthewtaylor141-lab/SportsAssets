@@ -98,6 +98,33 @@ reads a book is the same object the egress functions hang off; a read-only GET
 cannot reach one. It also reads **the same endpoint U2 was built from**, so the
 forward curve and the historical measurement are the same quantity.
 
+### That channel is named, and the name is a limit, not a boast
+
+Every snapshot row carries `observation_channel`, `transport` and
+`feed_identity`, and the migration **refuses an unnamed channel** rather than
+defaulting one.
+
+```
+LEGACY_COMPARABLE_BOOK_PATH   the raw CLOB /book HTTP read
+```
+
+It is here **because it is comparable to U2** — the population 81A, 81B and 82
+all measured came from this endpoint's ladders, so a forward curve read this way
+is the *same quantity* as the historical one.
+
+**It must not be read as `FASTEST_AVAILABLE_BOOK_PATH`, and it must not be read
+as `EARLIEST_ACTIONABLE_MARKET_STATE`.** Those are three different claims and
+only the first is supported. `FAST_STREAM_PATH` / `websocket_stream` are
+**declared in the schema and in the code constants so a second channel can be
+added later and compared against this one rather than pooled with it** — an
+average over two channels belongs to neither. **Nothing implements a stream
+channel and nothing activates one in run 83**, and a test asserts the obs package
+contains no websocket code.
+
+Each snapshot records a request/response pair **or** a stream receive, never both
+invented: a polled channel fills the first, a pushed channel the second, and
+`actual_offset_s` is measured from whichever one actually carried the data.
+
 ## 5. SAFETY PROOF (83F)
 
 > **THE OBSERVABILITY SHADOW HAS NO CODE PATH THAT SUBMITS, MODIFIES, CANCELS OR
@@ -122,10 +149,11 @@ failure in the instrumentation can change what the trading path does
 ## 6. TEST RESULTS
 
 ```
-tests/test_obs_safety.py             4 passed
+tests/test_obs_safety.py              4 passed
 tests/test_obs_clock_and_schedule.py 16 passed
-tests/test_obs_collector.py          18 passed
-                                     38 passed
+tests/test_obs_collector.py          21 passed
+tests/test_obs_config_independence.py 20 passed
+                                     61 passed
 ```
 
 **Full backend suite: 42 failed / 7,634 passed / 99 skipped / 3 xfailed (5m58s).**
@@ -161,7 +189,10 @@ boot_stagger, pipeline, chain, e26, dedupe, obs — is **264 passed / 9 skipped*
 | 9 | depth arrays retain exact values | `test_the_depth_ladder_is_stored_exactly` |
 | 10 | restart/replay does not duplicate | `test_a_replayed_event_is_not_a_second_observation` |
 | 11 | append-only semantics hold | writer SQL inspected + migration triggers asserted |
-| 12 | instrumentation failure cannot enable trading | `test_observe_swallows_every_failure`, queue-full drop test |
+| 12 | instrumentation failure cannot enable trading | `test_observe_swallows_every_failure`, queue-full drop test, `test_instrumentation_failure_cannot_enable_trading` |
+| 13 | **observability runs with trading OFF** (fail closed on a coupling) | `test_the_collector_starts_with_trading_off`, `test_the_shadow_flag_is_the_only_input_to_shadow_enabled` |
+| 14 | **the shadow flag cannot mutate `mirror_live`** | `test_setting_the_shadow_flag_does_not_change_any_trading_switch` (behavioural) + `test_no_observability_module_can_write_a_trading_switch` (AST) + 12 per-switch read checks |
+| 15 | **no deletion of forward observations** | `test_the_retention_worker_cannot_reach_the_observability_tables`, `test_the_migration_forbids_deletes_not_just_updates` |
 
 **A defect the sample event caught.** `source_token_id` is an `Observation`
 attribute, not one of `fields`, so it reached the book reader and never the event
@@ -187,16 +218,10 @@ predicted.
 
 ## 9. REMAINING LIMITATIONS
 
-1. **83I — `SOURCE_TO_RECEIPT_LATENCY = NOT IDENTIFIED`, and this run does not
-   change that.** Two timestamps rendering as UTC is not synchronisation. The
-   only source timestamps available are a Polygon block timestamp (a consensus
-   value from a block producer, not synchronised to us) and the Data API's own.
-   **Nothing this repository calls exposes a server-time endpoint**, so there is
-   no peer to measure an offset against. With the clock-sync table populated on
-   an NTP-disciplined host, **BOUNDED** becomes reachable for chain/s1 — our wall
-   clock tied to UTC within a *measured* error, against a block timestamp bounded
-   by consensus rules. **IDENTIFIED** is not reachable without a venue-side
-   timestamp the venue does not publish.
+1. **83I — `SOURCE_TO_RECEIPT_LATENCY = NOT IDENTIFIED`, and run 83 does not
+   change that.** See §9A below; the earlier wording in this file overstated it
+   and is corrected there.
+
 2. **The receipt anchor is arrival at `ingest_trade_result`, not at the socket.**
    For the chain lane the decode and the block-timestamp RPC happen *before* it,
    so that interval is inside the anchor rather than measured. Moving the stamp
@@ -227,3 +252,68 @@ decisions, and the first does not imply the second:
    four empty tables at the API's next boot.
 2. **Activate** collection — set `RN1_OBSERVABILITY_SHADOW=true`. Only then does
    anything get recorded, and it still places no orders.
+
+
+---
+
+## 9A. THE SOURCE-CLOCK BOUND, PER LANE (corrected)
+
+> **Withdrawn.** An earlier version of this file said *"with the clock-sync table
+> populated on an NTP-disciplined host, BOUNDED becomes reachable for chain/s1."*
+> **That is not automatically true and it is retracted.** NTP discipline
+> constrains **BETTOR's local wall clock and nothing else**. It says nothing
+> about the offset or error of the *remote* clock that produced the source
+> timestamp. Bounding one end of a cross-domain interval does not bound the
+> interval.
+
+**The standard, stated once.** `SOURCE_TO_RECEIPT_LATENCY = BOUNDED` requires a
+defensible uncertainty interval spanning **both** clock domains:
+
+```
+uncertainty = (BETTOR clock error, measured)  +  (source clock error, established)
+```
+
+Both terms must be *evidenced*, not assumed. And one more condition that is easy
+to skip: **the bound must be narrower than the quantity being claimed.** A
+two-sided bound of ±5 s is honest and useless for an interval believed to be
+around a second — it would be `BOUNDED` in name and `NOT IDENTIFIED` in effect,
+and would be reported as the former, which is worse than reporting neither.
+
+**Two timestamps rendering as UTC is not synchronisation.** No subtraction is
+performed across domains because both formats parse.
+
+### Per-lane: what evidence each would need
+
+| lane | source timestamp | BETTOR-side term | SOURCE-side term — what is required | status |
+|---|---|---|---|---|
+| **A_S1** | Polygon block timestamp, hash-verified against block hash and parentHash, no wall fallback (`s1_emitter.py:1081`) | obtainable: per-event `adjtimex` offset + max error, recorded in `rn1_obs_clock_sync` | **A cited, protocol-enforced bound on how far a Bor block timestamp may deviate from true UTC** — the validity conditions validators actually reject a block for, not folklore. Monotonicity against the parent alone does not bound deviation from UTC. Not established in this repository or in this run. | **NOT IDENTIFIED** |
+| **A_CHAIN** | same block timestamp, **plus** the substitution path at `chain.py:642` | same | everything A_S1 needs, **and** separability of substituted rows. Run 83 supplies the second half: `ts_fallback` now declares a substitution, so rows written after this lands are separable. **Rows written before it are not**, and no later work can separate them. | **NOT IDENTIFIED** |
+| **A_POLL** | Data-API `raw["timestamp"]` (`poller.py:107`) | same | **(a)** authoritative documented semantics — whether the field is the venue's fill time, the block time it reports, or the API's own write time is **not established anywhere in this tree**; **(b)** a server-time endpoint on the same host with measured round-trip, which would give a ±RTT/2 offset bound. Neither exists. Compounded by `detected_at` having two indistinguishable writers (live poller, missed-fill reconciler). | **NOT IDENTIFIED** |
+| **A_BACKFILL** | Data-API activity timestamp, same parser as poll | **not obtainable per row** — `detected_at` is stamped once per whale for an entire backfill (`history.py:91`) | everything poll needs, and migration `003_backfill_source.sql` retroactively relabels poll rows into this lane, so the lane is not even a single ingestion path | **NOT IDENTIFIED**, and structurally the furthest from it |
+
+### Forms of evidence that would count
+
+Any of these, for the source term, with the BETTOR term measured alongside:
+
+- **authoritative source timestamp semantics** — documentation from the venue or
+  protocol stating what instant the field denotes;
+- **documented source clock synchronisation** — the source's own discipline and
+  its stated error;
+- **a server-time endpoint with measured RTT**, giving offset ∈ ±RTT/2. *Nothing
+  this repository calls exposes one*, on any venue, on any path;
+- **protocol timestamps with known semantics** — a field whose meaning is fixed
+  by a specification rather than by convention;
+- **block timestamp bounds where defensible** — i.e. where the consensus rules
+  demonstrably reject a block outside a stated window, with that window cited;
+- **another independently validated clock relationship** — e.g. a third source
+  whose relationship to both ends is separately established.
+
+### Until both ends are bounded
+
+```
+SOURCE_TO_RECEIPT_LATENCY = NOT IDENTIFIED
+```
+
+in every lane. Run 83 makes the **BETTOR-side term measurable** and makes
+substitutions **declarable**. Neither of those is the source-side term, and
+neither on its own moves any lane out of `NOT IDENTIFIED`.

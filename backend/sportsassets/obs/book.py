@@ -28,6 +28,31 @@ from dataclasses import dataclass, field
 from . import clock
 
 
+class ObservationChannel:
+    """WHICH channel produced a snapshot. Named on every row, never inferred.
+
+    LEGACY_COMPARABLE_BOOK_PATH -- the raw CLOB /book HTTP read. It exists so the
+    forward curve is the SAME QUANTITY as U2, which 81A, 81B and 82 all measured
+    from this endpoint's ladders.
+
+    IT IS NOT the fastest path available, and it is NOT the earliest actionable
+    market state. Those are three different ideas and this label is what keeps
+    them apart: if a streaming channel is added later, the two can be COMPARED
+    rather than pooled into one average belonging to neither.
+
+    FAST_STREAM_PATH is declared here so the schema and the analysis already have
+    a name for it. NOTHING IMPLEMENTS IT and nothing activates it in run 83.
+    """
+
+    LEGACY_COMPARABLE_BOOK_PATH = "LEGACY_COMPARABLE_BOOK_PATH"
+    FAST_STREAM_PATH = "FAST_STREAM_PATH"          # declared, not implemented
+
+
+class Transport:
+    HTTP_GET = "http_get"
+    WEBSOCKET_STREAM = "websocket_stream"          # declared, not implemented
+
+
 @dataclass
 class BookSnapshot:
     """One book reading, with the timing of the read itself."""
@@ -35,6 +60,12 @@ class BookSnapshot:
     ok: bool
     request_start: clock.Instant
     response: clock.Instant | None = None
+    observation_channel: str = ObservationChannel.LEGACY_COMPARABLE_BOOK_PATH
+    transport: str = Transport.HTTP_GET
+    feed_identity: str | None = None
+    # A pushed channel fills this and leaves request/response null; a polled one
+    # does the reverse. Neither is made to invent the other.
+    stream_receive: clock.Instant | None = None
     best_bid: float | None = None
     best_ask: float | None = None
     # Exact retained ladder, as (price, size) pairs of the venue's own strings
@@ -84,17 +115,19 @@ async def read_book(http, base_url: str, token_id: str,
     rather than assumed -- and so the snapshot's position on the forward curve is
     the response instant, not the moment we got round to writing the row.
     """
+    feed = f"{base_url.rstrip('/')}/book"
     t0 = clock.now()
     try:
-        resp = await http.get(f"{base_url.rstrip('/')}/book",
+        resp = await http.get(feed,
                               params={"token_id": token_id}, timeout=timeout_s)
         t1 = clock.now()
         if resp.status_code != 200:
             return BookSnapshot(ok=False, request_start=t0, response=t1,
-                                error=f"http_{resp.status_code}")
+                                feed_identity=feed, error=f"http_{resp.status_code}")
         body = resp.json()
     except Exception as exc:                      # noqa: BLE001 -- never raise
         return BookSnapshot(ok=False, request_start=t0, response=clock.now(),
+                            feed_identity=feed,
                             error=f"{type(exc).__name__}: {exc}"[:200])
 
     asks = _levels(body.get("asks"))
@@ -103,6 +136,7 @@ async def read_book(http, base_url: str, token_id: str,
         ok=True,
         request_start=t0,
         response=t1,
+        feed_identity=feed,
         # best ask is the LOWEST ask and best bid the HIGHEST bid, computed here
         # rather than trusting a position in the array -- run 81A's semantic gate
         # checked exactly this and it is cheap to keep checking.

@@ -681,7 +681,7 @@ def test_e25_the_census_place_the_emit_sites_and_no_knob_no_migration_no_decisio
     # no switch, no migration, no decision word (059 as section 47 left it), no new skip key
     assert '"MIRROR_EXIT_CONFIRM' not in inspect.getsource(ml), "the worker reads the rails through rules, never the environment"
     assert "os.environ" not in inspect.getsource(ml._tick_book)
-    assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("061_")
+    assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("062_")  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
     assert "exit_confirm" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "exit_ref" not in ml._SKIP_CARRIED and "exit_confirm" not in ml._SKIP_CARRIED
 

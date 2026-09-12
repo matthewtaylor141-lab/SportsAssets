@@ -21,6 +21,7 @@ import logging
 import uuid
 
 from . import clock
+from .book import ObservationChannel, Transport
 from .config import COLLECTOR_VERSION
 
 log = logging.getLogger(__name__)
@@ -72,20 +73,24 @@ RETURNING obs_event_id
 _SNAPSHOT_SQL = """
 INSERT INTO rn1_obs_snapshots (
     obs_event_id, process_boot_id, offset_label, offset_target_s,
-    scheduled_for_monotonic, status, miss_reason,
+    scheduled_for_monotonic, observation_channel, transport, feed_identity,
+    status, miss_reason,
     request_start_wall, request_start_monotonic,
-    response_wall, response_monotonic, actual_offset_s,
+    response_wall, response_monotonic,
+    stream_receive_wall, stream_receive_monotonic, actual_offset_s,
     venue_snapshot_ts, venue_sequence, book_provenance,
     best_bid, best_ask, depth, depth_levels,
     vwap_qa, qa_depth_exhausted, vwap_qb, qb_depth_exhausted
 ) VALUES (
     $1,$2,$3,$4,
-    $5,$6,$7,
-    $8,$9,
-    $10,$11,$12,
-    $13,$14,$15,
-    $16,$17,$18::jsonb,$19,
-    $20,$21,$22,$23
+    $5,$6,$7,$8,
+    $9,$10,
+    $11,$12,
+    $13,$14,
+    $15,$16,$17,
+    $18,$19,$20,
+    $21,$22,$23::jsonb,$24,
+    $25,$26,$27,$28
 )
 ON CONFLICT (obs_event_id, offset_label) DO NOTHING
 """
@@ -168,16 +173,27 @@ async def insert_snapshot(pool, *, obs_event_id: str, slot, snap=None,
     """
     req = snap.request_start if snap is not None else None
     resp = snap.response if snap is not None else None
+    stream = snap.stream_receive if snap is not None else None
+    # The instant the snapshot SITS AT on the curve is when the data arrived --
+    # the response for a polled channel, the stream receive for a pushed one --
+    # never when we got round to writing the row.
+    arrival = resp or stream
     actual = None
-    if resp is not None:
-        actual = resp.monotonic - slot.anchor_monotonic
+    if arrival is not None:
+        actual = arrival.monotonic - slot.anchor_monotonic
 
     await pool.execute(
         _SNAPSHOT_SQL,
         obs_event_id, clock.PROCESS_BOOT_ID, slot.label, slot.target_s,
-        slot.due_at, slot.status, slot.miss_reason,
+        slot.due_at,
+        snap.observation_channel if snap else ObservationChannel.LEGACY_COMPARABLE_BOOK_PATH,
+        snap.transport if snap else Transport.HTTP_GET,
+        snap.feed_identity if snap else None,
+        slot.status, slot.miss_reason,
         req.wall if req else None, req.monotonic if req else None,
-        resp.wall if resp else None, resp.monotonic if resp else None, actual,
+        resp.wall if resp else None, resp.monotonic if resp else None,
+        stream.wall if stream else None, stream.monotonic if stream else None,
+        actual,
         snap.venue_snapshot_ts if snap else None,
         snap.venue_sequence if snap else None,
         snap.provenance if snap else None,

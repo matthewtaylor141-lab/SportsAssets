@@ -233,7 +233,7 @@ def test_c7_no_rail_no_name_no_field_no_word_no_migration():
     assert "future_clock" not in src and "lane_7" not in src
     migs = sorted(p.name for p in (ROOT / "backend" / "migrations").glob("*.sql"))
     # no migration from this lane: the newest file is lane 9's 061 (landed after), none names the clock
-    assert migs[-1] == "061_fill_answers_cause_orders_fast.sql" and not [m for m in migs if "tick_clock" in m or "lane_7" in m or "now_ts" in m]
+    assert migs[-1] == "062_rn1_observability.sql" and not [m for m in migs if "tick_clock" in m or "lane_7" in m or "now_ts" in m]  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
     assert "future" not in ml.CENSUS_KEYS and "clock" not in ml.CENSUS_KEYS
 
 

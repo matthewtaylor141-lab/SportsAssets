@@ -149,14 +149,34 @@ CREATE TABLE IF NOT EXISTS rn1_obs_snapshots (
     offset_target_s     NUMERIC(12,6) NOT NULL,
     scheduled_for_monotonic NUMERIC(20,9) NOT NULL,
 
+    -- ---- WHICH CHANNEL SAW THIS, AND HOW --------------------------------
+    -- LEGACY_COMPARABLE_BOOK_PATH is the raw CLOB /book HTTP read. It is here
+    -- because U2 -- the population 81A, 81B and 82 all measured -- was built
+    -- from that endpoint's ladders, so a curve read this way is the SAME
+    -- QUANTITY as the historical measurement and can be compared to it.
+    --
+    -- IT IS NOT the fastest path available and it is NOT the earliest
+    -- actionable market state. Naming the channel on every row is what keeps
+    -- those three ideas apart: when a streaming channel is added later, the two
+    -- can be compared against each other instead of silently pooled into one
+    -- average that belongs to neither.
+    observation_channel TEXT        NOT NULL,
+    transport           TEXT        NOT NULL,   -- http_get | websocket_stream
+    feed_identity       TEXT,                   -- endpoint or feed this came from
+
     status              TEXT        NOT NULL,   -- CAPTURED | MISSED_WINDOW | VENUE_ERROR
                                                 -- | NOT_ATTEMPTED | SKIPPED_PACING
     miss_reason         TEXT,
 
+    -- A request/response pair belongs to a polled channel; a stream receive
+    -- belongs to a pushed one. Both are present and both are nullable, so a
+    -- streaming row is not forced to invent a request it never made.
     request_start_wall  TIMESTAMPTZ,
     request_start_monotonic NUMERIC(20,9),
     response_wall       TIMESTAMPTZ,
     response_monotonic  NUMERIC(20,9),
+    stream_receive_wall TIMESTAMPTZ,
+    stream_receive_monotonic NUMERIC(20,9),
     -- The ACTUAL offset achieved, measured monotonically. Analysis uses this,
     -- never offset_target_s -- the target is what was asked for and this is what
     -- happened, and conflating them is how a scheduler's jitter disappears.
@@ -178,7 +198,15 @@ CREATE TABLE IF NOT EXISTS rn1_obs_snapshots (
 
     CONSTRAINT rn1_obs_snapshots_status_ck
         CHECK (status IN ('CAPTURED', 'MISSED_WINDOW', 'VENUE_ERROR',
-                          'NOT_ATTEMPTED', 'SKIPPED_PACING'))
+                          'NOT_ATTEMPTED', 'SKIPPED_PACING')),
+    -- An unnamed channel is refused rather than defaulted. A row whose channel
+    -- had to be guessed later is a row that will end up averaged with the wrong
+    -- ones.
+    CONSTRAINT rn1_obs_snapshots_channel_ck
+        CHECK (observation_channel IN ('LEGACY_COMPARABLE_BOOK_PATH',
+                                       'FAST_STREAM_PATH')),
+    CONSTRAINT rn1_obs_snapshots_transport_ck
+        CHECK (transport IN ('http_get', 'websocket_stream'))
 );
 
 -- One row per offset per event: this is what makes a replay idempotent.

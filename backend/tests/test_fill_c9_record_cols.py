@@ -92,7 +92,8 @@ def test_c9_061_exists_sorts_last_after_060_and_is_four_nullable_add_column_if_n
     assert SQL_061.exists()
     files = [x.name for x in sorted(MIG_DIR.glob("*.sql"))]
     i = files.index("060_mirror_fill_answers.sql")
-    assert files[i + 1] == "061_fill_answers_cause_orders_fast.sql" == files[-1]
+    assert files[i + 1] == "061_fill_answers_cause_orders_fast.sql"
+    assert files[-1] == "062_rn1_observability.sql"  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
     assert sum(f.startswith("061_") for f in files) == 1
     sql = SQL_061.read_text()
     assert sql.splitlines()[0].startswith("-- 061: THE RECORD'S COLUMNS (2026-09-09; FILL program lane 9")

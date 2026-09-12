@@ -723,7 +723,7 @@ def test_e29_the_census_place_the_emit_sites_the_rails_and_no_migration():
     rsrc = inspect.getsource(rules)
     assert rsrc.count("capped_env(") == 26 and rsrc.count("min_wait_env(") == 8 and rsrc.count("env_switch(") == 8
     assert "HAND_EXIT_MEMO_MAX" not in rsrc and ml.HAND_EXIT_MEMO_MAX == 500
-    assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("061_")
+    assert sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))[-1].startswith("062_")  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
     assert "hand" not in (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "hand_held" not in inspect.getsource(rules.order_decision)
 

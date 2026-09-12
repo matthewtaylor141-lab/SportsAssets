@@ -920,7 +920,7 @@ def test_e27_no_census_name_no_migration_render_ops_hashed_as_left_and_the_sites
     # no migration (061 the newest); render-ops.yml as this lane leaves it (take-band's third statement); 059's
     # comment as lane 2 left it
     files = sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))
-    assert files[-1] == "061_fill_answers_cause_orders_fast.sql"
+    assert files[-1] == "062_rn1_observability.sql"  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
     assert _sha_file(ROOT / ".github" / "workflows" / "render-ops.yml") == RENDER_OPS_SHA
     assert _sha_file(ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql") == MIGRATION_059_SHA
     sql = (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()

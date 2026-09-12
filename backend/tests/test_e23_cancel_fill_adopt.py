@@ -828,7 +828,7 @@ def test_e23_the_census_place_the_emit_sites_the_untouched_functions_and_no_knob
     mig = (ROOT / "backend" / "migrations" / "059_mirror_orders_send_record.sql").read_text()
     assert "cancel_fill" not in mig and "disagree_fill" not in mig
     files = sorted(x.name for x in (ROOT / "backend" / "migrations").glob("*.sql"))
-    assert files[-1] == "061_fill_answers_cause_orders_fast.sql"
+    assert files[-1] == "062_rn1_observability.sql"  # re-pinned 2026-09-12: run 83's 062 is the newest; this lane still adds none
     # no knob, no rail of the lane's own: E22's wait alone
     rsrc = inspect.getsource(rules)
     assert "CANCEL_FILL" not in rsrc and "DISAGREE_FILL" not in rsrc and "E23" not in rsrc
