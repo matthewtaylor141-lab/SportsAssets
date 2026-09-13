@@ -29,6 +29,18 @@ on:
       expected_archive_sha256:
         description: "archive SHA-256 from the capture runner (from ARCHIVE.sha256)"
         required: true
+      artifact_name:
+        description: "artifact to fetch"
+        required: true
+        default: "RUN85_PHASE2A_EVIDENCE"
+      archive_glob:
+        description: "archive filename glob inside the artifact"
+        required: true
+        default: "run85_phase2a_*.tar.gz"
+      source_workflow:
+        description: "workflow path the run must come from (provenance gate)"
+        required: true
+        default: ".github/workflows/run85-phase2a.yml"
 
 permissions:
   # contents: write is required ONLY to commit the evidence file. It is the
@@ -52,7 +64,7 @@ jobs:
       - name: Download the calibration evidence
         uses: actions/download-artifact@v4
         with:
-          name: RUN85_PHASE2A_EVIDENCE
+          name: ${{ inputs.artifact_name }}
           run-id: ${{ inputs.run_id }}
           github-token: ${{ github.token }}
           path: incoming
@@ -75,7 +87,7 @@ jobs:
                  "SOURCE_EVENT        = \(.event)",
                  "SOURCE_CONCLUSION   = \(.conclusion)",
                  "SOURCE_CREATED_AT   = \(.created_at)"' /tmp/run.json
-          if [ "$(jq -r '.path' /tmp/run.json)" != ".github/workflows/run85-phase2a.yml" ]; then
+          if [ "$(jq -r '.path' /tmp/run.json)" != "${{ inputs.source_workflow }}" ]; then
             echo "RUN85_ARTIFACT_PROVENANCE = FAIL (not the calibration workflow)"; exit 1
           fi
           echo "RUN85_ARTIFACT_PROVENANCE = OK"
@@ -84,7 +96,7 @@ jobs:
         run: |
           set -euo pipefail
           cd incoming
-          ARCHIVE="$(ls -1 run85_phase2a_*.tar.gz | tail -n1)"
+          ARCHIVE="$(ls -1 ${{ inputs.archive_glob }} | tail -n1)"
           echo "=== tar member listing ==="
           tar -tvzf "$ARCHIVE"
           # Reject absolute paths, traversal, links and special files. An
@@ -103,7 +115,7 @@ jobs:
           set -euo pipefail
           cd incoming
           ls -la
-          ARCHIVE="$(ls -1 run85_phase2a_*.tar.gz | tail -n1)"
+          ARCHIVE="$(ls -1 ${{ inputs.archive_glob }} | tail -n1)"
           ACTUAL="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
           echo "archive         = $ARCHIVE"
           echo "size_bytes      = $(stat -c%s "$ARCHIVE")"
@@ -122,8 +134,11 @@ jobs:
           set -euo pipefail
           mkdir -p research/evidence
           cp "incoming/${{ steps.verify.outputs.archive }}" research/evidence/
-          for f in run85_terminal_report.txt ARCHIVE.sha256; do
-            if [ -f "incoming/$f" ]; then cp "incoming/$f" "research/evidence/run85_$f"; fi
+          for f in incoming/*.txt incoming/ARCHIVE.sha256; do
+            [ -f "$f" ] || continue
+            b="$(basename "$f")"
+            case "$b" in run85_*) cp "$f" "research/evidence/$b" ;;
+                         *) cp "$f" "research/evidence/run85_$b" ;; esac
           done
           # Re-hash AFTER the copy: proving the committed file is the verified
           # file, not merely that a verified file once existed on this runner.
