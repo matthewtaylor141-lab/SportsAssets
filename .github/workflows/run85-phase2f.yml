@@ -1,0 +1,112 @@
+# RUN 85 PHASE 2D -- game-level market discovery.
+#
+# Phase 2C reached 150 markets and every one was `futures` or `election`. This
+# job finds out whether game-level markets exist on the public gateway at all,
+# and why the Phase 2C discovery never saw one.
+#
+# CAPABILITY BOUNDARY, as authorized. GET only. Public gateway
+# (gateway.polymarket.us) only -- never api.polymarket.us. No credential, no
+# repository secret, no wallet, no signer, no authentication header, no trading
+# SDK, no order or cancel endpoint, no POST/PUT/PATCH/DELETE. Aggregate request
+# rate is held at 0.5 rps by the Phase 2B AdaptivePacer, which honours
+# Retry-After exactly and never probes for the limit. mirror_live stays false;
+# this job cannot reach anything that could change it.
+#
+# HARD DISCOVERY BOUND, disclosed in the driver before it runs: at most 120
+# venue requests, 24 discovery pages, 8 detail confirmations, 36 calibration
+# reads. The driver raises and stops rather than exceed the bound.
+#
+# NO PROFITABILITY ANALYSIS. Nothing here computes an expectancy, a fill, or a
+# fee-adjusted figure, and no multi-day capture is started.
+#
+# The job runs the offline tests FIRST and refuses to contact the venue if any
+# fails -- the classifier's refusal to infer a market type from a slug is the
+# load-bearing rule of the whole run, and it is checked before the run buys
+# anything with it.
+
+name: run85-phase2f
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: run85-phase2f
+  cancel-in-progress: false
+
+jobs:
+  discover:
+    runs-on: ubuntu-latest
+    timeout-minutes: 40
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency
+        run: python -m pip install --quiet "httpx==0.27.2"
+
+      - name: Offline tests must pass before any venue contact
+        run: |
+          set -euo pipefail
+          python research/test_run85_phase2f.py
+          python research/test_run85_phase2e.py
+          python research/test_run85_phase2d.py
+          python research/test_run85_phase2c.py
+          python research/test_run85_phase2b.py
+          python research/test_run85_pmus_collector.py
+
+      - name: Confirm the job carries no credential
+        run: |
+          set -euo pipefail
+          # The capability boundary is physical here: this job is given no
+          # secret to leak. Assert the env is clean rather than trusting it.
+          python - <<'PY'
+          import os, sys
+          bad = [k for k in os.environ
+                 if any(t in k.upper() for t in
+                        ("POLYMARKET", "PRIVATE_KEY", "SIGNER", "WALLET",
+                         "RENDER", "DATABASE_URL", "PMUS_"))]
+          if bad:
+              print("CREDENTIAL_PRESENT_IN_ENV: %s" % sorted(bad))
+              sys.exit(1)
+          print("NO_CREDENTIAL_IN_ENV = CONFIRMED")
+          PY
+
+      - name: Phase 2F discovery
+        run: |
+          set -euo pipefail
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "RUN85_PHASE2F_STAMP=$STAMP" >> "$GITHUB_ENV"
+          OUT="run85_phase2f_${STAMP}"
+          echo "RUN85_PHASE2F_OUT=$OUT" >> "$GITHUB_ENV"
+          # The driver owns its own terminal report and closes it before
+          # hashing, so the recorded digest binds the bytes. No tee: Phase 2A
+          # sealed a report mid-tee and recorded the empty-string hash.
+          python research/run85_phase2f.py --out "$OUT"
+
+      - name: Archive and hash
+        run: |
+          set -euo pipefail
+          OUT="${RUN85_PHASE2F_OUT}"
+          tar -czf "${OUT}.tar.gz" "$OUT"
+          sha256sum "${OUT}.tar.gz" | tee ARCHIVE.sha256
+          echo "=== archive contents ==="
+          tar -tvzf "${OUT}.tar.gz"
+          echo "=== terminal report ==="
+          cat "${OUT}/run85_terminal_report.txt"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RUN85_PHASE2F_EVIDENCE
+          path: |
+            run85_phase2f_*.tar.gz
+            ARCHIVE.sha256
+          retention-days: 7

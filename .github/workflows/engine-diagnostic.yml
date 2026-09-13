@@ -48,6 +48,7 @@ on:
       - ".github/workflows/run85-phase2c.yml"
       - ".github/workflows/run85-phase2d.yml"
       - ".github/workflows/run85-phase2e.yml"
+      - ".github/workflows/run85-phase2f.yml"
       # And this file. paths-ignore skips a run only when EVERY changed file
       # matches, so without this line a commit that merely edits the probe's
       # own trigger config fires the probe -- which is exactly the spend the
