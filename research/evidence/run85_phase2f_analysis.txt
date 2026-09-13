@@ -1,0 +1,273 @@
+RUN 85 PHASE 2F -- ANALYSIS OF THE FROZEN CLOSURE RUN
+archive : run85_phase2f_20260913T152948Z
+NOTHING IN THIS FILE CONTACTS THE VENUE.
+
+=== 1. IDENTITY ===
+verdicts {'IDENTITY_MATCH': 20}  collisions 0  responses carrying an event id 0
+DETAIL_ROUTE_IDENTITY_VERIFIED = YES (market slug)
+EVENT_ID_ROUTE_IDENTITY        = NOT_IDENTIFIED (venue returns none)
+
+=== 2b. PAGINATION ===
+offset advanced=True overlap=0
+EVENT_PAGINATION_VERIFIED = YES
+
+=== 2. FRESHNESS -- SALVAGED FROM THE SEALED BODIES ===
+  THE DRIVER'S PROBE WAS BROKEN. It looked for a `marketBbo`/`bbo`
+  key; the bbo route wraps its payload in `marketData`, the same
+  envelope as the book. Every cross-route comparison came back
+  NOT_IDENTIFIED and the run's own freshness verdict is empty.
+  The raw bodies were sealed, so the comparison is recoverable here
+  without another venue call -- and it is redone from those bytes.
+
+  aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi
+     r0 book 0.7200 /0.7300   bbo 0.7200 /0.7300  depth 21/6  tt=15:21:29.162 -> UNCHANGED_BOOK_VALID
+     r1 book 0.7200 /0.7300   bbo 0.7200 /0.7300  depth 21/6  tt=15:21:29.162 -> UNCHANGED_BOOK_VALID
+     r2 book 0.7200 /0.7300   bbo 0.7200 /0.7300  depth 21/6  tt=15:21:29.162 -> UNCHANGED_BOOK_VALID
+     r3 book 0.7200 /0.7300   bbo 0.7200 /0.7300  depth 21/6  tt=15:21:29.162 -> UNCHANGED_BOOK_VALID
+     r4 book 0.7200 /0.7300   bbo 0.7200 /0.7300  depth 21/6  tt=15:21:29.162 -> UNCHANGED_BOOK_VALID
+
+  aec-nfl-bal-ind-2026-09-13
+     r0 book 0.6050 /0.6100   bbo 0.6050 /0.6100  depth 35/32  tt=15:30:52.402 -> UNCHANGED_BOOK_VALID
+     r1 book 0.6050 /0.6100   bbo 0.6050 /0.6100  depth 35/32  tt=15:31:22.327 -> UNCHANGED_BOOK_VALID
+     r2 book 0.6050 /0.6100   bbo 0.6050 /0.6100  depth 35/32  tt=15:31:22.327 -> UNCHANGED_BOOK_VALID
+     r3 book 0.6050 /0.6100   bbo 0.6050 /0.6100  depth 35/32  tt=15:31:53.449 -> UNCHANGED_BOOK_VALID
+     r4 book 0.6050 /0.6100   bbo 0.6050 /0.6100  depth 35/33  tt=15:32:21.793 -> CHANGED_BOOK_VALID
+
+  aec-nfl-chi-car-2026-09-13
+     r0 book 0.6000 /0.6050   bbo 0.6000 /0.6050  depth 32/32  tt=15:30:47.361 -> UNCHANGED_BOOK_VALID
+     r1 book 0.6000 /0.6050   bbo 0.6000 /0.6050  depth 32/31  tt=15:31:16.355 -> CHANGED_BOOK_VALID
+     r2 book 0.6000 /0.6050   bbo 0.6000 /0.6050  depth 32/31  tt=15:31:16.355 -> UNCHANGED_BOOK_VALID
+     r3 book 0.6000 /0.6050   bbo 0.6000 /0.6050  depth 32/31  tt=15:31:46.601 -> UNCHANGED_BOOK_VALID
+     r4 book 0.6000 /0.6050   bbo 0.6000 /0.6050  depth 32/31  tt=15:32:18.480 -> UNCHANGED_BOOK_VALID
+
+  atc-uecl-ggk-zil-2026-07-30-draw
+     r0 book None   /None     bbo None   /None    depth 0/0  tt=20:22:36.594 -> NOT_IDENTIFIED
+     r1 book None   /None     bbo None   /None    depth 0/0  tt=20:22:36.594 -> NOT_IDENTIFIED
+     r2 book None   /None     bbo None   /None    depth 0/0  tt=20:22:36.594 -> NOT_IDENTIFIED
+     r3 book None   /None     bbo None   /None    depth 0/0  tt=20:22:36.594 -> NOT_IDENTIFIED
+     r4 book None   /None     bbo None   /None    depth 0/0  tt=20:22:36.594 -> NOT_IDENTIFIED
+
+cross-route touch: AGREE 15   DISAGREE 0
+observation classes: {'UNCHANGED_BOOK_VALID': 13, 'CHANGED_BOOK_VALID': 2, 'NOT_IDENTIFIED': 5}
+
+transactTime vs stats.lastPriceSample.ts on this run's book reads:
+   EQUAL 15   UNEQUAL 0   lastPriceSample ABSENT 5
+
+  The runner reported '15 of 20' because it folded ABSENT into
+  unequal. All 5 absent readings are ONE market with an empty book
+  (atc-uecl-ggk-zil-2026-07-30-draw, a six-week-old soccer draw with
+  no ladder on either side), where the venue supplies no price sample
+  at all. Where the field EXISTS the identity holds 15 of 15, which
+  with the 262 of 262 from the sealed 2C/2D/2E archives leaves the
+  semantics unchanged:
+
+  TRANSACTTIME_SEMANTICS = LAST_PRICE_SAMPLE_TIMESTAMP
+     not last-mutation, not response-generation, not cache time.
+     Where lastPriceSample is absent, transactTime is NOT_IDENTIFIED
+     rather than contradicting.
+
+  FRESHNESS READING. Two independently-served routes -- /book and
+  /bbo -- were read back to back 15 times. The touch agreed on every
+  measurable pair and disagreed on none. That is corroboration from a
+  second path, which is what transactTime age could never provide.
+
+  It is NOT proof of freshness in the strong sense: both routes could
+  share one upstream. What it rules out is the specific failure that
+  would wreck a markout -- one route serving a book the other has
+  already moved past.
+
+PUBLIC_BOOK_FRESHNESS_SUFFICIENT_FOR_OBSERVATIONAL_RESEARCH = YES
+
+=== 3/7. COHORT AND DIVERSITY ===
+walk stop=DIVERSITY_CRITERION_MET pages=6 game_events=16
+sport buckets in frame=['nfl', 'other', 'soccer']  ticks=['0.005', '0.01']  price bands=['P_HIGH', 'P_LOW', 'P_MID']
+frame states={'PREGAME': 15, 'ENDED': 1}  live events=0
+
+market                                       sport   state    mid     tick    band     queue      
+aec-nfl-chi-car-2026-09-13                   nfl     PREGAME  0.6025  0.005   P_MID    BALANCED   
+aec-boxing-canalv-chrmbi-2026-10-31-canalv-c boxing  PREGAME  0.7250  0.01    P_MID    ASK_HEAVY  
+aec-nfl-bal-ind-2026-09-13                   nfl     PREGAME  0.6075  0.005   P_MID    BALANCED   
+aec-nfl-atl-pit-2026-09-13                   nfl     PREGAME  0.2775  0.005   P_MID    BALANCED   
+aec-nfl-cle-jax-2026-09-13                   nfl     PREGAME  0.2125  0.005   P_MID    BALANCED   
+aec-nfl-tb-cin-2026-09-13                    nfl     PREGAME  0.3625  0.005   P_MID    BALANCED   
+aec-nfl-nyj-ten-2026-09-13                   nfl     PREGAME  0.4875  0.005   P_MID    BALANCED   
+aec-nfl-no-det-2026-09-13                    nfl     PREGAME  0.2525  0.005   P_MID    BALANCED   
+
+sport buckets {'nfl': 7, 'other': 1}
+tick sizes    {'0.005': 7, '0.01': 1}
+price bands   {'P_MID': 8}
+queue classes {'BALANCED': 7, 'ASK_HEAVY': 1}
+states        {'PREGAME': 8}
+
+  Against section 3's named targets:
+    nfl      PRESENT
+    cfb      ABSENT at this instant
+    mlb      ABSENT at this instant
+    soccer   ABSENT at this instant
+    other    PRESENT
+    LIVE_COHORT_AVAILABLE = NO_AT_OBSERVATION_TIME
+
+GAME_LEVEL_COHORT_DIVERSITY = INSUFFICIENT
+
+=== 5. DRAINED-PACER SCHEDULER ===
+drain slept 2.486 s; residual debt after drain 0.0000 s -> DRAINED_PACER_VERIFIED = YES
+plan 10 reads over 62.5 s at 0.160 rps; throttled during test: False
+
+horizon      n     median        p90        p95        max   valid snapshots
+5            2      2.8ms      3.3ms      3.3ms      3.3ms   2/2
+10           2      0.9ms      1.4ms      1.4ms      1.4ms   2/2
+30           2      3.5ms      6.8ms      6.8ms      6.8ms   2/2
+60           2      4.9ms      7.8ms      7.8ms      7.8ms   2/2
+
+  Phase 2E's 5 s lag error was 575 ms median and 2.6 s at the first
+  read, a decaying startup debt. Draining the pacer before t0 takes it
+  to a few milliseconds. The defect is fixed at its cause.
+
+BOOK_CHANGED_BY_HORIZON -- descriptive, never a filter:
+    5s  0 of 2 observations differed from t0
+   10s  0 of 2 observations differed from t0
+   30s  2 of 2 observations differed from t0
+   60s  2 of 2 observations differed from t0
+
+  Per the corrected semantics, an unchanged book at a horizon is an
+  observation whose markout is ZERO. The rate above describes the
+  market; it does not select the sample and must never be used to.
+
+=== 6. RATE ===
+NOMINAL_RPS  = 0.40 (2.5 s spacing)
+ACHIEVED_RPS = 0.3393 over 247.5 s, 84 requests
+HTTP_429_COUNT = 0
+
+  Zero 429s at 0.4 rps, where 0.5 rps produced one on each of the two
+  preceding runs. That is consistent with the lower operating point
+  being safer and is NOT evidence of where the limit sits: one clean
+  run does not establish a rate. RPS_LIMIT_NOT_ESTABLISHED stands.
+
+=== 11. PHASE 2F FINAL VERDICTS ===
+DETAIL_ROUTE_IDENTITY_VERIFIED = YES
+EVENT_PAGINATION_VERIFIED      = YES
+GAME_LEVEL_COHORT_DIVERSITY    = INSUFFICIENT
+PUBLIC_BOOK_FRESHNESS_SUFFICIENT_FOR_OBSERVATIONAL_RESEARCH = YES
+TRANSACTTIME_SEMANTICS         = LAST_PRICE_SAMPLE_TIMESTAMP
+DRAINED_PACER_VERIFIED         = YES
+EXACT_5S_REQUEST_PLACEMENT_VERIFIED = YES (median 2.8 ms, max 3.3 ms)
+EXACT_5S_VALID_STATE_OBSERVATION_VERIFIED = YES (2/2)
+BOOK_CHANGED_WITHIN_5S_RATE    = 0 / 2
+HTTP_429_COUNT                 = 0
+PASSIVE_REALIZABLE_EDGE        = NOT_IDENTIFIED
+PMUS_FEES_RESOLVED             = NO
+READY_FOR_MULTI_DAY_PHASE2_CAPTURE = NO
+
+APPROVAL GATE, ITEM BY ITEM:
+   1 market identity verified           PASS
+   2 offset pagination verified         PASS
+   3 cohort genuinely diverse           FAIL
+   4 public book trustworthy            PASS
+   5 drained-pacer scheduling works     PASS
+   6 evidence integrity                 PASS
+
+  WHY GATE 3 FAILED, AND IT IS MY DEFECT AGAIN IN THE SAME SHAPE.
+
+  The frame this run built WAS diverse: sport buckets nfl, soccer
+  and other; tick sizes 0.005 and 0.01; price bands P_LOW, P_MID
+  and P_HIGH. The walk stopped the moment the FRAME satisfied the
+  criterion -- and the criterion was written against the frame.
+
+  But the frame is not the deliverable; the COHORT is. Selection
+  then round-robined over (sport bucket, state) across only 16
+  game events, most of them NFL, and produced 7 NFL plus 1 boxing,
+  every one P_MID and every one PREGAME.
+
+  Phase 2E stopped on 'events and sports' when the cohort needed
+  regimes. Phase 2F stopped on frame composition when the cohort
+  still needed regimes. Same error, one level further in: a stop
+  rule must be written against the thing that has to be diverse,
+  and the thing that has to be diverse is the SELECTED COHORT.
+
+  The fix is small and specific: keep walking until a TRIAL
+  SELECTION run over the current frame clears the diversity bar,
+  not until the frame does. That is a one-function change to the
+  stop condition and it is not applied to this sealed run.
+
+  Two named unavailabilities are NOT defects and must not be
+  papered over by a rule change: no CFB or MLB game-level event
+  and no LIVE event existed in the frame at 15:29Z on a Sunday
+  morning UTC. Section 3 says report unavailable categories
+  rather than force them, so they are reported.
+
+=== 9. FROZEN MULTI-DAY CAPTURE DESIGN (for approval; NOT started) ===
+
+SCOPE. Observational only. GET on the public gateway, no credential,
+no websocket, no order path, mirror_live stays false.
+
+RATE. 0.4 rps nominal, 2.5 s spacing floor, Retry-After honoured in
+full, backoff x2 on 429 to a 30 s ceiling, recovery x0.9 per success
+only. Pacer drained before every timed plan. No rate discovery.
+
+COHORT. Re-selected at the start of each capture day by the frozen
+2F rule: event-level frame over offset pagination, round-robin across
+(sport bucket, normalized state) strata, one market per native event,
+ordered by native event id. A null primaryTag is not a sport.
+Target 8 markets; re-selection is by rule, never by hand.
+
+SAMPLING. Horizon-specific, not one uniform round robin. Per subject,
+an observation SET is t0 then t0+5, +10, +30, +60 s, placed exactly
+and checked against the spacing floor and the mean ceiling BEFORE
+running; a plan that breaches either is not trimmed, it is refused.
+Sets repeat on a rotation so each market contributes to the horizons
+its schedule actually reached. A market may contribute to some
+horizons and not others. NOTHING IS EVER INTERPOLATED.
+
+PER OBSERVATION, RECORD:
+     * local request and response wall clock, and monotonic
+     * http status, response bytes, response sha256
+     * venue transactTime AND stats.lastPriceSample.ts
+     * full normalized ladder plus its sha256
+     * best bid, best ask, displayed spread
+     * touch quantity and notional, both sides
+     * cumulative quantity and notional within 0/1/2/5 ticks
+     * the market's own tick size, on every row
+     * raw period, normalized state, and the justification
+     * scheduled game start, event start, endDate -- kept separate
+     * a paired /bbo read for the freshness cross-check
+     * market state and event id from the frame
+
+DERIVABLE LATER, AND ONLY LATER:
+  displayed passive spread; a hypothetical resting quote at the touch
+  or one tick behind; whether the market traded through that price;
+  near-touch queue state ahead of it; one-leg versus both-leg
+  opportunity; 5/10/30/60 s adverse movement; incomplete-pair
+  exposure; residual settlement outcome where the venue publishes it.
+
+THE LINE THAT MUST NOT BE CROSSED:
+  PASSIVE_TOUCH_PROXY       = the market reached our hypothetical price
+  PASSIVE_FILL_PROBABILITY  = NOT_IDENTIFIED
+  Touching a price does not prove an order there would have filled.
+  Queue position, the size ahead, and whether the print consumed our
+  level are all unobserved from public data. The capture measures the
+  proxy and names it a proxy, everywhere, permanently.
+
+PROFITABILITY REGISTER. The dataset exists to estimate
+  GROSS_SPREAD_CAPTURE - ADVERSE_SELECTION - INCOMPLETE_PAIR_RESIDUAL
+  - FEES
+Displayed spread is NOT profit. Until the fee formula is resolved the
+only two figures that may be computed are:
+  PRE_FEE_EXPECTANCY      the first three terms, fees excluded
+  BREAK_EVEN_TOTAL_FEE    the total fee per share that would take
+                          PRE_FEE_EXPECTANCY to zero
+No borrowed fee formula. The 0.06 coefficient is a FIELD, not a rule.
+
+INTEGRITY. Every day's output sealed with per-file sha256 written
+after the report is closed, couriered into the repo unmodified, and
+re-verified by the analyst in its own process before use.
+
+STOP CONDITIONS. Halt and report on: any 429 rate above 1%% of
+requests; any cross-route touch disagreement above 1%%; any identity
+mismatch or body collision; any venue state change that invalidates
+the cohort. Do not adapt silently.
+
+  THE DESIGN ABOVE IS A DRAFT, NOT THE FROZEN PLAN. It is shown
+  because every part of it except cohort selection is settled by
+  this run's evidence, and withholding it would hide work that is
+  already done. It becomes the frozen plan only once gate 3
+  closes. No capture is started either way.
