@@ -369,8 +369,24 @@ def discover(out, http, pacer, log, want):
         c["complement_class"] = "BINARY_COMPLEMENT_VERIFIED"
         c["long_side"] = sides["long"].get("identifier")
         c["short_side"] = sides["short"].get("identifier")
-        c["market_type"] = detail.get("sportsMarketType") or detail.get("type")
-        c["market_state"] = detail.get("state")
+        c["market_type"] = (detail.get("sportsMarketType")
+                            or detail.get("marketType") or detail.get("type"))
+        c["market_state"] = detail.get("status") or detail.get("state")
+        # TICK SIZE AND FEE COEFFICIENT ARE ON THE WIRE, per market.
+        # Phase 2A reported tick size NOT_IDENTIFIED because it looked in the
+        # book payload and the SDK's types; both carry it in the MARKET DETAIL
+        # as orderPriceMinTickSize (0.001 on the probed markets). Section 11
+        # forbids manufacturing a tick, so capturing the venue's own value is
+        # what makes the one-tick-behind measurement legitimate rather than
+        # invented. feeCoefficient (0.06) rides along for the fee track: the
+        # COEFFICIENT is the venue's, the p(1-p) FORM is borrowed from another
+        # venue's published schedule and is NOT verified for PMUS.
+        c["order_price_min_tick_size"] = detail.get("orderPriceMinTickSize")
+        c["fee_coefficient"] = detail.get("feeCoefficient")
+        c["minimum_trade_qty"] = detail.get("minimumTradeQty")
+        c["best_bid_quote"] = detail.get("bestBidQuote")
+        c["best_ask_quote"] = detail.get("bestAskQuote")
+        c["market_detail_keys"] = sorted(detail.keys())
         verified.append(c)
     print("BINARY_COMPLEMENT_VERIFIED: %d" % len(verified))
 
@@ -426,6 +442,8 @@ def sample(out, http, pacer, markets, seconds, label, fh, log):
                 x["event_id"] = m["event_id"]
                 x["event_slug"] = m["event_slug"]
                 x["regime_slot"] = m.get("regime_slot")
+                x["tick_size"] = m.get("order_price_min_tick_size")
+                x["fee_coefficient"] = m.get("fee_coefficient")
                 x["phase"] = PHASE
                 if x.get("http_status") == 200:
                     v = book_view(x.get("body"))
