@@ -177,7 +177,26 @@ RUN 84 -- NATIVE MATCHED-PAIR MECHANISM (UPPER BOUND)
 VERDICTS
 ====================================================================
 RUN84_ANALYSIS_COMPLETE              = YES (on retained data; see LIMITS)
-NATIVE_MATCHED_PAIR_EDGE             = CONTRADICTED
+NATIVE_MATCHED_PAIR_EDGE             = CONTRADICTED for AGGRESSIVE
+                                       acquisition (regime D);
+                                       NOT_IDENTIFIED for PASSIVE (A/B/C)
+
+   That split is not hedging, and the passive half is the more important
+   half. The measured quantity is a CROSS of about +2.19 cents: a taker
+   who lifts both asks pays it, and a maker who rests on both sides and
+   is filled would EARN it. So the one regime this data cannot test is
+   precisely the one the measurement points toward, and no bid was ever
+   retained -- the gap is total, not partial.
+
+   It does not follow that the passive pair is profitable, and BETTOR
+   already holds production evidence against assuming so. The E14
+   measurement found our at-his-price fills systematically adverse:
+   filled roi -0.0061 against missed +0.1669. A resting quote is filled
+   BY someone, and in these markets that someone is informed flow. A
+   maker earns the spread only on the fills that were not worth having.
+   Testing it needs bid data BETTOR has never retained; it cannot be
+   settled by re-reading what is already here.
+
 RN1_SIGNAL_ADDS_INCREMENTAL_VALUE    = NOT_IDENTIFIED
 POSITIVE_EXPECTANCY_AFTER_EXECUTION  = CONTRADICTED
 POSITIVE_FINAL_HOLDOUT               = NO
