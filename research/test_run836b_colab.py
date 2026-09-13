@@ -170,6 +170,11 @@ httpx = types.ModuleType("httpx")
 httpx.Client = _Client
 sys.modules["httpx"] = httpx
 """
+    # The stub is prepended, so the module's own `from __future__` line would
+    # no longer be first in the file. Drop it: it affects only annotations,
+    # which this test does not exercise.
+    src = "\n".join(ln for ln in src.split("\n")
+                    if not ln.startswith("from __future__"))
     runner = tmp_path / "sel.py"
     runner.write_text(stub + "\n" + src + "\nprint('TOKENS=' + json.dumps(TOKEN_IDS))\n")
     return subprocess.run([sys.executable, str(runner)], cwd=tmp_path,
@@ -290,7 +295,8 @@ def test_9d_the_gate_uses_only_field_names_the_current_sdk_declares():
         "acceptingOrders", "enableOrderBook", "active", "closed",
         "clobTokenIds", "clob_token_ids", "volume24hr", "volume24hrClob",
         "volumeNum", "volume", "liquidityNum", "liquidity",
-        "gameStartTime", "sportsMarketType", "events", "tags",
+        "gameStartTime", "sportsMarketType", "gameId", "conditionId",
+        "questionID", "questionId", "ticker", "events", "tags",
         "slug", "question", "description", "category", "seriesSlug",
         # nested event / tag
         "id", "title", "label",
