@@ -5,7 +5,7 @@
  "end_utc": "2026-09-20T16:00:00Z",
  "note": "The frozen seven-day observational window. The capture workflow refuses to contact the venue outside it, so the capture stops on its own rather than on someone remembering to stop it. Widening this file widens the capture; that is a deliberate, reviewable edit, not a runtime decision.",
  "proof_segment_verified": false,
- "proof_gate_note": "PROOF_REQUIRED_BEFORE_UNATTENDED_CONTINUATION. While this is false the SCHEDULED capture refuses to contact the venue; only a dispatched run may. It is set true once a proof segment has been read end to end -- captured, sealed, digest-verified and committed. The gate lives here rather than in anyone's memory so that the cron cannot start an unattended seven-day run on an unproven path.",
+ "proof_gate_note": "PROOF_REQUIRED_BEFORE_UNATTENDED_CONTINUATION. While this is false the SCHEDULED capture refuses to contact the venue. Manual dispatch stays available because bounded proof and testing runs are separately authorized, not because a dispatch is supervised. This flag is never set by the capture workflow itself: the chain is PROOF RUN -> SEALED EVIDENCE -> AUDIT -> VERIFICATION COMMIT -> GATE OPENED, and only a verification commit made after reading the sealed bytes may flip it.",
  "cohort_file": "run85_phase2_frozen_cohort.json",
  "cohort_sha256": "8cdedf26479a309bf7e22c292ebdd2f562673e2b8dccb2ec2793d9ad29187efe",
  "segment_duration_s": 18000,

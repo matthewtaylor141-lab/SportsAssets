@@ -81,10 +81,11 @@ jobs:
           def ep(s):
               return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
           inside = ep(w["start_utc"]) <= now <= ep(w["end_utc"])
-          # PROOF_REQUIRED_BEFORE_UNATTENDED_CONTINUATION. A dispatched run is
-          # attended by definition -- somebody asked for it and is reading the
-          # result. A SCHEDULED run is the unattended case, and it waits until
-          # a proof segment has actually been read end to end.
+          # PROOF_REQUIRED_BEFORE_UNATTENDED_CONTINUATION. The gate stands in
+          # front of the SCHEDULED path: that is the one that would repeat for
+          # seven days on its own. Manual dispatch is separately and explicitly
+          # authorized for bounded proof and testing runs, which is why it is
+          # not gated here -- not because a dispatch is somehow supervised.
           scheduled = os.environ.get("EVENT_NAME") == "schedule"
           proven = bool(w.get("proof_segment_verified"))
           gate = "open" if (not scheduled or proven) else "awaiting_proof"
@@ -151,10 +152,17 @@ jobs:
           OUT="${RUN85_CAPTURE_OUT}"
           ls -la "$OUT"
           du -sh "$OUT"
-          git -c user.name="Claude" -c user.email="noreply@anthropic.com" \
-              add -- "$OUT"
-          git -c user.name="Claude" -c user.email="noreply@anthropic.com" \
-              commit -m "Run 85 Phase 2 capture: segment ${RUN85_CAPTURE_STAMP} sealed [skip render]" \
+          # The identity belongs to the WHOLE step, not just to `commit`.
+          # Proof run #2 set it with `git -c` on add and commit only; `git pull
+          # --rebase` then REWROTE that commit, found no committer, aborted
+          # with "Committer identity unknown", left a dirty index, and all
+          # three retries died on the leftover rebase state. The capture and
+          # the seal were fine; only the push path was broken. This is a local
+          # repo config, not a global one.
+          git config user.name "Claude"
+          git config user.email "noreply@anthropic.com"
+          git add -- "$OUT"
+          git commit -m "Run 85 Phase 2 capture: segment ${RUN85_CAPTURE_STAMP} sealed [skip render]" \
                      -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>" \
                      -m "Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC"
           # Another session may have pushed while the segment was running. Rebase
@@ -166,6 +174,10 @@ jobs:
               echo "pushed"
               exit 0
             fi
+            # A retry must start from a clean tree. Without this an aborted
+            # rebase poisons every later attempt, which is what turned one
+            # failure in run #2 into four.
+            git rebase --abort 2>/dev/null || true
             sleep $((2 ** i))
           done
           echo "PUSH_FAILED -- the artifact below still carries the bytes"
