@@ -413,16 +413,45 @@ def discover(out, http, pacer, log, want):
         got = pick(nm, kf, rev, nz)
         if got:
             cohort.append(got)
-    cohort = cohort[:want]
-    distinct = len({x["event_id"] for x in cohort})
-    print("cohort: %d markets across %d DISTINCT native events"
-          % (len(cohort), distinct))
+    # LABELS CANNOT OVERLAP. pick() consumes the chosen market's event via
+    # used_events, so each slot draws from an event no earlier slot used and
+    # every selected market carries exactly ONE label. Four filled slots
+    # therefore mean four distinct markets from four distinct events -- the
+    # count of labels is never evidence of the count of markets.
+    #
+    # The cohort cap can still bite: four slots fill and `want` is three. The
+    # earlier version truncated silently, so the fourth market was selected and
+    # then discarded with nothing in selection.json saying so. Everything
+    # selected is now recorded, and anything the cap drops is recorded AS
+    # dropped.
+    sampled, dropped = cohort[:want], cohort[want:]
+    for x in sampled:
+        x["assigned_regime_labels"] = [x["regime_slot"]]
+        x["dropped_by_cohort_cap"] = False
+    for x in dropped:
+        x["assigned_regime_labels"] = [x["regime_slot"]]
+        x["dropped_by_cohort_cap"] = True
+        print("  slot %-13s DROPPED BY COHORT CAP (want=%d): %s"
+              % (x["regime_slot"], want, x["market_slug"]))
+    labels = [x["regime_slot"] for x in sampled]
+    overlap = len(labels) != len(set(labels)) or \
+        len({x["market_slug"] for x in sampled}) != len(sampled)
+    print("UNIQUE_MARKETS_SELECTED = %d" % len({x["market_slug"] for x in sampled}))
+    print("UNIQUE_EVENTS_SELECTED  = %d" % len({x["event_id"] for x in sampled}))
+    print("REGIME_LABELS_FILLED    = %s" % ",".join(labels))
+    print("REGIME_LABELS_DROPPED   = %s"
+          % (",".join(x["regime_slot"] for x in dropped) or "none"))
+    print("REGIME_LABEL_OVERLAP_OCCURRED = %s" % ("YES" if overlap else "NO"))
     (Path(out) / "selection.json").write_text(json.dumps(
         {"phase": PHASE, "events_seen": len(events),
          "candidates": len(cands), "verified": len(verified),
-         "cohort": cohort, "excluded": excluded[:200],
-         "distinct_events_in_cohort": distinct}, indent=2))
-    return cohort
+         "cohort": sampled, "dropped_by_cohort_cap": dropped,
+         "excluded": excluded[:200],
+         "unique_markets_selected": len({x["market_slug"] for x in sampled}),
+         "unique_events_selected": len({x["event_id"] for x in sampled}),
+         "regime_labels_filled": labels,
+         "regime_label_overlap_occurred": overlap}, indent=2))
+    return sampled
 
 
 def sample(out, http, pacer, markets, seconds, label, fh, log):
