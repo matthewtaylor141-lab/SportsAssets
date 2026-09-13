@@ -117,11 +117,34 @@ jobs:
           ls -la
           ARCHIVE="$(ls -1 ${{ inputs.archive_glob }} | tail -n1)"
           ACTUAL="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+          EXPECTED="${{ inputs.expected_archive_sha256 }}"
+          # FROM_ARTIFACT takes the expected digest from the ARCHIVE.sha256 the
+          # capture runner wrote BEFORE upload, rather than from a value typed
+          # into the dispatch. Use it when the analyst's egress cannot reach the
+          # Actions blob store to read the runner's log (it cannot: that host is
+          # denied by policy), so the number is otherwise unobtainable.
+          #
+          # BE CLEAR ABOUT WHAT THIS PROVES. Comparing the artifact's own
+          # ARCHIVE.sha256 to the bytes beside it catches TRANSIT CORRUPTION
+          # between the capture runner and here. It does NOT independently
+          # attest the capture, because both sides come from the same runner --
+          # and neither did a hand-typed digest, which was only ever a copy of
+          # that same runner's output. The per-file integrity that the analyst
+          # verifies in its own process is checksums.sha256 INSIDE the tarball,
+          # sealed by the driver after it closed its own report.
+          if [ "$EXPECTED" = "FROM_ARTIFACT" ]; then
+            if [ ! -f ARCHIVE.sha256 ]; then
+              echo "NO_ARCHIVE_SHA256_IN_ARTIFACT -- nothing is committed"; exit 1
+            fi
+            EXPECTED="$(cut -d' ' -f1 < ARCHIVE.sha256)"
+            echo "expected sha256 source = ARCHIVE.sha256 from the artifact"
+          fi
           echo "archive         = $ARCHIVE"
           echo "size_bytes      = $(stat -c%s "$ARCHIVE")"
-          echo "expected sha256 = ${{ inputs.expected_archive_sha256 }}"
+          echo "expected sha256 = $EXPECTED"
           echo "actual   sha256 = $ACTUAL"
-          if [ "$ACTUAL" != "${{ inputs.expected_archive_sha256 }}" ]; then
+          echo "expected=$EXPECTED" >> "$GITHUB_OUTPUT"
+          if [ "$ACTUAL" != "$EXPECTED" ]; then
             echo "ARCHIVE_SHA256_MISMATCH -- the bytes changed in transit."
             echo "Nothing is committed."
             exit 1
@@ -144,7 +167,7 @@ jobs:
           # file, not merely that a verified file once existed on this runner.
           COMMITTED="$(sha256sum "research/evidence/${{ steps.verify.outputs.archive }}" | cut -d' ' -f1)"
           echo "committed sha256 = $COMMITTED"
-          if [ "$COMMITTED" != "${{ inputs.expected_archive_sha256 }}" ]; then
+          if [ "$COMMITTED" != "${{ steps.verify.outputs.expected }}" ]; then
             echo "COPY_ALTERED_THE_ARCHIVE"; exit 1
           fi
           git config user.name "Claude"
