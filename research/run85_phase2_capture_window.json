@@ -1,0 +1,12 @@
+{
+ "phase": "run85/phase2capture/1",
+ "days": 7,
+ "start_utc": "2026-09-13T16:30:00Z",
+ "end_utc": "2026-09-20T16:30:00Z",
+ "note": "The frozen seven-day observational window. The capture workflow refuses to contact the venue outside it, so the capture stops on its own rather than on someone remembering to stop it. Widening this file widens the capture; that is a deliberate, reviewable edit, not a runtime decision.",
+ "cohort_file": "run85_phase2_frozen_cohort.json",
+ "cohort_sha256": "8cdedf26479a309bf7e22c292ebdd2f562673e2b8dccb2ec2793d9ad29187efe",
+ "segment_duration_s": 18000,
+ "segment_cron_utc": "0 */6 * * *",
+ "expected_coverage_note": "Five hours of capture every six hours. The remaining hour of each cycle is a RECORDED GAP, not a hidden one: every segment stamps SEGMENT_START_UTC and SEGMENT_END_UTC."
+}

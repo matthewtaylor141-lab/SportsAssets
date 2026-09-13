@@ -51,6 +51,13 @@ on:
       - ".github/workflows/run85-phase2f.yml"
       - ".github/workflows/run85-phase2g.yml"
       - ".github/workflows/run85-phase2gr.yml"
+      # The Phase 2 observational capture and the cohort/window files it
+      # reads. This one lands a commit of its own every six hours for seven
+      # days, so without the line here every sealed segment would fire a live
+      # engine probe -- the exact spend this list exists to prevent. Its
+      # commits touch research/** only, which the first line already covers;
+      # the workflow file is named for when the workflow itself is edited.
+      - ".github/workflows/run85-phase2-capture.yml"
       # And this file. paths-ignore skips a run only when EVERY changed file
       # matches, so without this line a commit that merely edits the probe's
       # own trigger config fires the probe -- which is exactly the spend the

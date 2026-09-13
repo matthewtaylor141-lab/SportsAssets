@@ -1,0 +1,177 @@
+# RUN 85 PHASE 2 -- THE MULTI-DAY OBSERVATIONAL CAPTURE, one segment per run.
+#
+# A job here is capped at six hours, so the seven-day capture is a sequence of
+# independently sealed five-hour segments, one every six hours. The hour
+# between them is a RECORDED gap: every segment stamps its own start and end,
+# so the union has honest holes rather than hidden ones. A completed segment is
+# committed once and never rewritten.
+#
+# THE RATE GUARD IS THE CONCURRENCY GROUP. Two capture jobs running at the same
+# time would double the aggregate request rate against the venue, which the
+# rate policy forbids. `concurrency` with cancel-in-progress: false guarantees
+# one at a time; a segment that starts late simply queues and the next cron is
+# dropped rather than stacked.
+#
+# THE SEVEN-DAY WINDOW IS IN THE REPOSITORY, not in someone's memory. The job
+# reads research/run85_phase2_capture_window.json and refuses to contact the
+# venue outside it, so the capture stops on its own.
+#
+# CAPABILITY BOUNDARY, as authorized. GET only. Public gateway
+# (gateway.polymarket.us) only -- never api.polymarket.us. No credential, no
+# repository secret, no wallet, no signer, no authentication header, no trading
+# SDK, no order or cancel endpoint, no POST/PUT/PATCH/DELETE. 0.4 rps nominal,
+# Retry-After honoured exactly, the rate never raised to buy more samples.
+# mirror_live stays false; this job cannot reach anything that could change it.
+#
+# NO PROFITABILITY CLAIM. The runner records raw responses and derived
+# observations. It computes no expectancy, no ROI, no fill probability and no
+# fee-adjusted figure, and it never conditions its primary dataset on the book
+# having moved or on the sign of an outcome.
+#
+# The offline tests run FIRST and the job refuses to contact the venue if any
+# fails. The grid's collision-freedom and the "an unchanged book is an
+# observation worth zero" rule are both checked before the run spends anything
+# on them.
+
+name: run85-phase2-capture
+
+on:
+  schedule:
+    - cron: "0 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      duration_s:
+        description: "Seconds of capture in this segment"
+        required: false
+        default: "18000"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: run85-phase2-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 340
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency
+        run: python -m pip install --quiet "httpx==0.27.2"
+
+      - name: The seven-day window gates the venue contact
+        run: |
+          set -euo pipefail
+          python - <<'PY' > window.env
+          import calendar, json, time
+          w = json.load(open("research/run85_phase2_capture_window.json"))
+          now = time.time()
+          def ep(s):
+              return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
+          inside = ep(w["start_utc"]) <= now <= ep(w["end_utc"])
+          print("CAPTURE_WINDOW_OPEN=%s" % ("yes" if inside else "no"))
+          print("CAPTURE_WINDOW_END=%s" % w["end_utc"])
+          PY
+          cat window.env | tee -a "$GITHUB_ENV"
+          rm -f window.env
+
+      - name: Offline tests must pass before any venue contact
+        if: env.CAPTURE_WINDOW_OPEN == 'yes'
+        run: |
+          set -euo pipefail
+          python research/test_run85_phase2_capture.py
+          python research/test_run85_phase2gr.py
+          python research/test_run85_phase2g.py
+          python research/test_run85_phase2f.py
+          python research/test_run85_phase2e.py
+          python research/test_run85_phase2d.py
+          python research/test_run85_phase2c.py
+          python research/test_run85_phase2b.py
+          python research/test_run85_pmus_collector.py
+
+      - name: Confirm the job carries no credential
+        if: env.CAPTURE_WINDOW_OPEN == 'yes'
+        run: |
+          set -euo pipefail
+          # The capability boundary is physical here: this job is given no
+          # secret to leak. Assert the env is clean rather than trusting it.
+          python - <<'PY'
+          import os, sys
+          bad = [k for k in os.environ
+                 if any(t in k.upper() for t in
+                        ("POLYMARKET", "PRIVATE_KEY", "SIGNER", "WALLET",
+                         "RENDER", "DATABASE_URL", "PMUS_"))]
+          if bad:
+              print("CREDENTIAL_PRESENT_IN_ENV: %s" % sorted(bad))
+              sys.exit(1)
+          print("NO_CREDENTIAL_IN_ENV = CONFIRMED")
+          PY
+
+      - name: Capture one segment
+        if: env.CAPTURE_WINDOW_OPEN == 'yes'
+        env:
+          DURATION_S: ${{ github.event.inputs.duration_s || '18000' }}
+        run: |
+          set -euo pipefail
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          OUT="research/evidence/capture/run85_phase2_segment_${STAMP}"
+          echo "RUN85_CAPTURE_STAMP=$STAMP" >> "$GITHUB_ENV"
+          echo "RUN85_CAPTURE_OUT=$OUT" >> "$GITHUB_ENV"
+          # The runner owns its own terminal report and closes it before
+          # hashing, so the recorded digest binds the bytes. No tee.
+          python research/run85_phase2_capture.py \
+            --out "$OUT" --segment "$STAMP" --duration-s "$DURATION_S"
+
+      - name: Commit the sealed segment
+        if: env.CAPTURE_WINDOW_OPEN == 'yes'
+        run: |
+          set -euo pipefail
+          OUT="${RUN85_CAPTURE_OUT}"
+          ls -la "$OUT"
+          du -sh "$OUT"
+          git -c user.name="Claude" -c user.email="noreply@anthropic.com" \
+              add -- "$OUT"
+          git -c user.name="Claude" -c user.email="noreply@anthropic.com" \
+              commit -m "Run 85 Phase 2 capture: segment ${RUN85_CAPTURE_STAMP} sealed [skip render]" \
+                     -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>" \
+                     -m "Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC"
+          # Another session may have pushed while the segment was running. Rebase
+          # onto whatever landed; this segment's files are new paths, so a rebase
+          # can only conflict with itself, which cannot happen.
+          for i in 1 2 3 4; do
+            if git pull --rebase origin claude/session-njaewf \
+               && git push -u origin claude/session-njaewf; then
+              echo "pushed"
+              exit 0
+            fi
+            sleep $((2 ** i))
+          done
+          echo "PUSH_FAILED -- the artifact below still carries the bytes"
+          exit 1
+
+      - name: Archive the segment as well
+        if: always() && env.CAPTURE_WINDOW_OPEN == 'yes'
+        uses: actions/upload-artifact@v4
+        with:
+          name: RUN85_PHASE2_CAPTURE_${{ env.RUN85_CAPTURE_STAMP }}
+          path: ${{ env.RUN85_CAPTURE_OUT }}
+          retention-days: 90
+          if-no-files-found: warn
+
+      - name: Window closed
+        if: env.CAPTURE_WINDOW_OPEN != 'yes'
+        run: |
+          echo "CAPTURE_RUNNING = NO"
+          echo "The seven-day window in research/run85_phase2_capture_window.json"
+          echo "is not open (ends ${CAPTURE_WINDOW_END:-unknown}). No venue"
+          echo "contact was made. Nothing was written."
