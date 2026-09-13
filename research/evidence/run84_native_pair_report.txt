@@ -1,0 +1,199 @@
+RUN 84 -- NATIVE MATCHED-PAIR MECHANISM (UPPER BOUND)
+====================================================================
+
+1. INPUT PROVENANCE
+   source                : research/snapshots/u2_events_v1.jsonl.gz
+   rows                  : 214609
+   book source (code)    : clob_api_base = https://clob.polymarket.com
+                           -> RN1's venue. NOT a BETTOR-executable price.
+   ladder side retained  : ASK ONLY (migration 005). No bid exists anywhere
+                           in the retained data, at any timestamp.
+
+2. INVENTORY
+   distinct calendar days: 35   (2026-08-06 .. 2026-09-11)
+   distinct conditions   : 17752
+   book_ok true / false  : 214609 / 0
+   rows with >=1 ask lvl : 214609
+   rows with 0 ask levels: 0
+   top sports            : {'Soccer': 73400, 'Tennis': 70958, 'unclassified': 21785, 'Other-Sports': 16263, 'Non-Sports': 11845, 'MLB': 10117}
+
+3. PAIR FORMATION
+   rows usable (book_ok, >=1 ask level, best_ask present): 196619 of 214609
+   conditions with at least one probe on EACH outcome     : 9057 of 17722
+
+   pairs formed, by simultaneity window:
+     within     1s : 3186 pairs   (1272 distinct conditions)
+     within     5s : 8552 pairs   (2855 distinct conditions)
+     within    30s : 14052 pairs   (3942 distinct conditions)
+     within    60s : 18085 pairs   (4494 distinct conditions)
+     within   300s : 31896 pairs   (6112 distinct conditions)
+
+4. DISPLAYED PAIR COST  (best_ask YES + best_ask NO, zero fee)
+   'Displayed' means the touch only, at size 1. It is NOT a tradeable
+   quantity and is reported first precisely so the size-aware numbers
+   below can be compared against it.
+
+   window     1s  n=3186   min=1.0000  p05=1.0100  median=1.0100  max=1.6900
+                 below: {'0.90': 0, '0.92': 0, '0.94': 0, '0.95': 0, '0.96': 0, '0.97': 0, '0.98': 0, '0.99': 0}
+   window     5s  n=8552   min=0.8000  p05=1.0100  median=1.0100  max=1.9400
+                 below: {'0.90': 2, '0.92': 3, '0.94': 3, '0.95': 5, '0.96': 6, '0.97': 10, '0.98': 15, '0.99': 28}
+   window    30s  n=14052  min=0.5700  p05=1.0000  median=1.0100  max=1.9400
+                 below: {'0.90': 27, '0.92': 41, '0.94': 61, '0.95': 85, '0.96': 108, '0.97': 153, '0.98': 211, '0.99': 344}
+   window    60s  n=18085  min=0.5700  p05=0.9800  median=1.0100  max=1.9400
+                 below: {'0.90': 90, '0.92': 138, '0.94': 223, '0.95': 295, '0.96': 393, '0.97': 511, '0.98': 669, '0.99': 956}
+   window   300s  n=31896  min=0.0500  p05=0.9100  median=1.0100  max=1.9400
+                 below: {'0.90': 1351, '0.92': 1689, '0.94': 2232, '0.95': 2588, '0.96': 3014, '0.97': 3453, '0.98': 4042, '0.99': 4860}
+
+5. SIZE-AWARE PAIR COST  (walk BOTH displayed ask ladders, zero fee)
+   Still no fee, no queue, no adverse move between legs, both legs
+   treated as executable at their own probe instant.
+
+   window  clip      n      min      median   <1.00   <0.99   <0.97   <0.95
+       1s  $100    3173     1.0000   1.0100       0       0       0       0
+       1s  $500    3046     1.0020   1.0164       0       0       0       0
+       1s  $1000   2847     1.0024   1.0200       0       0       0       0
+       5s  $100    8524     0.8098   1.0100      49      17       4       3
+       5s  $500    8220     0.8165   1.0156      32      13       3       1
+       5s  $1000   7722     0.8183   1.0205      18       6       1       1
+      30s  $100    13963    0.6300   1.0117     508     272     113      63
+      30s  $500    13230    0.6346   1.0195     354     171      81      50
+      30s  $1000   12144    0.7372   1.0215     258     130      61      37
+      60s  $100    17941    0.6300   1.0170    1317     839     430     246
+      60s  $500    16829    0.6346   1.0200     981     604     326     195
+      60s  $1000   15299    0.7372   1.0224     754     478     260     159
+     300s  $100    31568    0.0912   1.0200    5770    4552    3212    2370
+     300s  $500    29029    0.2164   1.0203    4650    3679    2599    1910
+     300s  $1000   26068    0.2333   1.0259    3790    2989    2116    1539
+
+6. INDEPENDENCE / CLUSTERING
+   window 60s: 18085 pairs / 4494 conditions / 35 days
+
+7. IS THE SUB-$1.00 SET A TIME-SKEW ARTIFACT?
+   gap bucket      pairs    median cost   <1.00   share <1.00
+      0s -    1s    2149        1.0100       0       0.000%
+      1s -    5s    4323        1.0100      32       0.740%
+      5s -   30s    4399        1.0100     317       7.206%
+     30s -   60s    3527        1.0200     649      18.401%
+     60s -  300s   17498        1.0200    5062      28.929%
+
+   Read the last column, not the count column. If the sub-$1.00 set were
+   a real recurring opportunity, its SHARE would be roughly flat across
+   gap buckets and only the raw count would grow. A share that climbs
+   with the gap says the apparent edge is manufactured by the skew.
+
+8. CHRONOLOGICAL TRAIN / VALIDATION / FINAL HOLDOUT
+   TRAIN      2026-08-06 .. 2026-08-28  (21 days)
+   VALIDATION 2026-08-29 .. 2026-09-04  (7 days)
+   HOLDOUT    2026-09-05 .. 2026-09-11  (7 days)
+
+   TRAIN      window 1s : n=1837  median=1.0100  min=1.0000  below $1.00 = 0
+   TRAIN      window 5s : n=3403  median=1.0100  min=0.8900  below $1.00 = 9
+   VALIDATION window 1s : n=456   median=1.0100  min=1.0010  below $1.00 = 0
+   VALIDATION window 5s : n=1558  median=1.0100  min=0.9600  below $1.00 = 16
+   HOLDOUT    window 1s : n=893   median=1.0100  min=1.0010  below $1.00 = 0
+   HOLDOUT    window 5s : n=3591  median=1.0100  min=0.8000  below $1.00 = 30
+
+9. CLUSTERED BOOTSTRAP -- mean pair cost, 1 s window
+   clusters (conditions)     : 1272
+   observed mean pair cost   : 1.021933
+   95% CI (cluster bootstrap): [1.019554, 1.025031]
+   expected net pair profit  : -0.021933  = 1.00 - mean cost, ZERO fee
+   95% CI on that profit     : [-0.025031, -0.019554]
+   P(expected value > 0)     : 0.0000  (share of bootstrap means < 1.00)
+
+10. STRESS -- adverse execution added to the 1 s cohort
+   +0c per leg : median=1.0100  min=1.0000  pairs below $1.00 = 0 of 3186
+   +1c per leg : median=1.0300  min=1.0200  pairs below $1.00 = 0 of 3186
+   +2c per leg : median=1.0500  min=1.0400  pairs below $1.00 = 0 of 3186
+   +3c per leg : median=1.0700  min=1.0600  pairs below $1.00 = 0 of 3186
+   Fees are NOT included at any row above. BETTOR's fee is unmeasured
+   (task #126 has not reported), so every figure here is a ceiling.
+
+11. DIRECTIONAL FAMILY -- buy the displayed ask, hold to settlement
+   settled conditions available : 9545
+   probe rows gradeable to settlement : 114237
+   mean edge per share (zero fee)     : -0.014368
+
+   by ask price band:
+     band            n        mean edge/share   mean ROI/$
+     0.00-0.10   7935          -0.004071      -0.0024
+     0.10-0.30   20598         -0.002220      -0.0111
+     0.30-0.50   27872         -0.021125      -0.0554
+     0.50-0.70   28592         -0.012223      -0.0205
+     0.70-0.90   19858         -0.019811      -0.0256
+     0.90-0.95   4401          -0.020847      -0.0228
+     0.95-0.99   3788          -0.017980      -0.0184
+     0.99-1.00   1193          -0.060147      -0.0605
+
+   chronological split (same cut as section 8):
+     TRAIN      n=33748   mean edge/share=-0.014029  mean ROI/$=-0.0443
+     VALIDATION n=21652   mean edge/share=-0.004039  mean ROI/$=-0.0293
+     HOLDOUT    n=58837   mean edge/share=-0.018363  mean ROI/$=-0.0170
+
+   FINAL HOLDOUT, clustered bootstrap on ROI per dollar:
+     clusters (conditions)  : 4107
+     observed mean ROI/$    : -0.016984
+     95% CI                 : [-0.077028, +0.061518]
+     P(ROI > 0)             : 0.3035
+
+   STRESS -- the same holdout with adverse execution per share:
+     +1c : mean ROI/$ = -0.071414
+     +2c : mean ROI/$ = -0.100430
+     +3c : mean ROI/$ = -0.124916
+
+12. FEATURE-AVAILABILITY AUDIT (specification section 9)
+   field                     used as      available at decision time?
+   best_ask                  feature      YES -- it is read AT probe_at,
+                                          which IS the decision instant
+   depth (ask ladder)        feature      YES -- same read
+   asset / outcome_index     feature      YES -- static token metadata
+   condition_id_effective    join key     YES for CONDITION_DIRECT;
+                                          CONDITION_RECOVERED_UNIQUE_TOKEN
+                                          uses sealed metadata, also static
+   sport                     feature      YES -- static classification
+   his_price / his_size      feature      YES -- it is the trigger
+   probe_at                  clock        YES
+   payouts (settlement)      LABEL ONLY   NO -- and it is never used as a
+                                          feature, only to grade an outcome
+   gap between the two legs  NOT A FEATURE. Knowing the second leg's probe
+     instant requires the second probe to have happened. This is exactly
+     why the 1 s cohort is the honest one and the 300 s cohort is not: at
+     300 s the 'opportunity' is visible only in hindsight.
+   NO future book state, no future whale activity, no later market
+   classification and no ex-post maker/taker label is used anywhere.
+
+13. CAPACITY
+   Not estimated, and deliberately not estimated. Capacity is the
+   question 'how much can be deployed into an edge'; sections 4, 5, 9
+   and 11 find no edge to deploy into. Producing a capacity table for a
+   negative-expectancy rule would dress a loss in units of scale.
+   The $1,000 / $5,000 / $10,000 / $25,000 / $50,000 ladder is therefore
+   reported as NOT_APPLICABLE rather than filled in.
+   One capacity fact IS measured and is reported for its own sake: at the
+   1 s window, pairs that could source a $1,000 clip on BOTH legs from the
+   displayed ladder numbered 2847 of 3186. Depth is not what is missing here.
+
+====================================================================
+VERDICTS
+====================================================================
+RUN84_ANALYSIS_COMPLETE              = YES (on retained data; see LIMITS)
+NATIVE_MATCHED_PAIR_EDGE             = CONTRADICTED
+RN1_SIGNAL_ADDS_INCREMENTAL_VALUE    = NOT_IDENTIFIED
+POSITIVE_EXPECTANCY_AFTER_EXECUTION  = CONTRADICTED
+POSITIVE_FINAL_HOLDOUT               = NO
+ROBUST_TO_CONSERVATIVE_EXECUTION     = NO
+ROBUST_TO_STRESS                     = NO
+MEANINGFUL_CAPACITY_AT_50K           = NOT_IDENTIFIED (no edge to size)
+DEPLOYABLE_CANDIDATE_FOUND           = NO
+
+LIMITS THAT BOUND EVERY LINE ABOVE
+  1. The book is RN1's venue (clob.polymarket.com), not BETTOR's (PMUS).
+     No BETTOR-executable book is retained anywhere, at any timestamp.
+  2. The ladder is ASK ONLY. Passive execution -- regimes A, B and C of
+     the specification -- could not be tested at all.
+  3. The sampling instants are whale-triggered, so this is not a native
+     scan; it is the copy opportunity set measured at the post-impact ask.
+  4. No fee is included anywhere. Every figure is a CEILING.
+
+   wrote run84_pair_candidates.csv (50069 rows, 60 s window)
+
