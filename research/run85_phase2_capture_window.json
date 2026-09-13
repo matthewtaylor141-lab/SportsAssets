@@ -1,8 +1,8 @@
 {
  "phase": "run85/phase2capture/1",
  "days": 7,
- "start_utc": "2026-09-13T16:30:00Z",
- "end_utc": "2026-09-20T16:30:00Z",
+ "start_utc": "2026-09-13T16:00:00Z",
+ "end_utc": "2026-09-20T16:00:00Z",
  "note": "The frozen seven-day observational window. The capture workflow refuses to contact the venue outside it, so the capture stops on its own rather than on someone remembering to stop it. Widening this file widens the capture; that is a deliberate, reviewable edit, not a runtime decision.",
  "cohort_file": "run85_phase2_frozen_cohort.json",
  "cohort_sha256": "8cdedf26479a309bf7e22c292ebdd2f562673e2b8dccb2ec2793d9ad29187efe",
