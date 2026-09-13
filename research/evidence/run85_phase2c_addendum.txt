@@ -1,0 +1,172 @@
+RUN 85 PHASE 2C -- ADDENDUM
+archive : run85_phase2c_20260913T034625Z
+The sealed capture was NOT restarted, re-selected or modified.
+NOTHING IN THIS FILE CONTACTS THE VENUE.
+
+=== 1. CENSUS DENOMINATORS (each counted in its own units) ===
+CANDIDATE_ROWS_DISCOVERED      = 1579   market rows across 100 events
+UNIQUE_MARKET_SLUGS_PROBED     = 150
+UNIQUE_NATIVE_EVENTS_PROBED    = 100
+DETAIL_RESPONSES_SUCCESSFUL    = 150   (0 non-200)
+BINARY_MARKETS_ADMITTED        = 140
+UNIQUE_ADMITTED_EVENTS         = 93
+ECONOMIC_REGIMES_IDENTIFIED    = 13
+
+  Two intermediate denominators the main report did not separate,
+  and they carry the run's most fixable defect:
+    MARKETS_CENSUSED_FOR_BOOK_STATE = 60
+    UNIQUE_EVENTS_AMONG_THOSE       = 13
+    TWO_SIDED_BOOK_POOL             = 19
+    UNIQUE_EVENTS_IN_THAT_POOL      = 13
+
+  140 admitted markets spanned 93 EVENTS. The census budget of 60 was
+  then taken deterministically BY SLUG -- an alphabetical cut -- which
+  collapsed 93 events to 13, because sorting by slug groups a family
+  together. The one-market-per-event cap was enforced at SELECTION but
+  never at CENSUS, so the diversity was spent before selection ran.
+  A future census should round-robin across events, not slice by slug.
+
+  ECONOMIC_REGIMES_IDENTIFIED = 13 and UNIQUE_EVENTS_IN_POOL = 13 are
+  the same number here by coincidence. They count different things and
+  neither is a denominator for the other.
+
+=== 2. BOOK ACTIVITY: OBSERVED_CALIBRATION_ACTIVITY ===
+FEATURE_NAME                   = OBSERVED_CALIBRATION_ACTIVITY
+SOURCE_STAGE                   = census_book (the preregistered repeated-sampling pass)
+MARKETS_SAMPLED                = 60
+OBSERVATIONS_PER_MARKET        = [3]
+REVISIT_INTERVAL               = 120.0 s (min 120.0, max 120.0)
+PER_MARKET_WINDOW_SPAN         = 240.0 s (min 240.0, max 240.0)
+STAGE_WALL_CLOCK               = 2026-09-13T03:36:25.473332+00:00 .. 2026-09-13T03:42:23.494944+00:00
+
+  So ACTIVE / QUIET means: did this book's content change across THREE
+  observations 120 s apart, spanning 240 s. Nothing more.
+
+  IT IS NOT AN ADMISSION-TIME FEATURE. It cannot be read from a single
+  discovery snapshot, and a selection rule that needs it must pay for a
+  repeated-sampling pass first, as this run did.
+
+  It is also COARSE, and in a direction that matters. At a 120 s
+  interval a book that changed many times between samples records the
+  same 'changed' as one that moved once, and a book that moved and
+  reverted records QUIET. OBSERVED_CALIBRATION_ACTIVITY is a lower
+  bound on change, not a rate. It must not be reported as a
+  book-change RATE, and BOOK_ACTIVITY_DIVERSITY = SUFFICIENT means
+  only that both coarse labels appear in the cohort.
+
+=== 3. FAST / SURVEY RELATIONSHIP (diagnostic; selection unchanged) ===
+FAST_MARKETS                   = 2  ['aachc-mlb-2026-09-27-wr-col', 'aachc-mlb-2026-09-27-br-atl']
+SURVEY_MARKETS                 = 6
+                                 aachc-mlb-2026-09-27-wr-col
+                                 aachc-mlb-2026-09-27-br-atl
+                                 aachc-ufc-featherw-2026-12-31-champ-alevol
+                                 aachc-mlb-hrs-2026-09-29-leader-aarjud
+                                 aachc-mlb-bavg-2026-09-29-leader-alebur
+                                 aachc-ufc-lightheavyw-2026-12-31-champ-aleper
+FAST_SUBSET_OF_SURVEY          = YES
+FAST_SURVEY_OVERLAP_COUNT      = 2
+DISTINCT_MARKETS_ACROSS_TIERS  = 6
+
+  Nothing was altered to produce this. The property is STRUCTURAL: in
+  the frozen rule, `cap` appears only as an early return inside take().
+  The candidate ORDER -- S5's three asymmetry bins in fixed order, then
+  regime groups by (-size, key) with members by slug -- never consults
+  cap. So the cohort at cap=k is exactly the first k of one sequence,
+  and a smaller cap truncates it rather than diverting to a different
+  market. FAST is therefore a strict PREFIX of SURVEY, by construction.
+
+  Verified two ways: B[:2] == A on this pool, and on 800 synthetic
+  pools (4 sizes x 200 seeds) the subset property held every time.
+
+=== 4. HORIZON-SPECIFIC ELIGIBILITY ===
+  What the validation sample ACTUALLY ran:
+    aachc-mlb-2026-09-27-br-atl                    n= 20  gap 12.00 s (min 12.00 max 12.00)
+    aachc-mlb-2026-09-27-wr-col                    n= 21  gap 12.00 s (min 12.00 max 12.00)
+    aachc-mlb-bavg-2026-09-29-leader-alebur        n= 20  gap 12.00 s (min 12.00 max 12.00)
+    aachc-mlb-hrs-2026-09-29-leader-aarjud         n= 20  gap 12.00 s (min 12.00 max 12.00)
+    aachc-ufc-featherw-2026-12-31-champ-alevol     n= 20  gap 12.00 s (min 12.00 max 12.00)
+    aachc-ufc-lightheavyw-2026-12-31-champ-aleper  n= 20  gap 12.00 s (min 12.00 max 12.00)
+  OBSERVED_REVISIT = 12.000733 s median across 6 markets
+  NOMINAL_REVISIT  = 12.0 s   jitter vs nominal: median 0.7 ms, max 0.8 ms
+
+  THE FAST TIER WAS NEVER RUN. The validation sample exercised the
+  SURVEY tier only. The 4.0 s FAST cadence is arithmetic, not a
+  measurement, and nothing in this archive demonstrates it.
+
+  Eligibility on the NOMINAL 12.0 s grid, with no interpolation:
+     5S_ELIGIBLE_COHORT = NO   12.0 s grid has no sample at t+5s
+    10S_ELIGIBLE_COHORT = NO   12.0 s grid has no sample at t+10s
+    30S_ELIGIBLE_COHORT = NO   12.0 s grid has no sample at t+30s
+    60S_ELIGIBLE_COHORT = YES  5 x 12.0 s
+
+  Jitter is sub-millisecond here, so a t+60 s markout lands on a real
+  observation rather than near one. A future capture must re-check
+  that: jitter comparable to the horizon would reintroduce exactly the
+  interpolation this section exists to refuse.
+
+  The runner's cadence table said 12.0 s 'supports: 30, 60s'. That is
+  WRONG for 30 s and is corrected here: 30 is not a whole multiple of
+  12, so a 30 s markout off a 12 s grid requires interpolating a state
+  never observed. Only 60 s survives (5 x 12.0 s).
+
+  Generalised. Revisit = 2.0 x N, so horizon h is observable only when
+  h / (2.0 N) is a whole number:
+     N   revisit     5s   10s   30s   60s
+     1     2.0 s      -   YES   YES   YES
+     2     4.0 s      -     -     -   YES
+     3     6.0 s      -     -   YES   YES
+     4     8.0 s      -     -     -     -
+     5    10.0 s      -   YES   YES   YES
+     6    12.0 s      -     -     -   YES
+     7    14.0 s      -     -     -     -
+     8    16.0 s      -     -     -     -
+     9    18.0 s      -     -     -     -
+    10    20.0 s      -     -     -   YES
+
+  5 S IS UNREACHABLE AT ANY COHORT SIZE. Every achievable revisit is a
+  multiple of 2.0 s and 5 is odd, so h/(2.0 N) is never an integer.
+  5S_ELIGIBLE_COHORT = NOT_FEASIBLE at the 0.5 rps ceiling. It is not a
+  cohort-size problem and no selection fixes it; it would take a
+  different base spacing, which needs an RPS change, which is locked
+  (RPS_LIMIT_NOT_ESTABLISHED). Per the standing instruction, an
+  unobserved 5 s state is NOT interpolated -- so it is not reported.
+
+  A 'first observation at or after t+5s' statistic is measurable, but
+  it is a DIFFERENT ESTIMAND with its own bias and would need its own
+  preregistration. It is not the 5 s markout and is not substituted.
+
+  N=5 (10.0 s) is the only size reaching 10, 30 AND 60. The chosen
+  N=6 (12.0 s) reaches 60 alone, and N=2 (4.0 s) also reaches 60 alone.
+
+=== 5. TWO-TIER ARCHITECTURE: FEASIBLE? (reported, NOT implemented) ===
+FAST tier ~2 markets, high frequency   : the pool supports it (19 two-sided candidates across 13 events)
+SURVEY tier ~6 diverse markets         : the pool supports the COUNT; 'diverse' it does not
+BRIDGE_MARKETS_AVAILABLE               = YES (2 already in both tiers)
+CROSS_HORIZON_BRIDGE_FEASIBLE          = YES, structurally -- see section 3
+
+  TWO_TIER_ARCHITECTURE_FEASIBLE = YES ON CADENCE, NO ON CONTENT.
+
+  Feasible on cadence: two independent round-robins fit inside 0.5 rps
+  (2 + 6 = 8 reads per cycle), the bridge property comes free from the
+  rule's prefix ordering, and the venue answered 301 of 301 reads with
+  no 429 across the whole run.
+
+  Not feasible on content, for reasons already recorded and unchanged
+  by this addendum: every market reached is season-long futures; the
+  asymmetry feature is contaminated; time-to-event was never measured;
+  and the census spent its event diversity on an alphabetical cut.
+
+  If the architecture is built later, section 4 says the tiers should
+  be sized N=1 (2.0 s: reaches 10, 30, 60) and N=5 (10.0 s: reaches 10,
+  30, 60), not 2 and 6 -- which between them reach only 60. That is a
+  FUTURE design note. Phase 2C's selection is untouched.
+
+=== 6. NO PROFITABILITY INFERENCE ===
+  Phase 2C was a selection experiment and nothing in it, or in this
+  addendum, is evidence about realizable edge. No inference is drawn
+  from spread, depth, activity, price, or regime membership.
+
+  PASSIVE_REALIZABLE_EDGE = NOT_IDENTIFIED
+  DISPLAYED_PASSIVE_SPREAD remains a DISPLAY fact, not an edge.
+  PMUS_FEES_RESOLVED = NO; no fee arithmetic enters anything above.
+
