@@ -1,18 +1,16 @@
-# RUN 85 PHASE 2B -- repaired calibration.
+# RUN 85 PHASE 2C -- diversity / selection census.
 #
-# Same authorized capability boundary as Phase 2A, unchanged:
+# Same authorized capability boundary as 2A/2B, unchanged:
 #   GET only. https://gateway.polymarket.us only. No api.polymarket.us.
 #   No credentials. No repository secrets. No wallet. No signer. No auth
 #   headers. No Polymarket trading SDK. No order endpoint. No cancel endpoint.
-#   No POST/PUT/PATCH/DELETE. mirror_live false.
+#   No POST/PUT/PATCH/DELETE. 0.5 rps. mirror_live false.
 #
-# RATE: Phase 2A measured 73% HTTP 429 at 2.0 rps, so the ceiling here is
-# 0.5 rps with exact Retry-After and backoff that does not snap back.
-#
-# SEALING: the driver owns its terminal report and closes it before anything is
-# hashed. Phase 2A piped that file through `tee` and sealed it mid-write, so the
-# recorded digest was the empty string. There is no `tee` in this workflow, and
-# the job fails if the archive does not verify against its own checksums.
+# This workflow is written out in full rather than derived from the Phase 2B
+# file. It was derived once, by sed plus a string replacement, and the sed
+# pattern missed the script path while the replacement had no assertion to say
+# so -- the job then ran the PHASE 2B script with empty arguments and died on
+# argument parsing. A near-copy that fails silently is worse than a copy.
 
 name: run85-phase2c
 
@@ -44,7 +42,7 @@ concurrency:
   cancel-in-progress: false
 
 jobs:
-  calibrate:
+  census:
     runs-on: ubuntu-latest
     timeout-minutes: 50
 
@@ -65,7 +63,8 @@ jobs:
           set -euo pipefail
           python -m pip install --quiet pytest
           python -m pytest research/test_run85_pmus_collector.py \
-                           research/test_run85_phase2b.py research/test_run85_phase2c.py -q
+                           research/test_run85_phase2b.py \
+                           research/test_run85_phase2c.py -q
           python -m pip list --format=freeze
           if python -m pip list --format=freeze | grep -Ei '^(polymarket-us|py-clob-client)='; then
             echo "TRADING_SDK_PRESENT_IN_COLLECTOR_JOB"; exit 1
@@ -77,11 +76,12 @@ jobs:
           set -euo pipefail
           mkdir -p out
           # NO tee: the driver owns and closes its own report before sealing.
-          python research/run85_phase2b.py \
+          python research/run85_phase2c.py \
             --out out \
-            --fast-seconds "${{ inputs.fast_seconds }}" \
-            --cohort-seconds "${{ inputs.cohort_seconds }}" \
-            --cohort "${{ inputs.cohort }}"
+            --detail-probe "${{ inputs.detail_probe }}" \
+            --census-max "${{ inputs.census_max }}" \
+            --census-passes "${{ inputs.census_passes }}" \
+            --validate-seconds "${{ inputs.validate_seconds }}"
 
       - name: Verify the seal independently, then archive
         run: |
