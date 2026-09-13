@@ -63,6 +63,50 @@ jobs:
           github-token: ${{ github.token }}
           path: incoming
 
+      - name: Artifact provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Provenance comes from the API record of the artifact itself, not
+          # from the filename, so "is this the artifact we mean" is answered by
+          # GitHub rather than by resemblance.
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/repos/${{ github.repository }}/actions/artifacts/10308180862" \
+               -o /tmp/art.json
+          jq -r '"SOURCE_ARTIFACT_ID         = \(.id)",
+                 "SOURCE_ARTIFACT_NAME       = \(.name)",
+                 "SOURCE_ARTIFACT_CREATED_AT = \(.created_at)",
+                 "SOURCE_ARTIFACT_EXPIRED    = \(.expired)",
+                 "SOURCE_ARTIFACT_SIZE_BYTES = \(.size_in_bytes)",
+                 "SOURCE_WORKFLOW_RUN_ID     = \(.workflow_run.id)",
+                 "SOURCE_RUN_HEAD_SHA        = \(.workflow_run.head_sha)"' /tmp/art.json
+          if [ "$(jq -r '.expired' /tmp/art.json)" != "false" ]; then
+            echo "RUN836_ARTIFACT_PROVENANCE = FAIL (artifact expired)"; exit 1
+          fi
+          if [ "$(jq -r '.workflow_run.id' /tmp/art.json)" != "34726987952" ]; then
+            echo "RUN836_ARTIFACT_PROVENANCE = FAIL (artifact is not from the authoritative run)"; exit 1
+          fi
+          echo "RUN836_ARTIFACT_PROVENANCE = OK"
+
+      - name: Inspect tar members before extracting
+        run: |
+          set -euo pipefail
+          cd incoming
+          ARCHIVE="$(ls -1 run836b_capture_*.tar.gz | tail -n1)"
+          echo "=== tar member listing ==="
+          tar -tvzf "$ARCHIVE"
+          # Reject absolute paths, traversal, links and special files. An
+          # archive is untrusted input until its member paths are read.
+          if tar -tzf "$ARCHIVE" | grep -E '^/|(^|/)\.\.(/|$)' ; then
+            echo "UNSAFE_TAR_MEMBER_PATH"; exit 1
+          fi
+          if tar -tvzf "$ARCHIVE" | grep -vE '^[d-]' ; then
+            echo "UNSAFE_TAR_MEMBER_TYPE (link or special file)"; exit 1
+          fi
+          echo "TAR_MEMBERS_SAFE"
+
       - name: Verify the archive round-tripped unchanged
         id: verify
         run: |
@@ -109,6 +153,15 @@ jobs:
           set -euo pipefail
           mkdir -p research/evidence
           cp "incoming/${{ steps.verify.outputs.archive }}" research/evidence/
+          # The artifact also carries three small text files that are NOT
+          # inside the tar.gz -- among them the capture's own twelve-item
+          # terminal report, whose items 1-6 exist nowhere else. Carry them too,
+          # or the report stays unreadable.
+          for f in run836b_terminal_report.txt run836b_selection.txt runner_metadata.txt; do
+            if [ -f "incoming/$f" ]; then cp "incoming/$f" research/evidence/; fi
+          done
+          sha256sum research/evidence/* > research/evidence/RECEIVED.sha256
+          cat research/evidence/RECEIVED.sha256
           # Re-hash AFTER the copy: proving the committed file is the verified
           # file, not merely that a verified file once existed on this runner.
           COMMITTED="$(sha256sum "research/evidence/${{ steps.verify.outputs.archive }}" | cut -d' ' -f1)"
