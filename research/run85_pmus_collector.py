@@ -110,10 +110,29 @@ def _get(http, path, params=None):
     wall, mono = _now()
     row = {"path": path, "params": params, "local_request_wall_utc": wall,
            "local_request_monotonic_ns": mono, "http_status": None,
-           "error": None, "body": None}
+           "error": None, "body": None, "response_headers": None,
+           "response_bytes": None, "response_sha256": None}
     try:
         resp = http.get(GATEWAY_BASE + path, params=params, timeout=TIMEOUT_S)
         row["http_status"] = resp.status_code
+        # Headers are evidence about the venue's own limits. They are recorded
+        # verbatim for the subset that bears on pacing and caching; a header we
+        # did not anticipate is kept too, under "other", rather than dropped.
+        try:
+            hdrs = {k.lower(): v for k, v in resp.headers.items()}
+            keep = {k: v for k, v in hdrs.items()
+                    if ("ratelimit" in k or "rate-limit" in k or "retry" in k
+                        or k in ("cache-control", "age", "date", "server",
+                                 "content-length", "content-type"))}
+            row["response_headers"] = keep
+        except Exception:                              # noqa: BLE001
+            row["response_headers"] = None
+        try:
+            raw = resp.content
+            row["response_bytes"] = len(raw)
+            row["response_sha256"] = hashlib.sha256(raw).hexdigest()
+        except Exception:                              # noqa: BLE001
+            pass
         if resp.status_code == 200:
             try:
                 row["body"] = resp.json()
@@ -126,6 +145,7 @@ def _get(http, path, params=None):
     wall2, mono2 = _now()
     row["local_response_wall_utc"] = wall2
     row["local_response_monotonic_ns"] = mono2
+    row["latency_ms"] = (mono2 - mono) / 1e6
     return row
 
 

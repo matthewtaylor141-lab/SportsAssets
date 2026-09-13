@@ -54,10 +54,16 @@ def code_only(path: Path) -> str:
 
 
 class FakeResponse:
-    def __init__(self, status, payload=None, text=None):
+    def __init__(self, status, payload=None, headers=None):
         self.status_code = status
         self._payload = payload
-        self._text = text
+        self.headers = headers or {"Content-Type": "application/json",
+                                   "X-RateLimit-Limit": "60"}
+
+    @property
+    def content(self):
+        return (json.dumps(self._payload) if self._payload is not None
+                else "not json").encode()
 
     def json(self):
         if self._payload is None:
@@ -164,6 +170,26 @@ def test_a_200_with_a_non_json_body_is_named_rather_than_guessed():
     http = FakeHTTP([FakeResponse(200, None)])
     r = C._get(http, "/v1/markets/x/book")
     assert r["error"] == "NON_JSON_BODY"
+
+
+def test_every_row_records_headers_size_hash_and_latency():
+    """Section A of Phase 2A needs all four, and a row that lacks them cannot
+    be repaired afterwards -- the response is gone."""
+    http = FakeHTTP([FakeResponse(200, book([("0.4", "1")], []))])
+    r = C._get(http, "/v1/markets/x/book")
+    assert r["response_headers"]["x-ratelimit-limit"] == "60"
+    assert r["response_bytes"] > 0
+    assert len(r["response_sha256"]) == 64
+    assert r["latency_ms"] >= 0
+
+
+def test_rate_limit_headers_are_kept_and_unrelated_ones_dropped():
+    http = FakeHTTP([FakeResponse(200, {}, headers={
+        "X-RateLimit-Remaining": "59", "Retry-After": "1",
+        "Cache-Control": "no-store", "X-Irrelevant": "zzz"})])
+    r = C._get(http, "/v1/markets/x/book")
+    assert set(r["response_headers"]) == {
+        "x-ratelimit-remaining", "retry-after", "cache-control"}
 
 
 def test_every_row_carries_both_clocks_at_request_and_response():

@@ -1,0 +1,108 @@
+# RUN 85 PHASE 2A -- PMUS calibration capture.
+#
+# CAPABILITY BOUNDARY, authorized 2026-09-13 and enforced here:
+#   GET only. https://gateway.polymarket.us only. No api.polymarket.us.
+#   No credentials. No repository secrets. No wallet. No signer. No auth
+#   headers. No Polymarket trading SDK. No order endpoint. No cancel endpoint.
+#   No POST/PUT/PATCH/DELETE. Maximum 2.0 requests/second. mirror_live false.
+#
+# The boundary is not merely declared here -- it is a property of the code this
+# job runs. research/run85_pmus_collector.py imports httpx and the standard
+# library, never polymarket_us, constructs no signature and names the
+# authenticated host nowhere in its executable source. The guard step below
+# re-proves that ON THE RUNNER before a single request leaves it, because a
+# boundary checked only on the author's machine is a boundary checked in the
+# wrong place.
+#
+# NO SECRETS ARE USED OR NEEDED. That is the substantive improvement over Run
+# 83.6E: there is no credential to carry, so there is nothing to leak.
+
+name: run85-phase2a
+
+on:
+  workflow_dispatch:
+    inputs:
+      seconds:
+        description: "sampling duration in seconds (600-1200 for calibration)"
+        required: true
+        default: "900"
+      interval:
+        description: "seconds between sampling cycles"
+        required: true
+        default: "10"
+      markets:
+        description: "number of distinct-event markets to sample"
+        required: true
+        default: "12"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: run85-phase2a
+  cancel-in-progress: false
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 35
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the collector's only dependency
+        run: python -m pip install --quiet "httpx==0.27.2"
+
+      - name: Prove the capability boundary ON THE RUNNER
+        run: |
+          set -euo pipefail
+          # The offline suite is the boundary proof. Running it here means the
+          # bytes about to touch the venue are the bytes that were audited.
+          python -m pip install --quiet pytest
+          python -m pytest research/test_run85_pmus_collector.py -q
+          echo "--- installed distributions, for the record ---"
+          python -m pip list --format=freeze
+          # A trading SDK must not even be INSTALLED in this job. Run 83.3 could
+          # only achieve import-graph absence because the workers image needed
+          # the SDK; here physical absence is available, so it is taken.
+          if python -m pip list --format=freeze | grep -Ei '^(polymarket-us|py-clob-client)='; then
+            echo "TRADING_SDK_PRESENT_IN_COLLECTOR_JOB"; exit 1
+          fi
+          echo "COLLECTOR_PHYSICAL_ABSENCE = ACHIEVED"
+
+      - name: Calibration capture
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          python research/run85_phase2a.py \
+            --out out \
+            --seconds "${{ inputs.seconds }}" \
+            --interval "${{ inputs.interval }}" \
+            --markets "${{ inputs.markets }}" \
+            2>&1 | tee out/run85_terminal_report.txt
+
+      - name: Archive
+        run: |
+          set -euo pipefail
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          DIR="run85_phase2a_${STAMP}"
+          mv out "$DIR"
+          tar -czf "${DIR}.tar.gz" "$DIR"
+          sha256sum "${DIR}.tar.gz" | tee ARCHIVE.sha256
+          ls -la
+          cp "$DIR/run85_terminal_report.txt" .
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RUN85_PHASE2A_EVIDENCE
+          path: |
+            run85_phase2a_*.tar.gz
+            ARCHIVE.sha256
+            run85_terminal_report.txt
+          retention-days: 30

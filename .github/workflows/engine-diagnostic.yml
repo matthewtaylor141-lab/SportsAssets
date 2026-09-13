@@ -38,6 +38,12 @@ on:
       # as research/** above, and the mirror is still paused.
       - ".github/workflows/run836b-capture.yml"
       - ".github/workflows/run836f-retrieve.yml"
+      # Run 85's PMUS calibration capture and its courier. Same reasoning: both
+      # are standalone public-data research jobs against the PUBLIC GATEWAY
+      # only, with no credential and no order path, so landing or editing them
+      # says nothing about engine health.
+      - ".github/workflows/run85-phase2a.yml"
+      - ".github/workflows/run85-retrieve.yml"
       # And this file. paths-ignore skips a run only when EVERY changed file
       # matches, so without this line a commit that merely edits the probe's
       # own trigger config fires the probe -- which is exactly the spend the
