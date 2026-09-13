@@ -1,0 +1,50 @@
+{
+  "phase": "run85/phase2a/1",
+  "collector_sha256": "f5096ea4e9b0c3e042821c44bea6d6291175e911e715c04c25354f88fc9a25a4",
+  "driver_sha256": "5e31387b41ba668d52c7f894cbb5c6f9f5a7ea98a29aa1069af4d7867a4cdec9",
+  "python": "3.11.16 (main, Aug 13 2026, 02:46:14) [GCC 13.3.0]",
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "httpx": "0.27.2",
+  "gateway": "https://gateway.polymarket.us",
+  "max_rps": 2.0,
+  "seconds": 900.0,
+  "interval": 10.0,
+  "markets": 12
+}
+=== A. PREFLIGHT ===
+discovery  http=200 bytes=4472 latency=179.7ms err=None
+headers    {"date": "Sun, 13 Sep 2026 02:16:26 GMT", "content-type": "application/json", "cache-control": "public, max-age=30", "server": "cloudflare"}
+book       slug=aec-nfl-lac-ten-2025-11-02 http=200 bytes=1047 latency=88.5ms err=None
+headers    {"date": "Sun, 13 Sep 2026 02:16:26 GMT", "content-type": "application/json", "cache-control": "public, max-age=30", "server": "cloudflare"}
+body keys  ['marketData']
+bids=0 offers=0 state=None transactTime=None
+PMUS_PUBLIC_BOOK_ACCESS_VENUE_VERIFIED = YES
+
+=== B/C. DISCOVERY AND COMPLEMENT VALIDATION ===
+markets returned: 200  (http=200)
+market keys seen: ['active', 'archived', 'bestAskQuote', 'bestBidQuote', 'category', 'closed', 'color', 'comboEnabled', 'createdAt', 'description', 'endDate', 'ep3Status', 'ep3SyncedAt', 'feeCoefficient', 'gameStartTime', 'hidden', 'id', 'image', 'manualActivation', 'marketSides', 'marketType', 'minimumTradeQty', 'orderPriceMinTickSize', 'outcomePrices', 'outcomes', 'question', 'slug', 'sportsMarketType', 'sportsMarketTypeV2', 'startDate', 'status', 'subtitle', 'tags', 'title', 'titleShort', 'updatedAt']
+structured-sports markets: 200 of 200
+provenance: {'STRUCTURED_SPORTS_METADATA': 200}
+selected markets (distinct events): 12
+  tec-mlb-nlchamp-2026-09-27-nym               BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-champ-2026-09-27-ath                 BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-nlchamp-2026-09-27-atl               BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-champ-2026-09-27-atl                 BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-nlchamp-2026-09-27-sd                BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-champ-2026-09-27-az                  BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-nlchamp-2026-09-27-az                BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-nlchamp-2026-09-27-mia               BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-champ-2026-09-27-chc                 BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-nlchamp-2026-09-27-wsh               BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-champ-2026-09-27-cin                 BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+  tec-mlb-nlchamp-2026-09-27-lad               BINARY_COMPLEMENT_VERIFIED   marketSides=2, one long, one short
+
+=== D. CALIBRATION SAMPLING (900s, every 10s) ===
+book reads: 1080 over 90 cycles
+
+=== J. EVIDENCE ===
+3433d339fa4fe5c288e621703d4d8b802b7675f4dc54043dcfb072d07bc2a3a2  book_samples.jsonl
+ea8888c649b0fdde939da8eed702a4580334d1c1fcdeb17b7f3330c82426e3aa  request_log.jsonl
+e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  run85_terminal_report.txt
+4a0078e9fabf4f5e41a4f093baac3264ed7ba3dc70215d1042b9677023637434  runner_metadata.json
+eb7e193916ca6e064b52a82726aa91054cef7bdf935e24544d6819d64c4d2896  selection.json
