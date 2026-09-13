@@ -1,0 +1,103 @@
+RUN 85 PHASE 2B -- ANALYSIS
+======================================================================
+evidence : run85_phase2b_20260913T031858Z
+samples  : 451   request-log rows: 20
+
+1. COHORT SLOT ACCOUNTING
+   Labels CANNOT overlap: each slot consumes the chosen market's event,
+   so every selected market carries exactly one label. A count of
+   labels is never a count of markets.
+
+   market_slug                                    event_id     event_slug     assigned_regime_labels
+   tec-mlb-nlchamp-2026-09-27-lad                 6435         mlb-nlchamp-20 ['NEAREST_TERM']
+   tec-mlb-champ-2026-09-27-lad                   6436         mlb-champ-2026 ['LONGEST_TERM']
+
+   UNIQUE_MARKETS_SELECTED       = 2
+   UNIQUE_EVENTS_SELECTED        = 2
+   REGIME_LABELS_FILLED          = NEAREST_TERM, LONGEST_TERM
+   REGIME_LABELS_DROPPED         = none
+   REGIME_LABEL_OVERLAP_OCCURRED = NO
+   markets actually sampled      = 2
+
+3. TICK SIZE (per market, from the venue's own field)
+   PHASE2A_TICK_SIZE_VERDICT = RETRACTED
+   SOURCE = PMUS market-detail wire payload, orderPriceMinTickSize
+     tec-mlb-nlchamp-2026-09-27-lad                 tick=0.001
+     tec-mlb-champ-2026-09-27-lad                   tick=0.001
+   distinct tick sizes observed : ['0.001']
+   No generalisation is made beyond the markets listed above.
+
+2. FEE FIELDS (locked language)
+     tec-mlb-nlchamp-2026-09-27-lad                 feeCoefficient=0.06
+     tec-mlb-champ-2026-09-27-lad                   feeCoefficient=0.06
+   PMUS_FEE_COEFFICIENT_FIELD          = ['0.06']
+   PMUS_FEE_COEFFICIENT_FIELD_VERIFIED = YES (venue's own per-market field)
+   PMUS_FEE_FORMULA                    = NOT_IDENTIFIED
+   PMUS_MAKER_FEE                      = NOT_IDENTIFIED
+   PMUS_TAKER_FEE                      = NOT_IDENTIFIED
+   PMUS_MAKER_REBATE                   = NOT_IDENTIFIED
+   PMUS_FEES_RESOLVED                  = NO
+   The coefficient is the venue's. The p(1-p) form is not, and does not
+   enter any figure below.
+
+E. RATE AND RELIABILITY
+   requests attempted : 471
+   HTTP_SUCCESS_RATE  : 100.00% (471)
+   HTTP_429_RATE      : 0.00% (0)
+   status distribution: {200: 471}
+   latency ms p50=14.0 p90=17.8 p95=31.6 max=922.0
+   throttle/backoff events recorded: 0
+   RPS_LIMIT_NOT_ESTABLISHED remains TRUE.
+
+6/9. ACHIEVED CADENCE AND MARKOUT USABILITY
+   segment FAST   markets=1 revisit p50=2.00s p90=2.00s p95=2.00s max=2.01s
+   segment COHORT markets=2 revisit p50=4.00s p90=4.00s p95=4.01s max=4.09s
+
+   consecutive same-market responses that DIFFER: 16 of 448 (3.6%)
+
+   markout usability, judged against the ACHIEVED p50 revisit
+   (the best of any segment; interpolation of missing intermediate
+   states is not performed and no offset is claimed from one):
+     2  s : NOT_USABLE
+     5  s : USABLE
+     10 s : USABLE
+     30 s : USABLE
+     60 s : USABLE
+
+4. MARKET-DETAIL QUOTE vs BOOK TOP (diagnostic only)
+   comparisons        : 2
+   bid matches        : 2
+   ask matches        : 2
+   both match         : 2
+   mismatches         : 0
+   local separation s : p50=36.0 p90=310.0 min=36.0 max=310.0
+     tec-mlb-nlchamp-2026-09-27-lad               sep=   36.0s bid 0.3810 vs 0.3810 (OK)  ask 0.3870 vs 0.3870 (OK)
+     tec-mlb-champ-2026-09-27-lad                 sep=  310.0s bid 0.2880 vs 0.2880 (OK)  ask 0.2930 vs 0.2930 (OK)
+
+   The separation above is what it is: the detail probe happens in
+   discovery and the books are read afterwards, so this compares
+   readings minutes apart. A mismatch at that separation is not
+   evidence the summary quote is wrong -- it is evidence the two
+   are not interchangeable without a freshness argument, which is
+   exactly the claim this section refuses to make for free.
+
+10/11. DISPLAYED SPREAD AND QUEUE ASYMMETRY
+    DISPLAYED_SPREAD_ONLY. No fill is simulated anywhere in this file.
+
+    market                                   regime        bid      ask    spread   bid_depth$   ask_depth$    ratio
+    tec-mlb-nlchamp-2026-09-27-lad           NEAREST_   0.3810   0.3870    0.0060        12857       383918    29.9x
+    tec-mlb-champ-2026-09-27-lad             LONGEST_   0.2880   0.2930    0.0050         9727       267041    27.5x
+
+    Depth at touch, and one tick behind where the venue's own tick is
+    known for that market (no tick is manufactured):
+    tec-mlb-nlchamp-2026-09-27-lad           tick=0.001 bid_touch_qty=1317.0000 ask_touch_qty=1.0000
+      one tick behind the bid would be 0.3800
+    tec-mlb-champ-2026-09-27-lad             tick=0.001 bid_touch_qty=193.0000 ask_touch_qty=74.0000
+      one tick behind the bid would be 0.2870
+
+    DISPLAYED_PASSIVE_SPREAD across the cohort:
+      n=451  min=0.0050 p25=0.0050 median=0.0060 p75=0.0060 max=0.0120
+      crossed or locked (spread <= 0): 0
+    PASSIVE_REALIZABLE_EDGE = NOT_IDENTIFIED
+
+wrote run85_phase2b_bookchange.csv (448 rows)
