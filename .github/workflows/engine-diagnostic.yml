@@ -44,6 +44,7 @@ on:
       # says nothing about engine health.
       - ".github/workflows/run85-phase2a.yml"
       - ".github/workflows/run85-retrieve.yml"
+      - ".github/workflows/run85-phase2b.yml"
       # And this file. paths-ignore skips a run only when EVERY changed file
       # matches, so without this line a commit that merely edits the probe's
       # own trigger config fires the probe -- which is exactly the spend the
