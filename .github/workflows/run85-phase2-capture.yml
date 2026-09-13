@@ -69,18 +69,30 @@ jobs:
       - name: Install the one dependency
         run: python -m pip install --quiet "httpx==0.27.2"
 
-      - name: The seven-day window gates the venue contact
+      - name: The window and the proof gate both stand between here and the venue
+        env:
+          EVENT_NAME: ${{ github.event_name }}
         run: |
           set -euo pipefail
           python - <<'PY' > window.env
-          import calendar, json, time
+          import calendar, json, os, time
           w = json.load(open("research/run85_phase2_capture_window.json"))
           now = time.time()
           def ep(s):
               return calendar.timegm(time.strptime(s, "%Y-%m-%dT%H:%M:%SZ"))
           inside = ep(w["start_utc"]) <= now <= ep(w["end_utc"])
-          print("CAPTURE_WINDOW_OPEN=%s" % ("yes" if inside else "no"))
+          # PROOF_REQUIRED_BEFORE_UNATTENDED_CONTINUATION. A dispatched run is
+          # attended by definition -- somebody asked for it and is reading the
+          # result. A SCHEDULED run is the unattended case, and it waits until
+          # a proof segment has actually been read end to end.
+          scheduled = os.environ.get("EVENT_NAME") == "schedule"
+          proven = bool(w.get("proof_segment_verified"))
+          gate = "open" if (not scheduled or proven) else "awaiting_proof"
+          print("CAPTURE_WINDOW_OPEN=%s"
+                % ("yes" if (inside and gate == "open") else "no"))
           print("CAPTURE_WINDOW_END=%s" % w["end_utc"])
+          print("CAPTURE_WINDOW_INSIDE=%s" % ("yes" if inside else "no"))
+          print("CAPTURE_PROOF_GATE=%s" % gate)
           PY
           cat window.env | tee -a "$GITHUB_ENV"
           rm -f window.env
@@ -168,10 +180,15 @@ jobs:
           retention-days: 90
           if-no-files-found: warn
 
-      - name: Window closed
+      - name: Refused before any venue contact
         if: env.CAPTURE_WINDOW_OPEN != 'yes'
         run: |
           echo "CAPTURE_RUNNING = NO"
-          echo "The seven-day window in research/run85_phase2_capture_window.json"
-          echo "is not open (ends ${CAPTURE_WINDOW_END:-unknown}). No venue"
-          echo "contact was made. Nothing was written."
+          echo "WINDOW_INSIDE = ${CAPTURE_WINDOW_INSIDE:-unknown} (window ends ${CAPTURE_WINDOW_END:-unknown})"
+          echo "PROOF_GATE = ${CAPTURE_PROOF_GATE:-unknown}"
+          if [ "${CAPTURE_PROOF_GATE:-}" = "awaiting_proof" ]; then
+            echo "This SCHEDULED run was refused because a proof segment has not"
+            echo "yet been read end to end. Set proof_segment_verified true in"
+            echo "research/run85_phase2_capture_window.json once one has."
+          fi
+          echo "No venue contact was made. Nothing was written."

@@ -4,9 +4,13 @@
  "start_utc": "2026-09-13T16:00:00Z",
  "end_utc": "2026-09-20T16:00:00Z",
  "note": "The frozen seven-day observational window. The capture workflow refuses to contact the venue outside it, so the capture stops on its own rather than on someone remembering to stop it. Widening this file widens the capture; that is a deliberate, reviewable edit, not a runtime decision.",
+ "proof_segment_verified": false,
+ "proof_gate_note": "PROOF_REQUIRED_BEFORE_UNATTENDED_CONTINUATION. While this is false the SCHEDULED capture refuses to contact the venue; only a dispatched run may. It is set true once a proof segment has been read end to end -- captured, sealed, digest-verified and committed. The gate lives here rather than in anyone's memory so that the cron cannot start an unattended seven-day run on an unproven path.",
  "cohort_file": "run85_phase2_frozen_cohort.json",
  "cohort_sha256": "8cdedf26479a309bf7e22c292ebdd2f562673e2b8dccb2ec2793d9ad29187efe",
  "segment_duration_s": 18000,
  "segment_cron_utc": "0 */6 * * *",
- "expected_coverage_note": "Five hours of capture every six hours. The remaining hour of each cycle is a RECORDED GAP, not a hidden one: every segment stamps SEGMENT_START_UTC and SEGMENT_END_UTC."
+ "nominal_daily_capture_hours": 20,
+ "nominal_coverage": 0.8333,
+ "expected_coverage_note": "Five hours of capture every six hours: four segments a day, twenty hours of the twenty-four, 83.33 per cent. The remaining hour of each cycle is a RECORDED GAP, not a hidden one: every segment stamps SEGMENT_START_UTC and SEGMENT_END_UTC."
 }
