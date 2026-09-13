@@ -1,0 +1,37 @@
+{
+  "phase": "run85/phase2b/1",
+  "collector_sha256": "f5096ea4e9b0c3e042821c44bea6d6291175e911e715c04c25354f88fc9a25a4",
+  "driver_sha256": "8b948c2c7b6c110c787e698076c58f72c0c4c8240d0d94bf8c393584745907cd",
+  "python": "3.11.16 (main, Aug 13 2026, 02:46:14) [GCC 13.3.0]",
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "httpx": "0.27.2",
+  "gateway": "https://gateway.polymarket.us",
+  "base_spacing_s": 2.0,
+  "aggregate_rps_ceiling": 0.5,
+  "fast_seconds": 300.0,
+  "cohort_seconds": 600.0,
+  "cohort_target": 3
+}
+=== A. PREFLIGHT ===
+events http=200 bytes=9439 latency=62.7ms err=None
+headers {"date": "Sun, 13 Sep 2026 03:03:17 GMT", "content-type": "application/json", "age": "1", "cache-control": "public, max-age=30", "server": "cloudflare"}
+UNAUTHENTICATED_BOOK_ACCESS_STILL_CONFIRMED = YES
+=== B/C. EVENT-NATIVE DISCOVERY ===
+events returned: 100 (http=200)
+event keys seen: ['active', 'archived', 'category', 'closed', 'combos', 'createdAt', 'description', 'endDate', 'hidden', 'id', 'image', 'imageDisplayType', 'live', 'marketCounts', 'marketGroups', 'markets', 'participants', 'period', 'primaryTag', 'secondaryTag', 'seriesSlug', 'slug', 'sortType', 'sportradarGameId', 'startDate', 'startTime', 'streamProvider', 'streamRequiresAuth', 'tags', 'teams', 'ticker', 'title', 'updatedAt']
+candidate markets with NATIVE event identity + structured sport: 1579
+excluded: 0
+BINARY_COMPLEMENT_VERIFIED: 18
+  slot NEAREST_TERM  tec-mlb-nlchamp-2026-09-27-lad  (event mlb-nlchamp-2026-09-27)
+  slot LONGEST_TERM  tec-mlb-champ-2026-09-27-lad  (event mlb-champ-2026-09-27)
+  slot MOST_LIQUID   EMPTY (no candidate carries the field)
+  slot THINNEST      EMPTY (no candidate carries the field)
+cohort: 2 markets across 2 DISTINCT native events
+
+=== D. SAMPLING ===
+  segment FAST   reads=151 spacing_now=2.00s
+  segment COHORT reads=300 spacing_now=2.00s
+
+=== E. THROTTLE BEHAVIOUR ===
+   429 backoff events: 0
+   final spacing: 2.00s  (base 2.00s)
