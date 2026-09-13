@@ -1,0 +1,125 @@
+RUN 85 PHASE 2G -- ANALYSIS OF THE FROZEN COHORT CLOSURE
+archive : run85_phase2g_20260913T154702Z
+NOTHING IN THIS FILE CONTACTS THE VENUE.
+
+=== 5. RATE, WITH A CORRECTION TO MY OWN METRIC ===
+requests 11 over 25.0 s
+inter-request gap: min 2.500  median 2.500  max 2.500 s
+gaps below the 2.5 s floor: 0
+rate (N-1)/span = 0.4000 rps   nominal 0.4000
+
+  The runner printed ACHIEVED_RPS = 0.4389 and that is MY REPORTING
+  BUG, not a breach of the rate policy. It divided N requests by the
+  span from the FIRST request to the last, so it charged the opening
+  request no preceding interval. Every actual gap was 2.500 s to the
+  millisecond -- min equals max -- and the correct figure is 0.4000
+  rps, exactly the nominal. Nothing exceeded the configured rate.
+HTTP_429_COUNT = 0
+
+=== 6. FINAL COHORT ===
+  aec-nfl-chi-car-2026-09-13
+     event 74901 (nfl-chi-car-2026-09-13)  sport=nfl league=['nfl']  state=PREGAME (raw 'NS')
+     game_start=2026-09-13T17:00:00Z
+     bid 0.6000  ask 0.6050  mid 0.6025  tick 0.005  spread 0.0050 (S_1T)  band P_MID
+     touch qty bid/ask  3138460.1400 / 3721437.0500
+     1t qty    bid/ask  3362185.0900 / 4413978.0900
+     2t qty    bid/ask  3615812.8500 / 4670044.3400
+     5t qty    bid/ask  3820553.6700 / 4740805.8100
+     queue regime = BALANCED
+  aec-nfl-ari-lac-2026-09-13
+     event 74909 (nfl-ari-lac-2026-09-13)  sport=nfl league=['nfl']  state=PREGAME (raw 'NS')
+     game_start=2026-09-13T20:25:00Z
+     bid 0.1850  ask 0.1900  mid 0.1875  tick 0.005  spread 0.0050 (S_1T)  band P_LOW
+     touch qty bid/ask  3841562.0000 / 704913.2200
+     1t qty    bid/ask  4293246.6200 / 1872332.4600
+     2t qty    bid/ask  4508030.2500 / 2217447.2100
+     5t qty    bid/ask  4803331.3400 / 2446406.5800
+     queue regime = BALANCED
+  aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi
+     event 54125 (boxing-canalv-chrmbi-2026-10-31)  sport=boxing league=['boxing']  state=PREGAME (raw 'NS')
+     game_start=2026-11-01T03:00:00Z
+     bid 0.7200  ask 0.7300  mid 0.7250  tick 0.01  spread 0.0100 (S_1T)  band P_MID
+     touch qty bid/ask  194.0000 / 5391.3100
+     1t qty    bid/ask  231.9100 / 10391.3100
+     2t qty    bid/ask  5273.0500 / 20662.2800
+     5t qty    bid/ask  26106.7300 / 30787.2800
+     queue regime = ASK_HEAVY
+  aec-nfl-bal-ind-2026-09-13
+     event 74902 (nfl-bal-ind-2026-09-13)  sport=nfl league=['nfl']  state=PREGAME (raw 'NS')
+     game_start=2026-09-13T17:00:00Z
+     bid 0.6000  ask 0.6050  mid 0.6025  tick 0.005  spread 0.0050 (S_1T)  band P_MID
+     touch qty bid/ask  175384.8600 / 5008553.3900
+     1t qty    bid/ask  1027070.5000 / 5527866.0500
+     2t qty    bid/ask  1080791.2900 / 6046162.7400
+     5t qty    bid/ask  1297045.9600 / 6655752.7400
+     queue regime = ASK_HEAVY
+  aec-nfl-atl-pit-2026-09-13
+     event 74903 (nfl-atl-pit-2026-09-13)  sport=nfl league=['nfl']  state=PREGAME (raw 'NS')
+     game_start=2026-09-13T17:00:00Z
+     bid 0.2750  ask 0.2800  mid 0.2775  tick 0.005  spread 0.0050 (S_1T)  band P_MID
+     touch qty bid/ask  2708737.0200 / 4323938.6900
+     1t qty    bid/ask  3047718.0300 / 4896323.2000
+     2t qty    bid/ask  3183192.0200 / 4978052.1800
+     5t qty    bid/ask  3325304.3200 / 5040405.6400
+     queue regime = BALANCED
+
+=== 7. COUNTS ===
+OFFSET_PAGES_WALKED          = 6
+EVENTS_DISCOVERED            = 600
+ELIGIBLE_GAME_EVENTS         = 15
+TRIAL_SELECTIONS_EVALUATED   = 6
+FINAL_COHORT_SIZE            = 5
+FINAL_COHORT_UNIQUE_EVENTS   = 5
+SPORTS_IN_FINAL_COHORT       = {'nfl': 4, 'boxing': 1}
+PRICE_BANDS                  = ['P_LOW', 'P_MID']
+TICK_VALUES                  = ['0.005', '0.01']
+SPREAD_REGIMES               = ['S_1T']
+QUEUE_REGIMES                = ['ASK_HEAVY', 'BALANCED']
+NORMALIZED_STATES            = ['PREGAME']
+
+gate: {'sport': 'PASS', 'price_band': 'PASS', 'tick': 'PASS', 'spread': 'WAIVED_BY_ABSENCE', 'live_state': 'WAIVED_BY_ABSENCE', 'size': 'PASS'}
+frame availability: {'frame_sports': ['nfl', 'other'], 'frame_bands': ['P_LOW', 'P_MID'], 'frame_ticks': ['0.005', '0.01'], 'frame_spreads': ['S_1T'], 'frame_has_live': False}
+
+=== THE ONE THING THE GATE DOES NOT CATCH ===
+  nfl holds 4 of 5 selected markets (80%).
+
+  S4 caps any one sport at ceil(cap/2) = 4, and it BOUND: NFL took
+  exactly 4. But the cap is computed against the CAP (8), not against
+  the size the cohort actually reached (5). The frame held only 15
+  eligible events across 2 sports, so the cohort under-filled and a
+  cap meant to mean 'at most half' delivered 80%.
+
+  So the frozen gate PASSES and the anti-domination INTENT does not.
+  I am reporting both rather than letting the passing gate stand for
+  the intent. The fix is one line -- cap against len(picks) as it
+  grows, not against the target -- and it is NOT applied to this
+  sealed run.
+
+  The walk also stopped the instant the gate first passed, at page 6
+  of a 40-page bound. Stop-on-first-pass returns the MINIMUM passing
+  cohort by construction. Walking further would very likely have
+  found more sports and more spread regimes.
+
+=== 8. VERDICTS ===
+GAME_LEVEL_COHORT_DIVERSITY = SUFFICIENT
+   (by the frozen gate; see the concentration finding above)
+COHORT_SELECTION_RULE_EXECUTED_IDENTICALLY_IN_TRIAL_AND_FINAL = YES
+HTTP_429_COUNT = 0
+ACHIEVED_RPS = 0.4000 (corrected)   NOMINAL = 0.4000
+EVIDENCE_INTEGRITY = PASS (archive digest and 4 internal checksums verified in the analyst's own process)
+PASSIVE_REALIZABLE_EDGE = NOT_IDENTIFIED
+PMUS_FEES_RESOLVED = NO
+LIVE / CFB / MLB = NOT_OBSERVED_WITHIN_PHASE2G_DISCOVERY_BOUND
+READY_FOR_MULTI_DAY_PHASE2_CAPTURE = YES
+
+  READY is YES against the four stated criteria: the selected cohort
+  passes its own gate, the selector is provably identical in trial
+  and final, evidence integrity passes, and no locked infrastructure
+  contradiction appeared.
+
+  It is YES with one named reservation that is the owner's call, not
+  mine: 80% of the cohort is NFL. If that concentration is not
+  acceptable for the dataset, the fix is the one-line cap change plus
+  a walk that continues past first pass, and 2G should be re-run
+  before capture rather than capturing on this cohort.
+
