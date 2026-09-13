@@ -1,0 +1,79 @@
+RUN 83.6C -- CAPTURE INTEGRITY GATE
+Performed on the real archive bytes, in the analyst's own process.
+
+A. PROVENANCE
+   SOURCE_WORKFLOW_RUN_ID   = 34726987952
+   SOURCE_JOB_ID            = 103642740078
+   SOURCE_ARTIFACT_ID       = 10308180862
+   SOURCE_ARTIFACT_NAME     = RUN836B_CAPTURE_EVIDENCE
+   SOURCE_ARCHIVE_FILENAME  = run836b_capture_20260913T000344Z.tar.gz
+   CAPTURE_COMMIT           = b3d360d
+   RUN836_ARTIFACT_PROVENANCE = OK
+   Chain: artifact 10308180862 -> courier run836f-retrieve (hash checked at
+   download AND after copy) -> committed to research/evidence/ -> fetched here
+   over git -> hashed again. Every hop re-checked the same value.
+
+B. ARCHIVE BYTE SIZE = 672,898
+
+C. OUTER HASH
+   EXPECTED_ARCHIVE_SHA256 = 857afc31ae4e022f286fc443d4784bc0f2321ad27651227b4400083a45d4b759
+   ACTUAL_ARCHIVE_SHA256   = 857afc31ae4e022f286fc443d4784bc0f2321ad27651227b4400083a45d4b759
+
+D. THE FIFTEEN CHECKS
+CHECK_01 = PASS  outer sha256 recomputed from the bytes on disk; identical.
+CHECK_02 = PASS  members listed before extraction: 1 dir + 6 regular files, no
+                 absolute path, no ".." traversal, no link or special member.
+                 Extracted to a separate scratch dir; the archive was not
+                 modified (its hash is unchanged after extraction).
+CHECK_03 = PASS  all five files hashed from the extracted bytes and compared
+                 against the values printed in run836b_terminal_report.txt,
+                 which live OUTSIDE the archive. All five match. The in-archive
+                 checksums.sha256 also equals that out-of-archive set. Comparing
+                 only to the in-archive file would pass even if data and
+                 checksum file were altered together, so it was not relied on.
+CHECK_04 = PASS  manifest capture_version = "run836b/2", the frozen version.
+CHECK_05 = PASS  manifest script_sha256 = 7931b54aef42f31b5f4118bf410340eddd
+                 71549125153ccbd9b33df29794760b, equals the frozen instrument.
+CHECK_06 = PASS  manifest token_ids contains exactly the four selected ids.
+CHECK_07 = PASS  manifest custom_feature_enabled = false, and all three
+                 sessions' recorded subscribe payloads carry false.
+CHECK_08 = PASS  manifest websocket_url =
+                 wss://ws-subscriptions-clob.polymarket.com/ws/market
+CHECK_09 = PASS  manifest rest_url = https://clob.polymarket.com with
+                 rest_book_path=/book, rest_book_param=token_id.
+CHECK_10 = PASS  credential/auth sweep over every file including the 9.7 MB
+                 frame log: api_key, apikey, secret, private_key, authorization,
+                 bearer, wallet, passphrase, signature, x-pm-access-key,
+                 x-pm-signature, cookie, polymarket.us, /v1/orders -- zero hits.
+                 "token" was deliberately NOT treated as credential material:
+                 token ids are market identifiers here.
+CHECK_11 = PASS  sessions.jsonl: 3 rows, 3 opened, 3 distinct session ids,
+                 indices 0/1/2, each closed session_duration_elapsed, each with
+                 7 heartbeats at 10.0 s. Matches the preregistered 3 x 75 s.
+CHECK_12 = PASS  websocket_frames.jsonl has 5,951 rows counted here; the
+                 manifest independently records 5,951. Nonempty.
+CHECK_13 = PASS  rest_books.jsonl has 64 rows, all http_status 200; manifest
+                 records rest_successful 64, rest_failed 0. Nonempty.
+CHECK_14 = PASS  Stated exactly, without inventing timestamp certainty:
+                 (a) checksums.sha256 is INSIDE the archive, so it necessarily
+                     existed before the archive was created;
+                 (b) it covers exactly the five files manifest["files"] lists
+                     and does NOT cover the archive itself;
+                 (c) every one of those five hashes matches the final file
+                     contents, so it was written after the data was final;
+                 (d) the frozen instrument -- whose hash is verified -- writes
+                     checksums last in finalise(), and builds the archive only
+                     afterwards in _pack().
+                 Member mtimes corroborate at minute granularity only
+                 (checksums 00:07, errors.jsonl created 00:03) and are not
+                 relied on as proof.
+CHECK_15 = PASS  manifest CAPTURE_COMPLETE_FOR_RECONSTRUCTION = "YES",
+                 incomplete_reasons = [].
+
+E. VERDICT
+   RUN836_CAPTURE_INTEGRITY = PASS
+
+F. EVENT-TYPE COUNTS (literal tally from the manifest; no interpretation)
+   price_change 5838 | book 63 | last_trade_price 38 | <PONG heartbeat> 21
+   Per-session frames: 2797 / 788 / 2366
+   Window 2026-09-13T00:03:44.609616Z -> 2026-09-13T00:07:50.637573Z
