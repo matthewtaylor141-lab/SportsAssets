@@ -37,6 +37,7 @@ on:
       # must not spend a 16-19 minute live venue probe either -- same reasoning
       # as research/** above, and the mirror is still paused.
       - ".github/workflows/run836b-capture.yml"
+      - ".github/workflows/run836f-retrieve.yml"
       # And this file. paths-ignore skips a run only when EVERY changed file
       # matches, so without this line a commit that merely edits the probe's
       # own trigger config fires the probe -- which is exactly the spend the

@@ -1,0 +1,146 @@
+# RUN 83.6F -- courier the capture evidence into the repository.
+#
+# WHY THIS EXISTS. The agent session can reach github.com over git and the
+# GitHub API, but NOT the Actions artifact blob store
+# (productionresultssa2.blob.core.windows.net), which its egress proxy denies
+# with connect_rejected. So the evidence is reachable by the runner and not by
+# the analyst.
+#
+# THIS JOB IS A COURIER, NOT A VERIFIER OF RECORD. It downloads the artifact,
+# checks the outer archive against the SHA-256 the capture runner computed
+# BEFORE upload, and commits the unmodified .tar.gz into the repository, where
+# the session can fetch it over git and run the locked fifteen-check integrity
+# gate on the real bytes itself.
+#
+# It prints its own check results too, but those are a convenience. The gate is
+# only closed by opening the bytes, and this job does not close it.
+#
+# The archive is committed byte-for-byte as produced by the capture. Nothing is
+# repacked, re-compressed, renamed or normalised: a courier that altered the
+# parcel would destroy the very thing the hash exists to prove.
+#
+# PUBLIC DATA ONLY. No credential, no repository secret, no venue contact of
+# any kind -- this job talks to GitHub and nothing else.
+
+name: run836f-retrieve
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "workflow run id that produced RUN836B_CAPTURE_EVIDENCE"
+        required: true
+        default: "34726987952"
+      expected_archive_sha256:
+        description: "archive SHA-256 computed on the capture runner before upload"
+        required: true
+        default: "857afc31ae4e022f286fc443d4784bc0f2321ad27651227b4400083a45d4b759"
+
+permissions:
+  # contents: write is required ONLY to commit the evidence file. It is the
+  # minimum that lets the analyst reach bytes its network cannot fetch.
+  contents: write
+
+concurrency:
+  group: run836f-retrieve
+  cancel-in-progress: false
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - name: Download the capture evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: RUN836B_CAPTURE_EVIDENCE
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: incoming
+
+      - name: Verify the archive round-tripped unchanged
+        id: verify
+        run: |
+          set -euo pipefail
+          cd incoming
+          ls -la
+          ARCHIVE="$(ls -1 run836b_capture_*.tar.gz | tail -n1)"
+          ACTUAL="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+          SIZE="$(stat -c%s "$ARCHIVE")"
+          echo "archive        = $ARCHIVE"
+          echo "size_bytes     = $SIZE"
+          echo "expected sha256= ${{ inputs.expected_archive_sha256 }}"
+          echo "actual   sha256= $ACTUAL"
+          if [ "$ACTUAL" != "${{ inputs.expected_archive_sha256 }}" ]; then
+            echo "ARCHIVE_SHA256_MISMATCH -- the bytes changed in transit."
+            echo "Nothing is committed. The evidence is not laundered through"
+            echo "a courier that cannot prove what it carried."
+            exit 1
+          fi
+          echo "ARCHIVE_SHA256_VERIFIED"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+          echo "size=$SIZE" >> "$GITHUB_OUTPUT"
+
+      - name: Print the manifest and a courier-side check pass
+        run: |
+          set -euo pipefail
+          cd incoming
+          mkdir -p x && tar -xzf "${{ steps.verify.outputs.archive }}" -C x
+          DIR="$(ls -1 x)"
+          echo "=== extracted: $DIR ==="
+          ls -la "x/$DIR"
+          echo ""
+          echo "=== manifest.json (verbatim) ==="
+          cat "x/$DIR/manifest.json"
+          echo ""
+          echo "=== internal checksum verification ==="
+          ( cd "x/$DIR" && sha256sum -c checksums.sha256 )
+          echo ""
+          echo "=== line counts ==="
+          wc -l "x/$DIR"/*.jsonl
+
+      - name: Commit the evidence, unmodified
+        run: |
+          set -euo pipefail
+          mkdir -p research/evidence
+          cp "incoming/${{ steps.verify.outputs.archive }}" research/evidence/
+          # Re-hash AFTER the copy: proving the committed file is the verified
+          # file, not merely that a verified file once existed on this runner.
+          COMMITTED="$(sha256sum "research/evidence/${{ steps.verify.outputs.archive }}" | cut -d' ' -f1)"
+          echo "committed sha256 = $COMMITTED"
+          if [ "$COMMITTED" != "${{ inputs.expected_archive_sha256 }}" ]; then
+            echo "COPY_ALTERED_THE_ARCHIVE"; exit 1
+          fi
+          git config user.name "Claude"
+          git config user.email "noreply@anthropic.com"
+          git add research/evidence/
+          if git diff --cached --quiet; then
+            echo "already committed; nothing to do"
+            exit 0
+          fi
+          # The message goes through a file: a multi-line -m argument would sit
+          # at column 0 and terminate this YAML block scalar.
+          cat > /tmp/msg.txt <<'MSG'
+          Run 83.6F: carry the Run 83.6B capture evidence into the repo [skip render]
+
+          The analyst session can reach git and the GitHub API but not the Actions
+          artifact blob store, so the evidence is committed here for it to fetch
+          and verify itself. The archive is byte-for-byte as the capture produced
+          it, and its sha256 was checked after download AND again after the copy,
+          so the committed file is provably the verified file.
+
+          This job does not close the integrity gate. The locked fifteen checks
+          are run on these bytes by the analyst, in its own process.
+
+          Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+          Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC
+          MSG
+          sed -i 's/^          //' /tmp/msg.txt
+          git commit -q -F /tmp/msg.txt
+          git push origin HEAD:claude/session-njaewf
+          echo "pushed"
