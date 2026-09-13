@@ -1,0 +1,108 @@
+# RUN 85 PHASE 2B -- repaired calibration.
+#
+# Same authorized capability boundary as Phase 2A, unchanged:
+#   GET only. https://gateway.polymarket.us only. No api.polymarket.us.
+#   No credentials. No repository secrets. No wallet. No signer. No auth
+#   headers. No Polymarket trading SDK. No order endpoint. No cancel endpoint.
+#   No POST/PUT/PATCH/DELETE. mirror_live false.
+#
+# RATE: Phase 2A measured 73% HTTP 429 at 2.0 rps, so the ceiling here is
+# 0.5 rps with exact Retry-After and backoff that does not snap back.
+#
+# SEALING: the driver owns its terminal report and closes it before anything is
+# hashed. Phase 2A piped that file through `tee` and sealed it mid-write, so the
+# recorded digest was the empty string. There is no `tee` in this workflow, and
+# the job fails if the archive does not verify against its own checksums.
+
+name: run85-phase2c
+
+on:
+  workflow_dispatch:
+    inputs:
+      detail_probe:
+        description: "how many candidate markets to probe for detail"
+        required: true
+        default: "150"
+      census_max:
+        description: "max verified candidates carried into the book census"
+        required: true
+        default: "60"
+      census_passes:
+        description: "book passes per candidate (>=2 to see any change)"
+        required: true
+        default: "3"
+      validate_seconds:
+        description: "short validation sample on the frozen cohort"
+        required: true
+        default: "240"
+
+permissions:
+  contents: read
+
+concurrency:
+  group: run85-phase2c
+  cancel-in-progress: false
+
+jobs:
+  calibrate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 50
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the collector's only dependency
+        run: python -m pip install --quiet "httpx==0.27.2"
+
+      - name: Prove the capability boundary ON THE RUNNER
+        run: |
+          set -euo pipefail
+          python -m pip install --quiet pytest
+          python -m pytest research/test_run85_pmus_collector.py \
+                           research/test_run85_phase2b.py research/test_run85_phase2c.py -q
+          python -m pip list --format=freeze
+          if python -m pip list --format=freeze | grep -Ei '^(polymarket-us|py-clob-client)='; then
+            echo "TRADING_SDK_PRESENT_IN_COLLECTOR_JOB"; exit 1
+          fi
+          echo "COLLECTOR_PHYSICAL_ABSENCE = ACHIEVED"
+
+      - name: Diversity / selection census
+        run: |
+          set -euo pipefail
+          mkdir -p out
+          # NO tee: the driver owns and closes its own report before sealing.
+          python research/run85_phase2b.py \
+            --out out \
+            --fast-seconds "${{ inputs.fast_seconds }}" \
+            --cohort-seconds "${{ inputs.cohort_seconds }}" \
+            --cohort "${{ inputs.cohort }}"
+
+      - name: Verify the seal independently, then archive
+        run: |
+          set -euo pipefail
+          cd out
+          echo "=== independent checksum verification ==="
+          sha256sum -c checksums.sha256
+          cd ..
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          DIR="run85_phase2c_${STAMP}"
+          mv out "$DIR"
+          tar -czf "${DIR}.tar.gz" "$DIR"
+          sha256sum "${DIR}.tar.gz" | tee ARCHIVE.sha256
+          cp "$DIR/run85_terminal_report.txt" run85_phase2c_report.txt
+          ls -la
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: RUN85_PHASE2C_EVIDENCE
+          path: |
+            run85_phase2c_*.tar.gz
+            ARCHIVE.sha256
+            run85_phase2c_report.txt
+          retention-days: 30
