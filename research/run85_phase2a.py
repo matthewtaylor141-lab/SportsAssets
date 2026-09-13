@@ -184,15 +184,33 @@ def discover(out, pacer, http, log, want):
     print("provenance: %s" % dict(Counter(x["sports_provenance"] for x in rows)))
 
     # Diversity without free text: spread the sample across distinct events.
+    #
+    # MEASURED 2026-09-13: /v1/markets returns eventSlug = None on EVERY row, so
+    # the fallback below is not a rare edge -- it is the whole population. The
+    # first calibration run keyed 12 markets from two MLB championship-futures
+    # families as 12 separate "events" and reported diversity it did not have.
+    # Run 83.6E.1 required that a per-row fallback be disclosed if any selected
+    # market uses it; it was used by all of them and went unreported, so the
+    # grouping now NAMES its own source and the caller cannot miss it.
+    grouped_by = "eventSlug"
+    if not any(x.get("eventSlug") for x in sporty):
+        grouped_by = "PER_ROW_SLUG_FALLBACK"
     by_event = {}
     for x in sporty:
-        by_event.setdefault(x["eventSlug"] or x["slug"], []).append(x)
+        by_event.setdefault(x.get("eventSlug") or x["slug"], []).append(x)
     chosen = []
     for ev, xs in by_event.items():
         chosen.append(sorted(xs, key=lambda z: -(z["liquidity"] or 0))[0])
         if len(chosen) >= want:
             break
-    print("selected markets (distinct events): %d" % len(chosen))
+    print("DISCOVERY_EVENT_GROUPING = %s  (%d of %d rows carry an eventSlug)"
+          % (grouped_by, sum(1 for x in sporty if x.get("eventSlug")), len(sporty)))
+    if grouped_by == "PER_ROW_SLUG_FALLBACK":
+        print("  WARNING: these are NOT verified distinct events. Event identity")
+        print("  is unavailable from /v1/markets and must come from /v1/events.")
+        print("  Across-market pair economics (section G2) CANNOT be computed")
+        print("  from this selection, and diversity must not be claimed.")
+    print("selected markets: %d" % len(chosen))
 
     verified = []
     for x in chosen:

@@ -54,15 +54,45 @@ def quant(vals, q):
     return s[i]
 
 
+def md(body):
+    """The venue's real envelope.
+
+    The wire wraps the book in `marketData`; the SDK's MarketBook TypedDict
+    declares marketSlug/bids/offers/state at the TOP level and knows nothing of
+    the wrapper. Our own pmus.py does read `.get("marketData")`, so production
+    code already knew -- the SDK type is what is wrong, and this is exactly the
+    wire-vs-model check section B exists to perform. Both shapes are accepted
+    here so the reader does not silently return nothing if the venue changes.
+    """
+    if not isinstance(body, dict):
+        return {}
+    inner = body.get("marketData")
+    return inner if isinstance(inner, dict) else body
+
+
+def px_of(level):
+    """A price level's price.
+
+    On the wire `px` is an OBJECT {"value": "0.0010", "currency": "USD"}, not a
+    scalar. The SDK calls that type `Amount` and is right about it; my first
+    pass assumed a string and read every book as empty. Both forms are handled
+    rather than assumed.
+    """
+    p = level.get("px")
+    if isinstance(p, dict):
+        p = p.get("value")
+    return None if p is None else D(p)
+
+
 def best_bid(body):
-    lv = body.get("bids") or []
-    px = [D(x["px"]) for x in lv if x.get("px") is not None]
+    px = [px_of(x) for x in (md(body).get("bids") or [])]
+    px = [p for p in px if p is not None]
     return max(px) if px else None
 
 
 def best_offer(body):
-    lv = body.get("offers") or []
-    px = [D(x["px"]) for x in lv if x.get("px") is not None]
+    px = [px_of(x) for x in (md(body).get("offers") or [])]
+    px = [p for p in px if p is not None]
     return min(px) if px else None
 
 
@@ -70,7 +100,9 @@ def depth_usd(levels):
     t = Decimal(0)
     for x in levels or []:
         try:
-            t += D(x["px"]) * D(x["qty"])
+            p = px_of(x)
+            if p is not None:
+                t += p * D(x["qty"])
         except Exception:                             # noqa: BLE001
             pass
     return t
@@ -121,11 +153,23 @@ def main(capdir):
         for k in (r.get("response_headers") or {}):
             hdrs[k] += 1
     say("   response headers seen: %s" % dict(hdrs))
+    # retry-after IS a rate-limit signal. An earlier version of this check
+    # looked only for "ratelimit"/"rate-limit" in the header NAME and reported
+    # "no rate-limit headers observed" on a capture carrying 803 of them, which
+    # is the most misleading thing this file could have said.
     rl = [r.get("response_headers") for r in allrows
-          if any("ratelimit" in k or "rate-limit" in k
+          if any(("ratelimit" in k) or ("rate-limit" in k) or (k == "retry-after")
                  for k in (r.get("response_headers") or {}))]
     if rl:
-        say("   RATE LIMIT HEADERS PRESENT -- example: %s" % json.dumps(rl[0]))
+        say("   RATE-LIMIT SIGNAL PRESENT on %d responses" % len(rl))
+        say("     example: %s" % json.dumps(rl[0]))
+        ra = Counter(str((r.get("response_headers") or {}).get("retry-after"))
+                     for r in allrows
+                     if (r.get("response_headers") or {}).get("retry-after"))
+        say("     retry-after values: %s" % dict(ra))
+        srv = Counter(str((r.get("response_headers") or {}).get("server"))
+                      for r in allrows if r.get("http_status") == 429)
+        say("     server on 429s   : %s" % dict(srv))
     else:
         say("   no rate-limit headers observed.")
     say("   RPS_LIMIT_NOT_ESTABLISHED remains TRUE. The absence of throttling")
@@ -143,14 +187,14 @@ def main(capdir):
         (cap / "run85_phase2a_analysis.txt").write_text("\n".join(R) + "\n")
         return 1
 
-    with_bids = sum(1 for r in good if (r["body"].get("bids") or []))
-    with_offs = sum(1 for r in good if (r["body"].get("offers") or []))
-    with_both = sum(1 for r in good if (r["body"].get("bids") or [])
-                    and (r["body"].get("offers") or []))
+    with_bids = sum(1 for r in good if (md(r["body"]).get("bids") or []))
+    with_offs = sum(1 for r in good if (md(r["body"]).get("offers") or []))
+    with_both = sum(1 for r in good if (md(r["body"]).get("bids") or [])
+                    and (md(r["body"]).get("offers") or []))
     say("   %% with bids        : %.2f%% (%d)" % (pct(with_bids, len(good)), with_bids))
     say("   %% with offers      : %.2f%% (%d)" % (pct(with_offs, len(good)), with_offs))
     say("   %% with BOTH        : %.2f%% (%d)" % (pct(with_both, len(good)), with_both))
-    say("   market states      : %s" % dict(Counter(r["body"].get("state")
+    say("   market states      : %s" % dict(Counter(md(r["body"]).get("state")
                                                     for r in good)))
     say("   complement classes : %s" % dict(Counter(r.get("complement_class")
                                                     for r in good)))
@@ -160,8 +204,8 @@ def main(capdir):
         b, a = best_bid(r["body"]), best_offer(r["body"])
         if b is not None and a is not None:
             spreads.append(float(a - b))
-        bidD.append(float(depth_usd(r["body"].get("bids"))))
-        askD.append(float(depth_usd(r["body"].get("offers"))))
+        bidD.append(float(depth_usd(md(r["body"]).get("bids"))))
+        askD.append(float(depth_usd(md(r["body"]).get("offers"))))
     if spreads:
         say("   spread  n=%d  min=%.4f p25=%.4f median=%.4f p75=%.4f max=%.4f"
             % (len(spreads), min(spreads), quant(spreads, .25),
@@ -172,7 +216,7 @@ def main(capdir):
                                                  quant(bidD, .9)))
     say("   ask depth $ median=%.2f p90=%.2f" % (statistics.median(askD),
                                                  quant(askD, .9)))
-    tt = Counter(bool(r["body"].get("transactTime")) for r in good)
+    tt = Counter(bool(md(r["body"]).get("transactTime")) for r in good)
     say("   transactTime present: %s" % dict(tt))
     say()
 
