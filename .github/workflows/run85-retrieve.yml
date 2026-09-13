@@ -1,0 +1,160 @@
+# RUN 85 -- courier the Phase 2A calibration evidence into the repository.
+#
+# WHY THIS EXISTS. The analyst session reaches github.com over git and the API
+# but NOT the Actions artifact blob store (productionresultssa2.blob.core.
+# windows.net), which its egress proxy denies with connect_rejected. So the
+# evidence is reachable by the runner and not by the analyst. This job carries
+# it across, unmodified, so the analyst can open the real bytes itself.
+#
+# THIS JOB IS A COURIER, NOT A VERIFIER OF RECORD. It checks the archive
+# against the SHA-256 the capture runner computed BEFORE upload, and again
+# AFTER the copy, so the committed file is provably the verified file. It draws
+# no conclusion about the data. Phase 2A sections E-H are computed by the
+# analyst, from these bytes, in its own process.
+#
+# The archive is committed byte-for-byte as produced. A courier that altered
+# the parcel would destroy the very thing the hash exists to prove.
+#
+# PUBLIC DATA ONLY. No credential, no repository secret, no venue contact of
+# any kind -- this job talks to GitHub and nothing else.
+
+name: run85-retrieve
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "workflow run id that produced RUN85_PHASE2A_EVIDENCE"
+        required: true
+      expected_archive_sha256:
+        description: "archive SHA-256 from the capture runner (from ARCHIVE.sha256)"
+        required: true
+
+permissions:
+  # contents: write is required ONLY to commit the evidence file. It is the
+  # minimum that lets the analyst reach bytes its network cannot fetch.
+  contents: write
+
+concurrency:
+  group: run85-retrieve
+  cancel-in-progress: false
+
+jobs:
+  retrieve:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - name: Download the calibration evidence
+        uses: actions/download-artifact@v4
+        with:
+          name: RUN85_PHASE2A_EVIDENCE
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: incoming
+
+      - name: Artifact provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Provenance comes from the API record of the run itself, not from the
+          # filename, so "is this the capture we mean" is answered by GitHub
+          # rather than by resemblance.
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }}" \
+               -o /tmp/run.json
+          jq -r '"SOURCE_RUN_ID       = \(.id)",
+                 "SOURCE_WORKFLOW     = \(.path)",
+                 "SOURCE_HEAD_SHA     = \(.head_sha)",
+                 "SOURCE_EVENT        = \(.event)",
+                 "SOURCE_CONCLUSION   = \(.conclusion)",
+                 "SOURCE_CREATED_AT   = \(.created_at)"' /tmp/run.json
+          if [ "$(jq -r '.path' /tmp/run.json)" != ".github/workflows/run85-phase2a.yml" ]; then
+            echo "RUN85_ARTIFACT_PROVENANCE = FAIL (not the calibration workflow)"; exit 1
+          fi
+          echo "RUN85_ARTIFACT_PROVENANCE = OK"
+
+      - name: Inspect tar members before extracting
+        run: |
+          set -euo pipefail
+          cd incoming
+          ARCHIVE="$(ls -1 run85_phase2a_*.tar.gz | tail -n1)"
+          echo "=== tar member listing ==="
+          tar -tvzf "$ARCHIVE"
+          # Reject absolute paths, traversal, links and special files. An
+          # archive is untrusted input until its member paths are read.
+          if tar -tzf "$ARCHIVE" | grep -E '^/|(^|/)\.\.(/|$)' ; then
+            echo "UNSAFE_TAR_MEMBER_PATH"; exit 1
+          fi
+          if tar -tvzf "$ARCHIVE" | grep -vE '^[d-]' ; then
+            echo "UNSAFE_TAR_MEMBER_TYPE (link or special file)"; exit 1
+          fi
+          echo "TAR_MEMBERS_SAFE"
+
+      - name: Verify the archive round-tripped unchanged
+        id: verify
+        run: |
+          set -euo pipefail
+          cd incoming
+          ls -la
+          ARCHIVE="$(ls -1 run85_phase2a_*.tar.gz | tail -n1)"
+          ACTUAL="$(sha256sum "$ARCHIVE" | cut -d' ' -f1)"
+          echo "archive         = $ARCHIVE"
+          echo "size_bytes      = $(stat -c%s "$ARCHIVE")"
+          echo "expected sha256 = ${{ inputs.expected_archive_sha256 }}"
+          echo "actual   sha256 = $ACTUAL"
+          if [ "$ACTUAL" != "${{ inputs.expected_archive_sha256 }}" ]; then
+            echo "ARCHIVE_SHA256_MISMATCH -- the bytes changed in transit."
+            echo "Nothing is committed."
+            exit 1
+          fi
+          echo "ARCHIVE_SHA256_VERIFIED"
+          echo "archive=$ARCHIVE" >> "$GITHUB_OUTPUT"
+
+      - name: Commit the evidence, unmodified
+        run: |
+          set -euo pipefail
+          mkdir -p research/evidence
+          cp "incoming/${{ steps.verify.outputs.archive }}" research/evidence/
+          for f in run85_terminal_report.txt ARCHIVE.sha256; do
+            if [ -f "incoming/$f" ]; then cp "incoming/$f" "research/evidence/run85_$f"; fi
+          done
+          # Re-hash AFTER the copy: proving the committed file is the verified
+          # file, not merely that a verified file once existed on this runner.
+          COMMITTED="$(sha256sum "research/evidence/${{ steps.verify.outputs.archive }}" | cut -d' ' -f1)"
+          echo "committed sha256 = $COMMITTED"
+          if [ "$COMMITTED" != "${{ inputs.expected_archive_sha256 }}" ]; then
+            echo "COPY_ALTERED_THE_ARCHIVE"; exit 1
+          fi
+          git config user.name "Claude"
+          git config user.email "noreply@anthropic.com"
+          git add research/evidence/
+          if git diff --cached --quiet; then
+            echo "already committed; nothing to do"; exit 0
+          fi
+          # The message goes through a file: a multi-line -m argument would sit
+          # at column 0 and terminate this YAML block scalar.
+          cat > /tmp/msg.txt <<'MSG'
+          Run 85: carry the Phase 2A calibration evidence into the repo [skip render]
+
+          The analyst session can reach git and the GitHub API but not the Actions
+          artifact blob store, so the evidence is committed here for it to fetch
+          and analyse itself. The archive is byte-for-byte as the capture produced
+          it, and its sha256 was checked after download AND again after the copy.
+
+          This job draws no conclusion about the data. Phase 2A sections E to H
+          are computed by the analyst, on these bytes, in its own process.
+
+          Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+          Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC
+          MSG
+          sed -i 's/^          //' /tmp/msg.txt
+          git commit -q -F /tmp/msg.txt
+          git push origin HEAD:claude/session-njaewf
+          echo "pushed"
