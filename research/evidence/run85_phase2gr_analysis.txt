@@ -1,0 +1,198 @@
+RUN 85 PHASE 2G-R -- COHORT CLOSURE, ANALYSIS AND FROZEN SPECIFICATION
+archive : run85_phase2gr_20260913T160243Z
+NOTHING IN THIS FILE CONTACTS THE VENUE.
+
+=== A. FINAL COHORT ===
+market                                     sport   state    mid      band     tick   spread     queue     
+aec-cfb-portst-ore-2026-09-18              cfb     PREGAME  0.0075   P_LOW    0.005  S_1T       ASK_HEAVY 
+aec-nfl-chi-car-2026-09-13                 nfl     PREGAME  0.6025   P_MID    0.005  S_1T       BALANCED  
+aec-boxing-canalv-chrmbi-2026-10-31-canalv boxing  PREGAME  0.7250   P_MID    0.01   S_1T       ASK_HEAVY 
+asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5     epl     LIVE     0.0250   P_LOW    0.01   S_2_3T     BID_HEAVY 
+aec-cfb-coast-del-2026-09-19               cfb     PREGAME  0.3550   P_MID    0.005  S_4T_PLUS  ASK_HEAVY 
+aec-nfl-bal-ind-2026-09-13                 nfl     PREGAME  0.6025   P_MID    0.005  S_1T       ASK_HEAVY 
+atc-lmx-ame-tij-2026-09-05-tij             lmx     PREGAME  0.0200   P_LOW    0.01   S_2_3T     BID_HEAVY 
+aec-cfb-kentst-ohiost-2026-09-19           cfb     PREGAME  0.0075   P_LOW    0.005  S_1T       ASK_HEAVY 
+aec-nfl-atl-pit-2026-09-13                 nfl     PREGAME  0.2775   P_MID    0.005  S_1T       BALANCED  
+atc-lmx-pue-tol-2026-09-04-draw            lmx     PREGAME  0.2150   P_MID    0.01   S_1T       BALANCED  
+aec-cfb-uwg-etnst-2026-09-19               cfb     PREGAME  0.2950   P_MID    0.005  S_4T_PLUS  ASK_HEAVY 
+aec-nfl-cle-jax-2026-09-13                 nfl     PREGAME  0.2125   P_MID    0.005  S_1T       BALANCED  
+
+  aec-cfb-portst-ore-2026-09-18
+     event 103011 (cfb-portst-ore-2026-09-18)  league=['cfb']  raw_period='NS'  game_start=2026-09-19T02:30:00Z
+     bid 0.0050  ask 0.0100  spread 0.0050   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 72464.0600/951604.7200  1t 72464.0600/951684.7200  2t 72464.0600/961684.7200  5t 72464.0600/962317.1200
+  aec-nfl-chi-car-2026-09-13
+     event 74901 (nfl-chi-car-2026-09-13)  league=['nfl']  raw_period='NS'  game_start=2026-09-13T17:00:00Z
+     bid 0.6000  ask 0.6050  spread 0.0050   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 3168763.5000/2266562.2300  1t 3380173.9600/3676796.1300  2t 3636418.2800/3946605.3800  5t 3839836.5100/4009579.8500
+  aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi
+     event 54125 (boxing-canalv-chrmbi-2026-10-31)  league=['boxing']  raw_period='NS'  game_start=2026-11-01T03:00:00Z
+     bid 0.7200  ask 0.7300  spread 0.0100   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 194.0000/5393.8400  1t 261.9100/10777.8400  2t 5303.0500/21048.8100  5t 26136.7300/31173.8100
+  asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5
+     event 103311 (epl-mnu-mnc-2026-09-13)  league=['epl']  raw_period="33'"  game_start=2026-09-13T15:30:00Z
+     bid 0.0100  ask 0.0400  spread 0.0300   state justification: soccer minute token "33'"; agrees with gameStartTime
+     qty touch 4.0000/0.0100  1t 4.0000/0.0100  2t 4.0000/0.0100  5t 4.0000/0.0100
+  aec-cfb-coast-del-2026-09-19
+     event 103280 (cfb-coast-del-2026-09-19)  league=['cfb']  raw_period='NS'  game_start=2026-09-19T15:30:00Z
+     bid 0.3400  ask 0.3700  spread 0.0300   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 94.0000/300.0000  1t 94.0000/300.0000  2t 94.0000/300.0000  5t 428.0000/5300.0000
+  aec-nfl-bal-ind-2026-09-13
+     event 74902 (nfl-bal-ind-2026-09-13)  league=['nfl']  raw_period='NS'  game_start=2026-09-13T17:00:00Z
+     bid 0.6000  ask 0.6050  spread 0.0050   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 164787.7700/5022853.1900  1t 533060.4100/5539252.8500  2t 1095850.9000/6007997.9200  5t 1313096.3600/6393621.9200
+  atc-lmx-ame-tij-2026-09-05-tij
+     event 99994 (lmx-ame-tij-2026-09-05)  league=['lmx']  raw_period='NS'  game_start=2026-10-29T03:00:00Z
+     bid 0.0100  ask 0.0300  spread 0.0200   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 147.4600/11.7100  1t 147.4600/11.7100  2t 147.4600/11.7100  5t 147.4600/11.7100
+  aec-cfb-kentst-ohiost-2026-09-19
+     event 103326 (cfb-kentst-ohiost-2026-09-19)  league=['cfb']  raw_period='NS'  game_start=2026-09-19T16:00:00Z
+     bid 0.0050  ask 0.0100  spread 0.0050   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 72265.4100/482924.5100  1t 72265.4100/484924.5100  2t 72265.4100/494473.5100  5t 72265.4100/494473.5100
+  aec-nfl-atl-pit-2026-09-13
+     event 74903 (nfl-atl-pit-2026-09-13)  league=['nfl']  raw_period='NS'  game_start=2026-09-13T17:00:00Z
+     bid 0.2750  ask 0.2800  spread 0.0050   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 2733419.2000/4273134.8800  1t 3063779.2900/4844969.3900  2t 3199222.1400/4931705.4100  5t 3350471.3100/4996537.8700
+  atc-lmx-pue-tol-2026-09-04-draw
+     event 99015 (lmx-pue-tol-2026-09-04)  league=['lmx']  raw_period='NS'  game_start=2026-09-16T01:00:00Z
+     bid 0.2100  ask 0.2200  spread 0.0100   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 1144.2500/1543.4600  1t 4169.7500/2679.9500  2t 4965.7500/4309.9500  5t 4965.7500/9446.9500
+  aec-cfb-uwg-etnst-2026-09-19
+     event 103333 (cfb-uwg-etnst-2026-09-19)  league=['cfb']  raw_period='NS'  game_start=2026-09-19T16:00:00Z
+     bid 0.2050  ask 0.3850  spread 0.1800   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 10.0000/117.0000  1t 12.0000/165.0700  2t 12.0000/165.0700  5t 12.0000/165.0700
+  aec-nfl-cle-jax-2026-09-13
+     event 74904 (nfl-cle-jax-2026-09-13)  league=['nfl']  raw_period='NS'  game_start=2026-09-13T17:00:00Z
+     bid 0.2100  ask 0.2150  spread 0.0050   state justification: exact token 'NS'; agrees with gameStartTime
+     qty touch 1962510.0000/2921494.3600  1t 2504060.5000/3576963.5000  2t 2826553.0000/3682024.0100  5t 3023634.1200/3732688.5200
+
+=== COUNTS AND GATES ===
+OFFSET_PAGES_WALKED = 19   EVENTS_DISCOVERED = 1900   ELIGIBLE_GAME_EVENTS = 126
+TRIAL_SELECTIONS_EVALUATED = 19   FIRST_PASS_PAGE = 18 (walk continued)
+FINAL_COHORT_SIZE = 12 over 12 unique events
+SPORT_COUNTS = {'cfb': 4, 'nfl': 4, 'other': 3, 'soccer': 1}   MAX_SINGLE_SPORT_SHARE = 0.3333
+LEAGUE_COUNTS = {'cfb': 4, 'nfl': 4, 'boxing': 1, 'epl': 1, 'lmx': 2}   MAX_SINGLE_LEAGUE_SHARE = 0.3333
+UNIVERSE_SPORT_COUNTS = {'other': 3, 'nfl': 30, 'cfb': 68, 'soccer': 1}   MAX_BALANCED_SIZE_AVAILABLE = 68
+PRICE_BANDS = ['P_LOW', 'P_MID']  TICKS = ['0.005', '0.01']  SPREADS = ['S_1T', 'S_2_3T', 'S_4T_PLUS']  QUEUES = ['ASK_HEAVY', 'BALANCED', 'BID_HEAVY']  STATES = ['LIVE', 'PREGAME']
+gate = {'sport_concentration': 'PASS', 'league_concentration': 'PASS', 'sport_count': 'PASS', 'price_band': 'PASS', 'tick': 'PASS', 'spread': 'PASS', 'live_state': 'PASS', 'size': 'PASS'}
+
+  Both 2G defects are closed and the evidence says so rather than the
+  code claiming it. Concentration: 2G gave NFL 4 of 5 (80%); here the
+  largest sport holds 4 of 12 (33.3%), and the same bound holds at
+  league level. The repair was the SELECTOR -- round-robin over sports
+  before strata -- so balance is emergent, not a cap applied after.
+
+  First-pass stopping: the gate first passed at page 18 and the walk
+  did NOT stop, continuing to page 19 where target quality was met.
+  That single change is what produced a LIVE market, a third spread
+  regime and a third queue regime -- none of which 2G's minimum
+  passing cohort contained.
+
+  The LIVE market is asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5 at raw
+  period 33'. That is the sport-aware soccer-minute rule firing, and
+  it was corroborated against kickoff time rather than trusted from
+  the string alone.
+
+=== RATE ===
+INTER_REQUEST_GAP_MIN    = 2.500 s
+INTER_REQUEST_GAP_MEDIAN = 2.500 s
+INTER_REQUEST_GAP_MAX    = 6.856 s
+ACHIEVED_RPS_INTERVAL_BASED = 0.3780  nominal 0.4000
+gaps below the 2.5 s floor: 0
+HTTP_429_COUNT = 0
+
+  The floor is a floor, not a ceiling: the 6.86 s maximum gap is the
+  pause between the walk and the cohort reads and breaches nothing.
+  No gap fell below 2.5 s.
+
+=== VERDICTS ===
+SPORT_CONCENTRATION_GATE = PASS
+LEAGUE_CONCENTRATION_GATE = PASS
+GAME_LEVEL_COHORT_DIVERSITY = SUFFICIENT
+COHORT_SELECTION_RULE_EXECUTED_IDENTICALLY_IN_TRIAL_AND_FINAL = YES
+ACHIEVED_RPS_INTERVAL_BASED = 0.3780
+HTTP_429_COUNT = 0
+EVIDENCE_INTEGRITY = PASS (archive digest + 4 internal checksums verified in the analyst's own process)
+PASSIVE_REALIZABLE_EDGE = NOT_IDENTIFIED
+PMUS_FEES_RESOLVED = NO
+READY_FOR_MULTI_DAY_PHASE2_CAPTURE = YES
+
+=== B. FROZEN CAPTURE SPECIFICATION ===
+COHORT      the 12 markets above, one per native event, re-selected
+            each capture day by the frozen 2G-R selector -- never by
+            hand. A market whose event ends drops out; the selector
+            refills from the same rule.
+ACCESS      GET on the public gateway only. No credential, no
+            websocket, no order path. mirror_live stays false.
+RATE        0.4 rps nominal, 2.5 s spacing floor, Retry-After honoured
+            exactly, x2 backoff on 429 to a 30 s ceiling, x0.9 recovery
+            per success only. Pacer DRAINED before every timed set.
+SAMPLING    horizon sets, not a uniform round robin. One set = reads at
+            t0 and t0+5, +10, +30, +60 s for one market. 4 sets run
+            concurrently, staggered, so the merged timeline never
+            breaches the spacing floor or the mean ceiling. The plan is
+            validated before each window and REFUSED, not trimmed, if
+            it would breach either.
+RECORD      per observation: both local clocks and monotonic; http
+            status, bytes, sha256; transactTime AND
+            stats.lastPriceSample.ts; full ladder + its sha256; best
+            bid/ask and spread; touch qty and notional both sides;
+            cumulative qty and notional within 0/1/2/5 ticks; the
+            market's own tick on every row; raw period, normalized
+            state and its justification; gameStartTime, event
+            startTime and endDate kept separate; a paired /bbo read
+            for the cross-route freshness check; event id and slug.
+SEMANTICS   HORIZON_OBSERVATION_AVAILABLE, BOOK_CHANGED_BY_HORIZON and
+            MARKOUT stay three separate fields. An unchanged book at a
+            horizon is MARKOUT = 0, never a missing row. The sample is
+            NEVER conditioned on the book having moved.
+INTEGRITY   each day sealed with per-file sha256 written after the
+            report is closed, couriered unmodified, re-verified by the
+            analyst in its own process.
+STOP        halt and report on: 429s above 1%% of requests; cross-route
+            touch disagreement above 1%%; any identity mismatch or body
+            collision; a venue change that invalidates the cohort.
+            Never adapt silently.
+
+=== C. EXPECTED DURATION AND OBSERVATION COUNTS ===
+one set = 5 reads spanning 60 s (t0 + [5, 10, 30, 60])
+4 sets run concurrently per 60 s window = 20 reads/window = 0.333 rps
+   (ceiling 0.40 rps, so this sits at 83% of budget)
+windows/day = 1440   sets/day = 5760   full cohort rotations/day = 480
+observations/day        = 28800
+markout pairs/day       = 23040  (5760 sets x 4 horizons)
+per market per day      = 480 sets, 2400 observations
+   3 days ->    86400 observations,    69120 markout pairs
+   7 days ->   201600 observations,   161280 markout pairs
+  14 days ->   403200 observations,   322560 markout pairs
+
+  These are CEILINGS from the rate budget. Real yield will be lower:
+  events end, books go one-sided, the venue throttles. The capture
+  reports achieved counts, never these.
+
+=== D. PROFITABILITY OUTPUTS THE DATASET WILL SUPPORT ===
+SUPPORTED, directly from what is recorded:
+  displayed passive spread, per market and over time
+  hypothetical resting quote at the touch or N ticks behind
+  PASSIVE_TOUCH_PROXY -- did the market reach that price
+  near-touch queue state ahead of that price at 0/1/2/5 ticks
+  adverse movement at 5/10/30/60 s, signed against the quoted side
+  one-leg versus both-leg opportunity on the same market
+  incomplete-pair exposure: one side reached, the other not
+  residual settlement outcome where the venue publishes it
+  PRE_FEE_EXPECTANCY = gross spread capture - adverse selection
+                       - incomplete-pair residual
+  BREAK_EVEN_TOTAL_FEE = the per-share total fee that takes
+                         PRE_FEE_EXPECTANCY to zero
+
+NOT SUPPORTED, and not to be reported as if they were:
+  PASSIVE_FILL_PROBABILITY = NOT_IDENTIFIED. Touching our price does
+    not prove an order there would have filled. Queue position, the
+    size ahead of us and whether a print consumed our level are all
+    unobservable from public data.
+  NET profitability. PMUS_FEES_RESOLVED = NO; the 0.06 coefficient is
+    a FIELD, not a rule, and no borrowed formula may enter a result.
+  Any claim that displayed spread is profit.
+
+  Fee resolution is NOT required to begin collection. It IS required
+  before any net-profitability or deployment conclusion.
