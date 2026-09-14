@@ -266,3 +266,95 @@ measure real fill rate, queue behaviour, fees, adverse selection and pair
 completion, **not** to make money on the first test.
 
 `mirror_live = false` throughout.
+
+---
+
+## CHECKPOINT — FIRST ADMITTED PRIMARY SEGMENT (segment 2, 20:31:07Z → 01:30:14Z)
+
+Audited from committed bytes: **40/40 checks pass, ADMITTED.** 3,050 requests,
+all HTTP 200, 1,525 book / 1,525 bbo, 305 sets, 0 identity failures, 0 429s,
+min gap 2.5001 s, 0.1699 rps. Digest `58a37916…`. The scheduled start was
+2h30m late; that is recorded as a real gap and nothing is imputed into it.
+
+### FINDING B-2 — the pair does not complete, even at the upper bound
+
+299 postable pairs over five hours:
+
+| model | h=5 | h=10 | h=30 | h=60 | completed pairs |
+|---|---|---|---|---|---|
+| F0 pessimistic | 0 | 0 | 0 | 0 | **0** |
+| F1 conservative | 0 | 0 | 0 | 0 | **0** |
+| F2 moderate | 0 | 0 | 0 | 1 long-only | **0** |
+| F3 **upper bound** (touch = fill) | 0 | 0 | 0 | 1 long-only | **0** |
+
+```
+FIRST_LEG_FILL_PROBABILITY (F3 upper bound, 60 s)   1 / 299  = 0.33%
+PAIR_COMPLETION_PROBABILITY                          0 / 299  = 0%
+SHORT_LEG_TOUCHES                                    0
+```
+
+Zero completed pairs under an assumption known to be false and deliberately
+generous. The single long-only proxy carries a **negative** residual markout
+(−0.0025) — the one time our bid was reached, the market had already moved
+against us. That is n=1 and is not evidence of anything; it is reported because
+suppressing it would be worse.
+
+### WHY — the spread is enormous relative to the price level
+
+| market | median mid | median spread | spread / mid |
+|---|---|---|---|
+| atc-lmx-ame-tij | 0.0200 | 0.0200 | **100.0%** |
+| aec-cfb-portst-ore | 0.0075 | 0.0050 | **66.7%** |
+| aec-cfb-kentst-ohiost | 0.0075 | 0.0050 | **66.7%** |
+| aec-cfb-uwg-etnst | 0.3300 | 0.1700 | **51.5%** |
+| atc-lmx-pue-tol | 0.2150 | 0.0100 | 4.7% |
+| aec-cfb-coast-del | 0.3500 | 0.0100 | 2.9% |
+| aec-boxing-canalv | 0.7150 | 0.0200 | 2.8% |
+
+In four of the seven survivors a passive quote at the touch needs a **50–100%
+relative price move** to be reached. It is not that the edge is thin — the
+quote is simply never arrived at. The three tight books produced zero touches
+too, over five hours.
+
+### FINDING B-3 — the cohort has already lost every liquid market
+
+```
+segment 1 (16:55Z)   11 / 12 observable
+segment 2 (20:31Z)    7 / 12 observable
+```
+
+Five markets retired on the venue's own `MARKET_STATE_EXPIRED`, all within
+eight minutes of segment 2 starting: the four NFL games and the EPL first-half
+line. Those were the cohort's **only** tight-spread, near-mid, liquid subjects
+— chi-car alone quoted a 0.83%-of-mid spread against the 2.8–100% of what
+remains.
+
+The cohort was sealed on 2026-09-13 and contained same-day fixtures. Remaining
+event dates against a window ending 2026-09-20T16:00Z:
+
+```
+pue-tol    2026-09-16     cfb x4     2026-09-18/19     ame-tij  2026-10-29
+boxing     2026-11-01
+```
+
+so by day six or seven the sample is expected to be **two markets**, one of
+which quotes a spread equal to its own mid. Track A is frozen and no market is
+substituted; this is recorded, not repaired. But it means the remaining
+seven-day capture will increasingly measure books in which "no fills" is close
+to arithmetically guaranteed, and the headline result is already visible.
+
+### CLASSIFICATION
+
+```
+48H_CLASSIFICATION = C — DISPLAYED EDGE ONLY
+```
+
+The displayed edge is real and now fully priced: spread plus a VERIFIED maker
+rebate gives a genuinely positive pre-adverse-selection budget. What is absent
+is any evidence the budget is reachable. Zero completed pairs in 299
+opportunities at the upper bound is not a thin edge, it is an unexecuted one.
+
+This is **not** D. Nothing here demonstrates negative expectancy — it
+demonstrates non-execution, which is a different finding and would be fixed by
+different things (venue selection, market selection, queue position, resting
+duration far beyond 60 s) than a negative edge would be.
