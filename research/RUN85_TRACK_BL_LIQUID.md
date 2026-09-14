@@ -573,3 +573,102 @@ architecture, the 20-minute cap, supported horizons, the no-cross-block-state
 rule, economic formulas, Track A. `SELECTION_RULE_VERSION` stays `BL-SELECT-1`
 because the selection *rule* is untouched; only the payload it is fed and the
 way a tag is read have been repaired.
+
+---
+
+## BLOCK_3 — FACTUAL RECORD
+
+Observed facts only. No interpretation in this section.
+
+```
+BLOCK_STATUS                 OK
+ECONOMICALLY_USABLE          YES
+SCIENTIFIC_OBSERVATIONS      120
+SELECTED_MARKETS             6
+CAPTURE_ELAPSED_S            1042
+CHECKSUMS                    7/7 PASS
+COMMIT                       4734e95
+COHORT_SHA256                82632fa9ba549c8e1f204e22f8c25efd368d3001bfc6ca091b7d1ececae97ceb
+EVIDENCE                     research/evidence/trackbl/run85_trackbl_BLOCK_3_20260914T171339Z
+```
+
+### Discovery scope
+
+```
+QUERY_FILTERS                {"active": "true", "closed": "false"}
+EVENTS_DISCOVERED            2600     (26 pages x 100, offset walk from 0)
+EVENTS_WITH_CLOSED_TRUE      0
+MARKET_ROWS                  77020
+OPEN_MARKET_ROWS             76869
+RESOLVED_MARKET_ROWS         142
+MARKETS_WITH_BID_AND_ASK     45797
+CANDIDATES                   20403
+DISTINCT_EVENTS              726
+
+DISCOVERY_LIST_EXHAUSTED     NO
+FIRST_TERMINAL_OFFSET        NOT_OBSERVED
+DISCOVERY_FRAME_SCOPE        BOUNDED_PREFIX_OF_CURRENT_ACTIVE_UNIVERSE
+```
+
+The walk reached its configured 26-page bound without an empty page. **This is
+not the whole current PMUS market universe** and must never be described as
+one: it is a bounded prefix of the current active list, and selection ran only
+over that prefix.
+
+### Tag shapes, as returned
+
+```
+PRIMARY_TAG_OBJECT_COUNT     1322
+PRIMARY_TAG_STRING_COUNT     0
+PRIMARY_TAG_NULL_COUNT       1278
+PRIMARY_TAG_UNKNOWN_COUNT    0
+```
+
+### Cohort
+
+```
+COHORT_COMPOSITION           5 TAIL · 1 MODERATE · 0 NEAR_MID
+
+asc-bun-bre-aug-2026-09-19-fh-pos-2pt5    bun      b=0.9800 a=0.9900  TAIL
+asc-cfb-clmsn-cah-2026-09-25-pos-17pt5    cfb      b=0.9850 a=0.9900  TAIL
+aec-ufc-gabste-seasha-2026-09-19          (null)   b=0.9000 a=0.9100  TAIL
+aec-atp-jjwol-lucamb-2026-09-14           atp      b=0.9200 a=0.9300  TAIL
+asc-mlb-sd-col-2026-09-15-pos-2pt5        mlb      b=0.9850 a=0.9900  TAIL
+aec-t20icr-eng-slr-2026-09-15             t20icr   b=0.7800 a=0.7900  MODERATE
+
+SPORTS        sportId:2, 3, 5, 8, 9 and one NOT_IDENTIFIED (null primaryTag)
+SELECTION_RULE_VERSION       BL-SELECT-1
+SELECTION_RULE_UNCHANGED     YES
+BLOCK_FROZEN                 YES
+REQUIRED_BLOCK_SIZE          4
+SELECTED_BLOCK_SIZE          6
+```
+
+### Capture and rate
+
+```
+capture rows                 120 / 120, all HTTP 200, all carrying a book
+lanes x cycles x offsets     6 x 4 x {0,5,10,30,60} s
+VENUE_REQUESTS               146   (26 discovery + 120 capture)
+PLANNED_MIN_GAP_S            2.5
+observed min inter-read gap  2.5001 s
+ANY_GAP_LT_2_5S              0
+HTTP_429                     0
+RATE_GATE                    PASS
+SHARED_CONCURRENCY_GROUP     YES
+TRACK_A_OVERLAP              IMPOSSIBLE_BY_SHARED_CONCURRENCY
+```
+
+Track A segment #6 held the lock until 17:13:25Z; BLOCK_3 started at that
+instant and was never cancelled.
+
+### Clock
+
+```
+MAX_SLOT_TIMING_ERROR_S      3.46
+HORIZON_ANALYSIS_CLOCK       ACTUAL_OBSERVED_TIMESTAMPS
+```
+
+Nominal schedule times are never substituted for actual observation times.
+Every horizon is evaluated on measured elapsed time, and each reported horizon
+carries its `TARGET_HORIZON`, `ACTUAL_ELAPSED` and `HORIZON_ERROR`.
