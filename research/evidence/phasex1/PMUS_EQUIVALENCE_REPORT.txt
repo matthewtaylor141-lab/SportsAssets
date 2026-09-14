@@ -1,0 +1,413 @@
+========================================================================
+PHASE X1 -- PMUS HALF -- CONTRACT EQUIVALENCE RECORDS
+RECORD_VERSION = PX1-PMUS-1
+SOURCE = SEALED EVIDENCE ONLY (no venue contact)
+========================================================================
+
+--- EVIDENCE INTEGRITY ---
+  run85_trackbl_BLOCK_4_20260914T194859Z/block_cohort.json OK
+  run85_trackbl_BLOCK_4_20260914T194859Z/block_log.jsonl.gz OK
+  run85_trackbl_BLOCK_4_20260914T194859Z/block_summary.json OK
+  run85_trackbl_BLOCK_4_20260914T194859Z/book_probe_receipts.jsonl.gz OK
+  run85_trackbl_BLOCK_4_20260914T194859Z/discovery_body_samples.jsonl.gz OK
+  run85_trackbl_BLOCK_4_20260914T194859Z/discovery_pages.jsonl.gz OK
+  run85_trackbl_BLOCK_4_20260914T194859Z/run85_terminal_report.txt OK
+  run85_trackbl_BLOCK_4_20260914T194859Z/runner_metadata.json OK
+  run85_trackbl_BLOCK_3_20260914T171339Z/block_cohort.json OK
+  run85_trackbl_BLOCK_3_20260914T171339Z/block_log.jsonl.gz OK
+  run85_trackbl_BLOCK_3_20260914T171339Z/block_summary.json OK
+  run85_trackbl_BLOCK_3_20260914T171339Z/discovery_body_samples.jsonl.gz OK
+  run85_trackbl_BLOCK_3_20260914T171339Z/discovery_pages.jsonl.gz OK
+  run85_trackbl_BLOCK_3_20260914T171339Z/run85_terminal_report.txt OK
+  run85_trackbl_BLOCK_3_20260914T171339Z/runner_metadata.json OK
+  CHECKSUM_VERDICT = ALL_OK
+
+--- SCOPE ---
+  BLOCK_4 stage-2 probed markets : 15
+  BLOCK_3 capture cohort markets : 6
+  In both cohorts                : 1
+  UNIQUE VIABLE PMUS CONTRACTS   : 20
+
+--- BUILD ---
+  RECORDS_BUILT = 20
+  METADATA_MISSING_FROM_SEALED_BYTES = 0 
+  STRUCTURAL_AUDIT = CLEAN
+
+--- FIELD COVERAGE ACROSS 20 RECORDS ---
+  FIELD                                    VERIF  QUOTED  ABSENT
+  PMUS_MARKET_ID                              20       0       0
+  PMUS_MARKET_SLUG                            20       0       0
+  PMUS_EVENT_ID                               20       0       0
+  SPORT                                        0       0      20
+  SPORT_ID                                    20       0       0
+  CATEGORY                                    20       0       0
+  TAG_SLUGS                                   20       0       0
+  LEAGUE                                      20       0       0
+  LEAGUE_ABBREVIATION                         16       0       4
+  LEAGUE_RESOLUTION_SOURCE                    16       0       4
+  LEAGUE_AUTOMATIC_RESOLUTION                 20       0       0
+  EVENT                                       20       0       0
+  MARKET_TYPE                                 20       0       0
+  PARTICIPANTS                                 0       0      20
+  PARTICIPANTS_FROM_SIDES                     20       0       0
+  SIDE_COUNT                                  20       0       0
+  GAME_START_TIME                             20       0       0
+  EVENT_START_TIME                            20       0       0
+  END_TIME                                    20       0       0
+  EVENT_END_TIME                              20       0       0
+  RULES_DISCLAIMER                             1       0      19
+  RULES_DISCLAIMER_POPUP                       1       0      19
+  SETTLEMENT_PRICE_CALCULATION_METHOD         15       0       5
+  MARKET_STATUS                               20       0       0
+  TICK_SIZE                                   20       0       0
+  MINIMUM_TRADE_QTY                           20       0       0
+  FEE_COEFFICIENT                             20       0       0
+  CANCELLATION_RULES                           0      16       4
+  POSTPONEMENT_RULES                           0      19       1
+  OVERTIME_RULES                               0       3      17
+  DRAW_RULES                                   0      14       6
+  VOID_RULES                                   0       0      20
+  OTHER_RESOLUTION_CONDITIONS                  0      20       0
+
+--- PER-CONTRACT SUMMARY ---
+  aec-atp-jjwol-lucamb-2026-09-14
+    id=823171 event=111246 league=ATP type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-14T20:00:00Z end=2026-09-28T20:00:00Z spcm=None
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the match does not begin due to a walkover, forfeit, injury, or any other cancellation prior to the first point being played, the market will settle to fair market price.
+    POSTPONEMENT_RULES           NOT_IDENTIFIED
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   NOT_IDENTIFIED
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the J.J.
+        [market.description] Outcome sourced from ATP.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi
+    id=237388 event=54125 league=Boxing type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-11-01T03:00:00Z end=2026-11-14T23:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the match is cancelled, the market will settle to last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If this match is postponed or delayed, the market will remain open and settle following the conclusion of the rescheduled match.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   NOT_IDENTIFIED
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Canelo Alvarez vs.
+        [market.description] Outcome sourced from the relevant governing body.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-t20icr-eng-slr-2026-09-15
+    id=817668 event=111061 league=T20 Intl (M) type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-15T17:30:00Z end=2026-09-29T17:30:00Z spcm=None
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the match ends in a tie, draw, no result (NR), abandonment, or cancellation, and no official winner is declared, the market will settle to $0.50.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the game is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to $0.50.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the match ends in a tie, draw, no result (NR), abandonment, or cancellation, and no official winner is declared, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x3
+        [market.description] This market will settle to the winner of the England vs Sri Lanka T20 Intl match scheduled for Sep 15, 2026.
+        [market.description] If the match does not begin due to a forfeit, disqualification, or concession, the market will settle to $0.50.
+        [market.description] Outcome sourced from T20 Intl.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-alomen-iwobar-2026-09-19
+    id=480771 event=87939 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-20T01:00:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Alonzo Menifield vs Iwo Baraniewski UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-armtsa-mauruf-2026-09-19
+    id=480700 event=87935 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-20T02:30:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Arman Tsarukyan vs Mauricio Ruffy UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-casone-edumou-2026-09-19
+    id=480917 event=87946 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-19T21:30:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Casey O'Neill vs Eduarda Moura UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-edmsha-brufer-2026-09-19
+    id=480871 event=87944 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-19T22:00:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Edmen Shahbazyan vs Brunno Ferreira UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-gabste-seasha-2026-09-19
+    id=480793 event=87941 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-20T00:30:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Gable Steveson vs Sean Sharaf UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-gigchi-joabri-2026-09-19
+    id=480893 event=87945 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-19T21:00:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Giga Chikadze vs Joanderson Brito UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-josvan-alepan-2026-09-19
+    id=480672 event=87934 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-20T03:15:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Joshua Van vs Alexandre Pantoja UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-marver-chajou-2026-09-19
+    id=480816 event=87942 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-20T00:00:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Marlon Vera vs Charles Jourdain UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-michasw-jooyoo-2026-09-19
+    id=480959 event=87948 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-19T23:00:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Michael Aswell Jr.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-patpit-doocho-2026-09-19
+    id=480728 event=87936 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-20T02:00:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Patricio Pitbull vs Dooho Choi UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-renmoi-briort-2026-09-19
+    id=480750 event=87938 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-20T01:30:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Renato Moicano vs Brian Ortega UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-ryagan-ozzdia-2026-09-19
+    id=480938 event=87947 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-19T22:30:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Ryan Gandra vs Ozzy Diaz UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  aec-ufc-taitui-robdes-2026-09-19
+    id=480848 event=87943 league=UFC type=SPORTS_MARKET_TYPE_MONEYLINE
+    start=2026-09-19T23:30:00Z end=2026-10-03T21:00:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2
+    CANCELLATION_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is cancelled before the opening bell, the market will settle to the last fair market price.
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the fight is not held within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   QUOTED_VERBATIM x1
+        [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to the winner of the Tai Tuivasa vs Robelis Despaigne UFC fight scheduled for September 19 at 5:00PM ET.
+        [market.description] Outcome sourced from UFC.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  asc-bun-bre-aug-2026-09-19-fh-pos-2pt5
+    id=791126 event=109528 league=Bundesliga type=SPORTS_MARKET_TYPE_SPREAD
+    start=2026-09-19T13:30:00Z end=2026-10-03T13:30:00Z spcm=None
+    CANCELLATION_RULES           NOT_IDENTIFIED
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the match is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               NOT_IDENTIFIED
+    DRAW_RULES                   NOT_IDENTIFIED
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to Yes if FC Augsburg leads by more than 2.5 goals at halftime in the SV Werder Bremen vs FC Augsburg Bundesliga match scheduled for 2026-09-19 9:30AM ET.
+        [market.description] Outcome sourced from Bundesliga.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  asc-cfb-clmsn-cah-2026-09-25-pos-17pt5
+    id=804453 event=110180 league=CFB type=SPORTS_MARKET_TYPE_SPREAD
+    start=2026-09-26T02:30:00Z end=2026-10-10T02:30:00Z spcm=None
+    CANCELLATION_RULES           NOT_IDENTIFIED
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               QUOTED_VERBATIM x1
+        [market.description] Overtime is included if played.
+    DRAW_RULES                   NOT_IDENTIFIED
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to Yes if California wins by more than 17.5 in the California vs Clemson College Football game scheduled for Sep 25, 2026.
+        [market.description] Outcome sourced from the relevant governing body.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  asc-mlb-sd-col-2026-09-15-pos-2pt5
+    id=800757 event=110146 league=MLB type=SPORTS_MARKET_TYPE_SPREAD
+    start=2026-09-16T00:40:00Z end=2026-09-30T00:40:00Z spcm=None
+    CANCELLATION_RULES           NOT_IDENTIFIED
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the game is delayed, postponed, or suspended and not rescheduled to a date within two weeks of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               QUOTED_VERBATIM x1
+        [market.description] Extra innings are included if played.
+    DRAW_RULES                   NOT_IDENTIFIED
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x3
+        [market.description] This market will settle to Yes if the Colorado Rockies win by more than 2.5 runs in the Colorado Rockies vs San Diego Padres MLB game scheduled for 2026-09-15 at 8:40PM ET.
+        [market.description] If the game is shortened but an official final result is declared, the market will settle based on that result.
+        [market.description] Outcome sourced from MLB.
+    RULES_DISCLAIMER             NOT_IDENTIFIED
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+  asc-nfl-den-kc-2026-09-14-2h-pos-21pt5
+    id=726661 event=74914 league=NFL type=SPORTS_MARKET_TYPE_SPREAD
+    start=2026-09-15T00:15:00Z end=2026-09-29T00:15:00Z spcm=SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_3
+    CANCELLATION_RULES           NOT_IDENTIFIED
+    POSTPONEMENT_RULES           QUOTED_VERBATIM x1
+        [market.description] If the game is delayed, postponed, or suspended and not rescheduled to a date within two days of the originally scheduled date, the market will settle to the last fair market price.
+    OVERTIME_RULES               QUOTED_VERBATIM x2
+        [market.description] Overtime is not included if played.
+        [market.rulesDisclaimer] Overtime does not count for 2H and 4Q markets.
+    DRAW_RULES                   NOT_IDENTIFIED
+    VOID_RULES                   NOT_IDENTIFIED
+    OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
+        [market.description] This market will settle to Yes if Kansas City Chiefs outscores Denver Broncos by more than 21.5 points in the second half of the Kansas City Chiefs vs Denver Broncos professional football game scheduled for Sep 14, 2026.
+        [market.description] Outcome sourced from the relevant governing body.
+    RULES_DISCLAIMER             VERIFIED  Overtime does not count for 2H and 4Q markets.
+    EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
+
+WROTE /home/user/SportsAssets/research/evidence/phasex1/PMUS_EQUIVALENCE_RECORDS.json
+SHA256 6ae6ec75406cf02175ca78db7f0bb4755f34eb197613caf837788006af75c13a
+
+PHASE_X1_PMUS_HALF = BUILT
+PHASE_X1_KALSHI_HALF = NOT_BUILT
+CROSS_VENUE_EQUIVALENCE = NOT_CLASSIFIED

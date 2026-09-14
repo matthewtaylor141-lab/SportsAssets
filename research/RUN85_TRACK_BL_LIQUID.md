@@ -1448,3 +1448,174 @@ bounded prefix, one UFC card, `NEAR_MID` target unmet, and a rate floor breach
 that leaves `B_L_AGGREGATE_RATE_SAFE = NOT_VERIFIED`.
 
 No live capital. No order placement. `mirror_live = false`.
+
+---
+
+## PACER HANDOFF REPAIR (research hygiene, no scientific change)
+
+BLOCK_4's sealed receipts recorded `ANY_GAP_LT_2_5S = 1`: the first capture read
+fired **0.0546 s** after the last stage-2 book probe. Every gap *inside* each
+stage held the 2.5 s floor. The one gap *between* stages had no floor at all,
+because `run_block` began its own pacing from `last = None` — it could not see
+the stage that had just run.
+
+No plan check could have caught this. `PLAN_VIOLATES_SPACING` governs the gaps
+the capture plan describes, and the handoff is the one gap the plan does not
+describe.
+
+**The repair.** `AdaptivePacer` gained a read-only accessor,
+`last_request_monotonic()`, and `run_block` seeds its floor from it. The pacer
+paced stages 1 and 2, so it is the only object that saw both sides of the seam;
+the fix is to ask it rather than to restart the clock. Nothing about pacing
+policy changed: the floor is still `SPACING_S = 2.5`, never widened, never
+weakened.
+
+`run_block` now also records the seam itself:
+
+```
+PACER_STAMP_AT_CAPTURE_START   the pacer's stamp when capture began
+PROBE_TO_CAPTURE_GAP_S         first capture read minus last probe
+```
+
+`PROBE_TO_CAPTURE_GAP_S` is printed on its own terminal-report line so a reader
+takes it rather than derives it. When there is no earlier stage, both are
+reported absent — never as a number nobody observed.
+
+**Regression coverage** (8 tests, `test_run85_trackbl_block.py`). They drive
+`run_block` on a fake clock, so they measure the runner's real pacing arithmetic
+instead of asserting on its source text: a source pin cannot distinguish a floor
+that is applied from one that is merely mentioned. They pin
+`PROBE_TO_CAPTURE_GAP >= 2.5 s` across a range of last-probe durations, every
+within-stage gap, every consecutive touch across *both* stages read as one
+series (the reading that found the defect), the no-earlier-stage case, and the
+literal `last = None` at the source. Five of the eight fail against the
+pre-repair behaviour; they were run inverted to confirm it.
+
+### WHAT THIS DOES NOT ESTABLISH
+
+```
+B_L_AGGREGATE_RATE_SAFE = NOT_VERIFIED   (unchanged)
+```
+
+The repair makes the floor **VERIFIABLE, not historically verified**. Only a
+future sealed run that records every measurable request gap and confirms the
+floor can move that line. BLOCK_4's breach stands in the permanent record.
+
+`mirror_live = false`. No capital.
+
+---
+
+## PHASE X1 — PMUS HALF (cross-venue equivalence)
+
+`research/run85_phasex1_pmus_equivalence.py` builds one normalized contract
+record per viable PMUS market from **sealed evidence only** — it contacts no
+venue. Viable here means the sealed bytes carry both the full discovery row and
+at least one sealed `/book` observation: the BLOCK_4 stage-2 probes (15) and the
+BLOCK_3 capture cohort (6), one market in both, **20 unique contracts**.
+
+Every field is an envelope `{value, status, source}` with exactly three statuses
+and deliberately no fourth:
+
+| status | meaning |
+|---|---|
+| `VERIFIED` | the venue serves a **dedicated field** carrying this value, unchanged |
+| `QUOTED_VERBATIM` | no dedicated field; the value is sentences lifted character-for-character from a named prose field |
+| `NOT_IDENTIFIED` | neither |
+
+There is no `INFERRED`. PMUS publishes cancellation, postponement, overtime,
+draw and void terms as English prose inside `market.description` — there is no
+rules object to read. Parsing that prose into structured rule fields would be
+the analyst's inference wearing the venue's authority, and a cross-venue
+equivalence built on it would compare two summaries rather than two contracts.
+So the prose travels whole: `SOURCE_TEXTS` carries every rules-bearing field
+verbatim alongside the per-topic extracts.
+
+**Coverage over the 20 records.** `PMUS_MARKET_ID`, `LEAGUE`, `MARKET_TYPE`,
+`GAME_START_TIME`, `END_TIME`, `TICK_SIZE`, `FEE_COEFFICIENT` and the two side
+definitions: 20/20 `VERIFIED`. `SETTLEMENT_PRICE_CALCULATION_METHOD` 15/20
+(`/book` serves it; `/v1/events` never does — the same schema asymmetry that
+made BL-SELECT-1 activity-blind, and the 5 gaps are the BLOCK_3 cohort, which
+has no sealed probe receipt). `RULES_DISCLAIMER` 1/20 — the venue sends it on
+217 of 14,518 market rows. `SPORT` 0/20: the venue serves a numeric `sportId`
+and a `"sports"` category but never a sport **name**, so the name is
+`NOT_IDENTIFIED` and `SPORT_ID` is what is `VERIFIED`. `PARTICIPANTS` 0/20:
+`event.participants` was `[]` on every one of these rows, so the participants
+that exist are the per-side team objects, carried separately as
+`PARTICIPANTS_FROM_SIDES`.
+
+Rule topics, all `QUOTED_VERBATIM` where present: postponement 19/20,
+cancellation 16/20, draw 14/20, overtime 3/20, void 0/20, other resolution
+conditions 20/20.
+
+**Two things the record deliberately refuses to resolve.** Side orientation is
+named four ways by the venue — `marketSides[].description`,
+`marketSides[].team.name`, `outcomes[i]`, and the title's prose — and they do not
+always agree (`asc-nfl-den-kc-2026-09-14-2h-pos-21pt5` carries
+`outcomes = ["+21.50","-21.50"]` with `long` on the Broncos side while the
+description settles Yes on Kansas City outscoring Denver). All four namings are
+kept rather than electing one, because electing one is exactly the inference
+that would make a cross-venue join wrong in the case that matters. And overtime
+terms genuinely differ across markets ("Overtime is included if played" vs
+"Overtime is not included if played" vs "Overtime does not count for 2H and 4Q
+markets") — that variation is preserved, not normalized away.
+
+The Kalshi slots exist on every record and are all `NOT_IDENTIFIED`, so landing
+that half is an assignment rather than a change to PMUS semantics.
+
+```
+PHASE_X1_PMUS_HALF      = BUILT (20 records)
+PHASE_X1_KALSHI_HALF    = NOT_BUILT
+CROSS_VENUE_EQUIVALENCE = NOT_CLASSIFIED
+```
+
+Per record: `EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT`.
+Similar titles are not equivalence and nothing here is treated as such.
+
+Output: `research/evidence/phasex1/PMUS_EQUIVALENCE_RECORDS.json` and
+`PMUS_EQUIVALENCE_REPORT.txt`. Both blocks' checksums verify before the build
+(`CHECKSUM_VERDICT = ALL_OK`); the builder's structural audit is `CLEAN`.
+
+---
+
+## KALSHI CACHE INSPECTION (read-only, authorized) — BRANCH D
+
+```
+KALSHI_CACHE_READABLE            = NO
+CACHE_SCHEMA                     = VERIFIED FROM SOURCE (not from data)
+CACHE_ROW_COUNT                  = NOT_IDENTIFIED
+NEWEST_CACHE_TIMESTAMP           = NOT_IDENTIFIED
+OLDEST_CACHE_TIMESTAMP           = NOT_IDENTIFIED
+CACHE_TTL                        = 20.0 s  (_KALSHI_BOARD_TTL_S)
+CACHE_CURRENTLY_FRESH            = NOT_IDENTIFIED
+CACHE_FRESHNESS                  = NOT_IDENTIFIED
+BOOK_DEPTH_AVAILABLE             = NO (top-of-book only, by schema)
+SETTLEMENT_RULE_FIELDS_AVAILABLE = NO
+SOURCE_PROVENANCE_AVAILABLE      = PARTIAL (a fetch stamp; no request receipt)
+```
+
+`kalshi_board_cache` is **not a database table**. It is an in-process Python
+dict — `backend/sportsassets/api/app.py:1620`,
+`_kalshi_board_cache: dict[tuple[str, ...], dict]` — keyed by series tuple, each
+slot `{"ts", "board", "lock", "refresh"}`, TTL 20 s. It exists only inside a
+running Render API process. There is nothing persisted to read: reading it would
+mean invoking production code, which the authorization forbids. Every other
+reference in the repo is a test.
+
+Per-row schema (`_kalshi_shape`, app.py:1590): `ticker`, `series`, `title`,
+`sub_title`, `yes_ask`, `yes_bid`, `no_ask`, `no_bid`, `close_time`,
+`volume_usd`. Top of book only — **no depth, no size at any level** — so even a
+fresh, readable cache could not have answered Phase X2's executable-size
+question. No rules, settlement-source, expiration, or resolution field of any
+kind, so it could not have answered Phase X1's either.
+
+All Kalshi hosts remain blocked at the organization egress proxy (`CONNECT
+tunnel failed, response 403` on `api.elections.kalshi.com`,
+`trading-api.kalshi.com`, `api.kalshi.com`, `kalshi.com`). Not routed around;
+GitHub Actions not used as a workaround.
+
+```
+KALSHI_DECISION_TREE = BRANCH D (cache inaccessible)
+PHASE_X2             = BLOCKED
+NEXT ACCEPTABLE ROUTE = user-supplied Kalshi data, or explicitly approved
+                        network access
+```

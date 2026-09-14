@@ -751,7 +751,16 @@ def run_block(http, pacer, budget, block, log_fh, res):
     if res["planned_min_gap_s"] is not None and res["planned_min_gap_s"] < SPACING_S - 1e-9:
         raise RuntimeError("PLAN_VIOLATES_SPACING min=%.4f" % res["planned_min_gap_s"])
 
-    last = None
+    # THE FLOOR CARRIES ACROSS THE STAGE BOUNDARY. This was `last = None`,
+    # so the first capture read had no floor to respect and fired 0.0546 s
+    # after the last stage-2 book probe. No plan check could have caught it:
+    # the plan governs gaps WITHIN the capture, and this is the one gap the
+    # plan does not describe. The pacer paced both earlier stages, so it is
+    # the object that knows when the venue was last touched -- ask it.
+    last = pacer.last_request_monotonic()
+    handoff_from = last
+    res["PACER_STAMP_AT_CAPTURE_START"] = last
+    res["PROBE_TO_CAPTURE_GAP_S"] = None
     n429 = 0
     for target, lane, slug, cyc, off in slots:
         budget.take()
@@ -762,6 +771,8 @@ def run_block(http, pacer, budget, block, log_fh, res):
         if fire > now:
             time.sleep(fire - now)
         start = time.monotonic()
+        if handoff_from is not None and res["PROBE_TO_CAPTURE_GAP_S"] is None:
+            res["PROBE_TO_CAPTURE_GAP_S"] = start - handoff_from
         last = start
         row = C._get(http, BOOK_PATH % slug, None)
         row["_bl"] = {"lane": lane, "cycle": cyc, "burst_offset_s": off,
@@ -1080,6 +1091,11 @@ def main(argv=None):
              "OVERLAP_CHECK = %s" % res.get("OVERLAP_CHECK"),
              "VENUE_REQUESTS = %d" % budget.spent,
              "PLANNED_MIN_GAP_S = %s" % res.get("planned_min_gap_s"),
+             # The gap the plan does not describe: the last stage-2 probe to
+             # the first capture read. Printed on its own line so it is read,
+             # not derived. A future sealed run's ACTUAL gaps -- not this
+             # repair -- are what could make B_L_AGGREGATE_RATE_SAFE VERIFIED.
+             "PROBE_TO_CAPTURE_GAP_S = %s" % res.get("PROBE_TO_CAPTURE_GAP_S"),
              "HTTP_429 = %s" % res.get("http_429"),
              "HORIZONS_DERIVABLE = %s" % json.dumps(DERIVABLE_LONG_HORIZONS),
              "HORIZONS_UNREACHABLE = %s (NOT_OBSERVED_WITHIN_BLOCK_LENGTH)"

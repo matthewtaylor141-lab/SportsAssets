@@ -683,6 +683,179 @@ def test_the_required_block_size_is_not_quietly_loosened():
     assert L.REQUIRED_BLOCK_SIZE <= L.N_LANES
 
 
+# ------------------------------------------- the probe -> capture handoff
+#
+# BLOCK_4's sealed receipts recorded ANY_GAP_LT_2_5S = 1: the first capture
+# read fired 0.0546 s after the last stage-2 book probe. Every gap inside
+# each stage held. The defect lived exactly at the seam, where the capture
+# loop began from `last = None` and so had no floor at all.
+#
+# These drive run_block on a FAKE CLOCK, so they measure the runner's real
+# pacing arithmetic rather than asserting on its source text, and they cost
+# no wall time. A source-text pin cannot tell a floor that is applied from
+# one that is merely mentioned.
+
+class FakeClock:
+    """A monotonic clock that only sleep() advances, so every instant the
+    runner picks is the runner's own arithmetic and nothing else."""
+
+    def __init__(self, t0=10_000.0):
+        self.t = t0
+
+    def monotonic(self):
+        return self.t
+
+    def time(self):
+        return self.t
+
+    def sleep(self, s):
+        assert s >= 0, "a runner must never sleep a negative interval"
+        self.t += s
+
+
+def _paced_run(probe_count=3, request_duration_s=0.05, block_size=4):
+    """Run the two stages against one fake clock and return every instant
+    the venue was touched, split at the stage boundary.
+
+    Stage 1/2 are paced by the AdaptivePacer (as get_page and the book
+    probes are). Stage 3 is run_block, which paces itself.
+    """
+    clock = FakeClock()
+    real_L, real_B = L.time, L.B.time
+    real_get = L.C._get
+    probes, captures = [], []
+    try:
+        L.time = clock
+        L.B.time = clock
+        pacer = L.B.AdaptivePacer(base=L.SPACING_S)
+
+        for _ in range(probe_count):                  # stages 1 and 2
+            pacer.wait()
+            probes.append(clock.monotonic())
+            clock.sleep(request_duration_s)           # the request itself
+
+        def fake_get(http, path, params=None, **kw):
+            captures.append(clock.monotonic())
+            clock.sleep(request_duration_s)
+            return {"http_status": 200, "body": {}}
+
+        L.C._get = fake_get
+        block = [{"market_slug": "slug-%d" % i} for i in range(block_size)]
+        res = {}
+        L.run_block(None, pacer, L.Budget(10_000), block,
+                    _Sink(), res)
+        return probes, captures, res
+    finally:
+        L.time, L.B.time, L.C._get = real_L, real_B, real_get
+
+
+class _Sink:
+    def write(self, _s):
+        pass
+
+
+def test_the_first_capture_read_cannot_fire_inside_the_spacing_floor():
+    """PROBE_TO_CAPTURE_GAP >= 2.5 s. The regression this repair exists for."""
+    probes, captures, res = _paced_run()
+    assert probes and captures
+    gap = captures[0] - probes[-1]
+    assert gap >= L.SPACING_S - 1e-9, gap
+    assert res["PROBE_TO_CAPTURE_GAP_S"] >= L.SPACING_S - 1e-9, res
+
+
+def test_the_handoff_gap_is_measured_and_sealed_not_merely_respected():
+    """A floor nobody records cannot be audited from the sealed bytes."""
+    probes, captures, res = _paced_run()
+    assert res["PACER_STAMP_AT_CAPTURE_START"] == probes[-1]
+    assert abs(res["PROBE_TO_CAPTURE_GAP_S"]
+               - (captures[0] - probes[-1])) < 1e-9
+    assert "PROBE_TO_CAPTURE_GAP_S" in SRC.split("def main")[1], \
+        "the handoff gap must reach the terminal report"
+
+
+def test_every_within_stage_gap_still_holds_the_floor():
+    """The repair must not have bought the seam at the cost of the stages."""
+    probes, captures, _ = _paced_run()
+    for name, series in (("probe", probes), ("capture", captures)):
+        gaps = [series[i + 1] - series[i] for i in range(len(series) - 1)]
+        assert gaps, name
+        assert min(gaps) >= L.SPACING_S - 1e-9, (name, min(gaps))
+
+
+def test_every_consecutive_venue_touch_across_both_stages_holds_the_floor():
+    """The whole run as ONE series -- the reading the sealed receipts take,
+    and the one that found the 0.0546 s gap in the first place."""
+    probes, captures, _ = _paced_run()
+    allt = probes + captures
+    assert allt == sorted(allt), "the stages must not interleave"
+    gaps = [allt[i + 1] - allt[i] for i in range(len(allt) - 1)]
+    assert min(gaps) >= L.SPACING_S - 1e-9, min(gaps)
+
+
+def test_the_floor_holds_however_long_the_last_probe_took():
+    """A slow last probe already satisfies the floor and must not add a
+    second one; a fast one must still be held."""
+    for dur in (0.0, 0.05, 1.0, 2.49, 2.5, 7.0):
+        probes, captures, _ = _paced_run(request_duration_s=dur)
+        assert captures[0] - probes[-1] >= L.SPACING_S - 1e-9, dur
+
+
+def test_a_capture_that_follows_no_probe_at_all_still_runs():
+    """With no earlier stage there is no floor to carry, and the block must
+    start rather than stall. The gap is then not measurable, so it is
+    reported as absent -- never as a number that was never observed."""
+    clock = FakeClock()
+    real_L, real_B, real_get = L.time, L.B.time, L.C._get
+    captures = []
+    try:
+        L.time, L.B.time = clock, clock
+
+        def fake_get(http, path, params=None, **kw):
+            captures.append(clock.monotonic())
+            clock.sleep(0.05)
+            return {"http_status": 200, "body": {}}
+
+        L.C._get = fake_get
+        res = {}
+        L.run_block(None, L.B.AdaptivePacer(base=L.SPACING_S),
+                    L.Budget(10_000),
+                    [{"market_slug": "s-%d" % i} for i in range(4)],
+                    _Sink(), res)
+    finally:
+        L.time, L.B.time, L.C._get = real_L, real_B, real_get
+    assert captures
+    assert res["PACER_STAMP_AT_CAPTURE_START"] is None
+    assert res["PROBE_TO_CAPTURE_GAP_S"] is None
+    gaps = [captures[i + 1] - captures[i] for i in range(len(captures) - 1)]
+    assert min(gaps) >= L.SPACING_S - 1e-9, min(gaps)
+
+
+def test_the_pacer_exposes_its_stamp_without_changing_its_pacing():
+    """The accessor is READ ONLY: reading it must move nothing."""
+    clock = FakeClock()
+    real_B = L.B.time
+    try:
+        L.B.time = clock
+        p = L.B.AdaptivePacer(base=L.SPACING_S)
+        assert p.last_request_monotonic() is None
+        p.wait()
+        stamp, spacing = p.last_request_monotonic(), p.spacing
+        for _ in range(5):
+            assert p.last_request_monotonic() == stamp
+        assert p.spacing == spacing
+        assert clock.t == stamp, "reading the stamp must not sleep"
+    finally:
+        L.B.time = real_B
+
+
+def test_the_capture_loop_does_not_start_its_floor_from_nothing():
+    """The literal defect, pinned at the source so a later edit that
+    reintroduces `last = None` fails here and not only in production."""
+    body = SRC.split("def run_block")[1].split("def main")[0]
+    assert "pacer.last_request_monotonic()" in body
+    assert re.search(r"^\s+last = None\s*$", body, re.M) is None
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(vars().items())
            if n.startswith("test_") and callable(f)]

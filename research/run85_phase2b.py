@@ -195,6 +195,21 @@ class AdaptivePacer:
                 time.sleep(slack)
         self._last = time.monotonic()
 
+    def last_request_monotonic(self):
+        """The monotonic stamp of the most recent request this pacer paced,
+        or None if it has paced none.
+
+        READ ONLY -- it changes no pacing decision. It exists because a
+        caller that paces a LATER stage itself needs the floor to carry
+        ACROSS the stage boundary, and the pacer is the only object that
+        saw both stages. Track B-L's first capture read fired 0.0546 s
+        after the last stage-2 book probe (BLOCK_4 receipts,
+        ANY_GAP_LT_2_5S = 1) because its capture loop started from
+        `last = None`: every gap WITHIN each stage held, and the one gap
+        between them had nothing to hold it.
+        """
+        return self._last
+
     def on_429(self, retry_after):
         """Honour Retry-After exactly, THEN widen the spacing."""
         wait_s = None
