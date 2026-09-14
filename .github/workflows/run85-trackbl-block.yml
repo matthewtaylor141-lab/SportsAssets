@@ -69,6 +69,7 @@ jobs:
       - name: Offline tests must pass before any venue contact
         run: |
           set -euo pipefail
+          python research/test_run85_trackbl_block.py
           python research/test_run85_trackb_fees.py
           python research/test_run85_phase2_capture.py
           python research/test_run85_phase2b.py
