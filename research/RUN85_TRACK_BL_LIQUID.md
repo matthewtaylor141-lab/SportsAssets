@@ -286,3 +286,110 @@ BLOCK_1 — a failed block is preserved as it was.
 If BLOCK_2 also returns zero candidates, the retained bodies decide between
 pagination, parser/schema, admission logic and a genuinely unsuitable universe
 **before** any BLOCK_3.
+
+---
+
+## BLOCK_2 — PERMANENT RECORD, NOT TO BE REHABILITATED
+
+Dispatched under commit `b539864`, exactly as approved. Run `34839559613`, job
+`103961105306`, 2026-09-14T11:42:29Z → 11:43:45Z. Seven files sealed,
+`SEAL_VERIFIED = True`, runner exit 2, workflow conclusion **failure**.
+
+```
+B_L_BLOCK_2_STATUS      = FAILED_DISCOVERY_BOUND_NOT_ESTABLISHED
+SCIENTIFIC_OBSERVATIONS = 0
+ECONOMICALLY_USABLE     = NO
+```
+
+### Discovery, reported under the terminal-boundary rule
+
+```
+GEOMETRIC_PROBES            2000  4000  8000  16000  32000  64000
+                            every one returned a FULL page of 100 events
+
+    offset  2000   events=100   first=2002    last=2101
+    offset  4000   events=100   first=4002    last=4101
+    offset  8000   events=100   first=8004    last=8103
+    offset 16000   events=100   first=16349   last=16483
+    offset 32000   events=100   first=51389   last=51488
+    offset 64000   events=100   first=83420   last=83519
+
+TERMINAL_BOUNDARY_EVIDENCE  NONE. No empty page was ever returned, and no
+                            other venue signal of a list end was observed.
+LAST_NONEMPTY_OFFSET        64000  (the configured search ceiling)
+FIRST_TERMINAL_OFFSET       NOT_OBSERVED
+CURRENT_END_LOCATED         NO
+```
+
+**The ceiling is not the end.** `END_PROBE_STEPS` stops at 64000, and 64000
+returned a full page, so the walk ran out of configured search before it ran out
+of list. The id/offset relation is also nonlinear and widening — offset 32000
+returns ids from 51389, offset 64000 ids from 83420 — so the list demonstrably
+extends past the ceiling by an unknown amount.
+
+The runner printed `CURRENT_END_LOCATED = BOUNDED_BY_PROBE` and
+`BLOCK_STATUS = FAILED_BLOCK_TOO_SMALL`. Under the rule the owner issued after
+dispatch, that spelling is wrong in one direction and incomplete in the other:
+`BOUNDED_BY_PROBE` is **NO**, and the governing failure is the unestablished
+bound, not the empty block — the zero-candidate count is downstream of a frame
+taken from a place that was never shown to be the current end. The sealed
+evidence keeps the words the runner actually wrote; this reclassification sits
+beside it and does not overwrite it. Nothing about the block is rehabilitated by
+either spelling.
+
+### What the frame contained
+
+```
+FRAME                       offsets 64000 → 62700, 14 pages, 100 events each
+discovery_events            1400  (0 shared ids between adjacent pages)
+DISCOVERY_MARKET_ROWS       8532
+candidates                  0
+BLOCK_SIZE                  0   (REQUIRED_BLOCK_SIZE 4)
+
+PAGINATION_DIRECTION        VERIFIED_ASCENDING
+OVERLAP_CHECK               0 shared ids
+NEWER_THAN_PRIOR_PAGE       YES
+SELECTION_RULE_UNCHANGED    YES  (BL-SELECT-1, filters NOT loosened)
+VENUE_REQUESTS              22   (2 anchor + 6 probes + 14 frame)
+HTTP_429                    None
+RATE_GATE                   PASS
+TRACK_A_OVERLAP             IMPOSSIBLE_BY_SHARED_CONCURRENCY
+```
+
+The hard-failure repair worked as specified: no capture was attempted, the
+runner exited non-zero, and the workflow reported failure rather than success.
+
+### A SECOND SELF-INFLICTED DEFECT, FOUND HERE
+
+The non-zero exit failed the capture step, and **the commit step had no
+`if: always()`**, so GitHub skipped it. The seven sealed files (2,712,334 bytes)
+therefore landed only as Actions artifact `10345835689` — which the analyst
+container cannot reach, because its egress denies the Actions blob store. The
+repair scope said a failed block must seal its evidence; it did seal it, and
+then the workflow stranded it in the one place the evidence was needed from and
+could not be read.
+
+That is now fixed (`if: always() && env.RUN85_BL_OUT != ''`), and a directory
+courier — `run85-courier-dir.yml` — carries the stranded bytes into the repo so
+the cause can be classified from evidence rather than from inference. The
+courier verifies every file against the driver's own `checksums.sha256` before
+the copy and again after it. A failed block stays failed: couriering its
+evidence makes the failure readable, nothing more.
+
+### CAUSE CLASSIFICATION — OPEN
+
+`PAGINATION / PARSER-SCHEMA / ADMISSION / CURRENT_UNIVERSE` cannot be decided
+from the job log alone. What the log does settle:
+
+- **Not a gross parser failure at the event→market level.** 8,532 market rows
+  were parsed out of 1,400 events, so `markets` was found and walked. A schema
+  difference in the *fields the filter reads* (`sportsMarketTypeV2`,
+  `bestBidQuote`, `bestAskQuote`, `active/closed/archived`) would look exactly
+  like this and is still open.
+- **Not a rate or transport failure.** 22 requests, no 429, no error status.
+- **PAGINATION is not excluded** — the frame's position in the list is
+  unestablished, which is the block's governing failure.
+
+The runner records no per-reason rejection counts, so the decision needs the
+sealed body samples. **No filter changes, and no BLOCK_3, until the cause is
+established.**

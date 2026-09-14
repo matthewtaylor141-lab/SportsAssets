@@ -61,6 +61,9 @@ on:
       # Track B-L blocks: same reasoning, a standalone public-data research
       # job on the public gateway with no credential and no order path.
       - ".github/workflows/run85-trackbl-block.yml"
+      # The directory courier. It contacts GitHub only -- never the venue --
+      # so landing or editing it says nothing whatever about engine health.
+      - ".github/workflows/run85-courier-dir.yml"
       # And this file. paths-ignore skips a run only when EVERY changed file
       # matches, so without this line a commit that merely edits the probe's
       # own trigger config fires the probe -- which is exactly the spend the

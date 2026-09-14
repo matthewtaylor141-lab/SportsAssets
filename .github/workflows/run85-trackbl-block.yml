@@ -110,7 +110,15 @@ jobs:
           echo "RUN85_BL_OUT=$OUT" >> "$GITHUB_ENV"
           python research/run85_trackbl_block.py --out "$OUT" --block "$BLOCK"
 
+      # if: always() BECAUSE A FAILED BLOCK IS EXACTLY THE BLOCK WHOSE EVIDENCE
+      # MATTERS. Without it, a non-zero exit from the runner skips this step and
+      # the sealed diagnostics survive only as an Actions artifact, which the
+      # analyst's egress cannot reach -- which is what happened to BLOCK_2. The
+      # runner seals its evidence before it exits, so there is always something
+      # to commit. This does NOT rehabilitate the run: the capture step has
+      # already failed, so the job's conclusion stays failure either way.
       - name: Commit the sealed block
+        if: always() && env.RUN85_BL_OUT != ''
         run: |
           set -euo pipefail
           OUT="${RUN85_BL_OUT}"
