@@ -1,0 +1,274 @@
+==============================================================================
+RUN 85 TRACK B-L -- BLOCK_3 ECONOMIC READ
+==============================================================================
+evidence      run85_trackbl_BLOCK_3_20260914T171339Z
+pairs (lane x cycle t0, both sides quoted)   24
+cohort bands  {'TAIL': 20, 'MODERATE': 4}
+
+DISCOVERY_FRAME_SCOPE = BOUNDED_PREFIX_OF_CURRENT_ACTIVE_UNIVERSE
+DISCOVERY_LIST_EXHAUSTED = NO
+
+------------------------------------------------------------------------------
+1. HYPOTHETICAL PAIRS, PRICES FROZEN AT t0
+------------------------------------------------------------------------------
+   LONG maker = b0 ; SHORT maker = 1 - a0 ; PAIR_COST = 1 - (a0 - b0)
+   PAIR_DISPLAYED_GROSS = a0 - b0   (displayed, not realized)
+
+   market                                     cyc b0       a0       PAIR_COST  DISP_GROSS flag
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     0   0.9800   0.9900   0.9900     0.0100     
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     1   0.9800   0.9900   0.9900     0.0100     
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     2   0.0200   0.9900   0.0300     0.9700     DEGENERATE_BOOK
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     3   0.0200   0.9900   0.0300     0.9700     DEGENERATE_BOOK
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     0   0.9850   0.9900   0.9950     0.0050     
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     1   0.9850   0.9900   0.9950     0.0050     
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     2   0.9850   0.9900   0.9950     0.0050     
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     3   0.9850   0.9900   0.9950     0.0050     
+   aec-ufc-gabste-seasha-2026-09-19           0   0.9000   0.9100   0.9900     0.0100     
+   aec-ufc-gabste-seasha-2026-09-19           1   0.9000   0.9100   0.9900     0.0100     
+   aec-ufc-gabste-seasha-2026-09-19           2   0.9000   0.9100   0.9900     0.0100     
+   aec-ufc-gabste-seasha-2026-09-19           3   0.9000   0.9100   0.9900     0.0100     
+   aec-atp-jjwol-lucamb-2026-09-14            0   0.9200   0.9300   0.9900     0.0100     
+   aec-atp-jjwol-lucamb-2026-09-14            1   0.9200   0.9300   0.9900     0.0100     
+   aec-atp-jjwol-lucamb-2026-09-14            2   0.9200   0.9300   0.9900     0.0100     
+   aec-atp-jjwol-lucamb-2026-09-14            3   0.9200   0.9300   0.9900     0.0100     
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         0   0.9850   0.9900   0.9950     0.0050     
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         1   0.9850   0.9900   0.9950     0.0050     
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         2   0.9850   0.9900   0.9950     0.0050     
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         3   0.9850   0.9900   0.9950     0.0050     
+   aec-t20icr-eng-slr-2026-09-15              0   0.7800   0.7900   0.9900     0.0100     
+   aec-t20icr-eng-slr-2026-09-15              1   0.7800   0.7900   0.9900     0.0100     
+   aec-t20icr-eng-slr-2026-09-15              2   0.7800   0.7900   0.9900     0.0100     
+   aec-t20icr-eng-slr-2026-09-15              3   0.7800   0.7900   0.9900     0.0100     
+
+   DEGENERATE_BOOK pairs: 2 of 24. Their bid side had collapsed, so the
+   'displayed gross' is an artefact of a broken book and is EXCLUDED
+   from every headline figure below.
+
+------------------------------------------------------------------------------
+2. HORIZON CLOCK -- ACTUAL ELAPSED, NEVER NOMINAL
+------------------------------------------------------------------------------
+   target eligible  nearest obs min max            max |error|   
+   5s     23        5.000          5.000          0.000          NO_OBS_INSIDE_WINDOW dropped=1
+   10s    24        8.455          10.001         1.545          
+   30s    24        26.545         33.456         3.456          
+   60s    21        59.999         60.000         0.001          NO_OBS_INSIDE_WINDOW dropped=3
+   5m     18        300.000        303.454        3.454          NO_OBS_INSIDE_WINDOW dropped=6
+   10m    12        600.000        603.454        3.454          NO_OBS_INSIDE_WINDOW dropped=12
+   15m    6         900.000        903.454        3.454          NO_OBS_INSIDE_WINDOW dropped=18
+
+   A cycle counts as eligible for H only if it reaches H AND has an
+   observation inside the window. Touch-by-H uses measured elapsed <= H.
+
+------------------------------------------------------------------------------
+3. TOUCH UPPER BOUNDS (F3: touched counted as filled) -- NOT FILLS
+------------------------------------------------------------------------------
+   LONG_TOUCH  <=> best_ask(h) <= b0
+   SHORT_TOUCH <=> best_bid(h) >= a0     (short maker 1-a0 == sell at a0)
+
+   h     eligible long   short  either  both   either %  both %    long-only res short-only res
+   5s    23       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   10s   24       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   30s   24       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   60s   21       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   5m    18       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   10m   12       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   15m   6        0      0      0       0      0.0%      0.0%      n=0           n=0          
+
+   These are TOUCH_UPPER_BOUND_F3. MAKER_FILL_PROBABILITY = NOT_IDENTIFIED.
+   PAIR_COMPLETION_PROBABILITY = NOT_IDENTIFIED.
+
+------------------------------------------------------------------------------
+3b. DESCRIPTIVE -- DID THE t0 LEVELS PERSIST? (not a fill claim)
+------------------------------------------------------------------------------
+   A touch needs the market to come TO our price. This records what the
+   book did instead. It explains the touch counts; it is not evidence
+   about fills and is never promoted to one.
+
+   market                                     cyc best bid path          best ask path         
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     0   0.0200,0.9800          0.9900                
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     1   0.0200,0.9800          0.9900                
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     2   0.0200                 0.9900                
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     3   0.0200                 0.9900                
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     0   0.9850                 0.9900                
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     1   0.9850                 0.9900                
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     2   0.9850                 0.9900                
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     3   0.9850                 0.9900                
+   aec-ufc-gabste-seasha-2026-09-19           0   0.9000                 0.9100                
+   aec-ufc-gabste-seasha-2026-09-19           1   0.9000                 0.9100                
+   aec-ufc-gabste-seasha-2026-09-19           2   0.9000                 0.9100                
+   aec-ufc-gabste-seasha-2026-09-19           3   0.9000                 0.9100                
+   aec-atp-jjwol-lucamb-2026-09-14            0   0.9200                 0.9300                
+   aec-atp-jjwol-lucamb-2026-09-14            1   0.9200                 0.9300                
+   aec-atp-jjwol-lucamb-2026-09-14            2   0.9200                 0.9300                
+   aec-atp-jjwol-lucamb-2026-09-14            3   0.9200                 0.9300                
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         0   0.9850                 0.9900                
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         1   0.9850                 0.9900                
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         2   0.9850                 0.9900                
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         3   0.9850                 0.9900                
+   aec-t20icr-eng-slr-2026-09-15              0   0.7800                 0.7900                
+   aec-t20icr-eng-slr-2026-09-15              1   0.7800                 0.7900                
+   aec-t20icr-eng-slr-2026-09-15              2   0.7800                 0.7900                
+   aec-t20icr-eng-slr-2026-09-15              3   0.7800                 0.7900                
+
+   pairs whose touch price moved at all during their life: 2 / 24
+
+------------------------------------------------------------------------------
+4. SEQUENTIAL COMPLETION -- CONDITIONAL ON A FIRST TOUCH
+------------------------------------------------------------------------------
+   FIRST_LEG_TOUCH_COUNT   0 of 24 pairs
+   LONG_FIRST_COUNT        0
+   SHORT_FIRST_COUNT       0
+
+   COMPLEMENT_TOUCH_WITHIN_5M  _AFTER_FIRST  NOT_OBSERVABLE_FROM_BLOCK_3
+   COMPLEMENT_TOUCH_WITHIN_10M _AFTER_FIRST  NOT_OBSERVABLE_FROM_BLOCK_3
+   COMPLEMENT_TOUCH_WITHIN_15M _AFTER_FIRST  NOT_OBSERVABLE_FROM_BLOCK_3
+
+   BOTH_LEGS_TOUCHED_BY_15M_FROM_T0            0 / 6
+   COMPLEMENT_TOUCH_CONDITIONAL_ON_FIRST_TOUCH  reported above
+   (these are different quantities and are not merged)
+
+------------------------------------------------------------------------------
+5. RESIDUAL RISK -- ONE LEG ONLY, MARKED FROM THE FIRST TOUCH
+------------------------------------------------------------------------------
+   m_h = midpoint, ONLY where both sides remain quoted. Never invented.
+   LONG-first  residual markout_h = m_h - b0
+   SHORT-first residual markout_h = a0 - m_h
+
+   5s    n=0
+   10s   n=0
+   30s   n=0
+   60s   n=0
+   5m    n=0
+   10m   n=0
+   15m   n=0
+
+   no one-legged cycle produced a markable residual
+
+------------------------------------------------------------------------------
+6. COMPLETED-PAIR ECONOMICS -- CONDITIONAL, NOT REALIZED
+------------------------------------------------------------------------------
+   maker theta = -0.0125 (a REBATE). Fee = theta * C * p * (1-p).
+   long leg p = b0 ; short leg p = 1 - a0. The legs are a spread apart,
+   so their rebates are NOT equal in general.
+
+   market                                     cyc DISP_GROSS reb_long_ex reb_short_ex reb_total_ex
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     0   0.0100     0.000245    0.000124    0.000369   
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     2   0.9700     0.000245    0.000124    0.000369   
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     0   0.0050     0.000185    0.000124    0.000308   
+   aec-ufc-gabste-seasha-2026-09-19           0   0.0100     0.001125    0.001024    0.002149   
+   aec-atp-jjwol-lucamb-2026-09-14            0   0.0100     0.000920    0.000814    0.001734   
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         0   0.0050     0.000185    0.000124    0.000308   
+   aec-t20icr-eng-slr-2026-09-15              0   0.0100     0.002145    0.002074    0.004219   
+
+   PER-CONTRACT figures above are EXACT_UNROUNDED_REBATE.
+   Official rounding is half-even to the cent, PER FILL. Worked examples
+   on the tightest and widest pairs in the cohort:
+
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5  b0=0.9800 a0=0.9900
+     C=1     displayed_gross=$0.0100    exact_rebate=$0.00037   rounded=$0.00    
+     C=10    displayed_gross=$0.1000    exact_rebate=$0.00369   rounded=$0.00    
+     C=100   displayed_gross=$1.0000    exact_rebate=$0.03687   rounded=$0.03    
+     C=1000  displayed_gross=$10.0000   exact_rebate=$0.36875   rounded=$0.36    
+
+   aec-t20icr-eng-slr-2026-09-15  b0=0.7800 a0=0.7900
+     C=1     displayed_gross=$0.0100    exact_rebate=$0.00422   rounded=$0.00    
+     C=10    displayed_gross=$0.1000    exact_rebate=$0.04219   rounded=$0.04    
+     C=100   displayed_gross=$1.0000    exact_rebate=$0.42188   rounded=$0.42    
+     C=1000  displayed_gross=$10.0000   exact_rebate=$4.21875   rounded=$4.21    
+
+   ACTUAL_REBATE_NOT_IDENTIFIED -- no execution exists, fill
+   fragmentation is unknown, and a fragmented fill can round to zero.
+
+------------------------------------------------------------------------------
+7. PRE_ADVERSE_SELECTION_PAIR_BUDGET
+------------------------------------------------------------------------------
+   CONDITIONAL_ON_BOTH_MODELED_MAKER_EXECUTIONS. Not expected profit,
+   not realized edge, not net expectancy.
+
+   market (C = 100 contracts)                 spread cap  rebates rnd budget     
+   aec-atp-jjwol-lucamb-2026-09-14            $1.00       $0.17       $1.17      
+   aec-t20icr-eng-slr-2026-09-15              $1.00       $0.42       $1.42      
+   aec-ufc-gabste-seasha-2026-09-19           $1.00       $0.21       $1.21      
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     $1.00       $0.03       $1.03      
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     $0.50       $0.03       $0.53      
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         $0.50       $0.03       $0.53      
+
+   LIQUIDITY_INCENTIVE_REWARD = NOT_VERIFIED
+   EXCLUDED_FROM_PRIMARY_ECONOMICS = YES
+
+------------------------------------------------------------------------------
+8. CAPACITY -- DISPLAYED ONLY
+------------------------------------------------------------------------------
+   market                                     cyc bid qty      ask qty      pair proxy    
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     0   4.0100       103.0000     4.0100        
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     1   4.0100       103.0000     4.0100        
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     2   1.0000       103.0000     1.0000        
+   asc-bun-bre-aug-2026-09-19-fh-pos-2pt5     3   1.0000       103.0000     1.0000        
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     0   0.1000       76.0100      0.1000        
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     1   0.1000       76.0100      0.1000        
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     2   0.1000       76.0100      0.1000        
+   asc-cfb-clmsn-cah-2026-09-25-pos-17pt5     3   0.1000       76.0100      0.1000        
+   aec-ufc-gabste-seasha-2026-09-19           0   2550.0000    10598.3200   2550.0000     
+   aec-ufc-gabste-seasha-2026-09-19           1   2550.0000    10598.3200   2550.0000     
+   aec-ufc-gabste-seasha-2026-09-19           2   2507.8100    5049.0000    2507.8100     
+   aec-ufc-gabste-seasha-2026-09-19           3   2507.8100    5471.0200    2507.8100     
+   aec-atp-jjwol-lucamb-2026-09-14            0   14459.8000   148991.3000  14459.8000    
+   aec-atp-jjwol-lucamb-2026-09-14            1   31398.7600   149079.3400  31398.7600    
+   aec-atp-jjwol-lucamb-2026-09-14            2   14385.7600   149079.3400  14385.7600    
+   aec-atp-jjwol-lucamb-2026-09-14            3   14385.7600   149079.3400  14385.7600    
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         0   0.3400       463.0000     0.3400        
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         1   0.3400       2407.3000    0.3400        
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         2   0.3400       2407.3000    0.3400        
+   asc-mlb-sd-col-2026-09-15-pos-2pt5         3   0.3400       2407.3000    0.3400        
+   aec-t20icr-eng-slr-2026-09-15              0   1496.0000    1015.7500    1015.7500     
+   aec-t20icr-eng-slr-2026-09-15              1   1496.0000    1015.7500    1015.7500     
+   aec-t20icr-eng-slr-2026-09-15              2   1496.0000    1015.7500    1015.7500     
+   aec-t20icr-eng-slr-2026-09-15              3   1036.0000    1025.2700    1025.2700     
+
+   DISPLAYED_CAPACITY_PROXY = the figures above
+   QUEUE_POSITION      = NOT_IDENTIFIED
+   EXECUTABLE_CAPACITY = NOT_IDENTIFIED
+   Visible queue size is NOT executable capacity and says nothing about
+   where our order would sit in the queue.
+
+------------------------------------------------------------------------------
+9. SEGMENTATION
+------------------------------------------------------------------------------
+   PRICE BAND
+     MODERATE               pairs=4   either_touch<=15m=0   both=0  
+     TAIL                   pairs=20  either_touch<=15m=0   both=0  
+
+   SPREAD REGIME
+     S_1T                   pairs=24  either_touch<=15m=0   both=0  
+
+   TICK
+     0.005                  pairs=8   either_touch<=15m=0   both=0  
+     0.01                   pairs=16  either_touch<=15m=0   both=0  
+
+   SPORT
+     NOT_IDENTIFIED         pairs=4   either_touch<=15m=0   both=0  
+     sportId:2              pairs=4   either_touch<=15m=0   both=0  
+     sportId:3              pairs=4   either_touch<=15m=0   both=0  
+     sportId:5              pairs=4   either_touch<=15m=0   both=0  
+     sportId:8              pairs=4   either_touch<=15m=0   both=0  
+     sportId:9              pairs=4   either_touch<=15m=0   both=0  
+
+   LEAGUE
+     NOT_IDENTIFIED         pairs=4   either_touch<=15m=0   both=0  
+     atp                    pairs=4   either_touch<=15m=0   both=0  
+     bun                    pairs=4   either_touch<=15m=0   both=0  
+     cfb                    pairs=4   either_touch<=15m=0   both=0  
+     mlb                    pairs=4   either_touch<=15m=0   both=0  
+     t20icr                 pairs=4   either_touch<=15m=0   both=0  
+
+   NEAR_MID_EXECUTION_EVIDENCE_FROM_BLOCK_3 = NONE
+   The cohort contains zero NEAR_MID markets. Tail-market results are
+   NOT extrapolated to near-mid markets.
+
+------------------------------------------------------------------------------
+10. SCOPE LIMITATION CARRIED WITH EVERY CONCLUSION
+------------------------------------------------------------------------------
+   BLOCK_3 selection came from a BOUNDED PREFIX of the current active
+   universe (DISCOVERY_LIST_EXHAUSTED = NO). This is evidence about the
+   selected cohort only -- not 'the best markets on PMUS', not
+   'whole-board opportunity', not 'current-universe expectancy'.

@@ -672,3 +672,247 @@ HORIZON_ANALYSIS_CLOCK       ACTUAL_OBSERVED_TIMESTAMPS
 Nominal schedule times are never substituted for actual observation times.
 Every horizon is evaluated on measured elapsed time, and each reported horizon
 carries its `TARGET_HORIZON`, `ACTUAL_ELAPSED` and `HORIZON_ERROR`.
+
+---
+
+## BLOCK_3 — ECONOMIC READ
+
+Analyzer `research/run85_trackbl_block3_economics.py`, read-only over the
+committed bytes. Full output sealed at
+`research/evidence/trackbl/run85_trackbl_BLOCK_3_economics.txt`. Nothing in the
+runner, selection, cohort, rate policy or Track A was touched.
+
+### The order model and the short-leg algebra
+
+One book, quoted in the LONG token's price space (FINDING B-1: `longQuote ==
+bestAsk`, `shortQuote == 1 - bestBid`, 110/110). A SHORT at price *p* is a SELL
+of the long token at 1 − *p*. So, frozen at each t0:
+
+```
+LONG  maker price = b0                 a resting BUY  of the long token
+SHORT maker price = 1 - a0             a resting SELL of the long token at a0
+PAIR_COST            = b0 + (1 - a0) = 1 - (a0 - b0)
+PAIR_DISPLAYED_GROSS = a0 - b0
+```
+
+Both touch tests therefore live in the ladder's own price space:
+
+```
+LONG_TOUCH(h)   <=>  best_ask(h) <= b0
+SHORT_TOUCH(h)  <=>  best_bid(h) >= a0
+```
+
+The short test compares to **a0**, never to `1 - a0` and never to `shortQuote`.
+Comparing the short-token spelling against the long-token ladder is the sign
+error this section exists to rule out.
+
+### 24 hypothetical pairs · 2 excluded as degenerate
+
+24 pairs (6 markets × 4 cycle-t0s), all quoted two-sided, all 1-tick spreads.
+Two later-cycle t0s on `asc-bun-…-fh-pos-2pt5` opened on a **collapsed bid**
+(b0 = 0.0200 against a0 = 0.9900). Those are marked `DEGENERATE_BOOK` and are
+excluded from every headline figure — their 0.97 "displayed gross" is a broken
+book, not an opportunity.
+
+### Horizon clock and eligibility
+
+Eligibility is two-sided: a cycle counts for H only if it **reaches** H *and*
+has an observation **inside** the window. Getting that wrong inflates the
+denominator with cycles that never had a read in the window, which makes
+"not touched" vacuously true. Tolerance is Track A's established 0.5 s.
+
+```
+target  eligible  obs elapsed min..max   max |error|   dropped
+5s      23        5.000 .. 5.000         0.000         1
+10s     24        8.455 .. 10.001        1.545         0
+30s     24        26.545 .. 33.456       3.456         0
+60s     21        59.999 .. 60.000       0.001         3
+5m      18        300.000 .. 303.454     3.454         6
+10m     12        600.000 .. 603.454     3.454         12
+15m     6         900.000 .. 903.454     3.454         18
+```
+
+### REQUIRED SUMMARY TABLE
+
+```
+h     eligible  long  short  either  both  either%  both%   long-only res  short-only res
+5s    23        0     0      0       0     0.0%     0.0%    n=0            n=0
+10s   24        0     0      0       0     0.0%     0.0%    n=0            n=0
+30s   24        0     0      0       0     0.0%     0.0%    n=0            n=0
+60s   21        0     0      0       0     0.0%     0.0%    n=0            n=0
+5m    18        0     0      0       0     0.0%     0.0%    n=0            n=0
+10m   12        0     0      0       0     0.0%     0.0%    n=0            n=0
+15m   6         0     0      0       0     0.0%     0.0%    n=0            n=0
+```
+
+Touch % is a **TOUCH_UPPER_BOUND_F3**, never a fill probability.
+`MAKER_FILL_PROBABILITY = NOT_IDENTIFIED`.
+`PAIR_COMPLETION_PROBABILITY = NOT_IDENTIFIED`.
+
+**Zero touches on either leg, at every horizon, over the full 17-minute block.**
+
+### Why — descriptive, never promoted to a fill claim
+
+The books did not move. Across all 24 pairs the touch price changed at all in
+**2 of 24**, and both of those were the bid collapsing on the one degenerate
+market. Five of six markets held an unchanged one-tick quote for the entire
+block. A maker order is not being outrun here; nothing is trading.
+
+### Sequential completion
+
+```
+FIRST_LEG_TOUCH_COUNT                        0 of 24
+LONG_FIRST_COUNT                             0
+SHORT_FIRST_COUNT                            0
+COMPLEMENT_TOUCH_WITHIN_5M_AFTER_FIRST       NOT_OBSERVABLE_FROM_BLOCK_3
+COMPLEMENT_TOUCH_WITHIN_10M_AFTER_FIRST      NOT_OBSERVABLE_FROM_BLOCK_3
+COMPLEMENT_TOUCH_WITHIN_15M_AFTER_FIRST      NOT_OBSERVABLE_FROM_BLOCK_3
+BOTH_LEGS_TOUCHED_BY_15M_FROM_T0             0 / 6
+```
+
+The conditional quantity is not merged with the unconditional one. With no
+first touch there is no conditioning event, so the conditional is **not
+observable from this block** — not zero, and not manufactured.
+
+### Residual risk
+
+No cycle produced a one-legged state, so there is no residual to distribute:
+`n = 0` at every horizon. This is absence of the event, not a favourable
+result.
+
+### Completed-pair economics — conditional, not realized
+
+Maker theta = −0.0125, a **rebate**. Long leg at p = b0, short leg at p = 1−a0;
+the legs sit a spread apart so their rebates differ. Exact per-contract:
+
+```
+market                                  DISP_GROSS  reb_long    reb_short   total
+asc-bun-…-fh-pos-2pt5                   0.0100      0.000245    0.000124    0.000369
+asc-cfb-clmsn-cah-…-pos-17pt5           0.0050      0.000185    0.000124    0.000308
+aec-ufc-gabste-seasha-2026-09-19        0.0100      0.001125    0.001024    0.002149
+aec-atp-jjwol-lucamb-2026-09-14         0.0100      0.000920    0.000814    0.001734
+asc-mlb-sd-col-…-pos-2pt5               0.0050      0.000185    0.000124    0.000308
+aec-t20icr-eng-slr-2026-09-15           0.0100      0.002145    0.002074    0.004219
+```
+
+Rounding is half-even to the cent **per fill**, and it bites:
+
+```
+asc-bun-… (b0 0.9800 / a0 0.9900)      C=1 exact $0.00037 -> rounded $0.00
+                                       C=10  $0.00369 -> $0.00
+                                       C=100 $0.03687 -> $0.03
+                                       C=1000 $0.36875 -> $0.36
+aec-t20icr-… (b0 0.7800 / a0 0.7900)   C=1 exact $0.00422 -> rounded $0.00
+                                       C=100 $0.42188 -> $0.42
+                                       C=1000 $4.21875 -> $4.21
+```
+
+`ACTUAL_REBATE_NOT_IDENTIFIED` — no execution exists, fill fragmentation is
+unknown, and a fragmented fill rounds to zero. Theoretical rebate is never
+called realized revenue.
+
+### PRE_ADVERSE_SELECTION_PAIR_BUDGET
+
+`CONDITIONAL_ON_BOTH_MODELED_MAKER_EXECUTIONS`. Not profit, not expected
+profit, not realized edge, not net expectancy. Per 100 contracts:
+
+```
+aec-t20icr-eng-slr-2026-09-15           $1.00 + $0.42 = $1.42
+aec-ufc-gabste-seasha-2026-09-19        $1.00 + $0.21 = $1.21
+aec-atp-jjwol-lucamb-2026-09-14         $1.00 + $0.17 = $1.17
+asc-bun-…-fh-pos-2pt5                   $1.00 + $0.03 = $1.03
+asc-cfb-clmsn-cah-…-pos-17pt5           $0.50 + $0.03 = $0.53
+asc-mlb-sd-col-…-pos-2pt5               $0.50 + $0.03 = $0.53
+
+LIQUIDITY_INCENTIVE_REWARD      = NOT_VERIFIED
+EXCLUDED_FROM_PRIMARY_ECONOMICS = YES
+```
+
+### Capacity
+
+```
+market                            bid qty        ask qty       pair proxy
+asc-cfb-clmsn-cah-…-pos-17pt5     0.1000         76.0100       0.1000
+asc-mlb-sd-col-…-pos-2pt5         0.3400         463..2407     0.3400
+asc-bun-…-fh-pos-2pt5             4.0100/1.0000  103.0000      1.00-4.01
+aec-t20icr-eng-slr-2026-09-15     1036-1496      1015-1025      ~1016
+aec-ufc-gabste-seasha-2026-09-19  2507-2550      5049-10598    ~2508
+aec-atp-jjwol-lucamb-2026-09-14   14385-31398    148991        14386
+
+DISPLAYED_CAPACITY_PROXY   the figures above
+QUEUE_POSITION             NOT_IDENTIFIED
+EXECUTABLE_CAPACITY        NOT_IDENTIFIED
+```
+
+Three of six markets show a bid side of **under five shares** — 0.10, 0.34 and
+1.00–4.01. Displayed queue size is not executable capacity and establishes
+nothing about where our order would sit.
+
+### Segmentation
+
+```
+PRICE BAND      TAIL     20 pairs   either_touch<=15m 0   both 0
+                MODERATE  4 pairs   either_touch<=15m 0   both 0
+SPREAD REGIME   S_1T     24 pairs   0 / 0
+TICK            0.005     8 pairs · 0.01  16 pairs        0 / 0
+SPORT           6 groups of 4 pairs                        0 / 0 each
+LEAGUE          atp, bun, cfb, mlb, t20icr, NOT_IDENTIFIED 0 / 0 each
+
+NEAR_MID_EXECUTION_EVIDENCE_FROM_BLOCK_3 = NONE
+```
+
+The cohort contains zero NEAR_MID markets. Tail results are **not**
+extrapolated to near-mid markets.
+
+### Scope limitation, carried
+
+`DISCOVERY_LIST_EXHAUSTED = NO`. BLOCK_3's selection came from a bounded prefix
+of the current active universe. This is evidence about the selected cohort
+only — not "the best markets on PMUS", not whole-board opportunity, not
+current-universe expectancy.
+
+---
+
+## BLOCK_3 CLASSIFICATION
+
+```
+BLOCK_3_CLASSIFICATION = C — DISPLAYED EDGE ONLY
+```
+
+The displayed edge is real and measured: every one of the 24 pairs quoted a
+one-tick spread, and the conditional budget per 100 contracts is $0.53–$1.42
+including correctly-rounded maker rebates on both legs. Execution is entirely
+unestablished: **0 touches on either leg at every horizon**, under F3 — the
+most generous proxy available, where a touch is counted as a fill. There is no
+first leg, so no completion evidence and no residual distribution.
+
+Not D. Non-touch is absence of execution evidence, not adverse economics; no
+observation in this block shows a passive pair losing money.
+
+Not E. The data is clean and adequate to support the statement it makes — 120
+reads, all 200s, spacing honoured, seal verified. What it cannot support is any
+claim about fills.
+
+```
+DOES_BLOCK_3_JUSTIFY_CHANGING_48H_CLASSIFICATION = NO
+```
+
+Evidence: the 48-hour classification is already **C**, set from Track A
+segment 2 (299 postable pairs, 1 long touch at 60 s, 0 both-touches). BLOCK_3
+independently lands on C from a different cohort, a different design and longer
+horizons. It adds no execution evidence in either direction, so there is
+nothing to move the classification with. BLOCK_3 is also **not pooled** with
+Track A — these are two separate C findings, not one larger sample.
+
+The one thing BLOCK_3 does change is the *explanation*. Track A's non-touch was
+attributed partly to very wide quotes (four of seven survivors at 50–100%
+spread/mid). BLOCK_3 deliberately selected the tightest books available and
+still saw zero touches, in markets whose quotes did not move at all for 17
+minutes. Tightness was not the binding constraint; **trading activity was**.
+
+### What this does not authorize
+
+No live capital. No order placement. No `mirror_live` change. A tiny live
+execution validation would be a separately approved step with an explicit
+maximum exposure and stated kill conditions, and BLOCK_3 does not meet the bar
+to propose one.
