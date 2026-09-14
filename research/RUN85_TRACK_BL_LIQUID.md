@@ -184,3 +184,53 @@ nominal                                              83.33%
 Track A timing is **locked and I have not touched it**. Recording the gap
 exactly, imputing nothing, and not raising the rate to compensate. The decision
 of whether to accept ~46% coverage or change the schedule is the owner's.
+
+---
+
+## RATE GATE — WHAT CAN AND CANNOT BE PROVEN
+
+`B_L_AGGREGATE_RATE_SAFE = NOT_VERIFIED`. The earlier argument proved an
+average-rate budget and called it spacing safety. Those are different claims:
+two independently paced streams can collide no matter how each paces itself,
+because neither stream's spacing bounds the combined minimum gap.
+
+### Option A — shared cross-workflow pacing: INFEASIBLE
+
+Two Actions runners are separate machines with no shared clock or lock. Any
+coordination channel available here (a repo file, the GitHub API) has latency
+and contention measured in seconds, which is the same order as the 2.5 s floor
+it would be trying to enforce. It cannot operate on actual request start times.
+
+### Option B — poll the API and pause: HAS AN UNBOUNDED BLIND WINDOW
+
+A pre-flight "is Track A running or queued?" check cannot see a *delayed*
+scheduled run, because GitHub creates the run record only when the run actually
+starts. Run #4 is the proof:
+
+```
+cron boundary        2026-09-13T18:00:00Z
+run record created   2026-09-13T20:30:42Z    (+2h30m42s)
+run started          2026-09-13T20:30:42Z    (created == started)
+```
+
+For 2h30m that run did not exist in the API. Track A can therefore appear at
+any moment inside a B-L block, and the blind window is unbounded because cron
+lateness is unbounded. Option B degrades to best effort.
+
+### Option C — the only hard guarantee available
+
+GitHub's **concurrency group** is platform-level mutual exclusion: two runs in
+the same group never execute simultaneously. That is a guarantee about actual
+execution, not about planned schedules, and it is the only mechanism here that
+survives cron nondeterminism.
+
+Its cost is real and must be stated rather than buried: if a Track A segment
+becomes due while a B-L block is running, Track A **waits** for it. A Track A
+start could therefore be delayed by up to one B-L block length.
+
+It would not cause a Track A *drop*. A drop requires two runs pending in the
+group at once; Track A's crons are six hours apart and a B-L block is minutes,
+so two Track A runs can never be pending because of B-L.
+
+This changes Track A's realized start times, which is why it is an owner
+decision and not mine to take.
