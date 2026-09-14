@@ -84,6 +84,7 @@ import json
 import platform
 import sys
 import time
+import traceback
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -829,194 +830,212 @@ def main(argv=None):
            MAX_VENUE_REQUESTS))
     say("MIN_REQUEST_SPACING_S   %.1f  (unchanged, never weakened)" % SPACING_S)
     say()
-    with httpx.Client(timeout=30.0) as http:
-        say("=== DISCOVERY (current universe, offset walk from 0) ===")
-        events = discover(http, pacer, budget, pages, samples, res)
-        say()
-        say("=== QUERY-SCOPE VERIFICATION (re-derived from the payload) ===")
-        for k in ("QUERY_FILTERS", "EVENTS_RETURNED", "EVENTS_WITH_CLOSED_TRUE",
-                  "MARKETS_TOTAL", "MARKETS_OPEN", "MARKETS_RESOLVED",
-                  "MARKETS_WITH_BID_AND_ASK", "DISCOVERY_LIST_EXHAUSTED",
-                  "FIRST_TERMINAL_OFFSET", "PAGINATION_ADVANCES", "OVERLAP_CHECK"):
-            say("%-28s %s" % (k, res.get(k)))
-        # A parameter that was SENT is not evidence about what came back.
-        scope_fail = None
-        if res.get("EVENTS_WITH_CLOSED_TRUE"):
-            scope_fail = "FAILED_QUERY_SCOPE_NOT_HONOURED"
-        elif not res.get("MARKETS_OPEN"):
-            scope_fail = "FAILED_NO_OPEN_MARKET_ROWS"
-        now = time.time()
-        cands = candidates(events, now)
-        res["candidates"] = res["STRUCTURALLY_ELIGIBLE_MARKETS"] = len(cands)
-        res["CURRENT_EVENTS"] = res["EVENTS_DISCOVERED"]
-        say("structurally eligible markets: %d" % len(cands))
+    # EVIDENCE MUST SURVIVE THE FAILURE, and BLOCK_4 attempt 1 proved a
+    # controlled non-zero exit is not enough: an UNHANDLED EXCEPTION skipped
+    # the sealing block entirely and every discovery page, body sample and
+    # probe receipt died with it. Everything that touches the venue or builds
+    # evidence now runs inside this try, so any exception still reaches the
+    # seal, the checksums and a non-zero exit.
+    try:
+        with httpx.Client(timeout=30.0) as http:
+            say("=== DISCOVERY (current universe, offset walk from 0) ===")
+            events = discover(http, pacer, budget, pages, samples, res)
+            say()
+            say("=== QUERY-SCOPE VERIFICATION (re-derived from the payload) ===")
+            for k in ("QUERY_FILTERS", "EVENTS_RETURNED", "EVENTS_WITH_CLOSED_TRUE",
+                      "MARKETS_TOTAL", "MARKETS_OPEN", "MARKETS_RESOLVED",
+                      "MARKETS_WITH_BID_AND_ASK", "DISCOVERY_LIST_EXHAUSTED",
+                      "FIRST_TERMINAL_OFFSET", "PAGINATION_ADVANCES", "OVERLAP_CHECK"):
+                say("%-28s %s" % (k, res.get(k)))
+            # A parameter that was SENT is not evidence about what came back.
+            scope_fail = None
+            if res.get("EVENTS_WITH_CLOSED_TRUE"):
+                scope_fail = "FAILED_QUERY_SCOPE_NOT_HONOURED"
+            elif not res.get("MARKETS_OPEN"):
+                scope_fail = "FAILED_NO_OPEN_MARKET_ROWS"
+            now = time.time()
+            cands = candidates(events, now)
+            res["candidates"] = res["STRUCTURALLY_ELIGIBLE_MARKETS"] = len(cands)
+            res["CURRENT_EVENTS"] = res["EVENTS_DISCOVERED"]
+            say("structurally eligible markets: %d" % len(cands))
 
-        # ---------------- STAGE 1: prospective shortlist ----------------
-        short = shortlist(cands, now)
-        res["SHORTLIST"] = len(short)
-        say("stage-1 shortlist (by imminence, stratified by band): %d" % len(short))
-        say("   %s" % {b: sum(1 for m in short if m["price_band"] == b)
-                       for b in SHORTLIST_PER_BAND})
+            # ---------------- STAGE 1: prospective shortlist ----------------
+            short = shortlist(cands, now)
+            res["SHORTLIST"] = len(short)
+            say("stage-1 shortlist (by imminence, stratified by band): %d" % len(short))
+            say("   %s" % {b: sum(1 for m in short if m["price_band"] == b)
+                           for b in SHORTLIST_PER_BAND})
 
-        # ---------------- STAGE 2: /book activity probe ----------------
-        say()
-        say("=== STAGE 2: BOOK ACTIVITY PROBE ===")
-        probed = []
-        for m in short:
-            if budget.spent + 1 > MAX_VENUE_REQUESTS - res["planned_capture_reads"]:
-                say("   probe budget exhausted at %d probes" % len(probed))
-                break
-            budget.take()
-            r, _rows = B.get_paced(http, BOOK_PATH % m["market_slug"], pacer, None)
-            probe_rows.append({"market_slug": m["market_slug"],
-                               "http_status": r.get("http_status"),
-                               "response_sha256": r.get("response_sha256"),
-                               "probe_wall_utc": r.get("local_request_wall_utc"),
-                               "body": r.get("body")})
-            if r.get("http_status") == 200:
-                pacer.on_success()
-            af = activity_fields(r, time.time())
-            ec = derive_economics(af, m.get("tick_size"))
-            probed.append({**m, **af, **ec})
-        res["BOOKS_PROBED"] = len(probed)
-        say("   books probed: %d" % len(probed))
+            # ---------------- STAGE 2: /book activity probe ----------------
+            say()
+            say("=== STAGE 2: BOOK ACTIVITY PROBE ===")
+            probed = []
+            for m in short:
+                if budget.spent + 1 > MAX_VENUE_REQUESTS - res["planned_capture_reads"]:
+                    say("   probe budget exhausted at %d probes" % len(probed))
+                    break
+                budget.take()
+                r, _rows = B.get_paced(http, BOOK_PATH % m["market_slug"], pacer, None)
+                probe_rows.append({"market_slug": m["market_slug"],
+                                   "http_status": r.get("http_status"),
+                                   "response_sha256": r.get("response_sha256"),
+                                   "probe_wall_utc": r.get("local_request_wall_utc"),
+                                   "body": r.get("body")})
+                if r.get("http_status") == 200:
+                    pacer.on_success()
+                af = activity_fields(r, time.time())
+                ec = derive_economics(af, m.get("tick_size"))
+                probed.append({**m, **af, **ec})
+            res["BOOKS_PROBED"] = len(probed)
+            say("   books probed: %d" % len(probed))
 
-        # ---- distributions FIRST, thresholds after -- never the reverse ----
-        dist = {k: pctiles([m.get(k) for m in probed]) for k in
-                ("SECONDS_SINCE_LAST_TRADE", "NOTIONAL_TRADED",
-                 "SHARES_TRADED", "OPEN_INTEREST")}
-        res["RECENT_TRADE_DISTRIBUTION"] = dist["SECONDS_SINCE_LAST_TRADE"]
-        res["NOTIONAL_DISTRIBUTION"] = dist["NOTIONAL_TRADED"]
-        res["SHARES_DISTRIBUTION"] = dist["SHARES_TRADED"]
-        res["OPEN_INTEREST_DISTRIBUTION"] = dist["OPEN_INTEREST"]
-        say()
-        say("   CANDIDATE DISTRIBUTIONS (before any threshold is applied)")
-        for k, d in dist.items():
-            say("     %-26s n=%-4s miss=%-4s p10=%-12s p25=%-12s med=%-12s "
-                "p75=%-12s p90=%s"
-                % (k, d.get("n"), d.get("n_missing"),
-                   _fmt(d.get("p10")), _fmt(d.get("p25")), _fmt(d.get("median")),
-                   _fmt(d.get("p75")), _fmt(d.get("p90"))))
+            # ---- distributions FIRST, thresholds after -- never the reverse ----
+            dist = {k: pctiles([m.get(k) for m in probed]) for k in
+                    ("SECONDS_SINCE_LAST_TRADE", "NOTIONAL_TRADED",
+                     "SHARES_TRADED", "OPEN_INTEREST")}
+            res["RECENT_TRADE_DISTRIBUTION"] = dist["SECONDS_SINCE_LAST_TRADE"]
+            res["NOTIONAL_DISTRIBUTION"] = dist["NOTIONAL_TRADED"]
+            res["SHARES_DISTRIBUTION"] = dist["SHARES_TRADED"]
+            res["OPEN_INTEREST_DISTRIBUTION"] = dist["OPEN_INTEREST"]
+            say()
+            say("   CANDIDATE DISTRIBUTIONS (before any threshold is applied)")
+            for k, d in dist.items():
+                say("     %-26s n=%-4s miss=%-4s p10=%-12s p25=%-12s med=%-12s "
+                    "p75=%-12s p90=%s"
+                    % (k, d.get("n"), d.get("n_missing"),
+                       _fmt(d.get("p10")), _fmt(d.get("p25")), _fmt(d.get("median")),
+                       _fmt(d.get("p75")), _fmt(d.get("p90"))))
 
-        activity_gate(probed, dist)
-        economic_gate(probed)
-        act = [m for m in probed if m["ACTIVITY_ELIGIBLE"]]
-        eco = [m for m in probed if m["ECONOMICALLY_ELIGIBLE"]]
-        final = [m for m in probed
-                 if m["ACTIVITY_ELIGIBLE"] and m["ECONOMICALLY_ELIGIBLE"]]
-        res["ACTIVITY_ELIGIBLE"] = len(act)
-        res["ECONOMICALLY_ELIGIBLE"] = len(eco)
-        res["FINAL_CANDIDATES"] = len(final)
-        res["activity_rejects"] = _census(probed, "activity_reject")
-        res["economic_rejects"] = _census(probed, "economic_reject")
-        say()
-        say("   ACTIVITY_ELIGIBLE        %d   rejects %s"
-            % (len(act), res["activity_rejects"]))
-        say("   ECONOMICALLY_ELIGIBLE    %d   rejects %s"
-            % (len(eco), res["economic_rejects"]))
-        say("   FINAL_CANDIDATES         %d   (both gates)" % len(final))
+            activity_gate(probed, dist)
+            economic_gate(probed)
+            act = [m for m in probed if m["ACTIVITY_ELIGIBLE"]]
+            eco = [m for m in probed if m["ECONOMICALLY_ELIGIBLE"]]
+            final = [m for m in probed
+                     if m["ACTIVITY_ELIGIBLE"] and m["ECONOMICALLY_ELIGIBLE"]]
+            res["ACTIVITY_ELIGIBLE"] = len(act)
+            res["ECONOMICALLY_ELIGIBLE"] = len(eco)
+            res["FINAL_CANDIDATES"] = len(final)
+            res["activity_rejects"] = _census(probed, "activity_reject")
+            res["economic_rejects"] = _census(probed, "economic_reject")
+            say()
+            say("   ACTIVITY_ELIGIBLE        %d   rejects %s"
+                % (len(act), res["activity_rejects"]))
+            say("   ECONOMICALLY_ELIGIBLE    %d   rejects %s"
+                % (len(eco), res["economic_rejects"]))
+            say("   FINAL_CANDIDATES         %d   (both gates)" % len(final))
 
-        block = select_block_v2(final)
-        meta["selection_timestamp_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-        res["block_size"] = len(block)
-        say()
-        say("=== FROZEN BLOCK %s (%d markets) ===" % (a.block, len(block)))
-        for m in block:
-            say("  %s" % str(m["market_slug"])[:70])
-            say("     sport=%-14s league=%-12s event=%s"
-                % (m["sport"], str(m["league"])[:12], m["native_event_id"]))
-            say("     price mid=%-8s spread=%-8s ticks=%-3s s/m=%-8s band=%s"
-                % (m.get("MID"), m.get("SPREAD_ABSOLUTE"), m.get("SPREAD_TICKS"),
-                   _fmt(float(m["SPREAD_OVER_MID"]) if m.get("SPREAD_OVER_MID")
-                        is not None else None), m.get("PRICE_BAND")))
-            say("     ACTIVITY   since_last_trade=%-10s shares=%-12s notional=%-14s oi=%s"
-                % (_fmt(m.get("SECONDS_SINCE_LAST_TRADE")), m.get("SHARES_TRADED"),
-                   m.get("NOTIONAL_TRADED"), m.get("OPEN_INTEREST")))
-            say("     LIQUIDITY  best_bid_size=%-12s best_ask_size=%s"
-                % (m.get("BEST_BID_SIZE"), m.get("BEST_ASK_SIZE")))
-            say("     BUDGET     spread_capture=%-10s reb_long=%-8s reb_short=%-8s "
-                "pre_adverse_selection_pair_budget=%s"
-                % (m.get("DISPLAYED_SPREAD_CAPTURE"), m.get("REBATE_LONG"),
-                   m.get("REBATE_SHORT"), m.get("DISPLAYED_PAIR_BUDGET")))
-        blob = json.dumps(block, indent=1, sort_keys=True).encode()
-        (out / "block_cohort.json").write_bytes(blob)
-        meta["block_cohort_sha256"] = hashlib.sha256(blob).hexdigest()
+            block = select_block_v2(final)
+            meta["selection_timestamp_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+            res["block_size"] = len(block)
+            say()
+            say("=== FROZEN BLOCK %s (%d markets) ===" % (a.block, len(block)))
+            for m in block:
+                say("  %s" % str(m["market_slug"])[:70])
+                say("     sport=%-14s league=%-12s event=%s"
+                    % (m["sport"], str(m["league"])[:12], m["native_event_id"]))
+                say("     price mid=%-8s spread=%-8s ticks=%-3s s/m=%-8s band=%s"
+                    % (m.get("MID"), m.get("SPREAD_ABSOLUTE"), m.get("SPREAD_TICKS"),
+                       _fmt(float(m["SPREAD_OVER_MID"]) if m.get("SPREAD_OVER_MID")
+                            is not None else None), m.get("PRICE_BAND")))
+                say("     ACTIVITY   since_last_trade=%-10s shares=%-12s notional=%-14s oi=%s"
+                    % (_fmt(m.get("SECONDS_SINCE_LAST_TRADE")), m.get("SHARES_TRADED"),
+                       m.get("NOTIONAL_TRADED"), m.get("OPEN_INTEREST")))
+                say("     LIQUIDITY  best_bid_size=%-12s best_ask_size=%s"
+                    % (m.get("BEST_BID_SIZE"), m.get("BEST_ASK_SIZE")))
+                say("     BUDGET     spread_capture=%-10s reb_long=%-8s reb_short=%-8s "
+                    "pre_adverse_selection_pair_budget=%s"
+                    % (m.get("DISPLAYED_SPREAD_CAPTURE"), m.get("REBATE_LONG"),
+                       m.get("REBATE_SHORT"), m.get("DISPLAYED_PAIR_BUDGET")))
+            # default=str because BL-SELECT-2 puts Decimals in a selected market
+            # (BEST_BID, SPREAD_ABSOLUTE, the rebates, the sizes). Without it this
+            # line raised TypeError and took BLOCK_4 attempt 1 down before any seal.
+            blob = json.dumps(block, indent=1, sort_keys=True, default=str).encode()
+            (out / "block_cohort.json").write_bytes(blob)
+            meta["block_cohort_sha256"] = hashlib.sha256(blob).hexdigest()
 
-        # ---- PREFLIGHT, reported before anything is captured ----
-        res["DISTINCT_EVENTS"] = len({m["native_event_id"] for m in block})
-        res["SPORTS"] = sorted({m["sport"] for m in block if m.get("sport")})
-        res["PRICE_BANDS"] = sorted({m.get("PRICE_BAND") for m in block
-                                     if m.get("PRICE_BAND")})
-        res["SPREAD_REGIMES"] = sorted({spread_bucket(m.get("SPREAD_ABSOLUTE"),
-                                                      m.get("tick_size"))
-                                        for m in block} - {None})
-        res["LEAGUES"] = sorted({str(m["league"]) for m in block if m.get("league")})
-        bands = [m.get("PRICE_BAND") for m in block]
-        res["NEAR_MID_COUNT"] = bands.count("NEAR_MID")
-        res["MODERATE_COUNT"] = bands.count("MODERATE")
-        res["TAIL_COUNT"] = bands.count("TAIL")
-        res["SELECTED_MARKETS"] = len(block)
-        res["BAND_TARGETS_MET"] = {
-            "NEAR_MID>=2": res["NEAR_MID_COUNT"] >= 2,
-            "MODERATE>=2": res["MODERATE_COUNT"] >= 2,
-            "TAIL<=2": res["TAIL_COUNT"] <= 2}
-        # An unmet target is REPORTED. It is never met by relaxing a gate.
-        res["BAND_TARGET_SHORTFALL_REASON"] = (
-            "BOARD_DID_NOT_SUPPLY_ELIGIBLE_MARKETS_IN_BAND"
-            if not all(res["BAND_TARGETS_MET"].values()) else None)
-        res["QUEUE_REGIMES"] = "NOT_IDENTIFIED_AT_SELECTION (needs book reads)"
-        # The rule DID change between blocks: BLOCK_3 ran BL-SELECT-1, this runs
-        # BL-SELECT-2. What is unchanged is the rule WITHIN this block -- frozen
-        # before the first capture read and never touched afterwards. Spelling it
-        # the long way so nobody reads "UNCHANGED" as "same as BLOCK_3".
-        res["SELECTION_RULE_UNCHANGED_WITHIN_BLOCK"] = "YES"
-        res["SELECTION_RULE_SUPERSEDES"] = "BL-SELECT-1 (RETIRED_FOR_TRACK_B_L)"
-        res["SHARED_CONCURRENCY_GROUP"] = "YES"
-        res["BLOCK_FROZEN"] = "YES"
-        res["BLOCK_SIZE"] = len(block)
-        res["REQUIRED_BLOCK_SIZE"] = REQUIRED_BLOCK_SIZE
-        res["RATE_GATE"] = "PASS"
-        res["TRACK_A_OVERLAP"] = "IMPOSSIBLE_BY_SHARED_CONCURRENCY"
+            # ---- PREFLIGHT, reported before anything is captured ----
+            res["DISTINCT_EVENTS"] = len({m["native_event_id"] for m in block})
+            res["SPORTS"] = sorted({m["sport"] for m in block if m.get("sport")})
+            res["PRICE_BANDS"] = sorted({m.get("PRICE_BAND") for m in block
+                                         if m.get("PRICE_BAND")})
+            res["SPREAD_REGIMES"] = sorted({spread_bucket(m.get("SPREAD_ABSOLUTE"),
+                                                          m.get("tick_size"))
+                                            for m in block} - {None})
+            res["LEAGUES"] = sorted({str(m["league"]) for m in block if m.get("league")})
+            bands = [m.get("PRICE_BAND") for m in block]
+            res["NEAR_MID_COUNT"] = bands.count("NEAR_MID")
+            res["MODERATE_COUNT"] = bands.count("MODERATE")
+            res["TAIL_COUNT"] = bands.count("TAIL")
+            res["SELECTED_MARKETS"] = len(block)
+            res["BAND_TARGETS_MET"] = {
+                "NEAR_MID>=2": res["NEAR_MID_COUNT"] >= 2,
+                "MODERATE>=2": res["MODERATE_COUNT"] >= 2,
+                "TAIL<=2": res["TAIL_COUNT"] <= 2}
+            # An unmet target is REPORTED. It is never met by relaxing a gate.
+            res["BAND_TARGET_SHORTFALL_REASON"] = (
+                "BOARD_DID_NOT_SUPPLY_ELIGIBLE_MARKETS_IN_BAND"
+                if not all(res["BAND_TARGETS_MET"].values()) else None)
+            res["QUEUE_REGIMES"] = "NOT_IDENTIFIED_AT_SELECTION (needs book reads)"
+            # The rule DID change between blocks: BLOCK_3 ran BL-SELECT-1, this runs
+            # BL-SELECT-2. What is unchanged is the rule WITHIN this block -- frozen
+            # before the first capture read and never touched afterwards. Spelling it
+            # the long way so nobody reads "UNCHANGED" as "same as BLOCK_3".
+            res["SELECTION_RULE_UNCHANGED_WITHIN_BLOCK"] = "YES"
+            res["SELECTION_RULE_SUPERSEDES"] = "BL-SELECT-1 (RETIRED_FOR_TRACK_B_L)"
+            res["SHARED_CONCURRENCY_GROUP"] = "YES"
+            res["BLOCK_FROZEN"] = "YES"
+            res["BLOCK_SIZE"] = len(block)
+            res["REQUIRED_BLOCK_SIZE"] = REQUIRED_BLOCK_SIZE
+            res["RATE_GATE"] = "PASS"
+            res["TRACK_A_OVERLAP"] = "IMPOSSIBLE_BY_SHARED_CONCURRENCY"
+            say()
+            say("=== PREFLIGHT ===")
+            res["SELECTION_RULE_VERSION"] = SELECTION_RULE_VERSION
+            for k in ("QUERY_FILTERS", "CURRENT_EVENTS", "EVENTS_DISCOVERED",
+                      "EVENTS_WITH_CLOSED_TRUE", "MARKET_ROWS", "OPEN_MARKET_ROWS",
+                      "RESOLVED_MARKET_ROWS", "MARKETS_WITH_BID_AND_ASK",
+                      "PAGINATION_ADVANCES", "OVERLAP_CHECK",
+                      "DISCOVERY_LIST_EXHAUSTED",
+                      "STRUCTURALLY_ELIGIBLE_MARKETS", "SHORTLIST", "BOOKS_PROBED",
+                      "RECENT_TRADE_DISTRIBUTION", "NOTIONAL_DISTRIBUTION",
+                      "SHARES_DISTRIBUTION", "OPEN_INTEREST_DISTRIBUTION",
+                      "ACTIVITY_ELIGIBLE", "ECONOMICALLY_ELIGIBLE",
+                      "FINAL_CANDIDATES", "SELECTED_MARKETS", "DISTINCT_EVENTS",
+                      "NEAR_MID_COUNT", "MODERATE_COUNT", "TAIL_COUNT",
+                      "BAND_TARGETS_MET", "BAND_TARGET_SHORTFALL_REASON",
+                      "PRIMARY_TAG_OBJECT_COUNT", "PRIMARY_TAG_STRING_COUNT",
+                      "PRIMARY_TAG_NULL_COUNT", "PRIMARY_TAG_UNKNOWN_COUNT",
+                      "SPORTS", "LEAGUES", "PRICE_BANDS", "SPREAD_REGIMES",
+                      "QUEUE_REGIMES", "SELECTION_RULE_VERSION",
+                      "SELECTION_RULE_SUPERSEDES",
+                      "SELECTION_RULE_UNCHANGED_WITHIN_BLOCK",
+                      "REQUIRED_BLOCK_SIZE", "BLOCK_SIZE", "BLOCK_FROZEN",
+                      "RATE_GATE", "TRACK_A_OVERLAP", "SHARED_CONCURRENCY_GROUP"):
+                say("%-28s %s" % (k, res.get(k)))
+            say()
+            if scope_fail:
+                say("BLOCK_STATUS = %s -- the venue's own payload contradicts the "
+                    "query scope; no capture, exit non-zero." % scope_fail)
+                res["BLOCK_STATUS"] = scope_fail
+            elif len(block) < REQUIRED_BLOCK_SIZE:
+                say("BLOCK_STATUS = FAILED_BLOCK_TOO_SMALL "
+                    "(%d < %d) -- no capture, exit non-zero."
+                    % (len(block), REQUIRED_BLOCK_SIZE))
+                res["BLOCK_STATUS"] = "FAILED_BLOCK_TOO_SMALL"
+            else:
+                say("=== CAPTURE (%d cycles x %ds) ===" % (MAX_CYCLES, int(CYCLE_S)))
+                meta["actual_start_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+                with gzip.open(out / "block_log.jsonl.gz", "wt") as fh:
+                    run_block(http, pacer, budget, block, fh, res)
+                meta["actual_end_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+
+    except Exception as exc:                                   # noqa: BLE001
+        res["BLOCK_STATUS"] = "FAILED_RUNNER_EXCEPTION"
+        res["runner_exception"] = "%s: %s" % (type(exc).__name__, exc)
+        res["runner_traceback"] = traceback.format_exc()
         say()
-        say("=== PREFLIGHT ===")
-        res["SELECTION_RULE_VERSION"] = SELECTION_RULE_VERSION
-        for k in ("QUERY_FILTERS", "CURRENT_EVENTS", "EVENTS_DISCOVERED",
-                  "EVENTS_WITH_CLOSED_TRUE", "MARKET_ROWS", "OPEN_MARKET_ROWS",
-                  "RESOLVED_MARKET_ROWS", "MARKETS_WITH_BID_AND_ASK",
-                  "PAGINATION_ADVANCES", "OVERLAP_CHECK",
-                  "DISCOVERY_LIST_EXHAUSTED",
-                  "STRUCTURALLY_ELIGIBLE_MARKETS", "SHORTLIST", "BOOKS_PROBED",
-                  "RECENT_TRADE_DISTRIBUTION", "NOTIONAL_DISTRIBUTION",
-                  "SHARES_DISTRIBUTION", "OPEN_INTEREST_DISTRIBUTION",
-                  "ACTIVITY_ELIGIBLE", "ECONOMICALLY_ELIGIBLE",
-                  "FINAL_CANDIDATES", "SELECTED_MARKETS", "DISTINCT_EVENTS",
-                  "NEAR_MID_COUNT", "MODERATE_COUNT", "TAIL_COUNT",
-                  "BAND_TARGETS_MET", "BAND_TARGET_SHORTFALL_REASON",
-                  "PRIMARY_TAG_OBJECT_COUNT", "PRIMARY_TAG_STRING_COUNT",
-                  "PRIMARY_TAG_NULL_COUNT", "PRIMARY_TAG_UNKNOWN_COUNT",
-                  "SPORTS", "LEAGUES", "PRICE_BANDS", "SPREAD_REGIMES",
-                  "QUEUE_REGIMES", "SELECTION_RULE_VERSION",
-                  "SELECTION_RULE_SUPERSEDES",
-                  "SELECTION_RULE_UNCHANGED_WITHIN_BLOCK",
-                  "REQUIRED_BLOCK_SIZE", "BLOCK_SIZE", "BLOCK_FROZEN",
-                  "RATE_GATE", "TRACK_A_OVERLAP", "SHARED_CONCURRENCY_GROUP"):
-            say("%-28s %s" % (k, res.get(k)))
-        say()
-        if scope_fail:
-            say("BLOCK_STATUS = %s -- the venue's own payload contradicts the "
-                "query scope; no capture, exit non-zero." % scope_fail)
-            res["BLOCK_STATUS"] = scope_fail
-        elif len(block) < REQUIRED_BLOCK_SIZE:
-            say("BLOCK_STATUS = FAILED_BLOCK_TOO_SMALL "
-                "(%d < %d) -- no capture, exit non-zero."
-                % (len(block), REQUIRED_BLOCK_SIZE))
-            res["BLOCK_STATUS"] = "FAILED_BLOCK_TOO_SMALL"
-        else:
-            say("=== CAPTURE (%d cycles x %ds) ===" % (MAX_CYCLES, int(CYCLE_S)))
-            meta["actual_start_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-            with gzip.open(out / "block_log.jsonl.gz", "wt") as fh:
-                run_block(http, pacer, budget, block, fh, res)
-            meta["actual_end_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+        say("=== RUNNER EXCEPTION -- SEALING WHAT EXISTS, THEN FAILING ===")
+        say(res["runner_traceback"])
 
     res.setdefault("BLOCK_STATUS", "OK" if res.get("cycles") else "FAILED_NO_CAPTURE")
     res["venue_requests"] = budget.spent
@@ -1068,6 +1087,9 @@ def main(argv=None):
              "TOUCH_IS_NOT_FILL. MAKER_FILL_PROBABILITY = NOT_IDENTIFIED.",
              "PAIR_COMPLETION_PROBABILITY = NOT_IDENTIFIED.",
              "NOT POOLED WITH TRACK A. mirror_live = false."]
+    if res.get("runner_traceback"):
+        lines += ["", "RUNNER_EXCEPTION = %s" % res.get("runner_exception"),
+                  "RUNNER_TRACEBACK:", res["runner_traceback"]]
     for l in lines:
         say(l)
     B.seal(out, lines)

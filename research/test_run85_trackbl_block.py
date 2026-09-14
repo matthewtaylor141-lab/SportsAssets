@@ -252,7 +252,7 @@ def test_the_distribution_is_reported_before_any_threshold_exists():
     """Section order is load-bearing: distributions are computed and printed,
     then the gate reads them."""
     i_dist = SRC.index("CANDIDATE DISTRIBUTIONS (before any threshold")
-    i_gate = SRC.index("\n        activity_gate(probed, dist)")
+    i_gate = SRC.index("\n            activity_gate(probed, dist)")
     assert i_dist < i_gate
     d = L.pctiles([1.0, 2.0, 3.0, 4.0, 5.0, None])
     assert d["n"] == 5 and d["n_missing"] == 1 and d["median"] == 3.0
@@ -370,6 +370,65 @@ def test_the_shortlist_is_prospective_and_never_ranks_on_spread_alone():
         "imminent first, unknown last -- NOT tightest spread first"
     assert L.MAX_BOOK_PROBES > 0
     assert sum(L.SHORTLIST_PER_BAND.values()) <= L.MAX_BOOK_PROBES
+
+
+# ============ BLOCK_4 ATTEMPT 1: THE SEALING REPAIR ========================
+def test_the_frozen_cohort_serializes_with_decimals_in_it():
+    """THE BLOCK_4 ATTEMPT 1 CRASH, pinned. BL-SELECT-2 puts Decimals in a
+    selected market; the cohort dump had no default=str and raised
+    TypeError: Object of type Decimal is not JSON serializable, before any
+    seal. Every other dump in the runner already passed default=str."""
+    block = [{"market_slug": "m", "native_event_id": "1",
+              "BEST_BID": D("0.5450"), "BEST_ASK": D("0.5550"),
+              "SPREAD_ABSOLUTE": D("0.0100"), "BEST_BID_SIZE": D("12569.19"),
+              "REBATE_LONG": D("0.31"), "REBATE_SHORT": D("0.31"),
+              "DISPLAYED_PAIR_BUDGET": D("1.62"),
+              "SECONDS_SINCE_LAST_TRADE": 128.65}]
+    blob = json.dumps(block, indent=1, sort_keys=True, default=str).encode()
+    assert b"0.5450" in blob and b"1.62" in blob
+    # and the runner's own line must carry it
+    i = SRC.index("blob = json.dumps(block")
+    assert "default=str" in SRC[i:i + 120]
+    # Every dump that WRITES EVIDENCE must carry a default. The one dump that
+    # legitimately does not is the query-filters line, whose value is a dict of
+    # known strings -- narrowing to the evidence writers rather than banning a
+    # pattern that has a correct exception.
+    for writer in ('blob = json.dumps(block, indent=1, sort_keys=True, default=str)',
+                   'json.dumps(r, default=str)',
+                   'json.dumps(res, indent=1, default=str)',
+                   'json.dumps(meta, indent=1)'):
+        assert writer in SRC, writer
+
+
+def test_an_exception_still_reaches_the_seal_and_still_fails():
+    """BLOCK_4 attempt 1 lost every discovery page, body sample and probe
+    receipt because an UNHANDLED exception skipped the sealing block. A
+    controlled non-zero exit seals; an exception must too."""
+    i_try = SRC.index("\n    try:\n        with httpx.Client(")
+    i_except = SRC.index("\n    except Exception as exc:")
+    i_seal = SRC.index("discovery_pages.jsonl.gz")
+    i_probe = SRC.index("book_probe_receipts.jsonl.gz")
+    i_checksum = SRC.index("B.seal(out, lines)")
+    i_exit = SRC.index('res["BLOCK_STATUS"] != "OK"')
+    # the venue contact is inside the try, and the seal is after the handler
+    assert i_try < i_except < i_seal, "sealing must follow the handler"
+    assert i_except < i_probe < i_exit
+    assert i_seal < i_checksum < i_exit, "checksums before the exit decision"
+    assert "FAILED_RUNNER_EXCEPTION" in SRC
+    assert "runner_traceback" in SRC and "traceback.format_exc()" in SRC
+    # the traceback is sealed into the report, not left only in the log
+    assert 'lines += ["", "RUNNER_EXCEPTION' in SRC
+
+
+def test_a_runner_exception_is_never_reported_as_success():
+    """FAILED_RUNNER_EXCEPTION must flow to a non-zero exit and to
+    ECONOMICALLY_USABLE = NO, by the same rule every other failure uses."""
+    i_usable = SRC.index('res["ECONOMICALLY_USABLE"] = "YES" if res["BLOCK_STATUS"] == "OK"')
+    i_obs = SRC.index('res["SCIENTIFIC_OBSERVATIONS"] = res.get("planned_reads", 0)')
+    assert i_usable > 0 and i_obs > 0
+    # status is set by the handler before those lines run
+    assert SRC.index('res["BLOCK_STATUS"] = "FAILED_RUNNER_EXCEPTION"') < i_obs
+    assert "EXIT NON-ZERO" in SRC
 
 
 def test_the_probe_receipts_are_sealed_like_the_discovery_bodies():
