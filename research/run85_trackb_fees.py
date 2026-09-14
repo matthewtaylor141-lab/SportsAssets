@@ -25,14 +25,29 @@ with the TAKER coefficient and is NOT the maker coefficient — the earlier
 refusal to read maker economics out of that single number was correct.
 
 --------------------------------------------------------------------------
-THE SYMMETRY THAT MATTERS
+THE SYMMETRY — WHAT IT BUYS, AND WHAT IT DOES NOT
 --------------------------------------------------------------------------
-p * (1 - p) is symmetric about p = 1/2, so a leg priced p and a leg priced
-(1 - p) earn exactly the same rebate. Under Finding B-1 the short leg of a
-maker/maker pair IS priced at one minus the long leg, so **both legs of a pair
-earn the same rebate to within the spread**. The pair rebate is therefore very
-close to twice the single-leg rebate, and no separate short-side fee model is
-needed.
+RETRACTED: an earlier version of this module claimed that "both legs of a
+maker/maker pair earn the same rebate". That is FALSE whenever a != b, and it
+invited a 2 * rebate(long) shortcut which is not used anywhere here.
+
+The passive maker/maker construction on a binary book with bestBid b and
+bestAsk a is:
+
+    LONG_MAKER_PRICE  = b
+    SHORT_MAKER_PRICE = 1 - a          <-- NOT 1 - b
+    PAIR_COST         = b + (1 - a) = 1 - spread
+
+The B-1 identity `shortQuote = 1 - bestBid` describes the displayed
+opposite-side TAKER quote. It must never be substituted for the passive
+short-side maker price, which is 1 - a.
+
+What the symmetry of p*(1-p) genuinely buys is narrower and worth stating
+exactly: rebate(a) == rebate(1 - a) identically, so the short leg may be
+evaluated at either spelling of its price without changing the number. It does
+NOT make the two LEGS equal, because the legs sit at b and 1 - a, which differ
+by the spread. Both legs are therefore always computed independently below,
+and each is rounded on its own.
 
 --------------------------------------------------------------------------
 WHY THE ROUNDING IS NOT A DETAIL
@@ -111,30 +126,47 @@ def min_contracts_for_a_cent(price) -> int:
 
 
 def maker_pair(contracts, bid, ask):
-    """A maker/maker pair on one token: rest a buy at `bid`, a sell at `ask`.
+    """A passive maker/maker pair on one binary book.
+
+        LONG_MAKER_PRICE  = bid
+        SHORT_MAKER_PRICE = 1 - ask          (NOT 1 - bid)
+        PAIR_COST         = bid + (1 - ask) = 1 - spread
 
     Under Finding B-1 this is the only construction that can earn the spread;
     crossing both sides costs 1 + spread and loses it.
 
-    Returns the displayed capture, both leg rebates exact and rounded, and the
-    total budget available to absorb adverse selection and residual cost.
+    The two legs sit at DIFFERENT prices, so their rebates are computed
+    independently and each is rounded on its own. No 2 * rebate(long)
+    shortcut is used, and the two realized rebates may differ both in exact
+    value and, through per-fill cent rounding, in realized dollars.
+
     Nothing here is profit: it is the budget, before any fill is assumed.
     """
     b, a = D(str(bid)), D(str(ask))
     spread = a - b
+    long_price = b
+    short_price = D(1) - a
+    pair_cost = long_price + short_price
     displayed = spread * D(str(contracts))
-    ex_a, rd_a = maker_rebate(contracts, b)        # the resting buy
-    ex_b, rd_b = maker_rebate(contracts, a)        # the resting sell
+    ex_long, rd_long = maker_rebate(contracts, long_price)
+    ex_short, rd_short = maker_rebate(contracts, short_price)
     return {
         "contracts": D(str(contracts)),
         "bid": b, "ask": a, "spread": spread,
+        "long_maker_price": long_price,
+        "short_maker_price": short_price,
+        "pair_cost": pair_cost,
+        "displayed_spread_capture": displayed,
         "displayed_pair_edge": displayed,
-        "exact_unrounded_maker_rebate": ex_a + ex_b,
-        "actual_rounded_maker_rebate": rd_a + rd_b,
-        "rebate_leg_a_exact": ex_a, "rebate_leg_a_rounded": rd_a,
-        "rebate_leg_b_exact": ex_b, "rebate_leg_b_rounded": rd_b,
-        "budget_exact": displayed + ex_a + ex_b,
-        "budget_rounded": displayed + rd_a + rd_b,
+        "long_rebate_exact": ex_long, "long_rebate_rounded": rd_long,
+        "short_rebate_exact": ex_short, "short_rebate_rounded": rd_short,
+        "legs_earn_equal_rebate": ex_long == ex_short,
+        "exact_unrounded_maker_rebate": ex_long + ex_short,
+        "actual_rounded_maker_rebate": rd_long + rd_short,
+        "total_pre_adverse_selection_budget_exact": displayed + ex_long + ex_short,
+        "total_pre_adverse_selection_budget_rounded": displayed + rd_long + rd_short,
+        "budget_exact": displayed + ex_long + ex_short,
+        "budget_rounded": displayed + rd_long + rd_short,
         "adverse_selection": "NOT_IDENTIFIED",
         "incomplete_pair_cost": "NOT_IDENTIFIED",
         "maker_fill_probability": "NOT_IDENTIFIED",

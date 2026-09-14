@@ -57,13 +57,69 @@ def test_the_sealed_venue_field_is_the_taker_coefficient():
 
 
 # ------------------------------------------------------------- symmetry
-def test_a_leg_at_p_and_a_leg_at_one_minus_p_earn_the_same_rebate():
-    """p(1-p) is symmetric, and under B-1 the short leg IS priced 1 - the long
-    leg, so no separate short-side fee model is needed."""
+def test_the_symmetry_only_says_a_price_and_its_complement_agree():
+    """p(1-p) is symmetric, so the SHORT LEG may be spelled either 1-a or a
+    without changing its rebate. That is all the symmetry buys."""
     for p in ("0.10", "0.25", "0.37", "0.605"):
         lo = F.maker_rebate(1000, p)[0]
         hi = F.maker_rebate(1000, str(1 - D(p)))[0]
         assert lo == hi, p
+
+
+# ------------------------------------- THE RETRACTED SYMMETRY SHORTCUT
+def test_the_two_legs_of_a_pair_do_not_earn_the_same_rebate():
+    """THE RETRACTION, pinned. The legs sit at b and 1-a, which differ by the
+    spread, so their rebates differ. An earlier version of this module claimed
+    they were equal and invited a 2*rebate(long) shortcut."""
+    r = F.maker_pair(1000, "0.20", "0.30")
+    assert r["long_maker_price"] == D("0.20")
+    assert r["short_maker_price"] == D("0.70")          # 1 - a, NOT 1 - b
+    assert r["long_rebate_exact"] != r["short_rebate_exact"]
+    assert r["legs_earn_equal_rebate"] is False
+
+
+def test_the_short_maker_price_is_one_minus_the_ask_not_one_minus_the_bid():
+    """B-1's shortQuote = 1 - bestBid is the displayed TAKER quote. It must
+    never stand in for the passive short-side maker price."""
+    r = F.maker_pair(1000, "0.20", "0.30")
+    assert r["short_maker_price"] == D(1) - r["ask"]
+    assert r["short_maker_price"] != D(1) - r["bid"]
+
+
+def test_pair_cost_is_one_minus_the_spread():
+    for bid, ask in (("0.20", "0.30"), ("0.60", "0.605"), ("0.005", "0.010")):
+        r = F.maker_pair(1000, bid, ask)
+        assert r["pair_cost"] == D(1) - (D(ask) - D(bid))
+        assert r["pair_cost"] == r["long_maker_price"] + r["short_maker_price"]
+
+
+def test_the_pair_rebate_is_never_twice_the_long_leg():
+    """The shortcut this module retracted, pinned as an inequality."""
+    r = F.maker_pair(1000, "0.60", "0.605")
+    assert r["exact_unrounded_maker_rebate"] != 2 * r["long_rebate_exact"]
+
+
+def test_per_fill_rounding_can_make_the_two_realized_rebates_differ():
+    """REQUIRED REGRESSION. At 2 contracts across 0.20/0.30 the long leg earns
+    $0.004 and rounds to $0.00 while the short leg earns $0.00525 and rounds to
+    $0.01 -- the same pair, two different realized dollars."""
+    r = F.maker_pair(2, "0.20", "0.30")
+    assert r["long_rebate_exact"] == D("0.004")
+    assert r["short_rebate_exact"] == D("0.00525")
+    assert r["long_rebate_rounded"] == D("0.00")
+    assert r["short_rebate_rounded"] == D("0.01")
+    assert r["long_rebate_rounded"] != r["short_rebate_rounded"]
+    assert r["actual_rounded_maker_rebate"] == D("0.01")
+
+
+def test_the_split_is_always_reported_not_just_the_total():
+    r = F.maker_pair(1000, "0.20", "0.30")
+    for k in ("long_rebate_exact", "long_rebate_rounded",
+              "short_rebate_exact", "short_rebate_rounded",
+              "displayed_spread_capture", "exact_unrounded_maker_rebate",
+              "actual_rounded_maker_rebate",
+              "total_pre_adverse_selection_budget_exact"):
+        assert k in r, k
 
 
 def test_the_rebate_peaks_at_the_midpoint():
