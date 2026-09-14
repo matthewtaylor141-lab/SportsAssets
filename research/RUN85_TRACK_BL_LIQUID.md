@@ -1027,6 +1027,189 @@ remains an upper-bound proxy, never a fill.
 
 ---
 
+---
+
+## BLOCK_4 ATTEMPT 1 — FAILED. PERMANENT RECORD.
+
+```
+B_L_BLOCK_4_ATTEMPT_1_STATUS = FAILED_SEALING_DEFECT
+SCIENTIFIC_OBSERVATIONS      = 0
+ECONOMICALLY_USABLE          = NO
+CAPTURE_RAN                  = NO
+BYTES_SEALED                 = NONE
+BYTES_COMMITTED              = NONE
+ARTIFACT                     = EMPTY (upload-artifact found no files)
+```
+
+Run `34880452606`, job `104098166408`, commit `06bbfa1`,
+18:23:06Z → 18:24:43Z.
+
+**The numbers below exist ONLY in the job log.** Nothing was sealed, so they are
+transcribed here to preserve them; Actions logs expire and this would otherwise
+be lost. They are log evidence, not sealed evidence, and are labelled as such
+wherever they are used.
+
+### The defect — mine, one line
+
+```
+line 941   blob = json.dumps(block, indent=1, sort_keys=True).encode()
+           TypeError: Object of type Decimal is not JSON serializable
+```
+
+Every other `json.dumps` in the runner passes `default=str`; the cohort blob
+does not. Under BL-SELECT-1 each selected market carried only strings, so it
+never mattered. BL-SELECT-2 adds Decimal fields — `BEST_BID`,
+`SPREAD_ABSOLUTE`, `REBATE_LONG/SHORT`, sizes — and the first attempt to freeze
+the cohort raised.
+
+**The second, worse half:** the crash is an *unhandled exception*, so it exited
+before the sealing block that writes `discovery_pages`,
+`discovery_body_samples`, `book_probe_receipts` and `block_summary`. The
+`if: always()` commit step then had an empty directory to commit. This is the
+same lesson as BLOCK_2 — evidence must survive the failure — in a new place: a
+controlled non-zero exit seals, an exception does not.
+
+### Why the requested audit cannot be performed
+
+```
+CHECKSUMS                       NOT_PERFORMABLE -- no sealed files
+GLOBAL_MIN_INTER_REQUEST_GAP    NOT_IDENTIFIED
+ANY_GAP_LT_2_5S                 NOT_IDENTIFIED
+TRACK_A_OVERLAP_REQUEST_COUNT   0 by construction (shared group), NOT MEASURED
+HTTP_429                        0 observed in the log
+```
+
+The per-request `local_request_wall_utc` stamps live in the probe receipts,
+which were never written. Log-line timestamps are **not** a substitute: they are
+printed after each response, so their spacing is request spacing plus latency
+jitter, and several adjacent log lines are 2.2–2.5 s apart for that reason
+alone. **The 0.4000 rps design claim is therefore NOT CONFIRMED by BLOCK_4** and
+must not be treated as verified until a run seals its receipts.
+
+### Timing, from the log
+
+```
+DISCOVERY_DURATION_S     37.6   (16 pages)
+BOOK_PROBE_DURATION_S    37.4   (15 probes)
+CAPTURE_DURATION_S       0      -- never ran
+TOTAL_JOB_DURATION_S     97
+```
+
+The charter's cap, quoted exactly and not redefined after the fact:
+
+> A block is capped at 20 minutes so that a Track A segment falling due
+> mid-block waits minutes, not hours. Four 300 s cycles fit.
+
+The cap governs the block — the life of the hypothetical orders — and no block
+ran, so the cap was not exercised.
+
+### Discovery limitation
+
+```
+DISCOVERY_LIST_EXHAUSTED   NO
+EVENTS_SCANNED             1600
+DISCOVERY_PAGE_CAP         16
+CURRENT_UNIVERSE_CENSUS    NO
+SELECTION_FRAME            BOUNDED_PREFIX
+EVENTS_WITH_CLOSED_TRUE    0
+MARKETS_TOTAL              14518   (14416 open, 102 resolved, 7739 quoted)
+```
+
+### What BL-SELECT-2 actually did — the signal
+
+```
+STRUCTURALLY_ELIGIBLE_MARKETS   339
+SHORTLIST                       15      (NEAR_MID 3 · MODERATE 10 · TAIL 2)
+BOOKS_PROBED                    15
+```
+
+The shortlist was capped by **the board, not the probe budget** — 15 distinct
+events were available after one-market-per-event dedup, so only 15 of the 64
+probe slots were spent.
+
+Distributions, before any threshold:
+
+```
+                          p10          p25          median       p75          p90
+SECONDS_SINCE_LAST_TRADE  128.7        287.0        704.0        1183.3       3358.8
+NOTIONAL_TRADED           83,664       152,134      217,254      413,786      1,895,983
+SHARES_TRADED             2,488.6      3,048.0      6,172.4      8,131.8      26,110.0
+OPEN_INTEREST             1,526.3      3,982.8      6,783.8      14,798.9     29,478.0
+```
+
+**Against BLOCK_3, where two cohort markets had last traded 55 hours earlier and
+three had 0.28 shares or no volume at all, the median BLOCK_4 probe had traded
+11.7 minutes ago on $217k of notional.** That is the difference the rule change
+was built to make, and it is visible in the distribution rather than argued for.
+
+Gates, reported independently:
+
+```
+ACTIVITY_ELIGIBLE       4    rejects  NOTIONAL_BELOW_PROBED_MEDIAN 7
+                                      SLOWER_THAN_PROBED_MEDIAN    6
+                                      STALE_GT_3600s               1
+ECONOMICALLY_ELIGIBLE   15   rejects  {}
+FINAL_CANDIDATES        4
+```
+
+Every probed market passed the economic gate; activity alone did the cutting,
+which is what the median-based rule is supposed to do.
+
+### The block it selected
+
+```
+SELECTED_MARKETS   4     (>= REQUIRED_BLOCK_SIZE 4, below the target of 6)
+NEAR_MID_COUNT     1     TARGET >= 2   NOT MET
+MODERATE_COUNT     3     TARGET >= 2   MET
+TAIL_COUNT         0     CEILING <= 2  MET
+
+aec-ufc-josvan-alepan-2026-09-19  ev 87934  NEAR_MID mid 0.5450 1 tick
+   since_last_trade 128.7 s · shares 38,184 · notional $2,080,297 · OI 36,229
+   bid size 12,569.19 · ask size 4,427.67 · budget $1.62 / 100
+aec-ufc-armtsa-mauruf-2026-09-19  ev 87935  MODERATE mid 0.7250 1 tick
+   since_last_trade 287.0 s · shares 26,110 · notional $1,895,983 · OI 29,478
+   bid size 15,114.53 · ask size 310.27 · budget $1.50 / 100
+aec-ufc-renmoi-briort-2026-09-19  ev 87938  MODERATE mid 0.6550 1 tick
+   since_last_trade 351.6 s · shares 6,401 · notional $413,786 · OI 6,784
+   bid size 5,314.43 · ask size 1,545.48 · budget $1.56 / 100
+aec-ufc-taitui-robdes-2026-09-19  ev 87943  MODERATE mid 0.1750 1 tick
+   since_last_trade 704.0 s · shares 15,480 · notional $275,685 · OI 16,204
+   bid size 7,056.49 · ask size 2,004.39 · budget $1.36 / 100
+```
+
+### Two things wrong with that cohort, flagged not fixed
+
+1. **All four are fights on the same UFC card, dated 2026-09-19.** They are four
+   distinct venue event ids, so the one-market-per-event rule was satisfied —
+   but they are not four independent underlying contests in any economic sense.
+   This is close to the "six contracts representing effectively the same
+   underlying event" the charter warns against, and a result from this cohort
+   would be one card's behaviour, not a cross-sport finding.
+2. **`sport` and `league` are `NOT_IDENTIFIED` on all four** — UFC events carry
+   a null `primaryTag`. The normalizer handled it correctly (carried, not
+   crashed), but sport diversity in this block is nil.
+
+Neither is repaired here. Both are recorded.
+
+### gameStartTime semantics — NOT_IDENTIFIED for BLOCK_4
+
+All four slugs are dated 2026-09-19 against a 2026-09-14 run, so the contests
+are ~5 days out and were nonetheless trading minutes before selection. Per the
+owner's instruction this is interpretation only and no market is excluded
+retrospectively. The per-market `GAME_START_TIME` values live in the probe
+receipts, which were not sealed, so
+`DOES_GAME_START_TIME_REPRESENT_UNDERLYING_CONTEST_START = NOT_IDENTIFIED`
+for every selected market until a run seals them.
+
+### Touch analysis
+
+`NOT_OBSERVABLE_FROM_BLOCK_4_ATTEMPT_1`. No capture ran, so there is no
+`FIRST_LEG_TOUCH`, `EITHER_LEG_TOUCH`, `BOTH_LEGS_TOUCH` or
+`COMPLEMENT_AFTER_FIRST` at any horizon. The comparison against BLOCK_3 that
+this block exists to make has **not** been made.
+
+---
+
 ### What this does not authorize
 
 No live capital. No order placement. No `mirror_live` change. A tiny live
