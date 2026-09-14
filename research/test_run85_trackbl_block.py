@@ -172,6 +172,77 @@ def test_the_capability_boundary_holds():
     assert L.SPACING_S >= 2.5
 
 
+
+
+
+# ============ REPAIR SCOPE: diagnostics, current-end walk, hard failure ======
+def test_page_record_retains_everything_needed_to_diagnose_a_zero_result():
+    """BLOCK_1 could not be diagnosed because the discovery bodies were
+    stripped. These fields must survive, or the same blindness returns."""
+    row = {"http_status": 200, "error": None, "response_bytes": 10,
+           "response_sha256": "x", "body": {"events": []}}
+    rec = L.page_record(300, row, [{"id": 7}, {"id": 9}], b"{}")
+    for k in ("path", "params", "offset", "http_status", "response_sha256",
+              "body_sha256_recomputed", "event_count", "first_event_id",
+              "last_event_id", "event_ids", "top_level_keys"):
+        assert k in rec, k
+    assert rec["offset"] == 300
+    assert rec["first_event_id"] == "7" and rec["last_event_id"] == "9"
+    assert rec["event_count"] == 2
+
+
+def test_body_samples_are_bounded_but_keep_head_and_tail():
+    evs = [{"id": i} for i in range(500)]
+    s = L.sample_body(evs)
+    assert s["total"] == 500
+    assert len(s["events_head"]) == L.BODY_SAMPLE_EVENTS
+    assert len(s["events_tail"]) == L.BODY_SAMPLE_EVENTS
+    assert s["events_head"][0]["id"] == 0
+    assert s["events_tail"][-1]["id"] == 499
+
+
+def test_discovery_never_selects_from_offset_zero_alone():
+    """THE BLOCK_1 BUG, pinned. /v1/events is id-ascending, so offset 0 is the
+    OLDEST events. The frame must be built from the current end."""
+    assert "END_PROBE_STEPS" in SRC and "FRAME_PAGES_BACK" in SRC
+    assert "CURRENT_END_LOCATED" in SRC
+    assert "PAGINATION_DIRECTION" in SRC
+    assert L.END_PROBE_STEPS[0] > 0
+    assert L.FRAME_PAGES_BACK > 0
+
+
+def test_the_disproved_pagination_parameters_are_never_reintroduced():
+    """page= and skip= were shown in Phase 2E to return the identical first
+    page with HTTP 200. They must not come back."""
+    assert '"page"' not in SRC and "'page'" not in SRC
+    assert '"skip"' not in SRC and "'skip'" not in SRC
+
+
+def test_an_undersized_block_is_a_hard_failure_not_a_success():
+    assert "FAILED_BLOCK_TOO_SMALL" in SRC
+    assert "REQUIRED_BLOCK_SIZE" in SRC
+    assert "return 2" in SRC                      # non-zero exit
+    assert "EXIT NON-ZERO" in SRC
+
+
+def test_diagnostics_are_sealed_even_when_the_block_fails():
+    """The evidence that explains a failure must survive the failure."""
+    i_pages = SRC.index("discovery_pages.jsonl.gz")
+    i_status = SRC.index('res["BLOCK_STATUS"] != "OK"')
+    assert i_pages < i_status, "diagnostics must be written before the exit path"
+    assert "discovery_body_samples.jsonl.gz" in SRC
+
+
+def test_a_failed_block_is_marked_economically_unusable():
+    assert "ECONOMICALLY_USABLE" in SRC
+    assert "SCIENTIFIC_OBSERVATIONS" in SRC
+
+
+def test_the_required_block_size_is_not_quietly_loosened():
+    assert L.REQUIRED_BLOCK_SIZE >= 4
+    assert L.REQUIRED_BLOCK_SIZE <= L.N_LANES
+
+
 if __name__ == "__main__":
     fns = [(n, f) for n, f in sorted(vars().items())
            if n.startswith("test_") and callable(f)]

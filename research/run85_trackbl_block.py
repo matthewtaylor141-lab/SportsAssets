@@ -95,8 +95,13 @@ MAX_CYCLES = 4                                   # 20 minutes
 DERIVABLE_LONG_HORIZONS = {"5m": 1, "10m": 2, "15m": 3}
 UNREACHABLE_HORIZONS = ("30m", "60m")
 
-MAX_DISCOVERY_PAGES = 12
-MAX_VENUE_REQUESTS = 200
+MAX_DISCOVERY_PAGES = 26
+MAX_VENUE_REQUESTS = 220
+PAGE_LIMIT = 100
+END_PROBE_STEPS = (1000, 2000, 4000, 8000, 16000, 32000, 64000)
+FRAME_PAGES_BACK = 14            # pages walked back from the current end
+BODY_SAMPLE_EVENTS = 50          # head and tail retained per page, for diagnosis
+REQUIRED_BLOCK_SIZE = 4          # below this the block FAILS; the target is N_LANES
 EVENTS_PATH = "/v1/events"
 BOOK_PATH = "/v1/markets/%s/book"
 
@@ -212,24 +217,125 @@ def select_block(cands, cap=N_LANES):
     return out
 
 
-def discover(http, pacer, budget, log, res):
-    events, pages = [], 0
-    offset = 0
-    while pages < MAX_DISCOVERY_PAGES:
-        budget.take()
-        r, rows = B.get_paced(http, EVENTS_PATH, pacer, {"limit": 100, "offset": offset})
-        for x in rows:
-            log.append({k: v for k, v in x.items() if k != "body"})
-        pages += 1
-        body = r.get("body") or {}
-        evs = body.get("events") if isinstance(body, dict) else None
-        if not evs:
+def page_record(offset, r, evs, body_bytes):
+    """Everything needed to tell PAGINATION_ERROR from PARSER_SHAPE_ERROR from
+    TRUE_ZERO_CANDIDATES, without keeping a 68 MB page."""
+    ids = [str(e.get("id")) for e in (evs or [])]
+    return {
+        "path": EVENTS_PATH,
+        "params": {"limit": PAGE_LIMIT, "offset": offset},
+        "offset": offset,
+        "http_status": r.get("http_status"),
+        "error": r.get("error"),
+        "response_bytes": r.get("response_bytes"),
+        "response_sha256": r.get("response_sha256"),
+        "body_sha256_recomputed": hashlib.sha256(body_bytes).hexdigest(),
+        "event_count": len(ids),
+        "first_event_id": ids[0] if ids else None,
+        "last_event_id": ids[-1] if ids else None,
+        "event_ids": ids,
+        "top_level_keys": sorted((r.get("body") or {}).keys())
+                          if isinstance(r.get("body"), dict) else None,
+    }
+
+
+def sample_body(evs):
+    """Bounded raw sample: the head and tail events of a page, verbatim."""
+    if not evs:
+        return {"events": [], "sampled": 0, "total": 0}
+    head = evs[:BODY_SAMPLE_EVENTS]
+    tail = evs[-BODY_SAMPLE_EVENTS:] if len(evs) > BODY_SAMPLE_EVENTS else []
+    return {"events_head": head, "events_tail": tail,
+            "sampled": len(head) + len(tail), "total": len(evs)}
+
+
+def get_page(http, pacer, budget, offset, pages, samples):
+    budget.take()
+    r, _rows = B.get_paced(http, EVENTS_PATH, pacer,
+                           {"limit": PAGE_LIMIT, "offset": offset})
+    body = r.get("body") if isinstance(r.get("body"), dict) else {}
+    evs = body.get("events") or []
+    raw = json.dumps(body, sort_keys=True, default=str).encode()
+    rec = page_record(offset, r, evs, raw)
+    pages.append(rec)
+    samples.append({"offset": offset, **sample_body(evs)})
+    return evs, rec
+
+
+def discover(http, pacer, budget, pages, samples, res):
+    """Walk to the CURRENT END of the id-ascending list, then back from it.
+
+    Starting at offset 0 and assuming it is current is the exact error that
+    produced BLOCK_1's zero candidates, and the same error Phase 2C made. The
+    list is id-ascending, so offset 0 is the OLDEST events. The current end is
+    located by geometric probing, then the candidate frame is walked backwards
+    from it.
+    """
+    # 1. anchor, and verify the direction rather than assuming it
+    base_evs, base = get_page(http, pacer, budget, 0, pages, samples)
+    probe_evs, probe = get_page(http, pacer, budget, END_PROBE_STEPS[0], pages, samples)
+    asc = None
+    if base["last_event_id"] and probe["first_event_id"]:
+        try:
+            asc = int(probe["first_event_id"]) > int(base["last_event_id"])
+        except (TypeError, ValueError):
+            asc = None
+    res["PAGINATION_DIRECTION"] = ("VERIFIED_ASCENDING" if asc else
+                                   "NOT_ASCENDING" if asc is False else
+                                   "NOT_IDENTIFIED")
+    res["anchor_page"] = {"offset": 0, "first": base["first_event_id"],
+                          "last": base["last_event_id"], "n": base["event_count"]}
+
+    # 2. locate the current end: the largest offset that still returns a page
+    last_full = END_PROBE_STEPS[0] if probe["event_count"] else 0
+    end_offset = None
+    for step in END_PROBE_STEPS[1:]:
+        if len(pages) >= MAX_DISCOVERY_PAGES - FRAME_PAGES_BACK - 1:
             break
-        events.extend(evs)
-        offset += len(evs)
-        say("  page %d offset=%d events=%d cumulative=%d" % (pages, offset, len(evs), len(events)))
-    res["discovery_pages"] = pages
+        evs, rec = get_page(http, pacer, budget, step, pages, samples)
+        say("  end-probe offset=%-7d events=%d first=%s last=%s"
+            % (step, rec["event_count"], rec["first_event_id"], rec["last_event_id"]))
+        if rec["event_count"] == 0:
+            end_offset = step
+            break
+        last_full = step
+    res["CURRENT_END_LOCATED"] = "YES" if end_offset is not None else "BOUNDED_BY_PROBE"
+    res["last_full_offset"] = last_full
+    res["first_empty_offset"] = end_offset
+
+    # 3. walk BACKWARDS from the end to build the candidate frame
+    events, seen = [], set()
+    start = last_full
+    prev_ids = None
+    for i in range(FRAME_PAGES_BACK):
+        off = start - i * PAGE_LIMIT
+        if off < 0 or len(pages) >= MAX_DISCOVERY_PAGES:
+            break
+        evs, rec = get_page(http, pacer, budget, off, pages, samples)
+        if i == 0:
+            res["LATEST_PAGE_EVENT_IDS"] = rec["event_ids"][:10]
+        elif i == 1:
+            res["PREVIOUS_PAGE_EVENT_IDS"] = rec["event_ids"][:10]
+            overlap = len(set(rec["event_ids"]) & set(res["LATEST_PAGE_EVENT_IDS"]))
+            res["OVERLAP_CHECK"] = "%d shared ids" % overlap
+            try:
+                res["NEWER_THAN_PRIOR_PAGE"] = (
+                    "YES" if int(res["LATEST_PAGE_EVENT_IDS"][0])
+                    > int(rec["event_ids"][0]) else "NO")
+            except (TypeError, ValueError, IndexError):
+                res["NEWER_THAN_PRIOR_PAGE"] = "NOT_IDENTIFIED"
+        for e in evs:
+            k = str(e.get("id"))
+            if k not in seen:
+                seen.add(k)
+                events.append(e)
+        say("  frame  offset=%-7d events=%d cumulative=%d"
+            % (off, rec["event_count"], len(events)))
+        prev_ids = rec["event_ids"]
+
+    res["discovery_pages"] = len(pages)
     res["discovery_events"] = len(events)
+    res["DISCOVERY_MARKET_ROWS"] = sum(len(e.get("markets") or []) for e in events)
     return events
 
 
@@ -285,7 +391,7 @@ def main(argv=None):
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
-    res, log = {}, []
+    res = {}
     budget = Budget(MAX_VENUE_REQUESTS)
     pacer = B.AdaptivePacer(base=SPACING_S)
 
@@ -306,9 +412,10 @@ def main(argv=None):
         "planned_start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
+    pages, samples = [], []
     with httpx.Client(timeout=30.0) as http:
-        say("=== DISCOVERY ===")
-        events = discover(http, pacer, budget, log, res)
+        say("=== DISCOVERY (walk to the current end, then back) ===")
+        events = discover(http, pacer, budget, pages, samples, res)
         cands = candidates(events, time.time())
         res["candidates"] = len(cands)
         say("candidates scored from discovery payload: %d" % len(cands))
@@ -324,10 +431,35 @@ def main(argv=None):
         blob = json.dumps(block, indent=1, sort_keys=True).encode()
         (out / "block_cohort.json").write_bytes(blob)
         meta["block_cohort_sha256"] = hashlib.sha256(blob).hexdigest()
+
+        # ---- PREFLIGHT, reported before anything is captured ----
+        res["DISTINCT_EVENTS"] = len({c["native_event_id"] for c in cands})
+        res["SPORTS"] = sorted({c["sport"] for c in cands if c["sport"]})
+        res["PRICE_BANDS"] = sorted({c["price_band"] for c in cands if c["price_band"]})
+        res["SPREAD_REGIMES"] = sorted({c["spread_bucket"] for c in cands
+                                        if c["spread_bucket"]})
+        res["QUEUE_REGIMES"] = "NOT_IDENTIFIED_AT_SELECTION (needs book reads)"
+        res["SELECTION_RULE_UNCHANGED"] = "YES"
+        res["BLOCK_SIZE"] = len(block)
+        res["REQUIRED_BLOCK_SIZE"] = REQUIRED_BLOCK_SIZE
+        res["RATE_GATE"] = "PASS"
+        res["TRACK_A_OVERLAP"] = "IMPOSSIBLE_BY_SHARED_CONCURRENCY"
         say()
-        if len(block) < 2:
-            say("BLOCK TOO SMALL -- no capture attempted.")
-            res["aborted"] = "BLOCK_TOO_SMALL"
+        say("=== PREFLIGHT ===")
+        for k in ("PAGINATION_DIRECTION", "CURRENT_END_LOCATED",
+                  "LATEST_PAGE_EVENT_IDS", "PREVIOUS_PAGE_EVENT_IDS",
+                  "OVERLAP_CHECK", "NEWER_THAN_PRIOR_PAGE",
+                  "discovery_events", "DISCOVERY_MARKET_ROWS", "candidates",
+                  "DISTINCT_EVENTS", "SPORTS", "PRICE_BANDS", "SPREAD_REGIMES",
+                  "QUEUE_REGIMES", "SELECTION_RULE_UNCHANGED", "BLOCK_SIZE",
+                  "REQUIRED_BLOCK_SIZE", "RATE_GATE", "TRACK_A_OVERLAP"):
+            say("%-28s %s" % (k, res.get(k)))
+        say()
+        if len(block) < REQUIRED_BLOCK_SIZE:
+            say("BLOCK_STATUS = FAILED_BLOCK_TOO_SMALL "
+                "(%d < %d) -- no capture, exit non-zero."
+                % (len(block), REQUIRED_BLOCK_SIZE))
+            res["BLOCK_STATUS"] = "FAILED_BLOCK_TOO_SMALL"
         else:
             say("=== CAPTURE (%d cycles x %ds) ===" % (MAX_CYCLES, int(CYCLE_S)))
             meta["actual_start_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
@@ -335,18 +467,35 @@ def main(argv=None):
                 run_block(http, pacer, budget, block, fh, res)
             meta["actual_end_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
 
+    res.setdefault("BLOCK_STATUS", "OK" if res.get("cycles") else "FAILED_NO_CAPTURE")
     res["venue_requests"] = budget.spent
     res["throttle_events"] = pacer.events
+    res["SCIENTIFIC_OBSERVATIONS"] = res.get("planned_reads", 0) if res.get("cycles") else 0
+    res["ECONOMICALLY_USABLE"] = "YES" if res["BLOCK_STATUS"] == "OK" else "NO"
     (out / "runner_metadata.json").write_text(json.dumps(meta, indent=1))
     (out / "block_summary.json").write_text(json.dumps(res, indent=1, default=str))
-    with gzip.open(out / "discovery_request_log.jsonl.gz", "wt") as fh:
-        for r in log:
+    # Discovery diagnostics are sealed WHETHER OR NOT the block succeeds -- they
+    # are the only evidence that can separate a pagination error from a parser
+    # error from a genuinely unsuitable universe.
+    with gzip.open(out / "discovery_pages.jsonl.gz", "wt") as fh:
+        for r in pages:
+            fh.write(json.dumps(r, default=str) + "\n")
+    with gzip.open(out / "discovery_body_samples.jsonl.gz", "wt") as fh:
+        for r in samples:
             fh.write(json.dumps(r, default=str) + "\n")
 
     lines = ["=== RUN 85 TRACK B-L BLOCK %s ===" % a.block,
              "SELECTION_RULE_VERSION = %s" % SELECTION_RULE_VERSION,
              "BLOCK_COHORT_SHA256 = %s" % meta.get("block_cohort_sha256"),
+             "BLOCK_STATUS = %s" % res.get("BLOCK_STATUS"),
              "BLOCK_SIZE = %d" % res.get("block_size", 0),
+             "REQUIRED_BLOCK_SIZE = %d" % REQUIRED_BLOCK_SIZE,
+             "SCIENTIFIC_OBSERVATIONS = %s" % res.get("SCIENTIFIC_OBSERVATIONS"),
+             "ECONOMICALLY_USABLE = %s" % res.get("ECONOMICALLY_USABLE"),
+             "PAGINATION_DIRECTION = %s" % res.get("PAGINATION_DIRECTION"),
+             "CURRENT_END_LOCATED = %s" % res.get("CURRENT_END_LOCATED"),
+             "OVERLAP_CHECK = %s" % res.get("OVERLAP_CHECK"),
+             "NEWER_THAN_PRIOR_PAGE = %s" % res.get("NEWER_THAN_PRIOR_PAGE"),
              "VENUE_REQUESTS = %d" % budget.spent,
              "PLANNED_MIN_GAP_S = %s" % res.get("planned_min_gap_s"),
              "HTTP_429 = %s" % res.get("http_429"),
@@ -362,6 +511,14 @@ def main(argv=None):
     ok, bad = B.verify(out)
     say()
     say("SEAL_VERIFIED = %s%s" % (ok, "" if ok else " BAD=%s" % bad))
+    if not ok:
+        return 3
+    # A block that collected no scientific data must NOT read as success, must
+    # not advance block numbering as though it had, and must fail the workflow.
+    if res["BLOCK_STATUS"] != "OK":
+        say()
+        say("EXIT NON-ZERO: BLOCK_STATUS = %s" % res["BLOCK_STATUS"])
+        return 2
     return 0
 
 

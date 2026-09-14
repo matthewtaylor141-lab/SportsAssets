@@ -234,3 +234,55 @@ so two Track A runs can never be pending because of B-L.
 
 This changes Track A's realized start times, which is why it is an owner
 decision and not mine to take.
+
+---
+
+## BLOCK_1 — PERMANENT RECORD, NOT TO BE REHABILITATED
+
+```
+B_L_BLOCK_1_STATUS      = FAILED_DISCOVERY
+SCIENTIFIC_OBSERVATIONS = 0
+ECONOMICALLY_USABLE     = NO
+sealed at               research/evidence/trackbl/run85_trackbl_BLOCK_1_20260914T033223Z
+```
+
+12 pages from offset 0, 1,200 events, **0 candidates**, no capture. The workflow
+reported success, which was itself wrong.
+
+**Cause.** `/v1/events` is id-ascending, so offset 0 returns the OLDEST events.
+Selection was built from the wrong end of the list. This is the same error
+Phase 2C made and that I documented and retracted earlier in this run; I
+reintroduced it.
+
+The filter was NOT at fault, and that is established rather than assumed: run
+against the sealed 2G-R payload as a control it admits 10,471 of 51,566 market
+rows (~20%), rejecting PROP 19,399, FUTURE 15,623, no-quote 5,666, closed 403.
+
+**The diagnosis is weaker than it should be**, because the discovery bodies were
+stripped from the log. `PAGINATION_ERROR` versus `PARSER_SHAPE_ERROR` cannot be
+separated from BLOCK_1's own evidence. That is fixed for BLOCK_2, not for
+BLOCK_1 — a failed block is preserved as it was.
+
+## REPAIR SCOPE APPLIED (BLOCK_2 ONWARD)
+
+1. **Diagnostics retained.** Per page: path, params, offset, HTTP status,
+   response bytes, the venue's `response_sha256` AND an independently
+   recomputed body digest, event count, first/last event id, the full id list
+   and the top-level keys — plus a bounded raw sample (50 head + 50 tail events
+   per page, verbatim). Sealed **whether or not the block succeeds**; a test
+   pins that the diagnostics are written before the exit path.
+2. **Current-end pagination.** Direction is verified, not assumed; the current
+   end is located by geometric probing; the frame is walked backwards from it.
+   `page=` and `skip=` — disproved in Phase 2E — are pinned as never reappearing.
+3. **Hard failure.** `candidate_count < REQUIRED_BLOCK_SIZE (4)` seals
+   diagnostics, sets `BLOCK_STATUS = FAILED_BLOCK_TOO_SMALL`, refuses to
+   capture, and **exits non-zero**. Seal failure exits 3. No failed block may
+   read as success or advance numbering as though data were collected.
+4. **Nothing else changed.** Track A, selection criteria, economic definitions,
+   horizons, rate policy, shared concurrency group, 20-minute cap and the
+   no-cross-block-state rule are all untouched. Filters were **not** loosened to
+   reach six markets.
+
+If BLOCK_2 also returns zero candidates, the retained bodies decide between
+pagination, parser/schema, admission logic and a genuinely unsuitable universe
+**before** any BLOCK_3.
