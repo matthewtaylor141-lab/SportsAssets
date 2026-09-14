@@ -161,6 +161,78 @@ not an instruction to change the instrument.
 
 ---
 
+## FEE REGISTER — as of checkpoint +6h (2026-09-14T00:00Z)
+
+`PMUS_FEES_RESOLVED = NO.` The documentation authorization was granted and is
+not the constraint: **every Polymarket-owned host is refused by the organization
+egress policy**, which is a separate control from the trading-capability
+boundary.
+
+```
+docs.polymarket.us      EGRESS_BLOCKED
+polymarket.us           EGRESS_BLOCKED
+help.polymarket.com     EGRESS_BLOCKED
+```
+
+The proxy README is explicit that a policy denial must be reported, not routed
+around, so no third-party mirror is treated as a substitute for the primary text.
+
+### What the authorized venue host does publish
+
+Mined from already-sealed `/v1/events` payloads — **zero new venue contact**:
+
+| | |
+|---|---|
+| `feeCoefficient` | `0.06` on **51,566 / 51,566** market rows — one distinct value |
+| rewards / incentive / rebate / maker / taker field | **absent from every market row** |
+| `metadata` | sports identity only (player, team, line, stat) — nothing economic |
+
+So the public gateway exposes exactly one fee-shaped number and **nothing
+whatever about liquidity rewards**. There is therefore no authorized way to tell
+whether a frozen-cohort market participates in a rewards program.
+
+### The three components, kept separate
+
+| component | status | evidence |
+|---|---|---|
+| `PMUS_TAKER_FEE_RULE` | **NOT_RESOLVED** | one primary datum, `feeCoefficient = 0.06`, uniform. A coefficient is not a formula. |
+| `PMUS_MAKER_FEE_RULE` | **NOT_RESOLVED** | no primary evidence that a maker pays anything, or does not |
+| `PMUS_MAKER_REBATE_RULE` | **NOT_RESOLVED** | no primary evidence |
+| `PMUS_LIQUIDITY_REWARD_RULE` | **NOT_RESOLVED** | program not visible on the authorized host |
+| cohort reward eligibility | **NOT_IDENTIFIED** | no per-market reward field exists to read |
+
+Secondary web summaries were returned by search and are recorded as
+**UNVERIFIED, LOW confidence, NOT USED in any number here** — they also
+contradict each other (a `0.05` taker coefficient with a `-0.0125` maker rebate
+in one, `0.06 × C × p × (1−p)` in another, a flat `0.20%` maker rebate in a
+third). Conflicting secondary sources are not a resolution, and the coincidence
+between one of them and the venue's own `0.06` is *not* permission to adopt the
+rest of that sentence.
+
+### THE DECISIVE SENSITIVITY — why this blocker outranks the others
+
+Take the unverified taker form `0.06 · p · (1−p)` purely as a **sensitivity**, not
+as a fee rule. At `p = 0.50` it is `0.06 × 0.25 = 0.015` per contract per side.
+
+The frozen cohort's tick sizes are 0.005 and 0.01, and most observed spreads are
+one tick. So the whole maker/maker gross pair edge is **0.005–0.01**, while a fee
+of that shape would be **0.015**.
+
+> If the maker pays anything resembling the taker formula, the fee alone is
+> **one and a half to three times the entire gross edge**, and the strategy is
+> negative before adverse selection is even considered. If the maker pays zero
+> and collects a rebate or reward, the same strategy can be positive.
+
+**The sign of the answer is decided by an unresolved fact.** No amount of Track A
+capture changes that: more markout data refines the subtraction, it cannot tell
+us the fee. This is the highest-leverage open item in the 48-hour sprint, and it
+is blocked on egress policy rather than on measurement.
+
+`BREAK_EVEN_TOTAL_FEE` is bounded above by the displayed spread and cannot exceed
+it; the exact value needs `PRE_FEE_EXPECTANCY`, which needs primary segment data.
+
+---
+
 ## OPEN BLOCKERS
 
 1. **Fees — blocked on authorization, not on effort.** The published fee schedule
