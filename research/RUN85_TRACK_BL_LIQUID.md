@@ -393,3 +393,102 @@ from the job log alone. What the log does settle:
 The runner records no per-reason rejection counts, so the decision needs the
 sealed body samples. **No filter changes, and no BLOCK_3, until the cause is
 established.**
+
+---
+
+## BLOCK_2 — CAUSE, CLASSIFIED FROM THE SEALED BYTES
+
+The diagnostics were couriered in (`0c3b4b3`) and re-verified: all six files
+`sha256sum -c` OK against the driver's own `checksums.sha256`. Because each page
+holds 100 events and the sample keeps head 50 + tail 50, **the sample is the
+complete page** — all 1,400 frame events and all 8,532 market rows were
+re-derived here, matching the runner's counts exactly. The runner's own
+admission test was imported, not retyped.
+
+```
+CAUSE = PAGINATION   (specifically: the discovery QUERY, not the walk direction)
+```
+
+### The decisive evidence
+
+```
+B-L discovery call      GET /v1/events  {"limit": 100, "offset": N}
+Phase 2B / 2G-R call    GET /v1/events  {"active": "true", "closed": "false", "limit": 100}
+```
+
+B-L dropped the venue-side filters. Without them `/v1/events` is the venue's
+**entire historical archive**, id-ascending:
+
+```
+offset     0    startDate span  2025-10-31 .. 2025-11-18
+offset 62700..64000              2026-08-15 .. 2026-08-28
+today                            2026-09-14
+```
+
+The 64000 ceiling landed roughly two and a half weeks short of the present, in
+an archive stretching back ten and a half months. The frame is therefore a frame
+of finished games:
+
+```
+event closed              1400 / 1400  true
+market status             8532 / 8532  MARKET_STATUS_RESOLVED
+market closed             8532 / 8532  true
+admission rejection       8532 / 8532  at test 1 (closed / archived / inactive)
+```
+
+Every single row died on the first test. Nothing ever reached the market-type,
+quote or spread tests.
+
+### The other three candidate causes, each excluded on evidence
+
+- **ADMISSION — EXCLUDED.** The filter never got a chance: 8,532 of 8,532 rows
+  were rejected as closed before any economic test ran. The type census also
+  shows the frame is full of the types the filter *wants* — 1,247 MONEYLINE,
+  760 SPREAD, 739 TOTAL, 435 DRAWABLE_OUTCOME — so the admitted-type set is not
+  the constraint. Filters were not loosened and do not need to be.
+- **CURRENT_UNIVERSE — EXCLUDED.** The live universe was never reached, so it
+  was never tested. Under the filtered query the venue served 1,066 quoted rows
+  of 1,579 with `MARKET_STATUS_OPEN` at offset 0 (2G-R, sealed). There is no
+  evidence the current universe is unsuitable.
+- **PARSER/SCHEMA — NOT THE CAUSE, BUT IT CONCEALS A REAL DEFECT.** See below.
+
+### The missing quotes are a consequence, not a defect
+
+`bestBidQuote` / `bestAskQuote` are absent on **0 of 8,532** frame rows and 0 of
+100 at offset 0 — a resolved market carries no quote, only `outcomePrices`
+(`["0","1"]`) and `marketSides[].price`. Under the filtered query the same
+fields are present and populated (`{"value": "0.3810", "currency": "USD"}`,
+1,066 of 1,579 rows in the sealed 2G-R payload). The filter reads the right
+fields; it was handed the wrong slice of the list.
+
+### A GENUINE LATENT DEFECT, FOUND AND NOT YET FIXED
+
+`primaryTag` is a **dict** on the venue's real events —
+`{"id": "484", "label": "ITF Mens", "league": …}` — in the B-L payload and in
+the sealed 2G-R payload alike. `candidates()` assigns it straight to `sport`,
+and `select_block()` uses `sport` as a dict key. Reproduced against a real
+sealed venue event with an open quoted market spliced in (the only change):
+
+```
+candidates admitted   1
+sport field type      dict
+select_block RAISES   TypeError: unhashable type: 'dict'
+```
+
+**A successful discovery would have crashed the runner.** Both blocks returned
+zero candidates, so this never fired — one defect masked the other. My own test
+missed it because its fixture used `"primaryTag": "nfl"`, a string the venue
+does not send; a fixture that does not match the venue's shape cannot pin the
+venue's shape.
+
+### STATE
+
+```
+B_L_BLOCK_2_CAUSE            = PAGINATION (dropped active/closed query filters)
+B_L_BLOCK_2_SECOND_DEFECT    = PARSER/SCHEMA, primaryTag is an object not a string
+FILTERS_CHANGED              = NO
+BLOCK_3_DISPATCHED           = NO
+```
+
+Both defects are mine, both are now named from evidence, and neither is fixed
+yet — the repair scope is the owner's to set before any BLOCK_3.
