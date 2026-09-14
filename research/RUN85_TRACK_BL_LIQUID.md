@@ -1216,3 +1216,235 @@ No live capital. No order placement. No `mirror_live` change. A tiny live
 execution validation would be a separately approved step with an explicit
 maximum exposure and stated kill conditions, and BLOCK_3 does not meet the bar
 to propose one.
+
+---
+
+## BLOCK_4 ATTEMPT 2 — COMPLETE. AUDIT, PREFLIGHT, RESULT.
+
+Run `06b1163`, commit `cfdee8f`, 19:48:59Z → 20:06:32Z.
+`BLOCK_STATUS = OK`, `SCIENTIFIC_OBSERVATIONS = 80`, `ECONOMICALLY_USABLE = YES`.
+
+### 1. Checksums against committed bytes
+
+```
+sha256sum -c checksums.sha256    8 / 8 OK
+```
+
+Eight files, including — for the first time — `book_probe_receipts.jsonl.gz`.
+The sealing repair held.
+
+### 2. Actual global request timing — AND A REAL VIOLATION
+
+```
+measurable requests             95   (15 probes + 80 capture)
+GLOBAL_MIN_INTER_REQUEST_GAP    0.0546 s
+ANY_GAP_LT_2_5S                 1
+HTTP_429                        0
+non-200 responses               0
+TRACK_A_OVERLAP_REQUEST_COUNT   0 by construction, NOT MEASURED
+```
+
+**The 2.5 s floor was breached once, by 54.6 ms, at the probe→capture handoff**
+— last probe 19:50:14.934Z, first capture read 19:50:14.988Z. `run_block()`
+starts its pacer with `last = None`, so the first capture read fires
+immediately rather than waiting 2.5 s after the final probe. Every other gap in
+the block is ≥ 2.5 s.
+
+```
+B_L_AGGREGATE_RATE_SAFE = NOT_VERIFIED
+```
+
+The owner's condition was that the 0.4000 rps design claim is accepted **only
+if actual timestamps confirm it**. They do not. One breach in 95 measurable
+gaps is still a breach, and the claim stays unverified until a block runs clean.
+It is not repaired here.
+
+A second evidence gap: **discovery page records carry no per-request wall
+stamp**, so 16 of the 111 requests are `NOT_MEASURABLE` from the seal. The
+measured figures above cover probes and capture only.
+
+### 3. Timing
+
+```
+DISCOVERY_DURATION_S     ~38    (16 pages; not stamped per request)
+BOOK_PROBE_DURATION_S    35.0   (19:49:39.932 .. 19:50:14.934)
+CAPTURE_DURATION_S       977.5  (19:50:14.988 .. 20:06:32.488)
+TOTAL_JOB_DURATION_S     ~1053
+```
+
+The charter's cap, quoted exactly and not redefined after the result:
+
+> A block is capped at 20 minutes so that a Track A segment falling due
+> mid-block waits minutes, not hours. Four 300 s cycles fit.
+
+Capture was 16.3 minutes, inside the cap. It is shorter than BLOCK_3's 17.4 min
+because the block holds 4 lanes rather than 6.
+
+### 4. Discovery limitation
+
+```
+DISCOVERY_LIST_EXHAUSTED   NO          EVENTS_SCANNED  1600
+DISCOVERY_PAGE_CAP         16          EVENTS_WITH_CLOSED_TRUE  0
+MARKET_ROWS  14518   OPEN 14408   RESOLVED 110   QUOTED 7696
+CURRENT_UNIVERSE_CENSUS    NO
+SELECTION_FRAME            BOUNDED_PREFIX
+```
+
+Carried into every conclusion below.
+
+### 5. gameStartTime semantics — now sealed and readable
+
+```
+market                                 GAME_START_TIME        TYPE
+aec-ufc-josvan-alepan-2026-09-19        2026-09-20T03:15:00Z   MONEYLINE
+aec-ufc-taitui-robdes-2026-09-19        2026-09-19T23:30:00Z   MONEYLINE
+aec-ufc-renmoi-briort-2026-09-19        2026-09-20T01:30:00Z   MONEYLINE
+aec-ufc-gabste-seasha-2026-09-19        2026-09-20T00:30:00Z   MONEYLINE
+
+DOES_GAME_START_TIME_REPRESENT_UNDERLYING_CONTEST_START = YES (all four)
+```
+
+Distinct, plausible, sequential fight times on one card — 23:30, 00:30, 01:30,
+03:15 — consistent with a UFC running order. Interpretation only; nothing was
+excluded retrospectively.
+
+### BL-SELECT-2 PREFLIGHT
+
+```
+STRUCTURALLY_ELIGIBLE_MARKETS   339
+SHORTLIST                       15      (board-limited, not budget-limited)
+BOOKS_PROBED                    15
+```
+
+Raw stage-2 distributions, before any threshold (n=14; one probe returned no
+trade fields at all):
+
+```
+                          p10          p25          median       p75          p90
+SECONDS_SINCE_LAST_TRADE  267.5        568.2        948.0        2227.0       3316.5
+SHARES_TRADED             2779.7       3048.0       6223.2       15560.2      27458.4
+NOTIONAL_TRADED           94,241       157,263      218,484      640,704      1,993,175
+OPEN_INTEREST             1813.7       4046.8       6932.4       16284.2      30716.9
+```
+
+Gates, independently:
+
+```
+ACTIVITY_GATE     eligible 4   NOTIONAL_BELOW_PROBED_MEDIAN 6 · SLOWER_THAN_
+                              PROBED_MEDIAN 6 · STALE_GT_3600s 1 ·
+                              NO_LAST_TRADE_TIME 1 · NO_TRADED_NOTIONAL 1 ·
+                              NO_OPEN_INTEREST 1
+LIQUIDITY + DISPLAYED_PAIR_BUDGET GATE    eligible 15   rejects {}
+FINAL_CANDIDATES  4
+```
+
+```
+SELECTED_MARKETS 4 · DISTINCT_EVENTS 4
+NEAR_MID 1 (target >=2 NOT MET) · MODERATE 2 (MET) · TAIL 1 (ceiling MET)
+BAND_TARGET_SHORTFALL_REASON = BOARD_DID_NOT_SUPPLY_ELIGIBLE_MARKETS_IN_BAND
+SPORTS ['NOT_IDENTIFIED'] · LEAGUES ['NOT_IDENTIFIED'] · SPREAD_REGIMES ['S_1T']
+SELECTION_RULE_VERSION BL-SELECT-2 · SUPERSEDES BL-SELECT-1 (RETIRED)
+SELECTION_RULE_UNCHANGED_WITHIN_BLOCK YES · BLOCK_FROZEN YES
+RATE_GATE PASS (as designed) · SHARED_CONCURRENCY_GROUP YES
+```
+
+Per market, at selection:
+
+```
+josvan-alepan  NEAR_MID 0.5400/0.5500 1t  last trade 568.2 s  39,025 sh
+               $2,125,993  OI 36,371  bid 22,297.32  ask 4,003.89  budget $1.62
+taitui-robdes  MODERATE 0.1700/0.1800 1t  last trade  96.8 s  15,560 sh
+               $277,128    OI 16,284  bid  6,682.90  ask 2,187.78  budget $1.36
+renmoi-briort  MODERATE 0.6500/0.6600 1t  last trade 563.0 s   6,630 sh
+               $428,887    OI  6,932  bid  7,388.24  ask 2,256.70  budget $1.56
+gabste-seasha  TAIL     0.9000/0.9100 1t  last trade 652.8 s  16,452 sh
+               $1,484,225  OI 19,497  bid  2,318.64  ask 10,917.10 budget $1.21
+```
+
+All four are fights on the same UFC card, and `sport`/`league` are
+`NOT_IDENTIFIED` (null primaryTag). Both were flagged on attempt 1 and are
+unchanged.
+
+### TOUCH ANALYSIS — with denominators
+
+```
+h     eligible  long  short  either  both     BLOCK_3 comparison (eligible)
+5s    16        0     0      0       0        0 / 23
+10s   16        0     0      0       0        0 / 24
+30s   16        0     0      0       0        0 / 24
+60s   16        0     0      0       0        0 / 21
+5m    12        0     0      0       0        0 / 18
+10m   8         0     0      0       0        0 / 12
+15m   4         0     0      0       0        0 / 6
+```
+
+`FIRST_LEG_TOUCH 0 / 16` · `COMPLEMENT_AFTER_FIRST NOT_OBSERVABLE` ·
+residual `n = 0`. Horizon clock error ≤ 0.002 s on every in-cycle horizon.
+
+**And the quote did not move once: 0 of 16 pairs saw either touch price change
+in 16.3 minutes.**
+
+### WHY — AND WHY THE TOUCH PROXY IS THE WRONG INSTRUMENT HERE
+
+This is not BLOCK_3 repeating. BLOCK_3's markets were dead. These traded. The
+difference is that a **deep one-tick book does not have to move for a resting
+order to fill** — the queue drains instead — and a price-crossing test cannot
+see that at all.
+
+So the sealed books were asked the question directly:
+
+```
+market            bid queue    traded in block   markets printing any trade
+josvan-alepan     22,297.32    180.33 shares     in 16.3 min: 1 of 4
+taitui-robdes      6,682.90    0
+renmoi-briort      7,388.24    0
+gabste-seasha      2,318.64    0
+```
+
+**Three of the four "most active" markets on the eligible board printed ZERO
+trades in 16.3 minutes**, having last traded 96–653 s before selection. The one
+that traded moved 180.33 shares — both sides combined — against a 22,297-share
+bid queue.
+
+Treating that cumulative both-sides volume as if it all drained our side (a
+deliberately generous upper bound):
+
+```
+QUEUE_DRAIN_TIME_UPPER_BOUND   22,297 / 11.1 per min = 2,014 min = 1.4 days
+```
+
+A passive order joining that bid would have been behind ~22,287 shares and
+would have received **none** of the 180 that traded.
+
+```
+MAKER_FILL_PROBABILITY        NOT_IDENTIFIED
+PAIR_COMPLETION_PROBABILITY   NOT_IDENTIFIED
+```
+
+Still not identified — but for the first time the *reason* is quantified: it is
+queue position in a deep one-tick book, not market inactivity.
+
+### BLOCK_4 CLASSIFICATION
+
+```
+BLOCK_4_CLASSIFICATION = C — DISPLAYED EDGE ONLY
+BL_SELECT_2_WORKED     = YES, as a selection rule
+PASSIVE_MAKER_PATH     = SUSPECT AS THE NEAR-TERM PRODUCTION ROUTE
+```
+
+BL-SELECT-2 did its job: it found genuinely traded markets, and the activity
+distribution moved by orders of magnitude. The strategy is what failed to show
+interaction. Under the owner's own decision rule — *"if active-market selection
+still produces essentially zero interaction, the passive maker/maker path itself
+becomes suspect as the fastest route to production"* — that branch fires.
+
+The economics remain what they were and are not restated as new: a $1.21–$1.62
+displayed budget per 100 contracts, `CONDITIONAL_ON_BOTH_MODELED_MAKER
+_EXECUTIONS`, against a queue that would take on the order of a day to clear at
+observed volume.
+
+Carried with every line above: `DISCOVERY_LIST_EXHAUSTED = NO`, selection from a
+bounded prefix, one UFC card, `NEAR_MID` target unmet, and a rate floor breach
+that leaves `B_L_AGGREGATE_RATE_SAFE = NOT_VERIFIED`.
+
+No live capital. No order placement. `mirror_live = false`.
