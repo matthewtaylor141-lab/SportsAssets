@@ -11,6 +11,7 @@ Run:  python3 -m pytest research/test_run85_trackbl_block.py -q
 from __future__ import annotations
 
 import importlib.util
+import json
 import re
 import sys
 from decimal import Decimal as D
@@ -22,6 +23,13 @@ L = importlib.util.module_from_spec(_s)
 _s.loader.exec_module(L)
 
 SRC = Path(L.__file__).read_text()
+
+# REAL VENUE SHAPES, lifted verbatim from sealed evidence -- the BLOCK_2
+# discovery samples and the Phase 2G-R request log. The old fixtures used
+# "primaryTag": "nfl", a string this venue has never sent, which is precisely
+# why they could not catch the defect that would have crashed a good block.
+SHAPES = json.loads(
+    Path(__file__).with_name("run85_trackbl_venue_shapes.json").read_text())
 
 
 def plan():
@@ -121,7 +129,7 @@ def test_selection_uses_only_discovery_time_evidence():
 
 
 def test_a_one_sided_or_closed_market_is_never_a_candidate():
-    ev = {"id": 1, "primaryTag": "nfl", "tags": ["nfl"], "markets": [
+    ev = {"id": 1, "primaryTag": None, "tags": [], "markets": [
         {"slug": "closed", "active": True, "closed": True, "archived": False,
          "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
          "bestBidQuote": {"value": "0.50"}, "bestAskQuote": {"value": "0.51"}},
@@ -201,21 +209,213 @@ def test_body_samples_are_bounded_but_keep_head_and_tail():
     assert s["events_tail"][-1]["id"] == 499
 
 
-def test_discovery_never_selects_from_offset_zero_alone():
-    """THE BLOCK_1 BUG, pinned. /v1/events is id-ascending, so offset 0 is the
-    OLDEST events. The frame must be built from the current end."""
-    assert "END_PROBE_STEPS" in SRC and "FRAME_PAGES_BACK" in SRC
-    assert "CURRENT_END_LOCATED" in SRC
-    assert "PAGINATION_DIRECTION" in SRC
-    assert L.END_PROBE_STEPS[0] > 0
-    assert L.FRAME_PAGES_BACK > 0
+def test_the_discovery_query_carries_the_venue_side_scope_filters():
+    """THE BLOCK_2 BUG, pinned. Without active=true&closed=false, /v1/events is
+    the whole historical archive: offset 0 was 2025-10-31 and offset 64000 was
+    still 2026-08, so 8,532 of 8,532 rows came back MARKET_STATUS_RESOLVED."""
+    assert L.DISCOVERY_QUERY["active"] == "true"
+    assert L.DISCOVERY_QUERY["closed"] == "false"
+    q = L.query_for(300)
+    assert q["active"] == "true" and q["closed"] == "false"
+    assert q["limit"] == L.PAGE_LIMIT and q["offset"] == 300
+    # and the archive crawl is gone, not merely unused
+    assert "END_PROBE_STEPS" not in SRC and "FRAME_PAGES_BACK" not in SRC
 
 
-def test_the_disproved_pagination_parameters_are_never_reintroduced():
+def test_offset_is_the_only_pagination_mechanism():
     """page= and skip= were shown in Phase 2E to return the identical first
     page with HTTP 200. They must not come back."""
     assert '"page"' not in SRC and "'page'" not in SRC
     assert '"skip"' not in SRC and "'skip'" not in SRC
+    assert set(L.query_for(0)) == {"active", "closed", "limit", "offset"}
+    assert [L.query_for(i * L.PAGE_LIMIT)["offset"] for i in range(3)] \
+        == [0, L.PAGE_LIMIT, 2 * L.PAGE_LIMIT]
+
+
+def test_a_query_parameter_that_was_sent_is_not_evidence_about_the_answer():
+    """The frame the venue RETURNED is re-counted, and a payload that
+    contradicts the scope refuses to capture."""
+    assert "scope_census" in SRC
+    assert "FAILED_QUERY_SCOPE_NOT_HONOURED" in SRC
+    assert "FAILED_NO_OPEN_MARKET_ROWS" in SRC
+    resolved = {"id": "1", "closed": True, "primaryTag": None,
+                "markets": [{"status": "MARKET_STATUS_RESOLVED"}]}
+    c = L.scope_census([resolved])
+    assert c["EVENTS_WITH_CLOSED_TRUE"] == 1
+    assert c["MARKETS_OPEN"] == 0 and c["MARKETS_RESOLVED"] == 1
+    assert c["MARKETS_WITH_BID_AND_ASK"] == 0
+
+
+# ============ primaryTag: REAL SHAPES, NOT STRING-ONLY FIXTURES =============
+def test_a_real_venue_primary_tag_object_is_parsed_field_by_field():
+    for key in ("primaryTag_nfl", "primaryTag_2gr"):
+        raw = SHAPES[key]
+        assert isinstance(raw, dict), key
+        t = L.normalize_tag(raw)
+        assert t["PRIMARY_TAG_SHAPE"] == "OBJECT", key
+        assert t["PRIMARY_TAG_ID"] == str(raw["id"])
+        assert t["PRIMARY_TAG_LABEL"] == raw["label"]
+        assert t["PRIMARY_TAG_LEAGUE"] == raw["league"]["slug"]
+        assert t["PRIMARY_TAG_SPORT_ID"] == raw["league"]["sportId"]
+        assert t["SPORT_KEY"] == "sportId:%d" % raw["league"]["sportId"]
+        assert isinstance(t["SPORT_KEY"], str)      # hashable, by construction
+
+
+def test_the_whole_object_is_never_serialized_and_called_a_sport():
+    t = L.normalize_tag(SHAPES["primaryTag_nfl"])
+    for v in t.values():
+        assert not (isinstance(v, str) and v.lstrip().startswith("{"))
+    body = SRC[SRC.index("def normalize_tag("):SRC.index("def tag_slugs(")]
+    for banned in ("json.dumps", "str(raw)", "repr(", "sort_keys"):
+        assert banned not in body, banned
+    # str() appears once, narrowing a known id field -- never the object
+    assert body.count("str(") == 1 and "str(tid)" in body
+
+
+def test_a_bare_string_tag_is_supported_only_as_the_compatibility_case():
+    t = L.normalize_tag("nfl")
+    assert t["PRIMARY_TAG_SHAPE"] == "STRING"
+    assert t["SPORT_KEY"] == "nfl" and t["PRIMARY_TAG_LABEL"] == "nfl"
+    assert "COMPATIBILITY CASE ONLY" in SRC
+
+
+def test_a_null_tag_is_classified_not_guessed():
+    t = L.normalize_tag(None)
+    assert t["PRIMARY_TAG_SHAPE"] == "NULL"
+    assert t["SPORT_KEY"] == L.NOT_IDENTIFIED
+    assert t["PRIMARY_TAG_ID"] is None and t["PRIMARY_TAG_LEAGUE"] is None
+
+
+def test_an_unknown_object_shape_is_not_identified_and_does_not_crash():
+    for raw in ({"unexpected": {"nested": 1}}, {}, 17, ["nfl"], object()):
+        t = L.normalize_tag(raw)
+        assert t["PRIMARY_TAG_SHAPE"] == "UNKNOWN", raw
+        assert t["SPORT_KEY"] == L.NOT_IDENTIFIED
+    # a sport id alone is not prose, and prose alone is not a sport id
+    t = L.normalize_tag({"label": "Boxing"})
+    assert t["PRIMARY_TAG_SHAPE"] == "OBJECT"
+    assert t["SPORT_KEY"] == L.NOT_IDENTIFIED          # no league.sportId given
+    assert t["PRIMARY_TAG_LABEL"] == "Boxing"
+
+
+def test_a_real_open_quoted_market_is_admitted_with_an_object_tag():
+    ev = {"id": "77", "primaryTag": SHAPES["open_quoted_event_primaryTag"],
+          "tags": SHAPES["tags"], "markets": [SHAPES["open_quoted_market_row"]]}
+    got = L.candidates([ev], 0)
+    assert len(got) == 1
+    c = got[0]
+    assert c["PRIMARY_TAG_SHAPE"] == "OBJECT"
+    assert c["sport"].startswith("sportId:")
+    assert c["selected_from"] == "discovery_payload"
+    assert D(c["spread"]) > 0 and c["price_band"]
+
+
+def test_select_block_does_not_raise_on_real_object_shaped_tags():
+    """The exact crash BLOCK_2 was one successful frame away from:
+    TypeError: unhashable type: 'dict'."""
+    evs = []
+    for i in range(6):
+        m = dict(SHAPES["open_quoted_market_row"])
+        m["slug"] = "%s-%d" % (m["slug"], i)
+        evs.append({"id": str(i),
+                    "primaryTag": SHAPES["primaryTag_nfl"] if i % 2 else
+                                  SHAPES["open_quoted_event_primaryTag"],
+                    "tags": SHAPES["tags"], "markets": [m]})
+    # plus a null-tag event, which must neither crash nor be silently dropped
+    m = dict(SHAPES["open_quoted_market_row"])
+    m["slug"] = m["slug"] + "-null"
+    evs.append({"id": "99", "primaryTag": None, "tags": [], "markets": [m]})
+    cands = L.candidates(evs, 0)
+    assert len(cands) == 7
+    block = L.select_block(cands, cap=4)              # must not raise
+    assert len(block) == 4
+    assert len({b["native_event_id"] for b in block}) == 4
+    assert all(isinstance(b["sport"], str) for b in block)
+    assert L.NOT_IDENTIFIED in {c["sport"] for c in cands}
+
+
+def test_the_tag_slugs_are_read_by_name_never_stringified():
+    slugs = L.tag_slugs({"tags": SHAPES["tags"]})
+    assert slugs and all(isinstance(s, str) for s in slugs)
+    assert all(not s.startswith("{") for s in slugs)
+    assert L.tag_slugs({"tags": [{"no_slug": 1}, None, 5]}) == []
+
+
+def _drive(pages_by_offset):
+    """Run the real discover() against a scripted venue. No network."""
+    calls = []
+
+    def fake_get(http, path, params=None, **kw):
+        calls.append((path, dict(params or {})))
+        evs = pages_by_offset.get(params.get("offset"), [])
+        return {"http_status": 200, "path": path, "params": params,
+                "body": {"events": evs}, "response_bytes": 1,
+                "response_sha256": "x", "error": None}
+
+    # get_paced calls its OWN module's collector, so both are swapped
+    saved = [(m, m._get) for m in (L.C, L.B.C)]
+    for m, _ in saved:
+        m._get = fake_get
+    try:
+        res, pages, samples = {}, [], []
+        evs = L.discover(None, L.B.AdaptivePacer(base=0.0),
+                         L.Budget(L.MAX_VENUE_REQUESTS), pages, samples, res)
+        return evs, res, pages, calls
+    finally:
+        for m, fn in saved:
+            m._get = fn
+
+
+def _ev(i, closed=False, status="MARKET_STATUS_OPEN", quoted=True):
+    m = dict(SHAPES["open_quoted_market_row"])
+    m["slug"], m["status"] = "m%d" % i, status
+    if not quoted:
+        m = {k: v for k, v in m.items()
+             if k not in ("bestBidQuote", "bestAskQuote")}
+    return {"id": str(i), "closed": closed,
+            "primaryTag": SHAPES["open_quoted_event_primaryTag"],
+            "tags": SHAPES["tags"], "markets": [m]}
+
+
+def test_discovery_walks_offsets_forward_and_stops_at_a_real_boundary():
+    pages = {0: [_ev(i) for i in range(100)],
+             100: [_ev(100 + i) for i in range(40)],
+             200: []}
+    evs, res, recs, calls = _drive(pages)
+    assert [c[1]["offset"] for c in calls] == [0, 100, 200]
+    assert all(c[1]["active"] == "true" and c[1]["closed"] == "false"
+               for c in calls)
+    assert len(evs) == 140
+    assert res["DISCOVERY_LIST_EXHAUSTED"] == "YES"
+    assert res["FIRST_TERMINAL_OFFSET"] == 200
+    assert res["PAGINATION_ADVANCES"] == "YES"
+    assert res["EVENTS_DISCOVERED"] == 140
+    assert res["OPEN_MARKET_ROWS"] == 140 and res["RESOLVED_MARKET_ROWS"] == 0
+    assert res["EVENTS_WITH_CLOSED_TRUE"] == 0
+    assert res["MARKETS_WITH_BID_AND_ASK"] == 140
+    assert res["QUERY_FILTERS"] == {"active": "true", "closed": "false"}
+
+
+def test_a_payload_that_contradicts_the_query_scope_is_counted_as_such():
+    """BLOCK_2's frame, in miniature: the parameters were sent and the venue
+    still returned closed, resolved rows."""
+    _, res, _, _ = _drive({0: [_ev(i, closed=True,
+                                   status="MARKET_STATUS_RESOLVED",
+                                   quoted=False) for i in range(3)], 100: []})
+    assert res["EVENTS_WITH_CLOSED_TRUE"] == 3
+    assert res["OPEN_MARKET_ROWS"] == 0
+    assert res["RESOLVED_MARKET_ROWS"] == 3
+    assert res["MARKETS_WITH_BID_AND_ASK"] == 0
+    # and the runner refuses to capture on exactly those two conditions
+    assert 'res.get("EVENTS_WITH_CLOSED_TRUE")' in SRC
+    assert 'res.get("MARKETS_OPEN")' in SRC
+
+
+def test_the_walk_is_bounded_and_never_enumerates_the_archive():
+    evs, res, recs, calls = _drive({i * 100: [_ev(i)] for i in range(400)})
+    assert len(calls) == L.MAX_DISCOVERY_PAGES
+    assert res["DISCOVERY_LIST_EXHAUSTED"] == "NO"
+    assert "Enumeration of history is not the objective" in SRC
 
 
 def test_an_undersized_block_is_a_hard_failure_not_a_success():

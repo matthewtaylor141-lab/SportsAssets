@@ -37,10 +37,25 @@ is admissible only if it avoids that set; the first six admissible staggers on
 the 2.5 s grid are used. Minimum spacing inside the block is 2.5 s.
 
 --------------------------------------------------------------------------
+DISCOVERY -- THE CURRENT UNIVERSE, NOT THE ARCHIVE
+--------------------------------------------------------------------------
+/v1/events is queried WITH the venue-side scope filters active=true and
+closed=false, which is what the working discovery path always sent. Without
+them the endpoint serves the whole historical archive and no reachable offset
+is the present -- that is exactly how BLOCK_2 walked to offset 64000 and found
+August. Offset is the only pagination mechanism; page= and skip= were disproved
+in Phase 2E. And because a parameter that was SENT says nothing about what came
+back, the returned frame is re-counted (open / resolved / closed / quoted) and
+the block REFUSES TO CAPTURE if the payload contradicts the scope.
+
+--------------------------------------------------------------------------
 SELECTION -- OBSERVABLE AT SELECTION TIME ONLY
 --------------------------------------------------------------------------
-Candidates are scored from the DISCOVERY payload alone, which already carries
-bestBidQuote/bestAskQuote per market, so scoring costs no extra requests.
+Candidates are scored from the DISCOVERY payload alone, which under that query
+already carries bestBidQuote/bestAskQuote per market, so scoring costs no extra
+requests. Sport and league come from normalize_tag(), which reads the venue's
+primaryTag OBJECT field by field -- never the object used as a key, never a
+serialization of it treated as a sport.
 Nothing about later profitability can enter, because nothing later exists yet.
 
 Diversity is enforced, not optimised: one market per event, round robin over
@@ -98,8 +113,15 @@ UNREACHABLE_HORIZONS = ("30m", "60m")
 MAX_DISCOVERY_PAGES = 26
 MAX_VENUE_REQUESTS = 220
 PAGE_LIMIT = 100
-END_PROBE_STEPS = (1000, 2000, 4000, 8000, 16000, 32000, 64000)
-FRAME_PAGES_BACK = 14            # pages walked back from the current end
+# THE BLOCK_2 REPAIR. The unfiltered /v1/events is the venue's ENTIRE HISTORICAL
+# ARCHIVE, id-ascending: offset 0 was 2025-10-31 and offset 64000 was still only
+# 2026-08-15..28, so a geometric crawl toward "the current end" ran out of
+# configured search before it ran out of list, and every one of the 8,532 market
+# rows it did reach was MARKET_STATUS_RESOLVED. These are the venue-side filters
+# the WORKING discovery path (Phase 2B, 2G-R) always sent. With them the list IS
+# the current universe, so offset 0 is the right place to start and there is no
+# archive to crawl. Enumeration of history is not the objective and is not done.
+DISCOVERY_QUERY = {"active": "true", "closed": "false"}
 BODY_SAMPLE_EVENTS = 50          # head and tail retained per page, for diagnosis
 REQUIRED_BLOCK_SIZE = 4          # below this the block FAILS; the target is N_LANES
 EVENTS_PATH = "/v1/events"
@@ -152,13 +174,92 @@ def spread_bucket(spread, tick):
     return "S_1T" if n <= 1 else ("S_2_3T" if n <= 3 else "S_4T_PLUS")
 
 
+TAG_SHAPES = ("OBJECT", "STRING", "NULL", "UNKNOWN")
+NOT_IDENTIFIED = "NOT_IDENTIFIED"
+
+
+def _text(v):
+    """A venue string, or None. Never a stringified object."""
+    return v if isinstance(v, str) and v.strip() else None
+
+
+def normalize_tag(raw):
+    """Explicit, deterministic normalization of the venue's primaryTag.
+
+    THE BLOCK_2 SECOND DEFECT. primaryTag is an OBJECT -- {"id", "label",
+    "slug", "league": {...}} -- and the old code put it straight into `sport`,
+    which select_block then used as a dict key. On a successful candidate frame
+    that raises TypeError: unhashable type: 'dict'. Reproduced against a real
+    sealed venue event before this was written.
+
+    Known fields are parsed by name. The object is NEVER serialized and treated
+    as a sport, and there is no text search over it: a shape this does not
+    recognise is classified NOT_IDENTIFIED and carried, not guessed at and not
+    crashed on. A bare string is supported only as a documented compatibility
+    case -- the venue has not been observed to send one.
+    """
+    out = {"PRIMARY_TAG_SHAPE": "UNKNOWN", "PRIMARY_TAG_ID": None,
+           "PRIMARY_TAG_LABEL": None, "PRIMARY_TAG_LEAGUE": None,
+           "PRIMARY_TAG_SPORT_ID": None,
+           "SPORT_KEY": NOT_IDENTIFIED, "LEAGUE_KEY": NOT_IDENTIFIED}
+    if raw is None:
+        out["PRIMARY_TAG_SHAPE"] = "NULL"
+        return out
+    if isinstance(raw, str):
+        # COMPATIBILITY CASE ONLY, documented: not observed from this venue.
+        out["PRIMARY_TAG_SHAPE"] = "STRING"
+        out["PRIMARY_TAG_LABEL"] = _text(raw)
+        out["SPORT_KEY"] = _text(raw) or NOT_IDENTIFIED
+        out["LEAGUE_KEY"] = _text(raw) or NOT_IDENTIFIED
+        return out
+    if not isinstance(raw, dict):
+        return out
+    tid = raw.get("id")
+    out["PRIMARY_TAG_ID"] = str(tid) if isinstance(tid, (str, int)) else None
+    out["PRIMARY_TAG_LABEL"] = _text(raw.get("label"))
+    league = raw.get("league")
+    lg_slug = lg_name = None
+    if isinstance(league, dict):
+        lg_slug = _text(league.get("slug"))
+        lg_name = _text(league.get("name"))
+        sid = league.get("sportId")
+        if isinstance(sid, int):
+            out["PRIMARY_TAG_SPORT_ID"] = sid
+    out["PRIMARY_TAG_LEAGUE"] = lg_slug or lg_name
+    known = (out["PRIMARY_TAG_ID"] or out["PRIMARY_TAG_LABEL"]
+             or out["PRIMARY_TAG_LEAGUE"])
+    if not known:
+        # an object, but none of the fields we know how to read
+        return out
+    out["PRIMARY_TAG_SHAPE"] = "OBJECT"
+    # Sport grouping comes from the venue's own numeric sport id where it is
+    # given, and never from prose. Diversity round-robin only ever sees these.
+    out["SPORT_KEY"] = ("sportId:%d" % out["PRIMARY_TAG_SPORT_ID"]
+                        if out["PRIMARY_TAG_SPORT_ID"] is not None
+                        else NOT_IDENTIFIED)
+    out["LEAGUE_KEY"] = (out["PRIMARY_TAG_LEAGUE"] or _text(raw.get("slug"))
+                         or out["PRIMARY_TAG_ID"] or NOT_IDENTIFIED)
+    return out
+
+
+def tag_slugs(ev):
+    """The event's tag slugs, read by name. Objects are never stringified."""
+    out = []
+    for t in (ev.get("tags") or []):
+        s = _text(t.get("slug")) if isinstance(t, dict) else _text(t)
+        if s and s not in out:
+            out.append(s)
+    return out
+
+
 def candidates(events, now_epoch):
     """Score from the discovery payload only. No extra requests, no hindsight."""
     out = []
     for ev in events or []:
         eid = str(ev.get("id"))
-        tags = ev.get("tags") or []
-        sport = (ev.get("primaryTag") or (tags[0] if tags else None))
+        tags = tag_slugs(ev)
+        tag = normalize_tag(ev.get("primaryTag"))
+        sport = tag["SPORT_KEY"]
         for m in (ev.get("markets") or []):
             if m.get("closed") or m.get("archived") or not m.get("active"):
                 continue
@@ -173,7 +274,13 @@ def candidates(events, now_epoch):
             sp = a - b
             out.append({
                 "native_event_id": eid, "sport": sport,
-                "league": tags, "market_slug": m.get("slug"),
+                "league": tag["LEAGUE_KEY"], "tag_slugs": tags,
+                "PRIMARY_TAG_SHAPE": tag["PRIMARY_TAG_SHAPE"],
+                "PRIMARY_TAG_ID": tag["PRIMARY_TAG_ID"],
+                "PRIMARY_TAG_LABEL": tag["PRIMARY_TAG_LABEL"],
+                "PRIMARY_TAG_LEAGUE": tag["PRIMARY_TAG_LEAGUE"],
+                "PRIMARY_TAG_SPORT_ID": tag["PRIMARY_TAG_SPORT_ID"],
+                "market_slug": m.get("slug"),
                 "sports_market_type_v2": m.get("sportsMarketTypeV2"),
                 "tick_size": str(tick) if tick is not None else None,
                 "bid": str(b), "ask": str(a), "mid": str(mid), "spread": str(sp),
@@ -249,10 +356,17 @@ def sample_body(evs):
             "sampled": len(head) + len(tail), "total": len(evs)}
 
 
+def query_for(offset):
+    """The discovery query. The venue-side scope filters are part of it."""
+    q = dict(DISCOVERY_QUERY)
+    q["limit"] = PAGE_LIMIT
+    q["offset"] = offset          # offset is the ONLY pagination mechanism
+    return q
+
+
 def get_page(http, pacer, budget, offset, pages, samples):
     budget.take()
-    r, _rows = B.get_paced(http, EVENTS_PATH, pacer,
-                           {"limit": PAGE_LIMIT, "offset": offset})
+    r, _rows = B.get_paced(http, EVENTS_PATH, pacer, query_for(offset))
     body = r.get("body") if isinstance(r.get("body"), dict) else {}
     evs = body.get("events") or []
     raw = json.dumps(body, sort_keys=True, default=str).encode()
@@ -262,80 +376,76 @@ def get_page(http, pacer, budget, offset, pages, samples):
     return evs, rec
 
 
+def scope_census(events):
+    """VERIFY THE FRAME THE VENUE RETURNED. A query parameter that was SENT is
+    not evidence about what came back -- BLOCK_2 sent a walk it believed reached
+    the present and got August. These counts are re-derived from the payload."""
+    c = {"EVENTS_RETURNED": len(events), "EVENTS_WITH_CLOSED_TRUE": 0,
+         "MARKETS_TOTAL": 0, "MARKETS_OPEN": 0, "MARKETS_RESOLVED": 0,
+         "MARKETS_WITH_BID_AND_ASK": 0,
+         "PRIMARY_TAG_OBJECT_COUNT": 0, "PRIMARY_TAG_STRING_COUNT": 0,
+         "PRIMARY_TAG_NULL_COUNT": 0, "PRIMARY_TAG_UNKNOWN_COUNT": 0}
+    for e in events:
+        if e.get("closed") is True:
+            c["EVENTS_WITH_CLOSED_TRUE"] += 1
+        c["PRIMARY_TAG_%s_COUNT" % normalize_tag(e.get("primaryTag"))
+          ["PRIMARY_TAG_SHAPE"]] += 1
+        for m in (e.get("markets") or []):
+            c["MARKETS_TOTAL"] += 1
+            st = m.get("status")
+            if st == "MARKET_STATUS_OPEN":
+                c["MARKETS_OPEN"] += 1
+            elif st == "MARKET_STATUS_RESOLVED":
+                c["MARKETS_RESOLVED"] += 1
+            if (amount(m.get("bestBidQuote")) is not None
+                    and amount(m.get("bestAskQuote")) is not None):
+                c["MARKETS_WITH_BID_AND_ASK"] += 1
+    return c
+
+
 def discover(http, pacer, budget, pages, samples, res):
-    """Walk to the CURRENT END of the id-ascending list, then back from it.
+    """Walk the CURRENT-UNIVERSE list forward from offset 0.
 
-    Starting at offset 0 and assuming it is current is the exact error that
-    produced BLOCK_1's zero candidates, and the same error Phase 2C made. The
-    list is id-ascending, so offset 0 is the OLDEST events. The current end is
-    located by geometric probing, then the candidate frame is walked backwards
-    from it.
+    With active=true&closed=false the list IS the current universe, so offset 0
+    is the correct place to start and the archive is never crawled. Offset is
+    the only pagination mechanism; page= and skip= were disproved in Phase 2E
+    (HTTP 200 with the identical first page) and are never used.
     """
-    # 1. anchor, and verify the direction rather than assuming it
-    base_evs, base = get_page(http, pacer, budget, 0, pages, samples)
-    probe_evs, probe = get_page(http, pacer, budget, END_PROBE_STEPS[0], pages, samples)
-    asc = None
-    if base["last_event_id"] and probe["first_event_id"]:
-        try:
-            asc = int(probe["first_event_id"]) > int(base["last_event_id"])
-        except (TypeError, ValueError):
-            asc = None
-    res["PAGINATION_DIRECTION"] = ("VERIFIED_ASCENDING" if asc else
-                                   "NOT_ASCENDING" if asc is False else
-                                   "NOT_IDENTIFIED")
-    res["anchor_page"] = {"offset": 0, "first": base["first_event_id"],
-                          "last": base["last_event_id"], "n": base["event_count"]}
-
-    # 2. locate the current end: the largest offset that still returns a page
-    last_full = END_PROBE_STEPS[0] if probe["event_count"] else 0
-    end_offset = None
-    for step in END_PROBE_STEPS[1:]:
-        if len(pages) >= MAX_DISCOVERY_PAGES - FRAME_PAGES_BACK - 1:
-            break
-        evs, rec = get_page(http, pacer, budget, step, pages, samples)
-        say("  end-probe offset=%-7d events=%d first=%s last=%s"
-            % (step, rec["event_count"], rec["first_event_id"], rec["last_event_id"]))
-        if rec["event_count"] == 0:
-            end_offset = step
-            break
-        last_full = step
-    res["CURRENT_END_LOCATED"] = "YES" if end_offset is not None else "BOUNDED_BY_PROBE"
-    res["last_full_offset"] = last_full
-    res["first_empty_offset"] = end_offset
-
-    # 3. walk BACKWARDS from the end to build the candidate frame
     events, seen = [], set()
-    start = last_full
     prev_ids = None
-    for i in range(FRAME_PAGES_BACK):
-        off = start - i * PAGE_LIMIT
-        if off < 0 or len(pages) >= MAX_DISCOVERY_PAGES:
-            break
+    terminal = None
+    for i in range(MAX_DISCOVERY_PAGES):
+        off = i * PAGE_LIMIT
         evs, rec = get_page(http, pacer, budget, off, pages, samples)
+        say("  page   offset=%-6d events=%-4d first=%s last=%s"
+            % (off, rec["event_count"], rec["first_event_id"], rec["last_event_id"]))
+        if rec["event_count"] == 0:
+            terminal = off                 # a REAL terminal boundary, observed
+            break
         if i == 0:
-            res["LATEST_PAGE_EVENT_IDS"] = rec["event_ids"][:10]
-        elif i == 1:
-            res["PREVIOUS_PAGE_EVENT_IDS"] = rec["event_ids"][:10]
-            overlap = len(set(rec["event_ids"]) & set(res["LATEST_PAGE_EVENT_IDS"]))
+            res["FIRST_PAGE_EVENT_IDS"] = rec["event_ids"][:10]
+        if prev_ids is not None:
+            overlap = len(set(rec["event_ids"]) & set(prev_ids))
             res["OVERLAP_CHECK"] = "%d shared ids" % overlap
-            try:
-                res["NEWER_THAN_PRIOR_PAGE"] = (
-                    "YES" if int(res["LATEST_PAGE_EVENT_IDS"][0])
-                    > int(rec["event_ids"][0]) else "NO")
-            except (TypeError, ValueError, IndexError):
-                res["NEWER_THAN_PRIOR_PAGE"] = "NOT_IDENTIFIED"
+            res["PAGINATION_ADVANCES"] = "YES" if overlap == 0 else "NO"
+        prev_ids = rec["event_ids"]
         for e in evs:
             k = str(e.get("id"))
             if k not in seen:
                 seen.add(k)
                 events.append(e)
-        say("  frame  offset=%-7d events=%d cumulative=%d"
-            % (off, rec["event_count"], len(events)))
-        prev_ids = rec["event_ids"]
 
+    res["QUERY_FILTERS"] = dict(DISCOVERY_QUERY)
+    res["DISCOVERY_LIST_EXHAUSTED"] = "YES" if terminal is not None else "NO"
+    res["FIRST_TERMINAL_OFFSET"] = terminal
     res["discovery_pages"] = len(pages)
     res["discovery_events"] = len(events)
-    res["DISCOVERY_MARKET_ROWS"] = sum(len(e.get("markets") or []) for e in events)
+    res.update(scope_census(events))
+    # the owner's preflight spelling, same numbers, not recomputed
+    res["EVENTS_DISCOVERED"] = res["EVENTS_RETURNED"]
+    res["MARKET_ROWS"] = res["DISCOVERY_MARKET_ROWS"] = res["MARKETS_TOTAL"]
+    res["OPEN_MARKET_ROWS"] = res["MARKETS_OPEN"]
+    res["RESOLVED_MARKET_ROWS"] = res["MARKETS_RESOLVED"]
     return events
 
 
@@ -414,8 +524,21 @@ def main(argv=None):
 
     pages, samples = [], []
     with httpx.Client(timeout=30.0) as http:
-        say("=== DISCOVERY (walk to the current end, then back) ===")
+        say("=== DISCOVERY (current universe, offset walk from 0) ===")
         events = discover(http, pacer, budget, pages, samples, res)
+        say()
+        say("=== QUERY-SCOPE VERIFICATION (re-derived from the payload) ===")
+        for k in ("QUERY_FILTERS", "EVENTS_RETURNED", "EVENTS_WITH_CLOSED_TRUE",
+                  "MARKETS_TOTAL", "MARKETS_OPEN", "MARKETS_RESOLVED",
+                  "MARKETS_WITH_BID_AND_ASK", "DISCOVERY_LIST_EXHAUSTED",
+                  "FIRST_TERMINAL_OFFSET", "PAGINATION_ADVANCES", "OVERLAP_CHECK"):
+            say("%-28s %s" % (k, res.get(k)))
+        # A parameter that was SENT is not evidence about what came back.
+        scope_fail = None
+        if res.get("EVENTS_WITH_CLOSED_TRUE"):
+            scope_fail = "FAILED_QUERY_SCOPE_NOT_HONOURED"
+        elif not res.get("MARKETS_OPEN"):
+            scope_fail = "FAILED_NO_OPEN_MARKET_ROWS"
         cands = candidates(events, time.time())
         res["candidates"] = len(cands)
         say("candidates scored from discovery payload: %d" % len(cands))
@@ -438,24 +561,35 @@ def main(argv=None):
         res["PRICE_BANDS"] = sorted({c["price_band"] for c in cands if c["price_band"]})
         res["SPREAD_REGIMES"] = sorted({c["spread_bucket"] for c in cands
                                         if c["spread_bucket"]})
+        res["LEAGUES"] = sorted({str(c["league"]) for c in cands if c["league"]})
         res["QUEUE_REGIMES"] = "NOT_IDENTIFIED_AT_SELECTION (needs book reads)"
         res["SELECTION_RULE_UNCHANGED"] = "YES"
+        res["SHARED_CONCURRENCY_GROUP"] = "YES"
+        res["BLOCK_FROZEN"] = "YES"
         res["BLOCK_SIZE"] = len(block)
         res["REQUIRED_BLOCK_SIZE"] = REQUIRED_BLOCK_SIZE
         res["RATE_GATE"] = "PASS"
         res["TRACK_A_OVERLAP"] = "IMPOSSIBLE_BY_SHARED_CONCURRENCY"
         say()
         say("=== PREFLIGHT ===")
-        for k in ("PAGINATION_DIRECTION", "CURRENT_END_LOCATED",
-                  "LATEST_PAGE_EVENT_IDS", "PREVIOUS_PAGE_EVENT_IDS",
-                  "OVERLAP_CHECK", "NEWER_THAN_PRIOR_PAGE",
-                  "discovery_events", "DISCOVERY_MARKET_ROWS", "candidates",
-                  "DISTINCT_EVENTS", "SPORTS", "PRICE_BANDS", "SPREAD_REGIMES",
-                  "QUEUE_REGIMES", "SELECTION_RULE_UNCHANGED", "BLOCK_SIZE",
-                  "REQUIRED_BLOCK_SIZE", "RATE_GATE", "TRACK_A_OVERLAP"):
+        for k in ("QUERY_FILTERS", "EVENTS_DISCOVERED", "MARKET_ROWS",
+                  "OPEN_MARKET_ROWS", "RESOLVED_MARKET_ROWS",
+                  "MARKETS_WITH_BID_AND_ASK", "PAGINATION_ADVANCES",
+                  "OVERLAP_CHECK", "DISCOVERY_LIST_EXHAUSTED", "candidates",
+                  "DISTINCT_EVENTS",
+                  "PRIMARY_TAG_OBJECT_COUNT", "PRIMARY_TAG_STRING_COUNT",
+                  "PRIMARY_TAG_NULL_COUNT", "PRIMARY_TAG_UNKNOWN_COUNT",
+                  "SPORTS", "LEAGUES", "PRICE_BANDS", "SPREAD_REGIMES",
+                  "QUEUE_REGIMES", "SELECTION_RULE_UNCHANGED",
+                  "REQUIRED_BLOCK_SIZE", "BLOCK_SIZE", "BLOCK_FROZEN",
+                  "RATE_GATE", "TRACK_A_OVERLAP", "SHARED_CONCURRENCY_GROUP"):
             say("%-28s %s" % (k, res.get(k)))
         say()
-        if len(block) < REQUIRED_BLOCK_SIZE:
+        if scope_fail:
+            say("BLOCK_STATUS = %s -- the venue's own payload contradicts the "
+                "query scope; no capture, exit non-zero." % scope_fail)
+            res["BLOCK_STATUS"] = scope_fail
+        elif len(block) < REQUIRED_BLOCK_SIZE:
             say("BLOCK_STATUS = FAILED_BLOCK_TOO_SMALL "
                 "(%d < %d) -- no capture, exit non-zero."
                 % (len(block), REQUIRED_BLOCK_SIZE))
@@ -492,10 +626,16 @@ def main(argv=None):
              "REQUIRED_BLOCK_SIZE = %d" % REQUIRED_BLOCK_SIZE,
              "SCIENTIFIC_OBSERVATIONS = %s" % res.get("SCIENTIFIC_OBSERVATIONS"),
              "ECONOMICALLY_USABLE = %s" % res.get("ECONOMICALLY_USABLE"),
-             "PAGINATION_DIRECTION = %s" % res.get("PAGINATION_DIRECTION"),
-             "CURRENT_END_LOCATED = %s" % res.get("CURRENT_END_LOCATED"),
+             "QUERY_FILTERS = %s" % json.dumps(res.get("QUERY_FILTERS"),
+                                               sort_keys=True),
+             "EVENTS_DISCOVERED = %s" % res.get("EVENTS_DISCOVERED"),
+             "EVENTS_WITH_CLOSED_TRUE = %s" % res.get("EVENTS_WITH_CLOSED_TRUE"),
+             "OPEN_MARKET_ROWS = %s" % res.get("OPEN_MARKET_ROWS"),
+             "RESOLVED_MARKET_ROWS = %s" % res.get("RESOLVED_MARKET_ROWS"),
+             "MARKETS_WITH_BID_AND_ASK = %s" % res.get("MARKETS_WITH_BID_AND_ASK"),
+             "DISCOVERY_LIST_EXHAUSTED = %s" % res.get("DISCOVERY_LIST_EXHAUSTED"),
+             "PAGINATION_ADVANCES = %s" % res.get("PAGINATION_ADVANCES"),
              "OVERLAP_CHECK = %s" % res.get("OVERLAP_CHECK"),
-             "NEWER_THAN_PRIOR_PAGE = %s" % res.get("NEWER_THAN_PRIOR_PAGE"),
              "VENUE_REQUESTS = %d" % budget.spent,
              "PLANNED_MIN_GAP_S = %s" % res.get("planned_min_gap_s"),
              "HTTP_429 = %s" % res.get("http_429"),

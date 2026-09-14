@@ -492,3 +492,84 @@ BLOCK_3_DISPATCHED           = NO
 
 Both defects are mine, both are now named from evidence, and neither is fixed
 yet — the repair scope is the owner's to set before any BLOCK_3.
+
+---
+
+## REPAIR APPLIED FOR BLOCK_3 (owner-authorized, engineering only)
+
+### FIX 1 — the current-universe query
+
+```
+before   GET /v1/events {"limit": 100, "offset": N}
+after    GET /v1/events {"active": "true", "closed": "false",
+                         "limit": 100, "offset": N}
+```
+
+The archive crawl is **gone, not merely unused**: `END_PROBE_STEPS` and
+`FRAME_PAGES_BACK` are deleted and a test asserts the identifiers are absent
+from the module. Discovery now walks offsets forward from 0 and stops at the
+first empty page — a terminal boundary that is genuinely reachable, because
+the filtered list is the current universe. 2G-R's sealed log shows that list
+is ~1,900 events over 19 pages; the walk is bounded at 26.
+
+**And the query is not taken on trust.** The returned frame is re-counted from
+the payload, and the block refuses to capture if the venue contradicts the
+scope it was asked for:
+
+```
+EVENTS_RETURNED · EVENTS_WITH_CLOSED_TRUE · MARKETS_TOTAL
+MARKETS_OPEN · MARKETS_RESOLVED · MARKETS_WITH_BID_AND_ASK
+
+EVENTS_WITH_CLOSED_TRUE > 0  ->  FAILED_QUERY_SCOPE_NOT_HONOURED, exit non-zero
+MARKETS_OPEN == 0            ->  FAILED_NO_OPEN_MARKET_ROWS,      exit non-zero
+```
+
+### FIX 2 — primaryTag normalized, never keyed on
+
+`normalize_tag()` reads the venue's object **field by field**:
+
+```
+PRIMARY_TAG_SHAPE   OBJECT | STRING | NULL | UNKNOWN
+PRIMARY_TAG_ID      raw["id"]
+PRIMARY_TAG_LABEL   raw["label"]
+PRIMARY_TAG_LEAGUE  raw["league"]["slug"]  (else league name)
+PRIMARY_TAG_SPORT_ID raw["league"]["sportId"]
+
+SPORT_KEY   "sportId:<n>" from the venue's own numeric sport id, else NOT_IDENTIFIED
+LEAGUE_KEY  the league slug, else the tag slug, else the tag id, else NOT_IDENTIFIED
+```
+
+The object is never serialized and called a sport, and there is no text search
+over it — a test reads the function's own source to pin that. An unrecognised
+shape is classified `NOT_IDENTIFIED` and **carried**, not dropped and not
+crashed on; a bare string is supported as a documented compatibility case the
+venue has not been observed to send. `tags` are reduced to explicit slugs by
+name for the same reason.
+
+### Tests — 36, from real sealed venue shapes
+
+`research/run85_trackbl_venue_shapes.json` holds primaryTag objects and an
+open, quoted, admitted-type market row lifted verbatim from the BLOCK_2
+discovery samples and the 2G-R request log. The old string-only fixture is
+exactly why the defect survived, so the pins are now the venue's own bytes.
+
+```
+self-runner   36 passed, 0 failed
+pytest        36 passed, 0 failed
+whole gate    141 passed (5 suites, pytest)
+```
+
+Object / string / null / unknown tags · admission with an object tag ·
+`select_block` does not raise on real object tags · the query filters are
+present · `page=`/`skip=` still absent · offset is the only pagination ·
+the scope census · a bounded walk that never enumerates the archive ·
+BLOCK_TOO_SMALL still exits non-zero · diagnostics still seal on failure.
+
+### Not changed
+
+Admission logic, allowed market types, quote requirements, spread rules,
+price-band rules, block-size requirement, rate policy, concurrency
+architecture, the 20-minute cap, supported horizons, the no-cross-block-state
+rule, economic formulas, Track A. `SELECTION_RULE_VERSION` stays `BL-SELECT-1`
+because the selection *rule* is untouched; only the payload it is fed and the
+way a tag is read have been repaired.
