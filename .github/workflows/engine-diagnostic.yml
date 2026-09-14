@@ -58,6 +58,9 @@ on:
       # commits touch research/** only, which the first line already covers;
       # the workflow file is named for when the workflow itself is edited.
       - ".github/workflows/run85-phase2-capture.yml"
+      # Track B-L blocks: same reasoning, a standalone public-data research
+      # job on the public gateway with no credential and no order path.
+      - ".github/workflows/run85-trackbl-block.yml"
       # And this file. paths-ignore skips a run only when EVERY changed file
       # matches, so without this line a commit that merely edits the probe's
       # own trigger config fires the probe -- which is exactly the spend the
