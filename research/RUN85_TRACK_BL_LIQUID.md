@@ -910,6 +910,123 @@ spread/mid). BLOCK_3 deliberately selected the tightest books available and
 still saw zero touches, in markets whose quotes did not move at all for 17
 minutes. Tightness was not the binding constraint; **trading activity was**.
 
+---
+
+## BL-SELECT-1 RETIRED · BL-SELECT-2 EFFECTIVE
+
+```
+BL-SELECT-1                  RETIRED_FOR_TRACK_B_L
+REASON                       ACTIVITY_BLIND_SELECTION
+EFFECTIVE UNTIL              BLOCK_3 (2026-09-14T17:13:39Z), inclusive
+BLOCK_1 / BLOCK_2 / BLOCK_3  PRESERVED UNDER BL-SELECT-1, not reinterpreted
+
+BL-SELECT-2                  EFFECTIVE FROM BLOCK_4 (2026-09-14)
+```
+
+### Why BL-SELECT-1 was retired
+
+It scored candidates from the discovery payload alone, and `/v1/events` carries
+**no activity field of any kind** — the only quantity in a market row is
+`minimumTradeQty`. Ranking on tightest spread/mid therefore selects the markets
+whose spread is narrow *because nobody is there*. BLOCK_3's cohort contained two
+markets that had not traded in ~55 hours and three with negligible or no
+lifetime volume, and returned **0 first-leg touches in 24 cycles**.
+
+BLOCK_3 did **not** establish unfavourable maker economics. It established that
+the selection rule was blind to the one variable that decides whether a passive
+experiment can observe anything.
+
+### What changed
+
+**A stage 2 exists.** Discovery (stage 1) now produces a *prospective
+shortlist*, and the runner then spends `/book` requests on that shortlist to
+read the venue's own activity fields before anything is frozen.
+
+**Stage 1 no longer ranks on spread/mid.** It stratifies by price band and ranks
+by **imminence** — `|gameStartTime − now|` — which is knowable at selection time,
+is not an outcome, and is the only prospective activity proxy discovery offers.
+One market per event.
+
+**Stage 2 reads fields that exist only in `/book`:**
+
+```
+sharesTraded · notionalTraded · openInterest · lastTradeSetTime
+best bid / ask · displayed sizes · tick size · state
+```
+
+derived into `SECONDS_SINCE_LAST_TRADE`, `SHARES_TRADED`, `NOTIONAL_TRADED`,
+`OPEN_INTEREST`, `SPREAD_TICKS`, `SPREAD_ABSOLUTE`, `SPREAD_OVER_MID`,
+`BEST_BID_SIZE`, `BEST_ASK_SIZE`, each on a stamped selection-time receipt.
+Receipts are sealed whether or not the block succeeds.
+
+**Distributions are printed before thresholds are applied.** p10/p25/median/
+p75/p90 for seconds-since-last-trade, notional, shares and open interest.
+
+**The activity threshold is prospective twice over.** A market must have traded
+inside `MAX_SECONDS_SINCE_LAST_TRADE = 3600 s` — a floor reasoned from the
+20-minute block length and fixed before any data — *and* sit in the more active
+half of what was actually probed today. Neither half looks at a touch outcome,
+and the median is read off the distribution printed directly above it, so the
+rule is auditable after the fact.
+
+**Three components, never one score.** `ACTIVITY`, `LIQUIDITY` and
+`DISPLAYED_PAIR_BUDGET` are computed by separate functions and reported
+separately. A test asserts no `total_score` / `composite_score` / `rank_score`
+identifier exists. Enormous volume with no maker cushion fails the economic
+gate; a beautiful spread with no trading fails the activity gate.
+
+**Diversity is targeted, never manufactured.** `NEAR_MID ≥ 2`, `MODERATE ≥ 2`,
+`TAIL ≤ 2`, distinct events. The TAIL ceiling is *enforced*; the NEAR_MID and
+MODERATE targets are *attempted*, and a board that cannot supply them yields a
+smaller block with `BAND_TARGET_SHORTFALL_REASON =
+BOARD_DID_NOT_SUPPLY_ELIGIBLE_MARKETS_IN_BAND`. A test proves a TAIL-only board
+returns 2 markets, not 6 — it does not relax the ceiling to fill the block.
+
+### Rate budget, computed before any venue contact
+
+```
+TRACK_A_RATE            0.2860 rps   its design maximum
+B_L_DISCOVERY_RATE      0.4000 rps   16 pages at the 2.5 s floor
+B_L_BOOK_PROBE_RATE     0.4000 rps   <=64 probes at the floor
+B_L_CAPTURE_RATE        0.0952 rps   120 reads over 1,260 s
+
+TOTAL_WORST_CASE_RATE   0.4000 rps   NOT A SUM
+```
+
+It is not a sum because the shared concurrency group is platform-level mutual
+exclusion: at most one stream executes at any instant, and every B-L request
+waits behind the same 2.5 s floor. The worst case is a single stream at the
+floor, which is the established nominal. Adding the rates would describe a world
+the group makes impossible.
+
+```
+REQUEST BUDGET     16 + 64 + 120 = 200 of 220
+MIN_SPACING_S      2.5, unchanged and never weakened to fit the shortlist
+pre-capture wall   200 s (3.3 min)
+job wall           ~20.7 min, so a Track A segment now waits ~21 min, not ~18
+```
+
+Discovery was reduced from 26 pages to 16 to buy the probe budget — the trade is
+a narrower discovery prefix for actual activity evidence, and
+`DISCOVERY_LIST_EXHAUSTED = NO` continues to be reported and carried.
+
+### Not changed
+
+Market-type and structural eligibility, quote requirements, the economic
+definitions, horizons, block size requirement, the 20-minute cap, the
+no-cross-block-state rule, the shared concurrency group, the 2.5 s floor, and
+Track A. Tests: **49 passing** under both the self-runner and pytest.
+
+### BLOCK_4's question
+
+Not profitability. **Does activity-aware selection produce markets in which
+hypothetical resting orders interact with the market often enough for passive
+execution to be measurable at all?** Primary outputs stay `FIRST_LEG_TOUCH`,
+`BOTH_LEGS_TOUCH`, `COMPLEMENT_AFTER_FIRST`, `RESIDUAL_MARKOUT`, and touch
+remains an upper-bound proxy, never a fill.
+
+---
+
 ### What this does not authorize
 
 No live capital. No order placement. No `mirror_live` change. A tiny live

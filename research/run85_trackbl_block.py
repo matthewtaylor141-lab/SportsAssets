@@ -76,6 +76,7 @@ chasing. A touch is never a fill.
 from __future__ import annotations
 
 import argparse
+import datetime
 import gzip
 import hashlib
 import importlib.util
@@ -98,8 +99,13 @@ _b = importlib.util.spec_from_file_location(
 B = importlib.util.module_from_spec(_b)
 _b.loader.exec_module(B)
 
+_fe = importlib.util.spec_from_file_location(
+    "run85fee", Path(__file__).with_name("run85_trackb_fees.py"))
+FEE = importlib.util.module_from_spec(_fe)
+_fe.loader.exec_module(FEE)
+
 PHASE = "run85/trackbl/block/1"
-SELECTION_RULE_VERSION = "BL-SELECT-1"
+SELECTION_RULE_VERSION = "BL-SELECT-2"
 
 SPACING_S = 2.5
 CYCLE_S = 300.0
@@ -110,7 +116,7 @@ MAX_CYCLES = 4                                   # 20 minutes
 DERIVABLE_LONG_HORIZONS = {"5m": 1, "10m": 2, "15m": 3}
 UNREACHABLE_HORIZONS = ("30m", "60m")
 
-MAX_DISCOVERY_PAGES = 26
+MAX_DISCOVERY_PAGES = 16
 MAX_VENUE_REQUESTS = 220
 PAGE_LIMIT = 100
 # THE BLOCK_2 REPAIR. The unfiltered /v1/events is the venue's ENTIRE HISTORICAL
@@ -122,6 +128,28 @@ PAGE_LIMIT = 100
 # the current universe, so offset 0 is the right place to start and there is no
 # archive to crawl. Enumeration of history is not the objective and is not done.
 DISCOVERY_QUERY = {"active": "true", "closed": "false"}
+
+# ---------------------------------------------------------------- BL-SELECT-2
+# BL-SELECT-1 IS RETIRED: ACTIVITY_BLIND_SELECTION. It scored candidates from
+# the discovery payload alone, and /v1/events carries NO activity field at all
+# (the only quantity is minimumTradeQty). Ranking on tightest spread/mid then
+# selects the markets whose spread is narrow BECAUSE nobody is there: BLOCK_3's
+# cohort included two markets that had not traded in ~55 hours and three with
+# negligible or no lifetime volume, and produced 0 first-leg touches in 24
+# cycles. BLOCK_3 is preserved exactly as it is, under BL-SELECT-1.
+#
+# BL-SELECT-2 adds a STAGE 2: probe /book for a prospective shortlist and read
+# the venue's own activity fields before freezing anything. Thresholds are
+# derived from the probed distribution and from the experiment's own 20-minute
+# length -- never from any subsequent touch outcome.
+MAX_BOOK_PROBES = 64             # stage-2 /book probes, inside the rate budget
+SHORTLIST_PER_BAND = {"NEAR_MID": 28, "MODERATE": 22, "TAIL": 14}
+# A market that has not traded in an hour is unlikely to trade in the next 20
+# minutes. This floor is reasoned from the block length, fixed BEFORE the data.
+MAX_SECONDS_SINCE_LAST_TRADE = 3600.0
+BAND_TARGET = {"NEAR_MID": 2, "MODERATE": 2, "TAIL": 2}   # TAIL is a CEILING
+BAND_CEILING = {"TAIL": 2}
+HYPOTHETICAL_PAIR_CONTRACTS = 100        # for the displayed budget component
 BODY_SAMPLE_EVENTS = 50          # head and tail retained per page, for diagnosis
 REQUIRED_BLOCK_SIZE = 4          # below this the block FAILS; the target is N_LANES
 EVENTS_PATH = "/v1/events"
@@ -135,6 +163,18 @@ GAME_TYPES = ("SPORTS_MARKET_TYPE_MONEYLINE", "SPORTS_MARKET_TYPE_SPREAD",
 def say(s=""):
     print(s)
     sys.stdout.flush()
+
+
+def _fmt(v):
+    return "-" if v is None else ("%.4f" % v if isinstance(v, float) else str(v))
+
+
+def _census(rows, key):
+    out = {}
+    for r in rows:
+        for reason in r.get(key) or []:
+            out[reason] = out.get(reason, 0) + 1
+    return dict(sorted(out.items()))
 
 
 class Budget:
@@ -291,6 +331,251 @@ def candidates(events, now_epoch):
                 "state": m.get("status"),
                 "selected_from": "discovery_payload",
             })
+    return out
+
+
+# ======================= BL-SELECT-2: STAGE 2 AND THE GATES =================
+def _epoch(ts):
+    """Venue RFC3339 -> epoch seconds, or None. Never guessed."""
+    if not isinstance(ts, str) or not ts:
+        return None
+    t = ts.replace("Z", "+00:00")
+    if "." in t:                      # nanosecond precision the stdlib refuses
+        head, rest = t.split(".", 1)
+        frac = "".join(ch for ch in rest if ch.isdigit())[:6]
+        tail = rest[len(frac):] if rest[len(frac):].startswith(("+", "-")) else "+00:00"
+        for ch in rest:
+            if ch in "+-":
+                tail = rest[rest.index(ch):]
+                break
+        t = "%s.%s%s" % (head, frac or "0", tail)
+    try:
+        return datetime.datetime.fromisoformat(t).timestamp()
+    except ValueError:
+        return None
+
+
+def shortlist(cands, now_epoch):
+    """STAGE 1 -- a prospective shortlist, stratified by price band.
+
+    Ranked on TIME TO GAME START, not on spread/mid. Discovery carries no
+    activity field, so imminence is the only prospective activity proxy
+    available before spending a /book request, and it uses nothing that
+    happens after selection. One market per event.
+    """
+    best = {}
+    for c in cands:
+        eid = c["native_event_id"]
+        st = _epoch(c.get("game_start_time"))
+        c = dict(c, start_epoch=st,
+                 seconds_to_start=(st - now_epoch) if st is not None else None)
+        prev = best.get(eid)
+        if prev is None or (D(c["spread_over_mid"] or "999")
+                            < D(prev["spread_over_mid"] or "999")):
+            best[eid] = c
+    by_band = {}
+    for c in best.values():
+        by_band.setdefault(c["price_band"] or "UNKNOWN", []).append(c)
+
+    def key(c):
+        # imminent first; a game already under way sorts by how recently it
+        # started. Unknown start times go last, deterministically.
+        s = c["seconds_to_start"]
+        return (s is None, abs(s) if s is not None else 0.0, c["market_slug"] or "")
+
+    out = []
+    for band, cap in SHORTLIST_PER_BAND.items():
+        rows = sorted(by_band.get(band, []), key=key)
+        out.extend(rows[:cap])
+    return out[:MAX_BOOK_PROBES]
+
+
+def activity_fields(row, probe_epoch):
+    """STAGE 2 -- the venue's own activity and liquidity fields, by name.
+
+    Every one of these is present in /book and ABSENT from /v1/events, which is
+    precisely why BL-SELECT-1 could not see them.
+    """
+    md = ((row.get("body") or {}).get("marketData") or {})
+    st = md.get("stats") or {}
+
+    def num(v):
+        raw = v.get("value") if isinstance(v, dict) else v
+        try:
+            return D(str(raw))
+        except Exception:                                  # noqa: BLE001
+            return None
+
+    bids, offers = md.get("bids") or [], md.get("offers") or []
+    b = bq = a = aq = None
+    for lv in bids:
+        p, q = amount(lv.get("px")), num(lv.get("qty"))
+        if p is None or q is None or q <= 0:
+            continue
+        if b is None or p > b:
+            b, bq = p, q
+    for lv in offers:
+        p, q = amount(lv.get("px")), num(lv.get("qty"))
+        if p is None or q is None or q <= 0:
+            continue
+        if a is None or p < a:
+            a, aq = p, q
+    last = _epoch(st.get("lastTradeSetTime"))
+    return {
+        "market_state": md.get("state"),
+        "SECONDS_SINCE_LAST_TRADE": (probe_epoch - last) if last is not None else None,
+        "last_trade_set_time": st.get("lastTradeSetTime"),
+        "SHARES_TRADED": num(st.get("sharesTraded")),
+        "NOTIONAL_TRADED": num(st.get("notionalTraded")),
+        "OPEN_INTEREST": num(st.get("openInterest")),
+        "BEST_BID": b, "BEST_ASK": a,
+        "BEST_BID_SIZE": bq, "BEST_ASK_SIZE": aq,
+        "probe_epoch": probe_epoch,
+        "selected_from": "book_probe_receipt",
+    }
+
+
+def derive_economics(af, tick):
+    """SPREAD_* and the DISPLAYED_PAIR_BUDGET component. Independent of activity."""
+    b, a = af.get("BEST_BID"), af.get("BEST_ASK")
+    if b is None or a is None or a <= b or b <= 0:
+        return {"SPREAD_ABSOLUTE": None, "SPREAD_TICKS": None,
+                "SPREAD_OVER_MID": None, "MID": None,
+                "PRICE_BAND": None, "DISPLAYED_PAIR_BUDGET": None,
+                "DISPLAYED_SPREAD_CAPTURE": None, "REBATE_LONG": None,
+                "REBATE_SHORT": None}
+    mid, sp = (a + b) / 2, a - b
+    ticks = None
+    if tick:
+        t = D(str(tick))
+        if t > 0:
+            ticks = int((sp / t).to_integral_value())
+    c = HYPOTHETICAL_PAIR_CONTRACTS
+    _, rl = FEE.maker_rebate(c, b)
+    _, rs = FEE.maker_rebate(c, D(1) - a)
+    cap = sp * c
+    return {"SPREAD_ABSOLUTE": sp, "SPREAD_TICKS": ticks,
+            "SPREAD_OVER_MID": sp / mid, "MID": mid,
+            "PRICE_BAND": price_band(mid),
+            "DISPLAYED_SPREAD_CAPTURE": cap,
+            "REBATE_LONG": rl, "REBATE_SHORT": rs,
+            "DISPLAYED_PAIR_BUDGET": cap + rl + rs}
+
+
+def pctiles(vals):
+    """p10/p25/median/p75/p90 over the non-null values, plus n and n_missing."""
+    xs = sorted(float(v) for v in vals if v is not None)
+    out = {"n": len(xs), "n_missing": len(list(vals)) - len(xs)}
+    if not xs:
+        return out
+    def at(p):
+        return xs[min(len(xs) - 1, max(0, int(round(p * (len(xs) - 1)))))]
+    out.update({"p10": at(0.10), "p25": at(0.25), "median": at(0.50),
+                "p75": at(0.75), "p90": at(0.90)})
+    return out
+
+
+def activity_gate(probed, dist):
+    """The ACTIVITY component. Threshold is prospective, twice over.
+
+    A market passes only if it BOTH traded inside the reasoned absolute floor
+    (MAX_SECONDS_SINCE_LAST_TRADE, fixed from the 20-minute block length before
+    any data) AND sits in the more active half of what was actually probed
+    today. Neither half looks at any subsequent touch outcome; the second is
+    read off the distribution printed above it, so the rule is auditable.
+    """
+    med_sec = dist["SECONDS_SINCE_LAST_TRADE"].get("median")
+    med_not = dist["NOTIONAL_TRADED"].get("median")
+    for m in probed:
+        secs, notl = m.get("SECONDS_SINCE_LAST_TRADE"), m.get("NOTIONAL_TRADED")
+        oi = m.get("OPEN_INTEREST")
+        reasons = []
+        if secs is None:
+            reasons.append("NO_LAST_TRADE_TIME")
+        elif secs > MAX_SECONDS_SINCE_LAST_TRADE:
+            reasons.append("STALE_GT_%ds" % int(MAX_SECONDS_SINCE_LAST_TRADE))
+        elif med_sec is not None and secs > med_sec:
+            reasons.append("SLOWER_THAN_PROBED_MEDIAN")
+        if notl is None or notl <= 0:
+            reasons.append("NO_TRADED_NOTIONAL")
+        elif med_not is not None and float(notl) < med_not:
+            reasons.append("NOTIONAL_BELOW_PROBED_MEDIAN")
+        if oi is None or oi <= 0:
+            reasons.append("NO_OPEN_INTEREST")
+        m["ACTIVITY_ELIGIBLE"] = not reasons
+        m["activity_reject"] = reasons
+    return probed
+
+
+def economic_gate(probed):
+    """The LIQUIDITY and DISPLAYED_PAIR_BUDGET components, reported separately."""
+    for m in probed:
+        reasons = []
+        if m.get("market_state") != "MARKET_STATE_OPEN":
+            reasons.append("NOT_OPEN")
+        if m.get("BEST_BID") is None or m.get("BEST_ASK") is None:
+            reasons.append("ONE_SIDED")
+        if not m.get("SPREAD_TICKS"):
+            reasons.append("NO_POSITIVE_SPREAD")
+        for side in ("BEST_BID_SIZE", "BEST_ASK_SIZE"):
+            if not m.get(side) or m[side] <= 0:
+                reasons.append("NO_" + side)
+        bud = m.get("DISPLAYED_PAIR_BUDGET")
+        if bud is None or bud <= 0:
+            reasons.append("NO_DISPLAYED_BUDGET")
+        m["ECONOMICALLY_ELIGIBLE"] = not reasons
+        m["economic_reject"] = reasons
+    return probed
+
+
+def select_block_v2(final, cap=N_LANES):
+    """Diversity-aware selection. Price regimes are TARGETS, never manufactured.
+
+    NEAR_MID >= 2, MODERATE >= 2, TAIL <= 2 where the board supplies them. The
+    TAIL ceiling is enforced; the NEAR_MID and MODERATE targets are attempted
+    and an inability to meet them is REPORTED, never fixed by relaxing a gate.
+    """
+    by_band = {}
+    for m in final:
+        by_band.setdefault(m.get("PRICE_BAND") or "UNKNOWN", []).append(m)
+    for rows in by_band.values():
+        # most recently traded first, then deterministic by slug
+        rows.sort(key=lambda r: ((r.get("SECONDS_SINCE_LAST_TRADE")
+                                  if r.get("SECONDS_SINCE_LAST_TRADE") is not None
+                                  else float("inf")), r["market_slug"] or ""))
+    out, used_events = [], set()
+
+    def take(band, n):
+        got = 0
+        for m in by_band.get(band, []):
+            if got >= n or len(out) >= cap:
+                break
+            if m in out or m["native_event_id"] in used_events:
+                continue
+            out.append(m)
+            used_events.add(m["native_event_id"])
+            got += 1
+        return got
+
+    for band, n in BAND_TARGET.items():
+        take(band, n)
+    # fill any remainder from the most active eligible markets, TAIL capped
+    rest = sorted((m for m in final if m not in out),
+                  key=lambda r: ((r.get("SECONDS_SINCE_LAST_TRADE")
+                                  if r.get("SECONDS_SINCE_LAST_TRADE") is not None
+                                  else float("inf")), r["market_slug"] or ""))
+    for m in rest:
+        if len(out) >= cap:
+            break
+        band = m.get("PRICE_BAND") or "UNKNOWN"
+        ceil = BAND_CEILING.get(band)
+        if ceil is not None and sum(1 for x in out
+                                    if (x.get("PRICE_BAND") or "UNKNOWN") == band) >= ceil:
+            continue
+        if m["native_event_id"] in used_events:
+            continue
+        out.append(m)
+        used_events.add(m["native_event_id"])
     return out
 
 
@@ -522,7 +807,28 @@ def main(argv=None):
         "planned_start_utc": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
     }
 
-    pages, samples = [], []
+    pages, samples, probe_rows = [], [], []
+    res["planned_capture_reads"] = N_LANES * MAX_CYCLES * len(BURST_OFFSETS)
+    say("=== RATE BUDGET, COMPUTED BEFORE ANY VENUE CONTACT ===")
+    say("TRACK_A_RATE            0.2860 rps  (its design maximum)")
+    say("B_L_DISCOVERY_RATE      %.4f rps  (%d pages at the %.1f s floor)"
+        % (1 / SPACING_S, MAX_DISCOVERY_PAGES, SPACING_S))
+    say("B_L_BOOK_PROBE_RATE     %.4f rps  (<=%d probes at the floor)"
+        % (1 / SPACING_S, MAX_BOOK_PROBES))
+    say("B_L_CAPTURE_RATE        %.4f rps  (%d reads over %.0f s)"
+        % (res["planned_capture_reads"] / (MAX_CYCLES * CYCLE_S + max(BURST_OFFSETS)),
+           res["planned_capture_reads"], MAX_CYCLES * CYCLE_S + max(BURST_OFFSETS)))
+    say("TOTAL_WORST_CASE_RATE   %.4f rps  -- NOT A SUM. The shared concurrency"
+        % (1 / SPACING_S))
+    say("  group is platform-level mutual exclusion, so at most one stream runs")
+    say("  at any instant and every request waits behind the same floor. Adding")
+    say("  the rates would describe a world the group makes impossible.")
+    say("REQUEST BUDGET          %d + %d + %d = %d of %d"
+        % (MAX_DISCOVERY_PAGES, MAX_BOOK_PROBES, res["planned_capture_reads"],
+           MAX_DISCOVERY_PAGES + MAX_BOOK_PROBES + res["planned_capture_reads"],
+           MAX_VENUE_REQUESTS))
+    say("MIN_REQUEST_SPACING_S   %.1f  (unchanged, never weakened)" % SPACING_S)
+    say()
     with httpx.Client(timeout=30.0) as http:
         say("=== DISCOVERY (current universe, offset walk from 0) ===")
         events = discover(http, pacer, budget, pages, samples, res)
@@ -539,31 +845,132 @@ def main(argv=None):
             scope_fail = "FAILED_QUERY_SCOPE_NOT_HONOURED"
         elif not res.get("MARKETS_OPEN"):
             scope_fail = "FAILED_NO_OPEN_MARKET_ROWS"
-        cands = candidates(events, time.time())
-        res["candidates"] = len(cands)
-        say("candidates scored from discovery payload: %d" % len(cands))
-        block = select_block(cands)
+        now = time.time()
+        cands = candidates(events, now)
+        res["candidates"] = res["STRUCTURALLY_ELIGIBLE_MARKETS"] = len(cands)
+        res["CURRENT_EVENTS"] = res["EVENTS_DISCOVERED"]
+        say("structurally eligible markets: %d" % len(cands))
+
+        # ---------------- STAGE 1: prospective shortlist ----------------
+        short = shortlist(cands, now)
+        res["SHORTLIST"] = len(short)
+        say("stage-1 shortlist (by imminence, stratified by band): %d" % len(short))
+        say("   %s" % {b: sum(1 for m in short if m["price_band"] == b)
+                       for b in SHORTLIST_PER_BAND})
+
+        # ---------------- STAGE 2: /book activity probe ----------------
+        say()
+        say("=== STAGE 2: BOOK ACTIVITY PROBE ===")
+        probed = []
+        for m in short:
+            if budget.spent + 1 > MAX_VENUE_REQUESTS - res["planned_capture_reads"]:
+                say("   probe budget exhausted at %d probes" % len(probed))
+                break
+            budget.take()
+            r, _rows = B.get_paced(http, BOOK_PATH % m["market_slug"], pacer, None)
+            probe_rows.append({"market_slug": m["market_slug"],
+                               "http_status": r.get("http_status"),
+                               "response_sha256": r.get("response_sha256"),
+                               "probe_wall_utc": r.get("local_request_wall_utc"),
+                               "body": r.get("body")})
+            if r.get("http_status") == 200:
+                pacer.on_success()
+            af = activity_fields(r, time.time())
+            ec = derive_economics(af, m.get("tick_size"))
+            probed.append({**m, **af, **ec})
+        res["BOOKS_PROBED"] = len(probed)
+        say("   books probed: %d" % len(probed))
+
+        # ---- distributions FIRST, thresholds after -- never the reverse ----
+        dist = {k: pctiles([m.get(k) for m in probed]) for k in
+                ("SECONDS_SINCE_LAST_TRADE", "NOTIONAL_TRADED",
+                 "SHARES_TRADED", "OPEN_INTEREST")}
+        res["RECENT_TRADE_DISTRIBUTION"] = dist["SECONDS_SINCE_LAST_TRADE"]
+        res["NOTIONAL_DISTRIBUTION"] = dist["NOTIONAL_TRADED"]
+        res["SHARES_DISTRIBUTION"] = dist["SHARES_TRADED"]
+        res["OPEN_INTEREST_DISTRIBUTION"] = dist["OPEN_INTEREST"]
+        say()
+        say("   CANDIDATE DISTRIBUTIONS (before any threshold is applied)")
+        for k, d in dist.items():
+            say("     %-26s n=%-4s miss=%-4s p10=%-12s p25=%-12s med=%-12s "
+                "p75=%-12s p90=%s"
+                % (k, d.get("n"), d.get("n_missing"),
+                   _fmt(d.get("p10")), _fmt(d.get("p25")), _fmt(d.get("median")),
+                   _fmt(d.get("p75")), _fmt(d.get("p90"))))
+
+        activity_gate(probed, dist)
+        economic_gate(probed)
+        act = [m for m in probed if m["ACTIVITY_ELIGIBLE"]]
+        eco = [m for m in probed if m["ECONOMICALLY_ELIGIBLE"]]
+        final = [m for m in probed
+                 if m["ACTIVITY_ELIGIBLE"] and m["ECONOMICALLY_ELIGIBLE"]]
+        res["ACTIVITY_ELIGIBLE"] = len(act)
+        res["ECONOMICALLY_ELIGIBLE"] = len(eco)
+        res["FINAL_CANDIDATES"] = len(final)
+        res["activity_rejects"] = _census(probed, "activity_reject")
+        res["economic_rejects"] = _census(probed, "economic_reject")
+        say()
+        say("   ACTIVITY_ELIGIBLE        %d   rejects %s"
+            % (len(act), res["activity_rejects"]))
+        say("   ECONOMICALLY_ELIGIBLE    %d   rejects %s"
+            % (len(eco), res["economic_rejects"]))
+        say("   FINAL_CANDIDATES         %d   (both gates)" % len(final))
+
+        block = select_block_v2(final)
         meta["selection_timestamp_utc"] = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
         res["block_size"] = len(block)
         say()
         say("=== FROZEN BLOCK %s (%d markets) ===" % (a.block, len(block)))
         for m in block:
-            say("  %-46s %-8s mid=%-8s sprd=%-8s s/m=%-7s %s"
-                % (str(m["market_slug"])[:46], m["sport"], m["mid"], m["spread"],
-                   (m["spread_over_mid"] or "")[:6], m["price_band"]))
+            say("  %s" % str(m["market_slug"])[:70])
+            say("     sport=%-14s league=%-12s event=%s"
+                % (m["sport"], str(m["league"])[:12], m["native_event_id"]))
+            say("     price mid=%-8s spread=%-8s ticks=%-3s s/m=%-8s band=%s"
+                % (m.get("MID"), m.get("SPREAD_ABSOLUTE"), m.get("SPREAD_TICKS"),
+                   _fmt(float(m["SPREAD_OVER_MID"]) if m.get("SPREAD_OVER_MID")
+                        is not None else None), m.get("PRICE_BAND")))
+            say("     ACTIVITY   since_last_trade=%-10s shares=%-12s notional=%-14s oi=%s"
+                % (_fmt(m.get("SECONDS_SINCE_LAST_TRADE")), m.get("SHARES_TRADED"),
+                   m.get("NOTIONAL_TRADED"), m.get("OPEN_INTEREST")))
+            say("     LIQUIDITY  best_bid_size=%-12s best_ask_size=%s"
+                % (m.get("BEST_BID_SIZE"), m.get("BEST_ASK_SIZE")))
+            say("     BUDGET     spread_capture=%-10s reb_long=%-8s reb_short=%-8s "
+                "pre_adverse_selection_pair_budget=%s"
+                % (m.get("DISPLAYED_SPREAD_CAPTURE"), m.get("REBATE_LONG"),
+                   m.get("REBATE_SHORT"), m.get("DISPLAYED_PAIR_BUDGET")))
         blob = json.dumps(block, indent=1, sort_keys=True).encode()
         (out / "block_cohort.json").write_bytes(blob)
         meta["block_cohort_sha256"] = hashlib.sha256(blob).hexdigest()
 
         # ---- PREFLIGHT, reported before anything is captured ----
-        res["DISTINCT_EVENTS"] = len({c["native_event_id"] for c in cands})
-        res["SPORTS"] = sorted({c["sport"] for c in cands if c["sport"]})
-        res["PRICE_BANDS"] = sorted({c["price_band"] for c in cands if c["price_band"]})
-        res["SPREAD_REGIMES"] = sorted({c["spread_bucket"] for c in cands
-                                        if c["spread_bucket"]})
-        res["LEAGUES"] = sorted({str(c["league"]) for c in cands if c["league"]})
+        res["DISTINCT_EVENTS"] = len({m["native_event_id"] for m in block})
+        res["SPORTS"] = sorted({m["sport"] for m in block if m.get("sport")})
+        res["PRICE_BANDS"] = sorted({m.get("PRICE_BAND") for m in block
+                                     if m.get("PRICE_BAND")})
+        res["SPREAD_REGIMES"] = sorted({spread_bucket(m.get("SPREAD_ABSOLUTE"),
+                                                      m.get("tick_size"))
+                                        for m in block} - {None})
+        res["LEAGUES"] = sorted({str(m["league"]) for m in block if m.get("league")})
+        bands = [m.get("PRICE_BAND") for m in block]
+        res["NEAR_MID_COUNT"] = bands.count("NEAR_MID")
+        res["MODERATE_COUNT"] = bands.count("MODERATE")
+        res["TAIL_COUNT"] = bands.count("TAIL")
+        res["SELECTED_MARKETS"] = len(block)
+        res["BAND_TARGETS_MET"] = {
+            "NEAR_MID>=2": res["NEAR_MID_COUNT"] >= 2,
+            "MODERATE>=2": res["MODERATE_COUNT"] >= 2,
+            "TAIL<=2": res["TAIL_COUNT"] <= 2}
+        # An unmet target is REPORTED. It is never met by relaxing a gate.
+        res["BAND_TARGET_SHORTFALL_REASON"] = (
+            "BOARD_DID_NOT_SUPPLY_ELIGIBLE_MARKETS_IN_BAND"
+            if not all(res["BAND_TARGETS_MET"].values()) else None)
         res["QUEUE_REGIMES"] = "NOT_IDENTIFIED_AT_SELECTION (needs book reads)"
-        res["SELECTION_RULE_UNCHANGED"] = "YES"
+        # The rule DID change between blocks: BLOCK_3 ran BL-SELECT-1, this runs
+        # BL-SELECT-2. What is unchanged is the rule WITHIN this block -- frozen
+        # before the first capture read and never touched afterwards. Spelling it
+        # the long way so nobody reads "UNCHANGED" as "same as BLOCK_3".
+        res["SELECTION_RULE_UNCHANGED_WITHIN_BLOCK"] = "YES"
+        res["SELECTION_RULE_SUPERSEDES"] = "BL-SELECT-1 (RETIRED_FOR_TRACK_B_L)"
         res["SHARED_CONCURRENCY_GROUP"] = "YES"
         res["BLOCK_FROZEN"] = "YES"
         res["BLOCK_SIZE"] = len(block)
@@ -572,15 +979,25 @@ def main(argv=None):
         res["TRACK_A_OVERLAP"] = "IMPOSSIBLE_BY_SHARED_CONCURRENCY"
         say()
         say("=== PREFLIGHT ===")
-        for k in ("QUERY_FILTERS", "EVENTS_DISCOVERED", "MARKET_ROWS",
-                  "OPEN_MARKET_ROWS", "RESOLVED_MARKET_ROWS",
-                  "MARKETS_WITH_BID_AND_ASK", "PAGINATION_ADVANCES",
-                  "OVERLAP_CHECK", "DISCOVERY_LIST_EXHAUSTED", "candidates",
-                  "DISTINCT_EVENTS",
+        res["SELECTION_RULE_VERSION"] = SELECTION_RULE_VERSION
+        for k in ("QUERY_FILTERS", "CURRENT_EVENTS", "EVENTS_DISCOVERED",
+                  "EVENTS_WITH_CLOSED_TRUE", "MARKET_ROWS", "OPEN_MARKET_ROWS",
+                  "RESOLVED_MARKET_ROWS", "MARKETS_WITH_BID_AND_ASK",
+                  "PAGINATION_ADVANCES", "OVERLAP_CHECK",
+                  "DISCOVERY_LIST_EXHAUSTED",
+                  "STRUCTURALLY_ELIGIBLE_MARKETS", "SHORTLIST", "BOOKS_PROBED",
+                  "RECENT_TRADE_DISTRIBUTION", "NOTIONAL_DISTRIBUTION",
+                  "SHARES_DISTRIBUTION", "OPEN_INTEREST_DISTRIBUTION",
+                  "ACTIVITY_ELIGIBLE", "ECONOMICALLY_ELIGIBLE",
+                  "FINAL_CANDIDATES", "SELECTED_MARKETS", "DISTINCT_EVENTS",
+                  "NEAR_MID_COUNT", "MODERATE_COUNT", "TAIL_COUNT",
+                  "BAND_TARGETS_MET", "BAND_TARGET_SHORTFALL_REASON",
                   "PRIMARY_TAG_OBJECT_COUNT", "PRIMARY_TAG_STRING_COUNT",
                   "PRIMARY_TAG_NULL_COUNT", "PRIMARY_TAG_UNKNOWN_COUNT",
                   "SPORTS", "LEAGUES", "PRICE_BANDS", "SPREAD_REGIMES",
-                  "QUEUE_REGIMES", "SELECTION_RULE_UNCHANGED",
+                  "QUEUE_REGIMES", "SELECTION_RULE_VERSION",
+                  "SELECTION_RULE_SUPERSEDES",
+                  "SELECTION_RULE_UNCHANGED_WITHIN_BLOCK",
                   "REQUIRED_BLOCK_SIZE", "BLOCK_SIZE", "BLOCK_FROZEN",
                   "RATE_GATE", "TRACK_A_OVERLAP", "SHARED_CONCURRENCY_GROUP"):
             say("%-28s %s" % (k, res.get(k)))
@@ -616,6 +1033,12 @@ def main(argv=None):
             fh.write(json.dumps(r, default=str) + "\n")
     with gzip.open(out / "discovery_body_samples.jsonl.gz", "wt") as fh:
         for r in samples:
+            fh.write(json.dumps(r, default=str) + "\n")
+    # BL-SELECT-2: the stage-2 probe receipts are the selection-time evidence.
+    # Sealed whether or not the block succeeds, for the same reason the
+    # discovery bodies are.
+    with gzip.open(out / "book_probe_receipts.jsonl.gz", "wt") as fh:
+        for r in probe_rows:
             fh.write(json.dumps(r, default=str) + "\n")
 
     lines = ["=== RUN 85 TRACK B-L BLOCK %s ===" % a.block,

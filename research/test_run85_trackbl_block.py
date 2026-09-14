@@ -10,6 +10,7 @@ Run:  python3 -m pytest research/test_run85_trackbl_block.py -q
 """
 from __future__ import annotations
 
+import datetime
 import importlib.util
 import json
 import re
@@ -51,7 +52,7 @@ def test_a_block_carries_no_state_from_any_earlier_block():
                    "carry_over", "resume", "--continue"):
         assert banned not in SRC.replace('(out / "block_cohort.json")', ""), banned
     # the only cohort the runner ever loads is the one it just selected
-    assert "select_block(cands)" in SRC
+    assert "select_block_v2(final)" in SRC
     assert SRC.count("read_bytes()") == 1        # only its own source, for the digest
     assert "read_text()" not in SRC
 
@@ -207,6 +208,186 @@ def test_body_samples_are_bounded_but_keep_head_and_tail():
     assert len(s["events_tail"]) == L.BODY_SAMPLE_EVENTS
     assert s["events_head"][0]["id"] == 0
     assert s["events_tail"][-1]["id"] == 499
+
+
+# =================== BL-SELECT-2: ACTIVITY-AWARE SELECTION ==================
+def test_the_selection_rule_version_is_bumped_and_bl_select_1_is_named_retired():
+    assert L.SELECTION_RULE_VERSION == "BL-SELECT-2"
+    assert "BL-SELECT-1 IS RETIRED: ACTIVITY_BLIND_SELECTION" in SRC
+    assert "RETIRED_FOR_TRACK_B_L" in SRC
+    # and "unchanged" may never be readable as "same rule as BLOCK_3"
+    assert "SELECTION_RULE_UNCHANGED_WITHIN_BLOCK" in SRC
+    assert '"SELECTION_RULE_UNCHANGED"' not in SRC
+
+
+def test_the_activity_fields_are_read_from_the_book_by_name():
+    """These exist in /book and NOT in /v1/events -- the whole reason
+    BL-SELECT-1 could not see them."""
+    row = {"body": {"marketData": {
+        "state": "MARKET_STATE_OPEN",
+        "stats": {"sharesTraded": "6196.79",
+                  "notionalTraded": {"value": "485746.31", "currency": "USD"},
+                  "openInterest": "5610.15",
+                  "lastTradeSetTime": "2026-09-14T12:35:56.416483152Z"},
+        "bids": [{"px": {"value": "0.7800"}, "qty": "1496.0000"},
+                 {"px": {"value": "0.0100"}, "qty": "9.0"}],
+        "offers": [{"px": {"value": "0.7900"}, "qty": "1015.7500"}]}}}
+    af = L.activity_fields(row, L._epoch("2026-09-14T17:13:39Z"))
+    assert af["SHARES_TRADED"] == D("6196.79")
+    assert af["NOTIONAL_TRADED"] == D("485746.31")
+    assert af["OPEN_INTEREST"] == D("5610.15")
+    assert af["BEST_BID"] == D("0.7800") and af["BEST_BID_SIZE"] == D("1496.0000")
+    assert af["BEST_ASK"] == D("0.7900") and af["BEST_ASK_SIZE"] == D("1015.7500")
+    assert 16000 < af["SECONDS_SINCE_LAST_TRADE"] < 17000        # ~4.7 h
+    assert af["selected_from"] == "book_probe_receipt"
+
+
+def test_a_market_with_no_last_trade_time_is_not_identified_not_zero():
+    af = L.activity_fields({"body": {"marketData": {"stats": {}}}}, 1.0)
+    assert af["SECONDS_SINCE_LAST_TRADE"] is None
+    assert af["SHARES_TRADED"] is None and af["NOTIONAL_TRADED"] is None
+
+
+def test_the_distribution_is_reported_before_any_threshold_exists():
+    """Section order is load-bearing: distributions are computed and printed,
+    then the gate reads them."""
+    i_dist = SRC.index("CANDIDATE DISTRIBUTIONS (before any threshold")
+    i_gate = SRC.index("\n        activity_gate(probed, dist)")
+    assert i_dist < i_gate
+    d = L.pctiles([1.0, 2.0, 3.0, 4.0, 5.0, None])
+    assert d["n"] == 5 and d["n_missing"] == 1 and d["median"] == 3.0
+
+
+def test_the_activity_gate_uses_a_prospective_floor_and_the_probed_median():
+    dist = {"SECONDS_SINCE_LAST_TRADE": {"median": 600.0},
+            "NOTIONAL_TRADED": {"median": 1000.0}}
+    rows = [
+        {"SECONDS_SINCE_LAST_TRADE": 60.0, "NOTIONAL_TRADED": D("5000"),
+         "OPEN_INTEREST": D("10")},                       # passes
+        {"SECONDS_SINCE_LAST_TRADE": 4000.0, "NOTIONAL_TRADED": D("5000"),
+         "OPEN_INTEREST": D("10")},                       # stale beyond the floor
+        {"SECONDS_SINCE_LAST_TRADE": 700.0, "NOTIONAL_TRADED": D("5000"),
+         "OPEN_INTEREST": D("10")},                       # slower than median
+        {"SECONDS_SINCE_LAST_TRADE": 60.0, "NOTIONAL_TRADED": D("10"),
+         "OPEN_INTEREST": D("10")},                       # notional below median
+        {"SECONDS_SINCE_LAST_TRADE": 60.0, "NOTIONAL_TRADED": D("5000"),
+         "OPEN_INTEREST": None},                          # no open interest
+        {"SECONDS_SINCE_LAST_TRADE": None, "NOTIONAL_TRADED": D("5000"),
+         "OPEN_INTEREST": D("10")},                       # never traded
+    ]
+    L.activity_gate(rows, dist)
+    assert [r["ACTIVITY_ELIGIBLE"] for r in rows] == [True, False, False,
+                                                      False, False, False]
+    assert "STALE_GT_3600s" in rows[1]["activity_reject"]
+    assert "SLOWER_THAN_PROBED_MEDIAN" in rows[2]["activity_reject"]
+    assert "NOTIONAL_BELOW_PROBED_MEDIAN" in rows[3]["activity_reject"]
+    assert "NO_OPEN_INTEREST" in rows[4]["activity_reject"]
+    assert "NO_LAST_TRADE_TIME" in rows[5]["activity_reject"]
+
+
+def test_the_absolute_staleness_floor_is_reasoned_from_the_block_length():
+    """20 minutes of resting: an hour without a trade is a prospective floor,
+    fixed before the data, not tuned afterwards."""
+    block_span = L.MAX_CYCLES * L.CYCLE_S + max(L.BURST_OFFSETS)
+    assert L.MAX_SECONDS_SINCE_LAST_TRADE >= block_span
+    assert L.MAX_SECONDS_SINCE_LAST_TRADE == 3600.0
+
+
+def test_the_three_components_are_separate_and_never_one_opaque_score():
+    row = L.derive_economics(
+        {"BEST_BID": D("0.52"), "BEST_ASK": D("0.53")}, "0.01")
+    for k in ("DISPLAYED_SPREAD_CAPTURE", "REBATE_LONG", "REBATE_SHORT",
+              "DISPLAYED_PAIR_BUDGET", "SPREAD_TICKS", "PRICE_BAND"):
+        assert k in row, k
+    assert row["SPREAD_TICKS"] == 1 and row["PRICE_BAND"] == "NEAR_MID"
+    assert row["DISPLAYED_PAIR_BUDGET"] == (row["DISPLAYED_SPREAD_CAPTURE"]
+                                            + row["REBATE_LONG"]
+                                            + row["REBATE_SHORT"])
+    # activity and economics are decided by two different functions
+    assert "def activity_gate(" in SRC and "def economic_gate(" in SRC
+    for banned in ("total_score", "composite_score", "rank_score"):
+        assert banned not in SRC.lower(), banned
+
+
+def test_the_economic_gate_refuses_an_unpostable_book():
+    rows = [
+        {"market_state": "MARKET_STATE_OPEN", "BEST_BID": D("0.5"),
+         "BEST_ASK": D("0.51"), "SPREAD_TICKS": 1, "BEST_BID_SIZE": D("5"),
+         "BEST_ASK_SIZE": D("5"), "DISPLAYED_PAIR_BUDGET": D("1")},
+        {"market_state": "MARKET_STATE_HALTED", "BEST_BID": D("0.5"),
+         "BEST_ASK": D("0.51"), "SPREAD_TICKS": 1, "BEST_BID_SIZE": D("5"),
+         "BEST_ASK_SIZE": D("5"), "DISPLAYED_PAIR_BUDGET": D("1")},
+        {"market_state": "MARKET_STATE_OPEN", "BEST_BID": D("0.5"),
+         "BEST_ASK": None, "SPREAD_TICKS": None, "BEST_BID_SIZE": D("5"),
+         "BEST_ASK_SIZE": None, "DISPLAYED_PAIR_BUDGET": None},
+    ]
+    L.economic_gate(rows)
+    assert [r["ECONOMICALLY_ELIGIBLE"] for r in rows] == [True, False, False]
+    assert "NOT_OPEN" in rows[1]["economic_reject"]
+    assert "ONE_SIDED" in rows[2]["economic_reject"]
+
+
+def test_selection_seeks_price_regime_diversity_and_caps_tail():
+    def m(i, band, secs):
+        return {"native_event_id": str(i), "market_slug": "m%d" % i,
+                "PRICE_BAND": band, "SECONDS_SINCE_LAST_TRADE": secs}
+    rows = ([m(i, "TAIL", 10 + i) for i in range(10)]
+            + [m(100 + i, "NEAR_MID", 50 + i) for i in range(3)]
+            + [m(200 + i, "MODERATE", 80 + i) for i in range(3)])
+    got = L.select_block_v2(rows, cap=6)
+    bands = [g["PRICE_BAND"] for g in got]
+    assert len(got) == 6
+    assert bands.count("NEAR_MID") >= 2
+    assert bands.count("MODERATE") >= 2
+    assert bands.count("TAIL") <= 2              # the ceiling is enforced
+    assert len({g["native_event_id"] for g in got}) == 6
+
+
+def test_a_board_that_cannot_supply_the_regimes_is_reported_not_forced():
+    def m(i):
+        return {"native_event_id": str(i), "market_slug": "t%d" % i,
+                "PRICE_BAND": "TAIL", "SECONDS_SINCE_LAST_TRADE": float(i)}
+    got = L.select_block_v2([m(i) for i in range(10)], cap=6)
+    assert len(got) == 2, "the TAIL ceiling must bind even when nothing else exists"
+    assert "BAND_TARGET_SHORTFALL_REASON" in SRC
+    assert "BOARD_DID_NOT_SUPPLY_ELIGIBLE_MARKETS_IN_BAND" in SRC
+
+
+def test_the_shortlist_is_prospective_and_never_ranks_on_spread_alone():
+    """Stage 1 ranks on imminence, which is knowable at selection time and is
+    not an outcome. One market per event."""
+    now = 1_000_000.0
+    def c(i, band, start_off, som):
+        return {"native_event_id": str(i), "market_slug": "s%d" % i,
+                "price_band": band, "spread_over_mid": som,
+                "game_start_time": None if start_off is None else
+                datetime.datetime.utcfromtimestamp(now + start_off)
+                .strftime("%Y-%m-%dT%H:%M:%SZ")}
+    rows = [c(1, "NEAR_MID", 60, "0.9"), c(2, "NEAR_MID", 86400, "0.001"),
+            c(3, "NEAR_MID", None, "0.002")]
+    got = L.shortlist(rows, now)
+    assert [g["market_slug"] for g in got] == ["s1", "s2", "s3"], \
+        "imminent first, unknown last -- NOT tightest spread first"
+    assert L.MAX_BOOK_PROBES > 0
+    assert sum(L.SHORTLIST_PER_BAND.values()) <= L.MAX_BOOK_PROBES
+
+
+def test_the_probe_receipts_are_sealed_like_the_discovery_bodies():
+    i_probe = SRC.index("book_probe_receipts.jsonl.gz")
+    i_status = SRC.index('res["BLOCK_STATUS"] != "OK"')
+    assert i_probe < i_status
+    assert "probe_rows.append" in SRC
+
+
+def test_the_rate_budget_is_computed_before_any_venue_contact():
+    i_budget = SRC.index("RATE BUDGET, COMPUTED BEFORE ANY VENUE CONTACT")
+    i_client = SRC.index("with httpx.Client(")
+    assert i_budget < i_client
+    assert "TOTAL_WORST_CASE_RATE" in SRC and "NOT A SUM" in SRC
+    total = L.MAX_DISCOVERY_PAGES + L.MAX_BOOK_PROBES \
+        + L.N_LANES * L.MAX_CYCLES * len(L.BURST_OFFSETS)
+    assert total <= L.MAX_VENUE_REQUESTS, total
+    assert L.SPACING_S >= 2.5            # never weakened to fit the shortlist
 
 
 def test_the_discovery_query_carries_the_venue_side_scope_filters():
