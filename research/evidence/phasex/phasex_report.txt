@@ -1,0 +1,8 @@
+======================================================================
+PHASE X -- CROSS-VENUE (PMUS <-> KALSHI) -- READ ONLY
+======================================================================
+PMUS_SPORTS_MARKETS = 20 (sealed PX1-PMUS-1)
+KALSHI_SPORTS_MARKETS = 0
+KALSHI_READ_FAILURES = [{"series": "KXNFLGAME", "outcome": "TRANSPORT_EXCEPTION", "attempts": 4}]
+no Kalshi contract was retrieved; nothing was measured
+GATE = E -- DATA / ACCESS BOTTLENECK

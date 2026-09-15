@@ -1,0 +1,12 @@
+{
+ "PHASE": "X",
+ "GATE": "E -- DATA / ACCESS BOTTLENECK",
+ "KALSHI_SPORTS_MARKETS": 0,
+ "READ_FAILURES": [
+  {
+   "series": "KXNFLGAME",
+   "outcome": "TRANSPORT_EXCEPTION",
+   "attempts": 4
+  }
+ ]
+}

@@ -96,7 +96,7 @@ SOURCE = SEALED EVIDENCE ONLY (no venue contact)
     DRAW_RULES                   NOT_IDENTIFIED
     VOID_RULES                   NOT_IDENTIFIED
     OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
-        [market.description] This market will settle to the winner of the Canelo Alvarez vs.
+        [market.description] This market will settle to the winner of the Canelo Alvarez vs. Christian Mbilli boxing match originally scheduled for Sep 12, 2026.
         [market.description] Outcome sourced from the relevant governing body.
     RULES_DISCLAIMER             NOT_IDENTIFIED
     EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
@@ -267,7 +267,7 @@ SOURCE = SEALED EVIDENCE ONLY (no venue contact)
         [market.description] If the fight ends in a draw or is declared a no contest, the market will settle to $0.50.
     VOID_RULES                   NOT_IDENTIFIED
     OTHER_RESOLUTION_CONDITIONS  QUOTED_VERBATIM x2
-        [market.description] This market will settle to the winner of the Michael Aswell Jr.
+        [market.description] This market will settle to the winner of the Michael Aswell Jr. vs JooSang Yoo UFC fight scheduled for September 19 at 5:00PM ET.
         [market.description] Outcome sourced from UFC.
     RULES_DISCLAIMER             NOT_IDENTIFIED
     EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
@@ -406,7 +406,7 @@ SOURCE = SEALED EVIDENCE ONLY (no venue contact)
     EQUIVALENCE_CLASSIFICATION = NOT_CLASSIFIED_KALSHI_SIDE_ABSENT
 
 WROTE /home/user/SportsAssets/research/evidence/phasex1/PMUS_EQUIVALENCE_RECORDS.json
-SHA256 6ae6ec75406cf02175ca78db7f0bb4755f34eb197613caf837788006af75c13a
+SHA256 b28127656a87344a0ac5cb39153173f2de07051106953524058f5d3512e5aa01
 
 PHASE_X1_PMUS_HALF = BUILT
 PHASE_X1_KALSHI_HALF = NOT_BUILT

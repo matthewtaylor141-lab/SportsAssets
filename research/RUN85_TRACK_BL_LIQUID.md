@@ -1762,3 +1762,140 @@ read-only rules-field widening in item 2. Neither needs a credential, an order,
 or a production change.
 
 `mirror_live = false`. No capital. No orders. No production write.
+
+---
+
+## PHASE X READ PATH — BUILT AND GATED OFFLINE (2026-09-15)
+
+GATE E accepted as an ACCESS fact, not evidence about profitability. The
+research code is now ready to run X1-X4 the moment egress exists, with no
+further engineering cycle.
+
+### WHY A SEPARATE CLIENT
+
+`edge-engine`'s adapter is a TRADING client. Three of its habits are right
+there and wrong here:
+
+1. **It discards what it does not trade on.** `_discover_series` asks the
+   venue for nested markets and keeps `ticker` and `yes_sub_title` — the
+   two fields from which no settlement proposition can be built.
+2. **On 429 it sleeps 1 s and ABANDONS the read.** For a trader a skipped
+   book is a skipped opportunity. For research it is a hole that later
+   reads as *"no opportunity there"*.
+3. **It can place and cancel orders.**
+
+So `research/run85_phasex_kalshi.py` is a separate read path. Production
+trading rate behaviour is untouched.
+
+### WHAT IS RETAINED
+
+Every field that can move `PAYS_1_IF`, equivalence, cancellation,
+postponement, overtime, draw, void, settlement timing or settlement
+source — `rules_primary`, `rules_secondary`, `settlement_sources`,
+`expiration_time`, `expected_expiration_time`, `settlement_timer_seconds`,
+strike fields, `result`, `risk_limit_cents` and the rest — **RAW beside
+normalized**, so a normalization defect is repairable from the sealed bytes
+without going back to the venue.
+
+### PAYS_1_IF — DIRECTION IS EARNED, NOT ASSUMED
+
+`PAYOFF_DIRECTION` becomes `VERIFIED` only when the venue itself ties the
+side to the paying outcome: an affirmative settlement sentence exists, and
+**exactly one** of the two side labels appears in it. Both, or neither, is
+`NOT_IDENTIFIED` and the contract is ineligible for automated equivalence.
+Every component carries `FIELD / SOURCE_FIELD / RAW_VALUE /
+NORMALIZED_VALUE / STATUS`.
+
+This is strict on purpose, and the consequence is worth stating plainly:
+**a moneyline will usually fail it.** "This market will settle to the
+winner of A vs B" names both fighters, so the prose genuinely does not say
+which token pays — only the label does, and labels are not trusted. That is
+the honest reading, not a parser defect.
+
+**A REAL DEFECT THIS CAUGHT.** The first cut of the sentence splitter broke
+on `vs.`, leaving the boxing clause as *"...settle to the winner of the
+Canelo Alvarez vs."* — one fighter named, so `PAYOFF_DIRECTION` came back
+`VERIFIED`, on the wrong side, for a contract that determines nothing.
+`test_5b` caught it before it reached a venue. The splitter now keeps
+abbreviations (`vs.`, `Jr.`, initials) intact; the same fix was applied to
+the PMUS builder, whose `QUOTED_VERBATIM` extracts were being truncated
+mid-sentence — a truncated extract is a misquotation of the contract.
+`PX1-PMUS-1` records regenerated: 20 records, audit CLEAN, checksums
+ALL_OK.
+
+### THE EQUIVALENCE GATE
+
+All 18 material dimensions the owner listed. `MATCH` / `MISMATCH` /
+`UNRESOLVED`. `VERIFIED` needs both payoff directions `VERIFIED` and every
+dimension `MATCH`. Any `MISMATCH` → `REJECTED`. Any `UNRESOLVED` →
+`NOT_IDENTIFIED`, ineligible. **Two silences are not agreement**: a
+dimension neither venue published is `UNRESOLVED`, never `MATCH` — a pair
+of absences is exactly how a rule difference hides.
+
+### DEPTH AND FEES
+
+`vwap()` walks actual displayed depth and stops. A size the book cannot
+fill returns `FILLED_QTY < requested` with `DEPTH_EXHAUSTED`, never an
+extrapolated price. The hedgeable size is the **thinner** leg's fill.
+
+```
+KALSHI_FEE_FORMULA_FROM_BETTOR_SOURCE_ONLY = 0.07 * p * (1-p)
+  SOURCE              edge-engine/src/edge/venues/kalshi.py:304 (our constant)
+  EFFECTIVE_DATE      NOT_IDENTIFIED
+  VERIFICATION_STATUS NOT_IDENTIFIED
+```
+
+Maker formula, rounding rule, per-fill vs aggregate rounding, volume tiers,
+account tiers, rebates and other costs: all `NOT_IDENTIFIED` for Kalshi.
+So `LOCKED_NET_PNL = NOT_IDENTIFIED_FEES` and the fee function **refuses
+rather than defaulting**. Gross is still reported, labelled gross. PMUS
+fees remain `VERIFIED` (effective 2026-07-01) and do not unblock the pair
+on their own.
+
+### RATE SAFETY
+
+A research pacer independent of trading: explicit 1.0 s minimum interval,
+429 detection, exact `Retry-After`, backoff that does not snap back,
+per-attempt receipts with both clocks and a response hash, and **a sealed
+`OBSERVATION_FAILED` record instead of a silent abandonment**. Kalshi's
+real limit is not established and 1.0 s is a self-imposed floor, so no
+result may be called rate-safe because of it.
+
+### PRE-NETWORK OFFLINE GATE
+
+All ten of the owner's checks pass, plus the mechanisms they rest on:
+**47 tests in `research/test_run85_phasex.py`**, green under pytest and the
+self-runner. Track B-L's 60 remain green. Test 10 proves no write endpoint
+is reachable: every non-GET method refused, every `/portfolio/*` path
+refused, traversal such as `/markets/X/../../orders` refused twice over,
+and the client object carries no `place_order`, `cancel_order` or `post`.
+The module reads no `os.environ`, imports no crypto library, and contains
+no credential name — it cannot authenticate even if asked.
+
+### THE DRIVER
+
+`research/run85_phasex_run.py` runs X1 → X2 → X3 → X4 → gate in one pass.
+Run now against the blocked host it reports, correctly:
+
+```
+PMUS_SPORTS_MARKETS      = 20 (sealed PX1-PMUS-1)
+KALSHI_SPORTS_MARKETS    = 0
+KALSHI_READ_FAILURES     = [{"series": "KXNFLGAME",
+                             "outcome": "TRANSPORT_EXCEPTION",
+                             "attempts": 4}]
+GATE                     = E -- DATA / ACCESS BOTTLENECK
+```
+
+Note what it does **not** say: it does not report zero opportunities. A
+failed read is an access fact and is sealed as one.
+
+### THE ASK
+
+`research/PHASEX_EGRESS_REQUEST.md` — one host, `api.elections.kalshi.com`
+:443, GET only, five endpoint families, **no authentication and no
+credential access requested**, suitable for the egress owner to approve
+directly. With an alternative path stated if it cannot be granted: a
+BettorToken-supplied export of the same fields, ingested offline with no
+code change.
+
+`mirror_live = false`. No capital. No orders. No production write.

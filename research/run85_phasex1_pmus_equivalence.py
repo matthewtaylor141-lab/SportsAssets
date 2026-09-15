@@ -106,14 +106,40 @@ def dedicated(obj: dict, key: str, source_prefix: str) -> dict:
     return field(obj.get(key), VERIFIED, "%s.%s" % (source_prefix, key))
 
 
+# Periods that do not end a sentence. "vs." is the one that matters:
+# PMUS writes "the winner of the Canelo Alvarez vs. Christian Mbilli
+# boxing match", and a naive split cuts that clause in half, leaving an
+# extract that misquotes the contract and names only one fighter.
+NON_TERMINAL_ABBREVIATIONS = frozenset((
+    "vs", "v", "no", "nos", "st", "mr", "mrs", "ms", "dr", "prof", "jr",
+    "sr", "inc", "ltd", "co", "corp", "etc", "approx", "est", "al", "fig",
+    "ca", "cf", "eg", "ie", "am", "pm", "u.s", "u.k",
+))
+
+
 def sentences(text: str) -> list[str]:
     """Split prose into sentences without altering a single character of
-    what survives. Each returned string is a contiguous slice of `text`."""
+    what survives. Each returned string is a contiguous slice of `text`.
+
+    A period ends a sentence only when the word before it is not a known
+    abbreviation or a bare initial, and what follows opens like a new
+    sentence.
+    """
     if not text:
         return []
     out, start = [], 0
     for m in re.finditer(r"(?<=[.!?])\s+", text):
-        piece = text[start:m.start()].strip()
+        head = text[start:m.start()]
+        nxt = text[m.end():m.end() + 1]
+        if nxt and not (nxt.isupper() or nxt.isdigit() or nxt in "\"'("):
+            continue
+        if head.endswith("."):
+            word = re.search(r"([A-Za-z0-9.]+)\.$", head)
+            tok = (word.group(1).rstrip(".").lower() if word else "")
+            if tok in NON_TERMINAL_ABBREVIATIONS or (
+                    len(tok) == 1 and tok.isalpha()):
+                continue
+        piece = head.strip()
         if piece:
             out.append(piece)
         start = m.end()
