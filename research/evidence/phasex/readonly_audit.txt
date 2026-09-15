@@ -1,0 +1,46 @@
+========================================================================
+ENTRY run85_phasex_run.py -- import closure 8 files
+    run85_phase2b.py
+    run85_phasex1_pmus_equivalence.py
+    run85_phasex_economics.py
+    run85_phasex_kalshi.py
+    run85_phasex_run.py
+    run85_pmus_collector.py
+    run85_trackb_fees.py
+    run85_trackbl_block.py
+
+  1_HTTP_WRITE_VERBS         CLEAN
+  2_ORDER_PLACEMENT          CLEAN
+  3_MIRROR_LIVE              CLEAN
+  4_PRODUCTION_POSITIONS     CLEAN
+  5_PRODUCTION_WORKERS       CLEAN
+  CREDENTIALS                CLEAN
+  FORBIDDEN_HOSTS            CLEAN
+  HOSTS REACHABLE BY A REQUEST:
+      https://api.elections.kalshi.com           ALLOWED
+      https://gateway.polymarket.us              ALLOWED
+  HOSTS APPEARING ONLY AS PROVENANCE CITATIONS (not called):
+      https://docs.polymarket.us
+
+========================================================================
+ENTRY trackp2_capture.py -- import closure 6 files
+    run85_phase2b.py
+    run85_pmus_collector.py
+    run85_trackb_fees.py
+    run85_trackbl_block.py
+    trackp2_capture.py
+    trackp2_protocol.py
+
+  1_HTTP_WRITE_VERBS         CLEAN
+  2_ORDER_PLACEMENT          CLEAN
+  3_MIRROR_LIVE              CLEAN
+  4_PRODUCTION_POSITIONS     CLEAN
+  5_PRODUCTION_WORKERS       CLEAN
+  CREDENTIALS                CLEAN
+  FORBIDDEN_HOSTS            CLEAN
+  HOSTS REACHABLE BY A REQUEST:
+      https://gateway.polymarket.us              ALLOWED
+  HOSTS APPEARING ONLY AS PROVENANCE CITATIONS (not called):
+      https://docs.polymarket.us
+
+AUDIT = PASS

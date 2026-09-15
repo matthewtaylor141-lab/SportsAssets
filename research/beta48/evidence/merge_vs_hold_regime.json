@@ -1,0 +1,194 @@
+{
+ "D0_7": {
+  "_DECISION_TIME_FACTS": {
+   "fills": 73454,
+   "distinct_markets": 5905,
+   "first_side_acquisitions": 8892,
+   "never_completed": 3607,
+   "never_completed_share": 0.4056,
+   "mean_pair_basis": 0.97873,
+   "mean_complement_seconds": 1393.6,
+   "first_leg_price_decile_mix": {
+    "0.00": 0.1369,
+    "0.10": 0.0787,
+    "0.20": 0.0868,
+    "0.30": 0.096,
+    "0.40": 0.1146,
+    "0.50": 0.1212,
+    "0.60": 0.1008,
+    "0.70": 0.095,
+    "0.80": 0.0857,
+    "0.90": 0.0842
+   },
+   "top_sports": {
+    "Soccer": 4236,
+    "Tennis": 2166,
+    "Non-Sports": 1059,
+    "NFL": 838,
+    "Other-Sports": 559,
+    "MMA": 34
+   },
+   "entry_notional": 12619016.75,
+   "n_merges": 30546
+  },
+  "_KNOWN_ONLY_AFTERWARDS": {
+   "merge_pnl": 36010.7,
+   "edge_roi": 0.002623,
+   "edge_ci95": [
+    -0.034194,
+    0.039441
+   ],
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +0.26% on dollar deployed but the interval [-3.42%, +3.94%] contains zero over 34,646 closed lots",
+   "cf_hold_on_graded": -27198.55,
+   "cf_actual_on_graded": 53183.53,
+   "HOLD_MINUS_MERGE": -80382.08,
+   "MERGING_WAS_BETTER": true,
+   "cf_coverage": 0.7453,
+   "settled_lots": 4100
+  }
+ },
+ "D7_14": {
+  "_DECISION_TIME_FACTS": {
+   "fills": 56164,
+   "distinct_markets": 5680,
+   "first_side_acquisitions": 8178,
+   "never_completed": 3542,
+   "never_completed_share": 0.4331,
+   "mean_pair_basis": 0.97257,
+   "mean_complement_seconds": 1720.0,
+   "first_leg_price_decile_mix": {
+    "0.00": 0.1143,
+    "0.10": 0.0976,
+    "0.20": 0.0856,
+    "0.30": 0.1031,
+    "0.40": 0.1274,
+    "0.50": 0.1223,
+    "0.60": 0.0949,
+    "0.70": 0.0913,
+    "0.80": 0.0783,
+    "0.90": 0.0852
+   },
+   "top_sports": {
+    "Soccer": 4171,
+    "Tennis": 1709,
+    "Non-Sports": 1081,
+    "MLB": 727,
+    "NFL": 285,
+    "Other-Sports": 144
+   },
+   "entry_notional": 10315902.76,
+   "n_merges": 21779
+  },
+  "_KNOWN_ONLY_AFTERWARDS": {
+   "merge_pnl": 46320.3,
+   "edge_roi": 0.027534,
+   "edge_ci95": [
+    -0.009703,
+    0.064772
+   ],
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +2.75% on dollar deployed but the interval [-0.97%, +6.48%] contains zero over 24,103 closed lots",
+   "cf_hold_on_graded": 52030.47,
+   "cf_actual_on_graded": 54858.73,
+   "HOLD_MINUS_MERGE": -2828.26,
+   "MERGING_WAS_BETTER": true,
+   "cf_coverage": 0.3566,
+   "settled_lots": 2324
+  }
+ },
+ "D14_30": {
+  "_DECISION_TIME_FACTS": {
+   "fills": 59555,
+   "distinct_markets": 5072,
+   "first_side_acquisitions": 7399,
+   "never_completed": 3011,
+   "never_completed_share": 0.4069,
+   "mean_pair_basis": 0.97923,
+   "mean_complement_seconds": 2128.5,
+   "first_leg_price_decile_mix": {
+    "0.00": 0.1096,
+    "0.10": 0.0945,
+    "0.20": 0.0857,
+    "0.30": 0.1111,
+    "0.40": 0.1281,
+    "0.50": 0.1252,
+    "0.60": 0.0984,
+    "0.70": 0.0833,
+    "0.80": 0.0804,
+    "0.90": 0.0838
+   },
+   "top_sports": {
+    "Soccer": 2961,
+    "Tennis": 2316,
+    "Non-Sports": 714,
+    "MLB": 665,
+    "unclassified": 513,
+    "NFL": 92
+   },
+   "entry_notional": 8625970.38,
+   "n_merges": 23684
+  },
+  "_KNOWN_ONLY_AFTERWARDS": {
+   "merge_pnl": 130572.64,
+   "edge_roi": 0.04975,
+   "edge_ci95": [
+    0.00564,
+    0.09386
+   ],
+   "edge_verdict": "PROFITABLE at 95% \u2014 +4.98% on dollar deployed, interval [+0.56%, +9.39%] over 26,093 closed lots",
+   "cf_hold_on_graded": 202192.43,
+   "cf_actual_on_graded": 83203.63,
+   "HOLD_MINUS_MERGE": 118988.8,
+   "MERGING_WAS_BETTER": false,
+   "cf_coverage": 0.4599,
+   "settled_lots": 2409
+  }
+ },
+ "D30_PLUS": {
+  "_DECISION_TIME_FACTS": {
+   "fills": 7445,
+   "distinct_markets": 1125,
+   "first_side_acquisitions": 1481,
+   "never_completed": 759,
+   "never_completed_share": 0.5125,
+   "mean_pair_basis": 0.9763,
+   "mean_complement_seconds": 1833.5,
+   "first_leg_price_decile_mix": {
+    "0.00": 0.1114,
+    "0.10": 0.0898,
+    "0.20": 0.0972,
+    "0.30": 0.1033,
+    "0.40": 0.1398,
+    "0.50": 0.1209,
+    "0.60": 0.0905,
+    "0.70": 0.0871,
+    "0.80": 0.0972,
+    "0.90": 0.0628
+   },
+   "top_sports": {
+    "Tennis": 489,
+    "unclassified": 459,
+    "Soccer": 364,
+    "Non-Sports": 106,
+    "MLB": 55,
+    "NBA": 5
+   },
+   "entry_notional": 727166.43,
+   "n_merges": 2443
+  },
+  "_KNOWN_ONLY_AFTERWARDS": {
+   "merge_pnl": 12562.89,
+   "edge_roi": -0.007695,
+   "edge_ci95": [
+    -0.112467,
+    0.097077
+   ],
+   "edge_verdict": "NOT DEMONSTRATED \u2014 -0.77% on dollar deployed but the interval [-11.25%, +9.71%] contains zero over 3,173 closed lots",
+   "cf_hold_on_graded": 13035.92,
+   "cf_actual_on_graded": 11506.6,
+   "HOLD_MINUS_MERGE": 1529.32,
+   "MERGING_WAS_BETTER": false,
+   "cf_coverage": 0.7194,
+   "settled_lots": 730
+  }
+ }
+}

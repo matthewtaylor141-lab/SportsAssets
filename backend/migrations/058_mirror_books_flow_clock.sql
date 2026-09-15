@@ -1,0 +1,37 @@
+-- 058: MIRROR BOOKS FLOW CLOCK (E12b, 2026-09-08; the E12 fold
+-- re-review's MEDIUM-1). Under 057 the live worker ratchets the block
+-- (`flow_base`, D25: block_t = block_{t-1} x net_t / net_{t-1}) on every
+-- fall of HIS FILLS' NET against `flow_last_net`, with no side and no
+-- clock read. The fills' net can fall with no sale of his: the mirror's
+-- chain-first collapse (workers/mirror_shadow.his_fills) replaces the
+-- poll lane's per-match legs by the chain row of the same tx when the
+-- legs landed first, and the chain row is smaller when the legs did
+-- not sum to it (6,000 + 5,640 -> 11,000), so a block of 100,000
+-- ratcheted to 99,426.7 and 57 shares of it were held as flow. Now the
+-- ratchet moves ONLY when the tick's fills hold a REDUCING fill of his
+-- on the book's axis (a SELL of the long token or a BUY of the other on
+-- a long book; the mirror image on a short) whose ingest clock is AFTER
+-- the reference's, and by no more than that fill's share.
+--
+-- ONE nullable column on mirror_books, additive, re-runnable, no
+-- DEFAULT: `flow_last_at` is THE REFERENCE'S CLOCK -- the newest ingest
+-- clock (trades.detected_at, else the stamp) among the fills the
+-- reference `flow_last_net` counted when it was last written, so a fill
+-- the reference already counted can never witness it again and a fill
+-- ingested after that read always can, whatever the worker's own clock
+-- says against the ingestion's. Written with every reference write
+-- (the open's INSERT and the ratchet's UPDATE). NULL on a row written
+-- before this migration (a book opened between 057 and 058) means the
+-- landed rule for THAT book -- a net fall ratchets -- until its first
+-- reference write stamps the clock; a NULL block stays the old rule,
+-- byte for byte. Read the 057 way: the worker probes the column once
+-- per tick after 057's probe, and with 057 present and this column
+-- absent every book runs the landed rule (heartbeat `flow_clock_absent`,
+-- logged once per process) so the exits never stall on a migration
+-- that has not landed; the workers never run migrations (the API's
+-- start.sh applies the sorted glob on boot, best-effort).
+--
+-- NUMBERING. 058: 057 is landed; 048 and 051 stay reserved by
+-- docs/mirror-to-a-tee-program.md:184-187 (migrate.py applies the
+-- sorted glob, so the gaps are harmless).
+ALTER TABLE mirror_books ADD COLUMN IF NOT EXISTS flow_last_at DOUBLE PRECISION NULL;

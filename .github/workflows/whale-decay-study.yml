@@ -1,0 +1,30 @@
+name: whale-decay-study
+# Measures how much of the reference whale's edge survives a copier's
+# latency, from public data (his recent fills + each market's trade tape).
+# Runs here because the session container has no general egress.
+
+on:
+  workflow_dispatch:
+    inputs:
+      days:
+        description: "Lookback window (days)"
+        default: "7"
+      max_fills:
+        description: "Max sampled fills"
+        default: "400"
+
+jobs:
+  study:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip -q install requests
+      - name: Run the decay study
+        env:
+          STUDY_DAYS: ${{ github.event.inputs.days }}
+          STUDY_MAX_FILLS: ${{ github.event.inputs.max_fills }}
+        run: python edge-engine/scripts/whale_decay_study.py

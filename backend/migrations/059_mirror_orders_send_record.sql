@@ -1,0 +1,41 @@
+-- 059: MIRROR ORDERS SEND RECORD (E18, 2026-09-08; PNL program lane 6;
+-- owner "I want to know when he makes money we make money. This needs
+-- to be right"). The 11Z window (hourly_1129 rows 2697-2736) read 10
+-- of 24 increase rests cancelled `replace` after a median 20 s and two
+-- of book 509's cover IOCs expired 0 filled because the ask moved
+-- between the tick's quote read and the send; nothing on the row said
+-- which decision placed it, what the quote was at the SEND, or which
+-- fill of his it answered, so the fill-rate question ("did we miss
+-- because we re-quoted, or because the ask left?") had no column to
+-- read. The worker now re-reads the quote once through the pacer
+-- immediately before every IOC and skips the send when the level is
+-- no longer at or through the wire (`ask_moved` / `bid_moved` on the
+-- plan), and keeps an entry rest standing under MIRROR_REST_MIN_LIFE_S
+-- (`kept_min_life` on the plan).
+--
+-- THREE nullable columns on mirror_orders, additive, re-runnable, no
+-- DEFAULT: `ask_at_send` is the re-read's ASK immediately before an
+-- IOC's send (NULL on a rest, which is not re-read, and on every row
+-- written before this migration); `decision` is the word that placed
+-- the row ('rest', 'take', 'cover', 'exit_rest'; 'take_in_band' is
+-- reserved for the entry band, lane 8) and, once a replace cancels it,
+-- the cause ('replace_cent', 'replace_qty', 'replace_side', 'ttl',
+-- 'replace_unread'); `his_fill_id` is the id of the newest fill of his
+-- the tick held on the market when the row was placed -- the fill the
+-- order answers (the plan's his_fills_seen key). NULL on every row
+-- written before this migration means NOTHING: no reader sizes,
+-- places or cancels on these columns; they are the record the
+-- fills-missed and latency presets read. Read the 057 way: the worker
+-- probes the columns once per tick after the 050/057/058 probes and,
+-- absent, sends the 050-shaped INSERT (heartbeat `order_cols_absent`,
+-- logged once per process); a probe failing for any other reason
+-- refuses the tick by name (`order_cols_guard_unreadable`), as the
+-- sibling probes do. The workers never run migrations (the API's
+-- start.sh applies the sorted glob on boot, best-effort).
+--
+-- NUMBERING. 059: 057 and 058 are landed; 048 and 051 stay reserved by
+-- docs/mirror-to-a-tee-program.md:184-187 (migrate.py applies the
+-- sorted glob, so the gaps are harmless).
+ALTER TABLE mirror_orders ADD COLUMN IF NOT EXISTS ask_at_send DOUBLE PRECISION NULL;
+ALTER TABLE mirror_orders ADD COLUMN IF NOT EXISTS decision TEXT NULL;
+ALTER TABLE mirror_orders ADD COLUMN IF NOT EXISTS his_fill_id TEXT NULL;
