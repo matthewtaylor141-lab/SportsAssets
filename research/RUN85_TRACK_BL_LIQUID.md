@@ -1619,3 +1619,146 @@ PHASE_X2             = BLOCKED
 NEXT ACCEPTABLE ROUTE = user-supplied Kalshi data, or explicitly approved
                         network access
 ```
+
+---
+
+## KALSHI INTEGRATION CAPABILITY MAP (2026-09-15)
+
+The owner retracted `KALSHI_DATA_UNAVAILABLE` as a system-level conclusion:
+BETTOR holds an institutional Kalshi account and production is connected. That
+retraction is correct about the **system**. It does not unblock this container,
+and the reason is not the one either of us assumed.
+
+### THE INTEGRATION
+
+```
+KALSHI_API_CLIENT     edge-engine/src/edge/venues/kalshi.py :: KalshiAdapter
+                      backend/sportsassets/api/app.py (a second, thinner client)
+KALSHI_API_BASE       https://api.elections.kalshi.com/trade-api/v2
+                      (EDGE_KALSHI_BASE / KALSHI_PUBLIC_API override the default)
+AUTHENTICATION_PATH   RSA-PSS-SHA256 over "{ts_ms}{METHOD}{path}", sent as
+                      KALSHI-ACCESS-KEY / -TIMESTAMP / -SIGNATURE.
+                      Credentials: EDGE_KALSHI_KEY_ID + EDGE_KALSHI_PRIVATE_KEY
+                      (or _PATH), env only, held by the edge-engine service.
+```
+
+**Authentication is applied to `/portfolio/*` ONLY.** `get_book`,
+`_discover_series`, `_kalshi_sweep` and the API's `_book_levels` all call Kalshi
+with a bare session and no auth headers — `app.py:1464` says so in as many
+words: *"Public Kalshi market data (no auth needed for market/book reads)."*
+
+```
+AVAILABLE_READ_ENDPOINTS   GET /events?series_ticker=&status=open
+                               &with_nested_markets=true&limit=100&cursor=
+                           GET /markets            (bounded search)
+                           GET /markets/{ticker}
+                           GET /markets/{ticker}/orderbook
+                           GET /series/{s}/markets/{t}/candlesticks
+                           GET /portfolio/* (balance, positions, fills, orders,
+                               settlements)  [authenticated]
+AVAILABLE_WRITE_ENDPOINTS  POST /portfolio/events/orders
+                           DELETE /portfolio/orders/{id}
+                           -- NOT INVOKED, NOT AUTHORIZED
+FULL_ORDERBOOK_ENDPOINT    /markets/{ticker}/orderbook
+MARKET_RULES_ENDPOINT      NONE IS CALLED ANYWHERE IN THIS REPO
+EVENT_ENDPOINT             /events
+MARKET_ENDPOINT            /markets, /markets/{ticker}
+FEE_SOURCE                 HARD-CODED: taker_fee = 0.07*p*(1-p)
+                           (kalshi.py:304). Not read from the venue. No
+                           maker-fee or fee-schedule read exists.
+RATE_LIMIT_HANDLING        429 -> book_quiet counter + 1.0 s sleep, read
+                           abandoned. 404 -> market state, not an error.
+                           No token bucket, no adaptive pacer, no Retry-After.
+```
+
+### THE THREE-WAY DISTINCTION THE OWNER ASKED FOR
+
+| capability | SUPPORTED_BY_KALSHI_API | SUPPORTED_BY_EXISTING_BETTOR_CLIENT | ACTUALLY_RETRIEVED |
+|---|---|---|---|
+| `FULL_DEPTH_BOOKS` | yes (`orderbook_fp`, all levels) | yes — `get_book` parses every level | **NO** |
+| `BOOK_SIZES` | yes (price/qty pairs) | yes; API relay truncates to 10 levels | **NO** |
+| `MARKET_RULES` | evidenced by `with_nested_markets` market objects | **NO — no code reads a rules field** | **NO** |
+| `SETTLEMENT_TERMS` | as above | **NO** | **NO** |
+| `MARKET_TIMESTAMPS` | `close_time`, `expiration_time` | partially (`close_time`; expiry only in xv_crypto) | **NO** |
+| `POSITION_LIMITS_READ_ONLY` | NOT_IDENTIFIED | **NO — no code reads one** | **NO** |
+| `FEE_SCHEDULE` | NOT_IDENTIFIED | **NO — hard-coded constant** | **NO** |
+
+"Supported by the API" above is inferred from this repo's own parsers and
+forensic comments (real payload shapes they were written against), not from
+Kalshi's documentation — `kalshi.com` is blocked too, so the docs are unread.
+
+### WHY NOTHING WAS RETRIEVED
+
+Not credentials. The reads this research needs are unauthenticated in BETTOR's
+own client, so an institutional key changes nothing about them.
+
+The research container's egress allowlist admits **neither venue nor BETTOR**:
+
+```
+api.elections.kalshi.com:443     connect_rejected (gateway 403 to CONNECT)
+trading-api.kalshi.com:443       connect_rejected
+sportsassets-api.onrender.com:443  connect_rejected   <-- our own API
+www.bettortoken.com:443            connect_rejected   <-- our own site
+```
+
+So the integration cannot be reached *through its own service* either. The only
+remaining in-container routes would be loading `EDGE_KALSHI_*` (forbidden, and
+useless — the reads need no auth), invoking the production worker (forbidden),
+or tunnelling through CI (explicitly forbidden). None were attempted.
+
+### MISSING CAPABILITIES TO REPORT, NOT WORK AROUND
+
+Two are network, one is code, and the code one will still bite after the
+network opens:
+
+1. **EGRESS.** `api.elections.kalshi.com` is not on this environment's
+   allowlist. This is the whole of the X2 blocker and most of X1's.
+2. **RULES READ.** Even with egress, Phase X1 stays blocked: no code path in
+   this repo reads `rules_primary`, `rules_secondary`, `settlement_sources` or
+   an expiration field for sports markets. `_discover_series` requests nested
+   markets and then keeps only `ticker` and `yes_sub_title`, discarding
+   everything a settlement proposition is built from. A read-only field
+   widening is required before equivalence can be attempted.
+3. **FEES.** `taker_fee = 0.07*p*(1-p)` is a constant in our source, not a
+   venue-verified schedule, and there is no maker-fee path at all. Phase X4
+   forbids unverified fee assumptions, so this constant cannot carry a locked-net
+   claim without an independent verification of the current Kalshi schedule.
+
+### PHASES X1-X4
+
+```
+PMUS_SPORTS_MARKETS              14,518 market rows / 1,600 events (sealed,
+                                 BLOCK_4 prefix; DISCOVERY_LIST_EXHAUSTED = NO)
+KALSHI_SPORTS_MARKETS            NOT_RETRIEVED
+POTENTIAL_MATCHES                NOT_IDENTIFIED
+EQUIVALENCE_VERIFIED             0
+EQUIVALENCE_REJECTED             0
+EQUIVALENCE_NOT_IDENTIFIED       all
+VERIFIED_PAIRS_WITH_FRESH_BOOKS  0
+POSITIVE_GROSS_PAIR_COUNT        NOT_MEASURED
+POSITIVE_NET_PAIR_COUNT          NOT_MEASURED
+TOP_20_OPPORTUNITIES             NONE -- no pair reached the equivalence gate
+```
+
+X2-X4 were not run. Running them on one venue's data would produce numbers with
+no second leg, and a table of PMUS prices beside empty Kalshi columns would look
+like a result. `PAYS_1_IF` normalization is built and populated on the PMUS side
+(20 contracts, `PX1-PMUS-1`); the Kalshi slots on every record remain
+`NOT_IDENTIFIED`, so the join is an assignment once data exists.
+
+### FAST DECISION GATE
+
+```
+GATE = E -- DATA / ACCESS BOTTLENECK
+```
+
+Not C (nothing was measured), not D (no equivalence was attempted). The
+authorized institutional integration exists and is capable of the book reads;
+this container cannot reach it, and the reads it needs were never gated on the
+account in the first place.
+
+Unblocking is one allowlist entry — `api.elections.kalshi.com` — plus the
+read-only rules-field widening in item 2. Neither needs a credential, an order,
+or a production change.
+
+`mirror_live = false`. No capital. No orders. No production write.
