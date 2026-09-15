@@ -349,6 +349,162 @@ def merge_pnl_by_open_band(fills: list) -> dict:
     return out
 
 
+def pnl_by_open_band(fills: list, payouts: dict) -> dict:
+    """ALL THREE CHANNELS by the same open band, reconciling to lot_p.
+
+    WHY THIS IS NECESSARY AND merge_pnl_by_open_band IS NOT SUFFICIENT.
+    The merge split answers "what did the PAIR channel earn in this
+    band?" exactly. It cannot answer "was opening in this band
+    profitable?", and those are different questions whenever legs opened
+    in a band do not all get paired -- which is exactly the case here:
+    28% to 81% of the cheapest opens NEVER pair, even by settlement.
+
+    A leg opened at 5c and paired at basis 0.94 books a certain profit
+    into the merge channel. The leg opened at 5c that never finds a
+    complement is a naked longshot that usually settles at zero, and its
+    loss lands in the SETTLED channel where the merge split cannot see
+    it. Reading the merge split alone therefore has a built-in
+    survivorship bias in favour of low bands, because low bands are
+    precisely where pairing fails most often. The unanimous positive
+    sign of the sub-0.30 bands could be entirely an artefact of that.
+
+    So this books EVERY closed lot merge_pnl.replay books, to the band
+    the leg was OPENED in:
+
+      * MERGE   -- a BUY meeting an opposing balance (merge_pnl.py:318)
+      * SELL    -- a SELL against a held balance (merge_pnl.py:305)
+      * SETTLED -- a resolved-but-never-closed balance (merge_pnl.py:390)
+
+    and the three sum, per band, to that band's TOTAL. Summed over
+    bands, stake equals lot_s and pnl equals lot_p, so the reconciliation
+    target is the estimator's own closed-lot totals rather than the
+    merge subtotal. Ungraded balances are reported separately and are
+    NOT treated as losses -- guessing an unresolved outcome would invent
+    the number this exists to check.
+
+    The standing rule that headline edge_roi may never stand in for pair
+    economics applies here in the other direction too: a band's MERGE
+    economics may never stand in for that band's TOTAL economics.
+    """
+    by_cond: dict = defaultdict(list)
+    for f in fills:
+        by_cond[f["condition_id"]].append(f)
+
+    def blank():
+        return {"merge_stake": 0.0, "merge_pnl": 0.0, "merges": 0,
+                "sell_stake": 0.0, "sell_pnl": 0.0, "sells": 0,
+                "settled_stake": 0.0, "settled_pnl": 0.0, "settled_lots": 0,
+                "ungraded_stake": 0.0, "ungraded_shares": 0.0}
+
+    bands: dict = defaultdict(blank)
+    DUST = 1e-9
+
+    def band_of(p):
+        for lo, hi in PRICE_BANDS:
+            if lo <= p < hi:
+                return "%.2f-%.2f" % (lo, hi)
+        return "NOT_IDENTIFIED"
+
+    def key_for(opened, avg):
+        return band_of(opened if opened is not None else avg)
+
+    for cid, rows in by_cond.items():
+        bal, cost = [0.0, 0.0], [0.0, 0.0]
+        opened_at: list = [None, None]
+        for f in rows:
+            idx = f["outcome_index"]
+            other = 1 - idx
+            if f["side"] == "SELL":
+                q = min(f["size"], bal[idx])
+                if q > DUST:
+                    avg = cost[idx] / bal[idx] if bal[idx] > DUST else 0.0
+                    e = bands[key_for(opened_at[idx], avg)]
+                    e["sells"] += 1
+                    e["sell_stake"] += q * avg
+                    e["sell_pnl"] += q * (f["price"] - avg)
+                    bal[idx] -= q
+                    cost[idx] -= q * avg
+                    if bal[idx] <= DUST:
+                        opened_at[idx] = None
+                continue
+            m = min(f["size"], bal[other])
+            if m > DUST:
+                avg_other = (cost[other] / bal[other]
+                             if bal[other] > DUST else 0.0)
+                e = bands[key_for(opened_at[other], avg_other)]
+                e["merges"] += 1
+                e["merge_stake"] += m * avg_other
+                e["merge_pnl"] += m * (1.0 - avg_other - f["price"])
+                bal[other] -= m
+                cost[other] -= m * avg_other
+                if bal[other] <= DUST:
+                    opened_at[other] = None
+            entry = f["size"] - m
+            if entry > DUST:
+                if bal[idx] <= DUST:
+                    opened_at[idx] = f["price"]
+                bal[idx] += entry
+                cost[idx] += entry * f["price"]
+
+        # Whatever is still held when the fills run out, booked exactly
+        # as merge_pnl.finish books it.
+        v = payouts.get(cid)
+        for leg in (0, 1):
+            q = bal[leg]
+            if q <= DUST:
+                continue
+            avg = cost[leg] / q if q > DUST else 0.0
+            e = bands[key_for(opened_at[leg], avg)]
+            po = None
+            if isinstance(v, (list, tuple)) and leg < len(v):
+                try:
+                    po = float(v[leg])
+                except (TypeError, ValueError):
+                    po = None
+            if po is None:
+                e["ungraded_stake"] += cost[leg]
+                e["ungraded_shares"] += q
+                continue
+            e["settled_lots"] += 1
+            e["settled_stake"] += cost[leg]
+            e["settled_pnl"] += q * po - cost[leg]
+
+    out, tot_s, tot_p = {}, 0.0, 0.0
+    for k in sorted(bands):
+        e = bands[k]
+        stake = e["merge_stake"] + e["sell_stake"] + e["settled_stake"]
+        pnl = e["merge_pnl"] + e["sell_pnl"] + e["settled_pnl"]
+        tot_s += stake
+        tot_p += pnl
+        out[k] = {
+            "merges": e["merges"],
+            "MERGE_STAKE": round(e["merge_stake"], 2),
+            "MERGE_PNL": round(e["merge_pnl"], 2),
+            "MERGE_ROI": (round(e["merge_pnl"] / e["merge_stake"], 6)
+                          if e["merge_stake"] > 0 else None),
+            "sells": e["sells"],
+            "SELL_STAKE": round(e["sell_stake"], 2),
+            "SELL_PNL": round(e["sell_pnl"], 2),
+            "settled_lots": e["settled_lots"],
+            "SETTLED_STAKE": round(e["settled_stake"], 2),
+            "SETTLED_PNL": round(e["settled_pnl"], 2),
+            "SETTLED_ROI": (round(e["settled_pnl"] / e["settled_stake"], 6)
+                            if e["settled_stake"] > 0 else None),
+            "TOTAL_STAKE": round(stake, 2),
+            "TOTAL_PNL": round(pnl, 2),
+            "TOTAL_ROI": round(pnl / stake, 6) if stake > 0 else None,
+            "UNGRADED_STAKE": round(e["ungraded_stake"], 2),
+            "UNGRADED_SHARES": round(e["ungraded_shares"], 2),
+        }
+    out["_TOTAL_STAKE"] = round(tot_s, 2)
+    out["_TOTAL_PNL"] = round(tot_p, 2)
+    out["_BUCKET"] = ("the leg's OPENING price -- a decision-time fact. "
+                      "Every closed lot merge_pnl.replay books is booked "
+                      "here, so summing bands gives lot_s / lot_p, not the "
+                      "merge subtotal.")
+    return out
+
+
 # --------------------------------------------- ceiling x horizon grid --
 def completion_grid(fills: list) -> dict:
     """REFERENCE_ACCOUNT complement-completion, directive section 5.
@@ -701,10 +857,42 @@ def main(argv=None) -> int:
             label, "RECONCILES" if b["_RECONCILES"] else "DOES NOT RECONCILE",
             b["_RESIDUAL_VS_ESTIMATOR"]), flush=True)
 
+    # ALL THREE CHANNELS by the same band. The merge split above answers
+    # "what did the PAIR channel earn in this band?"; this answers "was
+    # OPENING in this band profitable?", which is the question a BETTOR
+    # rule would actually be built on. They differ wherever legs opened
+    # in a band go unpaired -- and 28% to 81% of the cheapest opens never
+    # pair, which is precisely where the merge-only view is most
+    # flattering. Reconciled against the estimator's own closed-lot
+    # totals (lot_s / lot_p), not against the merge subtotal.
+    all_bands = {}
+    for label, days in (("LIFETIME", None), ("LAST_30D", 30), ("LAST_7D", 7)):
+        sub = window(fills, days, as_of)
+        if not sub:
+            all_bands[label] = "NO_FILLS_IN_WINDOW"
+            continue
+        b = pnl_by_open_band(sub, pay)
+        rep = replays[label]
+        ls, lp = rep.get("lot_s"), rep.get("lot_p")
+        b["_ESTIMATOR_LOT_STAKE"] = ls
+        b["_ESTIMATOR_LOT_PNL"] = lp
+        b["_RESIDUAL_STAKE"] = (round(b["_TOTAL_STAKE"] - ls, 2)
+                                if ls is not None else None)
+        b["_RESIDUAL_PNL"] = (round(b["_TOTAL_PNL"] - lp, 2)
+                              if lp is not None else None)
+        b["_RECONCILES"] = (ls is not None and lp is not None
+                            and abs(b["_TOTAL_STAKE"] - ls) < 0.01
+                            and abs(b["_TOTAL_PNL"] - lp) < 0.01)
+        all_bands[label] = b
+        print("%-10s 3-channel %s  stake residual $%s  pnl residual $%s" % (
+            label, "RECONCILES" if b["_RECONCILES"] else "DOES NOT RECONCILE",
+            b["_RESIDUAL_STAKE"], b["_RESIDUAL_PNL"]), flush=True)
+
     payload = {"CENSUS": cen,
                "REFERENCE_ACCOUNT_REPLAY": replays,
                "REFERENCE_ACCOUNT_COMPLETION": grids,
-               "MERGE_PNL_BY_OPEN_BAND": open_bands}
+               "MERGE_PNL_BY_OPEN_BAND": open_bands,
+               "PNL_BY_OPEN_BAND_ALL_CHANNELS": all_bands}
     blob = json.dumps(payload, indent=1, default=str)
     (out / f"{a.wallet}_reconstruction.json").write_text(blob)
     (out / f"{a.wallet}_census.json").write_text(json.dumps(cen, indent=1))
