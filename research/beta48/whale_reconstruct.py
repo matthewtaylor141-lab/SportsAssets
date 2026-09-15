@@ -246,6 +246,109 @@ def census(wallet: str, address: str, source: str, fills: list,
     }
 
 
+# -------------------------------- the pair channel, split by open band --
+def merge_pnl_by_open_band(fills: list) -> dict:
+    """BETA48_DATA_GATE's NEXT_DECISIVE_EXPERIMENT: split the PAIR CHANNEL
+    by a decision-time bucket, and reconcile it to the estimator exactly.
+
+    WHY THIS EXISTS AND completion_grid DOES NOT ANSWER IT. The first
+    attempt attributed pair economics from completion_grid, which walks
+    only the FIRST complement of an OPENING leg. Measured against the
+    retained RN1 snapshot that reproduced $58,394 of a $223,094
+    realized_merge_pnl -- 26%. A leg built from many fills does most of
+    its merging in events that grid never looks at, so a per-band table
+    built from it would attribute a quarter of the money while reading
+    like the whole of it.
+
+    WHAT THIS DOES INSTEAD. It walks the fills with merge_pnl.step's own
+    balance/cost accounting -- a BUY meeting an opposing balance closes
+    m = min(size, bal[other]) shares and realises
+    m * (1 - avg_cost_of_held_leg - price_paid_now) -- and additionally
+    remembers the price at which each leg was OPENED from flat. Every
+    merge is then booked to the band of the HELD leg's opening price.
+
+    That price is a decision-time fact: it is known when the position is
+    taken, before any of the pair economics are determined. It is the
+    bucket the directive asked for.
+
+    THE GUARANTEE. Summed over bands this equals realized_merge_pnl to
+    the cent, because it is the same arithmetic over the same events in
+    the same order -- only labelled. reconciles_to_estimator carries the
+    residual so the claim is checkable in the sealed output rather than
+    taken on faith. It reads nothing the estimator does not read, and it
+    does not touch the estimator.
+    """
+    by_cond: dict[str, list] = defaultdict(list)
+    for f in fills:
+        by_cond[f["condition_id"]].append(f)
+
+    bands: dict = defaultdict(lambda: {"merges": 0, "shares": 0.0,
+                                       "stake": 0.0, "pnl": 0.0})
+    total = 0.0
+    DUST = 1e-9
+
+    def band_of(p):
+        for lo, hi in PRICE_BANDS:
+            if lo <= p < hi:
+                return "%.2f-%.2f" % (lo, hi)
+        return "NOT_IDENTIFIED"
+
+    for cid, rows in by_cond.items():
+        bal, cost = [0.0, 0.0], [0.0, 0.0]
+        opened_at: list = [None, None]      # price each leg was opened from flat
+        for f in rows:
+            idx = f["outcome_index"]
+            other = 1 - idx
+            if f["side"] == "SELL":
+                q = min(f["size"], bal[idx])
+                if q > DUST:
+                    avg = cost[idx] / bal[idx] if bal[idx] > DUST else 0.0
+                    bal[idx] -= q
+                    cost[idx] -= q * avg
+                    if bal[idx] <= DUST:
+                        opened_at[idx] = None
+                continue
+            m = min(f["size"], bal[other])
+            if m > DUST:
+                avg_other = (cost[other] / bal[other]
+                             if bal[other] > DUST else 0.0)
+                pnl = m * (1.0 - avg_other - f["price"])
+                key = band_of(opened_at[other]
+                              if opened_at[other] is not None else avg_other)
+                e = bands[key]
+                e["merges"] += 1
+                e["shares"] += m
+                e["stake"] += m * avg_other
+                e["pnl"] += pnl
+                total += pnl
+                bal[other] -= m
+                cost[other] -= m * avg_other
+                if bal[other] <= DUST:
+                    opened_at[other] = None
+            entry = f["size"] - m
+            if entry > DUST:
+                if bal[idx] <= DUST:
+                    opened_at[idx] = f["price"]
+                bal[idx] += entry
+                cost[idx] += entry * f["price"]
+
+    out = {}
+    for k in sorted(bands):
+        e = bands[k]
+        out[k] = {
+            "merges": e["merges"],
+            "merged_shares": round(e["shares"], 2),
+            "MATCHED_STAKE": round(e["stake"], 2),
+            "MATCHED_PNL": round(e["pnl"], 2),
+            "MATCHED_ROI": round(e["pnl"] / e["stake"], 6)
+            if e["stake"] > 0 else None,
+        }
+    out["_TOTAL_MATCHED_PNL"] = round(total, 2)
+    out["_BUCKET"] = ("the HELD leg's opening price -- a decision-time fact, "
+                      "known before the pair economics are determined")
+    return out
+
+
 # --------------------------------------------- ceiling x horizon grid --
 def completion_grid(fills: list) -> dict:
     """REFERENCE_ACCOUNT complement-completion, directive section 5.
@@ -283,6 +386,33 @@ def completion_grid(fills: list) -> dict:
                                          "basis_sum": 0.0, "basis_n": 0})
     by_week: dict = defaultdict(lambda: {"opens": 0, "done_1h": 0,
                                          "basis_sum": 0.0, "basis_n": 0})
+
+    # PER-BAND ECONOMICS (BETA48_DATA_GATE's NEXT_DECISIVE_EXPERIMENT).
+    #
+    # The sealed grids carried opens / completion / mean basis per band and
+    # NO P&L, so the 3/3 pair-channel sign split could not be attributed to
+    # a decision-time bucket. These accumulate the missing economics.
+    #
+    # THE ATTRIBUTION, stated plainly because it is an approximation.
+    # A completed pair returns exactly $1, so the pair bought at `basis`
+    # earns (1 - basis) per share. We attribute
+    #
+    #     pair_pnl = matched_size * (1 - basis)
+    #
+    # to the FIRST LEG'S band, where matched_size is min(first, complement).
+    # This is NOT merge_pnl's own number: merge_pnl closes against the
+    # held leg's AVERAGE cost across every fill on that leg, whereas this
+    # prices the single first fill that opened the position. The two agree
+    # when a leg is opened and closed in one pair and diverge when a leg is
+    # built from many fills. band_pnl_total is emitted alongside
+    # realized_merge_pnl precisely so the size of that divergence is
+    # visible rather than assumed, and the per-band split must be read as
+    # an attribution of the pair economics, not as a restatement of the
+    # estimator.
+    band_pnl: dict = defaultdict(lambda: {"pairs": 0, "matched_shares": 0.0,
+                                          "matched_stake": 0.0,
+                                          "pair_pnl": 0.0, "done_5s": 0,
+                                          "done_settle": 0, "bases": []})
 
     def band_of(p: float) -> str:
         for lo, hi in PRICE_BANDS:
@@ -338,6 +468,17 @@ def completion_grid(fills: list) -> dict:
                 d["basis_n"] += 1
                 if dt <= 3600:
                     d["done_1h"] += 1
+            # The pair's own economics, attributed to the first leg's band.
+            e = band_pnl[band]
+            msize = min(f["size"], comp["size"])
+            e["pairs"] += 1
+            e["matched_shares"] += msize
+            e["matched_stake"] += msize * p0
+            e["pair_pnl"] += msize * (1.0 - basis)
+            e["bases"].append(basis)
+            if dt <= 5:
+                e["done_5s"] += 1
+            e["done_settle"] += 1      # completed at all == completed by settlement
             for h in HORIZONS_S:
                 if dt <= h:
                     for c in CEILINGS:
@@ -349,8 +490,16 @@ def completion_grid(fills: list) -> dict:
                     grid["settlement"][c] += 1
             grid["settlement"]["ANY_BASIS"] += 1
 
-    def rate(d):
-        return {
+    def pct(sorted_vals, q):
+        """Nearest-rank percentile. No numpy on this path by design."""
+        if not sorted_vals:
+            return None
+        i = min(len(sorted_vals) - 1,
+                max(0, int(round(q * (len(sorted_vals) - 1)))))
+        return sorted_vals[i]
+
+    def rate(d, band_key=None):
+        out = {
             "opens": d["opens"],
             "completed_within_1h": d["done_1h"],
             "completion_rate_1h": round(d["done_1h"] / d["opens"], 4)
@@ -358,6 +507,35 @@ def completion_grid(fills: list) -> dict:
             "mean_pair_basis": round(d["basis_sum"] / d["basis_n"], 5)
             if d["basis_n"] else None,
         }
+        # The four keys above are unchanged and must stay so: the sealed
+        # run 35028887477 grids are compared against these.
+        if band_key is None or band_key not in band_pnl:
+            return out
+        e = band_pnl[band_key]
+        b = sorted(e["bases"])
+        out.update({
+            "completed_within_5s": e["done_5s"],
+            "completion_rate_5s": round(e["done_5s"] / d["opens"], 4)
+            if d["opens"] else None,
+            "completed_by_settlement": e["done_settle"],
+            "completion_rate_settlement": round(e["done_settle"] / d["opens"], 4)
+            if d["opens"] else None,
+            "residual_rate": round(1.0 - e["done_settle"] / d["opens"], 4)
+            if d["opens"] else None,
+            "median_pair_basis": round(pct(b, 0.50), 5) if b else None,
+            "p25_pair_basis": round(pct(b, 0.25), 5) if b else None,
+            "p75_pair_basis": round(pct(b, 0.75), 5) if b else None,
+            "first_complement_shares": round(e["matched_shares"], 2),
+            "first_complement_stake": round(e["matched_stake"], 2),
+            "first_complement_pnl": round(e["pair_pnl"], 2),
+            "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first "
+                                     "complement of an OPENING leg and on RN1 "
+                                     "reproduces just 26% of realized_merge_pnl. "
+                                     "The pair channel's per-band economics are "
+                                     "MERGE_PNL_BY_OPEN_BAND, which reconciles "
+                                     "to the cent. Do not read these as MATCHED_PNL.",
+        })
+        return out
 
     return {
         "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": opens,
@@ -373,8 +551,17 @@ def completion_grid(fills: list) -> dict:
                "any_basis_rate": round(grid[h]["ANY_BASIS"] / opens, 5)
                if opens else None}
             for h in list(HORIZONS_S) + ["settlement"]},
-        "BY_FIRST_LEG_PRICE_BAND": {k: rate(v) for k, v in
+        "BY_FIRST_LEG_PRICE_BAND": {k: rate(v, k) for k, v in
                                     sorted(by_band.items())},
+        # First-complement-only totals. Kept because the completion rates
+        # and basis percentiles above are computed over exactly this
+        # subset, so a reader needs its size. NOT the pair channel: on the
+        # retained RN1 snapshot this is $58,394 against a $223,094
+        # realized_merge_pnl. MERGE_PNL_BY_OPEN_BAND is the pair channel.
+        "FIRST_COMPLEMENT_PNL_TOTAL": round(
+            sum(e["pair_pnl"] for e in band_pnl.values()), 2),
+        "FIRST_COMPLEMENT_STAKE_TOTAL": round(
+            sum(e["matched_stake"] for e in band_pnl.values()), 2),
         "BY_SPORT_OR_QUESTION": dict(sorted(
             ((k, rate(v)) for k, v in by_sport.items()),
             key=lambda kv: -kv[1]["opens"])[:25]),
@@ -495,9 +682,29 @@ def main(argv=None) -> int:
              for label, days in (("LIFETIME", None), ("LAST_30D", 30),
                                  ("LAST_7D", 7))}
 
+    # The pair channel split by the held leg's opening band, with the
+    # residual against the estimator carried in the output so the
+    # reconciliation is checkable from the sealed file alone.
+    open_bands = {}
+    for label, days in (("LIFETIME", None), ("LAST_30D", 30), ("LAST_7D", 7)):
+        sub = window(fills, days, as_of)
+        if not sub:
+            open_bands[label] = "NO_FILLS_IN_WINDOW"
+            continue
+        b = merge_pnl_by_open_band(sub)
+        est = round(replays[label].get("realized_merge_pnl") or 0.0, 2)
+        b["_REALIZED_MERGE_PNL"] = est
+        b["_RESIDUAL_VS_ESTIMATOR"] = round(b["_TOTAL_MATCHED_PNL"] - est, 2)
+        b["_RECONCILES"] = abs(b["_TOTAL_MATCHED_PNL"] - est) < 0.01
+        open_bands[label] = b
+        print("%-10s band-split %s  residual $%s" % (
+            label, "RECONCILES" if b["_RECONCILES"] else "DOES NOT RECONCILE",
+            b["_RESIDUAL_VS_ESTIMATOR"]), flush=True)
+
     payload = {"CENSUS": cen,
                "REFERENCE_ACCOUNT_REPLAY": replays,
-               "REFERENCE_ACCOUNT_COMPLETION": grids}
+               "REFERENCE_ACCOUNT_COMPLETION": grids,
+               "MERGE_PNL_BY_OPEN_BAND": open_bands}
     blob = json.dumps(payload, indent=1, default=str)
     (out / f"{a.wallet}_reconstruction.json").write_text(blob)
     (out / f"{a.wallet}_census.json").write_text(json.dumps(cen, indent=1))
