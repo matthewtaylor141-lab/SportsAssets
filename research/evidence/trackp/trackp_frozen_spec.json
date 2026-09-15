@@ -1,0 +1,34 @@
+{
+ "ELIGIBLE_LEAGUES": "NOT_IDENTIFIED (no league field in data)",
+ "ELIGIBLE_MARKET_TYPES": "NOT_IDENTIFIED (no market-type field)",
+ "ELIGIBLE_SPORTS": "ALL (no sport filter)",
+ "ENTRY_THRESHOLD": 0.03,
+ "EXCLUSION_RULES": [
+  "condition already resolved at probe_at",
+  "book_ok false",
+  "ask outside [0.02,0.98]",
+  "ladder top disagrees with best_ask",
+  "payout vector not one-hot",
+  "only the FIRST probe per condition+token"
+ ],
+ "EXIT_RULE": "HOLD TO SETTLEMENT. No stop, target, cash-out or hedge.",
+ "FEATURE_SET": [
+  "best_ask@probe_at",
+  "sport"
+ ],
+ "FEE_MODEL": "PMUS verified taker 0.06*p*(1-p) per contract, APPLIED CROSS-VENUE to Polymarket prices",
+ "HYPOTHESES_TESTED_BEFORE_FREEZE": 32,
+ "MAXIMUM_EXPOSURE": "not modelled; capacity reported separately",
+ "MODEL_VERSION": "E_ISOTONIC_BY_SPORT",
+ "ORDER_ASSUMPTION": "buy 1 contract at the observed best ask (taker), top-of-book only",
+ "POSITION_SIZE": "1 contract per decision (normalized fixed risk)",
+ "PREGAME_LIVE_RULE": "NOT_IDENTIFIED (no start time, no live flag)",
+ "PRICE_RANGE": [
+  0.02,
+  0.98
+ ],
+ "SLIPPAGE_MODEL": "0 in the primary result; +1c/+2c/+3c reported as robustness",
+ "STRATEGY": "TRACKP-NATIVE-1",
+ "TRAIN_END": "2026-08-20",
+ "VALID_END": "2026-08-31"
+}

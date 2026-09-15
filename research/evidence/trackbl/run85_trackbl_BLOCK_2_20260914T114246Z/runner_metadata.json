@@ -1,0 +1,41 @@
+{
+ "phase": "run85/trackbl/block/1",
+ "block": "BLOCK_2",
+ "selection_rule_version": "BL-SELECT-1",
+ "python": "3.11.16 (main, Aug 13 2026, 02:46:14) [GCC 13.3.0]",
+ "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+ "httpx": "0.27.2",
+ "gateway": "https://gateway.polymarket.us",
+ "spacing_s": 2.5,
+ "cycle_s": 300.0,
+ "burst_offsets_s": [
+  0.0,
+  5.0,
+  10.0,
+  30.0,
+  60.0
+ ],
+ "lane_staggers_s": [
+  0.0,
+  2.5,
+  15.0,
+  17.5,
+  80.0,
+  82.5
+ ],
+ "max_cycles": 4,
+ "derivable_long_horizons": {
+  "5m": 1,
+  "10m": 2,
+  "15m": 3
+ },
+ "unreachable_horizons": [
+  "30m",
+  "60m"
+ ],
+ "unreachable_reason": "NOT_OBSERVED_WITHIN_BLOCK_LENGTH",
+ "driver_sha256": "652852fafceb59a72310a0e3ad86c41bc81d677c62a77e971b4a5ef65f70582b",
+ "selection_timestamp_utc": "2026-09-14T11:43:40Z",
+ "planned_start_utc": "2026-09-14T11:42:46Z",
+ "block_cohort_sha256": "4f53cda18c2baa0c0354bb5f9a3ecbe5ed12ab4d8e11ba873c2f11161202b945"
+}

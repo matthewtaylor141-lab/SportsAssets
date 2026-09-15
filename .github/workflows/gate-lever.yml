@@ -1,0 +1,93 @@
+# Gate levers as auditable operator actions (owner order 2026-09-02:
+# "make all 4 of these changes now"). Each run POSTs one admin lever to
+# the live API from the runner with the repository's ADMIN_TOKEN, prints
+# the state before and after, and leaves a run in the Actions log -- no
+# raw curl with the token in anyone's shell history.
+#
+#   side-echo-reset : clear the wrong-side circuit. The tripwire stays
+#                     armed: the next confirmed wrong-side fill re-trips
+#                     it AND re-arms the mapping quarantine.
+#   quarantine-off  : resume the quarantined mapping classes.
+#   quarantine-on   : re-arm them.
+name: gate-lever
+
+on:
+  workflow_dispatch:
+    inputs:
+      lever:
+        description: 'Which lever to pull'
+        required: true
+        type: choice
+        options:
+          - side-echo-reset
+          - quarantine-off
+          - quarantine-on
+      confirm:
+        description: 'Type LIFT to confirm (anything else is a dry run that only prints state)'
+        required: true
+        default: ''
+
+jobs:
+  lever:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Pull the lever
+        env:
+          BASE: https://sportsassets-api.onrender.com
+          ADMIN_TOKEN: ${{ secrets.ADMIN_TOKEN }}
+          LEVER: ${{ inputs.lever }}
+          CONFIRM: ${{ inputs.confirm }}
+        run: |
+          set -u
+          echo "lever=$LEVER confirm=$CONFIRM"
+          # THE `|| echo` FALLBACKS HERE WERE UNREACHABLE (fixed 2026-09-05).
+          #
+          # They were written as `curl ... | jq ... || echo "(unavailable)"`.
+          # A pipeline's status is the LAST command's, and jq handed an empty
+          # stdin prints nothing and exits 0 -- so when the API hung, this
+          # function printed NOTHING and the fallback never fired. During the
+          # 2026-09-05 database outage that made every check ambiguous: silence
+          # could mean "no quarantine" or "the read never returned", and the
+          # only way to tell them apart was timing the job.
+          #
+          # Same shape as the two fail-opens fixed in the probe the same night
+          # (1b14453, 9244ece): a read that could not be made, treated as a
+          # result rather than as a refusal. Fetch to a file, then require the
+          # file to be non-empty AND to parse, and SAY SO when it does not.
+          read_json() {                     # $1 = url, $2 = budget, $3 = label
+            local out="/tmp/gl_$3.json"
+            if curl -sS --max-time "$2" -H "X-Admin-Token: $ADMIN_TOKEN" \
+                    -o "$out" "$1" 2>/dev/null \
+               && [ -s "$out" ] && jq -e . "$out" >/dev/null 2>&1; then
+              return 0
+            fi
+            echo "  ($3 UNAVAILABLE after ${2}s -- no body, or not JSON."
+            echo "   A hang with an empty body is the signature of the API's"
+            echo "   DB reads timing out; check /healthz db_ok before reading"
+            echo "   anything else into this.)"
+            return 1
+          }
+          state() {
+            if read_json "$BASE/api/admin/quarantine" 45 quarantine; then
+              jq -c '.' /tmp/gl_quarantine.json
+            fi
+            if read_json "$BASE/api/admin/premap-status" 60 premap; then
+              jq -c '{side_echo_tripped: .side_echo_tripped, side_echo: .side_echo}' \
+                 /tmp/gl_premap.json
+            fi
+          }
+          echo "== before =="; state
+          if [ "$CONFIRM" != "LIFT" ]; then
+            echo "dry run: confirm was not LIFT; nothing changed"; exit 0
+          fi
+          case "$LEVER" in
+            side-echo-reset) URL="$BASE/api/admin/side-echo-reset" ;;
+            quarantine-off)  URL="$BASE/api/admin/quarantine/off" ;;
+            quarantine-on)   URL="$BASE/api/admin/quarantine/on" ;;
+            *) echo "unknown lever $LEVER"; exit 1 ;;
+          esac
+          CODE=$(curl -sS --max-time 45 -w '%{http_code}' -o /tmp/lever.json \
+                 -X POST -H "X-Admin-Token: $ADMIN_TOKEN" "$URL" 2>/dev/null || echo 000)
+          echo "POST $URL -> HTTP $CODE"; cat /tmp/lever.json 2>/dev/null; echo
+          if [ "$CODE" != "200" ]; then echo "lever refused (HTTP $CODE)"; exit 1; fi
+          echo "== after =="; state

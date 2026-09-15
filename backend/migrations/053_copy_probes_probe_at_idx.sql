@@ -1,0 +1,53 @@
+-- 053: COPY_PROBES INDEX ON probe_at, for the retention loop
+-- (workers/retention.py; the full-disk outage of 2026-09-04/05, in which
+-- sportsassets-db filled, Render degraded it and its hostname stopped
+-- resolving for ~15 hours).
+--
+-- NUMBERING. 053, not 050 or 051: docs/mirror-to-a-tee-program.md:182
+-- reserves 050 (Phase 5, shorts) and 051 (Phase 6, game claims) and
+-- tests/test_mirror_live_migration.py enforces the register; 052 is
+-- landed. migrate.py applies the sorted glob, so the gap is harmless
+-- (052's header says the same).
+--
+-- WHY. The retention loop prunes copy_probes oldest-first:
+--     DELETE ... WHERE id IN (SELECT id FROM copy_probes
+--                             WHERE probe_at < $1 ORDER BY probe_at LIMIT $2)
+-- and reads the oldest surviving probe_at after each cycle. 005's only
+-- index is (whale_id, probe_at DESC) -- led by whale_id, so neither
+-- read can use it and both are sequential scans of the biggest table
+-- on the disk, every hour, under a 30 s statement timeout that would
+-- simply fire. ai_trades already has ai_trades_placed_idx (006, on
+-- placed_at DESC) and needs nothing. The loop checks pg_indexes before
+-- touching a table and SKIPS one whose scan has no index, recording
+-- why, so on a database that has not applied this file copy_probes is
+-- left alone rather than hammered.
+--
+-- NOT CONCURRENTLY, and why not. migrate.py runs every file inside
+-- `conn.transaction()`, and Postgres refuses CREATE INDEX CONCURRENTLY
+-- inside a transaction block -- the file would fail to apply at all.
+-- A plain CREATE INDEX takes a SHARE lock on copy_probes for the
+-- build: reads proceed, INSERTs wait. The only writer is copy_probe.py,
+-- which is disabled by env (COPY_PROBE_ENABLED=false) until retention
+-- lands, so the build blocks nothing today; on a live writer it would
+-- queue that writer's inserts for the build's duration, which is the
+-- price of a migration runner that owns the transaction.
+--
+-- THE BUILD RUNS ON THE API'S BOOT PATH, NOT IN THE BACKGROUND
+-- (money-safety review 2026-09-05). start.sh runs migrate before
+-- uvicorn, so the first boot after this lands waits on the whole build
+-- with no statement timeout, and /healthz is not served until it
+-- finishes. If Render's deploy window expires first the container is
+-- killed, migrate.py's transaction rolls the index back,
+-- schema_migrations never records 053, and the next deploy pays the
+-- build again while the retention loop keeps skipping copy_probes with
+-- "no index leads with probe_at". The way to make this file a no-op on
+-- a table of the size that filled the disk is to build the index BY
+-- HAND first, from psql outside any transaction, where CONCURRENTLY is
+-- allowed:
+--     CREATE INDEX CONCURRENTLY copy_probes_probe_at_idx
+--         ON copy_probes (probe_at);
+-- IF NOT EXISTS then applies instantly at the next boot.
+--
+-- Re-runnable: IF NOT EXISTS, like every index in this directory.
+
+CREATE INDEX IF NOT EXISTS copy_probes_probe_at_idx ON copy_probes (probe_at);

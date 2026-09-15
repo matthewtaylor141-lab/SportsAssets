@@ -1,0 +1,230 @@
+==========================================================================
+BETA48 P1 -- RN1 PAIR / MERGE RECONSTRUCTION (raw fills, offline)
+==========================================================================
+SOURCE            research/snapshots/u2_events_v1.jsonl.gz
+SETTLEMENT        research/snapshots/settlement_v1.jsonl
+ESTIMATOR         backend/sportsassets/analytics/merge_pnl.py::replay (unmodified)
+
+--- INGESTION CENSUS ---
+  ROWS                           214609
+  KEPT                           196619
+  DROP_NO_CONDITION               17822
+  DROP_LEG_NOT_IDENTIFIED           168
+
+--- SETTLEMENT CENSUS ---
+  OK_ONE_HOT                       9545
+  NOT_RESOLVED                     8207
+
+FILL WINDOW       2026-08-06T04:36:32.000000Z .. 2026-09-11T23:59:34.000000Z
+DISTINCT MARKETS  17722
+
+--- LIFETIME(sample)  (196619 fills, 2026-08-06 .. 2026-09-11) ---
+  n_entries                    126242
+  n_merges                      78500
+  n_sells                           0
+  merge_shares             26914690.9
+  entry_notional      $  32276739.30
+  MATCHED (merge) PnL $    223093.85
+  realized_sell  PnL  $         0.00
+  edge_ci95              [-0.001947, 0.043624]
+  EDGE_VERDICT           NOT DEMONSTRATED — +2.08% on dollar deployed but the interval [-0.19%, +4.36%] contains zero over 88,034 closed lots
+  coverage_note          $8,338,997 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed — but the edge below describes the rest of the book, not all of it
+  cf_note                12045240 of 26914691 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses
+  cf_actual_on_graded       200524.37
+  cf_closed_shares        26914690.91
+  cf_coverage                  0.5525
+  cf_graded_shares        14869450.59
+  cf_hold_on_graded         232320.88
+  cf_ungraded_shares      12045240.32
+  edge_clusters                 13599
+  edge_coverage                0.7416
+  edge_deff                    1.1538
+  edge_deployed           23937742.29
+  edge_lots                     88034
+  edge_roi                   0.020838
+  edge_se                    0.011625
+  exit_value                -31796.51
+  lot_p                  498823.14598218515
+  lot_pp                 58493547230.065445
+  lot_ps                 9044437949.641075
+  lot_s                  23937742.292518593
+  lot_ss                 123333599929.53563
+  lots                          88034
+  n_fills                      196619
+  open_cost               18700507.05
+  open_shares              39953707.4
+  realized_total            223093.85
+  roi_on_entries               0.0069
+  settled_lots                   9534
+  settled_shares          22199893.34
+  ungraded_open_cost       8338997.01
+  ungraded_open_shares    17753814.05
+
+--- LAST_60D  (196619 fills, 2026-08-06 .. 2026-09-11) ---
+  n_entries                    126242
+  n_merges                      78500
+  n_sells                           0
+  merge_shares             26914690.9
+  entry_notional      $  32276739.30
+  MATCHED (merge) PnL $    223093.85
+  realized_sell  PnL  $         0.00
+  edge_ci95              [-0.001947, 0.043624]
+  EDGE_VERDICT           NOT DEMONSTRATED — +2.08% on dollar deployed but the interval [-0.19%, +4.36%] contains zero over 88,034 closed lots
+  coverage_note          $8,338,997 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed — but the edge below describes the rest of the book, not all of it
+  cf_note                12045240 of 26914691 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses
+  cf_actual_on_graded       200524.37
+  cf_closed_shares        26914690.91
+  cf_coverage                  0.5525
+  cf_graded_shares        14869450.59
+  cf_hold_on_graded         232320.88
+  cf_ungraded_shares      12045240.32
+  edge_clusters                 13599
+  edge_coverage                0.7416
+  edge_deff                    1.1538
+  edge_deployed           23937742.29
+  edge_lots                     88034
+  edge_roi                   0.020838
+  edge_se                    0.011625
+  exit_value                -31796.51
+  lot_p                  498823.14598218515
+  lot_pp                 58493547230.065445
+  lot_ps                 9044437949.641075
+  lot_s                  23937742.292518593
+  lot_ss                 123333599929.53563
+  lots                          88034
+  n_fills                      196619
+  open_cost               18700507.05
+  open_shares              39953707.4
+  realized_total            223093.85
+  roi_on_entries               0.0069
+  settled_lots                   9534
+  settled_shares          22199893.34
+  ungraded_open_cost       8338997.01
+  ungraded_open_shares    17753814.05
+
+--- LAST_30D  (189174 fills, 2026-08-13 .. 2026-09-11) ---
+  n_entries                    120889
+  n_merges                      76057
+  n_sells                           0
+  merge_shares             26595854.5
+  entry_notional      $  31549572.85
+  MATCHED (merge) PnL $    210530.93
+  realized_sell  PnL  $         0.00
+  edge_ci95              [-0.001692, 0.044687]
+  EDGE_VERDICT           NOT DEMONSTRATED — +2.15% on dollar deployed but the interval [-0.17%, +4.47%] contains zero over 84,863 closed lots
+  coverage_note          $8,152,332 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed — but the edge below describes the rest of the book, not all of it
+  cf_note                11955768 of 26595855 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses
+  cf_actual_on_graded       189017.74
+  cf_closed_shares        26595854.51
+  cf_coverage                  0.5505
+  cf_graded_shares        14640086.57
+  cf_hold_on_graded         219284.76
+  cf_ungraded_shares      11955767.95
+  edge_clusters                 12709
+  edge_coverage                0.7416
+  edge_deff                    1.1552
+  edge_deployed            23397240.5
+  edge_lots                     84863
+  edge_roi                   0.021498
+  edge_se                    0.011831
+  exit_value                -30267.02
+  lot_p                  502982.3674924262
+  lot_pp                 57752451848.99753
+  lot_ps                 9082464770.4896
+  lot_s                  23397240.50432533
+  lot_ss                 121971023500.9453
+  lots                          84863
+  n_fills                      189174
+  open_cost               18121046.82
+  open_shares             38732644.96
+  realized_total            210530.93
+  roi_on_entries               0.0067
+  settled_lots                   8806
+  settled_shares          21361850.28
+  ungraded_open_cost       8152332.35
+  ungraded_open_shares    17370794.68
+
+--- LAST_14D  (129616 fills, 2026-08-29 .. 2026-09-11) ---
+  n_entries                     82752
+  n_merges                      52322
+  n_sells                           0
+  merge_shares             20034036.2
+  entry_notional      $  22934874.76
+  MATCHED (merge) PnL $     82217.06
+  realized_sell  PnL  $         0.00
+  edge_ci95              [-0.01494, 0.039033]
+  EDGE_VERDICT           NOT DEMONSTRATED — +1.20% on dollar deployed but the interval [-1.49%, +3.90%] contains zero over 58,746 closed lots
+  coverage_note          $5,409,038 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed — but the edge below describes the rest of the book, not all of it
+  cf_note                8413298 of 20034036 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses
+  cf_actual_on_graded       107928.33
+  cf_closed_shares        20034036.23
+  cf_coverage                    0.58
+  cf_graded_shares        11620738.08
+  cf_hold_on_graded          25159.51
+  cf_ungraded_shares       8413298.15
+  edge_clusters                  8932
+  edge_coverage                0.7642
+  edge_deff                    1.1263
+  edge_deployed           17525836.61
+  edge_lots                     58746
+  edge_roi                   0.012047
+  edge_se                    0.013769
+  exit_value                 82768.82
+  lot_p                  211126.81010396485
+  lot_pp                 45974265498.015526
+  lot_ps                 3382394009.5488343
+  lot_s                  17525836.60681456
+  lot_ss                 96640624388.99294
+  lots                          58746
+  n_fills                      129616
+  open_cost               12797181.23
+  open_shares             27592123.34
+  realized_total             82217.06
+  roi_on_entries               0.0036
+  settled_lots                   6424
+  settled_shares          16181669.02
+  ungraded_open_cost       5409038.15
+  ungraded_open_shares    11410454.32
+
+--- LAST_7D  (73455 fills, 2026-09-05 .. 2026-09-11) ---
+  n_entries                     45880
+  n_merges                      30546
+  n_sells                           0
+  merge_shares             11518912.7
+  entry_notional      $  12619063.44
+  MATCHED (merge) PnL $     36010.70
+  realized_sell  PnL  $         0.00
+  edge_ci95              [-0.034199, 0.039437]
+  EDGE_VERDICT           NOT DEMONSTRATED — +0.26% on dollar deployed but the interval [-3.42%, +3.94%] contains zero over 34,646 closed lots
+  coverage_note          $1,711,026 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed — but the edge below describes the rest of the book, not all of it
+  cf_note                2933769 of 11518913 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses
+  cf_actual_on_graded        53183.53
+  cf_closed_shares         11518912.7
+  cf_coverage                  0.7453
+  cf_graded_shares         8585144.07
+  cf_hold_on_graded         -27198.55
+  cf_ungraded_shares       2933768.62
+  edge_clusters                  4892
+  edge_coverage                0.8644
+  edge_deff                    1.1129
+  edge_deployed           10908037.56
+  edge_lots                     34646
+  edge_roi                   0.002619
+  edge_se                    0.018785
+  exit_value                 80382.08
+  lot_p                  28570.313968763174
+  lot_pp                 33895675282.394234
+  lot_ps                 -1017537399.6026593
+  lot_s                  10908037.555941127
+  lot_ss                 68971462983.88911
+  lots                          34646
+  n_fills                       73455
+  open_cost                6866225.84
+  open_shares             15402467.21
+  realized_total              36010.7
+  roi_on_entries               0.0029
+  settled_lots                   4100
+  settled_shares          11458924.48
+  ungraded_open_cost       1711025.89
+  ungraded_open_shares     3943542.73
+

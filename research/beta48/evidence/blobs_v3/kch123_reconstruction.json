@@ -1,0 +1,2103 @@
+{
+ "CENSUS": {
+  "REFERENCE_ACCOUNT": "kch123",
+  "WALLET_ADDRESS": "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+  "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+  "EXTRACTION_UTC": "2026-09-15T23:58:53.634678+00:00",
+  "REQUESTED_RANGE_START": "NOT_IDENTIFIED",
+  "RETURNED_RANGE_START": "2025-06-25T19:14:46+00:00",
+  "RETURNED_RANGE_END": "2026-06-29T20:45:56+00:00",
+  "RETURNED_SPAN_DAYS": 369.06,
+  "ROWS_READ": 175076,
+  "ROWS_KEPT": 175076,
+  "UNIQUE_TRADE_IDS": 172439,
+  "DUPLICATE_FILL_KEYS": 0,
+  "BUY_COUNT": 174977,
+  "SELL_COUNT": 99,
+  "OTHER_SIDE_COUNT": 0,
+  "DISTINCT_CONDITIONS": 2614,
+  "DISTINCT_MARKET_SLUGS": 2614,
+  "DROP_CENSUS": {
+   "PAYOUT_ONE_HOT": 2612,
+   "PAYOUT_NOT_ONE_HOT": 2
+  },
+  "COVERAGE_LIMITATIONS": [
+   "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+   "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+   "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+  ],
+  "AS_OF_UTC": "2026-09-15T23:09:17+00:00",
+  "DAYS_SINCE_LAST_FILL_AT_AS_OF": 78.1
+ },
+ "REFERENCE_ACCOUNT_REPLAY": {
+  "LIFETIME": {
+   "n_fills": 175076,
+   "n_entries": 146193,
+   "n_merges": 29898,
+   "n_sells": 95,
+   "entry_notional": 135022957.88,
+   "merge_shares": 19720849.82,
+   "realized_merge_pnl": -673586.72,
+   "realized_sell_pnl": 715442.12,
+   "open_shares": 241421112.47,
+   "open_cost": 124099341.69,
+   "lots": 32595,
+   "lot_s": 134976858.52097458,
+   "lot_p": 10541564.330263183,
+   "lot_ss": 23305062451134.297,
+   "lot_pp": 20577474183724.832,
+   "lot_ps": 1865125253860.2517,
+   "settled_lots": 2602,
+   "settled_shares": 241311815.76,
+   "ungraded_open_shares": 109296.71,
+   "ungraded_open_cost": 46099.36,
+   "cf_closed_shares": 21183159.82,
+   "cf_graded_shares": 21163228.75,
+   "cf_ungraded_shares": 19931.08,
+   "cf_actual_on_graded": 39966.01,
+   "cf_hold_on_graded": -540721.5,
+   "edge_coverage": 0.9997,
+   "edge_coverage_note": "$46,099 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": 580687.51,
+   "edge_lots": 32595,
+   "edge_deployed": 134976858.52,
+   "edge_roi": 0.078099,
+   "edge_se": 0.033667,
+   "edge_ci95": [
+    0.012112,
+    0.144086
+   ],
+   "edge_clusters": 2613,
+   "edge_deff": 1.0054,
+   "edge_verdict": "PROFITABLE at 95% \u2014 +7.81% on dollar deployed, interval [+1.21%, +14.41%] over 32,595 closed lots",
+   "cf_coverage": 0.9991,
+   "cf_note": "19931 of 21183160 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 41855.4,
+   "roi_on_entries": 0.0003,
+   "_window_fills": 175076,
+   "_window_days_requested": null
+  },
+  "LAST_60D": {
+   "_window_fills": 0,
+   "_window_days_requested": 60,
+   "edge_verdict": "NO_FILLS_IN_WINDOW"
+  },
+  "LAST_30D": {
+   "_window_fills": 0,
+   "_window_days_requested": 30,
+   "edge_verdict": "NO_FILLS_IN_WINDOW"
+  },
+  "LAST_14D": {
+   "_window_fills": 0,
+   "_window_days_requested": 14,
+   "edge_verdict": "NO_FILLS_IN_WINDOW"
+  },
+  "LAST_7D": {
+   "_window_fills": 0,
+   "_window_days_requested": 7,
+   "edge_verdict": "NO_FILLS_IN_WINDOW"
+  }
+ },
+ "REFERENCE_ACCOUNT_COMPLETION": {
+  "LIFETIME": {
+   "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": 3734,
+   "REFERENCE_ACCOUNT_NEVER_COMPLETED": 1488,
+   "REFERENCE_ACCOUNT_MEAN_PAIR_BASIS": 1.01485,
+   "REFERENCE_ACCOUNT_COMPLETION_GRID": {
+    "5": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": 0.0
+     },
+     "ceiling_0.92": {
+      "completed": 1,
+      "rate": 0.00027
+     },
+     "ceiling_0.94": {
+      "completed": 1,
+      "rate": 0.00027
+     },
+     "ceiling_0.95": {
+      "completed": 1,
+      "rate": 0.00027
+     },
+     "ceiling_0.96": {
+      "completed": 2,
+      "rate": 0.00054
+     },
+     "ceiling_0.97": {
+      "completed": 8,
+      "rate": 0.00214
+     },
+     "ceiling_0.98": {
+      "completed": 18,
+      "rate": 0.00482
+     },
+     "ceiling_0.99": {
+      "completed": 23,
+      "rate": 0.00616
+     },
+     "ceiling_1.00": {
+      "completed": 25,
+      "rate": 0.0067
+     },
+     "any_basis_completed": 25,
+     "any_basis_rate": 0.0067
+    },
+    "10": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": 0.0
+     },
+     "ceiling_0.92": {
+      "completed": 1,
+      "rate": 0.00027
+     },
+     "ceiling_0.94": {
+      "completed": 1,
+      "rate": 0.00027
+     },
+     "ceiling_0.95": {
+      "completed": 1,
+      "rate": 0.00027
+     },
+     "ceiling_0.96": {
+      "completed": 5,
+      "rate": 0.00134
+     },
+     "ceiling_0.97": {
+      "completed": 16,
+      "rate": 0.00428
+     },
+     "ceiling_0.98": {
+      "completed": 41,
+      "rate": 0.01098
+     },
+     "ceiling_0.99": {
+      "completed": 50,
+      "rate": 0.01339
+     },
+     "ceiling_1.00": {
+      "completed": 55,
+      "rate": 0.01473
+     },
+     "any_basis_completed": 55,
+     "any_basis_rate": 0.01473
+    },
+    "30": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": 0.0
+     },
+     "ceiling_0.92": {
+      "completed": 1,
+      "rate": 0.00027
+     },
+     "ceiling_0.94": {
+      "completed": 2,
+      "rate": 0.00054
+     },
+     "ceiling_0.95": {
+      "completed": 3,
+      "rate": 0.0008
+     },
+     "ceiling_0.96": {
+      "completed": 11,
+      "rate": 0.00295
+     },
+     "ceiling_0.97": {
+      "completed": 31,
+      "rate": 0.0083
+     },
+     "ceiling_0.98": {
+      "completed": 77,
+      "rate": 0.02062
+     },
+     "ceiling_0.99": {
+      "completed": 99,
+      "rate": 0.02651
+     },
+     "ceiling_1.00": {
+      "completed": 109,
+      "rate": 0.02919
+     },
+     "any_basis_completed": 114,
+     "any_basis_rate": 0.03053
+    },
+    "60": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": 0.0
+     },
+     "ceiling_0.92": {
+      "completed": 1,
+      "rate": 0.00027
+     },
+     "ceiling_0.94": {
+      "completed": 2,
+      "rate": 0.00054
+     },
+     "ceiling_0.95": {
+      "completed": 3,
+      "rate": 0.0008
+     },
+     "ceiling_0.96": {
+      "completed": 12,
+      "rate": 0.00321
+     },
+     "ceiling_0.97": {
+      "completed": 41,
+      "rate": 0.01098
+     },
+     "ceiling_0.98": {
+      "completed": 106,
+      "rate": 0.02839
+     },
+     "ceiling_0.99": {
+      "completed": 138,
+      "rate": 0.03696
+     },
+     "ceiling_1.00": {
+      "completed": 156,
+      "rate": 0.04178
+     },
+     "any_basis_completed": 162,
+     "any_basis_rate": 0.04339
+    },
+    "120": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": 0.0
+     },
+     "ceiling_0.92": {
+      "completed": 1,
+      "rate": 0.00027
+     },
+     "ceiling_0.94": {
+      "completed": 2,
+      "rate": 0.00054
+     },
+     "ceiling_0.95": {
+      "completed": 3,
+      "rate": 0.0008
+     },
+     "ceiling_0.96": {
+      "completed": 15,
+      "rate": 0.00402
+     },
+     "ceiling_0.97": {
+      "completed": 56,
+      "rate": 0.015
+     },
+     "ceiling_0.98": {
+      "completed": 149,
+      "rate": 0.0399
+     },
+     "ceiling_0.99": {
+      "completed": 193,
+      "rate": 0.05169
+     },
+     "ceiling_1.00": {
+      "completed": 220,
+      "rate": 0.05892
+     },
+     "any_basis_completed": 237,
+     "any_basis_rate": 0.06347
+    },
+    "300": {
+     "ceiling_0.90": {
+      "completed": 2,
+      "rate": 0.00054
+     },
+     "ceiling_0.92": {
+      "completed": 5,
+      "rate": 0.00134
+     },
+     "ceiling_0.94": {
+      "completed": 7,
+      "rate": 0.00187
+     },
+     "ceiling_0.95": {
+      "completed": 11,
+      "rate": 0.00295
+     },
+     "ceiling_0.96": {
+      "completed": 33,
+      "rate": 0.00884
+     },
+     "ceiling_0.97": {
+      "completed": 87,
+      "rate": 0.0233
+     },
+     "ceiling_0.98": {
+      "completed": 214,
+      "rate": 0.05731
+     },
+     "ceiling_0.99": {
+      "completed": 276,
+      "rate": 0.07392
+     },
+     "ceiling_1.00": {
+      "completed": 312,
+      "rate": 0.08356
+     },
+     "any_basis_completed": 345,
+     "any_basis_rate": 0.09239
+    },
+    "600": {
+     "ceiling_0.90": {
+      "completed": 19,
+      "rate": 0.00509
+     },
+     "ceiling_0.92": {
+      "completed": 28,
+      "rate": 0.0075
+     },
+     "ceiling_0.94": {
+      "completed": 39,
+      "rate": 0.01044
+     },
+     "ceiling_0.95": {
+      "completed": 52,
+      "rate": 0.01393
+     },
+     "ceiling_0.96": {
+      "completed": 84,
+      "rate": 0.0225
+     },
+     "ceiling_0.97": {
+      "completed": 166,
+      "rate": 0.04446
+     },
+     "ceiling_0.98": {
+      "completed": 322,
+      "rate": 0.08623
+     },
+     "ceiling_0.99": {
+      "completed": 402,
+      "rate": 0.10766
+     },
+     "ceiling_1.00": {
+      "completed": 454,
+      "rate": 0.12159
+     },
+     "any_basis_completed": 553,
+     "any_basis_rate": 0.1481
+    },
+    "1800": {
+     "ceiling_0.90": {
+      "completed": 99,
+      "rate": 0.02651
+     },
+     "ceiling_0.92": {
+      "completed": 119,
+      "rate": 0.03187
+     },
+     "ceiling_0.94": {
+      "completed": 146,
+      "rate": 0.0391
+     },
+     "ceiling_0.95": {
+      "completed": 173,
+      "rate": 0.04633
+     },
+     "ceiling_0.96": {
+      "completed": 230,
+      "rate": 0.0616
+     },
+     "ceiling_0.97": {
+      "completed": 361,
+      "rate": 0.09668
+     },
+     "ceiling_0.98": {
+      "completed": 570,
+      "rate": 0.15265
+     },
+     "ceiling_0.99": {
+      "completed": 700,
+      "rate": 0.18747
+     },
+     "ceiling_1.00": {
+      "completed": 784,
+      "rate": 0.20996
+     },
+     "any_basis_completed": 1146,
+     "any_basis_rate": 0.30691
+    },
+    "3600": {
+     "ceiling_0.90": {
+      "completed": 190,
+      "rate": 0.05088
+     },
+     "ceiling_0.92": {
+      "completed": 220,
+      "rate": 0.05892
+     },
+     "ceiling_0.94": {
+      "completed": 261,
+      "rate": 0.0699
+     },
+     "ceiling_0.95": {
+      "completed": 293,
+      "rate": 0.07847
+     },
+     "ceiling_0.96": {
+      "completed": 368,
+      "rate": 0.09855
+     },
+     "ceiling_0.97": {
+      "completed": 516,
+      "rate": 0.13819
+     },
+     "ceiling_0.98": {
+      "completed": 751,
+      "rate": 0.20112
+     },
+     "ceiling_0.99": {
+      "completed": 909,
+      "rate": 0.24344
+     },
+     "ceiling_1.00": {
+      "completed": 1011,
+      "rate": 0.27076
+     },
+     "any_basis_completed": 1624,
+     "any_basis_rate": 0.43492
+    },
+    "settlement": {
+     "ceiling_0.90": {
+      "completed": 326,
+      "rate": 0.08731
+     },
+     "ceiling_0.92": {
+      "completed": 364,
+      "rate": 0.09748
+     },
+     "ceiling_0.94": {
+      "completed": 422,
+      "rate": 0.11302
+     },
+     "ceiling_0.95": {
+      "completed": 467,
+      "rate": 0.12507
+     },
+     "ceiling_0.96": {
+      "completed": 563,
+      "rate": 0.15078
+     },
+     "ceiling_0.97": {
+      "completed": 738,
+      "rate": 0.19764
+     },
+     "ceiling_0.98": {
+      "completed": 1000,
+      "rate": 0.26781
+     },
+     "ceiling_0.99": {
+      "completed": 1200,
+      "rate": 0.32137
+     },
+     "ceiling_1.00": {
+      "completed": 1343,
+      "rate": 0.35967
+     },
+     "any_basis_completed": 2246,
+     "any_basis_rate": 0.6015
+    }
+   },
+   "BY_FIRST_LEG_PRICE_BAND": {
+    "0.00-0.10": {
+     "opens": 54,
+     "completed_within_1h": 26,
+     "completion_rate_1h": 0.4815,
+     "mean_pair_basis": 0.95879,
+     "completed_within_5s": 2,
+     "completion_rate_5s": 0.037,
+     "completed_by_settlement": 29,
+     "completion_rate_settlement": 0.537,
+     "residual_rate": 0.463,
+     "median_pair_basis": 0.98,
+     "p25_pair_basis": 0.97,
+     "p75_pair_basis": 0.99,
+     "first_complement_shares": 5544.06,
+     "first_complement_stake": 295.0,
+     "first_complement_pnl": 521.47,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.10-0.30": {
+     "opens": 256,
+     "completed_within_1h": 157,
+     "completion_rate_1h": 0.6133,
+     "mean_pair_basis": 0.96753,
+     "completed_within_5s": 7,
+     "completion_rate_5s": 0.0273,
+     "completed_by_settlement": 200,
+     "completion_rate_settlement": 0.7812,
+     "residual_rate": 0.2188,
+     "median_pair_basis": 0.98,
+     "p25_pair_basis": 0.95,
+     "p75_pair_basis": 1.05,
+     "first_complement_shares": 116006.94,
+     "first_complement_stake": 24725.92,
+     "first_complement_pnl": 3428.44,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.30-0.50": {
+     "opens": 1531,
+     "completed_within_1h": 645,
+     "completion_rate_1h": 0.4213,
+     "mean_pair_basis": 0.99975,
+     "completed_within_5s": 8,
+     "completion_rate_5s": 0.0052,
+     "completed_by_settlement": 915,
+     "completion_rate_settlement": 0.5976,
+     "residual_rate": 0.4024,
+     "median_pair_basis": 0.98,
+     "p25_pair_basis": 0.96,
+     "p75_pair_basis": 1.12,
+     "first_complement_shares": 1493062.89,
+     "first_complement_stake": 689652.6,
+     "first_complement_pnl": 5416.05,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.50-0.70": {
+     "opens": 1326,
+     "completed_within_1h": 545,
+     "completion_rate_1h": 0.411,
+     "mean_pair_basis": 1.01993,
+     "completed_within_5s": 6,
+     "completion_rate_5s": 0.0045,
+     "completed_by_settlement": 777,
+     "completion_rate_settlement": 0.586,
+     "residual_rate": 0.414,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.96989,
+     "p75_pair_basis": 1.1,
+     "first_complement_shares": 831061.02,
+     "first_complement_stake": 485898.85,
+     "first_complement_pnl": 5664.1,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.70-0.90": {
+     "opens": 491,
+     "completed_within_1h": 241,
+     "completion_rate_1h": 0.4908,
+     "mean_pair_basis": 1.07505,
+     "completed_within_5s": 2,
+     "completion_rate_5s": 0.0041,
+     "completed_by_settlement": 311,
+     "completion_rate_settlement": 0.6334,
+     "residual_rate": 0.3666,
+     "median_pair_basis": 1.01,
+     "p25_pair_basis": 0.97,
+     "p75_pair_basis": 1.18,
+     "first_complement_shares": 311543.59,
+     "first_complement_stake": 231930.25,
+     "first_complement_pnl": -9531.11,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.90-1.01": {
+     "opens": 76,
+     "completed_within_1h": 10,
+     "completion_rate_1h": 0.1316,
+     "mean_pair_basis": 1.17421,
+     "completed_within_5s": 0,
+     "completion_rate_5s": 0.0,
+     "completed_by_settlement": 14,
+     "completion_rate_settlement": 0.1842,
+     "residual_rate": 0.8158,
+     "median_pair_basis": 1.03,
+     "p25_pair_basis": 0.97,
+     "p75_pair_basis": 1.39,
+     "first_complement_shares": 11589.61,
+     "first_complement_stake": 10724.01,
+     "first_complement_pnl": -438.22,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    }
+   },
+   "FIRST_COMPLEMENT_PNL_TOTAL": 5060.74,
+   "FIRST_COMPLEMENT_STAKE_TOTAL": 1443226.62,
+   "BY_SPORT_OR_QUESTION": {
+    "Wild vs. Avalanche": {
+     "opens": 15,
+     "completed_within_1h": 12,
+     "completion_rate_1h": 0.8,
+     "mean_pair_basis": 1.02
+    },
+    "Avalanche vs. Kings": {
+     "opens": 14,
+     "completed_within_1h": 11,
+     "completion_rate_1h": 0.7857,
+     "mean_pair_basis": 0.9925
+    },
+    "Golden Knights vs. Utah": {
+     "opens": 11,
+     "completed_within_1h": 7,
+     "completion_rate_1h": 0.6364,
+     "mean_pair_basis": 1.07447
+    },
+    "Stars vs. Wild": {
+     "opens": 11,
+     "completed_within_1h": 8,
+     "completion_rate_1h": 0.7273,
+     "mean_pair_basis": 0.98364
+    },
+    "Hurricanes vs. Flyers": {
+     "opens": 11,
+     "completed_within_1h": 9,
+     "completion_rate_1h": 0.8182,
+     "mean_pair_basis": 1.07246
+    },
+    "Kings vs. Avalanche": {
+     "opens": 11,
+     "completed_within_1h": 7,
+     "completion_rate_1h": 0.6364,
+     "mean_pair_basis": 1.099
+    },
+    "Canadiens vs. Sabres": {
+     "opens": 11,
+     "completed_within_1h": 6,
+     "completion_rate_1h": 0.5455,
+     "mean_pair_basis": 1.025
+    },
+    "Hurricanes vs. Canadiens": {
+     "opens": 11,
+     "completed_within_1h": 7,
+     "completion_rate_1h": 0.6364,
+     "mean_pair_basis": 1.01778
+    },
+    "Flyers vs. Hurricanes": {
+     "opens": 9,
+     "completed_within_1h": 7,
+     "completion_rate_1h": 0.7778,
+     "mean_pair_basis": 1.04714
+    },
+    "Sabres vs. Canadiens": {
+     "opens": 9,
+     "completed_within_1h": 4,
+     "completion_rate_1h": 0.4444,
+     "mean_pair_basis": 1.174
+    },
+    "Golden Knights vs. Hurri": {
+     "opens": 9,
+     "completed_within_1h": 8,
+     "completion_rate_1h": 0.8889,
+     "mean_pair_basis": 1.03667
+    },
+    "Canadiens vs. Lightning": {
+     "opens": 9,
+     "completed_within_1h": 6,
+     "completion_rate_1h": 0.6667,
+     "mean_pair_basis": 0.97143
+    },
+    "Flyers vs. Penguins": {
+     "opens": 9,
+     "completed_within_1h": 6,
+     "completion_rate_1h": 0.6667,
+     "mean_pair_basis": 1.03434
+    },
+    "Oilers vs. Ducks": {
+     "opens": 9,
+     "completed_within_1h": 7,
+     "completion_rate_1h": 0.7778,
+     "mean_pair_basis": 1.04757
+    },
+    "Chiefs vs. Chargers": {
+     "opens": 8,
+     "completed_within_1h": 7,
+     "completion_rate_1h": 0.875,
+     "mean_pair_basis": 0.97
+    },
+    "Wild vs. Stars": {
+     "opens": 8,
+     "completed_within_1h": 4,
+     "completion_rate_1h": 0.5,
+     "mean_pair_basis": 0.972
+    },
+    "Hurricanes vs. Golden Kn": {
+     "opens": 8,
+     "completed_within_1h": 3,
+     "completion_rate_1h": 0.375,
+     "mean_pair_basis": 1.16
+    },
+    "Penguins vs. Flyers": {
+     "opens": 8,
+     "completed_within_1h": 2,
+     "completion_rate_1h": 0.25,
+     "mean_pair_basis": 0.99
+    },
+    "Avalanche vs. Golden Kni": {
+     "opens": 8,
+     "completed_within_1h": 5,
+     "completion_rate_1h": 0.625,
+     "mean_pair_basis": 0.99875
+    },
+    "Golden Knights vs. Ducks": {
+     "opens": 8,
+     "completed_within_1h": 3,
+     "completion_rate_1h": 0.375,
+     "mean_pair_basis": 0.95167
+    },
+    "Hurricanes vs. Senators": {
+     "opens": 8,
+     "completed_within_1h": 6,
+     "completion_rate_1h": 0.75,
+     "mean_pair_basis": 1.05
+    },
+    "Sabres vs. Bruins": {
+     "opens": 7,
+     "completed_within_1h": 6,
+     "completion_rate_1h": 0.8571,
+     "mean_pair_basis": 1.10833
+    },
+    "Oilers vs. Red Wings": {
+     "opens": 7,
+     "completed_within_1h": 5,
+     "completion_rate_1h": 0.7143,
+     "mean_pair_basis": 1.00167
+    },
+    "Ducks vs. Golden Knights": {
+     "opens": 7,
+     "completed_within_1h": 4,
+     "completion_rate_1h": 0.5714,
+     "mean_pair_basis": 0.98833
+    },
+    "Steelers vs. Ravens": {
+     "opens": 7,
+     "completed_within_1h": 6,
+     "completion_rate_1h": 0.8571,
+     "mean_pair_basis": 0.99
+    }
+   },
+   "BY_FILL_SIZE_BUCKET": {
+    "0-100": {
+     "opens": 1040,
+     "completed_within_1h": 429,
+     "completion_rate_1h": 0.4125,
+     "mean_pair_basis": 1.01569
+    },
+    "100-1000": {
+     "opens": 828,
+     "completed_within_1h": 440,
+     "completion_rate_1h": 0.5314,
+     "mean_pair_basis": 1.01692
+    },
+    "1000-10000": {
+     "opens": 1131,
+     "completed_within_1h": 636,
+     "completion_rate_1h": 0.5623,
+     "mean_pair_basis": 1.01492
+    },
+    "10000-100000": {
+     "opens": 326,
+     "completed_within_1h": 77,
+     "completion_rate_1h": 0.2362,
+     "mean_pair_basis": 1.01905
+    },
+    "100000-inf": {
+     "opens": 409,
+     "completed_within_1h": 42,
+     "completion_rate_1h": 0.1027,
+     "mean_pair_basis": 0.98177
+    }
+   },
+   "BY_WEEK": {
+    "2025-W26": {
+     "opens": 13,
+     "completed_within_1h": 7,
+     "completion_rate_1h": 0.5385,
+     "mean_pair_basis": 0.86375
+    },
+    "2025-W27": {
+     "opens": 9,
+     "completed_within_1h": 8,
+     "completion_rate_1h": 0.8889,
+     "mean_pair_basis": 0.95625
+    },
+    "2025-W28": {
+     "opens": 2,
+     "completed_within_1h": 0,
+     "completion_rate_1h": 0.0,
+     "mean_pair_basis": null
+    },
+    "2025-W29": {
+     "opens": 2,
+     "completed_within_1h": 0,
+     "completion_rate_1h": 0.0,
+     "mean_pair_basis": null
+    },
+    "2025-W35": {
+     "opens": 1,
+     "completed_within_1h": 0,
+     "completion_rate_1h": 0.0,
+     "mean_pair_basis": null
+    },
+    "2025-W36": {
+     "opens": 47,
+     "completed_within_1h": 32,
+     "completion_rate_1h": 0.6809,
+     "mean_pair_basis": 0.98374
+    },
+    "2025-W37": {
+     "opens": 28,
+     "completed_within_1h": 20,
+     "completion_rate_1h": 0.7143,
+     "mean_pair_basis": 0.996
+    },
+    "2025-W38": {
+     "opens": 33,
+     "completed_within_1h": 27,
+     "completion_rate_1h": 0.8182,
+     "mean_pair_basis": 0.95793
+    },
+    "2025-W39": {
+     "opens": 23,
+     "completed_within_1h": 20,
+     "completion_rate_1h": 0.8696,
+     "mean_pair_basis": 0.97952
+    },
+    "2025-W40": {
+     "opens": 37,
+     "completed_within_1h": 29,
+     "completion_rate_1h": 0.7838,
+     "mean_pair_basis": 1.03806
+    },
+    "2025-W41": {
+     "opens": 95,
+     "completed_within_1h": 58,
+     "completion_rate_1h": 0.6105,
+     "mean_pair_basis": 0.99746
+    },
+    "2025-W42": {
+     "opens": 136,
+     "completed_within_1h": 80,
+     "completion_rate_1h": 0.5882,
+     "mean_pair_basis": 1.01012
+    },
+    "2025-W43": {
+     "opens": 118,
+     "completed_within_1h": 61,
+     "completion_rate_1h": 0.5169,
+     "mean_pair_basis": 0.98392
+    },
+    "2025-W44": {
+     "opens": 127,
+     "completed_within_1h": 71,
+     "completion_rate_1h": 0.5591,
+     "mean_pair_basis": 1.01864
+    },
+    "2025-W45": {
+     "opens": 130,
+     "completed_within_1h": 68,
+     "completion_rate_1h": 0.5231,
+     "mean_pair_basis": 1.00792
+    },
+    "2025-W46": {
+     "opens": 111,
+     "completed_within_1h": 46,
+     "completion_rate_1h": 0.4144,
+     "mean_pair_basis": 0.98976
+    },
+    "2025-W47": {
+     "opens": 122,
+     "completed_within_1h": 48,
+     "completion_rate_1h": 0.3934,
+     "mean_pair_basis": 0.99118
+    },
+    "2025-W48": {
+     "opens": 129,
+     "completed_within_1h": 50,
+     "completion_rate_1h": 0.3876,
+     "mean_pair_basis": 1.01074
+    },
+    "2025-W49": {
+     "opens": 156,
+     "completed_within_1h": 54,
+     "completion_rate_1h": 0.3462,
+     "mean_pair_basis": 0.99424
+    },
+    "2025-W50": {
+     "opens": 161,
+     "completed_within_1h": 72,
+     "completion_rate_1h": 0.4472,
+     "mean_pair_basis": 1.01856
+    },
+    "2025-W51": {
+     "opens": 158,
+     "completed_within_1h": 67,
+     "completion_rate_1h": 0.4241,
+     "mean_pair_basis": 1.03592
+    },
+    "2025-W52": {
+     "opens": 99,
+     "completed_within_1h": 32,
+     "completion_rate_1h": 0.3232,
+     "mean_pair_basis": 0.97622
+    },
+    "2026-W01": {
+     "opens": 154,
+     "completed_within_1h": 78,
+     "completion_rate_1h": 0.5065,
+     "mean_pair_basis": 1.01794
+    },
+    "2026-W02": {
+     "opens": 177,
+     "completed_within_1h": 50,
+     "completion_rate_1h": 0.2825,
+     "mean_pair_basis": 1.01659
+    },
+    "2026-W03": {
+     "opens": 225,
+     "completed_within_1h": 65,
+     "completion_rate_1h": 0.2889,
+     "mean_pair_basis": 1.00935
+    },
+    "2026-W04": {
+     "opens": 201,
+     "completed_within_1h": 74,
+     "completion_rate_1h": 0.3682,
+     "mean_pair_basis": 1.00393
+    },
+    "2026-W05": {
+     "opens": 94,
+     "completed_within_1h": 39,
+     "completion_rate_1h": 0.4149,
+     "mean_pair_basis": 1.05314
+    },
+    "2026-W06": {
+     "opens": 88,
+     "completed_within_1h": 44,
+     "completion_rate_1h": 0.5,
+     "mean_pair_basis": 1.03012
+    },
+    "2026-W07": {
+     "opens": 7,
+     "completed_within_1h": 0,
+     "completion_rate_1h": 0.0,
+     "mean_pair_basis": null
+    },
+    "2026-W08": {
+     "opens": 6,
+     "completed_within_1h": 0,
+     "completion_rate_1h": 0.0,
+     "mean_pair_basis": null
+    },
+    "2026-W09": {
+     "opens": 85,
+     "completed_within_1h": 46,
+     "completion_rate_1h": 0.5412,
+     "mean_pair_basis": 1.02774
+    },
+    "2026-W10": {
+     "opens": 138,
+     "completed_within_1h": 64,
+     "completion_rate_1h": 0.4638,
+     "mean_pair_basis": 1.03026
+    },
+    "2026-W11": {
+     "opens": 125,
+     "completed_within_1h": 43,
+     "completion_rate_1h": 0.344,
+     "mean_pair_basis": 1.04593
+    },
+    "2026-W12": {
+     "opens": 113,
+     "completed_within_1h": 36,
+     "completion_rate_1h": 0.3186,
+     "mean_pair_basis": 1.05224
+    },
+    "2026-W13": {
+     "opens": 126,
+     "completed_within_1h": 43,
+     "completion_rate_1h": 0.3413,
+     "mean_pair_basis": 1.03423
+    },
+    "2026-W14": {
+     "opens": 110,
+     "completed_within_1h": 37,
+     "completion_rate_1h": 0.3364,
+     "mean_pair_basis": 1.03725
+    },
+    "2026-W15": {
+     "opens": 82,
+     "completed_within_1h": 30,
+     "completion_rate_1h": 0.3659,
+     "mean_pair_basis": 1.04099
+    },
+    "2026-W16": {
+     "opens": 60,
+     "completed_within_1h": 20,
+     "completion_rate_1h": 0.3333,
+     "mean_pair_basis": 1.03742
+    },
+    "2026-W17": {
+     "opens": 59,
+     "completed_within_1h": 45,
+     "completion_rate_1h": 0.7627,
+     "mean_pair_basis": 1.03765
+    },
+    "2026-W18": {
+     "opens": 41,
+     "completed_within_1h": 19,
+     "completion_rate_1h": 0.4634,
+     "mean_pair_basis": 1.0378
+    },
+    "2026-W19": {
+     "opens": 23,
+     "completed_within_1h": 9,
+     "completion_rate_1h": 0.3913,
+     "mean_pair_basis": 1.0109
+    },
+    "2026-W20": {
+     "opens": 19,
+     "completed_within_1h": 10,
+     "completion_rate_1h": 0.5263,
+     "mean_pair_basis": 1.03692
+    },
+    "2026-W21": {
+     "opens": 16,
+     "completed_within_1h": 8,
+     "completion_rate_1h": 0.5,
+     "mean_pair_basis": 1.05083
+    },
+    "2026-W22": {
+     "opens": 15,
+     "completed_within_1h": 6,
+     "completion_rate_1h": 0.4,
+     "mean_pair_basis": 0.98222
+    },
+    "2026-W23": {
+     "opens": 7,
+     "completed_within_1h": 5,
+     "completion_rate_1h": 0.7143,
+     "mean_pair_basis": 0.97667
+    },
+    "2026-W24": {
+     "opens": 8,
+     "completed_within_1h": 3,
+     "completion_rate_1h": 0.375,
+     "mean_pair_basis": 1.2225
+    },
+    "2026-W25": {
+     "opens": 13,
+     "completed_within_1h": 0,
+     "completion_rate_1h": 0.0,
+     "mean_pair_basis": null
+    },
+    "2026-W26": {
+     "opens": 4,
+     "completed_within_1h": 0,
+     "completion_rate_1h": 0.0,
+     "mean_pair_basis": null
+    },
+    "2026-W27": {
+     "opens": 1,
+     "completed_within_1h": 0,
+     "completion_rate_1h": 0.0,
+     "mean_pair_basis": null
+    }
+   }
+  },
+  "LAST_30D": {
+   "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": 0,
+   "REFERENCE_ACCOUNT_NEVER_COMPLETED": 0,
+   "REFERENCE_ACCOUNT_MEAN_PAIR_BASIS": null,
+   "REFERENCE_ACCOUNT_COMPLETION_GRID": {
+    "5": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "10": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "30": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "60": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "120": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "300": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "600": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "1800": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "3600": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "settlement": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    }
+   },
+   "BY_FIRST_LEG_PRICE_BAND": {},
+   "FIRST_COMPLEMENT_PNL_TOTAL": 0,
+   "FIRST_COMPLEMENT_STAKE_TOTAL": 0,
+   "BY_SPORT_OR_QUESTION": {},
+   "BY_FILL_SIZE_BUCKET": {},
+   "BY_WEEK": {}
+  },
+  "LAST_7D": {
+   "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": 0,
+   "REFERENCE_ACCOUNT_NEVER_COMPLETED": 0,
+   "REFERENCE_ACCOUNT_MEAN_PAIR_BASIS": null,
+   "REFERENCE_ACCOUNT_COMPLETION_GRID": {
+    "5": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "10": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "30": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "60": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "120": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "300": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "600": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "1800": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "3600": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    },
+    "settlement": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.92": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.94": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.95": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.96": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.97": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.98": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_0.99": {
+      "completed": 0,
+      "rate": null
+     },
+     "ceiling_1.00": {
+      "completed": 0,
+      "rate": null
+     },
+     "any_basis_completed": 0,
+     "any_basis_rate": null
+    }
+   },
+   "BY_FIRST_LEG_PRICE_BAND": {},
+   "FIRST_COMPLEMENT_PNL_TOTAL": 0,
+   "FIRST_COMPLEMENT_STAKE_TOTAL": 0,
+   "BY_SPORT_OR_QUESTION": {},
+   "BY_FILL_SIZE_BUCKET": {},
+   "BY_WEEK": {}
+  }
+ },
+ "MERGE_PNL_BY_OPEN_BAND": {
+  "LIFETIME": {
+   "0.00-0.10": {
+    "merges": 125,
+    "merged_shares": 49866.51,
+    "MATCHED_STAKE": 4336.23,
+    "MATCHED_PNL": 2579.72,
+    "MATCHED_ROI": 0.594922
+   },
+   "0.10-0.30": {
+    "merges": 1567,
+    "merged_shares": 1244325.53,
+    "MATCHED_STAKE": 320035.87,
+    "MATCHED_PNL": 73527.04,
+    "MATCHED_ROI": 0.229746
+   },
+   "0.30-0.50": {
+    "merges": 12591,
+    "merged_shares": 8515420.24,
+    "MATCHED_STAKE": 3667018.56,
+    "MATCHED_PNL": -303010.81,
+    "MATCHED_ROI": -0.082631
+   },
+   "0.50-0.70": {
+    "merges": 12318,
+    "merged_shares": 7781667.61,
+    "MATCHED_STAKE": 4634096.68,
+    "MATCHED_PNL": -292483.95,
+    "MATCHED_ROI": -0.063116
+   },
+   "0.70-0.90": {
+    "merges": 3110,
+    "merged_shares": 2067519.86,
+    "MATCHED_STAKE": 1514516.66,
+    "MATCHED_PNL": -137655.18,
+    "MATCHED_ROI": -0.09089
+   },
+   "0.90-1.01": {
+    "merges": 187,
+    "merged_shares": 62050.07,
+    "MATCHED_STAKE": 55216.62,
+    "MATCHED_PNL": -16543.55,
+    "MATCHED_ROI": -0.299612
+   },
+   "_TOTAL_MATCHED_PNL": -673586.72,
+   "_BUCKET": "the HELD leg's opening price -- a decision-time fact, known before the pair economics are determined",
+   "_REALIZED_MERGE_PNL": -673586.72,
+   "_RESIDUAL_VS_ESTIMATOR": 0.0,
+   "_RECONCILES": true
+  },
+  "LAST_30D": "NO_FILLS_IN_WINDOW",
+  "LAST_7D": "NO_FILLS_IN_WINDOW"
+ },
+ "PNL_BY_OPEN_BAND_ALL_CHANNELS": {
+  "LIFETIME": {
+   "0.00-0.10": {
+    "merges": 125,
+    "MERGE_STAKE": 4336.23,
+    "MERGE_PNL": 2579.72,
+    "MERGE_ROI": 0.594922,
+    "sells": 0,
+    "SELL_STAKE": 0.0,
+    "SELL_PNL": 0.0,
+    "settled_lots": 41,
+    "SETTLED_STAKE": 145998.32,
+    "SETTLED_PNL": -142150.43,
+    "SETTLED_ROI": -0.973644,
+    "TOTAL_STAKE": 150334.55,
+    "TOTAL_PNL": -139570.71,
+    "TOTAL_ROI": -0.928401,
+    "UNGRADED_STAKE": 0.0,
+    "UNGRADED_SHARES": 0.0
+   },
+   "0.10-0.30": {
+    "merges": 1567,
+    "MERGE_STAKE": 320035.87,
+    "MERGE_PNL": 73527.04,
+    "MERGE_ROI": 0.229746,
+    "sells": 2,
+    "SELL_STAKE": 340.5,
+    "SELL_PNL": -147.0,
+    "settled_lots": 149,
+    "SETTLED_STAKE": 2663693.84,
+    "SETTLED_PNL": 636869.95,
+    "SETTLED_ROI": 0.239093,
+    "TOTAL_STAKE": 2984070.21,
+    "TOTAL_PNL": 710250.0,
+    "TOTAL_ROI": 0.238014,
+    "UNGRADED_STAKE": 43180.66,
+    "UNGRADED_SHARES": 105255.35
+   },
+   "0.30-0.50": {
+    "merges": 12591,
+    "MERGE_STAKE": 3667018.56,
+    "MERGE_PNL": -303010.81,
+    "MERGE_ROI": -0.082631,
+    "sells": 79,
+    "SELL_STAKE": 340889.03,
+    "SELL_PNL": 419271.4,
+    "settled_lots": 1055,
+    "SETTLED_STAKE": 50962001.16,
+    "SETTLED_PNL": 9946023.27,
+    "SETTLED_ROI": 0.195165,
+    "TOTAL_STAKE": 54969908.75,
+    "TOTAL_PNL": 10062283.86,
+    "TOTAL_ROI": 0.183051,
+    "UNGRADED_STAKE": 0.0,
+    "UNGRADED_SHARES": 0.0
+   },
+   "0.50-0.70": {
+    "merges": 12318,
+    "MERGE_STAKE": 4634096.68,
+    "MERGE_PNL": -292483.95,
+    "MERGE_ROI": -0.063116,
+    "sells": 6,
+    "SELL_STAKE": 267169.87,
+    "SELL_PNL": 238924.72,
+    "settled_lots": 953,
+    "SETTLED_STAKE": 57121391.61,
+    "SETTLED_PNL": -1603527.27,
+    "SETTLED_ROI": -0.028072,
+    "TOTAL_STAKE": 62022658.16,
+    "TOTAL_PNL": -1657086.5,
+    "TOTAL_ROI": -0.026717,
+    "UNGRADED_STAKE": 0.0,
+    "UNGRADED_SHARES": 0.0
+   },
+   "0.70-0.90": {
+    "merges": 3110,
+    "MERGE_STAKE": 1514516.66,
+    "MERGE_PNL": -137655.18,
+    "MERGE_ROI": -0.09089,
+    "sells": 7,
+    "SELL_STAKE": 113721.65,
+    "SELL_PNL": 57137.5,
+    "settled_lots": 335,
+    "SETTLED_STAKE": 12115475.66,
+    "SETTLED_PNL": 1605525.88,
+    "SETTLED_ROI": 0.132519,
+    "TOTAL_STAKE": 13743713.97,
+    "TOTAL_PNL": 1525008.2,
+    "TOTAL_ROI": 0.11096,
+    "UNGRADED_STAKE": 2918.69,
+    "UNGRADED_SHARES": 4041.36
+   },
+   "0.90-1.01": {
+    "merges": 187,
+    "MERGE_STAKE": 55216.62,
+    "MERGE_PNL": -16543.55,
+    "MERGE_ROI": -0.299612,
+    "sells": 1,
+    "SELL_STAKE": 6274.51,
+    "SELL_PNL": 255.5,
+    "settled_lots": 69,
+    "SETTLED_STAKE": 1044681.74,
+    "SETTLED_PNL": 56967.53,
+    "SETTLED_ROI": 0.054531,
+    "TOTAL_STAKE": 1106172.87,
+    "TOTAL_PNL": 40679.48,
+    "TOTAL_ROI": 0.036775,
+    "UNGRADED_STAKE": 0.0,
+    "UNGRADED_SHARES": 0.0
+   },
+   "_TOTAL_STAKE": 134976858.52,
+   "_TOTAL_PNL": 10541564.33,
+   "_BUCKET": "the leg's OPENING price -- a decision-time fact. Every closed lot merge_pnl.replay books is booked here, so summing bands gives lot_s / lot_p, not the merge subtotal.",
+   "_ESTIMATOR_LOT_STAKE": 134976858.52097458,
+   "_ESTIMATOR_LOT_PNL": 10541564.330263183,
+   "_RESIDUAL_STAKE": -0.0,
+   "_RESIDUAL_PNL": -0.0,
+   "_RECONCILES": true
+  },
+  "LAST_30D": "NO_FILLS_IN_WINDOW",
+  "LAST_7D": "NO_FILLS_IN_WINDOW"
+ }
+}

@@ -1,0 +1,204 @@
+# PHASE X -- cross-venue (PMUS <-> Kalshi) READ-ONLY measurement.
+#
+# WHY THIS WORKFLOW EXISTS. The research container's egress reaches neither
+# venue, and there is no terminal or workstation available. This runner is
+# the project's existing environment that already reaches PMUS -- every
+# Track B-L block and Phase 2 capture ran here. The Kalshi half was
+# previously out of bounds here by standing instruction; the owner lifted
+# that on 2026-09-15 FOR READ-ONLY RESEARCH ONLY.
+#
+# BOTH VENUES FROM ONE PROCESS, ON PURPOSE. Phase X2 compares two books
+# captured seconds apart. Two environments cannot produce a contemporaneous
+# pair, so the reachability test, the audit and the collector all run in
+# this one job.
+#
+# CAPABILITY BOUNDARY, as authorized. GET only. gateway.polymarket.us and
+# api.elections.kalshi.com only. No credential, no wallet, no signer, no
+# auth header, no trading SDK, no order or cancel route, no
+# POST/PUT/PATCH/DELETE, no portfolio endpoint, no production write.
+# mirror_live stays false. The collector is PROVEN to hold those properties
+# by research/trackx_readonly_audit.py, which walks its real import closure
+# and MUST print AUDIT = PASS before any venue is contacted.
+#
+# THE RATE GATE IS THE CONCURRENCY GROUP. Shared with Track A and Track B-L
+# on purpose: GitHub then guarantees at the platform level that no two of
+# them contact PMUS at the same time. An average-rate budget is not a
+# spacing proof.
+#
+# THE GROUP IS THE *PMUS* GATE, so a run that makes ZERO PMUS requests has
+# nothing to serialize against and takes its own group instead. That is the
+# ONLY case, and it is not a loophole: with pmus=sealed the driver reads the
+# sealed PX1-PMUS-1 records from disk and its PMUS code path is never
+# entered, so the only venue it touches is Kalshi -- which Track A does not
+# contact at all. The step below re-checks this from the run log rather than
+# trusting the input, and fails the job if a PMUS request appears.
+#
+# DISPATCH ONLY. No cron.
+
+name: phasex-crossvenue
+
+on:
+  workflow_dispatch:
+    inputs:
+      series:
+        description: "Kalshi sports series tickers, space separated"
+        required: false
+        default: "KXNFLGAME KXMLBGAME KXNBAGAME KXEPLGAME KXATPMATCH KXWTAMATCH"
+      pmus:
+        description: "live (walk the current board) or sealed (reference only)"
+        required: false
+        default: "live"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: >-
+    ${{ (github.event.inputs.pmus == 'sealed')
+        && 'phasex-kalshi-only' || 'run85-phase2-capture' }}
+  cancel-in-progress: false
+
+jobs:
+  measure:
+    runs-on: ubuntu-latest
+    # 60 minutes killed run 34971707012 mid-measurement. Raised, but still
+    # BOUNDED and deliberately not raised further: this job holds the
+    # shared PMUS concurrency group for its whole life, so every extra
+    # minute is a minute Track A waits. The repaired collector should
+    # finish in single-digit minutes -- this is headroom for a slow venue,
+    # not a budget to be spent.
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - run: python -m pip install --quiet "httpx==0.27.2"
+
+      # A credential reaching this job would break the authorization even if
+      # nothing read it, so the job refuses to continue rather than trusting
+      # that the collector would have ignored it.
+      - name: Confirm the job carries no credential
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, sys
+          bad = [k for k in os.environ
+                 if any(t in k.upper() for t in
+                        ("POLYMARKET", "KALSHI", "PRIVATE_KEY", "SIGNER",
+                         "WALLET", "RENDER", "DATABASE_URL", "PMUS_",
+                         "ADMIN_TOKEN", "EDGE_"))]
+          if bad:
+              print("CREDENTIAL_PRESENT_IN_ENV: %s" % sorted(bad))
+              sys.exit(1)
+          print("NO_CREDENTIAL_IN_ENV = CONFIRMED")
+          PY
+
+      # STEP 1 -- the question this whole job was blocked on. Recorded to the
+      # log and to a file, whichever way it goes.
+      - name: Two-host reachability
+        id: reach
+        run: |
+          set -euo pipefail
+          mkdir -p research/evidence/phasex
+          {
+            echo "REACHABILITY_PROBE_UTC = $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+            echo "HOST_USED = github-actions/ubuntu-latest"
+          } | tee research/evidence/phasex/reachability.txt
+          rc=0
+          for h in gateway.polymarket.us api.elections.kalshi.com; do
+            code="$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 \
+                    "https://$h/" || echo 000)"
+            echo "$h = HTTP $code" | tee -a research/evidence/phasex/reachability.txt
+            [ "$code" = "000" ] && rc=1
+          done
+          echo "BOTH_VENUES_REACHABLE = $([ $rc -eq 0 ] && echo VERIFIED || echo NOT_VERIFIED)" \
+            | tee -a research/evidence/phasex/reachability.txt
+          exit $rc
+
+      # STEP 2 -- offline proof, before a single venue byte is read.
+      - name: Read-only audit MUST pass before any venue contact
+        run: |
+          set -euo pipefail
+          python research/trackx_readonly_audit.py \
+            | tee research/evidence/phasex/readonly_audit.txt
+
+      - name: Offline gates
+        run: |
+          set -euo pipefail
+          python research/test_run85_phasex.py
+          # The execution repair is only admissible if it is provably
+          # result-preserving, so its conformance gate runs BEFORE the
+          # venue is contacted, like every other gate here.
+          python research/test_run85_phasex_index.py
+          python research/test_trackp2.py
+          python research/test_run85_trackbl_block.py
+
+      # STEP 3 -- the measurement. Both venues, one process.
+      - name: Phase X capture and analysis
+        id: phasex
+        env:
+          SERIES: ${{ github.event.inputs.series || 'KXNFLGAME KXMLBGAME KXNBAGAME KXEPLGAME KXATPMATCH KXWTAMATCH' }}
+          PMUSMODE: ${{ github.event.inputs.pmus || 'live' }}
+        run: |
+          set -euo pipefail
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          echo "PHASEX_STAMP=$STAMP" >> "$GITHUB_ENV"
+          set +e
+          python research/run85_phasex_run.py --pmus "$PMUSMODE" --series $SERIES \
+            2>&1 | tee research/evidence/phasex/phasex_run_${STAMP}.log
+          echo "PHASEX_RC=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
+          set -e
+
+      # The concurrency claim above is CHECKED, not assumed. A sealed-PMUS run
+      # that turns out to have contacted PMUS took the wrong lock, so the job
+      # fails and says so rather than quietly having raced Track A.
+      - name: Verify a kalshi-only run really was kalshi-only
+        if: always() && github.event.inputs.pmus == 'sealed'
+        run: |
+          set -euo pipefail
+          log="research/evidence/phasex/phasex_run_${PHASEX_STAMP:-}.log"
+          if [ -f "$log" ] && grep -q "live board" "$log"; then
+            echo "LOCK_VIOLATION: a sealed run walked the live PMUS board"
+            exit 1
+          fi
+          echo "PMUS_REQUESTS_IN_THIS_RUN = NONE (sealed mode) -- "\
+               "phasex-kalshi-only was the correct lock"
+
+      # if: always() -- a failed measurement is exactly the one whose receipts
+      # matter, and the collector seals before it exits.
+      - name: Commit the evidence
+        if: always()
+        run: |
+          set -euo pipefail
+          ls -la research/evidence/phasex || true
+          git config user.name "Claude"
+          git config user.email "noreply@anthropic.com"
+          git add -- research/evidence/phasex research/evidence/trackp2 2>/dev/null || true
+          git diff --cached --quiet && { echo "nothing to commit"; exit 0; }
+          git commit -m "Phase X cross-venue measurement ${PHASEX_STAMP:-run} [skip render]" \
+                     -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>" \
+                     -m "Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC"
+          for i in 1 2 3 4; do
+            if git pull --rebase origin claude/session-njaewf \
+               && git push -u origin claude/session-njaewf; then
+              echo "pushed"; exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((2 ** i))
+          done
+          echo "PUSH_FAILED -- the artifact still carries the bytes"
+          exit 1
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: PHASEX_${{ env.PHASEX_STAMP }}
+          path: research/evidence/phasex
+          retention-days: 90
+          if-no-files-found: warn

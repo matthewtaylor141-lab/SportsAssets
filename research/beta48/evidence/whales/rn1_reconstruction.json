@@ -1,0 +1,1917 @@
+{
+ "CENSUS": {
+  "REFERENCE_ACCOUNT": "rn1",
+  "WALLET_ADDRESS": "0x2005d16a84ceefa912d4e380cd32e7ff827875ea",
+  "SOURCE_ENDPOINT": "research/snapshots/u2_events_v1.jsonl.gz (retained snapshot)",
+  "EXTRACTION_UTC": "2026-09-15T21:49:48.398039+00:00",
+  "REQUESTED_RANGE_START": "2026-08-06",
+  "RETURNED_RANGE_START": "2026-08-06T04:36:32+00:00",
+  "RETURNED_RANGE_END": "2026-09-11T23:59:34+00:00",
+  "RETURNED_SPAN_DAYS": 36.81,
+  "ROWS_READ": 214609,
+  "ROWS_KEPT": 196619,
+  "UNIQUE_TRADE_IDS": 196619,
+  "DUPLICATE_FILL_KEYS": 0,
+  "BUY_COUNT": 196619,
+  "SELL_COUNT": 0,
+  "OTHER_SIDE_COUNT": 0,
+  "DISTINCT_CONDITIONS": 17722,
+  "DISTINCT_MARKET_SLUGS": 17722,
+  "DROP_CENSUS": {
+   "DROP_LEG_NOT_IDENTIFIED": 168,
+   "DROP_NO_CONDITION": 17822,
+   "PAYOUT_ONE_HOT": 9545
+  },
+  "COVERAGE_LIMITATIONS": [
+   "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+   "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+   "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+  ]
+ },
+ "REFERENCE_ACCOUNT_REPLAY": {
+  "LIFETIME": {
+   "n_fills": 196619,
+   "n_entries": 126242,
+   "n_merges": 78500,
+   "n_sells": 0,
+   "entry_notional": 32276739.3,
+   "merge_shares": 26914690.91,
+   "realized_merge_pnl": 223093.85,
+   "realized_sell_pnl": 0.0,
+   "open_shares": 39953707.4,
+   "open_cost": 18700507.05,
+   "lots": 88034,
+   "lot_s": 23937742.292518593,
+   "lot_p": 498823.14598218515,
+   "lot_ss": 123333599929.53563,
+   "lot_pp": 58493547230.065445,
+   "lot_ps": 9044437949.641075,
+   "settled_lots": 9534,
+   "settled_shares": 22199893.34,
+   "ungraded_open_shares": 17753814.05,
+   "ungraded_open_cost": 8338997.01,
+   "cf_closed_shares": 26914690.91,
+   "cf_graded_shares": 14869450.59,
+   "cf_ungraded_shares": 12045240.32,
+   "cf_actual_on_graded": 200524.37,
+   "cf_hold_on_graded": 232320.88,
+   "edge_coverage": 0.7416,
+   "edge_coverage_note": "$8,338,997 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": -31796.51,
+   "edge_lots": 88034,
+   "edge_deployed": 23937742.29,
+   "edge_roi": 0.020838,
+   "edge_se": 0.011625,
+   "edge_ci95": [
+    -0.001947,
+    0.043624
+   ],
+   "edge_clusters": 13599,
+   "edge_deff": 1.1538,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +2.08% on dollar deployed but the interval [-0.19%, +4.36%] contains zero over 88,034 closed lots",
+   "cf_coverage": 0.5525,
+   "cf_note": "12045240 of 26914691 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 223093.85,
+   "roi_on_entries": 0.0069,
+   "_window_fills": 196619,
+   "_window_days_requested": null
+  },
+  "LAST_60D": {
+   "n_fills": 196619,
+   "n_entries": 126242,
+   "n_merges": 78500,
+   "n_sells": 0,
+   "entry_notional": 32276739.3,
+   "merge_shares": 26914690.91,
+   "realized_merge_pnl": 223093.85,
+   "realized_sell_pnl": 0.0,
+   "open_shares": 39953707.4,
+   "open_cost": 18700507.05,
+   "lots": 88034,
+   "lot_s": 23937742.292518593,
+   "lot_p": 498823.14598218515,
+   "lot_ss": 123333599929.53563,
+   "lot_pp": 58493547230.065445,
+   "lot_ps": 9044437949.641075,
+   "settled_lots": 9534,
+   "settled_shares": 22199893.34,
+   "ungraded_open_shares": 17753814.05,
+   "ungraded_open_cost": 8338997.01,
+   "cf_closed_shares": 26914690.91,
+   "cf_graded_shares": 14869450.59,
+   "cf_ungraded_shares": 12045240.32,
+   "cf_actual_on_graded": 200524.37,
+   "cf_hold_on_graded": 232320.88,
+   "edge_coverage": 0.7416,
+   "edge_coverage_note": "$8,338,997 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": -31796.51,
+   "edge_lots": 88034,
+   "edge_deployed": 23937742.29,
+   "edge_roi": 0.020838,
+   "edge_se": 0.011625,
+   "edge_ci95": [
+    -0.001947,
+    0.043624
+   ],
+   "edge_clusters": 13599,
+   "edge_deff": 1.1538,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +2.08% on dollar deployed but the interval [-0.19%, +4.36%] contains zero over 88,034 closed lots",
+   "cf_coverage": 0.5525,
+   "cf_note": "12045240 of 26914691 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 223093.85,
+   "roi_on_entries": 0.0069,
+   "_window_fills": 196619,
+   "_window_days_requested": 60
+  },
+  "LAST_30D": {
+   "n_fills": 189174,
+   "n_entries": 120889,
+   "n_merges": 76057,
+   "n_sells": 0,
+   "entry_notional": 31549572.85,
+   "merge_shares": 26595854.51,
+   "realized_merge_pnl": 210530.93,
+   "realized_sell_pnl": 0.0,
+   "open_shares": 38732644.96,
+   "open_cost": 18121046.82,
+   "lots": 84863,
+   "lot_s": 23397240.50432533,
+   "lot_p": 502982.3674924262,
+   "lot_ss": 121971023500.9453,
+   "lot_pp": 57752451848.99753,
+   "lot_ps": 9082464770.4896,
+   "settled_lots": 8806,
+   "settled_shares": 21361850.28,
+   "ungraded_open_shares": 17370794.68,
+   "ungraded_open_cost": 8152332.35,
+   "cf_closed_shares": 26595854.51,
+   "cf_graded_shares": 14640086.57,
+   "cf_ungraded_shares": 11955767.95,
+   "cf_actual_on_graded": 189017.74,
+   "cf_hold_on_graded": 219284.76,
+   "edge_coverage": 0.7416,
+   "edge_coverage_note": "$8,152,332 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": -30267.02,
+   "edge_lots": 84863,
+   "edge_deployed": 23397240.5,
+   "edge_roi": 0.021498,
+   "edge_se": 0.011831,
+   "edge_ci95": [
+    -0.001692,
+    0.044687
+   ],
+   "edge_clusters": 12709,
+   "edge_deff": 1.1552,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +2.15% on dollar deployed but the interval [-0.17%, +4.47%] contains zero over 84,863 closed lots",
+   "cf_coverage": 0.5505,
+   "cf_note": "11955768 of 26595855 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 210530.93,
+   "roi_on_entries": 0.0067,
+   "_window_fills": 189174,
+   "_window_days_requested": 30
+  },
+  "LAST_14D": {
+   "n_fills": 129619,
+   "n_entries": 82753,
+   "n_merges": 52325,
+   "n_sells": 0,
+   "entry_notional": 22934966.2,
+   "merge_shares": 20034879.15,
+   "realized_merge_pnl": 82330.99,
+   "realized_sell_pnl": 0.0,
+   "open_shares": 27591290.85,
+   "open_cost": 12796845.99,
+   "lots": 58749,
+   "lot_s": 17525928.045865107,
+   "lot_p": 210787.82550313472,
+   "lot_ss": 96633780079.58713,
+   "lot_pp": 45966770180.955086,
+   "lot_ps": 3374882351.2791333,
+   "settled_lots": 6424,
+   "settled_shares": 16180836.53,
+   "ungraded_open_shares": 11410454.32,
+   "ungraded_open_cost": 5409038.15,
+   "cf_closed_shares": 20034879.15,
+   "cf_graded_shares": 11621581.0,
+   "cf_ungraded_shares": 8413298.15,
+   "cf_actual_on_graded": 108042.27,
+   "cf_hold_on_graded": 24831.92,
+   "edge_coverage": 0.7642,
+   "edge_coverage_note": "$5,409,038 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": 83210.35,
+   "edge_lots": 58749,
+   "edge_deployed": 17525928.05,
+   "edge_roi": 0.012027,
+   "edge_se": 0.013768,
+   "edge_ci95": [
+    -0.014958,
+    0.039012
+   ],
+   "edge_clusters": 8932,
+   "edge_deff": 1.1263,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +1.20% on dollar deployed but the interval [-1.50%, +3.90%] contains zero over 58,749 closed lots",
+   "cf_coverage": 0.5801,
+   "cf_note": "8413298 of 20034879 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 82330.99,
+   "roi_on_entries": 0.0036,
+   "_window_fills": 129619,
+   "_window_days_requested": 14
+  },
+  "LAST_7D": {
+   "n_fills": 73455,
+   "n_entries": 45880,
+   "n_merges": 30546,
+   "n_sells": 0,
+   "entry_notional": 12619063.44,
+   "merge_shares": 11518912.7,
+   "realized_merge_pnl": 36010.7,
+   "realized_sell_pnl": 0.0,
+   "open_shares": 15402467.21,
+   "open_cost": 6866225.84,
+   "lots": 34646,
+   "lot_s": 10908037.555941127,
+   "lot_p": 28570.313968763174,
+   "lot_ss": 68971462983.88911,
+   "lot_pp": 33895675282.394234,
+   "lot_ps": -1017537399.6026593,
+   "settled_lots": 4100,
+   "settled_shares": 11458924.48,
+   "ungraded_open_shares": 3943542.73,
+   "ungraded_open_cost": 1711025.89,
+   "cf_closed_shares": 11518912.7,
+   "cf_graded_shares": 8585144.07,
+   "cf_ungraded_shares": 2933768.62,
+   "cf_actual_on_graded": 53183.53,
+   "cf_hold_on_graded": -27198.55,
+   "edge_coverage": 0.8644,
+   "edge_coverage_note": "$1,711,026 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": 80382.08,
+   "edge_lots": 34646,
+   "edge_deployed": 10908037.56,
+   "edge_roi": 0.002619,
+   "edge_se": 0.018785,
+   "edge_ci95": [
+    -0.034199,
+    0.039437
+   ],
+   "edge_clusters": 4892,
+   "edge_deff": 1.1129,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +0.26% on dollar deployed but the interval [-3.42%, +3.94%] contains zero over 34,646 closed lots",
+   "cf_coverage": 0.7453,
+   "cf_note": "2933769 of 11518913 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 36010.7,
+   "roi_on_entries": 0.0029,
+   "_window_fills": 73455,
+   "_window_days_requested": 7
+  }
+ },
+ "REFERENCE_ACCOUNT_COMPLETION": {
+  "LIFETIME": {
+   "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": 25895,
+   "REFERENCE_ACCOUNT_NEVER_COMPLETED": 10869,
+   "REFERENCE_ACCOUNT_MEAN_PAIR_BASIS": 0.97693,
+   "REFERENCE_ACCOUNT_COMPLETION_GRID": {
+    "5": {
+     "ceiling_0.90": {
+      "completed": 4,
+      "rate": 0.00015
+     },
+     "ceiling_0.92": {
+      "completed": 7,
+      "rate": 0.00027
+     },
+     "ceiling_0.94": {
+      "completed": 12,
+      "rate": 0.00046
+     },
+     "ceiling_0.95": {
+      "completed": 21,
+      "rate": 0.00081
+     },
+     "ceiling_0.96": {
+      "completed": 42,
+      "rate": 0.00162
+     },
+     "ceiling_0.97": {
+      "completed": 96,
+      "rate": 0.00371
+     },
+     "ceiling_0.98": {
+      "completed": 300,
+      "rate": 0.01159
+     },
+     "ceiling_0.99": {
+      "completed": 995,
+      "rate": 0.03842
+     },
+     "ceiling_1.00": {
+      "completed": 1036,
+      "rate": 0.04001
+     },
+     "any_basis_completed": 1056,
+     "any_basis_rate": 0.04078
+    },
+    "10": {
+     "ceiling_0.90": {
+      "completed": 5,
+      "rate": 0.00019
+     },
+     "ceiling_0.92": {
+      "completed": 12,
+      "rate": 0.00046
+     },
+     "ceiling_0.94": {
+      "completed": 22,
+      "rate": 0.00085
+     },
+     "ceiling_0.95": {
+      "completed": 41,
+      "rate": 0.00158
+     },
+     "ceiling_0.96": {
+      "completed": 73,
+      "rate": 0.00282
+     },
+     "ceiling_0.97": {
+      "completed": 138,
+      "rate": 0.00533
+     },
+     "ceiling_0.98": {
+      "completed": 372,
+      "rate": 0.01437
+     },
+     "ceiling_0.99": {
+      "completed": 1183,
+      "rate": 0.04568
+     },
+     "ceiling_1.00": {
+      "completed": 1265,
+      "rate": 0.04885
+     },
+     "any_basis_completed": 1305,
+     "any_basis_rate": 0.0504
+    },
+    "30": {
+     "ceiling_0.90": {
+      "completed": 13,
+      "rate": 0.0005
+     },
+     "ceiling_0.92": {
+      "completed": 22,
+      "rate": 0.00085
+     },
+     "ceiling_0.94": {
+      "completed": 45,
+      "rate": 0.00174
+     },
+     "ceiling_0.95": {
+      "completed": 80,
+      "rate": 0.00309
+     },
+     "ceiling_0.96": {
+      "completed": 129,
+      "rate": 0.00498
+     },
+     "ceiling_0.97": {
+      "completed": 249,
+      "rate": 0.00962
+     },
+     "ceiling_0.98": {
+      "completed": 553,
+      "rate": 0.02136
+     },
+     "ceiling_0.99": {
+      "completed": 1502,
+      "rate": 0.058
+     },
+     "ceiling_1.00": {
+      "completed": 1653,
+      "rate": 0.06383
+     },
+     "any_basis_completed": 1771,
+     "any_basis_rate": 0.06839
+    },
+    "60": {
+     "ceiling_0.90": {
+      "completed": 33,
+      "rate": 0.00127
+     },
+     "ceiling_0.92": {
+      "completed": 53,
+      "rate": 0.00205
+     },
+     "ceiling_0.94": {
+      "completed": 100,
+      "rate": 0.00386
+     },
+     "ceiling_0.95": {
+      "completed": 160,
+      "rate": 0.00618
+     },
+     "ceiling_0.96": {
+      "completed": 238,
+      "rate": 0.00919
+     },
+     "ceiling_0.97": {
+      "completed": 395,
+      "rate": 0.01525
+     },
+     "ceiling_0.98": {
+      "completed": 760,
+      "rate": 0.02935
+     },
+     "ceiling_0.99": {
+      "completed": 1814,
+      "rate": 0.07005
+     },
+     "ceiling_1.00": {
+      "completed": 2044,
+      "rate": 0.07893
+     },
+     "any_basis_completed": 2300,
+     "any_basis_rate": 0.08882
+    },
+    "120": {
+     "ceiling_0.90": {
+      "completed": 92,
+      "rate": 0.00355
+     },
+     "ceiling_0.92": {
+      "completed": 123,
+      "rate": 0.00475
+     },
+     "ceiling_0.94": {
+      "completed": 204,
+      "rate": 0.00788
+     },
+     "ceiling_0.95": {
+      "completed": 296,
+      "rate": 0.01143
+     },
+     "ceiling_0.96": {
+      "completed": 414,
+      "rate": 0.01599
+     },
+     "ceiling_0.97": {
+      "completed": 635,
+      "rate": 0.02452
+     },
+     "ceiling_0.98": {
+      "completed": 1074,
+      "rate": 0.04148
+     },
+     "ceiling_0.99": {
+      "completed": 2251,
+      "rate": 0.08693
+     },
+     "ceiling_1.00": {
+      "completed": 2576,
+      "rate": 0.09948
+     },
+     "any_basis_completed": 3070,
+     "any_basis_rate": 0.11856
+    },
+    "300": {
+     "ceiling_0.90": {
+      "completed": 295,
+      "rate": 0.01139
+     },
+     "ceiling_0.92": {
+      "completed": 405,
+      "rate": 0.01564
+     },
+     "ceiling_0.94": {
+      "completed": 574,
+      "rate": 0.02217
+     },
+     "ceiling_0.95": {
+      "completed": 725,
+      "rate": 0.028
+     },
+     "ceiling_0.96": {
+      "completed": 921,
+      "rate": 0.03557
+     },
+     "ceiling_0.97": {
+      "completed": 1241,
+      "rate": 0.04792
+     },
+     "ceiling_0.98": {
+      "completed": 1806,
+      "rate": 0.06974
+     },
+     "ceiling_0.99": {
+      "completed": 3143,
+      "rate": 0.12137
+     },
+     "ceiling_1.00": {
+      "completed": 3626,
+      "rate": 0.14003
+     },
+     "any_basis_completed": 4810,
+     "any_basis_rate": 0.18575
+    },
+    "600": {
+     "ceiling_0.90": {
+      "completed": 685,
+      "rate": 0.02645
+     },
+     "ceiling_0.92": {
+      "completed": 880,
+      "rate": 0.03398
+     },
+     "ceiling_0.94": {
+      "completed": 1163,
+      "rate": 0.04491
+     },
+     "ceiling_0.95": {
+      "completed": 1398,
+      "rate": 0.05399
+     },
+     "ceiling_0.96": {
+      "completed": 1667,
+      "rate": 0.06438
+     },
+     "ceiling_0.97": {
+      "completed": 2053,
+      "rate": 0.07928
+     },
+     "ceiling_0.98": {
+      "completed": 2743,
+      "rate": 0.10593
+     },
+     "ceiling_0.99": {
+      "completed": 4199,
+      "rate": 0.16215
+     },
+     "ceiling_1.00": {
+      "completed": 4806,
+      "rate": 0.1856
+     },
+     "any_basis_completed": 6840,
+     "any_basis_rate": 0.26414
+    },
+    "1800": {
+     "ceiling_0.90": {
+      "completed": 1876,
+      "rate": 0.07245
+     },
+     "ceiling_0.92": {
+      "completed": 2226,
+      "rate": 0.08596
+     },
+     "ceiling_0.94": {
+      "completed": 2699,
+      "rate": 0.10423
+     },
+     "ceiling_0.95": {
+      "completed": 3036,
+      "rate": 0.11724
+     },
+     "ceiling_0.96": {
+      "completed": 3418,
+      "rate": 0.13199
+     },
+     "ceiling_0.97": {
+      "completed": 3932,
+      "rate": 0.15184
+     },
+     "ceiling_0.98": {
+      "completed": 4777,
+      "rate": 0.18448
+     },
+     "ceiling_0.99": {
+      "completed": 6380,
+      "rate": 0.24638
+     },
+     "ceiling_1.00": {
+      "completed": 7150,
+      "rate": 0.27612
+     },
+     "any_basis_completed": 10867,
+     "any_basis_rate": 0.41966
+    },
+    "3600": {
+     "ceiling_0.90": {
+      "completed": 2689,
+      "rate": 0.10384
+     },
+     "ceiling_0.92": {
+      "completed": 3121,
+      "rate": 0.12053
+     },
+     "ceiling_0.94": {
+      "completed": 3694,
+      "rate": 0.14265
+     },
+     "ceiling_0.95": {
+      "completed": 4090,
+      "rate": 0.15795
+     },
+     "ceiling_0.96": {
+      "completed": 4518,
+      "rate": 0.17447
+     },
+     "ceiling_0.97": {
+      "completed": 5086,
+      "rate": 0.19641
+     },
+     "ceiling_0.98": {
+      "completed": 5984,
+      "rate": 0.23109
+     },
+     "ceiling_0.99": {
+      "completed": 7654,
+      "rate": 0.29558
+     },
+     "ceiling_1.00": {
+      "completed": 8481,
+      "rate": 0.32751
+     },
+     "any_basis_completed": 13205,
+     "any_basis_rate": 0.50994
+    },
+    "settlement": {
+     "ceiling_0.90": {
+      "completed": 3363,
+      "rate": 0.12987
+     },
+     "ceiling_0.92": {
+      "completed": 3843,
+      "rate": 0.14841
+     },
+     "ceiling_0.94": {
+      "completed": 4472,
+      "rate": 0.1727
+     },
+     "ceiling_0.95": {
+      "completed": 4902,
+      "rate": 0.1893
+     },
+     "ceiling_0.96": {
+      "completed": 5375,
+      "rate": 0.20757
+     },
+     "ceiling_0.97": {
+      "completed": 5988,
+      "rate": 0.23124
+     },
+     "ceiling_0.98": {
+      "completed": 6940,
+      "rate": 0.26801
+     },
+     "ceiling_0.99": {
+      "completed": 8659,
+      "rate": 0.33439
+     },
+     "ceiling_1.00": {
+      "completed": 9532,
+      "rate": 0.3681
+     },
+     "any_basis_completed": 15026,
+     "any_basis_rate": 0.58027
+    }
+   },
+   "BY_FIRST_LEG_PRICE_BAND": {
+    "0.00-0.10": {
+     "opens": 3122,
+     "completed_within_1h": 620,
+     "completion_rate_1h": 0.1986,
+     "mean_pair_basis": 0.93924
+    },
+    "0.10-0.30": {
+     "opens": 4570,
+     "completed_within_1h": 2333,
+     "completion_rate_1h": 0.5105,
+     "mean_pair_basis": 0.93865
+    },
+    "0.30-0.50": {
+     "opens": 5874,
+     "completed_within_1h": 3556,
+     "completion_rate_1h": 0.6054,
+     "mean_pair_basis": 0.96493
+    },
+    "0.50-0.70": {
+     "opens": 5709,
+     "completed_within_1h": 3605,
+     "completion_rate_1h": 0.6315,
+     "mean_pair_basis": 0.98965
+    },
+    "0.70-0.90": {
+     "opens": 4466,
+     "completed_within_1h": 2394,
+     "completion_rate_1h": 0.5361,
+     "mean_pair_basis": 1.01286
+    },
+    "0.90-1.01": {
+     "opens": 2154,
+     "completed_within_1h": 697,
+     "completion_rate_1h": 0.3236,
+     "mean_pair_basis": 1.01693
+    }
+   },
+   "BY_SPORT_OR_QUESTION": {
+    "Soccer": {
+     "opens": 11715,
+     "completed_within_1h": 5431,
+     "completion_rate_1h": 0.4636,
+     "mean_pair_basis": 0.97541
+    },
+    "Tennis": {
+     "opens": 6676,
+     "completed_within_1h": 4609,
+     "completion_rate_1h": 0.6904,
+     "mean_pair_basis": 0.98169
+    },
+    "Non-Sports": {
+     "opens": 2960,
+     "completed_within_1h": 879,
+     "completion_rate_1h": 0.297,
+     "mean_pair_basis": 0.97265
+    },
+    "MLB": {
+     "opens": 1419,
+     "completed_within_1h": 677,
+     "completion_rate_1h": 0.4771,
+     "mean_pair_basis": 0.97045
+    },
+    "NFL": {
+     "opens": 1209,
+     "completed_within_1h": 534,
+     "completion_rate_1h": 0.4417,
+     "mean_pair_basis": 0.96902
+    },
+    "unclassified": {
+     "opens": 972,
+     "completed_within_1h": 342,
+     "completion_rate_1h": 0.3519,
+     "mean_pair_basis": 0.97823
+    },
+    "Other-Sports": {
+     "opens": 778,
+     "completed_within_1h": 633,
+     "completion_rate_1h": 0.8136,
+     "mean_pair_basis": 0.97346
+    },
+    "MMA": {
+     "opens": 86,
+     "completed_within_1h": 49,
+     "completion_rate_1h": 0.5698,
+     "mean_pair_basis": 0.99095
+    },
+    "NBA": {
+     "opens": 80,
+     "completed_within_1h": 51,
+     "completion_rate_1h": 0.6375,
+     "mean_pair_basis": 0.9983
+    }
+   },
+   "BY_FILL_SIZE_BUCKET": {
+    "0-100": {
+     "opens": 11961,
+     "completed_within_1h": 5558,
+     "completion_rate_1h": 0.4647,
+     "mean_pair_basis": 0.97268
+    },
+    "100-1000": {
+     "opens": 8424,
+     "completed_within_1h": 4348,
+     "completion_rate_1h": 0.5161,
+     "mean_pair_basis": 0.97537
+    },
+    "1000-10000": {
+     "opens": 5311,
+     "completed_within_1h": 3149,
+     "completion_rate_1h": 0.5929,
+     "mean_pair_basis": 0.98668
+    },
+    "10000-100000": {
+     "opens": 199,
+     "completed_within_1h": 150,
+     "completion_rate_1h": 0.7538,
+     "mean_pair_basis": 0.97696
+    }
+   },
+   "BY_WEEK": {
+    "2026-W32": {
+     "opens": 944,
+     "completed_within_1h": 403,
+     "completion_rate_1h": 0.4269,
+     "mean_pair_basis": 0.9761
+    },
+    "2026-W33": {
+     "opens": 1438,
+     "completed_within_1h": 565,
+     "completion_rate_1h": 0.3929,
+     "mean_pair_basis": 0.97948
+    },
+    "2026-W34": {
+     "opens": 1048,
+     "completed_within_1h": 527,
+     "completion_rate_1h": 0.5029,
+     "mean_pair_basis": 0.98533
+    },
+    "2026-W35": {
+     "opens": 9561,
+     "completed_within_1h": 4857,
+     "completion_rate_1h": 0.508,
+     "mean_pair_basis": 0.97584
+    },
+    "2026-W36": {
+     "opens": 7145,
+     "completed_within_1h": 3509,
+     "completion_rate_1h": 0.4911,
+     "mean_pair_basis": 0.9753
+    },
+    "2026-W37": {
+     "opens": 5759,
+     "completed_within_1h": 3344,
+     "completion_rate_1h": 0.5807,
+     "mean_pair_basis": 0.97859
+    }
+   }
+  },
+  "LAST_30D": {
+   "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": 24418,
+   "REFERENCE_ACCOUNT_NEVER_COMPLETED": 10113,
+   "REFERENCE_ACCOUNT_MEAN_PAIR_BASIS": 0.97697,
+   "REFERENCE_ACCOUNT_COMPLETION_GRID": {
+    "5": {
+     "ceiling_0.90": {
+      "completed": 4,
+      "rate": 0.00016
+     },
+     "ceiling_0.92": {
+      "completed": 7,
+      "rate": 0.00029
+     },
+     "ceiling_0.94": {
+      "completed": 11,
+      "rate": 0.00045
+     },
+     "ceiling_0.95": {
+      "completed": 20,
+      "rate": 0.00082
+     },
+     "ceiling_0.96": {
+      "completed": 41,
+      "rate": 0.00168
+     },
+     "ceiling_0.97": {
+      "completed": 88,
+      "rate": 0.0036
+     },
+     "ceiling_0.98": {
+      "completed": 266,
+      "rate": 0.01089
+     },
+     "ceiling_0.99": {
+      "completed": 881,
+      "rate": 0.03608
+     },
+     "ceiling_1.00": {
+      "completed": 919,
+      "rate": 0.03764
+     },
+     "any_basis_completed": 938,
+     "any_basis_rate": 0.03841
+    },
+    "10": {
+     "ceiling_0.90": {
+      "completed": 5,
+      "rate": 0.0002
+     },
+     "ceiling_0.92": {
+      "completed": 12,
+      "rate": 0.00049
+     },
+     "ceiling_0.94": {
+      "completed": 21,
+      "rate": 0.00086
+     },
+     "ceiling_0.95": {
+      "completed": 40,
+      "rate": 0.00164
+     },
+     "ceiling_0.96": {
+      "completed": 72,
+      "rate": 0.00295
+     },
+     "ceiling_0.97": {
+      "completed": 128,
+      "rate": 0.00524
+     },
+     "ceiling_0.98": {
+      "completed": 336,
+      "rate": 0.01376
+     },
+     "ceiling_0.99": {
+      "completed": 1053,
+      "rate": 0.04312
+     },
+     "ceiling_1.00": {
+      "completed": 1131,
+      "rate": 0.04632
+     },
+     "any_basis_completed": 1169,
+     "any_basis_rate": 0.04787
+    },
+    "30": {
+     "ceiling_0.90": {
+      "completed": 13,
+      "rate": 0.00053
+     },
+     "ceiling_0.92": {
+      "completed": 22,
+      "rate": 0.0009
+     },
+     "ceiling_0.94": {
+      "completed": 44,
+      "rate": 0.0018
+     },
+     "ceiling_0.95": {
+      "completed": 78,
+      "rate": 0.00319
+     },
+     "ceiling_0.96": {
+      "completed": 125,
+      "rate": 0.00512
+     },
+     "ceiling_0.97": {
+      "completed": 231,
+      "rate": 0.00946
+     },
+     "ceiling_0.98": {
+      "completed": 502,
+      "rate": 0.02056
+     },
+     "ceiling_0.99": {
+      "completed": 1338,
+      "rate": 0.0548
+     },
+     "ceiling_1.00": {
+      "completed": 1479,
+      "rate": 0.06057
+     },
+     "any_basis_completed": 1588,
+     "any_basis_rate": 0.06503
+    },
+    "60": {
+     "ceiling_0.90": {
+      "completed": 33,
+      "rate": 0.00135
+     },
+     "ceiling_0.92": {
+      "completed": 53,
+      "rate": 0.00217
+     },
+     "ceiling_0.94": {
+      "completed": 98,
+      "rate": 0.00401
+     },
+     "ceiling_0.95": {
+      "completed": 156,
+      "rate": 0.00639
+     },
+     "ceiling_0.96": {
+      "completed": 231,
+      "rate": 0.00946
+     },
+     "ceiling_0.97": {
+      "completed": 372,
+      "rate": 0.01523
+     },
+     "ceiling_0.98": {
+      "completed": 701,
+      "rate": 0.02871
+     },
+     "ceiling_0.99": {
+      "completed": 1636,
+      "rate": 0.067
+     },
+     "ceiling_1.00": {
+      "completed": 1856,
+      "rate": 0.07601
+     },
+     "any_basis_completed": 2095,
+     "any_basis_rate": 0.0858
+    },
+    "120": {
+     "ceiling_0.90": {
+      "completed": 91,
+      "rate": 0.00373
+     },
+     "ceiling_0.92": {
+      "completed": 122,
+      "rate": 0.005
+     },
+     "ceiling_0.94": {
+      "completed": 201,
+      "rate": 0.00823
+     },
+     "ceiling_0.95": {
+      "completed": 291,
+      "rate": 0.01192
+     },
+     "ceiling_0.96": {
+      "completed": 404,
+      "rate": 0.01655
+     },
+     "ceiling_0.97": {
+      "completed": 607,
+      "rate": 0.02486
+     },
+     "ceiling_0.98": {
+      "completed": 1010,
+      "rate": 0.04136
+     },
+     "ceiling_0.99": {
+      "completed": 2065,
+      "rate": 0.08457
+     },
+     "ceiling_1.00": {
+      "completed": 2377,
+      "rate": 0.09735
+     },
+     "any_basis_completed": 2852,
+     "any_basis_rate": 0.1168
+    },
+    "300": {
+     "ceiling_0.90": {
+      "completed": 285,
+      "rate": 0.01167
+     },
+     "ceiling_0.92": {
+      "completed": 388,
+      "rate": 0.01589
+     },
+     "ceiling_0.94": {
+      "completed": 552,
+      "rate": 0.02261
+     },
+     "ceiling_0.95": {
+      "completed": 700,
+      "rate": 0.02867
+     },
+     "ceiling_0.96": {
+      "completed": 887,
+      "rate": 0.03633
+     },
+     "ceiling_0.97": {
+      "completed": 1188,
+      "rate": 0.04865
+     },
+     "ceiling_0.98": {
+      "completed": 1715,
+      "rate": 0.07024
+     },
+     "ceiling_0.99": {
+      "completed": 2924,
+      "rate": 0.11975
+     },
+     "ceiling_1.00": {
+      "completed": 3390,
+      "rate": 0.13883
+     },
+     "any_basis_completed": 4531,
+     "any_basis_rate": 0.18556
+    },
+    "600": {
+     "ceiling_0.90": {
+      "completed": 661,
+      "rate": 0.02707
+     },
+     "ceiling_0.92": {
+      "completed": 846,
+      "rate": 0.03465
+     },
+     "ceiling_0.94": {
+      "completed": 1120,
+      "rate": 0.04587
+     },
+     "ceiling_0.95": {
+      "completed": 1350,
+      "rate": 0.05529
+     },
+     "ceiling_0.96": {
+      "completed": 1604,
+      "rate": 0.06569
+     },
+     "ceiling_0.97": {
+      "completed": 1967,
+      "rate": 0.08056
+     },
+     "ceiling_0.98": {
+      "completed": 2617,
+      "rate": 0.10718
+     },
+     "ceiling_0.99": {
+      "completed": 3942,
+      "rate": 0.16144
+     },
+     "ceiling_1.00": {
+      "completed": 4527,
+      "rate": 0.1854
+     },
+     "any_basis_completed": 6481,
+     "any_basis_rate": 0.26542
+    },
+    "1800": {
+     "ceiling_0.90": {
+      "completed": 1792,
+      "rate": 0.07339
+     },
+     "ceiling_0.92": {
+      "completed": 2125,
+      "rate": 0.08703
+     },
+     "ceiling_0.94": {
+      "completed": 2580,
+      "rate": 0.10566
+     },
+     "ceiling_0.95": {
+      "completed": 2911,
+      "rate": 0.11922
+     },
+     "ceiling_0.96": {
+      "completed": 3274,
+      "rate": 0.13408
+     },
+     "ceiling_0.97": {
+      "completed": 3762,
+      "rate": 0.15407
+     },
+     "ceiling_0.98": {
+      "completed": 4560,
+      "rate": 0.18675
+     },
+     "ceiling_0.99": {
+      "completed": 6025,
+      "rate": 0.24674
+     },
+     "ceiling_1.00": {
+      "completed": 6765,
+      "rate": 0.27705
+     },
+     "any_basis_completed": 10344,
+     "any_basis_rate": 0.42362
+    },
+    "3600": {
+     "ceiling_0.90": {
+      "completed": 2571,
+      "rate": 0.10529
+     },
+     "ceiling_0.92": {
+      "completed": 2984,
+      "rate": 0.1222
+     },
+     "ceiling_0.94": {
+      "completed": 3535,
+      "rate": 0.14477
+     },
+     "ceiling_0.95": {
+      "completed": 3922,
+      "rate": 0.16062
+     },
+     "ceiling_0.96": {
+      "completed": 4326,
+      "rate": 0.17716
+     },
+     "ceiling_0.97": {
+      "completed": 4867,
+      "rate": 0.19932
+     },
+     "ceiling_0.98": {
+      "completed": 5714,
+      "rate": 0.23401
+     },
+     "ceiling_0.99": {
+      "completed": 7243,
+      "rate": 0.29663
+     },
+     "ceiling_1.00": {
+      "completed": 8038,
+      "rate": 0.32918
+     },
+     "any_basis_completed": 12574,
+     "any_basis_rate": 0.51495
+    },
+    "settlement": {
+     "ceiling_0.90": {
+      "completed": 3208,
+      "rate": 0.13138
+     },
+     "ceiling_0.92": {
+      "completed": 3666,
+      "rate": 0.15014
+     },
+     "ceiling_0.94": {
+      "completed": 4269,
+      "rate": 0.17483
+     },
+     "ceiling_0.95": {
+      "completed": 4688,
+      "rate": 0.19199
+     },
+     "ceiling_0.96": {
+      "completed": 5135,
+      "rate": 0.2103
+     },
+     "ceiling_0.97": {
+      "completed": 5719,
+      "rate": 0.23421
+     },
+     "ceiling_0.98": {
+      "completed": 6618,
+      "rate": 0.27103
+     },
+     "ceiling_0.99": {
+      "completed": 8193,
+      "rate": 0.33553
+     },
+     "ceiling_1.00": {
+      "completed": 9033,
+      "rate": 0.36993
+     },
+     "any_basis_completed": 14305,
+     "any_basis_rate": 0.58584
+    }
+   },
+   "BY_FIRST_LEG_PRICE_BAND": {
+    "0.00-0.10": {
+     "opens": 2957,
+     "completed_within_1h": 586,
+     "completion_rate_1h": 0.1982,
+     "mean_pair_basis": 0.94
+    },
+    "0.10-0.30": {
+     "opens": 4294,
+     "completed_within_1h": 2216,
+     "completion_rate_1h": 0.5161,
+     "mean_pair_basis": 0.9382
+    },
+    "0.30-0.50": {
+     "opens": 5515,
+     "completed_within_1h": 3404,
+     "completion_rate_1h": 0.6172,
+     "mean_pair_basis": 0.96498
+    },
+    "0.50-0.70": {
+     "opens": 5398,
+     "completed_within_1h": 3447,
+     "completion_rate_1h": 0.6386,
+     "mean_pair_basis": 0.99005
+    },
+    "0.70-0.90": {
+     "opens": 4193,
+     "completed_within_1h": 2254,
+     "completion_rate_1h": 0.5376,
+     "mean_pair_basis": 1.01307
+    },
+    "0.90-1.01": {
+     "opens": 2061,
+     "completed_within_1h": 667,
+     "completion_rate_1h": 0.3236,
+     "mean_pair_basis": 1.01582
+    }
+   },
+   "BY_SPORT_OR_QUESTION": {
+    "Soccer": {
+     "opens": 11353,
+     "completed_within_1h": 5323,
+     "completion_rate_1h": 0.4689,
+     "mean_pair_basis": 0.97546
+    },
+    "Tennis": {
+     "opens": 6189,
+     "completed_within_1h": 4305,
+     "completion_rate_1h": 0.6956,
+     "mean_pair_basis": 0.98155
+    },
+    "Non-Sports": {
+     "opens": 2854,
+     "completed_within_1h": 856,
+     "completion_rate_1h": 0.2999,
+     "mean_pair_basis": 0.97185
+    },
+    "MLB": {
+     "opens": 1364,
+     "completed_within_1h": 664,
+     "completion_rate_1h": 0.4868,
+     "mean_pair_basis": 0.97038
+    },
+    "NFL": {
+     "opens": 1209,
+     "completed_within_1h": 534,
+     "completion_rate_1h": 0.4417,
+     "mean_pair_basis": 0.96902
+    },
+    "Other-Sports": {
+     "opens": 778,
+     "completed_within_1h": 633,
+     "completion_rate_1h": 0.8136,
+     "mean_pair_basis": 0.97346
+    },
+    "unclassified": {
+     "opens": 513,
+     "completed_within_1h": 164,
+     "completion_rate_1h": 0.3197,
+     "mean_pair_basis": 0.99632
+    },
+    "MMA": {
+     "opens": 83,
+     "completed_within_1h": 49,
+     "completion_rate_1h": 0.5904,
+     "mean_pair_basis": 0.99095
+    },
+    "NBA": {
+     "opens": 75,
+     "completed_within_1h": 46,
+     "completion_rate_1h": 0.6133,
+     "mean_pair_basis": 0.99657
+    }
+   },
+   "BY_FILL_SIZE_BUCKET": {
+    "0-100": {
+     "opens": 11070,
+     "completed_within_1h": 5188,
+     "completion_rate_1h": 0.4687,
+     "mean_pair_basis": 0.97234
+    },
+    "100-1000": {
+     "opens": 8028,
+     "completed_within_1h": 4179,
+     "completion_rate_1h": 0.5206,
+     "mean_pair_basis": 0.9757
+    },
+    "1000-10000": {
+     "opens": 5121,
+     "completed_within_1h": 3057,
+     "completion_rate_1h": 0.597,
+     "mean_pair_basis": 0.98666
+    },
+    "10000-100000": {
+     "opens": 199,
+     "completed_within_1h": 150,
+     "completion_rate_1h": 0.7538,
+     "mean_pair_basis": 0.97696
+    }
+   },
+   "BY_WEEK": {
+    "2026-W33": {
+     "opens": 903,
+     "completed_within_1h": 335,
+     "completion_rate_1h": 0.371,
+     "mean_pair_basis": 0.98164
+    },
+    "2026-W34": {
+     "opens": 1050,
+     "completed_within_1h": 529,
+     "completion_rate_1h": 0.5038,
+     "mean_pair_basis": 0.98533
+    },
+    "2026-W35": {
+     "opens": 9561,
+     "completed_within_1h": 4857,
+     "completion_rate_1h": 0.508,
+     "mean_pair_basis": 0.97584
+    },
+    "2026-W36": {
+     "opens": 7145,
+     "completed_within_1h": 3509,
+     "completion_rate_1h": 0.4911,
+     "mean_pair_basis": 0.9753
+    },
+    "2026-W37": {
+     "opens": 5759,
+     "completed_within_1h": 3344,
+     "completion_rate_1h": 0.5807,
+     "mean_pair_basis": 0.97859
+    }
+   }
+  },
+  "LAST_7D": {
+   "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": 8892,
+   "REFERENCE_ACCOUNT_NEVER_COMPLETED": 3607,
+   "REFERENCE_ACCOUNT_MEAN_PAIR_BASIS": 0.97873,
+   "REFERENCE_ACCOUNT_COMPLETION_GRID": {
+    "5": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": 0.0
+     },
+     "ceiling_0.92": {
+      "completed": 1,
+      "rate": 0.00011
+     },
+     "ceiling_0.94": {
+      "completed": 2,
+      "rate": 0.00022
+     },
+     "ceiling_0.95": {
+      "completed": 2,
+      "rate": 0.00022
+     },
+     "ceiling_0.96": {
+      "completed": 8,
+      "rate": 0.0009
+     },
+     "ceiling_0.97": {
+      "completed": 21,
+      "rate": 0.00236
+     },
+     "ceiling_0.98": {
+      "completed": 105,
+      "rate": 0.01181
+     },
+     "ceiling_0.99": {
+      "completed": 406,
+      "rate": 0.04566
+     },
+     "ceiling_1.00": {
+      "completed": 419,
+      "rate": 0.04712
+     },
+     "any_basis_completed": 426,
+     "any_basis_rate": 0.04791
+    },
+    "10": {
+     "ceiling_0.90": {
+      "completed": 0,
+      "rate": 0.0
+     },
+     "ceiling_0.92": {
+      "completed": 3,
+      "rate": 0.00034
+     },
+     "ceiling_0.94": {
+      "completed": 4,
+      "rate": 0.00045
+     },
+     "ceiling_0.95": {
+      "completed": 7,
+      "rate": 0.00079
+     },
+     "ceiling_0.96": {
+      "completed": 18,
+      "rate": 0.00202
+     },
+     "ceiling_0.97": {
+      "completed": 36,
+      "rate": 0.00405
+     },
+     "ceiling_0.98": {
+      "completed": 133,
+      "rate": 0.01496
+     },
+     "ceiling_0.99": {
+      "completed": 465,
+      "rate": 0.05229
+     },
+     "ceiling_1.00": {
+      "completed": 494,
+      "rate": 0.05556
+     },
+     "any_basis_completed": 507,
+     "any_basis_rate": 0.05702
+    },
+    "30": {
+     "ceiling_0.90": {
+      "completed": 3,
+      "rate": 0.00034
+     },
+     "ceiling_0.92": {
+      "completed": 7,
+      "rate": 0.00079
+     },
+     "ceiling_0.94": {
+      "completed": 12,
+      "rate": 0.00135
+     },
+     "ceiling_0.95": {
+      "completed": 22,
+      "rate": 0.00247
+     },
+     "ceiling_0.96": {
+      "completed": 40,
+      "rate": 0.0045
+     },
+     "ceiling_0.97": {
+      "completed": 80,
+      "rate": 0.009
+     },
+     "ceiling_0.98": {
+      "completed": 204,
+      "rate": 0.02294
+     },
+     "ceiling_0.99": {
+      "completed": 573,
+      "rate": 0.06444
+     },
+     "ceiling_1.00": {
+      "completed": 629,
+      "rate": 0.07074
+     },
+     "any_basis_completed": 665,
+     "any_basis_rate": 0.07479
+    },
+    "60": {
+     "ceiling_0.90": {
+      "completed": 10,
+      "rate": 0.00112
+     },
+     "ceiling_0.92": {
+      "completed": 19,
+      "rate": 0.00214
+     },
+     "ceiling_0.94": {
+      "completed": 36,
+      "rate": 0.00405
+     },
+     "ceiling_0.95": {
+      "completed": 55,
+      "rate": 0.00619
+     },
+     "ceiling_0.96": {
+      "completed": 85,
+      "rate": 0.00956
+     },
+     "ceiling_0.97": {
+      "completed": 145,
+      "rate": 0.01631
+     },
+     "ceiling_0.98": {
+      "completed": 291,
+      "rate": 0.03273
+     },
+     "ceiling_0.99": {
+      "completed": 702,
+      "rate": 0.07895
+     },
+     "ceiling_1.00": {
+      "completed": 788,
+      "rate": 0.08862
+     },
+     "any_basis_completed": 863,
+     "any_basis_rate": 0.09705
+    },
+    "120": {
+     "ceiling_0.90": {
+      "completed": 33,
+      "rate": 0.00371
+     },
+     "ceiling_0.92": {
+      "completed": 46,
+      "rate": 0.00517
+     },
+     "ceiling_0.94": {
+      "completed": 79,
+      "rate": 0.00888
+     },
+     "ceiling_0.95": {
+      "completed": 111,
+      "rate": 0.01248
+     },
+     "ceiling_0.96": {
+      "completed": 154,
+      "rate": 0.01732
+     },
+     "ceiling_0.97": {
+      "completed": 240,
+      "rate": 0.02699
+     },
+     "ceiling_0.98": {
+      "completed": 418,
+      "rate": 0.04701
+     },
+     "ceiling_0.99": {
+      "completed": 873,
+      "rate": 0.09818
+     },
+     "ceiling_1.00": {
+      "completed": 991,
+      "rate": 0.11145
+     },
+     "any_basis_completed": 1160,
+     "any_basis_rate": 0.13045
+    },
+    "300": {
+     "ceiling_0.90": {
+      "completed": 110,
+      "rate": 0.01237
+     },
+     "ceiling_0.92": {
+      "completed": 149,
+      "rate": 0.01676
+     },
+     "ceiling_0.94": {
+      "completed": 217,
+      "rate": 0.0244
+     },
+     "ceiling_0.95": {
+      "completed": 274,
+      "rate": 0.03081
+     },
+     "ceiling_0.96": {
+      "completed": 345,
+      "rate": 0.0388
+     },
+     "ceiling_0.97": {
+      "completed": 475,
+      "rate": 0.05342
+     },
+     "ceiling_0.98": {
+      "completed": 693,
+      "rate": 0.07794
+     },
+     "ceiling_0.99": {
+      "completed": 1207,
+      "rate": 0.13574
+     },
+     "ceiling_1.00": {
+      "completed": 1388,
+      "rate": 0.1561
+     },
+     "any_basis_completed": 1797,
+     "any_basis_rate": 0.20209
+    },
+    "600": {
+     "ceiling_0.90": {
+      "completed": 246,
+      "rate": 0.02767
+     },
+     "ceiling_0.92": {
+      "completed": 318,
+      "rate": 0.03576
+     },
+     "ceiling_0.94": {
+      "completed": 435,
+      "rate": 0.04892
+     },
+     "ceiling_0.95": {
+      "completed": 520,
+      "rate": 0.05848
+     },
+     "ceiling_0.96": {
+      "completed": 617,
+      "rate": 0.06939
+     },
+     "ceiling_0.97": {
+      "completed": 771,
+      "rate": 0.08671
+     },
+     "ceiling_0.98": {
+      "completed": 1036,
+      "rate": 0.11651
+     },
+     "ceiling_0.99": {
+      "completed": 1595,
+      "rate": 0.17937
+     },
+     "ceiling_1.00": {
+      "completed": 1829,
+      "rate": 0.20569
+     },
+     "any_basis_completed": 2547,
+     "any_basis_rate": 0.28644
+    },
+    "1800": {
+     "ceiling_0.90": {
+      "completed": 680,
+      "rate": 0.07647
+     },
+     "ceiling_0.92": {
+      "completed": 807,
+      "rate": 0.09076
+     },
+     "ceiling_0.94": {
+      "completed": 982,
+      "rate": 0.11044
+     },
+     "ceiling_0.95": {
+      "completed": 1106,
+      "rate": 0.12438
+     },
+     "ceiling_0.96": {
+      "completed": 1246,
+      "rate": 0.14013
+     },
+     "ceiling_0.97": {
+      "completed": 1438,
+      "rate": 0.16172
+     },
+     "ceiling_0.98": {
+      "completed": 1756,
+      "rate": 0.19748
+     },
+     "ceiling_0.99": {
+      "completed": 2366,
+      "rate": 0.26608
+     },
+     "ceiling_1.00": {
+      "completed": 2660,
+      "rate": 0.29915
+     },
+     "any_basis_completed": 3941,
+     "any_basis_rate": 0.44321
+    },
+    "3600": {
+     "ceiling_0.90": {
+      "completed": 968,
+      "rate": 0.10886
+     },
+     "ceiling_0.92": {
+      "completed": 1120,
+      "rate": 0.12596
+     },
+     "ceiling_0.94": {
+      "completed": 1329,
+      "rate": 0.14946
+     },
+     "ceiling_0.95": {
+      "completed": 1473,
+      "rate": 0.16565
+     },
+     "ceiling_0.96": {
+      "completed": 1624,
+      "rate": 0.18264
+     },
+     "ceiling_0.97": {
+      "completed": 1843,
+      "rate": 0.20726
+     },
+     "ceiling_0.98": {
+      "completed": 2183,
+      "rate": 0.2455
+     },
+     "ceiling_0.99": {
+      "completed": 2817,
+      "rate": 0.3168
+     },
+     "ceiling_1.00": {
+      "completed": 3129,
+      "rate": 0.35189
+     },
+     "any_basis_completed": 4732,
+     "any_basis_rate": 0.53216
+    },
+    "settlement": {
+     "ceiling_0.90": {
+      "completed": 1170,
+      "rate": 0.13158
+     },
+     "ceiling_0.92": {
+      "completed": 1338,
+      "rate": 0.15047
+     },
+     "ceiling_0.94": {
+      "completed": 1562,
+      "rate": 0.17566
+     },
+     "ceiling_0.95": {
+      "completed": 1717,
+      "rate": 0.19309
+     },
+     "ceiling_0.96": {
+      "completed": 1885,
+      "rate": 0.21199
+     },
+     "ceiling_0.97": {
+      "completed": 2114,
+      "rate": 0.23774
+     },
+     "ceiling_0.98": {
+      "completed": 2471,
+      "rate": 0.27789
+     },
+     "ceiling_0.99": {
+      "completed": 3122,
+      "rate": 0.3511
+     },
+     "ceiling_1.00": {
+      "completed": 3442,
+      "rate": 0.38709
+     },
+     "any_basis_completed": 5285,
+     "any_basis_rate": 0.59435
+    }
+   },
+   "BY_FIRST_LEG_PRICE_BAND": {
+    "0.00-0.10": {
+     "opens": 1217,
+     "completed_within_1h": 232,
+     "completion_rate_1h": 0.1906,
+     "mean_pair_basis": 0.95109
+    },
+    "0.10-0.30": {
+     "opens": 1472,
+     "completed_within_1h": 831,
+     "completion_rate_1h": 0.5645,
+     "mean_pair_basis": 0.94418
+    },
+    "0.30-0.50": {
+     "opens": 1873,
+     "completed_within_1h": 1252,
+     "completion_rate_1h": 0.6684,
+     "mean_pair_basis": 0.96886
+    },
+    "0.50-0.70": {
+     "opens": 1974,
+     "completed_within_1h": 1317,
+     "completion_rate_1h": 0.6672,
+     "mean_pair_basis": 0.9836
+    },
+    "0.70-0.90": {
+     "opens": 1607,
+     "completed_within_1h": 878,
+     "completion_rate_1h": 0.5464,
+     "mean_pair_basis": 1.01785
+    },
+    "0.90-1.01": {
+     "opens": 749,
+     "completed_within_1h": 222,
+     "completion_rate_1h": 0.2964,
+     "mean_pair_basis": 1.00788
+    }
+   },
+   "BY_SPORT_OR_QUESTION": {
+    "Soccer": {
+     "opens": 4236,
+     "completed_within_1h": 2025,
+     "completion_rate_1h": 0.478,
+     "mean_pair_basis": 0.98062
+    },
+    "Tennis": {
+     "opens": 2166,
+     "completed_within_1h": 1535,
+     "completion_rate_1h": 0.7087,
+     "mean_pair_basis": 0.98332
+    },
+    "Non-Sports": {
+     "opens": 1059,
+     "completed_within_1h": 298,
+     "completion_rate_1h": 0.2814,
+     "mean_pair_basis": 0.97479
+    },
+    "NFL": {
+     "opens": 838,
+     "completed_within_1h": 398,
+     "completion_rate_1h": 0.4749,
+     "mean_pair_basis": 0.96711
+    },
+    "Other-Sports": {
+     "opens": 559,
+     "completed_within_1h": 458,
+     "completion_rate_1h": 0.8193,
+     "mean_pair_basis": 0.96915
+    },
+    "MMA": {
+     "opens": 34,
+     "completed_within_1h": 18,
+     "completion_rate_1h": 0.5294,
+     "mean_pair_basis": 0.93981
+    }
+   },
+   "BY_FILL_SIZE_BUCKET": {
+    "0-100": {
+     "opens": 4049,
+     "completed_within_1h": 2012,
+     "completion_rate_1h": 0.4969,
+     "mean_pair_basis": 0.9745
+    },
+    "100-1000": {
+     "opens": 2922,
+     "completed_within_1h": 1552,
+     "completion_rate_1h": 0.5311,
+     "mean_pair_basis": 0.97895
+    },
+    "1000-10000": {
+     "opens": 1826,
+     "completed_within_1h": 1089,
+     "completion_rate_1h": 0.5964,
+     "mean_pair_basis": 0.98583
+    },
+    "10000-100000": {
+     "opens": 95,
+     "completed_within_1h": 79,
+     "completion_rate_1h": 0.8316,
+     "mean_pair_basis": 0.9863
+    }
+   },
+   "BY_WEEK": {
+    "2026-W36": {
+     "opens": 3133,
+     "completed_within_1h": 1388,
+     "completion_rate_1h": 0.443,
+     "mean_pair_basis": 0.97906
+    },
+    "2026-W37": {
+     "opens": 5759,
+     "completed_within_1h": 3344,
+     "completion_rate_1h": 0.5807,
+     "mean_pair_basis": 0.97859
+    }
+   }
+  }
+ }
+}

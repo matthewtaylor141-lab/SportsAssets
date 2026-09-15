@@ -1,0 +1,162 @@
+# BETA48 re-emit — the return channel, made verifiable.
+#
+# Why this workflow exists. The reconstruction blob comes home as ONE
+# gzip+base64 log line. That worked at ~7 KB (kch123) and FAILED at
+# ~15 KB (ferrarichampions2026): the captured line lost a slab out of its
+# middle, gzip died 24,595 bytes into a 72,227-byte payload, and nothing
+# in the channel said so. Header and trailer both survived, so a naive
+# "did it decode?" check would have been the only thing that caught it —
+# and a partial JSON that happened to parse would not have been caught at
+# all. RN1 and swisstony are LARGER than ferrari. The channel had to be
+# fixed before those are harvested, not after.
+#
+# The fix is per-chunk hashing. The base64 is cut into fixed-size pieces,
+# each line carrying its index, the total, and the SHA256 of that piece;
+# a header line carries the SHA256 of the whole gzip and the chunk count.
+# A dropped or mangled chunk is now identified BY INDEX before any
+# decompression is attempted, instead of surfacing as a corrupt stream.
+#
+# This workflow does NOT re-pull. It downloads the raw fills that a prior
+# run already archived and reconstructs from those exact bytes, so the
+# re-emitted payload is a property of the SAME pull — same fills, same
+# coverage, same provenance — and not a new sample of a moving venue.
+# (kch123 alone drifted 29,902 -> 29,898 merges between two pulls of a
+# dormant account, so a re-pull is NOT a neutral act.)
+#
+# --as-of is REQUIRED and COMMON to every wallet. That is the D2 canary
+# repair: a regime window must be cut from one wall clock, never from
+# each account's own last fill.
+name: beta48-reemit
+on:
+  workflow_dispatch:
+    inputs:
+      source_run_id:
+        description: "Run ID whose whale-history-* artifacts to reconstruct from"
+        required: true
+      as_of:
+        description: "Common as-of (ISO-8601 UTC) for every regime window"
+        required: true
+      chunk_chars:
+        description: "Base64 characters per emitted chunk"
+        default: "2000"
+        required: false
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  reemit:
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - wallet: rn1
+            address: "0x2005d16a84ceefa912d4e380cd32e7ff827875ea"
+          - wallet: w2c33
+            address: "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"
+          - wallet: homerunhazard
+            address: "0x5268527977f700f9bf9b6d5cd843859e4e70135d"
+          - wallet: swisstony
+            address: "0x204f72f35326db932158cba6adff0b9a1da95e14"
+          - wallet: kch123
+            address: "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee"
+          - wallet: ferrarichampions2026
+            address: "0xfe787d2da716d60e8acff57fb87eb13cd4d10319"
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: pip install --quiet requests pandas numpy
+      - name: Download the archived raw pull (no re-pull)
+        uses: actions/download-artifact@v4
+        with:
+          name: whale-history-${{ matrix.wallet }}
+          path: /tmp/whale/${{ matrix.wallet }}
+          run-id: ${{ github.event.inputs.source_run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - name: Provenance of the downloaded pull
+        run: |
+          set -e
+          D=/tmp/whale/${{ matrix.wallet }}
+          ls -la "$D"
+          wc -l "$D/trades_raw.csv" "$D/markets_meta.csv"
+          echo "RAWSHA_${{ matrix.wallet }} $(sha256sum $D/trades_raw.csv | cut -d' ' -f1)"
+          echo "METASHA_${{ matrix.wallet }} $(sha256sum $D/markets_meta.csv | cut -d' ' -f1)"
+      - name: BETA48 canonical reconstruction (census + replay + grid)
+        env:
+          W: ${{ matrix.wallet }}
+          A: ${{ matrix.address }}
+        run: |
+          set -e
+          D=/tmp/whale/$W
+          python research/beta48/whale_reconstruct.py \
+            --source csv --wallet "$W" --address "$A" \
+            --path "$D/trades_raw.csv" --meta "$D/markets_meta.csv" \
+            --as-of "${{ github.event.inputs.as_of }}" \
+            --out "$D/beta48"
+      - name: Emit the reconstruction in hashed chunks
+        env:
+          W: ${{ matrix.wallet }}
+          CHUNK: ${{ github.event.inputs.chunk_chars }}
+        run: |
+          set -e
+          python - <<'PY'
+          import hashlib, gzip, os, base64
+          w = os.environ["W"]
+          n = int(os.environ.get("CHUNK") or 2000)
+          src = f"/tmp/whale/{w}/beta48/{w}_reconstruction.json"
+          raw = open(src, "rb").read()
+          gz = gzip.compress(raw, 9, mtime=0)      # mtime=0 -> byte-reproducible
+          b64 = base64.b64encode(gz).decode()
+          U = w.upper()
+          chunks = [b64[i:i + n] for i in range(0, len(b64), n)]
+          print(f"BETA48H_{U} json_sha256={hashlib.sha256(raw).hexdigest()} "
+                f"json_bytes={len(raw)} gz_sha256={hashlib.sha256(gz).hexdigest()} "
+                f"gz_bytes={len(gz)} b64_chars={len(b64)} chunks={len(chunks)} "
+                f"chunk_chars={n}")
+          for i, c in enumerate(chunks):
+              print(f"BETA48C_{U} {i}/{len(chunks)} "
+                    f"{hashlib.sha256(c.encode()).hexdigest()[:16]} {c}")
+          print(f"BETA48E_{U} end chunks={len(chunks)}")
+          PY
+      # The PRIMARY channel. The hashed-chunk log lines above stay as an
+      # independent audit trail, but they are no longer how the payload
+      # travels: hand-transcribing 2,000-character base64 chunks out of a
+      # log failed on 2 of kch123's 4 chunks (right lengths, substituted
+      # characters). The per-chunk hashes caught it and named the indices
+      # — and that is the point. A channel whose repair step is itself
+      # unreliable is not repaired by localizing the damage. So the
+      # runner writes the evidence into git and nothing is transcribed.
+      #
+      # Each wallet pushes its OWN branch. Six parallel jobs pushing one
+      # shared branch would race, and a retry-until-it-lands loop is a
+      # worse failure mode than a branch per wallet.
+      - name: Commit the reconstruction to its own evidence branch
+        env:
+          W: ${{ matrix.wallet }}
+          RUN: ${{ github.event.inputs.source_run_id }}
+        run: |
+          set -e
+          D=/tmp/whale/$W/beta48
+          OUT=research/beta48/evidence/blobs_v3
+          BR="beta48-evidence/$RUN/$W"
+          mkdir -p "$OUT"
+          cp "$D/${W}_reconstruction.json" "$OUT/${W}_reconstruction.json"
+          ( cd "$OUT" && sha256sum "${W}_reconstruction.json" \
+              > "${W}_reconstruction.json.sha256" )
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan "$BR"
+          git rm -rq --cached . || true
+          git add -f "$OUT/${W}_reconstruction.json" \
+                     "$OUT/${W}_reconstruction.json.sha256"
+          git commit -qm "BETA48 evidence: $W reconstructed from run $RUN [skip render]"
+          for i in 1 2 4 8 16; do
+            git push -f origin "$BR" && break
+            echo "push failed, retrying in ${i}s"; sleep "$i"
+          done
+          echo "BETA48_BRANCH_$W $BR"

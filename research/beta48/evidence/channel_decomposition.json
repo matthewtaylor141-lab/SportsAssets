@@ -1,0 +1,321 @@
+{
+ "rn1": {
+  "CENSUS": {
+   "REFERENCE_ACCOUNT": "rn1",
+   "WALLET_ADDRESS": "0x2005d16a84ceefa912d4e380cd32e7ff827875ea",
+   "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+   "EXTRACTION_UTC": "2026-09-15T22:25:51.947461+00:00",
+   "REQUESTED_RANGE_START": "2024-06-01",
+   "RETURNED_RANGE_START": "2025-07-09T12:02:50+00:00",
+   "RETURNED_RANGE_END": "2026-09-15T22:15:54+00:00",
+   "RETURNED_SPAN_DAYS": 433.43,
+   "ROWS_READ": 4692621,
+   "ROWS_KEPT": 4692621,
+   "UNIQUE_TRADE_IDS": 4540792,
+   "DUPLICATE_FILL_KEYS": 0,
+   "BUY_COUNT": 4692373,
+   "SELL_COUNT": 248,
+   "OTHER_SIDE_COUNT": 0,
+   "DISTINCT_CONDITIONS": 138458,
+   "DISTINCT_MARKET_SLUGS": 138458,
+   "DROP_CENSUS": {
+    "PAYOUT_ONE_HOT": 138050,
+    "PAYOUT_NOT_ONE_HOT": 327
+   },
+   "COVERAGE_LIMITATIONS": [
+    "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+    "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+    "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+   ],
+   "AS_OF_UTC": "2026-09-15T22:25:05.520615+00:00",
+   "DAYS_SINCE_LAST_FILL_AT_AS_OF": 0.01
+  },
+  "REPAIR_GATES": "PASS",
+  "LIFETIME_DECOMPOSITION": {
+   "edge_roi": 0.035822,
+   "edge_ci95": [
+    0.030016,
+    0.041629
+   ],
+   "edge_clusters": 138227,
+   "edge_verdict": "PROFITABLE at 95% \u2014 +3.58% on dollar deployed, interval [+3.00%, +4.16%] over 2,291,448 closed lots",
+   "lot_s": 381621780.79,
+   "lot_p": 13670572.52,
+   "SETTLED_STAKE": 167713564.03,
+   "SETTLED_PNL": 2935868.21,
+   "SETTLED_SHARE_OF_STAKE": 0.4395,
+   "TRADED_STAKE": 213908216.76,
+   "TRADED_PNL": 10734704.31,
+   "MERGE_PNL": 10364422.79,
+   "SELL_PNL": 370281.52,
+   "TRADED_ROI": 0.050184,
+   "SETTLED_ROI": 0.017505
+  }
+ },
+ "w2c33": {
+  "CENSUS": {
+   "REFERENCE_ACCOUNT": "w2c33",
+   "WALLET_ADDRESS": "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563",
+   "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+   "EXTRACTION_UTC": "2026-09-15T22:06:01.578542+00:00",
+   "REQUESTED_RANGE_START": "2024-06-01",
+   "RETURNED_RANGE_START": "2025-10-08T15:39:18+00:00",
+   "RETURNED_RANGE_END": "2026-09-15T21:51:10+00:00",
+   "RETURNED_SPAN_DAYS": 342.26,
+   "ROWS_READ": 623608,
+   "ROWS_KEPT": 623608,
+   "UNIQUE_TRADE_IDS": 623045,
+   "DUPLICATE_FILL_KEYS": 0,
+   "BUY_COUNT": 621898,
+   "SELL_COUNT": 1710,
+   "OTHER_SIDE_COUNT": 0,
+   "DISTINCT_CONDITIONS": 9310,
+   "DISTINCT_MARKET_SLUGS": 9309,
+   "DROP_CENSUS": {
+    "PAYOUT_ONE_HOT": 9278,
+    "PAYOUT_NOT_ONE_HOT": 29
+   },
+   "COVERAGE_LIMITATIONS": [
+    "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+    "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+    "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+   ],
+   "AS_OF_UTC": "2026-09-15T22:05:55.705307+00:00",
+   "DAYS_SINCE_LAST_FILL_AT_AS_OF": 0.01
+  },
+  "REPAIR_GATES": "PASS",
+  "LIFETIME_DECOMPOSITION": {
+   "edge_roi": 0.015266,
+   "edge_ci95": [
+    -0.011534,
+    0.042066
+   ],
+   "edge_clusters": 9268,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +1.53% on dollar deployed but the interval [-1.15%, +4.21%] contains zero over 101,023 closed lots",
+   "lot_s": 504704520.27,
+   "lot_p": 7704667.61,
+   "SETTLED_STAKE": 405085811.51,
+   "SETTLED_PNL": 15843714.83,
+   "SETTLED_SHARE_OF_STAKE": 0.8026,
+   "TRADED_STAKE": 99618708.76,
+   "TRADED_PNL": -8139047.22,
+   "MERGE_PNL": -7880572.53,
+   "SELL_PNL": -258474.69,
+   "TRADED_ROI": -0.081702,
+   "SETTLED_ROI": 0.039112
+  }
+ },
+ "homerunhazard": {
+  "CENSUS": {
+   "REFERENCE_ACCOUNT": "homerunhazard",
+   "WALLET_ADDRESS": "0x5268527977f700f9bf9b6d5cd843859e4e70135d",
+   "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+   "EXTRACTION_UTC": "2026-09-15T22:08:33.075884+00:00",
+   "REQUESTED_RANGE_START": "2024-06-01",
+   "RETURNED_RANGE_START": "2026-04-24T14:39:18+00:00",
+   "RETURNED_RANGE_END": "2026-09-15T22:05:43+00:00",
+   "RETURNED_SPAN_DAYS": 144.31,
+   "ROWS_READ": 595070,
+   "ROWS_KEPT": 595070,
+   "UNIQUE_TRADE_IDS": 593509,
+   "DUPLICATE_FILL_KEYS": 0,
+   "BUY_COUNT": 595070,
+   "SELL_COUNT": 0,
+   "OTHER_SIDE_COUNT": 0,
+   "DISTINCT_CONDITIONS": 31877,
+   "DISTINCT_MARKET_SLUGS": 31877,
+   "DROP_CENSUS": {
+    "PAYOUT_ONE_HOT": 31676,
+    "PAYOUT_NOT_ONE_HOT": 195
+   },
+   "COVERAGE_LIMITATIONS": [
+    "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+    "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+    "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+   ],
+   "AS_OF_UTC": "2026-09-15T22:08:27.298698+00:00",
+   "DAYS_SINCE_LAST_FILL_AT_AS_OF": 0.0
+  },
+  "REPAIR_GATES": "PASS",
+  "LIFETIME_DECOMPOSITION": {
+   "edge_roi": 0.020856,
+   "edge_ci95": [
+    0.007483,
+    0.034229
+   ],
+   "edge_clusters": 31735,
+   "edge_verdict": "PROFITABLE at 95% \u2014 +2.09% on dollar deployed, interval [+0.75%, +3.42%] over 266,896 closed lots",
+   "lot_s": 119143713.86,
+   "lot_p": 2484862.43,
+   "SETTLED_STAKE": 73453679.79,
+   "SETTLED_PNL": 2961211.29,
+   "SETTLED_SHARE_OF_STAKE": 0.6165,
+   "TRADED_STAKE": 45690034.07,
+   "TRADED_PNL": -476348.86,
+   "MERGE_PNL": -476348.86,
+   "SELL_PNL": 0.0,
+   "TRADED_ROI": -0.010426,
+   "SETTLED_ROI": 0.040314
+  }
+ },
+ "swisstony": {
+  "CENSUS": {
+   "REFERENCE_ACCOUNT": "swisstony",
+   "WALLET_ADDRESS": "0x204f72f35326db932158cba6adff0b9a1da95e14",
+   "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+   "EXTRACTION_UTC": "2026-09-15T22:31:00.050090+00:00",
+   "REQUESTED_RANGE_START": "2024-06-01",
+   "RETURNED_RANGE_START": "2025-08-09T05:09:07+00:00",
+   "RETURNED_RANGE_END": "2026-08-26T09:17:49+00:00",
+   "RETURNED_SPAN_DAYS": 382.17,
+   "ROWS_READ": 6059643,
+   "ROWS_KEPT": 6059643,
+   "UNIQUE_TRADE_IDS": 6011620,
+   "DUPLICATE_FILL_KEYS": 0,
+   "BUY_COUNT": 6059643,
+   "SELL_COUNT": 0,
+   "OTHER_SIDE_COUNT": 0,
+   "DISTINCT_CONDITIONS": 203391,
+   "DISTINCT_MARKET_SLUGS": 203391,
+   "DROP_CENSUS": {
+    "PAYOUT_ONE_HOT": 202929,
+    "PAYOUT_NOT_ONE_HOT": 366
+   },
+   "COVERAGE_LIMITATIONS": [
+    "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+    "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+    "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+   ],
+   "AS_OF_UTC": "2026-09-15T22:29:58.782731+00:00",
+   "DAYS_SINCE_LAST_FILL_AT_AS_OF": 20.55
+  },
+  "REPAIR_GATES": "PASS",
+  "LIFETIME_DECOMPOSITION": {
+   "edge_roi": 0.030327,
+   "edge_ci95": [
+    0.016805,
+    0.04385
+   ],
+   "edge_clusters": 203111,
+   "edge_verdict": "PROFITABLE at 95% \u2014 +3.03% on dollar deployed, interval [+1.68%, +4.38%] over 2,315,561 closed lots",
+   "lot_s": 778766758.99,
+   "lot_p": 23617870.62,
+   "SETTLED_STAKE": 529649046.92,
+   "SETTLED_PNL": 23357747.68,
+   "SETTLED_SHARE_OF_STAKE": 0.6801,
+   "TRADED_STAKE": 249117712.07,
+   "TRADED_PNL": 260122.94,
+   "MERGE_PNL": 260122.94,
+   "SELL_PNL": 0.0,
+   "TRADED_ROI": 0.001044,
+   "SETTLED_ROI": 0.0441
+  }
+ },
+ "kch123": {
+  "CENSUS": {
+   "REFERENCE_ACCOUNT": "kch123",
+   "WALLET_ADDRESS": "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee",
+   "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+   "EXTRACTION_UTC": "2026-09-15T22:03:51.258383+00:00",
+   "REQUESTED_RANGE_START": "2024-06-01",
+   "RETURNED_RANGE_START": "2025-06-25T19:14:46+00:00",
+   "RETURNED_RANGE_END": "2026-06-29T20:45:56+00:00",
+   "RETURNED_SPAN_DAYS": 369.06,
+   "ROWS_READ": 175076,
+   "ROWS_KEPT": 175076,
+   "UNIQUE_TRADE_IDS": 172439,
+   "DUPLICATE_FILL_KEYS": 0,
+   "BUY_COUNT": 174977,
+   "SELL_COUNT": 99,
+   "OTHER_SIDE_COUNT": 0,
+   "DISTINCT_CONDITIONS": 2614,
+   "DISTINCT_MARKET_SLUGS": 2614,
+   "DROP_CENSUS": {
+    "PAYOUT_ONE_HOT": 2612,
+    "PAYOUT_NOT_ONE_HOT": 2
+   },
+   "COVERAGE_LIMITATIONS": [
+    "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+    "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+    "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+   ],
+   "AS_OF_UTC": "2026-09-15T22:03:49.534936+00:00",
+   "DAYS_SINCE_LAST_FILL_AT_AS_OF": 78.05
+  },
+  "REPAIR_GATES": "PASS",
+  "LIFETIME_DECOMPOSITION": {
+   "edge_roi": 0.078099,
+   "edge_ci95": [
+    0.012112,
+    0.144086
+   ],
+   "edge_clusters": 2613,
+   "edge_verdict": "PROFITABLE at 95% \u2014 +7.81% on dollar deployed, interval [+1.21%, +14.41%] over 32,599 closed lots",
+   "lot_s": 134977032.37,
+   "lot_p": 10541564.33,
+   "SETTLED_STAKE": 124053344.39,
+   "SETTLED_PNL": 10499606.87,
+   "SETTLED_SHARE_OF_STAKE": 0.9191,
+   "TRADED_STAKE": 10923687.98,
+   "TRADED_PNL": 41957.46,
+   "MERGE_PNL": -673481.63,
+   "SELL_PNL": 715439.09,
+   "TRADED_ROI": 0.003841,
+   "SETTLED_ROI": 0.084638
+  }
+ },
+ "ferrarichampions2026": {
+  "CENSUS": {
+   "REFERENCE_ACCOUNT": "ferrarichampions2026",
+   "WALLET_ADDRESS": "0xfe787d2da716d60e8acff57fb87eb13cd4d10319",
+   "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+   "EXTRACTION_UTC": "2026-09-15T22:12:01.889204+00:00",
+   "REQUESTED_RANGE_START": "2024-06-01",
+   "RETURNED_RANGE_START": "2026-03-31T20:13:01+00:00",
+   "RETURNED_RANGE_END": "2026-09-15T22:07:33+00:00",
+   "RETURNED_SPAN_DAYS": 168.08,
+   "ROWS_READ": 1958371,
+   "ROWS_KEPT": 1958371,
+   "UNIQUE_TRADE_IDS": 1911735,
+   "DUPLICATE_FILL_KEYS": 0,
+   "BUY_COUNT": 1958339,
+   "SELL_COUNT": 32,
+   "OTHER_SIDE_COUNT": 0,
+   "DISTINCT_CONDITIONS": 62885,
+   "DISTINCT_MARKET_SLUGS": 62885,
+   "DROP_CENSUS": {
+    "PAYOUT_ONE_HOT": 62579,
+    "PAYOUT_NOT_ONE_HOT": 306
+   },
+   "COVERAGE_LIMITATIONS": [
+    "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+    "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+    "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+   ],
+   "AS_OF_UTC": "2026-09-15T22:11:42.857379+00:00",
+   "DAYS_SINCE_LAST_FILL_AT_AS_OF": 0.0
+  },
+  "REPAIR_GATES": "PASS",
+  "LIFETIME_DECOMPOSITION": {
+   "edge_roi": 0.008235,
+   "edge_ci95": [
+    -0.008175,
+    0.024645
+   ],
+   "edge_clusters": 62690,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +0.82% on dollar deployed but the interval [-0.82%, +2.46%] contains zero over 747,086 closed lots",
+   "lot_s": 363040454.49,
+   "lot_p": 2989620.08,
+   "SETTLED_STAKE": 209554291.7,
+   "SETTLED_PNL": -8417042.03,
+   "SETTLED_SHARE_OF_STAKE": 0.5772,
+   "TRADED_STAKE": 153486162.79,
+   "TRADED_PNL": 11406662.11,
+   "MERGE_PNL": 10804769.68,
+   "SELL_PNL": 601892.43,
+   "TRADED_ROI": 0.074317,
+   "SETTLED_ROI": -0.040166
+  }
+ },
+ "_NOT_RETURNED": []
+}

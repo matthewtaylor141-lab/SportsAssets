@@ -1,0 +1,173 @@
+==========================================================================
+SAMPLE SHADOW EVENT -- produced by RUNNING the collector, not hand-written
+==========================================================================
+Fake venue, fake pool, no database, no network, no order path. The
+pre-registered offsets are shortened to 0/100/250 ms so one event completes
+inside a process, and the fake venue's ask walks half a cent per read so the
+curve visibly moves -- that movement is the whole thing the instrument exists
+to capture prospectively.
+
+Read three things in particular:
+
+  * source_ts_provenance / source_ts_clock_domain / source_ts_status travel
+    BESIDE the value. A later reader never has to infer which clock produced
+    it, which is the failure run 82 could not undo.
+  * venue_snapshot_ts and venue_sequence are null. Honestly: no book or BBO
+    response this repository reads carries either. That absence is a run 83I
+    finding, not a gap in the sample.
+  * receipt_monotonic is meaningful only against process_boot_id. Across a
+    restart the monotonic origin moves, and obs/clock.py RAISES rather than
+    subtract across that boundary.
+
+---- rn1_obs_events (one row, immutable) ----
+{
+  "obs_event_id": "88ac1a5f-1353-40f6-8059-7a43f0e5537c",
+  "parent_event_id": null,
+  "supersedes_event_id": null,
+  "collector_version": "rn1-obs/1",
+  "source_event_id": "3f1c8a07d2b4e590c6118fa2e4d77b31aa0c9e5f2d8b4713",
+  "source_fill_id": null,
+  "source_tx_hash": "0x9d2f4c1a88b7e0365d21f9ac4471bb02e6d8153f9a2c47e0b1d6f83a55c9410a",
+  "source_order_id": null,
+  "source_venue": "polymarket",
+  "source_lane": "chain",
+  "source_market_id": "0x776d4c852e871f8d22d387d0ad90d85791ef2decb8ba858c0d3e36f75fd32306",
+  "source_token_id": "36859068193542838101009131517417259578599309085172130829116810062828968856051",
+  "source_outcome_index": null,
+  "source_price": 0.61,
+  "source_size": 4120.0,
+  "source_side": "BUY",
+  "source_ts": "2026-09-12T13:04:17+00:00",
+  "source_ts_provenance": "polygon_block_timestamp",
+  "source_ts_clock_domain": "C1_SOURCE_CHAIN",
+  "source_ts_status": "SUPPLIED",
+  "source_ts_fallback": false,
+  "source_ts_sync_status": null,
+  "receipt_wall": "2026-09-12T13:09:49.342624+00:00",
+  "receipt_monotonic": 3786.751557435,
+  "process_boot_id": "e38fda2b-84dc-4ff0-8d81-503d9ea8fef0",
+  "process_identity": "vm:9899",
+  "ingest_worker": "ingestion.pipeline.ingest_trade_result",
+  "normalize_start_monotonic": null,
+  "normalize_done_monotonic": null,
+  "map_start_monotonic": null,
+  "map_done_monotonic": null,
+  "mapping_provenance": null,
+  "mapping_status": null,
+  "mapping_confidence": null,
+  "dest_venue": null,
+  "dest_market_id": null,
+  "dest_token_repr": null,
+  "cross_venue_mapping_id": null,
+  "decision_start_monotonic": null,
+  "decision_done_monotonic": null,
+  "eligibility_result": null,
+  "rejection_reason": null,
+  "hypothetical_side": null,
+  "hypothetical_qty": null,
+  "hypothetical_limit_price": null,
+  "shadow_executable_qty": null,
+  "shadow_vwap": null,
+  "shadow_depth_exhausted": null,
+  "shadow_queue_state": null,
+  "shadow_notes": null
+}
+
+---- rn1_obs_snapshots (one row per pre-registered offset) ----
+{
+  "obs_event_id": "88ac1a5f-1353-40f6-8059-7a43f0e5537c",
+  "process_boot_id": "e38fda2b-84dc-4ff0-8d81-503d9ea8fef0",
+  "offset_label": "0ms",
+  "offset_target_s": 0.0,
+  "scheduled_for_monotonic": 3786.751557435,
+  "status": "CAPTURED",
+  "miss_reason": null,
+  "request_start_wall": "2026-09-12T13:09:49.343051+00:00",
+  "request_start_monotonic": 3786.751985115,
+  "response_wall": "2026-09-12T13:09:49.343062+00:00",
+  "response_monotonic": 3786.751996975,
+  "actual_offset_s": 0.0004395400001158123,
+  "venue_snapshot_ts": null,
+  "venue_sequence": null,
+  "book_provenance": "clob_book_http",
+  "best_bid": 0.61,
+  "best_ask": 0.62,
+  "depth": "[[0.62, 412.5], [0.63, 1880.0], [0.65, 300.0]]",
+  "depth_levels": 3,
+  "vwap_qa": 0.62,
+  "qa_depth_exhausted": false,
+  "vwap_qb": null,
+  "qb_depth_exhausted": true
+}
+{
+  "obs_event_id": "88ac1a5f-1353-40f6-8059-7a43f0e5537c",
+  "process_boot_id": "e38fda2b-84dc-4ff0-8d81-503d9ea8fef0",
+  "offset_label": "100ms",
+  "offset_target_s": 0.1,
+  "scheduled_for_monotonic": 3786.851557435,
+  "status": "CAPTURED",
+  "miss_reason": null,
+  "request_start_wall": "2026-09-12T13:09:49.443485+00:00",
+  "request_start_monotonic": 3786.852416707,
+  "response_wall": "2026-09-12T13:09:49.443515+00:00",
+  "response_monotonic": 3786.852449753,
+  "actual_offset_s": 0.1008923180002057,
+  "venue_snapshot_ts": null,
+  "venue_sequence": null,
+  "book_provenance": "clob_book_http",
+  "best_bid": 0.61,
+  "best_ask": 0.625,
+  "depth": "[[0.625, 412.5], [0.635, 1880.0], [0.655, 300.0]]",
+  "depth_levels": 3,
+  "vwap_qa": 0.625,
+  "qa_depth_exhausted": false,
+  "vwap_qb": null,
+  "qb_depth_exhausted": true
+}
+{
+  "obs_event_id": "88ac1a5f-1353-40f6-8059-7a43f0e5537c",
+  "process_boot_id": "e38fda2b-84dc-4ff0-8d81-503d9ea8fef0",
+  "offset_label": "250ms",
+  "offset_target_s": 0.25,
+  "scheduled_for_monotonic": 3787.001557435,
+  "status": "CAPTURED",
+  "miss_reason": null,
+  "request_start_wall": "2026-09-12T13:09:49.594105+00:00",
+  "request_start_monotonic": 3787.003035703,
+  "response_wall": "2026-09-12T13:09:49.594139+00:00",
+  "response_monotonic": 3787.003073006,
+  "actual_offset_s": 0.2515155709997998,
+  "venue_snapshot_ts": null,
+  "venue_sequence": null,
+  "book_provenance": "clob_book_http",
+  "best_bid": 0.61,
+  "best_ask": 0.63,
+  "depth": "[[0.63, 412.5], [0.64, 1880.0], [0.66, 300.0]]",
+  "depth_levels": 3,
+  "vwap_qa": 0.63,
+  "qa_depth_exhausted": false,
+  "vwap_qb": null,
+  "qb_depth_exhausted": true
+}
+
+---- rn1_obs_transitions (state moves by appending, never by editing) ----
+{
+  "obs_event_id": "88ac1a5f-1353-40f6-8059-7a43f0e5537c",
+  "seq": 1,
+  "process_boot_id": "e38fda2b-84dc-4ff0-8d81-503d9ea8fef0",
+  "at_wall": "2026-09-12T13:09:49.343004+00:00",
+  "at_monotonic": 3786.751938552,
+  "stage": "RECEIPT",
+  "state": "OBSERVED",
+  "detail": "{\"lane\": \"chain\"}"
+}
+{
+  "obs_event_id": "88ac1a5f-1353-40f6-8059-7a43f0e5537c",
+  "seq": 2,
+  "process_boot_id": "e38fda2b-84dc-4ff0-8d81-503d9ea8fef0",
+  "at_wall": "2026-09-12T13:09:49.594240+00:00",
+  "at_monotonic": 3787.003174792,
+  "stage": "SNAPSHOTS",
+  "state": "COMPLETE",
+  "detail": null
+}
