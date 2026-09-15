@@ -221,8 +221,9 @@ def test_3_pays_1_if_cannot_be_verified_from_title_similarity_alone():
                     sibling_label="Denver Broncos",
                     rules_prose=[],            # titles only, no rules
                     subject="Kansas City Chiefs")
-    assert p["PAYOFF_DIRECTION"] == ABSENT
+    assert p["PAYOFF_STATUS"] == E.NOT_IDENTIFIED_SETTLEMENT_CONDITION
     assert "NO_RULES_PROSE" in p["DIRECTION_BLOCKERS"]
+    assert p["PAYOFF_PROPOSITION"] is None
     assert p["ELIGIBLE_FOR_AUTOMATED_EQUIVALENCE"] is False
 
 
@@ -234,7 +235,8 @@ def test_3b_matching_titles_do_not_create_direction_on_either_venue():
                         rules_prose=[("market.title",
                                       "Kansas City Chiefs vs Denver "
                                       "Broncos")])
-        assert p["PAYOFF_DIRECTION"] == ABSENT, venue
+        assert p["PAYOFF_STATUS"] == \
+            E.NOT_IDENTIFIED_SETTLEMENT_CONDITION, venue
         assert "NO_AFFIRMATIVE_SETTLEMENT_SENTENCE" in p["DIRECTION_BLOCKERS"]
 
 
@@ -243,9 +245,11 @@ def test_3c_a_real_affirmative_sentence_does_earn_direction():
                     side_label="Kansas City Chiefs",
                     sibling_label="Denver Broncos",
                     rules_prose=[("market.rules_primary",
-                                  KALSHI_MARKET["rules_primary"])])
-    assert p["PAYOFF_DIRECTION"] == VERIFIED
+                                  KALSHI_MARKET["rules_primary"])],
+                    event="Denver Broncos at Kansas City Chiefs")
+    assert p["PAYOFF_STATUS"] == E.PAYOFF_VERIFIED
     assert p["DIRECTION_ANCHOR"]
+    assert p["PROOF_COMPONENTS_MISSING"] == []
     assert p["ELIGIBLE_FOR_AUTOMATED_EQUIVALENCE"] is True
 
 
@@ -281,35 +285,120 @@ def test_5_opposite_labels_cannot_accidentally_reverse_orientation():
     denver = E.pays_1_if(venue="PMUS", contract_id="asc-nfl-den-kc",
                          side_label="Denver Broncos",
                          sibling_label="Kansas City Chiefs",
-                         rules_prose=prose)
-    assert denver["PAYOFF_DIRECTION"] == ABSENT
-    assert "SIDE_LABEL_ABSENT_FROM_AFFIRMATIVE_SENTENCE" not in \
-        denver["DIRECTION_BLOCKERS"] or True
-    assert "BOTH_SIDE_LABELS_IN_AFFIRMATIVE_SENTENCE" in \
+                         rules_prose=prose, event="Broncos at Chiefs")
+    assert denver["PAYOFF_STATUS"] == E.NOT_IDENTIFIED_CONTRADICTION
+    assert "SETTLEMENT_SUBJECT_IS_THE_SIBLING_SIDE" in \
         denver["DIRECTION_BLOCKERS"]
     assert denver["ELIGIBLE_FOR_AUTOMATED_EQUIVALENCE"] is False
 
 
-def test_5b_a_moneyline_that_names_both_teams_is_not_directional():
-    """'settle to the winner of A vs B' genuinely does not say which token
-    pays. Only the label would, and labels are not trusted."""
+def test_5b_a_contest_sentence_verifies_through_the_proof_chain():
+    """'settle to the winner of A vs B' states WHAT settles, not which side
+    pays. Both names sit inside the matchup, so the venue's side field
+    supplies orientation and nothing contradicts it -> VERIFIED."""
     p = E.pays_1_if(venue="PMUS", contract_id="aec-boxing",
                     side_label="Canelo Alvarez",
                     sibling_label="Christian Mbilli",
                     rules_prose=[("market.description",
                                   "This market will settle to the winner "
                                   "of the Canelo Alvarez vs. Christian "
-                                  "Mbilli boxing match.")])
-    assert p["PAYOFF_DIRECTION"] == ABSENT
-    assert "BOTH_SIDE_LABELS_IN_AFFIRMATIVE_SENTENCE" in \
-        p["DIRECTION_BLOCKERS"]
+                                  "Mbilli boxing match.")],
+                    event="Canelo Alvarez vs Christian Mbilli")
+    assert p["PAYOFF_STATUS"] == E.PAYOFF_VERIFIED
+    assert p["PAYOFF_PROPOSITION"] == "PAYS $1 IF: Canelo Alvarez"
+
+
+def test_5b2_the_same_sentence_verifies_the_other_side_too():
+    """Symmetry check: the contest rule must not favour whichever side we
+    happened to ask about."""
+    p = E.pays_1_if(venue="PMUS", contract_id="aec-boxing",
+                    side_label="Christian Mbilli",
+                    sibling_label="Canelo Alvarez",
+                    rules_prose=[("market.description",
+                                  "This market will settle to the winner "
+                                  "of the Canelo Alvarez vs. Christian "
+                                  "Mbilli boxing match.")],
+                    event="Canelo Alvarez vs Christian Mbilli")
+    assert p["PAYOFF_STATUS"] == E.PAYOFF_VERIFIED
+    assert p["PAYOFF_PROPOSITION"] == "PAYS $1 IF: Christian Mbilli"
+
+
+def test_5b3_disagreeing_side_binding_fields_are_a_contradiction():
+    """Two authoritative side fields naming different participants: report
+    the contradiction, never elect one."""
+    p = E.pays_1_if(venue="PMUS", contract_id="x",
+                    side_label="Denver Broncos",
+                    sibling_label="Kansas City Chiefs",
+                    rules_prose=[("market.description",
+                                  "Settles to the winner of the Denver "
+                                  "Broncos vs Kansas City Chiefs game.")],
+                    event="DEN at KC",
+                    side_binding_fields=[
+                        ("marketSides[0].team.name", "Denver Broncos"),
+                        ("outcomes[0]", "Kansas City Chiefs")])
+    assert p["PAYOFF_STATUS"] == E.NOT_IDENTIFIED_CONTRADICTION
+    assert any(b.startswith("SIDE_BINDING_FIELDS_DISAGREE")
+               for b in p["DIRECTION_BLOCKERS"])
+
+
+def test_5b4_two_subject_labels_are_ambiguous_not_verified():
+    """Word order finds disagreement, never agreement: 'A outscores B' and
+    'B is outscored by A' are one fact in two orders."""
+    p = E.pays_1_if(venue="PMUS", contract_id="x",
+                    side_label="Kansas City Chiefs",
+                    sibling_label="Denver Broncos",
+                    rules_prose=[("market.description",
+                                  "This market will settle to Yes if "
+                                  "Kansas City Chiefs outscores Denver "
+                                  "Broncos by more than 21.5 points.")],
+                    event="DEN at KC")
+    assert p["PAYOFF_STATUS"] == E.NOT_IDENTIFIED_AMBIGUOUS_SUBJECT
+    assert "BOTH_LABELS_ACT_AS_SUBJECTS" in p["DIRECTION_BLOCKERS"]
+
+
+def test_5b5_a_missing_side_binding_is_named_as_such():
+    p = E.pays_1_if(venue="KALSHI", contract_id="x", side_label=None,
+                    sibling_label="B",
+                    rules_prose=[("market.rules_primary",
+                                  "The market resolves to Yes if A wins.")],
+                    event="A vs B")
+    assert p["PAYOFF_STATUS"] == E.NOT_IDENTIFIED_SIDE_BINDING
+    assert "NO_SIDE_BINDING_FIELD" in p["DIRECTION_BLOCKERS"]
+
+
+def test_5b6_a_verified_payoff_carries_all_five_proof_components():
+    p = E.pays_1_if(venue="KALSHI", contract_id="T",
+                    side_label="Kansas City Chiefs",
+                    sibling_label="Denver Broncos",
+                    rules_prose=[("market.rules_primary",
+                                  KALSHI_MARKET["rules_primary"])],
+                    event=KALSHI_EVENT["title"], subject="Chiefs")
+    assert p["PAYOFF_STATUS"] == E.PAYOFF_VERIFIED
+    got = {c["proposition_component"] for c in p["PAYOFF_PROOF"]
+           if c["status"] in (VERIFIED, QUOTED)}
+    for comp in E.PROOF_COMPONENTS:
+        assert comp in got, comp
+    for entry in p["PAYOFF_PROOF"]:
+        for key in ("source_field", "raw_value", "proposition_component",
+                    "status"):
+            assert key in entry, key
+
+
+def test_5b7_an_absent_underlying_event_blocks_verification():
+    p = E.pays_1_if(venue="KALSHI", contract_id="T",
+                    side_label="Kansas City Chiefs",
+                    sibling_label="Denver Broncos",
+                    rules_prose=[("market.rules_primary",
+                                  KALSHI_MARKET["rules_primary"])],
+                    event=None)
+    assert p["PAYOFF_STATUS"] == E.NOT_IDENTIFIED_EVENT
 
 
 def test_5c_a_label_with_no_rules_never_reaches_the_gate():
     p = E.pays_1_if(venue="KALSHI", contract_id="T", side_label="YES",
-                    sibling_label="NO", rules_prose=[])
+                    sibling_label="NO", rules_prose=[], event="E")
     q = E.pays_1_if(venue="PMUS", contract_id="S", side_label="LONG",
-                    sibling_label="SHORT", rules_prose=[])
+                    sibling_label="SHORT", rules_prose=[], event="E")
     gate = E.equivalence(q, p, {d: ("x", "x") for d in E.MATERIAL_DIMENSIONS})
     assert gate["EQUIVALENCE_STATUS"] == E.EQUIVALENCE_NOT_IDENTIFIED
     assert gate["ELIGIBLE_FOR_ECONOMICS"] is False
@@ -321,14 +410,14 @@ def _good_payoffs():
                     sibling_label="Broncos",
                     rules_prose=[("market.description",
                                   "The market resolves to Yes if the "
-                                  "Chiefs win.")])
+                                  "Chiefs win.")], event="Broncos at Chiefs")
     b = E.pays_1_if(venue="KALSHI", contract_id="k", side_label="Chiefs",
                     sibling_label="Broncos",
                     rules_prose=[("market.rules_primary",
                                   "If the Chiefs win, the market resolves "
-                                  "to Yes.")])
-    assert a["PAYOFF_DIRECTION"] == VERIFIED
-    assert b["PAYOFF_DIRECTION"] == VERIFIED
+                                  "to Yes.")], event="Broncos at Chiefs")
+    assert a["PAYOFF_STATUS"] == E.PAYOFF_VERIFIED
+    assert b["PAYOFF_STATUS"] == E.PAYOFF_VERIFIED
     return a, b
 
 
@@ -654,12 +743,12 @@ def test_every_pays_1_if_component_carries_full_provenance():
                     rules_prose=[("market.rules_primary",
                                   KALSHI_MARKET["rules_primary"])],
                     subject="Kansas City Chiefs", line=None, period="full",
-                    settlement_source="NFL")
-    for comp in p["COMPONENTS"]:
-        for key in ("FIELD", "SOURCE_FIELD", "RAW_VALUE",
-                    "NORMALIZED_VALUE", "STATUS"):
+                    settlement_source="NFL", event=KALSHI_EVENT["title"])
+    for comp in p["PAYOFF_PROOF"]:
+        for key in ("source_field", "raw_value", "proposition_component",
+                    "status"):
             assert key in comp, key
-        assert comp["STATUS"] in (VERIFIED, QUOTED, ABSENT), comp
+        assert comp["proposition_component"] in E.PROOF_COMPONENTS, comp
 
 
 def test_the_status_vocabulary_has_exactly_three_members():

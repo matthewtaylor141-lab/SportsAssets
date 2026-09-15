@@ -22,6 +22,18 @@ One host added to this environment's outbound allowlist.
 Nothing else is requested. Not `trading-api.kalshi.com`, not `kalshi.com`,
 not the production API host, not a credential, not a broader rule.
 
+**One thing the first draft of this request got wrong.** `gateway.polymarket.us`
+is *also* refused from this environment (`connect_rejected`) — the PMUS
+captures to date ran on a CI runner with different egress. Phase X2 needs
+both books captured seconds apart from the *same* place, so a Kalshi grant
+alone would still leave the experiment blocked. Whichever environment is
+opened, it must reach both:
+
+| HOST | PORT | METHODS | AUTH |
+|---|---|---|---|
+| `api.elections.kalshi.com` | 443 | GET | no |
+| `gateway.polymarket.us` | 443 | GET | no (already-approved read-only PMUS research path) |
+
 ## Why no authentication is needed
 
 BettorToken holds an institutional Kalshi account, but it is not required

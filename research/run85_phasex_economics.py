@@ -40,13 +40,66 @@ _s.loader.exec_module(K)
 VERIFIED, QUOTED, ABSENT = K.VERIFIED, K.QUOTED, K.ABSENT
 field, present, sentences = K.field, K.present, K.sentences
 
-# A sentence that says which side the contract PAYS on. Without one, no
-# amount of labelling establishes direction.
+# A sentence that states the settlement condition. Without one, no amount
+# of labelling establishes anything.
 AFFIRMATIVE_MARKERS = (
     "resolves to yes", "resolve to yes", "settles to yes", "settle to yes",
     "settle to the winner", "settles to the winner", "pays out",
     "will settle to $1", "resolves yes", "market will settle to the winner",
+    "win the game", "wins the game", "win the match", "wins the match",
+    "settle according to", "settles according to",
 )
+
+# Connectors that join two participants into a CONTEST rather than making
+# one of them the subject of a clause.
+MATCHUP_CONNECTORS = (" vs. ", " vs ", " v. ", " v ", " versus ", " at ",
+                      " against ")
+
+# PAYOFF_STATUS vocabulary. Every non-VERIFIED value names WHY, because
+# "not identified" without a reason cannot be acted on.
+PAYOFF_VERIFIED = "VERIFIED"
+NOT_IDENTIFIED_SIDE_BINDING = "NOT_IDENTIFIED_SIDE_BINDING"
+NOT_IDENTIFIED_CONTRADICTION = "NOT_IDENTIFIED_CONTRADICTION"
+NOT_IDENTIFIED_SETTLEMENT_CONDITION = "NOT_IDENTIFIED_SETTLEMENT_CONDITION"
+NOT_IDENTIFIED_AMBIGUOUS_SUBJECT = "NOT_IDENTIFIED_AMBIGUOUS_SUBJECT"
+NOT_IDENTIFIED_EVENT = "NOT_IDENTIFIED_EVENT"
+
+PROOF_COMPONENTS = ("UNDERLYING_EVENT", "OUTCOME_PARTICIPANT_BINDING",
+                    "SIDE_TO_PAYOUT_BINDING", "SETTLEMENT_CONDITION",
+                    "MATERIAL_SPECIAL_RULES")
+
+
+def _matchup_spans(text: str, a: str, b: str) -> list[tuple[int, int]]:
+    """Where `a` and `b` sit adjacent across a matchup connector.
+
+    "the winner of the Canelo Alvarez vs. Christian Mbilli boxing match"
+    names a CONTEST. Neither fighter is the subject of that clause, so the
+    sentence states the settlement condition without stating orientation,
+    and the venue's side field is what supplies it.
+    """
+    low, spans = text.lower(), []
+    for x, y in ((a, b), (b, a)):
+        for conn in MATCHUP_CONNECTORS:
+            probe = x.lower() + conn + y.lower()
+            start = low.find(probe)
+            while start != -1:
+                spans.append((start, start + len(probe)))
+                start = low.find(probe, start + 1)
+    return spans
+
+
+def _outside_matchup(text: str, label: str,
+                     spans: list[tuple[int, int]]) -> int | None:
+    """First position where `label` occurs NOT inside a matchup phrase, or
+    None. An occurrence outside a matchup is the label acting as a SUBJECT.
+    """
+    low, needle = text.lower(), label.lower()
+    i = low.find(needle)
+    while i != -1:
+        if not any(s <= i < e for s, e in spans):
+            return i
+        i = low.find(needle, i + 1)
+    return None
 
 
 # ===================================================== PAYS_1_IF =========
@@ -59,48 +112,96 @@ def _component(name: str, source_field: str, raw: Any,
 def pays_1_if(*, venue: str, contract_id: str, side_label: str | None,
               sibling_label: str | None, rules_prose: list[tuple[str, str]],
               subject: Any = None, line: Any = None, period: Any = None,
-              settlement_source: Any = None) -> dict:
-    """The explicit settlement proposition for ONE side of ONE contract.
+              settlement_source: Any = None, event: Any = None,
+              side_binding_fields: list[tuple[str, Any]] | None = None
+              ) -> dict:
+    """The explicit settlement proposition for ONE side of ONE contract,
+    with the proof chain that establishes it.
 
-    `rules_prose` is [(source_field, text)] -- the venue's own rules or
-    description fields, verbatim.
+    THE RULE. A label alone is never a payoff proof. But a label is not
+    worthless either: when several AUTHORITATIVE venue fields agree, the
+    chain can carry what no single field does. So direction comes from:
 
-    DIRECTION IS EARNED, NOT ASSUMED. PAYOFF_DIRECTION becomes VERIFIED
-    only when the venue itself ties this side to the paying outcome: an
-    affirmative settlement sentence exists, and EXACTLY ONE of the two
-    side labels appears in it. If both appear -- which is what a
-    moneyline's "settle to the winner of A vs B" does -- the prose does
-    not say which token pays, and only the label would, so the answer is
-    NOT_IDENTIFIED. If neither appears, likewise.
+        UNDERLYING EVENT
+      + OUTCOME / PARTICIPANT BINDING
+      + SIDE-TO-PAYOUT BINDING          (what the venue says YES/LONG means)
+      + SETTLEMENT CONDITION            (the venue's own settlement prose)
+      + MATERIAL SPECIAL RULES
+      + NO CONTRADICTION among them
+      = VERIFIED
 
-    That is deliberately strict, and it is the rule that would have
-    caught asc-nfl-den-kc-2026-09-14-2h-pos-21pt5, whose `long` side is
-    Denver while its description settles Yes on Kansas City.
+    THE DISTINCTION THAT MAKES THIS SAFE. A settlement sentence can name
+    participants two ways, and they mean opposite things:
+
+      CONTEST   "...settle to the winner of the Canelo Alvarez vs.
+                 Christian Mbilli boxing match."
+                Both names sit inside a matchup phrase. The sentence
+                states WHAT settles, not WHICH side pays, so the side
+                field supplies orientation and nothing contradicts it.
+                -> VERIFIED through the chain.
+
+      SUBJECT   "...settle to Yes if Kansas City Chiefs outscores Denver
+                 Broncos by more than 21.5 points..."
+                A name sits OUTSIDE the matchup, as the subject of the
+                paying clause. Now the prose does speak to orientation --
+                and on the real PMUS row this text belongs to, the venue's
+                own `long` flag sits on DENVER.
+                -> NOT_IDENTIFIED_CONTRADICTION. The contradiction is
+                reported; neither field is elected correct.
+
+    Word order is used only to find DISAGREEMENT, never agreement: when
+    both labels act as subjects and the earliest is this side's, the
+    result is NOT_IDENTIFIED_AMBIGUOUS_SUBJECT, because "A outscores B"
+    and "B is outscored by A" are the same fact in opposite order and
+    position cannot tell them apart.
     """
-    comps: list[dict] = []
+    proof: list[dict] = []
     blockers: list[str] = []
 
-    comps.append(_component("SIDE_LABEL", "venue side label", side_label,
-                            side_label,
-                            VERIFIED if side_label else ABSENT))
-    comps.append(_component("SIBLING_LABEL", "venue sibling side label",
-                            sibling_label, sibling_label,
-                            VERIFIED if sibling_label else ABSENT))
-    for nm, src, val in (("SUBJECT", "venue subject field", subject),
-                         ("LINE", "venue strike/line field", line),
-                         ("PERIOD", "venue period/segment field", period),
-                         ("SETTLEMENT_SOURCE", "venue settlement source",
-                          settlement_source)):
-        comps.append(_component(nm, src, val, val,
-                                VERIFIED if val not in (None, "", [], {})
-                                else ABSENT))
+    def add(src: str, raw: Any, component: str, status: str) -> None:
+        proof.append({"source_field": src, "raw_value": raw,
+                      "proposition_component": component, "status": status})
 
+    # -- 1. UNDERLYING EVENT -------------------------------------------
+    add("venue event field", event, "UNDERLYING_EVENT",
+        VERIFIED if event not in (None, "", [], {}) else ABSENT)
+
+    # -- 2. OUTCOME / PARTICIPANT BINDING ------------------------------
+    add("venue side label", side_label, "OUTCOME_PARTICIPANT_BINDING",
+        VERIFIED if side_label else ABSENT)
+    add("venue sibling side label", sibling_label,
+        "OUTCOME_PARTICIPANT_BINDING",
+        VERIFIED if sibling_label else ABSENT)
+    for nm, val in (("venue subject field", subject),
+                    ("venue strike/line field", line),
+                    ("venue period/segment field", period),
+                    ("venue settlement source", settlement_source)):
+        add(nm, val, "MATERIAL_SPECIAL_RULES",
+            VERIFIED if val not in (None, "", [], {}) else ABSENT)
+
+    # -- 3. SIDE-TO-PAYOUT BINDING -------------------------------------
+    # Authoritative fields whose declared meaning is "this is what the
+    # paying side IS" -- yes_sub_title on Kalshi, the long marketSide on
+    # PMUS. Several of them must agree with each other.
+    bindings = list(side_binding_fields or [])
+    if not bindings and side_label:
+        bindings = [("venue side label", side_label)]
+    for src, val in bindings:
+        add(src, val, "SIDE_TO_PAYOUT_BINDING",
+            VERIFIED if val not in (None, "", [], {}) else ABSENT)
+    named = {str(v).strip().lower() for _s, v in bindings
+             if v not in (None, "", [], {})}
+    if not named:
+        blockers.append("NO_SIDE_BINDING_FIELD")
+    internal_conflict = len(named) > 1
+
+    # -- 4. SETTLEMENT CONDITION ---------------------------------------
+    names = "; ".join(n for n, _ in rules_prose)
     if not rules_prose:
-        blockers.append("NO_RULES_PROSE")
         prop = field(None, ABSENT, "no rules or description field supplied")
         affirm: list[dict] = []
+        blockers.append("NO_RULES_PROSE")
     else:
-        names = "; ".join(n for n, _ in rules_prose)
         prop = field([{"source": n, "text": t} for n, t in rules_prose],
                      QUOTED, names)
         affirm = [{"source": n, "text": s}
@@ -108,40 +209,88 @@ def pays_1_if(*, venue: str, contract_id: str, side_label: str | None,
                   if any(m in s.lower() for m in AFFIRMATIVE_MARKERS)]
         if not affirm:
             blockers.append("NO_AFFIRMATIVE_SETTLEMENT_SENTENCE")
+    for a in affirm:
+        add(a["source"], a["text"], "SETTLEMENT_CONDITION", QUOTED)
 
-    direction = ABSENT
+    # -- 5. MATERIAL SPECIAL RULES -------------------------------------
+    add(names or "none", bool(rules_prose), "MATERIAL_SPECIAL_RULES",
+        VERIFIED if rules_prose else ABSENT)
+
+    # -- resolve orientation against the settlement condition ----------
+    status = ABSENT
     anchor = None
-    if affirm and side_label:
-        joined = " ".join(a["text"].lower() for a in affirm)
-        mine = side_label.lower() in joined
-        theirs = bool(sibling_label) and sibling_label.lower() in joined
-        if mine and not theirs:
-            direction = VERIFIED
-            anchor = [a for a in affirm
-                      if side_label.lower() in a["text"].lower()]
-        elif mine and theirs:
-            blockers.append("BOTH_SIDE_LABELS_IN_AFFIRMATIVE_SENTENCE")
+    if internal_conflict:
+        status = NOT_IDENTIFIED_CONTRADICTION
+        blockers.append("SIDE_BINDING_FIELDS_DISAGREE:%s"
+                        % sorted(named))
+    elif not named:
+        status = NOT_IDENTIFIED_SIDE_BINDING
+    elif not affirm:
+        status = NOT_IDENTIFIED_SETTLEMENT_CONDITION
+    elif event in (None, "", [], {}):
+        status = NOT_IDENTIFIED_EVENT
+        blockers.append("NO_UNDERLYING_EVENT_FIELD")
+    else:
+        bound = next(iter(named))
+        joined = " ".join(a["text"] for a in affirm)
+        spans = (_matchup_spans(joined, side_label or "", sibling_label)
+                 if (side_label and sibling_label) else [])
+        mine = _outside_matchup(joined, bound, spans)
+        theirs = (_outside_matchup(joined, sibling_label, spans)
+                  if sibling_label else None)
+        in_text = bound in joined.lower() or (
+            sibling_label or "").lower() in joined.lower()
+        if mine is None and theirs is None:
+            # A CONTEST: the sentence settles the matchup and says nothing
+            # about orientation, so the side field is uncontradicted.
+            if in_text:
+                status = PAYOFF_VERIFIED
+                anchor = affirm
+            else:
+                status = NOT_IDENTIFIED_SIDE_BINDING
+                blockers.append("SIDE_LABEL_ABSENT_FROM_SETTLEMENT_SENTENCE")
+        elif mine is not None and theirs is None:
+            status = PAYOFF_VERIFIED           # subject IS this side
+            anchor = affirm
+        elif mine is None and theirs is not None:
+            status = NOT_IDENTIFIED_CONTRADICTION
+            blockers.append("SETTLEMENT_SUBJECT_IS_THE_SIBLING_SIDE")
+        elif mine < theirs:
+            status = NOT_IDENTIFIED_AMBIGUOUS_SUBJECT
+            blockers.append("BOTH_LABELS_ACT_AS_SUBJECTS")
         else:
-            blockers.append("SIDE_LABEL_ABSENT_FROM_AFFIRMATIVE_SENTENCE")
-    elif affirm and not side_label:
-        blockers.append("NO_SIDE_LABEL")
+            status = NOT_IDENTIFIED_CONTRADICTION
+            blockers.append("SETTLEMENT_SUBJECT_IS_THE_SIBLING_SIDE")
 
-    comps.append(_component(
-        "PAYOFF_DIRECTION", "affirmative settlement sentence vs side label",
-        anchor, "PAYS_1_IF this side's proposition holds"
-        if direction == VERIFIED else None, direction))
+    add("settlement condition vs side-to-payout binding", anchor,
+        "SIDE_TO_PAYOUT_BINDING",
+        VERIFIED if status == PAYOFF_VERIFIED else status)
+
+    missing = [c for c in PROOF_COMPONENTS
+               if not any(p["proposition_component"] == c
+                          and p["status"] in (VERIFIED, QUOTED)
+                          for p in proof)]
+    if missing and status == PAYOFF_VERIFIED:
+        status = ABSENT
+        blockers.append("PROOF_COMPONENTS_MISSING:%s" % missing)
 
     return {
         "VENUE": venue,
         "CONTRACT_ID": contract_id,
         "SIDE_LABEL": side_label,
-        "PAYOFF_DIRECTION": direction,
+        "PAYOFF_PROPOSITION": ("PAYS $1 IF: %s" % (side_label or "?"))
+                              if status == PAYOFF_VERIFIED else None,
+        "PAYOFF_STATUS": status,
+        "PAYOFF_PROOF": proof,
+        "PROOF_COMPONENTS_MISSING": missing,
+        # kept so the equivalence gate's contract is unchanged
+        "PAYOFF_DIRECTION": VERIFIED if status == PAYOFF_VERIFIED else ABSENT,
         "DIRECTION_ANCHOR": anchor,
         "DIRECTION_BLOCKERS": blockers,
         "PROPOSITION_TEXT": prop,
         "AFFIRMATIVE_SENTENCES": affirm,
-        "COMPONENTS": comps,
-        "ELIGIBLE_FOR_AUTOMATED_EQUIVALENCE": direction == VERIFIED,
+        "COMPONENTS": proof,
+        "ELIGIBLE_FOR_AUTOMATED_EQUIVALENCE": status == PAYOFF_VERIFIED,
     }
 
 

@@ -36,6 +36,11 @@ def _load(name: str, filename: str):
 
 K = _load("px_kalshi", "run85_phasex_kalshi.py")
 E = _load("px_econ", "run85_phasex_economics.py")
+# The PMUS discovery + record builders already proven in Track B-L and
+# Phase X1. Reused rather than rewritten: a second discovery path would be
+# a second thing to be wrong about the venue's pagination.
+BL = _load("px_bl", "run85_trackbl_block.py")
+PX1 = _load("px1", "run85_phasex1_pmus_equivalence.py")
 
 PMUS_RECORDS = HERE / "evidence" / "phasex1" / "PMUS_EQUIVALENCE_RECORDS.json"
 OUTDIR = HERE / "evidence" / "phasex"
@@ -62,8 +67,31 @@ def httpx_transport():
 
 
 # --------------------------------------------------------------- X1 ----
+def pmus_universe(cli_pages: list, samples: list, res: dict) -> list[dict]:
+    """The CURRENT PMUS sports universe, built with Track B-L's own
+    discovery walk and Phase X1's own record builder.
+
+    The 20 sealed PX1-PMUS-1 contracts stay as reference evidence; the
+    opportunity scan must run against what is quotable now, or it measures
+    a board that has closed.
+    """
+    import httpx
+
+    budget = BL.Budget(BL.MAX_VENUE_REQUESTS)
+    pacer = BL.B.AdaptivePacer(base=BL.SPACING_S)
+    with httpx.Client(timeout=30.0) as http:
+        events = BL.discover(http, pacer, budget, cli_pages, samples, res)
+    out = []
+    for ev in events:
+        for m in ev.get("markets") or []:
+            if m.get("status") != "MARKET_STATUS_OPEN":
+                continue
+            out.append(PX1.build_record(ev, m, []))
+    return out
+
+
 def pmus_side(rec: dict) -> dict:
-    """PAYS_1_IF for the PMUS long side of a sealed PX1-PMUS-1 record."""
+    """PAYS_1_IF for the PMUS long side of a PX1-PMUS-1 record."""
     s1 = rec.get("SIDE_1_DEFINITION") or {}
     s2 = rec.get("SIDE_2_DEFINITION") or {}
 
@@ -74,6 +102,18 @@ def pmus_side(rec: dict) -> dict:
             if node.get("value"):
                 return str(node["value"])
         return None
+
+    def bindings(side):
+        """Every authoritative field that declares what the LONG side IS.
+        Several are collected on purpose: when they disagree, the proof
+        chain must see the contradiction rather than one elected winner."""
+        out = []
+        for key, src in (("SIDE_TEAM_NAME", "marketSides[].team.name"),
+                         ("SIDE_DESCRIPTION", "marketSides[].description")):
+            node = side.get(key) or {}
+            if node.get("value"):
+                out.append((src, str(node["value"])))
+        return out
 
     prose = []
     txt = (rec.get("SOURCE_TEXTS") or {}).get("MARKET_DESCRIPTION")
@@ -90,7 +130,9 @@ def pmus_side(rec: dict) -> dict:
         subject=label(s1), line=mt.get("line"),
         period=mt.get("sportsMarketType"),
         settlement_source=(rec.get("LEAGUE_RESOLUTION_SOURCE") or {})
-        .get("value"))
+        .get("value"),
+        event=((rec.get("EVENT") or {}).get("value") or {}).get("title"),
+        side_binding_fields=bindings(s1))
 
 
 def kalshi_side(krec: dict) -> dict:
@@ -108,7 +150,13 @@ def kalshi_side(krec: dict) -> dict:
         subject=(krec.get("YES_SUB_TITLE") or {}).get("value"),
         line=(krec.get("STRIKE") or {}).get("value"),
         period=(krec.get("MARKET_TYPE") or {}).get("value"),
-        settlement_source=(krec.get("SETTLEMENT_SOURCES") or {}).get("value"))
+        settlement_source=(krec.get("SETTLEMENT_SOURCES") or {}).get("value"),
+        event=((krec.get("EVENT_TITLE") or {}).get("value")
+               or (krec.get("EVENT_TICKER") or {}).get("value")),
+        side_binding_fields=[
+            (src, (krec.get(k) or {}).get("value"))
+            for k, src in (("YES_SUB_TITLE", "market.yes_sub_title"),)
+            if (krec.get(k) or {}).get("value")])
 
 
 def dimensions(prec: dict, krec: dict) -> dict:
@@ -166,6 +214,9 @@ def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("--series", nargs="+", required=True)
     ap.add_argument("--out", default=str(OUTDIR))
+    ap.add_argument("--pmus", choices=("live", "sealed"), default="live",
+                    help="live: walk the current PMUS board (the scan); "
+                         "sealed: the 20 PX1-PMUS-1 reference contracts")
     a = ap.parse_args(argv)
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -184,9 +235,38 @@ def main(argv=None) -> int:
         say("PMUS side absent: %s" % PMUS_RECORDS)
         say("GATE = %s" % GATE_E)
         return 2
-    pm = json.loads(PMUS_RECORDS.read_text())
-    say("PMUS_SPORTS_MARKETS = %d (sealed %s)"
-        % (pm["RECORD_COUNT"], pm["RECORD_VERSION"]))
+    sealed = json.loads(PMUS_RECORDS.read_text())
+    if a.pmus == "live":
+        try:
+            pages, dres = [], {}
+            precs = pmus_universe(pages, [], dres)
+            say("PMUS_SPORTS_MARKETS = %d (live board)" % len(precs))
+            # AN UNREACHABLE BOARD IS NOT AN EMPTY BOARD. B-L's discover()
+            # treats a failed page as a terminal boundary, which is right
+            # for a walk that ends and wrong for a walk that never began:
+            # zero markets would otherwise read downstream as "nothing to
+            # arbitrage" when it means "we could not look".
+            first = pages[0] if pages else {}
+            if not precs and first.get("http_status") != 200:
+                raise RuntimeError(
+                    "PMUS discovery returned no page: first page status=%s "
+                    "error=%s" % (first.get("http_status"),
+                                  first.get("error")))
+        except Exception as exc:                           # noqa: BLE001
+            say("PMUS board unreachable: %s: %s"
+                % (type(exc).__name__, exc))
+            say("a stale PMUS leg is not a contemporaneous observation")
+            say("GATE = %s" % GATE_E)
+            res.update({"GATE": GATE_E,
+                        "BLOCKED_BY": ["PMUS_BOARD_UNREACHABLE"]})
+            (out / "phasex_result.json").write_text(
+                json.dumps(res, indent=1, default=str))
+            (out / "phasex_report.txt").write_text("\n".join(lines) + "\n")
+            return 2
+    else:
+        precs = sealed["RECORDS"]
+        say("PMUS_SPORTS_MARKETS = %d (sealed %s, reference only)"
+            % (sealed["RECORD_COUNT"], sealed["RECORD_VERSION"]))
 
     # ---- X1: Kalshi universe + full rules -----------------------------
     try:
@@ -234,7 +314,7 @@ def main(argv=None) -> int:
 
     # ---- X1 continued: match, then gate BEFORE any price is looked at --
     pairs = []
-    for prec in pm["RECORDS"]:
+    for prec in precs:
         pp = pmus_side(prec)
         for krec in krecords:
             kp = kalshi_side(krec)
