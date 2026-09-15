@@ -25,6 +25,14 @@
 # them contact PMUS at the same time. An average-rate budget is not a
 # spacing proof.
 #
+# THE GROUP IS THE *PMUS* GATE, so a run that makes ZERO PMUS requests has
+# nothing to serialize against and takes its own group instead. That is the
+# ONLY case, and it is not a loophole: with pmus=sealed the driver reads the
+# sealed PX1-PMUS-1 records from disk and its PMUS code path is never
+# entered, so the only venue it touches is Kalshi -- which Track A does not
+# contact at all. The step below re-checks this from the run log rather than
+# trusting the input, and fails the job if a PMUS request appears.
+#
 # DISPATCH ONLY. No cron.
 
 name: phasex-crossvenue
@@ -45,7 +53,9 @@ permissions:
   contents: write
 
 concurrency:
-  group: run85-phase2-capture
+  group: >-
+    ${{ (github.event.inputs.pmus == 'sealed')
+        && 'phasex-kalshi-only' || 'run85-phase2-capture' }}
   cancel-in-progress: false
 
 jobs:
@@ -134,6 +144,21 @@ jobs:
             2>&1 | tee research/evidence/phasex/phasex_run_${STAMP}.log
           echo "PHASEX_RC=${PIPESTATUS[0]}" >> "$GITHUB_ENV"
           set -e
+
+      # The concurrency claim above is CHECKED, not assumed. A sealed-PMUS run
+      # that turns out to have contacted PMUS took the wrong lock, so the job
+      # fails and says so rather than quietly having raced Track A.
+      - name: Verify a kalshi-only run really was kalshi-only
+        if: always() && github.event.inputs.pmus == 'sealed'
+        run: |
+          set -euo pipefail
+          log="research/evidence/phasex/phasex_run_${PHASEX_STAMP:-}.log"
+          if [ -f "$log" ] && grep -q "live board" "$log"; then
+            echo "LOCK_VIOLATION: a sealed run walked the live PMUS board"
+            exit 1
+          fi
+          echo "PMUS_REQUESTS_IN_THIS_RUN = NONE (sealed mode) -- "\
+               "phasex-kalshi-only was the correct lock"
 
       # if: always() -- a failed measurement is exactly the one whose receipts
       # matter, and the collector seals before it exits.
