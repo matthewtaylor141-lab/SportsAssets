@@ -1,0 +1,11 @@
+======================================================================
+PHASE X -- CROSS-VENUE (PMUS <-> KALSHI) -- READ ONLY
+======================================================================
+PMUS_SPORTS_MARKETS = 20 (sealed PX1-PMUS-1, reference only)
+KALSHI_SPORTS_MARKETS = 186
+POTENTIAL_MATCHES            = 3720
+EQUIVALENCE_VERIFIED         = 0
+EQUIVALENCE_REJECTED         = 3720
+EQUIVALENCE_NOT_IDENTIFIED   = 0
+no pair reached the equivalence gate; no economics were run
+GATE = D -- EQUIVALENCE BOTTLENECK

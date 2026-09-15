@@ -1,0 +1,310 @@
+{
+ "rows": {
+  "ferrarichampions2026": {
+   "account": "ferrarichampions2026",
+   "merge_pnl": 10804769.68,
+   "merge_sign": "+",
+   "worst_band_basis": 1.0119,
+   "open_weighted_basis": 0.97518,
+   "bands_above_parity": 2,
+   "bands_above_parity_names": [
+    "0.70-0.90",
+    "0.90-1.01"
+   ],
+   "never_completed_share": 0.3169,
+   "by_band": {
+    "0.00-0.10": {
+     "opens": 4969,
+     "completed_within_1h": 1693,
+     "completion_rate_1h": 0.3407,
+     "mean_pair_basis": 0.93844
+    },
+    "0.10-0.30": {
+     "opens": 17076,
+     "completed_within_1h": 10097,
+     "completion_rate_1h": 0.5913,
+     "mean_pair_basis": 0.94612
+    },
+    "0.30-0.50": {
+     "opens": 32419,
+     "completed_within_1h": 20449,
+     "completion_rate_1h": 0.6308,
+     "mean_pair_basis": 0.96508
+    },
+    "0.50-0.70": {
+     "opens": 31248,
+     "completed_within_1h": 19830,
+     "completion_rate_1h": 0.6346,
+     "mean_pair_basis": 0.99152
+    },
+    "0.70-0.90": {
+     "opens": 13473,
+     "completed_within_1h": 8658,
+     "completion_rate_1h": 0.6426,
+     "mean_pair_basis": 1.00547
+    },
+    "0.90-1.01": {
+     "opens": 2370,
+     "completed_within_1h": 1223,
+     "completion_rate_1h": 0.516,
+     "mean_pair_basis": 1.0119
+    }
+   }
+  },
+  "homerunhazard": {
+   "account": "homerunhazard",
+   "merge_pnl": -476348.86,
+   "merge_sign": "-",
+   "worst_band_basis": 1.01024,
+   "open_weighted_basis": 0.9829,
+   "bands_above_parity": 2,
+   "bands_above_parity_names": [
+    "0.70-0.90",
+    "0.90-1.01"
+   ],
+   "never_completed_share": 0.2411,
+   "by_band": {
+    "0.00-0.10": {
+     "opens": 1016,
+     "completed_within_1h": 710,
+     "completion_rate_1h": 0.6988,
+     "mean_pair_basis": 0.96763
+    },
+    "0.10-0.30": {
+     "opens": 5345,
+     "completed_within_1h": 3668,
+     "completion_rate_1h": 0.6862,
+     "mean_pair_basis": 0.96032
+    },
+    "0.30-0.50": {
+     "opens": 20143,
+     "completed_within_1h": 9980,
+     "completion_rate_1h": 0.4955,
+     "mean_pair_basis": 0.9669
+    },
+    "0.50-0.70": {
+     "opens": 20444,
+     "completed_within_1h": 9853,
+     "completion_rate_1h": 0.482,
+     "mean_pair_basis": 0.99591
+    },
+    "0.70-0.90": {
+     "opens": 6738,
+     "completed_within_1h": 4396,
+     "completion_rate_1h": 0.6524,
+     "mean_pair_basis": 1.00588
+    },
+    "0.90-1.01": {
+     "opens": 1376,
+     "completed_within_1h": 1035,
+     "completion_rate_1h": 0.7522,
+     "mean_pair_basis": 1.01024
+    }
+   }
+  },
+  "kch123": {
+   "account": "kch123",
+   "merge_pnl": -673481.63,
+   "merge_sign": "-",
+   "worst_band_basis": 1.17421,
+   "open_weighted_basis": 1.01762,
+   "bands_above_parity": 3,
+   "bands_above_parity_names": [
+    "0.50-0.70",
+    "0.70-0.90",
+    "0.90-1.01"
+   ],
+   "never_completed_share": 0.3985,
+   "by_band": {
+    "0.00-0.10": {
+     "opens": 54,
+     "completed_within_1h": 26,
+     "completion_rate_1h": 0.4815,
+     "mean_pair_basis": 0.95879
+    },
+    "0.10-0.30": {
+     "opens": 256,
+     "completed_within_1h": 157,
+     "completion_rate_1h": 0.6133,
+     "mean_pair_basis": 0.96753
+    },
+    "0.30-0.50": {
+     "opens": 1531,
+     "completed_within_1h": 645,
+     "completion_rate_1h": 0.4213,
+     "mean_pair_basis": 0.99979
+    },
+    "0.50-0.70": {
+     "opens": 1327,
+     "completed_within_1h": 546,
+     "completion_rate_1h": 0.4115,
+     "mean_pair_basis": 1.02017
+    },
+    "0.70-0.90": {
+     "opens": 490,
+     "completed_within_1h": 240,
+     "completion_rate_1h": 0.4898,
+     "mean_pair_basis": 1.07481
+    },
+    "0.90-1.01": {
+     "opens": 76,
+     "completed_within_1h": 10,
+     "completion_rate_1h": 0.1316,
+     "mean_pair_basis": 1.17421
+    }
+   }
+  },
+  "rn1": {
+   "account": "rn1",
+   "merge_pnl": 10364422.79,
+   "merge_sign": "+",
+   "worst_band_basis": 0.99823,
+   "open_weighted_basis": 0.96455,
+   "bands_above_parity": 0,
+   "bands_above_parity_names": [],
+   "never_completed_share": 0.2349,
+   "by_band": {
+    "0.00-0.10": {
+     "opens": 24873,
+     "completed_within_1h": 10345,
+     "completion_rate_1h": 0.4159,
+     "mean_pair_basis": 0.93068
+    },
+    "0.10-0.30": {
+     "opens": 46450,
+     "completed_within_1h": 32069,
+     "completion_rate_1h": 0.6904,
+     "mean_pair_basis": 0.94225
+    },
+    "0.30-0.50": {
+     "opens": 63146,
+     "completed_within_1h": 47001,
+     "completion_rate_1h": 0.7443,
+     "mean_pair_basis": 0.95969
+    },
+    "0.50-0.70": {
+     "opens": 61225,
+     "completed_within_1h": 45922,
+     "completion_rate_1h": 0.7501,
+     "mean_pair_basis": 0.97394
+    },
+    "0.70-0.90": {
+     "opens": 45095,
+     "completed_within_1h": 31142,
+     "completion_rate_1h": 0.6906,
+     "mean_pair_basis": 0.98649
+    },
+    "0.90-1.01": {
+     "opens": 18432,
+     "completed_within_1h": 8271,
+     "completion_rate_1h": 0.4487,
+     "mean_pair_basis": 0.99823
+    }
+   }
+  },
+  "swisstony": {
+   "account": "swisstony",
+   "merge_pnl": 260122.94,
+   "merge_sign": "+",
+   "worst_band_basis": 1.00931,
+   "open_weighted_basis": 0.99008,
+   "bands_above_parity": 1,
+   "bands_above_parity_names": [
+    "0.90-1.01"
+   ],
+   "never_completed_share": 0.2425,
+   "by_band": {
+    "0.00-0.10": {
+     "opens": 19565,
+     "completed_within_1h": 8023,
+     "completion_rate_1h": 0.4101,
+     "mean_pair_basis": 0.97597
+    },
+    "0.10-0.30": {
+     "opens": 60354,
+     "completed_within_1h": 30554,
+     "completion_rate_1h": 0.5062,
+     "mean_pair_basis": 0.97881
+    },
+    "0.30-0.50": {
+     "opens": 87365,
+     "completed_within_1h": 45406,
+     "completion_rate_1h": 0.5197,
+     "mean_pair_basis": 0.98412
+    },
+    "0.50-0.70": {
+     "opens": 87191,
+     "completed_within_1h": 48172,
+     "completion_rate_1h": 0.5525,
+     "mean_pair_basis": 0.99098
+    },
+    "0.70-0.90": {
+     "opens": 68055,
+     "completed_within_1h": 33138,
+     "completion_rate_1h": 0.4869,
+     "mean_pair_basis": 0.99779
+    },
+    "0.90-1.01": {
+     "opens": 45366,
+     "completed_within_1h": 7535,
+     "completion_rate_1h": 0.1661,
+     "mean_pair_basis": 1.00931
+    }
+   }
+  },
+  "w2c33": {
+   "account": "w2c33",
+   "merge_pnl": -7880572.53,
+   "merge_sign": "-",
+   "worst_band_basis": 1.06371,
+   "open_weighted_basis": 0.99708,
+   "bands_above_parity": 3,
+   "bands_above_parity_names": [
+    "0.50-0.70",
+    "0.70-0.90",
+    "0.90-1.01"
+   ],
+   "never_completed_share": 0.6926,
+   "by_band": {
+    "0.00-0.10": {
+     "opens": 405,
+     "completed_within_1h": 51,
+     "completion_rate_1h": 0.1259,
+     "mean_pair_basis": 0.89914
+    },
+    "0.10-0.30": {
+     "opens": 1220,
+     "completed_within_1h": 260,
+     "completion_rate_1h": 0.2131,
+     "mean_pair_basis": 0.92507
+    },
+    "0.30-0.50": {
+     "opens": 3467,
+     "completed_within_1h": 784,
+     "completion_rate_1h": 0.2261,
+     "mean_pair_basis": 0.97367
+    },
+    "0.50-0.70": {
+     "opens": 3129,
+     "completed_within_1h": 684,
+     "completion_rate_1h": 0.2186,
+     "mean_pair_basis": 1.00981
+    },
+    "0.70-0.90": {
+     "opens": 1819,
+     "completed_within_1h": 267,
+     "completion_rate_1h": 0.1468,
+     "mean_pair_basis": 1.06234
+    },
+    "0.90-1.01": {
+     "opens": 753,
+     "completed_within_1h": 41,
+     "completion_rate_1h": 0.0544,
+     "mean_pair_basis": 1.06371
+    }
+   }
+  }
+ },
+ "PAIR_BASIS_DISCRIMINATOR": "NOT_SUPPORTED",
+ "clean_separation_bands_above_parity": false
+}

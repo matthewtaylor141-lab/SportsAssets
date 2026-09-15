@@ -1,0 +1,21 @@
+-- Venue corroboration for S1-won fills (fleet round 2).
+--
+-- When the S1 emitter wins a fill, the venue's poll row later arrives
+-- with the IDENTICAL dedupe key (that equality is certified) and is
+-- absorbed by ON CONFLICT — no source='poll' row ever exists for the
+-- fill. The shadow instrument, correctly blind to s1 rows, then saw
+-- ZERO venue evidence for a perfectly correct emission and booked
+-- orphan GATING: every correct armed emission reset the certification
+-- window and auto-disarmed S1 (~2h after arming), while flooding the
+-- very alarm meant to catch WRONG emissions.
+--
+-- venue_seen_at is the fix's anchor: when the venue's own feed
+-- re-delivers the fill (poll duplicate through ingest, or the hourly
+-- reconciler), the conflict branch stamps the s1 row. The stamp comes
+-- from the VENUE, not from our decode, so it corroborates emissions in
+-- a way a shared decode bug cannot fake. The shadow treats an s1 row
+-- as: exact-key match required (divergence gates), corroboration
+-- required by deadline (s1_uncorroborated gates), and either way never
+-- as sim-policy coverage evidence.
+
+ALTER TABLE trades ADD COLUMN IF NOT EXISTS venue_seen_at timestamptz;

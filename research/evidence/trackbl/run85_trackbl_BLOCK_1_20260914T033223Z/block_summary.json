@@ -1,0 +1,9 @@
+{
+ "discovery_pages": 12,
+ "discovery_events": 1200,
+ "candidates": 0,
+ "block_size": 0,
+ "aborted": "BLOCK_TOO_SMALL",
+ "venue_requests": 12,
+ "throttle_events": []
+}

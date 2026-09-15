@@ -1,0 +1,27 @@
+COMPLETENESS CRITIC — evidence log (read-only probes, 2026-09-03 ~00:50Z, HEAD c2249ce)
+git status --short: M api/track_record.py, M workers/all.py, M 3 tests; ?? workers/mirror_live.py, ?? tests/test_mirror_live_worker.py (neither read). le/app.py/rules/pmus/mirror_shadow NOT modified in the tree.
+migrations: ...046_mirror_shadow.sql, 047_mirror_live.sql (048 free today).
+SDK: /usr/local/lib/python3.11/dist-packages/polymarket_us/websocket/{markets.py,private.py,types.py}
+  markets.py:18-43 SUBSCRIPTION_TYPE_MARKET_DATA (full order book), _LITE, _TRADE; private.py:18-27 SUBSCRIPTION_TYPE_ORDER;
+  types.py:70-119 PositionSnapshot/Update, AccountBalance {balance, buyingPower}; :122-132 _OrderBookLevel{px,qty}, lastTradePx
+  orders.py:52,:116 def modify(order_id, ModifyOrderParams)
+grep backend for MarketsWebSocket|PrivateWebSocket|websocket -> only ingestion/chain.py (Polygon WS). 0 PMUS WS readers.
+grep backend for buyingPower|buying_power|account_balance|def balance -> 0 in pmus.py/live_executor.py/mirror_live_rules.py
+grep backend for tickSize|minimumTradeQty|orderPriceMinTickSize|feeCoefficient|gameStartTime -> 0 readers except pmus.py:657-667 (bestBidQuote/bestAskQuote fallback in slug_bid)
+probe_33686724064.txt:3384 events.list market keys: bestAskQuote, bestBidQuote, feeCoefficient, gameStartTime, minimumTradeQty, orderPriceMinTickSize, status, ep3Status, sportsMarketType (values not printed; step = PMUS CRYPTO CENSUS 22:04:25Z)
+probe: grep "'status': '" / MARKET_STATUS_ -> 0 lines (market trading status never printed)
+grep -i retire|walkover|voided|postponed backend/sportsassets -> only roster.py:204,:252 / copies_record / track_record / app.py desk tickets (no resolution-rule handling); pmus.py 0 hits
+engine.py:334-393 settle pnl=(payout-price)*shares from resolved_prices; :423-424 _settle_pmus_from_venue reads POSITION_RESOLUTION realized; no void/refund branch
+copy_sports.py:89 HALTED_SPORTS=frozenset(); :91-99 SOCCER_PRICE_FLOOR=0.40 "Binds EVERY whale including UNRESTRICTED ones" (owner-approved 2026-08-12); :115 BLOCKED_TYPES={'prop'}; :397-405 soccer_price_floor / soccer_price_unreadable
+mirror_live_rules.py:255 MIRROR_FAMILIES={'moneyline'}; :446-447 cell_gate_<clause> (also on increase, :448 returns after); :463-464 side_band; :465-466 snapshot_stale; :475-476 first_fill_gate
+mirror_live_rules.py:211-217 capped_env MAX_LIVE_BOOKS 5, MAX_BOOKS_PER_DAY 5, MIRROR_DAY_USD 1250, MIRROR_LOSS_STOP_USD 250; :218-223 ops 6/tick, replaces 12/h; :229 TTL 600
+mirror_live_rules.py:11-13 imports MIN_PROOF_CLUSTERS (proof.py:87 = 30), MIN_N_PROMOTE; roster_rules.py:49-51 MIN_N_PROMOTE=30, MIN_CLUSTERS_PROMOTE=20 (D3's 20 games)
+mirror.py:56 RATIO_MAX 1.0; :61 MARKET_NET_CAP_USD 250; :64-66 MIN_MOVE_USD 5 / MIN_MOVE_FRAC 0.02
+mirror_shadow.py:55 LOOKBACK_H=6; :59 MAX_MARKETS_PER_TICK=20; :73 UNMAPPED_TTL_S=900; :155-167 active_conditions newest-first; :640-651 tick_once iterates conds with the cap (no live-book priority)
+probe_33690960366.txt:1673 MIRRORHB markets=20 skipped_markets=400 capped_tick=true; :1658 MIRROR markets=334 mapped=63 fill_rate=0.4907 drift_p90=0.4531 frozen=302
+live_executor.py:97-135 execute_copy: SELL->mirror_exit; copy_probe_enabled False -> return None (before maybe_execute); :151 _COPY_SEM; :3164 LIVE_MAX_REACTION_S default 90; :7527-7534 probe_disabled/halted/no_venue; :7569-7570 "after the staleness gate and inside the semaphore"; :7603-7639 classify_exit -> was_an_exit_pending; :7661-7663 mirror_mode -> _mirror_notify -> mirror_mode stop; :7449-7476 _mirror_notify lazy import, no-op without the worker
+whale_exits.py:473-521 _confirm_gone: /positions?user&market=cid&limit=100&sizeThreshold=0; refuses empty/unfiltered
+pmus.py:208-209 _amount "%.2f"; :585-613 _bbo_quotes bbo/book marketData per slug
+premap.py:2247-2327 events.list board walk (PAGE_LIMIT pages, startTimeMin/Max)
+spec p1_panel_synthesis.md:421 mirror honours copy_allowed, LIVE_SIDE_PRICE_BAND, first-fill gate, edge_gate; :426 caps; :437 capture denominator "restricted to the long-only fraction the mirror was allowed to hold"; :441 P0->P1 gate; :443 P1->P2 gate (>=30 games)
+probe_33686724064.txt:2080-2094 WL rn1 leagues: itf 2453, mlb 2066, atp 1820, epl 1228, lal 800, wta 603, nfl 556, sea 550 (7d) — all sports; :2110-2112 TYP moneyline 68313 total 43578 unknown 19428

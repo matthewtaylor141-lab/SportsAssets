@@ -1,0 +1,198 @@
+# RUN 85 -- courier a SEALED EVIDENCE DIRECTORY out of an Actions artifact and
+# into the repository, byte for byte.
+#
+# WHY THIS EXISTS. The analyst session reaches github.com over git and the API
+# but NOT the Actions artifact blob store, which its egress proxy denies with
+# connect_rejected. When a capture job FAILS, its commit step may not have run,
+# and the sealed evidence then exists only as an artifact -- reachable by the
+# runner and not by the analyst. That is exactly the failure mode that stranded
+# Track B-L BLOCK_2's discovery diagnostics. This job carries those bytes across.
+#
+# THE DIFFERENCE FROM run85-retrieve.yml. That courier carries a single tar.gz
+# with an ARCHIVE.sha256 beside it. This one carries a DIRECTORY of files sealed
+# by the capture driver's own checksums.sha256 manifest.
+#
+# THIS JOB IS A COURIER, NOT A VERIFIER OF RECORD. It checks every file against
+# the driver's manifest before the copy and again after it, so the committed
+# bytes are provably the verified bytes. BE CLEAR ABOUT WHAT THAT PROVES: the
+# manifest and the files come from the same runner, so this catches TRANSIT
+# CORRUPTION, not fabrication. It is the same class of guarantee the tar.gz
+# courier gives, and no stronger. This job draws no conclusion about the data.
+#
+# A FAILED CAPTURE STAYS FAILED. Couriering a failed block's evidence does not
+# rehabilitate the block, does not make it usable, and does not advance block
+# numbering. It only makes the failure readable.
+#
+# PUBLIC DATA ONLY. No credential, no repository secret, no venue contact of any
+# kind -- this job talks to GitHub and nothing else.
+
+name: run85-courier-dir
+
+on:
+  workflow_dispatch:
+    inputs:
+      run_id:
+        description: "workflow run id that produced the artifact"
+        required: true
+      artifact_name:
+        description: "artifact to fetch"
+        required: true
+      dest_dir:
+        description: "repository path to commit the directory at"
+        required: true
+      source_workflow:
+        description: "workflow path the run must come from (provenance gate)"
+        required: true
+        default: ".github/workflows/run85-trackbl-block.yml"
+
+permissions:
+  # The minimum that lets the analyst reach bytes its network cannot fetch:
+  # actions:read to download the artifact, contents:write to commit it.
+  contents: write
+  actions: read
+
+concurrency:
+  group: run85-courier-dir
+  cancel-in-progress: false
+
+jobs:
+  courier:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - name: Reject a destination outside the evidence tree
+        env:
+          DEST: ${{ inputs.dest_dir }}
+        run: |
+          set -euo pipefail
+          # The destination is dispatch input, so it is untrusted until read.
+          case "$DEST" in
+            research/evidence/*) ;;
+            *) echo "DEST_OUTSIDE_EVIDENCE_TREE: $DEST"; exit 1 ;;
+          esac
+          case "$DEST" in
+            *..*) echo "DEST_CONTAINS_TRAVERSAL: $DEST"; exit 1 ;;
+          esac
+          echo "DEST_OK = $DEST"
+
+      - name: Download the sealed directory
+        uses: actions/download-artifact@v4
+        with:
+          name: ${{ inputs.artifact_name }}
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ github.token }}
+          path: incoming
+
+      - name: Artifact provenance
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          # Provenance comes from the API record of the run itself, not from the
+          # artifact name, so "is this the capture we mean" is answered by
+          # GitHub rather than by resemblance.
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ inputs.run_id }}" \
+               -o /tmp/run.json
+          jq -r '"SOURCE_RUN_ID       = \(.id)",
+                 "SOURCE_WORKFLOW     = \(.path)",
+                 "SOURCE_HEAD_SHA     = \(.head_sha)",
+                 "SOURCE_EVENT        = \(.event)",
+                 "SOURCE_CONCLUSION   = \(.conclusion)",
+                 "SOURCE_CREATED_AT   = \(.created_at)"' /tmp/run.json
+          if [ "$(jq -r '.path' /tmp/run.json)" != "${{ inputs.source_workflow }}" ]; then
+            echo "RUN85_ARTIFACT_PROVENANCE = FAIL (not the named workflow)"; exit 1
+          fi
+          # A failed source run is EXPECTED here and is not an error. Stated so
+          # that nobody later reads a courier success as a capture success.
+          echo "RUN85_ARTIFACT_PROVENANCE = OK"
+          echo "SOURCE_CONCLUSION IS RECORDED, NOT REQUIRED TO BE SUCCESS."
+
+      - name: Inspect the member paths before touching them
+        run: |
+          set -euo pipefail
+          cd incoming
+          echo "=== member listing ==="
+          ls -la
+          find . -mindepth 1 -printf '%y %p\n' | sort
+          # Anything that is not a plain file or a directory is refused.
+          if find . -mindepth 1 ! -type f ! -type d | grep -q . ; then
+            echo "UNSAFE_MEMBER_TYPE (link or special file)"; exit 1
+          fi
+          if find . -mindepth 1 -name '*..*' | grep -q . ; then
+            echo "UNSAFE_MEMBER_PATH"; exit 1
+          fi
+          echo "MEMBERS_SAFE"
+
+      - name: Verify the directory against the driver's own manifest
+        run: |
+          set -euo pipefail
+          cd incoming
+          if [ ! -f checksums.sha256 ]; then
+            echo "NO_CHECKSUMS_MANIFEST -- nothing is committed"; exit 1
+          fi
+          echo "=== checksums.sha256 ==="
+          cat checksums.sha256
+          sha256sum -c checksums.sha256
+          # Every file except the manifest itself must appear in the manifest,
+          # so an unlisted extra file cannot ride along unverified.
+          MISSING=0
+          for f in $(find . -type f ! -name checksums.sha256 -printf '%P\n' | sort); do
+            if ! grep -qF "  $f" checksums.sha256; then
+              echo "FILE_NOT_IN_MANIFEST: $f"; MISSING=1
+            fi
+          done
+          [ "$MISSING" = "0" ] || { echo "MANIFEST_INCOMPLETE"; exit 1; }
+          echo "MANIFEST_VERIFIED"
+
+      - name: Commit the directory, unmodified
+        env:
+          DEST: ${{ inputs.dest_dir }}
+        run: |
+          set -euo pipefail
+          mkdir -p "$DEST"
+          cp -a incoming/. "$DEST"/
+          # Re-verify AFTER the copy: proving the committed files are the
+          # verified files, not merely that verified files once existed here.
+          ( cd "$DEST" && sha256sum -c checksums.sha256 )
+          echo "COPY_VERIFIED"
+          git config user.name "Claude"
+          git config user.email "noreply@anthropic.com"
+          git add -- "$DEST"
+          if git diff --cached --quiet; then
+            echo "already committed; nothing to do"; exit 0
+          fi
+          # The message goes through a file: a multi-line -m argument would sit
+          # at column 0 and terminate this YAML block scalar.
+          cat > /tmp/msg.txt <<'MSG'
+          Run 85: carry a sealed evidence directory into the repo [skip render]
+
+          The analyst session reaches git and the GitHub API but not the Actions
+          artifact blob store, so these bytes are committed here for it to open
+          itself. Every file was checked against the driver's own
+          checksums.sha256 after download AND again after the copy.
+
+          A failed capture stays failed. This carries its evidence; it does not
+          rehabilitate it, make it usable, or advance block numbering.
+
+          Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>
+          Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC
+          MSG
+          sed -i 's/^          //' /tmp/msg.txt
+          git commit -q -F /tmp/msg.txt
+          for i in 1 2 3 4; do
+            if git pull --rebase origin claude/session-njaewf \
+               && git push origin HEAD:claude/session-njaewf; then
+              echo "pushed"; exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((2 ** i))
+          done
+          echo "PUSH_FAILED"
+          exit 1

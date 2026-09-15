@@ -1,0 +1,35 @@
+-- us_premap.signed — produced on every row since the sweep was written,
+-- stored nowhere, and required by the matcher.
+--
+-- _market_rows stamps `signed` (signed_line of the side description or
+-- the question) on every row it builds. match_side._lined_ok then
+-- demands that the venue side's sign equal the whale's:
+--
+--     rs = (r.get("signed") or "").strip()
+--     if his_signed or rs:
+--         if not rs or rs != his_signed:
+--             return False
+--
+-- There was no such column, so every row read back from this table
+-- carried rs = "" — and any whale pick that states a sign hit `not rs`
+-- and refused. Every SIGNED SPREAD was structurally unresolvable
+-- through premap, and premap is the only lane permitted to trade while
+-- the mapping quarantine holds, so the class was dead end to end.
+--
+-- The check itself is right and stays: _norm erases +/- , so
+-- 'Chiefs -3.5' and 'Chiefs +3.5' normalize identically and only the
+-- sign separates giving points from getting them. That inversion is the
+-- incident this lane exists to prevent.
+--
+-- What changes is that the guard becomes FUNCTIONAL rather than
+-- blanket. It goes from refusing every signed pick to refusing
+-- MISMATCHED ones. A guard that blocks everything is not a guard, it is
+-- an outage that reports itself as safety — the same shape as the
+-- absolute ask test that made the sleeve sterile within an hour on
+-- 2026-08-25.
+--
+-- Nullable and unbackfilled on purpose: the sweep rewrites every live
+-- row within one full cycle (1800s), and a row that has not been swept
+-- yet reads NULL, which is exactly the pre-existing behaviour. No
+-- window where this can be wrong in a new way.
+ALTER TABLE us_premap ADD COLUMN IF NOT EXISTS signed text;

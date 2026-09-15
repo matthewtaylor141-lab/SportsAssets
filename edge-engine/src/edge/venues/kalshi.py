@@ -1,0 +1,1087 @@
+"""Kalshi adapter — shadow mode (public market-data REST; auth only needed
+for live orders, which shadow mode never places).
+
+Discovery: GET /events?series_ticker=...&with_nested_markets=true — one
+VenueMarket per game event, outcome names from each market's yes side.
+Books: GET /markets/{ticker}/orderbook — resting YES/NO bids in cents; the
+executable YES ask is (100 - best NO bid).
+Fees: taker ≈ 0.07 * p * (1-p) per contract (maker-first is the live-mode
+answer; shadow logs taker economics so the gate is conservative).
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+
+import requests
+
+from .base import BookLevel, FillIntent, MarketBook, VenueAdapter
+from .mapper import VenueMarket
+
+log = logging.getLogger(__name__)
+
+BASE = os.environ.get("EDGE_KALSHI_BASE", "https://api.elections.kalshi.com/trade-api/v2")
+
+# league code -> Kalshi series tickers ("+"-separated: game/spread/total
+# series are distinct on Kalshi), env-overridable:
+#   EDGE_KALSHI_SERIES="nba:KXNBAGAME+KXNBASPREAD,epl:KXEPLGAME"
+_DEFAULT_SERIES = {
+    # Spread/total series added 2026-08-04: the strategy blocks MONEYLINE on
+    # these leagues (category_blocks), so a *GAME-only map made the Kalshi
+    # edge surface zero by construction. Tickers follow the venue's
+    # {series}SPREAD / {series}TOTAL pattern; a wrong one fails loudly as a
+    # named census entry ({series}_http: 404), never silently, and the
+    # untagged_spread / untagged_total identity gates refuse any outcome
+    # that lost its line.
+    "nba": "KXNBAGAME+KXNBASPREAD+KXNBATOTAL",
+    "wnba": "KXWNBAGAME+KXWNBASPREAD+KXWNBATOTAL",
+    "epl": "KXEPLGAME+KXEPLSPREAD+KXEPLTOTAL",
+    "nhl": "KXNHLGAME+KXNHLSPREAD+KXNHLTOTAL",
+    "nfl": "KXNFLGAME+KXNFLSPREAD+KXNFLTOTAL",
+    # MLB added 2026-08-04: in August it is the only deep sport in season
+    # (NBA/NHL are dark, NFL is preseason, EPL starts mid-month). Without
+    # it the Kalshi surface is WNBA-only and cross-venue arbitrage has
+    # almost nothing to scan. MLB stays league-blocked for the EDGE
+    # strategy (measured flat) — but arbitrage is model-free arithmetic
+    # and the blocklist does not apply to it.
+    "mlb": "KXMLBGAME+KXMLBSPREAD+KXMLBTOTAL",
+    # Tennis (census 2026-08-04): KXWTACHALLENGERMATCH verified live with
+    # full player names as outcomes. The MATCH-winner series for the main
+    # tours are listed tentatively — a wrong ticker fails as a named
+    # census entry (…_http: 404), never silently, so tentative is safe.
+    # Set-winner series are deliberately EXCLUDED: a set is a different
+    # proposition than the match, and mapping one to the other is the
+    # wrong-bet class the identity gates exist to prevent.
+    "atp": "KXATPMATCH+KXATPCHALLENGERMATCH+KXCHALLENGERMATCH",
+    "wta": "KXWTAMATCH+KXWTACHALLENGERMATCH+KXWTAGAME",
+    # RESTORED 2026-08-10 night (owner: "copies and guaranteed arbitrage
+    # firing at every possible scenario"). These entries were reverted
+    # for a few hours while a $204 position was attributed; the ledger
+    # attributed it to a copy double-buy through two PM-side identities
+    # — nothing to do with this map — and the venue-side never-add veto,
+    # the $1 underdog clamp, and the per-slug claims now guard every
+    # consumer of wider discovery. itf routes to the challenger tier
+    # (1,213 unmapped itf moneylines/week; the 0.95 both-names identity
+    # gate decides match identity). Soccer tickers are tentative
+    # {league}GAME grammar — a wrong one fails loudly as a named census
+    # entry, never silently; 3-way soccer copies are still refused by
+    # the exactly-2-outcomes join, so soccer widens ARBITRAGE first.
+    # KXITFMATCH/KXITFWMATCH are Kalshi's actual ITF series — the
+    # challenger tickers alone missed a listed match RN1 bet on
+    # 2026-08-15 (KXITFWMATCH-26AUG15KUCJAK, probe census) while the
+    # copy funnel showed 9/9 candidates skipped_unmapped.
+    "itf": "KXATPCHALLENGERMATCH+KXWTACHALLENGERMATCH+KXCHALLENGERMATCH"
+           "+KXITFMATCH+KXITFWMATCH",
+    "lal": "KXLALIGAGAME",
+    "sea": "KXSERIEAGAME",
+    "fl1": "KXLIGUE1GAME",
+    "bun": "KXBUNDESLIGAGAME",
+    "mls": "KXMLSGAME",
+    "ucl": "KXUCLGAME",
+}
+
+
+def _series_map() -> dict[str, list[str]]:
+    raw = os.environ.get("EDGE_KALSHI_SERIES", "")
+    base = {k: v.split("+") for k, v in _DEFAULT_SERIES.items()}
+    if not raw:
+        return base
+    out: dict[str, list[str]] = {}
+    for pair in raw.split(","):
+        if ":" in pair:
+            code, series = pair.split(":", 1)
+            out[code.strip()] = [s.strip() for s in series.split("+") if s.strip()]
+    return out or base
+
+
+class KalshiAdapter(VenueAdapter):
+    name = "kalshi"
+
+    def __init__(self) -> None:
+        self._sess = requests.Session()
+        self.book_errors: dict[str, int] = {}
+        # Quiet books (404 / empty side): market states, never watchdog
+        # inputs. Surfaced in telemetry so thinness stays measurable.
+        self.book_quiet: dict[str, int] = {}
+        self.last_census: dict = {}
+        # Markets whose maker quote expired unfilled: cross for a cool-off
+        # (mirrors PMUS mark_force_taker; see reap_kalshi_makers).
+        self._force_taker: dict[str, float] = {}   # ticker -> cross-until ts
+
+    def _book_err(self, cause: str) -> None:
+        self.book_errors[cause] = self.book_errors.get(cause, 0) + 1
+
+    def discover_markets(self, league_codes: set[str]) -> list[VenueMarket]:
+        out: list[VenueMarket] = []
+        self.last_census = {}
+        for code, series_list in _series_map().items():
+            if code not in league_codes:
+                continue
+            for series in series_list:
+                self._discover_series(out, code, series)
+        return out
+
+    def _census(self, key: str) -> None:
+        self.last_census[key] = self.last_census.get(key, 0) + 1
+
+    def _discover_series(self, out: list[VenueMarket], code: str, series: str) -> None:
+        from edge.fairvalue.lines import (
+            canonical_outcome,
+            parse_outcome_line,
+            tag_segment,
+            title_segment,
+        )
+
+        cursor = ""
+        for _ in range(10):  # bounded paging
+            try:
+                resp = self._sess.get(
+                    f"{BASE}/events",
+                    params={"series_ticker": series, "status": "open",
+                            "with_nested_markets": "true", "limit": 100,
+                            **({"cursor": cursor} if cursor else {})},
+                    timeout=15,
+                )
+                if resp.status_code != 200:
+                    log.info("kalshi discovery %s -> HTTP %s (series unavailable?)",
+                             series, resp.status_code)
+                    # Named in the census so a wrong series ticker is a
+                    # probe-readable fact, not a silent zero.
+                    self.last_census[f"{series}_http"] = resp.status_code
+                    break
+                data = resp.json()
+            except (requests.RequestException, ValueError) as exc:
+                log.warning("kalshi discovery failed for %s: %s", series, exc)
+                break
+            sser = series.upper()
+            for ev in data.get("events") or []:
+                outcomes = {}
+                for m in ev.get("markets") or []:
+                    # No ticker fallback (capture-leak trace 2026-08-17):
+                    # a market with no subtitle used to key its outcome
+                    # by the raw TICKER STRING, which scores ~0.26
+                    # against any real name — every name join on that
+                    # event failed silently as 'unmapped'. A missing
+                    # subtitle is now a named census fact instead of a
+                    # poisoned key. (FSC iterates tokens without name-
+                    # matching, so a booked FSC position on an event
+                    # never proved the copy join could see it.)
+                    raw_name = m.get("yes_sub_title") or m.get("subtitle")
+                    if not raw_name:
+                        self._census("no_subtitle")
+                        continue
+                    if raw_name and m.get("ticker"):
+                        # Canonical form carries the line: "Over 45.5",
+                        # "Eagles -7.5", or a plain team for moneyline.
+                        title = m.get("title") or ev.get("title", "")
+                        key = canonical_outcome(title, raw_name)
+                        parsed = parse_outcome_line(key)
+                        # Identity gate (audit 2026-08-04). A total whose
+                        # subtitle dropped the number matches ANY sharp rung
+                        # downstream — pair matching lets point-less sides
+                        # through and the lowest alternate rung wins, so the
+                        # "edge" is the gap between rungs, not a mispricing.
+                        if parsed.kind == "total" and parsed.point is None:
+                            self._census("bare_total")
+                            continue
+                        # A spread/total-series outcome that parses as a
+                        # plain team name lost its line somewhere — priced
+                        # against the MONEYLINE fair value it is a different
+                        # bet wearing the team's name. Never guess.
+                        if "SPREAD" in sser and parsed.kind != "spread":
+                            self._census("untagged_spread")
+                            continue
+                        if ("TOTAL" in sser or "POINTS" in sser) and \
+                                parsed.kind != "total":
+                            self._census("untagged_total")
+                            continue
+                        # Segment tag: a first-half line must never collide
+                        # with — or be priced against — the full-game line.
+                        key = tag_segment(key, title_segment(title)
+                                          or title_segment(ev.get("title") or ""))
+                        outcomes[key] = m["ticker"]
+                # Census samples: the ACTUAL outcome-name strings this
+                # series produces, so a mapper mismatch is fixed against
+                # real forms instead of guesses (2026-08-04: 41 MLB events
+                # discovered, ~3/35 matched — the strings are the suspect).
+                if outcomes and len(self.last_census.get(
+                        f"{series}_samples", [])) < 3:
+                    self.last_census.setdefault(f"{series}_samples", [])
+                    self.last_census[f"{series}_samples"].append(
+                        {"title": (ev.get("title") or "")[:48],
+                         "outcomes": [k[:36] for k in list(outcomes)[:2]]})
+                if len(outcomes) >= 2:
+                    out.append(VenueMarket(
+                        market_id=ev.get("event_ticker", ""),
+                        title=ev.get("title", ""),
+                        league_code=code,
+                        outcome_tokens=outcomes,
+                    ))
+            self.last_census[f"{series}_events"] = (
+                self.last_census.get(f"{series}_events", 0)
+                + len(data.get("events") or []))
+            cursor = data.get("cursor") or ""
+            if not cursor:
+                break
+
+    def get_book(self, market_id: str, market_ticker: str) -> MarketBook | None:
+        try:
+            resp = self._sess.get(f"{BASE}/markets/{market_ticker}/orderbook", timeout=10)
+        except requests.RequestException as exc:
+            self._book_err(f"exc_{type(exc).__name__}")
+            return None
+        if resp.status_code == 404:
+            # A market with no orderbook yet is a MARKET STATE, not an
+            # input-health failure. Counting these as venue errors tripped
+            # the watchdog the moment coverage widened (2026-08-04: 63
+            # "errors"/cycle of quiet tennis/MLB books froze ALL orders,
+            # both venues). Quiet books are tallied separately.
+            self.book_quiet["http_404"] = self.book_quiet.get("http_404", 0) + 1
+            return None
+        if resp.status_code == 429:
+            # Rate limit: a backoff signal, never a venue error — a burst
+            # of 429s from background pollers once fed the watchdog and
+            # froze ALL orders. Pause this session's book reads briefly.
+            self.book_quiet["http_429"] = self.book_quiet.get("http_429", 0) + 1
+            time.sleep(1.0)
+            return None
+        if resp.status_code != 200:
+            self._book_err(f"http_{resp.status_code}")
+            log.info("kalshi book %s for %s: %s", resp.status_code, market_ticker,
+                     resp.text[:120])
+            return None
+        try:
+            data = resp.json() or {}
+        except ValueError:
+            self._book_err("bad_json")
+            return None
+        # Kalshi migrated the orderbook payload to "orderbook_fp":
+        # dollar-string prices and decimal contract quantities
+        # ({"no_dollars": [["0.0100","28945.00"], ...]}). Our parser read
+        # the legacy "orderbook" key, found nothing, and reported EVERY
+        # book empty — 448 "empty" reads during live WTA sessions while
+        # the raw payloads showed five-figure walls (probe ground truth
+        # 2026-08-04 18:44Z). Both formats are accepted; legacy stays for
+        # compatibility if the venue serves it anywhere.
+        fp = data.get("orderbook_fp") or {}
+        ob = data.get("orderbook") or {}
+
+        def _fp_levels(key: str) -> list[tuple[float, float]]:
+            out = []
+            for pq in fp.get(key) or []:
+                try:
+                    out.append((float(pq[0]), float(pq[1])))
+                except (TypeError, ValueError, IndexError):
+                    continue
+            return out
+
+        if fp:
+            no_lv = _fp_levels("no_dollars")
+            yes_lv = _fp_levels("yes_dollars")
+        else:
+            no_lv = [(p / 100.0, float(q)) for p, q in (ob.get("no") or [])]
+            yes_lv = [(p / 100.0, float(q)) for p, q in (ob.get("yes") or [])]
+        if not no_lv:
+            # An empty NO side is a thin market, not a broken venue. The
+            # runner already rejects bookless outcomes by name (no_book);
+            # the watchdog must not starve on it.
+            self.book_quiet["empty_no_side"] = \
+                self.book_quiet.get("empty_no_side", 0) + 1
+        yes_bids = sorted(
+            (BookLevel(p, q) for p, q in yes_lv),
+            key=lambda level: -level.price,
+        )
+        # Executable YES asks come from resting NO bids at (1 - price).
+        yes_asks = sorted(
+            (BookLevel(round(1.0 - p, 4), q) for p, q in no_lv),
+            key=lambda level: level.price,
+        )
+        return MarketBook(venue=self.name, market_id=market_id, outcome_id=market_ticker,
+                          bids=yes_bids, asks=yes_asks, ts=time.time())
+
+    def taker_fee(self, price: float) -> float:
+        return 0.07 * price * (1.0 - price)
+
+    # ── live orders (maker-first; LIVE_* modes only) ───────────────────
+    # Auth: Kalshi API key id + RSA private key; signature = RSA-PSS-SHA256
+    # over "{timestamp_ms}{METHOD}{path}". Credentials come only from env
+    # (EDGE_KALSHI_KEY_ID, EDGE_KALSHI_PRIVATE_KEY or _PATH) and are never
+    # logged. Absent credentials => RuntimeError, so LIVE_* cannot start.
+
+    def has_credentials(self) -> bool:
+        return bool(os.environ.get("EDGE_KALSHI_KEY_ID")
+                    and (os.environ.get("EDGE_KALSHI_PRIVATE_KEY")
+                         or os.environ.get("EDGE_KALSHI_PRIVATE_KEY_PATH")))
+
+    @staticmethod
+    def _normalize_pem(pem: str) -> str:
+        """Repair the newlines an env-var paste destroys.
+
+        Observed live 2026-08-04: the key pasted into Render's env editor
+        arrived as one line and load_pem_private_key refused it. A PEM's
+        base64 body is newline-wrapped by spec, but every common paste
+        format is mechanically recoverable, so recover instead of asking
+        the operator to guess quoting rules: literal backslash-n escapes
+        become newlines, and a single-line key (newlines collapsed to
+        spaces or nothing) is re-wrapped at 64 columns between its
+        BEGIN/END armor. A properly formatted key passes through as-is.
+        """
+        import re
+
+        pem = pem.strip().strip('"').strip("'")
+        if "\\n" in pem and "\n" not in pem:
+            pem = pem.replace("\\n", "\n")
+        if "\n" not in pem:
+            m = re.match(
+                r"^(-----BEGIN [A-Z0-9 ]+-----)(.*?)(-----END [A-Z0-9 ]+-----)$",
+                pem)
+            if m:
+                head, body, tail = m.groups()
+                body = re.sub(r"\s+", "", body)
+                wrapped = "\n".join(body[i:i + 64]
+                                    for i in range(0, len(body), 64))
+                pem = f"{head}\n{wrapped}\n{tail}\n"
+        return pem
+
+    def _private_key(self):
+        from cryptography.hazmat.primitives.serialization import load_pem_private_key
+
+        pem = os.environ.get("EDGE_KALSHI_PRIVATE_KEY", "")
+        if not pem:
+            path = os.environ.get("EDGE_KALSHI_PRIVATE_KEY_PATH", "")
+            if not path:
+                raise RuntimeError("Kalshi live credentials absent")
+            with open(path, "rb") as f:
+                pem = f.read().decode()
+        return load_pem_private_key(self._normalize_pem(pem).encode(),
+                                    password=None)
+
+    def _auth_headers(self, method: str, path: str) -> dict:
+        import base64
+
+        from cryptography.hazmat.primitives.asymmetric import padding
+        from cryptography.hazmat.primitives.hashes import SHA256
+
+        key_id = os.environ.get("EDGE_KALSHI_KEY_ID", "")
+        if not key_id:
+            raise RuntimeError("Kalshi live credentials absent")
+        ts_ms = str(int(time.time() * 1000))
+        msg = f"{ts_ms}{method.upper()}{path}".encode()
+        sig = self._private_key().sign(
+            msg,
+            padding.PSS(mgf=padding.MGF1(SHA256()), salt_length=padding.PSS.DIGEST_LENGTH),
+            SHA256(),
+        )
+        return {"KALSHI-ACCESS-KEY": key_id,
+                "KALSHI-ACCESS-TIMESTAMP": ts_ms,
+                "KALSHI-ACCESS-SIGNATURE": base64.b64encode(sig).decode()}
+
+    def check_auth(self) -> dict:
+        """check-live probe: balance call proves key validity + funding."""
+        path = "/trade-api/v2/portfolio/balance"
+        resp = self._sess.get(f"{BASE}/portfolio/balance",
+                              headers=self._auth_headers("GET", path), timeout=10)
+        if resp.status_code != 200:
+            return {"ok": False, "error": f"HTTP {resp.status_code}: {resp.text[:150]}"}
+        bal = (resp.json() or {}).get("balance")
+        return {"ok": True, "balance_usd": (bal or 0) / 100.0}
+
+    def plan_entry(self, book) -> tuple[float, bool]:
+        """(entry_price, taker) — maker-first, matching what execution does.
+
+        Without this override the engine priced every Kalshi entry as a
+        fee-paying taker at the ask, then EXECUTED maker (fee-free) one
+        tick under it: the threshold carried a 0.7-1.75c fee that was
+        never paid, suppressing most qualifying Kalshi volume and biasing
+        the cross-venue router toward Polymarket at genuinely worse
+        prices (audit 2026-08-04). Rest one tick under the ask (never
+        below the bid); a one-tick market crosses and pays the real fee —
+        which the runner then correctly charges, because taker=True."""
+        if not book.asks:
+            return 0.0, True
+        ask = round(book.asks[0].price, 2)
+        if self._crossing(book.outcome_id):
+            return ask, True
+        bid = round(book.bids[0].price, 2) if book.bids else 0.0
+        px = round(max(ask - 0.01, bid), 2)
+        if px <= 0 or px >= ask:
+            return ask, True
+        return px, False
+
+    def mark_force_taker(self, market_ticker: str) -> None:
+        """Cross on this market for a while — its queue didn't come to us.
+
+        A reaped unfilled maker (reap_kalshi_makers) proves the queue never
+        reached us; without this the next look requotes maker into the same
+        dead queue forever and the taker fallback stays dead code."""
+        self._force_taker[market_ticker] = time.time() + float(
+            os.environ.get("EDGE_KALSHI_FORCE_TAKER_S", "600"))
+
+    def _crossing(self, market_ticker: str) -> bool:
+        # getattr: tests build adapters via __new__ without __init__.
+        until = getattr(self, "_force_taker", {}).get(market_ticker)
+        if until is None:
+            return False
+        if time.time() >= until:      # cool-off elapsed: try resting again
+            self._force_taker.pop(market_ticker, None)
+            return False
+        return True
+
+    def plan_maker_order(self, limit_price: float, best_ask: float,
+                         edge: float, threshold: float,
+                         market_ticker: str | None = None,
+                         edge_is_fee_net: bool = False) -> tuple[float, bool] | None:
+        """Maker-first pricing (pure; unit-tested):
+        Post at our limit BELOW the ask -> rests as maker, fee-free.
+        Cross the ask ONLY if edge net of the taker fee still clears the
+        threshold — or if the market is marked force-taker, because a maker
+        quote already expired unfilled there. Returns (price, is_taker) or
+        None for no order.
+
+        edge_is_fee_net: the caller already judged the threshold at a taker
+        entry, so the taker fee is inside `edge` (plan_entry returned
+        taker=True and strategy_filter subtracted taker_fee). Deducting it
+        again here charged every forced cross the fee TWICE — threshold plus
+        2x fee (audit 2026-08-05)."""
+        tick = 0.01
+        if market_ticker is None or not self._crossing(market_ticker):
+            maker_px = round(min(limit_price, best_ask - tick), 2)
+            if maker_px >= 0.01 and maker_px < best_ask:
+                return maker_px, False
+        net = edge if edge_is_fee_net else edge - self.taker_fee(best_ask)
+        if net >= threshold:
+            return round(best_ask, 2), True
+        return None
+
+    def place_order(self, market_ticker: str, price: float, count: int,
+                    client_order_id: str, taker: bool,
+                    sell: bool = False, rest_s: int = 900) -> dict:
+        """POST a YES limit via the V2 events-orders endpoint. The legacy
+        /portfolio/orders path now answers HTTP 410 deprecated_v1_order_endpoint
+        (observed live 2026-08-04); V2 is a single YES-denominated book where a
+        buy is side "bid" and a sale of held YES contracts is side "ask" —
+        prices/counts travel as fixed-point strings, the same dialect the
+        orderbook_fp payload speaks. Crossing orders are immediate_or_cancel;
+        resting maker orders carry a 15-minute expiration_time so stale quotes
+        never linger. Sells are only ever sized to contracts we hold (the
+        underdog exit) — never a short."""
+        path = "/trade-api/v2/portfolio/events/orders"
+        body = {
+            "ticker": market_ticker, "client_order_id": client_order_id,
+            "side": "ask" if sell else "bid", "count": f"{int(count)}.00",
+            "price": f"{price:.4f}",
+            "self_trade_prevention_type": "taker_at_cross",
+        }
+        if taker:
+            body["time_in_force"] = "immediate_or_cancel"
+        else:
+            body["time_in_force"] = "good_till_canceled"
+            body["expiration_time"] = int(time.time()) + int(rest_s)
+        try:
+            resp = self._sess.post(
+                f"{BASE}/portfolio/events/orders", json=body,
+                headers=self._auth_headers("POST", path), timeout=10)
+        except requests.RequestException as exc:
+            # An ambiguous network failure must read as NOT filled — the
+            # order may rest at the venue, and sync_kalshi_fills will
+            # reconcile any real fill by trade id.
+            return {"ok": False, "order_id": None, "status": "network_error",
+                    "price": price, "count": count, "taker": taker,
+                    "sell": sell,
+                    "raw": {"error": f"{type(exc).__name__}: {str(exc)[:200]}"}}
+        ok = resp.status_code in (200, 201)
+        try:
+            data = resp.json() or {}
+        except ValueError:
+            data = {}
+        order = data.get("order") or data
+        # FAIL CLOSED on fills: the spec requires fill_count in every
+        # response, so a payload without one is an unknown shape — assuming
+        # "fully filled" there once meant buying the closing leg of an arb
+        # against contracts we never owned. remaining_count is the backup
+        # signal (count - remaining is what actually matched on an IOC).
+        filled = 0
+        for key in ("filled_count", "fill_count", "matched_count"):
+            if order.get(key) is not None:
+                try:
+                    filled = int(float(order[key]))
+                except (TypeError, ValueError):
+                    filled = 0
+                break
+        else:
+            if order.get("remaining_count") is not None:
+                try:
+                    filled = max(0, count - int(float(order["remaining_count"])))
+                except (TypeError, ValueError):
+                    filled = 0
+            elif ok:
+                log.warning("kalshi order %s: response carries no fill field"
+                            " — treating as 0 filled: %s",
+                            order.get("order_id"), str(data)[:200])
+        return {"ok": ok, "order_id": order.get("order_id") or order.get("id"),
+                "status": order.get("status", f"http_{resp.status_code}"),
+                "price": price, "count": filled if ok else count, "taker": taker,
+                "sell": sell,
+                "raw": data if ok else {"error": resp.text[:300]}}
+
+    def portfolio_truth(self) -> dict:
+        """The VENUE's answer to 'is this account actually trading':
+        open positions, resting orders, and today's fills straight from
+        the portfolio API (owner report 2026-08-10 evening: the app
+        showed one $4 position while the day counter read 14 fills —
+        internal counters and account state must be comparable in ONE
+        probe read, not argued about from inference). Every field is
+        best-effort; a fetch error reports itself instead of zeroes so
+        an auth/rate failure never reads as a flat account."""
+        out: dict = {}
+        try:
+            path = "/trade-api/v2/portfolio/positions"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/positions", params={"limit": 200},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                rows = (resp.json() or {}).get("market_positions") or []
+
+                # Field dialect named by the live raw samples 2026-08-10:
+                # position_fp (fixed-point contracts, e.g. '526.00') and
+                # market_exposure_dollars (e.g. '199.880000'). The bare
+                # 'position' key never appears; keep it as a fallback.
+                def _pos(r):
+                    return abs(float(r.get("position_fp")
+                                     or r.get("position") or 0))
+
+                open_rows = [r for r in rows if _pos(r) > 0]
+                out["positions"] = len(open_rows)
+                out["position_contracts"] = round(
+                    sum(_pos(r) for r in open_rows), 2)
+                out["exposure_usd"] = round(sum(
+                    abs(float(r.get("market_exposure_dollars") or 0))
+                    for r in open_rows), 2)
+                # Shape self-diagnosis stays: if the dialect shifts
+                # again, the next probe names it instead of guessing.
+                if rows and not open_rows:
+                    out["positions_raw_sample"] = str(rows[0])[:240]
+            else:
+                out["positions_error"] = f"http_{resp.status_code}"
+        except requests.RequestException as exc:
+            out["positions_error"] = f"{type(exc).__name__}"
+        try:
+            path = "/trade-api/v2/portfolio/fills"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/fills", params={"limit": 100},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                fills = (resp.json() or {}).get("fills") or []
+                day = time.strftime("%Y-%m-%d", time.gmtime())
+                today = [f for f in fills
+                         if str(f.get("created_time") or "")[:10] == day]
+                out["fills_today"] = len(today)
+
+                # count_fp ('263.00') per the live raw samples; bare
+                # 'count' kept as fallback. yes_price_dollars when
+                # present, else yes_price in cents.
+                def _qty(f):
+                    return float(f.get("count_fp") or f.get("count") or 0)
+
+                def _px(f):
+                    if f.get("yes_price_dollars") is not None:
+                        return float(f["yes_price_dollars"])
+                    return float(f.get("yes_price") or 0) / 100.0
+
+                out["fills_today_contracts"] = round(
+                    sum(_qty(f) for f in today), 2)
+                out["fills_today_usd"] = round(
+                    sum(_qty(f) * _px(f) for f in today), 2)
+                if len(fills) >= 100 and len(today) == len(fills):
+                    out["fills_today_truncated"] = True
+                if today and not out["fills_today_contracts"]:
+                    out["fills_raw_sample"] = str(today[0])[:240]
+            else:
+                out["fills_error"] = f"http_{resp.status_code}"
+        except requests.RequestException as exc:
+            out["fills_error"] = f"{type(exc).__name__}"
+        try:
+            path = "/trade-api/v2/portfolio/orders"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/orders",
+                params={"status": "resting", "limit": 100},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                out["resting_orders"] = len(
+                    (resp.json() or {}).get("orders") or [])
+            else:
+                out["orders_error"] = f"http_{resp.status_code}"
+        except requests.RequestException as exc:
+            out["orders_error"] = f"{type(exc).__name__}"
+        return out
+
+    def tennis_settlements_since(self, since_iso: str,
+                                 max_pages: int = 10) -> dict:
+        """Tennis settlements straight from the venue's ledger (owner
+        question 2026-08-14: per-play tennis P&L, venue numbers only).
+        Pages /portfolio/settlements newest-first until a row predates
+        since_iso. Dollar dialect first (revenue_dollars), cents-int
+        fallback — same defensive shape rule as portfolio_truth. pnl
+        per settlement = revenue - (yes_total_cost + no_total_cost)."""
+        out: dict = {"since": since_iso, "rows": [], "settled": 0,
+                     "won": 0, "lost": 0, "realized_total": 0.0,
+                     "cost_total": 0.0}
+
+        def _usd(row: dict, key: str) -> float:
+            if row.get(f"{key}_dollars") is not None:
+                return float(row[f"{key}_dollars"])
+            return float(row.get(key) or 0) / 100.0
+
+        cursor = ""
+        last_rows: list = []
+        try:
+            for _ in range(max_pages):
+                path = "/trade-api/v2/portfolio/settlements"
+                params: dict = {"limit": 200}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = self._sess.get(
+                    f"{BASE}/portfolio/settlements", params=params,
+                    headers=self._auth_headers("GET", path), timeout=15)
+                if resp.status_code != 200:
+                    out["error"] = f"http_{resp.status_code}"
+                    return out
+                body = resp.json() or {}
+                rows = body.get("settlements") or []
+                last_rows = rows or last_rows
+                if not rows:
+                    break
+                stop = False
+                for r in rows:
+                    when = str(r.get("settled_time") or "")
+                    if when and when < since_iso:
+                        stop = True
+                        break
+                    ticker = str(r.get("ticker") or "")
+                    if not ticker.startswith(("KXATP", "KXWTA")):
+                        continue
+                    cost = _usd(r, "yes_total_cost") + _usd(r, "no_total_cost")
+                    revenue = _usd(r, "revenue")
+                    pnl = round(revenue - cost, 2)
+                    out["rows"].append({
+                        "ticker": ticker, "settled_time": when,
+                        "cost": round(cost, 2), "revenue": round(revenue, 2),
+                        "pnl": pnl, "result": r.get("market_result")})
+                    out["settled"] += 1
+                    out["won" if pnl > 0 else "lost"] += 1
+                    out["realized_total"] = round(
+                        out["realized_total"] + pnl, 2)
+                    out["cost_total"] = round(out["cost_total"] + cost, 2)
+                if stop:
+                    break
+                cursor = body.get("cursor") or ""
+                if not cursor:
+                    break
+            if out["settled"] == 0 and not out.get("error") and last_rows:
+                # Shape self-diagnosis: an empty tennis week with rows
+                # present means the dialect or prefix guess is wrong —
+                # name it instead of reporting a silent zero.
+                out["raw_sample"] = str(last_rows[0])[:240]
+        except requests.RequestException as exc:
+            out["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        return out
+
+    def export_since(self, since_iso: str, max_pages: int = 20) -> dict:
+        """EVERY fill and EVERY settlement since a date, compact rows
+        for the cycle funnel (owner order 2026-08-14: every trade on
+        the account, perfect). Fill rows: 'time|ticker|side|action|
+        count|price'. Settlement rows: 'time|ticker|result|cost|
+        revenue'. Verbatim venue fields, dollar dialect first."""
+        def _usd(row: dict, key: str) -> float:
+            if row.get(f"{key}_dollars") is not None:
+                return float(row[f"{key}_dollars"])
+            return float(row.get(key) or 0) / 100.0
+
+        out: dict = {"since": since_iso, "fills": [], "settlements": [],
+                     "fills_truncated": False, "settle_truncated": False}
+        try:
+            cursor = ""
+            for page in range(max_pages):
+                path = "/trade-api/v2/portfolio/fills"
+                params: dict = {"limit": 200}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = self._sess.get(
+                    f"{BASE}/portfolio/fills", params=params,
+                    headers=self._auth_headers("GET", path), timeout=15)
+                if resp.status_code != 200:
+                    out["fills_error"] = f"http_{resp.status_code}"
+                    break
+                body = resp.json() or {}
+                rows = body.get("fills") or []
+                stop = False
+                for f in rows:
+                    when = str(f.get("created_time") or "")
+                    if when and when < since_iso:
+                        stop = True
+                        break
+                    qty = float(f.get("count_fp") or f.get("count") or 0)
+                    if f.get("yes_price_dollars") is not None:
+                        px = float(f["yes_price_dollars"])
+                    else:
+                        px = float(f.get("yes_price") or 0) / 100.0
+                    out["fills"].append(
+                        f"{when[:19]}|{f.get('ticker')}|{f.get('side')}|"
+                        f"{f.get('action')}|{qty:g}|{px}")
+                if stop:
+                    break
+                cursor = body.get("cursor") or ""
+                if not cursor or not rows:
+                    break
+            else:
+                out["fills_truncated"] = True
+            cursor = ""
+            for page in range(max_pages):
+                path = "/trade-api/v2/portfolio/settlements"
+                params = {"limit": 200}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = self._sess.get(
+                    f"{BASE}/portfolio/settlements", params=params,
+                    headers=self._auth_headers("GET", path), timeout=15)
+                if resp.status_code != 200:
+                    out["settle_error"] = f"http_{resp.status_code}"
+                    break
+                body = resp.json() or {}
+                rows = body.get("settlements") or []
+                stop = False
+                for r in rows:
+                    when = str(r.get("settled_time") or "")
+                    if when and when < since_iso:
+                        stop = True
+                        break
+                    cost = (_usd(r, "yes_total_cost")
+                            + _usd(r, "no_total_cost"))
+                    out["settlements"].append(
+                        f"{when[:19]}|{r.get('ticker')}|"
+                        f"{r.get('market_result')}|{round(cost, 2)}|"
+                        f"{round(_usd(r, 'revenue'), 2)}")
+                if stop:
+                    break
+                cursor = body.get("cursor") or ""
+                if not cursor or not rows:
+                    break
+            else:
+                out["settle_truncated"] = True
+        except requests.RequestException as exc:
+            out["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        return out
+
+    # Raw-fidelity export keys — everything needed to reconstruct P&L
+    # without interpretation. Kept explicit so a schema change on the
+    # venue side surfaces as missing keys, not silent drift.
+    _RAW_FILL_KEYS = (
+        "trade_id", "order_id", "ticker", "side", "action", "count",
+        "count_fp", "yes_price", "no_price", "yes_price_dollars",
+        "no_price_dollars", "is_taker", "fee", "fee_dollars",
+        "created_time")
+    _RAW_SETTLE_KEYS = (
+        "ticker", "market_result", "yes_count", "no_count",
+        "yes_count_fp", "no_count_fp", "yes_total_cost", "no_total_cost",
+        "yes_total_cost_dollars", "no_total_cost_dollars", "revenue",
+        "revenue_dollars", "settled_time")
+
+    def export_raw_since(self, since_iso: str, max_pages: int = 30) -> dict:
+        """Verbatim venue rows for fills and settlements since a date.
+
+        Exists because the compact export proved lossy in two ways the
+        2026-08-17 weekly report paid for: (1) rows truncated to
+        second-resolution strings collapse identical sliced fills, and
+        (2) 'cost' = yes_total_cost + no_total_cost does NOT equal our
+        cash for maker/mixed-side positions (for winners it came back
+        equal to revenue minus our actual outlay). This export keeps
+        trade_id (dedupe truth), both price sides, fee fields, and every
+        settlement cost component so the report can rebuild cash truth
+        with no guessing."""
+        out: dict = {"since": since_iso, "fills": [], "settlements": [],
+                     "fills_truncated": False, "settle_truncated": False}
+        try:
+            for name, path_tail, rows_key, keys, time_key in (
+                    ("fills", "fills", "fills",
+                     self._RAW_FILL_KEYS, "created_time"),
+                    ("settlements", "settlements", "settlements",
+                     self._RAW_SETTLE_KEYS, "settled_time")):
+                cursor = ""
+                for _page in range(max_pages):
+                    path = f"/trade-api/v2/portfolio/{path_tail}"
+                    params: dict = {"limit": 200}
+                    if cursor:
+                        params["cursor"] = cursor
+                    resp = self._sess.get(
+                        f"{BASE}/portfolio/{path_tail}", params=params,
+                        headers=self._auth_headers("GET", path), timeout=15)
+                    if resp.status_code != 200:
+                        out[f"{name}_error"] = f"http_{resp.status_code}"
+                        break
+                    body = resp.json() or {}
+                    rows = body.get(rows_key) or []
+                    stop = False
+                    for r in rows:
+                        when = str(r.get(time_key) or "")
+                        if when and when < since_iso:
+                            stop = True
+                            break
+                        out[name].append(
+                            {k: r[k] for k in keys if r.get(k) is not None})
+                    if stop:
+                        break
+                    cursor = body.get("cursor") or ""
+                    if not cursor or not rows:
+                        break
+                else:
+                    out["fills_truncated" if name == "fills"
+                        else "settle_truncated"] = True
+        except requests.RequestException as exc:
+            out["error"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        return out
+
+    def open_ticker_map(self) -> dict | None:
+        """Venue-side never-add source: tickers the VENUE says we hold or
+        have resting BUY orders on, straight from the portfolio API.
+
+        Exists because the local ledger's memory does not survive a
+        deploy (2026-08-11: three same-day deploys wiped the claims and
+        the never-add veto each time while the venue kept the positions
+        and 15-minute rests alive — the same dog was re-copied every
+        boot, stacking one ticker to $606 against a $100 clip). Returns
+        None on ANY fetch failure — callers must fail CLOSED and refuse
+        buys, never fall back to the amnesiac local view."""
+        try:
+            path = "/trade-api/v2/portfolio/positions"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/positions", params={"limit": 200},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code != 200:
+                return None
+            positions = set()
+            position_costs: dict[str, float] = {}
+            position_qty: dict[str, int] = {}
+            for r in (resp.json() or {}).get("market_positions") or []:
+                qty = abs(float(r.get("position_fp")
+                                or r.get("position") or 0))
+                t = str(r.get("ticker") or "")
+                if t and qty > 0:
+                    positions.add(t)
+                    # Contract count, venue-stated — the desk sell relay
+                    # clamps every cash-out to this number so a manual
+                    # ticket can never sell more than the account holds.
+                    position_qty[t] = int(qty)
+                    # Venue-stated cost of the position, dollar dialect
+                    # first (FSC runaway 2026-08-20: the sleeve's internal
+                    # spent counter read $199.88 while the venue held
+                    # $435 — sizing MUST be judged against the venue's
+                    # own number). Field name varies by payload version;
+                    # a ticker with no recognizable cost field is simply
+                    # absent from the map and callers treat it as
+                    # unknown, never as zero.
+                    cost = None
+                    for k in ("market_exposure_dollars",
+                              "total_traded_dollars"):
+                        if r.get(k) is not None:
+                            cost = float(r[k])
+                            break
+                    if cost is None:
+                        for k in ("market_exposure", "total_traded"):
+                            if r.get(k) is not None:
+                                cost = float(r[k]) / 100.0
+                                break
+                    if cost is not None:
+                        position_costs[t] = round(cost, 2)
+            path = "/trade-api/v2/portfolio/orders"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/orders",
+                params={"status": "resting", "limit": 100},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code != 200:
+                return None
+            resting_buys: dict[str, list[str]] = {}
+            for o in (resp.json() or {}).get("orders") or []:
+                if str(o.get("action") or "").lower() != "buy":
+                    continue          # sells are exits — never cancel/veto
+                t = str(o.get("ticker") or "")
+                oid = str(o.get("order_id") or o.get("id") or "")
+                if t and oid:
+                    resting_buys.setdefault(t, []).append(oid)
+            return {"positions": positions, "resting_buys": resting_buys,
+                    "position_costs": position_costs,
+                    "position_qty": position_qty}
+        except requests.RequestException:
+            return None
+
+    def account_snapshot(self, max_marks: int = 40) -> dict:
+        """Desk accounts export (platform /api/desk/accounts): balance plus
+        per-ticker holdings with a live mark, in one venue-truth object —
+        funnel["kalshi_account"] per the 2026-08-22 desk contract.
+
+        FAIL CLOSED, telemetry-grade: any venue error leaves nulls in
+        place of numbers and this method NEVER raises — the desk page
+        must show "unknown", not a zeroed account, and the runner's
+        heartbeat must never die for a balance read. Marks come from
+        get_book for HELD tickers only, capped at max_marks so a wide
+        book cannot turn one snapshot into hundreds of REST calls; a
+        ticker whose book read fails carries mark_bid null and its
+        value_usd stays null (unknown, never zero)."""
+        out: dict = {"balance_usd": None, "at": time.time(), "resting": 0,
+                     "exposure_usd": None, "positions": []}
+        try:
+            auth = self.check_auth()
+            if auth.get("ok") and auth.get("balance_usd") is not None:
+                out["balance_usd"] = round(float(auth["balance_usd"]), 2)
+        except Exception:  # noqa: BLE001 — fail closed, null balance
+            pass
+        try:
+            path = "/trade-api/v2/portfolio/positions"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/positions", params={"limit": 200},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                exposure = 0.0
+                for r in (resp.json() or {}).get("market_positions") or []:
+                    qty = abs(float(r.get("position_fp")
+                                    or r.get("position") or 0))
+                    t = str(r.get("ticker") or "")
+                    if not t or qty <= 0:
+                        continue
+                    # Same cost-field dialect ladder as open_ticker_map:
+                    # dollars first, cents fallback, unknown stays null.
+                    cost = None
+                    for k in ("market_exposure_dollars",
+                              "total_traded_dollars"):
+                        if r.get(k) is not None:
+                            cost = float(r[k])
+                            break
+                    if cost is None:
+                        for k in ("market_exposure", "total_traded"):
+                            if r.get(k) is not None:
+                                cost = float(r[k]) / 100.0
+                                break
+                    if cost is not None:
+                        exposure += cost
+                        cost = round(cost, 2)
+                    out["positions"].append(
+                        {"ticker": t, "qty": int(qty), "cost_usd": cost,
+                         "mark_bid": None, "value_usd": None})
+                out["exposure_usd"] = round(exposure, 2)
+            for row in out["positions"][:int(max_marks)]:
+                try:
+                    book = self.get_book("", row["ticker"])
+                except Exception:  # noqa: BLE001 — a bad book is a null mark
+                    book = None
+                if book is not None and book.bids:
+                    row["mark_bid"] = round(float(book.bids[0].price), 2)
+                    row["value_usd"] = round(
+                        row["qty"] * row["mark_bid"], 2)
+        except Exception:  # noqa: BLE001 — fail closed, null positions
+            pass
+        try:
+            path = "/trade-api/v2/portfolio/orders"
+            resp = self._sess.get(
+                f"{BASE}/portfolio/orders",
+                params={"status": "resting", "limit": 100},
+                headers=self._auth_headers("GET", path), timeout=10)
+            if resp.status_code == 200:
+                out["resting"] = len((resp.json() or {}).get("orders") or [])
+        except Exception:  # noqa: BLE001 — fail closed, zero resting
+            pass
+        return out
+
+    def cancel_order(self, order_id: str) -> str:
+        """DELETE a resting order. Returns 'cancelled' (confirmed dead,
+        safe to repost), 'gone' (404 — already filled or expired: do NOT
+        repost until the fill sync has spoken, a fill plus a repost is a
+        doubled copy), or 'error' (ambiguous — treat the order as
+        possibly still live and never repost on top of it)."""
+        path = f"/trade-api/v2/portfolio/orders/{order_id}"
+        try:
+            resp = self._sess.delete(
+                f"{BASE}/portfolio/orders/{order_id}",
+                headers=self._auth_headers("DELETE", path), timeout=10)
+        except requests.RequestException as exc:
+            log.warning("kalshi cancel %s failed: %s", order_id, exc)
+            return "error"
+        if resp.status_code in (200, 204):
+            return "cancelled"
+        if resp.status_code == 404:
+            return "gone"
+        return "error"
+
+    async def subscribe_books(self, market_ids: list[str]):
+        raise NotImplementedError("v1 uses REST polling")
+
+    async def place(self, intent: FillIntent):
+        raise RuntimeError("use place_order via the mode-gated executor path")
+
+    async def settlements(self):
+        raise NotImplementedError("grader pulls settlements in batch; see shadow/grader.py")
+
+    # Batch settlement lookup used by the settle sweep and the grader.
+    def fetch_results(self, tickers: list[str]) -> dict[str, float]:
+        """market ticker -> payout (1.0 yes / 0.0 no) for resolved markets.
+
+        Instrumented like the PMUS adapter (audit 2026-08-05): the probe
+        read settle_stats {"kalshi": null} for DAYS because this method
+        kept no counters — whether it even ran, what the venue answered,
+        and why nothing settled were all unanswerable from telemetry.
+        Two staleness causes fixed here:
+        - only status == "settled" priced. Kalshi holds a finished market
+          at determined/finalized (result already known) before financial
+          settlement completes, so realized P&L lagged the game by however
+          long the venue took to pay out. The result field is authoritative
+          the moment it is yes/no; price on it. Voids stay unsettled — a
+          void pays cost back, not $1/$0, and guessing either is wrong.
+        - non-200 answers were silently skipped: a rate-limited sweep read
+          exactly like "no results". Now every page is counted, errors keep
+          their first cause, and pages are paced 0.3s apart so deep books
+          cannot trip the limiter in the first place.
+        last_market_status (ticker -> venue status) is kept for every market
+        checked, so the kalshi_open card can flag finished-but-unresolved
+        rows instead of presenting a dead game as LIVE.
+        """
+        out: dict[str, float] = {}
+        stats = {"checked": len(tickers), "priced": 0, "no_price": 0,
+                 "errors": 0, "pages": 0, "by_status": {}}
+        first_err = None
+        statuses: dict[str, str] = {}
+        for i in range(0, len(tickers), 100):
+            chunk = tickers[i : i + 100]
+            if i:
+                # Gentle on the venue: full-speed paging is how the PMUS
+                # sweep tripped Cloudflare and lost the rest of the pass.
+                time.sleep(0.3)
+            try:
+                resp = self._sess.get(f"{BASE}/markets",
+                                      params={"tickers": ",".join(chunk)}, timeout=15)
+                if resp.status_code != 200:
+                    stats["errors"] += 1
+                    if first_err is None:
+                        first_err = f"HTTP {resp.status_code}: {resp.text[:120]}"
+                    continue
+                stats["pages"] += 1
+                for m in resp.json().get("markets") or []:
+                    status = str(m.get("status") or "?")
+                    stats["by_status"][status] = \
+                        stats["by_status"].get(status, 0) + 1
+                    if m.get("ticker"):
+                        statuses[m["ticker"]] = status
+                    if status in ("determined", "finalized", "settled") and \
+                            m.get("result") in ("yes", "no"):
+                        out[m["ticker"]] = 1.0 if m["result"] == "yes" else 0.0
+            except (requests.RequestException, ValueError) as exc:
+                stats["errors"] += 1
+                if first_err is None:
+                    first_err = f"{type(exc).__name__}: {str(exc)[:120]}"
+                log.warning("kalshi settlement fetch failed: %s", exc)
+        stats["priced"] = len(out)
+        stats["no_price"] = stats["checked"] - len(out)
+        stats["first_error"] = first_err
+        self.last_settle_stats = stats
+        self.last_market_status = statuses
+        log.info("kalshi fetch_results: %s", stats)
+        return out

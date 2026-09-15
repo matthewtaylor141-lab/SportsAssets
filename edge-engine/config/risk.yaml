@@ -1,0 +1,372 @@
+# Operating mode — strictly ordered: PAPER -> LIVE_BETA -> LIVE.
+# LIVE_BETA is unlockable ONLY by a human editing this line AND a clean
+# `edge check-live`; the runner refuses live orders otherwise and runs PAPER.
+# LIVE additionally requires the shadow gate below (grader output, no shortcuts).
+# Owner-authorized LIVE_BETA (2026-07-24). The runner still refuses live
+# orders until `edge check-live` passes; until then it runs PAPER and
+# re-checks every 30 min, auto-arming when clean (transition logged).
+# HALTED 2026-08-02 16:21, RE-ARMED 2026-08-02 17:4x in the same commit as
+# the fix, so there is no deploy in which this is live and the cap is not
+# holding.
+#
+# What was wrong: reap_pmus_makers() cleared a resting order's context
+# before the venue's activity feed reported its fill, which both stranded
+# the fill permanently (only parked markets are searched for trades) and
+# handed the one-per-market claim back. The next cycle bought the same
+# market again, against a cap computed from a ledger that did not know we
+# already owned it. It reached $30.21 against a $1.50 cap — 20x — across 20
+# markets and $271 of exposure.
+#
+# What holds it now (commit 1861cc4): the reaper fails closed — it releases
+# a claim only on a venue-CONFIRMED cancel or after a grace window with no
+# fill; reconcile_positions() runs every cycle rather than once per process;
+# and both fill paths share a fill_uid so one venue trade cannot be counted
+# twice. Reproduced by
+# test_a_fill_landing_after_the_reap_still_blocks_a_second_entry.
+#
+# HALTED AGAIN 2026-08-02 18:4x — the watch condition fired. Over-cap
+# exposure grew $271 -> $316 across the re-arm window, INCLUDING a stretch
+# in PAPER when the engine placed nothing. Root cause this time: orphaned
+# resting GTC maker orders. Their contexts lived in the ledger state
+# table, the deployed service's ledger does not survive deploys, so four
+# deploys today orphaned every resting order — still live at the venue,
+# filling on their own as game prices crossed them (sub-$1 partial fills
+# prove it: approve()'s $1 floor cannot place a 3c order). The reaper only
+# cancels what it has contexts for, and the maintenance block only ran in
+# live modes, so the PAPER halt left them standing.
+#
+# Fixed in this commit: cancel_orphan_orders() sweeps every untracked
+# venue order, every cycle, in EVERY mode; account maintenance no longer
+# gates on is_live; maker-first is HARD off in code (the service env may
+# still carry EDGE_PMUS_MAKER_FIRST=1, and a code default cannot beat a
+# set env var).
+#
+# Restore LIVE_BETA when: (1) a diagnostic probe shows orphans_cancelled
+# > 0 followed by open orders == 0 and STATIC over-cap cohort across two
+# probes an hour apart, and (2) the operator confirms EDGE_LEDGER_DB
+# points at a mounted persistent disk on the deployed service — every
+# control in this engine assumes the ledger survives a deploy, and today
+# proved the deployed one does not.
+#
+# RE-ARMED 2026-08-02 19:5x. Evidence:
+# (1) Over-cap cohort byte-identical across probes at 19:16Z and 19:50Z
+#     (23 positions, $320.22, every line item unchanged — including the
+#     three markets that had been creeping), through 34 minutes of engine
+#     cycles in the Sunday MLB window. During the incident, growth showed
+#     within minutes; the sweep is holding. Shorter than the hour the note
+#     above asked for — accepted deliberately because the sweep also runs
+#     every cycle in every mode, so a regression re-halts within one cycle,
+#     and the incident-fast growth signature gives 34 quiet minutes real
+#     statistical weight.
+# (2) The disk check is now MEASURED rather than operator-confirmed: the
+#     ledger's measurement history (drift n=449, free samples n=21,970)
+#     survived 4+ deploys today intact. A wiped disk cannot carry 21,970
+#     rows across a deploy. Operator should still eyeball the Render disk
+#     mount when convenient, but the evidence is already stronger than a
+#     dashboard checkbox.
+# This deploy also ships the per-fill net-margin gate (2df08fb): no entry
+# unless (edge - paid_over_mid)/price >= 2%, judged on the live book at
+# decision time. First live cycles are watched by a scheduled probe.
+#
+# HALTED AGAIN 2026-08-02 20:1x — the stasis above was FALSIFIED by the
+# very next probe: over-cap cohort $320.22 -> $324.92 between 19:50Z and
+# 20:06Z, both growths on the one in-play tennis match of the evening
+# (Uchijima/Bucsa: tsc $8.00 -> $10.45, aec $7.28 -> $9.53). The earlier
+# quiet window was the match not trading, not the sweep working. The
+# per-id sweep only cancels what /orders/open returns, and those orders
+# were not in it. Fixed in this commit: the sweep leads with the venue's
+# account-wide CANCEL-ALL endpoint (no listing required to be complete),
+# and per-id cancel failures are now counted instead of reported as
+# cancellations.
+#
+# RE-ARMED 2026-08-02 20:2x — OWNER DIRECTIVE. Matt declined the manual
+# UI cancel ("let them ride") and ordered live firing at the $1.00-$1.50
+# ladder. Existing positions ride to settlement either way (buy-only,
+# no exit logic); the operative control against further orphan fills is
+# now the venue-side CANCEL-ALL the sweep fires every cycle, which needs
+# no listing to be complete. The scheduled probes verify two things on
+# the first live cycles: every NEW position <= $1.50, and the over-cap
+# OPEN cohort static while its markets trade in-play. Renewed growth
+# after the cancel-all deploy means the endpoint cannot reach those
+# orders either -> halt again and escalate to the operator.
+#
+# HALTED 2026-08-02 21:4x — UNAUTHORIZED ACTIVITY. $72 of new over-cap
+# positions appeared 20:33Z->21:21Z in markets this engine cannot trade
+# (ATP is league-blocked; tennis moneylines are category-quarantined;
+# sizes 5-12x the per-market cap), and the owner has confirmed IN
+# WRITING that none of them are his. Something holding this account's
+# API credentials is trading it. Leading hypothesis: a zombie deploy —
+# an old worker instance still running pre-fix code with
+# EDGE_PMUS_MAKER_FIRST=1 from its era's env, placing resting orders
+# with the old reaper's repeat-entry bug (the fill pattern — paired
+# tennis ML+total, future-dated MLB within the 72h feed window, gradual
+# cost creep — is this engine's own maker-era footprint, not a human's
+# and not a rational attacker's). Key rotation kills it either way.
+#
+# ACTOR IDENTIFIED 2026-08-02 21:5x — it was OUR OWN PLATFORM. The
+# whale-tracking pipeline's live copy-trader (backend live_executor,
+# armed by LIVE_TRADING_ENABLED + the PMUS credentials present on the
+# platform services per render.yaml) has been placing real FOK copies
+# of source-whale trades on the SAME account this engine trades:
+# per-fill cap $25/daily $250, which matches every "unauthorized"
+# fill — ATP pairs, future-dated MLB, tennis ML+total, and
+# retroactively the sub-$1 3c fills from the original incident. There
+# were never unreachable resting orders; there was a second trader.
+# KILLED IN CODE this commit: live_executor.maybe_execute is hard-off
+# (LIVE_COPY_TRADING_BUILT_OUT = False; env cannot re-enable it).
+#
+# Restore LIVE_BETA after: (1) this commit is deployed on the platform
+# workers, and (2) a probe shows ZERO new over-cap positions through a
+# live trading window (whale copies arrived roughly hourly, so one
+# quiet hour of slate is signal). Operator hygiene, recommended not
+# blocking: unset LIVE_TRADING_ENABLED on the platform services and
+# remove PMUS credentials from services that only need to READ
+# (track record needs portfolio reads on the api service; the workers
+# service needs no venue credentials at all now).
+#
+# RE-ARMED 2026-08-02 22:2x. Final root cause of the day's unauthorized
+# fills: the ARBITRAGE path's fake partitions (see the arbitrage block
+# below) — killed in config, fixed in code (family pooling), pinned by
+# a regression test at cec9769. Evidence for re-arm: over-cap cohort
+# byte-static across the 22:04Z and 22:16Z probes ($403.50, 29
+# positions, no new rows) through a live Sunday-evening slate, with the
+# fixed build deployed. The engine's own live entries tonight were all
+# <= $1.50 with the net-margin gate refusing in real time.
+mode: LIVE_BETA
+
+# Size discipline — MEASURED caps (LIVE mode). Source: capacity_sizebuckets.csv
+# (ROI negative > $50K/fill).
+per_fill_usd_default: 5000
+per_fill_usd_max: 10000
+per_market_exposure_usd: 25000
+per_day_deployment_usd: 250000
+working_capital_usd: 0   # set only after shadow gate passes
+shadow_gate: {min_days: 60, min_fills_per_venue: 5000, min_net_roi: 0.015}
+
+# Beta risk profile — MICRO tier (owner request 2026-07-24): smallest
+# executable size while the venue sells whole contracts (1-2 contracts
+# ~= $1 at our 40-55c entry windows; $0.10/trade is physically impossible).
+# Used by BOTH LIVE_BETA and PAPER so paper evidence reflects live behavior.
+profiles:
+  live_beta:
+    # Stake by how far the edge clears its bar, in discrete rungs (see
+    # RiskManager.size_for_edge). A flat ticket pays the same for a 2c edge
+    # as a 6c one; the ladder puts more money on the better-priced bets
+    # only, and nothing at all on the marginal ones.
+    #
+    # `at` is a MULTIPLE of the band threshold, not a cent figure — the bar
+    # already varies by band, by category and by measured drift, so a fixed
+    # cent trigger would mean something different in every market.
+    # OWNER DIRECTIVE 2026-08-08: software-generated (edge-engine
+    # strategy) trades are $10.00 per trade on BOTH venues (was $1.00
+    # since 2026-08-05). Copy-sleeve trades (backend live_executor /
+    # kalshi_copies) are a separate class with their own per-whale
+    # sizing. Both rungs sit at the $10 ticket; every cap/room mechanism
+    # (market/event/day/venue room, breaker, pacing) is unchanged in
+    # STRUCTURE — the correlated caps below scale with the ticket so the
+    # same ticket-count discipline holds at the new size.
+    # OWNER DIRECTIVE 2026-08-10 (strategy class re-armed after the
+    # 08-06 pause; EDGE_STRATEGY_LIVE=1 set by the owner): $25 tickets.
+    # Every correlated cap below scales with the ticket per the standing
+    # rule so the same ticket-count discipline holds at the new size.
+    size_ladder:
+      - {at: 1.0, usd: 25.00}   # clears the bar: the $25 ticket
+      - {at: 2.0, usd: 25.00}   # twice the bar: same $25
+    per_fill_usd_default: 25
+    per_fill_usd_max: 25
+    per_market_exposure_usd: 75       # one ticket per bet; never add
+    # Sides of one game are not independent bets — exactly one of them pays.
+    # A three-way soccer match is three markets and a full ladder is twenty,
+    # so a per-market cap alone permits that much correlated exposure on a
+    # single result. $250 a game is the concentration ceiling (ten $25
+    # tickets at the 2026-08-10 sizing; the dollar cap is what holds).
+    per_event_exposure_usd: 250
+    # Day budget tracks the ACCOUNT, not a number typed here. A fixed daily
+    # cap is a trade-count cap wearing a disguise: at $1 a fill, "$25/day"
+    # means "25 trades a day" no matter how many edges exist. 1.0 = deploy up
+    # to the full buying power each day; positions release cash as they
+    # settle, so the real ceiling is settlement speed, not this line.
+    per_day_deployment_usd: 1250      # floor, used before the balance is
+                                      # read (same 50-ticket parity as the
+                                      # $1-era floor of 50)
+    per_day_deployment_pct_of_bankroll: 1.0
+    # One position per BET, not per game. A single game lists a moneyline
+    # plus a ladder of spreads and totals — 20-40 separately priced bets.
+    # Claiming the whole event took one and abandoned the rest.
+    one_position_per_event: false
+    one_position_per_market: true     # ever; no adds after first fill
+    daily_loss_halt_usd: 375          # floor (scaled with the $25 ticket:
+                                      # same ~15-ticket sensitivity as before)
+    daily_loss_halt_pct_of_day: 0.15  # governs at high volume
+    daily_loss_halt_sigmas: 4         # governs at low volume (4 sigma of the
+                                      # day's own noise; a false halt costs 72h)
+    halt_hours: 72                    # then auto-resume; NO manual override
+    # Two live venues since 2026-08-04 (owner connected the Kalshi
+    # corporate account). 0.6 each: either venue may use up to 60% of the
+    # day budget, so PMUS (the bigger opportunity set) is not starved by a
+    # hard 50/50 while neither venue can spend the whole day alone.
+    venue_bankroll_split: 0.6
+
+  # PAPER sampling profile: paper dollars are free — evidence velocity is
+  # the point. Wide day budget so every qualifying opportunity is graded;
+  # per-fill kept at the measured sweet spot; one-per-event still applies
+  # PER VENUE (independent samples + venue comparison).
+  paper:
+    per_fill_usd_default: 10
+    per_fill_usd_max: 10
+    per_market_exposure_usd: 10
+    per_day_deployment_usd: 500000
+    one_position_per_event: false
+    one_position_per_market: true   # per venue in PAPER (independent samples)
+    daily_loss_halt_usd: 1000000   # breaker is a live-money protection
+    halt_hours: 72
+    venue_bankroll_split: 1.0
+
+# ── exploration tier: small edges, at scale, on a leash ────────────────
+#
+# The band thresholds are not a profit target — they are a NOISE FLOOR. Our
+# fair value is a de-vigged median of a handful of sharp books; that estimate
+# carries error, so a 0.5c "edge" is mostly estimation noise. Noise has zero
+# mean, and adverse selection (we only get filled when someone wants to sell)
+# makes trading it slightly negative. That is why a lower bar is not free
+# volume — it is a bet that the sub-threshold zone is real.
+#
+# So we measure instead of assuming. Edges between explore_min_edge and the
+# band threshold DO trade, tagged 'exploration', capped at a share of the
+# day's budget and graded separately by the nightly report. If they settle
+# positive the threshold drops everywhere and volume multiplies; if they
+# don't, the loss is bounded by the cap and we learn it in days.
+#
+# min_consensus_books is the safety that makes small edges meaningful: a 1c
+# edge agreed by 6 sharp books is a signal, the same 1c from a single book
+# is a rounding error. Smaller edge => deeper agreement required.
+exploration:
+  enabled: true
+  min_edge: 0.008          # below this is inside de-vig error at any depth
+  min_consensus_books: 3   # small edges need agreement, not a lone quote
+  budget_share: 0.25       # never more than a quarter of the day's deployment
+  max_fills_per_day: 250
+
+# Reference-class books required behind a fair value before it may be traded.
+#
+# Measured 2026-07-31 against the live feed: MLB player props carry Pinnacle
+# across 440 outcomes a game. Liga MX props carry 191 outcomes and not one
+# sharp book. NHL is lowvig alone on 5 of 31 events. Same provider, same
+# plan, same request — the anchor is a per-league fact, not a global one.
+#
+# Without an anchor the "sharp consensus" is a median of books that are
+# themselves following someone else with a lag, and the biggest apparent
+# edges come from the thinnest consensus. That is the winner's curse with a
+# supply chain. 0 disables the gate; 1 is the evidence-backed default.
+min_anchor_books: 1
+
+# ── arbitrage (dutch book) ─────────────────────────────────────────────
+#
+# ARMED. Buys a complete outcome set priced under $1: exactly one leg
+# resolves true and pays $1, so the profit is arithmetic rather than a view.
+#
+# The guarantee holds only when EVERY leg is owned — three legs of four is
+# a naked directional position, not an arbitrage. execution/arbitrage.py is
+# built around that: thinnest leg first, abort the sequence on any failure,
+# and if legs are already held when one fails, complete at market up to a
+# bounded slip rather than hold a partial set.
+#
+# Sizing is deliberately tiny. The venue's fill-or-kill mechanics have NOT
+# been verified against the live API — the SDK documents them, nobody has
+# watched them behave. At one set per book the cost of that assumption being
+# wrong is cents, and we learn the real semantics immediately.
+#
+# max_books_per_cycle bounds the blast radius of a systematic detector
+# error: if a mapping bug makes every event look arbitrageable, we place
+# three, not three hundred.
+arbitrage:
+  # DISABLED 2026-08-02 22:0x — THIS was the "unauthorized" trader. The
+  # leg collector pooled every priced outcome of an EVENT (moneyline
+  # sides, totals, anything with a book) and the detector only checked
+  # len(legs) == the event's outcome count — so a cheap ML + a cheap
+  # total on the same tennis match read as a "riskless partition" and
+  # both got bought. Legs were collected before the league/category
+  # filters (blocked ATP qualified), the path bypassed approve() (no
+  # one-per-market claim -> re-bought every qualifying cycle -> the
+  # $0.50-0.99/cycle creep to $14-18), and partial books placed REAL
+  # venue orders that were never ledger-recorded (why the positions had
+  # no provenance). The collector is now same-market-only in code.
+  #
+  # RE-ENABLED 2026-08-03 (owner instruction: "ensure any available 100%
+  # arbitrage is traded"). What changed since the incident: legs pool by
+  # (market, family) so a ML+total pair can never read as a partition
+  # (regression test pins it), props are excluded, each proposition is
+  # claimed once in the ledger (no re-buy creep), and every filled leg is
+  # ledger-recorded with its order tagged. Sizing stays tiny (1 set,
+  # 3 books/cycle) until the live FOK semantics have been observed on
+  # real fills; a true set bought under $1 is arithmetic profit at
+  # settlement.
+  enabled: true
+  max_sets: 1                 # floor: contracts per leg, per opportunity
+  # TOTAL fee-loaded cost across ALL legs of one opportunity ($25 per
+  # side — owner directive 2026-08-08, on the relock-hardened path:
+  # every pair ends locked, relocked at bounded cents, or flat). Sizing
+  # divides max_usd by the COMBINED cost of one set, so a deeper book is
+  # taken only up to $50 of total pair cost; displayed depth still
+  # bounds sets, so thin books never force size.
+  max_usd: 50.0               # dollar cap per opportunity; depth-bounded
+  max_books_per_cycle: 3
+  # Cross-venue (owner instruction 2026-08-04: "exploit any guaranteed
+  # profitable arbitrage between the venues"). Team A on one venue, Team B
+  # on the other, fee-loaded asks under $1. The arithmetic guarantee rests
+  # on both venues settling the SAME game result, so only no-tie two-way
+  # leagues are eligible — the allowlist IS the safety. NFL is excluded
+  # (ties exist), soccer is excluded structurally (three-way). Kalshi's
+  # taker fee is charged inside the cost, so a "profit" here is net.
+  # min_profit is 2c (vs 1c same-venue): the extra cent pays for the
+  # cross-venue execution gap risk.
+  cross_venue:
+    # RE-ENABLED 2026-08-08 (owner directive: "guaranteed needs to be
+    # guaranteed, then fill the most you can") with the hardened
+    # execution path after the 1-9 diagnosis: the closer escalates to a
+    # price ceiling filling only the remainder; if it still misses, the
+    # position RELOCKS on the first leg's own venue (complete set,
+    # bounded cost) instead of holding naked to settlement; a true
+    # exposure (relock impossible too) freezes all arb fires for 6h.
+    # Leg order is scarce-book-first.
+    enabled: true
+    min_profit: 0.02
+    # TOTAL pair cost, BOTH legs together — i.e. $5 per side (owner
+    # directive 2026-08-05). max_sets = max_usd / fee-loaded cost_per_set
+    # where cost_per_set is the combined two-leg cost, so the $10 bounds
+    # the whole locked pair, never $10 per leg.
+    max_usd: 50.0             # $25 per side (owner directive 2026-08-08,
+                              # relock-hardened path), both legs together
+    max_books_per_cycle: 2
+    # Tennis added 2026-08-08 with the relock hardening: two-outcome
+    # matches, both venues list them (KXATP/KXWTA + Challengers), and
+    # the in-season surface is where "fill the most you can" lives.
+    # nfl REMOVED 2026-08-09: regular-season NFL games can end tied —
+    # a dutched two-team pair is not guaranteed there. (The F5-leak fix
+    # in polymarket_us.py is the companion change: segment markets can
+    # tie too and were entering the pool wearing bare team codes.)
+    leagues: [nba, wnba, nhl, mlb, atp, wta]
+    # Day budget scaled with the $50 pair (owner 2026-08-08): 20 max-size
+    # pairs a day, same pair-count capacity as the $10 era. Absolute
+    # worst corner (every pair relocked at ~3c/set) is low tens of
+    # dollars — and the 6h exposure freeze halts systemic failure long
+    # before a budget does.
+    watch_day_usd: 1000.0
+
+# Entry-price bands quarantined from LIVE money on OUR OWN settled
+# evidence (they keep paper-logging — study never stops). First entry
+# 2026-08-04: 10-15c measured -55% ROI on 113 settled live fills (-$78 of
+# the cohort's -$78.. total) while the neighbouring 5-10c band ran +24%
+# on 54. The reference calibration never flagged it because its mechanism
+# fills differently there; ours now has enough of its own dead bodies to
+# name the zone. Remove an entry only when a fresh settled cohort (n>=50)
+# reads net positive in paper.
+band_quarantine:
+  - [0.10, 0.15]
+
+# Watchdog: any breach halts live trading until inputs are healthy again.
+watchdog:
+  max_feed_age_s: 60
+  max_clock_skew_s: 5
+  max_venue_errors_per_cycle: 25
+  min_tradeable_rate: 0.5

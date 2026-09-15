@@ -1,0 +1,890 @@
+/* ═══ Desk v6 (owner order 2026-08-22): accounts command center +
+   cash-out surfaces. Additive layer over theme.css — dark app-side
+   pieces (Accounts page, gate) use the theme tokens; everything that
+   renders INSIDE the light .vdesk skins reuses the vdesk vars. ═══ */
+
+/* ── Desk gate (shared by Accounts + Trade Desk) ─────────────────── */
+.dk-gate { max-width: 420px; }
+.dk-gate-row { display: flex; gap: 8px; margin-top: 10px; }
+.dk-gate-row .input { flex: 1; }
+.dk-gate-err { color: var(--critical); font-size: 13px; margin: 8px 0 0; }
+
+/* ── Accounts: combined header strip ─────────────────────────────── */
+.ac-head { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 12px; margin: 12px 0 16px; }
+.ac-tile {
+  background: var(--surface); border: 1px solid var(--border);
+  border-radius: var(--radius); padding: 14px 16px;
+}
+.ac-tile-l { font-size: 11px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; color: var(--muted); }
+.ac-tile-v { font-size: 24px; font-weight: 800; margin-top: 4px; font-variant-numeric: tabular-nums; }
+.ac-tile-v.pos { color: var(--good); }
+.ac-tile-v.neg { color: var(--critical); }
+.ac-asof { color: var(--muted); font-size: 12px; margin: -6px 0 12px; }
+
+/* ── Accounts: venue cards ───────────────────────────────────────── */
+.ac-venues { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 14px; align-items: start; }
+.ac-card { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); padding: 16px; min-width: 0; }
+.ac-vhead { display: flex; align-items: center; gap: 10px; margin-bottom: 10px; }
+.ac-vname { font-size: 16px; font-weight: 800; }
+.ac-vdot { width: 9px; height: 9px; border-radius: 50%; flex: none; }
+.ac-vdot.pm { background: #2d5cf6; }
+.ac-vdot.k { background: #0ab97f; }
+.ac-vtag { margin-left: auto; font-size: 11px; font-weight: 700; color: var(--muted); }
+.ac-vtag.off { color: var(--warning); }
+.ac-stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(130px, 1fr)); gap: 4px 16px; margin-bottom: 12px; }
+.ac-stat { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; font-size: 13px; padding: 3px 0; border-bottom: 1px solid var(--border); }
+.ac-stat span { color: var(--muted); }
+.ac-stat b { font-variant-numeric: tabular-nums; }
+.ac-stat b.pos { color: var(--good); }
+.ac-stat b.neg { color: var(--critical); }
+.ac-degraded {
+  border: 1px solid rgba(250, 178, 25, 0.4); background: rgba(250, 178, 25, 0.08);
+  color: var(--warning); border-radius: 8px; padding: 8px 11px; font-size: 12.5px; margin-bottom: 10px;
+}
+
+/* Tabs inside a venue card */
+.ac-tabs { display: flex; gap: 4px; margin-bottom: 8px; }
+.ac-tabs button {
+  border: 1px solid var(--border); background: transparent; color: var(--muted);
+  border-radius: 999px; padding: 4px 12px; font-size: 12px; font-weight: 700; cursor: pointer;
+}
+.ac-tabs button.on { background: var(--surface-3); color: var(--ink); }
+
+/* Div-grid tables that collapse to row-cards on phones */
+.ac-table { min-width: 0; }
+.ac-thead, .ac-row { display: grid; gap: 8px; align-items: center; }
+.ac-thead {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted); padding: 4px 0; border-bottom: 1px solid var(--border-strong);
+}
+.ac-row { padding: 7px 0; border-bottom: 1px solid var(--border); font-size: 13px; }
+.ac-row:last-child { border-bottom: none; }
+.ac-cell { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.ac-cell.num { text-align: right; font-variant-numeric: tabular-nums; }
+.ac-cell.pos { color: var(--good); }
+.ac-cell.neg { color: var(--critical); }
+.ac-cols-pm, .ac-thead.ac-cols-pm { grid-template-columns: minmax(0, 2.2fr) 0.9fr 0.7fr 0.9fr 0.9fr 0.9fr 84px; }
+.ac-cols-k, .ac-thead.ac-cols-k { grid-template-columns: minmax(0, 1.8fr) 0.7fr 0.9fr 0.8fr 0.9fr 0.9fr 84px; }
+.ac-cols-tr, .ac-thead.ac-cols-tr { grid-template-columns: 0.9fr minmax(0, 2fr) 1fr 0.7fr 0.7fr; }
+.ac-sub { display: block; font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; }
+.ac-empty { color: var(--muted); font-size: 13px; padding: 10px 0; }
+.ac-cashout {
+  border: 1px solid var(--border-strong); background: transparent; color: var(--ink);
+  border-radius: 8px; padding: 7px 10px; font-size: 11.5px; font-weight: 800; cursor: pointer;
+  letter-spacing: 0.03em; white-space: nowrap; min-height: 34px;
+}
+.ac-cashout:hover { border-color: var(--critical); color: var(--critical); }
+
+@media (max-width: 980px) {
+  .ac-venues { grid-template-columns: 1fr; }
+}
+@media (max-width: 720px) {
+  .ac-head { grid-template-columns: 1fr; gap: 8px; }
+  .ac-thead { display: none; }
+  .ac-row, .ac-row.ac-cols-pm, .ac-row.ac-cols-k, .ac-row.ac-cols-tr {
+    grid-template-columns: 1fr 1fr; gap: 4px 12px;
+    border: 1px solid var(--border); border-radius: 10px; padding: 10px 12px; margin-bottom: 8px;
+  }
+  .ac-cell { white-space: normal; }
+  .ac-cell.num { text-align: left; }
+  .ac-cell[data-l]::before {
+    content: attr(data-l); display: block; font-size: 10px; font-weight: 700;
+    letter-spacing: 0.06em; text-transform: uppercase; color: var(--muted);
+  }
+  .ac-cell.ac-main { grid-column: 1 / -1; font-weight: 700; }
+  .ac-cell.ac-act { grid-column: 1 / -1; }
+  .ac-cashout { width: 100%; min-height: 42px; }
+}
+
+/* ── Trade Desk: live balance strip ──────────────────────────────── */
+.dx-balances { display: inline-flex; gap: 14px; flex-wrap: wrap; }
+.dx-balances b { font-variant-numeric: tabular-nums; }
+
+/* ── Trade Desk: account positions panel (inside the light vdesk) ── */
+.dx-acct { border: 1px solid var(--vd-line); border-radius: 12px; margin-top: 16px; overflow: hidden; }
+.dx-acct-h {
+  display: flex; justify-content: space-between; align-items: baseline; gap: 10px;
+  font-size: 12px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--vd-mut); background: var(--vd-soft); padding: 9px 13px;
+}
+.dx-acct-h span { font-weight: 600; text-transform: none; letter-spacing: 0; }
+.dx-acct-row {
+  display: grid; grid-template-columns: minmax(0, 2fr) auto auto auto auto 92px;
+  gap: 10px; align-items: center; padding: 9px 13px; border-top: 1px solid var(--vd-line);
+  font-size: 13px; font-variant-numeric: tabular-nums;
+}
+.dx-acct-name { min-width: 0; font-weight: 600; }
+.dx-acct-name small { display: block; font-weight: 500; color: var(--vd-mut); font-size: 11.5px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.dx-acct-num { color: var(--vd-mut); white-space: nowrap; }
+.dx-acct-num b { color: var(--vd-ink); }
+.dx-acct-empty { padding: 12px 13px; color: var(--vd-mut); font-size: 13px; border-top: 1px solid var(--vd-line); }
+.dx-cashout {
+  border: 1.5px solid #c92a2a; background: #fff; color: #c92a2a; border-radius: 8px;
+  padding: 8px 0; font-size: 11.5px; font-weight: 800; letter-spacing: 0.03em;
+  cursor: pointer; white-space: nowrap; transition: all 0.1s;
+}
+.dx-cashout:hover:not(:disabled) { background: #c92a2a; color: #fff; }
+.dx-cashout:disabled { opacity: 0.45; cursor: default; }
+/* Compact variant for the ticket's Sell tab */
+.dx-sellpos { display: flex; flex-direction: column; gap: 8px; }
+.dx-sellpos-row { border: 1px solid var(--vd-line); border-radius: 10px; padding: 9px 11px; display: flex; flex-direction: column; gap: 6px; }
+.dx-sellpos-top { display: flex; justify-content: space-between; gap: 8px; font-size: 12.5px; font-weight: 700; }
+.dx-sellpos-sub { display: flex; justify-content: space-between; gap: 8px; font-size: 11.5px; color: var(--vd-mut); font-variant-numeric: tabular-nums; }
+@media (max-width: 860px) {
+  .dx-acct-row { grid-template-columns: minmax(0, 1.4fr) auto auto 92px; }
+  .dx-acct-num.hide-sm { display: none; }
+}
+
+/* ── Book ladder: 5 levels + spread/mid ──────────────────────────── */
+.dx-book-mid {
+  grid-column: 1 / -1; display: flex; justify-content: space-between; gap: 10px;
+  border-top: 1px dashed var(--vd-line); margin-top: 5px; padding-top: 5px;
+  font-size: 11px; font-weight: 700; color: var(--vd-mut); font-variant-numeric: tabular-nums;
+}
+
+/* ── Cancel button on pending queue rows ─────────────────────────── */
+.dx-cancel {
+  border: 1px solid var(--border-strong); background: transparent; color: var(--ink);
+  border-radius: 7px; padding: 4px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer;
+}
+.dx-cancel:hover:not(:disabled) { border-color: var(--critical); color: var(--critical); }
+.dx-cancel:disabled { opacity: 0.5; cursor: default; }
+
+/* ── Cash-out modal (self-contained light card over a scrim) ─────── */
+.dxm-overlay {
+  position: fixed; inset: 0; z-index: 60; background: rgba(8, 10, 14, 0.62);
+  display: flex; align-items: center; justify-content: center; padding: 18px;
+}
+.dxm {
+  --vd-bg: #ffffff; --vd-ink: #1a1e23; --vd-mut: #6b7280; --vd-line: #e7e9ee;
+  --vd-soft: #f4f5f7;
+  background: var(--vd-bg); color: var(--vd-ink); border-radius: 16px;
+  width: min(420px, 100%); max-height: 88vh; overflow-y: auto;
+  padding: 16px 18px; display: flex; flex-direction: column; gap: 10px;
+  box-shadow: 0 18px 60px rgba(0, 0, 0, 0.5);
+}
+.dxm--pmx { --vda: #2d5cf6; --vda-soft: #e8eeff; --vda-ink: #1d3fb8; }
+.dxm--kx { --vda: #0ab97f; --vda-soft: #e2f7ee; --vda-ink: #056646; }
+.dxm-h { display: flex; align-items: flex-start; gap: 10px; }
+.dxm-title { font-size: 15px; font-weight: 800; line-height: 1.3; min-width: 0; }
+.dxm-title small { display: block; font-size: 12px; font-weight: 600; color: var(--vd-mut); margin-top: 2px; }
+.dxm-x { margin-left: auto; border: 0; background: var(--vd-soft); color: var(--vd-mut); width: 30px; height: 30px; border-radius: 50%; font-size: 15px; cursor: pointer; flex: none; }
+.dxm-x:hover { color: var(--vd-ink); }
+.dxm-qty { display: flex; gap: 8px; align-items: stretch; }
+.dxm-qty input {
+  flex: 1; min-width: 0; border: 1.5px solid var(--vd-line); border-radius: 10px;
+  font-size: 22px; font-weight: 800; padding: 8px 12px; text-align: center;
+  color: var(--vd-ink); background: var(--vd-bg); font-variant-numeric: tabular-nums;
+}
+.dxm-qty input:focus { outline: 2px solid var(--vda); outline-offset: 1px; }
+.dxm-qty input:disabled { opacity: 0.6; }
+.dxm-all {
+  border: 1px solid var(--vd-line); background: var(--vd-soft); color: var(--vd-ink);
+  border-radius: 10px; padding: 0 16px; font-size: 13px; font-weight: 800; cursor: pointer;
+}
+.dxm-all.on { border-color: var(--vda); background: var(--vda-soft); color: var(--vda-ink); }
+.dxm-cta {
+  border: 0; border-radius: 10px; padding: 13px 0; font-weight: 800; font-size: 15px;
+  cursor: pointer; background: var(--vd-soft); color: var(--vd-mut); transition: all 0.12s;
+}
+.dxm-cta.ready { background: #c92a2a; color: #fff; }
+.dxm-cta.ready:hover { filter: brightness(1.08); }
+.dxm-err { color: #c92a2a; font-size: 12.5px; margin: 0; }
+@media (max-width: 720px) {
+  .dxm-overlay { align-items: flex-end; padding: 0; }
+  .dxm { width: 100%; border-radius: 16px 16px 0 0; max-height: 92vh; padding-bottom: max(16px, env(safe-area-inset-bottom)); }
+  .dxm-cta, .dxm-all { min-height: 46px; }
+}
+
+/* ── Wave-2: price history charts (components/PriceChart.tsx) ──────
+   The SVG carries no literal colors — every mark reads a --pc-* slot.
+   Defaults map the dark app theme tokens (--s1/--ink/--muted); inside
+   the light .vdesk skins (the cash-out .dxm modal lives inside .vdesk
+   and re-scopes the --vda- / --vd- slots itself) the same slots remap to the
+   venue inks, so one chart is legible on every desk surface. */
+.pc-chart, .pc-sparkline {
+  --pc-accent: var(--s1, #3987e5);
+  --pc-t-ink: var(--ink, #f4f5f2);
+  --pc-t-mut: var(--muted, #8b8983);
+  --pc-t-grid: rgba(244, 245, 242, 0.08);
+  --pc-tip-bg: rgba(10, 16, 24, 0.95);
+  --pc-tip-line: rgba(244, 245, 242, 0.18);
+  --pc-dot-ring: #101216;
+}
+.vdesk .pc-chart, .vdesk .pc-sparkline {
+  --pc-accent: var(--vda-ink, #1d3fb8);
+  --pc-t-ink: var(--vd-ink);
+  --pc-t-mut: var(--vd-mut);
+  --pc-t-grid: var(--vd-line);
+  --pc-tip-bg: rgba(255, 255, 255, 0.97);
+  --pc-tip-line: var(--vd-line);
+  --pc-dot-ring: var(--vd-bg);
+}
+.pc-chart { margin: 0; }
+.pc-chart svg { display: block; width: 100%; height: auto; touch-action: pan-y; }
+.pc-chart figcaption {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--pc-t-mut); margin-bottom: 4px;
+}
+.pc-chart .pc-line { stroke: var(--pc-accent); }
+.pc-chart .pc-grid { stroke: var(--pc-t-grid); }
+.pc-chart .pc-entry { stroke: var(--pc-t-mut); }
+.pc-chart .pc-cross { stroke: var(--pc-t-mut); opacity: 0.55; }
+.pc-chart .pc-dot { fill: var(--pc-accent); stroke: var(--pc-dot-ring); }
+.pc-chart .pc-tip { fill: var(--pc-tip-bg); stroke: var(--pc-tip-line); }
+.pc-chart .pc-ink { fill: var(--pc-t-ink); }
+.pc-chart .pc-mut { fill: var(--pc-t-mut); }
+.pc-note { color: var(--pc-t-mut, var(--vd-mut, #6b7280)); font-size: 12.5px; padding: 8px 0; }
+
+/* Game-view chart block + 24h/7d toggle */
+.pc-block { border: 1px solid var(--vd-line); border-radius: 12px; padding: 12px 14px; margin: 0 0 14px; background: var(--vd-bg); }
+.pc-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px; }
+.pc-head .pc-title {
+  font-size: 11px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--vd-mut); min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.pc-hours { display: flex; gap: 4px; flex: none; }
+.pc-hours button {
+  border: 1px solid var(--vd-line); background: transparent; color: var(--vd-mut);
+  border-radius: 999px; padding: 3px 10px; font-size: 11.5px; font-weight: 700; cursor: pointer;
+}
+.pc-hours button.on { border-color: var(--vda); background: var(--vda-soft); color: var(--vda-ink); }
+
+/* Compact ticket / modal variant */
+.pc-chart.compact { border: 1px solid var(--vd-line); border-radius: 10px; padding: 8px 8px 4px; }
+
+/* Sparkline slot on browse/search cards (reserved height, no jump) */
+.pc-spark { display: block; width: 120px; height: 36px; flex: none; margin-left: auto; }
+.pc-sparkline { display: block; opacity: 0.9; }
+.pc-sparkline .pc-line { stroke: var(--pc-accent); }
+.kx-card-foot, .pmx-card-foot { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+
+/* ── Bottom-sheet ticket on phones (overrides theme.css static) ──── */
+@media (max-width: 720px) {
+  .vdesk .vd-rail.has-pick .pmx-ticket,
+  .vdesk .vd-rail.has-pick .kx-ticket {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 50;
+    border-radius: 16px 16px 0 0; max-height: 78vh; overflow-y: auto;
+    box-shadow: 0 -10px 40px rgba(0, 0, 0, 0.4);
+    padding-bottom: max(14px, env(safe-area-inset-bottom));
+  }
+  .vdesk .vd-rail.has-pick::after { content: ''; display: block; height: 56px; }
+  .pmx-cta, .kx-cta { min-height: 48px; }
+  .dx-quick button { min-height: 40px; }
+}
+
+/* Committed-capital microlabels (option 2, 2026-08-22) */
+.ac-tile-note { font-size: 10px; color: var(--muted); margin-top: 2px; letter-spacing: .03em; }
+.ac-stat-wide span { white-space: normal; }
+.vd-cc-note { font-size: 10px; opacity: .75; letter-spacing: .02em; }
+
+/* ═══ Desk v7 (owner order 2026-08-22): the PORTAL skin. Everything
+   below is presentation-only — connection strip, iPhone-standalone
+   ergonomics (sticky compact header, true bottom sheet, card blotter,
+   result toasts), execution theater, skeletons. No new palettes: dark
+   chrome draws on theme tokens; venue hexes and rgba components reuse
+   the values already established above / in theme.css. ═══ */
+
+/* ── Portal connection strip (dark chrome, above the light vdesk) ── */
+.dx-topbar { margin-bottom: 2px; }
+.dx-conn {
+  display: flex; align-items: center; gap: 10px; margin: 10px 0 2px;
+  padding: 8px 12px; border: 1px solid var(--border); border-radius: 10px;
+  background: var(--surface); font-size: 12px; color: var(--muted);
+}
+.dx-conn b { color: var(--good); letter-spacing: 0.08em; }
+.dx-conn.down b { color: var(--critical); }
+.dx-conn-dot {
+  width: 9px; height: 9px; border-radius: 50%; flex: none;
+  background: var(--good); box-shadow: 0 0 6px var(--good);
+  animation: tr-pulse 1.6s ease-out infinite;
+}
+.dx-conn.pm .dx-conn-dot { outline: 2px solid rgba(45, 92, 246, 0.55); outline-offset: 2px; }
+.dx-conn.k .dx-conn-dot { outline: 2px solid rgba(10, 185, 127, 0.55); outline-offset: 2px; }
+.dx-conn.down .dx-conn-dot {
+  background: var(--critical); box-shadow: 0 0 6px var(--critical); animation: none;
+}
+.dx-conn-txt { min-width: 0; }
+.dx-conn-age {
+  margin-left: auto; white-space: nowrap; font-size: 11.5px;
+  font-variant-numeric: tabular-nums;
+}
+
+/* Live-capital chip in the page head (feeds the sticky mobile header) */
+.dx-cap {
+  display: inline-flex; align-items: baseline; gap: 6px;
+  border: 1px solid var(--border); background: var(--surface); border-radius: 999px;
+  padding: 5px 12px; font-variant-numeric: tabular-nums; color: var(--muted);
+}
+.dx-cap small { font-size: 10px; font-weight: 700; letter-spacing: 0.07em; text-transform: uppercase; }
+.dx-cap b { color: var(--ink); font-size: 13px; }
+
+/* ── Execution theater ───────────────────────────────────────────── */
+.dx-run-clock {
+  display: flex; justify-content: space-between; align-items: baseline;
+  border-top: 1px dashed var(--vd-line); margin-top: 2px; padding-top: 6px;
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--vd-mut);
+}
+.dx-run-clock b {
+  font-size: 17px; color: var(--vd-ink); letter-spacing: 0;
+  font-variant-numeric: tabular-nums;
+}
+.dx-run-slip { font-size: 12.5px; color: var(--vd-mut); font-variant-numeric: tabular-nums; }
+.dx-run-slip b { color: var(--vd-ink); }
+.dx-run-slip b.pos { color: var(--vd-good, #14833b); }
+.dx-run-slip b.neg { color: var(--vd-bad, #c92a2a); }
+
+/* ── Result toast (fixed chrome, over both dark and light zones) ── */
+.dx-toast {
+  position: fixed; top: calc(60px + env(safe-area-inset-top)); left: 50%;
+  transform: translateX(-50%); z-index: 90; max-width: min(92vw, 440px);
+  background: rgba(16, 20, 26, 0.96); color: var(--ink, #f4f5f2);
+  border: 1px solid rgba(33, 176, 33, 0.45); border-radius: 12px;
+  padding: 10px 16px; font-size: 13px; font-weight: 600; line-height: 1.4;
+  box-shadow: 0 10px 36px rgba(0, 0, 0, 0.5);
+  animation: dx-toast-in 0.22s ease-out; pointer-events: none;
+  font-variant-numeric: tabular-nums;
+}
+.dx-toast.bad { border-color: rgba(224, 82, 82, 0.5); }
+@keyframes dx-toast-in {
+  from { transform: translate(-50%, -8px); opacity: 0; }
+  to { transform: translate(-50%, 0); opacity: 1; }
+}
+
+/* ── Skeleton shimmer variants (shimmer visible on the light skins) ─ */
+.dx-skel-rows {
+  display: flex; flex-direction: column; gap: 8px;
+  padding: 10px 13px; border-top: 1px solid var(--vd-line);
+}
+.dx-skel-rows.bare { padding: 0; border-top: 0; }
+.dx-skel-rows .tr-skel { height: 34px; border-radius: 8px; }
+.dx-skel-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(290px, 1fr)); gap: 12px;
+}
+.dx-skel-grid .tr-skel { height: 150px; border-radius: 12px; }
+.vdesk .tr-skel { border-color: var(--vd-line); }
+.vdesk .tr-skel::after {
+  background: linear-gradient(100deg, transparent 30%, rgba(120, 144, 180, 0.12) 50%, transparent 70%);
+}
+
+/* ── Blotter cards (phone) — table stays for desktop ─────────────── */
+.dx-blot-cards { display: none; }
+.dx-blot-card {
+  border: 1px solid var(--border); border-radius: 12px; padding: 10px 12px;
+  background: var(--surface-2, rgba(255, 255, 255, 0.02));
+}
+.dx-blot-card-top {
+  display: flex; justify-content: space-between; align-items: flex-start;
+  gap: 10px; font-size: 13.5px; line-height: 1.35;
+}
+.dx-blot-st {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--muted); border: 1px solid var(--border); border-radius: 999px;
+  padding: 2px 8px; white-space: nowrap; flex: none;
+}
+.dx-blot-st.filled, .dx-blot-st.settled { color: var(--good); border-color: rgba(33, 176, 33, 0.4); }
+.dx-blot-st.queued, .dx-blot-st.submitting { color: var(--warning); border-color: rgba(250, 178, 25, 0.4); }
+.dx-blot-st.error, .dx-blot-st.unfilled, .dx-blot-st.cancelled { color: var(--critical); border-color: rgba(224, 82, 82, 0.4); }
+.dx-blot-card-sub { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
+.dx-blot-nums {
+  display: flex; gap: 14px; flex-wrap: wrap; margin-top: 8px;
+  font-size: 12.5px; color: var(--muted); font-variant-numeric: tabular-nums;
+}
+.dx-blot-nums b { color: var(--ink); }
+.dx-blot-err { margin-top: 6px; font-size: 11.5px; color: var(--critical); }
+.dx-blot-card .dx-cancel { margin-top: 8px; width: 100%; min-height: 42px; }
+
+/* ── Bottom-sheet chrome (hidden on desktop) ─────────────────────── */
+.dx-sheet-handle { display: none; }
+.dx-sheet-scrim { display: none; }
+
+/* ── Accounts: compact sticky totals bar ─────────────────────────── */
+.ac-sticky {
+  position: fixed; top: 52px; left: 0; right: 0; z-index: 25;
+  display: flex; gap: 18px; align-items: baseline; justify-content: center;
+  flex-wrap: wrap; padding: 8px max(16px, env(safe-area-inset-left));
+  background: rgba(18, 20, 23, 0.92); backdrop-filter: blur(10px);
+  border-bottom: 1px solid var(--border); font-size: 12.5px; color: var(--muted);
+  animation: ac-sticky-in 0.18s ease-out;
+}
+.ac-sticky b { color: var(--ink); font-variant-numeric: tabular-nums; }
+.ac-sticky b.pos { color: var(--good); }
+.ac-sticky b.neg { color: var(--critical); }
+@keyframes ac-sticky-in { from { transform: translateY(-8px); opacity: 0; } to { transform: none; opacity: 1; } }
+.ac-skel { display: flex; flex-direction: column; gap: 10px; }
+.ac-skel .tr-skel { border-radius: 12px; }
+
+/* ── iPhone standalone (<720px): the portal in the hand ──────────── */
+@media (max-width: 720px) {
+  /* Sticky compact header: capital chip + venue toggle + LIVE strip
+     under the 52px nav; the h1 cedes its space. */
+  .dx-topbar {
+    position: sticky; top: 52px; z-index: 40;
+    margin: 0 -16px 10px; padding: 8px 16px;
+    background: var(--page, #101216); border-bottom: 1px solid var(--border);
+  }
+  .dx-topbar h1 { display: none; }
+  .dx-topbar .vd-pagehead { gap: 8px; }
+  .dx-cap { margin-right: auto; }
+  .vd-venue { padding: 9px 12px; font-size: 12.5px; min-height: 40px; }
+  .dx-conn { margin: 8px 0 0; padding: 6px 10px; font-size: 11px; border-radius: 8px; }
+  .dx-conn-age { font-size: 10.5px; }
+
+  /* True bottom sheet: scrim + drag handle + spring-up. The fixed
+     positioning itself comes from the v6 rule earlier in this file. */
+  .dx-sheet-scrim {
+    display: block; position: fixed; inset: 0; z-index: 49;
+    background: rgba(8, 10, 14, 0.45); animation: dx-fade 0.18s ease-out;
+  }
+  .vdesk .vd-rail.has-pick .pmx-ticket,
+  .vdesk .vd-rail.has-pick .kx-ticket {
+    max-height: 84vh; border-radius: 18px 18px 0 0; padding-top: 4px;
+    box-shadow: 0 -14px 48px rgba(0, 0, 0, 0.5);
+    animation: dx-sheet-up 0.22s ease-out; overscroll-behavior: contain;
+  }
+  .dx-sheet-handle {
+    display: flex; justify-content: center; padding: 8px 0 4px;
+    touch-action: none; margin: -4px -16px 0; /* wide grab zone */
+  }
+  .dx-sheet-handle span {
+    width: 42px; height: 5px; border-radius: 999px; background: var(--vd-line);
+  }
+  .dxm::before {
+    content: ''; display: block; width: 42px; height: 5px; border-radius: 999px;
+    background: var(--vd-line); margin: 0 auto 4px; flex: none;
+  }
+
+  /* Comfortable 44px+ touch targets. */
+  .pmx-btn, .kx-pct, .dx-mini { min-height: 44px; }
+  .dx-tab { min-height: 44px; padding: 10px 14px; }
+  .pmx-tabbtn { min-height: 42px; }
+  .kx-side-row { min-height: 44px; }
+  .dx-quick button { min-height: 44px; }
+  .dxm-x { width: 40px; height: 40px; }
+  .dx-blot-tabs button { min-height: 42px; padding: 9px 16px; }
+  .dx-cancel { min-height: 40px; padding: 8px 14px; }
+  .kx-pill { min-height: 48px; }
+  .pc-hours button { min-height: 36px; padding: 6px 14px; }
+  .dx-back { min-height: 44px; display: inline-flex; align-items: center; }
+
+  /* Book ladder readable at 390px. */
+  .dx-book { font-size: 13px; }
+  .dx-book-row { padding: 2px 0; }
+
+  /* Positions panel rows become touch cards. */
+  .dx-acct-row {
+    grid-template-columns: 1fr 1fr; gap: 4px 12px;
+    border: 1px solid var(--vd-line); border-radius: 10px;
+    margin: 8px 10px; padding: 10px 12px; border-top: 1px solid var(--vd-line);
+  }
+  .dx-acct-name { grid-column: 1 / -1; }
+  .dx-acct-num.hide-sm { display: block; }
+  .dx-acct-row .dx-cashout { grid-column: 1 / -1; min-height: 44px; }
+
+  /* Blotter: cards in, table out. */
+  .dx-blot-cards { display: flex; flex-direction: column; gap: 8px; }
+  .rpt-table-wrap.dx-blot-table { display: none; }
+
+  /* Accounts: full-bleed venue sections + sticky-bar breathing room. */
+  .ac-venues { margin: 0 -16px; gap: 10px; }
+  .ac-card { border-left: 0; border-right: 0; border-radius: 0; }
+  .ac-cashout { min-height: 44px; }
+  .ac-tabs button { min-height: 40px; padding: 8px 16px; }
+  .ac-sticky { justify-content: flex-start; gap: 14px; font-size: 12px; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .dx-conn-dot, .dx-toast, .dx-sheet-scrim, .ac-sticky,
+  .vdesk .vd-rail.has-pick .pmx-ticket,
+  .vdesk .vd-rail.has-pick .kx-ticket { animation: none; }
+}
+@keyframes dx-fade { from { opacity: 0; } to { opacity: 1; } }
+@keyframes dx-sheet-up {
+  from { transform: translateY(24px); opacity: 0.6; }
+  to { transform: none; opacity: 1; }
+}
+
+/* ═══ Desk v8 (owner order 2026-08-22, questionnaire): the VENUE-APP
+   paradigm. Feed of large market cards → full market page → order
+   panel; Markets / Positions / Activity tabs (bottom bar in the hand).
+   Everything below is presentation-only chrome around the untouched
+   money surfaces. Venue hexes reuse the values already established in
+   this file / theme.css (--vda families); no new palettes. ═══ */
+
+/* ── Topbar search (dark chrome, both venues) ────────────────────── */
+.v8-searchrow { display: flex; gap: 8px; margin-top: 8px; }
+.v8-search {
+  flex: 1; min-width: 0; border: 1px solid var(--border); background: var(--surface);
+  color: var(--ink); border-radius: 999px; padding: 8px 14px; font-size: 13.5px;
+  -webkit-appearance: none; appearance: none;
+}
+.v8-search:focus { outline: 2px solid var(--s1, #3987e5); outline-offset: 1px; }
+.v8-search-x {
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  border-radius: 50%; width: 36px; height: 36px; flex: none; cursor: pointer; font-size: 13px;
+}
+.v8-search-x:hover { color: var(--ink); }
+.dx-conn-bt { color: var(--ink, #f4f5f2); letter-spacing: 0.1em; }
+
+/* ── Section tabs: segmented row on desktop, bottom bar on phones ── */
+.v8-tabs { display: flex; gap: 6px; margin: 10px 0 2px; }
+.v8-tabs button {
+  border: 1px solid var(--border); background: var(--surface); color: var(--muted);
+  border-radius: 999px; padding: 8px 18px; font-size: 13px; font-weight: 700;
+  cursor: pointer; display: inline-flex; align-items: center; justify-content: center; gap: 7px;
+}
+.v8-tabs button.on {
+  background: var(--surface-3, #23262b); color: var(--ink);
+  border-color: var(--border-strong);
+}
+.v8-tab-n {
+  font-size: 10.5px; font-weight: 800; border-radius: 999px; padding: 1px 7px;
+  background: rgba(45, 92, 246, 0.2); color: #7ea0ff; font-variant-numeric: tabular-nums;
+}
+.v8-tabspace { display: none; }
+
+/* ── Shell body: feed/market-page column + the existing order rail ── */
+.v8-body { display: flex; gap: 18px; align-items: flex-start; }
+.v8-main { flex: 1 1 auto; min-width: 0; }
+.v8-body .vd-rail { width: 340px; flex: none; }
+.v8-body .vd-rail:not(.has-pick) { display: none; }
+
+/* ── Feed: league chips + large market cards ─────────────────────── */
+.mf-chips {
+  display: flex; gap: 6px; overflow-x: auto; padding-bottom: 10px; margin-bottom: 12px;
+  border-bottom: 1px solid var(--vd-line); -webkit-overflow-scrolling: touch;
+}
+.mf-chip {
+  border: 1px solid var(--vd-line); background: var(--vd-bg); color: var(--vd-mut);
+  border-radius: 999px; padding: 7px 13px; font-size: 13px; font-weight: 600;
+  white-space: nowrap; cursor: pointer; flex: none;
+}
+.mf-chip.on { background: var(--vda); border-color: var(--vda); color: #fff; }
+.vdesk--kx .mf-chip.on { color: #04241a; }
+.vdesk--kx .mf-chip { border-radius: 7px; }
+.mf-feed { display: grid; grid-template-columns: 1fr; gap: 14px; }
+@media (min-width: 980px) {
+  .mf-feed { grid-template-columns: repeat(auto-fill, minmax(360px, 1fr)); }
+}
+.mf-skel { height: 220px; border-radius: 14px; }
+.mf-card { display: flex; flex-direction: column; gap: 10px; background: var(--vd-bg); border: 1px solid var(--vd-line); }
+.mf-head { cursor: pointer; min-width: 0; }
+.mf-tags {
+  display: flex; gap: 8px; align-items: center; font-size: 10.5px; font-weight: 700;
+  letter-spacing: 0.05em; color: var(--vd-mut); text-transform: uppercase;
+}
+.mf-close { font-variant-numeric: tabular-nums; }
+.mf-vol { margin-left: auto; font-variant-numeric: tabular-nums; font-weight: 800; color: var(--vd-mut); }
+.mf-title { margin: 7px 0 0; font-size: 16.5px; font-weight: 700; line-height: 1.3; color: var(--vd-ink); }
+.mf-chartrow { width: 100%; cursor: pointer; }
+.mf-spark { display: block; width: 100%; height: 56px; }
+.mf-spark svg { width: 100%; height: 56px; display: block; opacity: 1; }
+.pc-sparkline.pos .pc-line { stroke: var(--vd-good, #14833b); }
+.pc-sparkline.neg .pc-line { stroke: var(--vd-bad, #c92a2a); }
+.mf-outcomes { display: flex; flex-direction: column; gap: 7px; }
+.mf-row { display: flex; align-items: center; gap: 10px; }
+.mf-oname {
+  flex: 1; min-width: 0; font-size: 13.5px; font-weight: 600; color: var(--vd-ink);
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mf-opct { font-size: 13px; font-weight: 700; color: var(--vd-mut); font-variant-numeric: tabular-nums; }
+.mf-split { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.mf-foot {
+  display: flex; justify-content: space-between; align-items: center;
+  border-top: 1px solid var(--vd-line); padding-top: 8px; margin-top: auto;
+}
+.mf-open { border: 0; background: none; color: var(--vd-mut); font-size: 12px; font-weight: 600; cursor: pointer; padding: 0; }
+.mf-open:hover { color: var(--vda); }
+
+/* ── pm8: Polymarket near-clone (white, rounded, blue family) ────── */
+.pm8-card { border-radius: 14px; padding: 14px 16px; transition: box-shadow 0.12s, border-color 0.12s; }
+.pm8-card:hover { border-color: #cfd6e4; box-shadow: 0 4px 18px rgba(23, 43, 99, 0.09); }
+.pm8-tag { background: var(--vda-soft); color: var(--vda-ink); border-radius: 5px; padding: 2px 7px; }
+.pm8-buy {
+  border: 0; border-radius: 9px; padding: 10px 12px; font-weight: 700; font-size: 13px;
+  cursor: pointer; font-variant-numeric: tabular-nums; transition: filter 0.1s;
+  display: inline-flex; justify-content: center; align-items: baseline; gap: 6px;
+}
+.pm8-buy b { font-weight: 800; }
+.pm8-buy.g { background: #e8f7ee; color: #14833b; }
+.pm8-buy.r { background: #fdecec; color: #c92a2a; }
+.pm8-buy.g:hover:not(:disabled) { filter: brightness(0.96); }
+.pm8-buy.r:hover:not(:disabled) { filter: brightness(0.97); }
+.pm8-buy.g.on { background: #14833b; color: #fff; }
+.pm8-buy.r.on { background: #c92a2a; color: #fff; }
+.pm8-buy:disabled { opacity: 0.45; cursor: default; }
+.mf-split .pm8-buy { width: 100%; justify-content: space-between; padding: 12px 14px; }
+.mf-split .pm8-buy span { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.mf-row .pm8-buy { min-width: 100px; flex: none; }
+
+/* ── kx8: Kalshi near-clone (flatter, compact, teal accent) ──────── */
+.kx8-card { border-radius: 8px; padding: 12px 14px; box-shadow: none; }
+.kx8-card .mf-title { font-size: 15.5px; }
+.kx8-card:hover { border-color: #bfe7d6; }
+.kx8-tag { color: var(--vda-ink); background: var(--vda-soft); border-radius: 4px; padding: 2px 6px; }
+.kx8-buy {
+  border: 1px solid var(--vd-line); background: var(--vd-soft); border-radius: 6px;
+  min-width: 88px; padding: 9px 0; font-weight: 800; font-size: 13.5px; flex: none;
+  color: var(--vd-ink); cursor: pointer; font-variant-numeric: tabular-nums; transition: all 0.1s;
+}
+.kx8-buy:hover:not(:disabled) { border-color: var(--vda); color: var(--vda-ink); }
+.kx8-buy.on { background: var(--vda); border-color: var(--vda); color: #04241a; }
+.kx8-buy:disabled { opacity: 0.45; cursor: default; }
+
+/* ── Market page (venue market screen) ───────────────────────────── */
+.mp { display: flex; flex-direction: column; gap: 14px; }
+.mp-head {
+  position: sticky; top: 0; z-index: 30; display: flex; align-items: center; gap: 10px;
+  background: var(--vd-bg); padding: 8px 0; border-bottom: 1px solid var(--vd-line);
+}
+.mp-back {
+  border: 1px solid var(--vd-line); background: var(--vd-bg); color: var(--vd-ink);
+  width: 36px; height: 36px; border-radius: 50%; font-size: 22px; line-height: 1;
+  cursor: pointer; flex: none; display: grid; place-items: center; padding: 0 0 3px;
+}
+.mp-back:hover { border-color: var(--vda); color: var(--vda-ink); }
+.mp-title { min-width: 0; font-size: 16px; font-weight: 800; line-height: 1.25; color: var(--vd-ink); }
+.mp-title small { display: block; font-size: 11.5px; font-weight: 600; color: var(--vd-mut); margin-top: 2px; }
+.mp-last {
+  margin-left: auto; font-size: 20px; font-weight: 800; color: var(--vd-ink);
+  font-variant-numeric: tabular-nums; text-align: right; flex: none;
+}
+.mp-last small { display: block; font-size: 11px; font-weight: 700; }
+.mp-last small.pos { color: var(--vd-good); }
+.mp-last small.neg { color: var(--vd-bad); }
+.mp-chart { border: 1px solid var(--vd-line); border-radius: 12px; padding: 12px 14px; background: var(--vd-bg); }
+.vdesk--kx .mp-chart { border-radius: 8px; }
+.mp-ranges { display: flex; gap: 4px; justify-content: flex-end; margin-bottom: 6px; }
+.mp-ranges button {
+  border: 1px solid var(--vd-line); background: transparent; color: var(--vd-mut);
+  border-radius: 999px; padding: 4px 13px; font-size: 11.5px; font-weight: 700; cursor: pointer;
+}
+.mp-ranges button.on { border-color: var(--vda); background: var(--vda-soft); color: var(--vda-ink); }
+.mp-chart-sub {
+  font-size: 11px; font-weight: 700; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--vd-mut); margin-top: 6px;
+}
+.mp-pos {
+  border: 1.5px solid var(--vda); border-radius: 12px; padding: 12px 14px;
+  background: var(--vda-soft); display: flex; flex-direction: column; gap: 10px;
+}
+.mp-pos-h {
+  font-size: 11px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase;
+  color: var(--vda-ink); display: flex; justify-content: space-between; gap: 10px;
+}
+.mp-pos-h span {
+  font-weight: 700; text-transform: none; letter-spacing: 0; color: var(--vd-ink);
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.mp-pos-grid {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(90px, 1fr));
+  gap: 6px 12px; font-size: 11.5px; color: var(--vd-mut);
+}
+.mp-pos-grid b { display: block; font-size: 14.5px; color: var(--vd-ink); font-variant-numeric: tabular-nums; }
+.mp-pos-grid b.pos { color: var(--vd-good); }
+.mp-pos-grid b.neg { color: var(--vd-bad); }
+.mp-trades { border: 1px solid var(--vd-line); border-radius: 12px; overflow: hidden; }
+.mp-trades-h {
+  font-size: 11px; font-weight: 800; letter-spacing: 0.05em; text-transform: uppercase;
+  color: var(--vd-mut); background: var(--vd-soft); padding: 8px 12px;
+}
+.mp-trade {
+  display: flex; align-items: center; gap: 10px; padding: 8px 12px;
+  border-top: 1px solid var(--vd-line); font-size: 12.5px; font-variant-numeric: tabular-nums;
+}
+.mp-trade-t { color: var(--vd-mut); flex: none; }
+.mp-trade-o { flex: 1; min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-weight: 600; color: var(--vd-ink); }
+.mp-trade-n { color: var(--vd-mut); }
+/* Status chips legible on the light venue surfaces */
+.vdesk .dx-blot-st { color: var(--vd-mut); border-color: var(--vd-line); }
+.vdesk .dx-blot-st.filled, .vdesk .dx-blot-st.settled { color: var(--vd-good); border-color: rgba(20, 131, 59, 0.4); }
+.vdesk .dx-blot-st.queued, .vdesk .dx-blot-st.submitting { color: #9a6700; border-color: rgba(154, 103, 0, 0.4); }
+.vdesk .dx-blot-st.error, .vdesk .dx-blot-st.unfilled, .vdesk .dx-blot-st.cancelled { color: var(--vd-bad); border-color: rgba(201, 42, 42, 0.4); }
+
+/* ── Collapsible order book in the ticket (ladder unchanged) ─────── */
+.dx-bookwrap { border: 1px solid var(--vd-line); border-radius: 10px; overflow: hidden; }
+.dx-booktoggle {
+  width: 100%; display: flex; align-items: center; gap: 8px; border: 0;
+  background: var(--vd-soft); color: var(--vd-mut); font-size: 11px; font-weight: 800;
+  letter-spacing: 0.05em; text-transform: uppercase; padding: 8px 11px; cursor: pointer;
+}
+.dx-booktoggle span { margin-left: auto; font-variant-numeric: tabular-nums; text-transform: none; letter-spacing: 0; font-weight: 700; }
+.dx-booktoggle i { font-style: normal; transition: transform 0.12s; }
+.dx-booktoggle i.up { transform: rotate(180deg); }
+.dx-bookwrap .dx-book { padding: 8px 11px; }
+
+/* ── Phone (<720px): the venue app in the hand ───────────────────── */
+@media (max-width: 720px) {
+  .v8-search { min-height: 40px; }
+  /* Market page: page chrome cedes to the market header (venue-app
+     behavior) — the topbar unsticks, the mp header takes the top. */
+  .dx-topbar.mp-mode { position: static; margin: 0 -16px 10px; }
+  .mp-head { top: 52px; margin: 0 -16px; padding: 8px 12px; border-radius: 0; }
+  .mp-back { width: 40px; height: 40px; }
+  /* Bottom tab bar over the safe area; the order sheet (z50) and its
+     scrim (z49) cover it while a ticket is open. */
+  .v8-tabs {
+    position: fixed; left: 0; right: 0; bottom: 0; z-index: 45; margin: 0;
+    background: rgba(16, 20, 26, 0.97); backdrop-filter: blur(12px);
+    border-top: 1px solid var(--border);
+    padding: 6px 10px calc(6px + env(safe-area-inset-bottom)); gap: 4px;
+  }
+  .v8-tabs button {
+    flex: 1; flex-direction: column; gap: 3px; border: 0; background: none;
+    border-radius: 10px; padding: 7px 0; font-size: 11px; min-height: 48px;
+  }
+  .v8-tabs button.on { background: rgba(255, 255, 255, 0.07); color: var(--ink); }
+  .v8-tabspace { display: block; height: calc(66px + env(safe-area-inset-bottom)); }
+  /* Touch targets on the new surfaces. */
+  .mf-chip { min-height: 40px; }
+  .mf-row .pm8-buy, .kx8-buy { min-height: 44px; }
+  .mf-split .pm8-buy { min-height: 52px; }
+  .mp-ranges button { min-height: 36px; }
+  .mp-pos .dx-cashout { min-height: 44px; }
+  .dx-booktoggle { min-height: 40px; }
+  .mf-title { font-size: 17.5px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .dx-booktoggle i { transition: none; }
+}
+
+/* Accounts hero (option-2 single-number display, 2026-08-22) */
+.ac-hero { padding: 14px 0 10px; }
+.ac-hero-num { font-size: 34px; font-weight: 700; letter-spacing: -0.5px; }
+.ac-hero-l { font-size: 10px; letter-spacing: .14em; color: var(--muted); margin-top: 4px; }
+.ac-hero-note { margin-left: 8px; text-transform: none; letter-spacing: .02em; opacity: .8; }
+.ac-details { margin: 6px 0 2px; }
+.ac-details summary { font-size: 11px; color: var(--muted); cursor: pointer; letter-spacing: .04em; }
+.ac-details[open] summary { margin-bottom: 6px; }
+
+/* ═══ Desk v9 (owner order 2026-08-27): LIMIT ORDERS + OPEN ORDERS +
+   FULL DEPTH. Additive presentation layer only — every money path
+   above and in TradeDesk.tsx stays untouched. New surfaces: the PM
+   ticket's Market/Limit segmented pill + limit-price stepper (venue
+   language: Polymarket's white pill-on-soft-track), the venue book
+   ladder's cumulative depth bars (all levels, up to 10/side), the
+   resting-order confirmation, and the unified Open-orders blotter tab
+   (PM resting book + Kalshi queue, two-tap cancel). No new palettes:
+   venue hexes reuse the --vda families; dark chrome uses theme tokens;
+   .oo-row / .oo-cancel / .v9-chip / .pulse-dot / .skel come from the
+   theme.css v9 layer. ═══ */
+
+/* ── PM ticket: Market/Limit segmented pill (Polymarket look) ────── */
+.v9-otype {
+  margin-left: auto; display: inline-flex; gap: 2px; padding: 2px;
+  background: var(--vd-soft); border: 1px solid var(--vd-line);
+  border-radius: 999px;
+}
+.v9-otype button {
+  border: 0; background: transparent; color: var(--vd-mut);
+  font-weight: 700; font-size: 12px; padding: 4px 12px;
+  border-radius: 999px; cursor: pointer; transition: all 0.12s;
+}
+.v9-otype button.on {
+  background: var(--vd-bg); color: var(--vda-ink);
+  box-shadow: 0 1px 4px rgba(23, 43, 99, 0.16);
+}
+.v9-otype button:disabled { opacity: 0.55; cursor: default; }
+
+/* ── Limit price input: − / cents / + steppers, 44px targets ─────── */
+.v9-limit { display: flex; flex-direction: column; gap: 6px; }
+.v9-limitbox { display: flex; gap: 8px; align-items: stretch; }
+.v9-step {
+  width: 46px; min-height: 44px; flex: none; border: 1px solid var(--vd-line);
+  background: var(--vd-soft); color: var(--vd-ink); border-radius: 10px;
+  font-size: 20px; font-weight: 800; cursor: pointer; transition: all 0.1s;
+}
+.v9-step:hover:not(:disabled) { border-color: var(--vda); color: var(--vda-ink); }
+.v9-step:disabled { opacity: 0.5; cursor: default; }
+.v9-pxwrap { position: relative; flex: 1; min-width: 0; }
+.v9-px {
+  width: 100%; height: 100%; border: 1.5px solid var(--vd-line);
+  border-radius: 10px; font-size: 24px; font-weight: 800; padding: 8px 30px 8px 12px;
+  text-align: center; color: var(--vd-ink); background: var(--vd-bg);
+  font-variant-numeric: tabular-nums;
+}
+.v9-px:focus { outline: 2px solid var(--vda); outline-offset: 1px; }
+.v9-px:disabled { opacity: 0.6; }
+.v9-cent {
+  position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
+  font-weight: 800; color: var(--vd-mut); pointer-events: none;
+}
+
+/* ── Resting (GTC) confirmation — venue-accent, not fill-green ───── */
+.dx-run.open { border-color: var(--vda, #2d5cf6); background: var(--vda-soft, #e8eeff); }
+.dx-run.open .dx-check { background: var(--vda, #2d5cf6); }
+.dx-run.open .dx-run-big { color: var(--vda-ink, #1d3fb8); }
+.v9-goto {
+  align-self: flex-start; border: 1px solid var(--vda); background: var(--vd-bg);
+  color: var(--vda-ink); border-radius: 8px; padding: 8px 14px; min-height: 40px;
+  font-weight: 700; font-size: 12.5px; cursor: pointer; transition: all 0.1s;
+}
+.v9-goto:hover { background: var(--vda); color: #fff; }
+
+/* ── Book ladder: cumulative depth bars behind every level ───────── */
+.v9-lvl {
+  position: relative; overflow: hidden; border-radius: 4px;
+  padding: 3px 6px; margin: 0 -6px; min-height: 22px; align-items: center;
+}
+.v9-lvl > span { position: relative; z-index: 1; }
+.v9-dbar {
+  position: absolute; top: 0; bottom: 0; right: 0; z-index: 0;
+  border-radius: 3px; pointer-events: none;
+}
+.v9-dbar.ask { background: rgba(201, 42, 42, 0.10); }
+.v9-dbar.bid { background: rgba(20, 131, 59, 0.12); }
+.vdesk--kx .v9-dbar.bid { background: rgba(10, 185, 127, 0.14); }
+
+/* ── Open-orders blotter tab (dark chrome inside the Activity card) ─ */
+.dx-blot-tabs .v8-tab-n { margin-left: 6px; }
+.v9-oo-head {
+  display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+  font-size: 12px; color: var(--muted); margin-bottom: 10px;
+}
+.v9-oo-age { margin-left: auto; font-size: 11.5px; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.v9-oo-skel { display: flex; flex-direction: column; gap: 8px; }
+.v9-oo-skel .skel { height: 42px; border-radius: 10px; }
+.v9-oo .oo-row:last-child { border-bottom: 0; }
+.v9-oo-h {
+  font-size: 10.5px; font-weight: 700; letter-spacing: 0.06em;
+  text-transform: uppercase; color: var(--muted);
+  border-bottom: 1px solid var(--border-strong);
+}
+.v9-oo-mkt { min-width: 0; }
+.v9-oo-title {
+  display: block; font-weight: 600; line-height: 1.3;
+  overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+}
+.v9-oo-mkt small {
+  display: flex; align-items: center; gap: 6px; margin-top: 3px;
+  color: var(--muted); font-size: 11px; white-space: nowrap;
+}
+.v9-oo-side { font-weight: 700; font-size: 11.5px; letter-spacing: 0.03em; white-space: nowrap; }
+.v9-oo-px, .v9-oo-size { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+.v9-oo-act { display: flex; justify-content: flex-end; }
+.v9-oo-conf { display: flex; flex-direction: column; align-items: flex-end; gap: 2px; }
+.v9-oo-conf small {
+  font-size: 10px; font-weight: 800; letter-spacing: 0.05em;
+  text-transform: uppercase; color: var(--critical);
+}
+.oo-cancel:disabled { opacity: 0.5; cursor: default; }
+.oo-cancel.v9-armed {
+  background: var(--critical, #e05252); border-color: var(--critical, #e05252);
+  color: #fff;
+}
+.oo-cancel.v9-armed:hover { background: var(--critical, #e05252); filter: brightness(1.08); }
+
+/* ── Phone (<720px): 44px+ targets on every new touch surface ────── */
+@media (max-width: 720px) {
+  .v9-otype button { min-height: 38px; padding: 6px 14px; }
+  .v9-step { width: 52px; min-height: 48px; }
+  .v9-px { font-size: 26px; }
+  .v9-goto { min-height: 44px; }
+  .oo-cancel { min-height: 44px; padding: 8px 14px; }
+  .v9-oo-age { margin-left: 0; width: 100%; }
+  .v9-lvl { min-height: 26px; }
+}
+@media (prefers-reduced-motion: reduce) {
+  .v9-otype button, .v9-step, .v9-goto { transition: none; }
+}
