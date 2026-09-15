@@ -1,4 +1,4 @@
-REACHABILITY_PROBE_UTC = 2026-09-15T12:59:31Z
+REACHABILITY_PROBE_UTC = 2026-09-15T16:22:36Z
 HOST_USED = github-actions/ubuntu-latest
 gateway.polymarket.us = HTTP 404
 api.elections.kalshi.com = HTTP 404
