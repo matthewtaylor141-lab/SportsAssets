@@ -385,11 +385,52 @@ def completion_grid(fills: list) -> dict:
 
 
 # ------------------------------------------------------------- windows --
-def window(fills: list, days: int | None) -> list:
+# merge_pnl computes a cluster-robust interval but does not gate on how
+# many clusters produced it. proof.py sets MIN_PROOF_CLUSTERS = 30 for
+# exactly this reason and merge_pnl does not import it.
+#
+# THE CANARY THAT FOUND THIS. The kch123 extraction returned a LAST_7D
+# window of 5 closed lots in 5 clusters, and the estimator reported
+# "PROFITABLE at 95% -- +47.06%, interval [+47.05%, +47.07%]": an
+# interval 0.02pp wide on five observations. At that n the ratio
+# estimator's variance collapses and the verdict is noise wearing a
+# significance label. LAST_14D on the same account returned "LOSING at
+# 95%" on 17 lots.
+#
+# So the verdict is SUPPRESSED below the threshold rather than quoted.
+# The point estimate and the interval are still reported -- they are
+# facts about the window -- but the word PROFITABLE is not available to
+# a sample that cannot support it.
+MIN_VERDICT_CLUSTERS = 30
+INSUFFICIENT = "NOT_DEMONSTRATED_INSUFFICIENT_CLUSTERS"
+
+
+def gate_verdict(r: dict) -> dict:
+    n = r.get("edge_clusters") or 0
+    if n < MIN_VERDICT_CLUSTERS:
+        r["edge_verdict_raw"] = r.get("edge_verdict")
+        r["edge_verdict"] = ("%s (%s clusters < %d; the estimator's own "
+                             "verdict is retained as edge_verdict_raw and "
+                             "must not be quoted)"
+                             % (INSUFFICIENT, n, MIN_VERDICT_CLUSTERS))
+    return r
+
+
+def window(fills: list, days: int | None, as_of: float | None = None) -> list:
+    """The last `days` before AS_OF -- a common wall-clock reference, not
+    the account's own last fill.
+
+    WHY THIS MATTERS AND WHY IT WAS WRONG. Anchoring to max(f["t"]) makes
+    "LAST_7D" mean "the last seven days THIS ACCOUNT traded". kch123's
+    pull ends 2026-06-29, so its "current regime" was late June while
+    RN1's was mid-September. Windows anchored that way are not
+    comparable across accounts and are not the current regime, which is
+    the one thing the directive says controls deployment decisions.
+    """
     if days is None or not fills:
         return fills
-    cut = max(f["t"] for f in fills) - days * 86400
-    return [f for f in fills if f["t"] >= cut]
+    ref = as_of if as_of is not None else max(f["t"] for f in fills)
+    return [f for f in fills if f["t"] >= ref - days * 86400]
 
 
 def main(argv=None) -> int:
@@ -400,8 +441,15 @@ def main(argv=None) -> int:
     ap.add_argument("--path")
     ap.add_argument("--meta")
     ap.add_argument("--requested-start")
+    # A COMMON wall-clock anchor for every current-regime window, so
+    # "last 7 days" means the same seven days for every account. Default
+    # is now. Never the account's own last fill.
+    ap.add_argument("--as-of", default=None,
+                    help="ISO8601 or unix seconds; default now(UTC)")
     ap.add_argument("--out", default=str(HERE / "evidence" / "whales"))
     a = ap.parse_args(argv)
+    as_of = _epoch(a.as_of) if a.as_of else datetime.now(
+        timezone.utc).timestamp()
 
     out = Path(a.out)
     out.mkdir(parents=True, exist_ok=True)
@@ -413,6 +461,9 @@ def main(argv=None) -> int:
         fills, pay, why = load_u2()
 
     cen = census(a.wallet, a.address, a.source, fills, why, a.requested_start)
+    cen["AS_OF_UTC"] = datetime.fromtimestamp(as_of, timezone.utc).isoformat()
+    cen["DAYS_SINCE_LAST_FILL_AT_AS_OF"] = round(
+        (as_of - max(f["t"] for f in fills)) / 86400.0, 2) if fills else None
     print(json.dumps(cen, indent=1), flush=True)
     if not fills:
         (out / f"{a.wallet}_census.json").write_text(json.dumps(cen, indent=1))
@@ -424,10 +475,14 @@ def main(argv=None) -> int:
     replays = {}
     for label, days in (("LIFETIME", None), ("LAST_60D", 60),
                         ("LAST_30D", 30), ("LAST_14D", 14), ("LAST_7D", 7)):
-        sub = window(fills, days)
+        sub = window(fills, days, as_of)
         if not sub:
+            replays[label] = {"_window_fills": 0,
+                              "_window_days_requested": days,
+                              "edge_verdict": "NO_FILLS_IN_WINDOW"}
+            print("%-10s NO FILLS IN WINDOW" % label, flush=True)
             continue
-        r = M.replay(sub, payouts=pay)
+        r = gate_verdict(M.replay(sub, payouts=pay))
         replays[label] = {k: v for k, v in r.items() if k not in drop}
         replays[label]["_window_fills"] = len(sub)
         replays[label]["_window_days_requested"] = days
@@ -436,7 +491,7 @@ def main(argv=None) -> int:
                  round(r.get("realized_merge_pnl") or 0, 2),
                  r.get("edge_verdict")), flush=True)
 
-    grids = {label: completion_grid(window(fills, days))
+    grids = {label: completion_grid(window(fills, days, as_of))
              for label, days in (("LIFETIME", None), ("LAST_30D", 30),
                                  ("LAST_7D", 7))}
 
