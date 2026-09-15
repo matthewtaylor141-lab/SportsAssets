@@ -42,6 +42,14 @@ jobs:
           - wallet: kch123
             address: "0x6a72f61820b26b1fe4d956e17b6dc2a1ea3033ee"
             workers: "3"
+          # BETA48: ferrariChampions2026 was missing from this matrix
+          # entirely, so no extraction has ever covered it. The address is
+          # the one migration 021_seed_dossier_promotions.sql seeds; it is
+          # NOT 0x2c33…0563, which engine-diagnostic.yml:355 keys as a
+          # separate account.
+          - wallet: ferrarichampions2026
+            address: "0xfe787d2da716d60e8acff57fb87eb13cd4d10319"
+            workers: "5"
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
@@ -75,6 +83,34 @@ jobs:
           set -e
           python edge-engine/scripts/gen_calib.py
           python edge-engine/scripts/gen_type_calib.py
+      # BETA48. The raw pull only ever leaves this runner as an artifact,
+      # and the research container cannot reach an artifact. So the
+      # canonical reconstruction runs HERE, against the raw fills, and its
+      # compact result comes back down the same blob channel the
+      # calibration tables use -- about 9 KB base64 per wallet.
+      #
+      # It is the SAME script the research container runs against the
+      # retained RN1 snapshot, so RN1 gets two independent measurements
+      # that can be reconciled against each other.
+      - name: BETA48 canonical reconstruction (census + replay + grid)
+        env:
+          W: ${{ matrix.wallet }}
+          A: ${{ matrix.address }}
+          START: ${{ github.event.inputs.start_date }}
+        run: |
+          set -e
+          D=/tmp/whale/$W
+          python research/beta48/whale_reconstruct.py \
+            --source csv --wallet "$W" --address "$A" \
+            --path "$D/trades_raw.csv" --meta "$D/markets_meta.csv" \
+            --requested-start "${START:-2024-06-01}" \
+            --out "$D/beta48"
+      - name: Emit BETA48 reconstruction blob
+        run: |
+          D=/tmp/whale/${{ matrix.wallet }}/beta48
+          W=$(echo "${{ matrix.wallet }}" | tr a-z A-Z)
+          echo "# BETA48 reconstruction, gzip+base64, one line #"
+          echo "BETA48_${W} $(gzip -c $D/${{ matrix.wallet }}_reconstruction.json | base64 -w0)"
       - name: Emit calibration blobs (the log IS the return channel)
         run: |
           D=/tmp/whale/${{ matrix.wallet }}
