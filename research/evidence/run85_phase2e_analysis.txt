@@ -1,0 +1,289 @@
+RUN 85 PHASE 2E -- ANALYSIS OF THE FROZEN CLOSURE RUN
+archive : run85_phase2e_20260913T120732Z
+NOTHING IN THIS FILE CONTACTS THE VENUE.
+
+=== 1. DETAIL/BOOK ROUTE IDENTITY, AND WHAT IT DOES NOT COVER ===
+probes: 44
+   book    IDENTITY_MATCH                 22
+   detail  IDENTITY_MATCH                 22
+distinct requested slugs sharing one response body: 0
+
+  SLUG LIMB: verified. Every request's response carried back the slug
+  that was asked for, on BOTH routes -- market-detail and book -- and
+  no two different requested slugs returned one body. Phase 2D only
+  ever checked detail, and only checked that FIELD VALUES agreed,
+  which is a different and weaker question than binding.
+
+  EVENT-ID LIMB: NOT TESTABLE. responses carrying an event id = 0.
+  The detail payload does not include an event id field at all, so
+  REQUESTED_EVENT_ID == RESPONSE_EVENT_ID could not be evaluated on a
+  single probe. That limb is RESPONSE_ID_NOT_IDENTIFIED for all 44
+  probes, and '44 IDENTITY_MATCH' must not be read as covering it.
+
+  Event identity therefore still rests on the /v1/events payload's own
+  market->event grouping, which is native and structured, but is NOT
+  re-confirmed by the per-market routes.
+
+DETAIL_ROUTE_IDENTITY_VERIFIED = YES (slug limb, both routes)
+EVENT_ID_ROUTE_IDENTITY        = NOT_IDENTIFIED (venue returns none)
+
+=== 2. PAGINATION PROOF ===
+   offset   http=200 events=100 overlap_with_page1=  0 reproduces_page1=False -> ADVANCES
+            id_set_sha256 = a2f9fb37ead216046f4928769ac81fd5f106a7041a899cc053ae78eb1903d01d
+   page     http=200 events=100 overlap_with_page1=100 reproduces_page1=True  -> IGNORED
+            id_set_sha256 = 391d77a269510fc6651ef7f9d0f2c5dc9b1f235ba8b25e7bd6e4be97f6db8ca6
+
+  `page` returned HTTP 200 with a full 100-event body whose id-set
+  hash is IDENTICAL to page 1's, and 100 of 100 ids overlap. It is
+  silently ignored, exactly as in Phase 2D. `offset` advances with
+  zero overlap. The hashes are archived so this is checkable from the
+  bytes rather than from this sentence.
+
+EVENT_PAGINATION_VERIFIED = YES, mechanism = offset
+
+=== 3/4. FRAME, TAXONOMY, AND A DEFECT IN MY OWN STOP RULE ===
+walk stopped: SUFFICIENCY_CRITERION_MET after 17 pages
+
+   FUTURES              14504
+   GAME_PROP             9423
+   GAME_BINARY           4956
+   GAME_THREE_WAY          27
+   OTHER_STRUCTURED         4
+
+PHASE2D_GAME_LEVEL_FLOOR = 4956   (2D's frozen allowlist, on THIS walk)
+PHASE2E_GAME_LEVEL_COUNT = 4983   (+27 GAME_THREE_WAY)
+GAME_PROP counted separately and excluded = 9423
+
+GAME_ROWS_DISCOVERED          = 4983
+GAME_UNIQUE_EVENTS_DISCOVERED = 50
+GAME_ACTIVE_EVENTS_DISCOVERED = 41
+SPORT_DISTRIBUTION_BY_EVENT   = {'boxing': 1, 'uecl': 1, 'nfl': 14, 'None': 24, 'pdc': 1, 'arg2': 4, 'esports': 1, 'cfb': 1, 'lmx': 2, 'mls': 1}
+NORMALIZED_STATE_BY_EVENT     = {'PREGAME': 41, 'ENDED': 2, 'SUSPENDED': 1, 'CANCELLED': 4, 'NOT_IDENTIFIED': 1, 'POSTPONED': 1}
+
+  DEFECT 1. MY SUFFICIENCY CRITERION STOPPED THE WALK TOO EARLY, AND
+  IT CUT OFF EXACTLY THE DIVERSITY SECTION 6 NEEDED.
+
+  The criterion I preregistered -- 40 events carrying a GAME_BINARY
+  market across 4 sports -- was met at page 16 and the walk stopped.
+  Phase 2D, which ran to a 24-page bound, found the game-level mass on
+  pages 17-23. So the criterion fired one page before the richest part
+  of the list and this run saw 50 game events where 2D saw 359.
+
+  The criterion counted EVENTS and SPORTS. It did not count LIVE
+  events, tick sizes, price bands or queue shapes -- the dimensions
+  section 6 actually asks the cohort to span. A stop rule should be
+  written against the thing it is protecting, and mine was not.
+
+  DEFECT 2. SPORT IS UNREADABLE ON 24 OF 50 GAME EVENTS.
+  primaryTag is null on those, and they are the UFC events. Sport
+  stratification is running blind on nearly half the frame, and a
+  cohort 'spanning 4 sports' counts None as one of them.
+
+=== 6/7. COHORT AND NEAR-TOUCH QUEUE METRIC ===
+market                                       sport   state    queue      tick   
+aec-ufc-josvan-alepan-2026-09-19             None    PREGAME  BALANCED   0.01   
+aec-nfl-chi-car-2026-09-13                   nfl     PREGAME  BALANCED   0.005  
+atc-lmx-pue-tol-2026-09-04-draw              lmx     PREGAME  BALANCED   0.01   
+aec-boxing-canalv-chrmbi-2026-10-31-canalv-c boxing  PREGAME  BALANCED   0.01   
+aec-ufc-armtsa-mauruf-2026-09-19             None    PREGAME  BALANCED   0.01   
+aec-nfl-bal-ind-2026-09-13                   nfl     PREGAME  BALANCED   0.005  
+atc-lmx-que-cmf-2026-09-05-cmf               lmx     PREGAME  BID_HEAVY  0.01   
+aec-ufc-patpit-doocho-2026-09-19             None    PREGAME  BID_HEAVY  0.01   
+aec-nfl-atl-pit-2026-09-13                   nfl     PREGAME  BALANCED   0.005  
+aec-ufc-renmoi-briort-2026-09-19             None    PREGAME  BALANCED   0.01   
+
+queue: {'BALANCED': 8, 'BID_HEAVY': 2}
+state: {'PREGAME': 10}
+sport: {'None': 4, 'nfl': 3, 'lmx': 2, 'boxing': 1}
+tick : {'0.01': 7, '0.005': 3}
+
+  THE QUEUE METRIC BEHAVES DIFFERENTLY FROM THE RETRACTED ONE, AND
+  THAT IS THE POINT. Phase 2C's whole-ladder dollar measure called 18
+  of 19 books ASK_HEAVY. Quantity within one tick calls these 8
+  BALANCED and %d BID_HEAVY, with no ASK_HEAVY at all. Same venue,
+  different instrument, opposite picture -- which is what a
+  contaminated measure being replaced looks like.
+
+  GAME_LEVEL_COHORT_DIVERSITY = INSUFFICIENT, on three counts:
+    * every market is PREGAME. Not one LIVE market was selected, so
+      the pregame/live contrast section 6 names is absent entirely.
+    * the sports are {'None': 4, 'nfl': 3, 'lmx': 2, 'boxing': 1} -- no CFB, no MLB, and 'None' is the UFC
+      rows whose sport the venue does not label.
+    * queue shapes span two of three classes and price bands were
+      never a stratification key at all.
+
+  The cohort is honestly built -- round-robin over (sport, state),
+  one market per event, ordered by native event id, no slug anywhere.
+  Phase 2D DEFECT 2 is fixed. What is wrong now is upstream: the
+  frame it selected from was truncated by DEFECT 1.
+
+=== 11. EXACT-HORIZON SCHEDULER -- TWO SEPARATE QUESTIONS ===
+plan: 15 reads over 77.5 s, mean 0.194 rps, min gap 2.5 s, throttled during test: False
+
+A. REQUEST PLACEMENT
+horizon       n       median          p90          max
+5             3      575.2ms      879.5ms      879.5ms
+10            3     1577.6ms     1891.9ms     1891.9ms
+30            3     2399.2ms     2582.7ms     2582.7ms
+60            3     2374.2ms     2491.0ms     2491.0ms
+
+  lateness against target, in schedule order:
+     target    0.0s  late +2.601s
+     target    2.5s  late +2.417s
+     target    5.0s  late +2.026s
+     target    7.5s  late +1.537s
+     target   10.0s  late +1.024s
+     target   12.5s  late +0.525s
+     target   17.5s  late +0.125s
+     target   22.5s  late +0.019s
+     target   27.5s  late +0.018s
+     target   30.0s  late +0.019s
+     target   32.5s  late +0.018s
+     target   47.5s  late +0.143s
+     target   60.0s  late +0.110s
+     target   62.5s  late +0.043s
+     target   77.5s  late +0.146s
+
+  THE ERROR IS A DECAYING STARTUP DEBT, NOT JITTER. The first read
+  fired 2.60 s late and each subsequent read is less late, settling
+  to about 0.02 s. Request latency is not the cause -- it is 31 ms
+  median and 145 ms at worst. The cause is that the plan's t0 was
+  taken while the pacer still owed spacing from the preceding cohort
+  reads, so the whole plan started displaced and then caught up as
+  its own slack absorbed the debt.
+
+  That is a real defect and it is mine: a timed plan must begin from
+  a drained pacer, and the driver did not drain it. It is also
+  entirely fixable and does not implicate the venue.
+
+  EXACT_HORIZON_REQUEST_PLACEMENT = DEMONSTRATED, WITH A NAMED
+  STARTUP DEFECT. Once settled, placement error is ~20 ms.
+
+B. MARKOUT OBSERVABILITY -- THE QUESTION THAT ACTUALLY MATTERS
+market                                           5s    10s    30s    60s
+aec-ufc-josvan-alepan-2026-09-19               SAME   SAME   SAME   SAME
+aec-nfl-chi-car-2026-09-13                      NEW    NEW    NEW    NEW
+atc-lmx-pue-tol-2026-09-04-draw                SAME   SAME    NEW    NEW
+
+   h=5     venue book state CHANGED in 1 of 3 subjects
+   h=10    venue book state CHANGED in 1 of 3 subjects
+   h=30    venue book state CHANGED in 2 of 3 subjects
+   h=60    venue book state CHANGED in 2 of 3 subjects
+
+  A MARKOUT NEEDS TWO DISTINCT BOOK STATES. At 5 s, 1 of 3 subjects
+  returned the SAME venue transactTime as t0 -- the identical book,
+  re-served. One subject returned one transactTime for all five reads
+  across the whole 60 s span; another was serving a book stamped 22
+  minutes before the request.
+
+  So the 5 s markout is not blocked by the rate limit, and it is not
+  blocked by scheduling. On quiet pregame markets it is blocked
+  because THE BOOK DOES NOT MOVE. Placing a read at t+5.000 s buys
+  nothing when the venue hands back the state from t.
+
+  EXACT_5S_SCHEDULER_EMPIRICALLY_VERIFIED = NO, as a clean claim.
+  The runner asserted YES on the grounds that no throttle fired during
+  the test. That was the wrong test. Split it:
+     EXACT_5S_REQUEST_PLACEMENT_FEASIBLE = YES
+     EXACT_5S_MARKOUT_OBSERVED           = 1 of 3 subjects
+     EXACT_5S_MARKOUT_GENERALLY_USABLE   = NOT_IDENTIFIED
+
+  This also reframes the whole horizon question. Book-update cadence,
+  not request cadence, may be the binding constraint on short
+  markouts -- and that is measurable, on a bigger sample, before any
+  long capture is designed around a 5 s offset.
+
+=== 10. RATE CONTROL ===
+HTTP_429_COUNT = 1
+   {'event': '429', 'retry_after': '10', 'slept_s': 10.0, 'spacing_before': 2.0, 'spacing_after': 4.0}
+venue requests spent = 88 of 220 disclosed
+final pacer spacing  = 2.0 s
+
+  A second 429 at nominal 0.5 rps, on a second consecutive run, again
+  answered with Retry-After: 10 and again fully honoured. Two runs,
+  two 429s: 0.5 rps is not a safe rate, it is a rate the venue
+  tolerates most of the time.
+  0.5_RPS_UNCONDITIONALLY_SAFE = NO
+  RPS_LIMIT_NOT_ESTABLISHED    = CARRIED FORWARD
+  Nothing here argues for raising the rate.
+
+=== 12. CFB TASK #48 RECHECK, ACROSS BOTH ARCHIVES ===
+TASK48_PRIOR_CONCLUSION, recorded verbatim and NOT altered:
+  "college football moneylines and spreads never map -- the grammar
+   class finds no full-game per-side contract (the venue's atc rows
+   for cfb are segment props) so no aec-cfb book has ever opened"
+
+PHASE 2E walk (stopped early at the sufficiency criterion):
+   aec-cfb-* game-level rows found: 1
+      aec-cfb-loulaf-usc-2026-09-12          football_team_full_game_winner   MARKET_STATUS_RESOLVED
+
+PHASE 2D walk (24 pages, the deeper one):
+   aec-cfb-* game-level rows: 130
+   state: {'MARKET_STATUS_RESOLVED': 1, 'MARKET_STATUS_OPEN': 129}
+   type : {'football_team_full_game_winner': 130}
+   two-sided marketSides: 130 of 130
+
+  On 2E alone the answer would rest on ONE row, and that row is
+  already resolved. The deeper 2D walk carries 130, of which 129 are
+  currently OPEN, all 130 two-sided, every one typed
+  football_team_full_game_winner -- the full-game per-side
+  contract the prior conclusion says does not exist.
+
+CURRENT_CFB_MONEYLINE_CONTRACTS_FOUND = YES
+
+  WHAT THIS DOES NOT SAY. It is evidence about the venue NOW. Task
+  #48 was a conclusion about the venue THEN, and neither archive
+  holds point-in-time evidence from that instant, so nothing here
+  claims the conclusion was wrong when it was drawn. The historical
+  evidence is untouched.
+
+  What it does say is that it cannot be carried forward as a
+  present-tense fact, and that the desk's CFB mapping work should be
+  re-derived against current venue rows rather than against it.
+TASK48_CONCLUSION_SAFE_TO_CARRY_FORWARD = NO
+
+=== 14. PHASE 2E VERDICTS, ANALYST-JUDGED ===
+DETAIL_ROUTE_IDENTITY_VERIFIED          = YES (slug limb, both routes)
+EVENT_ID_ROUTE_IDENTITY                 = NOT_IDENTIFIED (venue returns no event id)
+EVENT_PAGINATION_VERIFIED               = YES (offset; page ignored)
+GAME_LEVEL_MARKETS_FOUND                = YES
+PHASE2D_GAME_LEVEL_FLOOR                = 4956
+PHASE2E_GAME_LEVEL_ROWS                 = 4983
+PHASE2E_GAME_LEVEL_UNIQUE_EVENTS        = 50
+GAME_LEVEL_COHORT_DIVERSITY             = INSUFFICIENT
+GAME_STATE_CLASSIFICATION_READY         = YES
+NEAR_TOUCH_QUEUE_METRIC_READY           = YES  {'BALANCED': 8, 'BID_HEAVY': 2}
+EXACT_5S_SCHEDULER_EMPIRICALLY_VERIFIED = NO
+   EXACT_5S_REQUEST_PLACEMENT_FEASIBLE  = YES (startup defect named)
+   EXACT_5S_MARKOUT_OBSERVED            = 1 of 3 subjects
+   EXACT_5S_MARKOUT_GENERALLY_USABLE    = NOT_IDENTIFIED
+CURRENT_CFB_MONEYLINE_CONTRACTS_FOUND   = YES
+TASK48_CONCLUSION_SAFE_TO_CARRY_FORWARD = NO
+HTTP_429_COUNT                          = 1
+PMUS_FEES_RESOLVED                      = NO
+PASSIVE_REALIZABLE_EDGE                 = NOT_IDENTIFIED
+READY_FOR_MULTI_DAY_PHASE2_CAPTURE      = NO
+
+  AGAINST THE APPROVAL GATE, ITEM BY ITEM:
+    1 detail request identity verified ......... YES (slug limb)
+    2 event pagination actually advances ....... YES
+    3 diverse events, no alphabetical bias ..... BIAS FIXED,
+                                                 DIVERSITY NOT MET
+    4 game-state/time fields understood ........ YES
+    5 near-touch queue metrics valid ........... YES
+    6 scheduler produces useful horizons ....... NOT ESTABLISHED
+    7 evidence archive integrity ............... YES
+
+  Gate items 3 and 6 fail, so READY is NO. Both failures trace to
+  this run rather than to the venue: a stop rule I wrote against the
+  wrong quantity, and a scheduler I started from an undrained pacer.
+
+  The item-6 failure is the more interesting one, because fixing my
+  scheduler will not fix it. The binding constraint on a 5 s markout
+  looks like the venue's BOOK-UPDATE cadence, not our request
+  cadence, and that has to be measured on a real sample before any
+  capture is designed around a short horizon.
+
+  Fee resolution is not required for passive observational collection
+  and is not claimed: PMUS_FEES_RESOLVED = NO, and no borrowed fee
+  formula entered anything above.

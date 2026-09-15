@@ -1,0 +1,8 @@
+metric,session_id,value
+venue_timestamp_decreases,54a22659-e1cc-4a2c-9f70-94442522c79c,1
+venue_timestamp_decreases,090fbfdf-a61a-43bc-a83a-2463ccd61785,0
+venue_timestamp_decreases,ceb92c1f-e263-4a8a-b961-291dfcf82844,1
+venue_timestamp_repeats,54a22659-e1cc-4a2c-9f70-94442522c79c,529
+venue_timestamp_repeats,090fbfdf-a61a-43bc-a83a-2463ccd61785,170
+venue_timestamp_repeats,ceb92c1f-e263-4a8a-b961-291dfcf82844,426
+byte_identical_duplicate_payloads,,0

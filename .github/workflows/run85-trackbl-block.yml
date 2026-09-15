@@ -1,0 +1,155 @@
+# RUN 85 TRACK B-L -- one frozen liquid-cohort BLOCK.
+#
+# A SEPARATE experiment. Track A is frozen, unmodified and still running, and
+# nothing here is ever pooled into it.
+#
+# THE RATE GATE IS THIS CONCURRENCY GROUP, and it is the only reason this job
+# is allowed to contact the venue at all. It deliberately shares Track A's
+# group name, so GitHub guarantees at the platform level that the two never
+# execute at the same time. That is a guarantee about ACTUAL EXECUTION, which
+# is the only kind that survives GitHub's cron nondeterminism.
+#
+# Why nothing weaker works. Two independently paced workflows can collide
+# however each paces itself, because neither stream's spacing bounds the
+# combined minimum gap -- an average-rate budget is not a spacing proof. And a
+# pre-flight "is Track A running?" check cannot close the hole either: GitHub
+# creates a delayed scheduled run's record only when it actually starts. Track
+# A run #4 had a cron boundary of 18:00:00Z and a record created at 20:30:42Z,
+# so for two and a half hours that run was invisible to any API check.
+#
+# THE COST, STATED. If a Track A segment falls due while this block is running,
+# Track A WAITS -- its start is delayed by up to one block length. It cannot be
+# dropped by this job: a drop needs two runs pending in the group at once, and
+# Track A's crons are six hours apart while a block is twenty minutes. The
+# owner accepted that trade explicitly.
+#
+# DISPATCH ONLY. No cron. A block runs when someone asks for one, so the delay
+# risk to Track A is never incurred unattended.
+#
+# CAPABILITY BOUNDARY, as authorized. GET only, public gateway only, no
+# credential, no wallet, no signer, no auth header, no trading SDK, no order or
+# cancel route, no POST/PUT/PATCH/DELETE. 2.5 s minimum spacing, Retry-After
+# honoured, rate never raised. mirror_live stays false.
+
+name: run85-trackbl-block
+
+on:
+  workflow_dispatch:
+    inputs:
+      block:
+        description: "Block identifier, e.g. BLOCK_1"
+        required: false
+        default: "BLOCK_1"
+
+permissions:
+  contents: write
+
+# Shared with run85-phase2-capture ON PURPOSE. This is the rate gate.
+concurrency:
+  group: run85-phase2-capture
+  cancel-in-progress: false
+
+jobs:
+  block:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency
+        run: python -m pip install --quiet "httpx==0.27.2"
+
+      - name: Offline tests must pass before any venue contact
+        run: |
+          set -euo pipefail
+          python research/test_run85_trackbl_block.py
+          python research/test_run85_trackb_fees.py
+          python research/test_run85_phase2_capture.py
+          python research/test_run85_phase2b.py
+          python research/test_run85_pmus_collector.py
+
+      - name: Confirm the job carries no credential
+        run: |
+          set -euo pipefail
+          python - <<'PY'
+          import os, sys
+          bad = [k for k in os.environ
+                 if any(t in k.upper() for t in
+                        ("POLYMARKET", "PRIVATE_KEY", "SIGNER", "WALLET",
+                         "RENDER", "DATABASE_URL", "PMUS_"))]
+          if bad:
+              print("CREDENTIAL_PRESENT_IN_ENV: %s" % sorted(bad))
+              sys.exit(1)
+          print("NO_CREDENTIAL_IN_ENV = CONFIRMED")
+          PY
+
+      - name: Record that this run held the shared lock
+        run: |
+          set -euo pipefail
+          # The concurrency group means Track A cannot have been running while
+          # this line executes. Stamped so the claim is auditable afterwards
+          # from the job log rather than taken on trust.
+          echo "SHARED_CONCURRENCY_GROUP = run85-phase2-capture"
+          echo "LOCK_HELD_FROM_UTC = $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - name: Discover, freeze the block, capture
+        env:
+          BLOCK: ${{ github.event.inputs.block || 'BLOCK_1' }}
+        run: |
+          set -euo pipefail
+          STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+          OUT="research/evidence/trackbl/run85_trackbl_${BLOCK}_${STAMP}"
+          echo "RUN85_BL_STAMP=$STAMP" >> "$GITHUB_ENV"
+          echo "RUN85_BL_OUT=$OUT" >> "$GITHUB_ENV"
+          python research/run85_trackbl_block.py --out "$OUT" --block "$BLOCK"
+
+      # if: always() BECAUSE A FAILED BLOCK IS EXACTLY THE BLOCK WHOSE EVIDENCE
+      # MATTERS. Without it, a non-zero exit from the runner skips this step and
+      # the sealed diagnostics survive only as an Actions artifact, which the
+      # analyst's egress cannot reach -- which is what happened to BLOCK_2. The
+      # runner seals its evidence before it exits, so there is always something
+      # to commit. This does NOT rehabilitate the run: the capture step has
+      # already failed, so the job's conclusion stays failure either way.
+      - name: Commit the sealed block
+        if: always() && env.RUN85_BL_OUT != ''
+        run: |
+          set -euo pipefail
+          OUT="${RUN85_BL_OUT}"
+          ls -la "$OUT"
+          du -sh "$OUT"
+          git config user.name "Claude"
+          git config user.email "noreply@anthropic.com"
+          git add -- "$OUT"
+          git commit -m "Run 85 Track B-L: block ${RUN85_BL_STAMP} sealed [skip render]" \
+                     -m "Co-Authored-By: Claude Opus 5 <noreply@anthropic.com>" \
+                     -m "Claude-Session: https://claude.ai/code/session_01VWCVhVqpQNcNptWpp25jDC"
+          for i in 1 2 3 4; do
+            if git pull --rebase origin claude/session-njaewf \
+               && git push -u origin claude/session-njaewf; then
+              echo "pushed"
+              exit 0
+            fi
+            git rebase --abort 2>/dev/null || true
+            sleep $((2 ** i))
+          done
+          echo "PUSH_FAILED -- the artifact below still carries the bytes"
+          exit 1
+
+      - name: Record that this run released the shared lock
+        if: always()
+        run: echo "LOCK_RELEASED_UTC = $(date -u +%Y-%m-%dT%H:%M:%SZ)"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: RUN85_TRACKBL_${{ env.RUN85_BL_STAMP }}
+          path: ${{ env.RUN85_BL_OUT }}
+          retention-days: 90
+          if-no-files-found: warn

@@ -1,0 +1,235 @@
+==============================================================================
+RUN 85 TRACK B-L -- BLOCK_4 ECONOMIC READ
+==============================================================================
+evidence      run85_trackbl_BLOCK_4_20260914T194859Z
+pairs (lane x cycle t0, both sides quoted)   16
+cohort bands  {'NEAR_MID': 4, 'MODERATE': 8, 'TAIL': 4}
+
+DISCOVERY_FRAME_SCOPE = BOUNDED_PREFIX_OF_CURRENT_ACTIVE_UNIVERSE
+DISCOVERY_LIST_EXHAUSTED = NO
+
+------------------------------------------------------------------------------
+1. HYPOTHETICAL PAIRS, PRICES FROZEN AT t0
+------------------------------------------------------------------------------
+   LONG maker = b0 ; SHORT maker = 1 - a0 ; PAIR_COST = 1 - (a0 - b0)
+   PAIR_DISPLAYED_GROSS = a0 - b0   (displayed, not realized)
+
+   market                                     cyc b0       a0       PAIR_COST  DISP_GROSS flag
+   aec-ufc-josvan-alepan-2026-09-19           0   0.5400   0.5500   0.9900     0.0100     
+   aec-ufc-josvan-alepan-2026-09-19           1   0.5400   0.5500   0.9900     0.0100     
+   aec-ufc-josvan-alepan-2026-09-19           2   0.5400   0.5500   0.9900     0.0100     
+   aec-ufc-josvan-alepan-2026-09-19           3   0.5400   0.5500   0.9900     0.0100     
+   aec-ufc-taitui-robdes-2026-09-19           0   0.1700   0.1800   0.9900     0.0100     
+   aec-ufc-taitui-robdes-2026-09-19           1   0.1700   0.1800   0.9900     0.0100     
+   aec-ufc-taitui-robdes-2026-09-19           2   0.1700   0.1800   0.9900     0.0100     
+   aec-ufc-taitui-robdes-2026-09-19           3   0.1700   0.1800   0.9900     0.0100     
+   aec-ufc-renmoi-briort-2026-09-19           0   0.6500   0.6600   0.9900     0.0100     
+   aec-ufc-renmoi-briort-2026-09-19           1   0.6500   0.6600   0.9900     0.0100     
+   aec-ufc-renmoi-briort-2026-09-19           2   0.6500   0.6600   0.9900     0.0100     
+   aec-ufc-renmoi-briort-2026-09-19           3   0.6500   0.6600   0.9900     0.0100     
+   aec-ufc-gabste-seasha-2026-09-19           0   0.9000   0.9100   0.9900     0.0100     
+   aec-ufc-gabste-seasha-2026-09-19           1   0.9000   0.9100   0.9900     0.0100     
+   aec-ufc-gabste-seasha-2026-09-19           2   0.9000   0.9100   0.9900     0.0100     
+   aec-ufc-gabste-seasha-2026-09-19           3   0.9000   0.9100   0.9900     0.0100     
+
+   DEGENERATE_BOOK pairs: 0 of 16. Their bid side had collapsed, so the
+   'displayed gross' is an artefact of a broken book and is EXCLUDED
+   from every headline figure below.
+
+------------------------------------------------------------------------------
+2. HORIZON CLOCK -- ACTUAL ELAPSED, NEVER NOMINAL
+------------------------------------------------------------------------------
+   target eligible  nearest obs min max            max |error|   
+   5s     16        5.000          5.000          0.000          
+   10s    16        10.000         10.001         0.001          
+   30s    16        29.999         30.002         0.002          
+   60s    16        59.999         60.000         0.001          
+   5m     12        300.000        300.000        0.000          NO_OBS_INSIDE_WINDOW dropped=4
+   10m    8         600.000        600.000        0.000          NO_OBS_INSIDE_WINDOW dropped=8
+   15m    4         900.000        900.000        0.000          NO_OBS_INSIDE_WINDOW dropped=12
+
+   A cycle counts as eligible for H only if it reaches H AND has an
+   observation inside the window. Touch-by-H uses measured elapsed <= H.
+
+------------------------------------------------------------------------------
+3. TOUCH UPPER BOUNDS (F3: touched counted as filled) -- NOT FILLS
+------------------------------------------------------------------------------
+   LONG_TOUCH  <=> best_ask(h) <= b0
+   SHORT_TOUCH <=> best_bid(h) >= a0     (short maker 1-a0 == sell at a0)
+
+   h     eligible long   short  either  both   either %  both %    long-only res short-only res
+   5s    16       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   10s   16       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   30s   16       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   60s   16       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   5m    12       0      0      0       0      0.0%      0.0%      n=0           n=0          
+   10m   8        0      0      0       0      0.0%      0.0%      n=0           n=0          
+   15m   4        0      0      0       0      0.0%      0.0%      n=0           n=0          
+
+   These are TOUCH_UPPER_BOUND_F3. MAKER_FILL_PROBABILITY = NOT_IDENTIFIED.
+   PAIR_COMPLETION_PROBABILITY = NOT_IDENTIFIED.
+
+------------------------------------------------------------------------------
+3b. DESCRIPTIVE -- DID THE t0 LEVELS PERSIST? (not a fill claim)
+------------------------------------------------------------------------------
+   A touch needs the market to come TO our price. This records what the
+   book did instead. It explains the touch counts; it is not evidence
+   about fills and is never promoted to one.
+
+   market                                     cyc best bid path          best ask path         
+   aec-ufc-josvan-alepan-2026-09-19           0   0.5400                 0.5500                
+   aec-ufc-josvan-alepan-2026-09-19           1   0.5400                 0.5500                
+   aec-ufc-josvan-alepan-2026-09-19           2   0.5400                 0.5500                
+   aec-ufc-josvan-alepan-2026-09-19           3   0.5400                 0.5500                
+   aec-ufc-taitui-robdes-2026-09-19           0   0.1700                 0.1800                
+   aec-ufc-taitui-robdes-2026-09-19           1   0.1700                 0.1800                
+   aec-ufc-taitui-robdes-2026-09-19           2   0.1700                 0.1800                
+   aec-ufc-taitui-robdes-2026-09-19           3   0.1700                 0.1800                
+   aec-ufc-renmoi-briort-2026-09-19           0   0.6500                 0.6600                
+   aec-ufc-renmoi-briort-2026-09-19           1   0.6500                 0.6600                
+   aec-ufc-renmoi-briort-2026-09-19           2   0.6500                 0.6600                
+   aec-ufc-renmoi-briort-2026-09-19           3   0.6500                 0.6600                
+   aec-ufc-gabste-seasha-2026-09-19           0   0.9000                 0.9100                
+   aec-ufc-gabste-seasha-2026-09-19           1   0.9000                 0.9100                
+   aec-ufc-gabste-seasha-2026-09-19           2   0.9000                 0.9100                
+   aec-ufc-gabste-seasha-2026-09-19           3   0.9000                 0.9100                
+
+   pairs whose touch price moved at all during their life: 0 / 16
+
+------------------------------------------------------------------------------
+4. SEQUENTIAL COMPLETION -- CONDITIONAL ON A FIRST TOUCH
+------------------------------------------------------------------------------
+   FIRST_LEG_TOUCH_COUNT   0 of 16 pairs
+   LONG_FIRST_COUNT        0
+   SHORT_FIRST_COUNT       0
+
+   COMPLEMENT_TOUCH_WITHIN_5M  _AFTER_FIRST  NOT_OBSERVABLE_FROM_BLOCK_3
+   COMPLEMENT_TOUCH_WITHIN_10M _AFTER_FIRST  NOT_OBSERVABLE_FROM_BLOCK_3
+   COMPLEMENT_TOUCH_WITHIN_15M _AFTER_FIRST  NOT_OBSERVABLE_FROM_BLOCK_3
+
+   BOTH_LEGS_TOUCHED_BY_15M_FROM_T0            0 / 4
+   COMPLEMENT_TOUCH_CONDITIONAL_ON_FIRST_TOUCH  reported above
+   (these are different quantities and are not merged)
+
+------------------------------------------------------------------------------
+5. RESIDUAL RISK -- ONE LEG ONLY, MARKED FROM THE FIRST TOUCH
+------------------------------------------------------------------------------
+   m_h = midpoint, ONLY where both sides remain quoted. Never invented.
+   LONG-first  residual markout_h = m_h - b0
+   SHORT-first residual markout_h = a0 - m_h
+
+   5s    n=0
+   10s   n=0
+   30s   n=0
+   60s   n=0
+   5m    n=0
+   10m   n=0
+   15m   n=0
+
+   no one-legged cycle produced a markable residual
+
+------------------------------------------------------------------------------
+6. COMPLETED-PAIR ECONOMICS -- CONDITIONAL, NOT REALIZED
+------------------------------------------------------------------------------
+   maker theta = -0.0125 (a REBATE). Fee = theta * C * p * (1-p).
+   long leg p = b0 ; short leg p = 1 - a0. The legs are a spread apart,
+   so their rebates are NOT equal in general.
+
+   market                                     cyc DISP_GROSS reb_long_ex reb_short_ex reb_total_ex
+   aec-ufc-josvan-alepan-2026-09-19           0   0.0100     0.003105    0.003094    0.006199   
+   aec-ufc-taitui-robdes-2026-09-19           0   0.0100     0.001764    0.001845    0.003609   
+   aec-ufc-renmoi-briort-2026-09-19           0   0.0100     0.002844    0.002805    0.005649   
+   aec-ufc-gabste-seasha-2026-09-19           0   0.0100     0.001125    0.001024    0.002149   
+
+   PER-CONTRACT figures above are EXACT_UNROUNDED_REBATE.
+   Official rounding is half-even to the cent, PER FILL. Worked examples
+   on the tightest and widest pairs in the cohort:
+
+   aec-ufc-josvan-alepan-2026-09-19  b0=0.5400 a0=0.5500
+     C=1     displayed_gross=$0.0100    exact_rebate=$0.00620   rounded=$0.00    
+     C=10    displayed_gross=$0.1000    exact_rebate=$0.06199   rounded=$0.06    
+     C=100   displayed_gross=$1.0000    exact_rebate=$0.61987   rounded=$0.62    
+     C=1000  displayed_gross=$10.0000   exact_rebate=$6.19875   rounded=$6.19    
+
+   aec-ufc-taitui-robdes-2026-09-19  b0=0.1700 a0=0.1800
+     C=1     displayed_gross=$0.0100    exact_rebate=$0.00361   rounded=$0.00    
+     C=10    displayed_gross=$0.1000    exact_rebate=$0.03609   rounded=$0.04    
+     C=100   displayed_gross=$1.0000    exact_rebate=$0.36088   rounded=$0.36    
+     C=1000  displayed_gross=$10.0000   exact_rebate=$3.60875   rounded=$3.60    
+
+   ACTUAL_REBATE_NOT_IDENTIFIED -- no execution exists, fill
+   fragmentation is unknown, and a fragmented fill can round to zero.
+
+------------------------------------------------------------------------------
+7. PRE_ADVERSE_SELECTION_PAIR_BUDGET
+------------------------------------------------------------------------------
+   CONDITIONAL_ON_BOTH_MODELED_MAKER_EXECUTIONS. Not expected profit,
+   not realized edge, not net expectancy.
+
+   market (C = 100 contracts)                 spread cap  rebates rnd budget     
+   aec-ufc-gabste-seasha-2026-09-19           $1.00       $0.21       $1.21      
+   aec-ufc-josvan-alepan-2026-09-19           $1.00       $0.62       $1.62      
+   aec-ufc-renmoi-briort-2026-09-19           $1.00       $0.56       $1.56      
+   aec-ufc-taitui-robdes-2026-09-19           $1.00       $0.36       $1.36      
+
+   LIQUIDITY_INCENTIVE_REWARD = NOT_VERIFIED
+   EXCLUDED_FROM_PRIMARY_ECONOMICS = YES
+
+------------------------------------------------------------------------------
+8. CAPACITY -- DISPLAYED ONLY
+------------------------------------------------------------------------------
+   market                                     cyc bid qty      ask qty      pair proxy    
+   aec-ufc-josvan-alepan-2026-09-19           0   22297.3200   4003.8900    4003.8900     
+   aec-ufc-josvan-alepan-2026-09-19           1   22297.3200   3346.2600    3346.2600     
+   aec-ufc-josvan-alepan-2026-09-19           2   22286.8000   3538.8400    3538.8400     
+   aec-ufc-josvan-alepan-2026-09-19           3   22286.8000   3269.1000    3269.1000     
+   aec-ufc-taitui-robdes-2026-09-19           0   6682.9000    2187.7800    2187.7800     
+   aec-ufc-taitui-robdes-2026-09-19           1   2587.9000    2187.7800    2187.7800     
+   aec-ufc-taitui-robdes-2026-09-19           2   2587.9000    2187.7800    2187.7800     
+   aec-ufc-taitui-robdes-2026-09-19           3   2587.9000    2187.7800    2187.7800     
+   aec-ufc-renmoi-briort-2026-09-19           0   7388.2400    2256.7000    2256.7000     
+   aec-ufc-renmoi-briort-2026-09-19           1   7388.2400    2256.7000    2256.7000     
+   aec-ufc-renmoi-briort-2026-09-19           2   7388.2400    2256.7000    2256.7000     
+   aec-ufc-renmoi-briort-2026-09-19           3   7388.2400    2256.7000    2256.7000     
+   aec-ufc-gabste-seasha-2026-09-19           0   2318.6400    10917.1000   2318.6400     
+   aec-ufc-gabste-seasha-2026-09-19           1   2318.6400    2851.1000    2318.6400     
+   aec-ufc-gabste-seasha-2026-09-19           2   2318.6400    9734.1000    2318.6400     
+   aec-ufc-gabste-seasha-2026-09-19           3   2318.6400    9834.1000    2318.6400     
+
+   DISPLAYED_CAPACITY_PROXY = the figures above
+   QUEUE_POSITION      = NOT_IDENTIFIED
+   EXECUTABLE_CAPACITY = NOT_IDENTIFIED
+   Visible queue size is NOT executable capacity and says nothing about
+   where our order would sit in the queue.
+
+------------------------------------------------------------------------------
+9. SEGMENTATION
+------------------------------------------------------------------------------
+   PRICE BAND
+     MODERATE               pairs=8   either_touch<=15m=0   both=0  
+     NEAR_MID               pairs=4   either_touch<=15m=0   both=0  
+     TAIL                   pairs=4   either_touch<=15m=0   both=0  
+
+   SPREAD REGIME
+     S_1T                   pairs=16  either_touch<=15m=0   both=0  
+
+   TICK
+     0.01                   pairs=16  either_touch<=15m=0   both=0  
+
+   SPORT
+     NOT_IDENTIFIED         pairs=16  either_touch<=15m=0   both=0  
+
+   LEAGUE
+     NOT_IDENTIFIED         pairs=16  either_touch<=15m=0   both=0  
+
+   NEAR_MID_EXECUTION_EVIDENCE_FROM_BLOCK_3 = NONE
+   The cohort contains zero NEAR_MID markets. Tail-market results are
+   NOT extrapolated to near-mid markets.
+
+------------------------------------------------------------------------------
+10. SCOPE LIMITATION CARRIED WITH EVERY CONCLUSION
+------------------------------------------------------------------------------
+   BLOCK_3 selection came from a BOUNDED PREFIX of the current active
+   universe (DISCOVERY_LIST_EXHAUSTED = NO). This is evidence about the
+   selected cohort only -- not 'the best markets on PMUS', not
+   'whole-board opportunity', not 'current-universe expectancy'.

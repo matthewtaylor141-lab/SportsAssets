@@ -1,0 +1,141 @@
+asking the public market list (discovery only; not evidence)...
+  /markets               tag_id=1    HTTP 200           rows=100  structured-sports=81
+
+using 100 rows from https://gamma-api.polymarket.com/markets
+
+DISCOVERY_ACCEPTING_ORDERS_GATE = ENFORCED  (100 of 100 rows carry 'acceptingOrders')
+
+SPORTS_CLASSIFICATION: 81 admitted on structured evidence; 19 rejected as FALLBACK_TEXT only
+  rejected: Will Shakhtar Donetsk win the 2026-27 UEFA Champio question~uefa
+            context: ...Will Shakhtar Donetsk win the 2026-27 UEFA Champions League Championship?...
+  rejected: Will Elena Rybakina win the 2026 Women’s US Open?  description~tennis
+            context: ...The 2026 U.S. Open tennis tournament is scheduled for August 23 - Sept...
+  rejected: Will Aryna Sabalenka win the 2026 Women’s US Open? description~tennis
+            context: ...The 2026 U.S. Open tennis tournament is scheduled for August 23 - Sept...
+  rejected: Will Alexander Zverev win the 2026 Men's US Open?  description~tennis
+            context: ...The 2026 U.S. Open tennis tournament is scheduled for August 23 - Sept...
+  rejected: Will Ben Shelton win the 2026 Men's US Open?       description~tennis
+            context: ...The 2026 U.S. Open tennis tournament is scheduled for August 23 - Sept...
+
+EVENT_GROUPING_SOURCE counts among admitted candidates:
+  event.id           81
+  event.slug         0
+  event.ticker       0
+  gameId             0
+  conditionId        0
+  questionID         0
+  questionId         0
+  slug               0
+  id                 0
+  per-row fallback   0
+
+--- CANDIDATE TABLE (admitted on structured evidence only) ---
+ 1. Guadalajara Open Akron, Qualification: Varvara Lepchenko vs Nicole Mel
+    id=4489821 cond=0x9931ff5a38f9bcb0457e3c
+    active=True closed=False accepting=True book=True vol24=$574,535 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:1008133 (source event.id)
+ 2. Barranquilla: Claire Liu vs Anna Blinkova
+    id=4489819 cond=0xea6fbe46bc0bca9916c874
+    active=True closed=False accepting=True book=True vol24=$421,953 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:1008132 (source event.id)
+ 3. Noche UFC: Brandon Moreno vs. Joseph Morales (Flyweight, Main Card)
+    id=3985514 cond=0x0845fcf526dc4b9e3634a2
+    active=True closed=False accepting=True book=True vol24=$409,141 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:933056 (source event.id)
+ 4. Houston Astros vs. Tampa Bay Rays
+    id=4287263 cond=0xd9264d1126274daeaa7a81
+    active=True closed=False accepting=True book=True vol24=$370,332 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:975951 (source event.id)
+ 5. Will Orlando City SC win on 2026-09-12?
+    id=4003959 cond=0x29e442cc467be319b54bde
+    active=True closed=False accepting=True book=True vol24=$311,751 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:936875 (source event.id)
+ 6. LoL: Gen.G vs Hanwha Life Esports (BO5) - LCK Playoffs
+    id=4493142 cond=0x46f85d23512a796332a4f5
+    active=True closed=False accepting=True book=True vol24=$256,721 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:1009706 (source event.id)
+ 7. Counter-Strike: G2 vs Legacy (BO5) - FISSURE PLAYGROUND Playoffs
+    id=4497623 cond=0x3913e31a1c1919d956d07a
+    active=True closed=False accepting=True book=True vol24=$255,479 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:1011114 (source event.id)
+ 8. Texas Rangers vs. Arizona Diamondbacks
+    id=4287271 cond=0x924f14d4c0fb43025d6cb0
+    active=True closed=False accepting=True book=True vol24=$241,175 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:975955 (source event.id)
+ 9. Spread: Pittsburgh (-7.5)
+    id=4310520 cond=0xa66c1ee790ee06f9321845
+    active=True closed=False accepting=True book=True vol24=$239,449 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=spreads
+    group=event:944377 (source event.id)
+10. Will SE Palmeiras win on 2026-09-12?
+    id=4066081 cond=0x19f05b7917be379d584101
+    active=True closed=False accepting=True book=True vol24=$236,371 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:949122 (source event.id)
+11. Ohio State vs. Texas
+    id=4045709 cond=0x8bbef2e02646724981fb98
+    active=True closed=False accepting=True book=True vol24=$214,130 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:944447 (source event.id)
+12. Zuffa Boxing: Garcia vs. Benn (Welterweight, Main)
+    id=4082012 cond=0x8a8164998284de255933a7
+    active=True closed=False accepting=True book=True vol24=$207,051 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:950423 (source event.id)
+13. Will Inter Miami CF win on 2026-09-12?
+    id=4003941 cond=0xd0e1328ac748a7d649b115
+    active=True closed=False accepting=True book=True vol24=$204,795 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:936873 (source event.id)
+14. Spread: SE Palmeiras (-1.5)
+    id=4126332 cond=0xe543f1fb9f66d6f22cdf35
+    active=True closed=False accepting=True book=True vol24=$186,097 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=spreads
+    group=event:953294 (source event.id)
+15. US Open ATP: Alexander Zverev vs Ben Shelton
+    id=4490892 cond=0x40bd007c3bf433b3ab9f9d
+    active=True closed=False accepting=True book=True vol24=$176,566 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:1008402 (source event.id)
+16. Will FC Barcelona win on 2026-09-13?
+    id=4019535 cond=0x9db068aee7f73522b83e40
+    active=True closed=False accepting=True book=True vol24=$175,080 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:940190 (source event.id)
+17. Philadelphia Phillies vs. Atlanta Braves
+    id=4287267 cond=0x53f2504b223744d6ba7b36
+    active=True closed=False accepting=True book=True vol24=$169,831 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:975953 (source event.id)
+18. Cincinnati Reds vs. Milwaukee Brewers
+    id=4287265 cond=0xd9c13e36f49566d2aa21e8
+    active=True closed=False accepting=True book=True vol24=$160,812 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:975952 (source event.id)
+19. SE Palmeiras vs. São Paulo FC: O/U 2.5
+    id=4126338 cond=0x73b99c62a7dbec6d841ad5
+    active=True closed=False accepting=True book=True vol24=$145,831 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=totals
+    group=event:953294 (source event.id)
+20. Will CA Talleres win on 2026-09-12?
+    id=4006160 cond=0x316d0a3f04690bf25afc8c
+    active=True closed=False accepting=True book=True vol24=$144,915 tokens=2
+    SPORTS_CLASSIFICATION_PROVENANCE=STRUCTURED_SPORTS_METADATA  source=sportsMarketType=moneyline
+    group=event:937261 (source event.id)
+
+PROPOSED TOKEN IDS:
+  84697572938572732642876077505847013109919721646551043171063870280539349588315   # Guadalajara Open Akron, Qualification: Varvara L | STRUCTURED_SPORTS_METADATA
+  86678697607325035415301144402167255215468684543893990956207990950437281806267   # Barranquilla: Claire Liu vs Anna Blinkova | STRUCTURED_SPORTS_METADATA
+  29593316250860173485681500655272516621071562717109962191321330351423433807292   # Noche UFC: Brandon Moreno vs. Joseph Morales (Fl | STRUCTURED_SPORTS_METADATA
+  26924943409099587884725835387292512623954637197660419126367977003516773219764   # Houston Astros vs. Tampa Bay Rays | STRUCTURED_SPORTS_METADATA
+
+RUN836E_SPORTS_SELECTION_VERIFIED = YES
+wrote tokens.json
