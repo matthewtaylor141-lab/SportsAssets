@@ -48,10 +48,19 @@ carries OPENS from one and MERGES from the other, and they need not match.
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 HERE = Path(__file__).resolve().parent
-BLOBS = HERE / "evidence" / "blobs"
+# INPUT DIRECTORY ONLY. The default below is unchanged from the version
+# committed BEFORE the data existed. `BETA48_BLOBS` redirects which
+# verified evidence set is read and touches nothing else: no statistic,
+# no threshold, no criterion, no band, no account list. It exists
+# because the preregistered default points at run 35028887477, which ran
+# before merge_pnl_by_open_band existed and therefore carries no exact
+# split to test — the test would report NOT_IDENTIFIED for every account
+# on a missing field rather than on the evidence.
+BLOBS = Path(os.environ.get("BETA48_BLOBS") or (HERE / "evidence" / "blobs"))
 OUT = HERE / "evidence"
 
 BANDS = ("0.00-0.10", "0.10-0.30", "0.30-0.50",

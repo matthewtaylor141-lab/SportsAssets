@@ -1,0 +1,2734 @@
+{
+ "CENSUS": {
+  "REFERENCE_ACCOUNT": "ferrarichampions2026",
+  "WALLET_ADDRESS": "0xfe787d2da716d60e8acff57fb87eb13cd4d10319",
+  "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+  "EXTRACTION_UTC": "2026-09-15T23:51:24.205236+00:00",
+  "REQUESTED_RANGE_START": "NOT_IDENTIFIED",
+  "RETURNED_RANGE_START": "2026-03-31T20:13:01+00:00",
+  "RETURNED_RANGE_END": "2026-09-15T23:13:34+00:00",
+  "RETURNED_SPAN_DAYS": 168.13,
+  "ROWS_READ": 1958849,
+  "ROWS_KEPT": 1958843,
+  "UNIQUE_TRADE_IDS": 1912186,
+  "DUPLICATE_FILL_KEYS": 0,
+  "BUY_COUNT": 1958811,
+  "SELL_COUNT": 32,
+  "OTHER_SIDE_COUNT": 0,
+  "DISTINCT_CONDITIONS": 62928,
+  "DISTINCT_MARKET_SLUGS": 62928,
+  "DROP_CENSUS": {
+   "DROP_LEG_NOT_IDENTIFIED": 6,
+   "PAYOUT_ONE_HOT": 62653,
+   "PAYOUT_NOT_ONE_HOT": 275
+  },
+  "COVERAGE_LIMITATIONS": [
+   "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+   "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+   "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+  ],
+  "AS_OF_UTC": "2026-09-15T23:09:17+00:00",
+  "DAYS_SINCE_LAST_FILL_AT_AS_OF": -0.0
+ },
+ "REFERENCE_ACCOUNT_REPLAY": {
+  "LIFETIME": {
+   "n_fills": 1958843,
+   "n_entries": 1312627,
+   "n_merges": 684731,
+   "n_sells": 18,
+   "entry_notional": 364223577.33,
+   "merge_shares": 313484716.41,
+   "realized_merge_pnl": 10794895.83,
+   "realized_sell_pnl": 601892.43,
+   "open_shares": 475141818.02,
+   "open_cost": 210689703.28,
+   "lots": 747361,
+   "lot_s": 363209886.23853016,
+   "lot_p": 2935319.191542931,
+   "lot_ss": 11991328145657.285,
+   "lot_pp": 8363137331585.57,
+   "lot_ps": -1598051272097.686,
+   "settled_lots": 62612,
+   "settled_shares": 473329302.44,
+   "ungraded_open_shares": 1812515.58,
+   "ungraded_open_cost": 1013691.09,
+   "cf_closed_shares": 314673428.14,
+   "cf_graded_shares": 314545976.1,
+   "cf_ungraded_shares": 127452.04,
+   "cf_actual_on_graded": 11396271.6,
+   "cf_hold_on_graded": 8299767.76,
+   "edge_coverage": 0.9972,
+   "edge_coverage_note": "$1,013,691 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": 3096503.84,
+   "edge_lots": 747361,
+   "edge_deployed": 363209886.24,
+   "edge_roi": 0.008082,
+   "edge_se": 0.008369,
+   "edge_ci95": [
+    -0.008322,
+    0.024485
+   ],
+   "edge_clusters": 62746,
+   "edge_deff": 1.0495,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +0.81% on dollar deployed but the interval [-0.83%, +2.45%] contains zero over 747,361 closed lots",
+   "cf_coverage": 0.9996,
+   "cf_note": "127452 of 314673428 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 11396788.26,
+   "roi_on_entries": 0.0313,
+   "_window_fills": 1958843,
+   "_window_days_requested": null
+  },
+  "LAST_60D": {
+   "n_fills": 920780,
+   "n_entries": 614088,
+   "n_merges": 327500,
+   "n_sells": 0,
+   "entry_notional": 170827385.68,
+   "merge_shares": 156035401.67,
+   "realized_merge_pnl": 3696263.46,
+   "realized_sell_pnl": 0.0,
+   "open_shares": 211820761.87,
+   "open_cost": 93524301.22,
+   "lots": 361299,
+   "lot_s": 170071620.6862909,
+   "lot_p": 1198410.8560075215,
+   "lot_ss": 3535028841889.9385,
+   "lot_pp": 2208530487754.4834,
+   "lot_ps": 144910749709.50525,
+   "settled_lots": 33799,
+   "settled_shares": 210371495.14,
+   "ungraded_open_shares": 1449266.73,
+   "ungraded_open_cost": 755765.0,
+   "cf_closed_shares": 156035401.67,
+   "cf_graded_shares": 155922601.13,
+   "cf_ungraded_shares": 112800.54,
+   "cf_actual_on_graded": 3695913.77,
+   "cf_hold_on_graded": 2815618.74,
+   "edge_coverage": 0.9956,
+   "edge_coverage_note": "$755,765 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": 880295.03,
+   "edge_lots": 361299,
+   "edge_deployed": 170071620.69,
+   "edge_roi": 0.007047,
+   "edge_se": 0.009378,
+   "edge_ci95": [
+    -0.011333,
+    0.025426
+   ],
+   "edge_clusters": 33882,
+   "edge_deff": 1.0736,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +0.70% on dollar deployed but the interval [-1.13%, +2.54%] contains zero over 361,299 closed lots",
+   "cf_coverage": 0.9993,
+   "cf_note": "112801 of 156035402 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 3696263.46,
+   "roi_on_entries": 0.0216,
+   "_window_fills": 920780,
+   "_window_days_requested": 60
+  },
+  "LAST_30D": {
+   "n_fills": 390791,
+   "n_entries": 266868,
+   "n_merges": 134270,
+   "n_sells": 0,
+   "entry_notional": 74517656.12,
+   "merge_shares": 66799682.73,
+   "realized_merge_pnl": 1397808.45,
+   "realized_sell_pnl": 0.0,
+   "open_shares": 94467033.92,
+   "open_cost": 41121024.51,
+   "lots": 152699,
+   "lot_s": 74117690.01842184,
+   "lot_p": -237137.54203499845,
+   "lot_ss": 1345751171387.2988,
+   "lot_pp": 799949454784.2838,
+   "lot_ps": 5066921212.670666,
+   "settled_lots": 18429,
+   "settled_shares": 93586766.82,
+   "ungraded_open_shares": 880267.1,
+   "ungraded_open_cost": 399966.1,
+   "cf_closed_shares": 66799682.73,
+   "cf_graded_shares": 66699753.83,
+   "cf_ungraded_shares": 99928.9,
+   "cf_actual_on_graded": 1397892.88,
+   "cf_hold_on_graded": 193087.71,
+   "edge_coverage": 0.9946,
+   "edge_coverage_note": "$399,966 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": 1204805.17,
+   "edge_lots": 152699,
+   "edge_deployed": 74117690.02,
+   "edge_roi": -0.003199,
+   "edge_se": 0.013054,
+   "edge_ci95": [
+    -0.028785,
+    0.022386
+   ],
+   "edge_clusters": 18484,
+   "edge_deff": 1.0817,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 -0.32% on dollar deployed but the interval [-2.88%, +2.24%] contains zero over 152,699 closed lots",
+   "cf_coverage": 0.9985,
+   "cf_note": "99929 of 66799683 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 1397808.45,
+   "roi_on_entries": 0.0188,
+   "_window_fills": 390791,
+   "_window_days_requested": 30
+  },
+  "LAST_14D": {
+   "n_fills": 152701,
+   "n_entries": 105119,
+   "n_merges": 52256,
+   "n_sells": 0,
+   "entry_notional": 31572848.86,
+   "merge_shares": 27953359.24,
+   "realized_merge_pnl": 754103.04,
+   "realized_sell_pnl": 0.0,
+   "open_shares": 39368438.72,
+   "open_cost": 17429226.86,
+   "lots": 60663,
+   "lot_s": 31279339.12698065,
+   "lot_p": 255502.12004483884,
+   "lot_ss": 576886815473.4591,
+   "lot_pp": 357158470871.92426,
+   "lot_ps": -16680543410.128735,
+   "settled_lots": 8407,
+   "settled_shares": 38680210.66,
+   "ungraded_open_shares": 688228.06,
+   "ungraded_open_cost": 293509.73,
+   "cf_closed_shares": 27953359.24,
+   "cf_graded_shares": 27858096.31,
+   "cf_ungraded_shares": 95262.94,
+   "cf_actual_on_graded": 754467.39,
+   "cf_hold_on_graded": 560360.71,
+   "edge_coverage": 0.9907,
+   "edge_coverage_note": "$293,510 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": 194106.68,
+   "edge_lots": 60663,
+   "edge_deployed": 31279339.13,
+   "edge_roi": 0.008168,
+   "edge_se": 0.020875,
+   "edge_ci95": [
+    -0.032746,
+    0.049083
+   ],
+   "edge_clusters": 8450,
+   "edge_deff": 1.0921,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +0.82% on dollar deployed but the interval [-3.27%, +4.91%] contains zero over 60,663 closed lots",
+   "cf_coverage": 0.9966,
+   "cf_note": "95263 of 27953359 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 754103.04,
+   "roi_on_entries": 0.0239,
+   "_window_fills": 152701,
+   "_window_days_requested": 14
+  },
+  "LAST_7D": {
+   "n_fills": 71978,
+   "n_entries": 50639,
+   "n_merges": 23662,
+   "n_sells": 0,
+   "entry_notional": 14502874.82,
+   "merge_shares": 11641364.86,
+   "realized_merge_pnl": 349711.08,
+   "realized_sell_pnl": 0.0,
+   "open_shares": 19619139.2,
+   "open_cost": 8522875.13,
+   "lots": 28170,
+   "lot_s": 14211856.386455787,
+   "lot_p": 7022.248388848268,
+   "lot_ss": 270923662453.97174,
+   "lot_pp": 198782297353.10593,
+   "lot_ps": -44312430316.79986,
+   "settled_lots": 4508,
+   "settled_shares": 18935751.29,
+   "ungraded_open_shares": 683387.91,
+   "ungraded_open_cost": 291018.43,
+   "cf_closed_shares": 11641364.86,
+   "cf_graded_shares": 11546101.92,
+   "cf_ungraded_shares": 95262.94,
+   "cf_actual_on_graded": 350075.43,
+   "cf_hold_on_graded": 59687.6,
+   "edge_coverage": 0.9799,
+   "edge_coverage_note": "$291,018 of cost sits in positions that are still open OR whose market has no recorded payout. They are EXCLUDED, not assumed \u2014 but the edge below describes the rest of the book, not all of it",
+   "exit_value": 290387.83,
+   "edge_lots": 28170,
+   "edge_deployed": 14211856.39,
+   "edge_roi": 0.000494,
+   "edge_se": 0.033976,
+   "edge_ci95": [
+    -0.066098,
+    0.067086
+   ],
+   "edge_clusters": 4549,
+   "edge_deff": 1.0829,
+   "edge_verdict": "NOT DEMONSTRATED \u2014 +0.05% on dollar deployed but the interval [-6.61%, +6.71%] contains zero over 28,170 closed lots",
+   "cf_coverage": 0.9918,
+   "cf_note": "95263 of 11641365 closed shares have no known payout and are EXCLUDED from the comparison, not counted as losses",
+   "realized_total": 349711.08,
+   "roi_on_entries": 0.0241,
+   "_window_fills": 71978,
+   "_window_days_requested": 7
+  }
+ },
+ "REFERENCE_ACCOUNT_COMPLETION": {
+  "LIFETIME": {
+   "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": 101611,
+   "REFERENCE_ACCOUNT_NEVER_COMPLETED": 32203,
+   "REFERENCE_ACCOUNT_MEAN_PAIR_BASIS": 0.97637,
+   "REFERENCE_ACCOUNT_COMPLETION_GRID": {
+    "5": {
+     "ceiling_0.90": {
+      "completed": 34,
+      "rate": 0.00033
+     },
+     "ceiling_0.92": {
+      "completed": 53,
+      "rate": 0.00052
+     },
+     "ceiling_0.94": {
+      "completed": 118,
+      "rate": 0.00116
+     },
+     "ceiling_0.95": {
+      "completed": 253,
+      "rate": 0.00249
+     },
+     "ceiling_0.96": {
+      "completed": 384,
+      "rate": 0.00378
+     },
+     "ceiling_0.97": {
+      "completed": 629,
+      "rate": 0.00619
+     },
+     "ceiling_0.98": {
+      "completed": 1078,
+      "rate": 0.01061
+     },
+     "ceiling_0.99": {
+      "completed": 1783,
+      "rate": 0.01755
+     },
+     "ceiling_1.00": {
+      "completed": 2537,
+      "rate": 0.02497
+     },
+     "any_basis_completed": 2940,
+     "any_basis_rate": 0.02893
+    },
+    "10": {
+     "ceiling_0.90": {
+      "completed": 44,
+      "rate": 0.00043
+     },
+     "ceiling_0.92": {
+      "completed": 80,
+      "rate": 0.00079
+     },
+     "ceiling_0.94": {
+      "completed": 187,
+      "rate": 0.00184
+     },
+     "ceiling_0.95": {
+      "completed": 360,
+      "rate": 0.00354
+     },
+     "ceiling_0.96": {
+      "completed": 558,
+      "rate": 0.00549
+     },
+     "ceiling_0.97": {
+      "completed": 903,
+      "rate": 0.00889
+     },
+     "ceiling_0.98": {
+      "completed": 1501,
+      "rate": 0.01477
+     },
+     "ceiling_0.99": {
+      "completed": 2479,
+      "rate": 0.0244
+     },
+     "ceiling_1.00": {
+      "completed": 3479,
+      "rate": 0.03424
+     },
+     "any_basis_completed": 4053,
+     "any_basis_rate": 0.03989
+    },
+    "30": {
+     "ceiling_0.90": {
+      "completed": 110,
+      "rate": 0.00108
+     },
+     "ceiling_0.92": {
+      "completed": 201,
+      "rate": 0.00198
+     },
+     "ceiling_0.94": {
+      "completed": 472,
+      "rate": 0.00465
+     },
+     "ceiling_0.95": {
+      "completed": 785,
+      "rate": 0.00773
+     },
+     "ceiling_0.96": {
+      "completed": 1187,
+      "rate": 0.01168
+     },
+     "ceiling_0.97": {
+      "completed": 1803,
+      "rate": 0.01774
+     },
+     "ceiling_0.98": {
+      "completed": 2741,
+      "rate": 0.02698
+     },
+     "ceiling_0.99": {
+      "completed": 4331,
+      "rate": 0.04262
+     },
+     "ceiling_1.00": {
+      "completed": 5872,
+      "rate": 0.05779
+     },
+     "any_basis_completed": 7120,
+     "any_basis_rate": 0.07007
+    },
+    "60": {
+     "ceiling_0.90": {
+      "completed": 252,
+      "rate": 0.00248
+     },
+     "ceiling_0.92": {
+      "completed": 451,
+      "rate": 0.00444
+     },
+     "ceiling_0.94": {
+      "completed": 952,
+      "rate": 0.00937
+     },
+     "ceiling_0.95": {
+      "completed": 1448,
+      "rate": 0.01425
+     },
+     "ceiling_0.96": {
+      "completed": 2104,
+      "rate": 0.02071
+     },
+     "ceiling_0.97": {
+      "completed": 3023,
+      "rate": 0.02975
+     },
+     "ceiling_0.98": {
+      "completed": 4316,
+      "rate": 0.04248
+     },
+     "ceiling_0.99": {
+      "completed": 6390,
+      "rate": 0.06289
+     },
+     "ceiling_1.00": {
+      "completed": 8438,
+      "rate": 0.08304
+     },
+     "any_basis_completed": 10746,
+     "any_basis_rate": 0.10576
+    },
+    "120": {
+     "ceiling_0.90": {
+      "completed": 676,
+      "rate": 0.00665
+     },
+     "ceiling_0.92": {
+      "completed": 1113,
+      "rate": 0.01095
+     },
+     "ceiling_0.94": {
+      "completed": 2002,
+      "rate": 0.0197
+     },
+     "ceiling_0.95": {
+      "completed": 2757,
+      "rate": 0.02713
+     },
+     "ceiling_0.96": {
+      "completed": 3758,
+      "rate": 0.03698
+     },
+     "ceiling_0.97": {
+      "completed": 5057,
+      "rate": 0.04977
+     },
+     "ceiling_0.98": {
+      "completed": 6811,
+      "rate": 0.06703
+     },
+     "ceiling_0.99": {
+      "completed": 9479,
+      "rate": 0.09329
+     },
+     "ceiling_1.00": {
+      "completed": 12169,
+      "rate": 0.11976
+     },
+     "any_basis_completed": 16300,
+     "any_basis_rate": 0.16042
+    },
+    "300": {
+     "ceiling_0.90": {
+      "completed": 2223,
+      "rate": 0.02188
+     },
+     "ceiling_0.92": {
+      "completed": 3189,
+      "rate": 0.03138
+     },
+     "ceiling_0.94": {
+      "completed": 4841,
+      "rate": 0.04764
+     },
+     "ceiling_0.95": {
+      "completed": 6083,
+      "rate": 0.05987
+     },
+     "ceiling_0.96": {
+      "completed": 7639,
+      "rate": 0.07518
+     },
+     "ceiling_0.97": {
+      "completed": 9584,
+      "rate": 0.09432
+     },
+     "ceiling_0.98": {
+      "completed": 12036,
+      "rate": 0.11845
+     },
+     "ceiling_0.99": {
+      "completed": 15587,
+      "rate": 0.1534
+     },
+     "ceiling_1.00": {
+      "completed": 19134,
+      "rate": 0.18831
+     },
+     "any_basis_completed": 27300,
+     "any_basis_rate": 0.26867
+    },
+    "600": {
+     "ceiling_0.90": {
+      "completed": 4285,
+      "rate": 0.04217
+     },
+     "ceiling_0.92": {
+      "completed": 5750,
+      "rate": 0.05659
+     },
+     "ceiling_0.94": {
+      "completed": 8071,
+      "rate": 0.07943
+     },
+     "ceiling_0.95": {
+      "completed": 9726,
+      "rate": 0.09572
+     },
+     "ceiling_0.96": {
+      "completed": 11737,
+      "rate": 0.11551
+     },
+     "ceiling_0.97": {
+      "completed": 14124,
+      "rate": 0.139
+     },
+     "ceiling_0.98": {
+      "completed": 17116,
+      "rate": 0.16845
+     },
+     "ceiling_0.99": {
+      "completed": 21265,
+      "rate": 0.20928
+     },
+     "ceiling_1.00": {
+      "completed": 25442,
+      "rate": 0.25039
+     },
+     "any_basis_completed": 37730,
+     "any_basis_rate": 0.37132
+    },
+    "1800": {
+     "ceiling_0.90": {
+      "completed": 8709,
+      "rate": 0.08571
+     },
+     "ceiling_0.92": {
+      "completed": 10858,
+      "rate": 0.10686
+     },
+     "ceiling_0.94": {
+      "completed": 14049,
+      "rate": 0.13826
+     },
+     "ceiling_0.95": {
+      "completed": 16205,
+      "rate": 0.15948
+     },
+     "ceiling_0.96": {
+      "completed": 18757,
+      "rate": 0.1846
+     },
+     "ceiling_0.97": {
+      "completed": 21719,
+      "rate": 0.21375
+     },
+     "ceiling_0.98": {
+      "completed": 25362,
+      "rate": 0.2496
+     },
+     "ceiling_0.99": {
+      "completed": 30255,
+      "rate": 0.29775
+     },
+     "ceiling_1.00": {
+      "completed": 35166,
+      "rate": 0.34608
+     },
+     "any_basis_completed": 54087,
+     "any_basis_rate": 0.53229
+    },
+    "3600": {
+     "ceiling_0.90": {
+      "completed": 11162,
+      "rate": 0.10985
+     },
+     "ceiling_0.92": {
+      "completed": 13608,
+      "rate": 0.13392
+     },
+     "ceiling_0.94": {
+      "completed": 17171,
+      "rate": 0.16899
+     },
+     "ceiling_0.95": {
+      "completed": 19515,
+      "rate": 0.19206
+     },
+     "ceiling_0.96": {
+      "completed": 22272,
+      "rate": 0.21919
+     },
+     "ceiling_0.97": {
+      "completed": 25414,
+      "rate": 0.25011
+     },
+     "ceiling_0.98": {
+      "completed": 29270,
+      "rate": 0.28806
+     },
+     "ceiling_0.99": {
+      "completed": 34394,
+      "rate": 0.33849
+     },
+     "ceiling_1.00": {
+      "completed": 39572,
+      "rate": 0.38945
+     },
+     "any_basis_completed": 61979,
+     "any_basis_rate": 0.60996
+    },
+    "settlement": {
+     "ceiling_0.90": {
+      "completed": 13238,
+      "rate": 0.13028
+     },
+     "ceiling_0.92": {
+      "completed": 15969,
+      "rate": 0.15716
+     },
+     "ceiling_0.94": {
+      "completed": 19857,
+      "rate": 0.19542
+     },
+     "ceiling_0.95": {
+      "completed": 22410,
+      "rate": 0.22055
+     },
+     "ceiling_0.96": {
+      "completed": 25420,
+      "rate": 0.25017
+     },
+     "ceiling_0.97": {
+      "completed": 28809,
+      "rate": 0.28352
+     },
+     "ceiling_0.98": {
+      "completed": 32984,
+      "rate": 0.32461
+     },
+     "ceiling_0.99": {
+      "completed": 38484,
+      "rate": 0.37874
+     },
+     "ceiling_1.00": {
+      "completed": 44042,
+      "rate": 0.43344
+     },
+     "any_basis_completed": 69408,
+     "any_basis_rate": 0.68308
+    }
+   },
+   "BY_FIRST_LEG_PRICE_BAND": {
+    "0.00-0.10": {
+     "opens": 4978,
+     "completed_within_1h": 1696,
+     "completion_rate_1h": 0.3407,
+     "mean_pair_basis": 0.93823,
+     "completed_within_5s": 60,
+     "completion_rate_5s": 0.0121,
+     "completed_by_settlement": 1803,
+     "completion_rate_settlement": 0.3622,
+     "residual_rate": 0.6378,
+     "median_pair_basis": 0.98,
+     "p25_pair_basis": 0.921,
+     "p75_pair_basis": 1.0,
+     "first_complement_shares": 839719.22,
+     "first_complement_stake": 47553.83,
+     "first_complement_pnl": 39071.15,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.10-0.30": {
+     "opens": 17082,
+     "completed_within_1h": 10104,
+     "completion_rate_1h": 0.5915,
+     "mean_pair_basis": 0.9462,
+     "completed_within_5s": 323,
+     "completion_rate_5s": 0.0189,
+     "completed_by_settlement": 10994,
+     "completion_rate_settlement": 0.6436,
+     "residual_rate": 0.3564,
+     "median_pair_basis": 0.98,
+     "p25_pair_basis": 0.91,
+     "p75_pair_basis": 1.02,
+     "first_complement_shares": 3375573.19,
+     "first_complement_stake": 690670.26,
+     "first_complement_pnl": 136788.61,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.30-0.50": {
+     "opens": 32434,
+     "completed_within_1h": 20457,
+     "completion_rate_1h": 0.6307,
+     "mean_pair_basis": 0.96511,
+     "completed_within_5s": 970,
+     "completion_rate_5s": 0.0299,
+     "completed_by_settlement": 23277,
+     "completion_rate_settlement": 0.7177,
+     "residual_rate": 0.2823,
+     "median_pair_basis": 0.98,
+     "p25_pair_basis": 0.92,
+     "p75_pair_basis": 1.02,
+     "first_complement_shares": 8114727.98,
+     "first_complement_stake": 3368175.91,
+     "first_complement_pnl": 203925.76,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.50-0.70": {
+     "opens": 31269,
+     "completed_within_1h": 19840,
+     "completion_rate_1h": 0.6345,
+     "mean_pair_basis": 0.99148,
+     "completed_within_5s": 1037,
+     "completion_rate_5s": 0.0332,
+     "completed_by_settlement": 22591,
+     "completion_rate_settlement": 0.7225,
+     "residual_rate": 0.2775,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.94,
+     "p75_pair_basis": 1.04,
+     "first_complement_shares": 8020837.51,
+     "first_complement_stake": 4610047.88,
+     "first_complement_pnl": 87453.67,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.70-0.90": {
+     "opens": 13474,
+     "completed_within_1h": 8655,
+     "completion_rate_1h": 0.6423,
+     "mean_pair_basis": 1.00555,
+     "completed_within_5s": 456,
+     "completion_rate_5s": 0.0338,
+     "completed_by_settlement": 9450,
+     "completion_rate_settlement": 0.7014,
+     "residual_rate": 0.2986,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.94,
+     "p75_pair_basis": 1.04,
+     "first_complement_shares": 3141777.48,
+     "first_complement_stake": 2461989.81,
+     "first_complement_pnl": 12763.18,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.90-1.01": {
+     "opens": 2374,
+     "completed_within_1h": 1227,
+     "completion_rate_1h": 0.5168,
+     "mean_pair_basis": 1.01177,
+     "completed_within_5s": 94,
+     "completion_rate_5s": 0.0396,
+     "completed_by_settlement": 1293,
+     "completion_rate_settlement": 0.5447,
+     "residual_rate": 0.4553,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.98,
+     "p75_pair_basis": 1.011,
+     "first_complement_shares": 493103.55,
+     "first_complement_stake": 460648.26,
+     "first_complement_pnl": 1767.24,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    }
+   },
+   "FIRST_COMPLEMENT_PNL_TOTAL": 481769.6,
+   "FIRST_COMPLEMENT_STAKE_TOTAL": 11639085.95,
+   "BY_SPORT_OR_QUESTION": {
+    "Los Angeles Dodgers vs. ": {
+     "opens": 616,
+     "completed_within_1h": 325,
+     "completion_rate_1h": 0.5276,
+     "mean_pair_basis": 0.96902
+    },
+    "Internazionali BNL d'Ita": {
+     "opens": 591,
+     "completed_within_1h": 493,
+     "completion_rate_1h": 0.8342,
+     "mean_pair_basis": 0.97258
+    },
+    "Philadelphia Phillies vs": {
+     "opens": 556,
+     "completed_within_1h": 305,
+     "completion_rate_1h": 0.5486,
+     "mean_pair_basis": 0.97102
+    },
+    "Arizona Diamondbacks vs.": {
+     "opens": 545,
+     "completed_within_1h": 295,
+     "completion_rate_1h": 0.5413,
+     "mean_pair_basis": 0.96865
+    },
+    "San Francisco Giants vs.": {
+     "opens": 534,
+     "completed_within_1h": 282,
+     "completion_rate_1h": 0.5281,
+     "mean_pair_basis": 0.98993
+    },
+    "St. Louis Cardinals vs. ": {
+     "opens": 531,
+     "completed_within_1h": 276,
+     "completion_rate_1h": 0.5198,
+     "mean_pair_basis": 0.99658
+    },
+    "Washington Nationals vs.": {
+     "opens": 529,
+     "completed_within_1h": 285,
+     "completion_rate_1h": 0.5388,
+     "mean_pair_basis": 0.97275
+    },
+    "Wimbledon, Qualification": {
+     "opens": 509,
+     "completed_within_1h": 447,
+     "completion_rate_1h": 0.8782,
+     "mean_pair_basis": 0.96835
+    },
+    "Cleveland Guardians vs. ": {
+     "opens": 502,
+     "completed_within_1h": 227,
+     "completion_rate_1h": 0.4522,
+     "mean_pair_basis": 0.98412
+    },
+    "Spread: Los Angeles Dodg": {
+     "opens": 424,
+     "completed_within_1h": 198,
+     "completion_rate_1h": 0.467,
+     "mean_pair_basis": 0.98545
+    },
+    "Roland Garros, Qualifica": {
+     "opens": 365,
+     "completed_within_1h": 311,
+     "completion_rate_1h": 0.8521,
+     "mean_pair_basis": 0.96015
+    },
+    "Spread: New York Yankees": {
+     "opens": 330,
+     "completed_within_1h": 138,
+     "completion_rate_1h": 0.4182,
+     "mean_pair_basis": 0.98655
+    },
+    "Spread: Philadelphia Phi": {
+     "opens": 326,
+     "completed_within_1h": 123,
+     "completion_rate_1h": 0.3773,
+     "mean_pair_basis": 0.97809
+    },
+    "Spread: Milwaukee Brewer": {
+     "opens": 322,
+     "completed_within_1h": 146,
+     "completion_rate_1h": 0.4534,
+     "mean_pair_basis": 1.0114
+    },
+    "Spread: Tampa Bay Rays (": {
+     "opens": 310,
+     "completed_within_1h": 133,
+     "completion_rate_1h": 0.429,
+     "mean_pair_basis": 1.00296
+    },
+    "Spread: Boston Red Sox (": {
+     "opens": 291,
+     "completed_within_1h": 116,
+     "completion_rate_1h": 0.3986,
+     "mean_pair_basis": 0.9795
+    },
+    "Spread: Seattle Mariners": {
+     "opens": 282,
+     "completed_within_1h": 129,
+     "completion_rate_1h": 0.4574,
+     "mean_pair_basis": 0.98971
+    },
+    "Spread: Atlanta Braves (": {
+     "opens": 279,
+     "completed_within_1h": 127,
+     "completion_rate_1h": 0.4552,
+     "mean_pair_basis": 0.99625
+    },
+    "US Open, Qualification W": {
+     "opens": 273,
+     "completed_within_1h": 226,
+     "completion_rate_1h": 0.8278,
+     "mean_pair_basis": 0.97666
+    },
+    "Spread: Pittsburgh Pirat": {
+     "opens": 268,
+     "completed_within_1h": 106,
+     "completion_rate_1h": 0.3955,
+     "mean_pair_basis": 0.97739
+    },
+    "Spread: Detroit Tigers (": {
+     "opens": 266,
+     "completed_within_1h": 99,
+     "completion_rate_1h": 0.3722,
+     "mean_pair_basis": 0.97311
+    },
+    "US Open, Qualification A": {
+     "opens": 262,
+     "completed_within_1h": 212,
+     "completion_rate_1h": 0.8092,
+     "mean_pair_basis": 0.99414
+    },
+    "Spread: Cleveland Guardi": {
+     "opens": 257,
+     "completed_within_1h": 85,
+     "completion_rate_1h": 0.3307,
+     "mean_pair_basis": 0.96623
+    },
+    "Spread: San Diego Padres": {
+     "opens": 253,
+     "completed_within_1h": 100,
+     "completion_rate_1h": 0.3953,
+     "mean_pair_basis": 0.99793
+    },
+    "Spread: St. Louis Cardin": {
+     "opens": 253,
+     "completed_within_1h": 115,
+     "completion_rate_1h": 0.4545,
+     "mean_pair_basis": 0.99058
+    }
+   },
+   "BY_FILL_SIZE_BUCKET": {
+    "0-100": {
+     "opens": 43000,
+     "completed_within_1h": 23679,
+     "completion_rate_1h": 0.5507,
+     "mean_pair_basis": 0.97331
+    },
+    "100-1000": {
+     "opens": 31556,
+     "completed_within_1h": 19539,
+     "completion_rate_1h": 0.6192,
+     "mean_pair_basis": 0.97727
+    },
+    "1000-10000": {
+     "opens": 22395,
+     "completed_within_1h": 15497,
+     "completion_rate_1h": 0.692,
+     "mean_pair_basis": 0.97895
+    },
+    "10000-100000": {
+     "opens": 4609,
+     "completed_within_1h": 3240,
+     "completion_rate_1h": 0.703,
+     "mean_pair_basis": 0.98052
+    },
+    "100000-inf": {
+     "opens": 51,
+     "completed_within_1h": 24,
+     "completion_rate_1h": 0.4706,
+     "mean_pair_basis": 0.98401
+    }
+   },
+   "BY_WEEK": {
+    "2026-W14": {
+     "opens": 1932,
+     "completed_within_1h": 1039,
+     "completion_rate_1h": 0.5378,
+     "mean_pair_basis": 0.9659
+    },
+    "2026-W15": {
+     "opens": 2666,
+     "completed_within_1h": 1360,
+     "completion_rate_1h": 0.5101,
+     "mean_pair_basis": 0.96376
+    },
+    "2026-W16": {
+     "opens": 2237,
+     "completed_within_1h": 1215,
+     "completion_rate_1h": 0.5431,
+     "mean_pair_basis": 0.96711
+    },
+    "2026-W17": {
+     "opens": 2502,
+     "completed_within_1h": 1447,
+     "completion_rate_1h": 0.5783,
+     "mean_pair_basis": 0.97746
+    },
+    "2026-W18": {
+     "opens": 2537,
+     "completed_within_1h": 1335,
+     "completion_rate_1h": 0.5262,
+     "mean_pair_basis": 0.98155
+    },
+    "2026-W19": {
+     "opens": 2503,
+     "completed_within_1h": 1369,
+     "completion_rate_1h": 0.5469,
+     "mean_pair_basis": 0.99044
+    },
+    "2026-W20": {
+     "opens": 3219,
+     "completed_within_1h": 1744,
+     "completion_rate_1h": 0.5418,
+     "mean_pair_basis": 0.9894
+    },
+    "2026-W21": {
+     "opens": 3254,
+     "completed_within_1h": 2087,
+     "completion_rate_1h": 0.6414,
+     "mean_pair_basis": 0.98171
+    },
+    "2026-W22": {
+     "opens": 2572,
+     "completed_within_1h": 1598,
+     "completion_rate_1h": 0.6213,
+     "mean_pair_basis": 0.97047
+    },
+    "2026-W23": {
+     "opens": 2777,
+     "completed_within_1h": 1727,
+     "completion_rate_1h": 0.6219,
+     "mean_pair_basis": 0.96676
+    },
+    "2026-W24": {
+     "opens": 3259,
+     "completed_within_1h": 2260,
+     "completion_rate_1h": 0.6935,
+     "mean_pair_basis": 0.97235
+    },
+    "2026-W25": {
+     "opens": 2901,
+     "completed_within_1h": 1841,
+     "completion_rate_1h": 0.6346,
+     "mean_pair_basis": 0.95539
+    },
+    "2026-W26": {
+     "opens": 3099,
+     "completed_within_1h": 2116,
+     "completion_rate_1h": 0.6828,
+     "mean_pair_basis": 0.96426
+    },
+    "2026-W27": {
+     "opens": 3661,
+     "completed_within_1h": 2463,
+     "completion_rate_1h": 0.6728,
+     "mean_pair_basis": 0.97783
+    },
+    "2026-W28": {
+     "opens": 4615,
+     "completed_within_1h": 3284,
+     "completion_rate_1h": 0.7116,
+     "mean_pair_basis": 0.98353
+    },
+    "2026-W29": {
+     "opens": 4248,
+     "completed_within_1h": 2845,
+     "completion_rate_1h": 0.6697,
+     "mean_pair_basis": 0.97503
+    },
+    "2026-W30": {
+     "opens": 5347,
+     "completed_within_1h": 3565,
+     "completion_rate_1h": 0.6667,
+     "mean_pair_basis": 0.9801
+    },
+    "2026-W31": {
+     "opens": 6221,
+     "completed_within_1h": 4232,
+     "completion_rate_1h": 0.6803,
+     "mean_pair_basis": 0.98439
+    },
+    "2026-W32": {
+     "opens": 6088,
+     "completed_within_1h": 4097,
+     "completion_rate_1h": 0.673,
+     "mean_pair_basis": 0.98594
+    },
+    "2026-W33": {
+     "opens": 7096,
+     "completed_within_1h": 4082,
+     "completion_rate_1h": 0.5753,
+     "mean_pair_basis": 0.97607
+    },
+    "2026-W34": {
+     "opens": 7359,
+     "completed_within_1h": 4300,
+     "completion_rate_1h": 0.5843,
+     "mean_pair_basis": 0.98046
+    },
+    "2026-W35": {
+     "opens": 7183,
+     "completed_within_1h": 4017,
+     "completion_rate_1h": 0.5592,
+     "mean_pair_basis": 0.97453
+    },
+    "2026-W36": {
+     "opens": 5841,
+     "completed_within_1h": 3296,
+     "completion_rate_1h": 0.5643,
+     "mean_pair_basis": 0.96467
+    },
+    "2026-W37": {
+     "opens": 7157,
+     "completed_within_1h": 3932,
+     "completion_rate_1h": 0.5494,
+     "mean_pair_basis": 0.97699
+    },
+    "2026-W38": {
+     "opens": 1337,
+     "completed_within_1h": 728,
+     "completion_rate_1h": 0.5445,
+     "mean_pair_basis": 0.97209
+    }
+   }
+  },
+  "LAST_30D": {
+   "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": 28953,
+   "REFERENCE_ACCOUNT_NEVER_COMPLETED": 10169,
+   "REFERENCE_ACCOUNT_MEAN_PAIR_BASIS": 0.97456,
+   "REFERENCE_ACCOUNT_COMPLETION_GRID": {
+    "5": {
+     "ceiling_0.90": {
+      "completed": 9,
+      "rate": 0.00031
+     },
+     "ceiling_0.92": {
+      "completed": 18,
+      "rate": 0.00062
+     },
+     "ceiling_0.94": {
+      "completed": 37,
+      "rate": 0.00128
+     },
+     "ceiling_0.95": {
+      "completed": 62,
+      "rate": 0.00214
+     },
+     "ceiling_0.96": {
+      "completed": 79,
+      "rate": 0.00273
+     },
+     "ceiling_0.97": {
+      "completed": 109,
+      "rate": 0.00376
+     },
+     "ceiling_0.98": {
+      "completed": 208,
+      "rate": 0.00718
+     },
+     "ceiling_0.99": {
+      "completed": 377,
+      "rate": 0.01302
+     },
+     "ceiling_1.00": {
+      "completed": 562,
+      "rate": 0.01941
+     },
+     "any_basis_completed": 655,
+     "any_basis_rate": 0.02262
+    },
+    "10": {
+     "ceiling_0.90": {
+      "completed": 12,
+      "rate": 0.00041
+     },
+     "ceiling_0.92": {
+      "completed": 27,
+      "rate": 0.00093
+     },
+     "ceiling_0.94": {
+      "completed": 57,
+      "rate": 0.00197
+     },
+     "ceiling_0.95": {
+      "completed": 93,
+      "rate": 0.00321
+     },
+     "ceiling_0.96": {
+      "completed": 123,
+      "rate": 0.00425
+     },
+     "ceiling_0.97": {
+      "completed": 174,
+      "rate": 0.00601
+     },
+     "ceiling_0.98": {
+      "completed": 296,
+      "rate": 0.01022
+     },
+     "ceiling_0.99": {
+      "completed": 527,
+      "rate": 0.0182
+     },
+     "ceiling_1.00": {
+      "completed": 759,
+      "rate": 0.02621
+     },
+     "any_basis_completed": 902,
+     "any_basis_rate": 0.03115
+    },
+    "30": {
+     "ceiling_0.90": {
+      "completed": 27,
+      "rate": 0.00093
+     },
+     "ceiling_0.92": {
+      "completed": 51,
+      "rate": 0.00176
+     },
+     "ceiling_0.94": {
+      "completed": 126,
+      "rate": 0.00435
+     },
+     "ceiling_0.95": {
+      "completed": 199,
+      "rate": 0.00687
+     },
+     "ceiling_0.96": {
+      "completed": 271,
+      "rate": 0.00936
+     },
+     "ceiling_0.97": {
+      "completed": 357,
+      "rate": 0.01233
+     },
+     "ceiling_0.98": {
+      "completed": 550,
+      "rate": 0.019
+     },
+     "ceiling_0.99": {
+      "completed": 909,
+      "rate": 0.0314
+     },
+     "ceiling_1.00": {
+      "completed": 1263,
+      "rate": 0.04362
+     },
+     "any_basis_completed": 1574,
+     "any_basis_rate": 0.05436
+    },
+    "60": {
+     "ceiling_0.90": {
+      "completed": 61,
+      "rate": 0.00211
+     },
+     "ceiling_0.92": {
+      "completed": 117,
+      "rate": 0.00404
+     },
+     "ceiling_0.94": {
+      "completed": 244,
+      "rate": 0.00843
+     },
+     "ceiling_0.95": {
+      "completed": 361,
+      "rate": 0.01247
+     },
+     "ceiling_0.96": {
+      "completed": 487,
+      "rate": 0.01682
+     },
+     "ceiling_0.97": {
+      "completed": 627,
+      "rate": 0.02166
+     },
+     "ceiling_0.98": {
+      "completed": 897,
+      "rate": 0.03098
+     },
+     "ceiling_0.99": {
+      "completed": 1388,
+      "rate": 0.04794
+     },
+     "ceiling_1.00": {
+      "completed": 1864,
+      "rate": 0.06438
+     },
+     "any_basis_completed": 2455,
+     "any_basis_rate": 0.08479
+    },
+    "120": {
+     "ceiling_0.90": {
+      "completed": 166,
+      "rate": 0.00573
+     },
+     "ceiling_0.92": {
+      "completed": 268,
+      "rate": 0.00926
+     },
+     "ceiling_0.94": {
+      "completed": 494,
+      "rate": 0.01706
+     },
+     "ceiling_0.95": {
+      "completed": 673,
+      "rate": 0.02324
+     },
+     "ceiling_0.96": {
+      "completed": 881,
+      "rate": 0.03043
+     },
+     "ceiling_0.97": {
+      "completed": 1092,
+      "rate": 0.03772
+     },
+     "ceiling_0.98": {
+      "completed": 1456,
+      "rate": 0.05029
+     },
+     "ceiling_0.99": {
+      "completed": 2112,
+      "rate": 0.07295
+     },
+     "ceiling_1.00": {
+      "completed": 2787,
+      "rate": 0.09626
+     },
+     "any_basis_completed": 3836,
+     "any_basis_rate": 0.13249
+    },
+    "300": {
+     "ceiling_0.90": {
+      "completed": 563,
+      "rate": 0.01945
+     },
+     "ceiling_0.92": {
+      "completed": 772,
+      "rate": 0.02666
+     },
+     "ceiling_0.94": {
+      "completed": 1169,
+      "rate": 0.04038
+     },
+     "ceiling_0.95": {
+      "completed": 1456,
+      "rate": 0.05029
+     },
+     "ceiling_0.96": {
+      "completed": 1798,
+      "rate": 0.0621
+     },
+     "ceiling_0.97": {
+      "completed": 2166,
+      "rate": 0.07481
+     },
+     "ceiling_0.98": {
+      "completed": 2725,
+      "rate": 0.09412
+     },
+     "ceiling_0.99": {
+      "completed": 3611,
+      "rate": 0.12472
+     },
+     "ceiling_1.00": {
+      "completed": 4519,
+      "rate": 0.15608
+     },
+     "any_basis_completed": 6632,
+     "any_basis_rate": 0.22906
+    },
+    "600": {
+     "ceiling_0.90": {
+      "completed": 1099,
+      "rate": 0.03796
+     },
+     "ceiling_0.92": {
+      "completed": 1421,
+      "rate": 0.04908
+     },
+     "ceiling_0.94": {
+      "completed": 1967,
+      "rate": 0.06794
+     },
+     "ceiling_0.95": {
+      "completed": 2355,
+      "rate": 0.08134
+     },
+     "ceiling_0.96": {
+      "completed": 2800,
+      "rate": 0.09671
+     },
+     "ceiling_0.97": {
+      "completed": 3297,
+      "rate": 0.11387
+     },
+     "ceiling_0.98": {
+      "completed": 3994,
+      "rate": 0.13795
+     },
+     "ceiling_0.99": {
+      "completed": 5017,
+      "rate": 0.17328
+     },
+     "ceiling_1.00": {
+      "completed": 6114,
+      "rate": 0.21117
+     },
+     "any_basis_completed": 9340,
+     "any_basis_rate": 0.32259
+    },
+    "1800": {
+     "ceiling_0.90": {
+      "completed": 2351,
+      "rate": 0.0812
+     },
+     "ceiling_0.92": {
+      "completed": 2870,
+      "rate": 0.09913
+     },
+     "ceiling_0.94": {
+      "completed": 3645,
+      "rate": 0.12589
+     },
+     "ceiling_0.95": {
+      "completed": 4177,
+      "rate": 0.14427
+     },
+     "ceiling_0.96": {
+      "completed": 4765,
+      "rate": 0.16458
+     },
+     "ceiling_0.97": {
+      "completed": 5417,
+      "rate": 0.1871
+     },
+     "ceiling_0.98": {
+      "completed": 6325,
+      "rate": 0.21846
+     },
+     "ceiling_0.99": {
+      "completed": 7559,
+      "rate": 0.26108
+     },
+     "ceiling_1.00": {
+      "completed": 8867,
+      "rate": 0.30625
+     },
+     "any_basis_completed": 13973,
+     "any_basis_rate": 0.48261
+    },
+    "3600": {
+     "ceiling_0.90": {
+      "completed": 3127,
+      "rate": 0.108
+     },
+     "ceiling_0.92": {
+      "completed": 3739,
+      "rate": 0.12914
+     },
+     "ceiling_0.94": {
+      "completed": 4616,
+      "rate": 0.15943
+     },
+     "ceiling_0.95": {
+      "completed": 5202,
+      "rate": 0.17967
+     },
+     "ceiling_0.96": {
+      "completed": 5845,
+      "rate": 0.20188
+     },
+     "ceiling_0.97": {
+      "completed": 6546,
+      "rate": 0.22609
+     },
+     "ceiling_0.98": {
+      "completed": 7510,
+      "rate": 0.25939
+     },
+     "ceiling_0.99": {
+      "completed": 8805,
+      "rate": 0.30411
+     },
+     "ceiling_1.00": {
+      "completed": 10197,
+      "rate": 0.35219
+     },
+     "any_basis_completed": 16324,
+     "any_basis_rate": 0.56381
+    },
+    "settlement": {
+     "ceiling_0.90": {
+      "completed": 3797,
+      "rate": 0.13114
+     },
+     "ceiling_0.92": {
+      "completed": 4495,
+      "rate": 0.15525
+     },
+     "ceiling_0.94": {
+      "completed": 5475,
+      "rate": 0.1891
+     },
+     "ceiling_0.95": {
+      "completed": 6128,
+      "rate": 0.21165
+     },
+     "ceiling_0.96": {
+      "completed": 6845,
+      "rate": 0.23642
+     },
+     "ceiling_0.97": {
+      "completed": 7635,
+      "rate": 0.2637
+     },
+     "ceiling_0.98": {
+      "completed": 8705,
+      "rate": 0.30066
+     },
+     "ceiling_0.99": {
+      "completed": 10131,
+      "rate": 0.34991
+     },
+     "ceiling_1.00": {
+      "completed": 11677,
+      "rate": 0.40331
+     },
+     "any_basis_completed": 18784,
+     "any_basis_rate": 0.64878
+    }
+   },
+   "BY_FIRST_LEG_PRICE_BAND": {
+    "0.00-0.10": {
+     "opens": 2233,
+     "completed_within_1h": 668,
+     "completion_rate_1h": 0.2991,
+     "mean_pair_basis": 0.9354,
+     "completed_within_5s": 18,
+     "completion_rate_5s": 0.0081,
+     "completed_by_settlement": 714,
+     "completion_rate_settlement": 0.3197,
+     "residual_rate": 0.6803,
+     "median_pair_basis": 0.982,
+     "p25_pair_basis": 0.916,
+     "p75_pair_basis": 1.001,
+     "first_complement_shares": 252460.64,
+     "first_complement_stake": 13090.83,
+     "first_complement_pnl": 9443.82,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.10-0.30": {
+     "opens": 5682,
+     "completed_within_1h": 2957,
+     "completion_rate_1h": 0.5204,
+     "mean_pair_basis": 0.94482,
+     "completed_within_5s": 76,
+     "completion_rate_5s": 0.0134,
+     "completed_by_settlement": 3310,
+     "completion_rate_settlement": 0.5825,
+     "residual_rate": 0.4175,
+     "median_pair_basis": 0.98,
+     "p25_pair_basis": 0.9,
+     "p75_pair_basis": 1.02,
+     "first_complement_shares": 905121.99,
+     "first_complement_stake": 184185.96,
+     "first_complement_pnl": 34067.45,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.30-0.50": {
+     "opens": 8199,
+     "completed_within_1h": 4756,
+     "completion_rate_1h": 0.5801,
+     "mean_pair_basis": 0.9657,
+     "completed_within_5s": 189,
+     "completion_rate_5s": 0.0231,
+     "completed_by_settlement": 5657,
+     "completion_rate_settlement": 0.69,
+     "residual_rate": 0.31,
+     "median_pair_basis": 0.98,
+     "p25_pair_basis": 0.91,
+     "p75_pair_basis": 1.03,
+     "first_complement_shares": 2066118.03,
+     "first_complement_stake": 860014.59,
+     "first_complement_pnl": 37622.23,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.50-0.70": {
+     "opens": 7856,
+     "completed_within_1h": 4772,
+     "completion_rate_1h": 0.6074,
+     "mean_pair_basis": 0.98632,
+     "completed_within_5s": 229,
+     "completion_rate_5s": 0.0291,
+     "completed_by_settlement": 5642,
+     "completion_rate_settlement": 0.7182,
+     "residual_rate": 0.2818,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.93,
+     "p75_pair_basis": 1.03132,
+     "first_complement_shares": 2369274.17,
+     "first_complement_stake": 1349356.32,
+     "first_complement_pnl": 30779.38,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.70-0.90": {
+     "opens": 4006,
+     "completed_within_1h": 2660,
+     "completion_rate_1h": 0.664,
+     "mean_pair_basis": 1.00507,
+     "completed_within_5s": 121,
+     "completion_rate_5s": 0.0302,
+     "completed_by_settlement": 2912,
+     "completion_rate_settlement": 0.7269,
+     "residual_rate": 0.2731,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.94,
+     "p75_pair_basis": 1.04,
+     "first_complement_shares": 915084.09,
+     "first_complement_stake": 717725.27,
+     "first_complement_pnl": 7690.46,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.90-1.01": {
+     "opens": 977,
+     "completed_within_1h": 511,
+     "completion_rate_1h": 0.523,
+     "mean_pair_basis": 1.01348,
+     "completed_within_5s": 22,
+     "completion_rate_5s": 0.0225,
+     "completed_by_settlement": 549,
+     "completion_rate_settlement": 0.5619,
+     "residual_rate": 0.4381,
+     "median_pair_basis": 0.995,
+     "p25_pair_basis": 0.98,
+     "p75_pair_basis": 1.017,
+     "first_complement_shares": 184159.52,
+     "first_complement_stake": 172894.68,
+     "first_complement_pnl": -187.98,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    }
+   },
+   "FIRST_COMPLEMENT_PNL_TOTAL": 119415.36,
+   "FIRST_COMPLEMENT_STAKE_TOTAL": 3297267.66,
+   "BY_SPORT_OR_QUESTION": {
+    "US Open, Qualification W": {
+     "opens": 273,
+     "completed_within_1h": 226,
+     "completion_rate_1h": 0.8278,
+     "mean_pair_basis": 0.97666
+    },
+    "US Open, Qualification A": {
+     "opens": 262,
+     "completed_within_1h": 212,
+     "completion_rate_1h": 0.8092,
+     "mean_pair_basis": 0.99414
+    },
+    "St. Louis Cardinals vs. ": {
+     "opens": 146,
+     "completed_within_1h": 60,
+     "completion_rate_1h": 0.411,
+     "mean_pair_basis": 0.99388
+    },
+    "Games Total: O/U 2.5": {
+     "opens": 142,
+     "completed_within_1h": 26,
+     "completion_rate_1h": 0.1831,
+     "mean_pair_basis": 0.90077
+    },
+    "Los Angeles Dodgers vs. ": {
+     "opens": 127,
+     "completed_within_1h": 49,
+     "completion_rate_1h": 0.3858,
+     "mean_pair_basis": 0.94712
+    },
+    "Arizona Diamondbacks vs.": {
+     "opens": 108,
+     "completed_within_1h": 60,
+     "completion_rate_1h": 0.5556,
+     "mean_pair_basis": 0.98064
+    },
+    "Games Total: O/U 3.5": {
+     "opens": 103,
+     "completed_within_1h": 32,
+     "completion_rate_1h": 0.3107,
+     "mean_pair_basis": 0.95166
+    },
+    "San Francisco Giants vs.": {
+     "opens": 96,
+     "completed_within_1h": 27,
+     "completion_rate_1h": 0.2812,
+     "mean_pair_basis": 0.99044
+    },
+    "Philadelphia Phillies vs": {
+     "opens": 91,
+     "completed_within_1h": 40,
+     "completion_rate_1h": 0.4396,
+     "mean_pair_basis": 0.95286
+    },
+    "Washington Nationals vs.": {
+     "opens": 87,
+     "completed_within_1h": 33,
+     "completion_rate_1h": 0.3793,
+     "mean_pair_basis": 0.95725
+    },
+    "ITF WOMEN - SINGLES: W15": {
+     "opens": 86,
+     "completed_within_1h": 19,
+     "completion_rate_1h": 0.2209,
+     "mean_pair_basis": 0.91021
+    },
+    "Cleveland Guardians vs. ": {
+     "opens": 83,
+     "completed_within_1h": 24,
+     "completion_rate_1h": 0.2892,
+     "mean_pair_basis": 0.9926
+    },
+    "Spread: Los Angeles Dodg": {
+     "opens": 81,
+     "completed_within_1h": 31,
+     "completion_rate_1h": 0.3827,
+     "mean_pair_basis": 0.98432
+    },
+    "Spread: New York Yankees": {
+     "opens": 76,
+     "completed_within_1h": 38,
+     "completion_rate_1h": 0.5,
+     "mean_pair_basis": 0.96428
+    },
+    "ITF WOMEN - SINGLES: W35": {
+     "opens": 70,
+     "completed_within_1h": 38,
+     "completion_rate_1h": 0.5429,
+     "mean_pair_basis": 0.96668
+    },
+    "Spread: Tampa Bay Rays (": {
+     "opens": 68,
+     "completed_within_1h": 27,
+     "completion_rate_1h": 0.3971,
+     "mean_pair_basis": 0.99766
+    },
+    "Spread: Milwaukee Brewer": {
+     "opens": 66,
+     "completed_within_1h": 25,
+     "completion_rate_1h": 0.3788,
+     "mean_pair_basis": 1.00635
+    },
+    "Spread: St. Louis Cardin": {
+     "opens": 60,
+     "completed_within_1h": 26,
+     "completion_rate_1h": 0.4333,
+     "mean_pair_basis": 0.97597
+    },
+    "Games Total: O/U 4.5": {
+     "opens": 59,
+     "completed_within_1h": 14,
+     "completion_rate_1h": 0.2373,
+     "mean_pair_basis": 0.93941
+    },
+    "Counter-Strike: HOTU vs ": {
+     "opens": 58,
+     "completed_within_1h": 53,
+     "completion_rate_1h": 0.9138,
+     "mean_pair_basis": 0.95593
+    },
+    "Spread: Boston Red Sox (": {
+     "opens": 57,
+     "completed_within_1h": 18,
+     "completion_rate_1h": 0.3158,
+     "mean_pair_basis": 0.97425
+    },
+    "Spread: Houston Astros (": {
+     "opens": 56,
+     "completed_within_1h": 20,
+     "completion_rate_1h": 0.3571,
+     "mean_pair_basis": 0.97321
+    },
+    "Spread: Detroit Tigers (": {
+     "opens": 56,
+     "completed_within_1h": 16,
+     "completion_rate_1h": 0.2857,
+     "mean_pair_basis": 0.97182
+    },
+    "Spread: Chicago White So": {
+     "opens": 56,
+     "completed_within_1h": 23,
+     "completion_rate_1h": 0.4107,
+     "mean_pair_basis": 0.96222
+    },
+    "Spread: San Diego Padres": {
+     "opens": 56,
+     "completed_within_1h": 19,
+     "completion_rate_1h": 0.3393,
+     "mean_pair_basis": 1.0025
+    }
+   },
+   "BY_FILL_SIZE_BUCKET": {
+    "0-100": {
+     "opens": 12471,
+     "completed_within_1h": 6846,
+     "completion_rate_1h": 0.549,
+     "mean_pair_basis": 0.96753
+    },
+    "100-1000": {
+     "opens": 10359,
+     "completed_within_1h": 5808,
+     "completion_rate_1h": 0.5607,
+     "mean_pair_basis": 0.97885
+    },
+    "1000-10000": {
+     "opens": 4828,
+     "completed_within_1h": 2936,
+     "completion_rate_1h": 0.6081,
+     "mean_pair_basis": 0.97824
+    },
+    "10000-100000": {
+     "opens": 1289,
+     "completed_within_1h": 730,
+     "completion_rate_1h": 0.5663,
+     "mean_pair_basis": 0.98561
+    },
+    "100000-inf": {
+     "opens": 6,
+     "completed_within_1h": 4,
+     "completion_rate_1h": 0.6667,
+     "mean_pair_basis": 0.946
+    }
+   },
+   "BY_WEEK": {
+    "2026-W33": {
+     "opens": 74,
+     "completed_within_1h": 49,
+     "completion_rate_1h": 0.6622,
+     "mean_pair_basis": 0.98235
+    },
+    "2026-W34": {
+     "opens": 7361,
+     "completed_within_1h": 4302,
+     "completion_rate_1h": 0.5844,
+     "mean_pair_basis": 0.98056
+    },
+    "2026-W35": {
+     "opens": 7183,
+     "completed_within_1h": 4017,
+     "completion_rate_1h": 0.5592,
+     "mean_pair_basis": 0.97453
+    },
+    "2026-W36": {
+     "opens": 5841,
+     "completed_within_1h": 3296,
+     "completion_rate_1h": 0.5643,
+     "mean_pair_basis": 0.96467
+    },
+    "2026-W37": {
+     "opens": 7157,
+     "completed_within_1h": 3932,
+     "completion_rate_1h": 0.5494,
+     "mean_pair_basis": 0.97699
+    },
+    "2026-W38": {
+     "opens": 1337,
+     "completed_within_1h": 728,
+     "completion_rate_1h": 0.5445,
+     "mean_pair_basis": 0.97209
+    }
+   }
+  },
+  "LAST_7D": {
+   "REFERENCE_ACCOUNT_FIRST_SIDE_ACQUISITIONS": 6936,
+   "REFERENCE_ACCOUNT_NEVER_COMPLETED": 2656,
+   "REFERENCE_ACCOUNT_MEAN_PAIR_BASIS": 0.97624,
+   "REFERENCE_ACCOUNT_COMPLETION_GRID": {
+    "5": {
+     "ceiling_0.90": {
+      "completed": 1,
+      "rate": 0.00014
+     },
+     "ceiling_0.92": {
+      "completed": 3,
+      "rate": 0.00043
+     },
+     "ceiling_0.94": {
+      "completed": 8,
+      "rate": 0.00115
+     },
+     "ceiling_0.95": {
+      "completed": 9,
+      "rate": 0.0013
+     },
+     "ceiling_0.96": {
+      "completed": 12,
+      "rate": 0.00173
+     },
+     "ceiling_0.97": {
+      "completed": 18,
+      "rate": 0.0026
+     },
+     "ceiling_0.98": {
+      "completed": 32,
+      "rate": 0.00461
+     },
+     "ceiling_0.99": {
+      "completed": 56,
+      "rate": 0.00807
+     },
+     "ceiling_1.00": {
+      "completed": 79,
+      "rate": 0.01139
+     },
+     "any_basis_completed": 90,
+     "any_basis_rate": 0.01298
+    },
+    "10": {
+     "ceiling_0.90": {
+      "completed": 2,
+      "rate": 0.00029
+     },
+     "ceiling_0.92": {
+      "completed": 5,
+      "rate": 0.00072
+     },
+     "ceiling_0.94": {
+      "completed": 11,
+      "rate": 0.00159
+     },
+     "ceiling_0.95": {
+      "completed": 14,
+      "rate": 0.00202
+     },
+     "ceiling_0.96": {
+      "completed": 21,
+      "rate": 0.00303
+     },
+     "ceiling_0.97": {
+      "completed": 29,
+      "rate": 0.00418
+     },
+     "ceiling_0.98": {
+      "completed": 47,
+      "rate": 0.00678
+     },
+     "ceiling_0.99": {
+      "completed": 85,
+      "rate": 0.01225
+     },
+     "ceiling_1.00": {
+      "completed": 115,
+      "rate": 0.01658
+     },
+     "any_basis_completed": 136,
+     "any_basis_rate": 0.01961
+    },
+    "30": {
+     "ceiling_0.90": {
+      "completed": 5,
+      "rate": 0.00072
+     },
+     "ceiling_0.92": {
+      "completed": 11,
+      "rate": 0.00159
+     },
+     "ceiling_0.94": {
+      "completed": 24,
+      "rate": 0.00346
+     },
+     "ceiling_0.95": {
+      "completed": 33,
+      "rate": 0.00476
+     },
+     "ceiling_0.96": {
+      "completed": 49,
+      "rate": 0.00706
+     },
+     "ceiling_0.97": {
+      "completed": 63,
+      "rate": 0.00908
+     },
+     "ceiling_0.98": {
+      "completed": 98,
+      "rate": 0.01413
+     },
+     "ceiling_0.99": {
+      "completed": 168,
+      "rate": 0.02422
+     },
+     "ceiling_1.00": {
+      "completed": 223,
+      "rate": 0.03215
+     },
+     "any_basis_completed": 268,
+     "any_basis_rate": 0.03864
+    },
+    "60": {
+     "ceiling_0.90": {
+      "completed": 13,
+      "rate": 0.00187
+     },
+     "ceiling_0.92": {
+      "completed": 24,
+      "rate": 0.00346
+     },
+     "ceiling_0.94": {
+      "completed": 42,
+      "rate": 0.00606
+     },
+     "ceiling_0.95": {
+      "completed": 60,
+      "rate": 0.00865
+     },
+     "ceiling_0.96": {
+      "completed": 85,
+      "rate": 0.01225
+     },
+     "ceiling_0.97": {
+      "completed": 110,
+      "rate": 0.01586
+     },
+     "ceiling_0.98": {
+      "completed": 159,
+      "rate": 0.02292
+     },
+     "ceiling_0.99": {
+      "completed": 251,
+      "rate": 0.03619
+     },
+     "ceiling_1.00": {
+      "completed": 329,
+      "rate": 0.04743
+     },
+     "any_basis_completed": 420,
+     "any_basis_rate": 0.06055
+    },
+    "120": {
+     "ceiling_0.90": {
+      "completed": 36,
+      "rate": 0.00519
+     },
+     "ceiling_0.92": {
+      "completed": 54,
+      "rate": 0.00779
+     },
+     "ceiling_0.94": {
+      "completed": 91,
+      "rate": 0.01312
+     },
+     "ceiling_0.95": {
+      "completed": 120,
+      "rate": 0.0173
+     },
+     "ceiling_0.96": {
+      "completed": 155,
+      "rate": 0.02235
+     },
+     "ceiling_0.97": {
+      "completed": 191,
+      "rate": 0.02754
+     },
+     "ceiling_0.98": {
+      "completed": 258,
+      "rate": 0.0372
+     },
+     "ceiling_0.99": {
+      "completed": 385,
+      "rate": 0.05551
+     },
+     "ceiling_1.00": {
+      "completed": 498,
+      "rate": 0.0718
+     },
+     "any_basis_completed": 690,
+     "any_basis_rate": 0.09948
+    },
+    "300": {
+     "ceiling_0.90": {
+      "completed": 114,
+      "rate": 0.01644
+     },
+     "ceiling_0.92": {
+      "completed": 150,
+      "rate": 0.02163
+     },
+     "ceiling_0.94": {
+      "completed": 224,
+      "rate": 0.0323
+     },
+     "ceiling_0.95": {
+      "completed": 267,
+      "rate": 0.03849
+     },
+     "ceiling_0.96": {
+      "completed": 334,
+      "rate": 0.04815
+     },
+     "ceiling_0.97": {
+      "completed": 404,
+      "rate": 0.05825
+     },
+     "ceiling_0.98": {
+      "completed": 513,
+      "rate": 0.07396
+     },
+     "ceiling_0.99": {
+      "completed": 700,
+      "rate": 0.10092
+     },
+     "ceiling_1.00": {
+      "completed": 865,
+      "rate": 0.12471
+     },
+     "any_basis_completed": 1278,
+     "any_basis_rate": 0.18426
+    },
+    "600": {
+     "ceiling_0.90": {
+      "completed": 231,
+      "rate": 0.0333
+     },
+     "ceiling_0.92": {
+      "completed": 298,
+      "rate": 0.04296
+     },
+     "ceiling_0.94": {
+      "completed": 403,
+      "rate": 0.0581
+     },
+     "ceiling_0.95": {
+      "completed": 461,
+      "rate": 0.06646
+     },
+     "ceiling_0.96": {
+      "completed": 552,
+      "rate": 0.07958
+     },
+     "ceiling_0.97": {
+      "completed": 650,
+      "rate": 0.09371
+     },
+     "ceiling_0.98": {
+      "completed": 786,
+      "rate": 0.11332
+     },
+     "ceiling_0.99": {
+      "completed": 1001,
+      "rate": 0.14432
+     },
+     "ceiling_1.00": {
+      "completed": 1222,
+      "rate": 0.17618
+     },
+     "any_basis_completed": 1906,
+     "any_basis_rate": 0.2748
+    },
+    "1800": {
+     "ceiling_0.90": {
+      "completed": 515,
+      "rate": 0.07425
+     },
+     "ceiling_0.92": {
+      "completed": 631,
+      "rate": 0.09097
+     },
+     "ceiling_0.94": {
+      "completed": 779,
+      "rate": 0.11231
+     },
+     "ceiling_0.95": {
+      "completed": 865,
+      "rate": 0.12471
+     },
+     "ceiling_0.96": {
+      "completed": 989,
+      "rate": 0.14259
+     },
+     "ceiling_0.97": {
+      "completed": 1121,
+      "rate": 0.16162
+     },
+     "ceiling_0.98": {
+      "completed": 1304,
+      "rate": 0.188
+     },
+     "ceiling_0.99": {
+      "completed": 1568,
+      "rate": 0.22607
+     },
+     "ceiling_1.00": {
+      "completed": 1840,
+      "rate": 0.26528
+     },
+     "any_basis_completed": 3009,
+     "any_basis_rate": 0.43382
+    },
+    "3600": {
+     "ceiling_0.90": {
+      "completed": 731,
+      "rate": 0.10539
+     },
+     "ceiling_0.92": {
+      "completed": 876,
+      "rate": 0.1263
+     },
+     "ceiling_0.94": {
+      "completed": 1050,
+      "rate": 0.15138
+     },
+     "ceiling_0.95": {
+      "completed": 1151,
+      "rate": 0.16595
+     },
+     "ceiling_0.96": {
+      "completed": 1290,
+      "rate": 0.18599
+     },
+     "ceiling_0.97": {
+      "completed": 1434,
+      "rate": 0.20675
+     },
+     "ceiling_0.98": {
+      "completed": 1636,
+      "rate": 0.23587
+     },
+     "ceiling_0.99": {
+      "completed": 1915,
+      "rate": 0.2761
+     },
+     "ceiling_1.00": {
+      "completed": 2216,
+      "rate": 0.31949
+     },
+     "any_basis_completed": 3656,
+     "any_basis_rate": 0.5271
+    },
+    "settlement": {
+     "ceiling_0.90": {
+      "completed": 913,
+      "rate": 0.13163
+     },
+     "ceiling_0.92": {
+      "completed": 1082,
+      "rate": 0.156
+     },
+     "ceiling_0.94": {
+      "completed": 1276,
+      "rate": 0.18397
+     },
+     "ceiling_0.95": {
+      "completed": 1389,
+      "rate": 0.20026
+     },
+     "ceiling_0.96": {
+      "completed": 1548,
+      "rate": 0.22318
+     },
+     "ceiling_0.97": {
+      "completed": 1709,
+      "rate": 0.2464
+     },
+     "ceiling_0.98": {
+      "completed": 1933,
+      "rate": 0.27869
+     },
+     "ceiling_0.99": {
+      "completed": 2242,
+      "rate": 0.32324
+     },
+     "ceiling_1.00": {
+      "completed": 2576,
+      "rate": 0.3714
+     },
+     "any_basis_completed": 4280,
+     "any_basis_rate": 0.61707
+    }
+   },
+   "BY_FIRST_LEG_PRICE_BAND": {
+    "0.00-0.10": {
+     "opens": 619,
+     "completed_within_1h": 136,
+     "completion_rate_1h": 0.2197,
+     "mean_pair_basis": 0.94642,
+     "completed_within_5s": 3,
+     "completion_rate_5s": 0.0048,
+     "completed_by_settlement": 149,
+     "completion_rate_settlement": 0.2407,
+     "residual_rate": 0.7593,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.941,
+     "p75_pair_basis": 1.012,
+     "first_complement_shares": 51372.45,
+     "first_complement_stake": 3205.98,
+     "first_complement_pnl": 1491.78,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.10-0.30": {
+     "opens": 1376,
+     "completed_within_1h": 625,
+     "completion_rate_1h": 0.4542,
+     "mean_pair_basis": 0.93378,
+     "completed_within_5s": 6,
+     "completion_rate_5s": 0.0044,
+     "completed_by_settlement": 726,
+     "completion_rate_settlement": 0.5276,
+     "residual_rate": 0.4724,
+     "median_pair_basis": 0.98,
+     "p25_pair_basis": 0.87,
+     "p75_pair_basis": 1.03,
+     "first_complement_shares": 185911.79,
+     "first_complement_stake": 37451.76,
+     "first_complement_pnl": 9296.37,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.30-0.50": {
+     "opens": 1922,
+     "completed_within_1h": 1056,
+     "completion_rate_1h": 0.5494,
+     "mean_pair_basis": 0.96501,
+     "completed_within_5s": 20,
+     "completion_rate_5s": 0.0104,
+     "completed_by_settlement": 1262,
+     "completion_rate_settlement": 0.6566,
+     "residual_rate": 0.3434,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.91,
+     "p75_pair_basis": 1.03,
+     "first_complement_shares": 437841.54,
+     "first_complement_stake": 185630.55,
+     "first_complement_pnl": 1074.84,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.50-0.70": {
+     "opens": 1883,
+     "completed_within_1h": 1112,
+     "completion_rate_1h": 0.5905,
+     "mean_pair_basis": 0.99421,
+     "completed_within_5s": 36,
+     "completion_rate_5s": 0.0191,
+     "completed_by_settlement": 1349,
+     "completion_rate_settlement": 0.7164,
+     "residual_rate": 0.2836,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.93,
+     "p75_pair_basis": 1.05,
+     "first_complement_shares": 555727.12,
+     "first_complement_stake": 313462.57,
+     "first_complement_pnl": 8299.29,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.70-0.90": {
+     "opens": 883,
+     "completed_within_1h": 597,
+     "completion_rate_1h": 0.6761,
+     "mean_pair_basis": 1.00587,
+     "completed_within_5s": 24,
+     "completion_rate_5s": 0.0272,
+     "completed_by_settlement": 654,
+     "completion_rate_settlement": 0.7407,
+     "residual_rate": 0.2593,
+     "median_pair_basis": 0.99,
+     "p25_pair_basis": 0.94,
+     "p75_pair_basis": 1.04,
+     "first_complement_shares": 163698.3,
+     "first_complement_stake": 126477.89,
+     "first_complement_pnl": 140.88,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    },
+    "0.90-1.01": {
+     "opens": 253,
+     "completed_within_1h": 130,
+     "completion_rate_1h": 0.5138,
+     "mean_pair_basis": 1.0179,
+     "completed_within_5s": 1,
+     "completion_rate_5s": 0.004,
+     "completed_by_settlement": 140,
+     "completion_rate_settlement": 0.5534,
+     "residual_rate": 0.4466,
+     "median_pair_basis": 0.997,
+     "p25_pair_basis": 0.98,
+     "p75_pair_basis": 1.02,
+     "first_complement_shares": 60048.89,
+     "first_complement_stake": 56009.85,
+     "first_complement_pnl": -374.19,
+     "_NOT_THE_PAIR_CHANNEL": "first_complement_* covers ONLY the first complement of an OPENING leg and on RN1 reproduces just 26% of realized_merge_pnl. The pair channel's per-band economics are MERGE_PNL_BY_OPEN_BAND, which reconciles to the cent. Do not read these as MATCHED_PNL."
+    }
+   },
+   "FIRST_COMPLEMENT_PNL_TOTAL": 19928.97,
+   "FIRST_COMPLEMENT_STAKE_TOTAL": 722238.6,
+   "BY_SPORT_OR_QUESTION": {
+    "Guadalajara Open Akron: ": {
+     "opens": 47,
+     "completed_within_1h": 35,
+     "completion_rate_1h": 0.7447,
+     "mean_pair_basis": 0.96832
+    },
+    "Pittsburgh Pirates vs. C": {
+     "opens": 46,
+     "completed_within_1h": 20,
+     "completion_rate_1h": 0.4348,
+     "mean_pair_basis": 0.99625
+    },
+    "Los Angeles Dodgers vs. ": {
+     "opens": 34,
+     "completed_within_1h": 10,
+     "completion_rate_1h": 0.2941,
+     "mean_pair_basis": 0.97313
+    },
+    "Cleveland Guardians vs. ": {
+     "opens": 31,
+     "completed_within_1h": 8,
+     "completion_rate_1h": 0.2581,
+     "mean_pair_basis": 0.96085
+    },
+    "Chicago White Sox vs. St": {
+     "opens": 31,
+     "completed_within_1h": 16,
+     "completion_rate_1h": 0.5161,
+     "mean_pair_basis": 0.99048
+    },
+    "Colorado Rockies vs. Det": {
+     "opens": 30,
+     "completed_within_1h": 17,
+     "completion_rate_1h": 0.5667,
+     "mean_pair_basis": 1.0
+    },
+    "San Diego Padres vs. San": {
+     "opens": 30,
+     "completed_within_1h": 9,
+     "completion_rate_1h": 0.3,
+     "mean_pair_basis": 0.96294
+    },
+    "Houston Astros vs. Phila": {
+     "opens": 28,
+     "completed_within_1h": 14,
+     "completion_rate_1h": 0.5,
+     "mean_pair_basis": 0.98778
+    },
+    "Guadalajara Open Akron, ": {
+     "opens": 28,
+     "completed_within_1h": 22,
+     "completion_rate_1h": 0.7857,
+     "mean_pair_basis": 0.95398
+    },
+    "Counter-Strike: HOTU vs ": {
+     "opens": 26,
+     "completed_within_1h": 25,
+     "completion_rate_1h": 0.9615,
+     "mean_pair_basis": 0.9696
+    },
+    "Texas Rangers vs. Arizon": {
+     "opens": 26,
+     "completed_within_1h": 10,
+     "completion_rate_1h": 0.3846,
+     "mean_pair_basis": 0.94643
+    },
+    "Texas Rangers vs. Seattl": {
+     "opens": 25,
+     "completed_within_1h": 9,
+     "completion_rate_1h": 0.36,
+     "mean_pair_basis": 0.96714
+    },
+    "Counter-Strike: FOKUS vs": {
+     "opens": 25,
+     "completed_within_1h": 24,
+     "completion_rate_1h": 0.96,
+     "mean_pair_basis": 0.94083
+    },
+    "Philadelphia Phillies vs": {
+     "opens": 25,
+     "completed_within_1h": 11,
+     "completion_rate_1h": 0.44,
+     "mean_pair_basis": 0.95118
+    },
+    "Seattle Mariners vs. Ath": {
+     "opens": 25,
+     "completed_within_1h": 9,
+     "completion_rate_1h": 0.36,
+     "mean_pair_basis": 1.01876
+    },
+    "Colorado Rockies vs. New": {
+     "opens": 23,
+     "completed_within_1h": 9,
+     "completion_rate_1h": 0.3913,
+     "mean_pair_basis": 0.93643
+    },
+    "Spread: New York Yankees": {
+     "opens": 23,
+     "completed_within_1h": 11,
+     "completion_rate_1h": 0.4783,
+     "mean_pair_basis": 0.89231
+    },
+    "Spread: Texas Rangers (-": {
+     "opens": 23,
+     "completed_within_1h": 10,
+     "completion_rate_1h": 0.4348,
+     "mean_pair_basis": 1.09909
+    },
+    "Counter-Strike: 1WIN vs ": {
+     "opens": 22,
+     "completed_within_1h": 22,
+     "completion_rate_1h": 1.0,
+     "mean_pair_basis": 0.97773
+    },
+    "St. Louis Cardinals vs. ": {
+     "opens": 21,
+     "completed_within_1h": 9,
+     "completion_rate_1h": 0.4286,
+     "mean_pair_basis": 0.977
+    },
+    "Spread: St. Louis Cardin": {
+     "opens": 21,
+     "completed_within_1h": 8,
+     "completion_rate_1h": 0.381,
+     "mean_pair_basis": 0.96667
+    },
+    "Games Total: O/U 3.5": {
+     "opens": 21,
+     "completed_within_1h": 2,
+     "completion_rate_1h": 0.0952,
+     "mean_pair_basis": 0.968
+    },
+    "Spread: Detroit Tigers (": {
+     "opens": 20,
+     "completed_within_1h": 7,
+     "completion_rate_1h": 0.35,
+     "mean_pair_basis": 0.99333
+    },
+    "Spread: Los Angeles Dodg": {
+     "opens": 20,
+     "completed_within_1h": 12,
+     "completion_rate_1h": 0.6,
+     "mean_pair_basis": 1.00154
+    },
+    "Spread: San Diego Padres": {
+     "opens": 20,
+     "completed_within_1h": 4,
+     "completion_rate_1h": 0.2,
+     "mean_pair_basis": 0.99462
+    }
+   },
+   "BY_FILL_SIZE_BUCKET": {
+    "0-100": {
+     "opens": 3147,
+     "completed_within_1h": 1637,
+     "completion_rate_1h": 0.5202,
+     "mean_pair_basis": 0.97363
+    },
+    "100-1000": {
+     "opens": 2499,
+     "completed_within_1h": 1322,
+     "completion_rate_1h": 0.529,
+     "mean_pair_basis": 0.97764
+    },
+    "1000-10000": {
+     "opens": 1035,
+     "completed_within_1h": 567,
+     "completion_rate_1h": 0.5478,
+     "mean_pair_basis": 0.97558
+    },
+    "10000-100000": {
+     "opens": 252,
+     "completed_within_1h": 129,
+     "completion_rate_1h": 0.5119,
+     "mean_pair_basis": 0.99422
+    },
+    "100000-inf": {
+     "opens": 3,
+     "completed_within_1h": 1,
+     "completion_rate_1h": 0.3333,
+     "mean_pair_basis": 0.865
+    }
+   },
+   "BY_WEEK": {
+    "2026-W37": {
+     "opens": 5599,
+     "completed_within_1h": 2928,
+     "completion_rate_1h": 0.523,
+     "mean_pair_basis": 0.97727
+    },
+    "2026-W38": {
+     "opens": 1337,
+     "completed_within_1h": 728,
+     "completion_rate_1h": 0.5445,
+     "mean_pair_basis": 0.97209
+    }
+   }
+  }
+ },
+ "MERGE_PNL_BY_OPEN_BAND": {
+  "LIFETIME": {
+   "0.00-0.10": {
+    "merges": 10765,
+    "merged_shares": 5644023.39,
+    "MATCHED_STAKE": 730207.05,
+    "MATCHED_PNL": 611059.16,
+    "MATCHED_ROI": 0.83683
+   },
+   "0.10-0.30": {
+    "merges": 101840,
+    "merged_shares": 45659020.42,
+    "MATCHED_STAKE": 11886950.99,
+    "MATCHED_PNL": 3844029.16,
+    "MATCHED_ROI": 0.323382
+   },
+   "0.30-0.50": {
+    "merges": 237616,
+    "merged_shares": 111171600.24,
+    "MATCHED_STAKE": 47686138.18,
+    "MATCHED_PNL": 5713028.05,
+    "MATCHED_ROI": 0.119805
+   },
+   "0.50-0.70": {
+    "merges": 234074,
+    "merged_shares": 106850067.56,
+    "MATCHED_STAKE": 60114340.41,
+    "MATCHED_PNL": 1167177.46,
+    "MATCHED_ROI": 0.019416
+   },
+   "0.70-0.90": {
+    "merges": 92402,
+    "merged_shares": 39534718.73,
+    "MATCHED_STAKE": 28521768.71,
+    "MATCHED_PNL": -408535.13,
+    "MATCHED_ROI": -0.014324
+   },
+   "0.90-1.01": {
+    "merges": 8034,
+    "merged_shares": 4625286.06,
+    "MATCHED_STAKE": 4008838.1,
+    "MATCHED_PNL": -131862.87,
+    "MATCHED_ROI": -0.032893
+   },
+   "_TOTAL_MATCHED_PNL": 10794895.83,
+   "_BUCKET": "the HELD leg's opening price -- a decision-time fact, known before the pair economics are determined",
+   "_REALIZED_MERGE_PNL": 10794895.83,
+   "_RESIDUAL_VS_ESTIMATOR": 0.0,
+   "_RECONCILES": true
+  },
+  "LAST_30D": {
+   "0.00-0.10": {
+    "merges": 2927,
+    "merged_shares": 1272884.72,
+    "MATCHED_STAKE": 192703.56,
+    "MATCHED_PNL": 105944.74,
+    "MATCHED_ROI": 0.549781
+   },
+   "0.10-0.30": {
+    "merges": 19110,
+    "merged_shares": 8714866.23,
+    "MATCHED_STAKE": 2227688.22,
+    "MATCHED_PNL": 554346.7,
+    "MATCHED_ROI": 0.248844
+   },
+   "0.30-0.50": {
+    "merges": 44533,
+    "merged_shares": 22510456.02,
+    "MATCHED_STAKE": 9815675.73,
+    "MATCHED_PNL": 753553.16,
+    "MATCHED_ROI": 0.07677
+   },
+   "0.50-0.70": {
+    "merges": 44361,
+    "merged_shares": 23178423.73,
+    "MATCHED_STAKE": 12864791.38,
+    "MATCHED_PNL": 131835.66,
+    "MATCHED_ROI": 0.010248
+   },
+   "0.70-0.90": {
+    "merges": 20954,
+    "merged_shares": 9555420.63,
+    "MATCHED_STAKE": 6921152.77,
+    "MATCHED_PNL": -122975.94,
+    "MATCHED_ROI": -0.017768
+   },
+   "0.90-1.01": {
+    "merges": 2385,
+    "merged_shares": 1567631.4,
+    "MATCHED_STAKE": 1374619.96,
+    "MATCHED_PNL": -24895.86,
+    "MATCHED_ROI": -0.018111
+   },
+   "_TOTAL_MATCHED_PNL": 1397808.45,
+   "_BUCKET": "the HELD leg's opening price -- a decision-time fact, known before the pair economics are determined",
+   "_REALIZED_MERGE_PNL": 1397808.45,
+   "_RESIDUAL_VS_ESTIMATOR": 0.0,
+   "_RECONCILES": true
+  },
+  "LAST_7D": {
+   "0.00-0.10": {
+    "merges": 414,
+    "merged_shares": 140523.24,
+    "MATCHED_STAKE": 13485.01,
+    "MATCHED_PNL": 10852.59,
+    "MATCHED_ROI": 0.804789
+   },
+   "0.10-0.30": {
+    "merges": 3199,
+    "merged_shares": 1558032.44,
+    "MATCHED_STAKE": 425332.14,
+    "MATCHED_PNL": 80871.35,
+    "MATCHED_ROI": 0.190137
+   },
+   "0.30-0.50": {
+    "merges": 7272,
+    "merged_shares": 3747047.27,
+    "MATCHED_STAKE": 1674632.26,
+    "MATCHED_PNL": 183654.11,
+    "MATCHED_ROI": 0.109668
+   },
+   "0.50-0.70": {
+    "merges": 8465,
+    "merged_shares": 4154630.37,
+    "MATCHED_STAKE": 2317402.41,
+    "MATCHED_PNL": 113092.79,
+    "MATCHED_ROI": 0.048802
+   },
+   "0.70-0.90": {
+    "merges": 3764,
+    "merged_shares": 1725267.29,
+    "MATCHED_STAKE": 1259438.98,
+    "MATCHED_PNL": -21953.06,
+    "MATCHED_ROI": -0.017431
+   },
+   "0.90-1.01": {
+    "merges": 548,
+    "merged_shares": 315864.25,
+    "MATCHED_STAKE": 289708.88,
+    "MATCHED_PNL": -16806.7,
+    "MATCHED_ROI": -0.058012
+   },
+   "_TOTAL_MATCHED_PNL": 349711.08,
+   "_BUCKET": "the HELD leg's opening price -- a decision-time fact, known before the pair economics are determined",
+   "_REALIZED_MERGE_PNL": 349711.08,
+   "_RESIDUAL_VS_ESTIMATOR": 0.0,
+   "_RECONCILES": true
+  }
+ }
+}
