@@ -1,4 +1,57 @@
 {
+ "rn1": {
+  "CENSUS": {
+   "REFERENCE_ACCOUNT": "rn1",
+   "WALLET_ADDRESS": "0x2005d16a84ceefa912d4e380cd32e7ff827875ea",
+   "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+   "EXTRACTION_UTC": "2026-09-15T22:25:51.947461+00:00",
+   "REQUESTED_RANGE_START": "2024-06-01",
+   "RETURNED_RANGE_START": "2025-07-09T12:02:50+00:00",
+   "RETURNED_RANGE_END": "2026-09-15T22:15:54+00:00",
+   "RETURNED_SPAN_DAYS": 433.43,
+   "ROWS_READ": 4692621,
+   "ROWS_KEPT": 4692621,
+   "UNIQUE_TRADE_IDS": 4540792,
+   "DUPLICATE_FILL_KEYS": 0,
+   "BUY_COUNT": 4692373,
+   "SELL_COUNT": 248,
+   "OTHER_SIDE_COUNT": 0,
+   "DISTINCT_CONDITIONS": 138458,
+   "DISTINCT_MARKET_SLUGS": 138458,
+   "DROP_CENSUS": {
+    "PAYOUT_ONE_HOT": 138050,
+    "PAYOUT_NOT_ONE_HOT": 327
+   },
+   "COVERAGE_LIMITATIONS": [
+    "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+    "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+    "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+   ],
+   "AS_OF_UTC": "2026-09-15T22:25:05.520615+00:00",
+   "DAYS_SINCE_LAST_FILL_AT_AS_OF": 0.01
+  },
+  "REPAIR_GATES": "PASS",
+  "LIFETIME_DECOMPOSITION": {
+   "edge_roi": 0.035822,
+   "edge_ci95": [
+    0.030016,
+    0.041629
+   ],
+   "edge_clusters": 138227,
+   "edge_verdict": "PROFITABLE at 95% \u2014 +3.58% on dollar deployed, interval [+3.00%, +4.16%] over 2,291,448 closed lots",
+   "lot_s": 381621780.79,
+   "lot_p": 13670572.52,
+   "SETTLED_STAKE": 167713564.03,
+   "SETTLED_PNL": 2935868.21,
+   "SETTLED_SHARE_OF_STAKE": 0.4395,
+   "TRADED_STAKE": 213908216.76,
+   "TRADED_PNL": 10734704.31,
+   "MERGE_PNL": 10364422.79,
+   "SELL_PNL": 370281.52,
+   "TRADED_ROI": 0.050184,
+   "SETTLED_ROI": 0.017505
+  }
+ },
  "w2c33": {
   "CENSUS": {
    "REFERENCE_ACCOUNT": "w2c33",
@@ -103,6 +156,59 @@
    "SELL_PNL": 0.0,
    "TRADED_ROI": -0.010426,
    "SETTLED_ROI": 0.040314
+  }
+ },
+ "swisstony": {
+  "CENSUS": {
+   "REFERENCE_ACCOUNT": "swisstony",
+   "WALLET_ADDRESS": "0x204f72f35326db932158cba6adff0b9a1da95e14",
+   "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+   "EXTRACTION_UTC": "2026-09-15T22:31:00.050090+00:00",
+   "REQUESTED_RANGE_START": "2024-06-01",
+   "RETURNED_RANGE_START": "2025-08-09T05:09:07+00:00",
+   "RETURNED_RANGE_END": "2026-08-26T09:17:49+00:00",
+   "RETURNED_SPAN_DAYS": 382.17,
+   "ROWS_READ": 6059643,
+   "ROWS_KEPT": 6059643,
+   "UNIQUE_TRADE_IDS": 6011620,
+   "DUPLICATE_FILL_KEYS": 0,
+   "BUY_COUNT": 6059643,
+   "SELL_COUNT": 0,
+   "OTHER_SIDE_COUNT": 0,
+   "DISTINCT_CONDITIONS": 203391,
+   "DISTINCT_MARKET_SLUGS": 203391,
+   "DROP_CENSUS": {
+    "PAYOUT_ONE_HOT": 202929,
+    "PAYOUT_NOT_ONE_HOT": 366
+   },
+   "COVERAGE_LIMITATIONS": [
+    "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+    "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+    "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+   ],
+   "AS_OF_UTC": "2026-09-15T22:29:58.782731+00:00",
+   "DAYS_SINCE_LAST_FILL_AT_AS_OF": 20.55
+  },
+  "REPAIR_GATES": "PASS",
+  "LIFETIME_DECOMPOSITION": {
+   "edge_roi": 0.030327,
+   "edge_ci95": [
+    0.016805,
+    0.04385
+   ],
+   "edge_clusters": 203111,
+   "edge_verdict": "PROFITABLE at 95% \u2014 +3.03% on dollar deployed, interval [+1.68%, +4.38%] over 2,315,561 closed lots",
+   "lot_s": 778766758.99,
+   "lot_p": 23617870.62,
+   "SETTLED_STAKE": 529649046.92,
+   "SETTLED_PNL": 23357747.68,
+   "SETTLED_SHARE_OF_STAKE": 0.6801,
+   "TRADED_STAKE": 249117712.07,
+   "TRADED_PNL": 260122.94,
+   "MERGE_PNL": 260122.94,
+   "SELL_PNL": 0.0,
+   "TRADED_ROI": 0.001044,
+   "SETTLED_ROI": 0.0441
   }
  },
  "kch123": {
@@ -211,8 +317,5 @@
    "SETTLED_ROI": -0.040166
   }
  },
- "_NOT_RETURNED": [
-  "rn1",
-  "swisstony"
- ]
+ "_NOT_RETURNED": []
 }
