@@ -42,7 +42,7 @@ on:
         required: false
 
 permissions:
-  contents: read
+  contents: write
   actions: read
 
 jobs:
@@ -123,3 +123,40 @@ jobs:
                     f"{hashlib.sha256(c.encode()).hexdigest()[:16]} {c}")
           print(f"BETA48E_{U} end chunks={len(chunks)}")
           PY
+      # The PRIMARY channel. The hashed-chunk log lines above stay as an
+      # independent audit trail, but they are no longer how the payload
+      # travels: hand-transcribing 2,000-character base64 chunks out of a
+      # log failed on 2 of kch123's 4 chunks (right lengths, substituted
+      # characters). The per-chunk hashes caught it and named the indices
+      # — and that is the point. A channel whose repair step is itself
+      # unreliable is not repaired by localizing the damage. So the
+      # runner writes the evidence into git and nothing is transcribed.
+      #
+      # Each wallet pushes its OWN branch. Six parallel jobs pushing one
+      # shared branch would race, and a retry-until-it-lands loop is a
+      # worse failure mode than a branch per wallet.
+      - name: Commit the reconstruction to its own evidence branch
+        env:
+          W: ${{ matrix.wallet }}
+          RUN: ${{ github.event.inputs.source_run_id }}
+        run: |
+          set -e
+          D=/tmp/whale/$W/beta48
+          OUT=research/beta48/evidence/blobs_v3
+          BR="beta48-evidence/$RUN/$W"
+          mkdir -p "$OUT"
+          cp "$D/${W}_reconstruction.json" "$OUT/${W}_reconstruction.json"
+          ( cd "$OUT" && sha256sum "${W}_reconstruction.json" \
+              > "${W}_reconstruction.json.sha256" )
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git checkout --orphan "$BR"
+          git rm -rq --cached . || true
+          git add -f "$OUT/${W}_reconstruction.json" \
+                     "$OUT/${W}_reconstruction.json.sha256"
+          git commit -qm "BETA48 evidence: $W reconstructed from run $RUN [skip render]"
+          for i in 1 2 4 8 16; do
+            git push -f origin "$BR" && break
+            echo "push failed, retrying in ${i}s"; sleep "$i"
+          done
+          echo "BETA48_BRANCH_$W $BR"

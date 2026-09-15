@@ -109,6 +109,94 @@ which is strictly stronger.
 
 ---
 
+## D3 — the return channel loses data silently (added 2026-09-15 23:4xZ)
+
+A third defect, found while harvesting run `35034361586`. It is NOT a
+canary defect — it is in the transport, not the estimator — but it is
+classified here under the same headings so the record is uniform.
+
+**`CANARY_DEFECT` =** the gzip+base64 blob line is transcribed by hand
+out of the Actions log, and at ~15 KB that transcription dropped a slab
+out of the MIDDLE of the line without any symptom at either end.
+
+`ferrarichampions2026`, run `35034361586`:
+
+| check | result |
+|---|---|
+| base64 decode | **clean**, 11,613 bytes |
+| gzip magic + header | **intact** — named `ferrarichampions2026_reconstruction.json` |
+| gzip trailer | **intact** — `crc32=d4fdb3b5`, `isize=72227` |
+| decompression | **DIED** at byte 24,595 of 72,227, "invalid code lengths set" |
+
+**`ROOT_CAUSE` =** the payload is one log line and the transcription is
+manual. `kch123` at 7,565 characters survived; ferrari at 15,485 did
+not. rn1 and swisstony are *larger than ferrari*, so the channel would
+have failed again, twice, on the two accounts that matter most.
+
+**`AFFECTS_RAW_EXTRACTION` = NO.** The runner's pull and the runner's
+reconstruction were both correct; the artifact it archived is 129 MB of
+intact raw fills. Only the copy that travelled down the log was damaged.
+
+**`AFFECTS_RECONSTRUCTION` = NO.** Same reason.
+
+**`AFFECTS_RETURN_CHANNEL_ONLY` = YES.** Unlike D1 and D2, this defect
+is purely transport.
+
+**`COULD_BIAS_PAIR_PNL` = NO.**
+**`COULD_BIAS_COMPLETION_RATE` = NO.**
+**`COULD_BIAS_DIRECTIONAL_PNL` = NO.**
+
+All three for one reason, which is worth stating precisely because it is
+the only thing standing between this defect and a silent bad number:
+**gzip's trailer carries a CRC32 over the WHOLE uncompressed payload, and
+`gunzip` verifies it and exits non-zero on mismatch.** A blob that
+decompressed to completion is therefore byte-exact, not merely
+plausible. Every blob already accepted into `evidence/blobs/` and
+`evidence/blobs_v2/` decompressed to completion. So this defect can
+DESTROY a payload — loudly, as it did — but it cannot quietly deliver a
+corrupted one.
+
+The danger it does create is procedural, and it is real: a partial
+recovery of a damaged blob would often still parse as JSON, and a
+half-populated `completion_grid` looks exactly like a small account.
+That is why the damaged ferrari capture was deleted rather than kept.
+
+**`RN1_LOCAL_RESULTS_AFFECTED` = NO.** No RN1 figure travelled through a
+damaged blob; RN1's blobs decompressed and CRC-verified.
+
+**`ALREADY_RUNNING_WHALE_JOBS_AFFECTED` = NO** in their computation.
+ferrari's run-`35034361586` blob was unharvestable and is re-emitted.
+
+**`REPAIR` =** `.github/workflows/beta48-reemit.yml` +
+`research/beta48/chunked_channel.py`. The base64 is cut into indexed
+2,000-character chunks, each line carrying its own SHA256, under a
+header line carrying the SHA256 and byte count of the gzip AND of the
+JSON. The reader refuses anything it cannot prove and **names the defect
+by chunk index**, so a damaged payload costs 2,000 characters to repair
+instead of 15,000. Two properties chosen deliberately:
+
+- The re-emit does **NOT re-pull.** It reconstructs from the raw fills
+  run `35034361586` already archived, so the re-emitted payload is a
+  property of the SAME pull. This is not pedantry: kch123 drifted
+  29,902 → 29,898 merges and −$673,481.63 → −$673,586.72 between two
+  pulls of a **dormant** account, so a re-pull is not a neutral act and
+  would not be a replication of the run it replaced.
+- `--as-of` is **required and common to all six wallets**. That is the
+  D2 repair carried into the re-emit rather than re-defaulted to "now"
+  six separate times.
+
+**`TEST_PROVING_REPAIR` =** `research/beta48/test_chunked_channel.py`,
+9 tests. The controlling one reproduces the ferrari shape — a middle
+slab gone, both ends intact — and asserts the reader names indices
+`[2, 3]`. A companion test pins what the OLD channel did with the same
+damage (base64 valid, gzip magic intact, a zlib error at an offset
+nobody can act on), so the defect is on the record and not just its fix.
+Verified end to end against the real kch123 payload: the runner's
+emitter reproduces `json_sha256 = eabde232…af52e`, the hash that blob
+was already accepted under.
+
+---
+
 ## Every previously reported RN1 result, classified
 
 No old result is replaced here. Old and corrected values are shown side
