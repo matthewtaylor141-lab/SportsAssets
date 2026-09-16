@@ -90,9 +90,32 @@ def test_reads_no_environment_at_all():
                     and any(x.name == "os" for x in n.names)), "imports os"
 
 
-def test_only_two_venue_paths_exist():
+def test_the_whole_reachable_surface_is_enumerated():
+    """Every host and path this file can reach, listed exactly.
+
+    This used to assert "only two venue paths" and would have kept passing,
+    unchanged and unnoticed, while a third and a fourth were added beside it.
+    The surface is enumerated instead, so ANY addition fails here and has to be
+    argued for rather than slipped in.
+    """
     assert C.MARKETS_PATH == "/v1/markets"
     assert C.BOOK_PATH == "/v1/markets/{slug}/book"
+    assert C.INCENTIVES_PATH == "/v1/incentives"
+    assert C.DOC_URLS == ("https://docs.polymarket.us/fees",
+                          "https://docs.polymarket.us/incentives/liquidity")
+
+    # Every string literal in the file that names a host or a venue path.
+    # `http_status` and `http_%d` are field/label names, not addresses.
+    urlish = {n.value for n in ast.walk(TREE)
+              if isinstance(n, ast.Constant) and isinstance(n.value, str)
+              and (n.value.startswith("http://")
+                   or n.value.startswith("https://")
+                   or n.value.startswith("/v1"))}
+    assert urlish == {C.GATEWAY_BASE, C.MARKETS_PATH, C.BOOK_PATH,
+                      C.INCENTIVES_PATH, *C.DOC_URLS}, sorted(urlish)
+
+    # The doc hosts are READ-ONLY reference pages, not a trading surface.
+    assert all(u.startswith("https://docs.polymarket.us/") for u in C.DOC_URLS)
 
 
 def test_imports_are_stdlib_plus_httpx_only():
@@ -144,76 +167,136 @@ def test_a_failed_read_is_recorded_as_a_row_not_omitted():
     assert "local_request_wall_utc" in row and "latency_ms" in row
 
 
-def test_board_marks_a_prefix_as_a_prefix(tmp_path):
-    """DISCOVERY_LIST_EXHAUSTED = NO is the whole reason the old dataset was
-    unusable. Hitting the page cap must say so."""
+def _row(slug, sides=2, **extra):
+    """A market row shaped like the ones the venue ACTUALLY returned.
+
+    Taken from run 35040105217's captured rows: no `eventSlug` anywhere, two
+    `marketSides`, both quotes on the row. Mocks that omit these were testing a
+    board this venue does not serve.
+    """
+    r = {"slug": slug, "id": slug, "title": slug, "question": "Q",
+         "outcomes": '["Yes","No"]', "status": "MARKET_STATUS_OPEN",
+         "marketSides": [{"identifier": slug, "description": d}
+                         for d in ("Yes", "No")][:sides],
+         "bestBidQuote": {"value": "0.49", "currency": "USD"},
+         "bestAskQuote": {"value": "0.51", "currency": "USD"},
+         "outcomePrices": '["0.51","0.49"]',
+         "feeCoefficient": 0.06, "orderPriceMinTickSize": 0.01,
+         "minimumTradeQty": 1, "endDate": "2026-09-20T00:00:00Z"}
+    r.update(extra)
+    return r
+
+
+def _pager(pages):
+    """An http double serving a fixed list of market-row pages."""
     state = {"n": 0}
-    class Full:
-        def get(self, *a, **k):
-            i = state["n"]; state["n"] += 1
+
+    class H:
+        def get(self, url, params=None, timeout=None):
+            i = state["n"]
+            state["n"] += 1
+            body = {"markets": pages[i] if i < len(pages) else []}
+
             class R:
                 status_code = 200
                 headers = {}
                 content = b"{}"
-                @staticmethod
-                def json():
-                    base = i * C.PAGE_LIMIT
-                    return {"markets": [
-                        {"eventSlug": f"e{base+j}", "slug": f"s{base+j}"}
-                        for j in range(C.PAGE_LIMIT)]}
+                json = staticmethod(lambda: body)
             return R()
+    return H()
+
+
+def test_board_marks_a_prefix_as_a_prefix(tmp_path):
+    """DISCOVERY_LIST_EXHAUSTED = NO is the whole reason the old dataset was
+    unusable. Hitting the page cap must say so."""
+    pages = [[_row("s%d" % (i * C.PAGE_LIMIT + j)) for j in range(C.PAGE_LIMIT)]
+             for i in range(4)]
     p = C.Pacer(); p.spacing = 0.0
-    out = C.board(tmp_path, p, Full(), max_pages=2)
+    out = C.board(tmp_path, p, _pager(pages), max_pages=2)
     assert out["DISCOVERY_LIST_EXHAUSTED"] == "NO"
     assert out["PAGINATION_ADVANCED"] == "YES", "this mock DOES advance"
     assert out["pages_walked"] == 2
 
 
 def test_board_marks_exhaustion_when_a_page_comes_back_short(tmp_path):
-    class Short:
-        def get(self, *a, **k):
-            class R:
-                status_code = 200
-                headers = {}
-                content = b"{}"
-                @staticmethod
-                def json():
-                    return {"markets": [{"eventSlug": "e", "slug": "a"},
-                                        {"eventSlug": "e", "slug": "b"}]}
-            return R()
     p = C.Pacer(); p.spacing = 0.0
-    out = C.board(tmp_path, p, Short(), max_pages=50)
+    out = C.board(tmp_path, p, _pager([[_row("a"), _row("b")]]), max_pages=50)
     assert out["DISCOVERY_LIST_EXHAUSTED"] == "YES"
-    assert out["events_two_outcome"] == 1
+    assert out["markets_two_sided"] == 2
 
 
-def test_an_event_that_is_not_two_outcome_is_recorded_not_guessed(tmp_path):
-    class Three:
-        def get(self, *a, **k):
-            class R:
-                status_code = 200
-                headers = {}
-                content = b"{}"
-                @staticmethod
-                def json():
-                    return {"markets": [{"eventSlug": "e", "slug": x}
-                                        for x in ("a", "b", "c")]}
-            return R()
+def test_a_market_without_two_sides_is_recorded_not_guessed(tmp_path):
     p = C.Pacer(); p.spacing = 0.0
-    out = C.board(tmp_path, p, Three(), max_pages=1)
-    assert out["events_two_outcome"] == 0
-    assert out["skipped"][0]["reason"] == "NOT_A_TWO_OUTCOME_EVENT"
+    out = C.board(tmp_path, p,
+                  _pager([[_row("a"), _row("b", sides=1)]]), max_pages=1)
+    assert out["markets_two_sided"] == 1
+    assert out["skipped"][0]["reason"] == "NOT_A_TWO_SIDED_MARKET"
+    assert out["skipped"][0]["side_count"] == 1
+
+
+def test_the_selection_never_depends_on_an_eventSlug_field(tmp_path):
+    """The defect the first live run exposed, pinned.
+
+    Zero of 20,000 captured rows carried `eventSlug`. Grouping by it produced
+    an empty dict and discarded the whole board in silence. A row with no such
+    field must still be selected, and the ABSENCE must be counted so that a
+    venue which later starts sending one is visible rather than silent.
+    """
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.board(tmp_path, p, _pager([[_row("a"), _row("b")]]), max_pages=1)
+    assert out["markets_two_sided"] == 2, "no eventSlug must not mean no board"
+    assert out["rows_with_eventSlug"] == 0
+    assert all("eventSlug" not in s for s in out["selected"])
+
+
+def test_the_board_records_the_venue_stated_mechanics_per_market(tmp_path):
+    """feeCoefficient and the tick are READ, never assumed. The captured board
+    showed three distinct tick sizes, so a single assumed tick would be wrong
+    on most of it."""
+    p = C.Pacer(); p.spacing = 0.0
+    rows = [_row("a", orderPriceMinTickSize=0.01),
+            _row("b", orderPriceMinTickSize=0.001),
+            _row("c", orderPriceMinTickSize=0.005)]
+    out = C.board(tmp_path, p, _pager([rows]), max_pages=1)
+    assert out["tick_sizes_observed"] == [0.001, 0.005, 0.01]
+    assert out["fee_coefficients_observed"] == [0.06]
+    assert out["markets_with_both_board_quotes"] == 3
+    assert out["selected"][0]["board_bestBidQuote"]["value"] == "0.49"
+
+
+def test_every_board_capture_is_stamped_with_its_fee_regime(tmp_path):
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.board(tmp_path, p, _pager([[_row("a")]]), max_pages=1)
+    assert out["fee_regime"] in ("JUL2026", "SEP2026")
+
+
+def test_the_regime_boundary_is_applied_by_timestamp(tmp_path):
+    """Two regimes must never be pooled, so the label is a function of the
+    clock and nothing else."""
+    assert C.fee_regime("2026-09-17T03:58:59+00:00") == "JUL2026"
+    assert C.fee_regime("2026-09-17T03:59:00+00:00") == "SEP2026"
+    assert C.fee_regime("2026-09-17T04:00:00Z") == "SEP2026"
+    assert C.fee_regime("not a timestamp") == "UNKNOWN", (
+        "an unreadable clock must never default into a regime")
 
 
 # ------------------------------------------- the step whose absence was the gap --
 
 def test_breadth_enrolls_every_slug_into_the_settlement_registry(tmp_path):
     reg = tmp_path / "registry.json"
-    events = [{"eventSlug": "e1", "slugs": ["a", "b"], "endDate": "2026-09-20T00:00:00Z"}]
+    events = [{"slug": "a", "slugs": ["a"], "endDate": "2026-09-20T00:00:00Z"},
+              {"slug": "b", "slugs": ["b"], "endDate": "2026-09-20T00:00:00Z"}]
     assert C.update_registry(reg, events) == 2
     assert C.update_registry(reg, events) == 0, "re-enrolment must be idempotent"
     d = json.loads(reg.read_text())
     assert d["a"]["resolved"] is False and d["a"]["endDate"]
+
+
+def test_an_archived_paired_board_still_enrolls_both_of_its_legs(tmp_path):
+    """Boards captured under the old two-slug shape must stay readable."""
+    reg = tmp_path / "registry.json"
+    assert C.update_registry(
+        reg, [{"slugs": ["a", "b"], "endDate": "2026-09-20T00:00:00Z"}]) == 2
 
 
 def test_settle_only_checks_markets_past_their_endDate(tmp_path):
@@ -266,25 +349,73 @@ def test_an_unresolved_reread_does_not_mark_resolved(tmp_path):
     assert json.loads(reg.read_text())["x"]["resolved"] is False
 
 
-def test_breadth_records_the_gap_between_the_two_legs(tmp_path):
-    """The reconstructed mid is only valid when the gap is small AND known.
-    A pair with an unrecorded gap is the Run 84 failure."""
-    class OK:
-        def get(self, *a, **k):
-            class R:
-                status_code = 200
-                headers = {}
-                content = b"{}"
-                @staticmethod
-                def json():
-                    return {"bids": [], "offers": []}
-            return R()
+class _BookOK:
+    def get(self, *a, **k):
+        class R:
+            status_code = 200
+            headers = {}
+            content = b"{}"
+            json = staticmethod(lambda: {"bids": [], "offers": []})
+        return R()
+
+
+def test_breadth_is_complete_without_a_request_per_market(tmp_path):
+    """The whole board fits in a segment BECAUSE the board carries the touch.
+
+    20,000 book reads at the 2 rps ceiling is ~2.8 hours and does not fit a
+    2-hour segment; capping the sample would reintroduce the selection bias
+    this programme exists to remove. So every market gets a row and NO market
+    is dropped, while book reads stay opt-in and counted.
+    """
+    evs = [{"slug": "s%d" % i, "slugs": ["s%d" % i]} for i in range(50)]
     p = C.Pacer(); p.spacing = 0.0
-    n = C.breadth(tmp_path, [{"eventSlug": "e", "slugs": ["a", "b"]}], p, OK())
+    n = C.breadth(tmp_path, evs, p, _BookOK(), book_reads=0)
+    assert n == 50, "every market on the board still gets a row"
+    assert p.requests == 0, "and none of them costs a venue request"
+    rows = [json.loads(x) for x in
+            (tmp_path / "breadth.jsonl").read_text().splitlines()]
+    assert all(r["BOOK_READ"] == "NO" for r in rows)
+    assert all(r["legs"][0]["error"] == "NOT_REQUESTED" for r in rows)
+
+
+def test_opt_in_book_reads_are_bounded_and_labelled(tmp_path):
+    evs = [{"slug": "s%d" % i, "slugs": ["s%d" % i]} for i in range(10)]
+    p = C.Pacer(); p.spacing = 0.0
+    C.breadth(tmp_path, evs, p, _BookOK(), book_reads=3)
+    rows = [json.loads(x) for x in
+            (tmp_path / "breadth.jsonl").read_text().splitlines()]
+    assert [r["BOOK_READ"] for r in rows] == ["YES"] * 3 + ["NO"] * 7
+    assert p.requests == 3, "the budget is a hard ceiling on venue contact"
+
+
+def test_breadth_names_why_the_leg_gap_is_zero(tmp_path):
+    """A zero must never be mistaken for an unmeasured field.
+
+    A binary market's two sides arrive in ONE response, so there is no
+    inter-leg interval at all -- which is strictly better than a small measured
+    one. The basis is recorded so a later reader can tell that apart from a gap
+    that was simply never taken.
+    """
+    p = C.Pacer(); p.spacing = 0.0
+    n = C.breadth(tmp_path, [{"slug": "a", "slugs": ["a"]}], p, _BookOK(),
+                  book_reads=1)
     assert n == 1
     row = json.loads((tmp_path / "breadth.jsonl").read_text().strip())
-    assert "leg_gap_s" in row and row["leg_gap_s"] >= 0
-    assert len(row["legs"]) == 2
+    assert row["leg_gap_ns"] == 0
+    assert row["LEG_GAP_BASIS"] == "SINGLE_RESPONSE_BOTH_SIDES"
+    assert row["BOOK_READ"] == "YES", "a real book read, and still no gap"
+    assert len(row["legs"]) == 1
+    assert row["fee_regime"] in ("JUL2026", "SEP2026")
+
+
+def test_breadth_still_measures_a_real_gap_when_there_are_two_requests(tmp_path):
+    """The Run 84 lesson is kept: if two requests ARE made, the interval
+    between them is recorded on the row."""
+    p = C.Pacer(); p.spacing = 0.0
+    C.breadth(tmp_path, [{"slugs": ["a", "b"]}], p, _BookOK(), book_reads=1)
+    row = json.loads((tmp_path / "breadth.jsonl").read_text().strip())
+    assert row["LEG_GAP_BASIS"] == "TWO_REQUESTS"
+    assert row["leg_gap_s"] >= 0 and len(row["legs"]) == 2
 
 
 def test_no_fill_probability_or_expectancy_is_computed_here():
@@ -298,57 +429,108 @@ def test_no_fill_probability_or_expectancy_is_computed_here():
 
 # --------------- the defect the first live run exposed, pinned as a test --
 
-def test_a_repeated_page_does_not_destroy_the_two_outcome_grouping(tmp_path):
-    """The first live run walked 200 pages in 101 s and selected ZERO events.
+def test_a_repeated_page_ends_the_walk_and_is_named(tmp_path):
+    """A guard against a defect this venue turned out NOT to have.
 
-    That is the signature of an API that ignores the paging parameter: the
-    same market arrives many times, its event appears to have 200 outcomes,
-    every event fails the len(ms) == 2 test, and the whole board is silently
-    discarded as "not two-outcome". Deduping by slug makes the grouping
-    correct whatever the API does.
+    CORRECTION. The first live run's zero selection was first attributed to a
+    non-advancing cursor. The captured rows refute that: 20,000 rows carried
+    20,000 DISTINCT slugs. Pagination advanced perfectly; the real defect was
+    the missing `eventSlug`, pinned above.
+
+    This guard is kept anyway, because a repeating cursor is a real failure
+    mode elsewhere in this venue family and an undetected one would look like
+    a large board. It is kept as a GUARD, not as the explanation.
     """
-    class Repeats:
-        def get(self, *a, **k):
-            class R:
-                status_code = 200
-                headers = {}
-                content = b"{}"
-                @staticmethod
-                def json():
-                    # one event, two legs, returned on EVERY page
-                    return {"markets": [{"eventSlug": "e", "slug": "a"},
-                                        {"eventSlug": "e", "slug": "b"}]
-                                       * (C.PAGE_LIMIT // 2)}
-            return R()
+    page = [_row("a"), _row("b")] * (C.PAGE_LIMIT // 2)
     p = C.Pacer(); p.spacing = 0.0
-    out = C.board(tmp_path, p, Repeats(), max_pages=200)
-    assert out["events_two_outcome"] == 1, out
+    out = C.board(tmp_path, p, _pager([page] * 200), max_pages=200)
+    assert out["markets_two_sided"] == 2, out
     assert out["markets_seen"] == 2, "duplicates must collapse to distinct slugs"
     assert out["PAGINATION_ADVANCED"] == "NO"
     assert out["pages_walked"] == 2, "a non-advancing page must END the walk"
 
 
 def test_a_genuinely_advancing_pagination_still_walks(tmp_path):
-    """The dedupe must not break a venue whose paging DOES work."""
-    state = {"n": 0}
-    class Advances:
-        def get(self, url, params=None, timeout=None):
-            i = state["n"]; state["n"] += 1
-            class R:
-                status_code = 200
-                headers = {}
-                content = b"{}"
-                @staticmethod
-                def json():
-                    if i >= 3:
-                        return {"markets": []}
-                    base = i * C.PAGE_LIMIT
-                    return {"markets": [
-                        {"eventSlug": f"e{(base+j)//2}", "slug": f"s{base+j}"}
-                        for j in range(C.PAGE_LIMIT)]}
-            return R()
+    """The dedupe must not break a venue whose paging DOES work -- and this
+    venue's paging does work, so this is the live case, not the edge case."""
+    pages = [[_row("s%d" % (i * C.PAGE_LIMIT + j))
+              for j in range(C.PAGE_LIMIT)] for i in range(3)]
     p = C.Pacer(); p.spacing = 0.0
-    out = C.board(tmp_path, p, Advances(), max_pages=200)
+    out = C.board(tmp_path, p, _pager(pages), max_pages=200)
     assert out["PAGINATION_ADVANCED"] == "YES"
     assert out["markets_seen"] == 3 * C.PAGE_LIMIT
-    assert out["events_two_outcome"] == 3 * C.PAGE_LIMIT // 2
+    assert out["markets_two_sided"] == 3 * C.PAGE_LIMIT
+
+
+# ------------------------------------------------- the incentives capture --
+
+def _rules_http(payload, status=200, doc_status=200):
+    class H:
+        def get(self, url, params=None, timeout=None):
+            is_doc = url.startswith("https://docs.")
+
+            class R:
+                status_code = doc_status if is_doc else status
+                headers = {}
+                content = b"body"
+                text = "FEE PAGE TEXT"
+                json = staticmethod(lambda: payload)
+            return R()
+    return H()
+
+
+def test_rules_records_the_program_fields_a_later_observation_needs(tmp_path):
+    payload = {"incentives": [{
+        "active": True, "type": "LIQUIDITY", "slug": "a",
+        "rewardPool": 500, "discountFactor": 0.9, "targetSize": 1000,
+        "maxSpread": 0.03, "period": "DAILY",
+        "startDate": "2026-09-01T00:00:00Z", "endDate": "2026-10-01T00:00:00Z",
+    }]}
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p, _rules_http(payload))
+    assert out["INCENTIVES_ENDPOINT_REACHABLE"] == "YES"
+    prog = out["programs"][0]
+    assert prog["INCENTIVE_PROGRAM_ACTIVE"] is True
+    assert prog["PROGRAM_TYPE"] == "LIQUIDITY"
+    assert prog["REWARD_POOL"] == 500
+    assert prog["DISCOUNT_FACTOR"] == 0.9
+    assert prog["TARGET_SIZE"] == 1000
+    assert prog["PROGRAM_START"] and prog["PROGRAM_END"]
+    assert out["fee_regime"] in ("JUL2026", "SEP2026")
+
+
+def test_an_estimated_reward_is_never_recorded_as_an_actual_one(tmp_path):
+    """The binding distinction. Nothing here has an account, so no reward has
+    been earned by anyone and none may be written as if it had."""
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p,
+                  _rules_http({"incentives": [{"active": True, "slug": "a"}]}))
+    prog = out["programs"][0]
+    assert prog["ACTUAL_REWARD"] == "NOT_IDENTIFIED"
+    assert prog["ESTIMATED_REWARD"] == "NOT_COMPUTED_HERE"
+
+
+def test_an_unreachable_incentives_endpoint_is_recorded_not_defaulted(tmp_path):
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p, _rules_http({}, status=404, doc_status=403))
+    assert out["INCENTIVES_ENDPOINT_REACHABLE"] == "NO"
+    assert out["programs_parsed"] == 0
+    assert out["incentive_http_statuses"] == [404, 404]
+    assert out["doc_http_statuses"] == [403, 403]
+    # An absent answer stays absent. It never becomes "no program is running".
+    assert out["NEGOTIATED_MARKET_MAKER_ECONOMICS"] == "NOT_IDENTIFIED"
+    assert out["TIER_VERIFIED"] == "NO"
+
+
+def test_the_rule_documents_are_stored_with_a_hash(tmp_path):
+    """A relayed coefficient becomes captured evidence only if the page that
+    states it is stored verbatim and can be re-checked."""
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p, _rules_http({"incentives": []}))
+    assert len(out["doc_sha256"]) == 2
+    assert all(v for v in out["doc_sha256"].values())
+    docs = [json.loads(x) for x in
+            (tmp_path / "rules_docs.jsonl").read_text().splitlines()]
+    assert any(d["text"] == "FEE PAGE TEXT" for d in docs)
+    # The collector stores the page; it does NOT read a coefficient out of it.
+    assert out["THETA_TAKER_OBSERVED_IN_DOC"] == "NOT_PARSED_HERE"

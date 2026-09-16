@@ -52,6 +52,10 @@ on:
         description: "Seconds between dense cycles"
         required: false
         default: "5"
+      breadth_book_reads:
+        description: "Markets that also get a book read (0 = board quotes only)"
+        required: false
+        default: "0"
 
 permissions:
   contents: write
@@ -81,6 +85,18 @@ jobs:
       - name: Prove the capability boundary offline
         run: python -m pytest research/beta48/forward/test_fwd_collect.py -q
 
+      # The venue's own rule pages, captured so the fee coefficient and the
+      # reward schedule stop being relayed numbers. Runs FIRST so every later
+      # observation in the segment sits beside the rules in force at the time.
+      - name: Capture the incentive and fee rules in force
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/forward/evidence/seg_$SEG
+          mkdir -p "$D"
+          python research/beta48/forward/fwd_collect.py rules --out "$D"
+
       - name: Enumerate the WHOLE board
         env:
           SEG: ${{ github.run_id }}
@@ -90,7 +106,11 @@ jobs:
           mkdir -p "$D"
           python research/beta48/forward/fwd_collect.py board --out "$D"
 
-      - name: Breadth — one pass over every two-outcome event
+      # Every board row already carries both quotes, so breadth costs no venue
+      # requests by default. One book read per market would be ~20,000
+      # requests — about 2.8 h at our 2 rps ceiling — which does not fit a
+      # segment, and capping the sample would reintroduce selection bias.
+      - name: Breadth — one row per market, whole board, no sampling
         env:
           SEG: ${{ github.run_id }}
         run: |
@@ -98,6 +118,7 @@ jobs:
           D=research/beta48/forward/evidence/seg_$SEG
           python research/beta48/forward/fwd_collect.py breadth \
             --out "$D" --board "$D/board.json" \
+            --book-reads "${{ github.event.inputs.breadth_book_reads || 0 }}" \
             --registry research/beta48/forward/evidence/registry.json
 
       - name: Settlement follow-up — the step whose absence was the gap
@@ -130,7 +151,8 @@ jobs:
           D=research/beta48/forward/evidence/seg_$SEG
           ( cd "$D" && sha256sum * > SEALED.sha256 2>/dev/null || true )
           gzip -9 "$D"/breadth.jsonl "$D"/depth.jsonl "$D"/board_raw.jsonl \
-                  "$D"/settle_raw.jsonl 2>/dev/null || true
+                  "$D"/settle_raw.jsonl "$D"/incentives_raw.jsonl \
+                  "$D"/rules_docs.jsonl 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           BR="beta48-forward/seg-$SEG"

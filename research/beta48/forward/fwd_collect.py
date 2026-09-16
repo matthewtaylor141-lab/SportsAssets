@@ -46,12 +46,45 @@ It computes no expectancy, no ROI, no fill probability and no fee-adjusted
 figure. Fills are decided offline, later, under frozen models, and TOUCH is
 never written to a FILL field.
 
+WHAT THE FIRST LIVE RUN CORRECTED (run 35040105217, 2026-09-16 00:29Z).
+
+That run walked 200 pages, 20,000 market rows, and selected ZERO. Two beliefs
+in the first version of this file were wrong, and both are corrected here from
+the captured rows rather than from reasoning:
+
+  1. PAGINATION DID ADVANCE. 20,000 rows carried 20,000 DISTINCT slugs, zero
+     duplicates. The earlier "the offset param is ignored, so pages repeat"
+     diagnosis was WRONG for this endpoint. The dedupe guard is kept because a
+     non-advancing cursor is still worth detecting, but it was not the defect.
+
+  2. THERE IS NO `eventSlug` FIELD. Zero of 20,000 rows carried one, so the
+     grouping-by-event step produced an EMPTY dict and discarded the board in
+     silence. That was the defect.
+
+What the rows actually are: each row is ALREADY a binary market. It carries
+exactly two `marketSides` (20,000 of 20,000), an `outcomes` pair, and BOTH
+`bestBidQuote` and `bestAskQuote` on the row itself (11,364 of 20,000 had both
+populated). No pairing of two rows is needed, and there is consequently NO
+inter-leg time gap to control -- the two sides arrive in ONE response. That
+removes the single largest measurement hazard the retrospective work fought.
+
+Also read off those rows, as captured evidence rather than relay:
+  * `feeCoefficient` = 0.06 on all 20,000 rows, at 2026-09-16 00:29Z, which is
+    BEFORE the announced cutover -- live corroboration of the JUL2026 taker
+    coefficient.
+  * `orderPriceMinTickSize` takes THREE values: 0.001, 0.005, 0.01. The tick is
+    not a cent everywhere, which matters directly to any reward score computed
+    in ticks from best.
+  * `DISCOVERY_LIST_EXHAUSTED = NO` at the 200-page cap: the board is at least
+    20,000 open markets and its true size is still NOT_IDENTIFIED.
+
 Usage:
     python3 fwd_collect.py board   --out DIR [--max-pages N]
     python3 fwd_collect.py breadth --out DIR --board FILE
     python3 fwd_collect.py depth   --out DIR --board FILE --seconds N
                                    [--cohort K] [--interval S]
     python3 fwd_collect.py settle  --out DIR --registry FILE
+    python3 fwd_collect.py rules   --out DIR
 """
 from __future__ import annotations
 
@@ -71,6 +104,22 @@ COLLECTOR_VERSION = "beta48-forward-public/1"
 GATEWAY_BASE = "https://gateway.polymarket.us"
 MARKETS_PATH = "/v1/markets"
 BOOK_PATH = "/v1/markets/{slug}/book"
+INCENTIVES_PATH = "/v1/incentives"
+
+# The published rule pages, read as EVIDENCE. Both the fee coefficient and the
+# reward schedule are otherwise relayed, and a relayed number is not a measured
+# one. These are the only non-gateway hosts this file names, they are fetched
+# GET and stored verbatim, and a failure is recorded as a row like any other.
+DOC_URLS = (
+    "https://docs.polymarket.us/fees",
+    "https://docs.polymarket.us/incentives/liquidity",
+)
+
+# The announced taker-coefficient cutover, 23:59 ET Wed 2026-09-16 = 03:59 UTC
+# Thu 2026-09-17. Stamped on every observation so the regimes are never pooled.
+# Kept as a literal here rather than imported, so the collector stays free of
+# any dependency on the economics modules -- this file computes NO economics.
+FEE_REGIME_CUTOVER_UTC = "2026-09-17T03:59:00+00:00"
 
 # OUR restraint. RPS_LIMIT_NOT_ESTABLISHED stays locked; this is not evidence
 # about the venue's ceiling.
@@ -83,6 +132,23 @@ MAX_PAGES_DEFAULT = 200          # a real terminal boundary, not a prefix
 
 def _now():
     return (datetime.now(tz=timezone.utc).isoformat(), time.monotonic_ns())
+
+
+def fee_regime(wall_utc: str) -> str:
+    """Label an observation's fee regime. A LABEL, not a fee calculation.
+
+    Two regimes must never be pooled, so every artifact this file writes
+    carries the label of the wall clock that produced it. If the timestamp is
+    unreadable the answer is UNKNOWN -- never a default to either side.
+    """
+    try:
+        t = datetime.fromisoformat(str(wall_utc).replace("Z", "+00:00"))
+        if t.tzinfo is None:
+            t = t.replace(tzinfo=timezone.utc)
+    except (TypeError, ValueError):
+        return "UNKNOWN"
+    return ("SEP2026" if t >= datetime.fromisoformat(FEE_REGIME_CUTOVER_UTC)
+            else "JUL2026")
 
 
 class Pacer:
@@ -230,91 +296,292 @@ def board(outdir: Path, pacer, http, max_pages=MAX_PAGES_DEFAULT) -> dict:
         offset += len(items)
 
     markets = list(by_slug.values())
-    by_event = {}
-    for m in markets:
-        ev, slug = m.get("eventSlug"), m.get("slug")
-        if not ev or not slug:
-            continue
-        by_event.setdefault(ev, []).append(m)
 
+    # SELECTION IS PER ROW, NOT PER EVENT.
+    #
+    # The first live run proved there is no `eventSlug` on these rows and no
+    # grouping to do: every row IS a binary market carrying exactly two
+    # marketSides and both quotes. The selection rule is therefore the weakest
+    # one that can be stated -- "the row was on the board and has two sides" --
+    # which is what keeps breadth a population rather than a shortlist.
+    #
+    # `eventSlug` is still counted, so that if the venue ever starts sending
+    # it the change is visible instead of silent.
     selected, skipped = [], []
-    for ev, ms in by_event.items():
-        if len(ms) == 2:
-            selected.append({
-                "eventSlug": ev,
-                "slugs": sorted(x["slug"] for x in ms),
-                "titles": [x.get("title") for x in ms],
-                "gameStartTime": next((x.get("gameStartTime") for x in ms
-                                       if x.get("gameStartTime")), None),
-                "endDate": next((x.get("endDate") for x in ms
-                                 if x.get("endDate")), None),
-                "sportsMarketTypeV2": next(
-                    (x.get("sportsMarketTypeV2") for x in ms
-                     if x.get("sportsMarketTypeV2")), None),
-                "tags": next((x.get("tags") for x in ms if x.get("tags")), None),
-                "status": [x.get("status") for x in ms],
-            })
-        else:
-            skipped.append({"eventSlug": ev, "outcome_market_count": len(ms),
-                            "reason": "NOT_A_TWO_OUTCOME_EVENT"})
+    with_event_field = 0
+    for m in markets:
+        slug = m.get("slug")
+        if m.get("eventSlug"):
+            with_event_field += 1
+        sides = m.get("marketSides") or []
+        if not slug:
+            skipped.append({"slug": None, "reason": "NO_SLUG"})
+            continue
+        if len(sides) != 2:
+            skipped.append({"slug": slug, "side_count": len(sides),
+                            "reason": "NOT_A_TWO_SIDED_MARKET"})
+            continue
+        selected.append({
+            "slug": slug,
+            "slugs": [slug],            # kept so downstream readers stay valid
+            "id": m.get("id"),
+            "title": m.get("title"),
+            "question": m.get("question"),
+            "outcomes": m.get("outcomes"),
+            "status": m.get("status"),
+            "marketType": m.get("marketType"),
+            "sportsMarketTypeV2": m.get("sportsMarketTypeV2"),
+            "gameStartTime": m.get("gameStartTime"),
+            "endDate": m.get("endDate"),
+            "tags": m.get("tags"),
+            # Venue-stated mechanics, captured per market rather than assumed.
+            "feeCoefficient": m.get("feeCoefficient"),
+            "orderPriceMinTickSize": m.get("orderPriceMinTickSize"),
+            "minimumTradeQty": m.get("minimumTradeQty"),
+            # The board's own quotes. Recorded as BOARD_ quotes, never merged
+            # with a book read: they are a different observation at a different
+            # instant and must stay distinguishable.
+            "board_bestBidQuote": m.get("bestBidQuote"),
+            "board_bestAskQuote": m.get("bestAskQuote"),
+            "board_outcomePrices": m.get("outcomePrices"),
+            "side_identifiers": [s.get("identifier") for s in sides],
+            "side_descriptions": [s.get("description") for s in sides],
+        })
 
     wall, _ = _now()
+    ticks = sorted({m.get("orderPriceMinTickSize") for m in markets
+                    if m.get("orderPriceMinTickSize") is not None})
+    fees = sorted({m.get("feeCoefficient") for m in markets
+                   if m.get("feeCoefficient") is not None})
+    both_quotes = sum(1 for m in markets
+                      if m.get("bestBidQuote") and m.get("bestAskQuote"))
     out = {"collector_version": COLLECTOR_VERSION,
            "captured_at_utc": wall,
+           "fee_regime": fee_regime(wall),
            "pages_walked": pages,
            "DISCOVERY_LIST_EXHAUSTED": "YES" if exhausted else "NO",
            "PAGINATION_ADVANCED": "YES" if advanced else "NO",
            "markets_seen": len(markets),
+           "rows_with_eventSlug": with_event_field,
+           "markets_two_sided": len(selected),
+           "markets_skipped": len(skipped),
+           "markets_with_both_board_quotes": both_quotes,
+           "tick_sizes_observed": ticks,
+           "fee_coefficients_observed": fees,
+           "requests_used": pacer.requests,
+           # Retained under the old key so any existing reader keeps working.
            "events_two_outcome": len(selected),
            "events_skipped": len(skipped),
-           "requests_used": pacer.requests,
            "selected": selected, "skipped": skipped}
     outdir.mkdir(parents=True, exist_ok=True)
     (outdir / "board_raw.jsonl").write_text(
         "".join(json.dumps(x) + "\n" for x in raw))
     (outdir / "board.json").write_text(json.dumps(out, indent=1))
-    print("distinct markets %d | two-outcome events %d | pages %d | "
-          "exhausted %s | pagination advanced %s"
-          % (len(markets), len(selected), pages,
-             out["DISCOVERY_LIST_EXHAUSTED"], out["PAGINATION_ADVANCED"]))
+    print("distinct markets %d | two-sided %d | both board quotes %d | "
+          "pages %d | exhausted %s | pagination advanced %s | ticks %s | "
+          "feeCoefficients %s | regime %s"
+          % (len(markets), len(selected), both_quotes, pages,
+             out["DISCOVERY_LIST_EXHAUSTED"], out["PAGINATION_ADVANCED"],
+             ticks, fees, out["fee_regime"]))
+    return out
+
+
+# ------------------------------------------------------------------ rules --
+
+def rules(outdir: Path, pacer, http) -> dict:
+    """Capture the venue's INCENTIVE and FEE rules as evidence, not relay.
+
+    Answers, per snapshot, the four questions a later market observation needs:
+    was this market incentivized, what pool was active, what quote distance
+    would score, and had the target size already been reached ahead of BETTOR.
+
+    ESTIMATED_REWARD IS NOT ACTUAL_REWARD. This function records a PROGRAM
+    DESCRIPTION. It records no reward earned by anyone, because nothing here
+    has an account, and `ACTUAL_REWARD` therefore stays NOT_IDENTIFIED for
+    every market until an executed, settled reward is observed elsewhere.
+
+    Every field below is read from the response or left None. Nothing is
+    defaulted to an optimistic value, and the schedule is NOT hard-coded: if
+    the endpoint supplies current values they are what get stored.
+    """
+    wall, _ = _now()
+    rows = [_paced_get(http, pacer, INCENTIVES_PATH)]
+    rows.append(_paced_get(http, pacer, INCENTIVES_PATH, {"active": "true"}))
+
+    docs = []
+    for url in DOC_URLS:
+        w, mono = _now()
+        row = {"url": url, "local_request_wall_utc": w, "http_status": None,
+               "error": None, "text": None, "response_sha256": None,
+               "response_bytes": None, "collector_version": COLLECTOR_VERSION}
+        try:
+            pacer.wait()
+            resp = http.get(url, timeout=TIMEOUT_S)
+            row["http_status"] = resp.status_code
+            raw = resp.content
+            row["response_bytes"] = len(raw)
+            row["response_sha256"] = hashlib.sha256(raw).hexdigest()
+            if resp.status_code == 200:
+                row["text"] = resp.text
+            else:
+                row["error"] = "http_%d" % resp.status_code
+        except httpx.HTTPError as exc:
+            row["error"] = type(exc).__name__
+        docs.append(row)
+
+    programs = []
+    for r in rows:
+        body = r.get("body")
+        items = []
+        if isinstance(body, dict):
+            for key in ("incentives", "programs", "markets", "data", "rewards"):
+                v = body.get(key)
+                if isinstance(v, list):
+                    items = v
+                    break
+        elif isinstance(body, list):
+            items = body
+        for it in items:
+            if not isinstance(it, dict):
+                continue
+            programs.append({
+                "INCENTIVE_PROGRAM_ACTIVE": it.get("active"),
+                "PROGRAM_TYPE": it.get("type") or it.get("programType"),
+                "REWARD_POOL": (it.get("rewardPool") or it.get("pool")
+                                or it.get("rewardsDailyRate")),
+                "DISCOUNT_FACTOR": (it.get("discountFactor")
+                                    or it.get("rewardsDiscountFactor")),
+                "TARGET_SIZE": (it.get("targetSize")
+                                or it.get("rewardsMinSize")),
+                "MAX_SPREAD": (it.get("maxSpread")
+                               or it.get("rewardsMaxSpread")),
+                "PROGRAM_PERIOD": it.get("period"),
+                "PROGRAM_START": it.get("startDate") or it.get("start"),
+                "PROGRAM_END": it.get("endDate") or it.get("end"),
+                "MARKET_SLUG": it.get("slug") or it.get("marketSlug"),
+                "ESTIMATED_REWARD": "NOT_COMPUTED_HERE",
+                "ACTUAL_REWARD": "NOT_IDENTIFIED",
+                "raw": it,
+            })
+
+    reachable = any(r.get("http_status") == 200 for r in rows)
+    out = {"collector_version": COLLECTOR_VERSION,
+           "captured_at_utc": wall,
+           "fee_regime": fee_regime(wall),
+           "INCENTIVES_ENDPOINT_REACHABLE": "YES" if reachable else "NO",
+           "incentive_http_statuses": [r.get("http_status") for r in rows],
+           "programs_parsed": len(programs),
+           "programs": programs,
+           "doc_http_statuses": [d.get("http_status") for d in docs],
+           "doc_sha256": {d["url"]: d.get("response_sha256") for d in docs},
+           # Never asserted from this file. Both stay open until an analysis
+           # step reads the captured doc text and says so explicitly.
+           "THETA_TAKER_OBSERVED_IN_DOC": "NOT_PARSED_HERE",
+           "NEGOTIATED_MARKET_MAKER_ECONOMICS": "NOT_IDENTIFIED",
+           "TIER_VERIFIED": "NO"}
+
+    outdir.mkdir(parents=True, exist_ok=True)
+    with (outdir / "incentives_raw.jsonl").open("a") as fh:
+        for r in rows:
+            fh.write(json.dumps(r) + "\n")
+    with (outdir / "rules_docs.jsonl").open("a") as fh:
+        for d in docs:
+            fh.write(json.dumps(d) + "\n")
+    (outdir / "rules.json").write_text(json.dumps(out, indent=1))
+    print("incentives reachable %s | statuses %s | programs %d | docs %s | "
+          "regime %s"
+          % (out["INCENTIVES_ENDPOINT_REACHABLE"],
+             out["incentive_http_statuses"], len(programs),
+             out["doc_http_statuses"], out["fee_regime"]))
     return out
 
 
 # ---------------------------------------------------------------- breadth --
 
-def breadth(outdir: Path, events, pacer, http) -> int:
-    """One pass over EVERY event on the board. Both legs back to back.
+def _slugs_of(ev):
+    """Every slug an entry names. One for a binary row; two under the old
+    paired shape, which is kept readable so archived boards still parse."""
+    ss = ev.get("slugs") or ([ev["slug"]] if ev.get("slug") else [])
+    return [s for s in ss if s]
 
-    The two legs are read consecutively and the gap between them is recorded
-    on every pair. Run 84 established that an uncontrolled gap IS the result;
-    the whole reconstructed-mid finding this sprint rests on the gap being
-    small and known.
+
+def breadth(outdir: Path, events, pacer, http, book_reads=0) -> int:
+    """One pass over EVERY market on the board. No scoring, no shortlist.
+
+    THE BOARD IS THE BREADTH POPULATION, and that is why this is affordable.
+    Every board row already carries `bestBidQuote` and `bestAskQuote`, so the
+    touch for 20,000 markets arrives in the 200-page board walk -- about 100
+    seconds at our 2 rps ceiling. One book read PER MARKET would instead cost
+    20,000 requests, roughly 2.8 hours, which does not fit a 2-hour segment and
+    would have forced a capped sample. A capped sample is exactly the selection
+    bias this programme exists to avoid, so it is not taken.
+
+    BOOK READS ARE THEREFORE OPT-IN AND DECLARED. `book_reads` is a count, not
+    a filter: the first N markets in board order get depth beyond the touch,
+    every market still gets its row, and `BOOK_READ` says which is which. Depth
+    beyond the touch is a DEPTH question anyway, and depth() answers it on a
+    cohort whose selection rule is stated.
+
+    THE LEG GAP IS GONE, and that is a real improvement, not a simplification.
+    A binary market's two sides arrive inside ONE response, so there is no
+    inter-leg interval to control and no window in which the book can move
+    between the legs. Run 84 established that an uncontrolled gap IS the
+    result; here the gap is structurally zero and is recorded as such, with
+    LEG_GAP_BASIS naming why, so no later reader mistakes a zero for an
+    unmeasured field.
     """
     path = outdir / "breadth.jsonl"
     n = 0
+    read_budget = int(book_reads)
     with path.open("a") as fh:
         for ev in events:
-            slugs = ev.get("slugs") or []
-            if len(slugs) != 2:
+            slugs = _slugs_of(ev)
+            if not slugs:
                 continue
-            legs = []
-            for s in slugs:
-                legs.append(_paced_get(http, pacer, BOOK_PATH.format(slug=s)))
-            gap_ns = abs(legs[1]["local_request_monotonic_ns"]
-                         - legs[0]["local_request_monotonic_ns"])
+            if read_budget > 0:
+                legs = [_paced_get(http, pacer, BOOK_PATH.format(slug=s))
+                        for s in slugs]
+                read_budget -= 1
+                book_read = "YES"
+            else:
+                # No venue request. The row still carries the board's own
+                # two-sided quote, captured at the board walk's timestamp.
+                legs = [{"local_request_monotonic_ns": 0,
+                         "local_request_wall_utc": _now()[0],
+                         "path": None, "http_status": None,
+                         "error": "NOT_REQUESTED", "body": None}]
+                book_read = "NO"
+            if len(legs) >= 2:
+                gap_ns = abs(legs[1]["local_request_monotonic_ns"]
+                             - legs[0]["local_request_monotonic_ns"])
+                basis = "TWO_REQUESTS"
+            else:
+                gap_ns = 0
+                basis = "SINGLE_RESPONSE_BOTH_SIDES"
+            wall = legs[0]["local_request_wall_utc"]
             fh.write(json.dumps({
                 "kind": "BREADTH",
-                "eventSlug": ev.get("eventSlug"),
+                "slug": ev.get("slug"),
                 "slugs": slugs,
+                "fee_regime": fee_regime(wall),
+                "question": ev.get("question"),
+                "outcomes": ev.get("outcomes"),
                 "gameStartTime": ev.get("gameStartTime"),
                 "endDate": ev.get("endDate"),
                 "sportsMarketTypeV2": ev.get("sportsMarketTypeV2"),
                 "tags": ev.get("tags"),
+                "feeCoefficient": ev.get("feeCoefficient"),
+                "orderPriceMinTickSize": ev.get("orderPriceMinTickSize"),
+                "board_bestBidQuote": ev.get("board_bestBidQuote"),
+                "board_bestAskQuote": ev.get("board_bestAskQuote"),
                 "leg_gap_ns": gap_ns,
                 "leg_gap_s": gap_ns / 1e9,
+                "LEG_GAP_BASIS": basis,
+                "BOOK_READ": book_read,
                 "legs": legs}) + "\n")
             n += 1
-    print("breadth events written %d | requests %d" % (n, pacer.requests))
+    print("breadth markets written %d | book reads %d | requests %d"
+          % (n, int(book_reads) - read_budget, pacer.requests))
     return n
 
 
@@ -348,22 +615,31 @@ def depth(outdir: Path, events, seconds, cohort, interval_s, pacer, http) -> int
             for ev in picked:
                 if time.monotonic() >= t_end:
                     break
-                slugs = ev.get("slugs") or []
-                if len(slugs) != 2:
+                slugs = _slugs_of(ev)
+                if not slugs:
                     continue
                 legs = [_paced_get(http, pacer, BOOK_PATH.format(slug=s))
                         for s in slugs]
-                gap_ns = abs(legs[1]["local_request_monotonic_ns"]
-                             - legs[0]["local_request_monotonic_ns"])
+                if len(legs) >= 2:
+                    gap_ns = abs(legs[1]["local_request_monotonic_ns"]
+                                 - legs[0]["local_request_monotonic_ns"])
+                    basis = "TWO_REQUESTS"
+                else:
+                    gap_ns = 0
+                    basis = "SINGLE_RESPONSE_BOTH_SIDES"
                 fh.write(json.dumps({
                     "kind": "DEPTH",
-                    "eventSlug": ev.get("eventSlug"),
+                    "slug": ev.get("slug"),
                     "slugs": slugs,
+                    "fee_regime": fee_regime(
+                        legs[0]["local_request_wall_utc"]),
                     "gameStartTime": ev.get("gameStartTime"),
                     "endDate": ev.get("endDate"),
+                    "orderPriceMinTickSize": ev.get("orderPriceMinTickSize"),
                     "round": rounds,
                     "leg_gap_ns": gap_ns,
                     "leg_gap_s": gap_ns / 1e9,
+                    "LEG_GAP_BASIS": basis,
                     "legs": legs}) + "\n")
             rounds += 1
             slack = (cycle_start + float(interval_s)) - time.monotonic()
@@ -434,9 +710,9 @@ def update_registry(registry_path: Path, events) -> int:
     reg = json.loads(registry_path.read_text()) if registry_path.exists() else {}
     added = 0
     for ev in events:
-        for s in (ev.get("slugs") or []):
+        for s in _slugs_of(ev):
             if s not in reg:
-                reg[s] = {"eventSlug": ev.get("eventSlug"),
+                reg[s] = {"question": ev.get("question"),
                           "endDate": ev.get("endDate"),
                           "gameStartTime": ev.get("gameStartTime"),
                           "first_seen_utc": _now()[0],
@@ -451,7 +727,8 @@ def update_registry(registry_path: Path, events) -> int:
 
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
-    ap.add_argument("mode", choices=("board", "breadth", "depth", "settle"))
+    ap.add_argument("mode", choices=("board", "breadth", "depth", "settle",
+                                     "rules"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--board")
     ap.add_argument("--registry")
@@ -459,6 +736,9 @@ def main(argv=None) -> int:
     ap.add_argument("--cohort", type=int, default=8)
     ap.add_argument("--interval", type=float, default=5.0)
     ap.add_argument("--max-pages", type=int, default=MAX_PAGES_DEFAULT)
+    ap.add_argument("--book-reads", type=int, default=0,
+                    help="markets in board order that also get a book read; "
+                         "0 means the board's own two-sided quote only")
     a = ap.parse_args(argv)
 
     out = Path(a.out)
@@ -471,13 +751,16 @@ def main(argv=None) -> int:
         if a.mode == "settle":
             settle(out, Path(a.registry), pacer, http)
             return 0
+        if a.mode == "rules":
+            rules(out, pacer, http)
+            return 0
         b = json.loads(Path(a.board).read_text())
         events = b.get("selected") or []
         if a.mode == "breadth":
             if a.registry:
                 n = update_registry(Path(a.registry), events)
                 print("registry additions %d" % n)
-            breadth(out, events, pacer, http)
+            breadth(out, events, pacer, http, book_reads=a.book_reads)
         else:
             depth(out, events, a.seconds, a.cohort, a.interval, pacer, http)
     return 0
