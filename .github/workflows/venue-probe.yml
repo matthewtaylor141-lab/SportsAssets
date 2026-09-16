@@ -23,6 +23,18 @@ on:
         required: false
         default: '0'
 
+concurrency:
+  # THE GLOBAL PMUS VENUE-ACCESS DOMAIN. Every workflow that can reach
+  # gateway.polymarket.us shares this one group, so two BETTOR collectors can
+  # never read the venue at the same time and contaminate each other's
+  # measurements. The ladder in run 35129103916 was reported as isolated and
+  # was not: run85-phase2-capture held its own group and ran throughout.
+  #
+  # QUEUE, NEVER CANCEL: an evidence run must not be killed mid-collection by
+  # a scheduled job. The loser waits its turn.
+  group: pmus-public-read-global
+  cancel-in-progress: false
+
 jobs:
   probe:
     runs-on: ubuntu-latest

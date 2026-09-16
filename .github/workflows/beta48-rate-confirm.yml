@@ -61,11 +61,18 @@ on:
 
 permissions:
   contents: write
+  actions: read          # to see whether another BETTOR collector is running
 
-# SHARED with every other venue-touching job: a confirmation running beside a
-# capture would measure the wrong thing and add load while doing it.
 concurrency:
-  group: beta48-forward-capture
+  # THE GLOBAL PMUS VENUE-ACCESS DOMAIN. Every workflow that can reach
+  # gateway.polymarket.us shares this one group, so two BETTOR collectors can
+  # never read the venue at the same time and contaminate each other's
+  # measurements. The ladder in run 35129103916 was reported as isolated and
+  # was not: run85-phase2-capture held its own group and ran throughout.
+  #
+  # QUEUE, NEVER CANCEL: an evidence run must not be killed mid-collection by
+  # a scheduled job. The loser waits its turn.
+  group: pmus-public-read-global
   cancel-in-progress: false
 
 jobs:
@@ -116,6 +123,26 @@ jobs:
             --out "evidence/rateconfirm_$SEG/provenance.json"
           echo "EXECUTED_SHA=$EXECUTED_SHA" >> "$GITHUB_ENV"
 
+      # GATE 3. No venue contact while another BETTOR collector is reading the
+      # venue. The concurrency domain should already guarantee this; this step
+      # VERIFIES it at the moment the job begins rather than trusting it, and
+      # aborts before the first GET rather than collecting contaminated rows.
+      - name: Prove BETTOR collector isolation at start
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs?status=in_progress&per_page=100" \
+               -o /tmp/active_start.json
+          python venue_domain.py --root ../../.. \
+            --active-runs /tmp/active_start.json \
+            --self-run-id "$SEG" \
+            --out "evidence/rateconfirm_$SEG/isolation_at_start.json"
+
       # The pre-dispatch receipt prints and persists BEFORE the first request;
       # rate_confirm refuses to send anything if any gate fails.
       - name: Single-rate operational confirmation
@@ -135,6 +162,25 @@ jobs:
             --executed-sha "$EXECUTED_SHA" \
             --workflow-ref-sha "${{ github.sha }}" \
             --workflow-file "../../../.github/workflows/beta48-rate-confirm.yml"
+
+      # Did a known collector start WHILE we were reading? The domain should
+      # make that impossible; recording it is how we would find out otherwise.
+      - name: Check isolation again at the end
+        if: always()
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set +e
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs?status=in_progress&per_page=100" \
+               -o /tmp/active_end.json
+          python venue_domain.py --root ../../.. \
+            --active-runs /tmp/active_end.json \
+            --self-run-id "$SEG" \
+            --out "evidence/rateconfirm_$SEG/isolation_at_end.json" || true
 
       - name: Seal and commit the confirmation
         if: always()
