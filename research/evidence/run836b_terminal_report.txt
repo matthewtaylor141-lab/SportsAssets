@@ -1,0 +1,40 @@
+capture -> run836b_capture_20260913T000344Z
+  tokens   : 4
+  sessions : 3 x 75s (pause 5s)
+  REST poll: every 15s per token
+  heartbeat: PING every 10s
+  custom_feature_enabled: False
+
+==============================================================
+RUN 83.6B CAPTURE -- REPORT THESE ITEMS VERBATIM. DO NOT INTERPRET.
+==============================================================
+ 1. CAPTURE_COMPLETE_FOR_RECONSTRUCTION = YES
+ 2. start UTC = 2026-09-13T00:03:44.609616+00:00
+    end   UTC = 2026-09-13T00:07:50.637573+00:00
+ 3. token ids used:
+       84697572938572732642876077505847013109919721646551043171063870280539349588315
+       86678697607325035415301144402167255215468684543893990956207990950437281806267
+       29593316250860173485681500655272516621071562717109962191321330351423433807292
+       26924943409099587884725835387292512623954637197660419126367977003516773219764
+ 4. websocket sessions opened/attempted = 3/3
+ 5. total raw websocket frames = 5951
+ 6. counts by raw event_type (literal key tally, no interpretation):
+       <PONG heartbeat>: 21
+       book: 63
+       last_trade_price: 38
+       price_change: 5838
+ 7. PONG frames received = 21
+ 8. REST witness successful/failed = 64/0
+ 9. errors recorded = 0  (see errors.jsonl)
+10. output directory = run836b_capture_20260913T000344Z
+11. checksums.sha256:
+       d542733f8311a86a4ac2c6884fd5bafd888b8a17ecb4593461d9c3a667294428  manifest.json
+       3a2c752f6108c638dd017b451f7a56e2282b40c71ea950f1367faaadb5a4a1a7  websocket_frames.jsonl
+       4484bbeba3375ae4944808f74f2619d8deb62a6a98de590b3fff95131d1c3586  rest_books.jsonl
+       67354af2cff60c71c91842b2cdd2685c98900209a90bcf5b78acf5b77bc38f27  sessions.jsonl
+       e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855  errors.jsonl
+12. archive = run836b_capture_20260913T000344Z.tar.gz
+    archive sha256 = 857afc31ae4e022f286fc443d4784bc0f2321ad27651227b4400083a45d4b759
+==============================================================
+subscribe frame sent: {"type": "market", "assets_ids": ["84697572938572732642876077505847013109919721646551043171063870280539349588315", "86678697607325035415301144402167255215468684543893990956207990950437281806267", "29593316250860173485681500655272516621071562717109962191321330351423433807292", "26924943409099587884725835387292512623954637197660419126367977003516773219764"], "custom_feature_enabled": false}
+Do not draw conclusions about book semantics, price_change semantics, reconstruction, continuity or hashes from this summary.

@@ -1,0 +1,79 @@
+RUN 85 PHASE 2A -- SECTIONS E-H
+====================================================================
+evidence dir : run85_phase2a_20260913T023133Z
+sample rows  : 1080   request-log rows: 15
+
+E. RATE AND RELIABILITY
+   requests attempted : 1095
+   successes (200)    : 292  (26.67%)
+   status distribution: {200: 292, 429: 803}
+   errors             : {'http_429': 803}
+   429 count          : 803
+   5xx count          : 0
+   parse failures     : 0
+   timeouts           : 0
+   latency ms p50=15.8 p90=88.2 p95=110.3 max=515.8
+   response headers seen: {'date': 1095, 'content-type': 1095, 'age': 157, 'cache-control': 1083, 'server': 1095, 'content-length': 803, 'retry-after': 803}
+   RATE-LIMIT SIGNAL PRESENT on 803 responses
+     example: {"date": "Sun, 13 Sep 2026 02:16:35 GMT", "content-type": "application/json; charset=utf-8", "content-length": "983", "retry-after": "10", "cache-control": "private, max-age=0, no-store, no-cache, must-revalidate, post-check=0, pre-check=0", "server": "cloudflare"}
+     retry-after values: {'10': 91, '9': 66, '8': 64, '7': 60, '2': 118, '1': 120, '0': 108, '5': 56, '4': 58, '3': 60, '6': 2}
+     server on 429s   : {'cloudflare': 803}
+   RPS_LIMIT_NOT_ESTABLISHED remains TRUE. The absence of throttling
+   at our self-imposed 2.0/s ceiling is not a documented venue limit,
+   and the rate is not raised on the strength of it.
+
+F. BOOK QUALITY
+   book responses parsed: 277 of 1080 sample rows
+   % with bids        : 89.17% (247)
+   % with offers      : 100.00% (277)
+   % with BOTH        : 89.17% (247)
+   market states      : {'MARKET_STATE_OPEN': 277}
+   complement classes : {'BINARY_COMPLEMENT_VERIFIED': 277}
+   spread  n=247  min=0.0010 p25=0.0020 median=0.0050 p75=0.0100 max=0.0240
+   spread <=0 (crossed or locked): 0
+   bid depth $ median=323.32 p90=2353.51
+   ask depth $ median=255897.47 p90=382853.90
+   transactTime present: {True: 277}
+
+H. TEMPORAL RESOLUTION
+   achieved per-market re-read gap: median=30.00s p10=29.92s p90=30.08s
+   consecutive same-market responses that DIFFER: 89 of 265 (33.6%)
+
+   markout offset reachability, judged against the ACHIEVED gap:
+     0.1   s : UNOBSERVABLE_WITH_THIS_CAPTURE
+     0.25  s : UNOBSERVABLE_WITH_THIS_CAPTURE
+     0.5   s : UNOBSERVABLE_WITH_THIS_CAPTURE
+     1     s : UNOBSERVABLE_WITH_THIS_CAPTURE
+     2     s : UNOBSERVABLE_WITH_THIS_CAPTURE
+     5     s : UNOBSERVABLE_WITH_THIS_CAPTURE
+     10    s : UNOBSERVABLE_WITH_THIS_CAPTURE
+     30    s : UNOBSERVABLE_WITH_THIS_CAPTURE
+     60    s : OBSERVABLE
+
+   This is a property of the CADENCE, not of REST. A per-market re-read
+   gap of ~30.0 s means every offset below it is unreachable -- including
+   1 s and 2 s, not merely the sub-second ones. Phase 2 can buy shorter
+   offsets by sampling fewer markets more often, at the same 2.0/s
+   ceiling; that is a calibration decision this run exists to inform.
+
+G. FIRST PASSIVE ECONOMIC SCREEN (displayed books only)
+
+   G1. WITHIN-MARKET pair (long + short of ONE binary contract).
+       maker pair cost = 1 - spread, aggressive = 1 + spread. This is
+       algebra, not a measurement: buying the short side IS selling the
+       long side. The measured quantity is therefore the spread itself.
+       verified-binary observations : 247
+       maker pair cost   median=0.9950  (1 - spread)
+       aggressive cost   median=1.0050  (1 + spread)
+       spread            median=0.0050  p25=0.0020 p75=0.0100
+       PASSIVE_BOOK_EDGE (gross, per paired $1) = 0.0050
+
+   G2. ACROSS-MARKET pair (two outcome markets of one event).
+       NOT an identity. Reported only for events whose structure was
+       verified, and never pooled with G1.
+       no two-market events in this sample.
+
+   PASSIVE_REALIZABLE_EDGE = NOT_IDENTIFIED
+   No resting order is declared filled anywhere above. Fillability and
+   adverse selection are Phases 4 and 5 and have no evidence yet.
+

@@ -1,0 +1,28 @@
+# Does the edge-engine docker image BUILD and IMPORT from this branch?
+# Render's deploy events are invisible to the agent session; this answers
+# "is the deploy blocker our image or Render" from inside CI.
+name: engine-image-check
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**"]
+    paths: ["edge-engine/**"]
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the engine image exactly as Render would
+        run: docker build -t edge-engine-ci edge-engine
+      - name: Boot-import the runner inside the image
+        run: |
+          docker run --rm edge-engine-ci python -c "
+          import edge.shadow.runner as r
+          import edge.shadow.kalshi_guard, edge.shadow.kalshi_copies
+          import edge.shadow.kalshi_adds, edge.shadow.xv_watch
+          import edge.venues.kalshi
+          print('IMPORTS OK — boot stamp:', r._BOOT['build'])
+          "

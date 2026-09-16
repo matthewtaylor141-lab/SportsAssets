@@ -1,0 +1,49 @@
+-- 061: THE RECORD'S COLUMNS (2026-09-09; FILL program lane 9; owner "I
+-- want to know when he makes money we make money. This needs to be
+-- right"). fills-answered at 22:25Z (h2225 row 938) read
+-- `open_order_pending` named on 95 fills of his / $22,841.69 at a lag
+-- median of 3 s: the tick SAW each fill and refused it by name because
+-- a rest of ours stood -- book 760's three adds of 2,983 sh at 19:51:22
+-- / 19:52:55 / 19:53:58 (rows 983-985) against ONE standing rest -- and
+-- the row said WHY the rest was kept nowhere: rest_decision's `same`
+-- (inside the 2% hysteresis) and `min_life` (the rest-life floor) are
+-- on the heartbeat, `replace_capped` / `take_capped` are census words,
+-- the E5 freeze keeps its slot silently, and the E12b rise restored to
+-- the block (`flow_fills_grew`) is on the plan alone. Nor did any row
+-- say WHICH rest the fill stood behind (section 49's own DOES NOT FIX:
+-- "a lane that names the standing order on the entry would close it"),
+-- nor whether the FAST tick or the FULL tick named the fill or placed
+-- the order (the latency census re-measures a replace chain against
+-- the latest fill instead of the fill it first answered: 4688 / 4693 /
+-- 4697 / 4704, h2225 rows 883 / 878 / 874 / 868, read 32 / 53 / 192 /
+-- 287 s for ONE fill).
+--
+-- FOUR nullable columns, additive, re-runnable, no DEFAULT. On
+-- mirror_fill_answers (060): `cause` is the word that kept the rest the
+-- fill stood behind (`same`, `min_life`, `take_capped`,
+-- `replace_capped`, `frozen`, `flow_grew`; NULL on every fill the tick
+-- did not name against a standing rest), `rest_id` is that rest's
+-- mirror_orders id (NULL when none), `fast` says a FAST tick named the
+-- fill (true), a FULL tick (false), or a row written before this
+-- migration (NULL). On mirror_orders: `fast` says a FAST tick placed
+-- the row (true), a FULL tick (false), NULL before this migration.
+-- NULL means NOTHING: no reader sizes, places or cancels on these
+-- columns; the fills-missed, fill-answers and latency-census presets
+-- read them and print 'unrecorded' for NULL. Read the 059 / 060 way:
+-- the worker probes each table's new columns once per tick after the
+-- 060 probe and, absent, sends the 060-shaped fill INSERT (heartbeat
+-- `fill_answer_cause_absent`) and the 059-shaped order INSERT
+-- (heartbeat `fast_col_absent`), logged once per process; a probe
+-- failing for any other reason is `fast_col_unreadable` and the tick
+-- goes on -- these are measurement columns on no order path, so
+-- neither probe ever refuses a tick (the 059 probe's refusal branch is
+-- NOT copied). The workers never run migrations (the API's start.sh
+-- applies the sorted glob on boot, best-effort).
+--
+-- NUMBERING. 061: 060 is landed; 048 and 051 stay reserved by
+-- docs/mirror-to-a-tee-program.md:184-187 (migrate.py applies the
+-- sorted glob, so the gaps are harmless).
+ALTER TABLE mirror_fill_answers ADD COLUMN IF NOT EXISTS cause TEXT NULL;
+ALTER TABLE mirror_fill_answers ADD COLUMN IF NOT EXISTS rest_id BIGINT NULL;
+ALTER TABLE mirror_fill_answers ADD COLUMN IF NOT EXISTS fast BOOLEAN NULL;
+ALTER TABLE mirror_orders ADD COLUMN IF NOT EXISTS fast BOOLEAN NULL;

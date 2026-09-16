@@ -1,0 +1,1387 @@
+"""Path A — on-chain OrderFilled detection (primary, ~1–3s).
+
+Subscribes over Polygon WebSocket to OrderFilled logs on the CTF Exchange and
+NegRisk CTF Exchange, filters for tracked wallets, and pushes provisional
+trades into the shared pipeline immediately.
+
+Decode notes (CTF Exchange semantics):
+  OrderFilled(bytes32 indexed orderHash, address indexed maker,
+              address indexed taker, uint256 makerAssetId, uint256 takerAssetId,
+              uint256 makerAmountFilled, uint256 takerAmountFilled, uint256 fee)
+
+Each matched order emits one event where `maker` is the order owner.
+The order owner gave makerAsset and received takerAsset; asset id 0 is USDC
+collateral (6 decimals), any other id is a CTF outcome token (6 decimals).
+  makerAssetId == 0  → owner BOUGHT takerAssetId (paid USDC)
+  takerAssetId == 0  → owner SOLD  makerAssetId (received USDC)
+
+Fill timestamps MUST be real block timestamps: the Data API reports block
+time, and the cross-path dedupe key includes the timestamp.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import time
+from dataclasses import dataclass
+from typing import Any
+
+import httpx
+import websockets
+
+from ..analytics import mirror_live_rules as _rules
+from ..config import settings
+from ..db import get_pool, heartbeat
+from . import claim_registry
+from .pipeline import TradeEvent, ingest_trade_result
+from .s1_emitter import emitter_beat, emitter_observe, ensure_emitter_task
+from .shadow_v2 import beat_summary as _shadow_beat, ensure_shadow_task, shadow_observe
+
+log = logging.getLogger(__name__)
+
+# ── E26 (FILL lane 26, 2026-09-09): THE SWEEP ─────────────────────────
+# The socket is the only path that hands a v3 fill log to the receipt
+# decoder, and it sweeps nothing between reconnects: `backfill` runs
+# once at (re)connect and a quiet socket is only re-subscribed after
+# 60 s of silence. On 2026-09-09 17:04:57Z his 12,960-share buy settled
+# in more than one transaction; the listener handled one (2,880
+# @0.7105) and the other two (4,869 and 5,211) reached the table only
+# through the poller at 17:08:24Z, 207 s later -- the venue's own
+# publication lag, not ours -- so the book was sized on a third of his
+# order and exited twice (docs section 68). The sweep is a side task
+# that every CHAIN_SWEEP_S seconds reads the tip and the cursor and
+# runs eth_getLogs over the confirmed span behind the tip with the
+# listener's OWN filter (same addresses, same topics), handing a v3
+# log whose tx the socket did not handle to `_handle_v3` directly --
+# never through `_handle_log`'s observe calls, so the emitter and the
+# shadow see only what the socket delivered and a swept log is never
+# a second decoder's input -- and a legacy / v2 log to `_handle_log`
+# as `backfill` does. `_v3_seen` drops every tx the socket handled
+# BEFORE any RPC; a tx it did not handle takes the whole existing path
+# (claim, one receipt, decode, the (tx, whale, asset, chain/s1)
+# pre-probe, ingest, the E9 wake). Cost: two RPC calls per sweep when
+# the socket is healthy (eth_blockNumber + eth_getLogs, ~480/h at
+# 15 s) plus one receipt per found tx.
+#
+# The rails read through the mirror's three readers (analytics/
+# mirror_live_rules.py): the environment may turn the sweep OFF
+# (today, byte for byte: no task), LENGTHEN the period or DEEPEN the
+# confirmation, and LOWER the span -- never the other direction.
+CHAIN_SWEEP = _rules.env_switch("CHAIN_SWEEP", True)
+CHAIN_SWEEP_S = _rules.min_wait_env("CHAIN_SWEEP_S", 15.0)
+CHAIN_SWEEP_CONFIRM_BLOCKS = _rules.min_wait_env("CHAIN_SWEEP_CONFIRM_BLOCKS", 2.0)
+# `backfill`'s own step (2000); a lower span leaves an older gap to the
+# reconnect backfill and the reconciler, as today
+CHAIN_SWEEP_MAX_BLOCKS = _rules.capped_env("CHAIN_SWEEP_MAX_BLOCKS", 2000.0, floor=1.0)
+
+
+def _sweep_block() -> dict:
+    """The heartbeat's `sweep` block, zeroed: every key the docs name."""
+    return {"runs": 0, "found": 0, "handled": 0, "failed": 0,
+            "skipped_throttled": 0, "last_span": None, "last_at": None}
+
+ORDER_FILLED_SIG = "OrderFilled(bytes32,address,address,uint256,uint256,uint256,uint256,uint256)"
+USDC_DECIMALS = 10**6
+
+
+def order_filled_topic() -> str:
+    """keccak256 of the event signature, computed at runtime (never hardcoded)."""
+    from Crypto.Hash import keccak  # pycryptodome
+
+    h = keccak.new(digest_bits=256)
+    h.update(ORDER_FILLED_SIG.encode())
+    return "0x" + h.hexdigest()
+
+
+@dataclass
+class DecodedFill:
+    wallet: str  # tracked wallet (lowercase)
+    token_id: str  # outcome token traded (decimal string)
+    side: str  # BUY / SELL from the tracked wallet's perspective
+    size: float  # shares
+    price: float  # USDC per share
+    tx_hash: str
+    block_number: int
+
+
+def _topic_addr(topic: str) -> str:
+    return "0x" + topic[-40:].lower()
+
+
+# The 2026 exchange contract's fill event (Polymarket migrated exchanges;
+# the old CTF contracts stopped emitting — diagnosed 2026-08-10 when the
+# listener sat subscribed-but-silent all day). The topic is the OBSERVED
+# constant from live receipts (tx 0x2be95df8...62e3d4), not computed from
+# a signature: the contract is unverified on the explorers, so the
+# signature string is unknowable — but the layout was decoded empirically
+# against a known RN1 fill and every word tied out exactly
+# ($7.6322 / 12.31 shares @ 0.62, fee 0.145):
+#   topic1 orderHash, topic2 order owner, topic3 counterparty/exchange
+#   word0 side (0 = owner bought, 1 = owner sold)
+#   word1 outcome token id
+#   word2 amount the owner GAVE   (USDC on buys, tokens on sells)
+#   word3 amount the owner GOT    (tokens on buys, USDC on sells)
+#   word4 fee (USDC, 6dp)         words 5-6 observed zero
+ORDER_FILLED_V2_TOPIC = (
+    "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee")
+
+
+# ── Path A2: the venue's NEW exchanges (vanity 0xe111…/0xe2222…) emit a
+# proprietary fill event (topic 0xd543adfd…) our decoders never knew —
+# whales whose flow moved there silently fell back to minutes-latency
+# polling (RN1 median 212s, measured 2026-08-24). The proprietary DATA
+# layout is unknown, but the same receipt carries the economics in
+# STANDARD events: ERC-1155 TransferSingle (token id + shares) and
+# ERC-20 Transfer (USDC legs). So A2 matches the roster wallet in the
+# fill event's owner topics, pulls the receipt (~1 RPC), and decodes
+# the standard legs — sub-second detection, no reverse-engineering.
+FILL_V3_TOPIC = "0xd543adfd945773f1a62f74f0ee55a5e3b9b1a28262980ba90b1a89f2ea84d8ee"
+TRANSFER_SINGLE_TOPIC = "0xc3d58168c5ae7397731d063d5bbf3d657854427343f4c083240f7aacaa2d0f62"
+TRANSFER_BATCH_TOPIC = "0x4a39dc06d4c0dbc64b70af90fd698a233a518aa5d07e595d983b8c0526c8f7fb"
+_V3_MAX_BATCH = 1024
+
+
+class _Malformed(Exception):
+    """A wallet-touching 1155 leg or wallet-topic fill event that cannot
+    be fully read: the receipt is unpriceable, refuse."""
+
+ERC20_TRANSFER_TOPIC = "0xddf252ad1be2c89b69c2b068fc378daa952ba7f163c4a11628f55a4df523b3ef"
+V3_EXCHANGES_DEFAULT = ("0xe2222d279d744050d28e00520010520000310f59,"
+                        "0xe111180000d2663c0091e4f400237545b87b996b")
+
+
+def v3_owner_candidates(log_entry: dict[str, Any]) -> set[str]:
+    """Addresses named in a v3 fill event's indexed topics."""
+    topics = log_entry.get("topics") or []
+    return {_topic_addr(t) for t in topics[1:4] if t}
+
+
+def _decode_v3_legacy(logs: list[dict[str, Any]],
+                      wallet: str) -> DecodedFill | None:
+    """Reconstruct one wallet's fill from a receipt's STANDARD events.
+
+    BUY: the wallet received CTF tokens (TransferSingle to=wallet) and
+    paid USDC (ERC-20 Transfer from=wallet). SELL is the mirror. More
+    than one distinct token id for the wallet is a bundle we don't
+    price — refuse and let the poller carry it. Pure function.
+    """
+    wallet = wallet.lower()
+    tok_in = tok_out = 0
+    usdc_in = usdc_out = 0
+    token_ids: set[int] = set()
+    tx_hash = ""
+    block_number = 0
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps:
+            continue
+        t0 = str(tps[0]).lower()
+        data = str(lg.get("data", "0x"))[2:]
+        if t0 == TRANSFER_SINGLE_TOPIC and len(tps) >= 4                 and len(data) >= 2 * 64:
+            frm, to = _topic_addr(tps[2]), _topic_addr(tps[3])
+            tid = int(data[0:64], 16)
+            val = int(data[64:128], 16)
+            if to == wallet:
+                tok_in += val
+                token_ids.add(tid)
+            elif frm == wallet:
+                tok_out += val
+                token_ids.add(tid)
+            else:
+                continue
+        elif t0 == ERC20_TRANSFER_TOPIC and len(tps) >= 3                 and len(data) >= 64:
+            frm, to = _topic_addr(tps[1]), _topic_addr(tps[2])
+            val = int(data[0:64], 16)
+            if frm == wallet:
+                usdc_out += val
+            elif to == wallet:
+                usdc_in += val
+            else:
+                continue
+        else:
+            continue
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            block_number = int(str(lg.get("blockNumber", "0x0")), 16)                 or block_number
+        except ValueError:
+            pass
+    if len(token_ids) != 1:
+        return None
+    token = token_ids.pop()
+    if tok_in and usdc_out and not tok_out:
+        side, size_units, usdc_units = "BUY", tok_in, usdc_out
+    elif tok_out and usdc_in and not tok_in:
+        side, size_units, usdc_units = "SELL", tok_out, usdc_in
+    else:
+        return None
+    if size_units == 0:
+        return None
+    price = round(usdc_units / size_units, 6)
+    if not (0 < price < 1):
+        return None
+    return DecodedFill(
+        wallet=wallet,
+        token_id=str(token),
+        side=side,
+        size=round(size_units / USDC_DECIMALS, 6),
+        price=price,
+        tx_hash=tx_hash,
+        block_number=block_number,
+    )
+
+
+
+def _decode_batch_arrays(data: str) -> list[tuple[int, int]]:
+    """ABI-decode (uint256[] ids, uint256[] values) from TransferBatch
+    data, bounds-checked; raises _Malformed on any violation."""
+    try:
+        if len(data) < 2 * 64:
+            raise _Malformed
+        off_ids, off_vals = int(data[0:64], 16), int(data[64:128], 16)
+
+        def arr(off_bytes: int) -> list[int]:
+            if off_bytes <= 0 or off_bytes % 32:
+                raise _Malformed
+            p = off_bytes * 2
+            if p + 64 > len(data):
+                raise _Malformed
+            n = int(data[p:p + 64], 16)
+            if n > _V3_MAX_BATCH:
+                raise _Malformed
+            if p + 64 + n * 64 > len(data):
+                raise _Malformed
+            return [int(data[p + 64 + i * 64: p + 128 + i * 64], 16)
+                    for i in range(n)]
+
+        ids, vals = arr(off_ids), arr(off_vals)
+        if len(ids) != len(vals):
+            raise _Malformed
+        return list(zip(ids, vals))
+    except _Malformed:
+        raise
+    except Exception as exc:  # noqa: BLE001 — any parse slip is malformed
+        raise _Malformed from exc
+
+
+def _wallet_1155_legs(logs, wallet):
+    """Wallet-scoped ERC-1155 flows: TransferSingle AND TransferBatch.
+    Returns (my_ids, sh_in, sh_out, tx_hash, block_number)."""
+    my_ids: set[int] = set()
+    sh_in = sh_out = 0
+    tx_hash = ""
+    block_number = 0
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps:
+            continue
+        t0 = str(tps[0]).lower()
+        if t0 not in (TRANSFER_SINGLE_TOPIC, TRANSFER_BATCH_TOPIC):
+            continue
+        if len(tps) < 4:
+            if any(wallet == _topic_addr(str(t)) for t in tps[1:]):
+                raise _Malformed
+            continue
+        frm, to = _topic_addr(str(tps[2])), _topic_addr(str(tps[3]))
+        if wallet not in (frm, to):
+            continue
+        data = str(lg.get("data", "0x"))[2:]
+        if t0 == TRANSFER_SINGLE_TOPIC:
+            if len(data) < 2 * 64:
+                raise _Malformed
+            pairs = [(int(data[0:64], 16), int(data[64:128], 16))]
+        else:
+            pairs = _decode_batch_arrays(data)
+        for tid, val in pairs:
+            my_ids.add(tid)          # ids count even at val 0 (probe parity)
+            if val == 0:
+                continue
+            if to == wallet:
+                sh_in += val
+            else:
+                sh_out += val
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            block_number = int(str(lg.get("blockNumber", "0x0")), 16) \
+                or block_number
+        except ValueError:
+            pass
+    return my_ids, sh_in, sh_out, tx_hash, block_number
+
+
+def _decode_v3_selected(logs, wallet):
+    """Production-verified single-event selector (probes 2026-08-30)."""
+    try:
+        my_ids, sh_in, sh_out, tx_hash, blk = _wallet_1155_legs(logs, wallet)
+    except _Malformed:
+        return None, "malformed_1155"
+    if not my_ids or (sh_in == 0 and sh_out == 0):
+        return None, "no_shares"
+    if len(my_ids) > 1:
+        return None, "multi_token"
+    if sh_in and sh_out:
+        return None, "mixed_direction"
+    token = next(iter(my_ids))
+    side = "BUY" if sh_in else "SELL"
+    shares = sh_in or sh_out
+    candidates: list[tuple[int, int, int]] = []
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps or str(tps[0]).lower() != FILL_V3_TOPIC:
+            continue
+        if wallet not in {_topic_addr(str(t)) for t in tps[1:4] if t}:
+            continue
+        data = str(lg.get("data", "0x"))[2:]
+        if len(data) < 4 * 64:
+            return None, "malformed_fill"
+        candidates.append((int(data[64:128], 16),
+                           int(data[128:192], 16),
+                           int(data[192:256], 16)))
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            blk = int(str(lg.get("blockNumber", "0x0")), 16) or blk
+        except ValueError:
+            pass
+    if not candidates:
+        return None, "no_fill_events"
+    if not any(w1 == token for w1, _w2, _w3 in candidates):
+        return None, "no_token_match"
+    passes = [(w1, w2, w3) for w1, w2, w3 in candidates
+              if w1 == token and w2 > 0 and w3 > 0 and w3 == shares]
+    if not passes:
+        return None, "no_share_match"
+    if len(passes) > 1:
+        return None, "multi_pass"
+    _w1, w2, w3 = passes[0]
+    price = round(w2 / w3, 6)
+    if not (0 < price < 1):
+        return None, "px_oob"
+    return DecodedFill(
+        wallet=wallet, token_id=str(token), side=side,
+        size=round(shares / USDC_DECIMALS, 6), price=price,
+        tx_hash=tx_hash, block_number=blk), "selected"
+
+
+def _wallet_1155_legs_by_token(logs, wallet):
+    """The same walk as `_wallet_1155_legs`, GROUPED PER TOKEN.
+
+    The aggregating version sums every one of the wallet's 1155 legs into
+    one (sh_in, sh_out) pair and a set of ids, which is why the selector
+    has to refuse `multi_token` and `mixed_direction`: two fills of one
+    wallet in one settlement are indistinguishable from one incoherent
+    fill once they have been added together. Grouping first keeps them
+    separable, so each token can be judged on its own.
+
+    Returns (per_token, tx_hash, block_number) where per_token maps
+    token_id -> [shares_in, shares_out]. Raises `_Malformed` on exactly
+    the inputs the aggregating walk rejects, so the two cannot disagree
+    about what is decodable.
+    """
+    per_token: dict[int, list[int]] = {}
+    tx_hash = ""
+    block_number = 0
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps:
+            continue
+        t0 = str(tps[0]).lower()
+        if t0 not in (TRANSFER_SINGLE_TOPIC, TRANSFER_BATCH_TOPIC):
+            continue
+        if len(tps) < 4:
+            if any(wallet == _topic_addr(str(t)) for t in tps[1:]):
+                raise _Malformed
+            continue
+        frm, to = _topic_addr(str(tps[2])), _topic_addr(str(tps[3]))
+        if wallet not in (frm, to):
+            continue
+        data = str(lg.get("data", "0x"))[2:]
+        if t0 == TRANSFER_SINGLE_TOPIC:
+            if len(data) < 2 * 64:
+                raise _Malformed
+            pairs = [(int(data[0:64], 16), int(data[64:128], 16))]
+        else:
+            pairs = _decode_batch_arrays(data)
+        for tid, val in pairs:
+            slot = per_token.setdefault(tid, [0, 0])
+            if val == 0:
+                continue            # id still counts, matching the walk above
+            if to == wallet:
+                slot[0] += val
+            else:
+                slot[1] += val
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            block_number = int(str(lg.get("blockNumber", "0x0")), 16) \
+                or block_number
+        except ValueError:
+            pass
+    return per_token, tx_hash, block_number
+
+
+def decode_fills_v3_bundle(logs, wallet):
+    """EVERY fill this wallet has in one settlement receipt.
+
+    THE GAP THIS MEASURES. `_decode_v3_selected` returns at most ONE fill
+    and refuses outright when the wallet appears more than once in a
+    receipt -- `multi_token` when it traded two contracts, `multi_pass`
+    when two fill events match, `mixed_direction` when it bought one and
+    sold another. The venue batches settlements, so those refusals are
+    not corrupt data: they are several real fills we decline to read, and
+    chain.py's own audit comment names this as where HomeRunHazard's and
+    swisstony's chain lane dies.
+
+    Returns (fills, reasons): a list of DecodedFill -- one per token the
+    receipt resolves cleanly -- and a per-token refusal tally for the
+    ones it does not. An empty list with an empty tally means the wallet
+    has no 1155 flow here at all.
+
+    MEASUREMENT ONLY at this commit. Nothing calls this to place an
+    order; `_handle_v3` runs it alongside the single-fill decoder purely
+    to count what a bundle-aware lane WOULD have caught, because arming
+    it without that number first is the thing this codebase does not do.
+    """
+    wallet = wallet.lower()
+    reasons: dict[str, int] = {}
+    try:
+        per_token, tx_hash, blk = _wallet_1155_legs_by_token(logs, wallet)
+    except _Malformed:
+        return [], {"malformed_1155": 1}
+    if not per_token:
+        return [], {}
+
+    # Fill events, decoded once and indexed by the token they name, so a
+    # receipt with N of the wallet's fills costs one pass rather than N.
+    by_token: dict[int, list[tuple[int, int]]] = {}
+    malformed_fill = False
+    for lg in logs:
+        tps = lg.get("topics") or []
+        if not tps or str(tps[0]).lower() != FILL_V3_TOPIC:
+            continue
+        if wallet not in {_topic_addr(str(t)) for t in tps[1:4] if t}:
+            continue
+        data = str(lg.get("data", "0x"))[2:]
+        if len(data) < 4 * 64:
+            malformed_fill = True
+            continue
+        by_token.setdefault(int(data[64:128], 16), []).append(
+            (int(data[128:192], 16), int(data[192:256], 16)))
+        tx_hash = str(lg.get("transactionHash", tx_hash)).lower() or tx_hash
+        try:
+            blk = int(str(lg.get("blockNumber", "0x0")), 16) or blk
+        except ValueError:
+            pass
+    if malformed_fill and not by_token:
+        return [], {"malformed_fill": 1}
+
+    fills: list[DecodedFill] = []
+    for token, (sh_in, sh_out) in sorted(per_token.items()):
+        if sh_in == 0 and sh_out == 0:
+            continue                                   # id seen at value 0
+        if sh_in and sh_out:
+            # Both directions on ONE token in one receipt is a wash the
+            # net of which this decoder will not invent a side for.
+            reasons["mixed_direction"] = reasons.get("mixed_direction", 0) + 1
+            continue
+        shares = sh_in or sh_out
+        cands = by_token.get(token) or []
+        if not cands:
+            reasons["no_fill_events"] = reasons.get("no_fill_events", 0) + 1
+            continue
+        passes = [(w2, w3) for w2, w3 in cands
+                  if w2 > 0 and w3 > 0 and w3 == shares]
+        if not passes:
+            reasons["no_share_match"] = reasons.get("no_share_match", 0) + 1
+            continue
+        if len(passes) > 1:
+            # Two fill events on one token claiming the same share count:
+            # which one priced this leg is not decidable here.
+            reasons["multi_pass"] = reasons.get("multi_pass", 0) + 1
+            continue
+        w2, w3 = passes[0]
+        price = round(w2 / w3, 6)
+        if not (0 < price < 1):
+            reasons["px_oob"] = reasons.get("px_oob", 0) + 1
+            continue
+        fills.append(DecodedFill(
+            wallet=wallet, token_id=str(token),
+            side="BUY" if sh_in else "SELL",
+            size=round(shares / USDC_DECIMALS, 6), price=price,
+            tx_hash=tx_hash, block_number=blk))
+    return fills, reasons
+
+
+def decode_fill_v3_receipt_ex(logs, wallet):
+    """(fill, reason). Legacy lane first; selector only on legacy refusal."""
+    wallet = wallet.lower()
+    try:
+        fill = _decode_v3_legacy(logs, wallet)
+        if fill is not None:
+            return fill, "legacy"
+        return _decode_v3_selected(logs, wallet)
+    except Exception:  # noqa: BLE001 — fail closed, never crash the WS loop
+        return None, "error"
+
+
+def decode_fill_v3_receipt(logs: list[dict[str, Any]],
+                           wallet: str) -> DecodedFill | None:
+    """Two lanes: the legacy direct-USDC-leg decode, then the
+    production-verified single-event selector."""
+    return decode_fill_v3_receipt_ex(logs, wallet)[0]
+
+
+def decode_order_filled_v2(log_entry: dict[str, Any],
+                           roster: set[str]) -> DecodedFill | None:
+    """Decode one v2 fill log; each matched order emits its OWN log with
+    the order owner in topic2, so only that side is matched against the
+    roster. Pure function — unit-tested with the live log verbatim."""
+    topics = log_entry.get("topics") or []
+    if len(topics) < 4:
+        return None
+    owner = _topic_addr(topics[2])
+    if owner not in roster:
+        return None
+    data = log_entry.get("data", "0x")[2:]
+    if len(data) < 4 * 64:
+        return None
+    words = [int(data[i * 64: (i + 1) * 64], 16) for i in range(4)]
+    side_flag, token, gave, got = words
+    if gave == 0 or got == 0:
+        return None
+    if side_flag == 0:
+        side, usdc_units, size_units = "BUY", gave, got
+    else:
+        side, size_units, usdc_units = "SELL", gave, got
+    size = size_units / USDC_DECIMALS
+    price = round(usdc_units / size_units, 6)
+    if not (0 < price < 1):
+        return None
+    return DecodedFill(
+        wallet=owner,
+        token_id=str(token),
+        side=side,
+        size=round(size, 6),
+        price=price,
+        tx_hash=str(log_entry.get("transactionHash", "")).lower(),
+        block_number=int(str(log_entry.get("blockNumber", "0x0")), 16),
+    )
+
+
+def decode_order_filled(log_entry: dict[str, Any], roster: set[str]) -> DecodedFill | None:
+    """Decode one OrderFilled log; return a fill if a roster wallet is involved.
+
+    Pure function — unit-testable with synthetic logs.
+    """
+    topics = log_entry.get("topics") or []
+    if len(topics) < 4:
+        return None
+    maker = _topic_addr(topics[2])
+    taker = _topic_addr(topics[3])
+
+    data = log_entry.get("data", "0x")[2:]
+    if len(data) < 5 * 64:
+        return None
+    words = [int(data[i * 64 : (i + 1) * 64], 16) for i in range(5)]
+    maker_asset, taker_asset, maker_amt, taker_amt, _fee = words
+
+    if maker_amt == 0 or taker_amt == 0:
+        return None
+
+    # Perspective of the order owner (`maker` field):
+    if maker_asset == 0:
+        owner_side, token, size_units, usdc_units = "BUY", taker_asset, taker_amt, maker_amt
+    elif taker_asset == 0:
+        owner_side, token, size_units, usdc_units = "SELL", maker_asset, maker_amt, taker_amt
+    else:
+        return None  # token-for-token (neg-risk conversion legs) — not a priced fill
+
+    if maker in roster:
+        wallet, side = maker, owner_side
+    elif taker in roster:
+        # Counterparty view: the taker took the opposite side of the same token.
+        wallet, side = taker, ("SELL" if owner_side == "BUY" else "BUY")
+    else:
+        return None
+
+    size = size_units / USDC_DECIMALS
+    price = round(usdc_units / size_units, 6)
+    return DecodedFill(
+        wallet=wallet,
+        token_id=str(token),
+        side=side,
+        size=round(size, 6),
+        price=price,
+        tx_hash=str(log_entry.get("transactionHash", "")).lower(),
+        block_number=int(str(log_entry.get("blockNumber", "0x0")), 16),
+    )
+
+
+class BlockTimestampCache:
+    """block number → unix timestamp via eth_getBlockByNumber, memoized."""
+
+    def __init__(self, http: httpx.AsyncClient, rpc_url: str, max_size: int = 2048) -> None:
+        self._http = http
+        self._url = rpc_url
+        self._cache: dict[int, int] = {}
+        self._max = max_size
+        # THE FALLBACK LEDGER (run 82 / 83B). Which blocks got our own wall
+        # clock instead of a real block timestamp. Bounded the same way the
+        # cache is, and read by the observability collector so a substituted
+        # value can declare itself as FALLBACK_SUBSTITUTED rather than travel
+        # as though the chain had supplied it.
+        self._fallback_blocks: set[int] = set()
+        self.fallback_count: int = 0
+
+    def was_fallback(self, block_number: int) -> bool:
+        """Did this block's timestamp come from OUR clock rather than the chain?"""
+        return block_number in self._fallback_blocks
+
+    async def get(self, block_number: int) -> int:
+        if block_number in self._cache:
+            return self._cache[block_number]
+        resp = await self._http.post(
+            self._url,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_getBlockByNumber",
+                "params": [hex(block_number), False],
+            },
+        )
+        resp.raise_for_status()
+        result = resp.json().get("result") or {}
+        # THE SUBSTITUTION IS DECLARED, NOT SILENT (run 82, 2026-09-12).
+        #
+        # This used to read result.get("timestamp", hex(int(time.time()))) --
+        # one expression in which an RPC returning 200 with no timestamp (an
+        # unsynced or eventually-consistent node) silently put OUR WALL CLOCK
+        # into trades.ts, indistinguishable forever afterwards from a real block
+        # time. Run 82 could not rule that out as a contributor to the 92.04% of
+        # chain-lane rows whose detected_at - ts is negative, precisely because
+        # nothing recorded which rows it happened to.
+        #
+        # THE VALUE IS UNCHANGED. int(time.time()) is what hex(int(time.time()))
+        # parsed back to. Only the bookkeeping is new.
+        raw_ts = result.get("timestamp")
+        if raw_ts is None:
+            ts = int(time.time())
+            if len(self._fallback_blocks) >= self._max:
+                self._fallback_blocks.pop()
+            self._fallback_blocks.add(block_number)
+            self.fallback_count += 1
+            log.warning(
+                "block %s returned no timestamp; substituting the local wall "
+                "clock (%s). This row's trades.ts is NOT a chain timestamp. "
+                "fallbacks this process: %d",
+                block_number, ts, self.fallback_count,
+            )
+        else:
+            ts = int(str(raw_ts), 16)
+        if len(self._cache) >= self._max:
+            self._cache.pop(next(iter(self._cache)))
+        self._cache[block_number] = ts
+        return ts
+
+
+class ChainListener:
+    def __init__(self) -> None:
+        cfg = settings()
+        # ENDPOINT ROTATION (2026-09-01). POLYGON_WS_URL was a single
+        # endpoint with no failover, and on 2026-08-31 the provider
+        # started answering the subscribe with HTTP 429. Path A stayed
+        # down for a full day: rn1's on-chain decode coverage went from
+        # 81-86% at -0.65s detection lag to ZERO at 333s, because the
+        # Data-API poller is the only thing left and 281s is the
+        # VENUE's publication lag, not something we can poll away.
+        #
+        # That is the difference TRUEEDGE-FAST measures: the same book
+        # at reaction <= 5s grades +$9,148 against actual -$2,121. A
+        # throttled endpoint therefore does not degrade us a little, it
+        # removes the edge — and with one URL there was nothing to fail
+        # over TO.
+        #
+        # Comma-separated, first entry is the primary, rotation happens
+        # only after a failure. A list of one behaves exactly as before.
+        self._ws_urls = [u.strip() for u in
+                         str(cfg.polygon_ws_url or "").split(",")
+                         if u.strip()]
+        self._ws_idx = 0
+        self._ws_url = self._ws_urls[0] if self._ws_urls else ""
+        self._http_url = cfg.polygon_http_url
+        self._addresses = [
+            cfg.ctf_exchange_address.lower(),
+            cfg.neg_risk_ctf_exchange_address.lower(),
+            cfg.pm_exchange_v2_address.lower(),
+            # Crypto/non-sports books fill on a second v2 instance —
+            # without it the crypto copy whales decode zero (2026-08-22).
+            cfg.pm_exchange_crypto_address.lower(),
+        ]
+        # Path A2 exchanges (env-extensible as the venue mints more)
+        import os as _os
+        self._addresses += [
+            a.strip().lower() for a in
+            _os.getenv("PM_EXCHANGE_V3_ADDRESSES",
+                       V3_EXCHANGES_DEFAULT).split(",") if a.strip()]
+        # OR-list in topic position 0: legacy OrderFilled plus the v2
+        # fill event — either matches.
+        self._topic = order_filled_topic()
+        self._topics = [[self._topic, ORDER_FILLED_V2_TOPIC, FILL_V3_TOPIC]]
+        self._http = httpx.AsyncClient(timeout=10)
+        self._blocks = BlockTimestampCache(self._http, self._http_url)
+        self._roster: dict[str, dict] = {}  # address -> {id, username}
+        self.last_event_at: float = time.time()
+        # Diagnosis counters (2026-08-10: the socket beat 'ok' all day
+        # while every fill arrived via the poller — 'subscribed' alone
+        # cannot distinguish a silent provider from a decode mismatch).
+        self.events_seen = 0    # raw OrderFilled logs delivered by the WS
+        self.decoded = 0        # logs that decoded to a roster wallet
+        self.ingested = 0       # decoded fills that won the dedupe
+        # Venue block time -> our ingest, for the last fill this path
+        # won (owner latency push 2026-08-20). NOTE this measures from
+        # on-chain SETTLEMENT, which itself lags the off-chain CLOB
+        # match — the poller's detect_lag_s is the comparable number.
+        self.last_lag_s: float | None = None
+        # E26: the sweep's counters, task and lock (lazily re-created by
+        # `_sweep_state` for a listener built without __init__); the
+        # socket's subscription state, which the sweep reads
+        self._sweep = _sweep_block()
+        self._sweep_task: asyncio.Task | None = None
+        self._sweep_lock = asyncio.Lock()
+        self._sweep_end: int | None = None   # the last swept end (review HIGH-1)
+        self._subscribed = False
+
+    def _sweep_state(self) -> dict:
+        st = getattr(self, "_sweep", None)
+        if not isinstance(st, dict):
+            st = self._sweep = _sweep_block()
+        for k, v in _sweep_block().items():
+            st.setdefault(k, v)
+        if getattr(self, "_sweep_lock", None) is None:
+            self._sweep_lock = asyncio.Lock()
+        return st
+
+    def _beat_detail(self) -> dict:
+        return {"subscribed": True,
+                "sweep": dict(self._sweep_state()),
+                "last_event_age_s": round(time.time() - self.last_event_at),
+                "events_seen": self.events_seen,
+                "decoded": self.decoded,
+                "ingested": self.ingested,
+                "v3_refused": getattr(self, "v3_refused", 0),
+                "v3_no_token_match": (getattr(self, "v3_ref", None) or {}).get("no_token_match", 0),
+                "v3_multi_pass": (getattr(self, "v3_ref", None) or {}).get("multi_pass", 0),
+                "v3_px_oob": (getattr(self, "v3_ref", None) or {}).get("px_oob", 0),
+                "v3_ref": dict(getattr(self, "v3_ref", None) or {}),
+                "v3_selected": getattr(self, "v3_selected", 0),
+                "detect_lag_s": self.last_lag_s,
+                "roster": len(self._roster),
+                "shadow": _shadow_beat(),
+                "s1": emitter_beat()}
+
+    async def refresh_roster(self) -> None:
+        pool = await get_pool()
+        rows = await pool.fetch(
+            "SELECT id, address, username FROM whales WHERE active AND NOT banned"
+        )
+        self._roster = {r["address"].lower(): dict(r) for r in rows}
+
+    async def _handle_log(self, log_entry: dict[str, Any]) -> None:
+        self.events_seen += 1
+        topics = log_entry.get("topics") or []
+        if topics and str(topics[0]).lower() == FILL_V3_TOPIC:
+            try:  # S0 shadow: observe-only, sync, no I/O (shadow_v2.py)
+                shadow_observe(self, log_entry)
+            except Exception:  # noqa: BLE001 — wall body must stay bare
+                pass
+            try:  # S1 emitter: buffers only; its own independent wall,
+                # BEFORE _handle_v3 so _v3_seen cannot hide events 2..N
+                emitter_observe(self, log_entry)
+            except Exception:  # noqa: BLE001 — wall body must stay bare
+                pass
+            await self._handle_v3(log_entry)
+            return
+        if topics and str(topics[0]).lower() == ORDER_FILLED_V2_TOPIC:
+            fill = decode_order_filled_v2(log_entry, set(self._roster))
+        else:
+            fill = decode_order_filled(log_entry, set(self._roster))
+        if fill is None:
+            return
+        self.decoded += 1
+        whale = self._roster[fill.wallet]
+        ts_epoch = await self._blocks.get(fill.block_number)
+        ev = TradeEvent(
+            whale_id=whale["id"],
+            whale_username=whale["username"],
+            tx_hash=fill.tx_hash,
+            asset=fill.token_id,
+            side=fill.side,
+            size=fill.size,
+            price=fill.price,
+            ts_epoch=ts_epoch,
+            source="chain",
+            # Run 83B: declare which clock produced ts_epoch. ts_fallback=True
+            # means the RPC gave no block timestamp and our own wall clock was
+            # substituted -- the observability record then stores it as
+            # FALLBACK_SUBSTITUTED instead of as a chain value.
+            ts_provenance="polygon_block_timestamp",
+            ts_fallback=self._blocks.was_fallback(fill.block_number),
+        )
+        # `if trade_id:` was a dedupe test in effect, and stopped being
+        # one when ingest_trade switched to ON CONFLICT DO UPDATE — it
+        # returns the id for duplicates too, so `ingested` counted every
+        # re-seen chain fill and the heartbeat over-reported.
+        trade_id, was_new = await ingest_trade_result(ev)
+        if was_new:
+            self.ingested += 1
+            self.last_lag_s = round(time.time() - ts_epoch, 1)
+            log.info(
+                "chain fill: %s %s %s %.2f @ %.3f (trade %s)",
+                whale["username"] or fill.wallet,
+                fill.side,
+                fill.token_id[:12],
+                fill.size,
+                fill.price,
+                trade_id,
+            )
+        await self._save_cursor(fill.block_number)
+
+    async def _handle_v3(self, log_entry: dict[str, Any]) -> None:
+        """Path A2: roster wallet named in a new-exchange fill event →
+        pull the receipt once and decode the standard transfer legs."""
+        matched = v3_owner_candidates(log_entry) & set(self._roster)
+        if not matched:
+            return
+        tx = str(log_entry.get("transactionHash", "")).lower()
+        if not tx:
+            return
+        if not hasattr(self, "_v3_seen"):
+            self._v3_seen = {}
+        if tx in self._v3_seen:
+            return
+        self._v3_seen[tx] = time.time()
+        # S1 collision protocol: the receipt path claims every matched
+        # (tx, wallet) synchronously at the _v3_seen set point — before
+        # any await — so the emitter's 3s debounce always finds the
+        # claim. Outcomes land below; the emitter reads them.
+        for wallet in matched:
+            claim_registry.claim(tx, wallet, "receipt")
+        if len(self._v3_seen) > 512:
+            cutoff = sorted(self._v3_seen.values())[128]
+            self._v3_seen = {k: v for k, v in self._v3_seen.items()
+                             if v > cutoff}
+        try:
+            resp = await self._http.post(
+                self._http_url,
+                json={"jsonrpc": "2.0", "id": 1,
+                      "method": "eth_getTransactionReceipt",
+                      "params": [tx]})
+            receipt = (resp.json() or {}).get("result") or {}
+        except Exception:  # noqa: BLE001 — the poller still carries it
+            log.warning("v3 receipt fetch failed for %s", tx)
+            for wallet in matched:
+                # _v3_seen means this path never retries: the class is
+                # the emitter's (or the poller's) from here on
+                claim_registry.finish(tx, wallet, "receipt", "refused")
+            return
+        logs = receipt.get("logs") or []
+        for wallet in matched:
+            fill, why = decode_fill_v3_receipt_ex(logs, wallet)
+            if fill is None:
+                # COUNTED (audit 2026-08-30): receipts show the venue
+                # batches several fills — including several of ONE
+                # wallet's — into one settlement tx, so this refusal
+                # is where hrh's (and swisstony's) chain lane dies and
+                # their edge decays at poll latency. The counter rides
+                # the beat so the coming bundle decoder has a
+                # before/after number instead of a story.
+                self.v3_refused = getattr(self, "v3_refused", 0) + 1
+                ref = getattr(self, "v3_ref", None)
+                if ref is None:
+                    ref = self.v3_ref = {}
+                ref[why] = ref.get(why, 0) + 1
+                # WHAT A BUNDLE-AWARE LANE WOULD HAVE CAUGHT (2026-09-05).
+                #
+                # The comment above has asserted since 2026-08-30 that
+                # these refusals are batched settlements rather than bad
+                # data, and asked for "a before/after number instead of a
+                # story". This is that number, and it is COUNTED ONLY:
+                # the fills below are not copied, not emitted, and reach
+                # no order path. Arming the bundle lane is a separate
+                # change that should be made against these counters, not
+                # against the argument.
+                #
+                # It cannot raise into the listener. A decoder fault here
+                # would cost the fill the single decoder already refused
+                # plus every fill after it in this receipt, which is a
+                # strictly worse lane than the one being measured.
+                try:
+                    _bundle, _why2 = decode_fills_v3_bundle(logs, wallet)
+                    if _bundle:
+                        self.v3_bundle_would = (
+                            getattr(self, "v3_bundle_would", 0) + len(_bundle))
+                        self.v3_bundle_tx = getattr(self, "v3_bundle_tx", 0) + 1
+                        if len(_bundle) > 1:
+                            self.v3_bundle_multi = (
+                                getattr(self, "v3_bundle_multi", 0) + 1)
+                    bref = getattr(self, "v3_bundle_ref", None)
+                    if bref is None:
+                        bref = self.v3_bundle_ref = {}
+                    for _r, _n in (_why2 or {}).items():
+                        bref[_r] = bref.get(_r, 0) + _n
+                except Exception:  # noqa: BLE001 — measurement never bites
+                    self.v3_bundle_err = getattr(self, "v3_bundle_err", 0) + 1
+                log.info("v3 fill undecodable for %s in %s (%s)",
+                         wallet[:10], tx[:14], why)
+                claim_registry.finish(tx, wallet, "receipt", "refused")
+                continue
+            if why == "selected":
+                self.v3_selected = getattr(self, "v3_selected", 0) + 1
+            reg = claim_registry.get(tx, wallet)
+            if reg is not None and reg["owner"] == "emitter":
+                # ordering inversion inside one process: the emitter got
+                # here first — its row stands, this path steps back
+                self._v3_skip_emitter = getattr(
+                    self, "_v3_skip_emitter", 0) + 1
+                continue
+            pool = await get_pool()
+            # asset-scoped, both chain sources: a (tx, whale)-only probe
+            # would block legitimate other-market rows of the same tx,
+            # and an emitter row must count (fleet r1)
+            pre = await pool.fetchrow(
+                "SELECT 1 FROM trades WHERE lower(tx_hash) = $1 "
+                "AND whale_id = $2 AND asset = $3 "
+                "AND source IN ('chain', 's1') LIMIT 1",
+                tx, self._roster[wallet]["id"], fill.token_id)
+            if pre is not None:
+                # cross-restart authority: a chain row (emitter's, or a
+                # pre-crash twin) already exists — never write a second
+                # view of the same fill with a possibly-divergent key
+                self._v3_skip_preexist = getattr(
+                    self, "_v3_skip_preexist", 0) + 1
+                claim_registry.finish(tx, wallet, "receipt", "ingested")
+                continue
+            self.decoded += 1
+            whale = self._roster[wallet]
+            ts_epoch = await self._blocks.get(
+                fill.block_number
+                or int(str(log_entry.get("blockNumber", "0x0")), 16))
+            ev = TradeEvent(
+                whale_id=whale["id"],
+                whale_username=whale["username"],
+                tx_hash=fill.tx_hash or tx,
+                asset=fill.token_id,
+                side=fill.side,
+                size=fill.size,
+                price=fill.price,
+                ts_epoch=ts_epoch,
+                source="chain",
+                ts_provenance="polygon_block_timestamp",
+                ts_fallback=self._blocks.was_fallback(
+                    fill.block_number
+                    or int(str(log_entry.get("blockNumber", "0x0")), 16)),
+            )
+            trade_id, was_new = await ingest_trade_result(ev)
+            claim_registry.finish(tx, wallet, "receipt", "ingested")
+            if was_new:
+                self.ingested += 1
+                self.last_lag_s = round(time.time() - ts_epoch, 1)
+                log.info("v3 chain fill: %s %s %s %.2f @ %.3f (trade %s)",
+                         whale["username"] or wallet, fill.side,
+                         fill.token_id[:12], fill.size, fill.price,
+                         trade_id)
+        blk = int(str(log_entry.get("blockNumber", "0x0")), 16)
+        if blk:
+            await self._save_cursor(blk)
+
+    async def _save_cursor(self, block_number: int) -> None:
+        pool = await get_pool()
+        await pool.execute(
+            """
+            INSERT INTO ingestion_state (key, value) VALUES ('chain.last_block', to_jsonb($1::bigint))
+            ON CONFLICT (key) DO UPDATE SET value = GREATEST((ingestion_state.value)::bigint,
+                                                             ($1::bigint))::text::jsonb
+            """,
+            block_number,
+        )
+
+    async def _load_cursor(self) -> int | None:
+        pool = await get_pool()
+        val = await pool.fetchval("SELECT value FROM ingestion_state WHERE key='chain.last_block'")
+        return int(json.loads(val)) if val is not None else None
+
+    async def _get_logs(self, start: int, end: int) -> list[dict]:
+        resp = await self._http.post(
+            self._http_url,
+            json={
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "eth_getLogs",
+                "params": [
+                    {
+                        "fromBlock": hex(start),
+                        "toBlock": hex(end),
+                        "address": self._addresses,
+                        "topics": self._topics,
+                    }
+                ],
+            },
+        )
+        if resp.status_code >= 400:
+            # Surface the provider's own explanation — a bare "400 Bad
+            # Request" burned an hour of Path A downtime on 2026-08-11
+            # because the reason (range/response cap? param shape?) was
+            # discarded here and only Alchemy's dashboard showed the
+            # rejects.
+            raise RuntimeError(
+                f"eth_getLogs {start}..{end} -> HTTP {resp.status_code}: "
+                f"{resp.text[:300]}")
+        body = resp.json()
+        if body.get("error"):
+            raise RuntimeError(
+                f"eth_getLogs {start}..{end} -> RPC error: "
+                f"{str(body['error'])[:300]}")
+        return body.get("result") or []
+
+    async def backfill(self, from_block: int, to_block: int) -> int:
+        """eth_getLogs over a gap (reconnect recovery). Returns log count processed.
+
+        Providers cap getLogs differently (block span, log count, response
+        bytes) and answer an over-cap query with 400 — so a rejected chunk
+        retries at smaller spans before giving up, and the final failure
+        carries the provider's error text.
+        """
+        count = 0
+        step = 2000
+        start = from_block
+        self._shadow_replay = True
+        try:
+            while start <= to_block:
+                end = min(start + step - 1, to_block)
+                try:
+                    entries = await self._get_logs(start, end)
+                except RuntimeError:
+                    if step > 10:
+                        step = max(10, step // 10)
+                        log.warning("backfill chunk %s..%s rejected — retrying "
+                                    "at %s-block spans", start, end, step)
+                        continue
+                    raise
+                for entry in entries:
+                    await self._handle_log(entry)
+                    count += 1
+                start = end + 1
+        finally:
+            self._shadow_replay = False
+        return count
+
+    async def _current_block(self) -> int:
+        resp = await self._http.post(
+            self._http_url,
+            json={"jsonrpc": "2.0", "id": 1, "method": "eth_blockNumber", "params": []},
+        )
+        resp.raise_for_status()
+        return int(str(resp.json()["result"]), 16)
+
+    # ── E26: the sweep ────────────────────────────────────────────────
+    def ensure_sweep_task(self) -> asyncio.Task | None:
+        """Start the sweep loop once (idempotent; restarted only if a
+        prior loop ended). CHAIN_SWEEP off is today byte for byte: no
+        task. Called from run() after every successful subscribe."""
+        if not CHAIN_SWEEP:
+            return None
+        self._sweep_state()
+        t = getattr(self, "_sweep_task", None)
+        if t is not None and not t.done():
+            return t
+        t = asyncio.create_task(self._sweep_loop(), name="chain.sweep")
+        self._sweep_task = t
+        return t
+
+    async def _sweep_loop(self) -> None:
+        while True:
+            await asyncio.sleep(CHAIN_SWEEP_S)
+            try:
+                await self._sweep_once()
+            except Exception as exc:  # noqa: BLE001 — the loop never dies
+                self._sweep_state()["failed"] += 1
+                log.warning("chain sweep failed: %s", exc)
+
+    async def _sweep_once(self) -> None:
+        """One sweep over [start, min(tip - CHAIN_SWEEP_CONFIRM_BLOCKS,
+        start + CHAIN_SWEEP_MAX_BLOCKS - 1)] with the listener's own filter,
+        where start is the block after the sweep's own last end (the
+        cursor block itself on the first sweep and after a lag past
+        CHAIN_SWEEP_MAX_BLOCKS).
+
+        FAIL CLOSED by input: a tip or cursor that cannot be read, a
+        getLogs that raises, a non-list body -> `failed` + 1, the
+        cursor unchanged, no row (the next sweep re-reads the same
+        span); a handler that raises on one entry -> `failed` + 1 and
+        the cursor is NOT advanced past the span; a tx the socket
+        already handled -> no RPC, no row (`_v3_seen`, before any I/O);
+        a swept log whose receipt cannot be fetched or decoded ->
+        today's refusal path inside `_handle_v3` (no retry; the poller
+        carries it). Skipped -- counted `skipped_throttled` -- while the
+        provider is throttling us (the reconnect's own rule: DO NOT
+        SPEND RPC CALLS WHILE BEING RATE-LIMITED), and silently while
+        the socket is not subscribed (the reconnect's catch-up owns
+        that gap). A swept v3 log goes to `_handle_v3` DIRECTLY: not
+        through `_handle_log`, so `emitter_observe` / `shadow_observe`
+        never see it, and NOT under `backfill`'s listener-wide
+        `_shadow_replay` flag, which would make the emitter abstain on
+        a live socket log landing mid-sweep."""
+        st = self._sweep_state()
+        if getattr(self, "_last_throttled", False):
+            st["skipped_throttled"] += 1
+            return
+        if not getattr(self, "_subscribed", False):
+            return
+        st["runs"] += 1
+        async with self._sweep_lock:
+            try:
+                cursor = await self._load_cursor()
+                tip = await self._current_block()
+                if cursor is None or isinstance(cursor, bool) or isinstance(tip, bool):
+                    raise ValueError("cursor or tip unreadable")
+                cursor = int(cursor)
+                tip = int(tip)
+            except Exception as exc:  # noqa: BLE001 — no span, no row
+                st["failed"] += 1
+                log.warning("chain sweep: tip or cursor unreadable (%s)", exc)
+                return
+            # THE SWEEP'S OWN END (review HIGH-1). The cursor is the
+            # block of the newest log ANY path handled: a socket log
+            # landing after the last sweep moves it past blocks the
+            # sweep never read, and a log the socket dropped in one of
+            # them -- or in the SAME block as the one it delivered --
+            # would sit behind it for good. So the sweep is contiguous
+            # with its OWN last end (`_sweep_end`, this process's
+            # memory), never with the socket's high-water mark: the
+            # first sweep opens at the cursor block itself (its
+            # siblings), every later one at the block after the last
+            # swept end, and a lag past CHAIN_SWEEP_MAX_BLOCKS (the
+            # catch-up backfill owns that gap, as today) resumes at the
+            # cursor block. Re-reading a block the socket handled is
+            # free: `_v3_seen` drops its txs before any RPC and the
+            # pre-probe blocks a second row across a restart.
+            last = getattr(self, "_sweep_end", None)
+            if last is None or cursor - last > int(CHAIN_SWEEP_MAX_BLOCKS):
+                start = cursor
+            else:
+                start = last + 1
+            end = min(tip - int(CHAIN_SWEEP_CONFIRM_BLOCKS),
+                      start + int(CHAIN_SWEEP_MAX_BLOCKS) - 1)
+            if end < start:
+                return                      # nothing confirmed past the last sweep yet
+            try:
+                entries = await self._get_logs(start, end)
+            except Exception as exc:  # noqa: BLE001 — cursor unchanged
+                st["failed"] += 1
+                log.warning("chain sweep %s..%s failed: %s", start, end, exc)
+                return
+            if not isinstance(entries, list):
+                st["failed"] += 1
+                log.warning("chain sweep %s..%s: non-list body %s",
+                            start, end, type(entries).__name__)
+                return
+            found = 0
+            ingested_before = self.ingested
+            broke = False
+            roster = set(self._roster)
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                topics = entry.get("topics") or []
+                t0 = str(topics[0]).lower() if topics else ""
+                try:
+                    if t0 == FILL_V3_TOPIC:
+                        tx = str(entry.get("transactionHash", "")).lower()
+                        if not tx or not (v3_owner_candidates(entry) & roster):
+                            continue
+                        if tx in (getattr(self, "_v3_seen", None) or {}):
+                            continue        # the socket handled it: no RPC, no row
+                        found += 1
+                        await self._handle_v3(entry)
+                    else:
+                        await self._handle_log(entry)   # legacy / v2, as backfill does
+                except Exception as exc:  # noqa: BLE001 — one entry, counted
+                    st["failed"] += 1
+                    broke = True
+                    log.warning("chain sweep: entry in %s failed: %s",
+                                str(entry.get("transactionHash", ""))[:14], exc)
+            st["found"] += found
+            st["handled"] += max(0, self.ingested - ingested_before)
+            st["last_span"] = [start, end]
+            st["last_at"] = round(time.time())
+            if found:
+                log.info("chain sweep %s..%s: %s tx the socket did not hand over",
+                         start, end, found)
+            if not broke:
+                await self._save_cursor(end)
+                self._sweep_end = end       # the next sweep opens at end + 1
+
+    async def run(self) -> None:
+        if not self._ws_url:
+            log.error("POLYGON_WS_URL not set — Path A disabled, Path B carries detection")
+            await heartbeat("chain_listener", "disabled", {"reason": "no POLYGON_WS_URL"})
+            return
+        while True:
+            # E26: not subscribed until the ack below; the sweep skips
+            self._subscribed = False
+            try:
+                await self.refresh_roster()
+                ensure_shadow_task(self)  # S0 shadow: idempotent, never raises
+                ensure_emitter_task(self)  # S1 emitter: idempotent, flag-off default
+                # Recover any gap before subscribing — but NEVER let the
+                # catch-up block the live stream. On 2026-08-11 a rejected
+                # getLogs threw here, so every reconnect died before
+                # eth_subscribe and Path A stayed down for an hour while
+                # the subscription itself would have worked fine. The
+                # poller + reconciler own gap coverage; a skipped backfill
+                # costs nothing but duplicate-suppressed rows.
+                # The WHOLE catch-up (tip check included) is optional:
+                # a throttled eth_blockNumber (429, 2026-08-11 afternoon)
+                # used to throw here and kill every reconnect before the
+                # subscribe, exactly like the rejected backfill before it.
+                # DO NOT SPEND RPC CALLS WHILE BEING RATE-LIMITED
+                # (2026-09-01). The 429 lands on the SUBSCRIBE, so this
+                # catch-up still ran on every 120s retry: one
+                # eth_blockNumber plus N eth_getLogs, ~30 times an hour,
+                # against a provider that is actively throttling us.
+                # That is our own quota being spent on work whose only
+                # consumer is a connection we are about to be refused.
+                #
+                # Measured: the block has held for ~28 hours and across
+                # a UTC midnight (streak 35 -> 96), so it is not a daily
+                # quota rolling over — and every call we make while
+                # blocked can only make recovery slower.
+                #
+                # Skipping is already known-safe and the comment above
+                # says why: "The poller + reconciler own gap coverage; a
+                # skipped backfill costs nothing but duplicate-suppressed
+                # rows." One successful subscribe clears the flag, and
+                # the very next cycle backfills the whole accumulated
+                # gap in one pass.
+                _skip_catchup = getattr(self, "_last_throttled", False)
+                try:
+                    cursor = None if _skip_catchup else await self._load_cursor()
+                    if _skip_catchup:
+                        log.info("catch-up skipped — endpoint is "
+                                 "throttling us; not spending calls on a "
+                                 "backfill until a subscribe succeeds")
+                    if cursor is not None:
+                        tip = await self._current_block()
+                        if tip > cursor:
+                            # E26: the same lock the sweep holds, so the
+                            # catch-up and a sweep never interleave
+                            self._sweep_state()
+                            async with self._sweep_lock:
+                                n = await self.backfill(cursor + 1, tip)
+                                log.info("backfilled %s logs over blocks %s..%s",
+                                         n, cursor + 1, tip)
+                                await self._save_cursor(tip)
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("catch-up failed (%s) — skipping, "
+                                "subscribing live", exc)
+                    await heartbeat(
+                        "chain_listener", "ok",
+                        {"backfill_skipped": str(exc)[:300]})
+                    # Move past any poisoned range so the next reconnect
+                    # doesn't re-fight the same rejection; the poller
+                    # covers the gap. Best-effort — under a 429 the tip
+                    # itself may be unknowable, and that's fine.
+                    try:
+                        await self._save_cursor(await self._current_block())
+                    except Exception:  # noqa: BLE001
+                        pass
+
+                self._ws_url = self._ws_urls[self._ws_idx % len(self._ws_urls)]
+                async with websockets.connect(self._ws_url, ping_interval=15, ping_timeout=10) as ws:
+                    await ws.send(
+                        json.dumps(
+                            {
+                                "jsonrpc": "2.0",
+                                "id": 1,
+                                "method": "eth_subscribe",
+                                "params": [
+                                    "logs",
+                                    {"address": self._addresses,
+                                     "topics": self._topics},
+                                ],
+                            }
+                        )
+                    )
+                    await ws.recv()  # subscription ack
+                    log.info("Path A subscribed to OrderFilled on %s", self._addresses)
+                    await heartbeat("chain_listener", "ok", self._beat_detail())
+                    self._fail_streak = 0
+                    # Subscribe succeeded, so we are no longer being
+                    # refused: allow the catch-up again. The NEXT cycle
+                    # backfills the whole accumulated gap in one pass,
+                    # which is why skipping it while blocked loses
+                    # nothing.
+                    self._last_throttled = False
+                    # E26: subscribed, so the sweep may run; started here
+                    # (after the ack, beside the emitter's own task) and
+                    # never while CHAIN_SWEEP is off
+                    self._subscribed = True
+                    self.ensure_sweep_task()
+                    roster_refreshed = time.time()
+                    while True:
+                        raw = await asyncio.wait_for(ws.recv(), timeout=60)
+                        self.last_event_at = time.time()
+                        msg = json.loads(raw)
+                        params = msg.get("params") or {}
+                        entry = params.get("result")
+                        if entry:
+                            await self._handle_log(entry)
+                        if time.time() - roster_refreshed > 60:
+                            await self.refresh_roster()
+                            roster_refreshed = time.time()
+                            await heartbeat("chain_listener", "ok",
+                                            self._beat_detail())
+            except asyncio.TimeoutError:
+                self._subscribed = False          # E26: the sweep skips until the re-subscribe
+                # No events for 60s can be legitimate quiet time; heartbeat + resubscribe
+                # to be safe (subscription may have silently died).
+                log.info("no WS traffic for 60s — resubscribing")
+                await heartbeat("chain_listener", "ok", {"resubscribe": "quiet"})
+            except Exception as exc:  # noqa: BLE001
+                self._subscribed = False          # E26: the sweep skips until the re-subscribe
+                # Exponential backoff, capped at 2 minutes. A fixed 2s
+                # retry against a rate-limiting provider (429, 2026-08-11)
+                # is a denial-of-service on our own quota: ~1,800 rejected
+                # calls per hour that keep the throttle pinned. Reset on
+                # every successful subscribe.
+                self._fail_streak = getattr(self, "_fail_streak", 0) + 1
+                # Remembered so the NEXT cycle can skip the catch-up
+                # rather than spend calls we are being refused for.
+                self._last_throttled = "429" in str(exc)
+                delay = min(2 * (2 ** min(self._fail_streak - 1, 6)), 120)
+                # ROTATE BEFORE SLEEPING, once this endpoint has failed
+                # twice. Not on the first failure — a single blip is not
+                # a reason to leave a healthy primary — and not never,
+                # which is what cost a day of edge on 2026-08-31. With
+                # one URL configured the modulo makes this a no-op, so
+                # nothing changes for a single-endpoint deployment.
+                if len(self._ws_urls) > 1 and self._fail_streak >= 2:
+                    self._ws_idx += 1
+                    log.warning("rotating Polygon WS endpoint to #%d of %d "
+                                "after %d consecutive failures",
+                                (self._ws_idx % len(self._ws_urls)) + 1,
+                                len(self._ws_urls), self._fail_streak)
+                log.warning("chain listener error: %s — reconnecting in %ss",
+                            exc, delay)
+                await heartbeat("chain_listener", "down",
+                                {"error": str(exc)[:300],
+                                 "fail_streak": self._fail_streak,
+                                 "retry_in_s": delay,
+                                 # Named so a reader knows whether the
+                                 # provider is throttling us or the
+                                 # endpoint is simply gone — the two
+                                 # need different actions from a human.
+                                 "throttled": "429" in str(exc),
+                                 "endpoint_index": self._ws_idx
+                                 % max(1, len(self._ws_urls)),
+                                 "endpoints_configured": len(self._ws_urls)})
+                await asyncio.sleep(delay)

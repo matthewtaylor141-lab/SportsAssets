@@ -1,0 +1,29 @@
+{
+ "REFERENCE_ACCOUNT": "rn1",
+ "WALLET_ADDRESS": "0x2005d16a84ceefa912d4e380cd32e7ff827875ea",
+ "SOURCE_ENDPOINT": "research/snapshots/u2_events_v1.jsonl.gz (retained snapshot)",
+ "EXTRACTION_UTC": "2026-09-15T21:49:48.398039+00:00",
+ "REQUESTED_RANGE_START": "2026-08-06",
+ "RETURNED_RANGE_START": "2026-08-06T04:36:32+00:00",
+ "RETURNED_RANGE_END": "2026-09-11T23:59:34+00:00",
+ "RETURNED_SPAN_DAYS": 36.81,
+ "ROWS_READ": 214609,
+ "ROWS_KEPT": 196619,
+ "UNIQUE_TRADE_IDS": 196619,
+ "DUPLICATE_FILL_KEYS": 0,
+ "BUY_COUNT": 196619,
+ "SELL_COUNT": 0,
+ "OTHER_SIDE_COUNT": 0,
+ "DISTINCT_CONDITIONS": 17722,
+ "DISTINCT_MARKET_SLUGS": 17722,
+ "DROP_CENSUS": {
+  "DROP_LEG_NOT_IDENTIFIED": 168,
+  "DROP_NO_CONDITION": 17822,
+  "PAYOUT_ONE_HOT": 9545
+ },
+ "COVERAGE_LIMITATIONS": [
+  "A windowed-cursor pull is not a proof of lifetime completeness; it is what this request returned.",
+  "Rows without a condition id or a resolvable leg are EXCLUDED and counted in DROP_CENSUS, never silently skipped.",
+  "Settlement is only available for markets present in the meta pull; unresolved and non-one-hot payouts are excluded, not treated as losses."
+ ]
+}

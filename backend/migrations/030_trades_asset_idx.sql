@@ -1,0 +1,32 @@
+-- trades(asset) — missing, and I put a query on it in the hot path today.
+--
+-- classify_exit (live_executor.py) asks "does this whale hold the
+-- sibling leg?" on EVERY copy, inside the 4-slot semaphore:
+--
+--     FROM trades t JOIN whales w ON w.id = t.whale_id
+--     WHERE t.asset = $1 AND lower(w.username) = $2
+--
+-- The existing indexes are (whale_id, ts DESC), (ts DESC),
+-- (condition_id) and (sport). None of them serves a lookup by asset, so
+-- this is a sequential scan of the whole ledger — 860,669 fills on the
+-- copied whales alone, plus backfill history capped at 500k per wallet
+-- across six rostered whales: roughly 2-4M rows.
+--
+-- On a small instance that is disk-bound, seconds not milliseconds, and
+-- it runs while holding one of only four copy slots. The reaction stamp
+-- is taken INSIDE that semaphore, so the delay counts against the
+-- staleness cap for every copy queued behind it: a scan here does not
+-- merely slow one copy, it can push the next one past its ceiling and
+-- have it rejected as stale for a delay we caused.
+--
+-- Worth stating plainly: the exit classifier is one of today's coverage
+-- wins, and I shipped it with a full table scan on the money path. The
+-- lookup itself is right; the index it needed did not exist.
+--
+-- (asset, whale_id) rather than (asset) alone so the join filter is
+-- covered too and the row need not be visited to reject another whale's
+-- fills on the same token.
+--
+-- Also serves mirror_exit's ledger sum, which filters the same way.
+CREATE INDEX IF NOT EXISTS trades_asset_whale_idx
+    ON trades (asset, whale_id);

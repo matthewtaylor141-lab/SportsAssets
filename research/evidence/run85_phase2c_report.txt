@@ -1,0 +1,99 @@
+{
+  "phase": "run85/phase2c/1",
+  "collector_sha256": "f5096ea4e9b0c3e042821c44bea6d6291175e911e715c04c25354f88fc9a25a4",
+  "phase2b_sha256": "65f3b0a1c3fdf3f74aaa8ce3f869abcf168aee2ec7de46c7ef9b0a72fe5c59c6",
+  "driver_sha256": "539776b7994c906521c10b023bf49cf2a38954bceee7fa0e6ac44c659002d311",
+  "python": "3.11.16 (main, Aug 13 2026, 02:46:14) [GCC 13.3.0]",
+  "platform": "Linux-6.17.0-1022-azure-x86_64-with-glibc2.39",
+  "httpx": "0.27.2",
+  "gateway": "https://gateway.polymarket.us",
+  "base_spacing_s": 2.0,
+  "aggregate_rps_ceiling": 0.5,
+  "detail_probe": 150,
+  "census_passes": 3,
+  "validate_seconds": 240.0,
+  "fast_tier_cap": 2,
+  "survey_tier_cap": 6
+}
+=== 1/2. CANDIDATE POOL (native identity only) ===
+events returned: 100 (http=200)
+pool with native identity + structured sport: 1579
+excluded at A1-A3: 0
+NATIVE_EVENT_IDENTITY_RATE = 100.00%
+detail probe budget: 150 markets (100 distinct events in the first pass)
+CANDIDATES_PROBED = 150
+admitted through A1-A5,A7 = 140
+census bounded to 60 of 140 verified candidates (deterministic, by slug)
+
+=== 3. REGIME FEATURES FROM OBSERVED WIRE DATA (3 passes) ===
+  pass 0 done (spacing now 2.00s)
+  pass 1 done (spacing now 2.00s)
+  pass 2 done (spacing now 2.00s)
+candidates with a two-sided book (A6): 19 of 60
+
+=== 4. OBSERVED REGIME DISTRIBUTION ===
+   tercile cuts: price=(0.015, 0.085) depth=(1.0, 13.85)
+   price_bin   {'P_LOW': 8, 'P_HIGH': 6, 'P_MID': 5}
+   spread_bin  {'S_1T': 13, 'S_4T_PLUS': 6}
+   depth_bin   {'D_THIN': 7, 'D_DEEP': 6, 'D_MID': 6}
+   asym_bin    {'ASK_HEAVY': 18, 'BALANCED': 1}
+   tte_bin     {'T_LT_24H': 19}
+   act_bin     {'QUIET': 8, 'ACTIVE': 11}
+   distinct full regime keys: 13
+   ECONOMIC_REGIMES_IDENTIFIED = 13
+
+=== 7. CADENCE BUDGET at 0.5 rps ===
+   N markets -> revisit; markouts a revisit supports
+     N=1 ->  2.0s   supports: 5, 10, 30, 60s
+     N=2 ->  4.0s   supports: 5, 10, 30, 60s
+     N=3 ->  6.0s   supports: 10, 30, 60s
+     N=4 ->  8.0s   supports: 10, 30, 60s
+     N=5 -> 10.0s   supports: 10, 30, 60s
+     N=6 -> 12.0s   supports: 30, 60s
+   The 5 s markout survives only at N<=2. Diversity and the
+   5 s offset cannot both be had from one flat cohort.
+
+=== 6. FROZEN SELECTION APPLIED ===
+   FAST tier: 2 markets, revisit 4.0s
+     aachc-mlb-2026-09-27-wr-col                  ev=40947  P_HIGH|S_1T|D_DEEP|BALANCED|T_LT_24H|ACTIVE  [S5_ASYMMETRY_COVERAGE_BALANCED]
+     aachc-mlb-2026-09-27-br-atl                  ev=40946  P_LOW|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|QUIET  [S5_ASYMMETRY_COVERAGE_ASK_HEAVY]
+   SURVEY tier: 6 markets, revisit 12.0s
+     aachc-mlb-2026-09-27-wr-col                  ev=40947  P_HIGH|S_1T|D_DEEP|BALANCED|T_LT_24H|ACTIVE  [S5_ASYMMETRY_COVERAGE_BALANCED]
+     aachc-mlb-2026-09-27-br-atl                  ev=40946  P_LOW|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|QUIET  [S5_ASYMMETRY_COVERAGE_ASK_HEAVY]
+     aachc-ufc-featherw-2026-12-31-champ-alevol   ev=16734  P_HIGH|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|ACTIVE  [S3_REGIME_P_HIGH|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|ACTIVE]
+     aachc-mlb-hrs-2026-09-29-leader-aarjud       ev=40948  P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|ACTIVE  [S3_REGIME_P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|ACTIVE]
+     aachc-mlb-bavg-2026-09-29-leader-alebur      ev=40952  P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|QUIET  [S3_REGIME_P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|QUIET]
+     aachc-ufc-lightheavyw-2026-12-31-champ-alepe ev=16356  P_LOW|S_1T|D_MID|ASK_HEAVY|T_LT_24H|ACTIVE  [S3_REGIME_P_LOW|S_1T|D_MID|ASK_HEAVY|T_LT_24H|ACTIVE]
+
+=== SURVEY-TIER DIVERSITY ===
+   PRICE_DIVERSITY              SUFFICIENT
+   SPREAD_DIVERSITY             INSUFFICIENT
+   DEPTH_DIVERSITY              SUFFICIENT
+   DEPTH_ASYMMETRY_DIVERSITY    SUFFICIENT
+   TIME_TO_EVENT_DIVERSITY      INSUFFICIENT
+   BOOK_ACTIVITY_DIVERSITY      SUFFICIENT
+   bins available in candidate pool: {'price_bin': ['P_HIGH', 'P_LOW', 'P_MID'], 'spread_bin': ['S_1T', 'S_4T_PLUS'], 'depth_bin': ['D_DEEP', 'D_MID', 'D_THIN'], 'asym_bin': ['ASK_HEAVY', 'BALANCED'], 'tte_bin': ['T_LT_24H'], 'act_bin': ['ACTIVE', 'QUIET']}
+
+=== PHASE 2C VERDICTS (census-derived) ===
+CANDIDATES_PROBED              = 150
+NATIVE_EVENT_IDENTITY_RATE     = 100.00%
+ECONOMIC_REGIMES_IDENTIFIED    = 13
+PRICE_DIVERSITY                = SUFFICIENT
+SPREAD_DIVERSITY               = INSUFFICIENT
+DEPTH_DIVERSITY                = SUFFICIENT
+DEPTH_ASYMMETRY_DIVERSITY      = SUFFICIENT
+TIME_TO_EVENT_DIVERSITY        = INSUFFICIENT
+BOOK_ACTIVITY_DIVERSITY        = SUFFICIENT
+PROPOSED_MULTI_DAY_COHORT_SIZE = 2 FAST + 6 SURVEY = 8
+EXPECTED_REVISIT_CADENCE       = FAST 4.0s / SURVEY 12.0s
+SELECTION_RULE_FROZEN          = YES (docstring, pre-data)
+   The tiered proposal is two INDEPENDENT round-robins, not
+   one pooled cohort: pooling them would make every revisit
+   2.0 x (FAST+SURVEY) and destroy the short offsets the
+   FAST tier exists to preserve.
+
+=== 8. SHORT VALIDATION SAMPLE (240s) ===
+  validation reads: 121
+
+=== THROTTLE ===
+   429 backoff events: 0   final spacing 2.00s

@@ -1,0 +1,701 @@
+"""Polymarket US adapter (build step 5a) — the regulated US exchange.
+
+This is a DIFFERENT venue from the global CLOB the reference account trades
+on: per-outcome markets (one market per team, grouped by event), own slugs,
+own liquidity. Calibration from the global book transfers as a prior only;
+the PAPER grader measures this venue's books directly.
+
+Market data: public gateway via the official polymarket-us SDK (no auth).
+Orders: Ed25519 API keys (EDGE_PMUS_KEY_ID / EDGE_PMUS_SECRET_KEY, minted at
+polymarket.us/developer) — FOK limit, preview-verified, LIVE_* modes only.
+Credentials are never logged; absent credentials => RuntimeError.
+
+Fees: taker commission is configurable (EDGE_PMUS_TAKER_FEE, probability
+units), default 0.0 per the current fee schedule. Every order response's
+commission fields are stored raw in the ledger decision record, and the
+nightly report recomputes net edge from actual charged commissions — the
+hard rule is "log fee assumptions per venue per fill", encoded here.
+"""
+
+from __future__ import annotations
+
+import logging
+import os
+import time
+
+from .base import BookLevel, FillIntent, MarketBook, VenueAdapter
+from .mapper import VenueMarket
+
+log = logging.getLogger(__name__)
+
+
+TICK = 0.01   # venue prices are whole cents
+
+
+class PolymarketUSAdapter(VenueAdapter):
+    name = "polymarket-us"
+
+    def __init__(self) -> None:
+        from polymarket_us import PolymarketUS
+
+        self._pub = PolymarketUS()  # public gateway (market data)
+        self._auth = None
+        self.book_errors: dict[str, int] = {}
+        self._taker_fee = float(os.environ.get("EDGE_PMUS_TAKER_FEE", "0.0"))
+        self._maker_fee_rate = float(os.environ.get("EDGE_PMUS_MAKER_FEE", "0.0"))
+        # Maker-first is OPT-IN. It was shipped default-on without ever being
+        # exercised against the live venue, which made an unverified order
+        # type the only path real money could take: if the venue refuses GTC
+        # post-only, every order fails and the engine goes quiet while its
+        # telemetry still reports orders "placed". Prove it with
+        # EDGE_PMUS_MAKER_FIRST=1 and watch the maker fill count first.
+        # HARD OFF — not env-controlled, deliberately. The env default was
+        # flipped to "0" on 2026-08-02, but the deployed service can carry
+        # EDGE_PMUS_MAKER_FIRST=1 from the earlier experiment, and a code
+        # default never beats a set env var. Maker orders are what became
+        # the orphaned-GTC incident: contexts die with the ledger on
+        # deploy, the venue keeps the orders, and they fill on their own
+        # through a halt. Resting orders return only when the orphan sweep
+        # has run clean in production for a while and order state survives
+        # restarts — then this becomes env-controlled again, opt-in.
+        self._maker_first = False
+        self._force_taker: dict[str, float] = {}   # slug -> cross-until ts
+        # Live book stream (push-latency books). Needs API keys for the WS
+        # handshake; fail-soft — REST remains the fallback path.
+        self._stream = None
+        if self.has_credentials() and os.environ.get("EDGE_PMUS_WS", "1") != "0":
+            try:
+                from .pmus_stream import BookStreamer
+
+                self._stream = BookStreamer(os.environ["EDGE_PMUS_KEY_ID"],
+                                            os.environ["EDGE_PMUS_SECRET_KEY"])
+            except Exception as exc:  # noqa: BLE001
+                log.warning("book stream unavailable, using REST: %s", exc)
+
+    def stream_stats(self) -> dict | None:
+        return self._stream.stats() if self._stream else None
+
+    def add_book_listener(self, fn) -> bool:
+        """Subscribe to book-change notifications (slug per update). Returns
+        False when there is no live stream — the caller then keeps polling."""
+        if self._stream is None:
+            return False
+        self._stream.add_listener(fn)
+        return True
+
+    # ── credentials / auth ─────────────────────────────────────────────
+
+    @staticmethod
+    def has_credentials() -> bool:
+        return bool(os.environ.get("EDGE_PMUS_KEY_ID")
+                    and os.environ.get("EDGE_PMUS_SECRET_KEY"))
+
+    def _client(self):
+        if self._auth is None:
+            if not self.has_credentials():
+                raise RuntimeError("Polymarket US live credentials absent")
+            from polymarket_us import PolymarketUS
+
+            self._auth = PolymarketUS(
+                key_id=os.environ["EDGE_PMUS_KEY_ID"],
+                secret_key=os.environ["EDGE_PMUS_SECRET_KEY"],
+            )
+        return self._auth
+
+    def check_auth(self) -> dict:
+        """check-live probe: balances call proves key validity + funding."""
+        try:
+            bal = self._client().account.balances()
+            out = {"ok": True, "balances": bal}
+            bp = self._buying_power_from(bal)
+            if bp is not None:
+                out["balance_usd"] = bp
+            return out
+        except Exception as exc:  # noqa: BLE001
+            return {"ok": False, "error": f"{type(exc).__name__}: {str(exc)[:150]}"}
+
+    @staticmethod
+    def _buying_power_from(payload: dict) -> float | None:
+        """Cash actually available to deploy — buyingPower when the venue
+        reports it, else the current balance. Unsettled funds and money
+        already committed to resting orders are excluded by the venue."""
+        for b in (payload or {}).get("balances") or []:
+            for field in ("buyingPower", "currentBalance"):
+                if b.get(field) is not None:
+                    try:
+                        return float(b[field])
+                    except (TypeError, ValueError):
+                        continue
+        return None
+
+    def buying_power(self) -> float | None:
+        """Live deployable cash, or None if the venue can't be reached. The
+        day budget is sized from this, so 'how much can we trade' answers
+        itself as the account grows or shrinks — no config edit."""
+        try:
+            return self._buying_power_from(self._client().account.balances())
+        except Exception as exc:  # noqa: BLE001
+            log.info("buying power unavailable (keeping last known): %s", exc)
+            return None
+
+    # ── discovery / books ──────────────────────────────────────────────
+
+    # Param variants tried in order until one yields events — the gateway's
+    # exact filter semantics are verified empirically via the census.
+    # Primary variant adds a 72h start-time window: census showed the
+    # unwindowed sports listing leads with season-long futures ("World
+    # Series Champion"), starving the 1,000-event page budget of games.
+    @staticmethod
+    def _list_variants() -> tuple:
+        from datetime import datetime, timedelta, timezone
+
+        now = datetime.now(timezone.utc)
+        iso = lambda d: d.strftime("%Y-%m-%dT%H:%M:%SZ")  # noqa: E731
+        window = {"startTimeMin": iso(now - timedelta(hours=6)),
+                  "startTimeMax": iso(now + timedelta(hours=72))}
+        return (
+            {"active": True, "closed": False, "categories": ["sports"], **window},
+            {"active": True, "closed": False, "categories": ["sports"]},
+            {"active": True, "closed": False},
+            {"active": True},
+            {},
+        )
+
+    def discover_markets(self, league_codes: set[str]) -> list[VenueMarket]:
+        """Active events with nested per-outcome markets. League assignment
+        happens at match time (mapper league filter passes None here).
+        Every skip reason is counted in last_census — the funnel shows WHY
+        discovery found nothing instead of just '0 candidates'."""
+        from edge.fairvalue.lines import (
+            apply_slug_line,
+            bet_identity,
+            canonical_outcome,
+            tag_segment,
+        )
+        from edge.venues.pmus_slug import (CODE_PREFIX, is_bare_team_market,
+                                           looks_like_a_slug, parse_slug)
+
+        census: dict[str, Any] = {"events_seen": 0, "skipped_no_title": 0,
+                                  "skipped_lt2_outcomes": 0, "markets_seen": 0,
+                                  "markets_closed": 0, "markets_no_outcome": 0,
+                                  "outcome_from_title": 0, "samples": [],
+                                  "market_samples": []}
+        out: list[VenueMarket] = []
+        try:
+            variant_used = None
+            for variant in self._list_variants():
+                probe = self._pub.events.list({"limit": 100, **variant}) or {}
+                if probe.get("events"):
+                    variant_used = variant
+                    break
+            census["params"] = variant_used if variant_used is not None else "all_empty"
+            if variant_used is None:
+                self.last_census = census
+                return out
+
+            offset = 0
+            for _ in range(10):  # bounded paging
+                resp = self._pub.events.list(
+                    {"limit": 100, "offset": offset, **variant_used}) or {}
+                events = resp.get("events") or []
+                census["events_seen"] += len(events)
+                for ev in events:
+                    if len(census["samples"]) < 3 and ev.get("title"):
+                        census["samples"].append(ev["title"][:60])
+                    outcomes = {}
+                    titles = {}
+                    collided: set = set()
+                    for m in ev.get("markets") or []:
+                        census["markets_seen"] += 1
+                        if len(census["market_samples"]) < 3 and m.get("title"):
+                            census["market_samples"].append(m["title"][:50])
+                        oc = m.get("outcome") or (m.get("team") or {}).get("name")
+                        if m.get("closed"):
+                            census["markets_closed"] += 1
+                            continue
+                        if oc and looks_like_a_slug(oc):
+                            oc = None      # the "outcome" is the slug again
+                        if not oc and m.get("title") and not looks_like_a_slug(
+                                m["title"]):
+                            # Census finding (2026-07-24): event listings carry
+                            # no `outcome` field — the market TITLE names the
+                            # side ("Mets", "Spread: Eagles (-7.5)"). Use it;
+                            # the mapper's 0.95 team gate and the line parser
+                            # discard anything that isn't actually a side.
+                            oc = m["title"].strip()
+                            census["outcome_from_title"] += 1
+                        if not oc and m.get("slug"):
+                            # No usable prose. Read the side STRUCTURALLY from
+                            # the slug and let the runner resolve the code
+                            # against the event's actual teams. Guessing from
+                            # a slug string is how a market gets priced as its
+                            # own opposite.
+                            # ONLY a full-game team moneyline may wear a
+                            # bare code: the side extraction DISCARDS the
+                            # qualifiers around it, so an F5/segment slug
+                            # would enter the pools as a full-game side —
+                            # two of those "dutched" lose everything on a
+                            # tie (owner report 2026-08-09, Mets/Pirates
+                            # F5, $51 exposed on the third outcome).
+                            parsed = parse_slug(m["slug"])
+                            if parsed.side and is_bare_team_market(m["slug"]):
+                                oc = f"{CODE_PREFIX}{parsed.side}"
+                                census["outcome_from_slug_code"] = census.get(
+                                    "outcome_from_slug_code", 0) + 1
+                            elif parsed.side:
+                                census["slug_code_refused_derivative"] = \
+                                    census.get(
+                                        "slug_code_refused_derivative", 0) + 1
+                        if not (oc and m.get("slug")):
+                            census["markets_no_outcome"] += 1
+                            continue
+                        # Canonical key carries the line ("Over 8.5",
+                        # "Eagles -7.5") so ML/spread/total outcomes of one
+                        # event never collide. The venue often exposes the
+                        # handicap ONLY in the slug (…-neg-2pt5), so apply
+                        # that too — otherwise a spread market gets priced
+                        # against the moneyline fair value.
+                        ident = bet_identity(m["slug"], m.get("title") or "", oc)
+                        if not ident.tradeable:
+                            census["identity_conflict"] = census.get(
+                                "identity_conflict", 0) + 1
+                            if ident.conflict and "conflict_example" not in census:
+                                census["conflict_example"] = {
+                                    "slug": m["slug"][:60],
+                                    "why": ident.conflict[:80]}
+                            continue  # never guess which bet this is
+                        # Segment tag keeps a first-five-innings run line from
+                        # ever colliding with — or being priced against — the
+                        # full-game line of the same game.
+                        base = oc if oc.startswith(CODE_PREFIX) else apply_slug_line(
+                            canonical_outcome(m.get("title") or "", oc), m["slug"])
+                        key = tag_segment(base, ident.segment)
+                        if ident.segment:
+                            census["segments"] = census.get("segments", {})
+                            census["segments"][ident.segment] = census[
+                                "segments"].get(ident.segment, 0) + 1
+                        # A canonical key two DIFFERENT markets claim is an
+                        # identity ambiguity, not a tiebreak: the canonical
+                        # form drops a total's subject ("Orioles 1st Inning
+                        # O/U 0.5" and the game's YRFI both come out as
+                        # "[i1] Over 0.5"), so last-writer-wins silently
+                        # substitutes one proposition for another. Refuse
+                        # BOTH — never trade a key two markets answered to.
+                        if key in outcomes and outcomes[key] != m["slug"]:
+                            collided.add(key)
+                            census["key_collision"] = census.get(
+                                "key_collision", 0) + 1
+                            if "key_collision_example" not in census:
+                                census["key_collision_example"] = {
+                                    "key": key[:60],
+                                    "slugs": [outcomes[key][:60],
+                                              m["slug"][:60]]}
+                        else:
+                            outcomes[key] = m["slug"]
+                            titles[key] = (m.get("title") or "").strip()
+                    for k in collided:
+                        outcomes.pop(k, None)
+                        titles.pop(k, None)
+                    if not ev.get("title"):
+                        census["skipped_no_title"] += 1
+                    elif len(outcomes) < 2:
+                        census["skipped_lt2_outcomes"] += 1
+                    else:
+                        out.append(VenueMarket(
+                            market_id=ev.get("slug") or ev["title"],
+                            title=ev["title"],
+                            league_code=None,   # resolved by the mapper's fuzzy match
+                            outcome_tokens=outcomes,
+                            outcome_titles=titles,
+                        ))
+                if len(events) < 100:
+                    break
+                offset += 100
+        except Exception as exc:  # noqa: BLE001
+            self._book_err(f"discovery_{type(exc).__name__}")
+            census["error"] = f"{type(exc).__name__}: {str(exc)[:150]}"
+            log.warning("polymarket-us discovery failed: %s", exc)
+        self.last_census = census
+        # Stream every discovered outcome book — books arrive by push before
+        # the pricing loop ever asks for them. Prune first: ended games must
+        # give their memory and their subscription room back, or the 4,000
+        # bound fills with finished markets and new ones stop streaming.
+        if self._stream is not None and out:
+            active = {slug for m in out for slug in m.outcome_tokens.values()}
+            self._stream.prune(active)
+            self._stream.ensure(sorted(active))
+        return out
+
+    def _book_err(self, cause: str) -> None:
+        self.book_errors[cause] = self.book_errors.get(cause, 0) + 1
+
+    @staticmethod
+    def _parse_levels(body: dict) -> tuple[list[BookLevel], list[BookLevel]]:
+        def levels(rows, reverse):
+            out = []
+            for lvl in rows or []:
+                try:
+                    px = float((lvl.get("px") or {}).get("value") or 0)
+                    qty = float(lvl.get("qty") or 0)
+                except (TypeError, ValueError, AttributeError):
+                    continue
+                if 0 < px < 1 and qty > 0:
+                    out.append(BookLevel(px, qty))
+            return sorted(out, key=lambda x: -x.price if reverse else x.price)
+
+        return (levels(body.get("bids"), reverse=True),
+                levels(body.get("offers") or body.get("asks"), reverse=False))
+
+    def peek_book(self, market_slug: str) -> MarketBook | None:
+        """Stream-cache-only book read — no REST, no session contention.
+
+        Built for the 24/7 arbitrage watcher: it runs on its own thread,
+        and the one thing a background scanner must never do is race the
+        trading loop for the shared HTTP client. A market not in the
+        cache returns None (and is asked to stream from now on) rather
+        than falling back to a competing REST call.
+        """
+        if self._stream is None:
+            return None
+        md = self._stream.get(market_slug)
+        if md is None:
+            self._stream.ensure([market_slug])
+            return None
+        bids, asks = self._parse_levels(md)
+        if not asks:
+            return None
+        return MarketBook(venue=self.name, market_id=market_slug,
+                          outcome_id=market_slug, bids=bids, asks=asks,
+                          ts=time.time())
+
+    def get_book(self, market_id: str, market_slug: str) -> MarketBook | None:
+        # Push-latency path: serve from the live stream cache when current.
+        if self._stream is not None:
+            md = self._stream.get(market_slug)
+            if md is not None:
+                bids, asks = self._parse_levels(md)
+                if asks:
+                    return MarketBook(venue=self.name, market_id=market_id,
+                                      outcome_id=market_slug, bids=bids,
+                                      asks=asks, ts=time.time())
+            else:
+                self._stream.ensure([market_slug])  # stream it from now on
+
+        try:
+            raw = self._pub.markets.book(market_slug) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._book_err(f"exc_{type(exc).__name__}")
+            return None
+
+        # Measured venue shape (funnel book-sample 2026-07-24): the payload
+        # nests under "marketData". Accept that, "book", or top-level.
+        body = raw
+        for key in ("marketData", "book"):
+            if isinstance(raw.get(key), dict):
+                body = raw[key]
+                break
+        bids, asks = self._parse_levels(body)
+
+        if not asks:
+            # Depth book empty — fall back to the venue's BBO endpoint
+            # (thin markets often quote a best ask without visible depth).
+            try:
+                bbo = self._pub.markets.bbo(market_slug) or {}
+                best_ask = float((bbo.get("bestAsk") or {}).get("value") or 0)
+                ask_qty = float(bbo.get("askDepth") or 0)
+                if 0 < best_ask < 1 and ask_qty > 0:
+                    asks = [BookLevel(best_ask, ask_qty)]
+                    self._book_err("asks_from_bbo")
+                best_bid = float((bbo.get("bestBid") or {}).get("value") or 0)
+                bid_qty = float(bbo.get("bidDepth") or 0)
+                if not bids and 0 < best_bid < 1 and bid_qty > 0:
+                    bids = [BookLevel(best_bid, bid_qty)]
+            except Exception:  # noqa: BLE001
+                pass
+        if not asks:
+            self._book_err("no_asks")
+            # Keep ONE raw sample per cycle so telemetry shows the actual
+            # response shape instead of just a counter.
+            if not getattr(self, "last_book_sample", None):
+                self.last_book_sample = {"slug": market_slug,
+                                         "keys": sorted(raw.keys()),
+                                         "snippet": str(raw)[:220]}
+        return MarketBook(venue=self.name, market_id=market_id,
+                          outcome_id=market_slug, bids=bids, asks=asks,
+                          ts=time.time())
+
+    def taker_fee(self, price: float) -> float:
+        return self._taker_fee
+
+    def maker_fee(self, price: float) -> float:
+        return self._maker_fee_rate
+
+    # ── maker-first entry pricing ──────────────────────────────────────
+
+    def plan_entry(self, book: MarketBook) -> tuple[float, bool]:
+        """(entry_price, taker) — where we try to buy.
+
+        Crossing the spread means paying the ask, and an ask only two ticks
+        rich of fair kills an otherwise-good trade. Resting one tick inside
+        the spread buys at a better price, which BOTH widens the edge on
+        trades we were already taking and qualifies trades that could not
+        clear the threshold at the ask. The cost is fill probability, which
+        the reaper bounds: an order that hasn't filled by its TTL is pulled
+        and the decision is made again on a fresh book.
+
+        Never crosses (that would make us the taker at a worse price than we
+        asked for) and never prices below the best bid (there is no reason to
+        queue behind the whole book when joining the front is free)."""
+        if not book.asks:
+            return 0.0, True
+        ask = round(book.asks[0].price, 2)
+        if not self._maker_first or self._crossing(book.outcome_id):
+            return ask, True
+        bid = round(book.bids[0].price, 2) if book.bids else 0.0
+        px = round(max(ask - TICK, bid), 2)
+        if px <= 0 or px >= ask:      # one-tick market: no room to rest
+            return ask, True
+        return px, False
+
+    def mark_force_taker(self, market_slug: str) -> None:
+        """Cross on this market for a while — its queue didn't come to us.
+
+        Without this, a market we can never get filled on as maker would be
+        quoted, reaped, quoted, reaped, forever, and traded never. Resting is
+        supposed to buy a better price on trades we'd take anyway, not to
+        replace taking. One failed attempt and we go back to crossing."""
+        self._force_taker[market_slug] = time.time() + float(
+            os.environ.get("EDGE_PMUS_FORCE_TAKER_S", "600"))
+
+    def _crossing(self, market_slug: str) -> bool:
+        until = self._force_taker.get(market_slug)
+        if until is None:
+            return False
+        if time.time() >= until:      # cool-off elapsed: try resting again
+            self._force_taker.pop(market_slug, None)
+            return False
+        return True
+
+    # ── live orders (FOK limit, preview-verified) ──────────────────────
+
+    def place_order(self, market_slug: str, price: float, quantity: int,
+                    preview: bool = True, tif: str = "TIME_IN_FORCE_FILL_OR_KILL",
+                    post_only: bool = False) -> dict:
+        """BUY_LONG limit at whole-cent price. preview=False skips the venue
+        cost pre-check round-trip — safe for micro orders because the LIMIT
+        price already hard-bounds cost at price*quantity; the executor keeps
+        the preview for larger sizes.
+
+        tif=TIME_IN_FORCE_GOOD_TILL_CANCEL with post_only=True is the maker
+        path: the venue's participateDontInitiate flag makes it reject rather
+        than cross, so a resting order can never turn into a taker fill at a
+        price we never approved."""
+        client = self._client()
+        params = {
+            "marketSlug": market_slug,
+            "intent": "ORDER_INTENT_BUY_LONG",
+            "type": "ORDER_TYPE_LIMIT",
+            "price": {"value": f"{price:.2f}", "currency": "USD"},
+            "quantity": int(quantity),
+            "tif": tif,
+        }
+        if post_only:
+            params["participateDontInitiate"] = True
+        expected = price * quantity
+        prev = {}
+        if preview:
+            prev = (client.orders.preview({"request": params}) or {}).get("order") or {}
+            try:
+                prev_cost = float((prev.get("cashOrderQty") or {}).get("value") or 0)
+            except (TypeError, ValueError):
+                prev_cost = 0.0
+            if prev_cost and prev_cost > expected * 1.02:
+                return {"ok": False, "status": "preview_mismatch", "order_id": None,
+                        "price": price, "count": quantity, "taker": True,
+                        "raw": {"preview": prev, "expected": expected}}
+
+        resting = tif == "TIME_IN_FORCE_GOOD_TILL_CANCEL"
+        resp = client.orders.create(
+            {**params, "synchronousExecution": not resting}) or {}
+        filled, notional, state = 0.0, 0.0, ""
+        for ex in resp.get("executions") or []:
+            state = (ex.get("order") or {}).get("state") or state
+            try:
+                px = float((ex.get("lastPx") or {}).get("value") or 0)
+                sh = float(ex.get("lastShares") or 0)
+            except (TypeError, ValueError):
+                continue
+            if ex.get("type") in ("EXECUTION_TYPE_FILL", "EXECUTION_TYPE_PARTIAL_FILL") and px:
+                filled += sh
+                notional += sh * px
+        status = state.replace("ORDER_STATE_", "").lower() or "unknown"
+        # A resting order succeeds by EXISTING, not by filling — its fills
+        # arrive later and are reconciled from the activity feed.
+        accepted = resp.get("id") and state not in ("ORDER_STATE_REJECTED",
+                                                    "ORDER_STATE_EXPIRED")
+        ok = bool(accepted) if resting else filled > 0
+        return {"ok": ok, "order_id": resp.get("id"),
+                "status": ("resting" if resting and accepted else status),
+                "resting": bool(resting and accepted),
+                "price": round(notional / filled, 4) if filled else price,
+                "count": filled, "taker": not resting,
+                "raw": {"preview": prev, "response": resp}}
+
+    # ── resting-order lifecycle ────────────────────────────────────────
+
+    def cancel_order(self, order_id: str, market_slug: str) -> bool:
+        try:
+            self._client().orders.cancel(order_id, {"marketSlug": market_slug})
+            return True
+        except Exception as exc:  # noqa: BLE001 — already gone counts as done
+            log.info("cancel %s failed (treating as closed): %s", order_id, exc)
+            return False
+
+    def cancel_all_orders(self) -> bool:
+        """Venue-side cancel of EVERY open order on the account.
+
+        This is the only cancel that does not depend on our own listing:
+        cancel-by-id can only kill what /orders/open returns, and the
+        2026-08-02 incident's second act proved that is not everything —
+        orders on the in-play Uchijima/Bucsa markets kept filling
+        ($320.22 -> $324.92 across two probes) while the sweep read a
+        clean book. Failure here is loud, not "treated as closed": a
+        cancel-all that silently no-ops is how a halt stops halting.
+        """
+        try:
+            self._client().orders.cancel_all()
+            return True
+        except Exception as exc:  # noqa: BLE001 — caller counts the failure
+            self._book_err(f"cancel_all_{type(exc).__name__}")
+            log.error("cancel_all failed: %s", exc)
+            return False
+
+    def open_positions_map(self) -> dict[str, dict]:
+        """Open account positions: slug -> {qty, cost, outcome, title}.
+
+        Feeds the Kalshi better-price add sweep — the account's real book,
+        not the ledger's view of it, because the directive is about every
+        open position regardless of which system placed it.
+        """
+        out: dict[str, dict] = {}
+        cursor = ""
+        for _ in range(5):
+            resp = self._client().portfolio.positions(
+                {"limit": 100, **({"cursor": cursor} if cursor else {})}) or {}
+            for slug, p in (resp.get("positions") or {}).items():
+                def _amt(a):
+                    if isinstance(a, dict):
+                        a = a.get("value")
+                    try:
+                        return float(a or 0)
+                    except (TypeError, ValueError):
+                        return 0.0
+                qty = _amt(p.get("netPosition"))
+                if qty <= 0 or p.get("expired"):
+                    continue
+                meta = p.get("marketMetadata") or {}
+                out[slug] = {"qty": qty, "cost": _amt(p.get("cost")),
+                             "outcome": meta.get("outcome"),
+                             "title": meta.get("title")}
+            cursor = resp.get("nextCursor") or ""
+            if resp.get("eof") or not cursor:
+                break
+        return out
+
+    def open_orders(self) -> list[dict]:
+        try:
+            return list((self._client().orders.list() or {}).get("orders") or [])
+        except Exception as exc:  # noqa: BLE001
+            self._book_err(f"open_orders_{type(exc).__name__}")
+            return []
+
+    def recent_trades(self, limit: int = 100) -> list[dict]:
+        """Executed trades, newest first — the reconciliation source for
+        resting orders (there is no fills endpoint; trades live in the
+        activity feed)."""
+        try:
+            resp = self._client().portfolio.activities({
+                "limit": int(limit), "types": ["ACTIVITY_TYPE_TRADE"],
+                "sortOrder": "SORT_ORDER_DESCENDING"}) or {}
+        except Exception as exc:  # noqa: BLE001
+            self._book_err(f"activities_{type(exc).__name__}")
+            return []
+        return [a["trade"] for a in (resp.get("activities") or []) if a.get("trade")]
+
+    async def subscribe_books(self, market_ids: list[str]):
+        raise NotImplementedError("v1 uses REST polling")
+
+    async def place(self, intent: FillIntent):
+        raise RuntimeError("use place_order via the mode-gated executor path")
+
+    async def settlements(self):
+        raise NotImplementedError("grader pulls settlements in batch")
+
+    def fetch_results(self, slugs: list[str]) -> dict[str, float]:
+        """market slug -> payout for settled markets (grader input).
+
+        Rewritten 2026-08-04 from the probe's settle_stats: the public
+        per-slug settlement endpoint priced 0 of 782 traded slugs
+        (700 no_price, 82 NotFoundError) while the account showed
+        hundreds of settlements. On this venue settlement is an ACCOUNT
+        ACTIVITY (ACTIVITY_TYPE_POSITION_RESOLUTION keyed by marketSlug)
+        — the same feed the platform's track record consumes — not a
+        public market attribute. For a buy-only book the payout is the
+        sign of `realized`: a win pays $1/contract (realized =
+        qty - cost > 0), a loss pays $0 (realized = -cost < 0).
+        realized == 0 is ambiguous and stays unsettled rather than
+        guessed.
+        """
+
+        def _amt(a) -> float:
+            if isinstance(a, dict):
+                a = a.get("value")
+            try:
+                return float(a or 0)
+            except (TypeError, ValueError):
+                return 0.0
+
+        out: dict[str, float] = {}
+        wanted = set(slugs)
+        stats = {"checked": len(slugs), "priced": 0, "no_price": 0,
+                 "errors": 0, "activities": 0}
+        first_err = None
+        cursor = ""
+        try:
+            for _ in range(40):  # page cap: 40 x 250 resolutions
+                resp = self._client().portfolio.activities(
+                    {"limit": 250, "sortOrder": "SORT_ORDER_DESCENDING",
+                     "types": ["ACTIVITY_TYPE_POSITION_RESOLUTION"],
+                     **({"cursor": cursor} if cursor else {})}) or {}
+                acts = resp.get("activities") or []
+                stats["activities"] += len(acts)
+                for a in acts:
+                    res = a.get("positionResolution") or {}
+                    slug = res.get("marketSlug")
+                    if not slug or slug not in wanted or slug in out:
+                        continue
+                    realized = _amt((res.get("afterPosition") or {})
+                                    .get("realized"))
+                    if not realized:
+                        realized = _amt((res.get("beforePosition") or {})
+                                        .get("realized"))
+                    if realized > 0:
+                        out[slug] = 1.0
+                    elif realized < 0:
+                        out[slug] = 0.0
+                cursor = resp.get("nextCursor") or ""
+                if resp.get("eof") or not cursor or len(out) == len(wanted):
+                    break
+                # Gentle on the venue: deep paging at full speed tripped
+                # Cloudflare rate limiting (observed 2026-08-04, first_error
+                # RateLimitError) and cost the rest of the pass.
+                time.sleep(0.3)
+        except Exception as exc:  # noqa: BLE001 — partial results still settle
+            stats["errors"] += 1
+            first_err = f"{type(exc).__name__}: {str(exc)[:120]}"
+        stats["priced"] = len(out)
+        stats["no_price"] = len(wanted) - len(out)
+        stats["first_error"] = first_err
+        self.last_settle_stats = stats
+        log.info("pmus fetch_results: %s", stats)
+        return out

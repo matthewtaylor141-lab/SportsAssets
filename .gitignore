@@ -1,0 +1,41 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+
+# Node
+node_modules/
+dist/
+*.local
+
+# Env / secrets
+.env
+.env.*
+!.env.example
+
+# Editor / OS
+.idea/
+.vscode/
+.DS_Store
+
+# SQLite WAL runtime artifacts (created by local test runs)
+*.sqlite3-shm
+*.sqlite3-wal
+
+# Adversarial-fleet scratch reproductions (regenerated per round)
+backend/fleet*_repros/
+
+# Isolated worktrees for the adversarial review agents. Each is a FULL
+# nested checkout of this repo (~8MB) created by `git worktree add` and
+# removed when its round ends, so committing one would vendor the repo
+# into itself — and it can be locked and in use while a round is still
+# running. Tooling scratch, never project state.
+.claude/worktrees/
+rn1-collector/build/

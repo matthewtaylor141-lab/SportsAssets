@@ -1,0 +1,52 @@
+name: fetch-docs
+
+# READ-ONLY. Fetches one public documentation page from the GitHub runner
+# (which has open internet; the desk's session container does not) and
+# prints it as text so the desk can read a venue's public docs. No
+# secrets, no repository writes, no venue credentials, no deploy.
+
+on:
+  workflow_dispatch:
+    inputs:
+      url:
+        description: "public https URL to fetch (docs pages only)"
+        required: true
+        type: string
+
+concurrency:
+  group: fetch-docs
+  cancel-in-progress: false
+
+jobs:
+  fetch:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Fetch
+        env:
+          URL: ${{ inputs.url }}
+        run: |
+          set -euo pipefail
+          case "$URL" in
+            https://*) ;;
+            *) echo "refused: https only (got '$URL')"; exit 1 ;;
+          esac
+          echo "== fetch $URL at $(date -u +%FT%TZ) =="
+          curl -sSL --max-time 60 -A "sportsassets-docs-reader" "$URL" -o /tmp/page.html
+          echo "== bytes: $(wc -c < /tmp/page.html) =="
+          python3 - <<'PY'
+          import html, re
+          s = open('/tmp/page.html', encoding='utf-8', errors='ignore').read()
+          s = re.sub(r'(?is)<(script|style|noscript)[^>]*>.*?</\1>', ' ', s)
+          links = re.findall(r'href="([^"]+)"', s)
+          s = re.sub(r'(?i)<br\s*/?>|</p>|</div>|</li>|</h[1-6]>|</tr>|</pre>', '\n', s)
+          s = re.sub(r'<[^>]+>', ' ', s)
+          s = html.unescape(s)
+          s = re.sub(r'[ \t]+', ' ', s)
+          s = re.sub(r'\n\s*\n+', '\n', s)
+          print("== TEXT ==")
+          print(s[:60000])
+          print("== LINKS ==")
+          for l in sorted(set(links))[:400]:
+              print(l)
+          PY

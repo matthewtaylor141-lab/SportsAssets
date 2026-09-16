@@ -1,0 +1,228 @@
+{
+ "_note": "Anonymized VERBATIM Phase 2A gateway response. Only marketSlug was replaced; every price, quantity, state and timestamp is exactly as the venue sent it, because a fixture that normalises the shape it is meant to test proves nothing.",
+ "_source_run": "34732628261",
+ "_source_archive_sha256": "30cadd87a76c15b90e402905a7bc86cf08777d304033b4886fd8dd624b30c3aa",
+ "http_status": 200,
+ "body": {
+  "marketData": {
+   "marketSlug": "anon-league-champ-2026-01-01-aaa",
+   "state": "MARKET_STATE_OPEN",
+   "transactTime": "2026-09-13T02:13:54.586329521Z",
+   "bids": [
+    {
+     "px": {
+      "value": "0.0010",
+      "currency": "USD"
+     },
+     "qty": "65.0000"
+    }
+   ],
+   "offers": [
+    {
+     "px": {
+      "value": "0.0020",
+      "currency": "USD"
+     },
+     "qty": "44620.0000"
+    },
+    {
+     "px": {
+      "value": "0.0030",
+      "currency": "USD"
+     },
+     "qty": "500.0000"
+    },
+    {
+     "px": {
+      "value": "0.0060",
+      "currency": "USD"
+     },
+     "qty": "129.0000"
+    },
+    {
+     "px": {
+      "value": "0.0070",
+      "currency": "USD"
+     },
+     "qty": "4502.0000"
+    },
+    {
+     "px": {
+      "value": "0.0110",
+      "currency": "USD"
+     },
+     "qty": "2500.0000"
+    },
+    {
+     "px": {
+      "value": "0.0120",
+      "currency": "USD"
+     },
+     "qty": "9965.0000"
+    },
+    {
+     "px": {
+      "value": "0.0200",
+      "currency": "USD"
+     },
+     "qty": "100.0000"
+    },
+    {
+     "px": {
+      "value": "0.0220",
+      "currency": "USD"
+     },
+     "qty": "14932.0000"
+    },
+    {
+     "px": {
+      "value": "0.1600",
+      "currency": "USD"
+     },
+     "qty": "1750.0000"
+    },
+    {
+     "px": {
+      "value": "0.1610",
+      "currency": "USD"
+     },
+     "qty": "200.0000"
+    },
+    {
+     "px": {
+      "value": "0.1690",
+      "currency": "USD"
+     },
+     "qty": "2500.0000"
+    },
+    {
+     "px": {
+      "value": "0.1700",
+      "currency": "USD"
+     },
+     "qty": "100.0000"
+    },
+    {
+     "px": {
+      "value": "0.4790",
+      "currency": "USD"
+     },
+     "qty": "1659.0000"
+    },
+    {
+     "px": {
+      "value": "0.4800",
+      "currency": "USD"
+     },
+     "qty": "25.0000"
+    },
+    {
+     "px": {
+      "value": "0.6000",
+      "currency": "USD"
+     },
+     "qty": "200.0000"
+    },
+    {
+     "px": {
+      "value": "0.7000",
+      "currency": "USD"
+     },
+     "qty": "200.0000"
+    },
+    {
+     "px": {
+      "value": "0.8000",
+      "currency": "USD"
+     },
+     "qty": "200.0000"
+    },
+    {
+     "px": {
+      "value": "0.8500",
+      "currency": "USD"
+     },
+     "qty": "300.0000"
+    },
+    {
+     "px": {
+      "value": "0.9000",
+      "currency": "USD"
+     },
+     "qty": "200.0000"
+    },
+    {
+     "px": {
+      "value": "0.9800",
+      "currency": "USD"
+     },
+     "qty": "650.0000"
+    },
+    {
+     "px": {
+      "value": "0.9990",
+      "currency": "USD"
+     },
+     "qty": "252499.0000"
+    }
+   ],
+   "stats": {
+    "openPx": {
+     "value": "0.0020",
+     "currency": "USD"
+    },
+    "closePx": {
+     "value": "0.0010",
+     "currency": "USD"
+    },
+    "lowPx": {
+     "value": "0.0020",
+     "currency": "USD"
+    },
+    "highPx": {
+     "value": "0.0020",
+     "currency": "USD"
+    },
+    "lastTradePx": {
+     "value": "0.0020",
+     "currency": "USD"
+    },
+    "settlementPx": {
+     "value": "0.0010",
+     "currency": "USD"
+    },
+    "sharesTraded": "21.0000",
+    "notionalTraded": {
+     "value": "0.0420",
+     "currency": "USD"
+    },
+    "lastTradeQty": "16.0000",
+    "openInterest": "199835.0000",
+    "openSetTime": "2026-09-12T22:12:32.160944516Z",
+    "closeSetTime": "2026-09-12T21:00:12.223681739Z",
+    "highSetTime": "2026-09-12T22:12:32.160944516Z",
+    "lowSetTime": "2026-09-12T22:12:32.160944516Z",
+    "lastTradeSetTime": "2026-09-13T00:28:50.025634157Z",
+    "settlementSetTime": "2026-09-12T21:00:12.223731077Z",
+    "openInterestSetTime": "2026-09-11T07:26:58.765290270Z",
+    "notionalSetTime": "2026-09-13T00:28:50.025634157Z",
+    "settlementPriceCalculationMethod": "SETTLEMENT_PRICE_CALCULATION_METHOD_EVENT_TIER_2",
+    "currentPx": {
+     "value": "0.0010",
+     "currency": "USD"
+    },
+    "lastPriceSample": {
+     "longPx": {
+      "value": "0.0020",
+      "currency": "USD"
+     },
+     "shortPx": {
+      "value": "0.998",
+      "currency": "USD"
+     },
+     "ts": "2026-09-13T02:13:54.586329521Z"
+    }
+   }
+  }
+ }
+}
