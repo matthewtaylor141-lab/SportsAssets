@@ -297,3 +297,43 @@ class TheCadenceIsReportedBeforeAnythingDerivedFromIt(unittest.TestCase):
     def test_realized_maker_economics_stay_unestablished(self):
         r = H.harvest(write(rows(20)))
         self.assertEqual(r["REALIZED_MAKER_ECONOMICS"], "NOT_ESTABLISHED")
+
+
+class AttemptedIsNotObserved(unittest.TestCase):
+    """This capture made the distinction material: 429s lost whole markets."""
+
+    def _mixed(self):
+        rs = rows(6, slug="aec-nfl-a-b")
+        for i in range(6):
+            rs.append({"kind": "TICK_ERROR", "slug": "aec-cfb-c-d", "seq": i,
+                       "ELAPSED_S": float(i * 3), "status": 429,
+                       "error": "http_429"})
+        return write(rs)
+
+    def setUp(self):
+        self.a = H.harvest(self._mixed())["A_CAPTURE_QUALITY"]
+
+    def test_the_two_counts_are_separate(self):
+        self.assertEqual(self.a["MARKETS_ATTEMPTED"], 2)
+        self.assertEqual(self.a["MARKETS_WITH_ANY_READABLE_BOOK"], 1)
+        self.assertEqual(self.a["MARKETS_WITH_ZERO_READABLE_BOOKS"], 1)
+
+    def test_the_sport_mix_reports_what_was_observed(self):
+        self.assertEqual(self.a["SPORT_MIX_ATTEMPTED"], {"nfl": 1, "cfb": 1})
+        self.assertEqual(self.a["SPORT_MIX_OBSERVED"], {"nfl": 1})
+        self.assertEqual(self.a["SPORT_MIX"], self.a["SPORT_MIX_OBSERVED"])
+
+    def test_losing_whole_markets_is_flagged_as_non_random(self):
+        self.assertTrue(self.a["MISSINGNESS"]["MISSINGNESS_IS_NOT_RANDOM"])
+        self.assertIn("SELECTED subset", self.a["MISSINGNESS"]["WHY"])
+
+    def test_the_failure_kinds_are_reported_in_the_venues_own_words(self):
+        self.assertEqual(self.a["FAILED_READ_KINDS"], {"http_429": 6})
+        self.assertEqual(self.a["FAILED_READ_STATUS"], {"429": 6})
+        self.assertEqual(self.a["FAILED_READ_SHARE"], D(6) / D(12))
+
+    def test_a_clean_capture_is_not_flagged(self):
+        a = H.harvest(write(rows(5)))["A_CAPTURE_QUALITY"]
+        self.assertFalse(a["MISSINGNESS"]["MISSINGNESS_IS_NOT_RANDOM"])
+        self.assertEqual(a["MARKETS_ATTEMPTED"],
+                         a["MARKETS_WITH_ANY_READABLE_BOOK"])

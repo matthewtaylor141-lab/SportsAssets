@@ -1668,3 +1668,146 @@ ORDERS 0   CAPITAL 0   CREDENTIALS NONE   mirror_live false
 
 The next action on this programme is the harvest of run 35120338223, A/B/C/D
 exactly as frozen.
+
+---
+
+## 20. THE HARVEST — RUN 35120338223, A/B/C/D AS FROZEN
+
+Capture sealed 2026-09-16 17:24:51Z to branch `beta48-ticks/seg-35120338223`.
+Report at `shadow/evidence/ticks_35120338223/harvest_35120338223.json`.
+
+**THE HEADLINE IS NOT A BOOK RESULT. THE VENUE RATE-LIMITED THE CAPTURE.**
+
+### 20a. A — CAPTURE QUALITY
+
+```
+ROWS                              7,200
+FAILED_READS                      5,835   ALL http_429, status 429   (81.04%)
+MARKETS_ATTEMPTED                    24
+MARKETS_WITH_ANY_READABLE_BOOK        6
+MARKETS_WITH_ZERO_READABLE_BOOKS     18
+SPORT_MIX_ATTEMPTED    nfl 6 / cfb 6 / mlb 6 / ufc 6
+SPORT_MIX_OBSERVED     nfl 6            <- the stratification did NOT survive
+DURATION_S                     4,344.9   (72.4 min, 16:12:11Z - 17:24:36Z)
+MISSINGNESS_IS_NOT_RANDOM          True
+```
+
+**Whole markets failed, not scattered reads.** The six that returned data are
+the six polled first in each round; every later slug in the round was refused.
+So the observed set is a **selected** subset — selected by our own poll order —
+and the frozen 6/6/6/6 sport stratification is gone. Nothing in section B
+describes cfb, mlb or ufc at all.
+
+```
+REVISIT CADENCE (observed markets)
+  MEDIAN 14.536 s   P10 14.393 s   P90 29.057 s   MAX 159.835 s
+  intervals observed 1,359
+```
+
+The 14.5 s median is not the 3 s cadence that was planned: the 429s consumed
+the round. A 160 s maximum gap is a hole in which anything could have happened.
+
+`VALIDATED_DISTINCT_EVENTS = NOT_IDENTIFIED` — no event map was supplied to
+this run, so all 24 are unresolved, event weighting is `NOT_IDENTIFIED`, and
+independence is not assumed instead.
+
+**`CAPTURE_SAMPLE_REPRESENTATIVE_OF_788 = NOT_ESTABLISHED`** — and now doubly
+so: 6 observed markets, all NFL, chosen by poll order rather than by design.
+
+### 20b. B — BOOK STRUCTURE (the 6 observed NFL markets only)
+
+```
+SPREAD          N 1,365    P10 0.0050   P50 0.0100   P90 0.0100   MAX 0.0100
+ONE_TICK_SNAPSHOT_SHARE                 0.7978
+TOUCH_SIZE_BID_P50                     12,447 shares
+TOUCH_SIZE_ASK_P50                      3,259.46 shares
+QUEUE_AHEAD_AT_HYPOTHETICAL_ENTRY_P50  12,447 shares
+
+CLASS A COUNTS over 1,359 observed transitions
+  OBSERVED_BOOK_CHANGES            1
+  OBSERVED_MID_CHANGES             1
+  OBSERVED_PRICE_IMPROVEMENTS      1
+  OBSERVED_DEPTH_CHANGES         150
+  OBSERVED_MOVE_THROUGH_EVENTS     0
+
+BOOK_UPDATE_RATE_OBSERVED        0.000736      DEPTH_CHANGE_RATE_OBSERVED 0.1104
+SPREAD_PERSISTENCE_OBSERVED_S_P50  348.7 s
+BID_OBSERVED_RUN_SPAN_S  P50 4,329.4   MAX 4,344.1
+BID_PERSISTENCE_RUNS 6 — LEFT_CENSORED 6, RIGHT_CENSORED 6, UNCENSORED 0
+```
+
+**Read that last block with §19a in hand.** Every one of the six markets shows a
+single run spanning the whole window, censored at both ends. The span is
+**4,329 s of elapsed time between matching sampled endpoints — not a proven
+4,329 s of continuous quoting.** `PROVEN_CONTINUOUS_PERSISTENCE_S` is
+`NOT_IDENTIFIED`, and had this still been called MIN_OBSERVED_PERSISTENCE it
+would have read as "these quotes held for at least 72 minutes", which the data
+does not support.
+
+The books are, on the sampled evidence, **nearly static**: one price change
+across 1,359 transitions, spreads pinned at one tick, and very large displayed
+size at the touch. Note the character of what survived — three of the six are
+season-long futures (MVP, DPOY, OPOY winner markets) whose quiet is not news.
+
+### 20c. B — THE SHARES_TRADED FIELD
+
+```
+RUNTIME   MONOTONIC_WITHIN_MARKET True   NEGATIVE_DELTAS 0   RESETS 0
+          MISSING_TRANSITIONS 0          LARGE_DISCONTINUITIES 0
+          FIELD_UPDATE_FREQUENCY 0.00294  (4 positive updates in 1,359)
+          SAME_VALUE_DESPITE_BOOK_CHANGES 146
+VENUE     every semantic field NOT_IDENTIFIED
+```
+
+Monotone for 72 minutes, and that settles **nothing** about its meaning (§16a).
+`SAME_VALUE_DESPITE_BOOK_CHANGES = 146` is exactly the pattern that would have
+made a volume-bound refutation produce a confident wrong answer.
+
+### 20d. C — HYPOTHETICAL QUOTE PATH
+
+```
+HYPOTHETICAL_QUOTES     138
+TOUCHES                   0
+MOVE_THROUGH_OBSERVED     0
+POST_QUOTE_BOOK_MARKOUT   30S / 60S / 300S:  P10 = P50 = P90 = 0.0000
+```
+
+The market never came to a hypothetical bid resting at the touch, and the book
+did not move after any of them. On this sample the markout distribution is a
+point mass at zero — which is a statement about six quiet NFL books over 72
+minutes, not about the venue.
+
+### 20e. D — EXECUTION IDENTIFICATION
+
+```
+TRADE_EVIDENCE                                       0
+COUNTERFACTUAL_FILLS                                 0
+WHY_UNRESOLVED    VOLUME_BOUND_INSUFFICIENT 138 / 138
+PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION  NO
+CONCLUSION        PUBLIC_BOOK_SNAPSHOTS_CANNOT_IDENTIFY_FILL
+NOT_THE_CONCLUSION  WE_NEED_A_MORE_AGGRESSIVE_APPROXIMATION
+```
+
+Every one of the 138 quotes is unresolved for the same reason, and it is the
+reason §16a predicted: the volume bound is arithmetic over a field whose venue
+semantics are unknown, so it may not carry a verdict.
+
+### 20f. WHAT THE NEXT CAPTURE HAS TO FIX, BEFORE ANY OF THIS IS A BOOK RESULT
+
+1. **The rate limit.** 2.0 rps against this venue produced 81% 429s. The next
+   capture needs a measured limit and a backoff that yields the round rather
+   than burning it, or a much smaller universe per round.
+2. **Poll order must not select the sample.** Round-robin the start index so a
+   refused round does not always refuse the same 18 markets.
+3. **The universe needs live game markets**, not three season-long futures. The
+   quiet observed here is partly a property of what survived.
+4. **Event identity** should be passed in at harvest so the event-weighted
+   figures exist at all.
+
+None of that is a fill-model change, and none of it is authorised yet.
+
+```
+ORDERS_PLACED 0   CAPITAL_DEPLOYED 0   CREDENTIALS NONE   mirror_live false
+REALIZED_MAKER_ECONOMICS  NOT_ESTABLISHED
+PROFITABILITY / WIN_RATE / EXPECTED_MONTHLY_RETURN  NOT_IDENTIFIED
+```

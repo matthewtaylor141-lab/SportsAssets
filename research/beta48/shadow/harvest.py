@@ -37,6 +37,7 @@ from __future__ import annotations
 import gzip
 import json
 import sys
+from decimal import Decimal as D
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -235,11 +236,32 @@ def harvest(path, universe_path=None, event_of=None, board_path=None):
     if universe_path and Path(universe_path).exists():
         universe = json.loads(Path(universe_path).read_text())
 
+    # ATTEMPTED IS NOT OBSERVED, AND THIS CAPTURE MADE THAT MATTER. A slug
+    # appears in the rows whether the read returned a book or an error, so
+    # counting distinct slugs counts what we ASKED FOR. The markets that
+    # actually produced a book are a separate, smaller set, and every figure in
+    # section B describes only those.
     slugs = sorted({r.get("slug") for r in rows if r.get("slug")})
-    mix = {}
+    observed = sorted({r.get("slug") for r in rows
+                       if r.get("slug") and r.get("kind") != "TICK_ERROR"})
+    mix, mix_obs = {}, {}
     for s in slugs:
         k = sport_of(s, universe)
         mix[k] = mix.get(k, 0) + 1
+    for s in observed:
+        k = sport_of(s, universe)
+        mix_obs[k] = mix_obs.get(k, 0) + 1
+
+    # Why the reads failed, in the venue's own words, and where.
+    fail_kind, fail_status, fail_by_slug = {}, {}, {}
+    for r in rows:
+        if r.get("kind") != "TICK_ERROR":
+            continue
+        e = str(r.get("error"))[:60]
+        fail_kind[e] = fail_kind.get(e, 0) + 1
+        st = str(r.get("status"))
+        fail_status[st] = fail_status.get(st, 0) + 1
+        fail_by_slug[r.get("slug")] = fail_by_slug.get(r.get("slug"), 0) + 1
 
     if event_of is None and board_path and Path(board_path).exists():
         event_of = event_map_from_board(board_path, slugs)
@@ -259,15 +281,34 @@ def harvest(path, universe_path=None, event_of=None, board_path=None):
         "A_CAPTURE_QUALITY": dict({
             "CAPTURE_PATH": str(path),
             "ROWS": len(rows),
-            "MARKETS": len(slugs),
-            "SPORT_MIX": mix,
+
+            # Attempted vs observed, never collapsed into one "MARKETS".
+            "MARKETS_ATTEMPTED": len(slugs),
+            "MARKETS_WITH_ANY_READABLE_BOOK": len(observed),
+            "MARKETS": len(observed),
+            "SPORT_MIX_ATTEMPTED": mix,
+            "SPORT_MIX_OBSERVED": mix_obs,
+            "SPORT_MIX": mix_obs,
+            "EVERY_SECTION_B_FIGURE_DESCRIBES_THE_OBSERVED_MARKETS_ONLY": True,
+
             "DURATION_S": (max(elapsed) - min(elapsed)) if elapsed else
                           NOT_IDENTIFIED,
             "FAILED_READS": book["TICK_ERRORS"],
+            "FAILED_READ_SHARE": (
+                (D(book["TICK_ERRORS"]) / D(len(rows))) if rows
+                else NOT_IDENTIFIED),
+            "FAILED_READ_KINDS": fail_kind,
+            "FAILED_READ_STATUS": fail_status,
+            "MARKETS_WITH_ZERO_READABLE_BOOKS": len(slugs) - len(observed),
             "MISSINGNESS": {
                 "TICK_ERRORS": book["TICK_ERRORS"],
                 "SHARES_TRADED_MISSING_TRANSITIONS":
                     field["MISSING_TRANSITIONS"],
+                "MISSINGNESS_IS_NOT_RANDOM": (len(observed) < len(slugs)),
+                "WHY": ("whole markets failed rather than scattered reads, so "
+                        "the observed set is a SELECTED subset of the frozen "
+                        "universe and the sport stratification did not survive"
+                        if len(observed) < len(slugs) else "no market was lost"),
             },
             "REVISIT_CADENCE": book["REVISIT_CADENCE"],
             "SAMPLE_SCOPE": sample_scope(universe, len(slugs)),
@@ -351,7 +392,6 @@ def harvest(path, universe_path=None, event_of=None, board_path=None):
 
 
 def _jsonable(o):
-    from decimal import Decimal as D
     if isinstance(o, D):
         return str(o)
     raise TypeError("not JSON serializable: %s" % type(o).__name__)
