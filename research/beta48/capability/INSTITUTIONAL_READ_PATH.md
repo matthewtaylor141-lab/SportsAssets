@@ -332,3 +332,90 @@ displace the §10 capture, which is measuring what is measurable today. And the
 
 **This is not authorization to request credentials.** No credential has been
 requested, created, installed or presented.
+
+---
+
+## 9. THE §11 CAPABILITY BLOCK
+
+The field list below is the one asked for, answered on the captured evidence.
+§8 above is the earlier, longer block; where the two overlap they agree, and
+this one is the canonical short form.
+
+```
+SAFE_REALTIME_PATH_FOUND             = YES, DOCUMENTED, NOT_YET_GRANTED
+INSTITUTIONAL_AUTH0_READ_ONLY_SCOPE  = DOCUMENTED
+RETAIL_API_KEY_READ_ONLY_SCOPE       = NOT_DOCUMENTED
+READ_L2_SCOPE                        = DOCUMENTED (read:l2marketdata, marked
+                                       "premium"; commercial terms
+                                       NOT_IDENTIFIED)
+RETAIL_WS_SCOPE_ISOLATED             = NO — the data value is VERY_HIGH and
+                                       the isolation is absent; the only key
+                                       we could present is trading-capable,
+                                       so SAFE_TO_USE = NO
+FIX_MBO_AVAILABLE                    = YES (tag 37 OrderID, 278 MDEntryID,
+                                       279 New/Change/Delete, 269=2 Trade,
+                                       1003 TradeID, 2446 AggressorSide,
+                                       per-order timestamp used for time
+                                       priority; MarketDepth max 25)
+BEST_CURRENT_DATA_LEVEL              = LEVEL_0 (REST snapshots, unauthenticated)
+BEST_ATTAINABLE_WITHOUT_ORDER_CAPABILITY
+                                     = LEVEL_2 via institutional gRPC read
+                                       scopes; LEVEL_4 via the FIX market-data
+                                       gateway, which is ALSO a read-only
+                                       market-data session and therefore does
+                                       NOT require order capability either —
+                                       it requires PrivateLink, not write:orders
+ACCESS_ACTION_REQUIRED               = institutional registration portal;
+                                       Entity Participant and Clearing Member
+                                       Agreement; venue-issued Client ID; an
+                                       RS256 key pair we generate. NO KYC and
+                                       NO x-participant-id for market-data
+                                       streams. FIX additionally: AWS Account
+                                       ID at registration and a VPC
+                                       PrivateLink endpoint manually approved
+                                       by Polymarket DevOps.
+EXPECTED_ENGINEERING_TIME_AFTER_ACCESS
+                                     = gRPC L2 reader: DAYS (client-assertion
+                                       JWT, 3-minute token refresh, stream
+                                       fan-out across the 1000-symbol cap, a
+                                       separate boundary proof for the second
+                                       client). FIX MBO book builder: WEEKS
+                                       (session layer, per-order book
+                                       maintenance, PrivateLink networking).
+                                       Both figures EXCLUDE the venue-side
+                                       onboarding latency, which is not ours
+                                       to schedule.
+EXPECTED_INFORMATION_GAIN            = LEVEL_0 -> LEVEL_2 converts four of the
+                                       five blocked maker terms from NO to
+                                       PROXY_ONLY and NONE to YES.
+                                       LEVEL_0 -> LEVEL_4 converts all five to
+                                       YES, including the only direct evidence
+                                       that BETTOR's OWN resting quote would
+                                       have filled.
+```
+
+**The capacity arithmetic, flagged not smoothed.** A stream is capped at 1000
+symbols and a firm at 20 concurrent streams. The observed board prefix is
+`>= 20,000 OPEN MARKETS`, and each market carries two tokens. 20,000 / 1000 =
+20 streams to cover the prefix once — exactly the firm cap, with the prefix
+being a LOWER BOUND and the true board size `NOT_IDENTIFIED`. Separately the
+docs state an empty symbol list subscribes to ALL instruments, which cannot be
+reconciled with the 1000 cap from the captured text alone.
+
+```
+SYMBOL_LIMIT_PER_STREAM              = 1000
+MAX_CONCURRENT_STREAMS_PER_FIRM      = 20
+EMPTY_SYMBOL_LIST_VS_1000_CAP        = NOT_IDENTIFIED (unreconciled)
+BOARD_COVERAGE_HEADROOM_AT_L2        = NONE_AT_THE_OBSERVED_PREFIX
+```
+
+A universe filter is therefore a design requirement of the L2 path, not a
+tuning choice — and the filter has to be frozen on decision-time facts, the
+same discipline the §10 panel already runs under, or it becomes selection bias
+with a streaming budget as its excuse.
+
+**What this block does NOT say.** It does not say a grant will be made; it does
+not price `read:l2marketdata`; it does not establish any market-data latency
+SLA (the only captured 5-second figure is an ORDER-path stopgap and must never
+be read as a feed guarantee); and it does not promote a single PROXY_ONLY cell
+of §5 to YES.
