@@ -936,6 +936,12 @@ MARKETS_WITH_UNRESOLVED_EVENT_IDENTITY  788
 COMPLEMENT_REFUSAL: IDENTITY_LEVEL_C    773      NO_SIBLING_IN_FAMILY  15
 ```
 
+> **SUPERSEDED BY §15a — and the diagnosis below was half wrong.** It was not a
+> capture limitation either: `board_raw.jsonl.gz` already holds `marketSides`
+> on all 20,000 rows. The defect was a FIELD SHAPE misread in the reader. No
+> board walk was needed, and §15a measures the result from the sealed census
+> with **zero** new venue reads.
+
 Not a venue limitation — a **capture** limitation, and worth naming precisely:
 `underlying_event_key` reads team ids and provider ids from `marketSides`, and
 the board walk stores `side_identifiers` / `side_descriptions` instead.
@@ -966,3 +972,198 @@ summariser refuses to emit those three fields as numbers at all.
    snapshot — the input `SHADOW_EXIT_LEARNING_V1` actually consumes.
 
 Neither establishes a fill. Only an order does, and none is authorised.
+
+---
+
+## 15. PHASE_2A — THE TWO EXPERIMENTS, AND WHAT THE FILL QUESTION TURNS OUT TO COST
+
+### 15a. EXPERIMENT 1 — VENUE-NATIVE EVENT IDENTITY. ZERO NEW VENUE READS.
+
+§14c called `VALID_EVENTS = 0` a capture limitation and proposed a board
+re-walk. **Both halves of that were wrong, and the correction is cheaper than
+the plan.** The sealed census already contains `board_raw.jsonl.gz` with FULL
+rows: every one of 20,000 carries `marketSides` (exactly 2), `gameStartTime`,
+`side.teamId`, `side.team.league` and `side.team.providerId`.
+
+The real defect, named exactly:
+
+```
+eligibility.underlying_event_key  reads  side.team.providerIds  as a LIST OF DICTS
+this venue sends                         side.team.providerId   as a SCALAR
+```
+
+So it never reached LEVEL_B on a real row and fell to LEVEL_C on 773 of 788.
+`shadow/event_identity.py` is an **additive second reader** — `eligibility`
+stays frozen, so its published validation result still describes what it
+validated — and it reads BOTH shapes, so a venue change in either direction
+degrades instead of silently returning nothing.
+
+```
+FULL BOARD (20,000 rows)
+  contest 1,557   subject 1,942   no-binding 16,501
+  VALID_EVENTS 87
+  MARKETS_PER_EVENT   min 1 / P50 15 / MAX 41 / mean 17.9
+  INDEPENDENT_CAPACITY  NOT_IDENTIFIED (18,443 unresolved)   LOWER_BOUND 87
+
+HIGH_ACTIVITY (788)
+  contest 142     subject 121     no-binding 525
+  HIGH_ACTIVITY_EVENTS 56         leagues cfb 29 / nfl 16 / ufc 11
+  MARKETS_PER_EVENT   min 1 / P50 1 / MAX 15
+  INDEPENDENT_CAPACITY  NOT_IDENTIFIED (646 unresolved)      LOWER_BOUND 56
+```
+
+**1,557 contest markets are 87 contests.** That is the correlation a market
+count hides, now read from the venue's own fields rather than from a slug. The
+capacity lower bound moves 0 → 56 on the candidate set; the exact figure stays
+`NOT_IDENTIFIED` while any market's identity is unresolved, and subject-level
+rows are never merged on start time alone. **A start time by itself is refused
+as an identity at every level** — that is precisely the error that killed the
+slug key, and refusing it is the whole point of the module.
+
+### 15b. EXPERIMENT 2 — BOUNDED LIVE TICK CAPTURE
+
+24 markets, 6 each across nfl/cfb/mlb/ufc, frozen into
+`shadow/tick_universe.json` **before any tick was seen**, ordered by salted hash
+within stratum and NOT by activity rank. Each tick carries BID/ASK/ladders/
+depth plus what a snapshot cannot give: `QUOTE_LIFETIME_S`, `TIME_AT_BID_S`,
+`TIME_AT_ASK_S`, `BID/ASK/DEPTH_CHANGED`, `SHARES_TRADED_DELTA`.
+`TRADE_OCCURRED` is the only field in the capture that may be read as trading.
+
+### 15c. THE COUNTERFACTUAL MAKER-FILL MODEL — IDENTIFICATION IS ASYMMETRIC
+
+`shadow/maker_fill.py`. Per hypothetical quote: `QUOTE_TIME`, `QUOTE_PRICE`,
+`QUEUE_AHEAD_ESTIMATE`, `BOOK_STATE_AT_ENTRY`, `TRADE_FLOW_AFTER_ENTRY`,
+`PRICE_MOVEMENT_AFTER_ENTRY` → `FILL_STATUS`.
+
+**The result that matters is a negative one, and it is structural.** A tick row
+has no per-print tape, so for a quote resting at price *p*:
+
+```
+volume traded AT p      NOT_IDENTIFIED     which side consumed it   NOT_IDENTIFIED
+our queue position      NOT_IDENTIFIED     the aggressor            NOT_IDENTIFIED
+```
+
+Every model in `fill_model_v2` shares the precondition `at > 0`. From ticks
+alone that precondition is not identified, so **no positive fill support comes
+out of tick data at all**. `fill_status()` has no branch that can return a
+`COUNTERFACTUAL_FILL_*`, and `test_maker_fill.py` proves the absence by walking
+the AST rather than trusting the docstring.
+
+What ticks CAN settle is the refutation, by an upper bound nobody can argue
+with. Credit **every share the whole market traded** to our price and our side:
+
+```
+MAXIMAL_ATTRIBUTION = sum of SHARES_TRADED_DELTA over the window
+
+F0 refuted if  MAX <  QUEUE_AHEAD + QUOTE_SIZE
+F1 refuted if  MAX <= QUEUE_AHEAD
+F2 refuted only if MAX == 0      (a cancellation can clear a queue; it cannot
+F3 refuted only if MAX == 0       create a fill, and F3 was never a fill)
+```
+
+`QUEUE_AHEAD_ESTIMATE` is the DISPLAYED size at our level; hidden size and
+orders joining between polls only make the true queue LONGER, so a refutation
+computed against it is conservative in the right direction.
+
+Two consequences worth stating before any number is quoted:
+
+1. **Joining a deep displayed queue is refutable from aggregate volume;
+   improving the price to the front of the book (QUEUE_AHEAD = 0) makes the
+   fill question entirely tape-dependent.** The cheaper the queue, the less our
+   own data can say about it.
+2. **The tape join has a precondition of its own.**
+   `fill_model_v2.classify_execution` reaches `CLOB_EXECUTION` only through a
+   venue execution-type flag or a block index; an unflagged, unindexed print is
+   `UNKNOWN_EXECUTION_TYPE`, which depletes no queue. **A raw tape with no
+   block publication supports nothing, however much volume it shows.** That is
+   the second gate between this programme and its first counterfactual fill,
+   and it is easy to mistake for a bug in the join.
+
+`summarise_fills` refuses to divide fills by quotes while any outcome is
+UNKNOWN: treating an unresolved quote as a miss is the same error as treating
+one as a fill, just in the flattering direction for a cautious-sounding number.
+
+### 15d. INVENTORY-CLOSURE LEARNING
+
+`shadow/inventory.py`. `open_inventory()` refuses anything whose `FILL_STATUS`
+is not a `COUNTERFACTUAL_FILL_*`, and **UNKNOWN is refused as firmly as
+NOT_FILLED** — an unresolved fill is not a small fill. Combined with §15c, the
+honest first output on tick-only data is **no inventory rows at all**. That is
+the measurement, and it names exactly what the next capture must add.
+
+The two closes are different kinds of object and are never mixed:
+
+```
+PASSIVE_CLOSE_PRICE     the price we would REST at, carried WITH its own
+                        FILL_STATUS. A hope with a price attached.
+AGGRESSIVE_CLOSE_PRICE  the price available NOW by crossing displayed size,
+                        walked across the captured ladder and NOT_IDENTIFIED
+                        beyond it. A measured floor.
+```
+
+Per closed round trip: `GROSS_SPREAD`, `EXIT_TAKER_FEE`,
+`TRADING_NET_EX_INCENTIVES` **first**, then `MAKER_REBATE` /
+`LIQUIDITY_INCENTIVE` / `OTHER_INCENTIVE` and only then `TOTAL_NET`. The maker
+rebate sits on the INCENTIVE side of that split, which is what makes "the
+spread was negative and the rebate saved it" visible instead of netted away.
+Also `INVENTORY_MARKOUT` (a frozen horizon set, never one horizon promoted to
+be *the* markout), `MAX_ADVERSE_EXCURSION`, `MAX_FAVORABLE_EXCURSION`,
+`CAPITAL_OCCUPANCY` in dollar-seconds with both factors kept, `FAILURE_TO_CLOSE`
+with a reason, and `SETTLEMENT_OUTCOME = NOT_IDENTIFIED` — a tick window is
+minutes long and settlement is days away.
+
+**`INCENTIVE_DEPENDENT` is now three-valued.** A row with negative trading
+economics and an unmeasured incentive total used to read `NO`, which is
+reassurance the evidence does not carry; it now reads `NOT_IDENTIFIED` until
+both sides of the question are numbers.
+
+`FEE_REGIME` travels with every row and a straddle is named, never pooled. This
+matters within hours: the taker curve changes at **2026-09-17 03:59 UTC**
+(theta 0.06 → 0.0695), so tonight's capture is JUL2026 and tomorrow's is not.
+
+The whale comparison is available and guarded:
+`compare_close_times()` raises `EstimandMismatch` unless the caller states that
+`WHALE_PRIOR_EXPECTED_CLOSE_TIME` (time to pair completion by any means, on a
+two-token venue) and `BETTOR_OBSERVED_COUNTERFACTUAL_CLOSE_TIME` (time to a
+passive inventory close on one binary book) are **not the same estimand**. A gap
+between them mixes a venue-structure difference with a speed difference, and
+`DIFFERENCE_IS_EVIDENCE_ABOUT_BETTOR_SPEED` stays `NOT_IDENTIFIED`.
+
+### 15e. WHAT BETTOR IS, IN ONE LINE FOR MANAGEMENT
+
+**BETTOR IS A MAKER-FIRST TWO-SIDED MARKET-MAKING SYSTEM.** It opens inventory
+passively, prefers to close it passively, and treats an aggressive close as a
+priced option rather than a failure. It is not a directional betting system and
+it is not an arbitrage system: the structural spread is captured only when the
+relevant legs execute passively, and that capture is **GROSS**.
+
+```
+GROSS_TWO_SIDED_MAKER_EDGE        OBSERVED
+REALIZED_BETTOR_TWO_SIDED_EDGE    NOT_ESTABLISHED
+SPREAD_STATEMENT_QUALIFIER        IF_BOTH_FILLS_OCCUR
+```
+
+### 15f. THE PHASE_2A SUCCESS CRITERION, ANSWERED AS FAR AS IT CAN BE
+
+```
+How often a maker quote would have been filled        NOT_IDENTIFIED  (§15c)
+  ... and how often it is REFUTED                     MEASURABLE FROM TICKS
+How long inventory stays one-sided                    NOT_IDENTIFIED  (no fills)
+How often the opposite passive close arrives          NOT_IDENTIFIED  (no fills)
+What gross spread a completed round trip captures     FORMULA READY, NO SAMPLE
+Markouts while waiting                                MEASURABLE FROM TICKS
+How often an aggressive close is needed               MEASURABLE FROM TICKS
+Capital-time per round trip                           FORMULA READY, NO SAMPLE
+```
+
+Every quantity that depends on a FILL is `NOT_IDENTIFIED` and will stay so
+until the execution tape is joined to the tick capture with a block index or a
+venue execution-type column. Every quantity that depends only on the BOOK is
+computable from the capture now. **None of this is profitability**, and the
+summarisers refuse to emit `PROFITABILITY`, `WIN_RATE` or
+`EXPECTED_MONTHLY_RETURN` as numbers at all.
+
+```
+ORDERS_PLACED   0        CAPITAL_DEPLOYED  0
+CREDENTIALS     NONE     mirror_live       false
+```

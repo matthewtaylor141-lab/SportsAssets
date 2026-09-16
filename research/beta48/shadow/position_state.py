@@ -1396,8 +1396,16 @@ def incentive_split(trading_terms, incentive_terms):
     inet, imiss = ev_sum(tuple(incentive_terms.items()))
     total = (tnet + inet if tnet != NOT_IDENTIFIED and inet != NOT_IDENTIFIED
              else NOT_IDENTIFIED)
-    dependent = (tnet != NOT_IDENTIFIED and tnet <= 0
-                 and inet != NOT_IDENTIFIED and inet > 0)
+    # THREE-VALUED ON PURPOSE. A row whose trading economics are negative and
+    # whose incentive total is NOT_IDENTIFIED is not "not incentive
+    # dependent" -- nobody knows yet, and a flat "NO" there reads as
+    # reassurance the evidence does not carry. The question is only ANSWERED
+    # when both sides of it are numbers.
+    if tnet == NOT_IDENTIFIED or (tnet <= 0 and inet == NOT_IDENTIFIED):
+        dependent = NOT_IDENTIFIED
+    else:
+        dependent = ("YES" if (tnet <= 0 and inet != NOT_IDENTIFIED
+                               and inet > 0) else "NO")
     return {
         "TRADING_NET_EX_INCENTIVES": tnet,
         "TRADING_MISSING_TERMS": list(tmiss),
@@ -1409,7 +1417,7 @@ def incentive_split(trading_terms, incentive_terms):
         "INCENTIVE_CONTRIBUTION": inet,
         "INCENTIVE_MISSING_TERMS": list(imiss),
         "TOTAL_NET": total,
-        "INCENTIVE_DEPENDENT": "YES" if dependent else "NO",
+        "INCENTIVE_DEPENDENT": dependent,
         "REPORTED_TRADING_FIRST": True,
     }
 
