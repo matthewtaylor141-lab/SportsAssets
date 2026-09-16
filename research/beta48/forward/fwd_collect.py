@@ -362,7 +362,18 @@ def board(outdir: Path, pacer, http, max_pages=MAX_PAGES_DEFAULT) -> dict:
            "pages_walked": pages,
            "DISCOVERY_LIST_EXHAUSTED": "YES" if exhausted else "NO",
            "PAGINATION_ADVANCED": "YES" if advanced else "NO",
-           "markets_seen": len(markets),
+           # PREFIX LANGUAGE, NOT POPULATION LANGUAGE.
+           #
+           # A walk that stopped at the page cap has seen AT LEAST this many
+           # markets, not all of them. Calling 20,000 "the whole board" would
+           # be the same error as the archaeology's, in a friendlier font.
+           # Breadth can be unbiased WITHIN the observed prefix; it is not
+           # exchange-wide complete, and the true size stays unknown.
+           "OBSERVED_PREFIX_MARKETS": len(markets),
+           "TRUE_ACTIVE_BOARD_SIZE": (
+               len(markets) if exhausted else "NOT_IDENTIFIED"),
+           "BREADTH_IS_EXCHANGE_WIDE_COMPLETE": "YES" if exhausted else "NO",
+           "markets_seen": len(markets),          # retained name, same number
            "rows_with_eventSlug": with_event_field,
            "markets_two_sided": len(selected),
            "markets_skipped": len(skipped),
@@ -492,7 +503,11 @@ def rules(outdir: Path, pacer, http) -> dict:
                     "MAX_SPREAD": tp.get("maxSpread"),      # absent: stays None
                     "PROGRAM_PERIOD": tp.get("period"),
                     "PROGRAM_START": tp.get("start"),
-                    "PROGRAM_END": tp.get("end"),           # absent: stays None
+                    # `end` was absent from every observed row. It is read
+                    # anyway so that the day the venue starts sending one, it
+                    # is captured rather than silently dropped -- and it is
+                    # NEVER inferred from `start` plus a guessed duration.
+                    "PROGRAM_END": tp.get("end"),
                     "PROGRAM_CREATED_AT": tp.get("createdAt"),
                     # Our own score needs the TOTAL qualifying score across all
                     # participants, which this endpoint does not publish.
@@ -503,6 +518,7 @@ def rules(outdir: Path, pacer, http) -> dict:
                 })
 
     reachable = any(r.get("http_status") == 200 for r in rows)
+    types = sorted({p["PROGRAM_TYPE"] for p in programs if p["PROGRAM_TYPE"]})
     out = {"collector_version": COLLECTOR_VERSION,
            "captured_at_utc": wall,
            "fee_regime": fee_regime(wall),
@@ -512,6 +528,15 @@ def rules(outdir: Path, pacer, http) -> dict:
            "incentive_http_statuses": [r.get("http_status") for r in rows],
            "incentivized_markets": len(markets_seen),
            "programs_parsed": len(programs),
+           "PROGRAM_TYPES_OBSERVED": types,
+           # The documentation names FOUR programs -- volume, liquidity, fill
+           # and the application-only Market Maker Program. This endpoint has
+           # only ever been seen returning one type. Whether it publishes the
+           # others is NOT established by its silence, so the absence of a
+           # type here is never read as "that programme is not running".
+           "DOCUMENTED_PROGRAMS": ["VOLUME_INCENTIVE", "LIQUIDITY_INCENTIVE",
+                                   "FILL_INCENTIVE", "MARKET_MAKER_PROGRAM"],
+           "INCENTIVES_ENDPOINT_COVERS_ALL_PROGRAMS": "NOT_IDENTIFIED",
            "programs": programs,
            "doc_http_statuses": [d.get("http_status") for d in docs],
            "doc_sha256": {d["url"]: d.get("response_sha256") for d in docs},
@@ -746,6 +771,108 @@ def settle(outdir: Path, registry_path: Path, pacer, http) -> dict:
             "resolved_total": total, "registry_size": len(reg)}
 
 
+# ------------------------------------------------------------- the panel --
+
+def panel_cohort(board_events, rules_out, per_stratum=3):
+    """Choose the depth panel's markets. SAMPLING FROZEN BEFORE ANY ECONOMICS.
+
+    THE ONE RULE: selection may use only facts knowable AT DECISION TIME from
+    the public programme description -- programType, rewardPool, targetSize,
+    discountFactor, tick size, market period, category. It may NOT use anything
+    about how the market later behaved, traded or paid. Picking markets whose
+    economics turned out attractive is how a panel manufactures the result it
+    was built to test, and it is the single failure this whole programme has
+    been trying not to repeat.
+
+    The stratum key is therefore made of programme facts ONLY, the markets
+    inside a stratum are taken in SLUG ORDER (deterministic, and unrelated to
+    any outcome), and the count per stratum is fixed in advance.
+
+    This is a DIFFERENT DATASET from the breadth census and is never pooled
+    with it: breadth is the whole observed prefix with no selection at all;
+    the panel is a stratified sample chosen for depth.
+    """
+    by_slug = {e.get("slug"): e for e in board_events if e.get("slug")}
+    strata: dict = {}
+    for p in (rules_out or {}).get("programs", []):
+        slug = p.get("MARKET_SLUG")
+        ev = by_slug.get(slug)
+        if not ev:
+            continue                      # not on the observed board prefix
+        key = (p.get("PROGRAM_TYPE"), p.get("REWARD_POOL"),
+               p.get("TARGET_SIZE"), p.get("DISCOUNT_FACTOR"),
+               p.get("PROGRAM_PERIOD"), ev.get("orderPriceMinTickSize"),
+               ev.get("sportsMarketTypeV2"))
+        strata.setdefault(key, []).append((slug, p, ev))
+
+    picked, plan = [], []
+    for key in sorted(strata, key=lambda k: tuple(str(x) for x in k)):
+        rows = sorted(strata[key], key=lambda r: r[0])       # SLUG ORDER
+        take = rows[:int(per_stratum)]
+        plan.append({"stratum": [str(x) for x in key],
+                     "available": len(rows), "taken": len(take)})
+        for slug, p, ev in take:
+            picked.append({"slug": slug, "event": ev, "program": p})
+    return picked, plan
+
+
+def panel(outdir: Path, board_events, rules_out, pacer, http,
+          per_stratum=3, rounds=1, interval_s=5.0) -> int:
+    """Read FULL DEPTH on the panel's markets, for the Target Size question.
+
+    Writes raw book responses plus the programme facts they must be read
+    against. It computes no scoring here: depth_panel.py does that offline,
+    under a rule fixed before the data, so the measurement and the capture
+    cannot drift into each other.
+    """
+    picked, plan = panel_cohort(board_events, rules_out, per_stratum)
+    path = outdir / "panel.jsonl"
+    n = 0
+    with path.open("a") as fh:
+        for rnd in range(max(1, int(rounds))):
+            start = time.monotonic()
+            for item in picked:
+                leg = _paced_get(http, pacer,
+                                 BOOK_PATH.format(slug=item["slug"]))
+                fh.write(json.dumps({
+                    "kind": "PANEL",
+                    "round": rnd,
+                    "slug": item["slug"],
+                    "fee_regime": fee_regime(leg["local_request_wall_utc"]),
+                    # Decision-time programme facts, carried WITH the book so
+                    # the two can never be matched up wrongly later.
+                    "PROGRAM_TYPE": item["program"].get("PROGRAM_TYPE"),
+                    "PROGRAM_ID": item["program"].get("PROGRAM_ID"),
+                    "REWARD_POOL": item["program"].get("REWARD_POOL"),
+                    "TARGET_SIZE": item["program"].get("TARGET_SIZE"),
+                    "DISCOUNT_FACTOR": item["program"].get("DISCOUNT_FACTOR"),
+                    "PROGRAM_PERIOD": item["program"].get("PROGRAM_PERIOD"),
+                    "INSTRUMENT_STATE": item["program"].get("INSTRUMENT_STATE"),
+                    "tick": item["event"].get("orderPriceMinTickSize"),
+                    "sportsMarketTypeV2": item["event"].get(
+                        "sportsMarketTypeV2"),
+                    "leg": leg}) + "\n")
+                n += 1
+            slack = (start + float(interval_s)) - time.monotonic()
+            if rnd + 1 < int(rounds) and slack > 0:
+                time.sleep(slack)
+
+    (outdir / "panel_plan.json").write_text(json.dumps({
+        "DATASET": "INCENTIVE_DEPTH_PANEL",
+        "NEVER_POOLED_WITH": "BREADTH_CENSUS",
+        "SAMPLING_FROZEN_BEFORE_ECONOMICS": "YES",
+        "SELECTION_INPUTS": ["PROGRAM_TYPE", "REWARD_POOL", "TARGET_SIZE",
+                             "DISCOUNT_FACTOR", "PROGRAM_PERIOD",
+                             "orderPriceMinTickSize", "sportsMarketTypeV2"],
+        "SELECTION_WITHIN_STRATUM": "SLUG_ORDER",
+        "per_stratum": int(per_stratum),
+        "strata": len(plan), "markets_picked": len(picked),
+        "rounds": int(rounds), "plan": plan}, indent=1))
+    print("panel strata %d | markets %d | rows %d"
+          % (len(plan), len(picked), n))
+    return n
+
+
 def update_registry(registry_path: Path, events) -> int:
     """Every event seen by BREADTH enters the settlement registry."""
     reg = json.loads(registry_path.read_text()) if registry_path.exists() else {}
@@ -769,7 +896,7 @@ def update_registry(registry_path: Path, events) -> int:
 def main(argv=None) -> int:
     ap = argparse.ArgumentParser()
     ap.add_argument("mode", choices=("board", "breadth", "depth", "settle",
-                                     "rules"))
+                                     "rules", "panel"))
     ap.add_argument("--out", required=True)
     ap.add_argument("--board")
     ap.add_argument("--registry")
@@ -780,6 +907,9 @@ def main(argv=None) -> int:
     ap.add_argument("--book-reads", type=int, default=0,
                     help="markets in board order that also get a book read; "
                          "0 means the board's own two-sided quote only")
+    ap.add_argument("--rules", help="rules.json, for the panel's strata")
+    ap.add_argument("--per-stratum", type=int, default=3)
+    ap.add_argument("--rounds", type=int, default=1)
     a = ap.parse_args(argv)
 
     out = Path(a.out)
@@ -797,6 +927,11 @@ def main(argv=None) -> int:
             return 0
         b = json.loads(Path(a.board).read_text())
         events = b.get("selected") or []
+        if a.mode == "panel":
+            r = json.loads(Path(a.rules).read_text()) if a.rules else {}
+            panel(out, events, r, pacer, http, a.per_stratum,
+                  a.rounds, a.interval)
+            return 0
         if a.mode == "breadth":
             if a.registry:
                 n = update_registry(Path(a.registry), events)

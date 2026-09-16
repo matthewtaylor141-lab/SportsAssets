@@ -264,6 +264,31 @@ def test_the_board_records_the_venue_stated_mechanics_per_market(tmp_path):
     assert out["selected"][0]["board_bestBidQuote"]["value"] == "0.49"
 
 
+def test_a_capped_walk_is_a_prefix_and_says_so_in_those_words(tmp_path):
+    """PREFIX LANGUAGE, NOT POPULATION LANGUAGE.
+
+    A walk that stopped at the page cap has seen AT LEAST this many markets,
+    not all of them. Breadth can be unbiased WITHIN the observed prefix; it is
+    not exchange-wide complete, and the true size stays unknown.
+    """
+    pages = [[_row("s%d" % (i * C.PAGE_LIMIT + j)) for j in range(C.PAGE_LIMIT)]
+             for i in range(4)]
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.board(tmp_path, p, _pager(pages), max_pages=2)
+    assert out["DISCOVERY_LIST_EXHAUSTED"] == "NO"
+    assert out["OBSERVED_PREFIX_MARKETS"] == 2 * C.PAGE_LIMIT
+    assert out["TRUE_ACTIVE_BOARD_SIZE"] == "NOT_IDENTIFIED"
+    assert out["BREADTH_IS_EXCHANGE_WIDE_COMPLETE"] == "NO"
+
+
+def test_only_a_terminal_boundary_yields_a_true_board_size(tmp_path):
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.board(tmp_path, p, _pager([[_row("a"), _row("b")]]), max_pages=50)
+    assert out["DISCOVERY_LIST_EXHAUSTED"] == "YES"
+    assert out["TRUE_ACTIVE_BOARD_SIZE"] == 2
+    assert out["BREADTH_IS_EXCHANGE_WIDE_COMPLETE"] == "YES"
+
+
 def test_every_board_capture_is_stamped_with_its_fee_regime(tmp_path):
     p = C.Pacer(); p.spacing = 0.0
     out = C.board(tmp_path, p, _pager([[_row("a")]]), max_pages=1)
@@ -607,6 +632,33 @@ def test_an_unreachable_incentives_endpoint_is_recorded_not_defaulted(tmp_path):
     assert out["TIER_VERIFIED"] == "NO"
 
 
+def test_the_program_types_observed_are_listed_separately(tmp_path):
+    """Four programmes are documented; this endpoint has only been seen
+    returning one type. Its silence is not evidence the others are not
+    running, so coverage stays NOT_IDENTIFIED."""
+    mkt = _incentive_market("a", [_period(programType="liquidityProgram"),
+                                  _period(programType="fillProgram")])
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p,
+                  _rules_http([{"programs": [mkt], "nextPageToken": ""}]))
+    assert out["PROGRAM_TYPES_OBSERVED"] == ["fillProgram", "liquidityProgram"]
+    assert out["INCENTIVES_ENDPOINT_COVERS_ALL_PROGRAMS"] == "NOT_IDENTIFIED"
+    assert set(out["DOCUMENTED_PROGRAMS"]) == {
+        "VOLUME_INCENTIVE", "LIQUIDITY_INCENTIVE", "FILL_INCENTIVE",
+        "MARKET_MAKER_PROGRAM"}
+    # The two types stay on their own records; they are never merged.
+    assert {x["PROGRAM_TYPE"] for x in out["programs"]} == {
+        "liquidityProgram", "fillProgram"}
+
+
+def test_a_program_end_is_captured_when_the_venue_sends_one(tmp_path):
+    mkt = _incentive_market("a", [_period(end="2026-10-01T00:00:00Z")])
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p,
+                  _rules_http([{"programs": [mkt], "nextPageToken": ""}]))
+    assert out["programs"][0]["PROGRAM_END"] == "2026-10-01T00:00:00Z"
+
+
 def test_the_rule_documents_are_stored_with_a_hash(tmp_path):
     """A relayed coefficient becomes captured evidence only if the page that
     states it is stored verbatim and can be re-checked."""
@@ -620,3 +672,105 @@ def test_the_rule_documents_are_stored_with_a_hash(tmp_path):
     assert any(d["text"] == "FEE PAGE TEXT" for d in docs)
     # The collector stores the page; it does NOT read a coefficient out of it.
     assert out["THETA_TAKER_OBSERVED_IN_DOC"] == "NOT_PARSED_HERE"
+
+
+# ------------------------------------------ the incentive depth panel ------
+
+def _prog(slug, **kw):
+    d = {"MARKET_SLUG": slug, "PROGRAM_TYPE": "liquidityProgram",
+         "REWARD_POOL": 1000, "TARGET_SIZE": 500, "DISCOUNT_FACTOR": 0.3,
+         "PROGRAM_PERIOD": "live", "PROGRAM_ID": "p1",
+         "INSTRUMENT_STATE": "INSTRUMENT_STATE_OPEN"}
+    d.update(kw)
+    return d
+
+
+def _ev(slug, tick=0.01, kind="SPORTS_MARKET_TYPE_FUTURE"):
+    return {"slug": slug, "slugs": [slug], "orderPriceMinTickSize": tick,
+            "sportsMarketTypeV2": kind}
+
+
+def test_the_panel_stratifies_only_on_decision_time_facts(tmp_path):
+    """THE SELECTION RULE. Anything about how a market later behaved is
+    forbidden; picking on later economics is how a panel manufactures the
+    result it was built to test."""
+    events = [_ev("a"), _ev("b"), _ev("c"), _ev("d")]
+    rules = {"programs": [_prog("a"), _prog("b"),
+                          _prog("c", REWARD_POOL=10000),
+                          _prog("d", DISCOUNT_FACTOR=0.35)]}
+    picked, plan = C.panel_cohort(events, rules, per_stratum=5)
+    assert len(plan) == 3, "pool and discount factor separate the strata"
+    assert {x["slug"] for x in picked} == {"a", "b", "c", "d"}
+
+
+def test_a_later_outcome_field_cannot_change_the_panel(tmp_path):
+    """The forbidden input, tested as behaviour rather than promised in prose.
+
+    Two markets identical on every decision-time fact must land in the SAME
+    stratum and be taken in the same order, no matter what is attached to them
+    about how they later traded or paid. If any outcome field ever reached the
+    stratum key, this would split them.
+    """
+    events = [_ev("a"), _ev("b")]
+    plain = {"programs": [_prog("a"), _prog("b")]}
+    tempting = {"programs": [
+        dict(_prog("a"), realized_spread=0.001, volume_24h=10, later_pnl=-5),
+        dict(_prog("b"), realized_spread=0.900, volume_24h=10 ** 9,
+             later_pnl=5000)]}
+    one, plan_one = C.panel_cohort(events, plain, per_stratum=1)
+    two, plan_two = C.panel_cohort(events, tempting, per_stratum=1)
+    assert len(plan_one) == len(plan_two) == 1, "one stratum, both times"
+    assert [x["slug"] for x in one] == [x["slug"] for x in two] == ["a"]
+
+
+def test_the_panel_takes_markets_in_slug_order_not_by_attractiveness(tmp_path):
+    events = [_ev("z"), _ev("a"), _ev("m")]
+    rules = {"programs": [_prog("z"), _prog("a"), _prog("m")]}
+    picked, _ = C.panel_cohort(events, rules, per_stratum=2)
+    assert [x["slug"] for x in picked] == ["a", "m"], (
+        "deterministic, and unrelated to any outcome")
+
+
+def test_the_panel_is_deterministic_across_input_order(tmp_path):
+    rules_a = {"programs": [_prog("z"), _prog("a"), _prog("m")]}
+    rules_b = {"programs": [_prog("m"), _prog("z"), _prog("a")]}
+    evs = [_ev("z"), _ev("a"), _ev("m")]
+    one, _ = C.panel_cohort(evs, rules_a, per_stratum=2)
+    two, _ = C.panel_cohort(list(reversed(evs)), rules_b, per_stratum=2)
+    assert [x["slug"] for x in one] == [x["slug"] for x in two]
+
+
+def test_an_incentivized_market_off_the_board_prefix_is_not_invented(tmp_path):
+    """The panel can only sample what discovery actually saw."""
+    picked, _ = C.panel_cohort([_ev("a")],
+                               {"programs": [_prog("a"), _prog("unseen")]}, 5)
+    assert [x["slug"] for x in picked] == ["a"]
+
+
+def test_the_panel_carries_the_program_facts_with_each_book(tmp_path):
+    """So a book and its programme can never be matched up wrongly later."""
+    p = C.Pacer(); p.spacing = 0.0
+    n = C.panel(tmp_path, [_ev("a")], {"programs": [_prog("a")]},
+                p, _BookOK(), per_stratum=1, rounds=1)
+    assert n == 1
+    row = json.loads((tmp_path / "panel.jsonl").read_text().strip())
+    assert row["kind"] == "PANEL"
+    assert row["TARGET_SIZE"] == 500 and row["DISCOUNT_FACTOR"] == 0.3
+    assert row["tick"] == 0.01 and row["PROGRAM_TYPE"] == "liquidityProgram"
+    assert row["fee_regime"] in ("JUL2026", "SEP2026")
+
+
+def test_the_panel_plan_declares_it_is_a_separate_dataset(tmp_path):
+    """BREADTH_CENSUS and INCENTIVE_DEPTH_PANEL are different datasets and
+    must never be pooled: one is the whole observed prefix with no selection,
+    the other a stratified sample chosen for depth."""
+    p = C.Pacer(); p.spacing = 0.0
+    C.panel(tmp_path, [_ev("a")], {"programs": [_prog("a")]}, p, _BookOK())
+    plan = json.loads((tmp_path / "panel_plan.json").read_text())
+    assert plan["DATASET"] == "INCENTIVE_DEPTH_PANEL"
+    assert plan["NEVER_POOLED_WITH"] == "BREADTH_CENSUS"
+    assert plan["SAMPLING_FROZEN_BEFORE_ECONOMICS"] == "YES"
+    assert plan["SELECTION_WITHIN_STRATUM"] == "SLUG_ORDER"
+    for f in ("PROGRAM_TYPE", "REWARD_POOL", "TARGET_SIZE",
+              "DISCOUNT_FACTOR", "orderPriceMinTickSize"):
+        assert f in plan["SELECTION_INPUTS"]

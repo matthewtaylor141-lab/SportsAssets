@@ -56,6 +56,14 @@ on:
         description: "Markets that also get a book read (0 = board quotes only)"
         required: false
         default: "0"
+      panel_per_stratum:
+        description: "Depth-panel markets per decision-time stratum"
+        required: false
+        default: "4"
+      panel_rounds:
+        description: "Depth-panel passes per segment"
+        required: false
+        default: "3"
 
 permissions:
   contents: write
@@ -97,7 +105,7 @@ jobs:
           mkdir -p "$D"
           python research/beta48/forward/fwd_collect.py rules --out "$D"
 
-      - name: Enumerate the WHOLE board
+      - name: Enumerate the board to a terminal boundary or a named prefix
         env:
           SEG: ${{ github.run_id }}
         run: |
@@ -110,7 +118,7 @@ jobs:
       # requests by default. One book read per market would be ~20,000
       # requests — about 2.8 h at our 2 rps ceiling — which does not fit a
       # segment, and capping the sample would reintroduce selection bias.
-      - name: Breadth — one row per market, whole board, no sampling
+      - name: Breadth — one row per market across the observed prefix, no sampling
         env:
           SEG: ${{ github.run_id }}
         run: |
@@ -130,6 +138,22 @@ jobs:
           python research/beta48/forward/fwd_collect.py settle \
             --out "$D" \
             --registry research/beta48/forward/evidence/registry.json
+
+      # A SEPARATE DATASET from the breadth census, never pooled with it.
+      # Breadth is the whole observed prefix with no selection; this is a
+      # stratified sample on decision-time programme facts only, frozen before
+      # any economics are examined, for the Target Size scoring-range question.
+      - name: Incentive depth panel — the Target Size question
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/forward/evidence/seg_$SEG
+          python research/beta48/forward/fwd_collect.py panel \
+            --out "$D" --board "$D/board.json" --rules "$D/rules.json" \
+            --per-stratum "${{ github.event.inputs.panel_per_stratum || 4 }}" \
+            --rounds "${{ github.event.inputs.panel_rounds || 3 }}" \
+            --interval 30
 
       - name: Depth — dense cohort, for execution questions only
         env:
@@ -151,7 +175,7 @@ jobs:
           D=research/beta48/forward/evidence/seg_$SEG
           ( cd "$D" && sha256sum * > SEALED.sha256 2>/dev/null || true )
           gzip -9 "$D"/breadth.jsonl "$D"/depth.jsonl "$D"/board_raw.jsonl \
-                  "$D"/settle_raw.jsonl "$D"/incentives_raw.jsonl \
+                  "$D"/settle_raw.jsonl "$D"/incentives_raw.jsonl "$D"/panel.jsonl \
                   "$D"/rules_docs.jsonl 2>/dev/null || true
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"

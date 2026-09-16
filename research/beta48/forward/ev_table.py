@@ -1,6 +1,33 @@
 #!/usr/bin/env python3
 """EV_MAKER vs EV_TAKER vs EV_NO_TRADE across both fee regimes. Contacts nothing.
 
+WHAT THIS TABLE IS: a CONDITIONAL ACCOUNTING IDENTITY / UPPER-BOUND COMPARISON.
+WHAT IT IS NOT: a strategy result.
+
+    MAKER_BEATS_TAKER_CONDITIONAL_ON_FILL = 23/23
+    MAKER_STRATEGY_PROFITABLE             = NOT_ESTABLISHED
+
+Both halves of that matter, and the second is the honest one.
+
+`TAKER < NO_TRADE` at zero fair-value edge is EXPECTED, not a discovery: taking
+pays execution costs and buys nothing in return when there is no edge. It is
+arithmetic, and the table would be wrong if it said otherwise.
+
+`MAKER > TAKER` likewise establishes nothing about maker profitability. It is
+the same arithmetic run from the other side of the spread, CONDITIONAL ON A
+FILL. Four terms that decide whether a maker actually makes money are absent
+from every number below:
+
+    maker fill probability      NOT_IDENTIFIED
+    queue position              NOT_IDENTIFIED
+    adverse selection           NOT_IDENTIFIED
+    residual inventory + exit   NOT_IDENTIFIED
+
+The forward experiment exists precisely to measure those four. Until it does,
+the maker column is a CEILING -- the best the channel could possibly do if
+every quote filled and nothing ever traded against us -- and a ceiling is not
+a floor, a forecast, or a plan.
+
 WHAT FAIR VALUE IS TAKEN TO BE, stated before any number.
 
 Every figure below sets FAIR_VALUE = MID. That is not a claim that the mid is
@@ -80,12 +107,28 @@ def row(mid: D, spread: D, regime: str, contracts: int = CLIP) -> dict:
     out["ESTIMATED_REWARD"] = mk["estimated_reward"]          # zero: unmeasured
     out["ACTUAL_REWARD"] = "NOT_IDENTIFIED"
 
-    be = F.breakeven_adverse_selection(mid, bid, contracts=contracts)
+    # THE CORE CONTROL, in BOTH forms, always together. The EX_INCENTIVES
+    # figure is the one that decides; the inclusive figure is only allowed to
+    # use a VERIFIED incentive, and none has been observed, so here they are
+    # equal and the equality is itself the finding.
+    mt = F.max_tolerable_adverse_selection(
+        mid, bid, contracts, verified_incentive_per_contract=D("0"))
+    be = mt["MAX_TOLERABLE_ADVERSE_SELECTION_EX_INCENTIVES"]
+    out["MAX_TOLERABLE_ADVERSE_SELECTION_EX_INCENTIVES"] = be
+    out["MAX_TOLERABLE_ADVERSE_SELECTION_INCL_VERIFIED_INCENTIVES"] = (
+        mt["MAX_TOLERABLE_ADVERSE_SELECTION_INCL_VERIFIED_INCENTIVES"])
+    out["INCENTIVE_CONTRIBUTION"] = mt["INCENTIVE_CONTRIBUTION"]
+    out["INCENTIVE_IS_VERIFIED"] = mt["INCENTIVE_IS_VERIFIED"]
     out["BREAKEVEN_ADVERSE_SELECTION_TOTAL"] = be
     out["BREAKEVEN_ADVERSE_SELECTION_PER_CONTRACT"] = be / D(contracts)
     # As a share of the price paid -- the markout the shadow engine must beat.
     out["BREAKEVEN_AS_PCT_OF_NOTIONAL"] = (
         (be / D(contracts) / bid * D(100)) if bid > 0 else D("0"))
+
+    # The three figures the architecture requires on every economic statement.
+    out["TRADING_NET_EX_INCENTIVES"] = mk["trading_net_ex_incentives"]
+    out["INCENTIVE_CONTRIBUTION_MAKER"] = mk["estimated_reward"]
+    out["TOTAL_NET"] = mk["net"]
 
     # What a taker's directional signal must be worth, per contract, merely to
     # reach zero. Not what makes it a good trade -- what stops it losing.
@@ -136,6 +179,16 @@ def headline(regime: str) -> dict:
     return {
         "regime": regime,
         "cells": len(rows),
+        "RESULT_CLASS": "CONDITIONAL_ACCOUNTING_IDENTITY_UPPER_BOUND",
+        "MAKER_BEATS_TAKER_CONDITIONAL_ON_FILL": "%d/%d" % (maker_wins,
+                                                            len(rows)),
+        "MAKER_STRATEGY_PROFITABLE": "NOT_ESTABLISHED",
+        "MAKER_FILL_PROBABILITY": "NOT_IDENTIFIED",
+        "QUEUE_POSITION": "NOT_IDENTIFIED",
+        "ADVERSE_SELECTION": "NOT_IDENTIFIED",
+        "RESIDUAL_INVENTORY_AND_EXIT": "NOT_IDENTIFIED",
+        "TAKER_BELOW_NO_TRADE_IS_EXPECTED": (
+            "YES -- taking pays execution costs at zero edge"),
         "MAKER_BEATS_TAKER_CELLS": maker_wins,
         "MAKER_BEATS_NO_TRADE_CELLS": maker_beats_flat,
         "TAKER_BEATS_NO_TRADE_CELLS_BASE": taker_beats_flat,

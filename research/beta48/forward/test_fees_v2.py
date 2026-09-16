@@ -93,6 +93,100 @@ class Regimes(unittest.TestCase):
         self.assertGreater(new, old)
 
 
+class ThreeSeparateFacts(unittest.TestCase):
+    """A published schedule, our entitlement to it, and a bilateral deal are
+    three different things. Collapsing them is how a document becomes a grant.
+    """
+
+    def test_they_are_not_the_same_field(self):
+        self.assertEqual(F.PUBLIC_FEE_SCHEDULE, "DOCUMENTED")
+        self.assertEqual(F.BETTOR_TIER_ELIGIBILITY, "NOT_IDENTIFIED")
+        self.assertEqual(F.NEGOTIATED_ECONOMICS, "NOT_IDENTIFIED")
+
+    def test_a_documented_schedule_does_not_make_us_eligible(self):
+        self.assertNotEqual(F.PUBLIC_FEE_SCHEDULE, F.BETTOR_TIER_ELIGIBILITY)
+
+    def test_the_cross_venue_route_is_an_application_not_an_entitlement(self):
+        """Accelerated placement on trailing-30-day volume elsewhere is a
+        route whose outcome we do not know, so it changes nothing here."""
+        self.assertEqual(F.ACCELERATED_TIER_PLACEMENT_ROUTE,
+                         "DOCUMENTED_APPLICATION_OUTCOME_UNKNOWN")
+        self.assertEqual(F.BETTOR_TIER_ELIGIBILITY, "NOT_IDENTIFIED")
+
+    def test_the_volume_bands_match_the_published_schedule(self):
+        self.assertEqual(F.tier_for_prior_month_volume(0), "BASE")
+        self.assertEqual(F.tier_for_prior_month_volume(249999), "BASE")
+        self.assertEqual(F.tier_for_prior_month_volume(250000), "T10_250k_1M")
+        self.assertEqual(F.tier_for_prior_month_volume(999999), "T10_250k_1M")
+        self.assertEqual(F.tier_for_prior_month_volume(1000000), "T25_1M_10M")
+        self.assertEqual(F.tier_for_prior_month_volume(9999999), "T25_1M_10M")
+        self.assertEqual(F.tier_for_prior_month_volume(10000000),
+                         "T50_10M_PLUS")
+
+    def test_reading_the_schedule_does_not_set_our_eligibility(self):
+        F.tier_for_prior_month_volume(50000000)
+        self.assertEqual(F.BETTOR_TIER_ELIGIBILITY, "NOT_IDENTIFIED")
+        self.assertFalse(F.TIER_VERIFIED)
+
+    def test_the_new_coefficient_is_not_verified_from_capture(self):
+        """It flips only when a segment CROSSES the cutover and captures the
+        changed authoritative state -- not when a doc page is read."""
+        self.assertFalse(F.VERIFIED_FROM_CAPTURE)
+        self.assertFalse(F.THETA_TAKER_SEP2026_VERIFIED)
+
+
+class IncentiveChannels(unittest.TestCase):
+
+    def test_there_are_four_and_they_are_distinct(self):
+        self.assertEqual(len(F.INCENTIVE_CHANNELS), 4)
+        self.assertEqual(len(set(F.INCENTIVE_CHANNEL_BASIS.values())), 4)
+
+    def test_each_channel_is_paid_for_a_different_thing(self):
+        self.assertEqual(F.INCENTIVE_CHANNEL_BASIS["LIQUIDITY_INCENTIVE"],
+                         "RESTING_PRESENCE")
+        self.assertEqual(F.INCENTIVE_CHANNEL_BASIS["FILL_INCENTIVE"],
+                         "PASSIVE_EXECUTION")
+        self.assertEqual(F.INCENTIVE_CHANNEL_BASIS["VOLUME_INCENTIVE"],
+                         "TAKER_SIDE_NOTIONAL")
+        self.assertEqual(F.INCENTIVE_CHANNEL_BASIS["NEGOTIATED_MM_INCENTIVE"],
+                         "NOT_IDENTIFIED")
+
+    def test_the_endpoints_coverage_of_all_programmes_is_not_assumed(self):
+        """It has only ever been seen returning liquidityProgram rows. Its
+        silence about the others is not evidence they are not running."""
+        self.assertEqual(F.INCENTIVES_ENDPOINT_COVERS_ALL_PROGRAMS,
+                         "NOT_IDENTIFIED")
+
+
+class MaxTolerableAdverseSelection(unittest.TestCase):
+    """The core control, always in BOTH forms."""
+
+    def test_both_figures_are_always_returned(self):
+        r = F.max_tolerable_adverse_selection(D("0.52"), D("0.50"), 1000)
+        self.assertIn("MAX_TOLERABLE_ADVERSE_SELECTION_EX_INCENTIVES", r)
+        self.assertIn(
+            "MAX_TOLERABLE_ADVERSE_SELECTION_INCL_VERIFIED_INCENTIVES", r)
+        self.assertIn("INCENTIVE_CONTRIBUTION", r)
+
+    def test_with_no_verified_incentive_the_two_are_identical(self):
+        r = F.max_tolerable_adverse_selection(D("0.52"), D("0.50"), 1000)
+        self.assertEqual(
+            r["MAX_TOLERABLE_ADVERSE_SELECTION_EX_INCENTIVES"],
+            r["MAX_TOLERABLE_ADVERSE_SELECTION_INCL_VERIFIED_INCENTIVES"])
+        self.assertFalse(r["INCENTIVE_IS_VERIFIED"])
+
+    def test_an_incentive_widens_only_the_inclusive_figure(self):
+        r = F.max_tolerable_adverse_selection(
+            D("0.50"), D("0.50"), 1000,
+            verified_incentive_per_contract=D("0.002"))
+        ex = r["MAX_TOLERABLE_ADVERSE_SELECTION_EX_INCENTIVES"]
+        incl = r["MAX_TOLERABLE_ADVERSE_SELECTION_INCL_VERIFIED_INCENTIVES"]
+        self.assertGreater(incl, ex)
+        self.assertEqual(incl - ex, D("2.000"))
+        # The deciding figure is untouched by the incentive.
+        self.assertEqual(ex, F.maker_rebate_at(1000, D("0.50")))
+
+
 class RebateTiers(unittest.TestCase):
 
     def test_bettor_tier_eligibility_is_not_assumed(self):
@@ -264,19 +358,36 @@ class LiquidityScoring(unittest.TestCase):
         for f in self.OBSERVED:
             self.assertEqual(F.liquidity_score(500, 0, f), D("500"))
 
+    def test_the_discount_ladder_exactly(self):
+        """CORRECTION PINNED. An earlier report of mine gave the 3-tick figure
+        as 4.05%, which is wrong: 0.30^3 = 0.027, i.e. 2.7%. 4.05% would be
+        0.30^2 * 0.45, which is not a term in this formula at all. The ladder
+        is pinned here so the number cannot drift again.
+        """
+        self.assertEqual(D("0.30") ** 0, D("1"))
+        self.assertEqual(D("0.30") ** 1, D("0.30"))
+        self.assertEqual(D("0.30") ** 2, D("0.0900"))
+        self.assertEqual(D("0.30") ** 3, D("0.027000"))
+        self.assertNotEqual(D("0.30") ** 3, D("0.0405"))
+
     def test_one_tick_off_the_touch_costs_most_of_the_score(self):
-        """At 0.3, resting ONE tick behind scores 30% of the same size, and
-        two ticks 9%. The programme pays for the touch, not for presence."""
+        """At 0.3: one tick back scores 30%, two 9%, three 2.7%.
+        The programme pays for the touch, not for presence."""
+        self.assertEqual(F.liquidity_score(500, 0, D("0.3")), D("500"))
         self.assertEqual(F.liquidity_score(500, 1, D("0.3")), D("150.0"))
         self.assertEqual(F.liquidity_score(500, 2, D("0.3")), D("45.00"))
         self.assertEqual(F.liquidity_score(500, 3, D("0.3")), D("13.500"))
+        # 13.5 / 500 = 0.027 = 2.7%, NOT 4.05%.
+        self.assertEqual(F.liquidity_score(500, 3, D("0.3")) / D("500"),
+                         D("0.027"))
 
     def test_size_cannot_buy_back_distance(self):
         """A quote three ticks back needs ~37x the size to match one at the
-        touch, which is a far larger inventory risk for the same score."""
+        touch (1 / 0.027 = 37.04), a far larger inventory risk for the same
+        score."""
         at_touch = F.liquidity_score(500, 0, D("0.3"))
-        self.assertLess(F.liquidity_score(500 * 30, 3, D("0.3")), at_touch)
-        self.assertGreater(F.liquidity_score(500 * 40, 3, D("0.3")), at_touch)
+        self.assertLess(F.liquidity_score(500 * 37, 3, D("0.3")), at_touch)
+        self.assertGreater(F.liquidity_score(500 * 38, 3, D("0.3")), at_touch)
 
     def test_a_tick_is_not_a_cent_everywhere(self):
         """The board showed tick sizes of 0.001, 0.005 and 0.01, so 'one tick

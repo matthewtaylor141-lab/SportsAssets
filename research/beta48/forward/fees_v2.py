@@ -69,17 +69,69 @@ THETA_MAKER_ALL = THETA_MAKER                # D("-0.0125"), unchanged
 # Thu 2026-09-17. Stated as UTC because every capture clock is UTC.
 REGIME_CUTOVER_UTC = datetime(2026, 9, 17, 3, 59, tzinfo=timezone.utc)
 
-THETA_TAKER_SEP2026_VERIFIED = False
-TIER_VERIFIED = False
-NEGOTIATED_MARKET_MAKER_ECONOMICS = "NOT_IDENTIFIED"
+# ------------------------------------------------- THREE SEPARATE FACTS ----
+#
+# These are kept apart on purpose. Conflating them is how a published schedule
+# silently becomes an assumed entitlement.
+#
+#   PUBLIC_FEE_SCHEDULE      what the venue publishes for everyone.
+#   BETTOR_TIER_ELIGIBILITY  which of those terms BETTOR actually qualifies
+#                            for. A schedule existing is not a grant.
+#   NEGOTIATED_ECONOMICS     bilateral Market Maker Program terms. Public
+#                            economics are NOT assumed to be BETTOR's ceiling
+#                            OR its floor.
+PUBLIC_FEE_SCHEDULE = "DOCUMENTED"
+BETTOR_TIER_ELIGIBILITY = "NOT_IDENTIFIED"
+NEGOTIATED_ECONOMICS = "NOT_IDENTIFIED"
 
-# Prior-month taker rebate schedule, relayed. A rebate REDUCES the taker fee.
+# Retained under its old name so existing readers keep working.
+NEGOTIATED_MARKET_MAKER_ECONOMICS = NEGOTIATED_ECONOMICS
+
+# The SEP2026 coefficient is documented but has not yet been seen IN FORCE by
+# our own capture. It flips only when a segment crosses the cutover and
+# captures the changed authoritative state -- not when a doc page is read.
+THETA_TAKER_SEP2026_VERIFIED = False
+VERIFIED_FROM_CAPTURE = False
+TIER_VERIFIED = False
+
+# Prior-month taker volume bands. A rebate REDUCES the taker fee.
+#
+# The documentation also allows ACCELERATED TIER PLACEMENT on verifiable
+# trailing-30-day volume at another prediction market. That is a route, not an
+# entitlement: it is an application whose outcome is unknown to us, so it
+# changes nothing about BETTOR_TIER_ELIGIBILITY until a placement is granted
+# and observed.
+ACCELERATED_TIER_PLACEMENT_ROUTE = "DOCUMENTED_APPLICATION_OUTCOME_UNKNOWN"
+
 TAKER_REBATE_TIERS = {
     "BASE": D("0.00"),
     "T10_250k_1M": D("0.10"),
     "T25_1M_10M": D("0.25"),
     "T50_10M_PLUS": D("0.50"),
 }
+
+# The prior-month taker NOTIONAL bands each tier requires, in USD. Lower bound
+# inclusive, upper bound inclusive, None = unbounded above.
+TAKER_REBATE_TIER_BANDS = {
+    "BASE": (D("0"), D("249999.99")),
+    "T10_250k_1M": (D("250000"), D("999999.99")),
+    "T25_1M_10M": (D("1000000"), D("9999999.99")),
+    "T50_10M_PLUS": (D("10000000"), None),
+}
+
+
+def tier_for_prior_month_volume(usd) -> str:
+    """The tier a prior-month taker notional would earn, from the schedule.
+
+    This reads the PUBLIC SCHEDULE. It is not a statement that BETTOR has that
+    volume, and it does not set BETTOR_TIER_ELIGIBILITY.
+    """
+    v = D(str(usd))
+    for name in ("T50_10M_PLUS", "T25_1M_10M", "T10_250k_1M", "BASE"):
+        lo, hi = TAKER_REBATE_TIER_BANDS[name]
+        if v >= lo and (hi is None or v <= hi):
+            return name
+    return "BASE"
 
 
 def regime_at(ts) -> str:
@@ -191,6 +243,67 @@ def breakeven_adverse_selection(fair_value, quote,
     reb = maker_rebate_at(contracts, px)
     rew = D(str(expected_reward_per_contract)) * D(contracts)
     return edge + reb + rew
+
+
+def max_tolerable_adverse_selection(fair_value, quote, contracts=1,
+                                    verified_incentive_per_contract=D("0")):
+    """THE CORE CONTROL, reported in BOTH forms, always together.
+
+    EX_INCENTIVES is the one that decides. It answers "does the underlying
+    trade make money", and an incentive can never move it. INCL_VERIFIED_
+    INCENTIVES answers "does the whole package make money", and is only
+    allowed to use incentives that have been VERIFIED -- an observed, earned,
+    settled amount, never a program that merely exists.
+
+    Reporting only the second is how an incentive hides a losing trade, so
+    this returns both plus the contribution that separates them.
+    """
+    ex = breakeven_adverse_selection(fair_value, quote, D("0"), contracts)
+    rew = D(str(verified_incentive_per_contract)) * D(contracts)
+    return {
+        "MAX_TOLERABLE_ADVERSE_SELECTION_EX_INCENTIVES": ex,
+        "MAX_TOLERABLE_ADVERSE_SELECTION_INCL_VERIFIED_INCENTIVES": ex + rew,
+        "INCENTIVE_CONTRIBUTION": rew,
+        "INCENTIVE_IS_VERIFIED": rew != 0,
+        "EX_INCENTIVES_PER_CONTRACT": ex / D(contracts) if contracts else D(0),
+    }
+
+
+# ------------------------------------------------- the incentive channels --
+#
+# FOUR programs, economically different, NEVER blended. Each answers a
+# different question about the same resting order, and summing them before
+# each is separately verified would double-count presence as execution.
+#
+#   LIQUIDITY_INCENTIVE  pays for RESTING, by quote position and size.
+#                        Earned without ever trading.
+#   FILL_INCENTIVE       pays a resting order that ACTUALLY FILLS. Requires
+#                        execution, so it carries the adverse selection that
+#                        the liquidity channel does not.
+#   VOLUME_INCENTIVE     pays eligible trading volume; the current detailed
+#                        documentation states TAKER-SIDE notional for this
+#                        program, so it does not reward passive presence and
+#                        must never be credited to a maker quote.
+#   NEGOTIATED_MM        application-only, bilateral. NOT_IDENTIFIED.
+INCENTIVE_CHANNELS = (
+    "LIQUIDITY_INCENTIVE",
+    "FILL_INCENTIVE",
+    "VOLUME_INCENTIVE",
+    "NEGOTIATED_MM_INCENTIVE",
+)
+
+# What each channel is paid FOR. Used to refuse a credit that the channel
+# cannot possibly have generated.
+INCENTIVE_CHANNEL_BASIS = {
+    "LIQUIDITY_INCENTIVE": "RESTING_PRESENCE",
+    "FILL_INCENTIVE": "PASSIVE_EXECUTION",
+    "VOLUME_INCENTIVE": "TAKER_SIDE_NOTIONAL",
+    "NEGOTIATED_MM_INCENTIVE": "NOT_IDENTIFIED",
+}
+
+# Whether /v1/incentives is known to publish every program. It publishes
+# liquidityProgram rows; nothing observed proves it covers the others.
+INCENTIVES_ENDPOINT_COVERS_ALL_PROGRAMS = "NOT_IDENTIFIED"
 
 
 # ------------------------------------------------- liquidity reward scoring --
