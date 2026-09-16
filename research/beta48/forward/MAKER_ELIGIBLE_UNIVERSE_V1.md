@@ -771,3 +771,197 @@ EVENT_INDEPENDENCE_INFERRED_FROM_DIFFERING_SLUGS = False
 Thirty eligible props on one NFL game are one event's worth of correlated
 inventory. Capacity stays a COUNT; turning it into money needs the fill and
 recycling rates that remain unmeasured.
+
+---
+
+## CL-22 — THE EVENT KEY FAILED VALIDATION. THE COUNT IS RETRACTED.
+
+Zero network. Already-captured rows only: the 20,000 raw market objects in the
+observed-prefix capture, read for `slug`, `title`, `question`, `gameStartTime`,
+`marketSides[].team.id`, `marketSides[].team.providerIds`, `metadata.playerId`
+and `sportsMarketTypeV2`.
+
+```
+EVENT_KEY_METHOD             = DERIVED_HEURISTIC_V1
+EVENT_KEY_VALIDATED          = NO
+EVENT_KEY_VALIDATION_RESULT  = FAILS_AS_EVENT_ID_BOTH_DIRECTIONS
+UNIQUE_EVENTS_1456           = PROVISIONAL_HEURISTIC_COUNT
+INDEPENDENT_SAMPLE_SIZE      = NOT_IDENTIFIED
+SAMPLE_OVERSTATEMENT_MAGNITUDE = NOT_IDENTIFIED
+```
+
+**Retracted.** "20,000 markets overstates the effective sample by more than an
+order of magnitude" is withdrawn as an established quantitative fact.
+
+**Survives.** Market-level independence is false and the clustering is
+material. That is now PROVED rather than assumed — see the Level-B stratum
+below — and it is proved without depending on the retracted number.
+
+## CL-23 — THE PURITY TEST
+
+Verdicts are assigned from the venue's own fields. A cluster with no team ids
+and no start-time spread is **UNKNOWN, never PURE**: absence of evidence is not
+evidence of purity, and treating it as such is how the original 1,456 came to
+look solid.
+
+Board-wide, 1,456 derived clusters over 19,513 keyed markets:
+
+```
+CLUSTERS_TESTED                1456
+PURE_CLUSTERS                    72
+OVERMERGED_CLUSTERS             114
+UNKNOWN_CLUSTERS               1270
+MARKETS_IN_PURE_CLUSTERS       4783
+MARKETS_IN_OVERMERGED_CLUSTERS 3553
+MARKETS_IN_UNKNOWN_CLUSTERS   11177
+MARKETS_WITH_NO_DERIVABLE_KEY   487
+OVERMERGE_RATE_BY_CLUSTER      7.8%
+OVERMERGE_RATE_BY_MARKET      18.2%
+```
+
+Top 50 by market count — the most over-merge-prone stratum by construction, and
+NOT a board-wide rate:
+
+```
+CLUSTERS_TESTED  50   PURE 24   OVERMERGED 8   UNKNOWN 18
+MARKETS        6572   PURE 2797 OVERMERGED 1609 UNKNOWN 2166
+OVERMERGE_RATE_BY_CLUSTER  16.0%
+OVERMERGE_RATE_BY_MARKET   24.5%
+```
+
+The evidence on the largest clusters, verbatim from the capture:
+
+```
+DERIVED_EVENT_KEY              N   GST PAIR PROV TEAM PLYR  VERDICT
+nfl-2027-01-10               394     3   32   32   32  123  OVERMERGED
+cfb-wins-2026-11-28          380     1    0    0    0    0  UNKNOWN
+cfb-2026-11-28               261     2    0    0    0  111  OVERMERGED
+epl-2027-05-30               248     2   20   20   20    0  OVERMERGED
+nfl-wins-2027-01-10          160     1   32   32   32    0  OVERMERGED
+cfb-kentst-ohiost-2026-09-19 138     1    1    1    2    0  PURE
+cfb-mia-wake-2026-09-18      135     1    1    1    2    0  PURE
+cfb-syra-pitt-2026-09-17     133     1    1    1    2    0  PURE
+nfl-det-buf-2026-09-17       108     1    1    1    2    0  PURE
+```
+
+`nfl-2027-01-10`'s sample titles are `ARI Cardinals`, `ATL Falcons`,
+`BAL Ravens`, `BUF Bills` — thirty-two teams' season outcomes, not one contest.
+`cfb-2026-11-28`'s are `Caden Veltkamp`, `Owen McCown`, `Keelon Russell` — a
+player futures board. The user's read of the 394/380/248 clusters was right.
+
+## CL-24 — THE DEFECT RUNS IN BOTH DIRECTIONS
+
+The key **also under-merges**, which the top-50 view cannot show. Eight separate
+derived keys carry the identical 32-team roster on the identical settlement
+date — one NFL season split eight ways:
+
+```
+nfl-2027-01-10          394     nfl-mostsacksteam-2027-01-10   32
+nfl-wins-2027-01-10     160     nfl-mostintteam-2027-01-10     32
+                                nfl-bestrecord-2027-01-10      32   (+3 more)
+```
+
+Same shape in `epl-/epl-title-`, `sea-/sea-title-`, `bun-`, `lg1-`, and five
+college-football conference pairs. `KEYS_REMOVED_BY_PROVED_COLLAPSE = 17`.
+
+Over-merge inflates the count; under-merge deflates it. **The two errors do not
+cancel to a known quantity**, which is the whole reason the count is retracted
+rather than adjusted.
+
+**A collapse I attempted and withdrew.** A first pass collapsed every futures
+family sharing a league token and a settlement date. That merged 409
+`ushrmov-<state>-<district>-2026-11-03` keys into one "event" — 409 *different
+House races*. The middle slug segment is a market TYPE in one family
+(`nfl-wins-`) and a CONTEST IDENTITY in another (`ushrmov-al-01-`), and nothing
+in a captured row separates them. So the collapse now fires only on an
+identical non-empty roster of venue team ids, and the election families are left
+uncollapsed. A test pins the `ushrmov` case specifically.
+
+## CL-25 — THE FOUR-LEVEL EVIDENCE HIERARCHY
+
+```
+LEVEL                              CLUSTERS  MARKETS
+A_EXPLICIT_VENUE_EVENT_ID                 0        0
+B_STRONG_COMPOSITE_GAME                  72     4783
+C_FAMILY_ONLY                          1384    14730
+D_UNKNOWN                                 0        0
+MARKETS_WITH_NO_DERIVABLE_KEY             -      487
+```
+
+- **A** — an explicit venue identifier. `eventSlug`, `eventId`, `event`,
+  `eventTicker`, `seriesId`, `groupId`, `parentId`, `gameId`, `conditionId`:
+  all 0/20,000. The probe is kept live in code, so the day the venue ships one
+  it is used automatically.
+- **B** — three agreeing venue fields: ONE `gameStartTime`, ONE participant
+  pair, EXACTLY TWO provider-identified teams. A proof, from the venue's own
+  data.
+- **C** — a market family. The rows share a naming block and nothing that
+  identifies a contest. `UNDERLYING_EVENT_KEY` is `NOT_IDENTIFIED` here; only
+  `MARKET_FAMILY_KEY` exists.
+- **D** — no identity evidence at all.
+
+The two fields are now separate in code: `market_family_key()` returns the
+derived label, `underlying_event_key()` returns `(key, level)` and hands back
+`NOT_IDENTIFIED` at every level except A and B. `event_key` is kept as an alias
+so no existing call site silently changed meaning.
+
+A defect in the first version of that function was caught by a test rather than
+by reading it: `{None}` has length one, so a cluster where *nobody filled in*
+`gameStartTime` was promoted to Level B. Absence of evidence again, in new
+clothes. Fixed, pinned.
+
+## CL-26 — BOUNDS, NOT A POINT ESTIMATE
+
+```
+PROVEN_DISTINCT_EVENT_N        72
+EVENT_COUNT_LOWER_BOUND      1439
+EVENT_COUNT_UPPER_BOUND     14802
+EXACT_INDEPENDENT_EVENT_N   NOT_IDENTIFIED
+PROVISIONAL_HEURISTIC_COUNT  1456     (inside the range, not pinned by it)
+RANGE_WIDTH                  10.3x
+```
+
+The upper bound is **a ceiling, not an estimate**. It applies the
+every-market-is-independent assumption to the unproven remainder only, and is
+reported to show how wide the range is — not adopted. Retracting 1,456 is not
+licence to swing to 20,000; a flag in code and a test both say so.
+
+**What is proved, and is enough to act on:** on the Level-B stratum, 4,783
+markets are only 72 contests — 66.4 markets per contest — established from the
+venue's own team and start-time fields with no heuristic in the chain.
+
+## CL-27 — EVENT-WEIGHTED INFERENCE IS OFF
+
+`by_event()` now raises `EventKeyNotValidated` unless the caller supplies a key
+at identity level A or B. The weighting machinery is intact and still tested —
+the defect was in the key, not the aggregation — and it switches back on the
+moment a validated key exists.
+
+Downstream consequences, all pinned:
+
+- `capacity()` reports `OPPORTUNITY_COUNT` and `INDEPENDENT_CAPACITY`
+  separately. The second is `NOT_IDENTIFIED`, bracketed by
+  `INDEPENDENT_CAPACITY_LOWER_BOUND` (the family count) and
+  `INDEPENDENT_CAPACITY_UPPER_BOUND` (the market count).
+- `inference_status()` returns `EVENT_IDENTITY_UNVALIDATED`, which is
+  deliberately **not** `UNDERPOWERED` — the latter would imply the identity was
+  sound and only the sample small.
+
+## CL-28 — THE ROUTING AUDIT'S TIMING CHECK IS NOW A MEASUREMENT
+
+`audit_schedule()` fixes the audit lane's POSITION before any result exists.
+That is the right design, but a position is a promise, not a measurement: a
+stall, a retry or a rate limit pushes the audit lane late in wall-clock from a
+perfectly fair slot.
+
+`audit_elapsed_report()` therefore reports the actual distributions —
+`ROUTED_ELAPSED_P10/P50/P90` and `AUDIT_ELAPSED_P10/P50/P90` — and sets
+`SCHEDULE_FAIRNESS_ASSERTED_FROM_POSITION = False`. When the median gap exceeds
+a tenth of the scan's own span it emits
+
+```
+TIMING_DEFECT = AUDIT_LANE_OBSERVED_AT_MATERIALLY_DIFFERENT_ELAPSED_TIME
+```
+
+and the false-negative rate from that scan is labelled confounded with scan
+drift rather than reported as a routing-rule error rate.

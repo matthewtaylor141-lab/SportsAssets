@@ -437,8 +437,14 @@ class TheTwoEstimandsAreNeverCollapsed(unittest.TestCase):
         rows.append({"slug": "aec-nfl-c-d-2026-09-20", "X": False})
         return rows
 
+    # The weighting MACHINERY is still correct and still tested; it is the KEY
+    # that failed validation. So these run it with an explicit level-B key,
+    # which is the only way the gate lets it run at all.
+    _B = dict(key=lambda c: E.market_family_key(c.get("slug")),
+              level=E.IDENTITY_LEVEL_B)
+
     def test_market_and_event_weighting_give_different_answers(self):
-        out = E.by_event(self._rows(), "X")
+        out = E.by_event(self._rows(), "X", **self._B)
         self.assertEqual(out["RAW_MARKET_N"], 5)
         self.assertEqual(out["UNIQUE_EVENT_N"], 2)
         self.assertAlmostEqual(out["MARKET_WEIGHTED_RESULT"], 3 / 5)
@@ -447,24 +453,25 @@ class TheTwoEstimandsAreNeverCollapsed(unittest.TestCase):
                                   out["EVENT_WEIGHTED_RESULT"])
 
     def test_the_independent_sample_size_is_events_not_markets(self):
-        out = E.by_event(self._rows(), "X")
+        out = E.by_event(self._rows(), "X", **self._B)
         self.assertEqual(out["INDEPENDENT_SAMPLE_SIZE"], 2)
         self.assertNotEqual(out["INDEPENDENT_SAMPLE_SIZE"],
                             out["RAW_MARKET_N"])
 
     def test_event_weighting_aggregates_within_event_first(self):
-        self.assertIn("WITHIN_EVENT_FIRST", E.by_event([], "X")["WEIGHTING"])
+        self.assertIn("WITHIN_EVENT_FIRST",
+                      E.by_event([], "X", **self._B)["WEIGHTING"])
         self.assertTrue(E.ESTIMANDS_ARE_NEVER_COLLAPSED)
 
     def test_markets_without_an_event_key_are_counted_not_folded_in(self):
         rows = self._rows() + [{"slug": "no-date", "X": True}]
-        out = E.by_event(rows, "X")
+        out = E.by_event(rows, "X", **self._B)
         self.assertEqual(out["MARKETS_WITHOUT_EVENT_ID"], 1)
         self.assertEqual(out["UNIQUE_EVENT_N"], 2)
 
     def test_underpowered_is_said_rather_than_precision_manufactured(self):
-        self.assertEqual(E.inference_status(2), "UNDERPOWERED")
-        self.assertEqual(E.inference_status(1456),
+        self.assertEqual(E.inference_status(2, validated=True), "UNDERPOWERED")
+        self.assertEqual(E.inference_status(1456, validated=True),
                          "EVENT_CLUSTERED_INFERENCE_PERMITTED")
 
 
@@ -549,10 +556,10 @@ class CapacityIsGrossAndNet(unittest.TestCase):
                      "HIGH_ACTIVITY_AT_DECISION": True})
         cap = E.capacity(rows)
         self.assertEqual(cap["MARKET_LEVEL_GROSS_CAPACITY"], 31)
-        self.assertEqual(cap["EVENT_LEVEL_NET_CAPACITY"], 2)
-        self.assertEqual(cap["MAX_EVENT_EXPOSURE"], 30)
+        self.assertEqual(cap["FAMILY_LEVEL_COUNT"], 2)
+        self.assertEqual(cap["MAX_FAMILY_EXPOSURE"], 30)
         self.assertNotEqual(cap["MARKET_LEVEL_GROSS_CAPACITY"],
-                            cap["EVENT_LEVEL_NET_CAPACITY"])
+                            cap["FAMILY_LEVEL_COUNT"])
 
     def test_independence_is_not_inferred_from_differing_slugs(self):
         cap = E.capacity([])
@@ -562,3 +569,336 @@ class CapacityIsGrossAndNet(unittest.TestCase):
         cap = E.capacity([])
         self.assertEqual(cap["EXPECTED_NET_PNL_PER_CAPITAL_DOLLAR_PER_HOUR"],
                          NI)
+
+
+# ---------------------------------------------------------------------------
+# CL-22 .. CL-26: THE EVENT KEY FAILED VALIDATION, AND THE CODE SAYS SO
+# ---------------------------------------------------------------------------
+
+def _mkt(slug, start=None, teams=(), provs=(), mtype="SPORTS_MARKET_TYPE_PROP",
+         title=None):
+    sides = []
+    for i, t in enumerate(teams):
+        sides.append({"teamId": t, "team": {
+            "id": t, "name": "T%s" % t,
+            "providerIds": [{"provider": "PROVIDER_SPORTRADAR",
+                             "providerId": p} for p in (provs[i:i + 1] or ())]}})
+    while len(sides) < 2:
+        sides.append({"description": "Yes"})
+    return {"slug": slug, "gameStartTime": start, "marketSides": sides,
+            "sportsMarketTypeV2": mtype, "title": title or slug}
+
+
+class TheDerivedKeyIsLabelledAsUnvalidated(unittest.TestCase):
+    """The count 1,456 is a provisional heuristic, not a measurement."""
+
+    def test_the_method_is_named_a_heuristic(self):
+        self.assertEqual(E.EVENT_KEY_METHOD, "DERIVED_HEURISTIC_V1")
+
+    def test_the_key_is_not_validated(self):
+        self.assertFalse(E.EVENT_KEY_VALIDATED)
+
+    def test_the_1456_count_is_labelled_provisional(self):
+        self.assertEqual(E.UNIQUE_EVENTS_1456, "PROVISIONAL_HEURISTIC_COUNT")
+
+    def test_the_independent_sample_size_is_not_identified(self):
+        self.assertEqual(E.INDEPENDENT_SAMPLE_SIZE, NI)
+
+    def test_the_order_of_magnitude_claim_is_retracted(self):
+        self.assertEqual(E.SAMPLE_OVERSTATEMENT_MAGNITUDE, NI)
+
+    def test_the_broad_conclusion_survives_the_retraction(self):
+        # The direction is kept; only the quantity is withdrawn. Retracting a
+        # number is not licence to swing to the opposite error.
+        self.assertTrue(E.MARKETS_ARE_NOT_INDEPENDENT)
+        self.assertTrue(E.DIFFERENT_SLUGS_DO_NOT_IMPLY_INDEPENDENT_EVENTS)
+
+    def test_no_source_line_states_the_order_of_magnitude_claim(self):
+        # Structural, not a substring scan for the phrase itself: the file is
+        # allowed to RECORD that the claim was retracted. What it may not do is
+        # bind a live name to a magnitude.
+        import ast
+        tree = ast.parse(open(E.__file__).read())
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Assign):
+                for t in node.targets:
+                    if (isinstance(t, ast.Name)
+                            and "OVERSTATEMENT" in t.id
+                            and isinstance(node.value, ast.Constant)):
+                        self.assertEqual(node.value.value, NI)
+
+
+class TheTwoKeysAreSeparateFields(unittest.TestCase):
+    """MARKET_FAMILY_KEY and UNDERLYING_EVENT_KEY are different claims."""
+
+    def test_the_family_key_exists_and_is_the_old_derivation(self):
+        self.assertEqual(E.market_family_key("aec-ufc-alomen-iwobar-2026-09-19"),
+                         "ufc-alomen-iwobar-2026-09-19")
+        self.assertEqual(
+            E.market_family_key("astatc-ufc-alomen-iwobar-2026-09-19-mof-ko"),
+            "ufc-alomen-iwobar-2026-09-19")
+
+    def test_event_key_is_kept_as_an_alias_so_no_caller_changes_meaning(self):
+        self.assertIs(E.event_key, E.market_family_key)
+
+    def test_a_proved_single_contest_reaches_level_b(self):
+        ms = [_mkt("aec-nfl-det-buf-2026-09-17", "2026-09-17T00:20:00Z",
+                   teams=(1, 2), provs=("u1", "u2")) for _ in range(5)]
+        key, level = E.underlying_event_key(ms)
+        self.assertEqual(level, E.IDENTITY_LEVEL_B)
+        self.assertNotEqual(key, NI)
+
+    def test_a_season_family_is_level_c_and_yields_no_event_key(self):
+        # The `nfl-2027-01-10` shape: one naming block, 32 participant sets.
+        ms = [_mkt("tec-nfl-2027-01-10-t%d" % i, "2026-09-10T00:00:00Z",
+                   teams=(i,), provs=("u%d" % i,),
+                   mtype="SPORTS_MARKET_TYPE_FUTURE") for i in range(32)]
+        key, level = E.underlying_event_key(ms)
+        self.assertEqual(level, E.IDENTITY_LEVEL_C)
+        self.assertEqual(key, NI)
+
+    def test_a_family_label_is_never_returned_dressed_as_an_event_id(self):
+        for ms in ([_mkt("tec-cfb-wins-2026-11-28-a",
+                         "2026-08-27T16:00:00Z",
+                         mtype="SPORTS_MARKET_TYPE_FUTURE")],
+                   [_mkt("x-2026-01-01")], []):
+            key, level = E.underlying_event_key(ms)
+            if level != E.IDENTITY_LEVEL_B:
+                self.assertEqual(key, NI)
+
+    def test_a_missing_start_time_on_every_row_is_not_one_start_time(self):
+        # Caught by the roster-collapse test rather than by reading the code:
+        # `{None}` has length 1, so a naive check promoted a cluster with NO
+        # start time at all to level B.
+        ms = [_mkt("aec-nfl-a-b-2026-09-17", None, teams=(1, 2),
+                   provs=("u1", "u2")) for _ in range(4)]
+        key, level = E.underlying_event_key(ms)
+        self.assertNotEqual(level, E.IDENTITY_LEVEL_B)
+        self.assertEqual(key, NI)
+
+    def test_differing_start_times_alone_break_level_b(self):
+        ms = [_mkt("aec-nfl-a-b-2026-09-17", "2026-09-17T00:00:00Z",
+                   teams=(1, 2), provs=("u1", "u2")),
+              _mkt("aec-nfl-a-b-2026-09-17", "2026-09-17T19:00:00Z",
+                   teams=(1, 2), provs=("u1", "u2"))]
+        _, level = E.underlying_event_key(ms)
+        self.assertNotEqual(level, E.IDENTITY_LEVEL_B)
+
+
+class ThePurityTest(unittest.TestCase):
+    """Absence of evidence is UNKNOWN, never PURE."""
+
+    def test_an_over_merged_cluster_is_caught(self):
+        ms = [_mkt("tec-nfl-2027-01-10-t%d" % i, "2026-09-10T00:00:00Z",
+                   teams=(i,), provs=("u%d" % i,),
+                   mtype="SPORTS_MARKET_TYPE_FUTURE") for i in range(32)]
+        out = E.cluster_purity(ms)
+        self.assertEqual(out["OVERMERGED_CLUSTERS"], 1)
+        self.assertEqual(out["MARKETS_IN_OVERMERGED_CLUSTERS"], 32)
+        self.assertEqual(out["ROWS"][0]["DISTINCT_PARTICIPANT_PAIRS"], 32)
+
+    def test_a_real_game_cluster_is_pure(self):
+        ms = [_mkt("aec-nfl-det-buf-2026-09-17", "2026-09-17T00:20:00Z",
+                   teams=(1, 2), provs=("u1", "u2")) for _ in range(9)]
+        out = E.cluster_purity(ms)
+        self.assertEqual(out["PURE_CLUSTERS"], 1)
+        self.assertEqual(out["OVERMERGED_CLUSTERS"], 0)
+
+    def test_a_cluster_with_no_identity_evidence_is_unknown_not_pure(self):
+        ms = [_mkt("tec-cfb-wins-2026-11-28-%d" % i, "2026-08-27T16:00:00Z",
+                   mtype="SPORTS_MARKET_TYPE_FUTURE") for i in range(6)]
+        out = E.cluster_purity(ms)
+        self.assertEqual(out["UNKNOWN_CLUSTERS"], 1)
+        self.assertEqual(out["PURE_CLUSTERS"], 0)
+
+    def test_both_over_merge_rates_are_reported(self):
+        ms = ([_mkt("tec-nfl-2027-01-10-t%d" % i, "2026-09-10T00:00:00Z",
+                    teams=(i,), provs=("u%d" % i,),
+                    mtype="SPORTS_MARKET_TYPE_FUTURE") for i in range(32)]
+              + [_mkt("aec-nfl-det-buf-2026-09-17", "2026-09-17T00:20:00Z",
+                      teams=(1, 2), provs=("u1", "u2"))])
+        out = E.cluster_purity(ms)
+        self.assertEqual(out["CLUSTERS_TESTED"], 2)
+        self.assertAlmostEqual(out["OVERMERGE_RATE_BY_CLUSTER"], 0.5)
+        self.assertAlmostEqual(out["OVERMERGE_RATE_BY_MARKET"], 32 / 33)
+        # By cluster and by market are DIFFERENT numbers and neither stands in
+        # for the other.
+        self.assertNotAlmostEqual(out["OVERMERGE_RATE_BY_CLUSTER"],
+                                  out["OVERMERGE_RATE_BY_MARKET"])
+
+    def test_markets_with_no_key_are_counted_not_dropped_silently(self):
+        out = E.cluster_purity([_mkt("no-date-here")])
+        self.assertEqual(out["MARKETS_WITH_NO_DERIVABLE_KEY"], 1)
+        self.assertEqual(out["CLUSTERS_TESTED"], 0)
+
+
+class TheEvidenceHierarchyIsFourLevels(unittest.TestCase):
+
+    def test_all_four_levels_are_named(self):
+        self.assertEqual(len(E.IDENTITY_LEVELS), 4)
+        for lvl in E.IDENTITY_LEVELS:
+            self.assertTrue(lvl[0] in "ABCD" and lvl[1] == "_")
+
+    def test_level_a_is_zero_on_this_venue_and_recorded_as_such(self):
+        self.assertEqual(E.OBSERVED_PREFIX_LEVEL_A_CLUSTERS, 0)
+        self.assertEqual(E.VENUE_EVENT_IDENTIFIER_PRESENT, "NO")
+
+    def test_an_explicit_venue_identifier_would_be_level_a(self):
+        # The probe is live, not decorative: ship the field and it is used.
+        ms = [{"slug": "x-2026-01-01", "eventId": "EV-7",
+               "marketSides": []} for _ in range(3)]
+        key, level = E.underlying_event_key(ms)
+        self.assertEqual(level, E.IDENTITY_LEVEL_A)
+        self.assertEqual(key, "EV-7")
+
+    def test_the_observed_prefix_counts_are_recorded(self):
+        self.assertEqual(E.OBSERVED_PREFIX_LEVEL_B_CLUSTERS, 72)
+        self.assertEqual(E.OBSERVED_PREFIX_LEVEL_B_MARKETS, 4783)
+        self.assertEqual(E.OBSERVED_PREFIX_NO_KEY_MARKETS, 487)
+
+
+class BoundsNotAPointEstimate(unittest.TestCase):
+
+    def test_the_exact_count_is_not_identified(self):
+        self.assertEqual(E.EXACT_INDEPENDENT_EVENT_N, NI)
+
+    def test_the_bounds_bracket_the_retracted_heuristic_count(self):
+        self.assertLess(E.EVENT_COUNT_LOWER_BOUND, E.EVENT_COUNT_UPPER_BOUND)
+        self.assertLessEqual(E.EVENT_COUNT_LOWER_BOUND, 1456)
+        self.assertGreaterEqual(E.EVENT_COUNT_UPPER_BOUND, 1456)
+
+    def test_the_upper_bound_is_flagged_as_a_ceiling(self):
+        # Retracting 1,456 must NOT become "every market is independent".
+        self.assertTrue(E.EVENT_COUNT_UPPER_BOUND_IS_A_CEILING_NOT_AN_ESTIMATE)
+
+    def test_the_proven_count_is_smaller_than_both_bounds(self):
+        self.assertLess(E.PROVEN_DISTINCT_EVENT_N, E.EVENT_COUNT_LOWER_BOUND)
+
+    def test_bounds_are_computed_not_just_declared(self):
+        ms = ([_mkt("aec-nfl-det-buf-2026-09-17", "2026-09-17T00:20:00Z",
+                    teams=(1, 2), provs=("u1", "u2")) for _ in range(9)]
+              + [_mkt("tec-nfl-2027-01-10-t%d" % i, "2026-09-10T00:00:00Z",
+                      teams=(i,), provs=("u%d" % i,),
+                      mtype="SPORTS_MARKET_TYPE_FUTURE") for i in range(4)])
+        out = E.event_count_bounds(ms)
+        self.assertEqual(out["PROVEN_DISTINCT_EVENT_N"], 1)
+        self.assertEqual(out["EXACT_INDEPENDENT_EVENT_N"], NI)
+        self.assertEqual(out["EVENT_COUNT_LOWER_BOUND"], 2)
+        # 1 proved cluster + the 4 unproven futures markets presumed distinct.
+        self.assertEqual(out["EVENT_COUNT_UPPER_BOUND"], 5)
+        self.assertLess(out["EVENT_COUNT_LOWER_BOUND"],
+                        out["EVENT_COUNT_UPPER_BOUND"])
+
+    def test_two_keys_on_one_roster_and_date_collapse_but_only_when_proved(self):
+        # Same league token, same settlement date, identical roster -> proved.
+        proved = [_mkt("tec-nfl-2027-01-10-t%d" % i, None, teams=(1, 2),
+                       provs=("u1", "u2"), mtype="SPORTS_MARKET_TYPE_FUTURE")
+                  for i in range(2)]
+        proved += [_mkt("tec-nfl-wins-2027-01-10-t%d" % i, None, teams=(1, 2),
+                        provs=("u1", "u2"), mtype="SPORTS_MARKET_TYPE_FUTURE")
+                   for i in range(2)]
+        self.assertEqual(
+            E.event_count_bounds(proved)["KEYS_REMOVED_BY_PROVED_COLLAPSE"], 1)
+
+    def test_a_shared_league_and_date_alone_never_collapses(self):
+        # The ushrmov trap: `ushrmov-al-01-2026-11-03` and
+        # `ushrmov-al-03-2026-11-03` share a league token and a date and are
+        # DIFFERENT CONTESTS. With no team ids to test, nothing collapses.
+        rows = [_mkt("paccc-ushrmov-al-01-2026-11-03-%d" % i,
+                     mtype="SPORTS_MARKET_TYPE_FUTURE") for i in range(3)]
+        rows += [_mkt("paccc-ushrmov-al-03-2026-11-03-%d" % i,
+                      mtype="SPORTS_MARKET_TYPE_FUTURE") for i in range(3)]
+        out = E.event_count_bounds(rows)
+        self.assertEqual(out["KEYS_REMOVED_BY_PROVED_COLLAPSE"], 0)
+        self.assertEqual(out["EVENT_COUNT_LOWER_BOUND"], 2)
+
+
+class EventWeightedInferenceIsOff(unittest.TestCase):
+
+    def test_calling_by_event_without_a_validated_key_raises(self):
+        with self.assertRaises(E.EventKeyNotValidated):
+            E.by_event([{"slug": "aec-nfl-a-b-2026-09-19", "X": True}], "X")
+
+    def test_a_level_c_key_does_not_unlock_it(self):
+        with self.assertRaises(E.EventKeyNotValidated):
+            E.by_event([], "X", level=E.IDENTITY_LEVEL_C)
+        with self.assertRaises(E.EventKeyNotValidated):
+            E.by_event([], "X", level=E.IDENTITY_LEVEL_D)
+
+    def test_the_refusal_names_why(self):
+        try:
+            E.by_event([], "X")
+        except E.EventKeyNotValidated as exc:
+            self.assertIn("EVENT_WEIGHTED_INFERENCE_DISABLED", str(exc))
+            self.assertIn("DERIVED_HEURISTIC_V1", str(exc))
+            self.assertIn(NI, str(exc))
+
+    def test_a_level_b_key_switches_it_back_on(self):
+        # The weighting machinery is intact; the defect was the key.
+        out = E.by_event([{"slug": "aec-nfl-a-b-2026-09-19", "X": True}], "X",
+                         level=E.IDENTITY_LEVEL_B)
+        self.assertEqual(out["UNIQUE_EVENT_N"], 1)
+        self.assertEqual(out["IDENTITY_LEVEL"], E.IDENTITY_LEVEL_B)
+
+    def test_inference_status_reports_unvalidated_not_underpowered(self):
+        # A big count does not repair an unvalidated key, and "UNDERPOWERED"
+        # would wrongly imply the identity was sound and only the size small.
+        self.assertEqual(E.inference_status(99999), "EVENT_IDENTITY_UNVALIDATED")
+        self.assertEqual(E.inference_status(2), "EVENT_IDENTITY_UNVALIDATED")
+
+
+class OpportunityIsNotIndependentCapacity(unittest.TestCase):
+
+    def test_capacity_returns_both_names_and_conflates_neither(self):
+        rows = [{"slug": "aec-nfl-a-b-2026-09-19-p%d" % i,
+                 "HIGH_ACTIVITY_AT_DECISION": True} for i in range(30)]
+        cap = E.capacity(rows)
+        self.assertEqual(cap["OPPORTUNITY_COUNT"], 30)
+        self.assertEqual(cap["INDEPENDENT_CAPACITY"], NI)
+        self.assertEqual(cap["INDEPENDENT_CAPACITY_LOWER_BOUND"], 1)
+        self.assertEqual(cap["INDEPENDENT_CAPACITY_UPPER_BOUND"], 30)
+
+    def test_capacity_reports_the_key_is_unvalidated(self):
+        self.assertFalse(E.capacity([])["EVENT_KEY_VALIDATED"])
+
+
+class TheAuditTimingCheckMeasuresElapsedTime(unittest.TestCase):
+    """A fair POSITION is not a measurement of a fair TIME."""
+
+    def _obs(self, routed, audit):
+        return ([{"lane": "ROUTED", "elapsed_s": e} for e in routed]
+                + [{"lane": "AUDIT", "elapsed_s": e} for e in audit])
+
+    def test_the_percentiles_are_reported_for_both_lanes(self):
+        out = E.audit_elapsed_report(self._obs(range(0, 100), range(0, 100, 5)))
+        for k in ("ROUTED_ELAPSED_P10", "ROUTED_ELAPSED_P50",
+                  "ROUTED_ELAPSED_P90", "AUDIT_ELAPSED_P10",
+                  "AUDIT_ELAPSED_P50", "AUDIT_ELAPSED_P90"):
+            self.assertIn(k, out)
+            self.assertNotEqual(out[k], NI)
+
+    def test_fairness_is_not_asserted_from_the_schedule(self):
+        out = E.audit_elapsed_report([])
+        self.assertFalse(out["SCHEDULE_FAIRNESS_ASSERTED_FROM_POSITION"])
+        self.assertTrue(out["ELAPSED_MEASURED"])
+
+    def test_an_interleaved_scan_reads_as_comparable(self):
+        out = E.audit_elapsed_report(self._obs(range(0, 100), range(0, 100, 4)))
+        self.assertTrue(out["TIMING_COMPARABLE"])
+
+    def test_an_audit_lane_read_late_is_caught_despite_a_fair_position(self):
+        # This is precisely what asserting first/last thirds could not see: a
+        # stall pushes the audit lane's WALL-CLOCK late even from a fair slot.
+        out = E.audit_elapsed_report(self._obs(range(0, 100), range(80, 100)))
+        self.assertFalse(out["TIMING_COMPARABLE"])
+        self.assertIn("confounded with scan drift", out["TIMING_DEFECT"])
+
+    def test_an_empty_lane_is_not_identified_rather_than_comparable(self):
+        out = E.audit_elapsed_report(self._obs(range(0, 10), []))
+        self.assertEqual(out["AUDIT_ELAPSED_P50"], NI)
+        self.assertEqual(out["TIMING_COMPARABLE"], NI)
+
+    def test_the_schedule_and_the_report_are_different_functions(self):
+        sched = E.audit_schedule(["a", "b"], ["c"], "salt")
+        self.assertEqual(len(sched), 3)
+        self.assertEqual({r["lane"] for r in sched}, {"ROUTED", "AUDIT"})
