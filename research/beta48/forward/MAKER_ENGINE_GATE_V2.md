@@ -50,8 +50,12 @@ QUEUE_AHEAD                    BID  median 107.04 contracts = 1.32 median
                                     trade hits the bid, 118.3 min at 50/50
                                ASK  median 101.96 = 1.26 trades -> 56.4 / 112.7
 
-SPREAD_CAPTURE                 $0.0100 per contract at a 1-tick spread
-                               (median spread is 1 tick: 613 of 780 pairs)
+ONE_TICK_SPREAD_OPPORTUNITY    OBSERVED, widespread: 1 tick on 8,357 of
+                               11,290 two-sided markets = 74.0% board-wide.
+                               Gross value IF captured: $0.0100 per contract.
+BETTOR_REALIZED_SPREAD_CAPTURE NOT_ESTABLISHED -- requires passive fill, queue
+                               position, adverse selection and inventory
+                               management. Presence is not capture.
 
 MAKER_REBATE                   $0.0053 per contract, both sides, at p=0.305
                                $0.00 at a one-contract clip -- the floor is
@@ -74,13 +78,16 @@ COUNTERFACTUAL_FILL_EVIDENCE   F0-F3 bounds only, and they are unevaluated --
                                ACTUAL_BETTOR_FILL_PROBABILITY = NOT_IDENTIFIED.
                                TOUCH != FILL.
 
-ADVERSE_SELECTION              NOT_IDENTIFIED for this panel.
-                               A HARD CONSTRAINT exists from a different flow:
-                               -$0.0140/share making a market to RN1's takes,
-                               112,553 trades over 9,337 conditions, fills
-                               OBSERVED not modelled, net -$0.0090/share,
-                               95% CI [-0.0143,-0.0038], clustered by
-                               condition. See the scope warning below.
+ADVERSE_SELECTION              NOT_IDENTIFIED for this panel, and
+                               THIS_IS_ACTUAL_BETTOR_ADVERSE_SELECTION = NO.
+                               A CONSTRAINT exists from a DIFFERENT VENUE and a
+                               DIFFERENT FLOW: -$0.0140/share (a residual)
+                               inside a net of -$0.0090/share, 95% CI
+                               [-0.0143,-0.0038], on POLYMARKET CLOB (not
+                               PMUS), 2026-08-06..09-11, 112,553 trades over
+                               9,337 conditions, marked TO SETTLEMENT, against
+                               ONE informed taker. Fills observed, not
+                               modelled. Full provenance block below.
 
 RESIDUAL_INVENTORY_COST        NOT_IDENTIFIED.
                                UNPAIRED_LEG_EXIT_COST = NOT_IDENTIFIED, and no
@@ -210,8 +217,17 @@ SPREAD_TICKS, all 11,290 two-sided markets on the observed prefix
 ```
 
 So "the spread is one tick" is **not** a UFC artifact — it is the modal state
-of three quarters of the two-sided board, and the $0.0100 spread-capture figure
-carries board-wide.
+of three quarters of the two-sided board:
+
+```
+ONE_TICK_SPREAD_OPPORTUNITY_IS_WIDESPREAD = OBSERVED   (74.0%)
+BETTOR_REALIZED_SPREAD_CAPTURE            = NOT_ESTABLISHED
+```
+
+**Spread PRESENCE is not spread CAPTURE.** Realizing $0.0100 requires a passive
+fill, a queue position, a survivable adverse-selection cost and inventory
+management -- and all four are unmeasured or incompletely measured. A widespread
+one-tick spread is an OPPORTUNITY on the board, not revenue in our ledger.
 
 What does **not** carry is everything that needs a book read:
 
@@ -222,11 +238,12 @@ TRADE_SIZE           measured on UFC only
 ACTIVE / HIGH_ACTIVITY   NOT_IDENTIFIED board-wide
 ```
 
-That distinction matters for the gate: the **reward** side of the maker
-arithmetic generalizes; the **cost** side — how long capital waits, and how
-often anything trades at all — is measured on 1.9% of the board and is
-`NOT_IDENTIFIED` on the other 98.1%. It is not "low" there. It is unmeasured,
-and a 9,182-read census would settle it for free.
+That distinction matters for the gate: the **opportunity** side is observed
+board-wide; the **cost** side — how long capital waits, how often anything
+trades at all, and what the fill costs when it comes — is measured on 1.9% of
+the routed universe and is `NOT_IDENTIFIED` on the other 98.1%. It is not "low"
+there. It is unmeasured, and a 9,182-read census would settle part of it for
+free. Neither side is realized P&L until a BETTOR order is filled.
 
 ```
 PANEL_GENERALIZES_TO_BOARD = NO
@@ -377,6 +394,76 @@ even then it yields `COUNTERFACTUAL_PASSIVE_FILL`, never
 `ACTUAL_BETTOR_FILL_PROBABILITY`. Protocol prepared in
 `MICRO_LIVE_VALIDATION.md`. Requires explicit approval, capital and a
 credential. **Not sought here.** `MICRO_LIVE_AUTHORIZED = NO`.
+
+---
+
+## PROVENANCE OF THE −$0.0090 / SHARE MAKER RESULT
+
+This is one of the strongest findings in the package, so its exact scope
+travels with it everywhere it is quoted. **It is not our live execution
+result.**
+
+```
+SOURCE_DATASET      Retained Polymarket CLOB probe rows (214,609 rows), read
+                    for execution economics. THIS IS POLYMARKET CLOB, NOT
+                    PMUS -- a DIFFERENT VENUE from the forward capture that
+                    produced every other number in this closeout.
+
+POPULATION          Trades in which RN1 was the TAKER. Every probe row carries
+                    side = BUY; RN1 only buys in this dataset, so the passive
+                    side was filled. ONE COUNTERPARTY, NOT THE BOARD.
+
+TIME_WINDOW         2026-08-06 .. 2026-09-11. Not the current regime.
+
+N_TRADES            112,553  (1,684 already-resolved rows dropped)
+
+N_INDEPENDENT_MARKETS_OR_EVENTS
+                    9,337 conditions, each with a one-hot settlement whose
+                    resolved_at is strictly after the trade.
+
+MAKER_DEFINITION    The anonymous resting offer that RN1 lifted. NOT BETTOR.
+                    Not any identified account. Not an order we placed.
+
+MARKOUT_HORIZON     TO SETTLEMENT. The maker sells at p and pays out the
+                    settlement, so the quantity is p - settle. This is NOT a
+                    1-minute, 5-minute or 30-minute markout, and it should not
+                    be compared to one.
+
+ESTIMATE            EXPECTED_MAKER_NET_VALUE = -0.0090 per share, offer side
+
+CI                  95% [-0.0143, -0.0038], clustered by condition
+
+WHAT_IS_DIRECTLY_OBSERVED
+                    That the trade occurred, at what price, and how the
+                    condition settled. THE FILL IS OBSERVED, NOT MODELLED --
+                    no touch is being counted as a fill.
+
+WHAT_IS_INFERRED    (a) The decomposition into SPREAD_CAPTURE +0.0050 and
+                        ADVERSE_SELECTION -0.0140. The second is a RESIDUAL
+                        (net minus spread), not an independent measurement.
+                    (b) Any transfer of this number to BETTOR, to PMUS, to a
+                        different counterparty, or to a different period.
+                        Every one of those transfers is unsupported.
+
+THIS_IS_ACTUAL_BETTOR_ADVERSE_SELECTION = NO
+```
+
+**Strongest truthful label:**
+
+```
+OBSERVED_FILL_MAKER_VALUE_AGAINST_ONE_INFORMED_TAKER,
+POLYMARKET_CLOB, 2026-08-06..09-11, MARKED TO SETTLEMENT
+```
+
+**What it does establish.** That resting at the touch against a specific
+informed taker was value-destructive over that window on that venue, at a
+magnitude that would have required a 1.81%-of-notional rebate to offset. It is
+a real, large-sample, settlement-anchored measurement and it is why the maker
+engine is not waved through.
+
+**What it does not establish.** BETTOR's adverse selection, on PMUS, now,
+against the board's flow. That is `NOT_IDENTIFIED` and only BETTOR's own
+resting orders can produce it.
 
 ---
 

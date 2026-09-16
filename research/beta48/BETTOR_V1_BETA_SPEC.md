@@ -132,8 +132,10 @@ SETTLEMENT is a valid residual outcome -- and never a default.
 
 Bound on `INDEPENDENT_CAPACITY_LOWER_BOUND` — the market-family count — **not**
 on the market count. Using the market count would assume an independence the
-evidence rejects: 4,783 markets are proved to be only 72 contests on the
-stratum where the venue's own fields settle it.
+evidence rejects: on the STRONG-IDENTITY SUBSET,
+STRONG_IDENTITY_SUBSET_MARKETS = 4,783 map to
+PROVEN_DISTINCT_CONTESTS_IN_SUBSET = 72. This is a SUBSET result;
+EXACT_FULL_BOARD_INDEPENDENT_EVENT_COUNT = NOT_IDENTIFIED.
 
 Since `EVENT_KEY_VALIDATED = NO`, the beta treats every market in a family as
 fully correlated. That is conservative and it is deliberate.

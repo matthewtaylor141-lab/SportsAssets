@@ -5,12 +5,20 @@ Every other rendering of this sprint (the management artifact, any PDF) is a
 
 ```
 SPRINT_CLOSEOUT_STATUS   = RESEARCH / ARCHITECTURE SUBSTANTIALLY COMPLETE
-MAKER_ENGINE_GATE_V2     = BLOCKED
 BETTOR_V1_BETA_STATUS    = SPECIFIED, SHADOW-ONLY, NOT BUILT
-STAGE2_CENSUS_STATUS     = IN FLIGHT
+MAKER_ENGINE_GATE_V2     = BLOCKED
 MAKER_PROFITABILITY      = NOT_ESTABLISHED
+STAGE2_CENSUS_STATUS     = IN FLIGHT
 MICRO_LIVE_AUTHORIZED    = NO
 mirror_live              = false
+```
+
+The sprint is **not downgraded** because a production-validation gate remains.
+Two different things are being graded:
+
+```
+ARCHITECTURE / RESEARCH SPRINT   = SUBSTANTIALLY COMPLETE
+PRODUCTION EXECUTION VALIDATION  = NEXT PHASE
 ```
 
 ---
@@ -34,7 +42,8 @@ it. We had no measurement of our own execution environment at all.
 - **Directional economics matter.** Three accounts made their money in the
   bands where their pairing did worst.
 - **Execution and capital recycling matter.** A one-tick spread is worth
-  $0.0100 per contract; reaching the front of the queue takes one to two hours.
+  $0.0100 per contract *if captured*; reaching the front of the queue takes one
+  to two hours, before any fill.
 - **Blind copying is not sufficient** — and is not even well-defined, because
   nobody has isolated what the profitable accounts are doing.
 
@@ -70,7 +79,7 @@ capital-turnover economics.
 
 | | PAIR_COMPLETION | DIRECTIONAL_HOLD | RESIDUAL_INVENTORY | CAPITAL_RECYCLING | EXIT_BEHAVIOR | MAKER / REBATE | KNOWN_STRENGTH | KNOWN_FAILURE_MODE |
 |---|---|---|---|---|---|---|---|---|
-| **RN1** | 78,500 merges | primary, takes at once | held to settlement | via merge/redeem only | **zero sells** — exits by buying the complement | pure taker; the maker facing him loses 0.90¢/share | informed entry; band economics monotone | two sources disagree by up to 21.2 pp; good only cheap |
+| **RN1** | 78,500 merges | primary, takes at once | held to settlement | via merge/redeem only | **zero sells** — exits by buying the complement | pure taker; the maker facing him lost 0.90¢/share (Polymarket CLOB, 2026-08-06..09-11) | informed entry; band economics monotone | two sources disagree by up to 21.2 pp; good only cheap |
 | **Ferrari** | pair-positive, ρ −1.000 | present, not separable | settlement | merge-driven | ≤0.54% of stake | none observed | best total ROI, +7.06%; independent of discovery | merge curve perfect, total ρ only −0.257 |
 | **SwissTony** | ρ −1.000 | NOT_IDENTIFIED | settlement | NOT_IDENTIFIED | ≤0.54% | none observed | none adoptable — excluded | 6.06M fills for +0.10%; volume ≠ edge |
 | **HomeRunHazard** | pair-negative | money came from its worst pairing band | settlement | none observable | **exactly zero sells** | none observed | none | textbook curve, negative money |
@@ -174,20 +183,31 @@ in every output, whatever `TOTAL_NET` says. MODEL A (structural) and MODEL B
 1. **The merge curve is universal and uninformative about money.** 6/6 accounts
    replicate it (ρ −0.94 to −1.00); 2/6 clear the preregistered bar on total
    economics; **14 of 36 bands flip sign**. All six reconcile at $0.00.
-2. **Making a market to informed flow at the touch loses money.**
+2. **Resting at the touch against one informed taker was value-destructive.**
    −$0.0090/share net, 95% CI [−0.0143, −0.0038], clustered by condition,
-   112,553 trades over 9,337 conditions, **fills observed not modelled**.
-   Adverse selection is 2.8× the half-spread earned.
+   112,553 trades over 9,337 conditions, **fills observed not modelled**,
+   marked **to settlement**. Adverse selection is 2.8× the half-spread earned.
+   **Scope, which travels with the number:** Polymarket CLOB — *a different
+   venue from every other figure here* — 2026-08-06..09-11, one counterparty,
+   an anonymous resting offer that was not ours.
+   `THIS_IS_ACTUAL_BETTOR_ADVERSE_SELECTION = NO`. Full provenance in
+   `MAKER_ENGINE_GATE_V2.md`.
 3. **The maker rebate does not exist at small clip size.** Banker-rounded per
    fill, so a one-contract fill earns **exactly $0.00**; the minimum clip is
    U-shaped in price (41 contracts at p=0.01, 2 at p=0.30–0.70, 41 at p=0.99).
-4. **Market-level independence is false, and now proved.** 4,783 markets are
-   only 72 contests — 66.4 per contest — from the venue's own team and
-   start-time fields, no heuristic in the chain.
-5. **The spread generalizes; depth and frequency do not.** One tick in
-   **8,357 of 11,290** two-sided markets (74.0%) board-wide, so the $0.0100
-   spread capture carries. Queue depth and trade frequency need a book read and
-   are measured on 1.9% of the routed universe.
+4. **Market count can massively overstate independent capital opportunities.**
+   On the strong-identity subset: `STRONG_IDENTITY_SUBSET_MARKETS = 4,783`,
+   `PROVEN_DISTINCT_CONTESTS_IN_SUBSET = 72` — 66.4 markets per contest, from
+   the venue's own team and start-time fields with no heuristic in the chain.
+   This is a SUBSET, not the board:
+   `EXACT_FULL_BOARD_INDEPENDENT_EVENT_COUNT = NOT_IDENTIFIED`.
+5. **The one-tick spread OPPORTUNITY is widespread; capture is not
+   established.** One tick in **8,357 of 11,290** two-sided markets (74.0%)
+   board-wide — `ONE_TICK_SPREAD_OPPORTUNITY_IS_WIDESPREAD = OBSERVED`. But
+   `BETTOR_REALIZED_SPREAD_CAPTURE = NOT_ESTABLISHED`: realizing it needs a
+   passive fill, a queue position, a survivable adverse-selection cost and
+   inventory management, none of which are established. Queue depth and trade
+   frequency need a book read and are measured on 1.9% of the routed universe.
 
 ## 6. TOP 5 REMAINING GATES
 
@@ -225,7 +245,8 @@ Terminology, fixed at the source and asserted by a test: **9,182 =
 ## 8. WHY BLOCKED IS DECISIVE, AND IS NOT FAILURE
 
 ```
-BOARD-WIDE SPREAD OPPORTUNITY            EXISTS (74.0% at one tick)
+ONE_TICK_SPREAD_OPPORTUNITY              OBSERVED, widespread (74.0%)
+BETTOR_REALIZED_SPREAD_CAPTURE           NOT_ESTABLISHED
 UFC EXECUTION ENVIRONMENT                POOR (1 trade / 44.9 market-minutes;
                                          16 of 23 markets traded zero times)
 NON-UFC TRADE FREQUENCY AND DEPTH        INSUFFICIENTLY MEASURED
