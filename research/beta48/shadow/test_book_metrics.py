@@ -80,19 +80,21 @@ class SamplingIsNotContinuousObservation(unittest.TestCase):
 
     def test_the_sampled_rates_carry_the_observed_suffix(self):
         m = BM.book_metrics([tick(i) for i in range(5)])
-        for k in ("QUOTE_LIFETIME_OBSERVED_BID_S_P50",
+        for k in ("BID_MIN_OBSERVED_PERSISTENCE_S_P50",
                   "TIME_AT_PRICE_OBSERVED_S_P50",
                   "BOOK_UPDATE_RATE_OBSERVED",
                   "MARKET_MOVED_THROUGH_QUOTE_OBSERVED",
                   "MID_MOVE_FREQUENCY_OBSERVED",
-                  "ONE_TICK_UPTIME_OBSERVED",
+                  "ONE_TICK_SNAPSHOT_SHARE",
                   "SPREAD_PERSISTENCE_OBSERVED_S_P50"):
             self.assertIn(k, m, k)
 
     def test_the_unsuffixed_names_are_gone(self):
         m = BM.book_metrics([tick(i) for i in range(5)])
         for gone in ("BOOK_MOVE_FREQUENCY", "MID_MOVE_FREQUENCY",
-                     "ONE_TICK_UPTIME", "DEPTH_CHANGE_RATE",
+                     "ONE_TICK_UPTIME", "ONE_TICK_UPTIME_OBSERVED",
+                     "DEPTH_CHANGE_RATE", "QUOTE_LIFETIME",
+                     "QUOTE_LIFETIME_OBSERVED_BID_S_P50",
                      "MARKET_MOVED_THROUGH_QUOTE_FREQUENCY"):
             self.assertNotIn(gone, m, gone)
 
@@ -103,9 +105,11 @@ class SamplingIsNotContinuousObservation(unittest.TestCase):
                      "DISAPPEARED_AND_REAPPEARED"):
             self.assertIn(miss, c["UNOBSERVED_BETWEEN_POLLS"])
 
-    def test_the_bias_direction_is_stated(self):
+    def test_the_over_broad_lower_bound_claim_is_withdrawn(self):
         m = BM.book_metrics([tick(i) for i in range(3)])
-        self.assertTrue(m["OBSERVED_RATES_ARE_A_LOWER_BOUND_ON_ACTIVITY"])
+        self.assertNotIn("OBSERVED_RATES_ARE_A_LOWER_BOUND_ON_ACTIVITY", m)
+        self.assertEqual(m["WITHDRAWN_TOO_BROAD"],
+                         "EVERY_OBSERVED_RATE_IS_A_LOWER_BOUND_ON_ACTIVITY")
 
 
 class MoveThroughIsAPricePath(unittest.TestCase):
@@ -167,7 +171,7 @@ class TheSpread(unittest.TestCase):
 
     def test_one_tick_uptime_is_the_share_of_one_tick_books(self):
         rows = [tick(0, ask="0.55"), tick(1, ask="0.55"), tick(2, ask="0.60")]
-        self.assertEqual(BM.book_metrics(rows)["ONE_TICK_UPTIME_OBSERVED"],
+        self.assertEqual(BM.book_metrics(rows)["ONE_TICK_SNAPSHOT_SHARE"],
                          D(2) / D(3))
 
     def test_spread_persistence_measures_a_sampled_run(self):
@@ -257,7 +261,7 @@ class TheCaptureItself(unittest.TestCase):
 
     def test_an_empty_capture_is_not_identified_not_zero(self):
         m = BM.book_metrics([])
-        self.assertEqual(m["ONE_TICK_UPTIME_OBSERVED"], NI)
+        self.assertEqual(m["ONE_TICK_SNAPSHOT_SHARE"], NI)
         self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED"], NI)
         self.assertEqual(m["REVISIT_CADENCE"]["MEDIAN_REVISIT_INTERVAL_S"], NI)
 
@@ -270,3 +274,130 @@ class TheCaptureItself(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheBiasStatementIsPerClassNotGlobal(unittest.TestCase):
+
+    def setUp(self):
+        self.m = BM.book_metrics([tick(i) for i in range(6)])
+
+    def test_class_a_counts_are_an_undercount_with_a_stated_bound(self):
+        self.assertEqual(self.m["CLASS_A_BOUND"],
+                         "OBSERVED_TRANSITION_COUNT_LE_TRUE_TRANSITION_COUNT")
+        self.assertEqual(self.m["CLASS_A_SAMPLING_BIAS_DIRECTION"],
+                         "UNDERCOUNT")
+        self.assertEqual(self.m["CLASS_A_BOUND_SUBJECT_TO"],
+                         "THE_SNAPSHOTS_THEMSELVES_BEING_VALID")
+
+    def test_every_class_a_count_is_actually_emitted(self):
+        for k in BM.CLASS_A_TRANSITION_COUNTS:
+            self.assertIn(k, self.m, k)
+            self.assertIsInstance(self.m[k], int)
+
+    def test_class_b_bias_direction_is_not_identified(self):
+        self.assertEqual(self.m["CLASS_B_SAMPLING_BIAS_DIRECTION"], NI)
+        self.assertIn("interval-censored", self.m["CLASS_B_WHY"])
+
+    def test_the_two_classes_do_not_overlap(self):
+        self.assertFalse(set(BM.CLASS_A_TRANSITION_COUNTS)
+                         & set(BM.CLASS_B_STATE_OCCUPANCY))
+
+    def test_a_frequency_is_a_share_not_a_continuous_time_rate(self):
+        self.assertTrue(self.m["FREQUENCIES_ARE_PER_OBSERVED_TRANSITION"])
+        self.assertEqual(self.m["FREQUENCIES_AS_CONTINUOUS_TIME_RATES"], NI)
+
+    def test_one_tick_uptime_is_a_snapshot_share_not_time_weighted(self):
+        self.assertIn("ONE_TICK_SNAPSHOT_SHARE", self.m)
+        self.assertEqual(self.m["TRUE_TIME_WEIGHTED_ONE_TICK_UPTIME"], NI)
+
+
+class QuoteDurationIsIntervalCensored(unittest.TestCase):
+
+    def test_a_single_unbroken_run_is_censored_at_both_ends(self):
+        r = BM.persistence_runs([tick(i) for i in range(5)], key="BID")
+        self.assertEqual(r["PERSISTENCE_RUNS"], 1)
+        self.assertEqual(r["LEFT_CENSORED_RUNS"], 1)
+        self.assertEqual(r["RIGHT_CENSORED_RUNS"], 1)
+        self.assertEqual(r["UNCENSORED_RUNS"], 0)
+
+    def test_a_middle_run_is_uncensored(self):
+        rows = [tick(0, bid="0.54"), tick(1, bid="0.55"), tick(2, bid="0.55"),
+                tick(3, bid="0.56")]
+        r = BM.persistence_runs(rows, key="BID")
+        self.assertEqual(r["PERSISTENCE_RUNS"], 3)
+        self.assertEqual(r["UNCENSORED_RUNS"], 1)
+        self.assertEqual(r["LEFT_CENSORED_RUNS"], 1)
+        self.assertEqual(r["RIGHT_CENSORED_RUNS"], 1)
+
+    def test_the_span_is_a_minimum_not_a_lifetime(self):
+        rows = [tick(0, bid="0.54"), tick(1, bid="0.54"), tick(2, bid="0.55")]
+        r = BM.persistence_runs(rows, key="BID")
+        self.assertEqual(r["MIN_OBSERVED_PERSISTENCE_S_MAX"], D("3"))
+        self.assertEqual(r["TRUE_QUOTE_LIFETIME"], NI)
+        self.assertEqual(r["INTRAINTERVAL_STATE_CHANGES"], "NOT_OBSERVED")
+
+    def test_it_is_class_b_and_its_bias_direction_is_unknown(self):
+        r = BM.persistence_runs([tick(i) for i in range(3)])
+        self.assertEqual(r["METRIC_CLASS"], "B_STATE_OCCUPANCY")
+        self.assertEqual(r["SAMPLING_BIAS_DIRECTION"], NI)
+
+    def test_both_sides_are_reported_in_the_metrics(self):
+        m = BM.book_metrics([tick(i) for i in range(4)])
+        for side in ("BID", "ASK"):
+            self.assertIn("%s_MIN_OBSERVED_PERSISTENCE_S_P50" % side, m)
+            self.assertIn("%s_LEFT_CENSORED_RUNS" % side, m)
+            self.assertEqual(m["%s_TRUE_QUOTE_LIFETIME" % side], NI)
+
+    def test_runs_are_per_market_not_across_markets(self):
+        rows = [tick(0, slug="a", bid="0.54"), tick(0, slug="b", bid="0.20"),
+                tick(1, slug="a", bid="0.54"), tick(1, slug="b", bid="0.20")]
+        r = BM.persistence_runs(rows, key="BID")
+        self.assertEqual(r["PERSISTENCE_RUNS"], 2)
+
+
+class EventWeightingAggregatesInternallyFirst(unittest.TestCase):
+
+    def _rows(self):
+        """E1 holds two markets of very different sizes; E2 holds one."""
+        rows = []
+        # E1 market 'a': 20 observations, every transition a book change.
+        for i in range(21):
+            rows.append(tick(i, slug="a", bid_changed=(i > 0)))
+        # E1 market 'b': 3 observations, no changes at all.
+        for i in range(3):
+            rows.append(tick(i, slug="b"))
+        # E2 market 'c': 3 observations, no changes.
+        for i in range(3):
+            rows.append(tick(i, slug="c"))
+        return rows
+
+    def test_the_event_pools_its_own_counts_before_it_votes(self):
+        m = BM.book_metrics(self._rows(),
+                            event_of={"a": "E1", "b": "E1", "c": "E2"})
+        # E1 pooled: 20 changes over 22 transitions. E2: 0 over 2.
+        # One vote each -> (20/22 + 0) / 2.
+        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED"],
+                         (D(20) / D(22)) / D(2))
+        self.assertTrue(m["EVENT_AGGREGATED_INTERNALLY_FIRST"])
+        self.assertFalse(m["MARKET_ROWS_REWEIGHTED_AFTER_POOLING"])
+
+    def test_that_is_not_the_mean_of_per_market_rates(self):
+        """The rejected alternative: average a's 1.0 with b's 0.0 inside E1,
+        which would let a 3-observation market cancel a 21-observation one."""
+        m = BM.book_metrics(self._rows(),
+                            event_of={"a": "E1", "b": "E1", "c": "E2"})
+        mean_of_market_rates = (D(1) + D(0)) / D(2)      # E1 the wrong way
+        wrong = (mean_of_market_rates + D(0)) / D(2)
+        self.assertNotEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED"],
+                            wrong)
+
+    def test_a_market_with_no_event_gets_no_vote(self):
+        m = BM.book_metrics(self._rows(), event_of={"a": "E1", "b": "E1"})
+        self.assertEqual(m["EVENTS_IN_WEIGHTING"], 1)
+        self.assertTrue(m["MARKETS_WITHOUT_AN_EVENT_GET_NO_VOTE"])
+
+    def test_market_weighting_is_unchanged_and_named(self):
+        m = BM.book_metrics(self._rows(),
+                            event_of={"a": "E1", "b": "E1", "c": "E2"})
+        self.assertEqual(m["WEIGHTING"], "MARKET_WEIGHTED")
+        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED"], D(20) / D(24))

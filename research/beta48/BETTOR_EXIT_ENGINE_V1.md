@@ -1480,3 +1480,99 @@ cadence, how often a hypothetical quote is reached, how long quoted states last,
 and what inventory-risk environment a maker would face. **These are inputs to
 quote placement and risk.** They do not establish realized maker economics, and
 `REALIZED_MAKER_ECONOMICS = NOT_ESTABLISHED` is carried on every report.
+
+---
+
+## 18. THE BIAS STATEMENT IS PER CLASS, NOT GLOBAL
+
+§17a said "every `_OBSERVED` rate is a lower bound on activity". **Too broad,
+withdrawn.** The metrics split into two classes that behave differently under
+discrete polling, and only one of them carries a bound.
+
+### 18a. CLASS A — EVENT / TRANSITION COUNTS
+
+```
+OBSERVED_BOOK_CHANGES        OBSERVED_MID_CHANGES
+OBSERVED_PRICE_IMPROVEMENTS  OBSERVED_DEPTH_CHANGES
+OBSERVED_MOVE_THROUGH_EVENTS
+
+CLASS_A_BOUND = OBSERVED_TRANSITION_COUNT <= TRUE_TRANSITION_COUNT
+                subject to THE_SNAPSHOTS_THEMSELVES_BEING_VALID
+```
+
+A poll can miss a transition; it cannot manufacture one. A legitimate
+undercount, and the counts are now emitted in their own right rather than only
+as the numerators of rates.
+
+**The frequencies built from them inherit no such bound.** They are shares per
+OBSERVED transition, not per unit time, so
+`FREQUENCIES_AS_CONTINUOUS_TIME_RATES = NOT_IDENTIFIED` travels with them.
+
+### 18b. CLASS B — STATE OCCUPANCY AND DURATION
+
+```
+ONE_TICK_SNAPSHOT_SHARE   MIN_OBSERVED_PERSISTENCE_S   TIME_AT_PRICE_OBSERVED_S
+TOUCH_SIZE_BID / ASK      QUEUE_AHEAD_AT_HYPOTHETICAL_ENTRY   SPREAD
+
+CLASS_B_SAMPLING_BIAS_DIRECTION = NOT_IDENTIFIED
+```
+
+These are interval-censored samples and the error runs **both** ways: a quote
+that disappears and returns between polls looks too long-lived; one alive before
+the first or after the last poll looks too short; a spread that widens and
+tightens between two reads moves the sampled share in either direction. No
+directional claim is made for any of them unless a specific bound is proved, and
+none is.
+
+### 18c. QUOTE DURATION IS INTERVAL-CENSORED, PER SIDE
+
+`persistence_runs()` replaces the old lifetime distribution. There is **no
+`QUOTE_LIFETIME` field** — an observed duration is a minimum, not a lifetime:
+
+```
+MIN_OBSERVED_PERSISTENCE_S  (P10 / P50 / P90 / MIN / MAX)
+LEFT_CENSORED_RUNS      the run starts at our first observation of that market
+RIGHT_CENSORED_RUNS     the run is still open at our last observation
+UNCENSORED_RUNS         both ends seen
+INTRAINTERVAL_STATE_CHANGES = NOT_OBSERVED     (always)
+TRUE_QUOTE_LIFETIME         = NOT_IDENTIFIED
+```
+
+Reported separately for `BID` and `ASK`, and runs never span two markets.
+
+### 18d. ONE-TICK UPTIME IS A SNAPSHOT SHARE
+
+```
+ONE_TICK_SNAPSHOT_SHARE                 the share of sampled books one tick wide
+TRUE_TIME_WEIGHTED_ONE_TICK_UPTIME      NOT_IDENTIFIED
+```
+
+`ONE_TICK_UPTIME_OBSERVED` is gone as a name, because "uptime" reads as
+continuous-time occupancy and this is a count of snapshots.
+
+### 18e. EVENT WEIGHTING: AGGREGATE INTERNALLY, THEN ONE VOTE
+
+The order is the whole point, and my first implementation had it wrong — it
+averaged per-market *rates* inside each event, which let a 3-observation market
+cancel a 21-observation one. Now each event's **raw counts** are pooled first,
+producing one event-level rate, and only then does each event cast **one equal
+vote**:
+
+```
+EVENT_AGGREGATED_INTERNALLY_FIRST     = True
+MARKET_ROWS_REWEIGHTED_AFTER_POOLING  = False
+ONE_EVENT_ONE_VOTE                    = True
+MARKETS_WITHOUT_AN_EVENT_GET_NO_VOTE  = True
+```
+
+A market whose event identity is unresolved gets no vote rather than an event of
+its own. Both weightings are reported side by side; neither replaces the other.
+
+### 18f. UNCHANGED, AND STILL THE CONCLUSIONS
+
+```
+PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION = NO
+TOUCH != TRADE_EVIDENCE != COUNTERFACTUAL_FILL
+REALIZED_MAKER_ECONOMICS = NOT_ESTABLISHED
+THE FILL MODEL IS FROZEN THROUGH HARVEST -- no new approximation.
+```

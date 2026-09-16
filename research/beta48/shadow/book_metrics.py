@@ -25,9 +25,31 @@ TWO THINGS THE NAMES HAVE TO CARRY, BECAUSE PROSE DOES NOT TRAVEL WITH A NUMBER.
    (P10 / MEDIAN / P90 / MAX) is reported per market so a reader can see how
    coarse the sampling was that produced every other figure.
 
-   The direction of the bias is knowable even where its size is not: unobserved
-   round trips make a quote look LONGER-lived and the book look CALMER than it
-   was. Every _OBSERVED rate is therefore a LOWER bound on activity.
+   THE BIAS DIRECTION IS NOT ONE ANSWER FOR ALL OF THEM. An earlier version of
+   this file said "every _OBSERVED rate is a lower bound on activity". That is
+   too broad and is withdrawn. The metrics split into two classes that behave
+   differently under discrete polling:
+
+   CLASS A -- EVENT / TRANSITION COUNTS. Polling can only MISS a transition;
+   it cannot manufacture one. So for counts, and for counts alone:
+
+       OBSERVED_TRANSITION_COUNT <= TRUE_TRANSITION_COUNT
+
+   subject to the snapshots themselves being valid. A legitimate undercount.
+   (The FREQUENCIES built from those counts are shares per OBSERVED transition,
+   not per unit time, so they inherit no such bound -- their relation to a
+   continuous-time rate is NOT_IDENTIFIED and is labelled so.)
+
+   CLASS B -- STATE OCCUPANCY AND DURATION. These are interval-censored
+   samples, and the error runs BOTH ways:
+
+       a quote that disappears and returns between polls   looks TOO LONG-lived
+       a quote alive before the first or after the last poll  looks TOO SHORT
+       a spread that widens and tightens between two reads  moves the sampled
+                                                            share either way
+
+   So SAMPLING_BIAS_DIRECTION = NOT_IDENTIFIED for every Class B quantity,
+   unless a specific mathematical bound is proved for it. None is claimed here.
 
 2. MOVE-THROUGH IS A PRICE PATH, NOT AN EXECUTION.
        MOVE_THROUGH != TRADE
@@ -64,8 +86,38 @@ UNOBSERVED_BETWEEN_POLLS = ("QUOTE_MOVED_AWAY_AND_RETURNED", "TRADED",
                             "DISAPPEARED_AND_REAPPEARED")
 TRUE_CONTINUOUS_QUOTE_LIFETIME = NOT_IDENTIFIED
 TRUE_CONTINUOUS_BOOK_UPDATE_RATE = NOT_IDENTIFIED
+TRUE_TIME_WEIGHTED_ONE_TICK_UPTIME = NOT_IDENTIFIED
 FEED_IS_EVENT_COMPLETE = NOT_IDENTIFIED
-OBSERVED_RATES_ARE_A_LOWER_BOUND_ON_ACTIVITY = True
+
+# ---------------------------------------------------------------------------
+# THE TWO METRIC CLASSES. The bias statement is per class, never global.
+# ---------------------------------------------------------------------------
+
+CLASS_A_TRANSITION_COUNTS = (
+    "OBSERVED_BOOK_CHANGES", "OBSERVED_MID_CHANGES",
+    "OBSERVED_MOVE_THROUGH_EVENTS", "OBSERVED_PRICE_IMPROVEMENTS",
+    "OBSERVED_DEPTH_CHANGES",
+)
+CLASS_A_BOUND = "OBSERVED_TRANSITION_COUNT_LE_TRUE_TRANSITION_COUNT"
+CLASS_A_SAMPLING_BIAS_DIRECTION = "UNDERCOUNT"
+CLASS_A_BOUND_SUBJECT_TO = "THE_SNAPSHOTS_THEMSELVES_BEING_VALID"
+
+CLASS_B_STATE_OCCUPANCY = (
+    "ONE_TICK_SNAPSHOT_SHARE", "MIN_OBSERVED_PERSISTENCE_S",
+    "TIME_AT_PRICE_OBSERVED_S", "TOUCH_SIZE_BID", "TOUCH_SIZE_ASK",
+    "QUEUE_AHEAD_AT_HYPOTHETICAL_ENTRY", "SPREAD",
+)
+CLASS_B_SAMPLING_BIAS_DIRECTION = NOT_IDENTIFIED
+CLASS_B_WHY = ("interval-censored: an unobserved round trip lengthens a "
+               "sampled duration, a state alive outside the window shortens "
+               "it, and a state that changes and changes back between two "
+               "reads moves a sampled share in either direction")
+
+# The frequencies are shares per OBSERVED transition, not per unit time.
+FREQUENCIES_ARE_PER_OBSERVED_TRANSITION = True
+FREQUENCIES_AS_CONTINUOUS_TIME_RATES = NOT_IDENTIFIED
+
+WITHDRAWN_TOO_BROAD = "EVERY_OBSERVED_RATE_IS_A_LOWER_BOUND_ON_ACTIVITY"
 
 MOVE_THROUGH_IS_A_PRICE_PATH_OBSERVATION = True
 MOVE_THROUGH_IS_NOT_TRADE = True
@@ -74,7 +126,7 @@ MOVE_THROUGH_IS_NOT_A_COUNTERFACTUAL_FILL = True
 MARKOUT_HORIZONS_S = (30, 60, 300)
 
 # Rates that exist in both weightings when an event map is supplied.
-WEIGHTED_RATES = ("ONE_TICK_UPTIME_OBSERVED", "BOOK_UPDATE_RATE_OBSERVED",
+WEIGHTED_RATES = ("ONE_TICK_SNAPSHOT_SHARE", "BOOK_UPDATE_RATE_OBSERVED",
                   "MID_MOVE_FREQUENCY_OBSERVED",
                   "PRICE_IMPROVEMENT_FREQUENCY_OBSERVED",
                   "DEPTH_CHANGE_RATE_OBSERVED",
@@ -186,8 +238,60 @@ def revisit_cadence(rows):
     }
 
 
+def persistence_runs(rows, key="BID"):
+    """Quote duration as an INTERVAL, with its censoring recorded.
+
+    A run is consecutive observations at an unchanged price. What we can say is
+    that the price held for AT LEAST the span between the first and last
+    observation of the run -- `MIN_OBSERVED_PERSISTENCE_S`. What we cannot say
+    is when it actually started or ended, because both lie inside an unobserved
+    gap, and we cannot say it held CONTINUOUSLY: it may have moved and come
+    back between two reads.
+
+        LEFT_CENSORED   the run starts at our first observation of this market,
+                        so the price may have been there long before
+        RIGHT_CENSORED  the run is still open at our last observation
+        INTRAINTERVAL_STATE_CHANGES = NOT_OBSERVED, always
+
+    TRUE_QUOTE_LIFETIME is therefore never equal to an observed duration, and
+    this function does not emit a field by that name.
+    """
+    by_slug, _ = _rows_by_slug(rows)
+    spans, left, right, uncensored, runs = [], 0, 0, 0, 0
+    for _, rs in by_slug.items():
+        if not rs:
+            continue
+        start_i, cur = 0, _d(rs[0].get(key))
+        for i in range(1, len(rs) + 1):
+            v = _d(rs[i].get(key)) if i < len(rs) else object()
+            if i == len(rs) or v != cur:
+                first, last = rs[start_i], rs[i - 1]
+                spans.append(D(str(round(
+                    last["ELAPSED_S"] - first["ELAPSED_S"], 3))))
+                runs += 1
+                lc = start_i == 0
+                rc = i == len(rs)
+                left += lc
+                right += rc
+                uncensored += (not lc and not rc)
+                start_i, cur = i, v
+    out = _dist(spans, "MIN_OBSERVED_PERSISTENCE_S")
+    out.update({
+        "PERSISTENCE_RUNS": runs,
+        "LEFT_CENSORED_RUNS": left,
+        "RIGHT_CENSORED_RUNS": right,
+        "UNCENSORED_RUNS": uncensored,
+        "INTRAINTERVAL_STATE_CHANGES": "NOT_OBSERVED",
+        "TRUE_QUOTE_LIFETIME": NOT_IDENTIFIED,
+        "SAMPLING_BIAS_DIRECTION": CLASS_B_SAMPLING_BIAS_DIRECTION,
+        "METRIC_CLASS": "B_STATE_OCCUPANCY",
+        "KEY": key,
+    })
+    return out
+
+
 def _slug_metrics(rs, tick_size):
-    """Per-market rates, so they can be weighted two different ways."""
+    """Per-market counts and rates, so they can be weighted two ways."""
     obs = moves = mid_moves = improvements = depth_changes = through = 0
     one_tick = spreads = 0
     prev = None
@@ -220,7 +324,17 @@ def _slug_metrics(rs, tick_size):
     return {
         "OBSERVATIONS": len(rs),
         "OBSERVED_TRANSITIONS": obs,
-        "ONE_TICK_UPTIME_OBSERVED": r_(one_tick, spreads),
+
+        # CLASS A. Counts. Each one is <= its true count, because a poll can
+        # miss a transition but cannot invent one.
+        "OBSERVED_BOOK_CHANGES": moves,
+        "OBSERVED_MID_CHANGES": mid_moves,
+        "OBSERVED_PRICE_IMPROVEMENTS": improvements,
+        "OBSERVED_DEPTH_CHANGES": depth_changes,
+        "OBSERVED_MOVE_THROUGH_EVENTS": through,
+
+        # The shares built from them. Per OBSERVED transition, not per second.
+        "ONE_TICK_SNAPSHOT_SHARE": r_(one_tick, spreads),
         "BOOK_UPDATE_RATE_OBSERVED": r_(moves, obs),
         "MID_MOVE_FREQUENCY_OBSERVED": r_(mid_moves, obs),
         "PRICE_IMPROVEMENT_FREQUENCY_OBSERVED": r_(improvements, obs),
@@ -233,24 +347,54 @@ def _slug_metrics(rs, tick_size):
     }
 
 
-def _event_weighted(per_slug, event_of):
-    """Average within each event, then across events. One event, one vote."""
+# numerator, denominator -- the raw counts each rate is built from, so an event
+# can be aggregated INTERNALLY before it votes.
+RATE_COUNTS = {
+    "ONE_TICK_SNAPSHOT_SHARE": ("one_tick", "spreads"),
+    "BOOK_UPDATE_RATE_OBSERVED": ("moves", "obs"),
+    "MID_MOVE_FREQUENCY_OBSERVED": ("mid_moves", "obs"),
+    "PRICE_IMPROVEMENT_FREQUENCY_OBSERVED": ("improvements", "obs"),
+    "DEPTH_CHANGE_RATE_OBSERVED": ("depth_changes", "obs"),
+    "MARKET_MOVED_THROUGH_QUOTE_OBSERVED": ("through", "obs"),
+}
+
+
+def _event_weighted(counts_by_slug, event_of):
+    """Aggregate each event INTERNALLY first, then one equal vote per event.
+
+    THE ORDER MATTERS AND IT IS THE WHOLE POINT. Each event's own counts are
+    pooled into a single event-level rate -- so a market inside the event
+    contributes in proportion to how much of that event we actually observed --
+    and only then does each event contribute ONE value to the mean.
+
+    What this is NOT is a reweighting of individual market rows after pooling,
+    which would leave an event carrying more markets, or more observations,
+    with more influence than an event carrying one.
+    """
     if not event_of:
         return {k + "_EVENT_WEIGHTED": NOT_IDENTIFIED for k in WEIGHTED_RATES}
     by_event = {}
-    for slug, m in per_slug.items():
-        by_event.setdefault(event_of.get(slug, NOT_IDENTIFIED), []).append(m)
+    for slug, c in counts_by_slug.items():
+        ev = event_of.get(slug)
+        if ev is None:
+            # An unresolved market gets no vote rather than an event of its own.
+            continue
+        acc = by_event.setdefault(ev, {k: 0 for k in
+                                       ("one_tick", "spreads", "moves",
+                                        "mid_moves", "improvements",
+                                        "depth_changes", "through", "obs")})
+        for k in acc:
+            acc[k] += c[k]
     out = {}
-    for key in WEIGHTED_RATES:
-        ev_vals = []
-        for _, ms in by_event.items():
-            vals = [m[key] for m in ms if m[key] != NOT_IDENTIFIED]
-            if vals:
-                ev_vals.append(sum(vals) / D(len(vals)))
+    for key, (num, den) in RATE_COUNTS.items():
+        ev_vals = [D(a[num]) / D(a[den]) for a in by_event.values() if a[den]]
         out[key + "_EVENT_WEIGHTED"] = (sum(ev_vals) / D(len(ev_vals))
                                         if ev_vals else NOT_IDENTIFIED)
     out["EVENTS_IN_WEIGHTING"] = len(by_event)
     out["ONE_EVENT_ONE_VOTE"] = True
+    out["EVENT_AGGREGATED_INTERNALLY_FIRST"] = True
+    out["MARKET_ROWS_REWEIGHTED_AFTER_POOLING"] = False
+    out["MARKETS_WITHOUT_AN_EVENT_GET_NO_VOTE"] = True
     return out
 
 
@@ -261,16 +405,17 @@ def book_metrics(rows, tick_size=TICK_SIZE, horizons_s=MARKOUT_HORIZONS_S,
     cadence = revisit_cadence(rows)
 
     spreads, touch_bid_sz, touch_ask_sz, queue_ahead = [], [], [], []
-    life_bid, life_ask, time_at_price = [], [], []
+    time_at_price = []
     spread_runs, queue_deltas = [], []
     markout = {h: [] for h in horizons_s}
-    per_slug, totals = {}, {"one_tick": 0, "spreads": 0, "moves": 0,
-                            "mid_moves": 0, "improvements": 0,
-                            "depth_changes": 0, "through": 0, "obs": 0}
+    per_slug, counts_by_slug = {}, {}
+    totals = {"one_tick": 0, "spreads": 0, "moves": 0, "mid_moves": 0,
+              "improvements": 0, "depth_changes": 0, "through": 0, "obs": 0}
 
     for slug, rs in by_slug.items():
         m = _slug_metrics(rs, tick_size)
         counts = m.pop("_counts")
+        counts_by_slug[slug] = counts
         for k in totals:
             totals[k] += counts[k]
         m["TICK_ERRORS"] = errs.get(slug, 0)
@@ -289,15 +434,15 @@ def book_metrics(rows, tick_size=TICK_SIZE, horizons_s=MARKOUT_HORIZONS_S,
                 queue_ahead.append(bq)
             if aq != NOT_IDENTIFIED:
                 touch_ask_sz.append(aq)
-            for k, acc in (("TIME_AT_BID_S", life_bid),
-                           ("TIME_AT_ASK_S", life_ask),
-                           ("QUOTE_LIFETIME_S", time_at_price)):
-                v = r.get(k)
-                if isinstance(v, (int, str)) and v != NOT_IDENTIFIED:
-                    try:
-                        acc.append(D(str(v)))
-                    except Exception:                          # noqa: BLE001
-                        pass
+            # The collector's own accumulated time at an unchanged touch. A
+            # sampled occupancy (Class B), not a lifetime -- the per-side
+            # interval-censored runs below are the duration measure.
+            v = r.get("QUOTE_LIFETIME_S")
+            if isinstance(v, (int, str)) and v != NOT_IDENTIFIED:
+                try:
+                    time_at_price.append(D(str(v)))
+                except Exception:                              # noqa: BLE001
+                    pass
             if prev is not None and bq != NOT_IDENTIFIED:
                 pq = _d(prev.get("BID_QTY"))
                 if pq != NOT_IDENTIFIED and _d(r.get("BID")) == _d(
@@ -336,21 +481,42 @@ def book_metrics(rows, tick_size=TICK_SIZE, horizons_s=MARKOUT_HORIZONS_S,
         "REVISIT_CADENCE": {k: v for k, v in cadence.items()
                             if k != "PER_SLUG"},
 
-        # --- sampled rates. MARKET-WEIGHTED (every observation counts once) ---
-        "ONE_TICK_UPTIME_OBSERVED": r_(t["one_tick"], t["spreads"]),
+        # --- CLASS A: counts. Each <= its true count. ---
+        "OBSERVED_BOOK_CHANGES": t["moves"],
+        "OBSERVED_MID_CHANGES": t["mid_moves"],
+        "OBSERVED_PRICE_IMPROVEMENTS": t["improvements"],
+        "OBSERVED_DEPTH_CHANGES": t["depth_changes"],
+        "OBSERVED_MOVE_THROUGH_EVENTS": t["through"],
+        "CLASS_A_TRANSITION_COUNTS": list(CLASS_A_TRANSITION_COUNTS),
+        "CLASS_A_BOUND": CLASS_A_BOUND,
+        "CLASS_A_SAMPLING_BIAS_DIRECTION": CLASS_A_SAMPLING_BIAS_DIRECTION,
+        "CLASS_A_BOUND_SUBJECT_TO": CLASS_A_BOUND_SUBJECT_TO,
+
+        # --- the shares built from them. MARKET-WEIGHTED. ---
+        "ONE_TICK_SNAPSHOT_SHARE": r_(t["one_tick"], t["spreads"]),
         "BOOK_UPDATE_RATE_OBSERVED": r_(t["moves"], obs),
         "MID_MOVE_FREQUENCY_OBSERVED": r_(t["mid_moves"], obs),
         "PRICE_IMPROVEMENT_FREQUENCY_OBSERVED": r_(t["improvements"], obs),
         "DEPTH_CHANGE_RATE_OBSERVED": r_(t["depth_changes"], obs),
         "MARKET_MOVED_THROUGH_QUOTE_OBSERVED": r_(t["through"], obs),
         "WEIGHTING": "MARKET_WEIGHTED",
+        "FREQUENCIES_ARE_PER_OBSERVED_TRANSITION":
+            FREQUENCIES_ARE_PER_OBSERVED_TRANSITION,
+        "FREQUENCIES_AS_CONTINUOUS_TIME_RATES":
+            FREQUENCIES_AS_CONTINUOUS_TIME_RATES,
+
+        # --- CLASS B: state occupancy. Interval-censored, BOTH directions. ---
+        "CLASS_B_STATE_OCCUPANCY": list(CLASS_B_STATE_OCCUPANCY),
+        "CLASS_B_SAMPLING_BIAS_DIRECTION": CLASS_B_SAMPLING_BIAS_DIRECTION,
+        "CLASS_B_WHY": CLASS_B_WHY,
 
         # --- what sampling cannot give ---
         "TRUE_CONTINUOUS_QUOTE_LIFETIME": TRUE_CONTINUOUS_QUOTE_LIFETIME,
         "TRUE_CONTINUOUS_BOOK_UPDATE_RATE": TRUE_CONTINUOUS_BOOK_UPDATE_RATE,
+        "TRUE_TIME_WEIGHTED_ONE_TICK_UPTIME":
+            TRUE_TIME_WEIGHTED_ONE_TICK_UPTIME,
         "FEED_IS_EVENT_COMPLETE": FEED_IS_EVENT_COMPLETE,
-        "OBSERVED_RATES_ARE_A_LOWER_BOUND_ON_ACTIVITY":
-            OBSERVED_RATES_ARE_A_LOWER_BOUND_ON_ACTIVITY,
+        "WITHDRAWN_TOO_BROAD": WITHDRAWN_TOO_BROAD,
         "EVERY_INTRAINTERVAL_TRANSITION_OBSERVED": False,
 
         # --- the price-path observation, and what it is not ---
@@ -360,7 +526,7 @@ def book_metrics(rows, tick_size=TICK_SIZE, horizons_s=MARKOUT_HORIZONS_S,
 
         "PER_SLUG": per_slug,
     }
-    out.update(_event_weighted(per_slug, event_of))
+    out.update(_event_weighted(counts_by_slug, event_of))
     out.update(_dist(spreads, "SPREAD"))
     out["SPREAD_IS_A_SAMPLED_STATE_DISTRIBUTION"] = True
     out.update(_dist(spread_runs, "SPREAD_PERSISTENCE_OBSERVED_S"))
@@ -368,9 +534,13 @@ def book_metrics(rows, tick_size=TICK_SIZE, horizons_s=MARKOUT_HORIZONS_S,
     out.update(_dist(touch_ask_sz, "TOUCH_SIZE_ASK"))
     out.update(_dist(queue_ahead, "QUEUE_AHEAD_AT_HYPOTHETICAL_ENTRY"))
     out.update(_dist(queue_deltas, "DISPLAYED_QUEUE_CHANGE"))
-    out.update(_dist(life_bid, "QUOTE_LIFETIME_OBSERVED_BID_S"))
-    out.update(_dist(life_ask, "QUOTE_LIFETIME_OBSERVED_ASK_S"))
     out.update(_dist(time_at_price, "TIME_AT_PRICE_OBSERVED_S"))
+
+    # Quote duration as an INTERVAL with its censoring, per side. There is no
+    # QUOTE_LIFETIME field: an observed duration is a minimum, not a lifetime.
+    for side in ("BID", "ASK"):
+        for k, v in persistence_runs(rows, key=side).items():
+            out["%s_%s" % (side, k)] = v
     for h in horizons_s:
         out.update(_dist(markout[h], "POST_QUOTE_BOOK_MARKOUT_%dS" % h))
     return out

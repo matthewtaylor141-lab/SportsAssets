@@ -139,7 +139,10 @@ class TheFieldAndTheBookAreBothReported(unittest.TestCase):
     def test_the_book_half_is_measured(self):
         b = self.r["B_BOOK_STRUCTURE"]
         self.assertEqual(b["MARKETS"], 1)
-        self.assertNotEqual(b["ONE_TICK_UPTIME_OBSERVED"], NI)
+        self.assertNotEqual(b["ONE_TICK_SNAPSHOT_SHARE"], NI)
+        self.assertEqual(b["TRUE_TIME_WEIGHTED_ONE_TICK_UPTIME"], NI)
+        self.assertEqual(b["CLASS_B_SAMPLING_BIAS_DIRECTION"], NI)
+        self.assertEqual(b["CLASS_A_SAMPLING_BIAS_DIRECTION"], "UNDERCOUNT")
         self.assertNotEqual(b["SPREAD_P50"], NI)
         self.assertTrue(b["FILL_RATE_NOT_PRESENT"])
 
