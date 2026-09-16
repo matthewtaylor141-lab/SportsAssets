@@ -42,11 +42,19 @@ class TheBoundaryIsStructural(unittest.TestCase):
         self.assertNotIn("environ", {n.attr for n in ast.walk(TREE)
                                      if isinstance(n, ast.Attribute)})
 
-    def test_only_one_host_is_ever_addressed(self):
+    def test_no_hostname_is_hand_written_in_this_module(self):
+        """I typed a plausible-looking hostname here from memory once and it
+        was wrong. The host is now IMPORTED from the collector that has been
+        reaching this venue for the whole programme, and no URL literal is
+        allowed back in."""
         strings = [n.value for n in ast.walk(TREE)
                    if isinstance(n, ast.Constant) and isinstance(n.value, str)]
-        hosts = [s for s in strings if "://" in s]
-        self.assertEqual(hosts, [C.HOST])
+        self.assertEqual([s for s in strings if "://" in s], [])
+
+    def test_the_host_is_the_one_the_forward_collector_uses(self):
+        import fwd_collect as F
+        self.assertEqual(C.HOST, F.GATEWAY_BASE)
+        self.assertEqual(C.HOST, "https://gateway.polymarket.us")
 
     def test_the_declared_boundary_matches_the_tree(self):
         self.assertEqual(C.METHOD, "GET")

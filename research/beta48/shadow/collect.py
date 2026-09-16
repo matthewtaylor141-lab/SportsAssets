@@ -18,15 +18,23 @@ board refutes that on all 20,000 rows: `slugs` holds exactly one slug,
 the complement IS selling the own side, and there is no sibling contract to
 pair with.
 
-That makes the pair channel a MAKER-ONLY trade here, measured on the sealed
-census over 9,143 routed two-sided books:
+STRUCTURAL SPREAD CAPTURE THEREFORE REQUIRES PASSIVE EXECUTION ON THE RELEVANT
+LEGS. (Not "the pair trade is maker-only" -- that was my phrasing and it was
+too strong: a round trip can end with an aggressive close after favourable
+movement and still be profitable. What needs both legs passive is capturing
+THE SPREAD ITSELF.) Measured on the sealed census, 9,143 routed two-sided
+books:
 
     cross both legs   ask + (1 - bid) = 1 + spread    0 of 9,143 below 1.00
     rest  both legs   bid + (1 - ask) = 1 - spread    9,143 of 9,143 below
 
-So the pair channel on this venue collapses ONTO
+So structural spread capture on this venue collapses ONTO
 `ACTUAL_BETTOR_FILL_PROBABILITY` rather than around it. It does not add a
-blocker; it removes a hoped-for way past the one we already had.
+blocker; it removes a hoped-for way past the one we already had. And the
+arithmetic is GROSS: `GROSS_TWO_SIDED_MAKER_EDGE = OBSERVED`,
+`REALIZED_BETTOR_TWO_SIDED_EDGE = NOT_ESTABLISHED`, with fees, rebates,
+incentives, queue position, partial fills, adverse selection, inventory
+duration, requote cost and capital occupancy all still unpriced in between.
 
 The sibling-complement resolver is KEPT, and refuses to guess. If the venue
 ever quotes a complement independently, `EVENT_KEY_VALIDATED = NO` still holds,
@@ -51,13 +59,18 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "forward"))
 
 import eligibility as E  # noqa: E402
+import fwd_collect as F  # noqa: E402
 import position_state as P  # noqa: E402
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 
 # The capability boundary, identical to the census's and asserted structurally
 # by test_collect.py rather than by this comment.
-HOST = "https://api.sportstradingus.com"
+# THE HOST IS IMPORTED, NOT RETYPED. I first wrote a plausible-looking
+# hostname here from memory and it was wrong -- the capture would have failed
+# on every read, or worse, contacted an unrelated host. A test pins this to
+# fwd_collect's own constant so the two can never drift.
+HOST = F.GATEWAY_BASE
 BOOK_PATH = "/v1/markets/{slug}/book"
 METHOD = "GET"
 CREDENTIAL = None
@@ -178,9 +191,12 @@ def resolve_complement(slug, board_by_slug, family_index):
 #     PASSIVE:    rest both legs    bid + (1 - ask) = 1 - spread    < 1.00
 #                 P10/P50/P90 = 0.99 / 0.99 / 0.99, all 9,143 below 1.00
 #
-# The consequence is the important part. THE PAIR TRADE IS NOT DEAD HERE, but
-# it is ONLY available to a maker: crossing is arithmetically certain to lose,
-# and resting both sides is arithmetically certain to win IF BOTH REST. So on
+# The consequence is the important part, stated at the right strength:
+# STRUCTURAL_SPREAD_CAPTURE_REQUIRES_PASSIVE_EXECUTION_ON_THE_RELEVANT_LEGS.
+# Crossing both legs is arithmetically certain to lose the spread; resting both
+# is arithmetically certain to earn it IF BOTH FILLS OCCUR. A profitable round
+# trip may still end aggressively after favourable movement -- that is a
+# different trade, and it is not forbidden by this. So on
 # this venue the pair channel collapses exactly onto
 # ACTUAL_BETTOR_FILL_PROBABILITY -- the single unknown the whole programme is
 # already blocked on. It does not add a new blocker; it removes a hoped-for
@@ -402,3 +418,210 @@ def summarise(rows):
                 "profitability number needs a counterfactual execution "
                 "methodology and a sample, and neither exists yet."),
     }
+
+
+# ===========================================================================
+# PHASE_2A EXPERIMENT 2 -- BOUNDED LIVE PUBLIC TICK CAPTURE
+# ===========================================================================
+#
+# What the capture must make reconstructable, per market, per tick:
+#
+#     BID  ASK  SPREAD  DEPTH  LAST_TRADE/ACTIVITY  BOOK_CHANGES
+#     QUOTE_LIFETIME   TIME_AT_PRICE
+#
+# and nothing it records is ever a fill. A price touching a level is a touch.
+
+TICK_VERSION = "beta48-shadow-tick/1"
+STRATA = ("nfl", "cfb", "mlb", "ufc")
+
+
+def stratify(candidates, board_by_slug, per_stratum, strata=STRATA,
+             salt=SELECTION_SALT):
+    """A bounded, balanced subset -- NOT the most active markets.
+
+    Taking the top-N by activity and then reporting an activity distribution
+    measured on them is circular, and this programme has already made that
+    mistake once with the UFC panel. Selection inside each stratum is the
+    frozen salted hash, so the subset is reproducible and was fixed before any
+    tick was seen.
+    """
+    buckets = {s: [] for s in strata}
+    other = []
+    for slug, row in candidates:
+        tok = ((row.get("STAGE1") or {}).get("SPORT_TOKEN") or "").lower()
+        if tok in buckets:
+            buckets[tok].append((slug, row))
+        else:
+            other.append((slug, row))
+    out = []
+    for s in strata:
+        out.extend(buckets[s][:per_stratum])
+    return {
+        "SELECTED": out,
+        "PER_STRATUM": {s: min(len(buckets[s]), per_stratum) for s in strata},
+        "AVAILABLE_PER_STRATUM": {s: len(buckets[s]) for s in strata},
+        "OUT_OF_STRATA_AVAILABLE": len(other),
+        "SELECTION": "FROZEN_SALTED_HASH_WITHIN_STRATUM",
+        "NOT_SELECTED_BY_ACTIVITY_RANK": True,
+    }
+
+
+def _touch(body):
+    md = (body or {}).get("marketData") or {}
+    bids, offs = md.get("bids") or [], md.get("offers") or []
+    stats = md.get("stats") or {}
+    return {
+        "BID": D(str(bids[0]["px"]["value"])) if bids else NOT_IDENTIFIED,
+        "ASK": D(str(offs[0]["px"]["value"])) if offs else NOT_IDENTIFIED,
+        "BID_QTY": D(str(bids[0]["qty"])) if bids else NOT_IDENTIFIED,
+        "ASK_QTY": D(str(offs[0]["qty"])) if offs else NOT_IDENTIFIED,
+        "DEPTH_LEVELS_BID": len(bids),
+        "DEPTH_LEVELS_ASK": len(offs),
+        "BID_LADDER": [[b["px"]["value"], b["qty"]] for b in bids[:5]],
+        "ASK_LADDER": [[o["px"]["value"], o["qty"]] for o in offs[:5]],
+        "SHARES_TRADED": stats.get("sharesTraded", NOT_IDENTIFIED),
+        "LAST_TRADE_SET_TIME": stats.get("lastTradeSetTime", NOT_IDENTIFIED),
+        "LAST_TRADE_PX": (stats.get("lastTradePx") or {}).get(
+            "value", NOT_IDENTIFIED),
+        "STATE": md.get("state"),
+        "TRANSACT_TIME": md.get("transactTime"),
+    }
+
+
+def tick_row(slug, body, receipt_iso, seq, elapsed_s, prev=None):
+    """One tick, with the CHANGE from the previous tick made explicit.
+
+    `QUOTE_LIFETIME` and `TIME_AT_PRICE` cannot be read from a single snapshot
+    -- they are properties of a sequence -- so each row carries how long the
+    touch has been unchanged, accumulated tick over tick. A quote's life
+    measured from one observation would be a guess.
+    """
+    t = _touch(body)
+    row = {"kind": "TICK", "VERSION": TICK_VERSION, "slug": slug, "seq": seq,
+           "RECEIPT_UTC": receipt_iso, "ELAPSED_S": elapsed_s}
+    row.update(t)
+    if t["BID"] != NOT_IDENTIFIED and t["ASK"] != NOT_IDENTIFIED:
+        row["SPREAD"] = t["ASK"] - t["BID"]
+    else:
+        row["SPREAD"] = NOT_IDENTIFIED
+
+    if prev is None:
+        row.update({"BID_CHANGED": NOT_IDENTIFIED, "ASK_CHANGED": NOT_IDENTIFIED,
+                    "DEPTH_CHANGED": NOT_IDENTIFIED,
+                    "SHARES_TRADED_DELTA": NOT_IDENTIFIED,
+                    "TIME_AT_BID_S": 0.0, "TIME_AT_ASK_S": 0.0,
+                    "QUOTE_LIFETIME_S": 0.0, "FIRST_OBSERVATION": True})
+        return row
+
+    dt_s = elapsed_s - prev.get("ELAPSED_S", elapsed_s)
+    bid_same = t["BID"] == prev.get("BID")
+    ask_same = t["ASK"] == prev.get("ASK")
+    st, pst = t["SHARES_TRADED"], prev.get("SHARES_TRADED")
+    delta = NOT_IDENTIFIED
+    if st != NOT_IDENTIFIED and pst not in (NOT_IDENTIFIED, None):
+        try:
+            delta = D(str(st)) - D(str(pst))
+        except Exception:                              # noqa: BLE001
+            delta = NOT_IDENTIFIED
+    row.update({
+        "BID_CHANGED": not bid_same,
+        "ASK_CHANGED": not ask_same,
+        "DEPTH_CHANGED": (t["BID_QTY"] != prev.get("BID_QTY")
+                          or t["ASK_QTY"] != prev.get("ASK_QTY")),
+        # A TRADE is a positive change in cumulative shares. Anything else --
+        # a quote move, a depth change, a cancel -- is not a trade, and this
+        # is the only field in the capture that may be read as trading.
+        "SHARES_TRADED_DELTA": delta,
+        "TRADE_OCCURRED": (NOT_IDENTIFIED if delta == NOT_IDENTIFIED
+                           else delta > 0),
+        "TIME_AT_BID_S": (prev.get("TIME_AT_BID_S", 0.0) + dt_s if bid_same
+                          else 0.0),
+        "TIME_AT_ASK_S": (prev.get("TIME_AT_ASK_S", 0.0) + dt_s if ask_same
+                          else 0.0),
+        "QUOTE_LIFETIME_S": (prev.get("QUOTE_LIFETIME_S", 0.0) + dt_s
+                             if bid_same and ask_same else 0.0),
+        "FIRST_OBSERVATION": False,
+    })
+    return row
+
+
+def tick_capture(outdir, slugs, pacer, http, rounds, sleep_between=0.0):
+    """Poll a bounded slug set for `rounds` passes. GET only. No orders.
+
+    Each pass is paced at the declared rate; rows are appended as they arrive
+    so a truncated run still yields usable data rather than nothing.
+    """
+    out = Path(outdir)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / "ticks.jsonl"
+    prev, n, errs = {}, 0, 0
+    start = time.monotonic()
+    with path.open("a") as fh:
+        for seq in range(rounds):
+            for slug in slugs:
+                body, recv, status, err = read_book(http, pacer, slug)
+                if err:
+                    errs += 1
+                    fh.write(json.dumps(
+                        {"kind": "TICK_ERROR", "slug": slug, "seq": seq,
+                         "RECEIPT_UTC": recv, "status": status,
+                         "error": err}) + "\n")
+                    continue
+                row = tick_row(slug, body, recv, seq,
+                               time.monotonic() - start, prev.get(slug))
+                prev[slug] = row
+                fh.write(json.dumps(row, default=_jsonable,
+                                    sort_keys=True) + "\n")
+                n += 1
+            fh.flush()
+            if sleep_between:
+                time.sleep(sleep_between)
+    return {"TICK_ROWS": n, "TICK_ERRORS": errs, "ROUNDS": rounds,
+            "SLUGS": len(slugs), "DURATION_S": time.monotonic() - start,
+            "PATH": str(path)}
+
+
+def _cli():
+    """PHASE_2A tick capture. GET only. No orders. No credential.
+
+    The universe is READ FROM A COMMITTED FILE that was frozen before any tick
+    was seen, so the job cannot re-select markets after seeing how they behave.
+    """
+    import argparse
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--universe", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--rounds", type=int, required=True)
+    ap.add_argument("--sleep", type=float, default=3.0)
+    a = ap.parse_args()
+
+    uni = json.loads(Path(a.universe).read_text())
+    slugs = [m["slug"] for m in uni["MARKETS"]]
+    out = Path(a.out)
+    out.mkdir(parents=True, exist_ok=True)
+    (out / "universe.json").write_text(json.dumps(uni, indent=1))
+
+    pacer = Pacer()
+    with httpx.Client(headers={"accept": "application/json"}) as http:
+        res = tick_capture(out, slugs, pacer, http, a.rounds, a.sleep)
+
+    res.update({
+        "VERSION": TICK_VERSION,
+        "UNIVERSE_N": len(slugs),
+        "UNIVERSE_FROZEN_BEFORE_CAPTURE": uni.get(
+            "FROZEN_BEFORE_ANY_TICK_WAS_SEEN"),
+        "RATE_LIMIT_RPS": RATE_LIMIT_RPS,
+        "METHOD": METHOD,
+        "CREDENTIAL": "NONE",
+        "ORDER_PATH_EXISTS": "NO",
+        "mirror_live": False,
+        "NO_FILL_IS_RECORDED_HERE": (
+            "a touch is not a fill; this capture records book state only"),
+        "REALIZED_BETTOR_TWO_SIDED_EDGE": "NOT_ESTABLISHED",
+    })
+    (out / "tick_plan.json").write_text(json.dumps(res, indent=1, default=str))
+    print(json.dumps(res, indent=1, default=str))
+
+
+if __name__ == "__main__":
+    _cli()

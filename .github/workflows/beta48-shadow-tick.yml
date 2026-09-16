@@ -1,0 +1,103 @@
+# BETA48 PHASE_2A EXPERIMENT 2 -- BOUNDED LIVE PUBLIC TICK CAPTURE.
+# READ ONLY. NO CREDENTIAL. NO ORDER. mirror_live = false.
+#
+# WHY. The census gave one snapshot per market. A snapshot cannot yield
+# QUOTE_LIFETIME, TIME_AT_PRICE, book-change frequency, or the trade flow that
+# arrives after a hypothetical quote is placed -- those are properties of a
+# SEQUENCE. This job polls a small frozen universe repeatedly so the sequence
+# exists.
+#
+# THE UNIVERSE IS COMMITTED, NOT CHOSEN AT RUNTIME. shadow/tick_universe.json
+# was frozen from the sealed census before any tick was seen: HIGH_ACTIVITY at
+# decision, stratified 6 each across nfl/cfb/mlb/ufc, ordered by salted hash
+# within each stratum. NOT by activity rank -- selecting the most active
+# markets and then reporting an activity distribution measured on them is
+# circular, and this programme has made that mistake once already.
+#
+# NOTHING HERE IS A FILL. The capture records book state. A price touching a
+# level is a touch, and TOUCH != FILL is enforced in position_state.
+#
+# CAPABILITY BOUNDARY, re-proved by AST scan before any contact:
+#   GET only. One host. No credential, no secret, no wallet, no signer, no
+#   trading SDK, no order or cancel path, no POST/PUT/PATCH/DELETE. 2.0 rps as
+#   OUR restraint.
+
+name: beta48-shadow-tick
+
+on:
+  workflow_dispatch:
+    inputs:
+      rounds:
+        description: "Polling passes over the 24-market universe"
+        required: false
+        default: "300"
+      sleep:
+        description: "Seconds to pause between passes"
+        required: false
+        default: "3.0"
+
+permissions:
+  contents: write
+
+# SHARED with the forward capture and the census on purpose: concurrent jobs
+# would multiply the aggregate request rate, which the rate policy forbids.
+concurrency:
+  group: beta48-forward-capture
+  cancel-in-progress: false
+
+jobs:
+  tick:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency
+        run: python -m pip install --quiet "httpx==0.27.2" "pytest==8.3.3"
+
+      # THE GATE. No venue contact until the boundary is proved.
+      - name: Prove the capability boundary offline
+        working-directory: research/beta48/shadow
+        run: python -m pytest -q
+
+      - name: Bounded live tick capture
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          python collect.py \
+            --universe tick_universe.json \
+            --out "evidence/ticks_$SEG" \
+            --rounds "${{ github.event.inputs.rounds || 300 }}" \
+            --sleep "${{ github.event.inputs.sleep || 3.0 }}"
+
+      - name: Seal and commit the capture
+        if: always()
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/shadow/evidence/ticks_$SEG
+          [ -d "$D" ] || exit 0
+          ( cd "$D" && sha256sum * > SEALED.sha256 2>/dev/null || true )
+          gzip -9 "$D"/ticks.jsonl 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BR="beta48-ticks/seg-$SEG"
+          git checkout --orphan "$BR"
+          git rm -rq --cached . || true
+          git add -f "$D"
+          git commit -qm "BETA48 shadow tick capture $SEG [skip render]" || exit 0
+          for i in 1 2 4 8 16; do
+            git push -f origin "$BR" && break
+            echo "push failed, retrying in ${i}s"; sleep "$i"
+          done
+          echo "BETA48_TICK_BRANCH $BR"

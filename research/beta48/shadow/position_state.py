@@ -1465,3 +1465,132 @@ def candidate_universe(markets, event_key_of=None):
         "STRATIFIED_BY_VALIDATED_EVENT; unresolved markets retain their "
         "uncertainty and are never assumed independent")
     return out
+
+
+# ===========================================================================
+# PMUS EXECUTION VOCABULARY -- a correction to my own language
+# ===========================================================================
+#
+# I wrote "the pair trade on this venue is maker-only". That is TOO STRONG and
+# I am withdrawing it. A profitable round trip may perfectly well end in an
+# AGGRESSIVE close after favourable movement: buy at 0.41, the market moves to
+# 0.45, cross the bid at 0.44 and the round trip is profitable with one passive
+# leg and one aggressive one. What the census arithmetic actually establishes
+# is narrower and should be stated as:
+#
+#     STRUCTURAL_SPREAD_CAPTURE_REQUIRES_PASSIVE_EXECUTION_ON_THE_RELEVANT_LEGS
+#
+# Capturing THE SPREAD ITSELF needs both legs passive. Making money does not.
+STRUCTURAL_SPREAD_CAPTURE_REQUIRES_PASSIVE_EXECUTION_ON_THE_RELEVANT_LEGS = True
+PAIR_TRADE_IS_MAKER_ONLY = "WITHDRAWN_TOO_STRONG"
+
+# And the arithmetic is GROSS. It is a spread, not a profit.
+GROSS_TWO_SIDED_MAKER_EDGE = "OBSERVED"
+REALIZED_BETTOR_TWO_SIDED_EDGE = "NOT_ESTABLISHED"
+# Everything between the two:
+UNPRICED_BETWEEN_GROSS_AND_REALIZED = (
+    "MAKER_FEE", "TAKER_FEE", "MAKER_REBATE", "LIQUIDITY_INCENTIVE",
+    "QUEUE_POSITION", "PARTIAL_FILLS", "ADVERSE_SELECTION",
+    "INVENTORY_DURATION", "REQUOTE_COST", "CAPITAL_OCCUPANCY",
+)
+# The condition that must travel with every spread statement.
+SPREAD_STATEMENT_QUALIFIER = "IF_BOTH_FILLS_OCCUR"
+
+
+# TWO VOCABULARIES, DELIBERATELY KEPT APART.
+#
+# PAIRING is an ANALYTICAL concept. It is how the whale archive is organised --
+# a first leg, a complement, a basis, a completion hazard -- and it is the only
+# language in which those priors can be read. It stays, in the prior-mapping
+# layer, and nowhere else.
+#
+# On PMUS there is ONE BINARY BOOK per market, so acquiring the economic
+# complement IS reducing the position. An execution action here is an INVENTORY
+# action, and letting Polymarket's two-token vocabulary leak into it would
+# describe a trade this venue cannot make.
+PAIRING_ANALYTICAL_CONCEPT = "WHALE_PRIOR_MAPPING_ONLY"
+PMUS_EXECUTION_ACTION = "INVENTORY_CLOSE_ON_THE_SAME_BINARY_BOOK"
+
+X_OPEN_MAKER_INVENTORY = "OPEN_MAKER_INVENTORY"
+X_PASSIVE_INVENTORY_CLOSE = "PASSIVE_INVENTORY_CLOSE"
+X_AGGRESSIVE_INVENTORY_CLOSE = "AGGRESSIVE_INVENTORY_CLOSE"
+X_REQUOTED_PASSIVE_CLOSE = "REQUOTED_PASSIVE_CLOSE"
+X_HOLD_INVENTORY = "HOLD_INVENTORY"
+X_HEDGE_EXTERNALLY = "HEDGE_EXTERNALLY"
+X_SETTLE = "SETTLE"
+
+PMUS_ACTIONS = (X_OPEN_MAKER_INVENTORY, X_PASSIVE_INVENTORY_CLOSE,
+                X_AGGRESSIVE_INVENTORY_CLOSE, X_REQUOTED_PASSIVE_CLOSE,
+                X_HOLD_INVENTORY, X_HEDGE_EXTERNALLY, X_SETTLE)
+
+# How the whale-prior action vocabulary maps onto what PMUS can actually do.
+# The mapping is EXPLICIT so the translation is auditable rather than implied:
+# "complete the pair passively" and "close the inventory passively" are the
+# same venue instruction, and saying so once here is safer than letting two
+# names for one act drift apart in the code.
+WHALE_ACTION_TO_PMUS = {
+    A_PASSIVE_COMPLEMENT_PAIR: X_PASSIVE_INVENTORY_CLOSE,
+    A_AGGRESSIVE_COMPLEMENT_PAIR: X_AGGRESSIVE_INVENTORY_CLOSE,
+    A_PASSIVE_SELL_EXIT: X_PASSIVE_INVENTORY_CLOSE,
+    A_AGGRESSIVE_SELL_EXIT: X_AGGRESSIVE_INVENTORY_CLOSE,
+    A_WAIT: X_HOLD_INVENTORY,
+    A_DIRECTIONAL_HOLD: X_HOLD_INVENTORY,
+    A_HEDGE: X_HEDGE_EXTERNALLY,
+    A_SETTLEMENT_HOLD: X_SETTLE,
+    A_REALIZE_AND_RECYCLE: X_PASSIVE_INVENTORY_CLOSE,
+    A_HOLD_LOCKED_PAIR: X_HOLD_INVENTORY,
+}
+
+
+def pmus_action(whale_action):
+    """Translate a prior-layer action into the venue instruction it really is.
+
+    Note the many-to-one: BOTH 'complete the pair passively' and 'exit
+    passively' are one venue act on a single binary book. The collapse is the
+    point -- it is what makes the PMUS vocabulary honest.
+    """
+    if whale_action == A_NO_ACTION_RECORDED:
+        return A_NO_ACTION_RECORDED
+    if whale_action not in WHALE_ACTION_TO_PMUS:
+        raise ValueError("no PMUS translation for %r" % (whale_action,))
+    return WHALE_ACTION_TO_PMUS[whale_action]
+
+
+# ---------------------------------------------------------------------------
+# THE CENTRAL PHASE-2 QUESTION, RESTATED FOR THIS VENUE
+# ---------------------------------------------------------------------------
+#
+# Not "how often does a pair complete" -- that is the whale question. Ours is:
+# AFTER A HYPOTHETICAL MAKER FILL CREATES ONE-SIDED INVENTORY, what happens?
+# These are the distributions the shadow run exists to produce, and the
+# BETTOR-native analogue of the whale completion process.
+INVENTORY_OUTCOME_FIELDS = (
+    "TIME_TO_OPPOSITE_FILL", "PRICE_OF_OPPOSITE_FILL", "NET_SPREAD_CAPTURE",
+    "INVENTORY_MARKOUT", "MAX_ADVERSE_EXCURSION", "MAX_FAVORABLE_EXCURSION",
+    "CAPITAL_OCCUPANCY", "FAILURE_TO_CLOSE", "SETTLEMENT_OUTCOME",
+)
+
+
+def orphan_conservatism(fv_status, time_unpaired_s):
+    """An unpriced directional hold makes a long orphan MORE conservative.
+
+    The temptation runs the other way: if nothing is priced, nothing forbids
+    holding, so inventory drifts. That is backwards. A position whose
+    directional value is NOT_IDENTIFIED is being held on no evidence at all,
+    and the longer it is held the larger the unmeasured bet. So the engine
+    records an escalating conservatism flag rather than an escalating licence.
+    """
+    if fv_status == FV_VALIDATED:
+        return {"DIRECTIONAL_HOLD_PRICED": True,
+                "ORPHAN_CONSERVATISM": "NORMAL"}
+    b = time_unpaired_bucket(time_unpaired_s)
+    late = b in ("600s-1800s", "1800s-3600s", NO_LAMBDA_BUCKET)
+    return {
+        "DIRECTIONAL_HOLD_PRICED": False,
+        "EV_DIRECTIONAL_HOLD": NOT_IDENTIFIED,
+        "ORPHAN_CONSERVATISM": "ELEVATED" if late else "NORMAL",
+        "WHY": ("directional value is NOT_IDENTIFIED, so continuing to hold is "
+                "an unmeasured bet that grows with TIME_UNPAIRED -- this is a "
+                "reason for MORE caution, never a licence to drift"),
+        "TIME_UNPAIRED_BUCKET": b,
+    }
