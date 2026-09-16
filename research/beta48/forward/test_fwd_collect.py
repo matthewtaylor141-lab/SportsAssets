@@ -698,7 +698,7 @@ def test_the_panel_stratifies_only_on_decision_time_facts(tmp_path):
     rules = {"programs": [_prog("a"), _prog("b"),
                           _prog("c", REWARD_POOL=10000),
                           _prog("d", DISCOUNT_FACTOR=0.35)]}
-    picked, plan = C.panel_cohort(events, rules, per_stratum=5)
+    picked, plan, _slots = C.panel_cohort(events, rules, per_stratum=5)
     assert len(plan) == 3, "pool and discount factor separate the strata"
     assert {x["slug"] for x in picked} == {"a", "b", "c", "d"}
 
@@ -717,8 +717,8 @@ def test_a_later_outcome_field_cannot_change_the_panel(tmp_path):
         dict(_prog("a"), realized_spread=0.001, volume_24h=10, later_pnl=-5),
         dict(_prog("b"), realized_spread=0.900, volume_24h=10 ** 9,
              later_pnl=5000)]}
-    one, plan_one = C.panel_cohort(events, plain, per_stratum=1)
-    two, plan_two = C.panel_cohort(events, tempting, per_stratum=1)
+    one, plan_one, _ = C.panel_cohort(events, plain, per_stratum=1)
+    two, plan_two, _ = C.panel_cohort(events, tempting, per_stratum=1)
     assert len(plan_one) == len(plan_two) == 1, "one stratum, both times"
     assert [x["slug"] for x in one] == [x["slug"] for x in two] == ["a"]
 
@@ -726,7 +726,7 @@ def test_a_later_outcome_field_cannot_change_the_panel(tmp_path):
 def test_the_panel_takes_markets_in_slug_order_not_by_attractiveness(tmp_path):
     events = [_ev("z"), _ev("a"), _ev("m")]
     rules = {"programs": [_prog("z"), _prog("a"), _prog("m")]}
-    picked, _ = C.panel_cohort(events, rules, per_stratum=2)
+    picked, _, _ = C.panel_cohort(events, rules, per_stratum=2)
     assert [x["slug"] for x in picked] == ["a", "m"], (
         "deterministic, and unrelated to any outcome")
 
@@ -735,15 +735,15 @@ def test_the_panel_is_deterministic_across_input_order(tmp_path):
     rules_a = {"programs": [_prog("z"), _prog("a"), _prog("m")]}
     rules_b = {"programs": [_prog("m"), _prog("z"), _prog("a")]}
     evs = [_ev("z"), _ev("a"), _ev("m")]
-    one, _ = C.panel_cohort(evs, rules_a, per_stratum=2)
-    two, _ = C.panel_cohort(list(reversed(evs)), rules_b, per_stratum=2)
+    one, _, _ = C.panel_cohort(evs, rules_a, per_stratum=2)
+    two, _, _ = C.panel_cohort(list(reversed(evs)), rules_b, per_stratum=2)
     assert [x["slug"] for x in one] == [x["slug"] for x in two]
 
 
 def test_an_incentivized_market_off_the_board_prefix_is_not_invented(tmp_path):
     """The panel can only sample what discovery actually saw."""
-    picked, _ = C.panel_cohort([_ev("a")],
-                               {"programs": [_prog("a"), _prog("unseen")]}, 5)
+    picked, _, _ = C.panel_cohort(
+        [_ev("a")], {"programs": [_prog("a"), _prog("unseen")]}, 5)
     assert [x["slug"] for x in picked] == ["a"]
 
 
@@ -755,8 +755,10 @@ def test_the_panel_carries_the_program_facts_with_each_book(tmp_path):
     assert n == 1
     row = json.loads((tmp_path / "panel.jsonl").read_text().strip())
     assert row["kind"] == "PANEL"
-    assert row["TARGET_SIZE"] == 500 and row["DISCOUNT_FACTOR"] == 0.3
-    assert row["tick"] == 0.01 and row["PROGRAM_TYPE"] == "liquidityProgram"
+    assert row["PROGRAMS"][0]["TARGET_SIZE"] == 500
+    assert row["PROGRAMS"][0]["DISCOUNT_FACTOR"] == 0.3
+    assert row["PROGRAMS"][0]["PROGRAM_TYPE"] == "liquidityProgram"
+    assert row["tick"] == 0.01
     assert row["fee_regime"] in ("JUL2026", "SEP2026")
 
 
@@ -841,3 +843,72 @@ def test_the_same_period_served_twice_is_recorded_once(tmp_path):
     p = C.Pacer(); p.spacing = 0.0
     out = C.rules(tmp_path, p, _rules_http(pages))
     assert out["programs_parsed"] == 1
+
+
+def test_a_market_in_five_strata_is_read_once_per_round(tmp_path):
+    """C-8. The stratum is a PROGRAMME; the book read is a MARKET.
+
+    The venue runs several concurrent programmes on one market -- a UFC fight
+    carries moneyline early/day_of/live at target 20,000 AND props day_of/live
+    at target 1,000, all active at once. Before this fix the collector fetched
+    that market's book once PER PROGRAMME: 4.5x the venue requests for the same
+    snapshot, and every copy counted as an independent panel observation, so a
+    market entered the statistics weighted by how many programmes it carried.
+    """
+    progs = [_prog("a", PROGRAM_ID="ml_early", TARGET_SIZE=20000),
+             _prog("a", PROGRAM_ID="ml_dayof", TARGET_SIZE=20000,
+                   PROGRAM_PERIOD="day_of"),
+             _prog("a", PROGRAM_ID="props_live", TARGET_SIZE=1000,
+                   REWARD_POOL=10000)]
+    reads, plan, slots = C.panel_cohort([_ev("a")], {"programs": progs}, 5)
+    assert len(plan) == 3, "three strata, because they really are different"
+    assert len(slots) == 3, "three stratum slots"
+    assert len(reads) == 1, "ONE market, therefore ONE book read"
+    assert len(reads[0]["programs"]) == 3, "all three carried with the book"
+
+
+def test_the_one_row_carries_every_programme_and_its_distinct_targets(tmp_path):
+    p = C.Pacer(); p.spacing = 0.0
+    progs = [_prog("a", PROGRAM_ID="ml", TARGET_SIZE=20000),
+             _prog("a", PROGRAM_ID="props", TARGET_SIZE=1000)]
+    n = C.panel(tmp_path, [_ev("a")], {"programs": progs},
+                p, _BookOK(), per_stratum=5, rounds=1)
+    assert n == 1, "one row per market per round, not one per programme"
+    row = json.loads((tmp_path / "panel.jsonl").read_text().strip())
+    assert row["PROGRAMS_N"] == 2
+    assert row["DISTINCT_TARGET_SIZES"] == [1000, 20000]
+    assert {p["PROGRAM_ID"] for p in row["PROGRAMS"]} == {"ml", "props"}
+
+
+def test_the_book_is_fetched_once_not_once_per_programme(tmp_path):
+    """The venue-cost half of the same defect, counted at the HTTP boundary."""
+    class Counting(_BookOK):
+        calls = 0
+
+        def get(self, *a, **k):
+            Counting.calls += 1
+            return super().get(*a, **k)
+
+    p = C.Pacer(); p.spacing = 0.0
+    progs = [_prog("a", PROGRAM_ID="p%d" % i, TARGET_SIZE=1000 * (i + 1))
+             for i in range(5)]
+    Counting.calls = 0
+    C.panel(tmp_path, [_ev("a")], {"programs": progs},
+            p, Counting(), per_stratum=5, rounds=2)
+    assert Counting.calls == 2, ("one request per market per round; got %d"
+                                 % Counting.calls)
+
+
+def test_the_plan_names_the_slot_count_and_the_read_count_separately(tmp_path):
+    """54 stratum slots resolving to 12 distinct markets is a fact about the
+    panel that must be readable from the plan, not discovered afterwards."""
+    p = C.Pacer(); p.spacing = 0.0
+    progs = [_prog("a", PROGRAM_ID="x", TARGET_SIZE=1000),
+             _prog("a", PROGRAM_ID="y", TARGET_SIZE=20000)]
+    C.panel(tmp_path, [_ev("a")], {"programs": progs},
+            p, _BookOK(), per_stratum=5, rounds=1)
+    plan = json.loads((tmp_path / "panel_plan.json").read_text())
+    assert plan["STRATUM_SLOTS_FILLED"] == 2
+    assert plan["DISTINCT_MARKETS_READ"] == 1
+    assert plan["ELIGIBILITY_NEVER_POOLED_ACROSS"] == "TARGET_SIZE"
+    assert plan["OBSERVATION_UNIT"] == "ONE_BOOK_READ_PER_MARKET_PER_ROUND"

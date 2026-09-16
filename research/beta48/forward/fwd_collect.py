@@ -862,7 +862,31 @@ def panel_cohort(board_events, rules_out, per_stratum=3):
                      "available": len(rows), "taken": len(take)})
         for slug, p, ev in take:
             picked.append({"slug": slug, "event": ev, "program": p})
-    return picked, plan
+
+    # C-8. THE STRATUM IS A PROGRAMME; THE BOOK READ IS A MARKET.
+    #
+    # The venue attaches several concurrent programmes to ONE market -- a UFC
+    # fight carries moneyline early/day_of/live at target 20,000 AND props
+    # day_of/live at target 1,000, all active at once. Strata are therefore
+    # built over PROGRAMMES, which is right, but a market that qualifies in
+    # five strata was then READ FIVE TIMES per round: 4.5x the venue requests
+    # for the same snapshot, and -- far worse -- every emitted row counted as
+    # an independent panel observation, so each market entered the statistics
+    # weighted by how many programmes it happened to carry.
+    #
+    # Collapsing here keeps the stratification intact and makes the READ what
+    # it always should have been: one market, one book, all its programmes
+    # carried alongside so the offline scorer can evaluate each on its own
+    # target size without ever pooling them.
+    by_slug: dict = {}
+    for item in picked:
+        cur = by_slug.setdefault(item["slug"], {"slug": item["slug"],
+                                                "event": item["event"],
+                                                "programs": []})
+        if item["program"] not in cur["programs"]:
+            cur["programs"].append(item["program"])
+    reads = [by_slug[s] for s in sorted(by_slug)]
+    return reads, plan, picked
 
 
 def panel(outdir: Path, board_events, rules_out, pacer, http,
@@ -874,29 +898,38 @@ def panel(outdir: Path, board_events, rules_out, pacer, http,
     under a rule fixed before the data, so the measurement and the capture
     cannot drift into each other.
     """
-    picked, plan = panel_cohort(board_events, rules_out, per_stratum)
+    reads, plan, picked = panel_cohort(board_events, rules_out, per_stratum)
     path = outdir / "panel.jsonl"
     n = 0
     with path.open("a") as fh:
         for rnd in range(max(1, int(rounds))):
             start = time.monotonic()
-            for item in picked:
+            for item in reads:
                 leg = _paced_get(http, pacer,
                                  BOOK_PATH.format(slug=item["slug"]))
+                # ONE ROW PER (slug, round). The market's programmes travel
+                # WITH the book, as a list, because a market really does carry
+                # several at once at DIFFERENT target sizes -- and the offline
+                # scorer must evaluate each on its own target and never pool
+                # them into a single percentage. See C-8.
                 fh.write(json.dumps({
                     "kind": "PANEL",
                     "round": rnd,
                     "slug": item["slug"],
                     "fee_regime": fee_regime(leg["local_request_wall_utc"]),
-                    # Decision-time programme facts, carried WITH the book so
-                    # the two can never be matched up wrongly later.
-                    "PROGRAM_TYPE": item["program"].get("PROGRAM_TYPE"),
-                    "PROGRAM_ID": item["program"].get("PROGRAM_ID"),
-                    "REWARD_POOL": item["program"].get("REWARD_POOL"),
-                    "TARGET_SIZE": item["program"].get("TARGET_SIZE"),
-                    "DISCOUNT_FACTOR": item["program"].get("DISCOUNT_FACTOR"),
-                    "PROGRAM_PERIOD": item["program"].get("PROGRAM_PERIOD"),
-                    "INSTRUMENT_STATE": item["program"].get("INSTRUMENT_STATE"),
+                    "PROGRAMS": [{
+                        "PROGRAM_TYPE": p.get("PROGRAM_TYPE"),
+                        "PROGRAM_ID": p.get("PROGRAM_ID"),
+                        "REWARD_POOL": p.get("REWARD_POOL"),
+                        "TARGET_SIZE": p.get("TARGET_SIZE"),
+                        "DISCOUNT_FACTOR": p.get("DISCOUNT_FACTOR"),
+                        "PROGRAM_PERIOD": p.get("PROGRAM_PERIOD"),
+                        "INSTRUMENT_STATE": p.get("INSTRUMENT_STATE"),
+                    } for p in item["programs"]],
+                    "PROGRAMS_N": len(item["programs"]),
+                    "DISTINCT_TARGET_SIZES": sorted(
+                        {p.get("TARGET_SIZE") for p in item["programs"]
+                         if p.get("TARGET_SIZE") is not None}),
                     "tick": item["event"].get("orderPriceMinTickSize"),
                     "sportsMarketTypeV2": item["event"].get(
                         "sportsMarketTypeV2"),
@@ -915,10 +948,17 @@ def panel(outdir: Path, board_events, rules_out, pacer, http,
                              "orderPriceMinTickSize", "sportsMarketTypeV2"],
         "SELECTION_WITHIN_STRATUM": "SLUG_ORDER",
         "per_stratum": int(per_stratum),
-        "strata": len(plan), "markets_picked": len(picked),
+        "strata": len(plan),
+        "STRATUM_SLOTS_FILLED": len(picked),
+        "DISTINCT_MARKETS_READ": len(reads),
+        "OBSERVATION_UNIT": "ONE_BOOK_READ_PER_MARKET_PER_ROUND",
+        "ELIGIBILITY_NEVER_POOLED_ACROSS": "TARGET_SIZE",
+        "SPORT_CONCENTRATION": sorted(
+            {str(r["slug"]).split("-")[1] for r in reads
+             if len(str(r["slug"]).split("-")) > 1}),
         "rounds": int(rounds), "plan": plan}, indent=1))
-    print("panel strata %d | markets %d | rows %d"
-          % (len(plan), len(picked), n))
+    print("panel strata %d | slots %d | distinct markets %d | rows %d"
+          % (len(plan), len(picked), len(reads), n))
     return n
 
 

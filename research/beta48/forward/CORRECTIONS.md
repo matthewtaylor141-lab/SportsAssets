@@ -199,3 +199,104 @@ COMBO_NET_VALUE_VS_SINGLE_LEG_EXECUTION NOT_IDENTIFIED
 +0.1% I reported. Rounding up nearly doubles it, and it is the one price where
 the premium is negligible. Pinned to 0.0576% in
 `test_fees_v2.py::TheUpcomingComboPremium`.
+
+---
+
+## C-8 — the panel read one book once per PROGRAMME, and counted each copy
+
+**Class: duplication. This is the fourth time in this programme that a
+duplication guard existed in one place and was missing in another** (the board
+walk, the incentives token walk, the incentives emit side, and now the panel).
+The pattern is the finding; the instance is just where it surfaced this time.
+
+**What the venue actually does.** It runs several concurrent liquidity
+programmes on ONE market. Captured from segment 35045117108's own
+`/v1/incentives` bytes, `aec-ufc-alomen-iwobar-2026-09-19` carries five active
+periods at the same instant:
+
+```
+ufc_main_moneyline_early_20260712   early    pool  1250  target 20000  df 0.30
+ufc_main_moneyline_dayof_20260915   day_of   pool  1250  target 20000  df 0.30
+ufc_main_moneyline_live_20260915    live     pool 10000  target 20000  df 0.30
+ufc_main_props_dayof_20260915       day_of   pool   500  target  1000  df 0.35
+ufc_main_props_live_20260915        live     pool   500  target  1000  df 0.35
+```
+
+Stratifying over programmes is right — they are genuinely different economics.
+**Reading the book once per programme is not.** The collector fetched the same
+market's book up to five times a round, ~21 s apart, and wrote each as its own
+`PANEL` row.
+
+**Two separate harms.**
+
+1. **Venue cost.** 324 book requests bought 72 distinct book snapshots. 4.5x
+   the traffic for the same information, against a 2 rps ceiling that is the
+   binding constraint on how much of the board a segment can reach.
+
+2. **Silent non-uniform weighting — the one that changed a number.** The report
+   counted 324 observations. Each market therefore entered the statistics
+   weighted by how many programmes it happened to carry, 4 or 5, which is a
+   fact about venue programme design and nothing to do with book depth.
+
+**What the pooled figure was hiding.** Eligibility is a FUNCTION OF THE TARGET
+SIZE, and these markets run two targets at once. Pooling them produced a number
+describing no programme anyone can actually quote into:
+
+```
+                              pooled (wrong)   target 1,000   target 20,000
+ASK one tick back                    79.6%          66.7%          91.7%
+BID one tick back                    71.2%          65.7%          79.3%
+```
+
+The pooled value sits between two real answers that differ by 25 points.
+
+**Fixed at both ends.** `panel_cohort` now returns
+`(reads, plan, slots)`: strata and their slots are unchanged, and the READ list
+is collapsed to distinct markets carrying all their programmes. `panel` writes
+ONE row per (market, round) with a `PROGRAMS` list, `PROGRAMS_N` and
+`DISTINCT_TARGET_SIZES`. `panel_report` reads BOTH row shapes — so the
+correction applies to the segments already on disk, not only to segments not
+yet captured — dedupes on `(slug, round, TARGET_SIZE)`, and reports each target
+size in its own block. There is no code path left that prints a blended figure.
+
+**Segment 35045117108 is NOT void.** Unlike C-5, no information was lost: the
+duplicate rows are real reads of a real book, and rescoring them under the
+correct unit recovers the whole panel. Only the previously reported percentages
+are superseded, by the per-target table above.
+
+**Two further limits of that panel, stated rather than left to be assumed.**
+
+- `SPORT_CONCENTRATION = [('ufc', 12)]`. Nine strata and 54 slots resolved to
+  **12 distinct markets, every one a UFC fight**, because slug order within a
+  stratum is deterministic and `aec-ufc-` sorts early enough to fill every
+  stratum. That is not selection bias — no outcome touched the choice — but the
+  panel measures one event family's books, so `PANEL_GENERALIZES_TO_BOARD = NO`.
+- The panel spans **6 rounds x 30 s = 2.5 minutes**. Across 60 consecutive
+  snapshot pairs the touch price moved **zero times**. That is a statement
+  about a 2.5-minute window and is emphatically **not** a touch rate.
+
+## C-8b — I understated what a REST snapshot carries
+
+A correction to my own capability assessment, in the direction of being too
+pessimistic, which is just as wrong as the other direction.
+
+The book payload carries a `stats` block: `sharesTraded`, `notionalTraded`,
+`lastTradePx`, `lastTradeQty`, `lastTradeSetTime` (nanosecond), `openInterest`
+and their set-times. Differencing two snapshots therefore establishes THAT
+trading occurred in the interval and HOW MUCH. I had assigned LEVEL_0 no trade
+information at all.
+
+It moves exactly one cell: `DEPTH_DEPLETION` from `NO` to `PROXY_ONLY` at
+LEVEL_0. It is a polled volume counter, not a tape, and it does not give:
+
+```
+TRADE_AGGRESSOR_AVAILABLE           NO   (last trade price beside a one-tick
+                                          spread does not identify the lifter)
+PER_TRADE_SEQUENCE                  NO   (several trades collapse into one
+                                          sharesTraded delta)
+PASSIVE_FILL_ATTRIBUTION_AVAILABLE  NO   (it never says WHOSE order filled)
+TRADE_COUNTER_IS_A_TAPE             NO
+```
+
+Reported in `panel_report.tape_observables`, with each of those four NOs pinned
+as a test so the counter cannot be quietly promoted into a tape.
