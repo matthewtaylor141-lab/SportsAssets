@@ -1,0 +1,13 @@
+{
+ "collector_version": "beta48-forward-public/1",
+ "captured_at_utc": "2026-09-16T00:46:41.108454+00:00",
+ "pages_walked": 200,
+ "DISCOVERY_LIST_EXHAUSTED": "NO",
+ "PAGINATION_ADVANCED": "YES",
+ "markets_seen": 20000,
+ "events_two_outcome": 0,
+ "events_skipped": 0,
+ "requests_used": 200,
+ "selected": [],
+ "skipped": []
+}
