@@ -1,0 +1,145 @@
+# BETA48 FORWARD — the prospective capture. READ ONLY. NO CREDENTIAL.
+#
+# WHY THIS EXISTS. The retrospective programme is finished: Engine A closed on
+# total economics, Engine B failed its holdout, and the maker ledger measured
+# against RN1's flow came out negative. Every one of those answers was limited
+# by the same thing — a dataset selected by one whale, on the wrong venue, with
+# prices and outcomes that never met. This captures the board BETTOR actually
+# trades, with the settlement follow-up whose absence was the entire gap.
+#
+# CAPABILITY BOUNDARY, unchanged from the authorized run85 collector and
+# re-proved by AST scan before the job is allowed to contact anything:
+#   GET only. gateway.polymarket.us only — never api.polymarket.us. No
+#   credential, no repository secret, no wallet, no signer, no authentication
+#   header, no trading SDK, no order or cancel endpoint, no POST/PUT/PATCH/
+#   DELETE. 2.0 rps ceiling as OUR restraint, Retry-After honoured exactly,
+#   never raised to buy more samples. mirror_live stays false; this job cannot
+#   reach anything that could change it.
+#
+# THE OFFLINE TESTS RUN FIRST and the job refuses to contact the venue if any
+# fails. The capability boundary is not a promise in a comment — it is a gate.
+#
+# RATE GUARD IS THE CONCURRENCY GROUP. Two capture jobs at once would double
+# the aggregate request rate, which the rate policy forbids. cancel-in-progress
+# is false, so a late segment queues and the next cron is dropped rather than
+# stacked.
+#
+# NO PROFITABILITY CLAIM. The runner records responses and derived
+# observations. It computes no expectancy, no ROI, no fill probability and no
+# fee-adjusted figure. TOUCH is never written into a FILL field. Fills are
+# decided offline, later, under frozen models.
+#
+# THROUGHPUT IS MEASURED, NOT ASSUMED. Board size, achieved request rate and
+# settlement arrivals come out of the first runs; every calendar estimate in
+# the sequential programme derives from those numbers afterwards.
+
+name: beta48-forward-capture
+
+on:
+  schedule:
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      depth_seconds:
+        description: "Seconds of dense cohort sampling this segment"
+        required: false
+        default: "1800"
+      depth_cohort:
+        description: "Markets in the dense cohort (nearest to start)"
+        required: false
+        default: "8"
+      depth_interval:
+        description: "Seconds between dense cycles"
+        required: false
+        default: "5"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta48-forward-capture
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency
+        run: python -m pip install --quiet "httpx==0.27.2" "pytest==8.3.3"
+
+      # THE GATE. No venue contact until the boundary is proved.
+      - name: Prove the capability boundary offline
+        run: python -m pytest research/beta48/forward/test_fwd_collect.py -q
+
+      - name: Enumerate the WHOLE board
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/forward/evidence/seg_$SEG
+          mkdir -p "$D"
+          python research/beta48/forward/fwd_collect.py board --out "$D"
+
+      - name: Breadth — one pass over every two-outcome event
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/forward/evidence/seg_$SEG
+          python research/beta48/forward/fwd_collect.py breadth \
+            --out "$D" --board "$D/board.json" \
+            --registry research/beta48/forward/evidence/registry.json
+
+      - name: Settlement follow-up — the step whose absence was the gap
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/forward/evidence/seg_$SEG
+          python research/beta48/forward/fwd_collect.py settle \
+            --out "$D" \
+            --registry research/beta48/forward/evidence/registry.json
+
+      - name: Depth — dense cohort, for execution questions only
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/forward/evidence/seg_$SEG
+          python research/beta48/forward/fwd_collect.py depth \
+            --out "$D" --board "$D/board.json" \
+            --seconds "${{ github.event.inputs.depth_seconds || 1800 }}" \
+            --cohort "${{ github.event.inputs.depth_cohort || 8 }}" \
+            --interval "${{ github.event.inputs.depth_interval || 5 }}"
+
+      - name: Seal and commit the segment
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/forward/evidence/seg_$SEG
+          ( cd "$D" && sha256sum * > SEALED.sha256 2>/dev/null || true )
+          gzip -9 "$D"/breadth.jsonl "$D"/depth.jsonl "$D"/board_raw.jsonl \
+                  "$D"/settle_raw.jsonl 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BR="beta48-forward/seg-$SEG"
+          git checkout --orphan "$BR"
+          git rm -rq --cached . || true
+          git add -f "$D" research/beta48/forward/evidence/registry.json
+          git commit -qm "BETA48 forward segment $SEG [skip render]" || exit 0
+          for i in 1 2 4 8 16; do
+            git push -f origin "$BR" && break
+            echo "push failed, retrying in ${i}s"; sleep "$i"
+          done
+          echo "BETA48_FORWARD_BRANCH $BR"
