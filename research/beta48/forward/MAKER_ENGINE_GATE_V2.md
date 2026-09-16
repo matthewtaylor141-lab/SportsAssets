@@ -24,13 +24,18 @@ OBSERVED_PREFIX_SCOPE          20,000 markets, one capture instant, NOT the
                                whole board. DISCOVERY_LIST_EXHAUSTED = NO,
                                TRUE_ACTIVE_BOARD_SIZE = NOT_IDENTIFIED.
 
-MARKET_WEIGHTED_RESULT         STAGE1_BROAD_SURVIVORS 9,182 / 20,000 = 45.9%
+MARKET_WEIGHTED_RESULT         STAGE1_BROAD_ROUTED 9,182 / 20,000 = 45.9%
 EVENT_WEIGHTED_RESULT_IF_VALID NOT_IDENTIFIED -- the event key failed
                                validation; event-weighted inference is OFF and
                                raises rather than returning a number.
 
-ELIGIBLE_MARKETS               9,182  (stage 1 only; stage 2 never run at scale)
-ELIGIBLE_INDEPENDENT_EVENTS    NOT_IDENTIFIED
+STAGE1_BROAD_ROUTED_MARKETS    9,182
+                               NOT "eligible", and NOT
+                               PROVEN_MAKER_ELIGIBLE_MARKETS. ACTIVE,
+                               HIGH_ACTIVITY and every execution term are
+                               still unknown for these markets.
+MAKER_PROFITABILITY            NOT_ESTABLISHED
+INDEPENDENT_EVENTS_AMONG_THEM  NOT_IDENTIFIED
                                lower bound 444 families, upper bound 9,182
                                (a CEILING, not an estimate)
 
@@ -158,21 +163,21 @@ exist, and it did not flatter the maker case.
 OBSERVED_PREFIX_MARKETS   20,000
 STATUS_OPEN               19,996   (100.0%)
 TWO_SIDED_BBO_PRESENT     11,290   (56.5%)
-STAGE1_BROAD_SURVIVORS     9,182   (45.9% of prefix, 81.3% of two-sided)
+STAGE1_BROAD_ROUTED        9,182   (45.9% of prefix, 81.3% of two-sided)
 
 PRIMARY_FAIL_REASONS
   FAIL_NO_TWO_SIDED_BOOK   8,709
   FAIL_SPREAD              2,105
   FAIL_CLOSED_OR_UNKNOWN       4
 
-BROAD SURVIVOR COMPOSITION, BY TYPE
+BROAD ROUTED COMPOSITION, BY TYPE
   FUTURE      7,152   77.9%
   SPREAD        994   10.8%
   TOTAL         581    6.3%
   PROP          366    4.0%
   MONEYLINE      83    0.9%
 
-BROAD SURVIVOR COMPOSITION, BY LEAGUE
+BROAD ROUTED COMPOSITION, BY LEAGUE
   nfl         4,141   45.1%
   cfb         2,484   27.1%
   (no key)      407    4.4%
@@ -182,7 +187,13 @@ BROAD SURVIVOR COMPOSITION, BY LEAGUE
   lal           117    1.3%
 ```
 
-**UFC is 1.9% of the eligible board.**
+**UFC is 1.9% of the stage-1 BROAD routed universe.**
+
+The conclusion that follows is a LIMIT ON WHAT WE MAY SAY, not a claim about
+the rest: UFC microstructure is insufficient to characterize the broader
+observed prefix. **The other 98.1% is the PRIMARY GENERALIZATION TARGET.** It
+is emphatically NOT established that it has better economics -- that has not
+been measured, and the census now running is what would measure it.
 
 ### One part of the microstructure DOES generalize, and it should be said
 
