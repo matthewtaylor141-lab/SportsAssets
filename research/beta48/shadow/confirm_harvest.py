@@ -89,25 +89,75 @@ def _parse(ts):
         return None
 
 
-def elapsed_from_rows(rows):
-    """FIRST_REQUEST_TIME / LAST_REQUEST_COMPLETION_TIME from the rows."""
+def elapsed_from_rows(rows, rps):
+    """The two spans, and only one of them may satisfy the support floor.
+
+    WHY THEY ARE NOT THE SAME NUMBER. MIN_DURATION_S exists to establish
+    SUSTAINED OPERATION AT THE SELECTED RATE. Two things can stretch a wall
+    clock without adding a second of that evidence:
+
+        A VENUE-ENFORCED PAUSE. A 429 backoff or an honoured Retry-After is the
+        venue telling us to stop. Time spent obeying it is time we were NOT
+        reading at 0.25 rps -- it is the opposite of the thing being measured.
+        Counting it toward the floor would mean a refusal helps a rate pass.
+
+        RESPONSE LATENCY. The last request's 30 ms of flight is operationally
+        interesting and is reported, but measuring completion-minus-first-start
+        would turn a 1,196-second pacing experiment into a "1,200-second"
+        validation by arithmetic rather than by exposure.
+
+    So the support criterion uses NOMINAL_PACED_EXPOSURE_S: the sum over
+    consecutive request STARTS of min(observed gap, nominal interval). Capping
+    each interval at its nominal value means no pause of any kind -- venue
+    backoff, Retry-After, runner stall, GC -- can inflate it, without the
+    measure needing to know why a gap was long.
+    """
+    interval = 1.0 / float(rps)
     stamps = [(_parse(r.get("RECEIPT_UTC")), r) for r in rows]
     stamps = [(t, r) for t, r in stamps if t is not None]
     if not stamps:
-        return {"FIRST_REQUEST_TIME": NOT_IDENTIFIED,
-                "LAST_REQUEST_COMPLETION_TIME": NOT_IDENTIFIED,
-                "ACTUAL_ELAPSED_DURATION_S": NOT_IDENTIFIED}
-    stamps.sort(key=lambda p: p[0])
-    first_t, _ = stamps[0]
+        return {"FIRST_REQUEST_START": NOT_IDENTIFIED,
+                "LAST_REQUEST_START": NOT_IDENTIFIED,
+                "LAST_REQUEST_COMPLETION": NOT_IDENTIFIED,
+                "NOMINAL_PACED_EXPOSURE_S": NOT_IDENTIFIED,
+                "WALL_CLOCK_ELAPSED_S": NOT_IDENTIFIED}
+    stamps.sort(key=lambda p: (p[1].get("SEQ", 0), p[0]))
+    first_t = stamps[0][0]
     last_t, last_r = stamps[-1]
     lat = float(last_r.get("LATENCY_S") or 0.0)
-    span = (last_t - first_t).total_seconds() + lat
+
+    exposure = 0.0
+    short_gaps = 0
+    for (a, _), (b, _) in zip(stamps, stamps[1:]):
+        g = (b - a).total_seconds()
+        if g < interval - TIMESTAMP_RESOLUTION_S:
+            short_gaps += 1
+        exposure += min(g, interval)
+
+    start_span = (last_t - first_t).total_seconds()
     return {
-        "FIRST_REQUEST_TIME": first_t.isoformat(),
-        "LAST_REQUEST_ISSUE_TIME": last_t.isoformat(),
-        "LAST_REQUEST_COMPLETION_TIME": (
+        "FIRST_REQUEST_START": first_t.isoformat(),
+        "LAST_REQUEST_START": last_t.isoformat(),
+        "LAST_REQUEST_COMPLETION": (
             last_t.isoformat() + " +%.3fs latency" % lat),
-        "ACTUAL_ELAPSED_DURATION_S": span,
+        "LAST_REQUEST_LATENCY_S": lat,
+
+        # the support criterion
+        "NOMINAL_PACED_EXPOSURE_S": exposure,
+        "REQUEST_INTERVAL_S": interval,
+        "INTERVALS": len(stamps) - 1,
+
+        # reported, and explicitly not usable for the floor
+        "WALL_CLOCK_ELAPSED_S": start_span + lat,
+        "START_TO_START_SPAN_S": start_span,
+        "FORCED_SUSPENSION_S": max(0.0, start_span - exposure),
+        "BACKOFF_EXCLUDED_FROM_SUPPORT": True,
+        "LATENCY_EXCLUDED_FROM_SUPPORT": True,
+        "WHY_BACKOFF_IS_EXCLUDED": (
+            "time spent obeying a venue refusal is time we were not operating "
+            "at the selected rate; a 429 may not help a rate pass"),
+        "GAPS_SHORTER_THAN_NOMINAL": short_gaps,
+
         "TIMESTAMP_RESOLUTION_S": TIMESTAMP_RESOLUTION_S,
         "ELAPSED_UNCERTAINTY_S": TIMESTAMP_RESOLUTION_S,
     }
@@ -220,14 +270,15 @@ def harvest(outdir, rps=None):
     other = req - ok - n429
     lat = [float(r.get("LATENCY_S") or 0.0) for r in rows]
 
-    timing = elapsed_from_rows(rows)
-    actual = timing["ACTUAL_ELAPSED_DURATION_S"]
+    timing = elapsed_from_rows(rows, rps)
+    exposure = timing["NOMINAL_PACED_EXPOSURE_S"]
     need_dur = RC.min_duration_s(rps)
     need_req = RC.MIN_REQUESTS
 
-    # Enforced literally. 1196 is not 1200, and it is not rounded to 1200.
+    # Enforced literally, against the PACED EXPOSURE. 1196 is not 1200, it is
+    # not rounded to 1200, and no backoff or latency may carry it there.
     reqs_ok = req >= need_req
-    dur_ok = (actual != NOT_IDENTIFIED and float(actual) >= need_dur)
+    dur_ok = (exposure != NOT_IDENTIFIED and float(exposure) >= need_dur)
 
     fair = order_fairness(rows)
     cover = success_coverage(rows)
@@ -241,23 +292,42 @@ def harvest(outdir, rps=None):
         elif r.get("status") == 200:
             after += 1
 
-    reasons = []
+    # -- the question THIS RUN CAN answer: was 0.25 rps operationally clean
+    #    over the requests it actually issued? Outcome criteria only. The
+    #    duration floor is deliberately absent here.
+    operational = []
+    if n429 > RC.MAX_ALLOWED_429:
+        operational.append("REFUSALS_EXCEED_FROZEN_ALLOWANCE")
+    if cover.get("POLL_ORDER_STARVATION") == "YES":
+        operational.append("POLL_ORDER_STARVATION")
+    if fair.get("POLL_ORDER_FAIRNESS") == "FAIL":
+        operational.append("POLL_ORDER_NOT_FAIR")
+    if cover.get("SUCCESS_COVERAGE_BALANCED") == "NO":
+        operational.append("SUCCESS_COVERAGE_UNBALANCED")
+    if other and D(other) / D(req) > RC.MAX_OTHER_FAILURE_SHARE:
+        operational.append("OTHER_FAILURES_EXCEED_TOLERANCE")
+    if n429 and not after:
+        operational.append("READS_DID_NOT_RESUME_AFTER_THE_REFUSAL")
+    clean = not operational
+
+    # -- the question THIS RUN CANNOT answer: has the frozen sustained-duration
+    #    criterion been met? Support floors on top of the outcome criteria.
+    reasons = list(operational)
     if not reqs_ok:
         reasons.append(REQUESTS_FAIL_REASON)
     if not dur_ok:
         reasons.append(DURATION_FAIL_REASON)
-    if n429 > RC.MAX_ALLOWED_429:
-        reasons.append("REFUSALS_EXCEED_FROZEN_ALLOWANCE")
-    if cover.get("POLL_ORDER_STARVATION") == "YES":
-        reasons.append("POLL_ORDER_STARVATION")
-    if fair.get("POLL_ORDER_FAIRNESS") == "FAIL":
-        reasons.append("POLL_ORDER_NOT_FAIR")
-    if other and D(other) / D(req) > RC.MAX_OTHER_FAILURE_SHARE:
-        reasons.append("OTHER_FAILURES_EXCEED_TOLERANCE")
-    if n429 and not after:
-        reasons.append("READS_DID_NOT_RESUME_AFTER_THE_REFUSAL")
 
     validated = not reasons
+    structural = (exposure != NOT_IDENTIFIED
+                  and float(exposure) < need_dur
+                  and abs(float(exposure) - planned_elapsed_s(req, rps)) < 1.5)
+
+    # A clean-but-short run is repeatable at the SAME rate with the corrected
+    # count. A run that failed on venue behaviour is not: repeating 0.25 rps
+    # merely to fix our own off-by-one would be answering the arithmetic
+    # question while ignoring the answer the venue already gave.
+    propose = clean and not dur_ok
     report = {
         "REQUESTS": req,
         "SUCCESSES": ok,
@@ -278,19 +348,54 @@ def harvest(outdir, rps=None):
         "RUN_REPORTED_DURATION_S": sealed.get("DURATION_S", NOT_IDENTIFIED),
         "PACING_SEMANTICS": PACING_SEMANTICS,
         "FIRST_REQUEST_IS_NOT_DELAYED": FIRST_REQUEST_IS_NOT_DELAYED,
-        "PLANNED_ELAPSED_BY_PACING_S": planned_elapsed_s(req, rps),
+        "PLANNED_PACED_EXPOSURE_S": planned_elapsed_s(req, rps),
         "MIN_REQUESTS_REQUIRED": need_req,
-        "MIN_DURATION_S_REQUIRED": need_dur,
+        "MIN_PACED_EXPOSURE_S_REQUIRED": need_dur,
+        "SUPPORT_CRITERION_USES": "NOMINAL_PACED_EXPOSURE_S",
         "REQUESTS_MEET_FLOOR": reqs_ok,
         "DURATION_MEETS_FLOOR": dur_ok,
         "DURATION_WAS_NOT_ROUNDED": True,
-        "REQUESTS_NEEDED_FOR_THE_DURATION_FLOOR":
+        "DURATION_VERDICT_IS_STRUCTURAL": structural,
+        "WHY_STRUCTURAL": (
+            "%d requests at %s rps span %d intervals; the exposure is fixed by "
+            "the pacing before the venue answers anything"
+            % (req, rps, req - 1) if structural else None),
+        "REQUESTS_NEEDED_FOR_THE_EXPOSURE_FLOOR":
             requests_for_duration(rps, need_dur),
+
+        # the two questions, kept apart
+        "QUESTION_THIS_RUN_CAN_ANSWER": (
+            "does %s rps appear operationally clean over the %d requests "
+            "issued?" % (rps, req)),
+        "OPERATIONALLY_CLEAN_OVER_THE_REQUESTS_ISSUED": ("YES" if clean
+                                                         else "NO"),
+        "OPERATIONAL_FAILURES": (operational if operational else None),
+        "QUESTION_THIS_RUN_CANNOT_ANSWER": (
+            "has %s rps met the frozen sustained-duration validation "
+            "criterion?" % rps),
 
         "COLLECTOR_RATE_OPERATIONALLY_VALIDATED": ("YES" if validated else "NO"),
         "FAIL_REASON": (reasons if reasons else None),
         "PROPOSED_SUBSTANTIVE_CAPTURE_RATE": (
             "%s RPS" % sealed["RATE_RPS"] if validated else NOT_IDENTIFIED),
+
+        # the corrected re-run, offered only when the venue gave no adverse
+        # answer -- never as a way to re-ask a question already answered NO
+        "CORRECTED_CONFIRMATION_RATE": ("%s RPS" % sealed["RATE_RPS"]
+                                        if propose else NOT_IDENTIFIED),
+        "CORRECTED_CONFIRMATION_REQUESTS": (
+            requests_for_duration(rps, need_dur) if propose else NOT_IDENTIFIED),
+        "MIN_PACED_EXPOSURE_S": (need_dur if propose else NOT_IDENTIFIED),
+        "CORRECTED_REQUEST_INTERVAL_S": (1.0 / rps if propose
+                                         else NOT_IDENTIFIED),
+        "PROPOSE_REPEAT_AT_THIS_RATE": ("YES" if propose else "NO"),
+        "WHY_NOT_PROPOSED": (
+            None if propose else
+            ("the run already validated" if validated else
+             "the venue gave an adverse answer at this rate; repeating it "
+             "merely to fix our own off-by-one would re-ask a question that "
+             "has been answered")),
+        "CORRECTED_CONFIRMATION_IS_NOT_DISPATCHED": True,
         "VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED": NOT_IDENTIFIED,
         "MECHANISM_DOES_NOT_GATE_THIS": True,
         "REFUSED_LABELS": list(RC.REFUSED_LABELS),
@@ -309,11 +414,17 @@ def harvest(outdir, rps=None):
 def render(r):
     """The frozen field list, ending on the two lines that are the decision."""
     L = []
-    for k in ("REQUESTS", "ACTUAL_ELAPSED_DURATION_S", "SUCCESSES", "HTTP_429",
-              "OTHER_FAILURES", "HTTP_429_RATE", "P50_LATENCY", "P90_LATENCY",
-              "P99_LATENCY", "VALID_RETRY_AFTER_COUNT", "GLOBAL_BACKOFF_EVENTS",
+    for k in ("REQUESTS", "SUCCESSES", "HTTP_429", "OTHER_FAILURES",
+              "HTTP_429_RATE", "P50_LATENCY", "P90_LATENCY", "P99_LATENCY",
+              "VALID_RETRY_AFTER_COUNT", "GLOBAL_BACKOFF_EVENTS",
               "SUCCESSES_AFTER_LAST_429"):
-        L.append("%-34s = %s" % (k, r.get(k)))
+        L.append("%-38s = %s" % (k, r.get(k)))
+    L.append("")
+    for k in ("FIRST_REQUEST_START", "LAST_REQUEST_START",
+              "LAST_REQUEST_COMPLETION", "NOMINAL_PACED_EXPOSURE_S",
+              "WALL_CLOCK_ELAPSED_S", "FORCED_SUSPENSION_S",
+              "MIN_PACED_EXPOSURE_S_REQUIRED"):
+        L.append("%-38s = %s" % (k, r.get(k)))
     L.append("")
     for slug, d in r.get("PER_MARKET", {}).items():
         L.append("%-44s att %-4s ok %-4s 429 %-3s other %-3s share %s"
@@ -322,17 +433,19 @@ def render(r):
     L.append("")
     for k in ("POLL_ORDER_FAIRNESS", "SUCCESS_COVERAGE_BALANCED",
               "POLL_ORDER_STARVATION"):
-        L.append("%-34s = %s" % (k, r.get(k)))
+        L.append("%-38s = %s" % (k, r.get(k)))
     if r.get("FAIL_REASON"):
         L.append("")
         for f in r["FAIL_REASON"]:
-            L.append("%-34s = %s" % ("FAIL_REASON", f))
+            L.append("%-38s = %s" % ("FAIL_REASON", f))
     L.append("")
-    L.append("%-34s = %s" % ("VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED",
+    L.append("%-38s = %s" % ("OPERATIONALLY_CLEAN_OVER_THE_REQUESTS_ISSUED",
+                             r["OPERATIONALLY_CLEAN_OVER_THE_REQUESTS_ISSUED"]))
+    L.append("%-38s = %s" % ("VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED",
                              r["VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED"]))
-    L.append("%-34s = %s" % ("COLLECTOR_RATE_OPERATIONALLY_VALIDATED",
+    L.append("%-38s = %s" % ("COLLECTOR_RATE_OPERATIONALLY_VALIDATED",
                              r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"]))
-    L.append("%-34s = %s" % ("PROPOSED_SUBSTANTIVE_CAPTURE_RATE",
+    L.append("%-38s = %s" % ("PROPOSED_SUBSTANTIVE_CAPTURE_RATE",
                              r["PROPOSED_SUBSTANTIVE_CAPTURE_RATE"]))
     return "\n".join(L)
 
