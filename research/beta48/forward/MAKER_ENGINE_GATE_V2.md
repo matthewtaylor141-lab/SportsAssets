@@ -24,19 +24,19 @@ OBSERVED_PREFIX_SCOPE          20,000 markets, one capture instant, NOT the
                                whole board. DISCOVERY_LIST_EXHAUSTED = NO,
                                TRUE_ACTIVE_BOARD_SIZE = NOT_IDENTIFIED.
 
-MARKET_WEIGHTED_RESULT         STAGE1_BROAD_ROUTED 9,182 / 20,000 = 45.9%
+MARKET_WEIGHTED_RESULT         STAGE1_BROAD_ROUTED 9,185 / 20,000 = 45.9%
 EVENT_WEIGHTED_RESULT_IF_VALID NOT_IDENTIFIED -- the event key failed
                                validation; event-weighted inference is OFF and
                                raises rather than returning a number.
 
-STAGE1_BROAD_ROUTED_MARKETS    9,182
+STAGE1_BROAD_ROUTED_MARKETS    9,185
                                NOT "eligible", and NOT
                                PROVEN_MAKER_ELIGIBLE_MARKETS. ACTIVE,
                                HIGH_ACTIVITY and every execution term are
                                still unknown for these markets.
 MAKER_PROFITABILITY            NOT_ESTABLISHED
 INDEPENDENT_EVENTS_AMONG_THEM  NOT_IDENTIFIED
-                               lower bound 444 families, upper bound 9,182
+                               lower bound 444 families, upper bound 9,185
                                (a CEILING, not an estimate)
 
 TRADE_ACTIVITY                 SEG 10: 10 trade intervals / 897 pairs = 1.11%
@@ -170,7 +170,7 @@ exist, and it did not flatter the maker case.
 OBSERVED_PREFIX_MARKETS   20,000
 STATUS_OPEN               19,996   (100.0%)
 TWO_SIDED_BBO_PRESENT     11,290   (56.5%)
-STAGE1_BROAD_ROUTED        9,182   (45.9% of prefix, 81.3% of two-sided)
+STAGE1_BROAD_ROUTED        9,185   (45.9% of prefix, 81.3% of two-sided)
 
 PRIMARY_FAIL_REASONS
   FAIL_NO_TWO_SIDED_BOOK   8,709
@@ -242,7 +242,7 @@ That distinction matters for the gate: the **opportunity** side is observed
 board-wide; the **cost** side — how long capital waits, how often anything
 trades at all, and what the fill costs when it comes — is measured on 1.9% of
 the routed universe and is `NOT_IDENTIFIED` on the other 98.1%. It is not "low"
-there. It is unmeasured, and a 9,182-read census would settle part of it for
+there. It is unmeasured, and a 9,185-read census would settle part of it for
 free. Neither side is realized P&L until a BETTOR order is filled.
 
 ```
@@ -368,7 +368,7 @@ BETTOR's own resting orders, showing a positive
 ## THE NEXT EXPERIMENTS, IN ORDER OF COST
 
 **1. The stage-2 rolling census — FREE, NO NEW AUTHORITY, DO THIS FIRST.**
-9,182 book reads, 1.28 hours at 2 requests/second, public and unauthenticated.
+9,185 book reads, 1.28 hours at 2 requests/second, public and unauthenticated.
 It converts `ACTIVE` and `HIGH_ACTIVITY` from `NOT_IDENTIFIED` to measured
 across the **other 98.1% of the board**, and it is the only cheap way to learn
 whether the UFC microstructure is representative or pathological. The runtime

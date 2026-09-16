@@ -226,7 +226,7 @@ in every output, whatever `TOTAL_NET` says. MODEL A (structural) and MODEL B
 ## 7. WHAT A3 DOES AND DOES NOT SAY
 
 ```
-SAYS      UFC is 174 of 9,182 stage-1 BROAD routed markets = 1.9%.
+SAYS      UFC is 174 of 9,185 stage-1 BROAD routed markets = 1.9%.
           UFC microstructure is therefore INSUFFICIENT to characterize the
           broader observed prefix.
           The other 98.1% is the PRIMARY GENERALIZATION TARGET.
@@ -236,7 +236,7 @@ SAY       That has not been measured. The census now running is what would
           measure it, and it may come back worse.
 ```
 
-Terminology, fixed at the source and asserted by a test: **9,182 =
+Terminology, fixed at the source and asserted by a test: **9,185 =
 `STAGE1_BROAD_ROUTED_MARKETS`**, never `PROVEN_MAKER_ELIGIBLE_MARKETS`.
 `ACTIVE`, `HIGH_ACTIVITY` and every execution term are unknown for them.
 

@@ -191,7 +191,7 @@ reinterpreted later:
 
 ```
 MARKETS_DISCOVERED               ~20,000 (observed prefix)
-STAGE1_BROAD_ROUTED_MARKETS      ~9,182   (not "eligible")
+STAGE1_BROAD_ROUTED_MARKETS      ~9,185   (not "eligible")
 STAGE2_ACTIVE / HIGH_ACTIVITY    measured once the census runs
 FV_BASIS                         NOT_IDENTIFIED on essentially all markets
 EV_MAKER / EV_TAKER              NOT_IDENTIFIED on essentially all markets

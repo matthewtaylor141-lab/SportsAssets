@@ -10,6 +10,8 @@ import json
 import unittest
 from pathlib import Path
 
+from decimal import Decimal
+
 import census_collect as C
 
 SRC = Path(C.__file__).read_text()
@@ -183,3 +185,58 @@ class EveryRowMustSurviveJsonDumps(unittest.TestCase):
     def test_an_unexpected_type_still_raises_rather_than_being_coerced(self):
         with self.assertRaises(TypeError):
             C._jsonable(object())
+
+
+class TheDecimalPipelineIsExactInBothDirections(unittest.TestCase):
+    """Decimal -> exact decimal string in JSON -> Decimal on read.
+
+    The writer half alone is not enough: a reader that leaves SPREAD_TICKS a
+    string invites a LEXICAL comparison, and lexically "10" < "2".
+    """
+
+    def test_the_lexical_hazard_this_exists_to_prevent_is_real(self):
+        # Stated as a test so nobody has to take it on trust.
+        self.assertLess("10", "2")                       # lexical: WRONG order
+        self.assertGreater(Decimal("10"), Decimal("2"))  # numeric: right order
+
+    def test_a_row_round_trips_string_to_decimal(self):
+        row = {"STAGE1": {"SPREAD_TICKS": "10", "BROAD": True}}
+        back = C.rehydrate(row)
+        self.assertIsInstance(back["STAGE1"]["SPREAD_TICKS"], Decimal)
+        self.assertEqual(back["STAGE1"]["SPREAD_TICKS"], Decimal("10"))
+
+    def test_sorting_rehydrated_rows_is_numeric_not_lexical(self):
+        rows = [C.rehydrate({"STAGE1": {"SPREAD_TICKS": t}})
+                for t in ("2", "10", "1", "20", "3")]
+        order = [str(r["STAGE1"]["SPREAD_TICKS"])
+                 for r in sorted(rows, key=lambda r: r["STAGE1"]["SPREAD_TICKS"])]
+        self.assertEqual(order, ["1", "2", "3", "10", "20"])
+
+    def test_a_float_is_refused_rather_than_coerced(self):
+        # float(0.1) is not 0.1. Accepting it would make the one exact step lossy.
+        with self.assertRaises(TypeError):
+            C.from_json_decimal(0.1)
+
+    def test_no_implicit_int_conversion(self):
+        v = C.from_json_decimal("1.5")
+        self.assertEqual(v, Decimal("1.5"))
+        self.assertNotEqual(v, 1)
+
+    def test_not_identified_survives_as_none_not_as_zero(self):
+        self.assertIsNone(C.from_json_decimal("NOT_IDENTIFIED"))
+        self.assertIsNone(C.from_json_decimal(None))
+
+    def test_the_full_write_then_read_cycle_is_exact(self):
+        s1 = C.E.stage1({"slug": "aec-nfl-a-b-2026-09-19",
+                         "status": "MARKET_STATUS_OPEN",
+                         "orderPriceMinTickSize": 0.001,
+                         "board_bestBidQuote": {"value": "0.400", "currency": "USD"},
+                         "board_bestAskQuote": {"value": "0.410", "currency": "USD"}})
+        written = json.dumps({"STAGE1": s1}, default=C._jsonable)
+        back = C.rehydrate(json.loads(written))
+        self.assertEqual(back["STAGE1"]["SPREAD_TICKS"], s1["SPREAD_TICKS"])
+        self.assertIsInstance(back["STAGE1"]["SPREAD_TICKS"], Decimal)
+
+    def test_the_pipeline_is_named_in_code(self):
+        self.assertEqual(C.CANONICAL_NUMERIC_PIPELINE,
+                         "DECIMAL -> EXACT_DECIMAL_STRING -> DECIMAL")

@@ -64,6 +64,56 @@ def _jsonable(o):
     raise TypeError("not JSON serializable: %s" % type(o).__name__)
 
 
+# THE CANONICAL PIPELINE, both halves in one place:
+#     Decimal -> exact decimal string in JSON -> Decimal on read
+# The writer half alone is not enough. A reader that leaves SPREAD_TICKS as a
+# string invites a LEXICAL comparison, and lexically "10" < "2". A reader that
+# calls float() on it reintroduces exactly the corruption the string prevents.
+DECIMAL_FIELDS = ("SPREAD_TICKS",)
+CANONICAL_NUMERIC_PIPELINE = "DECIMAL -> EXACT_DECIMAL_STRING -> DECIMAL"
+
+
+def from_json_decimal(v):
+    """The exact inverse of `_jsonable` for one Decimal field.
+
+    Accepts the string the writer produced, or a Decimal already. Refuses a
+    float outright: float(0.1) is not 0.1, and silently accepting one would
+    make the round trip lossy at the one place it is supposed to be exact.
+    """
+    if v is None or v == "NOT_IDENTIFIED":
+        return None
+    if isinstance(v, Decimal):
+        return v
+    if isinstance(v, float):
+        raise TypeError(
+            "refusing to build a Decimal from a float: the value has already "
+            "lost precision. Read the exact decimal string instead.")
+    return Decimal(str(v))
+
+
+def rehydrate(row):
+    """One census row, with every DECIMAL_FIELD returned to Decimal."""
+    out = dict(row)
+    s1 = dict(out.get("STAGE1") or {})
+    for f in DECIMAL_FIELDS:
+        if f in s1:
+            s1[f] = from_json_decimal(s1[f])
+    if s1:
+        out["STAGE1"] = s1
+    return out
+
+
+def read_census(path):
+    """Every row of a census.jsonl, rehydrated. The ONLY supported reader."""
+    import gzip
+    opener = gzip.open if str(path).endswith(".gz") else open
+    with opener(path, "rt") as fh:
+        for line in fh:
+            line = line.strip()
+            if line:
+                yield rehydrate(json.loads(line))
+
+
 def _rank(slug, tag, salt=CENSUS_SALT):
     import hashlib
     return hashlib.sha256(
