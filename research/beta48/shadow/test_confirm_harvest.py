@@ -17,7 +17,7 @@ T0 = datetime(2026, 9, 16, 18, 3, 15, tzinfo=timezone.utc)
 
 
 def sealed(outdir, requests=300, rps="0.25", statuses=None, slugs=None,
-           interval=4.0, latency=0.03, order=None, backoff_s=0.0):
+           interval=4.0, latency=0.03, order=None, backoff_s=0.0, prov=None):
     """Write a sealed confirmation exactly as the workflow would.
 
     backoff_s adds a forced pause AFTER each 429, exactly as a global backoff
@@ -46,7 +46,22 @@ def sealed(outdir, requests=300, rps="0.25", statuses=None, slugs=None,
         "RETRY_AFTER_OBSERVED": ["10"] if 429 in statuses else [],
         "GLOBAL_BACKOFF_EVENTS": sum(1 for s in statuses if s == 429),
     }))
+    if prov is not None:
+        (out / "provenance.json").write_text(json.dumps(prov))
     return str(out)
+
+
+SHA = "2c3b261f9d61e12aaa26ff5942f6cf481d7e43a1"
+
+
+def legacy_prov(outdir=None, **over):
+    """A v1 artifact, exactly as commit 2c3b261 writes it: EXECUTED_SHA, no
+    EXECUTED_SHA_ACTUAL, no four-aspect split."""
+    d = {"DISPATCH_SHA": SHA, "EXECUTED_SHA": SHA, "WORKFLOW_REF_SHA": SHA,
+         "WORKFLOW_FILE_SHA": "wfhash", "CONFIG_SHA": "cfghash",
+         "DATA_OUTPUT_SHA": "outhash", "EVIDENCE_RUN_VALIDITY": "PASS"}
+    d.update(over)
+    return d
 
 
 class TheOffByOneIsRealAndDecides(unittest.TestCase):
@@ -288,6 +303,98 @@ class TheRefusalRulesStillApply(unittest.TestCase):
         self.assertEqual(r["HTTP_429"], 1)
         self.assertGreater(r["SUCCESSES_AFTER_LAST_429"], 0)
         self.assertEqual(r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "YES")
+
+
+class TheSchemaGapIsRecordedNotSmoothedOver(unittest.TestCase):
+    """The executing commit writes v1; this harvester is v2. A reader must see
+    that a field was RENAMED in translation, not invented."""
+
+    def _harvest(self, **over):
+        rows_dir = sealed(tempfile.mkdtemp(), requests=301,
+                          prov=legacy_prov(**over))
+        return CH.harvest(rows_dir), rows_dir
+
+    def test_both_schema_versions_are_reported(self):
+        r, _ = self._harvest()
+        self.assertEqual(r["EXECUTION_PROVENANCE_SCHEMA_VERSION"], 1)
+        self.assertEqual(r["HARVEST_PROVENANCE_SCHEMA_VERSION"], 2)
+        self.assertEqual(r["LEGACY_PROVENANCE_FALLBACK_USED"], "YES")
+
+    def test_the_field_mapping_is_explicit(self):
+        r, _ = self._harvest()
+        self.assertIn("EXECUTED_SHA -> EXECUTED_SHA_ACTUAL",
+                      r["LEGACY_FIELD_MAPPING"])
+        self.assertEqual(r["EXECUTED_SHA_ACTUAL"], SHA)
+
+    def test_a_v2_artifact_reports_no_fallback(self):
+        rows_dir = sealed(tempfile.mkdtemp(), requests=301, prov=dict(
+            legacy_prov(), EXECUTED_SHA_ACTUAL=SHA,
+            EXECUTED_SHA_SOURCE="RUNNER_GIT_REV_PARSE"))
+        r = CH.harvest(rows_dir)
+        self.assertEqual(r["EXECUTION_PROVENANCE_SCHEMA_VERSION"], 2)
+        self.assertEqual(r["LEGACY_PROVENANCE_FALLBACK_USED"], "NO")
+        self.assertIsNone(r["LEGACY_FIELD_MAPPING"])
+
+    def test_each_aspect_names_its_source(self):
+        r, _ = self._harvest()
+        self.assertEqual(r["CODE_PROVENANCE_SOURCE"],
+                         "SEALED_RUNNER_OBSERVED_GIT_REV_PARSE_HEAD")
+        self.assertEqual(r["CONFIG_PROVENANCE_SOURCE"], "SEALED_CONFIG_HASH")
+        self.assertEqual(r["WORKFLOW_PROVENANCE_SOURCE"],
+                         "SEALED_WORKFLOW_FILE_HASH")
+        self.assertIn("SEALED_OUTPUT_HASH_WRITTEN_BY_THE_RUN",
+                      r["DATA_OUTPUT_PROVENANCE_SOURCE"])
+        self.assertTrue(r["NOT_INFERRED_FROM_THE_CURRENT_REPOSITORY"])
+
+
+class ARehashIsNotOriginalProvenance(unittest.TestCase):
+    """The defect this class exists to prevent: a harvest-time rehash standing
+    in for a sealed hash the run never wrote."""
+
+    def test_a_missing_sealed_output_hash_stays_not_recorded(self):
+        """The rows file is present and hashable. That does NOT make the
+        output provenance recorded."""
+        rows_dir = sealed(tempfile.mkdtemp(), requests=301,
+                          prov=legacy_prov(DATA_OUTPUT_SHA=None))
+        r = CH.harvest(rows_dir)
+        self.assertNotEqual(r["HARVEST_RECOMPUTED_DATA_SHA"], NI)
+        self.assertEqual(r["SEALED_DATA_OUTPUT_SHA"], NI)
+        self.assertEqual(r["DATA_OUTPUT_PROVENANCE"], "NOT_RECORDED")
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
+
+    def test_the_three_hash_facts_are_separate_fields(self):
+        rows_dir = sealed(tempfile.mkdtemp(), requests=301,
+                          prov=legacy_prov())
+        r = CH.harvest(rows_dir)
+        self.assertEqual(r["SEALED_DATA_OUTPUT_SHA"], "outhash")
+        self.assertNotEqual(r["HARVEST_RECOMPUTED_DATA_SHA"], "outhash")
+        self.assertEqual(r["DATA_OUTPUT_SHA_MATCHES_SEALED_RECORD"], "NO")
+        self.assertTrue(r["REHASH_IS_VERIFICATION_NOT_PROVENANCE"])
+
+    def test_a_matching_rehash_is_reported_as_verification(self):
+        d = tempfile.mkdtemp()
+        sealed(d, requests=301, prov=legacy_prov())
+        real = CH.PV.file_sha256(Path(d) / "confirm_rows.jsonl")
+        sealed(d, requests=301, prov=legacy_prov(DATA_OUTPUT_SHA=real))
+        r = CH.harvest(d)
+        self.assertEqual(r["DATA_OUTPUT_SHA_MATCHES_SEALED_RECORD"], "YES")
+        self.assertIn("VERIFIED_BY_HARVEST_REHASH",
+                      r["DATA_OUTPUT_PROVENANCE_SOURCE"])
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "PASS")
+
+    def test_a_missing_config_hash_is_not_read_off_the_repository(self):
+        rows_dir = sealed(tempfile.mkdtemp(), requests=301,
+                          prov=legacy_prov(CONFIG_SHA=None))
+        r = CH.harvest(rows_dir)
+        self.assertEqual(r["CONFIG_PROVENANCE"], "NOT_RECORDED")
+        self.assertEqual(r["CONFIG_PROVENANCE_SOURCE"],
+                         "ABSENT_FROM_EXECUTED_ARTIFACT")
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
+
+    def test_no_provenance_file_at_all_is_not_identified(self):
+        r = CH.harvest(sealed(tempfile.mkdtemp(), requests=301))
+        self.assertEqual(r["EXECUTION_PROVENANCE_SCHEMA_VERSION"], NI)
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
 
 
 class TheOutputShape(unittest.TestCase):

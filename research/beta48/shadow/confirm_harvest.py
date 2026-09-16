@@ -451,7 +451,9 @@ def harvest(outdir, rps=None):
         workflow_ref_sha=sealed_prov.get("WORKFLOW_REF_SHA"),
         workflow_file_sha=sealed_prov.get("WORKFLOW_FILE_SHA"),
         config_sha=sealed_prov.get("CONFIG_SHA"),
-        data_output_sha=rows_sha if rows_sha != NOT_IDENTIFIED else None,
+        # THE SEALED hash, never the harvest-time rehash. A rehash verifies a
+        # recorded hash; it cannot stand in for one the run never wrote.
+        data_output_sha=sealed_out_sha,
         executed_sha_source=sealed_prov.get(
             "EXECUTED_SHA_SOURCE",
             # the runner obtains it from `git rev-parse HEAD` in both the
@@ -463,10 +465,37 @@ def harvest(outdir, rps=None):
         "DATA_OUTPUT_SHA", "CODE_PROVENANCE_VALIDITY", "WORKFLOW_PROVENANCE",
         "CONFIG_PROVENANCE", "DATA_OUTPUT_PROVENANCE",
         "EVIDENCE_RUN_VALIDITY", "WORKFLOW_FILE_AND_CODE_SAME_COMMIT")})
+    # Three separate facts, never one. The rehash is verification of the
+    # sealed record, not a substitute for it.
+    report["SEALED_DATA_OUTPUT_SHA"] = sealed_out_sha or NOT_IDENTIFIED
+    report["HARVEST_RECOMPUTED_DATA_SHA"] = rows_sha
     report["DATA_OUTPUT_SHA_MATCHES_SEALED_RECORD"] = (
         "YES" if (sealed_out_sha and rows_sha == sealed_out_sha) else
         ("NO" if sealed_out_sha else NOT_IDENTIFIED))
-    report["PROVENANCE_REDERIVED_NOT_COPIED"] = True
+    report["DATA_OUTPUT_SHA"] = sealed_out_sha or NOT_IDENTIFIED
+    report["REHASH_IS_VERIFICATION_NOT_PROVENANCE"] = True
+
+    # Schema translation, stated rather than silent.
+    exec_schema = PV.schema_version_of(sealed_prov)
+    legacy = exec_schema == PV.LEGACY_SCHEMA_VERSION
+    report.update({
+        "EXECUTION_PROVENANCE_SCHEMA_VERSION": exec_schema,
+        "HARVEST_PROVENANCE_SCHEMA_VERSION": PV.SCHEMA_VERSION,
+        "LEGACY_PROVENANCE_FALLBACK_USED": "YES" if legacy else "NO",
+        "LEGACY_FIELD_MAPPING": (list(PV.LEGACY_FIELD_MAPPING) if legacy
+                                 else None),
+        "TRANSLATION_IS_NOT_SYNTHESIS": PV.TRANSLATION_IS_NOT_SYNTHESIS,
+        "PROVENANCE_REDERIVED_NOT_COPIED": True,
+    })
+    for k in ("CODE_PROVENANCE_SOURCE", "WORKFLOW_PROVENANCE_SOURCE",
+              "CONFIG_PROVENANCE_SOURCE", "DATA_OUTPUT_PROVENANCE_SOURCE",
+              "NOT_INFERRED_FROM_THE_CURRENT_REPOSITORY"):
+        report[k] = prov[k]
+    if report["DATA_OUTPUT_PROVENANCE"] == "RECORDED":
+        report["DATA_OUTPUT_PROVENANCE_SOURCE"] = (
+            "SEALED_OUTPUT_HASH_WRITTEN_BY_THE_RUN, VERIFIED_BY_HARVEST_REHASH"
+            if report["DATA_OUTPUT_SHA_MATCHES_SEALED_RECORD"] == "YES"
+            else "SEALED_OUTPUT_HASH_WRITTEN_BY_THE_RUN, REHASH_DISAGREES")
     return report
 
 
@@ -498,10 +527,18 @@ def render(r):
         for f in r["FAIL_REASON"]:
             L.append("%-38s = %s" % ("FAIL_REASON", f))
     L.append("")
-    for k in ("DISPATCH_SHA", "EXECUTED_SHA_ACTUAL", "WORKFLOW_FILE_SHA",
-              "CONFIG_SHA", "DATA_OUTPUT_SHA", "CODE_PROVENANCE_VALIDITY",
-              "WORKFLOW_PROVENANCE", "CONFIG_PROVENANCE",
-              "DATA_OUTPUT_PROVENANCE", "EVIDENCE_RUN_VALIDITY"):
+    for k in ("EXECUTION_PROVENANCE_SCHEMA_VERSION",
+              "HARVEST_PROVENANCE_SCHEMA_VERSION",
+              "LEGACY_PROVENANCE_FALLBACK_USED", "LEGACY_FIELD_MAPPING",
+              "DISPATCH_SHA", "EXECUTED_SHA_ACTUAL", "EXECUTED_SHA_SOURCE",
+              "WORKFLOW_FILE_SHA", "CONFIG_SHA", "SEALED_DATA_OUTPUT_SHA",
+              "HARVEST_RECOMPUTED_DATA_SHA",
+              "DATA_OUTPUT_SHA_MATCHES_SEALED_RECORD",
+              "CODE_PROVENANCE_VALIDITY", "CODE_PROVENANCE_SOURCE",
+              "WORKFLOW_PROVENANCE", "WORKFLOW_PROVENANCE_SOURCE",
+              "CONFIG_PROVENANCE", "CONFIG_PROVENANCE_SOURCE",
+              "DATA_OUTPUT_PROVENANCE", "DATA_OUTPUT_PROVENANCE_SOURCE",
+              "EVIDENCE_RUN_VALIDITY"):
         L.append("%-38s = %s" % (k, r.get(k)))
     L.append("")
     L.append("%-38s = %s" % ("VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED",

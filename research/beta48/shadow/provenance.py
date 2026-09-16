@@ -56,6 +56,38 @@ PROVENANCE_FIELDS = ("DISPATCH_SHA", "EXECUTED_SHA_ACTUAL", "WORKFLOW_REF_SHA",
                      "WORKFLOW_FILE_SHA", "CONFIG_SHA", "DATA_OUTPUT_SHA")
 
 # ---------------------------------------------------------------------------
+# SCHEMA VERSIONS, BECAUSE A HARVESTER CAN OUTRUN THE RUN IT READS
+# ---------------------------------------------------------------------------
+#
+# v1  DISPATCH_SHA / EXECUTED_SHA / WORKFLOW_REF_SHA / WORKFLOW_FILE_SHA /
+#     CONFIG_SHA / DATA_OUTPUT_SHA, and a single EVIDENCE_RUN_VALIDITY
+#     computed from the code comparison alone.
+# v2  EXECUTED_SHA renamed EXECUTED_SHA_ACTUAL, EXECUTED_SHA_SOURCE added, and
+#     the verdict split into four aspects.
+#
+# Run 35133738118 executes commit 2c3b261, which is v1. The harvester is v2.
+# That gap is recorded rather than smoothed over: a reader must be able to see
+# that a field was RENAMED in translation and not invented.
+SCHEMA_VERSION = 2
+LEGACY_SCHEMA_VERSION = 1
+LEGACY_FIELD_MAPPING = ("EXECUTED_SHA -> EXECUTED_SHA_ACTUAL",)
+TRANSLATION_IS_NOT_SYNTHESIS = (
+    "renaming, verifying, rehashing and comparing existing evidence is "
+    "allowed; manufacturing a component the executed run never recorded is "
+    "not")
+
+
+def schema_version_of(sealed):
+    """Which provenance schema an executed artifact was written under."""
+    if not sealed:
+        return NOT_IDENTIFIED
+    if "EXECUTED_SHA_ACTUAL" in sealed or "CODE_PROVENANCE_VALIDITY" in sealed:
+        return SCHEMA_VERSION
+    if "EXECUTED_SHA" in sealed:
+        return LEGACY_SCHEMA_VERSION
+    return NOT_IDENTIFIED
+
+# ---------------------------------------------------------------------------
 # AN EXPECTATION IS NOT AN OBSERVATION
 # ---------------------------------------------------------------------------
 #
@@ -168,6 +200,9 @@ def check(dispatch_sha, executed_sha_actual, workflow_ref_sha=None,
     code_ok = all(checks.values())
     ref = _norm(workflow_ref_sha)
 
+    # Each aspect names the evidence it rests on. `data_output_sha` here is the
+    # SEALED hash the run itself wrote -- a harvest-time rehash verifies that
+    # hash, it does not stand in for a missing one.
     aspects = {
         "CODE_PROVENANCE_VALIDITY": "PASS" if code_ok else "FAIL",
         "WORKFLOW_PROVENANCE": ("RECORDED" if workflow_file_sha
@@ -179,6 +214,25 @@ def check(dispatch_sha, executed_sha_actual, workflow_ref_sha=None,
         "DATA_OUTPUT_PROVENANCE": ("RECORDED" if data_output_sha
                                    and data_output_sha != NOT_IDENTIFIED
                                    else "NOT_RECORDED"),
+    }
+    sources = {
+        "CODE_PROVENANCE_SOURCE": (
+            "SEALED_RUNNER_OBSERVED_GIT_REV_PARSE_HEAD" if e
+            else "ABSENT_FROM_EXECUTED_ARTIFACT"),
+        "WORKFLOW_PROVENANCE_SOURCE": (
+            "SEALED_WORKFLOW_FILE_HASH"
+            if aspects["WORKFLOW_PROVENANCE"] == "RECORDED"
+            else "ABSENT_FROM_EXECUTED_ARTIFACT"),
+        "CONFIG_PROVENANCE_SOURCE": (
+            "SEALED_CONFIG_HASH"
+            if aspects["CONFIG_PROVENANCE"] == "RECORDED"
+            else "ABSENT_FROM_EXECUTED_ARTIFACT"),
+        "DATA_OUTPUT_PROVENANCE_SOURCE": (
+            "SEALED_OUTPUT_HASH_WRITTEN_BY_THE_RUN"
+            if aspects["DATA_OUTPUT_PROVENANCE"] == "RECORDED"
+            else "ABSENT_FROM_EXECUTED_ARTIFACT"),
+        "REHASH_IS_VERIFICATION_NOT_PROVENANCE": True,
+        "NOT_INFERRED_FROM_THE_CURRENT_REPOSITORY": True,
     }
     ok = (aspects["CODE_PROVENANCE_VALIDITY"] == "PASS"
           and all(aspects[a] == "RECORDED" for a in PROVENANCE_ASPECTS[1:]))
@@ -201,6 +255,8 @@ def check(dispatch_sha, executed_sha_actual, workflow_ref_sha=None,
         "THIS_MODULE_CONTACTS_NOTHING": THIS_MODULE_CONTACTS_NOTHING,
     }
     out.update(aspects)
+    out.update(sources)
+    out["PROVENANCE_SCHEMA_VERSION"] = SCHEMA_VERSION
     if not ok:
         out["WHY_INVALID"] = (
             "the code that ran is not the code that was authorised"
