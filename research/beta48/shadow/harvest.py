@@ -1,22 +1,36 @@
 #!/usr/bin/env python3
 """The Phase-2A harvest. Reads a sealed capture off disk. Contacts nothing.
 
-WHAT THIS PRODUCES, in the order the answer has to be read:
+FOUR SECTIONS, in the order the answer has to be read:
 
-    THE CAPTURE          markets, validated events, sport mix, rows, errors
-    THE FIELD            what SHARES_TRADED did, and what it still does not mean
-    THE BOOK             spread, uptime, update rate, quote lifetime, depth --
-                         every one of them measurable, none of them a fill rate
-    THE EVENT LADDER     HYPOTHETICAL_QUOTES / TOUCHES / TRADE_EVIDENCE /
-                         ADMITTED_COUNTERFACTUAL_FILLS, as four separate counts
-    THE BOTTLENECK       PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION
+    A  CAPTURE QUALITY   rows, markets, events, duration, REVISIT CADENCE,
+                         missingness, failed reads -- and the SAMPLE SCOPE
+    B  BOOK STRUCTURE    spread, uptime, touch depth, depth change, book and
+                         mid change frequency, time at price. All _OBSERVED.
+    C  HYPOTHETICAL      quotes, touches, MOVE_THROUGH events, post-quote book
+       QUOTE PATH        markouts. A price path, not an execution record.
+    D  EXECUTION         TRADE_EVIDENCE, COUNTERFACTUAL_FILLS, and then
+       IDENTIFICATION    PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION
 
 THE ANSWER TO THE LAST ONE IS EXPECTED TO BE NO, and this module is written so
 that saying so is the easy path rather than the awkward one. If admitted fills
-are zero because execution evidence does not exist, the report says exactly
-that, names the evidence that would settle it, and does NOT reach for another
-approximation. A third fill heuristic would be the same mistake as the first
-two, with more machinery around it.
+are zero because execution evidence does not exist, the conclusion is
+PUBLIC_BOOK_SNAPSHOTS_CANNOT_IDENTIFY_FILL -- not "we need a more aggressive
+approximation". A third fill heuristic would be the first two's mistake with
+more machinery around it.
+
+TWO SCOPE GUARDS THAT TRAVEL WITH EVERY FIGURE.
+
+    24 CAPTURED MARKETS ARE NOT 788. The capture was stratified by sport and
+    frozen before any tick was seen, which makes it reproducible and
+    unrigged -- it does not make it representative. Nothing here is scaled to
+    the candidate universe, and CAPTURE_SAMPLE_REPRESENTATIVE_OF_788 is
+    NOT_ESTABLISHED.
+
+    MARKETS FROM ONE EVENT ARE NOT INDEPENDENT. Where an event map is
+    available, every rate is reported market-weighted AND event-weighted, so a
+    single event family carrying several captured markets cannot decide the
+    number by itself.
 """
 from __future__ import annotations
 
@@ -51,6 +65,112 @@ NEXT_STEP_IF_INSUFFICIENT = (
     "OBTAIN_EVIDENCE_CAPABLE_OF_RESOLVING_EXECUTION_AND_QUEUE, "
     "OR A BOUNDED MICRO-LIVE VALIDATION AFTER EXPLICIT AUTHORIZATION")
 DO_NOT_INVENT_ANOTHER_FILL_APPROXIMATION = True
+CONCLUSION_IF_ZERO = "PUBLIC_BOOK_SNAPSHOTS_CANNOT_IDENTIFY_FILL"
+NOT_THE_CONCLUSION = "WE_NEED_A_MORE_AGGRESSIVE_APPROXIMATION"
+
+# The candidate universe the 24 were drawn from. A count of markets, and -- per
+# the correction to section 15a -- not a capacity.
+CANDIDATE_UNIVERSE = 788
+CANDIDATE_UNIVERSE_MEANING = "HIGH_ACTIVITY_CANDIDATE_MARKETS_AT_DECISION"
+
+
+def sample_scope(universe, captured_markets):
+    """How the 24 were chosen, and what that does NOT license.
+
+    Freezing the selection before any tick was seen buys reproducibility and
+    rules out picking the markets that flattered the result. It does not buy
+    representativeness: the strata were sports, the draw inside each was a
+    salted hash, and no design was chosen to make the 24 stand for the 788.
+    """
+    u = universe or {}
+    return {
+        "CANDIDATE_UNIVERSE": CANDIDATE_UNIVERSE,
+        "CANDIDATE_UNIVERSE_MEANING": CANDIDATE_UNIVERSE_MEANING,
+        "CAPTURED_MARKETS": captured_markets,
+        "CAPTURE_SELECTION_RULE": u.get("SELECTION", NOT_IDENTIFIED),
+        "SELECTION_SALT": u.get("SELECTION_SALT", NOT_IDENTIFIED),
+        "SPORT_STRATIFICATION": u.get("PER_STRATUM_SELECTED", NOT_IDENTIFIED),
+        "AVAILABLE_PER_STRATUM": u.get("AVAILABLE_PER_STRATUM",
+                                       NOT_IDENTIFIED),
+        # The strata were SPORTS. No event stratification was applied, which is
+        # why section 4's event weighting exists at all.
+        "EVENT_STRATIFICATION": "NONE_APPLIED",
+        "SELECTION_TIMESTAMP": u.get("SOURCE_CENSUS_RUN", NOT_IDENTIFIED),
+        "SELECTION_FROZEN_BEFORE_CAPTURE": (
+            "YES" if u.get("FROZEN_BEFORE_ANY_TICK_WAS_SEEN") else
+            NOT_IDENTIFIED),
+        "NOT_SELECTED_BY_ACTIVITY_RANK": bool(
+            u.get("NOT_SELECTED_BY_ACTIVITY_RANK")),
+
+        "CAPTURE_SAMPLE_REPRESENTATIVE_OF_788": "NOT_ESTABLISHED",
+        "WHY": ("stratified by SPORT and frozen before any tick -- "
+                "reproducible and unrigged, but no sampling design was chosen "
+                "to make these 24 stand for the 788"),
+        "EXTRAPOLATION_TO_THE_UNIVERSE": "NOT_PERFORMED",
+        "ANY_PERCENTAGE_HERE_DESCRIBES_THE_24": True,
+    }
+
+
+def event_map_from_board(board_path, slugs=None):
+    """slug -> venue-native EVENT_ID, read from a sealed board walk.
+
+    Uses `event_identity`, which reads the venue's own marketSides rather than
+    a slug. Markets whose identity is unresolved are simply absent from the
+    map: an unresolved market is not quietly given an event of its own.
+    """
+    import event_identity as EI
+    want = set(slugs) if slugs else None
+    out = {}
+    p = Path(board_path)
+    op = gzip.open if p.suffix == ".gz" else open
+    with op(p, "rt") as fh:
+        for line in fh:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                m = json.loads(line)
+            except ValueError:
+                continue
+            slug = m.get("slug")
+            if want is not None and slug not in want:
+                continue
+            key, lv = EI.event_identity(m)
+            if lv == EI.LEVEL_V1_CONTEST and key != EI.NOT_IDENTIFIED:
+                out[slug] = key
+    return out
+
+
+def event_clustering(slugs, event_of):
+    """Distinct events inside the capture, and how the markets cluster."""
+    if not event_of:
+        return {"VALIDATED_DISTINCT_EVENTS": NOT_IDENTIFIED,
+                "MARKETS_PER_EVENT": NOT_IDENTIFIED,
+                "MARKETS_WITH_UNRESOLVED_EVENT_IDENTITY": len(slugs),
+                "MARKETS_TREATED_AS_INDEPENDENT": False,
+                "WHY": "no event map supplied; independence is NOT assumed"}
+    groups = {}
+    unresolved = 0
+    for s in slugs:
+        k = event_of.get(s)
+        if k is None:
+            unresolved += 1
+            continue
+        groups.setdefault(k, []).append(s)
+    sizes = sorted(len(v) for v in groups.values())
+    return {
+        "VALIDATED_DISTINCT_EVENTS": len(groups),
+        "MARKETS_PER_EVENT": {
+            "N": len(sizes),
+            "MIN": sizes[0] if sizes else NOT_IDENTIFIED,
+            "P50": sizes[len(sizes) // 2] if sizes else NOT_IDENTIFIED,
+            "MAX": sizes[-1] if sizes else NOT_IDENTIFIED,
+        },
+        "MARKETS_WITH_UNRESOLVED_EVENT_IDENTITY": unresolved,
+        "MARKETS_FROM_ONE_EVENT_ARE_NOT_INDEPENDENT": True,
+        "MARKETS_TREATED_AS_INDEPENDENT": False,
+        "DEPLOYABLE_CAPITAL_CAPACITY": NOT_IDENTIFIED,
+    }
 
 
 def read_capture(path):
@@ -108,8 +228,8 @@ def hypothetical_quotes(rows, every=QUOTE_EVERY_N_TICKS, size=QUOTE_SIZE,
     return out
 
 
-def harvest(path, universe_path=None, event_index=None):
-    """The whole Phase-2A report for one sealed capture."""
+def harvest(path, universe_path=None, event_of=None, board_path=None):
+    """The whole Phase-2A report for one sealed capture, in four sections."""
     rows = read_capture(path)
     universe = None
     if universe_path and Path(universe_path).exists():
@@ -121,25 +241,43 @@ def harvest(path, universe_path=None, event_index=None):
         k = sport_of(s, universe)
         mix[k] = mix.get(k, 0) + 1
 
+    if event_of is None and board_path and Path(board_path).exists():
+        event_of = event_map_from_board(board_path, slugs)
+
     field = TS.diagnose(rows)
-    book = BM.report(rows)
+    book = BM.report(rows, event_of=event_of)
     quotes = hypothetical_quotes(rows, runtime=field)
     ladder = MF.summarise_fills(quotes)
+    clusters = event_clustering(slugs, event_of)
 
+    elapsed = [r["ELAPSED_S"] for r in rows if r.get("ELAPSED_S") is not None]
     admitted = ladder["ADMITTED_COUNTERFACTUAL_FILLS"]
     sufficient = "YES" if admitted > 0 else "NO"
 
     return {
-        # --- the capture ---
-        "CAPTURE_PATH": str(path),
-        "ROWS": len(rows),
-        "TICK_ERRORS": book["TICK_ERRORS"],
-        "MARKETS": len(slugs),
-        "SPORT_MIX": mix,
-        "VALIDATED_EVENTS": (event_index.get("VALID_EVENTS")
-                             if event_index else NOT_IDENTIFIED),
+        # =================================================== A. CAPTURE =====
+        "A_CAPTURE_QUALITY": dict({
+            "CAPTURE_PATH": str(path),
+            "ROWS": len(rows),
+            "MARKETS": len(slugs),
+            "SPORT_MIX": mix,
+            "DURATION_S": (max(elapsed) - min(elapsed)) if elapsed else
+                          NOT_IDENTIFIED,
+            "FAILED_READS": book["TICK_ERRORS"],
+            "MISSINGNESS": {
+                "TICK_ERRORS": book["TICK_ERRORS"],
+                "SHARES_TRADED_MISSING_TRANSITIONS":
+                    field["MISSING_TRANSITIONS"],
+            },
+            "REVISIT_CADENCE": book["REVISIT_CADENCE"],
+            "SAMPLE_SCOPE": sample_scope(universe, len(slugs)),
+        }, **clusters),
 
-        # --- the field, with its two halves apart ---
+        # =================================================== B. THE BOOK ====
+        "B_BOOK_STRUCTURE": book,
+
+        # THE FIELD. Kept beside the book because it is a property of the
+        # capture, not of the market -- and its two halves stay apart.
         "SHARES_TRADED_RUNTIME": {k: field[k] for k in (
             "MONOTONIC_WITHIN_MARKET", "NEGATIVE_DELTAS_OBSERVED",
             "RESET_EVENTS_OBSERVED", "MISSING_TRANSITIONS",
@@ -149,37 +287,60 @@ def harvest(path, universe_path=None, event_index=None):
         "SHARES_TRADED_DELTA_STATUS": TS.SHARES_TRADED_DELTA_STATUS,
         "RUNTIME_BEHAVIOUR_IS_NOT_VENUE_SEMANTICS": True,
 
-        # --- the book ---
-        "BOOK": book,
+        # ============================================ C. THE QUOTE PATH =====
+        "C_HYPOTHETICAL_QUOTE_PATH": {
+            "HYPOTHETICAL_QUOTES": ladder["HYPOTHETICAL_QUOTES"],
+            "TOUCHES": ladder["TOUCHES"],
+            "MOVE_THROUGH_OBSERVED":
+                book["MARKET_MOVED_THROUGH_QUOTE_OBSERVED"],
+            "MOVE_THROUGH_OBSERVED_EVENT_WEIGHTED":
+                book.get("MARKET_MOVED_THROUGH_QUOTE_OBSERVED_EVENT_WEIGHTED",
+                         NOT_IDENTIFIED),
+            "POST_QUOTE_BOOK_MARKOUTS": {
+                k: v for k, v in book.items()
+                if k.startswith("POST_QUOTE_BOOK_MARKOUT")},
+            "MOVE_THROUGH_IS_NOT_TRADE": True,
+            "MOVE_THROUGH_IS_NOT_A_COUNTERFACTUAL_FILL": True,
+        },
 
-        # --- the ladder, four separate counts ---
+        # ================================ D. EXECUTION IDENTIFICATION =======
+        "D_EXECUTION_IDENTIFICATION": {
+            "TRADE_EVIDENCE": ladder["TRADE_EVIDENCE"],
+            "COUNTERFACTUAL_FILLS": admitted,
+            "WHY_UNRESOLVED": {
+                "NO_PER_PRICE_ATTRIBUTION": ladder["UNKNOWN_NO_ATTRIBUTION"],
+                "VOLUME_BOUND_INSUFFICIENT":
+                    ladder["UNKNOWN_VOLUME_BOUND_INSUFFICIENT"],
+                "WINDOW_UNREADABLE": ladder["UNKNOWN_WINDOW_UNREADABLE"],
+            },
+            "PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION": sufficient,
+            "CONCLUSION": (CONCLUSION_IF_ZERO if sufficient == "NO"
+                           else "EXECUTION_EVIDENCE_WAS_JOINED"),
+            "NOT_THE_CONCLUSION": NOT_THE_CONCLUSION,
+            "WHY": ("no execution evidence exists in this capture: the tick "
+                    "feed carries no per-print tape, no side and no queue "
+                    "position, so TRADE_EVIDENCE is NOT_IDENTIFIED and no fill "
+                    "can be admitted" if sufficient == "NO"
+                    else "execution evidence was joined"),
+            "EVIDENCE_THAT_WOULD_IDENTIFY_A_FILL":
+                list(EVIDENCE_THAT_WOULD_IDENTIFY_A_FILL),
+            "NEXT_STEP": NEXT_STEP_IF_INSUFFICIENT,
+            "DO_NOT_INVENT_ANOTHER_FILL_APPROXIMATION":
+                DO_NOT_INVENT_ANOTHER_FILL_APPROXIMATION,
+        },
+
+        # --- promoted to the top level because they are read first ---
         "HYPOTHETICAL_QUOTES": ladder["HYPOTHETICAL_QUOTES"],
         "TOUCHES": ladder["TOUCHES"],
         "TRADE_EVIDENCE": ladder["TRADE_EVIDENCE"],
         "ADMITTED_COUNTERFACTUAL_FILLS": admitted,
-        "WHY_UNRESOLVED": {
-            "NO_PER_PRICE_ATTRIBUTION": ladder["UNKNOWN_NO_ATTRIBUTION"],
-            "VOLUME_BOUND_INSUFFICIENT":
-                ladder["UNKNOWN_VOLUME_BOUND_INSUFFICIENT"],
-            "WINDOW_UNREADABLE": ladder["UNKNOWN_WINDOW_UNREADABLE"],
-        },
-
-        # --- the bottleneck, stated plainly ---
         "PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION": sufficient,
-        "WHY": ("no execution evidence exists in this capture: the tick feed "
-                "carries no per-print tape, no side and no queue position, so "
-                "TRADE_EVIDENCE is NOT_IDENTIFIED and no fill can be admitted"
-                if sufficient == "NO" else "execution evidence was joined"),
-        "EVIDENCE_THAT_WOULD_IDENTIFY_A_FILL":
-            list(EVIDENCE_THAT_WOULD_IDENTIFY_A_FILL),
-        "NEXT_STEP": NEXT_STEP_IF_INSUFFICIENT,
-        "DO_NOT_INVENT_ANOTHER_FILL_APPROXIMATION":
-            DO_NOT_INVENT_ANOTHER_FILL_APPROXIMATION,
 
         # --- and what is still not reportable ---
         "PROFITABILITY": NOT_IDENTIFIED,
         "WIN_RATE": NOT_IDENTIFIED,
         "EXPECTED_MONTHLY_RETURN": NOT_IDENTIFIED,
+        "REALIZED_MAKER_ECONOMICS": "NOT_ESTABLISHED",
         "ORDERS_PLACED": 0,
         "CAPITAL_DEPLOYED": 0,
         "mirror_live": False,

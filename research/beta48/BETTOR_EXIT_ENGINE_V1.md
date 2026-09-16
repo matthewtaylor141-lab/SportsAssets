@@ -1362,3 +1362,121 @@ around it. The report is written so that saying NO is the easy path.
 ORDERS_PLACED   0        CAPITAL_DEPLOYED  0
 CREDENTIALS     NONE     mirror_live       false
 ```
+
+---
+
+## 17. MEASUREMENT GUARDS BEFORE THE SEAL
+
+The tick capture is now correctly scoped as a **BOOK-STATE experiment**, not a
+fill-identification one. The fill model is frozen until harvest. These four
+guards govern how its output may be read.
+
+### 17a. SNAPSHOT POLLING IS NOT CONTINUOUS OBSERVATION
+
+The collector revisits each market at a finite cadence. Between two polls a
+quote may move away, trade, return, change depth, or disappear and reappear —
+**and none of that is observed**. So every sequence-derived figure carries the
+suffix and the cadence that produced it:
+
+```
+QUOTE_LIFETIME_OBSERVED_*          TIME_AT_PRICE_OBSERVED_S_*
+BOOK_UPDATE_RATE_OBSERVED          MARKET_MOVED_THROUGH_QUOTE_OBSERVED
+MID_MOVE_FREQUENCY_OBSERVED        ONE_TICK_UPTIME_OBSERVED
+SPREAD_PERSISTENCE_OBSERVED_S_*    PRICE_IMPROVEMENT_FREQUENCY_OBSERVED
+                                   DEPTH_CHANGE_RATE_OBSERVED
+
+TRUE_CONTINUOUS_QUOTE_LIFETIME   = NOT_IDENTIFIED
+TRUE_CONTINUOUS_BOOK_UPDATE_RATE = NOT_IDENTIFIED
+FEED_IS_EVENT_COMPLETE           = NOT_IDENTIFIED
+```
+
+`revisit_cadence()` reports `MEDIAN / P10 / P90 / MAX_REVISIT_INTERVAL_S` per
+market **and pooled**, and section A of the harvest prints it *before* anything
+derived from it — a MEDIAN of 12 s means no observed lifetime below 12 s exists,
+and a MAX of 300 s means there is a five-minute hole somewhere in which anything
+could have happened.
+
+The direction of the bias is knowable even where its size is not: unobserved
+round trips make a quote look **longer-lived** and the book look **calmer** than
+it was, so every `_OBSERVED` rate is a **lower bound on activity**. The
+unsuffixed names are gone, and a test asserts they are gone.
+
+### 17b. MOVE-THROUGH IS A PRICE PATH
+
+```
+MOVE_THROUGH != TRADE
+MOVE_THROUGH != COUNTERFACTUAL_FILL
+```
+
+Kept and reported, because it is genuinely useful for execution-opportunity
+diagnostics, markouts and quote placement. **Not** convertible into a fill
+probability: `book_metrics.move_through_fill_probability()` exists only to
+raise `MoveThroughIsNotAFill`, so the refusal is greppable and tested rather
+than implied by an absence.
+
+### 17c. THE 24 ARE NOT THE 788
+
+```
+CANDIDATE_UNIVERSE                    788   HIGH_ACTIVITY candidate markets
+CAPTURED_MARKETS                       24
+CAPTURE_SELECTION_RULE                 HIGH_ACTIVITY at decision, stratified,
+                                       frozen salted hash within stratum
+SPORT_STRATIFICATION                   nfl 6 / cfb 6 / mlb 6 / ufc 6
+EVENT_STRATIFICATION                   NONE_APPLIED
+SELECTION_TIMESTAMP                    census run 35105863528
+SELECTION_FROZEN_BEFORE_CAPTURE        YES
+NOT_SELECTED_BY_ACTIVITY_RANK          True
+
+CAPTURE_SAMPLE_REPRESENTATIVE_OF_788   NOT_ESTABLISHED
+EXTRAPOLATION_TO_THE_UNIVERSE          NOT_PERFORMED
+```
+
+Freezing the draw before any tick was seen buys **reproducibility** and rules
+out picking the markets that flattered the result. It does not buy
+**representativeness**: the strata were sports, the draw inside each was a salted
+hash, and no design was chosen to make these 24 stand for the 788. Every
+percentage in the harvest describes the 24.
+
+### 17d. MARKETS FROM ONE EVENT ARE NOT INDEPENDENT
+
+Section A reports `CAPTURED_MARKETS`, `VALIDATED_DISTINCT_EVENTS`,
+`MARKETS_PER_EVENT` and the sport mix. Where an event map is available — built
+from the sealed board by `event_map_from_board()`, using the venue's own
+`marketSides` rather than a slug — every rate is reported **twice**:
+
+```
+<RATE>_OBSERVED                  MARKET_WEIGHTED   every observation counts once
+<RATE>_OBSERVED_EVENT_WEIGHTED   ONE_EVENT_ONE_VOTE
+```
+
+so one large event family carrying several captured markets cannot decide the
+figure by itself. With no event map, the event weighting is `NOT_IDENTIFIED` and
+independence is **not** assumed instead.
+
+### 17e. THE HARVEST'S FOUR SECTIONS
+
+```
+A  CAPTURE QUALITY   rows, markets, events, duration, REVISIT CADENCE,
+                     missingness, failed reads, SAMPLE SCOPE
+B  BOOK STRUCTURE    spread distribution, ONE_TICK_UPTIME_OBSERVED, touch
+                     depth, depth change, book and mid change frequency,
+                     TIME_AT_PRICE_OBSERVED  (+ the SHARES_TRADED field block)
+C  HYPOTHETICAL      HYPOTHETICAL_QUOTES, TOUCHES, MOVE_THROUGH_OBSERVED,
+   QUOTE PATH        POST_QUOTE_BOOK_MARKOUTS
+D  EXECUTION         TRADE_EVIDENCE, COUNTERFACTUAL_FILLS, and
+   IDENTIFICATION    PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION
+```
+
+If D comes back zero for want of execution evidence, the conclusion is
+**`PUBLIC_BOOK_SNAPSHOTS_CANNOT_IDENTIFY_FILL`**, and the report carries
+`NOT_THE_CONCLUSION = WE_NEED_A_MORE_AGGRESSIVE_APPROXIMATION` beside it. That
+conclusion will not be weakened to make the experiment look productive.
+
+### 17f. WHY THE EXPERIMENT IS STILL WORTH THE RUN
+
+Even with fill identification NO, the capture tells BETTOR where spreads
+persist, how deep the touch is, how fast the book changes at the sampled
+cadence, how often a hypothetical quote is reached, how long quoted states last,
+and what inventory-risk environment a maker would face. **These are inputs to
+quote placement and risk.** They do not establish realized maker economics, and
+`REALIZED_MAKER_ECONOMICS = NOT_ESTABLISHED` is carried on every report.
