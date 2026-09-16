@@ -85,8 +85,82 @@ MODELS = ("F0_PESSIMISTIC", "F1_CONSERVATIVE", "F2_MODERATE",
           "F3_TOUCH_UPPER_BOUND")
 
 
+# --- BLOCK TRADES: the tape is not a CLOB tape --------------------------
+#
+# Block trades execute APART FROM the public order book and do not touch
+# orders resting in it -- and they are reported into Time & Sales anyway. A
+# block print therefore depletes nothing: a hypothetical maker sitting in the
+# queue is exactly as far from the front after a block as before it.
+#
+# So TIME_SALES_VOLUME != ORDER_BOOK_DEPLETION, and every model below counts
+# only executions classified CLOB. This is the difference between a maker who
+# would have filled and one who watched a $500,000 block print past them while
+# their quote sat untouched.
+#
+# WHAT WE HAVE VERIFIED OURSELVES, from the 340-page capture: block trades
+# exist (FIX ExecInst 'j', "SINGLE EXECUTION REQUESTED FOR BLOCK TRADE") and
+# the Daily Market Report carries a separate `Block Volume` column beside
+# `Trade Volume`. That is enough to establish the contamination risk.
+#
+# WHAT WE HAVE NOT VERIFIED: that blocks appear in Time & Sales, and any
+# row-level flag distinguishing them. No Block Trade Data page appears in
+# llms.txt or in any captured page. The conservative consequence is the same
+# either way -- an unflagged tape's volume is an UPPER BOUND on CLOB volume,
+# never equal to it.
+BLOCK_TRADE_EXCLUSION_REQUIRED = "YES"
+TIME_SALES_QUEUE_DEPLETION_VALID_ONLY_FOR_CLOB_EXECUTIONS = "YES"
+BLOCK_TRADES_EXIST = "VERIFIED_FROM_CAPTURE"
+BLOCKS_APPEAR_IN_TIME_SALES = "RELAYED_NOT_CAPTURED"
+BLOCK_TRADE_DATA_PAGE_CAPTURED = "NO"
+BLOCK_TRADE_DATA_PUBLIC = NOT_IDENTIFIED
+BLOCK_TRADE_TIMESTAMP_AVAILABLE = NOT_IDENTIFIED
+BLOCK_TRADE_SYMBOL_AVAILABLE = NOT_IDENTIFIED
+BLOCK_TRADE_PRICE_AVAILABLE = NOT_IDENTIFIED
+BLOCK_TRADE_QUANTITY_AVAILABLE = NOT_IDENTIFIED
+ROW_LEVEL_MATCH_TO_TIME_SALES_POSSIBLE = NOT_IDENTIFIED
+
+CLOB_EXECUTION = "CLOB_EXECUTION"
+BLOCK_EXECUTION = "BLOCK_EXECUTION"
+UNKNOWN_EXECUTION_TYPE = "UNKNOWN_EXECUTION_TYPE"
+
+# Whether the Daily Market Report's `Trade Volume` INCLUDES or EXCLUDES
+# `Block Volume` decides the reconciliation arithmetic, and the captured page
+# does not say. Guessing would make a reconciliation that always passes or one
+# that always fails, and both look like evidence.
+DMR_TRADE_VOLUME_INCLUDES_BLOCK_VOLUME = NOT_IDENTIFIED
+
+
 def _d(x):
     return x if isinstance(x, D) else D(str(x))
+
+
+def classify_execution(row, block_index=None):
+    """CLOB / BLOCK / UNKNOWN for one tape print.
+
+    `block_index` is a set of (symbol, time, price, qty) keys built from the
+    venue's own block publication, when such a publication turns out to exist
+    and to be row-matchable. A print found there is a BLOCK.
+
+    A row carrying an explicit venue flag is believed. Everything else is
+    UNKNOWN -- NOT CLOB. The tape as documented has four columns and no trade
+    type, so "unflagged" means "we do not know", and the one thing that must
+    never happen is UNKNOWN being counted as CLOB by default: that is how the
+    whole contamination correction would be silently undone.
+    """
+    flag = row.get("execution_type") or row.get("trade_type")
+    if flag in (CLOB_EXECUTION, BLOCK_EXECUTION, UNKNOWN_EXECUTION_TYPE):
+        return flag
+    if isinstance(flag, str) and flag.strip().lower() == "block":
+        return BLOCK_EXECUTION
+    if block_index is not None:
+        key = (row.get("symbol"), row.get("time"),
+               str(row.get("price")), str(row.get("qty")))
+        if key in block_index:
+            return BLOCK_EXECUTION
+        # The index EXISTS and this row is not in it. That is positive
+        # evidence of a CLOB execution, and it is the only route to CLOB.
+        return CLOB_EXECUTION
+    return UNKNOWN_EXECUTION_TYPE
 
 
 class Quote:
@@ -130,18 +204,35 @@ def _through(side, print_px, quote_px):
 
 
 def observe(quote, tape, t1=None, depth_removed_ahead=None,
-            depth_added_ahead=None):
-    """The observable quantities, before any model interprets them."""
+            depth_added_ahead=None, block_index=None):
+    """The observable quantities, before any model interprets them.
+
+    CLOB volume is separated from block and unknown volume here, at the point
+    of measurement, so no downstream model has to remember to do it.
+    """
     rows = prints_after(tape, quote.SYMBOL, quote.HYPOTHETICAL_INSERT_TIME, t1)
     at = through = D("0")
+    at_block = at_unknown = D("0")
+    n_clob = n_block = n_unknown = 0
     first_at_time = None
     for r in rows:
         px, qty = _d(r["price"]), _d(r["qty"])
+        kind = classify_execution(r, block_index)
+        n_clob += kind == CLOB_EXECUTION
+        n_block += kind == BLOCK_EXECUTION
+        n_unknown += kind == UNKNOWN_EXECUTION_TYPE
         if px == quote.PRICE:
-            at += qty
-            if first_at_time is None:
-                first_at_time = r["time"]
+            if kind == CLOB_EXECUTION:
+                at += qty
+                if first_at_time is None:
+                    first_at_time = r["time"]
+            elif kind == BLOCK_EXECUTION:
+                at_block += qty
+            else:
+                at_unknown += qty
         elif _through(quote.SIDE, px, quote.PRICE):
+            # F3 is a TOUCH bound, not a depletion claim, so it may count any
+            # print that moved the price past us.
             through += qty
     return {
         "SYMBOL": quote.SYMBOL,
@@ -149,7 +240,14 @@ def observe(quote, tape, t1=None, depth_removed_ahead=None,
         "PRICE": quote.PRICE,
         "QUOTE_SIZE": quote.QUOTE_SIZE,
         "QUEUE_AHEAD_AT_INSERT": quote.QUEUE_AHEAD_AT_INSERT,
+        # CLOB ONLY. A block print depletes no queue, so it is not in here.
         "TRADED_VOLUME_AT_PRICE": at,
+        "CLOB_VOLUME_AT_PRICE": at,
+        "BLOCK_VOLUME_AT_PRICE": at_block,
+        "UNKNOWN_TYPE_VOLUME_AT_PRICE": at_unknown,
+        "EXECUTIONS_CLOB": n_clob,
+        "EXECUTIONS_BLOCK": n_block,
+        "EXECUTIONS_UNKNOWN_TYPE": n_unknown,
         "TRADED_VOLUME_THROUGH_PRICE": through,
         # A shrink at our level that the tape does not explain. Only F2 uses
         # it, and only when both snapshots exist -- absent snapshots give None,
@@ -167,12 +265,13 @@ def observe(quote, tape, t1=None, depth_removed_ahead=None,
 
 
 def evaluate(quote, tape, t1=None, depth_removed_ahead=None,
-             depth_added_ahead=None):
+             depth_added_ahead=None, block_index=None):
     """The four models over one hypothetical quote.
 
     Returns COUNTERFACTUAL_FILL_SUPPORTED_* and never a fill.
     """
-    o = observe(quote, tape, t1, depth_removed_ahead, depth_added_ahead)
+    o = observe(quote, tape, t1, depth_removed_ahead, depth_added_ahead,
+                block_index)
     at = o["TRADED_VOLUME_AT_PRICE"]
     ahead = quote.QUEUE_AHEAD_AT_INSERT
     # Size joining the queue AHEAD of us cannot exist under price-time
@@ -182,12 +281,20 @@ def evaluate(quote, tape, t1=None, depth_removed_ahead=None,
     added = o["VISIBLE_DEPTH_ADDED_AHEAD"] or D("0")
     removed = o["VISIBLE_DEPTH_REMOVED_AHEAD"]
 
+    # THE PRECONDITION EVERY MODEL SHARES, stated once and applied to all
+    # three rather than left to emerge from each inequality. A counterfactual
+    # fill requires that somebody actually executed AGAINST THE BOOK at our
+    # price after our hypothetical order was entered. Cancellation can advance
+    # a queue position; it cannot create a fill. Nor can a block, which never
+    # touched the book at all.
+    clob_after_entry = at > 0
+
     # F0: the whole queue ahead AND our entire quote must have been traded
     # through at our price. Cancellations credited at zero.
-    f0 = at >= (ahead + added + quote.QUOTE_SIZE)
+    f0 = clob_after_entry and at >= (ahead + added + quote.QUOTE_SIZE)
     # F1: executed volume at our price exceeds the queue ahead. The first
     # contract of ours would have traded. Cancellations still credited at zero.
-    f1 = at > (ahead + added)
+    f1 = clob_after_entry and at > (ahead + added)
     # F2: F1, or the queue ahead was cleared by execution plus an observed,
     # tape-unexplained disappearance -- AND somebody then traded at our price.
     #
@@ -228,6 +335,109 @@ def evaluate(quote, tape, t1=None, depth_removed_ahead=None,
     })
     return out
 
+
+def symbol_day_gate(tape_qty, dmr_trade_volume=None, dmr_block_volume=None,
+                    row_level_blocks_excluded=False, tolerance="0"):
+    """Is one (Symbol, Business Date) usable for queue inference at all?
+
+    THE GATE, not a caveat. A symbol-day whose Daily Market Report shows block
+    volume, and whose block rows we cannot identify individually, has a tape
+    whose volume is an UPPER BOUND on CLOB volume. Using it as queue depletion
+    would credit counterfactual fills to makers who were never touched, and the
+    error is worst exactly where it matters most -- the large, illiquid,
+    block-traded markets where a maker's queue position is most valuable.
+
+    So the verdict is USABLE / CONTAMINATED / UNRECONCILED, and the two failing
+    verdicts block the symbol-day rather than annotating it.
+
+    The reconciliation itself is deliberately NOT computed when
+    DMR_TRADE_VOLUME_INCLUDES_BLOCK_VOLUME is unknown, which it is: the
+    captured page lists `Trade Volume` ("Total traded volume for the day") and
+    `Block Volume` ("Volume from block trades") as separate columns without
+    saying whether the first contains the second. Picking one reading would
+    produce a check that always passes or one that always fails, and both look
+    like evidence.
+    """
+    out = {
+        "TAPE_TOTAL_QTY": _d(tape_qty),
+        "DMR_TRADE_VOLUME": (None if dmr_trade_volume is None
+                             else _d(dmr_trade_volume)),
+        "DMR_BLOCK_VOLUME": (None if dmr_block_volume is None
+                             else _d(dmr_block_volume)),
+        "DMR_TRADE_VOLUME_INCLUDES_BLOCK_VOLUME":
+            DMR_TRADE_VOLUME_INCLUDES_BLOCK_VOLUME,
+        "ROW_LEVEL_BLOCKS_EXCLUDED": bool(row_level_blocks_excluded),
+    }
+    if dmr_trade_volume is None:
+        out["RECONCILIATION"] = NOT_IDENTIFIED
+        out["QUEUE_DEPLETION_CONTAMINATED_BY_BLOCKS"] = NOT_IDENTIFIED
+        out["SYMBOL_DAY_USABLE_FOR_QUEUE_INFERENCE"] = "NO"
+        out["VERDICT"] = "UNRECONCILED_NO_DMR_ROW"
+        return out
+
+    # Only the block-free case has an unambiguous expected total, so only it
+    # can be reconciled while the inclusive/exclusive question is open.
+    blk = out["DMR_BLOCK_VOLUME"]
+    if blk is not None and blk > 0:
+        if not row_level_blocks_excluded:
+            out["RECONCILIATION"] = NOT_IDENTIFIED
+            out["QUEUE_DEPLETION_CONTAMINATED_BY_BLOCKS"] = "YES"
+            out["SYMBOL_DAY_USABLE_FOR_QUEUE_INFERENCE"] = "NO"
+            out["VERDICT"] = "CONTAMINATED_BY_BLOCKS"
+            return out
+        out["QUEUE_DEPLETION_CONTAMINATED_BY_BLOCKS"] = "NO"
+    else:
+        out["QUEUE_DEPLETION_CONTAMINATED_BY_BLOCKS"] = "NO"
+
+    delta = abs(out["TAPE_TOTAL_QTY"] - out["DMR_TRADE_VOLUME"])
+    ok = delta <= _d(tolerance)
+    out["RECONCILIATION_DELTA"] = delta
+    out["RECONCILIATION"] = "PASS" if ok else "FAIL"
+    out["SYMBOL_DAY_USABLE_FOR_QUEUE_INFERENCE"] = "YES" if ok else "NO"
+    out["VERDICT"] = "USABLE" if ok else "UNRECONCILED_VOLUME_MISMATCH"
+    return out
+
+
+def reconciliation_report(gates):
+    """The six rates, over a set of symbol-day gate results."""
+    n = len(gates)
+    if not n:
+        return {k: NOT_IDENTIFIED for k in (
+            "TAPE_DMR_JOIN_RATE", "TAPE_VOLUME_RECONCILIATION_RATE",
+            "SYMBOLS_WITH_BLOCK_VOLUME", "BLOCK_VOLUME_SHARE",
+            "ROW_LEVEL_BLOCK_EXCLUSION_RATE", "QUEUE_USABLE_SYMBOL_DAYS")}
+    joined = [g for g in gates if g.get("DMR_TRADE_VOLUME") is not None]
+    blocky = [g for g in gates
+              if g.get("DMR_BLOCK_VOLUME") not in (None,)
+              and g["DMR_BLOCK_VOLUME"] > 0]
+    blk_total = sum((g["DMR_BLOCK_VOLUME"] for g in blocky), D("0"))
+    trade_total = sum((g["DMR_TRADE_VOLUME"] for g in joined), D("0"))
+    return {
+        "SYMBOL_DAYS": n,
+        "TAPE_DMR_JOIN_RATE": "%d/%d" % (len(joined), n),
+        "TAPE_VOLUME_RECONCILIATION_RATE":
+            "%d/%d" % (sum(1 for g in gates
+                           if g.get("RECONCILIATION") == "PASS"), n),
+        "SYMBOLS_WITH_BLOCK_VOLUME": len(blocky),
+        "BLOCK_VOLUME_SHARE": (str(blk_total / trade_total)
+                               if trade_total > 0 else NOT_IDENTIFIED),
+        "ROW_LEVEL_BLOCK_EXCLUSION_RATE":
+            "%d/%d" % (sum(1 for g in blocky
+                           if g.get("ROW_LEVEL_BLOCKS_EXCLUDED")), len(blocky))
+            if blocky else "0/0",
+        "QUEUE_USABLE_SYMBOL_DAYS":
+            sum(1 for g in gates
+                if g.get("SYMBOL_DAY_USABLE_FOR_QUEUE_INFERENCE") == "YES"),
+    }
+
+
+# No counterfactual fill result may be promoted to a finding until a
+# symbol-day's gate says USABLE. Recorded as a flag so the promotion step has
+# something to check rather than a paragraph to remember.
+COUNTERFACTUAL_RESULTS_PROMOTABLE = False
+PROMOTION_REQUIRES = ("SYMBOL_DAY_USABLE_FOR_QUEUE_INFERENCE == YES",
+                      "BLOCK_CONTAMINATION_RESOLVED",
+                      "TAPE_SYMBOL_JOINS_TO_MARKET_SLUG != NOT_IDENTIFIED")
 
 MARKOUT_HORIZONS_S = (1, 5, 30, 60, 300)
 

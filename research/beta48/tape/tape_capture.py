@@ -54,7 +54,14 @@ CAPTURE_VERSION = "beta48-tape-public/1"
 TAPE_HOST = "www.polymarketexchange.com"
 SCHEME = "https://"
 TAPE_BASE = SCHEME + TAPE_HOST
-LANDING_PAGES = ("/time-and-sales.html", "/daily-market-report.html")
+# The third page is the block publication. Its path is NOT documented in any
+# of our 340 captured pages, so it is a CANDIDATE: fetched, and recorded as
+# absent if it 404s. A 404 here is a real finding -- it means row-level block
+# exclusion is unavailable and every symbol-day carrying block volume stays
+# blocked for queue inference.
+LANDING_PAGES = ("/time-and-sales.html", "/daily-market-report.html",
+                 "/block-trade-data.html")
+BLOCK_TRADE_PAGE = "/block-trade-data.html"
 
 # OUR restraint, not evidence about the venue's ceiling.
 MAX_RPS = 1.0
@@ -174,6 +181,20 @@ def capture(outdir: Path, max_files: int = 0) -> dict:
         "SYMBOL_JOINS_TO_MARKET_SLUG": "NOT_IDENTIFIED",
         "BUSINESS_DATE_CUTOVER": "17:00 America/New_York (captured)",
         "BUSINESS_DATE_IS_NOT_A_UTC_DAY": "YES",
+        # C-14. Tape volume is an UPPER BOUND on CLOB volume until blocks can
+        # be identified row by row, because a block executes apart from the
+        # book and depletes no queue.
+        "BLOCK_TRADE_DATA_PUBLIC": "NOT_IDENTIFIED",
+        "BLOCK_TRADE_PAGE_HTTP_STATUS": None,
+        "ROW_LEVEL_MATCH_TO_TIME_SALES_POSSIBLE": "NOT_IDENTIFIED",
+        "TAPE_VOLUME_IS_UPPER_BOUND_ON_CLOB_VOLUME": "YES",
+        # Publication times differ, so the join key is the BUSINESS DATE and
+        # never a fetch or discovery timestamp.
+        "TAPE_PUBLICATION_TIME_ET_RELAYED": "~18:00",
+        "DMR_PUBLICATION_TIME_ET_RELAYED": "~00:00",
+        "JOIN_KEY": "BUSINESS_DATE",
+        "JOIN_KEY_IS_NOT": ("UTC_CALENDAR_DATE", "FILE_DISCOVERY_TIMESTAMP",
+                            "FETCH_TIMESTAMP"),
     }
     links = []
     with httpx.Client(headers={"User-Agent": CAPTURE_VERSION}) as client, \
@@ -185,7 +206,12 @@ def capture(outdir: Path, max_files: int = 0) -> dict:
             summary["landing_pages"].append(
                 {"url": url, "http_status": row["http_status"],
                  "error": row["error"], "sha256": row["sha256"]})
-            if row["http_status"] == 200:
+            if path == BLOCK_TRADE_PAGE:
+                summary["BLOCK_TRADE_PAGE_HTTP_STATUS"] = row["http_status"]
+                summary["BLOCK_TRADE_DATA_PUBLIC"] = (
+                    "YES" if row["http_status"] == 200 else
+                    "NO" if row["http_status"] == 404 else "NOT_IDENTIFIED")
+            elif row["http_status"] == 200:
                 summary["PUBLIC_TIME_SALES_AVAILABLE"] = "YES"
                 for u in csv_links(row.get("text"), url):
                     if u not in links:

@@ -19,8 +19,23 @@ sys.path.insert(0, str(HERE))
 import fill_model_v2 as M  # noqa: E402
 
 
-def T(t, px, qty, symbol="s"):
+def RAW(t, px, qty, symbol="s"):
+    """A row exactly as the four-column tape gives it: no trade type at all."""
     return {"time": t, "symbol": symbol, "price": px, "qty": qty}
+
+
+def T(t, px, qty, symbol="s"):
+    """A row KNOWN to be a CLOB execution.
+
+    The model tests are about model logic, so they state the classification
+    rather than relying on a default -- and after C-14 there is no permissive
+    default to rely on: an unclassified row contributes nothing.
+    """
+    return dict(RAW(t, px, qty, symbol), execution_type=M.CLOB_EXECUTION)
+
+
+def BLOCK(t, px, qty, symbol="s"):
+    return dict(RAW(t, px, qty, symbol), execution_type=M.BLOCK_EXECUTION)
 
 
 class TheModelNeverAssertsAnActualFill(unittest.TestCase):
@@ -303,3 +318,148 @@ class QueueDepletionIsNotAFill(unittest.TestCase):
                 self.assertEqual(row["F3_TOUCH_ONLY"], "NO")
                 self.assertEqual(row["COUNTERFACTUAL_FILL_SUPPORTED_F2"],
                                  "NO", (ahead, removed))
+
+
+class BlockTradesDepleteNoQueue(unittest.TestCase):
+    """C-14. A block executes APART from the order book and does not touch
+    orders resting in it -- yet it is reported into Time & Sales. So tape
+    volume is an upper bound on CLOB volume, never equal to it.
+
+    The failure this prevents is worst exactly where it matters most: the
+    large, illiquid, block-traded markets where a maker's queue position is
+    most valuable are the ones whose tape carries the biggest blocks."""
+
+    def test_a_block_print_alone_supports_nothing(self):
+        q = M.Quote(0, "s", "BID", "0.30", 10, 5)
+        row = M.evaluate(q, [BLOCK(1, "0.30", 1_000_000)])
+        self.assertEqual(row["CLOB_VOLUME_AT_PRICE"], D("0"))
+        self.assertEqual(row["BLOCK_VOLUME_AT_PRICE"], D("1000000"))
+        for f in ("COUNTERFACTUAL_FILL_SUPPORTED_F0",
+                  "COUNTERFACTUAL_FILL_SUPPORTED_F1",
+                  "COUNTERFACTUAL_FILL_SUPPORTED_F2"):
+            self.assertEqual(row[f], "NO", f)
+
+    def test_a_block_does_not_rescue_a_queue_a_clob_trade_cannot_clear(self):
+        q = M.Quote(0, "s", "BID", "0.30", 10, 100)
+        row = M.evaluate(q, [T(1, "0.30", 5), BLOCK(2, "0.30", 10_000)])
+        self.assertEqual(row["CLOB_VOLUME_AT_PRICE"], D("5"))
+        self.assertEqual(row["COUNTERFACTUAL_FILL_SUPPORTED_F1"], "NO")
+
+    def test_the_two_volumes_are_reported_separately(self):
+        q = M.Quote(0, "s", "BID", "0.30", 10, 0)
+        row = M.evaluate(q, [T(1, "0.30", 7), BLOCK(2, "0.30", 70)])
+        self.assertEqual(row["CLOB_VOLUME_AT_PRICE"], D("7"))
+        self.assertEqual(row["BLOCK_VOLUME_AT_PRICE"], D("70"))
+        self.assertEqual(row["EXECUTIONS_CLOB"], 1)
+        self.assertEqual(row["EXECUTIONS_BLOCK"], 1)
+
+    def test_traded_volume_at_price_is_the_clob_figure(self):
+        """The field the models read must BE the CLOB figure, not a total that
+        a later reader has to remember to net a block out of."""
+        q = M.Quote(0, "s", "BID", "0.30", 10, 0)
+        row = M.evaluate(q, [T(1, "0.30", 7), BLOCK(2, "0.30", 70)])
+        self.assertEqual(row["TRADED_VOLUME_AT_PRICE"],
+                         row["CLOB_VOLUME_AT_PRICE"])
+
+
+class UnknownIsNeverSilentlyClob(unittest.TestCase):
+
+    def test_a_raw_four_column_row_is_unknown(self):
+        """The documented tape has Time, Symbol, Price, Quantity and no trade
+        type. Unflagged therefore means "we do not know", and defaulting it to
+        CLOB would undo the whole correction in one line."""
+        self.assertEqual(M.classify_execution(RAW(1, "0.30", 5)),
+                         M.UNKNOWN_EXECUTION_TYPE)
+
+    def test_an_unclassified_tape_supports_no_counterfactual_fill(self):
+        q = M.Quote(0, "s", "BID", "0.30", 10, 5)
+        row = M.evaluate(q, [RAW(1, "0.30", 1_000_000)])
+        self.assertEqual(row["UNKNOWN_TYPE_VOLUME_AT_PRICE"], D("1000000"))
+        self.assertEqual(row["CLOB_VOLUME_AT_PRICE"], D("0"))
+        self.assertEqual(row["COUNTERFACTUAL_FILL_SUPPORTED_F1"], "NO")
+
+    def test_unknown_volume_still_counts_toward_the_touch_upper_bound(self):
+        """F3 is a TOUCH bound, not a depletion claim: something traded past
+        our level whatever kind of execution it was."""
+        q = M.Quote(0, "s", "BID", "0.30", 10, 5)
+        row = M.evaluate(q, [RAW(1, "0.25", 100)])
+        self.assertEqual(row["F3_TOUCH_ONLY"], "YES")
+        self.assertEqual(row["COUNTERFACTUAL_FILL_SUPPORTED_F2"], "NO")
+
+    def test_an_index_that_exists_makes_absence_positive_evidence(self):
+        """With a real block publication in hand, a row NOT in it is a CLOB
+        execution. That is the only route from UNKNOWN to CLOB."""
+        r = RAW(1, "0.30", 5)
+        idx = {("s", 9, "0.99", "1")}
+        self.assertEqual(M.classify_execution(r, idx), M.CLOB_EXECUTION)
+        idx2 = {("s", 1, "0.30", "5")}
+        self.assertEqual(M.classify_execution(r, idx2), M.BLOCK_EXECUTION)
+
+    def test_the_exclusion_mechanism_is_unverified(self):
+        """Blocks exist (FIX ExecInst 'j'; the DMR's Block Volume column) --
+        that is captured. That they appear in Time & Sales, and any row-level
+        flag for them, is not."""
+        self.assertEqual(M.BLOCK_TRADES_EXIST, "VERIFIED_FROM_CAPTURE")
+        self.assertEqual(M.BLOCKS_APPEAR_IN_TIME_SALES,
+                         "RELAYED_NOT_CAPTURED")
+        self.assertEqual(M.BLOCK_TRADE_DATA_PAGE_CAPTURED, "NO")
+        for f in ("BLOCK_TRADE_DATA_PUBLIC", "BLOCK_TRADE_TIMESTAMP_AVAILABLE",
+                  "BLOCK_TRADE_SYMBOL_AVAILABLE", "BLOCK_TRADE_PRICE_AVAILABLE",
+                  "BLOCK_TRADE_QUANTITY_AVAILABLE",
+                  "ROW_LEVEL_MATCH_TO_TIME_SALES_POSSIBLE"):
+            self.assertEqual(getattr(M, f), "NOT_IDENTIFIED", f)
+
+
+class TheSymbolDayGateBlocksRatherThanAnnotates(unittest.TestCase):
+
+    def test_block_volume_without_row_exclusion_blocks_the_day(self):
+        g = M.symbol_day_gate(1000, dmr_trade_volume=1000, dmr_block_volume=50)
+        self.assertEqual(g["QUEUE_DEPLETION_CONTAMINATED_BY_BLOCKS"], "YES")
+        self.assertEqual(g["SYMBOL_DAY_USABLE_FOR_QUEUE_INFERENCE"], "NO")
+        self.assertEqual(g["VERDICT"], "CONTAMINATED_BY_BLOCKS")
+
+    def test_a_clean_reconciled_day_is_usable(self):
+        g = M.symbol_day_gate(1000, dmr_trade_volume=1000, dmr_block_volume=0)
+        self.assertEqual(g["RECONCILIATION"], "PASS")
+        self.assertEqual(g["VERDICT"], "USABLE")
+
+    def test_a_volume_mismatch_blocks_the_day(self):
+        g = M.symbol_day_gate(900, dmr_trade_volume=1000, dmr_block_volume=0)
+        self.assertEqual(g["RECONCILIATION"], "FAIL")
+        self.assertEqual(g["SYMBOL_DAY_USABLE_FOR_QUEUE_INFERENCE"], "NO")
+
+    def test_a_missing_dmr_row_is_not_a_pass(self):
+        """No control is not the same as a passed control."""
+        g = M.symbol_day_gate(1000)
+        self.assertEqual(g["VERDICT"], "UNRECONCILED_NO_DMR_ROW")
+        self.assertEqual(g["SYMBOL_DAY_USABLE_FOR_QUEUE_INFERENCE"], "NO")
+
+    def test_row_level_exclusion_reopens_a_blocky_day(self):
+        g = M.symbol_day_gate(1000, dmr_trade_volume=1000, dmr_block_volume=50,
+                              row_level_blocks_excluded=True)
+        self.assertEqual(g["QUEUE_DEPLETION_CONTAMINATED_BY_BLOCKS"], "NO")
+        self.assertEqual(g["VERDICT"], "USABLE")
+
+    def test_the_inclusive_exclusive_question_is_not_guessed(self):
+        """Whether DMR Trade Volume contains Block Volume decides the
+        arithmetic, and the captured page does not say. Guessing produces a
+        check that always passes or always fails -- both look like evidence."""
+        self.assertEqual(M.DMR_TRADE_VOLUME_INCLUDES_BLOCK_VOLUME,
+                         "NOT_IDENTIFIED")
+        g = M.symbol_day_gate(1000, dmr_trade_volume=1000, dmr_block_volume=50)
+        self.assertEqual(g["RECONCILIATION"], "NOT_IDENTIFIED")
+
+    def test_the_six_rates_are_reported(self):
+        gates = [M.symbol_day_gate(100, 100, 0),
+                 M.symbol_day_gate(100, 100, 5),
+                 M.symbol_day_gate(100)]
+        rep = M.reconciliation_report(gates)
+        self.assertEqual(rep["SYMBOL_DAYS"], 3)
+        self.assertEqual(rep["TAPE_DMR_JOIN_RATE"], "2/3")
+        self.assertEqual(rep["SYMBOLS_WITH_BLOCK_VOLUME"], 1)
+        self.assertEqual(rep["QUEUE_USABLE_SYMBOL_DAYS"], 1)
+        self.assertEqual(rep["ROW_LEVEL_BLOCK_EXCLUSION_RATE"], "0/1")
+
+    def test_nothing_is_promotable_yet(self):
+        self.assertFalse(M.COUNTERFACTUAL_RESULTS_PROMOTABLE)
+        self.assertIn("BLOCK_CONTAMINATION_RESOLVED", M.PROMOTION_REQUIRES)

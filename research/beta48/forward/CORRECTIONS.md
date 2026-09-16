@@ -540,3 +540,91 @@ An inventory cap that does not bound the worst single fill is not an inventory
 cap. BETTOR's own seven controls stay required as an independent layer:
 position, event, correlation and loss limits, stale-data kill, quote-age limit,
 inventory kill.
+
+---
+
+## C-14 — the tape carries block trades, and a block depletes no queue
+
+**A correctness defect in what I built yesterday**, not a refinement of it.
+
+A block trade executes APART FROM the public order book and does not touch
+orders resting in it — and is reported into Time & Sales anyway. So:
+
+```
+TIME_SALES_VOLUME  !=  ORDER_BOOK_DEPLETION
+```
+
+A maker sitting in the queue is exactly as far from the front after a block
+prints as before it. The first version of `fill_model_v2.py` counted every
+tape print toward queue depletion, so a single large block would have
+manufactured a counterfactual fill for a quote nothing ever touched.
+
+**Worst exactly where it matters most.** The large, illiquid, block-traded
+markets are the ones where a maker's queue position is most valuable, and they
+are the ones whose tape carries the biggest blocks.
+
+**What I verified myself, and what I did not.** Blocks exist: FIX
+`ExecInst = j`, "SINGLE EXECUTION REQUESTED FOR BLOCK TRADE", and the Daily
+Market Report carries a separate `Block Volume` column beside `Trade Volume`
+— both in the 340-page capture. That establishes the contamination risk. That
+blocks appear in Time & Sales, and any row-level flag for them, I could NOT
+verify: no Block Trade Data page appears in `llms.txt` or in any captured page.
+
+```
+BLOCK_TRADES_EXIST                     VERIFIED_FROM_CAPTURE
+BLOCKS_APPEAR_IN_TIME_SALES            RELAYED_NOT_CAPTURED
+BLOCK_TRADE_DATA_PAGE_CAPTURED         NO
+ROW_LEVEL_MATCH_TO_TIME_SALES_POSSIBLE NOT_IDENTIFIED
+```
+
+The conservative consequence is identical either way: **an unflagged tape's
+volume is an UPPER BOUND on CLOB volume, never equal to it.**
+
+**Three-way classification, and UNKNOWN is never silently CLOB.** The
+documented tape has four columns and no trade type, so an unflagged row means
+"we do not know". Defaulting it to CLOB would undo this whole correction in one
+line, so the only route from UNKNOWN to CLOB is a real block publication in
+hand: a row absent from an index that EXISTS is positive evidence of a CLOB
+execution; a row absent from an index that does not exist is not.
+
+Updating this broke six existing tests, which is the fix working: those tests
+fed raw unflagged rows and had been getting fills out of them.
+
+**The shared precondition, now stated once and applied to all three models:**
+
+```
+clob_after_entry = CLOB volume at our price, after entry, > 0
+```
+
+This keeps C-11 intact — cancellation can advance a queue position, it cannot
+create a fill — and adds that a block cannot either.
+
+**The symbol-day gate blocks rather than annotates.** `VERDICT` is
+`USABLE` / `CONTAMINATED_BY_BLOCKS` / `UNRECONCILED_VOLUME_MISMATCH` /
+`UNRECONCILED_NO_DMR_ROW`, and only the first permits queue inference. A
+missing DMR row is not a passed control.
+
+**The reconciliation arithmetic is deliberately not computed for blocky days.**
+Whether the DMR's `Trade Volume` ("Total traded volume for the day") INCLUDES
+`Block Volume` ("Volume from block trades") decides the sum, and the captured
+page does not say. `DMR_TRADE_VOLUME_INCLUDES_BLOCK_VOLUME = NOT_IDENTIFIED`.
+Guessing would produce a check that always passes or one that always fails, and
+both look like evidence.
+
+**Publication times differ**, so the join key is the business date and never a
+clock reading: the tape updates ~18:00 ET and the Daily Market Report ~00:00 ET
+(relayed), on a business day that already ends at 17:00 ET (captured).
+
+```
+JOIN_KEY      BUSINESS_DATE
+JOIN_KEY_IS_NOT  UTC_CALENDAR_DATE, FILE_DISCOVERY_TIMESTAMP, FETCH_TIMESTAMP
+```
+
+**Nothing is promotable.** `COUNTERFACTUAL_RESULTS_PROMOTABLE = False`, with
+`PROMOTION_REQUIRES` naming the three conditions, so the promotion step has a
+flag to check rather than a paragraph to remember.
+
+The block landing page is fetched as a CANDIDATE — its path is in none of our
+captured pages — and **a 404 there is a finding, not a failure**: it would mean
+row-level exclusion is unavailable and every symbol-day carrying block volume
+stays blocked for queue inference indefinitely.

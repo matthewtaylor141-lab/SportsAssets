@@ -237,3 +237,41 @@ def test_the_open_questions_start_open():
     for f in ("TAPE_TIMESTAMP_PRECISION", "PUBLICATION_LATENCY",
               "SYMBOL_JOINS_TO_MARKET_SLUG"):
         assert '"%s": "NOT_IDENTIFIED"' % f in src, f
+
+
+def test_the_block_page_is_a_candidate_and_a_404_is_a_finding():
+    """Its path is in none of our 340 captured pages, so it is fetched as a
+    CANDIDATE. A 404 is not a failure of the capture -- it is the answer that
+    row-level block exclusion is unavailable, which keeps every symbol-day
+    carrying block volume blocked for queue inference."""
+    assert C.BLOCK_TRADE_PAGE in C.LANDING_PAGES
+    import inspect
+    src = inspect.getsource(C.capture)
+    assert '"BLOCK_TRADE_DATA_PUBLIC"' in src
+    assert '"NO" if row["http_status"] == 404' in src
+
+
+def test_a_missing_block_page_does_not_claim_the_tape_is_clean():
+    """The dangerous default: no block page found, therefore no blocks. The
+    summary must say the tape is an upper bound regardless."""
+    import inspect
+    src = inspect.getsource(C.capture)
+    assert '"TAPE_VOLUME_IS_UPPER_BOUND_ON_CLOB_VOLUME": "YES"' in src
+
+
+def test_the_join_key_is_the_business_date_and_not_a_clock_reading():
+    """Tape and DMR publish at different times of day (~18:00 ET and ~00:00
+    ET), so a fetch or discovery timestamp would join the wrong rows."""
+    import inspect
+    src = inspect.getsource(C.capture)
+    assert '"JOIN_KEY": "BUSINESS_DATE"' in src
+    for bad in ("UTC_CALENDAR_DATE", "FILE_DISCOVERY_TIMESTAMP",
+                "FETCH_TIMESTAMP"):
+        assert bad in src, bad
+
+
+def test_the_block_page_does_not_widen_the_host_surface():
+    """A third page, still one host."""
+    for p in C.LANDING_PAGES:
+        assert p.startswith("/")
+        C._assert_tape_host(C.TAPE_BASE + p)
