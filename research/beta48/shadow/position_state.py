@@ -130,32 +130,54 @@ COMPLETED_PAIR = "COMPLETED_PAIR"
 SETTLED = "SETTLED"
 
 STATES = (FRESH_UNPAIRED, AGING_UNPAIRED, PAIR_AVAILABLE,
+          "PASSIVE_PAIR_AVAILABLE", "AGGRESSIVE_PAIR_AVAILABLE",
           PASSIVE_EXIT_AVAILABLE, AGGRESSIVE_EXIT_AVAILABLE, HEDGE_AVAILABLE,
           DIRECTIONAL_HOLD, COMPLETED_PAIR, SETTLED)
 
 FRESH_SECONDS = 60
 
-A_PAIR_NOW = "A_PAIR_NOW"
+# PHASE 2 EXTENSION: THE PASSIVE / AGGRESSIVE SPLIT.
+#
+# BETTOR IS MAKER-FIRST, so "pair" and "exit" are each TWO actions, not one.
+# The distinction is not cosmetic -- it changes the economics in three places
+# at once. Resting earns the spread and may earn a maker rebate; crossing pays
+# the spread and a taker fee. Collapsing them would price a maker strategy at
+# taker costs, or worse, credit a crossing trade with a rebate it never earned.
+#
+# The split also changes WHEN the action is available: a passive complement
+# pair needs somewhere to rest, an aggressive one needs depth to cross, and a
+# market can offer either, both, or neither.
+A_PASSIVE_COMPLEMENT_PAIR = "A_PASSIVE_COMPLEMENT_PAIR"
+A_AGGRESSIVE_COMPLEMENT_PAIR = "A_AGGRESSIVE_COMPLEMENT_PAIR"
 A_WAIT = "A_WAIT"
-A_PASSIVE_EXIT = "A_PASSIVE_EXIT"
-A_AGGRESSIVE_EXIT = "A_AGGRESSIVE_EXIT"
+A_PASSIVE_SELL_EXIT = "A_PASSIVE_SELL_EXIT"
+A_AGGRESSIVE_SELL_EXIT = "A_AGGRESSIVE_SELL_EXIT"
 A_HEDGE = "A_HEDGE"
 A_DIRECTIONAL_HOLD = "A_DIRECTIONAL_HOLD"
 A_SETTLEMENT_HOLD = "A_SETTLEMENT_HOLD"
 A_REALIZE_AND_RECYCLE = "A_REALIZE_AND_RECYCLE"
 A_HOLD_LOCKED_PAIR = "A_HOLD_LOCKED_PAIR"
 
-ACTIONS = (A_PAIR_NOW, A_WAIT, A_PASSIVE_EXIT, A_AGGRESSIVE_EXIT, A_HEDGE,
+ACTIONS = (A_PASSIVE_COMPLEMENT_PAIR, A_AGGRESSIVE_COMPLEMENT_PAIR, A_WAIT,
+           A_PASSIVE_SELL_EXIT, A_AGGRESSIVE_SELL_EXIT, A_HEDGE,
            A_DIRECTIONAL_HOLD, A_SETTLEMENT_HOLD, A_REALIZE_AND_RECYCLE,
            A_HOLD_LOCKED_PAIR)
+
+PASSIVE_ACTIONS = (A_PASSIVE_COMPLEMENT_PAIR, A_PASSIVE_SELL_EXIT)
+AGGRESSIVE_ACTIONS = (A_AGGRESSIVE_COMPLEMENT_PAIR, A_AGGRESSIVE_SELL_EXIT)
+
+PASSIVE_PAIR_AVAILABLE = "PASSIVE_PAIR_AVAILABLE"
+AGGRESSIVE_PAIR_AVAILABLE = "AGGRESSIVE_PAIR_AVAILABLE"
 
 # What each state MAKES POSSIBLE. Not what it recommends.
 FEASIBLE_BY_STATE = {
     FRESH_UNPAIRED: (A_WAIT, A_SETTLEMENT_HOLD),
     AGING_UNPAIRED: (A_WAIT, A_SETTLEMENT_HOLD),
-    PAIR_AVAILABLE: (A_PAIR_NOW,),
-    PASSIVE_EXIT_AVAILABLE: (A_PASSIVE_EXIT,),
-    AGGRESSIVE_EXIT_AVAILABLE: (A_AGGRESSIVE_EXIT,),
+    PAIR_AVAILABLE: (A_AGGRESSIVE_COMPLEMENT_PAIR,),
+    PASSIVE_PAIR_AVAILABLE: (A_PASSIVE_COMPLEMENT_PAIR,),
+    AGGRESSIVE_PAIR_AVAILABLE: (A_AGGRESSIVE_COMPLEMENT_PAIR,),
+    PASSIVE_EXIT_AVAILABLE: (A_PASSIVE_SELL_EXIT,),
+    AGGRESSIVE_EXIT_AVAILABLE: (A_AGGRESSIVE_SELL_EXIT,),
     HEDGE_AVAILABLE: (A_HEDGE,),
     DIRECTIONAL_HOLD: (A_DIRECTIONAL_HOLD,),
     COMPLETED_PAIR: (A_REALIZE_AND_RECYCLE, A_HOLD_LOCKED_PAIR),
@@ -181,6 +203,9 @@ def states(obs):
         out.append(FRESH_UNPAIRED if t <= FRESH_SECONDS else AGING_UNPAIRED)
     if obs.get("COMPLEMENT_EXECUTABLE_NOW"):
         out.append(PAIR_AVAILABLE)
+        out.append(AGGRESSIVE_PAIR_AVAILABLE)
+    if obs.get("COMPLEMENT_PASSIVE_PLACEABLE"):
+        out.append(PASSIVE_PAIR_AVAILABLE)
     if obs.get("PASSIVE_EXIT_PLACEABLE"):
         out.append(PASSIVE_EXIT_AVAILABLE)
     if obs.get("AGGRESSIVE_EXIT_DEPTH_EXISTS"):
@@ -190,8 +215,9 @@ def states(obs):
     # DIRECTIONAL_HOLD is the state of having no feasible pair OR exit. It is
     # NOT a decision to run the position directionally -- that decision is
     # A_DIRECTIONAL_HOLD, and it is taken by the allocator on economics.
-    if not ({PAIR_AVAILABLE, PASSIVE_EXIT_AVAILABLE,
-             AGGRESSIVE_EXIT_AVAILABLE, HEDGE_AVAILABLE} & set(out)):
+    if not ({PAIR_AVAILABLE, PASSIVE_PAIR_AVAILABLE, AGGRESSIVE_PAIR_AVAILABLE,
+             PASSIVE_EXIT_AVAILABLE, AGGRESSIVE_EXIT_AVAILABLE,
+             HEDGE_AVAILABLE} & set(out)):
         out.append(DIRECTIONAL_HOLD)
     return tuple(out)
 
@@ -225,9 +251,10 @@ INFEASIBLE = "INFEASIBLE"
 
 # What each conditional action needs the book to show.
 PROBES = {
-    A_PAIR_NOW: "COMPLEMENT_EXECUTABLE_NOW",
-    A_PASSIVE_EXIT: "PASSIVE_EXIT_PLACEABLE",
-    A_AGGRESSIVE_EXIT: "AGGRESSIVE_EXIT_DEPTH_EXISTS",
+    A_PASSIVE_COMPLEMENT_PAIR: "COMPLEMENT_PASSIVE_PLACEABLE",
+    A_AGGRESSIVE_COMPLEMENT_PAIR: "COMPLEMENT_EXECUTABLE_NOW",
+    A_PASSIVE_SELL_EXIT: "PASSIVE_EXIT_PLACEABLE",
+    A_AGGRESSIVE_SELL_EXIT: "AGGRESSIVE_EXIT_DEPTH_EXISTS",
     A_HEDGE: "HEDGE_INSTRUMENT_EXECUTABLE",
 }
 
@@ -915,9 +942,12 @@ def record_tick(history, row, at):
                  PAIR_BASIS=row.get("PAIR_BASIS", NOT_IDENTIFIED),
                  QUEUE_AHEAD=row.get("QUEUE_AHEAD", NOT_IDENTIFIED))
     fmap = row.get("ACTION_FEASIBILITY", {})
-    for action, kind in (("A_PAIR_NOW", "PAIR_OPPORTUNITY_APPEARED"),
-                         ("A_PASSIVE_EXIT", "PASSIVE_EXIT_AVAILABLE"),
-                         ("A_AGGRESSIVE_EXIT", "AGGRESSIVE_EXIT_AVAILABLE"),
+    for action, kind in ((A_PASSIVE_COMPLEMENT_PAIR,
+                          "PAIR_OPPORTUNITY_APPEARED"),
+                         (A_AGGRESSIVE_COMPLEMENT_PAIR,
+                          "PAIR_OPPORTUNITY_APPEARED"),
+                         (A_PASSIVE_SELL_EXIT, "PASSIVE_EXIT_AVAILABLE"),
+                         (A_AGGRESSIVE_SELL_EXIT, "AGGRESSIVE_EXIT_AVAILABLE"),
                          ("A_HEDGE", "HEDGE_AVAILABLE")):
         if fmap.get(action) == FEASIBLE:
             append_event(history, kind, at, ACTION=action)
@@ -1006,12 +1036,12 @@ def ghost_actions(obs, priors, account=CONSENSUS, horizon_minutes=None,
     # deliberately crude -- claiming a richer reconstruction would be claiming
     # per-position evidence the archive does not contain.
     out[POLICY_WHALE_BASELINE] = (
-        A_PAIR_NOW if A_PAIR_NOW in feas
+        A_AGGRESSIVE_COMPLEMENT_PAIR if A_AGGRESSIVE_COMPLEMENT_PAIR in feas
         else hold(A_HOLD_LOCKED_PAIR, A_SETTLEMENT_HOLD, A_DIRECTIONAL_HOLD))
     out[POLICY_ALWAYS_HOLD] = hold(A_HOLD_LOCKED_PAIR, A_SETTLEMENT_HOLD,
                                    A_DIRECTIONAL_HOLD)
     out[POLICY_PAIR_FIRST] = (
-        A_PAIR_NOW if A_PAIR_NOW in feas
+        A_AGGRESSIVE_COMPLEMENT_PAIR if A_AGGRESSIVE_COMPLEMENT_PAIR in feas
         else hold(A_WAIT, A_HOLD_LOCKED_PAIR, A_SETTLEMENT_HOLD,
                   A_DIRECTIONAL_HOLD))
     out[POLICY_NO_PAIR_DIRECTIONAL] = hold(
@@ -1149,3 +1179,289 @@ def blended_lambda(prior_lambda, bettor_lambda, bettor_n):
         # No BETTOR evidence yet: the prior stands, undiluted and unhidden.
         return prior_lambda
     return (1.0 - w) * prior_lambda + w * bettor_lambda
+
+
+# ===========================================================================
+# PHASE 2 -- SHADOW_EXIT_LEARNING_V1
+# ===========================================================================
+
+PHASE_2A = "LIVE_PUBLIC_MARKET_STATE_AND_DECISION_TELEMETRY"
+PHASE_2B = "COUNTERFACTUAL_POSITION_AND_FILL_LEARNING"
+PHASE_2C = "EXIT_POLICY_COMPARISON"
+PHASE_2_STAGE = PHASE_2A
+
+# THE JUMP THAT IS FORBIDDEN. Market snapshots do not become a strategy P&L
+# by being numerous. Every stage below 2C leaves this NOT_IDENTIFIED, and the
+# recorder refuses to name it at all until a stage that could support it.
+BETTOR_EXIT_ENGINE_PNL = NOT_IDENTIFIED
+PROFITABILITY_REPORTABLE = False
+
+
+# ---------------------------------------------------------------------------
+# POSITION PROVENANCE -- exactly one class per position
+# ---------------------------------------------------------------------------
+
+OBSERVED_ACTUAL_POSITION = "OBSERVED_ACTUAL_POSITION"
+COUNTERFACTUAL_MAKER_FILL = "COUNTERFACTUAL_MAKER_FILL"
+COUNTERFACTUAL_TAKER_ENTRY = "COUNTERFACTUAL_TAKER_ENTRY"
+SYNTHETIC_RESEARCH_POSITION = "SYNTHETIC_RESEARCH_POSITION"
+
+PROVENANCE_CLASSES = (OBSERVED_ACTUAL_POSITION, COUNTERFACTUAL_MAKER_FILL,
+                      COUNTERFACTUAL_TAKER_ENTRY, SYNTHETIC_RESEARCH_POSITION)
+
+# What each class is ALLOWED to be used for. The second column is the one that
+# matters: a synthetic position exercises the machinery and proves nothing
+# about whether the strategy makes money.
+PROVENANCE_ADMISSIBLE_AS_STRATEGY_EVIDENCE = {
+    OBSERVED_ACTUAL_POSITION: True,
+    COUNTERFACTUAL_MAKER_FILL: True,      # only under the fill model
+    COUNTERFACTUAL_TAKER_ENTRY: True,     # a cross is observable, not assumed
+    SYNTHETIC_RESEARCH_POSITION: False,   # machinery only, never evidence
+}
+
+# In this phase there is no real money anywhere in the system.
+ACTUAL_POSITIONS_POSSIBLE_THIS_PHASE = False
+
+
+class ProvenanceViolation(RuntimeError):
+    """Raised when a position is created without the evidence its class needs."""
+
+
+def open_position(position_id, provenance, entry, fill_evidence=None,
+                  fill_model="F1"):
+    """Create one shadow position, or refuse.
+
+    THE RULE THAT DOES THE WORK: a COUNTERFACTUAL_MAKER_FILL is only a
+    position if the counterfactual fill model SUPPORTS a fill. Touching our
+    hypothetical quote is not a fill -- a price can trade at our level while
+    the queue ahead of us absorbs every contract, and a book of positions
+    built from touches would show a fill rate nobody earned.
+    """
+    if provenance not in PROVENANCE_CLASSES:
+        raise ProvenanceViolation("unknown provenance: %r" % (provenance,))
+    if provenance == OBSERVED_ACTUAL_POSITION:
+        raise ProvenanceViolation(
+            "no ACTUAL position is possible in this phase: no order path "
+            "exists, no credential exists, mirror_live is false")
+    if provenance == COUNTERFACTUAL_MAKER_FILL:
+        supported = ghost_fill_permitted(fill_evidence, fill_model)
+        if supported != "YES":
+            raise ProvenanceViolation(
+                "COUNTERFACTUAL_MAKER_FILL requires the fill model to support "
+                "a fill; got %r under %s. TOUCH != FILL."
+                % (supported, fill_model))
+    return {
+        "POSITION_ID": position_id,
+        "ENTRY_PROVENANCE": provenance,
+        "ADMISSIBLE_AS_STRATEGY_EVIDENCE":
+            PROVENANCE_ADMISSIBLE_AS_STRATEGY_EVIDENCE[provenance],
+        "FILL_MODEL": fill_model if provenance == COUNTERFACTUAL_MAKER_FILL
+                      else NOT_IDENTIFIED,
+        "ENTRY": entry,
+        "LABEL": COUNTERFACTUAL,
+        "SUNK_PNL": NOT_IDENTIFIED,
+    }
+
+
+# ---------------------------------------------------------------------------
+# FAIR VALUE -- a dependency, never quietly populated
+# ---------------------------------------------------------------------------
+
+FV_VALIDATED = "VALIDATED"
+FV_VENUE_IMPLIED = "VENUE_IMPLIED_NOT_INDEPENDENT"
+
+
+def fair_value_status(obs):
+    """What we actually know about fair value on this row.
+
+    `VENUE_IMPLIED` is the market's own opinion restated and is NOT an
+    independent fair value: using it would make every EV a tautology in which
+    the market is always correctly priced and no edge can ever exist. It is
+    recorded, and it does not count.
+    """
+    fv = obs.get("FAIR_VALUE", NOT_IDENTIFIED)
+    basis = obs.get("FV_BASIS", NOT_IDENTIFIED)
+    if fv == NOT_IDENTIFIED or fv is None:
+        return NOT_IDENTIFIED
+    if basis in (NOT_IDENTIFIED, None, "VENUE_IMPLIED", FV_VENUE_IMPLIED):
+        return FV_VENUE_IMPLIED
+    return FV_VALIDATED
+
+
+def fair_value_dependent_ev(status, *terms):
+    """Any EV that needs fair value is NOT_IDENTIFIED unless FV is VALIDATED.
+
+    The allocator is NOT weakened to force a decision. An unpriced action stays
+    unpriced, the comparison stays incomplete, and the engine declines. That is
+    the expected Phase-2A output, not a fault to be engineered around.
+    """
+    if status != FV_VALIDATED:
+        return NOT_IDENTIFIED, ("FAIR_VALUE",)
+    return ev_sum(tuple(terms))
+
+
+# ---------------------------------------------------------------------------
+# THE TWO PRIORS, RUN IN PARALLEL
+# ---------------------------------------------------------------------------
+#
+# PRIOR_3 is the frozen preregistered primary. PRIOR_4 is a GHOST run beside
+# it because the swisstony sensitivity is MATERIAL and the exclusion reason is
+# NOT_IDENTIFIED_IN_THIS_WORKSPACE -- so the 3-account prior is preregistered,
+# which is a claim about PROCEDURE, not about being economically more correct.
+# Recording both prospectively is the only way to find out which describes
+# BETTOR, and it costs nothing but a column.
+PRIOR_3 = "POLICY_PRIOR_3"
+PRIOR_4 = "POLICY_PRIOR_4"
+PRIMARY_PRIOR = PRIOR_3
+PRIOR_3_IS_PREREGISTERED_NOT_PROVEN_BETTER = True
+
+
+def lambda_prior(priors, bucket, which=PRIOR_3):
+    """The consensus lambda under either membership. Same pooled method."""
+    if bucket == NOT_IDENTIFIED:
+        return NOT_IDENTIFIED
+    if which == PRIOR_3:
+        return lambda_for(priors, bucket, account=CONSENSUS)
+    if which == PRIOR_4:
+        sens = priors.get("SWISSTONY_SENSITIVITY") or {}
+        for r in sens.get("BY_INTERVAL", []):
+            if r.get("INTERVAL") == bucket:
+                v = r.get("LAMBDA_4", NOT_IDENTIFIED)
+                return NOT_IDENTIFIED if isinstance(v, str) else v
+        return NOT_IDENTIFIED
+    raise ValueError("unknown prior: %r" % (which,))
+
+
+def dual_prior_block(priors, bucket, horizon_minutes, evs3=None, evs4=None,
+                     feas=None, in_play=(), risk_kill=None):
+    """Both priors evaluated on the SAME state, with disagreement recorded.
+
+    Neither is allowed to overwrite the other. The frozen prior decides; the
+    ghost is measured beside it, and `ACTION_DISAGREEMENT` is the column that
+    eventually answers whether slower swisstony-like pairing describes BETTOR
+    better than the preregistered three.
+    """
+    l3 = lambda_prior(priors, bucket, PRIOR_3)
+    l4 = lambda_prior(priors, bucket, PRIOR_4)
+    p3 = p_complete_next_interval(l3, horizon_minutes)
+    p4 = p_complete_next_interval(l4, horizon_minutes)
+
+    w3 = ev_wait(p3, **(evs3 or {}))
+    w4 = ev_wait(p4, **(evs4 or {}))
+
+    a3, r3, _ = allocate(dict(evs3 or {}).get("_actions", {}) or {},
+                         in_play, risk_kill=risk_kill, feas=feas)
+    a4, r4, _ = allocate(dict(evs4 or {}).get("_actions", {}) or {},
+                         in_play, risk_kill=risk_kill, feas=feas)
+
+    delta = (w4[0] - w3[0]
+             if w3[0] != NOT_IDENTIFIED and w4[0] != NOT_IDENTIFIED
+             else NOT_IDENTIFIED)
+    return {
+        "PRIMARY_PRIOR": PRIMARY_PRIOR,
+        "COMPLETION_HAZARD_PRIOR3": l3,
+        "COMPLETION_HAZARD_PRIOR4": l4,
+        "P_COMPLETE_PRIOR3": p3,
+        "P_COMPLETE_PRIOR4": p4,
+        "EV_WAIT_PRIOR3": w3[0],
+        "EV_WAIT_PRIOR4": w4[0],
+        "EV_WAIT_PRIOR3_MISSING": list(w3[1]),
+        "EV_WAIT_PRIOR4_MISSING": list(w4[1]),
+        "DELTA_EV_WAIT": delta,
+        "ACTION_PRIOR3": a3,
+        "ACTION_PRIOR4": a4,
+        "ACTION_PRIOR3_REASON": r3,
+        "ACTION_PRIOR4_REASON": r4,
+        "ACTION_DISAGREEMENT": "YES" if a3 != a4 else "NO",
+        "PRIOR_4_IS_A_GHOST_NOT_THE_PROTOCOL": True,
+    }
+
+
+# ---------------------------------------------------------------------------
+# INCENTIVES ARE NEVER MIXED INTO TRADING ECONOMICS
+# ---------------------------------------------------------------------------
+
+INCENTIVE_TERMS = ("MAKER_REBATE", "LIQUIDITY_INCENTIVE", "OTHER_INCENTIVE")
+
+
+def incentive_split(trading_terms, incentive_terms):
+    """TRADING_NET_EX_INCENTIVES first, TOTAL_NET last, never one number.
+
+    NEVER HOLD A MATERIALLY NEGATIVE-EV POSITION TO COLLECT A REBATE. The rule
+    is enforced by reporting: a run whose trading economics are negative is
+    labelled INCENTIVE_DEPENDENT in every output regardless of TOTAL_NET, so
+    the rebate cannot be used to make the trade look good.
+    """
+    tnet, tmiss = ev_sum(tuple(trading_terms.items()))
+    inet, imiss = ev_sum(tuple(incentive_terms.items()))
+    total = (tnet + inet if tnet != NOT_IDENTIFIED and inet != NOT_IDENTIFIED
+             else NOT_IDENTIFIED)
+    dependent = (tnet != NOT_IDENTIFIED and tnet <= 0
+                 and inet != NOT_IDENTIFIED and inet > 0)
+    return {
+        "TRADING_NET_EX_INCENTIVES": tnet,
+        "TRADING_MISSING_TERMS": list(tmiss),
+        "MAKER_REBATE": incentive_terms.get("MAKER_REBATE", NOT_IDENTIFIED),
+        "LIQUIDITY_INCENTIVE": incentive_terms.get("LIQUIDITY_INCENTIVE",
+                                                   NOT_IDENTIFIED),
+        "OTHER_INCENTIVE": incentive_terms.get("OTHER_INCENTIVE",
+                                               NOT_IDENTIFIED),
+        "INCENTIVE_CONTRIBUTION": inet,
+        "INCENTIVE_MISSING_TERMS": list(imiss),
+        "TOTAL_NET": total,
+        "INCENTIVE_DEPENDENT": "YES" if dependent else "NO",
+        "REPORTED_TRADING_FIRST": True,
+    }
+
+
+# ---------------------------------------------------------------------------
+# CAPACITY -- 788 HIGH_ACTIVITY MARKETS ARE NOT 788 OPPORTUNITIES
+# ---------------------------------------------------------------------------
+
+HIGH_ACTIVITY_CANDIDATE_MARKETS = 788
+HIGH_ACTIVITY_MEANS = "OBSERVED_HIGH_ACTIVITY_CANDIDATE_MARKETS"
+HIGH_ACTIVITY_DOES_NOT_MEAN = (
+    "INDEPENDENT_OPPORTUNITIES", "ELIGIBLE_POSITIONS", "POSITIVE_EV_ENTRIES")
+
+
+def candidate_universe(markets, event_key_of=None):
+    """Count candidates and capacity SEPARATELY, and never conflate them.
+
+    Market count is not capacity. Where a validated event identity exists the
+    universe is stratified by event; where it does not, the uncertainty is
+    RETAINED rather than resolved by pretending markets are independent.
+    """
+    n = len(markets)
+    out = {
+        "CANDIDATE_MARKETS": n,
+        "MEANING": HIGH_ACTIVITY_MEANS,
+        "IS_NOT": list(HIGH_ACTIVITY_DOES_NOT_MEAN),
+        "MARKET_COUNT_USED_AS_CAPACITY": False,
+    }
+    if event_key_of is None:
+        out["EVENT_STRATIFIED"] = False
+        out["VALIDATED_EVENTS"] = NOT_IDENTIFIED
+        out["INDEPENDENT_CAPACITY"] = NOT_IDENTIFIED
+        out["CORRELATION_TREATMENT"] = (
+            "ALL_MARKETS_TREATED_AS_FULLY_CORRELATED -- conservative, and "
+            "deliberate, because EVENT_KEY_VALIDATED = NO")
+        return out
+    keys, unresolved = {}, 0
+    for m in markets:
+        k = event_key_of(m)
+        if k in (None, NOT_IDENTIFIED):
+            unresolved += 1
+            continue
+        keys.setdefault(k, []).append(m)
+    out["EVENT_STRATIFIED"] = True
+    out["VALIDATED_EVENTS"] = len(keys)
+    out["MARKETS_WITH_UNRESOLVED_EVENT_IDENTITY"] = unresolved
+    # A lower bound: the resolved events plus, at most, one event per market
+    # whose identity we could not establish. The upper end is not claimed.
+    out["INDEPENDENT_CAPACITY_LOWER_BOUND"] = len(keys)
+    out["INDEPENDENT_CAPACITY"] = (
+        len(keys) if unresolved == 0 else NOT_IDENTIFIED)
+    out["CORRELATION_TREATMENT"] = (
+        "STRATIFIED_BY_VALIDATED_EVENT; unresolved markets retain their "
+        "uncertainty and are never assumed independent")
+    return out

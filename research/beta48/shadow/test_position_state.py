@@ -305,51 +305,51 @@ class TheAllocator(unittest.TestCase):
         """The engine does NOT fall back to the best identified EV. The
         unpriced action could have dominated it, and choosing among the priced
         subset would quietly assume it did not."""
-        evs = {P.A_PAIR_NOW: (D("0.05"), ()),
+        evs = {P.A_AGGRESSIVE_COMPLEMENT_PAIR: (D("0.05"), ()),
                P.A_WAIT: (P.NOT_IDENTIFIED, ("EXPECTED_CONTINUATION_VALUE",))}
         chosen, reason, ranked = P.allocate(
-            evs, (P.A_PAIR_NOW, P.A_WAIT))
+            evs, (P.A_AGGRESSIVE_COMPLEMENT_PAIR, P.A_WAIT))
         self.assertEqual(chosen, P.A_NO_ACTION_RECORDED)
         self.assertEqual(reason, P.COMPARISON_NOT_IDENTIFIED)
         self.assertEqual(len(ranked), 2)
 
     def test_a_feasible_action_nobody_priced_is_not_silently_ignored(self):
-        evs = {P.A_PAIR_NOW: (D("0.05"), ())}
-        chosen, reason, _ = P.allocate(evs, (P.A_PAIR_NOW, P.A_SETTLEMENT_HOLD))
+        evs = {P.A_AGGRESSIVE_COMPLEMENT_PAIR: (D("0.05"), ())}
+        chosen, reason, _ = P.allocate(evs, (P.A_AGGRESSIVE_COMPLEMENT_PAIR, P.A_SETTLEMENT_HOLD))
         self.assertEqual(chosen, P.A_NO_ACTION_RECORDED)
         self.assertEqual(reason, P.COMPARISON_NOT_IDENTIFIED)
 
     def test_it_chooses_when_everything_feasible_is_priced(self):
-        evs = {P.A_PAIR_NOW: (D("0.05"), ()),
+        evs = {P.A_AGGRESSIVE_COMPLEMENT_PAIR: (D("0.05"), ()),
                P.A_SETTLEMENT_HOLD: (D("0.01"), ())}
         chosen, reason, ranked = P.allocate(
-            evs, (P.A_PAIR_NOW, P.A_SETTLEMENT_HOLD))
-        self.assertEqual(chosen, P.A_PAIR_NOW)
+            evs, (P.A_AGGRESSIVE_COMPLEMENT_PAIR, P.A_SETTLEMENT_HOLD))
+        self.assertEqual(chosen, P.A_AGGRESSIVE_COMPLEMENT_PAIR)
         self.assertEqual(reason, P.DOMINATES)
         self.assertEqual([a for a, _ in ranked],
-                         [P.A_PAIR_NOW, P.A_SETTLEMENT_HOLD])
+                         [P.A_AGGRESSIVE_COMPLEMENT_PAIR, P.A_SETTLEMENT_HOLD])
 
     def test_a_tie_is_not_a_decision(self):
-        evs = {P.A_PAIR_NOW: (D("0.01"), ()),
+        evs = {P.A_AGGRESSIVE_COMPLEMENT_PAIR: (D("0.01"), ()),
                P.A_SETTLEMENT_HOLD: (D("0.01"), ())}
-        chosen, _, _ = P.allocate(evs, (P.A_PAIR_NOW, P.A_SETTLEMENT_HOLD))
+        chosen, _, _ = P.allocate(evs, (P.A_AGGRESSIVE_COMPLEMENT_PAIR, P.A_SETTLEMENT_HOLD))
         self.assertEqual(chosen, P.A_NO_ACTION_RECORDED)
 
     def test_never_pair_merely_because_a_pair_exists(self):
         """PAIR_AVAILABLE with a NEGATIVE pair EV and a better alternative must
         not pair. Cosmetic pair completion is the failure mode this forbids."""
-        evs = {P.A_PAIR_NOW: (D("-0.03"), ()),
+        evs = {P.A_AGGRESSIVE_COMPLEMENT_PAIR: (D("-0.03"), ()),
                P.A_SETTLEMENT_HOLD: (D("0.00"), ())}
-        chosen, _, _ = P.allocate(evs, (P.A_PAIR_NOW, P.A_SETTLEMENT_HOLD))
+        chosen, _, _ = P.allocate(evs, (P.A_AGGRESSIVE_COMPLEMENT_PAIR, P.A_SETTLEMENT_HOLD))
         self.assertEqual(chosen, P.A_SETTLEMENT_HOLD)
 
     def test_only_a_risk_kill_acts_without_a_complete_comparison(self):
-        evs = {P.A_AGGRESSIVE_EXIT: (P.NOT_IDENTIFIED, ("FAIR_VALUE",))}
+        evs = {P.A_AGGRESSIVE_SELL_EXIT: (P.NOT_IDENTIFIED, ("FAIR_VALUE",))}
         chosen, reason, _ = P.allocate(
-            evs, (P.A_AGGRESSIVE_EXIT,),
-            risk_kill={"ACTION": P.A_AGGRESSIVE_EXIT,
+            evs, (P.A_AGGRESSIVE_SELL_EXIT,),
+            risk_kill={"ACTION": P.A_AGGRESSIVE_SELL_EXIT,
                        "SWITCH": "EVENT_EXPOSURE_KILL"})
-        self.assertEqual(chosen, P.A_AGGRESSIVE_EXIT)
+        self.assertEqual(chosen, P.A_AGGRESSIVE_SELL_EXIT)
         self.assertEqual(reason, P.RISK_KILL)
 
     def test_no_feasible_action_is_its_own_reason(self):
@@ -372,6 +372,7 @@ class TheDecisionRow(unittest.TestCase):
             "TIMESTAMP": "2026-09-16T14:30:00Z",
             "TIME_UNPAIRED_S": 45,
             "COMPLEMENT_EXECUTABLE_NOW": True,
+            "COMPLEMENT_PASSIVE_PLACEABLE": True,
             "PASSIVE_EXIT_PLACEABLE": True,
             "AGGRESSIVE_EXIT_DEPTH_EXISTS": True,
             "HEDGE_INSTRUMENT_EXECUTABLE": False,
@@ -400,32 +401,33 @@ class TheDecisionRow(unittest.TestCase):
         self.assertEqual(row["ACTION_REASON"], P.COMPARISON_NOT_IDENTIFIED)
 
     def test_actions_not_chosen_carries_the_rejected_evs(self):
-        evs = {P.A_PAIR_NOW: (D("0.05"), ()),
+        evs = {P.A_AGGRESSIVE_COMPLEMENT_PAIR: (D("0.05"), ()),
                P.A_SETTLEMENT_HOLD: (D("0.01"), ()),
                P.A_WAIT: (D("0.02"), ()),
-               P.A_PASSIVE_EXIT: (D("0.00"), ()),
-               P.A_AGGRESSIVE_EXIT: (D("-0.01"), ()),
+               P.A_PASSIVE_SELL_EXIT: (D("0.00"), ()),
+               P.A_AGGRESSIVE_SELL_EXIT: (D("-0.01"), ()),
+               P.A_PASSIVE_COMPLEMENT_PAIR: (D("0.03"), ()),
                P.A_DIRECTIONAL_HOLD: (D("0.00"), ())}
         row = P.decision_row(self.obs, self.pri, horizon_minutes=1.0, evs=evs)
-        self.assertEqual(row["ACTION_CHOSEN"], P.A_PAIR_NOW)
+        self.assertEqual(row["ACTION_CHOSEN"], P.A_AGGRESSIVE_COMPLEMENT_PAIR)
         rejected = {d["ACTION"]: d["EV"] for d in row["ACTIONS_NOT_CHOSEN"]}
         self.assertEqual(rejected[P.A_SETTLEMENT_HOLD], D("0.01"))
         self.assertEqual(rejected[P.A_WAIT], D("0.02"))
-        self.assertNotIn(P.A_PAIR_NOW, rejected)
+        self.assertNotIn(P.A_AGGRESSIVE_COMPLEMENT_PAIR, rejected)
 
     def test_the_rejected_evs_are_recorded_even_when_nothing_is_done(self):
         """This is the field that makes the dataset worth having: the price of
         the road not taken, recorded at the moment of rejection."""
-        evs = {P.A_PAIR_NOW: (D("0.05"), ())}
+        evs = {P.A_AGGRESSIVE_COMPLEMENT_PAIR: (D("0.05"), ())}
         row = P.decision_row(self.obs, self.pri, horizon_minutes=1.0, evs=evs)
         self.assertEqual(row["ACTION_CHOSEN"], P.A_NO_ACTION_RECORDED)
         rejected = {d["ACTION"]: d["EV"] for d in row["ACTIONS_NOT_CHOSEN"]}
-        self.assertEqual(rejected[P.A_PAIR_NOW], D("0.05"))
+        self.assertEqual(rejected[P.A_AGGRESSIVE_COMPLEMENT_PAIR], D("0.05"))
         self.assertEqual(rejected[P.A_SETTLEMENT_HOLD], P.NOT_IDENTIFIED)
 
     def test_an_unevaluated_action_is_not_identified_not_zero(self):
         row = P.decision_row(self.obs, self.pri, horizon_minutes=1.0)
-        cell = row["ALL_ACTION_EVS"][P.A_PAIR_NOW]
+        cell = row["ALL_ACTION_EVS"][P.A_AGGRESSIVE_COMPLEMENT_PAIR]
         self.assertEqual(cell["EV"], P.NOT_IDENTIFIED)
         self.assertEqual(cell["MISSING_TERMS"], ["NOT_EVALUATED"])
 
@@ -449,7 +451,7 @@ class TheDecisionRow(unittest.TestCase):
                          P.NOT_IDENTIFIED)
 
     def test_decimal_money_round_trips_as_an_exact_string(self):
-        evs = {P.A_PAIR_NOW: (D("0.1"), ()),
+        evs = {P.A_AGGRESSIVE_COMPLEMENT_PAIR: (D("0.1"), ()),
                P.A_SETTLEMENT_HOLD: (D("0.2"), ()),
                P.A_WAIT: (D("0.05"), ())}
         row = P.decision_row(self.obs, self.pri, horizon_minutes=1.0, evs=evs)
@@ -583,26 +585,28 @@ class InfeasibleIsNotUnknown(unittest.TestCase):
         f = P.feasibility({"TIME_UNPAIRED_S": 30,
                            "HEDGE_INSTRUMENT_EXECUTABLE": False,
                            "COMPLEMENT_EXECUTABLE_NOW": True,
+                           "COMPLEMENT_PASSIVE_PLACEABLE": False,
                            "PASSIVE_EXIT_PLACEABLE": False,
                            "AGGRESSIVE_EXIT_DEPTH_EXISTS": False})
         self.assertEqual(f[P.A_HEDGE], P.INFEASIBLE)
-        self.assertEqual(f[P.A_PAIR_NOW], P.FEASIBLE)
+        self.assertEqual(f[P.A_AGGRESSIVE_COMPLEMENT_PAIR], P.FEASIBLE)
         self.assertNotIn(P.A_HEDGE, P.actions_in_play(f))
-        self.assertIn(P.A_PAIR_NOW, P.actions_in_play(f))
+        self.assertIn(P.A_AGGRESSIVE_COMPLEMENT_PAIR, P.actions_in_play(f))
 
     def test_no_hedge_venue_does_not_freeze_the_engine(self):
         """The user's own example: a missing hedge instrument is not a missing
         number, and the comparison completes without it."""
         obs = {"TIME_UNPAIRED_S": 30, "COMPLEMENT_EXECUTABLE_NOW": True,
+               "COMPLEMENT_PASSIVE_PLACEABLE": False,
                "PASSIVE_EXIT_PLACEABLE": False,
                "AGGRESSIVE_EXIT_DEPTH_EXISTS": False,
                "HEDGE_INSTRUMENT_EXECUTABLE": False}
         f = P.feasibility(obs)
         play = P.actions_in_play(f)
-        evs = {a: (D("0.01") if a == P.A_PAIR_NOW else D("0.00"), ())
+        evs = {a: (D("0.01") if a == P.A_AGGRESSIVE_COMPLEMENT_PAIR else D("0.00"), ())
                for a in play}
         chosen, reason, _ = P.allocate(evs, play, feas=f)
-        self.assertEqual(chosen, P.A_PAIR_NOW)
+        self.assertEqual(chosen, P.A_AGGRESSIVE_COMPLEMENT_PAIR)
         self.assertEqual(reason, P.DOMINATES)
 
     def test_a_settled_market_makes_everything_infeasible_and_blocks_nothing(self):
@@ -617,6 +621,7 @@ class InfeasibleIsNotUnknown(unittest.TestCase):
         against pairing. It can now."""
         f = P.feasibility({"TIME_UNPAIRED_S": 30,
                            "COMPLEMENT_EXECUTABLE_NOW": True,
+                           "COMPLEMENT_PASSIVE_PLACEABLE": True,
                            "PASSIVE_EXIT_PLACEABLE": True,
                            "AGGRESSIVE_EXIT_DEPTH_EXISTS": True,
                            "HEDGE_INSTRUMENT_EXECUTABLE": True})
@@ -630,6 +635,7 @@ class InfeasibleIsNotUnknown(unittest.TestCase):
 
     def test_the_two_blocking_causes_are_reported_separately(self):
         obs = {"TIME_UNPAIRED_S": 30, "COMPLEMENT_EXECUTABLE_NOW": True,
+               "COMPLEMENT_PASSIVE_PLACEABLE": False,
                "PASSIVE_EXIT_PLACEABLE": False,
                "AGGRESSIVE_EXIT_DEPTH_EXISTS": False}
         # HEDGE unobserved -> feasibility blocks, even with every EV supplied
@@ -654,9 +660,9 @@ class InfeasibleIsNotUnknown(unittest.TestCase):
                "HEDGE_INSTRUMENT_EXECUTABLE": False}
         row = P.decision_row(obs, pri, horizon_minutes=1.0)
         f = row["ACTION_FEASIBILITY"]
-        self.assertEqual(f[P.A_PAIR_NOW], P.FEASIBLE)
+        self.assertEqual(f[P.A_AGGRESSIVE_COMPLEMENT_PAIR], P.FEASIBLE)
         self.assertEqual(f[P.A_HEDGE], P.INFEASIBLE)
-        self.assertEqual(f[P.A_PASSIVE_EXIT], P.NOT_IDENTIFIED)
+        self.assertEqual(f[P.A_PASSIVE_SELL_EXIT], P.NOT_IDENTIFIED)
 
 
 class EvBoundsAreDesignedAndInert(unittest.TestCase):
@@ -669,13 +675,13 @@ class EvBoundsAreDesignedAndInert(unittest.TestCase):
         """Forcing it on does NOT make it rule: the bound methodology gate is
         separate, so a config flag alone cannot license a trade on unchecked
         intervals."""
-        cells = {P.A_PAIR_NOW: P.ev_cell(lower="0.05", upper="0.06"),
+        cells = {P.A_AGGRESSIVE_COMPLEMENT_PAIR: P.ev_cell(lower="0.05", upper="0.06"),
                  P.A_WAIT: P.ev_cell(lower="0.01", upper="0.02")}
-        got, reason = P.robust_dominance(cells, (P.A_PAIR_NOW, P.A_WAIT))
+        got, reason = P.robust_dominance(cells, (P.A_AGGRESSIVE_COMPLEMENT_PAIR, P.A_WAIT))
         self.assertIsNone(got)
         self.assertIn("UNVALIDATED", reason)
         forced, reason2 = P.robust_dominance(
-            cells, (P.A_PAIR_NOW, P.A_WAIT), active=True)
+            cells, (P.A_AGGRESSIVE_COMPLEMENT_PAIR, P.A_WAIT), active=True)
         self.assertIsNone(forced)
         self.assertIn("UNVALIDATED", reason2)
 
@@ -866,10 +872,11 @@ class TheEventHistory(unittest.TestCase):
         """Recording only the chosen action would reproduce the whale
         archive's central defect at higher resolution."""
         obs = {"TIME_UNPAIRED_S": 45, "COMPLEMENT_EXECUTABLE_NOW": True,
+               "COMPLEMENT_PASSIVE_PLACEABLE": True,
                "PASSIVE_EXIT_PLACEABLE": True,
                "AGGRESSIVE_EXIT_DEPTH_EXISTS": False,
                "HEDGE_INSTRUMENT_EXECUTABLE": False}
-        evs = {a: (D("0.01") if a == P.A_PAIR_NOW else D("0.00"), ())
+        evs = {a: (D("0.01") if a == P.A_AGGRESSIVE_COMPLEMENT_PAIR else D("0.00"), ())
                for a in P.actions_in_play(P.feasibility(obs))}
         row = P.decision_row(obs, self.pri, horizon_minutes=1.0, evs=evs)
         h = P.record_tick(P.new_history("pos-1", 1000.0), row, 1045.0)
