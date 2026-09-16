@@ -315,7 +315,16 @@ class TheCooldownNeverClaimsACleanStart(unittest.TestCase):
         self.assertTrue(RP.DO_NOT_REVERSE_ENGINEER_HEADERS_TO_CLAIM_A_CLEAN_START)
 
 
-class SustainedIsNotTheSameClaimAsUnrefused(unittest.TestCase):
+class TheLadderScreensAndNominatesAndNothingElse(unittest.TestCase):
+    """The ladder's own limits, stated by the ladder.
+
+    The version this replaces required SUSTAINED *and* rung independence before
+    a capture could proceed, while stating that rung independence can never be
+    established. Those two rules together are a lock with no key. The tests
+    below pin the fix: the ladder screens and nominates, its confirmation field
+    is a refusal rather than a NOT_IDENTIFIED that reads like a pending value,
+    and the reason it gives names a route that can actually return YES.
+    """
 
     def setUp(self):
         self._saved = []
@@ -324,39 +333,73 @@ class SustainedIsNotTheSameClaimAsUnrefused(unittest.TestCase):
     def tearDown(self):
         RP.time.sleep = self._saved[0]
 
-    def test_a_short_clean_rung_passes_but_is_not_sustained(self):
+    def test_a_rung_is_not_refused_or_refused_and_never_confirmed(self):
         r = RP.run_rate(FakeHttp([200] * 40), ["a"], "1.0", requests=40)
         self.assertTrue(r["PASSES"])
-        self.assertFalse(r["SUSTAINED"])
-        self.assertEqual(r["RATE_CONFIDENCE"], "LIMITED")
-        self.assertIn("needs >=", r["WHY_LIMITED"])
+        self.assertEqual(r["RUNG_VERDICT"], "NOT_REFUSED")
+        self.assertFalse(r["RUNG_MAY_CONFIRM"])
+        self.assertNotIn("SUSTAINED", r)
 
-    def test_the_candidate_and_the_confirmation_are_separate_fields(self):
-        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
-                             "SUSTAINED": False}], "NOT_ESTABLISHED")
-        self.assertEqual(s["SUSTAINABLE_RATE_CANDIDATE"], "0.5")
-        self.assertEqual(s["SUSTAINABLE_RATE_CONFIRMED"], NI)
-        self.assertEqual(s["RATE_CONFIDENCE"], "LIMITED")
+    def test_a_refused_rung_says_refused(self):
+        r = RP.run_rate(FakeHttp([200] * 9 + [429]), ["a"], "1.0", requests=10)
+        self.assertEqual(r["RUNG_VERDICT"], "REFUSED")
 
-    def test_an_unconfirmed_candidate_does_not_authorise_a_capture(self):
-        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
-                             "SUSTAINED": False}], "NOT_ESTABLISHED")
+    def test_the_ladder_may_screen_and_nominate(self):
+        self.assertEqual(set(RP.LADDER_MAY),
+                         {"REJECT_OBVIOUSLY_UNSAFE_RATES",
+                          "NOMINATE_A_CONSERVATIVE_RATE_CANDIDATE"})
+
+    def test_the_ladder_may_not_confirm_a_sustainable_rate(self):
+        self.assertIn("CONFIRM_A_SUSTAINABLE_RATE", RP.LADDER_MAY_NOT)
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True}])
+        self.assertEqual(s["SUSTAINABLE_RATE_CONFIRMED"],
+                         "REFUSED_THE_LADDER_MAY_NOT_CONFIRM")
+
+    def test_the_three_reportable_outputs_are_present(self):
+        s = RP.select_rate([{"RATE_RPS": "0.25", "PASSES": True},
+                            {"RATE_RPS": "0.5", "PASSES": False}])
+        self.assertEqual(s["UNSAFE_RATES"], ["0.5"])
+        self.assertEqual(s["CANDIDATE_RATE"], "0.25")
+        self.assertIn("RECOMMENDED_HEADROOM_RATE", s)
+
+    def test_every_refused_rung_lands_in_unsafe_rates(self):
+        s = RP.select_rate([{"RATE_RPS": "0.25", "PASSES": True},
+                            {"RATE_RPS": "0.5", "PASSES": False},
+                            {"RATE_RPS": "1.0", "PASSES": False},
+                            {"RATE_RPS": "2.0", "PASSES": False}])
+        self.assertEqual(s["UNSAFE_RATES"], ["0.5", "1.0", "2.0"])
+
+    # ---- the deadlock itself, pinned so it cannot come back ----------------
+
+    def test_the_two_questions_are_separate_fields(self):
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True}])
+        self.assertEqual(s["VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED"], NI)
+        self.assertEqual(s["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
+
+    def test_mechanism_identification_is_not_a_precondition(self):
+        self.assertTrue(
+            RP.OPERATIONAL_VALIDATION_DOES_NOT_REQUIRE_MECHANISM_IDENTIFICATION)
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True}])
+        self.assertTrue(s["INDEPENDENCE_IS_NOT_A_PRECONDITION_OF_VALIDATION"])
+
+    def test_the_refusal_names_a_route_that_can_return_yes(self):
+        """A gate that cannot open is a defect. This one says what opens it."""
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True}])
         self.assertFalse(s["CAPTURE_MAY_PROCEED"])
-        self.assertIn("CANDIDATE is not a CONFIRMATION",
-                      s["WHY_CAPTURE_MAY_NOT_PROCEED"])
+        self.assertEqual(s["CONFIRMATION_ROUTE"],
+                         "SINGLE_RATE_OPERATIONAL_CONFIRMATION")
+        self.assertIn("rate_confirm", s["WHY_CAPTURE_MAY_NOT_PROCEED"])
 
-    def test_sustained_alone_is_not_enough_while_rungs_are_dependent(self):
-        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
-                             "SUSTAINED": True}], "NOT_ESTABLISHED")
-        self.assertEqual(s["SUSTAINABLE_RATE_CONFIRMED"], NI)
-        self.assertFalse(s["CAPTURE_MAY_PROCEED"])
-
-    def test_both_together_confirm(self):
-        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
-                             "SUSTAINED": True}], "ESTABLISHED")
-        self.assertEqual(s["SUSTAINABLE_RATE_CONFIRMED"], "0.5")
-        self.assertEqual(s["RATE_CONFIDENCE"], "SUSTAINED")
-        self.assertTrue(s["CAPTURE_MAY_PROCEED"])
+    def test_rung_independence_no_longer_changes_any_verdict(self):
+        """The old code turned ESTABLISHED into an authorisation. Nothing may
+        hinge on a value that is never produced."""
+        a = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True}],
+                           "NOT_ESTABLISHED")
+        b = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True}], "ESTABLISHED")
+        for k in ("CANDIDATE_RATE", "SUSTAINABLE_RATE_CONFIRMED",
+                  "CAPTURE_MAY_PROCEED", "RECOMMENDED_HEADROOM_RATE",
+                  "COLLECTOR_RATE_OPERATIONALLY_VALIDATED"):
+            self.assertEqual(a[k], b[k], k)
 
     def test_the_per_rung_metrics_are_all_reported(self):
         r = RP.run_rate(FakeHttp([200] * 4), ["a"], "1.0", requests=4)
@@ -385,28 +428,28 @@ class SustainedIsNotTheSameClaimAsUnrefused(unittest.TestCase):
 class TheCaptureRateHasHeadroom(unittest.TestCase):
 
     def test_the_recommendation_is_one_rung_below_the_candidate(self):
-        s = RP.select_rate([{"RATE_RPS": "0.25", "PASSES": True,
-                             "SUSTAINED": False},
-                            {"RATE_RPS": "0.5", "PASSES": True,
-                             "SUSTAINED": False},
-                            {"RATE_RPS": "1.0", "PASSES": False,
-                             "SUSTAINED": False}], "NOT_ESTABLISHED")
-        self.assertEqual(s["SUSTAINABLE_RATE_CANDIDATE"], "0.5")
-        self.assertEqual(s["RECOMMENDED_CAPTURE_RATE"], "0.25")
+        s = RP.select_rate([{"RATE_RPS": "0.25", "PASSES": True},
+                            {"RATE_RPS": "0.5", "PASSES": True},
+                            {"RATE_RPS": "1.0", "PASSES": False}])
+        self.assertEqual(s["CANDIDATE_RATE"], "0.5")
+        self.assertEqual(s["RECOMMENDED_HEADROOM_RATE"], "0.25")
         self.assertTrue(s["RECOMMENDED_RATE_HAS_HEADROOM"])
 
-    def test_a_candidate_on_the_slowest_rung_has_no_headroom_and_says_so(self):
-        s = RP.select_rate([{"RATE_RPS": "0.25", "PASSES": True,
-                             "SUSTAINED": False},
-                            {"RATE_RPS": "0.5", "PASSES": False,
-                             "SUSTAINED": False}], "NOT_ESTABLISHED")
-        self.assertEqual(s["RECOMMENDED_CAPTURE_RATE"], "0.25")
+    def test_a_candidate_on_the_slowest_rung_has_no_headroom_rate_at_all(self):
+        """This is the pilot's actual shape, and it must NOT quietly resolve to
+        the candidate: 0.25 is the slowest rung tested, so no rate below it has
+        been measured, and inventing one from the ladder's spacing would be a
+        number chosen after seeing the result."""
+        s = RP.select_rate([{"RATE_RPS": "0.25", "PASSES": True},
+                            {"RATE_RPS": "0.5", "PASSES": False}])
+        self.assertEqual(s["CANDIDATE_RATE"], "0.25")
+        self.assertEqual(s["RECOMMENDED_HEADROOM_RATE"], NI)
+        self.assertEqual(s["RECOMMENDED_CAPTURE_RATE"], NI)
         self.assertFalse(s["RECOMMENDED_RATE_HAS_HEADROOM"])
-        self.assertIn("slower ladder", s["HEADROOM_NOTE"])
+        self.assertIn("new measurement", s["HEADROOM_NOTE"])
 
     def test_the_objective_is_recorded_as_data_not_throughput(self):
-        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
-                             "SUSTAINED": False}], "NOT_ESTABLISHED")
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True}])
         self.assertEqual(s["OBJECTIVE"],
                          "BALANCED_COMPLETE_DATA_NOT_MAXIMUM_REQUEST_THROUGHPUT")
         self.assertEqual(s["HEADROOM_RULE"],

@@ -1811,3 +1811,143 @@ ORDERS_PLACED 0   CAPITAL_DEPLOYED 0   CREDENTIALS NONE   mirror_live false
 REALIZED_MAKER_ECONOMICS  NOT_ESTABLISHED
 PROFITABILITY / WIN_RATE / EXPECTED_MONTHLY_RETURN  NOT_IDENTIFIED
 ```
+
+## 21. THE RATE PILOT — AND THE DEADLOCK IT WOULD HAVE HANDED US
+
+### 21a. WHAT THE LADDER RETURNED — RUN 35129103916
+
+Read-only, GET only, one global pacer, no concurrency. Dispatched 17:35:12Z on
+commit `2d57100`, completed 17:43:25Z, sealed to `beta48-ratepilot/seg-35129103916`.
+160 requests, 140 successes, 20 HTTP 429s across four rungs of 40, rotating
+through six markets.
+
+| rate (rps) | requests | 200 | 429 | 429 share | verdict |
+|---|---|---|---|---|---|
+| 0.25 | 40 | 40 | 0 | 0.0000 | NOT_REFUSED |
+| 0.5  | 40 | 34 | 6 | 0.1500 | REFUSED |
+| 1.0  | 40 | 34 | 6 | 0.1500 | REFUSED |
+| 2.0  | 40 | 32 | 8 | 0.2000 | REFUSED |
+
+`retry-after: 10` was present on every refusal and was honoured globally.
+Latency was never the constraint: p50 0.019–0.032 s, max 0.369 s.
+
+```
+UNSAFE_RATES              0.5, 1.0, 2.0 rps
+CANDIDATE_RATE            0.25 rps
+RECOMMENDED_HEADROOM_RATE NOT_IDENTIFIED  (0.25 is the slowest MEASURED rung)
+```
+
+The headroom rate is not silently resolved to the candidate. The frozen rule is
+*one measured rung below the fastest passing rate*, and below 0.25 nothing was
+tested. A rate obtained by continuing the ladder's spacing downward would be a
+number chosen after seeing the result, which is the thing the freeze exists to
+prevent. So it is NOT_IDENTIFIED, and extending the ladder downward is a new
+measurement, not an inference from this one.
+
+Two properties of the run bound what may be said about it, and both are
+recorded rather than argued away. The rungs ran back to back with **no
+inter-rung cooldown** (the cooldown landed in `6b01b88`, after dispatch), so
+`PILOT_RUNG_INDEPENDENCE = NOT_ESTABLISHED_NO_COOLDOWN_BETWEEN_RUNGS`. And the
+0.5 rung shows the starvation signature the whole programme is guarding
+against: one market returned **1 success in 7 attempts** while the other five
+returned 6–7 each. A rate can post a 15% refusal share and still be quietly
+concentrating every refusal on one slug.
+
+### 21b. THE DEADLOCK — A GATE WITH NO KEY
+
+The confirmation gate as built required `SUSTAINED` **and**
+`RUNG_INDEPENDENCE_ESTABLISHED`, while the same module stated — correctly —
+that rung independence can never be established from anything available to us.
+Those two rules together are a permanent refusal wearing the clothes of rigour.
+`CAPTURE_DISPATCH_AUTHORIZED` could never have become YES, whatever any future
+run returned.
+
+The defect was collapsing two questions that are not the same question:
+
+```
+VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED   NOT_IDENTIFIED   (and always will be)
+COLLECTOR_RATE_OPERATIONALLY_VALIDATED  YES | NO         (and is measurable)
+```
+
+The second can become YES while the first stays NOT_IDENTIFIED. We do not need
+to know how the venue counts in order to know that our own paced reader was not
+refused over twenty minutes. Identifying the limiter is not a precondition for
+reading public books.
+
+`predispatch.py` now gates on the second and merely *reports* the first —
+`REPORTED_NOT_GATING`, printed with "(reported, not gating)" beside it — and
+`test_predispatch.py::TheGateCanOpen` pins that a NOT_IDENTIFIED mechanism does
+not block a dispatch, so a later edit that "tightens" the gate cannot
+reintroduce the lock.
+
+### 21c. WHAT THE LADDER MAY AND MAY NOT CONCLUDE
+
+```
+LADDER_MAY      REJECT_OBVIOUSLY_UNSAFE_RATES
+                NOMINATE_A_CONSERVATIVE_RATE_CANDIDATE
+LADDER_MAY_NOT  CONFIRM_A_SUSTAINABLE_RATE
+SUSTAINABLE_RATE_CONFIRMED = REFUSED_THE_LADDER_MAY_NOT_CONFIRM
+```
+
+Not `NOT_IDENTIFIED` — that reads like a pending value some longer ladder would
+fill in. This is a refusal: no sample size makes a sequential rung into a
+confirmation. `run_rate` no longer computes a `SUSTAINED` field at all; a rung
+is `NOT_REFUSED` or `REFUSED`. `CAPTURE_MAY_PROCEED` is `False` here always,
+and the reason names the route that can return YES. A gate that cannot open is
+a worse defect than a gate that cannot fail; this one says what opens it.
+
+### 21d. THE ROUTE THAT CAN RETURN YES — `rate_confirm.py`
+
+One rate. One fresh workflow. One global pacer. No concurrency. No prior
+higher-rate rungs in the same workflow. Then the only thing the result can be
+about is that rate.
+
+```
+MIN_DURATION = max(900 s, 300 / rate)      MIN_REQUESTS = max(300, floor x rate)
+    0.25 rps -> >= 1,200 s      0.125 rps -> >= 2,400 s      2.0 rps -> >= 900 s / 1,800 req
+TARGET_429_RATE = ZERO
+ALLOWANCE: at most ONE refusal, carrying a Retry-After we honoured globally,
+           with nothing following it, and NOT inside the final tenth of the run
+```
+
+Both floors bind, not either: at a slow rate the request count sets the clock,
+and at a fast rate the 900 s clock raises the request count so a three-minute
+burst buys nothing. The threshold is frozen in the module **before** dispatch,
+and `dispatch_check()` refuses a run that cannot reach its own floor — including
+one whose job timeout is shorter than its own paced duration — rather than
+running it and reinterpreting the result afterwards.
+
+Validation also fails on **starvation**: `POLL_ORDER_STARVATION` must be NONE
+and `MIN_SUCCESS_SHARE_BY_MARKET` at or above 0.98. A rate that works by
+quietly not reading some markets is exactly how run 35120338223 "succeeded".
+
+What a YES means, stated in the output itself:
+
+```
+WHAT_THIS_VALIDATES        our paced collector at <rate> over this period
+WHAT_THIS_DOES_NOT_VALIDATE any faster rate, any other time of day, and the
+                            venue's limiter
+FASTER_RATES               UNTESTED_IN_THIS_RUN
+REFUSED_LABELS             VENUE_MAXIMUM_SAFE_RATE, VENUE_RATE_LIMIT_KNOWN,
+                           RATE_LIMIT_WINDOW_IDENTIFIED, MAXIMUM_SUSTAINABLE_RATE
+```
+
+`.github/workflows/beta48-rate-confirm.yml` is built and **not dispatched**. Its
+rate input has no default on purpose, so nothing starts by accident, and the
+rate to confirm is not ours to choose.
+
+### 21e. STILL UNBUILT, AND STILL IN THIS ORDER
+
+Only after a rate is operationally validated: the fair rotation scheduler with
+per-market attempts/successes/429s; the game-market selection excluding
+season-long futures from venue-native timing and state; the frozen
+`TARGET_MARKETS` / `TARGET_EVENTS` / `SPORT_STRATA` / `MAX_MARKETS_PER_EVENT`;
+and the event map passed into harvest. The measurement model is untouched, the
+fill model is frozen, and the true next execution gate is unchanged.
+
+```
+ORDERS_PLACED 0   CAPITAL_DEPLOYED 0   CREDENTIALS NONE   mirror_live false
+VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED   NOT_IDENTIFIED
+COLLECTOR_RATE_OPERATIONALLY_VALIDATED  NO  (no confirmation has been run)
+CAPTURE_DISPATCH_AUTHORIZED             NO
+```

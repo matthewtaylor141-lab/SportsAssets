@@ -9,7 +9,8 @@ NI = PD.NOT_IDENTIFIED
 GOOD = {
     "SELECTED_REQUEST_RATE": "0.25",
     "RATE_SELECTION_EVIDENCE": "pilot run 35129103916, rungs 0.25-2.0",
-    "RATE_CONFIDENCE": "SUSTAINED",
+    "COLLECTOR_RATE_OPERATIONALLY_VALIDATED": "YES",
+    "VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED": "NOT_IDENTIFIED",
     "TARGET_MARKETS": 24,
     "TARGET_EVENTS": 8,
     "SPORT_STRATA": {"nfl": 6, "cfb": 6, "mlb": 6, "ufc": 6},
@@ -29,7 +30,8 @@ class AGoodDesignIsAuthorised(unittest.TestCase):
 
     def test_the_block_ends_on_the_authorisation_line(self):
         text = PD.render(PD.check(GOOD))
-        self.assertTrue(text.strip().endswith("CAPTURE_DISPATCH_AUTHORIZED  = YES"))
+        self.assertTrue(text.strip().endswith(
+            "CAPTURE_DISPATCH_AUTHORIZED  = YES"))
         self.assertIn("SELECTED_REQUEST_RATE", text)
 
     def test_it_contacts_nothing(self):
@@ -45,8 +47,9 @@ class EveryCheckCanFail(unittest.TestCase):
         return r
 
     def test_a_candidate_rate_is_not_enough(self):
-        r = self._no(RATE_CONFIDENCE="LIMITED")
-        self.assertIn("RATE_IS_CONFIRMED_NOT_A_CANDIDATE", r["FAILED_CHECKS"])
+        r = self._no(COLLECTOR_RATE_OPERATIONALLY_VALIDATED="NO")
+        self.assertIn("RATE_IS_OPERATIONALLY_VALIDATED_NOT_A_CANDIDATE",
+                      r["FAILED_CHECKS"])
 
     def test_a_missing_rate_blocks_it(self):
         r = self._no(SELECTED_REQUEST_RATE=NI)
@@ -83,9 +86,45 @@ class EveryCheckCanFail(unittest.TestCase):
         self.assertEqual(len(r["MISSING_FIELDS"]), len(PD.REQUIRED_FIELDS))
 
     def test_the_failed_checks_are_printed_in_the_block(self):
-        text = PD.render(self._no(RATE_CONFIDENCE="LIMITED"))
+        text = PD.render(self._no(
+            COLLECTOR_RATE_OPERATIONALLY_VALIDATED="NO"))
         self.assertIn("FAILED_CHECK", text)
         self.assertTrue(text.strip().endswith("= NO"))
+
+
+class TheGateCanOpen(unittest.TestCase):
+    """A gate that cannot pass is a worse defect than one that cannot fail.
+
+    The earlier version required a rate confidence that could only be earned by
+    identifying the venue's limiter -- which is undocumented and permanently
+    NOT_IDENTIFIED. These tests pin the separation so that deadlock cannot be
+    reintroduced by a later edit that "tightens" the gate.
+    """
+
+    def test_an_unidentified_venue_mechanism_does_not_block_a_dispatch(self):
+        r = PD.check(dict(GOOD,
+                          VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED=NI))
+        self.assertEqual(r["CAPTURE_DISPATCH_AUTHORIZED"], "YES")
+
+    def test_the_mechanism_field_is_reported_but_not_required(self):
+        self.assertNotIn("VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED",
+                         PD.REQUIRED_FIELDS)
+        self.assertIn("VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED",
+                      PD.REPORTED_NOT_GATING)
+        r = PD.check(GOOD)
+        self.assertEqual(r["VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED"], NI)
+        self.assertTrue(r["MECHANISM_IDENTIFICATION_IS_NOT_REQUIRED"])
+
+    def test_the_mechanism_field_is_printed_as_non_gating(self):
+        text = PD.render(PD.check(GOOD))
+        self.assertIn("VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED", text)
+        self.assertIn("reported, not gating", text)
+
+    def test_operational_validation_is_what_gates(self):
+        yes = PD.check(dict(GOOD, COLLECTOR_RATE_OPERATIONALLY_VALIDATED="YES"))
+        no = PD.check(dict(GOOD, COLLECTOR_RATE_OPERATIONALLY_VALIDATED="NO"))
+        self.assertEqual(yes["CAPTURE_DISPATCH_AUTHORIZED"], "YES")
+        self.assertEqual(no["CAPTURE_DISPATCH_AUTHORIZED"], "NO")
 
 
 class TheGateMatchesTheRunThatFailed(unittest.TestCase):
@@ -95,7 +134,7 @@ class TheGateMatchesTheRunThatFailed(unittest.TestCase):
         r = PD.check({
             "SELECTED_REQUEST_RATE": "2.0",
             "RATE_SELECTION_EVIDENCE": NI,        # never measured
-            "RATE_CONFIDENCE": NI,
+            "COLLECTOR_RATE_OPERATIONALLY_VALIDATED": NI,
             "TARGET_MARKETS": 24,
             "TARGET_EVENTS": NI,                  # no event map
             "SPORT_STRATA": {"nfl": 6, "cfb": 6, "mlb": 6, "ufc": 6},
@@ -105,7 +144,7 @@ class TheGateMatchesTheRunThatFailed(unittest.TestCase):
             "EVENT_IDENTITY_COVERAGE": NI,
         })
         self.assertEqual(r["CAPTURE_DISPATCH_AUTHORIZED"], "NO")
-        for c in ("RATE_IS_CONFIRMED_NOT_A_CANDIDATE",
+        for c in ("RATE_IS_OPERATIONALLY_VALIDATED_NOT_A_CANDIDATE",
                   "RATE_SELECTION_EVIDENCE_NAMED",
                   "NO_FUTURES_IN_PRIMARY_SAMPLE",
                   "POLL_ORDER_FAIRNESS_PASSES",

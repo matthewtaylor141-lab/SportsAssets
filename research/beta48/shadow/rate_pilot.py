@@ -92,6 +92,55 @@ WHY_NOT_INDEPENDENT = (
     "the venue documents no accounting window, so limiter state carried from "
     "an earlier rung can neither be excluded nor measured")
 
+# ---------------------------------------------------------------------------
+# TWO DIFFERENT QUESTIONS. ONE IS UNANSWERABLE; THE OTHER IS THE ONE WE NEED.
+# ---------------------------------------------------------------------------
+#
+# An earlier version of this module required BOTH a sustained rung AND
+# RUNG_INDEPENDENCE_ESTABLISHED before a capture could proceed -- while also
+# stating, correctly, that independence can never be established from anything
+# available to us. That is a permanent deadlock: a gate whose key does not
+# exist. It was a defect, not caution.
+#
+# The defect came from collapsing two questions that are not the same question:
+#
+#   VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED   what the limiter actually is --
+#       window shape, bucket size, accounting boundary, scope. Undocumented,
+#       and not reverse-engineerable from headers. Stays NOT_IDENTIFIED, and
+#       nothing downstream is allowed to wait on it.
+#
+#   COLLECTOR_RATE_OPERATIONALLY_VALIDATED  whether OUR collector, at ONE
+#       chosen rate, ran long enough and clean enough to be trusted to collect
+#       public books. YES or NO. Measurable. This is the gate that matters.
+#
+# The second can become YES while the first stays NOT_IDENTIFIED. We do not
+# need to know how the venue counts in order to know that our own paced reader
+# did not get refused over twenty minutes.
+VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED = NOT_IDENTIFIED
+OPERATIONAL_VALIDATION_DOES_NOT_REQUIRE_MECHANISM_IDENTIFICATION = True
+WHY_THESE_ARE_SEPARATE = (
+    "identifying the venue's limiter is not a precondition for reading public "
+    "books at a rate our own collector has been observed to sustain")
+
+# ---------------------------------------------------------------------------
+# WHAT THIS LADDER MAY AND MAY NOT CONCLUDE
+# ---------------------------------------------------------------------------
+#
+# A sequential ladder, short rungs, no proof of a clean start between them, is
+# a screening instrument. It is good at one thing -- showing that a rate is
+# obviously unsafe -- and it can nominate a conservative starting point. It
+# cannot confirm anything, and it is not going to be rescued into confirming
+# anything by adding conditions to its own output.
+LADDER_MAY = ("REJECT_OBVIOUSLY_UNSAFE_RATES",
+              "NOMINATE_A_CONSERVATIVE_RATE_CANDIDATE")
+LADDER_MAY_NOT = ("CONFIRM_A_SUSTAINABLE_RATE",)
+LADDER_CONFIRMATION_STATUS = "REFUSED_THE_LADDER_MAY_NOT_CONFIRM"
+CONFIRMATION_ROUTE = "SINGLE_RATE_OPERATIONAL_CONFIRMATION"
+WHY_THE_LADDER_MAY_NOT_CONFIRM = (
+    "short sequential rungs against an undocumented limiter, with no proof "
+    "that any rung started clean; see rate_confirm.py for the route that can "
+    "return YES")
+
 # The cooldown between rungs, in preference order. C never claims a clean
 # start -- it is a wait, and a wait is not evidence the server forgot.
 COOLDOWN_BASIS_RETRY_AFTER = "RETRY_AFTER_HONOURED_GLOBALLY"
@@ -101,11 +150,12 @@ FROZEN_COOLDOWN_S = 90.0
 CLEAN_SERVER_RATE_LIMIT_STATE_WHEN_FROZEN = "NOT_ESTABLISHED"
 DO_NOT_REVERSE_ENGINEER_HEADERS_TO_CLAIM_A_CLEAN_START = True
 
-# What it takes to call a rate SUSTAINED rather than merely un-refused. Zero
-# 429s over 40 requests in a couple of minutes is a small sample and a short
-# period, and it is not the same claim.
-MIN_REQUESTS_TO_CONFIRM = 300
-MIN_DURATION_S_TO_CONFIRM = 900.0
+# A rung is NOT_REFUSED or REFUSED. Neither verdict is a confirmation, and no
+# combination of rungs adds up to one -- the evidence floor lives in
+# rate_confirm.py, where a single standalone rate can actually clear it.
+RUNG_NOT_REFUSED = "NOT_REFUSED"
+RUNG_REFUSED = "REFUSED"
+RUNG_MAY_CONFIRM = False
 
 # Headroom. The objective is balanced complete data, not throughput.
 HEADROOM_RULE = "ONE_LADDER_RUNG_BELOW_THE_FASTEST_PASSING_RATE"
@@ -263,8 +313,6 @@ def run_rate(http, slugs, rps, requests=REQUESTS_PER_RATE, rows=None):
     share = (D(n429) / D(requests)) if requests else NOT_IDENTIFIED
     dur = time.monotonic() - t0
     passes = share != NOT_IDENTIFIED and share <= ACCEPTABLE_429_SHARE
-    sustained = (passes and requests >= MIN_REQUESTS_TO_CONFIRM
-                 and dur >= MIN_DURATION_S_TO_CONFIRM)
     return {
         "RATE_RPS": str(rps),
         "REQUESTS": requests,
@@ -284,100 +332,114 @@ def run_rate(http, slugs, rps, requests=REQUESTS_PER_RATE, rows=None):
         "RATE_LIMIT_HEADERS_SEEN": headers_seen,
         "LAST_VALID_RETRY_AFTER": last_retry_after,
 
-        # A rung that was not refused is not the same claim as a rung that was
-        # sustained. Both are reported; only the second confirms anything.
+        # A rung is NOT_REFUSED or REFUSED. It is never CONFIRMED: this rung
+        # is one leg of a sequential ladder with no proof of a clean start, so
+        # there is no sample size at which it would start confirming.
         "PASSES": passes,
-        "SUSTAINED": sustained,
-        "SAMPLE_SUFFICIENT_TO_CONFIRM": (requests >= MIN_REQUESTS_TO_CONFIRM
-                                         and dur >= MIN_DURATION_S_TO_CONFIRM),
-        "RATE_CONFIDENCE": ("SUSTAINED" if sustained else "LIMITED"),
-        "WHY_LIMITED": (None if sustained else
-                        "needs >= %d requests over >= %.0fs at this rate; had "
-                        "%d over %.0fs" % (MIN_REQUESTS_TO_CONFIRM,
-                                           MIN_DURATION_S_TO_CONFIRM,
-                                           requests, dur)),
+        "RUNG_VERDICT": (RUNG_NOT_REFUSED if passes else RUNG_REFUSED),
+        "RUNG_MAY_CONFIRM": RUNG_MAY_CONFIRM,
+        "WHY_A_RUNG_CANNOT_CONFIRM": WHY_THE_LADDER_MAY_NOT_CONFIRM,
     }
 
 
 def select_rate(ladder_results, rung_independence=NOT_IDENTIFIED):
-    """A CANDIDATE, a CONFIRMATION status, and a rate with HEADROOM under it.
+    """The THREE things this ladder is allowed to say, and nothing more.
 
-    Three separate things, because they answer three separate questions and
-    running them together is how a 40-request rung becomes "the sustainable
-    rate" in a later sentence:
+      UNSAFE_RATES               every rung the venue refused. This is the
+                                 ladder's real product: a rejection is robust
+                                 to carryover in the direction that matters --
+                                 a rung that was refused is not a rate we are
+                                 going to argue our way back to.
+      CANDIDATE_RATE             the fastest rung that was NOT refused, taken
+                                 BEFORE the first failure. A nomination. A
+                                 starting point for a confirmation, not a
+                                 finding.
+      RECOMMENDED_HEADROOM_RATE  one measured rung BELOW the candidate. If the
+                                 candidate is the slowest rung on the ladder
+                                 there is no such rung, and this comes back
+                                 NOT_IDENTIFIED rather than quietly resolving
+                                 to the candidate itself -- "no headroom
+                                 available" is a result, and dropping it is
+                                 how a candidate becomes an operating rate.
 
-      SUSTAINABLE_RATE_CANDIDATE   the fastest rung that was not refused,
-                                   taken BEFORE the first failure -- a faster
-                                   rung passing after a slower one failed is
-                                   noise and is refused.
-      SUSTAINABLE_RATE_CONFIRMED   the same rung, only if its sample was large
-                                   enough and long enough to show SUSTAINED
-                                   operation. Usually NOT_IDENTIFIED.
-      RECOMMENDED_CAPTURE_RATE     one ladder rung BELOW the candidate. We are
-                                   after balanced complete data, not the
-                                   fastest rate that survived a short probe.
+    CAPTURE_MAY_PROCEED is False here ALWAYS, and the reason names a route that
+    can actually return YES. That is the difference between a gate and a
+    deadlock: this one says what unlocks it.
     """
-    chosen, chosen_row, reason, idx = None, None, "", None
+    chosen, reason, idx = None, "", None
+    unsafe = [row["RATE_RPS"] for row in ladder_results if not row["PASSES"]]
     for i, row in enumerate(ladder_results):
         if row["PASSES"]:
-            chosen, chosen_row, idx = row["RATE_RPS"], row, i
+            chosen, idx = row["RATE_RPS"], i
         else:
             reason = ("stopped at the first rate whose 429 share exceeded "
                       "%s (%s rps)" % (ACCEPTABLE_429_SHARE, row["RATE_RPS"]))
             break
     base = {
+        "LADDER_MAY": list(LADDER_MAY),
+        "LADDER_MAY_NOT": list(LADDER_MAY_NOT),
+        "SUSTAINABLE_RATE_CONFIRMED": LADDER_CONFIRMATION_STATUS,
+        "WHY_THE_LADDER_MAY_NOT_CONFIRM": WHY_THE_LADDER_MAY_NOT_CONFIRM,
+        "CONFIRMATION_ROUTE": CONFIRMATION_ROUTE,
+
+        "UNSAFE_RATES": unsafe,
         "RATE_LIMIT_WINDOW_SEMANTICS": RATE_LIMIT_WINDOW_SEMANTICS,
+        "VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED":
+            VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED,
+        "COLLECTOR_RATE_OPERATIONALLY_VALIDATED": "NO",
+        "WHY_NOT_OPERATIONALLY_VALIDATED":
+            "no standalone single-rate confirmation has been run yet",
+        "OPERATIONAL_VALIDATION_DOES_NOT_REQUIRE_MECHANISM_IDENTIFICATION":
+            OPERATIONAL_VALIDATION_DOES_NOT_REQUIRE_MECHANISM_IDENTIFICATION,
         "SEQUENTIAL_RUNG_CARRYOVER_POSSIBLE": SEQUENTIAL_RUNG_CARRYOVER_POSSIBLE,
         "RUNG_RESULT_INDEPENDENT": RUNG_RESULT_INDEPENDENT,
         "PILOT_RUNG_INDEPENDENCE": rung_independence,
         "WHY_NOT_INDEPENDENT": WHY_NOT_INDEPENDENT,
+        "INDEPENDENCE_IS_NOT_A_PRECONDITION_OF_VALIDATION": True,
         "OBJECTIVE": OBJECTIVE,
         "HEADROOM_RULE": HEADROOM_RULE,
         "MARGIN_RULE": MARGIN_RULE,
         "NOT_CHOSEN_FOR_BEING_FASTEST": True,
+        "CAPTURE_MAY_PROCEED": False,
+        "WHY_CAPTURE_MAY_NOT_PROCEED": (
+            "a screening ladder cannot confirm a rate; run the standalone "
+            "single-rate confirmation in rate_confirm.py, then re-check"),
     }
     if chosen is None:
         base.update({
+            "CANDIDATE_RATE": NOT_IDENTIFIED,
             "SUSTAINABLE_RATE_CANDIDATE": NOT_IDENTIFIED,
-            "SUSTAINABLE_RATE_CONFIRMED": NOT_IDENTIFIED,
+            "RECOMMENDED_HEADROOM_RATE": NOT_IDENTIFIED,
             "RECOMMENDED_CAPTURE_RATE": NOT_IDENTIFIED,
             "SUSTAINABLE_RATE_SELECTED": NOT_IDENTIFIED,
-            "RATE_CONFIDENCE": "NONE",
+            "RECOMMENDED_RATE_HAS_HEADROOM": False,
             "SELECTION_REASON": ("no tested rate held the 429 share at or "
                                  "under %s; the ladder needs a slower rung"
                                  % ACCEPTABLE_429_SHARE),
-            "CAPTURE_MAY_PROCEED": False,
         })
         return base
 
-    confirmed = chosen_row.get("SUSTAINED") and rung_independence == "ESTABLISHED"
     below = (ladder_results[idx - 1]["RATE_RPS"] if idx and idx > 0 else None)
     base.update({
+        "CANDIDATE_RATE": chosen,
         "SUSTAINABLE_RATE_CANDIDATE": chosen,
-        "SUSTAINABLE_RATE_CONFIRMED": (chosen if confirmed else NOT_IDENTIFIED),
-        "RATE_CONFIDENCE": ("SUSTAINED" if confirmed else "LIMITED"),
-        "WHY_NOT_CONFIRMED": (None if confirmed else
-                              "the rung's sample was too small or too short to "
-                              "show sustained operation, and/or the rungs are "
-                              "not known to be independent"),
-        "RECOMMENDED_CAPTURE_RATE": (below or chosen),
+        "RECOMMENDED_HEADROOM_RATE": (below if below is not None
+                                      else NOT_IDENTIFIED),
+        "RECOMMENDED_CAPTURE_RATE": (below if below is not None
+                                     else NOT_IDENTIFIED),
         "RECOMMENDED_RATE_HAS_HEADROOM": below is not None,
         "HEADROOM_NOTE": (None if below is not None else
-                          "the candidate is the ladder's slowest rung, so "
-                          "there is no rung below it to drop to -- headroom "
-                          "would need a slower ladder"),
+                          "the candidate is the ladder's slowest MEASURED "
+                          "rung, so no rung below it was tested; a headroom "
+                          "rate would have to come from extending the ladder "
+                          "downward, which is a new measurement, not an "
+                          "inference from this one"),
         # The old field name, kept pointing at the CANDIDATE so nothing silently
         # reads a confirmation that was never made.
         "SUSTAINABLE_RATE_SELECTED": chosen,
         "SELECTION_REASON": (reason or
                              "every tested rate passed; the ladder's top rung "
                              "is the candidate and a faster one is UNTESTED"),
-        "CAPTURE_MAY_PROCEED": bool(confirmed),
-        "WHY_CAPTURE_MAY_NOT_PROCEED": (
-            None if confirmed else
-            "a CANDIDATE is not a CONFIRMATION: run a short confirming pilot "
-            "at the recommended rate, with a cooldown before it, and report "
-            "before dispatching a capture"),
     })
     return base
 
