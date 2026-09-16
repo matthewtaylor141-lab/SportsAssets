@@ -56,7 +56,10 @@ def clean(rate="0.25", **over):
         "OTHER_FAILURES": 0,
         "RETRY_AFTER_OBSERVED": [],
         "LAST_429_AT_S": None,
-        "POLL_ORDER_STARVATION": "NONE",
+        "GLOBAL_BACKOFF_EVENTS": 0,
+        "SUCCESSES_AFTER_LAST_429": 0,
+        "POLL_ORDER_STARVATION": "NO",
+        "POLL_ORDER_FAIRNESS": "PASS",
         "MIN_SUCCESS_SHARE_BY_MARKET": D("1.0"),
         "MAX_SUCCESS_SHARE_BY_MARKET": D("1.0"),
     }
@@ -177,17 +180,23 @@ class TheThresholdIsFrozenBeforeTheRun(unittest.TestCase):
 
     def test_one_isolated_honoured_refusal_is_inside_the_allowance(self):
         v = RC.validate(clean(HTTP_429=1, RETRY_AFTER_OBSERVED=["10"],
+                              GLOBAL_BACKOFF_EVENTS=1,
+                              SUCCESSES_AFTER_LAST_429=40,
                               LAST_429_AT_S=100.0))
         self.assertEqual(v["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "YES")
 
     def test_two_refusals_are_a_pattern_and_fail(self):
         v = RC.validate(clean(HTTP_429=2, RETRY_AFTER_OBSERVED=["10"],
+                              GLOBAL_BACKOFF_EVENTS=2,
+                              SUCCESSES_AFTER_LAST_429=40,
                               LAST_429_AT_S=100.0))
         self.assertIn("REFUSALS_WITHIN_FROZEN_ALLOWANCE", v["FAILED_CHECKS"])
         self.assertIn("pattern", v["ALLOWANCE_FAILURE_REASON"])
 
     def test_a_refusal_without_a_retry_after_fails(self):
         v = RC.validate(clean(HTTP_429=1, RETRY_AFTER_OBSERVED=[],
+                              GLOBAL_BACKOFF_EVENTS=1,
+                              SUCCESSES_AFTER_LAST_429=40,
                               LAST_429_AT_S=100.0))
         self.assertIn("REFUSALS_WITHIN_FROZEN_ALLOWANCE", v["FAILED_CHECKS"])
 
@@ -195,6 +204,8 @@ class TheThresholdIsFrozenBeforeTheRun(unittest.TestCase):
         """A refusal at the end is the beginning of a trend the run stopped
         before showing."""
         v = RC.validate(clean(HTTP_429=1, RETRY_AFTER_OBSERVED=["10"],
+                              GLOBAL_BACKOFF_EVENTS=1,
+                              SUCCESSES_AFTER_LAST_429=2,
                               LAST_429_AT_S=1190.0))
         self.assertIn("REFUSALS_WITHIN_FROZEN_ALLOWANCE", v["FAILED_CHECKS"])
         self.assertIn("final tenth", v["ALLOWANCE_FAILURE_REASON"])
@@ -208,28 +219,122 @@ class TheThresholdIsFrozenBeforeTheRun(unittest.TestCase):
 class ARateThatWorksByStarvingMarketsIsNotValidated(unittest.TestCase):
 
     def test_starvation_fails_the_run(self):
-        v = RC.validate(clean(POLL_ORDER_STARVATION="PRESENT",
+        v = RC.validate(clean(POLL_ORDER_STARVATION="YES",
                               MIN_SUCCESS_SHARE_BY_MARKET=D("0.3")))
         self.assertEqual(v["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
         self.assertIn("NO_POLL_ORDER_STARVATION", v["FAILED_CHECKS"])
-        self.assertIn("EVERY_MARKET_READ_ABOVE_FLOOR", v["FAILED_CHECKS"])
 
     def test_the_share_spread_is_computed_per_market(self):
         s = RC._starvation({"a": {"ATTEMPTS": 10, "SUCCESSES": 10},
-                            "b": {"ATTEMPTS": 10, "SUCCESSES": 3}})
+                            "b": {"ATTEMPTS": 10, "SUCCESSES": 3}}, 20)
         self.assertEqual(s["MAX_SUCCESS_SHARE_BY_MARKET"], D(1))
         self.assertEqual(s["MIN_SUCCESS_SHARE_BY_MARKET"], D("0.3"))
-        self.assertEqual(s["POLL_ORDER_STARVATION"], "PRESENT")
+        self.assertEqual(s["SUCCESS_SHARE_SPREAD"], D("0.7"))
+        self.assertEqual(s["POLL_ORDER_STARVATION"], "YES")
         self.assertEqual(s["STARVED_MARKETS"], ["b"])
 
     def test_an_even_read_is_not_starvation(self):
         s = RC._starvation({"a": {"ATTEMPTS": 10, "SUCCESSES": 10},
-                            "b": {"ATTEMPTS": 10, "SUCCESSES": 10}})
-        self.assertEqual(s["POLL_ORDER_STARVATION"], "NONE")
+                            "b": {"ATTEMPTS": 10, "SUCCESSES": 10}}, 20)
+        self.assertEqual(s["POLL_ORDER_STARVATION"], "NO")
 
     def test_no_markets_at_all_is_not_identified_rather_than_clean(self):
         s = RC._starvation({})
         self.assertEqual(s["POLL_ORDER_STARVATION"], NI)
+
+    def test_the_floor_is_derived_from_the_frozen_allowance(self):
+        """Every failure the run is permitted, landing on one market. At 300
+        requests over 6 markets: 1 + 3 = 4 misses, 50 attempts -> 46/50."""
+        self.assertEqual(RC.max_allowed_misses(300), 4)
+        self.assertEqual(RC.starvation_floor(50, 300), D("0.92"))
+
+    def test_one_unlucky_read_is_not_called_starvation(self):
+        s = RC._starvation({"a": {"ATTEMPTS": 50, "SUCCESSES": 50},
+                            "b": {"ATTEMPTS": 50, "SUCCESSES": 49}}, 300)
+        self.assertEqual(s["POLL_ORDER_STARVATION"], "NO")
+
+
+class NoMarketLeadsEveryCycle(unittest.TestCase):
+    """Equal attempts is not enough. The first slot of a cycle is the one that
+    spends whatever budget the venue refilled, and a fixed order hands it to the
+    same slug every time -- which is how run 35120338223 chose its entire
+    surviving sample."""
+
+    SLUGS = ["a", "b", "c", "d", "e", "f"]
+
+    def test_the_start_index_advances_each_cycle(self):
+        o = RC.rotation_order(self.SLUGS, 12)
+        self.assertEqual(o[:6], ["a", "b", "c", "d", "e", "f"])
+        self.assertEqual(o[6:], ["b", "c", "d", "e", "f", "a"])
+
+    def test_attempts_stay_equal_across_markets(self):
+        o = RC.rotation_order(self.SLUGS, 300)
+        counts = {s: o.count(s) for s in self.SLUGS}
+        self.assertEqual(set(counts.values()), {50})
+
+    def test_the_lead_slot_is_shared(self):
+        f = RC.rotation_fairness(RC.rotation_order(self.SLUGS, 300), self.SLUGS)
+        self.assertEqual(f["POLL_ORDER_FAIRNESS"], "PASS")
+        self.assertLessEqual(f["CYCLE_LEAD_IMBALANCE"], 1)
+
+    def test_a_fixed_order_would_fail_the_fairness_test(self):
+        """The thing we are not doing, shown failing."""
+        fixed = [self.SLUGS[i % 6] for i in range(300)]
+        f = RC.rotation_fairness(fixed, self.SLUGS)
+        self.assertEqual(f["POLL_ORDER_FAIRNESS"], "FAIL")
+        self.assertEqual(f["CYCLE_LEAD_COUNTS"]["a"], 50)
+        self.assertEqual(f["CYCLE_LEAD_COUNTS"]["f"], 0)
+
+    def test_an_unfair_order_fails_validation(self):
+        v = RC.validate(clean(POLL_ORDER_FAIRNESS="FAIL"))
+        self.assertEqual(v["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
+        self.assertIn("POLL_ORDER_IS_FAIR", v["FAILED_CHECKS"])
+
+
+class TheRefusalMustBeRecoveredFrom(unittest.TestCase):
+    """The allowance conditions the order added: reads resume, nothing
+    cascades, no market pays for it."""
+
+    def setUp(self):
+        self._saved = []
+        no_sleep(self._saved)
+
+    def tearDown(self):
+        RC.RP.time.sleep = self._saved[0]
+
+    def test_a_refusal_with_no_successful_reads_after_it_fails(self):
+        v = RC.validate(clean(HTTP_429=1, RETRY_AFTER_OBSERVED=["10"],
+                              GLOBAL_BACKOFF_EVENTS=1,
+                              SUCCESSES_AFTER_LAST_429=0,
+                              LAST_429_AT_S=100.0))
+        self.assertIn("REFUSALS_WITHIN_FROZEN_ALLOWANCE", v["FAILED_CHECKS"])
+        self.assertIn("did not resume", v["ALLOWANCE_FAILURE_REASON"])
+
+    def test_a_refusal_not_answered_by_a_global_backoff_fails(self):
+        v = RC.validate(clean(HTTP_429=1, RETRY_AFTER_OBSERVED=["10"],
+                              GLOBAL_BACKOFF_EVENTS=0,
+                              SUCCESSES_AFTER_LAST_429=40,
+                              LAST_429_AT_S=100.0))
+        self.assertIn("global backoff", v["ALLOWANCE_FAILURE_REASON"])
+
+    def test_a_refusal_that_starved_a_market_fails(self):
+        v = RC.validate(clean(HTTP_429=1, RETRY_AFTER_OBSERVED=["10"],
+                              GLOBAL_BACKOFF_EVENTS=1,
+                              SUCCESSES_AFTER_LAST_429=40,
+                              LAST_429_AT_S=100.0,
+                              POLL_ORDER_STARVATION="YES"))
+        self.assertEqual(v["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
+
+    def test_the_preferred_outcome_is_zero(self):
+        self.assertEqual(RC.validate(clean())["PREFERRED_OUTCOME"],
+                         "HTTP_429 = 0")
+
+    def test_the_resume_counter_resets_on_each_refusal(self):
+        """A run whose last request is a 429 has zero successes after it."""
+        rep = RC.confirm(tempfile.mkdtemp(), ["a", "b"],
+                         FakeHttp([200, 200, 200, 429], {"Retry-After": "10"}),
+                         "1.0", requests=4)
+        self.assertEqual(rep["SUCCESSES_AFTER_LAST_429"], 0)
 
 
 class ItIsOneRateInOneRun(unittest.TestCase):
@@ -264,6 +369,18 @@ class TheRunItself(unittest.TestCase):
         rep = RC.confirm(tempfile.mkdtemp(), ["a", "b", "c"],
                          FakeHttp([200] * 9), "1.0", requests=9)
         self.assertEqual(set(rep["PER_MARKET_ATTEMPTS"].values()), {3})
+        self.assertEqual(rep["POLL_ORDER_FAIRNESS"], "PASS")
+
+    def test_the_request_interval_is_the_reciprocal_of_the_rate(self):
+        rep = RC.confirm(tempfile.mkdtemp(), ["a"], FakeHttp([200] * 4),
+                         "0.25", requests=4)
+        self.assertEqual(rep["REQUEST_INTERVAL_S"], 4.0)
+
+    def test_other_failures_are_reported_per_market(self):
+        rep = RC.confirm(tempfile.mkdtemp(), ["a", "b"],
+                         FakeHttp([200, 500, 200, 200]), "1.0", requests=4)
+        self.assertEqual(rep["PER_MARKET_OTHER_FAILURES"]["b"], 1)
+        self.assertEqual(rep["PER_MARKET_OTHER_FAILURES"]["a"], 0)
 
     def test_a_short_run_is_reported_and_refused(self):
         """The run still produces its numbers; it just does not validate."""

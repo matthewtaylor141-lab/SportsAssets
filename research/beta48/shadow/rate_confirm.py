@@ -91,31 +91,63 @@ MIN_REQUESTS = 300
 MIN_DURATION_FLOOR_S = 900.0
 REQUESTS_FOR_DURATION_FLOOR = 300.0
 
+PREFERRED_OUTCOME = "HTTP_429 = 0"
 TARGET_429_RATE = D("0")
 # The allowance. ONE refusal is tolerated, and only when it is isolated: the
-# venue asked us to wait, we waited globally, and nothing followed. A second
-# 429 is not a blip -- it is a pattern with two points, and it fails.
+# venue asked us to wait, we waited globally, reads RESUMED afterwards, and
+# nothing followed. A second 429 is not a blip -- it is a pattern with two
+# points, and it fails.
 MAX_ALLOWED_429 = 1
 ALLOWANCE_CONDITIONS = (
     "AT_MOST_ONE_429_IN_THE_WHOLE_RUN",
     "RETRY_AFTER_PRESENT_AND_HONOURED_GLOBALLY",
     "NO_SECOND_429_AFTER_THE_BACKOFF",
+    "SUCCESSFUL_READS_RESUMED_AFTER_THE_BACKOFF",
+    "NO_MARKET_STARVED_BY_THE_EVENT",
     "NOT_INSIDE_THE_FINAL_TENTH_OF_THE_RUN",
 )
 WHY_THE_FINAL_TENTH = ("a refusal arriving at the end is the start of a trend "
                        "the run stopped before showing")
 THRESHOLD_FROZEN_BEFORE_THE_RUN = True
 
-# Fairness floors: a rate is not validated if it works by starving markets.
-MIN_SUCCESS_SHARE_BY_MARKET_FLOOR = D("0.98")
+# Fairness. A rate is not validated if it works by starving markets.
+#
+# The per-market floor is DERIVED from the allowance above rather than picked:
+# it is the share a market keeps if every failure the whole run is permitted
+# landed on that one market. Below it, failures concentrated further than the
+# run is even allowed to have in total.
 MAX_OTHER_FAILURE_SHARE = D("0.01")
+
+
+def max_allowed_misses(requests):
+    """Every failure the run is permitted, as a count."""
+    return MAX_ALLOWED_429 + int(D(requests) * MAX_OTHER_FAILURE_SHARE)
+
+
+def starvation_floor(attempts, requests):
+    """The per-market success share below which failures are concentrated."""
+    if not attempts:
+        return D(0)
+    keep = max(0, int(attempts) - max_allowed_misses(requests))
+    return D(keep) / D(int(attempts))
+
+
+# The rotation itself. Equal attempts is not enough: a fixed order gives slug 0
+# the first slot of every cycle, and the first slot of a cycle is the one that
+# spends whatever budget the venue has refilled. Run 35120338223 selected its
+# entire surviving sample that way. So the start index advances each cycle, and
+# rotation_fairness() proves it from the order that was actually issued.
+ROTATION = "ROUND_ROBIN_WITH_ADVANCING_START_INDEX"
+MAX_CYCLE_LEAD_IMBALANCE = 1
 
 OPERATIONAL_CRITERIA = (
     "REQUESTS", "DURATION_S", "SUCCESSES", "HTTP_429", "OTHER_FAILURES",
     "HTTP_429_RATE", "P50_LATENCY", "P90_LATENCY", "P99_LATENCY",
-    "RETRY_AFTER_OBSERVED", "GLOBAL_BACKOFF_EVENTS", "PER_MARKET_ATTEMPTS",
-    "PER_MARKET_SUCCESSES", "MAX_SUCCESS_SHARE_BY_MARKET",
+    "RETRY_AFTER_COUNT", "RETRY_AFTER_OBSERVED", "GLOBAL_BACKOFF_EVENTS",
+    "PER_MARKET_ATTEMPTS", "PER_MARKET_SUCCESSES", "PER_MARKET_429",
+    "PER_MARKET_OTHER_FAILURES", "MAX_SUCCESS_SHARE_BY_MARKET",
     "MIN_SUCCESS_SHARE_BY_MARKET", "POLL_ORDER_STARVATION",
+    "POLL_ORDER_FAIRNESS", "REQUEST_INTERVAL_S",
 )
 
 
@@ -174,29 +206,65 @@ def dispatch_check(rps, planned_requests, timeout_s=None):
     }
 
 
-def _starvation(per_market):
+def rotation_order(slugs, requests):
+    """The issue order: round-robin whose START INDEX advances each cycle.
+
+    slugs[(cycle + position) % n]. Every market gets equal attempts AND takes
+    the lead slot of a cycle equally often, so no market is first in line for
+    the venue's refilled budget every time round.
+    """
+    n = len(slugs)
+    return [slugs[((i // n) + (i % n)) % n] for i in range(int(requests))]
+
+
+def rotation_fairness(order, slugs):
+    """Prove the rotation from the order actually issued, not from intent."""
+    n = len(slugs)
+    leads = {s: 0 for s in slugs}
+    for i in range(0, len(order), n):
+        leads[order[i]] += 1
+    if not leads:
+        return {"POLL_ORDER_FAIRNESS": NOT_IDENTIFIED, "CYCLE_LEAD_COUNTS": {}}
+    spread = max(leads.values()) - min(leads.values())
+    return {
+        "ROTATION": ROTATION,
+        "CYCLE_LEAD_COUNTS": dict(sorted(leads.items())),
+        "CYCLE_LEAD_IMBALANCE": spread,
+        "POLL_ORDER_FAIRNESS": ("PASS" if spread <= MAX_CYCLE_LEAD_IMBALANCE
+                                else "FAIL"),
+    }
+
+
+def _starvation(per_market, requests=None):
     """Did the rate work by quietly starving some markets?
 
     The previous capture "succeeded" at 2 rps in exactly this way: six markets
-    were read and eighteen were not, and the difference was poll order.
+    were read and eighteen were not, and the difference was poll order. The
+    floor is derived from the frozen allowance, so the question asked is
+    "were the failures concentrated past what the run is even permitted in
+    total", not "was any market slightly unlucky".
     """
-    shares = {}
+    shares, floors = {}, {}
+    total = requests if requests is not None else sum(
+        d["ATTEMPTS"] for d in per_market.values())
     for slug, d in per_market.items():
         att = d["ATTEMPTS"]
         shares[slug] = (D(d["SUCCESSES"]) / D(att)) if att else D(0)
+        floors[slug] = starvation_floor(att, total)
     if not shares:
         return {"MAX_SUCCESS_SHARE_BY_MARKET": NOT_IDENTIFIED,
                 "MIN_SUCCESS_SHARE_BY_MARKET": NOT_IDENTIFIED,
                 "POLL_ORDER_STARVATION": NOT_IDENTIFIED,
                 "STARVED_MARKETS": []}
     lo, hi = min(shares.values()), max(shares.values())
-    starved = sorted(s for s, v in shares.items()
-                     if v < MIN_SUCCESS_SHARE_BY_MARKET_FLOOR)
+    starved = sorted(s for s, v in shares.items() if v < floors[s])
     return {
         "SUCCESS_SHARE_BY_MARKET": {k: str(v) for k, v in sorted(shares.items())},
         "MAX_SUCCESS_SHARE_BY_MARKET": hi,
         "MIN_SUCCESS_SHARE_BY_MARKET": lo,
-        "POLL_ORDER_STARVATION": ("NONE" if not starved else "PRESENT"),
+        "SUCCESS_SHARE_SPREAD": hi - lo,
+        "STARVATION_FLOOR": str(min(floors.values())),
+        "POLL_ORDER_STARVATION": ("NO" if not starved else "YES"),
         "STARVED_MARKETS": starved,
     }
 
@@ -221,6 +289,16 @@ def validate(result):
         elif not result.get("RETRY_AFTER_OBSERVED"):
             allowance_ok, allowance_why = False, (
                 "the one refusal carried no Retry-After we could honour")
+        elif not result.get("GLOBAL_BACKOFF_EVENTS"):
+            allowance_ok, allowance_why = False, (
+                "the refusal was not answered by a global backoff")
+        elif not result.get("SUCCESSES_AFTER_LAST_429"):
+            allowance_ok, allowance_why = False, (
+                "successful reads did not resume after the backoff, so the "
+                "run ends on a refusal it never recovered from")
+        elif result.get("POLL_ORDER_STARVATION") == "YES":
+            allowance_ok, allowance_why = False, (
+                "the refusal cost one market its share of the rotation")
         elif result.get("LAST_429_AT_S") is not None and dur and (
                 float(result["LAST_429_AT_S"]) > 0.9 * float(dur)):
             allowance_ok, allowance_why = False, (
@@ -231,12 +309,8 @@ def validate(result):
         "DURATION_MEETS_FLOOR": dur >= min_duration_s(rps),
         "REFUSALS_WITHIN_FROZEN_ALLOWANCE": allowance_ok,
         "OTHER_FAILURES_WITHIN_TOLERANCE": other_share <= MAX_OTHER_FAILURE_SHARE,
-        "NO_POLL_ORDER_STARVATION": result.get("POLL_ORDER_STARVATION") == "NONE",
-        "EVERY_MARKET_READ_ABOVE_FLOOR": (
-            result.get("MIN_SUCCESS_SHARE_BY_MARKET") not in
-            (None, NOT_IDENTIFIED)
-            and result["MIN_SUCCESS_SHARE_BY_MARKET"]
-            >= MIN_SUCCESS_SHARE_BY_MARKET_FLOOR),
+        "NO_POLL_ORDER_STARVATION": result.get("POLL_ORDER_STARVATION") == "NO",
+        "POLL_ORDER_IS_FAIR": result.get("POLL_ORDER_FAIRNESS") == "PASS",
         "SINGLE_RATE_RUN": result.get("RATES_IN_THIS_RUN") == 1,
         "NO_PRIOR_HIGHER_RATE_IN_THIS_WORKFLOW": bool(
             result.get("NO_PRIOR_HIGHER_RATE_IN_THIS_WORKFLOW")),
@@ -258,6 +332,7 @@ def validate(result):
         "CHECKS": checks,
         "FAILED_CHECKS": [k for k, v in checks.items() if not v],
         "ALLOWANCE_FAILURE_REASON": allowance_why,
+        "PREFERRED_OUTCOME": PREFERRED_OUTCOME,
         "TARGET_429_RATE": TARGET_429_RATE,
         "MAX_ALLOWED_429": MAX_ALLOWED_429,
         "ALLOWANCE_CONDITIONS": list(ALLOWANCE_CONDITIONS),
@@ -279,26 +354,29 @@ def confirm(outdir, slugs, http, rps, requests=None, no_prior_higher_rate=True):
     out.mkdir(parents=True, exist_ok=True)
 
     pacer = RP.GlobalPacer(rps_f)
+    order = rotation_order(slugs, requests)
     per_market = {s: {"ATTEMPTS": 0, "SUCCESSES": 0, "HTTP_429": 0,
                       "OTHER_FAILURES": 0} for s in slugs}
     rows, lat, backoffs = [], [], []
     ok = n429 = other = 0
     retry_after_seen = []
     first_429 = last_429 = None
+    successes_after_last_429 = 0
     t0 = time.monotonic()
-    for i in range(requests):
-        slug = slugs[i % len(slugs)]
+    for i, slug in enumerate(order):
         r = RP.probe(http, pacer, slug)
-        rows.append(dict(r, RATE=str(rps)))
+        rows.append(dict(r, RATE=str(rps), SEQ=i))
         lat.append(r["LATENCY_S"])
         m = per_market[slug]
         m["ATTEMPTS"] += 1
         if r["status"] == 200:
             ok += 1
             m["SUCCESSES"] += 1
+            successes_after_last_429 += 1
         elif r["status"] == 429:
             n429 += 1
             m["HTTP_429"] += 1
+            successes_after_last_429 = 0     # reads must RESUME after a backoff
             at = time.monotonic() - t0
             first_429 = at if first_429 is None else first_429
             last_429 = at
@@ -330,16 +408,21 @@ def confirm(outdir, slugs, http, rps, requests=None, no_prior_higher_rate=True):
         "P50_LATENCY": RP._pct(lat, 50),
         "P90_LATENCY": RP._pct(lat, 90),
         "P99_LATENCY": RP._pct(lat, 99),
+        "RETRY_AFTER_COUNT": len(retry_after_seen),
         "RETRY_AFTER_OBSERVED": sorted(set(retry_after_seen)),
         "GLOBAL_BACKOFF_EVENTS": len(backoffs),
         "BACKOFF_SOURCES": sorted({b["BACKOFF_SOURCE"] for b in backoffs}),
         "FIRST_429_AT_S": first_429 if first_429 is not None else NOT_IDENTIFIED,
         "LAST_429_AT_S": last_429,
+        "SUCCESSES_AFTER_LAST_429": successes_after_last_429,
+        "REQUEST_INTERVAL_S": pacer.gap,
         "PER_MARKET_ATTEMPTS": {s: d["ATTEMPTS"]
                                 for s, d in sorted(per_market.items())},
         "PER_MARKET_SUCCESSES": {s: d["SUCCESSES"]
                                  for s, d in sorted(per_market.items())},
         "PER_MARKET_429": {s: d["HTTP_429"] for s, d in sorted(per_market.items())},
+        "PER_MARKET_OTHER_FAILURES": {s: d["OTHER_FAILURES"]
+                                      for s, d in sorted(per_market.items())},
         "SCHEDULER": "SINGLE_GLOBAL_PACER_NO_CONCURRENCY",
         "BACKOFF": "GLOBAL_ON_429_HONOURING_RETRY_AFTER_WHEN_PRESENT",
         "PER_MARKET_RETRY_LOOP": "NONE_BY_CONSTRUCTION",
@@ -348,7 +431,8 @@ def confirm(outdir, slugs, http, rps, requests=None, no_prior_higher_rate=True):
         "CREDENTIALS": CREDENTIAL_PATH,
         "mirror_live": mirror_live,
     }
-    result.update(_starvation(per_market))
+    result.update(_starvation(per_market, requests))
+    result.update(rotation_fairness(order, slugs))
     result.update(validate(result))
     with (out / "confirm_report.json").open("w") as fh:
         json.dump(result, fh, indent=1, sort_keys=True, default=str)
