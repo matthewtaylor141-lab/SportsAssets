@@ -115,6 +115,22 @@ def main() -> int:
 
     print(f"\nbands whose sign FLIPS between merge-only and total: {flips}")
 
+    # band_of() returns NOT_IDENTIFIED for a price outside every band.
+    # Those lots are inside the reconciliation but outside the table, so
+    # their size has to be visible or the table silently understates the
+    # book it claims to describe.
+    print("\nOUT-OF-BAND lots (price outside every band; inside the "
+          "reconciliation, outside the table above):")
+    for w in clean:
+        e = recs[w].get("NOT_IDENTIFIED")
+        if not e:
+            print(f"  {w:<22} none")
+            continue
+        tot = recs[w].get("_TOTAL_STAKE") or 0.0
+        share = (e.get("TOTAL_STAKE", 0.0) / tot * 100) if tot else 0.0
+        print(f"  {w:<22} stake ${e.get('TOTAL_STAKE', 0):,.0f} "
+              f"({share:.2f}% of lot stake)  pnl ${e.get('TOTAL_PNL', 0):,.0f}")
+
     print()
     print("=" * 100)
     print("THE PREREGISTERED BAR: TOTAL_ROI > 0 in EVERY reconciling account")
