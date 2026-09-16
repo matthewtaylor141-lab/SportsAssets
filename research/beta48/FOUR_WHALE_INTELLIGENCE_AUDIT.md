@@ -255,34 +255,58 @@ Cumulative `F(t)` = P(first leg completed by t), any basis ceiling.
 | 3600s | 61.00% | 39.00% | 16.61% | 0.55% |
 | settlement | 68.31% | **31.69%** | 18.75% | *not comparable* |
 
-**A methodological catch that changes the reading.** The per-interval hazard
-appears to RISE to a peak at 600–1800s. **That is a duration artifact** — the
-late buckets are simply longer. Normalised **per minute** the hazard falls
-monotonically after the first seconds, from 34.7%/min in the first five seconds
-to 0.55%/min in the second half-hour. The final bucket spans hours to weeks and
-is not comparable to any of them.
-
-Both columns are reported because neither alone is the story: an operator
-waiting in wall-clock time faces the *interval* number, while the *rate* is
-what decays.
-
-**Verification of the figures supplied in the brief** — recomputed from the
-canonical grid rather than copied:
+**THREE SEPARATE CONCEPTS, and only one of them is a hazard rate.**
 
 ```
-H(5s, 120s)         = (0.16042 - 0.02893) / (1 - 0.02893) = 13.54%
-H(120s, 3600s)      = (0.60996 - 0.16042) / (1 - 0.16042) = 53.54%
-H(3600s, settlement)= (0.68308 - 0.60996) / (1 - 0.60996) = 18.75%
+INTERVAL_COMPLETION_H                      [F(t2)-F(t1)] / [1-F(t1)]
+    conditional probability of completing SOMEWHERE INSIDE the interval.
+
+AVERAGE_COMPLETION_PROBABILITY_PER_MINUTE  H / interval_minutes
+    DESCRIPTIVE ONLY. Not a hazard rate. It is a probability divided by a
+    duration: it is not additive across unequal intervals, and a short enough
+    interval drives it above 1.0 per minute, which no probability can be.
+
+CONTINUOUS_HAZARD_LAMBDA                   -ln( S(t2)/S(t1) ) / minutes
+    the equivalent constant continuous hazard. PREFERRED for comparison
+    across unequal intervals, because it is the quantity that IS additive.
 ```
 
-All three reproduce. The substantive point holds: **a leg still unpaired at one
-hour is in a different population** — only 18.75% of those survivors ever
-complete, against 53.54% for the cohort alive at two minutes.
+An earlier version of this appendix labelled `H / minutes` a hazard rate. It is
+not, and the correction matters: the two differ at every interval, and only
+lambda can be compared between a 5-second bucket and a 30-minute one.
 
-**This is not yet an exit rule.** It answers *how much completion probability
-remains*. It does not answer *when waiting stops paying*, which additionally
-requires pair basis, executable exit value, settlement expectancy, capital
-opportunity cost and tail risk — four of which this archive cannot supply.
+### The corrected lambda series (per minute, any basis)
+
+| interval | rn1 | ferrari | swisstony | hrh |
+|---|---|---|---|---|
+| 0–5s | 0.6127 | 0.3523 | 0.4408 | 0.3124 |
+| 5–10s | 0.2979 | 0.1362 | 0.1923 | 0.2022 |
+| 10–30s | 0.1616 | 0.0958 | 0.1085 | 0.0871 |
+| 30–60s | 0.1090 | 0.0783 | 0.0669 | 0.0668 |
+| 60–120s | 0.0748 | 0.0631 | 0.0420 | 0.0491 |
+| 120–300s | 0.0498 | 0.0460 | 0.0274 | 0.0344 |
+| 300–600s | 0.0314 | 0.0302 | 0.0174 | 0.0222 |
+| 600–1800s | 0.0165 | 0.0148 | 0.0087 | 0.0121 |
+| 1800–3600s | 0.0075 | 0.0061 | 0.0042 | 0.0054 |
+| 3600s–settlement | *not defined* | *not defined* | *not defined* | *not defined* |
+
+The settlement tail has **no well-defined elapsed duration**, so it has no
+lambda and is excluded from every comparison and every monotonicity test.
+
+```
+PAIRING_INTENSITY_DECAYS_WITH_TIME = YES
+```
+
+Strictly non-increasing in **all four accounts**, over all nine well-defined
+intervals, with a first-to-last ratio of **82x (rn1), 58x (ferrari), 105x
+(swisstony), 58x (hrh)**. The earlier per-interval reading suggested a *rise*
+to a peak at 600–1800s; that was entirely a duration artifact and the properly
+normalised series shows monotone decay with no exception anywhere.
+
+The substantive consequence is unchanged and now rests on the right metric: a
+leg still unpaired at one hour is in a different population, and the intensity
+with which it is still pairing is roughly two orders of magnitude below a fresh
+leg's.
 
 ### Half-lives, as fractions of EVENTUAL completions
 
@@ -323,6 +347,58 @@ the low-completion region. Whether that was a good trade-off depends on the
 economics of the completions it forwent — which this archive cannot price.
 
 ---
+
+## MACHINE-READABLE PRIORS
+
+The intelligence does not live only in this document.
+
+```
+ARTIFACT   research/beta48/evidence/whale_audit/whale_exit_priors_v1.json
+BUILDER    research/beta48/build_exit_priors.py     (pure derivation)
+TESTS      research/beta48/test_exit_priors.py      (21, all passing)
+```
+
+Per account × price band × basis ceiling × time interval it stores
+`CUMULATIVE_COMPLETION_F`, `SURVIVAL_S`, `INTERVAL_COMPLETION_H`,
+`CONTINUOUS_HAZARD_LAMBDA`, sample counts, the four channel P&Ls, an
+`EVIDENCE_LEVEL` and a `SUPPORT` flag. **No invented fields**: anything the
+archive does not carry is the string `NOT_IDENTIFIED`.
+
+**Account-specific AND cross-whale priors are both retained**, so BETTOR never
+silently inherits Ferrari:
+
+```
+RN1_PRIOR  FERRARI_PRIOR  SWISSTONY_PRIOR  HRH_PRIOR
+CROSS_WHALE_CONSENSUS_PRIOR
+```
+
+The consensus is **weighted by first-side acquisitions**, not averaged —
+`UNWEIGHTED_AVERAGE_REFUSED = True`, and a test asserts the consensus lambda
+lies inside its members' range. **swisstony is excluded from the consensus**,
+not quietly averaged in, because it is excluded from clean ground truth.
+Member lambdas are retained beside the consensus so disagreement survives
+aggregation rather than being collapsed into it.
+
+Sign agreement across all four is graded `HIGH_COHORT_SUPPORT` (4/4),
+`MODERATE_COHORT_SUPPORT` (3/4) or `LOW_COHORT_SUPPORT` (2/4 or sign
+conflict) — sign is descriptive, so the excluded account contributes to it.
+
+```
+PRIORS_ARE_INITIAL_ONLY = True
+SUPERSEDED_BY           = BETTOR_POSTERIOR once shadow data is credible
+```
+
+## THE SELL FINDING, PRESERVED
+
+```
+WHALE_SELL_POLICY_GENERALIZABLE = NOT_ESTABLISHED
+```
+
+The cohort teaches us **where losses accumulated**. It does not supply a
+solution, and BETTOR is not taught to copy whale exits. Two of four never sold;
+the two that did placed sells that band-level settled economics do not explain.
+This is a genuine gap in the archive and therefore an opportunity BETTOR must
+close prospectively, not a behaviour to imitate.
 
 ## LESSON DISPOSITION MATRIX
 

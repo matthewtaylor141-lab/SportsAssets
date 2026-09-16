@@ -69,13 +69,25 @@ not count — it is the market's opinion restated. Today `NOT_IDENTIFIED`, so
 every EV that depends on it is `NOT_IDENTIFIED`.
 
 ### COMPLETION_HAZARD_ENGINE  — LEVEL_A prior, live update
-Prior from the whale grid: `H(t1,t2)` conditioned on price band and basis
-ceiling, with the **per-minute** rate used for reasoning and the per-interval
-figure used for wall-clock planning. The archive's per-interval hazard rises to
-a peak at 600–1800s purely because those buckets are longer; per minute it
-decays monotonically, and the engine uses the decaying form.
+Prior from `whale_exit_priors_v1.json`, conditioned on price band, basis
+ceiling and `TIME_UNPAIRED`. The engine reasons in
+**`CONTINUOUS_HAZARD_LAMBDA`**, `-ln(S(t2)/S(t1)) / minutes`, because that is
+the only one of the three time metrics that is additive across unequal
+intervals. `INTERVAL_COMPLETION_H` is used where a wall-clock interval question
+is being asked, and `H / minutes` is carried **descriptive only** and is never
+called a rate.
 
-Outputs `P(COMPLETION_IN_NEXT_INTERVAL | band, basis, time_unpaired)`.
+```
+PAIRING_INTENSITY_DECAYS_WITH_TIME = YES
+  strictly non-increasing lambda in all four accounts, across all nine
+  well-defined intervals; first/last ratio 58x-105x.
+  The settlement tail has no defined duration and no lambda.
+```
+
+Outputs `P(COMPLETION_IN_NEXT_INTERVAL | band, basis, time_unpaired)` from
+lambda and the interval length, so the answer adapts to whatever decision
+cadence the engine is running at rather than being locked to the archive's
+bucket edges.
 
 ### LOSS_HAZARD_ENGINE  — LEVEL_B
 `P(LARGE_RESIDUAL_LOSS | state)`, from band-level settled economics as a prior,
@@ -208,6 +220,167 @@ reported as realised.
 
 ---
 
+## 5b. THE DECISION STATE MACHINE
+
+**State determines FEASIBLE actions. Economics chooses the action.** No action
+is ever hard-coded from a state.
+
+```
+FRESH_UNPAIRED              TIME_UNPAIRED <= 60s
+AGING_UNPAIRED              TIME_UNPAIRED > 60s
+PAIR_AVAILABLE              a complement is executable now
+PASSIVE_EXIT_AVAILABLE      a post-only rest is placeable
+AGGRESSIVE_EXIT_AVAILABLE   depth exists to cross
+HEDGE_AVAILABLE             a correlated instrument is executable
+DIRECTIONAL_HOLD            no feasible pair or exit improves on holding
+COMPLETED_PAIR              economics locked
+SETTLED                     terminal
+```
+
+`TIME_UNPAIRED` is a **first-class state variable**, bucketed on the frozen
+grid so the prior is directly addressable:
+
+```
+0-5s  5-10s  10-30s  30-60s  60-120s  120-300s  300-600s  600-1800s
+1800-3600s  >3600s
+```
+
+**A 5-second leg and a 60-minute orphan never share a pairing prior.** The
+lambda series makes the difference roughly two orders of magnitude, and the
+engine is not permitted to average across it. Later BETTOR may learn a smooth
+hazard; until then the buckets are the resolution the evidence supports.
+
+## 5c. THE ACTION SET
+
+```
+A_PAIR_NOW           A_WAIT              A_PASSIVE_EXIT
+A_AGGRESSIVE_EXIT    A_HEDGE             A_DIRECTIONAL_HOLD
+A_SETTLEMENT_HOLD
+
+and once economically paired:
+A_REALIZE_AND_RECYCLE                    A_HOLD_LOCKED_PAIR
+```
+
+**No default action, except risk-kill conditions.** Every feasible action is
+evaluated at every decision point.
+
+### EV_PAIR_NOW
+
+```
+EV_PAIR_NOW = locked pair value
+            - execution costs
+            + maker rebate where applicable   (zero below the clip floor)
+            + verified incentives where applicable
+            - incremental inventory / execution risk
+            + CAPITAL_RECYCLING_VALUE if the action releases capital
+```
+
+**Never merge merely because a pair exists.** Pair when its economic value
+dominates the alternatives.
+
+### EV_WAIT — where the case-study intelligence becomes machine logic
+
+```
+EV_WAIT = P_COMPLETE_NEXT_INTERVAL x EV_IF_COMPLETED
+        + (1 - P_COMPLETE_NEXT_INTERVAL) x EXPECTED_CONTINUATION_VALUE
+        - CAPITAL_OPPORTUNITY_COST
+        - INVENTORY_RISK_COST
+```
+
+```
+P_COMPLETE_NEXT_INTERVAL   from lambda (LEVEL_A prior -> BETTOR posterior)
+EV_IF_COMPLETED            from the live basis economics
+EXPECTED_CONTINUATION_VALUE  NOT_IDENTIFIED in V1 shadow
+CAPITAL_OPPORTUNITY_COST     NOT_IDENTIFIED until BETTOR has an opportunity set
+INVENTORY_RISK_COST          NOT_IDENTIFIED until fair value exists
+```
+
+**`EXPECTED_CONTINUATION_VALUE` is honestly `NOT_IDENTIFIED` in V1**, because it
+requires fair value and a model of future state transitions, and neither is
+measured. `EV_WAIT` is therefore `NOT_IDENTIFIED` in V1 shadow mode — and by
+the propagation rule that makes the whole comparison `NOT_IDENTIFIED`, so the
+engine records the state and declines to act. That is the correct V1 behaviour:
+the machinery is exercised, the numbers are not fabricated.
+
+## 5d. THE BELLMAN / OPTIMAL-STOPPING FRAME
+
+The mature form is a control problem, not a threshold:
+
+```
+V(state_t) = max { EV_PAIR_NOW,
+                   EV_PASSIVE_EXIT,
+                   EV_AGGRESSIVE_EXIT,
+                   EV_HEDGE,
+                   EV_DIRECTIONAL_HOLD,
+                   EV_SETTLEMENT,
+                   EXPECTED_VALUE_OF_WAITING }
+```
+
+where `EXPECTED_VALUE_OF_WAITING` is itself the discounted expectation of
+`V(state_{t+1})`. **This is the correct architecture for the exit problem.**
+
+```
+OPTIMAL_POLICY_LEARNED = NO
+```
+
+The frame is stated; the policy is not solved. Claiming otherwise would be
+claiming knowledge of transition dynamics we have not measured.
+
+## 5e. BASIS-TIME EFFICIENCY
+
+From the frontier, for adjacent basis ceilings at each horizon:
+
+```
+BASIS_RELAXATION_EFFICIENCY = DELTA_COMPLETION_PROBABILITY / DELTA_BASIS_COST
+```
+
+**Descriptive.** Maximum completion probability is not maximum profit — a pair
+completed at basis 1.00 completes at zero economics. The decision compares
+`MARGINAL_COMPLETION_PROBABILITY` against `MARGINAL_BASIS_COST`, and a
+tenfold completion gain for eight points of basis may or may not be worth
+taking depending on what the completion is worth.
+
+## 5f. PROSPECTIVE LEARNING LOOP
+
+```
+WHALE_PRIOR  ->  BETTOR_POSTERIOR
+```
+
+The whale priors are **initial priors only**. As shadow data accumulates BETTOR
+tracks its own:
+
+```
+BETTOR_COMPLETION_HAZARD        BETTOR_BASIS_FRONTIER
+BETTOR_PASSIVE_EXIT_FILL        BETTOR_AGGRESSIVE_EXIT_VALUE
+BETTOR_DIRECTIONAL_HOLD_OUTCOME BETTOR_CAPITAL_OCCUPANCY
+BETTOR_EXIT_ACTION_VALUE
+```
+
+and the whale prior's weight **decays as BETTOR's own evidence becomes
+statistically credible**. The machine is not frozen to historical whale
+behaviour — a prior from four accounts on a different venue is a starting
+point, not a law.
+
+## 5g. GHOST POLICY COMPARISON
+
+Every shadow position runs **all** policies simultaneously, no capital:
+
+```
+POLICY_WHALE_BASELINE      POLICY_ALWAYS_HOLD      POLICY_PAIR_FIRST
+POLICY_EXIT_ENGINE_V1      POLICY_NO_PAIR_DIRECTIONAL
+```
+
+Outcomes tracked separately, per policy, per position. This builds our own
+prospective policy-comparison dataset — the thing the whale archive could never
+provide.
+
+**Hypothetical passive fills obey the counterfactual fill model and are never
+assumed.** A ghost policy that rests an order does not get a fill because the
+touch traded; it gets one only under F0–F3, with `clob_after_entry > 0`, and
+`UNKNOWN_EXECUTION_TYPE != CLOB_EXECUTION` still binds. A ghost policy allowed
+to assume its own fills would beat every other policy by construction and
+measure nothing.
+
 ## 6. THE EXIT LEDGERS
 
 ```
@@ -259,8 +432,15 @@ That is the architectural claim. It is an assertion about the **decision
 procedure**, not about the P&L.
 
 ```
-BETTOR_POLICY_IS_MORE_COMPLETE_AND_ECONOMICALLY_EXPLICIT_THAN_ANY_SINGLE
-REFERENCE_POLICY  = the engineering objective of this document
+BETTOR_EXIT_ARCHITECTURE_IS_MORE_EXPLICIT_AND_MORE_COMPLETE_THAN_THE
+BEHAVIORAL_POLICY_RECONSTRUCTIBLE_FROM_THE_FOUR_WHALE_ARCHIVE
+    = what we can legitimately say today
+
+BETTOR_IS_MORE_PROFITABLE_THAN_THE_WHALES
+    = CANNOT YET BE SAID. Requires prospective validation.
+
+SUCCESS_DEFINED_AS   BETTOR_EXIT_ENGINE_VALUE_ADDED > 0 on PROSPECTIVE
+                     HELD-OUT data. Never historical fit.
 
 PERFORMANCE_SUPERIORITY = MUST BE PROVEN PROSPECTIVELY
 ```
@@ -282,4 +462,21 @@ collection spec in §5 exists precisely so that question is answerable.
 - No treating settlement as a default -- or as a failure.
 - No NOT_IDENTIFIED term silently evaluating to zero.
 - No order. No capital. No credential.
+- No ghost policy that assumes its own fills.
+- No claim that the optimal stopping policy has been learned.
 ```
+
+---
+
+## 9. THE PRIORS ARTIFACT
+
+```
+research/beta48/evidence/whale_audit/whale_exit_priors_v1.json
+research/beta48/build_exit_priors.py    pure derivation, no network
+research/beta48/test_exit_priors.py     21 tests
+```
+
+Account-specific priors (`RN1_PRIOR`, `FERRARI_PRIOR`, `SWISSTONY_PRIOR`,
+`HRH_PRIOR`) and a `CROSS_WHALE_CONSENSUS_PRIOR` weighted by first-side
+acquisitions, with swisstony excluded from the consensus and member lambdas
+retained beside it so disagreement survives aggregation.
