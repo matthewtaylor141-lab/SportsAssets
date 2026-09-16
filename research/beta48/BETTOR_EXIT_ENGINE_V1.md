@@ -1576,3 +1576,95 @@ TOUCH != TRADE_EVIDENCE != COUNTERFACTUAL_FILL
 REALIZED_MAKER_ECONOMICS = NOT_ESTABLISHED
 THE FILL MODEL IS FROZEN THROUGH HARVEST -- no new approximation.
 ```
+
+---
+
+## 19. TERMINOLOGY AND POPULATION SCOPE — THE LAST PRE-HARVEST FIXES
+
+### 19a. "MIN_OBSERVED_PERSISTENCE" ASSERTED A CONTINUITY WE NEVER OBSERVED
+
+```
+quote at t1 = X      quote at t2 = X
+```
+
+does not establish that X held between them. It may have disappeared, changed,
+and returned. So a span between matching sampled endpoints is not a **minimum**
+of anything — a minimum of a quantity we cannot bound at all is not a minimum.
+Renamed to say exactly what it measures:
+
+```
+OBSERVED_RUN_SPAN_S        elapsed time spanning consecutive sampled
+                           observations that match the run definition
+OBSERVED_RUN_SPAN_IS_NOT_A_MINIMUM_CONTINUOUS_LIFETIME = True
+
+PROVEN_CONTINUOUS_PERSISTENCE_S = NOT_IDENTIFIED
+TRUE_CONTINUOUS_QUOTE_LIFETIME  = NOT_IDENTIFIED
+INTRAINTERVAL_STATE_CHANGES     = NOT_OBSERVED
+```
+
+A genuine floor would need a venue-supplied timestamp saying the order rested
+from some instant. We have none, so the field exists and is `NOT_IDENTIFIED`
+rather than being quietly filled by the span. A test asserts no key anywhere
+still contains `MIN_OBSERVED_PERSISTENCE`.
+
+### 19b. CENSORING IS SCOPED TO THE SAMPLED RUN
+
+Survival vocabulary is borrowed deliberately and bounded deliberately:
+
+```
+CENSORING_APPLIES_TO_SAMPLED_RUN                     = YES
+CENSORING_APPLIES_TO_TRUE_CONTINUOUS_QUOTE_LIFETIME  = NOT_IDENTIFIED
+```
+
+`LEFT_CENSORED` / `RIGHT_CENSORED` still describe whether a run begins at our
+first observation or is open at our last. They do **not** carry over to the
+underlying lifetime, because a disappear-and-return between two sampled
+endpoints breaks the correspondence entirely — the reason is on the row.
+
+### 19c. EVENT-WEIGHTED COVERAGE TRAVELS WITH THE METRIC
+
+An unresolved market correctly gets no vote, which makes every event-weighted
+figure **conditional on the resolved subset**. That condition now ships beside
+the number rather than in a footnote:
+
+```
+CAPTURE_MARKETS_TOTAL                  CAPTURE_MARKETS_EVENT_RESOLVED
+CAPTURE_MARKETS_EVENT_UNRESOLVED       EVENT_WEIGHTING_MARKET_COVERAGE_PCT
+EVENT_WEIGHTED_POPULATION = EVENT_IDENTITY_RESOLVED_SUBSET
+EVENT_WEIGHTED_COVERS_ALL_CAPTURED_MARKETS = <bool>
+```
+
+### 19d. APPLES TO APPLES — THREE FIGURES, NOT TWO
+
+Market-weighted over ALL markets against event-weighted over RESOLVED markets
+differs for two reasons at once. The third figure separates them:
+
+```
+<RATE>                                    MARKET_WEIGHTED_ALL_MARKETS
+<RATE>_MARKET_WEIGHTED_RESOLVED_ONLY      same weights, resolved subset
+<RATE>_EVENT_WEIGHTED_RESOLVED_ONLY       one vote per event, same subset
+
+first vs second   isolates THE POPULATION DROP
+second vs third   isolates THE WEIGHTING
+```
+
+Only the last two compare like with like.
+
+### 19e. CLASS A STANDS
+
+Unchanged: `OBSERVED_TRANSITION_COUNT <= TRUE_TRANSITION_COUNT` for valid
+snapshots, with `FREQUENCIES_AS_CONTINUOUS_TIME_RATES = NOT_IDENTIFIED` — counts
+can be lower bounds while the ratios built from them inherit nothing.
+
+### 19f. PRE-HARVEST REDESIGN ENDS HERE
+
+```
+FILL MODEL                                            FROZEN THROUGH HARVEST
+PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION   NO
+TOUCH != TRADE_EVIDENCE != COUNTERFACTUAL_FILL
+REALIZED_MAKER_ECONOMICS                              NOT_ESTABLISHED
+ORDERS 0   CAPITAL 0   CREDENTIALS NONE   mirror_live false
+```
+
+The next action on this programme is the harvest of run 35120338223, A/B/C/D
+exactly as frozen.

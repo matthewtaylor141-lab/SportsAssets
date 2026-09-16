@@ -103,7 +103,7 @@ CLASS_A_SAMPLING_BIAS_DIRECTION = "UNDERCOUNT"
 CLASS_A_BOUND_SUBJECT_TO = "THE_SNAPSHOTS_THEMSELVES_BEING_VALID"
 
 CLASS_B_STATE_OCCUPANCY = (
-    "ONE_TICK_SNAPSHOT_SHARE", "MIN_OBSERVED_PERSISTENCE_S",
+    "ONE_TICK_SNAPSHOT_SHARE", "OBSERVED_RUN_SPAN_S",
     "TIME_AT_PRICE_OBSERVED_S", "TOUCH_SIZE_BID", "TOUCH_SIZE_ASK",
     "QUEUE_AHEAD_AT_HYPOTHETICAL_ENTRY", "SPREAD",
 )
@@ -239,22 +239,35 @@ def revisit_cadence(rows):
 
 
 def persistence_runs(rows, key="BID"):
-    """Quote duration as an INTERVAL, with its censoring recorded.
+    """The SPAN between matching sampled endpoints. Not a duration of anything.
 
-    A run is consecutive observations at an unchanged price. What we can say is
-    that the price held for AT LEAST the span between the first and last
-    observation of the run -- `MIN_OBSERVED_PERSISTENCE_S`. What we cannot say
-    is when it actually started or ended, because both lie inside an unobserved
-    gap, and we cannot say it held CONTINUOUSLY: it may have moved and come
-    back between two reads.
+    WHY THIS IS NOT CALLED A MINIMUM PERSISTENCE, WHICH IS WHAT I CALLED IT
+    FIRST. A run here is consecutive OBSERVATIONS whose price matched. Two
+    matching endpoints do not establish that the price held between them:
 
-        LEFT_CENSORED   the run starts at our first observation of this market,
-                        so the price may have been there long before
+        quote at t1 = X      quote at t2 = X
+        -> X may have disappeared, changed, and returned to X in between
+
+    So `OBSERVED_RUN_SPAN_S` is elapsed time spanning consecutive sampled
+    observations that match the run definition, and nothing more. Calling it a
+    MINIMUM would assert a continuity we did not observe -- a minimum of a
+    quantity we cannot bound at all is not a minimum.
+
+    A genuine floor would need a venue-supplied timestamp saying the order
+    rested from some instant. We have none, so:
+
+        PROVEN_CONTINUOUS_PERSISTENCE_S = NOT_IDENTIFIED
+
+    and the censoring flags below describe the SAMPLED RUN only:
+
+        LEFT_CENSORED   the run starts at our first observation of this market
         RIGHT_CENSORED  the run is still open at our last observation
         INTRAINTERVAL_STATE_CHANGES = NOT_OBSERVED, always
 
-    TRUE_QUOTE_LIFETIME is therefore never equal to an observed duration, and
-    this function does not emit a field by that name.
+    Survival-analysis vocabulary is borrowed deliberately and bounded
+    deliberately: it applies to the run we sampled, NOT to the underlying
+    continuous lifetime, because a disappear-and-return between two endpoints
+    breaks the correspondence entirely.
     """
     by_slug, _ = _rows_by_slug(rows)
     spans, left, right, uncensored, runs = [], 0, 0, 0, 0
@@ -275,14 +288,27 @@ def persistence_runs(rows, key="BID"):
                 right += rc
                 uncensored += (not lc and not rc)
                 start_i, cur = i, v
-    out = _dist(spans, "MIN_OBSERVED_PERSISTENCE_S")
+    out = _dist(spans, "OBSERVED_RUN_SPAN_S")
     out.update({
+        "OBSERVED_RUN_SPAN_MEANS": ("ELAPSED_TIME_SPANNING_CONSECUTIVE_"
+                                    "SAMPLED_OBSERVATIONS_THAT_MATCH"),
+        "OBSERVED_RUN_SPAN_IS_NOT_A_MINIMUM_CONTINUOUS_LIFETIME": True,
         "PERSISTENCE_RUNS": runs,
+
+        # Censoring, scoped to what it actually describes.
         "LEFT_CENSORED_RUNS": left,
         "RIGHT_CENSORED_RUNS": right,
         "UNCENSORED_RUNS": uncensored,
+        "CENSORING_APPLIES_TO_SAMPLED_RUN": "YES",
+        "CENSORING_APPLIES_TO_TRUE_CONTINUOUS_QUOTE_LIFETIME": NOT_IDENTIFIED,
+        "WHY": ("a disappear-and-return between two sampled endpoints breaks "
+                "the correspondence between the sampled run and any "
+                "continuous lifetime, so the censoring flags bound the run "
+                "and not the lifetime"),
+
         "INTRAINTERVAL_STATE_CHANGES": "NOT_OBSERVED",
-        "TRUE_QUOTE_LIFETIME": NOT_IDENTIFIED,
+        "PROVEN_CONTINUOUS_PERSISTENCE_S": NOT_IDENTIFIED,
+        "TRUE_CONTINUOUS_QUOTE_LIFETIME": NOT_IDENTIFIED,
         "SAMPLING_BIAS_DIRECTION": CLASS_B_SAMPLING_BIAS_DIRECTION,
         "METRIC_CLASS": "B_STATE_OCCUPANCY",
         "KEY": key,
@@ -359,42 +385,97 @@ RATE_COUNTS = {
 }
 
 
+COUNT_KEYS = ("one_tick", "spreads", "moves", "mid_moves", "improvements",
+              "depth_changes", "through", "obs")
+
+
 def _event_weighted(counts_by_slug, event_of):
-    """Aggregate each event INTERNALLY first, then one equal vote per event.
+    """Three figures per rate, because two of them differ for two reasons.
 
     THE ORDER MATTERS AND IT IS THE WHOLE POINT. Each event's own counts are
     pooled into a single event-level rate -- so a market inside the event
     contributes in proportion to how much of that event we actually observed --
-    and only then does each event contribute ONE value to the mean.
+    and only then does each event contribute ONE value to the mean. What this
+    is NOT is a reweighting of individual market rows after pooling, which
+    would leave an event carrying more markets, or more observations, with more
+    influence than an event carrying one.
 
-    What this is NOT is a reweighting of individual market rows after pooling,
-    which would leave an event carrying more markets, or more observations,
-    with more influence than an event carrying one.
+    AND THE COMPARISON NEEDS A THIRD FIGURE. Market-weighted over ALL markets
+    against event-weighted over RESOLVED markets differs for two reasons at
+    once: the weights changed AND the population changed. So the resolved-only
+    market weighting is computed too, and only the last two isolate the effect
+    of weighting:
+
+        MARKET_WEIGHTED_ALL_MARKETS      every captured market
+        MARKET_WEIGHTED_RESOLVED_ONLY    same weights, resolved subset
+        EVENT_WEIGHTED_RESOLVED_ONLY     one vote per event, resolved subset
+
+    Event-weighted statistics are CONDITIONAL on the event-resolved subset, and
+    the coverage that makes them conditional travels in the same dict.
     """
+    total = len(counts_by_slug)
     if not event_of:
-        return {k + "_EVENT_WEIGHTED": NOT_IDENTIFIED for k in WEIGHTED_RATES}
-    by_event = {}
+        out = {}
+        for k in WEIGHTED_RATES:
+            out[k + "_MARKET_WEIGHTED_RESOLVED_ONLY"] = NOT_IDENTIFIED
+            out[k + "_EVENT_WEIGHTED_RESOLVED_ONLY"] = NOT_IDENTIFIED
+        out.update({
+            "EVENT_WEIGHTED_POPULATION": NOT_IDENTIFIED,
+            "CAPTURE_MARKETS_TOTAL": total,
+            "CAPTURE_MARKETS_EVENT_RESOLVED": 0,
+            "CAPTURE_MARKETS_EVENT_UNRESOLVED": total,
+            "EVENT_WEIGHTING_MARKET_COVERAGE_PCT": NOT_IDENTIFIED,
+            "EVENTS_IN_WEIGHTING": 0,
+        })
+        return out
+
+    by_event, resolved = {}, {k: 0 for k in COUNT_KEYS}
+    n_resolved = 0
     for slug, c in counts_by_slug.items():
         ev = event_of.get(slug)
         if ev is None:
             # An unresolved market gets no vote rather than an event of its own.
             continue
-        acc = by_event.setdefault(ev, {k: 0 for k in
-                                       ("one_tick", "spreads", "moves",
-                                        "mid_moves", "improvements",
-                                        "depth_changes", "through", "obs")})
-        for k in acc:
+        n_resolved += 1
+        acc = by_event.setdefault(ev, {k: 0 for k in COUNT_KEYS})
+        for k in COUNT_KEYS:
             acc[k] += c[k]
+            resolved[k] += c[k]
+
     out = {}
     for key, (num, den) in RATE_COUNTS.items():
+        # Same weights, smaller population. Isolates the DROP.
+        out[key + "_MARKET_WEIGHTED_RESOLVED_ONLY"] = (
+            D(resolved[num]) / D(resolved[den]) if resolved[den]
+            else NOT_IDENTIFIED)
+        # One vote per event, same population. Against the line above, this
+        # isolates the WEIGHTING.
         ev_vals = [D(a[num]) / D(a[den]) for a in by_event.values() if a[den]]
-        out[key + "_EVENT_WEIGHTED"] = (sum(ev_vals) / D(len(ev_vals))
-                                        if ev_vals else NOT_IDENTIFIED)
-    out["EVENTS_IN_WEIGHTING"] = len(by_event)
-    out["ONE_EVENT_ONE_VOTE"] = True
-    out["EVENT_AGGREGATED_INTERNALLY_FIRST"] = True
-    out["MARKET_ROWS_REWEIGHTED_AFTER_POOLING"] = False
-    out["MARKETS_WITHOUT_AN_EVENT_GET_NO_VOTE"] = True
+        out[key + "_EVENT_WEIGHTED_RESOLVED_ONLY"] = (
+            sum(ev_vals) / D(len(ev_vals)) if ev_vals else NOT_IDENTIFIED)
+
+    out.update({
+        "EVENTS_IN_WEIGHTING": len(by_event),
+        "ONE_EVENT_ONE_VOTE": True,
+        "EVENT_AGGREGATED_INTERNALLY_FIRST": True,
+        "MARKET_ROWS_REWEIGHTED_AFTER_POOLING": False,
+        "MARKETS_WITHOUT_AN_EVENT_GET_NO_VOTE": True,
+
+        # The coverage that makes the event figures conditional. It travels
+        # with them so a reader cannot pick the number up without it.
+        "EVENT_WEIGHTED_POPULATION": "EVENT_IDENTITY_RESOLVED_SUBSET",
+        "CAPTURE_MARKETS_TOTAL": total,
+        "CAPTURE_MARKETS_EVENT_RESOLVED": n_resolved,
+        "CAPTURE_MARKETS_EVENT_UNRESOLVED": total - n_resolved,
+        "EVENT_WEIGHTING_MARKET_COVERAGE_PCT": (
+            (D(n_resolved) * D(100) / D(total)) if total else NOT_IDENTIFIED),
+        "EVENT_WEIGHTED_COVERS_ALL_CAPTURED_MARKETS": n_resolved == total,
+        "THREE_WAY_COMPARISON": ("MARKET_WEIGHTED_ALL_MARKETS vs "
+                                 "MARKET_WEIGHTED_RESOLVED_ONLY isolates the "
+                                 "population drop; RESOLVED_ONLY vs "
+                                 "EVENT_WEIGHTED_RESOLVED_ONLY isolates the "
+                                 "weighting"),
+    })
     return out
 
 
@@ -492,14 +573,15 @@ def book_metrics(rows, tick_size=TICK_SIZE, horizons_s=MARKOUT_HORIZONS_S,
         "CLASS_A_SAMPLING_BIAS_DIRECTION": CLASS_A_SAMPLING_BIAS_DIRECTION,
         "CLASS_A_BOUND_SUBJECT_TO": CLASS_A_BOUND_SUBJECT_TO,
 
-        # --- the shares built from them. MARKET-WEIGHTED. ---
+        # --- the shares built from them. MARKET-WEIGHTED, ALL MARKETS. ---
         "ONE_TICK_SNAPSHOT_SHARE": r_(t["one_tick"], t["spreads"]),
         "BOOK_UPDATE_RATE_OBSERVED": r_(t["moves"], obs),
         "MID_MOVE_FREQUENCY_OBSERVED": r_(t["mid_moves"], obs),
         "PRICE_IMPROVEMENT_FREQUENCY_OBSERVED": r_(t["improvements"], obs),
         "DEPTH_CHANGE_RATE_OBSERVED": r_(t["depth_changes"], obs),
         "MARKET_MOVED_THROUGH_QUOTE_OBSERVED": r_(t["through"], obs),
-        "WEIGHTING": "MARKET_WEIGHTED",
+        "WEIGHTING": "MARKET_WEIGHTED_ALL_MARKETS",
+        "MARKET_WEIGHTED_POPULATION": "ALL_CAPTURED_MARKETS",
         "FREQUENCIES_ARE_PER_OBSERVED_TRANSITION":
             FREQUENCIES_ARE_PER_OBSERVED_TRANSITION,
         "FREQUENCIES_AS_CONTINUOUS_TIME_RATES":

@@ -7,6 +7,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from decimal import Decimal as D
+
 import harvest as H
 
 SRC = Path(__file__).resolve().parent / "harvest.py"
@@ -239,9 +241,17 @@ class MarketsFromOneEventAreNotIndependent(unittest.TestCase):
                       event_of={"aec-nfl-a-b": "E1", "tsc-nfl-a-b-total": "E1",
                                 "aec-cfb-c-d": "E2"})
         b = r["B_BOOK_STRUCTURE"]
-        self.assertEqual(b["WEIGHTING"], "MARKET_WEIGHTED")
+        self.assertEqual(b["WEIGHTING"], "MARKET_WEIGHTED_ALL_MARKETS")
         self.assertEqual(b["EVENTS_IN_WEIGHTING"], 2)
-        self.assertIn("BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED", b)
+        # All three figures, so the weighting effect and the population drop
+        # can be told apart.
+        for k in ("BOOK_UPDATE_RATE_OBSERVED",
+                  "BOOK_UPDATE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY",
+                  "BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"):
+            self.assertIn(k, b, k)
+        self.assertEqual(b["EVENT_WEIGHTED_POPULATION"],
+                         "EVENT_IDENTITY_RESOLVED_SUBSET")
+        self.assertEqual(b["EVENT_WEIGHTING_MARKET_COVERAGE_PCT"], D(100))
 
     def test_without_an_event_map_independence_is_not_assumed(self):
         a = H.harvest(self._capture())["A_CAPTURE_QUALITY"]

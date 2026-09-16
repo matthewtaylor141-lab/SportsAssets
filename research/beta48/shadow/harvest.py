@@ -293,9 +293,12 @@ def harvest(path, universe_path=None, event_of=None, board_path=None):
             "TOUCHES": ladder["TOUCHES"],
             "MOVE_THROUGH_OBSERVED":
                 book["MARKET_MOVED_THROUGH_QUOTE_OBSERVED"],
-            "MOVE_THROUGH_OBSERVED_EVENT_WEIGHTED":
-                book.get("MARKET_MOVED_THROUGH_QUOTE_OBSERVED_EVENT_WEIGHTED",
-                         NOT_IDENTIFIED),
+            "MOVE_THROUGH_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY":
+                book.get("MARKET_MOVED_THROUGH_QUOTE_OBSERVED"
+                         "_MARKET_WEIGHTED_RESOLVED_ONLY", NOT_IDENTIFIED),
+            "MOVE_THROUGH_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY":
+                book.get("MARKET_MOVED_THROUGH_QUOTE_OBSERVED"
+                         "_EVENT_WEIGHTED_RESOLVED_ONLY", NOT_IDENTIFIED),
             "POST_QUOTE_BOOK_MARKOUTS": {
                 k: v for k, v in book.items()
                 if k.startswith("POST_QUOTE_BOOK_MARKOUT")},

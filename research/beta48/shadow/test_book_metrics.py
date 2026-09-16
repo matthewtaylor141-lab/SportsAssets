@@ -80,7 +80,7 @@ class SamplingIsNotContinuousObservation(unittest.TestCase):
 
     def test_the_sampled_rates_carry_the_observed_suffix(self):
         m = BM.book_metrics([tick(i) for i in range(5)])
-        for k in ("BID_MIN_OBSERVED_PERSISTENCE_S_P50",
+        for k in ("BID_OBSERVED_RUN_SPAN_S_P50",
                   "TIME_AT_PRICE_OBSERVED_S_P50",
                   "BOOK_UPDATE_RATE_OBSERVED",
                   "MARKET_MOVED_THROUGH_QUOTE_OBSERVED",
@@ -140,7 +140,7 @@ class EventClusteringIsNotIndependence(unittest.TestCase):
     def test_both_weightings_are_reported(self):
         m = BM.book_metrics(self._rows(),
                             event_of={"a": "E1", "b": "E1", "c": "E2"})
-        self.assertEqual(m["WEIGHTING"], "MARKET_WEIGHTED")
+        self.assertEqual(m["WEIGHTING"], "MARKET_WEIGHTED_ALL_MARKETS")
         self.assertEqual(m["EVENTS_IN_WEIGHTING"], 2)
         self.assertTrue(m["ONE_EVENT_ONE_VOTE"])
 
@@ -151,13 +151,13 @@ class EventClusteringIsNotIndependence(unittest.TestCase):
         # and E2 is 0.0, so the average is 0.5 -- the two-market event counts
         # once, not twice.
         self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED"], D(4) / D(6))
-        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED"],
+        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
                          D("0.5"))
 
     def test_without_an_event_map_the_event_weighting_is_not_identified(self):
         m = BM.book_metrics(self._rows())
         for k in BM.WEIGHTED_RATES:
-            self.assertEqual(m[k + "_EVENT_WEIGHTED"], NI, k)
+            self.assertEqual(m[k + "_EVENT_WEIGHTED_RESOLVED_ONLY"], NI, k)
 
 
 class TheSpread(unittest.TestCase):
@@ -332,8 +332,11 @@ class QuoteDurationIsIntervalCensored(unittest.TestCase):
     def test_the_span_is_a_minimum_not_a_lifetime(self):
         rows = [tick(0, bid="0.54"), tick(1, bid="0.54"), tick(2, bid="0.55")]
         r = BM.persistence_runs(rows, key="BID")
-        self.assertEqual(r["MIN_OBSERVED_PERSISTENCE_S_MAX"], D("3"))
-        self.assertEqual(r["TRUE_QUOTE_LIFETIME"], NI)
+        self.assertEqual(r["OBSERVED_RUN_SPAN_S_MAX"], D("3"))
+        self.assertEqual(r["PROVEN_CONTINUOUS_PERSISTENCE_S"], NI)
+        self.assertEqual(r["TRUE_CONTINUOUS_QUOTE_LIFETIME"], NI)
+        self.assertTrue(
+            r["OBSERVED_RUN_SPAN_IS_NOT_A_MINIMUM_CONTINUOUS_LIFETIME"])
         self.assertEqual(r["INTRAINTERVAL_STATE_CHANGES"], "NOT_OBSERVED")
 
     def test_it_is_class_b_and_its_bias_direction_is_unknown(self):
@@ -344,9 +347,9 @@ class QuoteDurationIsIntervalCensored(unittest.TestCase):
     def test_both_sides_are_reported_in_the_metrics(self):
         m = BM.book_metrics([tick(i) for i in range(4)])
         for side in ("BID", "ASK"):
-            self.assertIn("%s_MIN_OBSERVED_PERSISTENCE_S_P50" % side, m)
+            self.assertIn("%s_OBSERVED_RUN_SPAN_S_P50" % side, m)
             self.assertIn("%s_LEFT_CENSORED_RUNS" % side, m)
-            self.assertEqual(m["%s_TRUE_QUOTE_LIFETIME" % side], NI)
+            self.assertEqual(m["%s_PROVEN_CONTINUOUS_PERSISTENCE_S" % side], NI)
 
     def test_runs_are_per_market_not_across_markets(self):
         rows = [tick(0, slug="a", bid="0.54"), tick(0, slug="b", bid="0.20"),
@@ -376,7 +379,7 @@ class EventWeightingAggregatesInternallyFirst(unittest.TestCase):
                             event_of={"a": "E1", "b": "E1", "c": "E2"})
         # E1 pooled: 20 changes over 22 transitions. E2: 0 over 2.
         # One vote each -> (20/22 + 0) / 2.
-        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED"],
+        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
                          (D(20) / D(22)) / D(2))
         self.assertTrue(m["EVENT_AGGREGATED_INTERNALLY_FIRST"])
         self.assertFalse(m["MARKET_ROWS_REWEIGHTED_AFTER_POOLING"])
@@ -388,7 +391,7 @@ class EventWeightingAggregatesInternallyFirst(unittest.TestCase):
                             event_of={"a": "E1", "b": "E1", "c": "E2"})
         mean_of_market_rates = (D(1) + D(0)) / D(2)      # E1 the wrong way
         wrong = (mean_of_market_rates + D(0)) / D(2)
-        self.assertNotEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED"],
+        self.assertNotEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
                             wrong)
 
     def test_a_market_with_no_event_gets_no_vote(self):
@@ -399,5 +402,144 @@ class EventWeightingAggregatesInternallyFirst(unittest.TestCase):
     def test_market_weighting_is_unchanged_and_named(self):
         m = BM.book_metrics(self._rows(),
                             event_of={"a": "E1", "b": "E1", "c": "E2"})
-        self.assertEqual(m["WEIGHTING"], "MARKET_WEIGHTED")
+        self.assertEqual(m["WEIGHTING"], "MARKET_WEIGHTED_ALL_MARKETS")
         self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED"], D(20) / D(24))
+
+
+class TheRunSpanClaimsNoContinuity(unittest.TestCase):
+
+    def test_it_is_named_for_what_it_measures(self):
+        r = BM.persistence_runs([tick(i) for i in range(4)])
+        self.assertEqual(r["OBSERVED_RUN_SPAN_MEANS"],
+                         "ELAPSED_TIME_SPANNING_CONSECUTIVE_SAMPLED_"
+                         "OBSERVATIONS_THAT_MATCH")
+        self.assertTrue(
+            r["OBSERVED_RUN_SPAN_IS_NOT_A_MINIMUM_CONTINUOUS_LIFETIME"])
+
+    def test_a_proven_floor_would_be_a_separate_quantity_and_we_have_none(self):
+        r = BM.persistence_runs([tick(i) for i in range(4)])
+        self.assertEqual(r["PROVEN_CONTINUOUS_PERSISTENCE_S"], NI)
+
+    def test_two_matching_endpoints_do_not_prove_continuity(self):
+        """X at t1 and X at t2 is consistent with X leaving and returning."""
+        r = BM.persistence_runs([tick(0, bid="0.54"), tick(1, bid="0.54")])
+        self.assertEqual(r["OBSERVED_RUN_SPAN_S_MAX"], D("3"))
+        self.assertEqual(r["INTRAINTERVAL_STATE_CHANGES"], "NOT_OBSERVED")
+        self.assertEqual(r["PROVEN_CONTINUOUS_PERSISTENCE_S"], NI)
+
+    def test_the_minimum_wording_is_gone_from_every_key(self):
+        m = BM.book_metrics([tick(i) for i in range(4)])
+        for k in m:
+            self.assertNotIn("MIN_OBSERVED_PERSISTENCE", k)
+
+
+class CensoringIsScopedToTheSampledRun(unittest.TestCase):
+
+    def test_it_applies_to_the_run_and_not_to_the_lifetime(self):
+        r = BM.persistence_runs([tick(i) for i in range(4)])
+        self.assertEqual(r["CENSORING_APPLIES_TO_SAMPLED_RUN"], "YES")
+        self.assertEqual(
+            r["CENSORING_APPLIES_TO_TRUE_CONTINUOUS_QUOTE_LIFETIME"], NI)
+
+    def test_the_reason_names_the_disappear_and_return_case(self):
+        r = BM.persistence_runs([tick(i) for i in range(4)])
+        self.assertIn("disappear-and-return", r["WHY"])
+
+    def test_the_flags_themselves_still_work(self):
+        rows = [tick(0, bid="0.54"), tick(1, bid="0.55"), tick(2, bid="0.55"),
+                tick(3, bid="0.56")]
+        r = BM.persistence_runs(rows, key="BID")
+        self.assertEqual(r["LEFT_CENSORED_RUNS"], 1)
+        self.assertEqual(r["RIGHT_CENSORED_RUNS"], 1)
+        self.assertEqual(r["UNCENSORED_RUNS"], 1)
+
+    def test_both_sides_carry_the_scoping(self):
+        m = BM.book_metrics([tick(i) for i in range(4)])
+        for side in ("BID", "ASK"):
+            self.assertEqual(m["%s_CENSORING_APPLIES_TO_SAMPLED_RUN" % side],
+                             "YES")
+            self.assertEqual(
+                m["%s_CENSORING_APPLIES_TO_TRUE_CONTINUOUS_QUOTE_LIFETIME"
+                  % side], NI)
+
+
+class EventWeightedCoverageTravelsWithTheMetric(unittest.TestCase):
+
+    def _rows(self):
+        rows = []
+        for slug in ("a", "b", "c", "d"):
+            for i in range(4):
+                rows.append(tick(i, slug=slug, bid_changed=(slug == "a"
+                                                            and i > 0)))
+        return rows
+
+    def test_the_coverage_is_reported_beside_the_figure(self):
+        m = BM.book_metrics(self._rows(), event_of={"a": "E1", "b": "E1"})
+        self.assertEqual(m["CAPTURE_MARKETS_TOTAL"], 4)
+        self.assertEqual(m["CAPTURE_MARKETS_EVENT_RESOLVED"], 2)
+        self.assertEqual(m["CAPTURE_MARKETS_EVENT_UNRESOLVED"], 2)
+        self.assertEqual(m["EVENT_WEIGHTING_MARKET_COVERAGE_PCT"], D(50))
+        self.assertEqual(m["EVENT_WEIGHTED_POPULATION"],
+                         "EVENT_IDENTITY_RESOLVED_SUBSET")
+        self.assertFalse(m["EVENT_WEIGHTED_COVERS_ALL_CAPTURED_MARKETS"])
+
+    def test_full_coverage_is_stated_as_such(self):
+        m = BM.book_metrics(self._rows(),
+                            event_of={"a": "E1", "b": "E1", "c": "E2",
+                                      "d": "E3"})
+        self.assertEqual(m["EVENT_WEIGHTING_MARKET_COVERAGE_PCT"], D(100))
+        self.assertTrue(m["EVENT_WEIGHTED_COVERS_ALL_CAPTURED_MARKETS"])
+
+    def test_with_no_map_the_coverage_is_zero_and_says_so(self):
+        m = BM.book_metrics(self._rows())
+        self.assertEqual(m["CAPTURE_MARKETS_EVENT_RESOLVED"], 0)
+        self.assertEqual(m["CAPTURE_MARKETS_EVENT_UNRESOLVED"], 4)
+        self.assertEqual(m["EVENT_WEIGHTED_POPULATION"], NI)
+
+
+class TheThreeWayWeightingComparison(unittest.TestCase):
+
+    def _rows(self):
+        """'a' moves every tick; 'b', 'c', 'd' never move. Only a and b are
+        event-resolved, so dropping the unresolved markets changes the number
+        by itself -- which is exactly what the third figure isolates."""
+        rows = []
+        for slug in ("a", "b", "c", "d"):
+            for i in range(4):
+                rows.append(tick(i, slug=slug,
+                                 bid_changed=(slug == "a" and i > 0)))
+        return rows
+
+    def setUp(self):
+        self.m = BM.book_metrics(self._rows(),
+                                 event_of={"a": "E1", "b": "E2"})
+
+    def test_all_three_figures_are_present(self):
+        self.assertIn("BOOK_UPDATE_RATE_OBSERVED", self.m)
+        self.assertIn("BOOK_UPDATE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY",
+                      self.m)
+        self.assertIn("BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY",
+                      self.m)
+
+    def test_the_population_drop_is_visible_on_its_own(self):
+        # All markets: 3 of 12 transitions moved. Resolved only (a, b): 3 of 6.
+        self.assertEqual(self.m["BOOK_UPDATE_RATE_OBSERVED"], D(3) / D(12))
+        self.assertEqual(
+            self.m["BOOK_UPDATE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY"],
+            D(3) / D(6))
+
+    def test_only_the_last_two_isolate_the_weighting(self):
+        # E1 = 1.0, E2 = 0.0, one vote each -> 0.5, against 0.5 market-weighted
+        # on the same subset. Same population, so the difference here is the
+        # weighting alone -- and on this fixture it happens to be zero.
+        self.assertEqual(
+            self.m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
+            D("0.5"))
+        self.assertEqual(
+            self.m["BOOK_UPDATE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY"],
+            D("0.5"))
+
+    def test_the_comparison_is_explained_on_the_row(self):
+        self.assertIn("isolates the population drop", self.m["THREE_WAY_COMPARISON"])
+        self.assertEqual(self.m["MARKET_WEIGHTED_POPULATION"],
+                         "ALL_CAPTURED_MARKETS")
