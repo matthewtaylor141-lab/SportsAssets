@@ -389,6 +389,16 @@ def harvest(outdir, rps=None):
             "criterion?" % rps),
 
         "COLLECTOR_RATE_OPERATIONALLY_VALIDATED": ("YES" if validated else "NO"),
+        "RESEARCH_COLLECTOR_OPERATIONALLY_VALIDATED": ("YES" if validated
+                                                       else "NO"),
+        "VALIDATION_LABEL": "%s_RPS_%s" % (sealed["RATE_RPS"],
+                                           RC.VALIDATION_LABEL),
+        "NOT_THIS_LABEL": "%s_RPS_%s" % (sealed["RATE_RPS"],
+                                         RC.NOT_THIS_LABEL),
+        "INDIRECT_BETTOR_PMUS_LOAD_ISOLATION": "NOT_ESTABLISHED",
+        "INDIRECT_CONFOUND_MAGNITUDE": NOT_IDENTIFIED,
+        "ALL_BETTOR_PMUS_TRAFFIC_ISOLATED": "NO",
+        "REFUSED_SCOPE_LABELS": list(RC.REFUSED_LABELS),
         "FAIL_REASON": (reasons if reasons else None),
         "PROPOSED_SUBSTANTIVE_CAPTURE_RATE": (
             "%s RPS" % sealed["RATE_RPS"] if validated else NOT_IDENTIFIED),

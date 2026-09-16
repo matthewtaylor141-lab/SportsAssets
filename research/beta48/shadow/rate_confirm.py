@@ -77,9 +77,21 @@ VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED = NOT_IDENTIFIED
 RATE_LIMIT_WINDOW_SEMANTICS = NOT_IDENTIFIED
 OPERATIONAL_VALIDATION_DOES_NOT_REQUIRE_MECHANISM_IDENTIFICATION = True
 
+# WHAT THIS VALIDATES, NAMED SO THE SCOPE TRAVELS WITH THE NUMBER.
+#
+# The objective is not "identify the venue's standalone limit in a vacuum" --
+# that would need class B traffic controlled too, and it is not. The objective
+# is "does a 0.25 rps public research collector operate cleanly while every
+# controllable BETTOR research collector is excluded". A useful operational
+# result, and a smaller one than the name it nearly got.
+VALIDATION_LABEL = "RESEARCH_COLLECTOR_OPERATIONAL_VALIDATION"
+NOT_THIS_LABEL = "VENUE_STANDALONE_LIMIT_VALIDATION"
+
 # Labels this module refuses to emit whatever the result looks like.
 REFUSED_LABELS = ("VENUE_MAXIMUM_SAFE_RATE", "VENUE_RATE_LIMIT_KNOWN",
-                  "RATE_LIMIT_WINDOW_IDENTIFIED", "MAXIMUM_SUSTAINABLE_RATE")
+                  "RATE_LIMIT_WINDOW_IDENTIFIED", "MAXIMUM_SUSTAINABLE_RATE",
+                  "ABSOLUTE_PMUS_RATE_LIMIT", "ALL_BETTOR_PMUS_TRAFFIC_ISOLATED",
+                  "VENUE_STANDALONE_LIMIT_VALIDATION")
 WHY_REFUSED = ("a clean run at one rate bounds our own behaviour, not the "
                "venue's ceiling; no rate above the tested one was tested")
 
@@ -359,7 +371,13 @@ def validate(result):
     return {
         "THIS_IS": THIS_IS,
         "THIS_IS_NOT": THIS_IS_NOT,
+        "VALIDATION_LABEL": "%s_RPS_%s" % (result["RATE_RPS"], VALIDATION_LABEL),
+        "NOT_THIS_LABEL": "%s_RPS_%s" % (result["RATE_RPS"], NOT_THIS_LABEL),
+        "RESEARCH_COLLECTOR_OPERATIONALLY_VALIDATED": ("YES" if ok else "NO"),
         "COLLECTOR_RATE_OPERATIONALLY_VALIDATED": ("YES" if ok else "NO"),
+        "INDIRECT_BETTOR_PMUS_LOAD_ISOLATION": "NOT_ESTABLISHED",
+        "INDIRECT_CONFOUND_MAGNITUDE": NOT_IDENTIFIED,
+        "ALL_BETTOR_PMUS_TRAFFIC_ISOLATED": "NO",
         "VALIDATED_RATE_RPS": (result["RATE_RPS"] if ok else NOT_IDENTIFIED),
         "VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED":
             VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED,

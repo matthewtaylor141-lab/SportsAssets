@@ -12,6 +12,7 @@ from pathlib import Path
 
 import venue_domain as VD
 
+NI = VD.NOT_IDENTIFIED
 ROOT = Path(__file__).resolve().parents[3]
 
 
@@ -68,39 +69,79 @@ class TheIsolationVerdict(unittest.TestCase):
 
     def test_an_empty_field_is_isolation(self):
         i = VD.isolation([], self.KNOWN, self_run_id="1")
-        self.assertEqual(i["BETTOR_COLLECTOR_ISOLATION"], "ESTABLISHED")
-        self.assertEqual(i["ACTIVE_CONFLICTING_WORKFLOWS"], 0)
+        self.assertEqual(i["DIRECT_RESEARCH_COLLECTOR_ISOLATION"],
+                         "ESTABLISHED")
+        self.assertEqual(i["ACTIVE_DIRECT_CONFLICTS"], 0)
+        self.assertEqual(i["PENDING_DIRECT_CONFLICTS"], 0)
 
     def test_the_exact_collision_that_happened_is_caught(self):
         """run85-phase2-capture in_progress while we start."""
         i = VD.isolation(
             [{"name": "run85-phase2-capture", "id": 35122016351,
               "status": "in_progress"}], self.KNOWN, self_run_id="1")
-        self.assertEqual(i["BETTOR_COLLECTOR_ISOLATION"], "NOT_ESTABLISHED")
+        self.assertEqual(i["DIRECT_RESEARCH_COLLECTOR_ISOLATION"],
+                         "NOT_ESTABLISHED")
+        self.assertEqual(i["ACTIVE_DIRECT_CONFLICTS"], 1)
         self.assertEqual(i["CONFLICTS"][0]["NAME"], "run85-phase2-capture")
 
     def test_our_own_run_does_not_count_against_us(self):
         i = VD.isolation([{"name": "beta48-rate-confirm", "id": 99,
                            "status": "in_progress"}], self.KNOWN,
                          self_run_id=99)
-        self.assertEqual(i["BETTOR_COLLECTOR_ISOLATION"], "ESTABLISHED")
+        self.assertEqual(i["DIRECT_RESEARCH_COLLECTOR_ISOLATION"],
+                         "ESTABLISHED")
 
-    def test_a_queued_collector_also_counts(self):
-        i = VD.isolation([{"name": "beta48-forward-capture", "id": 7,
-                           "status": "queued"}], self.KNOWN, self_run_id="1")
-        self.assertEqual(i["BETTOR_COLLECTOR_ISOLATION"], "NOT_ESTABLISHED")
+    def test_a_queued_collector_counts_as_PENDING_not_active(self):
+        """Idle cannot mean in_progress == 0: a pending member can be
+        displaced by a newer queue, and ours could be the one displaced."""
+        i = VD.domain_idle([{"name": "beta48-forward-capture", "id": 7,
+                             "status": "queued"}], self.KNOWN, self_run_id="1")
+        self.assertEqual(i["ACTIVE_DIRECT_CONFLICTS"], 0)
+        self.assertEqual(i["PENDING_DIRECT_CONFLICTS"], 1)
+        self.assertEqual(i["DOMAIN_IDLE"], "NO")
+        self.assertIn("displace", i["WHY_NOT_IDLE"])
+
+    def test_idle_requires_both_counts_at_zero(self):
+        i = VD.domain_idle([], self.KNOWN, self_run_id="1")
+        self.assertEqual(i["DOMAIN_IDLE"], "YES")
+        self.assertIsNone(i["WHY_NOT_IDLE"])
 
     def test_an_unrelated_workflow_does_not_count(self):
         i = VD.isolation([{"name": "render-ops", "id": 7,
                            "status": "in_progress"}], self.KNOWN,
                          self_run_id="1")
-        self.assertEqual(i["BETTOR_COLLECTOR_ISOLATION"], "ESTABLISHED")
+        self.assertEqual(i["DIRECT_RESEARCH_COLLECTOR_ISOLATION"],
+                         "ESTABLISHED")
 
     def test_a_completed_run_does_not_count(self):
         i = VD.isolation([{"name": "run85-phase2-capture", "id": 7,
                            "status": "completed"}], self.KNOWN,
                          self_run_id="1")
-        self.assertEqual(i["BETTOR_COLLECTOR_ISOLATION"], "ESTABLISHED")
+        self.assertEqual(i["DIRECT_RESEARCH_COLLECTOR_ISOLATION"],
+                         "ESTABLISHED")
+
+
+class TwoClassesNeverCollapsed(unittest.TestCase):
+    """Class A is controlled and observable. Class B is neither. A single
+    combined verdict would assert B on the strength of A."""
+
+    def test_the_combined_label_is_refused_even_when_class_a_is_clean(self):
+        i = VD.isolation([], ["x"], self_run_id="1")
+        self.assertEqual(i["DIRECT_RESEARCH_COLLECTOR_ISOLATION"],
+                         "ESTABLISHED")
+        self.assertEqual(i["BETTOR_COLLECTOR_ISOLATION"],
+                         "REFUSED_SCOPE_NOT_ESTABLISHED_FOR_INDIRECT_TRAFFIC")
+        self.assertEqual(i["ALL_BETTOR_PMUS_TRAFFIC_ISOLATED"], "NO")
+
+    def test_indirect_load_stays_unestablished_and_unmeasured(self):
+        i = VD.isolation([], ["x"], self_run_id="1")
+        self.assertEqual(i["INDIRECT_BETTOR_PMUS_LOAD_ISOLATION"],
+                         "NOT_ESTABLISHED")
+        self.assertEqual(i["INDIRECT_CONFOUND_MAGNITUDE"], NI)
+
+    def test_not_seeing_indirect_traffic_is_not_zero_traffic(self):
+        i = VD.isolation([], ["x"], self_run_id="1")
+        self.assertIn("not evidence that there was none", i["ABSENCE_IS_NOT_ZERO"])
 
 
 class WhatWeMayNotClaim(unittest.TestCase):

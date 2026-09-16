@@ -73,6 +73,34 @@ ABSOLUTE_VENUE_ISOLATION = "REFUSED_NOT_KNOWABLE"
 WHY_ABSOLUTE_IS_REFUSED = (
     "we observe our own workflows, not the venue's global traffic")
 
+# ---------------------------------------------------------------------------
+# TWO CLASSES OF BETTOR TRAFFIC, AND ONLY ONE OF THEM IS CONTROLLED
+# ---------------------------------------------------------------------------
+#
+#   A  DIRECT GITHUB PMUS COLLECTORS -- the 18 discovered workflows. Mutually
+#      excluded by pmus-public-read-global, and observable run by run.
+#   B  INDIRECT PMUS TRAFFIC -- reaches the venue through our own API and the
+#      production path. Not controlled by a GitHub concurrency group, and its
+#      load contribution is not instrumented.
+#
+# So the isolation claim is scoped to class A and says so in its own name. A
+# single "BETTOR_COLLECTOR_ISOLATION = ESTABLISHED" would quietly assert class
+# B as well, which nothing here establishes.
+COMBINED_ISOLATION_LABEL = "REFUSED_SCOPE_NOT_ESTABLISHED_FOR_INDIRECT_TRAFFIC"
+INDIRECT_LOAD_ISOLATION = "NOT_ESTABLISHED"
+INDIRECT_CONFOUND_MAGNITUDE = NOT_IDENTIFIED
+WHY_INDIRECT_IS_UNCONTROLLED = (
+    "it reaches PMUS through our own API, which no GitHub concurrency group "
+    "gates, and no instrumentation counts those requests")
+ABSENCE_IS_NOT_ZERO = (
+    "not observing indirect traffic is not evidence that there was none; "
+    "INDIRECT_LOAD stays NOT_IDENTIFIED until something actually counts it")
+
+# GitHub reports a waiting run under several names; all of them occupy the
+# domain, and "idle" means none of them is present.
+ACTIVE_STATES = ("in_progress",)
+WAITING_STATES = ("queued", "pending", "requested", "waiting")
+
 
 # The scan walks every module in research/ and every workflow; the suite runs
 # it many times and the workflow runs the suite before venue contact, so the
@@ -206,36 +234,66 @@ def audit(root="."):
 
 
 def isolation(active_runs, known, self_run_id=None):
-    """BETTOR_COLLECTOR_ISOLATION from a list of currently active runs.
+    """DIRECT_RESEARCH_COLLECTOR_ISOLATION, scoped to class A and named so.
 
-    `active_runs` is [{"name":…, "id":…, "status":…}, …] as the Actions API
-    reports it. Our own run never counts against itself; anything else on the
-    known list does.
+    ACTIVE and PENDING conflicts are counted SEPARATELY. "Idle" cannot mean
+    in_progress == 0: GitHub allows a run to sit pending in the group, and a
+    newer queued run displaces an older pending one, so a domain with a waiting
+    member is not a domain we may start an experiment in.
     """
     known = set(known or ())
-    conflicts = []
+    active, waiting = [], []
     for r in active_runs or ():
         rid = str(r.get("id", ""))
         if self_run_id is not None and rid == str(self_run_id):
             continue
-        if r.get("status") not in ("in_progress", "queued", "pending",
-                                   "requested", "waiting"):
+        if r.get("name") not in known:
             continue
-        if r.get("name") in known:
-            conflicts.append({"NAME": r.get("name"), "ID": rid,
-                              "STATUS": r.get("status")})
-    clear = not conflicts
+        st = r.get("status")
+        row = {"NAME": r.get("name"), "ID": rid, "STATUS": st}
+        if st in ACTIVE_STATES:
+            active.append(row)
+        elif st in WAITING_STATES:
+            waiting.append(row)
+    clear = not active and not waiting
     return {
-        "ACTIVE_CONFLICTING_WORKFLOWS": len(conflicts),
-        "CONFLICTS": conflicts,
-        "BETTOR_COLLECTOR_ISOLATION": ("ESTABLISHED" if clear
-                                       else "NOT_ESTABLISHED"),
+        "ACTIVE_DIRECT_CONFLICTS": len(active),
+        "PENDING_DIRECT_CONFLICTS": len(waiting),
+        "ACTIVE_CONFLICTING_WORKFLOWS": len(active) + len(waiting),
+        "CONFLICTS": active + waiting,
+        "DIRECT_RESEARCH_COLLECTOR_ISOLATION": ("ESTABLISHED" if clear
+                                                else "NOT_ESTABLISHED"),
         "NO_OTHER_KNOWN_BETTOR_GITHUB_COLLECTOR_RUNNING": ("YES" if clear
                                                            else "NO"),
+
+        # class B, uncontrolled and unmeasured -- carried beside every class A
+        # verdict so the two are never read as one.
+        "INDIRECT_BETTOR_PMUS_LOAD_ISOLATION": INDIRECT_LOAD_ISOLATION,
+        "INDIRECT_CONFOUND_MAGNITUDE": INDIRECT_CONFOUND_MAGNITUDE,
+        "WHY_INDIRECT_IS_UNCONTROLLED": WHY_INDIRECT_IS_UNCONTROLLED,
+        "ABSENCE_IS_NOT_ZERO": ABSENCE_IS_NOT_ZERO,
+        "BETTOR_COLLECTOR_ISOLATION": COMBINED_ISOLATION_LABEL,
+        "ALL_BETTOR_PMUS_TRAFFIC_ISOLATED": "NO",
+
         "NO_OTHER_CLIENT_ANYWHERE_IS_USING_THE_VENUE": ABSOLUTE_VENUE_ISOLATION,
         "WHY_ABSOLUTE_IS_REFUSED": WHY_ABSOLUTE_IS_REFUSED,
         "KNOWN_VENUE_TOUCHING_WORKFLOWS": sorted(known),
     }
+
+
+def domain_idle(active_runs, known, self_run_id=None):
+    """May an experiment be dispatched? Both counts must be zero."""
+    i = isolation(active_runs, known, self_run_id)
+    idle = (i["ACTIVE_DIRECT_CONFLICTS"] == 0
+            and i["PENDING_DIRECT_CONFLICTS"] == 0)
+    i["DOMAIN_IDLE"] = "YES" if idle else "NO"
+    i["WHY_NOT_IDLE"] = (None if idle else
+                         "a member of the domain is %s; dispatching now would "
+                         "leave the experiment pending, where a newer queued "
+                         "run can displace it"
+                         % ("running" if i["ACTIVE_DIRECT_CONFLICTS"]
+                            else "waiting"))
+    return i
 
 
 def render(a):
