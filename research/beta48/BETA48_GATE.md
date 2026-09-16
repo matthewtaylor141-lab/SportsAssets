@@ -223,7 +223,47 @@ no production order, no capital. `mirror_live = false`.
 
 ---
 
-## G. What this sprint established that keeps its value
+## G. Two things that must not be glossed
+
+### RN1's two sources still disagree, and are neither averaged nor picked
+
+RN1 has two independent measurements of the same LIFETIME band split.
+Both are reported; neither is selected.
+
+| band | retained snapshot | run `35034361586` | diff (pp) |
+|---|---|---|---|
+| 0.00–0.10 | +87.834% | +66.639% | **−21.20** |
+| 0.10–0.30 | +22.588% | +23.020% | +0.43 |
+| 0.30–0.50 | +5.230% | +8.567% | +3.34 |
+| 0.50–0.70 | −1.410% | +1.353% | +2.76 |
+| 0.70–0.90 | −4.745% | −1.018% | +3.73 |
+| 0.90–1.01 | −3.676% | −1.119% | +2.56 |
+
+They agree on **shape** — both monotone decreasing, both crossing zero
+between 0.50–0.70 and 0.70–0.90 — and disagree on **level** in every
+band, by 2.1 to 21.2 pp. `RN1_TWO_SOURCE_COVERAGE_DISCREPANCY` stays
+open and unexplained.
+
+It does not move this gate: RN1 is DISCOVERY, the kill came from TOTAL
+economics across all six accounts, and the level disagreement is inside
+the MERGE channel that the TOTAL result already supersedes. But it is a
+standing reason not to quote any single RN1 band number as a quantity.
+
+### A provenance rule I did not follow
+
+The standing rule is that evidence commits are separate from analysis
+commits. In this sprint `ee7329c` and `eb7e383` each carry **both** the
+`blobs_v3` payloads and the analysis that reads them. The evidence is
+independently verifiable regardless — each payload is hash-matched to
+the `.sha256` its own runner wrote, on its own `beta48-evidence/<run>/`
+branch, and those branches are untouched by any analysis commit — so
+nothing here is unprovable. But the rule exists so that evidence cannot
+be quietly edited to fit an analysis in the same change, and I did not
+honour it. Recorded rather than left for someone to notice.
+
+---
+
+## H. What this sprint established that keeps its value
 
 1. The MERGE vs SETTLED decomposition, and now its per-band form:
    `pnl_by_open_band` books every closed lot the estimator books to the
