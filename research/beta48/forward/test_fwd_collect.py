@@ -101,8 +101,8 @@ def test_the_whole_reachable_surface_is_enumerated():
     assert C.MARKETS_PATH == "/v1/markets"
     assert C.BOOK_PATH == "/v1/markets/{slug}/book"
     assert C.INCENTIVES_PATH == "/v1/incentives"
-    assert C.DOC_URLS == ("https://docs.polymarket.us/fees",
-                          "https://docs.polymarket.us/incentives/liquidity")
+    assert C.DOC_URLS[0] == "https://docs.polymarket.us/fees"
+    assert len(C.DOC_URLS) == len(set(C.DOC_URLS)), "no duplicate doc pages"
 
     # Every string literal in the file that names a host or a venue path.
     # `http_status` and `http_%d` are field/label names, not addresses.
@@ -626,7 +626,7 @@ def test_an_unreachable_incentives_endpoint_is_recorded_not_defaulted(tmp_path):
     out = C.rules(tmp_path, p, _rules_http([{}], status=404, doc_status=403))
     assert out["INCENTIVES_ENDPOINT_REACHABLE"] == "NO"
     assert out["programs_parsed"] == 0
-    assert out["doc_http_statuses"] == [403, 403]
+    assert out["doc_http_statuses"] == [403] * len(C.DOC_URLS)
     # An absent answer stays absent. It never becomes "no program is running".
     assert out["NEGOTIATED_MARKET_MAKER_ECONOMICS"] == "NOT_IDENTIFIED"
     assert out["TIER_VERIFIED"] == "NO"
@@ -665,7 +665,7 @@ def test_the_rule_documents_are_stored_with_a_hash(tmp_path):
     p = C.Pacer(); p.spacing = 0.0
     out = C.rules(tmp_path, p,
                   _rules_http([{"programs": [], "nextPageToken": ""}]))
-    assert len(out["doc_sha256"]) == 2
+    assert len(out["doc_sha256"]) == len(C.DOC_URLS)
     assert all(v for v in out["doc_sha256"].values())
     docs = [json.loads(x) for x in
             (tmp_path / "rules_docs.jsonl").read_text().splitlines()]

@@ -110,9 +110,19 @@ INCENTIVES_PATH = "/v1/incentives"
 # reward schedule are otherwise relayed, and a relayed number is not a measured
 # one. These are the only non-gateway hosts this file names, they are fetched
 # GET and stored verbatim, and a failure is recorded as a row like any other.
+# The page list is not guessed: it is read off the nav of the fee page we
+# already captured, so every URL here is one the venue itself links.
 DOC_URLS = (
     "https://docs.polymarket.us/fees",
     "https://docs.polymarket.us/incentives/liquidity",
+    "https://docs.polymarket.us/incentives/overview",
+    "https://docs.polymarket.us/market-structure/collateral-and-margin",
+    "https://docs.polymarket.us/market-structure/"
+    "mutually-exclusive-collateral-return",
+    "https://docs.polymarket.us/api-reference/introduction",
+    "https://docs.polymarket.us/api-reference/websocket/overview",
+    "https://docs.polymarket.us/learn/advanced/liquidity",
+    "https://docs.polymarket.us/learn/trading/basics/order-types",
 )
 
 # The announced taker-coefficient cutover, 23:59 ET Wed 2026-09-16 = 03:59 UTC

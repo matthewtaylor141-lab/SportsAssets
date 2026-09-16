@@ -99,7 +99,11 @@ class ThreeSeparateFacts(unittest.TestCase):
     """
 
     def test_they_are_not_the_same_field(self):
-        self.assertEqual(F.PUBLIC_FEE_SCHEDULE, "DOCUMENTED")
+        """The schedule is now captured from the venue's own page. That says
+        nothing about whether BETTOR qualifies for any of it, and nothing at
+        all about bilateral terms -- which is the entire point of keeping the
+        three apart."""
+        self.assertEqual(F.PUBLIC_FEE_SCHEDULE, "CAPTURED_FROM_PRIMARY_SOURCE")
         self.assertEqual(F.BETTOR_TIER_ELIGIBILITY, "NOT_IDENTIFIED")
         self.assertEqual(F.NEGOTIATED_ECONOMICS, "NOT_IDENTIFIED")
 

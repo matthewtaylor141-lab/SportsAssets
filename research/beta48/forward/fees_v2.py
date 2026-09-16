@@ -80,7 +80,17 @@ REGIME_CUTOVER_UTC = datetime(2026, 9, 17, 3, 59, tzinfo=timezone.utc)
 #   NEGOTIATED_ECONOMICS     bilateral Market Maker Program terms. Public
 #                            economics are NOT assumed to be BETTOR's ceiling
 #                            OR its floor.
-PUBLIC_FEE_SCHEDULE = "DOCUMENTED"
+# PUBLIC_FEE_SCHEDULE is now CAPTURED, not relayed. The forward collector
+# fetched https://docs.polymarket.us/fees on 2026-09-16 00:57Z and stored it
+# verbatim with sha256
+# 25223cc8fd136a8539914e5e772735de1a978ce1050cc9759e22bb80690c8227.
+# Its own text carries the formula, both coefficients, the tier table, the
+# accelerated-placement route and the announced change -- see
+# test_fee_page_capture.py, which asserts each of those against the stored
+# bytes rather than against anything a human retyped.
+PUBLIC_FEE_SCHEDULE = "CAPTURED_FROM_PRIMARY_SOURCE"
+FEE_PAGE_SHA256 = (
+    "25223cc8fd136a8539914e5e772735de1a978ce1050cc9759e22bb80690c8227")
 BETTOR_TIER_ELIGIBILITY = "NOT_IDENTIFIED"
 NEGOTIATED_ECONOMICS = "NOT_IDENTIFIED"
 
@@ -163,9 +173,75 @@ def effective_theta_taker(regime: str, tier: str = "BASE") -> D:
 
 
 def taker_fee_at(contracts, price, regime: str, tier: str = "BASE") -> D:
-    """A charge, positive, banker-rounded to the cent, per fill."""
+    """A charge, positive, banker-rounded to the cent, per fill.
+
+    SINGLE-LEG ONLY. A combo has its own curve -- see combo_taker_fee.
+    """
     return bankers_cents(exact_fee(effective_theta_taker(regime, tier),
                                    contracts, price))
+
+
+# --------------------------------------------------- combos have their own --
+#
+# CAPTURED from the fee page, verbatim:
+#
+#   "Combos -- the combo taker fee curve becomes
+#    Fee = C x p x [0.0695(1 - p) + 0.04(1 - p)^4]"
+#
+# This is NOT the single-leg formula, and the difference runs the WRONG WAY for
+# anyone hoping a combo is a cheaper way to get paired:
+#
+#   combo = 0.0695 * C * p * (1-p)  +  0.04 * C * p * (1-p)^4
+#         = single-leg fee          +  a strictly non-negative surcharge
+#
+# The surcharge is maximised at p = 0.2 (where d/dp of p(1-p)^4 is zero) and is
+# worth 0.04 * 0.2 * 0.8^4 = $0.0032768 per contract there, against a single-leg
+# taker fee of $0.01112 -- about 29% more. It is small near p = 0.5 and largest
+# in the cheap tail, which is exactly the band the retrospective work kept
+# finding interesting.
+#
+# WHAT IS NOT STATED and is therefore NOT ASSUMED: whether a combo's MAKER leg
+# earns the standard -0.0125 rebate. The page says maker rebates are unchanged
+# by the September update, which is a statement about the update, not about
+# combo treatment.
+COMBO_TAKER_SURCHARGE_COEFF = D("0.04")
+COMBO_TAKER_SURCHARGE_EXPONENT = 4
+COMBO_MAKER_REBATE_TREATMENT = "NOT_IDENTIFIED"
+COMBO_INCENTIVE_ELIGIBILITY = "NOT_IDENTIFIED"
+COMBO_LEG_RANGE = (2, 10)
+
+
+def combo_taker_fee_exact(contracts, price, regime: str = "SEP2026") -> D:
+    """Fee = C * p * [theta(1-p) + 0.04(1-p)^4], unrounded.
+
+    The captured curve names 0.0695 explicitly, i.e. the SEP2026 coefficient.
+    The JUL2026 form of the combo curve was NOT captured and is not invented:
+    asking for it raises rather than silently substituting 0.06.
+    """
+    if regime != "SEP2026":
+        raise ValueError(
+            "the combo curve was captured only in its SEP2026 form; "
+            "COMBO_CURVE_JUL2026 = NOT_IDENTIFIED")
+    p = D(str(price))
+    c = D(str(contracts))
+    one_minus = D(1) - p
+    return c * p * (theta_taker(regime) * one_minus
+                    + COMBO_TAKER_SURCHARGE_COEFF
+                    * one_minus ** COMBO_TAKER_SURCHARGE_EXPONENT)
+
+
+def combo_taker_fee(contracts, price, regime: str = "SEP2026") -> D:
+    return bankers_cents(combo_taker_fee_exact(contracts, price, regime))
+
+
+def combo_vs_single_leg_surcharge(contracts, price,
+                                  regime: str = "SEP2026") -> D:
+    """What a combo costs ABOVE two single-leg takes at the same price.
+
+    Positive everywhere in (0, 1): a combo is never the cheaper way to take.
+    """
+    single = exact_fee(theta_taker(regime), contracts, price)
+    return combo_taker_fee_exact(contracts, price, regime) - single
 
 
 def maker_rebate_at(contracts, price) -> D:

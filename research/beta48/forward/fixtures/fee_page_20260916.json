@@ -1,0 +1,10 @@
+{
+ "url": "https://docs.polymarket.us/fees",
+ "captured_at_utc": "2026-09-16T00:57:12.802581+00:00",
+ "http_status": 200,
+ "page_sha256": "25223cc8fd136a8539914e5e772735de1a978ce1050cc9759e22bb80690c8227",
+ "response_bytes": 386599,
+ "text_sha256": "644fafee14364eb126d5b16d408a3c3722683796b539b61f867bbe67287e3c15",
+ "segment": "seg_35042094434",
+ "NOTE": "Verbatim capture of the venue's own fee page. Stored so the schedule is evidence, not relay."
+}
