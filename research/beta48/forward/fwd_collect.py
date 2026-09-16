@@ -182,9 +182,11 @@ def board(outdir: Path, pacer, http, max_pages=MAX_PAGES_DEFAULT) -> dict:
     short or empty. If the page cap is hit first it is written NO, and the
     dataset is then a prefix and must be treated as one.
     """
-    raw, markets, pages = [], [], 0
+    raw, pages = [], 0
     offset = 0
     exhausted = False
+    advanced = True
+    by_slug: dict = {}                 # DEDUPE. See why, below.
     while pages < max_pages:
         params = {"active": "true", "closed": "false",
                   "limit": PAGE_LIMIT, "offset": offset}
@@ -196,16 +198,40 @@ def board(outdir: Path, pacer, http, max_pages=MAX_PAGES_DEFAULT) -> dict:
         if not isinstance(items, list) or not items:
             exhausted = True
             break
-        markets.extend(items)
+        # DEDUPE BY SLUG, AND DETECT A PAGINATION THAT DOES NOT ADVANCE.
+        #
+        # The first live run walked all 200 pages in 101 s and then selected
+        # ZERO two-outcome events. That is the signature of a repeated page:
+        # the same market arriving many times makes its event look like it has
+        # 200 outcomes, so every event fails the len(ms) == 2 test and the
+        # whole board is silently discarded. The repository already knows this
+        # venue family ignores paging params -- reference_pull.py carries
+        # "NEVER the offset param" in its header for the data-api.
+        #
+        # Deduping makes the grouping correct whatever the API does, and a page
+        # that contributes no NEW slug ends the walk and is NAMED, so a
+        # non-advancing cursor can never again be mistaken for a large board.
+        fresh = 0
+        for m in items:
+            if not isinstance(m, dict):
+                continue
+            slug = m.get("slug")
+            if not slug or slug in by_slug:
+                continue
+            by_slug[slug] = m
+            fresh += 1
+        if fresh == 0:
+            advanced = False
+            exhausted = True
+            break
         if len(items) < PAGE_LIMIT:
             exhausted = True
             break
         offset += len(items)
 
+    markets = list(by_slug.values())
     by_event = {}
     for m in markets:
-        if not isinstance(m, dict):
-            continue
         ev, slug = m.get("eventSlug"), m.get("slug")
         if not ev or not slug:
             continue
@@ -237,6 +263,7 @@ def board(outdir: Path, pacer, http, max_pages=MAX_PAGES_DEFAULT) -> dict:
            "captured_at_utc": wall,
            "pages_walked": pages,
            "DISCOVERY_LIST_EXHAUSTED": "YES" if exhausted else "NO",
+           "PAGINATION_ADVANCED": "YES" if advanced else "NO",
            "markets_seen": len(markets),
            "events_two_outcome": len(selected),
            "events_skipped": len(skipped),
@@ -246,8 +273,10 @@ def board(outdir: Path, pacer, http, max_pages=MAX_PAGES_DEFAULT) -> dict:
     (outdir / "board_raw.jsonl").write_text(
         "".join(json.dumps(x) + "\n" for x in raw))
     (outdir / "board.json").write_text(json.dumps(out, indent=1))
-    print("markets seen %d | two-outcome events %d | pages %d | exhausted %s"
-          % (len(markets), len(selected), pages, out["DISCOVERY_LIST_EXHAUSTED"]))
+    print("distinct markets %d | two-outcome events %d | pages %d | "
+          "exhausted %s | pagination advanced %s"
+          % (len(markets), len(selected), pages,
+             out["DISCOVERY_LIST_EXHAUSTED"], out["PAGINATION_ADVANCED"]))
     return out
 
 

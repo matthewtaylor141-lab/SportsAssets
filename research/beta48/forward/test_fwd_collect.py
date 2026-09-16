@@ -147,21 +147,25 @@ def test_a_failed_read_is_recorded_as_a_row_not_omitted():
 def test_board_marks_a_prefix_as_a_prefix(tmp_path):
     """DISCOVERY_LIST_EXHAUSTED = NO is the whole reason the old dataset was
     unusable. Hitting the page cap must say so."""
+    state = {"n": 0}
     class Full:
         def get(self, *a, **k):
+            i = state["n"]; state["n"] += 1
             class R:
                 status_code = 200
                 headers = {}
                 content = b"{}"
                 @staticmethod
                 def json():
+                    base = i * C.PAGE_LIMIT
                     return {"markets": [
-                        {"eventSlug": f"e{i}", "slug": f"s{i}"}
-                        for i in range(C.PAGE_LIMIT)]}
+                        {"eventSlug": f"e{base+j}", "slug": f"s{base+j}"}
+                        for j in range(C.PAGE_LIMIT)]}
             return R()
     p = C.Pacer(); p.spacing = 0.0
     out = C.board(tmp_path, p, Full(), max_pages=2)
     assert out["DISCOVERY_LIST_EXHAUSTED"] == "NO"
+    assert out["PAGINATION_ADVANCED"] == "YES", "this mock DOES advance"
     assert out["pages_walked"] == 2
 
 
@@ -290,3 +294,61 @@ def test_no_fill_probability_or_expectancy_is_computed_here():
               "rebate", "pnl", "PNL"]
     hits = [b for b in banned if b in CODE]
     assert not hits, f"the collector computes economics it must not: {hits}"
+
+
+# --------------- the defect the first live run exposed, pinned as a test --
+
+def test_a_repeated_page_does_not_destroy_the_two_outcome_grouping(tmp_path):
+    """The first live run walked 200 pages in 101 s and selected ZERO events.
+
+    That is the signature of an API that ignores the paging parameter: the
+    same market arrives many times, its event appears to have 200 outcomes,
+    every event fails the len(ms) == 2 test, and the whole board is silently
+    discarded as "not two-outcome". Deduping by slug makes the grouping
+    correct whatever the API does.
+    """
+    class Repeats:
+        def get(self, *a, **k):
+            class R:
+                status_code = 200
+                headers = {}
+                content = b"{}"
+                @staticmethod
+                def json():
+                    # one event, two legs, returned on EVERY page
+                    return {"markets": [{"eventSlug": "e", "slug": "a"},
+                                        {"eventSlug": "e", "slug": "b"}]
+                                       * (C.PAGE_LIMIT // 2)}
+            return R()
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.board(tmp_path, p, Repeats(), max_pages=200)
+    assert out["events_two_outcome"] == 1, out
+    assert out["markets_seen"] == 2, "duplicates must collapse to distinct slugs"
+    assert out["PAGINATION_ADVANCED"] == "NO"
+    assert out["pages_walked"] == 2, "a non-advancing page must END the walk"
+
+
+def test_a_genuinely_advancing_pagination_still_walks(tmp_path):
+    """The dedupe must not break a venue whose paging DOES work."""
+    state = {"n": 0}
+    class Advances:
+        def get(self, url, params=None, timeout=None):
+            i = state["n"]; state["n"] += 1
+            class R:
+                status_code = 200
+                headers = {}
+                content = b"{}"
+                @staticmethod
+                def json():
+                    if i >= 3:
+                        return {"markets": []}
+                    base = i * C.PAGE_LIMIT
+                    return {"markets": [
+                        {"eventSlug": f"e{(base+j)//2}", "slug": f"s{base+j}"}
+                        for j in range(C.PAGE_LIMIT)]}
+            return R()
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.board(tmp_path, p, Advances(), max_pages=200)
+    assert out["PAGINATION_ADVANCED"] == "YES"
+    assert out["markets_seen"] == 3 * C.PAGE_LIMIT
+    assert out["events_two_outcome"] == 3 * C.PAGE_LIMIT // 2
