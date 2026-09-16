@@ -131,8 +131,10 @@ class TheHazardPrior(unittest.TestCase):
         self.assertEqual(P.lambda_for(self.pri, "0s-5s"), want)
 
     def test_an_account_series_is_that_accounts_own_numbers(self):
+        # A ceiling series is DESCRIPTIVE and must be asked for as such.
         got = P.lambda_for(self.pri, "0s-5s", account="rn1",
-                           ceiling="ceiling_0.90")
+                           ceiling="ceiling_0.90",
+                           subdistribution_acknowledged=True)
         rows = (self.pri["ACCOUNT_PRIORS"]["rn1"]["HAZARD_BY_BASIS_CEILING"]
                 ["ceiling_0.90"]["ROWS"])
         self.assertEqual(got, rows[0]["CONTINUOUS_HAZARD_LAMBDA"])
@@ -145,7 +147,8 @@ class TheHazardPrior(unittest.TestCase):
         """The consensus is published at any_basis only. Answering a different
         question than the one asked is worse than answering nothing."""
         self.assertEqual(
-            P.lambda_for(self.pri, "0s-5s", ceiling="ceiling_0.90"),
+            P.lambda_for(self.pri, "0s-5s", ceiling="ceiling_0.90",
+                         subdistribution_acknowledged=True),
             P.NOT_IDENTIFIED)
 
     def test_an_unknown_account_is_not_identified_not_the_consensus(self):
@@ -744,3 +747,163 @@ class TheShrinkageIsContinuousNotACliff(unittest.TestCase):
         import inspect
         src = inspect.getsource(P.blended_lambda)
         self.assertNotIn("posterior_weight_precision", src)
+
+
+class TheSubdistributionIsNotAHazard(unittest.TestCase):
+
+    def setUp(self):
+        self.pri = P.load_priors(
+            Path(__file__).resolve().parent.parent / "evidence"
+            / "whale_audit" / "whale_exit_priors_v1.json")
+
+    def test_asking_for_a_ceiling_lambda_unacknowledged_raises(self):
+        """The refusal is the point: a ceiling lambda quietly returned would
+        be fed to EV_WAIT as though it were this leg's hazard."""
+        with self.assertRaises(P.SubdistributionMisuse):
+            P.lambda_for(self.pri, "0s-5s", account="rn1",
+                         ceiling="ceiling_0.90")
+
+    def test_the_decision_row_hazard_is_always_the_any_basis_one(self):
+        obs = {"TIME_UNPAIRED_S": 45, "COMPLEMENT_EXECUTABLE_NOW": True}
+        row = P.decision_row(obs, self.pri, horizon_minutes=1.0,
+                             ceiling="ceiling_0.90")
+        t = row["TIME_UNPAIRED"]
+        self.assertEqual(t["CONTINUOUS_HAZARD_LAMBDA"],
+                         P.lambda_for(self.pri, "30s-60s"))
+        self.assertEqual(t["BASIS_CEILING_ASKED"], "ceiling_0.90")
+        self.assertTrue(
+            t["P_JOINT_IS_A_DECOMPOSITION_NOT_A_SUBDISTRIBUTION_LAMBDA"])
+
+    def test_the_joint_is_the_product_of_the_two_separate_factors(self):
+        obs = {"TIME_UNPAIRED_S": 45, "COMPLEMENT_EXECUTABLE_NOW": True}
+        row = P.decision_row(obs, self.pri, horizon_minutes=1.0,
+                             ceiling="ceiling_0.90", quality_account="rn1")
+        t = row["TIME_UNPAIRED"]
+        self.assertAlmostEqual(
+            t["P_COMPLETE_AND_BASIS_LE_B"],
+            t["P_COMPLETE_NEXT_INTERVAL"] * t["P_BASIS_LE_B_GIVEN_COMPLETION"])
+
+    def test_the_joint_is_below_the_unconditional_completion_probability(self):
+        obs = {"TIME_UNPAIRED_S": 45, "COMPLEMENT_EXECUTABLE_NOW": True}
+        t = P.decision_row(obs, self.pri, horizon_minutes=1.0,
+                           ceiling="ceiling_0.90")["TIME_UNPAIRED"]
+        self.assertLess(t["P_COMPLETE_AND_BASIS_LE_B"],
+                        t["P_COMPLETE_NEXT_INTERVAL"])
+
+    def test_the_conditional_is_read_from_interval_counts(self):
+        got = P.p_basis_at_or_below(self.pri, "0s-5s", "ceiling_0.90",
+                                    account="rn1")
+        cell = [c for c in self.pri["ACCOUNT_PRIORS"]["rn1"]
+                ["BASIS_QUALITY_GIVEN_COMPLETION"]
+                if c["INTERVAL"] == "0s-5s"][0]
+        self.assertEqual(
+            got,
+            cell["BY_CEILING"]["ceiling_0.90"]
+            ["P_BASIS_LE_B_GIVEN_COMPLETION_IN_INTERVAL"])
+
+    def test_no_ceiling_asked_means_no_quality_factor_and_no_joint(self):
+        obs = {"TIME_UNPAIRED_S": 45, "COMPLEMENT_EXECUTABLE_NOW": True}
+        t = P.decision_row(obs, self.pri, horizon_minutes=1.0)["TIME_UNPAIRED"]
+        self.assertEqual(t["P_BASIS_LE_B_GIVEN_COMPLETION"], P.NOT_IDENTIFIED)
+        self.assertEqual(t["P_COMPLETE_AND_BASIS_LE_B"], P.NOT_IDENTIFIED)
+
+    def test_an_unknown_factor_makes_the_joint_unknown(self):
+        self.assertEqual(
+            P.p_complete_at_or_below_basis(0.5, P.NOT_IDENTIFIED),
+            P.NOT_IDENTIFIED)
+        self.assertEqual(
+            P.p_complete_at_or_below_basis(P.NOT_IDENTIFIED, 0.5),
+            P.NOT_IDENTIFIED)
+
+    def test_a_conditional_outside_the_unit_interval_is_an_error(self):
+        with self.assertRaises(ValueError):
+            P.p_complete_at_or_below_basis(0.5, 1.4)
+
+    def test_the_row_declares_both_models_unidentified(self):
+        obs = {"TIME_UNPAIRED_S": 45}
+        t = P.decision_row(obs, self.pri, horizon_minutes=1.0)["TIME_UNPAIRED"]
+        self.assertEqual(t["CAUSE_SPECIFIC_HAZARD_MODEL"], P.NOT_IDENTIFIED)
+        self.assertEqual(t["COMPETING_RISK_MODEL"], P.NOT_IDENTIFIED)
+
+
+class TheEventHistory(unittest.TestCase):
+
+    def setUp(self):
+        self.pri = P.load_priors(
+            Path(__file__).resolve().parent.parent / "evidence"
+            / "whale_audit" / "whale_exit_priors_v1.json")
+
+    def test_a_history_opens_with_an_entry_and_no_terminal_state(self):
+        h = P.new_history("pos-1", 1000.0, {"price": "0.41"})
+        self.assertEqual(h["EVENTS"][0]["KIND"], "ENTRY")
+        self.assertEqual(h["TERMINAL_STATE"], P.NOT_IDENTIFIED)
+        self.assertEqual(h["LABEL"], P.COUNTERFACTUAL)
+
+    def test_events_out_of_order_are_refused_not_silently_sorted(self):
+        """Order IS the data. Sorting a bad clock would hide the bug that a
+        hazard estimate would then be built on."""
+        h = P.new_history("pos-1", 1000.0)
+        P.append_event(h, "BOOK_STATE", 1001.0)
+        with self.assertRaises(ValueError):
+            P.append_event(h, "BOOK_STATE", 999.0)
+
+    def test_an_unknown_event_kind_is_refused(self):
+        h = P.new_history("pos-1", 1000.0)
+        with self.assertRaises(ValueError):
+            P.append_event(h, "SOMETHING_NEW", 1001.0)
+
+    def test_a_position_ends_once_and_only_into_a_known_terminal_state(self):
+        h = P.new_history("pos-1", 1000.0)
+        with self.assertRaises(ValueError):
+            P.close_history(h, "VANISHED", 1100.0)
+        P.close_history(h, "PAIRED", 1100.0)
+        with self.assertRaises(ValueError):
+            P.close_history(h, "SETTLED", 1200.0)
+        with self.assertRaises(ValueError):
+            P.append_event(h, "BOOK_STATE", 1300.0)
+
+    def test_a_tick_writes_the_roads_not_taken_as_their_own_events(self):
+        """Recording only the chosen action would reproduce the whale
+        archive's central defect at higher resolution."""
+        obs = {"TIME_UNPAIRED_S": 45, "COMPLEMENT_EXECUTABLE_NOW": True,
+               "PASSIVE_EXIT_PLACEABLE": True,
+               "AGGRESSIVE_EXIT_DEPTH_EXISTS": False,
+               "HEDGE_INSTRUMENT_EXECUTABLE": False}
+        evs = {a: (D("0.01") if a == P.A_PAIR_NOW else D("0.00"), ())
+               for a in P.actions_in_play(P.feasibility(obs))}
+        row = P.decision_row(obs, self.pri, horizon_minutes=1.0, evs=evs)
+        h = P.record_tick(P.new_history("pos-1", 1000.0), row, 1045.0)
+        kinds = [e["KIND"] for e in h["EVENTS"]]
+        self.assertIn("PAIR_OPPORTUNITY_APPEARED", kinds)
+        self.assertIn("PASSIVE_EXIT_AVAILABLE", kinds)
+        # infeasible ones were never available, so they are not logged as such
+        self.assertNotIn("AGGRESSIVE_EXIT_AVAILABLE", kinds)
+        self.assertNotIn("HEDGE_AVAILABLE", kinds)
+        rejected = [e for e in h["EVENTS"] if e["KIND"] == "ACTION_NOT_SELECTED"]
+        self.assertGreater(len(rejected), 0)
+        self.assertTrue(all("EV" in e for e in rejected))
+
+    def test_the_terminal_states_are_the_competing_risks_we_cannot_yet_see(self):
+        self.assertEqual(set(P.TERMINAL_STATES),
+                         {"PAIRED", "EXITED_PASSIVE", "EXITED_AGGRESSIVE",
+                          "HEDGED", "SETTLED", "OTHER"})
+        for k in ("CAUSE_SPECIFIC_COMPLETION_HAZARD",
+                  "CAUSE_SPECIFIC_EXIT_HAZARD", "COMPETING_RISKS",
+                  "OPTIMAL_STOPPING_POLICY"):
+            self.assertIn(k, P.ESTIMABLE_FROM_EVENT_HISTORY)
+
+
+class ThePosteriorUpdatesAtTheCell(unittest.TestCase):
+
+    def test_the_update_key_is_the_cell_not_the_aggregate(self):
+        self.assertEqual(P.POSTERIOR_UPDATE_KEY,
+                         ("SPORT", "MARKET_TYPE", "PRICE_BAND",
+                          "TIME_UNPAIRED", "PAIR_BASIS_STATE"))
+
+    def test_a_thin_cell_backs_off_rather_than_pooling_everything(self):
+        self.assertEqual(P.POSTERIOR_CELL_MIN_SUPPORT, 30)
+        self.assertEqual(P.POSTERIOR_BACKOFF_ORDER[0], "PAIR_BASIS_STATE")
+        self.assertEqual(P.POSTERIOR_BACKOFF_ORDER[-1], "SPORT")
+
+    def test_cell_level_update_is_inactive_because_nothing_is_observed_yet(self):
+        self.assertFalse(P.POSTERIOR_CELL_UPDATE_ACTIVE)

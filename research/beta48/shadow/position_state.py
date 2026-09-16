@@ -290,14 +290,37 @@ def load_priors(path):
     return json.loads(Path(path).read_text())
 
 
-def lambda_for(priors, bucket, account=CONSENSUS, ceiling="any_basis"):
+class SubdistributionMisuse(RuntimeError):
+    """Raised when a basis-ceiling lambda is asked for as though it were the
+    hazard of a live unpaired leg."""
+
+
+def lambda_for(priors, bucket, account=CONSENSUS, ceiling="any_basis",
+               subdistribution_acknowledged=False):
     """The continuous hazard lambda for one bucket. NOT_IDENTIFIED where absent.
 
-    `account=CONSENSUS` reads the FIRST_SIDE_ACQUISITIONS-weighted cross-whale
-    prior; naming an account reads that account's own series. The consensus is
-    weighted and excludes swisstony -- both facts live in the artifact, and this
-    reader never re-averages anything.
+    `account=CONSENSUS` reads the risk-set-pooled cross-whale prior; naming an
+    account reads that account's own series. The consensus excludes swisstony
+    -- both facts live in the artifact, and this reader never re-averages.
+
+    A BASIS CEILING IS REFUSED UNLESS EXPLICITLY ACKNOWLEDGED. For a ceiling B
+    the archive's curve is
+
+        F_B(t) = P(completed by t at basis <= B)
+
+    whose denominator is every opening leg, so a position that ALREADY
+    COMPLETED ABOVE B is still counted as eligible for a future <=B completion.
+    It is not: it is gone. That makes the ceiling lambda a SUB-DISTRIBUTION
+    quantity, systematically below the true cause-specific hazard, and feeding
+    it to EV_WAIT would answer "how much of the original cohort eventually
+    pairs cheaply" when the question asked was "will THIS live leg pair cheaply
+    next interval". Use `p_complete_at_or_below_basis` instead.
     """
+    if ceiling != "any_basis" and not subdistribution_acknowledged:
+        raise SubdistributionMisuse(
+            "basis-ceiling lambda is a SUBDISTRIBUTION quantity, not a "
+            "cause-specific hazard. Use p_complete_at_or_below_basis(), or "
+            "pass subdistribution_acknowledged=True for descriptive use.")
     if bucket == NOT_IDENTIFIED:
         return NOT_IDENTIFIED
     if account == CONSENSUS:
@@ -341,6 +364,54 @@ def p_complete_next_interval(lam, minutes):
     if lam < 0:
         raise ValueError("a hazard rate cannot be negative: %r" % (lam,))
     return 1.0 - math.exp(-lam * minutes)
+
+
+def p_basis_at_or_below(priors, bucket, ceiling, account="rn1"):
+    """P(basis <= B | A COMPLETION HAPPENS IN THIS INTERVAL).
+
+    A conditional on completion, read from the interval completion counts. It
+    is a DIFFERENT object from the hazard: the hazard says whether a pairing
+    happens at all, this says what quality it is if one does.
+    """
+    if bucket == NOT_IDENTIFIED or ceiling == "any_basis":
+        return NOT_IDENTIFIED
+    acct = priors.get("ACCOUNT_PRIORS", {}).get(account)
+    if acct is None:
+        return NOT_IDENTIFIED
+    for cell in acct.get("BASIS_QUALITY_GIVEN_COMPLETION", []):
+        if cell.get("INTERVAL") != bucket:
+            continue
+        block = cell.get("BY_CEILING", {}).get(ceiling)
+        if not block:
+            return NOT_IDENTIFIED
+        v = block.get("P_BASIS_LE_B_GIVEN_COMPLETION_IN_INTERVAL",
+                      NOT_IDENTIFIED)
+        return NOT_IDENTIFIED if isinstance(v, str) else v
+    return NOT_IDENTIFIED
+
+
+def p_complete_at_or_below_basis(p_any, p_basis):
+    """P(complete next interval AND basis <= B), decomposed conservatively.
+
+        P(complete AND basis<=B) = P(complete) x P(basis<=B | complete)
+
+    An EXACT identity, and both factors are separately identified -- the
+    any-basis hazard from the risk set, the conditional from the interval
+    completion counts. This replaces the subdistribution lambda everywhere a
+    quality-conditioned completion probability is wanted.
+
+    TIME-TO-COMPLETION AND COMPLETION-QUALITY STAY SEPARATE right up to this
+    multiplication, which is the whole point: conflating them is what the
+    ceiling curve does.
+    """
+    if isinstance(p_any, str) or isinstance(p_basis, str):
+        return NOT_IDENTIFIED
+    if p_any is None or p_basis is None:
+        return NOT_IDENTIFIED
+    if not (0.0 <= p_basis <= 1.0):
+        raise ValueError("a conditional probability outside [0,1]: %r"
+                         % (p_basis,))
+    return p_any * p_basis
 
 
 # ---------------------------------------------------------------------------
@@ -636,7 +707,8 @@ CANONICAL_NUMERIC_PIPELINE = "DECIMAL -> EXACT_DECIMAL_STRING -> DECIMAL"
 
 
 def decision_row(obs, priors, account=CONSENSUS, ceiling="any_basis",
-                 horizon_minutes=None, evs=None, risk_kill=None):
+                 horizon_minutes=None, evs=None, risk_kill=None,
+                 quality_account="rn1"):
     """One decision tick, fully recorded, whether or not anything is done.
 
     `obs` carries the book the caller read publicly; this function contacts
@@ -646,8 +718,13 @@ def decision_row(obs, priors, account=CONSENSUS, ceiling="any_basis",
     """
     t = obs.get("TIME_UNPAIRED_S")
     bucket = time_unpaired_bucket(t)
-    lam = lambda_for(priors, bucket, account=account, ceiling=ceiling)
+    # THE HAZARD IS ALWAYS THE ANY-BASIS ONE. `ceiling` never selects a
+    # lambda here; it selects the conditional quality factor, which is a
+    # separate object multiplied in afterwards.
+    lam = lambda_for(priors, bucket, account=account, ceiling="any_basis")
     p = p_complete_next_interval(lam, horizon_minutes)
+    p_q = p_basis_at_or_below(priors, bucket, ceiling, account=quality_account)
+    p_joint = p_complete_at_or_below_basis(p, p_q)
 
     state_set = states(obs)
     fmap = feasibility(obs)
@@ -684,6 +761,14 @@ def decision_row(obs, priors, account=CONSENSUS, ceiling="any_basis",
             "HORIZON_MINUTES": (horizon_minutes if horizon_minutes is not None
                                 else NOT_IDENTIFIED),
             "P_COMPLETE_NEXT_INTERVAL": p,
+            # Quality is a SEPARATE factor, never folded into the hazard.
+            "BASIS_CEILING_ASKED": ceiling,
+            "P_BASIS_LE_B_GIVEN_COMPLETION": p_q,
+            "P_COMPLETE_AND_BASIS_LE_B": p_joint,
+            "P_JOINT_IS_A_DECOMPOSITION_NOT_A_SUBDISTRIBUTION_LAMBDA": True,
+            "QUALITY_PRIOR_ACCOUNT": quality_account,
+            "CAUSE_SPECIFIC_HAZARD_MODEL": NOT_IDENTIFIED,
+            "COMPETING_RISK_MODEL": NOT_IDENTIFIED,
         },
         "EVENT_STATE": obs.get("EVENT_STATE", NOT_IDENTIFIED),
         "CAPITAL_OCCUPANCY": obs.get("CAPITAL_OCCUPANCY", NOT_IDENTIFIED),
@@ -733,6 +818,116 @@ def stamp_outcome(row, outcome):
     out = dict(row)
     out["LATER_OUTCOME"] = outcome
     return out
+
+
+# ---------------------------------------------------------------------------
+# THE POSITION EVENT HISTORY -- the thing the archive could never provide
+# ---------------------------------------------------------------------------
+#
+# The whale grid is a set of cumulative counts. It cannot say which INDIVIDUAL
+# leg went where, so it cannot distinguish "paired at a good basis" from
+# "paired at a worse basis" from "sold" from "settled" as COMPETING terminal
+# transitions. That is exactly why
+#
+#     CAUSE_SPECIFIC_HAZARD_MODEL = NOT_IDENTIFIED
+#     COMPETING_RISK_MODEL        = NOT_IDENTIFIED
+#
+# and why neither is manufactured. An ordered per-position event history is the
+# minimum structure from which those ARE estimable, so BETTOR writes one from
+# the first shadow position. This is the target, recorded prospectively.
+
+EVENT_KINDS = (
+    "ENTRY", "BOOK_STATE", "PAIR_OPPORTUNITY_APPEARED",
+    "PASSIVE_EXIT_AVAILABLE", "AGGRESSIVE_EXIT_AVAILABLE", "HEDGE_AVAILABLE",
+    "ACTION_SELECTED", "ACTION_NOT_SELECTED", "FILL", "SETTLEMENT",
+)
+
+TERMINAL_STATES = ("PAIRED", "EXITED_PASSIVE", "EXITED_AGGRESSIVE", "HEDGED",
+                   "SETTLED", "OTHER")
+
+# What such a history makes estimable, once enough of it exists. None of these
+# is claimed from it today.
+ESTIMABLE_FROM_EVENT_HISTORY = (
+    "CAUSE_SPECIFIC_COMPLETION_HAZARD", "CAUSE_SPECIFIC_EXIT_HAZARD",
+    "COMPETING_RISKS", "OPTIMAL_STOPPING_POLICY",
+)
+
+
+def new_history(position_id, entry_time, entry_state=None):
+    """Open an event history for one shadow position."""
+    return {
+        "POSITION_ID": position_id,
+        "ENTRY_TIME": entry_time,
+        "LABEL": COUNTERFACTUAL,
+        "EVENTS": [{"KIND": "ENTRY", "AT": entry_time,
+                    "ENTRY_STATE": entry_state
+                    if entry_state is not None else NOT_IDENTIFIED}],
+        "TERMINAL_STATE": NOT_IDENTIFIED,
+        "TERMINAL_AT": NOT_IDENTIFIED,
+    }
+
+
+def append_event(history, kind, at, **fields):
+    """Append one ORDERED transition. Order is the data, so it is enforced.
+
+    A history whose events are not monotone in time cannot support a hazard
+    estimate, and silently sorting them would hide a clock bug rather than
+    surface it.
+    """
+    if kind not in EVENT_KINDS:
+        raise ValueError("unknown event kind: %r" % (kind,))
+    if history.get("TERMINAL_STATE", NOT_IDENTIFIED) != NOT_IDENTIFIED:
+        raise ValueError("position already terminal: %r"
+                         % (history["TERMINAL_STATE"],))
+    last = history["EVENTS"][-1]["AT"]
+    if (at is not None and last is not None
+            and not isinstance(at, str) and not isinstance(last, str)
+            and at < last):
+        raise ValueError("event out of order: %r before %r" % (at, last))
+    ev = {"KIND": kind, "AT": at}
+    ev.update(fields)
+    history["EVENTS"].append(ev)
+    return history
+
+
+def close_history(history, terminal_state, at):
+    """Stamp the terminal transition. A position ends once."""
+    if terminal_state not in TERMINAL_STATES:
+        raise ValueError("unknown terminal state: %r" % (terminal_state,))
+    if history.get("TERMINAL_STATE", NOT_IDENTIFIED) != NOT_IDENTIFIED:
+        raise ValueError("already closed as %r" % (history["TERMINAL_STATE"],))
+    history["TERMINAL_STATE"] = terminal_state
+    history["TERMINAL_AT"] = at
+    return history
+
+
+def record_tick(history, row, at):
+    """Fold one decision row into the history, INCLUDING the roads not taken.
+
+    `ACTION_NOT_SELECTED` is written as its own event, one per rejected action
+    with the EV it was rejected at. A history that recorded only the chosen
+    action would reproduce the whale archive's central defect at higher
+    resolution.
+    """
+    append_event(history, "BOOK_STATE", at,
+                 CURRENT_BOOK=row.get("CURRENT_BOOK", NOT_IDENTIFIED),
+                 COMPLEMENT_BOOK=row.get("COMPLEMENT_BOOK", NOT_IDENTIFIED),
+                 PAIR_BASIS=row.get("PAIR_BASIS", NOT_IDENTIFIED),
+                 QUEUE_AHEAD=row.get("QUEUE_AHEAD", NOT_IDENTIFIED))
+    fmap = row.get("ACTION_FEASIBILITY", {})
+    for action, kind in (("A_PAIR_NOW", "PAIR_OPPORTUNITY_APPEARED"),
+                         ("A_PASSIVE_EXIT", "PASSIVE_EXIT_AVAILABLE"),
+                         ("A_AGGRESSIVE_EXIT", "AGGRESSIVE_EXIT_AVAILABLE"),
+                         ("A_HEDGE", "HEDGE_AVAILABLE")):
+        if fmap.get(action) == FEASIBLE:
+            append_event(history, kind, at, ACTION=action)
+    append_event(history, "ACTION_SELECTED", at,
+                 ACTION=row.get("ACTION_CHOSEN"),
+                 REASON=row.get("ACTION_REASON"))
+    for d in row.get("ACTIONS_NOT_CHOSEN", []):
+        append_event(history, "ACTION_NOT_SELECTED", at,
+                     ACTION=d.get("ACTION"), EV=d.get("EV"))
+    return history
 
 
 # ---------------------------------------------------------------------------
@@ -922,8 +1117,31 @@ def posterior_weight_precision(whale_var, bettor_var, active=None):
     return pb / (pw + pb)
 
 
+# THE UPDATE BELONGS AT THE CELL, NOT THE AGGREGATE.
+#
+# A pooled BETTOR hazard would let observations from one kind of market wash
+# out a strongly different prior in another: a thousand fast-pairing tennis
+# moneyline legs would displace the prior for a thin futures market they say
+# nothing about. The update key is therefore:
+POSTERIOR_UPDATE_KEY = ("SPORT", "MARKET_TYPE", "PRICE_BAND", "TIME_UNPAIRED",
+                        "PAIR_BASIS_STATE")
+# with a minimum-support floor per cell, and a documented back-off path for
+# cells that never reach it -- coarsen the key rather than pool everything.
+POSTERIOR_CELL_MIN_SUPPORT = 30
+POSTERIOR_BACKOFF_ORDER = ("PAIR_BASIS_STATE", "PRICE_BAND", "MARKET_TYPE",
+                           "SPORT")
+# NOT ACTIVE: no shadow observation exists, so there is nothing to key yet.
+# It is recorded now so the collector writes the fields the update will need,
+# which is the one thing that cannot be fixed retrospectively.
+POSTERIOR_CELL_UPDATE_ACTIVE = False
+
+
 def blended_lambda(prior_lambda, bettor_lambda, bettor_n):
-    """WHALE_PRIOR -> BETTOR_POSTERIOR, with the prior's weight decaying."""
+    """WHALE_PRIOR -> BETTOR_POSTERIOR, with the prior's weight decaying.
+
+    Applied PER CELL (see POSTERIOR_UPDATE_KEY), never to a pooled BETTOR
+    hazard, so evidence from one market type cannot displace another's prior.
+    """
     w = posterior_weight(bettor_n)
     if w == NOT_IDENTIFIED or isinstance(prior_lambda, str):
         return NOT_IDENTIFIED

@@ -210,6 +210,46 @@ def account_prior(path):
             "SETTLEMENT_TAIL_EXCLUDED_FROM_MONOTONICITY": True,
         }
 
+    # ---- basis quality GIVEN completion -------------------------------
+    #
+    # TIME-TO-COMPLETION AND COMPLETION QUALITY ARE TWO DIFFERENT QUESTIONS,
+    # and the basis-ceiling lambda answers NEITHER cleanly. What is wanted is
+    #
+    #   P(complete in interval AND basis <= B)
+    #     = P(complete in interval) x P(basis <= B | complete in interval)
+    #
+    # an exact decomposition whose two factors ARE separately available: the
+    # any-basis hazard for the first, and the ratio of interval completion
+    # counts for the second. Both numerators come from differencing the
+    # retained integer counts, which is checked to be well-formed (no negative
+    # interval count, none exceeding the any-basis count for that interval).
+    quality = []
+    prev = None
+    for i, h in enumerate(HORIZONS):
+        d_any = (grid[h]["any_basis_completed"]
+                 - (grid[prev]["any_basis_completed"] if prev else 0))
+        cell = {"INTERVAL": _intervals({k: 0.0 for k in HORIZONS})[i][0],
+                "N_COMPLETED_IN_INTERVAL_ANY_BASIS": d_any,
+                "BY_CEILING": {}}
+        for c in CEILINGS:
+            d_c = grid[h][c]["completed"] - (grid[prev][c]["completed"]
+                                             if prev else 0)
+            if d_c < 0 or d_c > d_any:
+                # A malformed difference would mean the cumulative counts are
+                # not what this derivation assumes. Refuse rather than publish
+                # a conditional probability outside [0,1].
+                cell["BY_CEILING"][c] = {"N": d_c, "P_BASIS_LE_B": NI,
+                                         "MALFORMED_DIFFERENCE": True}
+                continue
+            cell["BY_CEILING"][c] = {
+                "N": d_c,
+                "P_BASIS_LE_B_GIVEN_COMPLETION_IN_INTERVAL": (
+                    d_c / d_any if d_any else NI),
+            }
+        cell["EVIDENCE_LEVEL"] = "LEVEL_A_DIRECT_WHALE_EVIDENCE"
+        quality.append(cell)
+        prev = h
+
     # ---- channel economics, by band -----------------------------------
     bands = {}
     for b in BANDS:
@@ -248,7 +288,11 @@ def account_prior(path):
         "FIRST_SIDE_ACQUISITIONS": opens_total,
         "EVIDENCE_LEVEL": "LEVEL_A_DIRECT_WHALE_EVIDENCE",
         "HAZARD_BY_BASIS_CEILING": hazard,
+        "BASIS_QUALITY_GIVEN_COMPLETION": quality,
         "CHANNEL_BY_PRICE_BAND": bands,
+        "GRID_CUMULATIVE_ANY_BASIS": [
+            {"HORIZON": h, "CUMULATIVE_COMPLETED": grid[h]["any_basis_completed"]}
+            for h in HORIZONS],
     }
 
 
@@ -374,6 +418,137 @@ def consensus(priors):
     return out
 
 
+def _pooled_series(priors, names):
+    """Pooled risk-set hazard over an arbitrary member set. One method, used
+    for both the frozen consensus and its sensitivity twin, so a difference
+    between them is never a difference of method."""
+    by = {p["ACCOUNT"]: p for p in priors}
+    rows0 = by[names[0]]["HAZARD_BY_BASIS_CEILING"]["any_basis"]["ROWS"]
+    out = []
+    for i, r0 in enumerate(rows0):
+        cells = [by[n]["HAZARD_BY_BASIS_CEILING"]["any_basis"]["ROWS"][i]
+                 for n in names]
+        n_pool = sum(c["N_AT_RISK_AT_START"] for c in cells)
+        d_pool = sum(c["N_COMPLETED_IN_INTERVAL"] for c in cells)
+        m = r0["INTERVAL_MINUTES"]
+        lam = (NI if m == NI or n_pool <= 0 or d_pool <= 0 or d_pool >= n_pool
+               else -math.log(1.0 - d_pool / n_pool) / m)
+        out.append({"INTERVAL": r0["INTERVAL"], "LAMBDA": lam,
+                    "N": n_pool, "D": d_pool})
+    return out
+
+
+def _completion_milestones(priors, names):
+    """Pooled cumulative completion, and the time to reach 25/50/75% OF THE
+    EVENTUAL completion rate -- not of 1.0. Linear-in-time interpolation
+    inside the bracketing bucket, and flagged as interpolated, because the
+    archive has ten grid points and no finer resolution exists."""
+    by = {p["ACCOUNT"]: p for p in priors}
+    opens = sum(by[n]["FIRST_SIDE_ACQUISITIONS"] for n in names)
+    cum = []
+    for h in HORIZONS:
+        tot = 0
+        for n in names:
+            row = [x for x in by[n]["GRID_CUMULATIVE_ANY_BASIS"]
+                   if x["HORIZON"] == h][0]
+            tot += row["CUMULATIVE_COMPLETED"]
+        cum.append(tot / opens)
+    eventual = cum[-1]
+    out = {"EVENTUAL_COMPLETION_RATE": eventual,
+           "POOLED_OPENS": opens,
+           "INTERPOLATION": "LINEAR_IN_TIME_WITHIN_BRACKETING_BUCKET"}
+    for frac in (0.25, 0.50, 0.75):
+        target = frac * eventual
+        prev_t, prev_f, hit = 0.0, 0.0, NI
+        for h, f in zip(HORIZONS[:-1], cum[:-1]):
+            t = SECONDS[h]
+            if f >= target:
+                hit = (prev_t + (t - prev_t) * (target - prev_f) / (f - prev_f)
+                       if f > prev_f else float(t))
+                break
+            prev_t, prev_f = float(t), f
+        out["TIME_TO_%d_PERCENT_EVENTUAL_S" % int(frac * 100)] = (
+            hit if hit != NI else "BEYOND_3600S_GRID")
+    return out
+
+
+def swisstony_sensitivity(priors):
+    """Is the exclusion load-bearing? Computed, never argued.
+
+    The exclusion reason is NOT_IDENTIFIED_IN_THIS_WORKSPACE, which means it
+    cannot be shown to be NECESSARY. That is a reason to measure what it costs,
+    not a reason to reverse it: the frozen 3-account consensus stays the
+    protocol's prior, and the 4-account series is SENSITIVITY EVIDENCE ONLY.
+    Inclusion is not decided on which version reads better.
+    """
+    three = ["rn1", "ferrarichampions2026", "homerunhazard"]
+    four = three + ["swisstony"]
+    s3, s4 = _pooled_series(priors, three), _pooled_series(priors, four)
+
+    rows = []
+    for a, b in zip(s3, s4):
+        both = a["LAMBDA"] != NI and b["LAMBDA"] != NI
+        rows.append({
+            "INTERVAL": a["INTERVAL"],
+            "LAMBDA_3": a["LAMBDA"], "LAMBDA_4": b["LAMBDA"],
+            "ABSOLUTE_DIFFERENCE": (b["LAMBDA"] - a["LAMBDA"]) if both else NI,
+            "RELATIVE_DIFFERENCE": ((b["LAMBDA"] - a["LAMBDA"]) / a["LAMBDA"]
+                                    if both and a["LAMBDA"] else NI),
+            "POOLED_N_3": a["N"], "POOLED_N_4": b["N"],
+        })
+
+    def mono(series):
+        lams = [r["LAMBDA"] for r in series if r["LAMBDA"] != NI]
+        return ("YES" if all(lams[i] >= lams[i + 1]
+                             for i in range(len(lams) - 1)) else "NO",
+                lams[0] / lams[-1] if lams and lams[-1] else NI)
+
+    m3, m4 = mono(s3), mono(s4)
+    k3 = _completion_milestones(priors, three)
+    k4 = _completion_milestones(priors, four)
+
+    # The verdict is SPLIT, and reporting one word would hide half of it.
+    # The qualitative conclusion survives; the timing quantities that EV_WAIT
+    # would actually consume do not.
+    return {
+        "PURPOSE": "SENSITIVITY_EVIDENCE_ONLY_NOT_A_PROTOCOL_CHANGE",
+        "CONSENSUS_3_ACCOUNT": three,
+        "CONSENSUS_4_ACCOUNT_SENSITIVITY": four,
+        "METHOD": "IDENTICAL_POOLED_INTERVAL_RISK_SET_BOTH_VERSIONS",
+        "BY_INTERVAL": rows,
+        "PAIRING_INTENSITY_DECAYS_WITH_TIME_3": m3[0],
+        "PAIRING_INTENSITY_DECAYS_WITH_TIME_4": m4[0],
+        "FIRST_LAST_LAMBDA_RATIO_3": m3[1],
+        "FIRST_LAST_LAMBDA_RATIO_4": m4[1],
+        "MILESTONES_3": k3,
+        "MILESTONES_4": k4,
+        "PRIOR_SENSITIVITY_TO_SWISSTONY": "MATERIAL",
+        "SENSITIVITY_SPLIT": {
+            "QUALITATIVE_DECAY_CONCLUSION": "SURVIVES -- YES in both, 75x vs 89x",
+            "EVENTUAL_COMPLETION_RATE": "SURVIVES -- 0.744 vs 0.750",
+            "TIMING_QUANTITIES": (
+                "DOES NOT SURVIVE -- lambda falls 6% to 23% with the gap "
+                "widening in time, the 50% milestone moves 510s -> 856s, and "
+                "the 75% milestone leaves the measurable grid entirely"),
+        },
+        "WHY_IT_MOVES": (
+            "swisstony is the LARGEST account in the cohort by first-side "
+            "acquisitions (367,896 vs RN1's 259,271) and is the SLOWEST to "
+            "pair, so risk-set pooling gives it the largest weight exactly "
+            "where it disagrees most."),
+        "DECISION": (
+            "The frozen 3-account consensus REMAINS the shadow protocol's "
+            "prior. Changing it would break preregistration, and the "
+            "4-account version is not adopted because it is not shown to be "
+            "more correct -- only different."),
+        "OPEN_ITEM": (
+            "The exclusion is now known to be LOAD-BEARING for the timing "
+            "quantities. Resolving the upstream two-source discrepancy is "
+            "therefore worth more than it appeared, and is recorded as an "
+            "open item rather than acted on here."),
+    }
+
+
 def build(src_dir, out_path):
     priors = [account_prior(Path(src_dir) / f"{a}.json") for a in ACCOUNTS]
     doc = {
@@ -389,8 +564,21 @@ def build(src_dir, out_path):
         "WHALE_SELL_POLICY_GENERALIZABLE": "NOT_ESTABLISHED",
         "PRIORS_ARE_INITIAL_ONLY": True,
         "SUPERSEDED_BY": "BETTOR_POSTERIOR once shadow data is credible",
+        # The basis-ceiling lambda is a SUB-DISTRIBUTION quantity and must not
+        # be read as the probability that a live unpaired leg completes at or
+        # below that basis. The identified decomposition is published instead.
+        "BASIS_CEILING_LAMBDA_IS": "SUBDISTRIBUTION_QUANTITY",
+        "TRUE_CAUSE_SPECIFIC_COMPLETION_HAZARD": NI,
+        "CAUSE_SPECIFIC_HAZARD_MODEL": NI,
+        "COMPETING_RISK_MODEL": NI,
+        "JOINT_TIME_BASIS_MODEL": "DECOMPOSED_ANY_HAZARD_x_CONDITIONAL_BASIS",
+        "JOINT_TIME_BASIS_GRANULARITY": "ACCOUNT x INTERVAL (NOT x PRICE_BAND)",
+        "TERMINAL_TRANSITIONS_NOT_INDIVIDUALLY_RETAINED": [
+            "PAIR_AT_GOOD_BASIS", "PAIR_AT_WORSE_BASIS", "SELL",
+            "SETTLEMENT", "OTHER"],
         "ACCOUNT_PRIORS": {p["ACCOUNT"]: p for p in priors},
         "CROSS_WHALE_CONSENSUS_PRIOR": consensus(priors),
+        "SWISSTONY_SENSITIVITY": swisstony_sensitivity(priors),
     }
     Path(out_path).write_text(json.dumps(doc, indent=1))
     return doc

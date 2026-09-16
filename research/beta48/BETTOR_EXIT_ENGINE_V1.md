@@ -10,7 +10,8 @@ ORDER_CAPABLE         = NO
 MICRO_LIVE_AUTHORIZED = NO
 mirror_live           = false
 
-BETTOR_EXIT_ENGINE_V1_PRIOR_COMPLETE = YES   (section 11)
+BETTOR_EXIT_ENGINE_V1_PRIOR_COMPLETE = YES   (sections 11-13)
+HISTORICAL_WHALE_RESEARCH_FROZEN     = YES
 NEXT_MILESTONE                       = SHADOW_EXIT_LEARNING_V1
 
 BETTOR_WILL_OUTPERFORM_THE_WHALES = NOT CLAIMED
@@ -679,3 +680,165 @@ empty. No BETTOR shadow position has been recorded, so
 prospective observations exist would be tuning a model against a dataset of
 size zero. The next milestone is `SHADOW_EXIT_LEARNING_V1`, and its input is
 BETTOR's own decision rows — not another historical research cycle.
+
+---
+
+## 12. THE TWO ROBUSTNESS CHECKS
+
+### 12a. THE SWISSTONY EXCLUSION IS LOAD-BEARING
+
+Since the exclusion reason is `NOT_IDENTIFIED_IN_THIS_WORKSPACE`, it cannot be
+shown to be *necessary*, so its cost was measured rather than argued. Both
+consensus versions were built with the **identical** pooled interval-risk-set
+method, so any difference between them is a difference of membership and not
+of method.
+
+| interval | LAMBDA_3 | LAMBDA_4 | ABS_DIFF | REL_DIFF |
+|---|---|---|---|---|
+| 0s–5s | 0.508601 | 0.476766 | −0.031835 | −6.26% |
+| 5s–10s | 0.244821 | 0.220043 | −0.024778 | −10.12% |
+| 10s–30s | 0.134944 | 0.122428 | −0.012515 | −9.27% |
+| 30s–60s | 0.095357 | 0.081806 | −0.013551 | −14.21% |
+| 60s–120s | 0.068186 | 0.055584 | −0.012602 | −18.48% |
+| 120s–300s | 0.046631 | 0.037160 | −0.009471 | −20.31% |
+| 300s–600s | 0.029743 | 0.023490 | −0.006253 | −21.02% |
+| 600s–1800s | 0.015389 | 0.011860 | −0.003529 | −22.93% |
+| 1800s–3600s | 0.006763 | 0.005342 | −0.001421 | −21.01% |
+
+```
+PAIRING_INTENSITY_DECAYS_WITH_TIME_3 = YES   first/last 75.2x
+PAIRING_INTENSITY_DECAYS_WITH_TIME_4 = YES   first/last 89.2x
+
+EVENTUAL_COMPLETION_3 = 0.74426    EVENTUAL_COMPLETION_4 = 0.75049
+TIME_TO_25_PERCENT_EVENTUAL   3 = 104.8s     4 = 141.1s
+TIME_TO_50_PERCENT_EVENTUAL   3 = 510.3s     4 = 856.1s
+TIME_TO_75_PERCENT_EVENTUAL   3 = 1789.5s    4 = BEYOND_3600S_GRID
+```
+
+```
+PRIOR_SENSITIVITY_TO_SWISSTONY = MATERIAL
+```
+
+**The verdict is split, and reporting one word would hide half of it.** The
+qualitative conclusion survives — decay is `YES` in both, and the eventual
+completion rate barely moves (0.744 vs 0.750). The **timing quantities that
+`EV_WAIT` would actually consume do not**: lambda falls 6% to 23% with the gap
+widening in time, the 50% milestone moves 510s → 856s, and the 75% milestone
+leaves the measurable grid entirely. Since the split touches exactly the
+numbers the engine consumes, the conservative single verdict is `MATERIAL`.
+
+**Why it moves:** swisstony is the *largest* account in the cohort by
+first-side acquisitions (367,896 vs RN1's 259,271) and the *slowest* to pair,
+so risk-set pooling gives it the heaviest weight precisely where it disagrees
+most. The correction the previous check introduced is what makes this visible.
+
+**Decision.** The frozen 3-account consensus **remains** the shadow protocol's
+prior. Changing it would break preregistration, and the 4-account version is
+not adopted — not because it reads worse, but because it is not shown to be
+*more correct*, only different. `PURPOSE =
+SENSITIVITY_EVIDENCE_ONLY_NOT_A_PROTOCOL_CHANGE`.
+
+**Open item, recorded not acted on:** the exclusion is now known to be
+load-bearing for the timing quantities, so resolving the upstream two-source
+discrepancy is worth more than it appeared.
+
+### 12b. THE SUBDISTRIBUTION IS NOT A HAZARD, AND THE CODE REFUSES IT
+
+```
+BASIS_CEILING_LAMBDA_IS               SUBDISTRIBUTION_QUANTITY
+TRUE_CAUSE_SPECIFIC_COMPLETION_HAZARD NOT_IDENTIFIED
+CAUSE_SPECIFIC_HAZARD_MODEL           NOT_IDENTIFIED
+COMPETING_RISK_MODEL                  NOT_IDENTIFIED
+```
+
+`lambda_for(..., ceiling=...)` now **raises `SubdistributionMisuse`** unless
+the caller passes `subdistribution_acknowledged=True` for descriptive use, and
+`decision_row` always takes the any-basis hazard regardless of the ceiling
+asked for. A documented convention that only lives in prose gets violated; one
+that raises does not.
+
+**Time-to-completion and completion-quality are separated.** The engine uses:
+
+```
+ANY_COMPLETION_HAZARD(t)         P(pairing occurs | still genuinely unpaired)
+BASIS_QUALITY_DISTRIBUTION       P(basis <= B | a completion occurs)
+```
+
+and multiplies only at the end, via the exact identity
+
+```
+P(complete next interval AND basis <= B)
+  = P(complete next interval) x P(basis <= B | complete)
+```
+
+Both factors are separately identified — the first from the risk set, the
+second from differencing the retained interval completion counts (checked
+well-formed: no negative interval count, none exceeding its any-basis count).
+So `JOINT_TIME_BASIS_MODEL = DECOMPOSED_ANY_HAZARD_x_CONDITIONAL_BASIS`, at
+`ACCOUNT × INTERVAL` granularity — **not** crossed with price band.
+
+The conditional is also a finding in its own right. On RN1:
+
+| interval | P(≤0.90 \| completion) | P(≤1.00 \| completion) |
+|---|---|---|
+| 0s–5s | 0.0219 | 0.9720 |
+| 1800s–3600s | 0.3305 | 0.6068 |
+
+A fast completion is a **tight, near-1.00** completion. A slow one is
+**dispersed in both directions** — far more mass below 0.90 *and* far more
+above 1.00. Waiting does not simply buy a cheaper pair; it widens the
+distribution of what the pair costs. Preserved descriptively; it is not a
+policy.
+
+### 12c. WHAT PROSPECTIVE DATA IS FOR
+
+The archive is cumulative counts, so it cannot distinguish `PAIR_AT_GOOD_BASIS`
+/ `PAIR_AT_WORSE_BASIS` / `SELL` / `SETTLEMENT` / `OTHER` as competing terminal
+transitions for an individual leg. Neither model is manufactured. The recorder
+now writes an ordered per-position event history —
+
+```
+EVENT_KINDS      ENTRY, BOOK_STATE, PAIR_OPPORTUNITY_APPEARED,
+                 PASSIVE_EXIT_AVAILABLE, AGGRESSIVE_EXIT_AVAILABLE,
+                 HEDGE_AVAILABLE, ACTION_SELECTED, ACTION_NOT_SELECTED,
+                 FILL, SETTLEMENT
+TERMINAL_STATES  PAIRED, EXITED_PASSIVE, EXITED_AGGRESSIVE, HEDGED,
+                 SETTLED, OTHER
+```
+
+— with out-of-order events **refused rather than sorted** (order is the data;
+silently sorting a bad clock hides the bug the hazard would then be built on),
+and `ACTION_NOT_SELECTED` written per rejected action with its EV. From enough
+of these, `CAUSE_SPECIFIC_COMPLETION_HAZARD`, `CAUSE_SPECIFIC_EXIT_HAZARD`,
+`COMPETING_RISKS` and `OPTIMAL_STOPPING_POLICY` become estimable. None is
+claimed from them today.
+
+### 12d. THE POSTERIOR UPDATES AT THE CELL
+
+```
+POSTERIOR_UPDATE_KEY = (SPORT, MARKET_TYPE, PRICE_BAND, TIME_UNPAIRED,
+                        PAIR_BASIS_STATE)
+POSTERIOR_CELL_MIN_SUPPORT = 30
+POSTERIOR_BACKOFF_ORDER    = PAIR_BASIS_STATE, PRICE_BAND, MARKET_TYPE, SPORT
+POSTERIOR_CELL_UPDATE_ACTIVE = NO
+```
+
+A pooled BETTOR hazard would let a thousand fast-pairing tennis moneyline legs
+displace the prior for a thin futures market they say nothing about. Thin cells
+**coarsen the key** rather than pooling everything. Inactive — no shadow
+observation exists to key yet — but recorded now so the collector writes the
+fields the update will need, which is the one thing that cannot be fixed
+retrospectively.
+
+---
+
+## 13. FREEZE
+
+```
+BETTOR_EXIT_ENGINE_V1_PRIOR_COMPLETE = YES
+HISTORICAL_WHALE_RESEARCH_FROZEN     = YES
+NEXT_SOURCE_OF_INTELLIGENCE          = SHADOW_EXIT_LEARNING_V1
+```
+
+The historical cohort is the PRIOR. BETTOR's prospective observations become
+the DATA. No further optimisation of this engine against the whale evidence.
