@@ -1,0 +1,18 @@
+{
+ "TICK_ROWS": 1365,
+ "TICK_ERRORS": 5835,
+ "ROUNDS": 300,
+ "SLUGS": 24,
+ "DURATION_S": 4358.582936012001,
+ "PATH": "evidence/ticks_35120338223/ticks.jsonl",
+ "VERSION": "beta48-shadow-tick/1",
+ "UNIVERSE_N": 24,
+ "UNIVERSE_FROZEN_BEFORE_CAPTURE": true,
+ "RATE_LIMIT_RPS": 2.0,
+ "METHOD": "GET",
+ "CREDENTIAL": "NONE",
+ "ORDER_PATH_EXISTS": "NO",
+ "mirror_live": false,
+ "NO_FILL_IS_RECORDED_HERE": "a touch is not a fill; this capture records book state only",
+ "REALIZED_BETTOR_TWO_SIDED_EDGE": "NOT_ESTABLISHED"
+}

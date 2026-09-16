@@ -1,0 +1,296 @@
+{
+ "VERSION": "beta48-shadow-tick/1",
+ "PURPOSE": "PHASE_2A EXPERIMENT 2 -- bounded live public tick capture universe",
+ "SOURCE_CENSUS_RUN": "35105863528",
+ "SELECTION": "HIGH_ACTIVITY at decision, stratified, frozen salted hash within stratum",
+ "SELECTION_SALT": "BETA48-SHADOW-2026-09-16",
+ "NOT_SELECTED_BY_ACTIVITY_RANK": true,
+ "FROZEN_BEFORE_ANY_TICK_WAS_SEEN": true,
+ "STRATA": [
+  "nfl",
+  "cfb",
+  "mlb",
+  "ufc"
+ ],
+ "PER_STRATUM_TARGET": 6,
+ "PER_STRATUM_SELECTED": {
+  "nfl": 6,
+  "cfb": 6,
+  "mlb": 6,
+  "ufc": 6
+ },
+ "AVAILABLE_PER_STRATUM": {
+  "nfl": 327,
+  "cfb": 120,
+  "mlb": 61,
+  "ufc": 25
+ },
+ "OUT_OF_STRATA_AVAILABLE": 255,
+ "N": 24,
+ "MARKETS": [
+  {
+   "slug": "tsc-nfl-det-buf-2026-09-17-total-66pt5",
+   "SPORT_TOKEN": "nfl",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_TOTAL",
+   "gameStartTime": "2026-09-18T00:15:00Z"
+  },
+  {
+   "slug": "tec-nfl-champ-2027-02-14-w-detlio",
+   "SPORT_TOKEN": "nfl",
+   "EVENT_ID": "2026-09-10T00:20:00Z|SUBJECT=58",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V2_VENUE_SINGLE_TEAM_SUBJECT",
+   "LEAGUE": [
+    "nfl"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-09-10T00:20:00Z"
+  },
+  {
+   "slug": "asc-nfl-jax-den-2026-09-20-neg-0pt5",
+   "SPORT_TOKEN": "nfl",
+   "EVENT_ID": "2026-09-20T20:05:00Z|57-62",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V1_VENUE_TEAM_PAIR_CONTEST",
+   "LEAGUE": [
+    "nfl"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_SPREAD",
+   "gameStartTime": "2026-09-20T20:05:00Z"
+  },
+  {
+   "slug": "tec-nfl-dpoy-2027-02-11-w-tjwatt",
+   "SPORT_TOKEN": "nfl",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2027-02-12T01:00:00Z"
+  },
+  {
+   "slug": "tec-nfl-opoy-2027-02-11-w-niccol",
+   "SPORT_TOKEN": "nfl",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2027-02-12T01:00:00Z"
+  },
+  {
+   "slug": "tec-nfl-mvp-2027-02-11-w-bonix",
+   "SPORT_TOKEN": "nfl",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2027-02-12T01:00:00Z"
+  },
+  {
+   "slug": "aachc-cfb-wins-2026-11-28-ill-7pt5wins",
+   "SPORT_TOKEN": "cfb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-08-27T16:00:00Z"
+  },
+  {
+   "slug": "aachc-cfb-acc-2026-11-28-mostpassyds-giolop",
+   "SPORT_TOKEN": "cfb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-08-29T16:00:00Z"
+  },
+  {
+   "slug": "aachc-cfb-big12-2026-11-28-mostrushtds-dyledw",
+   "SPORT_TOKEN": "cfb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-08-29T16:00:00Z"
+  },
+  {
+   "slug": "aachc-cfb-big12-2026-11-28-mostrushtds-micawel",
+   "SPORT_TOKEN": "cfb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-08-29T16:00:00Z"
+  },
+  {
+   "slug": "aec-cfb-valp-indst-2026-09-19",
+   "SPORT_TOKEN": "cfb",
+   "EVENT_ID": "2026-09-19T17:00:00Z|1171-1202",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V1_VENUE_TEAM_PAIR_CONTEST",
+   "LEAGUE": [
+    "cfb"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-09-19T17:00:00Z"
+  },
+  {
+   "slug": "tec-cfb-heisman-2026-12-13-w-malton",
+   "SPORT_TOKEN": "cfb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-12-14T01:00:00Z"
+  },
+  {
+   "slug": "aachc-mlb-ks-2026-09-29-leader-jesluz",
+   "SPORT_TOKEN": "mlb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-08-10T19:00:00Z"
+  },
+  {
+   "slug": "tec-mlb-al-2026-11-27-cy-kevgau",
+   "SPORT_TOKEN": "mlb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-11-27T23:00:00Z"
+  },
+  {
+   "slug": "tec-mlb-al-2026-11-27-mvp-jazchi",
+   "SPORT_TOKEN": "mlb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-11-27T23:00:00Z"
+  },
+  {
+   "slug": "tec-mlb-alchamp-2026-09-27-cws",
+   "SPORT_TOKEN": "mlb",
+   "EVENT_ID": "2026-09-07T00:00:00Z|SUBJECT=3009",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V2_VENUE_SINGLE_TEAM_SUBJECT",
+   "LEAGUE": [
+    "mlb"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-09-07T00:00:00Z"
+  },
+  {
+   "slug": "tec-mlb-nl-2026-11-27-roy-didfue",
+   "SPORT_TOKEN": "mlb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-11-27T23:00:00Z"
+  },
+  {
+   "slug": "tec-mlb-nl-2026-11-27-roy-robsne",
+   "SPORT_TOKEN": "mlb",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-11-27T23:00:00Z"
+  },
+  {
+   "slug": "aec-ufc-alomen-iwobar-2026-09-19",
+   "SPORT_TOKEN": "ufc",
+   "EVENT_ID": "2026-09-20T01:00:00Z|2235-5399",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V1_VENUE_TEAM_PAIR_CONTEST",
+   "LEAGUE": [
+    "ufc"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-09-20T01:00:00Z"
+  },
+  {
+   "slug": "astatc-ufc-armtsa-mauruf-2026-09-19-rov-f2-r2",
+   "SPORT_TOKEN": "ufc",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_PROP",
+   "gameStartTime": "2026-09-20T02:30:00Z"
+  },
+  {
+   "slug": "astatc-ufc-armtsa-mauruf-2026-09-19-rov-f2-r1",
+   "SPORT_TOKEN": "ufc",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_PROP",
+   "gameStartTime": "2026-09-20T02:30:00Z"
+  },
+  {
+   "slug": "aachc-ufc-heavyw-2026-12-31-champ-serpav",
+   "SPORT_TOKEN": "ufc",
+   "EVENT_ID": "NOT_IDENTIFIED",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V3_NO_TEAM_BINDING",
+   "LEAGUE": [
+    "NONE"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_FUTURE",
+   "gameStartTime": "2026-06-03T21:56:00Z"
+  },
+  {
+   "slug": "aec-ufc-johcas-alaten-2026-09-26",
+   "SPORT_TOKEN": "ufc",
+   "EVENT_ID": "2026-09-26T22:00:00Z|3035-29626",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V1_VENUE_TEAM_PAIR_CONTEST",
+   "LEAGUE": [
+    "ufc"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-09-26T22:00:00Z"
+  },
+  {
+   "slug": "aec-ufc-edmsha-brufer-2026-09-19",
+   "SPORT_TOKEN": "ufc",
+   "EVENT_ID": "2026-09-19T22:30:00Z|2186-2672",
+   "EVENT_IDENTITY_LEVEL": "LEVEL_V1_VENUE_TEAM_PAIR_CONTEST",
+   "LEAGUE": [
+    "ufc"
+   ],
+   "MARKET_TYPE": "SPORTS_MARKET_TYPE_MONEYLINE",
+   "gameStartTime": "2026-09-19T22:30:00Z"
+  }
+ ]
+}
