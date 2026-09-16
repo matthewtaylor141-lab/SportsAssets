@@ -1,46 +1,63 @@
 # BETA48 PHASE_2A -- SINGLE-RATE OPERATIONAL CONFIRMATION. READ-ONLY.
 # NO ORDERS. NO CREDENTIAL. mirror_live = false.
 #
-# WHY A SECOND, SEPARATE JOB. The ladder (beta48-rate-pilot.yml) screens. It
-# runs four rates back to back against a limiter whose accounting window is
-# undocumented, so a rung may pass on credit an earlier rung left or fail on
-# debt a faster one ran up. That instrument can say "0.5 rps was refused" and
-# it can nominate a starting point. It cannot confirm a rate, and no amount of
-# post-processing turns it into something that can.
+# WHY A SECOND, SEPARATE JOB. The ladder (beta48-rate-pilot.yml) screens: four
+# rates back to back against an undocumented limiter, where a rung may pass on
+# credit an earlier rung left or fail on debt a faster one ran up. It can say "
+# 0.5 rps was refused" and nominate a starting point. It cannot confirm a rate.
+# This job is the other instrument: ONE rate, ONE fresh process, ONE global
+# pacer, no faster traffic ahead of it.
 #
-# This job is the other instrument. ONE rate. ONE fresh process. ONE global
-# pacer, no concurrency. NO faster traffic ahead of it inside this workflow.
-# Then the only thing the result is about is that rate.
+# WHY THE CODE SHA IS AN INPUT AND NOT A BRANCH.
 #
-# WHAT IT DECIDES, AND WHAT IT LEAVES ALONE.
-#   COLLECTOR_RATE_OPERATIONALLY_VALIDATED  YES or NO. The gate.
-#   VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED   NOT_IDENTIFIED, permanently, and
-#                                           nothing here waits on it. Requiring
-#                                           it would be a gate with no key.
+# Run 35131981591 sat QUEUED for twenty-five minutes with `ref: <branch>`. The
+# runner resolves that to the branch head when it STARTS, so three commits that
+# landed while it waited would have been the code it ran. Nothing broke -- the
+# executed surface was byte-identical, verified by diff -- but an experiment
+# whose code is decided after it is authorised is not an experiment.
 #
-# THE FLOOR AND THE THRESHOLD ARE FROZEN IN rate_confirm.py BEFORE DISPATCH:
-#   MIN_DURATION = max(900 s, 300 / rate)  -- 0.125 rps needs >= 2,400 s
-#   TARGET_429_RATE = ZERO, with one narrowly defined allowance
-# A run that cannot reach its own floor is REFUSED AT THE DOOR by
-# dispatch_check rather than run and then reinterpreted. That is why the job
-# takes a rate with no default: nothing here starts by accident.
+# So an evidence run checks out an EXPLICIT SHA and proves it on the runner
+# before the first request:
+#
+#     DISPATCH_SHA == EXECUTED_SHA    or    EVIDENCE_RUN_VALIDITY = FAIL
+#
+# The check costs a failed job on mismatch. Checking afterwards would cost the
+# collection window too.
+#
+# THE ARITHMETIC THAT CANCELLED THE LAST RUN. The pacer does not wait before
+# the first request, so N requests span N-1 intervals:
+#
+#     300 requests at 0.25 rps  ->  299 x 4 s  =  1196 s,  NOT 1200 s
+#
+# Run 35131981591 was dispatched on N/rate and cancelled before it started,
+# because its validation verdict was already necessarily NO. The corrected
+# count is ceil(MIN_DURATION x RATE) + 1 = 301, and dispatch_check now refuses
+# anything short of it at the door.
+#
+# THE SUPPORT FLOOR IS PACED EXPOSURE, NOT WALL CLOCK. Time spent obeying a
+# venue refusal is time we were NOT operating at the rate; a 429 may never help
+# a rate pass. Response latency may not carry a 1,196-second experiment to a
+# "1,200-second" validation either.
 
 name: beta48-rate-confirm
 
 on:
   workflow_dispatch:
     inputs:
-      rate:
-        description: "The ONE requests-per-second rate to confirm (no default on purpose)"
+      code_sha:
+        description: "IMMUTABLE commit to execute (full 40-char SHA). No default on purpose."
         required: true
-      markets:
-        description: "Distinct markets to rotate through"
-        required: false
-        default: "6"
+      rate:
+        description: "The ONE requests-per-second rate to confirm"
+        required: true
       requests:
         description: "Requests (0 = the frozen floor for this rate)"
         required: false
         default: "0"
+      markets:
+        description: "Distinct markets to rotate through"
+        required: false
+        default: "6"
 
 permissions:
   contents: write
@@ -54,14 +71,16 @@ concurrency:
 jobs:
   confirm:
     runs-on: ubuntu-latest
-    # 2,400 s at 0.125 rps plus backoff, with room. The job must outlast its
-    # own evidence floor or dispatch_check refuses it.
+    # 1,200 s of paced requests plus backoff, with room. The job must outlast
+    # its own evidence floor or dispatch_check refuses it.
     timeout-minutes: 90
 
     steps:
+      # THE IMMUTABLE CHECKOUT. An exact commit, never a moving branch head.
       - uses: actions/checkout@v4
         with:
-          ref: claude/session-njaewf
+          ref: ${{ github.event.inputs.code_sha }}
+          fetch-depth: 0
 
       - uses: actions/setup-python@v5
         with:
@@ -70,11 +89,35 @@ jobs:
       - name: Install the one dependency
         run: python -m pip install --quiet "httpx==0.27.2" "pytest==8.3.3"
 
-      # THE GATE. No venue contact until the boundary is proved.
+      # GATE 1. No venue contact until the capability boundary is proved.
       - name: Prove the capability boundary offline
         working-directory: research/beta48/shadow
         run: python -m pytest -q
 
+      # GATE 2. No venue contact until the code that ran is the code that was
+      # authorised. Printed, persisted, and able to stop the job.
+      - name: Prove the executed revision
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          EXECUTED_SHA="$(git rev-parse HEAD)"
+          echo "DISPATCH_SHA  = ${{ github.event.inputs.code_sha }}"
+          echo "EXECUTED_SHA  = $EXECUTED_SHA"
+          echo "WORKFLOW_REF  = ${{ github.sha }}"
+          mkdir -p "evidence/rateconfirm_$SEG"
+          python provenance.py \
+            --dispatch-sha "${{ github.event.inputs.code_sha }}" \
+            --executed-sha "$EXECUTED_SHA" \
+            --workflow-ref-sha "${{ github.sha }}" \
+            --workflow-file "../../../.github/workflows/beta48-rate-confirm.yml" \
+            --config tick_universe.json \
+            --out "evidence/rateconfirm_$SEG/provenance.json"
+          echo "EXECUTED_SHA=$EXECUTED_SHA" >> "$GITHUB_ENV"
+
+      # The pre-dispatch receipt prints and persists BEFORE the first request;
+      # rate_confirm refuses to send anything if any gate fails.
       - name: Single-rate operational confirmation
         working-directory: research/beta48/shadow
         env:
@@ -87,7 +130,11 @@ jobs:
             --rate "${{ github.event.inputs.rate }}" \
             --markets "${{ github.event.inputs.markets || 6 }}" \
             --requests "${{ github.event.inputs.requests || 0 }}" \
-            --timeout-s 5100
+            --timeout-s 5100 \
+            --dispatch-sha "${{ github.event.inputs.code_sha }}" \
+            --executed-sha "$EXECUTED_SHA" \
+            --workflow-ref-sha "${{ github.sha }}" \
+            --workflow-file "../../../.github/workflows/beta48-rate-confirm.yml"
 
       - name: Seal and commit the confirmation
         if: always()

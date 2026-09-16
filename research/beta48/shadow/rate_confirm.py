@@ -164,39 +164,76 @@ def min_duration_s(rps):
     return max(MIN_DURATION_FLOOR_S, REQUESTS_FOR_DURATION_FLOOR / r)
 
 
+# THE PACING SEMANTICS, FIXED AFTER THEY COST A RUN.
+#
+# The pacer does not wait before the FIRST request: its `last` starts at 0.0
+# while the monotonic clock is seconds-since-boot, so the first gap is already
+# in the past. N requests therefore span N-1 intervals, not N.
+#
+#     300 requests at 0.25 rps  ->  299 x 4 s  =  1196 s,  NOT 1200 s
+#
+# The old dispatch_check planned N / rate and cheerfully authorised a run that
+# could not reach its own floor. Run 35131981591 was dispatched on that
+# arithmetic and cancelled before it started, because its verdict was already
+# necessarily NO. The formula below is the fix.
+PACING_SEMANTICS = "N_REQUESTS_SPAN_N_MINUS_1_INTERVALS"
+FIRST_REQUEST_IS_NOT_DELAYED = True
+
+
+def planned_paced_exposure_s(requests, rps):
+    """(N-1)/rate -- the span N paced requests actually occupy."""
+    return (int(requests) - 1) / float(rps)
+
+
+def requests_for_exposure(rps, duration_s):
+    """ceil(MIN_DURATION x RATE) + 1 -- what it takes to OCCUPY the floor."""
+    need = float(duration_s) * float(rps)
+    return int(-(-need // 1)) + 1
+
+
 def min_requests(rps):
-    """Requests needed: the fixed floor, or whatever the clock implies if more.
+    """Requests needed: the fixed floor, or the count the clock implies.
 
-    At a fast rate the 900 s floor implies far more than 300 requests, and
-    running 300 of them and then sitting idle would satisfy neither floor
-    honestly.
+    At 0.25 rps: ceil(1200 x 0.25) + 1 = 301. At 2 rps the 900 s floor implies
+    1,801, so a three-minute burst of 300 buys nothing.
     """
-    return max(MIN_REQUESTS, int(round(min_duration_s(rps) * float(rps))))
+    return max(MIN_REQUESTS, requests_for_exposure(rps, min_duration_s(rps)))
 
 
-def dispatch_check(rps, planned_requests, timeout_s=None):
+def dispatch_check(rps, planned_requests, timeout_s=None,
+                   dispatch_sha=None, executed_sha=None):
     """Refuse, at the door, a confirmation that cannot meet its own floor.
 
     Running it anyway and then explaining why 180 requests were enough is the
-    failure mode this exists to make impossible.
+    failure mode this exists to make impossible -- and so is running one whose
+    exposure falls four seconds short because we divided by the wrong number.
     """
     need_req = min_requests(rps)
     need_dur = min_duration_s(rps)
-    plan_dur = float(planned_requests) / float(rps)
+    plan_dur = planned_paced_exposure_s(planned_requests, rps)
     checks = {
         "PLANNED_REQUESTS_MEET_FLOOR": planned_requests >= need_req,
-        "PLANNED_DURATION_MEETS_FLOOR": plan_dur >= need_dur,
+        "PLANNED_PACED_EXPOSURE_MEETS_FLOOR": plan_dur >= need_dur,
         "JOB_TIMEOUT_COVERS_THE_RUN": (
             timeout_s is None or float(timeout_s) >= plan_dur),
     }
+    if dispatch_sha is not None or executed_sha is not None:
+        checks["DISPATCH_SHA_EQUALS_EXECUTED_SHA"] = (
+            bool(dispatch_sha) and dispatch_sha == executed_sha)
     ok = all(checks.values())
     return {
         "RATE_RPS": str(rps),
+        "REQUEST_INTERVAL_S": 1.0 / float(rps),
         "PLANNED_REQUESTS": planned_requests,
-        "PLANNED_DURATION_S": plan_dur,
+        "PLANNED_PACED_EXPOSURE_S": plan_dur,
+        "PACING_SEMANTICS": PACING_SEMANTICS,
         "MIN_REQUESTS_REQUIRED": need_req,
-        "MIN_DURATION_S_REQUIRED": need_dur,
+        "MIN_REQUESTS": MIN_REQUESTS,
+        "MIN_DURATION_S": need_dur,
+        "MIN_PACED_EXPOSURE_S_REQUIRED": need_dur,
         "JOB_TIMEOUT_S": timeout_s if timeout_s is not None else NOT_IDENTIFIED,
+        "DISPATCH_SHA": dispatch_sha or NOT_IDENTIFIED,
+        "EXECUTED_SHA": executed_sha or NOT_IDENTIFIED,
         "CHECKS": checks,
         "FAILED_CHECKS": [k for k, v in checks.items() if not v],
         "CONFIRMATION_MAY_DISPATCH": "YES" if ok else "NO",
@@ -276,7 +313,10 @@ def validate(result):
     """
     rps = float(result["RATE_RPS"])
     n429 = result["HTTP_429"]
-    dur = result["DURATION_S"]
+    # The SUPPORT criterion is paced exposure, never wall clock: time spent
+    # obeying a venue refusal is time we were NOT operating at the rate, and a
+    # 429 may not help a rate pass. Wall clock is reported, not judged on.
+    dur = result.get("NOMINAL_PACED_EXPOSURE_S", result.get("DURATION_S"))
     req = result["REQUESTS"]
     other_share = (D(result["OTHER_FAILURES"]) / D(req)) if req else D(1)
 
@@ -306,7 +346,7 @@ def validate(result):
 
     checks = {
         "REQUESTS_MEET_FLOOR": req >= min_requests(rps),
-        "DURATION_MEETS_FLOOR": dur >= min_duration_s(rps),
+        "PACED_EXPOSURE_MEETS_FLOOR": dur >= min_duration_s(rps),
         "REFUSALS_WITHIN_FROZEN_ALLOWANCE": allowance_ok,
         "OTHER_FAILURES_WITHIN_TOLERANCE": other_share <= MAX_OTHER_FAILURE_SHARE,
         "NO_POLL_ORDER_STARVATION": result.get("POLL_ORDER_STARVATION") == "NO",
@@ -346,7 +386,8 @@ def validate(result):
     }
 
 
-def confirm(outdir, slugs, http, rps, requests=None, no_prior_higher_rate=True):
+def confirm(outdir, slugs, http, rps, requests=None, no_prior_higher_rate=True,
+            dispatch_sha=None, executed_sha=None):
     """Run ONE rate to its floor, rotating fairly, and report the criteria."""
     rps_f = float(rps)
     requests = int(requests or min_requests(rps_f))
@@ -354,6 +395,9 @@ def confirm(outdir, slugs, http, rps, requests=None, no_prior_higher_rate=True):
     out.mkdir(parents=True, exist_ok=True)
 
     pacer = RP.GlobalPacer(rps_f)
+    interval = 1.0 / rps_f
+    exposure = 0.0
+    prev_start = first_start = None
     order = rotation_order(slugs, requests)
     per_market = {s: {"ATTEMPTS": 0, "SUCCESSES": 0, "HTTP_429": 0,
                       "OTHER_FAILURES": 0} for s in slugs}
@@ -365,6 +409,14 @@ def confirm(outdir, slugs, http, rps, requests=None, no_prior_higher_rate=True):
     t0 = time.monotonic()
     for i, slug in enumerate(order):
         r = RP.probe(http, pacer, slug)
+        start = pacer.last                    # when this request was issued
+        if first_start is None:
+            first_start = start
+        if prev_start is not None:
+            # Cap every interval at its nominal value. A pause of any kind --
+            # venue backoff, Retry-After, runner stall -- adds no exposure.
+            exposure += min(start - prev_start, interval)
+        prev_start = start
         rows.append(dict(r, RATE=str(rps), SEQ=i))
         lat.append(r["LATENCY_S"])
         m = per_market[slug]
@@ -398,7 +450,25 @@ def confirm(outdir, slugs, http, rps, requests=None, no_prior_higher_rate=True):
         "RATES_IN_THIS_RUN": 1,
         "NO_PRIOR_HIGHER_RATE_IN_THIS_WORKFLOW": bool(no_prior_higher_rate),
         "REQUESTS": requests,
+
+        # the SUPPORT criterion, and the two spans that may not stand in for it
+        "NOMINAL_PACED_EXPOSURE_S": exposure,
+        "WALL_CLOCK_ELAPSED_S": dur,
+        "FORCED_SUSPENSION_S": (max(0.0, (prev_start - first_start) - exposure)
+                                if prev_start is not None else 0.0),
+        "START_TO_START_SPAN_S": ((prev_start - first_start)
+                                  if prev_start is not None else 0.0),
+        "PACING_SEMANTICS": PACING_SEMANTICS,
+        "BACKOFF_EXCLUDED_FROM_SUPPORT": True,
+        "LATENCY_EXCLUDED_FROM_SUPPORT": True,
         "DURATION_S": dur,
+
+        "DISPATCH_SHA": dispatch_sha or NOT_IDENTIFIED,
+        "EXECUTED_SHA": executed_sha or NOT_IDENTIFIED,
+        "EVIDENCE_RUN_VALIDITY": (
+            "PASS" if (dispatch_sha and dispatch_sha == executed_sha)
+            else ("FAIL" if (dispatch_sha or executed_sha) else NOT_IDENTIFIED)),
+
         "SUCCESSES": ok,
         "SUCCESSFUL_REQUESTS": ok,
         "HTTP_429": n429,
@@ -461,6 +531,7 @@ def render(report):
 def _cli():                                                   # pragma: no cover
     import argparse
     import httpx
+    import provenance as PV
     ap = argparse.ArgumentParser()
     ap.add_argument("--universe", required=True)
     ap.add_argument("--out", required=True)
@@ -468,19 +539,39 @@ def _cli():                                                   # pragma: no cover
     ap.add_argument("--markets", type=int, default=6)
     ap.add_argument("--requests", type=int, default=0)
     ap.add_argument("--timeout-s", type=float, default=None)
+    ap.add_argument("--dispatch-sha", required=True)
+    ap.add_argument("--executed-sha", required=True)
+    ap.add_argument("--workflow-ref-sha", default=None)
+    ap.add_argument("--workflow-file", default=None)
     a = ap.parse_args()
     rps = float(a.rate)
     req = a.requests or min_requests(rps)
 
-    gate = dispatch_check(rps, req, a.timeout_s)
+    # PROVENANCE FIRST. A mismatch costs a failed job; finding out afterwards
+    # would cost the collection window as well.
+    prov = PV.check(a.dispatch_sha, a.executed_sha, a.workflow_ref_sha,
+                    PV.file_sha256(a.workflow_file) if a.workflow_file else None,
+                    PV.file_sha256(a.universe))
+    print(PV.render(prov))
+    PV.receipt(Path(a.out) / "provenance.json", prov)
+    if prov["EVIDENCE_RUN_VALIDITY"] != "PASS":
+        raise SystemExit("EVIDENCE_RUN_VALIDITY = FAIL")
+
+    gate = dispatch_check(rps, req, a.timeout_s,
+                          dispatch_sha=a.dispatch_sha,
+                          executed_sha=a.executed_sha)
     print(json.dumps(gate, indent=1, sort_keys=True, default=str))
+    PV.receipt(Path(a.out) / "predispatch_receipt.json", gate)
     if gate["CONFIRMATION_MAY_DISPATCH"] != "YES":
         raise SystemExit("CONFIRMATION_MAY_DISPATCH = NO")
 
     u = json.loads(Path(a.universe).read_text())
     slugs = [m["slug"] for m in u["MARKETS"]][:a.markets]
     with httpx.Client(headers={"accept": "application/json"}) as http:
-        rep = confirm(a.out, slugs, http, rps, req)
+        rep = confirm(a.out, slugs, http, rps, req,
+                      dispatch_sha=a.dispatch_sha, executed_sha=a.executed_sha)
+    prov["DATA_OUTPUT_SHA"] = PV.file_sha256(Path(a.out) / "confirm_rows.jsonl")
+    PV.receipt(Path(a.out) / "provenance.json", prov)
     print(render(rep))
 
 

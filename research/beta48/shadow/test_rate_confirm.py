@@ -116,9 +116,17 @@ class TheLabelsItRefuses(unittest.TestCase):
 class TheEvidenceFloorIsBothFloors(unittest.TestCase):
 
     def test_a_slow_rate_is_bound_by_the_request_count(self):
-        """300 requests at 0.25 rps take 1,200 s, so duration binds."""
+        """N requests span N-1 intervals, so OCCUPYING 1,200 s at 0.25 rps
+        takes 301 requests, not 300. That off-by-one cost a dispatched run."""
         self.assertEqual(RC.min_duration_s(0.25), 1200.0)
-        self.assertEqual(RC.min_requests(0.25), 300)
+        self.assertEqual(RC.min_requests(0.25), 301)
+        self.assertEqual(RC.planned_paced_exposure_s(300, 0.25), 1196.0)
+        self.assertEqual(RC.planned_paced_exposure_s(301, 0.25), 1200.0)
+
+    def test_the_required_count_is_ceil_duration_times_rate_plus_one(self):
+        self.assertEqual(RC.requests_for_exposure(0.25, 1200.0), 301)
+        self.assertEqual(RC.requests_for_exposure(2.0, 900.0), 1801)
+        self.assertEqual(RC.requests_for_exposure(0.125, 2400.0), 301)
 
     def test_a_very_slow_rate_needs_a_very_long_run(self):
         self.assertEqual(RC.min_duration_s(0.125), 2400.0)
@@ -127,7 +135,7 @@ class TheEvidenceFloorIsBothFloors(unittest.TestCase):
         """At 2 rps, 300 requests take 150 s. The 900 s floor binds, and the
         request floor rises with it -- a three-minute burst buys nothing."""
         self.assertEqual(RC.min_duration_s(2.0), 900.0)
-        self.assertEqual(RC.min_requests(2.0), 1800)
+        self.assertEqual(RC.min_requests(2.0), 1801)
 
     def test_a_zero_or_negative_rate_is_refused(self):
         with self.assertRaises(ValueError):
@@ -139,32 +147,60 @@ class TheEvidenceFloorIsBothFloors(unittest.TestCase):
         self.assertIn("REQUESTS_MEET_FLOOR", v["FAILED_CHECKS"])
 
     def test_too_short_a_run_fails(self):
-        v = RC.validate(clean(DURATION_S=300.0))
-        self.assertIn("DURATION_MEETS_FLOOR", v["FAILED_CHECKS"])
+        v = RC.validate(clean(NOMINAL_PACED_EXPOSURE_S=300.0))
+        self.assertIn("PACED_EXPOSURE_MEETS_FLOOR", v["FAILED_CHECKS"])
+
+    def test_wall_clock_may_not_stand_in_for_paced_exposure(self):
+        """A 60 s backoff pushes wall clock over the floor. The verdict must
+        not move: a refusal may never help a rate pass."""
+        v = RC.validate(clean(NOMINAL_PACED_EXPOSURE_S=1196.0,
+                              WALL_CLOCK_ELAPSED_S=1256.0,
+                              DURATION_S=1256.0))
+        self.assertIn("PACED_EXPOSURE_MEETS_FLOOR", v["FAILED_CHECKS"])
+        self.assertEqual(v["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
 
 
 class TheDispatchCheckRefusesAnImpossibleRun(unittest.TestCase):
 
     def test_a_plan_that_clears_its_floor_may_dispatch(self):
-        g = RC.dispatch_check(0.25, 300, timeout_s=5400)
+        g = RC.dispatch_check(0.25, 301, timeout_s=5400)
         self.assertEqual(g["CONFIRMATION_MAY_DISPATCH"], "YES")
+        self.assertEqual(g["PLANNED_PACED_EXPOSURE_S"], 1200.0)
+
+    def test_the_run_that_was_cancelled_would_now_be_refused(self):
+        """300 requests at 0.25 rps. Dispatched on the old arithmetic,
+        cancelled before it started. The gate now says no at the door."""
+        g = RC.dispatch_check(0.25, 300, timeout_s=5100)
+        self.assertEqual(g["CONFIRMATION_MAY_DISPATCH"], "NO")
+        self.assertEqual(g["PLANNED_PACED_EXPOSURE_S"], 1196.0)
+        self.assertIn("PLANNED_REQUESTS_MEET_FLOOR", g["FAILED_CHECKS"])
+        self.assertIn("PLANNED_PACED_EXPOSURE_MEETS_FLOOR", g["FAILED_CHECKS"])
 
     def test_a_plan_with_too_few_requests_is_refused_at_the_door(self):
         g = RC.dispatch_check(0.25, 120, timeout_s=5400)
         self.assertEqual(g["CONFIRMATION_MAY_DISPATCH"], "NO")
         self.assertIn("PLANNED_REQUESTS_MEET_FLOOR", g["FAILED_CHECKS"])
 
+    def test_a_sha_mismatch_refuses_the_dispatch(self):
+        ok = RC.dispatch_check(0.25, 301, 5400, dispatch_sha="a" * 40,
+                               executed_sha="a" * 40)
+        bad = RC.dispatch_check(0.25, 301, 5400, dispatch_sha="a" * 40,
+                                executed_sha="b" * 40)
+        self.assertEqual(ok["CONFIRMATION_MAY_DISPATCH"], "YES")
+        self.assertEqual(bad["CONFIRMATION_MAY_DISPATCH"], "NO")
+        self.assertIn("DISPATCH_SHA_EQUALS_EXECUTED_SHA", bad["FAILED_CHECKS"])
+
     def test_a_job_timeout_shorter_than_the_run_is_refused(self):
         """1,200 s of paced requests inside a 600 s job would be cut off and
         then read as a result."""
-        g = RC.dispatch_check(0.25, 300, timeout_s=600)
+        g = RC.dispatch_check(0.25, 301, timeout_s=600)
         self.assertEqual(g["CONFIRMATION_MAY_DISPATCH"], "NO")
         self.assertIn("JOB_TIMEOUT_COVERS_THE_RUN", g["FAILED_CHECKS"])
 
     def test_the_required_floors_are_printed_with_the_refusal(self):
         g = RC.dispatch_check(0.125, 100)
-        self.assertEqual(g["MIN_DURATION_S_REQUIRED"], 2400.0)
-        self.assertEqual(g["MIN_REQUESTS_REQUIRED"], 300)
+        self.assertEqual(g["MIN_PACED_EXPOSURE_S_REQUIRED"], 2400.0)
+        self.assertEqual(g["MIN_REQUESTS_REQUIRED"], 301)
 
 
 class TheThresholdIsFrozenBeforeTheRun(unittest.TestCase):
