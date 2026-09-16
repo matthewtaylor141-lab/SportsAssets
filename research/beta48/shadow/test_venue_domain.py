@@ -144,6 +144,60 @@ class TwoClassesNeverCollapsed(unittest.TestCase):
         self.assertIn("not evidence that there was none", i["ABSENCE_IS_NOT_ZERO"])
 
 
+class TheStartGateAndTheDuringCheckAreDifferentRules(unittest.TestCase):
+    """The idle window buys a CLEAN START, not a container. The confirmation
+    does not have to finish before the next cron; once running, the domain
+    queues later collectors behind it."""
+
+    KNOWN = ["beta48-rate-confirm", "run85-phase2-capture",
+             "beta48-forward-capture"]
+    PENDING = [{"name": "beta48-forward-capture", "id": 7, "status": "queued"}]
+    RUNNING = [{"name": "run85-phase2-capture", "id": 8,
+                "status": "in_progress"}]
+
+    def test_pending_blocks_the_start(self):
+        i = VD.domain_idle(self.PENDING, self.KNOWN, self_run_id="9")
+        self.assertEqual(i["DOMAIN_IDLE"], "NO")
+
+    def test_pending_is_not_a_confound_during_the_run(self):
+        """A collector queued behind us makes no request. Failing the run for
+        that would punish the domain for working."""
+        d = VD.during_run_conflict(self.PENDING, self.KNOWN, self_run_id="9")
+        self.assertEqual(d["DIRECT_CONFLICT_STARTED_DURING_RUN"], "NO")
+        self.assertEqual(d["PENDING_COLLECTORS_DURING_RUN"],
+                         ["beta48-forward-capture"])
+        self.assertTrue(d["PENDING_IS_NOT_A_CONFOUND"])
+
+    def test_a_running_collector_during_the_run_is_a_confound(self):
+        d = VD.during_run_conflict(self.RUNNING, self.KNOWN, self_run_id="9")
+        self.assertEqual(d["DIRECT_CONFLICT_STARTED_DURING_RUN"], "YES")
+        self.assertEqual(d["DIRECT_CONFLICTS_RUNNING_DURING_RUN"],
+                         ["run85-phase2-capture"])
+
+    def test_the_two_semantics_are_named_apart(self):
+        self.assertEqual(VD.GATE_SEMANTICS_AT_START, "RUNNING_OR_PENDING_BLOCKS")
+        self.assertEqual(VD.GATE_SEMANTICS_DURING_RUN,
+                         "ONLY_RUNNING_IS_A_CONFOUND")
+
+    def test_supersession_of_another_job_is_an_ops_issue(self):
+        d = VD.during_run_conflict([], self.KNOWN, self_run_id="9")
+        self.assertIn("NOT_A_CONFIRMATION_FAULT", d["PENDING_SUPERSESSION_IS"])
+
+    def test_the_start_audit_names_the_collectors_not_just_a_count(self):
+        i = VD.isolation(self.RUNNING + self.PENDING, self.KNOWN,
+                         self_run_id="9")
+        self.assertEqual(i["KNOWN_DIRECT_PMUS_COLLECTORS_ACTIVE"],
+                         ["run85-phase2-capture"])
+        self.assertEqual(i["KNOWN_DIRECT_PMUS_COLLECTORS_PENDING"],
+                         ["beta48-forward-capture"])
+
+    def test_the_audit_scans_names_not_group_membership(self):
+        """run85's live run carries its OLD group, so membership would have
+        missed it entirely."""
+        self.assertIn("NOT_GROUP_MEMBERSHIP",
+                      VD.isolation([], self.KNOWN, self_run_id="9")["AUDIT_SCANS"])
+
+
 class WhatWeMayNotClaim(unittest.TestCase):
 
     def test_absolute_venue_isolation_is_refused(self):

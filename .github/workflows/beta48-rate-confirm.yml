@@ -141,6 +141,7 @@ jobs:
           python venue_domain.py --root ../../.. \
             --active-runs /tmp/active_start.json \
             --self-run-id "$SEG" \
+            --mode start \
             --out "evidence/rateconfirm_$SEG/isolation_at_start.json"
 
       # The pre-dispatch receipt prints and persists BEFORE the first request;
@@ -163,8 +164,10 @@ jobs:
             --workflow-ref-sha "${{ github.sha }}" \
             --workflow-file "../../../.github/workflows/beta48-rate-confirm.yml"
 
-      # Did a known collector start WHILE we were reading? The domain should
-      # make that impossible; recording it is how we would find out otherwise.
+      # Did a known collector RUN while we were reading? Only a RUNNING one is
+      # a confound -- a collector queued behind us by the domain made no
+      # request, and failing the run for that would punish the domain for
+      # working. Records, never aborts.
       - name: Check isolation again at the end
         if: always()
         working-directory: research/beta48/shadow
@@ -180,6 +183,7 @@ jobs:
           python venue_domain.py --root ../../.. \
             --active-runs /tmp/active_end.json \
             --self-run-id "$SEG" \
+            --mode during \
             --out "evidence/rateconfirm_$SEG/isolation_at_end.json" || true
 
       - name: Seal and commit the confirmation
