@@ -1,0 +1,56 @@
+{
+ "planned_sets": 513,
+ "planned_requests": 5130,
+ "idle_slots": 2064,
+ "stop_reason": "PLAN_EXHAUSTED",
+ "sets_started": 260,
+ "sets_completed": 260,
+ "sets_abandoned_at_segment_end": 0,
+ "http_429": 0,
+ "identity_failures": 0,
+ "grid_reanchors": [],
+ "throttle_events": [],
+ "venue_requests": 2600,
+ "book_observations": 1300,
+ "bbo_observations": 1300,
+ "elapsed_s": 17947.565048136003,
+ "achieved_rps": 0.1448112529900841,
+ "gap_stats": {
+  "min": 2.5,
+  "median": 2.5,
+  "max": 42.5
+ },
+ "cross_agree": 1298,
+ "cross_disagree": 2,
+ "cross_absent": 0,
+ "retired": {
+  "aec-nfl-chi-car-2026-09-13": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-16T04:02:40.261238+00:00"
+  },
+  "asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-16T04:03:50.261478+00:00"
+  },
+  "aec-nfl-bal-ind-2026-09-13": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-16T04:05:00.261488+00:00"
+  },
+  "atc-lmx-ame-tij-2026-09-05-tij": {
+   "reason": "SUSTAINED_NO_TWO_SIDED_BOOK",
+   "at": "2026-09-16T08:38:35.260980+00:00"
+  },
+  "aec-nfl-atl-pit-2026-09-13": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-16T04:06:45.261615+00:00"
+  },
+  "atc-lmx-pue-tol-2026-09-04-draw": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-16T04:07:20.261605+00:00"
+  },
+  "aec-nfl-cle-jax-2026-09-13": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-16T04:08:30.261560+00:00"
+  }
+ }
+}
