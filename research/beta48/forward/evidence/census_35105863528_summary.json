@@ -1,0 +1,319 @@
+{
+ "STAGE2_BOOK_READS": 9715,
+ "STAGE2_VALID_BOOKS": 9709,
+ "STAGE2_UNREADABLE": 6,
+ "ALL": {
+  "N": 9709,
+  "BROAD_AT_DECISION": 9066,
+  "ACTIVE_AT_DECISION": 5566,
+  "HIGH_ACTIVITY_AT_DECISION": 788,
+  "BROAD_PCT": 93.38,
+  "ACTIVE_PCT": 57.33,
+  "HIGH_ACTIVITY_PCT": 8.12,
+  "TRADE_RECENCY_N_USABLE": 9112,
+  "TRADE_RECENCY_MISSING": 597,
+  "TRADE_RECENCY_MISSING_PCT": 6.15,
+  "TRADE_RECENCY_NEGATIVE_CLOCK": 0,
+  "RECENCY_P10_S": 3910.6,
+  "RECENCY_P50_S": 53332.7,
+  "RECENCY_P90_S": 251585.7,
+  "SPREAD_TICKS_P10": 1.0,
+  "SPREAD_TICKS_P50": 1.0,
+  "SPREAD_TICKS_P90": 2.0,
+  "SPREAD_1_TICK_PCT": 87.41
+ },
+ "ROUTED": {
+  "N": 9168,
+  "BROAD_AT_DECISION": 9056,
+  "ACTIVE_AT_DECISION": 5558,
+  "HIGH_ACTIVITY_AT_DECISION": 788,
+  "BROAD_PCT": 98.78,
+  "ACTIVE_PCT": 60.62,
+  "HIGH_ACTIVITY_PCT": 8.6,
+  "TRADE_RECENCY_N_USABLE": 8997,
+  "TRADE_RECENCY_MISSING": 171,
+  "TRADE_RECENCY_MISSING_PCT": 1.87,
+  "TRADE_RECENCY_NEGATIVE_CLOCK": 0,
+  "RECENCY_P10_S": 3873.7,
+  "RECENCY_P50_S": 52743.6,
+  "RECENCY_P90_S": 248840.3,
+  "SPREAD_TICKS_P10": 1.0,
+  "SPREAD_TICKS_P50": 1.0,
+  "SPREAD_TICKS_P90": 2.0,
+  "SPREAD_1_TICK_PCT": 89.58
+ },
+ "AUDIT": {
+  "N": 541,
+  "BROAD_AT_DECISION": 10,
+  "ACTIVE_AT_DECISION": 8,
+  "HIGH_ACTIVITY_AT_DECISION": 0,
+  "BROAD_PCT": 1.85,
+  "ACTIVE_PCT": 1.48,
+  "HIGH_ACTIVITY_PCT": 0.0,
+  "TRADE_RECENCY_N_USABLE": 115,
+  "TRADE_RECENCY_MISSING": 426,
+  "TRADE_RECENCY_MISSING_PCT": 78.74,
+  "TRADE_RECENCY_NEGATIVE_CLOCK": 0,
+  "RECENCY_P10_S": 15628.2,
+  "RECENCY_P50_S": 158740.6,
+  "RECENCY_P90_S": 588660.7,
+  "SPREAD_TICKS_P10": 9.0,
+  "SPREAD_TICKS_P50": 26.0,
+  "SPREAD_TICKS_P90": 97.2,
+  "SPREAD_1_TICK_PCT": 0.87
+ },
+ "ROUTED_UFC": {
+  "N": 172,
+  "BROAD_AT_DECISION": 169,
+  "ACTIVE_AT_DECISION": 151,
+  "HIGH_ACTIVITY_AT_DECISION": 25,
+  "BROAD_PCT": 98.26,
+  "ACTIVE_PCT": 87.79,
+  "HIGH_ACTIVITY_PCT": 14.53,
+  "TRADE_RECENCY_N_USABLE": 163,
+  "TRADE_RECENCY_MISSING": 9,
+  "TRADE_RECENCY_MISSING_PCT": 5.23,
+  "TRADE_RECENCY_NEGATIVE_CLOCK": 0,
+  "RECENCY_P10_S": 1130.3,
+  "RECENCY_P50_S": 14147.6,
+  "RECENCY_P90_S": 67083.7,
+  "SPREAD_TICKS_P10": 1.0,
+  "SPREAD_TICKS_P50": 1.0,
+  "SPREAD_TICKS_P90": 2.0,
+  "SPREAD_1_TICK_PCT": 87.72
+ },
+ "ROUTED_NON_UFC": {
+  "N": 8996,
+  "BROAD_AT_DECISION": 8887,
+  "ACTIVE_AT_DECISION": 5407,
+  "HIGH_ACTIVITY_AT_DECISION": 763,
+  "BROAD_PCT": 98.79,
+  "ACTIVE_PCT": 60.1,
+  "HIGH_ACTIVITY_PCT": 8.48,
+  "TRADE_RECENCY_N_USABLE": 8834,
+  "TRADE_RECENCY_MISSING": 162,
+  "TRADE_RECENCY_MISSING_PCT": 1.8,
+  "TRADE_RECENCY_NEGATIVE_CLOCK": 0,
+  "RECENCY_P10_S": 3950.0,
+  "RECENCY_P50_S": 53918.0,
+  "RECENCY_P90_S": 249686.0,
+  "SPREAD_TICKS_P10": 1.0,
+  "SPREAD_TICKS_P50": 1.0,
+  "SPREAD_TICKS_P90": 2.0,
+  "SPREAD_1_TICK_PCT": 89.61
+ },
+ "DEPTH_ROUTED": {
+  "BEST_BID_QTY_P10": 5.1,
+  "BEST_BID_QTY_P50": 282.0,
+  "BEST_BID_QTY_P90": 52565.0,
+  "BEST_ASK_QTY_P10": 4.7,
+  "BEST_ASK_QTY_P50": 109.1,
+  "BEST_ASK_QTY_P90": 11235.3,
+  "N_BID": 9143,
+  "N_ASK": 9168
+ },
+ "DEPTH_AUDIT": {
+  "BEST_BID_QTY_P10": 1.0,
+  "BEST_BID_QTY_P50": 105.0,
+  "BEST_BID_QTY_P90": 325.0,
+  "BEST_ASK_QTY_P10": 10.0,
+  "BEST_ASK_QTY_P50": 76.9,
+  "BEST_ASK_QTY_P90": 4276.6,
+  "N_BID": 236,
+  "N_ASK": 495
+ },
+ "ROUTING_AUDIT": {
+  "AUDIT_N_READ": 541,
+  "FALSE_NEGATIVE_BROAD": 10,
+  "FALSE_NEGATIVE_BROAD_RATE": 0.0185,
+  "FALSE_NEGATIVE_ACTIVE": 8,
+  "FALSE_NEGATIVE_ACTIVE_RATE": 0.0148
+ },
+ "ELAPSED": {
+  "SCHEDULE_FAIRNESS_ASSERTED_FROM_POSITION": false,
+  "ELAPSED_MEASURED": true,
+  "ROUTED_N": 9174,
+  "ROUTED_ELAPSED_P10": 482.1142385005951,
+  "ROUTED_ELAPSED_P50": 2450.355005979538,
+  "ROUTED_ELAPSED_P90": 4450.797992706299,
+  "AUDIT_N": 541,
+  "AUDIT_ELAPSED_P10": 576.7077379226685,
+  "AUDIT_ELAPSED_P50": 2568.4567024707794,
+  "AUDIT_ELAPSED_P90": 4452.104435443878,
+  "MEDIAN_ELAPSED_GAP_S": 118.10169649124146,
+  "SCAN_SPAN_S": 4937.150888681412,
+  "TIMING_COMPARABLE": true
+ },
+ "SCAN": {
+  "SCAN_DURATION_S": 4937.277179718018,
+  "READS_PER_S": 1.9677
+ },
+ "SPORT_ALL_ROUTED": [
+  [
+   "nfl",
+   4168
+  ],
+  [
+   "cfb",
+   2501
+  ],
+  [
+   "epl",
+   390
+  ],
+  [
+   "mlb",
+   264
+  ],
+  [
+   "ufc",
+   172
+  ],
+  [
+   "lal",
+   116
+  ],
+  [
+   "nba",
+   87
+  ],
+  [
+   "oscars",
+   80
+  ],
+  [
+   "usgub",
+   77
+  ],
+  [
+   "sea",
+   73
+  ],
+  [
+   "usse",
+   71
+  ],
+  [
+   "lg1",
+   66
+  ]
+ ],
+ "SPORT_ACTIVE": [
+  [
+   "nfl",
+   2544
+  ],
+  [
+   "cfb",
+   1259
+  ],
+  [
+   "mlb",
+   227
+  ],
+  [
+   "epl",
+   185
+  ],
+  [
+   "ufc",
+   151
+  ],
+  [
+   "lal",
+   85
+  ],
+  [
+   "usse",
+   62
+  ],
+  [
+   "nhl",
+   59
+  ],
+  [
+   "usgub",
+   59
+  ],
+  [
+   "nba",
+   55
+  ],
+  [
+   "oscars",
+   51
+  ],
+  [
+   "nascar",
+   45
+  ]
+ ],
+ "SPORT_HIGH": [
+  [
+   "nfl",
+   327
+  ],
+  [
+   "cfb",
+   120
+  ],
+  [
+   "mlb",
+   61
+  ],
+  [
+   "ufc",
+   25
+  ],
+  [
+   "sea",
+   23
+  ],
+  [
+   "ucl",
+   23
+  ],
+  [
+   "nascar",
+   18
+  ],
+  [
+   "usse",
+   17
+  ],
+  [
+   "epl",
+   17
+  ],
+  [
+   "oscars",
+   13
+  ],
+  [
+   "usgub",
+   10
+  ],
+  [
+   "usp",
+   9
+  ]
+ ],
+ "ROUTED_PRIMARY_FAIL": [
+  [
+   "FAIL_STALE_TRADE",
+   3330
+  ],
+  [
+   "FAIL_NO_TRADE_TIMESTAMP",
+   168
+  ],
+  [
+   "FAIL_SPREAD",
+   87
+  ],
+  [
+   "FAIL_NO_TWO_SIDED_BOOK",
+   25
+  ]
+ ]
+}

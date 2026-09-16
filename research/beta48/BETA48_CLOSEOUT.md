@@ -355,3 +355,188 @@ No credentials. No authenticated connection. No orders. No capital.
 No production activation. No Track A modification. No Phase X re-dispatch.
 mirror_live = false.
 ```
+
+---
+
+# CLOSEOUT_ADDENDUM_STAGE2
+
+```
+RUN_ID            35105863528     STATUS  completed / success  (queried, not inferred)
+SCAN              2026-09-16 14:04:57Z -> 15:27Z, 4,937.3s = 82.3 min
+REQUESTS_USED     9,715           RATE    1.97 reads/s
+SEALED            SHA256 over board.json, board_raw.jsonl, census.jsonl, census_plan.json
+```
+
+**This addendum adds directly measured fields. It rewrites no historical
+conclusion, and it cannot change `ACTUAL_BETTOR_FILL_RATE`,
+`ACTUAL_BETTOR_ADVERSE_SELECTION`, `FAIR_VALUE_EDGE` or
+`MAKER_PROFITABILITY` — no order was sent. `MAKER_ENGINE_GATE_V2 = BLOCKED`
+stands.**
+
+## The count reconciliation, extended
+
+```
+9,267  earlier seg-8 board, stage-1 BROAD under the pre-amendment rule
+9,182  RETRACTED -- a 9h26m-stale join of seg-10 quotes to seg-8 status
+9,185  the corrected figure for THAT board snapshot
+9,174  THIS census's own board, enumerated fresh at 2026-09-16 14:03Z
+```
+
+**9,174 is a fourth board, not a fourth count of the same board.** The board
+turns over daily; a market that settled overnight is gone and a new one is
+listed. Nothing here revises 9,185, which remains correct for its snapshot.
+
+## What the census measured
+
+| | ROUTED | AUDIT (stage-1 rejects) |
+|---|---|---|
+| books read | 9,168 | 541 |
+| BROAD_AT_DECISION | 9,056 (98.78%) | 10 (1.85%) |
+| ACTIVE_AT_DECISION | 5,558 (60.62%) | 8 (1.48%) |
+| HIGH_ACTIVITY_AT_DECISION | 788 (8.60%) | 0 (0.00%) |
+| spread ≤ 1 tick at decision | 89.58% | 0.87% |
+| spread ticks P10/P50/P90 | 1 / 1 / 2 | 9 / 26 / 97.2 |
+| last-trade timestamp MISSING | 171 (1.87%) | 426 (78.74%) |
+| trade recency P10/P50/P90 (s) | 3,874 / 52,744 / 248,840 | 15,628 / 158,741 / 588,661 |
+
+```
+STAGE2_BOOK_READS   9,715      STAGE2_VALID_BOOKS  9,709      UNREADABLE  6
+NEGATIVE_RECENCY_CLOCKS  0
+```
+
+**Missingness is reported separately and is never read as staleness.** 597
+markets board-wide have no `lastTradeSetTime` at all; a market that never
+traded and one that traded two days ago fail the same tier for entirely
+different reasons.
+
+## The routing rule is not badly censoring
+
+```
+ROUTING_FALSE_NEGATIVE_BROAD_RATE   0.0185   (10 of 541)
+ROUTING_FALSE_NEGATIVE_ACTIVE_RATE  0.0148   ( 8 of 541)
+```
+
+And the audit lane was genuinely interleaved, not parked at the end where
+every market would have had maximum time to tighten:
+
+```
+ROUTED_ELAPSED  P10 482.1s   P50 2,450.4s   P90 4,450.8s
+AUDIT_ELAPSED   P10 576.7s   P50 2,568.5s   P90 4,452.1s
+MEDIAN_ELAPSED_GAP 118.1s    TIMING_COMPARABLE = true
+SCHEDULE_FAIRNESS_ASSERTED_FROM_POSITION = false
+```
+
+A fair schedule *position* was never accepted as a fair observation *time*;
+the elapsed clocks were measured and they agree.
+
+## UFC vs the other 98.1% — the answer is MIXED, and one half is worse
+
+| | ROUTED_UFC | ROUTED_NON_UFC |
+|---|---|---|
+| N | 172 | 8,996 |
+| BROAD_AT_DECISION | 98.26% | 98.79% |
+| **ACTIVE_AT_DECISION** | **87.79%** | **60.10%** |
+| **HIGH_ACTIVITY_AT_DECISION** | **14.53%** | **8.48%** |
+| spread ≤ 1 tick | 87.72% | 89.61% |
+| trade recency P50 | 14,148s | 53,918s |
+
+```
+SPREAD_GENERALIZES_FROM_UFC            YES  (non-UFC is marginally BETTER)
+ACTIVITY_GENERALIZES_FROM_UFC          NO
+NON_UFC_BOARD_HAS_BETTER_ECONOMICS     NOT_CLAIMED -- on activity it is WORSE
+```
+
+**The non-UFC board is not a better hunting ground; on the cost side it is a
+worse one.** Its median market last traded 53,918 seconds ago — **3.7x** the
+UFC median — and it clears HIGH_ACTIVITY at 8.48% against UFC's 14.53%. The
+earlier reading that "depth and frequency do not generalize" is confirmed and
+sharpened: they do not generalize, and the direction is unfavourable.
+
+## Composition of what survives
+
+```
+ROUTED    nfl 4,168   cfb 2,501   epl 390   mlb 264   ufc 172   lal 116
+ACTIVE    nfl 2,544   cfb 1,259   mlb 227   epl 185   ufc 151   lal  85
+HIGH      nfl   327   cfb   120   mlb  61   ufc  25   sea  23   ucl  23
+```
+
+Why routed markets fail ACTIVE, primary reason, in priority order:
+
+```
+FAIL_STALE_TRADE          3,330
+FAIL_NO_TRADE_TIMESTAMP     168
+FAIL_SPREAD                  87
+FAIL_NO_TWO_SIDED_BOOK       25
+```
+
+Staleness is the binding constraint, by a factor of twenty over everything
+else combined.
+
+## Depth at the touch, from the ARRIVING book
+
+```
+ROUTED  best bid qty P10/P50/P90    5.1 /   282.0 / 52,565.0
+        best ask qty P10/P50/P90    4.7 /   109.1 / 11,235.3
+AUDIT   best bid qty P10/P50/P90    1.0 /   105.0 /    325.0
+        best ask qty P10/P50/P90   10.0 /    76.9 /  4,276.6
+```
+
+`QUEUE_AHEAD` for a BETTOR rest is bounded below by the displayed size at the
+touch; it is **not** a fill rate and must never be read as one.
+
+## What this does and does not establish
+
+```
+ACTIVE_AT_DECISION                   MEASURED     5,558 of 9,168 routed
+HIGH_ACTIVITY_AT_DECISION            MEASURED       788 of 9,168 routed
+ROUTING_CENSORING                    MEASURED     ~1.9% false-negative
+ONE_TICK_SPREAD_OPPORTUNITY          OBSERVED     89.58% of routed
+BETTOR_REALIZED_SPREAD_CAPTURE       NOT_ESTABLISHED
+ACTUAL_BETTOR_FILL_RATE              NOT_IDENTIFIED
+ACTUAL_BETTOR_ADVERSE_SELECTION      NOT_IDENTIFIED
+FAIR_VALUE_EDGE                      NOT_IDENTIFIED
+MAKER_PROFITABILITY                  NOT_ESTABLISHED
+MAKER_ENGINE_GATE_V2                 BLOCKED  (unchanged)
+INDEPENDENT_CAPACITY                 still bounded by the family key, not 788
+```
+
+`STAGE2_BOOK_READ_BUDGET_WASTED = ZERO`.
+
+## 48_HOUR_SPRINT_COMPLETE
+
+```
+48_HOUR_SPRINT_COMPLETE = YES
+```
+
+All eight deliverables exist, the census addendum that was the last open item
+has landed, and the two frozen gates are unchanged. **YES does not mean the
+programme cleared its gates.** It means the sprint's questions were answered,
+including the ones whose answer is BLOCKED:
+
+```
+MAKER_ENGINE_GATE_V2 = BLOCKED      precisely named, cheapest next experiment
+                                    specified, and it is not a public read
+MICRO_LIVE_AUTHORIZED = NO
+BETTOR_EXIT_ENGINE_V1_PRIOR_COMPLETE = YES
+HISTORICAL_WHALE_RESEARCH_FROZEN     = YES
+```
+
+The remaining blocker is unchanged and was never going to move here: **no
+amount of public reading establishes a BETTOR fill.** That requires an order,
+and no order was authorised, sent, or built a path for.
+
+## PHASE 2
+
+```
+1. SHADOW ENGINE BUILT          DONE   shadow/position_state.py, 103 tests
+2. BETTER REAL-TIME DATA        NEXT   feed the recorder live public books;
+                                       the census says where: 788 HIGH_ACTIVITY
+                                       markets, nfl/cfb/mlb/ufc-led
+3. COUNTERFACTUAL EXECUTION     THEN   F0-F3 against the recorded books;
+                                       ghost policies; no assumed fills
+4. MICRO_LIVE_VALIDATION        GATED  requires authorisation not given
+5. SCALE DECISION               GATED  requires 4
+```
+
+No further broad whale-analysis cycle. The historical cohort is the prior;
+BETTOR's own shadow rows are the data.

@@ -235,8 +235,20 @@ What does **not** carry is everything that needs a book read:
 QUEUE_AHEAD          measured on UFC only  (needs L2 depth)
 TRADE_FREQUENCY      measured on UFC only  (needs repeated sharesTraded)
 TRADE_SIZE           measured on UFC only
-ACTIVE / HIGH_ACTIVITY   NOT_IDENTIFIED board-wide
+ACTIVE / HIGH_ACTIVITY   MEASURED board-wide by the stage-2 census
+                         (run 35105863528, 2026-09-16) -- see the addendum
+                         in BETA48_CLOSEOUT.md. DIRECTLY MEASURED FIELDS ONLY:
+  ROUTED_READ                9,168      BROAD_AT_DECISION   9,056 (98.78%)
+  ACTIVE_AT_DECISION         5,558 (60.62%)
+  HIGH_ACTIVITY_AT_DECISION    788 (8.60%)
+  ROUTING_FALSE_NEGATIVE_BROAD_RATE   0.0185
+  ROUTING_FALSE_NEGATIVE_ACTIVE_RATE  0.0148
 ```
+
+The census changes NOTHING else on this page. It cannot: no order was sent, so
+`ACTUAL_BETTOR_FILL_RATE`, `ACTUAL_BETTOR_ADVERSE_SELECTION`, `FAIR_VALUE_EDGE`
+and `MAKER_PROFITABILITY` remain exactly as they were, and
+`MAKER_ENGINE_GATE_V2 = BLOCKED` stands unchanged.
 
 That distinction matters for the gate: the **opportunity** side is observed
 board-wide; the **cost** side — how long capital waits, how often anything
@@ -367,14 +379,12 @@ BETTOR's own resting orders, showing a positive
 
 ## THE NEXT EXPERIMENTS, IN ORDER OF COST
 
-**1. The stage-2 rolling census — FREE, NO NEW AUTHORITY, DO THIS FIRST.**
-9,185 book reads, 1.28 hours at 2 requests/second, public and unauthenticated.
-It converts `ACTIVE` and `HIGH_ACTIVITY` from `NOT_IDENTIFIED` to measured
-across the **other 98.1% of the board**, and it is the only cheap way to learn
-whether the UFC microstructure is representative or pathological. The runtime
-presence of every field it needs has already been verified against captured
-rows. **It is the highest information-per-dollar experiment available and it
-requires nothing that is not already permitted.**
+**1. The stage-2 rolling census — DONE, 2026-09-16, run 35105863528.**
+9,715 book reads (9,174 routed + a 541-market audit lane), 82.3 minutes at
+1.97 requests/second, public and unauthenticated. `ACTIVE` and
+`HIGH_ACTIVITY` are now MEASURED across the whole routed board rather than
+`NOT_IDENTIFIED`, and the UFC-representativeness question is answered: see
+the addendum. This experiment is closed.
 
 **2. The public tape, once the C-14 block gate clears.** Gives
 `TIME_TO_QUEUE_DEPLETION` and `MARKOUT_AFTER_COUNTERFACTUAL_MAKER_FILL` — the
