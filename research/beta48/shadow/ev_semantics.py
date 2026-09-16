@@ -88,8 +88,12 @@ class ExecutabilityError(RuntimeError):
     """CERTAIN was claimed without proof the required size can execute."""
 
 
+class LiveCertaintyError(ExecutabilityError):
+    """A snapshot was offered as evidence of an actual venue execution."""
+
+
 # ---------------------------------------------------------------------------
-# CORRECTION 7 -- CERTAIN REQUIRES PROVEN EXECUTABLE DEPTH, NOT A TOUCH
+# CORRECTION 7 -- CERTAIN REQUIRES PROVEN DISPLAYED DEPTH, NOT A TOUCH
 # ---------------------------------------------------------------------------
 #
 # CERTAIN means "this action executes now, so there is no fill branch". That
@@ -98,6 +102,36 @@ class ExecutabilityError(RuntimeError):
 # resting ask does not make a 500-lot aggressive pair CERTAIN -- the remainder
 # walks the book at unknown prices, or does not execute at all, which is a
 # fill branch wearing a different name.
+#
+# CORRECTION 10 -- AND SNAPSHOT EXECUTABILITY IS NOT A LIVE FILL
+#
+# The gate above is sufficient to establish exactly one thing:
+#
+#   THE CAPTURED SNAPSHOT CONTAINS ENOUGH DISPLAYED DEPTH TO PRICE THE FULL
+#   ACTION AT THAT INSTANT.
+#
+# It does NOT establish that a real order sent afterwards fills that size. The
+# book can change at four points between the two:
+#
+#   OBSERVATION -> DECISION -> ORDER_TRANSMISSION -> VENUE_ARRIVAL
+#
+# and displayed depth is not reserved for us in any of those gaps. So the two
+# quantities are kept as SEPARATE VARIABLES, and there is no code path from
+# one to the other:
+#
+#   SNAPSHOT_FULL_SIZE_EXECUTABLE   YES / NO / NOT_IDENTIFIED   (this gate)
+#   LIVE_FULL_SIZE_FILL_CERTAINTY   NOT_ESTABLISHED             (until an
+#                                   actual venue execution result exists, or
+#                                   documented venue execution semantics give
+#                                   a stronger guarantee -- which is itself
+#                                   NOT_ESTABLISHED for PMUS today)
+#
+# THIS DOES NOT REINTRODUCE P_FILL INTO THE SNAPSHOT ARITHMETIC. For a
+# same-snapshot counterfactual, displayed ladder depth proving full-size
+# execution under the stated pricing rule is enough to price the action with
+# CERTAIN terms and no hypothetical fill probability. What changes is the
+# LABEL on the result: it is a SNAPSHOT_EXECUTION_COUNTERFACTUAL, a pre-trade
+# estimate, and never GUARANTEED_LIVE_EXECUTION.
 CERTAIN_REQUIRES = "CAPTURED_BOOK_DEPTH_COVERING_THE_REQUIRED_SIZE"
 CERTAIN_IS_NOT_ESTABLISHED_BY = ("PRESENCE_OF_A_BEST_BID",
                                  "PRESENCE_OF_A_BEST_ASK",
@@ -106,19 +140,35 @@ CERTAIN_IS_NOT_ESTABLISHED_BY = ("PRESENCE_OF_A_BEST_BID",
                                  "AN_UNTIMED_OR_UNSOURCED_SNAPSHOT")
 DEPTH_SOURCE_REQUIRED = "CAPTURED_BOOK_SNAPSHOT"
 STALE_SNAPSHOT_IS_NOT_DEPTH = True
-AGGRESSIVE_CERTAIN_EXECUTION_GATE = "PROVEN_EXECUTABLE_DEPTH_FOR_FULL_SIZE"
+
+AGGRESSIVE_SNAPSHOT_EXECUTABILITY_GATE = "PROVEN_DISPLAYED_DEPTH_FOR_FULL_SIZE"
+LIVE_AGGRESSIVE_FILL_CERTAINTY = "NOT_ESTABLISHED_UNTIL_ACTUAL_EXECUTION"
+SNAPSHOT_CALCULATION_LABEL = "SNAPSHOT_EXECUTION_COUNTERFACTUAL"
+SNAPSHOT_CALCULATION_IS_NOT = "GUARANTEED_LIVE_EXECUTION"
+SNAPSHOT_MODEL_IS = "A_PRE_TRADE_ESTIMATE_ONLY"
+WHAT_CAN_CHANGE_BETWEEN_SNAPSHOT_AND_ARRIVAL = (
+    "OBSERVATION", "DECISION", "ORDER_TRANSMISSION", "VENUE_ARRIVAL")
+DISPLAYED_DEPTH_IS_NOT_RESERVED_FOR_US = True
+VENUE_EXECUTION_SEMANTICS_GUARANTEE = NOT_ESTABLISHED
+
+# The only things that may set LIVE_FULL_SIZE_FILL_CERTAINTY. A snapshot is
+# not among them, and `live_fill_certainty` refuses one by name.
+OBSERVED_VENUE_EXECUTION = "OBSERVED_VENUE_EXECUTION"
+VENUE_RESULTS = ("FULL_FILL", "PARTIAL_FILL", "NO_FILL", "REJECT",
+                 "OTHER_VENUE_RESULT")
+REALIZED_EV_SOURCE = "ACTUAL_EXECUTION_ONLY"
 
 
-def certain_execution_gate(required_size, executable_depth=None,
-                           depth_source=None, snapshot_age_s=None,
-                           max_snapshot_age_s=5):
-    """May this action be priced with CERTAIN terms?
+def snapshot_executability_gate(required_size, executable_depth=None,
+                                depth_source=None, snapshot_age_s=None,
+                                max_snapshot_age_s=5):
+    """Does the CAPTURED SNAPSHOT display enough depth to price full size?
 
-    Returns the CONDITIONING that is actually justified. It returns CERTAIN
-    only when a captured book snapshot shows executable depth at or above the
-    required size. Otherwise it returns NOT_ESTABLISHED and names why -- and
-    `assert_certain_allowed` turns that into a refusal, so a caller cannot
-    read past it.
+    Returns SNAPSHOT_FULL_SIZE_EXECUTABLE = YES / NO / NOT_IDENTIFIED, the
+    conditioning that is justified FOR THE SNAPSHOT COUNTERFACTUAL, and --
+    always, on every branch, including YES -- LIVE_FULL_SIZE_FILL_CERTAINTY =
+    NOT_ESTABLISHED. The live field is a constant here by design: nothing this
+    function can see is evidence about a later execution.
 
     A PARTIAL depth result is deliberately NOT downgraded to
     CONDITIONAL_ON_FILL here: an aggressive order that can only partially
@@ -129,44 +179,109 @@ def certain_execution_gate(required_size, executable_depth=None,
            "EXECUTABLE_DEPTH": (executable_depth if executable_depth is not None
                                 else NOT_IDENTIFIED),
            "DEPTH_SOURCE": depth_source or NOT_IDENTIFIED,
-           "GATE": AGGRESSIVE_CERTAIN_EXECUTION_GATE,
-           "CERTAIN_REQUIRES": CERTAIN_REQUIRES}
+           "GATE": AGGRESSIVE_SNAPSHOT_EXECUTABILITY_GATE,
+           "CERTAIN_REQUIRES": CERTAIN_REQUIRES,
+           "CALCULATION_LABEL": SNAPSHOT_CALCULATION_LABEL,
+           "IS_NOT": SNAPSHOT_CALCULATION_IS_NOT,
+           # Carried on EVERY branch, so no caller can read a YES without it.
+           "LIVE_FULL_SIZE_FILL_CERTAINTY": LIVE_AGGRESSIVE_FILL_CERTAINTY,
+           "VENUE_EXECUTION_SEMANTICS_GUARANTEE":
+               VENUE_EXECUTION_SEMANTICS_GUARANTEE}
+
+    def _no(why, **extra):
+        return dict(out, SNAPSHOT_FULL_SIZE_EXECUTABLE="NO",
+                    SNAPSHOT_CONDITIONING_ALLOWED=NOT_ESTABLISHED,
+                    WHY=why, **extra)
+
+    def _unknown(why):
+        return dict(out, SNAPSHOT_FULL_SIZE_EXECUTABLE=NOT_IDENTIFIED,
+                    SNAPSHOT_CONDITIONING_ALLOWED=NOT_ESTABLISHED, WHY=why)
+
     if depth_source != DEPTH_SOURCE_REQUIRED:
-        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
-                    WHY="depth must come from a %s; %r does not establish "
-                        "executable size" % (DEPTH_SOURCE_REQUIRED,
-                                             depth_source))
+        return _unknown("depth must come from a %s; %r does not establish "
+                        "displayed size" % (DEPTH_SOURCE_REQUIRED,
+                                            depth_source))
     if snapshot_age_s is None:
-        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
-                    WHY="the snapshot carries no age; an untimed snapshot is "
-                        "not evidence about what can execute NOW")
+        return _unknown("the snapshot carries no age; an untimed snapshot is "
+                        "not evidence about what was displayed at any instant")
     if snapshot_age_s > max_snapshot_age_s:
-        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
-                    WHY="snapshot is %ss old against a %ss limit; a stale "
-                        "book is not proof of current depth"
+        return _unknown("snapshot is %ss old against a %ss limit; a stale "
+                        "book is not proof of displayed depth"
                         % (snapshot_age_s, max_snapshot_age_s))
     if executable_depth is None or isinstance(executable_depth, str):
-        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
-                    WHY="executable depth is not identified")
+        return _unknown("displayed depth is not identified")
     if D(str(executable_depth)) < D(str(required_size)):
-        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
-                    DEPTH_SHORTFALL=str(D(str(required_size))
-                                        - D(str(executable_depth))),
-                    WHY="captured depth covers less than the required size, "
-                        "so part of the order does not execute now; that is "
-                        "a fill branch, not a certainty")
-    return dict(out, CONDITIONING_ALLOWED=CERTAIN,
-                WHY="captured book depth covers the full required size")
+        return _no("displayed depth covers less than the required size, so "
+                   "part of the order does not execute even in the snapshot; "
+                   "that is a fill branch, not a certainty",
+                   DEPTH_SHORTFALL=str(D(str(required_size))
+                                       - D(str(executable_depth))))
+    return dict(out, SNAPSHOT_FULL_SIZE_EXECUTABLE="YES",
+                SNAPSHOT_CONDITIONING_ALLOWED=CERTAIN,
+                WHY="the captured snapshot displays enough depth to price the "
+                    "full required size at that instant; this prices a "
+                    "counterfactual, not a promise about a later order")
 
 
-def assert_certain_allowed(gate_result):
-    """Refuse to price CERTAIN terms on an ungated action."""
-    if gate_result.get("CONDITIONING_ALLOWED") != CERTAIN:
+# The old name, kept so nothing silently calls a function that no longer
+# exists -- but it points at the snapshot gate, which is all it ever was.
+certain_execution_gate = snapshot_executability_gate
+
+
+def assert_snapshot_certain_allowed(gate_result):
+    """Refuse to price CERTAIN terms on an ungated snapshot action."""
+    if gate_result.get("SNAPSHOT_CONDITIONING_ALLOWED") != CERTAIN:
         raise ExecutabilityError(
-            "CERTAIN conditioning refused: %s. %s = %s"
-            % (gate_result.get("WHY"), "AGGRESSIVE_CERTAIN_EXECUTION_GATE",
-               AGGRESSIVE_CERTAIN_EXECUTION_GATE))
+            "CERTAIN conditioning refused for the snapshot counterfactual: "
+            "%s. %s = %s"
+            % (gate_result.get("WHY"),
+               "AGGRESSIVE_SNAPSHOT_EXECUTABILITY_GATE",
+               AGGRESSIVE_SNAPSHOT_EXECUTABILITY_GATE))
     return gate_result
+
+
+assert_certain_allowed = assert_snapshot_certain_allowed
+
+
+def live_fill_certainty(snapshot_gate=None, venue_result=None,
+                        result_source=None):
+    """THE GUARD. A snapshot can never produce live fill certainty.
+
+    There is deliberately no argument combination that turns
+    SNAPSHOT_FULL_SIZE_EXECUTABLE = YES into LIVE_FULL_SIZE_FILL_CERTAINTY =
+    YES. The only input that moves the live field is an OBSERVED venue
+    execution, and passing a snapshot as one raises.
+    """
+    if venue_result is None:
+        return {"LIVE_FULL_SIZE_FILL_CERTAINTY":
+                    LIVE_AGGRESSIVE_FILL_CERTAINTY,
+                "SNAPSHOT_FULL_SIZE_EXECUTABLE":
+                    (snapshot_gate or {}).get("SNAPSHOT_FULL_SIZE_EXECUTABLE",
+                                              NOT_IDENTIFIED),
+                "WHY": "no order has been sent, so there is no execution to "
+                       "observe; displayed depth is not reserved for us and "
+                       "the book may change between %s"
+                       % " -> ".join(WHAT_CAN_CHANGE_BETWEEN_SNAPSHOT_AND_ARRIVAL),
+                "REALIZED_EV_SOURCE": REALIZED_EV_SOURCE}
+    if result_source != OBSERVED_VENUE_EXECUTION:
+        raise LiveCertaintyError(
+            "a venue result must come from %s; %r may not stand in for one. A "
+            "stale snapshot is not an observed fill."
+            % (OBSERVED_VENUE_EXECUTION, result_source))
+    if venue_result not in VENUE_RESULTS:
+        raise LiveCertaintyError(
+            "unknown venue result %r; expected one of %s"
+            % (venue_result, ", ".join(VENUE_RESULTS)))
+    return {"LIVE_EXECUTION_RESULT": venue_result,
+            "RESULT_SOURCE": OBSERVED_VENUE_EXECUTION,
+            "LIVE_FULL_SIZE_FILL_CERTAINTY":
+                "OBSERVED_FULL_FILL" if venue_result == "FULL_FILL"
+                else "OBSERVED_%s" % venue_result,
+            "REALIZED_EV_SOURCE": REALIZED_EV_SOURCE,
+            "SNAPSHOT_MODEL_ROLE": SNAPSHOT_MODEL_IS,
+            "WHY": "the observed execution is authoritative; the snapshot "
+                   "estimate does not override it and is not re-scored "
+                   "against it here"}
 
 
 # ---------------------------------------------------------------------------
@@ -571,11 +686,16 @@ def semantic_guards():
         "EV_IF_NO_FILL_MAY_DEFAULT_TO_ZERO_ONLY_WHEN":
             EV_IF_NO_FILL_MAY_DEFAULT_TO_ZERO_ONLY_WHEN,
         "WHY_ZERO_IS_WRONG_WHEN_EXPOSED": WHY_ZERO_IS_WRONG_WHEN_EXPOSED,
-        # 6. CERTAIN IS GATED ON PROVEN DEPTH.
-        "AGGRESSIVE_CERTAIN_EXECUTION_GATE":
-            AGGRESSIVE_CERTAIN_EXECUTION_GATE,
+        # 6. CERTAIN IS GATED ON PROVEN DISPLAYED DEPTH -- AND THAT GATE IS
+        #    ABOUT THE SNAPSHOT, NOT ABOUT A LATER LIVE ORDER.
+        "AGGRESSIVE_SNAPSHOT_EXECUTABILITY_GATE":
+            AGGRESSIVE_SNAPSHOT_EXECUTABILITY_GATE,
+        "LIVE_AGGRESSIVE_FILL_CERTAINTY": LIVE_AGGRESSIVE_FILL_CERTAINTY,
         "CERTAIN_REQUIRES": CERTAIN_REQUIRES,
         "CERTAIN_IS_NOT_ESTABLISHED_BY": list(CERTAIN_IS_NOT_ESTABLISHED_BY),
+        "SNAPSHOT_CALCULATION_LABEL": SNAPSHOT_CALCULATION_LABEL,
+        "SNAPSHOT_CALCULATION_IS_NOT": SNAPSHOT_CALCULATION_IS_NOT,
+        "REALIZED_EV_SOURCE": REALIZED_EV_SOURCE,
     }
 
 

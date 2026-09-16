@@ -417,7 +417,7 @@
    "ORIGINAL_MARKET": "NOT_APPLICABLE",
    "BETTOR_APPLICABILITY": "DIRECT",
    "CURRENT_BETTOR_EQUIVALENT": "inventory.py already treats the AGGRESSIVE close as identified only for as much size as the captured ladder displays, and NOT_IDENTIFIED beyond it. That is exactly the right rule and should be reused for entry.",
-   "PROPOSED_CHANGE": "EV_TAKER = (FV - ask) * size - TAKER_FEE(size, p, regime, tier) - E[INVENTORY_HOLDING_COST] - E[CLOSE_COST] + VERIFIED_INCENTIVES, with P_FILL = 1 ONLY up to displayed size at the crossed levels and NOT_IDENTIFIED beyond. Which FV enters depends on the intended exit: FV_SETTLEMENT for a hold-to-resolution intent, FV_EXECUTION_SHORT_HORIZON for an intent to close early.",
+   "PROPOSED_CHANGE": "EV_TAKER = (FV - ask) * size - TAKER_FEE(size, p, regime, tier) - E[INVENTORY_HOLDING_COST] - E[CLOSE_COST] + VERIFIED_INCENTIVES, priced as CERTAIN in the SNAPSHOT COUNTERFACTUAL only up to the displayed size at the crossed levels, and NOT_IDENTIFIED beyond. SNAPSHOT_FULL_SIZE_EXECUTABLE is what displayed depth establishes; LIVE_FULL_SIZE_FILL_CERTAINTY stays NOT_ESTABLISHED_UNTIL_ACTUAL_EXECUTION, because the book may change across OBSERVATION -> DECISION -> ORDER_TRANSMISSION -> VENUE_ARRIVAL and displayed depth is not reserved for us. No hypothetical P_FILL enters the same-snapshot sum. Which FV enters depends on the intended exit: FV_SETTLEMENT for a hold-to-resolution intent, FV_EXECUTION_SHORT_HORIZON for an intent to close early.",
    "DATA_REQUIRED": "Fee regime and tier, which fees_v2 already carries with TIER_VERIFIED = False.",
    "CAN_TEST_NOW": "YES",
    "VALIDATION_METHOD": "Unit tests on the size boundary and on regime straddles.",

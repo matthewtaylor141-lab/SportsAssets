@@ -26,7 +26,9 @@ PRICE_TIME_JOINT_PRIOR             NOT_IDENTIFIED
 BETTOR_P_FILL_SOURCE               BETTOR_NATIVE_ADMITTED_FILLS_REQUIRED
 WHALE_COMPLETION_AS_P_FILL         FORBIDDEN
 PASSIVE_NO_FILL_BRANCH             EXPLICIT
-AGGRESSIVE_CERTAIN_EXECUTION_GATE  PROVEN_EXECUTABLE_DEPTH_FOR_FULL_SIZE
+AGGRESSIVE_SNAPSHOT_EXECUTABILITY_GATE
+                                   PROVEN_DISPLAYED_DEPTH_FOR_FULL_SIZE
+LIVE_AGGRESSIVE_FILL_CERTAINTY     NOT_ESTABLISHED_UNTIL_ACTUAL_EXECUTION
 PAIR_BASIS_ABOVE_PAR_IS            GROSS_STRUCTURAL_FACT_BEFORE_INCENTIVES
 BLOBS_V3_RICH_CELL_STATUS          NOT_AVAILABLE_AGGREGATE_ONLY
 ```
@@ -124,13 +126,52 @@ proven.** `ev_pair_now` prices `A_AGGRESSIVE_COMPLEMENT_PAIR`
 earlier audit of mine called that a double count; it was wrong, and this
 document records the correction because the wrong version was circulated.
 
-But **`CERTAIN` now requires proven depth for the full size**, not a quoted
-price: `certain_execution_gate()` returns `CERTAIN` only from a captured book
-snapshot, timed and fresh, whose executable depth covers the required size. A
-best bid or best ask, a quote with no size, a last trade, or an untimed
-snapshot all return `NOT_ESTABLISHED` — and a one-lot book does not make a
-500-lot pair certain, because the remainder is a fill branch wearing another
-name.
+But **`CERTAIN` requires proven displayed depth for the full size**, not a
+quoted price: `snapshot_executability_gate()` returns `CERTAIN` only from a
+captured book snapshot, timed and fresh, whose displayed depth covers the
+required size. A best bid or best ask, a quote with no size, a last trade, or
+an untimed snapshot all return `NOT_ESTABLISHED` — and a one-lot book does not
+make a 500-lot pair certain, because the remainder is a fill branch wearing
+another name.
+
+### And that gate is about the SNAPSHOT, not about a later live order
+
+Passing it establishes exactly one thing: **the captured snapshot displayed
+enough depth to price the full action at that instant.** It does not establish
+that an order sent afterwards fills that size. The book can change at four
+points in between —
+
+```
+OBSERVATION -> DECISION -> ORDER_TRANSMISSION -> VENUE_ARRIVAL
+```
+
+— and displayed depth is never reserved for us. So these are two separate
+variables with **no code path from one to the other**:
+
+```
+SNAPSHOT_FULL_SIZE_EXECUTABLE   YES / NO / NOT_IDENTIFIED
+LIVE_FULL_SIZE_FILL_CERTAINTY   NOT_ESTABLISHED
+```
+
+The live field is carried on **every** branch of the gate, including the YES,
+so a reader cannot pick up the first without the second. `live_fill_certainty()`
+is the guard: a snapshot `YES` goes in and `NOT_ESTABLISHED` comes out, and
+offering a snapshot as a venue result raises `LiveCertaintyError` — a stale
+snapshot may never masquerade as an observed fill. Today
+`VENUE_EXECUTION_SEMANTICS_GUARANTEE = NOT_ESTABLISHED`; if PMUS documents
+stronger execution semantics, that is where the stronger claim would enter.
+
+**This does not put `P_FILL` back into the snapshot arithmetic.** For a
+same-snapshot counterfactual, displayed ladder depth proving full-size execution
+under the stated pricing rule is enough to price the action with `CERTAIN` terms
+and no hypothetical fill probability. What changes is the **label**: the result
+is a `SNAPSHOT_EXECUTION_COUNTERFACTUAL` and a pre-trade estimate, never
+`GUARANTEED_LIVE_EXECUTION`.
+
+**The live path is authoritative when it exists.** When BETTOR actually sends an
+aggressive order, the observed `FULL_FILL` / `PARTIAL_FILL` / `NO_FILL` /
+`REJECT` / other venue result is the fact, `REALIZED_EV_SOURCE =
+ACTUAL_EXECUTION_ONLY`, and the snapshot estimate does not override it.
 
 ---
 
@@ -314,4 +355,6 @@ is honestly larger than "re-derive from files we already hold."
   and every interval width computed from them is a lower bound.
 - That `blobs_v3` supplies the richer cells:
   `BLOBS_V3_RICH_CELL_STATUS = NOT_AVAILABLE_AGGREGATE_ONLY`.
+- That a snapshot showing full-size displayed depth means a real order would
+  fill: `LIVE_FULL_SIZE_FILL_CERTAINTY = NOT_ESTABLISHED_UNTIL_ACTUAL_EXECUTION`.
 - Any profitability, win rate or expected return figure whatsoever.

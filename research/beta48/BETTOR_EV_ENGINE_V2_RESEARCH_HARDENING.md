@@ -30,6 +30,18 @@ action has no fill uncertainty, so unconditional terms are exactly right and
 there is nothing to fix. The terms are registered `CERTAIN`, and a test refuses
 to let a `CERTAIN` term be placed in a fill branch.
 
+Two later corrections narrow what "executes now" is allowed to mean, without
+changing the arithmetic:
+
+- `CERTAIN` requires **proven displayed depth for the full size** from a timed,
+  fresh captured snapshot — `snapshot_executability_gate()`. A best bid or ask
+  proves a price and no size.
+- Passing that gate establishes `SNAPSHOT_FULL_SIZE_EXECUTABLE = YES` and
+  nothing about a later order. `LIVE_FULL_SIZE_FILL_CERTAINTY` stays
+  `NOT_ESTABLISHED` on every branch, the calculation is labelled
+  `SNAPSHOT_EXECUTION_COUNTERFACTUAL`, and `live_fill_certainty()` refuses to
+  convert one into the other. **No `P_FILL` re-enters the snapshot sum.**
+
 ### The actual gap
 
 `A_PASSIVE_COMPLEMENT_PAIR` and `A_PASSIVE_SELL_EXIT` are feasible actions —

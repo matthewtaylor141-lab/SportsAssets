@@ -451,13 +451,24 @@ EV_TAKER = (FV − ask)·size
          − E[INVENTORY_HOLDING_COST] − E[CLOSE_COST]
          + VERIFIED_INCENTIVES
 
-   with P_FILL = 1 ONLY up to displayed size at the crossed levels,
-   and NOT_IDENTIFIED beyond it.
+   IN THE SNAPSHOT COUNTERFACTUAL, priced as CERTAIN only up to the
+   displayed size at the crossed levels, and NOT_IDENTIFIED beyond it.
 ```
 
 That size boundary is not new — `inventory.py` already applies exactly this rule
 to the *aggressive close*. The proposal is to reuse it on *entry*, where it is
-currently absent. **Which FV enters depends on the intended exit**: `FV_SETTLEMENT`
+currently absent.
+
+**Scope correction.** An earlier draft of this block wrote "`P_FILL = 1` up to
+displayed size". That reads as a claim about a live order and it is not one.
+Displayed depth establishes `SNAPSHOT_FULL_SIZE_EXECUTABLE = YES` — the captured
+book could have absorbed that size at that instant — while
+`LIVE_FULL_SIZE_FILL_CERTAINTY` stays `NOT_ESTABLISHED_UNTIL_ACTUAL_EXECUTION`,
+because the book can move across `OBSERVATION → DECISION → ORDER_TRANSMISSION →
+VENUE_ARRIVAL` and none of that depth is reserved for us. The arithmetic is
+unchanged: no hypothetical `P_FILL` enters the same-snapshot sum. Only the label
+is — it is a `SNAPSHOT_EXECUTION_COUNTERFACTUAL`, and the realised figure comes
+from the actual execution. **Which FV enters depends on the intended exit**: `FV_SETTLEMENT`
 for a hold-to-resolution intent, `FV_EXECUTION_SHORT_HORIZON` for an intent to
 close early. This is the first place where §4's separation earns its keep.
 

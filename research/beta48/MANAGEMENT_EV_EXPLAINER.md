@@ -131,8 +131,15 @@ Two smaller versions of the same discipline:
   trying to exit, we still own the position afterwards — so the calculation must
   say what we are left holding, and if we cannot price that, it says "unknown"
   rather than "zero".
-- An order is only treated as certain to execute if the order book we captured
-  actually shows enough size to fill it. A visible price is not a visible size.
+- An order is only treated as executable if the order book we captured actually
+  shows enough size to fill it. A visible price is not a visible size.
+- And even that is only a statement about **the book as we saw it**. It is not a
+  promise that a real order sent a moment later gets filled: the book can move
+  while we decide, while the order travels, and as it arrives, and nobody is
+  holding that size for us. So we keep two separate facts — "the snapshot showed
+  enough depth" and "the order actually filled" — and the code will not let the
+  first turn into the second. Only a real execution settles the second, and when
+  we have one, it is what the P&L uses.
 
 **10. What portion is independent BETTOR fair value?**
 

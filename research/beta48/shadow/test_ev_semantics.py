@@ -216,48 +216,161 @@ class CertainExecutionIsGatedOnProvenDepth(unittest.TestCase):
     OK = dict(depth_source=S.DEPTH_SOURCE_REQUIRED, snapshot_age_s=1)
 
     def test_full_depth_from_a_fresh_snapshot_allows_certain(self):
-        g = S.certain_execution_gate(500, executable_depth=500, **self.OK)
-        self.assertEqual(g["CONDITIONING_ALLOWED"], S.CERTAIN)
-        self.assertIs(S.assert_certain_allowed(g), g)
+        g = S.snapshot_executability_gate(500, executable_depth=500, **self.OK)
+        self.assertEqual(g["SNAPSHOT_FULL_SIZE_EXECUTABLE"], "YES")
+        self.assertEqual(g["SNAPSHOT_CONDITIONING_ALLOWED"], S.CERTAIN)
+        self.assertIs(S.assert_snapshot_certain_allowed(g), g)
 
     def test_a_best_ask_alone_does_not_establish_certainty(self):
-        g = S.certain_execution_gate(500, executable_depth=500,
-                                     depth_source="BEST_ASK_PRESENT",
-                                     snapshot_age_s=0)
-        self.assertEqual(g["CONDITIONING_ALLOWED"], S.NOT_ESTABLISHED)
+        g = S.snapshot_executability_gate(500, executable_depth=500,
+                                          depth_source="BEST_ASK_PRESENT",
+                                          snapshot_age_s=0)
+        self.assertEqual(g["SNAPSHOT_CONDITIONING_ALLOWED"], S.NOT_ESTABLISHED)
         for phrase in ("PRESENCE_OF_A_BEST_ASK", "A_QUOTED_PRICE_WITH_NO_SIZE"):
             self.assertIn(phrase, S.CERTAIN_IS_NOT_ESTABLISHED_BY)
 
     def test_a_one_lot_book_does_not_make_a_500_lot_order_certain(self):
-        g = S.certain_execution_gate(500, executable_depth=1, **self.OK)
-        self.assertEqual(g["CONDITIONING_ALLOWED"], S.NOT_ESTABLISHED)
+        g = S.snapshot_executability_gate(500, executable_depth=1, **self.OK)
+        self.assertEqual(g["SNAPSHOT_FULL_SIZE_EXECUTABLE"], "NO")
         self.assertEqual(g["DEPTH_SHORTFALL"], "499")
         with self.assertRaises(S.ExecutabilityError):
-            S.assert_certain_allowed(g)
+            S.assert_snapshot_certain_allowed(g)
 
-    def test_an_untimed_snapshot_is_not_evidence_about_now(self):
-        g = S.certain_execution_gate(10, executable_depth=1000,
-                                     depth_source=S.DEPTH_SOURCE_REQUIRED)
-        self.assertEqual(g["CONDITIONING_ALLOWED"], S.NOT_ESTABLISHED)
+    def test_an_untimed_snapshot_is_not_evidence_about_any_instant(self):
+        g = S.snapshot_executability_gate(
+            10, executable_depth=1000, depth_source=S.DEPTH_SOURCE_REQUIRED)
+        self.assertEqual(g["SNAPSHOT_FULL_SIZE_EXECUTABLE"], S.NOT_IDENTIFIED)
         self.assertIn("no age", g["WHY"])
 
     def test_a_stale_snapshot_is_refused(self):
-        g = S.certain_execution_gate(10, executable_depth=1000,
-                                     depth_source=S.DEPTH_SOURCE_REQUIRED,
-                                     snapshot_age_s=60)
-        self.assertEqual(g["CONDITIONING_ALLOWED"], S.NOT_ESTABLISHED)
+        g = S.snapshot_executability_gate(
+            10, executable_depth=1000, depth_source=S.DEPTH_SOURCE_REQUIRED,
+            snapshot_age_s=60)
+        self.assertEqual(g["SNAPSHOT_FULL_SIZE_EXECUTABLE"], S.NOT_IDENTIFIED)
         self.assertTrue(S.STALE_SNAPSHOT_IS_NOT_DEPTH)
 
     def test_unidentified_depth_is_refused(self):
-        g = S.certain_execution_gate(10, executable_depth=S.NOT_IDENTIFIED,
-                                     **self.OK)
-        self.assertEqual(g["CONDITIONING_ALLOWED"], S.NOT_ESTABLISHED)
+        g = S.snapshot_executability_gate(
+            10, executable_depth=S.NOT_IDENTIFIED, **self.OK)
+        self.assertEqual(g["SNAPSHOT_FULL_SIZE_EXECUTABLE"], S.NOT_IDENTIFIED)
+
+    def test_the_old_name_still_reaches_the_snapshot_gate(self):
+        """It was only ever a snapshot gate; the name is what was wrong."""
+        self.assertIs(S.certain_execution_gate, S.snapshot_executability_gate)
+        self.assertIs(S.assert_certain_allowed,
+                      S.assert_snapshot_certain_allowed)
 
     def test_the_gate_is_named_in_the_guard_block(self):
         g = S.semantic_guards()
-        self.assertEqual(g["AGGRESSIVE_CERTAIN_EXECUTION_GATE"],
-                         "PROVEN_EXECUTABLE_DEPTH_FOR_FULL_SIZE")
+        self.assertEqual(g["AGGRESSIVE_SNAPSHOT_EXECUTABILITY_GATE"],
+                         "PROVEN_DISPLAYED_DEPTH_FOR_FULL_SIZE")
+        self.assertEqual(g["LIVE_AGGRESSIVE_FILL_CERTAINTY"],
+                         "NOT_ESTABLISHED_UNTIL_ACTUAL_EXECUTION")
         self.assertEqual(g["PASSIVE_NO_FILL_BRANCH"], "EXPLICIT")
+
+
+class SnapshotExecutabilityIsNotALiveFill(unittest.TestCase):
+    """CORRECTION 10. Two variables, and no code path from one to the other.
+
+    The book can change across OBSERVATION -> DECISION -> ORDER_TRANSMISSION
+    -> VENUE_ARRIVAL, and displayed depth is never reserved for us.
+    """
+
+    FRESH = dict(depth_source=S.DEPTH_SOURCE_REQUIRED, snapshot_age_s=1)
+
+    def gate(self, size=500, depth=500):
+        return S.snapshot_executability_gate(size, executable_depth=depth,
+                                             **self.FRESH)
+
+    def test_a_snapshot_yes_still_carries_live_certainty_not_established(self):
+        g = self.gate()
+        self.assertEqual(g["SNAPSHOT_FULL_SIZE_EXECUTABLE"], "YES")
+        self.assertEqual(g["LIVE_FULL_SIZE_FILL_CERTAINTY"],
+                         "NOT_ESTABLISHED_UNTIL_ACTUAL_EXECUTION")
+
+    def test_every_branch_carries_the_live_field_not_only_the_yes(self):
+        for g in (self.gate(),
+                  self.gate(depth=1),
+                  S.snapshot_executability_gate(10, executable_depth=10,
+                                                depth_source="BEST_ASK"),
+                  S.snapshot_executability_gate(
+                      10, executable_depth=10,
+                      depth_source=S.DEPTH_SOURCE_REQUIRED,
+                      snapshot_age_s=999)):
+            self.assertEqual(g["LIVE_FULL_SIZE_FILL_CERTAINTY"],
+                             S.LIVE_AGGRESSIVE_FILL_CERTAINTY)
+
+    def test_the_calculation_is_labelled_a_counterfactual(self):
+        g = self.gate()
+        self.assertEqual(g["CALCULATION_LABEL"],
+                         "SNAPSHOT_EXECUTION_COUNTERFACTUAL")
+        self.assertEqual(g["IS_NOT"], "GUARANTEED_LIVE_EXECUTION")
+
+    def test_a_snapshot_yes_does_not_produce_live_certainty(self):
+        """The machine guard: YES in, NOT_ESTABLISHED out."""
+        r = S.live_fill_certainty(snapshot_gate=self.gate())
+        self.assertEqual(r["SNAPSHOT_FULL_SIZE_EXECUTABLE"], "YES")
+        self.assertEqual(r["LIVE_FULL_SIZE_FILL_CERTAINTY"],
+                         "NOT_ESTABLISHED_UNTIL_ACTUAL_EXECUTION")
+        self.assertIn("not reserved for us", r["WHY"])
+
+    def test_the_four_gaps_are_named(self):
+        self.assertEqual(S.WHAT_CAN_CHANGE_BETWEEN_SNAPSHOT_AND_ARRIVAL,
+                         ("OBSERVATION", "DECISION", "ORDER_TRANSMISSION",
+                          "VENUE_ARRIVAL"))
+        self.assertTrue(S.DISPLAYED_DEPTH_IS_NOT_RESERVED_FOR_US)
+
+    def test_no_venue_semantics_guarantee_is_claimed_today(self):
+        self.assertEqual(S.VENUE_EXECUTION_SEMANTICS_GUARANTEE,
+                         S.NOT_ESTABLISHED)
+
+    def test_a_snapshot_may_not_masquerade_as_an_observed_fill(self):
+        with self.assertRaises(S.LiveCertaintyError) as cm:
+            S.live_fill_certainty(venue_result="FULL_FILL",
+                                  result_source=S.DEPTH_SOURCE_REQUIRED)
+        self.assertIn("not an observed fill", str(cm.exception))
+
+    def test_an_unsourced_result_is_refused(self):
+        with self.assertRaises(S.LiveCertaintyError):
+            S.live_fill_certainty(venue_result="FULL_FILL")
+
+    def test_an_observed_execution_is_authoritative(self):
+        for res in S.VENUE_RESULTS:
+            r = S.live_fill_certainty(
+                venue_result=res, result_source=S.OBSERVED_VENUE_EXECUTION)
+            self.assertEqual(r["LIVE_EXECUTION_RESULT"], res)
+            self.assertEqual(r["REALIZED_EV_SOURCE"], "ACTUAL_EXECUTION_ONLY")
+        self.assertEqual(
+            S.live_fill_certainty(
+                venue_result="FULL_FILL",
+                result_source=S.OBSERVED_VENUE_EXECUTION)[
+                    "LIVE_FULL_SIZE_FILL_CERTAINTY"], "OBSERVED_FULL_FILL")
+
+    def test_a_partial_or_reject_is_carried_as_itself(self):
+        for res, want in (("PARTIAL_FILL", "OBSERVED_PARTIAL_FILL"),
+                          ("NO_FILL", "OBSERVED_NO_FILL"),
+                          ("REJECT", "OBSERVED_REJECT")):
+            r = S.live_fill_certainty(
+                venue_result=res, result_source=S.OBSERVED_VENUE_EXECUTION)
+            self.assertEqual(r["LIVE_FULL_SIZE_FILL_CERTAINTY"], want)
+
+    def test_an_unknown_venue_result_is_refused(self):
+        with self.assertRaises(S.LiveCertaintyError):
+            S.live_fill_certainty(venue_result="PROBABLY_FILLED",
+                                  result_source=S.OBSERVED_VENUE_EXECUTION)
+
+    def test_the_snapshot_model_stays_a_pre_trade_estimate(self):
+        r = S.live_fill_certainty(venue_result="PARTIAL_FILL",
+                                  result_source=S.OBSERVED_VENUE_EXECUTION)
+        self.assertEqual(r["SNAPSHOT_MODEL_ROLE"],
+                         "A_PRE_TRADE_ESTIMATE_ONLY")
+
+    def test_p_fill_is_not_reintroduced_into_the_snapshot_arithmetic(self):
+        """The counterfactual still prices with CERTAIN terms and no P_FILL."""
+        g = self.gate()
+        self.assertEqual(g["SNAPSHOT_CONDITIONING_ALLOWED"], S.CERTAIN)
+        with self.assertRaises(S.ConditioningError):
+            S.check_no_double_count(("LOCKED_PAIR_VALUE_CERTAIN",), ())
 
 
 class TheEarlierClaimAboutEvPairNowWasWrong(unittest.TestCase):
