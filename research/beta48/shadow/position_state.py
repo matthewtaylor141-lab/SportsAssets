@@ -207,6 +207,74 @@ def feasible_actions(state_set):
 
 
 # ---------------------------------------------------------------------------
+# FEASIBILITY IS THREE-VALUED. INFEASIBLE IS NOT UNKNOWN.
+# ---------------------------------------------------------------------------
+#
+# An action that CANNOT PHYSICALLY OCCUR must not block the allocator. There
+# is no hedge instrument, no complement is quoted, the market has settled --
+# none of those is a missing number, and treating them as one would freeze the
+# engine on the absence of a thing that does not exist.
+#
+# An action whose feasibility we DID NOT OBSERVE is a different claim, and it
+# does block: we can neither rule it out nor price it, so the comparison is
+# still incomplete. Absence of observation never becomes evidence -- the same
+# rule that caught a cluster of missing start times being promoted because
+# len({None}) == 1.
+FEASIBLE = "FEASIBLE"
+INFEASIBLE = "INFEASIBLE"
+
+# What each conditional action needs the book to show.
+PROBES = {
+    A_PAIR_NOW: "COMPLEMENT_EXECUTABLE_NOW",
+    A_PASSIVE_EXIT: "PASSIVE_EXIT_PLACEABLE",
+    A_AGGRESSIVE_EXIT: "AGGRESSIVE_EXIT_DEPTH_EXISTS",
+    A_HEDGE: "HEDGE_INSTRUMENT_EXECUTABLE",
+}
+
+# Actions that need no counterparty. Holding, waiting and carrying a leg to
+# settlement are always physically available on an open unpaired position.
+UNCONDITIONAL_UNPAIRED = (A_WAIT, A_DIRECTIONAL_HOLD, A_SETTLEMENT_HOLD)
+
+
+def feasibility(obs):
+    """{action: FEASIBLE | INFEASIBLE | NOT_IDENTIFIED} for one observation."""
+    out = {a: INFEASIBLE for a in ACTIONS}
+
+    if obs.get("SETTLED"):
+        # Terminal. Nothing can physically occur, and nothing is unknown
+        # about that -- so nothing blocks either.
+        return out
+
+    if obs.get("PAIR_COMPLETE"):
+        out[A_REALIZE_AND_RECYCLE] = FEASIBLE
+        out[A_HOLD_LOCKED_PAIR] = FEASIBLE
+        return out
+
+    t = obs.get("TIME_UNPAIRED_S")
+    known_age = t is not None and not isinstance(t, str)
+    for a in UNCONDITIONAL_UNPAIRED:
+        out[a] = FEASIBLE if known_age else NOT_IDENTIFIED
+
+    for a, probe in PROBES.items():
+        v = obs.get(probe, NOT_IDENTIFIED)
+        if v is None or (isinstance(v, str) and v == NOT_IDENTIFIED):
+            # NOT OBSERVED. Not "no". The engine must not conclude that a
+            # complement is unavailable because nobody looked.
+            out[a] = NOT_IDENTIFIED
+        else:
+            out[a] = FEASIBLE if v else INFEASIBLE
+    return out
+
+
+def actions_in_play(feas):
+    """The actions the allocator must account for: FEASIBLE or unobserved.
+
+    INFEASIBLE actions are dropped entirely -- they are not alternatives.
+    """
+    return tuple(a for a in ACTIONS if feas.get(a, INFEASIBLE) != INFEASIBLE)
+
+
+# ---------------------------------------------------------------------------
 # THE HAZARD PRIOR -- LEVEL_A evidence, read, never re-derived here
 # ---------------------------------------------------------------------------
 
@@ -401,12 +469,101 @@ def ev_simple(name, **terms):
 A_NO_ACTION_RECORDED = "A_NO_ACTION_RECORDED"
 
 COMPARISON_NOT_IDENTIFIED = "COMPARISON_NOT_IDENTIFIED"
+FEASIBILITY_NOT_IDENTIFIED = "FEASIBILITY_NOT_IDENTIFIED"
 DOMINATES = "DOMINATES"
+ROBUSTLY_DOMINATES = "ROBUSTLY_DOMINATES"
 RISK_KILL = "RISK_KILL"
 NO_FEASIBLE_ACTION = "NO_FEASIBLE_ACTION"
 
+# ---------------------------------------------------------------------------
+# EV INTERVALS AND ROBUST DOMINANCE -- DESIGNED, NOT ACTIVATED
+# ---------------------------------------------------------------------------
+#
+# The current rule is deliberately blunt: one unpriced feasible alternative
+# stops the whole comparison. It is correct and conservative, and it is not the
+# end state, because it conflates "we know nothing about this action" with "we
+# know this action's value lies in a range that cannot win".
+#
+# The better rule prices a BOUND where a point estimate is unavailable, and
+# acts only on ROBUST DOMINANCE:
+#
+#     LOWER_BOUND(A) > MAX( UPPER_BOUND(every other action in play) )
+#
+# Then A may be chosen even though another action has no precise point
+# estimate -- because no value inside that action's own bound could have beaten
+# A. That is substantially smarter than either ignoring missing alternatives or
+# never acting until everything is known exactly.
+#
+# IT STAYS OFF UNTIL THE BOUNDS THEMSELVES ARE VALIDATED. A dominance test run
+# on bounds that are too narrow is not conservative at all -- it is the old
+# error wearing an interval, and it would license trades on the strength of an
+# upper bound nobody checked.
+ROBUST_DOMINANCE_ACTIVE = False
+BOUND_METHODOLOGY_VALIDATED = False
 
-def allocate(evs, feasible, risk_kill=None):
+EV_PRICED = "PRICED"
+EV_BOUNDED = "BOUNDED"
+EV_INFEASIBLE = "INFEASIBLE"
+EV_STATUSES = (EV_PRICED, EV_BOUNDED, NOT_IDENTIFIED, EV_INFEASIBLE)
+
+
+def ev_cell(point=NOT_IDENTIFIED, lower=NOT_IDENTIFIED,
+            upper=NOT_IDENTIFIED, status=None):
+    """One action's EV as a point estimate AND a bound, with its status.
+
+    Status is derived, not asserted, unless the caller names INFEASIBLE:
+        a point estimate            -> PRICED
+        both bounds, no point       -> BOUNDED
+        anything less               -> NOT_IDENTIFIED
+    A one-sided bound is NOT_IDENTIFIED: dominance needs both ends, and a lone
+    lower bound would let an action with no ceiling look safe.
+    """
+    p, lo, hi = _term(point), _term(lower), _term(upper)
+    if status == EV_INFEASIBLE:
+        return {"EV_POINT_ESTIMATE": NOT_IDENTIFIED,
+                "EV_LOWER_BOUND": NOT_IDENTIFIED,
+                "EV_UPPER_BOUND": NOT_IDENTIFIED,
+                "EV_STATUS": EV_INFEASIBLE}
+    if lo != NOT_IDENTIFIED and hi != NOT_IDENTIFIED and lo > hi:
+        raise ValueError("EV_LOWER_BOUND above EV_UPPER_BOUND: %s > %s"
+                         % (lo, hi))
+    if p != NOT_IDENTIFIED:
+        st = EV_PRICED
+    elif lo != NOT_IDENTIFIED and hi != NOT_IDENTIFIED:
+        st = EV_BOUNDED
+    else:
+        st = NOT_IDENTIFIED
+    return {"EV_POINT_ESTIMATE": p, "EV_LOWER_BOUND": lo,
+            "EV_UPPER_BOUND": hi, "EV_STATUS": st}
+
+
+def robust_dominance(cells, in_play, active=None):
+    """Does one action's floor clear every other action's ceiling?
+
+    Returns (action_or_None, reason). Refuses to answer while the bound
+    methodology is unvalidated: the caller gets NOT_IDENTIFIED, not a verdict
+    computed from bounds nobody has checked.
+    """
+    if active is None:
+        active = ROBUST_DOMINANCE_ACTIVE
+    if not active or not BOUND_METHODOLOGY_VALIDATED:
+        return None, "ROBUST_DOMINANCE_INACTIVE_BOUND_METHODOLOGY_UNVALIDATED"
+    best = None
+    for a in in_play:
+        lo = cells.get(a, {}).get("EV_LOWER_BOUND", NOT_IDENTIFIED)
+        if lo == NOT_IDENTIFIED:
+            continue
+        ceilings = [cells.get(o, {}).get("EV_UPPER_BOUND", NOT_IDENTIFIED)
+                    for o in in_play if o != a]
+        if any(c == NOT_IDENTIFIED for c in ceilings):
+            continue
+        if not ceilings or lo > max(ceilings):
+            best = a if best is None else best
+    return (best, ROBUSTLY_DOMINATES) if best else (None,
+                                                    COMPARISON_NOT_IDENTIFIED)
+
+
+def allocate(evs, feasible, risk_kill=None, feas=None):
     """Choose among the feasible actions, or decline.
 
     Two rules, and the second is the one that matters today:
@@ -432,6 +589,14 @@ def allocate(evs, feasible, risk_kill=None):
     for a in feasible:
         v = evs.get(a, (NOT_IDENTIFIED, ("NOT_EVALUATED",)))[0]
         priced.append((a, v))
+
+    # An action we could not even establish to be POSSIBLE is a different
+    # blocker from an action we could not PRICE, and the row says which.
+    # Neither is overridden, because neither can be ruled out.
+    if feas is not None and any(feas.get(a) == NOT_IDENTIFIED
+                                for a in feasible):
+        return A_NO_ACTION_RECORDED, FEASIBILITY_NOT_IDENTIFIED, tuple(priced)
+
     if any(v == NOT_IDENTIFIED for _, v in priced):
         return A_NO_ACTION_RECORDED, COMPARISON_NOT_IDENTIFIED, tuple(priced)
 
@@ -485,9 +650,11 @@ def decision_row(obs, priors, account=CONSENSUS, ceiling="any_basis",
     p = p_complete_next_interval(lam, horizon_minutes)
 
     state_set = states(obs)
-    feas = feasible_actions(state_set)
+    fmap = feasibility(obs)
+    feas = actions_in_play(fmap)
     evs = dict(evs or {})
-    chosen, reason, ranked = allocate(evs, feas, risk_kill=risk_kill)
+    chosen, reason, ranked = allocate(evs, feas, risk_kill=risk_kill,
+                                      feas=fmap)
 
     row = {
         "LABEL": COUNTERFACTUAL,
@@ -522,6 +689,12 @@ def decision_row(obs, priors, account=CONSENSUS, ceiling="any_basis",
         "CAPITAL_OCCUPANCY": obs.get("CAPITAL_OCCUPANCY", NOT_IDENTIFIED),
         "STATES": state_set,
         "FEASIBLE_ACTIONS": feas,
+        # THREE-VALUED, and the third value is not the second. An action that
+        # cannot physically occur is dropped from the comparison; one whose
+        # feasibility was never observed stays in it and blocks.
+        "ACTION_FEASIBILITY": fmap,
+        "ROBUST_DOMINANCE_ACTIVE": ROBUST_DOMINANCE_ACTIVE,
+        "BOUND_METHODOLOGY_VALIDATED": BOUND_METHODOLOGY_VALIDATED,
         "ALL_ACTION_EVS": {
             a: {"EV": evs.get(a, (NOT_IDENTIFIED, ("NOT_EVALUATED",)))[0],
                 "MISSING_TERMS": list(
@@ -680,24 +853,73 @@ BETTOR_SERIES = (
     "BETTOR_EXIT_ACTION_VALUE",
 )
 
-# Below this many of BETTOR's own completions in a bucket, BETTOR's own hazard
-# is not yet credible and the whale prior carries full weight. The threshold is
-# the same n>=30 the inference gate uses elsewhere in the programme, and it is
-# frozen here before any shadow data exists so it cannot be tuned to a result.
+# n=30 IS A SCALE CONSTANT, NOT A SWITCH. Stated precisely because the
+# difference matters:
+#
+#     POSTERIOR_WEIGHT_FORMULA = w = n / (n + 30)          CONTINUOUS
+#     HARD_N30_SWITCH          = NO
+#
+# There is no cliff: nothing changes discontinuously at n=30, which is merely
+# where the two sources carry equal weight. What n=30 IS, is a V1 HEURISTIC --
+# it shrinks on COUNT alone and is blind to how noisy either estimate is. A
+# whale cell with 250,000 at risk and a whale cell with 40 would both be
+# displaced at exactly the same rate, which is wrong, and the formula below
+# cannot see it.
+#
+#     V1_HEURISTIC                            = YES
+#     STATISTICALLY_OPTIMAL_POSTERIOR_WEIGHTING = NOT_ESTABLISHED
+#
+# The frozen shadow experiment keeps this rule as preregistered. The successor
+# is `posterior_weight_precision` -- designed below, deliberately NOT wired in,
+# and to be tested prospectively against this one rather than substituted for
+# it on the strength of being better-looking mathematics.
 POSTERIOR_CREDIBILITY_N = 30
+POSTERIOR_WEIGHT_FORMULA = "w = n / (n + 30)"
+HARD_N30_SWITCH = "NO"
+POSTERIOR_WEIGHTING_IS_CONTINUOUS = True
+V1_HEURISTIC = True
+STATISTICALLY_OPTIMAL_POSTERIOR_WEIGHTING = "NOT_ESTABLISHED"
+PRECISION_WEIGHTING_ACTIVE = False
 
 
 def posterior_weight(bettor_n, credibility_n=POSTERIOR_CREDIBILITY_N):
     """How much of the blended hazard is BETTOR's own evidence.
 
-    A simple, pre-registered shrinkage: w = n / (n + credibility_n). At n=0 the
-    whale prior is the whole answer; at n=30 the two are equal; the prior never
-    reaches zero weight and never stays at one. The whale prior is an INITIAL
-    prior -- four accounts on a different venue is a starting point, not a law.
+    A pre-registered CONTINUOUS shrinkage: w = n / (n + credibility_n). At n=0
+    the whale prior is the whole answer; at n=30 the two are equal; the prior
+    never reaches zero weight and never stays at one, and no value of n makes
+    the weight jump. The whale prior is an INITIAL prior -- four accounts on a
+    different venue is a starting point, not a law.
     """
     if bettor_n is None or isinstance(bettor_n, str) or bettor_n < 0:
         return NOT_IDENTIFIED
     return bettor_n / float(bettor_n + credibility_n)
+
+
+def posterior_weight_precision(whale_var, bettor_var, active=None):
+    """THE SUCCESSOR RULE, designed and inert: inverse-variance weighting.
+
+        w_bettor = (1/bettor_var) / (1/whale_var + 1/bettor_var)
+
+    This is what the count rule is a proxy for. It lets a tight whale cell hold
+    its ground against a noisy BETTOR cell of the same n, which
+    `posterior_weight` cannot do because it never sees either variance.
+
+    It stays OFF. Switching the frozen shadow experiment's blending rule
+    mid-collection would make the two halves of the run incomparable, and the
+    right way to adopt it is to run it alongside and compare -- exactly the
+    prospective test the whale archive could never give us.
+    """
+    if active is None:
+        active = PRECISION_WEIGHTING_ACTIVE
+    if not active:
+        return NOT_IDENTIFIED
+    if (isinstance(whale_var, str) or isinstance(bettor_var, str)
+            or whale_var is None or bettor_var is None
+            or whale_var <= 0 or bettor_var <= 0):
+        return NOT_IDENTIFIED
+    pw, pb = 1.0 / whale_var, 1.0 / bettor_var
+    return pb / (pw + pb)
 
 
 def blended_lambda(prior_lambda, bettor_lambda, bettor_n):

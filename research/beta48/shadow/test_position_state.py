@@ -362,10 +362,16 @@ class TheDecisionRow(unittest.TestCase):
         self.pri = P.load_priors(
             Path(__file__).resolve().parent.parent / "evidence"
             / "whale_audit" / "whale_exit_priors_v1.json")
+        # A FULLY OBSERVED tick: every probe the recorder reads is present.
+        # Leaving one out is not "that action is unavailable", it is "nobody
+        # looked", and the engine treats the two differently on purpose.
         self.obs = {
             "TIMESTAMP": "2026-09-16T14:30:00Z",
             "TIME_UNPAIRED_S": 45,
             "COMPLEMENT_EXECUTABLE_NOW": True,
+            "PASSIVE_EXIT_PLACEABLE": True,
+            "AGGRESSIVE_EXIT_DEPTH_EXISTS": True,
+            "HEDGE_INSTRUMENT_EXECUTABLE": False,
             "CURRENT_BOOK": {"bids": [["0.41", 120]], "asks": [["0.43", 90]]},
             "COMPLEMENT_BOOK": {"bids": [["0.56", 40]], "asks": [["0.58", 75]]},
             "PAIR_BASIS": "0.99",
@@ -393,7 +399,10 @@ class TheDecisionRow(unittest.TestCase):
     def test_actions_not_chosen_carries_the_rejected_evs(self):
         evs = {P.A_PAIR_NOW: (D("0.05"), ()),
                P.A_SETTLEMENT_HOLD: (D("0.01"), ()),
-               P.A_WAIT: (D("0.02"), ())}
+               P.A_WAIT: (D("0.02"), ()),
+               P.A_PASSIVE_EXIT: (D("0.00"), ()),
+               P.A_AGGRESSIVE_EXIT: (D("-0.01"), ()),
+               P.A_DIRECTIONAL_HOLD: (D("0.00"), ())}
         row = P.decision_row(self.obs, self.pri, horizon_minutes=1.0, evs=evs)
         self.assertEqual(row["ACTION_CHOSEN"], P.A_PAIR_NOW)
         rejected = {d["ACTION"]: d["EV"] for d in row["ACTIONS_NOT_CHOSEN"]}
@@ -556,3 +565,182 @@ class ThePosteriorLoop(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class InfeasibleIsNotUnknown(unittest.TestCase):
+    """An action that cannot physically occur must not block the allocator.
+    An action nobody looked at must."""
+
+    def test_an_unobserved_probe_is_not_identified_not_infeasible(self):
+        f = P.feasibility({"TIME_UNPAIRED_S": 30})
+        for a in P.PROBES:
+            self.assertEqual(f[a], P.NOT_IDENTIFIED, a)
+
+    def test_an_explicit_false_is_infeasible_and_is_dropped(self):
+        f = P.feasibility({"TIME_UNPAIRED_S": 30,
+                           "HEDGE_INSTRUMENT_EXECUTABLE": False,
+                           "COMPLEMENT_EXECUTABLE_NOW": True,
+                           "PASSIVE_EXIT_PLACEABLE": False,
+                           "AGGRESSIVE_EXIT_DEPTH_EXISTS": False})
+        self.assertEqual(f[P.A_HEDGE], P.INFEASIBLE)
+        self.assertEqual(f[P.A_PAIR_NOW], P.FEASIBLE)
+        self.assertNotIn(P.A_HEDGE, P.actions_in_play(f))
+        self.assertIn(P.A_PAIR_NOW, P.actions_in_play(f))
+
+    def test_no_hedge_venue_does_not_freeze_the_engine(self):
+        """The user's own example: a missing hedge instrument is not a missing
+        number, and the comparison completes without it."""
+        obs = {"TIME_UNPAIRED_S": 30, "COMPLEMENT_EXECUTABLE_NOW": True,
+               "PASSIVE_EXIT_PLACEABLE": False,
+               "AGGRESSIVE_EXIT_DEPTH_EXISTS": False,
+               "HEDGE_INSTRUMENT_EXECUTABLE": False}
+        f = P.feasibility(obs)
+        play = P.actions_in_play(f)
+        evs = {a: (D("0.01") if a == P.A_PAIR_NOW else D("0.00"), ())
+               for a in play}
+        chosen, reason, _ = P.allocate(evs, play, feas=f)
+        self.assertEqual(chosen, P.A_PAIR_NOW)
+        self.assertEqual(reason, P.DOMINATES)
+
+    def test_a_settled_market_makes_everything_infeasible_and_blocks_nothing(self):
+        f = P.feasibility({"SETTLED": True})
+        self.assertTrue(all(v == P.INFEASIBLE for v in f.values()))
+        chosen, reason, _ = P.allocate({}, P.actions_in_play(f), feas=f)
+        self.assertEqual(reason, P.NO_FEASIBLE_ACTION)
+
+    def test_holding_needs_no_counterparty_and_is_always_feasible(self):
+        """Previously A_DIRECTIONAL_HOLD only entered the action set when
+        nothing else existed, so the allocator could never compare holding
+        against pairing. It can now."""
+        f = P.feasibility({"TIME_UNPAIRED_S": 30,
+                           "COMPLEMENT_EXECUTABLE_NOW": True,
+                           "PASSIVE_EXIT_PLACEABLE": True,
+                           "AGGRESSIVE_EXIT_DEPTH_EXISTS": True,
+                           "HEDGE_INSTRUMENT_EXECUTABLE": True})
+        for a in P.UNCONDITIONAL_UNPAIRED:
+            self.assertEqual(f[a], P.FEASIBLE, a)
+
+    def test_an_unknown_leg_age_makes_the_holds_unknown_not_available(self):
+        f = P.feasibility({"COMPLEMENT_EXECUTABLE_NOW": True})
+        for a in P.UNCONDITIONAL_UNPAIRED:
+            self.assertEqual(f[a], P.NOT_IDENTIFIED, a)
+
+    def test_the_two_blocking_causes_are_reported_separately(self):
+        obs = {"TIME_UNPAIRED_S": 30, "COMPLEMENT_EXECUTABLE_NOW": True,
+               "PASSIVE_EXIT_PLACEABLE": False,
+               "AGGRESSIVE_EXIT_DEPTH_EXISTS": False}
+        # HEDGE unobserved -> feasibility blocks, even with every EV supplied
+        f = P.feasibility(obs)
+        play = P.actions_in_play(f)
+        evs = {a: (D("0.01"), ()) for a in play}
+        _, reason, _ = P.allocate(evs, play, feas=f)
+        self.assertEqual(reason, P.FEASIBILITY_NOT_IDENTIFIED)
+        # every probe observed, one EV missing -> the pricing blocks instead
+        obs2 = dict(obs, HEDGE_INSTRUMENT_EXECUTABLE=False)
+        f2 = P.feasibility(obs2)
+        play2 = P.actions_in_play(f2)
+        evs2 = {a: (D("0.01"), ()) for a in play2 if a != P.A_WAIT}
+        _, reason2, _ = P.allocate(evs2, play2, feas=f2)
+        self.assertEqual(reason2, P.COMPARISON_NOT_IDENTIFIED)
+
+    def test_the_row_records_all_three_feasibility_values(self):
+        pri = P.load_priors(
+            Path(__file__).resolve().parent.parent / "evidence"
+            / "whale_audit" / "whale_exit_priors_v1.json")
+        obs = {"TIME_UNPAIRED_S": 30, "COMPLEMENT_EXECUTABLE_NOW": True,
+               "HEDGE_INSTRUMENT_EXECUTABLE": False}
+        row = P.decision_row(obs, pri, horizon_minutes=1.0)
+        f = row["ACTION_FEASIBILITY"]
+        self.assertEqual(f[P.A_PAIR_NOW], P.FEASIBLE)
+        self.assertEqual(f[P.A_HEDGE], P.INFEASIBLE)
+        self.assertEqual(f[P.A_PASSIVE_EXIT], P.NOT_IDENTIFIED)
+
+
+class EvBoundsAreDesignedAndInert(unittest.TestCase):
+
+    def test_robust_dominance_is_off_until_the_bounds_are_validated(self):
+        self.assertFalse(P.ROBUST_DOMINANCE_ACTIVE)
+        self.assertFalse(P.BOUND_METHODOLOGY_VALIDATED)
+
+    def test_it_refuses_to_answer_while_inactive_even_if_asked(self):
+        """Forcing it on does NOT make it rule: the bound methodology gate is
+        separate, so a config flag alone cannot license a trade on unchecked
+        intervals."""
+        cells = {P.A_PAIR_NOW: P.ev_cell(lower="0.05", upper="0.06"),
+                 P.A_WAIT: P.ev_cell(lower="0.01", upper="0.02")}
+        got, reason = P.robust_dominance(cells, (P.A_PAIR_NOW, P.A_WAIT))
+        self.assertIsNone(got)
+        self.assertIn("UNVALIDATED", reason)
+        forced, reason2 = P.robust_dominance(
+            cells, (P.A_PAIR_NOW, P.A_WAIT), active=True)
+        self.assertIsNone(forced)
+        self.assertIn("UNVALIDATED", reason2)
+
+    def test_a_status_is_derived_from_what_is_actually_present(self):
+        self.assertEqual(P.ev_cell(point="0.01")["EV_STATUS"], P.EV_PRICED)
+        self.assertEqual(P.ev_cell(lower="0.01", upper="0.02")["EV_STATUS"],
+                         P.EV_BOUNDED)
+        self.assertEqual(P.ev_cell()["EV_STATUS"], P.NOT_IDENTIFIED)
+        self.assertEqual(P.ev_cell(status=P.EV_INFEASIBLE)["EV_STATUS"],
+                         P.EV_INFEASIBLE)
+
+    def test_a_one_sided_bound_is_not_bounded(self):
+        """A lower bound with no ceiling would let an action look safe with no
+        limit on how good the alternatives could have been."""
+        self.assertEqual(P.ev_cell(lower="0.01")["EV_STATUS"],
+                         P.NOT_IDENTIFIED)
+        self.assertEqual(P.ev_cell(upper="0.02")["EV_STATUS"],
+                         P.NOT_IDENTIFIED)
+
+    def test_an_inverted_bound_is_an_error(self):
+        with self.assertRaises(ValueError):
+            P.ev_cell(lower="0.05", upper="0.01")
+
+    def test_bounds_refuse_floats_like_every_other_money_term(self):
+        with self.assertRaises(TypeError):
+            P.ev_cell(lower=0.1, upper=0.2)
+
+
+class TheShrinkageIsContinuousNotACliff(unittest.TestCase):
+
+    def test_there_is_no_switch_at_n_equals_thirty(self):
+        self.assertEqual(P.HARD_N30_SWITCH, "NO")
+        self.assertTrue(P.POSTERIOR_WEIGHTING_IS_CONTINUOUS)
+        self.assertEqual(P.POSTERIOR_WEIGHT_FORMULA, "w = n / (n + 30)")
+
+    def test_nothing_jumps_across_the_threshold(self):
+        """A cliff would show up as a step here. The weights either side of 30
+        differ by about a sixtieth, which is the point."""
+        below = P.posterior_weight(29)
+        at = P.posterior_weight(30)
+        above = P.posterior_weight(31)
+        self.assertLess(abs(at - below), 0.01)
+        self.assertLess(abs(above - at), 0.01)
+
+    def test_the_rule_does_not_claim_to_be_optimal(self):
+        self.assertTrue(P.V1_HEURISTIC)
+        self.assertEqual(P.STATISTICALLY_OPTIMAL_POSTERIOR_WEIGHTING,
+                         "NOT_ESTABLISHED")
+
+    def test_the_count_rule_is_blind_to_precision_and_says_so(self):
+        """Two whale cells, one with 250,000 at risk and one with 40, are
+        displaced at exactly the same rate. That is the known defect the
+        successor rule addresses."""
+        self.assertEqual(P.posterior_weight(50), P.posterior_weight(50))
+        # the successor exists and is inert
+        self.assertFalse(P.PRECISION_WEIGHTING_ACTIVE)
+        self.assertEqual(P.posterior_weight_precision(0.001, 0.1),
+                         P.NOT_IDENTIFIED)
+
+    def test_the_successor_rule_is_inverse_variance_when_switched_on(self):
+        w = P.posterior_weight_precision(0.01, 0.01, active=True)
+        self.assertAlmostEqual(w, 0.5)
+        tight_whale = P.posterior_weight_precision(0.0001, 0.01, active=True)
+        self.assertLess(tight_whale, 0.5)
+
+    def test_the_successor_is_not_wired_into_the_blend(self):
+        """Switching the blending rule mid-collection would make the two
+        halves of the frozen shadow run incomparable."""
+        import inspect
+        src = inspect.getsource(P.blended_lambda)
+        self.assertNotIn("posterior_weight_precision", src)

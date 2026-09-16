@@ -372,12 +372,50 @@ RN1_PRIOR  FERRARI_PRIOR  SWISSTONY_PRIOR  HRH_PRIOR
 CROSS_WHALE_CONSENSUS_PRIOR
 ```
 
-The consensus is **weighted by first-side acquisitions**, not averaged —
-`UNWEIGHTED_AVERAGE_REFUSED = True`, and a test asserts the consensus lambda
-lies inside its members' range. **swisstony is excluded from the consensus**,
-not quietly averaged in, because it is excluded from clean ground truth.
+The consensus is **weighted by the pooled interval risk set** — the positions
+still unpaired at the START of each interval — not by first-side acquisitions,
+and not averaged. `UNWEIGHTED_AVERAGE_REFUSED = True`, and a test asserts the
+consensus lambda lies inside its members' range. **swisstony is excluded from
+the consensus**, not quietly averaged in, because it is excluded from clean
+ground truth; the full exclusion provenance now travels inside the artifact.
 Member lambdas are retained beside the consensus so disagreement survives
 aggregation rather than being collapsed into it.
+
+**The weighting was revised.** First-side acquisitions is an account-size
+proxy: it would let a large account dominate the 1800–3600s prior on the
+strength of entries that had long since completed and were never exposed to
+that interval's risk. The archive retains the integer completion counts and
+their denominator is `opens_total` (verified: `rate == completed/opens` to
+1e-4 on all four accounts), so the risk set is recoverable exactly and the
+pooled estimator is used instead:
+
+```
+H_pooled = sum(d_i) / sum(n_i)          lambda = -ln(1 - H_pooled) / minutes
+```
+
+The correction is real but small, because the three members' survival curves
+are similar. RN1 holds **62.33%** of acquisitions but only **57.72%** of the
+risk set at 1800s; the tail lambda moves 0.006859 → **0.006763**, about 1.4%.
+Both estimators are published side by side so the revision is verifiable
+rather than asserted. `CONSENSUS_STATISTICAL_OPTIMALITY = NOT_ESTABLISHED` —
+pooling is the right estimator for a common hazard, but these accounts are not
+draws from one population and no between-account variance component is
+modelled.
+
+Each interval now also carries `N_AT_RISK_AT_START`, `N_COMPLETED_IN_INTERVAL`,
+`HAZARD_LAMBDA_SE` and `HAZARD_LAMBDA_CI95`, computed from the **counts** by
+the delta method — `SE(λ) = sqrt( H / ((1−H)·n) ) / m` — never from a
+percentage. Two cells with the same lambda and 40 vs 250,000 at risk are no
+longer indistinguishable to a reader. Where the counts cannot support it, the
+uncertainty is `NOT_IDENTIFIED`; the settlement tail keeps real counts and no
+lambda at all, because it has no elapsed duration.
+
+One convention is stated rather than left to be inferred: a **basis-ceiling**
+curve's published F is `completed_at_or_below_ceiling / opens`, which treats a
+completion ABOVE the ceiling as still at risk. That is a sub-distribution
+quantity, not a cause-specific hazard, and each row now says which convention
+it uses and carries the any-basis departure count beside it.
+`CAUSE_SPECIFIC_HAZARD = NOT_COMPUTED` for every ceiling curve.
 
 Sign agreement across all four is graded `HIGH_COHORT_SUPPORT` (4/4),
 `MODERATE_COHORT_SUPPORT` (3/4) or `LOW_COHORT_SUPPORT` (2/4 or sign

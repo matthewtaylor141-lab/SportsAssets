@@ -120,10 +120,66 @@ class TheConsensusIsWeightedAndRetainsDisagreement(unittest.TestCase):
         self.assertTrue(P["CROSS_WHALE_CONSENSUS_PRIOR"]
                         ["UNWEIGHTED_AVERAGE_REFUSED"])
 
-    def test_the_weighting_is_named_not_assumed(self):
+    def test_the_weighting_is_the_interval_risk_set_not_account_size(self):
+        """A conditional hazard is weighted by who was STILL AT RISK, not by
+        who opened the most positions. The superseded weighting is named so
+        the revision is visible rather than silent."""
         c = P["CROSS_WHALE_CONSENSUS_PRIOR"]
-        self.assertEqual(c["CONSENSUS_WEIGHTING"], "FIRST_SIDE_ACQUISITIONS")
-        self.assertIsInstance(c["CONSENSUS_WEIGHTS"], dict)
+        self.assertEqual(c["CONSENSUS_WEIGHTING"], "POOLED_INTERVAL_RISK_SET")
+        self.assertEqual(c["CONSENSUS_WEIGHTING_SUPERSEDED"],
+                         "FIRST_SIDE_ACQUISITIONS")
+        self.assertIsInstance(c["ACQUISITION_WEIGHTS_RETAINED"], dict)
+
+    def test_the_weighting_does_not_claim_to_be_optimal(self):
+        c = P["CROSS_WHALE_CONSENSUS_PRIOR"]
+        self.assertEqual(c["CONSENSUS_STATISTICAL_OPTIMALITY"],
+                         "NOT_ESTABLISHED")
+
+    def test_the_four_way_cell_the_ideal_weight_needs_does_not_exist(self):
+        """The completion grid is crossed with BASIS_CEILING but not with
+        PRICE_BAND. Saying so is the point: an unavailable cross must not be
+        implied by publishing a weight as though it were measured there."""
+        c = P["CROSS_WHALE_CONSENSUS_PRIOR"]
+        self.assertEqual(
+            c["FOUR_WAY_CELL_ACCOUNT_x_BAND_x_CEILING_x_INTERVAL"], NI)
+
+    def test_the_risk_set_share_moves_away_from_the_largest_account(self):
+        """The whole reason for the change: RN1 holds 62.3% of acquisitions
+        but only 57.7% of the positions still unpaired at 1800s, because its
+        own legs completed. The first number would over-weight it there."""
+        rows = P["CROSS_WHALE_CONSENSUS_PRIOR"]["HAZARD_any_basis"]
+        first = rows[0]["RISK_SET_WEIGHT_SHARE"]["rn1"]
+        late = rows[8]["RISK_SET_WEIGHT_SHARE"]["rn1"]
+        self.assertAlmostEqual(first, 0.62329, places=4)
+        self.assertAlmostEqual(late, 0.57724, places=4)
+        self.assertLess(late, first)
+
+    def test_the_pooled_lambda_reproduces_its_definition_from_the_counts(self):
+        for r in P["CROSS_WHALE_CONSENSUS_PRIOR"]["HAZARD_any_basis"]:
+            lam = r["CONSENSUS_CONTINUOUS_HAZARD_LAMBDA"]
+            if lam == NI:
+                continue
+            m = [x["INTERVAL_MINUTES"] for x in
+                 P["ACCOUNT_PRIORS"]["rn1"]["HAZARD_BY_BASIS_CEILING"]
+                 ["any_basis"]["ROWS"] if x["INTERVAL"] == r["INTERVAL"]][0]
+            want = -math.log(1.0 - r["POOLED_N_COMPLETED"]
+                             / r["POOLED_N_AT_RISK"]) / m
+            self.assertAlmostEqual(lam, want, places=12)
+
+    def test_the_pooled_risk_set_is_the_sum_of_its_members(self):
+        for r in P["CROSS_WHALE_CONSENSUS_PRIOR"]["HAZARD_any_basis"]:
+            self.assertEqual(r["POOLED_N_AT_RISK"],
+                             sum(r["RISK_SET_N_BY_MEMBER"].values()))
+
+    def test_the_superseded_estimator_is_retained_for_comparison(self):
+        """Both numbers are published. The revision moved the tail lambda by
+        about 1.4%; hiding the old one would make that unverifiable."""
+        rows = P["CROSS_WHALE_CONSENSUS_PRIOR"]["HAZARD_any_basis"]
+        for r in rows:
+            self.assertIn("ACQUISITION_WEIGHTED_CONTINUOUS_HAZARD_LAMBDA", r)
+        late = rows[8]
+        self.assertLess(late["CONSENSUS_CONTINUOUS_HAZARD_LAMBDA"],
+                        late["ACQUISITION_WEIGHTED_CONTINUOUS_HAZARD_LAMBDA"])
 
     def test_consensus_lambda_lies_within_its_members(self):
         for row in P["CROSS_WHALE_CONSENSUS_PRIOR"]["HAZARD_any_basis"]:
@@ -155,3 +211,125 @@ class TheConsensusIsWeightedAndRetainsDisagreement(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheUncertaintyTravelsWithTheHazard(unittest.TestCase):
+    """Two cells with the same lambda and very different support must not
+    receive the same decision weight. That requires the counts."""
+
+    def _rows(self, acct="rn1", key="any_basis"):
+        return P["ACCOUNT_PRIORS"][acct]["HAZARD_BY_BASIS_CEILING"][key]["ROWS"]
+
+    def test_every_interval_carries_its_risk_set_and_its_completions(self):
+        for r in self._rows():
+            self.assertIsInstance(r["N_AT_RISK_AT_START"], int)
+            self.assertIsInstance(r["N_COMPLETED_IN_INTERVAL"], int)
+            self.assertGreater(r["N_AT_RISK_AT_START"], 0)
+            self.assertGreaterEqual(r["N_COMPLETED_IN_INTERVAL"], 0)
+
+    def test_the_risk_set_is_opens_minus_everyone_already_completed(self):
+        rows = self._rows()
+        opens = P["ACCOUNT_PRIORS"]["rn1"]["FIRST_SIDE_ACQUISITIONS"]
+        self.assertEqual(rows[0]["N_AT_RISK_AT_START"], opens)
+        done = 0
+        for r in rows:
+            self.assertEqual(r["N_AT_RISK_AT_START"], opens - done)
+            done += r["N_COMPLETED_IN_INTERVAL"]
+
+    def test_the_risk_set_only_ever_shrinks(self):
+        rows = self._rows()
+        for a, b in zip(rows, rows[1:]):
+            self.assertLessEqual(b["N_AT_RISK_AT_START"],
+                                 a["N_AT_RISK_AT_START"])
+
+    def test_the_se_comes_from_the_counts_and_reproduces_its_formula(self):
+        for r in self._rows():
+            se = r["HAZARD_LAMBDA_SE"]
+            if se == NI:
+                continue
+            n, d, m = (r["N_AT_RISK_AT_START"], r["N_COMPLETED_IN_INTERVAL"],
+                       r["INTERVAL_MINUTES"])
+            h = d / n
+            self.assertAlmostEqual(
+                se, math.sqrt(h / ((1 - h) * n)) / m, places=12)
+
+    def test_the_settlement_tail_has_counts_but_no_lambda(self):
+        """It has a real risk set and real completions; what it does not have
+        is an elapsed duration, so no rate can be formed from it."""
+        tail = self._rows()[-1]
+        self.assertEqual(tail["INTERVAL"], "3600s-settlement")
+        self.assertGreater(tail["N_AT_RISK_AT_START"], 0)
+        self.assertGreater(tail["N_COMPLETED_IN_INTERVAL"], 0)
+        self.assertEqual(tail["CONTINUOUS_HAZARD_LAMBDA"], NI)
+        self.assertEqual(tail["HAZARD_LAMBDA_SE"], NI)
+        self.assertEqual(tail["HAZARD_LAMBDA_CI95"], NI)
+
+    def test_a_ceiling_curve_says_which_risk_set_convention_it_uses(self):
+        """A basis-ceiling curve treats an above-ceiling completion as still
+        at risk. That is a sub-distribution quantity, not a cause-specific
+        hazard, and the row says so rather than letting a reader assume."""
+        any_r = self._rows(key="any_basis")[3]
+        ceil_r = self._rows(key="ceiling_0.90")[3]
+        self.assertEqual(any_r["RISK_SET_CONVENTION"],
+                         "EXACT_OPENS_MINUS_COMPLETED")
+        self.assertEqual(ceil_r["RISK_SET_CONVENTION"],
+                         "SUB_DISTRIBUTION_ABOVE_CEILING_TREATED_AS_AT_RISK")
+        self.assertEqual(ceil_r["CAUSE_SPECIFIC_HAZARD"], "NOT_COMPUTED")
+        # and the gap between the two conventions is visible, not hidden
+        self.assertLess(ceil_r["N_AT_RISK_ANY_BASIS_DEPARTURES"],
+                        ceil_r["N_AT_RISK_AT_START"])
+
+    def test_the_archive_rate_and_the_recovered_counts_agree(self):
+        """The whole risk-set derivation rests on the denominator being
+        opens_total. If that ever stopped holding, every N_AT_RISK here would
+        be wrong, so it is checked rather than believed."""
+        for acct in P["ACCOUNT_PRIORS"]:
+            rows = (P["ACCOUNT_PRIORS"][acct]["HAZARD_BY_BASIS_CEILING"]
+                    ["any_basis"]["ROWS"])
+            opens = P["ACCOUNT_PRIORS"][acct]["FIRST_SIDE_ACQUISITIONS"]
+            done = 0
+            for r in rows:
+                done += r["N_COMPLETED_IN_INTERVAL"]
+                self.assertAlmostEqual(r["CUMULATIVE_COMPLETION_F"],
+                                       done / opens, places=4, msg=acct)
+
+
+class TheExclusionTravelsWithTheArtifact(unittest.TestCase):
+    """An account never disappears from the consensus silently."""
+
+    def setUp(self):
+        self.e = P["EXCLUSION_PROVENANCE"]["swisstony"]
+
+    def test_the_account_specific_prior_still_exists(self):
+        self.assertEqual(self.e["SWISSTONY_INCLUDED_IN_ACCOUNT_SPECIFIC_PRIOR"],
+                         "YES")
+        self.assertIn("swisstony", P["ACCOUNT_PRIORS"])
+        self.assertEqual(self.e["SWISSTONY_INCLUDED_IN_CONSENSUS"], "NO")
+
+    def test_the_reason_is_recorded_and_is_not_a_reconciliation_failure(self):
+        self.assertIn("two-source", self.e["EXCLUSION_REASON"])
+        self.assertIn("RECONCILES",
+                      self.e["EXCLUSION_IS_NOT_A_RECONCILIATION_FAILURE"])
+
+    def test_the_part_of_the_reason_we_do_not_have_is_marked_unknown(self):
+        """The specific two-source comparison behind the flag is not retained
+        in this workspace. Naming fields we cannot point to would be inventing
+        the reason, so the gap is declared instead."""
+        self.assertEqual(self.e["WHICH_FIELDS_PREVENT_INCLUSION"],
+                         "NOT_IDENTIFIED_IN_THIS_WORKSPACE")
+
+    def test_the_exclusion_was_frozen_before_any_hazard_was_cut(self):
+        self.assertEqual(self.e["WHETHER_EXCLUSION_WAS_FROZEN_BEFORE_RESULT"],
+                         "YES")
+        self.assertIn("ee7329c", self.e["FROZEN_AT"])
+
+    def test_swisstony_still_supports_the_descriptive_findings(self):
+        """It is excluded from the ESTIMATE, not from the description. Its
+        own lambda series is present and decays like the others."""
+        rows = (P["ACCOUNT_PRIORS"]["swisstony"]["HAZARD_BY_BASIS_CEILING"]
+                ["any_basis"]["ROWS"])
+        lams = [r["CONTINUOUS_HAZARD_LAMBDA"] for r in rows
+                if r["CONTINUOUS_HAZARD_LAMBDA"] != NI]
+        self.assertTrue(all(lams[i] >= lams[i + 1]
+                            for i in range(len(lams) - 1)))
+        self.assertGreater(lams[0] / lams[-1], 50)

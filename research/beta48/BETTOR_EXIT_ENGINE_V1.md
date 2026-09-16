@@ -5,10 +5,13 @@ the reference accounts, and the improvement claimed is **architectural**, not
 performance.
 
 ```
-EXIT_ENGINE_V1        = SPECIFIED, SHADOW-ONLY, NOT BUILT
+EXIT_ENGINE_V1        = SPECIFIED; RECORDER BUILT; FROZEN FOR DATA COLLECTION
 ORDER_CAPABLE         = NO
 MICRO_LIVE_AUTHORIZED = NO
 mirror_live           = false
+
+BETTOR_EXIT_ENGINE_V1_PRIOR_COMPLETE = YES   (section 11)
+NEXT_MILESTONE                       = SHADOW_EXIT_LEARNING_V1
 
 BETTOR_WILL_OUTPERFORM_THE_WHALES = NOT CLAIMED
 ```
@@ -517,10 +520,162 @@ collection spec in §5 exists precisely so that question is answerable.
 ```
 research/beta48/evidence/whale_audit/whale_exit_priors_v1.json
 research/beta48/build_exit_priors.py    pure derivation, no network
-research/beta48/test_exit_priors.py     21 tests
+research/beta48/test_exit_priors.py     39 tests
 ```
 
 Account-specific priors (`RN1_PRIOR`, `FERRARI_PRIOR`, `SWISSTONY_PRIOR`,
-`HRH_PRIOR`) and a `CROSS_WHALE_CONSENSUS_PRIOR` weighted by first-side
-acquisitions, with swisstony excluded from the consensus and member lambdas
-retained beside it so disagreement survives aggregation.
+`HRH_PRIOR`) and a `CROSS_WHALE_CONSENSUS_PRIOR` weighted by the pooled
+interval risk set, with swisstony excluded from the consensus and member
+lambdas retained beside it so disagreement survives aggregation.
+
+---
+
+## 10. THE THREE PRECISION CHECKS, BEFORE THE FREEZE
+
+### 10a. THE CONSENSUS IS WEIGHTED BY THE RISK SET
+
+The question was whether the denominator exists at the state the hazard is
+conditioned on. It does, for exactly the cells the consensus uses:
+
+```
+CELL_ENTRY_N_AVAILABLE                  YES_PER_ACCOUNT_AND_PER_PRICE_BAND
+INTERVAL_RISK_SET_N_AVAILABLE           YES_ANY_BASIS
+COMPLETION_COUNT_BY_INTERVAL_AVAILABLE  YES_ANY_BASIS_AND_CEILING
+
+FOUR_WAY_CELL_ACCOUNT x BAND x CEILING x INTERVAL   NOT_IDENTIFIED
+```
+
+The last line is the boundary: the completion grid is crossed with
+`BASIS_CEILING` but **not** with `PRICE_BAND`, and the per-band table carries
+only three fixed horizons and no ceilings. The ideal four-way weight does not
+exist and is not implied.
+
+The consensus is therefore built from **pooled risk-set evidence** —
+`H_pooled = Σd / Σn`, `λ = −ln(1−H_pooled)/m` — and the superseded
+acquisition-weighted series is retained beside it. RN1's weight at 1800s falls
+from 62.33% to 57.72%; the tail lambda moves about 1.4%. The concern was
+correct in direction and modest in magnitude, because the three members'
+survival curves are similar. `CONSENSUS_STATISTICAL_OPTIMALITY =
+NOT_ESTABLISHED`.
+
+### 10b. THE EXCLUSION TRAVELS WITH THE ARTIFACT
+
+```
+SWISSTONY_INCLUDED_IN_ACCOUNT_SPECIFIC_PRIOR  YES
+SWISSTONY_INCLUDED_IN_CONSENSUS               NO
+EXCLUSION_REASON      FLAGGED_EXCLUDED from clean ground truth on an
+                      unresolved two-source discrepancy, assigned as the
+                      account's ROLE before any priors were built
+WHICH_FIELDS_PREVENT_INCLUSION   NOT_IDENTIFIED_IN_THIS_WORKSPACE
+WHETHER_EXCLUSION_WAS_FROZEN_BEFORE_RESULT   YES  (commit ee7329c, 2026-09-15)
+EFFECT_IF_INCLUDED    NOT_COMPUTED
+```
+
+Two things are worth stating plainly. **It is not a reconciliation failure** —
+swisstony reconciles at residual $0.00 stake and $0.00 P&L against
+`lot_s`/`lot_p`, the same bar the included accounts clear; that reconciliation
+does not clear the exclusion, because they are different defects. And **the
+specific two-source comparison behind the flag is not retained in this
+workspace**, so the field naming it says so rather than reconstructing a
+plausible reason. The account remains available for DESCRIPTION — it is in the
+sign-agreement tally and in the cohort time-decay finding, where a sign is not
+an economic estimate.
+
+### 10c. n=30 IS A SCALE CONSTANT, NOT A CLIFF
+
+```
+POSTERIOR_WEIGHT_FORMULA                    w = n / (n + 30)
+HARD_N30_SWITCH                             NO
+POSTERIOR_WEIGHTING_IS_CONTINUOUS           YES
+V1_HEURISTIC                                YES
+STATISTICALLY_OPTIMAL_POSTERIOR_WEIGHTING   NOT_ESTABLISHED
+```
+
+Nothing jumps at n=30; it is where the two sources carry equal weight. What
+the rule genuinely is, is a heuristic that shrinks on **count alone** and is
+blind to how noisy either estimate is — a whale cell with 250,000 at risk and
+one with 40 are displaced at identical rates, which is wrong. The successor,
+`posterior_weight_precision`, is inverse-variance weighted, is written, and is
+**inactive**: changing the blending rule mid-collection would make the two
+halves of the frozen shadow run incomparable. It gets tested prospectively
+against the incumbent, not substituted for it on the strength of being
+better-looking mathematics.
+
+### 10d. INFEASIBLE IS NOT UNKNOWN
+
+The no-action rule is preserved — `UNKNOWN != ZERO`, `UNKNOWN != WORSE`,
+`UNKNOWN != UNAVAILABLE` — and sharpened. Feasibility is now three-valued:
+
+```
+FEASIBLE         the book shows it can be done
+INFEASIBLE       it cannot physically occur     -> DROPPED from the comparison
+NOT_IDENTIFIED   nobody observed whether it can -> BLOCKS the comparison
+```
+
+An action that cannot happen is not an alternative, so no hedge instrument, no
+quoted complement and a settled market no longer freeze the allocator. An
+action whose feasibility was never observed still does, because absence of
+observation is not evidence — and the row reports which of the two blocked it
+(`FEASIBILITY_NOT_IDENTIFIED` vs `COMPARISON_NOT_IDENTIFIED`).
+
+This also fixed a real defect. `A_DIRECTIONAL_HOLD` used to enter the action
+set only when nothing else existed, so the allocator could never compare
+holding against pairing. Holding needs no counterparty; it is always feasible
+on an open leg, and now it is always priced against the alternatives.
+
+### 10e. EV INTERVALS AND ROBUST DOMINANCE — DESIGNED, INACTIVE
+
+Every action can carry `EV_POINT_ESTIMATE`, `EV_LOWER_BOUND`,
+`EV_UPPER_BOUND` and `EV_STATUS ∈ {PRICED, BOUNDED, NOT_IDENTIFIED,
+INFEASIBLE}`, and the successor decision rule is:
+
+```
+LOWER_BOUND(A) > MAX[ UPPER_BOUND(every other action in play) ]  ->  act
+```
+
+which permits acting even when an alternative has no point estimate, because
+nothing inside that alternative's own bound could have won.
+
+```
+ROBUST_DOMINANCE_ACTIVE      = NO
+BOUND_METHODOLOGY_VALIDATED  = NO
+```
+
+It stays off, and forcing the flag does not turn it on — the bound-methodology
+gate is separate and a test proves it. A dominance test run on bounds that are
+too narrow is not conservative; it is the old error wearing an interval.
+
+---
+
+## 11. BETTOR_EXIT_ENGINE_V1_PRIOR_COMPLETE
+
+```
+BETTOR_EXIT_ENGINE_V1_PRIOR_COMPLETE = YES
+```
+
+| criterion | status | where |
+|---|---|---|
+| four whale behaviours represented | YES | four `ACCOUNT_PRIORS`, four case studies |
+| completion hazard represented | YES | `HAZARD_BY_BASIS_CEILING`, 10 intervals |
+| time decay represented | YES | λ monotone non-increasing, 58–105× |
+| basis frontier represented | YES | 9 basis ceilings + `any_basis` |
+| channel risk represented | YES | MERGE / SELL / SETTLED / TOTAL × 6 bands |
+| uncertainty represented honestly | YES | risk sets, SEs, CI95, `COHORT_AGREEMENT`; `NOT_IDENTIFIED` where counts cannot support it |
+| live executable alternatives specified | YES | nine actions, three-valued feasibility |
+| missing evidence explicitly NOT_IDENTIFIED | YES | propagation rule in one function |
+| prospective instrumentation complete | YES (BUILT, NOT YET FED A LIVE BOOK) | `shadow/position_state.py`, 85 tests |
+| no action from an incomplete comparison | YES | allocator declines; both blockers named |
+
+**What YES means and does not mean.** The PRIOR is complete: everything the
+four-account archive can yield about pair completion, timing, basis and
+channel risk has been extracted, bounded, and made machine-readable, and the
+machinery that will consume it is built and exercised. The LIKELIHOOD is
+empty. No BETTOR shadow position has been recorded, so
+`BETTOR_COMPLETION_HAZARD`, `BETTOR_PASSIVE_EXIT_FILL` and every other
+`BETTOR_*` series is `NOT_IDENTIFIED`, and `EXIT_ENGINE_VALUE_ADDED` remains
+`NOT_IDENTIFIED` and will for some time.
+
+**The exit engine is now FROZEN for data collection.** Further redesign before
+prospective observations exist would be tuning a model against a dataset of
+size zero. The next milestone is `SHADOW_EXIT_LEARNING_V1`, and its input is
+BETTOR's own decision rows — not another historical research cycle.
