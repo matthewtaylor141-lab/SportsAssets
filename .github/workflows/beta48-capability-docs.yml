@@ -1,0 +1,90 @@
+# BETA48 CAPABILITY — public documentation capture. READ ONLY. NO CREDENTIAL.
+#
+# SEPARATE FROM THE §10 FORWARD CAPTURE, ON PURPOSE. Different workflow,
+# different concurrency group, different script, different output tree,
+# different branch namespace. It cannot perturb a running capture segment and
+# it does not touch fwd_collect.py, which stays frozen.
+#
+# WHAT IT REACHES: docs.polymarket.us, over HTTPS GET, and nothing else. A
+# literal host allow-list is checked on every request and the AST gate below
+# proves the file contains no other host, no credential vocabulary, no
+# environment read, and no mutating verb.
+#
+# WHAT IT DOES NOT DO: no API key, no Auth0 token, no client assertion, no
+# market-data subscription, no WebSocket, no gRPC, no FIX, no order path. The
+# institutional surface is RESEARCHED here, never contacted.
+#
+# WHY IT EXISTS: "determine from PRIMARY OFFICIAL DOCUMENTATION" cannot be
+# satisfied by quoting a quotation. The scope list we hold today is a verbatim
+# excerpt inside RUN835_CREDENTIAL_RESOLUTION.md, captured 2026-09-10 into a
+# scratchpad that no longer exists. This puts the pages themselves in the
+# repository with hashes.
+
+name: beta48-capability-docs
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_pages:
+        description: "Maximum documentation pages to fetch"
+        required: false
+        default: "120"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: beta48-capability-docs
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency
+        run: python -m pip install --quiet "httpx==0.27.2" "pytest==8.3.3"
+
+      # THE GATE. No fetch until the boundary is proved.
+      - name: Prove the capture boundary offline
+        run: python -m pytest research/beta48/capability/test_doc_capture.py -q
+
+      - name: Capture the public documentation
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/capability/evidence/docs_$SEG
+          mkdir -p "$D"
+          python research/beta48/capability/doc_capture.py \
+            --out "$D" --max-pages "${{ github.event.inputs.max_pages || 120 }}"
+
+      - name: Seal and commit
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/capability/evidence/docs_$SEG
+          ( cd "$D" && sha256sum * > SEALED.sha256 2>/dev/null || true )
+          gzip -9 "$D"/docs_raw.jsonl 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BR="beta48-capability/docs-$SEG"
+          git checkout --orphan "$BR"
+          git rm -rq --cached . || true
+          git add -f "$D"
+          git commit -qm "BETA48 capability docs $SEG [skip render]" || exit 0
+          for i in 1 2 4 8 16; do
+            git push -f origin "$BR" && break
+            echo "push failed, retrying in ${i}s"; sleep "$i"
+          done
+          echo "BETA48_CAPABILITY_BRANCH $BR"
