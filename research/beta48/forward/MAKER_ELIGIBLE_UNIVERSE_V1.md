@@ -272,3 +272,159 @@ UFC_RESULT_REPRESENTATIVE               = NOT_IDENTIFIED
 One UFC card is not exchange-wide evidence, and §10 is not a refutation of the
 maker architecture. It is a measurement of one corner of the board, and the
 corner it measured was the only corner the instrument could reach.
+
+---
+
+# PRE-RESULT CLARIFICATION — no economics have been evaluated
+
+Recorded BEFORE any tier was scored against any outcome. Four of these correct
+overstatements in the text above; they are corrections, not retunes, and the
+cut points are unchanged.
+
+## CL-1. The incentive-universe finding was overstated
+
+I wrote that Model B "has almost no universe to harvest and none outside UFC".
+That is stronger than the evidence. `INCENTIVES_PAGINATION_ADVANCED = NO`, so
+100 markets is what the endpoint served, not what exists.
+
+**Supported:**
+
+```
+OBSERVED_OPEN_INCENTIVE_UNIVERSE          53 UFC MARKETS
+OBSERVED_INCENTIVE_COVERAGE_LOWER_BOUND   53 / 20,000 OBSERVED PREFIX MARKETS
+                                          = 0.265%, an observed lower bound
+                                          from a captured page, NOT an
+                                          exchange-wide prevalence estimate
+```
+
+**Not supported, and explicitly not concluded:**
+
+```
+TRUE_ACTIVE_INCENTIVE_UNIVERSE_SIZE   NOT_IDENTIFIED
+INCENTIVE_ENDPOINT_COMPLETE           NOT_ESTABLISHED
+NON_UFC_ACTIVE_INCENTIVES             NOT_OBSERVED, NOT PROVEN ABSENT
+INCENTIVE_PROGRAM_BOARD_SHARE         NOT_IDENTIFIED (the denominator,
+                                      TRUE_ACTIVE_BOARD_SIZE, is itself
+                                      NOT_IDENTIFIED)
+```
+
+Both the numerator and the denominator of any "programme prevalence" figure are
+prefixes. A ratio of two prefixes is not a share of anything.
+
+## CL-2. Tier semantics: NESTED, and now tested
+
+The intended design is nested, and the text above already read that way. It is
+now stated unambiguously and asserted over every market rather than promised:
+
+```
+BROAD         = STATUS_OPEN AND TWO_SIDED_BBO AND SPREAD_TICKS <= 5
+ACTIVE        = BROAD AND TRADE_RECENCY <= 24 h
+HIGH_ACTIVITY = BROAD AND TRADE_RECENCY <= 60 min
+
+HIGH_ACTIVITY subset ACTIVE subset BROAD    for every market
+```
+
+`HIGH_ACTIVITY` is defined against BROAD rather than against ACTIVE. Because
+60 min < 24 h the two readings coincide today, and anchoring to BROAD means the
+subset property survives a later edit to one threshold and not the other.
+`ELIGIBILITY_TIERS_NESTED = YES`, pinned by a sweep over spread × recency ×
+status in `test_eligibility.py`.
+
+## CL-3. The stage-2 request count was wrong — 12,313 is not 9,267
+
+I wrote "12,313 two-sided markets = ~1.7 h at 2 rps". That used the TWO-SIDED
+count as though it were the BROAD survivor count. It is not: BROAD also
+requires spread ≤ 5 ticks.
+
+```
+STAGE1_INPUT_COUNT            20,000   (19,999 MARKET_STATUS_OPEN)
+STAGE1_TWO_SIDED_COUNT        12,313
+STAGE1_BROAD_SURVIVOR_COUNT    9,267
+STAGE2_BOOK_READ_COUNT         9,267   <- the frozen stage-2 population
+WHY_STAGE2_COUNT_EQUALS_THIS   stage 2 reads exactly the BROAD survivors,
+                               because ACTIVE and HIGH_ACTIVITY are defined
+                               as subsets of BROAD and a read on a
+                               non-survivor could not change any tier
+STAGE2_DURATION_AT_2_RPS       1.29 h  (I said 1.7 h — 32.9% too many reads)
+```
+
+"Two-sided survivor" and "BROAD survivor" are not synonyms and are separate
+fields in `census()`, with a test asserting they differ.
+
+## CL-4. `lastTradeSetTime` is RECENCY, not an arrival rate
+
+I called it "the closest available proxy for the arrival rate". That is wrong.
+One timestamp establishes recency; a rate needs repeated observations or
+timestamped executions.
+
+```
+TRADE_RECENCY_PROXY = CURRENT_TIME - lastTradeSetTime   <- cheap trade-recency
+                                                           activity proxy
+```
+
+Nothing derives `TRADES_PER_HOUR`, `EXPECTED_INTERARRIVAL_TIME`, a Poisson
+rate or a queue-clearing time from it — asserted structurally by a test that
+those names do not occur in `eligibility.py` at all.
+
+```
+LEVEL_A_ACTIVITY   trade recency, from ONE book read     AVAILABLE
+LEVEL_B_ACTIVITY   observed trade count / elapsed time   NOT AVAILABLE
+                   (repeated sharesTraded deltas, a block-safe tape, or
+                    streaming trades)
+
+TRADE_RECENCY_AVAILABLE      YES
+TRADE_ARRIVAL_RATE_AVAILABLE NO
+```
+
+A market with `LAST_TRADE_AGE = 5 min` can still have a terrible long-run
+arrival rate — one trade in a day, read five minutes after it happened.
+
+## CL-5. The north star is not manufactured from a recency proxy
+
+```
+EXPECTED_FILL_RATE                            NOT_IDENTIFIED
+EXPECTED_WAIT_TO_FILL                         NOT_IDENTIFIED
+EXPECTED_CAPITAL_OCCUPANCY                    NOT_IDENTIFIED
+EXPECTED_NET_PNL_PER_CAPITAL_DOLLAR_PER_HOUR  NOT_IDENTIFIED
+```
+
+Descriptive quantities may be reported per tier — `QUEUE_AHEAD`,
+`LAST_TRADE_AGE`, `SPREAD`, `DEPTH`, `CURRENT_INCENTIVE_STATE`. The north star
+stays `NOT_IDENTIFIED` while its denominator needs an unmeasured fill or
+recycling rate, and `census()` hard-codes those four to `NOT_IDENTIFIED` with
+a test that a market trading one second ago still yields no wait estimate.
+
+## CL-6. Two separate objects, not one
+
+**A. `BOARD_FRAME_GENERALIZATION_PANEL`** — answers whether the UFC §10
+microstructure is representative. Frame: all eligible OPEN markets in the
+observed board prefix, **not** incentives ∩ board. Selection: frozen
+deterministic hash over preregistered strata. A manageable deterministic
+sample, not all 20,000. Reports representation by sport, league, event, market
+type, tick size, spread band, and time-to-event where valid.
+
+**B. `MAKER_ELIGIBLE_ROLLING_CENSUS`** — answers how many markets pass the
+pre-quote screens. Scanning thousands of books at 2 rps takes over an hour, so
+it is a **ROLLING CENSUS and never a simultaneous board snapshot**. Every row
+carries `BOARD_CAPTURE_TIME`, `BOOK_RECEIPT_TIME`, `BOOK_TRANSACT_TIME`,
+`LAST_TRADE_SET_TIME` and `TRADE_RECENCY_AT_RECEIPT`, because a 1.3-hour scan
+observes different markets at different wall-clock times and that drift must
+not be hidden. `census()` carries `OBSERVATION_TYPE = ROLLING_CENSUS`,
+`IS_SIMULTANEOUS_BOARD_SNAPSHOT = False` and an explicit drift label.
+
+## CL-7. Three questions, kept apart
+
+```
+GENERALIZATION  is the UFC microstructure representative?      panel A
+ELIGIBILITY     how many markets pass the pre-quote screens?   census B
+ECONOMICS       are those markets profitable to make?          NEITHER
+```
+
+Economics needs fill and adverse-selection evidence.
+`QUESTION_ECONOMICS_ANSWERABLE_HERE = False`, as a flag rather than a caveat.
+
+## What is unchanged
+
+The three tiers, their cut points, the forbidden-input list, the
+anti-threshold-mining rules, and the rebate floor all stand exactly as frozen.
+`MICRO_LIVE_AUTHORIZED = NO`.
