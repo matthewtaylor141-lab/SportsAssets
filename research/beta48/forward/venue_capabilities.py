@@ -321,3 +321,155 @@ CAPABILITY_DOCUMENTED = "YES"
 BETTOR_GRANTED_SCOPE = NOT_IDENTIFIED
 BETTOR_CREDENTIAL_INSTALLED = "NO"
 BETTOR_CONNECTION_AUTHORIZED = "NO"
+
+# ---------------------------------------------------------------------------
+# THE PUBLIC EXECUTION TAPE
+# ---------------------------------------------------------------------------
+#
+# CAPTURED, not relayed: docs.polymarket.us/faqs/execution-tape.md, response
+# sha256 5ff446a6abd4fbca..., in the 340-page capture on branch
+# beta48-capability/docs-35047389408.
+PUBLIC_TIME_SALES_AVAILABLE = "YES"
+PUBLIC_TIME_SALES_AUTH_REQUIRED = "NO"
+TAPE_EXECUTION_TIMESTAMP = "YES"
+TAPE_EXECUTION_PRICE = "YES"
+TAPE_EXECUTION_QUANTITY = "YES"
+TAPE_SYMBOL = "YES"
+TAPE_TRADE_SIDE = "NO"
+TAPE_AGGRESSOR = "NO"
+TAPE_PARTICIPANT_IDENTITY = "NO"
+
+# WHAT THE CAPTURED PAGE ADDS THAT THE RELAY DID NOT. It is not an endpoint.
+# It is a DAILY CSV FILE, `YYYYMMDD-time-and-sales.csv`, offered from a THIRD
+# host we had never contacted. Each of these changes the design.
+TAPE_DELIVERY = "DAILY_CSV_FILE_DOWNLOAD"
+TAPE_IS_AN_API = False
+TAPE_IS_REALTIME = False
+TAPE_HOST_IS_A_THIRD_HOST = "www.polymarketexchange.com"
+TAPE_FILENAME_CONVENTION = "YYYYMMDD-time-and-sales.csv"
+TAPE_DOWNLOAD_URL_DOCUMENTED = "NO"        # only a landing page is linked
+TAPE_URL_MAY_BE_CONSTRUCTED_FROM_CONVENTION = False
+
+# The venue's reporting day is "as of 5:00 PM Eastern Time each business day"
+# (captured: learn/trading/access-and-limits/trading-hours.md). A file named
+# 20260113 is therefore NOT the UTC day 2026-01-13. This is the C-6 off-by-a-
+# day error in a new place, and it would misalign the whole tape by up to
+# seven hours in a way that looks like ordinary noise.
+TAPE_BUSINESS_DATE_CUTOVER_ET = "17:00 America/New_York"
+TAPE_BUSINESS_DATE_IS_A_UTC_DAY = False
+
+# The three questions that decide whether any of this is usable, all open
+# until a real file is read. The third is the single point of failure: if the
+# tape's Symbol does not join to the board's market slug, the pipeline yields
+# nothing at all.
+TAPE_TIMESTAMP_PRECISION = NOT_IDENTIFIED
+TAPE_PUBLICATION_LATENCY = NOT_IDENTIFIED
+TAPE_SYMBOL_JOINS_TO_MARKET_SLUG = NOT_IDENTIFIED
+TAPE_JOIN_IS_THE_SINGLE_POINT_OF_FAILURE = True
+
+# A second free artifact found in the same capture, 21 columns including open
+# interest, settlement price and the day's low/high bid and offer.
+PUBLIC_DAILY_MARKET_REPORT_AVAILABLE = "YES"
+DAILY_MARKET_REPORT_DELIVERY = "DAILY_CSV_FILE_DOWNLOAD"
+
+# The tape moves counterfactual terms only. These are unchanged by it.
+ACTUAL_BETTOR_FILL = NOT_IDENTIFIED
+ACTUAL_BETTOR_FILL_PROBABILITY_FROM_TAPE = NOT_IDENTIFIED
+TRADE_AGGRESSOR_FROM_TAPE = NOT_IDENTIFIED
+ACTUAL_BETTOR_QUEUE_POSITION_FROM_TAPE = NOT_IDENTIFIED
+
+# ---------------------------------------------------------------------------
+# MATCHING PRIORITY, AND ITS DOCUMENTED EXCEPTION
+# ---------------------------------------------------------------------------
+CURRENT_MATCHING_PRIORITY = "PRICE_TIME"
+BETTER_PRICE_PRIORITY = "YES"
+SAME_PRICE_TIME_PRIORITY = "YES"
+# The Rulebook permits a different algorithm for a particular Contract after
+# advance notice, so price-time is the current rule and not a law of nature.
+MATCHING_ALGORITHM_EXCEPTION_POSSIBLE = "YES"
+CONTRACT_SPECIFIC_ALGORITHM_OVERRIDE_POSSIBLE = "YES"
+CHECK_PRODUCT_SPECIFIC_MATCHING_NOTICE = "REQUIRED"
+PRODUCT_NOTICE_CHECK_REQUIRED_BEFORE_LIVE = "YES"
+
+# ---------------------------------------------------------------------------
+# THE TARGET SIZE DOCUMENTATION CONFLICT
+# ---------------------------------------------------------------------------
+#
+# Two official pages describe the same parameter incompatibly. The generic
+# incentives page reads it as a MAXIMUM per side that counts toward scoring;
+# the dedicated Liquidity Incentive Program page gives an algorithm in which it
+# is a MINIMUM AGGREGATE threshold that defines the qualifying price range.
+#
+# We implement the DETAILED page, because it is the one that states the
+# procedure. We do NOT rewrite either page to match the other, and we do not
+# retire the conflict on our own authority: it is resolved by the venue or by
+# runtime evidence, and until then it is a live risk to every depth-panel
+# figure, since the two readings disagree about which orders score at all.
+TARGET_SIZE_GENERIC_PAGE = "MAXIMUM_DESCRIPTION"
+TARGET_SIZE_DETAILED_LIQUIDITY_PAGE = "MINIMUM_AGGREGATE_THRESHOLD"
+DOC_CONFLICT_TARGET_SIZE = "YES"
+TARGET_SIZE_IMPLEMENTED_FROM = "DETAILED_LIQUIDITY_PROGRAM_PAGE"
+DOC_CONFLICT_TARGET_SIZE_RESOLVED_BY = NOT_IDENTIFIED
+
+# The liquidity programme's mechanics, from the detailed page.
+LIQUIDITY_SIDES_NORMALIZED_INDEPENDENTLY = True
+LIQUIDITY_SCORED_EVERY_SECOND = True
+LIQUIDITY_TARGET_SIZE_USES_RAW_SIZE = True
+LIQUIDITY_DISCOUNT_AFFECTS_SCORE_NOT_THRESHOLD = True
+LIQUIDITY_BEYOND_RANGE_SCORES_ZERO = True
+LIQUIDITY_INDIVIDUAL_SIZE_CAP_INSIDE_RANGE = "NONE"
+LIQUIDITY_REWARD_IS_PROPORTIONAL_TO_SCORE = True
+LIQUIDITY_PARAMETERS_CHANGE_BETWEEN_PERIODS = True
+
+# THE QUESTION THIS REFRAMES. Not "does BETTOR have a resting quote?" but "is
+# it inside the qualifying range, and what fraction of TOTAL score does it
+# contribute?" The second needs every participant's qualifying score through
+# time, which no public endpoint publishes.
+ACTUAL_REWARD_SHARE = NOT_IDENTIFIED
+
+# ---------------------------------------------------------------------------
+# MAKER-ONLY EXECUTION CONTROL (architecture only; nothing is submitted)
+# ---------------------------------------------------------------------------
+MAKER_MODE_POST_ONLY_CONTROL = "REQUIRED"
+POST_ONLY_FIELD = "participateDontInitiate"
+TAKER_EXECUTION_REQUIRES_EXPLICIT_ENGINE_SELECTION = True
+SELF_MATCH_PREVENTION_REQUIRED_IN_PRODUCTION = True
+
+# ---------------------------------------------------------------------------
+# MASS QUOTE PROTECTION IS A BACKSTOP, NOT A FILL CAP
+# ---------------------------------------------------------------------------
+#
+# Executions accumulate over a rolling interval; when the threshold is reached
+# the remaining resting orders in the bucket are cancelled -- but the execution
+# that BREACHED it still completes, so one aggressive sweep can fill MORE than
+# the threshold before any cancellation happens. Treating MQP as a maximum
+# position change is therefore an inventory cap that does not cap inventory.
+MQP_IS_HARD_MAX_FILL_LIMIT = False
+MQP_TRIGGERING_EXECUTION_COMPLETES = True
+MQP_REMAINING_QUOTES_CANCEL_AFTER_TRIGGER = True
+MQP_IS_SUFFICIENT_AS_SOLE_INVENTORY_CAP = False
+
+BETTOR_OWN_REQUIRED_CONTROLS = (
+    "POSITION_LIMITS", "EVENT_LIMITS", "CORRELATION_LIMITS", "LOSS_LIMITS",
+    "STALE_DATA_KILL", "QUOTE_AGE_LIMIT", "INVENTORY_KILL",
+)
+
+# ---------------------------------------------------------------------------
+# PUBLIC SPORTS REFERENCE DATA -- SPEC ONLY, NOT BUILT
+# ---------------------------------------------------------------------------
+#
+# A separate read-only coverage probe, specified so it is not designed later
+# under pressure. It measures JOIN RATES and builds no model, and it does not
+# touch Engine B. Every rate is NOT_IDENTIFIED because runtime capture, not a
+# schema, decides which fields actually come back.
+SPORTS_COVERAGE_PROBE_STATUS = "SPECIFIED_NOT_BUILT"
+SPORTS_COVERAGE_PROBE_MEASURES = (
+    "SPORT_JOIN_RATE", "LEAGUE_JOIN_RATE", "EVENT_JOIN_RATE",
+    "TEAM_JOIN_RATE", "GAME_START_JOIN_RATE", "MARKET_TYPE_JOIN_RATE",
+    "LINE_JOIN_RATE", "PROVIDER_ID_JOIN_RATE",
+    # Only if the captured event endpoints actually return them. Presence in a
+    # schema is not presence in a response.
+    "LIVE_STATE_JOIN_RATE", "SCORE_JOIN_RATE", "ELAPSED_JOIN_RATE",
+    "PERIOD_JOIN_RATE",
+)
+SPORTS_LIVE_STATE_FIELDS_ASSUMED_PRESENT = False

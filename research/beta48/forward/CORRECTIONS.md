@@ -416,3 +416,127 @@ BETTOR_CONNECTION_AUTHORIZED        = NO
 ```
 
 Four separate facts. The first is about the venue; the rest are about us.
+
+---
+
+## C-10 — the public execution tape, verified from our own bytes
+
+**Confirmed, and it is not what the relay described.** The claim was checked
+against `docs.polymarket.us/faqs/execution-tape.md`, response sha256
+`5ff446a6abd4fbca...`, in the 340-page capture on branch
+`beta48-capability/docs-35047389408`.
+
+The four columns and the three absences are exactly as relayed:
+
+```
+Transaction Time | Symbol | Last Price | Last Quantity
+and explicitly NO side, NO aggressor flag, NO buyer or seller
+```
+
+**Three things the captured page adds, each of which changes the design.**
+
+1. **It is a file, not an endpoint.** A daily CSV, `YYYYMMDD-time-and-sales
+   .csv`, offered from `www.polymarketexchange.com` — a THIRD host we had never
+   contacted, alongside the gateway and the docs host. So this is a
+   retrospective join, not a live feed, and it needs its own capability
+   boundary rather than a corner of an existing one.
+2. **The business date is not a UTC day.** The venue's reporting occurs "as of
+   5:00 PM Eastern Time each business day" (captured: `learn/trading/
+   access-and-limits/trading-hours.md`). A file named `20260113` therefore does
+   NOT cover 2026-01-13 00:00–24:00 UTC. **This is C-6 in a new place** — an
+   off-by-a-day that misaligns the entire tape by up to seven hours, silently,
+   in a direction that looks like ordinary noise. `tape_capture.py` performs no
+   date arithmetic at all, and a test proves it by AST rather than by scanning
+   for a string the file legitimately contains.
+3. **No download URL is documented, only a landing page.** The docs give a
+   filename CONVENTION. Turning a convention into a URL means guessing a path
+   on a host we have never fetched, where a guessed 404 is indistinguishable
+   from "the venue does not publish this" and a guessed 200 on the wrong path
+   is worse. The capturer fetches the landing page and follows ITS links; if
+   the page links nothing it reports `NO_LINKS_FOUND`. A test walks the AST for
+   any f-string, `%` or `.format()` that builds a `.csv` path and fails if one
+   exists.
+
+**A second free artifact found in the same capture:** the Daily Market Report,
+21 columns including open interest, settlement price and the day's low/high bid
+and offer.
+
+**The three questions that decide whether any of this is usable** stay open
+until a real file is read, and the third is the single point of failure — if
+the tape's `Symbol` does not join to the board's market slug, the pipeline
+yields nothing:
+
+```
+TAPE_TIMESTAMP_PRECISION          NOT_IDENTIFIED   (so MARKOUT_1S may not be
+                                                    measurable at all)
+TAPE_PUBLICATION_LATENCY          NOT_IDENTIFIED
+TAPE_SYMBOL_JOINS_TO_MARKET_SLUG  NOT_IDENTIFIED   <- single point of failure
+```
+
+**Scheduling note for the free cutover test.** Maintenance runs Thursday
+02:00–04:00 ET. The coefficient flip is Wednesday 23:59 ET, so the verifying
+segment must land in the ~2-hour window before 02:00 ET, or after 04:00 ET.
+
+## C-11 — my own F2 credited a fill where nothing traded
+
+Caught by the monotonicity sweep in `test_fill_model_v2.py`, not by reading the
+code. The first version of F2 read:
+
+```python
+f2 = f1 or (removed is not None and (at + removed) > (ahead + added))
+```
+
+With no prints at all and a queue ahead cancelled away, that returned
+`COUNTERFACTUAL_FILL_SUPPORTED_F2 = YES` while `F3_TOUCH_ONLY`, its own upper
+bound, was `NO`.
+
+**The substantive error, not the arithmetic one:** a queue that empties by
+cancellation moves a maker to the FRONT of the queue. That is not being filled.
+A maker at the front of an untouched queue holds exactly zero contracts. F2 now
+additionally requires `at > 0` — somebody actually traded at our price — and
+three tests pin it, including one asserting F2 can never exceed F3.
+
+The monotonicity invariant `F0 <= F1 <= F2 <= F3` is asserted at runtime inside
+`evaluate()` as well as in the sweep, so a future edit that breaks it raises
+rather than quietly reporting support above its own ceiling.
+
+## C-12 — the Target Size documentation conflicts with itself
+
+Two official pages describe the same parameter incompatibly:
+
+```
+TARGET_SIZE_GENERIC_PAGE             MAXIMUM_DESCRIPTION
+TARGET_SIZE_DETAILED_LIQUIDITY_PAGE  MINIMUM_AGGREGATE_THRESHOLD
+DOC_CONFLICT_TARGET_SIZE             YES
+TARGET_SIZE_IMPLEMENTED_FROM         DETAILED_LIQUIDITY_PROGRAM_PAGE
+DOC_CONFLICT_TARGET_SIZE_RESOLVED_BY NOT_IDENTIFIED
+```
+
+We implement the detailed page because it is the one that states the
+procedure — walk outward from best, accumulate RAW size, stop at Target Size,
+everything inside the range scores and everything beyond it scores zero. We do
+NOT rewrite either page to match the other, and we do not retire the conflict
+on our own authority.
+
+**Why it is not bookkeeping.** The two readings disagree about WHICH ORDERS
+SCORE AT ALL, so every depth-panel eligibility figure is conditional on the
+detailed page being the operative one. That conditionality is now a label
+rather than an assumption.
+
+## C-13 — mass quote protection does not cap inventory
+
+Executions accumulate over a rolling interval and the remaining resting orders
+cancel once the threshold is breached — but **the execution that breaches it
+still completes**, so a single aggressive sweep can fill for MORE than the
+threshold before any cancellation happens.
+
+```
+MQP_IS_HARD_MAX_FILL_LIMIT              False
+MQP_TRIGGERING_EXECUTION_COMPLETES      True
+MQP_IS_SUFFICIENT_AS_SOLE_INVENTORY_CAP False
+```
+
+An inventory cap that does not bound the worst single fill is not an inventory
+cap. BETTOR's own seven controls stay required as an independent layer:
+position, event, correlation and loss limits, stale-data kill, quote-age limit,
+inventory kill.

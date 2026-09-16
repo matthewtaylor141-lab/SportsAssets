@@ -342,5 +342,128 @@ class ADocumentedCapabilityIsNotAGrant(unittest.TestCase):
         self.assertNotEqual(V.CAPABILITY_DOCUMENTED, V.BETTOR_GRANTED_SCOPE)
 
 
+class ThePublicTapeIsAFileNotAFeed(unittest.TestCase):
+    """Captured from our own 340-page bytes, and it differs from the relay in
+    three ways that each change the design."""
+
+    def test_the_four_columns_and_the_three_absences(self):
+        for f in ("TAPE_EXECUTION_TIMESTAMP", "TAPE_EXECUTION_PRICE",
+                  "TAPE_EXECUTION_QUANTITY", "TAPE_SYMBOL"):
+            self.assertEqual(getattr(V, f), "YES", f)
+        for f in ("TAPE_TRADE_SIDE", "TAPE_AGGRESSOR",
+                  "TAPE_PARTICIPANT_IDENTITY"):
+            self.assertEqual(getattr(V, f), "NO", f)
+        self.assertEqual(V.PUBLIC_TIME_SALES_AUTH_REQUIRED, "NO")
+
+    def test_it_is_a_daily_file_and_not_a_realtime_endpoint(self):
+        self.assertEqual(V.TAPE_DELIVERY, "DAILY_CSV_FILE_DOWNLOAD")
+        self.assertFalse(V.TAPE_IS_AN_API)
+        self.assertFalse(V.TAPE_IS_REALTIME)
+
+    def test_the_url_may_not_be_built_from_the_filename_convention(self):
+        """A convention is not an address. Guessing a path on a host we have
+        never fetched turns a 404 into a false negative about the venue."""
+        self.assertEqual(V.TAPE_DOWNLOAD_URL_DOCUMENTED, "NO")
+        self.assertFalse(V.TAPE_URL_MAY_BE_CONSTRUCTED_FROM_CONVENTION)
+
+    def test_the_business_date_is_not_a_utc_day(self):
+        """C-6 in a new place: a 5pm-ET reporting day joined to UTC snapshots
+        misaligns the tape by up to seven hours, invisibly."""
+        self.assertEqual(V.TAPE_BUSINESS_DATE_CUTOVER_ET,
+                         "17:00 America/New_York")
+        self.assertFalse(V.TAPE_BUSINESS_DATE_IS_A_UTC_DAY)
+
+    def test_the_three_open_questions_stay_open(self):
+        for f in ("TAPE_TIMESTAMP_PRECISION", "TAPE_PUBLICATION_LATENCY",
+                  "TAPE_SYMBOL_JOINS_TO_MARKET_SLUG"):
+            self.assertEqual(getattr(V, f), "NOT_IDENTIFIED", f)
+        self.assertTrue(V.TAPE_JOIN_IS_THE_SINGLE_POINT_OF_FAILURE)
+
+    def test_the_tape_moves_no_actual_bettor_term(self):
+        for f in ("ACTUAL_BETTOR_FILL",
+                  "ACTUAL_BETTOR_FILL_PROBABILITY_FROM_TAPE",
+                  "TRADE_AGGRESSOR_FROM_TAPE",
+                  "ACTUAL_BETTOR_QUEUE_POSITION_FROM_TAPE"):
+            self.assertEqual(getattr(V, f), "NOT_IDENTIFIED", f)
+
+
+class PriceTimePriorityCarriesItsException(unittest.TestCase):
+
+    def test_the_current_rule(self):
+        self.assertEqual(V.CURRENT_MATCHING_PRIORITY, "PRICE_TIME")
+        self.assertEqual(V.BETTER_PRICE_PRIORITY, "YES")
+        self.assertEqual(V.SAME_PRICE_TIME_PRIORITY, "YES")
+
+    def test_it_is_not_treated_as_universal_and_permanent(self):
+        self.assertEqual(V.MATCHING_ALGORITHM_EXCEPTION_POSSIBLE, "YES")
+        self.assertEqual(V.CONTRACT_SPECIFIC_ALGORITHM_OVERRIDE_POSSIBLE,
+                         "YES")
+        self.assertEqual(V.CHECK_PRODUCT_SPECIFIC_MATCHING_NOTICE, "REQUIRED")
+        self.assertEqual(V.PRODUCT_NOTICE_CHECK_REQUIRED_BEFORE_LIVE, "YES")
+
+
+class TheTargetSizeConflictIsPreserved(unittest.TestCase):
+    """Two official pages describe the same parameter incompatibly. Silently
+    rewriting one to match the other would erase a live risk to every
+    depth-panel figure, because the readings disagree about which orders
+    score at all."""
+
+    def test_both_readings_are_kept_and_they_differ(self):
+        self.assertEqual(V.TARGET_SIZE_GENERIC_PAGE, "MAXIMUM_DESCRIPTION")
+        self.assertEqual(V.TARGET_SIZE_DETAILED_LIQUIDITY_PAGE,
+                         "MINIMUM_AGGREGATE_THRESHOLD")
+        self.assertNotEqual(V.TARGET_SIZE_GENERIC_PAGE,
+                            V.TARGET_SIZE_DETAILED_LIQUIDITY_PAGE)
+
+    def test_the_conflict_is_flagged_and_unresolved(self):
+        self.assertEqual(V.DOC_CONFLICT_TARGET_SIZE, "YES")
+        self.assertEqual(V.DOC_CONFLICT_TARGET_SIZE_RESOLVED_BY,
+                         "NOT_IDENTIFIED")
+
+    def test_we_implement_the_page_that_states_the_procedure(self):
+        self.assertEqual(V.TARGET_SIZE_IMPLEMENTED_FROM,
+                         "DETAILED_LIQUIDITY_PROGRAM_PAGE")
+
+    def test_the_share_question_stays_unanswerable_from_public_data(self):
+        self.assertEqual(V.ACTUAL_REWARD_SHARE, "NOT_IDENTIFIED")
+
+
+class MassQuoteProtectionIsNotAnInventoryCap(unittest.TestCase):
+
+    def test_the_breaching_execution_still_completes(self):
+        """So one sweep can fill MORE than the threshold before any cancel."""
+        self.assertFalse(V.MQP_IS_HARD_MAX_FILL_LIMIT)
+        self.assertTrue(V.MQP_TRIGGERING_EXECUTION_COMPLETES)
+        self.assertTrue(V.MQP_REMAINING_QUOTES_CANCEL_AFTER_TRIGGER)
+        self.assertFalse(V.MQP_IS_SUFFICIENT_AS_SOLE_INVENTORY_CAP)
+
+    def test_our_seven_own_controls_are_named(self):
+        for c in ("POSITION_LIMITS", "EVENT_LIMITS", "CORRELATION_LIMITS",
+                  "LOSS_LIMITS", "STALE_DATA_KILL", "QUOTE_AGE_LIMIT",
+                  "INVENTORY_KILL"):
+            self.assertIn(c, V.BETTOR_OWN_REQUIRED_CONTROLS, c)
+
+    def test_post_only_is_required_and_nothing_is_submitted(self):
+        self.assertEqual(V.MAKER_MODE_POST_ONLY_CONTROL, "REQUIRED")
+        self.assertEqual(V.POST_ONLY_FIELD, "participateDontInitiate")
+        self.assertTrue(V.TAKER_EXECUTION_REQUIRES_EXPLICIT_ENGINE_SELECTION)
+        self.assertFalse(V.MICRO_LIVE_AUTHORIZED)
+
+
+class TheSportsProbeIsSpecifiedNotAssumed(unittest.TestCase):
+
+    def test_it_is_a_spec_and_measures_join_rates_only(self):
+        self.assertEqual(V.SPORTS_COVERAGE_PROBE_STATUS,
+                         "SPECIFIED_NOT_BUILT")
+        for f in ("SPORT_JOIN_RATE", "PROVIDER_ID_JOIN_RATE",
+                  "LIVE_STATE_JOIN_RATE", "SCORE_JOIN_RATE"):
+            self.assertIn(f, V.SPORTS_COVERAGE_PROBE_MEASURES, f)
+
+    def test_schema_presence_is_not_response_presence(self):
+        """Documentation suggesting richer event data is not evidence that a
+        field comes back. Runtime capture decides."""
+        self.assertFalse(V.SPORTS_LIVE_STATE_FIELDS_ASSUMED_PRESENT)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)
