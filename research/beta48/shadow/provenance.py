@@ -52,8 +52,33 @@ MUTABLE_REF_IS_NOT_ALLOWED_FOR_EVIDENCE = True
 WHY = ("a queued job that checks out a moving ref is an experiment whose code "
        "is chosen after the experiment is authorised")
 
-PROVENANCE_FIELDS = ("DISPATCH_SHA", "EXECUTED_SHA", "WORKFLOW_REF_SHA",
+PROVENANCE_FIELDS = ("DISPATCH_SHA", "EXECUTED_SHA_ACTUAL", "WORKFLOW_REF_SHA",
                      "WORKFLOW_FILE_SHA", "CONFIG_SHA", "DATA_OUTPUT_SHA")
+
+# ---------------------------------------------------------------------------
+# AN EXPECTATION IS NOT AN OBSERVATION
+# ---------------------------------------------------------------------------
+#
+# Before the runner starts we hold DISPATCH_SHA and EXPECTED_EXECUTED_SHA --
+# the same number twice, both written by us. Comparing them proves only that we
+# can copy a string. EVIDENCE_RUN_VALIDITY is a claim about what a RUNNER did,
+# and until the runner reports its checkout there is nothing to validate.
+#
+# So the pre-dispatch gate cannot reach PASS on that field at all. It is
+# structurally unable to: pre_dispatch_gate() takes no executed SHA, so there
+# is no argument position into which an expectation could be passed and read
+# back as an observation. That is a stronger guarantee than remembering not to.
+PENDING = "PENDING_EXECUTION"
+EXECUTED_SHA_MUST_BE_OBSERVED = True
+OBSERVED_SOURCES = ("RUNNER_GIT_REV_PARSE",)
+WHY_EXPECTED_IS_NOT_OBSERVED = (
+    "DISPATCH_SHA and EXPECTED_EXECUTED_SHA are the same value written twice "
+    "by the dispatcher; only the runner's own checkout is evidence")
+
+# Four provenance questions, four answers. Collapsing them hides which one
+# failed, and three of the four are recordings rather than comparisons.
+PROVENANCE_ASPECTS = ("CODE_PROVENANCE_VALIDITY", "WORKFLOW_PROVENANCE",
+                      "CONFIG_PROVENANCE", "DATA_OUTPUT_PROVENANCE")
 
 
 def file_sha256(path):
@@ -78,24 +103,90 @@ def _norm(sha):
     return s
 
 
-def check(dispatch_sha, executed_sha, workflow_ref_sha=None,
-          workflow_file_sha=None, config_sha=None, data_output_sha=None):
-    """EVIDENCE_RUN_VALIDITY. PASS only when the executed code is the
-    authorised code, and never by default."""
-    d, e = _norm(dispatch_sha), _norm(executed_sha)
+def pre_dispatch_gate(dispatch_sha, workflow_file_sha=None, config_sha=None):
+    """What can be established BEFORE a runner exists -- and nothing further.
+
+    Note the signature: there is no executed-SHA parameter. An expectation
+    cannot be passed in here and read back out as an observation, because there
+    is nowhere to put it. EVIDENCE_RUN_VALIDITY comes back PENDING_EXECUTION
+    and no argument can change that.
+    """
+    d = _norm(dispatch_sha)
+    checks = {
+        "DISPATCH_SHA_VALID_FORMAT": bool(d),
+        "WORKFLOW_CONFIG_VALID": bool(workflow_file_sha
+                                      and workflow_file_sha != NOT_IDENTIFIED),
+        "CONFIG_SHA_PRESENT": bool(config_sha and config_sha != NOT_IDENTIFIED),
+    }
+    ok = all(checks.values())
+    return {
+        "DISPATCH_SHA": d or NOT_IDENTIFIED,
+        "DISPATCH_SHA_VALID_FORMAT": "YES" if d else "NO",
+        # Named EXPECTED, and it is the dispatch SHA restated. It is not
+        # evidence and is never compared against itself for a verdict.
+        "EXPECTED_EXECUTED_SHA": d or NOT_IDENTIFIED,
+        "EXECUTED_SHA_ACTUAL": PENDING,
+        "WORKFLOW_FILE_SHA": workflow_file_sha or NOT_IDENTIFIED,
+        "CONFIG_SHA": config_sha or NOT_IDENTIFIED,
+        "DATA_OUTPUT_SHA": PENDING,
+        "CHECKS": checks,
+        "FAILED_CHECKS": [k for k, v in checks.items() if not v],
+        "PRE_DISPATCH_PROVENANCE_GATE": "PASS" if ok else "FAIL",
+        "EVIDENCE_RUN_VALIDITY": PENDING,
+        "WHY_PENDING": WHY_EXPECTED_IS_NOT_OBSERVED,
+        "EXECUTED_SHA_MUST_BE_OBSERVED": EXECUTED_SHA_MUST_BE_OBSERVED,
+        "THIS_MODULE_CONTACTS_NOTHING": THIS_MODULE_CONTACTS_NOTHING,
+    }
+
+
+def check(dispatch_sha, executed_sha_actual, workflow_ref_sha=None,
+          workflow_file_sha=None, config_sha=None, data_output_sha=None,
+          executed_sha_source=None):
+    """EVIDENCE_RUN_VALIDITY, from an OBSERVED checkout. Never by default.
+
+    `executed_sha_actual` must come from the runner -- `git rev-parse HEAD`
+    after checkout. `executed_sha_source` names where it came from, and a
+    source this module does not recognise as an observation fails the run
+    rather than being taken on trust.
+
+    Four provenance questions are answered separately, because three of them
+    are recordings and only one is a comparison, and collapsing them would hide
+    which one failed.
+    """
+    d, e = _norm(dispatch_sha), _norm(executed_sha_actual)
+    src = executed_sha_source or (OBSERVED_SOURCES[0] if e else None)
     # Abbreviated SHAs compare on the shorter prefix, so a 7-char dispatch SHA
     # still pins a 40-char checkout. Absent values never compare equal.
     match = bool(d and e and (d.startswith(e) or e.startswith(d)))
+    observed = src in OBSERVED_SOURCES
     checks = {
         "DISPATCH_SHA_PRESENT": bool(d),
-        "EXECUTED_SHA_PRESENT": bool(e),
+        "EXECUTED_SHA_ACTUAL_PRESENT": bool(e),
+        "EXECUTED_SHA_WAS_OBSERVED_NOT_EXPECTED": observed,
         "DISPATCH_SHA_EQUALS_EXECUTED_SHA": match,
     }
-    ok = all(checks.values())
+    code_ok = all(checks.values())
     ref = _norm(workflow_ref_sha)
+
+    aspects = {
+        "CODE_PROVENANCE_VALIDITY": "PASS" if code_ok else "FAIL",
+        "WORKFLOW_PROVENANCE": ("RECORDED" if workflow_file_sha
+                                and workflow_file_sha != NOT_IDENTIFIED
+                                else "NOT_RECORDED"),
+        "CONFIG_PROVENANCE": ("RECORDED" if config_sha
+                              and config_sha != NOT_IDENTIFIED
+                              else "NOT_RECORDED"),
+        "DATA_OUTPUT_PROVENANCE": ("RECORDED" if data_output_sha
+                                   and data_output_sha != NOT_IDENTIFIED
+                                   else "NOT_RECORDED"),
+    }
+    ok = (aspects["CODE_PROVENANCE_VALIDITY"] == "PASS"
+          and all(aspects[a] == "RECORDED" for a in PROVENANCE_ASPECTS[1:]))
+
     out = {
         "DISPATCH_SHA": d or NOT_IDENTIFIED,
-        "EXECUTED_SHA": e or NOT_IDENTIFIED,
+        "EXECUTED_SHA_ACTUAL": e or NOT_IDENTIFIED,
+        "EXECUTED_SHA_SOURCE": src or NOT_IDENTIFIED,
         "WORKFLOW_REF_SHA": ref or NOT_IDENTIFIED,
         "WORKFLOW_FILE_SHA": workflow_file_sha or NOT_IDENTIFIED,
         "CONFIG_SHA": config_sha or NOT_IDENTIFIED,
@@ -106,12 +197,16 @@ def check(dispatch_sha, executed_sha, workflow_ref_sha=None,
         "MUTABLE_REF_IS_NOT_ALLOWED_FOR_EVIDENCE":
             MUTABLE_REF_IS_NOT_ALLOWED_FOR_EVIDENCE,
         "WHY_IMMUTABLE": WHY,
+        "WHY_EXPECTED_IS_NOT_OBSERVED": WHY_EXPECTED_IS_NOT_OBSERVED,
         "THIS_MODULE_CONTACTS_NOTHING": THIS_MODULE_CONTACTS_NOTHING,
     }
+    out.update(aspects)
     if not ok:
         out["WHY_INVALID"] = (
-            "the code that ran is not the code that was authorised; the "
-            "artifacts describe a different revision")
+            "the code that ran is not the code that was authorised"
+            if not code_ok else
+            "a required provenance record is missing, so the artifacts cannot "
+            "be tied to the revision and inputs that produced them")
     # Reported, never gating: the workflow FILE is read from the ref, so it can
     # legitimately come from a different commit than our checkout. Seeing it is
     # the point.
@@ -130,12 +225,21 @@ def receipt(path, payload):
 
 
 def render(r):
-    """The block printed before the first request."""
+    """The block printed before the first request, and again at harvest."""
     lines = []
     for f in PROVENANCE_FIELDS:
-        lines.append("%-34s = %s" % (f, r.get(f)))
+        if f == "EXECUTED_SHA_ACTUAL" and "EXPECTED_EXECUTED_SHA" in r:
+            lines.append("%-34s = %s" % ("EXPECTED_EXECUTED_SHA",
+                                         r["EXPECTED_EXECUTED_SHA"]))
+        lines.append("%-34s = %s" % (f, r.get(f, NOT_IDENTIFIED)))
+    for a in PROVENANCE_ASPECTS:
+        if a in r:
+            lines.append("%-34s = %s" % (a, r[a]))
     for c in r.get("FAILED_CHECKS", []):
         lines.append("%-34s = %s" % ("FAILED_CHECK", c))
+    if "PRE_DISPATCH_PROVENANCE_GATE" in r:
+        lines.append("%-34s = %s" % ("PRE_DISPATCH_PROVENANCE_GATE",
+                                     r["PRE_DISPATCH_PROVENANCE_GATE"]))
     lines.append("%-34s = %s" % ("EVIDENCE_RUN_VALIDITY",
                                  r["EVIDENCE_RUN_VALIDITY"]))
     return "\n".join(lines)

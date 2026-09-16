@@ -55,6 +55,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
+import provenance as PV                                        # noqa: E402
 import rate_confirm as RC                                      # noqa: E402
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -260,6 +261,9 @@ def harvest(outdir, rps=None):
     """The frozen field list, re-derived from the sealed evidence."""
     out = Path(outdir)
     sealed = json.loads((out / "confirm_report.json").read_text())
+    prov_path = out / "provenance.json"
+    sealed_prov = (json.loads(prov_path.read_text())
+                   if prov_path.is_file() else {})
     rows = [json.loads(l) for l in
             (out / "confirm_rows.jsonl").read_text().splitlines() if l.strip()]
     rps = float(rps or sealed["RATE_RPS"])
@@ -318,6 +322,11 @@ def harvest(outdir, rps=None):
     if not dur_ok:
         reasons.append(DURATION_FAIL_REASON)
 
+    # -- the SUPPORT question, its own verdict: did the run occupy the floors?
+    #    Separate from cleanliness (outcomes) and from the combined verdict, so
+    #    a reader can see which of the two failed without inference.
+    support_ok = reqs_ok and dur_ok
+
     validated = not reasons
     structural = (exposure != NOT_IDENTIFIED
                   and float(exposure) < need_dur
@@ -367,9 +376,14 @@ def harvest(outdir, rps=None):
         "QUESTION_THIS_RUN_CAN_ANSWER": (
             "does %s rps appear operationally clean over the %d requests "
             "issued?" % (rps, req)),
+        "OPERATIONALLY_CLEAN_OVER_REQUESTS": ("YES" if clean else "NO"),
         "OPERATIONALLY_CLEAN_OVER_THE_REQUESTS_ISSUED": ("YES" if clean
                                                          else "NO"),
         "OPERATIONAL_FAILURES": (operational if operational else None),
+        "SUPPORT_FLOORS_MET": ("YES" if support_ok else "NO"),
+        "SUPPORT_FAILURES": ([r for r in (REQUESTS_FAIL_REASON,
+                                          DURATION_FAIL_REASON)
+                              if r in reasons] or None),
         "QUESTION_THIS_RUN_CANNOT_ANSWER": (
             "has %s rps met the frozen sustained-duration validation "
             "criterion?" % rps),
@@ -398,6 +412,25 @@ def harvest(outdir, rps=None):
         "CORRECTED_CONFIRMATION_IS_NOT_DISPATCHED": True,
         "VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED": NOT_IDENTIFIED,
         "MECHANISM_DOES_NOT_GATE_THIS": True,
+
+        # PROVENANCE, read from the runner's own sealed record. The executed
+        # SHA here is the one the RUNNER reported, never the one we expected.
+        "DISPATCH_SHA": sealed_prov.get("DISPATCH_SHA", NOT_IDENTIFIED),
+        "EXECUTED_SHA_ACTUAL": sealed_prov.get(
+            "EXECUTED_SHA_ACTUAL", sealed_prov.get("EXECUTED_SHA",
+                                                   NOT_IDENTIFIED)),
+        "EXECUTED_SHA_SOURCE": sealed_prov.get("EXECUTED_SHA_SOURCE",
+                                               NOT_IDENTIFIED),
+        "WORKFLOW_REF_SHA": sealed_prov.get("WORKFLOW_REF_SHA", NOT_IDENTIFIED),
+        "WORKFLOW_FILE_SHA": sealed_prov.get("WORKFLOW_FILE_SHA",
+                                             NOT_IDENTIFIED),
+        "CONFIG_SHA": sealed_prov.get("CONFIG_SHA", NOT_IDENTIFIED),
+        "DATA_OUTPUT_SHA": sealed_prov.get("DATA_OUTPUT_SHA", NOT_IDENTIFIED),
+        # The four aspects are RE-DERIVED here from the values the runner
+        # sealed, not copied from its verdict -- an artifact that carries its
+        # own PASS is not evidence of a PASS. DATA_OUTPUT_SHA is additionally
+        # re-hashed off the rows file that is actually present.
+        "EVIDENCE_RUN_VALIDITY": NOT_IDENTIFIED,
         "REFUSED_LABELS": list(RC.REFUSED_LABELS),
         "FASTER_RATES": "UNTESTED_IN_THIS_RUN",
         "THIS_MODULE_CONTACTS_NOTHING": THIS_MODULE_CONTACTS_NOTHING,
@@ -408,6 +441,32 @@ def harvest(outdir, rps=None):
     report.update(timing)
     report.update(fair)
     report.update(cover)
+
+    # Provenance, re-derived from the sealed record plus the rows on disk.
+    rows_sha = PV.file_sha256(out / "confirm_rows.jsonl")
+    sealed_out_sha = sealed_prov.get("DATA_OUTPUT_SHA")
+    prov = PV.check(
+        sealed_prov.get("DISPATCH_SHA"),
+        sealed_prov.get("EXECUTED_SHA_ACTUAL", sealed_prov.get("EXECUTED_SHA")),
+        workflow_ref_sha=sealed_prov.get("WORKFLOW_REF_SHA"),
+        workflow_file_sha=sealed_prov.get("WORKFLOW_FILE_SHA"),
+        config_sha=sealed_prov.get("CONFIG_SHA"),
+        data_output_sha=rows_sha if rows_sha != NOT_IDENTIFIED else None,
+        executed_sha_source=sealed_prov.get(
+            "EXECUTED_SHA_SOURCE",
+            # the runner obtains it from `git rev-parse HEAD` in both the
+            # current and the previous revision of provenance.py
+            "RUNNER_GIT_REV_PARSE" if sealed_prov else None))
+    report.update({k: prov[k] for k in (
+        "DISPATCH_SHA", "EXECUTED_SHA_ACTUAL", "EXECUTED_SHA_SOURCE",
+        "WORKFLOW_REF_SHA", "WORKFLOW_FILE_SHA", "CONFIG_SHA",
+        "DATA_OUTPUT_SHA", "CODE_PROVENANCE_VALIDITY", "WORKFLOW_PROVENANCE",
+        "CONFIG_PROVENANCE", "DATA_OUTPUT_PROVENANCE",
+        "EVIDENCE_RUN_VALIDITY", "WORKFLOW_FILE_AND_CODE_SAME_COMMIT")})
+    report["DATA_OUTPUT_SHA_MATCHES_SEALED_RECORD"] = (
+        "YES" if (sealed_out_sha and rows_sha == sealed_out_sha) else
+        ("NO" if sealed_out_sha else NOT_IDENTIFIED))
+    report["PROVENANCE_REDERIVED_NOT_COPIED"] = True
     return report
 
 
@@ -439,10 +498,18 @@ def render(r):
         for f in r["FAIL_REASON"]:
             L.append("%-38s = %s" % ("FAIL_REASON", f))
     L.append("")
-    L.append("%-38s = %s" % ("OPERATIONALLY_CLEAN_OVER_THE_REQUESTS_ISSUED",
-                             r["OPERATIONALLY_CLEAN_OVER_THE_REQUESTS_ISSUED"]))
+    for k in ("DISPATCH_SHA", "EXECUTED_SHA_ACTUAL", "WORKFLOW_FILE_SHA",
+              "CONFIG_SHA", "DATA_OUTPUT_SHA", "CODE_PROVENANCE_VALIDITY",
+              "WORKFLOW_PROVENANCE", "CONFIG_PROVENANCE",
+              "DATA_OUTPUT_PROVENANCE", "EVIDENCE_RUN_VALIDITY"):
+        L.append("%-38s = %s" % (k, r.get(k)))
+    L.append("")
     L.append("%-38s = %s" % ("VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED",
                              r["VENUE_RATE_LIMIT_MECHANISM_IDENTIFIED"]))
+    L.append("")
+    L.append("%-38s = %s" % ("OPERATIONALLY_CLEAN_OVER_REQUESTS",
+                             r["OPERATIONALLY_CLEAN_OVER_REQUESTS"]))
+    L.append("%-38s = %s" % ("SUPPORT_FLOORS_MET", r["SUPPORT_FLOORS_MET"]))
     L.append("%-38s = %s" % ("COLLECTOR_RATE_OPERATIONALLY_VALIDATED",
                              r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"]))
     L.append("%-38s = %s" % ("PROPOSED_SUBSTANTIVE_CAPTURE_RATE",

@@ -7,19 +7,32 @@ from pathlib import Path
 import provenance as PV
 
 NI = PV.NOT_IDENTIFIED
+PENDING = PV.PENDING
 A = "a" * 40
 B = "b" * 40
+
+
+def full(dispatch=A, executed=A, **over):
+    """A complete runtime record: matching SHAs plus every provenance
+    recording. EVIDENCE_RUN_VALIDITY needs all four aspects, not just the
+    code comparison."""
+    kw = dict(workflow_ref_sha=A, workflow_file_sha="wf",
+              config_sha="cfg", data_output_sha="out",
+              executed_sha_source="RUNNER_GIT_REV_PARSE")
+    kw.update(over)
+    return PV.check(dispatch, executed, **kw)
 
 
 class TheShaMustMatch(unittest.TestCase):
 
     def test_matching_shas_pass(self):
-        r = PV.check(A, A)
+        r = full()
         self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "PASS")
         self.assertEqual(r["FAILED_CHECKS"], [])
+        self.assertEqual(r["CODE_PROVENANCE_VALIDITY"], "PASS")
 
     def test_a_mismatch_fails_and_says_why(self):
-        r = PV.check(A, B)
+        r = full(executed=B)
         self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
         self.assertIn("DISPATCH_SHA_EQUALS_EXECUTED_SHA", r["FAILED_CHECKS"])
         self.assertIn("not the code that was authorised", r["WHY_INVALID"])
@@ -27,21 +40,20 @@ class TheShaMustMatch(unittest.TestCase):
     def test_a_missing_sha_is_not_a_pass(self):
         """Absent must never compare equal to absent."""
         for d, e in ((None, None), (A, None), (None, A), ("", "")):
-            self.assertEqual(PV.check(d, e)["EVIDENCE_RUN_VALIDITY"], "FAIL")
+            self.assertEqual(full(d, e)["EVIDENCE_RUN_VALIDITY"], "FAIL")
 
     def test_an_abbreviated_sha_still_pins_the_checkout(self):
-        self.assertEqual(PV.check(A[:7], A)["EVIDENCE_RUN_VALIDITY"], "PASS")
-        self.assertEqual(PV.check(A[:7], B)["EVIDENCE_RUN_VALIDITY"], "FAIL")
+        self.assertEqual(full(A[:7], A)["EVIDENCE_RUN_VALIDITY"], "PASS")
+        self.assertEqual(full(A[:7], B)["EVIDENCE_RUN_VALIDITY"], "FAIL")
 
     def test_a_branch_name_is_not_a_sha(self):
         """The whole defect was a branch ref standing in for a commit."""
-        r = PV.check("claude/session-njaewf", A)
+        r = full("claude/session-njaewf", A)
         self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
         self.assertEqual(r["DISPATCH_SHA"], NI)
 
     def test_case_does_not_defeat_the_comparison(self):
-        self.assertEqual(PV.check(A.upper(), A)["EVIDENCE_RUN_VALIDITY"],
-                         "PASS")
+        self.assertEqual(full(A.upper(), A)["EVIDENCE_RUN_VALIDITY"], "PASS")
 
 
 class TheWorkflowFileIsReportedNotGated(unittest.TestCase):
@@ -49,16 +61,16 @@ class TheWorkflowFileIsReportedNotGated(unittest.TestCase):
     legitimately differ. Seeing that is the point; blocking on it is not."""
 
     def test_a_differing_ref_sha_is_reported_but_still_passes(self):
-        r = PV.check(A, A, workflow_ref_sha=B)
+        r = full(workflow_ref_sha=B)
         self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "PASS")
         self.assertEqual(r["WORKFLOW_FILE_AND_CODE_SAME_COMMIT"], "NO")
 
     def test_the_same_commit_is_reported_too(self):
-        r = PV.check(A, A, workflow_ref_sha=A)
+        r = full(workflow_ref_sha=A)
         self.assertEqual(r["WORKFLOW_FILE_AND_CODE_SAME_COMMIT"], "YES")
 
     def test_an_absent_ref_is_not_identified_rather_than_no(self):
-        r = PV.check(A, A)
+        r = full(workflow_ref_sha=None)
         self.assertEqual(r["WORKFLOW_FILE_AND_CODE_SAME_COMMIT"], NI)
 
 
@@ -82,7 +94,7 @@ class TheArtifactHashes(unittest.TestCase):
         self.assertEqual(PV.file_sha256("/nonexistent/x"), NI)
 
     def test_every_provenance_field_is_carried(self):
-        r = PV.check(A, A, B, "wf", "cfg", "out")
+        r = full(workflow_ref_sha=B)
         for f in PV.PROVENANCE_FIELDS:
             self.assertIn(f, r, f)
         self.assertEqual(r["CONFIG_SHA"], "cfg")
@@ -93,14 +105,14 @@ class TheReceipt(unittest.TestCase):
 
     def test_it_persists_and_ends_on_the_verdict(self):
         d = Path(tempfile.mkdtemp())
-        r = PV.check(A, A)
+        r = full()
         PV.receipt(d / "prov.json", r)
         self.assertTrue((d / "prov.json").is_file())
         self.assertTrue(PV.render(r).strip().endswith(
             "EVIDENCE_RUN_VALIDITY              = PASS"))
 
     def test_the_refusal_of_mutable_refs_is_stated(self):
-        r = PV.check(A, A)
+        r = full()
         self.assertTrue(r["MUTABLE_REF_IS_NOT_ALLOWED_FOR_EVIDENCE"])
         self.assertIn("chosen after the experiment is authorised",
                       r["WHY_IMMUTABLE"])
@@ -110,6 +122,78 @@ class TheReceipt(unittest.TestCase):
         src = Path(PV.__file__).read_text()
         self.assertNotIn("httpx", src)
         self.assertNotIn("requests.get", src)
+
+
+class AnExpectationIsNotAnObservation(unittest.TestCase):
+    """The pre-dispatch gate cannot claim EVIDENCE_RUN_VALIDITY = PASS, and it
+    is structurally unable to: there is no executed-SHA parameter to pass an
+    expectation into."""
+
+    def test_the_pre_dispatch_gate_leaves_validity_pending(self):
+        g = PV.pre_dispatch_gate(A, "wf", "cfg")
+        self.assertEqual(g["PRE_DISPATCH_PROVENANCE_GATE"], "PASS")
+        self.assertEqual(g["EVIDENCE_RUN_VALIDITY"], PENDING)
+        self.assertEqual(g["EXECUTED_SHA_ACTUAL"], PENDING)
+        self.assertEqual(g["DATA_OUTPUT_SHA"], PENDING)
+
+    def test_the_expected_sha_is_labelled_expected(self):
+        g = PV.pre_dispatch_gate(A, "wf", "cfg")
+        self.assertEqual(g["EXPECTED_EXECUTED_SHA"], A)
+        self.assertEqual(g["DISPATCH_SHA_VALID_FORMAT"], "YES")
+
+    def test_there_is_no_way_to_pass_an_expectation_as_an_observation(self):
+        """Not a convention -- a signature. The parameter does not exist."""
+        import inspect
+        params = inspect.signature(PV.pre_dispatch_gate).parameters
+        for p in params:
+            self.assertNotIn("executed", p)
+
+    def test_a_malformed_dispatch_sha_fails_the_gate(self):
+        g = PV.pre_dispatch_gate("claude/session-njaewf", "wf", "cfg")
+        self.assertEqual(g["PRE_DISPATCH_PROVENANCE_GATE"], "FAIL")
+        self.assertEqual(g["EVIDENCE_RUN_VALIDITY"], PENDING)
+
+    def test_a_missing_config_hash_fails_the_gate(self):
+        g = PV.pre_dispatch_gate(A, "wf", None)
+        self.assertIn("CONFIG_SHA_PRESENT", g["FAILED_CHECKS"])
+
+    def test_an_unobserved_executed_sha_fails_at_runtime(self):
+        """If the source is not a runner observation, the run is not valid."""
+        r = full(executed_sha_source="EXPECTED")
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
+        self.assertIn("EXECUTED_SHA_WAS_OBSERVED_NOT_EXPECTED",
+                      r["FAILED_CHECKS"])
+
+    def test_the_gate_block_prints_pending_not_pass(self):
+        text = PV.render(PV.pre_dispatch_gate(A, "wf", "cfg"))
+        self.assertIn("EXPECTED_EXECUTED_SHA", text)
+        self.assertTrue(text.strip().endswith("= PENDING_EXECUTION"))
+
+
+class FourAspectsNotOne(unittest.TestCase):
+
+    def test_a_missing_output_hash_fails_though_the_code_matches(self):
+        r = full(data_output_sha=None)
+        self.assertEqual(r["CODE_PROVENANCE_VALIDITY"], "PASS")
+        self.assertEqual(r["DATA_OUTPUT_PROVENANCE"], "NOT_RECORDED")
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
+        self.assertIn("required provenance record is missing", r["WHY_INVALID"])
+
+    def test_a_missing_config_hash_fails_though_the_code_matches(self):
+        r = full(config_sha=None)
+        self.assertEqual(r["CONFIG_PROVENANCE"], "NOT_RECORDED")
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
+
+    def test_a_code_mismatch_is_named_as_the_code_aspect(self):
+        r = full(executed=B)
+        self.assertEqual(r["CODE_PROVENANCE_VALIDITY"], "FAIL")
+        self.assertEqual(r["WORKFLOW_PROVENANCE"], "RECORDED")
+        self.assertIn("not the code that was authorised", r["WHY_INVALID"])
+
+    def test_all_four_aspects_are_separate_fields(self):
+        r = full()
+        for a in PV.PROVENANCE_ASPECTS:
+            self.assertIn(a, r, a)
 
 
 if __name__ == "__main__":
