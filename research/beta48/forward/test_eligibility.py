@@ -231,7 +231,11 @@ class ThisFileContactsNothing(unittest.TestCase):
 
     def test_it_imports_no_network_library_and_no_clock(self):
         """The clock is injected, so the module cannot acquire a timezone
-        opinion of its own -- the C-6 / C-10 business-date trap."""
+        opinion of its own -- the C-6 / C-10 business-date trap.
+
+        hashlib is permitted: it is deterministic, does no I/O, and is how the
+        audit interleave is made reproducible. What must stay out is anything
+        that could read a network or a wall clock."""
         tree = ast.parse((HERE / "eligibility.py").read_text())
         mods = set()
         for n in ast.walk(tree):
@@ -239,7 +243,11 @@ class ThisFileContactsNothing(unittest.TestCase):
                 mods.update(x.name.split(".")[0] for x in n.names)
             elif isinstance(n, ast.ImportFrom) and n.module:
                 mods.add(n.module.split(".")[0])
-        self.assertLessEqual(mods, {"decimal", "__future__"}, mods)
+        self.assertLessEqual(mods, {"decimal", "hashlib", "__future__"},
+                             mods)
+        for banned in ("httpx", "requests", "urllib", "socket", "time",
+                       "datetime", "zoneinfo"):
+            self.assertNotIn(banned, mods, banned)
 
 
 if __name__ == "__main__":
@@ -382,3 +390,175 @@ class TheResultIsPipelineYieldNotBoardPrevalence(unittest.TestCase):
         self.assertEqual(c["STAGE2_BROAD_AT_DECISION"], 1)
         self.assertEqual(c["PIPELINE_YIELD_BROAD"], "1/2")
         self.assertEqual(c["PIPELINE_YIELD_HIGH_ACTIVITY"], "1/2")
+
+
+class EventIdentityIsFrozenAndDerived(unittest.TestCase):
+    """The venue publishes NO event identifier -- eventSlug, eventId, event,
+    gameId, conditionId and five others are all 0/20,000 on the captured raw
+    objects. So the key is derived, and the derivation is frozen before
+    sampling rather than invented after seeing a sample's composition."""
+
+    def test_the_prefix_is_dropped_and_the_date_retained(self):
+        self.assertEqual(E.event_key("aec-ufc-alomen-iwobar-2026-09-19"),
+                         "ufc-alomen-iwobar-2026-09-19")
+
+    def test_a_market_and_its_props_share_one_event(self):
+        a = E.event_key("aec-ufc-alomen-iwobar-2026-09-19")
+        b = E.event_key("astatc-ufc-alomen-iwobar-2026-09-19-mof-ko")
+        c = E.event_key("astatc-ufc-alomen-iwobar-2026-09-19-mov-f1-dec")
+        self.assertEqual(a, b)
+        self.assertEqual(b, c)
+
+    def test_different_events_do_not_collide(self):
+        self.assertNotEqual(E.event_key("aec-ufc-a-b-2026-09-19"),
+                            E.event_key("aec-ufc-a-b-2026-09-26"))
+
+    def test_a_slug_with_no_date_has_no_event_key(self):
+        """None, not a fabricated singleton. A market we cannot place in an
+        event must not silently become its own independent event."""
+        self.assertIsNone(E.event_key("some-market-without-a-date"))
+        self.assertIsNone(E.event_key(None))
+
+    def test_the_source_is_recorded_as_derived(self):
+        self.assertEqual(E.VENUE_EVENT_IDENTIFIER_PRESENT, "NO")
+        self.assertEqual(E.EVENT_ID_SOURCE, "DERIVED_FROM_SLUG_DATE_PREFIX")
+        self.assertTrue(E.EVENT_ID_DERIVATION_FROZEN)
+
+
+class TheTwoEstimandsAreNeverCollapsed(unittest.TestCase):
+
+    def _rows(self):
+        # One event with four markets, three eligible; one event with a single
+        # market, not eligible. Market-weighted says 3/5; event-weighted says
+        # (0.75 + 0)/2 = 0.375. The numbers MUST differ.
+        rows = []
+        for i, ok in enumerate((True, True, True, False)):
+            rows.append({"slug": "aec-nfl-a-b-2026-09-19-p%d" % i, "X": ok})
+        rows.append({"slug": "aec-nfl-c-d-2026-09-20", "X": False})
+        return rows
+
+    def test_market_and_event_weighting_give_different_answers(self):
+        out = E.by_event(self._rows(), "X")
+        self.assertEqual(out["RAW_MARKET_N"], 5)
+        self.assertEqual(out["UNIQUE_EVENT_N"], 2)
+        self.assertAlmostEqual(out["MARKET_WEIGHTED_RESULT"], 3 / 5)
+        self.assertAlmostEqual(out["EVENT_WEIGHTED_RESULT"], (0.75 + 0.0) / 2)
+        self.assertNotAlmostEqual(out["MARKET_WEIGHTED_RESULT"],
+                                  out["EVENT_WEIGHTED_RESULT"])
+
+    def test_the_independent_sample_size_is_events_not_markets(self):
+        out = E.by_event(self._rows(), "X")
+        self.assertEqual(out["INDEPENDENT_SAMPLE_SIZE"], 2)
+        self.assertNotEqual(out["INDEPENDENT_SAMPLE_SIZE"],
+                            out["RAW_MARKET_N"])
+
+    def test_event_weighting_aggregates_within_event_first(self):
+        self.assertIn("WITHIN_EVENT_FIRST", E.by_event([], "X")["WEIGHTING"])
+        self.assertTrue(E.ESTIMANDS_ARE_NEVER_COLLAPSED)
+
+    def test_markets_without_an_event_key_are_counted_not_folded_in(self):
+        rows = self._rows() + [{"slug": "no-date", "X": True}]
+        out = E.by_event(rows, "X")
+        self.assertEqual(out["MARKETS_WITHOUT_EVENT_ID"], 1)
+        self.assertEqual(out["UNIQUE_EVENT_N"], 2)
+
+    def test_underpowered_is_said_rather_than_precision_manufactured(self):
+        self.assertEqual(E.inference_status(2), "UNDERPOWERED")
+        self.assertEqual(E.inference_status(1456),
+                         "EVENT_CLUSTERED_INFERENCE_PERMITTED")
+
+
+class FailureHasAReasonCode(unittest.TestCase):
+
+    def test_missing_and_stale_are_different_codes(self):
+        """A market that never traded and one that traded two days ago fail
+        the same tier for completely different reasons."""
+        missing = E.decision_screen(row(), bk(last_trade=None), 0, PARSE,
+                                    book_transact_time="100",
+                                    book_receipt_time="101")
+        stale = E.decision_screen(row(), bk(last_trade="0"), 0, PARSE,
+                                  book_transact_time=str(48 * 3600),
+                                  book_receipt_time=str(48 * 3600))
+        self.assertEqual(missing["PRIMARY_FAIL_REASON"],
+                         E.FAIL_NO_TRADE_TIMESTAMP)
+        self.assertEqual(stale["PRIMARY_FAIL_REASON"], E.FAIL_STALE_TRADE)
+        self.assertNotEqual(missing["PRIMARY_FAIL_REASON"],
+                            stale["PRIMARY_FAIL_REASON"])
+
+    def test_a_negative_age_is_its_own_code_not_staleness(self):
+        d = E.decision_screen(row(), bk(last_trade="500"), 0, PARSE,
+                              book_transact_time="100",
+                              book_receipt_time="100")
+        self.assertEqual(d["PRIMARY_FAIL_REASON"], E.FAIL_INVALID_CLOCK)
+        self.assertTrue(d["LAST_TRADE_SET_TIME_INVALID_FUTURE"])
+
+    def test_the_primary_reason_is_deterministic_under_multiple_failures(self):
+        d = E.decision_screen(row(), bk(ask="0.90", last_trade=None,
+                                        state="MARKET_STATE_CLOSED"),
+                              0, PARSE, book_transact_time="100",
+                              book_receipt_time="101")
+        self.assertIn(E.FAIL_CLOSED, d["FAIL_REASONS"])
+        self.assertIn(E.FAIL_SPREAD, d["FAIL_REASONS"])
+        self.assertIn(E.FAIL_NO_TRADE_TIMESTAMP, d["FAIL_REASONS"])
+        self.assertEqual(d["PRIMARY_FAIL_REASON"], E.FAIL_CLOSED)
+
+    def test_a_passing_market_has_no_reason(self):
+        d = E.decision_screen(row(), bk(last_trade="0"), 0, PARSE,
+                              book_transact_time="60", book_receipt_time="61")
+        self.assertIsNone(d["PRIMARY_FAIL_REASON"])
+        self.assertEqual(d["FAIL_REASONS"], [])
+
+
+class TheAuditIsInterleavedNotAppended(unittest.TestCase):
+    """Putting audit markets at the end of a 1.29 h scan gives each the maximum
+    time to tighten, so the false-negative rate would measure scan latency
+    rather than routing error."""
+
+    def test_audit_rows_are_spread_through_the_scan(self):
+        routed = ["r%03d" % i for i in range(200)]
+        audit = ["a%03d" % i for i in range(20)]
+        sched = E.audit_schedule(routed, audit, salt="S")
+        pos = [r["position"] for r in sched if r["lane"] == "AUDIT"]
+        self.assertEqual(len(pos), 20)
+        # Not clustered at either end: audit reads appear in the first and the
+        # last third of the scan.
+        self.assertLess(min(pos), len(sched) // 3)
+        self.assertGreater(max(pos), 2 * len(sched) // 3)
+
+    def test_the_schedule_is_deterministic_and_salt_dependent(self):
+        a = E.audit_schedule(["r1", "r2"], ["a1"], salt="S")
+        b = E.audit_schedule(["r2", "r1"], ["a1"], salt="S")
+        self.assertEqual([x["slug"] for x in a], [x["slug"] for x in b])
+        c = E.audit_schedule(["r1", "r2"], ["a1"], salt="OTHER")
+        self.assertEqual(len(a), len(c))
+
+    def test_every_market_appears_exactly_once(self):
+        sched = E.audit_schedule(["r1", "r2"], ["a1"], salt="S")
+        self.assertEqual(sorted(x["slug"] for x in sched),
+                         ["a1", "r1", "r2"])
+
+
+class CapacityIsGrossAndNet(unittest.TestCase):
+    """Thirty eligible props on one NFL game are not thirty independent
+    capital opportunities."""
+
+    def test_markets_and_events_are_counted_separately(self):
+        rows = [{"slug": "aec-nfl-a-b-2026-09-19-p%d" % i,
+                 "HIGH_ACTIVITY_AT_DECISION": True} for i in range(30)]
+        rows.append({"slug": "aec-nfl-c-d-2026-09-20",
+                     "HIGH_ACTIVITY_AT_DECISION": True})
+        cap = E.capacity(rows)
+        self.assertEqual(cap["MARKET_LEVEL_GROSS_CAPACITY"], 31)
+        self.assertEqual(cap["EVENT_LEVEL_NET_CAPACITY"], 2)
+        self.assertEqual(cap["MAX_EVENT_EXPOSURE"], 30)
+        self.assertNotEqual(cap["MARKET_LEVEL_GROSS_CAPACITY"],
+                            cap["EVENT_LEVEL_NET_CAPACITY"])
+
+    def test_independence_is_not_inferred_from_differing_slugs(self):
+        cap = E.capacity([])
+        self.assertFalse(cap["EVENT_INDEPENDENCE_INFERRED_FROM_DIFFERING_SLUGS"])
+
+    def test_capacity_is_a_count_and_not_money(self):
+        cap = E.capacity([])
+        self.assertEqual(cap["EXPECTED_NET_PNL_PER_CAPITAL_DOLLAR_PER_HOUR"],
+                         NI)

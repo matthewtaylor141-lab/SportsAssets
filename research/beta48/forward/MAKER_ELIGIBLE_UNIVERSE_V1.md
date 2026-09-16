@@ -594,3 +594,180 @@ C. ECONOMICS  do surfaced opportunities generate positive net economics after
 
 A does not answer B. B does not answer C. C needs evidence nothing above
 provides.
+
+---
+
+# PRE-RESULT FREEZE 3 — ESTIMAND, EVENT IDENTITY, ROUTING AUDIT
+
+Still no economics. Cut points unchanged.
+
+## CL-15. The estimand: market-weighted and event-weighted, never collapsed
+
+Uniform MARKET sampling answers "what does a randomly selected instrument look
+like?" It does not answer "what does a randomly selected independent event look
+like?", and it does not produce independent observations when sampled markets
+share an event.
+
+**Measured on the observed prefix, and the magnitude is not marginal:**
+
+```
+MARKETS_WITH_DERIVABLE_EVENT_KEY   19,513 / 20,000 = 97.6%
+UNIQUE_EVENTS                       1,456
+MARKETS_PER_EVENT                   mean 13.4, median 8, p90 27, MAX 394
+MAX_SINGLE_EVENT_SHARE              394 / 19,513 = 2.02%
+largest events   nfl-2027-01-10 394 | cfb-wins-2026-11-28 380 |
+                 cfb-2026-11-28 261 | epl-2027-05-30 248
+```
+
+Treating 20,000 markets as 20,000 independent observations overstates the
+effective sample by **more than an order of magnitude**, and one single event
+holds 2% of the entire board.
+
+```
+MARKET_WEIGHTED_ESTIMAND   quote-opportunity count, routing workload,
+                           number of books to make
+EVENT_WEIGHTED_ESTIMAND    independent opportunity count, correlated
+                           inventory, capital concentration, event capacity,
+                           statistical independence
+```
+
+`by_event()` aggregates WITHIN event first and then weights events equally —
+never by pretending each market is independent. `RAW_MARKET_N` and
+`UNIQUE_EVENT_N` are separate fields; `INDEPENDENT_SAMPLE_SIZE` is the event
+count. `inference_status()` returns `UNDERPOWERED` below 30 events rather than
+manufacturing precision.
+
+## CL-16. Event identity: the venue publishes none
+
+Probed against the 20,000 captured raw market objects:
+
+```
+eventSlug 0/20,000   eventId 0/20,000   event 0/20,000   eventTicker 0/20,000
+seriesId  0/20,000   groupId 0/20,000   parentId 0/20,000  gameId 0/20,000
+conditionId 0/20,000
+```
+
+So the key is DERIVED, and the derivation is frozen in `event_key()` before any
+sampling: first `YYYY-MM-DD` in the slug, keep through it, drop the leading
+grammar prefix.
+
+```
+EVENT_ID_SOURCE            DERIVED_FROM_SLUG_DATE_PREFIX
+EVENT_ID_COVERAGE          19,513 / 20,000 = 97.6%
+MARKETS_WITHOUT_EVENT_ID   487
+```
+
+A market with no derivable key returns `None` — **not a fabricated singleton**.
+It stays a market-level observation and is excluded from event-clustered
+inference with a count, because inventing an event for it would make the very
+markets we cannot place look maximally independent.
+
+## CL-17. The generalization frame is OPEN markets, not two-sided ones
+
+Two-sidedness is itself an economically relevant property of the board —
+38.4% of the observed prefix does not have it. Conditioning the generalization
+panel on two-sided quotes would discard the finding and then be unable to
+report it.
+
+```
+OBSERVED_PREFIX_FRAME_PANEL frame = OPEN markets in the observed prefix
+observable and reported:  TWO_SIDED | ONE_SIDED | EMPTY_UNQUOTED |
+                          CLOSED_AT_DECISION | INVALID
+```
+
+If a panel IS conditioned on two-sided markets it is labelled
+`TWO_SIDED_MARKET_FRAME` and its prevalence is not generalized back to all OPEN
+instruments.
+
+## CL-18. ROUTING_CENSORING_AUDIT_V1 — preregistered
+
+Stage 1 rejects spread > 5 ticks at `T0` and never looks again, so a market
+that tightened before `Ti` is invisible. The audit measures how often that
+happens, without reading every rejected market.
+
+```
+FRAME       stage-1 OPEN two-sided markets rejected ONLY for spread > 5 ticks
+SELECTION   deterministic salted hash, fixed before any stage-2 result
+AUDIT_N     300      <- fixed on request budget, NOT on observed miss rate
+SALT        BETA48-FORWARD-PANEL-2026-09-16   (the existing frozen salt)
+COST        300 reads = 2.5 min at 2 rps, on top of the 9,267
+```
+
+At each audit market's assigned `Ti`, the SAME fresh book the decision screen
+uses, classified into:
+
+```
+STILL_REJECTED_AT_TI | NOW_BROAD_AT_TI | NOW_ONE_SIDED | NOW_CLOSED |
+INVALID_CLOCK_OR_DATA
+```
+
+Reported as:
+
+```
+AUDIT_N, AUDIT_VALID_N, REJECT_TO_BROAD_COUNT, REJECT_TO_BROAD_RATE,
+REJECT_TO_ONE_SIDED_RATE, REJECT_TO_CLOSED_RATE
+```
+
+`REJECT_TO_BROAD_RATE` is a **routing false-negative estimate within the
+audited rejected frame**. It is not `TRUE_BOARD_ELIGIBILITY`.
+
+**V1 does not change from this audit.** A material miss rate motivates V2 — a
+wider routing threshold, periodic revisit, or a faster router signal — and V2
+gets its own freeze.
+
+## CL-19. The audit is interleaved, so it measures the rule and not the clock
+
+Audit markets are NOT appended to the end of the scan. Every one of them would
+then have had the maximum time to tighten, and the measured false-negative rate
+would be scan latency wearing the rule's name.
+
+`audit_schedule()` orders both lanes by the same salted hash, so an audit
+market's position is fixed before any result exists and is uncorrelated with
+anything about the market. A test asserts audit reads land in both the first
+and the last third of the scan.
+
+Every row records:
+
+```
+STAGE1_CAPTURE_TIME, STAGE2_DECISION_TIME, ELAPSED_STAGE1_TO_STAGE2_SECONDS
+```
+
+and the miss rate is stratified by elapsed-time band, which separates:
+
+```
+ROUTING_RULE_ERROR     the 5-tick cut was wrong for this market
+SCAN_LATENCY_EFFECT    the market simply had an hour to change
+```
+
+## CL-20. Missingness is a reason code, not a silent number
+
+```
+LAST_TRADE_SET_TIME_PRESENT / _MISSING / _INVALID_FUTURE
+```
+
+A missing timestamp never becomes `0 minutes old` or `infinite age`. Missing or
+invalid fails the activity criterion **with its own code**:
+
+```
+FAIL_CLOSED > FAIL_NO_TWO_SIDED_BOOK > FAIL_SPREAD >
+FAIL_NO_TRADE_TIMESTAMP > FAIL_INVALID_CLOCK > FAIL_STALE_TRADE
+```
+
+All applicable codes are recorded; `PRIMARY_FAIL_REASON` is the first in that
+fixed priority order, so two runs over the same row always agree. A market that
+never traded and one that traded two days ago fail the same tier for completely
+different reasons, and a screen that cannot tell them apart cannot be debugged.
+
+## CL-21. Opportunity count is not independent capacity
+
+```
+MARKET_LEVEL_GROSS_CAPACITY    eligible markets
+EVENT_LEVEL_NET_CAPACITY       distinct eligible events
+MAX_EVENT_EXPOSURE             largest eligible market count in one event
+CORRELATED_MARKET_COUNT_PER_EVENT
+EVENT_INDEPENDENCE_INFERRED_FROM_DIFFERING_SLUGS = False
+```
+
+Thirty eligible props on one NFL game are one event's worth of correlated
+inventory. Capacity stays a COUNT; turning it into money needs the fill and
+recycling rates that remain unmeasured.

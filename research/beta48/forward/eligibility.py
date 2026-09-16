@@ -36,6 +36,7 @@ into an invented fill rate.
 """
 from __future__ import annotations
 
+import hashlib
 from decimal import Decimal as D
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -60,6 +61,97 @@ TRADE_ARRIVAL_RATE_AVAILABLE = "NO"
 # Forbidden here by construction, and by a test.
 EXPECTED_WAIT_TO_FILL = NOT_IDENTIFIED
 EXPECTED_NET_PNL_PER_CAPITAL_DOLLAR_PER_HOUR = NOT_IDENTIFIED
+
+
+# ---------------------------------------------------------------------------
+# EVENT IDENTITY
+# ---------------------------------------------------------------------------
+#
+# THE VENUE PUBLISHES NO EVENT IDENTIFIER. Probed against 20,000 captured raw
+# market objects: eventSlug, eventId, event, eventTicker, seriesId, groupId,
+# parentId, gameId and conditionId are ALL absent, 0/20,000. So the event key
+# is derived from the slug, and its derivation is frozen HERE rather than
+# invented after seeing a sample's composition.
+#
+# The rule: find the first YYYY-MM-DD in the slug, keep everything up to and
+# including it, and drop the leading grammar prefix (aec-, astatc-, tec-, ...).
+# `aec-ufc-alomen-iwobar-2026-09-19` and
+# `astatc-ufc-alomen-iwobar-2026-09-19-mof-ko` both key to
+# `ufc-alomen-iwobar-2026-09-19`.
+#
+# WHY THIS MATTERS AT ALL: on the observed prefix, 19,513 markets carry a
+# derivable key and they resolve to 1,456 events -- 13.4 markets per event,
+# median 8, p90 27, and one event holding 394 markets. Treating 20,000 markets
+# as 20,000 independent observations overstates the effective sample by more
+# than an order of magnitude.
+EVENT_ID_SOURCE = "DERIVED_FROM_SLUG_DATE_PREFIX"
+VENUE_EVENT_IDENTIFIER_PRESENT = "NO"
+EVENT_ID_DERIVATION_FROZEN = True
+
+MARKET_WEIGHTED_ESTIMAND = "EACH_MARKET_EQUAL_WEIGHT"
+EVENT_WEIGHTED_ESTIMAND = "EACH_INDEPENDENT_EVENT_EQUAL_WEIGHT"
+ESTIMANDS_ARE_NEVER_COLLAPSED = True
+
+# Reason codes. A market can fail for several reasons; the PRIMARY reason is
+# deterministic and ordered, so two runs over the same row always agree.
+FAIL_CLOSED = "FAIL_CLOSED"
+FAIL_NO_TWO_SIDED_BOOK = "FAIL_NO_TWO_SIDED_BOOK"
+FAIL_SPREAD = "FAIL_SPREAD"
+FAIL_NO_TRADE_TIMESTAMP = "FAIL_NO_TRADE_TIMESTAMP"
+FAIL_INVALID_CLOCK = "FAIL_INVALID_CLOCK"
+FAIL_STALE_TRADE = "FAIL_STALE_TRADE"
+REASON_PRIORITY = (FAIL_CLOSED, FAIL_NO_TWO_SIDED_BOOK, FAIL_SPREAD,
+                   FAIL_NO_TRADE_TIMESTAMP, FAIL_INVALID_CLOCK,
+                   FAIL_STALE_TRADE)
+
+
+def event_key(slug):
+    """The frozen event key, or None when no date is derivable."""
+    s = str(slug or "")
+    i = 0
+    while True:
+        i = s.find("-", i)
+        if i < 0:
+            return None
+        cand = s[i + 1:i + 11]
+        if (len(cand) == 10 and cand[4] == "-" and cand[7] == "-"
+                and cand[:4].isdigit() and cand[5:7].isdigit()
+                and cand[8:].isdigit()):
+            head = s[:i + 11]
+            return head.split("-", 1)[1] if "-" in head else head
+        i += 1
+
+
+def by_event(classified, metric, agg=None):
+    """EVENT-WEIGHTED: aggregate WITHIN event first, then weight events equally.
+
+    Not obtained by pretending each market is independent -- that is exactly
+    the error this function exists to prevent. Markets with no derivable event
+    key are excluded and counted, never silently folded in as singletons.
+    """
+    groups = {}
+    dropped = 0
+    for c in classified:
+        k = event_key(c.get("slug"))
+        if k is None:
+            dropped += 1
+            continue
+        groups.setdefault(k, []).append(c)
+    agg = agg or (lambda vals: sum(1 for v in vals if v is True) / len(vals))
+    per_event = {k: agg([m.get(metric) for m in v]) for k, v in groups.items()}
+    return {
+        "METRIC": metric,
+        "UNIQUE_EVENT_N": len(groups),
+        "RAW_MARKET_N": len(classified),
+        "MARKETS_WITHOUT_EVENT_ID": dropped,
+        "EVENT_WEIGHTED_RESULT": (sum(per_event.values()) / len(per_event)
+                                  if per_event else NOT_IDENTIFIED),
+        "MARKET_WEIGHTED_RESULT": (
+            sum(1 for c in classified if c.get(metric) is True)
+            / len(classified) if classified else NOT_IDENTIFIED),
+        "INDEPENDENT_SAMPLE_SIZE": len(groups),
+        "WEIGHTING": "EVENT_WEIGHTED_AGGREGATES_WITHIN_EVENT_FIRST",
+    }
 
 
 def _q(d):
@@ -198,7 +290,61 @@ def decision_screen(row, book_body, now_s, parse_time, tick=None,
                                      and rec <= ACTIVE_RECENCY_S)
     out["HIGH_ACTIVITY_AT_DECISION"] = bool(
         broad and usable and rec <= HIGH_ACTIVITY_RECENCY_S)
+
+    # REASON CODES. A market can fail several ways; every applicable code is
+    # recorded, and PRIMARY_FAIL_REASON is the first in a fixed priority order
+    # so two runs over the same row always agree on the headline.
+    #
+    # Missingness gets its OWN code rather than collapsing into staleness: a
+    # market that never traded and a market that traded two days ago fail the
+    # same tier for completely different reasons, and a screen that cannot tell
+    # them apart cannot be debugged.
+    reasons = []
+    if not open_at_ti:
+        reasons.append(FAIL_CLOSED)
+    if not two_sided:
+        reasons.append(FAIL_NO_TWO_SIDED_BOOK)
+    elif spread is not None and spread > MAX_SPREAD_TICKS_BROAD:
+        reasons.append(FAIL_SPREAD)
+    if not lts:
+        reasons.append(FAIL_NO_TRADE_TIMESTAMP)
+    elif rec == NOT_IDENTIFIED:
+        reasons.append(FAIL_INVALID_CLOCK)
+    elif rec < 0:
+        reasons.append(FAIL_INVALID_CLOCK)
+    elif rec > ACTIVE_RECENCY_S:
+        reasons.append(FAIL_STALE_TRADE)
+    out["FAIL_REASONS"] = reasons
+    out["PRIMARY_FAIL_REASON"] = next(
+        (r for r in REASON_PRIORITY if r in reasons), None)
+    out["LAST_TRADE_SET_TIME_PRESENT"] = bool(lts)
+    out["LAST_TRADE_SET_TIME_INVALID_FUTURE"] = bool(
+        at_venue != NOT_IDENTIFIED and at_venue < 0)
     return out
+
+
+def audit_schedule(routed_slugs, audit_slugs, salt):
+    """Interleave the routing-censoring audit DETERMINISTICALLY among the
+    routed reads.
+
+    THE TRAP THIS AVOIDS. Putting audit markets at the end of a 1.29-hour scan
+    gives every one of them the maximum time to tighten, so the measured
+    false-negative rate would be mechanically inflated by scan order alone --
+    it would measure the scan's latency, not the routing rule's error.
+
+    Both populations are ordered by the same salted hash, so an audit market's
+    position in the scan is fixed before any result exists and is uncorrelated
+    with anything about the market.
+    """
+    def h(slug, tag):
+        return hashlib.sha256(
+            ("%s|%s|%s" % (salt, tag, slug)).encode("utf-8")).hexdigest()
+
+    rows = ([(h(s, "routed"), s, "ROUTED") for s in routed_slugs]
+            + [(h(s, "audit"), s, "AUDIT") for s in audit_slugs])
+    rows.sort()
+    return [{"position": i, "slug": s, "lane": lane}
+            for i, (_, s, lane) in enumerate(rows)]
 
 
 def classify(row, book_body=None, now_s=None, parse_time=None):
@@ -302,6 +448,40 @@ def census(classified, board_capture_time=None, scan_start=None,
             "TRADE_RECENCY_AT_RECEIPT is per-row and not comparable to a "
             "single board capture instant")
     return out
+
+
+def capacity(classified, tier="HIGH_ACTIVITY_AT_DECISION"):
+    """Gross market count and NET independent-event count, never conflated.
+
+    Thirty eligible props on one NFL game are not thirty independent capital
+    opportunities. Differing slugs are not evidence of independence.
+    """
+    elig = [c for c in classified if c.get(tier) is True]
+    ev = {}
+    for c in elig:
+        k = event_key(c.get("slug"))
+        ev.setdefault(k if k is not None else ("__NO_EVENT_ID__", c.get("slug")),
+                      []).append(c)
+    sizes = sorted((len(v) for v in ev.values()), reverse=True)
+    return {
+        "TIER": tier,
+        "MARKET_LEVEL_GROSS_CAPACITY": len(elig),
+        "EVENT_LEVEL_NET_CAPACITY": len(ev),
+        "ELIGIBLE_MARKETS": len(elig),
+        "ELIGIBLE_EVENTS": len(ev),
+        "MAX_EVENT_EXPOSURE": sizes[0] if sizes else 0,
+        "CORRELATED_MARKET_COUNT_PER_EVENT": sizes[:10],
+        "EVENT_INDEPENDENCE_INFERRED_FROM_DIFFERING_SLUGS": False,
+        # Capacity is a COUNT. Turning it into money needs the fill and
+        # recycling rates that are still unmeasured.
+        "EXPECTED_NET_PNL_PER_CAPITAL_DOLLAR_PER_HOUR": NOT_IDENTIFIED,
+    }
+
+
+def inference_status(unique_event_n, minimum=30):
+    """Say UNDERPOWERED rather than manufacture precision."""
+    return ("UNDERPOWERED" if unique_event_n < minimum
+            else "EVENT_CLUSTERED_INFERENCE_PERMITTED")
 
 
 # The three questions, kept apart because only the first two are answerable
