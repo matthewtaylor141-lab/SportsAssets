@@ -428,3 +428,169 @@ Economics needs fill and adverse-selection evidence.
 The three tiers, their cut points, the forbidden-input list, the
 anti-threshold-mining rules, and the rebate floor all stand exactly as frozen.
 `MICRO_LIVE_AUTHORIZED = NO`.
+
+---
+
+# PRE-RESULT CLARIFICATION 2 — TIME ALIGNMENT
+
+Still no economics evaluated against any tier. Cut points unchanged.
+
+## CL-8. Stage 1 and stage 2 observe DIFFERENT times, and were being mixed
+
+Stage 1 reads the board at `T0`. Stage 2 reads each survivor's book at `Ti`,
+up to 1.29 hours later. Combining `SPREAD_AT_T0` with
+`TRADE_RECENCY_AT_Ti` describes no market at any single decision time.
+
+So the two stages now have different jobs and different names:
+
+```
+STAGE1_ROUTING_SCREEN    decides which markets deserve the expensive read
+STAGE2_DECISION_SCREEN   the contemporaneous trading decision, recomputed
+                         ENTIRELY from the book that arrived at Ti
+```
+
+Stage 1 is a routing frame. It is not the final eligibility answer, and its
+spread is never carried forward as though it were current.
+
+**Every tier is recomputed at `Ti` from the arriving book:**
+
+```
+CURRENT_BID_AT_TI, CURRENT_ASK_AT_TI, CURRENT_SPREAD_TICKS_AT_TI,
+CURRENT_STATE_AT_TI, LAST_TRADE_SET_TIME, BOOK_TRANSACT_TIME, BOOK_RECEIPT_TIME
+
+BROAD_AT_DECISION         = open at Ti AND two-sided at Ti
+                            AND current spread <= 5 ticks at Ti
+ACTIVE_AT_DECISION        = BROAD_AT_DECISION AND recency <= 24 h
+HIGH_ACTIVITY_AT_DECISION = BROAD_AT_DECISION AND recency <= 60 min
+```
+
+The nesting tests apply to the `_AT_DECISION` tiers exactly as before.
+
+## CL-9. Censoring: stage 1 rejects are never re-examined
+
+A market quoting 6 ticks at `T0` is never read at `Ti`, and may have tightened
+to 1 tick in between. This pipeline cannot know, and no amount of stage-2 care
+recovers it.
+
+```
+STAGE1_ROUTED_MARKETS                      countable
+STAGE2_CURRENTLY_ELIGIBLE_MARKETS          countable
+STAGE2_ELIGIBILITY_RATE_WITHIN_ROUTED_FRAME countable
+TRUE_ELIGIBLE_MARKET_SHARE_OF_BOARD        NOT_IDENTIFIED
+```
+
+The result is a **PIPELINE_YIELD** — what this scanner surfaces — and never a
+board prevalence. That is operationally honest: a production scanner really
+does behave this way, and the number a production scanner produces is the
+number worth knowing. It is simply not the same number as "how many markets on
+the board are eligible", and the two must not share a name.
+
+## CL-10. Recency needs an explicit clock, per row
+
+Two figures, both computed where the inputs exist, neither from a shared
+timestamp:
+
+```
+TRADE_RECENCY_AT_VENUE_SNAPSHOT  = BOOK_TRANSACT_TIME - LAST_TRADE_SET_TIME
+TRADE_RECENCY_AT_BETTOR_RECEIPT  = BOOK_RECEIPT_TIME  - LAST_TRADE_SET_TIME
+```
+
+Never from `SCAN_END_TIME`, `REPORT_TIME`, or one clock reading applied to
+every market — that would make the first market scanned look 1.29 hours staler
+than the last purely because of scan order.
+
+Asserted per row, with violations counted rather than clamped:
+
+```
+LAST_TRADE_SET_TIME <= BOOK_TRANSACT_TIME
+BOOK_RECEIPT_TIME   >= BOOK_TRANSACT_TIME     (subject to clock semantics)
+NEGATIVE_RECENCY_ROWS = <count>
+```
+
+**A negative age is a data-quality defect, not "very active."** Clamping it to
+zero would turn a broken clock into the strongest possible activity signal, and
+put exactly the wrong markets at the top of the screen.
+
+## CL-11. "Board-frame" overstates it — the frame is the observed prefix
+
+```
+SAMPLING_FRAME                     OBSERVED_20K_PREFIX
+FULL_BOARD_BOUNDARY_KNOWN          NO
+TRUE_ACTIVE_BOARD_SIZE             NOT_IDENTIFIED
+GENERALIZES_TO_OBSERVED_PREFIX     potentially testable
+GENERALIZES_TO_FULL_BOARD          NOT_IDENTIFIED
+```
+
+A deterministic hash fixes selection WITHIN a frame. It cannot repair an
+incomplete outer frame. The strongest positive result this experiment can ever
+produce is `UFC_RESULT_REPRESENTATIVE_OF_OBSERVED_PREFIX = YES`;
+`UFC_RESULT_REPRESENTATIVE_OF_BOARD` stays `NOT_IDENTIFIED` whatever it returns.
+
+## CL-12. The free activity features DO NOT EXIST at runtime — probed, 0/20,000
+
+A zero-network probe against the raw board capture already on disk (segment 8,
+`board_raw.jsonl.gz`, 200 responses, 20,000 market objects). The documentation
+lists volume fields; **the runtime response contains none of them.**
+
+```
+BOARD_VOLUME24HR_PRESENT      NO    COVERAGE 0/20,000
+BOARD_VOLUME1WK_PRESENT       NO    COVERAGE 0/20,000
+BOARD_VOLUME1MO_PRESENT       NO    COVERAGE 0/20,000
+BOARD_VOLUME_NUM_PRESENT      NO    COVERAGE 0/20,000
+BOARD_LIQUIDITY_NUM_PRESENT   NO    COVERAGE 0/20,000
+BOARD_LAST_TRADE_PRICE_PRESENT NO   COVERAGE 0/20,000
+(also absent: volume, liquidity, openInterest)
+```
+
+The 46 fields the runtime DOES return are enumerated in the probe output.
+Notably `bestAskQuote` appears on 14,443 rows and `bestBidQuote` on 12,336 —
+the two sides are not equally populated, which is why two-sided coverage
+(61.6%) is below either.
+
+**Consequence: there is no cheap stage-1 activity screen. The 9,267 book reads
+stand.** This is the "a field in a schema is not a field in a response"
+principle, confirmed rather than assumed — and it was worth 15 minutes to check
+before spending 1.29 hours of requests on a plan that assumed otherwise.
+
+Nothing in V1 changes. Two fields ARE present on every row and are recorded as
+**candidate future stage-1 features, not admitted to V1**:
+
+```
+CANDIDATE_updatedAt     20,000/20,000, 30 distinct hour-buckets
+CANDIDATE_ep3SyncedAt   20,000/20,000, 5 distinct hour-buckets
+```
+
+Both are ROW-UPDATE recency, not trade activity. `ep3SyncedAt` is nearly
+constant (19,882 rows share one hour), so it carries almost no information.
+`updatedAt` is more varied but still says when the venue touched the record,
+which is not when anyone traded. Neither is admitted to V1, and neither would
+be admitted later without its own freeze.
+
+## CL-13. Cumulative fields are not interval volume until reset semantics are known
+
+`sharesTraded` and `notionalTraded` are cumulative. Before any differencing:
+
+```
+MONOTONICITY_TEST         sharesTraded(t+1) >= sharesTraded(t)
+RESET_SEMANTICS           NOT_IDENTIFIED — lifetime? session? business day?
+DIFFERENCING_PERMITTED    NO, until reset semantics are established
+```
+
+A field that silently resets at the 17:00 ET business-day boundary would
+produce a large negative delta that looks like nothing, and a large positive
+one the next interval that looks like a burst of trading. If monotonicity holds
+across the relevant period, repeated deltas may eventually give
+`EXECUTED_SHARE_VOLUME_PER_INTERVAL` — and still not aggressor, and still not
+block-safe CLOB attribution.
+
+## CL-14. Three experiments, three questions, no substitution
+
+```
+A. GENERALIZATION  does UFC microstructure resemble the observed 20k prefix?
+B. ROUTING/ELIGIBILITY  how many opportunities does the frozen scanner surface?
+C. ECONOMICS  do surfaced opportunities generate positive net economics after
+              fill probability, adverse selection, inventory and costs?
+```
+
+A does not answer B. B does not answer C. C needs evidence nothing above
+provides.

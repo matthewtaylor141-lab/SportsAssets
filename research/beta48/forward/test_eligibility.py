@@ -244,3 +244,141 @@ class ThisFileContactsNothing(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+def bk(bid="0.30", ask="0.31", last_trade="0", state="MARKET_STATE_OPEN"):
+    md = {"state": state, "stats": {"sharesTraded": "10"}}
+    if bid is not None:
+        md["bids"] = [{"px": {"value": bid}, "qty": "100"}]
+    if ask is not None:
+        md["offers"] = [{"px": {"value": ask}, "qty": "100"}]
+    if last_trade is not None:
+        md["stats"]["lastTradeSetTime"] = last_trade
+    return {"marketData": md}
+
+
+class TheDecisionScreenRecomputesFromTheArrivingBook(unittest.TestCase):
+    """Stage 1 observes T0; stage 2 observes Ti up to 1.29 h later. Combining
+    SPREAD_AT_T0 with TRADE_RECENCY_AT_Ti describes no market at any single
+    decision time."""
+
+    def test_a_market_that_widened_after_routing_fails_at_decision(self):
+        r = row(bid="0.30", ask="0.31")           # 1 tick at T0 -> routed
+        self.assertTrue(E.stage1(r)["BROAD"])
+        d = E.decision_screen(r, bk(bid="0.30", ask="0.50"),  # 20 ticks at Ti
+                              now_s=0, parse_time=PARSE,
+                              book_transact_time="100",
+                              book_receipt_time="101")
+        self.assertEqual(d["CURRENT_SPREAD_TICKS_AT_TI"], D("20"))
+        self.assertFalse(d["BROAD_AT_DECISION"])
+        self.assertFalse(d["HIGH_ACTIVITY_AT_DECISION"])
+
+    def test_the_stage1_spread_is_not_carried_forward(self):
+        r = row(bid="0.30", ask="0.50")           # wide at T0
+        d = E.decision_screen(r, bk(bid="0.30", ask="0.31"),  # tight at Ti
+                              0, PARSE, book_transact_time="100",
+                              book_receipt_time="101")
+        self.assertEqual(d["CURRENT_SPREAD_TICKS_AT_TI"], D("1"))
+        self.assertTrue(d["BROAD_AT_DECISION"])
+        self.assertTrue(d["STAGE2_CURRENT_SPREAD_RECOMPUTED"])
+
+    def test_a_market_closed_by_decision_time_fails(self):
+        d = E.decision_screen(row(), bk(state="MARKET_STATE_CLOSED"),
+                              0, PARSE, book_transact_time="100",
+                              book_receipt_time="101")
+        self.assertFalse(d["BROAD_AT_DECISION"])
+
+    def test_the_decision_tiers_nest(self):
+        for spread in (1, 6):
+            for age in (30, 3600, 7200, 10 ** 6):
+                ask = D("0.30") + D("0.01") * spread
+                d = E.decision_screen(
+                    row(), bk(ask=str(ask), last_trade="0"), 0, PARSE,
+                    book_transact_time=str(age),
+                    book_receipt_time=str(age))
+                if d["HIGH_ACTIVITY_AT_DECISION"]:
+                    self.assertTrue(d["ACTIVE_AT_DECISION"], (spread, age))
+                if d["ACTIVE_AT_DECISION"]:
+                    self.assertTrue(d["BROAD_AT_DECISION"], (spread, age))
+
+
+class RecencyUsesPerRowClocks(unittest.TestCase):
+
+    def test_both_clocks_are_computed_and_differ(self):
+        d = E.decision_screen(row(), bk(last_trade="0"), 0, PARSE,
+                              book_transact_time="100",
+                              book_receipt_time="130")
+        self.assertEqual(d["TRADE_RECENCY_AT_VENUE_SNAPSHOT"], 100)
+        self.assertEqual(d["TRADE_RECENCY_AT_BETTOR_RECEIPT"], 130)
+        self.assertNotEqual(d["TRADE_RECENCY_AT_VENUE_SNAPSHOT"],
+                            d["TRADE_RECENCY_AT_BETTOR_RECEIPT"])
+
+    def test_a_negative_age_is_a_defect_and_is_not_treated_as_active(self):
+        """Clamping to zero would make a broken clock the strongest activity
+        signal on the board, promoting exactly the wrong markets."""
+        d = E.decision_screen(row(), bk(last_trade="500"), 0, PARSE,
+                              book_transact_time="100",
+                              book_receipt_time="100")
+        self.assertEqual(d["TRADE_RECENCY_AT_VENUE_SNAPSHOT"], -400)
+        self.assertTrue(d["NEGATIVE_RECENCY"])
+        self.assertIs(d["LAST_TRADE_BEFORE_TRANSACT_TIME"], False)
+        self.assertFalse(d["HIGH_ACTIVITY_AT_DECISION"])
+        self.assertFalse(d["ACTIVE_AT_DECISION"])
+
+    def test_the_ordering_invariant_is_reported_per_row(self):
+        ok = E.decision_screen(row(), bk(last_trade="0"), 0, PARSE,
+                               book_transact_time="100",
+                               book_receipt_time="101")
+        self.assertIs(ok["LAST_TRADE_BEFORE_TRANSACT_TIME"], True)
+        self.assertFalse(ok["NEGATIVE_RECENCY"])
+
+    def test_negative_rows_are_counted_not_hidden(self):
+        rows = [E.decision_screen(row(), bk(last_trade=lt), 0, PARSE,
+                                  book_transact_time="100",
+                                  book_receipt_time="100")
+                for lt in ("0", "500", "0")]
+        c = E.census(rows)
+        self.assertEqual(c["NEGATIVE_RECENCY_ROWS"], 1)
+        self.assertIn("PER_ROW", c["TRADE_RECENCY_CLOCK"])
+        self.assertIn("never a shared timestamp", c["TRADE_RECENCY_CLOCK"])
+
+
+class TheResultIsPipelineYieldNotBoardPrevalence(unittest.TestCase):
+    """A market quoting 6 ticks at T0 is never read at Ti and may have
+    tightened since. No amount of stage-2 care recovers it."""
+
+    def test_the_census_names_itself_a_pipeline_yield(self):
+        c = E.census([])
+        self.assertEqual(c["RESULT_KIND"], "PIPELINE_YIELD")
+        self.assertTrue(c["STAGE1_REJECTS_ARE_NEVER_REEXAMINED"])
+
+    def test_true_board_share_stays_unidentified(self):
+        rows = [E.decision_screen(row(), bk(), 0, PARSE,
+                                  book_transact_time="10",
+                                  book_receipt_time="11")] * 3
+        c = E.census(rows)
+        self.assertEqual(c["TRUE_ELIGIBLE_MARKET_SHARE_OF_BOARD"], NI)
+        self.assertEqual(c["TRUE_BOARD_ELIGIBLE_SHARE"], NI)
+
+    def test_the_frame_is_the_observed_prefix_not_the_board(self):
+        c = E.census([])
+        self.assertEqual(c["SAMPLING_FRAME"], "OBSERVED_20K_PREFIX")
+        self.assertEqual(c["FULL_BOARD_BOUNDARY_KNOWN"], "NO")
+        self.assertEqual(c["GENERALIZES_TO_FULL_BOARD"], NI)
+        self.assertNotEqual(c["GENERALIZES_TO_OBSERVED_PREFIX"],
+                            c["GENERALIZES_TO_FULL_BOARD"])
+
+    def test_yields_are_expressed_against_the_routed_frame(self):
+        rows = [E.decision_screen(row(), bk(last_trade="0"), 0, PARSE,
+                                  book_transact_time="30",
+                                  book_receipt_time="31"),
+                E.decision_screen(row(), bk(ask="0.50"), 0, PARSE,
+                                  book_transact_time="30",
+                                  book_receipt_time="31")]
+        for r in rows:
+            r["BROAD"] = True          # both were routed by stage 1
+        c = E.census(rows)
+        self.assertEqual(c["STAGE1_ROUTED_MARKETS"], 2)
+        self.assertEqual(c["STAGE2_BROAD_AT_DECISION"], 1)
+        self.assertEqual(c["PIPELINE_YIELD_BROAD"], "1/2")
+        self.assertEqual(c["PIPELINE_YIELD_HIGH_ACTIVITY"], "1/2")
