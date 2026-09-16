@@ -1,0 +1,144 @@
+{
+ "DATASET": "INCENTIVE_DEPTH_PANEL",
+ "NEVER_POOLED_WITH": "BREADTH_CENSUS",
+ "SAMPLING_FROZEN_BEFORE_ECONOMICS": "YES",
+ "SELECTION_INPUTS": [
+  "PROGRAM_TYPE",
+  "REWARD_POOL",
+  "TARGET_SIZE",
+  "DISCOUNT_FACTOR",
+  "PROGRAM_PERIOD",
+  "orderPriceMinTickSize",
+  "sportsMarketTypeV2"
+ ],
+ "SELECTION_WITHIN_STRATUM": "SLUG_ORDER",
+ "per_stratum": 8,
+ "strata": 9,
+ "STRATUM_SLOTS_FILLED": 72,
+ "DISTINCT_MARKETS_READ": 16,
+ "OBSERVATION_UNIT": "ONE_BOOK_READ_PER_MARKET_PER_ROUND",
+ "ELIGIBILITY_NEVER_POOLED_ACROSS": "TARGET_SIZE",
+ "SPORT_CONCENTRATION": [
+  "ufc"
+ ],
+ "rounds": 40,
+ "plan": [
+  {
+   "stratum": [
+    "liquidityProgram",
+    "10000",
+    "20000",
+    "0.3",
+    "live",
+    "0.01",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 11,
+   "taken": 8
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "10000",
+    "20000",
+    "0.3",
+    "live",
+    "0.01",
+    "SPORTS_MARKET_TYPE_PROP"
+   ],
+   "available": 42,
+   "taken": 8
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "1250",
+    "20000",
+    "0.3",
+    "day_of",
+    "0.01",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 11,
+   "taken": 8
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "1250",
+    "20000",
+    "0.3",
+    "day_of",
+    "0.01",
+    "SPORTS_MARKET_TYPE_PROP"
+   ],
+   "available": 42,
+   "taken": 8
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "1250",
+    "20000",
+    "0.3",
+    "early",
+    "0.01",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 11,
+   "taken": 8
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "500",
+    "1000",
+    "0.35",
+    "day_of",
+    "0.01",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 11,
+   "taken": 8
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "500",
+    "1000",
+    "0.35",
+    "day_of",
+    "0.01",
+    "SPORTS_MARKET_TYPE_PROP"
+   ],
+   "available": 42,
+   "taken": 8
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "500",
+    "1000",
+    "0.35",
+    "live",
+    "0.01",
+    "SPORTS_MARKET_TYPE_MONEYLINE"
+   ],
+   "available": 11,
+   "taken": 8
+  },
+  {
+   "stratum": [
+    "liquidityProgram",
+    "500",
+    "1000",
+    "0.35",
+    "live",
+    "0.01",
+    "SPORTS_MARKET_TYPE_PROP"
+   ],
+   "available": 42,
+   "taken": 8
+  }
+ ]
+}
