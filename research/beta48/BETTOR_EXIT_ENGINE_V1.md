@@ -218,6 +218,50 @@ afterwards.
 Every row is labelled `COUNTERFACTUAL` while shadow-only. A shadow P&L is never
 reported as realised.
 
+### 5a. THE SPEC IS NOW CODE
+
+```
+MODULE          research/beta48/shadow/position_state.py
+TESTS           research/beta48/shadow/test_position_state.py   65 passing
+STATUS          BUILT, NOT YET FED A LIVE BOOK
+```
+
+Sections 5 through 5f of this document are implemented. The module holds the
+frozen `TIME_UNPAIRED` grid (asserted equal to the priors artifact's own
+interval list, so a bucket label here cannot drift from the lambda it
+addresses), the state machine, the nine-action set, the EV functions with the
+propagation rule enforced in one place, the allocator, the decision-row writer,
+the five ghost policies, and the `WHALE_PRIOR -> BETTOR_POSTERIOR` shrinkage.
+
+**Its boundary is structural, not configured.**
+
+```
+SHADOW_ONLY = YES   ORDER_PATH_EXISTS = NO   CREDENTIAL_PATH = NONE
+mirror_live = false
+```
+
+The module imports no HTTP client and no `os`; it takes the book as an
+argument from a caller that did the public read. Both facts are proved by
+walking the AST, never by grepping the source — a substring scan matches the
+prose that states the guarantee, which is exactly what a file like this
+contains, and that error class has already appeared three times in this
+programme.
+
+**What it outputs on a live book today, stated in advance:**
+
+```
+ACTION_CHOSEN = A_NO_ACTION_RECORDED
+ACTION_REASON = COMPARISON_NOT_IDENTIFIED
+```
+
+on essentially every tick, because `EV_WAIT` is `NOT_IDENTIFIED` by derivation
+(§5c) and the allocator refuses to choose among the priced subset when a
+feasible alternative is unpriced — the unpriced one could have dominated, and
+picking the best identified EV would quietly assume it did not. Every rejected
+EV is still written to `ACTIONS_NOT_CHOSEN` alongside the book that priced it.
+**That is the deliverable.** The dataset accumulates from the first tick; the
+decisions begin when a fair value is identified.
+
 ---
 
 ## 5b. THE DECISION STATE MACHINE
