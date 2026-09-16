@@ -18,7 +18,7 @@ T0 = datetime(2026, 9, 16, 18, 3, 15, tzinfo=timezone.utc)
 
 def sealed(outdir, requests=300, rps="0.25", statuses=None, slugs=None,
            interval=4.0, latency=0.03, order=None, backoff_s=0.0, prov=None,
-           history="clean"):
+           history="clean", more_pages=False, venue_windows=None):
     """Write a sealed confirmation exactly as the workflow would.
 
     backoff_s adds a forced pause AFTER each 429, exactly as a global backoff
@@ -49,20 +49,26 @@ def sealed(outdir, requests=300, rps="0.25", statuses=None, slugs=None,
     }))
     if prov is not None:
         (out / "provenance.json").write_text(json.dumps(prov))
-    if history == "clean":
-        # A normal sealed run carries run history reaching back past the
-        # window with nothing overlapping it. Without history at all,
-        # isolation-throughout is NOT_IDENTIFIED and the run cannot validate --
-        # which is the point, so it must be supplied deliberately.
-        (out / "run_history.json").write_text(json.dumps({"workflow_runs": [
-            {"name": "run85-phase2-capture", "id": 99, "status": "completed",
-             "conclusion": "success",
-             "created_at": "2026-09-16T09:00:00Z",
-             "run_started_at": "2026-09-16T09:00:00Z",
-             "updated_at": "2026-09-16T10:00:00Z"}]}))
-    elif history is not None:
-        (out / "run_history.json").write_text(
-            json.dumps({"workflow_runs": history}))
+    if history is not None:
+        # A normal sealed run carries run history PAGED TO EXHAUSTION, so
+        # every known collector's coverage is established. Without history at
+        # all, isolation-throughout is NOT_IDENTIFIED and the run cannot
+        # validate -- which is the point, so it must be supplied deliberately.
+        # `more_pages=True` is the thin-history case: the fetch stopped with
+        # runs still unread.
+        runs = history
+        if history == "clean":
+            runs = [{"name": "run85-phase2-capture", "id": 99,
+                     "status": "completed", "conclusion": "success",
+                     "created_at": "2026-09-16T09:00:00Z",
+                     "run_started_at": "2026-09-16T09:00:00Z",
+                     "updated_at": "2026-09-16T10:00:00Z"}]
+        (out / "run_history.json").write_text(json.dumps({
+            "workflow_runs": runs,
+            "HISTORY_PAGES_FETCHED": 1,
+            "MORE_PAGES_AVAILABLE": bool(more_pages),
+            "VENUE_REQUEST_WINDOWS": venue_windows or {},
+        }))
     return str(out)
 
 
@@ -455,9 +461,10 @@ class IsolationThroughoutComesFromIntervalOverlap(unittest.TestCase):
 
     W_START, W_END = "2026-09-16T10:00:00Z", None   # history reaches back
 
-    def _dir(self, runs):
+    def _dir(self, runs, more_pages=False, venue_windows=None):
         return sealed(tempfile.mkdtemp(), requests=301, prov=legacy_prov(),
-                      history=runs)
+                      history=runs, more_pages=more_pages,
+                      venue_windows=venue_windows)
 
     def _run(self, start, end, name="run85-phase2-capture", status="completed"):
         return {"name": name, "id": 1, "status": status, "conclusion": "success",
@@ -465,14 +472,71 @@ class IsolationThroughoutComesFromIntervalOverlap(unittest.TestCase):
                 "updated_at": end}
 
     def test_a_collector_that_began_and_ended_inside_the_window_is_caught(self):
+        """LEVEL B. The job interval overlaps, so this is a POSSIBLE direct
+        overlap -- and it still fails the confirmation. What it is NOT is an
+        observation of venue contact: the job could have spent those seven
+        minutes in checkout and tests."""
         r = CH.harvest(self._dir([self._run("2026-09-16T18:08:00Z",
                                             "2026-09-16T18:15:00Z")]))
-        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "YES")
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "POSSIBLE")
         self.assertEqual(r["DIRECT_OVERLAP_COUNT"], 1)
+        self.assertEqual(r["POSSIBLE_DIRECT_WORKFLOW_OVERLAP"], "YES")
+        self.assertEqual(r["CONFIRMED_DIRECT_REQUEST_OVERLAP"], NI)
         self.assertEqual(
-            r["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"], "NO")
-        self.assertIn("DIRECT_PMUS_COLLECTOR_OVERLAP", r["FAIL_REASON"])
+            r["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"],
+            "NOT_ESTABLISHED_POSSIBLE_OVERLAP")
+        self.assertIn("POSSIBLE_DIRECT_WORKFLOW_OVERLAP", r["FAIL_REASON"])
+        self.assertNotIn("DIRECT_PMUS_COLLECTOR_OVERLAP", r["FAIL_REASON"])
         self.assertEqual(r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
+
+    def test_level_b_is_labelled_a_conservative_proxy(self):
+        r = CH.harvest(self._dir([self._run("2026-09-16T18:08:00Z",
+                                            "2026-09-16T18:15:00Z")]))
+        row = r["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0]
+        self.assertEqual(row["EVIDENCE_LEVEL"],
+                         "B_CONSERVATIVE_WORKFLOW_INTERVAL_PROXY")
+        self.assertEqual(row["VENUE_REQUEST_TIMES"], NI)
+        self.assertTrue(r["DO_NOT_SYNTHESIZE_GET_TIMESTAMPS"])
+
+    def test_level_a_sealed_request_times_make_the_overlap_confirmed(self):
+        """The other run recorded when it actually read the venue."""
+        r = CH.harvest(self._dir(
+            [self._run("2026-09-16T18:00:00Z", "2026-09-16T18:30:00Z")],
+            venue_windows={"1": ["2026-09-16T18:08:00Z",
+                                 "2026-09-16T18:15:00Z"]}))
+        self.assertEqual(r["CONFIRMED_DIRECT_REQUEST_OVERLAP"], "YES")
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "YES")
+        self.assertEqual(
+            r["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"],
+            "NO_CONFIRMED")
+        self.assertIn("DIRECT_PMUS_COLLECTOR_OVERLAP", r["FAIL_REASON"])
+        self.assertEqual(r["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0][
+            "EVIDENCE_LEVEL"], "A_SEALED_VENUE_REQUEST_TIMES")
+
+    def test_level_a_request_times_can_also_clear_a_job_that_overlapped(self):
+        """The job ran through our window; its reads did not. Sealed times are
+        evidence in BOTH directions -- that is what makes them level A."""
+        r = CH.harvest(self._dir(
+            [self._run("2026-09-16T18:00:00Z", "2026-09-16T18:30:00Z")],
+            venue_windows={"1": ["2026-09-16T18:00:05Z",
+                                 "2026-09-16T18:02:00Z"]}))
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "NO")
+        self.assertEqual(r["CONFIRMED_DIRECT_REQUEST_OVERLAP"], "NO")
+        self.assertEqual(
+            r["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"], "YES")
+
+    def test_the_two_failing_verdicts_are_never_the_same_string(self):
+        """A confirmed overlap and an unresolved one are different facts."""
+        seen = CH.harvest(self._dir(
+            [self._run("2026-09-16T18:00:00Z", "2026-09-16T18:30:00Z")],
+            venue_windows={"1": ["2026-09-16T18:08:00Z",
+                                 "2026-09-16T18:15:00Z"]}))
+        maybe = CH.harvest(self._dir([self._run("2026-09-16T18:08:00Z",
+                                                "2026-09-16T18:15:00Z")]))
+        K = "DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"
+        self.assertNotEqual(seen[K], maybe[K])
+        self.assertEqual({seen[K], maybe[K]},
+                         {"NO_CONFIRMED", "NOT_ESTABLISHED_POSSIBLE_OVERLAP"})
 
     def test_the_raw_observations_are_not_discarded(self):
         r = CH.harvest(self._dir([self._run("2026-09-16T18:08:00Z",
@@ -500,20 +564,66 @@ class IsolationThroughoutComesFromIntervalOverlap(unittest.TestCase):
         """Coverage gates the NEGATIVE only."""
         late = dict(self._run("2026-09-16T19:00:00Z", "2026-09-16T19:10:00Z"),
                     created_at="2026-09-16T19:00:00Z")
-        r = CH.harvest(self._dir([late]))
+        r = CH.harvest(self._dir([late], more_pages=True))
         self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], NI)
-        self.assertEqual(r["RUN_HISTORY_COVERS_THE_WINDOW"], "NO")
+        self.assertEqual(r["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
         self.assertIn("ISOLATION_THROUGHOUT_RUN_NOT_IDENTIFIED",
                       r["FAIL_REASON"])
         self.assertEqual(r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
 
-    def test_a_detected_overlap_outranks_thin_coverage(self):
+    def test_coverage_is_reported_per_workflow(self):
+        """One collector's history reaching back says nothing about another's.
+        Every known direct collector gets its own row."""
+        r = CH.harvest(self._dir([], more_pages=True))
+        rows = r["DIRECT_RUN_HISTORY_COVERAGE"]
+        names = [c["WORKFLOW_NAME"] for c in rows]
+        self.assertEqual(sorted(names), sorted(set(names)))
+        self.assertGreater(len(rows), 1)
+        for c in rows:
+            for k in ("WORKFLOW_NAME", "HISTORY_PAGES_FETCHED",
+                      "EARLIEST_RUN_TIME_FETCHED", "LATEST_RUN_TIME_FETCHED",
+                      "MORE_PAGES_AVAILABLE", "COVERS_EVIDENCE_WINDOW"):
+                self.assertIn(k, c)
+            self.assertEqual(c["COVERS_EVIDENCE_WINDOW"], "NO")
+        self.assertEqual(r["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
+
+    def test_one_uncovered_workflow_fails_the_whole_coverage_claim(self):
+        """COMPLETE means every known collector, not most of them."""
+        deep = dict(self._run("2026-09-16T09:00:00Z", "2026-09-16T09:30:00Z"),
+                    created_at="2026-09-16T09:00:00Z")
+        r = CH.harvest(self._dir([deep], more_pages=True))
+        rows = {c["WORKFLOW_NAME"]: c for c in r["DIRECT_RUN_HISTORY_COVERAGE"]}
+        self.assertEqual(rows["run85-phase2-capture"][
+            "COVERS_EVIDENCE_WINDOW"], "YES")
+        self.assertEqual(r["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
+
+    def test_the_lookback_is_a_job_timeout_not_the_window_start(self):
+        """A five-hour capture created long before the window still overlaps
+        it, so history must reach back a full job timeout -- paging only to the
+        window start would miss exactly that collision."""
+        r = CH.harvest(self._dir([], more_pages=True))
+        ws = datetime.fromisoformat(r["EVIDENCE_WINDOW"][0])
+        anchor = datetime.fromisoformat(r["COVERAGE_ANCHOR"])
+        self.assertGreater(r["COVERAGE_LOOKBACK_S"], 3600)
+        self.assertEqual((ws - anchor).total_seconds(),
+                         r["COVERAGE_LOOKBACK_S"])
+
+    def test_a_confirmed_overlap_outranks_thin_coverage(self):
         """Seeing it beats not being able to rule it out."""
+        hit = dict(self._run("2026-09-16T18:00:00Z", "2026-09-16T18:30:00Z"),
+                   created_at="2026-09-16T18:07:00Z")
+        r = CH.harvest(self._dir([hit], more_pages=True,
+                                 venue_windows={"1": ["2026-09-16T18:08:00Z",
+                                                      "2026-09-16T18:15:00Z"]}))
+        self.assertEqual(r["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "YES")
+
+    def test_a_possible_overlap_also_outranks_thin_coverage(self):
         hit = dict(self._run("2026-09-16T18:08:00Z", "2026-09-16T18:15:00Z"),
                    created_at="2026-09-16T18:07:00Z")
-        r = CH.harvest(self._dir([hit]))
-        self.assertEqual(r["RUN_HISTORY_COVERS_THE_WINDOW"], "NO")
-        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "YES")
+        r = CH.harvest(self._dir([hit], more_pages=True))
+        self.assertEqual(r["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "POSSIBLE")
 
     def test_no_history_at_all_cannot_establish_isolation(self):
         d = sealed(tempfile.mkdtemp(), requests=301, prov=legacy_prov(),

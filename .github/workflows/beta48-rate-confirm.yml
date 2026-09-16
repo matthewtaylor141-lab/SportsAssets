@@ -174,6 +174,8 @@ jobs:
         env:
           SEG: ${{ github.run_id }}
           GH_TOKEN: ${{ github.token }}
+          API_URL: ${{ github.api_url }}
+          REPO: ${{ github.repository }}
         run: |
           set +e
           curl -sS -H "Authorization: Bearer $GH_TOKEN" \
@@ -188,30 +190,88 @@ jobs:
           # SEAL THE RUN HISTORY. The verdict on isolation-throughout comes
           # from INTERVAL OVERLAP against the evidence window, not from this
           # end snapshot -- a collector that started and finished inside the
-          # window is invisible here. Two pages, all statuses, so the history
-          # reaches back past the window start; harvest refuses to conclude
-          # "no overlap" if it does not.
-          for page in 1 2; do
-            curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-                 -H "Accept: application/vnd.github+json" \
-                 "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs?per_page=100&page=$page" \
-                 -o "/tmp/hist_$page.json" || true
-          done
+          # window is invisible here.
+          #
+          # TWO PAGES WAS NOT A COVERAGE GUARANTEE. A busy repository can fill
+          # 200 rows in an hour, leaving an older overlapping run just off the
+          # end of the page -- and the run we most need to see (a 5-hour
+          # capture created long before the window) is exactly the one that
+          # sits furthest back. So the fetch PAGES UNTIL one of:
+          #
+          #   A  the earliest run fetched is older than the window start minus
+          #      a full job timeout (a run cannot outlive its own timeout, so
+          #      nothing older could still have been running), or
+          #   B  the API returns a short page -- there are no more runs.
+          #
+          # Whichever ends it is RECORDED. Harvest refuses to conclude "no
+          # overlap" from history that does not reach back far enough, per
+          # workflow, and a page cap here becomes a NO on coverage rather than
+          # a silent one.
           python - <<'PYEOF' || true
-          import json, pathlib, os
-          runs = []
-          for f in ("/tmp/hist_1.json", "/tmp/hist_2.json"):
+          import json, os, pathlib, subprocess, sys
+          sys.path.insert(0, ".")
+          import venue_domain as VD
+
+          API = "%s/repos/%s/actions/runs" % (os.environ["API_URL"],
+                                              os.environ["REPO"])
+          TOK = os.environ["GH_TOKEN"]
+          lookback = VD.max_job_timeout_s("../../..")
+
+          # The window start is the run's FIRST VENUE GET, not the dispatch.
+          seg = os.environ["SEG"]
+          d = pathlib.Path("evidence/rateconfirm_%s" % seg)
+          start = None
+          try:
+              start = json.loads((d / "confirm_report.json").read_text()).get(
+                  "FIRST_VENUE_GET_TIME")
+          except Exception:
+              pass
+          from datetime import datetime, timedelta, timezone
+          anchor = None
+          if start:
+              anchor = (datetime.fromisoformat(start.replace("Z", "+00:00"))
+                        - timedelta(seconds=lookback))
+
+          PAGE_CAP = 30                      # 3,000 runs; a bound, not a target
+          runs, fetched, more = [], 0, True
+          while fetched < PAGE_CAP:
+              raw = subprocess.run(
+                  ["curl", "-sS", "-H", "Authorization: Bearer %s" % TOK,
+                   "-H", "Accept: application/vnd.github+json",
+                   "%s?per_page=100&page=%d" % (API, fetched + 1)],
+                  capture_output=True, text=True).stdout
               try:
-                  runs += json.load(open(f)).get("workflow_runs", [])
+                  got = json.loads(raw).get("workflow_runs", [])
               except Exception:
-                  pass
+                  break                      # neither A nor B: coverage stays
+              fetched += 1
+              runs += got
+              if len(got) < 100:
+                  more = False               # B: the API has no more runs
+                  break
+              if anchor:
+                  times = []
+                  for r in runs:
+                      try:
+                          times.append(datetime.fromisoformat(
+                              str(r.get("created_at")).replace("Z", "+00:00")))
+                      except Exception:
+                          pass
+                  if times and min(times) <= anchor:
+                      break                  # A: reached back past the anchor
           keep = ("id", "name", "status", "conclusion", "created_at",
                   "run_started_at", "updated_at")
-          out = pathlib.Path("evidence/rateconfirm_%s/run_history.json"
-                             % os.environ["SEG"])
-          out.write_text(json.dumps(
-              {"workflow_runs": [{k: r.get(k) for k in keep} for r in runs]},
-              indent=1, sort_keys=True))
+          (d / "run_history.json").write_text(json.dumps({
+              "workflow_runs": [{k: r.get(k) for k in keep} for r in runs],
+              "HISTORY_PAGES_FETCHED": fetched,
+              "MORE_PAGES_AVAILABLE": more,
+              "COVERAGE_LOOKBACK_S": lookback,
+              "COVERAGE_ANCHOR": anchor.isoformat() if anchor else None,
+              # LEVEL A needs the OTHER run's own sealed venue-request times.
+              # Nothing here can synthesise them, so this stays empty unless a
+              # collector publishes them.
+              "VENUE_REQUEST_WINDOWS": {},
+          }, indent=1, sort_keys=True))
           PYEOF
 
       - name: Seal and commit the confirmation

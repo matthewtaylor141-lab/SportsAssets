@@ -8,6 +8,7 @@ contaminating the next rate measurement -- which is exactly how
 run85-phase2-capture came to be running throughout the ladder.
 """
 import unittest
+from datetime import datetime
 from pathlib import Path
 
 import venue_domain as VD
@@ -233,3 +234,171 @@ class TheQueueingLimitIsRecorded(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class ARunningWorkflowIsNotProvenVenueContact(unittest.TestCase):
+    """Two levels of evidence, never collapsed into one claim.
+
+    A job is RUNNING through checkout, install, tests, provenance and upload,
+    none of which touches the venue. So a job-interval overlap is a POSSIBLE
+    direct overlap; only the other run's own sealed request times make it a
+    CONFIRMED one.
+    """
+
+    WS, WE = "2026-09-16T18:00:00Z", "2026-09-16T18:20:00Z"
+    KNOWN = ["run85-phase2-capture"]
+    LB = 340 * 60
+
+    def _job(self, start, end, created="2026-09-16T10:00:00Z", rid=1):
+        return {"name": "run85-phase2-capture", "id": rid, "status": "completed",
+                "conclusion": "success", "created_at": created,
+                "run_started_at": start, "updated_at": end}
+
+    def _audit(self, runs, **kw):
+        kw.setdefault("more_pages", {"*": False})
+        kw.setdefault("pages_fetched", {"*": 1})
+        kw.setdefault("lookback_s", self.LB)
+        return VD.overlap_audit(self.WS, self.WE, runs, self.KNOWN,
+                                self_run_id="9", **kw)
+
+    def test_a_job_interval_overlap_alone_is_only_possible(self):
+        a = self._audit([self._job("2026-09-16T18:05:00Z",
+                                   "2026-09-16T18:10:00Z")])
+        self.assertEqual(a["POSSIBLE_DIRECT_WORKFLOW_OVERLAP"], "YES")
+        self.assertEqual(a["CONFIRMED_DIRECT_REQUEST_OVERLAP"], NI)
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "POSSIBLE")
+        self.assertEqual(a["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"],
+                         "NOT_ESTABLISHED_POSSIBLE_OVERLAP")
+
+    def test_the_fallback_is_labelled_a_conservative_proxy(self):
+        a = self._audit([self._job("2026-09-16T18:05:00Z",
+                                   "2026-09-16T18:10:00Z")])
+        self.assertEqual(a["LEVEL_B_LABEL"],
+                         "CONSERVATIVE_WORKFLOW_INTERVAL_PROXY")
+        self.assertEqual(a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0][
+            "VENUE_REQUEST_TIMES"], NI)
+
+    def test_no_get_timestamps_are_ever_synthesized(self):
+        a = self._audit([self._job("2026-09-16T18:05:00Z",
+                                   "2026-09-16T18:10:00Z")])
+        row = a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0]
+        self.assertNotIn("OTHER_FIRST_VENUE_GET_TIME", row)
+        self.assertTrue(a["DO_NOT_SYNTHESIZE_GET_TIMESTAMPS"])
+        self.assertTrue(VD.DO_NOT_SYNTHESIZE_GET_TIMESTAMPS)
+
+    def test_sealed_request_times_confirm_the_overlap(self):
+        a = self._audit([self._job("2026-09-16T17:50:00Z",
+                                   "2026-09-16T18:30:00Z")],
+                        venue_windows={"1": ("2026-09-16T18:05:00Z",
+                                             "2026-09-16T18:10:00Z")})
+        self.assertEqual(a["CONFIRMED_DIRECT_REQUEST_OVERLAP"], "YES")
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "YES")
+        self.assertEqual(a["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"],
+                         "NO_CONFIRMED")
+        self.assertEqual(a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0][
+            "EVIDENCE_LEVEL"], "A_SEALED_VENUE_REQUEST_TIMES")
+
+    def test_sealed_request_times_outside_the_window_clear_the_job(self):
+        """Level A cuts both ways: the job ran through our window, its reads
+        did not."""
+        a = self._audit([self._job("2026-09-16T17:50:00Z",
+                                   "2026-09-16T18:30:00Z")],
+                        venue_windows={"1": ("2026-09-16T17:51:00Z",
+                                             "2026-09-16T17:55:00Z")})
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "NO")
+        self.assertEqual(a["CONFIRMED_DIRECT_REQUEST_OVERLAP"], "NO")
+        self.assertEqual(a["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"],
+                         "YES")
+
+    def test_the_four_conflict_values_are_distinct(self):
+        clean = self._audit([])
+        possible = self._audit([self._job("2026-09-16T18:05:00Z",
+                                          "2026-09-16T18:10:00Z")])
+        confirmed = self._audit(
+            [self._job("2026-09-16T17:50:00Z", "2026-09-16T18:30:00Z")],
+            venue_windows={"1": ("2026-09-16T18:05:00Z",
+                                 "2026-09-16T18:10:00Z")})
+        thin = self._audit([], more_pages={"*": True})
+        vals = [x["DIRECT_CONFLICT_STARTED_DURING_RUN"]
+                for x in (confirmed, possible, clean, thin)]
+        self.assertEqual(vals, ["YES", "POSSIBLE", "NO", NI])
+        isos = [x["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"]
+                for x in (confirmed, possible, clean, thin)]
+        self.assertEqual(isos, ["NO_CONFIRMED", "NOT_ESTABLISHED_POSSIBLE_OVERLAP",
+                                "YES", NI])
+        self.assertEqual(len(set(isos)), 4)
+
+
+class CoverageIsPerWorkflowAndPagedToIt(unittest.TestCase):
+    """One collector's history reaching back says nothing about another's."""
+
+    WS, WE = "2026-09-16T18:00:00Z", "2026-09-16T18:20:00Z"
+    KNOWN = ["run85-phase2-capture", "beta48-forward-capture"]
+    LB = 340 * 60
+
+    def _audit(self, runs, **kw):
+        kw.setdefault("lookback_s", self.LB)
+        return VD.overlap_audit(self.WS, self.WE, runs, self.KNOWN,
+                                self_run_id="9", **kw)
+
+    def _row(self, a, name):
+        return {c["WORKFLOW_NAME"]: c
+                for c in a["DIRECT_RUN_HISTORY_COVERAGE"]}[name]
+
+    def test_every_known_collector_gets_its_own_row(self):
+        a = self._audit([], more_pages={"*": True}, pages_fetched={"*": 2})
+        self.assertEqual(sorted(c["WORKFLOW_NAME"]
+                                for c in a["DIRECT_RUN_HISTORY_COVERAGE"]),
+                         sorted(self.KNOWN))
+        for c in a["DIRECT_RUN_HISTORY_COVERAGE"]:
+            self.assertEqual(c["HISTORY_PAGES_FETCHED"], 2)
+            self.assertEqual(c["MORE_PAGES_AVAILABLE"], "YES")
+            self.assertEqual(c["COVERS_EVIDENCE_WINDOW"], "NO")
+
+    def test_history_reaching_past_the_anchor_covers_that_workflow_only(self):
+        deep = {"name": "run85-phase2-capture", "id": 3, "status": "completed",
+                "conclusion": "success", "created_at": "2026-09-16T09:00:00Z",
+                "run_started_at": "2026-09-16T09:00:00Z",
+                "updated_at": "2026-09-16T09:30:00Z"}
+        a = self._audit([deep], more_pages={"*": True})
+        self.assertEqual(self._row(a, "run85-phase2-capture")[
+            "COVERS_EVIDENCE_WINDOW"], "YES")
+        self.assertEqual(self._row(a, "beta48-forward-capture")[
+            "COVERS_EVIDENCE_WINDOW"], "NO")
+        self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
+
+    def test_an_exhausted_api_covers_every_workflow(self):
+        """No more pages means nothing older exists -- including for a
+        workflow with no runs at all."""
+        a = self._audit([], more_pages={"*": False})
+        self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "YES")
+        for c in a["DIRECT_RUN_HISTORY_COVERAGE"]:
+            self.assertEqual(c["COVERS_EVIDENCE_WINDOW"], "YES")
+
+    def test_unknown_paging_is_not_assumed_complete(self):
+        a = self._audit([])
+        self.assertEqual(self._row(a, "run85-phase2-capture")[
+            "MORE_PAGES_AVAILABLE"], NI)
+        self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], NI)
+
+    def test_the_anchor_is_a_full_job_timeout_before_the_window(self):
+        a = self._audit([], more_pages={"*": False})
+        ws = datetime.fromisoformat(a["EVIDENCE_WINDOW"][0])
+        anchor = datetime.fromisoformat(a["COVERAGE_ANCHOR"])
+        self.assertEqual((ws - anchor).total_seconds(), self.LB)
+
+    def test_the_lookback_is_read_from_the_workflows_not_guessed(self):
+        """A run cannot outlive its own timeout-minutes, so the longest one is
+        the lookback -- and run85 is created five hours before it overlaps."""
+        self.assertGreaterEqual(VD.max_job_timeout_s(ROOT), 300 * 60)
+
+    def test_a_detection_outranks_incomplete_coverage(self):
+        hit = {"name": "run85-phase2-capture", "id": 4, "status": "completed",
+               "conclusion": "success", "created_at": "2026-09-16T17:59:00Z",
+               "run_started_at": "2026-09-16T18:05:00Z",
+               "updated_at": "2026-09-16T18:10:00Z"}
+        a = self._audit([hit], more_pages={"*": True})
+        self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "POSSIBLE")
+        self.assertTrue(a["COVERAGE_GATES_ONLY_THE_NEGATIVE"])

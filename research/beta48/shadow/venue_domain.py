@@ -35,6 +35,7 @@ This module contacts nothing. It reads files and compares strings.
 from __future__ import annotations
 
 import re
+from datetime import timedelta
 from pathlib import Path
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -385,33 +386,83 @@ def _iso(ts):
         return None
 
 
-def overlap_audit(window_start, window_end, runs, known, self_run_id=None):
-    """Which known direct collectors EXECUTED during the evidence window.
+# ---------------------------------------------------------------------------
+# A RUNNING WORKFLOW IS NOT PROVEN VENUE CONTACT
+# ---------------------------------------------------------------------------
+#
+# A job can be RUNNING while it checks out, installs, runs tests, proves
+# provenance, sleeps, uploads artifacts or post-processes -- issuing no PMUS
+# request at all. So a RUNNING-interval overlap is a POSSIBILITY, not an
+# observation, and the two get different names:
+#
+#   LEVEL A  the other run sealed FIRST_VENUE_GET_TIME / LAST_VENUE_GET_TIME.
+#            Overlap of that interval is CONFIRMED_DIRECT_REQUEST_OVERLAP.
+#   LEVEL B  no request timestamps, only a job interval.
+#            POSSIBLE_DIRECT_WORKFLOW_OVERLAP, and CONFIRMED stays
+#            NOT_IDENTIFIED. We do not invent the missing timestamps.
+#
+# Level B still fails the confirmation -- conservatively -- but it is never
+# reported as observed PMUS traffic.
+CONSERVATIVE_PROXY = "CONSERVATIVE_WORKFLOW_INTERVAL_PROXY"
+WHY_RUNNING_IS_NOT_CONTACT = (
+    "a job is RUNNING through checkout, tests, provenance and upload, none of "
+    "which touches the venue")
+DO_NOT_SYNTHESIZE_GET_TIMESTAMPS = True
 
-    A run counts only if it actually reached a running/executing state --
-    queued-and-never-started issued no request. An in-flight run with no end
-    time is treated as still running, which overlaps anything that began
-    before now.
+
+def max_job_timeout_s(root):
+    """The longest job timeout among known venue-touching workflows.
+
+    Coverage needs this: a run that OVERLAPS our window may have been CREATED
+    long before it. run85-phase2-capture is created at 16:27 and still running
+    at 21:30 -- paging back only to the window start would have missed the very
+    collision this exists to catch. A run cannot outlive its own timeout, so
+    that is the lookback, read from the workflows rather than guessed.
     """
+    import re as _re
+    best = 0
+    for n in venue_touching_workflows(root):
+        txt = Path(root, ".github/workflows", "%s.yml" % n).read_text(
+            errors="ignore")
+        for m in _re.finditer(r"timeout-minutes:\s*(\d+)", txt):
+            best = max(best, int(m.group(1)))
+    return (best or 360) * 60
+
+
+def overlap_audit(window_start, window_end, runs, known, self_run_id=None,
+                  venue_windows=None, more_pages=None, lookback_s=None,
+                  pages_fetched=None):
+    """Which known direct collectors overlapped the evidence window, and HOW
+    WELL WE KNOW IT.
+
+    `venue_windows` maps run id -> (first_get, last_get) for runs that sealed
+    their own request timestamps; those give LEVEL A. Everything else falls
+    back to the job interval and is labelled a conservative proxy.
+    """
+    venue_windows = venue_windows or {}
+    more_pages = more_pages or {}
+    pages_fetched = pages_fetched or {}
     ws, we = _iso(window_start), _iso(window_end)
-    known = set(known or ())
+    known = sorted(set(known or ()))
     if ws is None or we is None:
         return {"DIRECT_CONFLICT_STARTED_DURING_RUN": NOT_IDENTIFIED,
                 "WHY_NOT_IDENTIFIED": "the evidence window is not established",
+                "CONFIRMED_DIRECT_REQUEST_OVERLAP": NOT_IDENTIFIED,
+                "POSSIBLE_DIRECT_WORKFLOW_OVERLAP": NOT_IDENTIFIED,
+                "DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN":
+                    NOT_IDENTIFIED,
                 "DIRECT_OVERLAP_COUNT": NOT_IDENTIFIED,
                 "DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW": []}
 
-    overlaps, considered, oldest = [], 0, None
+    confirmed, possible, considered = [], [], 0
     for r in runs or ():
         rid = str(r.get("id", ""))
-        created = _iso(r.get("created_at"))
-        if oldest is None or (created and created < oldest):
-            oldest = created
         if self_run_id is not None and rid == str(self_run_id):
             continue
         if r.get("name") not in known:
             continue
         considered += 1
+        created = _iso(r.get("created_at"))
         started = _iso(r.get("run_started_at")) or created
         if started is None:
             continue
@@ -419,45 +470,124 @@ def overlap_audit(window_start, window_end, runs, known, self_run_id=None):
         if r.get("status") in WAITING_STATES and r.get("conclusion") in (
                 None, "cancelled", "skipped"):
             continue
-        ended = _iso(r.get("updated_at")) if r.get("status") == "completed" else we
+
+        # LEVEL A. The other run sealed the times of its OWN first and last
+        # venue GET. That is an observation of venue contact, so an overlap of
+        # that interval is CONFIRMED.
+        vw = venue_windows.get(rid) or venue_windows.get(r.get("id"))
+        a0 = a1 = None
+        if vw:
+            a0, a1 = _iso(vw[0]), _iso(vw[1])
+        if a0 is not None and a1 is not None:
+            if a0 <= we and a1 >= ws:
+                confirmed.append({
+                    "NAME": r.get("name"), "ID": rid,
+                    "EVIDENCE_LEVEL": "A_SEALED_VENUE_REQUEST_TIMES",
+                    "OTHER_FIRST_VENUE_GET_TIME": a0.isoformat(),
+                    "OTHER_LAST_VENUE_GET_TIME": a1.isoformat(),
+                    "STATUS": r.get("status")})
+            continue
+
+        # LEVEL B. No request timestamps -- only a job interval. A job is
+        # RUNNING through checkout, tests, provenance and upload, none of which
+        # touches the venue, so this is a POSSIBILITY and is labelled one. We
+        # do not manufacture the timestamps the other run never wrote.
+        ended = (_iso(r.get("updated_at")) if r.get("status") == "completed"
+                 else we)
         if ended is None:
             ended = we
         if started <= we and ended >= ws:
-            overlaps.append({"NAME": r.get("name"), "ID": rid,
-                             "OTHER_RUN_START": started.isoformat(),
-                             "OTHER_RUN_END": (ended.isoformat()
-                                               if r.get("status") == "completed"
-                                               else "STILL_RUNNING"),
-                             "STATUS": r.get("status")})
+            possible.append({
+                "NAME": r.get("name"), "ID": rid,
+                "EVIDENCE_LEVEL": "B_" + CONSERVATIVE_PROXY,
+                "OTHER_RUN_START": started.isoformat(),
+                "OTHER_RUN_END": (ended.isoformat()
+                                  if r.get("status") == "completed"
+                                  else "STILL_RUNNING"),
+                "VENUE_REQUEST_TIMES": NOT_IDENTIFIED,
+                "STATUS": r.get("status")})
 
-    # Coverage: the fetched history must reach back past the window start, or
-    # an older overlapping run could be sitting just off the end of the page.
-    # PRECEDENCE MATTERS. A DETECTED overlap is a fact and outranks coverage:
-    # thin history cannot turn something we saw into something unknown.
-    # Coverage only gates the NEGATIVE -- concluding "nothing overlapped"
-    # requires history reaching back past the window start.
-    covered = bool(oldest and ws and oldest <= ws)
-    if overlaps:
-        verdict = "YES"
-    elif covered:
-        verdict = "NO"
+    # COVERAGE, PER WORKFLOW. One workflow's history reaching back far enough
+    # says nothing about another's. And the anchor is NOT the window start: a
+    # run that overlaps the window may have been CREATED hours before it --
+    # run85-phase2-capture is created at 16:27 and still running at 21:30 --
+    # so history must reach back a full job timeout before the window, or the
+    # very collision this exists to catch sits just off the end of the page.
+    lb = float(lookback_s) if lookback_s else 0.0
+    anchor = ws - timedelta(seconds=lb)
+    cov_rows, coverage_complete = [], True
+    for name in known:
+        times = [_iso(r.get("created_at")) for r in (runs or ())
+                 if r.get("name") == name]
+        times = sorted(t for t in times if t is not None)
+        mp = more_pages.get(name, more_pages.get("*", None))
+        pf = pages_fetched.get(name, pages_fetched.get("*", NOT_IDENTIFIED))
+        earliest = times[0] if times else None
+        if mp is False:
+            covers = "YES"          # the API says there is nothing older
+        elif earliest is not None and earliest <= anchor:
+            covers = "YES"
+        else:
+            covers = "NO"
+        if covers != "YES":
+            coverage_complete = False
+        cov_rows.append({
+            "WORKFLOW_NAME": name,
+            "HISTORY_PAGES_FETCHED": pf,
+            "EARLIEST_RUN_TIME_FETCHED": (earliest.isoformat() if earliest
+                                          else NOT_IDENTIFIED),
+            "LATEST_RUN_TIME_FETCHED": (times[-1].isoformat() if times
+                                        else NOT_IDENTIFIED),
+            "MORE_PAGES_AVAILABLE": (NOT_IDENTIFIED if mp is None
+                                     else ("YES" if mp else "NO")),
+            "COVERS_EVIDENCE_WINDOW": covers,
+        })
+
+    # PRECEDENCE. A DETECTED overlap is a fact and outranks coverage: thin
+    # history cannot turn something we saw into something unknown. Coverage
+    # gates only the NEGATIVE -- concluding "nothing overlapped" needs history
+    # that reaches back far enough to have seen it.
+    if confirmed:
+        verdict, iso_verdict = "YES", "NO_CONFIRMED"
+    elif possible:
+        verdict, iso_verdict = "POSSIBLE", "NOT_ESTABLISHED_POSSIBLE_OVERLAP"
+    elif coverage_complete:
+        verdict, iso_verdict = "NO", "YES"
     else:
-        verdict = NOT_IDENTIFIED
+        verdict, iso_verdict = NOT_IDENTIFIED, NOT_IDENTIFIED
+
+    why = None
+    if verdict == NOT_IDENTIFIED:
+        why = ("the fetched run history does not reach back a full job timeout "
+               "before the window start for every known direct collector, so "
+               "an older overlapping run cannot be excluded")
+    elif verdict == "POSSIBLE":
+        why = ("the other run's job interval overlaps but it sealed no venue "
+               "request times, so contact is possible and not observed")
+
     return {
         "EVIDENCE_WINDOW": [ws.isoformat(), we.isoformat()],
-        "DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW": overlaps,
-        "DIRECT_OVERLAP_COUNT": len(overlaps),
+        "DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW": confirmed + possible,
+        "DIRECT_OVERLAP_COUNT": len(confirmed) + len(possible),
+        "CONFIRMED_DIRECT_REQUEST_OVERLAP": (
+            "YES" if confirmed else ("NO" if coverage_complete and not possible
+                                     else NOT_IDENTIFIED)),
+        "CONFIRMED_DIRECT_REQUEST_OVERLAP_COUNT": len(confirmed),
+        "POSSIBLE_DIRECT_WORKFLOW_OVERLAP": "YES" if possible else "NO",
+        "POSSIBLE_DIRECT_WORKFLOW_OVERLAP_COUNT": len(possible),
         "DIRECT_CONFLICT_STARTED_DURING_RUN": verdict,
-        "DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN": (
-            "NO" if verdict == "YES" else
-            ("YES" if verdict == "NO" else NOT_IDENTIFIED)),
-        "RUN_HISTORY_COVERS_THE_WINDOW": "YES" if covered else "NO",
-        "OLDEST_RUN_IN_HISTORY": oldest.isoformat() if oldest else NOT_IDENTIFIED,
+        "DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN": iso_verdict,
+        "RUNNING_IS_NOT_PROVEN_VENUE_CONTACT": WHY_RUNNING_IS_NOT_CONTACT,
+        "LEVEL_B_LABEL": CONSERVATIVE_PROXY,
+        "DO_NOT_SYNTHESIZE_GET_TIMESTAMPS": DO_NOT_SYNTHESIZE_GET_TIMESTAMPS,
+        "DIRECT_RUN_HISTORY_COVERAGE": cov_rows,
+        "DIRECT_RUN_HISTORY_COVERAGE_COMPLETE": (
+            "YES" if coverage_complete else "NO"),
+        "COVERAGE_LOOKBACK_S": lb,
+        "COVERAGE_ANCHOR": anchor.isoformat(),
+        "RUN_HISTORY_COVERS_THE_WINDOW": "YES" if coverage_complete else "NO",
         "KNOWN_DIRECT_RUNS_CONSIDERED": considered,
-        "WHY_NOT_IDENTIFIED": (None if verdict != NOT_IDENTIFIED else
-                               "the fetched run history does not reach back "
-                               "past the window start, so an older "
-                               "overlapping run cannot be excluded"),
+        "WHY_NOT_IDENTIFIED": why,
         "COVERAGE_GATES_ONLY_THE_NEGATIVE": True,
         "EVIDENCE_VERDICT_FROM": EVIDENCE_VERDICT_FROM,
         "WHY_SNAPSHOT_IS_NOT_PROOF": WHY_SNAPSHOT_IS_NOT_PROOF,

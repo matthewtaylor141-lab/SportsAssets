@@ -521,15 +521,33 @@ def harvest(outdir, rps=None):
     # at 21:47 inside a 21:35-21:55 window is invisible at 21:55 and was venue
     # load for the whole seven minutes.
     hist_path = out / "run_history.json"
-    hist = []
+    hist, more_pages, pages_fetched, venue_windows = [], {}, {}, {}
     if hist_path.is_file():
         raw = json.loads(hist_path.read_text())
-        hist = raw.get("workflow_runs", raw) if isinstance(raw, dict) else raw
-    known = VD.audit(Path(__file__).resolve().parents[3])[
-        "KNOWN_VENUE_TOUCHING_WORKFLOWS"]
+        if isinstance(raw, dict):
+            hist = raw.get("workflow_runs", [])
+            # What the run recorded about its own paging. Absent -> unknown,
+            # never assumed complete.
+            if "MORE_PAGES_AVAILABLE" in raw:
+                more_pages["*"] = bool(raw["MORE_PAGES_AVAILABLE"])
+            if "HISTORY_PAGES_FETCHED" in raw:
+                pages_fetched["*"] = raw["HISTORY_PAGES_FETCHED"]
+            # LEVEL A is only available for other runs that SEALED their own
+            # first/last venue GET. Nothing synthesises these; a run that did
+            # not record them stays Level B.
+            for rid, w in (raw.get("VENUE_REQUEST_WINDOWS") or {}).items():
+                if isinstance(w, (list, tuple)) and len(w) == 2 and all(w):
+                    venue_windows[str(rid)] = (w[0], w[1])
+        else:
+            hist = raw
+    root = Path(__file__).resolve().parents[3]
+    known = VD.audit(root)["KNOWN_VENUE_TOUCHING_WORKFLOWS"]
     ov = VD.overlap_audit(report.get("FIRST_VENUE_GET_TIME"),
                           report.get("LAST_VENUE_GET_TIME"),
-                          hist, known, self_run_id=sealed_prov.get("RUN_ID"))
+                          hist, known, self_run_id=sealed_prov.get("RUN_ID"),
+                          venue_windows=venue_windows, more_pages=more_pages,
+                          pages_fetched=pages_fetched,
+                          lookback_s=VD.max_job_timeout_s(root))
     report.update(ov)
 
     snap = out / "isolation_at_end.json"
@@ -544,10 +562,16 @@ def harvest(outdir, rps=None):
     # An overlap fails the run -- the isolated-rate experiment was not
     # isolated. The raw observations are retained; they are simply not an
     # isolated result.
+    #
+    # Three distinct ways to miss, kept distinct. A confirmed request overlap
+    # is an observation; a possible workflow overlap is a job interval we could
+    # not resolve into venue contact either way; thin history is neither.
     verdict = ov["DIRECT_CONFLICT_STARTED_DURING_RUN"]
     if verdict != "NO":
-        reasons.append("DIRECT_PMUS_COLLECTOR_OVERLAP" if verdict == "YES"
-                       else "ISOLATION_THROUGHOUT_RUN_NOT_IDENTIFIED")
+        reasons.append({
+            "YES": "DIRECT_PMUS_COLLECTOR_OVERLAP",
+            "POSSIBLE": "POSSIBLE_DIRECT_WORKFLOW_OVERLAP",
+        }.get(verdict, "ISOLATION_THROUGHOUT_RUN_NOT_IDENTIFIED"))
         report["FAIL_REASON"] = reasons
         report["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"] = "NO"
         report["RESEARCH_COLLECTOR_OPERATIONALLY_VALIDATED"] = "NO"
@@ -582,11 +606,21 @@ def render(r):
     L.append("")
     for k in ("FIRST_VENUE_GET_TIME", "LAST_VENUE_GET_TIME",
               "DIRECT_OVERLAP_COUNT", "DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW",
-              "RUN_HISTORY_COVERS_THE_WINDOW",
+              "CONFIRMED_DIRECT_REQUEST_OVERLAP",
+              "POSSIBLE_DIRECT_WORKFLOW_OVERLAP",
               "RUNNING_COLLECTORS_AT_END", "PENDING_COLLECTORS_AT_END",
               "DIRECT_CONFLICT_STARTED_DURING_RUN",
               "DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN",
               "INDIRECT_BETTOR_PMUS_LOAD_ISOLATION"):
+        L.append("%-38s = %s" % (k, r.get(k)))
+    # Coverage, per workflow: one collector's history reaching back says
+    # nothing about another's.
+    for c in r.get("DIRECT_RUN_HISTORY_COVERAGE", []):
+        L.append("    %-34s pages %-4s earliest %-26s more %-14s covers %s"
+                 % (c["WORKFLOW_NAME"], c["HISTORY_PAGES_FETCHED"],
+                    c["EARLIEST_RUN_TIME_FETCHED"], c["MORE_PAGES_AVAILABLE"],
+                    c["COVERS_EVIDENCE_WINDOW"]))
+    for k in ("DIRECT_RUN_HISTORY_COVERAGE_COMPLETE", "COVERAGE_ANCHOR"):
         L.append("%-38s = %s" % (k, r.get(k)))
     if r.get("FAIL_REASON"):
         L.append("")
