@@ -1,0 +1,85 @@
+====================================================================================================
+HAZARD PER INTERVAL vs HAZARD PER MINUTE -- the duration confound, stated
+====================================================================================================
+interval               dur  H(interval)   H per minute
+0-5s                    5s        2.89%         34.72%
+5-10s                   5s        1.13%         13.54%
+10-30s                 20s        3.14%          9.43%
+30-60s                 30s        3.84%          7.68%
+60-120s                60s        6.11%          6.11%
+120-300s              180s       12.89%          4.30%
+300-600s              300s       14.04%          2.81%
+600-1800s            1200s       25.60%          1.28%
+1800-3600s           1800s       16.61%          0.55%
+3600s-settle     UNBOUNDED       18.75% NOT_COMPARABLE
+
+Per-interval hazard RISES to 600-1800s then falls. Per MINUTE it falls
+monotonically after the first seconds. The rise is a duration artifact --
+the late buckets are simply longer. Both are reported; neither alone is the
+story. The final bucket spans hours to weeks and is NOT comparable.
+
+====================================================================================================
+BAND x CHANNEL MATRIX, LIFETIME, all four
+====================================================================================================
+
+--- rn1 ---
+band           MERGE_PNL      SELL   SETTLED_PNL    TOTAL_PNL  signs    |S/M|     T/M  CELL
+0.00-0.10      1,043,702        21       -94,814      948,909   ++-+     0.09    0.91  PAIR_STRONG / SETTLED_WEAK
+0.10-0.30      3,961,179    83,404    -1,825,415    2,219,168   ++-+     0.46    0.56  PAIR_STRONG / SETTLED_WEAK
+0.30-0.50      5,017,030   115,659      -326,572    4,806,117   ++-+     0.07    0.96  PAIR_STRONG / SETTLED_WEAK
+0.50-0.70        989,923    96,345     1,822,547    2,908,815   ++++     1.84    2.94  BOTH_STRONG
+0.70-0.90       -510,540    67,023     2,656,099    2,212,582   -+++     5.20   -4.33  PAIR_WEAK / SETTLED_STRONG
+0.90-1.01       -142,189     7,829       736,800      602,440   -+++   UNSTABLE  UNSTABLE  LOW_MERGE_BASE_UNSTABLE
+
+--- ferrarichampions2026 ---
+band           MERGE_PNL      SELL   SETTLED_PNL    TOTAL_PNL  signs    |S/M|     T/M  CELL
+0.00-0.10        611,059         0      -305,937      305,122   +0-+     0.50    0.50  PAIR_STRONG / SETTLED_WEAK
+0.10-0.30      3,844,029    30,561    -4,435,219     -560,629   ++--     1.15   -0.15  PAIR_STRONG / SETTLED_WEAK
+0.30-0.50      5,713,028   392,127    -3,462,556    2,642,599   ++-+     0.61    0.46  PAIR_STRONG / SETTLED_WEAK
+0.50-0.70      1,167,177   174,244      -946,843      394,579   ++-+     0.81    0.34  PAIR_STRONG / SETTLED_WEAK
+0.70-0.90       -408,535     4,232       344,266      -60,037   -++-     0.84    0.15  PAIR_WEAK / SETTLED_STRONG
+0.90-1.01       -131,863       729       344,820      213,686   -+++   UNSTABLE  UNSTABLE  LOW_MERGE_BASE_UNSTABLE
+
+--- swisstony ---
+band           MERGE_PNL      SELL   SETTLED_PNL    TOTAL_PNL  signs    |S/M|     T/M  CELL
+0.00-0.10        557,903         0      -292,613      265,289   +0-+     0.52    0.48  PAIR_STRONG / SETTLED_WEAK
+0.10-0.30      2,507,273         0       453,963    2,961,236   +0++     0.18    1.18  BOTH_STRONG
+0.30-0.50      1,219,592         0     9,509,512   10,729,104   +0++     7.80    8.80  BOTH_STRONG
+0.50-0.70     -1,263,133         0     5,455,801    4,192,667   -0++     4.32   -3.32  PAIR_WEAK / SETTLED_STRONG
+0.70-0.90     -2,015,153         0     6,369,143    4,353,989   -0++     3.16   -2.16  PAIR_WEAK / SETTLED_STRONG
+0.90-1.01       -746,356         0     1,861,941    1,115,584   -0++     2.49   -1.49  PAIR_WEAK / SETTLED_STRONG
+
+--- homerunhazard ---
+band           MERGE_PNL      SELL   SETTLED_PNL    TOTAL_PNL  signs    |S/M|     T/M  CELL
+0.00-0.10         97,324         0        48,731      146,055   +0++     0.50    1.50  BOTH_STRONG
+0.10-0.30        335,843         0      -265,896       69,946   +0-+     0.79    0.21  PAIR_STRONG / SETTLED_WEAK
+0.30-0.50        352,439         0     1,035,254    1,387,693   +0++     2.94    3.94  BOTH_STRONG
+0.50-0.70       -576,322         0     1,338,662      762,340   -0++     2.32   -1.32  PAIR_WEAK / SETTLED_STRONG
+0.70-0.90       -591,206         0       634,878       43,672   -0++     1.07   -0.07  PAIR_WEAK / SETTLED_STRONG
+0.90-1.01        -94,993         0       179,673       84,681   -0++     1.89   -0.89  PAIR_WEAK / SETTLED_STRONG
+
+====================================================================================================
+SELL CONCENTRATION -- are sells where settled economics are worst?
+====================================================================================================
+
+rn1:  total sells 234
+band         sells  sell share    SELL_PNL  SETTLED_ROI
+0.00-0.10       12        5.1%          21        -4.9%
+0.10-0.30       37       15.8%      83,404       -14.1% <- worst SETTLED_ROI
+0.30-0.50       81       34.6%     115,659        -0.8%
+0.50-0.70       29       12.4%      96,345         3.7%
+0.70-0.90       71       30.3%      67,023         5.9%
+0.90-1.01        4        1.7%       7,829         3.5%
+
+ferrarichampions2026:  total sells 18
+band         sells  sell share    SELL_PNL  SETTLED_ROI
+0.00-0.10        0        0.0%           0       -18.5%
+0.10-0.30        4       22.2%      30,561       -27.5% <- worst SETTLED_ROI
+0.30-0.50        3       16.7%     392,127        -5.4%
+0.50-0.70        7       38.9%     174,244        -1.1%
+0.70-0.90        2       11.1%       4,232         0.9%
+0.90-1.01        2       11.1%         729         5.9%
+
+swisstony: ZERO sells in every band. No hypothesis derivable.
+
+homerunhazard: ZERO sells in every band. No hypothesis derivable.
