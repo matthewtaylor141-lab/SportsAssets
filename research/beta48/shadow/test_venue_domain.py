@@ -557,3 +557,95 @@ class TheCleanNegativeStandard(unittest.TestCase):
         a = self._audit([], more_pages={"*": True})
         self.assertEqual(a["POSSIBLE_DIRECT_WORKFLOW_OVERLAP"], "NO")
         self.assertEqual(a[self.K], NI)
+
+
+class BothEndpointsFailTowardsDetection(unittest.TestCase):
+    """A missing timestamp may WIDEN an execution interval and may never narrow
+    one. Narrowing turns a real overlap into a clean run, which is the single
+    error this audit exists to prevent.
+
+    The start endpoint was handled when execution intervals landed. This pins
+    the other one: a job that has STARTED and has no completion time must stay
+    in the overlap test, open-ended, not be dropped.
+    """
+
+    WS, WE = "2026-09-16T18:00:00Z", "2026-09-16T18:20:00Z"
+    KNOWN = ["run85-phase2-capture"]
+
+    def _audit(self, runs, **kw):
+        kw.setdefault("more_pages", {"*": False})
+        return VD.overlap_audit(self.WS, self.WE, runs, self.KNOWN,
+                                self_run_id="9", **kw)
+
+    def _active(self, started, rid=1, created="2026-09-16T12:00:00Z"):
+        """Still running: no conclusion, and completion is genuinely absent."""
+        return {"name": "run85-phase2-capture", "id": rid,
+                "status": "in_progress", "conclusion": None,
+                "created_at": created, "run_started_at": started,
+                "updated_at": None}
+
+    def test_an_active_job_started_before_the_window_still_overlaps(self):
+        """Started 17:00, still in_progress, completed_at null. It has been
+        reading across our whole window."""
+        a = self._audit([self._active("2026-09-16T17:00:00Z")])
+        self.assertEqual(a["DIRECT_OVERLAP_COUNT"], 1)
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "POSSIBLE")
+
+    def test_an_active_job_started_during_the_window_still_overlaps(self):
+        a = self._audit([self._active("2026-09-16T18:05:00Z")])
+        self.assertEqual(a["DIRECT_OVERLAP_COUNT"], 1)
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "POSSIBLE")
+
+    def test_an_active_job_started_after_the_window_does_not_overlap_it(self):
+        """A run that began after 18:20 cannot have contaminated 18:00-18:20,
+        however long it goes on running."""
+        a = self._audit([self._active("2026-09-16T19:30:00Z")])
+        self.assertEqual(a["STAGE_1_JOB_INTERVAL_CANDIDATES"], 0)
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "NO")
+
+    def test_an_open_end_is_reported_as_open_never_as_the_window_edge(self):
+        a = self._audit([self._active("2026-09-16T17:00:00Z")])
+        row = a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0]
+        self.assertEqual(row["JOB_END_SOURCE"], "OPEN_ENDED_STILL_RUNNING")
+        self.assertEqual(row["JOB_EXECUTION_INTERVAL"][1],
+                         "OPEN_ENDED_STILL_RUNNING")
+        self.assertNotIn("18:20", row["JOB_EXECUTION_INTERVAL"][1])
+
+    def test_a_completed_run_missing_its_completion_time_is_open_ended_too(self):
+        r = {"name": "run85-phase2-capture", "id": 2, "status": "completed",
+             "conclusion": "success", "created_at": "2026-09-16T12:00:00Z",
+             "run_started_at": "2026-09-16T17:00:00Z", "updated_at": None}
+        a = self._audit([r])
+        row = a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0]
+        self.assertEqual(row["JOB_END_SOURCE"],
+                         "OPEN_ENDED_COMPLETION_TIMESTAMP_MISSING")
+        self.assertEqual(a["DIRECT_OVERLAP_COUNT"], 1)
+
+    def test_the_narrowing_substitutions_are_refused_by_name(self):
+        a = self._audit([self._active("2026-09-16T17:00:00Z")])
+        self.assertEqual(sorted(a["END_SUBSTITUTIONS_REFUSED"]),
+                         ["END_EQUALS_CREATED", "END_EQUALS_START",
+                          "END_NULL_THEN_DROP_THE_ROW"])
+        # each refused substitution would have ended this run at or before
+        # 17:00 and dropped it from an 18:00-18:20 window
+        self.assertEqual(a["DIRECT_OVERLAP_COUNT"], 1)
+
+    def test_the_three_policies_are_reported(self):
+        a = self._audit([])
+        self.assertEqual(a["MISSING_START_POLICY"],
+                         "SUBSTITUTE_CREATION_TIME_WIDENS_NEVER_NARROWS")
+        self.assertEqual(a["MISSING_END_ACTIVE_POLICY"],
+                         "OPEN_ENDED_THROUGH_THE_WINDOW_ROW_NEVER_DROPPED")
+        self.assertEqual(a["MISSING_END_COMPLETED_POLICY"],
+                         "OPEN_ENDED_THROUGH_THE_WINDOW_ROW_NEVER_DROPPED")
+
+    def test_a_level_a_row_on_a_running_job_does_not_print_a_fake_end(self):
+        """Sealed request times classify it; the job's own end is still open."""
+        a = self._audit([self._active("2026-09-16T17:00:00Z")],
+                        venue_windows={"1": ("2026-09-16T18:05:00Z",
+                                             "2026-09-16T18:10:00Z")})
+        row = a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0]
+        self.assertEqual(row["EVIDENCE_LEVEL"], "A_SEALED_VENUE_REQUEST_TIMES")
+        self.assertEqual(row["JOB_EXECUTION_INTERVAL"][1],
+                         "OPEN_ENDED_STILL_RUNNING")
+        self.assertEqual(a["CONFIRMED_DIRECT_REQUEST_OVERLAP"], "YES")

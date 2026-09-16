@@ -454,6 +454,18 @@ NOT_ESTABLISHED = "NOT_ESTABLISHED"
 AUDIT_STAGES = ("STAGE_1_JOB_EXECUTION_INTERVALS",
                 "STAGE_2_REQUEST_TIMES_FOR_CANDIDATES_ONLY")
 
+# BOTH ENDPOINTS FAIL TOWARDS DETECTION. A missing timestamp may widen an
+# interval and may never narrow one, because narrowing turns a real overlap
+# into a clean run -- the one error this audit exists to prevent.
+MISSING_START_POLICY = "SUBSTITUTE_CREATION_TIME_WIDENS_NEVER_NARROWS"
+MISSING_END_ACTIVE_POLICY = "OPEN_ENDED_THROUGH_THE_WINDOW_ROW_NEVER_DROPPED"
+MISSING_END_COMPLETED_POLICY = "OPEN_ENDED_THROUGH_THE_WINDOW_ROW_NEVER_DROPPED"
+END_SUBSTITUTIONS_REFUSED = ("END_EQUALS_START", "END_EQUALS_CREATED",
+                             "END_NULL_THEN_DROP_THE_ROW")
+WHY_END_SUBSTITUTIONS_ARE_REFUSED = (
+    "each collapses or shortens the execution interval, and a shortened "
+    "interval can report a contaminated run as a clean one")
+
 
 def max_job_timeout_s(root):
     """The longest job timeout among known venue-touching workflows.
@@ -533,16 +545,34 @@ def overlap_audit(window_start, window_end, runs, known, self_run_id=None,
             src = "RUN_CREATION_TIME_AS_START_PROXY_WIDER_NOT_NARROWER"
         if job_start is None:
             continue
-        if status == "completed":
-            job_end = _iso(r.get("updated_at")) or we
-        else:
-            job_end = we                       # still running: open-ended
+        # THE OTHER ENDPOINT, AND IT IS THE ONE THAT CAN SILENTLY DROP A ROW.
+        # A job that has STARTED but has no completion time must not vanish
+        # from the overlap test. Its interval is OPEN-ENDED: job_end is set to
+        # the window end, and since we >= ws by construction the condition
+        # `job_end >= ws` is then satisfied unconditionally -- it extends
+        # through the whole window. END = START, END = CREATED, and
+        # END = null-then-drop are all refused: each would NARROW the interval
+        # and could turn a real overlap into a clean run.
+        end_src = "OBSERVED_COMPLETION"
+        job_end = _iso(r.get("updated_at")) if status == "completed" else None
+        if status != "completed":
+            job_end, end_src = we, "OPEN_ENDED_STILL_RUNNING"
+        elif job_end is None:
+            job_end, end_src = we, "OPEN_ENDED_COMPLETION_TIMESTAMP_MISSING"
         if job_start <= we and job_end >= ws:
-            candidates.append((r, rid, job_start, job_end, src, status))
+            candidates.append((r, rid, job_start, job_end, src, end_src, status))
 
     # ---------------- STAGE 2: request times, candidates only ----------------
     confirmed, possible, cleared = [], [], []
-    for r, rid, job_start, job_end, src, status in candidates:
+    def _interval(job_start, job_end, end_src):
+        """The interval as REPORTED. An open end is printed as an open end, so
+        the window boundary used for the comparison is never mistaken for an
+        observed completion."""
+        return [job_start.isoformat(),
+                job_end.isoformat() if end_src == "OBSERVED_COMPLETION"
+                else end_src]
+
+    for r, rid, job_start, job_end, src, end_src, status in candidates:
         vw = venue_windows.get(rid) or venue_windows.get(r.get("id"))
         a0 = a1 = None
         if vw:
@@ -551,8 +581,10 @@ def overlap_audit(window_start, window_end, runs, known, self_run_id=None,
             row = {"NAME": r.get("name"), "ID": rid,
                    "EVIDENCE_LEVEL": "A_SEALED_VENUE_REQUEST_TIMES",
                    "REQUEST_TIME_EVIDENCE": "SEALED",
-                   "JOB_EXECUTION_INTERVAL": [job_start.isoformat(),
-                                              job_end.isoformat()],
+                   "JOB_EXECUTION_INTERVAL": _interval(job_start, job_end,
+                                                       end_src),
+                   "JOB_INTERVAL_SOURCE": src,
+                   "JOB_END_SOURCE": end_src,
                    "OTHER_FIRST_VENUE_GET_TIME": a0.isoformat(),
                    "OTHER_LAST_VENUE_GET_TIME": a1.isoformat(),
                    "STATUS": status}
@@ -564,11 +596,9 @@ def overlap_audit(window_start, window_end, runs, known, self_run_id=None,
             "NAME": r.get("name"), "ID": rid,
             "EVIDENCE_LEVEL": "B_" + CONSERVATIVE_PROXY,
             "REQUEST_TIME_EVIDENCE": "ABSENT",
-            "JOB_EXECUTION_INTERVAL": [
-                job_start.isoformat(),
-                job_end.isoformat() if status == "completed" else
-                "STILL_RUNNING"],
+            "JOB_EXECUTION_INTERVAL": _interval(job_start, job_end, end_src),
             "JOB_INTERVAL_SOURCE": src,
+            "JOB_END_SOURCE": end_src,
             "VENUE_REQUEST_TIMES": NOT_IDENTIFIED,
             "STATUS": status})
 
@@ -651,6 +681,10 @@ def overlap_audit(window_start, window_end, runs, known, self_run_id=None,
         "STAGE_2_CANDIDATES_CLEARED_BY_REQUEST_TIMES": cleared,
         "OVERLAP_INTERVAL": OVERLAP_INTERVAL,
         "NOT_THE_OVERLAP_INTERVAL": NOT_THE_OVERLAP_INTERVAL,
+        "MISSING_START_POLICY": MISSING_START_POLICY,
+        "MISSING_END_ACTIVE_POLICY": MISSING_END_ACTIVE_POLICY,
+        "MISSING_END_COMPLETED_POLICY": MISSING_END_COMPLETED_POLICY,
+        "END_SUBSTITUTIONS_REFUSED": list(END_SUBSTITUTIONS_REFUSED),
 
         "RUNNING_IS_NOT_PROVEN_VENUE_CONTACT": WHY_RUNNING_IS_NOT_CONTACT,
         "LEVEL_B_LABEL": CONSERVATIVE_PROXY,
