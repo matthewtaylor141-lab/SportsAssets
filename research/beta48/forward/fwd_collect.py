@@ -426,14 +426,43 @@ def rules(outdir: Path, pacer, http) -> dict:
     # `active=true`, which returned byte-identical content (87,650 bytes both
     # times) and is therefore not a filter this endpoint honours; that request
     # is dropped rather than left in looking like a control.
+    # THE TOKEN IS NOT A RELIABLE END MARKER. A first attempt stopped only
+    # when `nextPageToken` repeated, and the live run showed why that is not
+    # enough: the endpoint handed back a DIFFERENT token every time while
+    # serving the SAME 100 markets, so the walk ran to the 200-page cap and
+    # 267 real programme-periods were counted 200 times over as 53,400.
+    #
+    # Termination is therefore decided by CONTENT, not by the cursor: a page
+    # that contributes no new (market, programme, period, start) ends the walk.
+    # The board walk already learned this lesson; this is the same guard, and
+    # not carrying it across the first time is the reason this run is void.
     rows, token, pages = [], None, 0
     exhausted = False
+    advanced = True
+    seen: set = set()
     while pages < INCENTIVES_MAX_PAGES:
         r = _paced_get(http, pacer, INCENTIVES_PATH,
                        {"pageToken": token} if token else None)
         rows.append(r)
         pages += 1
         body = r.get("body") or {}
+        items = body.get("programs") if isinstance(body, dict) else None
+        fresh = 0
+        for it in (items or []):
+            if not isinstance(it, dict):
+                continue
+            slug = it.get("marketSlug")
+            for tp in (it.get("timePeriods") or [{}]):
+                tp = tp if isinstance(tp, dict) else {}
+                key = (slug, tp.get("programId"), tp.get("programType"),
+                       tp.get("period"), tp.get("start"))
+                if key not in seen:
+                    seen.add(key)
+                    fresh += 1
+        if fresh == 0:
+            advanced = False
+            exhausted = True
+            break
         nxt = body.get("nextPageToken") if isinstance(body, dict) else None
         if not nxt or nxt == token:
             exhausted = True
@@ -472,7 +501,7 @@ def rules(outdir: Path, pacer, http) -> dict:
     #
     # `end` and `maxSpread` are NOT in this payload. They are emitted as None
     # rather than inferred from `start` plus a guessed duration.
-    programs, markets_seen = [], set()
+    programs, markets_seen, emitted = [], set(), set()
     for r in rows:
         body = r.get("body")
         items = body.get("programs") if isinstance(body, dict) else None
@@ -489,6 +518,14 @@ def rules(outdir: Path, pacer, http) -> dict:
             for tp in periods:
                 if not isinstance(tp, dict):
                     tp = {}
+                # DEDUPE ON THE WAY OUT TOO. A repeated page must not become a
+                # repeated record: a distribution computed over duplicates
+                # reads as a much larger sample than was ever observed.
+                key = (slug, tp.get("programId"), tp.get("programType"),
+                       tp.get("period"), tp.get("start"))
+                if key in emitted:
+                    continue
+                emitted.add(key)
                 programs.append({
                     "MARKET_SLUG": slug,
                     "INSTRUMENT_STATE": it.get("instrumentState"),
@@ -524,6 +561,7 @@ def rules(outdir: Path, pacer, http) -> dict:
            "fee_regime": fee_regime(wall),
            "INCENTIVES_ENDPOINT_REACHABLE": "YES" if reachable else "NO",
            "INCENTIVES_LIST_EXHAUSTED": "YES" if exhausted else "NO",
+           "INCENTIVES_PAGINATION_ADVANCED": "YES" if advanced else "NO",
            "incentive_pages_walked": pages,
            "incentive_http_statuses": [r.get("http_status") for r in rows],
            "incentivized_markets": len(markets_seen),
@@ -554,10 +592,11 @@ def rules(outdir: Path, pacer, http) -> dict:
         for d in docs:
             fh.write(json.dumps(d) + "\n")
     (outdir / "rules.json").write_text(json.dumps(out, indent=1))
-    print("incentives reachable %s | pages %d | exhausted %s | markets %d | "
-          "program-periods %d | docs %s | regime %s"
+    print("incentives reachable %s | pages %d | exhausted %s | advanced %s | "
+          "markets %d | distinct program-periods %d | docs %s | regime %s"
           % (out["INCENTIVES_ENDPOINT_REACHABLE"], pages,
-             out["INCENTIVES_LIST_EXHAUSTED"], len(markets_seen),
+             out["INCENTIVES_LIST_EXHAUSTED"],
+             out["INCENTIVES_PAGINATION_ADVANCED"], len(markets_seen),
              len(programs), out["doc_http_statuses"], out["fee_regime"]))
     return out
 

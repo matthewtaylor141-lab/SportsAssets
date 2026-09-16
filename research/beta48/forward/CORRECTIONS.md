@@ -83,3 +83,44 @@ market, and markets carry 1, 4 or 5 periods with different pools and factors.
 Separately, the endpoint is token-paginated and the first capture followed
 `nextPageToken` zero times — the same prefix mistake as C-2, in a new place.
 Both fixed; both pinned.
+
+---
+
+## C-5. A rotating page token inflated the incentive sample 200x
+
+**Segment 35043611049 is VOID for incentive counts.** It reported:
+
+```
+incentive_pages_walked   200   (the cap)
+INCENTIVES_LIST_EXHAUSTED NO
+incentivized_markets     100
+programs_parsed          53,400
+```
+
+100 markets cannot yield 53,400 distinct programme-periods. The endpoint
+returned a **different `nextPageToken` on every request while serving the same
+100 markets**, so the walk ran to the page cap and the same ~267 periods were
+recorded 200 times over.
+
+**Why the existing guard missed it.** C-4's fix stopped only when the token
+*repeated*. A rotating cursor never repeats, so the guard never fired. The
+board walk already terminates on **content** — a page contributing no new slug
+ends the walk — and that lesson was not carried across to the token walk. It is
+the third time in this programme that a prefix/duplication guard existed in one
+place and was missing in another.
+
+**Fixed both ends:**
+- the walk ends when a page contributes no new
+  `(marketSlug, programId, programType, period, start)`, recording
+  `INCENTIVES_PAGINATION_ADVANCED`;
+- records are deduped on the way out too, so a repeated page can never become a
+  repeated record — a distribution over duplicates reads as a sample two
+  hundred times larger than anything observed.
+
+Pinned in `test_fwd_collect.py::test_a_rotating_page_token_over_identical_content_ends_the_walk`.
+
+**What survives from that segment.** The *shape* of the distribution, which was
+already established on the single clean page of segment 35042094434 and is
+unchanged: discount factors are only 0.3 and 0.35; pools are 500 / 1000 / 1250
+/ 10000; target sizes 500 / 1000 / 20000. The **counts** do not survive and are
+not reported.

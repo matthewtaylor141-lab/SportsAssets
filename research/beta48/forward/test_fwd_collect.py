@@ -774,3 +774,70 @@ def test_the_panel_plan_declares_it_is_a_separate_dataset(tmp_path):
     for f in ("PROGRAM_TYPE", "REWARD_POOL", "TARGET_SIZE",
               "DISCOUNT_FACTOR", "orderPriceMinTickSize"):
         assert f in plan["SELECTION_INPUTS"]
+
+
+def test_a_rotating_page_token_over_identical_content_ends_the_walk():
+    """THE DEFECT THAT VOIDED SEGMENT 35043611049, pinned.
+
+    The endpoint handed back a DIFFERENT nextPageToken on every request while
+    serving the SAME 100 markets. A guard that only watched for a REPEATED
+    token never fired, the walk ran to the 200-page cap, and 267 real
+    programme-periods were counted 200 times over as 53,400 -- a distribution
+    that would have read as a sample two hundred times larger than anything
+    observed.
+
+    Termination is decided by CONTENT now, so a rotating cursor cannot inflate
+    a sample again.
+    """
+    state = {"n": 0}
+
+    class Rotating:
+        def get(self, url, params=None, timeout=None):
+            if url.startswith("https://docs."):
+                class D:
+                    status_code = 200
+                    headers = {}
+                    content = b"body"
+                    text = "x"
+                    json = staticmethod(lambda: {})
+                return D()
+            state["n"] += 1
+            body = {"programs": [_incentive_market("a"),
+                                 _incentive_market("b")],
+                    "nextPageToken": "tok-%d" % state["n"]}   # ALWAYS NEW
+
+            class R:
+                status_code = 200
+                headers = {}
+                content = b"body"
+                json = staticmethod(lambda: body)
+            return R()
+
+    import tempfile
+    with tempfile.TemporaryDirectory() as d:
+        p = C.Pacer(); p.spacing = 0.0
+        out = C.rules(Path(d), p, Rotating())
+    assert out["incentive_pages_walked"] == 2, "a stale page must END the walk"
+    assert out["INCENTIVES_PAGINATION_ADVANCED"] == "NO"
+    assert out["incentivized_markets"] == 2
+    assert out["programs_parsed"] == 2, "duplicates must not become records"
+
+
+def test_a_genuinely_advancing_token_walk_still_collects_every_page(tmp_path):
+    pages = [{"programs": [_incentive_market("s%d" % i)],
+              "nextPageToken": "t%d" % i} for i in range(5)]
+    pages.append({"programs": [_incentive_market("last")], "nextPageToken": ""})
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p, _rules_http(pages))
+    assert out["INCENTIVES_PAGINATION_ADVANCED"] == "YES"
+    assert out["INCENTIVES_LIST_EXHAUSTED"] == "YES"
+    assert out["incentivized_markets"] == 6
+    assert out["programs_parsed"] == 6
+
+
+def test_the_same_period_served_twice_is_recorded_once(tmp_path):
+    same = _incentive_market("a")
+    pages = [{"programs": [same, same], "nextPageToken": ""}]
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p, _rules_http(pages))
+    assert out["programs_parsed"] == 1
