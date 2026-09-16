@@ -14,16 +14,31 @@ Every claim below is marked with how it is known:
 
 ## 1. COMBOS + RFQ
 
-### The one thing captured so far, and it cuts the wrong way
+### The one thing captured so far — a dated COST, not a settled verdict
 
 **[CAPTURED]** from `https://docs.polymarket.us/fees`, sha256
 `25223cc8…0c8227`, fetched 2026-09-16 00:57:12Z, asserted in
 `test_fee_page_capture.py` against the stored bytes:
 
-> "Combos — the combo taker fee curve becomes
-> `Fee = C × p × [0.0695(1 - p) + 0.04(1 - p)^4]`"
+> "**Upcoming fee changes.** … **Combos** — the combo taker fee curve
+> **becomes** `Fee = C × p × [0.0695(1 - p) + 0.04(1 - p)^4]`"
 
-That is **not** the single-leg curve. Algebraically:
+**This is the UPCOMING schedule, not today's.** It sits under the page's
+"Upcoming fee changes" callout, beside the sentence that the schedule below it
+"describe[s] the fees in effect today". So:
+
+```
+UPCOMING_COMBO_TAKER_FEE_FORMULA = C × p × [0.0695(1-p) + 0.04(1-p)^4]
+                                   effective 2026-09-16 23:59 ET
+CURRENT_COMBO_TAKER_FEE_FORMULA  = NOT_IDENTIFIED
+```
+
+The current curve was **not** captured, and is not back-formed by swapping
+0.0695 for 0.06 — nothing on the page says the surcharge term exists today.
+`upcoming_combo_taker_fee()` raises for any other regime.
+
+Against the **upcoming** single-leg fee (both sides post-cutover, so the two
+regimes are never blended), it is that fee plus a surcharge:
 
 ```
 combo = 0.0695·C·p·(1-p)  +  0.04·C·p·(1-p)^4
@@ -40,28 +55,40 @@ there. Measured against the single-leg taker fee at the same price:
 | 0.20 | $11.12 | $14.40 | $3.28 | +29.5% |
 | 0.30 | $14.60 | $17.48 | $2.88 | +19.7% |
 | 0.50 | $17.38 | $18.63 | $1.25 | +7.2% |
-| 0.90 | $6.26 | $6.26 | $0.004 | +0.1% |
+| 0.90 | $6.2550 | $6.2586 | $0.0036 | **+0.06%** |
 
-*(per 1,000 contracts, SEP2026 regime)*
+*(per 1,000 contracts, both columns on the UPCOMING schedule)*
 
-**A combo is never the cheaper way to take, and it is most expensive exactly
-in the cheap tail the retrospective work kept finding interesting.** Any claim
-that combos reduce legging cost has to survive paying up to half again on the
-taker side first.
+The far-tail figure is **+0.06%**, not the +0.1% I first reported — rounding it
+up nearly doubles it, and it is the one price where the premium is negligible,
+which is a real fact about where combos cost least.
+
+**What this establishes and what it does not.** The venue will charge a taker
+premium for combos; that is verified from primary docs and dated. Whether the
+premium buys materially lower execution or orphan risk is **exactly the
+unresolved benefit**, and it is not recorded as zero:
+
+```
+UPCOMING_COMBO_TAKER_COST_PREMIUM       VERIFIED_FROM_PRIMARY_DOCS
+COMBO_ORPHAN_RISK_REDUCTION             NOT_IDENTIFIED
+COMBO_EXECUTION_ATOMICITY               NOT_IDENTIFIED
+COMBO_PARTIAL_FILL_BEHAVIOR             NOT_IDENTIFIED
+COMBO_NET_VALUE_VS_SINGLE_LEG_EXECUTION NOT_IDENTIFIED
+```
 
 ### Field answers
 
 | field | value | basis |
 |---|---|---|
-| `COMBO_FEE_TREATMENT` | `SEPARATE_CURVE_STRICTLY_MORE_EXPENSIVE` | **[CAPTURED]** |
-| `COMBO_CURVE_JUL2026` | `NOT_IDENTIFIED` | only the SEP2026 form was captured; `combo_taker_fee` **raises** rather than substitute 0.06 |
+| `UPCOMING_COMBO_TAKER_FEE_FORMULA` | `C × p × [0.0695(1-p) + 0.04(1-p)^4]`, effective 2026-09-16 23:59 ET | **[CAPTURED]** |
+| `CURRENT_COMBO_TAKER_FEE_FORMULA` | `NOT_IDENTIFIED` | not on the page; `upcoming_combo_taker_fee` **raises** rather than substitute 0.06 |
 | `COMBO_MAKER_REBATE_TREATMENT` | `NOT_IDENTIFIED` | the page says maker rebates are unchanged *by the September update* — a statement about the update, not about combo legs |
 | `COMBO_INCENTIVE_ELIGIBILITY` | `NOT_IDENTIFIED` | no combo row observed in `/v1/incentives` |
 | `PAIR_SUBMISSION_SEMANTICS` | `NOT_IDENTIFIED` | **[RELAYED]** only |
-| `ATOMIC_FILL_GUARANTEE` | `NOT_IDENTIFIED` | **and presumed absent until proven** — see below |
-| `PARTIAL_FILL_BEHAVIOR` | `NOT_IDENTIFIED` | |
-| `REST_REMAINDER_BEHAVIOR` | `NOT_IDENTIFIED` | |
-| `LAST_LOOK_RISK` | `PRESENT_BY_DESIGN` | **[RELAYED]** — a last-look window is an option granted to the counterparty, which is a cost to us whether or not it is exercised |
+| `COMBO_EXECUTION_ATOMICITY` | `NOT_IDENTIFIED` | unresolved in **both** directions |
+| `COMBO_PARTIAL_FILL_BEHAVIOR` | `NOT_IDENTIFIED` | |
+| `COMBO_REST_REMAINDER_BEHAVIOR` | `NOT_IDENTIFIED` | |
+| `COMBO_LAST_LOOK_RISK` | `NOT_IDENTIFIED` | **[RELAYED]** that a last-look window exists. Its magnitude, and whether it is net-costly once the risk it removes is counted, are unmeasured |
 | `EXECUTION_ATTRIBUTION_SOURCE` | `DROP_COPY` | **[RELAYED]** |
 | `REQUIRED_AUTH_SCOPE` | `NOT_IDENTIFIED` | |
 | `RETAIL_OR_INSTITUTIONAL_ACCESS` | `NOT_IDENTIFIED` | |
@@ -73,12 +100,21 @@ sports set.
 
 ### CAN_COMBO_RFQ_REDUCE_ORPHAN_RISK = **NOT_IDENTIFIED**
 
-And the asymmetry matters: the *cost* of combos is captured and real, while the
-*benefit* is entirely relayed. "Paired orders submitted" and "quote_executed"
-are submission events, not fills; Drop Copy being the source of truth for fills
-is itself evidence that the earlier states are not. Until
-`ATOMIC_FILL_GUARANTEE` is proven, a combo is a **more expensive way to acquire
-the same legging risk**, plus a last-look option written to the counterparty.
+The **evidential asymmetry** is the thing to hold onto: the cost is captured
+and dated, the benefit is relayed and unmeasured. That is a statement about
+what we know, not about which is larger.
+
+"Paired orders submitted" and "quote_executed" are submission events, not
+fills — Drop Copy being the source of truth for fills is itself evidence that
+the earlier states are not. So the mechanism by which combos *would* reduce
+orphan risk is precisely what remains unestablished.
+
+**Not concluded:** that a combo is merely a more expensive way to acquire the
+same legging risk. A venue charging a premium for a paired instrument may well
+be charging for real risk transfer, and pricing that away before measuring it
+would be prejudging the benefit as zero — the same error as prejudging a cost
+as zero, pointed the other way. `COMBO_NET_VALUE_VS_SINGLE_LEG_EXECUTION`
+stays open.
 
 Preserved as a future mode, not a plan: `EV_COMBO_RFQ`, alongside
 `EV_MAKER_SINGLE`, `EV_TAKER_SINGLE`, `EV_PAIR_CONVERSION`, `EV_CROSS_VENUE`,
@@ -129,9 +165,30 @@ Two consequences worth stating now, before any numbers:
 ## 3. REAL-TIME MARKET WEBSOCKET
 
 ```
-READ_ONLY_SCOPE_AVAILABLE           NOT_IDENTIFIED
-CAN_KEY_BE_ISOLATED_FROM_ORDER_WRITES NOT_IDENTIFIED
+WEBSOCKET_DATA_VALUE                               HIGH
+RETAIL_READ_ONLY_KEY_SCOPE_DOCUMENTED              NO
+READ_ONLY_CREDENTIAL_ISOLATION                     NOT_IDENTIFIED
+SAFE_TO_CONNECT_WITH_EXISTING_TRADING_CAPABLE_KEY  NO
+WEBSOCKET_CONNECTED                                False
 ```
+
+High value does **not** imply permission, and a test asserts the two
+independently. The authenticated retail docs require an API key for trading,
+portfolio **and** WebSocket endpoints, and **no documented retail read-only
+scope was found**. Three routes could change that, all open questions, none
+attempted:
+
+```
+A_SCOPE_LIMITED_KEYS_IN_DEVELOPER_PORTAL        NOT_IDENTIFIED
+B_INSTITUTIONAL_OAUTH_READ_ONLY_SCOPE           NOT_IDENTIFIED
+C_FIXED_FUNCTION_BROKER_PLUS_PATH_RESTRICTION   NOT_IDENTIFIED
+```
+
+Route C is ours rather than the venue's: a fixed-function signing broker plus
+network-path restriction could make the *capability* non-trading even if the
+underlying credential is broader. That is a **containment** argument and it is
+weaker than a scope the venue enforces — it has to be argued on its own merits,
+not assumed equivalent to A or B.
 
 **Not connected. No credential requested.** `/api-reference/websocket/overview`
 is now in `DOC_URLS`, so the scope question gets a captured answer next segment.
@@ -212,10 +269,19 @@ no-trade at zero edge, 23/23 cells) · `EV_PAIR_CONVERSION` ·
 `EV_CROSS_VENUE` · `EV_NO_TRADE` (default).
 
 **`CAPITAL_EFFICIENCY_FEATURES`**
-Mutually-exclusive and directional collateral return. Objective moves to
-expected net dollars per working-capital dollar per unit time. All magnitudes
-`NOT_IDENTIFIED` pending the captured margin pages. Multiplies the sign it is
-given; does not change it.
+Mutually-exclusive and directional collateral return, classified
+`CAPITAL_EFFICIENCY_MULTIPLIER` — explicitly **not** an `ALPHA_SOURCE`.
+Objective moves to `NET_PNL_PER_WORKING_CAPITAL_DOLLAR_PER_HOUR`, to be
+computed **with and without** collateral return. All magnitudes
+`NOT_IDENTIFIED` pending the captured margin pages.
+
+**The hazard, recorded as a binding flag rather than a footnote:** freed buying
+power spent in other events can make the offsetting leg **uncloseable** exactly
+when we most want to close it — the close may require restoring the collateral,
+and may be *rejected* if that capital is deployed. That converts a margin
+optimisation into a liquidity obligation, under stress, which is the shape of
+every forced-exit failure this programme has already recorded. Hence
+`ALLOCATOR_MUST_RESERVE_UNWIND_CAPACITY = True`.
 
 **`NEW_DATA_AVAILABLE`** (all read-only, no new auth)
 `comboEnabled` (25.6% TRUE) · category/sport · league on 17.5% ·
@@ -237,9 +303,12 @@ institutional. Drop Copy → authenticated. **None requested. None held.**
    frequency with which the target is already met at the touch.
 4. Sports metadata coverage and the provider-ID join, measured not assumed.
 5. Fee-regime cutover: the board's own `feeCoefficient` should move 0.06 →
-   0.0695 tonight at 03:59 UTC. **That is the cleanest possible
-   `VERIFIED_FROM_CAPTURE` test and it costs nothing** — we are already
-   polling the board every two hours.
+   0.0695 at **2026-09-16 23:59 ET = 2026-09-17 03:59 UTC** — roughly 26 hours
+   after the first captures, **not** the same night. **That is the cleanest
+   possible `VERIFIED_FROM_CAPTURE` test and it costs nothing** (we already
+   poll the board every two hours), but the first eligible segment is the one
+   that starts **after** that instant. Every segment before it is expected to
+   read 0.06, and reading 0.06 early is confirmation, not contradiction.
 
 **`WHAT_REQUIRES_USER_APPROVAL`**
 Any API key, even read-only · any WebSocket connection · any combo, RFQ or

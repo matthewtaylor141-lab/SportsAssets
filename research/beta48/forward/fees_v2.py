@@ -65,9 +65,28 @@ THETA_TAKER_JUL2026 = THETA_TAKER            # D("0.06"), verified
 THETA_TAKER_SEP2026 = D("0.0695")            # relayed, not yet captured
 THETA_MAKER_ALL = THETA_MAKER                # D("-0.0125"), unchanged
 
-# 23:59 ET on Wed 2026-09-16. September ET is EDT = UTC-4, so 03:59 UTC on
-# Thu 2026-09-17. Stated as UTC because every capture clock is UTC.
+# THE CUTOVER, WRITTEN OUT IN FULL SO IT CANNOT BE PARAPHRASED WRONG.
+#
+#   UPCOMING_EFFECTIVE_TIME      2026-09-16 23:59 ET  (Wednesday)
+#   UPCOMING_EFFECTIVE_TIME_UTC  2026-09-17 03:59 UTC (Thursday)
+#
+# September ET is EDT = UTC-4, so the ET Wednesday evening is a UTC Thursday
+# very-early-morning. The two dates DIFFER, and that is the whole trap.
+#
+# The first captures landed 2026-09-16 00:29-01:19 UTC, which is the evening of
+# TUESDAY 2026-09-15 in ET. From those captures the cutover was still ~26 hours
+# away, NOT "tonight" and NOT "03:59 UTC on the 16th". A reader who took the
+# UTC date off a capture stamp and assumed the cutover shared it would expect
+# the new regime a full day early and would then read 0.06 as a contradiction
+# of the documentation rather than as the correct current value.
+UPCOMING_EFFECTIVE_TIME_ET = "2026-09-16 23:59 America/New_York (Wednesday)"
+UPCOMING_EFFECTIVE_TIME_UTC = "2026-09-17T03:59:00+00:00"
 REGIME_CUTOVER_UTC = datetime(2026, 9, 17, 3, 59, tzinfo=timezone.utc)
+
+# What the venue charges NOW, and what it will charge after the cutover. Named
+# separately so no report can quietly present the second as the first.
+CURRENT_CAPTURED_TAKER_THETA = D("0.06")
+UPCOMING_STANDARD_TAKER_THETA = D("0.0695")
 
 # ------------------------------------------------- THREE SEPARATE FACTS ----
 #
@@ -204,44 +223,68 @@ def taker_fee_at(contracts, price, regime: str, tier: str = "BASE") -> D:
 # earns the standard -0.0125 rebate. The page says maker rebates are unchanged
 # by the September update, which is a statement about the update, not about
 # combo treatment.
-COMBO_TAKER_SURCHARGE_COEFF = D("0.04")
-COMBO_TAKER_SURCHARGE_EXPONENT = 4
+UPCOMING_COMBO_TAKER_SURCHARGE_COEFF = D("0.04")
+UPCOMING_COMBO_TAKER_SURCHARGE_EXPONENT = 4
+UPCOMING_COMBO_TAKER_FEE_FORMULA = (
+    "Fee = C x p x [0.0695(1 - p) + 0.04(1 - p)^4]   "
+    "EFFECTIVE 2026-09-16 23:59 ET / 2026-09-17 03:59 UTC")
+
+# EVERY ONE OF THESE IS THE UPCOMING SCHEDULE, NOT TODAY'S.
+CURRENT_COMBO_TAKER_FEE_FORMULA = "NOT_IDENTIFIED"
+UPCOMING_COMBO_TAKER_COST_PREMIUM = "VERIFIED_FROM_PRIMARY_DOCS"
+
+# The benefit side. NOT prejudged as zero -- a premium the venue charges may
+# well buy materially lower execution risk, and that is precisely the open
+# question rather than a settled one.
+COMBO_ORPHAN_RISK_REDUCTION = "NOT_IDENTIFIED"
+COMBO_EXECUTION_ATOMICITY = "NOT_IDENTIFIED"
+COMBO_PARTIAL_FILL_BEHAVIOR = "NOT_IDENTIFIED"
+COMBO_NET_VALUE_VS_SINGLE_LEG_EXECUTION = "NOT_IDENTIFIED"
 COMBO_MAKER_REBATE_TREATMENT = "NOT_IDENTIFIED"
 COMBO_INCENTIVE_ELIGIBILITY = "NOT_IDENTIFIED"
 COMBO_LEG_RANGE = (2, 10)
 
 
-def combo_taker_fee_exact(contracts, price, regime: str = "SEP2026") -> D:
-    """Fee = C * p * [theta(1-p) + 0.04(1-p)^4], unrounded.
+def upcoming_combo_taker_fee_exact(contracts, price,
+                                   regime: str = "SEP2026") -> D:
+    """Fee = C * p * [0.0695(1-p) + 0.04(1-p)^4], unrounded. UPCOMING ONLY.
 
-    The captured curve names 0.0695 explicitly, i.e. the SEP2026 coefficient.
-    The JUL2026 form of the combo curve was NOT captured and is not invented:
-    asking for it raises rather than silently substituting 0.06.
+    The captured page presents this curve under "Upcoming fee changes", beside
+    the sentence that the schedule below it "describe[s] the fees in effect
+    today". So this is what a combo WILL cost after 2026-09-16 23:59 ET -- not
+    what one costs now.
+
+    The CURRENT combo curve was not captured at all, and is not inferred by
+    swapping 0.0695 for 0.06: nothing in the page says the surcharge term
+    exists today. Asking for a non-SEP2026 regime raises.
     """
     if regime != "SEP2026":
         raise ValueError(
-            "the combo curve was captured only in its SEP2026 form; "
-            "COMBO_CURVE_JUL2026 = NOT_IDENTIFIED")
+            "only the UPCOMING combo curve was captured; "
+            "CURRENT_COMBO_TAKER_FEE_FORMULA = NOT_IDENTIFIED")
     p = D(str(price))
     c = D(str(contracts))
     one_minus = D(1) - p
     return c * p * (theta_taker(regime) * one_minus
-                    + COMBO_TAKER_SURCHARGE_COEFF
-                    * one_minus ** COMBO_TAKER_SURCHARGE_EXPONENT)
+                    + UPCOMING_COMBO_TAKER_SURCHARGE_COEFF
+                    * one_minus ** UPCOMING_COMBO_TAKER_SURCHARGE_EXPONENT)
 
 
-def combo_taker_fee(contracts, price, regime: str = "SEP2026") -> D:
-    return bankers_cents(combo_taker_fee_exact(contracts, price, regime))
+def upcoming_combo_taker_fee(contracts, price, regime: str = "SEP2026") -> D:
+    return bankers_cents(
+        upcoming_combo_taker_fee_exact(contracts, price, regime))
 
 
-def combo_vs_single_leg_surcharge(contracts, price,
-                                  regime: str = "SEP2026") -> D:
-    """What a combo costs ABOVE two single-leg takes at the same price.
+def upcoming_combo_vs_single_leg_surcharge(contracts, price,
+                                           regime: str = "SEP2026") -> D:
+    """What a combo will cost ABOVE the UPCOMING single-leg take, same price.
 
-    Positive everywhere in (0, 1): a combo is never the cheaper way to take.
+    Both sides of this comparison are post-cutover figures. Comparing the
+    upcoming combo curve against TODAY's 0.06 single-leg fee would blend two
+    regimes and overstate the premium.
     """
     single = exact_fee(theta_taker(regime), contracts, price)
-    return combo_taker_fee_exact(contracts, price, regime) - single
+    return upcoming_combo_taker_fee_exact(contracts, price, regime) - single
 
 
 def maker_rebate_at(contracts, price) -> D:

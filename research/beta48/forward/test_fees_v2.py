@@ -441,3 +441,107 @@ class SignConventions(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main(verbosity=2)
+
+
+class TheCutoverMoment(unittest.TestCase):
+    """OFF-BY-A-DAY GUARD.
+
+    The cutover is 23:59 ET on WEDNESDAY 2026-09-16, which is 03:59 UTC on
+    THURSDAY 2026-09-17. The ET date and the UTC date DIFFER, and that is the
+    whole trap: the first captures are stamped 2026-09-16 in UTC while being
+    the evening of Tuesday 2026-09-15 in ET. Reading a UTC capture stamp and
+    assuming the cutover shares its date puts the new regime a full day early,
+    after which a correctly-captured 0.06 looks like it contradicts the
+    documentation instead of confirming it.
+    """
+
+    ET = timezone(timedelta(hours=-4))          # EDT, in force in September
+
+    def test_the_cutover_is_wednesday_evening_in_ET(self):
+        et = F.REGIME_CUTOVER_UTC.astimezone(self.ET)
+        self.assertEqual(et.strftime("%A"), "Wednesday")
+        self.assertEqual(et.strftime("%Y-%m-%d %H:%M"), "2026-09-16 23:59")
+
+    def test_the_cutover_is_thursday_very_early_in_UTC(self):
+        self.assertEqual(F.REGIME_CUTOVER_UTC.strftime("%A"), "Thursday")
+        self.assertEqual(F.REGIME_CUTOVER_UTC.strftime("%Y-%m-%d %H:%M"),
+                         "2026-09-17 03:59")
+
+    def test_the_ET_and_UTC_dates_are_deliberately_different(self):
+        self.assertNotEqual(
+            F.REGIME_CUTOVER_UTC.date(),
+            F.REGIME_CUTOVER_UTC.astimezone(self.ET).date())
+
+    def test_0359_UTC_on_the_SIXTEENTH_is_still_the_old_regime(self):
+        """The exact mistake, pinned. A day early is still JUL2026."""
+        self.assertEqual(
+            F.regime_at(datetime(2026, 9, 16, 3, 59, tzinfo=timezone.utc)),
+            "JUL2026")
+
+    def test_the_whole_of_the_sixteenth_UTC_before_2359_is_old_regime(self):
+        for h in (0, 4, 8, 12, 18, 23):
+            self.assertEqual(
+                F.regime_at(datetime(2026, 9, 16, h, 0, tzinfo=timezone.utc)),
+                "JUL2026", "2026-09-16T%02d:00Z must still be JUL2026" % h)
+
+    def test_the_capture_timestamps_we_already_hold_are_pre_cutover(self):
+        """Every segment captured so far sits in the OLD regime, and each one
+        correctly observed feeCoefficient 0.06."""
+        for stamp in ("2026-09-16T00:29:44+00:00",    # seg 35040105217
+                      "2026-09-16T00:57:11+00:00",    # seg 35042094434 rules
+                      "2026-09-16T00:58:54+00:00",    # seg 35042094434 board
+                      "2026-09-16T01:19:33+00:00"):   # seg 35043611049
+            self.assertEqual(F.regime_at(stamp), "JUL2026", stamp)
+
+    def test_the_named_labels_agree_with_the_datetime(self):
+        self.assertEqual(F.UPCOMING_EFFECTIVE_TIME_UTC,
+                         "2026-09-17T03:59:00+00:00")
+        self.assertIn("2026-09-16 23:59", F.UPCOMING_EFFECTIVE_TIME_ET)
+        self.assertEqual(
+            datetime.fromisoformat(F.UPCOMING_EFFECTIVE_TIME_UTC),
+            F.REGIME_CUTOVER_UTC)
+
+    def test_current_and_upcoming_theta_are_named_apart(self):
+        self.assertEqual(F.CURRENT_CAPTURED_TAKER_THETA, D("0.06"))
+        self.assertEqual(F.UPCOMING_STANDARD_TAKER_THETA, D("0.0695"))
+        self.assertEqual(F.CURRENT_CAPTURED_TAKER_THETA,
+                         F.theta_taker("JUL2026"))
+        self.assertEqual(F.UPCOMING_STANDARD_TAKER_THETA,
+                         F.theta_taker("SEP2026"))
+
+
+class TheUpcomingComboPremium(unittest.TestCase):
+    """The premium is real, dated, and NOT a current cost."""
+
+    def test_the_formula_is_labelled_upcoming_and_the_current_one_is_unknown(self):
+        self.assertIn("EFFECTIVE 2026-09-16 23:59 ET",
+                      F.UPCOMING_COMBO_TAKER_FEE_FORMULA)
+        self.assertEqual(F.CURRENT_COMBO_TAKER_FEE_FORMULA, "NOT_IDENTIFIED")
+
+    def test_the_premium_is_measured_against_the_UPCOMING_single_leg_fee(self):
+        """Comparing the upcoming combo curve against TODAY's 0.06 would blend
+        two regimes and overstate the premium."""
+        with self.assertRaises(ValueError):
+            F.upcoming_combo_vs_single_leg_surcharge(1000, D("0.20"),
+                                                     "JUL2026")
+
+    def test_the_premium_percentages_to_the_precision_we_report(self):
+        from run85_trackb_fees import exact_fee
+        expect = {"0.05": 49.3, "0.10": 42.0, "0.20": 29.5,
+                  "0.50": 7.2, "0.90": 0.06}
+        for p, want in expect.items():
+            single = exact_fee(F.theta_taker("SEP2026"), 1000, D(p))
+            sur = F.upcoming_combo_vs_single_leg_surcharge(1000, D(p))
+            got = 100.0 * float(sur / single)
+            self.assertAlmostEqual(got, want, delta=0.05,
+                                   msg="p=%s got %.3f%% want %.2f%%"
+                                       % (p, got, want))
+
+    def test_the_far_tail_premium_is_six_hundredths_not_a_tenth(self):
+        """+0.06%, not +0.1%. Rounding it up nearly doubles it, and it is the
+        one figure where the premium is negligible -- which is a real fact
+        about where combos cost least, worth not blurring."""
+        from run85_trackb_fees import exact_fee
+        single = exact_fee(F.theta_taker("SEP2026"), 1000, D("0.90"))
+        sur = F.upcoming_combo_vs_single_leg_surcharge(1000, D("0.90"))
+        self.assertAlmostEqual(100.0 * float(sur / single), 0.0576, places=3)

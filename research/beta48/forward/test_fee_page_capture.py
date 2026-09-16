@@ -132,8 +132,13 @@ class TheAnnouncedChange(unittest.TestCase):
         self.assertEqual(F.PUBLIC_FEE_SCHEDULE, "CAPTURED_FROM_PRIMARY_SOURCE")
 
 
-class CombosHaveTheirOwnCurve(unittest.TestCase):
-    """The finding that cuts AGAINST combos as an orphan-risk remedy."""
+class CombosHaveTheirOwnUpcomingCurve(unittest.TestCase):
+    """A COST that is verified from primary docs, for a BENEFIT that is not.
+
+    Both halves matter. The premium is real and dated; whether it buys lower
+    execution risk is the open question, and these tests are careful not to
+    answer it in either direction.
+    """
 
     def setUp(self):
         self.t = _text()
@@ -144,32 +149,45 @@ class CombosHaveTheirOwnCurve(unittest.TestCase):
 
     def test_the_combo_fee_is_the_single_leg_fee_plus_a_surcharge(self):
         for p in ("0.05", "0.20", "0.50", "0.80", "0.95"):
-            surcharge = F.combo_vs_single_leg_surcharge(1000, D(p))
+            surcharge = F.upcoming_combo_vs_single_leg_surcharge(1000, D(p))
             self.assertGreater(surcharge, 0,
                                "a combo is never cheaper to take, at p=%s" % p)
 
     def test_the_surcharge_peaks_in_the_cheap_tail_not_at_even_money(self):
         """p(1-p)^4 is maximised at p = 0.2, which is precisely the band the
         retrospective work kept finding interesting."""
-        at_20 = F.combo_vs_single_leg_surcharge(1000, D("0.20"))
+        at_20 = F.upcoming_combo_vs_single_leg_surcharge(1000, D("0.20"))
         for other in ("0.05", "0.10", "0.30", "0.50", "0.80"):
             self.assertGreater(at_20,
-                               F.combo_vs_single_leg_surcharge(1000, D(other)))
+                               F.upcoming_combo_vs_single_leg_surcharge(1000, D(other)))
 
     def test_the_surcharge_at_its_peak_is_about_29_percent_of_the_single_fee(self):
         single = F.exact_fee(F.theta_taker("SEP2026"), 1000, D("0.20")) \
             if hasattr(F, "exact_fee") else None
         from run85_trackb_fees import exact_fee
         single = exact_fee(F.theta_taker("SEP2026"), 1000, D("0.20"))
-        sur = F.combo_vs_single_leg_surcharge(1000, D("0.20"))
+        sur = F.upcoming_combo_vs_single_leg_surcharge(1000, D("0.20"))
         self.assertEqual(sur, D("3.2768000"))          # $0.0032768/contract
         self.assertAlmostEqual(float(sur / single), 0.2946, places=3)
 
-    def test_the_jul2026_combo_curve_is_not_invented(self):
-        """Only the SEP2026 form was captured. Asking for the other raises
-        rather than silently substituting 0.06."""
+    def test_the_current_combo_curve_is_not_invented(self):
+        """Only the UPCOMING form was captured. Nothing in the page says the
+        surcharge term exists today, so the current curve stays unidentified
+        rather than being back-formed by swapping the coefficient."""
+        self.assertEqual(F.CURRENT_COMBO_TAKER_FEE_FORMULA, "NOT_IDENTIFIED")
         with self.assertRaises(ValueError):
-            F.combo_taker_fee(1000, D("0.50"), "JUL2026")
+            F.upcoming_combo_taker_fee(1000, D("0.50"), "JUL2026")
+
+    def test_the_premium_is_verified_but_the_benefit_is_not_prejudged(self):
+        """The venue clearly charges an upcoming premium. Whether it buys
+        materially lower orphan/execution risk is UNRESOLVED -- and must not
+        be recorded as zero just because it is unmeasured."""
+        self.assertEqual(F.UPCOMING_COMBO_TAKER_COST_PREMIUM,
+                         "VERIFIED_FROM_PRIMARY_DOCS")
+        for f in ("COMBO_ORPHAN_RISK_REDUCTION", "COMBO_EXECUTION_ATOMICITY",
+                  "COMBO_PARTIAL_FILL_BEHAVIOR",
+                  "COMBO_NET_VALUE_VS_SINGLE_LEG_EXECUTION"):
+            self.assertEqual(getattr(F, f), "NOT_IDENTIFIED", f)
 
     def test_combo_maker_and_incentive_treatment_stay_unidentified(self):
         """The page's 'maker rebates are unchanged' is a statement about the

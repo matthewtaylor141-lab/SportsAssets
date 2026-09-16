@@ -124,3 +124,78 @@ already established on the single clean page of segment 35042094434 and is
 unchanged: discount factors are only 0.3 and 0.35; pools are 500 / 1000 / 1250
 / 10000; target sizes 500 / 1000 / 20000. The **counts** do not survive and are
 not reported.
+
+---
+
+## C-6. "Tonight" — an off-by-one-day paraphrase of the fee cutover
+
+**Said:** that the fee cutover was "tonight, 03:59 UTC", in reports written
+from captures stamped 2026-09-16 in UTC.
+
+**Correct:** the cutover is **23:59 ET on Wednesday 2026-09-16**, which is
+**03:59 UTC on Thursday 2026-09-17**. At the time those reports were written
+it was the evening of **Tuesday 2026-09-15** in ET, and the cutover was
+**~26 hours away** — not that night, and not 03:59 UTC on the 16th.
+
+**Where the error was and was not.** The code was right throughout:
+`REGIME_CUTOVER_UTC = 2026-09-17 03:59Z` and the collector's
+`FEE_REGIME_CUTOVER_UTC` both carried the correct instant, and every captured
+segment was correctly labelled `JUL2026`. The error was in narration only.
+
+**Why it matters more than a typo.** The ET date and the UTC date of this
+cutover **differ**. Reading a UTC capture stamp (`2026-09-16T00:29Z`) and
+assuming the cutover shares that date puts the new regime a full day early —
+after which a correctly captured `feeCoefficient = 0.06` reads as though it
+*contradicts* the documentation, when it is in fact the correct current value.
+That is a defect that manufactures a false anomaly.
+
+**Pinned** in `test_fees_v2.py::TheCutoverMoment`: the ET weekday and the UTC
+weekday are asserted to be Wednesday and Thursday respectively, the two dates
+asserted to differ, `03:59 UTC on the 16th` asserted to still be `JUL2026`,
+every hour of the 16th UTC asserted `JUL2026`, and each of the four capture
+timestamps we already hold asserted pre-cutover.
+
+Preserved until a post-cutover observation:
+
+```
+CURRENT_CAPTURED_TAKER_THETA   0.06
+UPCOMING_STANDARD_TAKER_THETA  0.0695
+UPCOMING_EFFECTIVE_TIME        2026-09-16 23:59 ET (Wednesday)
+UPCOMING_EFFECTIVE_TIME_UTC    2026-09-17 03:59 UTC (Thursday)
+VERIFIED_FROM_CAPTURE          False
+```
+
+---
+
+## C-7. The combo curve is UPCOMING, and its benefit was nearly prejudged
+
+Two faults in one paragraph.
+
+**(a) Schedule.** I presented the combo curve
+`Fee = C × p × [0.0695(1-p) + 0.04(1-p)^4]` as though it described a current
+cost. It does not: it sits under the page's "Upcoming fee changes" callout and
+takes effect at the same cutover as the standard coefficient. Renamed
+`UPCOMING_COMBO_TAKER_FEE_FORMULA`; `CURRENT_COMBO_TAKER_FEE_FORMULA` is
+`NOT_IDENTIFIED` and is **not** back-formed by substituting 0.06.
+
+**(b) Conclusion.** I wrote that a combo is "a more expensive way to acquire
+the same legging risk". That prejudges the benefit as zero while
+`COMBO_EXECUTION_ATOMICITY` and `COMBO_PARTIAL_FILL_BEHAVIOR` are both
+unmeasured — the mirror image of the error this programme spends most of its
+effort avoiding in the other direction. A venue charging a premium for a paired
+instrument may be charging for real risk transfer.
+
+Replaced with:
+
+```
+UPCOMING_COMBO_TAKER_COST_PREMIUM       VERIFIED_FROM_PRIMARY_DOCS
+COMBO_ORPHAN_RISK_REDUCTION             NOT_IDENTIFIED
+COMBO_EXECUTION_ATOMICITY               NOT_IDENTIFIED
+COMBO_PARTIAL_FILL_BEHAVIOR             NOT_IDENTIFIED
+COMBO_NET_VALUE_VS_SINGLE_LEG_EXECUTION NOT_IDENTIFIED
+```
+
+**(c) Precision.** The far-tail premium is **+0.06%** at p = 0.90, not the
++0.1% I reported. Rounding up nearly doubles it, and it is the one price where
+the premium is negligible. Pinned to 0.0576% in
+`test_fees_v2.py::TheUpcomingComboPremium`.
