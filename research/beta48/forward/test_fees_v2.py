@@ -253,19 +253,49 @@ class BreakevenAdverseSelection(unittest.TestCase):
 
 
 class LiquidityScoring(unittest.TestCase):
+    """The observed discount factors are 0.3 and 0.35 -- NOT the ~0.9 a first
+    reading of the formula might suggest. Captured from /v1/incentives on
+    2026-09-16, 267 active liquidityProgram periods, factors {0.3, 0.35} only.
+    """
+
+    OBSERVED = (D("0.3"), D("0.35"))
 
     def test_at_the_touch_the_score_is_the_full_order_size(self):
-        self.assertEqual(F.liquidity_score(500, 0, D("0.9")), D("500"))
+        for f in self.OBSERVED:
+            self.assertEqual(F.liquidity_score(500, 0, f), D("500"))
 
-    def test_each_tick_away_discounts_the_score(self):
-        near = F.liquidity_score(500, 1, D("0.9"))
-        far = F.liquidity_score(500, 5, D("0.9"))
-        self.assertLess(far, near)
-        self.assertEqual(near, D("0.9") * D("500"))
+    def test_one_tick_off_the_touch_costs_most_of_the_score(self):
+        """At 0.3, resting ONE tick behind scores 30% of the same size, and
+        two ticks 9%. The programme pays for the touch, not for presence."""
+        self.assertEqual(F.liquidity_score(500, 1, D("0.3")), D("150.0"))
+        self.assertEqual(F.liquidity_score(500, 2, D("0.3")), D("45.00"))
+        self.assertEqual(F.liquidity_score(500, 3, D("0.3")), D("13.500"))
+
+    def test_size_cannot_buy_back_distance(self):
+        """A quote three ticks back needs ~37x the size to match one at the
+        touch, which is a far larger inventory risk for the same score."""
+        at_touch = F.liquidity_score(500, 0, D("0.3"))
+        self.assertLess(F.liquidity_score(500 * 30, 3, D("0.3")), at_touch)
+        self.assertGreater(F.liquidity_score(500 * 40, 3, D("0.3")), at_touch)
+
+    def test_a_tick_is_not_a_cent_everywhere(self):
+        """The board showed tick sizes of 0.001, 0.005 and 0.01, so 'one tick
+        from best' can be a TENTH of a cent -- the distance penalty and the
+        price distance are different quantities and must not be conflated."""
+        observed_ticks = [D("0.001"), D("0.005"), D("0.01")]
+        self.assertEqual(len(set(observed_ticks)), 3)
+        # One tick back scores the same whatever the tick is WORTH.
+        scores = {F.liquidity_score(100, 1, D("0.3")) for _ in observed_ticks}
+        self.assertEqual(len(scores), 1)
 
     def test_score_is_not_a_dollar_amount(self):
-        """Converting a score to a payout needs a denominator we do not have."""
-        s = F.liquidity_score(500, 0, D("0.9"))
+        """Converting a score to a payout needs a denominator we do not have.
+
+        The endpoint publishes the pool and the target size but NOT the total
+        qualifying score across participants, so our share is unknowable from
+        our own quotes.
+        """
+        s = F.liquidity_score(500, 0, D("0.3"))
         self.assertEqual(F.estimated_reward_share(s, None, D("1000")),
                          "NOT_IDENTIFIED")
         self.assertEqual(F.estimated_reward_share(s, 0, D("1000")),

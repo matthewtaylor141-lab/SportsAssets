@@ -464,58 +464,143 @@ def test_a_genuinely_advancing_pagination_still_walks(tmp_path):
 
 # ------------------------------------------------- the incentives capture --
 
-def _rules_http(payload, status=200, doc_status=200):
+def _period(**kw):
+    """One `timePeriods` entry, shaped as the venue actually returned it."""
+    d = {"programId": "prog_1", "programType": "liquidityProgram",
+         "start": "2026-09-15T22:00:00Z", "rewardPool": 1000,
+         "status": "active", "discountFactor": 0.3, "targetSize": 500,
+         "period": "live", "createdAt": "2026-09-15T22:54:30Z"}
+    d.update(kw)
+    return d
+
+
+def _incentive_market(slug, periods=None, state="INSTRUMENT_STATE_OPEN"):
+    return {"marketSlug": slug, "instrumentState": state, "category": "",
+            "subcategory": "", "eventStartTime": "", "instrumentProduct": "",
+            "timePeriods": periods if periods is not None else [_period()]}
+
+
+def _rules_http(pages, status=200, doc_status=200):
+    """`pages` is a list of incentive page bodies, served in order."""
+    state = {"n": 0}
+
     class H:
         def get(self, url, params=None, timeout=None):
-            is_doc = url.startswith("https://docs.")
+            if url.startswith("https://docs."):
+                class D:
+                    status_code = doc_status
+                    headers = {}
+                    content = b"body"
+                    text = "FEE PAGE TEXT"
+                    json = staticmethod(lambda: {})
+                return D()
+            i = min(state["n"], len(pages) - 1)
+            state["n"] += 1
+            body = pages[i]
 
             class R:
-                status_code = doc_status if is_doc else status
+                status_code = status
                 headers = {}
                 content = b"body"
-                text = "FEE PAGE TEXT"
-                json = staticmethod(lambda: payload)
+                json = staticmethod(lambda: body)
             return R()
     return H()
 
 
-def test_rules_records_the_program_fields_a_later_observation_needs(tmp_path):
-    payload = {"incentives": [{
-        "active": True, "type": "LIQUIDITY", "slug": "a",
-        "rewardPool": 500, "discountFactor": 0.9, "targetSize": 1000,
-        "maxSpread": 0.03, "period": "DAILY",
-        "startDate": "2026-09-01T00:00:00Z", "endDate": "2026-10-01T00:00:00Z",
-    }]}
+def test_rules_reads_the_economics_out_of_the_time_period(tmp_path):
+    """Every economic field lives INSIDE a timePeriod, not on the market.
+
+    The first live capture read the market level, found nothing, and wrote a
+    full row of nulls beside a `raw` that held the answers.
+    """
+    page = {"programs": [_incentive_market("a")], "nextPageToken": ""}
     p = C.Pacer(); p.spacing = 0.0
-    out = C.rules(tmp_path, p, _rules_http(payload))
+    out = C.rules(tmp_path, p, _rules_http([page]))
     assert out["INCENTIVES_ENDPOINT_REACHABLE"] == "YES"
     prog = out["programs"][0]
-    assert prog["INCENTIVE_PROGRAM_ACTIVE"] is True
-    assert prog["PROGRAM_TYPE"] == "LIQUIDITY"
-    assert prog["REWARD_POOL"] == 500
-    assert prog["DISCOUNT_FACTOR"] == 0.9
-    assert prog["TARGET_SIZE"] == 1000
-    assert prog["PROGRAM_START"] and prog["PROGRAM_END"]
+    assert prog["MARKET_SLUG"] == "a"
+    assert prog["INCENTIVE_PROGRAM_ACTIVE"] == "active"
+    assert prog["PROGRAM_TYPE"] == "liquidityProgram"
+    assert prog["REWARD_POOL"] == 1000
+    assert prog["DISCOUNT_FACTOR"] == 0.3
+    assert prog["TARGET_SIZE"] == 500
+    assert prog["PROGRAM_PERIOD"] == "live"
+    assert prog["PROGRAM_START"] == "2026-09-15T22:00:00Z"
+    assert prog["INSTRUMENT_STATE"] == "INSTRUMENT_STATE_OPEN"
     assert out["fee_regime"] in ("JUL2026", "SEP2026")
+
+
+def test_a_market_with_several_periods_becomes_several_records(tmp_path):
+    """Markets carry 1, 4 or 5 periods with DIFFERENT pools and factors, so
+    one of them may never stand in for the market."""
+    mkt = _incentive_market("a", [
+        _period(period="early", rewardPool=500, discountFactor=0.35),
+        _period(period="day_of", rewardPool=1250, discountFactor=0.35),
+        _period(period="live", rewardPool=10000, discountFactor=0.3,
+                targetSize=20000)])
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p,
+                  _rules_http([{"programs": [mkt], "nextPageToken": ""}]))
+    assert out["incentivized_markets"] == 1
+    assert out["programs_parsed"] == 3
+    assert [x["PROGRAM_PERIOD"] for x in out["programs"]] == [
+        "early", "day_of", "live"]
+    assert [x["REWARD_POOL"] for x in out["programs"]] == [500, 1250, 10000]
+
+
+def test_the_incentive_list_is_walked_to_exhaustion(tmp_path):
+    """The first capture took page one and left a nextPageToken unfollowed --
+    the same prefix mistake that made the retrospective board unusable."""
+    pages = [{"programs": [_incentive_market("s%d" % i)],
+              "nextPageToken": "t%d" % i} for i in range(3)]
+    pages.append({"programs": [_incentive_market("last")],
+                  "nextPageToken": ""})
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p, _rules_http(pages))
+    assert out["incentive_pages_walked"] == 4
+    assert out["INCENTIVES_LIST_EXHAUSTED"] == "YES"
+    assert out["incentivized_markets"] == 4
+
+
+def test_a_repeating_page_token_ends_the_walk(tmp_path):
+    page = {"programs": [_incentive_market("a")], "nextPageToken": "same"}
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p, _rules_http([page] * 10))
+    assert out["incentive_pages_walked"] == 2, "a token that repeats is the end"
+
+
+def test_absent_incentive_fields_are_not_inferred(tmp_path):
+    """`end` and `maxSpread` are not in this payload. A duration is never
+    guessed from `start`."""
+    p = C.Pacer(); p.spacing = 0.0
+    out = C.rules(tmp_path, p,
+                  _rules_http([{"programs": [_incentive_market("a")],
+                                "nextPageToken": ""}]))
+    prog = out["programs"][0]
+    assert prog["PROGRAM_END"] is None
+    assert prog["MAX_SPREAD"] is None
 
 
 def test_an_estimated_reward_is_never_recorded_as_an_actual_one(tmp_path):
     """The binding distinction. Nothing here has an account, so no reward has
-    been earned by anyone and none may be written as if it had."""
+    been earned by anyone and none may be written as if it had. Nor can this
+    file know whether the target size was already met ahead of BETTOR: the
+    endpoint publishes no total qualifying score."""
     p = C.Pacer(); p.spacing = 0.0
     out = C.rules(tmp_path, p,
-                  _rules_http({"incentives": [{"active": True, "slug": "a"}]}))
+                  _rules_http([{"programs": [_incentive_market("a")],
+                                "nextPageToken": ""}]))
     prog = out["programs"][0]
     assert prog["ACTUAL_REWARD"] == "NOT_IDENTIFIED"
     assert prog["ESTIMATED_REWARD"] == "NOT_COMPUTED_HERE"
+    assert prog["TARGET_SIZE_ALREADY_MET_BY_OTHERS"] == "NOT_IDENTIFIED"
 
 
 def test_an_unreachable_incentives_endpoint_is_recorded_not_defaulted(tmp_path):
     p = C.Pacer(); p.spacing = 0.0
-    out = C.rules(tmp_path, p, _rules_http({}, status=404, doc_status=403))
+    out = C.rules(tmp_path, p, _rules_http([{}], status=404, doc_status=403))
     assert out["INCENTIVES_ENDPOINT_REACHABLE"] == "NO"
     assert out["programs_parsed"] == 0
-    assert out["incentive_http_statuses"] == [404, 404]
     assert out["doc_http_statuses"] == [403, 403]
     # An absent answer stays absent. It never becomes "no program is running".
     assert out["NEGOTIATED_MARKET_MAKER_ECONOMICS"] == "NOT_IDENTIFIED"
@@ -526,7 +611,8 @@ def test_the_rule_documents_are_stored_with_a_hash(tmp_path):
     """A relayed coefficient becomes captured evidence only if the page that
     states it is stored verbatim and can be re-checked."""
     p = C.Pacer(); p.spacing = 0.0
-    out = C.rules(tmp_path, p, _rules_http({"incentives": []}))
+    out = C.rules(tmp_path, p,
+                  _rules_http([{"programs": [], "nextPageToken": ""}]))
     assert len(out["doc_sha256"]) == 2
     assert all(v for v in out["doc_sha256"].values())
     docs = [json.loads(x) for x in

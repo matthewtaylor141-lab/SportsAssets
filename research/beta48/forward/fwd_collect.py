@@ -128,6 +128,7 @@ MIN_SPACING_S = 1.0 / MAX_RPS
 TIMEOUT_S = 10.0
 PAGE_LIMIT = 100
 MAX_PAGES_DEFAULT = 200          # a real terminal boundary, not a prefix
+INCENTIVES_MAX_PAGES = 200       # token-paginated; walked until it exhausts
 
 
 def _now():
@@ -405,8 +406,28 @@ def rules(outdir: Path, pacer, http) -> dict:
     the endpoint supplies current values they are what get stored.
     """
     wall, _ = _now()
-    rows = [_paced_get(http, pacer, INCENTIVES_PATH)]
-    rows.append(_paced_get(http, pacer, INCENTIVES_PATH, {"active": "true"}))
+
+    # TOKEN PAGINATION, walked to exhaustion.
+    #
+    # The first live capture took one page and recorded 100 programs beside a
+    # `nextPageToken` it never followed -- the same prefix mistake that made
+    # the retrospective board unusable, in a new place. It also sent
+    # `active=true`, which returned byte-identical content (87,650 bytes both
+    # times) and is therefore not a filter this endpoint honours; that request
+    # is dropped rather than left in looking like a control.
+    rows, token, pages = [], None, 0
+    exhausted = False
+    while pages < INCENTIVES_MAX_PAGES:
+        r = _paced_get(http, pacer, INCENTIVES_PATH,
+                       {"pageToken": token} if token else None)
+        rows.append(r)
+        pages += 1
+        body = r.get("body") or {}
+        nxt = body.get("nextPageToken") if isinstance(body, dict) else None
+        if not nxt or nxt == token:
+            exhausted = True
+            break
+        token = nxt
 
     docs = []
     for url in DOC_URLS:
@@ -429,47 +450,67 @@ def rules(outdir: Path, pacer, http) -> dict:
             row["error"] = type(exc).__name__
         docs.append(row)
 
-    programs = []
+    # FLATTENED TO ONE RECORD PER (MARKET, TIME PERIOD).
+    #
+    # A market carries a LIST of `timePeriods` -- observed 1, 4 or 5 of them --
+    # and every economic field lives inside a period, not on the market. The
+    # first capture read the market level, found nothing there, and wrote a
+    # full set of nulls beside a `raw` that held the answers. A market is
+    # therefore never summarised by one of its periods: each becomes its own
+    # record, and the period is named.
+    #
+    # `end` and `maxSpread` are NOT in this payload. They are emitted as None
+    # rather than inferred from `start` plus a guessed duration.
+    programs, markets_seen = [], set()
     for r in rows:
         body = r.get("body")
-        items = []
-        if isinstance(body, dict):
-            for key in ("incentives", "programs", "markets", "data", "rewards"):
-                v = body.get(key)
-                if isinstance(v, list):
-                    items = v
-                    break
-        elif isinstance(body, list):
-            items = body
+        items = body.get("programs") if isinstance(body, dict) else None
+        if not isinstance(items, list):
+            continue
         for it in items:
             if not isinstance(it, dict):
                 continue
-            programs.append({
-                "INCENTIVE_PROGRAM_ACTIVE": it.get("active"),
-                "PROGRAM_TYPE": it.get("type") or it.get("programType"),
-                "REWARD_POOL": (it.get("rewardPool") or it.get("pool")
-                                or it.get("rewardsDailyRate")),
-                "DISCOUNT_FACTOR": (it.get("discountFactor")
-                                    or it.get("rewardsDiscountFactor")),
-                "TARGET_SIZE": (it.get("targetSize")
-                                or it.get("rewardsMinSize")),
-                "MAX_SPREAD": (it.get("maxSpread")
-                               or it.get("rewardsMaxSpread")),
-                "PROGRAM_PERIOD": it.get("period"),
-                "PROGRAM_START": it.get("startDate") or it.get("start"),
-                "PROGRAM_END": it.get("endDate") or it.get("end"),
-                "MARKET_SLUG": it.get("slug") or it.get("marketSlug"),
-                "ESTIMATED_REWARD": "NOT_COMPUTED_HERE",
-                "ACTUAL_REWARD": "NOT_IDENTIFIED",
-                "raw": it,
-            })
+            slug = it.get("marketSlug")
+            markets_seen.add(slug)
+            periods = it.get("timePeriods") or []
+            if not periods:
+                periods = [{}]
+            for tp in periods:
+                if not isinstance(tp, dict):
+                    tp = {}
+                programs.append({
+                    "MARKET_SLUG": slug,
+                    "INSTRUMENT_STATE": it.get("instrumentState"),
+                    "EVENT_START_TIME": it.get("eventStartTime") or None,
+                    "CATEGORY": it.get("category") or None,
+                    "PROGRAM_ID": tp.get("programId"),
+                    "INCENTIVE_PROGRAM_ACTIVE": tp.get("status"),
+                    "PROGRAM_TYPE": tp.get("programType"),
+                    "REWARD_POOL": tp.get("rewardPool"),
+                    "DISCOUNT_FACTOR": tp.get("discountFactor"),
+                    "TARGET_SIZE": tp.get("targetSize"),
+                    "MAX_SPREAD": tp.get("maxSpread"),      # absent: stays None
+                    "PROGRAM_PERIOD": tp.get("period"),
+                    "PROGRAM_START": tp.get("start"),
+                    "PROGRAM_END": tp.get("end"),           # absent: stays None
+                    "PROGRAM_CREATED_AT": tp.get("createdAt"),
+                    # Our own score needs the TOTAL qualifying score across all
+                    # participants, which this endpoint does not publish.
+                    "ESTIMATED_REWARD": "NOT_COMPUTED_HERE",
+                    "ACTUAL_REWARD": "NOT_IDENTIFIED",
+                    "TARGET_SIZE_ALREADY_MET_BY_OTHERS": "NOT_IDENTIFIED",
+                    "raw_time_period": tp,
+                })
 
     reachable = any(r.get("http_status") == 200 for r in rows)
     out = {"collector_version": COLLECTOR_VERSION,
            "captured_at_utc": wall,
            "fee_regime": fee_regime(wall),
            "INCENTIVES_ENDPOINT_REACHABLE": "YES" if reachable else "NO",
+           "INCENTIVES_LIST_EXHAUSTED": "YES" if exhausted else "NO",
+           "incentive_pages_walked": pages,
            "incentive_http_statuses": [r.get("http_status") for r in rows],
+           "incentivized_markets": len(markets_seen),
            "programs_parsed": len(programs),
            "programs": programs,
            "doc_http_statuses": [d.get("http_status") for d in docs],
@@ -488,11 +529,11 @@ def rules(outdir: Path, pacer, http) -> dict:
         for d in docs:
             fh.write(json.dumps(d) + "\n")
     (outdir / "rules.json").write_text(json.dumps(out, indent=1))
-    print("incentives reachable %s | statuses %s | programs %d | docs %s | "
-          "regime %s"
-          % (out["INCENTIVES_ENDPOINT_REACHABLE"],
-             out["incentive_http_statuses"], len(programs),
-             out["doc_http_statuses"], out["fee_regime"]))
+    print("incentives reachable %s | pages %d | exhausted %s | markets %d | "
+          "program-periods %d | docs %s | regime %s"
+          % (out["INCENTIVES_ENDPOINT_REACHABLE"], pages,
+             out["INCENTIVES_LIST_EXHAUSTED"], len(markets_seen),
+             len(programs), out["doc_http_statuses"], out["fee_regime"]))
     return out
 
 
