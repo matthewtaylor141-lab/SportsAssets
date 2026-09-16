@@ -1,0 +1,76 @@
+{
+ "planned_sets": 513,
+ "planned_requests": 5130,
+ "idle_slots": 2064,
+ "stop_reason": "ALL_SUBJECTS_RETIRED",
+ "sets_started": 480,
+ "sets_completed": 480,
+ "sets_abandoned_at_segment_end": 0,
+ "http_429": 0,
+ "identity_failures": 0,
+ "grid_reanchors": [],
+ "throttle_events": [],
+ "venue_requests": 4800,
+ "book_observations": 2400,
+ "bbo_observations": 2400,
+ "elapsed_s": 16827.543306511998,
+ "achieved_rps": 0.28518793288975186,
+ "gap_stats": {
+  "min": 2.5,
+  "median": 2.5,
+  "max": 27.5
+ },
+ "cross_agree": 0,
+ "cross_disagree": 0,
+ "cross_absent": 2400,
+ "retired": {
+  "aec-cfb-portst-ore-2026-09-18": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T02:55:51.917749+00:00"
+  },
+  "aec-nfl-chi-car-2026-09-13": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T02:56:26.917731+00:00"
+  },
+  "aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T02:57:01.917755+00:00"
+  },
+  "asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T02:57:36.917743+00:00"
+  },
+  "aec-cfb-coast-del-2026-09-19": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T02:58:11.917786+00:00"
+  },
+  "aec-nfl-bal-ind-2026-09-13": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T02:58:46.917862+00:00"
+  },
+  "atc-lmx-ame-tij-2026-09-05-tij": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T02:59:21.917764+00:00"
+  },
+  "aec-cfb-kentst-ohiost-2026-09-19": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T02:59:56.917788+00:00"
+  },
+  "aec-nfl-atl-pit-2026-09-13": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T03:00:31.917761+00:00"
+  },
+  "atc-lmx-pue-tol-2026-09-04-draw": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T03:01:06.917738+00:00"
+  },
+  "aec-cfb-uwg-etnst-2026-09-19": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T03:01:41.917759+00:00"
+  },
+  "aec-nfl-cle-jax-2026-09-13": {
+   "reason": "SUSTAINED_NON_OPEN_STATE:None",
+   "at": "2026-09-16T03:02:16.917812+00:00"
+  }
+ }
+}
