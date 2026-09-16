@@ -1,0 +1,3240 @@
+"""Position mirroring, phase P0: the SHADOW (owner order 2026-09-02,
+"go for it, let's get this working").
+
+MEASUREMENT ONLY. This worker never places, cancels or touches an
+order. For each whale in MIRROR_WHALES (default "rn1") and each market
+he traded inside MIRROR_LOOKBACK_H (newest first), every tick it:
+
+  1. derives his position per outcome token from the fills we already
+     ingest (BUY adds, SELL subtracts), and reads the exit worker's
+     UNPINNED positions read for the same tokens so derived-vs-read
+     drift is a number (stamped; a stale read is excluded, not trusted);
+  2. maps the market to its Polymarket US slug and finds which of his
+     two tokens is the venue's LONG side -- first from our own ledger
+     rows on those tokens, else from the premap table (Postgres only,
+     no venue call);
+  3. reads what we hold there by our ledger (signed, long-token
+     shares) and by the venue -- from ONE paced positions walk per tick,
+     so a market we do not hold reads 0, not "unreadable" -- and the
+     venue's quote for the long side (one BBO call per market, paced);
+  4. computes the target = ratio x his_net, where ratio maps his
+     median opening burst to the $50 measuring clip (analytics/mirror),
+     capped at the mark, long-only in P0;
+  5. writes one mirror_shadow row with the plan it WOULD execute (side,
+     qty, resting price at his level, would-fill against the book) or
+     the reason for none;
+  6. records the EXIT LEG (A3/MIRROREXIT) beside that plan: whether he
+     REDUCED or LEFT, when, at what price the complement traded, what
+     our own leg was at that moment, what the exit rule would have done
+     (rest at his equivalent, hold, or nothing) and the reason when it
+     is nothing. The verdict on that plan is the row's own would_fill,
+     judged on the SELL side over the same TTL as every other plan.
+
+VENUE LOAD IS BOUNDED (review round one): the venue 429'd a board walk
+above ~3 req/s and the money path's no-stack referee reads the same
+positions endpoint, so every HTTP call here is paced at READ_PACING_S,
+the positions walk happens once per tick, at most MAX_MARKETS_PER_TICK
+markets are read, a failed walk abandons the tick before any BBO call,
+a run of BBO misses abandons it too, and a write failure (table absent
+until migration 046) stops the tick rather than spending venue budget
+on rows that cannot land. Every abandon backs off BACKOFF_S.
+
+Kill: MIRROR_SHADOW=off (env) or ingestion_state 'mirror_shadow' =
+"off" (DB switch, no deploy).
+
+THE CENSUS COLUMNS (to-a-tee Phase 0, owner order 2026-09-02 "I want
+us to match everything ... mirror the whales to a tee"): every gate the
+later phases read was unreadable from the row as written -- an unmapped
+market carried only its two token ids, a mapped one carried no family,
+no mapping class, no snapshot state, and his short side (55% of his
+mapped markets) was refused before it was measured. So the row now
+carries, INSIDE THE JSONB DETAIL and never as a new 046 column, what
+those gates need: the unmapped market's slug/title/sport/family/why/
+dollars; the mapped market's family, per-side flag, snapshot state,
+ledger facts (is our position on the slug a legacy per-fill row, and
+what mapping class the ledger row itself carries); a PARALLEL short
+reading (target_short and its plan, computed with allow_short=True and
+judged on the SELL side against the bid over the same TTL); and, when a
+plan is touched, how long it waited and what sat at the best bid/ask.
+The live-compared target (the value P1 names shadow_live_disagree on)
+is byte-identical to before: the short reading is beside it, never in
+it, because a shadow whose target went negative while the long-only
+book flattened would refuse P2 on that counter by construction.
+"""
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import os
+import re
+import time
+from collections import Counter
+from datetime import datetime
+from typing import Any
+
+from ..analytics import mirror as mi
+from ..analytics import mirror_live_rules as rules
+from ..db import get_pool, heartbeat
+from .. import venue_pace
+from ..venue_pace import pace
+
+log = logging.getLogger(__name__)
+
+# EVERY KNOB BELOW IS DOWNWARD-ONLY, through the rules' own helper.
+# These were raw env reads, and one of them is a money bound in
+# disguise: SNAP_MAX_AGE_S is the freshness gate on HIS position --
+# mirror_live reads it as fresh_read, which becomes the admission fact
+# the drift rule's increase clause and the snapshot resolution key on --
+# so a shell could open new books and grow live ones on an arbitrarily
+# old reading of the whale, and loosen the very gate the rollout is
+# steered by, without a deploy or a review. The dollar caps beside it
+# have been downward-only since the rules were written; these now match.
+# An operator can still make any of them TIGHTER (a shorter freshness
+# window, fewer markets, a shorter judge TTL) without a deploy.
+# an INTERVAL, not a cap: its aggressive direction is DOWN (more venue
+# reads on a key shared with the live lane), so it lengthens only --
+# which also keeps the operator's incident lever, slowing the shadow
+# during a venue event without a deploy
+#
+# E2 (2026-09-06) left this at 30 s, and the live lane's POLL_S with it:
+# the brief lowered both to 10 s ONLY with the live tick under 10 s on
+# the live book count, and the tick's floor is the pacer's -- one paced
+# read per 0.35 s, ~46 books x 0.35 s = 16 s before a single candidate
+# -- so the parallel walk lands the tick near that floor, not under 10 s.
+POLL_S = rules.min_wait_env("MIRROR_SHADOW_POLL_S", 30.0)
+LOOKBACK_H = rules.capped_env("MIRROR_LOOKBACK_H", 6.0, floor=0.25)
+RATIO_DAYS = int(rules.capped_env("MIRROR_RATIO_DAYS", 30.0, floor=1.0))
+RATIO_REFRESH_S = 3600.0
+READ_PACING_S = 0.35
+# THE SHADOW'S candidate quote reads a tick: 20, as before E2. The live
+# lane's budget is its own (mirror_live.MAX_MARKETS_PER_TICK, env
+# MIRROR_LIVE_MAX_MARKETS, 40 since E2): sharing one constant doubled
+# the shadow's reads on a venue that was already answering 429s (E2
+# review round 2, HIGH-B). Still capped_env: env may only lower it.
+MAX_MARKETS_PER_TICK = int(rules.capped_env("MIRROR_MAX_MARKETS", 20.0, floor=0.0))
+POSITIONS_PAGES_MAX = 5
+MISS_STREAK_ABANDON = 3
+BACKOFF_S = 60.0
+# a raw positions read older than this is not a reading of his book now
+# TWO-SIDED, and the floor is the interesting half. Raising it lets new
+# books open on an arbitrarily old reading of him. LOWERING it is not
+# the safe direction either: a book whose snapshot reads stale takes
+# select_flatten's vanished path, the only path that accepts slippage,
+# so a short window would delete the paired-flatten guard for every
+# book. The floor is the SNAPSHOT WRITER'S own cadence (whale_exits
+# INTERVAL_S, 120 s): under it, every read is stale by construction.
+SNAP_MAX_AGE_S = rules.capped_env("MIRROR_SNAP_MAX_AGE_S", 300.0, floor=120.0)
+# a plan is a resting order with this life: it fills if the book reaches
+# its price inside it, and did not fill if it ages past it while the
+# market is still read (the live lane's rest TTL, review of the first
+# shadow hour)
+JUDGE_TTL_S = rules.capped_env("MIRROR_JUDGE_TTL_S", 600.0, floor=30.0)  # the live rest TTL's own floor
+# a market that mapped to no venue market is not re-read every tick: the
+# per-tick cap goes to markets that can produce a plan (81% of RN1's
+# markets read unmapped in the first hour and took every slot)
+UNMAPPED_TTL_S = 900.0
+# A MARKET UNLISTED AT FIRST SIGHT MAY BE LISTED A MINUTE LATER (C2,
+# 2026-09-06). lal-esp-sev-2026-09-06-esp / No maps offline to
+# atc-lal-esp-sev-2026-09-06-esp BUY_SHORT, and production judged it
+# no_side_match at 19:02:02Z: the venue listed the market ~18:59Z for a
+# 19:00Z kickoff, the premap poller had not written the rows yet, and
+# the 900 s memo held the verdict for the whole first half. The
+# poller's cadence (workers/premap.py): the full sweep every 1800 s
+# (REFRESH_SECONDS, now-12h..now+96h, 120 pages), the fast lane every
+# 180 s (FAST_REFRESH_SECONDS, now-3h..now+14h, 25 pages) and SKIPPED
+# while the full sweep holds _SWEEP_LOCK -- so a fresh listing is in
+# us_premap within one fast cycle, two when one is skipped. No kickoff
+# time is readable here (us_premap stores no start time and his feed
+# carries a date, not a clock), so the rule keys on the two facts the
+# tick does have: the verdict and first sight. A market's FIRST
+# unmapped verdict, when the verdict is one the poller can change
+# (no_key_intersection: no row yet; no_side_match: rows, but maybe not
+# this market's yet), is remembered for two fast cycles; every later
+# miss keeps the full memo. Cost: at most one extra read per new
+# market, ever.
+UNMAPPED_FRESH_TTL_S = 360.0
+_POLLER_CAN_CHANGE = ("no_key_intersection", "no_side_match")
+
+
+def unmapped_memo_s(explain: str | None, *, seen_before: bool) -> float:
+    """How long an unmapped verdict is remembered: the fresh memo on a
+    market's first sight when the premap poller may still list it,
+    the full memo otherwise. Pure."""
+    step = str(explain or "").split(":", 1)[0]
+    if not seen_before and step in _POLLER_CAN_CHANGE:
+        return UNMAPPED_FRESH_TTL_S
+    return UNMAPPED_TTL_S
+# THE EXIT LEG'S OWN BOUNDS (A3). The census is a READ of rows this
+# worker already wrote, so its cost is a query, not venue budget: it is
+# bounded three ways -- a window, a row cap and a wall-clock timeout --
+# and it runs at most once per EXIT_SUMMARY_S, never per market.
+# EXIT_WINDOW_H is the gate's own 24 h; a shorter window is a tighter
+# reading, so it is downward-only like every other bound here.
+EXIT_WINDOW_H = rules.capped_env("MIRROR_EXIT_WINDOW_H", 24.0, floor=1.0)
+# an INTERVAL, like POLL_S: its aggressive direction is DOWN (more
+# database reads), so it lengthens only
+EXIT_SUMMARY_S = rules.min_wait_env("MIRROR_EXIT_SUMMARY_S", 900.0)
+# one row per (whale, market) comes back, so this is a cap on MARKETS,
+# not on rows read. A CENSUS THAT HIT ITS CAP IS NOT A READING OF THE
+# WINDOW -- the same standard `account_positions` holds the walk to --
+# so `exit_census` asks for one row MORE than this and refuses the
+# reading when that row comes back. The floor is deliberately far above
+# the gate's own minimum n: at floor=30 a shell could pin the census to
+# exactly the n the gate reads at, and every day busier than 30 markets
+# would then read as refused. 500 is five times the mapped-market count
+# the mirror programme records for a 24 h window (§0 of
+# docs/mirror-to-a-tee-program.md, recorded there, not measured here).
+EXIT_SUMMARY_MAX = int(rules.capped_env("MIRROR_EXIT_SUMMARY_MAX", 2000.0, floor=500.0))
+# not a knob: a read that has not answered in this long is unreadable,
+# and the tick must not wait on it
+EXIT_CENSUS_TIMEOUT_S = 15.0
+# §3b: "the line prints at n >= 30". The VALUE is an input to owner
+# decision 18; this is the count under which there is no reading at all.
+EXIT_MIN_N = 30
+_unmapped_until: dict[tuple[str, str], float] = {}
+# THE SHADOW LEAVES A TERMINAL MARKET (W1 / R2, 2026-09-07; the live
+# lane's D1 rule, mirror_live._terminal_until). The tick's 20 slots go
+# newest-touched first, and his newest-touched markets are matches he
+# trades to settlement: every one of them was re-judged for LOOKBACK_H
+# after the venue expired it, so the newest row per market -- the row
+# the coverage census keys on -- read 'no mark' on $385k that was
+# two-sided OPEN while he traded (skipped_markets 49-85 at 09:37Z and
+# 13:44Z, capped_tick true). A market whose read carried a TERMINAL
+# state (STATE_TERMINAL, the venue's own word) is remembered here per
+# (whale, condition_id) for UNMAPPED_TTL_S and skipped in the tick loop
+# beside _unmapped_until under `skipped_terminal`: one `no mark: venue
+# state ...` row, then silence, so the last reading before expiry is
+# the last row that can plan. NEVER for HALTED / SUSPENDED / PREOPEN
+# (they reopen), never when the state was unread. The miss streak's
+# rule is untouched (a terminal read counts nowhere, as before).
+_terminal_until: dict[tuple[str, str], float] = {}
+# THE MIRROR MAPS WHAT THE COPY LANE MAPS (C1, owner order 2026-09-06).
+# After premap says no, map_market runs the copy lane's exact steps
+# (map_lane.exact_lane: the slug grammar through resolve_market_exact /
+# resolve_derivative_exact, his slug verbatim, resolve_team_yesno_exact)
+# and the mirror-only aec code-order side. Those are VENUE reads, so
+# they are paced through the measurement pacer like every read here,
+# remembered per (whale, condition_id) for MAP_CACHE_TTL_S so the tick
+# that follows costs nothing, and bounded per tick: MAP_READS_PER_TICK
+# resolver calls, a capped_env (the environment may only LOWER it),
+# past which a market stays unmapped THIS tick under `map_reads_capped`
+# and is read again next tick -- never TTL-skipped, never a verdict.
+MAP_READS_PER_TICK = int(rules.capped_env("MIRROR_MAP_READS", 10.0, floor=0.0))
+MAP_CACHE_TTL_S = 900.0
+# (whale, condition_id) -> {"until", "tokens": {asset: (slug, intent, source) | None},
+#                           "refusal": name | None}; a venue slug the
+# exact resolver saw 404 is remembered under the same TTL so a lane the
+# budget cut resumes where it stopped instead of re-reading the 404s
+_map_cache: dict[tuple[str, str], dict] = {}
+_slug_404_until: dict[str, float] = {}
+# the sources map_market can answer with, least to most certified: the
+# market's source is its least certified token when the two differ
+MAP_SOURCE_RANK = ("ledger", "premap", "exact", "yesno", "grammar")
+
+
+class MapBudget:
+    """One tick's venue budget for mapping: `cap` resolver calls, counted
+    on `reads`; `hits` counts the cache answering instead."""
+
+    def __init__(self, cap: int | None = None) -> None:
+        self.cap = MAP_READS_PER_TICK if cap is None else int(cap)
+        self.reads = 0
+        self.hits = 0
+        self.capped = 0
+# the venue's word for a market open for trading (bbo_read's `state`);
+# an empty book under it is `no_quote`, never a halt
+_STATE_OPEN = "MARKET_STATE_OPEN"
+# THE VENUE'S TERMINAL STATES: a market that has ended -- settled,
+# expired, terminated (the SDK's MarketState literals plus CLOSED, seen
+# live on a settled market with a stale resting book). A PER-MARKET
+# fact, never a venue-wide one: a venue cannot expire every market, so
+# a read on one counts nowhere toward the miss streak (2026-09-06,
+# 12:32Z: `tick abandoned (venue_halted: MARKET_STATE_EXPIRED)` between
+# placements, off one book whose market had ended and his morning's
+# expired markets still inside LOOKBACK_H). Read by mirror_live too.
+STATE_TERMINAL: frozenset[str] = frozenset({
+    "MARKET_STATE_EXPIRED", "MARKET_STATE_CLOSED", "MARKET_STATE_TERMINATED",
+    # the SDK's own MarketState names a market's closing phase too, and
+    # three candidates ending together read exactly like the 12:32Z
+    # expiries (U10 review, finding 1)
+    "MARKET_STATE_MATCH_AND_CLOSE_AUCTION",
+})
+_STATE_RATIO = "mirror_ratio"
+_STATE_SWITCH = "mirror_shadow"
+_SNAP_RAW_KEY = "whale_positions_raw:%s"
+_backoff_until = 0.0
+_ratio_cache: dict[str, Any] = {"at": 0.0, "by_whale": {}}
+_exit_cache: dict[str, Any] = {"at": 0.0, "value": None}
+_sleep = asyncio.sleep          # indirection so a test can count the pacing
+
+
+def mirror_whales() -> list[str]:
+    raw = os.environ.get("MIRROR_WHALES", "rn1")
+    return sorted({w.strip().lower() for w in raw.split(",") if w.strip()})
+
+
+def enabled() -> bool:
+    return os.environ.get("MIRROR_SHADOW", "on").strip().lower() not in ("off", "0", "false", "no")
+
+
+async def _db_switch_off(pool) -> bool:
+    try:
+        v = await pool.fetchval("SELECT value FROM ingestion_state WHERE key=$1",
+                                _STATE_SWITCH)
+    except Exception:  # noqa: BLE001 — no switch row is 'on'
+        return False
+    if v is None:
+        return False
+    s = v if isinstance(v, str) else json.dumps(v)
+    return s.strip().strip('"').lower() in ("off", "0", "false", "no")
+
+
+# ----------------------------------------------------------------- ratio
+
+async def compute_ratio(pool, whale: str, days: int = RATIO_DAYS) -> dict:
+    """His opening burst per market over `days`, and the ratio that maps
+    the median burst to the measuring clip. Pure arithmetic lives in
+    analytics/mirror; this is the query."""
+    rows = await pool.fetch(
+        """
+        SELECT t.condition_id, t.asset, t.side, t.size::float8 AS size,
+               t.price::float8 AS price, extract(epoch FROM t.ts)::float8 AS ts
+          FROM trades t JOIN whales w ON w.id = t.whale_id
+         WHERE lower(w.username) = $1
+           AND t.ts >= now() - make_interval(days => $2)
+           AND t.condition_id IS NOT NULL
+         ORDER BY t.condition_id, t.ts
+        """, whale, int(days))
+    by: dict[str, list[dict]] = {}
+    for r in rows:
+        by.setdefault(str(r["condition_id"]), []).append(dict(r))
+    bursts = [mi.opening_burst(fs) for fs in by.values()]
+    out = mi.mirror_ratio(bursts)
+    out["whale"] = whale
+    out["days"] = int(days)
+    out["markets"] = len(by)
+    out["at"] = time.time()
+    return out
+
+
+async def refresh_ratios(pool, whales: list[str], force: bool = False) -> dict[str, dict]:
+    if not force and time.time() - _ratio_cache["at"] < RATIO_REFRESH_S and _ratio_cache["by_whale"]:
+        return _ratio_cache["by_whale"]
+    by: dict[str, dict] = {}
+    for w in whales:
+        try:
+            by[w] = await compute_ratio(pool, w)
+        except Exception as exc:  # noqa: BLE001 — no ratio = no target, named
+            log.warning("mirror_shadow: ratio for %s unreadable (%s)", w, type(exc).__name__)
+            by[w] = {"whale": w, "ratio": None, "why": f"unreadable: {type(exc).__name__}"}
+    _ratio_cache.update(at=time.time(), by_whale=by)
+    try:
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            _STATE_RATIO, json.dumps(by, default=str))
+    except Exception:  # noqa: BLE001 — the cache is enough for a tick
+        log.debug("mirror_shadow: ratio state write failed")
+    return by
+
+
+# ------------------------------------------------------------ his book
+
+async def active_conditions(pool, whale: str, hours: float = LOOKBACK_H, *,
+                            stamped: bool = False) -> list:
+    """His markets with activity in the window, NEWEST FIRST, so the
+    per-tick cap always reads the market he just moved in.
+
+    `stamped` (E7, 2026-09-07) hands back `(condition_id, last_ts)`
+    pairs instead -- the very `last_ts` this query already ranks on, as
+    an epoch float, None where the row carries none or it cannot be
+    read as an instant -- so the live lane's candidate memos can be
+    RELEASED by his newest fill without a read of their own. The same
+    one query either way."""
+    rows = await pool.fetch(
+        """
+        SELECT t.condition_id, max(t.ts) AS last_ts
+          FROM trades t JOIN whales w ON w.id = t.whale_id
+         WHERE lower(w.username) = $1 AND t.condition_id IS NOT NULL
+           AND t.ts >= now() - ($2::float8 * interval '1 hour')
+         GROUP BY t.condition_id
+         ORDER BY last_ts DESC
+        """, whale, float(hours))
+    if stamped:
+        return [(str(r["condition_id"]), _stamp_epoch(r.get("last_ts"))) for r in rows]
+    return [str(r["condition_id"]) for r in rows]
+
+
+def _stamp_epoch(v: Any) -> float | None:
+    """A fill stamp as an epoch float: a timestamptz (the column's
+    type, an aware datetime from the driver) or a finite number; a
+    naive datetime, anything else and an unreadable value are None --
+    no evidence, never a guessed instant."""
+    if isinstance(v, datetime):
+        if v.tzinfo is None:
+            return None
+        return float(v.timestamp())
+    if isinstance(v, bool) or v is None:
+        return None
+    if isinstance(v, (int, float)):
+        return float(v) if math.isfinite(float(v)) else None
+    return None
+
+
+# THE SOURCES THAT WRITE THE WALLET'S OWN NET LEGS (D1, 2026-09-06). The
+# chain path (ingestion/chain.py, _wallet_1155_legs) writes ONE row per
+# tx per token: the wallet's net ERC-1155 flow, size = the whole taker
+# order, price = its average. The S1 emitter (ingestion/s1_emitter.py)
+# is the second chain source: its `agg` record is the same aggregate
+# view (the wallet against the exchange), and the ingest probes on both
+# paths (`SQL_PROBE`, `_handle_v3`'s pre-probe: `source IN ('chain',
+# 's1')` per (tx, whale, asset)) make the two mutually exclusive on a
+# fill, so a (tx, asset, side) carries at most one of them. Everything
+# else in `trades.source` -- 'poll' (ingestion/poller.py), the
+# reconciler's re-sweep, 'backfill' -- is the Data API's shape: ONE ROW
+# PER MAKER MATCH, so a taker order that matched N makers is N rows
+# whose sizes sum to the chain row.
+FILLS_NET_LEG_SOURCES: tuple[str, ...] = ("chain", "s1")
+# what the LAST his_fills call collapsed (see his_fills_dedup)
+_FILLS_DEDUP: dict[str, float] = {"dup_rows": 0, "dup_shares": 0.0}
+
+
+def his_fills_dedup() -> dict:
+    """What the most recent `his_fills` call collapsed: `dup_rows`, the
+    per-match rows dropped because their (tx_hash, asset, side) also
+    holds a net-leg row, and `dup_shares`, their shares. Read by the
+    shadow and the live tick right after each call, so a tick can sum
+    them onto its stats (`fills_dedup_rows` / `fills_dedup_shares`).
+    Zero after a call that collapsed nothing, or that raised."""
+    return {"dup_rows": int(_FILLS_DEDUP["dup_rows"]),
+            "dup_shares": round(float(_FILLS_DEDUP["dup_shares"]), 4)}
+
+
+async def his_fills(pool, whale: str, condition_id: str) -> list[dict]:
+    """ALL his fills on the condition (his position is cumulative), with
+    the trade context the mapper needs, ONE READING PER (tx_hash, asset,
+    side): the net-leg row (source 'chain' or 's1',
+    FILLS_NET_LEG_SOURCES) when the key holds one, else every per-match
+    row (poll, backfill) the key holds.
+
+    THE RULE, AND WHY IT IS THE VENUE'S OWN NUMBER (D1, 2026-09-06,
+    book 16, aec-wta-markos-linnos-2026-09-06). The chain row is the
+    wallet's net 1155 legs for the tx -- the whole taker order at its
+    average price; the Data-API rows for the same tx are its maker
+    matches, and they sum to it exactly (tx 0x5446ded9b2e157ec Kostyuk
+    BUY: chain 15,164.0 @ 0.563; poll 4,996 @ 0.560 + 5,172 @ 0.560 +
+    4,996 @ 0.570 = 15,164.0). The ingest dedupe key (ingestion/
+    dedupe.py: tx, asset, side, size, price, ts) never collapses them
+    when the taker matched more than one maker, so the same fill sat in
+    the table twice and every fills-derived reading of his position was
+    inflated by the poll legs of multi-maker orders: 92,145 / 39,779
+    against the exit worker's snapshot of his wallet reading 55,993 /
+    29,555 (drift 0.44, so `rules.admission` refused every increase on
+    his most active book under `drift`). Collapsed by this rule the
+    fills read 49,483.5 + 6,509.9 (poll-only txs the chain path missed)
+    = 55,993.4 long and 29,555 other -- the snapshot, to the share. A
+    poll-only tx is KEPT WHOLE (nothing to collapse into), and a
+    per-match row whose leg does not sum to the chain row still
+    collapses: the chain row is the wallet's net legs, the truth.
+
+    This collapse is the MIRROR'S OWN READ-SIDE view. The trades table
+    is shared with the copy lane, the edge analytics and the
+    reconciler, and a wrong dedupe at ingest loses fills; the durable
+    fix is a dedupe on (tx, asset, side) at ingest with a sum check,
+    not here. It is done in SQL, deterministically (a window over the
+    key; rows keep their `ts, id` order), and what was dropped is
+    counted on every call (his_fills_dedup).
+
+    The event title lives on the markets table, not on trades (review
+    round two): without it the premap lookup builds its keys from one
+    source instead of three and misses the markets the copy sleeve
+    never traded -- the very ones the mirror exists to add. The OUTCOME
+    is coalesced from the token catalogue the way the copy lane's
+    unmapped census reads it (api/app.py, COALESCE(t.outcome,
+    mt.outcome); C1 build step 3): a chain row is inserted with outcome
+    NULL and enriched later, and a NULL outcome was filed as
+    no_side_match -- our miss, not the venue's."""
+    _FILLS_DEDUP.update(dup_rows=0, dup_shares=0.0)
+    rows = await pool.fetch(
+        """
+        WITH f AS (
+            SELECT t.id, t.source, t.tx_hash, t.asset, t.side, t.condition_id,
+                   t.size::float8 AS size, t.price::float8 AS price,
+                   extract(epoch FROM t.ts)::float8 AS ts,
+                   -- E9: the ingest's clock, for the plan's his_fills_seen
+                   extract(epoch FROM t.detected_at)::float8 AS detected_at,
+                   COALESCE(t.market_title, m.title) AS market_title, t.event_slug,
+                   m.event_title, COALESCE(t.market_slug, m.slug) AS market_slug,
+                   COALESCE(t.outcome, mt.outcome) AS outcome,
+                   COALESCE(t.outcome_index, mt.outcome_index) AS outcome_index,
+                   COALESCE(NULLIF(m.sport, 'unclassified'), NULLIF(t.sport, 'unclassified'),
+                            'unclassified') AS sport,
+                   -- the key holds a net-leg row (chain / s1): the wallet's
+                   -- own legs for the tx, which every per-match row of the
+                   -- same key is a split of
+                   bool_or(COALESCE(t.source, '') IN ('chain', 's1')) OVER (
+                       PARTITION BY t.whale_id, COALESCE(lower(NULLIF(t.tx_hash, '')), 'row:' || t.id::text),
+                                    t.asset, upper(t.side)) AS has_net_leg
+              FROM trades t JOIN whales w ON w.id = t.whale_id
+              LEFT JOIN markets m ON m.condition_id = t.condition_id
+              LEFT JOIN market_tokens mt ON mt.token_id = t.asset
+             WHERE lower(w.username) = $1 AND t.condition_id = $2
+        ), c AS (
+            SELECT f.*, (COALESCE(f.source, '') NOT IN ('chain', 's1') AND f.has_net_leg) AS collapsed
+              FROM f
+        ), d AS (
+            SELECT c.*,
+                   count(*) FILTER (WHERE c.collapsed) OVER () AS dup_rows,
+                   COALESCE(sum(c.size) FILTER (WHERE c.collapsed) OVER (), 0.0) AS dup_shares
+              FROM c
+        )
+        SELECT d.id, d.source, d.tx_hash, d.asset, d.side, d.size, d.price, d.ts,
+               d.detected_at,
+               d.market_title, d.event_slug, d.event_title, d.market_slug,
+               d.outcome, d.outcome_index, d.sport, d.dup_rows, d.dup_shares
+          FROM d
+         WHERE NOT d.collapsed
+         ORDER BY d.ts, d.id
+        """, whale, condition_id)
+    out: list[dict] = []
+    dup_rows, dup_shares = 0, 0.0
+    for r in rows:
+        d = dict(r)
+        # the same totals ride on every kept row (a window over the
+        # whole result); a fake pool's rows carry none, which reads 0
+        dup_rows = int(d.pop("dup_rows", 0) or 0)
+        dup_shares = float(d.pop("dup_shares", 0.0) or 0.0)
+        out.append(d)
+    _FILLS_DEDUP.update(dup_rows=dup_rows, dup_shares=dup_shares)
+    return out
+
+
+# what the LAST his_fills_distinct call collapsed (his_fills_distinct_dedup):
+# its own counter, so a reference read never moves what his_fills_dedup
+# reports to the shadow and the live tick
+_FILLS_DEDUP_DISTINCT: dict[str, float] = {"dup_rows": 0, "dup_shares": 0.0}
+
+
+def his_fills_distinct_dedup() -> dict:
+    """What the most recent `his_fills_distinct` call collapsed, in the
+    shape of his_fills_dedup. Read by no worker: the function it counts
+    for is not wired (its docstring); a pin reads it beside the D1
+    figure."""
+    return {"dup_rows": int(_FILLS_DEDUP_DISTINCT["dup_rows"]),
+            "dup_shares": round(float(_FILLS_DEDUP_DISTINCT["dup_shares"]), 4)}
+
+
+async def his_fills_distinct(pool, whale: str, condition_id: str) -> list[dict]:
+    """NOT WIRED. Lane 8's collapse key (E19 part (b), commit e9cda86,
+    2026-09-08) kept under its own name: the reference the fills-vs-venue
+    preset's `new_*` columns compute (render-ops.yml, the same SQL) and
+    the figure a later redesign is measured against. NO sizing path calls
+    it -- not the candidate, not the book, not the shadow's his_paired_sh
+    / fills_dedup_*, not the report (pinned: test_e19_smaller_reading,
+    test_d1_fills_dedup) -- and it keeps its own dedup counter
+    (his_fills_distinct_dedup), so a call never moves what
+    his_fills_dedup reports to the census. `his_fills` above, D1's key
+    byte for byte, is THE reader.
+
+    WHY IT IS NOT WIRED (E19b, 2026-09-08; docs/mirror-coverage.md
+    section 43). On Martinez's rows this key reads the long at 29,054.9
+    against the venue's 29,054.9 where D1 reads 15,925.4 (the net
+    11,974.5 at 12:10:43Z). But the FIRST PRODUCTION RUN of the
+    fills-vs-venue preset (17:07Z, ten minutes after e9cda86 deployed at
+    16:57Z) read it FARTHER from the venue's per-market position than the
+    D1 key it replaced, on the whole day: 359 markets in 24 h, 83 with a
+    venue figure; the summed gap to the venue's net 81,470.2 sh under the
+    old key against 119,856.5 sh under the new; the old key closer on 22
+    markets, the new closer on 4 (raw 8,683,766.1 sh; 3,313,258.2 dropped
+    under the old key, 786,112.1 under the new; $1,267,599 the new key
+    kept). On books with no fill after the plan's clock (611, 622, 656
+    live; 601 closed at its read) the OLD key
+    reads the venue to the decimal and this key over-reads by thousands
+    of shares: book 611 aec-cs2-g2-ast-2026-09-08, old_net -966.9 =
+    snap_net -966.9, new_net +19,349.5 (chain 301 rows / 113,737.2 sh, s1
+    5 / 1,398.3, poll 72 / 67,966.3; 66,580.3 sh dropped under the old
+    key, 15,780.3 under the new; the plan's drift 1.05); 601
+    aec-cs2-gl-furia-2026-09-08, old gap 0.0, new gap 10,127.5 (old_net
+    2,228.3 = snap_net; new_net 12,355.8; chain 78 / 25,611.7, poll 9 /
+    18,534.2); 622 atc-spl-haz-taa-2026-09-08-taa, old 15,000 = venue
+    15,000, new 20,000 (chain 3 rows / 15,000 sh, poll ONE row / 5,000;
+    drift 0.25); 656 atc-ucl-bru-ast-2026-09-08-bru, old -9,150.7 = venue
+    -9,150.7, new -13,746.8 (chain 24 / 9,474.5, poll 4 / 4,596.1; drift
+    0.33). The shape those rows show: the poll lane's rows under a chain
+    key are a PARTIAL set of the maker matches the chain row already
+    holds (622: one 5,000 row under 15,000 of chain legs), so they
+    neither sum to the leg nor repeat it, and this key counts them ON TOP
+    of the chain row. The live census read drift 0 at 16:25Z and drift 7
+    at 17:04:48Z across the deploy (611 drift 1.113, 613 0.812, 633
+    0.506). An over-read of his net inflates the mirror's target (10 % of
+    his net); the drift gate refused those increases (fail closed), but
+    a reader that sizes on MORE of his flow than the venue holds cannot
+    stand: when in doubt the mirror sizes on LESS. So D1's key is the
+    reader again and this one is the reference; the candidate's
+    smaller-reading open (E19 part (a), rules.smaller_reading) stands and
+    covers the Martinez shape from the venue's side. What remains is a
+    redesign judged by fills-vs-venue with books 611 / 622 / 656 / 601's
+    raw rows as fixtures.
+
+    THE RULE AS LANE 8 BUILT IT, for the record (its docstring, verbatim):
+
+    THE COLLAPSE KEEPS DISTINCT FILLS (E19, PNL lane 8, 2026-09-08;
+    Martinez, aec-atp-pedmar-frafor-2026-09-08, books 529/534). D1's
+    key alone dropped EVERY per-match row under a net-leg row, and one
+    of his sweeps fills across price levels under ONE tx: at 12:09:24Z
+    the s1 lane carried 5,225 @0.62 and the poll carried 3,601 @0.61
+    and 5,245 @0.61 under the same hash; at 12:09:45Z s1 5,225 @0.61
+    beside poll 4,283.5 @0.60. The venue's own per-market snapshot in
+    534's last plan read mkt_long 29,054.9 -- the SUM of every row,
+    chain 230.4 + s1 15,695 + poll 13,129.5 -- so the four poll rows
+    (18,374.5 sh with the 12:23:33Z other-token pair) were real fills
+    the old key dropped, his net read ~50 % low for the rest of the
+    match, and every reopen was refused `drift`. Two rows are the SAME
+    fill only when they agree on the key AND (i) the per-match rows
+    under it SUM to the net-leg row's size (D1's aggregate/split
+    shape: Kostyuk's 4,996 + 5,172 + 4,996 = 15,164, the venue to the
+    share) or (ii) the row repeats the net-leg row's price to the cent
+    and its size within max(0.01 sh, 0.1 %). Rows that share a tx but
+    differ in price or size are distinct fills and every one counts:
+    the s1 record is one fill of the sweep, not its aggregate, when
+    the splits do not sum to it (5,225 vs 8,846). The tolerance is the
+    D1 dust: 5,225 against 5,245 (20 sh, 0.38 %) is two fills. The
+    review's fold (2026-09-08): the leg the splits are measured against
+    is ONE source's net-leg rows (chain and s1 on one key stay D1's
+    admitted collision, never a doubled leg); a repeat collapses ONE
+    per-match row per net-leg row (two makers of one size in one tx are
+    two fills); and both arms judge price the same way -- the same cent
+    by round(., 2) on both sides, or within half a cent in numeric to
+    the mil (0.615 against 0.61 is one fill, not float8's two).
+
+    Returns rows in the shape of his_fills (the totals stripped, counted
+    on _FILLS_DEDUP_DISTINCT)."""
+    _FILLS_DEDUP_DISTINCT.update(dup_rows=0, dup_shares=0.0)
+    rows = await pool.fetch(
+        """
+        WITH f AS (
+            SELECT t.id, t.source, t.tx_hash, t.asset, t.side, t.condition_id,
+                   t.size::float8 AS size, t.price::float8 AS price,
+                   extract(epoch FROM t.ts)::float8 AS ts,
+                   -- E9: the ingest's clock, for the plan's his_fills_seen
+                   extract(epoch FROM t.detected_at)::float8 AS detected_at,
+                   COALESCE(t.market_title, m.title) AS market_title, t.event_slug,
+                   m.event_title, COALESCE(t.market_slug, m.slug) AS market_slug,
+                   COALESCE(t.outcome, mt.outcome) AS outcome,
+                   COALESCE(t.outcome_index, mt.outcome_index) AS outcome_index,
+                   COALESCE(NULLIF(m.sport, 'unclassified'), NULLIF(t.sport, 'unclassified'),
+                            'unclassified') AS sport,
+                   t.whale_id,
+                   -- the key: (whale, tx, asset, side); a '' hash is its own row
+                   COALESCE(lower(NULLIF(t.tx_hash, '')), 'row:' || t.id::text) AS tx_key,
+                   (COALESCE(t.source, '') IN ('chain', 's1')) AS net_leg
+              FROM trades t JOIN whales w ON w.id = t.whale_id
+              LEFT JOIN markets m ON m.condition_id = t.condition_id
+              LEFT JOIN market_tokens mt ON mt.token_id = t.asset
+             WHERE lower(w.username) = $1 AND t.condition_id = $2
+        ), k AS (
+            -- the key holds a net-leg row (chain / s1): the wallet's own
+            -- legs for the tx; the per-match rows' sum and size-weighted
+            -- price under the key are measured against ONE source's
+            -- net-leg rows below (E19: the paragraph in the docstring)
+            SELECT f.*,
+                   bool_or(f.net_leg) OVER w AS has_net_leg,
+                   COALESCE(sum(f.size) FILTER (WHERE NOT f.net_leg) OVER w, 0.0) AS match_sum,
+                   sum(f.size * f.price) FILTER (WHERE NOT f.net_leg) OVER w
+                       / NULLIF(sum(f.size) FILTER (WHERE NOT f.net_leg) OVER w, 0.0) AS match_vwap
+              FROM f
+            WINDOW w AS (PARTITION BY f.whale_id, f.tx_key, f.asset, upper(f.side))
+        ), rep AS (
+            -- (ii) the repeat pairs of a key: a per-match row m at a net-leg
+            -- row n's price and size (the witness below). Each side ranks
+            -- the other by id and a pair holds only where the ranks agree,
+            -- so a net-leg row is repeated by ONE per-match row and no more
+            -- (E19 review MEDIUM-1: two makers of one size in one tx, the
+            -- s1 lane carrying one record and the poll both, are two fills
+            -- -- 10,000, not 5,000 -- and the second poll row counts).
+            -- THE PRICE WITNESS (both arms; review LOW-2): the same cent by
+            -- round(., 2) on both sides, or within half a cent judged in
+            -- numeric to the mil -- the venue quotes cents, and 0.615 less
+            -- 0.61 in float8 is a hair OVER 0.005, which read one fill as
+            -- two. A cent off is another fill
+            SELECT m.id AS m_id,
+                   row_number() OVER (PARTITION BY n.id ORDER BY m.id) AS m_rank,
+                   row_number() OVER (PARTITION BY m.id ORDER BY n.id) AS n_rank
+              FROM f m JOIN f n
+                ON n.whale_id = m.whale_id AND n.tx_key = m.tx_key AND n.asset = m.asset
+               AND upper(n.side) = upper(m.side) AND n.net_leg AND NOT m.net_leg
+               AND (round(n.price::numeric, 2) = round(m.price::numeric, 2)
+                    OR abs(round(n.price::numeric, 3) - round(m.price::numeric, 3)) <= 0.005)
+               AND abs(n.size - m.size) <= greatest(0.01, 0.001 * n.size)
+        ), c AS (
+            SELECT k.*,
+                   COALESCE(NOT k.net_leg AND k.has_net_leg AND (
+                        -- (i) the per-match rows are the maker splits of ONE
+                        -- source's net-leg rows on the key (E19 review LOW-1:
+                        -- chain and s1 on one key are D1's admitted collision,
+                        -- never a doubled leg the splits are measured against):
+                        -- they sum to that source's rows within max(0.01 sh,
+                        -- 0.1 %) and their size-weighted price is its price by
+                        -- the witness above (Kostyuk 0.563 / 0.5633)
+                        EXISTS (SELECT 1
+                                  FROM (SELECT sum(n.size) AS leg_size,
+                                               sum(n.size * n.price) / sum(n.size) AS leg_vwap
+                                          FROM f n
+                                         WHERE n.whale_id = k.whale_id AND n.tx_key = k.tx_key
+                                           AND n.asset = k.asset AND upper(n.side) = upper(k.side)
+                                           AND n.net_leg
+                                         GROUP BY n.source) leg
+                                 WHERE abs(k.match_sum - leg.leg_size) <= greatest(0.01, 0.001 * leg.leg_size)
+                                   AND (round(k.match_vwap::numeric, 2) = round(leg.leg_vwap::numeric, 2)
+                                        OR abs(round(k.match_vwap::numeric, 3)
+                                               - round(leg.leg_vwap::numeric, 3)) <= 0.005))
+                        -- (ii) this row repeats a net-leg row of the key, one
+                        -- per-match row per net-leg row (rep)
+                        OR EXISTS (SELECT 1 FROM rep WHERE rep.m_id = k.id AND rep.m_rank = rep.n_rank)
+                   ), false) AS collapsed
+              FROM k
+        ), d AS (
+            SELECT c.*,
+                   count(*) FILTER (WHERE c.collapsed) OVER () AS dup_rows,
+                   COALESCE(sum(c.size) FILTER (WHERE c.collapsed) OVER (), 0.0) AS dup_shares
+              FROM c
+        )
+        SELECT d.id, d.source, d.tx_hash, d.asset, d.side, d.size, d.price, d.ts,
+               d.detected_at,
+               d.market_title, d.event_slug, d.event_title, d.market_slug,
+               d.outcome, d.outcome_index, d.sport, d.dup_rows, d.dup_shares
+          FROM d
+         WHERE NOT d.collapsed
+         ORDER BY d.ts, d.id
+        """, whale, condition_id)
+    out: list[dict] = []
+    dup_rows, dup_shares = 0, 0.0
+    for r in rows:
+        d = dict(r)
+        dup_rows = int(d.pop("dup_rows", 0) or 0)
+        dup_shares = float(d.pop("dup_shares", 0.0) or 0.0)
+        out.append(d)
+    _FILLS_DEDUP_DISTINCT.update(dup_rows=dup_rows, dup_shares=dup_shares)
+    return out
+
+
+async def snapshot_sizes(pool, whale: str) -> tuple[dict[str, float], float | None, bool]:
+    """The exit worker's last UNPINNED positions read for the whale
+    (token -> shares), its age in seconds, and whether the read was
+    PARTIAL (a page walk that did not finish); ({}, None, True) when
+    there is none. The pinned baseline it keeps beside it is for exit
+    detection and deliberately holds deferred and sub-floor shrinks at
+    their old size, so it is not read here."""
+    try:
+        raw = await pool.fetchval("SELECT value FROM ingestion_state WHERE key=$1",
+                                  _SNAP_RAW_KEY % whale)
+    except Exception:  # noqa: BLE001
+        return {}, None, True
+    if not raw:
+        return {}, None, True
+    try:
+        d = raw if isinstance(raw, dict) else json.loads(raw)
+        sizes = {str(k): float(v) for k, v in (d.get("sizes") or {}).items()}
+        age = max(0.0, time.time() - float(d.get("at") or 0.0)) if d.get("at") else None
+        return sizes, age, bool(d.get("partial", True))
+    except (TypeError, ValueError, AttributeError):
+        return {}, None, True
+
+
+# -------------------------------------------------------------- mapping
+
+def _choose_long(assets: list[str], cands: dict[str, tuple[str, str]],
+                 pos: dict[str, float], source: str) -> dict | None:
+    """Which of his two tokens is the venue's LONG side, from what each
+    token resolved to (slug, intent). Two shapes exist (review round
+    two): the aec tennis family resolves both tokens to ONE identifier
+    with LONG/SHORT intents, so a short intent names the other token as
+    the long; per-side-identifier markets resolve each token BUY_LONG on
+    its OWN slug, so neither intent decides and his directional side --
+    the token with the larger fills-derived position -- is the long,
+    traded on its slug. Fill or row order never decides."""
+    def other_of(a: str) -> str | None:
+        return next((x for x in assets if x != a), None)
+
+    longs = [a for a, (_, i) in cands.items() if i == "ORDER_INTENT_BUY_LONG"]
+    shorts = [a for a, (_, i) in cands.items() if i == "ORDER_INTENT_BUY_SHORT"]
+    if len(longs) == 2:
+        if cands[longs[0]][0] == cands[longs[1]][0]:
+            return None                 # both long on one slug: ambiguous, refuse
+        a = max(longs, key=lambda x: (float(pos.get(x, 0.0)), x))
+        return {"us_slug": cands[a][0], "long_asset": a, "other_asset": other_of(a),
+                "source": source, "per_side": True}
+    if longs:
+        a = longs[0]
+        return {"us_slug": cands[a][0], "long_asset": a, "other_asset": other_of(a),
+                "source": source}
+    if shorts:
+        a = shorts[0]
+        return {"us_slug": cands[a][0], "long_asset": other_of(a), "other_asset": a,
+                "source": source}
+    return None
+
+
+def _venue_reader(pmus, budget: MapBudget, out: dict | None):
+    """The paced, counted, bounded venue read the exact lane runs every
+    resolver call through: one measurement-pacer slot per call (the
+    _paced_bbo shape), one budget unit per call, the count on `out`."""
+    from ..map_lane import ReadsCapped
+
+    async def _read(fn, *args):
+        if budget.reads >= budget.cap:
+            raise ReadsCapped()
+        budget.reads += 1
+        if out is not None:
+            out["venue_reads"] = int(out.get("venue_reads") or 0) + 1
+
+        def _call():
+            pace(READ_PACING_S)
+            return fn(*args)
+
+        return await asyncio.to_thread(_call)
+    return _read
+
+
+def _lane_available(pmus) -> bool:
+    """The venue module carries the copy lane's resolvers (a test fake
+    that quotes but cannot resolve is a lane that is not there: named,
+    never an exception in the middle of a tick)."""
+    return all(callable(getattr(pmus, n, None)) for n in
+               ("resolve_market_exact", "resolve_derivative_exact",
+                "resolve_team_yesno_exact"))
+
+
+def _prune_maps(now_ts: float) -> None:
+    """Drop expired entries (review C): both memories are bounded by
+    the TTL, never by the number of markets he has ever traded."""
+    for k in [k for k, v in _map_cache.items() if float(v.get("until") or 0.0) <= now_ts]:
+        _map_cache.pop(k, None)
+    for k in [k for k, v in _slug_404_until.items() if float(v) <= now_ts]:
+        _slug_404_until.pop(k, None)
+
+
+async def _exact_for_token(pool, pmus, f: dict, read, now_ts: float,
+                           retrieve=None, slugs_404: set | None = None) -> tuple[dict | None, str | None]:
+    """The copy lane's exact steps for ONE of his tokens: ({slug, intent,
+    source[, side_index, outcome_desc]} | None, refusal). Candidates the
+    venue answered 404 inside the TTL are skipped without a read (the
+    resumable lane). `slugs_404`, when given, collects the DISTINCT
+    candidate slugs the venue answered 404 on this token's exact asks
+    (the resolver's own '404' note on a one-slug ask, or the memo's
+    remembered 404 for a slug it did not re-ask -- the venue's answer
+    either way) so the caller can count the slugs, each once however
+    many tokens asked it (L7, the census trail `exact:404:<n>`; the
+    fold of review MEDIUM-2: the trail counted every ask)."""
+    from .. import map_lane
+
+    diag: list[str] = []
+    cands: list[str] = []
+    ctx = {"market_slug": f.get("market_slug"), "event_slug": f.get("event_slug"),
+           "market_title": f.get("market_title"), "event_title": f.get("event_title"),
+           "outcome": f.get("outcome"), "outcome_index": f.get("outcome_index")}
+
+    def _answered_404(slug: str) -> None:
+        if slugs_404 is not None and slug:
+            slugs_404.add(slug)
+
+    async def _read(fn, *args):
+        # a one-slug exact ask (the resolver's list of one candidate):
+        # on a slug the venue 404'd inside the TTL, the remembered
+        # answer, no venue call; else the read, its '404' note memoised
+        one = bool(args) and isinstance(args[0], list) and len(args[0]) == 1
+        slug = str(args[0][0] or "").lower() if one else ""
+        memo = one and fn is getattr(pmus, "resolve_market_exact", None)
+        if memo and _slug_404_until.get(slug, 0.0) > now_ts:
+            if len(args) > 2 and isinstance(args[2], list) and len(args[2]) < 24:
+                args[2].append("404")
+            _answered_404(slug)
+            return None
+        n0 = len(diag)
+        res = await read(fn, *args)
+        if one and res is None and len(diag) > n0 and diag[n0] == "404":
+            if memo:
+                _slug_404_until[slug] = now_ts + MAP_CACHE_TTL_S
+            _answered_404(slug)
+        return res
+
+    mapping, source, refusal = await map_lane.exact_lane(
+        pool, pmus, ctx, _read, diag=diag, cands_out=cands, grammar=True, retrieve=retrieve)
+    if mapping and mapping.get("market_slug") and mapping.get("intent"):
+        v = {"slug": str(mapping["market_slug"]), "intent": str(mapping["intent"]),
+             "source": str(source)}
+        if source == map_lane.SRC_GRAMMAR:
+            v["side_index"] = mapping.get("side_index")
+            v["outcome_desc"] = mapping.get("outcome")
+            v["his_slug"] = str(ctx.get("market_slug") or ctx.get("event_slug") or "")
+        return v, None
+    return None, refusal
+
+
+# THE VENUE'S OWN TOKEN FOR THE OTHER SIDE OF A CONDITION (W2 / P1,
+# 2026-09-07; the live lane's ml-sibling-token statement, ONE text for
+# both lanes the way INTENT_GUARD_SQL is). Identity-only: the token
+# catalogue's row for THIS condition_id whose token is not the one in
+# hand -- never a name, never a position guess.
+SIBLING_TOKEN_SQL = """
+SELECT token_id FROM market_tokens WHERE condition_id = $1 AND token_id <> $2
+ ORDER BY outcome_index LIMIT 1 /* ml-sibling-token */
+"""
+
+
+async def sibling_token(pool, condition_id: str | None, asset: str | None) -> str | None:
+    """The catalogue's other token of the condition, or None (absent,
+    unnamed, unreadable: the caller refuses by name; never a guess)."""
+    if not condition_id or not asset:
+        return None
+    try:
+        tok = await pool.fetchval(SIBLING_TOKEN_SQL, str(condition_id), str(asset))
+    except Exception:  # noqa: BLE001 — an unreadable catalogue names nothing
+        return None
+    return str(tok) if tok else None
+
+
+async def _long_from_catalogue(pool, condition_id: str | None, m: dict | None) -> dict | None:
+    """THE LONG TOKEN HIS FILLS NEVER TOUCHED (W2 / P1, gap_planned_unopened
+    section 1 class B). `_choose_long` names the LONG side `other_of(a)`
+    when his only mapped token resolved BUY_SHORT -- and `assets` is HIS
+    fills' tokens, so with every fill on the venue's short-side token
+    (the aec tennis family: `<his side>:SHORT`) `other_of` is None and
+    the mapping came back {us_slug, long_asset: None, other_asset: B}.
+    The shadow then read his_long 0, planned SELL_LONG and wrote the row
+    with long_asset NULL (14 of 22 mapped markets on 2026-09-07 opened
+    that way, 15-127 min each); the live lane left silently. The
+    catalogue names the long token by identity (the condition's other
+    token, SIBLING_TOKEN_SQL) exactly as the live lane already read the
+    OTHER token for a long-only fill; a mapping with its long side set
+    is returned as it was, byte for byte. `long_from: catalogue` marks
+    the fill; a catalogue that does not name it leaves long_asset None
+    for the callers to refuse (`long_token_unknown` on the live lane)."""
+    if not m or m.get("long_asset") or not m.get("other_asset"):
+        return m
+    la = await sibling_token(pool, condition_id, m["other_asset"])
+    if not la:
+        return m
+    return {**m, "long_asset": la, "long_from": "catalogue"}
+
+
+async def map_market(pool, fills: list[dict], pmus=None, *, whale: str | None = None,
+                     condition_id: str | None = None, budget: MapBudget | None = None,
+                     out: dict | None = None) -> dict | None:
+    """{us_slug, long_asset, other_asset, source[, per_side]} for the
+    condition, or None. Our own ledger first: the newest live_orders row
+    on EACH of his tokens carries the slug and the intent we actually
+    traded on. Else the premap table with the trade's own context
+    (Postgres only). Else -- when a venue module is given (C1) -- the
+    copy lane's exact steps per token through map_lane.exact_lane: paced,
+    remembered per (whale, condition_id) for MAP_CACHE_TTL_S, bounded by
+    `budget` (MAP_READS_PER_TICK a tick; past it the market stays
+    unmapped this tick, `out["refusal"] == "map_reads_capped"`). Without
+    a venue module the read is table-only, as before (the cover report).
+    The long side is then chosen by shape, never by which row or fill
+    came first (_choose_long).
+
+    `out`, when given, carries what happened: `cache_hit` (the exact
+    lane answered from memory), `venue_reads` (resolver calls made),
+    `refusal` (a step found his market and refused the side, by name --
+    side_code_unmatched and its siblings -- or the budget), `lane`."""
+    assets = sorted({str(f.get("asset") or "") for f in fills if f.get("asset")})
+    if not assets:
+        return None
+    pos = mi.net_positions(fills)
+    from ..live_executor import ORDER_INTENT_SQL
+
+    cands: dict[str, tuple[str, str]] = {}
+    try:
+        rows = await pool.fetch(
+            f"""
+            SELECT asset, us_market_slug, {ORDER_INTENT_SQL} AS intent
+              FROM live_orders
+             WHERE asset = ANY($1::text[]) AND us_market_slug IS NOT NULL
+               AND {ORDER_INTENT_SQL} IN ('ORDER_INTENT_BUY_LONG', 'ORDER_INTENT_BUY_SHORT')
+             ORDER BY placed_at DESC LIMIT 20
+            """, assets)
+    except Exception:  # noqa: BLE001
+        rows = []
+    for r in rows:                      # newest row per token
+        cands.setdefault(str(r["asset"]), (str(r["us_market_slug"]), str(r["intent"])))
+    if cands:
+        return await _long_from_catalogue(pool, condition_id, _choose_long(assets, cands, pos, "ledger"))
+    # premap, per token, with the event title the markets table carries
+    try:
+        from . import premap as _premap
+    except Exception:  # noqa: BLE001
+        return None
+    by_asset: dict[str, dict] = {}
+    for f in fills:
+        a = str(f.get("asset") or "")
+        if a and a not in by_asset:
+            by_asset[a] = f
+    for a, f in by_asset.items():
+        try:
+            m = await _premap.resolve(pool, f.get("market_title"), f.get("event_title"),
+                                      f.get("outcome"), f.get("market_slug"),
+                                      condition_id=condition_id)
+        except Exception:  # noqa: BLE001
+            m = None
+        if m and m.get("market_slug") and m.get("intent"):
+            cands[a] = (str(m["market_slug"]), str(m["intent"]))
+    if cands:
+        return await _long_from_catalogue(pool, condition_id, _choose_long(assets, cands, pos, "premap"))
+    if pmus is None:
+        return None
+    return await _map_exact(pool, pmus, assets, by_asset, pos, whale, condition_id, budget, out)
+
+
+async def _catalogue_pair(pool, condition_id: str | None, asset: str, v: dict) -> str | None:
+    """The pair rule read off the token catalogue for a single-token fill:
+    market_tokens must carry exactly the condition's two tokens, the
+    mapped token at the code's position and the sibling at the
+    complement with no claim on the mapped code (map_lane.pair_agrees).
+    Any absence or disagreement is side_code_pair -- fail closed."""
+    from .. import map_lane
+
+    if not condition_id:
+        return map_lane.REFUSE_CODE_PAIR
+    try:
+        rows = [dict(r) for r in await pool.fetch(
+            "SELECT token_id, outcome, outcome_index FROM market_tokens "
+            "WHERE condition_id = $1 /* map-catalogue-pair */", str(condition_id))]
+    except Exception:  # noqa: BLE001 — an unreadable catalogue corroborates nothing
+        return map_lane.REFUSE_CODE_PAIR
+    mine = [r for r in rows if str(r.get("token_id")) == str(asset)]
+    others = [r for r in rows if str(r.get("token_id")) != str(asset)]
+    if len(rows) != 2 or len(mine) != 1 or len(others) != 1:
+        return map_lane.REFUSE_CODE_PAIR
+    # THE SIBLING'S NAME IS THE ONLY THING THAT PINS THE ORDER (round-3
+    # review, major-conditional): the catalogue's indices come from the
+    # same feed as his fill's, so with the sibling's outcome NULL nothing
+    # says the feed's index order is the slug's team order, and
+    # pair_agrees would pass on the index complement alone -- a wrong
+    # side that opens a live book. An unnamed sibling corroborates
+    # nothing: side_code_pair.
+    if not str(others[0].get("outcome") or "").strip():
+        return map_lane.REFUSE_CODE_PAIR
+    i = v.get("side_index")
+    try:
+        if int(mine[0].get("outcome_index")) != int(i):
+            return map_lane.REFUSE_CODE_PAIR
+    except (TypeError, ValueError):
+        return map_lane.REFUSE_CODE_PAIR
+    return map_lane.pair_agrees(v.get("his_slug"), i, others[0].get("outcome"),
+                                others[0].get("outcome_index"))
+
+
+async def _map_exact(pool, pmus, assets: list[str], by_asset: dict[str, dict],
+                     pos: dict[str, float], whale: str | None, condition_id: str | None,
+                     budget: MapBudget | None, out: dict | None) -> dict | None:
+    """The exact lane over his tokens, larger position first, stopping
+    when one token's copy-lane answer names both sides (a shared-
+    identifier aec- side, or a yes/no contract: the other token is the
+    other side by construction, exactly what the per-fill copy lane
+    knows about the sibling it never maps). A per-side family (distinct
+    identifiers) reads both tokens so _choose_long can pick his
+    directional side.
+
+    THE GRAMMAR CLASS IS JUDGED ON BOTH TOKENS (review (3), E): a token
+    the aec code side mapped is a mapping only when its sibling in the
+    fills agrees by its own facts (map_lane.pair_agrees: complementary
+    outcome index, no claim on the mapped code) -- no venue read, the
+    sibling's lane never runs -- and ANY named refusal on any token that
+    the pair rule cannot resolve (ambiguous, conflict, no index, shape)
+    refuses the whole market. Verdicts are remembered per token; a
+    market the budget cut gets NO entry (review C)."""
+    from .. import map_lane
+    from ..map_lane import ReadsCapped
+
+    if out is None:
+        out = {}
+    if not _lane_available(pmus):
+        # not a refusal of HIS market: the market keeps premap's own
+        # explain, and the absence is named on the row's detail
+        out["lane"] = "unavailable"
+        return None
+    budget = budget if budget is not None else MapBudget()
+    now_ts = time.time()
+    _prune_maps(now_ts)
+    key = (str(whale or "").lower(), str(condition_id or ""))
+    ent = _map_cache.get(key)
+    tokens: dict = dict(ent["tokens"]) if ent else {}
+    refusals: dict = dict(ent.get("refusals") or {}) if ent else {}
+    # THE 404 TRAIL (L7, 2026-09-08; PNL_lane3_coverage §3): the DISTINCT
+    # candidate slugs the exact lane asked and the venue answered 404
+    # (the resolver's own '404' note per one-slug ask, or the memo's for
+    # a slug inside _slug_404_until), each once however many of his
+    # tokens asked it (L7 fold, review MEDIUM-2: every ask was counted,
+    # `:exact:404:12` for five slugs). Remembered with the verdicts so
+    # a cache hit keeps the trail; named on the census as
+    # `<premap step>:exact:404:<n>` by explain_unmapped -- tennis was
+    # hiding under premap's bare `no_key_intersection` ($154k/6 h,
+    # atp-gea-zandsch $98,210) with no word that the venue was asked
+    slugs404: set[str] = set(ent.get("slugs_404") or ()) if ent else set()
+    read = _venue_reader(pmus, budget, out)
+    markets: dict[str, dict] = {}
+
+    def _fetch(slug: str) -> dict:
+        return (pmus._get_client().markets.retrieve_by_slug(slug) or {}).get("market") or {}
+
+    async def _retrieve(slug: str) -> dict:
+        # the aec payload read once per market per call, both tokens
+        if slug not in markets:
+            markets[slug] = await read(_fetch, slug)
+        return markets[slug]
+
+    def _remember() -> None:
+        if tokens:
+            _map_cache[key] = {"until": now_ts + MAP_CACHE_TTL_S, "tokens": dict(tokens),
+                               "refusals": dict(refusals), "exact_404": len(slugs404),
+                               "slugs_404": sorted(slugs404)}
+        if slugs404:
+            out["exact_404"] = len(slugs404)
+
+    order = sorted(assets, key=lambda a: (-abs(float(pos.get(a, 0.0))), a))
+    for a in order:
+        if a in tokens:
+            budget.hits += 1
+            out["cache_hit"] = int(out.get("cache_hit") or 0) + 1
+            verdict = tokens[a]
+        else:
+            grammar_done = any(isinstance(v, dict) and v.get("source") == map_lane.SRC_GRAMMAR
+                               for v in tokens.values())
+            if grammar_done:
+                # the sibling of a grammar-mapped token: judged by the
+                # pair rule below from his own facts, never read
+                tokens[a] = {"pair": True}
+                continue
+            f = by_asset.get(a) or {}
+            try:
+                # the slugs the venue answered 404 land in slugs404 as
+                # they are asked, so a lane the budget cuts keeps its
+                # trail so far
+                verdict, why = await _exact_for_token(pool, pmus, f, read, now_ts, _retrieve,
+                                                      slugs_404=slugs404)
+            except ReadsCapped:
+                budget.capped += 1
+                out["refusal"] = "map_reads_capped"
+                _remember()
+                return None
+            except Exception as exc:  # noqa: BLE001 — one token's lane, named on the detail
+                log.warning("mirror_shadow: exact lane for %s raised (%s)", a, type(exc).__name__)
+                out["lane_error"] = type(exc).__name__
+                verdict, why = None, None
+            tokens[a] = verdict
+            if why:
+                refusals[a] = why
+        if isinstance(verdict, dict) and verdict.get("source") in (map_lane.SRC_EXACT,
+                                                                    map_lane.SRC_YESNO):
+            if verdict["slug"].startswith("aec-") or verdict["source"] == map_lane.SRC_YESNO:
+                break                   # the other token is the other side
+    _remember()
+    # ---- the verdict for the market
+    hard = [w for w in refusals.values() if w not in map_lane.PAIR_RESOLVABLE]
+    if hard:
+        out["refusal"] = hard[0]        # review E: a refused token refuses the market
+        return None
+    copy_lane = {a: v for a, v in tokens.items()
+                 if isinstance(v, dict) and v.get("source") in (map_lane.SRC_EXACT,
+                                                                 map_lane.SRC_YESNO)}
+    if copy_lane:
+        cands = {a: (v["slug"], v["intent"]) for a, v in copy_lane.items()}
+        sources = [v["source"] for v in copy_lane.values()]
+        source = max(sources, key=lambda s: MAP_SOURCE_RANK.index(s))
+        out["lane"] = source
+        return await _long_from_catalogue(pool, condition_id, _choose_long(assets, cands, pos, source))
+    grammar = {a: v for a, v in tokens.items()
+               if isinstance(v, dict) and v.get("source") == map_lane.SRC_GRAMMAR}
+    if not grammar:
+        if refusals:
+            out["refusal"] = next(iter(refusals.values()))
+        return None
+    if len(grammar) == 2:
+        (a1, v1), (a2, v2) = list(grammar.items())
+        if v1["slug"] != v2["slug"] or v1["intent"] == v2["intent"]:
+            out["refusal"] = map_lane.REFUSE_CODE_PAIR
+            return None
+    else:
+        (a1, v1), = list(grammar.items())
+        siblings = [a2 for a2 in assets if a2 != a1]
+        if siblings:
+            for a2 in siblings:
+                f2 = by_asset.get(a2) or {}
+                why = map_lane.pair_agrees(v1.get("his_slug"), v1.get("side_index"),
+                                           f2.get("outcome"), f2.get("outcome_index"))
+                if why:
+                    out["refusal"] = why
+                    return None
+        else:
+            # A SINGLE-TOKEN FILL (round 3, review 1): nothing in his fills
+            # pins the feed's index order to the slug's team order, and a
+            # first-word collision would map the wrong side on the index
+            # alone. The market's own token catalogue (market_tokens) must
+            # corroborate BOTH tokens' indices against the slug order --
+            # the mapped token's own row at its position and the sibling's
+            # row as the pair rule reads it -- else side_code_pair
+            why = await _catalogue_pair(pool, condition_id, a1, v1)
+            if why:
+                out["refusal"] = why
+                return None
+    cands = {a: (v["slug"], v["intent"]) for a, v in grammar.items()}
+    out["lane"] = map_lane.SRC_GRAMMAR
+    out["grammar"] = {"his_slug": v1.get("his_slug"), "side_index": v1.get("side_index"),
+                      "outcome_desc": v1.get("outcome_desc"), "intent": v1.get("intent"),
+                      "slug": v1["slug"], "asset": a1,
+                      # C6: his outcome's own words, for the live class's
+                      # team-field truth check (map_lane.grammar_truth)
+                      "his_outcome": (by_asset.get(a1) or {}).get("outcome")}
+    return await _long_from_catalogue(pool, condition_id,
+                                      _choose_long(assets, cands, pos, map_lane.SRC_GRAMMAR))
+
+
+# --------------------------------------------------------------- ours
+
+async def ledger_net(pool, us_slug: str) -> int:
+    """Our signed holding by the ledger, in long-token shares: filled or
+    exiting rows, long minus short, whole shares. EVERY sleeve counts
+    (review round one): the venue's net is account-wide, so a desk or
+    underdog row left out here would read as a position the ledger
+    cannot explain and freeze the market every tick."""
+    from ..live_executor import ORDER_INTENT_SQL
+
+    rows = await pool.fetch(
+        f"""
+        SELECT filled_shares::float8 AS sh, {ORDER_INTENT_SQL} AS intent
+          FROM live_orders
+         WHERE us_market_slug = $1 AND status IN ('filled', 'exiting')
+        """, us_slug)
+    net = 0.0
+    for r in rows:
+        sh = float(r["sh"] or 0.0)
+        net += sh if str(r["intent"]) != "ORDER_INTENT_BUY_SHORT" else -sh
+    return round(net, 4)               # fractional fills kept; the plan compares within a share
+
+
+async def account_positions(pmus, basis_out: dict | None = None) -> dict[str, float] | None:
+    """ONE paced walk of the venue account's positions per tick:
+    {slug (lower): signed netPosition}. None when the walk failed -- a
+    market absent from a successful walk is simply not held (0).
+
+    `basis_out`, when a dict is passed, is filled with the SAME walk's
+    all-in basis per slug (pmus.position_basis) -- no second venue read.
+    Omit it and the walk behaves exactly as it always has."""
+    positions, _pages, _rate_limited = await account_positions_walk(
+        pmus, basis_out=basis_out)
+    return positions
+
+
+async def account_positions_walk(pmus, basis_out: dict | None = None
+                                 ) -> tuple[dict[str, float] | None, int, bool]:
+    """account_positions with its own accounting, PER CALL (E2 review
+    round 2, LOW-b: a module-level page count was shared with the shadow
+    on the same loop): (positions or None, the pages the walk read --
+    every one a venue request, failed or truncated walks included --
+    and whether the walk failed on a 429). A 429 also trips the
+    process-wide pacer's circuit (venue_pace.penalize).
+
+    `basis_out` (2026-09-10, the fee-capture fix) collects the venue's
+    OWN all-in basis for each slug off the same position objects this
+    walk already reads -- {slug: pmus.position_basis(p)} -- so the
+    number the owner's standing-order rule needs costs no extra venue
+    call. It is filled ONLY on a walk that completes; a failed or
+    truncated walk leaves whatever the caller passed untouched, for the
+    same reason the positions map is None there: a partial reading of
+    the account is not a reading of the account. NOTHING ON AN ORDER
+    PATH READS IT -- the shadow records it and that is all, exactly as
+    migration 061's measurement columns are recorded and never sized
+    on."""
+    pages = [0]
+
+    def _walk() -> dict[str, float]:
+        client = pmus._get_client()
+        out: dict[str, float] = {}
+        basis: dict[str, dict] = {}
+        cursor = ""
+        complete = False
+        for _ in range(POSITIONS_PAGES_MAX):
+            # every page is one venue read through the PROCESS-WIDE
+            # measurement pacer (review round two): this worker and
+            # price_path together never exceed one read per gap
+            pace(READ_PACING_S)
+            pages[0] += 1
+            resp = client.portfolio.positions(
+                {"limit": 100, **({"cursor": cursor} if cursor else {})}) or {}
+            for slug, p in (resp.get("positions") or {}).items():
+                key = slug.strip().lower() if isinstance(slug, str) else ""
+                if not key or key in out:
+                    # A ROW WE CANNOT NAME IS A ROW WE CANNOT PLACE AGAINST.
+                    # Skipping it used to leave the walk claiming to be a
+                    # COMPLETE reading of the account while a slug was
+                    # missing from it; the caller then reads venue 0 for
+                    # that market, the "the venue already holds this"
+                    # admission clause passes, and a BUY goes out into a
+                    # slug the account already holds. Unreadable row,
+                    # unreadable walk -- the same rule the page cap keeps.
+                    # A repeated key is the same defect by another route:
+                    # last-write-wins can report 0 for a slug that is held.
+                    raise RuntimeError("positions walk carries a row we cannot name uniquely")
+                try:
+                    net = float((p or {}).get("netPosition") or 0.0)
+                except (TypeError, ValueError) as exc:
+                    raise RuntimeError(
+                        f"positions walk carries an unreadable netPosition for {key}") from exc
+                if not math.isfinite(net):
+                    # a NaN reaches int() downstream and wedges the book
+                    raise RuntimeError(f"positions walk carries a non-finite netPosition for {key}")
+                out[key] = net
+                if basis_out is not None:
+                    # measurement only, and it must never be able to
+                    # fail the walk: an unreadable basis is a missing
+                    # number, not an unreadable account. Read off the
+                    # pmus module rather than the injected client --
+                    # `position_basis` is a pure dict reader and the E35
+                    # pmx adapter's position carries the same
+                    # netPosition / cost keys (pmx.py:959), so one
+                    # reader serves both venues.
+                    try:
+                        from ..pmus import position_basis
+                        basis[key] = position_basis(p)
+                    except Exception:  # noqa: BLE001
+                        basis[key] = {"error": "unreadable"}
+            cursor = resp.get("nextCursor") or ""
+            if resp.get("eof") or not cursor:
+                complete = True
+                break
+        if not complete:
+            # A WALK THAT HIT THE PAGE CAP IS NOT A READING OF THE ACCOUNT
+            # (P1 design review): a slug on a page we never fetched would
+            # read as "not held", which is a venue/ledger disagreement
+            # invented by us -- or worse, a position the plan trades
+            # against. Truncated is unreadable.
+            raise RuntimeError(f"positions walk truncated at {POSITIONS_PAGES_MAX} pages")
+        if basis_out is not None:
+            # only a COMPLETE walk publishes a basis, and it is published
+            # in one step at the end so a raise midway can never leave the
+            # caller's dict holding half an account
+            basis_out.update(basis)
+        return out
+
+    try:
+        return await asyncio.to_thread(_walk), pages[0], False
+    except Exception as exc:  # noqa: BLE001 — a failed walk is named, never guessed
+        # the message names WHICH row or WHICH cap refused: three raise
+        # sites all carry RuntimeError, and a walk that fails every tick
+        # on one stuck row is otherwise indistinguishable from a 429 --
+        # except a 429 itself, which trips the pacer's circuit (E2
+        # review round 2, HIGH-B) and is reported to the caller by name
+        limited = is_rate_limit(exc)
+        if limited:
+            venue_pace.penalize()
+        log.warning("mirror_shadow: positions walk failed (%s: %s)%s",
+                    type(exc).__name__, str(exc)[:200], " -- 429: pacer penalty on" if limited else "")
+        return None, pages[0], limited
+
+
+_RATE_LIMIT_TEXT = re.compile(r"^\s*(RateLimitError\b|429\b|HTTP 429\b|Too Many Requests\b)", re.I)
+
+
+def is_rate_limit(err: Any) -> bool:
+    """Does an error -- an exception or the adapter's error string --
+    name the venue's rate limit? The SDK maps status 429 to
+    RateLimitError whatever the body (an HTML page from a proxy
+    included), so the class name, a `status_code` of 429, or a text
+    that STARTS with the SDK's name / '429' / 'Too Many Requests' (the
+    positions walk's RuntimeError wrapper, the adapter's `error`
+    strings, which lead with the exception's name). Never a substring
+    match over free text (E2 review round 3, LOW-4): '429' inside an
+    order id, a slug or a price is not a rate limit. Anything else
+    (a timeout, a 5xx, a socket reset) is not one.
+
+    AN INT STATUS IS AUTHORITATIVE (round 5, LOW d5): the SDK already
+    decided the status when it built the exception, so an exception
+    carrying an int `status_code` that is not 429 is not a rate limit
+    whatever its text says -- a BadRequestError(400) whose message
+    begins "429 contracts exceeds the maximum order size" is a size
+    refusal, an InternalServerError(503) beginning "429 upstream busy"
+    is an outage. The text is consulted only when no int status is
+    there (the adapter's error strings, the walk's RuntimeError)."""
+    if err is None:
+        return False
+    if isinstance(err, BaseException):
+        if "RateLimit" in type(err).__name__:
+            return True
+        code = getattr(err, "status_code", None)
+        if isinstance(code, int) and not isinstance(code, bool):
+            return code == 429
+    return bool(_RATE_LIMIT_TEXT.match(str(err)))
+
+
+def _paced_bbo(pmus, slug: str) -> dict:
+    """One BBO read behind the process-wide measurement pacer:
+    pmus.bbo_read's dict -- `{"bid", "ask", "state", "error"}` -- so the
+    two workers that read through here see the venue's own market
+    state beside the quotes (2026-09-05: five hours of
+    MARKET_STATE_HALTED read as `no_quote`)."""
+    pace(READ_PACING_S)
+    return pmus.bbo_read(pmus._get_client(), slug)
+
+
+def _px(f: dict) -> float | None:
+    try:
+        p = float(f.get("price"))
+    except (TypeError, ValueError):
+        return None
+    return p if 0.0 < p < 1.0 else None
+
+
+def his_level(fills: list[dict], long_asset: str | None, other_asset: str | None,
+              reducing: bool) -> float | None:
+    """The price of HIS most recent move in the direction we are about
+    to follow, in long-token terms. Increasing: his last BUY of the long
+    token. Reducing: the most recent of his SELL of the long token (at
+    its price) and his BUY of the other token (his pair completion, at
+    one minus its price) -- by timestamp, so a sale after an old entry
+    is not priced off the entry (review round one). The other-token
+    equivalent is round(1 - p, 6), THE SAME ROUNDING AS THE LIVE
+    WORKER'S mirror_live._his_level (E4 review round 3, L-3): a 4-place
+    figure read his other-token BUY at 0.47996 as 0.52 and this
+    module's exit leg then recorded `exit_rest_px` 0.52, a cent under
+    the live rest at 0.53 (rules.exit_terms ceils 0.52004)."""
+    best: tuple[float, float] | None = None
+    for f in fills:
+        a, side = str(f.get("asset") or ""), str(f.get("side") or "").upper()
+        try:
+            ts = float(f.get("ts") or 0.0)
+        except (TypeError, ValueError):
+            ts = 0.0
+        p = _px(f)
+        if p is None:
+            continue
+        lvl = None
+        if not reducing:
+            if long_asset and a == long_asset and side == "BUY":
+                lvl = p
+        else:
+            if long_asset and a == long_asset and side == "SELL":
+                lvl = p
+            elif other_asset and a == other_asset and side == "BUY":
+                lvl = round(1.0 - p, 6)
+        if lvl is not None and (best is None or ts >= best[0]):
+            best = (ts, lvl)
+    return best[1] if best else None
+
+
+# ------------------------------------------------- census helpers (Phase 0)
+
+def notional_in_window(fills: list[dict], hours: float, now_ts: float | None = None) -> float:
+    """Dollars of his BUYS on the market inside the last `hours`: the
+    unmapped row's dollar weight, so the coverage gate can be read by
+    his money and not by a count of $25 markets (coverage review: 86.8%
+    of his stake sits in lots of $250 and over)."""
+    now_ts = time.time() if now_ts is None else float(now_ts)
+    lo = now_ts - float(hours) * 3600.0
+    total = 0.0
+    for f in fills:
+        if str(f.get("side") or "").upper() != "BUY":
+            continue
+        try:
+            ts = float(f.get("ts") or 0.0)
+            n = float(f.get("size") or 0.0) * float(f.get("price") or 0.0)
+        except (TypeError, ValueError):
+            continue
+        if ts >= lo and n > 0:
+            total += n
+    return round(total, 2)
+
+
+def fills_since(fills: list[dict], age_s: float | None, now_ts: float | None = None) -> int | None:
+    """How many of his fills landed AFTER the positions snapshot was
+    taken. Fills-derived and snapshot-derived positions disagree for two
+    different reasons -- an ingest miss and plain lag -- and only this
+    count separates them (a book built at 1,098 sh/min lags thousands
+    of shares inside a 300 s snapshot age). None without a snapshot."""
+    if age_s is None:
+        return None
+    now_ts = time.time() if now_ts is None else float(now_ts)
+    cut = now_ts - float(age_s)
+    n = 0
+    for f in fills:
+        try:
+            if float(f.get("ts") or 0.0) > cut:
+                n += 1
+        except (TypeError, ValueError):
+            continue
+    return n
+
+
+def outcome_null_count(fills: list[dict]) -> int:
+    """His fills on the market whose outcome is still NULL (chain rows
+    are inserted with outcome NULL and enriched later; the premap side
+    match refuses an empty outcome, so this is a named mapping miss and
+    not a venue gap)."""
+    return sum(1 for f in fills if not str(f.get("outcome") or "").strip())
+
+
+# ------------------------------------------- E38: the two-legged reading
+#
+# MEASUREMENT ONLY, AND NOT EVEN A PLAN. Everything below is written
+# into the row's JSONB detail and read by an operator. The live lane's
+# order paths are untouched by this lane and are pinned byte-identical
+# by hash (test_e38_two_legged.py); the two-legged target is never sent,
+# never compared against a book, and never reaches mirror_live. The live
+# switch is a later lane, after the owner has read these numbers.
+#
+# THE OBJECTIVE IS HIS MATCHED PAIRS WHERE THE PAIR CLEARS -- not his
+# net (which erases the matched book: 58.6% of his cost buys BOTH
+# outcomes) and not his gross (which would buy his losing tennis pairs
+# alongside his winning soccer ones). analytics/mirror_two_legged.py
+# carries the arithmetic and the evidence; this function only records.
+#
+# NO EXTRA VENUE READ. The other leg's quote is the complement of the
+# one book the tick already read (rules_2l.leg_quotes), so the tick's
+# venue budget is exactly what it was. A per-side market, whose second
+# leg lives on a slug this worker never read, records NO pair price at
+# all rather than a guessed one.
+
+TWO_LEG_KEYS_ALWAYS = ("two_leg_both_sides", "two_leg_mapped", "two_leg_his_cost_usd",
+                       "two_leg_tokens_held")
+
+
+def two_leg_block(fills: list[dict], long_asset: str | None, other_asset: str | None, *,
+                  mark: float | None = None, ratio: float | None = None,
+                  bid: float | None = None, ask: float | None = None,
+                  state: Any = None, per_side: bool = False,
+                  fee_per_contract: float | None = None) -> dict:
+    """The two-legged census for ONE market, as JSONB detail keys.
+
+    Called twice from `shadow_market`: on the UNMAPPED branch with no
+    assets and no quote (only the four TWO_LEG_KEYS_ALWAYS, which give
+    the coverage question its denominator), and on the mapped branch
+    with the pair and this tick's book.
+
+    It answers three questions, and each has ONE column:
+
+      (1) how often BOTH legs would have been obtainable
+          -> `two_leg_both_obtainable`, filled in later by the judge in
+             `_resolve_previous` when the two post-only rests recorded
+             here (`two_leg_rest_long_px`, `two_leg_rest_other_wire`)
+             have both been reached inside JUDGE_TTL_S -- the same
+             window, the same rule and the same clock the shadow
+             already judges its one-legged plan on.
+
+      (2) what pair cost we would actually have achieved, against his
+          -> `two_leg_pair_cost` (ask on leg A + ask on leg B: what one
+             pair costs if we CROSS both touches now) and
+             `two_leg_rest_pair_cost` (bid A + bid B: the POST-ONLY
+             pair, and the achievable one -- see below), with his own
+             figure beside them as `two_leg_his_pair_cost` and the
+             difference as `two_leg_pair_edge`. `two_leg_pair_clears`
+             is the crossing cost under 1.00 before any fee and
+             `two_leg_take_admissible` is it under 1.00 less two fees:
+             BOTH ARE FALSE ON EVERY BOOK, because the two outcomes
+             share one book and ask_long + (1 - bid_long) is 1 + the
+             spread exactly. `two_leg_rest_admissible` is the gate that
+             means anything, and `two_leg_breakeven_fee` is the fee per
+             contract the pair could bear -- half the margin, since a
+             pair is two contracts -- so an operator reads what we can
+             afford rather than a fee nobody has measured yet.
+
+      (3) what share of his gross book we can even see
+          -> `two_leg_his_cost_usd`, his dollars on this market at HIS
+             OWN fill prices, split by `two_leg_mapped`. It is read
+             from the fills alone, so it exists on the unmapped rows
+             too -- those rows ARE the denominator, and a coverage
+             figure without them would be a numerator over itself.
+
+    HIS RESIDUAL (`two_leg_residual_sh`, `two_leg_residual_side`) is
+    recorded and is NEVER a target: it is today's `his_net` under
+    another name, and it is the directional bet the diagnosis blames.
+
+    Pure but for its own arithmetic; writes nothing, reads nothing,
+    sends nothing. Every failure is a named key, never an exception:
+    this rides the census, and a census that raises loses the tick."""
+    from ..analytics import mirror_two_legged as rules_2l
+
+    both, cost_usd, held = rules_2l.both_sides_cost(fills)
+    out: dict[str, Any] = {"two_leg_both_sides": bool(both),
+                           "two_leg_mapped": bool(long_asset and other_asset),
+                           "two_leg_his_cost_usd": round(float(cost_usd), 2),
+                           "two_leg_tokens_held": int(held)}
+    if not out["two_leg_mapped"]:
+        return out
+    legs = rules_2l.his_legs(fills, long_asset, other_asset)
+    q = rules_2l.leg_quotes(bid, ask, per_side=bool(per_side))
+    fee = rules_2l.FEE_PER_CONTRACT if fee_per_contract is None else fee_per_contract
+    r = ratio if ratio is not None else rules_2l.two_leg_open_ratio(legs, mark)
+    p = rules_2l.our_pair(legs, r, q, fee_per_contract=fee)
+    out.update(
+        two_leg_his_long_sh=round(legs.long_shares, 4),
+        two_leg_his_other_sh=round(legs.other_shares, 4),
+        two_leg_his_long_vwap=legs.long_vwap, two_leg_his_other_vwap=legs.other_vwap,
+        two_leg_his_pair_cost=legs.his_pair_cost,
+        two_leg_matched_sh=round(legs.matched_shares, 4),
+        # NEVER A TARGET: his directional part, recorded so the operator
+        # sees exactly what the matched-only objective declines to copy
+        two_leg_residual_sh=round(legs.residual_shares, 4),
+        two_leg_residual_side=("long" if legs.residual_asset == legs.long_asset
+                               else "other" if legs.residual_asset else None),
+        two_leg_quote_src=q.src, two_leg_state=(str(state) if state is not None else None),
+        two_leg_bid_long=q.bid_long, two_leg_ask_long=q.ask_long,
+        two_leg_bid_other=q.bid_other, two_leg_ask_other=q.ask_other,
+        # THE TAKE PAIR (ask A + ask B): what a pair costs if we cross
+        # both touches now. On this venue's single complementary book
+        # that is 1 + the spread EXACTLY, so `two_leg_pair_clears` is
+        # False on every book that has ever existed and
+        # `two_leg_take_admissible` is False by arithmetic rather than
+        # by market conditions. Both are recorded so the identity is
+        # visible in the data instead of assumed.
+        two_leg_pair_cost=p.take_pair_cost,
+        two_leg_pair_clears=(None if p.take_pair_cost is None else bool(p.take_pair_cost < 1.0)),
+        two_leg_take_admissible=p.take_admissible, two_leg_take_edge=p.take_edge,
+        # THE POST-ONLY PAIR (bid A + bid B = 1 - the spread): the only
+        # pair that can clear, the only pair a maker could form (E31),
+        # and the price the target is sized and admitted on. Obtainable
+        # only if BOTH rests fill -- `two_leg_both_obtainable`, judged
+        # below over the same window as every other plan.
+        two_leg_rest_pair_cost=p.our_pair_cost,
+        two_leg_rest_admissible=p.admissible,
+        two_leg_pair_edge=p.pair_edge, two_leg_margin=p.margin,
+        two_leg_breakeven_fee=p.breakeven_fee_pc, two_leg_fee_pc=p.fee_per_contract,
+        two_leg_ratio=p.ratio, two_leg_pair_target=int(p.pair_target),
+        two_leg_pair_usd=p.our_pair_usd, two_leg_clipped=bool(p.clipped),
+        two_leg_refusal=p.refusal)
+    # THE TWO POST-ONLY RESTS, in the terms the judge below reads. The
+    # long leg rests at its own touch (the bid); the other leg rests at
+    # ITS touch, which on this one complementary book is a SELL of the
+    # long token at the long ask -- so the judge compares the long
+    # book's bid against `two_leg_rest_other_wire`. Recorded only when
+    # both legs have a touch: half a pair is not a pair.
+    if q.bid_long is not None and q.ask_long is not None:
+        out["two_leg_rest_long_px"] = q.bid_long
+        out["two_leg_rest_other_px"] = q.bid_other
+        out["two_leg_rest_other_wire"] = q.ask_long
+        out["two_leg_both_obtainable"] = None
+    return out
+
+
+def _first_context(fills: list[dict]) -> dict:
+    """The market context the mapper reads: the first fill that carries
+    a title, else the first fill."""
+    ctx = next((f for f in fills if f.get("market_title")), fills[0] if fills else {})
+    slug = str(ctx.get("market_slug") or "")
+    sport = str(ctx.get("sport") or "").strip()
+    if not sport or sport == "unclassified":
+        try:
+            from ..copy_sports import sport_of
+            sport = sport_of(slug) or "unclassified"
+        except Exception:  # noqa: BLE001
+            sport = "unclassified"
+    return {"his_slug": slug or None, "title": ctx.get("market_title"),
+            "event_title": ctx.get("event_title"), "event_slug": ctx.get("event_slug"),
+            "outcome": ctx.get("outcome"), "sport": sport,
+            # C7: the condition the resolver reads his kickoff for
+            "condition_id": ctx.get("condition_id")}
+
+
+def _family_of(slug: str | None) -> str:
+    try:
+        # C3: a first-half total is the mirror's 'total' family
+        from ..copy_sports import mirror_family_of
+        return mirror_family_of(slug or "")
+    except Exception:  # noqa: BLE001
+        return "unknown"
+
+
+async def explain_unmapped(pool, ctx: dict, refusal: str | None = None, *,
+                           exact_404: int | None = None) -> str:
+    """WHY the market is unmapped: a REFUSAL the exact lane named
+    (side_code_unmatched and its siblings, the budget) when it found his
+    market and refused the side; else why premap said no, as the
+    resolver's own step name (the same read-only resolve_explain the
+    copy lane's unmapped census uses -- a market the exact steps also
+    fail keeps premap's name), or a named failure -- never a guess.
+    `unknown_market_type` carries its split (C1 build step 5):
+    `:unparsed` (the slug grammar named no family) or
+    `:family_not_listed` (a family the venue table has no prefix for).
+
+    THE 404 TRAIL (L7, 2026-09-08): when premap's step carries NO split
+    (its keys never met the venue's rows -- tennis, docs §1.4 R3 -- so
+    the venue's own rows certified nothing) and the venue answered 404
+    on `exact_404` DISTINCT candidate slugs the exact lane asked (each
+    slug once, however many of his tokens asked it -- the fold of
+    review MEDIUM-2), the trail rides on the step:
+    `no_key_intersection:exact:404:5` on atp-gea-zandsch's shape -- the
+    two aec slug orders, the atc slug, `aec-<his slug>` and his own
+    slug were asked and the venue listed none of them. A split premap
+    named from the venue's rows (`:venue:league-unlisted`,
+    `:kind-absent`, ...) is the venue's word and stands as it is; the
+    trail then lives on the row's `exact_404` detail only. A refusal the
+    lane named wins over both, as before. Never a guess: 0 or an
+    unreadable count prints premap's name alone."""
+    if refusal:
+        return str(refusal)
+    try:
+        from . import premap as _premap
+    except Exception:  # noqa: BLE001
+        return "explain_unavailable"
+    try:
+        ex = await _premap.resolve_explain(pool, ctx.get("title"), ctx.get("event_title"),
+                                           ctx.get("outcome"), ctx.get("his_slug"),
+                                           condition_id=ctx.get("condition_id"))
+    except Exception as exc:  # noqa: BLE001 — one market's why, named
+        return f"explain_raised:{type(exc).__name__}"
+    step = str((ex or {}).get("step") or "unknown")
+    split = (ex or {}).get("split")
+    if split:
+        return f"{step}:{split}"
+    n = _exact_404_count(exact_404)
+    return f"{step}:exact:404:{n}" if n > 0 else step
+
+
+def _exact_404_count(v: Any) -> int:
+    """The 404 trail's count as an int >= 0; anything unreadable (None,
+    a bool, a NaN, text) is 0 -- no trail, premap's name alone."""
+    if isinstance(v, bool) or v is None:
+        return 0
+    try:
+        n = int(v)
+    except (TypeError, ValueError):
+        return 0
+    return n if n > 0 else 0
+
+
+# THE LIVE ROWS ARE NEVER TRUNCATED (Phase 0 review of the instruments,
+# major 1; owner order 2026-09-02 "mirror the whales to a tee"): the copy
+# lane inserts one live_orders row per whale trade and the quarantine
+# UPDATEs each to 'rejected', so on a slug where a per-fill row FILLED
+# on one token and he then traded the other token twenty-odd times, the
+# twenty newest rows are all rejected and a plain newest-20 read drops
+# the filled row -- ledger_legacy read a confident False where P1's own
+# referee (an EXISTS over filled/submitting/exiting, no LIMIT) reads
+# True, and the plan was counted in the non-legacy rate it must not
+# enter. So the filled/exiting rows are read whole, and the newest-20
+# cap applies only to the rest (the rows the mapping class is read
+# from). A slug's live rows are bounded by the lane's own caps, so the
+# whole read is small; the newest-20 keeps the class read bounded.
+_SQL_LEDGER_FACTS = """
+SELECT status, lane, error, whale_username
+  FROM live_orders
+ WHERE us_market_slug = $1
+   AND (status IN ('filled', 'exiting')
+        OR id IN (SELECT id FROM live_orders
+                   WHERE us_market_slug = $1
+                     AND status IN ('filled', 'exiting', 'settled', 'cashed_out', 'merged',
+                                    'submitting', 'open', 'rejected')
+                   ORDER BY placed_at DESC LIMIT 20))
+ ORDER BY placed_at DESC /* ledger-facts */
+"""
+
+
+async def ledger_rows(pool, us_slug: str) -> list[dict] | None:
+    """Every live_orders row on the venue slug that could explain what
+    the ledger holds or where its mapping came from: ALL of its
+    filled/exiting rows and the newest twenty of every status (see
+    _SQL_LEDGER_FACTS for why the live rows sit outside the cap); None
+    when the read failed (unreadable is named, never 'no rows')."""
+    try:
+        rows = await pool.fetch(_SQL_LEDGER_FACTS, us_slug)
+    except Exception:  # noqa: BLE001
+        return None
+    return [dict(r) for r in rows]
+
+
+# the mapping class a refused row records in its error text ('(src=fuzzy,
+# slug=...)'); compiled once with the module (Phase 0 review, minor 5)
+_SRC_RE = re.compile(r"\(src=([a-z_]+),")
+
+
+def ledger_facts(rows: list[dict] | None) -> dict:
+    """Two readings off the slug's ledger rows. `legacy`: a NON-mirror
+    row is live on the slug (filled/exiting), so any plan the shadow
+    makes there is against a per-fill position P1 refuses by name
+    (legacy_row) -- those plans must not count toward the would-fill
+    rate P1 is gated on. `map_class`: the mapping class the copy lane's
+    own row carries, which is the only class a ledger-sourced mirror map
+    can claim; a refused row names it in its error text ('(src=fuzzy,
+    slug=...)'), a traded row never recorded it. Fail closed: None rows
+    read as unreadable on both counts."""
+    if rows is None:
+        return {"legacy": None, "map_class": "unreadable"}
+    legacy = False
+    traded_lane = None
+    src = None
+    for r in rows:
+        status = str(r.get("status") or "")
+        lane = str(r.get("lane") or "") or "-"
+        if status in ("filled", "exiting") and lane != "mirror":
+            legacy = True
+        if status in ("filled", "exiting", "settled", "cashed_out", "merged") and traded_lane is None:
+            traded_lane = lane
+        if src is None:
+            m = _SRC_RE.search(str(r.get("error") or ""))
+            if m:
+                src = m.group(1)
+    if src:
+        cls = f"refused:{src}"
+    elif traded_lane is not None:
+        cls = f"traded:{traded_lane}"
+    elif rows:
+        cls = "unrecorded"
+    else:
+        cls = "no_rows"
+    return {"legacy": legacy, "map_class": cls}
+
+
+def _book_depth(client, slug: str) -> dict | None:
+    """The best level of each side of the venue book -- price and
+    resting size -- from one `markets.book` read; None when unreadable.
+    The BBO feed the plan is judged on carries prices only, so the size
+    that sat ahead of a resting order at the touch (the queue, the one
+    residual the shadow's touch rate cannot see) is read here, once per
+    touch, never per tick."""
+    try:
+        raw = client.markets.book(slug) or {}
+    except Exception:  # noqa: BLE001
+        return None
+    body = raw if isinstance(raw, dict) else {}
+    for key in ("marketData", "book"):
+        if isinstance(body.get(key), dict):
+            body = body[key]
+
+    def _levels(items) -> list[tuple[float, float]]:
+        out: list[tuple[float, float]] = []
+        for lvl in items or []:
+            try:
+                px = lvl.get("px")
+                p = float(px.get("value") if isinstance(px, dict) else px)
+                q = float(lvl.get("qty") or 0.0)
+            except (TypeError, ValueError, AttributeError):
+                continue
+            if 0.0 < p < 1.0 and q > 0:
+                out.append((p, q))
+        return out
+
+    bids = _levels(body.get("bids"))
+    asks = _levels(body.get("offers") or body.get("asks"))
+    if not bids and not asks:
+        return None
+    out: dict[str, Any] = {}
+    if bids:
+        p, q = max(bids)
+        out.update(bid=p, bid_qty=q)
+    if asks:
+        p, q = min(asks)
+        out.update(ask=p, ask_qty=q)
+    return out
+
+
+def _paced_depth(pmus, slug: str) -> dict | None:
+    """One paced book-depth read (the same process-wide gate every venue
+    read here goes through)."""
+    pace(READ_PACING_S)
+    try:
+        client = pmus._get_client()
+    except Exception:  # noqa: BLE001
+        return None
+    return _book_depth(client, slug)
+
+
+def short_reading(ratio: float, net: float, mark: float, ledger: float,
+                  venue: float | None, book: "mi.Book", fills: list[dict],
+                  long_asset: str | None, other_asset: str | None) -> dict:
+    """THE PARALLEL SHORT READING. The same arithmetic as the live-
+    compared plan with allow_short=True: a negative net becomes a
+    negative target capped at the short leg's mark, and the plan from
+    the ledger toward it is a SELL of the long token at his equivalent
+    (one minus the price he paid for the other token) or better -- the
+    shape the executor's BUY_SHORT wire already sends (373 sign-verified
+    fills, 0 mismatch). Written beside the long-only target, never in
+    its place, so P1's shadow_live_disagree keeps comparing like with
+    like while P2's gate (would_fill_short over 30 markets) is measured."""
+    tgt = mi.target_shares(ratio, net, mark, allow_short=True)
+    reducing = int(tgt["target"]) <= int(ledger)
+    his_px = his_level(fills, long_asset, other_asset, reducing)
+    p = mi.plan(int(tgt["target"]), float(ledger), venue, book, his_px, mark)
+    return {"target_short": int(tgt["target"]), "target_raw_short": tgt["raw"],
+            "capped_short": bool(tgt["capped"]), "his_px_short": his_px,
+            "would_side_short": p.side, "would_qty_short": int(p.qty),
+            "would_px_short": p.price, "would_fill_short": None,
+            "reason_short": p.reason,
+            "marketable_now_short": (bool(p.would_fill) if p.side and p.price is not None
+                                     else None)}
+
+
+# ------------------------------------------------ the exit leg (A3)
+#
+# THE HALF OF THE METHODOLOGY WITH NO EVIDENCE BEHIND IT. The shadow
+# judges what it would have done on ENTRIES; it recorded nothing about
+# EXITS, and the exit is the half that decides a market maker's day.
+# The owner's reading of the whale -- "he never sells" -- is right about
+# the wire and wrong about the position: he exits by BUYING THE
+# COMPLEMENT, so on a netting venue his exit arrives as a BUY and only
+# his NET says he left. A rule keyed on his SELLs would see almost
+# nothing -- the programme's decision 18 records how few sells exist
+# in his whole history (docs/mirror-to-a-tee-program.md; a reading
+# taken there, not re-measured here) -- while a rule keyed on his
+# NET sees every exit he has ever made.
+#
+# Nothing here arms anything and nothing here re-plans. The exit leg is
+# a LABEL on the plan the row already carries plus the evidence behind
+# it, so the live-compared columns stay byte-identical and the verdict
+# is the row's own `would_fill` -- judged on the SELL side, against the
+# book we actually read, over the same JUDGE_TTL_S the BUY judge uses.
+# A separate exit judge would have been a second arithmetic that could
+# disagree with the first; there is one plan and one verdict.
+#
+# Read this before quoting the rate it produces: a maker who is filled
+# on his exit was filled because the market came to him, which on the
+# losing half of the distribution is the market coming through him. The
+# fill rate here says how OFTEN the exit rests would have been touched.
+# It says nothing about what those fills were worth, and the programme
+# is explicit that the VALUE is owner decision 18, not a threshold this
+# unit sets.
+
+# a reduction older than the shadow's own window is not a current exit:
+# the market can re-enter the window on a NEW trade while carrying an
+# ancient reduction, and that must not read as "he is leaving now".
+# Derived, not a seventh knob: it tightens with MIRROR_LOOKBACK_H.
+def _exit_max_age_s() -> float:
+    return float(LOOKBACK_H) * 3600.0
+
+
+def reduction_event(fills: list[dict], long_asset: str | None, other_asset: str | None,
+                    max_age_s: float | None = None, now_ts: float | None = None) -> dict | None:
+    """HIS most recent move that REDUCED his net on this market, or None.
+
+    His net is long minus other (mi.his_net), so exactly two shapes
+    reduce it: a SELL of the long token, and a BUY of the complement --
+    his pair completion, the shape he actually uses. The event is the
+    LAST fill that changed his net at all: if that fill INCREASED it he
+    is adding, not leaving, and a reduction behind it is history, not a
+    current exit. `left` is a net that reached zero (or crossed it);
+    anything else is a trim.
+
+    Prices are read the same way the rest of the worker reads them
+    (`_px`, which refuses a price outside (0,1)); an unreadable price
+    still records the event, with `px_equiv` None, so a reduction we
+    cannot price is visible instead of absent.
+
+    ONE LIMITATION, STATED BECAUSE `left` IS SERVED ON THE PROBE LINE:
+    each leg is floored at zero at EVERY fill here, while
+    `mi.net_positions` floors only the final value. The two agree unless
+    a SELL exceeds the BUYs we ingested -- exactly the ingest-miss the
+    floor exists for -- and in that case a trim reads as net_after 0 and
+    the event is recorded `left` rather than `reduced`. The row's own
+    `his_net` carries the same limitation, and he exits by buying the
+    complement, which never drives a leg negative, so the exposure is
+    small; it is a mislabel of a kind, never a phantom exit.
+    """
+    now_ts = time.time() if now_ts is None else float(now_ts)
+    max_age_s = _exit_max_age_s() if max_age_s is None else float(max_age_s)
+
+    def _ts(f: dict) -> float:
+        try:
+            return float(f.get("ts") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    def _size(f: dict) -> float:
+        try:
+            return float(f.get("size") or 0.0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    # replayed in his own order, with the same floor-at-zero rule
+    # mi.net_positions applies (a SELL beyond what we saw him buy is a
+    # fill we missed, not a short)
+    raw: dict[str, float] = {}
+
+    def _net() -> float:
+        return round(max(0.0, raw.get(long_asset or "", 0.0))
+                     - max(0.0, raw.get(other_asset or "", 0.0)), 6)
+
+    last: dict | None = None
+    if not long_asset:
+        # we do not know which token is the long leg, so "he reduced the
+        # long side" is not a statement this row can make
+        return None
+    # his own order, and OURS as the tiebreak: the query returns the
+    # fills ORDER BY ts, id, and two fills on one timestamp must not be
+    # reordered by a lexicographic id ("10" before "9")
+    for _i, f in sorted(enumerate(fills), key=lambda p: (_ts(p[1]), p[0])):
+        asset = str(f.get("asset") or "")
+        size = _size(f)
+        if not asset or size <= 0:
+            continue
+        before = _net()
+        raw[asset] = raw.get(asset, 0.0) + (size if str(f.get("side") or "").upper() == "BUY"
+                                            else -size)
+        after = _net()
+        if abs(after - before) < 1e-9:
+            continue                      # nothing about his net changed
+        if after > before:
+            last = None                   # he is adding: no exit is in force
+            continue
+        if before <= 0:
+            # he held no long side to leave: this is him OPENING a short
+            # of the long leg, which is the short reading's question, not
+            # the exit leg's
+            continue
+        px = _px(f)
+        if asset == other_asset and str(f.get("side") or "").upper() == "BUY":
+            move, equiv, comp = "bought_complement", (None if px is None else round(1.0 - px, 4)), px
+        elif asset == long_asset and str(f.get("side") or "").upper() == "SELL":
+            move, equiv, comp = "sold_long", px, None
+        else:                             # a token that is neither leg cannot move this net
+            continue
+        last = {"move": move, "asset": asset, "at": _ts(f), "size": round(size, 4),
+                "px_equiv": equiv, "complement_px": comp,
+                "net_before": before, "net_after": after,
+                "left": after <= 1e-9}
+    if last is None:
+        return None
+    age = round(max(0.0, now_ts - float(last["at"])), 1)
+    if max_age_s > 0 and age > max_age_s:
+        return None                       # a reduction older than the window we read
+    last["age_s"] = age
+    last["kind"] = "left" if last["left"] else "reduced"
+    return last
+
+
+# THE PLAN REASONS THAT ARE A DECISION not to reduce (we hold what we
+# have) as opposed to a reading that could not decide at all. `mi.plan`
+# returns side=None for exactly six reasons: these four, plus its two
+# FAIL-CLOSED REFUSALS -- "venue unreadable" and "frozen: venue and
+# ledger disagree" -- which are not decisions and must never be filed
+# as one. A test pins that this list plus those two is the whole set,
+# so a seventh reason added upstream cannot silently become a `hold`:
+# anything not named here falls through to `none`, the unjudged class.
+_EXIT_HOLD_REASONS = ("on target", "under one share", "under the dollar dead band",
+                      "inside hysteresis")
+
+
+def exit_leg(ev: dict | None, ledger: float, venue: float | None,
+             target: int | None = None, p: "mi.Plan | None" = None,
+             his_px: float | None = None, no_plan_reason: str | None = None) -> dict:
+    """The exit-leg block for one row, or {} when he is not reducing.
+
+    What it records, and nothing beyond it: that he reduced or left,
+    when, at what price the COMPLEMENT traded (the leg he actually
+    bought), what our own leg was at that moment -- by our ledger and by
+    the venue, the two readings the plan is fail-closed on -- what the
+    exit rule would have done, and the reason when it would have done
+    nothing.
+
+      rest  the row's plan is a SELL of the long leg at his equivalent
+            or better; its verdict is the row's own would_fill
+      hold  the rule DECIDED not to reduce: on target, under a share,
+            inside the dead band or the hysteresis, or the plan is a
+            BUY_LONG -- our target is still above what we hold and the
+            entry leg, not the exit leg, has the market
+      none  the rule could not decide: no ratio, no mark, an unreadable
+            venue, a frozen slug, no side of the book to rest at
+
+    `none` is the unjudged class: it is never a fill and never a miss.
+
+    THE BUCKET IS DECIDED BY THE REASON, NEVER BY ARITHMETIC. An earlier
+    version filed any side-None plan as `hold` when `target >= ledger`,
+    which is a comparison, not a decision: it swept `frozen` and `venue
+    unreadable` -- both fail-closed REFUSALS -- into `hold` whenever our
+    target sat at or above our ledger, which is the mirror's own day-one
+    state (it holds nothing). Frozen is the most common reason class in
+    the shadow window the mirror programme records, so that clause put
+    the rows carrying the LEAST information into the bucket the line
+    serves as "the rule chose not to reduce", and into the count the
+    gate keys on. It is removed, not guarded.
+    """
+    if not ev:
+        return {}
+    out: dict[str, Any] = {
+        "exit_kind": ev["kind"], "exit_move": ev["move"], "exit_at": ev["at"],
+        "exit_age_s": ev.get("age_s"), "exit_size": ev["size"],
+        "exit_his_px": ev["px_equiv"], "exit_complement_px": ev["complement_px"],
+        "exit_his_net_before": ev["net_before"], "exit_his_net_after": ev["net_after"],
+        # our own leg at that moment, both readings
+        "exit_ledger": round(float(ledger), 4), "exit_venue": venue,
+        "exit_target": None if target is None else int(target),
+    }
+    if p is None:
+        out.update(exit_plan="none", exit_reason=no_plan_reason or "no plan")
+        return out
+    if p.side == "SELL_LONG" and p.price is not None:
+        out.update(exit_plan="rest", exit_side=p.side, exit_qty=int(p.qty),
+                   exit_px=p.price, exit_reason=p.reason,
+                   # did we rest at HIS level, or did the book's own side
+                   # hold the price above it? (the plan takes the max)
+                   exit_at_his_level=(his_px is not None and p.price == his_px),
+                   # the immediate read, beside the verdict and never in
+                   # it: the bid is already at or through our price
+                   exit_marketable_now=bool(p.would_fill))
+        # THE LIVE WORKER'S EXIT PRICES, beside the plan's (E4, owner
+        # order 2026-09-06 "exit when he exits at his price or within
+        # 1c"): the same rules.exit_terms off the same his_px -- the
+        # floor (his price less the tolerance), the cent the live rest
+        # goes at (his cent, never lifted to the ask as plan.price is)
+        # and the cent its IOC fires at. Recorded so the shadow's row
+        # and the live plan read the same figures; the live/shadow
+        # comparison (mirror_live._shadow_check) compares the TARGET
+        # alone and never a price, so nothing here can name a
+        # disagreement. Absent when he gave no exit price
+        ex = rules.exit_terms(rules.SELL, his_px)
+        if ex is not None:
+            out.update(exit_floor=round(ex["floor"], 6), exit_rest_px=ex["rest"], exit_take_px=ex["take"])
+            # FILL lane 3: the band cent beside the take cent (equal at
+            # the default band), the cent the band judge reads
+            if ex.get("take_band") is not None:
+                out.update(exit_take_band_px=ex["take_band"], exit_band_floor=round(ex["band_floor"], 6))
+        return out
+    if p.side is None and str(p.reason or "") in _EXIT_HOLD_REASONS:
+        out.update(exit_plan="hold", exit_reason=p.reason)
+        return out
+    if p.side == "BUY_LONG":
+        # he reduced and our target is still ABOVE what we hold: the
+        # exit rule does nothing here, whatever the entry rule does.
+        #
+        # THE PLAN'S OWN REASON RIDES ALONG. This clause writes the
+        # bucket's own text over `p.reason`, and one of the reasons it
+        # overwrites is `no price to rest at` -- a book we could not
+        # read on the side the entry leg wanted. The BUCKET is right
+        # either way (the exit rule would not reduce here whatever the
+        # book says), but `hold` is served on the line as "the rule
+        # chose not to reduce", and without this key the row no longer
+        # records that there was no price. It costs one key.
+        out.update(exit_plan="hold",
+                   exit_reason="target still above the ledger; the entry leg has it",
+                   exit_plan_reason=p.reason)
+        return out
+    out.update(exit_plan="none", exit_reason=p.reason or no_plan_reason or "no plan")
+    return out
+
+
+def _pct(vals: list[float], q: float) -> float | None:
+    """Nearest-rank percentile — the same rule the drift p90 and the
+    report's `_p` use, restated here so the worker does not import the
+    report to read one number."""
+    xs = sorted(float(v) for v in vals if v is not None)
+    if not xs:
+        return None
+    n = len(xs)
+    return round(xs[min(n - 1, max(0, -(-int(q * 100) * n // 100) - 1))], 1)
+
+
+# ONE ROW PER MARKET COMES BACK, not one per reading: the gate is
+# clustered by MARKET (§3b), and a market read two hundred times is one
+# market's worth of evidence. The DISTINCT ON prefers the reading that
+# was actually judged, then any reading that produced a rest, then the
+# newest -- so a market whose newest tick says "hold" does not erase the
+# exit plan it rested an hour ago. The window, the cap and the caller's
+# timeout are the three bounds; there is no ORDER BY over the whole
+# table and no scan outside the window's index.
+_SQL_EXIT_CENSUS = """
+SELECT DISTINCT ON (whale, condition_id)
+       whale, condition_id, would_fill, would_qty, would_px,
+       CASE WHEN detail ? 'would_fill_band' THEN (detail->>'would_fill_band')::boolean
+            WHEN detail ? 'exit_take_band_px' THEN would_fill
+            ELSE NULL END AS would_fill_band,
+       detail->>'exit_kind'   AS exit_kind,
+       detail->>'exit_plan'   AS exit_plan,
+       detail->>'exit_reason' AS exit_reason,
+       detail->>'family'      AS family,
+       (detail->>'touched_s')::float8 AS touched_s
+  FROM mirror_shadow
+ WHERE at >= now() - ($1::float8 * interval '1 hour')
+   AND detail ? 'exit_kind'
+ ORDER BY whale, condition_id,
+          (detail->>'exit_plan' = 'rest' AND would_fill IS NOT NULL) DESC,
+          (detail->>'exit_plan' = 'rest') DESC,
+          at DESC
+ LIMIT $2 /* exit-leg-census */
+"""
+
+
+def summarize_exit_rows(rows: list[dict], window_h: float = EXIT_WINDOW_H,
+                        limit: int | None = None) -> dict:
+    """The MIRROREXIT reading, per whale, from one row per market.
+
+    Every market lands in exactly one bucket and none is counted twice:
+    n = resolved + unjudged + hold, and resolved = fills + misses. A
+    market we could not judge -- a rest nobody ever read back, or a
+    reading whose rule could not decide -- is `unjudged`, never a fill
+    and never a miss (A3's unreadable contract).
+
+    WHAT THE DENOMINATOR IS KEYED ON, both halves, because the line has
+    to say both: `n` counts the markets where HE IS REDUCING and which
+    WE COULD MAP to a US slug. A market we could not map has no book to
+    judge a rest against and carries no exit block at all, so it is
+    absent from this reading rather than counted unjudged; and a SELL
+    our own ratio raised without a reduction of his -- our target moving
+    down, or the market cap binding -- carries no exit block either. The
+    probe line prints this count as `mapped_markets_he_reduced` for that
+    reason: M14's denominator is "planned reductions", of which this is
+    a strict subset, and decision 18 should read it as the subset it is.
+
+    `lo` is the cluster-robust 95% lower bound the gates are read at
+    (proof.roi_with_ci through mirror_report.rate_with_ci); the rows are
+    already one per market, so the cluster count equals the resolved
+    count and the interval cannot be narrowed by re-reading a market.
+
+    THE GATE'S n IS THE PROPORTION'S OWN DENOMINATOR, NOT `n`. §3b reads
+    this gate as `proportion / market / >= 30`, so the 30 is a count of
+    JUDGED markets -- `clusters` -- and `ready` keys on that. Keying it
+    on `n` (which counts holds and unjudged rows too) let 28 holds and
+    two filled rests print `ready=true` with a 95% lower bound of 1.00
+    over two markets: `rate_with_ci` -> `proof.roi_with_ci` refuses only
+    below two clusters, and two identical observations give a zero
+    standard error and an interval clamped onto the point estimate.
+    Below the floor the three COHORT ESTIMATES -- the rate, its lower
+    bound and the dollar share -- are not computed at all; the counts
+    they would be computed from stay on the line, because a count is a
+    fact and a rate below its minimum n authorises nothing (§3b).
+
+    A TRUNCATED CENSUS IS NOT A READING. `limit` is the caller's market
+    cap; the caller reads one row beyond it, and if that row exists this
+    returns the refusal (no whales, no families) instead of an
+    alphabetically-selected prefix of (whale, condition_id) served as
+    the window's reading.
+    """
+    from ..analytics.mirror_report import rate_with_ci
+
+    if limit is not None and len(rows) > int(limit):
+        return {"whales": {}, "families": {}, "markets": None,
+                "window_h": float(window_h), "truncated": True, "limit": int(limit)}
+
+    def _blank() -> dict[str, Any]:
+        return {"n": 0, "reduced": 0, "left": 0, "rest": 0, "hold": 0, "no_plan": 0,
+                "resolved": 0, "fills": 0, "misses": 0, "unresolved": 0,
+                "resolved_usd": 0.0, "unfilled_usd": 0.0,
+                # FILL lane 3: the same rest rows judged at the exit's
+                # BAND cent (would_fill_band: the band's own verdict; a
+                # row the rest judge resolved with a band cent recorded
+                # inherits it -- the rest cent touched is the band cent
+                # touched, and the plan expired is both expired; a row
+                # with no band cent is unjudged for the band)
+                "resolved_band": 0, "fills_band": 0, "resolved_usd_band": 0.0,
+                "unfilled_usd_band_usd": 0.0}
+
+    by: dict[str, dict[str, Any]] = {}
+    rest_rows: dict[str, list[dict]] = {}
+    touches: dict[str, list[float]] = {}
+    fam: dict[str, dict[str, Any]] = {}
+    for r in rows:
+        w = str(r.get("whale") or "-")
+        b = by.setdefault(w, _blank())
+        b["n"] += 1
+        b["left" if str(r.get("exit_kind")) == "left" else "reduced"] += 1
+        plan = str(r.get("exit_plan") or "")
+        if plan != "rest":
+            b["hold" if plan == "hold" else "no_plan"] += 1
+            continue
+        b["rest"] += 1
+        wf = r.get("would_fill")
+        try:
+            usd = abs(float(r.get("would_qty") or 0.0)) * float(r.get("would_px") or 0.0)
+        except (TypeError, ValueError):
+            usd = 0.0
+        wfb = r.get("would_fill_band")
+        if wfb is not None:
+            b["resolved_band"] += 1
+            b["resolved_usd_band"] += usd
+            if wfb:
+                b["fills_band"] += 1
+            else:
+                b["unfilled_usd_band_usd"] += usd
+        if wf is None:
+            b["unresolved"] += 1
+            continue
+        b["resolved"] += 1
+        rest_rows.setdefault(w, []).append({"would_fill": bool(wf),
+                                            "condition_id": r.get("condition_id")})
+        b["resolved_usd"] += usd
+        fk = f"{w}/{str(r.get('family') or '-')}"
+        fb = fam.setdefault(fk, {"n": 0, "fills": 0, "touch": [], "whale": w})
+        fb["n"] += 1
+        if wf:
+            b["fills"] += 1
+            fb["fills"] += 1
+            t = r.get("touched_s")
+            if t is not None:
+                touches.setdefault(w, []).append(float(t))
+                fb["touch"].append(float(t))
+        else:
+            b["misses"] += 1
+            b["unfilled_usd"] += usd
+    for w, b in by.items():
+        b["resolved_usd"] = round(b["resolved_usd"], 2)
+        b["unfilled_usd"] = round(b["unfilled_usd"], 2)
+        b["unjudged"] = b["unresolved"] + b["no_plan"]
+        ci = rate_with_ci(rest_rows.get(w, []))
+        # one row per market comes back, so the cluster count IS the
+        # judged-market count; the gate's minimum n is read against it
+        b["clusters"] = ci["clusters"]
+        b["ready"] = bool(b["clusters"] >= EXIT_MIN_N)
+        b["n_min"] = EXIT_MIN_N
+        # §3b: the line prints at >= 30 JUDGED markets and the VALUE
+        # feeds decision 18. Below that there is no reading to quote.
+        b["rate"] = (round(b["fills"] / b["resolved"], 4)
+                     if b["ready"] and b["resolved"] else None)
+        b["lo"] = (ci["ci95"][0] if b["ready"] and ci.get("ci95") else None)
+        b["unfilled_usd_share"] = (round(b["unfilled_usd"] / b["resolved_usd"], 4)
+                                   if b["ready"] and b["resolved_usd"] > 0 else None)
+        # FILL lane 3: the band's rate and unfilled-dollar share beside
+        # the rest's, under the SAME gate (the whale's judged-market
+        # floor) and over the rows the band judge resolved; both None
+        # below the floor or with nothing resolved for the band
+        b["resolved_usd_band"] = round(b["resolved_usd_band"], 2)
+        b["unfilled_usd_band_usd"] = round(b["unfilled_usd_band_usd"], 2)
+        b["rate_band"] = (round(b["fills_band"] / b["resolved_band"], 4)
+                          if b["ready"] and b["resolved_band"] else None)
+        b["unfilled_usd_band"] = (round(b["unfilled_usd_band_usd"] / b["resolved_usd_band"], 4)
+                                  if b["ready"] and b["resolved_usd_band"] > 0 else None)
+        # THE PERCENTILES TAKE THE SAME FLOOR AS THE RATE. They are
+        # descriptive and carry no confidence claim, which is why an
+        # earlier version let them print at any n with `touch_n` beside
+        # them -- but §3b lists `.time_to_touch_p50/p90` in the SAME gate
+        # row as `sell_fill_lo` (`proportion / market / >= 30`), and they
+        # were printing numbers on a line whose sibling fields read
+        # `below_min_n`. A line that is a gate should obey one floor in
+        # every field, so a reader cannot take a two-market median off
+        # the row decision 18 reads. The count they were taken over
+        # stays, because a count is a fact.
+        b["touch_p50"] = _pct(touches.get(w, []), 0.5) if b["ready"] else None
+        b["touch_p90"] = _pct(touches.get(w, []), 0.9) if b["ready"] else None
+        b["touch_n"] = len(touches.get(w, []))
+    fams = {}
+    # bounded: the twelve families carrying the most judged markets.
+    # §3b asks this split for time-to-touch p50/p90, NOT for a rate: a
+    # per-family rate had no minimum n of its own and would have printed
+    # 1.00 off one judged market beside a line that is a gate. The
+    # counts stay; the rate is removed rather than floored.
+    #
+    # The split carries its WHALE'S readiness, and its percentiles take
+    # the same floor: flooring them on the gate line while the split
+    # beside it printed them at any n would have left the split as the
+    # way to read the number the gate refused.
+    for k, v in sorted(fam.items(), key=lambda kv: (-kv[1]["n"], kv[0]))[:12]:
+        rdy = bool((by.get(v["whale"]) or {}).get("ready"))
+        fams[k] = {"n": v["n"], "fills": v["fills"], "touch_n": len(v["touch"]),
+                   "ready": rdy,
+                   "touch_p50": _pct(v["touch"], 0.5) if rdy else None,
+                   "touch_p90": _pct(v["touch"], 0.9) if rdy else None}
+    return {"whales": by, "families": fams, "markets": len(rows),
+            "window_h": float(window_h), "truncated": False}
+
+
+async def exit_census(pool, window_h: float | None = None, limit: int | None = None) -> dict:
+    """One bounded read of the rows this worker already wrote, summarized
+    per whale. Raises on an unreadable table; the caller contains it.
+
+    It asks the table for ONE MARKET MORE than the cap: a census that
+    hit its cap is a lexicographic prefix of (whale, condition_id) --
+    whichever whale sorts first would take every slot and the second
+    would read n=0 -- and that is not a reading of the window. The extra
+    row is how the reading knows, and `summarize_exit_rows` refuses it.
+    """
+    w = float(EXIT_WINDOW_H if window_h is None else window_h)
+    lim = int(EXIT_SUMMARY_MAX if limit is None else limit)
+    rows = await pool.fetch(_SQL_EXIT_CENSUS, w, lim + 1)
+    return summarize_exit_rows([dict(r) for r in rows], w, limit=lim)
+
+
+async def refresh_exit_census(pool, now_ts: float | None = None, force: bool = False) -> dict:
+    """The census, at most once per EXIT_SUMMARY_S, and CONTAINED: this
+    is a measurement read, so a failure of it may not cost a tick, may
+    not abandon a market and may not spend the venue budget. It fails
+    closed -- the block carries an error and NO numbers, never a stale
+    reading dressed as a fresh one -- and the failure takes the interval
+    with it, so a table that raises every call is read no more often
+    than one that answers."""
+    now_ts = time.time() if now_ts is None else float(now_ts)
+    if (not force and _exit_cache.get("value") is not None
+            and now_ts - float(_exit_cache.get("at") or 0.0) < EXIT_SUMMARY_S):
+        return _exit_cache["value"]
+    try:
+        value = await asyncio.wait_for(exit_census(pool), EXIT_CENSUS_TIMEOUT_S)
+    except Exception as exc:  # noqa: BLE001 — table absent until 046, or slow
+        value = {"error": type(exc).__name__}
+        log.warning("mirror_shadow: exit-leg census unreadable (%s)", type(exc).__name__)
+    _exit_cache.update(at=now_ts, value=value)
+    return value
+
+
+def attach_exit_census(stats: dict, now_ts: float) -> None:
+    """The reading the probe line reads, on every census this worker
+    beats -- including the ones that abandoned, where it is the CACHED
+    value and its age says so. A tick that has never read it says so
+    too: silence is the one output an instrument must not produce, and
+    a tick that skipped the refresh says SUPPRESSED rather than absent,
+    because "we never read it" and "we did not read it this tick" are
+    different facts about the instrument.
+
+    THE WINDOW TRAVELS WITH THE NUMBERS. `MIRROR_EXIT_WINDOW_H` is
+    shell-settable down to 1 h, so a line that does not name its window
+    can serve a 1 h cohort in the shape of the 24 h reading §3b and §4
+    S4 define. It is published beside them and printed on the line.
+
+    The block is copied per whale on the way out: the cache is a module
+    global that outlives the tick, and an aliased sub-dict would let
+    anything downstream edit the reading the next tick serves.
+    """
+    value = _exit_cache.get("value")
+    if value is None:
+        skipped = bool(stats.get("abandoned") or stats.get("skipped_backoff")
+                       or stats.get("switched_off"))
+        stats["exit_leg"] = {"state": "suppressed" if skipped else "unread"}
+        return
+    stats["exit_census_age_s"] = round(max(0.0, now_ts - float(_exit_cache.get("at") or 0.0)), 1)
+    if "error" in value:
+        stats["exit_leg"] = {"error": value["error"]}
+        return
+    stats["exit_window_h"] = value.get("window_h")
+    if value.get("truncated"):
+        # a census that hit its market cap is not a reading of the
+        # window: no numbers at all, never a truncated cohort dressed
+        # as the whole one
+        stats["exit_leg"] = {"state": "truncated"}
+        stats["exit_markets"] = None
+        return
+    stats["exit_leg"] = {k: dict(v) for k, v in (value.get("whales") or {}).items()}
+    stats["exit_family"] = {k: dict(v) for k, v in (value.get("families") or {}).items()}
+    stats["exit_markets"] = value.get("markets", 0)
+
+
+# ---------------------------------------------------------------- tick
+
+async def shadow_market(pool, pmus, whale: str, condition_id: str,
+                        ratio: float | None, snap: dict[str, float],
+                        positions: dict[str, float] | None,
+                        snap_age_s: float | None = None,
+                        allow_short: bool = False,
+                        snap_partial: bool = False,
+                        map_budget: MapBudget | None = None,
+                        basis: dict | None = None) -> dict:
+    """One (whale, market) reading. `positions` is this tick's account
+    walk (None = the walk failed: venue unreadable, plan frozen). `snap`
+    is the exit worker's raw positions read; a token ABSENT from a fresh
+    and complete read is a position he no longer holds (0), which is the
+    exact case drift exists to catch -- fills say he holds, the venue
+    says he merged out (review round two). Absent from a PARTIAL read is
+    unknown (None). `map_budget` is the tick's venue budget for the exact
+    mapping lane (C1); None is a fresh per-call budget. `basis` is the
+    same walk's all-in basis per slug (account_positions' `basis_out`);
+    absent or empty, the row simply carries no basis keys. Returns the
+    row that was written."""
+    fills = await his_fills(pool, whale, condition_id)
+    dedup = his_fills_dedup()
+    pos = mi.net_positions(fills)
+    row: dict[str, Any] = {"whale": whale, "condition_id": condition_id,
+                           "ratio": ratio, "detail": {}}
+    if dedup["dup_rows"]:
+        # the per-match rows his_fills collapsed under a net-leg row on
+        # this market (D1), so a row's his_long/his_other can be read
+        # beside what the raw table would have said
+        row["detail"].update(fills_dedup_rows=dedup["dup_rows"],
+                             fills_dedup_shares=dedup["dup_shares"])
+    mo: dict[str, Any] = {}
+    m = await map_market(pool, fills, pmus, whale=whale, condition_id=condition_id,
+                         budget=map_budget, out=mo)
+    if mo.get("cache_hit"):
+        row["detail"]["map_cache_hit"] = int(mo["cache_hit"])
+    if mo.get("venue_reads"):
+        row["detail"]["map_venue_reads"] = int(mo["venue_reads"])
+    if mo.get("lane") == "unavailable" or mo.get("lane_error"):
+        row["detail"]["map_lane"] = str(mo.get("lane_error") or "unavailable")
+    if not m:
+        assets = sorted(pos)
+        capped = mo.get("refusal") == "map_reads_capped"
+        row.update(long_asset=assets[0] if assets else None,
+                   other_asset=assets[1] if len(assets) > 1 else None,
+                   his_long=None, his_other=None, his_net=None,
+                   # a market past the tick's mapping budget has NO
+                   # verdict: its reason never starts with 'unmapped', so
+                   # the unmapped TTL never remembers it and next tick
+                   # reads it again
+                   reason=("map reads capped: no verdict this tick" if capped
+                           else "unmapped: no US market for his tokens"))
+        # WHAT THE UNMAPPED MARKET IS (Phase 0): the row used to carry two
+        # token ids and nothing else, so 81% of his markets were one
+        # number with no family, no dollars and no reason. Each is now
+        # named -- slug, title, sport, family, the resolver's own step,
+        # his dollars in the window, and the NULL-outcome fills that
+        # make a premap miss ours rather than the venue's.
+        ctx = _first_context(fills)
+        n404 = _exact_404_count(mo.get("exact_404"))
+        # the trail is handed over only when there is one (a caller's
+        # three-argument explain keeps working where the lane asked nothing)
+        trail_kw = {"exact_404": n404} if n404 > 0 else {}
+        row["detail"].update(
+            his_slug=ctx["his_slug"], title=ctx["title"], event_title=ctx["event_title"],
+            event_slug=ctx["event_slug"], sport=ctx["sport"],
+            family=_family_of(ctx["his_slug"]),
+            explain=await explain_unmapped(pool, ctx, mo.get("refusal"), **trail_kw),
+            notional_6h=notional_in_window(fills, LOOKBACK_H),
+            gross_sh=round(sum(pos.values()), 4),
+            outcome_null=outcome_null_count(fills))
+        if n404 > 0:
+            # L7: the exact lane's 404 trail, whatever the explain says
+            row["detail"]["exact_404"] = n404
+        # E38 QUESTION 3, the DENOMINATOR half: his dollars on a market
+        # we could not map. It is read at HIS OWN fill prices, so it
+        # needs no venue quote and exists on exactly the rows that have
+        # none. `two_leg_mapped` false is what makes this row the
+        # denominator and a mapped row the numerator.
+        row["detail"].update(two_leg_block(fills, None, None))
+        return row
+    la, oa, slug = m["long_asset"], m["other_asset"], m["us_slug"]
+    his_long = float(pos.get(la, 0.0)) if la else 0.0
+    his_other = float(pos.get(oa, 0.0)) if oa else 0.0
+    net = mi.his_net(his_long, his_other)
+    fresh_snap = snap_age_s is not None and snap_age_s <= SNAP_MAX_AGE_S
+    # THE MAPPED MARKET'S CENSUS (Phase 0): family (the P1 family gate
+    # reads it), per-side as a bool on every row, the snapshot state in
+    # one word, fills that landed after the snapshot, and the ledger's
+    # own facts -- whether the position on the slug is a legacy per-fill
+    # row and what mapping class that row carries, because a
+    # ledger-sourced map is refused at P1 admission under the quarantine
+    # and the share P1 can actually admit was not a number anywhere.
+    lf = ledger_facts(await ledger_rows(pool, slug))
+    row["detail"].update(
+        family=_family_of(slug), per_side=bool(m.get("per_side")),
+        map_class=(lf["map_class"] if m["source"] == "ledger" else m["source"]),
+        ledger_legacy=lf["legacy"],
+        snap_state=("none" if snap_age_s is None else
+                    "stale" if not fresh_snap else
+                    "fresh_partial" if snap_partial else "fresh_complete"),
+        fills_since_snap=fills_since(fills, snap_age_s),
+        his_paired_sh=round(min(his_long, his_other), 4),
+        his_sport=_first_context(fills)["sport"])
+
+    def _snap_of(asset: str | None) -> float | None:
+        if not asset or not fresh_snap:
+            return None
+        if asset in snap:
+            return float(snap[asset])
+        return None if snap_partial else 0.0
+
+    row.update(us_market_slug=slug, long_asset=la, other_asset=oa,
+               his_long=his_long, his_other=his_other, his_net=net,
+               snap_long=_snap_of(la), snap_other=_snap_of(oa))
+    row["detail"]["map"] = m["source"]
+    if m.get("long_from"):
+        # W2 / P1: the long token came off the catalogue (his fills sit
+        # only on the short-side token), so the row's long_asset is set
+        # and the two lanes read the same pair
+        row["detail"]["long_from"] = str(m["long_from"])
+    elif not la:
+        # the catalogue did not name it either: the row says so, and
+        # the live lane refuses the candidate `long_token_unknown`
+        row["detail"]["long_token_unknown"] = True
+    if m.get("per_side"):
+        row["detail"]["per_side"] = True     # his larger side is the long, on its own slug
+    if fresh_snap and snap_partial:
+        row["detail"]["snap_partial"] = True
+    if snap_age_s is not None:
+        row["detail"]["snap_age_s"] = round(float(snap_age_s), 1)
+        if not fresh_snap:
+            row["detail"]["snap_stale"] = True
+    # venue quote for the long side (one paced call) and what we hold
+    bid = ask = None
+    try:
+        q = await asyncio.to_thread(_paced_bbo, pmus, slug)
+    except Exception as exc:  # noqa: BLE001 — unreadable book, named below
+        row["detail"]["bbo_error"] = type(exc).__name__
+    else:
+        # the venue's own state string rides on every mapped row, and
+        # a read on which no feed answered is named, never silent
+        bid, ask = q.get("bid"), q.get("ask")
+        row["detail"]["state"] = q.get("state")
+        if q.get("error"):
+            row["detail"]["bbo_error"] = str(q["error"])
+    mark = None
+    if bid is not None and ask is not None and 0.0 < bid < 1.0 and 0.0 < ask < 1.0:
+        mark = round((float(bid) + float(ask)) / 2.0, 4)
+    elif ask is not None and 0.0 < ask < 1.0:
+        mark = float(ask)
+    if mark is not None:
+        # his GROSS dollars at the mark -- long leg at the mark, other leg
+        # at one minus it -- the denominator the coverage gate is read
+        # against (a net mirror can never hold the paired part)
+        row["detail"]["his_gross_usd"] = round(his_long * mark + his_other * (1.0 - mark), 2)
+    # E38, THE TWO-LEGGED READING -- RECORDED, NEVER SENT. Written here,
+    # BEFORE the no-ratio and no-mark returns below, so a market he holds
+    # both sides of is counted whether or not the mirror had a plan for
+    # it: a closed or unquoted book is exactly the row the coverage
+    # question needs, and dropping it would count only the markets that
+    # went well.
+    # the ratio is the E1 / U12 RULE'S, not this tick's measured one:
+    # mirror_target's own note says the shadow's measured ratio sizes
+    # nothing live any more, and a reading the owner will judge a live
+    # switch on must be sized by the rule the live lane would use
+    # (rules_2l.two_leg_open_ratio, which is open_ratio read against his
+    # gross rather than his net -- see that function)
+    row["detail"].update(two_leg_block(fills, la, oa, mark=mark,
+                                       bid=bid, ask=ask,
+                                       state=row["detail"].get("state"),
+                                       per_side=bool(m.get("per_side"))))
+    venue = None if positions is None else float(positions.get(slug.lower(), 0.0))
+    # THE VENUE'S OWN ALL-IN BASIS on what we hold here (the fee-capture
+    # fix, 2026-09-10). `cost` is fees-included and `baseCost` is the
+    # same position before them, so `venue_fee_px` is the venue's
+    # arithmetic and not a fee model of ours -- the per-execution
+    # commission keys have never carried a value. RECORDED ONLY: the
+    # owner's standing-order rule (a sell that never rests below
+    # basis + margin + fee) will read `venue_basis_px`, and until that
+    # rule is built and armed nothing sizes, places or cancels on any
+    # of these keys.
+    if basis:
+        b = basis.get(slug.lower())
+        if isinstance(b, dict) and not b.get("error"):
+            for k, name in (("basis_px", "venue_basis_px"), ("fee_px", "venue_fee_px"),
+                            ("cost", "venue_cost_usd"), ("fees", "venue_fees_usd")):
+                v = b.get(k)
+                if v is not None and math.isfinite(float(v)):
+                    row["detail"][name] = round(float(v), 6)
+            if b.get("source"):
+                row["detail"]["venue_fee_src"] = str(b["source"])
+    try:
+        ledger = await ledger_net(pool, slug)
+    except Exception:  # noqa: BLE001
+        ledger = 0
+    # HIS EXIT, READ FROM HIS OWN FILLS (A3): the same list the target is
+    # derived from, so it costs no read of any kind. It rides the early
+    # returns too -- an exit we could not plan against is the reading the
+    # gate needs most, and dropping it would leave the census counting
+    # only the exits that went well.
+    ev = reduction_event(fills, la, oa)
+    # NO SCALE OR NO MARK IS NO PLAN (review round one): a missing ratio
+    # or an unreadable book must not read as "target zero, flatten" or
+    # as an uncapped target. Nothing is planned; the row says why.
+    if ratio is None or ratio <= 0:
+        row.update(target=0, target_raw=0.0, capped=False, ledger_net=int(ledger),
+                   venue_net=venue, bid=bid, ask=ask, mark=mark, his_last_px=None,
+                   would_side=None, would_qty=0, would_px=None, would_fill=None,
+                   reason="no ratio: fewer than the minimum markets with an opening burst")
+        row["detail"].update(exit_leg(ev, ledger, venue, no_plan_reason=row["reason"]))
+        return row
+    if mark is None:
+        row.update(target=0, target_raw=0.0, capped=False, ledger_net=int(ledger),
+                   venue_net=venue, bid=bid, ask=ask, mark=None, his_last_px=None,
+                   would_side=None, would_qty=0, would_px=None, would_fill=None,
+                   reason=no_mark_reason(row["detail"], bid, ask))
+        row["detail"].update(exit_leg(ev, ledger, venue, no_plan_reason=row["reason"]))
+        return row
+    tgt = mi.target_shares(ratio, net, mark, allow_short=allow_short)
+    reducing = int(tgt["target"]) <= int(ledger)
+    his_px = his_level(fills, la, oa, reducing)
+    p = mi.plan(int(tgt["target"]), float(ledger), venue,
+                mi.Book(bid=bid, ask=ask), his_px, mark)
+    row.update(target=int(tgt["target"]), target_raw=tgt["raw"], capped=bool(tgt["capped"]),
+               ledger_net=int(ledger), venue_net=venue, bid=bid, ask=ask, mark=mark,
+               his_last_px=his_px, would_side=p.side, would_qty=int(p.qty),
+               would_px=p.price,
+               # resolved against the NEXT reading of this market (see
+               # _write); the immediate read is kept beside it
+               would_fill=None,
+               reason=(tgt["why"] + "; " if tgt.get("why") else "") + p.reason)
+    row["detail"].update(p.detail)
+    if p.side and p.price is not None:
+        row["detail"]["marketable_now"] = bool(p.would_fill)
+    # the exit leg names the plan the row already carries; it never
+    # re-plans, so there is one arithmetic and one verdict
+    row["detail"].update(exit_leg(ev, ledger, venue, int(tgt["target"]), p, his_px))
+    # the parallel short reading, beside the target and never in it
+    row["detail"].update(short_reading(ratio, net, mark, ledger, venue,
+                                       mi.Book(bid=bid, ask=ask), fills, la, oa))
+    return row
+
+
+NO_MARK_PREFIX = "no mark:"
+
+
+def no_mark_reason(detail: dict, bid, ask) -> str:
+    """THE VENUE'S WORD FOR A BOOK WITH NO MARK (W1 / R1, 2026-09-07).
+    One string, 'no mark: book unreadable', covered four venue readings
+    the row told apart only in `detail`, and the coverage census keyed
+    on it printed $385k of finished markets -- two-sided OPEN for the
+    whole match, EXPIRED minutes after -- as a read problem (64 markets,
+    8,740 rows, 0 halts, 0 raised reads, 2026-09-07 13:50Z). Named by
+    the reading the row already holds, in this order:
+
+      no mark: venue state <STATE>   the state is present and not OPEN
+                                     (terminal or a halt), the string
+                                     as read, never normalised
+      no mark: read failed <Exc>     bbo_error: the read raised, or no
+                                     feed answered (state OPEN or None)
+      no mark: no state, empty       no state, no error, no quote (the
+                                     SDK-typed shape)
+      no mark: bid only <px>         OPEN, a bid, no ask (a decided
+                                     market's 0.99 bid)
+      no mark: quote off ladder      OPEN, a quote the mark rule refused
+                                     (an ask at 0 or 1) -- named rather
+                                     than read as an empty book
+      no mark: empty open book       OPEN, neither side
+
+    Every consumer reads the PREFIX (NO_MARK_PREFIX); nothing else on
+    the row moves (target 0, would_side None, no plan). Pure."""
+    state = detail.get("state")
+    err = detail.get("bbo_error")
+    if state is not None and str(state) != _STATE_OPEN:
+        return f"{NO_MARK_PREFIX} venue state {state}"
+    if err:
+        return f"{NO_MARK_PREFIX} read failed {err}"
+    if state is None:
+        return f"{NO_MARK_PREFIX} no state, empty"
+    if bid is not None and ask is None:
+        return f"{NO_MARK_PREFIX} bid only {bid}"
+    if ask is not None:
+        return f"{NO_MARK_PREFIX} quote off ladder {bid}/{ask}"
+    return f"{NO_MARK_PREFIX} empty open book"
+
+
+def _rowcount(status) -> int:
+    """asyncpg returns the command tag ('UPDATE 3'); a fake pool may
+    return None."""
+    try:
+        return int(str(status).split()[-1])
+    except (TypeError, ValueError, IndexError, AttributeError):
+        return 0
+
+
+async def _resolve_previous(pool, row: dict, census: dict | None = None,
+                            pmus=None) -> tuple[int, int]:
+    """WOULD IT HAVE FILLED? Every plan this market still has open is
+    judged against THIS tick's book. A plan is a resting order with a
+    life of JUDGE_TTL_S (the live lane's rest TTL): it FILLED if, at any
+    reading inside that life, the opposite side of the book REACHED our
+    price (buy: the ask came down to it; sell: the bid came up to it);
+    it did NOT fill if it aged past its life while the market was still
+    being read without that happening. "The book moved past our level"
+    is never a fill: market makers reprice by cancel-and-replace, so a
+    level that vanished was as likely pulled as taken, and counting it
+    would flatter the rate that gates P1. A plan on a market we stopped
+    reading stays NULL -- unobserved is not unfilled. (Review round one
+    judged one plan against one next reading, thirty seconds apart, and
+    read 15% on the first hour of the shadow; a resting order lives
+    minutes, not one tick, so this is the question P1 actually asks.)
+    Returns (resolved, filled) counts for the census. Best-effort.
+
+    THE TOUCH IS RECORDED (Phase 0): a judged plan also learns how long
+    it waited (touched_s, from its own `at`) and the touching side's
+    price, inside its JSONB detail -- a 046 column would change the
+    table the report select is pinned to. The PARALLEL SHORT reading in
+    the detail is judged by the same rule on its own side: its SELL of
+    the long token fills when the bid comes UP to its price, its BUY
+    when the ask comes down, and it expires past the same TTL. Those
+    counts go to the short census keys, never into the long-only rate
+    P1 is gated on. When something was touched this tick and a venue
+    handle is given, ONE paced book read records the size resting at the
+    best bid and ask (the queue the touch rate cannot see) on the rows
+    just touched; an unreadable book records null, never a guess."""
+    bid, ask = row.get("bid"), row.get("ask")
+    whale, cid = row.get("whale"), row.get("condition_id")
+    resolved = filled = 0
+    resolved_s = filled_s = 0
+    touch_ctx = ("COALESCE(detail, '{}'::jsonb) || jsonb_build_object("
+                 "'touched_s', round(extract(epoch FROM (now() - at)))::int, "
+                 "'touch_px', $3::float8)")
+    try:
+        if ask is not None and 0.0 < float(ask) < 1.0:
+            n = _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET would_fill = true, detail = " + touch_ctx + " "
+                "WHERE whale = $1 AND condition_id = $2 AND would_fill IS NULL "
+                "AND would_side = 'BUY_LONG' AND would_px IS NOT NULL AND would_px >= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-buy */",
+                whale, cid, float(ask), float(JUDGE_TTL_S)))
+            resolved += n
+            filled += n
+        if bid is not None and 0.0 < float(bid) < 1.0:
+            n = _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET would_fill = true, detail = " + touch_ctx + " "
+                "WHERE whale = $1 AND condition_id = $2 AND would_fill IS NULL "
+                "AND would_side = 'SELL_LONG' AND would_px IS NOT NULL AND would_px <= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-sell */",
+                whale, cid, float(bid), float(JUDGE_TTL_S)))
+            resolved += n
+            filled += n
+        if bid is not None and 0.0 < float(bid) < 1.0:
+            # FILL lane 3: THE BAND'S JUDGE beside the rest's -- the bid
+            # came up to the exit's band cent (exit_leg's
+            # exit_take_band_px, the take cent at the default band)
+            # inside the same life. Its verdict rides the detail
+            # (`would_fill_band`, `touched_s_band`, `touch_px_band`),
+            # never the live-compared column, and never the long-only
+            # rate P1 is gated on; a row with no band cent is not
+            # judged (the cast of a missing key is NULL: no match)
+            band_ctx = ("COALESCE(detail, '{}'::jsonb) || jsonb_build_object("
+                        "'would_fill_band', true, "
+                        "'touched_s_band', round(extract(epoch FROM (now() - at)))::int, "
+                        "'touch_px_band', $3::float8)")
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = " + band_ctx + " "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'would_fill_band' IS NULL "
+                "AND would_side = 'SELL_LONG' "
+                "AND (detail->>'exit_take_band_px')::float8 <= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-band */",
+                whale, cid, float(bid), float(JUDGE_TTL_S))
+        if bid is not None or ask is not None:
+            # still being read, and the plan outlived a resting order
+            resolved += _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET would_fill = false, detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('expired_s', round(extract(epoch FROM (now() - at)))::int) "
+                "WHERE whale = $1 AND condition_id = $2 AND would_fill IS NULL "
+                "AND would_side IS NOT NULL AND would_px IS NOT NULL "
+                "AND at < now() - ($3::float8 * interval '1 second') /* judge-expire */",
+                whale, cid, float(JUDGE_TTL_S)))
+        # the parallel short reading, judged on ITS side of the book
+        short_ctx = ("COALESCE(detail, '{}'::jsonb) || jsonb_build_object("
+                     "'would_fill_short', true, "
+                     "'touched_s_short', round(extract(epoch FROM (now() - at)))::int, "
+                     "'touch_px_short', $3::float8)")
+        if bid is not None and 0.0 < float(bid) < 1.0:
+            n = _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET detail = " + short_ctx + " "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'would_fill_short' IS NULL "
+                "AND detail->>'would_side_short' = 'SELL_LONG' "
+                "AND (detail->>'would_px_short')::float8 <= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-short-sell */",
+                whale, cid, float(bid), float(JUDGE_TTL_S)))
+            resolved_s += n
+            filled_s += n
+        if ask is not None and 0.0 < float(ask) < 1.0:
+            n = _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET detail = " + short_ctx + " "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'would_fill_short' IS NULL "
+                "AND detail->>'would_side_short' = 'BUY_LONG' "
+                "AND (detail->>'would_px_short')::float8 >= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-short-buy */",
+                whale, cid, float(ask), float(JUDGE_TTL_S)))
+            resolved_s += n
+            filled_s += n
+        if bid is not None or ask is not None:
+            resolved_s += _rowcount(await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('would_fill_short', false, "
+                "'expired_s_short', round(extract(epoch FROM (now() - at)))::int) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'would_fill_short' IS NULL "
+                "AND detail->>'would_side_short' IS NOT NULL "
+                "AND detail->>'would_px_short' IS NOT NULL "
+                "AND at < now() - ($3::float8 * interval '1 second') /* judge-short-expire */",
+                whale, cid, float(JUDGE_TTL_S)))
+        # E38: THE TWO-LEGGED JUDGE -- would BOTH post-only rests have
+        # filled inside the SAME window? Same rule, same clock, same
+        # TTL as every plan above; its verdict rides the detail alone
+        # and never touches would_fill, so the long-only rate P1 is
+        # gated on is byte-identical to before this lane. The long
+        # leg's rest fills when the ask comes DOWN to it; the OTHER
+        # leg's rest is a sale of the long token on this one
+        # complementary book, so it fills when the bid comes UP to
+        # `two_leg_rest_other_wire`. A pair is obtainable only when
+        # BOTH have happened -- which is the whole question.
+        if ask is not None and 0.0 < float(ask) < 1.0:
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('two_leg_fill_long', true, "
+                "'two_leg_touched_s_long', round(extract(epoch FROM (now() - at)))::int) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail ? 'two_leg_rest_long_px' "
+                "AND detail->>'two_leg_fill_long' IS NULL "
+                "AND (detail->>'two_leg_rest_long_px')::float8 >= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-two-leg-long */",
+                whale, cid, float(ask), float(JUDGE_TTL_S))
+        if bid is not None and 0.0 < float(bid) < 1.0:
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('two_leg_fill_other', true, "
+                "'two_leg_touched_s_other', round(extract(epoch FROM (now() - at)))::int) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail ? 'two_leg_rest_other_wire' "
+                "AND detail->>'two_leg_fill_other' IS NULL "
+                "AND (detail->>'two_leg_rest_other_wire')::float8 <= $3 "
+                "AND at >= now() - ($4::float8 * interval '1 second') /* judge-two-leg-other */",
+                whale, cid, float(bid), float(JUDGE_TTL_S))
+        if bid is not None or ask is not None:
+            # BOTH legs reached inside the life: the pair was obtainable
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('two_leg_both_obtainable', true) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail->>'two_leg_both_obtainable' IS NULL "
+                "AND detail->>'two_leg_fill_long' = 'true' "
+                "AND detail->>'two_leg_fill_other' = 'true' /* judge-two-leg-both */",
+                whale, cid)
+            # and a pair still unresolved past the life was NOT
+            # obtainable -- unobserved stays NULL, exactly as the
+            # one-legged judge treats a market we stopped reading
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('two_leg_both_obtainable', false, "
+                "'two_leg_expired_s', round(extract(epoch FROM (now() - at)))::int) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND detail ? 'two_leg_rest_long_px' "
+                "AND detail->>'two_leg_both_obtainable' IS NULL "
+                "AND at < now() - ($3::float8 * interval '1 second') /* judge-two-leg-expire */",
+                whale, cid, float(JUDGE_TTL_S))
+        if filled + filled_s > 0:
+            depth = None
+            if pmus is not None and row.get("us_market_slug"):
+                try:
+                    depth = await asyncio.to_thread(_paced_depth, pmus, str(row["us_market_slug"]))
+                except Exception:  # noqa: BLE001 — unreadable depth is null
+                    depth = None
+                if census is not None:
+                    census["touch_depth_reads"] = census.get("touch_depth_reads", 0) + 1
+            await pool.execute(
+                "UPDATE mirror_shadow SET detail = COALESCE(detail, '{}'::jsonb) "
+                "|| jsonb_build_object('touch_depth', $3::jsonb) "
+                "WHERE whale = $1 AND condition_id = $2 "
+                "AND (detail ? 'touched_s' OR detail ? 'touched_s_short') "
+                "AND NOT (detail ? 'touch_depth') /* judge-depth */",
+                whale, cid, json.dumps(depth))
+    except Exception:  # noqa: BLE001 — table absent until 046
+        pass
+    if census is not None:
+        census["resolved_short"] = census.get("resolved_short", 0) + resolved_s
+        census["resolved_filled_short"] = census.get("resolved_filled_short", 0) + filled_s
+    return resolved, filled
+
+
+async def _write(pool, row: dict, census: dict | None = None, pmus=None) -> tuple[int, int]:
+    """Judge this market's open plans against the row's book, then land
+    the row. Returns (resolved, filled) from _resolve_previous; the short
+    reading's counts land in `census` when given."""
+    verdict = await _resolve_previous(pool, row, census, pmus)
+    await pool.execute(
+        """
+        INSERT INTO mirror_shadow (whale, condition_id, us_market_slug, long_asset,
+            other_asset, his_long, his_other, his_net, snap_long, snap_other, ratio,
+            target, target_raw, capped, ledger_net, venue_net, bid, ask, mark,
+            his_last_px, would_side, would_qty, would_px, would_fill, reason, detail)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,
+                $20,$21,$22,$23,$24,$25,$26::jsonb)
+        """,
+        row.get("whale"), row.get("condition_id"), row.get("us_market_slug"),
+        row.get("long_asset"), row.get("other_asset"), row.get("his_long"),
+        row.get("his_other"), row.get("his_net"), row.get("snap_long"),
+        row.get("snap_other"), row.get("ratio"), row.get("target"), row.get("target_raw"),
+        row.get("capped"), row.get("ledger_net"), row.get("venue_net"), row.get("bid"),
+        row.get("ask"), row.get("mark"), row.get("his_last_px"), row.get("would_side"),
+        row.get("would_qty"), row.get("would_px"), row.get("would_fill"), row.get("reason"),
+        json.dumps(row.get("detail") or {}, default=str))
+    return verdict
+
+
+# THE 050 COLUMN'S PROBE (P2 rung S0), shared by both lanes: the live
+# worker runs it once per tick before any statement that names
+# mirror_orders.intent, and tick_once below runs it to read the same
+# EFFECTIVE knob (rules.shorts_effective) for its live-compared target
+# column. The workers never run migrations, so the column may be absent
+# in production for a deploy window, and the two lanes must read one
+# answer through that window or shadow_live_disagree trips by
+# construction on every negative-net book (brief E5).
+INTENT_GUARD_SQL = "SELECT intent FROM mirror_orders LIMIT 0 /* ml-intent-guard */"
+
+
+async def intent_column_present(pool) -> bool:
+    """True when mirror_orders.intent answers, False when the database
+    says the COLUMN does not exist (rules.column_missing: asyncpg's
+    UndefinedColumnError or its text). Any other failure of the probe
+    is re-raised: a timeout or a dropped connection is not a fact about
+    the schema, and a caller must not read it as one."""
+    from ..analytics import mirror_live_rules as _rules
+    try:
+        await pool.fetch(INTENT_GUARD_SQL)
+    except Exception as exc:  # noqa: BLE001 — the column absent is a fact; anything else is not
+        if _rules.column_missing(exc, "intent"):
+            return False
+        raise
+    return True
+
+
+async def tick_once(pool, pmus, now_ts: float | None = None,
+                    allow_short: bool | None = None) -> dict:
+    """One pass over the newest MAX_MARKETS_PER_TICK markets of every
+    mirrored whale. Returns the census the heartbeat carries; its
+    `status` is what the heartbeat reports.
+
+    `allow_short` (P2 rung S0, brief E5) is the ONE knob the live lane
+    admits shorts by, read here when the caller passes None as the
+    live lane reads it: mirror_live_rules.MIRROR_SHORTS AND the 050
+    column present (intent_column_present, rules.shorts_effective).
+    The live-compared `target` column then flips to the signed target
+    in the same deploy AND the same schema state as the live lane's
+    admission, so `shadow_live_disagree` keeps comparing like with
+    like -- every negative-net book would trip the P2 integrity counter
+    by construction if only one side flipped, and the env on with 050
+    unapplied is exactly that state. A probe that fails for any OTHER
+    reason (a timeout, a dropped connection: a blip on the shadow's
+    side, not a fact about the schema) is `intent_guard_unreadable`,
+    the live lane's own name for it: the tick still runs long-only and
+    is marked degraded under that key, and the live-compared `target`
+    column is written NULL on every row of the tick -- the live lane
+    skips a NULL target (_shadow_check), so a blip here never trips
+    shadow_live_disagree on the live tick that follows against a
+    long-only figure the live lane (whose own probe answered) never
+    computed (P2 rung S0 re-review). The parallel short reading
+    (`detail.target_short`) is written either way, so the report's
+    `.short` block is continuous across the flip."""
+    global _backoff_until
+    now_ts = time.time() if now_ts is None else now_ts
+    knob_unreadable: str | None = None
+    if allow_short is None:
+        from ..analytics import mirror_live_rules as _rules
+        if not _rules.MIRROR_SHORTS:
+            # the knob is off: shorts_effective is False whatever the
+            # column says, so the probe buys nothing and a blip on it
+            # must not degrade the tick (fold review, finding 3)
+            allow_short = False
+        else:
+            try:
+                present = await intent_column_present(pool)
+            except Exception as exc:  # noqa: BLE001 — an unreadable probe is not a column
+                log.warning("mirror_shadow: intent column probe failed (%s); shorts off this "
+                            "tick, its live-compared target written NULL", type(exc).__name__)
+                present = None
+                knob_unreadable = type(exc).__name__
+            allow_short = _rules.shorts_effective(present)
+    # would_orders: plans this tick; marketable_now: of those, the book
+    # was already at or through the resting price; resolved /
+    # resolved_filled: previous plans judged against this tick's book
+    # (review round two: a fill counted at write time is structurally 0)
+    stats: dict[str, Any] = {"status": "ok", "whales": 0, "markets": 0, "rows": 0,
+                             "unmapped": 0, "would_orders": 0, "marketable_now": 0,
+                             "resolved": 0, "resolved_filled": 0,
+                             # the parallel short reading's census (Phase 0)
+                             "would_orders_short": 0, "resolved_short": 0,
+                             "resolved_filled_short": 0, "touch_depth_reads": 0,
+                             # the exit leg (A3): rows on which he reduced or
+                             # left, and what the exit rule would have done.
+                             # exit_unjudged is a row whose rule could not
+                             # decide -- never a fill, never a miss.
+                             "exit_rows": 0, "exit_rest": 0, "exit_hold": 0,
+                             "exit_unjudged": 0, "exit_left": 0,
+                             "frozen": 0, "skipped_markets": 0, "skipped_unmapped": 0,
+                             # W1 / R2: markets whose last read said they had
+                             # ended, skipped inside the memo's TTL
+                             "skipped_terminal": 0,
+                             "stale_snapshots": 0, "skipped_backoff": False, "ratio": {},
+                             # the venue's own market state, the most common one
+                             # read this tick (None: no read carried one)
+                             "venue_state": None,
+                             # THE MAPPING LANE'S CENSUS (C1): markets mapped by
+                             # source; the exact lane's venue reads, cache hits,
+                             # and markets left without a verdict by the budget
+                             "mapped_by": {"ledger": 0, "premap": 0, "exact": 0,
+                                           "grammar": 0, "yesno": 0},
+                             "map_venue_reads": 0, "map_cache_hit": 0, "map_reads_capped": 0,
+                             # D1: the per-match rows his_fills collapsed under
+                             # a net-leg row across this tick's markets, and
+                             # their shares (his_fills_dedup)
+                             "fills_dedup_rows": 0, "fills_dedup_shares": 0.0}
+    map_budget = MapBudget()
+    if knob_unreadable:
+        stats.update(status="degraded", intent_guard_unreadable=knob_unreadable)
+    if now_ts < _backoff_until:
+        stats["skipped_backoff"] = True
+        attach_exit_census(stats, now_ts)
+        return stats
+    if await _db_switch_off(pool):
+        stats["switched_off"] = True
+        attach_exit_census(stats, now_ts)
+        return stats
+    whales = mirror_whales()
+    ratios = await refresh_ratios(pool, whales)
+    # ONE positions walk for the whole tick, before any market read; a
+    # failed walk is the venue saying no -- back off before adding load
+    # the SAME walk also yields the venue's all-in basis per slug (the
+    # fee-capture fix): no extra venue call, and nothing on an order
+    # path reads it -- the shadow records it and that is all
+    venue_basis: dict[str, dict] = {}
+    positions = await account_positions(pmus, basis_out=venue_basis)
+    if positions is None:
+        _backoff_until = now_ts + BACKOFF_S
+        stats.update(positions_unreadable=True, abandoned=True, status="degraded")
+        log.warning("mirror_shadow: account positions unreadable — abandoning the "
+                    "tick, backing off %ss", BACKOFF_S)
+        attach_exit_census(stats, now_ts)
+        return stats
+    stats["venue_positions"] = len(positions)
+    reads = 0
+    misses = 0
+    venue_states: Counter = Counter()
+    for w in whales:
+        stats["whales"] += 1
+        r = (ratios.get(w) or {})
+        stats["ratio"][w] = r.get("ratio")
+        snap, snap_age, snap_partial = await snapshot_sizes(pool, w)
+        if snap_age is not None and snap_age > SNAP_MAX_AGE_S:
+            stats["stale_snapshots"] += 1
+        try:
+            conds = await active_conditions(pool, w)
+        except Exception as exc:  # noqa: BLE001
+            log.warning("mirror_shadow: active markets for %s unreadable (%s)", w, type(exc).__name__)
+            continue
+        for i, cid in enumerate(conds):
+            if reads >= MAX_MARKETS_PER_TICK:
+                stats["skipped_markets"] += len(conds) - i
+                stats["capped_tick"] = True
+                break
+            if _unmapped_until.get((w, cid), 0.0) > now_ts:
+                stats["skipped_unmapped"] += 1
+                continue
+            if _terminal_until.get((w, cid), 0.0) > now_ts:
+                # its last read said the market had ended (R2): no slot
+                # spent on it until the memo's TTL runs
+                stats["skipped_terminal"] += 1
+                continue
+            reads += 1
+            stats["markets"] += 1
+            try:
+                row = await shadow_market(pool, pmus, w, cid, r.get("ratio"), snap,
+                                          positions, snap_age, allow_short=allow_short,
+                                          snap_partial=snap_partial, map_budget=map_budget,
+                                          basis=venue_basis)
+            except Exception as exc:  # noqa: BLE001 — one market, not the tick
+                log.warning("mirror_shadow: %s/%s failed (%s)", w, cid, type(exc).__name__)
+                continue
+            if knob_unreadable:
+                # the knob this tick planned by is a guess, not the live
+                # lane's: the compared column carries no figure
+                row["target"] = None
+                if not isinstance(row.get("detail"), dict):
+                    row["detail"] = {}
+                row["detail"]["target_unreadable"] = knob_unreadable
+            _d = row.get("detail") or {}
+            stats["map_venue_reads"] += int(_d.get("map_venue_reads") or 0)
+            stats["map_cache_hit"] += int(_d.get("map_cache_hit") or 0)
+            stats["fills_dedup_rows"] += int(_d.get("fills_dedup_rows") or 0)
+            stats["fills_dedup_shares"] = round(
+                stats["fills_dedup_shares"] + float(_d.get("fills_dedup_shares") or 0.0), 4)
+            if str(row.get("reason") or "").startswith("map reads capped"):
+                stats["map_reads_capped"] += 1
+            if row.get("us_market_slug") and _d.get("map") in stats["mapped_by"]:
+                stats["mapped_by"][_d["map"]] += 1
+            if str(row.get("reason") or "").startswith("unmapped"):
+                stats["unmapped"] += 1
+                _unmapped_until[(w, cid)] = now_ts + unmapped_memo_s(
+                    _d.get("explain"), seen_before=(w, cid) in _unmapped_until)
+            if row.get("would_side"):
+                stats["would_orders"] += 1
+                if (row.get("detail") or {}).get("marketable_now"):
+                    stats["marketable_now"] += 1
+            if (row.get("detail") or {}).get("would_side_short"):
+                stats["would_orders_short"] += 1
+            ex = str((row.get("detail") or {}).get("exit_plan") or "")
+            if ex:
+                stats["exit_rows"] += 1
+                if (row.get("detail") or {}).get("exit_kind") == "left":
+                    stats["exit_left"] += 1
+                stats["exit_rest" if ex == "rest" else
+                      "exit_hold" if ex == "hold" else "exit_unjudged"] += 1
+            if "frozen" in str(row.get("reason") or ""):
+                stats["frozen"] += 1
+            state = (row.get("detail") or {}).get("state")
+            state = str(state) if state is not None else None
+            if state is not None:
+                venue_states[state] += 1
+                stats["venue_state"] = venue_states.most_common(1)[0][0]
+            if state in STATE_TERMINAL:
+                # the market has ended, the venue's own word for it
+                # (R2): remembered for the TTL. An unread state (None)
+                # and a halt (not in the set) never reach here
+                _terminal_until[(w, cid)] = now_ts + UNMAPPED_TTL_S
+            # THE MISS STREAK COUNTS ONLY WHAT CAN BE A VENUE-WIDE
+            # OUTAGE -- the live worker's rule (mirror_live._bbo,
+            # 2026-09-06), so shadow and live agree on every read:
+            #   counts   an unreadable read (bbo_error, no state); an
+            #            empty read that names no state (the SDK-typed
+            #            shape: it cannot be told from a halt); a
+            #            non-OPEN, non-terminal state (HALTED,
+            #            SUSPENDED, PREOPEN, ...), quoted or not
+            #   neither  an OPEN market with an empty book (`no mark`
+            #            on the row: a per-market refusal, the venue is
+            #            up); a terminal state (STATE_TERMINAL) -- a
+            #            market that has ended is a per-market fact
+            #   resets   a quoted read on an OPEN market (or one that
+            #            names no state)
+            # A row with no slug made no read and leaves the streak
+            # where it stood. Three OPEN empty books never abandon; a
+            # halted venue abandons as before, under the state's name.
+            quoted = row.get("bid") is not None or row.get("ask") is not None
+            if not row.get("us_market_slug"):
+                pass
+            elif quoted and state in (None, _STATE_OPEN):
+                misses = 0
+            elif state == _STATE_OPEN or state in STATE_TERMINAL:
+                pass
+            else:
+                misses += 1
+                if misses >= MISS_STREAK_ABANDON:
+                    _backoff_until = now_ts + BACKOFF_S
+                    stats.update(abandoned=True, status="degraded")
+                    # the venue's own word for the last miss -- a halted
+                    # market is not an unreadable one (2026-09-05); a
+                    # read with no state is `no_quote`
+                    log.warning("mirror_shadow: %d consecutive venue misses (%s) — "
+                                "abandoning the tick, backing off %ss",
+                                misses, state or "no_quote", BACKOFF_S)
+                    break
+            try:
+                n_res, n_fill = await _write(pool, row, stats, pmus)
+                stats["rows"] += 1
+                stats["resolved"] += n_res
+                stats["resolved_filled"] += n_fill
+            except Exception as exc:  # noqa: BLE001 — table absent until 046
+                # A ROW THAT CANNOT LAND STOPS THE TICK: no venue budget
+                # is spent on readings nobody can read back.
+                _backoff_until = now_ts + BACKOFF_S
+                stats.update(write_failed=type(exc).__name__, abandoned=True,
+                             status="degraded")
+                log.warning("mirror_shadow: write failed (%s) — abandoning the tick, "
+                            "backing off %ss", type(exc).__name__, BACKOFF_S)
+                break
+        if stats.get("abandoned"):
+            break
+    # the 24 h reading, at most once per EXIT_SUMMARY_S and never on a
+    # tick that has already abandoned: an abandoned tick has told us the
+    # venue or the table is unwell, and a census read is not the answer.
+    #
+    # THIS GUARD IS LOAD-BEARING FOR TWO OF THE THREE ABANDONS. The
+    # unreadable-walk abandon returns above it and never reaches this
+    # line; the BBO miss streak and the write failure `break` out of the
+    # loop and arrive here. The write failure is the one that most wants
+    # it: an INSERT INTO mirror_shadow has just raised, and without the
+    # guard the next thing this tick would do is a SELECT against that
+    # same table. The test that pins it drives BOTH fall-through paths,
+    # because an assertion on the walk path alone passes with the guard
+    # deleted -- which is what an earlier round of that test did.
+    if not stats.get("abandoned"):
+        await refresh_exit_census(pool, now_ts)
+    attach_exit_census(stats, now_ts)
+    return stats
+
+
+async def main() -> None:
+    from .. import pmus
+
+    if not enabled():
+        log.info("mirror_shadow: off by env (MIRROR_SHADOW)")
+        while True:
+            await asyncio.sleep(300)
+    pool = await get_pool()
+    log.info("mirror_shadow up: whales=%s poll=%ss lookback=%sh (NO ORDERS)",
+             mirror_whales(), POLL_S, LOOKBACK_H)
+    while True:
+        try:
+            stats = await tick_once(pool, pmus)
+            try:
+                await heartbeat("mirror_shadow", str(stats.get("status") or "ok"), stats)
+            except Exception:  # noqa: BLE001
+                log.debug("mirror_shadow: heartbeat failed")
+            if stats.get("rows") or stats.get("abandoned"):
+                log.info("mirror_shadow: %s", stats)
+        except Exception:  # noqa: BLE001 — a measurement worker never dies
+            log.exception("mirror_shadow pass failed")
+        await asyncio.sleep(POLL_S)

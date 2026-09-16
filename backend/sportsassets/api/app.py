@@ -1,0 +1,11821 @@
+"""FastAPI application: REST + SSE stream + push subscription + admin."""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import logging
+import math
+import os
+import re
+import time
+from contextlib import asynccontextmanager
+from datetime import datetime, timezone
+from typing import Any
+
+from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi.middleware.cors import CORSMiddleware
+from starlette.middleware.gzip import GZipMiddleware
+from fastapi.responses import PlainTextResponse, Response, StreamingResponse
+from pydantic import BaseModel, Field
+
+from .. import procmem as _procmem
+from .. import roster as roster_svc
+from ..bus import CH_HEALTH, CH_TRADES_ENRICHED, CH_TRADES_NEW, get_redis
+from ..config import settings
+from ..db import close_pool, get_pool
+from . import queries
+from .grading import grade_rows
+
+# THE API'S LOG HANDLER (2026-09-05). The API had none: uvicorn
+# configures its own loggers only, so every INFO record from
+# sportsassets.* fell through to Python's last-resort handler, which
+# prints WARNING and above, and the venue board sweeps' INFO lines
+# (pages, markets, seconds, RSS before and after) never reached the
+# log the instrument was built for. Same shape as workers/__init__.py.
+# httpx and httpcore are held to WARNING because the sweeps make dozens
+# of venue calls a minute and a line per call would bury the lines
+# that matter. This sits HERE, in uvicorn's entry module, and not in
+# api/__init__.py: the workers import api.copies_record at run time,
+# a package __init__ runs in whatever process imports it first, and
+# for a few hours that day this configuration silenced the workers'
+# per-call httpx lines, the ones venue outages are read from. Nothing
+# outside uvicorn imports this module (pinned by the logging test).
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(name)s: %(message)s",
+)
+for _name in ("httpx", "httpcore"):
+    logging.getLogger(_name).setLevel(logging.WARNING)
+
+log = logging.getLogger(__name__)
+
+
+def _cap_malloc_arenas(limit: int = 2) -> str:
+    """Cap glibc's per-thread malloc arenas. Called at IMPORT, on purpose.
+
+    Measured 2026-08-25, one process, no restart:
+
+        MEMCENSUS rss=1424.2MB accounted=353.4MB unaccounted=1070.8MB
+        archive 300171r @1181B marginal = 338.2MB
+
+    Three quarters of RSS is in none of the caches, and RSS moved
+    1,217.7 -> 1,808.2 MB between two reads thirty seconds apart. That
+    is not a leak and not a cache — it is transient allocation that is
+    freed and never handed back.
+
+    glibc gives each thread that contends for the heap its own arena,
+    up to 8 x ncores, and each one keeps its freed pages. The archive
+    parse runs in asyncio.to_thread workers, so every heavy request can
+    land in a different arena and grow the process permanently. The
+    code has described this ratchet since August and answered it with a
+    one-shot malloc_trim, which reclaims but does not stop the spread.
+
+    M_ARENA_MAX (-8) bounds the count instead. It must be set before
+    the arenas exist, which is why this runs at import rather than in
+    lifespan — by the time the first request arrives the thread pool
+    has already claimed them.
+
+    Returns a short status string so the census can report whether it
+    took, rather than leaving it to be assumed. Every wrong turn on
+    this problem has been an instrument that could not see its subject.
+    """
+    try:
+        import ctypes
+
+        M_ARENA_MAX = -8
+        rc = ctypes.CDLL("libc.so.6").mallopt(M_ARENA_MAX, int(limit))
+        return f"arena_max={limit} rc={rc}"
+    except Exception as exc:  # noqa: BLE001 — non-glibc simply skips
+        return f"unavailable: {type(exc).__name__}"
+
+
+_ARENA_STATUS = _cap_malloc_arenas()
+
+
+@asynccontextmanager
+async def lifespan(_: FastAPI):
+    # Boot must not require a healthy database. get_pool() retries lazily
+    # on first use; dying here just turns a DB hiccup into a full outage.
+    try:
+        await get_pool()
+    except Exception:  # noqa: BLE001
+        logging.getLogger(__name__).exception(
+            "DB unavailable at boot — serving anyway, will retry lazily")
+    # INGESTION FALLBACK (2026-08-02). The workers service died on Jul 27
+    # and stayed dead for six days because nothing else could do its job;
+    # whale detection is the platform's heartbeat and must not depend on a
+    # single service's health. The poller runs here too. Coexistence with
+    # a revived workers service is safe by construction: trades dedupe on
+    # dedupe_key, the outbox on (trade_id, kind), and live copy orders on
+    # trade_id — two pollers can never double-ingest or double-order.
+    # API_INGESTION_FALLBACK=0 turns this off.
+    import asyncio
+    import os as _os
+
+    poller_task = None
+    # DEFAULT OFF (2026-08-03 00:0x). The fallback proved the pipeline
+    # (poller heartbeat went fresh at 23:55Z after six dead days, live
+    # detections flowed) — and then proved the instance can't carry it:
+    # whale-rate ingestion plus per-detection probes/mapping OOM-flapped
+    # the API on a ~4-minute cycle even with the history loop off, the
+    # probe burst gated, and a delayed start. Serving the site is this
+    # service's job; ingestion belongs on the workers service, which now
+    # boots cleanly on the fixed schema. Set API_INGESTION_FALLBACK=1
+    # only for short-lived diagnostic use.
+    if _os.getenv("API_INGESTION_FALLBACK", "0") == "1":
+        async def _delayed_poller():
+            # Let the service finish booting and pass its health check
+            # BEFORE the polling load starts — a heavy startup on a small
+            # instance reads as a failed deploy and extends the outage.
+            await asyncio.sleep(45)
+            from ..ingestion.poller import Poller
+
+            # history=False: live detection only. The deep-history backfill
+            # pages millions of trades and OOM-cycled this service when the
+            # fallback first shipped with it on.
+            await Poller().run(history=False)
+
+        try:
+            poller_task = asyncio.get_running_loop().create_task(_delayed_poller())
+            logging.getLogger(__name__).warning(
+                "ingestion fallback: poller (live-only, delayed 45s) in API")
+        except Exception:  # noqa: BLE001 — the API must serve regardless
+            logging.getLogger(__name__).exception("ingestion fallback failed")
+    # Warm the track-record snapshot (including the post-deploy deep
+    # activity sweep) BEFORE the first visitor, so no page load ever waits
+    # on the venue's 20-80 serial REST calls.
+    from .track_record import warm_cache
+
+    asyncio.get_running_loop().create_task(warm_cache())
+    # Whale-identities snapshot refresher: the engine's Kalshi copy sweep
+    # reads /api/whale-open-identities behind a 30s timeout; the query
+    # can take longer under evening ingest load, so it must never run on
+    # the request path (starved the copy leg 3x on 2026-08-05).
+    asyncio.get_running_loop().create_task(refresh_whale_idents_loop())
+
+    # Desk-feed warmer (owner report 2026-08-29: "the desk takes forever
+    # to load"): the venue event listing behind /api/admin/desk-feed has
+    # a 30s TTL, so with today's deploy cadence nearly every desk open
+    # paid a cold venue sweep on the request path. Keep it warm in the
+    # background — one listing call per TTL — so the desk's first paint
+    # always reads a hot cache. Failures just retry next tick.
+    # 25 s -> DESK_WARM_S (120 s) on 2026-09-05. The sweep's own log line
+    # (pmus 'desk sweep US: pages=13 events=1206/1206 markets=68746 19.5s
+    # rss 470.0->592.1 MB') showed what a warm tick costs: about 65,000
+    # raw markets parsed and freed per sweep, roughly 200 MB of Python
+    # objects through the allocator every 25 s, and RSS stepping up 100
+    # to 360 MB per sweep on the way to five OOM kills at 2 GiB between
+    # 20:42Z and 21:53Z. The retained board is ~40 MB; the churn is the
+    # cost, and its RATE is what the cadence sets. 120 s cuts the churn
+    # ~5x and leaves the 60 s trim below a quiet window between sweeps
+    # instead of racing the next one. Browse staleness up to two
+    # minutes is cosmetic: the ticket re-quotes at order time and the
+    # desk-game view re-quotes its moneyline live. The TTL in pmus
+    # (_DESK_TTL_S) moves with it, so a request between warm ticks reads
+    # the cache rather than starting a sweep of its own.
+    async def _desk_feed_warm_loop() -> None:
+        from .. import pmus as _pmus
+
+        while True:
+            try:
+                await asyncio.to_thread(_pmus.list_desk_events)
+            except Exception:  # noqa: BLE001 — venue blip, next tick
+                pass
+            await asyncio.sleep(DESK_WARM_S)
+
+    asyncio.get_running_loop().create_task(_desk_feed_warm_loop())
+
+    # ONE-SHOT RESTATEMENT (owner emergency 2026-08-23): re-score every
+    # settled US-venue copy row since Aug 1 from the venue's own ledger.
+    # The old settlement sweep graded rows by the whale's global token,
+    # so the stored record is corrupt; this rewrites it from ground
+    # truth exactly once (state-key guarded), after boot has settled.
+    async def _rescore_once():
+        await asyncio.sleep(75)
+        try:
+            pool = await get_pool()
+            key = "rescore_copies_v2"
+            done = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1", key)
+            if done:
+                return
+            from ..analytics.engine import _settle_pmus_from_venue
+
+            summary = await _settle_pmus_from_venue(
+                pool, rescore_since="2026-08-01")
+            summary["at"] = datetime.now(timezone.utc).isoformat()
+            await pool.execute(
+                "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+                "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+                key, json.dumps(summary))
+            logging.getLogger(__name__).warning("rescore v1: %s", summary)
+        except Exception:  # noqa: BLE001 — retried on next boot
+            logging.getLogger(__name__).exception(
+                "rescore v1 failed (will retry next boot)")
+
+    # PERIODIC TRIM. Capping the arenas stops the spread; it does not
+    # give back what a heavy request already took. malloc_trim walks
+    # every arena and returns free pages to the OS, and it is cheap
+    # when there is nothing to return — so it runs on a timer instead
+    # of only after a snapshot save, which is roughly never.
+    # The trim SAYS what it returned (2026-09-05): the workers' trim
+    # line ('workers rss 656 MB (boot +39, peak 1271) trim returned
+    # 187 MB') is how that process's ratchet was read; this loop
+    # returned nothing to the log, so no line here could say whether
+    # the API's trim reclaims anything at all. One INFO line per trim
+    # with RSS before and after; '?' when RSS is unreadable, never an
+    # invented figure.
+    async def _trim_loop():
+        from .track_record import _malloc_trim
+
+        while True:
+            await asyncio.sleep(
+                float(_os.environ.get("API_TRIM_INTERVAL_S", "60")))
+            try:
+                before = _procmem.rss_mb()
+                await asyncio.to_thread(_malloc_trim)
+                after = _procmem.rss_mb()
+                freed = (before - after) if (before is not None and after is not None) else None
+                logging.getLogger(__name__).info(
+                    "api rss %s MB trim returned %s MB",
+                    _procmem.rss_label(after),
+                    "?" if freed is None else int(max(0.0, freed)))
+            except Exception:  # noqa: BLE001 — never kill the loop
+                logging.getLogger(__name__).warning(
+                    "periodic malloc_trim failed", exc_info=True)
+
+    trim_task = asyncio.get_running_loop().create_task(_trim_loop())
+
+    asyncio.get_running_loop().create_task(_rescore_once())
+    yield
+    trim_task.cancel()
+    if poller_task is not None:
+        poller_task.cancel()
+    await close_pool()
+
+
+app = FastAPI(title="SportsAssets Hub API", lifespan=lifespan)
+
+_origins = [o.strip() for o in settings().cors_origins.split(",") if o.strip()]
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=_origins or ["*"],
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+# The track-record payload alone is hundreds of KB of highly repetitive
+# JSON, polled every 30s by every open tab — uncompressed it dominated
+# page-load time on mobile. ~10x smaller on the wire with gzip.
+app.add_middleware(GZipMiddleware, minimum_size=1024)
+
+# Which frontends actually talk to this API? The deployed site's hostname
+# is recorded nowhere (Netlify names are set in its UI), which has made
+# "is the new build live?" unanswerable by probes twice now. Real browser
+# traffic is ground truth: remember the distinct Origin/Referer hosts.
+# Hostnames only — no paths, tokens, IPs, or user data — and the list is
+# capped so it cannot grow unboundedly.
+_SEEN_ORIGINS: dict[str, float] = {}
+
+
+@app.middleware("http")
+async def _track_origins(request, call_next):
+    raw = request.headers.get("origin") or request.headers.get("referer") or ""
+    # OPTIONS excluded: the diagnostic probe's CORS-preflight sweep sends
+    # candidate Origins and polluted the list with its own guesses. Real
+    # browsers follow every preflight with the actual GET/POST.
+    if raw and request.method != "OPTIONS":
+        try:
+            from urllib.parse import urlsplit
+
+            host = urlsplit(raw).netloc.lower()
+            if host and (host in _SEEN_ORIGINS or len(_SEEN_ORIGINS) < 40):
+                _SEEN_ORIGINS[host] = time.time()
+        except Exception:
+            pass
+    return await call_next(request)
+
+
+@app.get("/api/system/seen-origins")
+async def seen_origins():
+    now = time.time()
+    return {"origins": [
+        {"host": h, "ago_s": round(now - t, 1)}
+        for h, t in sorted(_SEEN_ORIGINS.items(), key=lambda kv: -kv[1])
+    ]}
+
+
+def require_admin(x_admin_token: str = Header(default="")) -> None:
+    import hmac
+
+    # Whitespace-tolerant compare: mobile keyboards append spaces/newlines,
+    # and env-var values sometimes carry a trailing newline.
+    supplied = (x_admin_token or "").strip()
+    expected = (settings().admin_token or "").strip()
+    if not expected or not hmac.compare_digest(supplied, expected):
+        raise HTTPException(status_code=401, detail="admin token required")
+
+
+# ── Desk auth (owner directive 2026-08-22) ──────────────────────────
+# The trading desk unlocks with its own password (DESK_PASSWORD) so the
+# admin token never has to live in a phone browser. A successful unlock
+# mints a stateless 12h token: "<exp>.<hmac_sha256(admin_token,
+# 'desk:'+exp)>" — verifiable on any instance without a session store,
+# and rotated for free whenever the admin token rotates. Tokens are
+# never logged.
+DESK_TOKEN_TTL_S = 12 * 3600
+# The US board warm loop's cadence, seconds (see _desk_feed_warm_loop in
+# lifespan). Equal to pmus._DESK_TTL_S by construction: the loop's job
+# is to keep the cache warm, so a request between ticks never sweeps.
+# The environment may only LENGTHEN it (a shorter cadence is the
+# 2026-09-05 OOM shape and wants a review, not a shell).
+DESK_WARM_S = max(120.0, float(os.environ.get("DESK_WARM_S", "120") or 120.0))
+
+
+def mint_desk_token(now: float | None = None) -> tuple[str, int]:
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    exp = int(now if now is not None else _t.time()) + DESK_TOKEN_TTL_S
+    key = (settings().admin_token or "").strip().encode()
+    sig = _hmac.new(key, f"desk:{exp}".encode(), hashlib.sha256).hexdigest()
+    return f"{exp}.{sig}", exp
+
+
+def desk_token_ok(token: str, now: float | None = None) -> bool:
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    if not isinstance(token, str):
+        return False
+    tok = token.strip()
+    exp_s, sep, sig = tok.partition(".")
+    if not sep:
+        return False
+    try:
+        exp = int(exp_s)
+    except ValueError:
+        return False
+    if exp <= (now if now is not None else _t.time()):
+        return False
+    key = (settings().admin_token or "").strip().encode()
+    if not key:
+        return False
+    want = _hmac.new(key, f"desk:{exp}".encode(),
+                     hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(sig, want)
+
+
+# ── Wall auth (TV wall, 2026-08-23) ─────────────────────────────────
+# The office TV runs unattended for weeks, so its token lives 7 days
+# and rolls itself over (see /api/wall/renew). Same stateless HMAC
+# shape as desk tokens, keyed by the same admin token, with a distinct
+# scope string — 'wall:' vs 'desk:' — so neither kind ever verifies as
+# the other. Wall is strictly read-only. Tokens are never logged.
+WALL_TOKEN_TTL_S = 7 * 24 * 3600
+
+
+def mint_wall_token(now: float | None = None) -> tuple[str, int]:
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    exp = int(now if now is not None else _t.time()) + WALL_TOKEN_TTL_S
+    key = (settings().admin_token or "").strip().encode()
+    sig = _hmac.new(key, f"wall:{exp}".encode(), hashlib.sha256).hexdigest()
+    return f"{exp}.{sig}", exp
+
+
+def wall_token_ok(token: str, now: float | None = None) -> bool:
+    import hashlib
+    import hmac as _hmac
+    import time as _t
+
+    if not isinstance(token, str):
+        return False
+    tok = token.strip()
+    exp_s, sep, sig = tok.partition(".")
+    if not sep:
+        return False
+    try:
+        exp = int(exp_s)
+    except ValueError:
+        return False
+    if exp <= (now if now is not None else _t.time()):
+        return False
+    key = (settings().admin_token or "").strip().encode()
+    if not key:
+        return False
+    want = _hmac.new(key, f"wall:{exp}".encode(),
+                     hashlib.sha256).hexdigest()
+    return _hmac.compare_digest(sig, want)
+
+
+def require_desk(x_desk_token: str = Header(default=""),
+                 x_admin_token: str = Header(default="")) -> str:
+    """Desk-scoped auth: a valid desk token, a valid wall token, OR the
+    admin token. The admin path keeps working so existing tooling never
+    breaks. Returns the caller's role ('admin'|'desk'|'wall') — endpoints
+    that shape their payload per role read it via Depends; everyone else
+    ignores it. 'wall' is read-only: every mutating endpoint must check
+    the role and refuse it with a 403."""
+    import hmac
+
+    supplied = (x_admin_token or "").strip()
+    expected = (settings().admin_token or "").strip()
+    if expected and hmac.compare_digest(supplied, expected):
+        return "admin"
+    if x_desk_token and desk_token_ok(x_desk_token):
+        return "desk"
+    if x_desk_token and wall_token_ok(x_desk_token):
+        return "wall"
+    raise HTTPException(status_code=401, detail="desk unlock required")
+
+
+def check_engine_token(supplied: str | None) -> None:
+    """Engine-feed auth (audit 2026-08-21): every engine endpoint was
+    comparing with != — non-constant-time, and unlike the admin path,
+    unstripped (a trailing-newline env var silently 401'd the whole
+    engine). Same discipline as require_admin, one place."""
+    import hmac
+
+    got = (supplied or "").strip()
+    expected = (settings().engine_ingest_token or "").strip()
+    if not expected or not hmac.compare_digest(got, expected):
+        raise HTTPException(status_code=401, detail="engine token required")
+
+
+# ── Health & config ─────────────────────────────────────────────────
+
+
+# Boot marker (2026-09-03 API restarts behind the 502s): every 502 in the
+# probes was Render's own page for 10-55 s on every route, after which the
+# same `commit` answered from an RSS 0.6-0.8 GB lower -- a replaced
+# process, yet unprovable, because `commit` is the deploy's
+# RENDER_GIT_COMMIT and survives any restart of that deploy, and the
+# MEMORY WATCH samples every 5-13 s so a 200 MB boot reading is missed by
+# construction. A per-process id and an uptime turn "DOWN" into
+# "restarted at rss X" or "unresponsive, same boot" on the next probe.
+import uuid  # noqa: E402
+
+_BOOT_ID = uuid.uuid4().hex[:8]
+_BOOT_TS = time.time()
+
+
+@app.get("/healthz")
+async def healthz() -> dict:
+    import os
+
+    # Health means "this process can serve" — the DB gets its own field
+    # instead of a veto. A 502ing health check during a DB hiccup turns a
+    # degraded product into a dead one (observed 2026-08-03: continuous
+    # platform 502s because every boot died before serving).
+    db_ok = False
+    # The probe reads the pool the process already has, never get_pool()
+    # (hotfix review, 2026-09-03 API restarts): with the DB down at boot
+    # the lifespan's get_pool() fails and leaves db._pool None, and every
+    # /healthz call through get_pool() would then start a fresh
+    # create_pool and, under the ceiling below, cancel it mid-connect --
+    # a stranded half-open connection per check until GC, on a platform
+    # that checks every few seconds. No pool is simply db_ok false; the
+    # next real request still builds one through get_pool() as before.
+    from .. import db as _db
+
+    pool = _db._pool
+    # The pool's own counters, next to db_ok (2026-09-05, after the
+    # night the payload below was read in anger): {"ok": true, "db_ok":
+    # false} on its own cannot tell a saturated pool from a slow
+    # database from a full disk at the edge, and each of those is fixed
+    # by a different hand. db.pool_stats() is the ONE reader of those
+    # counters (the first cut inlined the same four reads here and left
+    # the module function with no caller): synchronous, no acquire, no
+    # await, and closed to None on anything it cannot read -- see its
+    # docstring for how to read the numbers. It is read BEFORE the
+    # probe so it is the pool as the check found it, not as the probe
+    # left it, and it can never do what the SELECT 1 once did and hang
+    # the one check the platform restarts on.
+    pool_stats = _db.pool_stats()
+    if pool is not None:
+        try:
+            # 2 s ceiling (2026-09-03): with the ten pool connections held
+            # by stacked ledger fetches this await hung, and a hanging
+            # health check reads as a dead process to the platform's
+            # checker (render.yaml healthCheckPath) -- the one field meant
+            # to be informational was able to take the process down. A
+            # saturated pool now reports db_ok false; the check itself
+            # always answers.
+            # WHAT `db_ok: false` ACTUALLY MEANS, from the one time it
+            # was read in anger (2026-09-05, 01:06Z). The payload was
+            # {"ok": true, "db_ok": false, "rss_mb": 865.9, "uptime_s":
+            # 5874.9} on a single boot_id -- a healthy process, no crash
+            # loop, and LESS memory than the same check reported while
+            # the platform was working fine three hours earlier (1,085
+            # MB, and 1,665 MB moments before a restart). So this field
+            # going false is not a memory verdict and not a dead
+            # database: it is THIS `SELECT 1` losing a 2-second race for
+            # a pooled connection, i.e. the pool is saturated by queries
+            # that are still running.
+            #
+            # The symptom at the edge is total: every DB-backed endpoint
+            # hangs with ZERO BYTES RECEIVED while venue reads (which
+            # need no pool) answer normally, and the diagnostic probe
+            # dies at its 32-minute job ceiling instead of reporting
+            # anything. Read `db_ok` FIRST when that pattern appears --
+            # four probes were spent on the wrong causes (a workflow
+            # fail-open, then memory) before this one field settled it.
+            #
+            # What saturated it that night: a fail-open guard in
+            # engine-diagnostic.yml fired up to six concurrent
+            # /api/admin/rescore-copies passes, each a full restatement
+            # over live_orders. A curl timeout does not stop the server
+            # side, so they went on holding connections long after the
+            # probe gave up. That guard now fails closed (9244ece); the
+            # passes already in flight had to be cleared by a restart.
+            await asyncio.wait_for(pool.fetchval("SELECT 1"), timeout=2.0)
+            db_ok = True
+        except Exception:  # noqa: BLE001
+            pass
+    # Current RSS from /proc: after a night of OOM archaeology-by-email,
+    # memory is a number the probes can track, not a timeline to argue.
+    rss_mb = None
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss_mb = round(int(line.split()[1]) / 1024, 1)
+                    break
+    except OSError:
+        pass
+    # Render injects the deployed commit — lets anyone confirm which build is live.
+    return {"ok": True, "db_ok": db_ok,
+            "pool": pool_stats,
+            "commit": (os.getenv("RENDER_GIT_COMMIT") or "")[:7],
+            "rss_mb": rss_mb,
+            "boot_id": _BOOT_ID,
+            "uptime_s": round(max(0.0, time.time() - _BOOT_TS), 1)}
+
+
+# HEARTBEAT DETAIL SANITIZER.
+#
+# The old one-liner kept scalars and ran str()[:80] over everything
+# else — which destroyed every NESTED counter block on the way out:
+#
+#     detail.copy_queue  {"n": 0, "concurrency": 4, ...}
+#       became           "{\'n\': 0, \'concurrency\': 4, ...}"
+#
+# a Python repr, in single quotes, truncated at 80 characters. Anything
+# reading it as JSON gets a type error, which is why the COPYQUEUE line
+# of the diagnostic printed "unavailable" on five consecutive probes.
+# Copy-path queue latency — the number that says whether our own
+# semaphore is what ages a signal into a stale-signal rejection — has
+# never once been read, and it was being published correctly the whole
+# time.
+#
+# The truncation is the worse half. At 80 characters a slightly larger
+# counter block does not fail loudly, it loses its tail: a dict of four
+# 48-hour retry counts is 73 characters, so one more status or one
+# wider number silently cuts a value in half and the reader sees a
+# plausible smaller number. This endpoint has published wrong-looking
+# numbers as readily as missing ones.
+#
+# Nested scalars are the same safety class as top-level scalars, so
+# they are kept as scalars. Depth, key count and string length are all
+# bounded, because the reason for a sanitizer here is real: heartbeat
+# details are public and must never carry a payload or a token.
+_DETAIL_MAX_DEPTH = 3
+_DETAIL_MAX_KEYS = 40
+_DETAIL_MAX_ITEMS = 20
+_DETAIL_MAX_STR = 80
+
+
+def _sanitize_detail(obj, depth: int = 0):
+    """Numbers stay numbers, at any depth; everything else is capped."""
+    if isinstance(obj, bool) or isinstance(obj, (int, float)):
+        return obj
+    if obj is None:
+        return None
+    if isinstance(obj, str):
+        return obj[:_DETAIL_MAX_STR]
+    if depth >= _DETAIL_MAX_DEPTH:
+        # Deeper than a counter block ever needs to be. Report the
+        # shape rather than the contents, so a nested payload is
+        # visibly refused instead of silently half-printed.
+        return f"<{type(obj).__name__} depth>"
+    if isinstance(obj, dict):
+        out = {}
+        for k, v in list(obj.items())[:_DETAIL_MAX_KEYS]:
+            out[str(k)[:_DETAIL_MAX_STR]] = _sanitize_detail(v, depth + 1)
+        if len(obj) > _DETAIL_MAX_KEYS:
+            out["_truncated_keys"] = len(obj) - _DETAIL_MAX_KEYS
+        return out
+    if isinstance(obj, (list, tuple)):
+        out = [_sanitize_detail(v, depth + 1)
+               for v in list(obj)[:_DETAIL_MAX_ITEMS]]
+        if len(obj) > _DETAIL_MAX_ITEMS:
+            out.append(f"<+{len(obj) - _DETAIL_MAX_ITEMS} more>")
+        return out
+    return str(obj)[:_DETAIL_MAX_STR]
+
+
+@app.get("/api/health/services")
+async def health_services() -> list[dict]:
+    """Sanitized service heartbeats — status and age only, plus a short
+    error hint. The whale poller failed silently for six days (Jul 27 -
+    Aug 2, 2026) because its error heartbeats were admin-gated and nobody
+    was looking; a pipeline's liveness must be publicly checkable. No
+    payloads, no tokens: service name, status, age, truncated error."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT service, status, beat_at, detail FROM service_heartbeats "
+        "ORDER BY service")
+    out = []
+    for r in rows:
+        detail = r["detail"]
+        if isinstance(detail, str):
+            try:
+                detail = json.loads(detail)
+            except ValueError:
+                detail = {}
+        err = str((detail or {}).get("error") or "")[:160]
+        out.append({"service": r["service"], "status": r["status"],
+                    "beat_at": r["beat_at"],
+                    # Sweep counters are diagnostics, not payloads: the
+                    # underdog sleeve's per-gate stats are how "running
+                    # but placing nothing" gets localized in one probe
+                    # (owner report 2026-08-08). Numbers and short
+                    # strings only, capped.
+                    "detail": _sanitize_detail(
+                        {k: v for k, v in (detail or {}).items()
+                         if k != "error"}) or None,
+                    **({"error": err} if err else {})})
+    return out
+
+
+# Ping throttle (audit 2026-08-21): the unlock diagnostic is a public
+# yes/no oracle for token guesses and the app has no other rate limit.
+# 10 attempts/min/IP is far above any human retyping a token and far
+# below a useful brute force.
+_PING_HITS: dict[str, list[float]] = {}
+
+
+@app.post("/api/admin/ping")
+async def admin_ping(request: Request,
+                     x_admin_token: str = Header(default="")) -> dict:
+    """Unlock diagnostic. Reveals nothing about the token's value — only
+    whether a non-default token is configured on the server and whether this
+    attempt matched, so the UI can say 'wrong token' vs 'env not applied'
+    instead of one ambiguous failure message."""
+    import hmac
+    import time as _t
+
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0].strip() \
+        or (request.client.host if request.client else "?")
+    now = _t.time()
+    hits = [t for t in _PING_HITS.get(ip, []) if now - t < 60]
+    if len(hits) >= 10:
+        raise HTTPException(status_code=429, detail="slow down")
+    hits.append(now)
+    _PING_HITS[ip] = hits
+    if len(_PING_HITS) > 1000:      # bound the map; drop stale IPs
+        for k in [k for k, v in _PING_HITS.items()
+                  if not v or now - v[-1] > 300][:500]:
+            _PING_HITS.pop(k, None)
+    supplied = (x_admin_token or "").strip()
+    expected = (settings().admin_token or "").strip()
+    return {
+        "received_chars": len(supplied),
+        "configured": bool(expected) and expected != "change-me",
+        "match": bool(expected) and hmac.compare_digest(supplied, expected),
+    }
+
+
+# Unlock throttle: same shape and rationale as _PING_HITS — the desk
+# password is short by design, so the guess oracle must be slow.
+_UNLOCK_HITS: dict[str, list[float]] = {}
+
+
+def _throttled(hits: dict[str, list[float]], request: Request,
+               limit: int = 10, window: float = 60.0) -> bool:
+    """True when this IP is over its budget (the _PING_HITS pattern,
+    shared). Records the attempt when allowed; bounds the map."""
+    import time as _t
+
+    ip = (request.headers.get("x-forwarded-for") or "").split(",")[0] \
+        .strip() or (request.client.host if request.client else "?")
+    now = _t.time()
+    recent = [t for t in hits.get(ip, []) if now - t < window]
+    if len(recent) >= limit:
+        hits[ip] = recent
+        return True
+    recent.append(now)
+    hits[ip] = recent
+    if len(hits) > 1000:      # bound the map; drop stale IPs
+        for k in [k for k, v in hits.items()
+                  if not v or now - v[-1] > 300][:500]:
+            hits.pop(k, None)
+    return False
+
+
+class DeskUnlockBody(BaseModel):
+    password: str = ""
+
+
+@app.post("/api/desk/unlock")
+async def desk_unlock(request: Request, body: DeskUnlockBody) -> dict:
+    """Trade-desk unlock: password -> short-lived desk token. The
+    password is compared constant-time; the response never carries the
+    configured value, and nothing here is ever logged."""
+    import hmac
+
+    if _throttled(_UNLOCK_HITS, request):
+        raise HTTPException(status_code=429, detail="slow down")
+    supplied = (body.password or "").strip()
+    expected = (settings().desk_password or "").strip()
+    if not expected or not hmac.compare_digest(supplied, expected):
+        return {"ok": False, "error": "wrong password"}
+    token, exp = mint_desk_token()
+    return {"ok": True, "token": token, "expires_at": exp}
+
+
+# ── TV wall (2026-08-23) ────────────────────────────────────────────
+# One password (the desk's), a long-lived read-only token, and a tiny
+# in-memory switch the desk flips to steer what every TV shows. The
+# state is per-instance and non-durable by design: a restart falls
+# back to the live book, which is always safe to display.
+_wall_state: dict = {"mode": "book", "from": None, "to": None,
+                     "set_at": None, "headline": None, "ttl_s": None,
+                     "screens": None}
+
+
+@app.post("/api/wall/unlock")
+async def wall_unlock(request: Request, body: DeskUnlockBody) -> dict:
+    """Wall unlock: the desk password -> a 7-day read-only wall token.
+    Shares the desk throttle bucket so the two endpoints are one guess
+    oracle, not two. Constant-time compare; the response never carries
+    the configured value, and nothing here is ever logged."""
+    import hmac
+
+    if _throttled(_UNLOCK_HITS, request):
+        raise HTTPException(status_code=429, detail="slow down")
+    supplied = (body.password or "").strip()
+    expected = (settings().desk_password or "").strip()
+    if not expected or not hmac.compare_digest(supplied, expected):
+        return {"ok": False, "error": "wrong password"}
+    token, exp = mint_wall_token()
+    return {"ok": True, "token": token, "expires_at": exp}
+
+
+@app.post("/api/wall/renew")
+async def wall_renew(x_desk_token: str = Header(default="")) -> dict:
+    """Rolling renewal: a still-valid WALL token buys a fresh 7-day
+    one, so an always-on TV never sees the password again. Desk tokens
+    and everything else get a 401 — renewal must never be a way to
+    stretch a 12h desk grant into a week."""
+    if not wall_token_ok(x_desk_token):
+        raise HTTPException(status_code=401, detail="wall token required")
+    token, exp = mint_wall_token()
+    return {"ok": True, "token": token, "expires_at": exp}
+
+
+@app.get("/api/wall/state", dependencies=[Depends(require_desk)])
+async def wall_state() -> dict:
+    """What every TV should show right now. Any role may read."""
+    return dict(_wall_state)
+
+
+class WallBroadcastBody(BaseModel):
+    mode: str = "book"
+    from_: str | None = Field(default=None, alias="from")
+    to: str | None = None
+    # SCENE MODE (owner 2026-08-23: "Meridian should use both screens"):
+    # MERIDIAN commands the walls — a headline it writes across both
+    # TVs, an optional per-screen directive, and a TTL after which the
+    # walls fall back to the live books on their own.
+    headline: str | None = None
+    ttl_s: int | None = None
+    screens: dict | None = None
+
+
+# The only board kinds a wall knows how to draw, and the only param keys a
+# screen directive may carry — everything else is dropped, not stored.
+_WALL_KINDS = ("book", "report", "chart", "whales", "headline")
+_WALL_SCREEN_KEYS = ("kind", "from", "to", "text", "stat")
+
+
+def _clean_wall_chart(raw: object) -> dict | None:
+    """A projected chart (MERIDIAN throwing any series onto a TV) —
+    hard-capped so wall state stays a small dict, never a data sink:
+    <=3 series x <=160 finite numbers, short strings only."""
+    if not isinstance(raw, dict):
+        return None
+    series_in = raw.get("series")
+    if not isinstance(series_in, list):
+        return None
+    series = []
+    for s in series_in[:3]:
+        if not isinstance(s, dict):
+            continue
+        vals_in = s.get("values")
+        if not isinstance(vals_in, list):
+            continue
+        vals = []
+        for v in vals_in[:160]:
+            try:
+                f = float(v)
+            except (TypeError, ValueError):
+                continue
+            if f == f and abs(f) < 1e12:      # finite, sane magnitude
+                vals.append(round(f, 4))
+        if len(vals) >= 2:
+            name = s.get("name")
+            series.append({
+                "name": (name if isinstance(name, str) else "")[:40],
+                "values": vals,
+            })
+    if not series:
+        return None
+    out: dict = {"series": series}
+    title = raw.get("title")
+    if isinstance(title, str) and title.strip():
+        out["title"] = title[:120]
+    labels_in = raw.get("labels")
+    if isinstance(labels_in, list):
+        labels = [str(x)[:12] for x in labels_in[:160]
+                  if isinstance(x, (str, int, float))]
+        if labels:
+            out["labels"] = labels
+    kind = raw.get("kind")
+    if kind in ("line", "bar"):
+        out["kind"] = kind
+    return out
+
+
+def _clean_wall_screens(raw: dict | None) -> dict | None:
+    if not isinstance(raw, dict):
+        return None
+    out: dict = {}
+    for venue in ("kalshi", "polymarket"):
+        d = raw.get(venue)
+        if not isinstance(d, dict):
+            continue
+        kind = d.get("kind")
+        if kind not in _WALL_KINDS:
+            continue
+        cleaned = {}
+        for k in _WALL_SCREEN_KEYS:
+            v = d.get(k)
+            if isinstance(v, str) and v.strip():
+                cleaned[k] = v[:200]
+        cleaned["kind"] = kind
+        chart = _clean_wall_chart(d.get("chart"))
+        if chart is not None:
+            cleaned["chart"] = chart
+        out[venue] = cleaned
+    return out or None
+
+
+@app.post("/api/wall/broadcast")
+async def wall_broadcast(body: WallBroadcastBody,
+                         role: str = Depends(require_desk)) -> dict:
+    """Steer every TV: the live book, a date-ranged report, or a
+    MERIDIAN scene (per-screen visuals + a headline + a TTL that hands
+    the walls back to the books). The wall itself may not steer the
+    wall — read-only means read-only."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
+    if body.mode not in ("book", "report", "scene"):
+        raise HTTPException(status_code=400,
+                            detail="mode must be 'book', 'report' or 'scene'")
+    headline = (body.headline or "").strip()[:120] or None
+    ttl = None
+    if body.ttl_s is not None:
+        ttl = max(60, min(3600, int(body.ttl_s)))
+    _wall_state.update({"mode": body.mode, "from": body.from_,
+                        "to": body.to, "set_at": time.time(),
+                        "headline": headline, "ttl_s": ttl,
+                        "screens": _clean_wall_screens(body.screens)})
+    return {"ok": True, **_wall_state}
+
+
+@app.get("/api/config")
+async def public_config() -> dict:
+    cfg = settings()
+    return {
+        "vapid_public_key": cfg.vapid_public_key,
+        "telegram_channel_invite_url": cfg.telegram_channel_invite_url,
+        "burst_collapse_threshold": cfg.burst_collapse_threshold,
+        "burst_collapse_window_seconds": cfg.burst_collapse_window_seconds,
+    }
+
+
+# ── Live stream (SSE) ───────────────────────────────────────────────
+
+
+@app.get("/stream")
+async def stream(request: Request) -> StreamingResponse:
+    """SSE feed: `trade` (provisional), `trade_update` (enriched), `health`."""
+
+    async def gen():
+        pubsub = get_redis().pubsub()
+        await pubsub.subscribe(CH_TRADES_NEW, CH_TRADES_ENRICHED, CH_HEALTH)
+        event_names = {
+            CH_TRADES_NEW: "trade",
+            CH_TRADES_ENRICHED: "trade_update",
+            CH_HEALTH: "health",
+        }
+        try:
+            yield "retry: 2000\n\n"
+            while True:
+                if await request.is_disconnected():
+                    break
+                msg = await pubsub.get_message(ignore_subscribe_messages=True, timeout=15.0)
+                if msg is None:
+                    yield ": keepalive\n\n"
+                    continue
+                name = event_names.get(msg["channel"], "message")
+                yield f"event: {name}\ndata: {msg['data']}\n\n"
+        finally:
+            await pubsub.unsubscribe()
+            await pubsub.aclose()
+
+    return StreamingResponse(
+        gen(),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+# ── Feed / whales / matrix / events ─────────────────────────────────
+
+
+@app.get("/api/feed")
+async def api_feed(
+    limit: int = Query(50, ge=1, le=200),
+    before_id: int | None = None,
+    whale_id: int | None = None,
+    sport: str | None = None,
+    side: str | None = None,
+    min_notional: float | None = None,
+) -> list[dict]:
+    return await queries.feed(limit, before_id, whale_id, sport, side, min_notional)
+
+
+_whale_idents_cache: dict = {"ts": 0.0, "data": None}
+# The identities query walks 7 days of source-whale trades (10-15k rows a
+# day per whale) and goes >30s under evening ingest contention even with
+# the CTE rewrite. A request-path cache cannot save the ONE consumer —
+# the engine sweeps every 10 minutes, so every call was a cold miss and
+# paid the full compute (still timing out 21:23Z after the 120s-TTL
+# attempt). The snapshot is therefore maintained by a BACKGROUND
+# refresher (armed in lifespan): the endpoint always answers instantly
+# from the last computed snapshot, however the database is feeling; a
+# refresh failure keeps serving the previous snapshot. The consumer's
+# own freshness gate is 45 minutes, so a couple minutes of staleness is
+# free.
+_WHALE_IDENTS_TTL = 90.0
+
+
+async def _compute_whale_idents() -> dict:
+    import time as _time
+
+    from ..config import settings as _settings
+    from ..db import get_pool as _get_pool
+
+    now = _time.time()
+    pool = await _get_pool()
+    # pmus_copied is computed AFTER the DISTINCT ON dedup, never inline:
+    # inline, the EXISTS probe ran for every raw trade row in the 7-day
+    # scan (a source whale posts ~10-15k fills/day), which blew past the
+    # engine sweep's 30s read timeout and silently starved the Kalshi
+    # copy leg for hours (observed 14:53Z and 16:06Z, 2026-08-05).
+    rows = await pool.fetch(
+        """
+        WITH latest AS (
+            SELECT DISTINCT ON (t.asset)
+                   t.asset,
+                   COALESCE(t.market_slug, t.event_slug, '') AS slug,
+                   t.outcome, t.price::float8 AS price,
+                   w.username AS whale,
+                   extract(epoch FROM t.ts)::float8 AS entered_ts,
+                   m.title AS market_title
+            FROM trades t
+            JOIN whales w ON w.id = t.whale_id
+            LEFT JOIN markets m ON m.condition_id = t.condition_id
+            WHERE t.side = 'BUY'
+              AND t.ts > now() - interval '7 days'
+              AND lower(w.username) = ANY($1)
+              AND COALESCE(m.resolved, false) = false
+            ORDER BY t.asset, t.ts DESC
+        )
+        SELECT l.asset, l.slug, l.outcome, l.price, l.whale, l.entered_ts,
+               l.market_title,
+               EXISTS (SELECT 1 FROM live_orders lo
+                       WHERE lo.asset = l.asset
+                         -- 'submitting' counts as copied (review
+                         -- 2026-08-10): the event-woken Kalshi sweep
+                         -- reacts inside the PMUS order's in-flight
+                         -- window, and a not-yet-filled FOK must still
+                         -- hold the position or both venues buy it. A
+                         -- row that ends unfilled/rejected releases the
+                         -- claim on the next refresh.
+                         AND lo.status IN ('submitting', 'filled',
+                                           'settled')
+                         -- Manual-desk rows must not mark a whale
+                         -- position as already copied (owner 2026-08-07:
+                         -- the desk never impacts autonomous trading).
+                         AND COALESCE(lo.whale_username, '') <> 'manual')
+                   AS pmus_copied
+        FROM latest l
+        """,
+        sorted(_settings().source_whales()),
+    )
+    # entered_ts travels with each identity so copy consumers can enforce
+    # FRESHNESS — copying a days-old position at today's price is buying
+    # fair value minus fees, and preferentially the collapsed ones
+    # (audit 2026-08-04). pmus_copied marks positions whose fast PMUS
+    # copy already FILLED (or settled): one copy per whale position
+    # ACROSS venues (owner directive 2026-08-05), so the Kalshi sweep
+    # must skip these rather than duplicate them.
+    # `asset` rides along so the engine's Kalshi copies can claim the
+    # position back (kalshi_claims) and so the venue split has a stable
+    # id to hash on — same id the PMUS paths key on.
+    out = {"identities": [{"asset": str(r["asset"]),
+                           "slug": r["slug"], "outcome": r["outcome"],
+                           "price": r["price"], "whale": r["whale"],
+                           "entered_ts": r["entered_ts"],
+                           # Full market title rides along (2026-08-17):
+                           # the venue-name join can use real player
+                           # names instead of slug-truncated surnames.
+                           "market_title": r["market_title"],
+                           "pmus_copied": bool(r["pmus_copied"])}
+                          for r in rows if r["slug"] and r["outcome"]],
+           "as_of": now}
+    _whale_idents_cache["ts"] = now
+    _whale_idents_cache["data"] = out
+    return out
+
+
+async def refresh_whale_idents_loop() -> None:
+    """Keep the identities snapshot warm so the engine's 30s-timeout
+    fetch NEVER runs the heavy query inline. Armed from lifespan."""
+    import asyncio
+
+    while True:
+        try:
+            await _compute_whale_idents()
+        except Exception:  # noqa: BLE001 — keep serving the last snapshot
+            logging.getLogger(__name__).exception(
+                "whale identities refresh failed; serving last snapshot")
+        await asyncio.sleep(_WHALE_IDENTS_TTL)
+
+
+async def _fresh_whale_idents(fresh_s: float) -> list[dict]:
+    """Identity rows for source-whale BUYs in the last fresh_s seconds —
+    the same shape as the snapshot, from a cheap bounded scan (minutes,
+    not the 7-day walk that forced the snapshot design)."""
+    from ..config import settings as _settings
+    from ..db import get_pool as _get_pool
+
+    pool = await _get_pool()
+    rows = await pool.fetch(
+        """
+        WITH latest AS (
+            SELECT DISTINCT ON (t.asset)
+                   t.asset,
+                   COALESCE(t.market_slug, t.event_slug, '') AS slug,
+                   t.outcome, t.price::float8 AS price,
+                   w.username AS whale,
+                   extract(epoch FROM t.ts)::float8 AS entered_ts,
+                   m.title AS market_title
+            FROM trades t
+            JOIN whales w ON w.id = t.whale_id
+            LEFT JOIN markets m ON m.condition_id = t.condition_id
+            WHERE t.side = 'BUY'
+              AND t.ts > now() - make_interval(secs => $2)
+              AND lower(w.username) = ANY($1)
+              AND COALESCE(m.resolved, false) = false
+            ORDER BY t.asset, t.ts DESC
+        )
+        SELECT l.asset, l.slug, l.outcome, l.price, l.whale, l.entered_ts,
+               l.market_title,
+               EXISTS (SELECT 1 FROM live_orders lo
+                       WHERE lo.asset = l.asset
+                         -- 'submitting' holds the claim here too — this
+                         -- fresh tail is exactly what the event-woken
+                         -- sweep reads mid-race (review 2026-08-10).
+                         AND lo.status IN ('submitting', 'filled',
+                                           'settled')
+                         AND COALESCE(lo.whale_username, '') <> 'manual')
+                   AS pmus_copied
+        FROM latest l
+        """,
+        sorted(_settings().source_whales()), float(fresh_s),
+    )
+    return [{"asset": str(r["asset"]), "slug": r["slug"],
+             "outcome": r["outcome"], "price": r["price"],
+             "whale": r["whale"], "entered_ts": r["entered_ts"],
+             "market_title": r["market_title"],
+             "pmus_copied": bool(r["pmus_copied"])}
+            for r in rows if r["slug"] and r["outcome"]]
+
+
+@app.get("/api/whale-open-identities")
+async def api_whale_open_identities(
+        fresh_s: float | None = None,
+        x_engine_token: str = Header(default=""),
+        authorization: str = Header(default="")) -> dict:
+    """Source whales' open BUY positions as identity rows for the engine's
+    whale-alignment tagging: [{slug, outcome}]. Moneyline-shaped consumers
+    only — the engine joins on game key + team name at the mapper bar.
+    Served from the background-refreshed snapshot; before the first
+    refresh completes (cold boot) the caller gets an empty list and picks
+    up the real one next sweep rather than waiting on a slow compute.
+
+    fresh_s (2026-08-10, reaction-time work): the engine's copy sweep now
+    wakes on fresh-fill events, and the fill that woke it is younger than
+    this snapshot's 90s TTL. When set, a bounded fresh-tail query is
+    merged over the snapshot (fresh rows win by asset) so the woken sweep
+    can actually price the position that woke it. Tail failures serve the
+    plain snapshot — freshness is an upgrade, never an outage.
+
+    ENGINE-ONLY (audit 2026-08-21): this feed is, in real time, the list
+    of positions the engine is about to copy — publicly it was a
+    front-runner's dream. Gated on the engine token; the engine's
+    whale_align client sends it as a Bearer header, so both header
+    shapes are accepted."""
+    bearer = authorization.removeprefix("Bearer ").strip() \
+        if authorization.startswith("Bearer ") else ""
+    check_engine_token(x_engine_token or bearer)
+    data = _whale_idents_cache["data"]
+    if data is None:
+        return {"identities": [], "as_of": None, "warming": True}
+    if not fresh_s or fresh_s <= 0:
+        return data
+    try:
+        fresh_rows = await _fresh_whale_idents(min(float(fresh_s), 900.0))
+    except Exception:  # noqa: BLE001 — snapshot alone is today's behavior
+        logging.getLogger(__name__).exception("fresh-tail identities failed")
+        return data
+    if not fresh_rows:
+        return data
+    by_asset = {i["asset"]: i for i in data["identities"]}
+    for r in fresh_rows:
+        by_asset[r["asset"]] = r
+    return {"identities": list(by_asset.values()), "as_of": data["as_of"],
+            "fresh_merged": len(fresh_rows)}
+
+
+@app.get("/api/whales")
+async def api_whales(include_inactive: bool = False) -> list[dict]:
+    return await queries.whales(include_inactive)
+
+
+@app.get("/api/whales/{whale_id}")
+async def api_whale(whale_id: int) -> dict:
+    profile = await queries.whale_profile(whale_id)
+    if profile is None:
+        raise HTTPException(status_code=404, detail="unknown whale")
+    return profile
+
+
+@app.get("/api/whales/{whale_id}/day/{day}")
+async def api_whale_day(whale_id: int, day: str) -> dict:
+    """Day drill-down for the P&L calendar: every bet settled that day,
+    sportsbook-labeled and grouped by sport, plus the day's activity."""
+    from datetime import date as _date
+
+    from .reports import settled_bets
+
+    try:
+        d = _date.fromisoformat(day)
+    except ValueError:
+        raise HTTPException(status_code=400, detail="day must be YYYY-MM-DD") from None
+    # ET day, not UTC (audit 2026-08-21): the platform's reporting day
+    # is US/Eastern everywhere else (track_record.RECORD_TZ) — a 9:30pm
+    # ET settlement was landing on tomorrow's drill-down.
+    from .track_record import RECORD_TZ
+    bets = [b for b in await settled_bets(whale_id)
+            if b["settled_at"].astimezone(RECORD_TZ).date() == d]
+    pool = await get_pool()
+    activity = await pool.fetchrow(
+        "SELECT count(*)::int AS trades, COALESCE(sum(notional),0)::float8 AS volume "
+        "FROM trades WHERE whale_id=$1 AND ts::date = $2",
+        whale_id, d,
+    )
+    by_sport: dict[str, dict] = {}
+    for b in bets:
+        s = by_sport.setdefault(
+            b["sport"] or "unclassified",
+            {"sport": b["sport"] or "unclassified", "pnl": 0.0, "stake": 0.0,
+             "wins": 0, "losses": 0, "bets": []},
+        )
+        s["pnl"] += b["pnl"]
+        s["stake"] += b["stake"]
+        s["wins"] += 1 if b["pnl"] > 0.01 else 0
+        s["losses"] += 1 if b["pnl"] < -0.01 else 0
+        s["bets"].append(b)
+    sports = sorted(by_sport.values(), key=lambda s: s["pnl"], reverse=True)
+    for s in sports:
+        s["bets"].sort(key=lambda b: b["pnl"], reverse=True)
+    return {
+        "date": day,
+        "pnl": round(sum(b["pnl"] for b in bets), 2),
+        "stake": round(sum(b["stake"] for b in bets), 2),
+        "wins": sum(1 for b in bets if b["pnl"] > 0.01),
+        "losses": sum(1 for b in bets if b["pnl"] < -0.01),
+        "settled_count": len(bets),
+        "trades_placed": activity["trades"],
+        "volume_placed": activity["volume"],
+        "sports": sports,
+    }
+
+
+# ── Engine (internal model) fills: record + read ────────────────────
+
+
+class EngineFillBody(BaseModel):
+    ts: float
+    venue: str
+    market_id: str
+    outcome_id: str
+    league: str | None = None
+    band: str | None = None
+    limit_price: float
+    size_usd: float
+    fair_value: float | None = None
+    edge: float | None = None
+    would_fill: bool = True
+    whale_alignment: dict | None = None
+    book_asks: list | None = None
+    book_bids: list | None = None
+
+
+@app.post("/api/engine/fills")
+async def engine_fill_ingest(body: EngineFillBody, x_engine_token: str = Header(default="")) -> dict:
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    import hashlib
+
+    from datetime import datetime, timezone
+
+    dedupe = hashlib.sha256(
+        f"{body.venue}|{body.outcome_id}|{int(body.ts)}|{body.limit_price}".encode()
+    ).hexdigest()
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        """
+        INSERT INTO engine_fills (ts, venue, market_id, outcome_id, league, band, limit_price,
+                                  size_usd, fair_value, edge, would_fill, whale_alignment,
+                                  book, dedupe_key)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12::jsonb,$13::jsonb,$14)
+        ON CONFLICT (dedupe_key) DO NOTHING RETURNING id
+        """,
+        datetime.fromtimestamp(body.ts, tz=timezone.utc), body.venue, body.market_id,
+        body.outcome_id, body.league, body.band, body.limit_price, body.size_usd,
+        body.fair_value, body.edge, body.would_fill,
+        json.dumps(body.whale_alignment) if body.whale_alignment is not None else None,
+        json.dumps({"asks": body.book_asks or [], "bids": body.book_bids or []}),
+        dedupe,
+    )
+    return {"ok": True, "id": row["id"] if row else None, "duplicate": row is None}
+
+
+class EngineStatusBody(BaseModel):
+    status: str = "ok"
+    detail: dict = {}
+
+
+# Posts from engine processes that predate the boot stamp are DROPPED and
+# counted. Discovered 2026-08-04: a stale engine instance survived deploys
+# and kept overwriting the status row with old-code heartbeats, poisoning
+# every remote diagnosis for hours ("Deploy live" on the new build while
+# probes only ever saw the old one). Only a stamped process — the current
+# build — may write telemetry; the drop counter keeps the stray VISIBLE.
+_unstamped_drops = {"n": 0, "last_at": 0.0}
+
+
+@app.post("/api/engine/status")
+async def engine_status_ingest(
+    body: EngineStatusBody, x_engine_token: str = Header(default="")
+) -> dict:
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    if not (body.detail or {}).get("boot"):
+        _unstamped_drops["n"] += 1
+        _unstamped_drops["last_at"] = time.time()
+        return {"ok": False, "ignored": "unstamped legacy process"}
+    from ..db import heartbeat
+
+    await heartbeat("edge_engine", body.status, body.detail)
+    return {"ok": True}
+
+
+class KalshiClaimBody(BaseModel):
+    asset: str
+    ticker: str = ""
+    whale: str = ""
+
+
+@app.post("/api/engine/kalshi-claim")
+async def kalshi_claim_ingest(
+    body: KalshiClaimBody, x_engine_token: str = Header(default="")
+) -> dict:
+    """The engine's Kalshi sleeve reports each FILLED copy here so the
+    PMUS paths never buy the same whale position twice (one copy per
+    position ACROSS venues — owner rule). Idempotent by asset."""
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    if not body.asset.strip():
+        return {"ok": False, "ignored": "empty asset"}
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO kalshi_claims (asset, whale, ticker) "
+        "VALUES ($1, $2, $3) ON CONFLICT (asset) DO NOTHING",
+        body.asset.strip(), body.whale[:120], body.ticker[:120])
+    return {"ok": True}
+
+
+# ── Manual trade desk (owner directive 2026-08-07) ───────────────────
+
+
+@app.get("/api/admin/market-search", dependencies=[Depends(require_desk)])
+async def api_market_search(q: str = Query(min_length=2)) -> dict:
+    """Exchange-style market browser for the desk: title/slug/outcome
+    substring over unresolved markets, grouped per MARKET with each
+    outcome's live best ask/bid quoted from the venue book — so the
+    desk shows real prices before the ticket, like any exchange UI."""
+    import asyncio as _asyncio
+
+    import httpx
+
+    from ..team_aliases import matches as _team_match, terms_of
+
+    pool = await get_pool()
+    # Recall-first SQL (any alias of any term), precision in Python
+    # (every term must match) — so 'braves ml' finds the Atlanta game
+    # whichever word the venue titled it with.
+    pats = sorted({a for s in terms_of(q) for a in s})[:12] \
+        or [q.strip().lower()]
+    conds = []
+    for i in range(1, len(pats) + 1):
+        conds.append(
+            f"(m.title ILIKE '%' || ${i} || '%' "
+            f"OR m.slug ILIKE '%' || ${i} || '%' "
+            f"OR m.event_title ILIKE '%' || ${i} || '%' "
+            f"OR mt.outcome ILIKE '%' || ${i} || '%')")
+    rows = await pool.fetch(
+        f"""
+        SELECT m.slug, m.title, m.event_title, mt.outcome,
+               mt.outcome_index, mt.token_id
+        FROM markets m
+        JOIN market_tokens mt ON mt.condition_id = m.condition_id
+        WHERE COALESCE(m.resolved, false) = false
+          AND ({' OR '.join(conds)})
+        ORDER BY m.slug DESC, mt.outcome_index
+        LIMIT 250
+        """, *pats)
+    markets: dict[str, dict] = {}
+    for r in rows:
+        m = markets.setdefault(r["slug"], {
+            "slug": r["slug"], "title": r["title"],
+            "event_title": r["event_title"], "outcomes": []})
+        m["outcomes"].append({"outcome": r["outcome"],
+                              "asset": str(r["token_id"]),
+                              "ask": None, "bid": None})
+    out = [m for m in markets.values()
+           if _team_match(q, [m["title"], m["event_title"], m["slug"]]
+                          + [o["outcome"] for o in m["outcomes"]])][:12]
+
+    async def _quote(client: httpx.AsyncClient, o: dict) -> None:
+        try:
+            resp = await client.get("/book", params={"token_id": o["asset"]})
+            if resp.status_code != 200:
+                return
+            d = resp.json()
+            asks = sorted(float(x["price"]) for x in (d.get("asks") or []))
+            bids = sorted((float(x["price"]) for x in (d.get("bids") or [])),
+                          reverse=True)
+            o["ask"] = asks[0] if asks else None
+            o["bid"] = bids[0] if bids else None
+        except (httpx.HTTPError, ValueError, KeyError, TypeError):
+            return
+
+    cfg = settings()
+    try:
+        async with httpx.AsyncClient(base_url=cfg.clob_api_base,
+                                     timeout=8) as client:
+            await _asyncio.gather(*(_quote(client, o)
+                                    for m in out for o in m["outcomes"]))
+    except Exception:  # noqa: BLE001 — quotes are an upgrade, not a gate
+        pass
+    _mirror_dead_prop_sides(out)
+    return {"markets": out}
+
+
+_MIRROR_SUFFIX = re.compile(r"(.*?)\s*[—–-]\s*(yes|no)\s*$", re.IGNORECASE)
+
+
+def _mirror_dead_prop_sides(mkts: list[dict]) -> None:
+    """Route bookless sides through their mirrored sibling listing.
+
+    Owner report 2026-08-21 evening: every prop's No button was dead on
+    the desk. The venue lists props as mirrored pairs ('Q — Yes' and
+    'Q — No') and only carries a book on the Yes token of each listing —
+    the No token's book is empty, so the desk quoted None and disabled
+    the side. But No on 'Q — Yes' IS Yes on 'Q — No' (and vice versa):
+    identical bet, live book, proven order path. For any outcome with no
+    ask whose sibling listing quotes the complementary side, substitute
+    the sibling's token/quotes in place — the pick then executes on the
+    token that actually trades. Priced outcomes are never touched, and
+    with no live sibling the side stays honestly dead."""
+    by_base: dict[str, dict[str, dict]] = {}
+    for m in mkts:
+        mm = _MIRROR_SUFFIX.match(m.get("title") or "")
+        if mm:
+            by_base.setdefault(mm.group(1).strip().lower(),
+                               {})[mm.group(2).lower()] = m
+    for pair in by_base.values():
+        if "yes" not in pair or "no" not in pair:
+            continue
+        for mine, sib in ((pair["yes"], pair["no"]),
+                          (pair["no"], pair["yes"])):
+            for o in mine.get("outcomes") or []:
+                if o.get("ask") is not None:
+                    continue
+                side = (o.get("outcome") or "").strip().lower()
+                if side not in ("yes", "no"):
+                    continue
+                want = "no" if side == "yes" else "yes"
+                twin = next(
+                    (so for so in (sib.get("outcomes") or [])
+                     if (so.get("outcome") or "").strip().lower() == want
+                     and so.get("ask") is not None
+                     and not so.get("via_sibling")), None)
+                if twin is None:
+                    continue
+                o["asset"] = twin["asset"]
+                o["ask"] = twin["ask"]
+                o["bid"] = twin.get("bid")
+                o["via_sibling"] = True
+
+
+# Public Kalshi market data (no auth needed for market/book reads).
+KALSHI_PUBLIC_API = os.environ.get(
+    "KALSHI_PUBLIC_API", "https://api.elections.kalshi.com/trade-api/v2")
+# TENNIS IS NOT TWO SERIES (census ground truth 2026-08-26, run against
+# the venue's own /series?category=Sports -- 3,516 series).
+#
+# The desk browsed KXATPMATCH and KXWTAMATCH and nothing else. Both were
+# reporting ZERO open events at census time, while live tennis sat under
+# the challenger and doubles boards -- which is how the Kalshi tennis
+# board could read empty while the venue was quoting matches.
+#
+# ONE list, referenced everywhere, because this was already the same
+# decision written in THREE places (_DESK_KALSHI_SERIES, and a
+# series_by_league map in each of desk-games and desk-feed) and any fix
+# that updated some of them would look like it worked.
+_TENNIS_MATCH_SERIES = [
+    "KXATPMATCH", "KXWTAMATCH",
+    # Live at census: 9 / 12 / 4 / 4 open events respectively, against
+    # 0 for the two above.
+    "KXATPCHALLENGERMATCH", "KXWTACHALLENGERMATCH",
+    "KXATPCHALLENGERDOUBLES", "KXATPDOUBLES", "KXWTADOUBLES",
+]
+
+# The sports series the desk browses -- same universe the engine trades.
+_DESK_KALSHI_SERIES = ["KXMLBGAME", "KXWNBAGAME", "KXNBAGAME", "KXNFLGAME",
+                       "KXNHLGAME"] + _TENNIS_MATCH_SERIES
+
+# THE DERIVATIVE FAMILIES A TENNIS MATCH ACTUALLY HAS, appended to the
+# match series stem (KXATPMATCH -> KXATP + suffix). Owner 2026-08-26:
+# the venue app shows Spread with alternate lines, Total Games, Set
+# Winner and Exact Match Score on a match our desk rendered as a bare
+# two-outcome board.
+#
+# SETWINNER / GWINNER / EXACTMATCH were already here and the census
+# confirms all three are real tickers -- my first reading, that they
+# were wrong names, was itself wrong. What is genuinely absent is every
+# SPREAD and TOTAL family, which is exactly what was asked for:
+#
+#   KXATPGAMESPREAD  ATP Game Spread     KXATPGAMETOTAL  ATP Total Games
+#   KXATPGSPREAD     ATO Game Spread     KXATPGTOTAL     ATP Total Games
+#   KXATPSSPREAD     ATP Set Spread      KXATPTOTALSETS  ATP Total Sets
+#   KXWTAGTOTAL      WTA Total Games
+#
+# Both spellings of each (GAMESPREAD and GSPREAD, GAMETOTAL and GTOTAL)
+# are separate real series on the venue -- one is not a typo for the
+# other, so both are asked for. Unknown siblings 404 or come back empty
+# and cost one concurrent request.
+_TENNIS_SIBLING_SUFFIXES = (
+    "SETWINNER", "GWINNER", "EXACTMATCH",
+    "GAMESPREAD", "GSPREAD", "SSPREAD",
+    "GAMETOTAL", "GTOTAL", "TOTALSETS",
+    "ANYSET", "SETSWEEP", "TIEBREAK",
+    "S1GWINNER", "S2GWINNER", "S3GWINNER",
+)
+
+
+def _kcents(m: dict, key: str) -> float | None:
+    """Tolerant price read: the venue migrated int-cent fields to
+    string-dollar '*_dollars' twins (learned the hard way in the BTC
+    calibration) — accept either, return dollars 0-1."""
+    v = m.get(f"{key}_dollars")
+    try:
+        if v is not None and str(v).strip():
+            f = float(v)
+            return f if 0 <= f <= 1 else None
+    except (TypeError, ValueError):
+        pass
+    try:
+        c = m.get(key)
+        if c is not None:
+            f = float(c) / 100.0
+            return f if 0 <= f <= 1 else None
+    except (TypeError, ValueError):
+        pass
+    return None
+
+
+def _kvol(m: dict) -> float | None:
+    """Kalshi traded volume in DOLLARS — the _kcents discipline without
+    the 0-1 clamp: the venue's '*_dollars' string twin wins, the plain
+    field is cents /100. Total volume preferred, 24h as fallback; None
+    when the venue doesn't say (the feed never invents volume)."""
+    for key in ("volume", "volume_24h"):
+        v = m.get(f"{key}_dollars")
+        try:
+            if v is not None and str(v).strip():
+                return float(v)
+        except (TypeError, ValueError):
+            pass
+        try:
+            c = m.get(key)
+            if c is not None:
+                return float(c) / 100.0
+        except (TypeError, ValueError):
+            pass
+    return None
+
+
+def _kalshi_group_label(series: str) -> str:
+    """Which board group a Kalshi series belongs to.
+
+    A NAMED FUNCTION so the tests can call the ladder production uses
+    instead of restating it. A test that rebuilds the answer grades its
+    own arithmetic and goes green on a mutated build -- which is exactly
+    how a cut-whale test passed earlier today.
+
+    ORDER MATTERS, AND SPREAD/TOTAL SIT ABOVE MONEYLINE. The Moneyline
+    test is endswith("MATCH"), and KXATPEXACTMATCH ends in MATCH -- so
+    the specific families must be decided before the generic one,
+    leaving the fallthrough as the only loose branch.
+    """
+    if series.endswith("EXACTMATCH"):
+        return "Exact Score"
+    if "SPREAD" in series:
+        return "Spreads"
+    if "TOTAL" in series:
+        return "Totals"
+    if series.endswith(("SETWINNER", "ANYSET", "SETSWEEP")):
+        return "Set Winners"
+    if series.endswith(("GWINNER", "TIEBREAK")):
+        return "Game Props"
+    if series.endswith(("GAME", "MATCH")):
+        return "Moneyline"
+    return "More"
+
+
+def _kalshi_shape(m: dict, series: str) -> dict:
+    return {
+        "ticker": m.get("ticker"),
+        "series": series,
+        "title": m.get("title") or "",
+        "sub_title": m.get("yes_sub_title") or m.get("subtitle") or "",
+        "yes_ask": _kcents(m, "yes_ask"),
+        "yes_bid": _kcents(m, "yes_bid"),
+        "no_ask": _kcents(m, "no_ask"),
+        "no_bid": _kcents(m, "no_bid"),
+        "close_time": m.get("close_time"),
+        "volume_usd": _kvol(m),
+    }
+
+
+
+# ONE BOARD FETCH PER SERIES SET PER 20 S (2026-09-05, the API's three
+# OOM kills at 2 GiB). /api/admin/desk-feed?venue=kalshi had NO cache:
+# every poll from the wall client — every ~25 s — refetched twelve
+# series at limit=1000 concurrently, and a second client or a probe
+# landing in the same second doubled that. The venue answered 429 for
+# KXATPDOUBLES at 19:36:49Z and KXWTADOUBLES at 19:48:04Z. 20 s, not
+# longer: this is an owner-facing trading board and the wall polls
+# every ~25 s, so 20 s collapses concurrent clients onto one fetch
+# without two consecutive wall polls ever reading the same board.
+# Per key: the cached board, its stamp, a lock so one sweep is in
+# flight, and the background refresh task (held here so the loop does
+# not collect it mid-flight). A stale board is served as it is and
+# refreshed behind the request; only a caller with no board waits.
+_KALSHI_BOARD_TTL_S = 20.0
+_kalshi_board_cache: dict[tuple[str, ...], dict] = {}
+
+
+def _kalshi_dropped_text(series_list: list[str],
+                         dropped: dict[str, str]) -> str:
+    """'KXATPDOUBLES 429, KXWTADOUBLES 429' — in series_list order, not
+    completion order, so two lines about the same outage read alike."""
+    return ", ".join(f"{s} {dropped[s]}" for s in series_list
+                     if s in dropped)
+
+
+async def _kalshi_board_sweep(series_list: list[str]
+                              ) -> tuple[list[dict], dict[str, str]]:
+    """One venue visit for a board, with per-sport close windows. Tennis
+    carries the TOURNAMENT'S close time (KDESKG-T forensics 2026-08-22:
+    US Open quali matches, played Aug 26, close Sep 6) — a game-time
+    window structurally hides every tennis market, so tennis series
+    fetch unwindowed while game sports keep the 7-day slate.
+
+    Returns the board and the series the venue refused (status code, or
+    the exception that ate the call), aggregated over both partitions:
+    ONE warning and ONE 'desk sweep kalshi' line per board. The first
+    cut (2026-09-05) logged per partition, so league=all wrote two
+    lines, each with its own '2 of 7' denominator."""
+    t0 = time.monotonic()
+    rss0 = _procmem.rss_label()
+    # Membership in the ONE list, not a startswith on two of its
+    # members: KXATPCHALLENGERMATCH does not start with KXATPMATCH, so
+    # the prefix test would have handed every newly-added tennis board
+    # the 7-day game-sport window -- the exact window this function
+    # exists to keep tennis out of.
+    tennis = [x for x in series_list if x in _TENNIS_MATCH_SERIES]
+    rest = [x for x in series_list if x not in tennis]
+    out: list[dict] = []
+    dropped: dict[str, str] = {}
+    if rest:
+        rows, refused = await _kalshi_sweep(rest, max_close_h=168, cap=None)
+        out += rows
+        dropped.update(refused)
+    if tennis:
+        rows, refused = await _kalshi_sweep(tennis, max_close_h=None,
+                                            cap=None)
+        out += rows
+        dropped.update(refused)
+    if dropped:
+        log.warning("kalshi board: %d of %d series dropped: %s",
+                    len(dropped), len(series_list),
+                    _kalshi_dropped_text(series_list, dropped))
+    log.info("desk sweep kalshi: series=%d markets=%d %.1fs rss %s->%s MB",
+             len(series_list), len(out), time.monotonic() - t0, rss0,
+             _procmem.rss_label())
+    return out, dropped
+
+
+async def _kalshi_board_fill(series_list: list[str], slot: dict) -> None:
+    """One sweep into the slot. Runs under slot['lock'].
+
+    A BLIND SWEEP KEEPS THE BOARD (2026-09-05). The first cut let an
+    empty answer replace the cached board unconditionally, so one
+    refresh in which every series came back 429 — or the venue blipped
+    — blanked the owner-facing board for every caller for 20 s. An
+    empty answer that carries a refusal is not evidence the slate is
+    empty: the board it had stays, and the stamp still moves so the
+    venue gets its 20 s of back-off. An empty answer with NO refusal is
+    the slate, and clears the board as before.
+
+    THE STAMP IS TAKEN WHEN THE SWEEP LANDS, not when it begins
+    (re-review 2026-09-05). Stamped at the start, a sweep longer than
+    the TTL — five sequential rounds on a slow venue — landed already
+    stale, the very next caller started another refresh, and the venue
+    that had just been slow got no back-off at all."""
+    board, dropped = await _kalshi_board_sweep(series_list)
+    if slot["board"] and not board and dropped:
+        slot["ts"] = time.time()
+        return
+    slot["ts"], slot["board"] = time.time(), board
+
+
+async def _kalshi_board_refresh(series_list: list[str],
+                                slot: dict) -> None:
+    """The background half of stale-while-revalidate: one sweep under
+    the slot lock, skipped when another already brought the board
+    inside the TTL. A sweep that raises is a WARNING with its traceback
+    and the stamp still moves — a refresh that fails on every request
+    must not run on every request."""
+    try:
+        async with slot["lock"]:
+            if time.time() - slot["ts"] < _KALSHI_BOARD_TTL_S:
+                return
+            await _kalshi_board_fill(series_list, slot)
+    except Exception:  # noqa: BLE001
+        slot["ts"] = time.time()
+        log.warning("kalshi board: background refresh raised; serving "
+                    "the board it had for another %gs",
+                    _KALSHI_BOARD_TTL_S, exc_info=True)
+
+
+async def _kalshi_fetch_boards(series_list: list[str]) -> list[dict]:
+    """The desk's Kalshi board from the 20 s cache: fresh, served; stale,
+    served AS IT IS and refreshed once behind the request; absent, the
+    caller waits for the one sweep.
+
+    TRUE stale-while-revalidate (2026-09-05): with three live responses
+    at a time, league=all is five sequential rounds over the two
+    partitions, and the first cut awaited them on the request path
+    whenever the board was stale — the wall client aborts at 15 s
+    (frontend/src/lib/wall.ts) and the owner had already reported "the
+    desk takes forever to load" (2026-08-29). Only a caller with NO
+    board pays for a sweep now."""
+    key = tuple(series_list)
+    slot = _kalshi_board_cache.get(key)
+    if slot is None:
+        slot = _kalshi_board_cache[key] = {
+            "ts": 0.0, "board": None, "lock": asyncio.Lock(),
+            "refresh": None}
+    board = slot["board"]
+    if board is not None:
+        if time.time() - slot["ts"] < _KALSHI_BOARD_TTL_S:
+            return board
+        task = slot["refresh"]
+        if task is None or task.done():
+            slot["refresh"] = asyncio.create_task(
+                _kalshi_board_refresh(series_list, slot))
+        return board
+    async with slot["lock"]:
+        if slot["board"] is None:
+            await _kalshi_board_fill(series_list, slot)
+        return slot["board"]
+
+
+async def _kalshi_fetch(series_list: list[str], q: str = "",
+                        max_close_h: int | None = None,
+                        cap: int | None = 60) -> list[dict]:
+    """Kalshi's open markets for the given series, close-time sorted —
+    the search path's entry (api_kalshi_markets). The board path calls
+    _kalshi_sweep itself because it needs to know which series the
+    venue refused; a search needs the rows, and says at DEBUG what it
+    did not get."""
+    out, dropped = await _kalshi_sweep(series_list, q=q,
+                                       max_close_h=max_close_h, cap=cap)
+    if dropped:
+        log.debug("kalshi search: %d of %d series dropped: %s",
+                  len(dropped), len(series_list),
+                  _kalshi_dropped_text(series_list, dropped))
+    return out
+
+
+async def _kalshi_sweep(series_list: list[str], q: str = "",
+                        max_close_h: int | None = None,
+                        cap: int | None = 60
+                        ) -> tuple[list[dict], dict[str, str]]:
+    """Kalshi's open markets for the given series, close-time sorted,
+    and the series the venue refused — by status code, or the name of
+    the exception that ate the call. A blind sweep and an empty slate
+    look the same on the board; the cache must tell them apart.
+
+    limit=1000 (the venue max) per series: at 100 a big tournament board
+    (ATP mid-major week is 400+ open markets) hid TODAY's matches behind
+    far-future rounds — Sam's Tennis tab showed 'no games' during a live
+    session (owner report 2026-08-07 evening). A max_close_h window
+    trims browse views to the actual slate; search passes None."""
+    import asyncio as _asyncio
+    import time as _time
+
+    import httpx
+
+    from ..team_aliases import matches as _team_match
+
+    ql = q.strip()
+    out: list[dict] = []
+    # THREE LIVE RESPONSES, NOT TWELVE (2026-09-05, the API's three OOM
+    # kills at 2 GiB). The gather below fired every series at once, so
+    # twelve 1000-market bodies were resident and parsed on the loop at
+    # the same moment, per request, per client. The gather stays — the
+    # semaphore caps how many of those bodies are alive together.
+    sem = _asyncio.Semaphore(3)
+    # Series the venue refused, by status code (or the exception that
+    # ate the call). Until 2026-09-05 a 429 on KXATPDOUBLES simply left
+    # doubles off the board and nothing said so.
+    dropped: dict[str, str] = {}
+    # NO status param (owner report 2026-08-28 19:35 ET: "none of
+    # the games for tonight are showing up — all 3 days out"): the
+    # venue flips a game market's status from 'open' to 'ACTIVE' when
+    # play begins, and status=open silently deleted the ENTIRE
+    # same-day slate from the desk — the team could not execute on
+    # tonight's games while Kalshi itself still traded them live.
+    # Probe ground truth 21:44Z: KXMLBGAME's first open events were
+    # tonight's (26AUG281840LADDET ...) with every market 'active'.
+    # Acceptance is filtered client-side in _keep (open|active), the
+    # same set the events fallback and the everything branch always
+    # accepted; min_close_ts still drops finished games.
+    base_params: dict = {"limit": 1000,
+                         "min_close_ts": int(_time.time())}
+    if max_close_h is not None:
+        base_params["max_close_ts"] = int(_time.time()) + max_close_h * 3600
+
+    def _keep(m: dict, series: str) -> bool:
+        if (m.get("status") or "open") not in ("open", "active"):
+            return False
+        title = m.get("title") or ""
+        sub = m.get("yes_sub_title") or m.get("subtitle") or ""
+        # Alias-aware: 'braves' finds the game Kalshi titles
+        # 'Atlanta at ...' (owner report 2026-08-07).
+        if ql and not _team_match(ql, [title, sub, m.get("ticker")]):
+            return False
+        out.append(_kalshi_shape(m, series))
+        return True
+
+    async def _series(client: httpx.AsyncClient, series: str) -> None:
+        try:
+            async with sem:
+                resp = await client.get("/markets", params={
+                    **base_params, "series_ticker": series})
+                if resp.status_code != 200:
+                    dropped[series] = str(resp.status_code)
+                    return
+                for m in (resp.json().get("markets") or []):
+                    _keep(m, series)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            dropped[series] = type(exc).__name__
+            return
+
+    async def _series_events(client: httpx.AsyncClient,
+                             series: str) -> None:
+        # Fallback surface (owner report 2026-08-12: Kalshi mode showed
+        # an empty board): /markets came back empty for EVERY series
+        # while the diagnostic census — which queries /events with
+        # nested markets — was listing live matches at the same moment.
+        # A silent venue-side rejection of the /markets param shape
+        # must degrade to the call shape proven working, not to an
+        # empty desk. Window/price filters re-applied client-side.
+        try:
+            async with sem:
+                resp = await client.get("/events", params={
+                    "series_ticker": series, "status": "open",
+                    "with_nested_markets": "true", "limit": 200})
+                if resp.status_code != 200:
+                    dropped[series] = str(resp.status_code)
+                    return
+                hi = base_params.get("max_close_ts")
+                kept = 0
+                for ev in (resp.json().get("events") or []):
+                    for m in (ev.get("markets") or []):
+                        if m.get("status") not in (None, "open",
+                                                   "active"):
+                            continue
+                        ct = m.get("close_time") or ""
+                        if hi and ct:
+                            try:
+                                from datetime import datetime as _dt
+                                if _dt.fromisoformat(
+                                        ct.replace("Z", "+00:00")
+                                ).timestamp() > hi:
+                                    continue
+                            except ValueError:
+                                pass
+                        if _keep(m, series):
+                            kept += 1
+                # The venue put markets on the board from this surface:
+                # whatever /markets said about the series no longer
+                # decides it. A 200 with nothing in it does not — the
+                # /markets status is still why the series is missing.
+                if kept:
+                    dropped.pop(series, None)
+        except (httpx.HTTPError, ValueError, KeyError, TypeError) as exc:
+            dropped[series] = type(exc).__name__
+            return
+
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=10) as client:
+            await _asyncio.gather(*(_series(client, s)
+                                    for s in series_list))
+            if not out:
+                await _asyncio.gather(*(_series_events(client, s)
+                                        for s in series_list))
+    except Exception:  # noqa: BLE001
+        pass
+    out.sort(key=lambda m: (m.get("close_time") or ""))
+    return (out[:cap] if cap else out), dropped
+
+
+# ── Kalshi full universe (wave-2 2026-08-22: league=everything) ──────
+# One paginated sweep of EVERY open event (politics, econ, weather,
+# entertainment — not just the sports series), nested markets included.
+# 5-min TTL, its own cache: the sweep is ~3 pages of 200 events and the
+# desk's browse/search polling must not re-walk it per request. Capped
+# at ~600 events — beyond that the desk is a search box, not a board.
+_KALSHI_ALL_TTL_S = 300.0
+_KALSHI_ALL_EVENTS_CAP = 600
+_kalshi_all_cache: dict = {"ts": 0.0, "events": []}
+
+
+async def _kalshi_all_open_events() -> list[dict]:
+    """ALL open Kalshi events with nested markets, cached 5 minutes.
+    Best-effort: a venue error serves the stale sweep (or empty) —
+    the desk degrades, it never 500s."""
+    import time as _time
+
+    import httpx
+
+    now = _time.time()
+    if (now - _kalshi_all_cache["ts"] < _KALSHI_ALL_TTL_S
+            and _kalshi_all_cache["events"]):
+        return _kalshi_all_cache["events"]
+    events: list[dict] = []
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=10) as client:
+            cursor = ""
+            while len(events) < _KALSHI_ALL_EVENTS_CAP:
+                params: dict = {"status": "open", "limit": 200,
+                                "with_nested_markets": "true"}
+                if cursor:
+                    params["cursor"] = cursor
+                resp = await client.get("/events", params=params)
+                if resp.status_code != 200:
+                    break
+                d = resp.json() or {}
+                got = d.get("events") or []
+                if not got:
+                    break
+                events.extend(got)
+                cursor = d.get("cursor") or ""
+                if not cursor:
+                    break
+    except Exception:  # noqa: BLE001 — stale sweep beats an empty desk
+        pass
+    events = events[:_KALSHI_ALL_EVENTS_CAP]
+    if events:
+        _kalshi_all_cache.update(ts=now, events=events)
+    return events or _kalshi_all_cache["events"]
+
+
+def _kalshi_search_all(events: list[dict], q: str,
+                       cap: int = 60) -> list[dict]:
+    """Alias-aware market search over the full-events sweep — the same
+    row shape _kalshi_fetch returns, close-time sorted."""
+    from ..team_aliases import matches as _team_match
+
+    out = []
+    for ev in events:
+        ev_title = ev.get("title") or ""
+        for m in (ev.get("markets") or []):
+            if m.get("status") not in (None, "open", "active"):
+                continue
+            title = m.get("title") or ""
+            sub = m.get("yes_sub_title") or m.get("subtitle") or ""
+            if not _team_match(q, [title, sub, ev_title,
+                                   m.get("ticker")]):
+                continue
+            series = (m.get("ticker") or "").split("-", 1)[0]
+            out.append(_kalshi_shape(m, series))
+    out.sort(key=lambda m: (m.get("close_time") or ""))
+    return out[:cap]
+
+
+@app.get("/api/admin/kalshi-markets", dependencies=[Depends(require_desk)])
+async def api_kalshi_markets(q: str = Query(default="")) -> dict:
+    """Search Kalshi's live markets for the desk — event rows with
+    Yes/No prices, the venue's own presentation shape. A query searches
+    EVERYTHING open (wave-2: the sports-only restriction is gone) —
+    full-universe sweep plus the live sports series, deduped; browsing
+    with no query stays the sports slate."""
+    ql = q.strip()
+    sports = await _kalshi_fetch(_DESK_KALSHI_SERIES, q=q)
+    if not ql:
+        return {"markets": sports}
+    everything = _kalshi_search_all(await _kalshi_all_open_events(), ql)
+    seen = {m.get("ticker") for m in sports}
+    merged = sports + [m for m in everything
+                       if m.get("ticker") not in seen]
+    merged.sort(key=lambda m: (m.get("close_time") or ""))
+    return {"markets": merged[:60]}
+
+
+@app.get("/api/admin/book", dependencies=[Depends(require_desk)])
+async def api_admin_book(venue: str = Query(...),
+                         id: str = Query(...)) -> dict:
+    """Live order-book depth for the desk ticket — the venue's actual
+    liquidity at each level, both sides. Polymarket: token book as-is.
+    Kalshi: the public book lists resting BIDS per side; the YES asks
+    are the NO bids mirrored through $1."""
+    import httpx
+
+    levels: dict = {"bids": [], "asks": []}
+    try:
+        if venue == "polymarket":
+            cfg = settings()
+            async with httpx.AsyncClient(base_url=cfg.clob_api_base,
+                                         timeout=8) as client:
+                resp = await client.get("/book", params={"token_id": id})
+            if resp.status_code == 200:
+                d = resp.json()
+                levels["asks"] = sorted(
+                    ([float(x["price"]), float(x["size"])]
+                     for x in (d.get("asks") or [])),
+                    key=lambda l: l[0])[:10]
+                levels["bids"] = sorted(
+                    ([float(x["price"]), float(x["size"])]
+                     for x in (d.get("bids") or [])),
+                    key=lambda l: -l[0])[:10]
+        elif venue == "kalshi":
+            async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                         timeout=8) as client:
+                resp = await client.get(f"/markets/{id}/orderbook")
+            if resp.status_code == 200:
+                ob = (resp.json() or {}).get("orderbook") or {}
+
+                def _lv(raw) -> list[list[float]]:
+                    outl = []
+                    for lv in raw or []:
+                        try:
+                            p, c = float(lv[0]), float(lv[1])
+                            outl.append([p if p <= 1 else p / 100.0, c])
+                        except (TypeError, ValueError, IndexError):
+                            continue
+                    return outl
+
+                yes_bids = _lv(ob.get("yes_dollars") or ob.get("yes"))
+                no_bids = _lv(ob.get("no_dollars") or ob.get("no"))
+                levels["bids"] = sorted(yes_bids, key=lambda l: -l[0])[:10]
+                levels["asks"] = sorted(
+                    ([round(1 - p, 2), c] for p, c in no_bids),
+                    key=lambda l: l[0])[:10]
+    except Exception:  # noqa: BLE001 — depth is display, never a gate
+        pass
+    return levels
+
+
+# ── Desk v3: venue-style browse + full game views (owner directive
+#    2026-08-07: "feel like you are inside the venue placing an order").
+#    Sport chips -> game cards -> a game view where EVERY market for the
+#    game populates, grouped the way the venues group them. Data is the
+#    venues' own (metadata + live books); the skin is ours. ──────────────
+
+def _desk_league_of(prefix: str) -> str:
+    """Venue event-slug prefix -> desk navigation bucket."""
+    p = (prefix or "").lower()
+    if p in ("mlb",): return "mlb"
+    if p in ("wnba",): return "wnba"
+    if p in ("nba", "cbb"): return "nba"
+    if p in ("nfl", "cfb"): return "nfl"
+    if p in ("nhl",): return "nhl"
+    if p.startswith(("atp", "wta", "itf")): return "tennis"
+    if p in ("cs2", "csgo", "dota2", "lol", "valorant", "val"):
+        return "esports"
+    return "soccer"
+
+
+_DESK_LEAGUES = {
+    "mlb": ("mlb",), "wnba": ("wnba",), "nba": ("nba",),
+    "nfl": ("nfl",), "nhl": ("nhl",),
+    "tennis": ("atp", "wta", "itf", "itfm", "itfw"),
+}
+_GAME_DATE_RE = __import__("re").compile(r"\d{4}-\d{2}-\d{2}")
+
+
+def _game_base(slug: str) -> str | None:
+    """'mlb-nyy-bos-2026-08-07-o8pt5' -> 'mlb-nyy-bos-2026-08-07'."""
+    m = _GAME_DATE_RE.search(slug or "")
+    if not m:
+        return None
+    return slug[: m.end()]
+
+
+async def _pm_quote_many(assets: list[str]) -> dict[str, dict]:
+    """Best ask/bid for many tokens, concurrently, best-effort."""
+    import asyncio as _asyncio
+
+    import httpx
+
+    out: dict[str, dict] = {}
+    cfg = settings()
+
+    async def _one(client: httpx.AsyncClient, a: str) -> None:
+        try:
+            resp = await client.get("/book", params={"token_id": a})
+            if resp.status_code != 200:
+                return
+            d = resp.json()
+            asks = sorted(float(x["price"]) for x in (d.get("asks") or []))
+            bids = sorted((float(x["price"]) for x in (d.get("bids") or [])),
+                          reverse=True)
+            out[a] = {"ask": asks[0] if asks else None,
+                      "bid": bids[0] if bids else None}
+        except Exception:  # noqa: BLE001
+            return
+
+    try:
+        async with httpx.AsyncClient(base_url=cfg.clob_api_base,
+                                     timeout=8) as client:
+            await _asyncio.gather(*(_one(client, a) for a in assets[:48]))
+    except Exception:  # noqa: BLE001
+        pass
+    return out
+
+
+@app.get("/api/admin/desk-games", dependencies=[Depends(require_desk)])
+async def api_desk_games(venue: str = Query("polymarket"),
+                         league: str = Query("all")) -> dict:
+    """Game cards for the browse view: today/tomorrow's games with live
+    moneyline prices on each side — the venue home screen's shape."""
+    from datetime import date as _date, timedelta as _td
+
+    from ..copy_sports import market_type_of
+
+    days = {(_date.today() + _td(days=i)).isoformat() for i in (-1, 0, 1)}
+    if venue == "kalshi" and league == "everything":
+        # FULL UNIVERSE (wave-2 2026-08-22): every open event on the
+        # venue — politics, econ, weather, the lot — from the 5-min
+        # cached sweep, one card per event, same card shape as the
+        # sports board. The sports leagues keep their own per-series
+        # path below, untouched.
+        evs = await _kalshi_all_open_events()
+        games_all = []
+        for ev in evs:
+            et = ev.get("event_ticker") or ""
+            mkts = [m for m in (ev.get("markets") or [])
+                    if m.get("status") in (None, "open", "active")]
+            if not et or not mkts:
+                continue
+            series = et.split("-", 1)[0]
+            games_all.append({
+                "id": et, "venue": "kalshi", "league": "everything",
+                "title": ((ev.get("title") or et)
+                          .replace(" Winner?", "")),
+                "outcomes": [
+                    {"label": s["sub_title"] or s["title"],
+                     "ticker": s["ticker"], "price": s["yes_ask"]}
+                    for s in (_kalshi_shape(m, series)
+                              for m in mkts[:3])]})
+        return {"games": games_all,
+                "counts": {"everything": len(games_all),
+                           "all": len(games_all)}}
+    if venue == "kalshi":
+        # Kalshi games from the per-league series (each side its own
+        # ticker); the league picks its OWN series so a busy MLB slate
+        # can never crowd tennis out of a shared cap, and the 48h close
+        # window keeps the board to the actual slate (live matches stay:
+        # they close soonest and sort first).
+        series_by_league = {
+            "mlb": ["KXMLBGAME"], "wnba": ["KXWNBAGAME"],
+            "nba": ["KXNBAGAME"], "nfl": ["KXNFLGAME"],
+            "nhl": ["KXNHLGAME"],
+            "tennis": list(_TENNIS_MATCH_SERIES),
+        }
+        series_list = (_DESK_KALSHI_SERIES if league == "all"
+                       else series_by_league.get(league, []))
+        mkts = await _kalshi_fetch_boards(series_list)
+        games: dict[str, dict] = {}
+        for m in mkts:
+            t = m.get("ticker") or ""
+            parts = t.split("-")
+            if len(parts) < 3:
+                continue
+            gkey = "-".join(parts[:2])
+            series = m.get("series") or ""
+            lg = {"KXMLBGAME": "mlb", "KXWNBAGAME": "wnba",
+                  "KXNBAGAME": "nba", "KXNFLGAME": "nfl",
+                  "KXNHLGAME": "nhl"}.get(series, "tennis")
+            g = games.setdefault(gkey, {
+                "id": gkey, "venue": "kalshi", "league": lg,
+                "title": (m.get("title") or "").replace(" Winner?", ""),
+                "outcomes": []})
+            g["outcomes"].append({
+                "label": m.get("sub_title") or m.get("title"),
+                "ticker": t, "price": m.get("yes_ask")})
+        out = [g for g in games.values() if g["outcomes"]]
+        counts = {}
+        for g in out:
+            counts[g["league"]] = counts.get(g["league"], 0) + 1
+        counts["all"] = len(out)
+        return {"games": out[:60], "counts": counts}
+
+    # VENUE-NATIVE BOARD (owner order 2026-08-21: the desk must
+    # navigate like the venue itself — the catalog join dropped every
+    # event whose slug spelling differed, tennis worst of all). The
+    # venue's own event listing is the source of truth: every event it
+    # lists renders as a card, moneyline sides quoted from the listing
+    # itself, and the per-league counts come back in one response so
+    # the navigation reads like the venue's own category rail.
+    from .. import pmus as _pmus
+    try:
+        events = await asyncio.to_thread(_pmus.list_desk_events)
+    except Exception:  # noqa: BLE001
+        events = []
+    league_of_ev = _desk_league_of
+    counts: dict[str, int] = {}
+    cards = []
+    for ev in events:
+        lg = league_of_ev(ev["league"])
+        counts[lg] = counts.get(lg, 0) + 1
+        # 'everything' = the venue's whole open board, no league filter
+        # (the venue-native listing already carries every open event).
+        if league not in ("all", "everything") and lg != league:
+            continue
+        ml = [m for m in ev["markets"] if m["kind"] in ("aec", "atc")]
+        outs = [{"label": (m["label"].split("—")[-1].strip()
+                           or m["label"]),
+                 "us_slug": m["us_slug"], "price": m["price"]}
+                for m in ml[:3]]
+        if not outs:
+            m0 = ev["markets"][0]
+            outs = [{"label": m0["label"], "us_slug": m0["us_slug"],
+                     "price": m0["price"]}]
+        cards.append({
+            "id": ev["slug"], "venue": "polymarket", "league": lg,
+            "title": ev["title"], "markets_n": len(ev["markets"]),
+            "outcomes": outs})
+    counts["all"] = len(events)
+    counts["everything"] = len(events)
+    cards.sort(key=lambda g: (g["id"][-10:], g["id"]))
+    return {"games": cards[:400 if league == "everything" else 80],
+            "counts": counts}
+
+
+# ── Desk v8 (owner contract 2026-08-22): the venue-style FEED ────────
+# Large market cards for the home feed — same venue listings and caches
+# as desk-games (never a second venue sweep), plus the fields the card
+# skin needs: volume_usd (from the venue payloads where present, null
+# when absent, NEVER invented), close_time, and history_id = the first
+# outcome's chartable id so a card charts without a second lookup.
+# Sorted volume desc nulls-last, cap 60.
+
+_DESK_FEED_CAP = 60
+
+
+def _feed_finish(cards: list[dict], counts: dict) -> dict:
+    """history_id, volume-desc-nulls-last sort, cap — every venue path
+    funnels through here so the card contract has one spelling."""
+    for c in cards:
+        c["history_id"] = (c["outcomes"][0]["id"] if c["outcomes"]
+                           else None)
+    # SLATE ORDER (owner report 2026-08-28): volume-desc buried
+    # tonight's games under high-volume weekend boards — useless for a
+    # team executing NOW. The venues' own apps lead with the imminent
+    # slate: soonest close first (nulls last), volume breaks ties.
+    cards.sort(key=lambda c: (c.get("close_time") is None,
+                              c.get("close_time") or "~",
+                              -(c.get("volume_usd") or 0.0)))
+    return {"cards": cards[:_DESK_FEED_CAP], "counts": counts}
+
+
+@app.get("/api/admin/desk-feed", dependencies=[Depends(require_desk)])
+async def api_desk_feed(venue: str = Query("polymarket"),
+                        league: str = Query("all")) -> dict:
+    """Market cards for the v8 venue-style feed. Card shape:
+    {id, venue, title, league, volume_usd|null, close_time|null,
+     outcomes: [{label, id, price}], history_id} — the outcome id is
+    the venue-native orderable/chartable identifier (PM: the us-slug
+    the whole desk orders by — the venue listing carries no CLOB
+    token; Kalshi: the market ticker)."""
+    if venue == "kalshi" and league == "everything":
+        # Full-universe cards from the SAME 5-min cached sweep
+        # desk-games uses: one card per open event, volume summed
+        # over the event's open markets (null when none reported).
+        evs = await _kalshi_all_open_events()
+        cards = []
+        for ev in evs:
+            et = ev.get("event_ticker") or ""
+            mkts = [m for m in (ev.get("markets") or [])
+                    if m.get("status") in (None, "open", "active")]
+            if not et or not mkts:
+                continue
+            series = et.split("-", 1)[0]
+            shaped = [_kalshi_shape(m, series) for m in mkts]
+            vols = [s["volume_usd"] for s in shaped
+                    if s["volume_usd"] is not None]
+            closes = [s["close_time"] for s in shaped
+                      if s["close_time"]]
+            cards.append({
+                "id": et, "venue": "kalshi", "league": "everything",
+                "title": ((ev.get("title") or et)
+                          .replace(" Winner?", "")),
+                "volume_usd": round(sum(vols), 2) if vols else None,
+                "close_time": min(closes) if closes else None,
+                "outcomes": [
+                    {"label": s["sub_title"] or s["title"],
+                     "id": s["ticker"], "price": s["yes_ask"]}
+                    for s in shaped[:3]]})
+        return _feed_finish(cards, {"everything": len(cards),
+                                    "all": len(cards)})
+    if venue == "kalshi":
+        # Sports cards from the same per-league series fetch as
+        # desk-games (48h window, each side its own ticker), grouped
+        # to one card per game; volume summed across the game's sides.
+        series_by_league = {
+            "mlb": ["KXMLBGAME"], "wnba": ["KXWNBAGAME"],
+            "nba": ["KXNBAGAME"], "nfl": ["KXNFLGAME"],
+            "nhl": ["KXNHLGAME"],
+            "tennis": list(_TENNIS_MATCH_SERIES),
+        }
+        series_list = (_DESK_KALSHI_SERIES if league == "all"
+                       else series_by_league.get(league, []))
+        mkts = await _kalshi_fetch_boards(series_list)
+        games: dict[str, dict] = {}
+        for m in mkts:
+            t = m.get("ticker") or ""
+            parts = t.split("-")
+            if len(parts) < 3:
+                continue
+            gkey = "-".join(parts[:2])
+            lg = {"KXMLBGAME": "mlb", "KXWNBAGAME": "wnba",
+                  "KXNBAGAME": "nba", "KXNFLGAME": "nfl",
+                  "KXNHLGAME": "nhl"}.get(m.get("series") or "",
+                                          "tennis")
+            g = games.setdefault(gkey, {
+                "id": gkey, "venue": "kalshi", "league": lg,
+                "title": (m.get("title") or "").replace(" Winner?", ""),
+                "volume_usd": None, "close_time": None,
+                "outcomes": []})
+            g["outcomes"].append({
+                "label": m.get("sub_title") or m.get("title"),
+                "id": t, "price": m.get("yes_ask")})
+            v = m.get("volume_usd")
+            if v is not None:
+                g["volume_usd"] = round((g["volume_usd"] or 0.0) + v, 2)
+            ct = m.get("close_time")
+            if ct and (g["close_time"] is None or ct < g["close_time"]):
+                g["close_time"] = ct
+        cards = [g for g in games.values() if g["outcomes"]]
+        # MATCHUP TITLES (owner report 2026-08-29, with screenshot): the
+        # card inherited ONE side's market title — "New York Y wins" —
+        # which reads as a proposition, not a game. The sides ARE the
+        # teams, so a card with two distinct sides titles itself as the
+        # matchup the venue app would show. Cards with one readable
+        # side (or none) keep the market title rather than guessing.
+        for g in cards:
+            labels: list[str] = []
+            for o in g["outcomes"]:
+                lb = (o.get("label") or "").strip()
+                if lb and lb not in labels:
+                    labels.append(lb)
+            if len(labels) >= 2:
+                g["title"] = f"{labels[0]} vs {labels[1]}"
+        counts: dict[str, int] = {}
+        for g in cards:
+            counts[g["league"]] = counts.get(g["league"], 0) + 1
+        counts["all"] = len(cards)
+        return _feed_finish(cards, counts)
+
+    # Polymarket: the venue-native event listing (30s cache in pmus),
+    # one card per event, moneyline sides as the card outcomes —
+    # exactly desk-games' card builder plus volume/close_time, which
+    # now ride on the listing rows themselves.
+    from .. import pmus as _pmus
+    try:
+        events = await asyncio.to_thread(_pmus.list_desk_events)
+    except Exception:  # noqa: BLE001 — an empty feed, never a 500
+        events = []
+    counts = {}
+    cards = []
+    for ev in events:
+        lg = _desk_league_of(ev["league"])
+        counts[lg] = counts.get(lg, 0) + 1
+        if league not in ("all", "everything") and lg != league:
+            continue
+        ml = [m for m in ev["markets"] if m["kind"] in ("aec", "atc")]
+        outs = [{"label": (m["label"].split("—")[-1].strip()
+                           or m["label"]),
+                 "id": m["us_slug"], "price": m["price"]}
+                for m in ml[:3]]
+        if not outs:
+            m0 = ev["markets"][0]
+            outs = [{"label": m0["label"], "id": m0["us_slug"],
+                     "price": m0["price"]}]
+        # MATCHUP TITLES, same law as the Kalshi cards (owner report
+        # 2026-08-29: 'New York to win' reads as a proposition, not a
+        # game). A title that already names the matchup ('X vs. Y',
+        # 'X at Y') passes through; a one-sided title with two
+        # readable sides is rebuilt from them.
+        title = ev["title"] or ev["slug"]
+        tl = f" {title.lower()} "
+        if (" vs" not in tl and " at " not in tl and " @ " not in tl):
+            labs: list[str] = []
+            for o in outs:
+                lb = (o["label"] or "").strip()
+                if lb and lb.lower() not in ("yes", "no") \
+                        and lb not in labs:
+                    labs.append(lb)
+            if len(labs) >= 2:
+                title = f"{labs[0]} vs {labs[1]}"
+        cards.append({
+            "id": ev["slug"], "venue": "polymarket", "league": lg,
+            "title": title,
+            "volume_usd": ev.get("volume_usd"),
+            "close_time": ev.get("close_time"),
+            "outcomes": outs})
+    counts["all"] = len(events)
+    counts["everything"] = len(events)
+    return _feed_finish(cards, counts)
+
+
+@app.get("/api/admin/desk-game", dependencies=[Depends(require_desk)])
+async def api_desk_game(venue: str = Query(...),
+                        id: str = Query(...)) -> dict:
+    """The full game view: EVERY market for one game, grouped the way
+    the venue groups them, quoted live, with the desk's own positions
+    inline (cost / current value / to-win — no cash-out: this account
+    holds to resolution by design)."""
+    from ..copy_sports import market_type_of
+
+    group_label = {"moneyline": "Moneyline", "spread": "Spreads",
+                   "total": "Totals"}
+    if venue == "kalshi":
+        # The game id IS the venue's event_ticker (SERIES-EVENTCODE):
+        # ask for the event directly — precise, and immune to any cap
+        # or window on the shared browse list. The venue lists a
+        # game's OTHER market families under SIBLING series (census
+        # ground truth: ...GAME pairs with ...SPREAD/TOTAL/TEAMTOTAL/
+        # 1HTOTAL/1HSPREAD; ...MATCH pairs with ...SETWINNER/GWINNER/
+        # EXACTMATCH), each with its own event ticker sharing the
+        # event code — sweep them all so the full board shows (owner
+        # order 2026-08-12). Unknown siblings 404/empty harmlessly.
+        import asyncio as _asyncio
+
+        import httpx
+
+        series0 = id.split("-", 1)[0]
+        code = id.split("-", 1)[1] if "-" in id else ""
+        sibs: list[str] = []
+        if series0.endswith("MATCH"):
+            stem = series0[: -len("MATCH")]
+            # A challenger or doubles board stems to KXATPCHALLENGER /
+            # KXWTADOUBLES, and no derivative series is named off those.
+            # The derivatives hang off the TOUR stem, so ask for both: a
+            # wrong guess costs one empty response, a missing one costs
+            # the whole Spreads group.
+            stems = {stem}
+            for tour in ("KXATP", "KXWTA"):
+                if series0.startswith(tour):
+                    stems.add(tour)
+            sibs = [st + suf for st in sorted(stems)
+                    for suf in _TENNIS_SIBLING_SUFFIXES]
+        elif series0.endswith("GAME"):
+            stem = series0[: -len("GAME")]
+            sibs = [stem + s for s in ("SPREAD", "TOTAL", "TEAMTOTAL",
+                                       "1HTOTAL", "1HSPREAD")]
+        raw_markets: list[dict] = []
+
+        async def _event_direct(client: httpx.AsyncClient) -> None:
+            try:
+                resp = await client.get("/markets", params={
+                    "event_ticker": id, "status": "open", "limit": 200})
+                if resp.status_code == 200:
+                    raw_markets.extend(resp.json().get("markets") or [])
+            except Exception:  # noqa: BLE001
+                pass
+
+        async def _sibling(client: httpx.AsyncClient, sib: str) -> None:
+            try:
+                resp = await client.get("/events", params={
+                    "series_ticker": sib, "status": "open",
+                    "with_nested_markets": "true", "limit": 200})
+                if resp.status_code != 200:
+                    return
+                for ev in (resp.json().get("events") or []):
+                    et = ev.get("event_ticker") or ""
+                    if code and code in et:
+                        raw_markets.extend(ev.get("markets") or [])
+            except Exception:  # noqa: BLE001
+                pass
+
+        try:
+            async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                         timeout=10) as client:
+                await _asyncio.gather(_event_direct(client),
+                                      *(_sibling(client, s)
+                                        for s in sibs))
+        except Exception:  # noqa: BLE001
+            pass
+        groups: dict[str, list] = {}
+        title = id
+        for rm in raw_markets:
+            series = (rm.get("ticker") or "").split("-", 1)[0]
+            m = _kalshi_shape(rm, series)
+            label = _kalshi_group_label(series)
+            row_label = m.get("sub_title") or m.get("title")
+            if label not in ("Moneyline",):
+                # Sibling markets repeat the matchup in the title —
+                # keep the distinguishing part readable on one row.
+                row_label = (f"{(m.get('title') or '').strip()} — "
+                             f"{m.get('sub_title')}"
+                             if m.get("sub_title") else row_label)
+            groups.setdefault(label, []).append({
+                "label": row_label,
+                "ticker": m.get("ticker"), "price": m.get("yes_ask"),
+                "no_price": m.get("no_ask")})
+            if series == series0:
+                title = (m.get("title") or title).replace(" Winner?", "")
+        korder = ["Moneyline", "Spreads", "Totals", "Set Winners",
+                  "Game Props", "Exact Score", "More"]
+        # MATCHUP TITLE (owner report 2026-08-29): a game page headed
+        # "New York Y wins" reads as a proposition. When the Moneyline
+        # group carries two distinct sides, the page titles itself as
+        # the matchup, same as the feed cards.
+        ml = groups.get("Moneyline") or []
+        side_labels: list[str] = []
+        for r in ml:
+            lb = (r.get("label") or "").strip()
+            if lb and lb not in side_labels:
+                side_labels.append(lb)
+        if len(side_labels) >= 2:
+            title = f"{side_labels[0]} vs {side_labels[1]}"
+        return {"id": id, "venue": "kalshi", "title": title,
+                "groups": [{"name": k, "markets": groups[k]}
+                           for k in korder if k in groups]
+                + [{"name": k, "markets": v} for k, v in groups.items()
+                   if k not in korder],
+                "positions": []}
+
+    # VENUE-NATIVE FULL BOARD (owner order 2026-08-21): the event id
+    # IS the venue's own eventSlug from the desk listing — every market
+    # the venue lists for it renders, grouped by the venue slug grammar
+    # with the venue's own market titles (tennis alternate totals and
+    # game/set spreads included, because nothing filters them anymore).
+    from .. import pmus as _pmus
+    try:
+        events = await asyncio.to_thread(_pmus.list_desk_events)
+    except Exception:  # noqa: BLE001
+        events = []
+    ev = next((e for e in events if e["slug"] == id), None)
+    if ev is None:
+        try:
+            board = await asyncio.to_thread(_pmus.event_board, id)
+        except Exception:  # noqa: BLE001
+            board = []
+        ev = {"slug": id, "title": id,
+              "markets": [{"us_slug": r["us_slug"],
+                           "kind": (r["us_slug"] or "").split("-", 1)[0],
+                           "label": r["label"], "price": r["price"]}
+                          for r in board]}
+    kind_group = {"aec": "Moneyline", "atc": "Moneyline",
+                  "asc": "Spreads", "tsc": "Totals",
+                  "astatc": "Props & Specials"}
+
+    def _grp(mk: dict) -> str:
+        g = kind_group.get(mk["kind"], "More Markets")
+        lbl = (mk["label"] or "").lower()
+        # The venue's own wording decides the tennis subgroups the
+        # trader expects to see (game/set spreads, set winners).
+        if "set" in lbl and g in ("Spreads", "Moneyline",
+                                  "More Markets"):
+            return "Set Markets"
+        return g
+
+    groups: dict[str, list] = {}
+    for mk in ev["markets"]:
+        groups.setdefault(_grp(mk), []).append({
+            "label": mk["label"], "us_slug": mk["us_slug"],
+            "price": mk["price"]})
+    # The desk's own open positions on this event (manual sleeve),
+    # matched by venue slug — the game key both sides share.
+    pool = await get_pool()
+    pos_rows = await pool.fetch(
+        """
+        SELECT lo.asset, lo.us_market_slug,
+               lo.fill_price::float8 AS fill_price,
+               lo.filled_shares::float8 AS shares,
+               lo.filled_usd::float8 AS cost, lo.status,
+               lo.pnl::float8 AS pnl, mt.outcome
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        WHERE lo.whale_username = 'manual'
+          AND lo.status IN ('filled', 'settled')
+        ORDER BY lo.placed_at DESC LIMIT 200
+        """)
+    from ..live_executor import _us_game_key
+    ev_key = _us_game_key(f"atc-{id}") or id
+    positions = []
+    for p in pos_rows:
+        us = p["us_market_slug"] or ""
+        if (_us_game_key(us) or "") != ev_key:
+            continue
+        positions.append({
+            "asset": str(p["asset"] or us),
+            "outcome": p["outcome"] or us,
+            "cost": p["cost"], "fill_price": p["fill_price"],
+            "shares": p["shares"], "status": p["status"],
+            "current_value": None,
+            "to_win": round(p["shares"], 2) if p["shares"] else None,
+            "pnl": p["pnl"]})
+    order = ["Moneyline", "Spreads", "Totals", "Set Markets",
+             "Props & Specials", "More Markets"]
+    # LIVE RE-QUOTE for the moneyline rows (owner report 2026-08-22:
+    # Pegula 31c / Swiatek 32c — complements summing 63c). The venue's
+    # LISTING carries a stale per-side price when one side's book is
+    # thin; the ticket always re-quotes live so orders were never
+    # mispriced, but the page must not display a stale print either.
+    # Bounded: moneyline group only (<=6 slugs), live book read per
+    # side, listing price replaced whenever the live read answers.
+    ml = groups.get("Moneyline") or []
+    if ml:
+        from .. import pmus as _pm
+
+        async def _fresh(row: dict) -> None:
+            try:
+                px = await asyncio.to_thread(_pm.slug_ask,
+                                             row.get("us_slug") or "")
+                if px is not None:
+                    row["price"] = px
+            except Exception:  # noqa: BLE001 — keep the listing price
+                pass
+        await asyncio.gather(*(_fresh(r) for r in ml[:6]))
+    return {"id": id, "venue": "polymarket", "title": ev["title"],
+            "groups": [{"name": k, "markets": groups[k]}
+                       for k in order if k in groups]
+            + [{"name": k, "markets": v} for k, v in groups.items()
+               if k not in order],
+            "positions": positions}
+
+
+@app.get("/api/admin/fill-vs-miss", dependencies=[Depends(require_admin)])
+async def api_fill_vs_miss(days: int = Query(7, ge=1, le=30)) -> dict:
+    """The direct test of the copy thesis (owner 2026-08-12: 'same or
+    better price -> same or better margin'): grade the FILLED cohort's
+    realized ROI against the counterfactual ROI of the copies the
+    price rule made us SKIP ('unfilled' FOK kills), each miss scored
+    at HIS price against the market's actual resolution. If misses
+    grade far above fills, same-or-better is selecting away his best
+    trades (adverse selection) and the tolerance question gets decided
+    on this number, not on theory."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lo.whale_username AS whale, lo.status,
+               lo.his_price::float8 AS his_price,
+               lo.requested_usd::float8 AS req_usd,
+               lo.filled_usd::float8 AS filled_usd,
+               lo.pnl::float8 AS pnl,
+               mt.outcome_index, m.resolved_prices
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.placed_at > now() - make_interval(days => $1)
+          AND COALESCE(lo.whale_username, '')
+              NOT IN ('manual', 'underdog')
+          -- 'cashed_out' is what mirror_exit writes on a copy
+          -- exited at a profit. Omitting it deleted every
+          -- winning exited copy from the filled cohort, which
+          -- biases fill-vs-miss toward 'misses grade better'
+          -- and that number decides the price-tolerance rule.
+          AND lo.status IN ('filled', 'settled', 'unfilled',
+                            'cashed_out')
+          -- NOT THE MIRROR BOOK (position mirroring P1, owner order
+          -- 2026-09-02 "go for it, let's get this working"; the panel
+          -- review's predicate audit). The book is one standing row per
+          -- market whose his_price is an open-time level, and a grade of
+          -- fill against miss is a per-fill instrument that cannot score
+          -- it. NULL lanes (every row before 041) keep today's path.
+          AND COALESCE(lo.lane,'') <> 'mirror'
+        """, days)
+    return {"days": days, "whales": grade_rows(rows)}
+
+
+class MeridianJournalBody(BaseModel):
+    entry: str
+    mood: str = "steady"
+
+
+@app.post("/api/admin/meridian-journal",
+          dependencies=[Depends(require_admin)])
+async def api_meridian_journal_post(body: MeridianJournalBody) -> dict:
+    """MERIDIAN's journal intake: the co-CEO session authors entries in
+    the repo; the diagnostic workflow publishes the newest one here.
+    entry_hash dedupe makes republishing a no-op."""
+    import hashlib
+
+    entry = (body.entry or "").strip()
+    if not entry:
+        return {"ok": False, "error": "empty entry"}
+    mood = body.mood if body.mood in ("steady", "focused", "alert") \
+        else "steady"
+    h = hashlib.sha256(entry.encode()).hexdigest()[:32]
+    pool = await get_pool()
+    nid = await pool.fetchval(
+        """
+        INSERT INTO meridian_journal (entry, mood, entry_hash)
+        VALUES ($1, $2, $3)
+        ON CONFLICT (entry_hash) DO NOTHING
+        RETURNING id
+        """, entry[:2000], mood, h)
+    return {"ok": True, "id": nid, "new": nid is not None}
+
+
+@app.get("/api/meridian/journal")
+async def api_meridian_journal(limit: int = Query(5, ge=1, le=20)) -> dict:
+    """Public: MERIDIAN's latest journal entries. The author controls
+    the content (repo-reviewed before publish), so this is public-safe
+    by construction — it is the voice of the page."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT entry, mood, created_at FROM meridian_journal "
+        "ORDER BY id DESC LIMIT $1", limit)
+    return {"entries": [{"entry": r["entry"], "mood": r["mood"],
+                         "at": r["created_at"].isoformat()} for r in rows]}
+
+
+class MeridianTurn(BaseModel):
+    role: str
+    text: str
+
+
+class MeridianExchangeBody(BaseModel):
+    turns: list[MeridianTurn]
+
+
+@app.post("/api/admin/meridian-exchange",
+          dependencies=[Depends(require_admin)])
+async def api_meridian_exchange_post(body: MeridianExchangeBody) -> dict:
+    """Mirror voice turns from the MERIDIAN page into the shared
+    conversation record the engine session reads at its check-ins."""
+    pool = await get_pool()
+    n = 0
+    for t in body.turns[:20]:
+        role = t.role if t.role in ("user", "assistant") else None
+        text = (t.text or "").strip()
+        if not role or not text:
+            continue
+        await pool.execute(
+            "INSERT INTO meridian_exchange (role, text) VALUES ($1, $2)",
+            role, text[:4000])
+        n += 1
+    return {"ok": True, "stored": n}
+
+
+@app.get("/api/admin/meridian-exchange",
+         dependencies=[Depends(require_admin)])
+async def api_meridian_exchange(unseen: int = 0, mark: int = 0,
+                                limit: int = Query(40, ge=1, le=200)) -> dict:
+    """The conversation record. unseen=1&mark=1 is the engine session's
+    probe consumption (reads new turns, marks them delivered); the
+    MERIDIAN page uses the plain newest-N form to restore its memory
+    across visits."""
+    pool = await get_pool()
+    if unseen:
+        rows = await pool.fetch(
+            "SELECT id, role, text, at FROM meridian_exchange "
+            "WHERE seen_at IS NULL ORDER BY id LIMIT $1", limit)
+        if mark and rows:
+            await pool.execute(
+                "UPDATE meridian_exchange SET seen_at = now() "
+                "WHERE id = ANY($1::bigint[])", [r["id"] for r in rows])
+    else:
+        rows = list(reversed(await pool.fetch(
+            "SELECT id, role, text, at FROM meridian_exchange "
+            "ORDER BY id DESC LIMIT $1", limit)))
+    return {"turns": [{"id": r["id"], "role": r["role"], "text": r["text"],
+                       "at": r["at"].isoformat()} for r in rows]}
+
+
+class JarvisNoteBody(BaseModel):
+    note: str
+
+
+@app.post("/api/admin/jarvis-note", dependencies=[Depends(require_admin)])
+async def api_jarvis_note(body: JarvisNoteBody) -> dict:
+    """The JARVIS voice cockpit's one-way bridge to the autonomous engine
+    session: notes queue here and the engine session reads them at its
+    check-ins (probe prints unread + marks delivered)."""
+    note = (body.note or "").strip()
+    if not note:
+        return {"ok": False, "error": "empty note"}
+    pool = await get_pool()
+    nid = await pool.fetchval(
+        "INSERT INTO jarvis_notes (note) VALUES ($1) RETURNING id",
+        note[:4000])
+    return {"ok": True, "id": nid,
+            "detail": "queued — the engine session reads notes at its "
+                      "next check-in (within the hour)"}
+
+
+@app.get("/api/admin/jarvis-notes", dependencies=[Depends(require_admin)])
+async def api_jarvis_notes(mark: int = 0,
+                           limit: int = Query(20, ge=1, le=100)) -> dict:
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, note, created_at FROM jarvis_notes "
+        "WHERE read_at IS NULL ORDER BY id LIMIT $1", limit)
+    if mark and rows:
+        await pool.execute(
+            "UPDATE jarvis_notes SET read_at = now() "
+            "WHERE id = ANY($1::bigint[])", [r["id"] for r in rows])
+    remaining = int(await pool.fetchval(
+        "SELECT count(*) FROM jarvis_notes WHERE read_at IS NULL") or 0)
+    return {"notes": [{"id": r["id"], "note": r["note"],
+                       "created_at": r["created_at"].isoformat()}
+                      for r in rows],
+            "unread_remaining": remaining}
+
+
+class ManualTradeBody(BaseModel):
+    asset: str = ""            # Polymarket token id
+    usd: float
+    note: str = ""
+    venue: str = "polymarket-us"
+    ticker: str = ""           # Kalshi market ticker
+    side: str = "yes"          # Kalshi side
+    title: str = ""
+    us_slug: str = ""          # PM: venue-board row, orderable by slug
+    ask: float | None = None   # PM slug rows: bounded fallback quote
+
+
+# HOW LONG A DESK TICKET MAY SIT UNCLAIMED BEFORE WE CALL IT DEAD.
+# The relay polls every 2s and sleeps 30s once at thread start, so five
+# minutes is far past any healthy delay and well short of a trading
+# session.
+DESK_QUEUE_STALE_S = int(os.environ.get("DESK_QUEUE_STALE_S", "300"))
+DESK_RELAY_SEEN_KEY = "desk_relay_last_seen"
+
+
+async def reap_stale_desk_queue(pool) -> int:
+    """Retire desk tickets the relay never claimed. Returns the count.
+
+    ONLY 'pending'. A pending row was never handed to the venue -- the
+    relay picks rows up by moving them to 'placed' -- so failing it is a
+    statement we can prove. A 'placed' row may have money behind it and
+    only the venue knows; it is surfaced in the status block instead of
+    being guessed at here, the same discipline as the stranded-exit
+    reaper.
+    """
+    try:
+        rows = await pool.fetch(
+            "UPDATE manual_kalshi_queue SET status='error', "
+            "updated_at=now(), error=$1 "
+            "WHERE status='pending' "
+            "AND created_at < now() - ($2 || ' seconds')::interval "
+            "RETURNING id",
+            f"relay never claimed this ticket within "
+            f"{DESK_QUEUE_STALE_S}s - the desk relay looks down; "
+            f"nothing was sent to the venue",
+            str(DESK_QUEUE_STALE_S))
+        if rows:
+            log.warning("DESK RELAY: retired %d unclaimed ticket(s) - "
+                        "the Kalshi relay has not picked up work in %ds",
+                        len(rows), DESK_QUEUE_STALE_S)
+        return len(rows)
+    except Exception:  # noqa: BLE001 -- bookkeeping never blocks a ticket
+        return 0
+
+
+@app.post("/api/admin/manual-trade")
+async def api_manual_trade(body: ManualTradeBody,
+                           role: str = Depends(require_desk)) -> dict:
+    """Place an admin-directed trade as the 'manual' sleeve. Separate
+    budget, separate P&L line, zero interaction with autonomous flows.
+    Polymarket executes synchronously; Kalshi queues for the engine's
+    ~10s relay (only the engine holds Kalshi credentials)."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
+    from ..live_executor import (MANUAL_DAILY_USD, MANUAL_MAX_PER_ORDER_USD,
+                                 _is_paused, execute_manual)
+
+    if body.venue == "polymarket-us":
+        return await execute_manual(
+            body.asset, body.usd, body.note or body.title,
+            us_slug=body.us_slug, ask_hint=body.ask)
+    if body.venue != "kalshi":
+        return {"ok": False, "error": "unknown venue"}
+    if not (0 < body.usd <= MANUAL_MAX_PER_ORDER_USD):
+        return {"ok": False,
+                "error": f"size must be $0-{MANUAL_MAX_PER_ORDER_USD:.0f}"}
+    # THE KILL SWITCH APPLIED TO ONE VENUE AND NOT THE OTHER.
+    #
+    # _execute_manual checks _is_paused before a Polymarket ticket
+    # (live_executor.py). This branch never did, so flipping
+    # live_trading_paused stopped PM desk orders and left the Kalshi
+    # desk placing at full size — one decision written in two places
+    # with only one of them updated, which is how the pause looked like
+    # it worked while it didn't.
+    #
+    # A tightening, and it fails CLOSED on an unreadable flag, same as
+    # every other reader of it.
+    if await _is_paused(await get_pool()):
+        return {"ok": False,
+                "error": "live trading is paused by the admin switch"}
+    # The venue is YES-denominated per outcome ticker. A NO buy is the
+    # SAME BET as YES on the event's sibling ticker (NO Ruud 55c == YES
+    # Fonseca 55c), so NO routes through the one order path the venue
+    # has proven for us — no new order semantics, identical economics.
+    side = body.side.lower() if body.side.lower() in ("yes", "no") else "yes"
+    ticker = body.ticker.strip()
+    if not ticker:
+        return {"ok": False, "error": "pick a market"}
+    pool = await get_pool()
+    # A WEDGED QUEUE USED TO EAT THE DAY BUDGET FOREVER. 'pending' rows
+    # count toward the 24h cap below, and nothing ever retired one: if
+    # the relay thread is not running (it returns silently when
+    # EDGE_PLATFORM_API or EDGE_INGEST_TOKEN is unset) every ticket
+    # queues, never places, and the desk locks itself out with an
+    # "exhausted budget" that was never spent.
+    await reap_stale_desk_queue(pool)
+    day_spent = float(await pool.fetchval(
+        """
+        SELECT COALESCE((SELECT sum(CASE WHEN status IN ('submitting',
+                                                         'open')
+                                    THEN GREATEST(COALESCE(filled_usd, 0),
+                                              COALESCE(requested_usd, 0))
+                                    ELSE COALESCE(filled_usd, 0) END)
+                         FROM live_orders
+                         WHERE whale_username = 'manual'
+                           AND placed_at > now() - interval '24 hours'), 0)
+             + COALESCE((SELECT sum(usd) FROM manual_kalshi_queue
+                         WHERE status IN ('pending', 'placed', 'filled')
+                           AND created_at > now() - interval '24 hours'), 0)
+        """) or 0)
+    if day_spent + body.usd > MANUAL_DAILY_USD:
+        return {"ok": False,
+                "error": (f"manual day budget exhausted (${day_spent:.2f} "
+                          f"of ${MANUAL_DAILY_USD:.0f} in 24h)")}
+    # Re-quote server-side — never trust a client-supplied price.
+    import httpx
+
+    ask = None
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=8) as client:
+            if side == "no":
+                event = ticker.rsplit("-", 1)[0]
+                resp = await client.get("/markets",
+                                        params={"event_ticker": event})
+                ms = (resp.json().get("markets") or []) if \
+                    resp.status_code == 200 else []
+                sibs = [m for m in ms if m.get("ticker")
+                        and m["ticker"] != ticker]
+                if len(sibs) != 1:
+                    return {"ok": False,
+                            "error": ("no tradable NO side listed for "
+                                      "this market")}
+                ticker = sibs[0]["ticker"]
+                ask = _kcents(sibs[0], "yes_ask")
+            else:
+                resp = await client.get("/markets",
+                                        params={"tickers": ticker})
+                ms = (resp.json().get("markets") or []) if \
+                    resp.status_code == 200 else []
+                if ms:
+                    ask = _kcents(ms[0], "yes_ask")
+    except Exception:  # noqa: BLE001
+        ask = None
+    if ask is None or not (0 < ask < 1):
+        return {"ok": False, "error": "no live Kalshi quote for that side"}
+    limit = round(min(ask + 0.02, 0.99), 2)
+    count = int(body.usd / limit)
+    if count < 1:
+        return {"ok": False, "error": "budget buys zero whole contracts"}
+    # Double-submit guard (audit 2026-08-21): this branch does seconds of
+    # venue HTTP before the insert, so a double-click / client auto-retry
+    # queued TWO real orders and the relay placed both. A same-ticket row
+    # queued in the last 30s means the first click already went through —
+    # refuse the second and point at the blotter instead of double-buying.
+    dup_id = await pool.fetchval(
+        """
+        SELECT id FROM manual_kalshi_queue
+        WHERE ticker = $1 AND side = $2
+          AND status IN ('pending', 'placed')
+          AND created_at > now() - interval '30 seconds'
+        ORDER BY id DESC LIMIT 1
+        """, ticker, side)
+    if dup_id is not None:
+        return {"ok": False,
+                "error": (f"an identical ticket (#{dup_id}) was queued "
+                          "seconds ago — check the blotter before "
+                          "submitting again")}
+    row_id = await pool.fetchval(
+        """
+        INSERT INTO manual_kalshi_queue
+            (ticker, title, side, limit_price, count, usd, note)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
+        RETURNING id
+        """,
+        ticker, body.title[:200] or ticker, side,
+        limit, count, round(count * limit, 2), body.note[:200])
+    return {"ok": True, "queued": True, "row_id": row_id,
+            "quoted_ask": ask, "limit_price": limit, "count": count,
+            "title": body.title or ticker,
+            "outcome": side.upper(),
+            "error": None,
+            "detail": "queued — the engine places it within ~10 seconds"}
+
+
+@app.get("/api/engine/crypto-copy-candidates")
+async def api_crypto_copy_candidates(
+    x_engine_token: str = Header(default="")
+) -> dict:
+    """Fresh BUY fills from the CRYPTO copy sources (owner order
+    2026-08-21) for the engine's Kalshi crypto leg. Stateless: the
+    engine dedupes by trade id in its own ledger (fill_uid), so this
+    endpoint just serves the last few minutes of flow. Freshness is
+    enforced HERE as well as engine-side — a stale crypto price is a
+    different bet, and staleness must not depend on one process's
+    clock."""
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    from .copies_record import CRYPTO_WHALES
+
+    pool = await get_pool()
+    # Chain-detected rows (the fresh ones, post 2026-08-22 exchange fix)
+    # carry only the token id until async enrichment fills slug/title —
+    # the leg classifies by slug and was refusing every one as
+    # 'no-asset'. These systematics re-trade the same markets all day,
+    # so stored metadata (market_tokens -> markets, persisted the first
+    # time any trade on the market enriched) covers them: serve the
+    # trade's own slug/title when present, else the metadata's.
+    rows = await pool.fetch(
+        """
+        SELECT t.id, lower(COALESCE(w.username, '')) AS username,
+               COALESCE(t.market_slug, m.slug)   AS market_slug,
+               COALESCE(t.market_title, m.title) AS market_title,
+               t.side,
+               t.price::float8 AS price, t.notional::float8 AS notional,
+               EXTRACT(EPOCH FROM t.ts)::float8 AS ts_epoch
+        FROM trades t
+        JOIN whales w ON w.id = t.whale_id
+        LEFT JOIN market_tokens mt ON mt.token_id = t.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lower(COALESCE(w.username, '')) = ANY($1::text[])
+          AND t.side = 'BUY'
+          AND t.ts > now() - interval '10 minutes'
+        ORDER BY t.ts DESC LIMIT 100
+        """, list(CRYPTO_WHALES))
+    return {"candidates": [dict(r) for r in rows]}
+
+
+@app.get("/api/engine/manual-kalshi-queue")
+async def api_manual_kalshi_queue(
+    x_engine_token: str = Header(default="")
+) -> dict:
+    """Pending desk orders for the engine's Kalshi relay."""
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    pool = await get_pool()
+    # HEARTBEAT. This pull is the only proof the relay process is alive,
+    # and until now nothing recorded it -- so "the desk is live" was not
+    # a question anyone could answer, and a relay that never started
+    # looked exactly like a quiet desk.
+    try:
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+            DESK_RELAY_SEEN_KEY,
+            json.dumps({"at": datetime.now(timezone.utc).isoformat(
+                timespec="seconds")}))
+    except Exception:  # noqa: BLE001 -- never block the relay's work
+        pass
+    rows = await pool.fetch(
+        "SELECT id, ticker, side, action, "
+        "limit_price::float8 AS limit_price, "
+        "count FROM manual_kalshi_queue WHERE status = 'pending' "
+        "ORDER BY id LIMIT 20")
+    return {"orders": [dict(r) for r in rows]}
+
+
+class KalshiRelayResult(BaseModel):
+    id: int
+    status: str                # placed|filled|unfilled|error
+    order_id: str | None = None
+    fill_count: int | None = None
+    fill_price: float | None = None
+    error: str | None = None
+
+
+@app.post("/api/engine/manual-kalshi-result")
+async def api_manual_kalshi_result(
+    body: KalshiRelayResult, x_engine_token: str = Header(default="")
+) -> dict:
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    if body.status not in ("placed", "filled", "unfilled", "error"):
+        raise HTTPException(status_code=400, detail="bad status")
+    pool = await get_pool()
+    await pool.execute(
+        """
+        UPDATE manual_kalshi_queue
+        SET status=$2, order_id=$3, fill_count=$4, fill_price=$5,
+            error=$6, updated_at=now()
+        WHERE id=$1
+        """,
+        body.id, body.status, body.order_id, body.fill_count,
+        body.fill_price, (body.error or None) and body.error[:300])
+    return {"ok": True}
+
+
+@app.get("/api/engine/held-assets")
+async def api_held_assets(x_engine_token: str = Header(default="")) -> dict:
+    """PMUS token ids the platform already holds through ANY sleeve —
+    copies, the desk, the underdog test. The engine skips these outright
+    (owner 2026-08-08: 'trades are higher than $10 per trade' — each
+    sleeve capped its own ticket while stacking one position)."""
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT DISTINCT asset FROM live_orders "
+        "WHERE status IN ('submitting', 'filled') "
+        "  AND placed_at > now() - interval '7 days'")
+    return {"assets": [str(r["asset"]) for r in rows]}
+
+
+@app.get("/api/engine/kud-queue")
+async def api_kud_queue(x_engine_token: str = Header(default="")) -> dict:
+    """Queued Kalshi-leg underdog tasks for the engine's relay. The
+    worker queues EVERY catalogued game at first sight; the engine runs
+    the T-minus-5 window off start_ts, resolves the Kalshi market, picks
+    the dog from its own book, and rests the +20% exit. Soonest start
+    first so a full day's slate can never starve an open window behind
+    tonight's waiting games."""
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT id, game_slug, league, dog_outcome, other_outcome, "
+        "per_fill_usd::float8 AS per_fill_usd, "
+        "take_profit::float8 AS take_profit, "
+        "extract(epoch FROM start_ts)::float8 AS start_ts "
+        "FROM kud_queue WHERE status = 'queued' "
+        "ORDER BY start_ts ASC NULLS FIRST, id LIMIT 200")
+    return {"tasks": [dict(r) for r in rows]}
+
+
+class KudResult(BaseModel):
+    id: int
+    status: str          # filled|cashed_out|no_market|band_fail|held|unfilled|error|missed
+    ticker: str | None = None
+    entry_price: float | None = None
+    qty: int | None = None
+    exit_price: float | None = None
+    pnl: float | None = None
+    error: str | None = None
+
+
+@app.post("/api/engine/kud-result")
+async def api_kud_result(
+    body: KudResult, x_engine_token: str = Header(default="")
+) -> dict:
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    if body.status not in ("filled", "cashed_out", "no_market", "band_fail",
+                           "held", "unfilled", "error", "missed"):
+        raise HTTPException(status_code=400, detail="bad status")
+    pool = await get_pool()
+    await pool.execute(
+        """
+        UPDATE kud_queue
+        SET status=$2, ticker=COALESCE($3, ticker),
+            entry_price=COALESCE($4, entry_price),
+            qty=COALESCE($5, qty), exit_price=COALESCE($6, exit_price),
+            pnl=COALESCE($7, pnl), error=$8, updated_at=now()
+        WHERE id=$1
+        """,
+        body.id, body.status, body.ticker, body.entry_price, body.qty,
+        body.exit_price, body.pnl,
+        (body.error or None) and body.error[:300])
+    return {"ok": True}
+
+
+@app.get("/api/admin/manual-order", dependencies=[Depends(require_desk)])
+async def api_manual_order(id: int = Query(...),
+                           venue: str = Query("polymarket")) -> dict:
+    """Live status of ONE desk order — the ticket polls this at 1s
+    until terminal so the trader watches the AI counterparty execute
+    in real time (owner order 2026-08-21: confirmation must be
+    instant, not a blotter refresh).
+
+    venue=kalshi reads the relay queue row. Found 2026-08-22 at
+    integration: live_orders ids and manual_kalshi_queue ids are
+    independent serials, so the old single-table lookup left every
+    Kalshi ticket spinning on found:false (or, worse, could collide
+    with an unrelated PM order of the same id) — the venue param
+    makes the lookup unambiguous."""
+    pool = await get_pool()
+    if venue == "kalshi":
+        kr = await pool.fetchrow(
+            """
+            SELECT id, status, error, created_at, ticker,
+                   limit_price::float8 AS limit_price,
+                   fill_price::float8 AS fill_price,
+                   usd::float8 AS usd, count, fill_count
+            FROM manual_kalshi_queue WHERE id = $1
+            """, id)
+        if kr is None:
+            return {"found": False}
+        fill_count = float(kr["fill_count"] or 0)
+        fill_price = float(kr["fill_price"] or 0)
+        return {
+            "found": True,
+            "id": kr["id"],
+            "status": kr["status"],
+            "terminal": kr["status"] in ("filled", "unfilled",
+                                         "error", "cancelled"),
+            "error": kr["error"],
+            "venue": "kalshi",
+            "placed_at": kr["created_at"].isoformat()
+                         if kr["created_at"] else None,
+            "us_market_slug": kr["ticker"],
+            "limit_price": kr["limit_price"],
+            "fill_price": kr["fill_price"],
+            "requested_usd": float(kr["usd"] or 0),
+            "filled_usd": round(fill_count * fill_price, 2),
+            "filled_shares": fill_count,
+        }
+    r = await pool.fetchrow(
+        """
+        SELECT lo.id, lo.status, lo.error, lo.venue,
+               lo.placed_at, lo.us_market_slug,
+               lo.limit_price::float8 AS limit_price,
+               lo.fill_price::float8 AS fill_price,
+               lo.requested_usd::float8 AS requested_usd,
+               lo.filled_usd::float8 AS filled_usd,
+               lo.filled_shares::float8 AS filled_shares
+        FROM live_orders lo
+        WHERE lo.id = $1 AND lo.whale_username = 'manual'
+        """, id)
+    if r is None:
+        return {"found": False}
+    d = dict(r)
+    d["found"] = True
+    d["terminal"] = d["status"] in ("filled", "settled", "unfilled",
+                                    "rejected", "error", "cashed_out")
+    d["placed_at"] = d["placed_at"].isoformat() if d["placed_at"] else None
+    return d
+
+
+@app.get("/api/admin/manual-trades", dependencies=[Depends(require_desk)])
+async def api_manual_trades() -> dict:
+    """The desk blotter: every manual ticket with status and settled P&L."""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lo.id, lo.placed_at, lo.asset, lo.us_market_slug,
+               lo.limit_price, lo.fill_price, lo.requested_usd,
+               lo.filled_usd, lo.filled_shares, lo.status, lo.pnl,
+               lo.settled_at, lo.error,
+               m.title AS market_title, mt.outcome
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.whale_username = 'manual'
+        ORDER BY lo.placed_at DESC
+        LIMIT 200
+        """)
+    out = []
+    for r in rows:
+        out.append({
+            "id": r["id"],
+            "placed_at": r["placed_at"].isoformat() if r["placed_at"] else None,
+            "title": r["market_title"] or r["us_market_slug"] or r["asset"],
+            "outcome": r["outcome"],
+            "status": r["status"],
+            "limit_price": float(r["limit_price"] or 0) or None,
+            "fill_price": float(r["fill_price"] or 0) or None,
+            "requested_usd": float(r["requested_usd"] or 0),
+            "filled_usd": float(r["filled_usd"] or 0),
+            "filled_shares": float(r["filled_shares"] or 0),
+            "pnl": float(r["pnl"]) if r["pnl"] is not None else None,
+            "settled_at": r["settled_at"].isoformat() if r["settled_at"] else None,
+            "venue": "polymarket",
+            "error": r["error"],
+        })
+    # Kalshi leg of the desk: queued/relayed orders join the blotter.
+    krows = await pool.fetch(
+        """
+        SELECT id, created_at, ticker, title, side, status,
+               limit_price::float8 AS limit_price,
+               fill_price::float8 AS fill_price,
+               usd::float8 AS usd, count, fill_count, error
+        FROM manual_kalshi_queue
+        ORDER BY created_at DESC LIMIT 100
+        """)
+    for r in krows:
+        out.append({
+            "id": f"k{r['id']}",
+            "placed_at": r["created_at"].isoformat() if r["created_at"] else None,
+            "title": r["title"] or r["ticker"],
+            "outcome": (r["side"] or "yes").upper(),
+            "status": r["status"],
+            "limit_price": r["limit_price"],
+            "fill_price": r["fill_price"],
+            "requested_usd": float(r["usd"] or 0),
+            "filled_usd": round(float(r["fill_count"] or 0)
+                                * float(r["fill_price"] or 0), 2),
+            "filled_shares": float(r["fill_count"] or 0),
+            "pnl": None,          # Kalshi manual P&L settles venue-side
+            "settled_at": None,
+            "venue": "kalshi",
+            "error": r["error"],
+        })
+    out.sort(key=lambda t: t["placed_at"] or "", reverse=True)
+    day_spent = float(await pool.fetchval(
+        """
+        SELECT COALESCE((SELECT sum(CASE WHEN status IN ('submitting',
+                                                         'open')
+                                    THEN GREATEST(COALESCE(filled_usd, 0),
+                                              COALESCE(requested_usd, 0))
+                                    ELSE COALESCE(filled_usd, 0) END)
+                         FROM live_orders
+                         WHERE whale_username = 'manual'
+                           AND placed_at > now() - interval '24 hours'), 0)
+             + COALESCE((SELECT sum(usd) FROM manual_kalshi_queue
+                         WHERE status IN ('pending', 'placed', 'filled')
+                           AND created_at > now() - interval '24 hours'), 0)
+        """) or 0)
+    from ..live_executor import MANUAL_DAILY_USD, MANUAL_MAX_PER_ORDER_USD
+
+    return {"trades": out, "day_spent": round(day_spent, 2),
+            "day_budget": MANUAL_DAILY_USD,
+            "max_per_order": MANUAL_MAX_PER_ORDER_USD}
+
+
+# ── Desk accounts + cash-out (owner directive 2026-08-22) ────────────
+
+
+_KALSHI_BALANCE_RE = re.compile(r"balance \$([0-9][0-9,]*(?:\.\d+)?)")
+
+
+async def _engine_heartbeat_detail() -> dict:
+    try:
+        pool = await get_pool()
+        row = await pool.fetchrow(
+            "SELECT detail FROM service_heartbeats "
+            "WHERE service='edge_engine'")
+    except Exception:  # noqa: BLE001 — accounts degrade, never 500
+        return {}
+    if row is None:
+        return {}
+    detail = row["detail"]
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except ValueError:
+            return {}
+    return detail if isinstance(detail, dict) else {}
+
+
+# ticker -> (fetched_at_epoch, title); the venue's market titles are
+# immutable in practice, so a long TTL is honest.
+_KALSHI_TITLE_CACHE: dict[str, tuple[float, str]] = {}
+_KALSHI_TITLE_TTL_S = 6 * 3600.0
+
+
+async def _enrich_kalshi_titles(positions: list[dict]) -> None:
+    """Attach venue titles to Kalshi position rows in place. Public
+    metadata, cached, concurrent, best-effort — a miss leaves the
+    ticker, never blocks the accounts card."""
+    import httpx
+
+    now = time.time()
+    need = []
+    for p in positions:
+        t = str(p.get("ticker") or "")
+        if not t or p.get("title"):
+            continue
+        hit = _KALSHI_TITLE_CACHE.get(t)
+        if hit and now - hit[0] < _KALSHI_TITLE_TTL_S:
+            p["title"] = hit[1]
+        else:
+            need.append(p)
+    if not need:
+        return
+
+    async def _one(client: httpx.AsyncClient, p: dict) -> None:
+        t = str(p.get("ticker") or "")
+        try:
+            resp = await client.get(f"/markets/{t}")
+            if resp.status_code != 200:
+                return
+            m = (resp.json() or {}).get("market") or {}
+            title = str(m.get("title") or "").strip()
+            sub = str(m.get("yes_sub_title") or "").strip()
+            full = f"{title} — {sub}" if title and sub else (title or None)
+            if full:
+                _KALSHI_TITLE_CACHE[t] = (now, full)
+                p["title"] = full
+        except Exception:  # noqa: BLE001 — display only
+            return
+
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=6) as client:
+            await asyncio.gather(*(_one(client, p) for p in need[:24]))
+    except Exception:  # noqa: BLE001
+        return
+
+
+def kalshi_accounts_view(detail: dict, now: float) -> dict:
+    """Pure (unit-tested): engine heartbeat detail -> the desk's Kalshi
+    account card. Primary source is the engine's kalshi_account export
+    (~120s TTL); when a not-yet-upgraded engine hasn't published it,
+    degrade to the account-link balance string plus the open book at
+    cost — marked degraded, never guessed at marks."""
+    ka = (detail or {}).get("kalshi_account")
+    if isinstance(ka, dict):
+        at = float(ka.get("at") or 0) or None
+        positions = []
+        for p in ka.get("positions") or []:
+            cost, val = p.get("cost_usd"), p.get("value_usd")
+            positions.append({
+                "ticker": p.get("ticker"), "qty": p.get("qty"),
+                "cost_usd": cost, "mark_bid": p.get("mark_bid"),
+                "value_usd": val,
+                "unrealized": (round(val - cost, 2)
+                               if val is not None and cost is not None
+                               else None)})
+        return {"configured": True,
+                "balance_usd": ka.get("balance_usd"),
+                "at": at,
+                "stale_s": round(now - at, 1) if at else None,
+                "exposure_usd": ka.get("exposure_usd"),
+                "resting": int(ka.get("resting") or 0),
+                "positions": positions}
+    link = ((detail or {}).get("account_link") or {})
+    klink = link.get("kalshi")
+    balance = None
+    if isinstance(klink, dict):
+        m = _KALSHI_BALANCE_RE.search(str(klink.get("detail") or ""))
+        if m:
+            balance = float(m.group(1).replace(",", ""))
+    ko = (detail or {}).get("kalshi_open") or {}
+    positions = [{"ticker": r.get("ticker"), "qty": r.get("qty"),
+                  "cost_usd": r.get("cost"), "mark_bid": None,
+                  "value_usd": None, "unrealized": None}
+                 for r in (ko.get("rows") or [])]
+    return {"configured": bool(klink is not None or positions),
+            "degraded": True,
+            "balance_usd": balance,
+            "at": None, "stale_s": None,
+            "exposure_usd": ko.get("cost"),
+            "resting": 0,
+            "positions": positions}
+
+
+@app.get("/api/desk/stream")
+async def api_desk_stream(request: Request, token: str = Query("")) -> StreamingResponse:
+    """SSE order confirmations (owner order 2026-08-28): every
+    live_orders INSERT / status change, pushed the instant it commits
+    (migration-037 trigger -> pg_notify -> one listener -> fan-out).
+    EventSource cannot set headers, so the desk token rides a query
+    param; the header paths still work for tooling. The wall token is
+    deliberately NOT accepted: order flow is desk-scoped."""
+    import hmac as _hmac
+
+    supplied = (token or request.headers.get("X-Desk-Token", "") or "").strip()
+    admin = (request.headers.get("X-Admin-Token", "") or "").strip()
+    expected = (settings().admin_token or "").strip()
+    ok = bool(expected and _hmac.compare_digest(admin, expected)) \
+        or desk_token_ok(supplied) \
+        or bool(expected and _hmac.compare_digest(supplied, expected))
+    if not ok:
+        raise HTTPException(status_code=403, detail="desk token required")
+    from .order_stream import sse_events
+    return StreamingResponse(
+        sse_events(request),
+        media_type="text/event-stream",
+        headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+    )
+
+
+@app.get("/api/desk/history", dependencies=[Depends(require_desk)])
+async def api_desk_history(venue: str = Query(...), id: str = Query(...),
+                           hours: int = Query(24, ge=1, le=336)) -> dict:
+    """Normalized price history for the desk's charts — both venues in
+    one shape (thin route; the proxies and 60s cache live in
+    desk_history). Venue errors return empty points with HTTP 200:
+    charts degrade, desks never break."""
+    from .desk_history import history
+
+    return await history(venue, id, hours)
+
+
+@app.get("/api/desk/accounts")
+async def api_desk_accounts(role: str = Depends(require_desk)) -> dict:
+    """Both live venue accounts on one card: PM from the venue's own
+    portfolio API (30s-cached snapshot), Kalshi from the engine's
+    heartbeat export (only the engine holds Kalshi credentials).
+
+    COMMITTED CAPITAL (owner directive 2026-08-22, option 2): the PM
+    block carries trading_capital = cash + committed_capital_pm_usd,
+    ALWAYS labeled as a composite (committed_usd rides beside it so no
+    client can render it without knowing what it is). Desk-password
+    sessions see the composite ONLY — raw cash / buying_power /
+    account_value are stripped for them (an owner draw is the owner's
+    business); the admin token sees the full breakdown. The composite
+    is never called cash anywhere, and the raw figure is never
+    falsified — restricted sessions simply don't receive it."""
+    from .pmus_account import account_snapshot
+
+    now = time.time()
+    snap = await account_snapshot()
+    # PLATFORM-ONLY POSITIONS (owner 2026-08-22: personal trades placed
+    # directly on the venue app share the account but are NOT platform
+    # activity — the desk and team views show only what the copy engine
+    # and the desk placed). Membership = the platform's own order
+    # ledger; a venue position on a market we never ordered is
+    # external. Externals are never silently dropped: the admin view
+    # carries them in their own list so the owner always sees the whole
+    # account somewhere.
+    pool = await get_pool()
+    ours = await pool.fetch(
+        """
+        SELECT DISTINCT lower(COALESCE(us_market_slug, '')) AS slug
+        FROM live_orders
+        WHERE status IN ('submitting', 'filled')
+          AND us_market_slug IS NOT NULL
+        """)
+    our_slugs = {r["slug"] for r in ours if r["slug"]}
+    pm_positions, pm_external = [], []
+    for r in (snap.get("open_positions") or []):
+        cost, value = r.get("cost"), r.get("value")
+        row = {
+            "market_slug": r.get("market_slug"), "title": r.get("title"),
+            "outcome": r.get("outcome"), "qty": r.get("qty"),
+            "cost": cost, "value": value,
+            "unrealized": (round(value - cost, 2)
+                           if value is not None and cost is not None
+                           else None)}
+        slug = (r.get("market_slug") or "").lower()
+        (pm_positions if slug in our_slugs else pm_external).append(row)
+    # Open value = the PLATFORM's open book (externals excluded), summed
+    # from marked positions; the venue's account-wide assetNotional is
+    # only a fallback when we hold no marks at all (it both zeroes out
+    # intermittently and would count the owner's personal trades).
+    marked = [p["value"] for p in pm_positions
+              if p.get("value") is not None]
+    open_value = (round(sum(marked), 2) if marked
+                  else (snap.get("open_value") if not pm_external
+                        else 0.0))
+    pm = {"configured": bool(snap.get("configured")),
+          "account_value": snap.get("account_value"),
+          "cash": snap.get("cash"),
+          "buying_power": snap.get("buying_power"),
+          "open_value": open_value,
+          "unsettled_funds": snap.get("unsettled_funds"),
+          "realized_pnl": snap.get("realized_pnl"),
+          "positions": pm_positions,
+          "recent_trades": snap.get("recent_trades") or []}
+    if snap.get("error"):
+        pm["error"] = snap["error"]
+    if role == "admin":
+        # The whole account is always visible SOMEWHERE: externals
+        # (owner's personal venue-app trades) ride admin-only.
+        pm["external_positions"] = pm_external
+        pm["external_count"] = len(pm_external)
+    committed = float(settings().committed_capital_pm_usd or 0)
+    if pm.get("cash") is not None:
+        pm["trading_capital"] = round(pm["cash"] + committed, 2)
+        pm["committed_usd"] = round(committed, 2)
+    kalshi = kalshi_accounts_view(await _engine_heartbeat_detail(), now)
+    # Venue parity (owner order 2026-08-28): a Kalshi position shows
+    # its market TITLE, not a raw ticker — enriched from the venue's
+    # public metadata, cached, best-effort.
+    await _enrich_kalshi_titles(kalshi.get("positions") or [])
+    k_pos_value = sum(
+        (p["value_usd"] if p["value_usd"] is not None
+         else (p["cost_usd"] or 0)) or 0
+        for p in kalshi["positions"])
+    totals = {
+        "value": round((pm.get("account_value") or 0) + committed
+                       + (kalshi.get("balance_usd") or 0)
+                       + k_pos_value, 2),
+        "trading_capital": round((pm.get("cash") or 0) + committed
+                                 + (kalshi.get("balance_usd") or 0), 2),
+        "committed_usd": round(committed, 2),
+        "cash": round((pm.get("cash") or 0)
+                      + (kalshi.get("balance_usd") or 0), 2),
+        "unrealized": round(
+            sum(p["unrealized"] or 0 for p in pm_positions)
+            + sum(p["unrealized"] or 0 for p in kalshi["positions"]), 2),
+    }
+    if role != "admin":
+        # Owner-draw privacy: composite only for desk sessions.
+        for k in ("cash", "buying_power", "account_value"):
+            pm.pop(k, None)
+        totals.pop("cash", None)
+        totals["value"] = round((pm.get("trading_capital") or 0)
+                                + (pm.get("open_value") or 0)
+                                + (kalshi.get("balance_usd") or 0)
+                                + k_pos_value, 2)
+    return {"as_of": now, "polymarket": pm, "kalshi": kalshi,
+            "totals": totals, "role": role}
+
+
+class CashOutBody(BaseModel):
+    venue: str
+    us_slug: str = ""            # PM: the held market's venue slug
+    outcome: str = ""            # PM: display only
+    ticker: str = ""             # Kalshi: the held market ticker
+    qty: int | None = None       # contracts/shares; omit = all held
+    min_price: float | None = None
+
+
+async def _kalshi_held_qty(ticker: str) -> int | None:
+    """Held contracts for one ticker, from the engine's heartbeat export
+    (kalshi_account first, open-book fallback). None = unknown."""
+    detail = await _engine_heartbeat_detail()
+    ka = detail.get("kalshi_account")
+    if isinstance(ka, dict):
+        for p in ka.get("positions") or []:
+            if p.get("ticker") == ticker:
+                try:
+                    return int(p.get("qty") or 0)
+                except (TypeError, ValueError):
+                    return None
+    for r in ((detail.get("kalshi_open") or {}).get("rows") or []):
+        if r.get("ticker") == ticker:
+            try:
+                return int(float(r.get("qty") or 0))
+            except (TypeError, ValueError):
+                return None
+    return None
+
+
+@app.post("/api/desk/cash-out")
+async def api_desk_cash_out(body: CashOutBody,
+                            role: str = Depends(require_desk)) -> dict:
+    """Sell a held position from the desk. PM executes synchronously
+    (platform-side IOC at a protective limit under the live bid);
+    Kalshi queues a sell for the engine's relay — only the engine holds
+    Kalshi credentials, and it clamps the count to what is actually
+    held. Every path fails closed: no bid = refuse, more than held =
+    refuse, limits floored at $0.01."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
+    from ..live_executor import execute_manual_sell, sell_limit_price
+
+    if body.venue == "polymarket-us":
+        if not body.us_slug.strip():
+            return {"ok": False, "error": "pick a market"}
+        return await execute_manual_sell(
+            body.us_slug.strip(), qty=body.qty, min_price=body.min_price)
+    if body.venue != "kalshi":
+        return {"ok": False, "error": "unknown venue"}
+    ticker = body.ticker.strip()
+    if not ticker:
+        return {"ok": False, "error": "pick a market"}
+    qty = body.qty
+    if qty is None:
+        qty = await _kalshi_held_qty(ticker)
+        if qty is None:
+            return {"ok": False,
+                    "error": "position size unknown — pass qty explicitly"}
+    qty = int(qty)
+    if qty < 1:
+        return {"ok": False, "error": "nothing held on this market"}
+    # Server-side re-quote — never trust a client-supplied price.
+    import httpx
+
+    bid = None
+    try:
+        async with httpx.AsyncClient(base_url=KALSHI_PUBLIC_API,
+                                     timeout=8) as client:
+            resp = await client.get("/markets", params={"tickers": ticker})
+            ms = (resp.json().get("markets") or []) if \
+                resp.status_code == 200 else []
+            if ms:
+                bid = _kcents(ms[0], "yes_bid")
+    except Exception:  # noqa: BLE001
+        bid = None
+    if bid is None or not (0 < bid < 1):
+        return {"ok": False, "error": "no live Kalshi bid for this market"}
+    limit = sell_limit_price(bid, body.min_price)
+    pool = await get_pool()
+    # 30s duplicate-ticket guard, same shape as the buy path: the venue
+    # HTTP above takes seconds and a double-click must not queue two
+    # real sells.
+    dup_id = await pool.fetchval(
+        """
+        SELECT id FROM manual_kalshi_queue
+        WHERE ticker = $1 AND action = 'sell'
+          AND status IN ('pending', 'placed')
+          AND created_at > now() - interval '30 seconds'
+        ORDER BY id DESC LIMIT 1
+        """, ticker)
+    if dup_id is not None:
+        return {"ok": False,
+                "error": (f"an identical sell ticket (#{dup_id}) was "
+                          "queued seconds ago — check the blotter before "
+                          "submitting again")}
+    row_id = await pool.fetchval(
+        """
+        INSERT INTO manual_kalshi_queue
+            (ticker, title, side, action, limit_price, count, usd, note)
+        VALUES ($1, $2, 'yes', 'sell', $3, $4, $5, $6)
+        RETURNING id
+        """,
+        ticker, ticker, limit, qty, round(qty * limit, 2),
+        "desk cash-out")
+    return {"ok": True, "queued": True, "row_id": row_id,
+            "quoted_bid": bid, "limit_price": limit, "count": qty,
+            "detail": ("queued — the engine places the sell within ~10 "
+                       "seconds, clamped to the held quantity")}
+
+
+@app.delete("/api/desk/manual-order/{id}")
+async def api_desk_cancel_manual_order(
+        id: int, venue: str = Query("kalshi"),
+        role: str = Depends(require_desk)) -> dict:
+    """Cancel a desk order. venue=kalshi (default, back-compat): a
+    queued not-yet-relayed row — once the relay picked it up the order
+    is at the venue and this endpoint says so. venue=polymarket: a
+    RESTING GTC row is cancelled at the venue itself; a cancel that
+    raced a fill records the fill, never erases it."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
+    if venue == "polymarket":
+        from ..live_executor import cancel_manual_open
+
+        return await cancel_manual_open(id)
+    pool = await get_pool()
+    rid = await pool.fetchval(
+        "UPDATE manual_kalshi_queue SET status='cancelled', "
+        "updated_at=now() WHERE id=$1 AND status='pending' RETURNING id",
+        id)
+    if rid is None:
+        return {"ok": False, "error": "already picked up"}
+    return {"ok": True, "cancelled": True}
+
+
+class ManualLimitBody(BaseModel):
+    usd: float
+    limit_price: float
+    asset: str = ""
+    us_slug: str = ""
+    note: str = ""
+
+
+@app.post("/api/admin/manual-limit")
+async def api_manual_limit(body: ManualLimitBody,
+                           role: str = Depends(require_desk)) -> dict:
+    """Place a RESTING desk BUY at the user's own limit price (owner
+    order 2026-08-28, venue parity): a GTC on Polymarket US through
+    the same gate stack as every manual ticket — per-order cap, kill
+    switch, 24h budget that counts the commitment the moment it
+    rests, venue-named side or refusal."""
+    if role == "wall":
+        raise HTTPException(status_code=403, detail="wall is read-only")
+    from ..live_executor import execute_manual_limit
+
+    return await execute_manual_limit(body.usd, body.limit_price,
+                                      asset=body.asset,
+                                      us_slug=body.us_slug,
+                                      note=body.note)
+
+
+@app.get("/api/admin/open-orders", dependencies=[Depends(require_desk)])
+async def api_open_orders() -> dict:
+    """Every working desk order, both venues, one list: PM resting
+    GTCs (reconciled against the venue's own order records on each
+    read, so a fill that happened while nobody watched lands in the
+    audit row now) and queued Kalshi relay tickets."""
+    from ..live_executor import sync_open_manual_orders
+
+    pool = await get_pool()
+    try:
+        await sync_open_manual_orders(pool)
+    except Exception:  # noqa: BLE001 — the list still serves DB truth
+        pass
+    pm_rows = await pool.fetch(
+        """
+        SELECT id, us_market_slug, side, limit_price::float8 AS limit_price,
+               requested_shares::float8 AS requested_shares,
+               filled_shares::float8 AS filled_shares,
+               requested_usd::float8 AS requested_usd, placed_at, order_id
+        FROM live_orders
+        WHERE whale_username = 'manual' AND status = 'open'
+        ORDER BY placed_at DESC
+        """)
+    k_rows = await pool.fetch(
+        """
+        SELECT id, ticker, title, side,
+               COALESCE(action, 'buy') AS action,
+               limit_price::float8 AS limit_price, count, usd::float8 AS usd,
+               status, created_at
+        FROM manual_kalshi_queue
+        WHERE status = 'pending'
+        ORDER BY created_at DESC
+        """)
+    return {
+        "polymarket": [dict(r, placed_at=_iso_ts(r["placed_at"]))
+                       for r in pm_rows],
+        "kalshi": [dict(r, created_at=_iso_ts(r["created_at"]))
+                   for r in k_rows],
+    }
+
+
+def _iso_ts(v: Any) -> str | None:
+    if v is None:
+        return None
+    return v.isoformat() if hasattr(v, "isoformat") else str(v)
+
+
+@app.get("/api/admin/slug-token", dependencies=[Depends(require_desk)])
+async def api_slug_token(slug: str = Query(...)) -> dict:
+    """US venue market slug -> the global CLOB token our charts key on
+    (owner order 2026-08-28: a held position must chart like any other
+    market). Source of truth is our own order ledger — a mapping we
+    actually traded through — falling back to the whale ledger."""
+    pool = await get_pool()
+    s = slug.strip().lower()
+    asset = await pool.fetchval(
+        """
+        SELECT asset FROM live_orders
+        WHERE lower(COALESCE(us_market_slug, '')) = $1
+          AND asset IS NOT NULL AND asset NOT LIKE 'slug:%'
+        ORDER BY placed_at DESC LIMIT 1
+        """, s)
+    return {"slug": slug, "asset": asset, "found": asset is not None}
+
+
+class EngineMethodologyBody(BaseModel):
+    markdown: str
+    figures: dict = {}
+    generated_ts: float | None = None
+
+
+@app.post("/api/engine/methodology")
+async def engine_methodology_ingest(
+    body: EngineMethodologyBody, x_engine_token: str = Header(default="")
+) -> dict:
+    """The engine publishes its own methodology document.
+
+    It is generated on the worker, because that is where the ledger lives,
+    and stored here because that is the only place a human can read it. The
+    document is a pure function of config plus the ledger — the numbers are
+    computed at generation time, never transcribed — so what is served here
+    always describes the system that produced it.
+    """
+    cfg = settings()
+    check_engine_token(x_engine_token)
+    from ..db import heartbeat
+
+    await heartbeat("edge_methodology", "ok", {
+        "markdown": body.markdown,
+        "figures": body.figures,
+        "generated_ts": body.generated_ts,
+    })
+    return {"ok": True, "bytes": len(body.markdown)}
+
+
+@app.get("/api/engine/methodology")
+async def engine_methodology(format: str = Query("json")) -> Any:
+    """`?format=md` serves the raw document, for reading or piping."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT * FROM service_heartbeats WHERE service='edge_methodology'")
+    if row is None:
+        raise HTTPException(status_code=404,
+                            detail="no methodology published yet")
+    detail = row["detail"]
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    if format == "md":
+        return PlainTextResponse(detail.get("markdown", ""),
+                                 media_type="text/markdown")
+    # The heartbeats table timestamps with beat_at; reading the wrong key
+    # here turned every publish into an HTTP 500 that read exactly like
+    # "never published" — the worker had been publishing all along.
+    return {"updated_at": row["beat_at"], **detail}
+
+
+@app.get("/api/kalshi-open")
+async def kalshi_open() -> dict:
+    """The engine's open Kalshi book, slimmed for the public site.
+
+    Published inside the engine heartbeat (detail.kalshi_open) every
+    cycle; this endpoint exists so the site does not have to poll the
+    full status payload for a dozen rows."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT beat_at, detail FROM service_heartbeats "
+        "WHERE service='edge_engine'")
+    empty = {"n": 0, "cost": 0.0, "rows": []}
+    if row is None:
+        return empty
+    detail = row["detail"]
+    if isinstance(detail, str):
+        detail = json.loads(detail)
+    ko = (detail or {}).get("kalshi_open") or empty
+    # ISO 8601, not str(datetime): asyncpg's datetime stringifies with a
+    # space separator, which Date.parse treats as NaN on Safari — the card's
+    # "as of" age depends on this parsing everywhere.
+    beat = row["beat_at"]
+    updated = beat.isoformat() if hasattr(beat, "isoformat") else str(beat)
+    return {"updated_at": updated, **ko}
+
+
+# Heartbeat-detail keys that must never reach the public GET (audit
+# 2026-08-21): the raw venue account exports let anyone reconstruct the
+# entire book, and raw error strings can embed internal URLs. The System
+# page reads the rest of the detail (funnel counters, budgets) — strip,
+# don't gate. venue_truth reads the DB row directly and is unaffected.
+_ENGINE_STATUS_PRIVATE_KEYS = ("kalshi_export_raw", "pmus_export_raw",
+                               "venue_export_raw", "kalshi_export",
+                               "positions_raw_sample", "fills_raw_sample")
+
+
+@app.get("/api/engine/status")
+async def engine_status() -> dict:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM service_heartbeats WHERE service='edge_engine'")
+    if row is None:
+        return {"status": "never_reported",
+                "unstamped_drops": dict(_unstamped_drops)}
+    d = dict(row)
+    if isinstance(d.get("detail"), str):
+        d["detail"] = json.loads(d["detail"])
+    if isinstance(d.get("detail"), dict):
+        det = dict(d["detail"])
+        for k in list(det):
+            if k in _ENGINE_STATUS_PRIVATE_KEYS or k.endswith("_raw"):
+                det.pop(k, None)
+        if det.get("last_error"):
+            det["last_error"] = str(det["last_error"])[:120]
+        d["detail"] = det
+    # How often a stale (unstamped) engine process is still posting — a
+    # nonzero, growing count means a stray instance is alive somewhere.
+    d["unstamped_drops"] = dict(_unstamped_drops)
+    return d
+
+
+@app.get("/api/engine/summary")
+async def engine_summary() -> dict:
+    pool = await get_pool()
+    totals = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS fills,
+               count(*) FILTER (WHERE settled)::int AS settled,
+               COALESCE(sum(size_usd), 0)::float8 AS staked,
+               COALESCE(sum(size_usd) FILTER (WHERE settled), 0)::float8 AS settled_staked,
+               COALESCE(sum(pnl) FILTER (WHERE settled), 0)::float8 AS pnl,
+               min(ts) AS first_ts
+        FROM engine_fills WHERE ts >= $1::timestamptz
+        """, display_epoch_start()
+    )
+    by_venue = await pool.fetch(
+        """
+        SELECT venue, count(*)::int AS fills,
+               COALESCE(sum(size_usd) FILTER (WHERE settled), 0)::float8 AS settled_staked,
+               COALESCE(sum(pnl) FILTER (WHERE settled), 0)::float8 AS pnl
+        FROM engine_fills WHERE ts >= $1::timestamptz
+        GROUP BY venue ORDER BY venue
+        """, display_epoch_start()
+    )
+    by_league = await pool.fetch(
+        """
+        SELECT league, count(*)::int AS fills,
+               COALESCE(sum(pnl) FILTER (WHERE settled), 0)::float8 AS pnl
+        FROM engine_fills WHERE ts >= $1::timestamptz
+        GROUP BY league ORDER BY pnl DESC NULLS LAST LIMIT 20
+        """, display_epoch_start()
+    )
+    daily = await pool.fetch(
+        """
+        SELECT settled_at::date AS date, sum(pnl)::float8 AS pnl, count(*)::int AS settled
+        FROM engine_fills WHERE settled AND settled_at IS NOT NULL
+          AND ts >= $1::timestamptz
+        GROUP BY 1 ORDER BY 1
+        """, display_epoch_start()
+    )
+    d = dict(totals)
+    d["roi"] = d["pnl"] / d["settled_staked"] if d["settled_staked"] else None
+    return {
+        "totals": d,
+        "by_venue": [dict(r) for r in by_venue],
+        "by_league": [dict(r) for r in by_league],
+        "daily": [{"date": r["date"].isoformat(), "pnl": round(r["pnl"], 2),
+                   "volume": 0, "trades": r["settled"]} for r in daily],
+    }
+
+
+@app.get("/api/engine/fills")
+async def engine_fills(limit: int = Query(100, le=500), venue: str | None = None) -> list[dict]:
+    pool = await get_pool()
+    args: list = [display_epoch_start()]
+    where = "WHERE ef.ts >= $1::timestamptz"
+    if venue:
+        args.append(venue)
+        where += " AND ef.venue = $2"
+    args.append(limit)
+    rows = await pool.fetch(
+        f"""
+        SELECT ef.id, ef.ts, ef.venue, ef.market_id, ef.outcome_id, ef.league, ef.band,
+               ef.limit_price::float8 AS limit_price, ef.size_usd::float8 AS size_usd,
+               ef.fair_value::float8 AS fair_value, ef.edge::float8 AS edge,
+               ef.would_fill, ef.whale_alignment, ef.settled,
+               ef.payout::float8 AS payout, ef.pnl::float8 AS pnl, ef.settled_at,
+               COALESCE(m.event_title, m.title) AS market_title, m.sport, mt.outcome
+        FROM engine_fills ef
+        LEFT JOIN market_tokens mt ON mt.token_id = ef.outcome_id
+        LEFT JOIN markets m ON m.condition_id = COALESCE(mt.condition_id, ef.market_id)
+        {where}
+        ORDER BY ef.ts DESC LIMIT ${len(args)}
+        """,
+        *args,
+    )
+    out = []
+    for r in rows:
+        d = dict(r)
+        if isinstance(d.get("whale_alignment"), str):
+            d["whale_alignment"] = json.loads(d["whale_alignment"])
+        out.append(d)
+    return out
+
+
+@app.post("/api/admin/sms-test", dependencies=[Depends(require_admin)])
+async def admin_sms_test() -> dict:
+    """Send a test text to every configured SMS recipient and report per-number
+    results — the arming check for trade SMS alerts."""
+    from ..notifications import sms
+
+    if not sms.enabled():
+        return {"ok": False, "configured": False,
+                "error": "SMS not configured: set TWILIO_ACCOUNT_SID, TWILIO_AUTH_TOKEN, "
+                         "TWILIO_FROM_NUMBER, SMS_TO_NUMBERS on both backend services"}
+    results = await sms.broadcast(
+        "SportsAssets: SMS alerts are live. You'll get a text within seconds of "
+        "every watched trade.")
+    return {"ok": all(r["ok"] for r in results), "configured": True,
+            "watch_addresses": sorted(sms.watch_addresses()) or "all whales",
+            "results": results}
+
+
+@app.post("/api/admin/ntfy-test", dependencies=[Depends(require_admin)])
+async def admin_ntfy_test() -> dict:
+    """Publish a test notification to the configured ntfy topic."""
+    from ..notifications import ntfy
+
+    if not ntfy.enabled():
+        return {"ok": False, "configured": False,
+                "error": "ntfy not configured: set NTFY_TOPIC on both backend services"}
+    result = await ntfy.publish(
+        "SportsAssets alerts are live",
+        "You'll get a notification within seconds of every watched trade.")
+    cfg = settings()
+    return {**result, "configured": True, "topic": cfg.ntfy_topic,
+            "watch_addresses": sorted(ntfy.watch_addresses()) or "all whales"}
+
+
+@app.post("/api/admin/s1-clear-trip", dependencies=[Depends(require_admin)])
+async def admin_s1_clear_trip(body: dict) -> dict:
+    """Operator clear for ONE S1 sticky-trip reason (fleet round 6).
+
+    Atomic server-side: removes exactly the named reason from the trip
+    set and records a PER-REASON tombstone so a process still holding
+    the trip in memory can never union it back. Never clears more than
+    the reason named; re-arming stays a separate, deliberate act."""
+    from ..db import get_pool
+    from ..ingestion.s1_emitter import SQL_CLEAR, STATE_KEY
+
+    reason = str(body.get("reason") or "").strip()
+    if not reason:
+        raise HTTPException(status_code=400, detail="reason required")
+    pool = await get_pool()
+    row = await pool.fetchrow(SQL_CLEAR, STATE_KEY, reason)
+    if row is None:
+        return {"ok": False, "error": "no s1_emitter state row"}
+
+    def _j(v):
+        return v if isinstance(v, (dict, type(None))) else json.loads(v)
+
+    return {"ok": True, "cleared": reason,
+            "trips": _j(row["trips"]) or {},
+            "trips_cleared": _j(row["cleared"]) or {}}
+
+
+@app.post("/api/admin/live/{action}", dependencies=[Depends(require_admin)])
+async def admin_live_switch(action: str) -> dict:
+    """Kill switch for the LIVE beta. pause = no further orders; resume = re-arm."""
+    if action not in ("pause", "resume"):
+        raise HTTPException(status_code=400, detail="action must be pause|resume")
+    from .live_executor_state import set_paused  # thin helper below
+
+    await set_paused(action == "pause")
+    return {"ok": True, "paused": action == "pause"}
+
+
+_FVM_CACHE: dict = {"ts": 0.0, "data": None}
+
+
+# 15s payload cache (audit 2026-08-21): this endpoint is polled by every
+# open page and ran ~9 queries per request including lifetime full-table
+# aggregates over live_orders — the exact load class that OOM-flapped
+# this instance before. One viewer's compute serves everyone for 15s.
+_LIVE_STATUS_CACHE: dict = {"ts": 0.0, "data": None}
+_LIVE_STATUS_LOCK = asyncio.Lock()
+
+
+@app.get("/api/live-status")
+async def live_status() -> dict:
+    """LIVE beta account state: config, kill switch, bankroll usage, orders."""
+    now = time.time()
+    if _LIVE_STATUS_CACHE["data"] is not None \
+            and now - _LIVE_STATUS_CACHE["ts"] < 15:
+        return _LIVE_STATUS_CACHE["data"]
+    async with _LIVE_STATUS_LOCK:
+        now = time.time()
+        if _LIVE_STATUS_CACHE["data"] is not None \
+                and now - _LIVE_STATUS_CACHE["ts"] < 15:
+            return _LIVE_STATUS_CACHE["data"]
+        data = await _live_status_uncached()
+        _LIVE_STATUS_CACHE.update(ts=time.time(), data=data)
+        return data
+
+
+async def _live_status_uncached() -> dict:
+    from ..live_executor import PAUSE_KEY, active_venue
+
+    cfg = settings()
+    pool = await get_pool()
+    paused_val = await pool.fetchval("SELECT value FROM ingestion_state WHERE key=$1", PAUSE_KEY)
+    paused = bool(json.loads(paused_val) if isinstance(paused_val, str) else paused_val) \
+        if paused_val is not None else False
+    agg = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS orders,
+               -- 'merged': an add leg that filled and was booked onto its
+               -- standing row (migration 045) -- a fill, counted here
+               count(*) FILTER (WHERE status IN ('filled', 'settled', 'merged'))::int AS fills,
+               count(*) FILTER (WHERE status = 'unfilled')::int AS unfilled,
+               count(*) FILTER (WHERE status = 'rejected')::int AS unmapped,
+               count(*) FILTER (WHERE status = 'error')::int AS errors,
+               COALESCE(sum(filled_usd), 0)::float8 AS deployed,
+               COALESCE(sum(filled_usd) FILTER
+                   (WHERE placed_at > now() - interval '24 hours'), 0)::float8 AS deployed_24h,
+               COALESCE(sum(pnl) FILTER (WHERE status = 'settled'), 0)::float8 AS realized_pnl,
+               -- SLIPPAGE ON PER-FILL ROWS ONLY. The mirror book's
+               -- his_price is an open-time level, not the price of the
+               -- fills folded onto its one standing row (position
+               -- mirroring P1, owner order 2026-09-02 "go for it, let's
+               -- get this working"; the panel review's predicate audit).
+               -- NULL lanes (every row before 041) keep today's path.
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY (fill_price - his_price) * 100)
+                   FILTER (WHERE fill_price IS NOT NULL
+                           AND COALESCE(lane,'') <> 'mirror') AS live_slippage_p50
+        FROM live_orders
+        WHERE placed_at >= $1::timestamptz
+        """, display_epoch_start()
+    )
+    recent = await pool.fetch(
+        """
+        SELECT lo.placed_at, lo.status, lo.whale_username AS whale,
+               lo.his_price::float8 AS his_price,
+               lo.limit_price::float8 AS limit_price, lo.fill_price::float8 AS fill_price,
+               lo.filled_usd::float8 AS filled_usd, lo.requested_usd::float8 AS requested_usd,
+               lo.reaction_s::float8 AS reaction_s, lo.pnl::float8 AS pnl, lo.error,
+               lo.venue, lo.us_market_slug,
+               COALESCE(m.event_title, m.title, t.market_title) AS market_title,
+               COALESCE(mt.outcome, t.outcome) AS outcome
+        FROM live_orders lo
+        LEFT JOIN trades t ON t.id = lo.trade_id
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = COALESCE(mt.condition_id, lo.condition_id)
+        WHERE lo.placed_at >= $1::timestamptz
+        ORDER BY lo.placed_at DESC LIMIT 25
+        """, display_epoch_start()
+    )
+    d = dict(agg)
+    if d.get("live_slippage_p50") is not None:
+        d["live_slippage_p50"] = round(float(d["live_slippage_p50"]), 3)
+    # Per-whale grading: RN1 and swisstony must earn promotion on their OWN
+    # settled records — a blended number lets one carry the other.
+    by_whale = await pool.fetch(
+        """
+        SELECT COALESCE(whale_username, '?') AS whale,
+               -- 'merged': an add leg that filled and was booked onto its
+               -- standing row (migration 045) -- a fill, counted here
+               count(*) FILTER (WHERE status IN ('filled', 'settled', 'merged'))::int AS fills,
+               COALESCE(sum(filled_usd), 0)::float8 AS deployed,
+               count(*) FILTER (WHERE status = 'settled')::int AS settled,
+               COALESCE(sum(pnl) FILTER (WHERE status = 'settled'), 0)::float8 AS pnl
+        FROM live_orders WHERE placed_at >= $1::timestamptz
+        GROUP BY 1 ORDER BY deployed DESC
+        """, display_epoch_start()
+    )
+    # Sizing audit (owner question 2026-08-21: why is the average settled
+    # copy ~$30 against $225 clip caps?): per-whale 24h requested-vs-
+    # filled stats make the volume-normalized clip's behavior a served
+    # number — n_24h against the whale's baseline explains the shrink,
+    # and avg_filled == avg_requested rules out partial fills.
+    sizing = await pool.fetch(
+        """
+        SELECT COALESCE(whale_username, '?') AS whale,
+               count(*) FILTER (WHERE status IN
+                   ('filled', 'settled', 'cashed_out'))::int AS n_24h,
+               count(*) FILTER (WHERE status = 'unfilled')::int
+                   AS unfilled_24h,
+               count(*) FILTER (WHERE status = 'rejected')::int
+                   AS rejected_24h,
+               round(avg(requested_usd) FILTER (WHERE status IN
+                   ('filled', 'settled', 'cashed_out')), 2)::float8
+                   AS avg_req,
+               round(avg(filled_usd) FILTER (WHERE status IN
+                   ('filled', 'settled', 'cashed_out')), 2)::float8
+                   AS avg_filled,
+               round(max(requested_usd), 2)::float8 AS max_req,
+               round(COALESCE(sum(filled_usd), 0), 2)::float8
+                   AS deployed_24h
+        FROM live_orders
+        WHERE placed_at > now() - interval '24 hours'
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        GROUP BY 1 ORDER BY deployed_24h DESC
+        """
+    )
+    # OVERSPEND FORENSICS (2026-08-25): the 24h aggregate showed
+    # avg_filled ($363) ABOVE avg_req ($250) on a verified whale. Every
+    # writer of filled_usd sets it to filled_shares * fill_price, and an
+    # IOC buy cannot fill above its limit — so the aggregate and the
+    # money path disagree and one of them is wrong. Serve the RAW rows
+    # rather than reasoning about which: requested vs filled on both
+    # legs (shares and price) names the culprit on sight. `ratio` > 1 is
+    # the alarm; a per-row filled_usd above the authorized clip is a
+    # real overspend and must halt sizing.
+    fills = await pool.fetch(
+        """
+        SELECT COALESCE(whale_username, '?') AS whale, status,
+               round(requested_usd, 2)::float8 AS req_usd,
+               round(requested_shares, 2)::float8 AS req_sh,
+               round(limit_price, 4)::float8 AS lim,
+               round(filled_shares, 2)::float8 AS fill_sh,
+               round(fill_price, 4)::float8 AS fill_px,
+               round(filled_usd, 2)::float8 AS fill_usd,
+               CASE WHEN COALESCE(requested_usd, 0) > 0
+                    THEN round(filled_usd / requested_usd, 3)::float8
+               END AS ratio,
+               us_market_slug AS slug,
+               -- ROUND-TRIP TEST (owner hypothesis 2026-08-25): "these
+               -- were the same game bought and sold repeatedly, so the
+               -- max stake was only ever $250". Two facts decide it:
+               -- how many orders this account placed on THIS market,
+               -- and what the venue's own execution list says. One
+               -- market appearing once cannot have been round-tripped.
+               (SELECT count(*) FROM live_orders o2
+                 WHERE o2.us_market_slug = live_orders.us_market_slug
+                   AND COALESCE(o2.whale_username, '')
+                       NOT IN ('manual', 'underdog'))::int AS orders_on_mkt,
+               -- jsonb_array_length THROWS on a JSON null, and COALESCE
+               -- does not catch it: `#>` returns SQL NULL for a missing
+               -- path but 'null'::jsonb for a present-and-null one. One
+               -- such row would 500 this endpoint and silently delete
+               -- every FILL line — the exact measurement in flight.
+               CASE WHEN jsonb_typeof(raw #> '{response,executions}')
+                         = 'array'
+                    THEN jsonb_array_length(raw #> '{response,executions}')
+                    ELSE 0 END AS n_exec,
+               -- THE FALSIFIABLE VERSION (2026-08-25). Every overspent
+               -- row so far is ORDER_INTENT_BUY_SHORT, which reads like
+               -- "shorts pay the complement". That is only a real
+               -- finding if the converse holds: CLEAN shorts would
+               -- refute it, and clean longs would support it. The
+               -- receipts endpoint only returns overspent rows, so it
+               -- cannot see a clean short by construction. Carrying the
+               -- intent on EVERY fill makes the claim testable instead
+               -- of merely consistent.
+               COALESCE(
+                   raw #>> '{response,executions,0,order,intent}',
+                   raw #>> '{preview,intent}') AS intent,
+               -- OUR SIZE AS A MULTIPLE OF HIS (owner 2026-08-25:
+               -- "copy both buys and sells at a proportional rate").
+               --
+               -- plan_order computes min(ratio * his_notional, cap).
+               -- If the ratio is set high enough that the cap always
+               -- binds, every copy is a flat clip and our size stops
+               -- tracking his conviction entirely. Measured on the six
+               -- receipts: 72x his size on a $3.46 probe, 0.1x on a
+               -- $2,907 conviction trade. Nothing in the system
+               -- reported that, so it ran unseen.
+               (SELECT round(live_orders.requested_usd
+                             / NULLIF(t.notional, 0), 2)::float8
+                  FROM trades t WHERE t.id = live_orders.trade_id)
+                   AS size_vs_his,
+               (SELECT round(t.notional, 2)::float8 FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_notional,
+               to_char(placed_at AT TIME ZONE 'America/New_York',
+                       'MM-DD HH24:MI') AS at
+        FROM live_orders
+        WHERE placed_at > now() - interval '24 hours'
+          AND status IN ('filled', 'settled', 'cashed_out')
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        ORDER BY filled_usd DESC NULLS LAST
+        LIMIT 40
+        """
+    )
+    # Manual-desk diagnostics (owner report 2026-08-21: "trades aren't
+    # being processed"): the sleeve's status counts and its last rows
+    # WITH their errors ride the public status so the probe reads the
+    # exact failure mode instead of a lifetime zero.
+    manual_desk = {
+        "by_status": {r["status"]: r["n"] for r in await pool.fetch(
+            "SELECT status, count(*)::int AS n FROM live_orders "
+            "WHERE whale_username = 'manual' GROUP BY 1")},
+        "recent": [dict(r) for r in await pool.fetch(
+            "SELECT placed_at, status, requested_usd::float8 AS req, "
+            "filled_usd::float8 AS filled, venue, "
+            "left(COALESCE(error, ''), 200) AS error "
+            "FROM live_orders WHERE whale_username = 'manual' "
+            "ORDER BY placed_at DESC LIMIT 5")],
+    }
+    # THE BLOCK BUILT FOR "trades aren't being processed" COULD NOT SEE
+    # HALF THE DESK. live_orders holds the Polymarket leg only. Kalshi
+    # tickets live in manual_kalshi_queue and are placed by a relay
+    # thread in another process, so the entire failure mode this block
+    # exists to diagnose -- a ticket accepted and never executed -- was
+    # invisible in it.
+    #
+    # relay_last_seen is the only proof that process is alive. Absent or
+    # stale means every Kalshi ticket is queuing into nothing, which
+    # reads identically to a quiet desk unless it is stated.
+    try:
+        _seen = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            DESK_RELAY_SEEN_KEY)
+        _seen = (json.loads(_seen) if isinstance(_seen, str)
+                 else _seen) or {}
+        _seen_at = _seen.get("at")
+    except Exception:  # noqa: BLE001
+        _seen_at = None
+    _age = None
+    if _seen_at:
+        try:
+            _age = int((datetime.now(timezone.utc)
+                        - datetime.fromisoformat(_seen_at)).total_seconds())
+        except Exception:  # noqa: BLE001
+            _age = None
+    manual_desk["kalshi_queue"] = {
+        "by_status": {r["status"]: r["n"] for r in await pool.fetch(
+            "SELECT status, count(*)::int AS n FROM manual_kalshi_queue "
+            "GROUP BY 1")},
+        "stuck_pending": int(await pool.fetchval(
+            "SELECT count(*)::int FROM manual_kalshi_queue "
+            "WHERE status='pending' AND created_at < now() "
+            "- ($1 || ' seconds')::interval", str(DESK_QUEUE_STALE_S)) or 0),
+        # 'placed' is NOT terminal and nothing retires it, so a relay
+        # that died mid-ticket leaves a row the desk UI polls forever.
+        # Counted, not guessed at: only the venue knows if it filled.
+        "stuck_placed": int(await pool.fetchval(
+            "SELECT count(*)::int FROM manual_kalshi_queue "
+            "WHERE status='placed' AND updated_at < now() "
+            "- ($1 || ' seconds')::interval", str(DESK_QUEUE_STALE_S)) or 0),
+        "relay_last_seen": _seen_at,
+        "relay_age_s": _age,
+        "relay_alive": bool(_age is not None and _age < DESK_QUEUE_STALE_S),
+    }
+    venue = active_venue()
+    # Fill-vs-miss aggregate rides the public status (5-min cache) so
+    # the hourly probe reads the copy thesis' direct test without an
+    # admin credential (owner 2026-08-12: same-or-better must be
+    # judged on the graded number, not on theory).
+    import time as _time
+    fvm = None
+    try:
+        if (_FVM_CACHE.get("data") is not None
+                and _time.time() - _FVM_CACHE.get("ts", 0) < 300):
+            fvm = _FVM_CACHE["data"]
+        else:
+            full = await api_fill_vs_miss(days=7)
+            fvm = {w: {"f_n": b["filled_n"], "f_roi": b["filled_roi"],
+                       "m_n": b["missed_n"], "m_roi": b["missed_roi"],
+                       "m_unres": b["missed_unresolved"]}
+                   for w, b in full["whales"].items()}
+            _FVM_CACHE.update({"ts": _time.time(), "data": fvm})
+    except Exception:  # noqa: BLE001 — status must serve regardless
+        fvm = _FVM_CACHE.get("data")
+    return {
+        "enabled": venue is not None,
+        "venue": venue,
+        "paused": paused,
+        "by_whale": [dict(r) for r in by_whale],
+        "sizing_24h": [dict(r) for r in sizing],
+        "fills_24h": [dict(r) for r in fills],
+        "manual_desk": manual_desk,
+        "fill_vs_miss_7d": fvm,
+        "caps": {"per_fill": cfg.live_max_per_fill_usd, "daily": cfg.live_max_daily_usd,
+                 "total": cfg.live_max_total_usd,
+                 "max_slippage_cents": cfg.live_max_slippage_cents},
+        "summary": d,
+        "recent": [dict(r) for r in recent],
+    }
+
+
+@app.post("/api/admin/overspend-halt-clear",
+          dependencies=[Depends(require_admin)])
+async def api_overspend_halt_clear() -> dict:
+    """Clear the post-fill overspend breaker.
+
+    Deliberately a POST and deliberately not an env var: the breaker
+    means the venue charged us more than we authorized on a real fill.
+    Clearing it is a decision someone makes after reading
+    /api/admin/overspend-receipts, not something a config change does
+    as a side effect."""
+    pool = await get_pool()
+    prev = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1",
+        "copy_overspend_halt")
+    await pool.execute(
+        "DELETE FROM ingestion_state WHERE key=$1", "copy_overspend_halt")
+    return {"ok": True, "cleared": prev}
+
+
+@app.get("/api/admin/overspend-halt",
+         dependencies=[Depends(require_admin)])
+async def api_overspend_halt() -> dict:
+    pool = await get_pool()
+    v = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1",
+        "copy_overspend_halt")
+    return {"tripped": bool(v), "record": v}
+
+
+@app.get("/api/admin/true-edge-cashout",
+         dependencies=[Depends(require_admin)])
+async def api_true_edge_cashout(since_day: str = "2026-08-01",
+                                max_reaction_s: float | None = None) -> dict:
+    """TRUEEDGE re-graded at the whale's OWN EXIT, not at resolution.
+
+    Owner, 2026-08-25: "it would also mean you understate all whales
+    that genuinely sell before settlement (which I have confirmed is a
+    number of our whale traders, i.e. SwissTony)."
+
+    He is right, and this is the correction. Every whale number served
+    today comes from:
+
+        counterfactual_pnl = (payout - his_price) * (clip / his_price)
+
+    where `payout` is the RESOLUTION price, 1 or 0. A whale who buys at
+    0.22 and sells at 0.45 before the match ends made +0.23/share. If
+    that outcome later resolves 0, we book -0.22/share. A profitable
+    cash-out trader is recorded as a loser, systematically, and the
+    faster he takes profits the worse we make him look.
+
+    That is not a rounding issue. The TRUEEDGE cuts (rn1 -6,897,
+    ferrarichampions2026 -18,248, 0x2c33 -59,667) were made on this
+    number, so any whale who trades that way may have been cut on an
+    artifact of our accounting.
+
+    This grades each detected trade at his ACTUAL exit where he made
+    one — the notional-weighted price of his later SELLs of that asset
+    — and falls back to resolution only where he genuinely held. It
+    writes nothing: the stored table stays as it is so the two bases
+    can be compared rather than one quietly replacing the other.
+
+    `delta` is the correction per whale. A large positive delta means
+    we have been understating him.
+    """
+    from datetime import datetime as _dt
+
+    pool = await get_pool()
+    since_d = _dt.fromisoformat(since_day).date()
+    rows = await pool.fetch(
+        """
+        WITH ex AS (
+            -- his notional-weighted exit price per asset, from his own
+            -- SELLs. Weighted, not last: a partial scale-out is one
+            -- exit at a blended price, not several.
+            SELECT w.username AS whale, tr.asset,
+                   sum(tr.price * tr.size) / NULLIF(sum(tr.size), 0)
+                       AS exit_px,
+                   min(tr.ts) AS first_exit
+            FROM trades tr JOIN whales w ON w.id = tr.whale_id
+            WHERE tr.side = 'SELL'
+            GROUP BY 1, 2
+        )
+        SELECT lower(COALESCE(a.whale_username, '?')) AS whale,
+               count(*)::int AS detected,
+               count(*) FILTER (WHERE ex.exit_px IS NOT NULL
+                                  AND ex.first_exit > a.placed_at)::int
+                   AS exited,
+               COALESCE(sum(a.counterfactual_pnl), 0)::float8
+                   AS cf_settlement,
+               COALESCE(sum(
+                   CASE WHEN ex.exit_px IS NOT NULL
+                             AND ex.first_exit > a.placed_at
+                             AND a.his_price > 0
+                        THEN (ex.exit_px - a.his_price)
+                             * (a.clip_target / a.his_price)
+                        ELSE a.counterfactual_pnl END), 0)::float8
+                   AS cf_cashout
+        FROM ai_trades a
+        LEFT JOIN ex ON ex.whale = lower(a.whale_username)
+                    AND ex.asset = a.asset
+        WHERE a.placed_at >= $1
+          AND ($2::float8 IS NULL OR a.reaction_s <= $2::float8)
+        GROUP BY 1
+        ORDER BY cf_cashout DESC
+        """, since_d, max_reaction_s)
+    out = []
+    for r in rows:
+        d = dict(r)
+        d["cf_settlement"] = round(d["cf_settlement"], 2)
+        d["cf_cashout"] = round(d["cf_cashout"], 2)
+        d["delta"] = round(d["cf_cashout"] - d["cf_settlement"], 2)
+        det = d.get("detected") or 0
+        d["exit_rate"] = round((d.get("exited") or 0) / det, 3) if det else None
+        # The line that matters for the cut list.
+        # NO EXITS MEANS NO SECOND BASIS (2026-08-25, corrected).
+        #
+        # First version emitted "negative on both bases" / "positive on
+        # both bases" whenever the two numbers matched. They match
+        # trivially when the whale has NO recorded sells: cf_cashout
+        # falls back to cf_settlement row by row, so the "second basis"
+        # is a verbatim copy of the first. The line then reads as two
+        # independent confirmations of a cut when it is one number
+        # printed twice.
+        #
+        # Observed: every copied whale returned delta 0.0 with exited
+        # 0/N — swisstony 0 out of 142,890. An instrument that
+        # manufactures corroboration out of missing data is worse than
+        # one that stays silent, because the silence would have been
+        # investigated.
+        if not (d.get("exited") or 0):
+            d["verdict"] = (
+                "NO EXIT DATA — cashout basis unavailable; this is the "
+                "settlement number repeated, NOT a second opinion")
+        elif d["cf_settlement"] <= 0 < d["cf_cashout"]:
+            d["verdict"] = ("CUT MAY BE WRONG — negative at settlement, "
+                            "positive on his own exits")
+        elif d["cf_cashout"] <= 0:
+            d["verdict"] = "negative on both bases"
+        else:
+            d["verdict"] = "positive on both bases"
+        out.append(d)
+    return {"since": since_day, "max_reaction_s": max_reaction_s,
+            "whales": out,
+            "note": ("cf_settlement is what every whale number served "
+                     "today used. cf_cashout grades at his own exit "
+                     "where he made one. Nothing is overwritten.")}
+
+
+@app.get("/api/admin/ratio-calibration",
+         dependencies=[Depends(require_admin)])
+async def api_ratio_calibration(target_turnover_x: float = 1.0,
+                                days: int = 1) -> dict:
+    """What copy ratio hits the owner's turnover target — and can it?
+
+    Owner, 2026-08-25: "I want to play through the capital once a day
+    on average."
+
+    The naive answer divides the target by the whales' total flow and
+    lands near 1%. That is wrong, because we only FILL about one copy
+    in a hundred — the rest are refused for want of a mapped US market.
+    The ratio has to be computed against the flow we actually capture,
+    not the flow that exists.
+
+    Done properly the two goals collide: at a ~0.9% fill rate, playing
+    through the capital once a day requires trading roughly TWICE the
+    whale's own size on every copy. That is what the flat clip already
+    does — and it is why a $3.46 probe of his became a $249.92 position
+    of ours.
+
+    So the turnover target is a MAPPING problem, not a sizing one.
+    `ratio_at_fill_multiple` shows what becomes reachable as coverage
+    improves; the honest reading is that 1x daily turnover with
+    faithful proportional sizing needs roughly 50x the current fill
+    rate, which the US venue's listings may simply not support.
+
+    Nothing here changes sizing. It reports the number so the choice —
+    turnover, fidelity, or more markets — is made on arithmetic.
+    """
+    pool = await get_pool()
+    days = max(1, min(int(days), 30))
+    row = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS fills,
+               COALESCE(sum(t.notional), 0)::float8 AS his_flow_filled,
+               COALESCE(avg(t.notional), 0)::float8 AS avg_his,
+               COALESCE(sum(lo.filled_usd), 0)::float8 AS we_deployed
+        FROM live_orders lo JOIN trades t ON t.id = lo.trade_id
+        WHERE lo.placed_at > now() - interval '1 day' * $1
+          AND lo.status IN ('filled', 'settled', 'cashed_out')
+          AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
+        """, float(days))
+    refused = await pool.fetchval(
+        """
+        SELECT count(*)::int FROM live_orders
+        WHERE placed_at > now() - interval '1 day' * $1
+          AND status IN ('rejected', 'unfilled')
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        """, float(days)) or 0
+    try:
+        from .pmus_account import account_snapshot
+
+        snap = await account_snapshot()
+        capital = float((snap or {}).get("account_value") or 0)
+    except Exception:  # noqa: BLE001
+        capital = 0.0
+    fills = row["fills"] or 0
+    flow = row["his_flow_filled"] or 0.0
+    per_day = flow / days if days else 0.0
+    target = capital * float(target_turnover_x)
+    out = {
+        "capital": round(capital, 2),
+        "target_daily_deployment": round(target, 2),
+        "days": days,
+        "fills": fills,
+        "refused": refused,
+        "fill_rate": (round(fills / (fills + refused), 4)
+                      if (fills + refused) else None),
+        "his_flow_on_filled_per_day": round(per_day, 2),
+        "avg_his_notional_on_fills": round(row["avg_his"] or 0, 2),
+        "we_deployed_per_day": round((row["we_deployed"] or 0) / days, 2),
+    }
+    out["ratio_needed"] = (round(target / per_day, 4) if per_day else None)
+    out["ratio_at_fill_multiple"] = {
+        str(m): (round(target / (per_day * m), 4) if per_day else None)
+        for m in (1, 5, 10, 25, 50)}
+    out["verdict"] = (
+        "unreachable proportionally — ratio_needed above 1.0 means "
+        "trading MORE than the whale on every copy, which is the flat "
+        "clip we already have; fix fill rate, not size"
+        if out["ratio_needed"] and out["ratio_needed"] > 1.0
+        else "reachable — set LIVE_COPY_RATIO to ratio_needed")
+    return out
+
+
+@app.get("/api/admin/mapgap", dependencies=[Depends(require_admin)])
+async def api_mapgap(whale: str = "swisstony", limit: int = 12) -> dict:
+    """Why does this whale's book never reach the premap lane?
+
+    swisstony has 3,092 rejections and $0 deployed. Every one resolves
+    src=fuzzy, which the quarantine refuses — so the whale the system
+    is built around places nothing, and the same mapper gap is what
+    holds the fill rate at 0.9% and caps the turnover target.
+
+    His picks are "Yes"/"No" on slugs like
+
+        atc-lpa-tig-cac-2026-08-24-tig
+
+    where the TRAILING token names which team the market is about. So
+    "Yes" means Tigre wins. The venue's sides for that slug are named
+    by team, so a pick of "Yes" can never equal a side description of
+    "tigre" — and match_side deliberately refuses to bridge that:
+
+        "Yes/No picks match only literal yes/no sides — never a named
+         team (inversion incident 2026-08-24)"
+
+    That guard is there because this precise mapping once inverted a
+    position. I am NOT rewriting it on a hunch at 4am; that is the
+    failure mode that cost yesterday.
+
+    So: measure whether the bridge is UNAMBIGUOUS before building it.
+    For each recent refusal this reports his slug, outcome and title
+    against the venue's actual side descriptions, and asks one
+    question — does the slug's trailing token match exactly ONE side?
+
+      unique on every row  -> the mapping is determinate and safe to
+                              implement, because the slug names the
+                              side rather than us inferring it.
+      any row ambiguous    -> the guard is right and must stay.
+    """
+    from .. import pmus
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT DISTINCT ON (lo.us_market_slug)
+               lo.us_market_slug AS slug, lo.error,
+               t.outcome, t.market_title AS title, t.market_slug AS his_slug
+        FROM live_orders lo JOIN trades t ON t.id = lo.trade_id
+        WHERE lower(COALESCE(lo.whale_username,'')) = lower($1)
+          AND lo.status = 'rejected'
+          AND lo.us_market_slug IS NOT NULL
+          AND lo.placed_at > now() - interval '2 days'
+        ORDER BY lo.us_market_slug, lo.placed_at DESC
+        LIMIT $2
+        """, whale, min(int(limit), 40))
+    out, unique_n, total_n = [], 0, 0
+    for r in rows:
+        slug = r["slug"] or ""
+        rec = {"slug": slug, "outcome": r["outcome"], "title": r["title"],
+               "error": (r["error"] or "")[:90]}
+        # the trailing token after the date is the side the market is on
+        parts = slug.split("-")
+        suffix = parts[-1] if parts and not parts[-1].isdigit() else ""
+        rec["slug_suffix"] = suffix
+        # IS IT IN PREMAP AT ALL? (2026-08-25)
+        #
+        # The bridge hypothesis is dead: the venue's sides for these
+        # slugs are literally "Yes"/"No", so side_norm == "no" already
+        # matches and match_side was never the blocker. What is left is
+        # coverage — a market the sweep never captured cannot be
+        # resolved by the premap lane no matter how good the matcher is,
+        # and every such pick falls to fuzzy, which the quarantine
+        # refuses. This is the fact that decides where the work goes.
+        rec["premap_rows"] = await pool.fetchval(
+            "SELECT count(*)::int FROM us_premap WHERE identifier = $1",
+            slug)
+        try:
+            m = await asyncio.to_thread(
+                pmus._get_client().markets.retrieve_by_slug, slug)
+            sides = ((m or {}).get("market") or {}).get("marketSides") or []
+            descs = [str(sd.get("description") or "") for sd in sides
+                     if isinstance(sd, dict)]
+            rec["venue_sides"] = descs[:4]
+            if suffix and descs:
+                total_n += 1
+                hits = [d for d in descs
+                        if any(w.lower().startswith(suffix.lower())
+                               for w in pmus._norm(d).split())]
+                rec["suffix_matches"] = hits
+                if len(hits) == 1:
+                    unique_n += 1
+                    rec["verdict"] = (
+                        f"UNIQUE — '{suffix}' names '{hits[0]}' and "
+                        f"nothing else; Yes maps there, No to the other")
+                else:
+                    rec["verdict"] = (
+                        f"AMBIGUOUS — '{suffix}' matches {len(hits)} "
+                        f"sides; the guard is right to refuse")
+        except Exception as exc:  # noqa: BLE001 — report, never infer
+            rec["error_venue"] = f"{type(exc).__name__}: {str(exc)[:120]}"
+        out.append(rec)
+    missing = sum(1 for r in out if not r.get("premap_rows"))
+    return {"whale": whale, "rows": out,
+            "unique": unique_n, "checked": total_n,
+            "not_in_premap": missing, "of": len(out),
+            "verdict": (
+                f"{unique_n}/{total_n} slugs name their side uniquely — "
+                "the Yes/No bridge is determinate"
+                if total_n and unique_n == total_n else
+                f"{unique_n}/{total_n} unique — do NOT build the bridge"
+                if total_n else "no rows to judge")}
+
+
+@app.get("/api/admin/whale-position-truth",
+         dependencies=[Depends(require_admin)])
+async def api_whale_position_truth(top: int = 40) -> dict:
+    """Infer whale exits from POSITIONS, because they do not sell.
+
+    Established 2026-08-25, and it changes the approach entirely:
+
+        SELLTRUTH 0x076daa87 n=500 sides={"BUY":500}
+        SIDES swisstony buys 860,326 sells 0 across backfill+chain+poll
+        SIDES 0xf705fa04 buys 32,815 sells 14,901 (chain AND poll)
+
+    Our pipeline records sells fine — another whale has 14,901 of them
+    on the same code paths. The four whales we copy have zero, and the
+    data API's own trade feed has zero for them too. So this is not a
+    bug in our ingestion and no patch there will ever find them.
+
+    The owner has confirmed these accounts take profit before
+    settlement. Both facts hold at once if they close WITHOUT SELLING:
+    on this venue a position can also be closed by buying the
+    complementary outcome and merging, or by redeeming at resolution.
+    Neither is a SELL trade. Neither appears in any trade feed. That is
+    why every trade-based search tonight came back empty.
+
+    Positions are the observable that survives that. For each copy
+    whale: what our ledger says he bought of an asset, against what he
+    still HOLDS. A holding materially below the buys is an exit we
+    never saw, whatever mechanism produced it.
+
+    `unexplained_exits` is the count of assets where he holds less than
+    he bought and the market has not resolved — those are live exits
+    invisible to every trade feed we have.
+    """
+    import httpx
+
+    from ..api.copies_record import COPY_WHALES
+
+    cfg = settings()
+    pool = await get_pool()
+    whales = await pool.fetch(
+        "SELECT username, address FROM whales WHERE address IS NOT NULL")
+    wanted = {w.lower() for w in COPY_WHALES}
+    out = []
+    async with httpx.AsyncClient(base_url=cfg.data_api_base,
+                                 timeout=25.0) as http:
+        for w in whales:
+            uname = (w["username"] or "")
+            if wanted and uname.lower() not in wanted:
+                continue
+            rec = {"whale": uname}
+            try:
+                resp = await http.get("/positions",
+                                      params={"user": w["address"],
+                                              "limit": min(int(top), 100)})
+                resp.raise_for_status()
+                body = resp.json()
+                pos = body if isinstance(body, list) else (
+                    body.get("data") or body.get("positions") or [])
+                held: dict[str, float] = {}
+                for p_ in pos:
+                    if not isinstance(p_, dict):
+                        continue
+                    a = str(p_.get("asset") or p_.get("tokenId") or "")
+                    try:
+                        held[a] = float(p_.get("size")
+                                        or p_.get("netPosition") or 0)
+                    except (TypeError, ValueError):
+                        continue
+                rec["positions_returned"] = len(pos)
+                if pos and isinstance(pos[0], dict):
+                    rec["sample_keys"] = sorted(pos[0].keys())[:16]
+                # What our ledger says he bought of the assets he still
+                # appears in — restricted to those assets so one query
+                # answers it.
+                if held:
+                    rows = await pool.fetch(
+                        """
+                        SELECT t.asset,
+                               COALESCE(sum(t.size) FILTER
+                                   (WHERE t.side='BUY'), 0)::float8 AS bought
+                        FROM trades t JOIN whales w2 ON w2.id = t.whale_id
+                        WHERE lower(w2.username) = $1
+                          AND t.asset = ANY($2::text[])
+                        GROUP BY 1
+                        """, uname.lower(), list(held.keys()))
+                    shrunk = 0
+                    for r in rows:
+                        b = r["bought"] or 0
+                        h = held.get(r["asset"], 0)
+                        if b > 0 and h < b * 0.95:
+                            shrunk += 1
+                    rec["assets_compared"] = len(rows)
+                    rec["unexplained_exits"] = shrunk
+                    rec["verdict"] = (
+                        f"{shrunk}/{len(rows)} held positions are BELOW "
+                        f"what he bought — exits no trade feed shows"
+                        if shrunk else
+                        "holdings match his buys — no hidden exits here")
+                else:
+                    rec["verdict"] = ("no positions returned — check the "
+                                      "endpoint shape before concluding")
+            except Exception as exc:  # noqa: BLE001 — report, never infer
+                rec["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+            out.append(rec)
+    return {"base": cfg.data_api_base, "whales": out}
+
+
+@app.get("/api/admin/whale-sell-truth",
+         dependencies=[Depends(require_admin)])
+async def api_whale_sell_truth(limit: int = 500) -> dict:
+    """Does the SOURCE report sells for our whales? Ask it directly.
+
+    Owner, 2026-08-25: "the whale order sell data is most crucial — I
+    know the accounts are profitable and you are missing that whole
+    data ingestion, which is making decision making difficult."
+
+    Our ingestion is clean end to end: the poller requests
+    /trades?user=X with takerOnly=false and no side filter, maps
+    raw["side"] straight through, and ingest_trade inserts whatever
+    arrives — I read all three rather than assuming. Yet every copied
+    whale shows zero sells all time.
+
+    So the question is upstream of us, and inferring it from our own
+    empty table is exactly the mistake this session kept making. This
+    hits the data API for each copy whale and reports the RAW side
+    histogram from ITS response, bypassing our pipeline entirely:
+
+      * sells > 0 here, 0 in our table -> WE are dropping them, and the
+        gap is between this response and the trades row.
+      * sells = 0 here too -> the API does not report his exits at all,
+        and the fix is a different SOURCE (chain decode of the
+        unwatched contract, or the positions endpoint), not a pipeline
+        patch.
+
+    Either answer is actionable. Guessing between them is not.
+    """
+    import httpx
+
+    from ..api.copies_record import COPY_WHALES
+
+    cfg = settings()
+    pool = await get_pool()
+    rows = await pool.fetch(
+        "SELECT username, address FROM whales "
+        "WHERE address IS NOT NULL ORDER BY username")
+    wanted = {w.lower() for w in COPY_WHALES}
+    out = []
+    async with httpx.AsyncClient(base_url=cfg.data_api_base,
+                                 timeout=20.0) as http:
+        for r in rows:
+            uname = r["username"] or ""
+            if wanted and uname.lower() not in wanted:
+                continue
+            rec = {"whale": uname, "address": r["address"]}
+            try:
+                resp = await http.get("/trades",
+                                      params={"user": r["address"],
+                                              "limit": min(int(limit), 500),
+                                              "takerOnly": "false"})
+                resp.raise_for_status()
+                body = resp.json()
+                rows_ = body if isinstance(body, list) else (
+                    body.get("data") or body.get("trades") or [])
+                hist: dict[str, int] = {}
+                for t in rows_:
+                    if isinstance(t, dict):
+                        k = str(t.get("side", "?")).upper() or "?"
+                        hist[k] = hist.get(k, 0) + 1
+                rec["n"] = len(rows_)
+                rec["sides"] = hist
+                rec["sells"] = hist.get("SELL", 0)
+                rec["verdict"] = (
+                    "API REPORTS SELLS — our pipeline is dropping them"
+                    if hist.get("SELL", 0) > 0 else
+                    "API reports no sells either — need a different "
+                    "source for his exits")
+                # One raw row, so the field names are visible rather
+                # than assumed if the shape ever changes.
+                if rows_ and isinstance(rows_[0], dict):
+                    rec["sample_keys"] = sorted(rows_[0].keys())[:16]
+            except Exception as exc:  # noqa: BLE001 — report, never infer
+                rec["error"] = f"{type(exc).__name__}: {str(exc)[:160]}"
+            out.append(rec)
+    return {"base": cfg.data_api_base, "whales": out}
+
+
+@app.get("/api/admin/whale-side-census",
+         dependencies=[Depends(require_admin)])
+async def api_whale_side_census() -> dict:
+    """BUY vs SELL rows per whale, ALL TIME, by ingestion source.
+
+    The 7-day exit report returned exit_rate 0.0 for every whale we
+    copy — swisstony 9,243 assets bought, zero sold — while two whales
+    we do NOT copy showed round-trips at 46% and 29%. The owner has
+    confirmed from outside the system that several of ours do sell
+    before settlement. Our data says they never have.
+
+    One of those is wrong, and it is ours. This narrows where:
+
+      * sells = 0 ALL TIME (not just 7d) means we have never once
+        recorded a sale from that wallet — a detection gap, not a
+        quiet week.
+      * the `source` split says WHICH path is blind. If chain records
+        buys and sells but poll records only buys (or vice versa), the
+        gap has an address.
+      * a whale with sells proves the pipeline CAN store them, so any
+        whale without them is missing data rather than not selling.
+
+    No date filter anywhere: the question is existence, not recency.
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT w.username AS whale, tr.source,
+               count(*) FILTER (WHERE tr.side = 'BUY')::int  AS buys,
+               count(*) FILTER (WHERE tr.side = 'SELL')::int AS sells,
+               min(tr.ts) AS first_ts, max(tr.ts) AS last_ts
+        FROM trades tr JOIN whales w ON w.id = tr.whale_id
+        GROUP BY 1, 2 ORDER BY 1, 2
+        """)
+    by_whale: dict[str, dict] = {}
+    for r in rows:
+        d = by_whale.setdefault(r["whale"], {"whale": r["whale"],
+                                             "by_source": {},
+                                             "buys": 0, "sells": 0})
+        d["by_source"][r["source"]] = {"buys": r["buys"],
+                                       "sells": r["sells"]}
+        d["buys"] += r["buys"]
+        d["sells"] += r["sells"]
+    out = []
+    for d in by_whale.values():
+        d["sell_share"] = (round(d["sells"] / (d["buys"] + d["sells"]), 4)
+                           if (d["buys"] + d["sells"]) else None)
+        d["verdict"] = ("NO SELLS EVER RECORDED — detection gap"
+                        if d["sells"] == 0 and d["buys"] > 50
+                        else "has sells")
+        out.append(d)
+    out.sort(key=lambda x: -x["buys"])
+    return {"whales": out,
+            "note": ("A whale WITH sells proves the pipeline can store "
+                     "them; a whale with thousands of buys and zero "
+                     "sells is missing data, not abstaining.")}
+
+
+@app.get("/api/admin/whale-exits",
+         dependencies=[Depends(require_admin)])
+async def api_whale_exits(days: int = 7) -> dict:
+    """Does the whale CASH OUT before settlement? (owner 2026-08-25)
+
+    If he does, two things follow and both matter more than any bug
+    found tonight:
+
+    1. Our copy is only half his strategy. We mirror his entries and
+       then hold to resolution. If his edge is partly in EXITING —
+       taking a winner at 0.80 rather than riding it to 1.00 or 0.00 —
+       then copying entries alone is a different, worse strategy that
+       we have been grading as if it were his.
+
+    2. Every number we have shown all day understates him. TRUEEDGE,
+       fill-vs-miss and the copies audit all settle positions at
+       resolution. A whale who sells early books a gain our accounting
+       never sees, so he looks worse than he is — and our copies look
+       like they track him when they do not.
+
+    `round_trips` is the count of assets he both bought AND later sold.
+    `exit_rate` is that as a share of the assets he bought: how much of
+    his book he actively closes rather than letting resolve.
+    """
+    pool = await get_pool()
+    days = max(1, min(int(days), 60))
+    rows = await pool.fetch(
+        """
+        WITH t AS (
+            SELECT w.username AS whale, tr.asset, tr.side,
+                   tr.notional, tr.ts
+            FROM trades tr JOIN whales w ON w.id = tr.whale_id
+            WHERE tr.ts > now() - interval '1 day' * $1
+        ),
+        legs AS (
+            SELECT whale, asset,
+                   min(ts) FILTER (WHERE side = 'BUY')  AS first_buy,
+                   max(ts) FILTER (WHERE side = 'SELL') AS last_sell,
+                   sum(notional) FILTER (WHERE side = 'BUY')::float8
+                       AS bought,
+                   sum(notional) FILTER (WHERE side = 'SELL')::float8
+                       AS sold
+            FROM t GROUP BY 1, 2
+        )
+        SELECT whale,
+               count(*) FILTER (WHERE first_buy IS NOT NULL)::int
+                   AS assets_bought,
+               count(*) FILTER (WHERE first_buy IS NOT NULL
+                                  AND last_sell IS NOT NULL
+                                  AND last_sell > first_buy)::int
+                   AS round_trips,
+               round(COALESCE(sum(bought), 0)::numeric, 2)::float8
+                   AS bought_usd,
+               round(COALESCE(sum(sold), 0)::numeric, 2)::float8
+                   AS sold_usd
+        FROM legs GROUP BY 1
+        HAVING count(*) FILTER (WHERE first_buy IS NOT NULL) > 0
+        ORDER BY round_trips DESC
+        """, float(days))
+    out = []
+    for r in rows:
+        d = dict(r)
+        ab = d.get("assets_bought") or 0
+        d["exit_rate"] = round((d.get("round_trips") or 0) / ab, 3) if ab else None
+        out.append(d)
+    return {"days": days, "whales": out,
+            "note": ("round_trips = assets he bought AND later sold. A "
+                     "high exit_rate means our hold-to-settlement copy "
+                     "is NOT his strategy, and our settlement-based "
+                     "P&L understates him.")}
+
+
+@app.get("/api/admin/price-truth",
+         dependencies=[Depends(require_admin)])
+async def api_price_truth(price: float = 0.30, qty: int = 10,
+                          family: str = "aec-") -> dict:
+    """Which leg does the venue's `price` field name on a BUY_SHORT?
+
+    Runs HERE rather than on the CI runner because the runner has no
+    PMUS credentials — the workflow version printed "SKIP: no
+    credentials" and measured nothing (2026-08-25 00:57Z).
+
+    Previews the SAME market at the SAME price under both intents and
+    reports the venue's own stated cost for each. A preview places no
+    order. The arithmetic decides a question I will not decide by
+    pattern-matching fills:
+
+      BUY_SHORT cost ~= price*qty      -> price names the side we ask
+                                          for; the overspend is
+                                          something else
+      BUY_SHORT cost ~= (1-price)*qty  -> price names the LONG leg, so
+                                          every short copy has been
+                                          paying the complement
+    """
+    from . import pmus_account  # noqa: F401 — ensures creds are loaded
+
+    from .. import pmus as _pmus
+
+    def _amt(a) -> float:
+        try:
+            return float((a or {}).get("value") or 0)
+        except (TypeError, ValueError):
+            return 0.0
+
+    price = max(0.01, min(float(price), 0.99))
+    qty = max(1, min(int(qty), 10))
+    ours = round(price * qty, 4)
+    comp = round((1 - price) * qty, 4)
+    try:
+        client = await asyncio.to_thread(_pmus._get_client)
+    except Exception as exc:  # noqa: BLE001
+        return {"ok": False, "error": f"{type(exc).__name__}: {exc}"[:200]}
+    # Any live two-sided market — the point is the arithmetic, not the
+    # game. Reuse the premap table so we do not crawl the venue again.
+    pool = await get_pool()
+    # FAMILY MATTERS (2026-08-25). The first run of this picked the
+    # most recently updated premap row — an `astatc` MLB prop — and
+    # reported "matches OUR price" for both intents. All five overspend
+    # rows are `aec-` tennis, and we already know side semantics differ
+    # BY FAMILY (that was the whole shared-identifier finding). Testing
+    # the wrong family and reporting it as an answer is the mistake
+    # this parameter exists to prevent. Defaults to aec-.
+    slug = await pool.fetchval(
+        "SELECT identifier FROM us_premap "
+        "WHERE intent IS NOT NULL AND identifier IS NOT NULL "
+        "AND identifier LIKE $1 || '%' "
+        "ORDER BY updated_at DESC LIMIT 1", family)
+    if not slug:
+        slug = await pool.fetchval(
+            "SELECT identifier FROM us_premap "
+            "WHERE intent IS NOT NULL AND identifier IS NOT NULL "
+            "ORDER BY updated_at DESC LIMIT 1")
+    if not slug:
+        return {"ok": False, "error": "no premap row to preview against"}
+    out = {"ok": True, "market": slug, "family": family,
+           "price": price, "qty": qty,
+           "ours": ours, "complement": comp, "legs": {}}
+    for intent in ("ORDER_INTENT_BUY_LONG", "ORDER_INTENT_BUY_SHORT"):
+        req = {"marketSlug": slug, "intent": intent,
+               "type": "ORDER_TYPE_LIMIT",
+               "price": {"value": str(price)}, "quantity": qty,
+               "tif": "TIME_IN_FORCE_IMMEDIATE_OR_CANCEL"}
+        try:
+            pv = await asyncio.to_thread(
+                client.orders.preview, {"request": req})
+            o = (pv or {}).get("order") or {}
+            cash = _amt(o.get("cashOrderQty"))
+            px = _amt(o.get("price"))
+            if not cash and px:
+                cash = round(px * float(o.get("quantity") or qty), 4)
+            verdict = "venue stated no cost"
+            if cash:
+                if abs(cash - ours) <= 0.02:
+                    verdict = "matches OUR price — this leg is priced as asked"
+                elif abs(cash - comp) <= 0.02:
+                    verdict = ("COMPLEMENT — venue charges (1-price); we "
+                               "have been passing the wrong leg's price")
+                else:
+                    verdict = f"neither ours ({ours}) nor complement ({comp})"
+            out["legs"][intent[-10:]] = {
+                "venue_cost": cash, "venue_price": px,
+                "venue_qty": o.get("quantity"),
+                "ratio_to_ours": round(cash / ours, 4) if ours else None,
+                "verdict": verdict}
+        except Exception as exc:  # noqa: BLE001 — report, never infer
+            out["legs"][intent[-10:]] = {
+                "error": f"{type(exc).__name__}: {str(exc)[:180]}"}
+    return out
+
+
+@app.get("/api/admin/unmapped-census",
+         dependencies=[Depends(require_admin)])
+async def api_unmapped_census(hours: int = 48, sample: int = 400) -> dict:
+    """WHY did 26,569 copies fail to map? Attributed, not guessed.
+
+    This is the bucket that decides the fill rate. 1,155 blocked whale
+    entries a day; at the repo's own 13.6% entry-to-fill conversion,
+    fixing a quarter of it adds ~39 fills/day against a 19.2/day
+    baseline. Nothing else on the board is that size.
+
+    Until now it could not be attributed at all. api_mapgap — the
+    endpoint written to diagnose exactly this — filters
+    `us_market_slug IS NOT NULL` (app.py:3791), and that column is
+    written only AFTER a mapping succeeds (live_executor.py:2125-2128).
+    It measures the rows that WORKED while reporting on the ones that
+    failed, so every number published about this bucket so far
+    describes the wrong population.
+
+    Here the population is the right one — rejected rows with NO
+    us_market_slug — and each is re-run through resolve_explain, which
+    walks the same six decision points resolve() walks and names which
+    one returned None. Those six need completely different fixes:
+
+        no_keys_built            his titles/slug yield no event key
+        no_key_intersection      keys built, nothing in us_premap matched
+        unknown_market_type      market_type_of did not recognise it
+        type_prefix_filter_emptied  event found, wrong market family
+        no_side_match            market found, his outcome matched no side
+        side_has_no_intent       side found, venue named no long/short
+
+    Read-only: resolve_explain performs no writes and places no orders.
+    Bounded by `sample` because it is one resolver pass per row.
+    """
+    from ..workers.premap import resolve_explain
+
+    pool = await get_pool()
+    # THE SAME INPUTS PRODUCTION USES, FROM THE SAME PLACE.
+    #
+    # This passed t.event_slug into resolve_explain's EVENT_TITLE
+    # parameter. Those are different data — "mlb-nyy-bos-2026-08-25"
+    # against "New York Yankees vs. Boston Red Sox" — and
+    # event_keys_for builds title-derived keys out of whatever it is
+    # handed. So the census built a DIFFERENT KEY SET than production
+    # and then attributed production's failures to it.
+    #
+    # That is failure mode (c) — a probe reading a different argument
+    # list than the thing it measures — sitting inside the instrument
+    # every coverage decision today was prioritised from. The cause
+    # ranking (no_key_intersection 35.5%, resolves 25.8%, no_side_match
+    # 23.3%) was measured on inputs the copy path never sees.
+    #
+    # _market_context resolves the real values off market_tokens joined
+    # to markets, preferring the enriched payload; this LEFT JOINs the
+    # same pair and coalesces the same way, so the census now asks the
+    # question production asked.
+    rows = await pool.fetch(
+        """
+        SELECT lo.id, lo.whale_username, lo.error,
+               COALESCE(t.market_title, m.title)     AS market_title,
+               m.event_title                         AS event_title,
+               COALESCE(t.outcome, mt.outcome)       AS outcome,
+               COALESCE(t.market_slug, m.slug)       AS market_slug,
+               COALESCE(mt.condition_id, lo.condition_id) AS condition_id
+          FROM live_orders lo
+          JOIN trades t ON t.id = lo.trade_id
+          LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+          LEFT JOIN markets m
+                 ON m.condition_id = COALESCE(mt.condition_id,
+                                              lo.condition_id)
+         WHERE lo.status = 'rejected'
+           AND lo.us_market_slug IS NULL
+           AND lo.placed_at > now() - interval '1 hour' * $1
+         ORDER BY lo.placed_at DESC
+         LIMIT $2
+        """, hours, min(int(sample), 1500))
+
+    steps: dict[str, int] = {}
+    by_whale: dict[str, dict[str, int]] = {}
+    examples: dict[str, dict] = {}
+    alias_hits = 0
+    alias_examples: list[dict] = []
+    bridge_stats: dict = {"would_resolve": 0, "reasons": {},
+                          "questions": [], "venue_wordings": {},
+                          # ROUND-3 EVIDENCE CHANNELS (2026-08-27).
+                          # The tournament that designed the round-2
+                          # grammar demanded counts, not anecdotes:
+                          # per-row first-failing gates, the league
+                          # values and month tokens actually seen
+                          # (whitelist candidates enumerate
+                          # themselves), the named class's market-type
+                          # composition (the E1 bar for the named
+                          # variant), the would_resolve AUDIT ROWS
+                          # (Phase 1 is gated on a zero-mismatch hand
+                          # audit of every one), and the two-form
+                          # corroboration shadow-eval (sizes the
+                          # furniture-token miss class).
+                          "gate_histogram": {}, "lg_seen": {},
+                          "month_seen": {}, "named_types": {},
+                          "audits": [], "gate10_shadow": [],
+                          "opp_shadow": [], "blocker_sets": []}
+    # THE NAMED-TENNIS LANE'S CENSUS (2026-08-27): would_resolve,
+    # reason and sub_gate histograms (line_poison_recovered vs
+    # no_named_candidate is the stratification of the named class the
+    # earlier rounds lacked), the verbatim whale/venue lg pairs that
+    # earn future tour-map entries by observation, and the audit
+    # records the Phase-1 zero-mismatch hand audit consumes.
+    named_stats: dict = {"would_resolve": 0, "reasons": {},
+                         "sub_gates": {}, "lg_pairs": {},
+                         "row_gate_histogram": {}, "audits": [],
+                         "attested_family": 0}
+    for r in rows:
+        try:
+            # C7: the condition production hands resolve() (his kickoff
+            # instant is read per condition), so the census asks the
+            # same question -- and never fans out venue reads per row
+            # (fetch_kick=False: market_starts as the live path reads it)
+            ex = await resolve_explain(
+                pool, r["market_title"], r["event_title"], r["outcome"],
+                r["market_slug"], condition_id=r.get("condition_id"),
+                fetch_kick=False)
+        except Exception as exc:  # noqa: BLE001 — one row, not the census
+            ex = {"step": "explain_raised",
+                  "detail": type(exc).__name__, "keys": 0, "rows": 0}
+        step = str(ex.get("step") or "unknown")
+        steps[step] = steps.get(step, 0) + 1
+        # LEAGUE-CODE ALIASING, counted rather than argued.
+        #
+        # no_key_intersection has read "either the sweep never captured
+        # this market, or the two key sets are built differently" since
+        # the census was written, and those need opposite fixes. The
+        # probe printed a pair that is neither:
+        #
+        #   whale  bol1-gvs-ori-2026-08-25-gvs
+        #   venue  atc-lpb-gvs-ori-2026-08-25-gvs
+        #
+        # Same game, same date, same teams — the feed calls the league
+        # bol1 and the venue calls it lpb. resolve_explain now asks, on
+        # each miss, whether dropping the league token WOULD have found
+        # rows. This tallies the answer so the size of the class is a
+        # number before anything in the matcher moves.
+        _lap = ex.get("league_alias_probe") or {}
+        if _lap.get("would_have_hit"):
+            alias_hits += 1
+            if len(alias_examples) < 5:
+                alias_examples.append({
+                    "his_slug": r["market_slug"],
+                    "stripped_key": (_lap.get("stripped_keys") or [None])[0],
+                    "venue_rows_found": _lap.get("rows_it_would_find"),
+                    "venue_sample": _lap.get("sample"),
+                })
+        # THE BRIDGE INSTRUMENT (Phase 0, 2026-08-26). resolve_explain
+        # now runs the yes/no bridge read-only on every no_side_match
+        # and reports what it WOULD have done. Tallied here so the true
+        # recoverable fraction of the 59.8% class — and every venue
+        # question tail the bridge would consume — is a measured number
+        # before any executor code consumes a bridge hit. The
+        # certification bar reads the tail set: one non-whitelisted
+        # tail observed is a grammar review, not a shrug.
+        _br = ex.get("bridge") or {}
+        if _br:
+            _brs = bridge_stats  # accumulated below the loop's scope
+            _brs["reasons"][str(_br.get("reason") or _br.get("error")
+                                or "?")] = _brs["reasons"].get(
+                str(_br.get("reason") or _br.get("error") or "?"), 0) + 1
+            if _br.get("would_resolve"):
+                _brs["would_resolve"] += 1
+                q = str(_br.get("matched_question") or "")[:120]
+                if q and q not in _brs["questions"] \
+                        and len(_brs["questions"]) < 25:
+                    _brs["questions"].append(q)
+            # The wording census: what the venue's boards actually say,
+            # split by the whale's outcome shape. This is the ground
+            # truth the named-pick bridge variant gets designed against
+            # -- real strings, never imagined ones.
+            shape = str(_br.get("outcome_shape") or "?")
+            bucket = _brs["venue_wordings"].setdefault(shape, [])
+            for pair in (_br.get("venue_q_sample") or []):
+                if pair not in bucket and len(bucket) < 30:
+                    bucket.append(pair)
+            for g in (_br.get("row_gates") or []):
+                gate = str(g.get("gate") or "?")
+                _brs["gate_histogram"][gate] = \
+                    _brs["gate_histogram"].get(gate, 0) + 1
+                if g.get("lg_seen"):
+                    lg = str(g["lg_seen"])
+                    _brs["lg_seen"][lg] = _brs["lg_seen"].get(lg, 0) + 1
+                if g.get("month_seen"):
+                    mo = str(g["month_seen"])
+                    _brs["month_seen"][mo] = \
+                        _brs["month_seen"].get(mo, 0) + 1
+            _his = _br.get("his") or {}
+            if shape == "named" and _his:
+                mt = str(_his.get("market_type") or "?")
+                _brs["named_types"][mt] = \
+                    _brs["named_types"].get(mt, 0) + 1
+            if _br.get("audit") and len(_brs["audits"]) < 40:
+                _brs["audits"].append(_br["audit"])
+        _nm = ex.get("named_ml") or {}
+        if _nm:
+            _ns = named_stats
+            _ns["reasons"][str(_nm.get("reason") or _nm.get("error")
+                               or "?")] = _ns["reasons"].get(
+                str(_nm.get("reason") or _nm.get("error") or "?"),
+                0) + 1
+            sg = str(_nm.get("sub_gate") or "?")
+            _ns["sub_gates"][sg] = _ns["sub_gates"].get(sg, 0) + 1
+            if _nm.get("would_resolve"):
+                _ns["would_resolve"] += 1
+                if _nm.get("attested_family"):
+                    _ns["attested_family"] += 1
+            lgp = _nm.get("lg_pair_seen") or {}
+            if lgp.get("whale_lg"):
+                k = str(lgp["whale_lg"])
+                _ns["lg_pairs"][k] = _ns["lg_pairs"].get(k, 0) + 1
+            for pair in (_nm.get("lg_pairs") or []):
+                k = "->".join(str(x) for x in pair)
+                _ns["lg_pairs"][k] = _ns["lg_pairs"].get(k, 0) + 1
+            for g in (_nm.get("row_gates") or []):
+                gk = str(g.get("gate") or "?")
+                _ns["row_gate_histogram"][gk] = \
+                    _ns["row_gate_histogram"].get(gk, 0) + 1
+            if _nm.get("audit") and len(_ns["audits"]) < 40:
+                _ns["audits"].append(_nm["audit"])
+            if _br.get("gate10") and len(_brs["gate10_shadow"]) < 15:
+                _brs["gate10_shadow"].append(_br["gate10"])
+            for g in (_br.get("row_gates") or []):
+                if g.get("shadow") and len(_brs["opp_shadow"]) < 15:
+                    _brs["opp_shadow"].append(g["shadow"])
+            _blk = _br.get("blockers")
+            if _blk and len(_brs["blocker_sets"]) < 10:
+                _brs["blocker_sets"].append(_blk)
+        w = (r["whale_username"] or "?").lower()
+        by_whale.setdefault(w, {})
+        by_whale[w][step] = by_whale[w].get(step, 0) + 1
+        if step not in examples:
+            examples[step] = {
+                "whale": w, "his_slug": r["market_slug"],
+                "his_outcome": r["outcome"], "his_title": r["market_title"],
+                "keys": ex.get("keys"), "premap_rows": ex.get("rows"),
+                "detail": str(ex.get("detail"))[:220]}
+
+    n = len(rows)
+    ranked = sorted(steps.items(), key=lambda kv: -kv[1])
+    return {
+        "sampled": n, "hours": hours,
+        "steps": dict(ranked),
+        "by_whale": by_whale,
+        "examples": examples,
+        # MEASUREMENT ONLY — the matcher is unchanged. Dropping the
+        # league token widens what a signal can match, and widening a
+        # key is how a whale's pick reaches another game's row. The
+        # number comes first.
+        "league_alias": {
+            "misses_a_league_strip_would_have_found": alias_hits,
+            "share_of_sample": (round(alias_hits / n, 4) if n else None),
+            "share_of_no_key_intersection": (
+                round(alias_hits / steps["no_key_intersection"], 4)
+                if steps.get("no_key_intersection") else None),
+            "examples": alias_examples,
+            "note": ("counted, NOT applied — a league-stripped key can "
+                     "collide two leagues' identical team codes on one "
+                     "date, so this is sized before it is trusted"),
+        },
+        # THE BRIDGE'S PHASE-0 NUMBER. would_resolve over the
+        # no_side_match arm, the refusal-reason distribution (what the
+        # closed grammars cost in coverage), and every distinct venue
+        # question the bridge would have consumed — the certification
+        # bar demands zero non-whitelisted tails in that list.
+        "named_ml": named_stats,
+        "bridge": {
+            **bridge_stats,
+            "share_of_no_side_match": (
+                round(bridge_stats["would_resolve"]
+                      / steps["no_side_match"], 4)
+                if steps.get("no_side_match") else None),
+            "note": ("measured, NOT applied — resolve() takes no bridge "
+                     "argument yet; nothing on the order path consumes "
+                     "a bridge hit"),
+        },
+        "verdict": (
+            "NO UNMAPPED ROWS in window — nothing to attribute"
+            if not n else
+            f"largest cause: {ranked[0][0]} at {ranked[0][1]}/{n} "
+            f"({100.0 * ranked[0][1] / n:.1f}%)"),
+    }
+
+
+@app.get("/api/admin/whale-merge-pnl",
+         dependencies=[Depends(require_admin)])
+async def api_whale_merge_pnl(since: str = "",
+                              whales: str = "") -> dict:
+    """Re-grade every whale with their MERGES counted as exits.
+
+    Owner, 2026-08-25: "I need you to rerun all of the whale copy rois
+    and pnls with the sale order information included. I can see all of
+    these whales both buy and sell."
+
+    Every whale number this desk has produced grades at RESOLUTION,
+    which cannot see how these accounts actually take profit. The
+    blindness was total and self-consistent: SIDES said 0 sells, EXITS
+    said exit_rate 0.0, CUTCHECK had to print "NO EXIT DATA" — three
+    instruments agreeing because all three read the same trade-feed
+    definition of a sale. Three whales were cut on that basis.
+
+    A merge IS the sale: buying N of the complementary leg retires N
+    held shares and returns $N, because YES + NO is worth exactly $1.
+    It is a round trip, it has been in our trades table the whole time,
+    and nothing has ever read it as one.
+
+    Reported beside the settlement number, never instead of it — the
+    two answer different questions and the gap between them is the
+    point.
+    """
+    import datetime as _dt_mod
+
+    from ..analytics.merge_pnl import whale_merge_pnl
+    from .copies_record import COPY_WHALES
+
+    pool = await get_pool()
+    want = [w.strip() for w in whales.split(",") if w.strip()] or list(
+        COPY_WHALES)
+    # since="" means the WHOLE BOOK, which is the only window in
+    # which the replay's balances are right: a windowed replay seeds
+    # every balance at zero, so a position opened before the cutoff has
+    # its exit booked as a fresh entry.
+    graded = await whale_merge_pnl(pool, want, since or None)
+    # THE CASHFLOW MUST SHARE THE REPLAY'S WINDOW. Two numbers on one
+    # row measured over different spans is how a reader draws a
+    # conclusion neither of them supports — and with since="" the old
+    # form did not merely disagree, fromisoformat("") raises.
+    _since_d = (_dt_mod.datetime.fromisoformat(since).date()
+                if since else None)
+    for name, g in graded.items():
+        if _since_d is None:
+            st = await pool.fetchval(
+                """
+                SELECT COALESCE(sum(
+                         CASE WHEN t.side = 'BUY'
+                              THEN -t.notional ELSE t.notional END),
+                       0)::float8
+                  FROM trades t JOIN whales wh ON wh.id = t.whale_id
+                 WHERE lower(wh.username) = $1
+                """, name.lower())
+        else:
+            st = await pool.fetchval(
+                """
+                SELECT COALESCE(sum(
+                         CASE WHEN t.side = 'BUY'
+                              THEN -t.notional ELSE t.notional END),
+                       0)::float8
+                  FROM trades t JOIN whales wh ON wh.id = t.whale_id
+                 WHERE lower(wh.username) = $1 AND t.ts >= $2
+                """, name.lower(), _since_d)
+        g["net_cashflow"] = round(float(st or 0), 2)
+        g["verdict"] = (
+            "NO MERGES FOUND — this whale does not close by merging, so "
+            "the settlement basis is the only one available"
+            if not g.get("n_merges") else
+            f"{g['n_merges']} merges realising ${g['realized_merge_pnl']} "
+            f"on ${g['entry_notional']} of entries")
+        # THE EXIT VERDICT, stated rather than left to the reader.
+        #
+        # The owner's thesis is that for a number of these whales the
+        # EXITS are the edge. Both worlds are now measured over the
+        # SAME fills, so this is the comparison, not an analogy to one.
+        _cov = g.get("cf_coverage")
+        _ev = g.get("exit_value") or 0
+        g["exit_verdict"] = (
+            "NO GRADED EXITS — no closed share on this book has a known "
+            "payout, so neither world can be priced. This is missing "
+            "resolution data, NOT evidence that the exits were worthless"
+            if not _cov else
+            f"exiting {'BEAT' if _ev > 0 else 'LOST TO'} holding to "
+            f"resolution by ${abs(_ev):,.2f} on "
+            f"{g.get('cf_graded_shares', 0):,.0f} graded shares "
+            f"({_cov:.0%} of closed shares)"
+            + ("  — thin coverage, treat as indicative"
+               if _cov < 0.5 else ""))
+    return {"since": since, "whales": graded}
+
+
+@app.get("/api/admin/proof", dependencies=[Depends(require_admin)])
+async def admin_proof(since: str = "", target: float = 0.0) -> dict:
+    """Is the strategy proven profitable, and if not, how far off?
+
+    The owner asked for confidence that the company runs as designed
+    AND that the strategy is mathematically proven profitable. Those
+    need different evidence and only the first is a matter of reading
+    code. This is the second.
+
+    IT IS BUILT TO BE ABLE TO SAY NO. The all-time ledger is 3,351
+    settled copies at -3.62% on dollar deployed, and there is no
+    reading of that under which the strategy is currently proven. What
+    that number cannot do is settle the question, because every copy in
+    it was placed by a system that copied a whale's EXIT as a doubled
+    ENTRY — the census shows 79 such buys correctly reclassified in one
+    window. A ledger produced by a different system does not measure
+    this one.
+
+    So it reports a COHORT with the cutoff stated out loud, a real
+    ratio-estimator interval, and INSUFFICIENT until the sample can
+    carry a conclusion — plus how many more settled copies that takes,
+    which is the number that turns "are we there yet" into a date.
+
+    The target edge defaults to the whales' own merge-inclusive ROI:
+    that is the return the strategy is trying to inherit, and sizing
+    against our own noisy point estimate would demand an absurd sample
+    precisely when the estimate is least trustworthy.
+    """
+    from ..analytics.proof import COHORT_START, cohort_assess
+
+    pool = await get_pool()
+    start = since or COHORT_START
+    out = await cohort_assess(pool, start)
+
+    # THE BENCHMARK: what the whales themselves return, merge-inclusive.
+    # Reported beside our number because the gap between them is the
+    # execution loss, which is the thing engineering can actually move.
+    # THE BENCHMARK IS READ, NOT COMPUTED.
+    #
+    # The first version called whale_merge_pnl inline. That is the
+    # heaviest query in the system — seven whales, up to 600,000 fills
+    # each, swisstony alone at 283,748 — and it took this endpoint
+    # down with it: the 2026-08-25 probe read
+    #
+    #     MERGEHTTP code=502     PROOF unavailable
+    #
+    # at an API RSS of ~545MB. I made the instrument that answers "are
+    # we profitable" depend on the single most expensive thing the API
+    # does, so the answer became unavailable exactly when it mattered.
+    #
+    # The benchmark is now read from the value the analytics worker
+    # publishes. A stale benchmark is a fine benchmark — whale edge
+    # measured over a month does not move in an hour — and a MISSING
+    # one degrades to "no target", which costs the sample-size
+    # projection and nothing else. The verdict never depended on it.
+    bench: dict = {}
+    if not target:
+        try:
+            raw = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1",
+                "whale_edge_benchmark")
+            d = raw if isinstance(raw, dict) else (json.loads(raw)
+                                                   if raw else None)
+            if d and float(d.get("whale_roi_on_entries") or 0):
+                target = float(d["whale_roi_on_entries"])
+                bench = {**d, "basis": "merge-inclusive, all copied "
+                                       "whales (published by the "
+                                       "analytics worker)"}
+            else:
+                bench = {"error": "no published benchmark yet — the "
+                                  "sample-size projection is omitted, "
+                                  "the verdict is unaffected"}
+        except Exception as exc:  # noqa: BLE001 — benchmark is optional
+            bench = {"error": f"benchmark unreadable: "
+                              f"{type(exc).__name__}"}
+
+    if target and out.get("overall", {}).get("sigma_per_dollar"):
+        from ..analytics.proof import required_n
+
+        o = out["overall"]
+        need = required_n(o["sigma_per_dollar"], target)
+        o["target_edge"] = round(target, 6)
+        o["n_needed_at_target"] = need
+        o["n_still_needed"] = max(0, (need or 0) - o["n"])
+    out["benchmark"] = bench
+    # PRICE FIDELITY — the owner's other stated requirement, "same or
+    # better price", which had no instrument until now. It belongs on
+    # this page because it is the half of the strategy engineering can
+    # actually move: the whales' edge is theirs, and what we control is
+    # how much of it survives our execution.
+    try:
+        from ..analytics.price_fidelity import cohort_fidelity
+
+        out["price_fidelity"] = await cohort_fidelity(pool, start)
+    except Exception as exc:  # noqa: BLE001
+        out["price_fidelity"] = {"error": type(exc).__name__}
+    # THE ALL-TIME NUMBER STAYS ON THE PAGE. Showing only the clean
+    # cohort would be the same move as choosing the cutoff quietly:
+    # the contaminated history is the reason a cohort exists, so it is
+    # reported beside it, never instead of it.
+    try:
+        alltime = await pool.fetch(
+            "SELECT COALESCE(filled_usd, requested_usd)::float8 AS stake, "
+            "       pnl::float8 AS pnl FROM live_orders "
+            " WHERE pnl IS NOT NULL "
+            "   AND COALESCE(whale_username,'') NOT IN ('manual','underdog') "
+            "   AND COALESCE(filled_usd, requested_usd) > 0")
+        from ..analytics.proof import roi_with_ci
+
+        out["all_time_including_contaminated"] = roi_with_ci(
+            [dict(r) for r in alltime])
+    except Exception as exc:  # noqa: BLE001
+        out["all_time_including_contaminated"] = {
+            "error": type(exc).__name__}
+    return out
+
+
+# Copy latency buckets, in seconds. The first boundary is 5s because
+# that is the reaction time TRUEEDGE-FAST counterfactuals against; the
+# last is 300s because the Data-API poller's own publication lag sits
+# at 130-281s, so anything past 300s is definitionally poller-only.
+_LAT_BUCKETS: tuple[tuple[str, float, float], ...] = (
+    ("0-5s", 0.0, 5.0),
+    ("5-30s", 5.0, 30.0),
+    ("30-120s", 30.0, 120.0),
+    ("120-300s", 120.0, 300.0),
+    ("300s+", 300.0, float("inf")),
+)
+
+
+@app.get("/api/admin/latency-cohort", dependencies=[Depends(require_admin)])
+async def admin_latency_cohort(since: str = "", whale: str = "") -> dict:
+    """Does copying LATER earn less? Measured, not assumed.
+
+    Latency has been the standing explanation for the gap between the
+    whales' edge and ours, and it has never been measured on OUR OWN
+    SETTLED MONEY. What existed was TRUEEDGE-FAST, a counterfactual
+    that re-prices paper copies at a reaction time we did not have.
+    A counterfactual cannot settle this: it grades the same book twice
+    and the difference it reports is arithmetic, not evidence.
+
+    The chain lane going down on 2026-08-31 created the experiment.
+    Before it, rn1's fills decoded on-chain at roughly -0.65s; after,
+    every fill arrives through the Data-API poller at ~310s. Same
+    whale, same roster, same gates, same clip — only the delay moved.
+    So the settled book now contains both arms, and this endpoint
+    reports the ratio-estimator interval for each.
+
+    IT IS BUILT TO REFUSE A CAUSAL READING. The lane is almost
+    perfectly collinear with the calendar: chain rows are Aug 24-30,
+    poller rows Aug 31 onward. Anything that changed over those same
+    days — his edge decaying, a different slate, a softer book — lands
+    entirely in one arm. So every bucket reports the distinct UTC days
+    it draws from, and `confounded` is true whenever the two lanes do
+    not share days. Read the days first. If they do not overlap, this
+    is a description of two time periods, not a measurement of latency.
+    """
+    from ..analytics.proof import COHORT_START, roi_with_ci
+
+    pool = await get_pool()
+    start = since or COHORT_START
+    since_ts = datetime.fromisoformat(str(start))
+    args: list[Any] = [since_ts]
+    q = """
+        SELECT COALESCE(lo.filled_usd, lo.requested_usd)::float8 AS stake,
+               lo.pnl::float8 AS pnl,
+               lower(COALESCE(lo.whale_username, '?')) AS whale,
+               COALESCE(NULLIF(m.event_slug, ''),
+                        NULLIF(lo.us_market_slug, '')) AS event_key,
+               COALESCE(t.source, 'unknown') AS lane,
+               to_char(t.ts, 'YYYY-MM-DD') AS day,
+               -- DETECTION lag is the venue's + our decode's; COPY lag
+               -- is what actually priced the fill, because it is the
+               -- interval between HIS trade and OURS. Bucketing is on
+               -- the copy lag for that reason; detection is reported
+               -- beside it so a slow gate is distinguishable from a
+               -- slow lane.
+               extract(epoch FROM (t.detected_at - t.ts))::float8 AS det_lag,
+               extract(epoch FROM (lo.placed_at - t.ts))::float8 AS copy_lag
+          FROM live_orders lo
+          JOIN trades t ON t.id = lo.trade_id
+          LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+          LEFT JOIN markets m ON m.condition_id = mt.condition_id
+         WHERE lo.placed_at >= $1
+           AND lo.pnl IS NOT NULL
+           AND lo.status IN ('settled', 'cashed_out')
+           AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
+           AND COALESCE(lo.filled_usd, lo.requested_usd) > 0
+    """
+    if whale:
+        args.append(whale.lower())
+        q += "           AND lower(COALESCE(lo.whale_username,'')) = $2\n"
+    rows = [dict(r) for r in await pool.fetch(q, *args)]
+
+    def _summary(sel: list[dict]) -> dict:
+        out = roi_with_ci(sel)
+        days = sorted({str(r["day"]) for r in sel if r.get("day")})
+        out["days"] = days
+        lags = sorted(float(r["copy_lag"]) for r in sel
+                      if r.get("copy_lag") is not None)
+        out["copy_lag_p50"] = (round(lags[len(lags) // 2], 2)
+                               if lags else None)
+        return out
+
+    by_bucket: dict[str, dict] = {}
+    for name, lo_s, hi_s in _LAT_BUCKETS:
+        sel = [r for r in rows
+               if r.get("copy_lag") is not None
+               and lo_s <= float(r["copy_lag"]) < hi_s]
+        by_bucket[name] = _summary(sel)
+
+    by_lane: dict[str, dict] = {}
+    for lane in sorted({str(r["lane"]) for r in rows}):
+        by_lane[lane] = _summary([r for r in rows
+                                  if str(r["lane"]) == lane])
+
+    # THE CONFOUND, COMPUTED — not left to the reader's memory. If the
+    # two lanes never traded on the same day, no amount of sample size
+    # separates "we were slower" from "that week was worse".
+    lane_days = {k: set(v.get("days") or []) for k, v in by_lane.items()
+                 if k in ("chain", "poll")}
+    shared = (set.intersection(*lane_days.values())
+              if len(lane_days) == 2 else set())
+    confounded = len(lane_days) == 2 and not shared
+    if len(lane_days) < 2:
+        reading = ("SINGLE LANE — only one detection lane has settled "
+                   "copies in this cohort, so there is nothing to "
+                   "compare yet")
+    elif confounded:
+        reading = ("CONFOUNDED — the two lanes share no trading day, so "
+                   "this is a comparison of two time periods that "
+                   "happen to differ in latency, not a measurement of "
+                   "latency. It cannot support a causal claim.")
+    else:
+        reading = (f"OVERLAPPING — the lanes share {len(shared)} day(s), "
+                   f"so a like-for-like comparison is possible on those "
+                   f"days; check that each arm carries enough clusters "
+                   f"before reading the intervals")
+    return {
+        "cohort_start": start,
+        "whale": whale.lower() or "(all copied whales)",
+        "n_settled": len(rows),
+        "by_copy_lag": by_bucket,
+        "by_detection_lane": by_lane,
+        "shared_days": sorted(shared),
+        "confounded": confounded,
+        "reading": reading,
+        "caveat": ("stake and pnl are the same terminal-rows-only "
+                   "definition the proof cohort uses; a bucket with "
+                   "fewer than 2 clusters gets no interval"),
+    }
+
+
+@app.get("/api/admin/whale-screen", dependencies=[Depends(require_admin)])
+async def admin_whale_screen() -> dict:
+    """Which whales does the arithmetic actually work for?
+
+    Phase 3 of the owner's plan (2026-09-01): rank every whale the
+    analytics worker publishes by whether COPYING him can carry a
+    positive margin, not by his raw edge. The candidate census only
+    ever ranked raw edge, and raw edge is his, not ours.
+
+    THREE NUMBERS PER WHALE, READ FROM WHERE THEY ARE ALREADY PUBLISHED,
+    NEVER RECOMPUTED HERE:
+
+      his_edge      edge_gate.snapshot()  -- whole-book, merge-inclusive,
+                    the exact interval the money gate funds on
+      price_diff    price_fidelity        -- his price minus our cost per
+                    share, per dollar; positive means we filled CHEAPER.
+                    Today this is a CREDIT on every traded whale.
+      realized      proof.cohort_assess   -- what our settled copies of
+                    him actually returned, cluster-robust interval
+
+    The gap between his_edge and realized is NOT price_diff -- the
+    audit settled that: our entry prices beat his. The gap is WHICH of
+    his trades we get filled on. So net_ci95 (edge shifted by the price
+    differential) is reported as what copying could earn at his fill
+    selection, and realized is what it does earn at ours. A whale whose
+    realized interval excludes zero above is CAPTURING; one with no
+    settled copies is UNMEASURED and the only way to learn his number is
+    to trade him at a measurement clip -- there is no shortcut through
+    his own book.
+
+    Ranked by realized point estimate where measured, then by his_edge
+    lower bound where not. A candidate cannot outrank a measured whale
+    on a number we have not measured.
+    """
+    from .. import edge_gate
+    from ..analytics.price_fidelity import cohort_fidelity
+    from ..analytics.proof import (COHORT_START, MIN_PROOF_CLUSTERS,
+                                   cohort_assess, required_n)
+
+    pool = await get_pool()
+    snap = edge_gate.snapshot() or {}
+    whales_pub = snap.get("whales") or {}
+    try:
+        fid = (await cohort_fidelity(pool, COHORT_START)).get("by_whale") or {}
+    except Exception as exc:  # noqa: BLE001 — optional column
+        fid, fid_err = {}, type(exc).__name__
+    else:
+        fid_err = None
+    try:
+        realized = (await cohort_assess(pool, COHORT_START)).get("by_whale") or {}
+    except Exception as exc:  # noqa: BLE001 — optional column
+        realized, real_err = {}, type(exc).__name__
+    else:
+        real_err = None
+
+    rows = []
+    for w in sorted(set(whales_pub) | set(fid) | set(realized)):
+        g = whales_pub.get(w) or {}
+        f = fid.get(w) or {}
+        r = realized.get(w) or {}
+        his_ci = g.get("ci95")
+        dep = float(f.get("deployed") or 0)
+        diff = (round(float(f.get("dollar_edge_vs_his_price") or 0) / dep, 6)
+                if dep > 0 else None)
+        net_ci = ([round(his_ci[0] + diff, 6), round(his_ci[1] + diff, 6)]
+                  if isinstance(his_ci, (list, tuple)) and len(his_ci) == 2
+                  and diff is not None else None)
+        r_ci = r.get("ci95")
+        n_settled = int(r.get("n") or 0)
+        games = int(r.get("clusters") or 0)
+        if n_settled == 0:
+            verdict = ("UNMEASURED — no settled copies; his book cannot "
+                       "tell us what OUR fills of him return. Trade him at "
+                       "a measurement clip to learn it.")
+        elif not r_ci:
+            verdict = "INSUFFICIENT — fewer than two settled copies"
+        elif r_ci[0] > 0:
+            verdict = f"CAPTURING at 95% — realized {_pct_pair(r_ci)}"
+        elif r_ci[1] < 0:
+            verdict = f"LOSING at 95% — realized {_pct_pair(r_ci)}"
+        else:
+            verdict = (f"NOT DEMONSTRATED — realized {_pct_pair(r_ci)} "
+                       f"contains zero")
+        # BELOW THE FLOOR: provisional, and no horizon. See
+        # proof.MIN_PROOF_CLUSTERS -- a projection sized on a handful
+        # of games is noise squared, and the interval is not yet 95%.
+        provisional = bool(r_ci) and games < MIN_PROOF_CLUSTERS
+        if provisional:
+            verdict = f"PROVISIONAL (games<{MIN_PROOF_CLUSTERS}) — {verdict}"
+        need = None
+        if (not provisional and r.get("sigma_per_dollar")
+                and r.get("roi") and r["roi"] > 0):
+            need = required_n(r["sigma_per_dollar"], r["roi"])
+        rows.append({
+            "whale": w,
+            "his_edge_ci95": his_ci, "his_edge_roi": g.get("roi"),
+            "his_fills_total": g.get("fills_total"),
+            "funded": g.get("funded"), "gate_reason": g.get("reason"),
+            "price_diff_per_dollar": diff,
+            "price_diff_basis": ("his price minus our cost per share, on "
+                                 "all filled copies, open and closed; "
+                                 "positive = we fill cheaper"),
+            "net_edge_ci95_at_his_selection": net_ci,
+            "realized_roi": r.get("roi"), "realized_ci95": r_ci,
+            "realized_settled": n_settled,
+            "realized_clusters": r.get("clusters"),
+            "n_needed_at_observed": need,
+            "n_still_needed": (max(0, need - n_settled) if need else None),
+            "verdict": verdict,
+        })
+
+    def _rank(x):
+        # Measured whales first, by the realized LOWER BOUND and then
+        # the point estimate; the unmeasured after them by his own lower
+        # bound. A number we have not measured never outranks one we
+        # have -- and (round three) a point estimate on three copies
+        # never outranks a bound on eight hundred: capital follows what
+        # is demonstrated, not what is loudest.
+        if x["realized_settled"] > 0 and x["realized_roi"] is not None:
+            ci = x.get("realized_ci95")
+            lo = float(ci[0]) if ci else float("-inf")
+            return (0, -lo, -x["realized_roi"])
+        lo = (x["his_edge_ci95"] or [float("-inf")])[0]
+        return (1, -float(lo), 0.0)
+
+    rows.sort(key=_rank)
+    return {
+        "cohort_start": COHORT_START,
+        "gate_measured_at": snap.get("measured_at"),
+        "gate_read_age_s": snap.get("read_age_s"),
+        "errors": {k: v for k, v in (("fidelity", fid_err),
+                                     ("realized", real_err)) if v},
+        "rows": rows,
+        "reading": ("his_edge is what HE earns; realized is what OUR "
+                    "copies of him earn; the difference is fill "
+                    "selection, not price. Rank on realized. UNMEASURED "
+                    "is not a verdict, it is an instruction."),
+    }
+
+
+@app.get("/api/admin/impact-edge", dependencies=[Depends(require_admin)])
+async def admin_impact_edge(whale: str = "rn1", flow_per_day: float = 0.0) -> dict:
+    """Edge conditioned on what capturing it cost. See analytics/impact.py.
+
+    Proof needs n ~ (1.645*sigma/mu)^2 -- edge squared, not volume. If
+    the low-impact slice earns at 95%, that is the fill rule, and this
+    reports how many more settled copies prove it at the given flow.
+    """
+    from ..analytics.impact import cohort_impact
+    from ..analytics.proof import COHORT_START
+    return await cohort_impact(await get_pool(), COHORT_START,
+                               whale or None, flow_per_day or None)
+
+
+@app.get("/api/admin/gate-edge", dependencies=[Depends(require_admin)])
+async def admin_gate_edge(whale: str = "", days: int = 30) -> dict:
+    """What each refusal gate costs or saves. See analytics/gate_edge.py.
+
+    Every refused trade scored at HIS price to resolution, per gate,
+    beside the taken trades on the same basis. A gate whose refused
+    trades earn at 95% on 30+ games is a lever; one whose refused
+    trades lose is preserving his edge.
+    """
+    from ..analytics.gate_edge import cohort_gate_edge
+
+    return await cohort_gate_edge(await get_pool(), days, whale or None)
+
+
+@app.get("/api/admin/lane-exec", dependencies=[Depends(require_admin)])
+async def admin_lane_exec(whale: str = "", days: int = 7) -> dict:
+    """Execution by DETECTION lane. See analytics/lane_exec.py.
+
+    The chain lane sees rn1 in about a second; what happens after
+    detection had never been measured: seconds until the order left
+    (t_send, stamped at the IOC call), fill rate, venue round trip,
+    and what the fills return, per lane.
+    """
+    from ..analytics.lane_exec import cohort_lane_exec
+
+    return await cohort_lane_exec(await get_pool(), days, whale or None)
+
+
+@app.get("/api/admin/mirror-shadow", dependencies=[Depends(require_admin)])
+async def admin_mirror_shadow(whale: str = "", hours: float = 24.0) -> dict:
+    """Position mirroring, phase P0 (owner order 2026-09-02): what the
+    shadow worker read and would have done, per whale and market, with
+    the counts that gate P1 -- would-fill rate at the book, fill-derived
+    vs snapshot drift, mapped share. No orders are placed by this phase.
+    See analytics/mirror.py and workers/mirror_shadow.py."""
+    from ..analytics.mirror_report import mirror_shadow_report
+
+    return await mirror_shadow_report(await get_pool(), hours, whale or None)
+
+
+@app.get("/api/admin/mirror-cover", dependencies=[Depends(require_admin)])
+async def admin_mirror_cover(whale: str = "rn1", hours: float = 24.0,
+                             map_max: int = 150) -> dict:
+    """Coverage census for the MIRRORCOVER runner job (to-a-tee Phase 0,
+    owner order 2026-09-02 "mirror the whales to a tee"): his markets in
+    the window with every candidate slug the mapping grammar would try,
+    his dollars, the shadow's current class and the current mapping
+    source. Read-only, Postgres only; the venue listing test runs on the
+    runner, which can reach the venue. See analytics/mirror_report.py."""
+    from ..analytics.mirror_report import mirror_cover_report
+
+    return await mirror_cover_report(await get_pool(), (whale or "rn1").lower(), hours,
+                                     max(0, min(int(map_max), 600)))
+
+
+@app.get("/api/admin/size-edge", dependencies=[Depends(require_admin)])
+async def admin_size_edge(whale: str = "", days: int = 30) -> dict:
+    """His edge by the dollars he staked. See analytics/size_edge.py.
+
+    The $10 dust floor refuses every proportional copy of a probe he
+    placed under $10 (the largest refusal on the first day of the $50
+    measuring clips). Whether those probes carry his edge is a number
+    on his own resolved book; this reads it, and the floor moves only
+    when the number says so.
+    """
+    from ..analytics.size_edge import WHALES, cohort_size_edge
+
+    pool = await get_pool()
+    names = [whale.lower()] if whale else list(WHALES)
+    out: dict = {"days": days, "whales": {}}
+    for w in names:
+        try:
+            out["whales"][w] = await cohort_size_edge(pool, w, days)
+        except Exception as exc:  # noqa: BLE001 — one whale never hides the rest
+            out["whales"][w] = {"error": f"{type(exc).__name__}: {exc}"[:200]}
+    return out
+
+
+@app.get("/api/admin/edge-decomposition", dependencies=[Depends(require_admin)])
+async def admin_edge_decomposition(whale: str = "", days: int = 30) -> dict:
+    """His edge split into SELECTION and TIMING. See analytics/decompose.py.
+
+    Every resolved BUY of his scored at his fill, 5/10/60 minutes later,
+    and just before game start. If the pre-game leg clears zero at 95%
+    on 30+ games there is a learnable WHAT under the WHEN.
+    """
+    from ..analytics.decompose import WHALES, cohort_decompose
+
+    pool = await get_pool()
+    names = [whale.lower()] if whale else list(WHALES)
+    out: dict = {"days": days, "whales": {}}
+    for w in names:
+        try:
+            out["whales"][w] = await cohort_decompose(pool, w, days)
+        except Exception as exc:  # noqa: BLE001 — table absent until 044
+            out["whales"][w] = {"error": f"{type(exc).__name__}: {str(exc)[:160]}"}
+    return out
+
+
+@app.get("/api/admin/edge-marks-probe", dependencies=[Depends(require_admin)])
+async def admin_edge_marks_probe() -> dict:
+    """Does the public CLOB honour startTs/endTs for the marks worker?
+    One read on the newest markable buy; read-only."""
+    from ..workers import edge_marks as _em
+    return await _em.probe(await get_pool())
+
+
+@app.get("/api/admin/price-path", dependencies=[Depends(require_admin)])
+async def admin_price_path(whale: str = "rn1", since: str = "") -> dict:
+    """Mean ask change t seconds after his fill. See analytics/price_path.py.
+
+    RISES -> take the post-impact ask now. REVERTS -> rest at his price.
+    Neither -> the order type is not the lever.
+    """
+    from ..analytics.price_path import cohort_path
+    from ..analytics.proof import COHORT_START
+    try:
+        return await cohort_path(await get_pool(), since or COHORT_START,
+                                 whale or None)
+    except Exception as exc:  # noqa: BLE001 — table absent until 042
+        return {"error": f"{type(exc).__name__}: {str(exc)[:160]}",
+                "by_t": {}, "n_rows": 0}
+
+
+@app.get("/api/admin/exit-census", dependencies=[Depends(require_admin)])
+async def admin_exit_census() -> dict:
+    """WHY the exit path did or did not act, attributed.
+
+    "mirror_exit has never placed an order" has stood as an open item
+    for hours and it is not an answer — it is the absence of one.
+    classify_exit and mirror_exit refuse in twenty distinct ways and
+    nineteen were silent, so "the whale never exited", "we never copied
+    his entry", "the venue says we hold nothing" and "another task
+    claimed it" all reached production as the same event: no log line.
+
+    READ FROM THE HEARTBEAT, NOT FROM THIS PROCESS. The counters are
+    module globals in whichever process runs the copy path, and that is
+    the WORKER process — poller, copy_sweep and whale_exits all run
+    under workers/all.py. The API runs separately. An endpoint that
+    returned its own in-process census would answer zero forever and
+    read as "the exit path never ran", which is the exact false
+    negative this census was built to stop. So it reads the copy_sweep
+    heartbeat, and it says so in its own output.
+
+    The most important line is `mx_no_position_of_ours`. If that
+    dominates, the exit path is working and the fill rate is the
+    constraint — there is nothing to sell. Only a refusal AFTER
+    mx_reached_position_lookup with a position present is an exit-path
+    defect.
+    """
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT detail, beat_at FROM service_heartbeats "
+        "WHERE service = 'copy_sweep'")
+    if row is None:
+        return {"source": "copy_sweep heartbeat",
+                "available": False,
+                "why": "no copy_sweep heartbeat row — the sweep has "
+                       "never completed a cycle, so nothing has been "
+                       "published. This is a worker liveness problem, "
+                       "not an exit-path finding."}
+    detail = row["detail"]
+    if isinstance(detail, str):
+        try:
+            detail = json.loads(detail)
+        except ValueError:
+            detail = {}
+    detail = detail or {}
+    # ABSENT IS NOT EMPTY (2026-08-25, adversarial review). A heartbeat
+    # with no exit_census key at all — what a pre-census worker build
+    # writes, and what a failed sweep pass writes — was silently
+    # substituted with {} and then reported available:true alongside
+    # the verdict "no exit signal has reached mirror_exit at all". That
+    # is a confident claim about the exit path drawn from a heartbeat
+    # that never measured it: the exact false negative this endpoint
+    # was built to prevent, reproduced inside the endpoint.
+    if "exit_census" not in detail:
+        return {"source": "copy_sweep heartbeat (worker process)",
+                "beat_at": row["beat_at"],
+                "available": False,
+                "why": "the copy_sweep heartbeat carries no exit_census "
+                       "field. The sweep is beating but this build does "
+                       "not publish the census — most likely the worker "
+                       "is running an older commit than the API. This "
+                       "says NOTHING about whether exits are firing."}
+    counts = detail.get("exit_census") or {}
+    if not isinstance(counts, dict):
+        return {"source": "copy_sweep heartbeat", "available": False,
+                "why": f"exit_census arrived as {type(counts).__name__}, "
+                       "not an object — the heartbeat is being mangled "
+                       "between the worker and here."}
+    total = sum(v for v in counts.values() if isinstance(v, int))
+    reached = int(counts.get("mx_reached_position_lookup") or 0)
+    sold = int(counts.get("mx_SOLD") or 0)
+    no_pos = int(counts.get("mx_no_position_of_ours") or 0)
+    # HIS VANISH ON A MARKET THE MIRROR BOOK HOLDS (mirror P1 step 7,
+    # spec 3.2; owner order 2026-09-02). The book's standing row is kept
+    # out of mirror_exit's lookup by lane, so the per-fill exit path
+    # finds no row of its own there and names it distinctly rather than
+    # as "we never copied his entry" -- which keeps the coverage line
+    # above honest. For the verdict it is the same class as no_pos:
+    # nothing to sell on THIS path, the reconciler unwinds the book from
+    # the same snapshot. Its own line, so the two are never read as one
+    # number; zero, and the verdict below is what it was, whenever no
+    # book exists.
+    mirror_owned = int(counts.get("mx_mirror_owns_market") or 0)
+    # A rest bid can fill inside its own window while the whale is already
+    # exiting the same market; mirror_exit now WAITS for the row to leave
+    # 'submitting' and files the leftover as in-flight (pending), not as
+    # "no position". Named here so the verdict can point at it.
+    in_flight = (int(counts.get("mx_entry_in_flight") or 0)
+                 + int(counts.get("mx_inflight_unreadable") or 0))
+    # Refusals that happen AFTER we confirmed a position of ours is the
+    # only bucket that can be an exit-path defect. Everything before it
+    # is coverage or a genuine non-exit.
+    # EVERY REFUSAL THAT CAN FOLLOW A REACHED LOOKUP. The first list
+    # omitted mx_overspend_halt, mx_below_floor and mx_no_ledger_position,
+    # so the verdict could point a reader at "post_position_refusals"
+    # and show them an empty object while the sleeve sat halted. A
+    # diagnostic that names a bucket must be able to put things in it.
+    defect_keys = ("mx_overspend_halt", "mx_paused",
+                   "mx_venue_holds_nothing",
+                   # A trim too small to buy a whole share. Distinct
+                   # from holds_nothing on purpose: the venue holds our
+                   # shares in this case, and lumping the two together
+                   # is what made a rounding outcome read as a
+                   # ledger/venue disagreement.
+                   "mx_exit_rounds_to_zero",
+                   # The re-raise paths. Before 2026-08-26 an exit that
+                   # died on a cancellation or a venue error left no
+                   # census trace at all, so the totals read as complete
+                   # while a whole class was missing from them.
+                   "mx_aborted_before_venue",
+                   "mx_cancelled_mid_venue_call",
+                   "mx_venue_error",
+                   "mx_no_bid_for_partial", "mx_venue_unfilled",
+                   # A full exit that only partly filled. We still hold
+                   # shares the whale does not — the row stays live and
+                   # the exit is retried, but a standing count here is
+                   # a book we keep failing to get out of.
+                   "mx_partial_full_exit",
+                   "mx_bad_supplied_fraction", "mx_already_claimed",
+                   "mx_below_floor", "mx_no_ledger_position",
+                   # mx_exit_already_mirrored is the replay guard doing
+                   # its job and is EXPECTED at volume; it is listed so
+                   # the verdict can name it, not because it is a
+                   # defect. mx_exit_ledger_unreadable is.
+                   "mx_exit_already_mirrored", "mx_exit_ledger_unreadable",
+                   # Not a defect on its own -- it is the position lane
+                   # correctly declining an exit the trade lane already
+                   # mirrored. A STANDING count means the two detectors
+                   # are racing on every exit, which is worth seeing.
+                   "mx_exit_recently_applied",
+                   "mx_exit_dedup_unreadable")
+    return {
+        "source": "copy_sweep heartbeat (worker process)",
+        "beat_at": row["beat_at"],
+        "available": True,
+        "counts": counts,
+        "recent": detail.get("exit_recent") or [],
+        "read_this_first": {
+            "exits_reaching_the_position_lookup": reached,
+            "orders_actually_sold": sold,
+            "stopped_because_we_never_copied_his_entry": no_pos,
+            # Pending, not refused: the entry row was still 'submitting'
+            # (or named as an unexplained venue position) when the exit
+            # arrived, so whale_exits keeps the exit and retries it. A
+            # STANDING count here means rest bids are filling inside
+            # the whale's own hold time or a named row is not clearing.
+            "held_pending_entry_in_flight": in_flight,
+            "stopped_because_the_mirror_book_holds_the_market": mirror_owned,
+            "post_position_refusals": {
+                k: int(counts.get(k) or 0) for k in defect_keys
+                if counts.get(k)},
+            "verdict": (
+                "no exit signal has reached mirror_exit at all — look "
+                "upstream at whale_exits and classify_exit"
+                if reached == 0 else
+                "exits reach the path and are HELD because the entry is "
+                "still in flight (rest bid open or a named venue "
+                "position) — they retry; read held_pending_entry_in_flight"
+                if sold == 0 and in_flight > 0
+                and no_pos + mirror_owned + in_flight >= reached else
+                "exits reach the path and stop only because we hold "
+                "nothing to sell — this is a FILL RATE constraint, not "
+                "an exit defect"
+                if sold == 0 and no_pos + mirror_owned >= reached else
+                "exits are being placed"
+                if sold > 0 else
+                "exits reach the path, we hold a position, and they "
+                "still do not sell — read post_position_refusals"),
+        },
+        "census_total_events": total,
+    }
+
+
+# ───────────────────────── THE CASH-OUT CENSUS ─────────────────────────
+#
+# HOW MUCH MONEY DOES THE HAND-SALE PROBLEM MOVE? Nothing else answers
+# it. The five-lens investigation established the MECHANISM — a copy
+# sold by hand keeps sitting in live_orders as `filled`, the desk's
+# cash-out ticket wears `whale_username='manual'` which both halves of
+# the copy page ignore, and the settlement sweep then subtracts that
+# ticket's dollars from the market's target so they land nowhere — but
+# it could not state the SIZE, because there is no database in the
+# environment the plan was written in. Every figure in that document is
+# a synthetic probe input.
+#
+# So this endpoint is the gate. It changes no served number: it is a
+# new read-only admin route, it opens no transaction, it calls nothing
+# that writes, and no existing payload gains or loses a key because of
+# it. Its whole job is to put a magnitude on the restatement the owner
+# has not yet consented to, so that U3/U4/U5 — the units that DO move
+# headline figures — can be judged on numbers instead of on shape.
+#
+# THE DISCIPLINE, taken from this file's other censuses:
+#   * every read carries a LIMIT and a timeout, and the request carries
+#     one budget the reads spend down in order of value — the venue read
+#     is last precisely because it is the slowest and the likeliest to
+#     fail, and it must not be able to starve the dollar figures;
+#   * a figure that could not be computed is served as **null with a
+#     named reason**, never as zero. Zero is an answer; "unread" is not,
+#     and the two have been confused on this codebase before;
+#   * a census that hit its cap is UNREADABLE, not truncated. A floor
+#     served as a total is how a restatement gets under-sized;
+#   * anything the data cannot decide is REFUSED and counted, never
+#     allocated. Which of two co-held rows a partial sale closed is not
+#     a measurement, it is a policy invention.
+CASHOUT_CENSUS_ROW_CAP = 5000        # rows any one read may open
+CASHOUT_CENSUS_SLUG_CAP = 20000      # grouped slugs any one read may open
+CASHOUT_CENSUS_READ_TIMEOUT_S = 8.0  # per database read
+CASHOUT_CENSUS_VENUE_TIMEOUT_S = 30.0  # the positions page-through
+CASHOUT_CENSUS_BUDGET_S = 60.0       # the whole request
+CASHOUT_CENSUS_MIN_BUDGET_S = 0.25   # below this a read is not attempted
+# A shortfall smaller than one whole share is rounding, not a sale —
+# the same threshold `_reap_stale_exiting` uses for the opposite
+# direction (live_executor.py: `held - _explained < 1`).
+CASHOUT_CENSUS_SHARE_EPS = 1.0
+# The statuses in which one of our rows is holding, or has held, a
+# position. 'unfilled'/'rejected'/'error'/'submitting' never took one,
+# so they are not entry rows and cannot be what a sale closed.
+CASHOUT_POSITION_STATUSES = ("filled", "exiting", "settled",
+                             "cashed_out", "merged")
+# The cohort `/api/copies-record` actually SERVES: `_SETTLED_SQL` takes
+# `status IN ('settled','cashed_out') AND settled_at IS NOT NULL`. A copy
+# entry row outside this set has NO LINE on the scoreline, so a hand sale
+# attributed to it moves the published total by exactly nothing until the
+# market resolves. Kept separate from the holding statuses above because
+# conflating the two is what made the gate figure a ceiling.
+CASHOUT_SETTLED_STATUSES = ("settled", "cashed_out")
+# The venue's positions feed pages 50 x 100 (`pmus_account`). At exactly
+# this many entries the book may be short and nothing else says so.
+CASHOUT_CENSUS_VENUE_BOOK_CAP = 5000
+
+
+def _cc_cov(complete: bool, why: str | None = None, **extra) -> dict:
+    """One coverage block. `complete` false ALWAYS carries a why."""
+    return {"complete": bool(complete), "why": why, **extra}
+
+
+def _cc_blank(keys, reason: str) -> dict:
+    """A figure that could not be computed: every number null, the
+    reason named. Never zeros — a zero here reads as 'we looked and
+    there is nothing', which is the one thing this census must never
+    say when it did not look."""
+    out: dict = {k: None for k in keys}
+    out["coverage"] = _cc_cov(False, reason)
+    return out
+
+
+# Every figure this endpoint serves, with the keys that go null when it
+# cannot be computed. Held in ONE place so that a failure ABOVE the reads
+# — the pool, or the COPY_WHALES import — can null the whole payload with
+# a reason instead of raising, and so a new figure cannot be added without
+# declaring what its null looks like.
+_CC_FIGURE_KEYS: dict[str, tuple] = {
+    "desk_cashouts_on_copy_slugs": (
+        "rows", "realized_usd", "markets", "markets_with_realized_sale",
+        "pnl_null_rows", "unfilled_rows", "other_status_rows",
+        "rows_off_copy_slugs"),
+    "restatement_if_attributed": (
+        "copies_record_add_usd", "copies_record_add_rows",
+        "add_in_window_usd", "add_in_window_rows",
+        "add_before_window_usd", "add_before_window_rows",
+        "add_pending_resolution_usd", "add_pending_resolution_rows",
+        "copies_epoch", "refused_co_held_usd", "refused_co_held_rows",
+        "refused_sleeve_held_usd", "refused_sleeve_held_rows",
+        "unmeasurable_rows", "first_day", "last_day",
+        "entry_first_day", "entry_last_day",
+        "track_record_markets_returning_upper_bound",
+        "track_record_add_usd", "track_record_copy_ledger_proxy"),
+    "published_at_zero": (
+        "rows", "copy_rows", "copy_stake_usd", "copy_rows_in_window",
+        "copy_stake_usd_in_window", "copies_epoch", "reaper_retired",
+        "desk_manual", "first_day", "last_day"),
+    "rescore_delta_blind": ("rows", "pnl_usd", "copy_rows", "copy_pnl_usd"),
+    "kalshi_desk_cashouts": ("rows", "usd", "by_status"),
+    "stranded_copy_rows": (
+        "slugs", "rows", "rows_fully_short", "stake_usd",
+        "stake_usd_upper_bound", "shares_short", "sole_row_slugs",
+        "co_held_slugs", "sole_row_stake_usd", "co_held_stake_usd",
+        "mixed_side_slugs_refused"),
+    "unattributable_co_held": ("slugs", "rows", "stake_usd"),
+    "venue_silent_slugs": ("slugs", "rows", "stake_usd"),
+}
+
+
+def _cc_read_this_first() -> dict:
+    """The reading instructions, served whether or not the reads ran."""
+    return {
+        "the_question": "how much money do the owner's hand cash-outs "
+                        "move, and how much of it is attributable at all",
+        "gate": "nothing that changes a served number should ship before "
+                "these figures are read by a human — U3, U4 and U5 all "
+                "move published totals",
+        "already_wrong_vs_merely_unlabelled": (
+            "published_at_zero is money that was never MEASURED (a real "
+            "sale published as a $0.00 settled copy); "
+            "desk_cashouts_on_copy_slugs is money that was measured and "
+            "is wearing the wrong name. Different remedies, different "
+            "consent"),
+        "the_class_with_no_remedy": (
+            "unattributable_co_held plus kalshi_desk_cashouts — refused "
+            "and disclosed, never allocated"),
+        "nulls": "every null on this payload carries its own reason. A "
+                 "null is not a zero and must never be summed as one",
+        "which_number_is_the_move": (
+            "restatement_if_attributed.add_in_window_usd — NOT "
+            "copies_record_add_usd. The copy scoreline is served from "
+            "COPIES_EPOCH onward and grades only entry rows that have "
+            "SETTLED, so a lifetime, settle-agnostic sum is a CEILING on "
+            "the move, not the move. The three add_* figures partition "
+            "the lifetime total; only the in-window one changes a "
+            "published figure today"),
+        "which_numbers_are_ceilings": (
+            "stake_usd_upper_bound and rows on stranded_copy_rows (a "
+            "slug-level shortfall does not prove every row on the slug "
+            "was sold); "
+            "track_record_markets_returning_upper_bound (the record has "
+            "gates this census cannot see); and kalshi_desk_cashouts.usd "
+            "(notional written at QUEUE time on an append-only table, so "
+            "cancelled, reaped and unfilled tickets that never traded "
+            "still carry their full dollars — net them out with "
+            "by_status, which serves the dollars per status). Each "
+            "carries the evidence-bounded figure beside it or names its "
+            "gates"),
+    }
+
+
+class _CashoutBudget:
+    """One deadline for the whole request, spent down in order.
+
+    Each read gets the smaller of its own timeout and what is left. A
+    read that finds no budget left is not attempted and its figure says
+    so, rather than the endpoint hanging for a diagnostic.
+    """
+
+    def __init__(self, total: float = CASHOUT_CENSUS_BUDGET_S) -> None:
+        self.deadline = time.monotonic() + total
+
+    def left(self) -> float:
+        return max(0.0, self.deadline - time.monotonic())
+
+    def grant(self, want: float) -> float | None:
+        rem = self.left()
+        if rem < CASHOUT_CENSUS_MIN_BUDGET_S:
+            return None
+        return min(want, rem)
+
+
+async def _cc_fetch(pool, budget: _CashoutBudget, sql: str, *args,
+                    want: float = CASHOUT_CENSUS_READ_TIMEOUT_S):
+    """One bounded, timed, fail-closed read. -> (rows, None) | (None, why)."""
+    grant = budget.grant(want)
+    if grant is None:
+        return None, ("no request budget left — this read was not "
+                      "attempted rather than made to wait")
+    try:
+        rows = await asyncio.wait_for(pool.fetch(sql, *args), grant)
+    except asyncio.TimeoutError:
+        return None, (f"the read did not answer inside {grant:.1f}s and "
+                      "was abandoned (the database may still be working; "
+                      "the CALLER's wait is what is bounded here)")
+    except Exception as exc:  # noqa: BLE001 — a census never 500s
+        return None, f"{type(exc).__name__}: {str(exc)[:180]}"
+    return list(rows or []), None
+
+
+@app.get("/api/admin/cashout-census", dependencies=[Depends(require_admin)])
+async def api_cashout_census() -> dict:
+    """How much money do the owner's hand cash-outs move? — U0.
+
+    READ-ONLY, and the gate on everything downstream. Five questions,
+    each with its own coverage:
+
+      1. `stranded_copy_rows` — copy-lane rows we still call `filled`
+         that the venue no longer holds enough shares to explain. This
+         is `_reap_stale_exiting`'s reconciliation WITH THE INEQUALITY
+         REVERSED: the three existing reconcilers all ask "does the
+         venue hold MORE than we explain"; the hand-sale fingerprint is
+         the opposite direction. Their stake is phantom open exposure —
+         `/api/copies-record`'s `open.stake` counts it as money on the
+         table that is not on the table.
+
+      2. `desk_cashouts_on_copy_slugs` — the Route A population: desk
+         **Cash Out** tickets (`whale_username='manual'`, `side='SELL'`)
+         sitting on a slug a copy row also sits on. Their realized
+         dollars exist in the database exactly once already and are
+         already fenced by the settlement sweep's `sold_by` subtraction;
+         they are simply wearing a name no copy cohort reads.
+
+      3. `restatement_if_attributed` — what those dollars would ADD to
+         the copy scoreline, and how many markets would come back to the
+         track record, with the date range they fall in. This is the
+         magnitude the owner is owed before consenting to a restatement.
+
+         THE FIGURE THAT IS THE MOVE IS `add_in_window_usd`, NOT the
+         lifetime sum. Two gates stand between an attributable dollar
+         and the published total, and a census that ignores either
+         reports a ceiling as the move — in the UP direction, which is
+         the dangerous one for the number that authorises a restatement:
+           * THE WINDOW. `/api/copies-record` is served from
+             `COPIES_EPOCH` (defaulting to `DISPLAY_EPOCH`) onward and
+             `copies_record.build` drops every settled line dated before
+             it. Under U3 the sale's dollars land on the copy ENTRY
+             row's line, so it is the ENTRY's settled day — not the
+             sale's — that decides inclusion.
+           * THE SETTLED GATE. `_SETTLED_SQL` grades only
+             `status IN ('settled','cashed_out') AND settled_at IS NOT
+             NULL`. A desk cash-out never closes the copy row and the
+             settlement sweep only grades a `filled` row once the market
+             RESOLVES, so the normal state of a recent hand sale is an
+             entry row with no line to fold onto. Those dollars are real
+             and will be booked at resolution; they are not a
+             restatement of a number anyone has read.
+         So the lifetime total is served split three ways —
+         `add_in_window_usd` + `add_before_window_usd` +
+         `add_pending_resolution_usd` — with the epoch named on the
+         payload and the ENTRY-row day range beside the sale-day range.
+
+      4. `published_at_zero` — cash-outs ALREADY published as settled
+         copies worth $0.00, because the row carries `pnl IS NULL`
+         (`_reap_stale_exiting` never writes pnl; the desk writes NULL
+         when the venue gave no average cost). Counted separately
+         because it is a different remedy: those dollars are unmeasured,
+         not mis-labelled, and their stake sits in the ROI denominator.
+
+      5. `unattributable_co_held` — slugs carrying two or more of our
+         still-holding rows where the venue shows a PARTIAL sale. The
+         venue reports one signed net per slug for the whole account and
+         both sides of a market share one identifier, so which row that
+         sale closed is not knowable. This class is REFUSED and
+         disclosed. The owner needs its size, because it is the part of
+         the problem no amount of code can fix.
+
+    Plus `kalshi_desk_cashouts` (the route this repository cannot fix at
+    all — it never touches `live_orders`) and `rescore_delta_blind`, the
+    size of the population a restatement's own delta counter mis-reported
+    until commit d832e7e closed it (see below).
+
+    WHAT THIS ENDPOINT DELIBERATELY DOES NOT DO. It does not decide
+    which row a sale closed, it does not net anything, and it does not
+    reproduce the track record's own arithmetic — that is a fold over
+    the venue activity tape and this census reads `live_orders` and the
+    positions endpoint only, so the track-record dollar figure is served
+    as **null with its reason** beside a NAMED proxy taken from our own
+    ledger. A proxy that says what it is is worth more than a total that
+    does not.
+    """
+    budget = _CashoutBudget()
+    out: dict[str, Any] = {
+        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "writes": "none — this endpoint opens no transaction and calls "
+                  "nothing that writes",
+        "bounds": {
+            "row_cap": CASHOUT_CENSUS_ROW_CAP,
+            "slug_cap": CASHOUT_CENSUS_SLUG_CAP,
+            "read_timeout_s": CASHOUT_CENSUS_READ_TIMEOUT_S,
+            "venue_timeout_s": CASHOUT_CENSUS_VENUE_TIMEOUT_S,
+            "request_budget_s": CASHOUT_CENSUS_BUDGET_S,
+            "share_epsilon": CASHOUT_CENSUS_SHARE_EPS,
+            "venue_book_cap": CASHOUT_CENSUS_VENUE_BOOK_CAP,
+            "note": "a read that hits its cap makes its figure NULL, not "
+                    "a floor — EVERY read, the Kalshi one included; the "
+                    "caps bound the rows opened, and the timeouts bound "
+                    "this request's wait rather than the database's work",
+        },
+    }
+    # FAIL CLOSED ABOVE THE READS TOO. `_cc_fetch` makes every read
+    # incapable of 500ing, but the pool acquisition and the COPY_WHALES
+    # import sat outside that envelope and would raise straight out of
+    # the handler — a census that answers with a stack trace instead of
+    # a payload of named nulls is inconsistent with its own contract.
+    try:
+        from .copies_record import COPY_WHALES
+        # ONE DEFINITION OF THE INTENT PATH. `live_executor.
+        # ORDER_INTENT_SQL` is the only place that expression is written
+        # down; every reader splices it in, never re-types it. Imported
+        # lazily inside the handler for the same reason every other
+        # caller in this module does — so an admin GET does not pull the
+        # executor in at module import — and INSIDE the fail-closed
+        # envelope, because two reads now splice it and an import that
+        # raised here would leave the handler answering with a stack
+        # trace instead of a payload of named nulls.
+        from ..live_executor import ORDER_INTENT_SQL
+
+        pool = await get_pool()
+        whales = sorted(COPY_WHALES)
+    except Exception as exc:  # noqa: BLE001 — a census never 500s
+        why = (f"the census could not open its own inputs: "
+               f"{type(exc).__name__}: {str(exc)[:180]}")
+        out["copy_whales"] = None
+        for _name, _keys in _CC_FIGURE_KEYS.items():
+            out[_name] = _cc_blank(_keys, why)
+        out["budget_left_s"] = round(budget.left(), 2)
+        out["read_this_first"] = _cc_read_this_first()
+        return out
+    out["copy_whales"] = whales
+    # THE EPOCH THE COPY SCORELINE IS SERVED FROM. It is defined further
+    # down this module, so it is read defensively: if it is not a string
+    # here the window split below is served as null with that reason,
+    # per this endpoint's own rule, rather than silently assuming one.
+    _epoch = globals().get("COPIES_EPOCH")
+    epoch = _epoch if isinstance(_epoch, str) and _epoch else None
+    epoch_why = None if epoch else (
+        "COPIES_EPOCH could not be read from this module, so the split "
+        "between dollars that would move the SERVED copy total and "
+        "dollars that fall before its window is not decidable here")
+
+    # ── (2)+(3) THE DESK CASH-OUTS. First, because they are the dollars
+    # the question is about and they must not be starved by the venue
+    # read below.
+    sells, why = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT lo.id,
+               lower(lo.us_market_slug) AS slug,
+               lo.status,
+               lo.pnl::float8 AS pnl,
+               to_char(lo.settled_at AT TIME ZONE 'America/New_York',
+                       'YYYY-MM-DD') AS day
+        FROM live_orders lo
+        WHERE lower(COALESCE(lo.whale_username, '')) = 'manual'
+          AND upper(COALESCE(lo.side, '')) = 'SELL'
+          AND lo.us_market_slug IS NOT NULL
+        ORDER BY lo.id DESC
+        LIMIT $1
+        """, CASHOUT_CENSUS_ROW_CAP)
+    route_a_keys = _CC_FIGURE_KEYS["desk_cashouts_on_copy_slugs"]
+    restate_keys = _CC_FIGURE_KEYS["restatement_if_attributed"]
+    if sells is None:
+        out["desk_cashouts_on_copy_slugs"] = _cc_blank(route_a_keys, why)
+        out["restatement_if_attributed"] = _cc_blank(
+            restate_keys, f"depends on the desk cash-out read: {why}")
+    elif len(sells) >= CASHOUT_CENSUS_ROW_CAP:
+        capped = (f"the desk cash-out read hit its {CASHOUT_CENSUS_ROW_CAP}-row "
+                  "cap, so every figure below it would be a floor rather "
+                  "than a total — refused")
+        out["desk_cashouts_on_copy_slugs"] = _cc_blank(route_a_keys, capped)
+        out["restatement_if_attributed"] = _cc_blank(restate_keys, capped)
+    else:
+        slugs = sorted({r["slug"] for r in sells if r["slug"]})
+        peers, why_p = await _cc_fetch(
+            pool,
+            budget,
+            """
+            SELECT lower(us_market_slug) AS slug,
+                   count(*) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($3::text[]))::int AS copy_entry_rows,
+                   -- THE RULE U4 WOULD ACTUALLY SHIP, not a proxy for it.
+                   -- track_record builds manual_slugs with NO status
+                   -- filter at all; U4 adds only `AND side <> 'SELL'`.
+                   -- Restricting this to holding statuses made a manual
+                   -- BUY that never filled invisible here while it still
+                   -- holds its market in the manual sleeve after U4 —
+                   -- i.e. it counted a market as returning that would
+                   -- not return.
+                   count(*) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = 'manual'
+                         AND upper(COALESCE(side, '')) <> 'SELL')::int
+                       AS manual_buy_rows,
+                   -- WHOSE SHARES THE SALE COULD HAVE BEEN. A desk SELL
+                   -- on a slug the manual sleeve or underdog also HOLDS
+                   -- is very probably a sale of THOSE shares, not the
+                   -- copy row's — and attributing it to the copy row
+                   -- books the desk's own hand-sale onto the copy
+                   -- scoreline, in the UP direction, on the figure that
+                   -- authorises the restatement. So it is refused.
+                   -- An ENTRY leg is what counts, matched the way this
+                   -- codebase matches an intent everywhere else — a
+                   -- SUBSTRING, not a prefix (`is_short_intent`,
+                   -- live_executor.py:2894, is `"SHORT" in intent`).
+                   -- THE PREFIX FORM WAS WRONG AND SILENT: the venue
+                   -- stores `ORDER_INTENT_BUY_LONG` /
+                   -- `ORDER_INTENT_BUY_SHORT` (pmus.py:498, :1637), so
+                   -- `LIKE 'BUY%'` matched NO row that carried an
+                   -- intent, this counter stayed 0, and the refusal
+                   -- below never fired on exactly the rows it was
+                   -- written for. `%BUY%` cannot over-match: the only
+                   -- other literals are ORDER_INTENT_SELL_LONG and
+                   -- ORDER_INTENT_SELL_SHORT, neither containing BUY.
+                   -- The fallback to `side <> 'SELL'` stands for a row
+                   -- the venue named no intent for. A SELL leg must NOT
+                   -- count, or the desk
+                   -- cash-out ticket being attributed — itself a
+                   -- `manual` row in `cashed_out`, a holding status —
+                   -- would refuse every dollar on the payload.
+                   -- The mirror needs no term here: mirror rows carry
+                   -- the COPY whale's username, so a mirror leg beside
+                   -- a copy entry already reads as two copy_entry_rows
+                   -- and is refused by the co-held gate.
+                   count(*) FILTER (
+                       WHERE NOT (lower(COALESCE(whale_username, ''))
+                                  = ANY($2::text[]))
+                         AND status = ANY($3::text[])
+                         AND (upper(COALESCE(__INTENT__, '')) LIKE '%BUY%'
+                              OR (__INTENT__ IS NULL
+                                  AND upper(COALESCE(side, ''))
+                                      <> 'SELL')))::int
+                       AS non_copy_holding_rows,
+                   -- The copy entry rows that HAVE A LINE on the served
+                   -- scoreline (`_SETTLED_SQL`'s own population). A sale
+                   -- attributed to a row outside this set adds nothing
+                   -- to the published total until the market resolves.
+                   count(*) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($5::text[])
+                         AND settled_at IS NOT NULL)::int AS copy_settled_rows,
+                   -- THE DAY THE DOLLARS WOULD LAND ON, which is what the
+                   -- epoch window is applied against — the ENTRY row's
+                   -- settled day, never the sale's.
+                   min(to_char(settled_at AT TIME ZONE 'America/New_York',
+                               'YYYY-MM-DD')) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($5::text[])
+                         AND settled_at IS NOT NULL) AS copy_settled_day,
+                   COALESCE(sum(COALESCE(NULLIF(filled_usd, 0), requested_usd))
+                            FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($3::text[])), 0)::float8 AS copy_stake,
+                   COALESCE(sum(COALESCE(pnl, 0)) FILTER (
+                       WHERE lower(COALESCE(whale_username, '')) = ANY($2::text[])
+                         AND status = ANY($3::text[])), 0)::float8 AS copy_pnl
+            FROM live_orders
+            WHERE lower(us_market_slug) = ANY($1::text[])
+            GROUP BY 1
+            LIMIT $4
+            """.replace("__INTENT__", ORDER_INTENT_SQL),
+            slugs, whales, list(CASHOUT_POSITION_STATUSES),
+            CASHOUT_CENSUS_SLUG_CAP, list(CASHOUT_SETTLED_STATUSES))
+        if peers is None:
+            dep = f"the copy-row lookup for those slugs failed: {why_p}"
+            out["desk_cashouts_on_copy_slugs"] = _cc_blank(route_a_keys, dep)
+            out["restatement_if_attributed"] = _cc_blank(restate_keys, dep)
+        else:
+            peer = {r["slug"]: r for r in peers}
+            on_copy = [r for r in sells
+                       if (peer.get(r["slug"]) or {}).get("copy_entry_rows")]
+            # A desk ticket that never filled ('unfilled') is not a sale
+            # and has no dollars; it is counted so the population is
+            # whole, and excluded from every dollar figure.
+            sold = [r for r in on_copy if r["status"] == "cashed_out"]
+            measured = [r for r in sold if r["pnl"] is not None]
+            # Attributable — U3's rule, stated per row, not per
+            # intention: EXACTLY ONE copy-lane entry row on the slug AND
+            # NO NON-COPY ROW HOLDING SHARES OF IT. Two copy rows and
+            # the sale is not allocatable; `pnl IS NULL` and the
+            # settlement sweep has ALREADY given that market's whole
+            # cumulative realization to the copy row, so attributing it
+            # again books the money twice.
+            #
+            # THE SECOND CONDITION IS NOT COSMETIC. Without it a desk
+            # sale of the desk's OWN hand-opened position — a `manual`
+            # BUY sitting on the same slug as one copy row — was
+            # attributed in full to the copy row, i.e. the census booked
+            # the owner's own sleeve onto the copy scoreline, UP, on the
+            # figure the docstring names THE MOVE and calls the
+            # dangerous direction. The same payload was simultaneously
+            # saying that market does NOT come back to the track record
+            # *because the desk hand-opened it*. This is the discipline
+            # the ledger path below already applies ("shares other rows
+            # explain are not these rows'"); the restatement path is now
+            # consistent with it.
+            def _noncopy(r) -> int:
+                return int(peer[r["slug"]]["non_copy_holding_rows"] or 0)
+
+            attributable = [r for r in measured
+                            if peer[r["slug"]]["copy_entry_rows"] == 1
+                            and not _noncopy(r)]
+            refused = [r for r in measured
+                       if peer[r["slug"]]["copy_entry_rows"] > 1]
+            # Its own refusal class, never folded into the co-held one:
+            # the two have different remedies. A co-held slug is
+            # PERMANENTLY unattributable (the venue nets both rows into
+            # one signed number); a slug sharing a sleeve is decidable
+            # from the activity tape this census does not read.
+            refused_sleeve = [r for r in measured
+                              if peer[r["slug"]]["copy_entry_rows"] == 1
+                              and _noncopy(r)]
+            days = sorted({r["day"] for r in attributable if r["day"]})
+            # ── THE THREE GATES BETWEEN AN ATTRIBUTABLE DOLLAR AND THE
+            # SERVED TOTAL. Partitioned, never summed into one figure:
+            #   pending  — the copy entry row has no line on the
+            #              scoreline yet (still `filled`; the market has
+            #              not resolved). Real money, booked at
+            #              resolution, restating nothing anyone has read.
+            #   before   — the entry row's line is dated before the epoch
+            #              the copy page is served from, so it is dropped
+            #              by `copies_record.build` before the scorecard
+            #              ever sees it.
+            #   in_window— the only dollars that move a published figure.
+            pending, before, in_window, undecided = [], [], [], []
+            entry_days = sorted({
+                d for d in (peer[r["slug"]]["copy_settled_day"]
+                            for r in attributable) if d})
+            for r in attributable:
+                p = peer[r["slug"]]
+                if not int(p["copy_settled_rows"] or 0):
+                    pending.append(r)
+                elif epoch is None:
+                    undecided.append(r)
+                elif (p["copy_settled_day"] or "") < epoch:
+                    before.append(r)
+                else:
+                    in_window.append(r)
+            # A window that could not be decided is NOT quietly counted
+            # as in-window: the split is served null with its reason and
+            # the lifetime total stands alone.
+            split_unknown = bool(undecided)
+            # The markets U4 would stop deleting from the track record:
+            # a manual SELL on the slug, NO manual BUY on it (a genuinely
+            # hand-OPENED position stays in the manual sleeve — the
+            # standing 2026-08-22 order is untouched), and a copy row
+            # present to come back.
+            #
+            # BUILT FROM `on_copy`, NOT `sold` — the mirror of the
+            # status-filter mismatch already fixed on the BUY side above.
+            # `track_record.manual_slugs` is `SELECT DISTINCT
+            # us_market_slug FROM live_orders WHERE whale_username =
+            # 'manual'`: no status filter at all, and U4 adds only
+            # `AND side <> 'SELL'`. So a slug whose only manual row is a
+            # SELL that never filled is in manual_slugs TODAY and leaves
+            # it under U4 — the market returns. Counting only
+            # `cashed_out` sales dropped exactly those slugs, making a
+            # figure named `..._upper_bound`, whose own coverage says
+            # "It is a CEILING", a FLOOR in that sub-population.
+            returning = sorted({
+                r["slug"] for r in on_copy
+                if not peer[r["slug"]]["manual_buy_rows"]})
+            out["desk_cashouts_on_copy_slugs"] = {
+                "rows": len(on_copy),
+                "realized_usd": round(sum(r["pnl"] for r in measured), 2),
+                # `markets` counts every slug a manual SELL ticket
+                # touched, INCLUDING tickets that never filled. The
+                # markets actually covered by a realized sale are the
+                # second figure — the first over-reaches as a label.
+                "markets": len({r["slug"] for r in on_copy}),
+                "markets_with_realized_sale": len({r["slug"]
+                                                   for r in measured}),
+                "pnl_null_rows": len([r for r in sold if r["pnl"] is None]),
+                # `unfilled` is the desk's own no-fill status. It was
+                # previously the name on a count of EVERY non-cashed_out
+                # status, which also swept up rejected/error/open/
+                # cancelled tickets.
+                "unfilled_rows": len([r for r in on_copy
+                                      if r["status"] == "unfilled"]),
+                "other_status_rows": len([
+                    r for r in on_copy
+                    if r["status"] not in ("cashed_out", "unfilled")]),
+                "rows_off_copy_slugs": len(sells) - len(on_copy),
+                "coverage": _cc_cov(
+                    True,
+                    None,
+                    scanned_manual_sell_rows=len(sells),
+                    markets_is=("slugs touched by a manual SELL ticket, "
+                                "filled or not; markets_with_realized_"
+                                "sale is the subset carrying dollars"),
+                    dollars_exclude=("rows that never filled, and rows "
+                                     "whose pnl is NULL — the venue gave "
+                                     "no average cost, so no dollar was "
+                                     "ever measured on them"),
+                    exit_commission=("not in data we hold for any sale but "
+                                     "the desk's own; every realized figure "
+                                     "here is an UPPER bound on net, the "
+                                     "same caveat a settled line already "
+                                     "carries")),
+            }
+            proxy = {
+                "rows": sum(peer[s]["copy_entry_rows"] for s in returning),
+                "stake_usd": round(
+                    sum(peer[s]["copy_stake"] for s in returning), 2),
+                "pnl_usd": round(
+                    sum(peer[s]["copy_pnl"] for s in returning), 2),
+                "what_this_is": ("our OWN ledger's copy rows on the markets "
+                                 "that would return — NOT the track "
+                                 "record's arithmetic, which folds the "
+                                 "venue activity tape"),
+            }
+            def _sum(rows) -> float:
+                return round(sum(r["pnl"] for r in rows), 2)
+
+            out["restatement_if_attributed"] = {
+                "copies_record_add_usd": _sum(attributable),
+                "copies_record_add_rows": len(attributable),
+                # THE MOVE. Null rather than zero when the epoch could
+                # not be read — an undecided split is not a split of $0.
+                "add_in_window_usd": (None if split_unknown
+                                      else _sum(in_window)),
+                "add_in_window_rows": (None if split_unknown
+                                       else len(in_window)),
+                "add_before_window_usd": (None if split_unknown
+                                          else _sum(before)),
+                "add_before_window_rows": (None if split_unknown
+                                           else len(before)),
+                "add_pending_resolution_usd": _sum(pending),
+                "add_pending_resolution_rows": len(pending),
+                "copies_epoch": epoch,
+                "refused_co_held_usd": _sum(refused),
+                "refused_co_held_rows": len(refused),
+                "refused_sleeve_held_usd": _sum(refused_sleeve),
+                "refused_sleeve_held_rows": len(refused_sleeve),
+                "unmeasurable_rows": len([r for r in sold
+                                          if r["pnl"] is None]),
+                "first_day": days[0] if days else None,
+                "last_day": days[-1] if days else None,
+                "entry_first_day": entry_days[0] if entry_days else None,
+                "entry_last_day": entry_days[-1] if entry_days else None,
+                "track_record_markets_returning_upper_bound": len(returning),
+                "track_record_add_usd": None,
+                "track_record_copy_ledger_proxy": proxy,
+                "coverage": _cc_cov(
+                    False,
+                    "the track-record dollar figure is NOT computed here: "
+                    "that record is a fold over the venue activity tape "
+                    "and this census reads live_orders and the positions "
+                    "endpoint only. Its magnitude is served as null with "
+                    "this reason beside a named ledger proxy, never as "
+                    "zero and never as a guess.",
+                    copies_record_add_is=(
+                        "the LIFETIME, settle-agnostic sum of realized "
+                        "dollars on desk cash-out tickets sitting on a "
+                        "slug with EXACTLY ONE copy entry row AND NO "
+                        "non-copy row holding shares of it. It is a "
+                        "CEILING on the move, not the move: see "
+                        "add_in_window_usd"),
+                    the_move_is=(
+                        "add_in_window_usd — the attributable dollars "
+                        "whose copy ENTRY row already has a settled line "
+                        "on the scoreline AND whose line is dated on or "
+                        "after copies_epoch. Only these change a figure "
+                        "the owner has already read"),
+                    add_before_window_is=(
+                        "attributable dollars landing on a settled line "
+                        "dated before copies_epoch. /api/copies-record "
+                        "drops those lines before the scorecard runs "
+                        "(and the master report is windowed from "
+                        "DISPLAY_EPOCH too), so they restate nothing "
+                        "served today"),
+                    add_pending_resolution_is=(
+                        "attributable dollars whose copy entry row is "
+                        "still `filled` — no line to fold onto. A desk "
+                        "cash-out never closes the copy row and the "
+                        "settlement sweep grades it only at RESOLUTION, "
+                        "so this is the normal state of a recent hand "
+                        "sale. Real money, booked later; not a "
+                        "restatement"),
+                    day_axes=(
+                        "first_day/last_day are the SALE days; "
+                        "entry_first_day/entry_last_day are the days the "
+                        "dollars would LAND on (the entry row's settled "
+                        "day), which is also the axis the epoch window is "
+                        "applied against"),
+                    epoch_why=epoch_why,
+                    refused_because=(
+                        "TWO refusal classes, counted apart because they "
+                        "have different remedies. (a) refused_co_held — "
+                        "two or more copy entry rows share the slug; "
+                        "which one the sale closed is not knowable from "
+                        "any feed and must never be allocated. (b) "
+                        "refused_sleeve_held — exactly one copy entry "
+                        "row, but a NON-COPY row (the manual sleeve, "
+                        "underdog) also holds shares of the slug, so the "
+                        "sale is very probably of THOSE shares. "
+                        "Attributing it to the copy row would book the "
+                        "desk's own hand-sale onto the copy scoreline, "
+                        "UP, on the figure that authorises the "
+                        "restatement — and on a market the same payload "
+                        "says does not come back to the track record "
+                        "BECAUSE the desk hand-opened it. Decidable from "
+                        "the venue activity tape, which this census does "
+                        "not read"),
+                    sleeve_held_residual=(
+                        "a non-copy row counts as HOLDING when its intent "
+                        "is an entry leg (BUY_LONG/BUY_SHORT), falling "
+                        "back to `side <> 'SELL'` where the venue named "
+                        "no intent. A SELL leg cannot count: the desk "
+                        "cash-out ticket being attributed is itself a "
+                        "`manual` row in `cashed_out`, a holding status, "
+                        "so counting SELL legs would refuse the whole "
+                        "payload. The residual is a non-copy SHORT ENTRY "
+                        "on a row carrying no intent in `raw`, which "
+                        "reads as `side = 'SELL'` and is not counted — "
+                        "that one shape can still leak UP"),
+                    markets_returning_is_an_upper_bound=(
+                        "a manual SELL ticket on the slug IN ANY STATUS "
+                        "and no manual BUY row on it, modelled on "
+                        "track_record's own manual_slugs predicate, which "
+                        "has no status filter at all (U4 adds only `AND "
+                        "side <> 'SELL'`) — so a SELL that never filled "
+                        "still takes its slug out of the manual sleeve "
+                        "under U4 and is counted here. It is a CEILING: "
+                        "track_record.build can still keep such a market "
+                        "out of the record via the `attributed` set "
+                        "(copy slugs are not added to it, so a market "
+                        "leaving `manual` can land in `unattributed`), "
+                        "PNL_DISPLAY_CAP, max_stake and its own since_ts "
+                        "window — none of which this census can see, "
+                        "because it reads live_orders and the record "
+                        "folds the venue tape. Slug case is another "
+                        "small gap: manual_slugs keys on the raw-case "
+                        "slug, this census lowercases"),
+                    direction=(
+                        "UP — this is money the copy scoreline currently "
+                        "books nowhere. The two refusal classes above are "
+                        "what keeps it from running FURTHER up: dollars "
+                        "the data cannot assign to a copy row are refused "
+                        "and disclosed, never added. The one residual "
+                        "that can still bias it up is named in "
+                        "sleeve_held_residual")),
+            }
+
+    # ── (4) THE CASH-OUTS ALREADY PUBLISHED AT $0.00.
+    zero_keys = _CC_FIGURE_KEYS["published_at_zero"]
+    zrows, why_z = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT count(*)::int AS rows,
+               count(*) FILTER (
+                   WHERE whale = ANY($1::text[]))::int AS copy_rows,
+               COALESCE(sum(stake) FILTER (
+                   WHERE whale = ANY($1::text[])), 0)::float8 AS copy_stake_usd,
+               -- THE PAIR U5 WOULD ACTUALLY REMOVE FROM A SERVED
+               -- DENOMINATOR. `copies_record.build` drops every settled
+               -- line dated before COPIES_EPOCH before `scorecard`
+               -- accrues anything, so a pre-epoch row is in NO ROI
+               -- denominator and has NO win-rate slot: removing it moves
+               -- nothing. The lifetime pair above was labelled as though
+               -- it were this one. `day` is the settled day in ET, the
+               -- same axis `build` compares against, and both are
+               -- YYYY-MM-DD so the string compare is the date compare.
+               count(*) FILTER (
+                   WHERE whale = ANY($1::text[])
+                     AND day >= $3)::int AS copy_rows_in_window,
+               COALESCE(sum(stake) FILTER (
+                   WHERE whale = ANY($1::text[])
+                     AND day >= $3), 0)::float8 AS copy_stake_usd_in_window,
+               count(*) FILTER (
+                   WHERE err LIKE 'exit completed but the process died%'
+               )::int AS reaper_retired,
+               count(*) FILTER (WHERE whale = 'manual')::int AS desk_manual,
+               min(day) AS first_day, max(day) AS last_day
+        FROM (
+            SELECT lower(COALESCE(whale_username, '')) AS whale,
+                   -- THE ROI DENOMINATOR, EXACTLY AS `scorecard` READS
+                   -- IT: `float(r.get('filled_usd') or 0)`. The
+                   -- COALESCE-to-requested_usd pattern is right for
+                   -- `open.stake`, which is what it was borrowed from,
+                   -- and wrong here: a row with filled_usd = 0
+                   -- contributes nothing to the denominator this figure
+                   -- names, so it must contribute nothing here either.
+                   COALESCE(filled_usd, 0)::float8 AS stake,
+                   COALESCE(error, '') AS err,
+                   to_char(settled_at AT TIME ZONE 'America/New_York',
+                           'YYYY-MM-DD') AS day
+            FROM live_orders
+            WHERE status = 'cashed_out'
+              AND pnl IS NULL
+              AND settled_at IS NOT NULL
+            LIMIT $2
+        ) s
+        """, whales, CASHOUT_CENSUS_ROW_CAP,
+        # An unreadable epoch must not make the windowed pair read as
+        # "the whole population": a date no row can reach makes the raw
+        # counters 0, and the served values are nulled with the reason
+        # below rather than served at all.
+        epoch or "9999-12-31")
+    if zrows is None:
+        out["published_at_zero"] = _cc_blank(zero_keys, why_z)
+    elif not zrows:
+        out["published_at_zero"] = _cc_blank(
+            zero_keys, "the aggregate returned no row at all — the read "
+                       "answered in a shape this census cannot read")
+    else:
+        z = zrows[0]
+        n = int(z["rows"] or 0)
+        if n >= CASHOUT_CENSUS_ROW_CAP:
+            out["published_at_zero"] = _cc_blank(
+                zero_keys,
+                f"the $0.00 population hit the {CASHOUT_CENSUS_ROW_CAP}-row "
+                "cap; the count would be a floor, which is worse than no "
+                "number for a population being removed from a denominator")
+        else:
+            out["published_at_zero"] = {
+                "rows": n,
+                "copy_rows": int(z["copy_rows"] or 0),
+                "copy_stake_usd": round(float(z["copy_stake_usd"] or 0.0), 2),
+                "copy_rows_in_window": (
+                    None if epoch is None
+                    else int(z["copy_rows_in_window"] or 0)),
+                "copy_stake_usd_in_window": (
+                    None if epoch is None
+                    else round(float(z["copy_stake_usd_in_window"] or 0.0), 2)),
+                "copies_epoch": epoch,
+                "reaper_retired": int(z["reaper_retired"] or 0),
+                "desk_manual": int(z["desk_manual"] or 0),
+                "first_day": z["first_day"],
+                "last_day": z["last_day"],
+                "coverage": _cc_cov(
+                    True, None,
+                    what_this_is=("every `cashed_out` row with pnl NULL "
+                                  "and a settled_at — INCLUDING `manual` "
+                                  "and `underdog` rows, which the copy "
+                                  "scoreline filters out. The headline "
+                                  "`rows` is the whole population, not "
+                                  "the scoreline's"),
+                    copy_rows_is=("the LIFETIME copy subset: every copy "
+                                  "row published as a settled trade worth "
+                                  "exactly $0.00, whatever day it settled "
+                                  "on. NOT the pair U5 would remove — see "
+                                  "copy_rows_in_window"),
+                    copy_rows_in_window_is=(
+                        "THE PAIR U5 WOULD REMOVE. The copy scoreline is "
+                        "served from copies_epoch and "
+                        "`copies_record.build` drops every settled line "
+                        "dated before it BEFORE `scorecard` accrues "
+                        "anything, so only these rows are in an ROI "
+                        "denominator and hold a win-rate slot today. The "
+                        "lifetime pair carried this sentence and was read "
+                        "as this figure; the difference between the two "
+                        "is a removal that would move nothing"),
+                    copy_stake_usd_is=("summed as `scorecard` reads the "
+                                       "denominator — bare filled_usd, "
+                                       "not coalesced to requested_usd"),
+                    window_axis=("the row's own settled day in ET, which "
+                                 "is the axis `build` compares against. "
+                                 "first_day/last_day span the WHOLE "
+                                 "population (manual and underdog "
+                                 "included), so they do not decompose "
+                                 "this split"),
+                    epoch_why=epoch_why,
+                    remedy="different from (2): these dollars were never "
+                           "measured, so they cannot be re-labelled — they "
+                           "must either be recovered from the venue tape "
+                           "or disclosed as unmeasured"),
+            }
+
+    # ── THE POPULATION THE RESTATEMENT'S DELTA COUNTER USED TO MISREAD.
+    #
+    # The boot-time restatement's delta counter USED TO take its OLD
+    # value only when the row was already 'settled' (`analytics/
+    # engine.py`, `oldp = float(r["pnl"]) if r["status"] == "settled"
+    # else 0.0`). A row still `filled` while carrying accumulated
+    # partial-sale dollars therefore reported its WHOLE new pnl as the
+    # delta, and a write-DOWN of one reported a delta of 0.0.
+    #
+    # THAT SHIPPED. Commit d832e7e reads `oldp = float(r["pnl"] or 0)`
+    # unconditionally and added an `overwrote_filled` counter to the
+    # summary for exactly this population, so the counter now states its
+    # own move. This block is NOT a fix request and must not be read as
+    # one — it is the SIZE of what that fix touches, which is the number
+    # a reviewer of the restatement needs: every `filled` row carrying a
+    # non-zero pnl is a row whose delta the old counter mis-stated and
+    # whose rescore the new `overwrote_filled` counter now names.
+    #
+    # It is measured from `live_orders` alone: this census imports
+    # nothing from `analytics/engine.py` and the count does not depend on
+    # which side of d832e7e that file is on.
+    blind_keys = _CC_FIGURE_KEYS["rescore_delta_blind"]
+    brows, why_b = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT count(*)::int AS rows,
+               COALESCE(sum(pnl), 0)::float8 AS pnl_usd,
+               count(*) FILTER (WHERE whale = ANY($1::text[]))::int
+                   AS copy_rows,
+               COALESCE(sum(pnl) FILTER (
+                   WHERE whale = ANY($1::text[])), 0)::float8 AS copy_pnl_usd
+        FROM (
+            SELECT lower(COALESCE(whale_username, '')) AS whale,
+                   pnl::float8 AS pnl
+            FROM live_orders
+            WHERE status = 'filled'
+              AND pnl IS NOT NULL
+              AND pnl <> 0
+            LIMIT $2
+        ) s
+        """, whales, CASHOUT_CENSUS_ROW_CAP)
+    if brows is None:
+        out["rescore_delta_blind"] = _cc_blank(blind_keys, why_b)
+    elif not brows:
+        out["rescore_delta_blind"] = _cc_blank(
+            blind_keys, "the aggregate returned no row at all")
+    elif int(brows[0]["rows"] or 0) >= CASHOUT_CENSUS_ROW_CAP:
+        out["rescore_delta_blind"] = _cc_blank(
+            blind_keys, f"hit the {CASHOUT_CENSUS_ROW_CAP}-row cap — a "
+                        "floor, refused")
+    else:
+        b = brows[0]
+        out["rescore_delta_blind"] = {
+            "rows": int(b["rows"] or 0),
+            "pnl_usd": round(float(b["pnl_usd"] or 0.0), 2),
+            "copy_rows": int(b["copy_rows"] or 0),
+            "copy_pnl_usd": round(float(b["copy_pnl_usd"] or 0.0), 2),
+            "coverage": _cc_cov(
+                True, None,
+                what_this_is=("`filled` rows carrying accumulated partial "
+                              "realization — the rows whose delta the "
+                              "restatement's counter USED TO read against "
+                              "an old value of 0.0, so it reported their "
+                              "whole new pnl as the move and a write-DOWN "
+                              "as no move at all"),
+                already_fixed=("commit d832e7e. analytics/engine.py now "
+                               "reads `oldp = float(r['pnl'] or 0)` "
+                               "unconditionally and its summary carries an "
+                               "`overwrote_filled` counter for exactly this "
+                               "population. DO NOT SCHEDULE THIS FIX — it "
+                               "has shipped; what is served here is the "
+                               "SIZE of what it touches"),
+                still_worth_reading=("the magnitude a reviewer of any "
+                                     "restatement needs: how many rows and "
+                                     "how many dollars `overwrote_filled` "
+                                     "is now reporting on, and by how much "
+                                     "a pre-d832e7e summary under-stated "
+                                     "its own move"),
+                measured_from=("live_orders alone — this census imports "
+                               "nothing from analytics/engine.py, so the "
+                               "count reads the same on either side of "
+                               "that commit"),
+                blast_radius="reporting only — the counter describes the "
+                             "restatement, it does not decide any write"),
+        }
+
+    # ── KALSHI: the route this repository cannot make count at all.
+    kalshi_keys = _CC_FIGURE_KEYS["kalshi_desk_cashouts"]
+    krows, why_k = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT count(*)::int AS rows,
+               COALESCE(sum(usd), 0)::float8 AS usd,
+               status
+        FROM (
+            SELECT status, usd
+            FROM manual_kalshi_queue
+            WHERE action = 'sell'
+            LIMIT $1
+        ) s
+        GROUP BY status
+        """, CASHOUT_CENSUS_ROW_CAP)
+    if krows is None:
+        out["kalshi_desk_cashouts"] = _cc_blank(kalshi_keys, why_k)
+    elif sum(int(r["rows"] or 0) for r in krows) >= CASHOUT_CENSUS_ROW_CAP:
+        # THE CAP REFUSAL THIS READ WAS MISSING. The LIMIT sits inside
+        # the subquery, so at the cap the GROUP BY counts a TRUNCATED
+        # population and both `rows` and `usd` become a silent floor
+        # served as a total — the exact failure the payload's own bounds
+        # note says cannot happen here. manual_kalshi_queue is
+        # append-only and accumulates every desk ticket ever queued, so
+        # the cap is reachable rather than theoretical.
+        out["kalshi_desk_cashouts"] = _cc_blank(
+            kalshi_keys,
+            f"the Kalshi queue read hit its {CASHOUT_CENSUS_ROW_CAP}-row "
+            "cap; the LIMIT is inside the subquery, so the counts and "
+            "dollars would be a floor of a truncated population served "
+            "as a total — refused")
+    else:
+        out["kalshi_desk_cashouts"] = {
+            "rows": sum(int(r["rows"] or 0) for r in krows),
+            "usd": round(sum(float(r["usd"] or 0.0) for r in krows), 2),
+            # PER-STATUS DOLLARS, not just per-status counts. `usd` is
+            # written at QUEUE time (`round(qty * limit, 2)`), before the
+            # relay touches the venue, and manual_kalshi_queue is
+            # append-only: a ticket the desk cancelled, one the stale
+            # reaper flipped to `error` with "nothing was sent to the
+            # venue", and one the relay reported `unfilled` all keep
+            # their notional and all accumulate. So the headline `usd` is
+            # a CEILING containing tickets that never traded, and the
+            # counts alone let a reader see THAT it is inflated but not
+            # BY HOW MUCH. The query already computed sum(usd) per
+            # status; it was being discarded.
+            "by_status": {str(r["status"]): {
+                "rows": int(r["rows"] or 0),
+                "usd": round(float(r["usd"] or 0.0), 2)} for r in krows},
+            "coverage": _cc_cov(
+                False,
+                "these can NEVER be made to count from this repository: a "
+                "Kalshi desk cash-out is queued here and placed by the "
+                "engine's relay, never writes to live_orders, and the "
+                "Kalshi copy P&L arrives pre-aggregated in a heartbeat. "
+                "The figure is the SIZE of a class that has no remedy "
+                "here, not a backlog.",
+                usd_is="the ticket's notional at the protective limit, "
+                       "not a realization — no realized figure for these "
+                       "sales exists in this database",
+                usd_is_a_ceiling=(
+                    "a CEILING, not a total. `usd` is written at queue "
+                    "time and this table is "
+                    "append-only, so every ticket that never reached the "
+                    "venue — cancelled by the desk, flipped to `error` by "
+                    "the stale-queue reaper, or reported `unfilled` by "
+                    "the relay — still carries its full notional in the "
+                    "headline sum. Net it out with by_status, which "
+                    "carries the dollars per status as well as the "
+                    "count; this census does not decide which statuses "
+                    "traded, because that is the relay's word and it is "
+                    "not in this database"),
+                by_status_is=("{status: {rows, usd}} — the dollars beside "
+                              "the count for every status present, so a "
+                              "reader can subtract the ones that never "
+                              "traded rather than guess their share")),
+        }
+
+    # ── (1)+(5) THE LEDGER AGAINST THE VENUE. Last: the venue read is
+    # the slowest and the likeliest to fail, and it must not be able to
+    # starve the dollar figures above.
+    stranded_keys = _CC_FIGURE_KEYS["stranded_copy_rows"]
+    coheld_keys = _CC_FIGURE_KEYS["unattributable_co_held"]
+    unknown_keys = _CC_FIGURE_KEYS["venue_silent_slugs"]
+    # `ORDER_INTENT_SQL` — the one definition of the intent path — was
+    # imported with COPY_WHALES above, inside the fail-closed envelope.
+    ledger, why_l = await _cc_fetch(
+        pool,
+        budget,
+        """
+        SELECT lower(us_market_slug) AS slug,
+               count(*)::int AS holding_rows,
+               COALESCE(sum(COALESCE(filled_shares, 0)), 0)::float8
+                   AS claimed_shares,
+               count(*) FILTER (
+                   WHERE lower(COALESCE(whale_username, '')) = ANY($1::text[])
+                     AND status = 'filled')::int AS copy_rows,
+               -- WHAT THE COPY ROWS THEMSELVES CLAIM. The slug-level
+               -- total above includes the manual sleeve, the mirror and
+               -- underdog; charging their sales to the copy rows is how
+               -- a fully-held copy position was reported stranded.
+               COALESCE(sum(COALESCE(filled_shares, 0)) FILTER (
+                   WHERE lower(COALESCE(whale_username, '')) = ANY($1::text[])
+                     AND status = 'filled'), 0)::float8
+                   AS copy_claimed_shares,
+               -- Copy rows mid-sale. Their shares are ours but in
+               -- flight, so they are excluded from copy_claimed_shares
+               -- above; a slug whose ONLY copy row is `exiting` reaches
+               -- no bucket at all, and this count discloses that.
+               count(*) FILTER (
+                   WHERE lower(COALESCE(whale_username, '')) = ANY($1::text[])
+                     AND status = 'exiting')::int AS copy_exiting_rows,
+               -- BOTH SIDES OF A MARKET SHARE ONE IDENTIFIER and the
+               -- venue reports ONE SIGNED net for the slug, so a slug
+               -- carrying a long and a short of ours nets at the venue
+               -- and abs() cannot separate them. Counted so such a slug
+               -- can be REFUSED rather than read as fully sold. The
+               -- intent expression has ONE definition in this
+               -- repository and is spliced in, never re-typed.
+               count(*) FILTER (
+                   WHERE COALESCE(__INTENT__, '') LIKE '%SHORT%')::int
+                   AS short_rows,
+               COALESCE(sum(COALESCE(NULLIF(filled_usd, 0), requested_usd))
+                        FILTER (
+                   WHERE lower(COALESCE(whale_username, '')) = ANY($1::text[])
+                     AND status = 'filled'), 0)::float8 AS copy_stake
+        FROM live_orders
+        WHERE us_market_slug IS NOT NULL
+          AND status IN ('filled', 'exiting')
+        GROUP BY 1
+        ORDER BY 1
+        LIMIT $2
+        """.replace("__INTENT__", ORDER_INTENT_SQL),
+        whales, CASHOUT_CENSUS_SLUG_CAP)
+    positions, why_v, venue_skipped = None, None, None
+    # THE VENUE READ IS NOT MADE WHEN IT CAN DECIDE NOTHING. It pages the
+    # whole book unthrottled on a rate-limited credential shared with the
+    # executor's `_pm_held`, which gates every mirror exit; with no
+    # `filled` copy row on any slug there is nothing for it to answer.
+    # This is a SKIP, not a refusal: the three figures below consult the
+    # book only for slugs carrying a copy row, so with none of those the
+    # answer is a measured zero rather than an unread null.
+    _ledger_has_copy = bool(ledger) and any(
+        int(r["copy_rows"] or 0) > 0 and r["slug"] for r in ledger)
+    if ledger is not None and not _ledger_has_copy:
+        positions = {}
+        venue_skipped = ("the ledger returned no `filled` copy row on any "
+                         "slug, so the venue book was not read at all — "
+                         "it could have decided nothing, and its rate "
+                         "budget is shared with the executor's own "
+                         "position reads")
+    elif ledger is not None and len(ledger) < CASHOUT_CENSUS_SLUG_CAP:
+        grant = budget.grant(CASHOUT_CENSUS_VENUE_TIMEOUT_S)
+        if grant is None:
+            why_v = ("no request budget left for the venue positions read "
+                     "— it was not attempted")
+        else:
+            try:
+                from .pmus_account import _fetch_all_positions_sync
+
+                positions = await asyncio.wait_for(
+                    asyncio.to_thread(_fetch_all_positions_sync), grant)
+                # A SHAPE THIS CENSUS CANNOT READ IS UNREADABLE, not
+                # empty. An empty positions feed would make every copy
+                # row look sold; that is the one wrong answer here, so a
+                # feed that did not arrive as a mapping is refused.
+                if not isinstance(positions, dict):
+                    why_v = ("venue positions arrived as "
+                             f"{type(positions).__name__}, not a mapping — "
+                             "refused rather than read as an empty book, "
+                             "which would call every copy row sold")
+                    positions = None
+            except Exception as exc:  # noqa: BLE001 — unreadable decides nothing
+                why_v = (f"venue positions unreadable: {type(exc).__name__}: "
+                         f"{str(exc)[:160]}")
+                positions = None
+    if ledger is None:
+        blocked = why_l
+    elif len(ledger) >= CASHOUT_CENSUS_SLUG_CAP:
+        blocked = (f"the ledger read hit its {CASHOUT_CENSUS_SLUG_CAP}-slug "
+                   "cap — a floor, refused")
+    elif positions is None:
+        blocked = why_v or "venue positions unavailable"
+    else:
+        blocked = None
+    if blocked:
+        out["stranded_copy_rows"] = _cc_blank(stranded_keys, blocked)
+        out["unattributable_co_held"] = _cc_blank(coheld_keys, blocked)
+        out["venue_silent_slugs"] = _cc_blank(unknown_keys, blocked)
+    else:
+        from .pmus_account import _amt
+
+        held: dict[str, dict] = {}
+        collisions = 0
+        unreadable_entries = 0
+        for k, raw in (positions or {}).items():
+            # A POSITION WE CANNOT PARSE IS NOT A POSITION OF ZERO. An
+            # entry that did not arrive as an object is dropped, which
+            # sends its slug to `venue_silent_slugs` — undecidable —
+            # rather than reading as "the venue holds nothing", which is
+            # the hand-sale verdict.
+            if not isinstance(raw, dict):
+                unreadable_entries += 1
+                continue
+            # Our slug column is compared case-insensitively; the venue's
+            # keys are its own. A collision is counted and the LARGER
+            # magnitude kept, so a case fold can only make this census
+            # more conservative about calling a row stranded.
+            lk = str(k).lower()
+            if lk in held:
+                collisions += 1
+                if abs(_amt(raw.get("netPosition"))) <= \
+                        abs(_amt(held[lk].get("netPosition"))):
+                    continue
+            held[lk] = raw
+        st = {"slugs": 0, "rows": 0, "rows_fully_short": 0,
+              "stake_usd": 0.0, "stake_usd_upper_bound": 0.0,
+              "shares_short": 0.0, "sole_row_slugs": 0, "co_held_slugs": 0,
+              "sole_row_stake_usd": 0.0, "co_held_stake_usd": 0.0,
+              "mixed_side_slugs_refused": 0}
+        co = {"slugs": 0, "rows": 0, "stake_usd": 0.0}
+        unk = {"slugs": 0, "rows": 0, "stake_usd": 0.0}
+        expired_slugs = 0
+        exiting_only_slugs = 0
+        for r in ledger:
+            slug = r["slug"]
+            copy_rows = int(r["copy_rows"] or 0)
+            if not slug or copy_rows <= 0:
+                # A slug whose only copy row is `exiting` is our own sale
+                # in flight, not a hand sale — but it reaches none of the
+                # three buckets, so the omission is counted rather than
+                # silent.
+                if slug and int(r["copy_exiting_rows"] or 0) > 0:
+                    exiting_only_slugs += 1
+                continue
+            claimed = float(r["claimed_shares"] or 0.0)
+            copy_claimed = float(r["copy_claimed_shares"] or 0.0)
+            stake = round(float(r["copy_stake"] or 0.0), 2)
+            p = held.get(slug)
+            # ABSENT IS NOT SOLD. The positions endpoint prunes settled
+            # markets, so a market that RESOLVED and a market that was
+            # sold flat both vanish from it. Those two need opposite
+            # remedies — one is the settlement sweep's ordinary backlog,
+            # the other is a hand sale — and nothing in the positions
+            # feed separates them. Its own bucket, never folded in.
+            if p is None:
+                unk["slugs"] += 1
+                unk["rows"] += copy_rows
+                unk["stake_usd"] += stake
+                continue
+            # An EXPIRED position resolved; it was not sold. Excluding
+            # it is the difference between a hand-sale census and a
+            # settlement-backlog census.
+            if p.get("expired"):
+                expired_slugs += 1
+                continue
+            # A SLUG CARRYING BOTH A LONG AND A SHORT OF OURS NETS AT THE
+            # VENUE. One identifier, one signed number: `abs()` reads a
+            # perfectly-held pair as zero and would call the whole slug
+            # sold. Refused and counted, never measured.
+            short_rows = int(r["short_rows"] or 0)
+            if 0 < short_rows < int(r["holding_rows"] or 0):
+                st["mixed_side_slugs_refused"] += 1
+                continue
+            venue = abs(_amt(p.get("netPosition")))
+            # SHARES OTHER ROWS EXPLAIN ARE NOT THIS ROW'S — the
+            # reconciler's own refinement (`_reap_stale_exiting`), which
+            # a slug-level subtraction dropped. What is left at the venue
+            # is credited to the COPY rows first, so a hand sale of the
+            # manual sleeve's own shares on a slug the copy lane also
+            # holds can no longer be charged to the copy rows. Only the
+            # remainder the copy rows' own claim cannot cover decides.
+            short = copy_claimed - venue
+            if short < CASHOUT_CENSUS_SHARE_EPS:
+                continue
+            # AND THE DOLLARS ARE BOUNDED BY THE EVIDENCE. A shortfall is
+            # evidence that SOME shares left; it is not evidence that
+            # every copy row on the slug and its whole stake went with
+            # them. A one-share discrepancy on a 500-share position used
+            # to report 100% of the stake as phantom exposure — and
+            # `copy_exit_applied` partials taken before migration 040
+            # never reduced filled_shares, so those rows carry a
+            # permanent dust shortfall of exactly that shape.
+            frac = min(1.0, short / copy_claimed) if copy_claimed > 0 else 1.0
+            implied = round(stake * frac, 2)
+            fully = short >= copy_claimed - CASHOUT_CENSUS_SHARE_EPS
+            st["slugs"] += 1
+            st["rows"] += copy_rows
+            if fully:
+                st["rows_fully_short"] += copy_rows
+            st["stake_usd"] += implied
+            st["stake_usd_upper_bound"] += stake
+            st["shares_short"] += short
+            if int(r["holding_rows"] or 0) >= 2:
+                st["co_held_slugs"] += 1
+                st["co_held_stake_usd"] += implied
+                # A PARTIAL sale across co-held rows is the class that
+                # cannot be attributed: the venue still holds something,
+                # and which of our rows it belongs to is not in the
+                # data. A FULL flatten is decidable (everything on the
+                # slug closed), so it is NOT counted here.
+                if venue >= CASHOUT_CENSUS_SHARE_EPS:
+                    co["slugs"] += 1
+                    co["rows"] += copy_rows
+                    co["stake_usd"] += implied
+            else:
+                st["sole_row_slugs"] += 1
+                st["sole_row_stake_usd"] += implied
+        for _k in ("stake_usd", "stake_usd_upper_bound", "shares_short",
+                   "sole_row_stake_usd", "co_held_stake_usd"):
+            st[_k] = round(st[_k], 2)
+        co["stake_usd"] = round(co["stake_usd"], 2)
+        unk["stake_usd"] = round(unk["stake_usd"], 2)
+        # ── THE TWO WAYS THE VENUE BOOK CAN BE LESS THAN THE WHOLE BOOK,
+        # both of which make every figure derived from it incomplete. One
+        # bit, computed once, worn by BOTH ledger figures below — a
+        # coverage block that says "complete, no reason" beside a sibling
+        # field saying the book may be short is a payload arguing with
+        # itself, and the second of the two used to say exactly that.
+        #   * ENTRIES THAT DID NOT PARSE. Their slugs fall to
+        #     venue_silent_slugs instead of being decided.
+        #   * A BOOK AT THE PAGE-THROUGH CAP.
+        #     `pmus_account._fetch_all_positions_sync` loops
+        #     `for _ in range(50)` at 100 per page and returns with NO
+        #     eof signal, so a book past 5000 entries is silently
+        #     partial and this census cannot tell a complete book of
+        #     exactly 5000 from a truncated one. The endpoint's own
+        #     bounds note promises "a read that hits its cap makes its
+        #     figure NULL, not a floor — EVERY read"; the truncation was
+        #     disclosed as a sibling flag while `complete` stayed true.
+        # MEASURED ON THE RAW FEED, NOT THE FOLDED MAP. `held` is what
+        # survives the isinstance refusal and the case-fold, so a book that
+        # arrived exactly ON the venue's 50 x 100 page-through cap but
+        # carried one unparsable entry or one case collision folds to
+        # 4,999 — and a `>= cap` test on that reads a TRUNCATED book as
+        # complete, which is the bit this now gates. The raw count is the
+        # only one that answers "did the page-through stop early".
+        book_short = len(positions or {}) >= CASHOUT_CENSUS_VENUE_BOOK_CAP
+        venue_why = " ".join(w for w in (
+            (f"some venue entries did not parse ({unreadable_entries} of "
+             "them), so their slugs fell to venue_silent_slugs rather "
+             "than being decided.") if unreadable_entries else "",
+            (f"the venue book came back at exactly "
+             f"{CASHOUT_CENSUS_VENUE_BOOK_CAP} entries, which is its "
+             "page-through cap (50 pages x 100, no eof signal), so it "
+             "may be TRUNCATED — any slug past the cap is missing from "
+             "it and lands in venue_silent_slugs, and this census cannot "
+             "tell a whole book of that size from a short one.")
+            if book_short else "") if w) or None
+        venue_complete = not unreadable_entries and not book_short
+        venue_extras = dict(
+            venue_positions=len(held),
+            venue_book_may_be_short=book_short,
+            case_collisions=collisions,
+            unparsable_venue_entries=unreadable_entries,
+            expired_slugs_excluded=expired_slugs,
+            venue_read_skipped=venue_skipped,
+            exiting_only_copy_slugs_skipped=exiting_only_slugs)
+        out["stranded_copy_rows"] = dict(st, coverage=_cc_cov(
+            venue_complete,
+            venue_why,
+            **venue_extras,
+            what_this_is=("copy-lane rows we still call `filled` on a "
+                          "market the venue holds fewer shares of than "
+                          "THOSE ROWS claim — the hand-sale fingerprint, "
+                          "which is the existing reconcilers' inequality "
+                          "REVERSED. What the manual sleeve, the mirror "
+                          "and underdog hold on the same slug is "
+                          "subtracted first: shares other rows explain "
+                          "are not these rows'"),
+            stake_usd_is=("phantom open exposure BOUNDED BY THE EVIDENCE: "
+                          "each slug's copy stake scaled by the fraction "
+                          "of the copy rows' own claimed shares the venue "
+                          "cannot cover. /api/copies-record counts this "
+                          "in `open.stake` as money on the table"),
+            stake_usd_upper_bound_is=("the whole copy stake on every "
+                                      "short slug — what this figure used "
+                                      "to serve. A CEILING: a one-share "
+                                      "shortfall does not strand a "
+                                      "500-share position"),
+            rows_is=("copy rows sitting on a short slug — also a ceiling. "
+                     "rows_fully_short is the subset whose slug's entire "
+                     "copy claim is missing"),
+            not_proof=("a venue-short slug is evidence a sale happened, "
+                       "not proof of WHICH of our rows it closed, nor "
+                       "that the whole of any row went; see "
+                       "unattributable_co_held"),
+            netting=("both sides of a market share ONE identifier and the "
+                     "venue reports ONE SIGNED net, so a slug carrying a "
+                     "long and a short of ours nets there. Such slugs are "
+                     "REFUSED (mixed_side_slugs_refused), not measured")))
+        out["unattributable_co_held"] = dict(co, coverage=_cc_cov(
+            # THE SAME BIT AS stranded_copy_rows, and for the same
+            # reason: this figure is derived from the same venue book by
+            # the same loop. On the census's own tested input — a venue
+            # entry that is not a dict — the slug never reaches the
+            # `holding_rows >= 2` branch at all, so this block used to
+            # serve "0 slugs, $0.00, complete, why: null" beside a
+            # stranded block correctly reporting the book unreadable.
+            # Zero-with-a-stamp is the one thing read_this_first says
+            # "the class with no remedy" must never be.
+            venue_complete, venue_why,
+            **venue_extras,
+            what_this_is=("slugs with two or more of our still-holding "
+                          "rows where the venue shows a PARTIAL sale. The "
+                          "venue reports one signed net per slug for the "
+                          "whole account and both sides of a market share "
+                          "one identifier, so which row was sold is not "
+                          "knowable"),
+            remedy="REFUSE and disclose. FIFO, LIFO or pro-rata would be "
+                   "an invented policy, not a measurement",
+            stake_is="the same evidence-bounded dollars as "
+                     "stranded_copy_rows.co_held_stake_usd, and a SUBSET "
+                     "of stranded_copy_rows.stake_usd — the two figures "
+                     "overlap by construction and must never be added",
+            excludes="slugs fully flattened — everything on those closed, "
+                     "which IS decidable"))
+        out["venue_silent_slugs"] = dict(unk, coverage=_cc_cov(
+            False,
+            "the venue's positions feed does not list these slugs at all. "
+            "It prunes settled markets, so a resolved market and a "
+            "sold-flat one look identical here. Neither stranded nor "
+            "clean — undecidable from this feed, and separating them "
+            "needs the activity tape.",
+            what_to_do="read these against the activity tape before "
+                       "treating any of them as a hand sale"))
+
+    out["budget_left_s"] = round(budget.left(), 2)
+    out["read_this_first"] = dict(
+        _cc_read_this_first(),
+        two_definitions_of_co_held=(
+            "restatement_if_attributed counts a slug co-held when two or "
+            "more copy entry rows sit on it in ANY holding status, "
+            f"{list(CASHOUT_POSITION_STATUSES)} — which includes "
+            "`merged`, an add leg already booked onto its parent row "
+            "rather than a separate position, so a one-position slug can "
+            "read as co-held and push attributable dollars into "
+            "refused_co_held_usd. That direction UNDER-states the add and "
+            "OVER-states the class the owner is told cannot be fixed. "
+            "The ledger path's own co-held test counts only "
+            "filled/exiting rows. Two definitions, disclosed rather than "
+            "silently reconciled"))
+    return out
+
+
+@app.get("/api/admin/short-truth", dependencies=[Depends(require_admin)])
+async def api_short_truth(days: int = 7) -> dict:
+    """Does the venue book a BUY_SHORT as a SELL? The receipts already know.
+
+    The whole "6-for-6 overspend" finding rests on ONE assumption nobody
+    checked: that the cash cost of a filled order is fill_price x qty.
+    That is true for a long. It is not obviously true here.
+
+    The SDK settles the shape of the question
+    (polymarket_us/types/orders.py):
+
+      * CreateOrderParams takes marketSlug and intent. There is NO token
+        or asset id — you cannot name a "short token", because there is
+        only ONE market and one price ladder.
+      * Order carries BOTH `side` (ORDER_SIDE_BUY/SELL) and `intent`
+        (BUY_LONG/SELL_LONG/BUY_SHORT/SELL_SHORT). `side` is NOT an
+        input. The venue DERIVES it from the intent.
+
+    That is a futures-style contract, where going short is selling the
+    contract, `price` denominates the contract (long) side, and the cash
+    a short ties up is (1 - price) x qty.
+
+    Test it against the six rows, requested vs both models:
+
+      req $249.92  qty 1136  fill 0.78   f*q = $886.08   (1-f)*q = $249.92
+      req $249.92  qty  781  fill 0.6853 f*q = $535.22   (1-f)*q = $245.78
+      req $249.75  qty  675  fill 0.65   f*q = $438.75   (1-f)*q = $236.25
+      req $249.75  qty  555  fill 0.56   f*q = $310.80   (1-f)*q = $244.20
+      req $249.60  qty  520  fill 0.55   f*q = $286.00   (1-f)*q = $234.00
+      req $249.78  qty 1086  fill 0.89   f*q = $966.54   (1-f)*q = $119.46
+
+    Under the short model every one of the six lands AT OR UNDER the
+    authorised amount, one of them to the cent, and the worst overage
+    across all six is exactly $0.00. Six independent "overspends" do not
+    all land just under the exact figure we authorised by chance.
+
+    But arithmetic that fits is not proof — a fitted model is the most
+    persuasive kind of wrong, and this codebase has produced several
+    tonight. `order.side` is the venue SAYING it, and submit_fok has
+    been storing the full create-order response on every row all along:
+    raw -> response -> executions[] -> order -> {side, avgPx,
+    cashOrderQty}. The overspend diagnostic reads that same blob and
+    pulls marketSlug, intent, price — skipping the three fields that
+    answer the question.
+
+    ORDER_SIDE_SELL  -> short IS a sell; there was never an overspend,
+                        and our filled_usd/pnl/deployed figures are
+                        wrong by (1-p)/p on every short row.
+    ORDER_SIDE_BUY   -> we really were filled on the opposite leg and
+                        the ban stands.
+
+    No verdict is emitted when the field is absent. A missing `side` is
+    not evidence for either answer.
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        -- live_orders HAS NO `intent` COLUMN. The first version of this
+        -- query selected and filtered on one, so it raised
+        -- UndefinedColumnError and 500'd on every call — which the
+        -- probe reported as the uninformative "SHORTTRUTH unavailable".
+        -- The intent lives in the venue blob, and the already-working
+        -- read of it is the JSON path below (app.py:3430-3432 uses the
+        -- same one).
+        SELECT id, us_market_slug,
+               COALESCE(raw #>> '{response,executions,0,order,intent}',
+                        raw #>> '{preview,intent}')        AS intent,
+               round(limit_price, 4)::float8   AS lim,
+               round(requested_usd, 2)::float8 AS req_usd,
+               round(filled_shares, 2)::float8 AS qty,
+               round(fill_price, 4)::float8    AS fill_px,
+               round(filled_usd, 2)::float8    AS booked_usd,
+               -- Which keys the venue actually returned on the order.
+               -- Without this, "side is absent" and "we read the wrong
+               -- path" look identical, and the endpoint's own
+               -- no-verdict branch depends on telling them apart.
+               (SELECT string_agg(k, ',' ORDER BY k)
+                  FROM jsonb_object_keys(
+                       COALESCE(raw #> '{response,executions,0,order}',
+                                '{}'::jsonb)) AS k)        AS order_keys,
+               CASE WHEN jsonb_typeof(raw #> '{response,executions}')
+                         = 'array'
+                    THEN raw #> '{response,executions}'
+                    ELSE '[]'::jsonb END       AS executions
+          FROM live_orders
+         WHERE placed_at > now() - interval '1 day' * $1
+           AND COALESCE(
+                 raw #>> '{response,executions,0,order,intent}',
+                 raw #>> '{preview,intent}', '') LIKE '%SHORT%'
+           AND COALESCE(filled_shares, 0) > 0
+         ORDER BY placed_at DESC
+         LIMIT 50
+        """, days)
+
+    out, sides = [], {}
+    for r in rows:
+        execs = r["executions"]
+        if isinstance(execs, str):
+            try:
+                execs = json.loads(execs)
+            except (TypeError, ValueError):
+                execs = []
+        venue_side = venue_cash = venue_avg = None
+        for e in (execs or []):
+            o = (e or {}).get("order") or {}
+            venue_side = venue_side or o.get("side")
+            venue_cash = venue_cash or o.get("cashOrderQty")
+            venue_avg = venue_avg or o.get("avgPx")
+        qty = float(r["qty"] or 0)
+        f = float(r["fill_px"] or 0)
+        long_cost = round(f * qty, 2)
+        short_cost = round((1.0 - f) * qty, 2)
+        req = float(r["req_usd"] or 0)
+        sides[str(venue_side)] = sides.get(str(venue_side), 0) + 1
+        out.append({
+            "id": r["id"], "slug": r["us_market_slug"],
+            "intent": r["intent"], "limit": r["lim"], "requested_usd": req,
+            "qty": qty, "fill_px": f,
+            "booked_usd": r["booked_usd"],
+            "cost_if_long_model": long_cost,
+            "cost_if_short_model": short_cost,
+            "short_model_within_authorization": short_cost <= req + 0.01,
+            "long_model_within_authorization": long_cost <= req + 0.01,
+            "venue_side": venue_side,
+            "venue_cash_order_qty": venue_cash,
+            "venue_avg_px": venue_avg,
+            "order_keys": r["order_keys"],
+        })
+
+    named = [r for r in out if r["venue_side"]]
+    if not out:
+        verdict = "NO SHORT ROWS in window — nothing to decide from"
+    elif not named:
+        verdict = ("VENUE SIDE ABSENT on every row — the receipts do not "
+                   "carry it, so neither model is confirmed. The "
+                   "arithmetic below is suggestive, NOT proof")
+    elif all(r["venue_side"] == "ORDER_SIDE_SELL" for r in named):
+        verdict = ("SHORT IS A SELL — the venue booked every one of these "
+                   "as ORDER_SIDE_SELL, so cost is (1-price)*qty, there "
+                   "was no overspend, and filled_usd/pnl/deployed are "
+                   "wrong by (1-p)/p on every short row")
+    elif all(r["venue_side"] == "ORDER_SIDE_BUY" for r in named):
+        verdict = ("SHORT IS A BUY — we were filled on the opposite leg; "
+                   "the ban stands and the overspend was real")
+    else:
+        verdict = f"MIXED venue sides {sides} — do not act until resolved"
+
+    return {"rows": out, "n": len(out), "n_with_venue_side": len(named),
+            "side_counts": sides, "verdict": verdict,
+            "within_authorization_under_short_model":
+                sum(1 for r in out if r["short_model_within_authorization"]),
+            "within_authorization_under_long_model":
+                sum(1 for r in out if r["long_model_within_authorization"])}
+
+
+@app.post("/api/admin/short-restate",
+          dependencies=[Depends(require_admin)])
+async def api_short_restate() -> dict:
+    """Restate stored filled_usd on short rows WRITTEN UNDER THE LONG
+    MODEL — the venue's own receipts settled the cost question
+    (short-truth 2026-08-25: every short booked ORDER_SIDE_SELL, cost
+    is (1-price)*qty), fill_cash has booked new rows correctly since,
+    and settled pnl comes from the venue ledger either way. What
+    remains wrong is HISTORY: pre-arm short rows carry filled_usd
+    inflated by p/(1-p), polluting deployed totals, day-room displays,
+    ROI denominators and allocate_venue_pnl weights.
+
+    IDEMPOTENT by construction: a row is restated only when its stored
+    value matches the LONG model to the cent AND differs from the short
+    model — i.e. only rows provably written under the old arithmetic.
+    Rows already written correctly (post-arm) are untouched; a second
+    run finds nothing. The summary persists under
+    ingestion_state['short_restate'] for the probe."""
+    from ..live_executor import ORDER_INTENT_SQL
+    pool = await get_pool()
+    rows = await pool.fetch(
+        f"""
+        SELECT id, us_market_slug,
+               round(filled_shares, 6)::float8 AS qty,
+               round(fill_price, 6)::float8    AS fill_px,
+               round(filled_usd, 2)::float8    AS booked_usd
+          FROM live_orders
+         WHERE COALESCE({ORDER_INTENT_SQL}, '') LIKE '%SHORT%'
+           AND COALESCE(filled_shares, 0) > 0
+           AND fill_price IS NOT NULL
+           AND status IN ('filled', 'settled', 'cashed_out')
+        """)
+    examined = len(rows)
+    restated, delta, detail = 0, 0.0, []
+    # classification census: the first firing found restated=0 across
+    # 155 shorts — before loosening any predicate, the next probe must
+    # SHOW where stored values actually sit relative to the two models
+    buckets = {"near_long": 0, "near_short": 0, "neither": 0,
+               "skipped": 0}
+    neither_eg: list = []
+    for r in rows:
+        qty, px = float(r["qty"] or 0), float(r["fill_px"] or 0)
+        if qty <= 0 or not (0 < px < 1):
+            buckets["skipped"] += 1
+            continue
+        long_model = round(px * qty, 2)
+        short_model = round((1.0 - px) * qty, 2)
+        booked = float(r["booked_usd"] or 0)
+        if abs(booked - short_model) <= 0.01:
+            buckets["near_short"] += 1
+        elif abs(booked - long_model) <= 0.01:
+            buckets["near_long"] += 1
+        else:
+            buckets["neither"] += 1
+            if len(neither_eg) < 12:
+                neither_eg.append({"id": r["id"],
+                                   "slug": r["us_market_slug"],
+                                   "booked": booked, "long": long_model,
+                                   "short": short_model})
+        if abs(booked - long_model) > 0.01 or abs(booked - short_model) <= 0.01:
+            continue   # not provably long-math, or already correct
+        await pool.execute(
+            "UPDATE live_orders SET filled_usd = $2 WHERE id = $1",
+            r["id"], short_model)
+        restated += 1
+        delta = round(delta + short_model - long_model, 2)
+        if len(detail) < 20:
+            detail.append({"id": r["id"], "slug": r["us_market_slug"],
+                           "was": long_model, "now": short_model})
+    summary = {"at": datetime.now(timezone.utc).isoformat(),
+               "examined": examined, "restated": restated,
+               "delta_usd": delta, "rows": detail,
+               "buckets": buckets, "neither_examples": neither_eg}
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "short_restate", json.dumps(summary))
+    return summary
+
+
+@app.get("/api/admin/overspend-receipts",
+         dependencies=[Depends(require_admin)])
+async def api_overspend_receipts(hours: int = 48) -> dict:
+    """The venue's OWN execution records for every fill that cost more
+    than it was authorized to (owner question 2026-08-25).
+
+    The owner's hypothesis for the 1.15x-3.87x rows: "the order was
+    bought, then sold for profit, rebought with the same 250, sold
+    again" — i.e. round-trips on ONE market, so the true stake never
+    exceeded the clip and filled_usd is just aggregating them.
+
+    That is decidable from stored data, not from argument:
+
+      * `executions` is the venue's list for THIS order. A single buy
+        that walked the book shows several fills, all at or below the
+        limit — an IOC buy cannot pay more. Round-trips would not
+        appear here at all; they would be separate rows.
+      * `orders_on_market` counts how many orders this account ever
+        placed on the same slug. Round-tripping requires more than one.
+        The never-add gate and the one-fill-per-asset index are both
+        designed to make that impossible, so a count of 1 refutes the
+        hypothesis and a count above 1 supports it.
+      * `exec_max_px` vs `limit_price` is the decisive number. Every
+        execution at or below the limit means we were never overcharged
+        and the recorded fill_price is wrong. Any execution above it
+        means the venue really did charge more than we authorized.
+    """
+    pool = await get_pool()
+    hours = max(1, min(int(hours), 24 * 14))
+    rows = await pool.fetch(
+        """
+        SELECT id, whale_username AS whale, us_market_slug AS slug,
+               status,
+               round(limit_price, 4)::float8 AS limit_price,
+               round(requested_usd, 2)::float8 AS requested_usd,
+               round(requested_shares, 2)::float8 AS requested_shares,
+               round(filled_shares, 2)::float8 AS filled_shares,
+               round(fill_price, 4)::float8 AS fill_price,
+               round(filled_usd, 2)::float8 AS filled_usd,
+               round(pnl, 2)::float8 AS pnl,
+               to_char(placed_at AT TIME ZONE 'America/New_York',
+                       'MM-DD HH24:MI:SS') AS placed_at,
+               (SELECT count(*) FROM live_orders o2
+                 WHERE o2.us_market_slug = live_orders.us_market_slug
+                   AND COALESCE(o2.whale_username, '')
+                       NOT IN ('manual', 'underdog'))::int
+                   AS orders_on_market,
+               CASE WHEN jsonb_typeof(raw #> '{response,executions}')
+                         = 'array'
+                    THEN raw #> '{response,executions}'
+                    ELSE '[]'::jsonb END AS executions,
+               -- THE WHALE'S OWN TRADE (owner hypothesis 2026-08-25:
+               -- "he is cashing out — selling before settlement").
+               --
+               -- The arithmetic already says we sized from one price
+               -- and bought at another: 249.92/0.22 = 1136 shares,
+               -- 1136 x 0.78 = $886.08, the observed fill to the cent.
+               -- So the venue charged correctly for the side we
+               -- ordered; OUR price and OUR side disagreed.
+               --
+               -- If his source trade was a SELL, that is the whole
+               -- story: his 0.22 is the price of a side he was LEAVING,
+               -- and copying it as an entry buys the complement. This
+               -- column is the test. maybe_execute refuses side != BUY,
+               -- so a SELL here would mean the refusal is being reached
+               -- with the wrong side already recorded.
+               (SELECT t.side FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_side,
+               (SELECT t.outcome FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_outcome,
+               (SELECT round(t.price, 4)::float8 FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_trade_price,
+               (SELECT round(t.size, 2)::float8 FROM trades t
+                 WHERE t.id = live_orders.trade_id) AS his_size
+        FROM live_orders
+        WHERE placed_at > now() - interval '1 hour' * $1
+          AND status IN ('filled', 'settled', 'cashed_out')
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+          AND COALESCE(requested_usd, 0) > 0
+          AND filled_usd > requested_usd * 1.01
+        ORDER BY filled_usd / requested_usd DESC
+        LIMIT 25
+        """, float(hours))
+    out = []
+    for r in rows:
+        d = dict(r)
+        execs = d.pop("executions", None)
+        if isinstance(execs, str):
+            try:
+                execs = json.loads(execs)
+            except (TypeError, ValueError):
+                execs = []
+        execs = execs or []
+        # Flatten each execution to the three numbers that matter, so
+        # the answer is readable in a probe line rather than a blob.
+        flat, mx = [], None
+        for e in execs:
+            if not isinstance(e, dict):
+                continue
+            px = e.get("lastPx")
+            px = (px or {}).get("value") if isinstance(px, dict) else px
+            try:
+                px = float(px) if px is not None else None
+            except (TypeError, ValueError):
+                px = None
+            try:
+                sh = float(e.get("lastShares") or 0)
+            except (TypeError, ValueError):
+                sh = 0.0
+            # WHICH INSTRUMENT DID WE ACTUALLY GET? (2026-08-25)
+            # The complement hypothesis says the venue priced the other
+            # leg. A simpler and worse possibility is that it FILLED the
+            # other leg — a different instrument than the slug names.
+            # Those look identical in price and are opposite in
+            # position. Carry whatever identity the execution states,
+            # plus the key list, because guessing which field names the
+            # instrument is how the original incident happened.
+            ident = {}
+            for k in ("marketSlug", "instrumentId", "instrument",
+                      "marketSideId", "sideId", "identifier", "intent",
+                      "side", "long"):
+                if e.get(k) is not None:
+                    ident[k] = str(e.get(k))[:60]
+            o = e.get("order")
+            if isinstance(o, dict):
+                for k in ("marketSlug", "intent", "instrumentId"):
+                    if o.get(k) is not None:
+                        ident[f"order.{k}"] = str(o.get(k))[:60]
+                # The venue echoes back the price WE sent. Comparing it
+                # to lastPx is the whole question: same number means it
+                # honoured our limit, different means it did not.
+                if isinstance(o.get("price"), dict):
+                    ident["order.price"] = str(
+                        o["price"].get("value"))[:20]
+            # legPrices (2026-08-25): the venue states a price PER LEG
+            # on every execution. Every overspent fill is BUY_SHORT and
+            # filled near (1 - our price). If legPrices shows our number
+            # on one leg and the fill price on the other, the venue's
+            # `price` field names the LONG leg even on a short order —
+            # and PRICE-TRUTH could not see it, because the PREVIEW
+            # echoes price*qty naively while EXECUTION does the real
+            # conversion. This field settles it.
+            lp = e.get("legPrices")
+            if lp is not None:
+                ident["legPrices"] = str(lp)[:200]
+            flat.append({"type": e.get("type"), "px": px, "shares": sh,
+                         "ident": ident or None,
+                         "keys": sorted(e.keys())[:14]})
+            if px is not None and sh > 0:
+                mx = px if mx is None else max(mx, px)
+        d["n_executions"] = len(flat)
+        d["executions"] = flat[:12]
+        d["exec_max_px"] = mx
+        lim = d.get("limit_price") or 0
+        # The verdict, computed here so no reader has to eyeball it.
+        if mx is None:
+            d["verdict"] = "no execution prices recorded — undecidable"
+        elif mx <= lim + 1e-9:
+            d["verdict"] = ("executions all AT OR BELOW limit — we were "
+                            "NOT overcharged; recorded fill_price is wrong")
+        else:
+            d["verdict"] = (f"execution at {mx} ABOVE limit {lim} — the "
+                            "venue charged more than authorized")
+        # WHICH SIDE DID WE ASK FOR, AND WHICH DID WE GET? (2026-08-25)
+        #
+        # order.price echoes back the price WE sent (0.22) while the
+        # fill lands at 0.78 — exactly 1-0.22. The venue did not
+        # reinterpret our number; it recorded our order at 0.22 and
+        # filled us on the instrument trading at 0.78. That is the
+        # OPPOSITE SIDE, not a pricing convention.
+        #
+        # If that is right, the bug is in the INTENT we derive, not in
+        # the price we send, and it is the original wrong-side incident
+        # still live. The side echo cannot see it because it re-derives
+        # the intent with the SAME logic and agrees with itself.
+        #
+        # So ask the venue directly: which side carries the outcome we
+        # copied, and what is its `long` flag? Compare that to the
+        # intent we actually sent. A disagreement is the whole answer.
+        try:
+            from .. import pmus as _pmus
+
+            m = await asyncio.to_thread(
+                _pmus._get_client().markets.retrieve_by_slug, d["slug"])
+            sides = ((m or {}).get("market") or {}).get("marketSides") or []
+            d["venue_sides"] = [
+                {"desc": str(sd.get("description"))[:40],
+                 "long": sd.get("long"),
+                 "price": sd.get("price")}
+                for sd in sides if isinstance(sd, dict)][:4]
+            sent = (d.get("executions") or [{}])[0].get(
+                "ident", {}).get("order.intent") or ""
+            want_long = sent.endswith("BUY_LONG")
+            # The side whose price matches what we authorized is the
+            # side we MEANT to buy.
+            lim = d.get("limit_price")
+            meant = None
+            for sd in d["venue_sides"]:
+                try:
+                    if lim and abs(float(sd["price"]) - float(lim)) <= 0.06:
+                        meant = sd
+                except (TypeError, ValueError):
+                    continue
+            if meant is not None and meant.get("long") is not None:
+                d["side_verdict"] = (
+                    f"we authorized {lim}; the side priced near that is "
+                    f"'{meant['desc']}' with long={meant['long']}; we "
+                    f"sent {sent or '?'} — "
+                    + ("AGREES"
+                       if bool(meant["long"]) == want_long else
+                       "INVERTED: we bought the opposite side"))
+            else:
+                d["side_verdict"] = (
+                    "no venue side is priced near our limit — cannot "
+                    "attribute; do not infer")
+        except Exception as exc:  # noqa: BLE001 — report, never infer
+            d["side_verdict"] = f"unreadable: {type(exc).__name__}"
+        out.append(d)
+    return {"hours": hours, "n": len(out), "rows": out}
+
+
+@app.get("/api/copy-unmapped")
+async def api_copy_unmapped(days: int | None = None) -> dict:
+    """Breakdown of the copy sleeve's rejected rows — the number the site
+    shows as 'unmapped' (2026-08-10, unmapped-funnel work). The counter
+    blends three different writers (mapping failures, no-stack refusals,
+    manual-desk refusals) and a league mix that is largely world-soccer
+    flow the US venue simply does not list; this endpoint separates
+    'mapper bug we can fix' from 'venue does not carry it' without a
+    database dig. Pure DB read — never calls a venue."""
+    from ..copy_sports import league_of, market_type_of
+
+    pool = await get_pool()
+    where_days = "AND lo.placed_at > now() - make_interval(days => $1)" \
+        if days and days > 0 else ""
+    args = [int(days)] if days and days > 0 else []
+    rows = await pool.fetch(
+        f"""
+        SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
+               COALESCE(t.market_slug, t.event_slug, '') AS slug,
+               CASE WHEN lo.error LIKE 'no-stack%' THEN 'no_stack'
+                    WHEN lo.error LIKE 'never-add%' THEN 'never_add'
+                    WHEN lo.error LIKE 'one position per game%'
+                         THEN 'one_per_game'
+                    WHEN lo.error LIKE 'unmapped%' THEN 'unmapped'
+                    ELSE 'no_us_market' END AS reason,
+               count(*)::int AS n,
+               count(*) FILTER
+                   (WHERE lo.placed_at > now() - interval '7 days')::int
+                   AS n_7d,
+               -- WINNABLE SPLIT (owner question 2026-08-13: 'how do we
+               -- fix the unmapping error'). The mapper's own diag
+               -- strings already say which failure this was:
+               --   'sides:[' = the venue LISTED the event and handed us
+               --   its markets — every one of these is OUR bug, fixable.
+               --   every search 0ev (and none positive: the !~ guard
+               --   below) with no sides seen = the venue does not
+               --   carry it — unwinnable by code. A diag where a LATER
+               --   query found events is a mapper failure, not a venue
+               --   gap, and lands in undiagnosed.
+               -- Undiagnosed remainder stays its own bucket, never
+               -- guessed into either.
+               count(*) FILTER (WHERE lo.error LIKE '%sides:[%')::int
+                   AS n_listed,
+               count(*) FILTER (WHERE lo.error LIKE '%0ev%'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.error !~ ':[1-9][0-9]*ev')::int AS n_0ev,
+               count(*) FILTER (WHERE lo.error LIKE '%sides:[%'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_listed_7d,
+               count(*) FILTER (WHERE lo.error LIKE '%0ev%'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.error !~ ':[1-9][0-9]*ev'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_0ev_7d,
+               -- EXACT-LANE 404s (funnel truthing 2026-08-30): a row
+               -- whose EXACT candidates all 404'd but whose search
+               -- also saw nothing has been counted venue_unlisted —
+               -- yet a candidate-grammar miss and a real venue gap
+               -- look identical there. These counters split that out
+               -- so the winnable estimate stops absorbing grammar
+               -- bugs. Measurement only; the buckets above are
+               -- byte-unchanged. (No trailing bracket in the regex:
+               -- the compacted diag joins counts by comma, so x404 is
+               -- not always last.)
+               count(*) FILTER
+                   (WHERE lo.error ~ 'exact\\[[^\\]]*x404')::int
+                   AS n_exact404,
+               count(*) FILTER (WHERE lo.error ~ 'exact\\[[^\\]]*x404'
+                   AND lo.error LIKE '%0ev%'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.error !~ ':[1-9][0-9]*ev')::int
+                   AS n_exact404_unlisted,
+               count(*) FILTER (WHERE lo.error ~ 'exact\\[[^\\]]*x404'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_exact404_7d,
+               count(*) FILTER (WHERE lo.error ~ 'exact\\[[^\\]]*x404'
+                   AND lo.error LIKE '%0ev%'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.error !~ ':[1-9][0-9]*ev'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_exact404_unlisted_7d,
+               -- UNDIAGNOSED SHAPE SPLIT (2026-08-31). 'undiagnosed'
+               -- is a RESIDUAL — what is left after listed and 0ev —
+               -- and with the roster cut to one book it is the largest
+               -- unattributed number in the funnel (rn1: 23,005). The
+               -- comment above already concedes one shape inside it is
+               -- OURS: a diag whose LATER query found events (':<n>ev'
+               -- with no sides seen) is a mapper failure, not a venue
+               -- gap. It was described and then never counted, so all
+               -- of it read as unknown. Counting it says how much of
+               -- the residual is winnable. Beside the buckets above,
+               -- never inside them: the five winnable counters stay
+               -- byte-unchanged and this does not re-attribute a
+               -- single row.
+               count(*) FILTER (WHERE lo.error ~ ':[1-9][0-9]*ev'
+                   AND lo.error NOT LIKE '%sides:[%')::int
+                   AS n_later_ev,
+               count(*) FILTER (WHERE lo.error ~ ':[1-9][0-9]*ev'
+                   AND lo.error NOT LIKE '%sides:[%'
+                   AND lo.placed_at > now() - interval '7 days')::int
+                   AS n_later_ev_7d
+        FROM live_orders lo
+        LEFT JOIN trades t ON t.id = lo.trade_id
+        WHERE lo.status = 'rejected' {where_days}
+        GROUP BY 1, 2, 3
+        """,
+        *args,
+    )
+    # '(no slug)' enrichability: a rejected row whose trade STILL has no
+    # metadata either has a token our catalog now knows (the hourly
+    # sweep will map it on retry once enrichment lands) or a token
+    # nothing knows (the enrichment gap itself). Separate query — tiny.
+    noslug = await pool.fetchrow(
+        f"""
+        SELECT count(*)::int AS rows,
+               count(*) FILTER (WHERE mt.token_id IS NOT NULL)::int
+                   AS catalog_has_token
+        FROM live_orders lo
+        LEFT JOIN trades t ON t.id = lo.trade_id
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        WHERE lo.status = 'rejected'
+          AND COALESCE(t.market_slug, t.event_slug, '') = ''
+          {where_days}
+        """, *args)
+    # WHAT THE UNEXPLAINED REMAINDER ACTUALLY SAYS. The counters above
+    # can size undiag_other; nothing can say what it IS. These are the
+    # distinct diag SHAPES (the mapper's leading text, before the
+    # per-market detail), so the next coverage fix gets chosen from the
+    # strings themselves rather than guessed at. Read-only, capped,
+    # and outside every attribution bucket.
+    undiag_shapes = await pool.fetch(
+        f"""
+        SELECT left(lo.error, 80) AS shape, count(*)::int AS n,
+               count(*) FILTER
+                   (WHERE lo.placed_at > now() - interval '7 days')::int
+                   AS n_7d
+        FROM live_orders lo
+        WHERE lo.status = 'rejected'
+          AND lo.error LIKE 'unmapped%'
+          AND lo.error NOT LIKE '%sides:[%'
+          AND lo.error NOT LIKE '%0ev%'
+          AND lo.error !~ ':[1-9][0-9]*ev'
+          {where_days}
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+        """, *args)
+    # WHAT IS ACTUALLY IN 'no_us_market' (2026-08-31). That bucket is
+    # the ELSE branch of the reason CASE, so it does not mean "the
+    # venue has no market" — it swallows every rejection string this
+    # codebase writes that is not one of the four named prefixes, and
+    # NULL errors with it. It is 23,888 rows and it has been quoted as
+    # a venue-coverage number. Naming its members is the difference
+    # between a finding and a label.
+    other_shapes = await pool.fetch(
+        f"""
+        SELECT left(COALESCE(lo.error, '(null)'), 60) AS shape,
+               count(*)::int AS n,
+               count(*) FILTER
+                   (WHERE lo.placed_at > now() - interval '7 days')::int
+                   AS n_7d
+        FROM live_orders lo
+        WHERE lo.status = 'rejected'
+          AND COALESCE(lo.error, '') NOT LIKE 'no-stack%'
+          AND COALESCE(lo.error, '') NOT LIKE 'never-add%'
+          AND COALESCE(lo.error, '') NOT LIKE 'one position per game%'
+          AND COALESCE(lo.error, '') NOT LIKE 'unmapped%'
+          {where_days}
+        GROUP BY 1 ORDER BY 2 DESC LIMIT 12
+        """, *args)
+    by_reason: dict[str, int] = {}
+    by_whale: dict[str, int] = {}
+    # THE WINNABLE SPLIT, PER WHALE (owner order 2026-08-30: "we need to
+    # be mapping and trading a larger percentage of his trades").
+    #
+    # The roster-wide split says ~50/50 listed_mapper_fail vs
+    # venue_unlisted, but a roster average cannot answer the question
+    # that was asked, which is about ONE whale. A whale trading US
+    # majors and a whale trading world soccer have completely different
+    # ceilings, and only the listed half is ours to win. Same rows,
+    # same query — this was already grouped by whale and only ever
+    # summed to a flat count.
+    by_whale_win: dict[str, dict] = {}
+    # WHALE x LEAGUE (2026-08-31). The roster is one book, and the
+    # per-whale split and the per-league split are reported side by
+    # side with no join between them. Run 33395797987 put rn1's 7d
+    # misses at 14,503 and tennis's at 14,008 — close enough that the
+    # obvious reading is "rn1 IS the tennis book", and a coincidence of
+    # totals is not evidence of that. The rows are already grouped by
+    # whale AND slug, so the cross costs one dict and no query.
+    by_wl: dict[tuple[str, str], dict] = {}
+    by_league: dict[str, dict] = {}
+    by_type: dict[str, int] = {}
+    winnable = {"listed_mapper_fail": 0, "venue_unlisted": 0,
+                "undiagnosed": 0, "listed_mapper_fail_7d": 0,
+                "venue_unlisted_7d": 0,
+                # beside — never replacing — the five above: how many
+                # 'venue_unlisted' rows carry an exact-lane 404 trail
+                # (candidate-grammar misses masquerading as gaps)
+                "exact404": 0, "exact404_unlisted": 0,
+                "exact404_7d": 0, "exact404_unlisted_7d": 0,
+                # the winnable slice OF the undiagnosed residual, and
+                # what is still genuinely unexplained after it
+                "later_ev": 0, "later_ev_7d": 0, "undiag_other": 0}
+    total = 0
+    total_7d = 0
+    for r in rows:
+        n = r["n"]
+        total += n
+        total_7d += r["n_7d"]
+        by_reason[r["reason"]] = by_reason.get(r["reason"], 0) + n
+        by_whale[r["whale"]] = by_whale.get(r["whale"], 0) + n
+        wh = by_whale_win.setdefault(
+            r["whale"], {"n": 0, "n_7d": 0, "listed_mapper_fail": 0,
+                         "venue_unlisted": 0, "undiagnosed": 0,
+                         "listed_mapper_fail_7d": 0, "exact404": 0,
+                         "later_ev": 0, "later_ev_7d": 0,
+                         "undiag_other": 0})
+        wh["n"] += n
+        wh["n_7d"] += r["n_7d"]
+        slug = r["slug"] or ""
+        league = league_of(slug) if slug else "(no slug)"
+        mtype = market_type_of(slug) if slug else "unknown"
+        lg = by_league.setdefault(league, {"n": 0, "n_7d": 0, "types": {},
+                                           "listed": 0, "unlisted_0ev": 0,
+                                           "exact404": 0})
+        lg["n"] += n
+        lg["n_7d"] += r["n_7d"]
+        lg["types"][mtype] = lg["types"].get(mtype, 0) + n
+        by_type[mtype] = by_type.get(mtype, 0) + n
+        wl = by_wl.setdefault((r["whale"], league),
+                              {"n": 0, "n_7d": 0, "listed": 0,
+                               "unlisted_0ev": 0, "x404": 0})
+        wl["n"] += n
+        wl["n_7d"] += r["n_7d"]
+        if r["reason"] == "unmapped":
+            wl["listed"] += r["n_listed"]
+            wl["unlisted_0ev"] += r["n_0ev"]
+            wl["x404"] += r["n_exact404"]
+        if r["reason"] == "unmapped":
+            winnable["listed_mapper_fail"] += r["n_listed"]
+            winnable["venue_unlisted"] += r["n_0ev"]
+            winnable["undiagnosed"] += n - r["n_listed"] - r["n_0ev"]
+            winnable["listed_mapper_fail_7d"] += r["n_listed_7d"]
+            winnable["venue_unlisted_7d"] += r["n_0ev_7d"]
+            winnable["exact404"] += r["n_exact404"]
+            winnable["exact404_unlisted"] += r["n_exact404_unlisted"]
+            winnable["exact404_7d"] += r["n_exact404_7d"]
+            winnable["exact404_unlisted_7d"] += \
+                r["n_exact404_unlisted_7d"]
+            winnable["later_ev"] += r["n_later_ev"]
+            winnable["later_ev_7d"] += r["n_later_ev_7d"]
+            winnable["undiag_other"] += (
+                n - r["n_listed"] - r["n_0ev"] - r["n_later_ev"])
+            lg["listed"] += r["n_listed"]
+            lg["unlisted_0ev"] += r["n_0ev"]
+            lg["exact404"] += r["n_exact404"]
+            # Same buckets, same guard (`reason == "unmapped"` only —
+            # a no-stack or one-per-game refusal is a policy decision,
+            # not a mapping miss, and counting it as winnable would
+            # overstate the ceiling).
+            wh["listed_mapper_fail"] += r["n_listed"]
+            wh["venue_unlisted"] += r["n_0ev"]
+            wh["undiagnosed"] += n - r["n_listed"] - r["n_0ev"]
+            wh["listed_mapper_fail_7d"] += r["n_listed_7d"]
+            wh["exact404"] += r["n_exact404"]
+            wh["later_ev"] += r["n_later_ev"]
+            wh["later_ev_7d"] += r["n_later_ev_7d"]
+            wh["undiag_other"] += (
+                n - r["n_listed"] - r["n_0ev"] - r["n_later_ev"])
+    leagues = sorted(by_league.items(), key=lambda kv: -kv[1]["n"])[:30]
+    # Ranked by RECENT volume, not lifetime: the cross exists to say
+    # which book is losing which league right now, and a lifetime sort
+    # puts frozen history at the top of a live question.
+    by_whale_league = [
+        {"whale": k[0], "league": k[1], "n": v["n"], "n_7d": v["n_7d"],
+         "listed": v["listed"], "unlisted_0ev": v["unlisted_0ev"],
+         "x404": v["x404"]}
+        for k, v in sorted(by_wl.items(),
+                           key=lambda kv: (-kv[1]["n_7d"], -kv[1]["n"]))[:40]]
+    return {
+        "totals": {"rows": total, "recent_7d": total_7d},
+        "winnable": winnable,
+        "no_slug": {"rows": noslug["rows"],
+                    "catalog_has_token": noslug["catalog_has_token"],
+                    "token_unknown": noslug["rows"]
+                    - noslug["catalog_has_token"]},
+        "undiag_shapes": [{"shape": r["shape"], "n": r["n"],
+                           "n_7d": r["n_7d"]} for r in undiag_shapes],
+        "other_shapes": [{"shape": r["shape"], "n": r["n"],
+                          "n_7d": r["n_7d"]} for r in other_shapes],
+        "by_whale_league": by_whale_league,
+        "by_reason": [{"reason": k, "n": v}
+                      for k, v in sorted(by_reason.items(),
+                                         key=lambda kv: -kv[1])],
+        "by_market_type": [{"market_type": k, "n": v}
+                           for k, v in sorted(by_type.items(),
+                                              key=lambda kv: -kv[1])],
+        "by_whale": [{"whale": k, "n": v}
+                     for k, v in sorted(by_whale.items(),
+                                        key=lambda kv: -kv[1])],
+        "by_whale_winnable": [
+            {"whale": k, "n": v["n"], "n_7d": v["n_7d"],
+             "listed_mapper_fail": v["listed_mapper_fail"],
+             "listed_mapper_fail_7d": v["listed_mapper_fail_7d"],
+             "venue_unlisted": v["venue_unlisted"],
+             "undiagnosed": v["undiagnosed"],
+             "later_ev": v["later_ev"], "later_ev_7d": v["later_ev_7d"],
+             "undiag_other": v["undiag_other"],
+             "exact404": v["exact404"]}
+            for k, v in sorted(by_whale_win.items(),
+                               key=lambda kv: -kv[1]["listed_mapper_fail"])],
+        "by_league": [{"league": k, "n": v["n"], "n_7d": v["n_7d"],
+                       "listed": v["listed"],
+                       "unlisted_0ev": v["unlisted_0ev"],
+                       "exact404": v["exact404"],
+                       "market_types": dict(sorted(v["types"].items(),
+                                                   key=lambda kv: -kv[1]))}
+                      for k, v in leagues],
+    }
+
+
+@app.get("/api/track-record")
+async def api_track_record(since: str | None = Query(None),
+                           max_stake: float | None = Query(None)) -> dict:
+    """The AI trader's record from the ACTUAL venue account, windowed on
+    entry time (default 2026-08-01). The shadow mirror is not a record.
+
+    `max_stake` excludes positions costing more than it — and the payload
+    then carries `excluded_over_limit` (count, stake, net P&L) so any
+    consumer can, and the site does, disclose what the view leaves out.
+    The unfiltered record remains the default."""
+    from .track_record import track_record
+
+    return await track_record(since, max_stake=max_stake)
+
+
+def _parse_day(s: str | None, default: str) -> str:
+    from datetime import datetime as _dt
+
+    try:
+        return _dt.strptime((s or "").strip(), "%Y-%m-%d").strftime("%Y-%m-%d")
+    except ValueError:
+        return default
+
+
+def _today_et() -> str:
+    from datetime import datetime as _dt
+
+    from .track_record import RECORD_TZ
+
+    return _dt.now(RECORD_TZ).strftime("%Y-%m-%d")
+
+
+# Strong refs for shielded background fetches (asyncio only weakly
+# references running tasks; without this a warmup crawl could be GC'd).
+_bg_tasks: set = set()
+
+
+async def _category_breakdown(from_day: str, to_day: str) -> dict:
+    """Per-ET-day results by category over a date range (owner reports
+    2026-08-06/07): each live sleeve (RN1, swisstony, kch123,
+    HomeRunHazard, manual) from the order-level audit table; arbitrage
+    from the venue-account record split by the engine mirror's band tag;
+    everything left over lands in `residual`. The site's ±$100
+    single-trade display cap applies throughout.
+
+    `residual` is the derived remainder and is NOT a strategy — see the
+    comment above its computation. It was called `software` until
+    2026-08-30, which twice sent the owner the false signal that a
+    retired engine was still trading."""
+    from datetime import datetime as _dt
+
+    from .track_record import (AUDIT_SINCE, PNL_DISPLAY_CAP, RECORD_TZ,
+                               pnl_cap_exempt_patterns, track_record)
+
+    pool = await get_pool()
+    copies = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS whale,
+               to_char(settled_at AT TIME ZONE 'America/New_York',
+                       'YYYY-MM-DD') AS day,
+               count(*)::int AS settled,
+               count(*) FILTER (WHERE pnl > 0)::int AS wins,
+               count(*) FILTER (WHERE pnl < 0)::int AS losses,
+               COALESCE(sum(pnl), 0)::float8 AS pnl
+        FROM live_orders
+        WHERE status = 'settled' AND settled_at IS NOT NULL
+          -- Owner directive 2026-08-06: a single order swinging the P&L
+          -- past the display cap is an anomaly, not the record.
+          -- Owner override 2026-09-01: named trades count in full
+          -- (track_record.PNL_CAP_EXEMPT_KEYS).
+          AND (abs(COALESCE(pnl, 0)) <= $1
+               OR lower(COALESCE(us_market_slug, '')) LIKE ANY($2::text[]))
+        GROUP BY 1, 2
+        """, PNL_DISPLAY_CAP, pnl_cap_exempt_patterns())
+    arb_rows = await pool.fetch(
+        "SELECT DISTINCT outcome_id FROM engine_fills "
+        "WHERE band IN ('arb', 'arb_crypto')")
+    arb_slugs = {r["outcome_id"] for r in arb_rows}
+    # AUDIT SINCE (2026-08-25): this breakdown spans from first_day and
+    # its sleeve rows come from live_orders with NO date floor, so the
+    # account anchor must span the same period. track_record(None) reads
+    # the DISPLAY epoch, which the 2026-08-24 re-baseline moved forward
+    # — anchoring here would report every pre-epoch settled row as
+    # unattributed. Display windows move; audits do not.
+    from .track_record import AUDIT_SINCE as _audit_since
+
+    rec = await track_record(_audit_since)
+    first_day = "2026-08-01"
+
+    days: dict[str, dict] = {}
+
+    def _cat(day: str, cat: str) -> dict:
+        d = days.setdefault(day, {})
+        return d.setdefault(cat, {"pnl": 0.0, "settled": 0,
+                                  "wins": 0, "losses": 0})
+
+    def _in_range(day: str) -> bool:
+        return from_day <= day <= to_day
+
+    # RECONCILED BY CONSTRUCTION (owner report 2026-08-07: "the reports
+    # don't line up with the daily PNLs"). The venue-account calendar is
+    # the ANCHOR: each day's category rows must sum to that day's
+    # calendar P&L exactly. Copies/manual come from the order-level
+    # audit table (they are venue-account trades, so they subtract);
+    # arb from the record's band-tagged rows; SOFTWARE IS THE DERIVED
+    # REMAINDER — the same identity used in the owner's ops PDF, which
+    # ties out to the account to the penny instead of drifting across
+    # two accounting bases.
+    acct_by_day: dict[str, float] = {}
+    for d in rec.get("daily") or []:
+        day = d.get("date") or ""
+        if _in_range(day):
+            acct_by_day[day] = float(d.get("pnl") or 0)
+
+    for r in copies:
+        # Each live sleeve is its own category: the source whales plus
+        # the admin manual desk (owner 2026-08-07). A whale missing from
+        # this tuple silently leaks its P&L into the derived Software
+        # remainder — extend it with every promotion.
+        if r["whale"] not in ("rn1", "swisstony", "kch123",
+                              "homerunhazard", "manual",
+                              "underdog",
+                              "ferrarichampions2026", "0x076daa87",
+                              "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"
+                              "-1759935795465"):
+            continue
+        day = max(r["day"], first_day)
+        if not _in_range(day):
+            continue
+        c = _cat(day, r["whale"])
+        c["pnl"] = round(c["pnl"] + r["pnl"], 4)
+        c["settled"] += r["settled"]
+        c["wins"] += r["wins"]
+        c["losses"] += r["losses"]
+
+    for r in rec.get("trades") or []:
+        if r.get("sleeve") == "copy" or not r.get("settled"):
+            continue
+        ts = r.get("settled_ts") or r.get("entry_ts")
+        if not ts:
+            continue
+        day = max(_dt.fromtimestamp(ts, RECORD_TZ).strftime("%Y-%m-%d"),
+                  first_day)
+        if not _in_range(day) or r.get("market_slug") not in arb_slugs:
+            continue
+        pnl = float(r.get("pnl") or 0)
+        c = _cat(day, "arb")
+        c["pnl"] = round(c["pnl"] + pnl, 4)
+        c["settled"] += 1
+        c["wins"] += 1 if pnl > 0 else 0
+        c["losses"] += 1 if pnl < 0 else 0
+
+    # THE COUNTS WERE ALWAYS ZERO, AND THAT WAS THE TELL (2026-08-30).
+    #
+    # A sw_counts loop used to attach settled/wins/losses to the derived
+    # remainder from the record's non-copy rows. It could never count
+    # anything: copy_slugs (track_record.py) marks every us_market_slug a
+    # COPY_WHALES order has EVER touched as sleeve='copy', with no date
+    # bound, so `sleeve == "copy"` skipped essentially the whole account
+    # and every day published settled=0.
+    #
+    # The probe printed the result verbatim — `unattr=4970.76/0set` — and
+    # nothing alarmed on it for thirteen days: $5,001.11 of P&L filed
+    # under a strategy class the owner switched OFF on 2026-08-17, with
+    # zero trades behind it. Counting dollars against a bucket that
+    # cannot hold a trade is not attribution, so the loop is gone and the
+    # counts below are HARD zero with an explicit residual marker.
+
+    # EXTERNAL (owner) settlements — positive attribution BEFORE the
+    # remainder is derived (owner report 2026-08-22: personal trades
+    # placed directly on the venue app were landing in 'Software' and
+    # reviving the 'software is still firing' scare). A venue
+    # resolution on a market absent from EVERY platform ledger is the
+    # owner's own activity; it gets its own labeled line. Fail-open:
+    # if the venue export is unreachable, the remainder simply stays
+    # merged as before.
+    try:
+        from .pmus_account import venue_export
+
+        ours = {(r.get("market_slug") or "").lower()
+                for r in (rec.get("trades") or [])}
+        lo_rows = await pool.fetch(
+            "SELECT DISTINCT lower(us_market_slug) AS s FROM live_orders "
+            "WHERE us_market_slug IS NOT NULL")
+        ours |= {r["s"] for r in lo_rows if r["s"]}
+        # Bounded (2026-08-23): on a cold cache this crawl runs minutes
+        # and was timing out every report endpoint that renders the
+        # breakdown. Slow == unavailable here: fail open to the merged
+        # remainder — but SHIELD the crawl so it finishes in the
+        # background and warms the activities cache for the next render
+        # (a bare wait_for cancels it, and the cache never warms).
+        vtask = asyncio.ensure_future(venue_export(from_day))
+        _bg_tasks.add(vtask)
+        vtask.add_done_callback(_bg_tasks.discard)
+        vexp = await asyncio.wait_for(asyncio.shield(vtask), timeout=25)
+        for vr in (vexp.get("rows") or []):
+            if vr.get("kind") != "resolution":
+                continue
+            slug = (vr.get("slug") or "").lower()
+            if not slug or slug in ours:
+                continue
+            when = vr.get("time") or ""
+            if not when:
+                continue
+            day = (_dt.fromisoformat(when.replace("Z", "+00:00"))
+                   .astimezone(RECORD_TZ).strftime("%Y-%m-%d"))
+            if not _in_range(day):
+                continue
+            pnl = float(vr.get("realized_pnl") or 0)
+            c = _cat(day, "external")
+            c["pnl"] = round(c["pnl"] + pnl, 2)
+            c["settled"] += 1
+            c["wins"] += 1 if pnl > 0 else 0
+            c["losses"] += 1 if pnl < 0 else 0
+    except Exception:  # noqa: BLE001 — attribution stays merged
+        pass
+
+    # THE KEY IS THE LIE, NOT THE LABEL (2026-08-30).
+    #
+    # The CSV/PDF label was already corrected on 2026-08-22 after the
+    # first "software is still firing" scare — and the scare came back,
+    # because the label was never what most readers see. The probe
+    # (engine-diagnostic.yml), Wall.tsx, wall.ts and ReportsCard.tsx all
+    # read the JSON KEY, and ReportsCard rendered it as "Software" on
+    # screen. So the key changes here.
+    #
+    # `residual` is what this line actually is: the difference between
+    # the venue account calendar and everything we could attribute. It
+    # is a MEASUREMENT ERROR TERM, and it is dominated by a dating
+    # mismatch — copies bucket on live_orders.settled_at (the day our
+    # sweep DISCOVERED a resolution, because engine.py falls through to
+    # now() for archive-settled rows) while the account anchors on the
+    # venue's own resolution/entry day. Same trade, two calendars.
+    #
+    # It stays a derived remainder on purpose: an unexplained difference
+    # must be shown, never smoothed away or spread across the sleeves.
+    # What changes is that it can no longer wear a strategy's name, and
+    # `residual: True` lets any consumer refuse to plot it as earnings.
+    for day, acct_pnl in acct_by_day.items():
+        attributed = sum(c["pnl"] for c in (days.get(day) or {}).values())
+        c = _cat(day, "residual")
+        c["pnl"] = round(acct_pnl - attributed, 2)
+        c["settled"] = 0
+        c["wins"] = 0
+        c["losses"] = 0
+        c["residual"] = True
+
+    totals: dict[str, dict] = {}
+    for day, d in days.items():
+        for cat, c in d.items():
+            t = totals.setdefault(cat, {"pnl": 0.0, "settled": 0,
+                                        "wins": 0, "losses": 0})
+            t["pnl"] = round(t["pnl"] + c["pnl"], 4)
+            for k in ("settled", "wins", "losses"):
+                t[k] += c[k]
+            if c.get("residual"):
+                t["residual"] = True   # the marker survives aggregation
+    net = round(sum(t["pnl"] for t in totals.values()), 2)
+    out_days = []
+    for k in sorted(days):
+        out_days.append({"date": k, "account": acct_by_day.get(k),
+                         **days[k]})
+    return {"from": from_day, "to": to_day,
+            "days": out_days,
+            "totals": totals, "net_pnl": net,
+            "reconciled": True,
+            "cross_foots_by_construction": True,
+            "note": ("each day's categories sum to the account calendar "
+                     "BY CONSTRUCTION, because 'residual' is defined as "
+                     "account minus attributed — so 'reconciled' here is "
+                     "an identity, NOT an independent check, and it "
+                     "cannot detect a wrong input. copies/manual come "
+                     "from the order-level audit table, arb from the "
+                     "engine mirror's band tag, external is venue "
+                     "settlements on markets no platform ledger touched "
+                     "(owner activity). 'residual' is a MEASUREMENT "
+                     "ERROR TERM, never a strategy: it holds fees, "
+                     "open-stake mark moves, trades past the ±$100 "
+                     "display cap, and — dominantly — a dating mismatch, "
+                     "since copies bucket on the day our sweep "
+                     "DISCOVERED a resolution while the account anchors "
+                     "on the venue's own day. It carries settled=0 and "
+                     "residual=true; do not plot it as earnings")}
+
+
+@app.get("/api/admin/order-audit", dependencies=[Depends(require_admin)])
+async def api_admin_order_audit(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+) -> dict:
+    """UNCAPPED order-level attribution (owner order 2026-08-17, weekly
+    report R5). The public record's ±$100 single-trade display cap made
+    every derived report blind to big winners AND big losers — the
+    2026-08-10 week read -$4,984 capped against a materially different
+    uncapped book, and sleeve attributions were biased positive because
+    copy clips losing more than $100 vanished. This surface is the
+    management truth: every settled live order, no exclusions, split by
+    ET day x sleeve x venue. Admin-token gated — the cap stays on for
+    the public site only."""
+    from_day = _parse_day(from_, DISPLAY_EPOCH)
+    to_day = _parse_day(to, _today_et())
+    from .track_record import PNL_DISPLAY_CAP as _pnl_cap
+    from .track_record import pnl_cap_exempt_patterns
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS category,
+               COALESCE(venue, '?') AS venue,
+               to_char(settled_at AT TIME ZONE 'America/New_York',
+                       'YYYY-MM-DD') AS day,
+               count(*)::int AS settled,
+               count(*) FILTER (WHERE pnl > 0)::int AS wins,
+               count(*) FILTER (WHERE pnl < 0)::int AS losses,
+               COALESCE(sum(pnl), 0)::float8 AS pnl,
+               COALESCE(sum(filled_usd), 0)::float8 AS filled_usd,
+               COALESCE(sum(pnl) FILTER (
+                   WHERE abs(pnl) > $2::float8
+                     AND NOT lower(COALESCE(us_market_slug, ''))
+                             LIKE ANY($1::text[])), 0)::float8
+                   AS over_cap_pnl,
+               count(*) FILTER (
+                   WHERE abs(COALESCE(pnl, 0)) > $2::float8
+                     AND NOT lower(COALESCE(us_market_slug, ''))
+                             LIKE ANY($1::text[]))::int
+                   AS over_cap_n
+        FROM live_orders
+        WHERE status = 'settled' AND settled_at IS NOT NULL
+        GROUP BY 1, 2, 3
+        """, pnl_cap_exempt_patterns(), float(_pnl_cap))
+    days: dict[str, list] = {}
+    totals: dict[str, dict] = {}
+    for r in rows:
+        if not (from_day <= r["day"] <= to_day):
+            continue
+        d = dict(r)
+        days.setdefault(r["day"], []).append(d)
+        t = totals.setdefault(r["category"], {
+            "pnl": 0.0, "settled": 0, "wins": 0, "losses": 0,
+            "filled_usd": 0.0, "over_cap_pnl": 0.0, "over_cap_n": 0})
+        t["pnl"] = round(t["pnl"] + r["pnl"], 4)
+        t["filled_usd"] = round(t["filled_usd"] + r["filled_usd"], 2)
+        t["over_cap_pnl"] = round(t["over_cap_pnl"] + r["over_cap_pnl"], 4)
+        for k in ("settled", "wins", "losses", "over_cap_n"):
+            t[k] += r[k]
+    return {"from": from_day, "to": to_day, "capped": False,
+            "days": [{"date": k, "rows": v} for k, v in sorted(days.items())],
+            "totals": totals,
+            "net_pnl": round(sum(t["pnl"] for t in totals.values()), 2)}
+
+
+@app.get("/api/daily-breakdown")
+async def api_daily_breakdown() -> dict:
+    """Month-to-date category breakdown (kept for existing consumers)."""
+    return await _category_breakdown(DISPLAY_EPOCH, _today_et())
+
+
+@app.post("/api/admin/quarantine/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_quarantine_set(action: str) -> dict:
+    """Mapping-quarantine switch (wrong-side incident 2026-08-23).
+    'off' resumes the quarantined copy classes after fidelity is
+    proven; 'on' re-arms. The env var LIVE_MAPPING_QUARANTINE remains
+    a hard override in either direction."""
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="action must be on|off")
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "mapping_quarantine", json.dumps(action == "on"))
+    return {"ok": True, "quarantine": action == "on"}
+
+
+@app.get("/api/admin/shadow-v2", dependencies=[Depends(require_admin)])
+async def api_shadow_v2() -> dict:
+    """Phase S0 shadow evidence: the shadow_v2_fill state row plus the
+    chain_listener heartbeat's shadow gauge. Read-only."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        "SELECT value FROM ingestion_state WHERE key=$1", "shadow_v2_fill")
+    state = None
+    if row is not None and row["value"] is not None:
+        val = row["value"]
+        state = json.loads(val) if isinstance(val, str) else val
+    if not isinstance(state, dict):
+        state = None   # a corrupt row must read as "no state", not crash jq
+    hb = await pool.fetchrow(
+        "SELECT beat_at, status, detail FROM service_heartbeats "
+        "WHERE service='chain_listener'")
+    detail = {}
+    if hb and hb["detail"]:
+        detail = json.loads(hb["detail"]) if isinstance(hb["detail"], str) else hb["detail"]
+    return {"state": state,
+            "state_row_present": row is not None,
+            "listener_status": hb["status"] if hb else None,
+            "listener_beat_at": hb["beat_at"].isoformat() if hb else None,
+            "listener_shadow": detail.get("shadow")}
+
+
+@app.post("/api/admin/premap-live/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_premap_live_set(action: str) -> dict:
+    """The resume lever (owner order 2026-08-24): 'on' lets
+    premap-resolved mappings trade while the total quarantine still
+    refuses every legacy-resolved mapping. 'off' re-closes it. Flip on
+    only after the premap fidelity samples certify."""
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=400, detail="action must be on|off")
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "premap_live", json.dumps(action == "on"))
+    return {"ok": True, "premap_live": action == "on"}
+
+
+@app.get("/api/admin/whale-rate", dependencies=[Depends(require_admin)])
+async def api_whale_rate(whale: str = "rn1", days: int = 14) -> dict:
+    """How much copyable flow one whale actually produces per day.
+
+    Owner question 2026-08-31: "How many different copy orders should we
+    be getting on a daily basis from RN1? How many cash outs should we
+    have based on how many trades we are copying?"
+
+    Nothing answered that. Every existing counter is either all-time
+    (TRUEEDGE detected), a live_orders ROW count that the sweep inflates
+    by retrying the same trade for days (WINWHALE missed), or an instant
+    snapshot of a standing backlog (SWEEPMIX pool). None is a daily
+    ARRIVAL RATE, and dividing a stock by a window to get one is the
+    error that has already cost this session two wrong readings today.
+
+    So this measures the flow directly, per UTC day:
+
+      trades          every BUY row of his we recorded
+      distinct_assets distinct outcome tokens he bought that day
+      new_assets      tokens whose FIRST-EVER buy by him is that day —
+                      the true new-position rate, and the only one of
+                      these that maps 1:1 to "a copy order we should
+                      have placed"
+      dated_playable  new_assets whose slug date is within the sweep's
+                      own window (yesterday..tomorrow), i.e. the ones
+                      the candidate query would actually admit
+
+    THE EXIT SIDE IS AN IDENTITY, NOT A SEPARATE MEASUREMENT. At this
+    venue a whale exits by BUYING the complementary leg, so in steady
+    state every position he opens is eventually closed exactly once,
+    and cash-outs per day equal ENTRIES per day, lagged by his holding
+    period — plus one extra event per partial trim. That is why this
+    endpoint reports the entry rate and the holding period rather than
+    guessing an exit count: the exit rate is derived, and the honest
+    error bar comes from the trim multiplier, which is reported beside
+    it as adds_per_asset.
+
+    Read-only."""
+    pool = await get_pool()
+    d = max(1, min(int(days), 60))
+    w = (whale or "").strip().lower()
+    rows = await pool.fetch(
+        # RAW string: the slug regex carries backslash-d, which a plain
+        # literal reads as an unknown escape (a warning now, an error
+        # later) while SQL still needs the backslash.
+        r"""
+        WITH firsts AS (
+            SELECT t.asset, min(t.ts) AS first_ts
+            FROM trades t JOIN whales wh ON wh.id = t.whale_id
+            WHERE lower(wh.username) = $1 AND t.side = 'BUY'
+            GROUP BY t.asset
+        )
+        SELECT date_trunc('day', t.ts)::date AS day,
+               count(*)::int AS trades,
+               count(DISTINCT t.asset)::int AS distinct_assets,
+               count(DISTINCT t.asset) FILTER (
+                   WHERE f.first_ts >= date_trunc('day', t.ts)
+                     AND f.first_ts <  date_trunc('day', t.ts)
+                                       + interval '1 day')::int
+                   AS new_assets,
+               count(DISTINCT t.asset) FILTER (
+                   WHERE f.first_ts >= date_trunc('day', t.ts)
+                     AND f.first_ts <  date_trunc('day', t.ts)
+                                       + interval '1 day'
+                     AND substring(COALESCE(t.market_slug, t.event_slug, '')
+                                   from '\d{4}-\d{2}-\d{2}') IS NOT NULL
+                     AND substring(COALESCE(t.market_slug, t.event_slug, '')
+                                   from '\d{4}-\d{2}-\d{2}')::date
+                         BETWEEN date_trunc('day', t.ts)::date - 1
+                             AND date_trunc('day', t.ts)::date + 1)::int
+                   AS dated_playable,
+               sum(t.notional)::float8 AS notional,
+               -- WHICH LANE SAW IT (2026-09-01). trades.source is
+               -- CHECK'd to ('chain','poll'), so decode coverage is a
+               -- column, not an inference.
+               --
+               -- This is the whole edge question. TRUEEDGE on rn1's
+               -- book reads actual -$2,122 against TRUEEDGE-FAST
+               -- (the same trades at reaction <= 5s) at +$9,148, and
+               -- lat_cost $27,444 exceeds his entire counterfactual
+               -- edge of $25,719. The chain lane lands a fill in 1-3s;
+               -- the Data-API poller lands it in 130-212s, which is the
+               -- venue's own publication lag and cannot be polled away.
+               -- Our lat_med is 130s, so most fills are arriving by
+               -- poller — and this counts exactly how many.
+               count(*) FILTER (WHERE t.source = 'chain')::int AS n_chain,
+               count(*) FILTER (WHERE t.source = 'poll')::int AS n_poll,
+               -- Detection lag straight off the ledger: how long after
+               -- the fill did our pipeline first see it. Median, not
+               -- mean — one stalled row would otherwise define the day.
+               percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY extract(epoch FROM (t.detected_at - t.ts))
+               )::float8 AS lag_p50,
+               percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY extract(epoch FROM (t.detected_at - t.ts))
+               ) FILTER (WHERE t.source = 'chain')::float8 AS lag_p50_chain,
+               percentile_cont(0.5) WITHIN GROUP (
+                   ORDER BY extract(epoch FROM (t.detected_at - t.ts))
+               ) FILTER (WHERE t.source = 'poll')::float8 AS lag_p50_poll
+        FROM trades t
+        JOIN whales wh ON wh.id = t.whale_id
+        JOIN firsts f ON f.asset = t.asset
+        WHERE lower(wh.username) = $1
+          AND t.side = 'BUY'
+          AND t.ts > now() - make_interval(days => $2)
+        GROUP BY 1 ORDER BY 1 DESC
+        """, w, d)
+    def _r2(v):
+        return round(v, 2) if v is not None else None
+
+    out = [{"day": r["day"].isoformat(), "trades": r["trades"],
+            "distinct_assets": r["distinct_assets"],
+            "new_assets": r["new_assets"],
+            "dated_playable": r["dated_playable"],
+            "notional": round(r["notional"] or 0.0, 2),
+            "n_chain": r["n_chain"], "n_poll": r["n_poll"],
+            "chain_frac": (round(r["n_chain"] / r["trades"], 4)
+                           if r["trades"] else None),
+            "lag_p50": _r2(r["lag_p50"]),
+            "lag_p50_chain": _r2(r["lag_p50_chain"]),
+            "lag_p50_poll": _r2(r["lag_p50_poll"])} for r in rows]
+    # Medians, not means: this flow is bursty (a slate night is many
+    # times a Tuesday) and a mean over a fortnight would describe no
+    # actual day. Whole days only — today is still accumulating and
+    # would drag every average down.
+    body = out[1:] if len(out) > 1 else out
+
+    def _med(key):
+        # DROP NULLS, DO NOT SORT THEM (2026-09-01). The per-lane lag
+        # columns are NULL on a day where that lane never fired, and
+        # sorting None against a float raises. Dropping is also the
+        # right statistic: a day the chain lane was silent carries no
+        # chain latency to average, and coercing it to 0 would report
+        # the silence as instant decode.
+        vals = sorted(x[key] for x in body if x[key] is not None)
+        if not vals:
+            return None
+        n = len(vals)
+        return (vals[n // 2] if n % 2
+                else round((vals[n // 2 - 1] + vals[n // 2]) / 2, 1))
+
+    summary = {"days_counted": len(body),
+               "median_trades": _med("trades"),
+               "median_distinct_assets": _med("distinct_assets"),
+               "median_new_assets": _med("new_assets"),
+               "median_dated_playable": _med("dated_playable")}
+    # DECODE COVERAGE, over the whole window rather than a median of
+    # daily fractions — a quiet day and a slate night should not weigh
+    # the same when the question is "what share of his fills do we see
+    # fast".
+    _tc = sum(x["n_chain"] or 0 for x in body)
+    _tp = sum(x["n_poll"] or 0 for x in body)
+    if _tc + _tp:
+        summary["chain_frac"] = round(_tc / (_tc + _tp), 4)
+        summary["n_chain"] = _tc
+        summary["n_poll"] = _tp
+    summary["median_lag_p50"] = _med("lag_p50")
+    summary["median_lag_p50_chain"] = _med("lag_p50_chain")
+    summary["median_lag_p50_poll"] = _med("lag_p50_poll")
+    # How many buys he puts into one position. Every buy beyond the
+    # first is an ADD, and on the exit side a partial trim is an extra
+    # cash-out event — so this is the multiplier between "positions
+    # opened" and "exit events expected".
+    if summary["median_new_assets"]:
+        summary["adds_per_asset"] = round(
+            (summary["median_trades"] or 0)
+            / summary["median_new_assets"], 2)
+    return {"whale": w, "days": d, "by_day": out, "summary": summary,
+            "reading": (
+                "median_dated_playable is the number of copy orders a "
+                "perfect mapper would place per day for this whale. "
+                "Cash-outs per day equal that same number in steady "
+                "state (every position closes exactly once), multiplied "
+                "by the partial-trim factor and lagged by his holding "
+                "period.")}
+
+
+@app.get("/api/admin/short-shadow", dependencies=[Depends(require_admin)])
+async def api_short_shadow(limit: int = 6) -> dict:
+    """Count the evidence the BUY_SHORT ban was built to produce.
+
+    The ban shipped 2026-08-24 after six of six BUY_SHORT fills landed
+    on the opposite side at the complement price. It was deliberately
+    written to be TEMPORARY, and live_executor says how it ends:
+
+        "That converts every refusal into evidence. By morning the
+         question 'would the ask guard alone have caught these?' is
+         answered by counting rows, not arguing — if the shadow asks
+         sit near his price, the ask guard (1.08) and the side band
+         (0.15) are the real fix and the ban is redundant; if they sit
+         at the complement, the ban stays and we know why."
+
+    Seven mornings have passed and nothing ever counted the rows. Each
+    refusal records ` | SHADOW ask=A his=H ratio=R gap=G` — the
+    intent-aware ask for the leg we WOULD have bought, beside the price
+    the whale paid. This parses them.
+
+    HOW TO READ IT. ratio ~= 1.0 means the venue quoted OUR side at his
+    price, so the fill would have been correct and the ask guard alone
+    would have sufficed. A ratio at the complement — (1-p)/p, far from
+    1 in either direction — means the venue really was handing us the
+    other leg, and the ban is load-bearing.
+
+    THIS ENDPOINT CANNOT LIFT ANYTHING. It is a read. Reopening a money
+    gate on a class that was 6-for-6 wrong is the owner's call, and the
+    point of counting is to put a number in front of that call instead
+    of an argument."""
+    pool = await get_pool()
+    row = await pool.fetchrow(
+        # RAW string: the regexes carry backslash-dot, and in a plain
+        # literal Python reads that as an unknown escape (a warning
+        # today, an error later) while SQL still needs the backslash.
+        r"""
+        WITH s AS (
+            SELECT lo.placed_at,
+                   NULLIF(substring(lo.error from 'ratio=([0-9]+\.[0-9]+)'),
+                          '')::float8 AS ratio,
+                   NULLIF(substring(lo.error from 'gap=([0-9]+\.[0-9]+)'),
+                          '')::float8 AS gap,
+                   lo.error
+            FROM live_orders lo
+            WHERE lo.status = 'rejected'
+              AND lo.error LIKE 'short-branch-refused%'
+        )
+        SELECT count(*)::int AS n,
+               count(*) FILTER (
+                   WHERE placed_at > now() - interval '7 days')::int
+                   AS n_7d,
+               count(ratio)::int AS n_scored,
+               count(*) FILTER (WHERE error LIKE '%ask=unreadable%')::int
+                   AS n_unreadable,
+               count(*) FILTER (WHERE error LIKE '%SHADOW err=%')::int
+                   AS n_errored,
+               -- the verdict buckets: our side at his price, or the
+               -- complement
+               count(*) FILTER (WHERE ratio >= 0.9 AND ratio <= 1.1)::int
+                   AS near_his,
+               count(*) FILTER (WHERE ratio < 0.9)::int AS below,
+               count(*) FILTER (WHERE ratio > 1.1)::int AS above,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY ratio)::float8
+                   AS ratio_p50,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY gap)::float8
+                   AS gap_p50
+        FROM s
+        """)
+    samples = await pool.fetch(
+        """
+        SELECT left(lo.error, 220) AS error, lo.placed_at
+        FROM live_orders lo
+        WHERE lo.status = 'rejected'
+          AND lo.error LIKE 'short-branch-refused%'
+          AND lo.error LIKE '%ratio=%'
+        ORDER BY lo.placed_at DESC
+        LIMIT $1
+        """, max(1, min(int(limit), 20)))
+    out = {k: row[k] for k in row.keys()} if row else {}
+    out["samples"] = [{"error": r["error"],
+                       "at": r["placed_at"].isoformat()
+                       if r["placed_at"] else None}
+                      for r in samples]
+    # Say what the numbers mean, in the endpoint, so the reading is not
+    # reinvented (differently) by whoever looks next.
+    n_scored = out.get("n_scored") or 0
+    if n_scored == 0:
+        out["reading"] = ("NO SCORED EVIDENCE — no refusal carries a "
+                          "parseable shadow ask, so this cannot answer "
+                          "the question either way")
+    else:
+        frac = (out.get("near_his") or 0) / n_scored
+        out["near_his_frac"] = round(frac, 4)
+        out["reading"] = (
+            "shadow ask sits at OUR side's price on "
+            f"{frac:.1%} of scored refusals — the ask guard would have "
+            "seen what the ban is stopping"
+            if frac >= 0.9 else
+            "shadow ask sits AWAY from his price on "
+            f"{1 - frac:.1%} of scored refusals — consistent with the "
+            "venue handing us the other leg; the ban is load-bearing"
+            if frac <= 0.1 else
+            f"MIXED: {frac:.1%} near his price. Neither reading is "
+            "clean, and a money gate should not be reopened on a "
+            "mixed result")
+    return out
+
+
+@app.get("/api/admin/bid-truth", dependencies=[Depends(require_admin)])
+async def api_bid_truth(limit: int = 4, slug: str = "",
+                        whale: str = "") -> dict:
+    """WHICH LEG DOES THE VENUE'S BID BELONG TO — on a slug WE HOLD.
+
+    This is the last thing standing between rn1's exits and going live.
+
+    mirror_exit prices every partial sale off pmus.slug_bid, and slug_bid
+    is structurally broken here: it looks for a MARKET-level bestBid and
+    then mirrors the OTHER side's price through $1 — but both sides of a
+    market on this venue share ONE identifier, so `next(s for s in sides
+    if s.identifier != us_slug)` finds nothing and the function returns
+    None on the whole family. Measured: mx_no_bid_for_partial refused 42
+    exits in the last census, and exits_sold has never left 0.
+
+    The fix is one line, and the wrong version of it loses money. bbo is
+    keyed by marketSlug with NO side dimension, so if its bestBid belongs
+    to the LONG leg and we hold the SHORT one, pricing our sale off it
+    sets an IOC floor at the complement's price — accepting roughly 75%
+    below fair value on our own position. That is worse than the refusals
+    it would fix, which is why the refusals have been left alone.
+
+    The runner's public SDK could not settle it: it sees only expired
+    markets with null books, and the two live families it did reach
+    (stsc-) are not the aec-/atc- sports slugs we trade. So ask the
+    question where it actually matters — through the SAME authenticated
+    client mirror_exit uses, on slugs THIS ACCOUNT HOLDS, with our own
+    recorded intent beside the venue's answer.
+
+    READ-ONLY. It places nothing and changes nothing; it prints what the
+    venue says next to what we believe, so the rule can be READ rather
+    than inferred.
+    """
+    from .. import pmus
+    # LOCAL IMPORT, matching app.py:5636 / 7156 / 7310. This module does
+    # not import ORDER_INTENT_SQL at top level — every caller pulls it in
+    # itself — and referencing it without doing so is a NameError raised
+    # only when the route is hit. That is exactly what shipped: the first
+    # deploy answered BIDTRUTHHTTP code=500. The read-only tests could
+    # not catch it because they assert what this function must NOT do and
+    # never assert that it RUNS.
+    from ..live_executor import ORDER_INTENT_SQL
+
+    pool = await get_pool()
+    if slug:
+        rows = [{"us_market_slug": slug, "intent": None, "qty": None,
+                 "entry": None, "whale": None}]
+    else:
+        # NEWEST POSITIONS FIRST, and the ordering is the whole point.
+        #
+        # The first version did DISTINCT ON (us_market_slug) ... ORDER BY
+        # us_market_slug, placed_at DESC and then LIMIT. DISTINCT ON
+        # forces the sort to lead with the slug, so the LIMIT took the
+        # alphabetically-first slugs — which on a 2026-08 book means
+        # aec-atp-benbon..., aec-atp-carcan... from the 11th and 25th.
+        # Both had already settled: state=MARKET_STATE_EXPIRED, empty
+        # book, ATTRIB=undecidable. rn1's only sampled row was one of
+        # them, so the reading that mattered came back blank for a
+        # reason that had nothing to do with the venue.
+        #
+        # A settled market cannot answer "what bid would we sell into",
+        # so rank by recency in an outer query and let the caller ask
+        # for open ones.
+        rows = [dict(r) for r in await pool.fetch(
+            f"""
+            SELECT * FROM (
+                SELECT DISTINCT ON (lo.us_market_slug)
+                       lo.us_market_slug,
+                       {ORDER_INTENT_SQL} AS intent,
+                       lo.filled_shares::float8 AS qty,
+                       lo.fill_price::float8   AS entry,
+                       lower(COALESCE(lo.whale_username, '')) AS whale,
+                       lo.placed_at
+                  FROM live_orders lo
+                 WHERE lo.status = 'filled'
+                   AND lo.us_market_slug IS NOT NULL
+                   AND ($2 = '' OR lower(COALESCE(lo.whale_username,'')) = $2)
+                 ORDER BY lo.us_market_slug, lo.placed_at DESC
+            ) s
+             ORDER BY s.placed_at DESC
+             LIMIT $1
+            """, max(1, min(int(limit or 4), 12)), (whale or "").lower())]
+
+    out: list[dict] = []
+    for r in rows:
+        us = r["us_market_slug"]
+        item: dict = {"slug": us, "our_intent": r.get("intent"),
+                      "our_qty": r.get("qty"), "our_entry": r.get("entry"),
+                      "whale": r.get("whale")}
+        # What the CURRENT (broken) pricing function answers. If this is
+        # None while the book below has a bid, that is the defect, stated
+        # as a measurement rather than an argument.
+        try:
+            # PASS THE LEG (2026-08-31). This called slug_bid with the
+            # slug alone, so on the shared-identifier family it always
+            # returned None — correctly, since the slug cannot select a
+            # side. That made the one instrument pointed at this
+            # question incapable of answering it: `slug_bid_today=null`
+            # on every row whether the resolver was broken or working.
+            # The row's own recorded intent names the leg, and it is
+            # already read and displayed two lines below.
+            _oi = str(r.get("intent") or "").upper()
+            _leg = (True if "BUY_LONG" in _oi
+                    else False if "BUY_SHORT" in _oi else None)
+            item["slug_bid_today"] = await asyncio.to_thread(
+                pmus.slug_bid, us, _leg)
+            # Both legs beside it: the whole hazard is picking the
+            # wrong one, and two numbers make a swap visible where one
+            # cannot. Read-only.
+            item["bid_if_long"] = await asyncio.to_thread(
+                pmus.slug_bid, us, True)
+            item["bid_if_short"] = await asyncio.to_thread(
+                pmus.slug_bid, us, False)
+        except Exception as exc:  # noqa: BLE001
+            item["slug_bid_today"] = f"error:{type(exc).__name__}"
+        client = pmus._get_client()
+        try:
+            m = (client.markets.retrieve_by_slug(us) or {}).get(
+                "market") or {}
+            item["sides"] = [
+                {"long": s.get("long"), "price": s.get("price"),
+                 "identifier": s.get("identifier"),
+                 "tradable": s.get("tradable")}
+                for s in (m.get("marketSides") or []) if isinstance(s, dict)]
+            item["outcomes"] = m.get("outcomes")
+            item["outcomePrices"] = m.get("outcomePrices")
+        except Exception as exc:  # noqa: BLE001
+            item["market_error"] = f"{type(exc).__name__}"
+        for meth in ("bbo", "book"):
+            fn = getattr(client.markets, meth, None)
+            if fn is None:
+                item[meth] = "no such method"
+                continue
+            try:
+                d = (fn(us) or {}).get("marketData") or {}
+                if meth == "bbo":
+                    item["bestBid"] = d.get("bestBid")
+                    item["bestAsk"] = d.get("bestAsk")
+                    item["bidDepth"] = d.get("bidDepth")
+                    item["state"] = d.get("state")
+                else:
+                    item["bids"] = (d.get("bids") or [])[:2]
+                    item["offers"] = (d.get("offers") or [])[:2]
+            except Exception as exc:  # noqa: BLE001
+                item[f"{meth}_error"] = f"{type(exc).__name__}"
+        # THE ATTRIBUTION, STATED. If the long side's own quoted price
+        # sits inside [bestBid, bestAsk], bbo describes the long leg —
+        # and a position whose intent is SHORT must NOT be priced off it
+        # directly.
+        try:
+            b = float((item.get("bestBid") or {}).get("value"))
+            a = float((item.get("bestAsk") or {}).get("value"))
+            lp = next(float(s["price"]) for s in item.get("sides", [])
+                      if s.get("long") and s.get("price") is not None)
+            item["attrib"] = ("bbo-is-the-long-side" if b <= lp <= a
+                              else "bbo-is-NOT-the-long-side")
+            item["our_side_is_long"] = (
+                None if not item.get("our_intent")
+                else "LONG" in str(item["our_intent"]).upper())
+        except Exception:  # noqa: BLE001
+            item["attrib"] = "undecidable"
+        out.append(item)
+    return {"note": "read-only; places nothing", "rows": out}
+
+
+@app.post("/api/admin/verified-whales",
+          dependencies=[Depends(require_admin)])
+async def api_set_verified_whales(body: dict) -> dict:
+    """Owner roster control (owner order 2026-08-29, "update the
+    variables"): store the verified-whales set in ingestion_state,
+    where it BEATS the LIVE_VERIFIED_WHALES env — a stale Render env
+    silently overrode the owner's reinstate order for two days.
+    body: {"whales": "a,b,c"} or {"whales": [..]} to set;
+    {"clear": true} removes the override (env/default resume)."""
+    from .. import live_executor as _le
+
+    pool = await get_pool()
+    if body.get("clear"):
+        # CLEAR MEANS BACK TO THE ENV/CODE DEFAULT, ALL OF IT: the stored
+        # roster, the rules' memory and the stored clips. Leaving the
+        # last two in place let the hourly pass rewrite the roster within
+        # the hour and kept stored zero clips blocking whales the env
+        # roster named (round four).
+        for key in (_le._ROSTER_DB_KEY, _le._CLIPS_DB_KEY, "roster_state",
+                    "roster_auto_last"):
+            await pool.execute("DELETE FROM ingestion_state WHERE key=$1", key)
+        _le._roster_read_at = 0.0   # next money-path call re-reads
+        _le._clip_override = None
+        return {"ok": True, "cleared": True,
+                "note": ("stored roster, roster_state, live_clip_overrides "
+                         "and roster_auto_last removed; env/code default "
+                         "resumes until the next hourly pass writes again "
+                         "(ROSTER_AUTO=off on sportsassets-workers stops it)")}
+    raw = body.get("whales")
+    if isinstance(raw, str):
+        whales = [w.strip().lower() for w in raw.split(",") if w.strip()]
+    elif isinstance(raw, list):
+        whales = [str(w).strip().lower() for w in raw if str(w).strip()]
+    else:
+        raise HTTPException(status_code=422,
+                            detail="whales must be a list or comma string")
+    if not whales:
+        raise HTTPException(status_code=422,
+                            detail="refusing an empty roster — use clear")
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        _le._ROSTER_DB_KEY, json.dumps(whales))
+    _le._roster_read_at = 0.0
+    # THE OWNER'S WORD OUTRANKS THE RULES (2026-09-01 evening): tell the
+    # roster-by-evidence machine what he decided, so its next pass
+    # honours it -- a whale he adds enters measuring, a whale he removes
+    # is cut and stays cut -- instead of silently rewriting it an hour
+    # later from the same numbers that produced the state he overrode.
+    rules = None
+    try:
+        from ..workers import roster_auto as _ra
+        rules = await _ra.owner_set(pool, whales)
+    except Exception as exc:  # noqa: BLE001 — the roster write stands
+        rules = {"error": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    return {"ok": True, "verified_whales": whales, "rules": rules}
+
+
+async def _roster_auto_status(pool) -> dict:
+    try:
+        from ..workers import roster_auto as _ra
+        return await _ra.status(pool)
+    except Exception as exc:  # noqa: BLE001 — the gates page must render
+        return {"error": f"unreadable: {type(exc).__name__}"}
+
+
+async def _rest_lane_gate(pool, _le) -> dict:
+    """Budget consumed vs cap, so the owner can see when $2,500 is gone
+    -- and every row the reapers have NAMED rather than resolved: shares
+    the account holds that no ledger row explains, or an orphan fill
+    recorded on a row another row's claim kept out of 'filled'. Those
+    are the rows a human reconciles; a state nobody can see is a state
+    nobody reconciles (round eight)."""
+    spent = await _le._rest_lane_spent(pool)
+    named: dict = {"count": None, "rows": []}
+    try:
+        rows = await pool.fetch(
+            "SELECT id, us_market_slug, lower(COALESCE(whale_username,'')) AS whale, "
+            "       placed_at, filled_shares::float8 AS filled_shares, "
+            "       left(error, 160) AS error "
+            "FROM live_orders WHERE status = 'error' AND "
+            "(error LIKE 'venue holds a POSITION%' OR "
+            " error LIKE 'ORPHAN FILL RECORDED%' OR "
+            " error LIKE 'venue has no record of order%') "
+            "ORDER BY placed_at DESC LIMIT 20")
+        # PAST THE REVISIT HORIZON (round nine): the reaper re-asks a
+        # named row for _NAMED_HORIZON and then stops; the exit path
+        # stops treating it as in flight at the same moment. A named row
+        # older than that is nobody's any more -- it is counted here so
+        # the probe line shows it, not merely the fresh ones.
+        stale = int(await pool.fetchval(
+            "SELECT count(*) FROM live_orders WHERE status = 'error' AND "
+            "(error LIKE 'venue holds a POSITION%' OR "
+            " error LIKE 'ORPHAN FILL RECORDED%' OR "
+            " error LIKE 'venue has no record of order%') AND "
+            f"placed_at <= now() - interval '{_le._NAMED_HORIZON}'") or 0)
+        named = {"count": len(rows), "stale": stale,
+                 "revisit_horizon": _le._NAMED_HORIZON,
+                 "rows": [{"id": r["id"], "slug": r["us_market_slug"],
+                           "whale": r["whale"],
+                           "placed_at": (r["placed_at"].isoformat()
+                                         if r["placed_at"] else None),
+                           "filled_shares": r["filled_shares"],
+                           "error": r["error"]} for r in rows]}
+    except Exception as exc:  # noqa: BLE001
+        named = {"count": None, "rows": [], "error": type(exc).__name__}
+    fills = None
+    try:
+        fills = int(await pool.fetchval(
+            "SELECT count(*) FROM live_orders WHERE lane='rest' "
+            "AND filled_usd > 0") or 0)
+    except Exception:  # noqa: BLE001 — column absent until 041
+        fills = None
+    inf = spent == float("inf")
+    return {"enabled": _le.REST_BID_ENABLED, "ttl_s": _le.REST_BID_TTL_S,
+            "budget_usd": _le.REST_BID_BUDGET_USD,
+            "spent_usd": None if inf else round(spent, 2),
+            "remaining_usd": (None if inf else
+                              round(max(0.0, _le.REST_BID_BUDGET_USD - spent), 2)),
+            "fills": fills,
+            "named": named,
+            "note": ("spent unreadable — lane treats budget as exhausted"
+                     if inf else None)}
+
+
+@app.get("/api/admin/gates", dependencies=[Depends(require_admin)])
+async def api_gates() -> dict:
+    """Every whale/side gate the money paths consult, echoed so a probe
+    can READ the live state instead of inferring it (2026-08-29 audit:
+    the stale-env roster block was invisible for two days because no
+    probe line printed the effective set)."""
+    from .. import edge_gate as _eg
+    from .. import live_executor as _le
+
+    pool = await get_pool()
+    try:
+        await _le.refresh_whale_overrides(pool)
+    except Exception:  # noqa: BLE001
+        pass
+    # THE 95% GATE, REFRESHED HERE RATHER THAN READ FROM MEMORY.
+    #
+    # The API and the workers are separate services (render.yaml), so
+    # this process's module cache is never touched by the worker that
+    # actually spends. Reporting our own stale cache would show the
+    # owner a verdict no money path ever used — an instrument reading
+    # something other than its subject. Refresh, then reconstruct the
+    # same decision from the same pure function the worker calls.
+    edge = None
+    try:
+        await _eg.refresh(pool)
+        edge = _eg.snapshot()
+    except Exception as exc:  # noqa: BLE001
+        edge = {"err": f"unreadable: {type(exc).__name__}"}
+    stored = None
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            _le._ROSTER_DB_KEY)
+        stored = (json.loads(raw) if isinstance(raw, str) else raw)
+    except Exception:  # noqa: BLE001
+        stored = "unreadable"
+    proof = None
+    try:
+        raw = await pool.fetchval(
+            "SELECT value FROM ingestion_state WHERE key=$1",
+            _le.SHORT_PROOF_KEY)
+        proof = (json.loads(raw) if isinstance(raw, str) else raw)
+    except Exception:  # noqa: BLE001
+        proof = "unreadable"
+    # WHAT THE EXECUTOR WILL DO, NOT WHAT IT WOULD LIKE TO (disk-full
+    # incident 2026-09-04/05): while the database was unreadable this
+    # payload said source=default and printed the hardcoded clips,
+    # because the reader had fallen through to them. The reader now
+    # adopts UNREADABLE -- no whale verified, every clip 0.0 -- and the
+    # payload names that state so the probe prints the decision.
+    return {
+        "verified_effective": sorted(_le._whale_set("LIVE_VERIFIED_WHALES")),
+        "verified_source": ("unreadable_closed" if _le.overrides_unreadable()
+                            else "db" if _le._roster_override is not None
+                            else "env" if os.getenv("LIVE_VERIFIED_WHALES")
+                            else "default"),
+        "verified_stored": stored,
+        "unreadable_closed": _le.closed_state(),
+        "verified_env_set": os.getenv("LIVE_VERIFIED_WHALES") is not None,
+        "hold_whales": sorted(_le._whale_set("LIVE_HOLD_WHALES")
+                              if os.getenv("LIVE_HOLD_WHALES") else set()),
+        "premap_whales_env_set": os.getenv("LIVE_PREMAP_WHALES") is not None,
+        "allow_short_env": os.getenv("LIVE_ALLOW_SHORT"),
+        "short_side_proof": proof,
+        "cut_whales": sorted(_le.COPY_CUT_WHALES),
+        "exitable": sorted(_le.exitable_whales()),
+        # LIVE SIZING, the values that actually bind spend (owner
+        # question 2026-08-29 "I don't want to limit the flow" exposed
+        # that the config caps I kept quoting govern only the dormant
+        # 'full' mode — the answer must be READABLE, not inferred).
+        "edge_gate": edge,
+        "rest_lane": await _rest_lane_gate(pool, _le),
+        # THE RULES' LAST PASS, read from the database the worker wrote
+        # (separate service: this process's roster_auto module has never
+        # run a pass and its in-memory snapshot would read as "never").
+        "roster_auto": await _roster_auto_status(pool),
+        "sizing": {
+            "copy_mode": _le.COPY_MODE,
+            "per_fill_by_whale": dict(_le.PER_FILL_BY_WHALE),
+            # WHAT ACTUALLY BINDS: the stored clips the rules wrote, and
+            # the effective per-whale clip after they are applied.
+            "clip_overrides": ("unreadable -> all clips 0.0"
+                               if _le.overrides_unreadable()
+                               else dict(_le._clip_override or {})),
+            "per_fill_effective": {w: _le.per_fill_usd(w)
+                                   for w in sorted(_le.exitable_whales())},
+            "max_clip_usd": _le.LIVE_MAX_CLIP_USD,
+            "probe_day_usd": _le.PROBE_DAY_USD,   # 0 = no day cap
+            # inf (the shipped default: no cap) is not valid JSON —
+            # serialize the absence of a cap as null
+            "trial_daily_usd": (None if _le.PENNY_TRIAL_DAILY_USD
+                                == float("inf")
+                                else _le.PENNY_TRIAL_DAILY_USD),
+            "trial_total_usd": (None if _le.PENNY_TRIAL_TOTAL_USD
+                                == float("inf")
+                                else _le.PENNY_TRIAL_TOTAL_USD),
+        },
+    }
+
+
+@app.post("/api/admin/s1/arm-override/{action}",
+          dependencies=[Depends(require_admin)])
+async def api_s1_arm_override(action: str) -> dict:
+    """Owner-override arm for the S1 chain emitter (owner order
+    2026-08-29, "get it live now"): 'on' arms without the cert clock —
+    the 7-day window was structurally unreachable while deploys reset
+    it daily — while sticky trips keep full authority (they refuse the
+    arm, disarm a live one, and gate every emit). 'off' returns arming
+    to the certified regime. The emitter's sweep adopts the switch
+    within one cycle; every money gate downstream is untouched."""
+    if action not in ("on", "off"):
+        raise HTTPException(status_code=422, detail="action must be on|off")
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "s1_arm_override", json.dumps(action == "on"))
+    return {"ok": True, "s1_arm_override": action == "on"}
+
+
+@app.post("/api/admin/side-echo-reset",
+          dependencies=[Depends(require_admin)])
+async def api_side_echo_reset() -> dict:
+    """Clear the side-echo circuit after review. The circuit (tripped
+    by a confirmed wrong-side mismatch on a filled copy) deliberately
+    has NO env override — this explicit reset is the only way back to
+    trading, so a mismatch always gets human eyes before resumption."""
+    pool = await get_pool()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) "
+        "VALUES ('side_echo_tripped', 'false'::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value='false'::jsonb")
+    return {"ok": True, "side_echo_tripped": False}
+
+
+@app.get("/api/admin/quarantine", dependencies=[Depends(require_admin)])
+async def api_quarantine_get() -> dict:
+    pool = await get_pool()
+    val = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1",
+        "mapping_quarantine")
+    on = True
+    if val is not None:
+        try:
+            on = bool(json.loads(val) if isinstance(val, str) else val)
+        except (TypeError, ValueError):
+            on = True
+    env = os.getenv("LIVE_MAPPING_QUARANTINE", "")
+    if env in ("on", "off"):
+        on = env == "on"
+    pl_val = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1", "premap_live")
+    premap_live = False
+    if pl_val is not None:
+        try:
+            premap_live = bool(json.loads(pl_val)
+                               if isinstance(pl_val, str) else pl_val)
+        except (TypeError, ValueError):
+            premap_live = False
+    pl_env = os.getenv("LIVE_PREMAP", "")
+    if pl_env in ("on", "off"):
+        premap_live = pl_env == "on"
+    return {"quarantine": on, "env_override": env or None,
+            "premap_live": premap_live,
+            "premap_env_override": pl_env or None}
+
+
+@app.get("/api/admin/memory-census", dependencies=[Depends(require_admin)])
+async def api_memory_census() -> dict:
+    """WHAT IS ACTUALLY HOLDING THE MEMORY — measured, not guessed.
+
+    Three fixes have now been shipped at the API's OOM on the reasoning
+    that they were "obviously" the cost, and the honest scoreboard is:
+
+      type filter on the hydrate  317,681 -> 300,182 rows  (5.5%)
+      streaming snapshot packer   RSS still 595 -> 1,684.6 MB on one
+                                  process across a completed grind
+
+    Both were real improvements to real waste. Neither was the thing.
+    A fourth guess is not worth shipping; a number is.
+
+    So this walks the retained structures and reports bytes, sampling
+    rows and scaling rather than deep-sizing 300k dicts (which would
+    itself allocate). It is deliberately read-only and allocates on the
+    order of the sample, not the archive.
+    """
+    import sys
+
+    from . import track_record as tr
+
+    def _deep(obj: Any, seen: set | None = None, depth: int = 0) -> int:
+        """getsizeof is shallow — a dict of strings reports ~360 bytes
+        and hides the strings, which is how a 300k-row cache reads as
+        negligible. One level of recursion is where the weight lives.
+
+        `seen` is the correction to the FIRST version of this census.
+        _slim interns type tags, market slugs and sides, so one string
+        object is shared by tens of thousands of rows. Charging each
+        row the full size of a shared object inflates the per-row cost
+        and would have had me optimising against a number my own
+        instrument invented: the first run reported 1,838 B/row and
+        526 MB for the archive on exactly that basis.
+
+        With identity tracking, a shared object is charged once to the
+        first row that reaches it and nothing thereafter — which is
+        what "how much would freeing this row give back" actually
+        means.
+        """
+        if seen is None:
+            seen = set()
+        if id(obj) in seen:
+            return 0
+        seen.add(id(obj))
+        n = sys.getsizeof(obj)
+        if depth > 2:
+            return n
+        if isinstance(obj, dict):
+            for k, v in obj.items():
+                n += _deep(k, seen, depth + 1) + _deep(v, seen, depth + 1)
+        elif isinstance(obj, (list, tuple, set)):
+            for v in obj:
+                n += _deep(v, seen, depth + 1)
+        return n
+
+    def _measure_ledgers(led: Any, sample: int = 200) -> dict:
+        """The archive is the folded ledgers, not a row list (design D,
+        owner order 2026-09-02 and the 2026-09-03 rollback). A census
+        that only sized lists reported rows=0 / est_mb=0 for both the
+        archive and the grind under that form, and the 55-115 MB they
+        hold landed in unaccounted_mb -- the instrument blind to its
+        subject again (review of the archive ledgers change,
+        2026-09-03). Each holder inside the ledgers is sampled the same
+        way rows are (a bounded, strided sample; never a copy of the
+        dict), sized per item and scaled to its length; `rows` is the
+        rows the ledgers REPRESENT so the CI MEMCENSUS line keeps its
+        meaning, and bytes_per_row is the total over that count.
+        """
+        from itertools import islice
+
+        parts: dict = {}
+        total_b = 0.0
+        naive_b = 0.0
+        for name in ("entries", "sold", "resolutions", "ids"):
+            d = getattr(led, name, None) or {}
+            n_items = len(d)
+            if not n_items:
+                parts[name] = {"n": 0, "bytes_per_item": 0, "est_mb": 0.0}
+                continue
+            step = max(1, n_items // sample)
+            taken = list(islice(d.items(), 0, None, step))[:sample]
+            k = max(1, len(taken))
+            naive = sum(_deep(kv) for kv in taken) / k
+            shared: set = set()
+            marginal = sum(_deep(kv, shared) for kv in taken) / k
+            parts[name] = {"n": n_items, "bytes_per_item": round(marginal),
+                           "est_mb": round(marginal * n_items / 1048576, 1)}
+            total_b += marginal * n_items
+            naive_b += naive * n_items
+        left = _measure(getattr(led, "leftover", None), sample)
+        parts["leftover"] = {"n": left["rows"],
+                             "bytes_per_item": left["bytes_per_row"],
+                             "est_mb": left["est_mb"]}
+        total_b += left["bytes_per_row"] * left["rows"]
+        naive_b += left["bytes_per_row_naive"] * left["rows"]
+        n_rows = int(getattr(led, "rows", 0) or 0)
+        return {"rows": n_rows, "form": "ledgers_v4",
+                "slugs": led.slugs(),
+                "bytes_per_row": round(total_b / n_rows) if n_rows else 0,
+                "bytes_per_row_naive": (round(naive_b / n_rows)
+                                        if n_rows else 0),
+                "est_mb": round(total_b / 1048576, 1),
+                "parts": parts}
+
+    def _measure(rows: Any, sample: int = 200) -> dict:
+        """Report BOTH costs, because they answer different questions.
+
+        naive  — every row charged in isolation. Overstates whenever
+                 rows share interned strings, which these do.
+        marginal — one shared `seen` across the sample, so shared
+                 objects are paid for once. This is the number that
+                 scales to the row count.
+        """
+        if isinstance(rows, tr._ArchiveLedgers):
+            return _measure_ledgers(rows, sample)
+        if not isinstance(rows, list) or not rows:
+            return {"rows": 0, "est_mb": 0.0, "bytes_per_row": 0,
+                    "bytes_per_row_naive": 0}
+        step = max(1, len(rows) // sample)
+        taken = rows[::step][:sample]
+        n = max(1, len(taken))
+        naive = sum(_deep(r) for r in taken) / n
+        shared: set = set()
+        marginal = sum(_deep(r, shared) for r in taken) / n
+        return {"rows": len(rows),
+                "bytes_per_row": round(marginal),
+                "bytes_per_row_naive": round(naive),
+                "est_mb": round(marginal * len(rows) / 1048576, 1)}
+
+    rss_mb = None
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    rss_mb = round(int(line.split()[1]) / 1024, 1)
+                    break
+    except OSError:
+        pass
+
+    # WHO HOLDS THE GAP — the allocator, or something we never counted?
+    #
+    # The arena cap took (mallopt rc=1) and RSS did not come down:
+    # 1,536.5 MB at 9 minutes uptime, against 595 MB at 11 minutes on
+    # the previous build. Capping arenas was the fourth memory change
+    # tonight and the third that moved nothing.
+    #
+    # I am not proposing a fifth on reasoning. mallinfo2 splits the
+    # question exactly:
+    #
+    #   uordblks  in USE by the program — if this is ~RSS then
+    #             something really holds it and my census misses it
+    #   fordblks  FREE but retained by the allocator — if this is
+    #             ~1 GB then nothing holds it, trim cannot return it,
+    #             and the cause is fragmentation, not retention
+    #
+    # Two hypotheses, one number, no interpretation needed.
+    malloc_info: dict = {}
+    try:
+        import ctypes
+
+        class _MallInfo2(ctypes.Structure):
+            _fields_ = [(n, ctypes.c_size_t) for n in (
+                "arena", "ordblks", "smblks", "hblks", "hblkhd",
+                "usmblks", "fsmblks", "uordblks", "fordblks",
+                "keepcost")]
+
+        libc = ctypes.CDLL("libc.so.6")
+        libc.mallinfo2.restype = _MallInfo2
+        mi = libc.mallinfo2()
+        malloc_info = {
+            # non-mmapped space from sbrk
+            "arena_mb": round(mi.arena / 1048576, 1),
+            # space in mmapped regions
+            "hblkhd_mb": round(mi.hblkhd / 1048576, 1),
+            "in_use_mb": round(mi.uordblks / 1048576, 1),
+            "free_retained_mb": round(mi.fordblks / 1048576, 1),
+            "releasable_mb": round(mi.keepcost / 1048576, 1),
+            "free_chunks": mi.ordblks,
+        }
+    except Exception as exc:  # noqa: BLE001 — glibc 2.33+ only
+        malloc_info = {"unavailable": type(exc).__name__}
+
+    # Both holders are _ArchiveLedgers under the v4 form; the grind's
+    # buffer lives under "ledgers" (the "rows" list is gone with the
+    # row form). _measure sizes either form.
+    cache = _measure(tr._archive_cache.get("data"))
+    grind = _measure(tr._hydrate_progress.get("ledgers"))
+    raw = tr._raw_cache.get("data")
+    raw_acts = (raw or {}).get("activities") if isinstance(raw, dict) else None
+    rawm = _measure(raw_acts)
+
+    accounted = cache["est_mb"] + grind["est_mb"] + rawm["est_mb"]
+    return {
+        "rss_mb": rss_mb,
+        "archive_cache": cache,
+        "hydrate_in_progress": grind,
+        "raw_window_cache": rawm,
+        "accounted_mb": round(accounted, 1),
+        # The gap is the honest part. If the retained structures do not
+        # explain RSS, the next place to look is allocator arenas and
+        # per-request churn, NOT another cache.
+        "unaccounted_mb": (round(rss_mb - accounted, 1)
+                           if rss_mb is not None else None),
+        "gc_counts": list(__import__("gc").get_count()),
+        "arena_cap": _ARENA_STATUS,
+        "malloc_info": malloc_info,
+        "note": ("est_mb is a sampled estimate scaled to the row count, "
+                 "not an exact walk — it is meant to rank the holders, "
+                 "not to balance to the byte"),
+    }
+
+
+@app.get("/api/admin/whale-true-edge", dependencies=[Depends(require_admin)])
+async def api_whale_true_edge(since_day: str = "2026-08-01",
+                              max_reaction_s: float | None = None) -> dict:
+    """The owner's verification (2026-08-24: 'will we profit — verified,
+    not guessed'). ai_trades holds EVERY detected whale trade with two
+    settled results: counterfactual_pnl at HIS price (his true edge on
+    the full detected book — no fill-selection bias) and pnl from a
+    depth-walked paper fill at OUR real reaction time. Per whale:
+      cf_total      his edge, full book, his prices  ← the thesis test
+      cf_on_filled  his edge on just the trades our paper fill caught
+      paper_actual  what our reaction time actually achieves
+    cf_total>0 and paper_actual<0 = pure latency problem (engineering
+    fixes it). cf_total<=0 = the whale isn't copyable at ANY speed.
+
+    max_reaction_s (owner order 2026-08-24 evening: "make sure we are
+    profitable copying SwissTony") answers the question the blended
+    figure cannot. paper_actual averages over MONTHS of detections,
+    most of them minutes-late polling — so for a whale whose edge
+    decays fast it reports the old world forever, however quick we
+    became today. Restricting to trades we detected within N seconds
+    measures what our CURRENT speed achieves on his flow, which is the
+    only number that can justify resuming him."""
+    from datetime import datetime as _dt
+
+    pool = await get_pool()
+    since_d = _dt.fromisoformat(since_day).date()
+    rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS whale,
+               count(*)::int AS detected,
+               count(*) FILTER (WHERE filled_notional > 0)::int AS filled,
+               count(*) FILTER (WHERE status = 'missed')::int AS missed,
+               COALESCE(sum(counterfactual_pnl), 0)::float8 AS cf_total,
+               COALESCE(sum(counterfactual_pnl)
+                        FILTER (WHERE filled_notional > 0), 0)::float8
+                   AS cf_on_filled,
+               COALESCE(sum(pnl) FILTER (WHERE status = 'settled'
+                        AND filled_notional > 0), 0)::float8 AS paper_actual,
+               COALESCE(sum(clip_target), 0)::float8 AS clip_total,
+               count(*) FILTER (WHERE counterfactual_pnl > 0)::int AS cf_wins,
+               count(*) FILTER (WHERE counterfactual_pnl IS NOT NULL
+                        AND abs(counterfactual_pnl) >= 0.005)::int AS cf_graded
+        FROM ai_trades
+        WHERE placed_at >= $1
+          AND ($2::float8 IS NULL OR reaction_s <= $2::float8)
+        GROUP BY 1
+        ORDER BY cf_total DESC
+        """, since_d, max_reaction_s)
+    whales = []
+    for r in rows:
+        d = dict(r)
+        d["cf_total"] = round(d["cf_total"], 2)
+        d["cf_on_filled"] = round(d["cf_on_filled"], 2)
+        d["paper_actual"] = round(d["paper_actual"], 2)
+        d["clip_total"] = round(d["clip_total"], 2)
+        d["miss_selection"] = round(d["cf_total"] - d["cf_on_filled"], 2)
+        d["latency_price_cost"] = round(d["cf_on_filled"]
+                                        - d["paper_actual"], 2)
+        whales.append(d)
+    return {"since": since_day, "max_reaction_s": max_reaction_s,
+            "whales": whales,
+            "note": ("counterfactuals settle on the whale's own venue "
+                     "(global), where resolution data was always "
+                     "correct — this table is untouched by the "
+                     "settlement incident.")}
+
+
+class VenuePnlWhale(BaseModel):
+    username: str
+    address: str = ""
+    alltime: float
+    d30: float | None = None
+    points: int | None = None
+    first_t: int | None = None
+    last_t: int | None = None
+
+
+class VenuePnlBody(BaseModel):
+    whales: list[VenuePnlWhale] = Field(max_length=50)
+    source: str = "user-pnl-api"
+
+
+@app.post("/api/admin/venue-pnl", dependencies=[Depends(require_admin)])
+async def api_venue_pnl_ingest(body: VenuePnlBody) -> dict:
+    """Store the VENUE'S OWN per-wallet P&L, pulled by a runner.
+
+    WHY THIS EXISTS (2026-08-26). The roster was being graded -- and two
+    whales were CUT -- on a merge-graded estimator that cannot see
+    redemptions: REDEEM is not a trade, never enters our trades feed,
+    and these whales realize almost everything through it. The
+    estimator read swisstony at -0.94% while the venue's own books put
+    him at +$23.6M lifetime and +$1.36M in the trailing 30 days. It was
+    not measuring profitability; it was measuring which exit mechanism
+    a whale prefers.
+
+    The container's network policy blocks the venue, so the numbers are
+    pulled by the census/probe runners (open internet) and POSTed here.
+    Display and grading input only -- NOTHING on the order path reads
+    this key, and roster changes remain owner decisions.
+    """
+    pool = await get_pool()
+    doc = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "source": body.source[:40],
+        "whales": {w.username.lower(): {
+            "address": w.address.lower()[:64],
+            "alltime": round(float(w.alltime), 2),
+            "d30": round(float(w.d30), 2) if w.d30 is not None else None,
+            "points": w.points, "first_t": w.first_t, "last_t": w.last_t,
+        } for w in body.whales},
+    }
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "venue_pnl", json.dumps(doc))
+    return {"ok": True, "stored": len(doc["whales"])}
+
+
+@app.get("/api/admin/venue-pnl", dependencies=[Depends(require_admin)])
+async def api_venue_pnl() -> dict:
+    """The stored venue P&L snapshot, with its age stated -- a reader
+    must be able to tell yesterday's truth from today's."""
+    pool = await get_pool()
+    raw = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1", "venue_pnl")
+    doc = raw if isinstance(raw, dict) else (json.loads(raw) if raw
+                                             else None)
+    if not doc:
+        return {"whales": {}, "note": "never populated -- trigger the "
+                                      "whale-ledger-census workflow"}
+    return doc
+
+
+def _pct_pair(ci: list) -> str:
+    """A 95% interval as percentages, for a verdict a human reads."""
+    return f"[{ci[0]:+.2%}, {ci[1]:+.2%}]"
+
+
+@app.get("/api/admin/copy-tolerance", dependencies=[Depends(require_admin)])
+async def api_copy_tolerance(since_day: str = "2026-08-26") -> dict:
+    """Did Option A pay for itself? Graded on the MARGINAL cohort only.
+
+    Option A (owner order 2026-08-26) gave every whale a capture
+    tolerance so the FOK can fill above his price. Before it, the limit
+    was his price floored to the tick, so the book only reached us when
+    the market had moved AGAINST him -- filling was conditioned on the
+    whale being wrong, and at_his was negative on all six whales.
+
+    THE COHORT SPLIT IS THE WHOLE INSTRUMENT. A fill AT OR BELOW his
+    price would have happened under the old rule too; it says nothing
+    about the change. Only fills ABOVE his price exist BECAUSE of the
+    tolerance. Those are 'marginal', and their P&L is the only number
+    that answers whether Option A was worth doing.
+
+    Blending the two is how a change like this gets graded as harmless:
+    parity fills dominate the count and drown the marginal signal. So
+    the two are never summed here.
+
+    Reported per whale and per cohort: n, staked, realised P&L, ROI on
+    dollar staked, and the mean cents paid over his price. `since_day`
+    defaults to the day Option A shipped -- grading it against rows
+    placed under the OLD rule would mix two different policies into one
+    average, which is the same error as the blend above.
+    """
+    from datetime import datetime as _dt
+
+    from ..analytics.proof import roi_with_ci
+    from ..live_executor import (ORDER_INTENT_SQL, cost_per_share,
+                                 tolerance_cohort)
+
+    pool = await get_pool()
+    since_d = _dt.fromisoformat(since_day).date()
+    # ROW FETCH, COHORTED IN PYTHON BY THE PRODUCTION FUNCTION
+    # (adversarial review 2026-08-26, hours after the first version
+    # shipped). The v1 SQL split cohorts on raw `fill_price >
+    # his_price`. fill_price on a SHORT names the LONG leg while
+    # his_price is the whale's own side, so every short was cohorted by
+    # comparing two different legs -- the defect that inverted
+    # realized_pnl and fill_cash before both took an intent. Cohorting
+    # through tolerance_cohort/cost_per_share means the grader and the
+    # executor share ONE definition, and a future fix to that
+    # definition cannot leave this endpoint grading a population the
+    # code no longer produces. Row volume is bounded: the window opens
+    # the day Option A shipped.
+    _tol_sql = f"""
+        SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
+               lo.his_price::float8 AS his, lo.fill_price::float8 AS fp,
+               lo.filled_usd::float8 AS staked, lo.pnl::float8 AS pnl,
+               lo.status, {ORDER_INTENT_SQL} AS intent,
+               lo.lane AS lane,
+               -- THE GAME THIS COPY BELONGS TO, for the cluster-robust
+               -- interval below. Same LEFT JOIN and same COALESCE the
+               -- proof cohort uses, so the two instruments cannot
+               -- disagree about what one independent result is.
+               COALESCE(NULLIF(m.event_slug, ''),
+                        NULLIF(lo.us_market_slug, '')) AS event_key
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.placed_at >= $1
+          AND lo.status IN ('filled', 'settled', 'cashed_out')
+          AND lo.filled_usd > 0 AND lo.his_price > 0 AND lo.fill_price > 0
+          AND COALESCE(lo.whale_username, '') NOT IN ('manual', 'underdog')
+        """
+    # THE LANE COLUMN MAY NOT EXIST YET. Migrations run at API boot,
+    # best-effort, and this endpoint would 500 until the next healthy
+    # boot on a bare reference. Retry without the projection and let
+    # the defensive r.keys() read below file every row as before.
+    try:
+        rows = await pool.fetch(_tol_sql, since_d)
+    except Exception as exc:  # noqa: BLE001 — missing column only
+        if "lane" not in str(exc):
+            raise
+        rows = await pool.fetch(_tol_sql.replace("lo.lane AS lane,", ""),
+                                since_d)
+    agg: dict[tuple, dict] = {}
+    for r in rows:
+        # THE REST LANE IS ITS OWN COHORT. A rest fill lands at his
+        # exact price, so tolerance_cohort would file it under parity
+        # -- and it is not parity. Parity is "the ask was already at or
+        # below his price when the IOC arrived"; rest is "the IOC
+        # missed and the ask came back within the window". Different
+        # populations, possibly opposite signs, never blended. Read
+        # defensively: rows written before migration 041 have no lane.
+        _lane = r["lane"] if "lane" in r.keys() else None
+        # THE MIRROR BOOK IS ITS OWN COHORT, like rest (position
+        # mirroring P1, owner order 2026-09-02 "go for it, let's get
+        # this working"; the panel review's predicate audit). A book's
+        # his_price is an open-time level and its fill_price the
+        # lifetime average of the buys folded onto one row, so
+        # tolerance_cohort would file it as parity or marginal on a
+        # comparison that means nothing for a book. Named, never
+        # blended. A NULL lane still reads exactly as before.
+        cohort = ("mirror" if _lane == "mirror"
+                  else "rest" if _lane == "rest"
+                  else tolerance_cohort(r["his"], r["fp"], r["intent"]))
+        d = agg.setdefault((r["whale"], cohort), {
+            "whale": r["whale"], "cohort": cohort, "n": 0, "settled": 0,
+            "staked": 0.0, "pnl": 0.0, "settled_staked": 0.0,
+            "cents_sum": 0.0, "_rows": []})
+        d["n"] += 1
+        d["staked"] += float(r["staked"])
+        d["cents_sum"] += (cost_per_share(float(r["fp"]), r["intent"])
+                           - float(r["his"])) * 100.0
+        if r["status"] == "settled":
+            d["settled"] += 1
+            d["pnl"] += float(r["pnl"] or 0)
+            d["settled_staked"] += float(r["staked"])
+            # AN UNKEYED ROW STAYS A SINGLETON, IT DOES NOT ABORT. The
+            # SELECT always provides event_key, so this cannot be None
+            # in production -- but a row that somehow arrives without
+            # one must degrade to its own cluster (roi_with_ci's
+            # documented behaviour) rather than raise. An interval that
+            # throws when a join misses is an interval nobody can rely
+            # on at the moment they need it.
+            try:
+                _ek = r["event_key"]
+            except (KeyError, IndexError):
+                _ek = None
+            d["_rows"].append({"stake": float(r["staked"]),
+                               "pnl": float(r["pnl"] or 0),
+                               "event_key": _ek})
+    out = []
+    for d in sorted(agg.values(), key=lambda x: (x["whale"], x["cohort"])):
+        ss = d.pop("settled_staked")
+        cs = d.pop("cents_sum")
+        settled_rows = d.pop("_rows")
+        # ROI ON SETTLED DOLLARS ONLY. Dividing realised P&L by dollars
+        # that include still-open positions understates every cohort,
+        # and it understates the SMALLER one more -- which here is the
+        # marginal cohort, the one being judged.
+        d["roi"] = round(d["pnl"] / ss, 4) if ss > 0 else None
+        d["settled_staked"] = round(ss, 2)
+        d["cents_over"] = round(cs / d["n"], 3) if d["n"] else None
+        # ── THE INTERVAL THIS ENDPOINT WAS MISSING (2026-09-01) ─────
+        #
+        # It reported a bare ROI per cohort and nothing else, and a
+        # bare ROI cannot decide anything. rn1 read marginal -0.01% on
+        # 335 settled against parity +16.75% on 64, and that gap was
+        # about to be used to move 83% of his capital between cohorts.
+        # On 64 settled copies +16.75% may be noise; without an
+        # interval there is no way to say, and "the bigger number wins"
+        # is how a coin flip gets shipped as a strategy.
+        #
+        # Clustered on the whale's EVENT for the same reason the proof
+        # cohort is: three legs of one match settle on one result, and
+        # counting them as three independent copies narrows the
+        # interval in the direction that declares a cohort proven.
+        ci = roi_with_ci(settled_rows)
+        d["ci95"] = ci.get("ci95")
+        d["clusters"] = ci.get("clusters")
+        # THE STANDARD ERROR TRAVELS WITH THE ROW. The comparison below
+        # projects how much more data a cohort gap needs, and that
+        # projection is built from se -- without it every comparison
+        # silently took the "no standard error" branch and reported
+        # "no sample size separates them" for gaps that were merely
+        # noisy. Carried explicitly rather than recomputed.
+        d["se"] = ci.get("se")
+        lo_hi = ci.get("ci95")
+        if not lo_hi:
+            d["verdict"] = ("NO INTERVAL — fewer than two settled "
+                            "copies in this cohort")
+        elif lo_hi[0] > 0:
+            d["verdict"] = f"EARNS at 95% — interval {_pct_pair(lo_hi)}"
+        elif lo_hi[1] < 0:
+            d["verdict"] = f"LOSES at 95% — interval {_pct_pair(lo_hi)}"
+        else:
+            d["verdict"] = (f"NOT DEMONSTRATED — interval "
+                            f"{_pct_pair(lo_hi)} contains zero")
+        for k in ("staked", "pnl"):
+            d[k] = round(d[k], 2)
+        out.append(d)
+
+    # ── THE COMPARISON IS THE DECISION, SO STATE IT ─────────────────
+    #
+    # The question this endpoint exists to answer is not "what is each
+    # cohort's ROI" but "is one better than the other, by enough to
+    # move money". Two intervals that overlap do not establish a
+    # difference, and reading two point estimates side by side invites
+    # exactly the conclusion the intervals refuse. Overlap is the
+    # CONSERVATIVE test -- non-overlapping intervals imply a real
+    # difference, the converse does not hold -- so a SEPARATED verdict
+    # here is trustworthy and an OVERLAPPING one is genuinely "not yet".
+    cmp_out: dict[str, dict] = {}
+    for whale in sorted({d["whale"] for d in out}):
+        marg = next((d for d in out if d["whale"] == whale
+                     and d["cohort"] == "marginal"), None)
+        par = next((d for d in out if d["whale"] == whale
+                    and d["cohort"] == "parity"), None)
+        if not marg or not par or not marg.get("ci95") or not par.get("ci95"):
+            cmp_out[whale] = {"reading": ("INCOMPARABLE — one cohort has "
+                                          "no interval yet")}
+            continue
+        m, p = marg["ci95"], par["ci95"]
+        separated = m[1] < p[0] or p[1] < m[0]
+        # ── HOW MANY MORE COPIES UNTIL THIS RESOLVES ────────────────
+        #
+        # "OVERLAPPING" is honest and it is also unactionable on its
+        # own: it says the difference is not established without saying
+        # whether it is one week away or unreachable. rn1 has $32k of
+        # settled stake sitting in a cohort returning approximately
+        # nothing, and "wait for more data" is a decision to never
+        # decide unless someone can say how much more.
+        #
+        # The projection is deliberately crude and states its
+        # assumption. Standard errors shrink as 1/sqrt(n), so scaling
+        # BOTH cohorts by k scales the difference's SE by 1/sqrt(k).
+        # Separation needs 1.96 * SE_diff / sqrt(k) < |roi_m - roi_p|,
+        # so k > (1.96 * SE_diff / d)^2. That holds the observed point
+        # estimates and dispersion fixed, which is exactly what will
+        # NOT happen -- rn1's parity estimate has already walked
+        # +16.75% -> +11.23% -> +10.36% across three reads today. So
+        # this is a scale, not a date: "about 4x the current sample"
+        # is a decision input; "November 3rd" would be a fiction.
+        #
+        # An unreachable k is the most useful answer it can give. If
+        # the gap needs fifty times the book we will ever settle, the
+        # honest move is to stop waiting on this comparison and change
+        # something else.
+        _need: dict = {}
+        _d = abs((marg["roi"] or 0) - (par["roi"] or 0))
+        _se_m, _se_p = marg.get("se"), par.get("se")
+        if separated:
+            _need = {"reading": "already separated — nothing to wait for"}
+        elif _d <= 0 or not _se_m or not _se_p:
+            _need = {"reading": ("the point estimates are identical or a "
+                                 "cohort has no standard error — no "
+                                 "sample size separates them")}
+        else:
+            _se_diff = math.sqrt(_se_m ** 2 + _se_p ** 2)
+            _k = (1.645 * _se_diff / _d) ** 2
+            _need = {
+                "scale_factor": round(_k, 1),
+                "marginal_settled_needed": int(math.ceil(_k * marg["settled"])),
+                "parity_settled_needed": int(math.ceil(_k * par["settled"])),
+                "assumes": ("the observed point estimates and dispersion "
+                            "hold; they have not so far, so read this as "
+                            "a SCALE, not a date"),
+                "reading": (
+                    f"about {_k:.1f}x the current settled sample in each "
+                    f"cohort before a {_d:.2%} gap could clear the noise"
+                    if _k < 50 else
+                    f"about {_k:.0f}x the current sample — this comparison "
+                    f"is not going to resolve by waiting; the gap is too "
+                    f"small relative to the dispersion to be worth "
+                    f"measuring further"),
+            }
+        cmp_out[whale] = {
+            "marginal_roi": marg["roi"], "marginal_ci95": m,
+            "marginal_settled": marg["settled"],
+            "parity_roi": par["roi"], "parity_ci95": p,
+            "parity_settled": par["settled"],
+            "separated": separated,
+            "to_resolve": _need,
+            "reading": (
+                f"SEPARATED — the intervals do not overlap, so the "
+                f"cohorts differ; {'parity' if p[0] > m[1] else 'marginal'}"
+                f" is the better one"
+                if separated else
+                "OVERLAPPING — the intervals overlap, so the difference "
+                "between these cohorts is NOT established. The point "
+                "estimates may differ a lot and still be one book. Do "
+                "not move capital between cohorts on this."),
+        }
+    return {
+        "since": since_day, "rows": out, "by_whale": cmp_out,
+        "note": ("marginal = filled ABOVE his price, i.e. only because "
+                 "of the tolerance -- the only cohort that grades "
+                 "Option A. parity = at or below, which same-or-better "
+                 "would also have filled. Never summed together. roi is "
+                 "on SETTLED dollars; a cohort with settled=0 has no "
+                 "verdict yet, however large its n. Intervals are "
+                 "cluster-robust on the whale's event; read `by_whale` "
+                 "before treating a cohort gap as real."),
+    }
+
+
+@app.get("/api/admin/copy-latency", dependencies=[Depends(require_admin)])
+async def api_copy_latency(hours: int = Query(24, ge=1, le=24 * 60)) -> dict:
+    """Reaction time on the copy sleeve over a WINDOW YOU CHOOSE.
+
+    WHY THIS EXISTS (owner challenge 2026-08-26). edge-decay reports
+    latency_median_s and the hourly probe prints it as "lat_med", and I
+    read 187.2s off it as if it described how fast we copy TODAY. It
+    does not, on two counts, and the owner caught both:
+
+      * its window is since_day, defaulting to 2026-08-01 -- a
+        month-to-date figure spanning the era before the latency work;
+      * it selects `status = 'settled'` ONLY, so a copy placed today
+        contributes nothing until its market resolves. The number is
+        structurally incapable of describing current latency.
+
+    A metric that cannot see the period you are asking about is the
+    failure mode that has cost the most here, and quoting it as current
+    was mine.
+
+    This reads live_orders over a real time window and EVERY status, so
+    "how fast are we right now" is a question with an answer.
+
+    fresh_share is the other half of the honesty. copy_sweep's reclaim
+    path calls maybe_execute with reaction=None (live_executor.py), so
+    reclaimed rows carry a NULL reaction_s and drop out of every
+    percentile silently. If most copies arrive that way, a fast median
+    describes a minority of the sleeve -- so the share is reported next
+    to the percentiles rather than left for someone to discover.
+    """
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(whale_username, '?')) AS whale,
+               count(*)::int AS n,
+               count(reaction_s)::int AS n_timed,
+               count(*) FILTER (WHERE status = 'filled')::int AS filled,
+               count(*) FILTER (WHERE status = 'settled')::int AS settled,
+               count(*) FILTER (WHERE status = 'rejected')::int AS rejected,
+               count(*) FILTER (WHERE status = 'unfilled')::int AS unfilled,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s)
+                   AS p50,
+               percentile_cont(0.9) WITHIN GROUP (ORDER BY reaction_s)
+                   AS p90,
+               percentile_cont(0.99) WITHIN GROUP (ORDER BY reaction_s)
+                   AS p99,
+               max(reaction_s)::float8 AS worst,
+               count(*) FILTER (WHERE reaction_s <= 5)::int AS under_5s,
+               count(*) FILTER (WHERE reaction_s <= 30)::int AS under_30s
+        FROM live_orders
+        WHERE placed_at > now() - make_interval(hours => $1)
+          AND COALESCE(whale_username, '') NOT IN ('manual', 'underdog')
+        GROUP BY 1 ORDER BY n DESC
+        """, hours)
+    out = []
+    for r in rows:
+        d = dict(r)
+        for k in ("p50", "p90", "p99", "worst"):
+            d[k] = round(float(d[k]), 2) if d[k] is not None else None
+        d["fresh_share"] = (round(d["n_timed"] / d["n"], 3)
+                            if d["n"] else None)
+        out.append(d)
+    return {
+        "hours": hours, "whales": out,
+        "note": ("reaction_s over EVERY status in the window, not the "
+                 "settled-only month-to-date figure edge-decay reports. "
+                 "fresh_share is the fraction with a reaction stamp at "
+                 "all: reclaimed copies carry NULL and are invisible to "
+                 "the percentiles."),
+    }
+
+
+@app.get("/api/admin/edge-decay", dependencies=[Depends(require_admin)])
+async def api_edge_decay(since_day: str = "2026-08-01") -> dict:
+    """The syllogism test, per whale (owner order 2026-08-24: 'if we copy
+    their trades at the same or better price we must match their
+    profit'). For every settled copy row we hold the whale's price
+    (his_price), our fill (fill_price), our reaction time (reaction_s)
+    and the venue-true result — so each whale's certified P&L decomposes
+    into: his edge on OUR filled subset (P&L had we filled at his
+    price), the price drag our latency cost, and fees/other. A whale
+    with positive edge_at_his_price is copyable the moment our fills
+    reach price parity; one negative even at his prices is either
+    unlucky in our subset (selection effect) or not worth copying."""
+    from datetime import datetime as _dt
+
+    from ..live_executor import ORDER_INTENT_SQL, cost_per_share
+
+    pool = await get_pool()
+    since_d = _dt.fromisoformat(since_day).date()
+    # v2 (2026-08-24): resolution-settled rows ONLY — a cash-out row's
+    # pnl is sale-based and breaks the payout model; rows the model
+    # can't reconcile against the venue-true actual are COUNTED as
+    # unmodeled instead of silently blended (v1's decomposition mixed
+    # both and produced visibly inconsistent columns).
+    rows = await pool.fetch(
+        f"""
+        SELECT lower(COALESCE(whale_username, '?')) AS whale,
+               his_price::float8 AS his, fill_price::float8 AS fp,
+               filled_usd::float8 AS stake, pnl::float8 AS pnl,
+               reaction_s::float8 AS rs,
+               {ORDER_INTENT_SQL} AS intent,
+               (abs(COALESCE(pnl, 0)) > 100
+                AND NOT lower(COALESCE(us_market_slug, ''))
+                        LIKE ANY($2::text[])) AS over_cap
+        FROM live_orders
+        WHERE status = 'settled'
+          AND filled_usd > 0 AND his_price > 0
+          AND placed_at >= $1
+        """, since_d, __import__("sportsassets.api.track_record",
+                                 fromlist=["pnl_cap_exempt_patterns"])
+        .pnl_cap_exempt_patterns())
+    out: dict[str, dict] = {}
+    for r in rows:
+        w = out.setdefault(r["whale"], {
+            "n": 0, "voids": 0, "wins": 0, "over_cap_n": 0,
+            "unmodeled": 0, "staked": 0.0,
+            "actual": 0.0, "actual_capped_out": 0.0,
+            "at_his": 0.0, "at_ours_feefree": 0.0,
+            "slip_sum": 0.0, "slip_n": 0, "rs": []})
+        pnl = float(r["pnl"] or 0)
+        stake = float(r["stake"])
+        his, fp = float(r["his"]), float(r["fp"] or 0)
+        w["n"] += 1
+        w["staked"] = round(w["staked"] + stake, 2)
+        w["actual"] = round(w["actual"] + pnl, 2)
+        if r["over_cap"]:
+            w["over_cap_n"] += 1
+            w["actual_capped_out"] = round(w["actual_capped_out"] + pnl, 2)
+        if r["rs"] is not None:
+            w["rs"].append(float(r["rs"]))
+        if fp and his:
+            # OUR COST PER SHARE MINUS HIS, IN ONE DENOMINATION
+            # (2026-08-26). This was a raw `fp - his`. fill_price on a
+            # SHORT names the LONG leg, while his_price is what the
+            # whale paid on his own side, so the subtraction compared
+            # two different legs -- the same class of error that
+            # inverted realized_pnl and fill_cash, both of which now
+            # take an intent. cost_per_share is that single definition.
+            #
+            # WHAT THIS DOES NOT EXPLAIN, stated so nobody inherits a
+            # wrong story: the production table reports avg_slip of
+            # -0.195 (rn1), -0.246 (ferrari), -0.126 (076daa87), i.e.
+            # "we filled twelve to twenty-five cents a share BETTER
+            # than the whale", on a FOK at his price plus two cents.
+            # Short-leg mixing cannot be the cause -- for a short filled
+            # at his own price the raw formula returns +(1 - 2*his),
+            # which is POSITIVE on any book under 50c. The sign is
+            # wrong for that theory.
+            #
+            # So this corrects a real denomination bug and leaves the
+            # negative reading unexplained. Re-read the column after
+            # this deploys; if it is still large and negative the cause
+            # is upstream of here, in what his_price or fill_price
+            # actually contain.
+            #
+            # Still accumulated on EVERY priced row, including ones the
+            # payout model below declares unmodeled -- mostly the
+            # shorts. Their slippage is real and dropping them would
+            # silently scope this number to longs only.
+            w["slip_sum"] += (cost_per_share(fp, r["intent"]) - his)
+            w["slip_n"] += 1
+        if abs(pnl) < 0.005:
+            w["voids"] += 1
+            continue
+        win = pnl > 0
+        if not (0 < his < 1 and 0 < fp < 1):
+            w["unmodeled"] += 1
+            continue
+        # the payout model must explain the venue-true actual for this
+        # row; a row it can't explain is disclosed, never blended
+        model_row = stake * (1 - fp) / fp if win else -stake
+        if abs(model_row - pnl) > max(1.0, 0.15 * stake):
+            w["unmodeled"] += 1
+            continue
+        if win:
+            w["wins"] += 1
+        w["at_his"] = round(
+            w["at_his"] + (stake * (1 - his) / his if win else -stake), 2)
+        w["at_ours_feefree"] = round(w["at_ours_feefree"] + model_row, 2)
+    whales = []
+    for w, d in sorted(out.items(), key=lambda kv: kv[1]["at_his"],
+                       reverse=True):
+        rs = sorted(d.pop("rs"))
+        med = rs[len(rs) // 2] if rs else None
+        p90 = rs[int(len(rs) * 0.9)] if rs else None
+        whales.append({
+            "whale": w, **d,
+            "avg_slip": round(d["slip_sum"] / d["slip_n"], 4)
+            if d["slip_n"] else None,
+            "latency_median_s": round(med, 1) if med is not None else None,
+            "latency_p90_s": round(p90, 1) if p90 is not None else None,
+            "price_drag": round(d["at_ours_feefree"] - d["at_his"], 2),
+        })
+    for wrow in whales:
+        wrow.pop("slip_sum", None)
+        wrow.pop("slip_n", None)
+    return {"since": since_day, "whales": whales,
+            "note": ("at_his = venue-true outcomes priced at the whale's "
+                     "fill (his edge on OUR subset, fee-free); "
+                     "at_ours_feefree = same outcomes at our fill price; "
+                     "price_drag = what latency cost; fees_other = "
+                     "venue-actual minus fee-free at our price. A whale "
+                     "is copyable-at-parity iff at_his > 0.")}
+
+
+@app.get("/api/admin/premap-status", dependencies=[Depends(require_admin)])
+async def api_premap_status() -> dict:
+    """Pre-map coverage: how much of the venue universe the lookup table
+    holds and how fresh it is (owner order 2026-08-24)."""
+    pool = await get_pool()
+    try:
+        row = await pool.fetchrow(
+            "SELECT count(*)::int AS rows, "
+            "count(DISTINCT event_slug)::int AS events, "
+            "max(updated_at) AS fresh FROM us_premap")
+    except Exception:  # noqa: BLE001 — table not created yet
+        return {"rows": 0, "events": 0, "fresh": None}
+    # COVERAGE PROOF (2026-08-24): "9,353 rows" is only good news if the
+    # rows are TODAY's markets — the venue's bare listing leads with a
+    # stale 2025 catalog, so a full table can still be useless. Count
+    # the rows carrying today's/tomorrow's date and sample a few.
+    coverage: dict = {}
+    try:
+        from datetime import date as _date, timedelta as _td
+
+        d0 = _date.today().isoformat()
+        d1 = (_date.today() + _td(days=1)).isoformat()
+        # asyncpg cannot infer a parameter's type inside a concatenation
+        # ('%'||$1||'%' raises "could not determine data type") — the
+        # explicit ::text casts are load-bearing. Read today=0 on a
+        # 9k-row table on 2026-08-24: that was this, not missing data.
+        coverage = dict(await pool.fetchrow(
+            "SELECT count(*) FILTER (WHERE identifier LIKE '%'||$1::text||'%')"
+            "::int AS today, "
+            "count(*) FILTER (WHERE identifier LIKE '%'||$2::text||'%')"
+            "::int AS tomorrow FROM us_premap", d0, d1))
+        coverage["sample"] = [
+            r["identifier"] for r in await pool.fetch(
+                "SELECT identifier FROM us_premap "
+                "WHERE identifier LIKE '%'||$1::text||'%' "
+                "ORDER BY updated_at DESC LIMIT 3", d0)]
+    except Exception as exc:  # noqa: BLE001 — never silent (2026-08-24)
+        coverage = {"err": f"{type(exc).__name__}: {str(exc)[:160]}"}
+    # SLEEVE STATE (owner order 2026-08-24: "only copies flow"). The
+    # public heartbeats endpoint sanitizes detail away, so the sleeve's
+    # own report is read here — "is it off" must be verifiable, never
+    # assumed.
+    sleeve: dict = {}
+    try:
+        hb = await pool.fetchrow(
+            "SELECT status, beat_at, detail FROM service_heartbeats "
+            "WHERE service='underdog'")
+        if hb:
+            det = hb["detail"]
+            if isinstance(det, str):
+                det = json.loads(det)
+            sleeve = {"state": (det or {}).get("sleeve", "ON"),
+                      "status": hb["status"],
+                      "beat_at": hb["beat_at"].isoformat()
+                      if hb["beat_at"] else None,
+                      "copyexit_open": (det or {}).get("copyexit_open")}
+        else:
+            sleeve = {"state": "no-heartbeat"}
+    except Exception as exc:  # noqa: BLE001 — never silent
+        sleeve = {"state": "unreadable",
+                  "err": f"{type(exc).__name__}: {str(exc)[:120]}"}
+    extras: dict = {"coverage": coverage, "sleeve": sleeve}
+    for key, out in (("premap_last", "last_sweep"),
+                     # THE FAST LANE HAS ITS OWN BUDGET AND ITS OWN
+                     # TRUNCATION, and only the full sweep was ever
+                     # published. A capped board is markets that can
+                     # NEVER be premapped, and premap is the only lane
+                     # allowed to trade under the quarantine — so a
+                     # silent page-budget ceiling is a silent ceiling on
+                     # how much of a proven whale we can copy at all.
+                     ("premap_last_fast", "last_sweep_fast"),
+                     ("workers_boot", "workers_boot"),
+                     ("side_echo_last", "side_echo"),
+                     ("side_echo_shadow", "side_echo_shadow"),
+                     # The fuzzy class's own certification streak. Kept
+                     # separate from side_echo_shadow so the premap
+                     # number that justified the `exact` resume stays a
+                     # clean answer to its own question.
+                     ("side_echo_fuzzy", "side_echo_fuzzy"),
+                     ("side_echo_tripped", "side_echo_tripped")):
+        try:
+            val = await pool.fetchval(
+                "SELECT value FROM ingestion_state WHERE key=$1", key)
+            extras[out] = json.loads(val) if isinstance(val, str) else val
+        except Exception:  # noqa: BLE001
+            extras[out] = None
+    return {"rows": row["rows"], "events": row["events"],
+            "fresh": row["fresh"].isoformat() if row["fresh"] else None,
+            **extras}
+
+
+@app.get("/api/admin/mapping-audit", dependencies=[Depends(require_admin)])
+async def api_mapping_audit(days: int = 3, limit: int = 400) -> dict:
+    """Side-fidelity evidence, row by row (owner order 2026-08-24: prove
+    which mapping path put copies on the wrong side). For every recent
+    copy row with a US mapping: the whale's pick (token outcome), the
+    US slug we actually ordered (or would have — quarantined rejections
+    carry the mapping in their error), and the venue-true P&L. The slug
+    tail vs the pick's surname makes side-inversion readable at a
+    glance; the postmortem groups by mapping shape."""
+    pool = await get_pool()
+    days = max(1, min(int(days), 14))
+    limit = max(1, min(int(limit), 1000))
+    rows = await pool.fetch(
+        """
+        SELECT lo.placed_at, lower(COALESCE(lo.whale_username,'?')) AS whale,
+               COALESCE(mt.outcome, '') AS pick,
+               COALESCE(m.title, '') AS gtitle,
+               lower(COALESCE(lo.us_market_slug, '')) AS us_slug,
+               lo.status, lo.error,
+               lo.pnl::float8 AS pnl,
+               lo.filled_usd::float8 AS filled_usd
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.placed_at > now() - ($1::int * interval '1 day')
+          AND (lo.us_market_slug IS NOT NULL
+               OR lo.error LIKE 'quarantined%')
+        ORDER BY lo.placed_at DESC
+        LIMIT $2
+        """, days, limit)
+    out = []
+    for r in rows:
+        out.append({
+            "at": r["placed_at"].isoformat() if r["placed_at"] else None,
+            "whale": r["whale"], "pick": r["pick"][:60],
+            "gtitle": r["gtitle"][:80], "us_slug": r["us_slug"][:120],
+            "status": r["status"], "pnl": r["pnl"],
+            "filled_usd": r["filled_usd"],
+            "error": (r["error"] or "")[:160] or None})
+    return {"days": days, "count": len(out), "rows": out}
+
+
+@app.get("/api/admin/rescore-copies", dependencies=[Depends(require_admin)])
+async def api_rescore_summary() -> dict:
+    """Last venue-truth restatement summary (owner emergency 2026-08-23)."""
+    pool = await get_pool()
+    val = await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key=$1", "rescore_copies_v2")
+    if val is None:
+        return {"ran": False}
+    data = json.loads(val) if isinstance(val, str) else val
+    return {"ran": True, **(data or {})}
+
+
+@app.post("/api/admin/rescore-copies", dependencies=[Depends(require_admin)])
+async def api_rescore_run(since_day: str = "2026-08-01") -> dict:
+    """Re-run the venue-truth restatement of settled copy rows. Idempotent:
+    rows already matching the venue verdict are untouched."""
+    from ..analytics.engine import _settle_pmus_from_venue
+
+    pool = await get_pool()
+    summary = await _settle_pmus_from_venue(pool, rescore_since=since_day)
+    summary["at"] = datetime.now(timezone.utc).isoformat()
+    await pool.execute(
+        "INSERT INTO ingestion_state (key, value) VALUES ($1, $2::jsonb) "
+        "ON CONFLICT (key) DO UPDATE SET value = $2::jsonb",
+        "rescore_copies_v2", json.dumps(summary))
+    return summary
+
+
+@app.get("/api/admin/breakdown-day-detail",
+         dependencies=[Depends(require_admin)])
+async def api_breakdown_day_detail(day: str) -> dict:
+    """Every row behind one ET day of the category breakdown (owner order
+    2026-08-23: 'pinpoint what is making up this $668 — every cent').
+    The breakdown's Unattributed line is a derived residual (account
+    anchor minus attributed categories); this lists BOTH sides row by
+    row and diffs them per market, so the residual decomposes into
+    named per-trade deltas instead of one opaque number."""
+    from datetime import datetime as _dt
+
+    # AUDIT_SINCE was named below but never imported here (ruff F821,
+    # found by the 2026-09-02 codebase audit): every call of this
+    # endpoint raised NameError at the track_record line, so the day
+    # detail never rendered. The comment below explains why the audit
+    # anchor, not the display anchor, is the right one.
+    from .track_record import (AUDIT_SINCE, PNL_DISPLAY_CAP, RECORD_TZ,
+                               track_record)
+
+    pool = await get_pool()
+    # AUDIT SINCE, NOT DISPLAY SINCE (2026-08-25). track_record(None)
+    # honours DEFAULT_SINCE, which the 2026-08-24 front-end re-baseline
+    # moved to that day's epoch. This reconciliation is an ACCOUNTING
+    # audit, not a display: the copies side counts every live_order that
+    # SETTLED today, including positions entered days earlier, so an
+    # anchor windowed to the epoch compares two different populations.
+    # It read anchor=1 row against copies=471 rows and reported the 470
+    # invisible rows as an $867 residual — an alarm firing on its own
+    # window rather than on a real record-vs-venue divergence. The
+    # display re-baseline was a front-end decision and the history was
+    # kept on purpose; the audit reads all of it.
+    rec = await track_record(AUDIT_SINCE)
+    arb_rows = await pool.fetch(
+        "SELECT DISTINCT outcome_id FROM engine_fills "
+        "WHERE band IN ('arb', 'arb_crypto')")
+    arb_slugs = {r["outcome_id"] for r in arb_rows}
+
+    def _day_of(ts: float | None) -> str | None:
+        if not ts:
+            return None
+        return max(_dt.fromtimestamp(ts, RECORD_TZ).strftime("%Y-%m-%d"),
+                   "2026-08-01")
+
+    # Side A — the ANCHOR: record rows settled this ET day (their sum IS
+    # the day's 'account' figure the breakdown reconciles against).
+    anchor_rows = []
+    for r in rec.get("trades") or []:
+        if not r.get("settled"):
+            continue
+        if _day_of(r.get("settled_ts") or r.get("entry_ts")) != day:
+            continue
+        slug = (r.get("market_slug") or "").lower()
+        anchor_rows.append({
+            "slug": slug, "title": r.get("title") or slug,
+            "sleeve": r.get("sleeve"),
+            "arb": slug in arb_slugs,
+            "pnl": round(float(r.get("pnl") or 0), 4),
+            "cashed_out": bool(r.get("cashed_out"))})
+    anchor_pnl = round(sum(r["pnl"] for r in anchor_rows), 2)
+
+    # Side B — attributed copies: the exact live_orders query the
+    # breakdown runs (same whale tuple, same ±cap filter), per row.
+    from .track_record import pnl_cap_exempt_patterns
+
+    lo_rows = await pool.fetch(
+        """
+        SELECT lower(COALESCE(lo.whale_username, '?')) AS whale,
+               lower(COALESCE(lo.us_market_slug, '')) AS slug,
+               COALESCE(m.title, lo.us_market_slug, lo.asset) AS title,
+               lo.pnl::float8 AS pnl,
+               (abs(COALESCE(lo.pnl, 0)) > $2
+                AND NOT lower(COALESCE(lo.us_market_slug, ''))
+                        LIKE ANY($3::text[])) AS over_cap
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.status = 'settled' AND lo.settled_at IS NOT NULL
+          AND to_char(lo.settled_at AT TIME ZONE 'America/New_York',
+                      'YYYY-MM-DD') = $1
+        """, day, PNL_DISPLAY_CAP, pnl_cap_exempt_patterns())
+    sleeves = ("rn1", "swisstony", "kch123", "homerunhazard", "manual",
+               "underdog", "ferrarichampions2026", "0x076daa87",
+               "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563"
+               "-1759935795465")
+    copies_rows, capped_rows, foreign_rows = [], [], []
+    for r in lo_rows:
+        row = {"whale": r["whale"], "slug": r["slug"],
+               "title": r["title"], "pnl": round(r["pnl"] or 0, 4)}
+        if r["whale"] not in sleeves:
+            foreign_rows.append(row)
+        elif r["over_cap"]:
+            capped_rows.append(row)
+        else:
+            copies_rows.append(row)
+    copies_pnl = round(sum(r["pnl"] for r in copies_rows), 2)
+
+    # Arb + external, mirrored from the breakdown for this one day.
+    arb_pnl = round(sum(r["pnl"] for r in anchor_rows
+                        if r["arb"] and r["sleeve"] != "copy"), 2)
+    external_rows = []
+    try:
+        from .pmus_account import venue_export
+
+        ours = {(t.get("market_slug") or "").lower()
+                for t in (rec.get("trades") or [])}
+        lo_slugs = await pool.fetch(
+            "SELECT DISTINCT lower(us_market_slug) AS s FROM live_orders "
+            "WHERE us_market_slug IS NOT NULL")
+        ours |= {r["s"] for r in lo_slugs if r["s"]}
+        vtask = asyncio.ensure_future(venue_export(day))
+        _bg_tasks.add(vtask)
+        vtask.add_done_callback(_bg_tasks.discard)
+        vexp = await asyncio.wait_for(asyncio.shield(vtask), timeout=25)
+        for vr in (vexp.get("rows") or []):
+            if vr.get("kind") != "resolution":
+                continue
+            slug = (vr.get("slug") or "").lower()
+            when = vr.get("time") or ""
+            if not slug or slug in ours or not when:
+                continue
+            d = (_dt.fromisoformat(when.replace("Z", "+00:00"))
+                 .astimezone(RECORD_TZ).strftime("%Y-%m-%d"))
+            if d != day:
+                continue
+            external_rows.append({
+                "slug": slug, "title": vr.get("title") or slug,
+                "pnl": round(float(vr.get("realized_pnl") or 0), 2)})
+    except Exception:  # noqa: BLE001 — fail open, like the breakdown
+        pass
+    external_pnl = round(sum(r["pnl"] for r in external_rows), 2)
+    residual = round(anchor_pnl - copies_pnl - arb_pnl - external_pnl, 2)
+
+    # The decomposition: per market, what the anchor recorded vs what
+    # the copies audit recorded. Deltas are the residual, named.
+    by_slug: dict[str, dict] = {}
+    for r in anchor_rows:
+        if r["sleeve"] != "copy" or r["arb"]:
+            continue
+        s = by_slug.setdefault(r["slug"], {"slug": r["slug"],
+                                           "title": r["title"],
+                                           "anchor": 0.0, "copies": 0.0})
+        s["anchor"] = round(s["anchor"] + r["pnl"], 4)
+    for r in copies_rows:
+        s = by_slug.setdefault(r["slug"], {"slug": r["slug"],
+                                           "title": r["title"],
+                                           "anchor": 0.0, "copies": 0.0})
+        s["copies"] = round(s["copies"] + r["pnl"], 4)
+    diffs = []
+    for s in by_slug.values():
+        s["delta"] = round(s["anchor"] - s["copies"], 4)
+        if abs(s["delta"]) >= 0.005:
+            diffs.append(s)
+    diffs.sort(key=lambda s: -abs(s["delta"]))
+    noncopy = [r for r in anchor_rows
+               if r["sleeve"] != "copy" and not r["arb"]]
+    return {
+        "day": day,
+        "anchor": {"pnl": anchor_pnl, "rows": len(anchor_rows)},
+        "copies": {"pnl": copies_pnl, "rows": len(copies_rows)},
+        "arb_pnl": arb_pnl, "external_pnl": external_pnl,
+        "residual": residual,
+        "residual_from_copy_deltas": round(sum(s["delta"] for s in diffs), 2),
+        "residual_from_noncopy_rows": round(sum(r["pnl"] for r in noncopy), 2),
+        "copy_deltas": diffs,
+        "noncopy_anchor_rows": noncopy,
+        "capped_copy_rows": capped_rows,
+        "foreign_whale_rows": foreign_rows,
+        "external_rows": external_rows,
+        "anchor_rows": anchor_rows,
+        "copies_rows": copies_rows,
+        "note": ("residual == anchor - copies - arb - external, the same "
+                 "identity the breakdown derives per day. copy_deltas are "
+                 "per-market gaps between the venue-anchored record and "
+                 "the copies audit table (fees, partial fills, cash-out "
+                 "proceeds, settle-day boundaries); noncopy_anchor_rows "
+                 "land wholly in the residual. capped_copy_rows are "
+                 "excluded from BOTH sides by the ±$100 display rule and "
+                 "shown here for full disclosure.")}
+
+
+@app.get("/api/today-live")
+async def api_today_live() -> dict:
+    """Second-latency settlement feed from OUR OWN ledger (owner report
+    2026-08-07: 'won 4 trades, page didn't move'). The venue-account
+    snapshot lags minutes by design; the copy sleeves settle in
+    live_orders the moment our resolution pipeline marks them — this
+    endpoint powers the hero LIVE strip and the win toasts.
+
+    COPY-WHALES ONLY, UNCAPPED (owner order 2026-08-22): the strip is
+    the copy record's live edge — cash-outs count (they are settled by
+    OUR sale), and the $100 display cap is gone here so the strip
+    matches the uncapped copies record it fronts."""
+    from .copies_record import COPY_WHALES
+
+    # Mid-boot resilience: this endpoint is polled every 12s by every
+    # open page — during a redeploy the pool may not be ready, and a
+    # 500 here paints an error where a quiet empty strip belongs.
+    try:
+        pool = await get_pool()
+    except Exception:  # noqa: BLE001
+        return {"pnl": 0.0, "settled": 0, "wins": 0, "recent": [],
+                "warming": True}
+    # Sargable ET-day predicate (audit 2026-08-21): the to_char()-equals
+    # form is a function of the column — unindexable, so every 12s poll
+    # scanned all settled rows. A half-open range on settled_at uses the
+    # migration-024 partial index; identical ET-midnight semantics.
+    day = await pool.fetchrow(
+        """
+        SELECT COALESCE(sum(pnl), 0)::float8 AS pnl,
+               count(*)::int AS settled,
+               count(*) FILTER (WHERE pnl > 0)::int AS wins
+        FROM live_orders
+        WHERE status IN ('settled', 'cashed_out')
+          AND settled_at IS NOT NULL
+          AND settled_at >= date_trunc('day',
+                now() AT TIME ZONE 'America/New_York')
+              AT TIME ZONE 'America/New_York'
+          AND lower(COALESCE(whale_username, '')) = ANY($1::text[])
+        """, list(COPY_WHALES))
+    recent = await pool.fetch(
+        """
+        SELECT lo.pnl::float8 AS pnl, lo.settled_at, lo.whale_username,
+               m.title, mt.outcome
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.status IN ('settled', 'cashed_out')
+          AND lo.settled_at IS NOT NULL
+          AND lo.settled_at >= $2::timestamptz
+          AND lower(COALESCE(lo.whale_username, '')) = ANY($1::text[])
+        ORDER BY lo.settled_at DESC
+        LIMIT 8
+        """, list(COPY_WHALES), display_epoch_start())
+    return {
+        "pnl": round(float(day["pnl"]), 2),
+        "settled": day["settled"],
+        "wins": day["wins"],
+        "recent": [{
+            "title": r["title"] or "position",
+            "outcome": r["outcome"],
+            "whale": r["whale_username"],
+            "pnl": round(float(r["pnl"] or 0), 2),
+            "at": r["settled_at"].isoformat() if r["settled_at"] else None,
+        } for r in recent],
+        "scope": ("copy whales only, uncapped, cash-outs included "
+                  "(order-level, our ledger)"),
+    }
+
+
+@app.get("/api/report/range")
+async def api_report_range(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+) -> dict:
+    """Category P&L over any date range (owner directive 2026-08-07:
+    daily / weekly / monthly / custom downloadable reports)."""
+    return await _category_breakdown(
+        _parse_day(from_, DISPLAY_EPOCH), _parse_day(to, _today_et()))
+
+
+_WHALE_0X2C33 = "0x2c335066fe58fe9237c3d3dc7b275c2a034a0563-1759935795465"
+_CAT_ORDER = ["rn1", "swisstony", "kch123", "homerunhazard",
+              _WHALE_0X2C33,
+              # Dossier promotions (owner order 2026-08-21). Bug fix
+              # 2026-08-22: absent from this list, their settled rows
+              # were built by _category_breakdown but silently DROPPED
+              # from report.csv/pdf — the exports skip categories the
+              # label map doesn't know.
+              "ferrarichampions2026", "0x076daa87",
+              "manual", "underdog", "arb", "external", "residual"]
+_CAT_LABEL = {"rn1": "RN1 copies", "swisstony": "SwissTony copies",
+              "kch123": "kch123 copies", "homerunhazard": "HomeRunHazard copies",
+              # Display label is the truncated address — the owner names
+              # whales; until he does, the wallet is its own name.
+              _WHALE_0X2C33: "0x2c33…0563 copies",
+              "ferrarichampions2026": "ferrariChampions2026 copies",
+              "0x076daa87": "0x076daa87 copies",
+              "manual": "Manual desk", "underdog": "Underdog $1 test",
+              "arb": "Arbitrage", "external": "External (owner)",
+              # Relabelled 2026-08-22 after the owner scare, and the
+              # scare STILL came back — because the label only ever
+              # reached CSV/PDF while the probe and every React surface
+              # read the JSON key, which still said "software". The key
+              # itself was renamed to `residual` on 2026-08-30.
+              "residual": "Residual (dating gap · fees · marks · "
+                          "capped trades — not a strategy)"}
+
+
+@app.get("/api/report.csv")
+async def api_report_csv(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+):
+    import csv
+    import io as _io
+
+    data = await _category_breakdown(
+        _parse_day(from_, DISPLAY_EPOCH), _parse_day(to, _today_et()))
+    buf = _io.StringIO()
+    w = csv.writer(buf)
+    w.writerow(["date", "category", "pnl", "settled", "wins", "losses"])
+    for d in data["days"]:
+        for cat in _CAT_ORDER:
+            c = d.get(cat)
+            if not c:
+                continue
+            w.writerow([d["date"], _CAT_LABEL[cat], f"{c['pnl']:.2f}",
+                        c["settled"], c["wins"], c["losses"]])
+    for cat in _CAT_ORDER:
+        t = data["totals"].get(cat)
+        if not t:
+            continue
+        w.writerow(["TOTAL", _CAT_LABEL[cat], f"{t['pnl']:.2f}",
+                    t["settled"], t["wins"], t["losses"]])
+    w.writerow(["TOTAL", "ALL", f"{data['net_pnl']:.2f}", "", "", ""])
+    name = f"bettoredge_pnl_{data['from']}_{data['to']}.csv"
+    return PlainTextResponse(
+        buf.getvalue(), media_type="text/csv",
+        headers={"Content-Disposition": f'attachment; filename="{name}"'})
+
+
+@app.get("/api/report.pdf")
+async def api_report_pdf(
+    from_: str | None = Query(None, alias="from"),
+    to: str | None = Query(None),
+):
+    from fastapi.responses import Response
+
+    from .reports import build_category_report
+
+    data = await _category_breakdown(
+        _parse_day(from_, DISPLAY_EPOCH), _parse_day(to, _today_et()))
+    pdf, name = build_category_report(data)
+    return Response(pdf, media_type="application/pdf",
+                    headers={"Content-Disposition":
+                             f'attachment; filename="{name}"'})
+
+
+@app.get("/api/report")
+async def api_report(period: str = Query("weekly"),
+                     format: str = Query("md")) -> Any:
+    """Downloadable account report: daily/weekly/monthly x md/csv/json.
+    Derived from the same builder the site renders — a report can never
+    disagree with the page. Filters are stated in the report header."""
+    from .report import build_report
+
+    content, data = await build_report(period, format)
+    if content is None:
+        raise HTTPException(status_code=503,
+                            detail=data.get("error") or "not configured")
+    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if format == "csv":
+        return PlainTextResponse(content, media_type="text/csv", headers={
+            "Content-Disposition":
+                f'attachment; filename="bettoredge-{period}-{stamp}.csv"'})
+    if format == "md":
+        return PlainTextResponse(content, media_type="text/markdown", headers={
+            "Content-Disposition":
+                f'inline; filename="bettoredge-{period}-{stamp}.md"'})
+    return content
+
+
+@app.get("/api/tennis-week")
+async def api_tennis_week(days: str | None = Query(None)) -> dict:
+    """Venue-ledger tennis P&L for the given slug-dates (default: this
+    ET week, Monday onward). Owner question 2026-08-14 — every tennis
+    play, manual and AI, priced by the venue's own realized figures."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from .pmus_account import tennis_week_report
+
+    if days:
+        want = [d.strip() for d in days.split(",") if d.strip()]
+    else:
+        today = datetime.now(tz=ZoneInfo("America/New_York")).date()
+        monday = today - timedelta(days=today.weekday())
+        want = [(monday + timedelta(days=i)).isoformat()
+                for i in range((today - monday).days + 1)]
+    return await tennis_week_report(want)
+
+
+@app.get("/api/venue-export")
+async def api_venue_export(since: str | None = Query(None)) -> dict:
+    """RAW Polymarket activities ledger since a date (default Monday of
+    the current ET week): every trade and every resolution row, all
+    sports, verbatim venue fields. Owner order 2026-08-14: every trade
+    on the account, perfect — so no interpretation happens here at all."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from .pmus_account import venue_export
+
+    if not since:
+        today = datetime.now(tz=ZoneInfo("America/New_York")).date()
+        since = (today - timedelta(days=today.weekday())).isoformat()
+    return await venue_export(since)
+
+
+@app.get("/api/venue-export-raw")
+async def api_venue_export_raw(since: str | None = Query(None)) -> dict:
+    """Verbatim venue activities (no flattening) — the weekly report's
+    cash-truth source after the 2026-08-17 reconciliation found the
+    flat export drops the trade side and reduces resolution position
+    objects to two numbers. Public on the same precedent as
+    /api/venue-export (owner order 2026-08-14: every trade on the
+    account, served plainly); carries no credentials or keys."""
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from .pmus_account import venue_export_raw
+
+    if not since:
+        today = datetime.now(tz=ZoneInfo("America/New_York")).date()
+        since = (today - timedelta(days=today.weekday())).isoformat()
+    return await venue_export_raw(since)
+
+
+# Display epoch for the copies record (owner order 2026-08-28: "start
+# from zero tonight"). Same pattern as RECORD_EPOCH: a display
+# re-baseline that moves the served window without touching history —
+# ?since= keeps every earlier day reachable, and the audit surfaces
+# (order-audit, breakdown-day-detail) never adopt it.
+from .track_record import DISPLAY_EPOCH, display_epoch_start  # noqa: E402
+
+COPIES_EPOCH = os.environ.get("COPIES_EPOCH", DISPLAY_EPOCH)
+
+
+@app.get("/api/copies-record")
+async def api_copies_record(since: str | None = Query(None)) -> dict:
+    """The COPIES cohort, uncapped, from the order-level audit table —
+    the record the copy-trading thesis stands on (owner order
+    2026-08-20: show that the system is profitable). Public: these are
+    our own settled orders, venue-backed, no credentials involved."""
+    from .copies_record import build as build_copies
+
+    out = await build_copies(_parse_day(since, COPIES_EPOCH))
+    out["rebaselined"] = not since and COPIES_EPOCH > "2026-08-01"
+    out["epoch"] = COPIES_EPOCH
+    return out
+
+
+@app.get("/api/admin/proof2", dependencies=[Depends(require_desk)])
+async def api_proof2(since: str | None = Query(None)):
+    """PROOF-2 (owner order 2026-08-28): the decomposed thesis meter.
+    Sleeve edge = mix-weighted whale edge (their books, published CIs)
+    minus outcome-free capture drag (our fills vs the whale's own
+    prices, deterministic per fill) minus fees — with the combined CI,
+    P(edge > 0), and P(annual profit >= 100% of principal) across a
+    principal grid at measured flow and flow multiples. Every term is
+    measured; the meter moves when the evidence moves."""
+    from . import proof2 as p2
+
+    pool = await get_pool()
+    try:
+        return await p2.proof2_payload(pool, since)
+    except ValueError as exc:
+        raise HTTPException(400, f"bad since: {exc}") from exc
+
+
+@app.get("/api/admin/copy-reports", dependencies=[Depends(require_desk)])
+async def api_copy_reports(period: str = Query("monthly"),
+                           whale: str | None = Query(None),
+                           since: str | None = Query(None),
+                           until: str | None = Query(None),
+                           format: str = Query("json")):
+    """Management reports (owner order 2026-08-28): whale x sport x
+    trade-type x period over the copy ledger, with the latency between
+    the whale's fill and our execution aggregated per bucket. Uncapped;
+    settled + cashed_out copy rows only."""
+    from . import copy_reports as cr
+
+    if period not in cr.PERIODS:
+        raise HTTPException(400, f"period must be one of {cr.PERIODS}")
+    pool = await get_pool()
+    raw = await cr.fetch_ledger(pool)
+    rows = cr.ledger_rows(raw, since=_parse_day(since, DISPLAY_EPOCH),
+                          until=_parse_day(until, "") if until else "")
+    if whale:
+        rows = [r for r in rows
+                if r["whale"].lower() == whale.strip().lower()]
+    # ledger_rows already display-names the whale; report() passes an
+    # unknown key through DISPLAY.get unchanged, so the names survive
+    rep = cr.report(rows, period=period)
+    if format == "csv":
+        return PlainTextResponse(
+            cr.to_csv(rep["rows"], cr.REPORT_CSV_COLS),
+            media_type="text/csv",
+            headers={"Content-Disposition":
+                     f"attachment; filename=copy-report-{period}.csv"})
+    rep["filters"] = {"whale": whale, "since": since, "until": until}
+    return rep
+
+
+@app.get("/api/admin/reports/master.pdf", dependencies=[Depends(require_desk)])
+async def api_master_report_pdf(period: str = Query("monthly"),
+                                since: str | None = Query(None),
+                                until: str | None = Query(None)) -> Response:
+    """The master whale-performance report as a branded PDF (owner
+    order 2026-08-28: downloadable directly on the app). Same ledger,
+    same aggregation as the JSON report — print is a view, never a
+    second source of numbers."""
+    from . import copy_reports as cr
+    from .report_pdf import master_report_pdf
+
+    if period not in cr.PERIODS:
+        raise HTTPException(400, f"period must be one of {cr.PERIODS}")
+    pool = await get_pool()
+    raw = await cr.fetch_ledger(pool)
+    rows = cr.ledger_rows(raw, since=_parse_day(since, DISPLAY_EPOCH),
+                          until=_parse_day(until, "") if until else "")
+    rep = cr.report(rows, period=period)
+    label = (f"window {since or 'epoch start'} → {until or 'today'}"
+             f" · period {period}")
+    pdf = await asyncio.to_thread(master_report_pdf, rep, rows, label)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return Response(content=pdf, media_type="application/pdf", headers={
+        "Content-Disposition":
+            f"attachment; filename=bettor-token-master-report-{stamp}.pdf"})
+
+
+@app.get("/api/admin/reports/kalshi-manual.pdf",
+         dependencies=[Depends(require_desk)])
+async def api_kalshi_manual_pdf() -> Response:
+    """The desk team's manual Kalshi tickets as a branded PDF."""
+    from .report_pdf import kalshi_manual_pdf
+
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT lo.placed_at, lo.us_market_slug, lo.asset, lo.side,
+               lo.limit_price, lo.fill_price, lo.filled_shares,
+               lo.filled_usd, lo.status, lo.pnl,
+               m.title AS market_title
+        FROM live_orders lo
+        LEFT JOIN market_tokens mt ON mt.token_id = lo.asset
+        LEFT JOIN markets m ON m.condition_id = mt.condition_id
+        WHERE lo.whale_username = 'manual' AND lo.venue LIKE 'kalshi%'
+        ORDER BY lo.placed_at DESC
+        LIMIT 500
+        """)
+    pdf = await asyncio.to_thread(
+        kalshi_manual_pdf, [dict(r) for r in rows])
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d")
+    return Response(content=pdf, media_type="application/pdf", headers={
+        "Content-Disposition":
+            f"attachment; filename=bettor-token-kalshi-manual-{stamp}.pdf"})
+
+
+@app.get("/api/admin/copy-ledger", dependencies=[Depends(require_desk)])
+async def api_copy_ledger(whale: str | None = Query(None),
+                          since: str | None = Query(None),
+                          until: str | None = Query(None),
+                          limit: int = Query(500, ge=1, le=5000),
+                          offset: int = Query(0, ge=0),
+                          format: str = Query("json")):
+    """The order-level copy ledger (owner order 2026-08-28): every
+    trade assigned to its whale with the full timestamp chain and the
+    whale-fill -> our-execution latency next to each row."""
+    from . import copy_reports as cr
+
+    pool = await get_pool()
+    raw = await cr.fetch_ledger(pool)
+    rows = cr.ledger_rows(raw, since=_parse_day(since, DISPLAY_EPOCH),
+                          until=_parse_day(until, "") if until else "")
+    if whale:
+        rows = [r for r in rows
+                if r["whale"].lower() == whale.strip().lower()]
+    if format == "csv":
+        return PlainTextResponse(
+            cr.to_csv(rows, cr.LEDGER_CSV_COLS),
+            media_type="text/csv",
+            headers={"Content-Disposition":
+                     "attachment; filename=copy-ledger.csv"})
+    return {"count": len(rows),
+            "rows": rows[offset:offset + limit],
+            "filters": {"whale": whale, "since": since, "until": until}}
+
+
+@app.get("/api/admin/hub-telemetry", dependencies=[Depends(require_desk)])
+async def api_hub_telemetry() -> dict:
+    """One poll for the Meridian HUD (owner order 2026-08-28): the S1
+    beat, the shadow certification gauge, copy-latency percentiles,
+    today's copy scoreline, open exposure, and committed capital.
+    DB-only — no venue HTTP — safe on a 15s cadence."""
+    from .copies_record import COPY_WHALES, RECORD_TZ
+
+    pool = await get_pool()
+
+    def _doc(raw):
+        if isinstance(raw, dict):
+            return raw
+        try:
+            return json.loads(raw) if raw else {}
+        except ValueError:
+            return {}
+
+    hb = await pool.fetchrow(
+        "SELECT beat_at, status, detail FROM service_heartbeats "
+        "WHERE service = 'chain_listener'")
+    s1_beat = (_doc(hb["detail"]).get("s1") if hb else None) or {}
+    s1_doc = _doc(await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = 's1_emitter'"))
+    sh_doc = _doc(await pool.fetchval(
+        "SELECT value FROM ingestion_state WHERE key = 'shadow_v2_fill'"))
+    now_e = time.time()
+    ws, hs = sh_doc.get("window_start"), sh_doc.get("health_start")
+    c = s1_doc.get("counters") or {}
+    lat = await pool.fetchrow(
+        """
+        WITH l AS (
+          SELECT COALESCE(lo.reaction_s,
+                          EXTRACT(EPOCH FROM (lo.placed_at - t.ts))
+                          )::float8 AS s,
+                 lo.placed_at
+          FROM live_orders lo
+          LEFT JOIN trades t ON t.id = lo.trade_id
+          WHERE lower(COALESCE(lo.whale_username, '')) = ANY($1::text[])
+            AND lo.placed_at > now() - interval '7 days'
+        )
+        SELECT count(*) FILTER (WHERE s IS NOT NULL)::int         AS n_7d,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY s)
+                 FILTER (WHERE s IS NOT NULL)                     AS p50_7d,
+               percentile_cont(0.9) WITHIN GROUP (ORDER BY s)
+                 FILTER (WHERE s IS NOT NULL)                     AS p90_7d,
+               count(*) FILTER (WHERE s IS NOT NULL AND
+                 placed_at > now() - interval '24 hours')::int    AS n_24h,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY s)
+                 FILTER (WHERE s IS NOT NULL AND
+                 placed_at > now() - interval '24 hours')         AS p50_24h
+        FROM l
+        """, list(COPY_WHALES))
+    today = datetime.now(RECORD_TZ).strftime("%Y-%m-%d")
+    day = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS settled,
+               count(*) FILTER (WHERE pnl > 0)::int AS wins,
+               count(*) FILTER (WHERE pnl < 0)::int AS losses,
+               COALESCE(sum(pnl), 0)::float8 AS pnl
+        FROM live_orders
+        WHERE status IN ('settled', 'cashed_out')
+          AND lower(COALESCE(whale_username, '')) = ANY($1::text[])
+          AND to_char(settled_at AT TIME ZONE 'America/New_York',
+                      'YYYY-MM-DD') = $2
+        """, list(COPY_WHALES), today)
+    open_row = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS count,
+               COALESCE(sum(COALESCE(NULLIF(filled_usd, 0),
+                                     requested_usd)), 0)::float8 AS stake
+        FROM live_orders
+        WHERE status IN ('submitting', 'filled')
+          AND lower(COALESCE(whale_username, '')) = ANY($1::text[])
+        """, list(COPY_WHALES))
+
+    def _r(v, nd=2):
+        return round(float(v), nd) if v is not None else None
+
+    return {
+        "s1": {
+            "beat": s1_beat,
+            "beat_at": hb["beat_at"] if hb else None,
+            "armed": bool(s1_doc.get("armed")),
+            "trips": s1_doc.get("trips") or {},
+            "cert_reason": s1_doc.get("cert_reason"),
+            "emitted": c.get("s1.emitted", 0),
+            "would_emit": c.get("s1.would_emit", 0),
+            "confirmed": c.get("s1.confirmed", 0),
+            "uncorroborated": c.get("s1.uncorroborated", 0),
+        },
+        "shadow": {
+            "window_age_h": (_r((now_e - ws) / 3600.0, 1)
+                             if isinstance(ws, (int, float)) else None),
+            "health_age_h": (_r((now_e - hs) / 3600.0, 1)
+                             if isinstance(hs, (int, float)) else None),
+            "window_target_h": 7 * 24,
+        },
+        "latency": {
+            "n_24h": lat["n_24h"], "p50_24h_s": _r(lat["p50_24h"]),
+            "n_7d": lat["n_7d"], "p50_7d_s": _r(lat["p50_7d"]),
+            "p90_7d_s": _r(lat["p90_7d"]),
+        },
+        "today": {"day": today, "settled": day["settled"],
+                  "wins": day["wins"], "losses": day["losses"],
+                  "pnl": _r(day["pnl"])},
+        "open": {"count": open_row["count"], "stake": _r(open_row["stake"])},
+        "committed_usd": _r(settings().committed_capital_pm_usd or 0),
+        "epoch": COPIES_EPOCH,
+        "generated_at": datetime.now(RECORD_TZ).isoformat(),
+    }
+
+
+@app.get("/api/venue-truth")
+async def api_venue_truth() -> dict:
+    """Venue-truth P&L (task #74): the record rebuilt continuously from
+    the venues' own ledgers — PM afterPosition.realized per resolution,
+    Kalshi signed cash over raw fills+settlements with exact fees — so
+    the site's numbers reconcile to the accounts, uncapped. Rolling
+    window (Kalshi raw export carries 15 days); served stale-while-
+    refreshing so the homepage never waits on the venue crawl."""
+    from .venue_truth import snapshot
+
+    return await snapshot()
+
+
+@app.get("/api/pmus-account")
+async def api_pmus_account() -> dict:
+    """The REAL Polymarket US account, live from the venue's portfolio API:
+    value, cash, open positions, realized PnL, recent trades. 30s cache."""
+    from .pmus_account import account_snapshot
+
+    return await account_snapshot()
+
+
+@app.get("/api/ai-trader")
+async def ai_trader_report(days: int = Query(7, le=90)) -> dict:
+    """AI TRADER paper account: live P&L of copying the source whale at the
+    configured ratio, filled from real residual books, settled by our own
+    resolution pipeline. counterfactual = same clips at HIS prices — the
+    delta is the measured profitability impact of his own market impact."""
+    pool = await get_pool()
+    cfg = settings()
+    summary = await pool.fetchrow(
+        """
+        SELECT count(*)::int AS copies,
+               count(*) FILTER (WHERE status = 'missed')::int AS missed,
+               count(*) FILTER (WHERE status = 'open')::int AS open,
+               count(*) FILTER (WHERE status = 'settled')::int AS settled,
+               COALESCE(sum(filled_notional), 0)::float8 AS staked,
+               COALESCE(sum(filled_notional) FILTER (WHERE status = 'open'), 0)::float8
+                   AS open_exposure,
+               COALESCE(sum(pnl) FILTER (WHERE status = 'settled'), 0)::float8 AS realized_pnl,
+               COALESCE(sum(filled_notional) FILTER (WHERE status = 'settled'), 0)::float8
+                   AS settled_staked,
+               COALESCE(sum(counterfactual_pnl) FILTER (WHERE status = 'settled'), 0)::float8
+                   AS counterfactual_pnl,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s) AS reaction_p50,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY slippage_cents)
+                   FILTER (WHERE fill_vwap IS NOT NULL) AS slippage_p50,
+               min(placed_at) AS first_trade
+        FROM ai_trades WHERE placed_at > greatest(now() - make_interval(days => $1), $2::timestamptz)
+        """,
+        days, display_epoch_start(),
+    )
+    daily = await pool.fetch(
+        """
+        SELECT settled_at::date AS date, sum(pnl)::float8 AS pnl,
+               sum(counterfactual_pnl)::float8 AS counterfactual,
+               count(*)::int AS trades, COALESCE(sum(filled_notional), 0)::float8 AS volume
+        FROM ai_trades
+        WHERE status = 'settled' AND settled_at > greatest(now() - make_interval(days => $1), $2::timestamptz)
+        GROUP BY 1 ORDER BY 1
+        """,
+        days, display_epoch_start(),
+    )
+    recent = await pool.fetch(
+        """
+        SELECT a.id, a.placed_at, a.reaction_s::float8 AS reaction_s, a.status,
+               a.his_price::float8 AS his_price, a.fill_vwap::float8 AS fill_vwap,
+               a.slippage_cents::float8 AS slippage_cents,
+               a.clip_target::float8 AS clip_target,
+               a.filled_notional::float8 AS filled_notional,
+               a.pnl::float8 AS pnl, a.counterfactual_pnl::float8 AS counterfactual_pnl,
+               a.payout::float8 AS payout,
+               COALESCE(m.event_title, m.title, t.market_title) AS market_title,
+               COALESCE(mt.outcome, t.outcome) AS outcome, m.sport
+        FROM ai_trades a
+        LEFT JOIN trades t ON t.id = a.trade_id
+        LEFT JOIN market_tokens mt ON mt.token_id = a.asset
+        LEFT JOIN markets m ON m.condition_id = COALESCE(mt.condition_id, a.condition_id)
+        ORDER BY a.placed_at DESC LIMIT 50
+        """
+    )
+    d = dict(summary)
+    d["roi"] = d["realized_pnl"] / d["settled_staked"] if d["settled_staked"] else None
+    d["slippage_cost"] = round(d["counterfactual_pnl"] - d["realized_pnl"], 2)
+    for k in ("reaction_p50", "slippage_p50"):
+        if d.get(k) is not None:
+            d[k] = round(float(d[k]), 3)
+    # WHAT `days` DOES NOT MEAN, and what `roi` does not include.
+    #
+    # Both reads above floor at `greatest(now() - days, display_epoch_start())`,
+    # so `days` is a REQUEST, not the window that was measured. Asked for 30
+    # days against a display epoch four days back, this payload described four
+    # days of trading under a "30d" heading -- which is how the probe's own
+    # panel came to be labelled 30d while showing a four-day figure. The
+    # effective floor and the first trade actually in the window are served
+    # here so no reader has to know about the epoch to size what they are
+    # looking at.
+    #
+    # And `roi` is GROSS. settle_ai_trades computes pnl as
+    # `(payout - fill_vwap) * shares` (analytics/engine.py) with no fee term at
+    # all, while the live sleeve pays the venue's real commission -- measured at
+    # 2.22 cents per dollar of cost on 2026-09-04, which is most of this
+    # account's headline return. Comparing this number with the live sleeve's
+    # NET edge reads as a gap in the live sleeve's favour that does not exist.
+    # The two are not comparable and the payload now says so rather than
+    # leaving it to whoever quotes it.
+    _epoch = display_epoch_start()
+    d["window_days_requested"] = days
+    d["window_floor"] = _epoch.isoformat()
+    d["window_is_floored_at_epoch"] = True
+    d["window_note"] = (
+        f"`days`={days} is the REQUEST; the reads floor at the display epoch "
+        f"({_epoch.date().isoformat()}), so the measured window is whichever "
+        "is shorter. Read `first_trade` for what this payload actually covers.")
+    d["roi_is_gross"] = True
+    d["roi_note"] = (
+        "GROSS: paper P&L is (payout - fill_vwap) x shares with NO fee term. "
+        "The live sleeve pays the venue commission (2.22c per dollar of cost, "
+        "measured 2026-09-04), so this ROI is not comparable to the live "
+        "sleeve's net edge without subtracting a fee of the same shape.")
+    return {
+        "source": cfg.ai_trader_source,
+        "ratio": cfg.ai_trader_ratio,
+        "days": days,
+        "summary": d,
+        "daily": [{"date": r["date"].isoformat(), "pnl": round(r["pnl"] or 0, 2),
+                   "volume": round(r["volume"] or 0, 2), "trades": r["trades"],
+                   "counterfactual": round(r["counterfactual"] or 0, 2)} for r in daily],
+        "recent": [dict(r) for r in recent],
+    }
+
+
+@app.get("/api/copy-report")
+async def copy_report(whale: str | None = "swisstony", hours: int = Query(24, le=24 * 30)) -> dict:
+    """Copy-trade feasibility: measured residual books at our real reaction
+    time, for every fresh whale BUY. Answers: does the edge survive copying?"""
+    pool = await get_pool()
+    where_user = "AND lower(username) = lower($2)" if whale else ""
+    args: list = [hours] + ([whale] if whale else [])
+    agg = await pool.fetchrow(
+        f"""
+        SELECT count(*)::int AS probes,
+               count(*) FILTER (WHERE book_ok)::int AS with_book,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s) AS reaction_p50,
+               percentile_cont(0.95) WITHIN GROUP (ORDER BY reaction_s) AS reaction_p95,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY slippage_cents)
+                   FILTER (WHERE book_ok) AS slippage_p50,
+               percentile_cont(0.9) WITHIN GROUP (ORDER BY slippage_cents)
+                   FILTER (WHERE book_ok) AS slippage_p90,
+               count(*) FILTER (WHERE fillable_1k)::int AS fillable_1k,
+               count(*) FILTER (WHERE fillable_5k)::int AS fillable_5k,
+               avg(residual_roi_1k) FILTER (WHERE fillable_1k) AS avg_roi_1k,
+               avg(residual_roi_5k) FILTER (WHERE fillable_5k) AS avg_roi_5k,
+               count(*) FILTER (WHERE residual_roi_1k > 0)::int AS positive_1k,
+               count(*) FILTER (WHERE residual_roi_5k > 0)::int AS positive_5k
+        FROM copy_probes
+        WHERE probe_at > now() - make_interval(hours => $1) {where_user}
+        """,
+        *args,
+    )
+    # Per-whale vetting census (owner directive 2026-08-06): the same
+    # residual-edge measurement for EVERY probed whale, so copy-source
+    # candidates are graded on the identical yardstick as the incumbents.
+    by_whale = await pool.fetch(
+        """
+        SELECT lower(COALESCE(username, '?')) AS whale,
+               count(*)::int AS probes,
+               percentile_cont(0.5) WITHIN GROUP (ORDER BY reaction_s)
+                   AS reaction_p50,
+               avg(residual_roi_1k) FILTER (WHERE fillable_1k) AS avg_roi_1k,
+               count(*) FILTER (WHERE residual_roi_1k > 0)::int AS positive_1k,
+               count(*) FILTER (WHERE fillable_1k)::int AS fillable_1k,
+               avg(his_notional) AS avg_his_notional
+        FROM copy_probes
+        WHERE probe_at > now() - make_interval(hours => $1)
+        GROUP BY 1 ORDER BY probes DESC
+        """,
+        hours,
+    )
+    recent = await pool.fetch(
+        f"""
+        SELECT cp.probe_at, cp.reaction_s::float8 AS reaction_s,
+               cp.his_price::float8 AS his_price, cp.best_ask::float8 AS best_ask,
+               cp.slippage_cents::float8 AS slippage_cents,
+               cp.his_notional::float8 AS his_notional,
+               cp.fillable_5k, cp.residual_roi_1k::float8 AS residual_roi_1k,
+               cp.residual_roi_5k::float8 AS residual_roi_5k, cp.book_ok, cp.error,
+               COALESCE(m.event_title, m.title, t.market_title) AS market_title,
+               COALESCE(mt.outcome, t.outcome) AS outcome
+        FROM copy_probes cp
+        LEFT JOIN trades t ON t.id = cp.trade_id
+        LEFT JOIN market_tokens mt ON mt.token_id = cp.asset
+        LEFT JOIN markets m ON m.condition_id = COALESCE(mt.condition_id, t.condition_id)
+        WHERE cp.probe_at > now() - make_interval(hours => $1) {where_user}
+        ORDER BY cp.probe_at DESC LIMIT 15
+        """,
+        *args,
+    )
+    d = dict(agg)
+    for k in ("reaction_p50", "reaction_p95", "slippage_p50", "slippage_p90",
+              "avg_roi_1k", "avg_roi_5k"):
+        if d.get(k) is not None:
+            d[k] = round(float(d[k]), 4)
+    d["assumed_edge"] = settings().copy_probe_assumed_edge
+    bw = []
+    for r in by_whale:
+        row = dict(r)
+        for k in ("reaction_p50", "avg_roi_1k", "avg_his_notional"):
+            if row.get(k) is not None:
+                row[k] = round(float(row[k]), 4)
+        bw.append(row)
+    return {"whale": whale, "hours": hours, "summary": d,
+            "by_whale": bw,
+            "recent": [dict(r) for r in recent]}
+
+
+@app.get("/api/signal/{condition_id}")
+async def api_signal(condition_id: str) -> dict:
+    """Live whale positioning for one market — the edge engine's alignment
+    feature: are the tracked top traders on this outcome right now?"""
+    pool = await get_pool()
+    rows = await pool.fetch(
+        """
+        SELECT w.username, w.id AS whale_id, ap.outcome, ap.size::float8 AS size,
+               ap.avg_price::float8 AS avg_price,
+               COALESCE(ap.current_value, ap.size * ap.avg_price)::float8 AS value
+        FROM api_positions ap JOIN whales w ON w.id = ap.whale_id
+        WHERE ap.condition_id = $1 AND ap.size > 0 AND w.active
+        ORDER BY value DESC
+        """,
+        condition_id,
+    )
+    recent = await pool.fetch(
+        """
+        SELECT w.username, t.side, t.outcome, t.price::float8 AS price,
+               t.notional::float8 AS notional, t.ts
+        FROM trades t JOIN whales w ON w.id = t.whale_id
+        WHERE t.condition_id = $1 AND t.ts > now() - interval '48 hours'
+        ORDER BY t.ts DESC LIMIT 20
+        """,
+        condition_id,
+    )
+    return {
+        "condition_id": condition_id,
+        "positions": [dict(r) for r in rows],
+        "recent_trades": [dict(r) for r in recent],
+    }
+
+
+@app.get("/api/admin/calibration", dependencies=[Depends(require_admin)])
+async def admin_calibration(window_days: int = Query(90, le=730)) -> dict:
+    """Rolling recalibration of the edge-engine's measured tables from the
+    live whale ledger — band/league/size edges, Phase-1 methodology."""
+    from ..analytics.calibration import full_report
+
+    return await full_report(window_days)
+
+
+@app.get("/api/admin/diag", dependencies=[Depends(require_admin)])
+async def admin_diag() -> dict:
+    """Live probes of every upstream API, with response snippets — run this
+    when data looks wrong; it shows exactly what production sees."""
+    import time as _time
+
+    import httpx
+
+    from ..gamma import _OPEN_MARKET_PARAM_VARIANTS
+
+    cfg = settings()
+    pool = await get_pool()
+    out: dict = {}
+
+    async def probe(client: httpx.AsyncClient, key: str, url: str, params: dict | None = None):
+        try:
+            resp = await client.get(url, params=params)
+            body = resp.text[:220]
+            out[key] = {"status": resp.status_code, "body": body}
+        except Exception as exc:  # noqa: BLE001
+            out[key] = {"status": "error", "body": str(exc)[:220]}
+
+    sample_cid = await pool.fetchval(
+        "SELECT condition_id FROM trades WHERE condition_id IS NOT NULL LIMIT 1"
+    )
+    sample_addr = await pool.fetchval("SELECT address FROM whales WHERE active LIMIT 1")
+
+    async with httpx.AsyncClient(timeout=10) as http:
+        for i, variant in enumerate(_OPEN_MARKET_PARAM_VARIANTS):
+            await probe(http, f"gamma_open_v{i}", f"{cfg.gamma_api_base}/markets",
+                        {**variant, "limit": 1, "offset": 0})
+        if sample_cid:
+            await probe(http, "gamma_condition_ids", f"{cfg.gamma_api_base}/markets",
+                        {"condition_ids": sample_cid})
+            await probe(http, "clob_market", f"{cfg.clob_api_base}/markets/{sample_cid}")
+        if sample_addr:
+            now = int(_time.time())
+            await probe(http, "dataapi_offset_10k", f"{cfg.data_api_base}/trades",
+                        {"user": sample_addr, "limit": 1, "offset": 10_000})
+            for pname in ("before", "endTs", "to", "max_ts"):
+                await probe(http, f"dataapi_timeparam_{pname}", f"{cfg.data_api_base}/trades",
+                            {"user": sample_addr, "limit": 1, pname: now - 86400 * 30})
+
+    # Polymarket US venue (regulated exchange behind the mobile app): gateway
+    # reachability, credential validity, and slug-mapping spot check against a
+    # recent open market from our own metadata.
+    import asyncio as _asyncio
+
+    from .. import pmus
+
+    try:
+        out["pmus"] = await _asyncio.wait_for(_asyncio.to_thread(pmus.probe), timeout=15)
+        sample = await pool.fetchrow(
+            """
+            SELECT m.slug, m.event_slug, m.title, m.event_title, mt.outcome
+            FROM markets m JOIN market_tokens mt ON mt.condition_id = m.condition_id
+            WHERE NOT m.closed AND m.slug IS NOT NULL AND m.sport <> 'unclassified'
+            ORDER BY m.updated_at DESC LIMIT 1
+            """
+        )
+        if sample and out["pmus"].get("gateway_ok"):
+            mapping = await _asyncio.wait_for(
+                _asyncio.to_thread(
+                    pmus.resolve_market, sample["slug"], sample["event_slug"],
+                    sample["title"], sample["event_title"], sample["outcome"],
+                ),
+                timeout=15,
+            )
+            out["pmus"]["mapping_check"] = {
+                "global": {"slug": sample["slug"], "outcome": sample["outcome"]},
+                "mapped": mapping,
+            }
+    except Exception as exc:  # noqa: BLE001
+        out["pmus"] = {"status": "error", "body": str(exc)[:220]}
+    return out
+
+
+@app.get("/api/whales/{whale_id}/settled-report.pdf")
+async def api_whale_settled_report(whale_id: int):
+    from fastapi.responses import Response
+
+    from .reports import build_settled_report
+
+    try:
+        pdf, filename = await build_settled_report(whale_id)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="unknown whale") from None
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/whales/{whale_id}/report.pdf")
+async def api_whale_report(
+    whale_id: int,
+    period: str = Query("monthly", pattern="^(weekly|monthly)$"),
+    end: str | None = None,
+):
+    from datetime import date as _date
+
+    from .reports import build_report
+
+    try:
+        end_date = _date.fromisoformat(end) if end else None
+    except ValueError:
+        raise HTTPException(status_code=400, detail="end must be YYYY-MM-DD") from None
+    try:
+        pdf, filename = await build_report(whale_id, period, end_date)
+    except LookupError:
+        raise HTTPException(status_code=404, detail="unknown whale") from None
+    from fastapi.responses import Response
+
+    return Response(
+        content=pdf,
+        media_type="application/pdf",
+        headers={"Content-Disposition": f'attachment; filename="{filename}"'},
+    )
+
+
+@app.get("/api/matrix")
+async def api_matrix(window: str = Query("all", pattern="^(7d|30d|all)$")) -> dict:
+    return await queries.matrix(window)
+
+
+@app.get("/api/events")
+async def api_events(limit: int = Query(50, ge=1, le=200)) -> list[dict]:
+    return await queries.events_view(limit)
+
+
+# ── Push subscription + prefs ───────────────────────────────────────
+
+
+class PushSubscribeBody(BaseModel):
+    user_key: str
+    endpoint: str
+    p256dh: str
+    auth: str
+
+
+@app.post("/api/push/subscribe")
+async def push_subscribe(body: PushSubscribeBody) -> dict:
+    pool = await get_pool()
+    await pool.execute(
+        """
+        INSERT INTO push_subscriptions (user_key, endpoint, p256dh, auth)
+        VALUES ($1,$2,$3,$4)
+        ON CONFLICT (endpoint) DO UPDATE SET user_key=$1, p256dh=$3, auth=$4
+        """,
+        body.user_key, body.endpoint, body.p256dh, body.auth,
+    )
+    return {"ok": True}
+
+
+class PushUnsubscribeBody(BaseModel):
+    endpoint: str
+
+
+@app.post("/api/push/unsubscribe")
+async def push_unsubscribe(body: PushUnsubscribeBody) -> dict:
+    pool = await get_pool()
+    await pool.execute("DELETE FROM push_subscriptions WHERE endpoint=$1", body.endpoint)
+    return {"ok": True}
+
+
+class PrefsBody(BaseModel):
+    min_notional: float = 0
+    muted_whales: list[int] = []
+    sports: list[str] = []
+
+
+@app.get("/api/prefs/{user_key}")
+async def get_prefs(user_key: str) -> dict:
+    pool = await get_pool()
+    row = await pool.fetchrow("SELECT * FROM user_prefs WHERE user_key=$1", user_key)
+    if row is None:
+        return {"user_key": user_key, "min_notional": 0, "muted_whales": [], "sports": []}
+    d = dict(row)
+    for k in ("muted_whales", "sports"):
+        if isinstance(d[k], str):
+            d[k] = json.loads(d[k])
+    d["min_notional"] = float(d["min_notional"])
+    return d
+
+
+@app.put("/api/prefs/{user_key}")
+async def put_prefs(user_key: str, body: PrefsBody) -> dict:
+    pool = await get_pool()
+    await pool.execute(
+        """
+        INSERT INTO user_prefs (user_key, min_notional, muted_whales, sports, updated_at)
+        VALUES ($1,$2,$3::jsonb,$4::jsonb,now())
+        ON CONFLICT (user_key) DO UPDATE SET min_notional=$2, muted_whales=$3::jsonb,
+                                             sports=$4::jsonb, updated_at=now()
+        """,
+        user_key, body.min_notional, json.dumps(body.muted_whales), json.dumps(body.sports),
+    )
+    return {"ok": True}
+
+
+# ── Admin ───────────────────────────────────────────────────────────
+
+
+@app.get("/api/admin/health", dependencies=[Depends(require_admin)])
+async def admin_health() -> dict:
+    pool = await get_pool()
+    beats = await pool.fetch("SELECT * FROM service_heartbeats ORDER BY service")
+    recon = await pool.fetch(
+        "SELECT * FROM reconciliation_runs ORDER BY id DESC LIMIT 5"
+    )
+    outbox = await pool.fetchrow(
+        """
+        SELECT count(*) FILTER (WHERE NOT sent) AS pending,
+               count(*) FILTER (WHERE sent) AS sent,
+               count(*) FILTER (WHERE collapsed) AS collapsed
+        FROM notification_outbox
+        """
+    )
+    subs = await pool.fetchval("SELECT count(*) FROM push_subscriptions")
+    return {
+        "heartbeats": [dict(b) for b in beats],
+        "reconciliation": [dict(r) for r in recon],
+        "outbox": dict(outbox) if outbox else {},
+        "push_subscriptions": subs,
+    }
+
+
+@app.get("/api/admin/latency", dependencies=[Depends(require_admin)])
+async def admin_latency(hours: int = Query(24, le=24 * 30)) -> dict:
+    return await queries.latency_stats(hours)
+
+
+@app.get("/api/admin/roster", dependencies=[Depends(require_admin)])
+async def admin_roster() -> dict:
+    pool = await get_pool()
+    events = await pool.fetch("SELECT * FROM roster_events ORDER BY id DESC LIMIT 20")
+    return {
+        "whales": await queries.whales(include_inactive=True),
+        "events": [dict(e) for e in events],
+    }
+
+
+class RosterActionBody(BaseModel):
+    whale_id: int | None = None
+    address: str | None = None
+    username: str | None = None
+
+
+async def _whale_by_body(body: RosterActionBody) -> dict | None:
+    pool = await get_pool()
+    if body.whale_id is not None:
+        row = await pool.fetchrow("SELECT * FROM whales WHERE id=$1", body.whale_id)
+    elif body.address:
+        row = await pool.fetchrow("SELECT * FROM whales WHERE address=$1", body.address.lower())
+    elif body.username:
+        # 2026-08-24: rn1 and swisstony silently dropped off the active
+        # roster (auto-deactivation) and the only lookups here were
+        # id/address, neither of which the probe knows — reactivation
+        # by username closes that gap.
+        row = await pool.fetchrow(
+            "SELECT * FROM whales WHERE lower(username)=lower($1) "
+            "ORDER BY active DESC, id LIMIT 1", body.username)
+    else:
+        return None
+    return dict(row) if row else None
+
+
+@app.post("/api/admin/roster/{action}", dependencies=[Depends(require_admin)])
+async def admin_roster_action(action: str, body: RosterActionBody) -> dict:
+    pool = await get_pool()
+    if action == "refresh":
+        return await roster_svc.refresh_roster()
+    if action == "pin" and body.address and not await _whale_by_body(body):
+        # Pin a wallet not yet tracked: insert it directly.
+        await pool.execute(
+            "INSERT INTO whales (address, username, pinned, active) VALUES ($1,$2,TRUE,TRUE) "
+            "ON CONFLICT (address) DO UPDATE SET pinned=TRUE, active=TRUE, removed_at=NULL",
+            body.address.lower(), body.username,
+        )
+        await pool.execute(
+            "INSERT INTO roster_events (kind, detail) VALUES ('pinned', $1::jsonb)",
+            json.dumps({"address": body.address.lower()}),
+        )
+        return {"ok": True}
+    whale = await _whale_by_body(body)
+    if whale is None:
+        raise HTTPException(status_code=404, detail="unknown whale")
+    updates = {
+        "pin": "UPDATE whales SET pinned=TRUE, active=TRUE, removed_at=NULL WHERE id=$1",
+        "unpin": "UPDATE whales SET pinned=FALSE WHERE id=$1",
+        "ban": "UPDATE whales SET banned=TRUE, active=FALSE, removed_at=now() WHERE id=$1",
+        "unban": "UPDATE whales SET banned=FALSE WHERE id=$1",
+        "deactivate": "UPDATE whales SET active=FALSE, removed_at=now() WHERE id=$1",
+        "activate": "UPDATE whales SET active=TRUE, removed_at=NULL WHERE id=$1",
+    }
+    sql = updates.get(action)
+    if sql is None:
+        raise HTTPException(status_code=400, detail=f"unknown action {action}")
+    await pool.execute(sql, whale["id"])
+    await pool.execute(
+        "INSERT INTO roster_events (kind, whale_id) VALUES ($1, $2)", action, whale["id"]
+    )
+    return {"ok": True}

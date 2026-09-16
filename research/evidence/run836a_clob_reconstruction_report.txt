@@ -1,0 +1,206 @@
+RUN 83.6A -- OFFLINE CLOB PROTOCOL RECONSTRUCTION
+==================================================================
+evidence: run836b_capture_20260913T000344Z
+frozen instrument sha256 in manifest: 7931b54aef42f31b5f4118bf410340eddd71549125153ccbd9b33df29794760b
+manifest matches frozen: True
+
+2. RAW MESSAGE TAXONOMY (parsed independently of the manifest)
+   total rows            : 5951
+   transport PONG rows   : 21
+   unparsed rows         : 0
+   market-message rows   : 5930
+   event_type counts     : {'book': 63, 'price_change': 5838, 'last_trade_price': 38}
+     session 54a22659 : {'book': 15, 'price_change': 2772, 'last_trade_price': 6}
+     session 090fbfdf : {'book': 7, 'price_change': 776, 'last_trade_price': 1}
+     session ceb92c1f : {'book': 41, 'price_change': 2290, 'last_trade_price': 31}
+   observed top-level key sets:
+     book               n=12    ['asks', 'asset_id', 'bids', 'event_type', 'hash', 'last_trade_price', 'market', 'tick_size', 'timestamp']
+     book               n=51    ['asks', 'asset_id', 'bids', 'event_type', 'hash', 'market', 'timestamp']
+     price_change       n=5838  ['event_type', 'market', 'price_changes', 'timestamp']
+     last_trade_price   n=38    ['asset_id', 'event_type', 'fee_rate_bps', 'market', 'price', 'side', 'size', 'timestamp', 'transaction_hash']
+   tokens seen in price_change (incl. non-subscribed complements): 8
+     2692494340909958788472... {'book': 46, 'price_change': 5668, 'last_trade_price': 30}   [SUBSCRIBED]
+     1050137914064888888389... {'price_change': 5668}
+     8469757293857273264287... {'book': 3, 'price_change': 89}   [SUBSCRIBED]
+     5065962693662806477796... {'price_change': 89}
+     8667869760732503541530... {'book': 8, 'price_change': 56, 'last_trade_price': 5}   [SUBSCRIBED]
+     4708711519981816240977... {'price_change': 56}
+     2959331625086017348568... {'book': 6, 'price_change': 25, 'last_trade_price': 3}   [SUBSCRIBED]
+     4083338163708243963330... {'price_change': 25}
+
+3. BOOTSTRAP BEHAVIOUR (3 sessions x 4 subscribed tokens)
+   s0 84697572938572 first=book          books=1 bid_lv=10 ask_lv=6 hash=True ts=1789257792611
+   s0 86678697607325 first=book          books=4 bid_lv=61 ask_lv=0 hash=True ts=1789257808145
+   s0 29593316250860 first=book          books=2 bid_lv=53 ask_lv=0 hash=True ts=1789257816014
+   s0 26924943409099 first=book          books=8 bid_lv=18 ask_lv=38 hash=True ts=1789257824869
+   s1 84697572938572 first=book          books=1 bid_lv=10 ask_lv=6 hash=True ts=1789257852823
+   s1 86678697607325 first=book          books=2 bid_lv=60 ask_lv=0 hash=True ts=1789257896120
+   s1 29593316250860 first=book          books=1 bid_lv=51 ask_lv=0 hash=True ts=1789257898532
+   s1 26924943409099 first=book          books=3 bid_lv=16 ask_lv=37 hash=True ts=1789257904975
+   s2 84697572938572 first=book          books=1 bid_lv=5 ask_lv=6 hash=True ts=1789257952646
+   s2 86678697607325 first=book          books=2 bid_lv=59 ask_lv=0 hash=True ts=1789257994422
+   s2 29593316250860 first=book          books=3 bid_lv=51 ask_lv=0 hash=True ts=1789257994583
+   s2 26924943409099 first=book          books=35 bid_lv=18 ask_lv=33 hash=True ts=1789257995587
+   every (session,token) opened with a book : True
+   every (session,token) received >=1 book  : True
+   exactly one book per (session,token)     : False
+
+4. `book` STRUCTURE (websocket frames and REST bodies, described separately)
+   WS_BOOK  snapshots=63
+     level key sets        : {('price', 'size'): 3278}
+     price JSON types      : {'str': 3278}
+     size  JSON types      : {'str': 3278}
+     bids level ordering   : {'strictly ascending': 63}
+     asks level ordering   : {'n/a (<2 levels)': 14, 'strictly descending': 49}
+     snapshots w/ duplicate price on one side : 0
+     zero-size levels transmitted             : 0
+     snapshots with an empty side             : {'asks': 14}
+   REST  snapshots=64
+     level key sets        : {('price', 'size'): 2861}
+     price JSON types      : {'str': 2861}
+     size  JSON types      : {'str': 2861}
+     bids level ordering   : {'strictly ascending': 64}
+     asks level ordering   : {'strictly descending': 32, 'n/a (<2 levels)': 32}
+     snapshots w/ duplicate price on one side : 0
+     zero-size levels transmitted             : 0
+     snapshots with an empty side             : {'asks': 32}
+
+5. price_change STRUCTURE
+   frames                       : 5838
+   changes per frame            : {2: 5838}
+   distinct tokens per frame    : {2: 5838}
+   per-change key sets          : {('asset_id', 'best_ask', 'best_bid', 'hash', 'price', 'side', 'size'): 11676}
+   side values                  : {'BUY': 5838, 'SELL': 5838}
+   negative sizes               : 0
+   zero sizes                   : 970
+
+   side-mapping evidence: changes carrying best_bid/best_ask = 11676
+     BUY  price == best_bid : 867
+     SELL price == best_ask : 867
+
+6. CENTRAL TEST -- ABSOLUTE vs DELTA
+   ABSOLUTE opportunities=51 full=49 bid=50 ask=49 best_bid=51 best_ask=51  rate=96.1%
+            first divergence: (2, '26924943409099', 2256, 39)
+   DELTA    opportunities=51 full=0 bid=16 ask=8 best_bid=47 best_ask=49  rate=0.0%
+            first divergence: (0, '86678697607325', 2719, 10)
+
+7. ZERO-SIZE BEHAVIOUR
+   zero-size updates observed in the cohort: 970
+   zero-size levels still outstanding at a later authoritative book: 165
+     absent_in_authoritative_book       165
+
+8. MULTI-TOKEN FRAMES
+   frames carrying >1 distinct token : 5838 of 5838
+   token-count distribution          : {2: 5838}
+   all changes share the frame's single `market` field: 5838/5838
+   example: market=0xd9264d1126274dae tokens=['1050137914', '2692494340'] sides=['BUY', 'SELL']
+
+9. CHECKPOINT TABLE (every checkpoint counted; failures listed in full)
+   ABSOLUTE checkpoints=51 passed=49 failed=2
+     FAIL s2 26924943409099 book_frame=2256 updates=39 bid_diff=1 ask_diff=2 abs_size_error=5500.00 best_bid_equal=True best_ask_equal=True
+     FAIL s2 26924943409099 book_frame=2307 updates=9 bid_diff=0 ask_diff=1 abs_size_error=3000.00 best_bid_equal=True best_ask_equal=True
+   DELTA    checkpoints=51 passed=0 failed=51
+     (every DELTA checkpoint failed; see the CSV for all 51 rows)
+   every checkpoint was scored BEFORE the new book was adopted, and the
+   adoption was recorded (rebootstrap_after_check=True on every row).
+   full checkpoint table: run836a_reconstruction_checkpoints.csv
+
+10. REST /book RECONCILIATION
+   witnesses: 64
+     0-25ms/MATCH                 2
+     0-25ms/TOP_OF_BOOK_MATCH     2
+     100-250ms/MATCH              3
+     100-250ms/TOP_OF_BOOK_MATCH  1
+     25-100ms/MATCH               1
+     25-100ms/TOP_OF_BOOK_MATCH   1
+     250-1000ms/MATCH             4
+     >1000ms/MATCH                37
+     >1000ms/TOP_OF_BOOK_MATCH    3
+     no_prior                     1
+     no_session                   9
+
+11. LEGACY SHA-1 HASH TEST
+   REST/V1_full_transmitted_order/MATCH           64
+   REST/V2_full_reversed_levels/MISMATCH          64
+   REST/V3_omit_absent_keys/MISMATCH              64
+   REST/V4_absent_as_empty_false/MATCH            64
+   WS_BOOK/V3_omit_absent_keys/MISMATCH           63
+   WS_BOOK/V4_absent_as_empty_false/MISMATCH      63
+
+12. RECONNECT AND REBOOTSTRAP
+   Every session is a NEW websocket connection opened by the harness on
+   its own schedule, not a venue-initiated drop. No reconnect was forced.
+   s0 opened=True  subscribe->first book = 90.0 ms  heartbeats_sent=7 close_reason=session_duration_elapsed frames=2797
+   s1 opened=True  subscribe->first book = 97.7 ms  heartbeats_sent=7 close_reason=session_duration_elapsed frames=788
+   s2 opened=True  subscribe->first book = 87.8 ms  heartbeats_sent=7 close_reason=session_duration_elapsed frames=2366
+   a fresh book arrived for all 4 subscribed tokens in all 3 sessions: True
+   REBOOTSTRAP_ON_NEW_SESSION = OBSERVED (3/3 sessions, 12/12 session-token pairs)
+   This is re-subscription behaviour on a new connection. It is NOT
+   evidence that a mid-session gap would be repaired, and it is not
+   evidence of continuity across the boundary.
+
+13. DUPLICATES / ORDERING
+   byte-identical non-PONG frames repeated : 0 distinct payloads
+   venue timestamp decreases per session   : {'54a22659-e1cc-4a2c-9f70-94442522c79c': 1, '090fbfdf-a61a-43bc-a83a-2463ccd61785': 0, 'ceb92c1f-e263-4a8a-b961-291dfcf82844': 1}
+   venue timestamp repeats per session     : {'54a22659-e1cc-4a2c-9f70-94442522c79c': 529, '090fbfdf-a61a-43bc-a83a-2463ccd61785': 170, 'ceb92c1f-e263-4a8a-b961-291dfcf82844': 426}
+
+14. TIMESTAMP INVENTORY
+   websocket payload `timestamp` : venue clock, ms since epoch, string
+   envelope local_receive_wall_utc  : capture host wall clock, ISO, us
+   envelope local_receive_monotonic_ns : capture host MONOTONIC, ns
+   rest local_request/response_*    : same two local clocks
+   session open/close/connect_*     : same two local clocks
+   Only local monotonic values are compared with each other here.
+   No venue timestamp is subtracted from any local clock.
+   CROSS_PROCESS_MONOTONIC_CLOCK_DOMAIN = UNRESOLVED (unchanged)
+
+15. CONTINUITY BOUNDARY -- what the two ABSOLUTE failures actually are
+   updated_correct        493
+   updated_WRONG          2
+   not_updated_correct    2243
+   not_updated_WRONG      2
+   price levels wrong at an authoritative book, in detail:
+     s2 26924943409099 book_frame=2256 BUY  price=0.01 recon=15056 truth=12056 updated_in_window=True
+     s2 26924943409099 book_frame=2256 SELL price=0.98 recon=160871.69 truth=159371.69 updated_in_window=False
+     s2 26924943409099 book_frame=2256 SELL price=0.97 recon=14320 truth=13320 updated_in_window=False
+     s2 26924943409099 book_frame=2307 SELL price=0.99 recon=105056 truth=102056 updated_in_window=True
+
+   Two of the wrong levels DID receive an observed update and still
+   disagreed; two received none. Neither group sits on a session or
+   rebootstrap boundary -- both failures are mid-session. So the residue
+   is not explained away by a known boundary.
+   A dropped or non-exhaustive update would produce exactly this, and so
+   would a size semantic that is absolute only most of the time. The
+   evidence here does not separate those two, and no frame is missing
+   from the capture that could be pointed to as the loss.
+   STREAM_CONTINUITY_VERIFIED = NOT_IDENTIFIED
+   (NO is not used: loss is not positively demonstrated.)
+
+VERDICTS
+   PRICE_CHANGE_SIZE_SEMANTICS      = ABSOLUTE
+     ABSOLUTE 49/51 whole books, DELTA 0/51; ABSOLUTE 51/51 best_bid and
+     51/51 best_ask, DELTA 47 and 49. The gap is not marginal.
+   ZERO_SIZE_REMOVAL_SEMANTICS      = SUPPORTED (165/165 removed, 0 exceptions)
+   MULTI_TOKEN_UPDATE_SEMANTICS     = SUPPORTED (5838/5838 frames, token + complement
+     under one `market`)
+   BOOK_BOOTSTRAP_SEMANTICS         = SUPPORTED (12/12 session-token pairs opened
+     with a book)
+   ONE_BOOK_PER_TOKEN_PER_SESSION   = CONTRADICTED (books per pair run 1..35)
+   LEGACY_HASH_COMPATIBILITY        = SUPPORTED on the REST /book surface only
+     (64/64 exact, V1_full_transmitted_order). WS `book` frames omit two of the
+     ten inputs and are untestable by construction, not contradicting.
+   CURRENT_BOOK_HASH_ALGORITHM_PUBLISHED = NO (unchanged -- an empirical match
+     is not a publication)
+   RECONNECT_REBOOTSTRAP_VERIFIED   = YES (3/3 new connections re-bootstrapped)
+   STREAM_CONTINUITY_VERIFIED       = NOT_IDENTIFIED
+   CROSS_PROCESS_MONOTONIC_CLOCK_DOMAIN = UNRESOLVED (unchanged)
+
+   CLOB_PRICE_CHANGE_SEMANTICS      = RESOLVED_ABSOLUTE_WITH_NAMED_RESIDUE
+     Resolved because the two models are not close: one reproduces 96% of whole
+     books and 100% of both touches of top of book, the other reproduces none,
+     and the 970 zero-size updates corroborate independently (165/165 levels gone).
+     The residue is named, not explained away: 4 price levels across 2
+     checkpoints, both mid-session on one token, 2 of the 4 touched by an
+     observed update. That residue is why STREAM_CONTINUITY_VERIFIED stays
+     NOT_IDENTIFIED, and why the size rule is not claimed to be exceptionless.
+

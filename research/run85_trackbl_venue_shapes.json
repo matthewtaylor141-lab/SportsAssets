@@ -1,0 +1,392 @@
+{
+ "market_row": {
+  "active": true,
+  "archived": false,
+  "category": "sports",
+  "closed": true,
+  "comboEnabled": true,
+  "createdAt": "2026-03-07T02:30:00Z",
+  "description": "In the upcoming american football game, scheduled for November 2 at 1:00PM ET:\nIf Carolina wins, the market will resolve to \u201cCarolina\u201d.\nIf Green Bay wins, the market will resolve to \u201cGreen Bay\u201d.\nIf the game is postponed, this market will remain open until the game has been completed.\nIf the game is canceled entirely, with no make-up game, this market will resolve 50-50.",
+  "endDate": "2025-11-03T13:00:00Z",
+  "ep3Status": "EXPIRED",
+  "ep3SyncedAt": "2026-09-11T07:43:00Z",
+  "feeCoefficient": 0.06,
+  "gameStartTime": "2025-11-02T18:00:00Z",
+  "hidden": false,
+  "id": "2",
+  "manualActivation": false,
+  "marketSides": [
+   {
+    "createdAt": "2025-10-30T00:23:45Z",
+    "description": "Panthers",
+    "id": "3",
+    "identifier": "aec-nfl-car-gb-2025-11-02",
+    "long": true,
+    "marketId": 2,
+    "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+    "price": "1",
+    "team": {
+     "abbreviation": "car",
+     "alias": "Panthers",
+     "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_CarolinaPanthers_FacingLeft_Icon%40160x160.png",
+     "color": {
+      "dark": "#0085CA",
+      "light": "#0085CA"
+     },
+     "colorPrimary": "#0085CA",
+     "conference": "",
+     "displayAbbreviation": "CAR",
+     "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_CarolinaPanthers_FacingRight_Icon%40160x160.png",
+     "id": 52,
+     "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO",
+     "league": "nfl",
+     "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/CAR.png",
+     "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_CarolinaPanthers_L@320x320.png",
+     "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_CarolinaPanthers_L@320x320.png",
+     "name": "Carolina Panthers",
+     "ordering": "away",
+     "providerId": 5,
+     "providerIds": [
+      {
+       "provider": "PROVIDER_SPORTSDATAIO",
+       "providerId": "5"
+      },
+      {
+       "provider": "PROVIDER_SPORTRADAR",
+       "providerId": "f14bf5cc-9a82-4a38-bc15-d39f75ed5314"
+      }
+     ],
+     "record": "0-1",
+     "safeName": "CAR Panthers",
+     "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_CarolinaPanthers_R@320x320.png",
+     "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_CarolinaPanthers_R@320x320.png"
+    },
+    "teamId": 52,
+    "tradable": true,
+    "updatedAt": "2025-10-30T00:23:45Z"
+   },
+   {
+    "createdAt": "2025-10-30T00:23:45Z",
+    "description": "Packers",
+    "id": "4",
+    "identifier": "aec-nfl-car-gb-2025-11-02",
+    "long": false,
+    "marketId": 2,
+    "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+    "price": "0",
+    "team": {
+     "abbreviation": "gb",
+     "alias": "Packers",
+     "awayIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_GreenBayPackers_FacingLeft_Icon%40160x160.png",
+     "color": {
+      "dark": "#4C645D",
+      "light": "#203731"
+     },
+     "colorPrimary": "#203731",
+     "conference": "",
+     "displayAbbreviation": "GB",
+     "homeIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/Polymarket_GreenBayPackers_FacingRight_Icon%40160x160.png",
+     "id": 59,
+     "imageDisplayType": "IMAGE_DISPLAY_TYPE_LOGO",
+     "league": "nfl",
+     "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/NFL+Team+Logos/GB.png",
+     "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_GreenBayPackers_L@320x320.png",
+     "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_GreenBayPackers_L@320x320.png",
+     "name": "Green Bay Packers",
+     "ordering": "home",
+     "providerId": 12,
+     "providerIds": [
+      {
+       "provider": "PROVIDER_SPORTSDATAIO",
+       "providerId": "12"
+      },
+      {
+       "provider": "PROVIDER_SPORTRADAR",
+       "providerId": "a20471b4-a8d9-40c7-95ad-90cc30e46932"
+      }
+     ],
+     "record": "0-1",
+     "safeName": "GB Packers",
+     "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_GreenBayPackers_R@320x320.png",
+     "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/NFL/Polymarket_NFL_GreenBayPackers_R@320x320.png"
+    },
+    "teamId": 59,
+    "tradable": true,
+    "updatedAt": "2025-10-30T00:23:45Z"
+   }
+  ],
+  "marketType": "moneyline",
+  "minimumTradeQty": 1,
+  "orderPriceMinTickSize": 0.001,
+  "outcomePrices": "[\"1\",\"0\"]",
+  "outcomes": "[\"Panthers\",\"Packers\"]",
+  "question": "Carolina vs. Green Bay",
+  "slug": "aec-nfl-car-gb-2025-11-02",
+  "sportsMarketType": "moneyline",
+  "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+  "startDate": "2025-10-29T22:00:01Z",
+  "status": "MARKET_STATUS_RESOLVED",
+  "tags": [],
+  "title": "CAR Panthers vs GB Packers",
+  "titleShort": "CAR vs GB",
+  "updatedAt": "2026-09-11T07:43:00Z"
+ },
+ "open_quoted_event_primaryTag": {
+  "hub": null,
+  "id": "418",
+  "label": "Boxing",
+  "league": {
+   "activeSeriesId": 75,
+   "automaticResolution": false,
+   "createdAt": "2026-06-11T23:19:53Z",
+   "id": 55,
+   "image": "https://static.polymarket.us/images/new-category-icons/Icon-Boxing.png",
+   "isOperational": true,
+   "name": "Boxing",
+   "ordering": "home",
+   "slug": "boxing",
+   "sportId": 12,
+   "tagId": 418
+  },
+  "slug": "boxing",
+  "sport": {
+   "createdAt": "2026-06-11T23:19:53Z",
+   "id": 12,
+   "image": "https://static.polymarket.us/images/new-category-icons/Icon-Boxing.png",
+   "name": "Boxing",
+   "slug": "boxing",
+   "tagId": 418
+  },
+  "subtags": [],
+  "updatedAt": "2026-09-13T15:58:29Z"
+ },
+ "open_quoted_market_row": {
+  "active": true,
+  "archived": false,
+  "bestAskQuote": {
+   "currency": "USD",
+   "value": "0.7300"
+  },
+  "bestBidQuote": {
+   "currency": "USD",
+   "value": "0.7200"
+  },
+  "category": "sports",
+  "closed": false,
+  "comboEnabled": true,
+  "createdAt": "2026-07-17T05:40:54Z",
+  "description": "This market will settle to the winner of the Canelo Alvarez vs. Christian Mbilli boxing match originally scheduled for Sep 12, 2026. If this match is postponed or delayed, the market will remain open and settle following the conclusion of the rescheduled match. If the match is cancelled, the market will settle to last fair market price. Outcome sourced from the relevant governing body.",
+  "endDate": "2026-11-14T23:00:00Z",
+  "ep3Status": "OPEN",
+  "ep3SyncedAt": "2026-09-13T02:02:43Z",
+  "feeCoefficient": 0.06,
+  "gameStartTime": "2026-11-01T03:00:00Z",
+  "hidden": false,
+  "id": "237388",
+  "manualActivation": false,
+  "marketSides": [
+   {
+    "createdAt": "2026-07-17T05:40:54Z",
+    "description": "Canelo Alvarez",
+    "id": "474340",
+    "identifier": "aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi",
+    "long": true,
+    "marketId": 237388,
+    "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+    "price": "0.7200",
+    "quote": {
+     "currency": "USD",
+     "value": "0.7300"
+    },
+    "team": {
+     "abbreviation": "canalv",
+     "alias": "",
+     "awayIcon": "",
+     "color": {
+      "dark": "#B91C1C",
+      "light": "#B91C1C"
+     },
+     "colorPrimary": "#B91C1C",
+     "conference": "",
+     "displayAbbreviation": "Alvarez",
+     "homeIcon": "",
+     "id": 20138,
+     "imageDisplayType": "IMAGE_DISPLAY_TYPE_HEADSHOT",
+     "league": "boxing",
+     "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/canelo-alvarez-v2.png",
+     "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/canelo-alvarez-v2.png",
+     "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/canelo-alvarez-v2.png",
+     "name": "Canelo Alvarez",
+     "ordering": "home",
+     "providerIds": [],
+     "record": "",
+     "safeName": "",
+     "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/canelo-alvarez-v2.png",
+     "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/canelo-alvarez-v2.png"
+    },
+    "teamId": 20138,
+    "tradable": true,
+    "updatedAt": "2026-07-17T05:40:54Z"
+   },
+   {
+    "createdAt": "2026-07-17T05:40:54Z",
+    "description": "Christian Mbilli",
+    "id": "474341",
+    "identifier": "aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi",
+    "long": false,
+    "marketId": 237388,
+    "marketSideType": "MARKET_SIDE_TYPE_INSTRUMENT",
+    "price": "0.7300",
+    "quote": {
+     "currency": "USD",
+     "value": "0.28"
+    },
+    "team": {
+     "abbreviation": "chrmbi",
+     "alias": "",
+     "awayIcon": "",
+     "color": {
+      "dark": "#D4AF37",
+      "light": "#D4AF37"
+     },
+     "colorPrimary": "#D4AF37",
+     "conference": "",
+     "displayAbbreviation": "Mbilli",
+     "homeIcon": "",
+     "id": 20139,
+     "imageDisplayType": "IMAGE_DISPLAY_TYPE_HEADSHOT",
+     "league": "boxing",
+     "logo": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/christian-mbilli-v2.png",
+     "longIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/christian-mbilli-v2.png",
+     "longIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/christian-mbilli-v2.png",
+     "name": "Christian Mbilli",
+     "ordering": "away",
+     "providerIds": [],
+     "record": "",
+     "safeName": "",
+     "shortIcon": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/christian-mbilli-v2.png",
+     "shortIconDark": "https://polymarket-upload.s3.us-east-2.amazonaws.com/us-logos/boxing/christian-mbilli-v2.png"
+    },
+    "teamId": 20139,
+    "tradable": true,
+    "updatedAt": "2026-07-17T05:40:54Z"
+   }
+  ],
+  "marketType": "moneyline",
+  "minimumTradeQty": 0.01,
+  "orderPriceMinTickSize": 0.01,
+  "outcomePrices": "[\"0.7200\",\"0.7300\"]",
+  "outcomes": "[\"Christian Mbilli\",\"Canelo Alvarez\"]",
+  "question": "Canelo Alvarez vs Christian Mbilli",
+  "slug": "aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi",
+  "sportsMarketType": "moneyline",
+  "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_MONEYLINE",
+  "startDate": "2026-07-17T05:40:54Z",
+  "status": "MARKET_STATUS_OPEN",
+  "tags": [],
+  "title": "Canelo Alvarez vs Christian Mbilli",
+  "titleShort": "Alvarez vs Mbilli",
+  "updatedAt": "2026-09-13T15:56:40Z"
+ },
+ "open_quoted_source": "Phase 2G-R sealed request_log, event 54125",
+ "primaryTag_2gr": {
+  "createdAt": "2025-09-25T16:13:36Z",
+  "hub": null,
+  "id": "4",
+  "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/league-images/MLB.png",
+  "label": "MLB",
+  "league": {
+   "abbreviation": "MLB",
+   "activeSeriesId": 15,
+   "automaticResolution": false,
+   "createdAt": "2026-03-05T18:30:42Z",
+   "id": 5,
+   "image": "https://polymarket-upload.s3.us-east-2.amazonaws.com/league-images/MLB.png",
+   "isOperational": true,
+   "name": "MLB",
+   "ordering": "away",
+   "resolution": "https://www.mlb.com/",
+   "slug": "mlb",
+   "sportId": 5,
+   "tagId": 4
+  },
+  "parentId": 15,
+  "slug": "mlb",
+  "subtags": [],
+  "tradable": false,
+  "updatedAt": "2026-09-13T15:58:29Z"
+ },
+ "primaryTag_nfl": {
+  "createdAt": "2025-09-25T16:13:27Z",
+  "hub": null,
+  "id": "1",
+  "label": "NFL",
+  "league": {
+   "abbreviation": "NFL",
+   "activeSeriesId": 2,
+   "automaticResolution": false,
+   "createdAt": "2026-03-05T18:30:42Z",
+   "id": 1,
+   "image": "https://static.polymarket.us/images/new-category-icons/Icon-Rugby.png",
+   "isOperational": true,
+   "name": "NFL",
+   "ordering": "away",
+   "resolution": "https://www.nfl.com/",
+   "slug": "nfl",
+   "sportId": 3,
+   "tagId": 1
+  },
+  "parentId": 13,
+  "slug": "nfl",
+  "subtags": [],
+  "updatedAt": "2026-09-14T11:36:43Z"
+ },
+ "primaryTag_null_seen": true,
+ "source": "BLOCK_2 sealed discovery_body_samples, event 2",
+ "source_2gr": "Phase 2G-R sealed request_log, event 6435",
+ "tags": [
+  {
+   "createdAt": "2025-09-25T16:13:27Z",
+   "hub": null,
+   "id": "1",
+   "label": "NFL",
+   "league": {
+    "abbreviation": "NFL",
+    "activeSeriesId": 2,
+    "automaticResolution": false,
+    "createdAt": "2026-03-05T18:30:42Z",
+    "id": 1,
+    "image": "https://static.polymarket.us/images/new-category-icons/Icon-Rugby.png",
+    "isOperational": true,
+    "name": "NFL",
+    "ordering": "away",
+    "resolution": "https://www.nfl.com/",
+    "slug": "nfl",
+    "sportId": 3,
+    "tagId": 1
+   },
+   "parentId": 13,
+   "slug": "nfl",
+   "subtags": [],
+   "updatedAt": "2026-09-14T11:36:43Z"
+  },
+  {
+   "createdAt": "2025-09-25T16:13:27Z",
+   "hub": null,
+   "id": "2",
+   "label": "Sports",
+   "slug": "sports",
+   "subtags": [],
+   "updatedAt": "2026-09-14T11:36:43Z"
+  },
+  {
+   "createdAt": "2025-09-25T16:13:27Z",
+   "hub": null,
+   "id": "3",
+   "label": "Games",
+   "slug": "games",
+   "subtags": [],
+   "updatedAt": "2026-09-14T10:08:14Z"
+  }
+ ]
+}

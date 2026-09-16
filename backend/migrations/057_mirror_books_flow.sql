@@ -1,0 +1,35 @@
+-- 057: MIRROR BOOKS FLOW BASE (E12, 2026-09-08; owner "How do we make
+-- sure we go up when he goes up and we go down when he loses. I want
+-- this to be proportional and ensure that we aren't screwing ourselves
+-- in the management of the same trades"; "10% of what he puts on
+-- everything he takes"). On the books settled in the 24 h to 03:22Z
+-- our average cost sat far above his on the losers we opened late
+-- (Khantiw/Hillel ours 0.670 vs his 0.477, Richard/Kitthac 0.71 vs
+-- 0.287, Olivar/Grohbr 0.73 vs 0.298, Lorenz/Mauric 0.91 vs 0.336):
+-- at open the plan sized ratio x his WHOLE net and priced it at his
+-- NEWEST cent, so a block he built at 0.29 was bought by us at 0.71 the
+-- moment the market mapped. docs/mirror-to-a-tee-program.md decision
+-- 13 names that option (B) and says "(B) never"; option (A), Rule LE,
+-- is what the live worker sizes on now: the book follows his FLOW from
+-- first sight, and the block he held before we saw the market is never
+-- bought unless the mark is within MIRROR_CATCHUP_TOL_CENTS of his
+-- cost over it (or the market is an exact copy under $10).
+--
+-- TWO nullable columns on mirror_books, additive, re-runnable, no
+-- DEFAULT: `flow_base` is THE BLOCK -- his net on the book's long-token
+-- axis that stood before first sight, ratcheted PRO-RATA by his
+-- reductions (D25: block_t = block_{t-1} x net_t / net_{t-1} when net
+-- falls, unchanged on increases, 0 on a crossing to <= 0) -- and
+-- `flow_last_net` is his net the block was last read against
+-- (net_{t-1} in that formula). NULL on every row written before this
+-- migration means THE OLD RULE, byte for byte: no open book changes
+-- behaviour retroactively, and a book the worker opens while the
+-- columns are absent (the workers never run migrations; the API's
+-- start.sh applies this file on boot, best-effort) is written through
+-- the 056-shaped INSERT and reads NULL here too.
+--
+-- NUMBERING. 057: 054-056 are landed; 048 and 051 stay reserved by
+-- docs/mirror-to-a-tee-program.md:184-187 (migrate.py applies the
+-- sorted glob, so the gaps are harmless).
+ALTER TABLE mirror_books ADD COLUMN IF NOT EXISTS flow_base DOUBLE PRECISION NULL;
+ALTER TABLE mirror_books ADD COLUMN IF NOT EXISTS flow_last_net DOUBLE PRECISION NULL;

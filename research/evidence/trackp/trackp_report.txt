@@ -1,0 +1,149 @@
+========================================================================
+TRACK P -- NATIVE PREDICTIVE PROFITABILITY
+========================================================================
+
+--- DECISION SET (first eligible probe per condition+token) ---
+  DECISIONS                  13730
+  INDEPENDENT MARKETS        8981
+  rejected UNRESOLVED                         82550
+  rejected NO_SETTLEMENT_ROW                  17822
+  rejected ASK_OUTSIDE_TRADABLE_RANGE         3106
+  rejected ALREADY_RESOLVED_AT_PROBE          1684
+
+--- CHRONOLOGICAL SPLITS (declared before any result) ---
+  TRAIN         2260 decisions   1533 markets  2026-08-06 .. 2026-08-21  base rate 0.4832
+  VALIDATION    3946 decisions   2594 markets  2026-08-21 .. 2026-08-31  base rate 0.4878
+  HOLDOUT       7524 decisions   4854 markets  2026-09-01 .. 2026-09-11  base rate 0.4773
+
+--- Q1: IS THE ASK MISCALIBRATED?  (TRAIN only) ---
+  ASK BAND               N MEAN_ASK    SETTLE SETTLE-ASK
+  [0.02,0.10)          148   0.0579    0.0473    -0.0106
+  [0.10,0.20)          195   0.1461    0.1231    -0.0230
+  [0.20,0.30)          231   0.2458    0.2511    +0.0052
+  [0.30,0.40)          259   0.3449    0.3320    -0.0128
+  [0.40,0.50)          278   0.4469    0.4101    -0.0368
+  [0.50,0.60)          287   0.5448    0.5331    -0.0117
+  [0.60,0.70)          226   0.6455    0.6239    -0.0216
+  [0.70,0.80)          237   0.7427    0.6920    -0.0507
+  [0.80,0.90)          214   0.8448    0.8084    -0.0364
+  [0.90,0.98)          175   0.9357    0.9257    -0.0100
+
+--- VALIDATION GRID (model x threshold, net of the cross-venue fee assumption) ---
+  MODEL                         THR  TRADES    MKTS   NET_PNL       ROI
+  A_MARKET_ONLY               0.005       0       0      0.00         -
+  A_MARKET_ONLY               0.010       0       0      0.00         -
+  A_MARKET_ONLY               0.020       0       0      0.00         -
+  A_MARKET_ONLY               0.030       0       0      0.00         -
+  A_MARKET_ONLY               0.040       0       0      0.00         -
+  A_MARKET_ONLY               0.050       0       0      0.00         -
+  A_MARKET_ONLY               0.075       0       0      0.00         -
+  A_MARKET_ONLY               0.100       0       0      0.00         -
+  C_LOGISTIC_ON_LOGIT_ASK     0.005       0       0      0.00         -
+  C_LOGISTIC_ON_LOGIT_ASK     0.010       0       0      0.00         -
+  C_LOGISTIC_ON_LOGIT_ASK     0.020       0       0      0.00         -
+  C_LOGISTIC_ON_LOGIT_ASK     0.030       0       0      0.00         -
+  C_LOGISTIC_ON_LOGIT_ASK     0.040       0       0      0.00         -
+  C_LOGISTIC_ON_LOGIT_ASK     0.050       0       0      0.00         -
+  C_LOGISTIC_ON_LOGIT_ASK     0.075       0       0      0.00         -
+  C_LOGISTIC_ON_LOGIT_ASK     0.100       0       0      0.00         -
+  D_ISOTONIC_ON_ASK           0.005     902     838    -27.52   -0.0616
+  D_ISOTONIC_ON_ASK           0.010     549     530    -17.40   -0.0762
+  D_ISOTONIC_ON_ASK           0.020     216     214    -21.28   -0.2684
+  D_ISOTONIC_ON_ASK           0.030      46      46     -6.38   -0.4437
+  D_ISOTONIC_ON_ASK           0.040       0       0      0.00         -
+  D_ISOTONIC_ON_ASK           0.050       0       0      0.00         -
+  D_ISOTONIC_ON_ASK           0.075       0       0      0.00         -
+  D_ISOTONIC_ON_ASK           0.100       0       0      0.00         -
+  E_ISOTONIC_BY_SPORT         0.005    1331    1184    -31.71   -0.0474
+  E_ISOTONIC_BY_SPORT         0.010    1190    1061    -23.57   -0.0405
+  E_ISOTONIC_BY_SPORT         0.020     934     853    -17.56   -0.0390
+  E_ISOTONIC_BY_SPORT         0.030     684     639      1.59    0.0048
+  E_ISOTONIC_BY_SPORT         0.040     539     512     -2.28   -0.0084
+  E_ISOTONIC_BY_SPORT         0.050     411     393     -1.85   -0.0089
+  E_ISOTONIC_BY_SPORT         0.075     153     148     -1.59   -0.0222
+  E_ISOTONIC_BY_SPORT         0.100      41      41     -1.71   -0.1164
+
+  NUMBER_OF_HYPOTHESES_TESTED = 32 (4 models x 8 thresholds), all shown above
+
+  selection rule: highest VALIDATION ROI among cells with >= 200 independent markets
+  CHOSEN: E_ISOTONIC_BY_SPORT @ 0.030  (validation ROI 0.0048 on 639 markets)
+
+--- FROZEN STRATEGY SPECIFICATION ---
+  ELIGIBLE_LEAGUES                   NOT_IDENTIFIED (no league field in data)
+  ELIGIBLE_MARKET_TYPES              NOT_IDENTIFIED (no market-type field)
+  ELIGIBLE_SPORTS                    ALL (no sport filter)
+  ENTRY_THRESHOLD                    0.03
+  EXCLUSION_RULES                    ['condition already resolved at probe_at', 'book_ok false', 'ask outside [0.02,0.98]', 'ladder top disagrees with best_ask', 'payout vector not one-hot', 'only the FIRST probe per condition+token']
+  EXIT_RULE                          HOLD TO SETTLEMENT. No stop, target, cash-out or hedge.
+  FEATURE_SET                        ['best_ask@probe_at', 'sport']
+  FEE_MODEL                          PMUS verified taker 0.06*p*(1-p) per contract, APPLIED CROSS-VENUE to Polymarket prices
+  HYPOTHESES_TESTED_BEFORE_FREEZE    32
+  MAXIMUM_EXPOSURE                   not modelled; capacity reported separately
+  MODEL_VERSION                      E_ISOTONIC_BY_SPORT
+  ORDER_ASSUMPTION                   buy 1 contract at the observed best ask (taker), top-of-book only
+  POSITION_SIZE                      1 contract per decision (normalized fixed risk)
+  PREGAME_LIVE_RULE                  NOT_IDENTIFIED (no start time, no live flag)
+  PRICE_RANGE                        [0.02, 0.98]
+  SLIPPAGE_MODEL                     0 in the primary result; +1c/+2c/+3c reported as robustness
+  STRATEGY                           TRACKP-NATIVE-1
+  TRAIN_END                          2026-08-20
+  VALID_END                          2026-08-31
+  SPEC_SHA256                        32cdcc7e3cd5f1aa0a702ff3c4ce2c2e43c9f9b3c924cfcc8c04c5deece28a88
+
+  >>> HOLDOUT OPENED ONCE, AFTER THIS HASH <<<
+
+--- PRIMARY PROFITABILITY REPORT ---
+                                              TRAIN     VALIDATION        HOLDOUT
+  NUMBER_OF_TRADES                              387            684           1261
+  NUMBER_OF_INDEPENDENT_MARKETS                 367            639           1170
+  CAPITAL_DEPLOYED                         200.9637       329.4100       624.0095
+  GROSS_PNL                                 25.3540         9.6020       -54.6000
+  NET_PNL                                   21.0363         1.5900       -69.0095
+  ROI_ON_DEPLOYED_CAPITAL                    0.1047         0.0048        -0.1106
+  GROSS_ROI                                  0.1289         0.0299        -0.0896
+  WIN_RATE                                   0.5736         0.4839         0.4401
+  AVERAGE_EXPECTED_EDGE_AT_ENTRY             0.0588         0.0587         0.0584
+  AVERAGE_REALIZED_RETURN                    0.0544         0.0023        -0.0547
+  MAX_DRAWDOWN                              -4.9250       -10.9144       -70.1444
+  WORST_DAY                                 -1.4017        -5.7293       -17.8892
+  WORST_WEEK                                 3.8206        -1.4910       -45.1624
+  WORST_MONTH                               21.0363         1.5900       -69.0095
+  POSITIVE_MONTHS                                 1              1              0
+  NEGATIVE_MONTHS                                 0              0              1
+  BRIER                                      0.1801         0.1858         0.1827
+  LOG_LOSS                                   0.5302         0.6110         0.5941
+  CALIBRATION_ERROR_ECE                      0.0104         0.0190         0.0241
+  ROI_CI95 TRAIN                     [0.0244, 0.1849]
+  ROI_CI95 VALIDATION                [-0.0566, 0.0688]
+  ROI_CI95 HOLDOUT                   [-0.1552, -0.0658]
+
+--- HOLDOUT PROFIT CONCENTRATION ---
+  TOP_1_TRADE_SHARE            -0.0127
+  TOP_5_TRADE_SHARE            -0.0632
+  TOP_10_TRADE_SHARE           -0.1227
+  TOP_SPORT                    {'TOP': 'Other-Sports', 'SHARE': -0.025353048195158646}
+  TOP_MONTH                    2026-09
+  EXCLUDING_BEST_TRADE         trades=1260 net=-69.88 roi=-0.1120
+  EXCLUDING_BEST_5_TRADES      trades=1256 net=-73.37 roi=-0.1177
+  EXCLUDING_BEST_MONTH         trades=0 net=0.00 roi=-
+
+--- HOLDOUT ROBUSTNESS (worse execution; strategy NOT redesigned) ---
+  DEGRADATION             TRADES    NET_PNL       ROI
+  ask +0.00                 1261     -69.01   -0.1106
+  ask +0.01                  961     -61.49   -0.1236
+  ask +0.02                  723     -56.99   -0.1524
+  ask +0.03                  500     -45.38   -0.1805
+  no fee (gross only)       1261     -54.60   -0.0896
+
+--- CAPACITY ---
+  MEDIAN_TOP_OF_BOOK_SIZE (holdout trades)  1100.0
+  TOTAL_TOP_OF_BOOK_SIZE                    3691148.0800000075
+  CAPACITY = PARTIAL -- top-of-book size only, one snapshot per
+  market, on a population selected by RN1's flow. Not a capacity
+  estimate for a native strategy on the whole board.
+
+--- PER $ NORMALIZATION (holdout) ---
+  per $1 deployed           -0.110590
+  per $100 deployed         -11.0590
+  per 1,000 decisions       -54.7260
+

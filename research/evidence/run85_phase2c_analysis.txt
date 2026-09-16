@@ -1,0 +1,248 @@
+RUN 85 PHASE 2C -- ANALYSIS OF THE FROZEN CENSUS
+archive dir : run85_phase2c_20260913T034625Z
+phase       : run85/phase2c/1
+phase 2B    : run85_phase2b_20260913T031858Z (for the asymmetry cross-check)
+NOTHING IN THIS FILE CONTACTS THE VENUE.
+
+=== 8. SELECTED COHORT, PER MARKET (survey tier, 6 markets) ===
+market_slug                                      mid  spread  ticks  touch_bid$  touch_ask$  log10R  tte_days   chg
+aachc-mlb-2026-09-27-wr-col                   0.6550  0.0100      1     2030.60      265.40   0.495     -94.0   3/3
+aachc-mlb-2026-09-27-br-atl                   0.0150  0.0100      1        1.00      280.27   4.512     -94.0   1/3
+aachc-ufc-featherw-2026-12-31-champ-alevol    0.4950  0.0100      1       25.48        1.00   1.957    -101.2   3/3
+aachc-mlb-hrs-2026-09-29-leader-aarjud        0.0150  0.0100      1       14.71      351.74   3.275     -93.5   3/3
+aachc-mlb-bavg-2026-09-29-leader-alebur       0.0150  0.0100      1     1552.89       24.63   1.326     -93.5   1/3
+aachc-ufc-lightheavyw-2026-12-31-champ-aleper  0.0150  0.0100      1       24.27        5.26   3.052    -101.2   2/3
+
+  depth$ (whole displayed ladder) and regime key
+    aachc-mlb-2026-09-27-wr-col                  bid$=     9516.40 ask$=    29776.26  P_HIGH|S_1T|D_DEEP|BALANCED|T_LT_24H|ACTIVE
+    aachc-mlb-2026-09-27-br-atl                  bid$=        1.00 ask$=    32515.33  P_LOW|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-ufc-featherw-2026-12-31-champ-alevol   bid$=      305.66 ask$=    27662.35  P_HIGH|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-mlb-hrs-2026-09-29-leader-aarjud       bid$=       14.71 ask$=    27727.22  P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-mlb-bavg-2026-09-29-leader-alebur      bid$=     1552.89 ask$=    32918.74  P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-ufc-lightheavyw-2026-12-31-champ-aleper bid$=       24.27 ask$=    27331.00  P_LOW|S_1T|D_MID|ASK_HEAVY|T_LT_24H|ACTIVE
+
+=== 8b. FULL TWO-SIDED CANDIDATE POOL (19 markets) ===
+market_slug                                      mid  spread  ticks  touch_bid$  touch_ask$  log10R  tte_days   chg
+aachc-mlb-2026-09-27-br-atl                   0.0150  0.0100      1        1.00      280.27   4.512     -94.0   1/3
+aachc-mlb-2026-09-27-br-lad                   0.1950  0.0100      1        0.02        0.40   1.341     -94.0   3/3
+aachc-mlb-2026-09-27-br-mil                   0.6450  0.0500      5      437.72       20.36   1.313     -94.0   1/3
+aachc-mlb-2026-09-27-br-tb                    0.0850  0.0500      5        2.88        4.95   1.761     -94.0   1/3
+aachc-mlb-2026-09-27-wr-ath                   0.0350  0.0100      1        0.39      440.63   2.998     -94.0   2/3
+aachc-mlb-2026-09-27-wr-col                   0.6550  0.0100      1     2030.60      265.40   0.495     -94.0   3/3
+aachc-mlb-2026-09-27-wr-laa                   0.2350  0.0100      1       27.91        1.68   1.639     -94.0   3/3
+aachc-mlb-2026-09-27-wr-nym                   0.0150  0.0100      1       25.00     1688.34   3.113     -94.0   2/3
+aachc-mlb-bavg-2026-09-29-leader-alebur       0.0150  0.0100      1     1552.89       24.63   1.326     -93.5   1/3
+aachc-mlb-hits-2026-09-29-leader-alebre       0.0150  0.0100      1        0.25       51.86   5.101     -93.5   1/3
+aachc-mlb-hrs-2026-09-29-leader-aarjud        0.0150  0.0100      1       14.71      351.74   3.275     -93.5   3/3
+aachc-mlb-rbi-2026-09-29-leader-aarjud        0.0300  0.0400      4        0.25      146.50   5.115     -93.5   1/3
+aachc-mlb-runs-2026-09-29-leader-aarjud       0.0150  0.0100      1       19.91      260.94   3.220     -93.5   1/3
+aachc-ufc-bantamw-2026-12-31-champ-corsan     0.0300  0.0400      4       25.51       13.85   3.030    -101.2   2/3
+aachc-ufc-featherw-2026-12-31-champ-alevol    0.4950  0.0100      1       25.48        1.00   1.957    -101.2   3/3
+aachc-ufc-flyw-2026-12-31-champ-alepan        0.5200  0.0400      4        0.50       37.80   1.831    -101.2   2/3
+aachc-ufc-heavyw-2026-12-31-champ-aleper      0.0300  0.0400      4       27.84        6.75   2.992    -101.2   1/3
+aachc-ufc-lightheavyw-2026-12-31-champ-aleper  0.0150  0.0100      1       24.27        5.26   3.052    -101.2   2/3
+aachc-ufc-lightw-2026-12-31-champ-alevol      0.0150  0.0100      1        5.98       40.34   3.661    -101.2   3/3
+
+  depth$ (whole displayed ladder) and regime key
+    aachc-mlb-2026-09-27-br-atl                  bid$=        1.00 ask$=    32515.33  P_LOW|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-mlb-2026-09-27-br-lad                  bid$=     1285.89 ask$=    28184.28  P_HIGH|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-mlb-2026-09-27-br-mil                  bid$=     1756.24 ask$=    36123.81  P_HIGH|S_4T_PLUS|D_DEEP|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-mlb-2026-09-27-br-tb                   bid$=      486.12 ask$=    28058.43  P_MID|S_4T_PLUS|D_MID|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-mlb-2026-09-27-wr-ath                  bid$=       33.61 ask$=    33488.61  P_MID|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-mlb-2026-09-27-wr-col                  bid$=     9516.40 ask$=    29776.26  P_HIGH|S_1T|D_DEEP|BALANCED|T_LT_24H|ACTIVE
+    aachc-mlb-2026-09-27-wr-laa                  bid$=      911.43 ask$=    39708.93  P_HIGH|S_1T|D_MID|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-mlb-2026-09-27-wr-nym                  bid$=       25.00 ask$=    32433.83  P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-mlb-bavg-2026-09-29-leader-alebur      bid$=     1552.89 ask$=    32918.74  P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-mlb-hits-2026-09-29-leader-alebre      bid$=        0.25 ask$=    31540.64  P_LOW|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-mlb-hrs-2026-09-29-leader-aarjud       bid$=       14.71 ask$=    27727.22  P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-mlb-rbi-2026-09-29-leader-aarjud       bid$=        0.25 ask$=    32580.59  P_MID|S_4T_PLUS|D_THIN|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-mlb-runs-2026-09-29-leader-aarjud      bid$=       19.91 ask$=    33044.40  P_LOW|S_1T|D_DEEP|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-ufc-bantamw-2026-12-31-champ-corsan    bid$=       25.51 ask$=    27353.95  P_MID|S_4T_PLUS|D_MID|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-ufc-featherw-2026-12-31-champ-alevol   bid$=      305.66 ask$=    27662.35  P_HIGH|S_1T|D_THIN|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-ufc-flyw-2026-12-31-champ-alepan       bid$=      405.91 ask$=    27498.40  P_HIGH|S_4T_PLUS|D_THIN|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-ufc-heavyw-2026-12-31-champ-aleper     bid$=       27.84 ask$=    27351.78  P_MID|S_4T_PLUS|D_MID|ASK_HEAVY|T_LT_24H|QUIET
+    aachc-ufc-lightheavyw-2026-12-31-champ-aleper bid$=       24.27 ask$=    27331.00  P_LOW|S_1T|D_MID|ASK_HEAVY|T_LT_24H|ACTIVE
+    aachc-ufc-lightw-2026-12-31-champ-alevol     bid$=        5.98 ask$=    27409.43  P_LOW|S_1T|D_MID|ASK_HEAVY|T_LT_24H|ACTIVE
+
+=== AUDIT 1. TIME TO EVENT IS NOT MEASURED ===
+candidates with a tte value        : 19 of 19
+of those, NEGATIVE (event passed)  : 19
+range (days)                       : -101.24 to -93.49
+bins assigned                      : {'T_LT_24H': 19}
+
+  Every value is negative, so the event each startTime names has
+  already happened. These are season-long futures: startTime is the
+  season's start, not the resolution of the contract. The binning
+  tested `tte < 86400` with no lower bound, so every negative value
+  landed in T_LT_24H.
+
+  TIME_TO_EVENT_DIVERSITY = INSUFFICIENT is RETRACTED.
+  The venue supplied a field; the field does not measure the thing.
+  The dimension was NOT MEASURED, which is a different answer from
+  measured-and-narrow, and it must not be reported as the latter.
+  TIME_TO_EVENT_DIVERSITY = NOT_IDENTIFIED
+
+=== AUDIT 2. NO GAME-LEVEL MARKET WAS REACHED ===
+  MARKET_STATUS_OPEN       futures     138
+  MARKET_STATUS_RESOLVED   futures      10
+  MARKET_STATUS_OPEN       election      2
+
+  sportsMarketType is `futures` or `election` on every one of the
+  150 detail probes. A season-long futures book (worst record, batting
+  average leader, division winner) is not the market BETTOR mirrors:
+  RN1's flow is game-level -- moneylines, spreads, totals. A cohort
+  drawn from this pool would characterize passive fills in a market
+  structure we do not trade.
+
+  This is not a binning problem and more bins cannot fix it. It is a
+  DISCOVERY problem: /v1/events?active=true&closed=false returned a
+  first page of season-long events at 03:40Z. Whether game markets
+  are absent at that hour, are on a later page, or need a different
+  query is NOT ESTABLISHED by this run.
+
+  GAME_LEVEL_MARKET_COVERAGE = NONE_OBSERVED
+
+  tick size by market type (per-market storage was the right call):
+    futures    tick=0.01      138
+    futures    tick=0.001      10
+    election   tick=0.001       2
+
+  Tick is NOT constant across the venue. Phase 2B observed 0.001;
+  138 of 150 markets here are 0.01. PMUS_ORDER_PRICE_MIN_TICK_SIZE
+  is a PER-MARKET field and no single value may be carried forward.
+  A spread measured in ticks is comparable only within one tick size.
+
+=== AUDIT 3. THE TWO TIERS OVERLAP ===
+FAST tier    : 2  ['aachc-mlb-2026-09-27-wr-col', 'aachc-mlb-2026-09-27-br-atl']
+SURVEY tier  : 6
+in both      : 2  ['aachc-mlb-2026-09-27-wr-col', 'aachc-mlb-2026-09-27-br-atl']
+DISTINCT MARKETS = 6
+
+  '2 FAST + 6 SURVEY = 8' counts two markets twice. The venue-call
+  budget is still 2 + 6 = 8 reads per round-robin cycle, so the
+  cadence arithmetic holds -- but the number of DISTINCT books under
+  observation is 6, and the diversity of the capture is bounded by
+  that number, not by 8.
+
+=== AUDIT 4. WHAT THE POOL COULD HAVE SUPPORTED ===
+probed                          : 150
+excluded at A5 (not open)       : 10
+censused for book state         : 60
+of those, TWO-SIDED book (A6)   : 19
+
+  Two thirds of the censused markets had no two-sided book. A market
+  with only one side cannot be a passive-fill subject at all, so the
+  reachable pool for selection was 19, not 60 and not 140.
+
+primary_tag across the 19        : {'mlb': 13, 'None': 6}
+series_slug across the 19        : {'mlb-2026': 13, 'ufc-2025': 6}
+
+  Two series. primary_tag is null on the 6 UFC rows, so sport
+  identity for those came from series_slug alone. Section 5 allows
+  only structured metadata and forbids substring matching; series_slug
+  is structured, so this is legal -- but SPORT_DIVERSITY rests on one
+  field for a third of the pool.
+
+=== AUDIT 5. THE ASYMMETRY MEASURE IS CONTAMINATED ===
+two-sided-or-one-sided books sampled in the census : 60
+books carrying an offer level at px >= 0.95          : 60 of 60
+median share of ASK notional sitting at px >= 0.95  : 84.2%
+range                                              : 58.2% .. 100.0%
+most repeated far-ask level                        : 27499.0000 shares @ 0.9900, in 53 books
+
+  asym_bin was log10(WHOLE displayed ask notional / WHOLE displayed
+  bid notional). Every book in the census carries a large resting
+  block near the top of the price range, and the same block appears
+  at the bottom of the bid side. The two are comparable in SHARES and
+  wildly different in DOLLARS, because notional is price x quantity:
+  27,500 shares at 0.99 is $27,225; the same 27,500 shares at 0.01 is
+  $275. A 99x dollar gap out of a symmetric parking order.
+
+  So the whole-ladder measure mostly reports 'this book has a far-end
+  block', which is true of every book, and it reports it as ask
+  heaviness. It is not measuring side competition near the touch --
+  which is the thing section 9 says realizable passive fills depend on.
+
+  Re-derived with the far ends (px>=0.95, px<=0.05) excluded:
+    books with inside-range depth on BOTH sides      : 7
+    corrected classification                         : {'BALANCED': 4, 'ASK_HEAVY': 2, 'BID_HEAVY': 1}
+
+  BID-HEAVY BOOKS DO EXIST. The earlier reading that none exists was
+  produced by the contaminated measure, not by the venue.
+
+  The SAME test applied to the two Phase 2B books, because section 9
+  is founded on their 27-30x figure:
+    tec-mlb-champ-2026-09-27-lad           whole-ladder   27.5x   inside-range   1.59x  -> BALANCED
+    tec-mlb-nlchamp-2026-09-27-lad         whole-ladder   29.9x   inside-range   0.30x  -> BID_HEAVY
+
+  PHASE2B_DEPTH_ASYMMETRY_27_30X = RETRACTED AS A QUEUE-COMPETITION
+  READING. The number is arithmetically correct over the whole
+  displayed ladder and it is the wrong ladder for the question. Near
+  the money one of those two books is close to balanced and the other
+  is BID-heavy -- the opposite sign from the one carried forward.
+
+  DEPTH_ASYMMETRY_DIVERSITY = NOT_IDENTIFIED
+  Not INSUFFICIENT: the dimension was measured with an invalid
+  instrument, so the cohort's coverage of it is unknown rather than
+  narrow. S5 forced asymmetry coverage over the contaminated bins, so
+  the market the rule selected as BALANCED was selected for a reason
+  that does not survive this audit. The rule's MECHANISM is sound and
+  tested; the FEATURE it was fed is not.
+
+=== AUDIT 6. HOW A LEG IS ADDRESSED ===
+candidates whose long_side == short_side : 19 of 19
+
+  The A7 structure check is real: it requires marketSides to hold
+  exactly two entries, one with long=true and one with long=false.
+  All 19 passed it. But both entries carry the SAME identifier
+  string -- the market slug. The venue distinguishes the legs by the
+  BOOLEAN, not by a distinct per-leg token id.
+
+  PMUS_LEG_ADDRESSED_BY = marketSides[].long BOOLEAN
+  PMUS_DISTINCT_PER_LEG_IDENTIFIER = NOT_PRESENT
+
+  Nothing is ordered in this run and nothing will be. Recorded
+  because any future code that selects a side by identifier string
+  would select nothing, and would do so silently.
+
+=== PHASE 2C VERDICTS, AS CORRECTED BY THIS ANALYSIS ===
+CANDIDATES_PROBED              = 150
+NATIVE_EVENT_IDENTITY_RATE     = 100.00%
+TWO_SIDED_BOOK_POOL            = 19 of 60 censused
+ECONOMIC_REGIMES_IDENTIFIED    = 13 (over CONTAMINATED asym_bin -- see AUDIT 5)
+PRICE_DIVERSITY                = SUFFICIENT
+SPREAD_DIVERSITY               = INSUFFICIENT
+DEPTH_DIVERSITY                = SUFFICIENT
+DEPTH_ASYMMETRY_DIVERSITY      = NOT_IDENTIFIED
+TIME_TO_EVENT_DIVERSITY        = NOT_IDENTIFIED
+BOOK_ACTIVITY_DIVERSITY        = SUFFICIENT
+GAME_LEVEL_MARKET_COVERAGE     = NONE_OBSERVED
+BID_HEAVY_BOOK_AVAILABLE       = YES (1 of 7 books measurable near the money)
+PROPOSED_MULTI_DAY_COHORT_SIZE = 6 DISTINCT markets (2 FAST + 6 SURVEY, FAST a subset)
+EXPECTED_REVISIT_CADENCE       = FAST 4.0s / SURVEY 12.0s (two independent round-robins)
+SELECTION_RULE_FROZEN          = YES
+COHORT_DIVERSITY_VERIFIED      = NO
+READY_FOR_MULTI_DAY_PHASE2_CAPTURE = NO
+
+  READY is NO on AUDIT 2 alone, and independently on AUDIT 5.
+
+  The selection rule is no longer the blocker. It is deterministic,
+  frozen before the data, caps one market per event, forces coverage
+  before size-ranked filling, and keeps the cadence usable. Its
+  mechanism is tested and it behaved as specified.
+
+  What blocks the capture is what the rule was fed:
+    AUDIT 2  every market reached is season-long futures. A capture
+             here measures passive fills in a structure BETTOR does
+             not trade, and more capture time cannot convert that
+             into evidence about game markets.
+    AUDIT 5  the asymmetry feature does not measure side competition,
+             so the one dimension section 9 called decisive for
+             realizable passive fills was binned on a number that
+             does not measure it.
+
+  Fees are untouched by this file and remain:
+  PMUS_FEE_COEFFICIENT_FIELD = 0.06 (VERIFIED as a field)
+  PMUS_FEE_FORMULA / MAKER_FEE / TAKER_FEE / MAKER_REBATE = NOT_IDENTIFIED
+  PMUS_FEES_RESOLVED = NO
+  No fee arithmetic enters any verdict above.

@@ -1,0 +1,32 @@
+{
+ "planned_sets": 24,
+ "planned_requests": 240,
+ "idle_slots": 108,
+ "stop_reason": "PLAN_EXHAUSTED",
+ "sets_started": 23,
+ "sets_completed": 23,
+ "sets_abandoned_at_segment_end": 0,
+ "http_429": 0,
+ "identity_failures": 0,
+ "grid_reanchors": [],
+ "throttle_events": [],
+ "venue_requests": 230,
+ "book_observations": 115,
+ "bbo_observations": 115,
+ "elapsed_s": 867.582103401,
+ "achieved_rps": 0.2639768502723241,
+ "gap_stats": {
+  "min": 2.5,
+  "median": 2.5,
+  "max": 27.5
+ },
+ "cross_agree": 114,
+ "cross_disagree": 1,
+ "cross_absent": 0,
+ "retired": {
+  "asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5": {
+   "reason": "VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED",
+   "at": "2026-09-13T16:57:23.227248+00:00"
+  }
+ }
+}

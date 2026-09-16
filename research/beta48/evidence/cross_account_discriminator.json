@@ -1,0 +1,632 @@
+{
+ "TABLES": {
+  "rn1": [
+   {
+    "band": "0.00-0.10",
+    "OPENS": 24871,
+    "COMPLETION_5S": 0.0229,
+    "COMPLETION_1H": 0.4156,
+    "COMPLETION_SETTLEMENT": 0.4521,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.93098,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.5479,
+    "MERGES": 56685,
+    "EXACT_MATCHED_PNL": 1043701.96,
+    "MATCHED_STAKE": 1566207.61,
+    "MATCHED_ROI": 0.666388
+   },
+   {
+    "band": "0.10-0.30",
+    "OPENS": 46463,
+    "COMPLETION_5S": 0.0361,
+    "COMPLETION_1H": 0.6904,
+    "COMPLETION_SETTLEMENT": 0.7795,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.94213,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.2205,
+    "MERGES": 326101,
+    "EXACT_MATCHED_PNL": 3961179.11,
+    "MATCHED_STAKE": 17207677.11,
+    "MATCHED_ROI": 0.230198
+   },
+   {
+    "band": "0.30-0.50",
+    "OPENS": 63169,
+    "COMPLETION_5S": 0.0516,
+    "COMPLETION_1H": 0.7444,
+    "COMPLETION_SETTLEMENT": 0.8605,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.95969,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.1395,
+    "MERGES": 682451,
+    "EXACT_MATCHED_PNL": 5017030.04,
+    "MATCHED_STAKE": 58565645.64,
+    "MATCHED_ROI": 0.085665
+   },
+   {
+    "band": "0.50-0.70",
+    "OPENS": 61224,
+    "COMPLETION_5S": 0.0639,
+    "COMPLETION_1H": 0.75,
+    "COMPLETION_SETTLEMENT": 0.8542,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.97399,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.1458,
+    "MERGES": 661560,
+    "EXACT_MATCHED_PNL": 989922.68,
+    "MATCHED_STAKE": 73158641.72,
+    "MATCHED_ROI": 0.013531
+   },
+   {
+    "band": "0.70-0.90",
+    "OPENS": 45102,
+    "COMPLETION_5S": 0.0587,
+    "COMPLETION_1H": 0.6906,
+    "COMPLETION_SETTLEMENT": 0.7788,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.98644,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.2212,
+    "MERGES": 366858,
+    "EXACT_MATCHED_PNL": -510539.59,
+    "MATCHED_STAKE": 50143113.56,
+    "MATCHED_ROI": -0.010182
+   },
+   {
+    "band": "0.90-1.01",
+    "OPENS": 18442,
+    "COMPLETION_5S": 0.0457,
+    "COMPLETION_1H": 0.4487,
+    "COMPLETION_SETTLEMENT": 0.495,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.99825,
+    "MEDIAN_PAIR_BASIS": 0.984,
+    "RESIDUAL_RATE": 0.505,
+    "MERGES": 59722,
+    "EXACT_MATCHED_PNL": -142189.04,
+    "MATCHED_STAKE": 12711646.28,
+    "MATCHED_ROI": -0.011186
+   }
+  ],
+  "ferrarichampions2026": [
+   {
+    "band": "0.00-0.10",
+    "OPENS": 4978,
+    "COMPLETION_5S": 0.0121,
+    "COMPLETION_1H": 0.3407,
+    "COMPLETION_SETTLEMENT": 0.3622,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.93823,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.6378,
+    "MERGES": 10765,
+    "EXACT_MATCHED_PNL": 611059.16,
+    "MATCHED_STAKE": 730207.05,
+    "MATCHED_ROI": 0.83683
+   },
+   {
+    "band": "0.10-0.30",
+    "OPENS": 17082,
+    "COMPLETION_5S": 0.0189,
+    "COMPLETION_1H": 0.5915,
+    "COMPLETION_SETTLEMENT": 0.6436,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.9462,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.3564,
+    "MERGES": 101840,
+    "EXACT_MATCHED_PNL": 3844029.16,
+    "MATCHED_STAKE": 11886950.99,
+    "MATCHED_ROI": 0.323382
+   },
+   {
+    "band": "0.30-0.50",
+    "OPENS": 32434,
+    "COMPLETION_5S": 0.0299,
+    "COMPLETION_1H": 0.6307,
+    "COMPLETION_SETTLEMENT": 0.7177,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.96511,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.2823,
+    "MERGES": 237616,
+    "EXACT_MATCHED_PNL": 5713028.05,
+    "MATCHED_STAKE": 47686138.18,
+    "MATCHED_ROI": 0.119805
+   },
+   {
+    "band": "0.50-0.70",
+    "OPENS": 31269,
+    "COMPLETION_5S": 0.0332,
+    "COMPLETION_1H": 0.6345,
+    "COMPLETION_SETTLEMENT": 0.7225,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.99148,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.2775,
+    "MERGES": 234074,
+    "EXACT_MATCHED_PNL": 1167177.46,
+    "MATCHED_STAKE": 60114340.41,
+    "MATCHED_ROI": 0.019416
+   },
+   {
+    "band": "0.70-0.90",
+    "OPENS": 13474,
+    "COMPLETION_5S": 0.0338,
+    "COMPLETION_1H": 0.6423,
+    "COMPLETION_SETTLEMENT": 0.7014,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.00555,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.2986,
+    "MERGES": 92402,
+    "EXACT_MATCHED_PNL": -408535.13,
+    "MATCHED_STAKE": 28521768.71,
+    "MATCHED_ROI": -0.014324
+   },
+   {
+    "band": "0.90-1.01",
+    "OPENS": 2374,
+    "COMPLETION_5S": 0.0396,
+    "COMPLETION_1H": 0.5168,
+    "COMPLETION_SETTLEMENT": 0.5447,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.01177,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.4553,
+    "MERGES": 8034,
+    "EXACT_MATCHED_PNL": -131862.87,
+    "MATCHED_STAKE": 4008838.1,
+    "MATCHED_ROI": -0.032893
+   }
+  ],
+  "homerunhazard": [
+   {
+    "band": "0.00-0.10",
+    "OPENS": 1017,
+    "COMPLETION_5S": 0.0295,
+    "COMPLETION_1H": 0.6991,
+    "COMPLETION_SETTLEMENT": 0.7168,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.96769,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.2832,
+    "MERGES": 2842,
+    "EXACT_MATCHED_PNL": 97323.95,
+    "MATCHED_STAKE": 184756.32,
+    "MATCHED_ROI": 0.526769
+   },
+   {
+    "band": "0.10-0.30",
+    "OPENS": 5347,
+    "COMPLETION_5S": 0.0258,
+    "COMPLETION_1H": 0.6862,
+    "COMPLETION_SETTLEMENT": 0.796,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.96033,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.204,
+    "MERGES": 23261,
+    "EXACT_MATCHED_PNL": 335842.6,
+    "MATCHED_STAKE": 2449843.54,
+    "MATCHED_ROI": 0.137087
+   },
+   {
+    "band": "0.30-0.50",
+    "OPENS": 20151,
+    "COMPLETION_5S": 0.0256,
+    "COMPLETION_1H": 0.4956,
+    "COMPLETION_SETTLEMENT": 0.7525,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.9669,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.2475,
+    "MERGES": 83672,
+    "EXACT_MATCHED_PNL": 352438.89,
+    "MATCHED_STAKE": 13457100.97,
+    "MATCHED_ROI": 0.02619
+   },
+   {
+    "band": "0.50-0.70",
+    "OPENS": 20459,
+    "COMPLETION_5S": 0.0232,
+    "COMPLETION_1H": 0.4819,
+    "COMPLETION_SETTLEMENT": 0.7502,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.99593,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.2498,
+    "MERGES": 85790,
+    "EXACT_MATCHED_PNL": -576322.04,
+    "MATCHED_STAKE": 19013170.39,
+    "MATCHED_ROI": -0.030312
+   },
+   {
+    "band": "0.70-0.90",
+    "OPENS": 6741,
+    "COMPLETION_5S": 0.0294,
+    "COMPLETION_1H": 0.6523,
+    "COMPLETION_SETTLEMENT": 0.7815,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.00584,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.2185,
+    "MERGES": 34007,
+    "EXACT_MATCHED_PNL": -591205.9,
+    "MATCHED_STAKE": 8945909.65,
+    "MATCHED_ROI": -0.066087
+   },
+   {
+    "band": "0.90-1.01",
+    "OPENS": 1377,
+    "COMPLETION_5S": 0.0428,
+    "COMPLETION_1H": 0.7524,
+    "COMPLETION_SETTLEMENT": 0.7625,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.01022,
+    "MEDIAN_PAIR_BASIS": 1.0,
+    "RESIDUAL_RATE": 0.2375,
+    "MERGES": 5770,
+    "EXACT_MATCHED_PNL": -94992.63,
+    "MATCHED_STAKE": 1651195.38,
+    "MATCHED_ROI": -0.05753
+   }
+  ],
+  "swisstony": [
+   {
+    "band": "0.00-0.10",
+    "OPENS": 19565,
+    "COMPLETION_5S": 0.0305,
+    "COMPLETION_1H": 0.4101,
+    "COMPLETION_SETTLEMENT": 0.6361,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.97597,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.3639,
+    "MERGES": 53750,
+    "EXACT_MATCHED_PNL": 557902.77,
+    "MATCHED_STAKE": 1413089.76,
+    "MATCHED_ROI": 0.394811
+   },
+   {
+    "band": "0.10-0.30",
+    "OPENS": 60354,
+    "COMPLETION_5S": 0.0291,
+    "COMPLETION_1H": 0.5062,
+    "COMPLETION_SETTLEMENT": 0.8234,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.97881,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.1766,
+    "MERGES": 311695,
+    "EXACT_MATCHED_PNL": 2507273.15,
+    "MATCHED_STAKE": 17387035.34,
+    "MATCHED_ROI": 0.144204
+   },
+   {
+    "band": "0.30-0.50",
+    "OPENS": 87366,
+    "COMPLETION_5S": 0.0366,
+    "COMPLETION_1H": 0.5197,
+    "COMPLETION_SETTLEMENT": 0.8692,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.98413,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.1308,
+    "MERGES": 644648,
+    "EXACT_MATCHED_PNL": 1219591.85,
+    "MATCHED_STAKE": 60942964.34,
+    "MATCHED_ROI": 0.020012
+   },
+   {
+    "band": "0.50-0.70",
+    "OPENS": 87192,
+    "COMPLETION_5S": 0.0423,
+    "COMPLETION_1H": 0.5525,
+    "COMPLETION_SETTLEMENT": 0.8581,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.99098,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.1419,
+    "MERGES": 650326,
+    "EXACT_MATCHED_PNL": -1263133.48,
+    "MATCHED_STAKE": 79398462.48,
+    "MATCHED_ROI": -0.015909
+   },
+   {
+    "band": "0.70-0.90",
+    "OPENS": 68051,
+    "COMPLETION_5S": 0.0474,
+    "COMPLETION_1H": 0.4869,
+    "COMPLETION_SETTLEMENT": 0.7777,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.99779,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.2223,
+    "MERGES": 390831,
+    "EXACT_MATCHED_PNL": -2015153.48,
+    "MATCHED_STAKE": 68636412.35,
+    "MATCHED_ROI": -0.02936
+   },
+   {
+    "band": "0.90-1.01",
+    "OPENS": 45368,
+    "COMPLETION_5S": 0.0178,
+    "COMPLETION_1H": 0.1661,
+    "COMPLETION_SETTLEMENT": 0.2838,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.00932,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.7162,
+    "MERGES": 61549,
+    "EXACT_MATCHED_PNL": -746356.3,
+    "MATCHED_STAKE": 21339675.85,
+    "MATCHED_ROI": -0.034975
+   }
+  ],
+  "kch123": [
+   {
+    "band": "0.00-0.10",
+    "OPENS": 54,
+    "COMPLETION_5S": 0.037,
+    "COMPLETION_1H": 0.4815,
+    "COMPLETION_SETTLEMENT": 0.537,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.95879,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.463,
+    "MERGES": 125,
+    "EXACT_MATCHED_PNL": 2579.72,
+    "MATCHED_STAKE": 4336.23,
+    "MATCHED_ROI": 0.594922
+   },
+   {
+    "band": "0.10-0.30",
+    "OPENS": 256,
+    "COMPLETION_5S": 0.0273,
+    "COMPLETION_1H": 0.6133,
+    "COMPLETION_SETTLEMENT": 0.7812,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.96753,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.2188,
+    "MERGES": 1567,
+    "EXACT_MATCHED_PNL": 73527.04,
+    "MATCHED_STAKE": 320035.87,
+    "MATCHED_ROI": 0.229746
+   },
+   {
+    "band": "0.30-0.50",
+    "OPENS": 1531,
+    "COMPLETION_5S": 0.0052,
+    "COMPLETION_1H": 0.4213,
+    "COMPLETION_SETTLEMENT": 0.5976,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.99975,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.4024,
+    "MERGES": 12591,
+    "EXACT_MATCHED_PNL": -303010.81,
+    "MATCHED_STAKE": 3667018.56,
+    "MATCHED_ROI": -0.082631
+   },
+   {
+    "band": "0.50-0.70",
+    "OPENS": 1326,
+    "COMPLETION_5S": 0.0045,
+    "COMPLETION_1H": 0.411,
+    "COMPLETION_SETTLEMENT": 0.586,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.01993,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.414,
+    "MERGES": 12318,
+    "EXACT_MATCHED_PNL": -292483.95,
+    "MATCHED_STAKE": 4634096.68,
+    "MATCHED_ROI": -0.063116
+   },
+   {
+    "band": "0.70-0.90",
+    "OPENS": 491,
+    "COMPLETION_5S": 0.0041,
+    "COMPLETION_1H": 0.4908,
+    "COMPLETION_SETTLEMENT": 0.6334,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.07505,
+    "MEDIAN_PAIR_BASIS": 1.01,
+    "RESIDUAL_RATE": 0.3666,
+    "MERGES": 3110,
+    "EXACT_MATCHED_PNL": -137655.18,
+    "MATCHED_STAKE": 1514516.66,
+    "MATCHED_ROI": -0.09089
+   },
+   {
+    "band": "0.90-1.01",
+    "OPENS": 76,
+    "COMPLETION_5S": 0.0,
+    "COMPLETION_1H": 0.1316,
+    "COMPLETION_SETTLEMENT": 0.1842,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.17421,
+    "MEDIAN_PAIR_BASIS": 1.03,
+    "RESIDUAL_RATE": 0.8158,
+    "MERGES": 187,
+    "EXACT_MATCHED_PNL": -16543.55,
+    "MATCHED_STAKE": 55216.62,
+    "MATCHED_ROI": -0.299612
+   }
+  ],
+  "w2c33": [
+   {
+    "band": "0.00-0.10",
+    "OPENS": 405,
+    "COMPLETION_5S": 0.0,
+    "COMPLETION_1H": 0.1259,
+    "COMPLETION_SETTLEMENT": 0.1901,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.89914,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.8099,
+    "MERGES": 3434,
+    "EXACT_MATCHED_PNL": 273203.89,
+    "MATCHED_STAKE": 353263.09,
+    "MATCHED_ROI": 0.773372
+   },
+   {
+    "band": "0.10-0.30",
+    "OPENS": 1220,
+    "COMPLETION_5S": 0.009,
+    "COMPLETION_1H": 0.2131,
+    "COMPLETION_SETTLEMENT": 0.323,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.92507,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.677,
+    "MERGES": 10991,
+    "EXACT_MATCHED_PNL": 611534.17,
+    "MATCHED_STAKE": 4420696.99,
+    "MATCHED_ROI": 0.138334
+   },
+   {
+    "band": "0.30-0.50",
+    "OPENS": 3470,
+    "COMPLETION_5S": 0.0101,
+    "COMPLETION_1H": 0.2259,
+    "COMPLETION_SETTLEMENT": 0.3438,
+    "MEAN_COMPLETED_PAIR_BASIS": 0.97368,
+    "MEDIAN_PAIR_BASIS": 0.98,
+    "RESIDUAL_RATE": 0.6562,
+    "MERGES": 32761,
+    "EXACT_MATCHED_PNL": -1265729.8,
+    "MATCHED_STAKE": 30291729.09,
+    "MATCHED_ROI": -0.041785
+   },
+   {
+    "band": "0.50-0.70",
+    "OPENS": 3133,
+    "COMPLETION_5S": 0.008,
+    "COMPLETION_1H": 0.2183,
+    "COMPLETION_SETTLEMENT": 0.3444,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.00981,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.6556,
+    "MERGES": 28782,
+    "EXACT_MATCHED_PNL": -3234099.08,
+    "MATCHED_STAKE": 37433536.74,
+    "MATCHED_ROI": -0.086396
+   },
+   {
+    "band": "0.70-0.90",
+    "OPENS": 1820,
+    "COMPLETION_5S": 0.0049,
+    "COMPLETION_1H": 0.1467,
+    "COMPLETION_SETTLEMENT": 0.2665,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.06234,
+    "MEDIAN_PAIR_BASIS": 0.99,
+    "RESIDUAL_RATE": 0.7335,
+    "MERGES": 13328,
+    "EXACT_MATCHED_PNL": -3897809.67,
+    "MATCHED_STAKE": 21720655.36,
+    "MATCHED_ROI": -0.179452
+   },
+   {
+    "band": "0.90-1.01",
+    "OPENS": 753,
+    "COMPLETION_5S": 0.004,
+    "COMPLETION_1H": 0.0544,
+    "COMPLETION_SETTLEMENT": 0.1195,
+    "MEAN_COMPLETED_PAIR_BASIS": 1.06371,
+    "MEDIAN_PAIR_BASIS": 1.0,
+    "RESIDUAL_RATE": 0.8805,
+    "MERGES": 1573,
+    "EXACT_MATCHED_PNL": -368203.5,
+    "MATCHED_STAKE": 3788371.68,
+    "MATCHED_ROI": -0.097193
+   }
+  ]
+ },
+ "EXACT_ATTRIBUTION": {
+  "rn1": {
+   "EXACT_BUCKET_PNL_ATTRIBUTION": "ESTABLISHED",
+   "residual_vs_estimator": 0.0
+  },
+  "ferrarichampions2026": {
+   "EXACT_BUCKET_PNL_ATTRIBUTION": "ESTABLISHED",
+   "residual_vs_estimator": 0.0
+  },
+  "homerunhazard": {
+   "EXACT_BUCKET_PNL_ATTRIBUTION": "ESTABLISHED",
+   "residual_vs_estimator": 0.0
+  },
+  "swisstony": {
+   "EXACT_BUCKET_PNL_ATTRIBUTION": "ESTABLISHED",
+   "residual_vs_estimator": 0.0
+  },
+  "kch123": {
+   "EXACT_BUCKET_PNL_ATTRIBUTION": "ESTABLISHED",
+   "residual_vs_estimator": 0.0
+  },
+  "w2c33": {
+   "EXACT_BUCKET_PNL_ATTRIBUTION": "ESTABLISHED",
+   "residual_vs_estimator": 0.0
+  }
+ },
+ "WITHIN_ACCOUNT": {
+  "rn1": {
+   "spearman_band_vs_roi": -1.0,
+   "sign_pattern": "++++--",
+   "sign_crossings": 1,
+   "low_bands_positive_high_bands_negative": true
+  },
+  "ferrarichampions2026": {
+   "spearman_band_vs_roi": -1.0,
+   "sign_pattern": "++++--",
+   "sign_crossings": 1,
+   "low_bands_positive_high_bands_negative": true
+  },
+  "homerunhazard": {
+   "spearman_band_vs_roi": -0.9429,
+   "sign_pattern": "+++---",
+   "sign_crossings": 1,
+   "low_bands_positive_high_bands_negative": true
+  },
+  "swisstony": {
+   "spearman_band_vs_roi": -1.0,
+   "sign_pattern": "+++---",
+   "sign_crossings": 1,
+   "low_bands_positive_high_bands_negative": true
+  },
+  "kch123": {
+   "spearman_band_vs_roi": -0.9429,
+   "sign_pattern": "++----",
+   "sign_crossings": 1,
+   "low_bands_positive_high_bands_negative": true
+  },
+  "w2c33": {
+   "spearman_band_vs_roi": -0.9429,
+   "sign_pattern": "++----",
+   "sign_crossings": 1,
+   "low_bands_positive_high_bands_negative": true
+  }
+ },
+ "MIX_SUFFICIENCY": {
+  "weights": {
+   "0.00-0.10": 0.005527,
+   "0.10-0.30": 0.069765,
+   "0.30-0.50": 0.27896,
+   "0.50-0.70": 0.355835,
+   "0.70-0.90": 0.233299,
+   "0.90-1.01": 0.056615
+  },
+  "per_account": {
+   "rn1": {
+    "actual_roi": 0.048554,
+    "common_mix_roi": 0.045446
+   },
+   "ferrarichampions2026": {
+    "actual_roi": 0.070579,
+    "common_mix_roi": 0.062312
+   },
+   "homerunhazard": {
+    "actual_roi": -0.010435,
+    "common_mix_roi": -0.00968
+   },
+   "swisstony": {
+    "actual_roi": 0.001044,
+    "common_mix_roi": 0.003334
+   },
+   "kch123": {
+    "actual_roi": -0.066069,
+    "common_mix_roi": -0.06436
+   },
+   "w2c33": {
+    "actual_roi": -0.080413,
+    "common_mix_roi": -0.075842
+   }
+  }
+ },
+ "CONTROLS_AVAILABLE": {
+  "sport_or_question": "PARTIAL \u2014 BY_SPORT_OR_QUESTION top-25 only",
+  "league": "NOT_IDENTIFIED",
+  "market_type": "NOT_IDENTIFIED",
+  "first_leg_size": "AVAILABLE \u2014 BY_FILL_SIZE_BUCKET (no P&L)",
+  "first_leg_side": "NOT_IDENTIFIED",
+  "time_period": "AVAILABLE \u2014 BY_WEEK (no P&L)",
+  "pregame_live_time_to_event": "NOT_IDENTIFIED",
+  "liquidity_book_state": "NOT_IDENTIFIED"
+ },
+ "BETTOR_PASSIVE_FILL_PROBABILITY": "NOT_IDENTIFIED",
+ "BETTOR_EXPECTED_PAIR_PNL": "NOT_IDENTIFIED"
+}
