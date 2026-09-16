@@ -24,26 +24,54 @@ positive F0/F1/F2 here is produced by exactly one route -- `with_tape()`, which
 delegates to `fill_model_v2.evaluate` over a real execution tape and reads its
 verdict rather than re-deriving one.
 
-IDENTIFICATION IS ASYMMETRIC, AND THAT ASYMMETRY IS THE USEFUL RESULT.
+AND THE NEGATIVE IS NOT FREE EITHER. THE UPPER BOUND IS ARITHMETIC, NOT A
+VERDICT.
 
-What ticks CAN settle is the NEGATIVE, by an upper bound nobody can argue with.
-Credit EVERY share the market traded after entry to our price AND to our side --
-the most generous reading physically available, and one that is certainly too
-generous:
+The tempting move is to refute a fill from an upper bound: credit EVERY share
+the market traded after entry to our price AND to our side -- the most generous
+reading physically available -- and if even that does not clear the queue
+displayed ahead of us, call the model refuted.
 
     MAXIMAL_ATTRIBUTION = sum of SHARES_TRADED_DELTA over the window
 
-If even that does not clear the queue displayed ahead of us, then the true
-at-price volume does not either, and the model is REFUTED rather than unknown:
+    F0 needs   at >= QUEUE_AHEAD + QUOTE_SIZE   -> bound fails if MAX < that
+    F1 needs   at >  QUEUE_AHEAD                -> bound fails if MAX <= AHEAD
+    F2 needs   at >  0  (plus depletion)        -> bound fails only if MAX == 0
+    F3 needs   at >  0  or through-volume > 0   -> bound fails only if MAX == 0
 
-    F0 needs   at >= QUEUE_AHEAD + QUOTE_SIZE   -> refuted if MAX < that
-    F1 needs   at >  QUEUE_AHEAD                -> refuted if MAX <= QUEUE_AHEAD
-    F2 needs   at >  0  (plus depletion)        -> refuted only if MAX == 0
-    F3 needs   at >  0  or through-volume > 0   -> refuted only if MAX == 0
+The arithmetic is sound. THE INPUT IS NOT ESTABLISHED. `SHARES_TRADED` has
+    SHARES_TRADED_RESET_SEMANTICS = NOT_IDENTIFIED
+and until its venue semantics are known -- cumulative or interval, market-wide
+or side-specific, blocks in or out, where it resets, how often it updates -- a
+delta of zero cannot be distinguished from a field that did not update. That
+case is the dangerous one, because it produces a CONFIDENT WRONG ANSWER: a
+quiet feed reads exactly like a quiet market and would refute every model,
+including the touch bound.
 
-MAXIMAL_ATTRIBUTION == 0 -- an interval in which the market traded nothing at
-all -- refutes every model including the touch bound, and is expected to be the
-common case in a book polled every few seconds.
+So the bound is computed, carried, and NOT promoted:
+
+    SHARES_TRADED_DELTA_STATUS = CONSERVATIVE_DIAGNOSTIC_ONLY
+    FILL_REFUTATION_STATUS     = NOT_IDENTIFIED
+    WHY                        = AGGREGATE_VOLUME_UPPER_BOUND_INSUFFICIENT
+
+which is NOT equivalent to observed execution evidence, and `PROVEN_NOT_FILLED`
+is not an output of this programme at all. `tick_semantics` owns that gate and
+keeps RUNTIME BEHAVIOUR (what the field did in our capture -- ours to measure)
+strictly apart from VENUE SEMANTICS (what it means -- not ours to infer).
+
+THREE DIFFERENT EVENTS, NEVER COLLAPSED (and this is structural, not a naming
+convention):
+
+    TOUCH               the market reached our price
+    TRADE_EVIDENCE      a QUALIFYING execution occurred at our price after our
+                        hypothetical entry -- CLOB, typed, not a block
+    COUNTERFACTUAL_FILL trade evidence PLUS the queue model establishes that our
+                        order would have executed
+
+    TOUCH != TRADE_EVIDENCE != COUNTERFACTUAL_FILL
+
+Each is recorded separately on every row. From ticks alone the first is
+observable and the other two are NOT_IDENTIFIED.
 
 THE CONSEQUENCE FOR QUOTE PLACEMENT, stated here because it is structural and
 not a tuning knob: joining the back of a DEEP displayed queue is refutable from
@@ -72,6 +100,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "tape"))
 
+import tick_semantics as TS                                # noqa: E402
 from position_state import NOT_IDENTIFIED, COUNTERFACTUAL  # noqa: E402,F401
 
 SHADOW_ONLY = True
@@ -96,6 +125,32 @@ FILL_STATUSES = (NOT_FILLED, COUNTERFACTUAL_FILL_F0, COUNTERFACTUAL_FILL_F1,
 # A touch is not one of them. Named here so the absence is deliberate.
 TOUCH_IS_NOT_A_FILL_STATUS = True
 FILL_STATUS_FOR_A_TOUCH = UNKNOWN
+
+# ---------------------------------------------------------------------------
+# THE THREE EVENTS. Separate names, separate fields, separate evidence.
+# ---------------------------------------------------------------------------
+TOUCH = "TOUCH"
+TRADE_EVIDENCE = "TRADE_EVIDENCE"
+COUNTERFACTUAL_FILL = "COUNTERFACTUAL_FILL"
+
+EVENT_LADDER = (TOUCH, TRADE_EVIDENCE, COUNTERFACTUAL_FILL)
+
+# Each rung requires strictly more than the one below it, and no rung is ever
+# read as the next one up. Written as data so a test can assert the ladder
+# rather than trusting three prose sentences to stay true.
+EVENT_REQUIRES = {
+    TOUCH: "THE_MARKET_REACHED_OUR_PRICE",
+    TRADE_EVIDENCE: "A_QUALIFYING_CLOB_EXECUTION_AT_OUR_PRICE_AFTER_ENTRY",
+    COUNTERFACTUAL_FILL: "TRADE_EVIDENCE_PLUS_THE_QUEUE_MODEL",
+}
+TOUCH_IS_NOT_TRADE_EVIDENCE = True
+TRADE_EVIDENCE_IS_NOT_A_COUNTERFACTUAL_FILL = True
+EVENTS_ARE_DISTINCT = True
+
+# A block print at our price is a TRADE and is NOT trade evidence: it never
+# touched the book, so it depleted no queue.
+BLOCK_IS_NOT_TRADE_EVIDENCE = True
+UNKNOWN_EXECUTION_TYPE_IS_NOT_TRADE_EVIDENCE = True
 
 MODELS = ("F0", "F1", "F2")
 STATUS_FOR_MODEL = {"F0": COUNTERFACTUAL_FILL_F0, "F1": COUNTERFACTUAL_FILL_F1,
@@ -340,17 +395,22 @@ def walk_after_entry(quote, ticks, horizon_s=None):
 # THE VERDICT -- refutation from ticks, support only from a tape
 # ---------------------------------------------------------------------------
 
-def _refuted(model, maximal, ahead, size):
-    """Is `model` refuted by the most generous attribution available?
+def _bound_fails(model, maximal, ahead, size):
+    """Does the most generous attribution FAIL to reach what `model` needs?
 
-    Returns True (refuted), False (not refuted -- NOT the same as supported),
-    or NOT_IDENTIFIED when the window itself is unreadable.
+    ARITHMETIC ONLY. True here is not a refutation -- it is the statement that
+    the upper bound, TAKEN AT FACE VALUE, would not clear the queue. Whether the
+    bound may be taken at face value is `tick_semantics`' question, and the
+    answer today is no.
+
+    Returns True, False, or NOT_IDENTIFIED when the window is unreadable.
     """
     if maximal == NOT_IDENTIFIED:
         return NOT_IDENTIFIED
     if maximal == 0:
-        # Nothing traded. Every model's shared precondition `at > 0` fails, and
-        # so does the touch bound.
+        # The field did not move. That is NOT "nothing traded" until the field's
+        # update semantics are known -- see `tick_semantics`. Arithmetically the
+        # bound fails for every model; whether that means anything is gated.
         return True
     if ahead == NOT_IDENTIFIED:
         return NOT_IDENTIFIED
@@ -368,43 +428,76 @@ def _refuted(model, maximal, ahead, size):
     raise ValueError("unknown model: %r" % (model,))
 
 
-def fill_status(quote, walk, model="F1"):
-    """FILL_STATUS from tick evidence alone: NOT_FILLED or UNKNOWN. Never a fill.
+def fill_status(quote, walk, model="F1", semantics=None, runtime=None):
+    """FILL_STATUS from tick evidence alone. Today: UNKNOWN, with a reason.
 
-    This function has NO branch that returns COUNTERFACTUAL_FILL_*. That is not
-    an oversight to be patched later -- it is the identification result, and
-    `test_maker_fill.py` proves the absence by walking the AST.
+    TWO GATES, AND THEY FAIL IN OPPOSITE DIRECTIONS.
+
+    The POSITIVE gate: this function has NO branch that returns
+    COUNTERFACTUAL_FILL_*. Ticks carry no per-price attribution, so a fill
+    cannot be supported here at all.
+
+    The NEGATIVE gate, which is the correction that produced this version: the
+    volume bound is ARITHMETIC over a field whose venue semantics are
+    NOT_IDENTIFIED. A zero delta may be a quiet market or a lazy field, and
+    those are different facts. So a failing bound yields
+    FILL_REFUTATION_STATUS = NOT_IDENTIFIED and the separately named
+    AGGREGATE_VOLUME_UPPER_BOUND_INSUFFICIENT -- which is NOT equivalent to
+    observed execution evidence -- rather than NOT_FILLED.
+
+    `semantics` / `runtime` are how that gate opens: both the venue's meaning
+    and our own capture's behaviour, checked by `tick_semantics`. Passing a
+    runtime diagnostic alone does not open it.
     """
     if model not in MODELS:
         raise ValueError("unknown model: %r" % (model,))
     maximal = walk.get("MAXIMAL_ATTRIBUTION_AT_OUR_PRICE", NOT_IDENTIFIED)
     ahead = quote.get("QUEUE_AHEAD_ESTIMATE", NOT_IDENTIFIED)
     size = quote.get("QUOTE_SIZE", NOT_IDENTIFIED)
-    ref = _refuted(model, maximal, ahead, size)
+    bound = _bound_fails(model, maximal, ahead, size)
+    ref = TS.refutation_status(bound is True, semantics, runtime)
 
-    if ref is True:
+    if ref["FILL_REFUTATION_STATUS"] == "REFUTED":
         status, why = NOT_FILLED, (
             "MAXIMAL_ATTRIBUTION_DOES_NOT_CLEAR_QUEUE_AHEAD"
             if maximal != 0 else "NO_VOLUME_TRADED_IN_WINDOW")
+    elif bound is NOT_IDENTIFIED:
+        status, why = UNKNOWN, "WINDOW_UNREADABLE"
+    elif bound is True:
+        # The bound would have refuted, and is not allowed to.
+        status, why = UNKNOWN, TS.AGGREGATE_VOLUME_UPPER_BOUND_INSUFFICIENT
     else:
-        status, why = UNKNOWN, (
-            "WINDOW_UNREADABLE" if ref == NOT_IDENTIFIED
-            else "NO_PER_PRICE_ATTRIBUTION_WITHOUT_TAPE")
+        status, why = UNKNOWN, "NO_PER_PRICE_ATTRIBUTION_WITHOUT_TAPE"
 
-    return {
+    out = {
         "FILL_STATUS": status,
         "FILL_MODEL": model,
         "FILL_STATUS_BASIS": "TICK_CAPTURE_ONLY",
         "WHY": why,
-        "MODEL_REFUTED": ref,
+        "AGGREGATE_VOLUME_BOUND_ARITHMETIC": bound,
         "MAXIMAL_ATTRIBUTION_AT_OUR_PRICE": maximal,
         "QUEUE_AHEAD_ESTIMATE": ahead,
         "VOLUME_AT_OUR_PRICE": NOT_IDENTIFIED,
+
+        # The three events, side by side, never collapsed into one another.
+        "TOUCH": walk.get("TOUCHED_OUR_PRICE"),
         "TOUCHED_OUR_PRICE": walk.get("TOUCHED_OUR_PRICE"),
+        "TRADE_EVIDENCE": NOT_IDENTIFIED,
+        "COUNTERFACTUAL_FILL": NOT_IDENTIFIED,
+        "TRADE_EVIDENCE_BASIS": "REQUIRES_A_TYPED_EXECUTION_AT_OUR_PRICE",
+
         "POSITIVE_SUPPORT_POSSIBLE_FROM_THIS_EVIDENCE": False,
         "POSITIVE_FILL_SUPPORT_REQUIRES": POSITIVE_FILL_SUPPORT_REQUIRES,
         "ACTUAL_BETTOR_FILL": NOT_IDENTIFIED,
     }
+    # The refutation block carries its own WHY about the FIELD; the row's WHY
+    # is about the QUOTE. Merging them under one key would let the field's
+    # excuse overwrite the quote's reason, which is how a row ends up saying
+    # something true about the wrong subject.
+    ref = dict(ref)
+    ref["REFUTATION_WHY"] = ref.pop("WHY")
+    out.update(ref)
+    return out
 
 
 def with_tape(quote, tape, t1=None, block_index=None, model="F1",
@@ -442,12 +535,25 @@ def with_tape(quote, tape, t1=None, block_index=None, model="F1",
     else:
         status, why = UNKNOWN, "TAPE_VERDICT_NOT_IDENTIFIED"
 
+    clob_at_price = ev.get("TRADED_VOLUME_AT_PRICE")
     return {
         "FILL_STATUS": status,
         "FILL_MODEL": model,
         "FILL_STATUS_BASIS": "EXECUTION_TAPE_JOIN",
         "WHY": why,
-        "TRADED_VOLUME_AT_PRICE": ev.get("TRADED_VOLUME_AT_PRICE"),
+
+        # The three events again, and here the middle one is finally
+        # observable. TRADE_EVIDENCE counts CLOB volume at our price ONLY: a
+        # block never touched the book and an untyped print is not known to
+        # have, so neither depletes a queue and neither is evidence.
+        "TOUCH": ev.get("F3_TOUCH_ONLY") == "YES",
+        "TRADE_EVIDENCE": (clob_at_price > 0
+                           if clob_at_price is not None else NOT_IDENTIFIED),
+        "TRADE_EVIDENCE_BASIS": "CLOB_VOLUME_AT_OUR_PRICE_AFTER_ENTRY",
+        "COUNTERFACTUAL_FILL": status in (COUNTERFACTUAL_FILL_F0,
+                                          COUNTERFACTUAL_FILL_F1,
+                                          COUNTERFACTUAL_FILL_F2),
+        "TRADED_VOLUME_AT_PRICE": clob_at_price,
         "BLOCK_VOLUME_AT_PRICE": ev.get("BLOCK_VOLUME_AT_PRICE"),
         "UNKNOWN_TYPE_VOLUME_AT_PRICE": ev.get("UNKNOWN_TYPE_VOLUME_AT_PRICE"),
         "TIME_TO_QUEUE_DEPLETION": ev.get("TIME_TO_QUEUE_DEPLETION"),
@@ -493,9 +599,10 @@ def promote_touch_to_fill(*_a, **_k):
 # ---------------------------------------------------------------------------
 
 REPORTABLE_FILL_FIELDS = (
-    "QUOTES_EVALUATED", "REFUTED_NOT_FILLED", "UNKNOWN_NO_ATTRIBUTION",
-    "UNKNOWN_WINDOW_UNREADABLE", "TOUCHED_BUT_UNKNOWN",
-    "COUNTERFACTUAL_FILLS_FROM_TAPE",
+    "HYPOTHETICAL_QUOTES", "TOUCHES", "TRADE_EVIDENCE",
+    "ADMITTED_COUNTERFACTUAL_FILLS", "REFUTED_NOT_FILLED",
+    "UNKNOWN_NO_ATTRIBUTION", "UNKNOWN_VOLUME_BOUND_INSUFFICIENT",
+    "UNKNOWN_WINDOW_UNREADABLE",
 )
 
 FORBIDDEN_FILL_FIELDS = ("FILL_RATE", "MAKER_FILL_PROBABILITY",
@@ -515,21 +622,33 @@ def summarise_fills(rows):
     refuted = sum(1 for r in rows if r.get("FILL_STATUS") == NOT_FILLED)
     unknown_attr = sum(1 for r in rows if r.get("WHY")
                        == "NO_PER_PRICE_ATTRIBUTION_WITHOUT_TAPE")
+    bound_short = sum(1 for r in rows if r.get("WHY")
+                      == TS.AGGREGATE_VOLUME_UPPER_BOUND_INSUFFICIENT)
     unreadable = sum(1 for r in rows if r.get("WHY") == "WINDOW_UNREADABLE")
-    touched = sum(1 for r in rows if r.get("FILL_STATUS") == UNKNOWN
-                  and r.get("TOUCHED_OUR_PRICE"))
+    touches = sum(1 for r in rows if r.get("TOUCH") is True)
+    evidence = sum(1 for r in rows if r.get("TRADE_EVIDENCE") is True)
     fills = sum(1 for r in rows if is_a_fill(r))
     return {
-        "QUOTES_EVALUATED": n,
+        # The three events reported as three counts, in ladder order, so the
+        # gap between them is visible instead of inferred.
+        "HYPOTHETICAL_QUOTES": n,
+        "TOUCHES": touches,
+        "TRADE_EVIDENCE": evidence,
+        "ADMITTED_COUNTERFACTUAL_FILLS": fills,
+
         "REFUTED_NOT_FILLED": refuted,
         "UNKNOWN_NO_ATTRIBUTION": unknown_attr,
+        "UNKNOWN_VOLUME_BOUND_INSUFFICIENT": bound_short,
         "UNKNOWN_WINDOW_UNREADABLE": unreadable,
-        "TOUCHED_BUT_UNKNOWN": touched,
-        "COUNTERFACTUAL_FILLS_FROM_TAPE": fills,
+        "TOUCHED_BUT_UNKNOWN": sum(1 for r in rows
+                                   if r.get("FILL_STATUS") == UNKNOWN
+                                   and r.get("TOUCH") is True),
         "FILL_RATE": (NOT_IDENTIFIED if (n - refuted - fills) > 0
                       else (D(fills) / D(n) if n else NOT_IDENTIFIED)),
         "FILL_RATE_DENOMINATOR_COMPLETE": (n - refuted - fills) == 0,
         "UNKNOWN_COUNTED_AS_MISS": False,
+        "TOUCH_COUNTED_AS_FILL": False,
+        "TRADE_EVIDENCE_COUNTED_AS_FILL": False,
         "PROFITABILITY": NOT_IDENTIFIED,
         "WIN_RATE": NOT_IDENTIFIED,
     }

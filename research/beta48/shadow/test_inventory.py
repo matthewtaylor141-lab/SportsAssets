@@ -334,3 +334,29 @@ class TheSummaryReportsNothingItCannotSupport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheInventoryClockStartsOnlyFromAnAdmittedFill(unittest.TestCase):
+
+    def test_the_clock_is_stamped_by_the_fill_that_opened_it(self):
+        q, f, inv = filled_long()
+        self.assertEqual(inv["INVENTORY_START_TIME"], q["QUOTE_TIME"])
+        self.assertEqual(inv["INVENTORY_CLOCK_STARTED_BY"], f["FILL_STATUS"])
+        self.assertTrue(inv["CLOCK_MAY_START_ONLY_FROM_AN_ADMITTED_FILL"])
+        self.assertIn(inv["INVENTORY_CLOCK_STARTED_BY"],
+                      (MF.COUNTERFACTUAL_FILL_F0, MF.COUNTERFACTUAL_FILL_F1,
+                       MF.COUNTERFACTUAL_FILL_F2))
+
+    def test_no_clock_exists_without_one(self):
+        q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, "10")
+        for w in (window(["0"]), window(["500"])):
+            f = MF.fill_status(q, MF.walk_after_entry(q, w))
+            with self.assertRaises(INV.FillNotIdentified):
+                INV.open_inventory(q, f)
+
+    def test_every_duration_is_measured_from_that_start(self):
+        _, _, inv = filled_long(size="100")
+        o = INV.inventory_outcome(inv, window(["1", "1"]))
+        self.assertEqual(inv["INVENTORY_START_ELAPSED_S"],
+                         inv["ENTRY_ELAPSED_S"])
+        self.assertEqual(o["SECONDS_HELD"], D("6"))

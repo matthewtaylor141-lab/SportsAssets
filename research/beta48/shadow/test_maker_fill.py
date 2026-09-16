@@ -154,15 +154,18 @@ class TheWalk(unittest.TestCase):
         self.assertTrue(w["TOUCH_IS_NOT_A_FILL"])
         self.assertEqual(MF.fill_status(q, w)["FILL_STATUS"], MF.UNKNOWN)
 
-    def test_a_touch_with_no_volume_is_refuted_not_promoted(self):
-        # The market came to our price and nothing traded. The touch is
-        # evidence of NOTHING, and the volume bound refutes the fill outright.
+    def test_a_touch_with_no_volume_is_still_not_a_fill(self):
+        # The market came to our price and the volume field did not move. The
+        # touch is evidence of NOTHING -- and neither is the still field, until
+        # its semantics are known. So: UNKNOWN, with the bound named.
         q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, "10")
         rows = window(["0"])
         rows[0]["ASK"] = "0.54"
         w = MF.walk_after_entry(q, rows)
+        r = MF.fill_status(q, w)
         self.assertTrue(w["TOUCHED_OUR_PRICE"])
-        self.assertEqual(MF.fill_status(q, w)["FILL_STATUS"], MF.NOT_FILLED)
+        self.assertEqual(r["FILL_STATUS"], MF.UNKNOWN)
+        self.assertFalse(MF.is_a_fill(r))
 
     def test_excursions_are_signed_for_the_side_we_would_hold(self):
         q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, "10")
@@ -174,13 +177,71 @@ class TheWalk(unittest.TestCase):
         self.assertEqual(w["MAX_FAVORABLE_EXCURSION"], D("0.07"))
 
 
-class RefutationFromTicks(unittest.TestCase):
+# What `tick_semantics` would need to be told before a volume bound may carry a
+# verdict. NONE of this is established for this venue -- these fixtures exist to
+# exercise the arithmetic behind the gate, not to assert it is open.
+SEM_OK = {"CUMULATIVE_OR_INTERVAL": "CUMULATIVE",
+          "MARKET_WIDE_OR_SIDE_SPECIFIC": "MARKET_WIDE",
+          "RESET_BOUNDARY": "KNOWN_AND_AVOIDABLE_IN_WINDOW"}
+RUN_OK = {"MONOTONIC_WITHIN_MARKET": True, "RESET_EVENTS_OBSERVED": 0,
+          "NEGATIVE_DELTAS_OBSERVED": 0}
+
+
+class TheVolumeBoundIsGated(unittest.TestCase):
+    """SHARES_TRADED may not carry a hard refutation on an unproven field."""
+
+    def _status(self, deltas, size="10", model="F1", improve=None, **kw):
+        q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, size,
+                                  improve_ticks=improve)
+        w = MF.walk_after_entry(q, window(deltas))
+        return MF.fill_status(q, w, model=model, **kw)
+
+    def test_by_default_a_failing_bound_is_not_a_refutation(self):
+        r = self._status(["50", "40"])          # 90 < 100 ahead
+        self.assertTrue(r["AGGREGATE_VOLUME_BOUND_ARITHMETIC"])
+        self.assertEqual(r["FILL_STATUS"], MF.UNKNOWN)
+        self.assertEqual(r["FILL_REFUTATION_STATUS"], MF.NOT_IDENTIFIED)
+        self.assertEqual(r["WHY"],
+                         "AGGREGATE_VOLUME_UPPER_BOUND_INSUFFICIENT")
+        self.assertFalse(r["EQUIVALENT_TO_EXECUTION_EVIDENCE"])
+
+    def test_a_still_field_is_not_a_quiet_market(self):
+        """The dangerous case: a lazy feed would refute every model."""
+        for m in MF.MODELS:
+            r = self._status(["0", "0"], model=m)
+            self.assertEqual(r["FILL_STATUS"], MF.UNKNOWN, m)
+            self.assertEqual(r["FILL_REFUTATION_STATUS"], MF.NOT_IDENTIFIED)
+
+    def test_runtime_evidence_alone_does_not_open_the_gate(self):
+        r = self._status(["50"], runtime=RUN_OK)
+        self.assertEqual(r["FILL_STATUS"], MF.UNKNOWN)
+        self.assertIn("CUMULATIVE_OR_INTERVAL", r["SEMANTICS_MISSING"])
+
+    def test_venue_semantics_alone_do_not_open_it_either(self):
+        r = self._status(["50"], semantics=SEM_OK)
+        self.assertEqual(r["FILL_STATUS"], MF.UNKNOWN)
+
+    def test_a_misbehaving_capture_keeps_it_shut(self):
+        bad = dict(RUN_OK, RESET_EVENTS_OBSERVED=1)
+        r = self._status(["50"], semantics=SEM_OK, runtime=bad)
+        self.assertEqual(r["FILL_STATUS"], MF.UNKNOWN)
+
+    def test_proven_not_filled_is_not_an_output_of_this_programme(self):
+        import tick_semantics as TS
+        self.assertEqual(TS.PROVEN_NOT_FILLED,
+                         "REFUSED_NOT_AN_OUTPUT_OF_THIS_PROGRAMME")
+        self.assertNotIn("PROVEN_NOT_FILLED", MF.FILL_STATUSES)
+
+
+class TheArithmeticBehindTheGate(unittest.TestCase):
+    """Exercised with both halves supplied, so the bound itself stays pinned."""
 
     def _status(self, deltas, size="10", model="F1", improve=None):
         q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, size,
                                   improve_ticks=improve)
         w = MF.walk_after_entry(q, window(deltas))
-        return MF.fill_status(q, w, model=model)
+        return MF.fill_status(q, w, model=model, semantics=SEM_OK,
+                              runtime=RUN_OK)
 
     def test_no_volume_at_all_refutes_every_model(self):
         for m in MF.MODELS:
@@ -191,8 +252,13 @@ class RefutationFromTicks(unittest.TestCase):
     def test_volume_below_the_queue_refutes_f1(self):
         r = self._status(["50", "40"])          # 90 < 100 ahead
         self.assertEqual(r["FILL_STATUS"], MF.NOT_FILLED)
+        self.assertEqual(r["FILL_REFUTATION_STATUS"], "REFUTED")
         self.assertEqual(r["WHY"],
                          "MAXIMAL_ATTRIBUTION_DOES_NOT_CLEAR_QUEUE_AHEAD")
+
+    def test_even_then_it_is_not_execution_evidence(self):
+        r = self._status(["50"])
+        self.assertFalse(r["EQUIVALENT_TO_EXECUTION_EVIDENCE"])
 
     def test_volume_above_the_queue_is_unknown_not_a_fill(self):
         r = self._status(["500"])
@@ -217,7 +283,7 @@ class RefutationFromTicks(unittest.TestCase):
     def test_f2_is_not_refuted_by_the_queue_because_cancels_clear_it(self):
         r = self._status(["50"], model="F2")
         self.assertEqual(r["FILL_STATUS"], MF.UNKNOWN)
-        self.assertFalse(r["MODEL_REFUTED"])
+        self.assertFalse(r["AGGREGATE_VOLUME_BOUND_ARITHMETIC"])
 
     def test_an_unreadable_window_is_unknown_not_refuted(self):
         r = self._status([MF.NOT_IDENTIFIED])
@@ -236,6 +302,64 @@ class RefutationFromTicks(unittest.TestCase):
         w = MF.walk_after_entry(q, window(["1"]))
         with self.assertRaises(ValueError):
             MF.fill_status(q, w, model="F9")
+
+
+class TheThreeEventsAreDistinct(unittest.TestCase):
+
+    def test_the_ladder_is_ordered_and_each_rung_requires_more(self):
+        self.assertEqual(MF.EVENT_LADDER,
+                         (MF.TOUCH, MF.TRADE_EVIDENCE, MF.COUNTERFACTUAL_FILL))
+        self.assertTrue(MF.TOUCH_IS_NOT_TRADE_EVIDENCE)
+        self.assertTrue(MF.TRADE_EVIDENCE_IS_NOT_A_COUNTERFACTUAL_FILL)
+        self.assertEqual(len({MF.TOUCH, MF.TRADE_EVIDENCE,
+                              MF.COUNTERFACTUAL_FILL}), 3)
+
+    def test_ticks_give_a_touch_and_nothing_above_it(self):
+        q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, "10")
+        rows = window(["500"])
+        rows[0]["ASK"] = "0.54"
+        r = MF.fill_status(q, MF.walk_after_entry(q, rows))
+        self.assertTrue(r["TOUCH"])
+        self.assertEqual(r["TRADE_EVIDENCE"], MF.NOT_IDENTIFIED)
+        self.assertEqual(r["COUNTERFACTUAL_FILL"], MF.NOT_IDENTIFIED)
+
+    def test_a_tape_can_give_trade_evidence_without_a_fill(self):
+        q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, "10")
+        q["QUEUE_AHEAD_ESTIMATE"] = D("1000")
+        q["QUOTE_TIME"] = 0
+        r = MF.with_tape(q, [clob(1, "0.54", "50")], model="F1")
+        self.assertTrue(r["TRADE_EVIDENCE"])      # somebody traded at our price
+        self.assertFalse(r["COUNTERFACTUAL_FILL"])   # the queue was too long
+        self.assertEqual(r["FILL_STATUS"], MF.NOT_FILLED)
+
+    def test_a_block_at_our_price_is_not_trade_evidence(self):
+        q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, "10")
+        q["QUEUE_AHEAD_ESTIMATE"] = D("0")
+        q["QUOTE_TIME"] = 0
+        row = clob(1, "0.54", "500")
+        row["execution_type"] = "BLOCK_EXECUTION"
+        r = MF.with_tape(q, [row], model="F1")
+        self.assertFalse(r["TRADE_EVIDENCE"])
+        self.assertTrue(MF.BLOCK_IS_NOT_TRADE_EVIDENCE)
+
+    def test_an_untyped_print_is_not_trade_evidence(self):
+        q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, "10")
+        q["QUEUE_AHEAD_ESTIMATE"] = D("0")
+        q["QUOTE_TIME"] = 0
+        r = MF.with_tape(q, [{"time": 1, "symbol": "m", "price": "0.54",
+                              "qty": "500"}], model="F1")
+        self.assertFalse(r["TRADE_EVIDENCE"])
+        self.assertTrue(MF.UNKNOWN_EXECUTION_TYPE_IS_NOT_TRADE_EVIDENCE)
+
+    def test_the_summary_counts_all_three_separately(self):
+        q = MF.hypothetical_quote(tick(0), MF.SIDE_BID, "10")
+        q["QUEUE_AHEAD_ESTIMATE"] = D("1000")
+        q["QUOTE_TIME"] = 0
+        s = MF.summarise_fills([MF.with_tape(q, [clob(1, "0.54", "50")])])
+        self.assertEqual(s["TOUCHES"], 1)
+        self.assertEqual(s["TRADE_EVIDENCE"], 1)
+        self.assertEqual(s["ADMITTED_COUNTERFACTUAL_FILLS"], 0)
+        self.assertFalse(s["TRADE_EVIDENCE_COUNTED_AS_FILL"])
 
 
 class ATouchIsNeverPromoted(unittest.TestCase):

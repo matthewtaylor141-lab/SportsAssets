@@ -1423,21 +1423,42 @@ def incentive_split(trading_terms, incentive_terms):
 
 
 # ---------------------------------------------------------------------------
-# CAPACITY -- 788 HIGH_ACTIVITY MARKETS ARE NOT 788 OPPORTUNITIES
+# COUNTS -- 788 HIGH_ACTIVITY MARKETS ARE NOT 788 OPPORTUNITIES, AND 56
+#           VALIDATED EVENTS ARE NOT A CAPACITY EITHER
 # ---------------------------------------------------------------------------
+#
+# THE SECOND HALF OF THAT SENTENCE IS A CORRECTION TO MY OWN OUTPUT. Having
+# established that 788 markets resolve to 56 events, I reported the 56 as
+# INDEPENDENT_CAPACITY_LOWER_BOUND -- which quietly turned a COUNT OF EVENTS
+# into a statement about how much capital the venue can absorb. It is not one.
+# An event on which nothing is fillable has a capacity of zero, and an event
+# with deep two-sided books and fast turnover may carry many times another's.
+#
+# So the event count is reported as an EVENT COUNT, and capital capacity is
+# NOT_IDENTIFIED until every input below is measured. None of them is today.
 
 HIGH_ACTIVITY_CANDIDATE_MARKETS = 788
 HIGH_ACTIVITY_MEANS = "OBSERVED_HIGH_ACTIVITY_CANDIDATE_MARKETS"
 HIGH_ACTIVITY_DOES_NOT_MEAN = (
     "INDEPENDENT_OPPORTUNITIES", "ELIGIBLE_POSITIONS", "POSITIVE_EV_ENTRIES")
 
+EVENT_COUNT_IS_NOT_CAPITAL_CAPACITY = True
+CAPACITY_ADDITIONALLY_REQUIRES = (
+    "ACTUAL_FILLABILITY", "AVAILABLE_DEPTH", "QUOTE_SIZE",
+    "INVENTORY_DURATION", "CAPITAL_TURNOVER", "EVENT_EXPOSURE_LIMIT",
+    "CORRELATION", "RISK_BUDGET", "EXECUTION_COSTS",
+)
+DEPLOYABLE_CAPITAL_CAPACITY = NOT_IDENTIFIED
+
 
 def candidate_universe(markets, event_key_of=None):
-    """Count candidates and capacity SEPARATELY, and never conflate them.
+    """Count candidates and EVENTS. Capital capacity is not counted at all.
 
-    Market count is not capacity. Where a validated event identity exists the
-    universe is stratified by event; where it does not, the uncertainty is
-    RETAINED rather than resolved by pretending markets are independent.
+    Market count is not an event count, and an event count is not a capacity.
+    Both distinctions are kept by the field names: the function reports
+    CANDIDATE_MARKETS and INDEPENDENT_EVENT_COUNT, and
+    DEPLOYABLE_CAPITAL_CAPACITY is NOT_IDENTIFIED with its missing inputs
+    listed beside it.
     """
     n = len(markets)
     out = {
@@ -1445,11 +1466,14 @@ def candidate_universe(markets, event_key_of=None):
         "MEANING": HIGH_ACTIVITY_MEANS,
         "IS_NOT": list(HIGH_ACTIVITY_DOES_NOT_MEAN),
         "MARKET_COUNT_USED_AS_CAPACITY": False,
+        "EVENT_COUNT_USED_AS_CAPACITY": False,
+        "DEPLOYABLE_CAPITAL_CAPACITY": NOT_IDENTIFIED,
+        "CAPACITY_ADDITIONALLY_REQUIRES": list(CAPACITY_ADDITIONALLY_REQUIRES),
     }
     if event_key_of is None:
         out["EVENT_STRATIFIED"] = False
-        out["VALIDATED_EVENTS"] = NOT_IDENTIFIED
-        out["INDEPENDENT_CAPACITY"] = NOT_IDENTIFIED
+        out["VALIDATED_DISTINCT_EVENTS"] = NOT_IDENTIFIED
+        out["INDEPENDENT_EVENT_COUNT"] = NOT_IDENTIFIED
         out["CORRELATION_TREATMENT"] = (
             "ALL_MARKETS_TREATED_AS_FULLY_CORRELATED -- conservative, and "
             "deliberate, because EVENT_KEY_VALIDATED = NO")
@@ -1461,14 +1485,17 @@ def candidate_universe(markets, event_key_of=None):
             unresolved += 1
             continue
         keys.setdefault(k, []).append(m)
+    sizes = sorted(len(v) for v in keys.values())
     out["EVENT_STRATIFIED"] = True
-    out["VALIDATED_EVENTS"] = len(keys)
+    out["VALIDATED_DISTINCT_EVENTS"] = len(keys)
+    out["INDEPENDENT_EVENT_COUNT"] = len(keys)
     out["MARKETS_WITH_UNRESOLVED_EVENT_IDENTITY"] = unresolved
-    # A lower bound: the resolved events plus, at most, one event per market
-    # whose identity we could not establish. The upper end is not claimed.
-    out["INDEPENDENT_CAPACITY_LOWER_BOUND"] = len(keys)
-    out["INDEPENDENT_CAPACITY"] = (
-        len(keys) if unresolved == 0 else NOT_IDENTIFIED)
+    out["MARKETS_PER_EVENT"] = {
+        "N": len(sizes),
+        "MIN": sizes[0] if sizes else NOT_IDENTIFIED,
+        "P50": sizes[len(sizes) // 2] if sizes else NOT_IDENTIFIED,
+        "MAX": sizes[-1] if sizes else NOT_IDENTIFIED,
+    }
     out["CORRELATION_TREATMENT"] = (
         "STRATIFIED_BY_VALIDATED_EVENT; unresolved markets retain their "
         "uncertainty and are never assumed independent")
@@ -1492,9 +1519,34 @@ def candidate_universe(markets, event_key_of=None):
 STRUCTURAL_SPREAD_CAPTURE_REQUIRES_PASSIVE_EXECUTION_ON_THE_RELEVANT_LEGS = True
 PAIR_TRADE_IS_MAKER_ONLY = "WITHDRAWN_TOO_STRONG"
 
-# And the arithmetic is GROSS. It is a spread, not a profit.
-GROSS_TWO_SIDED_MAKER_EDGE = "OBSERVED"
-REALIZED_BETTOR_TWO_SIDED_EDGE = "NOT_ESTABLISHED"
+# THE CENTRAL PMUS RESULT, IN ITS CANONICAL LABELS.
+#
+#     ONE BINARY BOOK. YES and NO are economic complements ON THAT BOOK.
+#     Crossing both directions structurally pays          1 + spread
+#     Resting opposite passive executions can produce     1 - spread
+#
+# and "can produce" is doing real work in that second line: it is what the
+# venue's arithmetic permits IF BOTH RESTS FILL, before fees, rebates, rewards,
+# adverse selection, partial fills, inventory risk and capital occupancy.
+#
+# Three labels, and the middle one is the gap the whole shadow programme now
+# exists to close.
+GROSS_PASSIVE_TWO_SIDED_SPREAD_OPPORTUNITY = "OBSERVED"
+ACTUAL_BETTOR_TWO_SIDED_FILL_RATE = NOT_IDENTIFIED
+ACTUAL_BETTOR_REALIZED_SPREAD_CAPTURE = "NOT_ESTABLISHED"
+
+PMUS_VENUE_STRUCTURE = "ONE_BINARY_BOOK_YES_AND_NO_ARE_ECONOMIC_COMPLEMENTS"
+CROSSING_BOTH_DIRECTIONS_PAYS = "ONE_PLUS_SPREAD"
+RESTING_BOTH_DIRECTIONS_CAN_PRODUCE = "ONE_MINUS_SPREAD"
+
+# The earlier names for the first and third, kept so nothing silently changes
+# meaning, and marked so nothing keeps using them.
+GROSS_TWO_SIDED_MAKER_EDGE = GROSS_PASSIVE_TWO_SIDED_SPREAD_OPPORTUNITY
+REALIZED_BETTOR_TWO_SIDED_EDGE = ACTUAL_BETTOR_REALIZED_SPREAD_CAPTURE
+SUPERSEDED_LABEL_NAMES = {
+    "GROSS_TWO_SIDED_MAKER_EDGE": "GROSS_PASSIVE_TWO_SIDED_SPREAD_OPPORTUNITY",
+    "REALIZED_BETTOR_TWO_SIDED_EDGE": "ACTUAL_BETTOR_REALIZED_SPREAD_CAPTURE",
+}
 # Everything between the two:
 UNPRICED_BETWEEN_GROSS_AND_REALIZED = (
     "MAKER_FEE", "TAKER_FEE", "MAKER_REBATE", "LIQUIDITY_INCENTIVE",
@@ -1503,6 +1555,33 @@ UNPRICED_BETWEEN_GROSS_AND_REALIZED = (
 )
 # The condition that must travel with every spread statement.
 SPREAD_STATEMENT_QUALIFIER = "IF_BOTH_FILLS_OCCUR"
+
+
+# ---------------------------------------------------------------------------
+# WHAT BETTOR IS, FOR MANAGEMENT. One description, kept in code so the slide
+# and the engine cannot drift apart.
+# ---------------------------------------------------------------------------
+
+MANAGEMENT_DESCRIPTION = (
+    "BETTOR IS A MAKER-FIRST TWO-SIDED MARKET-MAKING AND "
+    "INVENTORY-MANAGEMENT SYSTEM.")
+
+WHAT_BETTOR_ATTEMPTS_TO_EARN = ("SPREAD", "MAKER_REBATES",
+                                "LIQUIDITY_OR_MARKET_MAKING_REWARDS")
+
+# When one side fills first, BETTOR temporarily OWNS INVENTORY. The exit engine
+# then chooses on expected economics among the PMUS actions defined below
+# (EXIT_ENGINE_CHOOSES_AMONG, set after those names exist) -- it does not follow
+# a rule about a number on a screen.
+WHEN_ONE_SIDE_FILLS_FIRST = "BETTOR_TEMPORARILY_OWNS_INVENTORY"
+
+# IMPORTED LANGUAGE, REFUSED. "Buy leg 1 then buy leg 2" describes a two-token
+# venue where the complement is a SEPARATE INSTRUMENT. On PMUS there is one
+# book and one inventory, so the two-leg description misstates the mechanism
+# even when it happens to describe the economics.
+DO_NOT_DESCRIBE_PMUS_AS = "BUY_LEG_1_THEN_BUY_LEG_2"
+WHY_NOT = ("imported Polymarket two-token language; PMUS has ONE binary book "
+           "and the position it creates is INVENTORY, not a leg")
 
 
 # TWO VOCABULARIES, DELIBERATELY KEPT APART.
@@ -1530,6 +1609,14 @@ X_SETTLE = "SETTLE"
 PMUS_ACTIONS = (X_OPEN_MAKER_INVENTORY, X_PASSIVE_INVENTORY_CLOSE,
                 X_AGGRESSIVE_INVENTORY_CLOSE, X_REQUOTED_PASSIVE_CLOSE,
                 X_HOLD_INVENTORY, X_HEDGE_EXTERNALLY, X_SETTLE)
+
+# The management description's second half, now that the names exist: once
+# BETTOR owns inventory, THESE are the choices, decided on expected economics.
+EXIT_ENGINE_CHOOSES_AMONG = (
+    X_PASSIVE_INVENTORY_CLOSE, X_REQUOTED_PASSIVE_CLOSE,
+    X_AGGRESSIVE_INVENTORY_CLOSE, X_HEDGE_EXTERNALLY, X_HOLD_INVENTORY,
+    X_SETTLE,
+)
 
 # How the whale-prior action vocabulary maps onto what PMUS can actually do.
 # The mapping is EXPLICIT so the translation is auditable rather than implied:

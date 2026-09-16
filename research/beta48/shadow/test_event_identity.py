@@ -107,18 +107,34 @@ class GroupingNeverOverMerges(unittest.TestCase):
         self.assertEqual(idx["MARKETS_WITH_NO_EVENT_IDENTITY"], 1)
         self.assertIn("prop-1", idx["UNRESOLVED_SLUGS"])
 
-    def test_capacity_is_not_identified_while_anything_is_unresolved(self):
+    def test_the_event_count_is_a_count_and_says_nothing_about_capital(self):
         idx = EI.index_events(self._board())
-        cap = EI.capacity(idx)
-        self.assertEqual(cap["INDEPENDENT_CAPACITY"], EI.NOT_IDENTIFIED)
-        self.assertEqual(cap["INDEPENDENT_CAPACITY_LOWER_BOUND"], 2)
-        self.assertFalse(cap["MARKET_COUNT_USED_AS_CAPACITY"])
+        c = EI.independent_event_count(idx)
+        self.assertEqual(c["INDEPENDENT_EVENT_COUNT"], 2)
+        self.assertEqual(c["VALIDATED_DISTINCT_EVENTS"], 2)
+        self.assertEqual(c["DEPLOYABLE_CAPITAL_CAPACITY"], EI.NOT_IDENTIFIED)
+        self.assertFalse(c["MARKET_COUNT_USED_AS_CAPACITY"])
+        self.assertFalse(c["EVENT_COUNT_USED_AS_CAPACITY"])
 
-    def test_capacity_resolves_only_when_every_row_is_a_contest(self):
+    def test_capital_capacity_stays_unidentified_even_on_a_clean_board(self):
+        """Resolving every identity settles the COUNT and nothing else."""
         clean = [row("g1", "T1", [side(58), side(51)]),
                  row("g2", "T1", [side(70), side(71)])]
-        cap = EI.capacity(EI.index_events(clean))
-        self.assertEqual(cap["INDEPENDENT_CAPACITY"], 2)
+        c = EI.independent_event_count(EI.index_events(clean))
+        self.assertTrue(c["EVENT_IDENTITY_COMPLETE"])
+        self.assertEqual(c["INDEPENDENT_EVENT_COUNT"], 2)
+        self.assertEqual(c["DEPLOYABLE_CAPITAL_CAPACITY"], EI.NOT_IDENTIFIED)
+
+    def test_the_missing_capacity_inputs_are_named_on_the_row(self):
+        c = EI.independent_event_count(EI.index_events(self._board()))
+        for need in ("ACTUAL_FILLABILITY", "AVAILABLE_DEPTH", "QUOTE_SIZE",
+                     "INVENTORY_DURATION", "CAPITAL_TURNOVER",
+                     "EVENT_EXPOSURE_LIMIT", "CORRELATION", "RISK_BUDGET",
+                     "EXECUTION_COSTS"):
+            self.assertIn(need, c["CAPACITY_ADDITIONALLY_REQUIRES"])
+
+    def test_the_old_capacity_name_is_gone(self):
+        self.assertFalse(hasattr(EI, "capacity"))
 
     def test_markets_per_event_exposes_the_correlation(self):
         mpe = EI.markets_per_event(EI.index_events(self._board()))

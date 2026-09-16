@@ -217,10 +217,10 @@ class CapacityIsNotMarketCount(unittest.TestCase):
                       "POSITIVE_EV_ENTRIES"):
             self.assertIn(wrong, P.HIGH_ACTIVITY_DOES_NOT_MEAN)
 
-    def test_without_a_validated_event_key_capacity_is_not_identified(self):
+    def test_without_a_validated_event_key_the_event_count_is_unknown(self):
         out = P.candidate_universe(["m1", "m2", "m3"])
         self.assertEqual(out["CANDIDATE_MARKETS"], 3)
-        self.assertEqual(out["INDEPENDENT_CAPACITY"], P.NOT_IDENTIFIED)
+        self.assertEqual(out["INDEPENDENT_EVENT_COUNT"], P.NOT_IDENTIFIED)
         self.assertFalse(out["MARKET_COUNT_USED_AS_CAPACITY"])
         self.assertIn("FULLY_CORRELATED", out["CORRELATION_TREATMENT"])
 
@@ -228,17 +228,28 @@ class CapacityIsNotMarketCount(unittest.TestCase):
         keys = {"m1": "e1", "m2": "e1", "m3": "e2"}
         out = P.candidate_universe(list(keys), event_key_of=keys.get)
         self.assertEqual(out["CANDIDATE_MARKETS"], 3)
-        self.assertEqual(out["VALIDATED_EVENTS"], 2)
-        self.assertEqual(out["INDEPENDENT_CAPACITY"], 2)
+        self.assertEqual(out["VALIDATED_DISTINCT_EVENTS"], 2)
+        self.assertEqual(out["INDEPENDENT_EVENT_COUNT"], 2)
+        self.assertEqual(out["MARKETS_PER_EVENT"]["MAX"], 2)
+
+    def test_an_event_count_is_never_reported_as_capital_capacity(self):
+        keys = {"m1": "e1", "m2": "e1", "m3": "e2"}
+        for out in (P.candidate_universe(list(keys), event_key_of=keys.get),
+                    P.candidate_universe(list(keys))):
+            self.assertEqual(out["DEPLOYABLE_CAPITAL_CAPACITY"],
+                             P.NOT_IDENTIFIED)
+            self.assertFalse(out["EVENT_COUNT_USED_AS_CAPACITY"])
+            self.assertIn("ACTUAL_FILLABILITY",
+                          out["CAPACITY_ADDITIONALLY_REQUIRES"])
 
     def test_unresolved_identity_retains_its_uncertainty(self):
         """Markets whose event we could not establish are NOT quietly counted
-        as independent -- capacity goes back to NOT_IDENTIFIED."""
+        as independent -- they are counted as unresolved and kept apart."""
         keys = {"m1": "e1", "m2": None, "m3": "e2"}
         out = P.candidate_universe(list(keys), event_key_of=keys.get)
         self.assertEqual(out["MARKETS_WITH_UNRESOLVED_EVENT_IDENTITY"], 1)
-        self.assertEqual(out["INDEPENDENT_CAPACITY"], P.NOT_IDENTIFIED)
-        self.assertEqual(out["INDEPENDENT_CAPACITY_LOWER_BOUND"], 2)
+        self.assertEqual(out["INDEPENDENT_EVENT_COUNT"], 2)
+        self.assertEqual(out["DEPLOYABLE_CAPITAL_CAPACITY"], P.NOT_IDENTIFIED)
 
 
 class MakerFirstSplitsEveryExecutionDecision(unittest.TestCase):
@@ -402,3 +413,62 @@ class TheGateCannotSeeTheSunkPnl(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class TheCanonicalPmusLabels(unittest.TestCase):
+    """Three labels, and the middle one is the gap the shadow run must close."""
+
+    def test_the_gross_opportunity_is_observed(self):
+        self.assertEqual(P.GROSS_PASSIVE_TWO_SIDED_SPREAD_OPPORTUNITY,
+                         "OBSERVED")
+
+    def test_the_actual_fill_rate_is_not_identified(self):
+        self.assertEqual(P.ACTUAL_BETTOR_TWO_SIDED_FILL_RATE,
+                         P.NOT_IDENTIFIED)
+
+    def test_the_realized_capture_is_not_established(self):
+        self.assertEqual(P.ACTUAL_BETTOR_REALIZED_SPREAD_CAPTURE,
+                         "NOT_ESTABLISHED")
+
+    def test_the_venue_structure_is_recorded_as_one_book(self):
+        self.assertEqual(P.PMUS_VENUE_STRUCTURE,
+                         "ONE_BINARY_BOOK_YES_AND_NO_ARE_ECONOMIC_COMPLEMENTS")
+        self.assertEqual(P.CROSSING_BOTH_DIRECTIONS_PAYS, "ONE_PLUS_SPREAD")
+        self.assertEqual(P.RESTING_BOTH_DIRECTIONS_CAN_PRODUCE,
+                         "ONE_MINUS_SPREAD")
+
+    def test_the_superseded_names_still_agree_with_the_canonical_ones(self):
+        self.assertEqual(P.GROSS_TWO_SIDED_MAKER_EDGE,
+                         P.GROSS_PASSIVE_TWO_SIDED_SPREAD_OPPORTUNITY)
+        self.assertEqual(P.REALIZED_BETTOR_TWO_SIDED_EDGE,
+                         P.ACTUAL_BETTOR_REALIZED_SPREAD_CAPTURE)
+        for old, new in P.SUPERSEDED_LABEL_NAMES.items():
+            self.assertTrue(hasattr(P, old))
+            self.assertTrue(hasattr(P, new))
+
+
+class TheManagementDescription(unittest.TestCase):
+
+    def test_it_names_market_making_and_inventory_management(self):
+        d = P.MANAGEMENT_DESCRIPTION
+        self.assertIn("MAKER-FIRST", d)
+        self.assertIn("TWO-SIDED MARKET-MAKING", d)
+        self.assertIn("INVENTORY-MANAGEMENT", d)
+
+    def test_the_three_revenue_sources_are_named(self):
+        self.assertEqual(P.WHAT_BETTOR_ATTEMPTS_TO_EARN,
+                         ("SPREAD", "MAKER_REBATES",
+                          "LIQUIDITY_OR_MARKET_MAKING_REWARDS"))
+
+    def test_a_first_fill_creates_inventory_not_a_leg(self):
+        self.assertEqual(P.WHEN_ONE_SIDE_FILLS_FIRST,
+                         "BETTOR_TEMPORARILY_OWNS_INVENTORY")
+
+    def test_the_two_token_description_is_refused_by_name(self):
+        self.assertEqual(P.DO_NOT_DESCRIBE_PMUS_AS, "BUY_LEG_1_THEN_BUY_LEG_2")
+        self.assertIn("ONE binary book", P.WHY_NOT)
+
+    def test_every_post_inventory_choice_is_a_pmus_action(self):
+        for a in P.EXIT_ENGINE_CHOOSES_AMONG:
+            self.assertIn(a, P.PMUS_ACTIONS)
+        self.assertNotIn(P.X_OPEN_MAKER_INVENTORY, P.EXIT_ENGINE_CHOOSES_AMONG)

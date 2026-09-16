@@ -151,25 +151,44 @@ def index_events(markets):
     }
 
 
-def capacity(idx):
-    """Independent capacity from venue-native identity, honestly bounded.
+# A COUNT OF EVENTS IS NOT A CAPACITY, and the first version of this function
+# said otherwise. It published the validated event count as
+# INDEPENDENT_CAPACITY_LOWER_BOUND, which reads as "we could deploy across at
+# least this many" -- a claim about CAPITAL that an identity count cannot
+# support. An event with no fillable book has a capacity of zero.
+EVENT_COUNT_IS_NOT_CAPITAL_CAPACITY = True
+CAPACITY_ADDITIONALLY_REQUIRES = (
+    "ACTUAL_FILLABILITY", "AVAILABLE_DEPTH", "QUOTE_SIZE",
+    "INVENTORY_DURATION", "CAPITAL_TURNOVER", "EVENT_EXPOSURE_LIMIT",
+    "CORRELATION", "RISK_BUDGET", "EXECUTION_COSTS",
+)
 
-    The contest rows give a real count. The subject and no-binding rows do not,
-    and they are not quietly added: a lower bound is published and the exact
-    figure stays NOT_IDENTIFIED while any market's identity is unresolved.
+
+def independent_event_count(idx):
+    """How many distinct validated events the board holds. A COUNT, not a size.
+
+    The contest rows give a real count of distinct events. The subject and
+    no-binding rows do not, and they are not quietly added. Nothing here is a
+    statement about how much capital those events could absorb: that is
+    DEPLOYABLE_CAPITAL_CAPACITY, it is NOT_IDENTIFIED, and every input it still
+    needs is listed on the row.
     """
     unresolved = (idx["MARKETS_WITH_NO_EVENT_IDENTITY"]
                   + sum(len(v) for v in idx["SUBJECT_GROUPS"].values()))
     return {
-        "VALID_EVENTS": idx["VALID_EVENTS"],
-        "INDEPENDENT_CAPACITY_LOWER_BOUND": idx["VALID_EVENTS"],
-        "INDEPENDENT_CAPACITY": (idx["VALID_EVENTS"] if unresolved == 0
-                                 else NOT_IDENTIFIED),
+        "VALIDATED_DISTINCT_EVENTS": idx["VALID_EVENTS"],
+        "INDEPENDENT_EVENT_COUNT": idx["VALID_EVENTS"],
         "MARKETS_OF_UNRESOLVED_IDENTITY": unresolved,
+        "EVENT_IDENTITY_COMPLETE": unresolved == 0,
+
+        "DEPLOYABLE_CAPITAL_CAPACITY": NOT_IDENTIFIED,
+        "CAPACITY_ADDITIONALLY_REQUIRES": list(CAPACITY_ADDITIONALLY_REQUIRES),
         "MARKET_COUNT_USED_AS_CAPACITY": False,
+        "EVENT_COUNT_USED_AS_CAPACITY": False,
+
         "WHY": ("contest-level rows carry a venue-native two-team identity; "
                 "subject-level and unbound rows do not, and are never merged "
-                "on start time alone"),
+                "on start time alone. None of that prices an event."),
     }
 
 

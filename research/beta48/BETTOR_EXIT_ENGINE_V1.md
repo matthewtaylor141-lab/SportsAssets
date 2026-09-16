@@ -1167,3 +1167,198 @@ summarisers refuse to emit `PROFITABILITY`, `WIN_RATE` or
 ORDERS_PLACED   0        CAPITAL_DEPLOYED  0
 CREDENTIALS     NONE     mirror_live       false
 ```
+
+---
+
+## 16. TWO PRECISION CORRECTIONS, BOTH AGAINST §15
+
+Both of these cut against conclusions §15 had just drawn, and the first one
+removes the only positive-sounding output the tick capture was going to produce.
+
+### 16a. THE VOLUME BOUND WAS ARITHMETIC OVER AN UNPROVEN FIELD
+
+§15c refuted counterfactual fills from an upper bound on traded volume. The
+arithmetic is sound. **The input was not established**, and the project state
+already said so:
+
+```
+SHARES_TRADED_RESET_SEMANTICS = NOT_IDENTIFIED
+```
+
+An upper bound is only a bound if the quantity it bounds is the quantity we
+think it is. Every one of these breaks it and none was excluded: the field being
+INTERVAL rather than cumulative; a session reset reading as a negative or a tiny
+delta; a SIDE-SPECIFIC count; blocks in or out; and — the dangerous one — a
+**lazy update**, under which an unchanged `SHARES_TRADED` gave
+`MAXIMAL_ATTRIBUTION = 0` and refuted every model including the touch bound. A
+quiet field and a quiet market are indistinguishable from one snapshot pair, and
+the quiet field is exactly what a thin feed does. That is not a missed nuance;
+it is a **confident wrong answer**, which is worse than an unknown.
+
+`shadow/tick_semantics.py` now owns the gate and keeps the two questions apart,
+because they have different answers and different owners:
+
+```
+RUNTIME BEHAVIOUR   what the field DID in our capture. Ours to measure.
+  MONOTONIC_WITHIN_MARKET / NEGATIVE_DELTAS_OBSERVED / RESET_EVENTS_OBSERVED
+  MISSING_TRANSITIONS / FIELD_UPDATE_FREQUENCY
+  SAME_VALUE_DESPITE_BOOK_CHANGES / LARGE_DISCONTINUITIES
+
+VENUE SEMANTICS     what the field MEANS. NOT ours to infer, all NOT_IDENTIFIED.
+  WHAT_SHARES_TRADED_COUNTS / CUMULATIVE_OR_INTERVAL
+  MARKET_WIDE_OR_SIDE_SPECIFIC / INCLUDES_BLOCKS / RESET_BOUNDARY
+```
+
+A field can be monotone all afternoon and still reset at midnight, still count
+one side, still include blocks — so `semantics_established()` requires **both**,
+and runtime evidence alone never opens it. Until it does:
+
+```
+SHARES_TRADED_DELTA_STATUS = CONSERVATIVE_DIAGNOSTIC_ONLY
+FILL_REFUTATION_STATUS     = NOT_IDENTIFIED
+WHY                        = AGGREGATE_VOLUME_UPPER_BOUND_INSUFFICIENT
+                             (NOT equivalent to observed execution evidence)
+PROVEN_NOT_FILLED          = REFUSED_NOT_AN_OUTPUT_OF_THIS_PROGRAMME
+```
+
+**Consequence: `fill_status()` on tick data now returns UNKNOWN in every case.**
+It cannot support a fill (no per-price attribution) and it may not refute one
+(no field semantics). The bound is still computed and carried as
+`AGGREGATE_VOLUME_BOUND_ARITHMETIC`; it is simply not a verdict.
+
+### 16b. THREE EVENTS, NEVER COLLAPSED
+
+```
+TOUCH                the market reached our price
+TRADE_EVIDENCE       a QUALIFYING execution occurred at our price after entry
+COUNTERFACTUAL_FILL  that evidence PLUS the queue model
+
+TOUCH != TRADE_EVIDENCE != COUNTERFACTUAL_FILL
+```
+
+All three are separate fields on every row and three separate counts in every
+summary, so the gap between them is visible rather than inferred. A block print
+at our price is a trade and is **not** trade evidence — it never touched the
+book — and an untyped print is not either.
+
+### 16c. AN EVENT COUNT IS NOT A CAPACITY — ALSO MINE
+
+§15a reported 56 validated HIGH_ACTIVITY events as
+`INDEPENDENT_CAPACITY_LOWER_BOUND`. That turned a count of events into a claim
+about how much capital the venue can absorb. An event with nothing fillable has
+a capacity of zero. Corrected everywhere:
+
+```
+VALIDATED_DISTINCT_HIGH_ACTIVITY_EVENTS = 56
+MARKETS_PER_HIGH_ACTIVITY_EVENT         = min 1 / P50 1 / MAX 15
+INDEPENDENT_EVENT_COUNT                 = 56
+DEPLOYABLE_CAPITAL_CAPACITY             = NOT_IDENTIFIED
+```
+
+`DEPLOYABLE_CAPITAL_CAPACITY` additionally requires actual fillability,
+available depth, quote size, inventory duration, capital turnover, the event
+exposure limit, correlation, the risk budget and execution costs. **None is
+measured.** `event_identity.capacity()` is gone; the function is now
+`independent_event_count()`, and a test asserts the old name no longer exists.
+
+RESIDUAL, NAMED RATHER THAN EDITED: `forward/eligibility.py` still emits
+`INDEPENDENT_CAPACITY*` fields. It is frozen so its published validation result
+keeps describing what it validated, and its value there is already
+`NOT_IDENTIFIED`. The naming is on the list to correct if that module is ever
+unfrozen.
+
+### 16d. THE CENTRAL PMUS RESULT, IN ITS CANONICAL LABELS
+
+```
+PMUS_VENUE_STRUCTURE  ONE BINARY BOOK; YES and NO are economic complements
+Crossing both directions structurally pays      1 + spread
+Resting opposite passive executions can produce 1 - spread
+
+GROSS_PASSIVE_TWO_SIDED_SPREAD_OPPORTUNITY = OBSERVED
+ACTUAL_BETTOR_TWO_SIDED_FILL_RATE          = NOT_IDENTIFIED
+ACTUAL_BETTOR_REALIZED_SPREAD_CAPTURE      = NOT_ESTABLISHED
+```
+
+before fees, rebates, rewards, adverse selection, partial fills, inventory risk
+and capital occupancy. The middle line is the gap the shadow programme exists to
+close, and §16a is why it is still open.
+
+### 16e. WHAT THE CAPTURE *CAN* ANSWER — `shadow/book_metrics.py`
+
+Not identifying a fill does not make the capture worthless. Every one of these
+is a property of the BOOK, fully observable, and an execution input a maker
+needs before it quotes anything:
+
+```
+SPREAD P10/P50/P90            ONE_TICK_UPTIME            SPREAD_PERSISTENCE_S
+QUOTE_LIFETIME_AT_TOUCH       TIME_AT_PRICE              TOUCH_SIZE (both sides)
+BOOK_MOVE_FREQUENCY           MID_MOVE_FREQUENCY         DEPTH_CHANGE_RATE
+PRICE_IMPROVEMENT_FREQUENCY   DISPLAYED_QUEUE_CHANGE
+QUEUE_AHEAD_AT_HYPOTHETICAL_ENTRY
+MARKET_MOVED_THROUGH_QUOTE_FREQUENCY        POST_QUOTE_BOOK_MARKOUT
+```
+
+**None of them may be renamed into anything that reads as an execution
+outcome.** `FILL_RATE`, `MAKER_FILL_RATE`, `EXECUTION_RATE`, `FILL_PROBABILITY`
+and `HIT_RATE` are listed as forbidden, and a test walks every measured key to
+assert none is named like an outcome. `MARKET_MOVED_THROUGH_QUOTE` is the
+closest any of this comes, and it is a fact about where the price went.
+
+### 16f. THE INVENTORY CLOCK
+
+Preserved and now explicit: only an admitted counterfactual fill sets
+`INVENTORY_START_TIME`. `UNKNOWN` does not. `NOT_FILLED` does not. Every
+duration — `TIME_TO_OPPOSITE_CLOSE`, the markouts, MAE, MFE,
+`CAPITAL_OCCUPANCY`, the round trip — is measured from it, and the row records
+`INVENTORY_CLOCK_STARTED_BY` so the fill that started it travels with the
+position.
+
+### 16g. WHAT BETTOR IS
+
+```
+BETTOR IS A MAKER-FIRST TWO-SIDED MARKET-MAKING AND INVENTORY-MANAGEMENT SYSTEM.
+
+It attempts to earn   SPREAD, MAKER REBATES, LIQUIDITY / MARKET-MAKING REWARDS
+When one side fills first, BETTOR TEMPORARILY OWNS INVENTORY, and the exit
+engine chooses on expected economics among
+  PASSIVE_INVENTORY_CLOSE / REQUOTED_PASSIVE_CLOSE / AGGRESSIVE_INVENTORY_CLOSE
+  HEDGE_EXTERNALLY / HOLD_INVENTORY / SETTLE
+
+DO_NOT_DESCRIBE_PMUS_AS = BUY_LEG_1_THEN_BUY_LEG_2
+```
+
+That last is imported Polymarket two-token language. On PMUS there is one book,
+and what a first fill creates is INVENTORY, not a leg.
+
+### 16h. THE HARVEST, AND THE ANSWER IT IS BUILT TO GIVE
+
+`shadow/harvest.py` reads the sealed capture off disk and reports, in order: the
+capture (markets, events, sport mix, rows, errors); the field (runtime and venue
+semantics, kept apart); the book (§16e); the four ladder counts
+(`HYPOTHETICAL_QUOTES` / `TOUCHES` / `TRADE_EVIDENCE` /
+`ADMITTED_COUNTERFACTUAL_FILLS`); and then
+
+```
+PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION = NO
+WHY = no execution evidence exists in this capture: the tick feed carries no
+      per-print tape, no side and no queue position, so TRADE_EVIDENCE is
+      NOT_IDENTIFIED and no fill can be admitted
+
+EVIDENCE_THAT_WOULD_IDENTIFY_A_FILL
+  PUBLIC_EXECUTION_TAPE_WITH_TIMESTAMP_PRICE_QUANTITY
+  AN_EXECUTION_TYPE_COLUMN_OR_A_BLOCK_PUBLICATION
+  A_SIDE_OR_AGGRESSOR_FLAG
+  QUEUE_POSITION_OR_ORDER_LEVEL_BOOK_UPDATES
+
+NEXT_STEP = obtain evidence capable of resolving execution and queue, OR a
+            bounded micro-live validation AFTER EXPLICIT AUTHORIZATION
+DO_NOT_INVENT_ANOTHER_FILL_APPROXIMATION = True
+```
+
+A third fill heuristic would be the first two's mistake with more machinery
+around it. The report is written so that saying NO is the easy path.
+
+```
+ORDERS_PLACED   0        CAPITAL_DEPLOYED  0
+CREDENTIALS     NONE     mirror_live       false
+```

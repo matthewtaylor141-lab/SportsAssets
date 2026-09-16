@@ -120,7 +120,16 @@ def open_inventory(quote, fill_row, position_id=None):
             "FILL_STATUS=%r does not open inventory. %s"
             % (fill_row.get("FILL_STATUS"), fill_row.get("WHY")))
     side = SIDE_AFTER_FILL[quote["SIDE"]]
+    # THE INVENTORY CLOCK STARTS HERE AND NOWHERE ELSE. Every duration this
+    # module reports -- TIME_TO_OPPOSITE_CLOSE, the markouts, MAE, MFE,
+    # CAPITAL_OCCUPANCY, the round trip -- is measured from INVENTORY_START_TIME,
+    # and the only statement that can set it is an admitted counterfactual fill.
+    # A touch does not start it; an UNKNOWN does not start it.
     return {
+        "INVENTORY_START_TIME": quote["QUOTE_TIME"],
+        "INVENTORY_START_ELAPSED_S": quote["QUOTE_ELAPSED_S"],
+        "INVENTORY_CLOCK_STARTED_BY": fill_row.get("FILL_STATUS"),
+        "CLOCK_MAY_START_ONLY_FROM_AN_ADMITTED_FILL": True,
         "POSITION_ID": position_id or ("SHADOW_%s_%s" % (quote.get("SLUG"),
                                                          quote.get("QUOTE_TIME"))),
         "PROVENANCE": "COUNTERFACTUAL_MAKER_FILL",
