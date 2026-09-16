@@ -18,7 +18,7 @@ TWO THINGS THE NAMES HAVE TO CARRY, BECAUSE PROSE DOES NOT TRAVEL WITH A NUMBER.
    beside it", never "this is what the market did".
 
        TRUE_CONTINUOUS_QUOTE_LIFETIME    NOT_IDENTIFIED
-       TRUE_CONTINUOUS_BOOK_UPDATE_RATE  NOT_IDENTIFIED
+       TRUE_CONTINUOUS_BBO_PRICE_CHANGE_RATE  NOT_IDENTIFIED
 
    and they stay NOT_IDENTIFIED unless the feed itself provides event-complete
    semantics, which this capture does not establish. The revisit distribution
@@ -85,7 +85,7 @@ UNOBSERVED_BETWEEN_POLLS = ("QUOTE_MOVED_AWAY_AND_RETURNED", "TRADED",
                             "DEPTH_CHANGED_AND_CHANGED_BACK",
                             "DISAPPEARED_AND_REAPPEARED")
 TRUE_CONTINUOUS_QUOTE_LIFETIME = NOT_IDENTIFIED
-TRUE_CONTINUOUS_BOOK_UPDATE_RATE = NOT_IDENTIFIED
+TRUE_CONTINUOUS_BBO_PRICE_CHANGE_RATE = NOT_IDENTIFIED
 TRUE_TIME_WEIGHTED_ONE_TICK_UPTIME = NOT_IDENTIFIED
 FEED_IS_EVENT_COMPLETE = NOT_IDENTIFIED
 
@@ -94,10 +94,43 @@ FEED_IS_EVENT_COMPLETE = NOT_IDENTIFIED
 # ---------------------------------------------------------------------------
 
 CLASS_A_TRANSITION_COUNTS = (
-    "OBSERVED_BOOK_CHANGES", "OBSERVED_MID_CHANGES",
+    "OBSERVED_BBO_PRICE_CHANGES", "OBSERVED_MID_CHANGES",
     "OBSERVED_MOVE_THROUGH_EVENTS", "OBSERVED_PRICE_IMPROVEMENTS",
     "OBSERVED_DEPTH_CHANGES",
 )
+
+# WHAT EACH COUNT MEANS, IN THE OUTPUT, SO NOBODY HAS TO READ THIS FILE.
+#
+# The first version called the price count OBSERVED_BOOK_CHANGES, which reads
+# as though it includes depth -- and then 150 depth changes beside 1 "book
+# change" looks like a bug. It is not: they count different things, and the
+# names now say which.
+COUNT_DEFINITIONS = {
+    "OBSERVED_BBO_PRICE_CHANGES": (
+        "consecutive observations where the BEST BID PRICE or the BEST ASK "
+        "PRICE differs. A PRICE event. Quantity is not consulted."),
+    "OBSERVED_DEPTH_CHANGES": (
+        "consecutive observations where the DISPLAYED QUANTITY at the best bid "
+        "or best ask differs. A SIZE event, and it fires whether or not the "
+        "price moved -- so size churning at an unchanged touch counts here and "
+        "NOT in OBSERVED_BBO_PRICE_CHANGES."),
+    "OBSERVED_MID_CHANGES": (
+        "consecutive observations where (bid+ask)/2 differs. A subset of price "
+        "events: a bid and ask that move together can leave the mid fixed."),
+    "OBSERVED_PRICE_IMPROVEMENTS": (
+        "consecutive observations where the bid ROSE or the ask FELL. The "
+        "directional subset of OBSERVED_BBO_PRICE_CHANGES; a widening book is "
+        "a price change and not an improvement."),
+    "OBSERVED_MOVE_THROUGH_EVENTS": (
+        "consecutive observations where the ask reached or crossed the "
+        "PREVIOUS bid -- a price path past a level we would have quoted. Not a "
+        "trade, not a fill."),
+}
+WHY_DEPTH_AND_PRICE_COUNTS_DIFFER = (
+    "a quoted price can stand while the size behind it churns: those are "
+    "DEPTH changes at an unchanged BBO. Many depth changes beside very few "
+    "price changes is a quiet-price / busy-size book, not an inconsistency.")
+COUNTS_WERE_NOT_ADJUSTED_TO_LOOK_CONSISTENT = True
 CLASS_A_BOUND = "OBSERVED_TRANSITION_COUNT_LE_TRUE_TRANSITION_COUNT"
 CLASS_A_SAMPLING_BIAS_DIRECTION = "UNDERCOUNT"
 CLASS_A_BOUND_SUBJECT_TO = "THE_SNAPSHOTS_THEMSELVES_BEING_VALID"
@@ -126,7 +159,7 @@ MOVE_THROUGH_IS_NOT_A_COUNTERFACTUAL_FILL = True
 MARKOUT_HORIZONS_S = (30, 60, 300)
 
 # Rates that exist in both weightings when an event map is supplied.
-WEIGHTED_RATES = ("ONE_TICK_SNAPSHOT_SHARE", "BOOK_UPDATE_RATE_OBSERVED",
+WEIGHTED_RATES = ("ONE_TICK_SNAPSHOT_SHARE", "BBO_PRICE_CHANGE_RATE_OBSERVED",
                   "MID_MOVE_FREQUENCY_OBSERVED",
                   "PRICE_IMPROVEMENT_FREQUENCY_OBSERVED",
                   "DEPTH_CHANGE_RATE_OBSERVED",
@@ -353,7 +386,7 @@ def _slug_metrics(rs, tick_size):
 
         # CLASS A. Counts. Each one is <= its true count, because a poll can
         # miss a transition but cannot invent one.
-        "OBSERVED_BOOK_CHANGES": moves,
+        "OBSERVED_BBO_PRICE_CHANGES": moves,
         "OBSERVED_MID_CHANGES": mid_moves,
         "OBSERVED_PRICE_IMPROVEMENTS": improvements,
         "OBSERVED_DEPTH_CHANGES": depth_changes,
@@ -361,7 +394,7 @@ def _slug_metrics(rs, tick_size):
 
         # The shares built from them. Per OBSERVED transition, not per second.
         "ONE_TICK_SNAPSHOT_SHARE": r_(one_tick, spreads),
-        "BOOK_UPDATE_RATE_OBSERVED": r_(moves, obs),
+        "BBO_PRICE_CHANGE_RATE_OBSERVED": r_(moves, obs),
         "MID_MOVE_FREQUENCY_OBSERVED": r_(mid_moves, obs),
         "PRICE_IMPROVEMENT_FREQUENCY_OBSERVED": r_(improvements, obs),
         "DEPTH_CHANGE_RATE_OBSERVED": r_(depth_changes, obs),
@@ -377,7 +410,7 @@ def _slug_metrics(rs, tick_size):
 # can be aggregated INTERNALLY before it votes.
 RATE_COUNTS = {
     "ONE_TICK_SNAPSHOT_SHARE": ("one_tick", "spreads"),
-    "BOOK_UPDATE_RATE_OBSERVED": ("moves", "obs"),
+    "BBO_PRICE_CHANGE_RATE_OBSERVED": ("moves", "obs"),
     "MID_MOVE_FREQUENCY_OBSERVED": ("mid_moves", "obs"),
     "PRICE_IMPROVEMENT_FREQUENCY_OBSERVED": ("improvements", "obs"),
     "DEPTH_CHANGE_RATE_OBSERVED": ("depth_changes", "obs"),
@@ -563,7 +596,7 @@ def book_metrics(rows, tick_size=TICK_SIZE, horizons_s=MARKOUT_HORIZONS_S,
                             if k != "PER_SLUG"},
 
         # --- CLASS A: counts. Each <= its true count. ---
-        "OBSERVED_BOOK_CHANGES": t["moves"],
+        "OBSERVED_BBO_PRICE_CHANGES": t["moves"],
         "OBSERVED_MID_CHANGES": t["mid_moves"],
         "OBSERVED_PRICE_IMPROVEMENTS": t["improvements"],
         "OBSERVED_DEPTH_CHANGES": t["depth_changes"],
@@ -575,7 +608,7 @@ def book_metrics(rows, tick_size=TICK_SIZE, horizons_s=MARKOUT_HORIZONS_S,
 
         # --- the shares built from them. MARKET-WEIGHTED, ALL MARKETS. ---
         "ONE_TICK_SNAPSHOT_SHARE": r_(t["one_tick"], t["spreads"]),
-        "BOOK_UPDATE_RATE_OBSERVED": r_(t["moves"], obs),
+        "BBO_PRICE_CHANGE_RATE_OBSERVED": r_(t["moves"], obs),
         "MID_MOVE_FREQUENCY_OBSERVED": r_(t["mid_moves"], obs),
         "PRICE_IMPROVEMENT_FREQUENCY_OBSERVED": r_(t["improvements"], obs),
         "DEPTH_CHANGE_RATE_OBSERVED": r_(t["depth_changes"], obs),
@@ -594,7 +627,8 @@ def book_metrics(rows, tick_size=TICK_SIZE, horizons_s=MARKOUT_HORIZONS_S,
 
         # --- what sampling cannot give ---
         "TRUE_CONTINUOUS_QUOTE_LIFETIME": TRUE_CONTINUOUS_QUOTE_LIFETIME,
-        "TRUE_CONTINUOUS_BOOK_UPDATE_RATE": TRUE_CONTINUOUS_BOOK_UPDATE_RATE,
+        "TRUE_CONTINUOUS_BBO_PRICE_CHANGE_RATE":
+            TRUE_CONTINUOUS_BBO_PRICE_CHANGE_RATE,
         "TRUE_TIME_WEIGHTED_ONE_TICK_UPTIME":
             TRUE_TIME_WEIGHTED_ONE_TICK_UPTIME,
         "FEED_IS_EVENT_COMPLETE": FEED_IS_EVENT_COMPLETE,

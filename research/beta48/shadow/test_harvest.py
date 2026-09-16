@@ -245,9 +245,9 @@ class MarketsFromOneEventAreNotIndependent(unittest.TestCase):
         self.assertEqual(b["EVENTS_IN_WEIGHTING"], 2)
         # All three figures, so the weighting effect and the population drop
         # can be told apart.
-        for k in ("BOOK_UPDATE_RATE_OBSERVED",
-                  "BOOK_UPDATE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY",
-                  "BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"):
+        for k in ("BBO_PRICE_CHANGE_RATE_OBSERVED",
+                  "BBO_PRICE_CHANGE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY",
+                  "BBO_PRICE_CHANGE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"):
             self.assertIn(k, b, k)
         self.assertEqual(b["EVENT_WEIGHTED_POPULATION"],
                          "EVENT_IDENTITY_RESOLVED_SUBSET")
@@ -337,3 +337,59 @@ class AttemptedIsNotObserved(unittest.TestCase):
         self.assertFalse(a["MISSINGNESS"]["MISSINGNESS_IS_NOT_RANDOM"])
         self.assertEqual(a["MARKETS_ATTEMPTED"],
                          a["MARKETS_WITH_ANY_READABLE_BOOK"])
+
+
+class TheValidityGate(unittest.TestCase):
+    """A pipeline that ran is not a sample that survived."""
+
+    def _starved(self):
+        rs = rows(20, slug="aec-nfl-a-b")
+        for i in range(20):
+            rs.append({"kind": "TICK_ERROR", "slug": "aec-cfb-c-d", "seq": i,
+                       "ELAPSED_S": float(i * 3), "status": 429,
+                       "error": "http_429"})
+        return write(rs)
+
+    def test_a_starved_capture_fails_the_gate(self):
+        v = H.harvest(self._starved())["CAPTURE_VALIDITY"]
+        self.assertEqual(v["CAPTURE_PIPELINE_FUNCTIONAL"], "YES")
+        self.assertEqual(v["CAPTURE_VALIDITY"], "FAIL")
+        self.assertEqual(v["MARKET_CHARACTERIZATION_VALID"], "NO")
+        self.assertEqual(v["CAPTURE_MISSINGNESS_RANDOM"], "NO")
+
+    def test_the_failed_checks_are_named(self):
+        v = H.harvest(self._starved())["CAPTURE_VALIDITY"]
+        for c in ("FAILED_READ_SHARE_ACCEPTABLE", "MARKET_YIELD_ACCEPTABLE",
+                  "MULTIPLE_SPORTS_RETURNED_BOOKS",
+                  "NO_WHOLE_MARKET_STARVATION", "MISSINGNESS_RANDOM"):
+            self.assertIn(c, v["FAILED_CHECKS"], c)
+
+    def test_the_quarantine_label_is_stamped_into_b_and_c(self):
+        r = H.harvest(self._starved())
+        for s in ("B_BOOK_STRUCTURE", "C_HYPOTHETICAL_QUOTE_PATH"):
+            self.assertEqual(r[s]["STATUS"],
+                             "DIAGNOSTIC_ONLY_RATE_LIMIT_SELECTED_SAMPLE")
+            self.assertEqual(r[s]["MARKET_CHARACTERIZATION_VALID"], "NO")
+
+    def test_the_prohibited_uses_travel_with_the_figures(self):
+        r = H.harvest(self._starved())
+        for use in ("BETTOR_STRATEGY_THRESHOLDS", "QUOTE_PLACEMENT_CALIBRATION",
+                    "SPORT_COMPARISONS", "CAPACITY", "PROFITABILITY",
+                    "MANAGEMENT_GENERALIZATIONS"):
+            self.assertIn(use, r["B_BOOK_STRUCTURE"]["MAY_NOT_ENTER"], use)
+
+    def test_section_d_is_not_quarantined_because_it_is_a_refusal(self):
+        """D says no fill can be identified. A bad sample does not make that
+        conclusion weaker -- it was never a sample-dependent claim."""
+        r = H.harvest(self._starved())
+        self.assertNotIn("STATUS", r["D_EXECUTION_IDENTIFICATION"])
+        self.assertEqual(
+            r["PUBLIC_TICK_DATA_SUFFICIENT_FOR_FILL_IDENTIFICATION"], "NO")
+
+    def test_a_clean_single_market_capture_still_fails_on_sport_coverage(self):
+        """One market, no errors -- the pipeline is fine and the sample is
+        still not a characterisation of the venue."""
+        v = H.harvest(write(rows(20)))["CAPTURE_VALIDITY"]
+        self.assertEqual(v["CAPTURE_VALIDITY"], "FAIL")
+        self.assertIn("MULTIPLE_SPORTS_RETURNED_BOOKS", v["FAILED_CHECKS"])
+        self.assertNotIn("MARKET_YIELD_ACCEPTABLE", v["FAILED_CHECKS"])

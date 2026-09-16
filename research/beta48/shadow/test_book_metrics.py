@@ -74,7 +74,7 @@ class SamplingIsNotContinuousObservation(unittest.TestCase):
     def test_the_continuous_quantities_are_not_identified(self):
         m = BM.book_metrics([tick(i) for i in range(5)])
         self.assertEqual(m["TRUE_CONTINUOUS_QUOTE_LIFETIME"], NI)
-        self.assertEqual(m["TRUE_CONTINUOUS_BOOK_UPDATE_RATE"], NI)
+        self.assertEqual(m["TRUE_CONTINUOUS_BBO_PRICE_CHANGE_RATE"], NI)
         self.assertEqual(m["FEED_IS_EVENT_COMPLETE"], NI)
         self.assertFalse(m["EVERY_INTRAINTERVAL_TRANSITION_OBSERVED"])
 
@@ -82,7 +82,7 @@ class SamplingIsNotContinuousObservation(unittest.TestCase):
         m = BM.book_metrics([tick(i) for i in range(5)])
         for k in ("BID_OBSERVED_RUN_SPAN_S_P50",
                   "TIME_AT_PRICE_OBSERVED_S_P50",
-                  "BOOK_UPDATE_RATE_OBSERVED",
+                  "BBO_PRICE_CHANGE_RATE_OBSERVED",
                   "MARKET_MOVED_THROUGH_QUOTE_OBSERVED",
                   "MID_MOVE_FREQUENCY_OBSERVED",
                   "ONE_TICK_SNAPSHOT_SHARE",
@@ -150,8 +150,8 @@ class EventClusteringIsNotIndependence(unittest.TestCase):
         # Market-weighted: 4 of 6 transitions moved. Event-weighted: E1 is 1.0
         # and E2 is 0.0, so the average is 0.5 -- the two-market event counts
         # once, not twice.
-        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED"], D(4) / D(6))
-        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
+        self.assertEqual(m["BBO_PRICE_CHANGE_RATE_OBSERVED"], D(4) / D(6))
+        self.assertEqual(m["BBO_PRICE_CHANGE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
                          D("0.5"))
 
     def test_without_an_event_map_the_event_weighting_is_not_identified(self):
@@ -186,7 +186,7 @@ class TheMovementRates(unittest.TestCase):
         rows = [tick(0), tick(1, bid_changed=True), tick(2)]
         m = BM.book_metrics(rows)
         self.assertEqual(m["OBSERVED_TRANSITIONS"], 2)
-        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED"], D(1) / D(2))
+        self.assertEqual(m["BBO_PRICE_CHANGE_RATE_OBSERVED"], D(1) / D(2))
 
     def test_price_improvement_is_a_better_bid_or_a_better_offer(self):
         rows = [tick(0), tick(1, bid="0.55", bid_changed=True),
@@ -206,7 +206,7 @@ class TheMovementRates(unittest.TestCase):
                 tick(1, bid="0.53", ask="0.57", bid_changed=True,
                      ask_changed=True)]
         m = BM.book_metrics(rows)
-        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED"], D(1))
+        self.assertEqual(m["BBO_PRICE_CHANGE_RATE_OBSERVED"], D(1))
         self.assertEqual(m["MID_MOVE_FREQUENCY_OBSERVED"], D(0))
 
 
@@ -262,7 +262,7 @@ class TheCaptureItself(unittest.TestCase):
     def test_an_empty_capture_is_not_identified_not_zero(self):
         m = BM.book_metrics([])
         self.assertEqual(m["ONE_TICK_SNAPSHOT_SHARE"], NI)
-        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED"], NI)
+        self.assertEqual(m["BBO_PRICE_CHANGE_RATE_OBSERVED"], NI)
         self.assertEqual(m["REVISIT_CADENCE"]["MEDIAN_REVISIT_INTERVAL_S"], NI)
 
     def test_a_float_quantity_is_refused(self):
@@ -379,7 +379,7 @@ class EventWeightingAggregatesInternallyFirst(unittest.TestCase):
                             event_of={"a": "E1", "b": "E1", "c": "E2"})
         # E1 pooled: 20 changes over 22 transitions. E2: 0 over 2.
         # One vote each -> (20/22 + 0) / 2.
-        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
+        self.assertEqual(m["BBO_PRICE_CHANGE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
                          (D(20) / D(22)) / D(2))
         self.assertTrue(m["EVENT_AGGREGATED_INTERNALLY_FIRST"])
         self.assertFalse(m["MARKET_ROWS_REWEIGHTED_AFTER_POOLING"])
@@ -391,7 +391,7 @@ class EventWeightingAggregatesInternallyFirst(unittest.TestCase):
                             event_of={"a": "E1", "b": "E1", "c": "E2"})
         mean_of_market_rates = (D(1) + D(0)) / D(2)      # E1 the wrong way
         wrong = (mean_of_market_rates + D(0)) / D(2)
-        self.assertNotEqual(m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
+        self.assertNotEqual(m["BBO_PRICE_CHANGE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
                             wrong)
 
     def test_a_market_with_no_event_gets_no_vote(self):
@@ -403,7 +403,7 @@ class EventWeightingAggregatesInternallyFirst(unittest.TestCase):
         m = BM.book_metrics(self._rows(),
                             event_of={"a": "E1", "b": "E1", "c": "E2"})
         self.assertEqual(m["WEIGHTING"], "MARKET_WEIGHTED_ALL_MARKETS")
-        self.assertEqual(m["BOOK_UPDATE_RATE_OBSERVED"], D(20) / D(24))
+        self.assertEqual(m["BBO_PRICE_CHANGE_RATE_OBSERVED"], D(20) / D(24))
 
 
 class TheRunSpanClaimsNoContinuity(unittest.TestCase):
@@ -515,17 +515,17 @@ class TheThreeWayWeightingComparison(unittest.TestCase):
                                  event_of={"a": "E1", "b": "E2"})
 
     def test_all_three_figures_are_present(self):
-        self.assertIn("BOOK_UPDATE_RATE_OBSERVED", self.m)
-        self.assertIn("BOOK_UPDATE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY",
+        self.assertIn("BBO_PRICE_CHANGE_RATE_OBSERVED", self.m)
+        self.assertIn("BBO_PRICE_CHANGE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY",
                       self.m)
-        self.assertIn("BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY",
+        self.assertIn("BBO_PRICE_CHANGE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY",
                       self.m)
 
     def test_the_population_drop_is_visible_on_its_own(self):
         # All markets: 3 of 12 transitions moved. Resolved only (a, b): 3 of 6.
-        self.assertEqual(self.m["BOOK_UPDATE_RATE_OBSERVED"], D(3) / D(12))
+        self.assertEqual(self.m["BBO_PRICE_CHANGE_RATE_OBSERVED"], D(3) / D(12))
         self.assertEqual(
-            self.m["BOOK_UPDATE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY"],
+            self.m["BBO_PRICE_CHANGE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY"],
             D(3) / D(6))
 
     def test_only_the_last_two_isolate_the_weighting(self):
@@ -533,13 +533,54 @@ class TheThreeWayWeightingComparison(unittest.TestCase):
         # on the same subset. Same population, so the difference here is the
         # weighting alone -- and on this fixture it happens to be zero.
         self.assertEqual(
-            self.m["BOOK_UPDATE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
+            self.m["BBO_PRICE_CHANGE_RATE_OBSERVED_EVENT_WEIGHTED_RESOLVED_ONLY"],
             D("0.5"))
         self.assertEqual(
-            self.m["BOOK_UPDATE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY"],
+            self.m["BBO_PRICE_CHANGE_RATE_OBSERVED_MARKET_WEIGHTED_RESOLVED_ONLY"],
             D("0.5"))
 
     def test_the_comparison_is_explained_on_the_row(self):
         self.assertIn("isolates the population drop", self.m["THREE_WAY_COMPARISON"])
         self.assertEqual(self.m["MARKET_WEIGHTED_POPULATION"],
                          "ALL_CAPTURED_MARKETS")
+
+
+class TheCountTaxonomyIsSelfExplaining(unittest.TestCase):
+    """150 depth changes beside 1 price change must not look like a bug."""
+
+    def test_every_class_a_count_has_a_definition(self):
+        for k in BM.CLASS_A_TRANSITION_COUNTS:
+            self.assertIn(k, BM.COUNT_DEFINITIONS, k)
+
+    def test_the_price_count_is_named_for_the_bbo(self):
+        self.assertIn("OBSERVED_BBO_PRICE_CHANGES",
+                      BM.CLASS_A_TRANSITION_COUNTS)
+        self.assertIn("BEST BID PRICE",
+                      BM.COUNT_DEFINITIONS["OBSERVED_BBO_PRICE_CHANGES"])
+        self.assertIn("Quantity is not consulted",
+                      BM.COUNT_DEFINITIONS["OBSERVED_BBO_PRICE_CHANGES"])
+
+    def test_the_depth_count_says_it_fires_at_an_unchanged_price(self):
+        d = BM.COUNT_DEFINITIONS["OBSERVED_DEPTH_CHANGES"]
+        self.assertIn("DISPLAYED QUANTITY", d)
+        self.assertIn("whether or not the price moved", d)
+
+    def test_the_coexistence_is_explained_without_reading_source(self):
+        self.assertIn("quiet-price / busy-size",
+                      BM.WHY_DEPTH_AND_PRICE_COUNTS_DIFFER)
+
+    def test_size_churn_at_a_fixed_price_counts_as_depth_and_not_price(self):
+        rows = [tick(0, bid_qty="100"),
+                tick(1, bid_qty="60", depth_changed=True),
+                tick(2, bid_qty="900", depth_changed=True)]
+        m = BM.book_metrics(rows)
+        self.assertEqual(m["OBSERVED_DEPTH_CHANGES"], 2)
+        self.assertEqual(m["OBSERVED_BBO_PRICE_CHANGES"], 0)
+
+    def test_the_counts_were_not_massaged_to_agree(self):
+        self.assertTrue(BM.COUNTS_WERE_NOT_ADJUSTED_TO_LOOK_CONSISTENT)
+
+    def test_the_old_ambiguous_name_is_gone(self):
+        m = BM.book_metrics([tick(i) for i in range(3)])
+        self.assertNotIn("OBSERVED_BOOK_CHANGES", m)
+        self.assertNotIn("BOOK_UPDATE_RATE_OBSERVED", m)

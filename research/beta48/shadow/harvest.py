@@ -69,6 +69,71 @@ DO_NOT_INVENT_ANOTHER_FILL_APPROXIMATION = True
 CONCLUSION_IF_ZERO = "PUBLIC_BOOK_SNAPSHOTS_CANNOT_IDENTIFY_FILL"
 NOT_THE_CONCLUSION = "WE_NEED_A_MORE_AGGRESSIVE_APPROXIMATION"
 
+# ---------------------------------------------------------------------------
+# THE VALIDITY GATE. A capture can work perfectly as a pipeline and still be
+# useless as a sample, and run 35120338223 was exactly that. So the report
+# decides, from its own numbers, whether its book figures may be read as
+# market characterisation at all -- and when they may not, it says so in a
+# label that travels on every one of them.
+# ---------------------------------------------------------------------------
+
+DIAGNOSTIC_ONLY = "DIAGNOSTIC_ONLY_RATE_LIMIT_SELECTED_SAMPLE"
+
+MAX_ACCEPTABLE_FAILED_READ_SHARE = D("0.05")
+MIN_ACCEPTABLE_MARKET_YIELD = D("0.90")      # observed / attempted
+MIN_SPORTS_OBSERVED = 2
+
+# What a quarantined figure may NOT be used for. Listed so the prohibition is
+# machine-readable and cannot be lost in prose.
+QUARANTINED_FIGURES_MAY_NOT_ENTER = (
+    "BETTOR_STRATEGY_THRESHOLDS", "QUOTE_PLACEMENT_CALIBRATION",
+    "SPORT_COMPARISONS", "CAPACITY", "PROFITABILITY",
+    "MANAGEMENT_GENERALIZATIONS",
+)
+
+
+def capture_validity(a, book):
+    """Is this capture eligible for substantive book analysis? Six checks.
+
+    A pipeline that ran to completion is not a sample. This function separates
+    the two questions and answers both, because the first one being YES is
+    exactly what makes the second one easy to forget.
+    """
+    attempted = a["MARKETS_ATTEMPTED"]
+    observed = a["MARKETS_WITH_ANY_READABLE_BOOK"]
+    share = a["FAILED_READ_SHARE"]
+    yield_ = (D(observed) / D(attempted)) if attempted else D(0)
+    sports = len([k for k, v in a["SPORT_MIX_OBSERVED"].items() if v])
+    checks = {
+        "FAILED_READ_SHARE_ACCEPTABLE": (
+            share != NOT_IDENTIFIED and share <= MAX_ACCEPTABLE_FAILED_READ_SHARE),
+        "MARKET_YIELD_ACCEPTABLE": yield_ >= MIN_ACCEPTABLE_MARKET_YIELD,
+        "MULTIPLE_SPORTS_RETURNED_BOOKS": sports >= MIN_SPORTS_OBSERVED,
+        "NO_WHOLE_MARKET_STARVATION": observed == attempted,
+        "EVENT_IDENTITY_PRESENT":
+            a.get("VALIDATED_DISTINCT_EVENTS") != NOT_IDENTIFIED,
+        "MISSINGNESS_RANDOM": not a["MISSINGNESS"]["MISSINGNESS_IS_NOT_RANDOM"],
+    }
+    ok = all(checks.values())
+    return {
+        "CAPTURE_PIPELINE_FUNCTIONAL": "YES",
+        "CAPTURE_VALIDITY": "PASS" if ok else "FAIL",
+        "MARKET_CHARACTERIZATION_VALID": "YES" if ok else "NO",
+        "CAPTURE_MISSINGNESS_RANDOM": (
+            "YES" if checks["MISSINGNESS_RANDOM"] else "NO"),
+        "CHECKS": checks,
+        "FAILED_CHECKS": [k for k, v in checks.items() if not v],
+        "MARKET_YIELD": yield_,
+        "SPORTS_WITH_READABLE_BOOKS": sports,
+        "SECTION_B_AND_C_STATUS": (None if ok else DIAGNOSTIC_ONLY),
+        "QUARANTINED_FIGURES_MAY_NOT_ENTER": (
+            [] if ok else list(QUARANTINED_FIGURES_MAY_NOT_ENTER)),
+        "WHY": ("every check passed" if ok else
+                "the pipeline ran; the SAMPLE did not survive. Book figures "
+                "here describe whichever markets the venue happened to let "
+                "through, and that is not the venue"),
+    }
+
 # The candidate universe the 24 were drawn from. A count of markets, and -- per
 # the correction to section 15a -- not a capacity.
 CANDIDATE_UNIVERSE = 788
@@ -276,7 +341,7 @@ def harvest(path, universe_path=None, event_of=None, board_path=None):
     admitted = ladder["ADMITTED_COUNTERFACTUAL_FILLS"]
     sufficient = "YES" if admitted > 0 else "NO"
 
-    return {
+    out = {
         # =================================================== A. CAPTURE =====
         "A_CAPTURE_QUALITY": dict({
             "CAPTURE_PATH": str(path),
@@ -389,6 +454,21 @@ def harvest(path, universe_path=None, event_of=None, board_path=None):
         "CAPITAL_DEPLOYED": 0,
         "mirror_live": False,
     }
+
+    # THE GATE, AND THE LABEL IT PUTS ON B AND C WHEN IT FAILS. Stamped INTO
+    # the sections rather than kept beside them, so a figure copied out of
+    # section B carries its own quarantine.
+    v = capture_validity(out["A_CAPTURE_QUALITY"], book)
+    out["CAPTURE_VALIDITY"] = v
+    out["MARKET_CHARACTERIZATION_VALID"] = v["MARKET_CHARACTERIZATION_VALID"]
+    if v["CAPTURE_VALIDITY"] != "PASS":
+        for section in ("B_BOOK_STRUCTURE", "C_HYPOTHETICAL_QUOTE_PATH"):
+            out[section]["STATUS"] = DIAGNOSTIC_ONLY
+            out[section]["MARKET_CHARACTERIZATION_VALID"] = "NO"
+            out[section]["MAY_NOT_ENTER"] = list(
+                QUARANTINED_FIGURES_MAY_NOT_ENTER)
+            out[section]["WHY"] = v["WHY"]
+    return out
 
 
 def _jsonable(o):

@@ -1,0 +1,102 @@
+# BETA48 PHASE_2A -- READ-ONLY RATE-LIMIT PILOT.
+# NO ORDERS. NO CREDENTIAL. mirror_live = false.
+#
+# WHY. Run 35120338223 polled 24 markets at 2.0 rps and took 5,835 HTTP 429s --
+# 81% of every read. Six markets survived, all NFL, and they survived because
+# they were polled FIRST. The pipeline worked; the sample did not. Repeating
+# that experiment at the same rate would destroy it again, so the limit gets
+# measured before another capture window is spent on it.
+#
+# WHAT THIS IS NOT. It is not a capture. It writes no ticks, characterises no
+# market, and its output feeds one decision only: the request rate the next
+# capture is allowed to use. Book figures do not come out of this job.
+#
+# THE FOUR RULES, enforced in rate_pilot.py and proved by its tests:
+#   single global scheduler, no concurrency
+#   no bursts -- the gap is enforced before every request
+#   a 429 backs off GLOBALLY, not per market (a per-market retry loop is
+#     exactly what starved 18 markets last time)
+#   Retry-After is honoured when present, and the report says which of the two
+#     schedules was used
+#
+# HEADERS ARE REPORTED, NEVER INTERPRETED. RATE_LIMIT_SEMANTICS stays
+# NOT_IDENTIFIED until the venue documents them.
+
+name: beta48-rate-pilot
+
+on:
+  workflow_dispatch:
+    inputs:
+      markets:
+        description: "Distinct markets to rotate through"
+        required: false
+        default: "6"
+      requests:
+        description: "Requests per rate rung"
+        required: false
+        default: "40"
+
+permissions:
+  contents: write
+
+# SHARED with every other venue-touching job on purpose: two of these running
+# at once would measure the wrong thing and add load while doing it.
+concurrency:
+  group: beta48-forward-capture
+  cancel-in-progress: false
+
+jobs:
+  pilot:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency
+        run: python -m pip install --quiet "httpx==0.27.2" "pytest==8.3.3"
+
+      # THE GATE. No venue contact until the boundary is proved.
+      - name: Prove the capability boundary offline
+        working-directory: research/beta48/shadow
+        run: python -m pytest -q
+
+      - name: Read-only rate-limit pilot
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          python rate_pilot.py \
+            --universe tick_universe.json \
+            --out "evidence/ratepilot_$SEG" \
+            --markets "${{ github.event.inputs.markets || 6 }}" \
+            --requests "${{ github.event.inputs.requests || 40 }}"
+
+      - name: Seal and commit the pilot
+        if: always()
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/shadow/evidence/ratepilot_$SEG
+          [ -d "$D" ] || exit 0
+          ( cd "$D" && sha256sum * > SEALED.sha256 2>/dev/null || true )
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BR="beta48-ratepilot/seg-$SEG"
+          git checkout --orphan "$BR"
+          git rm -rq --cached . || true
+          git add -f "$D"
+          git commit -qm "BETA48 rate-limit pilot $SEG [skip render]" || exit 0
+          for i in 1 2 4 8 16; do
+            git push -f origin "$BR" && break
+            echo "push failed, retrying in ${i}s"; sleep "$i"
+          done
+          echo "BETA48_RATEPILOT_BRANCH $BR"
