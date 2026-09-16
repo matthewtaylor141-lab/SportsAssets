@@ -300,3 +300,119 @@ TRADE_COUNTER_IS_A_TAPE             NO
 
 Reported in `panel_report.tape_observables`, with each of those four NOs pinned
 as a test so the counter cannot be quietly promoted into a tape.
+
+---
+
+## C-9 — three precision corrections, applied to the NEXT step, not the running one
+
+Independently confirmed against current official Polymarket US documentation.
+The segment running when these landed was NOT modified: the selection change
+below is opt-in and defaults to the original rule, so a dispatch that does not
+ask for it — including one already in flight — behaves exactly as before.
+
+### C-9a. LEVEL_4 MBO proves a COUNTERFACTUAL fill, not BETTOR's fill
+
+FIX market data is genuinely Market-by-Order — every order individually
+represented, unique OrderID, a per-order timestamp documented as setting time
+priority within a price level, incremental New/Change/Delete, Trade entries
+with AggressorSide. That is dramatically stronger than aggregated L2, and it is
+still not evidence about an order that was never submitted.
+
+```
+COUNTERFACTUAL_PASSIVE_FILL   what a simulator concludes about a quote that
+                              was never submitted
+ACTUAL_BETTOR_PASSIVE_FILL    what the venue did with an order BETTOR placed
+```
+
+`LEVEL_4_MBO_WITHOUT_BETTOR_ORDER` now carries all eleven terms explicitly,
+with `ACTUAL_BETTOR_PASSIVE_FILL`, `ACTUAL_BETTOR_ORDER_ACCEPTANCE_LATENCY` and
+`ACTUAL_BETTOR_FILL_PROBABILITY` all `NO`, and
+`TRUE_QUEUE_POSITION_FOR_HYPOTHETICAL_ORDER` carrying its condition rather than
+an unconditional YES. `FIX_MBO_GIVES = HIGH_FIDELITY_COUNTERFACTUAL_FILL
+_SIMULATION`; `FIX_MBO_DOES_NOT_GIVE = DIRECTLY_OBSERVED_BETTOR_FILL
+_PROBABILITY`. Those three NOs close only when BETTOR submits real passive
+orders:
+
+```
+MICRO_LIVE_REQUIRED_FOR_FINAL_EXECUTION_VALIDATION = YES
+MICRO_LIVE_AUTHORIZED                              = NO
+```
+
+Recording a requirement is not authorisation to meet it. Writing it down is
+what stops a data-quality upgrade being mistaken for having cleared the gate.
+
+### C-9b. The running panel is UFC-local evidence — and the two failures are different
+
+`OUTCOME_LEAKAGE` and `COVERAGE_BIAS` are not the same defect and no longer
+share a field:
+
+```
+PANEL_GENERALIZES_TO_BOARD = NO
+PANEL_SPORT_SCOPE          = UFC
+PANEL_SELECTION_METHOD     = LEXICOGRAPHIC_WITHIN_FROZEN_STRATA
+OUTCOME_LEAKAGE            = NO
+COVERAGE_BIAS              = YES
+DO_NOT_USE_AS              = EXCHANGE_WIDE_OR_SPORTS_WIDE_ESTIMATE
+```
+
+Its target-size eligibility, depth, touch, markout, adverse-selection and
+maker-budget figures are valid UFC/local microstructure and are not
+exchange-wide or sports-wide estimates. `panel_report.py` prints all six lines
+beside every figure, so a number cannot travel away from the label bounding it.
+
+### C-9c. The next panel ranks on a frozen salted hash, not the alphabet
+
+Lexicographic order is deterministic and outcome-blind. It is **not
+identity-blind**: `aec-ufc-` sorts early enough to fill every stratum.
+
+The strata stay exactly as they were. Within a stratum the order becomes
+`SHA256(PANEL_SALT + "|" + market_slug)`, lowest first.
+
+```
+PANEL_SALT = "BETA48-FORWARD-PANEL-2026-09-16"
+```
+
+The salt is a literal in `fwd_collect.py`, fixed before any outcome from a
+hash-selected panel exists. Changing it re-randomises the sample, so changing
+it after seeing a result would be resampling until the answer is liked. It
+does not change again.
+
+`panel_composition()` reports `SPORT_DISTRIBUTION`, `LEAGUE_DISTRIBUTION`,
+`PROGRAM_TYPE_DISTRIBUTION`, `TARGET_SIZE_DISTRIBUTION`,
+`TICK_SIZE_DISTRIBUTION`, `UNIQUE_MARKETS`, `UNIQUE_EVENTS`,
+`MAX_SINGLE_SPORT_SHARE` and `MAX_SINGLE_LEAGUE_SHARE` into `panel_plan.json`.
+
+**If a hash-selected panel is still concentrated, that is reported, not
+resampled.** `CONCENTRATION_IS_REPORTED_NOT_RESAMPLED = YES`, pinned by a test
+that draws from a single-sport universe and asserts the artifact says 100%.
+Resampling until a sample looks diverse is selection by another name, and a
+balanced panel would be a DIFFERENT experiment requiring its own preregistration.
+
+### C-9d. gRPC `unaggregated` stays unresolved
+
+`unaggregated=True` is documented as "receive raw order book" while the
+`BookEntry` schema carries only `px` and `qty` with `qty` described as the
+aggregate at that level. Unreconciled, and not promoted:
+
+```
+GRPC_UNAGGREGATED_EXISTS                   YES
+GRPC_UNAGGREGATED_EXACT_SEMANTICS          NOT_IDENTIFIED
+GRPC_UNAGGREGATED_HAS_ORDER_ID             NO DOCUMENTED FIELD
+GRPC_UNAGGREGATED_HAS_ORDER_TIMESTAMP      NO DOCUMENTED FIELD
+GRPC_UNAGGREGATED_GIVES_TRUE_TIME_PRIORITY NOT_ESTABLISHED
+```
+
+The resolving experiment is specified BEFORE the credential exists, so it
+cannot be designed in the excitement of finally holding one.
+
+### C-9e. A documented capability is not a grant
+
+```
+VENUE_ENFORCED_READ_ONLY_CAPABILITY = DOCUMENTED
+CAPABILITY_DOCUMENTED               = YES
+BETTOR_GRANTED_SCOPE                = NOT_IDENTIFIED
+BETTOR_CREDENTIAL_INSTALLED         = NO
+BETTOR_CONNECTION_AUTHORIZED        = NO
+```
+
+Four separate facts. The first is about the venue; the rest are about us.

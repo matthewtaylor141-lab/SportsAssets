@@ -64,6 +64,18 @@ on:
         description: "Depth-panel passes per segment"
         required: false
         default: "3"
+      panel_selection:
+        description: >-
+          Within-stratum order. Defaults to the ORIGINAL lexicographic rule so
+          a dispatch that does not ask for the new one behaves exactly as
+          before. SALTED_HASH_WITHIN_FROZEN_STRATA removes the alphabetic
+          sport-name artifact; the salt is frozen in fwd_collect.py.
+        required: false
+        default: "LEXICOGRAPHIC_WITHIN_FROZEN_STRATA"
+        type: choice
+        options:
+          - LEXICOGRAPHIC_WITHIN_FROZEN_STRATA
+          - SALTED_HASH_WITHIN_FROZEN_STRATA
 
 permissions:
   contents: write
@@ -153,6 +165,7 @@ jobs:
             --out "$D" --board "$D/board.json" --rules "$D/rules.json" \
             --per-stratum "${{ github.event.inputs.panel_per_stratum || 4 }}" \
             --rounds "${{ github.event.inputs.panel_rounds || 3 }}" \
+            --panel-selection "${{ github.event.inputs.panel_selection || 'LEXICOGRAPHIC_WITHIN_FROZEN_STRATA' }}" \
             --interval 30
 
       - name: Depth — dense cohort, for execution questions only

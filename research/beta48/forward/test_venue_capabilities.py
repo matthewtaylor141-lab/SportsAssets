@@ -254,5 +254,93 @@ class ExchangeRiskControlsDoNotReplaceOurs(unittest.TestCase):
         self.assertTrue(V.OWN_KILL_SWITCHES_STILL_REQUIRED)
 
 
+class Level4ProvesCounterfactualNotActualFill(unittest.TestCase):
+    """MBO is dramatically stronger than L2 and is still not evidence about an
+    order that was never submitted. Both halves pinned."""
+
+    def test_the_counterfactual_terms_are_yes(self):
+        L = V.LEVEL_4_MBO_WITHOUT_BETTOR_ORDER
+        for f in ("TOUCH", "SPREAD", "DEPTH", "DEPTH_DEPLETION",
+                  "QUEUE_AHEAD_AT_HYPOTHETICAL_ENTRY", "TRADE_AGGRESSOR",
+                  "COUNTERFACTUAL_PASSIVE_FILL"):
+            self.assertEqual(L[f], "YES", f)
+
+    def test_the_actual_bettor_terms_are_no(self):
+        """These three close only when BETTOR submits real passive orders.
+        No feed, at any level, closes them."""
+        L = V.LEVEL_4_MBO_WITHOUT_BETTOR_ORDER
+        for f in ("ACTUAL_BETTOR_PASSIVE_FILL",
+                  "ACTUAL_BETTOR_ORDER_ACCEPTANCE_LATENCY",
+                  "ACTUAL_BETTOR_FILL_PROBABILITY"):
+            self.assertEqual(L[f], "NO", f)
+
+    def test_counterfactual_and_actual_are_different_fields(self):
+        L = V.LEVEL_4_MBO_WITHOUT_BETTOR_ORDER
+        self.assertNotEqual(L["COUNTERFACTUAL_PASSIVE_FILL"],
+                            L["ACTUAL_BETTOR_PASSIVE_FILL"])
+        self.assertNotEqual(V.FIX_MBO_GIVES, V.FIX_MBO_DOES_NOT_GIVE)
+
+    def test_true_queue_position_carries_its_condition(self):
+        """It holds only while the documented matching semantics are the ones
+        in force; an unconditional YES would be a stronger claim than the
+        documentation supports."""
+        v = V.LEVEL_4_MBO_WITHOUT_BETTOR_ORDER[
+            "TRUE_QUEUE_POSITION_FOR_HYPOTHETICAL_ORDER"]
+        self.assertTrue(v.startswith("YES_CONDITIONAL_ON"), v)
+
+    def test_the_micro_live_gate_is_recorded_and_not_authorized(self):
+        self.assertTrue(V.MICRO_LIVE_REQUIRED_FOR_FINAL_EXECUTION_VALIDATION)
+        self.assertFalse(V.MICRO_LIVE_AUTHORIZED)
+
+
+class UnaggregatedGrpcIsNotLevel4(unittest.TestCase):
+
+    def test_it_exists_and_its_semantics_do_not(self):
+        self.assertEqual(V.GRPC_UNAGGREGATED_EXISTS, "YES")
+        self.assertEqual(V.GRPC_UNAGGREGATED_EXACT_SEMANTICS, "NOT_IDENTIFIED")
+
+    def test_no_documented_order_identity_or_timestamp(self):
+        self.assertEqual(V.GRPC_UNAGGREGATED_HAS_ORDER_ID, "NO_DOCUMENTED_FIELD")
+        self.assertEqual(V.GRPC_UNAGGREGATED_HAS_ORDER_TIMESTAMP,
+                         "NO_DOCUMENTED_FIELD")
+        self.assertEqual(V.GRPC_UNAGGREGATED_GIVES_TRUE_TIME_PRIORITY,
+                         "NOT_ESTABLISHED")
+
+    def test_the_adjective_raw_does_not_promote_it(self):
+        """"Receive raw order book" is one adjective; LEVEL_4 needs OrderID and
+        a per-order timestamp, and neither is a documented field."""
+        self.assertFalse(V.GRPC_UNAGGREGATED_IS_LEVEL_4)
+        self.assertFalse(V.GRPC_ORDER_IDENTITY_MAY_BE_INFERRED)
+
+    def test_the_resolving_experiment_is_specified_before_the_credential(self):
+        for f in ("NUMBER_OF_ENTRIES_PER_PRICE", "SUM_QTY_BY_PRICE",
+                  "ORDERING_STABILITY", "ENTRY_CHURN", "UPDATE_FREQUENCY",
+                  "TRANSACT_TIME", "RECONCILIATION_TO_AGGREGATED_BOOK"):
+            self.assertIn(f, V.GRPC_UNAGGREGATED_EXPERIMENT)
+        self.assertEqual(V.GRPC_UNAGGREGATED_ANSWER, "NOT_IDENTIFIED")
+
+
+class ADocumentedCapabilityIsNotAGrant(unittest.TestCase):
+
+    def test_the_scope_list_and_its_enforcement(self):
+        for s in ("read:marketdata", "read:l2marketdata", "read:instruments",
+                  "read:orders", "write:orders", "read:reports",
+                  "read:positions", "read:dropcopy"):
+            self.assertIn(s, V.DOCUMENTED_SCOPES, s)
+        self.assertEqual(V.ORDER_SUBMISSION_REQUIRES, "write:orders")
+        self.assertEqual(V.MARKET_DATA_STREAMING_REQUIRES, "read:marketdata")
+        self.assertEqual(V.SCOPE_ENFORCEMENT, "STRICT_SERVER_SIDE")
+
+    def test_what_the_venue_documents_is_not_what_bettor_holds(self):
+        self.assertEqual(V.VENUE_ENFORCED_READ_ONLY_CAPABILITY, "DOCUMENTED")
+        self.assertEqual(V.CAPABILITY_DOCUMENTED, "YES")
+        self.assertEqual(V.BETTOR_GRANTED_SCOPE, "NOT_IDENTIFIED")
+        self.assertEqual(V.BETTOR_CREDENTIAL_INSTALLED, "NO")
+        self.assertEqual(V.BETTOR_CONNECTION_AUTHORIZED, "NO")
+
+    def test_the_capability_never_stands_in_for_the_grant(self):
+        self.assertNotEqual(V.CAPABILITY_DOCUMENTED, V.BETTOR_GRANTED_SCOPE)
+
+
 if __name__ == "__main__":
     unittest.main(verbosity=2)

@@ -822,7 +822,37 @@ def settle(outdir: Path, registry_path: Path, pacer, http) -> dict:
 
 # ------------------------------------------------------------- the panel --
 
-def panel_cohort(board_events, rules_out, per_stratum=3):
+# THE FROZEN EXPERIMENT SALT. Fixed here, in the repository, BEFORE any
+# outcome or economics from a hash-selected panel has been looked at. Changing
+# it re-randomises the sample, so changing it after seeing a result would be
+# resampling until the answer is liked. It does not change again.
+PANEL_SALT = "BETA48-FORWARD-PANEL-2026-09-16"
+
+PANEL_SELECTION_LEXICOGRAPHIC = "LEXICOGRAPHIC_WITHIN_FROZEN_STRATA"
+PANEL_SELECTION_HASH = "SALTED_HASH_WITHIN_FROZEN_STRATA"
+
+
+def _panel_rank(slug, method, salt=PANEL_SALT):
+    """The within-stratum order. Deterministic under BOTH methods.
+
+    LEXICOGRAPHIC is the original and stays the default, so a dispatch that
+    does not ask for the new method -- including one already running when this
+    landed -- behaves exactly as before.
+
+    SALTED_HASH exists because lexicographic order is deterministic and
+    outcome-blind but NOT identity-blind: `aec-ufc-` sorts early enough to fill
+    every stratum, and the first panel drew 12 markets that were all UFC
+    fights. That is a coverage artifact, not outcome leakage, and the fix is a
+    ranking keyed to nothing a human would recognise as attractive.
+    """
+    if method == PANEL_SELECTION_HASH:
+        return hashlib.sha256(
+            ("%s|%s" % (salt, slug)).encode("utf-8")).hexdigest()
+    return str(slug)
+
+
+def panel_cohort(board_events, rules_out, per_stratum=3,
+                 selection=PANEL_SELECTION_LEXICOGRAPHIC, salt=PANEL_SALT):
     """Choose the depth panel's markets. SAMPLING FROZEN BEFORE ANY ECONOMICS.
 
     THE ONE RULE: selection may use only facts knowable AT DECISION TIME from
@@ -833,9 +863,9 @@ def panel_cohort(board_events, rules_out, per_stratum=3):
     was built to test, and it is the single failure this whole programme has
     been trying not to repeat.
 
-    The stratum key is therefore made of programme facts ONLY, the markets
-    inside a stratum are taken in SLUG ORDER (deterministic, and unrelated to
-    any outcome), and the count per stratum is fixed in advance.
+    The stratum key is therefore made of programme facts ONLY, the count per
+    stratum is fixed in advance, and the order WITHIN a stratum is one of two
+    deterministic rules -- see `_panel_rank`. Neither reads an outcome.
 
     This is a DIFFERENT DATASET from the breadth census and is never pooled
     with it: breadth is the whole observed prefix with no selection at all;
@@ -856,7 +886,8 @@ def panel_cohort(board_events, rules_out, per_stratum=3):
 
     picked, plan = [], []
     for key in sorted(strata, key=lambda k: tuple(str(x) for x in k)):
-        rows = sorted(strata[key], key=lambda r: r[0])       # SLUG ORDER
+        rows = sorted(strata[key],
+                      key=lambda r: (_panel_rank(r[0], selection, salt), r[0]))
         take = rows[:int(per_stratum)]
         plan.append({"stratum": [str(x) for x in key],
                      "available": len(rows), "taken": len(take)})
@@ -889,8 +920,54 @@ def panel_cohort(board_events, rules_out, per_stratum=3):
     return reads, plan, picked
 
 
+def panel_composition(reads):
+    """What the frozen rule actually drew, reported rather than assumed.
+
+    A deterministic, outcome-blind rule can still land on one sport, and the
+    first panel did exactly that. These nine fields make the concentration
+    visible in the artifact itself, so nobody has to notice it later.
+
+    If a hash-selected panel is STILL concentrated, that is a fact about the
+    underlying prefix and is reported as one. It is not a reason to resample:
+    resampling until the sample looks diverse is selection by another name.
+    """
+    def share(counter):
+        tot = sum(c for _, c in counter)
+        return "%.1f%%" % (100.0 * counter[0][1] / tot) if tot else "0.0%"
+
+    def top(field):
+        c: dict = {}
+        for r in reads:
+            c[field(r)] = c.get(field(r), 0) + 1
+        return sorted(c.items(), key=lambda kv: (-kv[1], str(kv[0])))
+
+    parts = lambda r: str(r["slug"]).split("-")            # noqa: E731
+    sport = top(lambda r: parts(r)[1] if len(parts(r)) > 1 else r["slug"])
+    league = top(lambda r: "-".join(parts(r)[:3])
+                 if len(parts(r)) > 2 else r["slug"])
+    return {
+        "SPORT_DISTRIBUTION": sport,
+        "LEAGUE_DISTRIBUTION": league[:12],
+        "PROGRAM_TYPE_DISTRIBUTION": top(
+            lambda r: tuple(sorted({p.get("PROGRAM_TYPE")
+                                    for p in r["programs"]}))),
+        "TARGET_SIZE_DISTRIBUTION": top(
+            lambda r: tuple(sorted(str(p.get("TARGET_SIZE"))
+                                   for p in r["programs"]))),
+        "TICK_SIZE_DISTRIBUTION": top(
+            lambda r: r["event"].get("orderPriceMinTickSize")),
+        "UNIQUE_MARKETS": len({r["slug"] for r in reads}),
+        "UNIQUE_EVENTS": len({"-".join(parts(r)[:-1]) if len(parts(r)) > 1
+                              else r["slug"] for r in reads}),
+        "MAX_SINGLE_SPORT_SHARE": share(sport),
+        "MAX_SINGLE_LEAGUE_SHARE": share(league),
+        "CONCENTRATION_IS_REPORTED_NOT_RESAMPLED": "YES",
+    }
+
+
 def panel(outdir: Path, board_events, rules_out, pacer, http,
-          per_stratum=3, rounds=1, interval_s=5.0) -> int:
+          per_stratum=3, rounds=1, interval_s=5.0,
+          selection=PANEL_SELECTION_LEXICOGRAPHIC, salt=PANEL_SALT) -> int:
     """Read FULL DEPTH on the panel's markets, for the Target Size question.
 
     Writes raw book responses plus the programme facts they must be read
@@ -898,7 +975,8 @@ def panel(outdir: Path, board_events, rules_out, pacer, http,
     under a rule fixed before the data, so the measurement and the capture
     cannot drift into each other.
     """
-    reads, plan, picked = panel_cohort(board_events, rules_out, per_stratum)
+    reads, plan, picked = panel_cohort(board_events, rules_out, per_stratum,
+                                       selection=selection, salt=salt)
     path = outdir / "panel.jsonl"
     n = 0
     with path.open("a") as fh:
@@ -946,19 +1024,21 @@ def panel(outdir: Path, board_events, rules_out, pacer, http,
         "SELECTION_INPUTS": ["PROGRAM_TYPE", "REWARD_POOL", "TARGET_SIZE",
                              "DISCOUNT_FACTOR", "PROGRAM_PERIOD",
                              "orderPriceMinTickSize", "sportsMarketTypeV2"],
-        "SELECTION_WITHIN_STRATUM": "SLUG_ORDER",
+        "PANEL_SELECTION_METHOD": selection,
+        "PANEL_SALT": salt if selection == PANEL_SELECTION_HASH else None,
+        "SALT_FROZEN_BEFORE_OUTCOMES": (
+            "YES" if selection == PANEL_SELECTION_HASH else "N/A"),
+        "OUTCOME_LEAKAGE": "NO",
         "per_stratum": int(per_stratum),
         "strata": len(plan),
         "STRATUM_SLOTS_FILLED": len(picked),
         "DISTINCT_MARKETS_READ": len(reads),
         "OBSERVATION_UNIT": "ONE_BOOK_READ_PER_MARKET_PER_ROUND",
         "ELIGIBILITY_NEVER_POOLED_ACROSS": "TARGET_SIZE",
-        "SPORT_CONCENTRATION": sorted(
-            {str(r["slug"]).split("-")[1] for r in reads
-             if len(str(r["slug"]).split("-")) > 1}),
+        "COMPOSITION": panel_composition(reads),
         "rounds": int(rounds), "plan": plan}, indent=1))
-    print("panel strata %d | slots %d | distinct markets %d | rows %d"
-          % (len(plan), len(picked), len(reads), n))
+    print("panel %s | strata %d | slots %d | distinct markets %d | rows %d"
+          % (selection, len(plan), len(picked), len(reads), n))
     return n
 
 
@@ -999,6 +1079,13 @@ def main(argv=None) -> int:
     ap.add_argument("--rules", help="rules.json, for the panel's strata")
     ap.add_argument("--per-stratum", type=int, default=3)
     ap.add_argument("--rounds", type=int, default=1)
+    # DEFAULTS TO THE ORIGINAL RULE ON PURPOSE. A dispatch that does not ask
+    # for the new method behaves exactly as before, so landing this cannot
+    # change a segment that is already running.
+    ap.add_argument("--panel-selection",
+                    choices=(PANEL_SELECTION_LEXICOGRAPHIC,
+                             PANEL_SELECTION_HASH),
+                    default=PANEL_SELECTION_LEXICOGRAPHIC)
     a = ap.parse_args(argv)
 
     out = Path(a.out)
@@ -1019,7 +1106,7 @@ def main(argv=None) -> int:
         if a.mode == "panel":
             r = json.loads(Path(a.rules).read_text()) if a.rules else {}
             panel(out, events, r, pacer, http, a.per_stratum,
-                  a.rounds, a.interval)
+                  a.rounds, a.interval, selection=a.panel_selection)
             return 0
         if a.mode == "breadth":
             if a.registry:

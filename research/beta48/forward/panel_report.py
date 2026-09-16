@@ -314,8 +314,29 @@ def main(argv=None):
     print("\n--- decision-time strata actually captured ---")
     for k, v in distributions(rows).items():
         print("%-20s %s" % (k, v))
-    print("%-20s %s" % ("SPORT_CONCENTRATION", sport_concentration(rows)))
-    print("%-20s %s" % ("PANEL_GENERALIZES_TO_BOARD", "NO"))
+    conc = sport_concentration(rows)
+    plan_method = None
+    if len(argv) > 1 and Path(argv[1]).exists():
+        plan_method = json.loads(Path(argv[1]).read_text()).get(
+            "PANEL_SELECTION_METHOD")
+    # THE SCOPE OF THIS PANEL'S EVIDENCE, printed beside every figure above so
+    # a number cannot travel away from the label that bounds it. Lexicographic
+    # order is outcome-blind, so there is NO leakage -- and it is not
+    # identity-blind, so there IS a coverage artifact. Those are different
+    # failures and get different fields.
+    for k, v in (
+            ("PANEL_GENERALIZES_TO_BOARD", "NO"),
+            ("PANEL_SPORT_SCOPE",
+             conc[0][0].upper() if len(conc) == 1 else
+             "+".join(s.upper() for s, _ in conc)),
+            ("PANEL_SELECTION_METHOD",
+             plan_method or "LEXICOGRAPHIC_WITHIN_FROZEN_STRATA"),
+            ("OUTCOME_LEAKAGE", "NO"),
+            ("COVERAGE_BIAS", "NO" if len(conc) > 1 else "YES"),
+            ("DO_NOT_USE_AS", "EXCHANGE_WIDE_OR_SPORTS_WIDE_ESTIMATE"),
+    ):
+        print("%-42s %s" % (k, v))
+    print("%-42s %s" % ("SPORT_CONCENTRATION", conc))
     print("\n--- what the book payload's own stats block adds at LEVEL_0 ---")
     for k, v in tape_observables(rows).items():
         print("%-42s %s" % (k, v))

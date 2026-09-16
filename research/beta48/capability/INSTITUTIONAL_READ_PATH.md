@@ -225,6 +225,102 @@ INSTITUTIONAL gRPC + read:l2marketdata LEVEL_2
 FIX MARKET DATA GATEWAY                LEVEL_4
 ```
 
+### 5b. LEVEL_4 WITHOUT A BETTOR ORDER — the correction that matters most
+
+The row above is written as though LEVEL_4 answers the maker question. It does
+not, and the gap has a name on each side so the two can never land in one
+field:
+
+```
+COUNTERFACTUAL_PASSIVE_FILL    what a simulator concludes about a quote that
+                               was never submitted
+ACTUAL_BETTOR_PASSIVE_FILL     what the venue did with an order BETTOR
+                               actually placed
+```
+
+A perfect MBO replay plus documented matching semantics gives the first at
+high fidelity. It cannot give the second, because the order was not there: it
+never sat in the queue, never displaced anyone, and no counterparty reacted to
+it. Nor does any feed reveal how long the venue would have taken to accept it.
+
+```
+LEVEL_4_MBO_WITHOUT_BETTOR_ORDER
+  TOUCH                                       YES
+  SPREAD                                      YES
+  DEPTH                                       YES
+  DEPTH_DEPLETION                             YES
+  QUEUE_AHEAD_AT_HYPOTHETICAL_ENTRY           YES
+  TRADE_AGGRESSOR                             YES
+  COUNTERFACTUAL_PASSIVE_FILL                 YES
+  TRUE_QUEUE_POSITION_FOR_HYPOTHETICAL_ORDER  YES, conditional on the
+                                              documented matching and
+                                              time-priority semantics
+  ACTUAL_BETTOR_PASSIVE_FILL                  NO
+  ACTUAL_BETTOR_ORDER_ACCEPTANCE_LATENCY      NO
+  ACTUAL_BETTOR_FILL_PROBABILITY              NO
+
+FIX_MBO_GIVES          HIGH_FIDELITY_COUNTERFACTUAL_FILL_SIMULATION
+FIX_MBO_DOES_NOT_GIVE  DIRECTLY_OBSERVED_BETTOR_FILL_PROBABILITY
+```
+
+The last three close only when BETTOR submits real passive orders.
+
+```
+MICRO_LIVE_REQUIRED_FOR_FINAL_EXECUTION_VALIDATION = YES
+MICRO_LIVE_AUTHORIZED                              = NO
+```
+
+Recording the requirement is not authorisation to meet it. The point of
+writing it down is the opposite: so that no amount of data-quality improvement
+is ever mistaken for having cleared this gate.
+
+### 5c. gRPC `unaggregated` is unresolved, not a fourth level
+
+The gRPC docs offer `unaggregated=True`, described as "receive raw order
+book". The documented `BookEntry` schema carries only `px` and `qty`, and
+describes `qty` as the AGGREGATE quantity at that price level. Both statements
+cannot be fully true of the same message, and the docs do not reconcile them.
+
+```
+GRPC_UNAGGREGATED_EXISTS                   YES
+GRPC_UNAGGREGATED_EXACT_SEMANTICS          NOT_IDENTIFIED
+GRPC_UNAGGREGATED_HAS_ORDER_ID             NO DOCUMENTED FIELD
+GRPC_UNAGGREGATED_HAS_ORDER_TIMESTAMP      NO DOCUMENTED FIELD
+GRPC_UNAGGREGATED_GIVES_TRUE_TIME_PRIORITY NOT_ESTABLISHED
+```
+
+Reading "raw order book" as market-by-order would hand us OrderID and time
+priority on the strength of one adjective. It is not promoted.
+
+**The first safe streaming experiment**, specified now so it is not designed
+in the excitement of finally holding a credential: same symbol, same time
+window, `aggregated=False` against `unaggregated=True`, compared on
+`NUMBER_OF_ENTRIES_PER_PRICE`, `SUM_QTY_BY_PRICE`, `ORDERING_STABILITY`,
+`ENTRY_CHURN`, `UPDATE_FREQUENCY`, `TRANSACT_TIME` and
+`RECONCILIATION_TO_AGGREGATED_BOOK`. The question it answers:
+
+```
+DOES_UNAGGREGATED_GRPC_IMPROVE_QUEUE_DEPLETION_SIMULATION?  NOT_IDENTIFIED
+```
+
+Order identity and time priority are inferred from nothing. They are read off
+documented fields plus observed runtime behaviour, or they stay unset.
+
+### 5d. A documented capability is not a grant
+
+The scope list is confirmed and enforcement is strict — `write:orders` for
+order submission, `read:marketdata` for streaming, refusal at the venue rather
+than at us. All of that is a fact about the venue. None of it is a fact about
+BETTOR.
+
+```
+VENUE_ENFORCED_READ_ONLY_CAPABILITY = DOCUMENTED
+CAPABILITY_DOCUMENTED               = YES
+BETTOR_GRANTED_SCOPE                = NOT_IDENTIFIED
+BETTOR_CREDENTIAL_INSTALLED         = NO
+BETTOR_CONNECTION_AUTHORIZED        = NO
+```
+
 ---
 
 ## 6. WHAT THIS DOES AND DOES NOT SOLVE

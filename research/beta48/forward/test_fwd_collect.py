@@ -772,7 +772,9 @@ def test_the_panel_plan_declares_it_is_a_separate_dataset(tmp_path):
     assert plan["DATASET"] == "INCENTIVE_DEPTH_PANEL"
     assert plan["NEVER_POOLED_WITH"] == "BREADTH_CENSUS"
     assert plan["SAMPLING_FROZEN_BEFORE_ECONOMICS"] == "YES"
-    assert plan["SELECTION_WITHIN_STRATUM"] == "SLUG_ORDER"
+    assert plan["PANEL_SELECTION_METHOD"] == (
+        "LEXICOGRAPHIC_WITHIN_FROZEN_STRATA"), "the default is unchanged"
+    assert plan["OUTCOME_LEAKAGE"] == "NO"
     for f in ("PROGRAM_TYPE", "REWARD_POOL", "TARGET_SIZE",
               "DISCOUNT_FACTOR", "orderPriceMinTickSize"):
         assert f in plan["SELECTION_INPUTS"]
@@ -912,3 +914,91 @@ def test_the_plan_names_the_slot_count_and_the_read_count_separately(tmp_path):
     assert plan["DISTINCT_MARKETS_READ"] == 1
     assert plan["ELIGIBILITY_NEVER_POOLED_ACROSS"] == "TARGET_SIZE"
     assert plan["OBSERVATION_UNIT"] == "ONE_BOOK_READ_PER_MARKET_PER_ROUND"
+
+
+def test_the_default_selection_is_still_lexicographic(tmp_path):
+    """A dispatch that does not ask for the new rule must behave EXACTLY as
+    before -- including one already running when this landed."""
+    evs = [_ev("z"), _ev("a"), _ev("m")]
+    rules = {"programs": [_prog("z"), _prog("a"), _prog("m")]}
+    reads, _, _ = C.panel_cohort(evs, rules, per_stratum=2)
+    assert [r["slug"] for r in reads] == ["a", "m"]
+
+
+def test_the_hash_rule_is_deterministic_and_salt_dependent():
+    """Reproducible without the salt being a secret, and a different salt is a
+    different sample -- which is exactly why the salt is frozen in the file
+    rather than passed at dispatch time."""
+    evs = [_ev(s) for s in "abcdefgh"]
+    rules = {"programs": [_prog(s) for s in "abcdefgh"]}
+    one, _, _ = C.panel_cohort(evs, rules, per_stratum=3,
+                               selection=C.PANEL_SELECTION_HASH)
+    two, _, _ = C.panel_cohort(list(reversed(evs)), rules, per_stratum=3,
+                               selection=C.PANEL_SELECTION_HASH)
+    assert [r["slug"] for r in one] == [r["slug"] for r in two]
+    other, _, _ = C.panel_cohort(evs, rules, per_stratum=3,
+                                 selection=C.PANEL_SELECTION_HASH,
+                                 salt="a-different-salt")
+    assert [r["slug"] for r in one] != [r["slug"] for r in other]
+
+
+def test_the_hash_rule_breaks_the_alphabetic_prefix_artifact():
+    """The actual defect: `aec-ufc-` sorted early enough to fill every stratum,
+    so lexicographic selection drew 12 markets that were all UFC fights."""
+    slugs = (["aec-ufc-f%d-2026-09-19" % i for i in range(8)]
+             + ["tec-nba-g%d-2026-09-19" % i for i in range(8)])
+    evs = [_ev(s) for s in slugs]
+    rules = {"programs": [_prog(s) for s in slugs]}
+
+    lex, _, _ = C.panel_cohort(evs, rules, per_stratum=8)
+    assert {s["slug"].split("-")[1] for s in lex} == {"ufc"}, (
+        "the artifact, reproduced")
+
+    hsh, _, _ = C.panel_cohort(evs, rules, per_stratum=8,
+                               selection=C.PANEL_SELECTION_HASH)
+    assert {s["slug"].split("-")[1] for s in hsh} == {"ufc", "nba"}, (
+        "the hash rule is blind to the name, so both families appear")
+
+
+def test_the_hash_rule_reads_no_outcome_field():
+    """Outcome blindness is the property that must survive the change."""
+    evs = [_ev("a"), _ev("b")]
+    plain = {"programs": [_prog("a"), _prog("b")]}
+    tempting = {"programs": [
+        dict(_prog("a"), realized_spread=0.001, volume_24h=10, later_pnl=-5),
+        dict(_prog("b"), realized_spread=0.9, volume_24h=10 ** 9,
+             later_pnl=5000)]}
+    one, _, _ = C.panel_cohort(evs, plain, 1, selection=C.PANEL_SELECTION_HASH)
+    two, _, _ = C.panel_cohort(evs, tempting, 1,
+                               selection=C.PANEL_SELECTION_HASH)
+    assert [r["slug"] for r in one] == [r["slug"] for r in two]
+
+
+def test_a_concentrated_draw_is_reported_not_resampled(tmp_path):
+    """If the underlying prefix really is one sport, an honest panel says so.
+    Resampling until the sample looks diverse is selection by another name."""
+    slugs = ["aec-ufc-f%d-2026-09-19" % i for i in range(6)]
+    p = C.Pacer(); p.spacing = 0.0
+    C.panel(tmp_path, [_ev(s) for s in slugs],
+            {"programs": [_prog(s) for s in slugs]}, p, _BookOK(),
+            per_stratum=6, rounds=1, selection=C.PANEL_SELECTION_HASH)
+    comp = json.loads((tmp_path / "panel_plan.json").read_text())["COMPOSITION"]
+    assert comp["MAX_SINGLE_SPORT_SHARE"] == "100.0%"
+    assert comp["UNIQUE_MARKETS"] == 6
+    assert comp["CONCENTRATION_IS_REPORTED_NOT_RESAMPLED"] == "YES"
+
+
+def test_the_plan_records_the_method_and_the_salt(tmp_path):
+    p = C.Pacer(); p.spacing = 0.0
+    C.panel(tmp_path, [_ev("a")], {"programs": [_prog("a")]}, p, _BookOK(),
+            selection=C.PANEL_SELECTION_HASH)
+    plan = json.loads((tmp_path / "panel_plan.json").read_text())
+    assert plan["PANEL_SELECTION_METHOD"] == "SALTED_HASH_WITHIN_FROZEN_STRATA"
+    assert plan["PANEL_SALT"] == C.PANEL_SALT
+    assert plan["SALT_FROZEN_BEFORE_OUTCOMES"] == "YES"
+    assert plan["OUTCOME_LEAKAGE"] == "NO"
+    for f in ("SPORT_DISTRIBUTION", "LEAGUE_DISTRIBUTION",
+              "PROGRAM_TYPE_DISTRIBUTION", "TARGET_SIZE_DISTRIBUTION",
+              "TICK_SIZE_DISTRIBUTION", "UNIQUE_MARKETS", "UNIQUE_EVENTS",
+              "MAX_SINGLE_SPORT_SHARE", "MAX_SINGLE_LEAGUE_SHARE"):
+        assert f in plan["COMPOSITION"], f

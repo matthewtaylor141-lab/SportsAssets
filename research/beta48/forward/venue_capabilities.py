@@ -208,3 +208,116 @@ CAPITAL_REUSE_RESTRICTIONS = {
 # must therefore reserve the capacity to unwind the position that freed it.
 FREED_CAPITAL_MAY_CREATE_CLOSE_OBLIGATION = True
 ALLOCATOR_MUST_RESERVE_UNWIND_CAPACITY = True
+
+# ---------------------------------------------------------------------------
+# WHAT LEVEL_4 MBO DOES AND DOES NOT PROVE
+# ---------------------------------------------------------------------------
+#
+# FIX market data is Market-by-Order: every order individually represented,
+# unique OrderID (37), MDEntryID (278), a per-order timestamp documented as
+# used for time priority within a price level, incremental New/Change/Delete
+# (279), Trade entries (269=2) with TradeID (1003) and AggressorSide (2446).
+# That is dramatically stronger than aggregated L2.
+#
+# It is still not the same thing as knowing whether OUR order would have
+# filled, and the distinction has a name on each side so the two can never be
+# written into one field:
+#
+#   COUNTERFACTUAL_PASSIVE_FILL      what a simulator concludes about a quote
+#                                    that was never submitted
+#   ACTUAL_BETTOR_PASSIVE_FILL       what the venue did with an order BETTOR
+#                                    actually placed
+#
+# A perfect MBO replay plus documented matching semantics gives the first at
+# high fidelity. It cannot give the second, because the order was not there:
+# it was not in the queue, it did not displace anyone, and no counterparty
+# reacted to it. Nor does any feed reveal how long the venue would have taken
+# to accept it.
+LEVEL_4_MBO_WITHOUT_BETTOR_ORDER = {
+    "TOUCH": "YES",
+    "SPREAD": "YES",
+    "DEPTH": "YES",
+    "DEPTH_DEPLETION": "YES",
+    "QUEUE_AHEAD_AT_HYPOTHETICAL_ENTRY": "YES",
+    "TRADE_AGGRESSOR": "YES",
+    "COUNTERFACTUAL_PASSIVE_FILL": "YES",
+    # Conditional, and the condition is named rather than assumed: it holds
+    # only while the venue's documented matching and time-priority semantics
+    # are the ones actually in force.
+    "TRUE_QUEUE_POSITION_FOR_HYPOTHETICAL_ORDER":
+        "YES_CONDITIONAL_ON_DOCUMENTED_MATCHING_AND_TIME_PRIORITY_SEMANTICS",
+    "ACTUAL_BETTOR_PASSIVE_FILL": "NO",
+    "ACTUAL_BETTOR_ORDER_ACCEPTANCE_LATENCY": "NO",
+    "ACTUAL_BETTOR_FILL_PROBABILITY": "NO",
+}
+
+FIX_MBO_GIVES = "HIGH_FIDELITY_COUNTERFACTUAL_FILL_SIMULATION"
+FIX_MBO_DOES_NOT_GIVE = "DIRECTLY_OBSERVED_BETTOR_FILL_PROBABILITY"
+
+# The three NOs above close only when BETTOR submits real passive orders. That
+# is a LATER GATE, recorded so no amount of data quality is mistaken for it.
+# Recording the requirement is not authorisation to meet it.
+MICRO_LIVE_REQUIRED_FOR_FINAL_EXECUTION_VALIDATION = True
+MICRO_LIVE_AUTHORIZED = False
+
+# ---------------------------------------------------------------------------
+# gRPC `unaggregated` -- a high-value UNRESOLVED feature, not a fourth level
+# ---------------------------------------------------------------------------
+#
+# The gRPC docs offer unaggregated=True, described as "receive raw order
+# book". The documented BookEntry schema, however, carries only `px` and
+# `qty`, and describes qty as the AGGREGATE quantity at that price level. Two
+# statements that cannot both be fully true of the same message, and the docs
+# do not reconcile them.
+#
+# Reading "raw order book" as market-by-order would hand us OrderID and time
+# priority on the strength of one adjective. It stays unresolved.
+GRPC_UNAGGREGATED_EXISTS = "YES"
+GRPC_UNAGGREGATED_EXACT_SEMANTICS = NOT_IDENTIFIED
+GRPC_UNAGGREGATED_HAS_ORDER_ID = "NO_DOCUMENTED_FIELD"
+GRPC_UNAGGREGATED_HAS_ORDER_TIMESTAMP = "NO_DOCUMENTED_FIELD"
+GRPC_UNAGGREGATED_GIVES_TRUE_TIME_PRIORITY = "NOT_ESTABLISHED"
+GRPC_UNAGGREGATED_IS_LEVEL_4 = False
+
+# THE FIRST SAFE STREAMING EXPERIMENT, specified now so it is not designed in
+# the excitement of finally having a credential. Same symbol, same window,
+# aggregated=False against unaggregated=True, compared on:
+GRPC_UNAGGREGATED_EXPERIMENT = (
+    "NUMBER_OF_ENTRIES_PER_PRICE",
+    "SUM_QTY_BY_PRICE",
+    "ORDERING_STABILITY",
+    "ENTRY_CHURN",
+    "UPDATE_FREQUENCY",
+    "TRANSACT_TIME",
+    "RECONCILIATION_TO_AGGREGATED_BOOK",
+)
+GRPC_UNAGGREGATED_QUESTION = (
+    "DOES_UNAGGREGATED_GRPC_IMPROVE_QUEUE_DEPLETION_SIMULATION?")
+GRPC_UNAGGREGATED_ANSWER = NOT_IDENTIFIED
+
+# Order identity and time priority are INFERRED FROM NOTHING. They are read
+# off documented fields plus observed runtime behaviour, or they stay unset.
+GRPC_ORDER_IDENTITY_MAY_BE_INFERRED = False
+
+# ---------------------------------------------------------------------------
+# A DOCUMENTED CAPABILITY IS NOT A GRANT
+# ---------------------------------------------------------------------------
+#
+# The scope list is confirmed and enforcement is strict: order submission
+# requires write:orders, market-data streaming requires read:marketdata, and a
+# token without a scope is refused by the venue rather than by us. All of that
+# is a fact about the venue. None of it is a fact about BETTOR.
+DOCUMENTED_SCOPES = (
+    "read:marketdata", "read:l2marketdata", "read:instruments",
+    "read:orders", "write:orders", "read:reports", "read:positions",
+    "read:dropcopy",
+)
+SCOPE_ENFORCEMENT = "STRICT_SERVER_SIDE"
+ORDER_SUBMISSION_REQUIRES = "write:orders"
+MARKET_DATA_STREAMING_REQUIRES = "read:marketdata"
+
+VENUE_ENFORCED_READ_ONLY_CAPABILITY = "DOCUMENTED"
+CAPABILITY_DOCUMENTED = "YES"
+BETTOR_GRANTED_SCOPE = NOT_IDENTIFIED
+BETTOR_CREDENTIAL_INSTALLED = "NO"
+BETTOR_CONNECTION_AUTHORIZED = "NO"
