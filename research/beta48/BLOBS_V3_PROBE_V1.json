@@ -1,0 +1,396 @@
+{
+ "VERSION": "BLOBS_V3_PROBE_V1",
+ "PROBE_IS": "A_READ_OF_THE_FILES_NOT_AN_INFERENCE_FROM_THEIR_SOURCE",
+ "VENUE_CONTACT": 0,
+ "ORDERS": 0,
+ "CAPITAL": 0,
+ "mirror_live": false,
+ "FILES": [
+  "ferrarichampions2026",
+  "homerunhazard",
+  "kch123",
+  "rn1",
+  "swisstony",
+  "w2c33"
+ ],
+ "ACCOUNTS_NOT_IN_THE_FOUR_ACCOUNT_PRIOR": [
+  "kch123",
+  "w2c33"
+ ],
+ "TOP_LEVEL_KEYS": [
+  "CENSUS",
+  "MERGE_PNL_BY_OPEN_BAND",
+  "PNL_BY_OPEN_BAND_ALL_CHANNELS",
+  "REFERENCE_ACCOUNT_COMPLETION",
+  "REFERENCE_ACCOUNT_REPLAY"
+ ],
+ "GRANULARITY": "AGGREGATE",
+ "PER_POSITION_ROWS": "NOT_PRESENT",
+ "SOURCE_ENDPOINT": "https://data-api.polymarket.com/activity?type=TRADE",
+ "FIELD_REPORT": [
+  {
+   "FIELD": "PER_POSITION_ROWS",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "blobs_v3 document structure",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "no list of dicts longer than 1000 exists in any file; the longest lists are COVERAGE_LIMITATIONS (3 strings) and edge_ci95 (2 floats). Row-bearing lists found: {}"
+  },
+  {
+   "FIELD": "MARKET_ID",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "CENSUS.DISTINCT_MARKET_SLUGS (a COUNT, not the ids)",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "CENSUS carries the COUNT of distinct market slugs (rn1: 62928) but not one slug. A count cannot be joined on."
+  },
+  {
+   "FIELD": "EVENT_ID",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "NOT_IDENTIFIED",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "no event identifier of any kind appears in the document; DISTINCT_CONDITIONS equals DISTINCT_MARKET_SLUGS in every file, so even the upstream grouping is by MARKET, not EVENT"
+  },
+  {
+   "FIELD": "ENTRY_TIMESTAMP",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "aggregated into BY_FIRST_LEG_PRICE_BAND / COMPLETION_GRID",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "the per-leg quantities survive only as band means, completion rates and basis percentiles; the underlying per-position values are not retained"
+  },
+  {
+   "FIELD": "ENTRY_PRICE",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "aggregated into BY_FIRST_LEG_PRICE_BAND / COMPLETION_GRID",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "the per-leg quantities survive only as band means, completion rates and basis percentiles; the underlying per-position values are not retained"
+  },
+  {
+   "FIELD": "SECOND_LEG_TIMESTAMP",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "aggregated into BY_FIRST_LEG_PRICE_BAND / COMPLETION_GRID",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "the per-leg quantities survive only as band means, completion rates and basis percentiles; the underlying per-position values are not retained"
+  },
+  {
+   "FIELD": "SECOND_LEG_PRICE",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "aggregated into BY_FIRST_LEG_PRICE_BAND / COMPLETION_GRID",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "the per-leg quantities survive only as band means, completion rates and basis percentiles; the underlying per-position values are not retained"
+  },
+  {
+   "FIELD": "SPORT",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "BY_SPORT_OR_QUESTION -- despite the name, a question-title table",
+   "JOIN_KEY": "truncated 24-character question title",
+   "UNIQUENESS_OR_COLLISIONS": "MANY-TO-ONE: the key is the market question truncated to 24 chars, so 'Philadelphia Phillies vs' collapses every Phillies fixture across the whole period into one key. It is opponent-blind and date-blind",
+   "WHY": "the table is the TOP-25 titles only, covering 3.04%-20.06% of opens depending on the account. It carries no sport taxonomy: the keys mix a market type ('Games Total: O/U 2.5'), a tournament ('Wimbledon, Qualification') and a fixture prefix"
+  },
+  {
+   "FIELD": "LEAGUE",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "BY_SPORT_OR_QUESTION",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "as SPORT",
+   "WHY": "no league field exists; a league cannot be recovered from a truncated title without an external mapping, and inventing one would be an authored cell"
+  },
+  {
+   "FIELD": "GAME_START",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "NOT_IDENTIFIED",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "no event start time, and therefore no time-to-event, appears"
+  },
+  {
+   "FIELD": "LIQUIDITY",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "NOT_IDENTIFIED",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "no depth, spread or size-at-touch quantity appears"
+  },
+  {
+   "FIELD": "BOOK_STATE",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "NOT_IDENTIFIED",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "the source endpoint is activity?type=TRADE -- executions only. A trade tape does not contain the book"
+  },
+  {
+   "FIELD": "ORDER_IDENTITY",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "NOT_IDENTIFIED",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "n/a",
+   "WHY": "no order id, no resting price, no cancel. WHALE_ORDER_POLICY stays NOT_IDENTIFIED and this probe does not change that"
+  },
+  {
+   "FIELD": "FILL_IDENTITY",
+   "STATUS": "ABSENT",
+   "COVERAGE_PCT": 0.0,
+   "SOURCE": "CENSUS.UNIQUE_TRADE_IDS (a COUNT)",
+   "JOIN_KEY": "NOT_IDENTIFIED",
+   "UNIQUENESS_OR_COLLISIONS": "rn1: 4,692,866 rows against 4,541,029 unique trade ids, so trade ids are NOT unique per row upstream; DUPLICATE_FILL_KEYS = 0 under the upstream composite key",
+   "WHY": "the counts are retained, the ids are not"
+  }
+ ],
+ "CELLS_GENUINELY_CONSTRUCTIBLE": [
+  {
+   "CELL": "ACCOUNT x PRICE_BAND",
+   "SOURCE_KEY": "BY_FIRST_LEG_PRICE_BAND",
+   "MIN_COVERAGE_PCT": 100.0,
+   "PER_ACCOUNT": {
+    "ferrarichampions2026": {
+     "CELL": "BY_FIRST_LEG_PRICE_BAND",
+     "KEYS": 6,
+     "OPENS_COVERED": 101611,
+     "OPENS_TOTAL": 101611,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 9
+    },
+    "homerunhazard": {
+     "CELL": "BY_FIRST_LEG_PRICE_BAND",
+     "KEYS": 6,
+     "OPENS_COVERED": 55092,
+     "OPENS_TOTAL": 55092,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 9
+    },
+    "kch123": {
+     "CELL": "BY_FIRST_LEG_PRICE_BAND",
+     "KEYS": 6,
+     "OPENS_COVERED": 3734,
+     "OPENS_TOTAL": 3734,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 9
+    },
+    "rn1": {
+     "CELL": "BY_FIRST_LEG_PRICE_BAND",
+     "KEYS": 6,
+     "OPENS_COVERED": 259271,
+     "OPENS_TOTAL": 259271,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 9
+    },
+    "swisstony": {
+     "CELL": "BY_FIRST_LEG_PRICE_BAND",
+     "KEYS": 6,
+     "OPENS_COVERED": 367896,
+     "OPENS_TOTAL": 367896,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 9
+    },
+    "w2c33": {
+     "CELL": "BY_FIRST_LEG_PRICE_BAND",
+     "KEYS": 6,
+     "OPENS_COVERED": 10801,
+     "OPENS_TOTAL": 10801,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 9
+    }
+   }
+  },
+  {
+   "CELL": "ACCOUNT x FILL_SIZE_BUCKET",
+   "SOURCE_KEY": "BY_FILL_SIZE_BUCKET",
+   "MIN_COVERAGE_PCT": 100.0,
+   "PER_ACCOUNT": {
+    "ferrarichampions2026": {
+     "CELL": "BY_FILL_SIZE_BUCKET",
+     "KEYS": 5,
+     "OPENS_COVERED": 101611,
+     "OPENS_TOTAL": 101611,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 12
+    },
+    "homerunhazard": {
+     "CELL": "BY_FILL_SIZE_BUCKET",
+     "KEYS": 4,
+     "OPENS_COVERED": 55092,
+     "OPENS_TOTAL": 55092,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 12
+    },
+    "kch123": {
+     "CELL": "BY_FILL_SIZE_BUCKET",
+     "KEYS": 5,
+     "OPENS_COVERED": 3734,
+     "OPENS_TOTAL": 3734,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 12
+    },
+    "rn1": {
+     "CELL": "BY_FILL_SIZE_BUCKET",
+     "KEYS": 5,
+     "OPENS_COVERED": 259271,
+     "OPENS_TOTAL": 259271,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 12
+    },
+    "swisstony": {
+     "CELL": "BY_FILL_SIZE_BUCKET",
+     "KEYS": 5,
+     "OPENS_COVERED": 367896,
+     "OPENS_TOTAL": 367896,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 12
+    },
+    "w2c33": {
+     "CELL": "BY_FILL_SIZE_BUCKET",
+     "KEYS": 5,
+     "OPENS_COVERED": 10801,
+     "OPENS_TOTAL": 10801,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 12
+    }
+   }
+  },
+  {
+   "CELL": "ACCOUNT x ISO_WEEK",
+   "SOURCE_KEY": "BY_WEEK",
+   "MIN_COVERAGE_PCT": 100.0,
+   "PER_ACCOUNT": {
+    "ferrarichampions2026": {
+     "CELL": "BY_WEEK",
+     "KEYS": 25,
+     "OPENS_COVERED": 101611,
+     "OPENS_TOTAL": 101611,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 8
+    },
+    "homerunhazard": {
+     "CELL": "BY_WEEK",
+     "KEYS": 22,
+     "OPENS_COVERED": 55092,
+     "OPENS_TOTAL": 55092,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 8
+    },
+    "kch123": {
+     "CELL": "BY_WEEK",
+     "KEYS": 49,
+     "OPENS_COVERED": 3734,
+     "OPENS_TOTAL": 3734,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 8
+    },
+    "rn1": {
+     "CELL": "BY_WEEK",
+     "KEYS": 63,
+     "OPENS_COVERED": 259271,
+     "OPENS_TOTAL": 259271,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 8
+    },
+    "swisstony": {
+     "CELL": "BY_WEEK",
+     "KEYS": 56,
+     "OPENS_COVERED": 367896,
+     "OPENS_TOTAL": 367896,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 8
+    },
+    "w2c33": {
+     "CELL": "BY_WEEK",
+     "KEYS": 43,
+     "OPENS_COVERED": 10801,
+     "OPENS_TOTAL": 10801,
+     "COVERAGE_PCT": 100.0,
+     "KEY_MAX_LEN": 8
+    }
+   }
+  }
+ ],
+ "CELLS_REFUSED": [
+  {
+   "CELL": "ACCOUNT x TRUNCATED_QUESTION_TITLE",
+   "SOURCE_KEY": "BY_SPORT_OR_QUESTION",
+   "MIN_COVERAGE_PCT": 3.04,
+   "PER_ACCOUNT": {
+    "ferrarichampions2026": {
+     "CELL": "BY_SPORT_OR_QUESTION",
+     "KEYS": 25,
+     "OPENS_COVERED": 9674,
+     "OPENS_TOTAL": 101611,
+     "COVERAGE_PCT": 9.52,
+     "KEY_MAX_LEN": 24
+    },
+    "homerunhazard": {
+     "CELL": "BY_SPORT_OR_QUESTION",
+     "KEYS": 25,
+     "OPENS_COVERED": 11050,
+     "OPENS_TOTAL": 55092,
+     "COVERAGE_PCT": 20.06,
+     "KEY_MAX_LEN": 24
+    },
+    "kch123": {
+     "CELL": "BY_SPORT_OR_QUESTION",
+     "KEYS": 25,
+     "OPENS_COVERED": 233,
+     "OPENS_TOTAL": 3734,
+     "COVERAGE_PCT": 6.24,
+     "KEY_MAX_LEN": 24
+    },
+    "rn1": {
+     "CELL": "BY_SPORT_OR_QUESTION",
+     "KEYS": 25,
+     "OPENS_COVERED": 10645,
+     "OPENS_TOTAL": 259271,
+     "COVERAGE_PCT": 4.11,
+     "KEY_MAX_LEN": 24
+    },
+    "swisstony": {
+     "CELL": "BY_SPORT_OR_QUESTION",
+     "KEYS": 25,
+     "OPENS_COVERED": 11185,
+     "OPENS_TOTAL": 367896,
+     "COVERAGE_PCT": 3.04,
+     "KEY_MAX_LEN": 24
+    },
+    "w2c33": {
+     "CELL": "BY_SPORT_OR_QUESTION",
+     "KEYS": 25,
+     "OPENS_COVERED": 1400,
+     "OPENS_TOTAL": 10801,
+     "COVERAGE_PCT": 12.96,
+     "KEY_MAX_LEN": 24
+    }
+   },
+   "WHY_REFUSED": "a top-25 table covering 3.04% of opens in the worst account, keyed on a 24-character truncation that collides across fixtures; it is not a taxonomy and not a partition"
+  }
+ ],
+ "CLAIM_UNDER_TEST": "re-deriving the whale cells from blobs_v3 unlocks the sport/league/market-type cells, enables event-level clustering and an event-blocked bootstrap",
+ "CLAIM_VERDICT": "REFUTED_BY_THE_FILES",
+ "BLOBS_V3_RICH_CELL_STATUS": "NOT_AVAILABLE_AGGREGATE_ONLY",
+ "EVENT_LEVEL_CLUSTERING_FROM_BLOBS_V3": "NOT_IDENTIFIED",
+ "EVENT_BLOCKED_BOOTSTRAP_FROM_BLOBS_V3": "NOT_IDENTIFIED",
+ "INDEPENDENT_EFFECTIVE_N_FROM_BLOBS_V3": "NOT_IDENTIFIED",
+ "NEW_CELLS_BLOBS_V3_ADDS_OVER_whale_exit_priors_v1": [
+  "ACCOUNT x FILL_SIZE_BUCKET",
+  "ACCOUNT x ISO_WEEK"
+ ],
+ "NEW_CELLS_ARE_STILL": "ACCOUNT_LEVEL_MARGINALS_NOT_A_CROSS_PRODUCT",
+ "WHAT_WOULD_ACTUALLY_UNLOCK_THE_CELL_SPACE": "re-running the upstream extraction from data-api.polymarket.com/activity?type=TRADE and RETAINING the per-row condition id, market slug and timestamp before aggregation. The ids existed at extraction time -- CENSUS counts them -- and were not written down. That is a new extraction, not a reprocessing of these files",
+ "THAT_WORK_REQUIRES": "AN_UPSTREAM_RE_EXTRACTION_NOT_VENUE_ACCESS"
+}

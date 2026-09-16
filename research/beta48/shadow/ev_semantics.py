@@ -43,6 +43,7 @@ from __future__ import annotations
 from decimal import Decimal as D
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
+NOT_ESTABLISHED = "NOT_ESTABLISHED"
 THIS_MODULE_CONTACTS_NOTHING = True
 ORDERS = 0
 CAPITAL = 0
@@ -77,6 +78,95 @@ class ConditioningError(RuntimeError):
 
 class DoubleCountError(RuntimeError):
     """The same economic quantity entered one sum twice."""
+
+
+class NoFillBranchError(RuntimeError):
+    """A passive EV was priced without declaring what happens if it misses."""
+
+
+class ExecutabilityError(RuntimeError):
+    """CERTAIN was claimed without proof the required size can execute."""
+
+
+# ---------------------------------------------------------------------------
+# CORRECTION 7 -- CERTAIN REQUIRES PROVEN EXECUTABLE DEPTH, NOT A TOUCH
+# ---------------------------------------------------------------------------
+#
+# CERTAIN means "this action executes now, so there is no fill branch". That
+# claim is only true if the size we need can actually execute now. A best bid
+# or best ask proves a price exists; it proves nothing about SIZE. A one-lot
+# resting ask does not make a 500-lot aggressive pair CERTAIN -- the remainder
+# walks the book at unknown prices, or does not execute at all, which is a
+# fill branch wearing a different name.
+CERTAIN_REQUIRES = "CAPTURED_BOOK_DEPTH_COVERING_THE_REQUIRED_SIZE"
+CERTAIN_IS_NOT_ESTABLISHED_BY = ("PRESENCE_OF_A_BEST_BID",
+                                 "PRESENCE_OF_A_BEST_ASK",
+                                 "A_QUOTED_PRICE_WITH_NO_SIZE",
+                                 "A_LAST_TRADE_PRICE",
+                                 "AN_UNTIMED_OR_UNSOURCED_SNAPSHOT")
+DEPTH_SOURCE_REQUIRED = "CAPTURED_BOOK_SNAPSHOT"
+STALE_SNAPSHOT_IS_NOT_DEPTH = True
+AGGRESSIVE_CERTAIN_EXECUTION_GATE = "PROVEN_EXECUTABLE_DEPTH_FOR_FULL_SIZE"
+
+
+def certain_execution_gate(required_size, executable_depth=None,
+                           depth_source=None, snapshot_age_s=None,
+                           max_snapshot_age_s=5):
+    """May this action be priced with CERTAIN terms?
+
+    Returns the CONDITIONING that is actually justified. It returns CERTAIN
+    only when a captured book snapshot shows executable depth at or above the
+    required size. Otherwise it returns NOT_ESTABLISHED and names why -- and
+    `assert_certain_allowed` turns that into a refusal, so a caller cannot
+    read past it.
+
+    A PARTIAL depth result is deliberately NOT downgraded to
+    CONDITIONAL_ON_FILL here: an aggressive order that can only partially
+    execute has an execution-price problem as well as a size problem, and
+    pricing it needs the walk-the-book cost this module does not model.
+    """
+    out = {"REQUIRED_SIZE": required_size,
+           "EXECUTABLE_DEPTH": (executable_depth if executable_depth is not None
+                                else NOT_IDENTIFIED),
+           "DEPTH_SOURCE": depth_source or NOT_IDENTIFIED,
+           "GATE": AGGRESSIVE_CERTAIN_EXECUTION_GATE,
+           "CERTAIN_REQUIRES": CERTAIN_REQUIRES}
+    if depth_source != DEPTH_SOURCE_REQUIRED:
+        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
+                    WHY="depth must come from a %s; %r does not establish "
+                        "executable size" % (DEPTH_SOURCE_REQUIRED,
+                                             depth_source))
+    if snapshot_age_s is None:
+        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
+                    WHY="the snapshot carries no age; an untimed snapshot is "
+                        "not evidence about what can execute NOW")
+    if snapshot_age_s > max_snapshot_age_s:
+        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
+                    WHY="snapshot is %ss old against a %ss limit; a stale "
+                        "book is not proof of current depth"
+                        % (snapshot_age_s, max_snapshot_age_s))
+    if executable_depth is None or isinstance(executable_depth, str):
+        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
+                    WHY="executable depth is not identified")
+    if D(str(executable_depth)) < D(str(required_size)):
+        return dict(out, CONDITIONING_ALLOWED=NOT_ESTABLISHED,
+                    DEPTH_SHORTFALL=str(D(str(required_size))
+                                        - D(str(executable_depth))),
+                    WHY="captured depth covers less than the required size, "
+                        "so part of the order does not execute now; that is "
+                        "a fill branch, not a certainty")
+    return dict(out, CONDITIONING_ALLOWED=CERTAIN,
+                WHY="captured book depth covers the full required size")
+
+
+def assert_certain_allowed(gate_result):
+    """Refuse to price CERTAIN terms on an ungated action."""
+    if gate_result.get("CONDITIONING_ALLOWED") != CERTAIN:
+        raise ExecutabilityError(
+            "CERTAIN conditioning refused: %s. %s = %s"
+            % (gate_result.get("WHY"), "AGGRESSIVE_CERTAIN_EXECUTION_GATE",
+               AGGRESSIVE_CERTAIN_EXECUTION_GATE))
+    return gate_result
 
 
 # ---------------------------------------------------------------------------
@@ -247,21 +337,93 @@ WHY_PARTIAL_MATTERS = (
     "a room-clipped or partially filled rest leaves inventory AND a live "
     "remainder; collapsing it into FULL or NONE misprices both")
 
+# ---------------------------------------------------------------------------
+# CORRECTION 6 -- THE NO-FILL BRANCH IS EXPLICIT, DECLARED, AND NEVER A ZERO
+#                 BY DEFAULT
+# ---------------------------------------------------------------------------
+#
+# A previous version defaulted VALUE_IF_NO_FILL to 0. For a NEW quote on a
+# flat book that is correct -- no fill, no position, nothing carried. But the
+# same function prices `A_PASSIVE_SELL_EXIT` and `A_PASSIVE_COMPLEMENT_PAIR`,
+# and in BOTH of those we are ALREADY EXPOSED when the quote misses. There,
+# zero is not "nothing happened": it is silently valuing a position we still
+# hold at nothing, which understates the cost of a missed exit exactly when it
+# matters most.
+#
+# So the no-fill state is now DECLARED, the horizon it is valued over is
+# declared with it, and an unpriced continuation is NOT_IDENTIFIED rather than
+# zero. The default is a sentinel, not a number: a caller who says nothing
+# gets a refusal naming the three states.
+NO_FILL_BRANCH_NOT_DECLARED = "NO_FILL_BRANCH_NOT_DECLARED"
+NO_EXPOSURE_CARRIED = "NO_EXPOSURE_CARRIED"
+QUEUE_POSITION_RETAINED = "QUEUE_POSITION_RETAINED"
+EXPOSURE_CONTINUES = "EXPOSURE_CONTINUES"
+NO_FILL_STATES = (NO_EXPOSURE_CARRIED, QUEUE_POSITION_RETAINED,
+                  EXPOSURE_CONTINUES)
+EV_IF_NO_FILL_MAY_DEFAULT_TO_ZERO_ONLY_WHEN = NO_EXPOSURE_CARRIED
+WHY_ZERO_IS_WRONG_WHEN_EXPOSED = (
+    "a missed passive exit leaves the position on the book: inventory cost, "
+    "markout, close cost and settlement risk all continue. Valuing that at "
+    "zero prices the miss as free")
+
+
+def no_fill_branch(state, horizon=None, continuation_value=None):
+    """Declare what the quote leaves behind when it does not fill.
+
+    Returns EV_IF_NO_FILL with its state and horizon. The only state that may
+    carry a zero without a number being supplied is NO_EXPOSURE_CARRIED --
+    a new quote on a flat book. Both other states demand a continuation value
+    and return NOT_IDENTIFIED when one is not supplied.
+    """
+    if state not in NO_FILL_STATES:
+        raise NoFillBranchError(
+            "NO_FILL_STATE must be one of %s, not %r"
+            % (", ".join(NO_FILL_STATES), state))
+    if state == NO_EXPOSURE_CARRIED:
+        if continuation_value is None:
+            continuation_value = D("0")
+        return {"NO_FILL_STATE": state,
+                "EV_IF_NO_FILL": continuation_value,
+                "NO_FILL_TIME_HORIZON": horizon or "AT_QUOTE_EXPIRY",
+                "ZERO_IS_JUSTIFIED_BECAUSE":
+                    "no fill means no position, no inventory and no markout"}
+    if horizon is None:
+        raise NoFillBranchError(
+            "NO_FILL_STATE=%s carries value forward, so it needs an explicit "
+            "NO_FILL_TIME_HORIZON: over what period is the continuation "
+            "valued?" % state)
+    if continuation_value is None:
+        return {"NO_FILL_STATE": state,
+                "EV_IF_NO_FILL": NOT_IDENTIFIED,
+                "NO_FILL_TIME_HORIZON": horizon,
+                "WHY_NOT_ZERO": WHY_ZERO_IS_WRONG_WHEN_EXPOSED}
+    return {"NO_FILL_STATE": state,
+            "EV_IF_NO_FILL": continuation_value,
+            "NO_FILL_TIME_HORIZON": horizon}
+
 
 def ev_maker_quote(p_full_fill, conditional_terms=None,
                    unconditional_terms=None, p_partial_fill=None,
-                   partial_terms=None, value_if_no_fill=D("0")):
+                   partial_terms=None,
+                   value_if_no_fill=NO_FILL_BRANCH_NOT_DECLARED,
+                   no_fill_state=None, no_fill_horizon=None,
+                   p_fill_source=None):
     """EV of RESTING a quote. The branch structure is the point.
 
         EV = P_FULL      * sum(conditional terms at full size)
            + P_PARTIAL   * sum(conditional terms at partial size)
-           + P_NO_FILL   * VALUE_IF_NO_FILL
+           + P_NO_FILL   * EV_IF_NO_FILL
            + sum(unconditional terms)
 
-    VALUE_IF_NO_FILL defaults to zero for the QUOTE ITSELF -- no fill means no
-    position, no inventory, no markout. It is a parameter rather than a
-    constant because a quote that expires can still leave something behind
-    (a retained queue position, say), and that is an observation, not a zero.
+    THE NO-FILL BRANCH IS MANDATORY. Pass either `no_fill_state` (and, for a
+    state that carries exposure forward, `no_fill_horizon` and a continuation
+    value in `value_if_no_fill`) or a `value_if_no_fill` that is already a
+    declared branch payload from `no_fill_branch`. There is no zero default:
+    for a passive EXIT the position survives the miss, and valuing it at zero
+    prices the miss as free.
+
+    `p_fill_source`, when given, is checked: a whale completion hazard may
+    never seed a BETTOR fill probability (whale_bridge correction 5).
 
     Every term is checked against its declared conditioning first. A
     NOT_IDENTIFIED anywhere propagates and names itself, exactly as ev_sum
@@ -270,6 +432,33 @@ def ev_maker_quote(p_full_fill, conditional_terms=None,
     conditional_terms = dict(conditional_terms or {})
     unconditional_terms = dict(unconditional_terms or {})
     partial_terms = dict(partial_terms or {})
+
+    if p_fill_source is not None:
+        from whale_bridge import assert_p_fill_source
+        assert_p_fill_source(p_fill_source)
+
+    # Resolve the no-fill branch BEFORE any arithmetic, so a missing
+    # declaration is a refusal rather than a quietly-zero branch.
+    if isinstance(value_if_no_fill, dict):
+        branch = dict(value_if_no_fill)
+    elif no_fill_state is not None:
+        branch = no_fill_branch(
+            no_fill_state, no_fill_horizon,
+            None if value_if_no_fill == NO_FILL_BRANCH_NOT_DECLARED
+            else value_if_no_fill)
+    elif value_if_no_fill == NO_FILL_BRANCH_NOT_DECLARED:
+        raise NoFillBranchError(
+            "the no-fill branch is not declared. Pass no_fill_state=%s for a "
+            "new quote on a flat book, or %s / %s with a "
+            "no_fill_horizon when the quote leaves something behind. %s"
+            % (NO_EXPOSURE_CARRIED, QUEUE_POSITION_RETAINED,
+               EXPOSURE_CONTINUES, WHY_ZERO_IS_WRONG_WHEN_EXPOSED))
+    else:
+        raise NoFillBranchError(
+            "value_if_no_fill was given as a bare number (%r) with no "
+            "NO_FILL_STATE. The state and its horizon must be declared: a "
+            "number alone does not say whether we are still exposed."
+            % (value_if_no_fill,))
 
     # FULL and PARTIAL are MUTUALLY EXCLUSIVE branches, so the same quantity
     # appearing in both is correct -- it is the same economics at a different
@@ -288,6 +477,12 @@ def ev_maker_quote(p_full_fill, conditional_terms=None,
         missing.append("P_FULL_FILL")
     if p_partial_fill is not None and isinstance(p_partial_fill, str):
         missing.append("P_PARTIAL_FILL")
+    ev_no_fill = branch.get("EV_IF_NO_FILL")
+    if ev_no_fill is None or (isinstance(ev_no_fill, str)
+                              and ev_no_fill == NOT_IDENTIFIED):
+        # An exposed no-fill state with no continuation value is NOT a zero
+        # branch. It propagates, exactly as any other unpriced term does.
+        missing.append("EV_IF_NO_FILL[%s]" % branch.get("NO_FILL_STATE"))
 
     def _bag(d, label):
         tot = D("0")
@@ -316,8 +511,8 @@ def ev_maker_quote(p_full_fill, conditional_terms=None,
         raise ValueError("P_FULL_FILL + P_PARTIAL_FILL exceeds 1: %s + %s"
                          % (pf, pp))
     p_no = D("1") - pf - pp
-    nofill = (D(str(value_if_no_fill))
-              if not isinstance(value_if_no_fill, D) else value_if_no_fill)
+    nofill = (ev_no_fill if isinstance(ev_no_fill, D)
+              else D(str(ev_no_fill)))
 
     return (pf * inside_full + pp * inside_part + p_no * nofill + outside), ()
 
@@ -370,6 +565,17 @@ def semantic_guards():
         "QUEUE_IMBALANCE_IS_NOT_YET": QUEUE_IMBALANCE_IS_NOT_YET,
         "EV_NO_TRADE_IS_FORCED_TO_ZERO": EV_NO_TRADE_IS_FORCED_TO_ZERO,
         "EV_WAIT_NUMERIC_VALUE": EV_WAIT_NUMERIC_VALUE,
+        # 5. THE NO-FILL BRANCH IS DECLARED, AND ZERO IS NOT ITS DEFAULT.
+        "PASSIVE_NO_FILL_BRANCH": "EXPLICIT",
+        "NO_FILL_STATES": list(NO_FILL_STATES),
+        "EV_IF_NO_FILL_MAY_DEFAULT_TO_ZERO_ONLY_WHEN":
+            EV_IF_NO_FILL_MAY_DEFAULT_TO_ZERO_ONLY_WHEN,
+        "WHY_ZERO_IS_WRONG_WHEN_EXPOSED": WHY_ZERO_IS_WRONG_WHEN_EXPOSED,
+        # 6. CERTAIN IS GATED ON PROVEN DEPTH.
+        "AGGRESSIVE_CERTAIN_EXECUTION_GATE":
+            AGGRESSIVE_CERTAIN_EXECUTION_GATE,
+        "CERTAIN_REQUIRES": CERTAIN_REQUIRES,
+        "CERTAIN_IS_NOT_ESTABLISHED_BY": list(CERTAIN_IS_NOT_ESTABLISHED_BY),
     }
 
 

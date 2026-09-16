@@ -26,11 +26,17 @@ us; only "copy their fills" was, and that is what we stopped.
 **3. What exactly are we preserving from RN1?**
 
 RN1 is the reference for passive two-sided market making: quoting both sides,
-completing the position, and recycling the capital. The specific thing RN1 did
-better than anyone else in our data is **discipline about what it paid for a
-completed position**. Across all six price bands, RN1 never paid more than
-$0.998 for a pair that redeems $1.00. Every other account, in its expensive
-bands, paid *more than a dollar* for a dollar. That is the habit we are keeping.
+completing the position, and recycling the capital. The clearest observed
+structural distinction in the retained data is **what it paid for a completed
+position**. Across all six price bands, RN1 never paid more than $0.998 for a
+pair that redeems $1.00. Every other account, in its expensive bands, paid
+*more than a dollar* for a dollar. That is the habit we are keeping.
+
+One honest qualification on that comparison: those are **gross trade prices**.
+Rebates, maker-reward programmes and any similar incentive are not separately
+recorded in our files, so paying above a dollar is a fact about the prices, not
+a proven loss. We can say RN1's prices were structurally different. We cannot
+say the others ended up behind, and we do not.
 
 **4. What exactly are we preserving from Ferrari?**
 
@@ -56,8 +62,20 @@ and completion value are different things and are never mixed.
 
 Live, in-play pricing and its exit behaviour — how it hedged and closed
 positions rather than only waiting for settlement. We treat its history as
-reference evidence about mechanics, not as proof of a live edge today. It is
-also flagged out of our consensus figures on an unresolved data discrepancy.
+reference evidence about mechanics, not as proof of a live edge today.
+
+**And it is now formally held out of our reference figures**, not merely noted
+as flagged. Two independent sources disagree about the *sign* of its
+pair-trading result — one says roughly −$3.4M, our own reconstruction says
++$0.26M, both tiny against a $249M turnover — and that sign is exactly the thing
+our reference figures are built on. We cannot settle which source is right from
+what we hold, so we keep two versions: a three-account reference we actually
+use, and a four-account version kept only to show what including SwissTony
+would do. The second is never promoted.
+
+Worth stating plainly for anyone who checks: SwissTony is the **largest** of
+the four accounts. It is held out by name precisely so that its size cannot
+quietly carry it back in.
 
 **7. Where does BETTOR's Day-1 EV come from?**
 
@@ -74,17 +92,47 @@ Four sources, kept separate and labelled on every decision:
 Less than the volume of data suggests, and we would rather say so now. The
 retained whale files are *summaries*, not trade-by-trade records. They support
 exactly two breakdowns: by account and price band, and by account and how long
-a position sat unfinished. There is **no** breakdown by sport, league, market
-type, or time to kickoff.
+a position sat unfinished — **and not the two crossed together**, which was
+never measured and which we refuse to manufacture by multiplying them.
+
+We checked the second archive (`blobs_v3`) rather than assuming it was richer.
+It is not: same aggregate shape, no per-position rows, no market or event
+identity, no sport, no kickoff time. It does add two genuine breakdowns we did
+not have — by trade size and by calendar week — and that is the whole gain.
+
+There is **no** breakdown by sport, league, market type, or time to kickoff.
 
 And the support is on **direction, not size**. We can say "the whales' evidence
 points this way in this price band." We cannot say "and it is worth 2.3 cents."
+
+**One more limit, and it is the easiest to forget.** Everything in these files
+is about trades the whales *chose to make*. We never see the markets they
+looked at and skipped, or the prices they refused. So "the cheap bands did well"
+is a statement about *their* cheap-band positions, not a statement that cheap
+contracts are a good buy. Our code refuses to phrase it the second way.
 
 **9. What portion is current-market measurement?**
 
 Everything about execution: the spread, the depth, the fees, the queue, whether
 our order is likely to fill. This is measured live and owes nothing to the
 whales.
+
+There is one shortcut we deliberately blocked. The whale files do contain a
+number that *looks* like a fill rate — how often their second contract arrived.
+It is not one. It measures whether the market's other side turned up for
+somebody else, on a different exchange, for trades they chose to open. Whether
+*our* order gets filled depends on our price and our place in the queue here.
+Using theirs as ours would be a confident number about the wrong thing, so the
+code refuses it outright.
+
+Two smaller versions of the same discipline:
+
+- A quote that **doesn't** fill is not automatically worth nothing. If we were
+  trying to exit, we still own the position afterwards — so the calculation must
+  say what we are left holding, and if we cannot price that, it says "unknown"
+  rather than "zero".
+- An order is only treated as certain to execute if the order book we captured
+  actually shows enough size to fill it. A visible price is not a visible size.
 
 **10. What portion is independent BETTOR fair value?**
 
@@ -156,8 +204,13 @@ All of the following, and not fewer:
   must remain possible.
 - **A multiple-testing correction**, with the full list of things we tried
   declared beforehand.
-- **Enough independent events** — not fills. One decision sliced into eighteen
-  fills is one observation, and in this data that ratio is roughly 18 to 1.
+- **Enough independent events** — not fills, and not positions either. One
+  decision sliced into eighteen fills is one observation, and in this data that
+  ratio is roughly 18 to 1. But several positions can also belong to one game,
+  and nothing in the files tells us which. So our position counts are a
+  **ceiling** on how much independent evidence we have, never a measurement of
+  it, and any confidence interval we quote from them is narrower than the truth.
+  We label those weightings as rough and cap what they are allowed to conclude.
 
 Until then the right description is: *BETTOR is a whale-anchored system with an
 independent EV engine under construction* — not *BETTOR has its own alpha.*
