@@ -149,3 +149,37 @@ class TheRoutingIsPreregisteredAndFair(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class EveryRowMustSurviveJsonDumps(unittest.TestCase):
+    """The census failed its first live run here, and the symptom was visible an
+    hour earlier: `SPREAD_TICKS` is a Decimal, so a stage-1 dict cannot be
+    json.dumps'd without a default. This pins it."""
+
+    def _row(self):
+        return {"slug": "aec-nfl-a-b-2026-09-19",
+                "status": "MARKET_STATUS_OPEN",
+                "orderPriceMinTickSize": 0.01,
+                "board_bestBidQuote": {"value": "0.40", "currency": "USD"},
+                "board_bestAskQuote": {"value": "0.42", "currency": "USD"}}
+
+    def test_stage1_output_contains_a_decimal(self):
+        from decimal import Decimal
+        s1 = C.E.stage1(self._row())
+        self.assertIsInstance(s1["SPREAD_TICKS"], Decimal)
+
+    def test_a_stage1_dict_round_trips_through_json(self):
+        s1 = C.E.stage1(self._row())
+        back = json.loads(json.dumps({"STAGE1": s1}, default=C._jsonable))
+        self.assertEqual(back["STAGE1"]["SPREAD_TICKS"], "2")
+
+    def test_the_decimal_is_written_exactly_and_never_as_a_float(self):
+        from decimal import Decimal
+        # 0.1 is not representable in binary floating point. A float conversion
+        # would corrupt a measured value; a string keeps it exact.
+        self.assertEqual(C._jsonable(Decimal("0.1")), "0.1")
+        self.assertIsInstance(C._jsonable(Decimal("0.1")), str)
+
+    def test_an_unexpected_type_still_raises_rather_than_being_coerced(self):
+        with self.assertRaises(TypeError):
+            C._jsonable(object())

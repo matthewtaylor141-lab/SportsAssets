@@ -32,6 +32,7 @@ from __future__ import annotations
 import argparse
 import json
 import time
+from decimal import Decimal
 from pathlib import Path
 
 import eligibility as E
@@ -47,6 +48,20 @@ CENSUS_VERSION = "beta48-stage2-census/1"
 # measured rather than assumed to be zero.
 AUDIT_FRACTION = 0.05
 ROUTING_CENSORING_AUDIT = "ROUTING_CENSORING_AUDIT_V1"
+
+
+def _jsonable(o):
+    """Decimal -> str, EXACTLY. Never float.
+
+    `eligibility.spread_ticks()` returns a Decimal, because a spread in ticks is
+    computed from Decimal money and turning it into a float would silently
+    change the value we measured. json.dumps cannot serialize Decimal, so it is
+    written as its exact decimal string and a test round-trips a real stage-1
+    dict to prove it.
+    """
+    if isinstance(o, Decimal):
+        return str(o)
+    raise TypeError("not JSON serializable: %s" % type(o).__name__)
 
 
 def _rank(slug, tag, salt=CENSUS_SALT):
@@ -106,7 +121,8 @@ def census(outdir: Path, board_events, pacer, http, limit=None,
         summary["TRUNCATION_IS_A_PREFIX_OF_A_FAIR_ORDER"] = "YES"
 
     outdir.mkdir(parents=True, exist_ok=True)
-    (outdir / "census_plan.json").write_text(json.dumps(summary, indent=1))
+    (outdir / "census_plan.json").write_text(
+        json.dumps(summary, indent=1, default=_jsonable))
 
     path = outdir / "census.jsonl"
     scan_start = time.time()
@@ -131,7 +147,7 @@ def census(outdir: Path, board_events, pacer, http, limit=None,
                 "STAGE1": E.stage1(ev),
                 "leg": leg,
             }
-            fh.write(json.dumps(row) + "\n")
+            fh.write(json.dumps(row, default=_jsonable) + "\n")
             n += 1
             if n % 500 == 0:
                 print("census rows %d / %d | requests %d | elapsed %.0fs"
@@ -140,7 +156,8 @@ def census(outdir: Path, board_events, pacer, http, limit=None,
     summary["CENSUS_ROWS_WRITTEN"] = n
     summary["SCAN_DURATION_S"] = time.time() - scan_start
     summary["REQUESTS_USED"] = pacer.requests
-    (outdir / "census_plan.json").write_text(json.dumps(summary, indent=1))
+    (outdir / "census_plan.json").write_text(
+        json.dumps(summary, indent=1, default=_jsonable))
     print("census rows written %d | requests %d | %.0fs"
           % (n, pacer.requests, summary["SCAN_DURATION_S"]))
     return n
