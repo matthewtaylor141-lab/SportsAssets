@@ -185,6 +185,34 @@ jobs:
             --self-run-id "$SEG" \
             --mode during \
             --out "evidence/rateconfirm_$SEG/isolation_at_end.json" || true
+          # SEAL THE RUN HISTORY. The verdict on isolation-throughout comes
+          # from INTERVAL OVERLAP against the evidence window, not from this
+          # end snapshot -- a collector that started and finished inside the
+          # window is invisible here. Two pages, all statuses, so the history
+          # reaches back past the window start; harvest refuses to conclude
+          # "no overlap" if it does not.
+          for page in 1 2; do
+            curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+                 -H "Accept: application/vnd.github+json" \
+                 "${{ github.api_url }}/repos/${{ github.repository }}/actions/runs?per_page=100&page=$page" \
+                 -o "/tmp/hist_$page.json" || true
+          done
+          python - <<'PYEOF' || true
+          import json, pathlib, os
+          runs = []
+          for f in ("/tmp/hist_1.json", "/tmp/hist_2.json"):
+              try:
+                  runs += json.load(open(f)).get("workflow_runs", [])
+              except Exception:
+                  pass
+          keep = ("id", "name", "status", "conclusion", "created_at",
+                  "run_started_at", "updated_at")
+          out = pathlib.Path("evidence/rateconfirm_%s/run_history.json"
+                             % os.environ["SEG"])
+          out.write_text(json.dumps(
+              {"workflow_runs": [{k: r.get(k) for k in keep} for r in runs]},
+              indent=1, sort_keys=True))
+          PYEOF
 
       - name: Seal and commit the confirmation
         if: always()

@@ -354,6 +354,119 @@ def during_run_conflict(active_runs, known, self_run_id=None):
     }
 
 
+# ---------------------------------------------------------------------------
+# A SNAPSHOT AT THE END IS NOT AN AUDIT OF THE INTERVAL
+# ---------------------------------------------------------------------------
+#
+#   confirmation starts    21:35
+#   other collector starts 21:40
+#   other collector ends   21:47
+#   confirmation ends      21:55
+#
+# At 21:55 nothing is running, so an end-of-run snapshot reports a clean run --
+# and the experiment was contaminated for seven minutes. The verdict therefore
+# comes from RUN-HISTORY OVERLAP against the evidence window. The snapshot
+# stays for operational visibility and is not the proof.
+EVIDENCE_VERDICT_FROM = "RUN_HISTORY_OVERLAP_NOT_END_OF_RUN_SNAPSHOT"
+WHY_SNAPSHOT_IS_NOT_PROOF = (
+    "a collector that started and finished inside the window is invisible at "
+    "the end, and it was venue load the whole time it ran")
+QUEUED_WITHOUT_EXECUTION_IS_NOT_LOAD = (
+    "a run that never reached a running state issued no request")
+
+
+def _iso(ts):
+    from datetime import datetime
+    if not ts:
+        return None
+    try:
+        return datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+    except Exception:                                          # noqa: BLE001
+        return None
+
+
+def overlap_audit(window_start, window_end, runs, known, self_run_id=None):
+    """Which known direct collectors EXECUTED during the evidence window.
+
+    A run counts only if it actually reached a running/executing state --
+    queued-and-never-started issued no request. An in-flight run with no end
+    time is treated as still running, which overlaps anything that began
+    before now.
+    """
+    ws, we = _iso(window_start), _iso(window_end)
+    known = set(known or ())
+    if ws is None or we is None:
+        return {"DIRECT_CONFLICT_STARTED_DURING_RUN": NOT_IDENTIFIED,
+                "WHY_NOT_IDENTIFIED": "the evidence window is not established",
+                "DIRECT_OVERLAP_COUNT": NOT_IDENTIFIED,
+                "DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW": []}
+
+    overlaps, considered, oldest = [], 0, None
+    for r in runs or ():
+        rid = str(r.get("id", ""))
+        created = _iso(r.get("created_at"))
+        if oldest is None or (created and created < oldest):
+            oldest = created
+        if self_run_id is not None and rid == str(self_run_id):
+            continue
+        if r.get("name") not in known:
+            continue
+        considered += 1
+        started = _iso(r.get("run_started_at")) or created
+        if started is None:
+            continue
+        # never executed -> never venue load
+        if r.get("status") in WAITING_STATES and r.get("conclusion") in (
+                None, "cancelled", "skipped"):
+            continue
+        ended = _iso(r.get("updated_at")) if r.get("status") == "completed" else we
+        if ended is None:
+            ended = we
+        if started <= we and ended >= ws:
+            overlaps.append({"NAME": r.get("name"), "ID": rid,
+                             "OTHER_RUN_START": started.isoformat(),
+                             "OTHER_RUN_END": (ended.isoformat()
+                                               if r.get("status") == "completed"
+                                               else "STILL_RUNNING"),
+                             "STATUS": r.get("status")})
+
+    # Coverage: the fetched history must reach back past the window start, or
+    # an older overlapping run could be sitting just off the end of the page.
+    # PRECEDENCE MATTERS. A DETECTED overlap is a fact and outranks coverage:
+    # thin history cannot turn something we saw into something unknown.
+    # Coverage only gates the NEGATIVE -- concluding "nothing overlapped"
+    # requires history reaching back past the window start.
+    covered = bool(oldest and ws and oldest <= ws)
+    if overlaps:
+        verdict = "YES"
+    elif covered:
+        verdict = "NO"
+    else:
+        verdict = NOT_IDENTIFIED
+    return {
+        "EVIDENCE_WINDOW": [ws.isoformat(), we.isoformat()],
+        "DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW": overlaps,
+        "DIRECT_OVERLAP_COUNT": len(overlaps),
+        "DIRECT_CONFLICT_STARTED_DURING_RUN": verdict,
+        "DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN": (
+            "NO" if verdict == "YES" else
+            ("YES" if verdict == "NO" else NOT_IDENTIFIED)),
+        "RUN_HISTORY_COVERS_THE_WINDOW": "YES" if covered else "NO",
+        "OLDEST_RUN_IN_HISTORY": oldest.isoformat() if oldest else NOT_IDENTIFIED,
+        "KNOWN_DIRECT_RUNS_CONSIDERED": considered,
+        "WHY_NOT_IDENTIFIED": (None if verdict != NOT_IDENTIFIED else
+                               "the fetched run history does not reach back "
+                               "past the window start, so an older "
+                               "overlapping run cannot be excluded"),
+        "COVERAGE_GATES_ONLY_THE_NEGATIVE": True,
+        "EVIDENCE_VERDICT_FROM": EVIDENCE_VERDICT_FROM,
+        "WHY_SNAPSHOT_IS_NOT_PROOF": WHY_SNAPSHOT_IS_NOT_PROOF,
+        "QUEUED_WITHOUT_EXECUTION_IS_NOT_LOAD":
+            QUEUED_WITHOUT_EXECUTION_IS_NOT_LOAD,
+        "INDIRECT_BETTOR_PMUS_LOAD_ISOLATION": INDIRECT_LOAD_ISOLATION,
+    }
+
+
 def render(a):
     L = ["%-38s = %s" % ("GLOBAL_VENUE_CONCURRENCY_DOMAIN",
                          a["GLOBAL_VENUE_CONCURRENCY_DOMAIN"]),

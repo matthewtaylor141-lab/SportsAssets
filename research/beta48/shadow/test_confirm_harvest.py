@@ -17,7 +17,8 @@ T0 = datetime(2026, 9, 16, 18, 3, 15, tzinfo=timezone.utc)
 
 
 def sealed(outdir, requests=300, rps="0.25", statuses=None, slugs=None,
-           interval=4.0, latency=0.03, order=None, backoff_s=0.0, prov=None):
+           interval=4.0, latency=0.03, order=None, backoff_s=0.0, prov=None,
+           history="clean"):
     """Write a sealed confirmation exactly as the workflow would.
 
     backoff_s adds a forced pause AFTER each 429, exactly as a global backoff
@@ -48,6 +49,20 @@ def sealed(outdir, requests=300, rps="0.25", statuses=None, slugs=None,
     }))
     if prov is not None:
         (out / "provenance.json").write_text(json.dumps(prov))
+    if history == "clean":
+        # A normal sealed run carries run history reaching back past the
+        # window with nothing overlapping it. Without history at all,
+        # isolation-throughout is NOT_IDENTIFIED and the run cannot validate --
+        # which is the point, so it must be supplied deliberately.
+        (out / "run_history.json").write_text(json.dumps({"workflow_runs": [
+            {"name": "run85-phase2-capture", "id": 99, "status": "completed",
+             "conclusion": "success",
+             "created_at": "2026-09-16T09:00:00Z",
+             "run_started_at": "2026-09-16T09:00:00Z",
+             "updated_at": "2026-09-16T10:00:00Z"}]}))
+    elif history is not None:
+        (out / "run_history.json").write_text(
+            json.dumps({"workflow_runs": history}))
     return str(out)
 
 
@@ -426,3 +441,94 @@ class TheOutputShape(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class IsolationThroughoutComesFromIntervalOverlap(unittest.TestCase):
+    """An end-of-run snapshot is not an audit of the interval.
+
+        confirmation 18:03:15 - 18:23:15
+        collector    18:08:00 - 18:15:00
+
+    Nothing is running at 18:23:15, and the experiment was contaminated for
+    seven minutes.
+    """
+
+    W_START, W_END = "2026-09-16T10:00:00Z", None   # history reaches back
+
+    def _dir(self, runs):
+        return sealed(tempfile.mkdtemp(), requests=301, prov=legacy_prov(),
+                      history=runs)
+
+    def _run(self, start, end, name="run85-phase2-capture", status="completed"):
+        return {"name": name, "id": 1, "status": status, "conclusion": "success",
+                "created_at": self.W_START, "run_started_at": start,
+                "updated_at": end}
+
+    def test_a_collector_that_began_and_ended_inside_the_window_is_caught(self):
+        r = CH.harvest(self._dir([self._run("2026-09-16T18:08:00Z",
+                                            "2026-09-16T18:15:00Z")]))
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "YES")
+        self.assertEqual(r["DIRECT_OVERLAP_COUNT"], 1)
+        self.assertEqual(
+            r["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"], "NO")
+        self.assertIn("DIRECT_PMUS_COLLECTOR_OVERLAP", r["FAIL_REASON"])
+        self.assertEqual(r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
+
+    def test_the_raw_observations_are_not_discarded(self):
+        r = CH.harvest(self._dir([self._run("2026-09-16T18:08:00Z",
+                                            "2026-09-16T18:15:00Z")]))
+        self.assertTrue(r["RAW_OBSERVATIONS_RETAINED"])
+        self.assertEqual(r["REQUESTS"], 301)
+        self.assertEqual(r["SUCCESSES"], 301)
+
+    def test_a_run_wholly_before_the_window_is_not_an_overlap(self):
+        r = CH.harvest(self._dir([self._run("2026-09-16T10:00:00Z",
+                                            "2026-09-16T11:00:00Z")]))
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "NO")
+        self.assertEqual(
+            r["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"], "YES")
+        self.assertEqual(r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "YES")
+
+    def test_a_queued_run_that_never_executed_is_not_load(self):
+        q = self._run("2026-09-16T18:08:00Z", "2026-09-16T18:08:00Z",
+                      status="queued")
+        q["conclusion"] = None
+        r = CH.harvest(self._dir([q]))
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "NO")
+
+    def test_thin_history_cannot_conclude_a_clean_run(self):
+        """Coverage gates the NEGATIVE only."""
+        late = dict(self._run("2026-09-16T19:00:00Z", "2026-09-16T19:10:00Z"),
+                    created_at="2026-09-16T19:00:00Z")
+        r = CH.harvest(self._dir([late]))
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], NI)
+        self.assertEqual(r["RUN_HISTORY_COVERS_THE_WINDOW"], "NO")
+        self.assertIn("ISOLATION_THROUGHOUT_RUN_NOT_IDENTIFIED",
+                      r["FAIL_REASON"])
+        self.assertEqual(r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
+
+    def test_a_detected_overlap_outranks_thin_coverage(self):
+        """Seeing it beats not being able to rule it out."""
+        hit = dict(self._run("2026-09-16T18:08:00Z", "2026-09-16T18:15:00Z"),
+                   created_at="2026-09-16T18:07:00Z")
+        r = CH.harvest(self._dir([hit]))
+        self.assertEqual(r["RUN_HISTORY_COVERS_THE_WINDOW"], "NO")
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "YES")
+
+    def test_no_history_at_all_cannot_establish_isolation(self):
+        d = sealed(tempfile.mkdtemp(), requests=301, prov=legacy_prov(),
+                   history=None)
+        r = CH.harvest(d)
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], NI)
+        self.assertEqual(r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "NO")
+
+    def test_the_window_starts_at_the_first_get_not_at_dispatch(self):
+        r = CH.harvest(self._dir([]))
+        self.assertEqual(r["FIRST_VENUE_GET_TIME"], "2026-09-16T18:03:15+00:00")
+        self.assertTrue(r["EVIDENCE_WINDOW_EXCLUDES_DISPATCH_TIME"])
+
+    def test_the_snapshot_is_labelled_visibility_not_proof(self):
+        r = CH.harvest(self._dir([]))
+        self.assertTrue(r["END_SNAPSHOT_IS_VISIBILITY_NOT_PROOF"])
+        self.assertEqual(r["EVIDENCE_VERDICT_FROM"],
+                         "RUN_HISTORY_OVERLAP_NOT_END_OF_RUN_SNAPSHOT")

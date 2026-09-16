@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import json
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 from decimal import Decimal as D
 from pathlib import Path
 
@@ -57,6 +57,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import provenance as PV                                        # noqa: E402
 import rate_confirm as RC                                      # noqa: E402
+import venue_domain as VD                                      # noqa: E402
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 THIS_MODULE_CONTACTS_NOTHING = True
@@ -142,6 +143,13 @@ def elapsed_from_rows(rows, rps):
         "LAST_REQUEST_COMPLETION": (
             last_t.isoformat() + " +%.3fs latency" % lat),
         "LAST_REQUEST_LATENCY_S": lat,
+
+        # THE EVIDENCE WINDOW. Venue exposure begins at the FIRST GET, not at
+        # workflow dispatch -- the job spends minutes on checkout, tests and
+        # gates before it touches anything.
+        "FIRST_VENUE_GET_TIME": first_t.isoformat(),
+        "LAST_VENUE_GET_TIME": (last_t + timedelta(seconds=lat)).isoformat(),
+        "EVIDENCE_WINDOW_EXCLUDES_DISPATCH_TIME": True,
 
         # the support criterion
         "NOMINAL_PACED_EXPOSURE_S": exposure,
@@ -506,6 +514,45 @@ def harvest(outdir, rps=None):
             "SEALED_OUTPUT_HASH_WRITTEN_BY_THE_RUN, VERIFIED_BY_HARVEST_REHASH"
             if report["DATA_OUTPUT_SHA_MATCHES_SEALED_RECORD"] == "YES"
             else "SEALED_OUTPUT_HASH_WRITTEN_BY_THE_RUN, REHASH_DISAGREES")
+
+    # ISOLATION THROUGHOUT THE RUN, from run-history OVERLAP against the
+    # evidence window. The end-of-run snapshot is kept for visibility and is
+    # explicitly not the proof: a collector that started at 21:40 and finished
+    # at 21:47 inside a 21:35-21:55 window is invisible at 21:55 and was venue
+    # load for the whole seven minutes.
+    hist_path = out / "run_history.json"
+    hist = []
+    if hist_path.is_file():
+        raw = json.loads(hist_path.read_text())
+        hist = raw.get("workflow_runs", raw) if isinstance(raw, dict) else raw
+    known = VD.audit(Path(__file__).resolve().parents[3])[
+        "KNOWN_VENUE_TOUCHING_WORKFLOWS"]
+    ov = VD.overlap_audit(report.get("FIRST_VENUE_GET_TIME"),
+                          report.get("LAST_VENUE_GET_TIME"),
+                          hist, known, self_run_id=sealed_prov.get("RUN_ID"))
+    report.update(ov)
+
+    snap = out / "isolation_at_end.json"
+    if snap.is_file():
+        s = json.loads(snap.read_text())
+        report["RUNNING_COLLECTORS_AT_END"] = s.get(
+            "KNOWN_DIRECT_PMUS_COLLECTORS_ACTIVE", NOT_IDENTIFIED)
+        report["PENDING_COLLECTORS_AT_END"] = s.get(
+            "KNOWN_DIRECT_PMUS_COLLECTORS_PENDING", NOT_IDENTIFIED)
+    report["END_SNAPSHOT_IS_VISIBILITY_NOT_PROOF"] = True
+
+    # An overlap fails the run -- the isolated-rate experiment was not
+    # isolated. The raw observations are retained; they are simply not an
+    # isolated result.
+    verdict = ov["DIRECT_CONFLICT_STARTED_DURING_RUN"]
+    if verdict != "NO":
+        reasons.append("DIRECT_PMUS_COLLECTOR_OVERLAP" if verdict == "YES"
+                       else "ISOLATION_THROUGHOUT_RUN_NOT_IDENTIFIED")
+        report["FAIL_REASON"] = reasons
+        report["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"] = "NO"
+        report["RESEARCH_COLLECTOR_OPERATIONALLY_VALIDATED"] = "NO"
+        report["PROPOSED_SUBSTANTIVE_CAPTURE_RATE"] = NOT_IDENTIFIED
+        report["RAW_OBSERVATIONS_RETAINED"] = True
     return report
 
 
@@ -531,6 +578,15 @@ def render(r):
     L.append("")
     for k in ("POLL_ORDER_FAIRNESS", "SUCCESS_COVERAGE_BALANCED",
               "POLL_ORDER_STARVATION"):
+        L.append("%-38s = %s" % (k, r.get(k)))
+    L.append("")
+    for k in ("FIRST_VENUE_GET_TIME", "LAST_VENUE_GET_TIME",
+              "DIRECT_OVERLAP_COUNT", "DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW",
+              "RUN_HISTORY_COVERS_THE_WINDOW",
+              "RUNNING_COLLECTORS_AT_END", "PENDING_COLLECTORS_AT_END",
+              "DIRECT_CONFLICT_STARTED_DURING_RUN",
+              "DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN",
+              "INDIRECT_BETTOR_PMUS_LOAD_ISOLATION"):
         L.append("%-38s = %s" % (k, r.get(k)))
     if r.get("FAIL_REASON"):
         L.append("")
