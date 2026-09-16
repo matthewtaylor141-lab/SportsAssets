@@ -842,3 +842,127 @@ NEXT_SOURCE_OF_INTELLIGENCE          = SHADOW_EXIT_LEARNING_V1
 
 The historical cohort is the PRIOR. BETTOR's prospective observations become
 the DATA. No further optimisation of this engine against the whale evidence.
+
+---
+
+## 14. PHASE_2A — SHADOW_EXIT_LEARNING_V1, FIRST RESULT
+
+```
+PHASE_2_STAGE   = PHASE_2A   LIVE_PUBLIC_MARKET_STATE_AND_DECISION_TELEMETRY
+MODULES         shadow/collect.py   shadow/lifecycle.py   shadow/position_state.py
+TESTS           181 in shadow/; 1,390 across beta48
+VENUE CONTACT   ZERO new reads -- the exercise ran on the sealed census
+```
+
+### 14a. THE PAIR TRADE ON THIS VENUE IS MAKER-ONLY. MEASURED.
+
+**I built the collector on a wrong assumption and the data corrected it.** I
+expected the Polymarket shape — YES and NO as separately quoted tokens in
+independent books whose asks can sum below 1.00. The captured board refutes
+that on **all 20,000 rows**:
+
+```
+slugs             exactly one
+side_identifiers  the SAME slug twice
+side_descriptions ["Yes", "No"]
+```
+
+Every market is **one binary book carrying both sides**. Buying the complement
+*is* selling the own side. There is no sibling contract to pair with, so the
+pair basis is not a sum of two asks — it is one of two arithmetic facts,
+measured over **9,143 routed two-sided books**:
+
+| | formula | P10 / P50 / P90 | below 1.00 |
+|---|---|---|---|
+| cross both legs | `ask + (1 − bid) = 1 + spread` | 1.01 / 1.01 / 1.01 | **0 of 9,143** |
+| rest both legs | `bid + (1 − ask) = 1 − spread` | 0.99 / 0.99 / 0.99 | **9,143 of 9,143** |
+
+```
+AGGRESSIVE_COMPLEMENT_PAIR_PROFITABLE_BEFORE_FEES = NO, STRUCTURALLY
+PASSIVE_COMPLEMENT_PAIR_PROFITABLE_BEFORE_FEES    = YES, IF BOTH RESTS FILL
+```
+
+**This is the most consequential thing Phase 2A has produced, and it is not
+good news.** The pair channel is not dead here — but it is available *only to a
+maker*. Crossing is arithmetically certain to lose; resting both sides is
+arithmetically certain to win **if both sides fill**. So on this venue the pair
+channel does not route *around* `ACTUAL_BETTOR_FILL_PROBABILITY` — it collapses
+**onto** it. It removes a hoped-for way past the blocker rather than adding a
+new one.
+
+It also scopes the whale prior precisely. The λ apparatus describes how long a
+first leg waits for its complement on a venue where the complement is
+independently quoted. Here, "waiting for the complement" and "waiting for the
+other side of my own two-sided quote to fill" are the same event.
+
+### 14b. THE PLUMBING EXERCISE — 788 rows, on sealed data
+
+Run over the 788 HIGH_ACTIVITY markets from census 35105863528. No new reads.
+
+```
+MARKETS_OBSERVED                        9,709
+SHADOW_ENTRY_OPPORTUNITIES                788
+TELEMETRY_ROWS                            788
+COUNTERFACTUAL_MAKER_FILLS                  0   (none supported; no rest was
+                                                 ever placed, so TOUCH != FILL
+                                                 has nothing to promote)
+SHADOW_POSITIONS_CREATED                    0
+
+POSITIONS_WITH_ALL_ACTIONS_PRICED           0
+POSITIONS_BLOCKED_BY_FAIR_VALUE           788
+POSITIONS_BLOCKED_BY_FILL_UNCERTAINTY       0
+POSITIONS_BLOCKED_BY_OTHER_UNKNOWN          0
+
+PRIOR3_VS_PRIOR4_ACTION_DISAGREEMENT        0
+PRIOR3_VS_PRIOR4_ACTION_AGREEMENT         788
+
+PASSIVE_PAIR_BASIS  min 0.95  P50 0.99  max 0.999   788 of 788 below 1.00
+AGGRESSIVE_PAIR_BASIS                                 0 of 788 below 1.00
+```
+
+**Every row blocked on fair value, exactly as specified in advance.** The two
+priors agree on all 788 — which is not evidence that they are equivalent: they
+agree because *neither* selects an action while `EV_WAIT` is `NOT_IDENTIFIED`
+under both. `ACTION_DISAGREEMENT` only becomes informative once actions are
+being selected, and the column exists now so that it will be there when they
+are.
+
+### 14c. EVENT IDENTITY IS STILL UNRESOLVED, AND THE CAPTURE IS WHY
+
+```
+VALID_EVENTS                              0
+INDEPENDENT_CAPACITY                      NOT_IDENTIFIED
+MARKETS_WITH_UNRESOLVED_EVENT_IDENTITY  788
+COMPLEMENT_REFUSAL: IDENTITY_LEVEL_C    773      NO_SIBLING_IN_FAMILY  15
+```
+
+Not a venue limitation — a **capture** limitation, and worth naming precisely:
+`underlying_event_key` reads team ids and provider ids from `marketSides`, and
+the board walk stores `side_identifiers` / `side_descriptions` instead.
+`rows_with_eventSlug = 0`, so LEVEL_A is unavailable, and LEVEL_B cannot be
+reached from what was retained. **This is a cheap fix on the next board walk,
+not a research problem.** Until then capacity stays `NOT_IDENTIFIED` and every
+market is treated as fully correlated — conservative, and deliberate.
+
+### 14d. WHAT PHASE_2A HAS NOT PRODUCED
+
+```
+PROFITABILITY            NOT_REPORTABLE_THIS_PHASE
+WIN_RATE                 NOT_REPORTABLE_THIS_PHASE
+EXPECTED_MONTHLY_RETURN  NOT_REPORTABLE_THIS_PHASE
+BETTOR_EXIT_ENGINE_PNL   NOT_IDENTIFIED
+```
+
+Zero shadow positions exist. Nothing here is a strategy result, and the
+summariser refuses to emit those three fields as numbers at all.
+
+### 14e. THE NEXT TWO EXPERIMENTS, IN COST ORDER
+
+1. **Re-walk the board retaining `marketSides`.** Free, one board walk, no new
+   authority. Converts `VALID_EVENTS` from 0 and makes event-stratified
+   capacity possible for the first time.
+2. **Live tick capture on a bounded candidate set.** Free, paced, public. Gives
+   `TIME_UNPAIRED` real values and the basis a time series rather than one
+   snapshot — the input `SHADOW_EXIT_LEARNING_V1` actually consumes.
+
+Neither establishes a fill. Only an order does, and none is authorised.
