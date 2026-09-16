@@ -1,0 +1,149 @@
+{
+ "SCHEMA": "WHALE_EV_PROVENANCE_SCHEMA_V1",
+ "PURPOSE": "A management user must be able to answer WHERE DID THIS EV COME FROM for any shadow or live decision, without reading code.",
+ "VENUE_CONTACT": 0, "ORDERS": 0, "CAPITAL": 0, "mirror_live": false,
+ "EVERY_FIELD_MAY_BE_NOT_IDENTIFIED": true,
+ "AN_ABSENT_FIELD_IS_A_DEFECT_A_NOT_IDENTIFIED_FIELD_IS_A_MEASUREMENT": true,
+
+ "SECTIONS": {
+
+  "IDENTITY": [
+   {"FIELD": "OPPORTUNITY_ID", "TYPE": "string"},
+   {"FIELD": "OPPORTUNITY_CLASS", "TYPE": "enum", "VALUES": ["WHALE_SUPPORTED_TWO_SIDED_MAKER", "HYBRID_MAKER_DIRECTIONAL", "DIRECTIONAL_SETTLEMENT_EDGE", "LIVE_DIRECTIONAL_EDGE", "MICROSTRUCTURE_EXECUTION_EDGE", "LOGICAL_CROSS_CONTRACT_EDGE", "CROSS_VENUE_REFERENCE_DISLOCATION", "INCENTIVE_ENHANCED_MAKER", "CAPITAL_EFFICIENCY", "NOT_IDENTIFIED"], "NOTE": "the class does not prove EV; it names WHICH model should value the opportunity"},
+   {"FIELD": "DECISION_TIMESTAMP", "TYPE": "iso8601"},
+   {"FIELD": "MARKET_ID", "TYPE": "string"},
+   {"FIELD": "EVENT_ID", "TYPE": "string", "NOTE": "the allocation unit; markets within one event are one correlated exposure"}
+  ],
+
+  "WHALE_REFERENCE": [
+   {"FIELD": "REFERENCE_WHALES", "TYPE": "list"},
+   {"FIELD": "REFERENCE_MECHANISM", "TYPE": "enum", "VALUES": ["TWO_SIDED_PASSIVE_MARKET_MAKING", "COMPLETION", "CAPITAL_RECYCLING", "RESIDUAL_INVENTORY_RISK", "DIRECTIONAL_PRICING", "SETTLEMENT_HOLD", "LIVE_DIRECTIONAL_PRICING", "IN_PLAY_EXECUTION", "HEDGE_INVENTORY_CLOSE", "NOT_IDENTIFIED"]},
+   {"FIELD": "WHALE_SUPPORT_LEVEL", "TYPE": "enum", "VALUES": ["STRONG", "MODERATE", "WEAK", "OUT_OF_DISTRIBUTION", "NOT_IDENTIFIED"]},
+   {"FIELD": "VENUE_MECHANISM_EQUIVALENCE", "TYPE": "enum", "VALUES": ["STRONG", "PARTIAL", "NONE", "NOT_IDENTIFIED"]},
+   {"FIELD": "MECHANISM_AGREEMENT", "TYPE": "bool_or_NOT_IDENTIFIED"},
+   {"FIELD": "WHALE_DISAGREEMENT", "TYPE": "string_or_NOT_IDENTIFIED", "NOTE": "recorded, never averaged away"}
+  ],
+
+  "SAMPLE_SIZE": [
+   {"FIELD": "REFERENCE_N_FILLS", "TYPE": "int", "NOTE": "REPORTED, NEVER USED AS THE SAMPLE SIZE"},
+   {"FIELD": "REFERENCE_N_POSITIONS", "TYPE": "int"},
+   {"FIELD": "REFERENCE_N_MARKETS", "TYPE": "int_or_NOT_IDENTIFIED"},
+   {"FIELD": "REFERENCE_N_EVENTS", "TYPE": "int_or_NOT_IDENTIFIED"},
+   {"FIELD": "REFERENCE_EFFECTIVE_N", "TYPE": "int_or_NOT_IDENTIFIED"},
+   {"FIELD": "REFERENCE_EFFECTIVE_N_LEVEL", "TYPE": "enum", "VALUES": ["EVENT", "MARKET", "POSITION", "NOT_IDENTIFIED"]},
+   {"FIELD": "EFFECTIVE_N_IS_A_FLOOR", "TYPE": "bool", "NOTE": "true when clustering is coarser than EVENT, because within-event correlation is then unmodelled"}
+  ],
+
+  "WHALE_PRIORS": [
+   {"FIELD": "WHALE_COMPLETION_PRIOR", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "WHALE_COMPLETION_HAZARD_CI95", "TYPE": "pair_or_NOT_IDENTIFIED"},
+   {"FIELD": "WHALE_RESIDUAL_PRIOR", "TYPE": "number_or_NOT_IDENTIFIED", "NOTE": "residual economics, NEVER summed with completion economics"},
+   {"FIELD": "WHALE_SIZE_PRIOR", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "WHALE_TIME_PRIOR", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "WHALE_PAIR_BASIS_PRIOR", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "WHALE_UNCERTAINTY", "TYPE": "object"},
+   {"FIELD": "PRIOR_WEIGHT", "TYPE": "number"},
+   {"FIELD": "NATIVE_WEIGHT", "TYPE": "number"},
+   {"FIELD": "REGIME_SHIFT_FLAG", "TYPE": "bool"},
+   {"FIELD": "PRIOR_DECAY_REASON", "TYPE": "enum_or_null", "VALUES": ["NATIVE_EVIDENCE_ACCUMULATED", "REGIME_SHIFT", "HISTORICAL_EDGE_DECAYED", "VENUE_MECHANICS_DIFFER", "CURRENT_EVIDENCE_CONTRADICTS_PRIOR", null]}
+  ],
+
+  "FAIR_VALUE": [
+   {"FIELD": "FV_SETTLEMENT", "TYPE": "probability_or_NOT_IDENTIFIED"},
+   {"FIELD": "FV_SETTLEMENT_UNCERTAINTY", "TYPE": "interval_or_NOT_IDENTIFIED"},
+   {"FIELD": "FV_SETTLEMENT_SOURCE", "TYPE": "enum", "VALUES": ["FV_EXTERNAL_PRIOR", "FV_INTERNAL_MODEL_RAW", "FV_SETTLEMENT_CALIBRATED", "NOT_IDENTIFIED"]},
+   {"FIELD": "FV_SOURCE_DISPERSION", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "FV_TARGET_MARKET_REFERENCE", "TYPE": "number", "NOTE": "RECORDED FOR COMPARISON ONLY. The venue's own price may never be the independent evidence that the venue is mispriced."},
+   {"FIELD": "FV_EXECUTION_SHORT_HORIZON", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "FV_EXECUTION_HORIZON_S", "TYPE": "int_or_NOT_IDENTIFIED"}
+  ],
+
+  "EXECUTION_STATE": [
+   {"FIELD": "P_FULL_FILL", "TYPE": "probability_or_NOT_IDENTIFIED"},
+   {"FIELD": "P_PARTIAL_FILL", "TYPE": "probability_or_NOT_IDENTIFIED"},
+   {"FIELD": "P_NO_FILL", "TYPE": "probability_or_NOT_IDENTIFIED"},
+   {"FIELD": "EXPECTED_MARKOUT_CONDITIONAL_ON_FILL", "TYPE": "object_by_horizon_or_NOT_IDENTIFIED"},
+   {"FIELD": "TOXICITY_STATE", "TYPE": "enum_or_NOT_IDENTIFIED"},
+   {"FIELD": "CURRENT_SPREAD", "TYPE": "number"},
+   {"FIELD": "CURRENT_QUEUE", "TYPE": "object_or_NOT_IDENTIFIED"},
+   {"FIELD": "QUEUE_AHEAD_ESTIMATE", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "CURRENT_DEPTH", "TYPE": "object"},
+   {"FIELD": "CURRENT_FEES", "TYPE": "object"},
+   {"FIELD": "FEE_REGIME_ID", "TYPE": "string"},
+   {"FIELD": "CURRENT_INCENTIVES", "TYPE": "object"}
+  ],
+
+  "INVENTORY_AND_CAPITAL": [
+   {"FIELD": "CURRENT_INVENTORY", "TYPE": "number"},
+   {"FIELD": "CURRENT_CAPITAL_OCCUPANCY", "TYPE": "USD_SECONDS_or_NOT_IDENTIFIED"},
+   {"FIELD": "CURRENT_MARGIN_REQUIREMENT", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "MARGIN_RELEASE_VALUE", "TYPE": "number_or_NOT_IDENTIFIED", "NOTE": "MARGIN RELEASE IS NOT TRADING P&L"},
+   {"FIELD": "FREED_BUYING_POWER", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "RETURN_ON_WORKING_CAPITAL", "TYPE": "number_or_NOT_IDENTIFIED"}
+  ],
+
+  "ACTION_VALUES": [
+   {"FIELD": "PASSIVE_CLOSE_VALUE", "TYPE": "number_or_NOT_IDENTIFIED", "NOTE": "a hope with a price attached; carries its own FILL_STATUS"},
+   {"FIELD": "AGGRESSIVE_CLOSE_VALUE", "TYPE": "number_or_NOT_IDENTIFIED", "NOTE": "identified only to displayed depth"},
+   {"FIELD": "HOLD_VALUE", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "HEDGE_VALUE", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "SETTLE_VALUE", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "EV_WAIT", "TYPE": "number_or_NOT_IDENTIFIED", "NOTE": "NOT forced to zero; waiting may have option value"},
+   {"FIELD": "KEEP_CURRENT_QUOTE_VALUE", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "REQUOTE_VALUE", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "REQUOTE_PRIORITY_LOSS", "TYPE": "number_or_NOT_IDENTIFIED", "NOTE": "cancel and requote is not free"},
+   {"FIELD": "ACTIONS_NOT_CHOSEN", "TYPE": "list", "NOTE": "every feasible action priced, including the ones not taken"}
+  ],
+
+  "FINAL": [
+   {"FIELD": "FINAL_EV_MEAN", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "FINAL_EV_LOWER_BOUND", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "FINAL_EV_UPPER_BOUND", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "EDGE_MEAN", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "EDGE_UNCERTAINTY", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "EDGE_LOWER_CONFIDENCE_BOUND", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "POSITION_SIZE", "TYPE": "number"},
+   {"FIELD": "SIZING_RULE", "TYPE": "enum", "VALUES": ["RISK_CONSTRAINED_EDGE_LCB", "PROPORTIONAL_MIRROR", "NOT_IDENTIFIED"]},
+   {"FIELD": "DECISION", "TYPE": "enum", "VALUES": ["ACT", "NO_TRADE", "SHADOW", "DECLINE_COMPARISON_NOT_IDENTIFIED"]},
+   {"FIELD": "REJECTION_REASON", "TYPE": "string_or_null"},
+   {"FIELD": "WHALE_ANCHORED_ROUTE", "TYPE": "enum_or_null", "VALUES": ["WHALE_SUPPORTED_MECHANISM_PLUS_POSITIVE_BETTOR_EV", "INDEPENDENTLY_VALIDATED_STRUCTURAL_OPPORTUNITY", null]}
+  ],
+
+  "INCENTIVE_SEPARATION": [
+   {"FIELD": "TRADING_EV_EX_INCENTIVES", "TYPE": "number_or_NOT_IDENTIFIED", "NOTE": "REPORTED FIRST, ALWAYS"},
+   {"FIELD": "MAKER_REBATE_EV", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "LIQUIDITY_REWARD_EV", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "TAKER_REBATE_EV", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "OTHER_INCENTIVE_EV", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "TOTAL_EV", "TYPE": "number_or_NOT_IDENTIFIED", "NOTE": "LAST"},
+   {"FIELD": "INCENTIVE_DEPENDENT", "TYPE": "enum", "VALUES": ["YES", "NO", "NOT_IDENTIFIED"]}
+  ],
+
+  "MODEL_ATTRIBUTION_EX_ANTE": [
+   {"FIELD": "PREDICTED_SETTLEMENT_PROBABILITY", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_EXECUTION_PRICE", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_FULL_FILL_PROBABILITY", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_PARTIAL_FILL_PROBABILITY", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_COMPLETION_TIME", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_MARKOUT", "TYPE": "object_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_CLOSE_COST", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_RESIDUAL_OUTCOME", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_SPREAD_CAPTURE", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_FEE_REBATE", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_CAPITAL_DURATION", "TYPE": "number_or_NOT_IDENTIFIED"},
+   {"FIELD": "PREDICTED_TOTAL_EV", "TYPE": "number_or_NOT_IDENTIFIED"}
+  ],
+
+  "OFF_POLICY_LOGGING": [
+   {"FIELD": "STATE_SNAPSHOT_ID", "TYPE": "string"},
+   {"FIELD": "AVAILABLE_ACTIONS", "TYPE": "list"},
+   {"FIELD": "CHOSEN_ACTION", "TYPE": "string"},
+   {"FIELD": "REJECTED_ACTIONS", "TYPE": "list"},
+   {"FIELD": "ACTION_PROBABILITY", "TYPE": "number_or_NOT_IDENTIFIED", "NOTE": "needed for doubly-robust off-policy evaluation LATER; absent in the whale archive, which is why whale counterfactual policy evaluation is NOT_IDENTIFIED"},
+   {"FIELD": "REALIZED_OUTCOME", "TYPE": "object_or_PENDING"}
+  ]
+ },
+
+ "THE_QUESTION_THIS_ANSWERS": "WHERE DID THIS EV COME FROM?",
+ "THE_QUESTION_ATTRIBUTION_ANSWERS": "WHICH PART OF OUR THESIS WAS WRONG? -- not merely DID THE TRADE WIN?"
+}
