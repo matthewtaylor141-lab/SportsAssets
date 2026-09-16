@@ -1,0 +1,120 @@
+# BETA48 STAGE-2 ROLLING ELIGIBILITY CENSUS. READ ONLY. NO CREDENTIAL.
+#
+# WHY. Every microstructure number the programme holds -- trade frequency,
+# queue depth, trade size -- was measured on UFC, which is 174 of the 9,182
+# stage-1 BROAD routed markets: 1.9%. The other 98.1% has never had a book
+# read. It is the GENERALIZATION TARGET, not a presumed improvement, and this
+# job measures it rather than assuming either way.
+#
+# WHY NOT `breadth --book-reads`. That reads the first N markets in BOARD
+# ORDER -- a systematic ordering, and a prefix of a prefix. This routes on the
+# frozen stage-1 rule and interleaves an AUDIT lane of stage-1 REJECTS by
+# salted hash, so the routing rule's own false-negative rate is measurable
+# instead of assumed to be zero.
+#
+# fwd_collect.py IS NOT MODIFIED BY THIS JOB. The census is a separate module
+# so the running forward panel's collector stays byte-identical.
+#
+# CAPABILITY BOUNDARY, re-proved by AST scan before any contact:
+#   GET only. gateway.polymarket.us only. No credential, no secret, no wallet,
+#   no signer, no authentication header, no trading SDK, no order or cancel
+#   endpoint, no POST/PUT/PATCH/DELETE. 2.0 rps as OUR restraint, Retry-After
+#   honoured exactly. mirror_live stays false.
+#
+# NO PROFITABILITY CLAIM. MAKER_PROFITABILITY = NOT_ESTABLISHED, written into
+# the plan file itself.
+
+name: beta48-stage2-census
+
+on:
+  workflow_dispatch:
+    inputs:
+      limit:
+        description: "Max book reads (blank = the whole routed universe + audit lane)"
+        required: false
+        default: ""
+      audit_fraction:
+        description: "Share of STAGE-1 REJECTS read as the routing-censoring audit lane"
+        required: false
+        default: "0.05"
+
+permissions:
+  contents: write
+
+# SHARED with the forward capture on purpose: two jobs at once would double the
+# aggregate request rate, which the rate policy forbids.
+concurrency:
+  group: beta48-forward-capture
+  cancel-in-progress: false
+
+jobs:
+  census:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: claude/session-njaewf
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency
+        run: python -m pip install --quiet "httpx==0.27.2" "pytest==8.3.3"
+
+      # THE GATE. No venue contact until the boundary is proved.
+      - name: Prove the capability boundary offline
+        working-directory: research/beta48/forward
+        run: |
+          python -m pytest test_census_collect.py test_fwd_collect.py \
+                          test_eligibility.py -q
+
+      - name: Enumerate the board
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/forward/evidence/census_$SEG
+          mkdir -p "$D"
+          python research/beta48/forward/fwd_collect.py board \
+            --out "$D" --board "$D/board.json" \
+            --registry research/beta48/forward/evidence/registry.json
+
+      - name: Stage-2 census + routing-censoring audit
+        working-directory: research/beta48/forward
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=evidence/census_$SEG
+          ARGS=""
+          if [ -n "${{ github.event.inputs.limit }}" ]; then
+            ARGS="--limit ${{ github.event.inputs.limit }}"
+          fi
+          python census_collect.py \
+            --out "$D" --board "$D/board.json" \
+            --audit-fraction "${{ github.event.inputs.audit_fraction || 0.05 }}" \
+            $ARGS
+
+      - name: Seal and commit the census
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/forward/evidence/census_$SEG
+          ( cd "$D" && sha256sum * > SEALED.sha256 2>/dev/null || true )
+          gzip -9 "$D"/census.jsonl "$D"/board_raw.jsonl 2>/dev/null || true
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BR="beta48-census/seg-$SEG"
+          git checkout --orphan "$BR"
+          git rm -rq --cached . || true
+          git add -f "$D"
+          git commit -qm "BETA48 stage-2 census $SEG [skip render]" || exit 0
+          for i in 1 2 4 8 16; do
+            git push -f origin "$BR" && break
+            echo "push failed, retrying in ${i}s"; sleep "$i"
+          done
+          echo "BETA48_CENSUS_BRANCH $BR"

@@ -182,11 +182,40 @@ BROAD SURVIVOR COMPOSITION, BY LEAGUE
   lal           117    1.3%
 ```
 
-**UFC is 1.9% of the eligible board.** Every microstructure number this
-programme holds was measured there, and the incentive programme universe is
-confined there too. The other **98.1% has no measured microstructure at all** —
-stage 2 was never run at scale, so `ACTIVE` and `HIGH_ACTIVITY` are
-`NOT_IDENTIFIED` board-wide, not "low".
+**UFC is 1.9% of the eligible board.**
+
+### One part of the microstructure DOES generalize, and it should be said
+
+The stage-1 screen reads the spread from the board row, so the spread — unlike
+depth and trade frequency — **is** measured board-wide:
+
+```
+SPREAD_TICKS, all 11,290 two-sided markets on the observed prefix
+   1 tick   8,357   74.0%   <- the modal state of the whole board
+   2 ticks    365    3.2%
+   3-5 ticks  463    4.1%
+   6-19       571    5.1%
+   20+      1,464   13.0%
+```
+
+So "the spread is one tick" is **not** a UFC artifact — it is the modal state
+of three quarters of the two-sided board, and the $0.0100 spread-capture figure
+carries board-wide.
+
+What does **not** carry is everything that needs a book read:
+
+```
+QUEUE_AHEAD          measured on UFC only  (needs L2 depth)
+TRADE_FREQUENCY      measured on UFC only  (needs repeated sharesTraded)
+TRADE_SIZE           measured on UFC only
+ACTIVE / HIGH_ACTIVITY   NOT_IDENTIFIED board-wide
+```
+
+That distinction matters for the gate: the **reward** side of the maker
+arithmetic generalizes; the **cost** side — how long capital waits, and how
+often anything trades at all — is measured on 1.9% of the board and is
+`NOT_IDENTIFIED` on the other 98.1%. It is not "low" there. It is unmeasured,
+and a 9,182-read census would settle it for free.
 
 ```
 PANEL_GENERALIZES_TO_BOARD = NO
