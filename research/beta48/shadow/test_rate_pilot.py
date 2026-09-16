@@ -254,3 +254,160 @@ class TheLadderAndTheReport(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RungsAreNotKnownToBeIndependent(unittest.TestCase):
+
+    def setUp(self):
+        self._saved = []
+        no_sleep(self._saved)
+
+    def tearDown(self):
+        RP.time.sleep = self._saved[0]
+
+    def test_the_window_semantics_are_not_identified(self):
+        self.assertEqual(RP.RATE_LIMIT_WINDOW_SEMANTICS, NI)
+        self.assertEqual(RP.SEQUENTIAL_RUNG_CARRYOVER_POSSIBLE, "YES")
+        self.assertEqual(RP.RUNG_RESULT_INDEPENDENT, NI)
+
+    def test_independence_is_never_established_even_with_a_cooldown(self):
+        rep = RP.pilot(tempfile.mkdtemp(), ["a"], FakeHttp([200] * 8),
+                       ladder=("0.25", "0.5"), requests=4)
+        self.assertEqual(rep["PILOT_RUNG_INDEPENDENCE"], "NOT_ESTABLISHED")
+        self.assertTrue(rep["COOLDOWN_BETWEEN_RUNGS"])
+
+    def test_no_cooldown_is_named_as_a_second_reason(self):
+        rep = RP.pilot(tempfile.mkdtemp(), ["a"], FakeHttp([200] * 8),
+                       ladder=("0.25", "0.5"), requests=4, cooldown=False)
+        self.assertEqual(rep["PILOT_RUNG_INDEPENDENCE"],
+                         "NOT_ESTABLISHED_NO_COOLDOWN_BETWEEN_RUNGS")
+
+    def test_the_selection_carries_the_carryover_warning(self):
+        rep = RP.pilot(tempfile.mkdtemp(), ["a"], FakeHttp([200] * 8),
+                       ladder=("0.25", "0.5"), requests=4)
+        self.assertEqual(rep["SEQUENTIAL_RUNG_CARRYOVER_POSSIBLE"], "YES")
+        self.assertIn("neither be excluded nor measured",
+                      rep["WHY_NOT_INDEPENDENT"])
+
+
+class TheCooldownNeverClaimsACleanStart(unittest.TestCase):
+
+    def test_a_valid_retry_after_is_route_a(self):
+        c = RP.rung_cooldown("12")
+        self.assertEqual(c["COOLDOWN_S"], 12.0)
+        self.assertEqual(c["COOLDOWN_BASIS"], "RETRY_AFTER_HONOURED_GLOBALLY")
+
+    def test_an_observed_reset_is_route_b(self):
+        c = RP.rung_cooldown(None, reset_timing=45)
+        self.assertEqual(c["COOLDOWN_BASIS"], "OBSERVED_RESET_TIMING")
+
+    def test_otherwise_route_c_waits_and_says_nothing_is_established(self):
+        c = RP.rung_cooldown(None)
+        self.assertEqual(c["COOLDOWN_S"], RP.FROZEN_COOLDOWN_S)
+        self.assertEqual(c["COOLDOWN_BASIS"], "FROZEN_CONSERVATIVE_COOLDOWN")
+        self.assertEqual(c["CLEAN_SERVER_RATE_LIMIT_STATE"], "NOT_ESTABLISHED")
+
+    def test_an_unparseable_retry_after_falls_through_to_route_c(self):
+        self.assertEqual(RP.rung_cooldown("soon")["COOLDOWN_BASIS"],
+                         "FROZEN_CONSERVATIVE_COOLDOWN")
+
+    def test_the_refusal_to_reverse_engineer_is_named(self):
+        self.assertTrue(RP.DO_NOT_REVERSE_ENGINEER_HEADERS_TO_CLAIM_A_CLEAN_START)
+
+
+class SustainedIsNotTheSameClaimAsUnrefused(unittest.TestCase):
+
+    def setUp(self):
+        self._saved = []
+        no_sleep(self._saved)
+
+    def tearDown(self):
+        RP.time.sleep = self._saved[0]
+
+    def test_a_short_clean_rung_passes_but_is_not_sustained(self):
+        r = RP.run_rate(FakeHttp([200] * 40), ["a"], "1.0", requests=40)
+        self.assertTrue(r["PASSES"])
+        self.assertFalse(r["SUSTAINED"])
+        self.assertEqual(r["RATE_CONFIDENCE"], "LIMITED")
+        self.assertIn("needs >=", r["WHY_LIMITED"])
+
+    def test_the_candidate_and_the_confirmation_are_separate_fields(self):
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
+                             "SUSTAINED": False}], "NOT_ESTABLISHED")
+        self.assertEqual(s["SUSTAINABLE_RATE_CANDIDATE"], "0.5")
+        self.assertEqual(s["SUSTAINABLE_RATE_CONFIRMED"], NI)
+        self.assertEqual(s["RATE_CONFIDENCE"], "LIMITED")
+
+    def test_an_unconfirmed_candidate_does_not_authorise_a_capture(self):
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
+                             "SUSTAINED": False}], "NOT_ESTABLISHED")
+        self.assertFalse(s["CAPTURE_MAY_PROCEED"])
+        self.assertIn("CANDIDATE is not a CONFIRMATION",
+                      s["WHY_CAPTURE_MAY_NOT_PROCEED"])
+
+    def test_sustained_alone_is_not_enough_while_rungs_are_dependent(self):
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
+                             "SUSTAINED": True}], "NOT_ESTABLISHED")
+        self.assertEqual(s["SUSTAINABLE_RATE_CONFIRMED"], NI)
+        self.assertFalse(s["CAPTURE_MAY_PROCEED"])
+
+    def test_both_together_confirm(self):
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
+                             "SUSTAINED": True}], "ESTABLISHED")
+        self.assertEqual(s["SUSTAINABLE_RATE_CONFIRMED"], "0.5")
+        self.assertEqual(s["RATE_CONFIDENCE"], "SUSTAINED")
+        self.assertTrue(s["CAPTURE_MAY_PROCEED"])
+
+    def test_the_per_rung_metrics_are_all_reported(self):
+        r = RP.run_rate(FakeHttp([200] * 4), ["a"], "1.0", requests=4)
+        for k in ("REQUESTS", "DURATION_S", "SUCCESSFUL_REQUESTS", "HTTP_429",
+                  "OTHER_FAILURES", "P50_RESPONSE_LATENCY",
+                  "P90_RESPONSE_LATENCY", "P99_RESPONSE_LATENCY",
+                  "VALID_RETRY_AFTER_COUNT", "TIME_TO_FIRST_429"):
+            self.assertIn(k, r, k)
+
+    def test_time_to_first_429_is_recorded_when_one_arrives(self):
+        r = RP.run_rate(FakeHttp([200, 200, 429, 200]), ["a"], "1.0",
+                        requests=4)
+        self.assertNotEqual(r["TIME_TO_FIRST_429"], NI)
+        self.assertEqual(r["HTTP_429"], 1)
+
+    def test_a_clean_rung_has_no_time_to_first_429(self):
+        r = RP.run_rate(FakeHttp([200] * 4), ["a"], "1.0", requests=4)
+        self.assertEqual(r["TIME_TO_FIRST_429"], NI)
+
+    def test_valid_retry_after_headers_are_counted_apart_from_junk(self):
+        http = FakeHttp([429, 429], headers={"Retry-After": "not-a-number"})
+        r = RP.run_rate(http, ["a"], "1.0", requests=2)
+        self.assertEqual(r["VALID_RETRY_AFTER_COUNT"], 0)
+
+
+class TheCaptureRateHasHeadroom(unittest.TestCase):
+
+    def test_the_recommendation_is_one_rung_below_the_candidate(self):
+        s = RP.select_rate([{"RATE_RPS": "0.25", "PASSES": True,
+                             "SUSTAINED": False},
+                            {"RATE_RPS": "0.5", "PASSES": True,
+                             "SUSTAINED": False},
+                            {"RATE_RPS": "1.0", "PASSES": False,
+                             "SUSTAINED": False}], "NOT_ESTABLISHED")
+        self.assertEqual(s["SUSTAINABLE_RATE_CANDIDATE"], "0.5")
+        self.assertEqual(s["RECOMMENDED_CAPTURE_RATE"], "0.25")
+        self.assertTrue(s["RECOMMENDED_RATE_HAS_HEADROOM"])
+
+    def test_a_candidate_on_the_slowest_rung_has_no_headroom_and_says_so(self):
+        s = RP.select_rate([{"RATE_RPS": "0.25", "PASSES": True,
+                             "SUSTAINED": False},
+                            {"RATE_RPS": "0.5", "PASSES": False,
+                             "SUSTAINED": False}], "NOT_ESTABLISHED")
+        self.assertEqual(s["RECOMMENDED_CAPTURE_RATE"], "0.25")
+        self.assertFalse(s["RECOMMENDED_RATE_HAS_HEADROOM"])
+        self.assertIn("slower ladder", s["HEADROOM_NOTE"])
+
+    def test_the_objective_is_recorded_as_data_not_throughput(self):
+        s = RP.select_rate([{"RATE_RPS": "0.5", "PASSES": True,
+                             "SUSTAINED": False}], "NOT_ESTABLISHED")
+        self.assertEqual(s["OBJECTIVE"],
+                         "BALANCED_COMPLETE_DATA_NOT_MAXIMUM_REQUEST_THROUGHPUT")
+        self.assertEqual(s["HEADROOM_RULE"],
+                         "ONE_LADDER_RUNG_BELOW_THE_FASTEST_PASSING_RATE")

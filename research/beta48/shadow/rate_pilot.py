@@ -76,6 +76,41 @@ REQUESTS_PER_RATE = 40
 ACCEPTABLE_429_SHARE = D("0.01")
 MARGIN_RULE = "PICK_THE_FASTEST_PASSING_RATE_ONE_STEP_BELOW_THE_FIRST_FAILURE"
 
+# ---------------------------------------------------------------------------
+# THE RUNGS ARE NOT KNOWN TO BE INDEPENDENT, AND THAT CHANGES WHAT A PASS MEANS
+# ---------------------------------------------------------------------------
+#
+# The ladder is tested sequentially against one gateway whose accounting window
+# is undocumented. If the limiter is a rolling window or a token bucket, a
+# later rung inherits whatever the earlier rungs left behind -- so a rung that
+# passed may have passed on credit, and a rung that failed may have failed on
+# debt. Neither reading is available to us.
+RATE_LIMIT_WINDOW_SEMANTICS = NOT_IDENTIFIED
+SEQUENTIAL_RUNG_CARRYOVER_POSSIBLE = "YES"
+RUNG_RESULT_INDEPENDENT = NOT_IDENTIFIED
+WHY_NOT_INDEPENDENT = (
+    "the venue documents no accounting window, so limiter state carried from "
+    "an earlier rung can neither be excluded nor measured")
+
+# The cooldown between rungs, in preference order. C never claims a clean
+# start -- it is a wait, and a wait is not evidence the server forgot.
+COOLDOWN_BASIS_RETRY_AFTER = "RETRY_AFTER_HONOURED_GLOBALLY"
+COOLDOWN_BASIS_OBSERVED_RESET = "OBSERVED_RESET_TIMING"
+COOLDOWN_BASIS_FROZEN = "FROZEN_CONSERVATIVE_COOLDOWN"
+FROZEN_COOLDOWN_S = 90.0
+CLEAN_SERVER_RATE_LIMIT_STATE_WHEN_FROZEN = "NOT_ESTABLISHED"
+DO_NOT_REVERSE_ENGINEER_HEADERS_TO_CLAIM_A_CLEAN_START = True
+
+# What it takes to call a rate SUSTAINED rather than merely un-refused. Zero
+# 429s over 40 requests in a couple of minutes is a small sample and a short
+# period, and it is not the same claim.
+MIN_REQUESTS_TO_CONFIRM = 300
+MIN_DURATION_S_TO_CONFIRM = 900.0
+
+# Headroom. The objective is balanced complete data, not throughput.
+HEADROOM_RULE = "ONE_LADDER_RUNG_BELOW_THE_FASTEST_PASSING_RATE"
+OBJECTIVE = "BALANCED_COMPLETE_DATA_NOT_MAXIMUM_REQUEST_THROUGHPUT"
+
 # A 429 stops everything for this long when the venue does not say otherwise.
 DEFAULT_BACKOFF_S = 30.0
 MAX_BACKOFF_S = 120.0
@@ -147,6 +182,47 @@ def probe(http, pacer, slug):
     }
 
 
+def _pct(vals, p):
+    v = sorted(vals)
+    if not v:
+        return NOT_IDENTIFIED
+    k = max(0, min(len(v) - 1, int(round((p / 100.0) * (len(v) - 1)))))
+    return v[k]
+
+
+def rung_cooldown(last_retry_after=None, reset_timing=None):
+    """How long to wait before the next rung, and on what basis.
+
+    A. a valid Retry-After is honoured globally
+    B. an OBSERVED reset timing, if one is ever reliably exposed
+    C. otherwise a frozen conservative wait -- and then
+       CLEAN_SERVER_RATE_LIMIT_STATE = NOT_ESTABLISHED, because waiting is not
+       the same as knowing the server forgot.
+
+    Route B is present and unused: no reset timing is exposed today, and
+    guessing one out of an undocumented header to claim a clean start is the
+    thing this function exists to refuse.
+    """
+    if last_retry_after is not None:
+        try:
+            return {"COOLDOWN_S": min(float(last_retry_after), MAX_BACKOFF_S),
+                    "COOLDOWN_BASIS": COOLDOWN_BASIS_RETRY_AFTER,
+                    "CLEAN_SERVER_RATE_LIMIT_STATE": "ASSERTED_BY_VENUE"}
+        except (TypeError, ValueError):
+            pass
+    if reset_timing is not None:
+        try:
+            return {"COOLDOWN_S": float(reset_timing),
+                    "COOLDOWN_BASIS": COOLDOWN_BASIS_OBSERVED_RESET,
+                    "CLEAN_SERVER_RATE_LIMIT_STATE": "OBSERVED"}
+        except (TypeError, ValueError):
+            pass
+    return {"COOLDOWN_S": FROZEN_COOLDOWN_S,
+            "COOLDOWN_BASIS": COOLDOWN_BASIS_FROZEN,
+            "CLEAN_SERVER_RATE_LIMIT_STATE":
+                CLEAN_SERVER_RATE_LIMIT_STATE_WHEN_FROZEN}
+
+
 def run_rate(http, slugs, rps, requests=REQUESTS_PER_RATE, rows=None):
     """Probe at ONE rate, rotating through the slugs. Returns the result row.
 
@@ -155,8 +231,10 @@ def run_rate(http, slugs, rps, requests=REQUESTS_PER_RATE, rows=None):
     happens to be last.
     """
     pacer = GlobalPacer(rps)
-    ok = n429 = other = 0
-    headers_seen, backoffs = {}, []
+    ok = n429 = other = valid_ra = 0
+    headers_seen, backoffs, lat = {}, [], []
+    first_429_at = NOT_IDENTIFIED
+    last_retry_after = None
     t0 = time.monotonic()
     for i in range(requests):
         r = probe(http, pacer, slugs[i % len(slugs)])
@@ -164,70 +242,165 @@ def run_rate(http, slugs, rps, requests=REQUESTS_PER_RATE, rows=None):
             rows.append(dict(r, RATE=str(rps)))
         for k, v in r["HEADERS"].items():
             headers_seen.setdefault(k, str(v))
+        lat.append(r["LATENCY_S"])
         if r["status"] == 200:
             ok += 1
         elif r["status"] == 429:
             n429 += 1
-            backoffs.append(pacer.back_off(r["HEADERS"].get("retry-after")))
+            if first_429_at == NOT_IDENTIFIED:
+                first_429_at = time.monotonic() - t0
+            ra = r["HEADERS"].get("retry-after")
+            if ra is not None:
+                try:
+                    float(ra)
+                    valid_ra += 1
+                    last_retry_after = ra
+                except (TypeError, ValueError):
+                    pass
+            backoffs.append(pacer.back_off(ra))
         else:
             other += 1
     share = (D(n429) / D(requests)) if requests else NOT_IDENTIFIED
+    dur = time.monotonic() - t0
+    passes = share != NOT_IDENTIFIED and share <= ACCEPTABLE_429_SHARE
+    sustained = (passes and requests >= MIN_REQUESTS_TO_CONFIRM
+                 and dur >= MIN_DURATION_S_TO_CONFIRM)
     return {
         "RATE_RPS": str(rps),
         "REQUESTS": requests,
+        "DURATION_S": dur,
         "SUCCESSFUL_REQUESTS": ok,
+        "HTTP_429": n429,
         "HTTP_429_COUNT": n429,
         "OTHER_FAILURES": other,
         "HTTP_429_SHARE": share,
-        "WALL_S": time.monotonic() - t0,
+        "TIME_TO_FIRST_429": first_429_at,
+        "VALID_RETRY_AFTER_COUNT": valid_ra,
+        "P50_RESPONSE_LATENCY": _pct(lat, 50),
+        "P90_RESPONSE_LATENCY": _pct(lat, 90),
+        "P99_RESPONSE_LATENCY": _pct(lat, 99),
         "GLOBAL_BACKOFFS": len(backoffs),
         "BACKOFF_SOURCES": sorted({b["BACKOFF_SOURCE"] for b in backoffs}),
         "RATE_LIMIT_HEADERS_SEEN": headers_seen,
-        "PASSES": share != NOT_IDENTIFIED and share <= ACCEPTABLE_429_SHARE,
+        "LAST_VALID_RETRY_AFTER": last_retry_after,
+
+        # A rung that was not refused is not the same claim as a rung that was
+        # sustained. Both are reported; only the second confirms anything.
+        "PASSES": passes,
+        "SUSTAINED": sustained,
+        "SAMPLE_SUFFICIENT_TO_CONFIRM": (requests >= MIN_REQUESTS_TO_CONFIRM
+                                         and dur >= MIN_DURATION_S_TO_CONFIRM),
+        "RATE_CONFIDENCE": ("SUSTAINED" if sustained else "LIMITED"),
+        "WHY_LIMITED": (None if sustained else
+                        "needs >= %d requests over >= %.0fs at this rate; had "
+                        "%d over %.0fs" % (MIN_REQUESTS_TO_CONFIRM,
+                                           MIN_DURATION_S_TO_CONFIRM,
+                                           requests, dur)),
     }
 
 
-def select_rate(ladder_results):
-    """The fastest rate that PASSED, and no faster -- with the reason.
+def select_rate(ladder_results, rung_independence=NOT_IDENTIFIED):
+    """A CANDIDATE, a CONFIRMATION status, and a rate with HEADROOM under it.
 
-    Ordered ascending, the first failure ends it: a faster rate that happened
-    to pass after a slower one failed would be noise, and taking it would be
-    choosing the rate that flattered the result.
+    Three separate things, because they answer three separate questions and
+    running them together is how a 40-request rung becomes "the sustainable
+    rate" in a later sentence:
+
+      SUSTAINABLE_RATE_CANDIDATE   the fastest rung that was not refused,
+                                   taken BEFORE the first failure -- a faster
+                                   rung passing after a slower one failed is
+                                   noise and is refused.
+      SUSTAINABLE_RATE_CONFIRMED   the same rung, only if its sample was large
+                                   enough and long enough to show SUSTAINED
+                                   operation. Usually NOT_IDENTIFIED.
+      RECOMMENDED_CAPTURE_RATE     one ladder rung BELOW the candidate. We are
+                                   after balanced complete data, not the
+                                   fastest rate that survived a short probe.
     """
-    chosen, reason = None, ""
-    for row in ladder_results:
+    chosen, chosen_row, reason, idx = None, None, "", None
+    for i, row in enumerate(ladder_results):
         if row["PASSES"]:
-            chosen = row["RATE_RPS"]
+            chosen, chosen_row, idx = row["RATE_RPS"], row, i
         else:
             reason = ("stopped at the first rate whose 429 share exceeded "
                       "%s (%s rps)" % (ACCEPTABLE_429_SHARE, row["RATE_RPS"]))
             break
+    base = {
+        "RATE_LIMIT_WINDOW_SEMANTICS": RATE_LIMIT_WINDOW_SEMANTICS,
+        "SEQUENTIAL_RUNG_CARRYOVER_POSSIBLE": SEQUENTIAL_RUNG_CARRYOVER_POSSIBLE,
+        "RUNG_RESULT_INDEPENDENT": RUNG_RESULT_INDEPENDENT,
+        "PILOT_RUNG_INDEPENDENCE": rung_independence,
+        "WHY_NOT_INDEPENDENT": WHY_NOT_INDEPENDENT,
+        "OBJECTIVE": OBJECTIVE,
+        "HEADROOM_RULE": HEADROOM_RULE,
+        "MARGIN_RULE": MARGIN_RULE,
+        "NOT_CHOSEN_FOR_BEING_FASTEST": True,
+    }
     if chosen is None:
-        return {
+        base.update({
+            "SUSTAINABLE_RATE_CANDIDATE": NOT_IDENTIFIED,
+            "SUSTAINABLE_RATE_CONFIRMED": NOT_IDENTIFIED,
+            "RECOMMENDED_CAPTURE_RATE": NOT_IDENTIFIED,
             "SUSTAINABLE_RATE_SELECTED": NOT_IDENTIFIED,
+            "RATE_CONFIDENCE": "NONE",
             "SELECTION_REASON": ("no tested rate held the 429 share at or "
                                  "under %s; the ladder needs a slower rung"
                                  % ACCEPTABLE_429_SHARE),
             "CAPTURE_MAY_PROCEED": False,
-        }
-    return {
+        })
+        return base
+
+    confirmed = chosen_row.get("SUSTAINED") and rung_independence == "ESTABLISHED"
+    below = (ladder_results[idx - 1]["RATE_RPS"] if idx and idx > 0 else None)
+    base.update({
+        "SUSTAINABLE_RATE_CANDIDATE": chosen,
+        "SUSTAINABLE_RATE_CONFIRMED": (chosen if confirmed else NOT_IDENTIFIED),
+        "RATE_CONFIDENCE": ("SUSTAINED" if confirmed else "LIMITED"),
+        "WHY_NOT_CONFIRMED": (None if confirmed else
+                              "the rung's sample was too small or too short to "
+                              "show sustained operation, and/or the rungs are "
+                              "not known to be independent"),
+        "RECOMMENDED_CAPTURE_RATE": (below or chosen),
+        "RECOMMENDED_RATE_HAS_HEADROOM": below is not None,
+        "HEADROOM_NOTE": (None if below is not None else
+                          "the candidate is the ladder's slowest rung, so "
+                          "there is no rung below it to drop to -- headroom "
+                          "would need a slower ladder"),
+        # The old field name, kept pointing at the CANDIDATE so nothing silently
+        # reads a confirmation that was never made.
         "SUSTAINABLE_RATE_SELECTED": chosen,
         "SELECTION_REASON": (reason or
                              "every tested rate passed; the ladder's top rung "
-                             "is the selection and a faster one is UNTESTED"),
-        "MARGIN_RULE": MARGIN_RULE,
-        "NOT_CHOSEN_FOR_BEING_FASTEST": True,
-        "CAPTURE_MAY_PROCEED": True,
-    }
+                             "is the candidate and a faster one is UNTESTED"),
+        "CAPTURE_MAY_PROCEED": bool(confirmed),
+        "WHY_CAPTURE_MAY_NOT_PROCEED": (
+            None if confirmed else
+            "a CANDIDATE is not a CONFIRMATION: run a short confirming pilot "
+            "at the recommended rate, with a cooldown before it, and report "
+            "before dispatching a capture"),
+    })
+    return base
 
 
 def pilot(outdir, slugs, http, ladder=DEFAULT_RATE_LADDER,
-          requests=REQUESTS_PER_RATE):
-    """The whole pilot: ascending ladder, per-rate results, one selection."""
+          requests=REQUESTS_PER_RATE, cooldown=True):
+    """The whole pilot: ascending ladder, a COOLDOWN between rungs, a selection.
+
+    The cooldown is what makes a rung even arguably a standalone measurement.
+    It does not make the rungs independent -- nothing available to us does --
+    but without it a later rung is certainly reading the earlier rung's
+    leftovers, and PILOT_RUNG_INDEPENDENCE would be NOT_ESTABLISHED for a
+    second, avoidable reason.
+    """
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
-    rows, ladder_results = [], []
-    for rps in ladder:
+    rows, ladder_results, cooldowns = [], [], []
+    for i, rps in enumerate(ladder):
+        if i and cooldown:
+            prev = ladder_results[-1]
+            cd = rung_cooldown(prev.get("LAST_VALID_RETRY_AFTER"))
+            cooldowns.append(dict(cd, BEFORE_RATE=str(rps)))
+            time.sleep(cd["COOLDOWN_S"])
         ladder_results.append(run_rate(http, slugs, rps, requests, rows))
     with (out / "pilot_rows.jsonl").open("w") as fh:
         for r in rows:
@@ -239,6 +412,11 @@ def pilot(outdir, slugs, http, ladder=DEFAULT_RATE_LADDER,
     headers = {}
     for r in ladder_results:
         headers.update(r["RATE_LIMIT_HEADERS_SEEN"])
+
+    # Independence is NEVER "ESTABLISHED" here. A cooldown is a wait, not a
+    # proof that the limiter reset, and the window semantics are undocumented.
+    independence = ("NOT_ESTABLISHED" if cooldown
+                    else "NOT_ESTABLISHED_NO_COOLDOWN_BETWEEN_RUNGS")
 
     report = {
         "PILOT_REQUESTS": total,
@@ -258,6 +436,17 @@ def pilot(outdir, slugs, http, ladder=DEFAULT_RATE_LADDER,
             HEADERS_ARE_REPORTED_NOT_INTERPRETED,
 
         "ACCEPTABLE_429_SHARE": ACCEPTABLE_429_SHARE,
+
+        # Between-rung separation, and what it does and does not buy.
+        "COOLDOWN_BETWEEN_RUNGS": bool(cooldown),
+        "COOLDOWNS": cooldowns,
+        "CLEAN_SERVER_RATE_LIMIT_STATE": (
+            "NOT_ESTABLISHED" if not cooldowns else
+            sorted({c["CLEAN_SERVER_RATE_LIMIT_STATE"] for c in cooldowns})),
+        "PILOT_RUNG_INDEPENDENCE": independence,
+        "DO_NOT_REVERSE_ENGINEER_HEADERS_TO_CLAIM_A_CLEAN_START":
+            DO_NOT_REVERSE_ENGINEER_HEADERS_TO_CLAIM_A_CLEAN_START,
+
         "SCHEDULER": "SINGLE_GLOBAL_PACER_NO_CONCURRENCY",
         "BACKOFF": "GLOBAL_ON_429_HONOURING_RETRY_AFTER_WHEN_PRESENT",
         "PER_MARKET_RETRY_LOOP": "NONE_BY_CONSTRUCTION",
@@ -266,7 +455,7 @@ def pilot(outdir, slugs, http, ladder=DEFAULT_RATE_LADDER,
         "CREDENTIALS": CREDENTIAL_PATH,
         "mirror_live": mirror_live,
     }
-    report.update(select_rate(ladder_results))
+    report.update(select_rate(ladder_results, independence))
     with (out / "pilot_report.json").open("w") as fh:
         json.dump(report, fh, indent=1, sort_keys=True, default=str)
     return report
