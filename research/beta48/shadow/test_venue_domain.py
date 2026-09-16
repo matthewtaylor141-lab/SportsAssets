@@ -247,7 +247,6 @@ class ARunningWorkflowIsNotProvenVenueContact(unittest.TestCase):
 
     WS, WE = "2026-09-16T18:00:00Z", "2026-09-16T18:20:00Z"
     KNOWN = ["run85-phase2-capture"]
-    LB = 340 * 60
 
     def _job(self, start, end, created="2026-09-16T10:00:00Z", rid=1):
         return {"name": "run85-phase2-capture", "id": rid, "status": "completed",
@@ -257,7 +256,6 @@ class ARunningWorkflowIsNotProvenVenueContact(unittest.TestCase):
     def _audit(self, runs, **kw):
         kw.setdefault("more_pages", {"*": False})
         kw.setdefault("pages_fetched", {"*": 1})
-        kw.setdefault("lookback_s", self.LB)
         return VD.overlap_audit(self.WS, self.WE, runs, self.KNOWN,
                                 self_run_id="9", **kw)
 
@@ -329,15 +327,138 @@ class ARunningWorkflowIsNotProvenVenueContact(unittest.TestCase):
         self.assertEqual(len(set(isos)), 4)
 
 
-class CoverageIsPerWorkflowAndPagedToIt(unittest.TestCase):
-    """One collector's history reaching back says nothing about another's."""
+class AJobTimeoutBoundsExecutionNotQueueAge(unittest.TestCase):
+    """The correction that cancelled the created-at lookback.
+
+        CREATED -> QUEUED (unbounded) -> STARTS -> runs <= timeout-minutes
+
+    The timeout bounds only the last leg, so a run created fifteen hours before
+    the window can still begin EXECUTING inside it. Overlap is therefore judged
+    on the job execution interval, and negative coverage has no finite
+    created-at shortcut.
+    """
+
+    WS, WE = "2026-09-16T18:00:00Z", "2026-09-16T18:20:00Z"
+    KNOWN = ["run85-phase2-capture"]
+    # 340 minutes before the window start is 12:20. The run below is created
+    # at 03:00 -- nine hours older than any such cutoff.
+    LONG_QUEUED = {"name": "run85-phase2-capture", "id": 42,
+                   "status": "completed", "conclusion": "success",
+                   "created_at": "2026-09-16T03:00:00Z",
+                   "run_started_at": "2026-09-16T18:05:00Z",
+                   "updated_at": "2026-09-16T18:12:00Z"}
+
+    def _audit(self, runs, **kw):
+        kw.setdefault("more_pages", {"*": False})
+        return VD.overlap_audit(self.WS, self.WE, runs, self.KNOWN,
+                                self_run_id="9", **kw)
+
+    def test_a_long_queued_run_executing_inside_the_window_is_detected(self):
+        a = self._audit([self.LONG_QUEUED])
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "POSSIBLE")
+        self.assertEqual(a["STAGE_1_JOB_INTERVAL_CANDIDATES"], 1)
+        self.assertEqual(a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0][
+            "JOB_EXECUTION_INTERVAL"][0], "2026-09-16T18:05:00+00:00")
+
+    def test_a_created_at_cutoff_would_have_missed_it(self):
+        """The rule the previous revision used, run against the same row. If
+        this ever passes as a detection rule, the audit has regressed."""
+        from datetime import datetime, timedelta
+        ws = datetime.fromisoformat(self.WS.replace("Z", "+00:00"))
+        cutoff = ws - timedelta(seconds=340 * 60)
+        created = datetime.fromisoformat(
+            self.LONG_QUEUED["created_at"].replace("Z", "+00:00"))
+        self.assertLess(created, cutoff)          # excluded by created-at
+        self.assertEqual(                          # detected anyway
+            self._audit([self.LONG_QUEUED])["DIRECT_OVERLAP_COUNT"], 1)
+
+    def test_the_overlap_interval_is_named_and_is_not_creation(self):
+        a = self._audit([self.LONG_QUEUED])
+        self.assertEqual(a["OVERLAP_INTERVAL"], "ACTUAL_JOB_EXECUTION_INTERVAL")
+        self.assertEqual(a["NOT_THE_OVERLAP_INTERVAL"], "RUN_CREATION_INTERVAL")
+        self.assertEqual(VD.TIMEOUT_BOUNDS, "EXECUTION_NOT_QUEUE_AGE")
+
+    def test_a_run_created_inside_but_executing_after_the_window_is_clear(self):
+        late = dict(self.LONG_QUEUED, id=43,
+                    created_at="2026-09-16T18:05:00Z",
+                    run_started_at="2026-09-16T19:00:00Z",
+                    updated_at="2026-09-16T19:10:00Z")
+        a = self._audit([late])
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "NO")
+        self.assertEqual(a["STAGE_1_JOB_INTERVAL_CANDIDATES"], 0)
+
+    def test_a_missing_execution_start_widens_rather_than_narrows(self):
+        """No run_started_at -> fall back to creation, which can only
+        over-report. The substitution is labelled, never silent."""
+        r = dict(self.LONG_QUEUED, id=44, run_started_at=None,
+                 created_at="2026-09-16T18:10:00Z")
+        a = self._audit([r])
+        row = a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0]
+        self.assertEqual(row["JOB_INTERVAL_SOURCE"],
+                         "RUN_CREATION_TIME_AS_START_PROXY_WIDER_NOT_NARROWER")
+
+    def test_the_timeout_helper_disclaims_being_a_coverage_proof(self):
+        self.assertTrue(VD.MAX_JOB_TIMEOUT_IS_NOT_A_COVERAGE_PROOF)
+        self.assertIn("not a proof about execution",
+                      VD.WHY_CREATED_AT_LOOKBACK_IS_REFUSED)
+
+
+class TheAuditIsTwoStage(unittest.TestCase):
+    """Stage 1 on metadata finds candidates; stage 2 seeks request times for
+    those alone. A run that never executed during the window cannot have made a
+    request during it, so its artifacts are never fetched."""
+
+    WS, WE = "2026-09-16T18:00:00Z", "2026-09-16T18:20:00Z"
+    KNOWN = ["run85-phase2-capture"]
+
+    def _job(self, rid, start, end):
+        return {"name": "run85-phase2-capture", "id": rid, "status": "completed",
+                "conclusion": "success", "created_at": "2026-09-16T17:00:00Z",
+                "run_started_at": start, "updated_at": end}
+
+    def _audit(self, runs, **kw):
+        kw.setdefault("more_pages", {"*": False})
+        return VD.overlap_audit(self.WS, self.WE, runs, self.KNOWN,
+                                self_run_id="9", **kw)
+
+    def test_only_overlapping_jobs_become_stage_two_candidates(self):
+        a = self._audit([
+            self._job(1, "2026-09-16T18:05:00Z", "2026-09-16T18:10:00Z"),
+            self._job(2, "2026-09-16T10:00:00Z", "2026-09-16T11:00:00Z"),
+        ])
+        self.assertEqual(a["STAGE_1_JOB_INTERVAL_CANDIDATES"], 1)
+        self.assertEqual(a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0]["ID"],
+                         "1")
+        self.assertEqual(list(VD.AUDIT_STAGES), a["AUDIT_STAGES"])
+
+    def test_stage_two_evidence_is_counted_and_named(self):
+        a = self._audit(
+            [self._job(1, "2026-09-16T17:50:00Z", "2026-09-16T18:30:00Z")],
+            venue_windows={"1": ("2026-09-16T18:05:00Z",
+                                 "2026-09-16T18:10:00Z")})
+        self.assertEqual(a["STAGE_2_CANDIDATES_WITH_SEALED_REQUEST_TIMES"], 1)
+        self.assertEqual(a["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"][0][
+            "REQUEST_TIME_EVIDENCE"], "SEALED")
+
+    def test_a_candidate_cleared_by_its_own_request_times_is_recorded(self):
+        a = self._audit(
+            [self._job(1, "2026-09-16T17:50:00Z", "2026-09-16T18:30:00Z")],
+            venue_windows={"1": ("2026-09-16T17:51:00Z",
+                                 "2026-09-16T17:55:00Z")})
+        self.assertEqual(a["DIRECT_OVERLAP_COUNT"], 0)
+        self.assertEqual(len(a["STAGE_2_CANDIDATES_CLEARED_BY_REQUEST_TIMES"]),
+                         1)
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "NO")
+
+
+class CoverageIsPerWorkflowAndProvedOnlyByExhaustion(unittest.TestCase):
+    """One collector's history reaching back says nothing about another's, and
+    nothing short of an exhausted history proves the negative."""
 
     WS, WE = "2026-09-16T18:00:00Z", "2026-09-16T18:20:00Z"
     KNOWN = ["run85-phase2-capture", "beta48-forward-capture"]
-    LB = 340 * 60
 
     def _audit(self, runs, **kw):
-        kw.setdefault("lookback_s", self.LB)
         return VD.overlap_audit(self.WS, self.WE, runs, self.KNOWN,
                                 self_run_id="9", **kw)
 
@@ -351,47 +472,55 @@ class CoverageIsPerWorkflowAndPagedToIt(unittest.TestCase):
                                 for c in a["DIRECT_RUN_HISTORY_COVERAGE"]),
                          sorted(self.KNOWN))
         for c in a["DIRECT_RUN_HISTORY_COVERAGE"]:
+            for k in ("WORKFLOW_NAME", "HISTORY_PAGES_FETCHED",
+                      "EARLIEST_RUN_TIME_FETCHED", "LATEST_RUN_TIME_FETCHED",
+                      "EARLIEST_JOB_START_FETCHED", "MORE_PAGES_AVAILABLE",
+                      "COVERS_EVIDENCE_WINDOW"):
+                self.assertIn(k, c)
             self.assertEqual(c["HISTORY_PAGES_FETCHED"], 2)
-            self.assertEqual(c["MORE_PAGES_AVAILABLE"], "YES")
-            self.assertEqual(c["COVERS_EVIDENCE_WINDOW"], "NO")
+            self.assertEqual(c["COVERS_EVIDENCE_WINDOW"], "NOT_ESTABLISHED")
 
-    def test_history_reaching_past_the_anchor_covers_that_workflow_only(self):
-        deep = {"name": "run85-phase2-capture", "id": 3, "status": "completed",
-                "conclusion": "success", "created_at": "2026-09-16T09:00:00Z",
-                "run_started_at": "2026-09-16T09:00:00Z",
-                "updated_at": "2026-09-16T09:30:00Z"}
-        a = self._audit([deep], more_pages={"*": True})
+    def test_coverage_is_exhausted_per_workflow_not_globally(self):
+        a = self._audit([], more_pages={"run85-phase2-capture": False,
+                                        "beta48-forward-capture": True})
         self.assertEqual(self._row(a, "run85-phase2-capture")[
             "COVERS_EVIDENCE_WINDOW"], "YES")
         self.assertEqual(self._row(a, "beta48-forward-capture")[
-            "COVERS_EVIDENCE_WINDOW"], "NO")
+            "COVERS_EVIDENCE_WINDOW"], "NOT_ESTABLISHED")
+        self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
+        self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], NI)
+
+    def test_deep_history_short_of_exhaustion_does_not_cover(self):
+        """The created-at shortcut is gone: an old run in hand proves nothing
+        about an older one still off the page."""
+        deep = {"name": "run85-phase2-capture", "id": 3, "status": "completed",
+                "conclusion": "success", "created_at": "2026-09-15T01:00:00Z",
+                "run_started_at": "2026-09-15T01:00:00Z",
+                "updated_at": "2026-09-15T01:30:00Z"}
+        a = self._audit([deep], more_pages={"*": True})
+        self.assertEqual(self._row(a, "run85-phase2-capture")[
+            "COVERS_EVIDENCE_WINDOW"], "NOT_ESTABLISHED")
         self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
 
-    def test_an_exhausted_api_covers_every_workflow(self):
-        """No more pages means nothing older exists -- including for a
-        workflow with no runs at all."""
+    def test_an_exhausted_api_covers_that_workflow(self):
         a = self._audit([], more_pages={"*": False})
         self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "YES")
         for c in a["DIRECT_RUN_HISTORY_COVERAGE"]:
             self.assertEqual(c["COVERS_EVIDENCE_WINDOW"], "YES")
+            self.assertEqual(c["COVERAGE_ROUTE"], "API_HISTORY_EXHAUSTED")
 
     def test_unknown_paging_is_not_assumed_complete(self):
         a = self._audit([])
         self.assertEqual(self._row(a, "run85-phase2-capture")[
-            "MORE_PAGES_AVAILABLE"], NI)
+            "HISTORY_EXHAUSTED"], NI)
         self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
         self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], NI)
 
-    def test_the_anchor_is_a_full_job_timeout_before_the_window(self):
-        a = self._audit([], more_pages={"*": False})
-        ws = datetime.fromisoformat(a["EVIDENCE_WINDOW"][0])
-        anchor = datetime.fromisoformat(a["COVERAGE_ANCHOR"])
-        self.assertEqual((ws - anchor).total_seconds(), self.LB)
-
-    def test_the_lookback_is_read_from_the_workflows_not_guessed(self):
-        """A run cannot outlive its own timeout-minutes, so the longest one is
-        the lookback -- and run85 is created five hours before it overlaps."""
-        self.assertGreaterEqual(VD.max_job_timeout_s(ROOT), 300 * 60)
+    def test_route_b_is_named_and_refused_not_approximated(self):
+        a = self._audit([], more_pages={"*": True})
+        self.assertEqual(a["COVERAGE_REQUIRES"], "API_HISTORY_EXHAUSTED")
+        self.assertEqual(a["COVERAGE_ROUTE_B_STATUS"],
+                         "NOT_ESTABLISHED_QUEUE_DELAY_IS_UNBOUNDED")
 
     def test_a_detection_outranks_incomplete_coverage(self):
         hit = {"name": "run85-phase2-capture", "id": 4, "status": "completed",
@@ -402,3 +531,29 @@ class CoverageIsPerWorkflowAndPagedToIt(unittest.TestCase):
         self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
         self.assertEqual(a["DIRECT_CONFLICT_STARTED_DURING_RUN"], "POSSIBLE")
         self.assertTrue(a["COVERAGE_GATES_ONLY_THE_NEGATIVE"])
+
+
+class TheCleanNegativeStandard(unittest.TestCase):
+    """ISOLATION_THROUGHOUT_RUN = YES needs all three: no confirmed overlap, no
+    possible overlap, and complete coverage. Any shortfall is NOT_IDENTIFIED
+    and the confirmation may not certify the rate."""
+
+    WS, WE = "2026-09-16T18:00:00Z", "2026-09-16T18:20:00Z"
+    KNOWN = ["run85-phase2-capture"]
+    K = "DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"
+
+    def _audit(self, runs, **kw):
+        return VD.overlap_audit(self.WS, self.WE, runs, self.KNOWN,
+                                self_run_id="9", **kw)
+
+    def test_all_three_conditions_give_yes(self):
+        a = self._audit([], more_pages={"*": False})
+        self.assertEqual(a["CONFIRMED_DIRECT_REQUEST_OVERLAP"], "NO")
+        self.assertEqual(a["POSSIBLE_DIRECT_WORKFLOW_OVERLAP"], "NO")
+        self.assertEqual(a["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "YES")
+        self.assertEqual(a[self.K], "YES")
+
+    def test_incomplete_coverage_alone_withholds_the_yes(self):
+        a = self._audit([], more_pages={"*": True})
+        self.assertEqual(a["POSSIBLE_DIRECT_WORKFLOW_OVERLAP"], "NO")
+        self.assertEqual(a[self.K], NI)

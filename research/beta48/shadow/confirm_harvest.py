@@ -526,12 +526,23 @@ def harvest(outdir, rps=None):
         raw = json.loads(hist_path.read_text())
         if isinstance(raw, dict):
             hist = raw.get("workflow_runs", [])
-            # What the run recorded about its own paging. Absent -> unknown,
+            # What the run recorded about its own paging, PER WORKFLOW -- each
+            # collector's history is exhausted separately. Absent -> unknown,
             # never assumed complete.
-            if "MORE_PAGES_AVAILABLE" in raw:
-                more_pages["*"] = bool(raw["MORE_PAGES_AVAILABLE"])
-            if "HISTORY_PAGES_FETCHED" in raw:
-                pages_fetched["*"] = raw["HISTORY_PAGES_FETCHED"]
+            mp, pf = raw.get("MORE_PAGES_AVAILABLE"), raw.get(
+                "HISTORY_PAGES_FETCHED")
+            # A dict is the per-workflow record. An older artifact wrote one
+            # figure for a single repository-wide walk; it is read under "*"
+            # rather than discarded, and it still has to say EXHAUSTED to
+            # establish coverage.
+            if isinstance(mp, dict):
+                more_pages.update({k: bool(v) for k, v in mp.items()})
+            elif mp is not None:
+                more_pages["*"] = bool(mp)
+            if isinstance(pf, dict):
+                pages_fetched.update(pf)
+            elif pf is not None:
+                pages_fetched["*"] = pf
             # LEVEL A is only available for other runs that SEALED their own
             # first/last venue GET. Nothing synthesises these; a run that did
             # not record them stays Level B.
@@ -546,8 +557,7 @@ def harvest(outdir, rps=None):
                           report.get("LAST_VENUE_GET_TIME"),
                           hist, known, self_run_id=sealed_prov.get("RUN_ID"),
                           venue_windows=venue_windows, more_pages=more_pages,
-                          pages_fetched=pages_fetched,
-                          lookback_s=VD.max_job_timeout_s(root))
+                          pages_fetched=pages_fetched)
     report.update(ov)
 
     snap = out / "isolation_at_end.json"
@@ -616,11 +626,15 @@ def render(r):
     # Coverage, per workflow: one collector's history reaching back says
     # nothing about another's.
     for c in r.get("DIRECT_RUN_HISTORY_COVERAGE", []):
-        L.append("    %-34s pages %-4s earliest %-26s more %-14s covers %s"
+        L.append("    %-30s pages %-4s runs %-5s earliest_job %-26s "
+                 "exhausted %-15s covers %s"
                  % (c["WORKFLOW_NAME"], c["HISTORY_PAGES_FETCHED"],
-                    c["EARLIEST_RUN_TIME_FETCHED"], c["MORE_PAGES_AVAILABLE"],
-                    c["COVERS_EVIDENCE_WINDOW"]))
-    for k in ("DIRECT_RUN_HISTORY_COVERAGE_COMPLETE", "COVERAGE_ANCHOR"):
+                    c["RUNS_FETCHED"], c["EARLIEST_JOB_START_FETCHED"],
+                    c["HISTORY_EXHAUSTED"], c["COVERS_EVIDENCE_WINDOW"]))
+    for k in ("DIRECT_RUN_HISTORY_COVERAGE_COMPLETE", "COVERAGE_REQUIRES",
+              "COVERAGE_ROUTE_B_STATUS", "OVERLAP_INTERVAL",
+              "STAGE_1_JOB_INTERVAL_CANDIDATES",
+              "STAGE_2_CANDIDATES_WITH_SEALED_REQUEST_TIMES"):
         L.append("%-38s = %s" % (k, r.get(k)))
     if r.get("FAIL_REASON"):
         L.append("")

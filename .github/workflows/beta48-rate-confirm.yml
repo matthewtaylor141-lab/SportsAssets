@@ -188,89 +188,127 @@ jobs:
             --mode during \
             --out "evidence/rateconfirm_$SEG/isolation_at_end.json" || true
           # SEAL THE RUN HISTORY. The verdict on isolation-throughout comes
-          # from INTERVAL OVERLAP against the evidence window, not from this
-          # end snapshot -- a collector that started and finished inside the
-          # window is invisible here.
+          # from EXECUTION-INTERVAL OVERLAP against the evidence window, not
+          # from this end snapshot -- a collector that started and finished
+          # inside the window is invisible here.
           #
-          # TWO PAGES WAS NOT A COVERAGE GUARANTEE. A busy repository can fill
-          # 200 rows in an hour, leaving an older overlapping run just off the
-          # end of the page -- and the run we most need to see (a 5-hour
-          # capture created long before the window) is exactly the one that
-          # sits furthest back. So the fetch PAGES UNTIL one of:
+          # WHY THIS PAGES PER WORKFLOW, AND TO EXHAUSTION.
           #
-          #   A  the earliest run fetched is older than the window start minus
-          #      a full job timeout (a run cannot outlive its own timeout, so
-          #      nothing older could still have been running), or
-          #   B  the API returns a short page -- there are no more runs.
+          # The previous revision paged the whole repository until the earliest
+          # run fetched was older than the window start minus the longest job
+          # timeout. That was wrong. A job timeout bounds how long a run may
+          # EXECUTE, not how long it may sit QUEUED first, and queue delay has
+          # no bound we can prove -- so a run created long before any finite
+          # cutoff can still start executing inside the window. There is no
+          # sound created-at shortcut, and inventing one would dress a guess as
+          # a proof.
           #
-          # Whichever ends it is RECORDED. Harvest refuses to conclude "no
-          # overlap" from history that does not reach back far enough, per
-          # workflow, and a page cap here becomes a NO on coverage rather than
-          # a silent one.
+          # What IS provable is exhaustion, and it is cheap per workflow: each
+          # known direct collector's own run list is walked until the API has
+          # no more runs to give (short page, or total_count reached). A
+          # workflow that hits the page cap without exhausting is reported
+          # NOT_ESTABLISHED, never covered.
           python - <<'PYEOF' || true
           import json, os, pathlib, subprocess, sys
           sys.path.insert(0, ".")
           import venue_domain as VD
 
-          API = "%s/repos/%s/actions/runs" % (os.environ["API_URL"],
-                                              os.environ["REPO"])
+          API = "%s/repos/%s/actions" % (os.environ["API_URL"],
+                                         os.environ["REPO"])
           TOK = os.environ["GH_TOKEN"]
-          lookback = VD.max_job_timeout_s("../../..")
-
-          # The window start is the run's FIRST VENUE GET, not the dispatch.
           seg = os.environ["SEG"]
           d = pathlib.Path("evidence/rateconfirm_%s" % seg)
+
+          def get(url):
+              raw = subprocess.run(
+                  ["curl", "-sS", "-H", "Authorization: Bearer %s" % TOK,
+                   "-H", "Accept: application/vnd.github+json", url],
+                  capture_output=True, text=True).stdout
+              try:
+                  return json.loads(raw)
+              except Exception:
+                  return None
+
+          known = sorted(VD.venue_touching_workflows("../../.."))
+          KEEP = ("id", "name", "status", "conclusion", "created_at",
+                  "run_started_at", "updated_at")
+          PAGE_CAP = 20                     # 2,000 runs per workflow; a bound
+
+          # ---- STAGE 1: run/job metadata, per workflow, to exhaustion ----
+          runs, pages, more = [], {}, {}
+          for wf in known:
+              got_all, page, exhausted = [], 1, None
+              while page <= PAGE_CAP:
+                  body = get("%s/workflows/%s.yml/runs?per_page=100&page=%d"
+                             % (API, wf, page))
+                  if body is None or "workflow_runs" not in body:
+                      break                 # unreadable -> coverage unknown
+                  batch = body["workflow_runs"]
+                  got_all += batch
+                  total = body.get("total_count")
+                  page += 1
+                  if len(batch) < 100 or (isinstance(total, int)
+                                          and len(got_all) >= total):
+                      exhausted = True
+                      break
+              else:
+                  exhausted = False         # hit the cap with runs still there
+              pages[wf] = page - 1
+              if exhausted is not None:
+                  more[wf] = not exhausted
+              for r in got_all:
+                  r["name"] = r.get("name") or wf
+                  runs.append({k: r.get(k) for k in KEEP})
+
+          # ---- STAGE 2: request times, for stage-1 CANDIDATES ONLY ----
+          # A run whose execution interval never overlapped ours cannot have
+          # made a request inside our window, so there is nothing to fetch for
+          # it. For the few that did overlap, look for a sealed evidence branch
+          # carrying that run's OWN first/last venue GET. Absent -> level B.
+          # Nothing here invents a timestamp.
           start = None
           try:
               start = json.loads((d / "confirm_report.json").read_text()).get(
                   "FIRST_VENUE_GET_TIME")
           except Exception:
               pass
-          from datetime import datetime, timedelta, timezone
-          anchor = None
+          windows = {}
           if start:
-              anchor = (datetime.fromisoformat(start.replace("Z", "+00:00"))
-                        - timedelta(seconds=lookback))
-
-          PAGE_CAP = 30                      # 3,000 runs; a bound, not a target
-          runs, fetched, more = [], 0, True
-          while fetched < PAGE_CAP:
-              raw = subprocess.run(
-                  ["curl", "-sS", "-H", "Authorization: Bearer %s" % TOK,
-                   "-H", "Accept: application/vnd.github+json",
-                   "%s?per_page=100&page=%d" % (API, fetched + 1)],
+              probe = VD.overlap_audit(
+                  start, json.loads((d / "confirm_report.json").read_text()
+                                    ).get("LAST_VENUE_GET_TIME"),
+                  runs, known, self_run_id=seg)
+              cands = [row["ID"] for row in
+                       probe["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"]]
+              heads = subprocess.run(
+                  ["git", "ls-remote", "--heads", "origin"],
                   capture_output=True, text=True).stdout
-              try:
-                  got = json.loads(raw).get("workflow_runs", [])
-              except Exception:
-                  break                      # neither A nor B: coverage stays
-              fetched += 1
-              runs += got
-              if len(got) < 100:
-                  more = False               # B: the API has no more runs
-                  break
-              if anchor:
-                  times = []
-                  for r in runs:
-                      try:
-                          times.append(datetime.fromisoformat(
-                              str(r.get("created_at")).replace("Z", "+00:00")))
-                      except Exception:
-                          pass
-                  if times and min(times) <= anchor:
-                      break                  # A: reached back past the anchor
-          keep = ("id", "name", "status", "conclusion", "created_at",
-                  "run_started_at", "updated_at")
+              for rid in cands:
+                  br = "beta48-rateconfirm/seg-%s" % rid
+                  if br not in heads:
+                      continue              # no sealed evidence -> level B
+                  subprocess.run(["git", "fetch", "-q", "origin", br],
+                                 capture_output=True, text=True)
+                  blob = subprocess.run(
+                      ["git", "show", "FETCH_HEAD:research/beta48/shadow/"
+                       "evidence/rateconfirm_%s/confirm_report.json" % rid],
+                      capture_output=True, text=True).stdout
+                  try:
+                      rep = json.loads(blob)
+                      f, l = (rep.get("FIRST_VENUE_GET_TIME"),
+                              rep.get("LAST_VENUE_GET_TIME"))
+                      if f and l:
+                          windows[str(rid)] = [f, l]
+                  except Exception:
+                      pass
+
           (d / "run_history.json").write_text(json.dumps({
-              "workflow_runs": [{k: r.get(k) for k in keep} for r in runs],
-              "HISTORY_PAGES_FETCHED": fetched,
+              "workflow_runs": runs,
+              "HISTORY_PAGES_FETCHED": pages,
               "MORE_PAGES_AVAILABLE": more,
-              "COVERAGE_LOOKBACK_S": lookback,
-              "COVERAGE_ANCHOR": anchor.isoformat() if anchor else None,
-              # LEVEL A needs the OTHER run's own sealed venue-request times.
-              # Nothing here can synthesise them, so this stays empty unless a
-              # collector publishes them.
-              "VENUE_REQUEST_WINDOWS": {},
+              "VENUE_REQUEST_WINDOWS": windows,
+              "COVERAGE_REQUIRES": "API_HISTORY_EXHAUSTED",
+              "NO_CREATED_AT_LOOKBACK": True,
           }, indent=1, sort_keys=True))
           PYEOF
 

@@ -582,31 +582,49 @@ class IsolationThroughoutComesFromIntervalOverlap(unittest.TestCase):
         for c in rows:
             for k in ("WORKFLOW_NAME", "HISTORY_PAGES_FETCHED",
                       "EARLIEST_RUN_TIME_FETCHED", "LATEST_RUN_TIME_FETCHED",
-                      "MORE_PAGES_AVAILABLE", "COVERS_EVIDENCE_WINDOW"):
+                      "EARLIEST_JOB_START_FETCHED", "MORE_PAGES_AVAILABLE",
+                      "COVERS_EVIDENCE_WINDOW"):
                 self.assertIn(k, c)
-            self.assertEqual(c["COVERS_EVIDENCE_WINDOW"], "NO")
+            self.assertEqual(c["COVERS_EVIDENCE_WINDOW"], "NOT_ESTABLISHED")
         self.assertEqual(r["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
 
-    def test_one_uncovered_workflow_fails_the_whole_coverage_claim(self):
-        """COMPLETE means every known collector, not most of them."""
-        deep = dict(self._run("2026-09-16T09:00:00Z", "2026-09-16T09:30:00Z"),
-                    created_at="2026-09-16T09:00:00Z")
+    def test_deep_history_short_of_exhaustion_still_does_not_cover(self):
+        """An old run in hand proves nothing about an older one off the page,
+        because the gap between CREATION and EXECUTION is an unbounded queue."""
+        deep = dict(self._run("2026-09-15T09:00:00Z", "2026-09-15T09:30:00Z"),
+                    created_at="2026-09-15T09:00:00Z")
         r = CH.harvest(self._dir([deep], more_pages=True))
         rows = {c["WORKFLOW_NAME"]: c for c in r["DIRECT_RUN_HISTORY_COVERAGE"]}
         self.assertEqual(rows["run85-phase2-capture"][
-            "COVERS_EVIDENCE_WINDOW"], "YES")
+            "COVERS_EVIDENCE_WINDOW"], "NOT_ESTABLISHED")
         self.assertEqual(r["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "NO")
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], NI)
 
-    def test_the_lookback_is_a_job_timeout_not_the_window_start(self):
-        """A five-hour capture created long before the window still overlaps
-        it, so history must reach back a full job timeout -- paging only to the
-        window start would miss exactly that collision."""
+    def test_a_long_queued_run_executing_in_the_window_is_caught(self):
+        """The case a created-at cutoff would have missed. Created at 03:00 --
+        far older than any finite lookback off an 18:03 window -- but it waited
+        in the queue and then RAN inside it."""
+        queued = dict(self._run("2026-09-16T18:08:00Z", "2026-09-16T18:15:00Z"),
+                      created_at="2026-09-16T03:00:00Z")
+        r = CH.harvest(self._dir([queued]))
+        self.assertEqual(r["DIRECT_CONFLICT_STARTED_DURING_RUN"], "POSSIBLE")
+        self.assertEqual(r["DIRECT_OVERLAP_COUNT"], 1)
+        self.assertEqual(r["OVERLAP_INTERVAL"], "ACTUAL_JOB_EXECUTION_INTERVAL")
+
+    def test_coverage_names_exhaustion_as_the_only_route_it_has(self):
         r = CH.harvest(self._dir([], more_pages=True))
-        ws = datetime.fromisoformat(r["EVIDENCE_WINDOW"][0])
-        anchor = datetime.fromisoformat(r["COVERAGE_ANCHOR"])
-        self.assertGreater(r["COVERAGE_LOOKBACK_S"], 3600)
-        self.assertEqual((ws - anchor).total_seconds(),
-                         r["COVERAGE_LOOKBACK_S"])
+        self.assertEqual(r["COVERAGE_REQUIRES"], "API_HISTORY_EXHAUSTED")
+        self.assertEqual(r["COVERAGE_ROUTE_B_STATUS"],
+                         "NOT_ESTABLISHED_QUEUE_DELAY_IS_UNBOUNDED")
+
+    def test_a_clean_negative_needs_all_three_conditions(self):
+        r = CH.harvest(self._dir([]))
+        self.assertEqual(r["CONFIRMED_DIRECT_REQUEST_OVERLAP"], "NO")
+        self.assertEqual(r["POSSIBLE_DIRECT_WORKFLOW_OVERLAP"], "NO")
+        self.assertEqual(r["DIRECT_RUN_HISTORY_COVERAGE_COMPLETE"], "YES")
+        self.assertEqual(
+            r["DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN"], "YES")
+        self.assertEqual(r["COLLECTOR_RATE_OPERATIONALLY_VALIDATED"], "YES")
 
     def test_a_confirmed_overlap_outranks_thin_coverage(self):
         """Seeing it beats not being able to rule it out."""
