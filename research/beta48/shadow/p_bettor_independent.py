@@ -541,3 +541,51 @@ def provenance():
         "SPREAD_REFUSAL_WHY": SPREAD_REFUSAL_WHY,
         "WHY_IT_NEED_NOT_BEAT_B0": WHY_IT_NEED_NOT_BEAT_B0,
     }
+
+
+# ---------------------------------------------------------------------------
+# THE V1 VERDICT, RECLASSIFIED PRECISELY (directive section 1)
+# ---------------------------------------------------------------------------
+#
+# V1 was tested on ONE sample with a specific and consequential shape: 12,213
+# observations over 157 events, sampled at the moments RN1 chose to trade,
+# 79.9% pregame and 20.1% in-play. V1 is a static pregame model. Twenty per
+# cent of the comparison therefore pitted a model that does not know the score
+# against a market price that does.
+#
+# The result is real and it is narrow. It is recorded at the width it was
+# measured at, and the wider claim is recorded as unanswered.
+
+INDEPENDENT_V1_RESULT = "NO_INCREMENTAL_SIGNAL_ON_TESTED_RN1_TRIGGERED_SAMPLE"
+GENERAL_INDEPENDENT_ALPHA_STATUS = "NOT_YET_IDENTIFIED"
+
+V1_RESULT_MUST_NOT_BE_RESTATED_AS = (
+    "INDEPENDENT_SPORTS_DATA_CANNOT_ADD_VALUE")
+WHY_NOT = (
+    "One model family, one input (goals), one source, four seasons, 157 "
+    "events, and an evaluation clock chosen by a whale's trading. A negative "
+    "result on that is a negative result on that. The families that could "
+    "carry signal and were never tested include richer sport features, "
+    "external market information, ensemble diversity and modern learners. "
+    "Until those are tested, GENERAL_INDEPENDENT_ALPHA_STATUS stays "
+    "NOT_YET_IDENTIFIED."
+)
+
+V1_TESTED_SAMPLE = {
+    "OBSERVATIONS": 12213,
+    "INDEPENDENT_EVENTS": 157,
+    "OBSERVATION_CLOCK": "RN1_TRADE_TRIGGERED",
+    "SHARE_PREGAME_PCT": 79.9,
+    "SHARE_IN_PLAY_PCT": 20.1,
+    "MODEL_INFORMATION_SET": "PREGAME_ONLY",
+    "THE_MISMATCH": (
+        "a pregame-only model was scored against a market price that, on a "
+        "fifth of the rows, already knew part of the score; that comparison is "
+        "a fair business benchmark and an unfair test of whether the model "
+        "carries information at the same information state"),
+}
+
+PREGAME_ONLY_REEVALUATION = (
+    "the same question restricted to observations that can be PROVEN pregame; "
+    "see ev_core_pregame for the gate, which uses the venue's own UTC "
+    "settlement stamps and needs no timezone assumption")

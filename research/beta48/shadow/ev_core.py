@@ -357,3 +357,77 @@ def describe():
 
 def to_json(rep):
     return json.dumps(rep, indent=1, sort_keys=True, default=str)
+
+
+# ===========================================================================
+# GENERATION 2 HOLDOUT -- FROZEN, AND PROSPECTIVE (directive section 20)
+# ===========================================================================
+#
+# Generation 1's final holdout was burned: it was consulted while choosing a
+# model, so it can report and cannot judge. Generation 2 must not repeat that,
+# and the only reliable way to stop it is to put the holdout somewhere no
+# amount of development can reach -- IN THE FUTURE.
+#
+# So Gen2's holdout is not a slice of the retained corpus. It is every event
+# that settles after the freeze stamp below. Nothing in it exists yet. It
+# cannot be peeked at, cannot leak into a feature, and cannot be re-drawn if
+# the first look disappoints.
+
+GEN2_PROSPECTIVE_HOLDOUT_STATUS = "FROZEN_PROSPECTIVE"
+GEN2_HOLDOUT_KIND = "PROSPECTIVE_NOT_A_SLICE_OF_RETAINED_DATA"
+GEN2_FREEZE_STAMP = "2026-09-17T14:00:00Z"
+GEN2_HOLDOUT_DEFINITION = (
+    "every venue event whose settlement timestamp is strictly after "
+    "GEN2_FREEZE_STAMP, on the market families predeclared below")
+
+GEN2_DEVELOPMENT_DATA = (
+    "everything settled at or before the freeze stamp, used walk-forward")
+GEN2_EVALUATION_TRIGGER = (
+    "the first report that quotes a Gen2 holdout number; until then no Gen2 "
+    "holdout result may be computed, quoted or glanced at")
+
+GEN2_FORBIDDEN_USES_BEFORE_THE_TRIGGER = (
+    "selecting a model family",
+    "selecting features",
+    "selecting a calibration method",
+    "selecting hyper-parameters",
+    "selecting a sport or market family",
+    "selecting thresholds",
+    "selecting ensemble weights",
+    "deciding whether to keep a challenger",
+)
+
+# Section 15: the challengers are named NOW, before the data that will judge
+# them exists. Naming them afterwards is how a subgroup finding gets mined out
+# of noise -- and V1 produced exactly the tempting subgroups, so the discipline
+# is not hypothetical.
+GEN2_PREREGISTERED_CHALLENGERS = (
+    "FULL_TIME_MONEYLINE",
+    "FULL_TIME_TOTAL",
+    "DRAW",
+    "EXACT_SCORE",
+)
+GEN2_PREREGISTRATION_NOTE = (
+    "EXACT_SCORE is on the list because its leave-one-family-out residual kept "
+    "its sign (+0.340) when every other family's reversed. That makes it a "
+    "CHALLENGER. It is not validated alpha, and the whole point of naming it "
+    "here is that the claim will be judged on events that did not suggest it."
+)
+
+GEN2_REGIME_FINDINGS_MAY_NOT_BE_OPTIMISED_ON_THE_SAMPLE_THAT_SUGGESTED_THEM = True
+
+
+def gen2_holdout():
+    return {
+        "GEN2_PROSPECTIVE_HOLDOUT_STATUS": GEN2_PROSPECTIVE_HOLDOUT_STATUS,
+        "GEN2_HOLDOUT_KIND": GEN2_HOLDOUT_KIND,
+        "GEN2_FREEZE_STAMP": GEN2_FREEZE_STAMP,
+        "GEN2_HOLDOUT_DEFINITION": GEN2_HOLDOUT_DEFINITION,
+        "GEN2_DEVELOPMENT_DATA": GEN2_DEVELOPMENT_DATA,
+        "GEN2_EVALUATION_TRIGGER": GEN2_EVALUATION_TRIGGER,
+        "GEN2_FORBIDDEN_USES_BEFORE_THE_TRIGGER":
+            list(GEN2_FORBIDDEN_USES_BEFORE_THE_TRIGGER),
+        "GEN2_PREREGISTERED_CHALLENGERS": list(GEN2_PREREGISTERED_CHALLENGERS),
+        "GEN2_PREREGISTRATION_NOTE": GEN2_PREREGISTRATION_NOTE,
+        "GENERATION_1_FINAL_HOLDOUT": GENERATION_1_FINAL_HOLDOUT,
+    }

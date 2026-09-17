@@ -535,3 +535,32 @@ WHY_THE_CORPUS_DOES_NOT_SUPPORT_THEM = (
     "clock of our own rather than on RN1's trading, which is what the "
     "substantive public-book capture does."
 )
+
+
+# ---------------------------------------------------------------------------
+# WHAT THIS EVIDENCE IS AND IS NOT (directive section 16)
+# ---------------------------------------------------------------------------
+#
+# The code in this module is general. The EVIDENCE it has produced so far is
+# not: every residual measured here comes from a price series sampled at the
+# moments RN1 chose to trade. That is a fine dataset for studying RN1 and a
+# poor one for studying market-state transitions, because the sampling clock
+# is correlated with exactly the thing being studied -- when informed flow
+# arrives.
+
+MARKET_SURFACE_CURRENT_EVIDENCE_STATUS = "RN1_TRIGGERED_SAMPLE_ONLY"
+
+SURFACE_RESIDUALS_MAY_NOT_BE_PROMOTED_INTO_EXECUTION_POLICY = True
+WHY_NOT_PROMOTED = (
+    "A residual measured on a whale-triggered series cannot be assumed to "
+    "exist on a continuously sampled one, and the leave-one-family-out result "
+    "already showed that the only reading available from this sample reverses "
+    "sign under an honest hold-out. Two reasons, either sufficient."
+)
+
+PRIMARY_SURFACE_EVIDENCE_WILL_BE = (
+    "the substantive public-book capture, once the clean-start gate permits "
+    "it: continuously sampled books on our own clock, which is what "
+    "cross-market residual creation and convergence, touch and depth changes, "
+    "price improvement, move-through and quote persistence all need"
+)
