@@ -40,21 +40,53 @@ EDGE_REQUIRED_FIELDS = ("ESTIMATE", "UNCERTAINTY", "OOS_EVENT_N", "RECENCY",
                         "REGIME_COVERAGE", "STATUS")
 
 
+SAMPLE_SIZE_TIERS = ("NO_EVENTS", "SMALL_EVENT_SAMPLE",
+                     "MEDIUM_EVENT_SAMPLE", "LARGE_EVENT_SAMPLE")
+
+STATUS_IS_NOT_ASSIGNED_BY_COUNT = (
+    "an earlier build mapped <30 events to HYPOTHESIS, 30-199 to DETECTED "
+    "and >=200 to REPLICATED. Calling those 'labels' did not fix the "
+    "problem: DETECTED and REPLICATED are scientific claims, and counting "
+    "events establishes neither. The count now yields a non-evaluative "
+    "SAMPLE_SIZE_TIER, and STATUS stays NOT_IDENTIFIED until something "
+    "earns it")
+
+WHAT_DETECTED_REQUIRES = (
+    "criteria declared BEFORE looking -- the estimator, the fold structure, "
+    "the effect size of interest and the decision rule -- and then met")
+
+WHAT_REPLICATED_REQUIRES = (
+    "independent PROSPECTIVE replication: the effect declared in advance and "
+    "found again in data collected afterwards, not a second slice of the "
+    "same capture")
+
+
+def sample_size_tier(oos_event_n):
+    """A NON-EVALUATIVE description of how many events are behind a row."""
+    n = oos_event_n if isinstance(oos_event_n, int) \
+        and not isinstance(oos_event_n, bool) else 0
+    if n <= 0:
+        return "NO_EVENTS"
+    if n < 30:
+        return "SMALL_EVENT_SAMPLE"
+    if n < 200:
+        return "MEDIUM_EVENT_SAMPLE"
+    return "LARGE_EVENT_SAMPLE"
+
+
 def edge_row(component, estimate=None, uncertainty=None, oos_event_n=0,
              recency=None, regime_coverage=None, status=None):
     """One edge component. Status is DERIVED from evidence, not asserted."""
     if component not in EDGE_COMPONENTS:
         return {"COMPONENT": component, "STATUS": "UNKNOWN_COMPONENT",
                 "DECLARED": EDGE_COMPONENTS}
+    # An event COUNT never assigns an evidential status. DETECTED and
+    # REPLICATED are scientific claims: DETECTED requires predeclared
+    # evidence criteria that were met, REPLICATED requires independent
+    # PROSPECTIVE replication. Counting to 200 establishes neither.
+    sample_tier = sample_size_tier(oos_event_n)
     if status is None:
-        if estimate is None or oos_event_n <= 0:
-            status = "NOT_IDENTIFIED"
-        elif oos_event_n < 30:
-            status = "HYPOTHESIS"
-        elif oos_event_n < 200:
-            status = "DETECTED"
-        else:
-            status = "REPLICATED"
+        status = "NOT_IDENTIFIED"
     if status not in EDGE_STATUSES:
         return {"COMPONENT": component, "STATUS": "UNKNOWN_STATUS",
                 "DECLARED": EDGE_STATUSES}
@@ -67,6 +99,10 @@ def edge_row(component, estimate=None, uncertainty=None, oos_event_n=0,
         "RECENCY": recency or NOT_IDENTIFIED,
         "REGIME_COVERAGE": regime_coverage or NOT_IDENTIFIED,
         "STATUS": status,
+        "SAMPLE_SIZE_TIER": sample_tier,
+        "STATUS_IS_NOT_ASSIGNED_BY_COUNT": STATUS_IS_NOT_ASSIGNED_BY_COUNT,
+        "WHAT_DETECTED_REQUIRES": WHAT_DETECTED_REQUIRES,
+        "WHAT_REPLICATED_REQUIRES": WHAT_REPLICATED_REQUIRES,
         "NO_BINARY_EDGE_FLAG": NO_BINARY_EDGE_FLAG,
         "PRODUCTION_VALIDATED_REQUIRES_PRODUCTION": (
             "PRODUCTION_VALIDATED cannot be reached offline. It requires the "
@@ -189,10 +225,24 @@ REGIME_SUPPORT_FIELDS = ("REGIMES_REQUIRED", "REGIMES_WITH_SUPPORT")
 POWER_TARGET_FIELDS = ("ALPHA", "POWER")
 
 LADDER_THRESHOLDS_ARE_A_SEPARATE_OPEN_QUESTION = (
-    "edge_row()'s 30/200 cutoffs name a STATUS LABEL on a ladder. They do not "
-    "grant permission to estimate anything, and this correction does not "
-    "cover them. That they are also unearned as sufficiency claims is "
-    "recorded here rather than silently repaired")
+    "SUPERSEDED. edge_row()'s 30/200 cutoffs no longer assign DETECTED or "
+    "REPLICATED. They describe a non-evaluative SAMPLE_SIZE_TIER and nothing "
+    "else; the evidential status stays NOT_IDENTIFIED until predeclared "
+    "criteria are met (DETECTED) or independent prospective replication "
+    "happens (REPLICATED)")
+
+INTERACTION_POWER_STATUS = "PLANNING_APPROXIMATION_ONLY"
+
+WHY_PLANNING_ONLY = (
+    "required_events_for_interaction() is a two-sided normal approximation "
+    "with a Bonferroni split across interaction degrees of freedom and an "
+    "implicit design factor of 1. That is a planning tool for sizing an "
+    "experiment. It is NOT a general power calculation for an arbitrary "
+    "interaction coefficient, and it may not confer scientific sufficiency")
+
+WHAT_FINAL_ADMISSION_NEEDS = (
+    "the actual model and design matrix, event-clustered variance, and "
+    "simulation or bootstrap power under the estimator actually planned")
 
 
 def _strict_int(v):
@@ -281,6 +331,9 @@ def required_events_for_interaction(effect_size_of_interest=None,
                         "INTERACTION_DEGREES_OF_FREEDOM": df,
                         "ALPHA": alpha, "POWER": power,
                         "ALPHA_PER_CONTRAST": alpha_per_contrast},
+        "INTERACTION_POWER_STATUS": INTERACTION_POWER_STATUS,
+        "WHY_PLANNING_ONLY": WHY_PLANNING_ONLY,
+        "WHAT_FINAL_ADMISSION_NEEDS": WHAT_FINAL_ADMISSION_NEEDS,
         "APPROXIMATION": (
             "two-sided normal approximation for one interaction contrast, "
             "Bonferroni-split across the interaction's degrees of freedom"),
@@ -317,6 +370,8 @@ def interaction(name, event_n=0, effect_size_of_interest=None,
     out = {"INTERACTION": name,
            "INDEPENDENT_EVENT_N": event_n,
            "EDGE_INTERACTION_STATUS": EDGE_INTERACTION_STATUS,
+           "INTERACTION_POWER_STATUS": INTERACTION_POWER_STATUS,
+           "WHY_PLANNING_ONLY": WHY_PLANNING_ONLY,
            "POWER_ANALYSIS": req,
            "POWER_ANALYSIS_INPUTS": POWER_ANALYSIS_INPUTS,
            "EDGE_INTERACTION_REQUIRES_N": EDGE_INTERACTION_REQUIRES_N,

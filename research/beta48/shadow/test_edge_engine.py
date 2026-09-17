@@ -282,8 +282,10 @@ def test_an_action_that_never_pays_reports_no_solution():
 def test_two_unknowns_make_a_surface_not_a_threshold():
     t = _terms(P_FILL=MC.NOT_IDENTIFIED, VALUE_IF_FILL=MC.NOT_IDENTIFIED)
     r = MC.break_even("POST_BID", t, "P_FILL")
-    assert r["STATUS"] == "MORE_THAN_ONE_UNKNOWN"
-    assert "a surface, not a threshold" in r["WHY"]
+    # Two unresolved economic terms: the multi-unknown refusal fires first,
+    # naming every one of them rather than holding the others at zero.
+    assert r["STATUS"] == "MORE_THAN_ONE_ECONOMIC_UNKNOWN"
+    assert "VALUE_IF_FILL" in r["ALSO_NOT_IDENTIFIED"]
 
 
 # --- Sensitivity and value of information. ---------------------------------
@@ -302,19 +304,22 @@ def test_a_point_term_contributes_no_swing():
 
 
 def test_value_of_information_ranks_by_variance_removed():
-    v = MC.value_of_information("POST_BID", _terms(), draws=1500)
+    v = MC.uncertainty_variance_attribution("POST_BID", _terms(), draws=1500)
     assert v["STATUS"] == "COMPUTED"
     rows = v["MARGINAL_VALUE_OF_REDUCING_UNCERTAINTY"]
     vals = [r["VARIANCE_REMOVED_IF_RESOLVED"] for r in rows]
     assert vals == sorted(vals, reverse=True)
-    assert v["TOP_VALUE_OF_INFORMATION_TERM"] in MC.EV_TERMS
+    assert v["TOP_VARIANCE_ATTRIBUTION_TERM"] in MC.EV_TERMS
+    # It is variance attribution, NOT value of information.
+    assert v["TOP_VALUE_OF_INFORMATION_TERM"] == MC.NOT_IDENTIFIED
+    assert v["EVPI_STATUS"].startswith("NOT_IMPLEMENTED")
 
 
 def test_voi_points_at_the_term_worth_an_experiment():
     """A term with huge uncertainty should dominate the ranking."""
     t = _terms(VALUE_IF_FILL=PR.Dist("NORMAL", {"mu": 0.02, "sigma": 0.05}))
-    v = MC.value_of_information("POST_BID", t, draws=1500)
-    assert v["TOP_VALUE_OF_INFORMATION_TERM"] == "VALUE_IF_FILL"
+    v = MC.uncertainty_variance_attribution("POST_BID", t, draws=1500)
+    assert v["TOP_VARIANCE_ATTRIBUTION_TERM"] == "VALUE_IF_FILL"
 
 
 def test_voi_defers_to_break_even_when_a_critical_term_is_unknown():
@@ -760,10 +765,22 @@ def test_every_edge_component_is_not_identified_today():
     assert all(r["STATUS"] == "NOT_IDENTIFIED" for r in b.values())
 
 
-def test_edge_status_is_derived_from_event_count():
-    assert ED.edge_row("FILL_EDGE", 0.01, 0.005, 10)["STATUS"] == "HYPOTHESIS"
-    assert ED.edge_row("FILL_EDGE", 0.01, 0.005, 100)["STATUS"] == "DETECTED"
-    assert ED.edge_row("FILL_EDGE", 0.01, 0.005, 500)["STATUS"] == "REPLICATED"
+def test_edge_status_is_never_derived_from_event_count():
+    """CORRECTED: DETECTED and REPLICATED are claims, not counts.
+
+    The ladder used to map <30 to HYPOTHESIS, 30-199 to DETECTED and >=200
+    to REPLICATED. An event count establishes neither, so the count now
+    yields a non-evaluative SAMPLE_SIZE_TIER and STATUS stays
+    NOT_IDENTIFIED until something earns it.
+    """
+    for n, tier in ((0, "NO_EVENTS"), (10, "SMALL_EVENT_SAMPLE"),
+                    (100, "MEDIUM_EVENT_SAMPLE"), (500, "LARGE_EVENT_SAMPLE")):
+        r = ED.edge_row("FILL_EDGE", estimate=0.001, oos_event_n=n)
+        assert r["SAMPLE_SIZE_TIER"] == tier
+        assert r["STATUS"] == "NOT_IDENTIFIED", n
+    assert "predeclared" in ED.WHAT_DETECTED_REQUIRES.replace(
+        "declared BEFORE", "predeclared")
+    assert "PROSPECTIVE replication" in ED.WHAT_REPLICATED_REQUIRES
 
 
 def test_production_validated_cannot_be_reached_offline():

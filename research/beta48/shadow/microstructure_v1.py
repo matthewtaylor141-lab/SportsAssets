@@ -57,7 +57,34 @@ TARGETS = tuple("MID_MOVE_%dS" % s for s in TARGET_HORIZONS_SECONDS) + \
 
 from bettor_dataset import (                                  # noqa: E402
     HORIZON_STATUS_V1, HORIZON_TOLERANCE_S, FORBIDDEN_5S_REPAIRS,
-    horizon_label_coverage_gate)
+    horizon_label_coverage_gate, TIE_BREAK_RULE,
+    WHY_A_TIE_NEEDS_A_FROZEN_RULE)
+
+# --- Market identity. Enforced, not requested. -----------------------------
+#
+# The docstring used to say "ticks must be ONE market's series" and nothing
+# checked it. Fed an interleaved capture (A at T, B at T+24, A at T+48) the
+# 30-second label for A resolved to B and reported a move of +0.30 that
+# belonged to a different contract.
+
+MARKET_IDENTITY_KEYS = ("MARKET_ID", "CONDITION_ID", "TOKEN_ID")
+
+EVENT_ID_IS_NOT_A_MARKET_IDENTITY = (
+    "one event carries many markets -- moneyline, totals, each side of each "
+    "line -- so two rows sharing an EVENT_ID are not two observations of the "
+    "same book. Identity must be at MARKET_ID / CONDITION_ID / TOKEN_ID "
+    "level or the label is cross-contract")
+
+BUILD_TARGETS_IDENTITY_POLICY = "GROUP_INTERNALLY_BY_MARKET_IDENTITY"
+
+
+def market_identity(tick):
+    """The market key for a tick, or None if it carries no market identity."""
+    for k in MARKET_IDENTITY_KEYS:
+        v = (tick or {}).get(k)
+        if v not in (None, "", NOT_IDENTIFIED):
+            return (k, v)
+    return None
 
 A_DECLARATION_IN_ANOTHER_MODULE_IS_NOT_A_CONTROL = (
     "a rule written as a constant in the module that defines the dataset does "
@@ -86,6 +113,14 @@ def horizon_of_target(target):
     return int(m.group(1)) if m else None
 
 
+LABEL_PROVENANCE_IS_REQUIRED = (
+    "a target column with no accompanying _STATUS column has no provenance: "
+    "nothing says the label came from the canonical builder, at the nearest "
+    "observation within tolerance, on the same market. An unchecked label is "
+    "not a checked one, and 'not checked therefore yes' is how a gate fails "
+    "open")
+
+
 def target_scoring_gate(target, rows=None, min_coverage_pct=None):
     """May any predictor be scored on this target? Fails closed.
 
@@ -111,25 +146,41 @@ def target_scoring_gate(target, rows=None, min_coverage_pct=None):
                 "FORBIDDEN_REPAIRS": FORBIDDEN_5S_REPAIRS,
                 "A_DECLARATION_IN_ANOTHER_MODULE_IS_NOT_A_CONTROL":
                     A_DECLARATION_IN_ANOTHER_MODULE_IS_NOT_A_CONTROL}
-    if rows:
-        status_key = "%s_STATUS" % target
-        shaped = [{"LABEL_STATUS": {"%dS" % h: r.get(status_key)}}
-                  for r in rows if r.get(status_key) is not None]
-        if shaped:
-            cov = horizon_label_coverage_gate(shaped, h, min_coverage_pct)
-            # MAY_EVALUATE is True, False, or NOT_IDENTIFIED -- and
-            # NOT_IDENTIFIED is a non-empty string, so a truthiness test
-            # would read "we do not know" as "yes".
-            if cov["MAY_EVALUATE"] is not True:
-                return {"MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
-                        "HORIZON_STATUS": st, "COVERAGE_GATE": cov,
-                        "REASON": "INSUFFICIENT_LABEL_COVERAGE",
-                        "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
-            return {"MAY_SCORE": True, "TARGET": target, "HORIZON_S": h,
-                    "HORIZON_STATUS": st, "COVERAGE_GATE": cov}
-    return {"MAY_SCORE": True, "TARGET": target, "HORIZON_S": h,
+    # Label PROVENANCE is required. Rows carrying MID_MOVE_30S but no
+    # MID_MOVE_30S_STATUS used to return MAY_SCORE = True with
+    # COVERAGE_GATE = NOT_CHECKED_NO_LABEL_STATUS_ON_ROWS -- "not checked,
+    # therefore yes", which is the shape of every fail-open gate.
+    status_key = "%s_STATUS" % target
+    rows = list(rows or ())
+    if not rows:
+        return {"MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
+                "HORIZON_STATUS": st,
+                "REASON": "NO_ROWS",
+                "LABEL_PROVENANCE": "ABSENT"}
+    without = [r for r in rows if r.get(status_key) is None]
+    if without:
+        return {
+            "MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
             "HORIZON_STATUS": st,
-            "COVERAGE_GATE": "NOT_CHECKED_NO_LABEL_STATUS_ON_ROWS"}
+            "REASON": "LABEL_PROVENANCE_ABSENT",
+            "ROWS_WITHOUT_LABEL_STATUS": len(without),
+            "ROWS": len(rows),
+            "REQUIRED_FIELD": status_key,
+            "LABEL_PROVENANCE_IS_REQUIRED": LABEL_PROVENANCE_IS_REQUIRED,
+            "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
+    shaped = [{"LABEL_STATUS": {"%dS" % h: r.get(status_key)}} for r in rows]
+    cov = horizon_label_coverage_gate(shaped, h, min_coverage_pct)
+    # MAY_EVALUATE is True, False, or NOT_IDENTIFIED -- and NOT_IDENTIFIED
+    # is a non-empty string, so a truthiness test would read "we do not
+    # know" as "yes".
+    if cov["MAY_EVALUATE"] is not True:
+        return {"MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
+                "HORIZON_STATUS": st, "COVERAGE_GATE": cov,
+                "REASON": "INSUFFICIENT_LABEL_COVERAGE",
+                "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
+    return {"MAY_SCORE": True, "TARGET": target, "HORIZON_S": h,
+            "HORIZON_STATUS": st, "COVERAGE_GATE": cov,
+            "LABEL_PROVENANCE": "PRESENT_ON_EVERY_ROW"}
 
 
 CANDIDATE_FEATURES = (
@@ -276,8 +327,40 @@ def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS,
             return None
         return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
 
-    rows = sorted([x for x in ticks if t(x.get(time_key))],
-                  key=lambda x: t(x[time_key]))
+    supplied = [x for x in ticks or () if t(x.get(time_key))]
+    keys = {market_identity(x) for x in supplied}
+    named = {k for k in keys if k is not None}
+    if len(named) > 1:
+        # Group internally rather than trust the caller. Each market's series
+        # is built on its own and the results are concatenated.
+        out_all, meta_all = [], {}
+        for key in sorted(named, key=lambda kv: (kv[0], str(kv[1]))):
+            part = [x for x in supplied if market_identity(x) == key]
+            rows_p, meta_p = build_targets(part, horizons, time_key,
+                                           tolerance_s)
+            out_all.extend(rows_p)
+            meta_all[str(key)] = meta_p
+        return out_all, {
+            "GROUPED_BY_MARKET_IDENTITY": True,
+            "MARKETS": sorted(str(k) for k in named),
+            "PER_MARKET": meta_all,
+            "BUILD_TARGETS_IDENTITY_POLICY": BUILD_TARGETS_IDENTITY_POLICY,
+            "EVENT_ID_IS_NOT_A_MARKET_IDENTITY":
+                EVENT_ID_IS_NOT_A_MARKET_IDENTITY,
+            "TICKS": len(out_all)}
+    if None in keys and named:
+        # Some rows identify a market and some do not: they cannot be shown
+        # to be the same series, so nothing is labelled.
+        return [], {"STATUS": "REFUSED_MIXED_IDENTITY",
+                    "TICKS": 0,
+                    "WHY": ("some ticks carry a market identity and some do "
+                            "not; they cannot be proven to be one market's "
+                            "series"),
+                    "MARKET_IDENTITY_KEYS": MARKET_IDENTITY_KEYS,
+                    "EVENT_ID_IS_NOT_A_MARKET_IDENTITY":
+                        EVENT_ID_IS_NOT_A_MARKET_IDENTITY}
+
+    rows = sorted(supplied, key=lambda x: t(x[time_key]))
     stamps = [t(r[time_key]) for r in rows]
     mids = [_mid(r.get("BEST_BID"), r.get("BEST_ASK")) for r in rows]
     out = []
@@ -304,7 +387,7 @@ def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS,
             # NEAREST to the target, STRICTLY after the origin, WITHIN
             # tolerance -- the same three rules bettor_dataset uses. The old
             # first-at-or-after rule systematically overshot on a grid.
-            best, best_gap, best_off = None, None, None
+            best, best_key, best_off = None, None, None
             for k in range(i + 1, len(rows)):
                 off = (stamps[k] - target).total_seconds()
                 gap = abs(off)
@@ -312,8 +395,12 @@ def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS,
                     if stamps[k] > target and best is None:
                         break          # sorted: everything later is worse
                     continue
-                if best_gap is None or gap < best_gap:
-                    best, best_gap, best_off = k, gap, off
+                # Same FROZEN TIE RULE as bettor_dataset.forward_observation:
+                # (ABS_TARGET_ERROR, OBSERVATION_TIMESTAMP). Named
+                # tie_key, NOT key -- `key` is the label column name.
+                tie_key = (gap, stamps[k])
+                if best_key is None or tie_key < best_key:
+                    best, best_key, best_off = k, tie_key, off
             if best is None:
                 if stamps[-1] < target:
                     truncated[key] += 1
@@ -336,6 +423,8 @@ def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS,
         "OUT_OF_TOLERANCE": dict(out_of_tolerance),
         "TOLERANCE_S": tolerance_s,
         "REFUSED_HORIZONS": refused,
+        "TIE_BREAK_RULE": TIE_BREAK_RULE,
+        "WHY_A_TIE_NEEDS_A_FROZEN_RULE": WHY_A_TIE_NEEDS_A_FROZEN_RULE,
         "WHY_REFUSED": (
             "a horizon this capture cannot label is not computed at a "
             "substitute offset. See bettor_dataset.FORBIDDEN_5S_REPAIRS"
@@ -394,13 +483,26 @@ def relative_value_rows(observations, horizons=TARGET_HORIZONS_SECONDS):
                 missing["NO_TARGET_AT_%dS" % h] += 1
                 continue
             row["TARGET_CHANGE_%dS" % h] = float(p1) - float(o["P_TARGET"])
+            # Provenance travels with the label or the label cannot be used.
+            row["TARGET_CHANGE_%dS_STATUS" % h] = (
+                o.get("TARGET_LATER_STATUS", {}).get(h)
+                or "PRESENT_PROVENANCE_NOT_ESTABLISHED")
             any_h = True
         if any_h:
             out.append(row)
     return out, dict(missing)
 
 
-def relative_value_test(rows, horizons=TARGET_HORIZONS_SECONDS):
+RELATIVE_VALUE_PROVENANCE_RULE = (
+    "no model may report MEASURED from a forward target whose provenance is "
+    "not established. The residual is only as good as the price change it is "
+    "correlated against, and a hand-built TARGET_CHANGE column establishes "
+    "nothing about nearest-within-tolerance, market identity or the realised "
+    "offset")
+
+
+def relative_value_test(rows, horizons=TARGET_HORIZONS_SECONDS,
+                        min_coverage_pct=None):
     """Does the residual predict the target's own move? Event-clustered.
 
     A NEGATIVE correlation is the tradeable one: a target priced above its
@@ -420,6 +522,19 @@ def relative_value_test(rows, horizons=TARGET_HORIZONS_SECONDS):
                         "scoring a challenger the capture cannot label")}
             continue
         key = "TARGET_CHANGE_%dS" % h
+        # The forward target must come from the canonical label builder.
+        # Hand-constructed TARGET_CHANGE columns used to reach STATUS =
+        # MEASURED with nothing establishing nearest-within-tolerance,
+        # same-market identity or an approved realised offset.
+        prov = target_scoring_gate(key, rows, min_coverage_pct)
+        if not prov["MAY_SCORE"]:
+            out["%dS" % h] = {
+                "STATUS": "REFUSED",
+                "REASON": prov.get("REASON"),
+                "PROVENANCE_GATE": prov,
+                "RELATIVE_VALUE_PROVENANCE_RULE":
+                    RELATIVE_VALUE_PROVENANCE_RULE}
+            continue
         by = defaultdict(list)
         for r in rows:
             if r.get(key) is not None:
@@ -513,25 +628,54 @@ A_COMPLEX_MODEL_EARNS_ADMISSION_ONLY_BY_BEATING_ALL_OF_THESE = True
 CHRONOLOGICALLY_OUT_OF_SAMPLE = True
 
 
-def baseline_prediction(name, feats, prev_move=None, scale=1.0):
-    """One baseline's predicted move. None when its inputs are absent."""
+DIMENSIONLESS_BASELINES = ("B4_SIMPLE_BOOK_IMBALANCE",
+                           "B5_SIMPLE_ORDER_FLOW_IMBALANCE")
+
+BASELINE_UNIT_CONTRACT = (
+    "book imbalance and order-flow imbalance are DIMENSIONLESS ratios in "
+    "[-1, 1]. A price move is in probability points. scale=1.0 asserts that "
+    "one unit of imbalance equals one full probability point, which is not a "
+    "fact about anything -- it is an arbitrary choice that decides whether "
+    "the baseline looks strong or weak. The transformation must be either "
+    "CALIBRATED ON TRAINING EVENTS ONLY or fixed before the experiment and "
+    "declared")
+
+BASELINE_SCALE_SOURCES = ("CALIBRATED_ON_TRAINING_EVENTS",
+                          "PREDECLARED_FIXED_TRANSFORMATION")
+
+NEVER_CALIBRATE_ON_THE_EVALUATION_FOLD = (
+    "a scale fitted on the fold the baseline is scored against is not a "
+    "baseline, it is a fitted model with one parameter, and it will beat an "
+    "honest predictor for that reason alone")
+
+
+def baseline_prediction(name, feats, prev_move=None, scale=None,
+                        scale_source=None):
+    """One baseline's predicted move. None when its inputs are absent.
+
+    A DIMENSIONLESS baseline returns None unless the caller supplies BOTH a
+    scale and a declared, admissible source for it. There is no default of
+    1.0: that default silently asserted a unit conversion nobody measured.
+    """
     if name in ("B0_NO_CHANGE", "B1_CURRENT_MID"):
         return 0.0
     if name == "B2_MICROPRICE":
         return feats.get("MICROPRICE_MINUS_MID")
     if name == "B3_LAST_MOVE_DIRECTION":
         return prev_move
-    if name == "B4_SIMPLE_BOOK_IMBALANCE":
-        v = feats.get("ORDER_BOOK_IMBALANCE")
-        return None if v is None else scale * v
-    if name == "B5_SIMPLE_ORDER_FLOW_IMBALANCE":
-        v = feats.get("ORDER_FLOW_IMBALANCE")
-        return None if v is None else scale * v
+    if name in DIMENSIONLESS_BASELINES:
+        if scale is None or scale_source not in BASELINE_SCALE_SOURCES:
+            return None                   # no unit contract, no prediction
+        key = ("ORDER_BOOK_IMBALANCE" if name == "B4_SIMPLE_BOOK_IMBALANCE"
+               else "ORDER_FLOW_IMBALANCE")
+        v = feats.get(key)
+        return None if v is None else float(scale) * v
     return None
 
 
 def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
-                    min_coverage_pct=None):
+                    min_coverage_pct=None, baseline_scale=None,
+                    baseline_scale_source=None):
     """Score every baseline (and optionally a model) on one target.
 
     Returns absolute error and direction accuracy per predictor. A predictor
@@ -548,27 +692,60 @@ def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
 
     out = {}
     names = list(baselines) + ([pred_key] if pred_key else [])
-    for name in names:
+    rows = list(rows or ())
+
+    def predict(name, r):
+        if name == pred_key:
+            return r.get(pred_key)
+        return baseline_prediction(name, r, r.get("_PREV_MOVE"),
+                                   scale=baseline_scale,
+                                   scale_source=baseline_scale_source)
+
+    # COMMON EVALUATION SUPPORT: the rows every predictor could price. A
+    # predictor that abstains on the hard rows must not win on an easier
+    # subset, so each one is scored twice -- on its own support and on the
+    # intersection -- and the two are reported side by side.
+    scorable = [r for r in rows if r.get(target) is not None]
+    common = [r for r in scorable
+              if all(predict(nm, r) is not None for nm in names)]
+
+    def score(name, subset):
         errs, dirs, n = [], [], 0
-        for r in rows or ():
-            y = r.get(target)
-            if y is None:
-                continue
-            p = (r.get(pred_key) if name == pred_key
-                 else baseline_prediction(name, r, r.get("_PREV_MOVE")))
-            if p is None:
+        for r in subset:
+            y, p = r.get(target), predict(name, r)
+            if y is None or p is None:
                 continue
             n += 1
             errs.append(abs(p - y))
             if y != 0:
                 dirs.append(1.0 if (p > 0) == (y > 0) else 0.0)
-        out[name] = {
+        return {
             "N_SCORED": n,
             "MEAN_ABSOLUTE_ERROR": (sum(errs) / len(errs)) if errs else None,
             "DIRECTION_ACCURACY": (sum(dirs) / len(dirs)) if dirs else None,
             "DIRECTIONAL_ROWS": len(dirs),
         }
+
+    for name in names:
+        own = score(name, scorable)
+        own["ON_COMMON_SUPPORT"] = score(name, common)
+        own["ABSTAINED_ROWS"] = len(scorable) - own["N_SCORED"]
+        out[name] = own
     return {"TARGET": target, "BY_PREDICTOR": out,
+            "COMMON_EVALUATION_SUPPORT_ROWS": len(common),
+            "SCORABLE_ROWS": len(scorable),
+            "COMMON_SUPPORT_IS_THE_FAIR_COMPARISON": (
+                "MEAN_ABSOLUTE_ERROR is each predictor's own support; "
+                "ON_COMMON_SUPPORT is the rows every predictor could price. "
+                "Compare on the second, and read ABSTAINED_ROWS before "
+                "believing the first"),
+            "BASELINE_SCALE": (baseline_scale if baseline_scale is not None
+                               else NOT_IDENTIFIED),
+            "BASELINE_SCALE_SOURCE": (baseline_scale_source
+                                      or NOT_IDENTIFIED),
+            "BASELINE_UNIT_CONTRACT": BASELINE_UNIT_CONTRACT,
+            "NEVER_CALIBRATE_ON_THE_EVALUATION_FOLD":
+                NEVER_CALIBRATE_ON_THE_EVALUATION_FOLD,
             "A_MODEL_MUST_BEAT_ALL_BASELINES":
                 A_COMPLEX_MODEL_EARNS_ADMISSION_ONLY_BY_BEATING_ALL_OF_THESE,
             "CHRONOLOGICALLY_OUT_OF_SAMPLE": CHRONOLOGICALLY_OUT_OF_SAMPLE}

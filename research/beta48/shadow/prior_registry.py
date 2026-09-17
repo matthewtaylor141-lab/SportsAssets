@@ -229,10 +229,54 @@ def make_prior(parameter_name, dist, evidence_class, prior_strength,
         "STRENGTH_AFFECTS_UNCERTAINTY_NOT_MEAN":
             STRENGTH_AFFECTS_UNCERTAINTY_NOT_MEAN,
     })
-    row["PRIOR_SHA"] = hashlib.sha256(json.dumps(
-        {k: v for k, v in row.items() if k != "PRIOR_SHA"},
-        sort_keys=True, default=str).encode()).hexdigest()
+    # PROVISIONAL. The registry attaches further semantic fields after this
+    # point, so the immutable hash is taken by seal_prior() once the object
+    # is complete. A hash over a half-built object protects the half nobody
+    # reads downstream.
+    row["PRIOR_SHA"] = NOT_IDENTIFIED
+    row["PRIOR_SHA_STATUS"] = "PROVISIONAL_NOT_YET_SEALED"
     return row
+
+
+THE_HASH_MUST_COVER_THE_OBJECT_CONSUMED = (
+    "make_prior() used to seal PRIOR_SHA and the registry then merged the "
+    "classification block and four more semantic fields on top. A consumer "
+    "recomputing the digest over the row it actually received got a "
+    "different answer, so the hash protected a version of the prior that "
+    "nothing downstream ever saw")
+
+
+def prior_sha(row):
+    """The digest over every field except the digest itself."""
+    return hashlib.sha256(json.dumps(
+        {k: v for k, v in (row or {}).items()
+         if k not in ("PRIOR_SHA", "PRIOR_SHA_STATUS")},
+        sort_keys=True, default=str).encode()).hexdigest()
+
+
+def seal_prior(row):
+    """Seal the FINAL object. Called once, after every field is attached."""
+    row["PRIOR_SHA_STATUS"] = "SEALED_OVER_FINAL_OBJECT"
+    row["PRIOR_SHA"] = prior_sha(row)
+    row["THE_HASH_MUST_COVER_THE_OBJECT_CONSUMED"] = \
+        THE_HASH_MUST_COVER_THE_OBJECT_CONSUMED
+    # Re-seal now that the explanatory constant is present, so a consumer
+    # recomputing over the shipped row reproduces the digest exactly.
+    row["PRIOR_SHA"] = NOT_IDENTIFIED
+    row["PRIOR_SHA"] = prior_sha(row)
+    return row
+
+
+def verify_prior_sha(row):
+    """Does the shipped row recompute to its own digest?"""
+    stored = (row or {}).get("PRIOR_SHA")
+    probe = dict(row or {})
+    probe["PRIOR_SHA"] = NOT_IDENTIFIED
+    recomputed = prior_sha(probe)
+    return {"PRIOR_SHA": stored, "RECOMPUTED": recomputed,
+            "MATCHES": stored == recomputed,
+            "PRIOR_SHA_STATUS": (row or {}).get("PRIOR_SHA_STATUS",
+                                                NOT_IDENTIFIED)}
 
 
 # --- The registry. ---------------------------------------------------------
@@ -378,6 +422,9 @@ def _registry():
             reg[p].setdefault(
                 "WHY_NOT", "no measurement on this venue and no defensible "
                            "transfer from a comparable one")
+    # Seal LAST, over the complete object every consumer will receive.
+    for p in reg:
+        seal_prior(reg[p])
     return reg
 
 
@@ -408,6 +455,29 @@ def registry_census():
 
 # --- The P_FILL mechanism, ready for the moment intensity is measured. -----
 
+QUEUE_MECHANISM_STATUS = "UNCALIBRATED_TOY_MECHANISM"
+
+QUEUE_DIMENSIONAL_CONTRACT = {
+    "QUEUE_AHEAD": "SHARES_RESTING_AHEAD_OF_US_AT_OUR_LEVEL",
+    "TRADE_INTENSITY_PER_SECOND": "POISSON_EVENTS_PER_SECOND_AT_OUR_LEVEL",
+    "POISSON_EVENT_UNIT": "ONE_TRADE_OF_ONE_SHARE_AT_OUR_LEVEL",
+    "THE_MISMATCH": (
+        "the docstring promises P(cumulative VOLUME exceeds the quantity "
+        "ahead) but the arithmetic is P(N >= ceil(queue_ahead)) for a "
+        "Poisson COUNT. Those agree only if every trade is exactly one "
+        "share. Until the trade-size distribution at the touch is measured, "
+        "lambda is a count rate and queue_ahead is a share count, and the "
+        "comparison is dimensionally unearned"),
+    "WHAT_WOULD_FIX_IT": (
+        "measure the trade-size distribution at the touch and use a "
+        "compound-Poisson threshold, or express both sides in the same unit"),
+}
+
+NEVER_CALL_THIS_MEASURED_P_FILL = (
+    "the output of an uncalibrated toy mechanism is not a measured P_FILL "
+    "and may not be substituted for one anywhere in the EV")
+
+
 def p_fill_from_mechanism(queue_ahead, trade_intensity_per_s, horizon_s,
                           intensity_evidence_class=NOT_IDENTIFIED):
     """P(cumulative volume at our level exceeds the queue ahead) over h.
@@ -427,6 +497,7 @@ def p_fill_from_mechanism(queue_ahead, trade_intensity_per_s, horizon_s,
     q = float(queue_ahead)
     if lam <= 0:
         return {"P_FILL": 0.0, "EVIDENCE_CLASS": intensity_evidence_class,
+                "QUEUE_MECHANISM_STATUS": QUEUE_MECHANISM_STATUS,
                 "WHY": "zero measured intensity over the horizon"}
     # P(N >= q) for Poisson(lam), q treated as a quantity threshold.
     k = int(math.ceil(q))
@@ -439,7 +510,11 @@ def p_fill_from_mechanism(queue_ahead, trade_intensity_per_s, horizon_s,
             "EVIDENCE_CLASS": (ESTIMATED_PRIOR
                                if intensity_evidence_class == ESTIMATED_PRIOR
                                else intensity_evidence_class),
-            "MECHANISM": "POISSON_VOLUME_EXCEEDS_QUEUE_AHEAD",
+            "QUEUE_MECHANISM_STATUS": QUEUE_MECHANISM_STATUS,
+            "QUEUE_DIMENSIONAL_CONTRACT": QUEUE_DIMENSIONAL_CONTRACT,
+            "NEVER_CALL_THIS_MEASURED_P_FILL":
+                NEVER_CALL_THIS_MEASURED_P_FILL,
+            "MECHANISM": "POISSON_COUNT_EXCEEDS_QUEUE_AHEAD_UNCALIBRATED",
             "LAMBDA": round(lam, 6), "QUEUE_AHEAD": q,
             "NEVER_LABEL_THIS_MEASURED_UNTIL_BETTOR_ORDERS_EXIST": True}
 
@@ -451,16 +526,77 @@ UPDATE_IS_VERSIONED = (
     "versions, so every posterior is reproducible from its inputs")
 
 
+COUNT_VALIDATION_RULE = (
+    "successes and trials are COUNTS. int() silently truncated 0.9 successes "
+    "out of 1.9 trials into 0 out of 1, turning a fractional quantity nobody "
+    "should have passed into a confident posterior. Floats, strings, bools "
+    "and negatives are refused rather than coerced")
+
+
+def _strict_count(v):
+    """A non-negative integer count. bool is not an integer count."""
+    return isinstance(v, int) and not isinstance(v, bool) and v >= 0
+
+
+EFFECTIVE_N_FIELDS = ("RAW_ROWS", "MARKETS", "INDEPENDENT_EVENTS",
+                      "EVENT_HOURS", "DEPENDENCE_CLUSTER_IDS",
+                      "EFFECTIVE_N", "EFFECTIVE_N_METHOD")
+
+RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS = (
+    "consecutive observations on one market overlap almost completely. "
+    "Feeding a timestamp-row count into a conjugate update as if it were N "
+    "independent trials shrinks the posterior by a factor nothing earned. "
+    "Until the dependence is modelled, posterior PRECISION is not identified "
+    "even though the posterior MEAN may be usable")
+
+POSTERIOR_PRECISION_UNMODELLED = \
+    "NOT_IDENTIFIED_PENDING_DEPENDENCE_MODEL"
+
+
+def effective_n(raw_rows=None, markets=None, independent_events=None,
+                event_hours=None, dependence_cluster_ids=None,
+                effective_n=None, effective_n_method=None):
+    """Carry the whole provenance of an N. Never collapse rows into trials."""
+    out = {
+        "RAW_ROWS": raw_rows if raw_rows is not None else NOT_IDENTIFIED,
+        "MARKETS": markets if markets is not None else NOT_IDENTIFIED,
+        "INDEPENDENT_EVENTS": (independent_events
+                               if independent_events is not None
+                               else NOT_IDENTIFIED),
+        "EVENT_HOURS": (event_hours if event_hours is not None
+                        else NOT_IDENTIFIED),
+        "DEPENDENCE_CLUSTER_IDS": (tuple(dependence_cluster_ids)
+                                   if dependence_cluster_ids
+                                   else NOT_IDENTIFIED),
+        "EFFECTIVE_N": (effective_n if effective_n is not None
+                        else NOT_IDENTIFIED),
+        "EFFECTIVE_N_METHOD": effective_n_method or NOT_IDENTIFIED,
+        "RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS":
+            RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS,
+    }
+    out["POSTERIOR_PRECISION_STATUS"] = (
+        "MODELLED" if (out["EFFECTIVE_N"] != NOT_IDENTIFIED
+                       and out["EFFECTIVE_N_METHOD"] != NOT_IDENTIFIED)
+        else POSTERIOR_PRECISION_UNMODELLED)
+    return out
+
+
 def update_beta(prior_dist, successes, trials, prior_version="1",
-                data_batch=None):
+                data_batch=None, n_provenance=None):
     """Beta-Binomial conjugate update. The canonical P_FILL update."""
     if prior_dist.family != "BETA":
         return {"STATUS": "WRONG_FAMILY", "EXPECTED": "BETA",
                 "GOT": prior_dist.family}
     a, b = prior_dist.params["alpha"], prior_dist.params["beta"]
-    s, n = int(successes), int(trials)
-    if s < 0 or n < 0 or s > n:
-        return {"STATUS": "INVALID_DATA", "SUCCESSES": s, "TRIALS": n}
+    if not _strict_count(successes) or not _strict_count(trials):
+        return {"STATUS": "INVALID_COUNTS",
+                "SUCCESSES": repr(successes), "TRIALS": repr(trials),
+                "REQUIRED": "NON_NEGATIVE_INTEGER",
+                "COUNT_VALIDATION_RULE": COUNT_VALIDATION_RULE}
+    s, n = successes, trials
+    if s > n:
+        return {"STATUS": "INVALID_DATA", "SUCCESSES": s, "TRIALS": n,
+                "WHY": "successes exceed trials"}
     post = Dist("BETA", {"alpha": a + s, "beta": b + (n - s)})
     return {
         "STATUS": "UPDATED",
@@ -473,15 +609,29 @@ def update_beta(prior_dist, successes, trials, prior_version="1",
         "POSTERIOR_DIST": post,
         "PRIOR_TO_POSTERIOR_SHIFT": round(post.mean() - prior_dist.mean(), 10),
         "UPDATE_IS_VERSIONED": UPDATE_IS_VERSIONED,
+        "N_PROVENANCE": (n_provenance if n_provenance is not None
+                         else effective_n()),
+        "POSTERIOR_PRECISION_STATUS": (
+            (n_provenance or {}).get("POSTERIOR_PRECISION_STATUS")
+            or POSTERIOR_PRECISION_UNMODELLED),
+        "RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS":
+            RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS,
     }
 
 
 def update_normal(prior_dist, obs_mean, obs_sigma, n, prior_version="1",
-                  data_batch=None):
+                  data_batch=None, n_provenance=None):
     """Normal-Normal conjugate update on the mean."""
     if prior_dist.family != "NORMAL":
         return {"STATUS": "WRONG_FAMILY", "EXPECTED": "NORMAL",
                 "GOT": prior_dist.family}
+    if not _strict_count(n) or n < 1:
+        return {"STATUS": "INVALID_COUNTS", "N": repr(n),
+                "REQUIRED": "POSITIVE_INTEGER",
+                "COUNT_VALIDATION_RULE": COUNT_VALIDATION_RULE}
+    if not isinstance(obs_sigma, (int, float)) or obs_sigma <= 0:
+        return {"STATUS": "INVALID_DATA", "OBS_SIGMA": repr(obs_sigma),
+                "WHY": "observation sigma must be positive"}
     if n <= 0 or obs_sigma is None or obs_sigma <= 0:
         return {"STATUS": "INVALID_DATA"}
     mu0, s0 = prior_dist.params["mu"], prior_dist.params["sigma"]

@@ -344,7 +344,7 @@ def test_missing_book_inputs_give_none_not_zero():
 
 
 def test_forward_targets_are_attached_and_truncation_is_declared():
-    ticks = [{"REQUEST_UTC": "2026-08-30T10:00:%02dZ" % s,
+    ticks = [{"MARKET_ID": "m1", "REQUEST_UTC": "2026-08-30T10:00:%02dZ" % s,
               "BEST_BID": 0.50 + s / 1000.0, "BEST_ASK": 0.52 + s / 1000.0}
              for s in range(0, 60, 4)]
     rows, meta = MS.build_targets(ticks, horizons=(30, 300))
@@ -362,7 +362,7 @@ def test_the_five_second_horizon_is_refused_not_computed():
     The horizon was declared UNOBSERVABLE in bettor_dataset while this
     module went on computing it, so the declaration did nothing.
     """
-    ticks = [{"REQUEST_UTC": "2026-08-30T10:00:%02dZ" % s,
+    ticks = [{"MARKET_ID": "m1", "REQUEST_UTC": "2026-08-30T10:00:%02dZ" % s,
               "BEST_BID": 0.50 + s / 1000.0, "BEST_ASK": 0.52 + s / 1000.0}
              for s in range(0, 60, 4)]
     rows, meta = MS.build_targets(ticks, horizons=(5, 30))
@@ -390,7 +390,8 @@ def test_a_target_on_an_undeclared_horizon_is_refused_too():
 
 def test_first_at_or_after_would_have_overshot():
     """A 30 s horizon on a 24 s grid must not resolve to +48 s."""
-    ticks = [{"REQUEST_UTC": "2026-08-30T10:0%d:%02dZ" % divmod(s, 60),
+    ticks = [{"MARKET_ID": "m1",
+              "REQUEST_UTC": "2026-08-30T10:0%d:%02dZ" % divmod(s, 60),
               "BEST_BID": 0.50 + i * 0.01, "BEST_ASK": 0.52 + i * 0.01}
              for i, s in enumerate((0, 24, 48, 72, 96))]
     rows, _ = MS.build_targets(ticks, horizons=(30,))
@@ -410,9 +411,11 @@ def test_a_reverting_residual_shows_a_negative_correlation():
         res = (i % 9 - 4) / 100.0
         obs.append({"EVENT_KEY": "e%d" % (i % 12), "MARKET": "m", "T": "t",
                     "P_TARGET": 0.50 + res, "P_SURFACE_EX_TARGET": 0.50,
-                    "TARGET_LATER": {30: 0.50 + 0.3 * res}})
+                    "TARGET_LATER": {30: 0.50 + 0.3 * res},
+                    "TARGET_LATER_STATUS": {30: "PRESENT"}})
     rows, _ = MS.relative_value_rows(obs, horizons=(30,))
-    out = MS.relative_value_test(rows, horizons=(30,))
+    out = MS.relative_value_test(rows, horizons=(30,),
+                                 min_coverage_pct=50.0)
     assert out["BY_HORIZON"]["30S"]["CORRELATION"] < -0.5
 
 

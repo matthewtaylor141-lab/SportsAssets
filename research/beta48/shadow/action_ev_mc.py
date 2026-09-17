@@ -111,6 +111,79 @@ NO_GUARANTEED_PROFIT_LANGUAGE = (
 FORBIDDEN_CLAIMS = ("GUARANTEED_PROFIT", "100_PERCENT_CONFIDENCE",
                     "CANNOT_LOSE", "RISK_FREE")
 
+# --- Term states. An absent economic term is not a zero one. ---------------
+#
+# The Monte Carlo used to substitute Dist("POINT", 0.0) for any term the
+# caller did not supply, so an action with no fee, no rebate, no exit cost
+# and no inventory cost still came back ACTION_EV_STATUS = IDENTIFIED with a
+# clean EV_MEAN. Every one of those zeros was an assumption nobody made.
+#
+# A term now carries a STATE. Only KNOWN_ZERO contributes a numeric zero,
+# and it does so because the economic quantity is known to be zero.
+# NOT_APPLICABLE omits the term because it genuinely does not apply to this
+# action. NOT_IDENTIFIED blocks IDENTIFIED outright.
+
+TERM_STATES = ("MEASURED_BETTOR_NATIVE", "ESTIMATED_PRIOR", "KNOWN_ZERO",
+               "NOT_APPLICABLE", "NOT_IDENTIFIED")
+
+RESOLVED_STATES = ("MEASURED_BETTOR_NATIVE", "ESTIMATED_PRIOR",
+                   "KNOWN_ZERO", "NOT_APPLICABLE")
+
+CONTRIBUTES_ZERO = ("KNOWN_ZERO", "NOT_APPLICABLE")
+
+UNKNOWN_IS_NOT_ZERO = (
+    "an absent term is NOT_IDENTIFIED, and NOT_IDENTIFIED cannot be added to "
+    "money. Only KNOWN_ZERO contributes a numeric zero, and only because the "
+    "quantity is known to be zero; NOT_APPLICABLE omits a term that does not "
+    "apply to this action. Substituting 0 for 'nobody told me' produces an "
+    "EV that looks complete and is not")
+
+# Terms that must be resolved before an EV may be called IDENTIFIED.
+# CAPITAL_REQUIRED and OCCUPANCY_SECONDS are not in the EV arithmetic -- they
+# feed the per-capital-hour rate -- so they gate that rate, not the EV.
+ECONOMIC_TERMS = ("P_FILL", "VALUE_IF_FILL", "VALUE_IF_NO_FILL", "TOXICITY",
+                  "FEE", "REBATE", "INVENTORY_COST", "EXIT_COST")
+
+RATE_TERMS = ("CAPITAL_REQUIRED", "OCCUPANCY_SECONDS")
+
+# --- Typed distribution domains. ------------------------------------------
+#
+# An impossible probability distribution is a bad model specification, not a
+# value to clip. P_FILL ~ NORMAL(mu=2.0, sigma=0.1) used to be silently
+# squeezed into [0, 1] and reported IDENTIFIED.
+
+DOMAINS = {
+    "PROBABILITY": (0.0, 1.0),
+    "POSITIVE_MONEY": (0.0, None),
+    "POSITIVE_TIME": (0.0, None),       # strict: zero occupancy is refused
+    "SHARES": (0.0, None),
+    "SIGNED_PRICE_EFFECT": (None, None),
+    "PRICE": (0.0, 1.0),                # binary contract, venue-valid range
+}
+
+STRICTLY_POSITIVE_DOMAINS = ("POSITIVE_TIME",)
+
+TERM_DOMAINS = {
+    "P_FILL": "PROBABILITY",
+    "VALUE_IF_FILL": "SIGNED_PRICE_EFFECT",
+    "VALUE_IF_NO_FILL": "SIGNED_PRICE_EFFECT",
+    "TOXICITY": "SIGNED_PRICE_EFFECT",
+    "FEE": "POSITIVE_MONEY",
+    "REBATE": "POSITIVE_MONEY",
+    "INVENTORY_COST": "POSITIVE_MONEY",
+    "EXIT_COST": "POSITIVE_MONEY",
+    "CAPITAL_REQUIRED": "POSITIVE_MONEY",
+    "OCCUPANCY_SECONDS": "POSITIVE_TIME",
+    FILL_SELECTION_TERM: "SIGNED_PRICE_EFFECT",
+}
+
+DOMAIN_ENVELOPE = (0.001, 0.999)
+
+INVALID_SUPPORT_IS_A_SPECIFICATION_ERROR = (
+    "a distribution whose central envelope falls outside its term's domain "
+    "describes a quantity that cannot exist. Clipping the draws would hide "
+    "the error and report a number; the specification is refused instead")
+
 
 def _as_dist(v):
     """A term may be a Dist, a scalar (POINT), or NOT_IDENTIFIED."""
@@ -137,6 +210,189 @@ def _net(p_fill, v_fill, v_nofill, tox, fee, rebate, inv, exit_c, convention,
     val = val + fs           # signed FAVOURABLE-positive; 0.0 when EXCLUDED
     return (p_fill * val + (1.0 - p_fill) * v_nofill
             + rebate - fee - inv - exit_c * p_fill)
+
+
+EVALUATION_ID_FIELDS = ("ACTION", "PRICE", "SIZE", "TERM_MANIFEST_SHA",
+                        "PRIOR_VERSION_MANIFEST_SHA", "CONVENTION",
+                        "FILL_SELECTION_CONVENTION", "MODEL_VERSION",
+                        "DECISION_ID")
+
+ACTION_ALONE_IS_NOT_AN_EVALUATION = (
+    "two evaluations of the same ACTION at different prices, sizes, term "
+    "manifests or prior versions are different decisions. Binding an "
+    "artifact by ACTION alone let a sensitivity run on one economic state "
+    "discharge the width requirement for another")
+
+
+def term_manifest_sha(terms):
+    """A stable digest of the terms actually evaluated.
+
+    Distributions are digested by family and parameters, declared states by
+    their value. Anything unhashable is rendered by repr rather than dropped
+    -- a field that cannot be digested must still change the digest.
+    """
+    import hashlib
+    import json
+    items = {}
+    for k in sorted((terms or {}).keys()):
+        v = terms[k]
+        if isinstance(v, Dist):
+            items[k] = {"FAMILY": v.family,
+                        "PARAMS": {pk: v.params[pk]
+                                   for pk in sorted(v.params)}}
+        elif isinstance(v, (int, float, str, bool)) or v is None:
+            items[k] = v
+        else:
+            items[k] = repr(v)
+    return hashlib.sha256(
+        json.dumps(items, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def evaluation_id(action, terms, convention="SEPARATE_TERM", price=None,
+                  size=None, prior_version_manifest_sha=None,
+                  model_version=None, decision_id=None):
+    """The immutable identity of ONE evaluation. Artifacts must share it."""
+    import hashlib
+    import json
+    fsel = _fill_selection_setup(terms)
+    body = {
+        "ACTION": action,
+        "PRICE": price if price is not None else NOT_IDENTIFIED,
+        "SIZE": size if size is not None else NOT_IDENTIFIED,
+        "TERM_MANIFEST_SHA": term_manifest_sha(terms),
+        "PRIOR_VERSION_MANIFEST_SHA": (prior_version_manifest_sha
+                                       or NOT_IDENTIFIED),
+        "CONVENTION": convention,
+        "FILL_SELECTION_CONVENTION": fsel.get("FILL_SELECTION_CONVENTION",
+                                              "EXCLUDED"),
+        "MODEL_VERSION": model_version or NOT_IDENTIFIED,
+        "DECISION_ID": decision_id or NOT_IDENTIFIED,
+    }
+    body["EVALUATION_ID"] = hashlib.sha256(
+        json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
+    body["ACTION_ALONE_IS_NOT_AN_EVALUATION"] = \
+        ACTION_ALONE_IS_NOT_AN_EVALUATION
+    return body
+
+
+def check_domain(term, dist):
+    """Is this distribution admissible for the term's domain? Fails closed."""
+    dom = TERM_DOMAINS.get(term)
+    if dom is None:
+        return {"TERM": term, "DOMAIN": NOT_IDENTIFIED, "VALID": NOT_IDENTIFIED,
+                "WHY": "no domain declared for this term"}
+    lo, hi = DOMAINS[dom]
+    if dist is None:
+        return {"TERM": term, "DOMAIN": dom, "VALID": NOT_IDENTIFIED}
+    try:
+        e_lo = dist.quantile(DOMAIN_ENVELOPE[0])
+        e_hi = dist.quantile(DOMAIN_ENVELOPE[1])
+    except Exception:
+        return {"TERM": term, "DOMAIN": dom, "VALID": False,
+                "WHY": "envelope not computable"}
+    strict = dom in STRICTLY_POSITIVE_DOMAINS
+    below = (lo is not None) and (e_lo <= lo if strict else e_lo < lo)
+    above = (hi is not None) and e_hi > hi
+    out = {"TERM": term, "DOMAIN": dom, "BOUNDS": (lo, hi),
+           "ENVELOPE": (round(e_lo, 10), round(e_hi, 10)),
+           "ENVELOPE_LEVELS": DOMAIN_ENVELOPE,
+           "VALID": not (below or above)}
+    if below or above:
+        out["WHY"] = (
+            "%s envelope %s falls outside %s %s"
+            % (term, out["ENVELOPE"], dom, out["BOUNDS"]))
+        out["INVALID_SUPPORT_IS_A_SPECIFICATION_ERROR"] = \
+            INVALID_SUPPORT_IS_A_SPECIFICATION_ERROR
+    elif dist.family in ("NORMAL", "LOGNORMAL") and (lo is not None
+                                                     or hi is not None):
+        # Unbounded family inside a bounded domain: admissible, but the
+        # residual tail mass is stated rather than quietly clipped away.
+        out["TAIL_MASS_OUTSIDE_DOMAIN"] = round(
+            _tail_mass_outside(dist, lo, hi), 12)
+        out["DOMAIN_STATUS"] = "ADMITTED_WITH_TAIL_MASS_DECLARED"
+    return out
+
+
+def _tail_mass_outside(dist, lo, hi):
+    """Exact normal/lognormal mass beyond the domain bounds."""
+    p = dist.params
+    if dist.family == "NORMAL":
+        mu, sd = float(p["mu"]), float(p["sigma"])
+        def cdf(x):
+            return 0.5 * (1.0 + math.erf((x - mu) / (sd * math.sqrt(2.0))))
+    else:
+        mu, sd = float(p["mu"]), float(p["sigma"])
+        def cdf(x):
+            if x <= 0:
+                return 0.0
+            return 0.5 * (1.0 + math.erf(
+                (math.log(x) - mu) / (sd * math.sqrt(2.0))))
+    m = 0.0
+    if lo is not None:
+        m += cdf(lo)
+    if hi is not None:
+        m += 1.0 - cdf(hi)
+    return m
+
+
+def resolve_terms(terms, convention="SEPARATE_TERM"):
+    """Resolve every term to a STATE and, where it has one, a distribution.
+
+    A term is resolved when the caller supplied a value, or declared it
+    KNOWN_ZERO or NOT_APPLICABLE. Anything else is NOT_IDENTIFIED, which is
+    not a zero.
+    """
+    terms = terms or {}
+    states, dists, conflicts, invalid = {}, {}, [], []
+    for term in ECONOMIC_TERMS + RATE_TERMS + (FILL_SELECTION_TERM,):
+        declared = terms.get("%s_STATE" % term)
+        supplied = terms.get(term)
+        dist = _as_dist(supplied)
+        if declared is not None and declared not in TERM_STATES:
+            conflicts.append({"TERM": term, "WHY": "UNKNOWN_TERM_STATE",
+                              "GOT": declared, "DECLARED": TERM_STATES})
+            states[term] = NOT_IDENTIFIED
+            dists[term] = None
+            continue
+        if declared in CONTRIBUTES_ZERO and dist is not None:
+            conflicts.append({
+                "TERM": term, "WHY": "STATE_CONTRADICTS_SUPPLIED_VALUE",
+                "STATE": declared,
+                "DETAIL": ("a term declared %s must not also carry a "
+                           "distribution" % declared)})
+            states[term] = NOT_IDENTIFIED
+            dists[term] = None
+            continue
+        if dist is not None:
+            st = terms.get("%s_EVIDENCE_CLASS" % term) or declared
+            if st not in ("MEASURED_BETTOR_NATIVE", "ESTIMATED_PRIOR"):
+                st = ESTIMATED_PRIOR
+            chk = check_domain(term, dist)
+            if chk.get("VALID") is False:
+                invalid.append(chk)
+                states[term] = "INVALID_MODEL_SPECIFICATION"
+                dists[term] = None
+                continue
+            states[term] = st
+            dists[term] = dist
+            continue
+        states[term] = declared if declared in CONTRIBUTES_ZERO \
+            else NOT_IDENTIFIED
+        dists[term] = None
+
+    # TOXICITY is only an economic term under the SEPARATE_TERM convention.
+    applicable = [t for t in ECONOMIC_TERMS
+                  if not (t == "TOXICITY" and convention != "SEPARATE_TERM")]
+    unresolved = [t for t in applicable if states[t] not in RESOLVED_STATES]
+    return {
+        "STATES": states, "DISTS": dists,
+        "APPLICABLE_ECONOMIC_TERMS": tuple(applicable),
+        "UNRESOLVED_ECONOMIC_TERMS": tuple(unresolved),
+        "CONFLICTS": tuple(conflicts),
+        "INVALID_DOMAINS": tuple(invalid),
+        "ALL_RESOLVED": not unresolved and not conflicts and not invalid,
+        "UNKNOWN_IS_NOT_ZERO": UNKNOWN_IS_NOT_ZERO,
+    }
 
 
 def _fill_selection_setup(terms):
@@ -194,11 +450,25 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         return {"ACTION": action, "STATUS": "UNKNOWN_CONVENTION",
                 "DECLARED": ADVERSE_SELECTION_CONVENTIONS}
 
-    d = {k: _as_dist(terms.get(k)) for k in EV_TERMS}
+    res = resolve_terms(terms, convention)
+    d = {k: res["DISTS"].get(k) for k in EV_TERMS}
     missing = [k for k in CRITICAL_TERMS if d.get(k) is None]
     # TOXICITY is only critical under the SEPARATE_TERM convention.
     if convention == "SEPARATE_TERM" and d.get("TOXICITY") is None:
         missing.append("TOXICITY")
+    unresolved = list(res["UNRESOLVED_ECONOMIC_TERMS"])
+
+    if res["CONFLICTS"] or res["INVALID_DOMAINS"]:
+        return {"ACTION": action,
+                "STATUS": "INVALID_MODEL_SPECIFICATION",
+                "ACTION_EV_STATUS": "INVALID_MODEL_SPECIFICATION",
+                "EV_MEAN": NOT_IDENTIFIED,
+                "RECOMMENDED": False,
+                "TERM_STATE_CONFLICTS": res["CONFLICTS"],
+                "INVALID_DOMAINS": res["INVALID_DOMAINS"],
+                "INVALID_SUPPORT_IS_A_SPECIFICATION_ERROR":
+                    INVALID_SUPPORT_IS_A_SPECIFICATION_ERROR,
+                "NO_ORDER_IS_PLACED": True}
 
     fsel = _fill_selection_setup(terms)
     if fsel["FILL_SELECTION_STATUS"] == "UNKNOWN_FILL_SELECTION_CONVENTION":
@@ -207,16 +477,22 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
                 "DECLARED": FILL_SELECTION_CONVENTIONS}
 
     unknown = [k for k in EV_TERMS if d.get(k) is None]
-    evidence = {k: (terms.get("%s_EVIDENCE_CLASS" % k)
-                    or (NOT_IDENTIFIED if d.get(k) is None
-                        else ESTIMATED_PRIOR))
-                for k in EV_TERMS}
-    evidence[FILL_SELECTION_TERM] = (
-        terms.get("%s_EVIDENCE_CLASS" % FILL_SELECTION_TERM)
-        or (NOT_IDENTIFIED if fsel["DIST"] is None else ESTIMATED_PRIOR))
+    evidence = {k: res["STATES"].get(k, NOT_IDENTIFIED) for k in EV_TERMS}
+    evidence[FILL_SELECTION_TERM] = res["STATES"].get(
+        FILL_SELECTION_TERM, NOT_IDENTIFIED)
+
+    _eid = evaluation_id(
+        action, terms, convention,
+        price=(terms or {}).get("PRICE"), size=(terms or {}).get("SIZE"),
+        prior_version_manifest_sha=(terms or {}).get(
+            "PRIOR_VERSION_MANIFEST_SHA"),
+        model_version=(terms or {}).get("MODEL_VERSION"),
+        decision_id=(terms or {}).get("DECISION_ID"))
 
     base = {
         "ACTION": action,
+        "EVALUATION_ID": _eid["EVALUATION_ID"],
+        "EVALUATION_IDENTITY": _eid,
         "ADVERSE_SELECTION_CONVENTION": convention,
         "DOUBLE_COUNT_GUARD": DOUBLE_COUNT_GUARD,
         "FILL_SELECTION_STATUS": fsel["FILL_SELECTION_STATUS"],
@@ -225,6 +501,9 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         "ABSENT_IS_EXCLUDED_NOT_ZERO": ABSENT_IS_EXCLUDED_NOT_ZERO,
         "WIDTH_TRAVELS_WITH_THE_MEAN": WIDTH_TRAVELS_WITH_THE_MEAN,
         "UNKNOWN_TERMS": unknown,
+        "TERM_STATES": dict(res["STATES"]),
+        "UNRESOLVED_ECONOMIC_TERMS": tuple(unresolved),
+        "UNKNOWN_IS_NOT_ZERO": UNKNOWN_IS_NOT_ZERO,
         "MISSING_CRITICAL_TERMS": sorted(set(missing)),
         "EVIDENCE_CLASS_BY_TERM": evidence,
         "EVIDENCE_MIX": {
@@ -232,6 +511,10 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
                             if v == MEASURED_BETTOR_NATIVE),
             "ESTIMATED": sum(1 for v in evidence.values()
                              if v == ESTIMATED_PRIOR),
+            "KNOWN_ZERO": sum(1 for v in evidence.values()
+                              if v == "KNOWN_ZERO"),
+            "NOT_APPLICABLE": sum(1 for v in evidence.values()
+                                  if v == "NOT_APPLICABLE"),
             "UNIDENTIFIED": sum(1 for v in evidence.values()
                                 if v == NOT_IDENTIFIED),
         },
@@ -262,25 +545,42 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
                  if fs_dist is not None else {})
     nets, caps, hours = [], [], []
     fs_nets = {p: [] for p in fs_points}
+    # Domain excursions are COUNTED, never silently clipped away. The
+    # specification already passed check_domain(); any draw outside the
+    # domain here is an unbounded family's declared tail, and the reader is
+    # told how often it happened.
+    excursions = {}
+
+    def draw(term):
+        dist = d.get(term)
+        if dist is None:
+            return 0.0                    # KNOWN_ZERO / NOT_APPLICABLE / TBD
+        x = dist.sample(rng)
+        dom = DOMAINS.get(TERM_DOMAINS.get(term, ""), (None, None))
+        lo, hi = dom
+        if (lo is not None and x < lo) or (hi is not None and x > hi):
+            excursions[term] = excursions.get(term, 0) + 1
+            x = min(x, hi) if hi is not None else x
+            x = max(x, lo) if lo is not None else x
+        return x
+
     for _ in range(draws):
-        pf = min(max(d["P_FILL"].sample(rng), 0.0), 1.0)
-        vf = d["VALUE_IF_FILL"].sample(rng)
-        vn = (d["VALUE_IF_NO_FILL"] or zero).sample(rng)
-        tx = (d["TOXICITY"] or zero).sample(rng)
-        fe = (d["FEE"] or zero).sample(rng)
-        rb = (d["REBATE"] or zero).sample(rng)
-        iv = (d["INVENTORY_COST"] or zero).sample(rng)
-        ex = (d["EXIT_COST"] or zero).sample(rng)
+        pf = draw("P_FILL")
+        vf = draw("VALUE_IF_FILL")
+        vn = draw("VALUE_IF_NO_FILL")
+        tx = draw("TOXICITY")
+        fe = draw("FEE")
+        rb = draw("REBATE")
+        iv = draw("INVENTORY_COST")
+        ex = draw("EXIT_COST")
         fs = fs_dist.sample(rng) if fs_dist is not None else 0.0
         nets.append(_net(pf, vf, vn, tx, fe, rb, iv, ex, convention, fs))
         for p, point in fs_points.items():
             fs_nets[p].append(
                 _net(pf, vf, vn, tx, fe, rb, iv, ex, convention, point))
         if d["CAPITAL_REQUIRED"] and d["OCCUPANCY_SECONDS"]:
-            c = max(d["CAPITAL_REQUIRED"].sample(rng), 0.0)
-            s = max(d["OCCUPANCY_SECONDS"].sample(rng), 0.0)
-            caps.append(c)
-            hours.append(s / 3600.0)
+            caps.append(draw("CAPITAL_REQUIRED"))
+            hours.append(draw("OCCUPANCY_SECONDS") / 3600.0)
 
     n = float(len(nets))
     mean = sum(nets) / n
@@ -291,6 +591,7 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
     base.update({
         "ACTION_EV_STATUS": "IDENTIFIED",
         "DRAWS": int(n), "SEED": seed,
+        "DOMAIN_EXCURSION_DRAWS": dict(excursions),
         "EV_MEAN": round(mean, 10),
         "EV_SD": round(math.sqrt(var), 10),
         "EV_MEDIAN": round(_q(nets, 0.50), 10),
@@ -347,6 +648,32 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         base["WHY_NO_CAPITAL_RATE"] = (
             "capital required and occupancy must both be supplied; a rate on "
             "a guessed denominator is not a measurement")
+    # --- Unresolved economics downgrade the whole result. -----------------
+    if unresolved:
+        partial = base["EV_MEAN"]
+        base["PARTIAL_EV"] = partial
+        base["EV_MEAN"] = NOT_IDENTIFIED
+        base["ACTION_EV_STATUS"] = "NOT_FULLY_IDENTIFIED"
+        base["PARTIAL_EV_TREATS_UNRESOLVED_AS_ZERO"] = (
+            "PARTIAL_EV is what the EV would be if every unresolved term were "
+            "zero. It is published so the shape of the answer is visible, and "
+            "it is NOT EV_MEAN because those zeros are assumptions nobody "
+            "made. Resolve the terms or use the break-even")
+        base["BREAK_EVEN_UNKNOWN_TERM"] = (
+            unresolved[0] if len(unresolved) == 1
+            else "MORE_THAN_ONE_ECONOMIC_UNKNOWN")
+        base["SENSITIVITY_AVAILABLE"] = True
+        base["WHAT_TO_DO_INSTEAD"] = (
+            "declare each unresolved term KNOWN_ZERO or NOT_APPLICABLE if that "
+            "is what it is, supply a distribution if it is estimable, or run "
+            "break_even() on it. What may not happen is an EV that treats "
+            "'nobody said' as 'zero'")
+        base["RECOMMENDED"] = False
+        base["WHY_NOT_RECOMMENDED"] = (
+            "%d economic term(s) unresolved: %s"
+            % (len(unresolved), ", ".join(unresolved)))
+        return base
+
     base["RECOMMENDED"] = False
     base["WHY_NOT_RECOMMENDED"] = (
         "SHADOW_ONLY. No production acceptance threshold has been chosen, and "
@@ -410,9 +737,39 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
                 "WHY": ("the terms declare a fill-selection convention this "
                         "module does not recognise; solving past it would "
                         "hold the term at 0.0 without saying so")}
+
+    # Break-even solves ONE unknown while the rest are held at their means.
+    # Holding an UNRESOLVED term at 0.0 is not holding it at its mean -- it
+    # is inventing one, and it produced a confident BREAK_EVEN_P_FILL of
+    # ~0 while fee, rebate, inventory, exit cost and value-if-no-fill were
+    # all unknown.
+    res = resolve_terms(terms, convention)
+    if res["CONFLICTS"] or res["INVALID_DOMAINS"]:
+        return {"STATUS": "INVALID_MODEL_SPECIFICATION",
+                "TERM_STATE_CONFLICTS": res["CONFLICTS"],
+                "INVALID_DOMAINS": res["INVALID_DOMAINS"]}
+    other_unknown = [t for t in res["UNRESOLVED_ECONOMIC_TERMS"]
+                     if t != unknown_term]
+    if other_unknown:
+        return {
+            "STATUS": "MORE_THAN_ONE_ECONOMIC_UNKNOWN",
+            "ACTION": action,
+            "SOLVING_FOR": unknown_term,
+            "ALSO_NOT_IDENTIFIED": tuple(other_unknown),
+            "WHY": ("break-even solves ONE unknown while every other "
+                    "applicable term is held at its mean. A term that is "
+                    "NOT_IDENTIFIED has no mean to hold it at, and holding "
+                    "it at zero manufactures a confident threshold out of "
+                    "quantities nobody has estimated"),
+            "WHAT_TO_DO_INSTEAD": (
+                "declare each of these KNOWN_ZERO or NOT_APPLICABLE if that "
+                "is what they are, or supply a distribution"),
+            "UNKNOWN_IS_NOT_ZERO": UNKNOWN_IS_NOT_ZERO,
+        }
+
     means = {}
     for k in EV_TERMS:
-        dd = _as_dist(terms.get(k))
+        dd = res["DISTS"].get(k)
         means[k] = 0.0 if dd is None else dd.mean()
     means[FILL_SELECTION_TERM] = (fsel["DIST"].mean()
                                   if fsel["APPLIES"] else 0.0)
@@ -452,6 +809,15 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
         out = {
             "STATUS": "NO_SOLUTION_IN_RANGE",
             "ACTION": action,
+            "EVALUATION_ID": evaluation_id(
+                action, terms, convention,
+                price=(terms or {}).get("PRICE"),
+                size=(terms or {}).get("SIZE"),
+                prior_version_manifest_sha=(terms or {}).get(
+                    "PRIOR_VERSION_MANIFEST_SHA"),
+                model_version=(terms or {}).get("MODEL_VERSION"),
+                decision_id=(terms or {}).get("DECISION_ID"))[
+                    "EVALUATION_ID"],
             "UNKNOWN_TERM": unknown_term,
             "RANGE": (lo, hi),
             "EV_AT_LO": round(f_lo, 10), "EV_AT_HI": round(f_hi, 10),
@@ -499,6 +865,13 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
     return {
         "STATUS": "SOLVED",
         "ACTION": action,
+        "EVALUATION_ID": evaluation_id(
+            action, terms, convention,
+            price=(terms or {}).get("PRICE"), size=(terms or {}).get("SIZE"),
+            prior_version_manifest_sha=(terms or {}).get(
+                "PRIOR_VERSION_MANIFEST_SHA"),
+            model_version=(terms or {}).get("MODEL_VERSION"),
+            decision_id=(terms or {}).get("DECISION_ID"))["EVALUATION_ID"],
         "UNKNOWN_TERM": unknown_term,
         "BREAK_EVEN_VALUE": round(x, 10),
         "BREAK_EVEN_%s" % unknown_term: round(x, 10),
@@ -551,6 +924,13 @@ def sensitivity(action, terms, convention="SEPARATE_TERM", seed=DEFAULT_SEED):
     return {
         "STATUS": "COMPUTED",
         "ACTION": action,
+        "EVALUATION_ID": evaluation_id(
+            action, terms, convention,
+            price=(terms or {}).get("PRICE"), size=(terms or {}).get("SIZE"),
+            prior_version_manifest_sha=(terms or {}).get(
+                "PRIOR_VERSION_MANIFEST_SHA"),
+            model_version=(terms or {}).get("MODEL_VERSION"),
+            decision_id=(terms or {}).get("DECISION_ID"))["EVALUATION_ID"],
         "TORNADO": rows,
         "TOP_EV_SENSITIVITY_DRIVERS": [r["TERM"] for r in rows[:3]],
         "WHY_THIS_MATTERS": (
@@ -560,9 +940,43 @@ def sensitivity(action, terms, convention="SEPARATE_TERM", seed=DEFAULT_SEED):
     }
 
 
-def value_of_information(action, terms, convention="SEPARATE_TERM",
-                         draws=4000, seed=DEFAULT_SEED):
-    """Which unknown, if measured, would most reduce EV uncertainty?
+VARIANCE_ATTRIBUTION_IS_NOT_EVPI = (
+    "freezing a term at its mean and measuring how much EV variance "
+    "disappears attributes uncertainty. It is NOT the expected value of "
+    "perfect information: EVPI is the gain from acting optimally once the "
+    "true value is known, which requires an action space and a decision "
+    "rule, and EVSI additionally requires an observation model saying what a "
+    "given experiment would actually reveal. Neither exists here, so neither "
+    "is computed and neither name is used")
+
+EVPI_STATUS = "NOT_IMPLEMENTED_REQUIRES_DECISION_RULE_OVER_ACTION_SPACE"
+EVSI_STATUS = "NOT_IMPLEMENTED_REQUIRES_OBSERVATION_MODEL"
+
+
+def expected_value_of_perfect_information(*_a, **_k):
+    """Deliberately unimplemented. Returns the reason, never a number."""
+    return {"EVPI": NOT_IDENTIFIED, "STATUS": EVPI_STATUS,
+            "REQUIRES": ("ACTION_SPACE", "DECISION_RULE",
+                         "JOINT_POSTERIOR_OVER_TERMS"),
+            "VARIANCE_ATTRIBUTION_IS_NOT_EVPI":
+                VARIANCE_ATTRIBUTION_IS_NOT_EVPI,
+            "USE_INSTEAD": "uncertainty_variance_attribution()"}
+
+
+def expected_value_of_sample_information(*_a, **_k):
+    """Deliberately unimplemented. Returns the reason, never a number."""
+    return {"EVSI": NOT_IDENTIFIED, "STATUS": EVSI_STATUS,
+            "REQUIRES": ("OBSERVATION_MODEL", "SAMPLE_DESIGN",
+                         "ACTION_SPACE", "DECISION_RULE"),
+            "VARIANCE_ATTRIBUTION_IS_NOT_EVPI":
+                VARIANCE_ATTRIBUTION_IS_NOT_EVPI,
+            "USE_INSTEAD": "uncertainty_variance_attribution()"}
+
+
+def uncertainty_variance_attribution(action, terms,
+                                     convention="SEPARATE_TERM",
+                                     draws=4000, seed=DEFAULT_SEED):
+    """Which unknown, if resolved, would most reduce EV VARIANCE?
 
     For each uncertain term, re-run the simulation with THAT term frozen at
     its mean and measure how much EV variance disappears. The term whose
@@ -621,13 +1035,30 @@ def value_of_information(action, terms, convention="SEPARATE_TERM",
         "ACTION": action,
         "BASE_EV_VARIANCE": round(base_var, 12),
         "MARGINAL_VALUE_OF_REDUCING_UNCERTAINTY": rows,
-        "TOP_VALUE_OF_INFORMATION_TERM": rows[0]["TERM"] if rows
+        "TOP_VARIANCE_ATTRIBUTION_TERM": rows[0]["TERM"] if rows
         else NOT_IDENTIFIED,
+        "TOP_VALUE_OF_INFORMATION_TERM": NOT_IDENTIFIED,
+        "EVPI_STATUS": EVPI_STATUS,
+        "EVSI_STATUS": EVSI_STATUS,
+        "VARIANCE_ATTRIBUTION_IS_NOT_EVPI": VARIANCE_ATTRIBUTION_IS_NOT_EVPI,
         "WHAT_THIS_TELLS_MANAGEMENT": (
-            "which measurement or experiment would most change the decision, "
-            "and therefore which research dollar has the highest expected "
-            "informational return"),
+            "which term's uncertainty dominates the EV distribution, and "
+            "therefore where a measurement would most tighten the answer. "
+            "How much that tightening is WORTH is a decision-theoretic "
+            "question this does not answer"),
     }
+
+
+def value_of_information(*args, **kwargs):
+    """Superseded name. Delegates and says so."""
+    out = uncertainty_variance_attribution(*args, **kwargs)
+    if isinstance(out, dict):
+        out = dict(out)
+        out["SUPERSEDED_NAME"] = (
+            "value_of_information() measured variance attribution, not "
+            "value of information. Use "
+            "uncertainty_variance_attribution()")
+    return out
 
 
 # --- Robustness and dominance. ---------------------------------------------
@@ -658,43 +1089,88 @@ def robustly_positive(ev_row, conservative_quantile=0.10):
 
 def dominated(rows, ev_key="EV_MEAN", risk_key="EV_SD",
               capital_key="CAPITAL_OCCUPANCY_MEAN"):
-    """Mark actions with no higher return AND higher risk or capital use."""
+    """Mark actions PARETO-dominated: no better on any axis, worse on none.
+
+    The earlier form marked A dominated by B whenever B returned at least as
+    much and was better on ANY one axis -- so B with EV 2, risk 0.5 and
+    capital 100 "dominated" A with EV 1, risk 1 and capital 1, although B
+    ties up a hundred times the capital. That is not dominance, it is a
+    preference nobody declared.
+
+    B dominates A only when, on EVERY comparison axis, B is at least as good
+    (EV higher-is-better, risk and capital lower-is-better) and strictly
+    better on at least one. A missing axis makes the comparison
+    NOT_IDENTIFIED rather than silently dropping that axis.
+    """
+    rows = list(rows or ())
+    axes = ((ev_key, "HIGHER_IS_BETTER"), (risk_key, "LOWER_IS_BETTER"),
+            (capital_key, "LOWER_IS_BETTER"))
     out = []
-    for i, a in enumerate(rows or ()):
-        dom_by = None
-        for j, b in enumerate(rows or ()):
+    for i, a in enumerate(rows):
+        dom_by, incomparable = None, []
+        for j, b in enumerate(rows):
             if i == j:
                 continue
-            ea, eb = a.get(ev_key), b.get(ev_key)
-            if not isinstance(ea, (int, float)) or \
-               not isinstance(eb, (int, float)):
+            missing = [k for k, _ in axes
+                       if not isinstance(a.get(k), (int, float))
+                       or not isinstance(b.get(k), (int, float))]
+            if missing:
+                incomparable.append({"AGAINST": b.get("ACTION",
+                                                      NOT_IDENTIFIED),
+                                     "MISSING_AXES": tuple(missing)})
                 continue
-            if eb < ea:
-                continue                       # b does not return more
-            worse = False
-            for k in (risk_key, capital_key):
-                va, vb = a.get(k), b.get(k)
-                if isinstance(va, (int, float)) and isinstance(vb, (int, float)):
-                    if vb < va:
-                        worse = True
-            if eb >= ea and worse:
-                dom_by = b.get("ACTION")
+            weakly, strictly = True, False
+            for k, sense in axes:
+                va, vb = float(a[k]), float(b[k])
+                better = (vb > va) if sense == "HIGHER_IS_BETTER" else (vb < va)
+                worse = (vb < va) if sense == "HIGHER_IS_BETTER" else (vb > va)
+                if worse:
+                    weakly = False
+                    break
+                if better:
+                    strictly = True
+            if weakly and strictly:
+                dom_by = b.get("ACTION", NOT_IDENTIFIED)
                 break
-        out.append(dict(a, DOMINATED=dom_by is not None,
-                        DOMINATED_BY=dom_by or NOT_IDENTIFIED))
+        row = dict(a)
+        if dom_by is not None:
+            row["DOMINATED"] = True
+            row["DOMINATED_BY"] = dom_by
+            row["DOMINANCE_STATUS"] = "DOMINATED"
+        elif incomparable:
+            row["DOMINATED"] = NOT_IDENTIFIED
+            row["DOMINATED_BY"] = NOT_IDENTIFIED
+            row["DOMINANCE_STATUS"] = NOT_IDENTIFIED
+            row["INCOMPARABLE"] = tuple(incomparable)
+        else:
+            row["DOMINATED"] = False
+            row["DOMINATED_BY"] = NOT_IDENTIFIED
+            row["DOMINANCE_STATUS"] = "NOT_DOMINATED"
+        out.append(row)
     return {"ROWS": out,
-            "DOMINATED_COUNT": sum(1 for r in out if r["DOMINATED"]),
-            "WHY": ("an action with no higher expected return and higher risk "
-                    "or capital use never deserves consideration, so removing "
-                    "it shrinks the decision space for free")}
+            "AXES": axes,
+            "DOMINATED_COUNT": sum(1 for r in out
+                                   if r["DOMINANCE_STATUS"] == "DOMINATED"),
+            "NOT_IDENTIFIED_COUNT": sum(
+                1 for r in out if r["DOMINANCE_STATUS"] == NOT_IDENTIFIED),
+            "WHY": ("an action Pareto-dominated on every axis at once never "
+                    "deserves consideration. One that merely returns more "
+                    "while consuming far more capital does not dominate -- "
+                    "it trades off, and the trade-off is the caller's to "
+                    "make"),
+            "A_MISSING_AXIS_IS_NOT_A_TIE": (
+                "dropping an axis nobody supplied would silently declare the "
+                "two actions equal on it")}
 
 
 def fill_selection_exposure(ev_row, sens=None, be=None):
     """Does this row publish the fill-selection width beside its answer?
 
     Satisfied by the three quantile EVs, OR by a sensitivity row naming the
-    term, OR by a break-even solved on it. Fails closed: a row that carries
-    the term and shows none of the three is REPORT_INCOMPLETE.
+    term, OR by a break-even solved on it -- but ONLY when that artifact
+    carries the SAME EVALUATION_ID. ACTION alone is not enough: the same
+    action at a different price, size, term manifest or prior version is a
+    different decision, and its width is not this row's width.
     """
     row = ev_row or {}
     status = row.get("FILL_SELECTION_STATUS", NOT_IDENTIFIED)
@@ -703,17 +1179,14 @@ def fill_selection_exposure(ev_row, sens=None, be=None):
                 "FILL_SELECTION_STATUS": status,
                 "REPORT_OK": True,
                 "ABSENT_IS_EXCLUDED_NOT_ZERO": ABSENT_IS_EXCLUDED_NOT_ZERO}
-    # An artifact only discharges the requirement for the row it BELONGS to.
-    # Without this, a sensitivity run on a different action -- or on the same
-    # action with different terms -- satisfied the gate, so the width shown
-    # to the reader described a quote nobody was deciding about.
     act = row.get("ACTION")
+    eid = row.get("EVALUATION_ID")
 
     def _bound(art):
         if not art:
             return False
-        a = art.get("ACTION")
-        return a is not None and act is not None and a == act
+        a_eid = art.get("EVALUATION_ID")
+        return eid is not None and a_eid is not None and a_eid == eid
 
     have_q = all(isinstance(row.get(k), (int, float))
                  for k in REQUIRED_FILL_SELECTION_EXPOSURE)
@@ -734,14 +1207,18 @@ def fill_selection_exposure(ev_row, sens=None, be=None):
         "EXPOSURE_REQUIRED": True,
         "FILL_SELECTION_STATUS": status,
         "ACTION": act if act is not None else NOT_IDENTIFIED,
+        "EVALUATION_ID": eid if eid is not None else NOT_IDENTIFIED,
+        "EVALUATION_ID_FIELDS": EVALUATION_ID_FIELDS,
+        "ACTION_ALONE_IS_NOT_AN_EVALUATION": ACTION_ALONE_IS_NOT_AN_EVALUATION,
         "HAS_QUANTILE_EVS": have_q,
         "HAS_SENSITIVITY_ROW": have_sens,
         "HAS_BREAK_EVEN": have_be,
         "UNBOUND_ARTIFACTS": tuple(unbound),
         "WHY_UNBOUND_DOES_NOT_COUNT": (
-            "an artifact that names the term but belongs to a different "
-            "ACTION describes a different decision. It is not this row's "
-            "width" if unbound else None),
+            "an artifact that names the term but carries a different "
+            "EVALUATION_ID describes a different decision -- a different "
+            "price, size, term manifest, prior version or convention. It is "
+            "not this row's width" if unbound else None),
         "REPORT_OK": ok,
         "REPORT_STATUS": "COMPLETE" if ok else "REPORT_INCOMPLETE",
         "REQUIRED_FILL_SELECTION_EXPOSURE": REQUIRED_FILL_SELECTION_EXPOSURE,
@@ -754,8 +1231,8 @@ def shadow_decision(action, price, size, ev_row, sens=None, voi=None):
     top = NOT_IDENTIFIED
     if sens and sens.get("TOP_EV_SENSITIVITY_DRIVERS"):
         top = sens["TOP_EV_SENSITIVITY_DRIVERS"][0]
-    elif voi and voi.get("TOP_VALUE_OF_INFORMATION_TERM"):
-        top = voi["TOP_VALUE_OF_INFORMATION_TERM"]
+    elif voi and voi.get("TOP_VARIANCE_ATTRIBUTION_TERM"):
+        top = voi["TOP_VARIANCE_ATTRIBUTION_TERM"]
     fs_keys = {k: ev_row.get(k, NOT_IDENTIFIED)
                for k in REQUIRED_FILL_SELECTION_EXPOSURE}
     return {

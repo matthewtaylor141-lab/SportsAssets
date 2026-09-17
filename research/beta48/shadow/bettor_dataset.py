@@ -369,6 +369,17 @@ WHY_A_TOLERANCE = (
 
 SUBJECT_KEYS = ("MARKET_ID", "CONDITION_ID", "TOKEN_ID", "EVENT_ID")
 
+TIE_BREAK_RULE = "MIN_TUPLE_ABS_TARGET_ERROR_THEN_OBSERVATION_TIMESTAMP"
+
+WHY_A_TIE_NEEDS_A_FROZEN_RULE = (
+    "with a 12 s tolerance and a target at T+60, an observation at T+48 and "
+    "one at T+72 are equidistant. Taking whichever the iteration reached "
+    "first made the scientific label depend on the order rows happened to be "
+    "stored in: the same data, re-sorted, produced a different label. The "
+    "rule is frozen as the minimum of (ABS_TARGET_ERROR, "
+    "OBSERVATION_TIMESTAMP), which prefers the EARLIER observation on an "
+    "exact tie -- earlier because it uses strictly less future information")
+
 A_FORWARD_OBSERVATION_IS_THE_SAME_MARKET_LATER = (
     "matching on timestamp alone would take whichever market happened to be "
     "polled next. The capture interleaves 6 markets 4 s apart, so the nearest "
@@ -419,7 +430,7 @@ def forward_observation(series, t0, horizon_s, tolerance_s=HORIZON_TOLERANCE_S,
     if base is None:
         return None, None
     target = base + datetime.timedelta(seconds=horizon_s)
-    best, best_gap, best_off = None, None, None
+    best, best_key, best_off = None, None, None
     for r in series or ():
         if not _same_subject(origin, r):
             continue                       # never another market's book
@@ -430,8 +441,11 @@ def forward_observation(series, t0, horizon_s, tolerance_s=HORIZON_TOLERANCE_S,
         gap = abs(off)
         if gap > tolerance_s:
             continue
-        if best_gap is None or gap < best_gap:
-            best, best_gap, best_off = r, gap, off
+        # FROZEN TIE RULE: (ABS_TARGET_ERROR, OBSERVATION_TIMESTAMP).
+        # Deterministic, and independent of the order `series` arrives in.
+        key = (gap, t)
+        if best_key is None or key < best_key:
+            best, best_key, best_off = r, key, off
     return best, best_off
 
 

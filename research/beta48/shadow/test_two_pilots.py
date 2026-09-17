@@ -196,13 +196,19 @@ def test_a_baseline_without_its_input_returns_none():
 def test_scoring_reports_how_many_rows_each_predictor_could_price():
     # 30S, not 5S: the 5-second horizon is UNOBSERVABLE at the V1 capture
     # cadence and score_baselines() now refuses it outright.
-    rows = [{"MID_MOVE_30S": 0.01, "ORDER_BOOK_IMBALANCE": 0.5,
-             "MICROPRICE_MINUS_MID": None},
-            {"MID_MOVE_30S": -0.01, "ORDER_BOOK_IMBALANCE": None,
-             "MICROPRICE_MINUS_MID": -0.002}]
-    out = MS.score_baselines(rows, "MID_MOVE_30S")
+    # Label provenance (_STATUS) is required, and a dimensionless baseline
+    # needs a declared unit transformation before it may predict at all.
+    rows = [{"MID_MOVE_30S": 0.01, "MID_MOVE_30S_STATUS": "PRESENT",
+             "ORDER_BOOK_IMBALANCE": 0.5, "MICROPRICE_MINUS_MID": None},
+            {"MID_MOVE_30S": -0.01, "MID_MOVE_30S_STATUS": "PRESENT",
+             "ORDER_BOOK_IMBALANCE": None, "MICROPRICE_MINUS_MID": -0.002}]
+    out = MS.score_baselines(
+        rows, "MID_MOVE_30S", min_coverage_pct=50.0, baseline_scale=0.01,
+        baseline_scale_source="PREDECLARED_FIXED_TRANSFORMATION")
     assert out["BY_PREDICTOR"]["B0_NO_CHANGE"]["N_SCORED"] == 2
     assert out["BY_PREDICTOR"]["B4_SIMPLE_BOOK_IMBALANCE"]["N_SCORED"] == 1
+    assert out["BY_PREDICTOR"]["B4_SIMPLE_BOOK_IMBALANCE"][
+        "ABSTAINED_ROWS"] == 1
     assert out["A_MODEL_MUST_BEAT_ALL_BASELINES"] is True
 
 

@@ -62,6 +62,7 @@ def drift(reference, recent, monitor="FEATURE_DRIFT", z_sudden=3.0,
         # value looks like, so no z-score exists. Reported, never assumed calm.
         return {"MONITOR": monitor, "DRIFT_KIND": NOT_IDENTIFIED,
                 "DRIFT_DETECTED": NOT_IDENTIFIED,
+                "DRIFT_STATUS": "NOT_IDENTIFIED",
                 "STATUS": "INSUFFICIENT_DATA",
                 "WHY_NOT_CALM": ("an unmeasurable drift check is not a "
                                  "passing one"),
@@ -98,6 +99,7 @@ def drift(reference, recent, monitor="FEATURE_DRIFT", z_sudden=3.0,
         "GRADUAL_THRESHOLD_SD": gradual_sd,
         "DRIFT_KIND": kind,
         "DRIFT_DETECTED": kind != "NONE",
+        "DRIFT_STATUS": "DETECTED" if kind != "NONE" else "NOT_DETECTED",
         "SUDDEN_AND_GRADUAL_ARE_DIFFERENT": SUDDEN_AND_GRADUAL_ARE_DIFFERENT,
     }
 
@@ -115,10 +117,55 @@ DRIFT_NEVER_AUTO_DEPLOYS = (
     "gate before it serves")
 
 
+DRIFT_STATUSES = ("DETECTED", "NOT_DETECTED", "NOT_IDENTIFIED")
+
+WHY_A_TRI_STATE_NEEDS_AN_ENUM = (
+    "drift() returns DETECTED, NOT_DETECTED or NOT_IDENTIFIED, and "
+    "NOT_IDENTIFIED is a non-empty string. `if d.get(\"DRIFT_DETECTED\")` is "
+    "therefore TRUE for a monitor that could not reach a verdict, so a "
+    "monitor with too little data fired the drift response as though drift "
+    "had been observed. Only DRIFT_STATUS == DETECTED enters the fired set")
+
+UNDETERMINED_IS_NOT_CALM = (
+    "a monitor that could not decide is not evidence of stability. It is "
+    "surfaced separately as UNDETERMINED_MONITORS with its own fail-closed "
+    "policy, rather than being counted as either drift or its absence")
+
+UNDETERMINED_POLICY = ("DO_NOT_FIRE_THE_DRIFT_RESPONSE",
+                       "DO_NOT_TREAT_AS_STABLE",
+                       "RAISE_DATA_SUFFICIENCY_FLAG",
+                       "MODEL_TRUST_MAY_NOT_INCREASE")
+
+
+def _drift_status(d):
+    """Strict. An old row carrying only the boolean is read conservatively."""
+    st = (d or {}).get("DRIFT_STATUS")
+    if st in DRIFT_STATUSES:
+        return st
+    legacy = (d or {}).get("DRIFT_DETECTED")
+    if legacy is True:
+        return "DETECTED"
+    if legacy is False:
+        return "NOT_DETECTED"
+    return "NOT_IDENTIFIED"
+
+
 def drift_response(drift_rows):
-    fired = [d for d in drift_rows or () if d.get("DRIFT_DETECTED")]
+    rows = list(drift_rows or ())
+    fired = [d for d in rows if _drift_status(d) == "DETECTED"]
+    undetermined = [d for d in rows if _drift_status(d) == "NOT_IDENTIFIED"]
     if not fired:
-        return {"DRIFT_DETECTED": False, "RESPONSES": [],
+        return {"DRIFT_DETECTED": False,
+                "DRIFT_STATUS": ("NOT_IDENTIFIED" if undetermined
+                                 else "NOT_DETECTED"),
+                "RESPONSES": [],
+                "UNDETERMINED_MONITORS": [d.get("MONITOR") for d
+                                          in undetermined],
+                "UNDETERMINED_POLICY": (UNDETERMINED_POLICY if undetermined
+                                        else ()),
+                "UNDETERMINED_IS_NOT_CALM": UNDETERMINED_IS_NOT_CALM,
+                "WHY_A_TRI_STATE_NEEDS_AN_ENUM":
+                    WHY_A_TRI_STATE_NEEDS_AN_ENUM,
                 "AUTO_DEPLOY": False}
     resp = ["LOWER_MODEL_TRUST", "WIDEN_UNCERTAINTY_BUFFER"]
     if any(d.get("DRIFT_KIND") == "SUDDEN" for d in fired):
@@ -127,7 +174,11 @@ def drift_response(drift_rows):
         resp += ["REDUCE_ELIGIBLE_SIZE", "TRIGGER_CHALLENGER_RETRAIN"]
     return {
         "DRIFT_DETECTED": True,
+        "DRIFT_STATUS": "DETECTED",
         "MONITORS_FIRED": [d["MONITOR"] for d in fired],
+        "UNDETERMINED_MONITORS": [d.get("MONITOR") for d in undetermined],
+        "UNDETERMINED_POLICY": (UNDETERMINED_POLICY if undetermined else ()),
+        "WHY_A_TRI_STATE_NEEDS_AN_ENUM": WHY_A_TRI_STATE_NEEDS_AN_ENUM,
         "RESPONSES": resp,
         "AUTO_DEPLOY": False,
         "DRIFT_NEVER_AUTO_DEPLOYS": DRIFT_NEVER_AUTO_DEPLOYS,

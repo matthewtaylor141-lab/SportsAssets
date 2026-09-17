@@ -274,11 +274,12 @@ def test_no_module_constant_supplies_an_interaction_event_threshold():
     assert ED.DERIVATION_FLOOR_EVENTS == 1
 
 
-def test_the_ladder_cutoffs_are_declared_a_separate_open_question():
-    """edge_row()'s 30/200 label a status; they grant no permission."""
-    assert "STATUS LABEL" in ED.LADDER_THRESHOLDS_ARE_A_SEPARATE_OPEN_QUESTION
+def test_the_ladder_no_longer_assigns_an_evidential_status():
+    """SUPERSEDED by the independent audit: a count is not a finding."""
+    assert "SUPERSEDED" in ED.LADDER_THRESHOLDS_ARE_A_SEPARATE_OPEN_QUESTION
     row = ED.edge_row("FILL_EDGE", estimate=0.001, oos_event_n=250)
-    assert row["STATUS"] == "REPLICATED"
+    assert row["STATUS"] == "NOT_IDENTIFIED"
+    assert row["SAMPLE_SIZE_TIER"] == "LARGE_EVENT_SAMPLE"
     assert "MAY_ESTIMATE" not in row
 
 
@@ -287,11 +288,19 @@ def test_the_ladder_cutoffs_are_declared_a_separate_open_question():
 # =========================================================================
 
 def _fs_terms(**over):
+    # Every economic term is RESOLVED: supplied, or explicitly declared
+    # KNOWN_ZERO / NOT_APPLICABLE. An absent term is NOT_IDENTIFIED and would
+    # (correctly) block ACTION_EV_STATUS = IDENTIFIED.
     t = {"P_FILL": Dist("BETA", {"alpha": 2.0, "beta": 20.0}),
          "VALUE_IF_FILL": Dist("NORMAL", {"mu": 0.004, "sigma": 0.003}),
          "TOXICITY": Dist("NORMAL", {"mu": 0.0, "sigma": 0.006}),
          "FILL_SELECTION_EFFECT": Dist("NORMAL", {"mu": 0.0,
-                                                  "sigma": 0.004})}
+                                                  "sigma": 0.004}),
+         "VALUE_IF_NO_FILL_STATE": "KNOWN_ZERO",
+         "FEE_STATE": "KNOWN_ZERO",
+         "REBATE_STATE": "NOT_APPLICABLE",
+         "INVENTORY_COST_STATE": "KNOWN_ZERO",
+         "EXIT_COST_STATE": "KNOWN_ZERO"}
     t.update(over)
     return t
 
@@ -527,7 +536,8 @@ import microstructure_v1 as MS
 
 def test_the_target_builder_refuses_the_unobservable_horizon():
     """The declaration lived in bettor_dataset; the builder ignored it."""
-    ticks = [{"REQUEST_UTC": "2026-09-17T18:0%d:%02dZ" % divmod(s, 60),
+    ticks = [{"MARKET_ID": "m1",
+              "REQUEST_UTC": "2026-09-17T18:0%d:%02dZ" % divmod(s, 60),
               "BEST_BID": 0.40 + i * 0.01, "BEST_ASK": 0.42 + i * 0.01}
              for i, s in enumerate((0, 24, 48, 72, 96))]
     rows, meta = MS.build_targets(ticks, horizons=(5, 30))
@@ -540,7 +550,8 @@ def test_the_target_builder_refuses_the_unobservable_horizon():
 
 def test_the_thirty_second_label_is_nearest_not_first_at_or_after():
     """First-at-or-after resolved +30s to +48s -- a longer horizon."""
-    ticks = [{"REQUEST_UTC": "2026-09-17T18:0%d:%02dZ" % divmod(s, 60),
+    ticks = [{"MARKET_ID": "m1",
+              "REQUEST_UTC": "2026-09-17T18:0%d:%02dZ" % divmod(s, 60),
               "BEST_BID": 0.40 + i * 0.01, "BEST_ASK": 0.42 + i * 0.01}
              for i, s in enumerate((0, 24, 48, 72, 96))]
     rows, _ = MS.build_targets(ticks, horizons=(30,))
