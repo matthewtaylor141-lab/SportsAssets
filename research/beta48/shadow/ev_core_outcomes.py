@@ -189,12 +189,41 @@ def moneyline_winner(records, home_code, away_code):
     return None
 
 
+def _empty_reconstruction(max_goals):
+    """The full report shape, with every recoverable quantity refused."""
+    return {
+        "EVENT_KEY": NOT_IDENTIFIED,
+        "LEAGUE": NOT_IDENTIFIED,
+        "HOME_CODE": NOT_IDENTIFIED,
+        "AWAY_CODE": NOT_IDENTIFIED,
+        "DATE": NOT_IDENTIFIED,
+        "RECONSTRUCTION_STATUS": STATUS_NO_CONSTRAINTS,
+        "HOME_GOALS": NOT_IDENTIFIED,
+        "AWAY_GOALS": NOT_IDENTIFIED,
+        "TOTAL_GOALS": NOT_IDENTIFIED,
+        "MARGIN": NOT_IDENTIFIED,
+        "WINNER": NOT_IDENTIFIED,
+        "BTTS": NOT_IDENTIFIED,
+        "SURVIVING_SCORES": NOT_IDENTIFIED,
+        "SURVIVING_SAMPLE": [],
+        "CONSTRAINTS_APPLIED": [],
+        "CONTRACTS_USED": 0,
+        "MAX_GOALS_SEARCHED": max_goals,
+        "LABEL_SOURCE": LABEL_SOURCE,
+        "NOT_AVAILABLE_AT_DECISION_TIME": NOT_AVAILABLE_AT_DECISION_TIME,
+    }
+
+
 def reconstruct(records, max_goals=MAX_GOALS):
     """Recover one fixture's score from its settled contract set."""
     records = [r for r in records if r.get("resolved") and r.get("market_slug")]
     if not records:
-        return {"RECONSTRUCTION_STATUS": STATUS_NO_CONSTRAINTS,
-                "CONTRACTS_USED": 0, "LABEL_SOURCE": LABEL_SOURCE}
+        # A fixture with no settled contract still has to answer every question
+        # the full shape answers, or an aggregator that reads TOTAL_GOALS raises
+        # KeyError on exactly the fixtures it knows least about. Refusing with
+        # NOT_IDENTIFIED in every slot is the fail-closed shape; a short dict is
+        # a different kind of missing and callers cannot tell it apart.
+        return _empty_reconstruction(max_goals)
 
     key = event_key(records[0]["market_slug"])
     m = EVENT_RE.match(records[0]["market_slug"])
