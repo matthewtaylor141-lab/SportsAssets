@@ -201,6 +201,107 @@ LABEL_STATUS_VALUES = ("PRESENT", "MISSING")
 # How far past the nominal horizon an observation may sit and still count.
 # Declared here, before any capture, and never widened to rescue a label.
 HORIZON_TOLERANCE_S = 12.0
+
+# --- The V1 capture cannot measure the 5-second horizon. -------------------
+#
+# The frozen capture revisits each market at ~24 s (4.0 s interval x 6
+# markets). The nearest observation strictly after T sits ~19 s from a T+5s
+# target, past the 12 s tolerance. So MID_MOVE_5S is MISSING BY CONSTRUCTION.
+#
+# This is a property of the CAPTURE DESIGN, not a gap in the data, and it is
+# reported permanently rather than repaired.
+
+V1_NOMINAL_REVISIT_S = 24.0
+
+HORIZON_STATUS_V1 = {
+    5: "UNOBSERVABLE_AT_V1_CAPTURE_FREQUENCY",
+    30: "OBSERVABLE",
+    60: "OBSERVABLE",
+    300: "OBSERVABLE",
+}
+
+FIVE_SECOND_HORIZON_STATUS = "UNOBSERVABLE_AT_V1_CAPTURE_FREQUENCY"
+
+WHY_5S_IS_UNOBSERVABLE = (
+    "at a ~24 s revisit the nearest observation strictly after T is ~19 s "
+    "from a T+5s target, outside the 12 s tolerance. The horizon is not "
+    "sparsely measured, it is UNMEASURED")
+
+FORBIDDEN_5S_REPAIRS = (
+    "INTERPOLATE_ACROSS_THE_GAP",
+    "WIDEN_THE_TOLERANCE_AFTER_THE_FACT",
+    "SUBSTITUTE_PLUS_24S_AND_CALL_IT_PLUS_5S",
+    "TRAIN_A_5_SECOND_MODEL",
+    "SCORE_A_5_SECOND_CHALLENGER",
+)
+
+WHY_NO_REPAIR = (
+    "every one of these produces a 5-second result from data that contains no "
+    "5-second information. Substituting +24s and calling it +5s is the most "
+    "tempting because it yields a full column of numbers, and it is the "
+    "worst because nothing downstream can tell the difference")
+
+V2_DERIVES_CADENCE_FROM_HORIZONS = (
+    "for V2, poll cadence is DERIVED from the horizons the experiment intends "
+    "to measure -- not chosen first and then discovered to exclude one. V1 is "
+    "not modified to fix this")
+
+# A horizon must clear this before any model is scored on it.
+MIN_LABEL_COVERAGE_PCT = 50.0
+
+
+def horizon_label_coverage_gate(rows, horizon_s, min_coverage_pct=None):
+    """May a model be evaluated on this horizon at all? Fails closed.
+
+    Checks the DECLARED status first (a horizon unobservable by construction
+    is refused regardless of what the rows happen to contain), then measured
+    label coverage.
+    """
+    min_coverage_pct = (MIN_LABEL_COVERAGE_PCT if min_coverage_pct is None
+                        else min_coverage_pct)
+    declared = HORIZON_STATUS_V1.get(horizon_s)
+    if declared and declared != "OBSERVABLE":
+        return {
+            "HORIZON_S": horizon_s,
+            "HORIZON_STATUS": declared,
+            "HORIZON_LABEL_COVERAGE_GATE": "FAIL",
+            "MAY_EVALUATE": False,
+            "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN",
+            "WHY": WHY_5S_IS_UNOBSERVABLE if horizon_s == 5 else declared,
+            "FORBIDDEN_REPAIRS": FORBIDDEN_5S_REPAIRS,
+            "WHY_NO_REPAIR": WHY_NO_REPAIR,
+        }
+    key = "%dS" % horizon_s
+    total = 0
+    present = 0
+    for r in rows or ():
+        st = (r.get("LABEL_STATUS") or {})
+        if key not in st:
+            continue
+        total += 1
+        present += 1 if st[key] == "PRESENT" else 0
+    if not total:
+        return {"HORIZON_S": horizon_s,
+                "HORIZON_LABEL_COVERAGE_GATE": "FAIL",
+                "MAY_EVALUATE": False,
+                "LABEL_COVERAGE_PCT": NOT_IDENTIFIED,
+                "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN",
+                "WHY": "no row carried a label status for this horizon"}
+    cov = 100.0 * present / total
+    ok = cov >= min_coverage_pct
+    return {
+        "HORIZON_S": horizon_s,
+        "HORIZON_STATUS": declared or NOT_IDENTIFIED,
+        "LABEL_COVERAGE_PCT": round(cov, 3),
+        "MIN_LABEL_COVERAGE_PCT": min_coverage_pct,
+        "LABELLED": present, "CANDIDATE_ROWS": total,
+        "HORIZON_LABEL_COVERAGE_GATE": "PASS" if ok else "FAIL",
+        "MAY_EVALUATE": ok,
+        "RESULT": (None if ok
+                   else "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"),
+    }
+
+
 WHY_A_TOLERANCE = (
     "the capture samples on a grid with a ~24 s nominal revisit, so an exact "
     "T+5s observation will rarely exist. A bounded tolerance is honest; "
@@ -420,6 +521,14 @@ def describe():
             NO_INTERPOLATION_BEYOND_THE_HORIZON,
         "HORIZON_TOLERANCE_S": HORIZON_TOLERANCE_S,
         "WHY_A_TOLERANCE": WHY_A_TOLERANCE,
+        "V1_NOMINAL_REVISIT_S": V1_NOMINAL_REVISIT_S,
+        "HORIZON_STATUS_V1": dict(HORIZON_STATUS_V1),
+        "FIVE_SECOND_HORIZON_STATUS": FIVE_SECOND_HORIZON_STATUS,
+        "WHY_5S_IS_UNOBSERVABLE": WHY_5S_IS_UNOBSERVABLE,
+        "FORBIDDEN_5S_REPAIRS": FORBIDDEN_5S_REPAIRS,
+        "WHY_NO_REPAIR": WHY_NO_REPAIR,
+        "V2_DERIVES_CADENCE_FROM_HORIZONS": V2_DERIVES_CADENCE_FROM_HORIZONS,
+        "MIN_LABEL_COVERAGE_PCT": MIN_LABEL_COVERAGE_PCT,
         "RAW_MOVEMENT_IS_INSUFFICIENT": RAW_MOVEMENT_IS_INSUFFICIENT,
         "RETENTION_METRICS": RETENTION_METRICS,
         "THIS_IS_A_BUSINESS_ASSET": THIS_IS_A_BUSINESS_ASSET,

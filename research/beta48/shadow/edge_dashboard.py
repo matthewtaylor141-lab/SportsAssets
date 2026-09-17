@@ -159,18 +159,173 @@ EDGE_INTERACTION_REQUIRES_N = (
     "external consensus agrees. But an interaction estimated on a handful of "
     "events is data mining. Interactions require their own sufficient event N")
 
-MIN_EVENTS_FOR_AN_INTERACTION = 200
+# --- CORRECTION. The interaction threshold was never earned. ---------------
+
+EDGE_INTERACTION_STATUS = "BUILT_THRESHOLD_NOT_IDENTIFIED_PENDING_POWER_ANALYSIS"
+
+EARLIER_THRESHOLD_SAID = (
+    "an earlier build fixed MIN_EVENTS_FOR_AN_INTERACTION at 200 and returned "
+    "a boolean from it. That is retracted. 200 was a round number chosen for "
+    "safety and then presented as scientific sufficiency")
+
+WHY_A_ROUND_N_IS_NOT_SUFFICIENCY = (
+    "a safety heuristic and a power analysis produce the same shape of "
+    "answer -- an integer -- and are not the same kind of claim. A round N "
+    "cannot be wrong in a way anyone can check, because it was never derived "
+    "from an effect size, a variance or a target. Sufficiency is a property "
+    "of a design, not of a number that feels large")
+
+POWER_ANALYSIS_INPUTS = (
+    "INDEPENDENT_EVENT_N",
+    "INTERACTION_DEGREES_OF_FREEDOM",
+    "EFFECT_SIZE_OF_INTEREST",
+    "EVENT_LEVEL_VARIANCE",
+    "REGIME_SUPPORT",
+    "PROSPECTIVE_PRECISION_OR_POWER_TARGET",
+)
+
+REGIME_SUPPORT_FIELDS = ("REGIMES_REQUIRED", "REGIMES_WITH_SUPPORT")
+
+POWER_TARGET_FIELDS = ("ALPHA", "POWER")
+
+LADDER_THRESHOLDS_ARE_A_SEPARATE_OPEN_QUESTION = (
+    "edge_row()'s 30/200 cutoffs name a STATUS LABEL on a ladder. They do not "
+    "grant permission to estimate anything, and this correction does not "
+    "cover them. That they are also unearned as sufficiency claims is "
+    "recorded here rather than silently repaired")
 
 
-def interaction(name, event_n=0):
-    ok = event_n >= MIN_EVENTS_FOR_AN_INTERACTION
-    return {"INTERACTION": name, "EVENT_N": event_n,
-            "MAY_ESTIMATE": ok,
-            "MIN_EVENTS_FOR_AN_INTERACTION": MIN_EVENTS_FOR_AN_INTERACTION,
-            "EDGE_INTERACTION_REQUIRES_N": EDGE_INTERACTION_REQUIRES_N,
-            "WHY_NOT": (None if ok else
-                        "%d events cannot support an interaction estimate; "
-                        "that is subgroup mining" % event_n)}
+def required_events_for_interaction(effect_size_of_interest=None,
+                                    event_level_variance=None,
+                                    interaction_degrees_of_freedom=None,
+                                    power_target=None):
+    """Derive the event N a specific interaction needs. Nothing is assumed.
+
+    Every term comes from the caller. If any is missing the answer is
+    NOT_IDENTIFIED -- there is no default effect size and no default
+    variance, and substituting one would rebuild the round number this
+    correction removed.
+    """
+    missing = []
+    if not isinstance(effect_size_of_interest, (int, float)) \
+            or effect_size_of_interest == 0:
+        missing.append("EFFECT_SIZE_OF_INTEREST")
+    if not isinstance(event_level_variance, (int, float)) \
+            or event_level_variance <= 0:
+        missing.append("EVENT_LEVEL_VARIANCE")
+    if not isinstance(interaction_degrees_of_freedom, int) \
+            or interaction_degrees_of_freedom < 1:
+        missing.append("INTERACTION_DEGREES_OF_FREEDOM")
+    tgt = power_target or {}
+    alpha = tgt.get("ALPHA")
+    power = tgt.get("POWER")
+    if not isinstance(alpha, (int, float)) or not 0 < alpha < 1 \
+            or not isinstance(power, (int, float)) or not 0 < power < 1:
+        missing.append("PROSPECTIVE_PRECISION_OR_POWER_TARGET")
+    if missing:
+        return {"REQUIRED_EVENT_N": NOT_IDENTIFIED,
+                "MISSING_INPUTS": tuple(missing),
+                "POWER_ANALYSIS_INPUTS": POWER_ANALYSIS_INPUTS,
+                "WHY_A_ROUND_N_IS_NOT_SUFFICIENCY":
+                    WHY_A_ROUND_N_IS_NOT_SUFFICIENCY}
+    import math
+    from statistics import NormalDist
+    nd = NormalDist()
+    df = interaction_degrees_of_freedom
+    # df enters as multiplicity: an interaction with df contrasts is df
+    # simultaneous tests, so the per-contrast alpha is split across them.
+    alpha_per_contrast = alpha / df
+    z_a = nd.inv_cdf(1.0 - alpha_per_contrast / 2.0)
+    z_b = nd.inv_cdf(power)
+    n = ((z_a + z_b) ** 2) * float(event_level_variance) \
+        / (float(effect_size_of_interest) ** 2)
+    return {
+        "REQUIRED_EVENT_N": int(math.ceil(n)),
+        "INPUTS_USED": {"EFFECT_SIZE_OF_INTEREST": effect_size_of_interest,
+                        "EVENT_LEVEL_VARIANCE": event_level_variance,
+                        "INTERACTION_DEGREES_OF_FREEDOM": df,
+                        "ALPHA": alpha, "POWER": power,
+                        "ALPHA_PER_CONTRAST": alpha_per_contrast},
+        "APPROXIMATION": (
+            "two-sided normal approximation for one interaction contrast, "
+            "Bonferroni-split across the interaction's degrees of freedom"),
+        "ASSUMPTIONS": (
+            "EVENT_LEVEL_VARIANCE is the per-INDEPENDENT-EVENT variance of "
+            "the interaction contrast estimator's numerator, not the "
+            "per-ROW variance. Rows inside one event are not independent, "
+            "so a row-level variance would understate the requirement",
+            "the effect size is the smallest interaction worth acting on, "
+            "chosen before looking at the data",
+            "this is a design calculation, not a guarantee: meeting N means "
+            "the design could detect the stated effect, not that any "
+            "interaction found is real"),
+        "DERIVED_NOT_ASSERTED": True,
+    }
+
+
+def interaction(name, event_n=0, effect_size_of_interest=None,
+                event_level_variance=None,
+                interaction_degrees_of_freedom=None,
+                regime_support=None, power_target=None):
+    """May this interaction be estimated? Default answer: NOT_IDENTIFIED.
+
+    Eligibility is the output of a power analysis over the caller's own
+    design terms. With no power analysis there is no threshold, and the
+    honest answer is that we do not know -- not a boolean read off a round
+    number.
+    """
+    req = required_events_for_interaction(
+        effect_size_of_interest=effect_size_of_interest,
+        event_level_variance=event_level_variance,
+        interaction_degrees_of_freedom=interaction_degrees_of_freedom,
+        power_target=power_target)
+    out = {"INTERACTION": name,
+           "INDEPENDENT_EVENT_N": event_n,
+           "EDGE_INTERACTION_STATUS": EDGE_INTERACTION_STATUS,
+           "POWER_ANALYSIS": req,
+           "POWER_ANALYSIS_INPUTS": POWER_ANALYSIS_INPUTS,
+           "EDGE_INTERACTION_REQUIRES_N": EDGE_INTERACTION_REQUIRES_N,
+           "WHY_A_ROUND_N_IS_NOT_SUFFICIENCY":
+               WHY_A_ROUND_N_IS_NOT_SUFFICIENCY,
+           "EARLIER_THRESHOLD_SAID": EARLIER_THRESHOLD_SAID}
+
+    # Regime support is supplied, never assumed -- an interaction estimated
+    # inside one regime is an interaction with a regime, uncontrolled.
+    rs = regime_support if isinstance(regime_support, dict) else None
+    req_reg = (rs or {}).get("REGIMES_REQUIRED")
+    have_reg = (rs or {}).get("REGIMES_WITH_SUPPORT")
+    regime_ok = None
+    if isinstance(req_reg, int) and req_reg >= 1 \
+            and isinstance(have_reg, int) and have_reg >= 0:
+        regime_ok = have_reg >= req_reg
+    out["REGIME_SUPPORT"] = (
+        {"REGIMES_REQUIRED": req_reg, "REGIMES_WITH_SUPPORT": have_reg,
+         "REGIME_SUPPORT_SUFFICIENT": regime_ok}
+        if regime_ok is not None else NOT_IDENTIFIED)
+    out["REGIME_SUPPORT_FIELDS"] = REGIME_SUPPORT_FIELDS
+
+    if req["REQUIRED_EVENT_N"] == NOT_IDENTIFIED or regime_ok is None:
+        blocked = list(req.get("MISSING_INPUTS", ()))
+        if regime_ok is None:
+            blocked.append("REGIME_SUPPORT")
+        if not isinstance(event_n, int) or event_n < 0:
+            blocked.append("INDEPENDENT_EVENT_N")
+        out["MAY_ESTIMATE"] = NOT_IDENTIFIED
+        out["BLOCKED_ON"] = tuple(blocked)
+        out["WHY_NOT"] = (
+            "no power analysis has been done for this interaction, so there "
+            "is no threshold to compare %s events against. NOT_IDENTIFIED is "
+            "the answer, not False and not True" % event_n)
+        return out
+
+    enough_events = int(event_n) >= req["REQUIRED_EVENT_N"]
+    out["MAY_ESTIMATE"] = bool(enough_events and regime_ok)
+    out["REQUIRED_EVENT_N"] = req["REQUIRED_EVENT_N"]
+    out["WHY_NOT"] = None if out["MAY_ESTIMATE"] else (
+        "%d independent events against a derived requirement of %d, regime "
+        "support %s" % (event_n, req["REQUIRED_EVENT_N"],
+                        "sufficient" if regime_ok else "insufficient"))
+    return out
 
 
 # --- Section 39/12. Experiment prioritisation. -----------------------------
@@ -313,6 +468,13 @@ def describe():
         "ATTRIBUTION_NEGATIVE": ATTRIBUTION_NEGATIVE,
         "NOT_ONE_BLENDED_ALPHA": NOT_ONE_BLENDED_ALPHA,
         "EDGE_INTERACTION_REQUIRES_N": EDGE_INTERACTION_REQUIRES_N,
+        "EDGE_INTERACTION_STATUS": EDGE_INTERACTION_STATUS,
+        "POWER_ANALYSIS_INPUTS": POWER_ANALYSIS_INPUTS,
+        "WHY_A_ROUND_N_IS_NOT_SUFFICIENCY":
+            WHY_A_ROUND_N_IS_NOT_SUFFICIENCY,
+        "EARLIER_THRESHOLD_SAID": EARLIER_THRESHOLD_SAID,
+        "LADDER_THRESHOLDS_ARE_A_SEPARATE_OPEN_QUESTION":
+            LADDER_THRESHOLDS_ARE_A_SEPARATE_OPEN_QUESTION,
         "EXPERIMENT_RANK_FORMULA": EXPERIMENT_RANK_FORMULA,
         "MOAT_METRICS": MOAT_METRICS,
         "DASHBOARD_FIELDS": DASHBOARD_FIELDS,

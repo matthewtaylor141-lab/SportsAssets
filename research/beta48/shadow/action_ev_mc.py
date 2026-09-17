@@ -58,6 +58,51 @@ DOUBLE_COUNT_GUARD = (
     "every quote look worse than it is and quietly kills a real edge. The "
     "convention is declared per evaluation and enforced here")
 
+# --- The fill-selection term. ----------------------------------------------
+#
+# FILL_SELECTION_EFFECT is an OPTIONAL term and is deliberately not in
+# EV_TERMS: the core terms are the money paths, this one is an adjustment to
+# VALUE_IF_FILL whose prior is a STRUCTURAL_NONDIRECTIONAL_PRIOR centred at
+# zero with no direction assumed. Its centre being zero is why it must never
+# be collapsed to its mean and forgotten -- read only through the mean it is
+# indistinguishable from not being there at all.
+
+FILL_SELECTION_TERM = "FILL_SELECTION_EFFECT"
+
+ALL_EV_TERMS = EV_TERMS + (FILL_SELECTION_TERM,)
+
+FILL_SELECTION_CONVENTIONS = ("SEPARATE_TERM", "EMBEDDED_IN_VALUE_IF_FILL",
+                              "EXCLUDED")
+
+FILL_SELECTION_SIGN_CONVENTION = (
+    "FILL_SELECTION_MARKOUT_DELTA = MARKOUT_FILLED - "
+    "MATCHED_COUNTERFACTUAL_MARKOUT. POSITIVE is FAVOURABLE to BETTOR, "
+    "NEGATIVE is ADVERSE. It enters VALUE_IF_FILL additively and only when "
+    "the convention says SEPARATE_TERM")
+
+ABSENT_IS_EXCLUDED_NOT_ZERO = (
+    "an absent FILL_SELECTION_EFFECT is recorded as EXCLUDED, never as 0.0. "
+    "Excluded says the EV does not carry the term; zero would say the term "
+    "was carried and found to be nil. A reader cannot recover the difference "
+    "from the number alone, so the number does not get to hide it")
+
+REQUIRED_FILL_SELECTION_EXPOSURE = ("EV_AT_FILL_SELECTION_P10",
+                                    "EV_AT_FILL_SELECTION_P50",
+                                    "EV_AT_FILL_SELECTION_P90")
+
+WIDTH_TRAVELS_WITH_THE_MEAN = (
+    "the prior's centre is zero because no direction is established, not "
+    "because the effect was measured at zero. Any action whose EV materially "
+    "depends on it must therefore publish the EV across the prior's own "
+    "P10/P50/P90 -- or its sensitivity and break-even rows -- so that the "
+    "width is on the page beside the answer")
+
+MATERIALITY_IS_A_SIGN_CHANGE_NOT_A_THRESHOLD = (
+    "materiality here is not a chosen cutoff. The term is material to THIS "
+    "action when the sign of EV differs anywhere across the prior's P10 to "
+    "P90 band -- the decision itself changes. The raw spread is reported "
+    "alongside so a reader can apply their own standard")
+
 NO_GUARANTEED_PROFIT_LANGUAGE = (
     "the engine may report POSTERIOR_EXPECTED_EV_POSITIVE, "
     "ROBUST_TO_CURRENT_UNCERTAINTY or PROSPECTIVELY_REPLICATED. It may never "
@@ -84,12 +129,51 @@ def _q(xs, p):
     return s[i]
 
 
-def _net(p_fill, v_fill, v_nofill, tox, fee, rebate, inv, exit_c, convention):
+def _net(p_fill, v_fill, v_nofill, tox, fee, rebate, inv, exit_c, convention,
+         fs=0.0):
     val = v_fill
     if convention == "SEPARATE_TERM":
         val = val - tox
+    val = val + fs           # signed FAVOURABLE-positive; 0.0 when EXCLUDED
     return (p_fill * val + (1.0 - p_fill) * v_nofill
             + rebate - fee - inv - exit_c * p_fill)
+
+
+def _fill_selection_setup(terms):
+    """Resolve the optional fill-selection term and its convention.
+
+    Absent means EXCLUDED, and EXCLUDED is recorded as such. It contributes
+    0.0 to the arithmetic because the term is not in the model -- which is a
+    different statement from the term being zero, and the status field is
+    where that difference lives.
+    """
+    conv = (terms or {}).get("FILL_SELECTION_CONVENTION")
+    dist = _as_dist((terms or {}).get(FILL_SELECTION_TERM))
+    if conv is not None and conv not in FILL_SELECTION_CONVENTIONS:
+        return {"FILL_SELECTION_STATUS": "UNKNOWN_FILL_SELECTION_CONVENTION",
+                "DECLARED": FILL_SELECTION_CONVENTIONS, "DIST": None,
+                "APPLIES": False}
+    if dist is None:
+        return {
+            "FILL_SELECTION_STATUS": "EXCLUDED_NOT_ZERO",
+            "FILL_SELECTION_CONVENTION": conv or "EXCLUDED",
+            "ABSENT_IS_EXCLUDED_NOT_ZERO": ABSENT_IS_EXCLUDED_NOT_ZERO,
+            "DIST": None, "APPLIES": False,
+        }
+    conv = conv or "SEPARATE_TERM"
+    if conv != "SEPARATE_TERM":
+        return {
+            "FILL_SELECTION_STATUS": "EMBEDDED_IN_VALUE_IF_FILL_NOT_ADDED",
+            "FILL_SELECTION_CONVENTION": conv,
+            "DOUBLE_COUNT_GUARD": DOUBLE_COUNT_GUARD,
+            "DIST": dist, "APPLIES": False,
+        }
+    return {
+        "FILL_SELECTION_STATUS": "CARRIED_AS_SEPARATE_TERM",
+        "FILL_SELECTION_CONVENTION": conv,
+        "FILL_SELECTION_SIGN_CONVENTION": FILL_SELECTION_SIGN_CONVENTION,
+        "DIST": dist, "APPLIES": True,
+    }
 
 
 def action_ev_mc(action, terms, convention="SEPARATE_TERM",
@@ -110,16 +194,30 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
     if convention == "SEPARATE_TERM" and d.get("TOXICITY") is None:
         missing.append("TOXICITY")
 
+    fsel = _fill_selection_setup(terms)
+    if fsel["FILL_SELECTION_STATUS"] == "UNKNOWN_FILL_SELECTION_CONVENTION":
+        return {"ACTION": action,
+                "STATUS": "UNKNOWN_FILL_SELECTION_CONVENTION",
+                "DECLARED": FILL_SELECTION_CONVENTIONS}
+
     unknown = [k for k in EV_TERMS if d.get(k) is None]
     evidence = {k: (terms.get("%s_EVIDENCE_CLASS" % k)
                     or (NOT_IDENTIFIED if d.get(k) is None
                         else ESTIMATED_PRIOR))
                 for k in EV_TERMS}
+    evidence[FILL_SELECTION_TERM] = (
+        terms.get("%s_EVIDENCE_CLASS" % FILL_SELECTION_TERM)
+        or (NOT_IDENTIFIED if fsel["DIST"] is None else ESTIMATED_PRIOR))
 
     base = {
         "ACTION": action,
         "ADVERSE_SELECTION_CONVENTION": convention,
         "DOUBLE_COUNT_GUARD": DOUBLE_COUNT_GUARD,
+        "FILL_SELECTION_STATUS": fsel["FILL_SELECTION_STATUS"],
+        "FILL_SELECTION_CONVENTION": fsel.get("FILL_SELECTION_CONVENTION",
+                                              "EXCLUDED"),
+        "ABSENT_IS_EXCLUDED_NOT_ZERO": ABSENT_IS_EXCLUDED_NOT_ZERO,
+        "WIDTH_TRAVELS_WITH_THE_MEAN": WIDTH_TRAVELS_WITH_THE_MEAN,
         "UNKNOWN_TERMS": unknown,
         "MISSING_CRITICAL_TERMS": sorted(set(missing)),
         "EVIDENCE_CLASS_BY_TERM": evidence,
@@ -150,7 +248,14 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
 
     rng = random.Random(seed)
     zero = Dist("POINT", {"value": 0.0})
+    fs_dist = fsel["DIST"] if fsel["APPLIES"] else None
+    # The three frozen points are computed ONCE from the prior itself, and
+    # the same random draws are reused for each -- common random numbers, so
+    # the three EVs differ only by the fill-selection term.
+    fs_points = ({p: fs_dist.quantile(p) for p in (0.10, 0.50, 0.90)}
+                 if fs_dist is not None else {})
     nets, caps, hours = [], [], []
+    fs_nets = {p: [] for p in fs_points}
     for _ in range(draws):
         pf = min(max(d["P_FILL"].sample(rng), 0.0), 1.0)
         vf = d["VALUE_IF_FILL"].sample(rng)
@@ -160,7 +265,11 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         rb = (d["REBATE"] or zero).sample(rng)
         iv = (d["INVENTORY_COST"] or zero).sample(rng)
         ex = (d["EXIT_COST"] or zero).sample(rng)
-        nets.append(_net(pf, vf, vn, tx, fe, rb, iv, ex, convention))
+        fs = fs_dist.sample(rng) if fs_dist is not None else 0.0
+        nets.append(_net(pf, vf, vn, tx, fe, rb, iv, ex, convention, fs))
+        for p, point in fs_points.items():
+            fs_nets[p].append(
+                _net(pf, vf, vn, tx, fe, rb, iv, ex, convention, point))
         if d["CAPITAL_REQUIRED"] and d["OCCUPANCY_SECONDS"]:
             c = max(d["CAPITAL_REQUIRED"].sample(rng), 0.0)
             s = max(d["OCCUPANCY_SECONDS"].sample(rng), 0.0)
@@ -191,6 +300,31 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         base["EV_P%02d" % int(round(p * 100))] = round(_q(nets, p), 10)
     base["CONSERVATIVE_EV_P10"] = base["EV_P10"]
     base["POSTERIOR_MEAN_EV"] = base["EV_MEAN"]
+
+    # --- The fill-selection width, on the page beside the answer. ----------
+    if fs_points:
+        evs = {}
+        for p in (0.10, 0.50, 0.90):
+            key = "EV_AT_FILL_SELECTION_P%02d" % int(round(p * 100))
+            xs = fs_nets[p]
+            evs[p] = sum(xs) / float(len(xs))
+            base[key] = round(evs[p], 10)
+            base["FILL_SELECTION_P%02d" % int(round(p * 100))] = round(
+                fs_points[p], 10)
+        lo, hi = min(evs.values()), max(evs.values())
+        base["EV_SPREAD_ACROSS_FILL_SELECTION"] = round(hi - lo, 10)
+        base["FILL_SELECTION_FLIPS_THE_SIGN"] = (lo < 0 < hi)
+        base["FILL_SELECTION_MATERIAL_TO_THIS_ACTION"] = (lo < 0 < hi)
+        base["MATERIALITY_IS_A_SIGN_CHANGE_NOT_A_THRESHOLD"] = \
+            MATERIALITY_IS_A_SIGN_CHANGE_NOT_A_THRESHOLD
+        base["REQUIRED_FILL_SELECTION_EXPOSURE"] = \
+            REQUIRED_FILL_SELECTION_EXPOSURE
+    else:
+        for key in REQUIRED_FILL_SELECTION_EXPOSURE:
+            base[key] = fsel["FILL_SELECTION_STATUS"]
+        base["EV_SPREAD_ACROSS_FILL_SELECTION"] = \
+            fsel["FILL_SELECTION_STATUS"]
+        base["FILL_SELECTION_MATERIAL_TO_THIS_ACTION"] = NOT_IDENTIFIED
 
     if caps:
         rates = [nets[i] / (caps[i] * hours[i])
@@ -230,13 +364,22 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
     Returns NO_SOLUTION_IN_RANGE when EV does not cross zero -- which is
     itself informative: no attainable fill rate rescues a losing quote.
     """
-    if unknown_term not in EV_TERMS:
-        return {"STATUS": "UNKNOWN_TERM", "DECLARED": EV_TERMS}
+    if unknown_term not in ALL_EV_TERMS:
+        return {"STATUS": "UNKNOWN_TERM", "DECLARED": ALL_EV_TERMS}
 
+    fsel = _fill_selection_setup(terms)
     means = {}
     for k in EV_TERMS:
         dd = _as_dist(terms.get(k))
         means[k] = 0.0 if dd is None else dd.mean()
+    means[FILL_SELECTION_TERM] = (fsel["DIST"].mean()
+                                  if fsel["APPLIES"] else 0.0)
+    if unknown_term == FILL_SELECTION_TERM and not fsel["APPLIES"] \
+            and fsel["DIST"] is not None:
+        return {"STATUS": "TERM_NOT_CARRIED_SEPARATELY",
+                "FILL_SELECTION_STATUS": fsel["FILL_SELECTION_STATUS"],
+                "WHY": ("solving for a term that is embedded in "
+                        "VALUE_IF_FILL would move it twice")}
     others_missing = [k for k in CRITICAL_TERMS
                       if k != unknown_term and _as_dist(terms.get(k)) is None]
     if others_missing:
@@ -252,7 +395,7 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
         return _net(min(max(m["P_FILL"], 0.0), 1.0), m["VALUE_IF_FILL"],
                     m["VALUE_IF_NO_FILL"], m["TOXICITY"], m["FEE"],
                     m["REBATE"], m["INVENTORY_COST"], m["EXIT_COST"],
-                    convention)
+                    convention, m[FILL_SELECTION_TERM])
 
     f_lo, f_hi = ev_at(lo), ev_at(hi)
     if (f_lo > 0) == (f_hi > 0):
@@ -303,7 +446,9 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
 
 def sensitivity(action, terms, convention="SEPARATE_TERM", seed=DEFAULT_SEED):
     """P25 -> P75 swing in EV attributable to each term, ranked."""
+    fsel = _fill_selection_setup(terms)
     dists = {k: _as_dist(terms.get(k)) for k in EV_TERMS}
+    dists[FILL_SELECTION_TERM] = fsel["DIST"] if fsel["APPLIES"] else None
     if any(dists.get(k) is None for k in CRITICAL_TERMS):
         return {"STATUS": "NOT_FULLY_IDENTIFIED",
                 "MISSING": [k for k in CRITICAL_TERMS
@@ -316,7 +461,7 @@ def sensitivity(action, terms, convention="SEPARATE_TERM", seed=DEFAULT_SEED):
         return _net(min(max(m["P_FILL"], 0.0), 1.0), m["VALUE_IF_FILL"],
                     m["VALUE_IF_NO_FILL"], m["TOXICITY"], m["FEE"],
                     m["REBATE"], m["INVENTORY_COST"], m["EXIT_COST"],
-                    convention)
+                    convention, m[FILL_SELECTION_TERM])
 
     rows = []
     for k, d in dists.items():
@@ -349,7 +494,9 @@ def value_of_information(action, terms, convention="SEPARATE_TERM",
     its mean and measure how much EV variance disappears. The term whose
     resolution removes the most variance is the one worth an experiment.
     """
+    fsel = _fill_selection_setup(terms)
     dists = {k: _as_dist(terms.get(k)) for k in EV_TERMS}
+    dists[FILL_SELECTION_TERM] = fsel["DIST"] if fsel["APPLIES"] else None
     if any(dists.get(k) is None for k in CRITICAL_TERMS):
         return {"STATUS": "NOT_FULLY_IDENTIFIED",
                 "MISSING": [k for k in CRITICAL_TERMS
@@ -452,6 +599,41 @@ def dominated(rows, ev_key="EV_MEAN", risk_key="EV_SD",
                     "it shrinks the decision space for free")}
 
 
+def fill_selection_exposure(ev_row, sens=None, be=None):
+    """Does this row publish the fill-selection width beside its answer?
+
+    Satisfied by the three quantile EVs, OR by a sensitivity row naming the
+    term, OR by a break-even solved on it. Fails closed: a row that carries
+    the term and shows none of the three is REPORT_INCOMPLETE.
+    """
+    row = ev_row or {}
+    status = row.get("FILL_SELECTION_STATUS", NOT_IDENTIFIED)
+    if status != "CARRIED_AS_SEPARATE_TERM":
+        return {"EXPOSURE_REQUIRED": False,
+                "FILL_SELECTION_STATUS": status,
+                "REPORT_OK": True,
+                "ABSENT_IS_EXCLUDED_NOT_ZERO": ABSENT_IS_EXCLUDED_NOT_ZERO}
+    have_q = all(isinstance(row.get(k), (int, float))
+                 for k in REQUIRED_FILL_SELECTION_EXPOSURE)
+    have_sens = bool(sens and any(
+        r.get("TERM") == FILL_SELECTION_TERM
+        for r in (sens.get("TORNADO") or ())))
+    have_be = bool(be and be.get("STATUS") in ("SOLVED", "NO_SOLUTION_IN_RANGE")
+                   and be.get("UNKNOWN_TERM") == FILL_SELECTION_TERM)
+    ok = have_q or have_sens or have_be
+    return {
+        "EXPOSURE_REQUIRED": True,
+        "FILL_SELECTION_STATUS": status,
+        "HAS_QUANTILE_EVS": have_q,
+        "HAS_SENSITIVITY_ROW": have_sens,
+        "HAS_BREAK_EVEN": have_be,
+        "REPORT_OK": ok,
+        "REPORT_STATUS": "COMPLETE" if ok else "REPORT_INCOMPLETE",
+        "REQUIRED_FILL_SELECTION_EXPOSURE": REQUIRED_FILL_SELECTION_EXPOSURE,
+        "WIDTH_TRAVELS_WITH_THE_MEAN": WIDTH_TRAVELS_WITH_THE_MEAN,
+    }
+
+
 def shadow_decision(action, price, size, ev_row, sens=None, voi=None):
     """The shadow output format. SHADOW_ONLY, always."""
     top = NOT_IDENTIFIED
@@ -459,12 +641,19 @@ def shadow_decision(action, price, size, ev_row, sens=None, voi=None):
         top = sens["TOP_EV_SENSITIVITY_DRIVERS"][0]
     elif voi and voi.get("TOP_VALUE_OF_INFORMATION_TERM"):
         top = voi["TOP_VALUE_OF_INFORMATION_TERM"]
+    fs_keys = {k: ev_row.get(k, NOT_IDENTIFIED)
+               for k in REQUIRED_FILL_SELECTION_EXPOSURE}
     return {
         "ACTION": action, "PRICE": price, "SIZE": size,
         "EV_MEAN": ev_row.get("EV_MEAN", NOT_IDENTIFIED),
         "EV_P10": ev_row.get("EV_P10", NOT_IDENTIFIED),
         "EV_P90": ev_row.get("EV_P90", NOT_IDENTIFIED),
         "P_EV_GT_0": ev_row.get("P_EV_GT_0", NOT_IDENTIFIED),
+        "FILL_SELECTION_STATUS": ev_row.get("FILL_SELECTION_STATUS",
+                                            NOT_IDENTIFIED),
+        "FILL_SELECTION_MATERIAL_TO_THIS_ACTION": ev_row.get(
+            "FILL_SELECTION_MATERIAL_TO_THIS_ACTION", NOT_IDENTIFIED),
+        "FILL_SELECTION_EXPOSURE": fill_selection_exposure(ev_row, sens),
         "EV_PER_CAPITAL_HOUR": ev_row.get("EV_PER_CAPITAL_HOUR_MEAN",
                                           NOT_IDENTIFIED),
         "ACTION_EV_STATUS": ev_row.get("ACTION_EV_STATUS", NOT_IDENTIFIED),
@@ -473,15 +662,26 @@ def shadow_decision(action, price, size, ev_row, sens=None, voi=None):
         "STATUS": "SHADOW_ONLY",
         "NO_ORDER_SUBMITTED": True,
         "FORBIDDEN_CLAIMS": FORBIDDEN_CLAIMS,
+        **fs_keys,
     }
 
 
 def describe():
     return {
         "EV_TERMS": EV_TERMS,
+        "ALL_EV_TERMS": ALL_EV_TERMS,
         "CRITICAL_TERMS": CRITICAL_TERMS,
         "ADVERSE_SELECTION_CONVENTIONS": ADVERSE_SELECTION_CONVENTIONS,
         "DOUBLE_COUNT_GUARD": DOUBLE_COUNT_GUARD,
+        "FILL_SELECTION_TERM": FILL_SELECTION_TERM,
+        "FILL_SELECTION_CONVENTIONS": FILL_SELECTION_CONVENTIONS,
+        "FILL_SELECTION_SIGN_CONVENTION": FILL_SELECTION_SIGN_CONVENTION,
+        "ABSENT_IS_EXCLUDED_NOT_ZERO": ABSENT_IS_EXCLUDED_NOT_ZERO,
+        "REQUIRED_FILL_SELECTION_EXPOSURE":
+            REQUIRED_FILL_SELECTION_EXPOSURE,
+        "WIDTH_TRAVELS_WITH_THE_MEAN": WIDTH_TRAVELS_WITH_THE_MEAN,
+        "MATERIALITY_IS_A_SIGN_CHANGE_NOT_A_THRESHOLD":
+            MATERIALITY_IS_A_SIGN_CHANGE_NOT_A_THRESHOLD,
         "BREAK_EVEN_TURNS_UNKNOWNS_INTO_QUESTIONS":
             BREAK_EVEN_TURNS_UNKNOWNS_INTO_QUESTIONS,
         "ROBUSTNESS_THRESHOLD_NOT_CHOSEN": ROBUSTNESS_THRESHOLD_NOT_CHOSEN,

@@ -253,6 +253,51 @@ A_NAME_IS_NOT_A_PRIOR = (
     "entry answers PRIOR_AVAILABLE = YES or NO on its own evidence")
 
 
+# --- CORRECTION. Classify the zero-centred fill-selection prior exactly. ----
+#
+# A symmetric wide prior centred at zero is an acceptable NON-DIRECTIONAL
+# STARTING BELIEF. It is not, and must never be read as, a finding that the
+# effect is zero. The two produce the same point estimate and opposite
+# obligations: a finding licenses ignoring the term, a starting belief
+# obliges carrying its width through every EV that depends on it.
+
+FILL_SELECTION_PRIOR_SOURCE = "STRUCTURAL_NONDIRECTIONAL_PRIOR"
+
+FILL_SELECTION_PRIOR_CLASSIFICATION = {
+    "FILL_SELECTION_PRIOR_SOURCE": FILL_SELECTION_PRIOR_SOURCE,
+    "EVIDENCE_CLASS": ESTIMATED_PRIOR,
+    "PRIOR_STRENGTH": "WEAK",
+    "PRIOR_CENTER": "ZERO",
+    "DIRECTION_ASSUMED": "NO",
+    "BETTOR_NATIVE_OBSERVATIONS": 0,
+}
+
+NOT_EVIDENCE_THAT_THE_EFFECT_IS_ZERO = (
+    "PRIOR_CENTER = ZERO is NOT evidence that FILL_SELECTION_EFFECT = 0. It "
+    "records that no direction has been established, which is a statement "
+    "about our evidence and not about the venue. A measured zero and an "
+    "unmeasured zero share a number and share nothing else")
+
+PRIOR_WIDTH_MUST_REMAIN_VISIBLE = (
+    "the width is the content of this prior. Any consumer that reads only "
+    "the mean sees 0.0 and silently treats the term as absent -- which is the "
+    "exact substitution the evidence-class rule exists to prevent. Every "
+    "shadow action whose EV materially depends on this prior must expose "
+    "EV_AT_FILL_SELECTION_P10 / _P50 / _P90, or the sensitivity and "
+    "break-even outputs, so the width is on the page beside the answer")
+
+POSTERIOR_MAY_MOVE_EITHER_WAY = (
+    "once BETTOR-native fill data exist, the posterior may move ADVERSE or "
+    "FAVOURABLE. Neither direction is a surprise and neither is a failure of "
+    "the prior. A prior that could only be revised one way was a directional "
+    "assumption wearing a symmetric distribution")
+
+EARLIER_SOURCE_LABEL_SAID = (
+    "an earlier build labelled this source PRINCIPLED_LEAST_INFORMATIVE_"
+    "CHOICE. That is superseded by STRUCTURAL_NONDIRECTIONAL_PRIOR, which "
+    "names what the prior IS rather than how it was chosen")
+
+
 def _registry():
     """The priors that exist today, each with its reason.
 
@@ -261,12 +306,14 @@ def _registry():
     """
     reg = {}
 
-    # FILL_SELECTION_EFFECT -- the least-informative defensible choice.
+    # FILL_SELECTION_EFFECT -- a structural non-directional prior. Its centre
+    # is zero because no direction is established, NOT because zero was
+    # measured. See FILL_SELECTION_PRIOR_CLASSIFICATION above.
     reg["FILL_SELECTION_EFFECT"] = make_prior(
         "FILL_SELECTION_EFFECT",
         Dist("NORMAL", {"mu": 0.0, "sigma": 0.004}),
         ESTIMATED_PRIOR, "WEAK",
-        source_type="PRINCIPLED_LEAST_INFORMATIVE_CHOICE",
+        source_type=FILL_SELECTION_PRIOR_SOURCE,
         source_references=("no directional evidence on this venue",),
         source_population="none -- this is a symmetry argument, not a dataset",
         target_population="BETTOR passive fills on this venue",
@@ -279,6 +326,17 @@ def _registry():
             "enough that a half-spread-scale effect in either direction sits "
             "comfortably inside the interval"),
         transfer_risk="HIGH -- this is a symmetry argument, not a measurement")
+    reg["FILL_SELECTION_EFFECT"].update(FILL_SELECTION_PRIOR_CLASSIFICATION)
+    reg["FILL_SELECTION_EFFECT"].update({
+        "NOT_EVIDENCE_THAT_THE_EFFECT_IS_ZERO":
+            NOT_EVIDENCE_THAT_THE_EFFECT_IS_ZERO,
+        "PRIOR_WIDTH_MUST_REMAIN_VISIBLE": PRIOR_WIDTH_MUST_REMAIN_VISIBLE,
+        "POSTERIOR_MAY_MOVE_EITHER_WAY": POSTERIOR_MAY_MOVE_EITHER_WAY,
+        "EARLIER_SOURCE_LABEL_SAID": EARLIER_SOURCE_LABEL_SAID,
+        "REQUIRED_EV_EXPOSURE": ("EV_AT_FILL_SELECTION_P10",
+                                 "EV_AT_FILL_SELECTION_P50",
+                                 "EV_AT_FILL_SELECTION_P90"),
+    })
 
     # MARKET_STATE_TOXICITY -- mechanism-bounded, deliberately wide.
     reg["MARKET_STATE_TOXICITY"] = make_prior(
@@ -484,6 +542,14 @@ def describe():
         "DECLARED_PARAMETERS": DECLARED_PARAMETERS,
         "A_NAME_IS_NOT_A_PRIOR": A_NAME_IS_NOT_A_PRIOR,
         "NO_PRIOR_WITHOUT_A_REASON": NO_PRIOR_WITHOUT_A_REASON,
+        "FILL_SELECTION_PRIOR_SOURCE": FILL_SELECTION_PRIOR_SOURCE,
+        "FILL_SELECTION_PRIOR_CLASSIFICATION":
+            dict(FILL_SELECTION_PRIOR_CLASSIFICATION),
+        "NOT_EVIDENCE_THAT_THE_EFFECT_IS_ZERO":
+            NOT_EVIDENCE_THAT_THE_EFFECT_IS_ZERO,
+        "PRIOR_WIDTH_MUST_REMAIN_VISIBLE": PRIOR_WIDTH_MUST_REMAIN_VISIBLE,
+        "POSTERIOR_MAY_MOVE_EITHER_WAY": POSTERIOR_MAY_MOVE_EITHER_WAY,
+        "EARLIER_SOURCE_LABEL_SAID": EARLIER_SOURCE_LABEL_SAID,
         "REGISTRY_CENSUS": registry_census(),
         "HIERARCHY": HIERARCHY,
         "SHRINKAGE_RULE": SHRINKAGE_RULE,

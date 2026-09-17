@@ -218,8 +218,13 @@ def test_toxicity_is_critical_under_the_separate_convention():
 def test_the_evidence_mix_is_reported():
     r = MC.action_ev_mc("POST_BID", _terms(), draws=2000)
     m = r["EVIDENCE_MIX"]
+    # ALL_EV_TERMS, not EV_TERMS: the optional FILL_SELECTION_EFFECT carries
+    # an evidence class like any other term, and an absent one counts as
+    # UNIDENTIFIED rather than dropping out of the census.
     assert m["MEASURED"] + m["ESTIMATED"] + m["UNIDENTIFIED"] == \
-        len(MC.EV_TERMS)
+        len(MC.ALL_EV_TERMS)
+    assert r["EVIDENCE_CLASS_BY_TERM"]["FILL_SELECTION_EFFECT"] == \
+        "NOT_IDENTIFIED"
 
 
 def test_nothing_is_ever_recommended_in_shadow():
@@ -790,8 +795,28 @@ def test_attribution_is_never_one_blended_number():
 
 
 def test_an_interaction_needs_its_own_event_count():
-    assert ED.interaction("MICROPRICE_X_EXTERNAL", 20)["MAY_ESTIMATE"] is False
-    assert ED.interaction("MICROPRICE_X_EXTERNAL", 500)["MAY_ESTIMATE"] is True
+    """CORRECTED: the count is compared against a DERIVED requirement.
+
+    An earlier build read the answer off a fixed 200. Without a power
+    analysis there is now no threshold to compare against and the answer is
+    NOT_IDENTIFIED; with one, the same 500 events can pass or fail depending
+    on the effect size the experiment is looking for.
+    """
+    assert ED.interaction("MICROPRICE_X_EXTERNAL", 20)["MAY_ESTIMATE"] == \
+        "NOT_IDENTIFIED"
+    assert ED.interaction("MICROPRICE_X_EXTERNAL", 500)["MAY_ESTIMATE"] == \
+        "NOT_IDENTIFIED"
+    design = dict(event_level_variance=0.0004,
+                  interaction_degrees_of_freedom=1,
+                  regime_support={"REGIMES_REQUIRED": 3,
+                                  "REGIMES_WITH_SUPPORT": 3},
+                  power_target={"ALPHA": 0.05, "POWER": 0.80})
+    assert ED.interaction("MICROPRICE_X_EXTERNAL", 500,
+                          effect_size_of_interest=0.004,
+                          **design)["MAY_ESTIMATE"] is True
+    assert ED.interaction("MICROPRICE_X_EXTERNAL", 500,
+                          effect_size_of_interest=0.001,
+                          **design)["MAY_ESTIMATE"] is False
 
 
 def test_experiments_rank_by_information_per_dollar():
