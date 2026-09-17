@@ -280,18 +280,38 @@ jobs:
           # it. For the few that did overlap, look for a sealed evidence branch
           # carrying that run's OWN first/last venue GET. Absent -> level B.
           # Nothing here invents a timestamp.
-          start = None
+          #
+          # A SKIPPED AUDIT IS NOT A CLEAN ONE. The previous revision guarded
+          # this on `if start:` alone. Run 35180590124 collected 301 rows
+          # cleanly and sealed VENUE_REQUEST_WINDOWS = {} -- which reads as "no
+          # collector overlapped" and actually meant "nobody looked", because
+          # confirm_report.json carried no FIRST_VENUE_GET_TIME for the guard
+          # to find. An empty overlap object and one nobody built are the same
+          # bytes. The window now comes from the rows' own receipts when the
+          # report lacks it, and overlap_harvest() records AUDIT_EXECUTED and
+          # OVERLAP_AUDIT_STATUS either way, so the isolation verdict can never
+          # read YES on an audit that did not run.
+          rep0, rows0 = {}, []
           try:
-              start = json.loads((d / "confirm_report.json").read_text()).get(
-                  "FIRST_VENUE_GET_TIME")
+              rep0 = json.loads((d / "confirm_report.json").read_text())
           except Exception:
               pass
+          try:
+              rows0 = [json.loads(x) for x in
+                       (d / "confirm_rows.jsonl").read_text().splitlines()
+                       if x.strip()]
+          except Exception:
+              pass
+          stamps = [r["RECEIPT_UTC"] for r in rows0 if r.get("RECEIPT_UTC")]
+          start = rep0.get("FIRST_VENUE_GET_TIME") or (min(stamps) if stamps
+                                                       else None)
+          end = rep0.get("LAST_VENUE_GET_TIME") or (max(stamps) if stamps
+                                                    else None)
           windows = {}
-          if start:
-              probe = VD.overlap_audit(
-                  start, json.loads((d / "confirm_report.json").read_text()
-                                    ).get("LAST_VENUE_GET_TIME"),
-                  runs, known, self_run_id=seg)
+          probe = VD.overlap_harvest(start, end, runs, known, len(rows0),
+                                     self_run_id=seg, more_pages=more,
+                                     pages_fetched=pages)
+          if probe["AUDIT_EXECUTED"] == "YES":
               cands = [row["ID"] for row in
                        probe["DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW"]]
               heads = subprocess.run(
@@ -320,10 +340,17 @@ jobs:
               "workflow_runs": runs,
               "HISTORY_PAGES_FETCHED": pages,
               "MORE_PAGES_AVAILABLE": more,
-              "VENUE_REQUEST_WINDOWS": windows,
+              "VENUE_REQUEST_WINDOWS": (windows if windows else
+                                        probe["VENUE_REQUEST_WINDOWS"]),
+              "AUDIT_EXECUTED": probe["AUDIT_EXECUTED"],
+              "OVERLAP_AUDIT_STATUS": probe["OVERLAP_AUDIT_STATUS"],
+              "FIRST_VENUE_GET_TIME": start or "NOT_IDENTIFIED",
+              "LAST_VENUE_GET_TIME": end or "NOT_IDENTIFIED",
               "COVERAGE_REQUIRES": "API_HISTORY_EXHAUSTED",
               "NO_CREATED_AT_LOOKBACK": True,
           }, indent=1, sort_keys=True))
+          (d / "overlap_audit.json").write_text(
+              json.dumps(probe, indent=1, sort_keys=True, default=str))
           PYEOF
 
       - name: Seal and commit the confirmation

@@ -481,6 +481,27 @@ def confirm(outdir, slugs, http, rps, requests=None, no_prior_higher_rate=True,
         "LATENCY_EXCLUDED_FROM_SUPPORT": True,
         "DURATION_S": dur,
 
+        # THE EVIDENCE WINDOW THE OVERLAP AUDIT READS, AND THE REASON IT IS
+        # HERE. The harvest looks for these two keys and runs the overlap audit
+        # only `if start:`. Run 35180590124 wrote neither, so the audit was
+        # skipped and an EMPTY VENUE_REQUEST_WINDOWS was sealed -- which reads
+        # exactly like "nothing overlapped" while actually meaning "nobody
+        # looked". A writer/reader key mismatch that failed silently into the
+        # reassuring answer.
+        #
+        # Taken from the receipts of the rows themselves, never synthesised.
+        # min/max rather than rows[0]/rows[-1]: the pacer is sequential with no
+        # concurrency, so they agree, but an extremum can only WIDEN the window,
+        # and widening fails towards detection. NOT_IDENTIFIED when there are no
+        # rows -- absent, never a zero-length window.
+        "VENUE_REQUESTS": len(rows),
+        "FIRST_VENUE_GET_TIME": (
+            min(r["RECEIPT_UTC"] for r in rows if r.get("RECEIPT_UTC"))
+            if any(r.get("RECEIPT_UTC") for r in rows) else NOT_IDENTIFIED),
+        "LAST_VENUE_GET_TIME": (
+            max(r["RECEIPT_UTC"] for r in rows if r.get("RECEIPT_UTC"))
+            if any(r.get("RECEIPT_UTC") for r in rows) else NOT_IDENTIFIED),
+
         "DISPATCH_SHA": dispatch_sha or NOT_IDENTIFIED,
         "EXECUTED_SHA": executed_sha or NOT_IDENTIFIED,
         "EVIDENCE_RUN_VALIDITY": (

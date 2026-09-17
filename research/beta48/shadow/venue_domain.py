@@ -711,6 +711,82 @@ def overlap_audit(window_start, window_end, runs, known, self_run_id=None,
     }
 
 
+OVERLAP_AUDIT_EXECUTED = "EXECUTED"
+OVERLAP_AUDIT_NOT_EXECUTED_MISSING_WINDOW = "NOT_EXECUTED_MISSING_WINDOW"
+OVERLAP_AUDIT_NOT_EXECUTED_NO_ROWS = "NOT_EXECUTED_NO_ROWS"
+EMPTY_AFTER_AUDIT = "EMPTY_AFTER_AUDIT"
+WHY_STATUS_EXISTS = (
+    "an empty overlap object and an overlap object nobody built are the same "
+    "bytes; only a status distinguishes them, so the status is mandatory")
+A_SKIPPED_AUDIT_IS_NOT_A_CLEAN_ONE = True
+
+
+def overlap_harvest(window_start, window_end, runs, known, row_count,
+                    self_run_id=None, venue_windows=None, more_pages=None,
+                    pages_fetched=None):
+    """The harvest wrapper. It runs the SAME frozen `overlap_audit` and adds
+    only the one thing its absence could not be told apart from: whether the
+    audit ran at all.
+
+    WHY THIS EXISTS. Run 35180590124 collected 301 rows cleanly, and its sealed
+    evidence carried VENUE_REQUEST_WINDOWS = {}. That reads as "no direct
+    collector overlapped". It actually meant "nobody looked": the harvest
+    guarded the audit on FIRST_VENUE_GET_TIME, the report did not carry that
+    key, and the guard fell through to an empty object. A writer/reader key
+    mismatch resolving, silently, to the reassuring answer.
+
+    So: a run WITH ROWS and WITHOUT A WINDOW is a defect, not a clean result.
+    The audit is not attempted, the status says why, and the isolation verdict
+    is NOT_IDENTIFIED -- it can never read YES on an audit that did not run.
+    An audit that DID run and found nothing says EMPTY_AFTER_AUDIT, which is a
+    finding rather than an absence.
+
+    No overlap rule, threshold or verdict definition is touched here. This
+    function decides only whether `overlap_audit` is called and how its silence
+    is labelled.
+    """
+    have_window = bool(window_start) and bool(window_end)
+    if not have_window:
+        status = (OVERLAP_AUDIT_NOT_EXECUTED_MISSING_WINDOW if row_count
+                  else OVERLAP_AUDIT_NOT_EXECUTED_NO_ROWS)
+        why = ("the run wrote %d venue rows but sealed no FIRST/LAST venue GET "
+               "time, so the window the audit needs does not exist in the "
+               "evidence" % row_count) if row_count else (
+              "the run wrote no venue rows, so there is no evidence window")
+        return {
+            "AUDIT_EXECUTED": "NO",
+            "OVERLAP_AUDIT_STATUS": status,
+            "WHY_NOT_EXECUTED": why,
+            "VENUE_REQUEST_WINDOWS": NOT_IDENTIFIED,
+            "EVIDENCE_WINDOW": NOT_IDENTIFIED,
+            "ROW_COUNT": row_count,
+            "DIRECT_RESEARCH_COLLECTOR_ISOLATION_THROUGHOUT_RUN":
+                NOT_IDENTIFIED,
+            "DIRECT_CONFLICT_STARTED_DURING_RUN": NOT_IDENTIFIED,
+            "CONFIRMED_DIRECT_REQUEST_OVERLAP": NOT_IDENTIFIED,
+            "POSSIBLE_DIRECT_WORKFLOW_OVERLAP": NOT_IDENTIFIED,
+            "DIRECT_OVERLAP_COUNT": NOT_IDENTIFIED,
+            "DIRECT_RUNS_OVERLAPPING_EVIDENCE_WINDOW": [],
+            "A_SKIPPED_AUDIT_IS_NOT_A_CLEAN_ONE":
+                A_SKIPPED_AUDIT_IS_NOT_A_CLEAN_ONE,
+            "WHY_STATUS_EXISTS": WHY_STATUS_EXISTS,
+        }
+
+    a = dict(overlap_audit(window_start, window_end, runs, known,
+                           self_run_id=self_run_id,
+                           venue_windows=venue_windows,
+                           more_pages=more_pages,
+                           pages_fetched=pages_fetched))
+    a["AUDIT_EXECUTED"] = "YES"
+    a["OVERLAP_AUDIT_STATUS"] = OVERLAP_AUDIT_EXECUTED
+    a["ROW_COUNT"] = row_count
+    a["VENUE_REQUEST_WINDOWS"] = (dict(venue_windows) if venue_windows
+                                  else EMPTY_AFTER_AUDIT)
+    a["A_SKIPPED_AUDIT_IS_NOT_A_CLEAN_ONE"] = A_SKIPPED_AUDIT_IS_NOT_A_CLEAN_ONE
+    a["WHY_STATUS_EXISTS"] = WHY_STATUS_EXISTS
+    return a
+
+
 def render(a):
     L = ["%-38s = %s" % ("GLOBAL_VENUE_CONCURRENCY_DOMAIN",
                          a["GLOBAL_VENUE_CONCURRENCY_DOMAIN"]),
