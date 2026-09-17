@@ -324,3 +324,274 @@ def describe():
             NO_FEATURE_HERE_MAY_BE_USED_AS_A_FILL_PROXY,
         "STATUS": NO_CAPTURE_YET,
     }
+
+
+# ===========================================================================
+# Section 8. BASELINES. A complex model earns admission only by beating these.
+#
+# The failure mode this prevents is familiar: a gradient-booster on twelve
+# features that looks impressive until someone checks it against "assume the
+# price does not move", which on a 5-second horizon in a quiet book is very
+# hard to beat. Every baseline here is one line of arithmetic, and any model
+# that cannot beat all of them chronologically out of sample has not earned
+# its complexity.
+# ===========================================================================
+
+BASELINES = ("B0_NO_CHANGE", "B1_CURRENT_MID", "B2_MICROPRICE",
+             "B3_LAST_MOVE_DIRECTION", "B4_SIMPLE_BOOK_IMBALANCE",
+             "B5_SIMPLE_ORDER_FLOW_IMBALANCE")
+
+BASELINE_SEMANTICS = {
+    "B0_NO_CHANGE": "predict zero move. The hardest one to beat at 5s",
+    "B1_CURRENT_MID": "predict the mid stays where it is (equivalent to B0 for "
+                      "a move target; kept separate for level targets)",
+    "B2_MICROPRICE": "predict the move toward microprice minus mid",
+    "B3_LAST_MOVE_DIRECTION": "momentum: predict the previous move repeats",
+    "B4_SIMPLE_BOOK_IMBALANCE": "predict a move proportional to touch imbalance",
+    "B5_SIMPLE_ORDER_FLOW_IMBALANCE": "predict a move proportional to order-flow "
+                                      "imbalance over the recent window",
+}
+
+A_COMPLEX_MODEL_EARNS_ADMISSION_ONLY_BY_BEATING_ALL_OF_THESE = True
+CHRONOLOGICALLY_OUT_OF_SAMPLE = True
+
+
+def baseline_prediction(name, feats, prev_move=None, scale=1.0):
+    """One baseline's predicted move. None when its inputs are absent."""
+    if name in ("B0_NO_CHANGE", "B1_CURRENT_MID"):
+        return 0.0
+    if name == "B2_MICROPRICE":
+        return feats.get("MICROPRICE_MINUS_MID")
+    if name == "B3_LAST_MOVE_DIRECTION":
+        return prev_move
+    if name == "B4_SIMPLE_BOOK_IMBALANCE":
+        v = feats.get("ORDER_BOOK_IMBALANCE")
+        return None if v is None else scale * v
+    if name == "B5_SIMPLE_ORDER_FLOW_IMBALANCE":
+        v = feats.get("ORDER_FLOW_IMBALANCE")
+        return None if v is None else scale * v
+    return None
+
+
+def score_baselines(rows, target, pred_key=None, baselines=BASELINES):
+    """Score every baseline (and optionally a model) on one target.
+
+    Returns absolute error and direction accuracy per predictor. A predictor
+    whose inputs were missing on a row is scored on the rows it COULD price,
+    and the count is reported so a thin predictor cannot look good by
+    abstaining on the hard ones.
+    """
+    out = {}
+    names = list(baselines) + ([pred_key] if pred_key else [])
+    for name in names:
+        errs, dirs, n = [], [], 0
+        for r in rows or ():
+            y = r.get(target)
+            if y is None:
+                continue
+            p = (r.get(pred_key) if name == pred_key
+                 else baseline_prediction(name, r, r.get("_PREV_MOVE")))
+            if p is None:
+                continue
+            n += 1
+            errs.append(abs(p - y))
+            if y != 0:
+                dirs.append(1.0 if (p > 0) == (y > 0) else 0.0)
+        out[name] = {
+            "N_SCORED": n,
+            "MEAN_ABSOLUTE_ERROR": (sum(errs) / len(errs)) if errs else None,
+            "DIRECTION_ACCURACY": (sum(dirs) / len(dirs)) if dirs else None,
+            "DIRECTIONAL_ROWS": len(dirs),
+        }
+    return {"TARGET": target, "BY_PREDICTOR": out,
+            "A_MODEL_MUST_BEAT_ALL_BASELINES":
+                A_COMPLEX_MODEL_EARNS_ADMISSION_ONLY_BY_BEATING_ALL_OF_THESE,
+            "CHRONOLOGICALLY_OUT_OF_SAMPLE": CHRONOLOGICALLY_OUT_OF_SAMPLE}
+
+
+# ===========================================================================
+# Section 9. Economically meaningful targets.
+#
+# A correct prediction of a 0.2-cent move is not monetizable through a 2-cent
+# spread. Direction accuracy alone will happily report a triumph in exactly
+# that situation, so the executable comparison is carried beside it.
+# ===========================================================================
+
+ECONOMIC_MEASURES = ("EXPECTED_PRICE_CHANGE", "SIGNED_PRICE_CHANGE",
+                     "ABSOLUTE_ERROR", "DIRECTION_ACCURACY",
+                     "EXPECTED_EXECUTABLE_MOVE")
+
+A_CORRECT_TINY_PREDICTION_IS_NOT_AN_EDGE = (
+    "a 0.2-cent move predicted perfectly through a 2-cent spread earns "
+    "nothing. Direction accuracy must always be reported beside the predicted "
+    "move relative to the spread")
+
+
+def economic_row(pred_move, feats):
+    """Put a predicted move next to the spread it would have to cross."""
+    spread = feats.get("SPREAD")
+    out = {
+        "PREDICTED_MOVE": pred_move,
+        "SPREAD": spread,
+        "BEST_BID": feats.get("_BEST_BID"),
+        "BEST_ASK": feats.get("_BEST_ASK"),
+        "MOVE_AS_FRACTION_OF_SPREAD": None,
+        "EXCEEDS_HALF_SPREAD": None,
+    }
+    if pred_move is not None and spread and spread > 0:
+        out["MOVE_AS_FRACTION_OF_SPREAD"] = abs(pred_move) / spread
+        out["EXCEEDS_HALF_SPREAD"] = abs(pred_move) > 0.5 * spread
+    return out
+
+
+def economic_summary(rows, pred_key, target):
+    """How much of the predicted movement is larger than the spread?"""
+    n = big = 0
+    fr = []
+    for r in rows or ():
+        p, s = r.get(pred_key), r.get("SPREAD")
+        if p is None or not s or s <= 0:
+            continue
+        n += 1
+        f = abs(p) / s
+        fr.append(f)
+        if abs(p) > 0.5 * s:
+            big += 1
+    fr.sort()
+    return {
+        "TARGET": target,
+        "ROWS_WITH_A_SPREAD": n,
+        "SHARE_PREDICTING_MORE_THAN_HALF_THE_SPREAD":
+            (big / n) if n else None,
+        "MOVE_OVER_SPREAD_MEDIAN": fr[len(fr) // 2] if fr else None,
+        "MOVE_OVER_SPREAD_P90": fr[int(0.9 * len(fr))] if fr else None,
+        "A_CORRECT_TINY_PREDICTION_IS_NOT_AN_EDGE":
+            A_CORRECT_TINY_PREDICTION_IS_NOT_AN_EDGE,
+    }
+
+
+# ===========================================================================
+# Section 10. Raw informational edge, quantified. NOT maker profit.
+# ===========================================================================
+
+MARKOUT_HORIZONS_SECONDS = (5, 30, 60, 300)
+
+EXECUTION_MONETIZABILITY = "NOT_IDENTIFIED"
+WHY_NOT_IDENTIFIED = (
+    "a markout measures what the mid did after a hypothetical fill. Whether "
+    "BETTOR would have BEEN filled is P_FILL, which requires BETTOR's own "
+    "passive-order sample and does not exist. Favourable predicted midpoint "
+    "movement is an informational edge, not a maker profit")
+
+DO_NOT_CALL_THIS_MAKER_PROFIT = True
+
+
+def markout(quote_price, side, mid_later, mid_now=None):
+    """Signed markout of a hypothetical passive fill. Sign favours the maker.
+
+    A BUY at 0.50 with the mid at 0.52 five seconds later is +0.02 for the
+    maker; a SELL at the same level is -0.02.
+    """
+    if quote_price is None or mid_later is None:
+        return None
+    if side not in ("BUY", "SELL"):
+        return None
+    d = float(mid_later) - float(quote_price)
+    return d if side == "BUY" else -d
+
+
+def markout_table(fills, horizons=MARKOUT_HORIZONS_SECONDS):
+    """Expected markout by horizon, with the monetizability caveat attached."""
+    out = {}
+    for h in horizons:
+        vals = []
+        for f in fills or ():
+            m = markout(f.get("QUOTE_PRICE"), f.get("SIDE"),
+                        (f.get("MID_LATER") or {}).get(h))
+            if m is not None:
+                vals.append(m)
+        out["EXPECTED_MARKOUT_%dS" % h] = {
+            "N": len(vals),
+            "MEAN": (sum(vals) / len(vals)) if vals else None,
+        }
+    out["EXECUTION_MONETIZABILITY"] = EXECUTION_MONETIZABILITY
+    out["WHY_NOT_IDENTIFIED"] = WHY_NOT_IDENTIFIED
+    out["DO_NOT_CALL_THIS_MAKER_PROFIT"] = DO_NOT_CALL_THIS_MAKER_PROFIT
+    return out
+
+
+# ===========================================================================
+# Section 11. Validation protocol. Event AND chronological block.
+# ===========================================================================
+
+VALIDATION_SPLIT = "EVENT_AND_CHRONOLOGICAL_BLOCK"
+NEVER_RANDOMLY_SCATTER_ADJACENT_TIMESTAMPS = (
+    "two ticks four seconds apart in the same game are almost the same "
+    "observation. Splitting them across train and test lets the model memorise "
+    "the session and report it as skill")
+
+REQUIRED_ALONGSIDE_EVERY_RESULT = ("ROWS", "EVENTS", "EVENT_HOURS",
+                                   "OBSERVATIONS_PER_EVENT")
+
+
+def split_blocks(rows, n_blocks=4, event_key="EVENT_KEY",
+                 time_key="REQUEST_UTC"):
+    """Contiguous chronological blocks that never split an event."""
+    import datetime
+
+    def T(x):
+        s = str(x).replace("Z", "+00:00")
+        try:
+            d = datetime.datetime.fromisoformat(s)
+        except Exception:
+            return None
+        return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+
+    first = {}
+    for r in rows or ():
+        t = T(r.get(time_key))
+        e = r.get(event_key)
+        if t is None or e is None:
+            continue
+        if e not in first or t < first[e]:
+            first[e] = t
+    evs = sorted(first, key=lambda e: (first[e], str(e)))
+    if not evs:
+        return [], {"STATUS": "NO_EVENTS"}
+    size = max(1, len(evs) // n_blocks)
+    blocks = [set(evs[i:i + size]) for i in range(0, len(evs), size)]
+    out = [[r for r in rows if r.get(event_key) in b] for b in blocks]
+    return out, {"BLOCKS": len(out), "EVENTS": len(evs),
+                 "SPLIT": VALIDATION_SPLIT,
+                 "NO_EVENT_SPANS_TWO_BLOCKS": True}
+
+
+def result_context(rows, event_key="EVENT_KEY", time_key="REQUEST_UTC"):
+    """The four numbers that must accompany every microstructure result."""
+    import datetime
+
+    def T(x):
+        s = str(x).replace("Z", "+00:00")
+        try:
+            d = datetime.datetime.fromisoformat(s)
+        except Exception:
+            return None
+        return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+
+    by = defaultdict(list)
+    for r in rows or ():
+        t = T(r.get(time_key))
+        if t is not None and r.get(event_key) is not None:
+            by[r[event_key]].append(t)
+    hours = 0.0
+    for v in by.values():
+        if len(v) > 1:
+            hours += (max(v) - min(v)).total_seconds() / 3600.0
+    n = len(rows or ())
+    return {
+        "ROWS": n,
+        "EVENTS": len(by),
+        "EVENT_HOURS": hours,
+        "OBSERVATIONS_PER_EVENT": (n / len(by)) if by else None,
+        "REQUIRED_ALONGSIDE_EVERY_RESULT": REQUIRED_ALONGSIDE_EVERY_RESULT,
+    }

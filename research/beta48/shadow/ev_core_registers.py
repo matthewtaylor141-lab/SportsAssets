@@ -1121,6 +1121,48 @@ WHY_THAT_LANE = (
     "can actually arrive at the rate the research needs")
 
 
+# ---------------------------------------------------------------------------
+# Directive K5. Two pilots, kept apart. Nothing purchased.
+# ---------------------------------------------------------------------------
+
+HISTORICAL_MATCHED_STATIC_COHORT_STATUS = "DEFINED_AND_COSTED"
+HISTORICAL_SAMPLE_SELECTION_STATUS = "RN1_TRIGGERED_SELECTED"
+
+MATCHED_STATIC_COST = {
+    "RULE": "EARLIEST_ELIGIBLE_POLY_OBSERVATION, h2h, one region, 1 obs/event",
+    100: {"REQUESTS": 90, "CREDITS": 900, "CREDITS_PER_EVENT": 9.0},
+    250: {"REQUESTS": 203, "CREDITS": 2030, "CREDITS_PER_EVENT": 9.1},
+    500: {"REQUESTS": 203, "CREDITS": 2030, "CREDITS_PER_EVENT": 9.1},
+    "WHY_250_AND_500_MATCH": (
+        "the universe is 222 settled soccer events with at least one venue "
+        "observation. 500 is not available; the 500 row IS the 222 row"),
+}
+MATCHED_STATIC_EXPECTED_EVENT_N = 222
+
+WHAT_THE_MATCHED_PILOT_COSTS_AND_WHY_THAT_IS_NOT_THE_POINT = (
+    "about 2,030 credits buys the entire matched cohort -- inside the smallest "
+    "tier. Money is not the constraint. The constraint is that 222 "
+    "RN1-selected events cannot answer a question whose incremental ladder "
+    "needs thousands, so the pilot's honest output is a description of "
+    "external consensus on the states RN1 traded")
+
+PROSPECTIVE_CAPTURE_ALIGNMENT_STATUS = "READY_AWAITING_CAPTURE"
+CAPTURE_EXTERNAL_BACKFILL_PLANNER_STATUS = "BUILT"
+EXTERNAL_MAY_BE_BACKFILLED_AFTER_THE_FACT = True
+
+MICROSTRUCTURE_BASELINES_STATUS = "BUILT_SIX_BASELINES"
+MICROSTRUCTURE_VALIDATION_PROTOCOL_STATUS = "BUILT_EVENT_AND_CHRONOLOGICAL_BLOCK"
+CURRENT_CAPTURE_RELATIVE_VALUE_IDENTIFIABILITY_STATUS = "AWAITING_HARVEST"
+SUBSTANTIVE_CAPTURE_V2_SPEC_STATUS = "PREPARED_NOT_DISPATCHED"
+
+PURCHASE_STATUS = "NOT_PURCHASED_GATE_NOT_MET"
+PURCHASE_GATE_SUMMARY = (
+    "condition A (a cohort large enough for a specific question) is arguable "
+    "at 222 events but cannot support a settlement result; condition B (the "
+    "capture completes and its request plan is known) is not yet met because "
+    "the clean-start gate is still blocked by run85. So: no purchase")
+
+
 def describe():
     return {
         "EVIDENCE_LADDER": {("%.3f" % k): v
@@ -1148,6 +1190,22 @@ def describe():
         "NOTHING_HAS_BEEN_PURCHASED": NOTHING_HAS_BEEN_PURCHASED,
         "CANONICAL_DELTA_SIGN_STATUS": CANONICAL_DELTA_SIGN_STATUS,
         "STATIC_SOCCER_V3_STATUS": STATIC_SOCCER_V3_STATUS,
+        "HISTORICAL_MATCHED_STATIC_COHORT_STATUS":
+            HISTORICAL_MATCHED_STATIC_COHORT_STATUS,
+        "HISTORICAL_SAMPLE_SELECTION_STATUS": HISTORICAL_SAMPLE_SELECTION_STATUS,
+        "MATCHED_STATIC_COST": {str(k): v for k, v in MATCHED_STATIC_COST.items()},
+        "MATCHED_STATIC_EXPECTED_EVENT_N": MATCHED_STATIC_EXPECTED_EVENT_N,
+        "PROSPECTIVE_CAPTURE_ALIGNMENT_STATUS":
+            PROSPECTIVE_CAPTURE_ALIGNMENT_STATUS,
+        "CAPTURE_EXTERNAL_BACKFILL_PLANNER_STATUS":
+            CAPTURE_EXTERNAL_BACKFILL_PLANNER_STATUS,
+        "MICROSTRUCTURE_BASELINES_STATUS": MICROSTRUCTURE_BASELINES_STATUS,
+        "MICROSTRUCTURE_VALIDATION_PROTOCOL_STATUS":
+            MICROSTRUCTURE_VALIDATION_PROTOCOL_STATUS,
+        "CURRENT_CAPTURE_RELATIVE_VALUE_IDENTIFIABILITY_STATUS":
+            CURRENT_CAPTURE_RELATIVE_VALUE_IDENTIFIABILITY_STATUS,
+        "SUBSTANTIVE_CAPTURE_V2_SPEC_STATUS": SUBSTANTIVE_CAPTURE_V2_SPEC_STATUS,
+        "PURCHASE_STATUS": PURCHASE_STATUS,
         "STATIC_SOCCER_V3_FREEZE": dict(STATIC_SOCCER_V3_FREEZE),
         "FUNDAMENTAL_MODELS_STATUS": FUNDAMENTAL_MODELS_STATUS,
         "ODDS_ADAPTER_STATUS": ODDS_ADAPTER_STATUS,
