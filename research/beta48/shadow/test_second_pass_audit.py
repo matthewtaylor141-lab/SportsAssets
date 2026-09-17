@@ -13,6 +13,7 @@ import bettor_dataset as B
 import drift_trust as D
 import edge_dashboard as E
 import maker_fill as MF
+import label_fixture_support as LF
 import microstructure_v1 as M
 import prior_registry as P
 from prior_registry import Dist, NOT_IDENTIFIED
@@ -89,7 +90,10 @@ def test_robustly_positive_refuses_a_row_that_is_not_decision_grade():
     r = A.action_ev_mc("POST_BID", full_terms(), draws=400)
     out = A.robustly_positive(r)
     # Unknown, not negative: the gate is blocked, so no finding was made.
-    assert out["ROBUSTLY_POSITIVE"] == NOT_IDENTIFIED
+    # None rather than the word, because the word is truthy and this is a
+    # boolean field; the word goes in ROBUST_POSITIVITY_STATUS.
+    assert out["ROBUSTLY_POSITIVE"] is None
+    assert out["ROBUST_POSITIVITY_STATUS"] == NOT_IDENTIFIED
     assert out["REASON"] == "DECISION_GRADE_BLOCKED"
     assert out["DECISION_GRADE_ACTION_EV_STATUS"] == "BLOCKED"
 
@@ -106,7 +110,8 @@ def test_robustly_positive_on_a_partial_row_reads_the_partial_twin():
     t.pop("FEE_STATE")
     r = A.action_ev_mc("POST_BID", t, draws=400)
     out = A.robustly_positive(r)
-    assert out["ROBUSTLY_POSITIVE"] == NOT_IDENTIFIED
+    assert out["ROBUSTLY_POSITIVE"] is None
+    assert out["ROBUST_POSITIVITY_STATUS"] == NOT_IDENTIFIED
     assert out["REASON"] == "EV_NOT_IDENTIFIED"
     assert isinstance(out["SHADOW_ROBUSTNESS_DIAGNOSTIC"], float)
 
@@ -485,7 +490,6 @@ def _scored_rows(n=20):
     rows = []
     for i in range(n):
         rows.append({
-            "LABEL_ARTIFACT_SHA": _LABEL_SHA,
             "MID_MOVE_60S": 0.001 * ((i % 5) - 2),
             "MID_MOVE_60S_STATUS": "PRESENT",
             "MID_MOVE_60S_REALISED_OFFSET_S": 1.0,
@@ -494,13 +498,15 @@ def _scored_rows(n=20):
             "RAW_OFI_SHARES": 50,
             "_PREV_MOVE": 0.0002,
             "MODEL": 0.0009})
-    return rows
+    # Each row gets its OWN genuine artifact: one artifact is one
+    # observation, and a row is bound to its artifact's content.
+    return rows, LF.bind(rows, "MID_MOVE_60S")
 
 
 def test_admission_is_not_identified_when_a_baseline_scored_nothing():
-    out = M.score_baselines(_scored_rows(), "MID_MOVE_60S", pred_key="MODEL",
-                            min_coverage_pct=0.0,
-                            label_artifacts=_LABEL_ARTIFACTS)
+    rows, arts = _scored_rows()
+    out = M.score_baselines(rows, "MID_MOVE_60S", pred_key="MODEL",
+                            min_coverage_pct=0.0, label_artifacts=arts)
     assert out.get("STATUS") != "REFUSED"
     assert out["BASELINE_SET_COMPLETE"] is False
     assert out["CHALLENGER_ADMISSION_COMPARISON_STATUS"] == NOT_IDENTIFIED
@@ -514,11 +520,10 @@ def test_an_empty_common_support_never_admits():
              "MID_MOVE_60S_STATUS": "PRESENT",
              "MICROPRICE_MINUS_MID": 0.0005,
              "_PREV_MOVE": 0.0002,
-             "MODEL": 0.0009,
-             "LABEL_ARTIFACT_SHA": _LABEL_SHA} for i in range(20)]
+             "MODEL": 0.0009} for i in range(20)]
+    arts = LF.bind(rows, "MID_MOVE_60S")
     out = M.score_baselines(rows, "MID_MOVE_60S", pred_key="MODEL",
-                            min_coverage_pct=0.0,
-                            label_artifacts=_LABEL_ARTIFACTS)
+                            min_coverage_pct=0.0, label_artifacts=arts)
     assert out.get("STATUS") != "REFUSED"
     assert out["COMMON_EVALUATION_SUPPORT_ROWS"] == 0
     assert out["CHALLENGER_ADMISSION_COMPARISON_STATUS"] == NOT_IDENTIFIED

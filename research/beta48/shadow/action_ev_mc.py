@@ -214,6 +214,73 @@ AN_UNBOUNDED_FAMILY_IS_NOT_A_BOUNDED_QUANTITY = (
     "right. For decision grade the family's own SUPPORT must match the "
     "domain -- BETA, TRUNCATED_NORMAL, LOGIT_NORMAL, TRIANGULAR or POINT")
 
+# --- Impossible draws may not enter EV arithmetic. ------------------------
+#
+# Removing the clip was correct: squeezing a draw back inside the domain
+# replaces the declared law with a point-mass mixture that still answers to
+# the family's name. But counting an excursion and then feeding it to _net()
+# is not a repair either. A P_FILL of -0.3 or 1.4 becomes a negative or
+# greater-than-one BRANCH WEIGHT: the fill branch and the no-fill branch no
+# longer partition the outcome space, and the resulting "EV" is arithmetic
+# over a state of the world that cannot happen.
+#
+# The answer is neither to clip nor to average: it is to refuse. A bounded
+# economic quantity whose declared family has support outside its physical
+# domain does not get an EV number. It gets a refusal, or -- when the caller
+# explicitly asks for one -- a clearly separate shadow diagnostic that
+# publishes NO ordinary EV statistics.
+
+REFUSED_INVALID_PHYSICAL_SUPPORT = "REFUSED_INVALID_PHYSICAL_SUPPORT"
+
+SHADOW_DISTRIBUTION_DIAGNOSTIC = "SHADOW_DISTRIBUTION_DIAGNOSTIC"
+
+AN_IMPOSSIBLE_DRAW_IS_NOT_AN_EV_INPUT = (
+    "a draw outside a bounded term's physical domain may be counted, "
+    "reported and refused, but it may not be multiplied. P_FILL outside "
+    "[0, 1] makes the fill and no-fill branch weights stop summing to one, "
+    "so the mean of _net() over such draws is not an expected value of "
+    "anything. Use a bounded family for real EV Monte Carlo; an unbounded "
+    "family gets REFUSED_INVALID_PHYSICAL_SUPPORT or a separately named "
+    "SHADOW_DISTRIBUTION_DIAGNOSTIC that publishes no EV statistics")
+
+# Terms whose draw is used as a PROBABILITY WEIGHT inside _net(). An
+# excursion in one of these is not a tail observation, it is a broken
+# partition of the outcome space, and it is refused at the draw site even
+# if the family support table above ever misses it.
+PROBABILITY_WEIGHT_TERMS = ("P_FILL",)
+
+# Statistics that only an admissible EV run may publish. The diagnostic path
+# publishes none of them at the top level; they live, renamed, inside
+# SHADOW_DISTRIBUTION_DIAGNOSTIC.
+ORDINARY_EV_STATISTICS = (
+    "EV_MEAN", "EV_SD", "EV_MEDIAN", "P_EV_GT_0", "P_EV_LT_0",
+    "EXPECTED_UPSIDE", "EXPECTED_DOWNSIDE", "TAIL_LOSS_P05",
+    "CONSERVATIVE_EV_P10", "POSTERIOR_MEAN_EV", "EV_TOTAL_USD",
+    "EV_TOTAL_USD_BASIS", "EV_SPREAD_ACROSS_FILL_SELECTION",
+    "FILL_SELECTION_FLIPS_THE_SIGN", "EV_PER_CAPITAL_HOUR_MEAN",
+    "EV_PER_CAPITAL_HOUR_P10", "CAPITAL_HOURS_MEAN")
+
+
+def _divert_ordinary_ev_statistics(base):
+    """Move every ordinary EV statistic off the row and into a clearly
+    separate shadow diagnostic block, renamed so that no downstream reader
+    can pick one up by its usual name.
+
+    A diagnostic reading of an inadmissible specification is legitimate
+    research output. What is not legitimate is publishing it under the same
+    key an admissible run would use, where a gate, a report or a ranking
+    reads it as an expected value.
+    """
+    keys = set(ORDINARY_EV_STATISTICS)
+    keys.update("EV_P%02d" % int(round(p * 100)) for p in QUANTILES)
+    keys.update("EV_AT_FILL_SELECTION_P%02d" % int(round(p * 100))
+                for p in (0.10, 0.50, 0.90))
+    diag = {}
+    for k in sorted(keys):
+        if k in base:
+            diag["DIAGNOSTIC_" + k] = base.pop(k)
+    return diag
+
 # --- Units, basis and conditioning. ---------------------------------------
 
 UNITS = ("PROBABILITY", "PROBABILITY_POINTS_PER_SHARE",
@@ -1212,54 +1279,390 @@ DECISION_GRADE_ARTIFACT_KEYS = {
 def _sha_of(obj, sha_field):
     import hashlib
     import json
-    body = {k: v for k, v in (obj or {}).items() if k != sha_field}
+    body = {k: v for k, v in (obj or {}).items()
+            if k != sha_field and k not in _UNSEALED_ARTIFACT_KEYS}
     return hashlib.sha256(
         json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
 
 
-def verify_decision_grade_artifacts(terms):
-    """Verify each gate artifact by recomputing its own digest.
+# Fields attached by the store on retrieval; never part of the seal.
+_UNSEALED_ARTIFACT_KEYS = ("ARTIFACT_STORE_ID", "ARTIFACT_STORE_KIND",
+                           "ARTIFACT_RETRIEVED_FROM")
 
-    `terms["DECISION_GRADE_ARTIFACTS"]` maps the SHA field name to the sealed
-    object. An absent artifact, an unresolvable reference and a mismatching
-    digest are all NOT verified -- there is no path where a claim alone
-    satisfies a condition.
+# --- Integrity, origin and semantics are three different questions. -------
+
+INTEGRITY_IS_NOT_VALIDITY_OR_TRUST = (
+    "recomputing an artifact's digest proves only that nobody edited it "
+    "since it was written. It does not say the artifact came from anywhere "
+    "in particular, and it does not say the artifact SATISFIES the condition "
+    "its name stands for. A caller could build {'LABELS': {...}}, hash it, "
+    "and pass LABEL_PROVENANCE_VALID. Three separate checks are now "
+    "required: ARTIFACT_INTEGRITY_VERIFIED, "
+    "ARTIFACT_TRUSTED_ORIGIN_VERIFIED and ARTIFACT_SEMANTICS_VERIFIED")
+
+ARTIFACT_VERIFICATION_DIMENSIONS = ("ARTIFACT_INTEGRITY_VERIFIED",
+                                    "ARTIFACT_TRUSTED_ORIGIN_VERIFIED",
+                                    "ARTIFACT_SEMANTICS_VERIFIED")
+
+TRUSTED_ARTIFACT_SOURCES = ("IMMUTABLE_CAPTURE_STORE",
+                            "SEALED_PRIOR_REGISTRY",
+                            "APPEND_ONLY_EVIDENCE_LEDGER")
+
+A_CALLER_SEALED_OBJECT_IS_NOT_TRUSTED_EVIDENCE = (
+    "an artifact handed in with the terms was sealed by whoever built the "
+    "terms. Trust has to come from somewhere the caller does not control: "
+    "an immutable capture store, the sealed prior registry, or an "
+    "append-only evidence ledger whose identity is registered out of band. "
+    "An inline artifact may be INSPECTED for shadow research and can never "
+    "be decision grade on the strength of hashing to itself")
+
+# The registry of trusted stores. EMPTY at import, and the terms dict cannot
+# add to it: registration is an operational act with its own audit row.
+_TRUSTED_STORES = {}
+_TRUSTED_STORE_REGISTRATIONS = []
+
+
+def register_trusted_store(store_id, kind, ledger_root_digest, index=None,
+                           registered_by=None):
+    """Register an immutable store as a trusted artifact origin.
+
+    `index` maps an artifact SHA to the artifact object the store holds. The
+    registration is recorded so a reader can see what was trusted and on
+    whose authority.
+    """
+    if kind not in TRUSTED_ARTIFACT_SOURCES:
+        return {"REGISTERED": False, "WHY": "UNKNOWN_STORE_KIND",
+                "DECLARED": TRUSTED_ARTIFACT_SOURCES}
+    if not store_id or not ledger_root_digest:
+        return {"REGISTERED": False,
+                "WHY": "STORE_ID_AND_LEDGER_ROOT_DIGEST_REQUIRED"}
+    _TRUSTED_STORES[store_id] = {
+        "STORE_ID": store_id, "KIND": kind,
+        "LEDGER_ROOT_DIGEST": ledger_root_digest,
+        "INDEX": dict(index or {}),
+    }
+    _TRUSTED_STORE_REGISTRATIONS.append(
+        {"STORE_ID": store_id, "KIND": kind,
+         "LEDGER_ROOT_DIGEST": ledger_root_digest,
+         "REGISTERED_BY": registered_by or NOT_IDENTIFIED,
+         "INDEXED_ARTIFACTS": len(index or {})})
+    return {"REGISTERED": True, "STORE_ID": store_id, "KIND": kind}
+
+
+def clear_trusted_stores():
+    """Drop every registration. Used by tests; leaves the audit trail."""
+    _TRUSTED_STORES.clear()
+
+
+def trusted_store_status():
+    return {
+        "TRUSTED_ARTIFACT_STORE_STATUS": (
+            "ESTABLISHED" if _TRUSTED_STORES
+            else "NOT_ESTABLISHED_NO_IMMUTABLE_LEDGER"),
+        "REGISTERED_STORES": tuple(sorted(_TRUSTED_STORES)),
+        "REGISTRATIONS": tuple(_TRUSTED_STORE_REGISTRATIONS),
+        "TRUSTED_ARTIFACT_SOURCES": TRUSTED_ARTIFACT_SOURCES,
+        "A_CALLER_SEALED_OBJECT_IS_NOT_TRUSTED_EVIDENCE":
+            A_CALLER_SEALED_OBJECT_IS_NOT_TRUSTED_EVIDENCE,
+    }
+
+
+def resolve_trusted_artifact(sha):
+    """Fetch an artifact from a registered trusted store, or None."""
+    for store in _TRUSTED_STORES.values():
+        obj = store["INDEX"].get(sha)
+        if isinstance(obj, dict):
+            out = dict(obj)
+            out["ARTIFACT_STORE_ID"] = store["STORE_ID"]
+            out["ARTIFACT_STORE_KIND"] = store["KIND"]
+            out["ARTIFACT_RETRIEVED_FROM"] = "TRUSTED_STORE"
+            return out
+    return None
+
+
+# --- Binding: a valid artifact from another decision is not this one's. ---
+
+ARTIFACT_BINDING_FIELDS = {
+    "POSTERIOR_ARTIFACT": ("PARAMETER", "MODEL_VERSION",
+                           "PRIOR_VERSION"),
+    "LABEL_ARTIFACT": ("MARKET_IDENTITY", "TARGET", "CAPTURE_SPEC_SHA"),
+    "COMMON_SUPPORT_EVALUATION": ("TARGET", "MODEL_VERSION", "FOLD"),
+    "CAPTURE_QUALITY_MANIFEST": ("CAPTURE_CODE_SHA", "CAPTURE_SPEC_SHA"),
+}
+
+A_VALID_ARTIFACT_FROM_ANOTHER_DECISION_IS_NOT_THIS_ONES = (
+    "a label artifact for a different market, a posterior for a different "
+    "parameter, common-support evidence for a different target and a quality "
+    "manifest from a different capture are each perfectly valid and each "
+    "says nothing about THIS evaluation. Every artifact declares BOUND_TO, "
+    "and BOUND_TO must match the evaluation's own identity")
+
+
+def _binding_ok(name, obj, binding):
+    """Does this artifact's BOUND_TO match the evaluation's identity?"""
+    want = dict(binding or {})
+    got = dict((obj or {}).get("BOUND_TO") or {})
+    fields = ARTIFACT_BINDING_FIELDS.get(name, ())
+    missing, mismatched = [], []
+    # EVALUATION_ID binds everything when the caller supplies one.
+    checks = list(fields)
+    if want.get("EVALUATION_ID") is not None:
+        checks.append("EVALUATION_ID")
+    for f in checks:
+        w = want.get(f)
+        g = got.get(f)
+        if w is None:
+            continue                      # the evaluation did not declare it
+        if g is None or g == NOT_IDENTIFIED:
+            missing.append(f)
+        elif g != w:
+            mismatched.append({"FIELD": f, "ARTIFACT": g, "EVALUATION": w})
+    return {"BOUND": not missing and not mismatched,
+            "BINDING_FIELDS": tuple(checks),
+            "MISSING_BINDINGS": tuple(missing),
+            "MISMATCHED_BINDINGS": tuple(mismatched),
+            "A_VALID_ARTIFACT_FROM_ANOTHER_DECISION_IS_NOT_THIS_ONES":
+                A_VALID_ARTIFACT_FROM_ANOTHER_DECISION_IS_NOT_THIS_ONES}
+
+
+# --- Type-specific SEMANTIC verifiers. ------------------------------------
+
+def _semantics_posterior(obj):
+    """A posterior artifact must be a DECISION-GRADE posterior, by content."""
+    problems = []
+    if obj.get("ARTIFACT_TYPE") != "POSTERIOR_ARTIFACT":
+        problems.append("WRONG_ARTIFACT_TYPE")
+    for f in ("PARAMETER", "MODEL_VERSION", "LIKELIHOOD_METHOD",
+              "N_PROVENANCE", "POSTERIOR_SUMMARY"):
+        if obj.get(f) in (None, "", NOT_IDENTIFIED):
+            problems.append("MISSING_%s" % f)
+    st = obj.get("POSTERIOR_PRECISION_STATUS")
+    if st != "DECISION_GRADE_POSTERIOR":
+        problems.append("POSTERIOR_PRECISION_STATUS_IS_%s"
+                        % (st or "ABSENT"))
+    if obj.get("DIAGNOSTIC_RAW_ROW_POSTERIOR") not in (None, NOT_IDENTIFIED):
+        problems.append("RAW_ROW_DIAGNOSTIC_POSTERIOR_PRESENT")
+    return problems
+
+
+def _semantics_label(obj):
+    """Delegate to the label module AND re-derive its observation chain."""
+    import bettor_dataset as _bd
+    v = _bd.verify_label_artifact(obj)
+    problems = []
+    if v["LABEL_PROVENANCE_STATUS"] != "VALID":
+        problems.append("LABEL_PROVENANCE_%s" % v["LABEL_PROVENANCE_STATUS"])
+    re_derived = _bd.rederive_observation_chain(obj)
+    if re_derived["OBSERVATION_CHAIN_STATUS"] != "COMPLETE":
+        problems.append("OBSERVATION_CHAIN_%s"
+                        % re_derived["OBSERVATION_CHAIN_STATUS"])
+    return problems
+
+
+def _semantics_common_support(obj):
+    problems = []
+    if obj.get("ARTIFACT_TYPE") != "COMMON_SUPPORT_EVALUATION":
+        problems.append("WRONG_ARTIFACT_TYPE")
+    if obj.get("BASELINE_SET_COMPLETE") is not True:
+        problems.append("BASELINE_SET_INCOMPLETE")
+    rows = obj.get("COMMON_EVALUATION_SUPPORT_ROWS")
+    if not isinstance(rows, int) or rows <= 0:
+        problems.append("COMMON_SUPPORT_ROWS_NOT_POSITIVE")
+    if obj.get("CHALLENGER_ADMISSION_COMPARISON_STATUS") not in (
+            "ADMITTED", "NOT_ADMITTED"):
+        problems.append("ADMISSION_COMPARISON_NOT_IDENTIFIED")
+    for f in ("TARGET", "MODEL_VERSION", "FOLD"):
+        if obj.get(f) in (None, "", NOT_IDENTIFIED):
+            problems.append("MISSING_%s" % f)
+    return problems
+
+
+def _semantics_capture_quality(obj):
+    problems = []
+    if obj.get("ARTIFACT_TYPE") != "CAPTURE_QUALITY_MANIFEST":
+        problems.append("WRONG_ARTIFACT_TYPE")
+    try:
+        import capture_quality as _cq
+        frozen = _cq.FROZEN_QUALITY_THRESHOLDS_SHA
+        intact = _cq.thresholds_intact().get("INTACT") is True
+    except Exception:
+        frozen, intact = None, False
+    if not intact:
+        problems.append("FROZEN_THRESHOLDS_NOT_INTACT")
+    if frozen and obj.get("FROZEN_QUALITY_THRESHOLDS_SHA") != frozen:
+        problems.append("FROZEN_THRESHOLD_HASH_MISMATCH")
+    if obj.get("CAPTURE_QUALITY_GATE") != "PASS":
+        problems.append("CAPTURE_QUALITY_GATE_IS_%s"
+                        % (obj.get("CAPTURE_QUALITY_GATE") or "ABSENT"))
+    for f in ("CAPTURE_CODE_SHA", "CAPTURE_SPEC_SHA",
+              "IMMUTABLE_MANIFEST_SHA"):
+        if obj.get(f) in (None, "", NOT_IDENTIFIED):
+            problems.append("MISSING_%s" % f)
+    return problems
+
+
+ARTIFACT_SEMANTIC_VERIFIERS = {
+    "POSTERIOR_ARTIFACT": _semantics_posterior,
+    "LABEL_ARTIFACT": _semantics_label,
+    "COMMON_SUPPORT_EVALUATION": _semantics_common_support,
+    "CAPTURE_QUALITY_MANIFEST": _semantics_capture_quality,
+}
+
+
+def verify_decision_grade_artifacts(terms, binding=None):
+    """Integrity AND trusted origin AND type-specific semantics AND binding.
+
+    An artifact is resolved from a registered trusted store when one holds
+    it; an inline object supplied with the terms is inspected but can never
+    reach ARTIFACT_TRUSTED_ORIGIN_VERIFIED. All four checks must hold for the
+    condition the artifact stands for to be satisfied.
     """
     arts = (terms or {}).get("DECISION_GRADE_ARTIFACTS") or {}
+    binding = dict(binding or {})
     out, detail = {}, {}
     for sha_field, name in DECISION_GRADE_ARTIFACT_KEYS.items():
-        obj = arts.get(sha_field) or arts.get(name)
         claimed = (terms or {}).get(sha_field)
+        inline = arts.get(sha_field) or arts.get(name)
+        trusted = resolve_trusted_artifact(claimed) if claimed else None
+        obj = trusted if trusted is not None else inline
         if not isinstance(obj, dict):
-            detail[name] = {"STATUS": "ARTIFACT_ABSENT",
-                            "CLAIMED_SHA": claimed or NOT_IDENTIFIED}
+            detail[name] = {
+                "STATUS": "ARTIFACT_ABSENT",
+                "CLAIMED_SHA": claimed or NOT_IDENTIFIED,
+                "ARTIFACT_INTEGRITY_VERIFIED": False,
+                "ARTIFACT_TRUSTED_ORIGIN_VERIFIED": False,
+                "ARTIFACT_SEMANTICS_VERIFIED": False,
+                "ARTIFACT_BOUND_TO_THIS_EVALUATION": False}
             out["%s_VERIFIED" % name] = False
             continue
         stored = obj.get(sha_field)
         got = _sha_of(obj, sha_field)
-        ok = bool(stored) and stored == got and (
+        integrity = bool(stored) and stored == got and (
             claimed is None or claimed == stored)
-        detail[name] = {"STATUS": "VERIFIED" if ok else "SHA_MISMATCH",
-                        "STORED_SHA": stored or NOT_IDENTIFIED,
-                        "RECOMPUTED_SHA": got,
-                        "CLAIMED_SHA": claimed or NOT_IDENTIFIED}
+        origin = obj.get("ARTIFACT_RETRIEVED_FROM") == "TRUSTED_STORE"
+        problems = ARTIFACT_SEMANTIC_VERIFIERS[name](obj) if integrity \
+            else ["INTEGRITY_FAILED_SEMANTICS_NOT_EVALUATED"]
+        semantics = not problems
+        bind = _binding_ok(name, obj, binding)
+        ok = integrity and origin and semantics and bind["BOUND"]
+        detail[name] = {
+            "STATUS": "VERIFIED" if ok else "NOT_VERIFIED",
+            "STORED_SHA": stored or NOT_IDENTIFIED,
+            "RECOMPUTED_SHA": got,
+            "CLAIMED_SHA": claimed or NOT_IDENTIFIED,
+            "ARTIFACT_INTEGRITY_VERIFIED": integrity,
+            "ARTIFACT_TRUSTED_ORIGIN_VERIFIED": origin,
+            "ARTIFACT_SEMANTICS_VERIFIED": semantics,
+            "SEMANTIC_PROBLEMS": tuple(problems),
+            "ARTIFACT_BOUND_TO_THIS_EVALUATION": bind["BOUND"],
+            "BINDING": bind,
+            "SOURCE": ("TRUSTED_STORE" if origin
+                       else "INLINE_CALLER_SUPPLIED"),
+        }
         out["%s_VERIFIED" % name] = ok
     out["DETAIL"] = detail
     out["DECISION_GRADE_ARTIFACT_KEYS"] = DECISION_GRADE_ARTIFACT_KEYS
+    out["ARTIFACT_VERIFICATION_DIMENSIONS"] = ARTIFACT_VERIFICATION_DIMENSIONS
+    out["INTEGRITY_IS_NOT_VALIDITY_OR_TRUST"] = \
+        INTEGRITY_IS_NOT_VALIDITY_OR_TRUST
+    out.update(trusted_store_status())
     out["A_STATUS_STRING_IS_NOT_A_PROOF"] = A_STATUS_STRING_IS_NOT_A_PROOF
     return out
 
 
-def _fill_quantity_validated(row, terms):
-    """A sized passive order needs a fill-QUANTITY model, not one scalar."""
+# --- The fill-quantity model artifact. ------------------------------------
+
+FILL_QUANTITY_ARTIFACT_BINDING = ("ACTION", "SIDE", "PRICE",
+                                  "POSTED_QUANTITY", "HORIZON_S", "VENUE",
+                                  "MODEL_VERSION", "CALIBRATION_WINDOW")
+
+A_FILL_QUANTITY_STATUS_STRING_IS_NOT_A_MODEL = (
+    "FILL_QUANTITY_STATUS = VALIDATED beside four numbers is a caller "
+    "assertion with four numbers next to it. The model must be a sealed, "
+    "trusted artifact bound to this action, side, price, posted quantity, "
+    "horizon, venue, model version and calibration window, and its own "
+    "quantities must be internally consistent")
+
+
+def verify_fill_quantity_artifact(terms, binding=None):
+    """Integrity, trusted origin, internal consistency and binding."""
+    sha = (terms or {}).get("FILL_QUANTITY_MODEL_ARTIFACT_SHA")
+    inline = (terms or {}).get("FILL_QUANTITY_MODEL_ARTIFACT") or \
+        (terms or {}).get("FILL_QUANTITY_MODEL")
+    trusted = resolve_trusted_artifact(sha) if sha else None
+    obj = trusted if trusted is not None else inline
+    out = {"FILL_QUANTITY_ARTIFACT_BINDING": FILL_QUANTITY_ARTIFACT_BINDING,
+           "A_FILL_QUANTITY_STATUS_STRING_IS_NOT_A_MODEL":
+               A_FILL_QUANTITY_STATUS_STRING_IS_NOT_A_MODEL}
+    if not isinstance(obj, dict):
+        out.update({"VALIDATED": False, "STATUS": "ARTIFACT_ABSENT",
+                    "ARTIFACT_INTEGRITY_VERIFIED": False,
+                    "ARTIFACT_TRUSTED_ORIGIN_VERIFIED": False,
+                    "ARTIFACT_SEMANTICS_VERIFIED": False})
+        return out
+    field = "FILL_QUANTITY_MODEL_ARTIFACT_SHA"
+    stored = obj.get(field)
+    got = _sha_of(obj, field)
+    integrity = bool(stored) and stored == got and (sha is None or sha ==
+                                                    stored)
+    origin = obj.get("ARTIFACT_RETRIEVED_FROM") == "TRUSTED_STORE"
+    problems = []
+    if obj.get("ARTIFACT_TYPE") != "FILL_QUANTITY_MODEL_ARTIFACT":
+        problems.append("WRONG_ARTIFACT_TYPE")
+    vals = {}
+    for f in ("P_ANY_FILL", "P_FULL_FILL", "EXPECTED_FILL_FRACTION",
+              "EXPECTED_FILLED_QTY"):
+        v = obj.get(f)
+        if not isinstance(v, (int, float)) or isinstance(v, bool):
+            problems.append("MISSING_OR_NON_NUMERIC_%s" % f)
+        else:
+            vals[f] = float(v)
+    qty = obj.get("POSTED_QUANTITY")
+    if not isinstance(qty, (int, float)) or qty <= 0:
+        problems.append("POSTED_QUANTITY_NOT_POSITIVE")
+    if len(vals) == 4 and isinstance(qty, (int, float)) and qty > 0:
+        if not 0.0 <= vals["P_FULL_FILL"] <= vals["P_ANY_FILL"] <= 1.0:
+            problems.append("P_FULL_FILL_EXCEEDS_P_ANY_FILL_OR_OUT_OF_RANGE")
+        if not 0.0 <= vals["EXPECTED_FILL_FRACTION"] <= 1.0:
+            problems.append("EXPECTED_FILL_FRACTION_OUT_OF_RANGE")
+        if not 0.0 <= vals["EXPECTED_FILLED_QTY"] <= float(qty):
+            problems.append("EXPECTED_FILLED_QTY_EXCEEDS_POSTED_QUANTITY")
+        elif abs(vals["EXPECTED_FILLED_QTY"]
+                 - vals["EXPECTED_FILL_FRACTION"] * float(qty)) > 1e-6:
+            problems.append("EXPECTED_FILLED_QTY_INCONSISTENT_WITH_FRACTION")
+    for f in FILL_QUANTITY_ARTIFACT_BINDING:
+        if obj.get(f) in (None, "", NOT_IDENTIFIED):
+            problems.append("MISSING_BINDING_%s" % f)
+    bind = {"BOUND": True, "MISMATCHED_BINDINGS": ()}
+    mism = []
+    for f in FILL_QUANTITY_ARTIFACT_BINDING:
+        w = (binding or {}).get(f)
+        if w is not None and obj.get(f) != w:
+            mism.append({"FIELD": f, "ARTIFACT": obj.get(f),
+                         "EVALUATION": w})
+    if mism:
+        bind = {"BOUND": False, "MISMATCHED_BINDINGS": tuple(mism)}
+    semantics = not problems
+    out.update({
+        "ARTIFACT_INTEGRITY_VERIFIED": integrity,
+        "ARTIFACT_TRUSTED_ORIGIN_VERIFIED": origin,
+        "ARTIFACT_SEMANTICS_VERIFIED": semantics,
+        "SEMANTIC_PROBLEMS": tuple(problems),
+        "BINDING": bind,
+        "SOURCE": "TRUSTED_STORE" if origin else "INLINE_CALLER_SUPPLIED",
+        "VALIDATED": bool(integrity and origin and semantics
+                          and bind["BOUND"]),
+        "STATUS": "VERIFIED" if (integrity and origin and semantics
+                                 and bind["BOUND"]) else "NOT_VERIFIED",
+    })
+    return out
+
+
+def _fill_quantity_validated(row, terms, binding=None):
+    """A sized passive order needs a trusted fill-QUANTITY model artifact."""
     if (row or {}).get("ACTION") not in FILL_BEARING_ACTIONS:
         return True                       # nothing to fill; not applicable
-    fq = (terms or {}).get("FILL_QUANTITY_MODEL") or {}
-    if fq.get("FILL_QUANTITY_STATUS") != "VALIDATED":
-        return False
-    return all(fq.get(f) not in (None, NOT_IDENTIFIED)
-               for f in ("P_ANY_FILL", "P_FULL_FILL",
-                         "EXPECTED_FILL_FRACTION", "EXPECTED_FILLED_QTY"))
+    return verify_fill_quantity_artifact(terms, binding)["VALIDATED"]
 
 
 def decision_grade_action_ev(ev_row, terms=None):
@@ -1275,7 +1678,28 @@ def decision_grade_action_ev(ev_row, terms=None):
     t = terms or {}
     arts = t.get("DECISION_GRADE_ARTIFACTS") or {}
     ev_status = row.get("ACTION_EV_STATUS", NOT_IDENTIFIED)
-    ver = verify_decision_grade_artifacts(t)
+    # Every artifact is bound to THIS evaluation, not merely valid somewhere.
+    binding = {
+        "EVALUATION_ID": row.get("EVALUATION_ID"),
+        "ACTION": row.get("ACTION"),
+        "SIDE": t.get("SIDE"),
+        "PRICE": t.get("PRICE"),
+        "POSTED_QUANTITY": row.get("QUANTITY") if isinstance(
+            row.get("QUANTITY"), (int, float)) else t.get("QUANTITY"),
+        "HORIZON_S": t.get("HORIZON_S"),
+        "VENUE": t.get("VENUE"),
+        "MODEL_VERSION": t.get("MODEL_VERSION"),
+        "CALIBRATION_WINDOW": t.get("CALIBRATION_WINDOW"),
+        "PARAMETER": t.get("PARAMETER"),
+        "PRIOR_VERSION": t.get("PRIOR_VERSION_MANIFEST_SHA"),
+        "TARGET": t.get("TARGET"),
+        "FOLD": t.get("FOLD"),
+        "MARKET_IDENTITY": t.get("MARKET_IDENTITY"),
+        "CAPTURE_SPEC_SHA": t.get("CAPTURE_SPEC_SHA"),
+        "CAPTURE_CODE_SHA": t.get("CAPTURE_CODE_SHA"),
+    }
+    binding = {k: v for k, v in binding.items() if v is not None}
+    ver = verify_decision_grade_artifacts(t, binding)
     checks = {
         "ACTION_EV_IDENTIFIED": ev_status == "IDENTIFIED",
         "EVIDENCE_PROVENANCE_VERIFIED":
@@ -1303,7 +1727,8 @@ def decision_grade_action_ev(ev_row, terms=None):
         "DATA_QUALITY_GATE_PASSED":
             ver["CAPTURE_QUALITY_MANIFEST_VERIFIED"],
         # --- the fill-quantity model, for an order that can be filled. ----
-        "FILL_QUANTITY_MODEL_VALIDATED": _fill_quantity_validated(row, t),
+        "FILL_QUANTITY_MODEL_VALIDATED": _fill_quantity_validated(
+            row, t, binding),
     }
     blockers = tuple(k for k in DECISION_GRADE_CONDITIONS if not checks[k])
     return {
@@ -1312,6 +1737,13 @@ def decision_grade_action_ev(ev_row, terms=None):
         "DECISION_GRADE_CHECKS": checks,
         "DECISION_GRADE_BLOCKERS": blockers,
         "ARTIFACT_VERIFICATION": ver,
+        "FILL_QUANTITY_ARTIFACT_VERIFICATION": verify_fill_quantity_artifact(
+            t, binding),
+        "ARTIFACT_BINDING": binding,
+        "INTEGRITY_IS_NOT_VALIDITY_OR_TRUST":
+            INTEGRITY_IS_NOT_VALIDITY_OR_TRUST,
+        "A_CALLER_SEALED_OBJECT_IS_NOT_TRUSTED_EVIDENCE":
+            A_CALLER_SEALED_OBJECT_IS_NOT_TRUSTED_EVIDENCE,
         "DECISION_GRADE_ARTIFACT_REFERENCES": tuple(sorted(arts)),
         "A_STATUS_STRING_IS_NOT_A_PROOF": A_STATUS_STRING_IS_NOT_A_PROOF,
         "FILL_QUANTITY_MODEL_VALIDATED":
@@ -1403,12 +1835,18 @@ def _attach_decision_grade(row, terms):
 
 
 def action_ev_mc(action, terms, convention="SEPARATE_TERM",
-                 draws=DEFAULT_DRAWS, seed=DEFAULT_SEED):
+                 draws=DEFAULT_DRAWS, seed=DEFAULT_SEED,
+                 shadow_distribution_diagnostic=False):
     """The full EV distribution for one candidate action.
 
     `terms` maps EV_TERMS -> Dist | scalar | NOT_IDENTIFIED. Missing critical
     terms make the result NOT_FULLY_IDENTIFIED, and the caller is pointed at
     the break-even engine rather than given a fabricated number.
+
+    A term whose declared family has support outside its physical domain is
+    REFUSED, not clipped and not averaged. Pass
+    shadow_distribution_diagnostic=True to read the shape anyway; the run
+    then publishes no ordinary EV statistic under its ordinary name.
     """
     if convention not in ADVERSE_SELECTION_CONVENTIONS:
         return {"ACTION": action, "STATUS": "UNKNOWN_CONVENTION",
@@ -1577,6 +2015,47 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         })
         return _attach_decision_grade(base, terms)
 
+    # --- Impossible draws may not enter EV arithmetic. -------------------
+    #
+    # Every term whose family support escapes its bounded physical domain is
+    # named here. check_domain() already threw out the specifications whose
+    # CENTRAL envelope lands outside; what is left is a family that will,
+    # with declared probability, produce a draw that cannot happen. Those
+    # draws used to be counted and then multiplied. They are now refused.
+    fsel_applies = fsel["APPLIES"]
+    _drawn_terms = [t for t in EV_TERMS if d.get(t) is not None]
+    if fsel_applies:
+        _drawn_terms.append(FILL_SELECTION_TERM)
+    invalid_support = tuple(sorted(
+        t for t in _drawn_terms
+        if res["DISTRIBUTION_GRADES"].get(t, {}).get(
+            "SUPPORT_INSIDE_DOMAIN") is False))
+    base["INVALID_PHYSICAL_SUPPORT_TERMS"] = invalid_support
+    base["AN_IMPOSSIBLE_DRAW_IS_NOT_AN_EV_INPUT"] = \
+        AN_IMPOSSIBLE_DRAW_IS_NOT_AN_EV_INPUT
+    base["SHADOW_DISTRIBUTION_DIAGNOSTIC_REQUESTED"] = bool(
+        shadow_distribution_diagnostic)
+
+    if invalid_support and not shadow_distribution_diagnostic:
+        base.update({
+            "STATUS": REFUSED_INVALID_PHYSICAL_SUPPORT,
+            "ACTION_EV_STATUS": REFUSED_INVALID_PHYSICAL_SUPPORT,
+            "ACTION_EV_MONTE_CARLO_STATUS": REFUSED_INVALID_PHYSICAL_SUPPORT,
+            "EV_MEAN": NOT_IDENTIFIED,
+            "RECOMMENDED": False,
+            "INVALID_PHYSICAL_SUPPORT_DETAIL": {
+                t: res["DISTRIBUTION_GRADES"][t] for t in invalid_support},
+            "WHAT_TO_DO_INSTEAD": (
+                "declare the term with a family whose SUPPORT is the domain "
+                "-- BETA, LOGIT_NORMAL, TRUNCATED_NORMAL, TRIANGULAR or "
+                "POINT for a probability; LOGNORMAL, TRUNCATED_NORMAL or "
+                "TRIANGULAR for money. Re-running with "
+                "shadow_distribution_diagnostic=True reads the shape but "
+                "publishes no EV statistic"),
+            "NO_ORDER_IS_PLACED": True,
+        })
+        return _attach_decision_grade(base, terms)
+
     rng = random.Random(seed)
     zero = Dist("POINT", {"value": 0.0})
     fs_dist = fsel["DIST"] if fsel["APPLIES"] else None
@@ -1614,8 +2093,29 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
     fs_scale = scales.get(FILL_SELECTION_TERM, 1.0)
     fs_points = {p: v * fs_scale for p, v in fs_points.items()}
 
+    # Belt and braces behind the support refusal above. If FAMILY_SUPPORT
+    # ever fails to describe a family, the draw itself still cannot reach
+    # _net(): a branch weight outside [0, 1] stops the fill and no-fill
+    # branches partitioning the outcome space.
+    #
+    # On the ordinary path the loop is abandoned and the run refuses. On the
+    # explicitly requested diagnostic path the impossible draw is COUNTED
+    # and SKIPPED -- observing how often a misspecified family produces an
+    # impossible state is the point of the diagnostic -- but it is never
+    # multiplied, so _net() sees only draws that could happen.
+    impossible_weights = {}
+    refused_mid_loop = False
+
     for _ in range(draws):
         pf = draw("P_FILL")
+        if pf < 0.0 or pf > 1.0:
+            rec = impossible_weights.setdefault(
+                "P_FILL", {"DRAWS": 0, "FIRST_VALUE": round(pf, 10)})
+            rec["DRAWS"] += 1
+            if shadow_distribution_diagnostic:
+                continue
+            refused_mid_loop = True
+            break
         vf = draw("VALUE_IF_FILL")
         vn = draw("VALUE_IF_NO_FILL")
         tx = draw("TOXICITY")
@@ -1631,6 +2131,24 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         if d["CAPITAL_REQUIRED"] and d["OCCUPANCY_SECONDS"]:
             caps.append(draw("CAPITAL_REQUIRED"))
             hours.append(draw("OCCUPANCY_SECONDS") / 3600.0)
+
+    if refused_mid_loop or (impossible_weights and not nets):
+        base.update({
+            "STATUS": REFUSED_INVALID_PHYSICAL_SUPPORT,
+            "ACTION_EV_STATUS": REFUSED_INVALID_PHYSICAL_SUPPORT,
+            "ACTION_EV_MONTE_CARLO_STATUS": REFUSED_INVALID_PHYSICAL_SUPPORT,
+            "EV_MEAN": NOT_IDENTIFIED,
+            "RECOMMENDED": False,
+            "IMPOSSIBLE_PROBABILITY_WEIGHT_DRAWS": dict(impossible_weights),
+            "PROBABILITY_WEIGHT_TERMS": PROBABILITY_WEIGHT_TERMS,
+            "DRAWS_COMPLETED_BEFORE_REFUSAL": len(nets),
+            "WHAT_TO_DO_INSTEAD": (
+                "the declared family produced a branch weight outside "
+                "[0, 1] even though its support was reported as admissible. "
+                "Fix the family declaration; nothing was multiplied"),
+            "NO_ORDER_IS_PLACED": True,
+        })
+        return _attach_decision_grade(base, terms)
 
     n = float(len(nets))
     mean = sum(nets) / n
@@ -1746,6 +2264,40 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         base["WHY_NO_CAPITAL_RATE"] = (
             "capital required and occupancy must both be supplied; a rate on "
             "a guessed denominator is not a measurement")
+    # --- A diagnostic reading publishes no ordinary EV statistic. ---------
+    if invalid_support:
+        diag = _divert_ordinary_ev_statistics(base)
+        diag["INVALID_PHYSICAL_SUPPORT_TERMS"] = invalid_support
+        diag["INVALID_PHYSICAL_SUPPORT_DETAIL"] = {
+            t: res["DISTRIBUTION_GRADES"][t] for t in invalid_support}
+        diag["DIAGNOSTIC_DOMAIN_EXCURSION_DRAWS"] = base.get(
+            "DOMAIN_EXCURSION_DRAWS", {})
+        diag["DIAGNOSTIC_IMPOSSIBLE_WEIGHT_DRAWS_SKIPPED"] = dict(
+            impossible_weights)
+        diag["DIAGNOSTIC_DRAWS_USED"] = len(nets)
+        diag["DIAGNOSTIC_DRAWS_REQUESTED"] = int(draws)
+        diag["THESE_ARE_NOT_EXPECTED_VALUES"] = (
+            "the draws behind these numbers include states of the world that "
+            "cannot occur, so their mean is the mean of an arithmetic "
+            "expression and not the expectation of a payoff. They are "
+            "published to show the shape of a misspecification, never to "
+            "rank, gate or size an action")
+        base.update({
+            "STATUS": SHADOW_DISTRIBUTION_DIAGNOSTIC,
+            "ACTION_EV_STATUS": SHADOW_DISTRIBUTION_DIAGNOSTIC,
+            "ACTION_EV_MONTE_CARLO_STATUS": SHADOW_DISTRIBUTION_DIAGNOSTIC,
+            "EV_MEAN": NOT_IDENTIFIED,
+            "RECOMMENDED": False,
+            "WHY_NOT_RECOMMENDED": (
+                "a term's declared family has support outside its physical "
+                "domain; this run is a distribution diagnostic, not an EV"),
+            "SHADOW_DISTRIBUTION_DIAGNOSTIC": diag,
+            "NO_ORDER_IS_PLACED": True,
+        })
+        return _attach_decision_grade(base, terms)
+
+    base["ACTION_EV_MONTE_CARLO_STATUS"] = "ADMISSIBLE_PHYSICAL_SUPPORT"
+
     # --- Unresolved economics downgrade the whole result. -----------------
     if unresolved:
         base["ACTION_EV_STATUS"] = "NOT_FULLY_IDENTIFIED"
@@ -2236,6 +2788,16 @@ ROBUSTNESS_THRESHOLD_NOT_CHOSEN = (
     "yet")
 
 
+ROBUST_POSITIVITY_STATUSES = ("POSITIVE", "NOT_POSITIVE", "NOT_IDENTIFIED")
+
+A_TRUTHY_STRING_IN_A_BOOLEAN_FIELD_IS_A_TRAP = (
+    "ROBUSTLY_POSITIVE = 'NOT_IDENTIFIED' is scientifically right and "
+    "operationally dangerous: bool('NOT_IDENTIFIED') is True, so `if "
+    "row['ROBUSTLY_POSITIVE']:` reads UNKNOWN as POSITIVE -- the exact "
+    "inversion the tri-state existed to prevent. The boolean field carries "
+    "None when undetermined, and the word lives in its own field, "
+    "ROBUST_POSITIVITY_STATUS")
+
 UNKNOWN_IS_NOT_NEGATIVE = (
     "ROBUSTLY_POSITIVE = False says the action was examined and found not "
     "robustly positive. When the EV is unidentified or the decision-grade "
@@ -2278,6 +2840,9 @@ def robustly_positive(ev_row, conservative_quantile=0.10, terms=None):
         "DECISION_GRADE_BLOCKERS": blockers,
         "ROBUSTNESS_THRESHOLD_NOT_CHOSEN": ROBUSTNESS_THRESHOLD_NOT_CHOSEN,
         "ROBUSTNESS_IS_A_DECISION_CLAIM": ROBUSTNESS_IS_A_DECISION_CLAIM,
+        "ROBUST_POSITIVITY_STATUSES": ROBUST_POSITIVITY_STATUSES,
+        "A_TRUTHY_STRING_IN_A_BOOLEAN_FIELD_IS_A_TRAP":
+            A_TRUTHY_STRING_IN_A_BOOLEAN_FIELD_IS_A_TRAP,
         "SHADOW_RESEARCH_REMAINS_ALLOWED": SHADOW_RESEARCH_REMAINS_ALLOWED,
     }
     # UNKNOWN IS NOT NEGATIVE. ROBUSTLY_POSITIVE = False asserts that the
@@ -2285,7 +2850,8 @@ def robustly_positive(ev_row, conservative_quantile=0.10, terms=None):
     # unidentified or the decision-grade gate is blocked, no such finding was
     # made, so the answer is NOT_IDENTIFIED and the diagnostic sits beside it.
     if v == NOT_IDENTIFIED or v is None:
-        out.update({"ROBUSTLY_POSITIVE": NOT_IDENTIFIED,
+        out.update({"ROBUSTLY_POSITIVE": None,
+                    "ROBUST_POSITIVITY_STATUS": NOT_IDENTIFIED,
                     "REASON": "EV_NOT_IDENTIFIED",
                     "UNKNOWN_IS_NOT_NEGATIVE": UNKNOWN_IS_NOT_NEGATIVE,
                     "SHADOW_ROBUSTNESS_DIAGNOSTIC": (
@@ -2293,7 +2859,8 @@ def robustly_positive(ev_row, conservative_quantile=0.10, terms=None):
                         else NOT_IDENTIFIED)})
         return out
     if row.get("ACTION_EV_STATUS") != "IDENTIFIED":
-        out.update({"ROBUSTLY_POSITIVE": NOT_IDENTIFIED,
+        out.update({"ROBUSTLY_POSITIVE": None,
+                    "ROBUST_POSITIVITY_STATUS": NOT_IDENTIFIED,
                     "REASON": "ACTION_EV_NOT_IDENTIFIED",
                     "UNKNOWN_IS_NOT_NEGATIVE": UNKNOWN_IS_NOT_NEGATIVE,
                     "ACTION_EV_STATUS": row.get("ACTION_EV_STATUS",
@@ -2301,14 +2868,17 @@ def robustly_positive(ev_row, conservative_quantile=0.10, terms=None):
                     "SHADOW_ROBUSTNESS_DIAGNOSTIC": v})
         return out
     if gate != "PASS":
-        out.update({"ROBUSTLY_POSITIVE": NOT_IDENTIFIED,
+        out.update({"ROBUSTLY_POSITIVE": None,
+                    "ROBUST_POSITIVITY_STATUS": NOT_IDENTIFIED,
                     "REASON": "DECISION_GRADE_BLOCKED",
                     "UNKNOWN_IS_NOT_NEGATIVE": UNKNOWN_IS_NOT_NEGATIVE,
                     "SHADOW_ROBUSTNESS_DIAGNOSTIC": v,
                     "SHADOW_ROBUSTNESS_DIAGNOSTIC_SIGN": (
                         "POSITIVE" if v > 0 else "NOT_POSITIVE")})
         return out
-    out.update({"ROBUSTLY_POSITIVE": v > 0,
+    out.update({"ROBUSTLY_POSITIVE": bool(v > 0),
+                "ROBUST_POSITIVITY_STATUS": ("POSITIVE" if v > 0
+                                             else "NOT_POSITIVE"),
                 "EV_AT_QUANTILE": v,
                 "EV_MEAN": row.get("EV_MEAN"),
                 "P_EV_GT_0": row.get("P_EV_GT_0")})
@@ -2530,6 +3100,9 @@ def describe():
             BREAK_EVEN_TURNS_UNKNOWNS_INTO_QUESTIONS,
         "ROBUSTNESS_THRESHOLD_NOT_CHOSEN": ROBUSTNESS_THRESHOLD_NOT_CHOSEN,
         "ROBUSTNESS_IS_A_DECISION_CLAIM": ROBUSTNESS_IS_A_DECISION_CLAIM,
+        "ROBUST_POSITIVITY_STATUSES": ROBUST_POSITIVITY_STATUSES,
+        "A_TRUTHY_STRING_IN_A_BOOLEAN_FIELD_IS_A_TRAP":
+            A_TRUTHY_STRING_IN_A_BOOLEAN_FIELD_IS_A_TRAP,
         "TERM_STATES": TERM_STATES,
         "RESOLVED_STATES": RESOLVED_STATES,
         "DECISION_GRADE_STATES": DECISION_GRADE_STATES,

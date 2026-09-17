@@ -7,6 +7,7 @@ import pytest
 
 import betfair_historical_adapter as BF
 import lead_lag as LL
+import label_fixture_support as LF
 import microstructure_v1 as MS
 import odds_api_adapter as OA
 import odds_procurement as PROC
@@ -437,12 +438,12 @@ def test_a_reverting_residual_shows_a_negative_correlation():
         obs.append({"EVENT_KEY": "e%d" % (i % 12), "MARKET": "m", "T": "t",
                     "P_TARGET": 0.50 + res, "P_SURFACE_EX_TARGET": 0.50,
                     "TARGET_LATER": {30: 0.50 + 0.3 * res},
-                    "TARGET_LATER_STATUS": {30: "PRESENT"},
-                    "LABEL_ARTIFACT_SHA": _LABEL_SHA})
+                    "TARGET_LATER_STATUS": {30: "PRESENT"}})
     rows, _ = MS.relative_value_rows(obs, horizons=(30,))
+    arts = LF.bind(rows, "TARGET_CHANGE_30S")
     out = MS.relative_value_test(rows, horizons=(30,),
                                  min_coverage_pct=50.0,
-                                 label_artifacts=_LABEL_ARTIFACTS)
+                                 label_artifacts=arts)
     assert out["BY_HORIZON"]["30S"]["CORRELATION"] < -0.5
 
 

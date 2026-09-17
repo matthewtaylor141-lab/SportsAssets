@@ -110,15 +110,20 @@ def test_a_beta_update_moves_toward_the_data():
     prior = PR.beta_from_mean_n(0.20, 10)
     r = PR.update_beta(prior, successes=40, trials=50)
     assert r["STATUS"] == "UPDATED"
-    assert r["POSTERIOR"]["MEAN"] > r["PRIOR"]["MEAN"]
-    assert r["PRIOR_TO_POSTERIOR_SHIFT"] > 0
+    # The generic names are gone: a raw-row posterior is reachable only
+    # under a DIAGNOSTIC_ name that says what it is.
+    assert r["POSTERIOR"] == PR.NOT_IDENTIFIED
+    assert r["DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY"]["MEAN"] > \
+        r["PRIOR"]["MEAN"]
+    assert r["DIAGNOSTIC_RAW_ROW_PRIOR_TO_POSTERIOR_SHIFT"] > 0
 
 
 def test_a_weak_prior_yields_to_data_faster_than_a_strong_one():
     data = dict(successes=40, trials=50)
     weak = PR.update_beta(PR.beta_from_mean_n(0.2, 2), **data)
     strong = PR.update_beta(PR.beta_from_mean_n(0.2, 200), **data)
-    assert weak["POSTERIOR"]["MEAN"] > strong["POSTERIOR"]["MEAN"]
+    assert weak["DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY"]["MEAN"] > \
+        strong["DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY"]["MEAN"]
 
 
 def test_the_prior_is_never_overwritten():
@@ -133,8 +138,9 @@ def test_the_prior_is_never_overwritten():
 def test_a_normal_update_reduces_uncertainty():
     prior = PR.Dist("NORMAL", {"mu": 0.0, "sigma": 0.01})
     r = PR.update_normal(prior, obs_mean=0.004, obs_sigma=0.01, n=100)
-    assert r["UNCERTAINTY_FELL_BY"] > 0
-    assert 0 < r["POSTERIOR"]["MEAN"] < 0.004
+    assert r["UNCERTAINTY_FELL_BY"] == PR.NOT_IDENTIFIED
+    assert r["DIAGNOSTIC_RAW_ROW_UNCERTAINTY_FELL_BY"] > 0
+    assert 0 < r["DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY"]["MEAN"] < 0.004
 
 
 def test_a_sparse_subgroup_shrinks_toward_its_parent():
@@ -355,15 +361,20 @@ def test_robustly_positive_uses_the_conservative_tail():
     # the number and the decision-grade gate is blocked -- and it is not
     # demoted to False either, because nothing established the negative.
     assert rob["SHADOW_ROBUSTNESS_DIAGNOSTIC"] == r["EV_P10"]
-    assert rob["ROBUSTLY_POSITIVE"] == MC.NOT_IDENTIFIED
+    # None, not the truthy string NOT_IDENTIFIED: a boolean field holds a
+    # boolean or nothing, and the word goes in its own status field.
+    assert rob["ROBUSTLY_POSITIVE"] is None
+    assert bool(rob["ROBUSTLY_POSITIVE"]) is False
+    assert rob["ROBUST_POSITIVITY_STATUS"] == MC.NOT_IDENTIFIED
     assert rob["REASON"] == "DECISION_GRADE_BLOCKED"
     assert "management decision" in rob["ROBUSTNESS_THRESHOLD_NOT_CHOSEN"]
 
 
 def test_an_unidentified_ev_is_never_robustly_positive():
     rob = MC.robustly_positive({"EV_P10": MC.NOT_IDENTIFIED})
-    assert rob["ROBUSTLY_POSITIVE"] == MC.NOT_IDENTIFIED
+    assert rob["ROBUSTLY_POSITIVE"] is None
     assert rob["ROBUSTLY_POSITIVE"] is not True
+    assert rob["ROBUST_POSITIVITY_STATUS"] == MC.NOT_IDENTIFIED
 
 
 def test_a_dominated_action_is_marked():

@@ -757,8 +757,6 @@ def label_artifact(state_row, series, horizons_s=HORIZONS_S,
     body["OBSERVATION_CHAIN_STATUS"] = ("COMPLETE" if not incomplete
                                         else "INCOMPLETE")
     body["OBSERVATION_CHAIN_GAPS"] = incomplete
-    body["LABEL_ARTIFACT_SHA"] = hashlib.sha256(
-        json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
     body["LABEL_ARTIFACT_FIELDS"] = LABEL_ARTIFACT_FIELDS
     body["OBSERVATION_CHAIN_FIELDS"] = OBSERVATION_CHAIN_FIELDS
     body["A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN"] = \
@@ -767,15 +765,179 @@ def label_artifact(state_row, series, horizons_s=HORIZONS_S,
         A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED
     body["LABEL_PROVENANCE_STATUS"] = ("VALID" if not incomplete
                                        else "OBSERVATION_CHAIN_INCOMPLETE")
+    # ONE sealing convention: everything but the digest field itself. The
+    # seal used to cover a sub-body and four fields were attached AFTER it,
+    # so a reader recomputing the digest over the whole object -- which is
+    # what the decision gate does -- could never reproduce it. The canonical
+    # artifact then failed integrity while a hand-built object sealed the
+    # reader's way passed. A convention that only outsiders' forgeries
+    # satisfy is worse than no convention.
+    body["LABEL_ARTIFACT_SHA"] = hashlib.sha256(
+        json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
     return body
 
 
+A_STORED_CHAIN_STATUS_IS_A_SELF_ASSESSMENT = (
+    "OBSERVATION_CHAIN_STATUS was read out of the artifact, so the seal "
+    "protected the artifact's own opinion of itself. It is re-derived from "
+    "every PRESENT target's required fields, and -- where the immutable "
+    "source rows are available -- the origin and forward row hashes, the "
+    "timestamps, the market identity, the label value, the realised offset "
+    "and the tie rule are each recomputed against those rows")
+
+SOURCE_RESOLUTION_STATUSES = ("RESOLVED_AND_RECOMPUTED",
+                              "SOURCE_ROWS_UNAVAILABLE",
+                              "SOURCE_ROW_HASH_MISMATCH",
+                              "RECOMPUTATION_MISMATCH")
+
+CANONICAL_SHA_FIELDS = ("LABEL_BUILDER_CODE_SHA", "LABEL_SPEC_SHA",
+                        "CAPTURE_SPEC_SHA")
+
+
+def rederive_observation_chain(artifact, source_rows=None,
+                               trusted_shas=None):
+    """Re-derive chain completeness; resolve the source rows when given.
+
+    `source_rows` maps a row hash to the immutable captured row. When both
+    the origin and forward rows resolve, the chain is not merely complete --
+    it is RECOMPUTED: timestamps, market identity, label value, realised
+    offset and the frozen tie rule are each checked against the rows.
+
+    `trusted_shas` maps LABEL_BUILDER_CODE_SHA / LABEL_SPEC_SHA /
+    CAPTURE_SPEC_SHA to the canonical value; a non-empty string that matches
+    nothing canonical is not a verified reference.
+    """
+    a = artifact or {}
+    chain = a.get("OBSERVATION_CHAIN") or {}
+    gaps, recomputed, source_status = [], {}, {}
+    rows = source_rows or {}
+    # The chain is re-derived against what the ARTIFACT CLAIMS TO LABEL, not
+    # merely against the chain it happens to carry. Deleting the chain and
+    # re-sealing used to produce a COMPLETE re-derivation, because a loop
+    # over an empty dict finds nothing wrong: every PRESENT target must have
+    # its own chain record, and that record must agree it is present.
+    statuses = a.get("TARGET_LABEL_STATUS") or {}
+    for key in sorted(statuses):
+        if statuses.get(key) != "PRESENT":
+            continue
+        rec = chain.get(key)
+        if not isinstance(rec, dict):
+            gaps.append((key, "CHAIN_RECORD_ABSENT_FOR_PRESENT_TARGET"))
+        elif rec.get("TARGET_LABEL_STATUS") != "PRESENT":
+            gaps.append((key, "CHAIN_RECORD_DISAGREES_WITH_LABEL_STATUS"))
+    for key, rec in sorted(chain.items()):
+        if rec.get("TARGET_LABEL_STATUS") != "PRESENT":
+            continue
+        for fld in OBSERVATION_CHAIN_FIELDS:
+            v = rec.get(fld)
+            if v in (None, NOT_IDENTIFIED, MISSING):
+                gaps.append((key, fld))
+        if not rows:
+            source_status[key] = "SOURCE_ROWS_UNAVAILABLE"
+            continue
+        o = rows.get(rec.get("SOURCE_ORIGIN_ROW_HASH"))
+        f = rows.get(rec.get("SOURCE_FORWARD_ROW_HASH"))
+        if not isinstance(o, dict) or not isinstance(f, dict):
+            source_status[key] = "SOURCE_ROW_HASH_MISMATCH"
+            gaps.append((key, "SOURCE_ROWS_DO_NOT_RESOLVE"))
+            continue
+        bad = _recompute_chain_record(key, rec, o, f)
+        source_status[key] = ("RECOMPUTATION_MISMATCH" if bad
+                              else "RESOLVED_AND_RECOMPUTED")
+        if bad:
+            gaps.extend((key, b) for b in bad)
+        recomputed[key] = tuple(bad)
+    canonical = {}
+    for fld in CANONICAL_SHA_FIELDS:
+        got = a.get(fld)
+        want = (trusted_shas or {}).get(fld)
+        if got in (None, "", NOT_IDENTIFIED):
+            canonical[fld] = "ABSENT"
+            gaps.append(("ARTIFACT", fld))
+        elif want is None:
+            canonical[fld] = "PRESENT_NOT_VERIFIED_AGAINST_CANONICAL"
+        elif got != want:
+            canonical[fld] = "MISMATCH"
+            gaps.append(("ARTIFACT", "%s_MISMATCH" % fld))
+        else:
+            canonical[fld] = "VERIFIED"
+    return {
+        "OBSERVATION_CHAIN_STATUS": "COMPLETE" if not gaps else "INCOMPLETE",
+        "OBSERVATION_CHAIN_GAPS": tuple(gaps),
+        "SOURCE_RESOLUTION": source_status,
+        "SOURCE_RESOLUTION_STATUSES": SOURCE_RESOLUTION_STATUSES,
+        "RECOMPUTATION_PROBLEMS": recomputed,
+        "CANONICAL_SHA_VERIFICATION": canonical,
+        "A_STORED_CHAIN_STATUS_IS_A_SELF_ASSESSMENT":
+            A_STORED_CHAIN_STATUS_IS_A_SELF_ASSESSMENT,
+    }
+
+
+def _recompute_chain_record(key, rec, origin_row, forward_row):
+    """Recompute one chain record from the two rows it names."""
+    bad = []
+    if origin_row.get("DECISION_TIMESTAMP_UTC") != rec.get(
+            "ORIGIN_TIMESTAMP"):
+        bad.append("ORIGIN_TIMESTAMP_MISMATCH")
+    if forward_row.get("DECISION_TIMESTAMP_UTC") != rec.get(
+            "FORWARD_OBSERVATION_TIMESTAMP"):
+        bad.append("FORWARD_TIMESTAMP_MISMATCH")
+    ident = rec.get("MARKET_IDENTITY") or {}
+    for r, tag in ((origin_row, "ORIGIN"), (forward_row, "FORWARD")):
+        for k in SUBJECT_KEYS:
+            want = ident.get(k)
+            if want in (None, NOT_IDENTIFIED):
+                continue
+            if r.get(k) != want:
+                bad.append("%s_MARKET_IDENTITY_MISMATCH" % tag)
+                break
+    t0 = _parse(rec.get("ORIGIN_TIMESTAMP"))
+    t1 = _parse(rec.get("FORWARD_OBSERVATION_TIMESTAMP"))
+    h = rec.get("TARGET_HORIZON_S")
+    if t0 is not None and t1 is not None and isinstance(h, (int, float)):
+        want_off = (t1 - t0).total_seconds() - float(h)
+        got_off = rec.get("REALIZED_OFFSET_S")
+        if not isinstance(got_off, (int, float)) or \
+                abs(want_off - float(got_off)) > 1e-6:
+            bad.append("REALIZED_OFFSET_MISMATCH")
+        if abs(want_off) > HORIZON_TOLERANCE_S:
+            bad.append("FORWARD_ROW_OUTSIDE_TOLERANCE")
+    base = key.rsplit("_", 1)[0]
+    want_val = _recompute_label_value(base, origin_row, forward_row)
+    got_val = rec.get("LABEL_VALUE")
+    if want_val is None:
+        bad.append("LABEL_VALUE_NOT_RECOMPUTABLE")
+    elif not isinstance(got_val, (int, float)) or \
+            abs(float(got_val) - want_val) > 1e-9:
+        bad.append("LABEL_VALUE_MISMATCH")
+    return bad
+
+
+def _recompute_label_value(base, origin_row, forward_row):
+    """The label this target SHOULD have, from the two named rows."""
+    o_mid, f_mid = _num(origin_row.get("MID")), _num(forward_row.get("MID"))
+    o_bid, o_ask = (_num(origin_row.get("BEST_BID")),
+                    _num(origin_row.get("BEST_ASK")))
+    f_bid, f_ask = (_num(forward_row.get("BEST_BID")),
+                    _num(forward_row.get("BEST_ASK")))
+    if base == "MID_MOVE":
+        return None if (o_mid is None or f_mid is None) \
+            else round(f_mid - o_mid, 10)
+    if base in ("EXECUTABLE_BUY_MOVE", "EXECUTABLE_MOVE"):
+        return None if (o_ask is None or f_bid is None) \
+            else round(f_bid - o_ask, 10)
+    if base == "EXECUTABLE_SELL_MOVE":
+        return None if (o_bid is None or f_ask is None) \
+            else round(o_bid - f_ask, 10)
+    return None
+
+
 # Keys attached AFTER sealing, excluded when the seal is recomputed.
-_UNSEALED_KEYS = ("LABEL_ARTIFACT_SHA", "LABEL_ARTIFACT_FIELDS",
-                  "OBSERVATION_CHAIN_FIELDS",
-                  "A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN",
-                  "A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED",
-                  "LABEL_PROVENANCE_STATUS")
+# Only the digest field itself, plus what a trusted store attaches on
+# retrieval, sits outside the seal. Everything the builder wrote is sealed,
+# so a reader recomputing over the whole object gets the same digest.
+_UNSEALED_KEYS = ("LABEL_ARTIFACT_SHA", "ARTIFACT_STORE_ID",
+                  "ARTIFACT_STORE_KIND", "ARTIFACT_RETRIEVED_FROM")
 
 
 def verify_label_artifact(artifact):
@@ -800,7 +962,11 @@ def verify_label_artifact(artifact):
     got = hashlib.sha256(
         json.dumps(a, sort_keys=True, default=str).encode()).hexdigest()
     sealed = got == claimed
-    chain_ok = a.get("OBSERVATION_CHAIN_STATUS") == "COMPLETE"
+    # RE-DERIVED, not read. Trusting the stored OBSERVATION_CHAIN_STATUS made
+    # the seal cover a self-assessment: an artifact could declare its own
+    # chain COMPLETE and the seal would faithfully protect that declaration.
+    rederived = rederive_observation_chain(artifact)
+    chain_ok = rederived["OBSERVATION_CHAIN_STATUS"] == "COMPLETE"
     if not sealed:
         status = "SHA_MISMATCH"
     elif not chain_ok:
@@ -811,9 +977,14 @@ def verify_label_artifact(artifact):
             "LABEL_ARTIFACT_SHA": claimed,
             "RECOMPUTED_SHA": got,
             "SEAL_INTACT": sealed,
-            "OBSERVATION_CHAIN_STATUS": a.get("OBSERVATION_CHAIN_STATUS",
-                                              NOT_IDENTIFIED),
-            "OBSERVATION_CHAIN_GAPS": a.get("OBSERVATION_CHAIN_GAPS", ()),
+            "OBSERVATION_CHAIN_STATUS":
+                rederived["OBSERVATION_CHAIN_STATUS"],
+            "OBSERVATION_CHAIN_REDERIVED": True,
+            "STORED_OBSERVATION_CHAIN_STATUS": a.get(
+                "OBSERVATION_CHAIN_STATUS", NOT_IDENTIFIED),
+            "OBSERVATION_CHAIN_GAPS": rederived["OBSERVATION_CHAIN_GAPS"],
+            "A_STORED_CHAIN_STATUS_IS_A_SELF_ASSESSMENT":
+                A_STORED_CHAIN_STATUS_IS_A_SELF_ASSESSMENT,
             "OBSERVATION_CHAIN_FIELDS": OBSERVATION_CHAIN_FIELDS,
             "A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN":
                 A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN,

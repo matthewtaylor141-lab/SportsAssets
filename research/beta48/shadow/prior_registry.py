@@ -732,6 +732,15 @@ POSTERIOR_PRECISION_STATUSES = (
     "NOT_IDENTIFIED_PENDING_DEPENDENCE_MODEL",
 )
 
+NO_GENERIC_ALIAS_FOR_A_DIAGNOSTIC_POSTERIOR = (
+    "POSTERIOR, POSTERIOR_DIST and PRIOR_TO_POSTERIOR_SHIFT are the names a "
+    "consumer reaches for without thinking, and they held the raw-row "
+    "narrowed object while DECISION_GRADE_POSTERIOR was withheld beside "
+    "them. A diagnostic that is one dictionary key away from looking like a "
+    "production posterior will be used as one. The generic names are "
+    "NOT_IDENTIFIED and the object is published only as "
+    "DIAGNOSTIC_RAW_ROW_POSTERIOR")
+
 A_VALIDATED_EFFECTIVE_N_IS_NOT_AN_APPLIED_ONE = (
     "EFFECTIVE_N = 12 beside RAW_ROWS = 100 says the design effect has been "
     "estimated. It does not say the posterior was built from it. Until an "
@@ -863,9 +872,15 @@ def update_beta(prior_dist, successes, trials, prior_version="1",
         "LIKELIHOOD_SPEC": "BINOMIAL",
         "DATA_BATCH": data_batch or NOT_IDENTIFIED,
         "PRIOR": prior_dist.summary(),
-        "POSTERIOR": post.summary(),
-        "POSTERIOR_DIST": post,
-        "PRIOR_TO_POSTERIOR_SHIFT": round(post.mean() - prior_dist.mean(), 10),
+        # No generic production-looking alias for a raw-row diagnostic.
+        "POSTERIOR": NOT_IDENTIFIED,
+        "POSTERIOR_DIST": NOT_IDENTIFIED,
+        "PRIOR_TO_POSTERIOR_SHIFT": NOT_IDENTIFIED,
+        "DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY": post.summary(),
+        "DIAGNOSTIC_RAW_ROW_PRIOR_TO_POSTERIOR_SHIFT": round(
+            post.mean() - prior_dist.mean(), 10),
+        "NO_GENERIC_ALIAS_FOR_A_DIAGNOSTIC_POSTERIOR":
+            NO_GENERIC_ALIAS_FOR_A_DIAGNOSTIC_POSTERIOR,
         "UPDATE_IS_VERSIONED": UPDATE_IS_VERSIONED,
         "N_PROVENANCE": prov,
         "POSTERIOR_PRECISION_STATUS": precision,
@@ -917,10 +932,15 @@ def update_normal(prior_dist, obs_mean, obs_sigma, n, prior_version="1",
         "LIKELIHOOD_SPEC": "NORMAL_KNOWN_VARIANCE",
         "DATA_BATCH": data_batch or NOT_IDENTIFIED,
         "PRIOR": prior_dist.summary(),
-        "POSTERIOR": post.summary(),
-        "POSTERIOR_DIST": post,
-        "PRIOR_TO_POSTERIOR_SHIFT": round(mu_post - mu0, 10),
-        "UNCERTAINTY_FELL_BY": round(s0 - s_post, 10),
+        "POSTERIOR": NOT_IDENTIFIED,
+        "POSTERIOR_DIST": NOT_IDENTIFIED,
+        "PRIOR_TO_POSTERIOR_SHIFT": NOT_IDENTIFIED,
+        "DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY": post.summary(),
+        "DIAGNOSTIC_RAW_ROW_PRIOR_TO_POSTERIOR_SHIFT": round(mu_post - mu0, 10),
+        "DIAGNOSTIC_RAW_ROW_UNCERTAINTY_FELL_BY": round(s0 - s_post, 10),
+        "UNCERTAINTY_FELL_BY": NOT_IDENTIFIED,
+        "NO_GENERIC_ALIAS_FOR_A_DIAGNOSTIC_POSTERIOR":
+            NO_GENERIC_ALIAS_FOR_A_DIAGNOSTIC_POSTERIOR,
         "UPDATE_IS_VERSIONED": UPDATE_IS_VERSIONED,
         "N_PROVENANCE": prov,
         "POSTERIOR_PRECISION_STATUS": precision,

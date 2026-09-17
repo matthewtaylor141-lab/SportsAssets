@@ -88,8 +88,10 @@ def test_the_posterior_is_identical_whether_or_not_effective_n_validated():
                          relation_to_raw_rows="CLUSTERED_BY_EVENT")
     val = P.update_beta(P.beta_from_mean_n(0.2, 10), 5, 100,
                         n_provenance=prov)
-    assert raw["POSTERIOR"]["MEAN"] == val["POSTERIOR"]["MEAN"]
-    assert raw["POSTERIOR"]["P05"] == val["POSTERIOR"]["P05"]
+    assert raw["DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY"]["MEAN"] == \
+        val["DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY"]["MEAN"]
+    assert raw["DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY"]["P05"] == \
+        val["DIAGNOSTIC_RAW_ROW_POSTERIOR_SUMMARY"]["P05"]
     # Neither is decision grade, because neither was built from 12.
     assert raw["DECISION_GRADE_POSTERIOR"] == NOT_IDENTIFIED
     assert val["DECISION_GRADE_POSTERIOR"] == NOT_IDENTIFIED
@@ -117,7 +119,9 @@ def test_update_normal_cannot_narrow_from_raw_n_while_effective_n_is_unapplied()
                          relation_to_raw_rows="CLUSTERED_BY_EVENT")
     out = P.update_normal(prior, obs_mean=0.004, obs_sigma=0.01, n=100,
                           n_provenance=prov)
-    assert out["UNCERTAINTY_FELL_BY"] > 0          # it did narrow, on raw n
+    # It did narrow, on raw n -- readable only under the diagnostic name.
+    assert out["UNCERTAINTY_FELL_BY"] == NOT_IDENTIFIED
+    assert out["DIAGNOSTIC_RAW_ROW_UNCERTAINTY_FELL_BY"] > 0
     assert out["DECISION_GRADE_POSTERIOR"] == NOT_IDENTIFIED
     assert out["POSTERIOR_PRECISION_STATUS"] == "DIAGNOSTIC_RAW_ROW_POSTERIOR"
 
@@ -400,12 +404,17 @@ def test_writing_valid_four_times_does_not_pass_four_conditions():
         assert c in r["DECISION_GRADE_BLOCKERS"], c
 
 
-def test_a_sealed_artifact_satisfies_its_own_condition():
+def test_a_sealed_artifact_no_longer_satisfies_its_own_condition():
+    """SUPERSEDED BY THE FOURTH PASS. This object hashes to itself and says
+    nothing: no observation chain, no capture spec, no trusted origin. The
+    third pass accepted it, which is the defect the fourth pass fixed --
+    integrity is not validity, and neither is trust. The inverted assertion
+    is kept here so the old behaviour cannot come back."""
     art = sealed_artifact("LABEL_ARTIFACT_SHA", LABELS={"MID_MOVE_60S": 0.002})
     t = terms(DECISION_GRADE_ARTIFACTS={"LABEL_ARTIFACT_SHA": art})
     r = A.action_ev_mc("POST_BID", t, draws=200)
-    assert r["DECISION_GRADE_CHECKS"]["LABEL_PROVENANCE_VALID"] is True
-    assert "LABEL_PROVENANCE_VALID" not in r["DECISION_GRADE_BLOCKERS"]
+    assert r["DECISION_GRADE_CHECKS"]["LABEL_PROVENANCE_VALID"] is False
+    assert "LABEL_PROVENANCE_VALID" in r["DECISION_GRADE_BLOCKERS"]
 
 
 def test_a_tampered_gate_artifact_does_not_satisfy_its_condition():
@@ -471,14 +480,19 @@ def test_the_default_contract_is_versioned_and_travels_in_the_evaluation_id():
 def test_an_unbounded_probability_family_is_not_clipped_into_a_bounded_law():
     # sigma 0.16 keeps the P001..P999 envelope inside [0, 1] so the
     # specification is admitted, while the tails still land outside.
+    # The fourth pass took this further: the draws are not clipped AND they
+    # are not multiplied either. The diagnostic run is where the excursion
+    # count is now readable, and it publishes no EV statistic.
     t = terms(P_FILL=Dist("NORMAL", {"mu": 0.5, "sigma": 0.16}))
-    r = A.action_ev_mc("POST_BID", t, draws=20000)
-    # Draws outside [0, 1] happened and were COUNTED, not squeezed to a bound.
-    assert r["DOMAIN_EXCURSION_DRAWS"].get("P_FILL", 0) > 0
+    r = A.action_ev_mc("POST_BID", t, draws=20000,
+                       shadow_distribution_diagnostic=True)
+    diag = r["SHADOW_DISTRIBUTION_DIAGNOSTIC"]
+    assert diag["DIAGNOSTIC_DOMAIN_EXCURSION_DRAWS"].get("P_FILL", 0) > 0
     assert r["MONTE_CARLO_CLIPPING"] == "REMOVED"
     assert "P_FILL" in r["SHADOW_APPROXIMATION_ONLY_TERMS"]
     assert "DISTRIBUTION_DOMAINS_DECISION_GRADE" in \
         r["DECISION_GRADE_BLOCKERS"]
+    assert r["EV_MEAN"] == NOT_IDENTIFIED
 
 
 def test_clipping_is_gone_from_the_source_of_the_draw_loop():
@@ -518,26 +532,33 @@ def test_caller_asserted_single_market_is_gone():
 def test_a_blocked_gate_returns_not_identified_not_false():
     r = A.action_ev_mc("POST_BID", terms(), draws=500)
     out = A.robustly_positive(r)
-    assert out["ROBUSTLY_POSITIVE"] == NOT_IDENTIFIED
+    # The fourth pass replaced the truthy word with None and moved the word
+    # into its own status field.
+    assert out["ROBUSTLY_POSITIVE"] is None
     assert out["ROBUSTLY_POSITIVE"] is not False
+    assert out["ROBUST_POSITIVITY_STATUS"] == NOT_IDENTIFIED
     assert out["REASON"] == "DECISION_GRADE_BLOCKED"
     assert isinstance(out["SHADOW_ROBUSTNESS_DIAGNOSTIC"], float)
 
 
 def test_an_unidentified_ev_is_also_not_identified_not_false():
     out = A.robustly_positive({"EV_P10": NOT_IDENTIFIED})
-    assert out["ROBUSTLY_POSITIVE"] == NOT_IDENTIFIED
+    assert out["ROBUSTLY_POSITIVE"] is None
+    assert out["ROBUST_POSITIVITY_STATUS"] == NOT_IDENTIFIED
     assert "UNKNOWN_IS_NOT_NEGATIVE" in out
 
 
-def test_not_identified_is_truthy_so_callers_must_compare_explicitly():
-    """The trap this closes runs the other way: NOT_IDENTIFIED is a
-    non-empty string, so a caller writing `if not robustly_positive(...)` now
-    gets False where it used to get True. The value is the honest one and the
-    comparison is the caller's to make explicitly."""
+def test_the_unknown_reading_is_never_truthy_in_the_boolean_field():
+    """SUPERSEDED BY THE FOURTH PASS. The third pass put the word
+    NOT_IDENTIFIED in ROBUSTLY_POSITIVE, and a non-empty string is truthy:
+    `if robustly_positive(...)["ROBUSTLY_POSITIVE"]` read 'we do not know' as
+    'yes'. A boolean field now holds True, False or None, and the word lives
+    in ROBUST_POSITIVITY_STATUS where nothing tests it for truth."""
     out = A.robustly_positive({"EV_P10": NOT_IDENTIFIED})
-    assert bool(out["ROBUSTLY_POSITIVE"]) is True
-    assert out["ROBUSTLY_POSITIVE"] != True          # noqa: E712
+    assert bool(out["ROBUSTLY_POSITIVE"]) is False
+    assert out["ROBUSTLY_POSITIVE"] is not True
+    assert out["ROBUSTLY_POSITIVE"] is not False
+    assert out["ROBUST_POSITIVITY_STATUS"] == NOT_IDENTIFIED
 
 
 # --- 11. The fill-quantity model is a load-bearing blocker. --------------

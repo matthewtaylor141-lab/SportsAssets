@@ -176,7 +176,116 @@ def _verified_artifact_shas(rows, artifacts=None):
             verified.add(sha)
         else:
             failed[sha] = v["LABEL_PROVENANCE_STATUS"]
-    return verified, failed, unresolved
+    return verified, failed, unresolved, by_sha
+
+
+A_VALID_ARTIFACT_ON_A_FABRICATED_ROW_IS_NOT_PROVENANCE = (
+    "verifying the artifact a row NAMES says nothing about whether the row's "
+    "own value came from it. A genuine sealed artifact stapled to a row "
+    "carrying a different number, a different status, a different market or "
+    "a different realised offset is provenance for something else. Every "
+    "scored row is now matched against the artifact's own LABELS, "
+    "TARGET_LABEL_STATUS and observation chain")
+
+ROW_ARTIFACT_BINDING_FIELDS = ("VALUE", "STATUS", "MARKET_IDENTITY",
+                               "DECISION_ID", "REALIZED_OFFSET_S",
+                               "LABEL_ARTIFACT_SHA")
+
+
+def bind_rows_to_artifacts(rows, target, by_sha):
+    """Does each row's CONTENT match the artifact it cites? Fails closed."""
+    unbound, checked = [], 0
+    for i, r in enumerate(rows or ()):
+        sha = (r or {}).get(LABEL_ARTIFACT_KEY)
+        art = by_sha.get(sha)
+        if not isinstance(art, dict):
+            unbound.append({"ROW": i, "WHY": "ARTIFACT_UNRESOLVED"})
+            continue
+        checked += 1
+        labels = art.get("LABELS") or {}
+        statuses = art.get("TARGET_LABEL_STATUS") or {}
+        chain = (art.get("OBSERVATION_CHAIN") or {}).get(target) or {}
+        problems = []
+        if target in labels:
+            a_val, r_val = labels.get(target), r.get(target)
+            if isinstance(a_val, (int, float)) and \
+                    isinstance(r_val, (int, float)):
+                if abs(float(a_val) - float(r_val)) > 1e-12:
+                    problems.append("VALUE_DIFFERS_FROM_ARTIFACT")
+            elif a_val != r_val:
+                problems.append("VALUE_DIFFERS_FROM_ARTIFACT")
+        else:
+            problems.append("TARGET_ABSENT_FROM_ARTIFACT_LABELS")
+        if statuses.get(target) != r.get("%s_STATUS" % target):
+            problems.append("STATUS_DIFFERS_FROM_ARTIFACT")
+        for k in MARKET_IDENTITY_KEYS:
+            want = (chain.get("MARKET_IDENTITY") or {}).get(k)
+            if want in (None, NOT_IDENTIFIED):
+                continue
+            if r.get(k) not in (None, want):
+                problems.append("MARKET_IDENTITY_DIFFERS_FROM_ARTIFACT")
+                break
+        r_dec = r.get("DECISION_ID")
+        if r_dec is not None and r_dec != art.get("DECISION_ID"):
+            problems.append("DECISION_ID_DIFFERS_FROM_ARTIFACT")
+        r_off = r.get("%s_REALISED_OFFSET_S" % target)
+        a_off = chain.get("REALIZED_OFFSET_S")
+        if r_off is not None and isinstance(a_off, (int, float)) and \
+                abs(float(r_off) - float(a_off)) > 1e-9:
+            problems.append("REALISED_OFFSET_DIFFERS_FROM_ARTIFACT")
+        if problems:
+            unbound.append({"ROW": i, "LABEL_ARTIFACT_SHA": sha,
+                            "PROBLEMS": tuple(problems)})
+    return {
+        "ROWS_CHECKED": checked,
+        "UNBOUND_ROWS": tuple(unbound),
+        "ROW_ARTIFACT_BINDING_FIELDS": ROW_ARTIFACT_BINDING_FIELDS,
+        "A_VALID_ARTIFACT_ON_A_FABRICATED_ROW_IS_NOT_PROVENANCE":
+            A_VALID_ARTIFACT_ON_A_FABRICATED_ROW_IS_NOT_PROVENANCE,
+    }
+
+
+ONE_ARTIFACT_IS_ONE_OBSERVATION = (
+    "twelve rows citing the same LABEL_ARTIFACT_SHA are twelve copies of one "
+    "labelled observation, not twelve observations. Counting them as twelve "
+    "inflates coverage, row N and scoring support at once. Target support is "
+    "counted over UNIQUE (artifact, decision, market-time origin) keys; "
+    "INDEPENDENT EVENT N remains a separate and stricter question")
+
+
+def deduplicate_label_observations(rows):
+    """Collapse rows that cite the same labelled observation."""
+    seen, unique, dupes = set(), [], 0
+    shas, decisions, origins = set(), set(), set()
+    for r in rows or ():
+        sha = (r or {}).get(LABEL_ARTIFACT_KEY)
+        dec = (r or {}).get("DECISION_ID")
+        origin = tuple((r or {}).get(k) for k in MARKET_IDENTITY_KEYS) + \
+            ((r or {}).get("DECISION_TIMESTAMP_UTC"),)
+        key = (sha, dec, origin)
+        if sha:
+            shas.add(sha)
+        if dec:
+            decisions.add(dec)
+        if any(x is not None for x in origin):
+            origins.add(origin)
+        if key in seen:
+            dupes += 1
+            continue
+        seen.add(key)
+        unique.append(r)
+    return {
+        "UNIQUE_ROWS": unique,
+        "ROWS": len(list(rows or ())),
+        "UNIQUE_LABEL_ARTIFACTS": len(shas),
+        "UNIQUE_DECISION_IDS": len(decisions),
+        "UNIQUE_MARKET_TIME_ORIGINS": len(origins),
+        "DUPLICATE_LABEL_ARTIFACT_ROWS": dupes,
+        "ONE_ARTIFACT_IS_ONE_OBSERVATION": ONE_ARTIFACT_IS_ONE_OBSERVATION,
+        "INDEPENDENT_EVENT_N_IS_A_SEPARATE_QUESTION": (
+            "de-duplicating identical label citations removes double "
+            "counting. It does not make the survivors independent"),
+    }
 
 
 def target_scoring_gate(target, rows=None, min_coverage_pct=None,
@@ -242,7 +351,7 @@ def target_scoring_gate(target, rows=None, min_coverage_pct=None,
             "A_STATUS_STRING_IS_NOT_A_PROVENANCE":
                 A_STATUS_STRING_IS_NOT_A_PROVENANCE,
             "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
-    verified, failed, unresolved = _verified_artifact_shas(
+    verified, failed, unresolved, by_sha = _verified_artifact_shas(
         rows, label_artifacts)
     unverified_rows = [r for r in rows
                        if r.get(LABEL_ARTIFACT_KEY) not in verified]
@@ -259,7 +368,23 @@ def target_scoring_gate(target, rows=None, min_coverage_pct=None,
                 A_STATUS_STRING_IS_NOT_A_PROVENANCE,
             "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
 
-    shaped = [{"LABEL_STATUS": {"%dS" % h: r.get(status_key)}} for r in rows]
+    # The artifact verifies. Does THIS ROW's content actually come from it?
+    binding = bind_rows_to_artifacts(rows, target, by_sha)
+    if binding["UNBOUND_ROWS"]:
+        return {
+            "MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
+            "HORIZON_STATUS": st,
+            "REASON": "ROW_DOES_NOT_MATCH_ITS_LABEL_ARTIFACT",
+            "ROW_ARTIFACT_BINDING": binding,
+            "ROWS": len(rows),
+            "A_VALID_ARTIFACT_ON_A_FABRICATED_ROW_IS_NOT_PROVENANCE":
+                A_VALID_ARTIFACT_ON_A_FABRICATED_ROW_IS_NOT_PROVENANCE,
+            "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
+
+    # One label artifact is ONE observation, however many rows cite it.
+    dedup = deduplicate_label_observations(rows)
+    shaped = [{"LABEL_STATUS": {"%dS" % h: r.get(status_key)}}
+              for r in dedup["UNIQUE_ROWS"]]
     cov = horizon_label_coverage_gate(shaped, h, min_coverage_pct)
     # MAY_EVALUATE is True, False, or NOT_IDENTIFIED -- and NOT_IDENTIFIED
     # is a non-empty string, so a truthiness test would read "we do not
@@ -273,6 +398,15 @@ def target_scoring_gate(target, rows=None, min_coverage_pct=None,
             "HORIZON_STATUS": st, "COVERAGE_GATE": cov,
             "LABEL_PROVENANCE": "VERIFIED_CANONICAL_ARTIFACT",
             "VERIFIED_LABEL_ARTIFACT_SHAS": tuple(sorted(verified)),
+            "ROW_ARTIFACT_BINDING": binding,
+            "LABEL_OBSERVATION_DEDUPLICATION": {
+                k: v for k, v in dedup.items() if k != "UNIQUE_ROWS"},
+            "UNIQUE_LABEL_ARTIFACTS": dedup["UNIQUE_LABEL_ARTIFACTS"],
+            "UNIQUE_DECISION_IDS": dedup["UNIQUE_DECISION_IDS"],
+            "UNIQUE_MARKET_TIME_ORIGINS": dedup["UNIQUE_MARKET_TIME_ORIGINS"],
+            "DUPLICATE_LABEL_ARTIFACT_ROWS":
+                dedup["DUPLICATE_LABEL_ARTIFACT_ROWS"],
+            "ONE_ARTIFACT_IS_ONE_OBSERVATION": ONE_ARTIFACT_IS_ONE_OBSERVATION,
             "A_STATUS_STRING_IS_NOT_A_PROVENANCE":
                 A_STATUS_STRING_IS_NOT_A_PROVENANCE}
 

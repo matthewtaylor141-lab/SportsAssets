@@ -11,6 +11,7 @@ import bettor_dataset as BD
 import drift_trust as DT
 import edge_dashboard as ED
 import ev_core_registers as R
+import label_fixture_support as LF
 import microstructure_v1 as MS
 import prior_registry as PR
 from prior_registry import Dist
@@ -356,7 +357,8 @@ def test_a_normal_update_validates_its_own_n():
     d = PR.Dist("NORMAL", {"mu": 0.0, "sigma": 0.01})
     assert PR.update_normal(d, 0.004, 0.01, 1.5)["STATUS"] == "INVALID_COUNTS"
     assert PR.update_normal(d, 0.004, 0.0, 10)["STATUS"] == "INVALID_DATA"
-    assert PR.update_normal(d, 0.004, 0.01, 10)["UNCERTAINTY_FELL_BY"] > 0
+    assert PR.update_normal(d, 0.004, 0.01, 10)[
+        "DIAGNOSTIC_RAW_ROW_UNCERTAINTY_FELL_BY"] > 0
 
 
 def test_posterior_precision_is_unidentified_without_a_dependence_model():
@@ -435,10 +437,10 @@ def test_relative_value_refuses_a_hand_built_target_column():
 def test_relative_value_proceeds_once_provenance_is_present():
     rows = [{"EVENT_KEY": "e%d" % i, "RESIDUAL_T": (i % 9 - 4) / 100.0,
              "TARGET_CHANGE_30S": -0.3 * (i % 9 - 4) / 100.0,
-             "TARGET_CHANGE_30S_STATUS": "PRESENT",
-             "LABEL_ARTIFACT_SHA": _LABEL_SHA} for i in range(60)]
+             "TARGET_CHANGE_30S_STATUS": "PRESENT"} for i in range(60)]
+    arts = LF.bind(rows, "TARGET_CHANGE_30S")
     out = MS.relative_value_test(rows, horizons=(30,), min_coverage_pct=50.0,
-                                 label_artifacts=_LABEL_ARTIFACTS)
+                                 label_artifacts=arts)
     assert out["BY_HORIZON"]["30S"]["STATUS"] == "MEASURED"
 
 
@@ -547,11 +549,10 @@ def test_scores_are_reported_on_a_common_evaluation_support():
             {"MID_MOVE_30S": -0.01, "MID_MOVE_30S_STATUS": "PRESENT",
              "ORDER_BOOK_IMBALANCE": None, "RAW_OFI_SHARES": None,
              "MICROPRICE_MINUS_MID": -0.002, "_PREV_MOVE": -0.001}]
-    for r in rows:
-        r["LABEL_ARTIFACT_SHA"] = _LABEL_SHA
+    arts = LF.bind(rows, "MID_MOVE_30S")
     out = MS.score_baselines(
         rows, "MID_MOVE_30S", min_coverage_pct=50.0,
-        baseline_scales=_SCALES, label_artifacts=_LABEL_ARTIFACTS)
+        baseline_scales=_SCALES, label_artifacts=arts)
     assert out["SCORABLE_ROWS"] == 2
     assert out["COMMON_EVALUATION_SUPPORT_ROWS"] == 1
     b0 = out["BY_PREDICTOR"]["B0_NO_CHANGE"]
@@ -569,11 +570,10 @@ def test_an_abstaining_predictor_cannot_win_on_an_easier_subset():
              "_PREV_MOVE": 0.0,
              "ORDER_BOOK_IMBALANCE": 0.1, "RAW_OFI_SHARES": 10}
             for i in range(10)]
-    for r in rows:
-        r["LABEL_ARTIFACT_SHA"] = _LABEL_SHA
+    arts = LF.bind(rows, "MID_MOVE_30S")
     out = MS.score_baselines(
         rows, "MID_MOVE_30S", min_coverage_pct=50.0,
-        baseline_scales=_SCALES, label_artifacts=_LABEL_ARTIFACTS)
+        baseline_scales=_SCALES, label_artifacts=arts)
     thin = out["BY_PREDICTOR"]["B2_MICROPRICE"]
     assert thin["ABSTAINED_ROWS"] == 5          # skipped every hard row
     assert thin["ON_COMMON_SUPPORT"]["N_SCORED"] == 5

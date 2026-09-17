@@ -7,6 +7,7 @@ import pytest
 import capture_external_backfill as CB
 import capture_v2_spec as V2
 import historical_matched_cohort as HC
+import label_fixture_support as LF
 import microstructure_v1 as MS
 
 
@@ -226,15 +227,14 @@ def test_scoring_reports_how_many_rows_each_predictor_could_price():
     # Every scored row names a VERIFIED canonical label artifact: the
     # _STATUS string alone is no longer provenance.
     rows = [{"MID_MOVE_30S": 0.01, "MID_MOVE_30S_STATUS": "PRESENT",
-             "LABEL_ARTIFACT_SHA": _LABEL_SHA,
              "ORDER_BOOK_IMBALANCE": 0.5, "MICROPRICE_MINUS_MID": None},
             {"MID_MOVE_30S": -0.01, "MID_MOVE_30S_STATUS": "PRESENT",
-             "LABEL_ARTIFACT_SHA": _LABEL_SHA,
              "ORDER_BOOK_IMBALANCE": None, "MICROPRICE_MINUS_MID": -0.002}]
+    arts = LF.bind(rows, "MID_MOVE_30S")
     out = MS.score_baselines(
         rows, "MID_MOVE_30S", min_coverage_pct=50.0, baseline_scale=0.01,
         baseline_scale_source="PREDECLARED_FIXED_TRANSFORMATION",
-        label_artifacts=_LABEL_ARTIFACTS)
+        label_artifacts=arts)
     assert out["BY_PREDICTOR"]["B0_NO_CHANGE"]["N_SCORED"] == 2
     assert out["BY_PREDICTOR"]["B4_SIMPLE_BOOK_IMBALANCE"]["N_SCORED"] == 1
     assert out["BY_PREDICTOR"]["B4_SIMPLE_BOOK_IMBALANCE"][
