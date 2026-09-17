@@ -341,7 +341,9 @@ def test_v1_is_market_state_toxicity_not_fill_conditional():
     lab = TX.label(has_native_fill_evidence=False)
     assert lab["LABEL"] == "MARKET_STATE_TOXICITY"
     assert lab["FILL_CONDITIONAL"] is False
-    assert lab["THIS_UNDERSTATES_ADVERSE_SELECTION"] is True
+    assert lab["CONDITIONING"] == "UNCONDITIONAL_ON_BETTOR_FILL"
+    assert lab["FILL_CONDITIONAL_TOXICITY"] == \
+        "NOT_IDENTIFIED_UNTIL_BETTOR_FILL_DATA"
 
 
 def test_it_upgrades_only_on_native_fill_evidence():
@@ -349,9 +351,103 @@ def test_it_upgrades_only_on_native_fill_evidence():
     assert lab["LABEL"] == "VALUE_CONDITIONAL_ON_FILL"
 
 
-def test_fills_are_selected_and_that_is_why_the_two_differ():
-    assert "SELECTED" in TX.WHY_THE_TWO_DIFFER
-    assert "correlates with being right" in TX.WHY_THE_TWO_DIFFER
+def test_selection_licenses_may_differ_not_is_worse():
+    """The corrected claim. No direction may be asserted in advance."""
+    assert TX.FILL_SELECTION_EFFECT == "NOT_IDENTIFIED"
+    assert "MAY" in TX.WHY_THE_TWO_MAY_DIFFER
+    assert "DIRECTION of the difference is empirical" in TX.WHY_THE_TWO_MAY_DIFFER
+    assert "hypothesis written as a theorem" in TX.THE_CORRECTED_CLAIM
+
+
+def test_all_three_outcomes_are_admissible_and_none_is_privileged():
+    assert set(TX.FILL_SELECTION_OUTCOMES) == {
+        "MORE_ADVERSE", "NO_MATERIAL_DIFFERENCE", "LESS_ADVERSE"}
+    assert TX.NO_OUTCOME_IS_PRIVILEGED_IN_ADVANCE is True
+    assert TX.label()["DIRECTION_OF_THE_DIFFERENCE"] == "NOT_IDENTIFIED"
+
+
+def test_the_direction_survives_only_inside_its_own_retraction():
+    """The superseded phrase may appear ONLY where it is being retracted.
+
+    A blunt grep cannot tell an assertion from a retraction, so the check is
+    on the live semantic constants: every place the phrase still occurs must
+    be a constant whose job is to record that the claim was withdrawn.
+    """
+    import ev_core_registers as R
+    phrase = "strictly worse"
+    retractions = {id(TX.THE_CORRECTED_CLAIM),
+                   id(R.SUPERSEDED_TOXICITY_DIRECTION_CLAIM)}
+    for mod in (TX, R):
+        for name in dir(mod):
+            if name.startswith("_"):
+                continue
+            v = getattr(mod, name)
+            if not isinstance(v, str) or phrase not in v:
+                continue
+            assert id(v) in retractions, (
+                "%s.%s still asserts a direction: %r" % (mod.__name__, name, v))
+    # And the retractions do say the claim is withdrawn.
+    assert "hypothesis written as a theorem" in TX.THE_CORRECTED_CLAIM
+    assert "Corrected here" in R.SUPERSEDED_TOXICITY_DIRECTION_CLAIM
+
+
+def test_no_live_constant_privileges_an_outcome():
+    """FILL_SELECTION_EFFECT is the only verdict, and it is unidentified."""
+    import ev_core_registers as R
+    assert TX.FILL_SELECTION_EFFECT == "NOT_IDENTIFIED"
+    assert R.FILL_SELECTION_EFFECT == "NOT_IDENTIFIED"
+    d = TX.describe()
+    assert d["FILL_SELECTION_EFFECT"] == "NOT_IDENTIFIED"
+    assert d["NO_OUTCOME_IS_PRIVILEGED_IN_ADVANCE"] is True
+
+
+def test_adverse_selection_is_labelled_a_hypothesis():
+    assert "measured, not assumed" in TX.ADVERSE_SELECTION_IS_A_HYPOTHESIS
+    assert "can cut the other way" in TX.ADVERSE_SELECTION_IS_A_HYPOTHESIS
+
+
+# --- The eventual matched test. --------------------------------------------
+
+def test_the_sign_convention_is_frozen_before_any_fill_exists():
+    assert TX.SIGN_CONVENTION_FROZEN_BEFORE_EVALUATION is True
+    assert TX.SIGN_CONVENTION == (
+        "FILL_SELECTION_MARKOUT_DELTA_h = "
+        "MARKOUT_FILLED_h - MATCHED_COUNTERFACTUAL_MARKOUT_h")
+    assert TX.SIGN_CONVENTION_MEANS["NEGATIVE"].startswith("MORE_ADVERSE")
+    assert TX.SIGN_CONVENTION_MEANS["POSITIVE"].startswith("LESS_ADVERSE")
+
+
+def test_the_delta_is_not_identified_without_fill_evidence():
+    d = TX.selection_delta(horizon_s=30)
+    assert d["DELTA"] == "NOT_IDENTIFIED"
+    assert d["FILL_SELECTION_EFFECT"] == "NOT_IDENTIFIED"
+
+
+def test_an_unmatched_comparison_is_refused():
+    d = TX.selection_delta(markout_filled=-0.01, matched_counterfactual=-0.002,
+                           horizon_s=30, controls_matched=("SPREAD",))
+    assert d["DELTA"] == "NOT_IDENTIFIED"
+    assert "SIDE" in d["CONTROLS_NOT_MATCHED"]
+    assert "not matched" in d["WHY"]
+
+
+def test_a_matched_comparison_can_return_any_of_the_three_outcomes():
+    """The machinery must be able to report LESS_ADVERSE, not only MORE."""
+    ctl = TX.MATCH_CONTROLS
+    worse = TX.selection_delta(-0.010, -0.002, 30, ctl)
+    same = TX.selection_delta(-0.005, -0.005, 30, ctl)
+    better = TX.selection_delta(-0.001, -0.008, 30, ctl)
+    assert worse["FILL_SELECTION_EFFECT"] == "MORE_ADVERSE"
+    assert same["FILL_SELECTION_EFFECT"] == "NO_MATERIAL_DIFFERENCE"
+    assert better["FILL_SELECTION_EFFECT"] == "LESS_ADVERSE"
+    assert worse["DELTA"] < 0 < better["DELTA"]
+
+
+def test_every_named_control_is_required_by_the_matched_test():
+    for c in ("QUOTE_PRICE", "SIDE", "SPREAD", "DEPTH", "IMBALANCE", "OFI",
+              "VOLATILITY", "TIME_TO_EVENT", "MARKET_FAMILY", "QUOTE_AGE",
+              "EXTERNAL_INFORMATION_STATE"):
+        assert c in TX.MATCH_CONTROLS, c
 
 
 def test_toxicity_targets_the_executable_price_not_the_mid():
@@ -572,6 +668,12 @@ def test_the_register_matches_the_modules():
     assert R.FINAL_EDGE == AE.THE_FINAL_EDGE
     assert R.RL_PRECONDITIONS == MZ.RL_PRECONDITIONS
     assert R.BENIGN_FLOW_CAPACITY_STATUS == TX.BENIGN_FLOW_CAPACITY_STATUS
+    assert R.FILL_SELECTION_EFFECT == TX.FILL_SELECTION_EFFECT
+    assert R.MARKET_STATE_TOXICITY == TX.MARKET_STATE_TOXICITY
+    assert R.FILL_CONDITIONAL_TOXICITY == TX.FILL_CONDITIONAL_TOXICITY
+    assert R.TOXICITY_SIGN_CONVENTION == TX.SIGN_CONVENTION
+    assert R.TOXICITY_SELECTION_ASSUMPTION_STATUS == \
+        "CORRECTED_TO_EMPIRICAL_UNKNOWN"
     for s, st in R.TARGET_SYSTEMS_STATUS.items():
         assert MZ.TARGET_SYSTEMS[s]["STATUS"] == st
 

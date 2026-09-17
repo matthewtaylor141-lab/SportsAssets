@@ -7,23 +7,40 @@ THE DISTINCTION THAT DEFINES THIS MODULE
 ----------------------------------------
 Before BETTOR has resting orders, what can be measured is:
 
-    MARKET_STATE_TOXICITY
+    MARKET_STATE_TOXICITY  =  UNCONDITIONAL_ON_BETTOR_FILL
     "given this book state, how adversely does the executable price move next?"
 
 What CANNOT be measured is:
 
-    FILL_CONDITIONAL_TOXICITY
+    FILL_CONDITIONAL_TOXICITY  =  NOT_IDENTIFIED_UNTIL_BETTOR_FILL_DATA
     "given that WE were filled here, how adversely does it move next?"
 
-These differ because fills are SELECTED. We are filled precisely when somebody
-wanted the other side, and that wanting is correlated with being right. The
-conditional quantity is the one that costs money, and it is strictly worse than
-the unconditional one. Reporting market-state toxicity as if it were
-fill-conditional toxicity understates adverse selection by exactly the amount
-that matters.
+WHAT SELECTION DOES AND DOES NOT ESTABLISH
+------------------------------------------
+Fills are selected. That is true, and it licenses exactly one conclusion:
 
-So V1 is labelled MARKET_STATE_TOXICITY and stays that way until BETTOR-native
-fill evidence exists.
+    D(FUTURE_MARKOUT | ORDER_FILLED, STATE)
+        MAY DIFFER FROM
+    D(FUTURE_MARKOUT | QUOTE_AVAILABLE, STATE)
+
+It does NOT establish which way. An earlier version of this module asserted
+that the fill-conditional quantity is "strictly worse". That was a hypothesis
+written as a theorem. Informed takers plausibly create adverse selection -- but
+liquidity-driven, hedging, rebalancing and impatient-benign flow are also
+selected into our fills, and those can cut the other way. Selection is a
+statement that a conditioning event may shift a distribution; the SIGN of the
+shift is an empirical quantity.
+
+So:
+
+    FILL_SELECTION_EFFECT = NOT_IDENTIFIED
+
+with three admissible outcomes, none privileged in advance:
+
+    MORE_ADVERSE / NO_MATERIAL_DIFFERENCE / LESS_ADVERSE
+
+No invariant, lower bound, prior conclusion or test expectation encodes a
+direction. Only evidence may.
 """
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -34,11 +51,31 @@ MODEL_NAME = "TOXICITY_V1"
 TOXICITY_V1 = "MARKET_STATE_TOXICITY"
 NOT_YET = "FILL_CONDITIONAL_TOXICITY"
 
-WHY_THE_TWO_DIFFER = (
-    "fills are SELECTED. We are filled exactly when somebody wanted the other "
-    "side, and that wanting correlates with being right. So the "
-    "fill-conditional quantity is strictly worse than the unconditional one, "
-    "and it is the one that costs money")
+MARKET_STATE_TOXICITY = "UNCONDITIONAL_ON_BETTOR_FILL"
+FILL_CONDITIONAL_TOXICITY = "NOT_IDENTIFIED_UNTIL_BETTOR_FILL_DATA"
+
+# The correction: a direction was asserted where only a difference is licensed.
+FILL_SELECTION_EFFECT = NOT_IDENTIFIED
+
+FILL_SELECTION_OUTCOMES = ("MORE_ADVERSE", "NO_MATERIAL_DIFFERENCE",
+                           "LESS_ADVERSE")
+NO_OUTCOME_IS_PRIVILEGED_IN_ADVANCE = True
+
+WHY_THE_TWO_MAY_DIFFER = (
+    "fills are SELECTED, so D(FUTURE_MARKOUT | ORDER_FILLED, STATE) MAY "
+    "differ from D(FUTURE_MARKOUT | QUOTE_AVAILABLE, STATE). That is all "
+    "selection establishes. The DIRECTION of the difference is empirical")
+
+THE_CORRECTED_CLAIM = (
+    "selection licenses 'may differ', not 'is worse'. An earlier version of "
+    "this module asserted the fill-conditional quantity is strictly worse, "
+    "which was a hypothesis written as a theorem")
+
+ADVERSE_SELECTION_IS_A_HYPOTHESIS = (
+    "informed takers plausibly create adverse selection. But liquidity, "
+    "hedging, rebalancing and impatient-benign flow are also selected into "
+    "our fills, and those can cut the other way. Which dominates on THIS "
+    "venue is measured, not assumed")
 
 UPGRADE_REQUIRES = "BETTOR_NATIVE_FILL_EVIDENCE"
 UPGRADE_TO = "VALUE_CONDITIONAL_ON_FILL"
@@ -110,9 +147,77 @@ def label(has_native_fill_evidence=False):
     if has_native_fill_evidence:
         return {"LABEL": UPGRADE_TO, "FILL_CONDITIONAL": True}
     return {"LABEL": TOXICITY_V1, "FILL_CONDITIONAL": False,
-            "NOT_YET": NOT_YET, "WHY_THE_TWO_DIFFER": WHY_THE_TWO_DIFFER,
+            "CONDITIONING": MARKET_STATE_TOXICITY,
+            "NOT_YET": NOT_YET,
+            "FILL_CONDITIONAL_TOXICITY": FILL_CONDITIONAL_TOXICITY,
+            "FILL_SELECTION_EFFECT": FILL_SELECTION_EFFECT,
+            "FILL_SELECTION_OUTCOMES": FILL_SELECTION_OUTCOMES,
+            "WHY_THE_TWO_MAY_DIFFER": WHY_THE_TWO_MAY_DIFFER,
+            "THE_CORRECTED_CLAIM": THE_CORRECTED_CLAIM,
             "UPGRADE_REQUIRES": UPGRADE_REQUIRES,
-            "THIS_UNDERSTATES_ADVERSE_SELECTION": True}
+            "DIRECTION_OF_THE_DIFFERENCE": NOT_IDENTIFIED}
+
+
+# --- The eventual test, with its sign convention frozen NOW. ---------------
+
+SELECTION_TEST_NAME = "FILL_SELECTION_MARKOUT_DELTA"
+
+SELECTION_TEST_HORIZONS_S = (5, 30, 60, 300)
+
+SIGN_CONVENTION = ("FILL_SELECTION_MARKOUT_DELTA_h = "
+                   "MARKOUT_FILLED_h - MATCHED_COUNTERFACTUAL_MARKOUT_h")
+SIGN_CONVENTION_MEANS = {
+    "NEGATIVE": "MORE_ADVERSE -- our fills markout worse than matched quotes",
+    "ZERO": "NO_MATERIAL_DIFFERENCE",
+    "POSITIVE": "LESS_ADVERSE -- our fills markout better than matched quotes",
+}
+SIGN_CONVENTION_FROZEN_BEFORE_EVALUATION = True
+WHY_FREEZE_THE_SIGN = (
+    "a sign convention chosen after seeing the result is how 'worse' and "
+    "'better' get swapped to match the story. It is fixed here, before any "
+    "fill exists")
+
+# Matching is the whole experiment. Comparing fills to arbitrary non-fill
+# observations measures the difference between their states, not selection.
+MATCH_CONTROLS = ("QUOTE_PRICE", "SIDE", "SPREAD", "DEPTH", "IMBALANCE",
+                  "OFI", "VOLATILITY", "TIME_TO_EVENT", "MARKET_FAMILY",
+                  "QUOTE_AGE", "EXTERNAL_INFORMATION_STATE")
+
+UNMATCHED_COMPARISON_IS_NOT_THE_TEST = (
+    "do not compare fills to arbitrary non-fill observations with materially "
+    "different states. That comparison measures the difference between the "
+    "states, and attributes it to selection")
+
+
+def selection_delta(markout_filled=None, matched_counterfactual=None,
+                    horizon_s=None, controls_matched=()):
+    """FILL_SELECTION_MARKOUT_DELTA_h. Refuses on an unmatched comparison."""
+    missing = [c for c in MATCH_CONTROLS if c not in set(controls_matched or ())]
+    if markout_filled is None or matched_counterfactual is None:
+        return {"TEST": SELECTION_TEST_NAME, "HORIZON_S": horizon_s,
+                "DELTA": NOT_IDENTIFIED,
+                "FILL_SELECTION_EFFECT": NOT_IDENTIFIED,
+                "WHY": "no BETTOR fill evidence exists",
+                "SIGN_CONVENTION": SIGN_CONVENTION}
+    if missing:
+        return {"TEST": SELECTION_TEST_NAME, "HORIZON_S": horizon_s,
+                "DELTA": NOT_IDENTIFIED,
+                "FILL_SELECTION_EFFECT": NOT_IDENTIFIED,
+                "CONTROLS_NOT_MATCHED": missing,
+                "WHY": "the comparison is not matched, so it is not the test",
+                "UNMATCHED_COMPARISON_IS_NOT_THE_TEST":
+                    UNMATCHED_COMPARISON_IS_NOT_THE_TEST,
+                "SIGN_CONVENTION": SIGN_CONVENTION}
+    delta = float(markout_filled) - float(matched_counterfactual)
+    effect = ("NO_MATERIAL_DIFFERENCE" if delta == 0 else
+              ("MORE_ADVERSE" if delta < 0 else "LESS_ADVERSE"))
+    return {"TEST": SELECTION_TEST_NAME, "HORIZON_S": horizon_s,
+            "DELTA": round(delta, 8),
+            "FILL_SELECTION_EFFECT": effect,
+            "SIGN_CONVENTION": SIGN_CONVENTION,
+            "SIGN_CONVENTION_MEANS": dict(SIGN_CONVENTION_MEANS),
+            "CONTROLS_MATCHED": sorted(set(controls_matched or ())),
+            "ALL_OUTCOMES_WERE_ADMISSIBLE": FILL_SELECTION_OUTCOMES}
 
 
 # --- Section H. Benign-flow capacity. --------------------------------------
@@ -198,6 +303,7 @@ def capacity_test(rows, capacity_of=None, markout_key="MARKOUT",
         "AT_OR_BELOW_CAPACITY_N": len(below),
         "ROWS_WITHOUT_A_CAPACITY": unknown,
         "HYPOTHESIS_DIRECTION": "oversized quotes should markout WORSE",
+        "THE_DIRECTION_IS_A_HYPOTHESIS_NOT_A_GUARANTEE": True,
         "THIS_IS_NOT_A_FILL_CONDITIONAL_RESULT": True,
         "THE_TEST": THE_TEST,
     }
@@ -207,8 +313,24 @@ def describe():
     return {
         "MODEL_NAME": MODEL_NAME,
         "TOXICITY_V1": TOXICITY_V1,
+        "MARKET_STATE_TOXICITY": MARKET_STATE_TOXICITY,
+        "FILL_CONDITIONAL_TOXICITY": FILL_CONDITIONAL_TOXICITY,
+        "FILL_SELECTION_EFFECT": FILL_SELECTION_EFFECT,
+        "FILL_SELECTION_OUTCOMES": FILL_SELECTION_OUTCOMES,
+        "NO_OUTCOME_IS_PRIVILEGED_IN_ADVANCE":
+            NO_OUTCOME_IS_PRIVILEGED_IN_ADVANCE,
         "NOT_YET": NOT_YET,
-        "WHY_THE_TWO_DIFFER": WHY_THE_TWO_DIFFER,
+        "WHY_THE_TWO_MAY_DIFFER": WHY_THE_TWO_MAY_DIFFER,
+        "THE_CORRECTED_CLAIM": THE_CORRECTED_CLAIM,
+        "ADVERSE_SELECTION_IS_A_HYPOTHESIS": ADVERSE_SELECTION_IS_A_HYPOTHESIS,
+        "SELECTION_TEST_NAME": SELECTION_TEST_NAME,
+        "SIGN_CONVENTION": SIGN_CONVENTION,
+        "SIGN_CONVENTION_MEANS": dict(SIGN_CONVENTION_MEANS),
+        "SIGN_CONVENTION_FROZEN_BEFORE_EVALUATION":
+            SIGN_CONVENTION_FROZEN_BEFORE_EVALUATION,
+        "MATCH_CONTROLS": MATCH_CONTROLS,
+        "UNMATCHED_COMPARISON_IS_NOT_THE_TEST":
+            UNMATCHED_COMPARISON_IS_NOT_THE_TEST,
         "UPGRADE_REQUIRES": UPGRADE_REQUIRES,
         "UPGRADE_TO": UPGRADE_TO,
         "TARGET": TARGET,
