@@ -315,3 +315,40 @@ def test_the_647_totals_are_not_confused_with_events():
 def test_v2_changes_only_the_market_families():
     assert "NOT changed by this spec" in V2.V2_UNCHANGED_FROM_V1
     assert V2.describe()["THE_FROZEN_CAPTURE_IS_NOT_ALTERED"] is True
+
+
+# --- The register and the gate function must agree. ------------------------
+
+def test_the_register_status_agrees_with_the_gate_function():
+    """The register once said GATE_NOT_MET while purchase_gate() said True.
+
+    Two artifacts stating opposite verdicts on the same numbers is the
+    failure mode this pins shut. The gate function is authoritative; the
+    register's word must follow it.
+    """
+    import ev_core_registers as R
+    g = CB.purchase_gate(
+        historical_cohort_events=R.MATCHED_STATIC_EXPECTED_EVENT_N,
+        capture_completed=False)
+    assert g["CONDITION_A_MET"] is True
+    assert g["CONDITION_B_MET"] is False
+    assert "GATE_NOT_MET" not in R.PURCHASE_STATUS
+    assert "CONDITION_A_MET" in R.PURCHASE_STATUS
+    assert R.PURCHASE_STATUS.startswith("NOT_PURCHASED")
+
+
+def test_a_met_gate_is_not_an_authorization():
+    import ev_core_registers as R
+    assert "not an authorization" in R.PURCHASE_GATE_SUMMARY
+    assert R.NOTHING_HAS_BEEN_PURCHASED is True
+
+
+def test_condition_a_does_not_clear_the_dense_spend():
+    import ev_core_registers as R
+    assert "does not clear" in R.WHAT_CONDITION_A_DOES_NOT_AUTHORIZE
+    assert "dense" in R.WHAT_CONDITION_A_DOES_NOT_AUTHORIZE.lower()
+
+
+def test_the_correction_records_what_the_register_used_to_say():
+    import ev_core_registers as R
+    assert "NOT_PURCHASED_GATE_NOT_MET" in R.EARLIER_REGISTER_SAID

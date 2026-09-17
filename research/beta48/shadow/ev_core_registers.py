@@ -1155,12 +1155,29 @@ MICROSTRUCTURE_VALIDATION_PROTOCOL_STATUS = "BUILT_EVENT_AND_CHRONOLOGICAL_BLOCK
 CURRENT_CAPTURE_RELATIVE_VALUE_IDENTIFIABILITY_STATUS = "AWAITING_HARVEST"
 SUBSTANTIVE_CAPTURE_V2_SPEC_STATUS = "PREPARED_NOT_DISPATCHED"
 
-PURCHASE_STATUS = "NOT_PURCHASED_GATE_NOT_MET"
+PURCHASE_STATUS = "NOT_PURCHASED_CONDITION_A_MET_AWAITING_AUTHORIZATION"
 PURCHASE_GATE_SUMMARY = (
-    "condition A (a cohort large enough for a specific question) is arguable "
-    "at 222 events but cannot support a settlement result; condition B (the "
-    "capture completes and its request plan is known) is not yet met because "
-    "the clean-start gate is still blocked by run85. So: no purchase")
+    "condition A IS met: the matched cohort is defined at 222 events, which "
+    "is enough to answer ONE specific question -- does external consensus "
+    "look useful on the market states RN1 traded? -- for about 2,030 "
+    "credits. Condition B is NOT met: the clean-start gate is still blocked "
+    "by run85, so the capture has not completed and its request plan is not "
+    "known. Nothing has been purchased; a met gate is a technical "
+    "precondition, not an authorization")
+
+WHAT_CONDITION_A_DOES_NOT_AUTHORIZE = (
+    "the DENSE lead/lag purchase. Condition A clears a ~2,030-credit "
+    "descriptive pilot on a selected sample. It does not clear the 24,500- "
+    "to 70,810-credit dense spend, which stays behind condition B because "
+    "the historical venue series is too sparse and too RN1-selected to pair "
+    "against. Reading a met A as clearance for the whole procurement "
+    "document would be exactly the error the gate exists to prevent")
+
+EARLIER_REGISTER_SAID = (
+    "NOT_PURCHASED_GATE_NOT_MET, which contradicted purchase_gate() on the "
+    "same numbers -- the function returns MAY_PURCHASE=True at 222 events "
+    "against a 100-event threshold. The register was the wrong one and is "
+    "corrected here rather than the threshold being raised to preserve it")
 
 
 def describe():
@@ -1206,6 +1223,9 @@ def describe():
             CURRENT_CAPTURE_RELATIVE_VALUE_IDENTIFIABILITY_STATUS,
         "SUBSTANTIVE_CAPTURE_V2_SPEC_STATUS": SUBSTANTIVE_CAPTURE_V2_SPEC_STATUS,
         "PURCHASE_STATUS": PURCHASE_STATUS,
+        "PURCHASE_GATE_SUMMARY": PURCHASE_GATE_SUMMARY,
+        "WHAT_CONDITION_A_DOES_NOT_AUTHORIZE":
+            WHAT_CONDITION_A_DOES_NOT_AUTHORIZE,
         "STATIC_SOCCER_V3_FREEZE": dict(STATIC_SOCCER_V3_FREEZE),
         "FUNDAMENTAL_MODELS_STATUS": FUNDAMENTAL_MODELS_STATUS,
         "ODDS_ADAPTER_STATUS": ODDS_ADAPTER_STATUS,

@@ -79,16 +79,32 @@ on a five-minute grid a 15:00 kickoff's T−2H request *is* a 13:00 kickoff's T�
 (h2h only, not three) and regions (one, not two) — together they divide the bill
 by six. That correction matters far more than the collision rate.
 
-## 3. Two experiments, not one
+## 3. Two pilots, not one — and the join direction is reversed
 
 Three snapshots per event cannot estimate 5, 15, 30 and 60-minute following
 dynamics. These are separate designs and are costed separately.
 
-**A. Static timestamped consensus** — T−24H, T−2H, T−15M. *Does external
-consensus improve settlement / fair value at selected decision points?*
+**A. Historical matched-static** — *does external consensus look useful on the
+market states BETTOR already observed?*
 
-**B. Dense lead/lag** — a 5-minute time series over T−2H→T−0 or T−6H→T−0. *Does
-external consensus lead the venue, and at what horizon?*
+**B. Prospective capture-aligned** — *does external consensus lead the venue, on
+a venue series sampled by a clock rather than by somebody's trading?*
+
+**The earlier version of this document costed pilot A the wrong way round.** It
+picked attractive horizons — T−24H, T−2H, T−15M — and assumed a venue
+observation would exist at each. Measured, one mostly does not: the historical
+series has a median of 3 observations per market slug and a forward point at
++60m only 9.3% of the time. An external snapshot at a horizon where no venue
+state exists is an unmatched row, and buying it is buying nothing.
+
+So the join is reversed. **Select the Poly observation first, then request the
+external snapshot at or before that instant.** Every request is anchored to an
+observation already held.
+
+That reversal caps the pilot at the corpus. **222 settled soccer events carry at
+least one observation.** A 500-event static experiment is not available at any
+price — the 500-event line in the old table was describing events that do not
+exist.
 
 ## 4. Phase 1 is deliberately narrow
 
@@ -104,46 +120,63 @@ historical calls, so **on the day a credential exists, one current-odds call per
 candidate region returns the bookmaker list and settles the choice by
 measurement. Do that before spending historical credits.**
 
-## 5. What the experiments cost (h2h, one region, deduplicated)
+## 5. What pilot A actually costs — the matched cohort, measured
 
-Credits per request = 10 × 1 × 1 = **10**.
+Credits per request = 10 × 1 × 1 = **10**. These figures are computed by
+`historical_matched_cohort.plan_external_requests()` against the real
+observation corpus, under the frozen `EARLIEST_ELIGIBLE_POLY_OBSERVATION` rule,
+one observation per independent event, five-minute buckets.
 
-| Experiment | Events | Naive credits | **Deduped credits** | Saving |
-|---|---|---|---|---|
-| Static (3 horizons) | 100 | 3,000 | **2,910** | 3.0% |
-| Static (3 horizons) | 500 | 15,000 | **13,390** | 10.7% |
-| Dense T−2H @ 5min | 100 | 25,000 | **24,500** | 2.0% |
-| Dense T−2H @ 5min | 500 | 125,000 | **111,650** | 10.7% |
-| Dense T−6H @ 5min | 100 | 73,000 | **70,810** | 3.0% |
-| Dense T−6H @ 5min | 500 | 365,000 | **312,270** | 14.4% |
+| Target events | Requests | **Credits** | Credits / matched event |
+|---|---|---|---|
+| 100 | 90 | **900** | 9.0 |
+| 250 | 203 | **2,030** | 9.1 |
+| 500 | 203 | **2,030** | 9.1 |
 
-Against verified pricing:
+The 250 and 500 rows are identical because **the universe caps at 222 events**.
+The other two selection rules land in the same place (MEDIAN 2,100; LATEST
+1,930), so the rule choice does not move the bill.
 
-| Requirement | Smallest tier that fits | Cost |
-|---|---|---|
-| Static 500 (13,390) | **20K** | **$30/mo** |
-| Dense 2H / 100 (24,500) | **100K** | **$59/mo** |
-| Dense 6H / 100 (70,810) | **100K** | **$59/mo** |
-| Dense 2H / 500 (111,650) | 5M | $119/mo |
-| Dense 6H / 500 (312,270) | 5M | $119/mo |
+**The whole matched historical cohort costs about 2,030 credits — inside the
+smallest tier, roughly 2% of a 100K plan.** Money is not the constraint on this
+pilot. The constraint is that 222 RN1-selected events cannot answer a question
+whose incremental ladder needs thousands.
 
-Note the cliff: dense-2H at 500 events needs 111,650 credits and **just**
-overruns the 100K tier. Trimming to ~440 events fits $59/month instead of $119.
+## 5a. What pilot B costs — not yet computable, and that is the correct state
 
-## 6. Recommendation
+The capture-aligned request set is a function of timestamps the capture has not
+written yet. `capture_external_backfill.plan_from_capture()` will compute it
+exactly once the capture completes; until then the figure is
+`NOT_IDENTIFIED`, not an estimate.
 
-**100K plan, $59/month.** It covers the static 500-event experiment *and* a
-dense pilot at 100 events on either window, with headroom.
+What can be said now is the shape: the capture samples every ~4 seconds, but
+deduplication is by five-minute bucket, so a 90-minute run produces **at most 18
+distinct buckets per sport** however many ticks it writes. Dense venue sampling
+does not imply a dense external bill.
 
-Sequence:
-1. Settle the region by measurement (one near-free current-odds call per region).
-2. Static 500 events — 13,390 credits.
-3. Dense T−2H, 100 events — 24,500 credits.
-4. Total ≈ 38,000 credits, inside 100K, leaving room to re-run.
+This is the property that makes pilot B the better purchase: historical external
+snapshots are retrievable *after the fact*, so the capture needs no odds
+credential running alongside it, and the purchase is **sized to an experiment
+that already exists** rather than bought in the hope one materialises.
 
-The 5M tier is unnecessary until the pilot produces evidence. The 20K tier is
-enough only if the dense pilot is dropped, which would leave the lead/lag
-question — the one that motivated this whole lane — unanswered.
+## 6. Recommendation — and it is smaller than the previous one
+
+**Neither pilot needs a purchase decision this week.** The earlier
+recommendation — 100K at $59/month to cover "static 500 plus a dense 100" — was
+sized against an experiment that does not exist. Corrected:
+
+1. **Settle the region by measurement.** One near-free current-odds call per
+   candidate region returns the bookmaker list. Do this before spending any
+   historical credits; `uk` remains provisional and unmeasured.
+2. **Pilot A, if it is wanted at all, is a $30/month 20K plan** and uses ~2,030
+   of those credits. It answers one descriptive question about a selected
+   sample. It is cheap enough that its cost is not the decision — its
+   *interpretability* is.
+3. **Pilot B is the one worth waiting for**, and its plan tier cannot be chosen
+   until the capture completes and `plan_from_capture()` returns a real number.
+
+The 5M tier remains unnecessary. The 100K tier is no longer justified by
+anything measured.
 
 ## 7. The problem the odds data cannot solve on its own
 
@@ -191,16 +224,38 @@ observation does not exist, `LEAD_LAG_ROW = UNAVAILABLE`.
 Every one of these returns `NO_EXTERNAL_DATA` today. That is the honest status,
 and it is a status rather than a zero.
 
-## 9. The decision being asked for
+## 9. The purchase gate, and its current reading
 
-1. Authorise a credential for The Odds API on the **100K plan at $59/month**,
-   or decline. That covers the static 500-event experiment plus a 100-event
-   dense pilot with headroom (~38,000 of 100,000 credits).
-2. Nothing else. Betfair is rank 2 and can wait for the lead/lag result;
+Nothing may be bought until condition A or condition B is true.
+
+| | Condition | Met? |
+|---|---|---|
+| **A** | the matched-static cohort is defined with enough usable event N that a small purchase answers a *specific* question | **YES** — 222 events, ~2,030 credits |
+| **B** | the continuous capture completes and the exact timestamp-aligned request plan is known | **NO** — the clean-start gate is still blocked |
+
+`PURCHASE_STATUS = NOT_PURCHASED_CONDITION_A_MET_AWAITING_AUTHORIZATION`
+
+**A met gate is a technical precondition, not an authorization.** And condition
+A clears only the ~2,030-credit descriptive pilot. It does **not** clear the
+dense spend — that stays behind condition B, because the historical venue series
+is too sparse and too RN1-selected to pair dense external odds against. Reading
+a met A as clearance for the whole document would be exactly the error the gate
+exists to prevent.
+
+## 10. The decision being asked for
+
+1. **Whether to run pilot A at all.** It costs ~2,030 credits on a $30/month
+   20K plan. It cannot prove market-wide external-consensus alpha; it can only
+   describe external consensus on the states RN1 happened to trade. That
+   limitation is structural and no amount of spending fixes it — so the
+   question is whether a descriptive answer on a selected sample is worth a
+   credential.
+2. **Nothing else yet.** Betfair is rank 2 and waits for the lead/lag result;
    OddsJam's history starts too late to be a first purchase.
-3. Note the sequencing constraint from section 7: the **dense** half of the
-   spend only becomes worth making alongside the prospective continuous
-   capture, because the historical venue series is too sparse and too selected
-   to pair against. The static half stands on its own today.
+3. **The real recommendation is to wait for the capture.** Pilot B has no
+   selection problem on the venue side, its cost is computable exactly rather
+   than estimated, and it is the design that can actually answer the lead/lag
+   question that motivated this lane.
 
-Nothing in this document has been purchased, requested, or committed to.
+Nothing in this document has been purchased, requested, or committed to. No
+credential exists.
