@@ -10,6 +10,31 @@ import historical_matched_cohort as HC
 import microstructure_v1 as MS
 
 
+# --- A VERIFIED canonical label artifact, for scorer fixtures. ------------
+#
+# The scorer no longer accepts a hand-written _STATUS column: every scored
+# row must name a LABEL_ARTIFACT_SHA whose artifact verifies.
+
+def _label_fixture():
+    import bettor_dataset as _BD
+    rows = []
+    for i in range(12):
+        sec = i * 24
+        rows.append({"MARKET_ID": "FIXTURE",
+                     "DECISION_TIMESTAMP_UTC": "2026-09-17T00:%02d:%02dZ"
+                                               % (sec // 60, sec % 60),
+                     "MID": 0.50 + i * 0.001,
+                     "BEST_BID": 0.49 + i * 0.001,
+                     "BEST_ASK": 0.51 + i * 0.001})
+    art = _BD.label_artifact(dict(rows[0], DECISION_ID="FIXTURE"), rows,
+                             capture_spec_sha="fixture-capture-spec")
+    return art["LABEL_ARTIFACT_SHA"], {art["LABEL_ARTIFACT_SHA"]: art}
+
+
+_LABEL_SHA, _LABEL_ARTIFACTS = _label_fixture()
+
+
+
 # --- Sections 1-3. The join direction and the frozen selection. ------------
 
 def _obs():
@@ -198,13 +223,18 @@ def test_scoring_reports_how_many_rows_each_predictor_could_price():
     # cadence and score_baselines() now refuses it outright.
     # Label provenance (_STATUS) is required, and a dimensionless baseline
     # needs a declared unit transformation before it may predict at all.
+    # Every scored row names a VERIFIED canonical label artifact: the
+    # _STATUS string alone is no longer provenance.
     rows = [{"MID_MOVE_30S": 0.01, "MID_MOVE_30S_STATUS": "PRESENT",
+             "LABEL_ARTIFACT_SHA": _LABEL_SHA,
              "ORDER_BOOK_IMBALANCE": 0.5, "MICROPRICE_MINUS_MID": None},
             {"MID_MOVE_30S": -0.01, "MID_MOVE_30S_STATUS": "PRESENT",
+             "LABEL_ARTIFACT_SHA": _LABEL_SHA,
              "ORDER_BOOK_IMBALANCE": None, "MICROPRICE_MINUS_MID": -0.002}]
     out = MS.score_baselines(
         rows, "MID_MOVE_30S", min_coverage_pct=50.0, baseline_scale=0.01,
-        baseline_scale_source="PREDECLARED_FIXED_TRANSFORMATION")
+        baseline_scale_source="PREDECLARED_FIXED_TRANSFORMATION",
+        label_artifacts=_LABEL_ARTIFACTS)
     assert out["BY_PREDICTOR"]["B0_NO_CHANGE"]["N_SCORED"] == 2
     assert out["BY_PREDICTOR"]["B4_SIMPLE_BOOK_IMBALANCE"]["N_SCORED"] == 1
     assert out["BY_PREDICTOR"]["B4_SIMPLE_BOOK_IMBALANCE"][

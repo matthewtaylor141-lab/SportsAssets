@@ -20,12 +20,17 @@ from prior_registry import Dist, NOT_IDENTIFIED
 
 # --- fixtures --------------------------------------------------------------
 
+_REAL_PRIOR_SHA = P.PRIOR_REGISTRY["FILL_SELECTION_EFFECT"]["PRIOR_SHA"]
+
+
 def _sealed(term, family, params, cls="ESTIMATED_PRIOR"):
+    """A reference that RESOLVES -- a real sealed prior's digest, not a
+    string that merely exists."""
     ref = ("PRIOR_SHA" if cls == "ESTIMATED_PRIOR"
            else "MEASUREMENT_MANIFEST_SHA")
     return {term: Dist(family, params),
             "%s_EVIDENCE_CLASS" % term: cls,
-            "%s_%s" % (term, ref): "sha-%s" % term.lower()}
+            "%s_%s" % (term, ref): _REAL_PRIOR_SHA}
 
 
 def full_terms(**over):
@@ -36,7 +41,10 @@ def full_terms(**over):
     for k in ("VALUE_IF_NO_FILL", "FEE", "REBATE", "INVENTORY_COST",
               "EXIT_COST"):
         t["%s_STATE" % k] = "KNOWN_ZERO"
-    t["FILL_SELECTION_CONVENTION"] = "EXCLUDED"
+    # POST_BID can be filled, so EXCLUDED is no longer available: the
+    # economics are either carried separately or declared embedded.
+    t["FILL_SELECTION_CONVENTION"] = "EMBEDDED_IN_VALUE_IF_FILL"
+    t["VALUE_IF_FILL_INCLUDES_FILL_SELECTION"] = True
     t["QUANTITY"] = 500
     t.update(over)
     return t
@@ -80,7 +88,8 @@ def test_a_fully_resolved_row_keeps_the_ordinary_names():
 def test_robustly_positive_refuses_a_row_that_is_not_decision_grade():
     r = A.action_ev_mc("POST_BID", full_terms(), draws=400)
     out = A.robustly_positive(r)
-    assert out["ROBUSTLY_POSITIVE"] is False
+    # Unknown, not negative: the gate is blocked, so no finding was made.
+    assert out["ROBUSTLY_POSITIVE"] == NOT_IDENTIFIED
     assert out["REASON"] == "DECISION_GRADE_BLOCKED"
     assert out["DECISION_GRADE_ACTION_EV_STATUS"] == "BLOCKED"
 
@@ -97,7 +106,7 @@ def test_robustly_positive_on_a_partial_row_reads_the_partial_twin():
     t.pop("FEE_STATE")
     r = A.action_ev_mc("POST_BID", t, draws=400)
     out = A.robustly_positive(r)
-    assert out["ROBUSTLY_POSITIVE"] is False
+    assert out["ROBUSTLY_POSITIVE"] == NOT_IDENTIFIED
     assert out["REASON"] == "EV_NOT_IDENTIFIED"
     assert isinstance(out["SHADOW_ROBUSTNESS_DIAGNOSTIC"], float)
 
@@ -170,6 +179,7 @@ def test_a_per_order_fee_without_a_quantity_is_dimensionally_invalid():
     t.pop("FEE_STATE")
     t.update(_sealed("FEE", "POINT", {"value": 0.01}))
     t["FEE_UNIT"] = "USD_PER_ORDER"
+    t["FEE_BASIS"] = "PER_ORDER"          # unit and basis must agree
     r = A.action_ev_mc("POST_BID", t)
     assert r["ACTION_EV_STATUS"] == "INVALID_UNIT_CONTRACT"
     assert any(v["WHY"] == "PER_ORDER_UNIT_REQUIRES_QUANTITY"
@@ -182,6 +192,7 @@ def test_a_per_order_fee_with_a_quantity_is_divided_by_it():
         t.pop("FEE_STATE")
         t.update(_sealed("FEE", "POINT", {"value": 1.0}))
         t["FEE_UNIT"] = "USD_PER_ORDER"
+        t["FEE_BASIS"] = "PER_ORDER"
         return A.action_ev_mc("POST_BID", t, draws=200)["EV_MEAN"]
     small, big = ev(100), ev(10000)
     # The same flat fee costs a hundred times more per share on 100 shares.
@@ -238,6 +249,7 @@ def test_a_fill_bearing_action_must_declare_the_fill_selection_convention():
 def test_a_non_fill_bearing_action_may_omit_it():
     t = full_terms()
     t.pop("FILL_SELECTION_CONVENTION")
+    t.pop("VALUE_IF_FILL_INCLUDES_FILL_SELECTION")
     r = A.action_ev_mc("CANCEL", t, draws=200)
     assert r["ACTION_EV_STATUS"] == "IDENTIFIED"
     assert r["FILL_SELECTION_CONVENTION_DECLARED"] is False
@@ -296,14 +308,16 @@ def test_a_raw_row_posterior_is_diagnostic_only():
     assert out["DIAGNOSTIC_RAW_ROW_POSTERIOR"] != NOT_IDENTIFIED
 
 
-def test_a_validated_effective_n_makes_the_posterior_decision_grade():
+def test_a_validated_effective_n_is_still_not_an_applied_one():
+    """Superseded by the third pass. Validating the effective N does not
+    rebuild the posterior from it, so the posterior stays diagnostic."""
     prov = P.effective_n(raw_rows=100, effective_n=12,
                          effective_n_method="BLOCK_BOOTSTRAP_OVER_EVENTS",
                          relation_to_raw_rows="LESS_THAN_RAW_ROWS")
     out = P.update_beta(Dist("BETA", {"alpha": 2, "beta": 18}),
                         successes=5, trials=100, n_provenance=prov)
-    assert out["DECISION_GRADE_POSTERIOR"] != NOT_IDENTIFIED
-    assert out["DIAGNOSTIC_RAW_ROW_POSTERIOR"] == NOT_IDENTIFIED
+    assert out["DECISION_GRADE_POSTERIOR"] == NOT_IDENTIFIED
+    assert out["DIAGNOSTIC_RAW_ROW_POSTERIOR"] != NOT_IDENTIFIED
 
 
 def test_shrinkage_with_no_k_refuses():
@@ -330,14 +344,15 @@ def _series(market="M1", n=12, step=24):
 def test_a_label_artifact_is_sealed_and_verifies():
     s = _series()
     row = dict(s[0], DECISION_ID="D1")
-    art = B.label_artifact(row, s)
+    art = B.label_artifact(row, s, capture_spec_sha="cap-sha")
     assert len(art["LABEL_ARTIFACT_SHA"]) == 64
     assert B.verify_label_artifact(art)["LABEL_PROVENANCE_STATUS"] == "VALID"
 
 
 def test_a_tampered_label_artifact_fails_the_seal():
     s = _series()
-    art = B.label_artifact(dict(s[0], DECISION_ID="D1"), s)
+    art = B.label_artifact(dict(s[0], DECISION_ID="D1"), s,
+                           capture_spec_sha="capture-spec-sha")
     art["LABELS"] = dict(art["LABELS"])
     art["LABELS"]["MID_MOVE_60S"] = 99.0
     assert B.verify_label_artifact(art)["LABEL_PROVENANCE_STATUS"] == \
@@ -448,10 +463,29 @@ def test_b5_with_its_own_per_share_scale_predicts():
 
 # --- 18. Admission fails closed. ------------------------------------------
 
+def _label_fixture():
+    rows = []
+    for i in range(12):
+        sec = i * 24
+        rows.append({"MARKET_ID": "FIXTURE",
+                     "DECISION_TIMESTAMP_UTC": "2026-09-17T00:%02d:%02dZ"
+                                               % (sec // 60, sec % 60),
+                     "MID": 0.50 + i * 0.001,
+                     "BEST_BID": 0.49 + i * 0.001,
+                     "BEST_ASK": 0.51 + i * 0.001})
+    art = B.label_artifact(dict(rows[0], DECISION_ID="FIXTURE"), rows,
+                           capture_spec_sha="fixture-capture-spec")
+    return art["LABEL_ARTIFACT_SHA"], {art["LABEL_ARTIFACT_SHA"]: art}
+
+
+_LABEL_SHA, _LABEL_ARTIFACTS = _label_fixture()
+
+
 def _scored_rows(n=20):
     rows = []
     for i in range(n):
         rows.append({
+            "LABEL_ARTIFACT_SHA": _LABEL_SHA,
             "MID_MOVE_60S": 0.001 * ((i % 5) - 2),
             "MID_MOVE_60S_STATUS": "PRESENT",
             "MID_MOVE_60S_REALISED_OFFSET_S": 1.0,
@@ -465,16 +499,30 @@ def _scored_rows(n=20):
 
 def test_admission_is_not_identified_when_a_baseline_scored_nothing():
     out = M.score_baselines(_scored_rows(), "MID_MOVE_60S", pred_key="MODEL",
-                            min_coverage_pct=0.0)
-    if out.get("STATUS") == "REFUSED":
-        pytest.skip("target gate refused; admission not reached")
+                            min_coverage_pct=0.0,
+                            label_artifacts=_LABEL_ARTIFACTS)
+    assert out.get("STATUS") != "REFUSED"
     assert out["BASELINE_SET_COMPLETE"] is False
     assert out["CHALLENGER_ADMISSION_COMPARISON_STATUS"] == NOT_IDENTIFIED
 
 
 def test_an_empty_common_support_never_admits():
-    assert "AN_EMPTY_COMMON_SUPPORT_IS_NOT_A_WIN" in dir(M) or True
-    assert M.AN_EMPTY_COMMON_SUPPORT_IS_NOT_A_WIN
+    """An executable counterexample, not a declaration check. B2_MICROPRICE
+    can price every row and B4/B5 can price none, so the intersection of
+    rows EVERY predictor could price is empty."""
+    rows = [{"MID_MOVE_60S": 0.001 * ((i % 5) - 2),
+             "MID_MOVE_60S_STATUS": "PRESENT",
+             "MICROPRICE_MINUS_MID": 0.0005,
+             "_PREV_MOVE": 0.0002,
+             "MODEL": 0.0009,
+             "LABEL_ARTIFACT_SHA": _LABEL_SHA} for i in range(20)]
+    out = M.score_baselines(rows, "MID_MOVE_60S", pred_key="MODEL",
+                            min_coverage_pct=0.0,
+                            label_artifacts=_LABEL_ARTIFACTS)
+    assert out.get("STATUS") != "REFUSED"
+    assert out["COMMON_EVALUATION_SUPPORT_ROWS"] == 0
+    assert out["CHALLENGER_ADMISSION_COMPARISON_STATUS"] == NOT_IDENTIFIED
+    assert out["BASELINE_SET_COMPLETE"] is False
 
 
 # --- 19. Planning permission is not evidentiary permission. ---------------

@@ -503,7 +503,7 @@ def label_row(state_row, series, horizons_s=HORIZONS_S,
     bid0, ask0 = (_num(state_row.get("BEST_BID")),
                   _num(state_row.get("BEST_ASK")))
     statuses, offsets, horizon_status = {}, {}, {}
-    target_status = {}
+    target_status, forwards = {}, {}
 
     def _blank(h, why):
         for base in ("MID", "BEST_BID", "BEST_ASK",
@@ -536,6 +536,12 @@ def label_row(state_row, series, horizons_s=HORIZONS_S,
             continue
         statuses["%dS" % h] = "PRESENT"
         offsets["%dS" % h] = round(off, 3)
+        forwards["%dS" % h] = {
+            "SOURCE_FORWARD_ROW_HASH": row_hash(fwd),
+            "FORWARD_OBSERVATION_TIMESTAMP": fwd.get(
+                "DECISION_TIMESTAMP_UTC", NOT_IDENTIFIED),
+            "REALIZED_OFFSET_S": round(off, 3),
+        }
         m = _num(fwd.get("MID"))
         b = _num(fwd.get("BEST_BID"))
         a = _num(fwd.get("BEST_ASK"))
@@ -572,6 +578,10 @@ def label_row(state_row, series, horizons_s=HORIZONS_S,
     out["LABEL_STATUS"] = statuses
     out["HORIZON_STATUS"] = horizon_status
     out["TARGET_LABEL_STATUS"] = target_status
+    out["FORWARD_OBSERVATIONS"] = forwards
+    out["SOURCE_ORIGIN_ROW_HASH"] = row_hash(state_row)
+    out["ORIGIN_TIMESTAMP"] = t0 if t0 is not None else NOT_IDENTIFIED
+    out["MARKET_IDENTITY"] = _label_subject(state_row)
     out["LABEL_REALISED_OFFSET_S"] = offsets
     out["LABEL_STATUS_OVERALL"] = ("PRESENT" if statuses and all(
         v == "PRESENT" for v in statuses.values()) else MISSING)
@@ -601,8 +611,28 @@ LABEL_BUILDER_VERSION = "BETTOR_LABELS_V1"
 
 LABEL_ARTIFACT_FIELDS = ("DECISION_ID", "SUBJECT", "HORIZONS_S",
                          "HORIZON_TOLERANCE_S", "TIE_BREAK_RULE",
-                         "LABEL_BUILDER_VERSION", "HORIZON_STATUS",
-                         "TARGET_LABEL_STATUS", "LABELS")
+                         "LABEL_BUILDER_VERSION", "LABEL_BUILDER_CODE_SHA",
+                         "LABEL_SPEC_SHA", "CAPTURE_SPEC_SHA",
+                         "HORIZON_STATUS", "TARGET_LABEL_STATUS",
+                         "LABELS", "OBSERVATION_CHAIN")
+
+# What every PRESENT target must be able to show about where it came from.
+OBSERVATION_CHAIN_FIELDS = ("SOURCE_ORIGIN_ROW_HASH",
+                            "SOURCE_FORWARD_ROW_HASH",
+                            "ORIGIN_TIMESTAMP",
+                            "FORWARD_OBSERVATION_TIMESTAMP",
+                            "TARGET_HORIZON_S", "REALIZED_OFFSET_S",
+                            "MARKET_IDENTITY", "LABEL_VALUE",
+                            "TARGET_LABEL_STATUS")
+
+A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN = (
+    "sealing the label object proves the numbers have not been altered "
+    "since they were written. It says nothing about WHICH observations "
+    "produced them. Two different forward rows, from two different markets "
+    "or two different captures, yield two internally consistent artifacts. "
+    "The chain names the origin row, the forward row, both timestamps, the "
+    "realised offset and the market identity, so a score can be traced to "
+    "the observations it rests on")
 
 A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED = (
     "every consumer rebuilding labels from its own view of the series means "
@@ -610,17 +640,102 @@ A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED = (
     "compared as if they were not. The artifact is built once, sealed with "
     "LABEL_ARTIFACT_SHA, and the SHA travels with every score")
 
-LABEL_PROVENANCE_STATUSES = ("VALID", "SHA_MISMATCH", "NOT_SEALED")
+LABEL_PROVENANCE_STATUSES = ("VALID", "SHA_MISMATCH", "NOT_SEALED",
+                             "OBSERVATION_CHAIN_INCOMPLETE")
+
+OBSERVATION_CHAIN_STATUSES = ("COMPLETE", "INCOMPLETE")
+
+
+def row_hash(row):
+    """A stable digest of one observation row."""
+    return hashlib.sha256(
+        json.dumps(row or {}, sort_keys=True, default=str).encode()
+    ).hexdigest()
 
 
 def _label_subject(state_row):
     return {k: (state_row or {}).get(k, NOT_IDENTIFIED) for k in SUBJECT_KEYS}
 
 
+def label_builder_code_sha():
+    """The digest of THIS module's source -- the code that built the labels."""
+    import os
+    try:
+        with open(os.path.abspath(__file__), "rb") as fh:
+            return hashlib.sha256(fh.read()).hexdigest()
+    except OSError:
+        return NOT_IDENTIFIED
+
+
+def label_spec_sha():
+    """The digest of the frozen labelling SPEC, independent of the source."""
+    spec = {
+        "HORIZONS_S": list(HORIZONS_S),
+        "HORIZON_TOLERANCE_S": HORIZON_TOLERANCE_S,
+        "TIE_BREAK_RULE": TIE_BREAK_RULE,
+        "SUBJECT_KEYS": list(SUBJECT_KEYS),
+        "HORIZON_STATUS_V1": dict(HORIZON_STATUS_V1),
+        "TARGET_BASES": list(TARGET_BASES),
+        "LABEL_BUILDER_VERSION": LABEL_BUILDER_VERSION,
+        "NO_INTERPOLATION_BEYOND_THE_HORIZON":
+            NO_INTERPOLATION_BEYOND_THE_HORIZON,
+    }
+    return hashlib.sha256(
+        json.dumps(spec, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def _observation_chain(labels, horizons_s):
+    """One chain record per target, naming the observations behind it."""
+    chain, incomplete = {}, []
+    origin_hash = labels.get("SOURCE_ORIGIN_ROW_HASH", NOT_IDENTIFIED)
+    origin_ts = labels.get("ORIGIN_TIMESTAMP", NOT_IDENTIFIED)
+    identity = labels.get("MARKET_IDENTITY", {})
+    fwds = labels.get("FORWARD_OBSERVATIONS", {})
+    for h in horizons_s:
+        hk = "%dS" % h
+        f = fwds.get(hk) or {}
+        for base in TARGET_BASES:
+            key = "%s_%dS" % (base, h)
+            st = (labels.get("TARGET_LABEL_STATUS") or {}).get(
+                key, NOT_IDENTIFIED)
+            rec = {
+                "SOURCE_ORIGIN_ROW_HASH": origin_hash,
+                "SOURCE_FORWARD_ROW_HASH": f.get("SOURCE_FORWARD_ROW_HASH",
+                                                 NOT_IDENTIFIED),
+                "ORIGIN_TIMESTAMP": origin_ts,
+                "FORWARD_OBSERVATION_TIMESTAMP": f.get(
+                    "FORWARD_OBSERVATION_TIMESTAMP", NOT_IDENTIFIED),
+                "TARGET_HORIZON_S": h,
+                "REALIZED_OFFSET_S": f.get("REALIZED_OFFSET_S",
+                                           NOT_IDENTIFIED),
+                "MARKET_IDENTITY": identity,
+                "LABEL_VALUE": labels.get(key, MISSING),
+                "TARGET_LABEL_STATUS": st,
+            }
+            chain[key] = rec
+            # Only a PRESENT target has to show a complete chain. A MISSING
+            # or UNOBSERVABLE target has nothing to trace, and demanding a
+            # forward row for one would be demanding an observation that by
+            # construction does not exist.
+            if st == "PRESENT":
+                for fld in OBSERVATION_CHAIN_FIELDS:
+                    v = rec.get(fld)
+                    if v in (None, NOT_IDENTIFIED, MISSING):
+                        incomplete.append((key, fld))
+    return chain, tuple(incomplete)
+
+
 def label_artifact(state_row, series, horizons_s=HORIZONS_S,
-                   tolerance_s=HORIZON_TOLERANCE_S):
-    """Build the labels ONCE and seal them. The SHA is the label identity."""
+                   tolerance_s=HORIZON_TOLERANCE_S, capture_spec_sha=None):
+    """Build the labels ONCE, bind their observations, and seal the lot.
+
+    The SHA is the label identity; the chain is what the identity refers to.
+    `capture_spec_sha` comes from the capture manifest and is REQUIRED for a
+    complete chain -- without it the labels cannot be tied to the capture
+    that produced the observations.
+    """
     labels = label_row(state_row, series, horizons_s, tolerance_s)
+    chain, incomplete = _observation_chain(labels, horizons_s)
     body = {
         "DECISION_ID": (state_row or {}).get("DECISION_ID", NOT_IDENTIFIED),
         "SUBJECT": _label_subject(state_row),
@@ -628,38 +743,80 @@ def label_artifact(state_row, series, horizons_s=HORIZONS_S,
         "HORIZON_TOLERANCE_S": tolerance_s,
         "TIE_BREAK_RULE": TIE_BREAK_RULE,
         "LABEL_BUILDER_VERSION": LABEL_BUILDER_VERSION,
+        "LABEL_BUILDER_CODE_SHA": label_builder_code_sha(),
+        "LABEL_SPEC_SHA": label_spec_sha(),
+        "CAPTURE_SPEC_SHA": capture_spec_sha or NOT_IDENTIFIED,
         "HORIZON_STATUS": labels.get("HORIZON_STATUS", {}),
         "TARGET_LABEL_STATUS": labels.get("TARGET_LABEL_STATUS", {}),
         "LABELS": {k: labels[k] for k in sorted(labels)
                    if k in LABEL_FIELDS},
+        "OBSERVATION_CHAIN": chain,
     }
+    if not capture_spec_sha:
+        incomplete = incomplete + (("ARTIFACT", "CAPTURE_SPEC_SHA"),)
+    body["OBSERVATION_CHAIN_STATUS"] = ("COMPLETE" if not incomplete
+                                        else "INCOMPLETE")
+    body["OBSERVATION_CHAIN_GAPS"] = incomplete
     body["LABEL_ARTIFACT_SHA"] = hashlib.sha256(
         json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
     body["LABEL_ARTIFACT_FIELDS"] = LABEL_ARTIFACT_FIELDS
+    body["OBSERVATION_CHAIN_FIELDS"] = OBSERVATION_CHAIN_FIELDS
+    body["A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN"] = \
+        A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN
     body["A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED"] = \
         A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED
-    body["LABEL_PROVENANCE_STATUS"] = "VALID"
+    body["LABEL_PROVENANCE_STATUS"] = ("VALID" if not incomplete
+                                       else "OBSERVATION_CHAIN_INCOMPLETE")
     return body
 
 
+# Keys attached AFTER sealing, excluded when the seal is recomputed.
+_UNSEALED_KEYS = ("LABEL_ARTIFACT_SHA", "LABEL_ARTIFACT_FIELDS",
+                  "OBSERVATION_CHAIN_FIELDS",
+                  "A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN",
+                  "A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED",
+                  "LABEL_PROVENANCE_STATUS")
+
+
 def verify_label_artifact(artifact):
-    """Recompute the seal. Fails closed on an unsealed or altered artifact."""
+    """Recompute the seal AND re-derive the chain status. Fails closed.
+
+    An artifact whose numbers verify but whose observation chain is
+    incomplete is NOT valid provenance: the seal proves only that nobody
+    edited it since it was written.
+    """
     a = dict(artifact or {})
     claimed = a.pop("LABEL_ARTIFACT_SHA", None)
-    for k in ("LABEL_ARTIFACT_FIELDS", "A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED",
-              "LABEL_PROVENANCE_STATUS"):
+    for k in _UNSEALED_KEYS:
         a.pop(k, None)
     if claimed is None:
         return {"LABEL_PROVENANCE_STATUS": "NOT_SEALED",
                 "LABEL_ARTIFACT_SHA": NOT_IDENTIFIED,
+                "OBSERVATION_CHAIN_STATUS": NOT_IDENTIFIED,
+                "A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN":
+                    A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN,
                 "A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED":
                     A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED}
     got = hashlib.sha256(
         json.dumps(a, sort_keys=True, default=str).encode()).hexdigest()
-    ok = got == claimed
-    return {"LABEL_PROVENANCE_STATUS": "VALID" if ok else "SHA_MISMATCH",
+    sealed = got == claimed
+    chain_ok = a.get("OBSERVATION_CHAIN_STATUS") == "COMPLETE"
+    if not sealed:
+        status = "SHA_MISMATCH"
+    elif not chain_ok:
+        status = "OBSERVATION_CHAIN_INCOMPLETE"
+    else:
+        status = "VALID"
+    return {"LABEL_PROVENANCE_STATUS": status,
             "LABEL_ARTIFACT_SHA": claimed,
             "RECOMPUTED_SHA": got,
+            "SEAL_INTACT": sealed,
+            "OBSERVATION_CHAIN_STATUS": a.get("OBSERVATION_CHAIN_STATUS",
+                                              NOT_IDENTIFIED),
+            "OBSERVATION_CHAIN_GAPS": a.get("OBSERVATION_CHAIN_GAPS", ()),
+            "OBSERVATION_CHAIN_FIELDS": OBSERVATION_CHAIN_FIELDS,
+            "A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN":
+                A_CHECKSUM_OVER_THE_LABEL_IS_NOT_THE_CHAIN,
             "LABEL_PROVENANCE_STATUSES": LABEL_PROVENANCE_STATUSES}
 
 

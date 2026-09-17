@@ -713,6 +713,69 @@ A_WARNING_IS_NOT_A_GATE = (
     "warning. The narrowed object is now named DIAGNOSTIC_RAW_ROW_POSTERIOR "
     "and DECISION_GRADE_POSTERIOR is absent until effective N is validated")
 
+# --- Effective N has to change the ARITHMETIC, not only the label. ---------
+#
+# The previous build constructed Beta(alpha + successes, beta + trials -
+# successes) from the RAW counts and then stamped that same object
+# DECISION_GRADE_POSTERIOR whenever an effective-N provenance validated.
+# Validating that 100 correlated rows carry the information of 12 independent
+# ones does not widen a posterior built from 100 trials: the distribution is
+# identical, only its name changed. A label is not a likelihood.
+
+EFFECTIVE_N_LIKELIHOOD_STATUS = "NOT_IMPLEMENTED_RAW_ROW_LIKELIHOOD_ONLY"
+
+# The canonical posterior-precision vocabulary. One contract, shared with
+# action_ev_mc's decision-grade gate. No module invents its own word.
+POSTERIOR_PRECISION_STATUSES = (
+    "DECISION_GRADE_POSTERIOR",
+    "DIAGNOSTIC_RAW_ROW_POSTERIOR",
+    "NOT_IDENTIFIED_PENDING_DEPENDENCE_MODEL",
+)
+
+A_VALIDATED_EFFECTIVE_N_IS_NOT_AN_APPLIED_ONE = (
+    "EFFECTIVE_N = 12 beside RAW_ROWS = 100 says the design effect has been "
+    "estimated. It does not say the posterior was built from it. Until an "
+    "event-level or clustered likelihood exists, the only posterior this "
+    "module can construct is the raw-row one, and it is returned as "
+    "DIAGNOSTIC_RAW_ROW_POSTERIOR no matter how well the effective N is "
+    "provenanced. DECISION_GRADE_POSTERIOR stays NOT_IDENTIFIED")
+
+DO_NOT_RESCALE_COUNTS_WITHOUT_A_DERIVATION = (
+    "scaling successes and trials by EFFECTIVE_N / RAW_ROWS is an "
+    "approximation with conditions -- it assumes an exchangeable cluster "
+    "structure and a design effect that does not vary with the outcome. "
+    "Applying it unnamed would swap one unjustified precision for another. "
+    "If it is ever used, EFFECTIVE_SUCCESS_WEIGHT, EFFECTIVE_FAILURE_WEIGHT, "
+    "LIKELIHOOD_METHOD and DERIVATION are declared and the mathematics is "
+    "tested")
+
+EFFECTIVE_LIKELIHOOD_FIELDS = ("EFFECTIVE_SUCCESS_WEIGHT",
+                               "EFFECTIVE_FAILURE_WEIGHT",
+                               "LIKELIHOOD_METHOD", "DERIVATION")
+
+
+def effective_likelihood_contract():
+    """The fields an effective-N likelihood must declare. All unfilled."""
+    out = {f: NOT_IDENTIFIED for f in EFFECTIVE_LIKELIHOOD_FIELDS}
+    out["EFFECTIVE_N_LIKELIHOOD_STATUS"] = EFFECTIVE_N_LIKELIHOOD_STATUS
+    out["DO_NOT_RESCALE_COUNTS_WITHOUT_A_DERIVATION"] = \
+        DO_NOT_RESCALE_COUNTS_WITHOUT_A_DERIVATION
+    return out
+
+
+def _posterior_precision(prov):
+    """The canonical status for a posterior built from RAW counts.
+
+    A validated effective N moves the status from 'we have not even measured
+    the dependence' to 'we measured it and did not apply it'. Neither is
+    decision grade, because in both cases the returned distribution was
+    constructed from the raw trial count.
+    """
+    v = (prov or {}).get("EFFECTIVE_N_VALIDATION") or {}
+    if v.get("VALID"):
+        return "DIAGNOSTIC_RAW_ROW_POSTERIOR"
+    return POSTERIOR_PRECISION_UNMODELLED
+
 
 def validate_effective_n(effective_n_value, effective_n_method,
                          raw_rows=None, relation_to_raw_rows=None):
@@ -781,13 +844,19 @@ def update_beta(prior_dist, successes, trials, prior_version="1",
                 "WHY": "successes exceed trials"}
     post = Dist("BETA", {"alpha": a + s, "beta": b + (n - s)})
     prov = n_provenance if n_provenance is not None else effective_n()
-    decision_grade = prov.get("POSTERIOR_PRECISION_STATUS") == "MODELLED"
+    # The posterior is built from the RAW counts, so it is the raw-row
+    # posterior whatever the effective N says. No amount of provenance on a
+    # number this arithmetic never touched makes it decision grade.
+    precision = _posterior_precision(prov)
     return {
         "STATUS": "UPDATED",
-        "DECISION_GRADE_POSTERIOR": (post if decision_grade
-                                     else NOT_IDENTIFIED),
-        "DIAGNOSTIC_RAW_ROW_POSTERIOR": (NOT_IDENTIFIED if decision_grade
-                                         else post),
+        "DECISION_GRADE_POSTERIOR": NOT_IDENTIFIED,
+        "DIAGNOSTIC_RAW_ROW_POSTERIOR": post,
+        "POSTERIOR_BUILT_FROM": {"SUCCESSES": s, "TRIALS": n,
+                                 "COUNT_BASIS": "RAW_TRIALS"},
+        "EFFECTIVE_LIKELIHOOD_CONTRACT": effective_likelihood_contract(),
+        "A_VALIDATED_EFFECTIVE_N_IS_NOT_AN_APPLIED_ONE":
+            A_VALIDATED_EFFECTIVE_N_IS_NOT_AN_APPLIED_ONE,
         "A_WARNING_IS_NOT_A_GATE": A_WARNING_IS_NOT_A_GATE,
         "PRIOR_VERSION": prior_version,
         "POSTERIOR_VERSION": "%s+n%d" % (prior_version, n),
@@ -799,8 +868,8 @@ def update_beta(prior_dist, successes, trials, prior_version="1",
         "PRIOR_TO_POSTERIOR_SHIFT": round(post.mean() - prior_dist.mean(), 10),
         "UPDATE_IS_VERSIONED": UPDATE_IS_VERSIONED,
         "N_PROVENANCE": prov,
-        "POSTERIOR_PRECISION_STATUS": prov.get(
-            "POSTERIOR_PRECISION_STATUS", POSTERIOR_PRECISION_UNMODELLED),
+        "POSTERIOR_PRECISION_STATUS": precision,
+        "POSTERIOR_PRECISION_STATUSES": POSTERIOR_PRECISION_STATUSES,
         "RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS":
             RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS,
     }
@@ -822,12 +891,27 @@ def update_normal(prior_dist, obs_mean, obs_sigma, n, prior_version="1",
     if n <= 0 or obs_sigma is None or obs_sigma <= 0:
         return {"STATUS": "INVALID_DATA"}
     mu0, s0 = prior_dist.params["mu"], prior_dist.params["sigma"]
+    # The likelihood precision is n / sigma^2 with n the RAW observation
+    # count. n is exactly where dependence bites -- 100 correlated rows do
+    # not carry 100 observations' worth of precision -- and this function
+    # used to ignore n_provenance altogether, so the narrowed posterior was
+    # returned with no precision status at all.
     tau0, tau = 1.0 / (s0 ** 2), n / (float(obs_sigma) ** 2)
     mu_post = (tau0 * mu0 + tau * float(obs_mean)) / (tau0 + tau)
     s_post = math.sqrt(1.0 / (tau0 + tau))
     post = Dist("NORMAL", {"mu": mu_post, "sigma": s_post})
+    prov = n_provenance if n_provenance is not None else effective_n()
+    precision = _posterior_precision(prov)
     return {
         "STATUS": "UPDATED",
+        "DECISION_GRADE_POSTERIOR": NOT_IDENTIFIED,
+        "DIAGNOSTIC_RAW_ROW_POSTERIOR": post,
+        "POSTERIOR_BUILT_FROM": {"N": n, "OBS_SIGMA": float(obs_sigma),
+                                 "COUNT_BASIS": "RAW_OBSERVATIONS"},
+        "EFFECTIVE_LIKELIHOOD_CONTRACT": effective_likelihood_contract(),
+        "A_VALIDATED_EFFECTIVE_N_IS_NOT_AN_APPLIED_ONE":
+            A_VALIDATED_EFFECTIVE_N_IS_NOT_AN_APPLIED_ONE,
+        "A_WARNING_IS_NOT_A_GATE": A_WARNING_IS_NOT_A_GATE,
         "PRIOR_VERSION": prior_version,
         "POSTERIOR_VERSION": "%s+n%d" % (prior_version, n),
         "LIKELIHOOD_SPEC": "NORMAL_KNOWN_VARIANCE",
@@ -838,6 +922,11 @@ def update_normal(prior_dist, obs_mean, obs_sigma, n, prior_version="1",
         "PRIOR_TO_POSTERIOR_SHIFT": round(mu_post - mu0, 10),
         "UNCERTAINTY_FELL_BY": round(s0 - s_post, 10),
         "UPDATE_IS_VERSIONED": UPDATE_IS_VERSIONED,
+        "N_PROVENANCE": prov,
+        "POSTERIOR_PRECISION_STATUS": precision,
+        "POSTERIOR_PRECISION_STATUSES": POSTERIOR_PRECISION_STATUSES,
+        "RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS":
+            RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS,
     }
 
 

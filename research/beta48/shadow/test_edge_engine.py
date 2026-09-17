@@ -166,9 +166,11 @@ def _terms(**over):
         "FEE": 0.001, "REBATE": 0.0005, "INVENTORY_COST": 0.0002,
         "EXIT_COST": 0.0, "CAPITAL_REQUIRED": 40.0,
         "OCCUPANCY_SECONDS": 1800.0,
-        # POST_BID is a fill-bearing action, so the fill-selection convention
-        # must be declared rather than defaulting silently to EXCLUDED.
-        "FILL_SELECTION_CONVENTION": "EXCLUDED",
+        # POST_BID can be filled, so EXCLUDED is not available: the
+        # fill-selection economics are either carried separately or declared
+        # embedded in VALUE_IF_FILL, which VALUE_IF_FILL then says so.
+        "FILL_SELECTION_CONVENTION": "EMBEDDED_IN_VALUE_IF_FILL",
+        "VALUE_IF_FILL_INCLUDES_FILL_SELECTION": True,
     }
     t.update(over)
     return t
@@ -350,23 +352,25 @@ def test_robustly_positive_uses_the_conservative_tail():
     rob = MC.robustly_positive(r)
     # The quantile reading is published as a SHADOW diagnostic. It is not
     # promoted to ROBUSTLY_POSITIVE, because that is a claim about acting on
-    # the number and the decision-grade gate is blocked.
+    # the number and the decision-grade gate is blocked -- and it is not
+    # demoted to False either, because nothing established the negative.
     assert rob["SHADOW_ROBUSTNESS_DIAGNOSTIC"] == r["EV_P10"]
-    assert rob["ROBUSTLY_POSITIVE"] is False
+    assert rob["ROBUSTLY_POSITIVE"] == MC.NOT_IDENTIFIED
     assert rob["REASON"] == "DECISION_GRADE_BLOCKED"
     assert "management decision" in rob["ROBUSTNESS_THRESHOLD_NOT_CHOSEN"]
 
 
 def test_an_unidentified_ev_is_never_robustly_positive():
     rob = MC.robustly_positive({"EV_P10": MC.NOT_IDENTIFIED})
-    assert rob["ROBUSTLY_POSITIVE"] is False
+    assert rob["ROBUSTLY_POSITIVE"] == MC.NOT_IDENTIFIED
+    assert rob["ROBUSTLY_POSITIVE"] is not True
 
 
 def test_a_dominated_action_is_marked():
     rows = [{"ACTION": "A", "EV_MEAN": 0.01, "EV_SD": 0.05,
-             "CAPITAL_OCCUPANCY_MEAN": 100},
+             "CAPITAL_HOURS_MEAN": 100},
             {"ACTION": "B", "EV_MEAN": 0.01, "EV_SD": 0.01,
-             "CAPITAL_OCCUPANCY_MEAN": 50}]
+             "CAPITAL_HOURS_MEAN": 50}]
     d = MC.dominated(rows)
     by = {r["ACTION"]: r for r in d["ROWS"]}
     assert by["A"]["DOMINATED"] is True

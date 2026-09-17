@@ -30,6 +30,29 @@ def _resolved(**over):
     return t
 
 
+# --- A VERIFIED canonical label artifact, for scorer fixtures. ------------
+#
+# The scorer no longer accepts a hand-written _STATUS column: every scored
+# row must name a LABEL_ARTIFACT_SHA whose artifact verifies.
+
+def _label_fixture():
+    rows = []
+    for i in range(12):
+        sec = i * 24
+        rows.append({"MARKET_ID": "FIXTURE",
+                     "DECISION_TIMESTAMP_UTC": "2026-09-17T00:%02d:%02dZ"
+                                               % (sec // 60, sec % 60),
+                     "MID": 0.50 + i * 0.001,
+                     "BEST_BID": 0.49 + i * 0.001,
+                     "BEST_ASK": 0.51 + i * 0.001})
+    art = BD.label_artifact(dict(rows[0], DECISION_ID="FIXTURE"), rows,
+                            capture_spec_sha="fixture-capture-spec")
+    return art["LABEL_ARTIFACT_SHA"], {art["LABEL_ARTIFACT_SHA"]: art}
+
+
+_LABEL_SHA, _LABEL_ARTIFACTS = _label_fixture()
+
+
 # --- 1. UNKNOWN economics must never become zero. -------------------------
 
 def test_the_exact_reported_reproduction_is_now_impossible():
@@ -198,9 +221,9 @@ def test_both_modules_use_the_same_frozen_tie_rule():
 def test_the_reported_counterexample_is_no_longer_dominance():
     r = MC.dominated([
         {"ACTION": "A", "EV_MEAN": 1, "EV_SD": 1,
-         "CAPITAL_OCCUPANCY_MEAN": 1},
+         "CAPITAL_HOURS_MEAN": 1},
         {"ACTION": "B", "EV_MEAN": 2, "EV_SD": 0.5,
-         "CAPITAL_OCCUPANCY_MEAN": 100}])
+         "CAPITAL_HOURS_MEAN": 100}])
     a = [x for x in r["ROWS"] if x["ACTION"] == "A"][0]
     assert a["DOMINANCE_STATUS"] == "NOT_DOMINATED"
     assert r["DOMINATED_COUNT"] == 0
@@ -209,9 +232,9 @@ def test_the_reported_counterexample_is_no_longer_dominance():
 def test_genuine_three_axis_dominance_is_still_detected():
     r = MC.dominated([
         {"ACTION": "A", "EV_MEAN": 1, "EV_SD": 1,
-         "CAPITAL_OCCUPANCY_MEAN": 1},
+         "CAPITAL_HOURS_MEAN": 1},
         {"ACTION": "C", "EV_MEAN": 2, "EV_SD": 0.5,
-         "CAPITAL_OCCUPANCY_MEAN": 1}])
+         "CAPITAL_HOURS_MEAN": 1}])
     a = [x for x in r["ROWS"] if x["ACTION"] == "A"][0]
     assert a["DOMINANCE_STATUS"] == "DOMINATED"
     assert a["DOMINATED_BY"] == "C"
@@ -220,9 +243,9 @@ def test_genuine_three_axis_dominance_is_still_detected():
 def test_an_exact_tie_on_every_axis_is_not_dominance():
     r = MC.dominated([
         {"ACTION": "A", "EV_MEAN": 1, "EV_SD": 1,
-         "CAPITAL_OCCUPANCY_MEAN": 1},
+         "CAPITAL_HOURS_MEAN": 1},
         {"ACTION": "B", "EV_MEAN": 1, "EV_SD": 1,
-         "CAPITAL_OCCUPANCY_MEAN": 1}])
+         "CAPITAL_HOURS_MEAN": 1}])
     assert r["DOMINATED_COUNT"] == 0
 
 
@@ -412,8 +435,10 @@ def test_relative_value_refuses_a_hand_built_target_column():
 def test_relative_value_proceeds_once_provenance_is_present():
     rows = [{"EVENT_KEY": "e%d" % i, "RESIDUAL_T": (i % 9 - 4) / 100.0,
              "TARGET_CHANGE_30S": -0.3 * (i % 9 - 4) / 100.0,
-             "TARGET_CHANGE_30S_STATUS": "PRESENT"} for i in range(60)]
-    out = MS.relative_value_test(rows, horizons=(30,), min_coverage_pct=50.0)
+             "TARGET_CHANGE_30S_STATUS": "PRESENT",
+             "LABEL_ARTIFACT_SHA": _LABEL_SHA} for i in range(60)]
+    out = MS.relative_value_test(rows, horizons=(30,), min_coverage_pct=50.0,
+                                 label_artifacts=_LABEL_ARTIFACTS)
     assert out["BY_HORIZON"]["30S"]["STATUS"] == "MEASURED"
 
 
@@ -522,9 +547,11 @@ def test_scores_are_reported_on_a_common_evaluation_support():
             {"MID_MOVE_30S": -0.01, "MID_MOVE_30S_STATUS": "PRESENT",
              "ORDER_BOOK_IMBALANCE": None, "RAW_OFI_SHARES": None,
              "MICROPRICE_MINUS_MID": -0.002, "_PREV_MOVE": -0.001}]
+    for r in rows:
+        r["LABEL_ARTIFACT_SHA"] = _LABEL_SHA
     out = MS.score_baselines(
         rows, "MID_MOVE_30S", min_coverage_pct=50.0,
-        baseline_scales=_SCALES)
+        baseline_scales=_SCALES, label_artifacts=_LABEL_ARTIFACTS)
     assert out["SCORABLE_ROWS"] == 2
     assert out["COMMON_EVALUATION_SUPPORT_ROWS"] == 1
     b0 = out["BY_PREDICTOR"]["B0_NO_CHANGE"]
@@ -542,9 +569,11 @@ def test_an_abstaining_predictor_cannot_win_on_an_easier_subset():
              "_PREV_MOVE": 0.0,
              "ORDER_BOOK_IMBALANCE": 0.1, "RAW_OFI_SHARES": 10}
             for i in range(10)]
+    for r in rows:
+        r["LABEL_ARTIFACT_SHA"] = _LABEL_SHA
     out = MS.score_baselines(
         rows, "MID_MOVE_30S", min_coverage_pct=50.0,
-        baseline_scales=_SCALES)
+        baseline_scales=_SCALES, label_artifacts=_LABEL_ARTIFACTS)
     thin = out["BY_PREDICTOR"]["B2_MICROPRICE"]
     assert thin["ABSTAINED_ROWS"] == 5          # skipped every hard row
     assert thin["ON_COMMON_SUPPORT"]["N_SCORED"] == 5

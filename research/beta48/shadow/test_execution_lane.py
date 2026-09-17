@@ -13,6 +13,31 @@ import odds_procurement as PROC
 import odds_snapshot_provider as OSP
 
 
+# --- A VERIFIED canonical label artifact, for scorer fixtures. ------------
+#
+# The scorer no longer accepts a hand-written _STATUS column: every scored
+# row must name a LABEL_ARTIFACT_SHA whose artifact verifies.
+
+def _label_fixture():
+    import bettor_dataset as _BD
+    rows = []
+    for i in range(12):
+        sec = i * 24
+        rows.append({"MARKET_ID": "FIXTURE",
+                     "DECISION_TIMESTAMP_UTC": "2026-09-17T00:%02d:%02dZ"
+                                               % (sec // 60, sec % 60),
+                     "MID": 0.50 + i * 0.001,
+                     "BEST_BID": 0.49 + i * 0.001,
+                     "BEST_ASK": 0.51 + i * 0.001})
+    art = _BD.label_artifact(dict(rows[0], DECISION_ID="FIXTURE"), rows,
+                             capture_spec_sha="fixture-capture-spec")
+    return art["LABEL_ARTIFACT_SHA"], {art["LABEL_ARTIFACT_SHA"]: art}
+
+
+_LABEL_SHA, _LABEL_ARTIFACTS = _label_fixture()
+
+
+
 # --- Section 2. The invariant. ---------------------------------------------
 
 def _row(snap, req, price=2.0):
@@ -412,10 +437,12 @@ def test_a_reverting_residual_shows_a_negative_correlation():
         obs.append({"EVENT_KEY": "e%d" % (i % 12), "MARKET": "m", "T": "t",
                     "P_TARGET": 0.50 + res, "P_SURFACE_EX_TARGET": 0.50,
                     "TARGET_LATER": {30: 0.50 + 0.3 * res},
-                    "TARGET_LATER_STATUS": {30: "PRESENT"}})
+                    "TARGET_LATER_STATUS": {30: "PRESENT"},
+                    "LABEL_ARTIFACT_SHA": _LABEL_SHA})
     rows, _ = MS.relative_value_rows(obs, horizons=(30,))
     out = MS.relative_value_test(rows, horizons=(30,),
-                                 min_coverage_pct=50.0)
+                                 min_coverage_pct=50.0,
+                                 label_artifacts=_LABEL_ARTIFACTS)
     assert out["BY_HORIZON"]["30S"]["CORRELATION"] < -0.5
 
 

@@ -344,7 +344,7 @@ DECISION_GRADE_CONDITIONS = (
     "DISTRIBUTION_DOMAINS_DECISION_GRADE", "QUANTITY_DECLARED",
     "DEPENDENCE_MODEL_VALIDATED", "POSTERIOR_PRECISION_VALID",
     "LABEL_PROVENANCE_VALID", "COMMON_SUPPORT_EVALUATION_VALID",
-    "DATA_QUALITY_GATE_PASSED",
+    "DATA_QUALITY_GATE_PASSED", "FILL_QUANTITY_MODEL_VALIDATED",
 )
 
 SHADOW_RESEARCH_REMAINS_ALLOWED = (
@@ -416,7 +416,8 @@ def _net(p_fill, v_fill, v_nofill, tox, fee, rebate, inv, exit_c, convention,
 
 EVALUATION_ID_FIELDS = ("ACTION", "PRICE", "SIZE", "TERM_MANIFEST_SHA",
                         "PRIOR_VERSION_MANIFEST_SHA", "CONVENTION",
-                        "FILL_SELECTION_CONVENTION", "MODEL_VERSION",
+                        "FILL_SELECTION_CONVENTION",
+                        "DEFAULT_TERM_CONTRACT_SHA", "MODEL_VERSION",
                         "DECISION_ID")
 
 ACTION_ALONE_IS_NOT_AN_EVALUATION = (
@@ -467,6 +468,7 @@ def evaluation_id(action, terms, convention="SEPARATE_TERM", price=None,
         "CONVENTION": convention,
         "FILL_SELECTION_CONVENTION": fsel.get("FILL_SELECTION_CONVENTION",
                                               "EXCLUDED"),
+        "DEFAULT_TERM_CONTRACT_SHA": default_term_contract_sha(),
         "MODEL_VERSION": model_version or NOT_IDENTIFIED,
         "DECISION_ID": decision_id or NOT_IDENTIFIED,
     }
@@ -624,6 +626,78 @@ UNIT_TO_USD_PER_SHARE = {
 
 PER_ORDER_UNITS = ("USD_PER_ORDER",)
 
+# --- UNIT and BASIS must agree, and conditioning must fit the term. --------
+#
+# BASIS was validated against an enum and then ignored, so a term could be
+# declared USD_PER_ORDER / PER_FILLED_SHARE and nothing objected -- the unit
+# said one thing about the denominator and the basis another.
+
+UNIT_BASIS_COMPATIBILITY = {
+    "PROBABILITY": ("PER_ORDER",),
+    "PROBABILITY_POINTS_PER_SHARE": ("PER_POSTED_SHARE", "PER_FILLED_SHARE"),
+    "USD_PER_POSTED_SHARE": ("PER_POSTED_SHARE",),
+    "USD_PER_FILLED_SHARE": ("PER_FILLED_SHARE",),
+    "USD_PER_ORDER": ("PER_ORDER",),
+    "USD": ("TOTAL_POSITION",),
+    "SHARES": ("TOTAL_POSITION", "PER_ORDER"),
+    "SECONDS": ("PER_ORDER",),
+    "HOURS": ("PER_ORDER",),
+    "USD_PER_CAPITAL_HOUR": ("TOTAL_POSITION",),
+}
+
+A_UNIT_AND_A_BASIS_MUST_AGREE = (
+    "USD_PER_ORDER / PER_FILLED_SHARE names a per-order numerator over a "
+    "per-filled-share denominator. One of the two is wrong and the module "
+    "does not get to pick, so the pair is refused. BASIS stops being "
+    "decoration the moment it has to agree with UNIT")
+
+# Which conditionings a term's SEMANTICS permit. VALUE_IF_FILL cannot be
+# declared ON_NO_FILL: the name is the conditioning.
+ADMISSIBLE_CONDITIONING = {
+    "P_FILL": ("ALWAYS",),
+    "VALUE_IF_FILL": ("ON_FILL", "PER_FILLED_SHARE"),
+    "VALUE_IF_NO_FILL": ("ON_NO_FILL", "PER_POSTED_SHARE"),
+    "TOXICITY": ("ON_FILL", "PER_FILLED_SHARE"),
+    "FEE": ("ALWAYS", "ON_FILL", "PER_FILLED_SHARE", "PER_POSTED_SHARE"),
+    "REBATE": ("ALWAYS", "ON_FILL", "PER_FILLED_SHARE", "PER_POSTED_SHARE"),
+    "INVENTORY_COST": ("ALWAYS", "ON_FILL", "PER_FILLED_SHARE",
+                       "PER_SECOND_OF_OCCUPANCY"),
+    "EXIT_COST": ("AT_EXIT", "AT_SETTLEMENT", "ON_FILL"),
+    "CAPITAL_REQUIRED": ("ALWAYS",),
+    "OCCUPANCY_SECONDS": ("ALWAYS",),
+    FILL_SELECTION_TERM: ("ON_FILL", "PER_FILLED_SHARE"),
+}
+
+A_TERMS_NAME_IS_ITS_CONDITIONING = (
+    "VALUE_IF_FILL declared ON_NO_FILL, or VALUE_IF_NO_FILL declared "
+    "ON_FILL, inverts the branch the term was defined for and produces an EV "
+    "that reads plausibly and prices the opposite economics. Fee, rebate and "
+    "inventory legitimately vary -- a maker fee is on the fill, a platform "
+    "fee is on the order -- so those keep their documented alternatives")
+
+# The frozen default contract carries its own version, and that version
+# travels in the EVALUATION_ID: two evaluations resolved under different
+# defaults are different decisions.
+DEFAULT_TERM_CONTRACT_VERSION = "DEFAULT_TERM_CONTRACT_V1"
+
+
+def default_term_contract_sha():
+    """The digest of the frozen default contract, for the EVALUATION_ID."""
+    import hashlib
+    import json
+    body = {"VERSION": DEFAULT_TERM_CONTRACT_VERSION,
+            "CONTRACT": {k: list(v)
+                         for k, v in sorted(DEFAULT_TERM_CONTRACT.items())}}
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True).encode()).hexdigest()
+
+
+THE_DEFAULT_CONTRACT_IS_VERSIONED_NOT_AMBIGUOUS = (
+    "a caller may declare UNIT / BASIS / APPLIES_WHEN per term, or accept "
+    "the frozen DEFAULT_TERM_CONTRACT. The ambiguous middle -- defaults that "
+    "could change under an evaluation without the evaluation noticing -- is "
+    "closed by DEFAULT_TERM_CONTRACT_SHA travelling inside EVALUATION_ID")
+
 # Terms that are summed into the EV. P_FILL weights them; it is not one.
 ADDITIVE_TERMS = tuple(t for t in ECONOMIC_TERMS if t != "P_FILL") + \
     (FILL_SELECTION_TERM,)
@@ -635,6 +709,27 @@ A_PER_ORDER_COST_IS_NOT_A_PER_SHARE_COST = (
     "over 500. Converting it needs the order's quantity, and without an "
     "explicit QUANTITY the sum is dimensionally invalid -- not merely "
     "imprecise. No default order size is assumed")
+
+A_PER_SHARE_EV_OVER_A_TOTAL_CAPITAL = (
+    "EV_PER_CAPITAL_HOUR divided a PER-SHARE net by a TOTAL capital "
+    "requirement, so its units were 1/(share*hour) and the answer did not "
+    "move when the order size did. The numerator must be TOTAL_NET_USD = "
+    "EV per posted share x POSTED_QUANTITY, which needs an explicit "
+    "QUANTITY. Without one the rate is not computed")
+
+THE_TWO_RATES_ARE_NOT_THE_SAME_NUMBER = (
+    "E_EXPECTED_RATIO is E[TOTAL_NET_USD / CAPITAL_HOURS] -- the average of "
+    "the per-draw rate. RATIO_OF_EXPECTATIONS is E[TOTAL_NET_USD] / "
+    "E[CAPITAL_HOURS]. With capital and occupancy both uncertain these "
+    "differ, and a single EV_PER_CAPITAL_HOUR silently picked one. Both are "
+    "published")
+
+OCCUPANCY_IS_NOT_CAPITAL = (
+    "CAPITAL_OCCUPANCY_MEAN was mean(CAPITAL_REQUIRED) -- dollars, under a "
+    "name that reads as time. The three quantities are now separate: "
+    "CAPITAL_REQUIRED_MEAN_USD (dollars), OCCUPANCY_TIME_MEAN_HOURS (hours) "
+    "and CAPITAL_HOURS_MEAN = E[CAPITAL_REQUIRED x OCCUPANCY_HOURS] "
+    "(dollar-hours), which is the actual denominator of the rate")
 
 QUANTITY_IS_NOT_OPTIONAL_FOR_TOTALS = (
     "EV_MEAN is per posted share. EV_TOTAL_USD is that times the quantity "
@@ -702,6 +797,23 @@ def unit_contract(terms):
                                "UNITS_ARE_NOT_A_CONVENTION":
                                    UNITS_ARE_NOT_A_CONVENTION})
             continue
+        compat = UNIT_BASIS_COMPATIBILITY.get(c["UNIT"], ())
+        if c["BASIS"] not in compat:
+            violations.append({"TERM": term, "WHY": "UNIT_BASIS_INCOMPATIBLE",
+                               "UNIT": c["UNIT"], "BASIS": c["BASIS"],
+                               "COMPATIBLE_BASES": compat,
+                               "A_UNIT_AND_A_BASIS_MUST_AGREE":
+                                   A_UNIT_AND_A_BASIS_MUST_AGREE})
+            continue
+        adm_cond = ADMISSIBLE_CONDITIONING.get(term, CONDITIONING)
+        if c["APPLIES_WHEN"] not in adm_cond:
+            violations.append({"TERM": term,
+                               "WHY": "INADMISSIBLE_CONDITIONING_FOR_TERM",
+                               "GOT": c["APPLIES_WHEN"],
+                               "ADMISSIBLE": adm_cond,
+                               "A_TERMS_NAME_IS_ITS_CONDITIONING":
+                                   A_TERMS_NAME_IS_ITS_CONDITIONING})
+            continue
         if term == "P_FILL":
             scales[term] = 1.0
         elif term == "CAPITAL_REQUIRED":
@@ -738,6 +850,12 @@ def unit_contract(terms):
         "CONDITIONING_CONTRACT_VALID": not any(
             v["WHY"] == "UNKNOWN_CONDITIONING" for v in violations),
         "ALL_FIELDS_DECLARED": not defaulted,
+        "DEFAULT_TERM_CONTRACT_VERSION": DEFAULT_TERM_CONTRACT_VERSION,
+        "DEFAULT_TERM_CONTRACT_SHA": default_term_contract_sha(),
+        "THE_DEFAULT_CONTRACT_IS_VERSIONED_NOT_AMBIGUOUS":
+            THE_DEFAULT_CONTRACT_IS_VERSIONED_NOT_AMBIGUOUS,
+        "A_UNIT_AND_A_BASIS_MUST_AGREE": A_UNIT_AND_A_BASIS_MUST_AGREE,
+        "A_TERMS_NAME_IS_ITS_CONDITIONING": A_TERMS_NAME_IS_ITS_CONDITIONING,
         "UNITS_ARE_NOT_A_CONVENTION": UNITS_ARE_NOT_A_CONVENTION,
         "CONDITIONING_IS_STRUCTURAL_NOT_POSITIONAL":
             CONDITIONING_IS_STRUCTURAL_NOT_POSITIONAL,
@@ -750,22 +868,82 @@ def unit_contract(terms):
 
 # --- Evidence provenance. --------------------------------------------------
 
-def evidence_provenance(terms, term, declared):
-    """Classify a SUPPLIED value by the evidence actually referenced.
+A_REFERENCE_PRESENT_IS_NOT_A_REFERENCE_VERIFIED = (
+    "the provenance check tested that PRIOR_SHA was a non-empty string. "
+    "PRIOR_SHA = 'anything' therefore established EVIDENCE_PROVENANCE_"
+    "VERIFIED = True. A reference must RESOLVE: an ESTIMATED_PRIOR's "
+    "PRIOR_SHA is recomputed against the sealed prior object it names, and a "
+    "BETTOR-native measurement's manifest hash against the immutable "
+    "measurement artifact. A bare SOURCE_REFERENCE establishes "
+    "SOURCE_REFERENCED and nothing more")
+
+VERIFIABLE_REFERENCE_FIELDS = {
+    ESTIMATED_PRIOR: ("PRIOR_SHA",),
+    MEASURED_BETTOR_NATIVE: ("MEASUREMENT_MANIFEST_SHA",),
+}
+
+# A reference that names a source but cannot be recomputed against one.
+NARRATIVE_REFERENCE_FIELDS = ("SOURCE_REFERENCE", "TERM_MANIFEST_REFERENCE",
+                              "NATIVE_EVIDENCE_REFERENCE")
+
+REFERENCE_RESOLUTION_STATUSES = ("VERIFIED", "UNRESOLVABLE", "MISMATCH",
+                                 "NARRATIVE_ONLY", "ABSENT")
+
+
+def _resolve_prior_sha(sha, registry=None, objects=None):
+    """Recompute a claimed PRIOR_SHA against the object it names."""
+    import prior_registry as _pr
+    for row in (objects or ()):
+        if isinstance(row, dict) and row.get("PRIOR_SHA") == sha:
+            v = _pr.verify_prior_sha(row)
+            return "VERIFIED" if v.get("MATCHES") else "MISMATCH"
+    reg = registry if registry is not None else _pr.PRIOR_REGISTRY
+    for row in (reg or {}).values():
+        if isinstance(row, dict) and row.get("PRIOR_SHA") == sha:
+            v = _pr.verify_prior_sha(row)
+            return "VERIFIED" if v.get("MATCHES") else "MISMATCH"
+    return "UNRESOLVABLE"
+
+
+def _resolve_measurement_sha(sha, manifests=None):
+    """Check a claimed measurement manifest hash against the artifact."""
+    for m in (manifests or ()):
+        if not isinstance(m, dict):
+            continue
+        if m.get("MEASUREMENT_MANIFEST_SHA") == sha:
+            import hashlib
+            import json
+            body = {k: v for k, v in m.items()
+                    if k != "MEASUREMENT_MANIFEST_SHA"}
+            got = hashlib.sha256(
+                json.dumps(body, sort_keys=True,
+                           default=str).encode()).hexdigest()
+            return "VERIFIED" if got == sha else "MISMATCH"
+    return "UNRESOLVABLE"
+
+
+def evidence_provenance(terms, term, declared, evidence_sources=None):
+    """Classify a SUPPLIED value by the evidence actually VERIFIED.
 
     A number arriving in the dict used to be classified ESTIMATED_PRIOR
-    automatically, so a typed-in guess and a sealed venue-mechanics prior were
-    indistinguishable downstream. A class is now honoured only when the
-    evidence it claims is referenced.
+    automatically, so a typed-in guess and a sealed venue-mechanics prior
+    were indistinguishable. Then a non-empty reference string was enough,
+    so `PRIOR_SHA = "anything"` passed. The reference must now RESOLVE
+    against the object it names.
+
+    `evidence_sources` may carry {"PRIOR_OBJECTS": [...],
+    "PRIOR_REGISTRY": {...}, "MEASUREMENT_MANIFESTS": [...]}.
     """
     t = terms or {}
+    src = evidence_sources or {}
     claimed = t.get("%s_EVIDENCE_CLASS" % term)
     if claimed is None and declared in (MEASURED_BETTOR_NATIVE,
                                         ESTIMATED_PRIOR):
         claimed = declared
     if claimed not in EVIDENCE_REFERENCE_FIELDS:
         return {"STATE": UNVERIFIED_INPUT, "CLAIMED": claimed or NOT_IDENTIFIED,
-                "REFERENCES": (),
+                "REFERENCE_PRESENT": False, "REFERENCE_VERIFIED": False,
+                "REFERENCE_RESOLUTION": "ABSENT", "REFERENCES": (),
                 "WHY": "no evidence class claimed for a supplied value",
                 "NUMERIC_PRESENCE_IS_NOT_EVIDENCE":
                     NUMERIC_PRESENCE_IS_NOT_EVIDENCE}
@@ -773,18 +951,57 @@ def evidence_provenance(terms, term, declared):
     found = tuple(f for f in fields
                   if t.get("%s_%s" % (term, f)) not in (None, "",
                                                         NOT_IDENTIFIED))
+    narrative = tuple(f for f in found if f in NARRATIVE_REFERENCE_FIELDS)
+    out = {
+        "CLAIMED": claimed,
+        "REQUIRED_ANY_OF": fields,
+        "REFERENCES": found,
+        "REFERENCE_PRESENT": bool(found),
+        "NARRATIVE_REFERENCES": narrative,
+        "SOURCE_REFERENCED": bool(narrative),
+        "A_REFERENCE_PRESENT_IS_NOT_A_REFERENCE_VERIFIED":
+            A_REFERENCE_PRESENT_IS_NOT_A_REFERENCE_VERIFIED,
+        "REFERENCE_RESOLUTION_STATUSES": REFERENCE_RESOLUTION_STATUSES,
+    }
     if not found:
-        return {"STATE": UNVERIFIED_INPUT, "CLAIMED": claimed,
-                "REQUIRED_ANY_OF": fields, "REFERENCES": (),
-                "WHY": ("%s claimed for %s with none of %s supplied"
-                        % (claimed, term, ", ".join(fields))),
-                "NUMERIC_PRESENCE_IS_NOT_EVIDENCE":
-                    NUMERIC_PRESENCE_IS_NOT_EVIDENCE}
-    return {"STATE": claimed, "CLAIMED": claimed, "REFERENCES": found,
-            "REQUIRED_ANY_OF": fields}
+        out.update({"STATE": UNVERIFIED_INPUT, "REFERENCE_VERIFIED": False,
+                    "REFERENCE_RESOLUTION": "ABSENT",
+                    "WHY": ("%s claimed for %s with none of %s supplied"
+                            % (claimed, term, ", ".join(fields))),
+                    "NUMERIC_PRESENCE_IS_NOT_EVIDENCE":
+                        NUMERIC_PRESENCE_IS_NOT_EVIDENCE})
+        return out
+    # A verifiable reference must be present AND resolve.
+    verifiable = VERIFIABLE_REFERENCE_FIELDS.get(claimed, ())
+    supplied_verifiable = [f for f in verifiable
+                           if t.get("%s_%s" % (term, f)) not in
+                           (None, "", NOT_IDENTIFIED)]
+    if not supplied_verifiable:
+        out.update({"STATE": UNVERIFIED_INPUT, "REFERENCE_VERIFIED": False,
+                    "REFERENCE_RESOLUTION": "NARRATIVE_ONLY",
+                    "WHY": ("%s carries only a narrative reference; a "
+                            "verifiable %s is required"
+                            % (term, " or ".join(verifiable)))})
+        return out
+    fld = supplied_verifiable[0]
+    sha = t.get("%s_%s" % (term, fld))
+    if claimed == ESTIMATED_PRIOR:
+        res = _resolve_prior_sha(sha, src.get("PRIOR_REGISTRY"),
+                                 src.get("PRIOR_OBJECTS"))
+    else:
+        res = _resolve_measurement_sha(sha, src.get("MEASUREMENT_MANIFESTS"))
+    out.update({"REFERENCE_FIELD": fld, "REFERENCE_VALUE": sha,
+                "REFERENCE_RESOLUTION": res,
+                "REFERENCE_VERIFIED": res == "VERIFIED",
+                "STATE": claimed if res == "VERIFIED" else UNVERIFIED_INPUT})
+    if res != "VERIFIED":
+        out["WHY"] = ("%s = %r did not resolve against a sealed object (%s)"
+                      % (fld, sha, res))
+    return out
 
 
-def resolve_terms(terms, convention="SEPARATE_TERM"):
+def resolve_terms(terms, convention="SEPARATE_TERM",
+                  evidence_sources=None):
     """Resolve every term to a STATE and, where it has one, a distribution.
 
     A term is resolved when the caller supplied a value, or declared it
@@ -792,6 +1009,7 @@ def resolve_terms(terms, convention="SEPARATE_TERM"):
     not a zero.
     """
     terms = terms or {}
+    evidence_sources = evidence_sources or terms.get("EVIDENCE_SOURCES")
     states, dists, conflicts, invalid = {}, {}, [], []
     provenance, grades = {}, {}
     for term in ECONOMIC_TERMS + RATE_TERMS + (FILL_SELECTION_TERM,):
@@ -829,7 +1047,8 @@ def resolve_terms(terms, convention="SEPARATE_TERM"):
             dists[term] = None
             continue
         if dist is not None:
-            prov = evidence_provenance(terms, term, declared)
+            prov = evidence_provenance(terms, term, declared,
+                                       evidence_sources)
             provenance[term] = prov
             chk = check_domain(term, dist)
             if chk.get("VALID") is False:
@@ -930,7 +1149,8 @@ PARTIAL_STATISTIC_KEYS = (
     "EXPECTED_UPSIDE", "EXPECTED_DOWNSIDE", "TAIL_LOSS_P05",
     "CONSERVATIVE_EV_P10", "POSTERIOR_MEAN_EV", "EV_TOTAL_USD",
     "EV_PER_CAPITAL_HOUR_MEAN", "EV_PER_CAPITAL_HOUR_P10",
-    "EV_PER_CAPITAL_HOUR_P90", "CAPITAL_OCCUPANCY_MEAN",
+    "EV_PER_CAPITAL_HOUR_P90", "E_EXPECTED_RATIO", "RATIO_OF_EXPECTATIONS",
+    "TOTAL_NET_USD_MEAN",
     "EV_SPREAD_ACROSS_FILL_SELECTION",
 )
 
@@ -966,6 +1186,82 @@ def _move_to_partial(row):
 
 # --- The decision-grade gate. ----------------------------------------------
 
+A_STATUS_STRING_IS_NOT_A_PROOF = (
+    "the gate read POSTERIOR_PRECISION_STATUS, LABEL_PROVENANCE_STATUS, "
+    "COMMON_SUPPORT_STATUS and DATA_QUALITY_GATE straight out of the caller's "
+    "own terms dict, so writing 'VALID' four times passed four conditions. "
+    "Each now names an ARTIFACT -- POSTERIOR_ARTIFACT_SHA, "
+    "LABEL_ARTIFACT_SHA, COMMON_SUPPORT_EVALUATION_SHA, "
+    "CAPTURE_QUALITY_MANIFEST_SHA -- whose object is verified here and whose "
+    "condition is derived from that verification")
+
+A_SCALAR_P_FILL_IS_NOT_A_SIZED_ORDERS_FILL_MODEL = (
+    "decision-grade EV for a SIZED passive order needs P_ANY_FILL, "
+    "P_FULL_FILL, EXPECTED_FILL_FRACTION and EXPECTED_FILLED_QTY, not one "
+    "scalar P_FILL. Those are NOT_IDENTIFIED and are not being invented, so "
+    "FILL_QUANTITY_MODEL_VALIDATED is FALSE and it is load-bearing")
+
+DECISION_GRADE_ARTIFACT_KEYS = {
+    "POSTERIOR_ARTIFACT_SHA": "POSTERIOR_ARTIFACT",
+    "LABEL_ARTIFACT_SHA": "LABEL_ARTIFACT",
+    "COMMON_SUPPORT_EVALUATION_SHA": "COMMON_SUPPORT_EVALUATION",
+    "CAPTURE_QUALITY_MANIFEST_SHA": "CAPTURE_QUALITY_MANIFEST",
+}
+
+
+def _sha_of(obj, sha_field):
+    import hashlib
+    import json
+    body = {k: v for k, v in (obj or {}).items() if k != sha_field}
+    return hashlib.sha256(
+        json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
+
+
+def verify_decision_grade_artifacts(terms):
+    """Verify each gate artifact by recomputing its own digest.
+
+    `terms["DECISION_GRADE_ARTIFACTS"]` maps the SHA field name to the sealed
+    object. An absent artifact, an unresolvable reference and a mismatching
+    digest are all NOT verified -- there is no path where a claim alone
+    satisfies a condition.
+    """
+    arts = (terms or {}).get("DECISION_GRADE_ARTIFACTS") or {}
+    out, detail = {}, {}
+    for sha_field, name in DECISION_GRADE_ARTIFACT_KEYS.items():
+        obj = arts.get(sha_field) or arts.get(name)
+        claimed = (terms or {}).get(sha_field)
+        if not isinstance(obj, dict):
+            detail[name] = {"STATUS": "ARTIFACT_ABSENT",
+                            "CLAIMED_SHA": claimed or NOT_IDENTIFIED}
+            out["%s_VERIFIED" % name] = False
+            continue
+        stored = obj.get(sha_field)
+        got = _sha_of(obj, sha_field)
+        ok = bool(stored) and stored == got and (
+            claimed is None or claimed == stored)
+        detail[name] = {"STATUS": "VERIFIED" if ok else "SHA_MISMATCH",
+                        "STORED_SHA": stored or NOT_IDENTIFIED,
+                        "RECOMPUTED_SHA": got,
+                        "CLAIMED_SHA": claimed or NOT_IDENTIFIED}
+        out["%s_VERIFIED" % name] = ok
+    out["DETAIL"] = detail
+    out["DECISION_GRADE_ARTIFACT_KEYS"] = DECISION_GRADE_ARTIFACT_KEYS
+    out["A_STATUS_STRING_IS_NOT_A_PROOF"] = A_STATUS_STRING_IS_NOT_A_PROOF
+    return out
+
+
+def _fill_quantity_validated(row, terms):
+    """A sized passive order needs a fill-QUANTITY model, not one scalar."""
+    if (row or {}).get("ACTION") not in FILL_BEARING_ACTIONS:
+        return True                       # nothing to fill; not applicable
+    fq = (terms or {}).get("FILL_QUANTITY_MODEL") or {}
+    if fq.get("FILL_QUANTITY_STATUS") != "VALIDATED":
+        return False
+    return all(fq.get(f) not in (None, NOT_IDENTIFIED)
+               for f in ("P_ANY_FILL", "P_FULL_FILL",
+                         "EXPECTED_FILL_FRACTION", "EXPECTED_FILLED_QTY"))
+
+
 def decision_grade_action_ev(ev_row, terms=None):
     """Is this EV fit to be acted on, or is it shadow research?
 
@@ -977,7 +1273,9 @@ def decision_grade_action_ev(ev_row, terms=None):
     """
     row = ev_row or {}
     t = terms or {}
+    arts = t.get("DECISION_GRADE_ARTIFACTS") or {}
     ev_status = row.get("ACTION_EV_STATUS", NOT_IDENTIFIED)
+    ver = verify_decision_grade_artifacts(t)
     checks = {
         "ACTION_EV_IDENTIFIED": ev_status == "IDENTIFIED",
         "EVIDENCE_PROVENANCE_VERIFIED":
@@ -995,13 +1293,17 @@ def decision_grade_action_ev(ev_row, terms=None):
         "QUANTITY_DECLARED": row.get("QUANTITY_DECLARED") is True,
         "DEPENDENCE_MODEL_VALIDATED":
             row.get("DEPENDENCE_MODEL_STATUS") == "VALIDATED",
+        # --- artifact-bound conditions. A caller cannot write "VALID". ----
         "POSTERIOR_PRECISION_VALID":
-            t.get("POSTERIOR_PRECISION_STATUS") == "DECISION_GRADE_POSTERIOR",
+            ver["POSTERIOR_ARTIFACT_VERIFIED"],
         "LABEL_PROVENANCE_VALID":
-            t.get("LABEL_PROVENANCE_STATUS") == "VALID",
+            ver["LABEL_ARTIFACT_VERIFIED"],
         "COMMON_SUPPORT_EVALUATION_VALID":
-            t.get("COMMON_SUPPORT_STATUS") == "VALID",
-        "DATA_QUALITY_GATE_PASSED": t.get("DATA_QUALITY_GATE") == "PASS",
+            ver["COMMON_SUPPORT_EVALUATION_VERIFIED"],
+        "DATA_QUALITY_GATE_PASSED":
+            ver["CAPTURE_QUALITY_MANIFEST_VERIFIED"],
+        # --- the fill-quantity model, for an order that can be filled. ----
+        "FILL_QUANTITY_MODEL_VALIDATED": _fill_quantity_validated(row, t),
     }
     blockers = tuple(k for k in DECISION_GRADE_CONDITIONS if not checks[k])
     return {
@@ -1009,6 +1311,13 @@ def decision_grade_action_ev(ev_row, terms=None):
         "DECISION_GRADE_CONDITIONS": DECISION_GRADE_CONDITIONS,
         "DECISION_GRADE_CHECKS": checks,
         "DECISION_GRADE_BLOCKERS": blockers,
+        "ARTIFACT_VERIFICATION": ver,
+        "DECISION_GRADE_ARTIFACT_REFERENCES": tuple(sorted(arts)),
+        "A_STATUS_STRING_IS_NOT_A_PROOF": A_STATUS_STRING_IS_NOT_A_PROOF,
+        "FILL_QUANTITY_MODEL_VALIDATED":
+            checks["FILL_QUANTITY_MODEL_VALIDATED"],
+        "A_SCALAR_P_FILL_IS_NOT_A_SIZED_ORDERS_FILL_MODEL":
+            A_SCALAR_P_FILL_IS_NOT_A_SIZED_ORDERS_FILL_MODEL,
         "DEPENDENCE_MODEL_STATUS": row.get("DEPENDENCE_MODEL_STATUS",
                                            DEPENDENCE_MODEL_STATUS),
         "DEPENDENCE_IS_A_BLOCKER_NOT_A_GUESS":
@@ -1016,6 +1325,75 @@ def decision_grade_action_ev(ev_row, terms=None):
         "SHADOW_RESEARCH_REMAINS_ALLOWED": SHADOW_RESEARCH_REMAINS_ALLOWED,
         "NO_ORDER_IS_PLACED": True,
     }
+
+
+EXCLUDED_IS_NOT_AVAILABLE_TO_A_FILL_BEARING_ACTION = (
+    "declaring FILL_SELECTION_CONVENTION = EXCLUDED on a POST_BID made the "
+    "economics of who trades against the quote disappear by writing a word. "
+    "An order that can be filled necessarily has fill-selection economics; "
+    "the only question is whether they are carried SEPARATELY, with a "
+    "resolved and provenance-backed FILL_SELECTION_EFFECT, or EMBEDDED in "
+    "VALUE_IF_FILL, which VALUE_IF_FILL must then say about itself")
+
+VALUE_IF_FILL_MUST_DECLARE_THE_EMBEDDING = (
+    "EMBEDDED_IN_VALUE_IF_FILL is a claim about VALUE_IF_FILL, so "
+    "VALUE_IF_FILL_INCLUDES_FILL_SELECTION = True must be declared beside "
+    "it. Otherwise 'embedded' is a word that removes the term without "
+    "anything having absorbed it")
+
+
+def fill_selection_admissible(action, terms, res=None):
+    """Is this fill-bearing action's fill-selection treatment admissible?
+
+    Two doors, both of which require something real behind them.
+    """
+    t = terms or {}
+    conv = t.get("FILL_SELECTION_CONVENTION")
+    out = {"ACTION": action, "FILL_SELECTION_CONVENTION": conv or
+           NOT_IDENTIFIED, "ADMISSIBLE": False,
+           "ADMISSIBLE_CONVENTIONS": ("SEPARATE_TERM",
+                                      "EMBEDDED_IN_VALUE_IF_FILL")}
+    if conv is None:
+        out.update({"REASON": "FILL_SELECTION_CONVENTION_NOT_DECLARED",
+                    "ACTION_EV_STATUS":
+                        "FILL_SELECTION_CONVENTION_NOT_DECLARED"})
+        return out
+    if conv == "EXCLUDED":
+        out.update({"REASON": "FILL_SELECTION_EXCLUDED_ON_FILL_BEARING_ACTION",
+                    "ACTION_EV_STATUS":
+                        "FILL_SELECTION_EXCLUDED_ON_FILL_BEARING_ACTION",
+                    "EXCLUDED_IS_NOT_AVAILABLE_TO_A_FILL_BEARING_ACTION":
+                        EXCLUDED_IS_NOT_AVAILABLE_TO_A_FILL_BEARING_ACTION})
+        return out
+    if conv == "EMBEDDED_IN_VALUE_IF_FILL":
+        declared = t.get("VALUE_IF_FILL_INCLUDES_FILL_SELECTION") is True
+        out.update({
+            "VALUE_IF_FILL_INCLUDES_FILL_SELECTION": declared,
+            "ADMISSIBLE": declared,
+            "REASON": (None if declared
+                       else "VALUE_IF_FILL_DOES_NOT_DECLARE_THE_EMBEDDING"),
+            "ACTION_EV_STATUS": (None if declared
+                                 else "FILL_SELECTION_EMBEDDING_NOT_DECLARED"),
+            "VALUE_IF_FILL_MUST_DECLARE_THE_EMBEDDING":
+                VALUE_IF_FILL_MUST_DECLARE_THE_EMBEDDING})
+        return out
+    if conv == "SEPARATE_TERM":
+        state = (res or {}).get("STATES", {}).get(FILL_SELECTION_TERM,
+                                                 NOT_IDENTIFIED)
+        resolved = state in RESOLVED_STATES
+        verified = state in DECISION_GRADE_STATES
+        out.update({
+            "FILL_SELECTION_EFFECT_STATE": state,
+            "ADMISSIBLE": resolved,
+            "PROVENANCE_BACKED": verified,
+            "REASON": (None if resolved
+                       else "FILL_SELECTION_EFFECT_NOT_RESOLVED"),
+            "ACTION_EV_STATUS": (None if resolved
+                                 else "NOT_FULLY_IDENTIFIED")})
+        return out
+    out.update({"REASON": "UNKNOWN_FILL_SELECTION_CONVENTION",
+                "ACTION_EV_STATUS": "UNKNOWN_FILL_SELECTION_CONVENTION"})
+    return out
 
 
 def _attach_decision_grade(row, terms):
@@ -1066,19 +1444,27 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
     # Omitting it resolved silently to EXCLUDED, so the term vanished from a
     # quote whose whole economics turn on who trades against it.
     fs_declared = (terms or {}).get("FILL_SELECTION_CONVENTION") is not None
-    if action in FILL_BEARING_ACTIONS and not fs_declared:
-        return {
-            "ACTION": action,
-            "STATUS": "FILL_SELECTION_CONVENTION_NOT_DECLARED",
-            "ACTION_EV_STATUS": "FILL_SELECTION_CONVENTION_NOT_DECLARED",
-            "EV_MEAN": NOT_IDENTIFIED,
-            "RECOMMENDED": False,
-            "FILL_BEARING_ACTIONS": FILL_BEARING_ACTIONS,
-            "DECLARED": FILL_SELECTION_CONVENTIONS,
-            "AN_OMITTED_CONVENTION_IS_NOT_EXCLUSION":
-                AN_OMITTED_CONVENTION_IS_NOT_EXCLUSION,
-            "NO_ORDER_IS_PLACED": True,
-        }
+    fs_check = (fill_selection_admissible(action, terms, res)
+                if action in FILL_BEARING_ACTIONS
+                else {"ACTION": action, "ADMISSIBLE": True,
+                      "REASON": "NOT_A_FILL_BEARING_ACTION"})
+    if action in FILL_BEARING_ACTIONS:
+        if not fs_check["ADMISSIBLE"]:
+            return {
+                "ACTION": action,
+                "STATUS": fs_check["REASON"],
+                "ACTION_EV_STATUS": fs_check["ACTION_EV_STATUS"],
+                "EV_MEAN": NOT_IDENTIFIED,
+                "RECOMMENDED": False,
+                "FILL_SELECTION_CHECK": fs_check,
+                "FILL_BEARING_ACTIONS": FILL_BEARING_ACTIONS,
+                "DECLARED": FILL_SELECTION_CONVENTIONS,
+                "AN_OMITTED_CONVENTION_IS_NOT_EXCLUSION":
+                    AN_OMITTED_CONVENTION_IS_NOT_EXCLUSION,
+                "EXCLUDED_IS_NOT_AVAILABLE_TO_A_FILL_BEARING_ACTION":
+                    EXCLUDED_IS_NOT_AVAILABLE_TO_A_FILL_BEARING_ACTION,
+                "NO_ORDER_IS_PLACED": True,
+            }
 
     # The dimensional contract. A per-order fee and a per-share fee are not
     # the same number, and nothing used to check which had been supplied.
@@ -1121,6 +1507,7 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         "FILL_SELECTION_CONVENTION": fsel.get("FILL_SELECTION_CONVENTION",
                                               "EXCLUDED"),
         "FILL_SELECTION_CONVENTION_DECLARED": fs_declared,
+        "FILL_SELECTION_CHECK": fs_check,
         "AN_OMITTED_CONVENTION_IS_NOT_EXCLUSION":
             AN_OMITTED_CONVENTION_IS_NOT_EXCLUSION,
         "ABSENT_IS_EXCLUDED_NOT_ZERO": ABSENT_IS_EXCLUDED_NOT_ZERO,
@@ -1214,9 +1601,13 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         dom = DOMAINS.get(TERM_DOMAINS.get(term, ""), (None, None))
         lo, hi = dom
         if (lo is not None and x < lo) or (hi is not None and x > hi):
+            # COUNTED, NOT CLIPPED. Squeezing the draw back inside the domain
+            # silently replaced the declared law with a point-mass-at-the-
+            # bound mixture, so an unbounded Normal on [0, 1] was labelled
+            # SHADOW_APPROXIMATION_ONLY and then sampled as something else
+            # entirely. The draw stands; the excursion is reported; and the
+            # term is barred from the decision-grade path.
             excursions[term] = excursions.get(term, 0) + 1
-            x = min(x, hi) if hi is not None else x
-            x = max(x, lo) if lo is not None else x
         # Into the common unit (USD per share) before anything is added.
         return x * scales.get(term, 1.0)
 
@@ -1251,6 +1642,11 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
         "ACTION_EV_STATUS": "IDENTIFIED",
         "DRAWS": int(n), "SEED": seed,
         "DOMAIN_EXCURSION_DRAWS": dict(excursions),
+        "DOMAIN_EXCURSIONS_ARE_NOT_CLIPPED": (
+            "draws outside a term's domain are counted and kept. Clipping "
+            "them would replace the declared law with a different one that "
+            "still answers to its name"),
+        "MONTE_CARLO_CLIPPING": "REMOVED",
         "EV_MEAN": round(mean, 10),
         "EV_SD": round(math.sqrt(var), 10),
         "EV_MEDIAN": round(_q(nets, 0.50), 10),
@@ -1300,18 +1696,53 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
             fsel["FILL_SELECTION_STATUS"]
         base["FILL_SELECTION_MATERIAL_TO_THIS_ACTION"] = NOT_IDENTIFIED
 
-    if caps:
-        rates = [nets[i] / (caps[i] * hours[i])
-                 for i in range(len(caps))
+    # --- The capital-hour rate, dimensionally. ----------------------------
+    #
+    # nets[] is USD PER POSTED SHARE. CAPITAL_REQUIRED is TOTAL USD. Dividing
+    # one by the other produced a number whose units were
+    # (USD/share)/(USD*hour) = 1/(share*hour) and which did not change when
+    # the order size changed. The numerator needs the quantity.
+    if caps and not uc["QUANTITY_DECLARED"]:
+        base["EV_PER_CAPITAL_HOUR_MEAN"] = NOT_IDENTIFIED
+        base["CAPITAL_HOURS_MEAN"] = NOT_IDENTIFIED
+        base["WHY_NO_CAPITAL_RATE"] = A_PER_SHARE_EV_OVER_A_TOTAL_CAPITAL
+        base["CAPITAL_RATE_STATUS"] = "QUANTITY_NOT_DECLARED"
+    elif caps:
+        qty = float(uc["QUANTITY"])
+        totals = [nets[i] * qty for i in range(len(caps))]
+        cap_hours = [caps[i] * hours[i] for i in range(len(caps))]
+        pairs = [(totals[i], cap_hours[i]) for i in range(len(caps))
                  if caps[i] > 0 and hours[i] > 0]
-        if rates:
-            base["EV_PER_CAPITAL_HOUR_MEAN"] = round(
-                sum(rates) / len(rates), 10)
+        base["CAPITAL_REQUIRED_MEAN_USD"] = round(
+            sum(caps) / len(caps), 10)
+        base["OCCUPANCY_TIME_MEAN_HOURS"] = round(
+            sum(hours) / len(hours), 10)
+        base["CAPITAL_HOURS_MEAN"] = round(
+            sum(cap_hours) / len(cap_hours), 10)
+        base["TOTAL_NET_USD_MEAN"] = round(sum(totals) / len(totals), 10)
+        base["CAPITAL_RATE_UNIT"] = "USD_PER_CAPITAL_HOUR"
+        if pairs:
+            rates = [t / ch for t, ch in pairs]
+            # These are NOT the same number. Jensen: the mean of a ratio is
+            # not the ratio of the means, and with capital and occupancy both
+            # uncertain they can differ materially.
+            base["E_EXPECTED_RATIO"] = round(sum(rates) / len(rates), 10)
+            base["RATIO_OF_EXPECTATIONS"] = round(
+                (sum(t for t, _ in pairs) / len(pairs))
+                / (sum(ch for _, ch in pairs) / len(pairs)), 10)
+            base["EV_PER_CAPITAL_HOUR_MEAN"] = base["E_EXPECTED_RATIO"]
             base["EV_PER_CAPITAL_HOUR_P10"] = round(_q(rates, 0.10), 10)
             base["EV_PER_CAPITAL_HOUR_P90"] = round(_q(rates, 0.90), 10)
-        base["CAPITAL_OCCUPANCY_MEAN"] = round(sum(caps) / len(caps), 10)
+            base["THE_TWO_RATES_ARE_NOT_THE_SAME_NUMBER"] = \
+                THE_TWO_RATES_ARE_NOT_THE_SAME_NUMBER
+            base["CAPITAL_RATE_STATUS"] = "COMPUTED"
+        else:
+            base["EV_PER_CAPITAL_HOUR_MEAN"] = NOT_IDENTIFIED
+            base["CAPITAL_RATE_STATUS"] = "NO_POSITIVE_CAPITAL_HOURS"
     else:
         base["EV_PER_CAPITAL_HOUR_MEAN"] = NOT_IDENTIFIED
+        base["CAPITAL_HOURS_MEAN"] = NOT_IDENTIFIED
+        base["CAPITAL_RATE_STATUS"] = "CAPITAL_OR_OCCUPANCY_NOT_SUPPLIED"
         base["WHY_NO_CAPITAL_RATE"] = (
             "capital required and occupancy must both be supplied; a rate on "
             "a guessed denominator is not a measurement")
@@ -1805,6 +2236,14 @@ ROBUSTNESS_THRESHOLD_NOT_CHOSEN = (
     "yet")
 
 
+UNKNOWN_IS_NOT_NEGATIVE = (
+    "ROBUSTLY_POSITIVE = False says the action was examined and found not "
+    "robustly positive. When the EV is unidentified or the decision-grade "
+    "gate is blocked, nothing of the kind was established, and returning "
+    "False let a downstream reader record a negative finding nobody made. "
+    "The answer is NOT_IDENTIFIED; the quantile stays beside it as "
+    "SHADOW_ROBUSTNESS_DIAGNOSTIC")
+
 ROBUSTNESS_IS_A_DECISION_CLAIM = (
     "'EV stays positive at its own P10' is a statement about acting on the "
     "number. It used to be computed from any row carrying an EV_P10, "
@@ -1841,22 +2280,30 @@ def robustly_positive(ev_row, conservative_quantile=0.10, terms=None):
         "ROBUSTNESS_IS_A_DECISION_CLAIM": ROBUSTNESS_IS_A_DECISION_CLAIM,
         "SHADOW_RESEARCH_REMAINS_ALLOWED": SHADOW_RESEARCH_REMAINS_ALLOWED,
     }
+    # UNKNOWN IS NOT NEGATIVE. ROBUSTLY_POSITIVE = False asserts that the
+    # action is NOT robustly positive, which is a finding. When the EV is
+    # unidentified or the decision-grade gate is blocked, no such finding was
+    # made, so the answer is NOT_IDENTIFIED and the diagnostic sits beside it.
     if v == NOT_IDENTIFIED or v is None:
-        out.update({"ROBUSTLY_POSITIVE": False, "REASON": "EV_NOT_IDENTIFIED",
+        out.update({"ROBUSTLY_POSITIVE": NOT_IDENTIFIED,
+                    "REASON": "EV_NOT_IDENTIFIED",
+                    "UNKNOWN_IS_NOT_NEGATIVE": UNKNOWN_IS_NOT_NEGATIVE,
                     "SHADOW_ROBUSTNESS_DIAGNOSTIC": (
                         partial if isinstance(partial, (int, float))
                         else NOT_IDENTIFIED)})
         return out
     if row.get("ACTION_EV_STATUS") != "IDENTIFIED":
-        out.update({"ROBUSTLY_POSITIVE": False,
+        out.update({"ROBUSTLY_POSITIVE": NOT_IDENTIFIED,
                     "REASON": "ACTION_EV_NOT_IDENTIFIED",
+                    "UNKNOWN_IS_NOT_NEGATIVE": UNKNOWN_IS_NOT_NEGATIVE,
                     "ACTION_EV_STATUS": row.get("ACTION_EV_STATUS",
                                                 NOT_IDENTIFIED),
                     "SHADOW_ROBUSTNESS_DIAGNOSTIC": v})
         return out
     if gate != "PASS":
-        out.update({"ROBUSTLY_POSITIVE": False,
+        out.update({"ROBUSTLY_POSITIVE": NOT_IDENTIFIED,
                     "REASON": "DECISION_GRADE_BLOCKED",
+                    "UNKNOWN_IS_NOT_NEGATIVE": UNKNOWN_IS_NOT_NEGATIVE,
                     "SHADOW_ROBUSTNESS_DIAGNOSTIC": v,
                     "SHADOW_ROBUSTNESS_DIAGNOSTIC_SIGN": (
                         "POSITIVE" if v > 0 else "NOT_POSITIVE")})
@@ -1869,7 +2316,7 @@ def robustly_positive(ev_row, conservative_quantile=0.10, terms=None):
 
 
 def dominated(rows, ev_key="EV_MEAN", risk_key="EV_SD",
-              capital_key="CAPITAL_OCCUPANCY_MEAN"):
+              capital_key="CAPITAL_HOURS_MEAN"):
     """Mark actions PARETO-dominated: no better on any axis, worse on none.
 
     The earlier form marked A dominated by B whenever B returned at least as
@@ -2028,6 +2475,13 @@ def shadow_decision(action, price, size, ev_row, sens=None, voi=None):
             "FILL_SELECTION_MATERIAL_TO_THIS_ACTION", NOT_IDENTIFIED),
         "FILL_SELECTION_EXPOSURE": fill_selection_exposure(ev_row, sens),
         "EV_PER_CAPITAL_HOUR": ev_row.get("EV_PER_CAPITAL_HOUR_MEAN",
+                                          NOT_IDENTIFIED),
+        "E_EXPECTED_RATIO": ev_row.get("E_EXPECTED_RATIO", NOT_IDENTIFIED),
+        "RATIO_OF_EXPECTATIONS": ev_row.get("RATIO_OF_EXPECTATIONS",
+                                            NOT_IDENTIFIED),
+        "CAPITAL_HOURS_MEAN": ev_row.get("CAPITAL_HOURS_MEAN",
+                                         NOT_IDENTIFIED),
+        "CAPITAL_RATE_STATUS": ev_row.get("CAPITAL_RATE_STATUS",
                                           NOT_IDENTIFIED),
         "EV_UNIT": ev_row.get("EV_UNIT", NOT_IDENTIFIED),
         "EV_TOTAL_USD": ev_row.get("EV_TOTAL_USD", NOT_IDENTIFIED),

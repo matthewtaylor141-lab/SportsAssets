@@ -34,6 +34,8 @@ queue position.
 import math
 from collections import defaultdict, deque
 
+import bettor_dataset
+
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 NO_CAPTURE_YET = "NO_SUBSTANTIVE_CAPTURE_HARVESTED_YET"
 
@@ -76,6 +78,14 @@ EVENT_ID_IS_NOT_A_MARKET_IDENTITY = (
     "level or the label is cross-contract")
 
 BUILD_TARGETS_IDENTITY_POLICY = "GROUP_INTERNALLY_BY_MARKET_IDENTITY"
+
+A_CALLER_ASSERTION_IS_NOT_AN_IDENTIFIER = (
+    "IDENTITY_STATUS = CALLER_ASSERTED_SINGLE_MARKET let a series with no "
+    "market identifier anywhere be labelled on the strength of the caller "
+    "saying it was one market's. That assertion cannot be checked by anyone "
+    "downstream, does not travel with the rows, and is the same fail-open "
+    "that was closed in bettor_dataset. A scientific forward label requires "
+    "the market to be named in the data")
 
 
 def market_identity(tick):
@@ -120,8 +130,57 @@ LABEL_PROVENANCE_IS_REQUIRED = (
     "not a checked one, and 'not checked therefore yes' is how a gate fails "
     "open")
 
+A_STATUS_STRING_IS_NOT_A_PROVENANCE = (
+    "requiring MID_MOVE_60S_STATUS = PRESENT on every row checks that "
+    "somebody wrote the word PRESENT. A hand-built column passes it. Every "
+    "scored row must carry a LABEL_ARTIFACT_SHA, and the scorer must call "
+    "bettor_dataset.verify_label_artifact() on the artifact it names -- "
+    "recomputing the seal and re-deriving the observation chain -- before "
+    "MAY_SCORE can become True")
 
-def target_scoring_gate(target, rows=None, min_coverage_pct=None):
+LABEL_ARTIFACT_KEY = "LABEL_ARTIFACT_SHA"
+LABEL_ARTIFACT_OBJECT_KEY = "LABEL_ARTIFACT"
+
+
+def _verified_artifact_shas(rows, artifacts=None):
+    """Which LABEL_ARTIFACT_SHAs on these rows actually verify?
+
+    `artifacts` maps LABEL_ARTIFACT_SHA -> the sealed artifact object. A row
+    naming a SHA with no artifact to check is NOT verified: an unresolvable
+    reference is a claim, not a proof.
+    """
+    by_sha = {}
+    for a in (artifacts or {}).values() if isinstance(artifacts, dict) \
+            else (artifacts or ()):
+        sha = (a or {}).get(LABEL_ARTIFACT_KEY)
+        if sha:
+            by_sha[sha] = a
+    if isinstance(artifacts, dict):
+        for sha, a in artifacts.items():
+            if isinstance(a, dict):
+                by_sha.setdefault(sha, a)
+    verified, failed, unresolved = set(), {}, set()
+    for r in rows or ():
+        sha = (r or {}).get(LABEL_ARTIFACT_KEY)
+        if not sha:
+            continue
+        if sha in verified or sha in failed:
+            continue
+        art = by_sha.get(sha) or (r or {}).get(LABEL_ARTIFACT_OBJECT_KEY)
+        if not isinstance(art, dict):
+            unresolved.add(sha)
+            continue
+        v = bettor_dataset.verify_label_artifact(art)
+        if v["LABEL_PROVENANCE_STATUS"] == "VALID" \
+                and v.get("LABEL_ARTIFACT_SHA") == sha:
+            verified.add(sha)
+        else:
+            failed[sha] = v["LABEL_PROVENANCE_STATUS"]
+    return verified, failed, unresolved
+
+
+def target_scoring_gate(target, rows=None, min_coverage_pct=None,
+                        label_artifacts=None):
     """May any predictor be scored on this target? Fails closed.
 
     Two conditions, in order. First the DECLARED status of the horizon the
@@ -168,6 +227,38 @@ def target_scoring_gate(target, rows=None, min_coverage_pct=None):
             "REQUIRED_FIELD": status_key,
             "LABEL_PROVENANCE_IS_REQUIRED": LABEL_PROVENANCE_IS_REQUIRED,
             "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
+
+    # The status column exists. That is a string somebody wrote. Now check
+    # the canonical artifact it claims to have come from.
+    no_sha = [r for r in rows if not r.get(LABEL_ARTIFACT_KEY)]
+    if no_sha:
+        return {
+            "MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
+            "HORIZON_STATUS": st,
+            "REASON": "LABEL_ARTIFACT_SHA_ABSENT",
+            "ROWS_WITHOUT_LABEL_ARTIFACT_SHA": len(no_sha),
+            "ROWS": len(rows),
+            "REQUIRED_FIELD": LABEL_ARTIFACT_KEY,
+            "A_STATUS_STRING_IS_NOT_A_PROVENANCE":
+                A_STATUS_STRING_IS_NOT_A_PROVENANCE,
+            "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
+    verified, failed, unresolved = _verified_artifact_shas(
+        rows, label_artifacts)
+    unverified_rows = [r for r in rows
+                       if r.get(LABEL_ARTIFACT_KEY) not in verified]
+    if unverified_rows:
+        return {
+            "MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
+            "HORIZON_STATUS": st,
+            "REASON": "LABEL_ARTIFACT_NOT_VERIFIED",
+            "ROWS_WITH_UNVERIFIED_ARTIFACT": len(unverified_rows),
+            "ROWS": len(rows),
+            "FAILED_ARTIFACTS": dict(failed),
+            "UNRESOLVABLE_ARTIFACT_SHAS": tuple(sorted(unresolved)),
+            "A_STATUS_STRING_IS_NOT_A_PROVENANCE":
+                A_STATUS_STRING_IS_NOT_A_PROVENANCE,
+            "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
+
     shaped = [{"LABEL_STATUS": {"%dS" % h: r.get(status_key)}} for r in rows]
     cov = horizon_label_coverage_gate(shaped, h, min_coverage_pct)
     # MAY_EVALUATE is True, False, or NOT_IDENTIFIED -- and NOT_IDENTIFIED
@@ -180,7 +271,10 @@ def target_scoring_gate(target, rows=None, min_coverage_pct=None):
                 "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
     return {"MAY_SCORE": True, "TARGET": target, "HORIZON_S": h,
             "HORIZON_STATUS": st, "COVERAGE_GATE": cov,
-            "LABEL_PROVENANCE": "PRESENT_ON_EVERY_ROW"}
+            "LABEL_PROVENANCE": "VERIFIED_CANONICAL_ARTIFACT",
+            "VERIFIED_LABEL_ARTIFACT_SHAS": tuple(sorted(verified)),
+            "A_STATUS_STRING_IS_NOT_A_PROVENANCE":
+                A_STATUS_STRING_IS_NOT_A_PROVENANCE}
 
 
 CANDIDATE_FEATURES = (
@@ -412,8 +506,26 @@ def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS,
             "EVENT_ID_IS_NOT_A_MARKET_IDENTITY":
                 EVENT_ID_IS_NOT_A_MARKET_IDENTITY,
             "TICKS": len(out_all)}
-    identity_status = ("MARKET_IDENTITY_ESTABLISHED" if named
-                       else "CALLER_ASSERTED_SINGLE_MARKET")
+    if supplied and not named:
+        # Every row lacks MARKET_ID / CONDITION_ID / TOKEN_ID. The previous
+        # build labelled them anyway under IDENTITY_STATUS =
+        # CALLER_ASSERTED_SINGLE_MARKET. A caller's assertion is not an
+        # identifier: it cannot be checked, it does not travel with the rows,
+        # and it is exactly the fail-open that bettor_dataset._same_subject
+        # was closed against. Scientific target construction requires the
+        # market to be named in the data.
+        return [], {"STATUS": "REFUSED_NO_MARKET_IDENTITY",
+                    "TICKS": 0,
+                    "ROWS_SUPPLIED": len(supplied),
+                    "MARKET_IDENTITY_KEYS": MARKET_IDENTITY_KEYS,
+                    "WHY": ("no row carries a market-level identifier, so "
+                            "nothing establishes that these observations are "
+                            "one market's book"),
+                    "A_CALLER_ASSERTION_IS_NOT_AN_IDENTIFIER":
+                        A_CALLER_ASSERTION_IS_NOT_AN_IDENTIFIER,
+                    "EVENT_ID_IS_NOT_A_MARKET_IDENTITY":
+                        EVENT_ID_IS_NOT_A_MARKET_IDENTITY}
+    identity_status = "MARKET_IDENTITY_ESTABLISHED"
 
     rows = sorted(supplied, key=lambda x: t(x[time_key]))
     stamps = [t(r[time_key]) for r in rows]
@@ -533,6 +645,10 @@ def relative_value_rows(observations, horizons=TARGET_HORIZONS_SECONDS):
         row = {"EVENT_KEY": o.get("EVENT_KEY"),
                "MARKET": o.get("MARKET"), "T": o.get("T"),
                "RESIDUAL_T": res, "P_TARGET": o.get("P_TARGET")}
+        # The canonical label artifact travels with the row, or the scorer
+        # has nothing to verify and the target cannot be scored.
+        if o.get(LABEL_ARTIFACT_KEY):
+            row[LABEL_ARTIFACT_KEY] = o[LABEL_ARTIFACT_KEY]
         any_h = False
         for h in horizons:
             p1 = (o.get("TARGET_LATER") or {}).get(h)
@@ -559,7 +675,7 @@ RELATIVE_VALUE_PROVENANCE_RULE = (
 
 
 def relative_value_test(rows, horizons=TARGET_HORIZONS_SECONDS,
-                        min_coverage_pct=None):
+                        min_coverage_pct=None, label_artifacts=None):
     """Does the residual predict the target's own move? Event-clustered.
 
     A NEGATIVE correlation is the tradeable one: a target priced above its
@@ -583,7 +699,8 @@ def relative_value_test(rows, horizons=TARGET_HORIZONS_SECONDS,
         # Hand-constructed TARGET_CHANGE columns used to reach STATUS =
         # MEASURED with nothing establishing nearest-within-tolerance,
         # same-market identity or an approved realised offset.
-        prov = target_scoring_gate(key, rows, min_coverage_pct)
+        prov = target_scoring_gate(key, rows, min_coverage_pct,
+                                   label_artifacts=label_artifacts)
         if not prov["MAY_SCORE"]:
             out["%dS" % h] = {
                 "STATUS": "REFUSED",
@@ -819,7 +936,8 @@ BASELINE_SET_INCOMPLETE_BLOCKS_ADMISSION = (
 
 def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
                     min_coverage_pct=None, baseline_scale=None,
-                    baseline_scale_source=None, baseline_scales=None):
+                    baseline_scale_source=None, baseline_scales=None,
+                    label_artifacts=None):
     """Score every baseline (and optionally a model) on one target.
 
     Returns absolute error and direction accuracy per predictor. A predictor
@@ -830,7 +948,8 @@ def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
     # SCORE_A_5_SECOND_CHALLENGER is a named forbidden repair. The refusal
     # lives here, at the scorer, because that is where a model would actually
     # acquire a number it could be judged on.
-    gate = target_scoring_gate(target, rows, min_coverage_pct)
+    gate = target_scoring_gate(target, rows, min_coverage_pct,
+                               label_artifacts=label_artifacts)
     if not gate["MAY_SCORE"]:
         return {"STATUS": "REFUSED", "TARGET": target, "GATE": gate}
 
