@@ -291,5 +291,240 @@ class ItCannotLowerTheStandard(unittest.TestCase):
         self.assertIn("AN_EV_ADMISSION_STANDARD", T.THIS_IS_NOT)
 
 
+def uteam(tid, abbr):
+    return {"teamId": tid, "team": {"id": tid, "abbreviation": abbr,
+                                    "league": "nfl"}}
+
+
+def ucontest(slug, start, a, b, cls="SPORTS_MARKET_TYPE_MONEYLINE"):
+    return {"slug": slug, "id": slug, "gameStartTime": start,
+            "sportsMarketTypeV2": cls,
+            "marketSides": [uteam(*a), uteam(*b)]}
+
+
+def utotal(slug, start):
+    return {"slug": slug, "id": slug, "gameStartTime": start,
+            "sportsMarketTypeV2": "SPORTS_MARKET_TYPE_TOTAL", "line": "44.5",
+            "marketSides": [{"id": slug + "-o", "description": "Over"},
+                            {"id": slug + "-u", "description": "Under"}]}
+
+
+U_START = "2026-09-20T17:00:00Z"
+
+
+class TheUniverseCountsTotalsWithoutDoubleCounting(unittest.TestCase):
+    """Section 4. Totals join the addressable set; nothing is counted twice."""
+
+    def board(self):
+        return [
+            ucontest("aec-nfl-det-buf", U_START, (11, "det"), (12, "buf")),
+            ucontest("asc-nfl-det-buf-neg3", U_START, (11, "det"), (12, "buf"),
+                     cls="SPORTS_MARKET_TYPE_SPREAD"),
+            ucontest("asc-nfl-det-buf-neg7", U_START, (11, "det"), (12, "buf"),
+                     cls="SPORTS_MARKET_TYPE_SPREAD"),
+            utotal("tsc-nfl-det-buf-44pt5", U_START),
+            # A second contest with a moneyline and a total but NO spread.
+            ucontest("aec-nfl-kc-lv", U_START, (13, "kc"), (14, "lv")),
+            utotal("tsc-nfl-kc-lv-47pt5", U_START),
+            # A total whose contest the venue does not list at all.
+            utotal("tsc-nfl-xxx-yyy-30pt5", U_START),
+            future("f1", "2027-06-01T00:00:00+00:00"),
+        ]
+
+    def test_the_three_families_are_counted_separately(self):
+        u = T.market_universe(self.board())
+        self.assertEqual(u["MONEYLINE_MARKETS"], 2)
+        self.assertEqual(u["SPREAD_MARKETS"], 2)
+        self.assertEqual(u["BOUND_TOTAL_MARKETS"], 2)
+        self.assertEqual(u["UNBOUND_TOTAL_MARKETS"], 1)
+
+    def test_the_addressable_total_is_the_sum_of_disjoint_families(self):
+        u = T.market_universe(self.board())
+        self.assertEqual(u["TOTAL_CANONICALLY_ADDRESSABLE_SPORTS_MARKETS"],
+                         u["MONEYLINE_MARKETS"] + u["SPREAD_MARKETS"]
+                         + u["BOUND_TOTAL_MARKETS"])
+        self.assertEqual(u["MARKETS_COUNTED_IN_TWO_FAMILIES"], 0)
+        self.assertTrue(u["NO_DOUBLE_COUNTING"])
+
+    def test_an_unbound_total_is_not_addressable(self):
+        u = T.market_universe(self.board())
+        self.assertEqual(u["TOTALS_MARKETS_ON_BOARD"], 3)
+        self.assertNotIn("tsc-nfl-xxx-yyy-30pt5", str(u["EVENTS_WITH_TOTAL"]))
+        self.assertEqual(u["BOUND_TOTAL_MARKETS"], 2)
+
+    def test_event_coverage_per_family(self):
+        u = T.market_universe(self.board())
+        self.assertEqual(u["CANONICAL_EVENTS"], 2)
+        self.assertEqual(u["EVENTS_WITH_MONEYLINE"], 2)
+        self.assertEqual(u["EVENTS_WITH_SPREAD"], 1)
+        self.assertEqual(u["EVENTS_WITH_TOTAL"], 2)
+        self.assertEqual(u["EVENTS_WITH_ALL_THREE"], 1)
+
+    def test_adding_totals_creates_no_new_canonical_event(self):
+        """The architectural condition, seen from the universe's side."""
+        b = self.board()
+        without = T.market_universe([m for m in b
+                                     if m["sportsMarketTypeV2"]
+                                     != "SPORTS_MARKET_TYPE_TOTAL"])
+        with_totals = T.market_universe(b)
+        self.assertEqual(with_totals["CANONICAL_EVENTS"],
+                         without["CANONICAL_EVENTS"])
+        self.assertEqual(with_totals["TOTALS_ONLY_EVENTS"], 0)
+        self.assertTrue(
+            with_totals["EVERY_TOTAL_ATTACHED_TO_A_PREEXISTING_EVENT"])
+
+    def test_futures_stay_outside_the_addressable_set(self):
+        u = T.market_universe(self.board())
+        self.assertEqual(u["NOT_ADDRESSABLE_MARKETS"],
+                         u["BOARD_MARKETS"]
+                         - u["TOTAL_CANONICALLY_ADDRESSABLE_SPORTS_MARKETS"])
+        self.assertIn("no two-team venue binding", u["WHY_NOT_ADDRESSABLE"])
+
+    def test_a_wider_universe_is_not_a_looser_standard(self):
+        u = T.market_universe(self.board())
+        self.assertIn("not because an", u["WIDER_IS_NOT_LOOSER"])
+        self.assertIn("passes BETTOR EV and risk",
+                      u["ADDING_TOTALS_IS_NOT_PERMISSION"])
+
+
+class TheThreeTurnoverConceptsAreKeptApart(unittest.TestCase):
+    """Section 5. The correction: P_FILL moves B, not A, and cancels in C."""
+
+    def model(self, p):
+        return T.turnover_model(opportunity_arrival_per_day="1000",
+                                p_fill=p, average_filled_notional="25",
+                                capital_occupancy_hours="2")
+
+    def test_opportunity_throughput_does_not_move_with_p_fill(self):
+        a, b = self.model("0.10"), self.model("0.50")
+        self.assertEqual(a["CANDIDATE_ORDER_INTENTS_PER_DAY"],
+                         b["CANDIDATE_ORDER_INTENTS_PER_DAY"])
+
+    def test_executed_turnover_scales_directly_with_p_fill(self):
+        """The sentence that was wrong, now pinned in the other direction."""
+        a, b = self.model("0.10"), self.model("0.50")
+        self.assertEqual(float(a["EXPECTED_FILLED_ORDERS_PER_DAY"]), 100.0)
+        self.assertEqual(float(b["EXPECTED_FILLED_ORDERS_PER_DAY"]), 500.0)
+        self.assertEqual(
+            float(b["EXPECTED_GROSS_FILLED_NOTIONAL_PER_DAY"]),
+            5 * float(a["EXPECTED_GROSS_FILLED_NOTIONAL_PER_DAY"]))
+        self.assertTrue(T.P_FILL_RAISES_EXECUTED_TURNOVER)
+
+    def test_capital_velocity_is_set_by_holding_time(self):
+        a, b = self.model("0.10"), self.model("0.50")
+        self.assertEqual(float(a["EXPECTED_CAPITAL_TURNS_PER_DAY"]),
+                         float(b["EXPECTED_CAPITAL_TURNS_PER_DAY"]))
+        self.assertAlmostEqual(
+            float(a["EXPECTED_CAPITAL_TURNS_PER_DAY"]), 12.0, places=6)
+        slow = T.turnover_model("1000", "0.10", "25", "6")
+        self.assertAlmostEqual(
+            float(slow["EXPECTED_CAPITAL_TURNS_PER_DAY"]), 4.0, places=6)
+
+    def test_capital_occupied_does_move_with_p_fill(self):
+        """Both numerator and denominator rise -- which is why turns cancel."""
+        a, b = self.model("0.10"), self.model("0.50")
+        self.assertEqual(float(b["AVERAGE_CAPITAL_OCCUPIED"]),
+                         5 * float(a["AVERAGE_CAPITAL_OCCUPIED"]))
+
+    def test_the_correction_is_recorded_rather_than_quietly_fixed(self):
+        m = self.model("0.20")
+        self.assertIn("true ONLY of", m["THE_CORRECTED_STATEMENT"])
+        self.assertIn("cancels from the RATIO only",
+                      m["WHY_TURNS_DO_NOT_MOVE_WITH_P_FILL"])
+
+    def test_the_four_inputs_are_modelled_separately(self):
+        sig = inspect.signature(T.turnover_model).parameters
+        for p in ("opportunity_arrival_per_day", "p_fill",
+                  "average_filled_notional", "capital_occupancy_hours"):
+            self.assertIn(p, sig, p)
+
+    def test_the_seven_required_scenario_fields_are_emitted(self):
+        m = self.model("0.20")
+        for f in T.TURNOVER_SCENARIO_FIELDS:
+            self.assertIn(f, m, f)
+        self.assertEqual(len(T.TURNOVER_SCENARIO_FIELDS), 7)
+
+    def test_peak_capital_is_absent_not_guessed(self):
+        m = self.model("0.20")
+        self.assertEqual(m["PEAK_CAPITAL_OCCUPIED"], NOT_IDENTIFIED)
+        self.assertTrue(m["PEAK_IS_AN_UPPER_BOUND_NOT_AN_ESTIMATE"])
+        self.assertNotEqual(m["PEAK_CAPITAL_OCCUPIED_UPPER_BOUND"],
+                            NOT_IDENTIFIED)
+        # The bound really is a bound.
+        self.assertGreater(float(m["PEAK_CAPITAL_OCCUPIED_UPPER_BOUND"]),
+                           float(m["AVERAGE_CAPITAL_OCCUPIED"]))
+
+    def test_net_ev_per_capital_dollar_is_absent_without_an_ev(self):
+        m = self.model("0.20")
+        self.assertEqual(m["EXPECTED_NET_EV_PER_CAPITAL_DOLLAR_PER_DAY"],
+                         NOT_IDENTIFIED)
+        self.assertEqual(m["MEASURED_BETTOR_P_FILL"], NOT_IDENTIFIED)
+
+    def test_every_scenario_carries_the_label(self):
+        g = T.turnover_scenarios("1000", "25", "2")
+        self.assertEqual(g["LABEL"], T.SCENARIO_LABEL)
+        self.assertIn("NOT MEASURED BETTOR PERFORMANCE", g["LABEL"])
+        for s in g["SCENARIOS"]:
+            self.assertEqual(s["LABEL"], T.SCENARIO_LABEL)
+            self.assertEqual(s["MEASURED_BETTOR_P_FILL"], NOT_IDENTIFIED)
+
+    def test_the_whale_fill_rate_is_still_forbidden(self):
+        m = self.model("0.20")
+        self.assertIn("is not a BETTOR fill probability",
+                      m["WHALE_P_FILL_IS_FORBIDDEN"])
+
+    def test_the_three_concepts_are_named_on_every_scenario(self):
+        m = self.model("0.20")
+        names = [c[0] for c in m["CONCEPTS"]]
+        self.assertEqual(names, ["A_OPPORTUNITY_THROUGHPUT",
+                                 "B_EXECUTED_TURNOVER", "C_CAPITAL_VELOCITY"])
+
+
+class TheObjectiveCarriesItsConstraint(unittest.TestCase):
+    """Section 6. High throughput SUBJECT TO positive net EV."""
+
+    def test_the_objective_is_stated(self):
+        self.assertEqual(T.OBJECTIVE,
+                         "HIGH_THROUGHPUT_SUBJECT_TO_POSITIVE_NET_EV")
+        self.assertEqual(len(T.OBJECTIVE_SEEKS), 4)
+
+    def test_throughput_cannot_admit_a_negative_ev_order(self):
+        r = T.admissible_under_objective(False, throughput_gain="1000x")
+        self.assertFalse(r["ADMISSIBLE"])
+        self.assertTrue(r["THROUGHPUT_GAIN_WAS_IGNORED"])
+
+    def test_throughput_cannot_admit_an_unidentified_ev_order(self):
+        for verdict in (None, NOT_IDENTIFIED, "NOT_IDENTIFIED", "", 0):
+            r = T.admissible_under_objective(verdict, throughput_gain="1000x")
+            self.assertFalse(r["ADMISSIBLE"], repr(verdict))
+
+    def test_a_positive_ev_order_is_admitted_on_its_ev_alone(self):
+        r = T.admissible_under_objective("POSITIVE_EV")
+        self.assertTrue(r["ADMISSIBLE"])
+        self.assertEqual(r["THROUGHPUT_GAIN_OFFERED"], NOT_IDENTIFIED)
+        self.assertIn("positive EV alone", r["WHY"])
+
+    def test_the_objective_is_not_scored_on_its_measurable_part_alone(self):
+        u = T.market_universe([])
+        s = T.objective_status(u)
+        self.assertEqual(s["OBJECTIVE_ACHIEVED"], NOT_IDENTIFIED)
+        self.assertEqual(s["MANY_INDEPENDENT_POSITIVE_EV_OPPORTUNITIES"],
+                         NOT_IDENTIFIED)
+        self.assertEqual(s["MEASURED_BETTOR_P_FILL"], NOT_IDENTIFIED)
+
+    def test_independence_is_part_of_the_objective(self):
+        s = T.objective_status()
+        self.assertIn("correlated legs on one contest",
+                      s["INDEPENDENCE_IS_PART_OF_THE_OBJECTIVE"]
+                      .replace("\n", " "))
+
+    def test_the_three_statuses_are_reported(self):
+        s = T.objective_status(T.market_universe([]))
+        self.assertEqual(s["EXECUTED_TURNOVER_STATUS"],
+                         "SCENARIO_ONLY_NO_BETTOR_FILL_EVIDENCE")
+        self.assertEqual(s["CAPITAL_VELOCITY_STATUS"],
+                         "SCENARIO_ONLY_NO_BETTOR_HOLDING_TIME_EVIDENCE")
+
+
 if __name__ == "__main__":
     unittest.main()

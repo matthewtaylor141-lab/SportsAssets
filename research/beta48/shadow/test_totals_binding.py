@@ -171,10 +171,19 @@ class NoTitleHeuristicIsUsed(unittest.TestCase):
         contains the words it is promising not to act on."""
         src = Path(TB.__file__).read_text()
         code = src.split('"""', 2)[2] if src.count('"""') >= 2 else src
+        # Callable names, not the words. The module now DECLARES the eight
+        # forbidden fallbacks in NO_FALLBACK, so scanning for the word "fuzzy"
+        # would match the promise rather than a violation of it.
         for bad in ('.get("title")', ".get('title')", '.get("question")',
-                    "difflib", "SequenceMatcher", "fuzz"):
+                    ".get('question')", "difflib", "SequenceMatcher",
+                    "get_close_matches", "rapidfuzz", "fuzzywuzzy", "fuzz."):
             self.assertNotIn(bad, code, bad)
         self.assertNotIn("import difflib", src)
+
+    def test_the_prohibition_is_declared_as_well_as_observed(self):
+        for phrase in ("title parsing", "fuzzy matching", "nearest start time",
+                       "single-team inference", "handwritten exceptions"):
+            self.assertIn(phrase, TB.NO_FALLBACK, phrase)
 
     def test_a_rich_title_cannot_rescue_an_unbindable_total(self):
         b = [contest_market("aec-nfl-det-buf-2026-09-20", START,
@@ -267,6 +276,100 @@ class TheSealedBoardEvidence(unittest.TestCase):
                     self.assertFalse(recs[i]["ABBREVIATIONS"]
                                      & recs[j]["ABBREVIATIONS"])
         self.assertGreater(checked, 0, "fixture has no simultaneous contests")
+
+
+class TheResolverAttachesButNeverCreatesIdentity(unittest.TestCase):
+    """The architectural condition, tested rather than asserted in a comment.
+
+    A resolver that could mint an EVENT_ID from a totals slug would look
+    identical on a healthy board -- the coverage number would be the same. The
+    difference shows only on a board where the contest is ABSENT, which is
+    exactly the board these tests use.
+    """
+
+    def test_a_board_of_totals_alone_resolves_nothing(self):
+        """No contest rows means no identities, so nothing can attach."""
+        board = [totals_market("tsc-nfl-det-buf-2026-09-20-44pt5", START),
+                 totals_market("tsc-nfl-kc-lv-2026-09-20-47pt5", START)]
+        rep = TB.bind_all(board)
+        self.assertEqual(rep["CONTESTS_INDEXED"], 0)
+        self.assertEqual(rep["TOTALS_MARKETS_OBSERVED"], 2)
+        self.assertEqual(rep["TOTALS_CANONICALLY_BOUND"], 0)
+        self.assertEqual(rep["TOTALS_UNBOUND"], 2)
+
+    def test_a_totals_row_contributes_no_key_to_the_contest_index(self):
+        """The index is built from contest rows; totals cannot enter it."""
+        tot = totals_market("tsc-nfl-det-buf-2026-09-20-44pt5", START)
+        self.assertEqual(TB.contest_index([tot]), {})
+        con = contest_market("aec-nfl-det-buf-2026-09-20", START,
+                             (11, "det"), (12, "buf"))
+        with_total = TB.contest_index([con, tot])
+        without = TB.contest_index([con])
+        self.assertEqual(set(with_total), set(without))
+
+    def test_every_bound_event_id_already_existed(self):
+        b = [contest_market("aec-nfl-det-buf-2026-09-20", START,
+                            (11, "det"), (12, "buf")),
+             totals_market("tsc-nfl-det-buf-2026-09-20-44pt5", START)]
+        rep = TB.bind_all(b)
+        self.assertEqual(rep["EVENT_IDS_INVENTED_BY_TOTALS"], 0)
+        self.assertTrue(rep["EVERY_BOUND_EVENT_ID_PREEXISTED"])
+        self.assertTrue(rep["ATTACHES_NEVER_CREATES"])
+        self.assertEqual(rep["IDENTITY_AUTHORITY"], "VENUE_CONTEST_ROWS_ONLY")
+
+    def test_the_sealed_board_invents_no_identity_either(self):
+        d = json.loads(FIXTURE.read_text())
+        rep = TB.bind_all(d["CONTEST_ROWS"] + d["TOTALS_ROWS"])
+        self.assertEqual(rep["EVENT_IDS_INVENTED_BY_TOTALS"], 0)
+        self.assertEqual(rep["CANONICAL_EVENTS_FROM_CONTEST_ROWS_ONLY"],
+                         rep["CONTESTS_INDEXED"])
+
+    def test_a_bound_record_states_the_identity_was_attached(self):
+        b = [contest_market("aec-nfl-det-buf-2026-09-20", START,
+                            (11, "det"), (12, "buf")),
+             totals_market("tsc-nfl-det-buf-2026-09-20-44pt5", START)]
+        r = TB.bind_total(b[1], TB.contest_index(b))
+        self.assertTrue(r["IDENTITY_ATTACHED_NOT_CREATED"])
+        self.assertTrue(r["EVENT_ID_EXISTED_INDEPENDENTLY"])
+        self.assertEqual(len(r["BIND_CONDITIONS"]), 4)
+
+    def test_an_unbound_record_says_the_event_id_did_not_exist(self):
+        r = TB.bind_total(totals_market("tsc-x-2026-09-20-1pt5", START), {})
+        self.assertFalse(r["EVENT_ID_EXISTED_INDEPENDENTLY"])
+        self.assertEqual(r["RESOLUTION_STATUS"],
+                         "UNBOUND_NO_CANDIDATE_CONTEST")
+
+    def test_the_seven_provenance_fields_are_on_every_attached_total(self):
+        """Section 7 of the brief, field by field."""
+        b = [contest_market("aec-nfl-det-buf-2026-09-20", START,
+                            (11, "det"), (12, "buf")),
+             contest_market("asc-nfl-det-buf-2026-09-20-neg-3", START,
+                            (11, "det"), (12, "buf"),
+                            kind="SPORTS_MARKET_TYPE_SPREAD"),
+             totals_market("tsc-nfl-det-buf-2026-09-20-44pt5", START)]
+        r = TB.bind_total(b[2], TB.contest_index(b))
+        for f in ("EVENT_ID", "TOTAL_MARKET_ID", "TOTAL_MARKET_SLUG",
+                  "GAME_START_TIME", "MATCHED_TEAM_ABBREVIATIONS",
+                  "SOURCE_CONTEST_MARKET_IDS", "IDENTITY_SOURCE",
+                  "RESOLVER_VERSION", "RESOLUTION_STATUS"):
+            self.assertIn(f, r, f)
+            self.assertNotEqual(r[f], NOT_IDENTIFIED, f)
+        self.assertEqual(sorted(r["MATCHED_TEAM_ABBREVIATIONS"]),
+                         ["buf", "det"])
+        # The audit trail names the rows that established the identity, so a
+        # reader can go and check that it existed without this total.
+        self.assertEqual(sorted(r["SOURCE_CONTEST_MARKET_IDS"]),
+                         ["aec-nfl-det-buf-2026-09-20",
+                          "asc-nfl-det-buf-2026-09-20-neg-3"])
+        self.assertEqual(r["RESOLVER_VERSION"], "TOTALS_BINDING_V1")
+
+    def test_the_eight_forbidden_fallbacks_are_named_in_the_record(self):
+        r = TB.bind_total(totals_market("tsc-x-2026-09-20-1pt5", START), {})
+        for phrase in ("title parsing", "question parsing", "fuzzy matching",
+                       "partial abbreviation", "nearest start time",
+                       "league-plus-approximate", "single-team inference",
+                       "handwritten exceptions"):
+            self.assertIn(phrase, r["NO_FALLBACK"], phrase)
 
 
 class AddingTotalsIsNotPermissionToTrade(unittest.TestCase):

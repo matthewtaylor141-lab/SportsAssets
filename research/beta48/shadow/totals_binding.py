@@ -64,9 +64,44 @@ import event_identity as EI
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 
+RESOLVER_VERSION = "TOTALS_BINDING_V1"
+
 MARKET_FAMILY = "TOTAL"
 TOTALS_TYPE = "SPORTS_MARKET_TYPE_TOTAL"
 CONTEST_TYPES = ("SPORTS_MARKET_TYPE_MONEYLINE", "SPORTS_MARKET_TYPE_SPREAD")
+
+# THE IDENTITY HIERARCHY, AND IT IS THE CONDITION THIS RESOLVER EXISTS UNDER.
+#
+# This module ATTACHES a total to an event. It does not CREATE one. The
+# canonical EVENT_ID is gameStartTime | sorted venue team ids, derived
+# independently from venue-native contest rows -- moneylines and spreads that
+# carry two team ids of their own. The totals slug is not an identity
+# authority; it is only evidence of which existing identity a total belongs to.
+#
+# Concretely: `bind_total` can only ever return an EVENT_ID that
+# `contest_index` already built from contest rows. There is no code path by
+# which a totals market contributes a key to that index, so a board of totals
+# alone resolves nothing at all -- which is the correct answer, not a gap.
+ATTACHES_NEVER_CREATES = True
+IDENTITY_AUTHORITY = "VENUE_CONTEST_ROWS_ONLY"
+WHY_THE_SLUG_IS_NOT_AN_AUTHORITY = (
+    "a slug is evidence of which contest a market belongs to; it is not "
+    "evidence that the contest exists, and only rows carrying two venue team "
+    "ids establish that")
+NO_FALLBACK = (
+    "no title parsing, no question parsing, no fuzzy matching, no partial "
+    "abbreviation match, no nearest start time, no league-plus-approximate "
+    "time, no single-team inference, no handwritten exceptions")
+
+# ALL FOUR, OR THE TOTAL STAYS UNBOUND. There is no fifth, weaker route.
+BIND_CONDITIONS = (
+    "1. the venue gameStartTime matches EXACTLY",
+    "2. both of an already-identified contest's own venue team abbreviations "
+    "appear as exact dash-delimited tokens of the venue slug",
+    "3. exactly one qualifying contest exists",
+    "4. the resulting EVENT_ID already existed independently, built from "
+    "venue contest rows before any totals row was read",
+)
 
 IDENTITY_SOURCE = "VENUE_START_TIME_PLUS_VENUE_TEAM_ABBREVIATIONS_IN_SLUG"
 STATUS_BOUND = "BOUND"
@@ -203,11 +238,31 @@ def _record(total_row, rec, status, hits):
         "TEAM_IDS": rec["TEAM_IDS"] if rec else NOT_IDENTIFIED,
         "IDENTITY_SOURCE": IDENTITY_SOURCE if rec else NOT_IDENTIFIED,
         "IDENTITY_STATUS": status,
+        "RESOLUTION_STATUS": status,
+        "RESOLVER_VERSION": RESOLVER_VERSION,
         "IDENTITY_CONFIDENCE": ("VENUE_STRUCTURED_EXACT_TOKEN_MATCH" if rec
                                 else NOT_IDENTIFIED),
         "CANDIDATE_CONTESTS": len(hits),
+
+        # PROVENANCE. The relationship is auditable end to end: which venue
+        # abbreviations matched, and which contest rows established the
+        # identity this total was attached to. Without the source market ids a
+        # reader cannot check that the event existed independently.
+        "TOTAL_MARKET_ID": str(total_row.get("id") or NOT_IDENTIFIED),
+        "TOTAL_MARKET_SLUG": total_row.get("slug") or NOT_IDENTIFIED,
+        "MATCHED_TEAM_ABBREVIATIONS": (sorted(a for a in rec["ABBREVIATIONS"]
+                                              if a) if rec
+                                       else NOT_IDENTIFIED),
+        "SOURCE_CONTEST_MARKET_IDS": (list(rec["MARKET_SLUGS"]) if rec
+                                      else NOT_IDENTIFIED),
+
         "EVENT_ID_IS_THE_FROZEN_KEY": True,
+        "IDENTITY_ATTACHED_NOT_CREATED": ATTACHES_NEVER_CREATES,
+        "IDENTITY_AUTHORITY": IDENTITY_AUTHORITY,
+        "EVENT_ID_EXISTED_INDEPENDENTLY": bool(rec),
+        "BIND_CONDITIONS": list(BIND_CONDITIONS),
         "NOT_A_TITLE_HEURISTIC": NOT_A_TITLE_HEURISTIC,
+        "NO_FALLBACK": NO_FALLBACK,
         "FAILS_CLOSED": FAILS_CLOSED,
     }
 
@@ -231,9 +286,22 @@ def bind_all(markets):
                 if {"SPORTS_MARKET_TYPE_MONEYLINE", "SPORTS_MARKET_TYPE_SPREAD",
                     TOTALS_TYPE} <= f]
 
+    # THE ARCHITECTURAL CHECK, RUN RATHER THAN ASSERTED. Every EVENT_ID a
+    # bound total carries must already be a key of the contest index -- an
+    # index built before a single totals row was read. If a totals market
+    # could ever mint a key, this set difference would be non-empty.
+    invented = sorted({r["EVENT_ID"] for r in bound} - set(idx))
+
     n = len(totals)
     return {
         "TOTALS_MARKETS_OBSERVED": n,
+        "ATTACHES_NEVER_CREATES": ATTACHES_NEVER_CREATES,
+        "IDENTITY_AUTHORITY": IDENTITY_AUTHORITY,
+        "BIND_CONDITIONS": list(BIND_CONDITIONS),
+        "NO_FALLBACK": NO_FALLBACK,
+        "EVENT_IDS_INVENTED_BY_TOTALS": len(invented),
+        "EVERY_BOUND_EVENT_ID_PREEXISTED": not invented,
+        "CANONICAL_EVENTS_FROM_CONTEST_ROWS_ONLY": len(idx),
         "TOTALS_CANONICALLY_BOUND": len(bound),
         "TOTALS_UNBOUND": len(unbound),
         "TOTALS_AMBIGUOUS_REFUSED": len(ambiguous),

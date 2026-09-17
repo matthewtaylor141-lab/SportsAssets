@@ -33,6 +33,7 @@ from datetime import datetime, timezone
 from decimal import Decimal as D
 
 import event_identity as EI
+import totals_binding as TB
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 NOT_ESTABLISHED = "NOT_ESTABLISHED"
@@ -514,6 +515,391 @@ def density_by_class(board_rows, now_iso=None, books_by_slug=None):
     }
 
 
+# ---------------------------------------------------------------------------
+# SECTION 6: THE CANONICALLY ADDRESSABLE MARKET UNIVERSE, WITH TOTALS
+#
+# Until the totals resolver existed, 651 of the board's markets were
+# unaddressable by construction -- not because they were unattractive, but
+# because nothing could say which contest they belonged to. They are now
+# attachable, and this recounts the universe with them in it.
+#
+# THE COUNTING RULE. A venue market row carries exactly one
+# `sportsMarketTypeV2`, so a row belongs to exactly one family and is counted
+# once. The addressable total is a sum over disjoint families, and the function
+# checks that rather than trusting it.
+#
+# WHAT ADDING TOTALS DOES NOT DO. It widens the mouth of the funnel. It does
+# not move one market across the EV bar, and a totals market is admitted on
+# exactly the same evidence as a moneyline: its own EV and its own risk pass.
+# ---------------------------------------------------------------------------
+
+FAMILY_MONEYLINE = "SPORTS_MARKET_TYPE_MONEYLINE"
+FAMILY_SPREAD = "SPORTS_MARKET_TYPE_SPREAD"
+FAMILY_TOTAL = "SPORTS_MARKET_TYPE_TOTAL"
+ADDRESSABLE_FAMILIES = (FAMILY_MONEYLINE, FAMILY_SPREAD, FAMILY_TOTAL)
+
+TOTALS_ARE_ATTACHED_NOT_CREATED = (
+    "a totals market enters this universe only by attaching to an EVENT_ID "
+    "that moneyline or spread rows already established; it never mints one, "
+    "so the canonical event count is unchanged by adding totals")
+WIDER_IS_NOT_LOOSER = (
+    "the addressable set grows because a resolver was built, not because an "
+    "identity standard was relaxed; the four unbound totals stay unbound")
+
+
+def market_universe(board_rows):
+    """The addressable universe by family, with bound totals included.
+
+    Moneylines and spreads are addressable when `event_identity` resolves them
+    to a contest. Totals are addressable when `totals_binding` ATTACHES them to
+    a contest that already exists. Nothing else on the board is addressable at
+    all, and that is reported rather than hidden.
+    """
+    rows, seen = [], set()
+    for m in board_rows or ():
+        if not isinstance(m, dict):
+            continue
+        slug = m.get("slug")
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        rows.append(m)
+
+    by_family = Counter(m.get("sportsMarketTypeV2") or NOT_IDENTIFIED
+                        for m in rows)
+
+    ml_slugs, sp_slugs = set(), set()
+    ev_ml, ev_sp, ev_tot = set(), set(), set()
+    events = set()
+    for m in rows:
+        fam = m.get("sportsMarketTypeV2")
+        if fam not in (FAMILY_MONEYLINE, FAMILY_SPREAD):
+            continue
+        eid, level = EI.event_identity(m)
+        if level != EI.LEVEL_V1_CONTEST:
+            continue
+        events.add(eid)
+        if fam == FAMILY_MONEYLINE:
+            ml_slugs.add(m["slug"])
+            ev_ml.add(eid)
+        else:
+            sp_slugs.add(m["slug"])
+            ev_sp.add(eid)
+
+    tb = TB.bind_all(rows)
+    bound = [r for r in tb["RECORDS"]
+             if r["IDENTITY_STATUS"] == TB.STATUS_BOUND]
+    tot_slugs = {r["MARKET_SLUG"] for r in bound}
+    for r in bound:
+        ev_tot.add(r["EVENT_ID"])
+
+    # DISJOINTNESS, CHECKED. If any slug appeared in two families the sum
+    # below would double-count it, so the overlap is computed rather than
+    # assumed to be empty.
+    overlap = ((ml_slugs & sp_slugs) | (ml_slugs & tot_slugs)
+               | (sp_slugs & tot_slugs))
+    addressable = len(ml_slugs) + len(sp_slugs) + len(tot_slugs)
+
+    # Every event a bound total names must already be a contest event.
+    totals_only_events = sorted(ev_tot - events)
+
+    return {
+        "BOARD_MARKETS": len(rows),
+        "MONEYLINE_MARKETS": len(ml_slugs),
+        "SPREAD_MARKETS": len(sp_slugs),
+        "BOUND_TOTAL_MARKETS": len(tot_slugs),
+        "UNBOUND_TOTAL_MARKETS": tb["TOTALS_UNBOUND"],
+        "AMBIGUOUS_TOTAL_MARKETS": tb["TOTALS_AMBIGUOUS_REFUSED"],
+        "TOTALS_MARKETS_ON_BOARD": tb["TOTALS_MARKETS_OBSERVED"],
+        "TOTAL_CANONICALLY_ADDRESSABLE_SPORTS_MARKETS": addressable,
+        "ADDRESSABLE_SHARE_OF_BOARD": (addressable / float(len(rows))
+                                       if rows else NOT_IDENTIFIED),
+
+        "CANONICAL_EVENTS": len(events),
+        "EVENTS_WITH_MONEYLINE": len(ev_ml),
+        "EVENTS_WITH_SPREAD": len(ev_sp),
+        "EVENTS_WITH_TOTAL": len(ev_tot),
+        "EVENTS_WITH_ALL_THREE": len(ev_ml & ev_sp & ev_tot),
+
+        "MARKETS_COUNTED_IN_TWO_FAMILIES": len(overlap),
+        "NO_DOUBLE_COUNTING": not overlap,
+        "FAMILIES_ARE_DISJOINT_BY_CONSTRUCTION": (
+            "a venue row carries one sportsMarketTypeV2, so it belongs to one "
+            "family and is counted once"),
+        "TOTALS_ONLY_EVENTS": len(totals_only_events),
+        "EVERY_TOTAL_ATTACHED_TO_A_PREEXISTING_EVENT": not totals_only_events,
+        "TOTALS_ARE_ATTACHED_NOT_CREATED": TOTALS_ARE_ATTACHED_NOT_CREATED,
+
+        "BOARD_MARKETS_BY_FAMILY": dict(by_family),
+        "NOT_ADDRESSABLE_MARKETS": len(rows) - addressable,
+        "WHY_NOT_ADDRESSABLE": (
+            "futures, props and drawable-outcome rows carry no two-team venue "
+            "binding, so no contest identity exists for them to attach to"),
+        "WIDER_IS_NOT_LOOSER": WIDER_IS_NOT_LOOSER,
+        "ADDING_TOTALS_IS_NOT_PERMISSION": (
+            "each addressable market still passes BETTOR EV and risk on its "
+            "own evidence; widening the universe admits nothing"),
+    }
+
+
+# ---------------------------------------------------------------------------
+# SECTION 7: THE TURNOVER MODEL, IN THREE SEPARATE CONCEPTS
+#
+# A CORRECTION IS RECORDED HERE RATHER THAN QUIETLY FIXED. An earlier version
+# of this programme stated "turnover is a function of how long we hold, not of
+# how often we fill." That sentence is WRONG as written. It is true only of the
+# capital-turns RATIO, where a higher fill rate raises the money deployed and
+# the money recycled in the same proportion and P_FILL cancels. It is false of
+# executed turnover, which scales directly with P_FILL: filling twice as often
+# at the same clip doubles the gross notional traded.
+#
+# The three quantities are therefore kept apart and never collapsed:
+#
+#   A  OPPORTUNITY THROUGHPUT   candidate opportunities per unit time
+#                               -- independent of P_FILL entirely
+#   B  EXECUTED TURNOVER        filled notional per unit time
+#                               -- scales DIRECTLY with P_FILL
+#   C  CAPITAL VELOCITY         filled notional per capital dollar per unit
+#                               time -- set by holding time; P_FILL cancels
+#
+# Four inputs are modelled separately, because conflating any two of them is
+# how the wrong sentence above got written in the first place: OPPORTUNITY
+# ARRIVAL RATE, P_FILL, AVERAGE FILLED NOTIONAL, CAPITAL OCCUPANCY TIME.
+#
+# Every P_FILL-derived output carries SCENARIO_LABEL. BETTOR has no measured
+# fill probability, and the whale's completion rate is forbidden as a stand-in.
+# ---------------------------------------------------------------------------
+
+TURNOVER_CONCEPTS = (
+    ("A_OPPORTUNITY_THROUGHPUT", "candidate opportunities per unit time",
+     "independent of P_FILL"),
+    ("B_EXECUTED_TURNOVER", "filled notional per unit time",
+     "scales DIRECTLY with P_FILL"),
+    ("C_CAPITAL_VELOCITY",
+     "filled notional per capital dollar per unit time",
+     "set by capital occupancy time; P_FILL cancels from the ratio"),
+)
+
+THE_CORRECTED_STATEMENT = (
+    "'turnover is a function of holding time, not fill rate' is true ONLY of "
+    "the capital-turns ratio, where P_FILL cancels. Executed gross notional "
+    "scales directly with P_FILL: a higher fill rate trades more, all else "
+    "equal. Holding time governs how fast committed capital comes back, not "
+    "how much gets traded.")
+P_FILL_RAISES_EXECUTED_TURNOVER = True
+HOLDING_TIME_SETS_CAPITAL_RECYCLE_RATE = True
+
+TURNOVER_SCENARIO_FIELDS = (
+    "CANDIDATE_ORDER_INTENTS_PER_DAY",
+    "EXPECTED_FILLED_ORDERS_PER_DAY",
+    "EXPECTED_GROSS_FILLED_NOTIONAL_PER_DAY",
+    "AVERAGE_CAPITAL_OCCUPIED",
+    "PEAK_CAPITAL_OCCUPIED",
+    "EXPECTED_CAPITAL_TURNS_PER_DAY",
+    "EXPECTED_NET_EV_PER_CAPITAL_DOLLAR_PER_DAY",
+)
+
+MEASURED_BETTOR_P_FILL = NOT_IDENTIFIED
+WHY_PEAK_IS_ABSENT = (
+    "peak occupancy needs an arrival-time distribution across the day; BETTOR "
+    "has measured none, so the peak is NOT_IDENTIFIED and only a deterministic "
+    "upper bound is given")
+
+
+def turnover_model(opportunity_arrival_per_day, p_fill,
+                   average_filled_notional, capital_occupancy_hours,
+                   net_ev_per_filled_order=None, peak_concurrency_factor=None):
+    """One scenario, with A, B and C computed from separate inputs.
+
+    `opportunity_arrival_per_day` is concept A and does NOT move with p_fill.
+    `p_fill` is a hypothetical in every case -- there is no argument by which a
+    caller can mark one measured.
+    """
+    arrivals = _d(opportunity_arrival_per_day)
+    pf = _d(p_fill)
+    clip = _d(average_filled_notional)
+    occ_h = _d(capital_occupancy_hours)
+    ev_each = _d(net_ev_per_filled_order)
+    peak_k = _d(peak_concurrency_factor)
+
+    fills = (arrivals * pf) if (arrivals is not None and pf is not None) else None
+    gross = (fills * clip) if (fills is not None and clip is not None) else None
+
+    # Average concurrent inventory: fills per day x hours held / 24 h.
+    concurrent = (fills * occ_h / D("24")) if (fills is not None
+                                               and occ_h is not None) else None
+    avg_cap = (concurrent * clip) if (concurrent is not None
+                                      and clip is not None) else None
+
+    # Peak. Not derivable without an arrival distribution; a caller-supplied
+    # concurrency factor is itself a scenario, and the no-factor case reports
+    # the honest absence plus a true upper bound (every fill of the day open
+    # at the same moment).
+    peak = (avg_cap * peak_k) if (avg_cap is not None
+                                  and peak_k is not None) else None
+    peak_bound = (fills * clip) if (fills is not None
+                                    and clip is not None) else None
+
+    turns = ((gross / avg_cap) if (gross is not None and avg_cap
+                                   and avg_cap != 0) else None)
+    ev_day = None
+    if ev_each is not None and fills is not None and avg_cap:
+        ev_day = (ev_each * fills) / avg_cap
+
+    def s(x):
+        return str(x) if x is not None else NOT_IDENTIFIED
+
+    return {
+        "LABEL": SCENARIO_LABEL,
+        "HYPOTHETICAL_P_FILL": s(pf),
+        "MEASURED_BETTOR_P_FILL": MEASURED_BETTOR_P_FILL,
+
+        # The four inputs, kept apart on purpose.
+        "OPPORTUNITY_ARRIVAL_RATE_PER_DAY": s(arrivals),
+        "AVERAGE_FILLED_NOTIONAL": s(clip),
+        "CAPITAL_OCCUPANCY_HOURS": s(occ_h),
+
+        # A -- opportunity throughput. Note it does not contain p_fill.
+        "CANDIDATE_ORDER_INTENTS_PER_DAY": s(arrivals),
+
+        # B -- executed turnover. Both of these scale with p_fill.
+        "EXPECTED_FILLED_ORDERS_PER_DAY": s(fills),
+        "EXPECTED_GROSS_FILLED_NOTIONAL_PER_DAY": s(gross),
+
+        # C -- capital velocity, and the capital it is measured against.
+        "AVERAGE_CONCURRENT_FILLED_ORDERS": s(concurrent),
+        "AVERAGE_CAPITAL_OCCUPIED": s(avg_cap),
+        "PEAK_CAPITAL_OCCUPIED": s(peak),
+        "PEAK_CAPITAL_OCCUPIED_UPPER_BOUND": s(peak_bound),
+        "PEAK_IS_AN_UPPER_BOUND_NOT_AN_ESTIMATE": peak is None,
+        "WHY_PEAK_IS_ABSENT": WHY_PEAK_IS_ABSENT,
+        "EXPECTED_CAPITAL_TURNS_PER_DAY": s(turns),
+        "EXPECTED_NET_EV_PER_CAPITAL_DOLLAR_PER_DAY": s(ev_day),
+        "WHY_NET_EV_MAY_BE_ABSENT": (
+            "net EV per filled order requires a BETTOR fair value; it is "
+            "NOT_IDENTIFIED, so the EV-per-capital-dollar figure is absent "
+            "rather than zero"),
+
+        "CONCEPTS": [list(c) for c in TURNOVER_CONCEPTS],
+        "THE_CORRECTED_STATEMENT": THE_CORRECTED_STATEMENT,
+        "P_FILL_RAISES_EXECUTED_TURNOVER": P_FILL_RAISES_EXECUTED_TURNOVER,
+        "HOLDING_TIME_SETS_CAPITAL_RECYCLE_RATE":
+            HOLDING_TIME_SETS_CAPITAL_RECYCLE_RATE,
+        "WHY_TURNS_DO_NOT_MOVE_WITH_P_FILL": (
+            "turns are gross notional over capital occupied and p_fill "
+            "appears in both, so it cancels from the RATIO only -- the "
+            "numerator itself still rises"),
+        "WHALE_P_FILL_IS_FORBIDDEN": WHALE_P_FILL_IS_FORBIDDEN,
+    }
+
+
+def turnover_scenarios(opportunity_arrival_per_day, average_filled_notional,
+                       capital_occupancy_hours, p_fill_grid=P_FILL_GRID,
+                       net_ev_per_filled_order=None,
+                       peak_concurrency_factor=None):
+    """The grid, with A, B and C visibly moving differently across it."""
+    rows = [turnover_model(opportunity_arrival_per_day, p,
+                           average_filled_notional, capital_occupancy_hours,
+                           net_ev_per_filled_order, peak_concurrency_factor)
+            for p in p_fill_grid]
+    return {
+        "LABEL": SCENARIO_LABEL,
+        "SCENARIOS": rows,
+        "P_FILL_GRID": list(p_fill_grid),
+        "FIELDS": list(TURNOVER_SCENARIO_FIELDS),
+        "MEASURED_BETTOR_P_FILL": MEASURED_BETTOR_P_FILL,
+        "OPPORTUNITY_THROUGHPUT_STATUS": "MEASURED_FROM_SEALED_PUBLIC_BOARD",
+        "EXECUTED_TURNOVER_STATUS": "SCENARIO_ONLY_NO_BETTOR_FILL_EVIDENCE",
+        "CAPITAL_VELOCITY_STATUS":
+            "SCENARIO_ONLY_NO_BETTOR_HOLDING_TIME_EVIDENCE",
+        "THE_CORRECTED_STATEMENT": THE_CORRECTED_STATEMENT,
+        "SCENARIOS_NEVER_REACH_THE_LIVE_ENGINE":
+            SCENARIOS_NEVER_REACH_THE_LIVE_ENGINE,
+    }
+
+
+# ---------------------------------------------------------------------------
+# SECTION 8: THE DIAGNOSTIC OBJECTIVE FOR THE MATURE ENGINE
+#
+# HIGH THROUGHPUT SUBJECT TO POSITIVE NET EV. The subject-to clause is not
+# decoration; it is the whole objective. An engine that maximises throughput
+# without it maximises the count of trades, which is trivially achievable and
+# worth nothing. So the objective is stated with its constraint attached, and
+# the constraint is enforced by a function rather than by intention.
+# ---------------------------------------------------------------------------
+
+OBJECTIVE = "HIGH_THROUGHPUT_SUBJECT_TO_POSITIVE_NET_EV"
+OBJECTIVE_SEEKS = (
+    "many independent positive-EV opportunities",
+    "high executable fill throughput",
+    "short capital occupancy",
+    "rapid capital recycling",
+)
+OBJECTIVE_CONSTRAINT = (
+    "volume itself must NEVER make a negative or unidentified-EV order "
+    "admissible; the constraint binds before the objective is read")
+INDEPENDENCE_IS_PART_OF_THE_OBJECTIVE = (
+    "'many independent opportunities' means many; a thousand correlated legs "
+    "on one contest is one opportunity repeated, and event-level exposure "
+    "limits exist to say so")
+
+
+def admissible_under_objective(ev_verdict, throughput_gain=None):
+    """The constraint, as code. Throughput is an argument and cannot help.
+
+    `ev_verdict` must be the frozen EV layer's own verdict. Anything that is
+    not an explicit positive EV -- including NOT_IDENTIFIED -- refuses, and
+    `throughput_gain` is accepted only so that a test can prove it is ignored.
+    """
+    positive = ev_verdict is True or ev_verdict == "POSITIVE_EV"
+    return {
+        "OBJECTIVE": OBJECTIVE,
+        "EV_VERDICT": (ev_verdict if ev_verdict is not None
+                       else NOT_IDENTIFIED),
+        "THROUGHPUT_GAIN_OFFERED": (throughput_gain
+                                    if throughput_gain is not None
+                                    else NOT_IDENTIFIED),
+        "ADMISSIBLE": positive,
+        "THROUGHPUT_GAIN_WAS_IGNORED": True,
+        "WHY": ("admitted on positive EV alone" if positive else
+                "refused: EV is not an explicit positive, and no throughput "
+                "argument can change that"),
+        "OBJECTIVE_CONSTRAINT": OBJECTIVE_CONSTRAINT,
+    }
+
+
+def objective_status(universe=None, scenarios=None):
+    """What the objective's four components can and cannot be measured at."""
+    u = universe or {}
+    return {
+        "OBJECTIVE": OBJECTIVE,
+        "OBJECTIVE_SEEKS": list(OBJECTIVE_SEEKS),
+        "OBJECTIVE_CONSTRAINT": OBJECTIVE_CONSTRAINT,
+        "INDEPENDENCE_IS_PART_OF_THE_OBJECTIVE":
+            INDEPENDENCE_IS_PART_OF_THE_OBJECTIVE,
+        "MANY_INDEPENDENT_POSITIVE_EV_OPPORTUNITIES": NOT_IDENTIFIED,
+        "WHY_POSITIVE_EV_COUNT_IS_ABSENT": WHY_BLOCKED,
+        "ADDRESSABLE_OPPORTUNITIES": u.get(
+            "TOTAL_CANONICALLY_ADDRESSABLE_SPORTS_MARKETS", NOT_IDENTIFIED),
+        "INDEPENDENT_EVENTS": u.get("CANONICAL_EVENTS", NOT_IDENTIFIED),
+        "HIGH_EXECUTABLE_FILL_THROUGHPUT": NOT_IDENTIFIED,
+        "SHORT_CAPITAL_OCCUPANCY": NOT_IDENTIFIED,
+        "RAPID_CAPITAL_RECYCLING": NOT_IDENTIFIED,
+        "MEASURED_BETTOR_P_FILL": MEASURED_BETTOR_P_FILL,
+        "OPPORTUNITY_THROUGHPUT_STATUS": (
+            "MEASURED_FROM_SEALED_PUBLIC_BOARD" if u else NOT_IDENTIFIED),
+        "EXECUTED_TURNOVER_STATUS": "SCENARIO_ONLY_NO_BETTOR_FILL_EVIDENCE",
+        "CAPITAL_VELOCITY_STATUS":
+            "SCENARIO_ONLY_NO_BETTOR_HOLDING_TIME_EVIDENCE",
+        "OBJECTIVE_ACHIEVED": NOT_IDENTIFIED,
+        "WHY_OBJECTIVE_STATUS_IS_ABSENT": (
+            "three of the four components require BETTOR-native evidence that "
+            "does not exist; an objective cannot be scored on its measurable "
+            "component alone"),
+        "THIS_IS_A_DIAGNOSTIC_OBJECTIVE_NOT_A_MANDATE": True,
+    }
+
+
 def render(rep):
     L = ["=== FUNNEL ==="]
     f = rep.get("FUNNEL", {})
@@ -526,6 +912,33 @@ def render(rep):
         v = r.get(k, NOT_IDENTIFIED)
         L.append("%-34s = %s" % (k, ("%.4f" % v) if isinstance(v, float)
                                  else v))
+    u = rep.get("UNIVERSE")
+    if u:
+        L.append("")
+        L.append("=== ADDRESSABLE UNIVERSE (WITH TOTALS) ===")
+        for k in ("BOARD_MARKETS", "MONEYLINE_MARKETS", "SPREAD_MARKETS",
+                  "BOUND_TOTAL_MARKETS", "UNBOUND_TOTAL_MARKETS",
+                  "TOTAL_CANONICALLY_ADDRESSABLE_SPORTS_MARKETS",
+                  "CANONICAL_EVENTS", "EVENTS_WITH_MONEYLINE",
+                  "EVENTS_WITH_SPREAD", "EVENTS_WITH_TOTAL",
+                  "EVENTS_WITH_ALL_THREE", "NO_DOUBLE_COUNTING",
+                  "EVERY_TOTAL_ATTACHED_TO_A_PREEXISTING_EVENT"):
+            L.append("%-46s = %s" % (k, u.get(k, NOT_IDENTIFIED)))
+    t = rep.get("TURNOVER")
+    if t:
+        L.append("")
+        L.append("=== TURNOVER SCENARIOS - %s ===" % SCENARIO_LABEL)
+        L.append("%-6s %10s %10s %14s %14s %8s" % (
+            "P_FILL", "INTENTS", "FILLS", "GROSS_NOTIONAL", "AVG_CAPITAL",
+            "TURNS"))
+        for s in t.get("SCENARIOS", ()):
+            L.append("%-6s %10s %10s %14s %14s %8s" % (
+                s["HYPOTHETICAL_P_FILL"],
+                s["CANDIDATE_ORDER_INTENTS_PER_DAY"],
+                s["EXPECTED_FILLED_ORDERS_PER_DAY"],
+                s["EXPECTED_GROSS_FILLED_NOTIONAL_PER_DAY"],
+                s["AVERAGE_CAPITAL_OCCUPIED"],
+                s["EXPECTED_CAPITAL_TURNS_PER_DAY"]))
     return "\n".join(L)
 
 
