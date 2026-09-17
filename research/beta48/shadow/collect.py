@@ -105,20 +105,42 @@ class Pacer:
 
 
 def read_book(http, pacer, slug):
-    """One paced public GET. Returns (body, receipt_iso, status, error)."""
+    """One paced public GET. Returns (body, receipt_iso, status, error).
+
+    REQUEST_TIME AND RECEIPT_TIME ARE DIFFERENT FACTS. The request time is
+    stamped after the pacer releases and before the socket is touched; the
+    receipt time after the body is in hand. The gap between them is this
+    observation's own latency, and collapsing the two would make a slow read
+    look like a state that existed at a moment it did not.
+    """
+    body, req, recv, status, err = read_book_timed(http, pacer, slug)
+    return body, recv, status, err
+
+
+def read_book_timed(http, pacer, slug):
+    """As `read_book`, but returns (body, request_iso, receipt_iso, status,
+    error) so the caller can record BOTH times.
+
+    `read_book` keeps its four-tuple so existing callers are untouched.
+    """
     pacer.wait()
     url = HOST + BOOK_PATH.format(slug=slug)
-    recv = time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
+    req = _utc_now()
     try:
         r = http.get(url, timeout=20.0)
     except Exception as exc:                       # noqa: BLE001
-        return None, recv, None, "%s: %s" % (type(exc).__name__, exc)
+        return None, req, _utc_now(), None, "%s: %s" % (type(exc).__name__, exc)
+    recv = _utc_now()
     if r.status_code != 200:
-        return None, recv, r.status_code, "http_%d" % r.status_code
+        return None, req, recv, r.status_code, "http_%d" % r.status_code
     try:
-        return r.json(), recv, 200, None
+        return r.json(), req, recv, 200, None
     except Exception as exc:                       # noqa: BLE001
-        return None, recv, 200, "decode: %s" % exc
+        return None, req, recv, 200, "decode: %s" % exc
+
+
+def _utc_now():
+    return time.strftime("%Y-%m-%dT%H:%M:%S+00:00", time.gmtime())
 
 
 # ---------------------------------------------------------------------------
@@ -488,17 +510,51 @@ def _touch(body):
     }
 
 
-def tick_row(slug, body, receipt_iso, seq, elapsed_s, prev=None):
+IDENTITY_FIELDS = ("EVENT_ID", "EVENT_KEY", "MARKET_ID", "MARKET_SLUG",
+                   "GAME_START", "SPORT", "LEAGUE", "MARKET_SIDES",
+                   "EVENT_IDENTITY_LEVEL")
+IDENTITY_TRAVELS_WITH_THE_ROW = True
+WHY_IDENTITY_TRAVELS = (
+    "the first public capture reconstructed event identity downstream from a "
+    "board file and lost it; identity that is not on the row is identity that "
+    "can go missing between the capture and the analysis")
+IDENTITY_IS_FROZEN_BEFORE_THE_FIRST_SAMPLED_GET = True
+NO_TITLE_HEURISTICS = (
+    "identity is the venue's own gameStartTime and team ids; question-title "
+    "truncation and text matching are refused while native identity exists")
+
+
+def tick_row(slug, body, receipt_iso, seq, elapsed_s, prev=None,
+             identity=None, request_iso=None):
     """One tick, with the CHANGE from the previous tick made explicit.
 
     `QUOTE_LIFETIME` and `TIME_AT_PRICE` cannot be read from a single snapshot
     -- they are properties of a sequence -- so each row carries how long the
     touch has been unchanged, accumulated tick over tick. A quote's life
     measured from one observation would be a guess.
+
+    IDENTITY TRAVELS WITH THE ROW. `identity` is the frozen per-slug block
+    selected before the first sampled GET, and every field of it is copied onto
+    every row. The previous public capture carried `slug` alone and rebuilt
+    event identity afterwards from a board file; when that reconstruction
+    missed, the rows could no longer say which contest they belonged to, and
+    the event-weighted statistics silently became market-weighted ones over a
+    subset. A row that cannot name its own event is not evidence about events.
+
+    Absent identity is written NOT_IDENTIFIED per field -- never guessed from
+    the slug, and never omitted, so a missing identity is visible in the row
+    rather than inferred from its absence.
     """
     t = _touch(body)
     row = {"kind": "TICK", "VERSION": TICK_VERSION, "slug": slug, "seq": seq,
-           "RECEIPT_UTC": receipt_iso, "ELAPSED_S": elapsed_s}
+           "RECEIPT_UTC": receipt_iso, "ELAPSED_S": elapsed_s,
+           "SAMPLING_SEQUENCE": seq,
+           "REQUEST_UTC": request_iso or NOT_IDENTIFIED}
+    ident = identity or {}
+    for f in IDENTITY_FIELDS:
+        row[f] = ident.get(f, NOT_IDENTIFIED)
+    if row["MARKET_SLUG"] == NOT_IDENTIFIED:
+        row["MARKET_SLUG"] = slug          # the one field the GET itself proves
     row.update(t)
     if t["BID"] != NOT_IDENTIFIED and t["ASK"] != NOT_IDENTIFIED:
         row["SPREAD"] = t["ASK"] - t["BID"]
@@ -545,38 +601,58 @@ def tick_row(slug, body, receipt_iso, seq, elapsed_s, prev=None):
     return row
 
 
-def tick_capture(outdir, slugs, pacer, http, rounds, sleep_between=0.0):
+def tick_capture(outdir, slugs, pacer, http, rounds, sleep_between=0.0,
+                 identity_of=None, deadline_s=None):
     """Poll a bounded slug set for `rounds` passes. GET only. No orders.
 
     Each pass is paced at the declared rate; rows are appended as they arrive
     so a truncated run still yields usable data rather than nothing.
+
+    `identity_of` maps slug -> the frozen identity block copied onto every row
+    (see `tick_row`). `deadline_s` is a wall-clock cap in seconds: the loop
+    stops at the end of the pass that crosses it, so a capture declared as 90
+    minutes ends at 90 minutes rather than whenever the round count happens to
+    run out. A partial pass is never written as a whole one.
     """
     out = Path(outdir)
     out.mkdir(parents=True, exist_ok=True)
     path = out / "ticks.jsonl"
+    identity_of = identity_of or {}
     prev, n, errs = {}, 0, 0
+    passes = 0
     start = time.monotonic()
     with path.open("a") as fh:
         for seq in range(rounds):
+            if deadline_s is not None and time.monotonic() - start >= deadline_s:
+                break
             for slug in slugs:
-                body, recv, status, err = read_book(http, pacer, slug)
+                body, req, recv, status, err = read_book_timed(http, pacer,
+                                                               slug)
                 if err:
                     errs += 1
                     fh.write(json.dumps(
                         {"kind": "TICK_ERROR", "slug": slug, "seq": seq,
+                         "REQUEST_UTC": req,
                          "RECEIPT_UTC": recv, "status": status,
                          "error": err}) + "\n")
                     continue
                 row = tick_row(slug, body, recv, seq,
-                               time.monotonic() - start, prev.get(slug))
+                               time.monotonic() - start, prev.get(slug),
+                               identity=identity_of.get(slug),
+                               request_iso=req)
                 prev[slug] = row
                 fh.write(json.dumps(row, default=_jsonable,
                                     sort_keys=True) + "\n")
                 n += 1
+            passes += 1
             fh.flush()
             if sleep_between:
                 time.sleep(sleep_between)
     return {"TICK_ROWS": n, "TICK_ERRORS": errs, "ROUNDS": rounds,
+            "ROUNDS_COMPLETED": passes,
+            "STOPPED_ON": ("DEADLINE" if (deadline_s is not None
+                                          and passes < rounds)
+                           else "ROUNDS"),
             "SLUGS": len(slugs), "DURATION_S": time.monotonic() - start,
             "PATH": str(path)}
 

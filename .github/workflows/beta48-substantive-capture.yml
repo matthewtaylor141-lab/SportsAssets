@@ -1,0 +1,323 @@
+# BETA48 SUBSTANTIVE PUBLIC-BOOK CAPTURE. READ ONLY. NO CREDENTIAL.
+#
+# WHAT THIS RUN IS FOR. One trustworthy prospective dataset characterising
+# executable public book state on a predeclared roster: spreads, top-of-book and
+# ladder depth, BBO and mid changes, price improvements, depth changes,
+# move-through events, quote persistence at sampled observations, event
+# identity, within-event correlation, revisit cadence, and whatever trade
+# evidence the public feed carries. It is the last public-book step before
+# BETTOR-native execution validation.
+#
+# WHAT IT CANNOT DO, and no artifact it writes may be read as doing. It cannot
+# identify a BETTOR fill. A public snapshot shows the book, not our order in it.
+# PUBLIC_TICK_FILL_IDENTIFICATION = NO, ACTUAL_BETTOR_FILL_RATE =
+# NOT_IDENTIFIED and REALIZED_MAKER_ECONOMICS = NOT_ESTABLISHED are the expected
+# outcomes, and they are limitations of public data, not failures of this run.
+#
+# THE RATE IS THE CONFIRMED ONE. 0.25 rps, 4.0 s apart, on the same GlobalPacer
+# that run 35180590124 validated: 301/301 successes, zero 429s, 1200 s of paced
+# exposure, EVIDENCE_RUN_VALIDITY = PASS. No faster rate has ever been tested by
+# this programme and none is tested here.
+#
+# CAPABILITY BOUNDARY, proved by the offline suite before anything is contacted:
+#   GET only. gateway.polymarket.us only. No credential, no repository secret,
+#   no wallet, no signer, no auth header, no trading SDK, no order or cancel
+#   endpoint, no POST/PUT/PATCH/DELETE. mirror_live stays false and this job
+#   cannot reach anything that could change it.
+#
+# THE ROSTER IS FROZEN BEFORE THE FIRST SAMPLED GET. Selection runs as its own
+# step, writes selection.json, and the capture re-reads that file. A roster
+# chosen after seeing how the markets behaved would be a sample of the outcome.
+# If fewer than three events qualify the job STOPS: a stale future substituted
+# to fill the roster answers a different question while looking like an answer
+# to this one.
+#
+# IDENTITY TRAVELS ON EVERY ROW. The first public capture carried `slug` alone
+# and rebuilt event identity downstream from a board file; when that missed, no
+# row could name its contest and the event-weighted figures quietly became
+# market-weighted ones over a subset. Every tick now carries EVENT_ID,
+# MARKET_ID, GAME_START, SPORT/LEAGUE, MARKET_SIDES, SAMPLING_SEQUENCE,
+# REQUEST_UTC and RECEIPT_UTC.
+#
+# THIS RUN DOES NOT AUTHORISE MICRO-LIVE and places no orders.
+
+name: beta48-substantive-capture
+
+on:
+  workflow_dispatch:
+    inputs:
+      code_sha:
+        description: "IMMUTABLE commit to execute (full 40-char SHA). No default on purpose."
+        required: true
+      capture_seconds:
+        description: "Capture duration in seconds (declared: 5400 = 90 minutes)"
+        required: false
+        default: "5400"
+
+permissions:
+  contents: write
+  actions: read          # to see whether another BETTOR collector is running
+
+concurrency:
+  # THE GLOBAL PMUS VENUE-ACCESS DOMAIN, unchanged. Two collectors at once would
+  # double the aggregate rate and contaminate each other's measurements.
+  # QUEUE, NEVER CANCEL: a compliant scheduled collector waits its turn rather
+  # than being killed, and an evidence run is never killed mid-collection.
+  group: pmus-public-read-global
+  cancel-in-progress: false
+
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    # 90 minutes of paced capture, plus selection, isolation sweeps and sealing.
+    timeout-minutes: 150
+
+    steps:
+      # THE IMMUTABLE CHECKOUT. An exact commit, never a moving branch head.
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ github.event.inputs.code_sha }}
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the one dependency
+        run: python -m pip install --quiet "httpx==0.27.2" "pytest==8.3.3"
+
+      # GATE 1. No venue contact until the capability boundary is proved.
+      - name: Prove the capability boundary offline
+        working-directory: research/beta48/shadow
+        run: python -m pytest -q
+
+      # GATE 2. No venue contact until the code that ran is the code that was
+      # authorised. STAGE pre-get: the code-provenance checks are IDENTICAL to
+      # the harvest ones -- pre_get_gate() calls check() and uses its findings
+      # verbatim -- and only the aggregate verdict differs, because
+      # DATA_OUTPUT_PROVENANCE cannot exist before the rows are written.
+      - name: Prove the executed revision
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          EXECUTED_SHA="$(git rev-parse HEAD)"
+          echo "DISPATCH_SHA  = ${{ github.event.inputs.code_sha }}"
+          echo "EXECUTED_SHA  = $EXECUTED_SHA"
+          echo "WORKFLOW_REF  = ${{ github.sha }}"
+          mkdir -p "evidence/substantive_$SEG"
+          python provenance.py \
+            --stage pre-get \
+            --dispatch-sha "${{ github.event.inputs.code_sha }}" \
+            --executed-sha "$EXECUTED_SHA" \
+            --workflow-ref-sha "${{ github.sha }}" \
+            --workflow-file "../../../.github/workflows/beta48-substantive-capture.yml" \
+            --config substantive_capture.py \
+            --out "evidence/substantive_$SEG/provenance_pre_get.json"
+          echo "EXECUTED_SHA=$EXECUTED_SHA" >> "$GITHUB_ENV"
+
+      # GATE 3. No venue contact while another direct collector is running.
+      # A PENDING collector is not a confound -- it is the domain working, and
+      # it makes no request while it waits.
+      - name: Prove BETTOR collector isolation at start
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=in_progress&per_page=100" \
+               -o /tmp/active_start.json
+          python venue_domain.py --root ../../.. \
+            --active-runs /tmp/active_start.json \
+            --self-run-id "$SEG" \
+            --mode start \
+            --out "evidence/substantive_$SEG/isolation_at_start.json"
+
+      # GATE 4. THE ROSTER, FROZEN BEFORE THE FIRST SAMPLED GET. Selection reads
+      # are paced at the SAME 0.25 rps and are counted separately from the
+      # capture's own observations. A short roster exits non-zero and the
+      # capture never starts.
+      - name: Freeze the event selection
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          python substantive_select.py \
+            --rate "0.25" \
+            --window-s "${{ github.event.inputs.capture_seconds || 5400 }}" \
+            --out "evidence/substantive_$SEG/selection.json"
+
+      # THE CAPTURE. 0.25 rps, 4.0 s apart, 6 markets, 90 minutes.
+      - name: Substantive public-book capture
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          python substantive_capture.py \
+            --selection "evidence/substantive_$SEG/selection.json" \
+            --out "evidence/substantive_$SEG" \
+            --seconds "${{ github.event.inputs.capture_seconds || 5400 }}"
+
+      # Isolation again at the end. The verdict on isolation-throughout comes
+      # from EXECUTION-INTERVAL OVERLAP against the evidence window, not from
+      # this snapshot -- a collector that started and finished inside the window
+      # is invisible here.
+      - name: Check isolation again at the end
+        if: always()
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          API_URL: https://api.github.com
+          REPO: ${{ github.repository }}
+        run: |
+          set +e
+          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
+               -H "Accept: application/vnd.github+json" \
+               "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=in_progress&per_page=100" \
+               -o /tmp/active_end.json
+          python venue_domain.py --root ../../.. \
+            --active-runs /tmp/active_end.json \
+            --self-run-id "$SEG" \
+            --mode during \
+            --out "evidence/substantive_$SEG/isolation_at_end.json" || true
+          python - <<'PYEOF' || true
+          import json, os, pathlib, subprocess, sys
+          sys.path.insert(0, ".")
+          import venue_domain as VD
+
+          API = "%s/repos/%s/actions" % (os.environ["API_URL"],
+                                         os.environ["REPO"])
+          TOK = os.environ["GH_TOKEN"]
+          seg = os.environ["SEG"]
+          d = pathlib.Path("evidence/substantive_%s" % seg)
+
+          def get(url):
+              raw = subprocess.run(
+                  ["curl", "-sS", "-H", "Authorization: Bearer %s" % TOK,
+                   "-H", "Accept: application/vnd.github+json", url],
+                  capture_output=True, text=True).stdout
+              try:
+                  return json.loads(raw)
+              except Exception:
+                  return None
+
+          known = sorted(VD.venue_touching_workflows("../../.."))
+          KEEP = ("id", "name", "status", "conclusion", "created_at",
+                  "run_started_at", "updated_at")
+          PAGE_CAP = 20                     # 2,000 runs per workflow; a bound
+
+          # Per workflow, to EXHAUSTION. A job timeout bounds how long a run may
+          # EXECUTE, not how long it may sit QUEUED first, and queue delay has no
+          # bound we can prove -- so there is no sound created-at shortcut.
+          runs, pages, more = [], {}, {}
+          for wf in known:
+              got_all, page, exhausted = [], 1, None
+              while page <= PAGE_CAP:
+                  body = get("%s/workflows/%s.yml/runs?per_page=100&page=%d"
+                             % (API, wf, page))
+                  if body is None or "workflow_runs" not in body:
+                      break                 # unreadable -> coverage unknown
+                  batch = body["workflow_runs"]
+                  got_all += batch
+                  total = body.get("total_count")
+                  page += 1
+                  if len(batch) < 100 or (isinstance(total, int)
+                                          and len(got_all) >= total):
+                      exhausted = True
+                      break
+              else:
+                  exhausted = False         # hit the cap with runs still there
+              pages[wf] = page - 1
+              if exhausted is not None:
+                  more[wf] = not exhausted
+              for r in got_all:
+                  r["name"] = r.get("name") or wf
+                  runs.append({k: r.get(k) for k in KEEP})
+
+          # THE WINDOW, FROM THE ROWS THEMSELVES. A skipped audit is not a clean
+          # one: overlap_harvest records AUDIT_EXECUTED either way, so an empty
+          # overlap object can never again be read as "nothing overlapped".
+          rows = []
+          try:
+              rows = [json.loads(x) for x in
+                      (d / "ticks.jsonl").read_text().splitlines() if x.strip()]
+          except Exception:
+              pass
+          stamps = [r["RECEIPT_UTC"] for r in rows
+                    if r.get("kind") == "TICK" and r.get("RECEIPT_UTC")]
+          start = min(stamps) if stamps else None
+          end = max(stamps) if stamps else None
+          probe = VD.overlap_harvest(start, end, runs, known, len(stamps),
+                                     self_run_id=seg, more_pages=more,
+                                     pages_fetched=pages)
+          (d / "overlap_audit.json").write_text(
+              json.dumps(probe, indent=1, sort_keys=True, default=str))
+          (d / "run_history.json").write_text(json.dumps({
+              "workflow_runs": runs,
+              "HISTORY_PAGES_FETCHED": pages,
+              "MORE_PAGES_AVAILABLE": more,
+              "VENUE_REQUEST_WINDOWS": probe["VENUE_REQUEST_WINDOWS"],
+              "AUDIT_EXECUTED": probe["AUDIT_EXECUTED"],
+              "OVERLAP_AUDIT_STATUS": probe["OVERLAP_AUDIT_STATUS"],
+              "FIRST_VENUE_GET_TIME": start or "NOT_IDENTIFIED",
+              "LAST_VENUE_GET_TIME": end or "NOT_IDENTIFIED",
+              "COVERAGE_REQUIRES": "API_HISTORY_EXHAUSTED",
+              "NO_CREATED_AT_LOOKBACK": True,
+          }, indent=1, sort_keys=True))
+          PYEOF
+
+      # THE HARVEST. Offline, over the rows this run just sealed.
+      - name: Harvest the capture
+        if: always()
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set +e
+          [ -f "evidence/substantive_$SEG/ticks.jsonl" ] || exit 0
+          python substantive_harvest.py \
+            --dir "evidence/substantive_$SEG" \
+            --out "evidence/substantive_$SEG/harvest.json"
+
+      - name: Seal and commit the capture
+        if: always()
+        env:
+          SEG: ${{ github.run_id }}
+        run: |
+          set -e
+          D=research/beta48/shadow/evidence/substantive_$SEG
+          [ -d "$D" ] || exit 0
+          # FINAL PROVENANCE, STRICT. All four aspects, with the data-output
+          # hash over the rows the run actually wrote. A run that wrote none
+          # still ends EVIDENCE_RUN_VALIDITY = FAIL here, so the pre-GET
+          # relaxation cannot make a run valid on its own.
+          ( cd research/beta48/shadow \
+            && python provenance.py \
+                 --stage harvest \
+                 --dispatch-sha "${{ github.event.inputs.code_sha }}" \
+                 --executed-sha "${EXECUTED_SHA:-}" \
+                 --workflow-ref-sha "${{ github.sha }}" \
+                 --workflow-file "../../../.github/workflows/beta48-substantive-capture.yml" \
+                 --config substantive_capture.py \
+                 --data-output "evidence/substantive_$SEG/ticks.jsonl" \
+                 --out "evidence/substantive_$SEG/provenance.json" || true )
+          ( cd "$D" && sha256sum * > SEALED.sha256 2>/dev/null || true )
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          BR="beta48-substantive/seg-$SEG"
+          git checkout --orphan "$BR"
+          git rm -rq --cached . || true
+          git add -f "$D"
+          git commit -qm "BETA48 substantive public-book capture $SEG [skip render]" || exit 0
+          for i in 1 2 4 8 16; do
+            git push -f origin "$BR" && break
+            echo "push failed, retrying in ${i}s"; sleep "$i"
+          done
+          echo "BETA48_SUBSTANTIVE_BRANCH $BR"
