@@ -567,13 +567,28 @@ def _cli():                                                   # pragma: no cover
 
     # PROVENANCE FIRST. A mismatch costs a failed job; finding out afterwards
     # would cost the collection window as well.
-    prov = PV.check(a.dispatch_sha, a.executed_sha, a.workflow_ref_sha,
-                    PV.file_sha256(a.workflow_file) if a.workflow_file else None,
-                    PV.file_sha256(a.universe))
+    #
+    # THIS IS THE SECOND SITE OF THE IMPOSSIBLE GATE FIXED IN ac0f13a, and it
+    # is the same defect, not a new one. The harvest verdict requires
+    # DATA_OUTPUT_PROVENANCE, and the only thing that can ever record it is the
+    # paced loop BELOW this line -- so calling check() here made the gate
+    # unreachable by construction. Run 35178484993 died here in zero seconds
+    # with CODE_PROVENANCE_VALIDITY = PASS and FAILED_CHECKS empty, before the
+    # httpx client was even opened. RUN_RESULT = NO_EVIDENCE,
+    # VENUE_REQUESTS = 0 -- never a rate result.
+    #
+    # NO CODE-PROVENANCE CHECK IS WEAKENED. pre_get_gate() calls check() and
+    # uses its findings verbatim; only the aggregate verdict differs, and it
+    # cannot report PASS. The strict four-aspect gate runs below, once the rows
+    # exist, and a run that wrote none still ends FAIL there.
+    prov = PV.pre_get_gate(
+        a.dispatch_sha, a.executed_sha, a.workflow_ref_sha,
+        PV.file_sha256(a.workflow_file) if a.workflow_file else None,
+        PV.file_sha256(a.universe))
     print(PV.render(prov))
     PV.receipt(Path(a.out) / "provenance.json", prov)
-    if prov["EVIDENCE_RUN_VALIDITY"] != "PASS":
-        raise SystemExit("EVIDENCE_RUN_VALIDITY = FAIL")
+    if prov["PRE_GET_PROVENANCE_GATE"] != "PASS":
+        raise SystemExit("PRE_GET_PROVENANCE_GATE = FAIL")
 
     gate = dispatch_check(rps, req, a.timeout_s,
                           dispatch_sha=a.dispatch_sha,
@@ -588,7 +603,17 @@ def _cli():                                                   # pragma: no cover
     with httpx.Client(headers={"accept": "application/json"}) as http:
         rep = confirm(a.out, slugs, http, rps, req,
                       dispatch_sha=a.dispatch_sha, executed_sha=a.executed_sha)
-    prov["DATA_OUTPUT_SHA"] = PV.file_sha256(Path(a.out) / "confirm_rows.jsonl")
+    # THE STRICT GATE, UNCHANGED AND UNAVOIDABLE. Now that the rows exist, run
+    # the full four-aspect harvest check -- recomputed, not patched. The old
+    # line assigned DATA_OUTPUT_SHA into the pre-run dict and re-sealed it
+    # WITHOUT re-deriving the verdict, so the receipt's aggregate never
+    # reflected the data aspect at all. It does now, and it FAILs without rows.
+    prov = PV.check(
+        a.dispatch_sha, a.executed_sha, a.workflow_ref_sha,
+        PV.file_sha256(a.workflow_file) if a.workflow_file else None,
+        PV.file_sha256(a.universe),
+        PV.file_sha256(Path(a.out) / "confirm_rows.jsonl"))
+    print(PV.render(prov))
     PV.receipt(Path(a.out) / "provenance.json", prov)
     print(render(rep))
 

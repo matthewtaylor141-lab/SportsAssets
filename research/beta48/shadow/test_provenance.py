@@ -295,5 +295,47 @@ class TheImpossibleProvenanceGate(unittest.TestCase):
             self.assertEqual(r[a], "RECORDED", a)
 
 
+class TheSecondSiteOfTheImpossibleGate(unittest.TestCase):
+    """REGRESSION, RUN 35178484993. The workflow's step 6 was repaired and
+    passed. The job then died at step 8 in ZERO SECONDS -- 03:31:55Z to
+    03:31:55Z -- because `rate_confirm.py::_cli()` carried its OWN copy of the
+    same construction: PV.check() with no data-output argument, gated on
+    EVIDENCE_RUN_VALIDITY == PASS, executed before the httpx client opened.
+
+    The collector is the only thing that can write confirm_rows.jsonl, so it
+    demanded of itself a hash it had not yet been allowed to produce. Two
+    aborts, one defect, two call sites. VENUE_REQUESTS = 0 both times.
+
+    These read the module source rather than executing _cli(), which opens a
+    network client and is marked `no cover`.
+    """
+
+    @staticmethod
+    def src():
+        import inspect
+        import rate_confirm as RC
+        return inspect.getsource(RC._cli)
+
+    def test_the_pre_get_call_is_the_pre_get_gate_not_the_harvest_check(self):
+        s = self.src()
+        before = s.split("httpx.Client")[0]
+        self.assertIn("PV.pre_get_gate(", before)
+        self.assertNotIn("PV.check(", before)
+
+    def test_the_collector_never_demands_a_data_hash_before_the_loop(self):
+        before = self.src().split("httpx.Client")[0]
+        self.assertNotIn("confirm_rows.jsonl", before)
+        self.assertNotIn('EVIDENCE_RUN_VALIDITY"] != "PASS"', before)
+
+    def test_the_strict_four_aspect_check_still_runs_after_the_loop(self):
+        after = self.src().split("httpx.Client")[1]
+        self.assertIn("PV.check(", after)
+        self.assertIn("confirm_rows.jsonl", after)
+
+    def test_the_final_verdict_is_recomputed_never_patched_in_place(self):
+        s = self.src()
+        self.assertNotIn('prov["DATA_OUTPUT_SHA"] =', s)
+
+
 if __name__ == "__main__":
     unittest.main()
