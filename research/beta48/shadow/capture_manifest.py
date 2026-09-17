@@ -65,6 +65,8 @@ REQUIRED_FIELDS = (
     "HOST",
     "RATE_LIMIT_PARAMETERS",
     "SCIENTIFIC_DEFINITIONS",
+    "FROZEN_QUALITY_THRESHOLDS",
+    "FROZEN_QUALITY_THRESHOLDS_SHA",
 )
 
 # The frozen scientific definitions. These are what a harvest is forbidden to
@@ -111,7 +113,9 @@ def build_manifest(code_sha, capture_start_utc, capture_seconds,
                    event_ids, market_ids, market_families,
                    poll_interval_s, rate_rps, request_policy,
                    selection_sha, capture_spec_sha, run_id, host,
-                   rate_limit_parameters, scientific_definitions):
+                   rate_limit_parameters, scientific_definitions,
+                   frozen_quality_thresholds=None,
+                   frozen_quality_thresholds_sha=None):
     """Assemble the manifest. Every field is required; none defaults silently.
 
     A missing value must arrive as NOT_IDENTIFIED from the caller, so that the
@@ -141,6 +145,12 @@ def build_manifest(code_sha, capture_start_utc, capture_seconds,
         "HOST": str(host),
         "RATE_LIMIT_PARAMETERS": dict(rate_limit_parameters or {}),
         "SCIENTIFIC_DEFINITIONS": dict(scientific_definitions or {}),
+        # BY VALUE. The gate's floors are part of the experiment's identity:
+        # a capture scored under different thresholds is a different
+        # experiment, whatever its rows say.
+        "FROZEN_QUALITY_THRESHOLDS": dict(frozen_quality_thresholds or {}),
+        "FROZEN_QUALITY_THRESHOLDS_SHA": str(
+            frozen_quality_thresholds_sha or NOT_IDENTIFIED),
     }
     m["INDEPENDENT_EVENT_N"] = len(m["EVENT_IDS"])
     m["MARKET_N"] = len(m["MARKET_IDS"])
@@ -201,8 +211,15 @@ def read_manifest(path):
 COMPARED_AT_HARVEST = (
     "CAPTURE_SECONDS", "EVENT_IDS", "MARKET_IDS", "MARKET_FAMILIES",
     "POLL_INTERVAL_S", "RATE_RPS", "SELECTION_SHA", "CAPTURE_SPEC_SHA",
-    "SCIENTIFIC_DEFINITIONS",
+    "SCIENTIFIC_DEFINITIONS", "FROZEN_QUALITY_THRESHOLDS",
+    "FROZEN_QUALITY_THRESHOLDS_SHA",
 )
+
+THRESHOLD_DRIFT_IS_THE_WORST_KIND = (
+    "a drifted SCIENTIFIC_DEFINITION changes what was measured; a drifted "
+    "FROZEN_QUALITY_THRESHOLD changes whether the measurement was allowed to "
+    "count. The second is the one that turns a failed capture into a passed "
+    "one without touching a single row, so it is compared here by value")
 
 DRIFT_IS_NOT_REPAIRED = (
     "a drifted field means the harvest is analysing a different experiment "
@@ -244,6 +261,30 @@ def verify_against(manifest, live):
     }
 
 
+def capture_spec_record(capture_params, frozen_quality_thresholds,
+                        frozen_quality_thresholds_sha):
+    """The CAPTURE_SPEC: capture parameters PLUS the frozen gate, hashed.
+
+    The frozen capture code is pinned by SHA and may not be edited to carry
+    these, so the spec record is where the two are bound together and the
+    binding is hashed.
+    """
+    rec = {
+        "CAPTURE_PARAMETERS": dict(capture_params or {}),
+        "FROZEN_QUALITY_THRESHOLDS": dict(frozen_quality_thresholds or {}),
+        "FROZEN_QUALITY_THRESHOLDS_SHA": str(frozen_quality_thresholds_sha),
+        "THRESHOLDS_FROZEN_BEFORE_ANY_CAPTURE_DATA": True,
+        "WHY_NOT_IN_THE_CAPTURE_SOURCE": (
+            "the substantive capture is dispatched at a pinned code SHA and "
+            "may not be altered before it runs. The gate is harvest-side, so "
+            "the thresholds live with the gate and are bound to the run HERE, "
+            "by value and by hash, rather than by editing pinned source"),
+    }
+    rec["CAPTURE_SPEC_RECORD_SHA"] = sha256_of(
+        {k: v for k, v in rec.items() if k != "CAPTURE_SPEC_RECORD_SHA"})
+    return rec
+
+
 def describe():
     return {
         "MANIFEST_VERSION": MANIFEST_VERSION,
@@ -253,5 +294,6 @@ def describe():
         "WRITE_ONCE": WRITE_ONCE,
         "WHY_WRITE_ONCE": WHY_WRITE_ONCE,
         "DRIFT_IS_NOT_REPAIRED": DRIFT_IS_NOT_REPAIRED,
+        "THRESHOLD_DRIFT_IS_THE_WORST_KIND": THRESHOLD_DRIFT_IS_THE_WORST_KIND,
         "THIS_MODULE_CONTACTS_NOTHING": THIS_MODULE_CONTACTS_NOTHING,
     }

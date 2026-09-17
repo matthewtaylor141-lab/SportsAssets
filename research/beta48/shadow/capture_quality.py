@@ -145,17 +145,149 @@ def classify_error(row):
     return "OTHER_HTTP_FAILURES"
 
 
-# Thresholds are declared BEFORE the run is scored, so the gate cannot be
-# tuned to whatever the capture happened to produce.
-COVERAGE_PCT_FLOOR = 90.0
-MAX_GAP_MULTIPLE_OF_NOMINAL = 4.0
-CROSSED_BOOK_TOLERANCE = 0
-CLOCK_MUST_BE_MONOTONE = True
-COMPLETE_SERIES_FRACTION = 0.90
+# ---------------------------------------------------------------------------
+# FROZEN QUALITY THRESHOLDS
+# ---------------------------------------------------------------------------
+# Fixed 2026-09-17, BEFORE any substantive-capture data existed. Every value is
+# declared here by value, hashed, and copied by value into the CAPTURE_SPEC
+# record and the CAPTURE_MANIFEST at dispatch.
+#
+# The capture parameters they are derived from (substantive_capture.py):
+#   REQUEST_INTERVAL_S = 4.0, MARKETS = 6  ->  NOMINAL_REVISIT_S = 24.0
+#   CAPTURE_SECONDS = 5400, EXPECTED_OBS_PER_MARKET = 225
+#
+# THESE MAY NOT BE CHANGED AFTER OBSERVING A RESULT. See THRESHOLD_CHANGE_RULE.
+
+FROZEN_AT = "2026-09-17"
+FROZEN_BEFORE_ANY_CAPTURE_DATA = True
+
+FROZEN_QUALITY_THRESHOLDS = {
+    "MIN_OBSERVATION_COVERAGE_PCT": 90.0,
+
+    # Rates are fractions of ATTEMPTED_POLLS.
+    "MAX_HTTP_429_RATE": 0.02,
+    "MAX_OTHER_FAILURE_RATE": 0.05,
+    "MAX_PARSE_FAILURE_RATE": 0.005,
+
+    # Rates are fractions of SUCCESSFUL_POLLS. A price outside [0,1] or a bid
+    # above its own ask is a defect, not noise, so the tolerance is zero.
+    "MAX_INVALID_BOOK_RATE": 0.0,
+    "MAX_CROSSED_BOOK_RATE": 0.0,
+
+    # Absolute seconds, against a 24.0 s nominal revisit.
+    "MAX_MEDIAN_OBSERVATION_GAP_S": 36.0,
+    "MAX_P90_OBSERVATION_GAP_S": 60.0,
+    "MAX_MAXIMUM_OBSERVATION_GAP_S": 300.0,
+
+    # Completeness.
+    "MIN_OBSERVATIONS_PER_MARKET": 200,
+    "COMPLETE_SERIES_FRACTION": 0.90,
+    "MIN_MARKETS_WITH_SUFFICIENT_SERIES": 5,
+    "MIN_EVENTS_WITH_SUFFICIENT_SERIES": 3,
+
+    "CLOCK_MONOTONICITY_REQUIRED": True,
+    "MAX_NON_MONOTONE_STEPS": 0,
+    "MAX_DUPLICATE_SNAPSHOTS": 0,
+}
+
+THRESHOLD_RATIONALE = {
+    "MIN_OBSERVATION_COVERAGE_PCT": (
+        "below 90% of planned polls the series has holes large enough to "
+        "change a short-horizon result by which observations survived"),
+    "MAX_HTTP_429_RATE": (
+        "the pacer runs at the confirmed 0.25 rps, deliberately conservative. "
+        "More than 2% rate-limited means the rate assumption is wrong, which "
+        "is a finding about the collector, not a nuisance to average over"),
+    "MAX_PARSE_FAILURE_RATE": (
+        "a parse failure is a schema mismatch, not transport noise. Near-zero "
+        "tolerance because the alternative is silently dropping a field"),
+    "MAX_INVALID_BOOK_RATE": (
+        "a contract price outside [0,1] cannot be a price. One is a defect"),
+    "MAX_CROSSED_BOOK_RATE": (
+        "a bid above its own ask is either a venue anomaly worth naming or a "
+        "read error. Either way it is not data to average through"),
+    "MAX_MEDIAN_OBSERVATION_GAP_S": (
+        "1.5x the 24.0 s nominal revisit. A typical gap worse than this means "
+        "the sampling grid did not hold"),
+    "MAX_P90_OBSERVATION_GAP_S": "2.5x nominal, for the tail",
+    "MAX_MAXIMUM_OBSERVATION_GAP_S": (
+        "a single 5-minute hole destroys the 300 s horizon outright"),
+    "MIN_OBSERVATIONS_PER_MARKET": (
+        "matches the existing SUPPORT_MIN_OBS_PER_MARKET floor of 200 against "
+        "225 expected, so the quality gate and the support gate agree"),
+    "MIN_MARKETS_WITH_SUFFICIENT_SERIES": (
+        "5 of 6, NOT 6 of 6. A market that halts mid-capture because its game "
+        "ended is a legitimate VENUE state, not a collection defect, and "
+        "requiring all six would fail the capture on the former. The event "
+        "floor below is what protects the scientific unit"),
+    "MIN_EVENTS_WITH_SUFFICIENT_SERIES": (
+        "all 3. The independent event is the unit of inference, so every "
+        "event must retain at least one sufficient market. Losing an event is "
+        "not a partial result, it is a smaller experiment"),
+    "CLOCK_MONOTONICITY_REQUIRED": (
+        "a backwards clock makes every gap, horizon and ordering statistic "
+        "unreadable. There is no partial credit"),
+}
 
 THRESHOLDS_ARE_PREDECLARED = (
     "these floors are fixed before the capture is scored. A gate whose "
     "threshold is chosen after seeing the data is not a gate")
+
+THRESHOLD_CHANGE_RULE = (
+    "a frozen threshold MAY NOT be modified after observing a result. If one "
+    "is later judged scientifically wrong: (1) the current capture is still "
+    "evaluated under the FROZEN rule and its verdict stands, (2) the reason "
+    "is documented, (3) the corrected rule applies ONLY to the NEXT "
+    "experiment. Re-scoring a finished capture under a revised threshold is "
+    "not a correction, it is choosing the answer")
+
+# Revisions accumulate here for the NEXT experiment. This list does not and
+# may not affect the current capture's verdict.
+NEXT_EXPERIMENT_THRESHOLD_REVISIONS = ()
+REVISIONS_DO_NOT_APPLY_TO_THE_CURRENT_CAPTURE = True
+
+
+def _thresholds_sha():
+    import hashlib
+    import json
+    return hashlib.sha256(json.dumps(
+        FROZEN_QUALITY_THRESHOLDS, sort_keys=True,
+        separators=(",", ":")).encode("utf-8")).hexdigest()
+
+
+FROZEN_QUALITY_THRESHOLDS_SHA = _thresholds_sha()
+FROZEN_QUALITY_THRESHOLDS_STATUS = "FROZEN_AND_HASHED"
+
+
+def thresholds_block():
+    """The by-value record embedded in CAPTURE_SPEC and CAPTURE_MANIFEST."""
+    return {
+        "FROZEN_QUALITY_THRESHOLDS": dict(FROZEN_QUALITY_THRESHOLDS),
+        "FROZEN_QUALITY_THRESHOLDS_SHA": FROZEN_QUALITY_THRESHOLDS_SHA,
+        "FROZEN_QUALITY_THRESHOLDS_STATUS": FROZEN_QUALITY_THRESHOLDS_STATUS,
+        "FROZEN_AT": FROZEN_AT,
+        "FROZEN_BEFORE_ANY_CAPTURE_DATA": FROZEN_BEFORE_ANY_CAPTURE_DATA,
+        "THRESHOLD_CHANGE_RULE": THRESHOLD_CHANGE_RULE,
+    }
+
+
+def thresholds_intact():
+    """Has the frozen block been edited since it was hashed?"""
+    got = _thresholds_sha()
+    ok = got == FROZEN_QUALITY_THRESHOLDS_SHA
+    return {"INTACT": ok, "RECORDED_SHA": FROZEN_QUALITY_THRESHOLDS_SHA,
+            "RECOMPUTED_SHA": got,
+            "REASON": None if ok else "THRESHOLDS_EDITED_AFTER_HASHING"}
+
+
+# Back-compatible names, reading from the frozen block so there is exactly one
+# source of truth.
+COVERAGE_PCT_FLOOR = FROZEN_QUALITY_THRESHOLDS["MIN_OBSERVATION_COVERAGE_PCT"]
+COMPLETE_SERIES_FRACTION = FROZEN_QUALITY_THRESHOLDS["COMPLETE_SERIES_FRACTION"]
+CROSSED_BOOK_TOLERANCE = 0
+CLOCK_MUST_BE_MONOTONE = FROZEN_QUALITY_THRESHOLDS[
+    "CLOCK_MONOTONICITY_REQUIRED"]
+MAX_GAP_MULTIPLE_OF_NOMINAL = 4.0   # retained for the per-market series label
 
 
 def quality(tick_rows, error_rows=(), planned_polls=None,
@@ -222,6 +354,8 @@ def quality(tick_rows, error_rows=(), planned_polls=None,
     gaps = []
     non_monotone = 0
     complete = partial = 0
+    sufficient_markets = 0
+    sufficient_events = set()
     per_market = {}
     for m, rows in by_market.items():
         stamped = [(_parse(r.get("RECEIPT_UTC")), r) for r in rows]
@@ -247,8 +381,21 @@ def quality(tick_rows, error_rows=(), planned_polls=None,
             verdict = "COMPLETE" if ok else "PARTIAL"
         complete += 1 if ok else 0
         partial += 0 if ok else 1
+        # SUFFICIENT is the frozen-threshold judgement and is deliberately
+        # separate from COMPLETE: a market may fall short of the planned count
+        # yet still carry enough observations to analyse.
+        suff = (len(rows) >= FROZEN_QUALITY_THRESHOLDS[
+            "MIN_OBSERVATIONS_PER_MARKET"]
+            and biggest <= FROZEN_QUALITY_THRESHOLDS[
+                "MAX_MAXIMUM_OBSERVATION_GAP_S"])
+        sufficient_markets += 1 if suff else 0
+        if suff:
+            ev = event_of(rows[0])
+            if ev != NOT_IDENTIFIED:
+                sufficient_events.add(ev)
         per_market[m] = {"OBSERVATIONS": len(rows), "MAX_GAP_S": biggest,
-                         "SERIES": verdict}
+                         "SERIES": verdict,
+                         "SUFFICIENT": suff}
 
     def _q(vals, p):
         if not vals:
@@ -282,6 +429,8 @@ def quality(tick_rows, error_rows=(), planned_polls=None,
 
         "MARKETS_WITH_COMPLETE_SERIES": complete,
         "MARKETS_WITH_PARTIAL_SERIES": partial,
+        "MARKETS_WITH_SUFFICIENT_SERIES": sufficient_markets,
+        "EVENTS_WITH_SUFFICIENT_SERIES": len(sufficient_events),
 
         "CLOCK_MONOTONICITY_STATUS": ("MONOTONE" if non_monotone == 0
                                       else "NON_MONOTONE"),
@@ -297,39 +446,108 @@ def quality(tick_rows, error_rows=(), planned_polls=None,
         "SCALE": scale_label(len(events)),
         "THRESHOLDS_ARE_PREDECLARED": THRESHOLDS_ARE_PREDECLARED,
     }
+    rep.update(thresholds_block())
     rep.update(gate(rep, nominal_revisit_s))
     return rep
 
 
 def gate(rep, nominal_revisit_s=24.0):
-    """May signal analysis proceed? Every failure is named."""
-    fails = []
-    if rep.get("SUCCESSFUL_POLLS", 0) <= 0:
-        fails.append("NO_SUCCESSFUL_POLLS")
+    """May signal analysis proceed? Every frozen threshold is evaluated.
+
+    Each check reports the OBSERVED value beside the FROZEN limit, so the
+    verdict can be audited without re-running anything. An unmeasurable
+    quantity fails; it does not pass by absence.
+    """
+    T = FROZEN_QUALITY_THRESHOLDS
+    fails, checks = [], []
+
+    def _check(name, observed, limit, ok, note=None):
+        checks.append({"CHECK": name, "OBSERVED": observed,
+                       "FROZEN_LIMIT": limit, "PASS": bool(ok),
+                       "NOTE": note})
+        if not ok:
+            fails.append(name)
+
+    integrity = thresholds_intact()
+    if not integrity["INTACT"]:
+        fails.append("FROZEN_THRESHOLDS_EDITED_AFTER_HASHING")
+
+    attempted = rep.get("ATTEMPTED_POLLS", 0) or 0
+    successful = rep.get("SUCCESSFUL_POLLS", 0) or 0
+
+    _check("SUCCESSFUL_POLLS", successful, "> 0", successful > 0)
+
     cov = rep.get("OBSERVATION_COVERAGE_PCT")
     if cov == NOT_IDENTIFIED or cov is None:
-        fails.append("PLANNED_POLLS_NOT_IDENTIFIED")
-    elif cov < COVERAGE_PCT_FLOOR:
-        fails.append("COVERAGE_BELOW_%.0f_PCT" % COVERAGE_PCT_FLOOR)
-    if CLOCK_MUST_BE_MONOTONE and rep.get(
-            "CLOCK_MONOTONICITY_STATUS") != "MONOTONE":
-        fails.append("CLOCK_NOT_MONOTONE")
-    if rep.get("CROSSED_BOOK_COUNT", 0) > CROSSED_BOOK_TOLERANCE:
-        fails.append("CROSSED_BOOKS_PRESENT")
-    if rep.get("DUPLICATE_SNAPSHOT_COUNT", 0) > 0:
-        fails.append("DUPLICATE_SNAPSHOTS")
-    if rep.get("INVALID_BOOK_COUNT", 0) > 0:
-        fails.append("INVALID_BOOKS")
-    mg = rep.get("MAX_OBSERVATION_GAP")
-    if isinstance(mg, (int, float)) and \
-            mg > MAX_GAP_MULTIPLE_OF_NOMINAL * nominal_revisit_s:
-        fails.append("MAX_GAP_EXCEEDS_%.0fX_NOMINAL"
-                     % MAX_GAP_MULTIPLE_OF_NOMINAL)
+        _check("MIN_OBSERVATION_COVERAGE_PCT", NOT_IDENTIFIED,
+               T["MIN_OBSERVATION_COVERAGE_PCT"], False,
+               "PLANNED_POLLS_NOT_IDENTIFIED -- an unknown denominator fails")
+    else:
+        _check("MIN_OBSERVATION_COVERAGE_PCT", cov,
+               T["MIN_OBSERVATION_COVERAGE_PCT"],
+               cov >= T["MIN_OBSERVATION_COVERAGE_PCT"])
+
+    for key, field, denom_n, denom_name in (
+            ("MAX_HTTP_429_RATE", "HTTP_429", attempted, "ATTEMPTED_POLLS"),
+            ("MAX_OTHER_FAILURE_RATE", "OTHER_HTTP_FAILURES", attempted,
+             "ATTEMPTED_POLLS"),
+            ("MAX_PARSE_FAILURE_RATE", "PARSE_FAILURES", attempted,
+             "ATTEMPTED_POLLS"),
+            ("MAX_INVALID_BOOK_RATE", "INVALID_BOOK_COUNT", successful,
+             "SUCCESSFUL_POLLS"),
+            ("MAX_CROSSED_BOOK_RATE", "CROSSED_BOOK_COUNT", successful,
+             "SUCCESSFUL_POLLS")):
+        n = rep.get(field, 0) or 0
+        rate = (n / denom_n) if denom_n else (0.0 if n == 0 else 1.0)
+        _check(key, round(rate, 6), T[key], rate <= T[key],
+               "%d / %d %s" % (n, denom_n, denom_name))
+
+    for key, field in (("MAX_MEDIAN_OBSERVATION_GAP_S",
+                        "MEDIAN_OBSERVATION_GAP"),
+                       ("MAX_P90_OBSERVATION_GAP_S", "P90_OBSERVATION_GAP"),
+                       ("MAX_MAXIMUM_OBSERVATION_GAP_S",
+                        "MAX_OBSERVATION_GAP")):
+        v = rep.get(field)
+        if isinstance(v, (int, float)):
+            _check(key, v, T[key], v <= T[key])
+        else:
+            _check(key, NOT_IDENTIFIED, T[key], False,
+                   "no measurable gap series")
+
+    suff_m = rep.get("MARKETS_WITH_SUFFICIENT_SERIES")
+    _check("MIN_MARKETS_WITH_SUFFICIENT_SERIES", suff_m,
+           T["MIN_MARKETS_WITH_SUFFICIENT_SERIES"],
+           isinstance(suff_m, int)
+           and suff_m >= T["MIN_MARKETS_WITH_SUFFICIENT_SERIES"])
+
+    suff_e = rep.get("EVENTS_WITH_SUFFICIENT_SERIES")
+    _check("MIN_EVENTS_WITH_SUFFICIENT_SERIES", suff_e,
+           T["MIN_EVENTS_WITH_SUFFICIENT_SERIES"],
+           isinstance(suff_e, int)
+           and suff_e >= T["MIN_EVENTS_WITH_SUFFICIENT_SERIES"])
+
+    if T["CLOCK_MONOTONICITY_REQUIRED"]:
+        steps = rep.get("CLOCK_NON_MONOTONE_STEPS", 0) or 0
+        _check("CLOCK_MONOTONICITY_REQUIRED", steps,
+               T["MAX_NON_MONOTONE_STEPS"],
+               rep.get("CLOCK_MONOTONICITY_STATUS") == "MONOTONE"
+               and steps <= T["MAX_NON_MONOTONE_STEPS"])
+
+    dup = rep.get("DUPLICATE_SNAPSHOT_COUNT", 0) or 0
+    _check("MAX_DUPLICATE_SNAPSHOTS", dup, T["MAX_DUPLICATE_SNAPSHOTS"],
+           dup <= T["MAX_DUPLICATE_SNAPSHOTS"])
+
     ok = not fails
     return {
         "CAPTURE_QUALITY_GATE": "PASS" if ok else "FAIL",
         "QUALITY_GATE_FAILURES": fails,
+        "QUALITY_GATE_CHECKS": checks,
         "SIGNAL_ANALYSIS_MAY_PROCEED": ok,
+        "FROZEN_QUALITY_THRESHOLDS_SHA": FROZEN_QUALITY_THRESHOLDS_SHA,
+        "FROZEN_QUALITY_THRESHOLDS_STATUS": FROZEN_QUALITY_THRESHOLDS_STATUS,
+        "THRESHOLDS_INTACT": integrity["INTACT"],
+        "THRESHOLD_CHANGE_RULE": THRESHOLD_CHANGE_RULE,
+        "EVALUATED_UNDER": "THE_FROZEN_RULE",
         "WHY_FIRST": WHY_FIRST,
     }
 

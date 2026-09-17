@@ -1209,6 +1209,18 @@ CAPTURE_V2_DISPATCH_RULE = (
     "TARGET_EVENT_N and TARGET_MARKETS_PER_EVENT are reported separately and "
     "one is never traded for the other")
 
+FROZEN_QUALITY_THRESHOLDS_STATUS = "FROZEN_AND_HASHED"
+FROZEN_QUALITY_THRESHOLDS_SHA = (
+    "70e6ddda88ad4141ae3ed58691d8322cea4bf37a83c89efd481792c47243e7fb")
+THRESHOLDS_FROZEN_BEFORE_ANY_CAPTURE_DATA = True
+THRESHOLD_CHANGE_RULE = (
+    "a frozen threshold MAY NOT be modified after observing a result. If one "
+    "is later judged scientifically wrong the current capture is STILL "
+    "evaluated under the frozen rule and its verdict stands, the reason is "
+    "documented, and the corrected rule applies ONLY to the next experiment. "
+    "Re-scoring a finished capture under a revised threshold is not a "
+    "correction, it is choosing the answer")
+
 PURCHASE_STATUS = "NOT_PURCHASED_CONDITION_A_MET_AWAITING_AUTHORIZATION"
 PURCHASE_GATE_SUMMARY = (
     "condition A IS met: the matched cohort is defined at 222 events, which "
@@ -1289,6 +1301,11 @@ def describe():
         "HARVEST_DECISION_STATUS": HARVEST_DECISION_STATUS,
         "STOP_IS_HARD_TO_REACH": STOP_IS_HARD_TO_REACH,
         "CAPTURE_V2_DISPATCH_RULE": CAPTURE_V2_DISPATCH_RULE,
+        "FROZEN_QUALITY_THRESHOLDS_STATUS": FROZEN_QUALITY_THRESHOLDS_STATUS,
+        "FROZEN_QUALITY_THRESHOLDS_SHA": FROZEN_QUALITY_THRESHOLDS_SHA,
+        "THRESHOLDS_FROZEN_BEFORE_ANY_CAPTURE_DATA":
+            THRESHOLDS_FROZEN_BEFORE_ANY_CAPTURE_DATA,
+        "THRESHOLD_CHANGE_RULE": THRESHOLD_CHANGE_RULE,
         "PURCHASE_STATUS": PURCHASE_STATUS,
         "PURCHASE_GATE_SUMMARY": PURCHASE_GATE_SUMMARY,
         "WHAT_CONDITION_A_DOES_NOT_AUTHORIZE":

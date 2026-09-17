@@ -26,7 +26,9 @@ def _manifest(**over):
               selection_sha="a" * 64, capture_spec_sha="b" * 64,
               run_id="12345", host="github-hosted",
               rate_limit_parameters={"RPS": "0.25"},
-              scientific_definitions=_defs())
+              scientific_definitions=_defs(),
+              frozen_quality_thresholds=CQ.FROZEN_QUALITY_THRESHOLDS,
+              frozen_quality_thresholds_sha=CQ.FROZEN_QUALITY_THRESHOLDS_SHA)
     kw.update(over)
     return CM.build_manifest(**kw)
 
@@ -151,81 +153,118 @@ def test_enough_events_earns_the_stronger_label():
 
 # --- Section 5. The quality gate. ------------------------------------------
 
-def _series(n=100, markets=("m1", "m2"), event_of=None, start_s=0,
-            step_s=24, bid=0.40, ask=0.42):
+def _series(n=225, markets=None, start_s=0, step_s=24, bid=0.40, ask=0.42):
+    """The frozen capture's real shape: 3 events x 2 markets, 24 s revisit."""
+    markets = markets or [("ev%d" % (i // 2 + 1), "m%d" % (i + 1))
+                          for i in range(6)]
     base = datetime.datetime(2026, 9, 17, 18, 0,
                              tzinfo=datetime.timezone.utc)
     rows = []
     for seq in range(n):
-        for m in markets:
+        for ev, m in markets:
             t = base + datetime.timedelta(seconds=start_s + seq * step_s)
             rows.append({"kind": "TICK", "MARKET_SLUG": m, "seq": seq,
-                         "RECEIPT_UTC": t.isoformat(),
-                         "EVENT_KEY": (event_of or (lambda s: "ev-" + s))(m),
+                         "RECEIPT_UTC": t.isoformat(), "EVENT_KEY": ev,
                          "BID": bid, "ASK": ask})
     return rows
 
 
+PLANNED = 225 * 6
+
+
 def test_a_clean_capture_passes_the_gate():
-    rows = _series(100)
-    q = CQ.quality(rows, [], planned_polls=200, nominal_revisit_s=24.0)
-    assert q["CAPTURE_QUALITY_GATE"] == "PASS"
+    q = CQ.quality(_series(), [], planned_polls=PLANNED,
+                   nominal_revisit_s=24.0)
+    assert q["CAPTURE_QUALITY_GATE"] == "PASS", q["QUALITY_GATE_FAILURES"]
     assert q["SIGNAL_ANALYSIS_MAY_PROCEED"] is True
-    assert q["TIMESTAMP_ROWS"] == 200
-    assert q["INDEPENDENT_EVENTS"] == 2
+    assert q["TIMESTAMP_ROWS"] == PLANNED
+    assert q["INDEPENDENT_EVENTS"] == 3
+    assert q["MARKETS_WITH_SUFFICIENT_SERIES"] == 6
+    assert q["EVENTS_WITH_SUFFICIENT_SERIES"] == 3
 
 
 def test_every_figure_carries_rows_and_events_together():
-    q = CQ.quality(_series(10), [], planned_polls=20)
+    q = CQ.quality(_series(), [], planned_polls=PLANNED)
     assert "TIMESTAMP_ROWS" in q and "INDEPENDENT_EVENTS" in q
 
 
-def test_a_crossed_book_fails_the_gate():
-    rows = _series(10)
+def test_every_check_reports_observed_beside_the_frozen_limit():
+    q = CQ.quality(_series(), [], planned_polls=PLANNED)
+    for c in q["QUALITY_GATE_CHECKS"]:
+        assert "OBSERVED" in c and "FROZEN_LIMIT" in c and "PASS" in c
+    names = {c["CHECK"] for c in q["QUALITY_GATE_CHECKS"]}
+    for k in CQ.FROZEN_QUALITY_THRESHOLDS:
+        if k in ("COMPLETE_SERIES_FRACTION", "MIN_OBSERVATIONS_PER_MARKET",
+                 "MAX_NON_MONOTONE_STEPS"):
+            continue        # consumed inside other checks, not their own row
+        assert k in names, k
+
+
+def test_one_crossed_book_fails_the_gate_at_zero_tolerance():
+    rows = _series()
     rows[3]["BID"], rows[3]["ASK"] = 0.60, 0.40
-    q = CQ.quality(rows, [], planned_polls=20)
+    q = CQ.quality(rows, [], planned_polls=PLANNED)
     assert q["CROSSED_BOOK_COUNT"] == 1
     assert q["CAPTURE_QUALITY_GATE"] == "FAIL"
-    assert "CROSSED_BOOKS_PRESENT" in q["QUALITY_GATE_FAILURES"]
+    assert "MAX_CROSSED_BOOK_RATE" in q["QUALITY_GATE_FAILURES"]
 
 
 def test_an_invalid_price_fails_the_gate():
-    rows = _series(10)
+    rows = _series()
     rows[2]["ASK"] = 1.7
-    q = CQ.quality(rows, [], planned_polls=20)
+    q = CQ.quality(rows, [], planned_polls=PLANNED)
     assert q["INVALID_BOOK_COUNT"] == 1
-    assert "INVALID_BOOKS" in q["QUALITY_GATE_FAILURES"]
+    assert "MAX_INVALID_BOOK_RATE" in q["QUALITY_GATE_FAILURES"]
 
 
 def test_missing_sides_are_counted_separately():
-    rows = _series(5)
+    rows = _series()
     rows[0]["BID"] = "NOT_IDENTIFIED"
     rows[1]["ASK"] = None
-    q = CQ.quality(rows, [], planned_polls=10)
+    q = CQ.quality(rows, [], planned_polls=PLANNED)
     assert q["MISSING_BID_COUNT"] == 1
     assert q["MISSING_ASK_COUNT"] == 1
 
 
 def test_a_duplicate_snapshot_fails_the_gate():
-    rows = _series(5)
+    rows = _series()
     rows.append(dict(rows[0]))
-    q = CQ.quality(rows, [], planned_polls=10)
+    q = CQ.quality(rows, [], planned_polls=PLANNED)
     assert q["DUPLICATE_SNAPSHOT_COUNT"] == 1
-    assert "DUPLICATE_SNAPSHOTS" in q["QUALITY_GATE_FAILURES"]
+    assert "MAX_DUPLICATE_SNAPSHOTS" in q["QUALITY_GATE_FAILURES"]
 
 
 def test_a_backwards_clock_is_caught():
-    rows = _series(5, markets=("m1",))
-    rows[3]["RECEIPT_UTC"] = "2026-09-17T17:00:00+00:00"
-    q = CQ.quality(rows, [], planned_polls=5)
+    rows = _series()
+    rows[18]["RECEIPT_UTC"] = "2026-09-17T17:00:00+00:00"
+    q = CQ.quality(rows, [], planned_polls=PLANNED)
     assert q["CLOCK_MONOTONICITY_STATUS"] == "NON_MONOTONE"
-    assert "CLOCK_NOT_MONOTONE" in q["QUALITY_GATE_FAILURES"]
+    assert "CLOCK_MONOTONICITY_REQUIRED" in q["QUALITY_GATE_FAILURES"]
 
 
 def test_low_coverage_fails_the_gate():
-    q = CQ.quality(_series(10), [], planned_polls=100)
-    assert q["OBSERVATION_COVERAGE_PCT"] < CQ.COVERAGE_PCT_FLOOR
-    assert q["CAPTURE_QUALITY_GATE"] == "FAIL"
+    q = CQ.quality(_series(60), [], planned_polls=PLANNED)
+    assert q["OBSERVATION_COVERAGE_PCT"] < \
+        CQ.FROZEN_QUALITY_THRESHOLDS["MIN_OBSERVATION_COVERAGE_PCT"]
+    assert "MIN_OBSERVATION_COVERAGE_PCT" in q["QUALITY_GATE_FAILURES"]
+
+
+def test_the_429_rate_is_a_rate_not_a_count():
+    """2% of attempts is the frozen limit, so scale matters, not the raw n."""
+    clean = _series()
+    few = [{"kind": "TICK_ERROR", "status": 429}] * 10      # ~0.7%
+    q = CQ.quality(clean, few, planned_polls=len(clean) + 10)
+    assert "MAX_HTTP_429_RATE" not in q["QUALITY_GATE_FAILURES"]
+    many = [{"kind": "TICK_ERROR", "status": 429}] * 200    # ~12.9%
+    q2 = CQ.quality(clean, many, planned_polls=len(clean) + 200)
+    assert "MAX_HTTP_429_RATE" in q2["QUALITY_GATE_FAILURES"]
+
+
+def test_a_single_parse_failure_is_nearly_intolerable():
+    clean = _series()
+    errs = [{"kind": "TICK_ERROR", "error": "json decode failure"}] * 12
+    q = CQ.quality(clean, errs, planned_polls=len(clean) + 12)
+    assert "MAX_PARSE_FAILURE_RATE" in q["QUALITY_GATE_FAILURES"]
 
 
 def test_failures_are_named_by_kind_not_pooled():
@@ -234,7 +273,7 @@ def test_failures_are_named_by_kind_not_pooled():
             {"kind": "TICK_ERROR", "status": 500},
             {"kind": "TICK_ERROR", "error": "Read timed out"},
             {"kind": "TICK_ERROR", "error": "json decode failure"}]
-    q = CQ.quality(_series(10), errs, planned_polls=25)
+    q = CQ.quality(_series(), errs, planned_polls=PLANNED + 5)
     assert q["HTTP_429"] == 2
     assert q["OTHER_HTTP_FAILURES"] == 1
     assert q["TIMEOUTS"] == 1
@@ -242,32 +281,111 @@ def test_failures_are_named_by_kind_not_pooled():
 
 
 def test_attempted_counts_errors_too():
-    q = CQ.quality(_series(5), [{"kind": "TICK_ERROR", "status": 429}] * 3,
-                   planned_polls=13)
-    assert q["SUCCESSFUL_POLLS"] == 10
-    assert q["ATTEMPTED_POLLS"] == 13
+    q = CQ.quality(_series(), [{"kind": "TICK_ERROR", "status": 429}] * 3,
+                   planned_polls=PLANNED + 3)
+    assert q["SUCCESSFUL_POLLS"] == PLANNED
+    assert q["ATTEMPTED_POLLS"] == PLANNED + 3
 
 
-def test_a_big_hole_is_reported_and_fails_the_gate():
-    rows = _series(5, markets=("m1",), step_s=24)
-    rows[-1]["RECEIPT_UTC"] = "2026-09-17T19:00:00+00:00"   # a long jump
-    q = CQ.quality(rows, [], planned_polls=5, nominal_revisit_s=24.0)
-    assert q["MAX_OBSERVATION_GAP"] > 4 * 24
-    assert any(f.startswith("MAX_GAP_EXCEEDS")
-               for f in q["QUALITY_GATE_FAILURES"])
+def test_a_five_minute_hole_fails_the_frozen_maximum_gap():
+    rows = _series()
+    rows[-1]["RECEIPT_UTC"] = "2026-09-17T21:00:00+00:00"
+    q = CQ.quality(rows, [], planned_polls=PLANNED, nominal_revisit_s=24.0)
+    assert q["MAX_OBSERVATION_GAP"] > \
+        CQ.FROZEN_QUALITY_THRESHOLDS["MAX_MAXIMUM_OBSERVATION_GAP_S"]
+    assert "MAX_MAXIMUM_OBSERVATION_GAP_S" in q["QUALITY_GATE_FAILURES"]
 
 
-def test_complete_and_partial_series_are_separated():
-    rows = _series(50, markets=("m1", "m2"))
-    rows = [r for r in rows if not (r["MARKET_SLUG"] == "m2"
-                                    and r["seq"] > 5)]
-    q = CQ.quality(rows, [], planned_polls=100)
-    assert q["MARKETS_WITH_COMPLETE_SERIES"] == 1
-    assert q["MARKETS_WITH_PARTIAL_SERIES"] == 1
+def test_one_market_may_halt_but_an_event_may_not_be_lost():
+    """5 of 6 markets is the frozen floor; all 3 events is also the floor."""
+    rows = [r for r in _series()
+            if not (r["MARKET_SLUG"] == "m2" and r["seq"] > 5)]
+    q = CQ.quality(rows, [], planned_polls=PLANNED)
+    assert q["MARKETS_WITH_SUFFICIENT_SERIES"] == 5
+    assert q["EVENTS_WITH_SUFFICIENT_SERIES"] == 3   # m1 still carries ev1
+    assert "MIN_MARKETS_WITH_SUFFICIENT_SERIES" not in \
+        q["QUALITY_GATE_FAILURES"]
+
+
+def test_losing_a_whole_event_fails_even_though_four_markets_survive():
+    rows = [r for r in _series()
+            if r["MARKET_SLUG"] not in ("m5", "m6")]     # both of ev3
+    q = CQ.quality(rows, [], planned_polls=PLANNED)
+    assert q["EVENTS_WITH_SUFFICIENT_SERIES"] == 2
+    assert "MIN_EVENTS_WITH_SUFFICIENT_SERIES" in q["QUALITY_GATE_FAILURES"]
 
 
 def test_the_thresholds_are_predeclared():
     assert "not a gate" in CQ.THRESHOLDS_ARE_PREDECLARED
+
+
+# --- The frozen threshold block. -------------------------------------------
+
+def test_the_thresholds_are_frozen_and_hashed():
+    b = CQ.thresholds_block()
+    assert b["FROZEN_QUALITY_THRESHOLDS_STATUS"] == "FROZEN_AND_HASHED"
+    assert b["FROZEN_BEFORE_ANY_CAPTURE_DATA"] is True
+    assert len(b["FROZEN_QUALITY_THRESHOLDS_SHA"]) == 64
+
+
+def test_every_named_threshold_is_present_by_value():
+    T = CQ.FROZEN_QUALITY_THRESHOLDS
+    for k in ("MIN_OBSERVATION_COVERAGE_PCT", "MAX_HTTP_429_RATE",
+              "MAX_OTHER_FAILURE_RATE", "MAX_PARSE_FAILURE_RATE",
+              "MAX_INVALID_BOOK_RATE", "MAX_CROSSED_BOOK_RATE",
+              "MAX_MEDIAN_OBSERVATION_GAP_S", "MAX_P90_OBSERVATION_GAP_S",
+              "MAX_MAXIMUM_OBSERVATION_GAP_S",
+              "MIN_MARKETS_WITH_SUFFICIENT_SERIES",
+              "CLOCK_MONOTONICITY_REQUIRED"):
+        assert k in T, k
+        assert not isinstance(T[k], str)        # by value, never a reference
+
+
+def test_editing_a_threshold_is_detected_and_fails_the_gate():
+    original = CQ.FROZEN_QUALITY_THRESHOLDS["MIN_OBSERVATION_COVERAGE_PCT"]
+    try:
+        CQ.FROZEN_QUALITY_THRESHOLDS["MIN_OBSERVATION_COVERAGE_PCT"] = 1.0
+        assert CQ.thresholds_intact()["INTACT"] is False
+        q = CQ.quality(_series(60), [], planned_polls=PLANNED)
+        assert "FROZEN_THRESHOLDS_EDITED_AFTER_HASHING" in \
+            q["QUALITY_GATE_FAILURES"]
+    finally:
+        CQ.FROZEN_QUALITY_THRESHOLDS["MIN_OBSERVATION_COVERAGE_PCT"] = original
+    assert CQ.thresholds_intact()["INTACT"] is True
+
+
+def test_loosening_a_threshold_cannot_rescue_a_failed_capture():
+    """The escape hatch this closes: fail, then lower the bar, then pass."""
+    rows = _series(60)
+    before = CQ.quality(rows, [], planned_polls=PLANNED)
+    assert before["CAPTURE_QUALITY_GATE"] == "FAIL"
+    original = CQ.FROZEN_QUALITY_THRESHOLDS["MIN_OBSERVATION_COVERAGE_PCT"]
+    try:
+        CQ.FROZEN_QUALITY_THRESHOLDS["MIN_OBSERVATION_COVERAGE_PCT"] = 1.0
+        after = CQ.quality(rows, [], planned_polls=PLANNED)
+        assert after["CAPTURE_QUALITY_GATE"] == "FAIL"
+    finally:
+        CQ.FROZEN_QUALITY_THRESHOLDS["MIN_OBSERVATION_COVERAGE_PCT"] = original
+
+
+def test_a_revision_applies_only_to_the_next_experiment():
+    assert CQ.NEXT_EXPERIMENT_THRESHOLD_REVISIONS == ()
+    assert CQ.REVISIONS_DO_NOT_APPLY_TO_THE_CURRENT_CAPTURE is True
+    assert "ONLY to the NEXT" in CQ.THRESHOLD_CHANGE_RULE
+    assert "choosing the answer" in CQ.THRESHOLD_CHANGE_RULE
+
+
+def test_the_gate_says_which_rule_it_evaluated_under():
+    q = CQ.quality(_series(), [], planned_polls=PLANNED)
+    assert q["EVALUATED_UNDER"] == "THE_FROZEN_RULE"
+    assert q["FROZEN_QUALITY_THRESHOLDS_SHA"] == \
+        CQ.FROZEN_QUALITY_THRESHOLDS_SHA
+
+
+def test_the_report_carries_the_thresholds_by_value():
+    q = CQ.quality(_series(), [], planned_polls=PLANNED)
+    assert q["FROZEN_QUALITY_THRESHOLDS"] == CQ.FROZEN_QUALITY_THRESHOLDS
+    assert q["FROZEN_QUALITY_THRESHOLDS_STATUS"] == "FROZEN_AND_HASHED"
 
 
 # --- Section 14. Version advances. -----------------------------------------
@@ -305,19 +423,19 @@ def test_a_state_change_with_no_venue_advance_is_reported_too():
 # --- Section 20. The decision. ---------------------------------------------
 
 def test_a_failed_quality_gate_forces_repair():
-    q = CQ.quality(_series(10), [], planned_polls=100)
+    q = CQ.quality(_series(60), [], planned_polls=PLANNED)
     d = CQ.harvest_decision(q)
     assert d["HARVEST_DECISION"] == "REPAIR_CAPTURE_AND_REPEAT"
 
 
 def test_a_clean_capture_with_findings_goes_larger():
-    q = CQ.quality(_series(100), [], planned_polls=200)
+    q = CQ.quality(_series(), [], planned_polls=PLANNED)
     d = CQ.harvest_decision(q, signal_findings=["microprice at 30s"])
     assert d["HARVEST_DECISION"] == "GO_TO_LARGER_PROSPECTIVE_CAPTURE"
 
 
 def test_stop_is_refused_on_a_three_event_pilot():
-    q = CQ.quality(_series(100), [], planned_polls=200)
+    q = CQ.quality(_series(), [], planned_polls=PLANNED)
     d = CQ.harvest_decision(q, structural_negative=True,
                             independent_events=3)
     assert d["HARVEST_DECISION"] == "GO_TO_LARGER_PROSPECTIVE_CAPTURE"
@@ -325,14 +443,14 @@ def test_stop_is_refused_on_a_three_event_pilot():
 
 
 def test_stop_needs_both_a_structural_negative_and_enough_events():
-    q = CQ.quality(_series(100), [], planned_polls=200)
+    q = CQ.quality(_series(), [], planned_polls=PLANNED)
     d = CQ.harvest_decision(q, structural_negative=True,
                             independent_events=200)
     assert d["HARVEST_DECISION"] == "STOP_THIS_MICROSTRUCTURE_PATH"
 
 
 def test_exactly_one_of_three_decisions_is_returned():
-    q = CQ.quality(_series(100), [], planned_polls=200)
+    q = CQ.quality(_series(), [], planned_polls=PLANNED)
     for kw in ({}, {"structural_negative": True},
                {"independent_events": 3}):
         d = CQ.harvest_decision(q, **kw)
@@ -349,15 +467,18 @@ def test_an_unknown_plan_does_not_become_100_percent_coverage():
     Defaulting PLANNED_POLLS to ATTEMPTED_POLLS would make coverage 100% by
     construction on a capture nobody planned.
     """
-    q = CQ.quality(_series(10), [], planned_polls=None)
+    q = CQ.quality(_series(), [], planned_polls=None)
     assert q["PLANNED_POLLS"] == "NOT_IDENTIFIED"
     assert q["OBSERVATION_COVERAGE_PCT"] == "NOT_IDENTIFIED"
     assert q["CAPTURE_QUALITY_GATE"] == "FAIL"
-    assert "PLANNED_POLLS_NOT_IDENTIFIED" in q["QUALITY_GATE_FAILURES"]
+    assert "MIN_OBSERVATION_COVERAGE_PCT" in q["QUALITY_GATE_FAILURES"]
+    row = [c for c in q["QUALITY_GATE_CHECKS"]
+           if c["CHECK"] == "MIN_OBSERVATION_COVERAGE_PCT"][0]
+    assert "PLANNED_POLLS_NOT_IDENTIFIED" in row["NOTE"]
 
 
 def test_an_unknown_plan_forces_repair_not_go():
-    q = CQ.quality(_series(10), [], planned_polls=None)
+    q = CQ.quality(_series(), [], planned_polls=None)
     d = CQ.harvest_decision(q, signal_findings=["looked promising"])
     assert d["HARVEST_DECISION"] == "REPAIR_CAPTURE_AND_REPEAT"
 
@@ -387,3 +508,73 @@ def test_v2_is_not_dispatched_automatically_on_v1_completion():
 def test_v2_must_raise_events_not_only_markets():
     import ev_core_registers as R
     assert "one is never traded for the other" in R.CAPTURE_V2_DISPATCH_RULE
+
+
+# --- The thresholds travel into the manifest and the spec record. ----------
+
+def test_the_manifest_carries_the_thresholds_by_value():
+    m = _manifest()
+    assert m["FROZEN_QUALITY_THRESHOLDS"] == CQ.FROZEN_QUALITY_THRESHOLDS
+    assert m["FROZEN_QUALITY_THRESHOLDS_SHA"] == \
+        CQ.FROZEN_QUALITY_THRESHOLDS_SHA
+    assert m["MANIFEST_COMPLETE"] is True
+
+
+def test_a_loosened_threshold_changes_the_manifest_hash():
+    a = _manifest()
+    loosened = dict(CQ.FROZEN_QUALITY_THRESHOLDS)
+    loosened["MIN_OBSERVATION_COVERAGE_PCT"] = 1.0
+    b = _manifest(frozen_quality_thresholds=loosened)
+    assert a["MANIFEST_SHA"] != b["MANIFEST_SHA"]
+
+
+def test_a_loosened_threshold_is_caught_as_drift_at_harvest():
+    """The failure mode: a failed capture passed by lowering the bar."""
+    m = _manifest()
+    live = {k: m[k] for k in CM.COMPARED_AT_HARVEST}
+    loosened = dict(CQ.FROZEN_QUALITY_THRESHOLDS)
+    loosened["MAX_CROSSED_BOOK_RATE"] = 0.5
+    live["FROZEN_QUALITY_THRESHOLDS"] = loosened
+    v = CM.verify_against(m, live)
+    assert v["STATUS"] == "DRIFTED"
+    assert v["HARVEST_MAY_PROCEED"] is False
+    assert "FROZEN_QUALITY_THRESHOLDS" in v["DRIFTED_FIELDS"]
+
+
+def test_threshold_drift_is_named_as_the_worst_kind():
+    assert "whether the measurement was allowed to count" in \
+        CM.THRESHOLD_DRIFT_IS_THE_WORST_KIND
+
+
+def test_the_capture_spec_record_binds_parameters_to_the_frozen_gate():
+    import substantive_capture as SC
+    spec = CM.capture_spec_record(
+        {"RATE_RPS": SC.RATE_RPS, "REQUEST_INTERVAL_S": SC.REQUEST_INTERVAL_S,
+         "CAPTURE_SECONDS": SC.CAPTURE_SECONDS, "EVENTS": SC.EVENTS,
+         "MARKETS": SC.MARKETS, "NOMINAL_REVISIT_S": SC.NOMINAL_REVISIT_S},
+        CQ.FROZEN_QUALITY_THRESHOLDS, CQ.FROZEN_QUALITY_THRESHOLDS_SHA)
+    assert spec["FROZEN_QUALITY_THRESHOLDS"] == CQ.FROZEN_QUALITY_THRESHOLDS
+    assert len(spec["CAPTURE_SPEC_RECORD_SHA"]) == 64
+    assert spec["THRESHOLDS_FROZEN_BEFORE_ANY_CAPTURE_DATA"] is True
+
+
+def test_the_spec_record_explains_why_the_capture_source_is_untouched():
+    spec = CM.capture_spec_record({}, CQ.FROZEN_QUALITY_THRESHOLDS,
+                                  CQ.FROZEN_QUALITY_THRESHOLDS_SHA)
+    assert "pinned code SHA" in spec["WHY_NOT_IN_THE_CAPTURE_SOURCE"]
+
+
+def test_the_frozen_capture_source_was_not_edited():
+    """The thresholds must NOT have been written into the pinned capture."""
+    import substantive_capture as SC
+    src = open(SC.__file__).read()
+    assert "FROZEN_QUALITY_THRESHOLDS" not in src
+
+
+def test_the_register_records_the_frozen_threshold_sha():
+    """The register's copy must match the module, or two artifacts disagree."""
+    import ev_core_registers as R
+    assert R.FROZEN_QUALITY_THRESHOLDS_SHA == CQ.FROZEN_QUALITY_THRESHOLDS_SHA
+    assert R.FROZEN_QUALITY_THRESHOLDS_STATUS == "FROZEN_AND_HASHED"
+    assert R.THRESHOLDS_FROZEN_BEFORE_ANY_CAPTURE_DATA is True
+    assert "choosing the answer" in R.THRESHOLD_CHANGE_RULE
