@@ -629,7 +629,8 @@ def test_labels_are_not_borrowed_from_another_market():
                 "BEST_BID": 0.40 if mk == "m0" else 0.50,
                 "BEST_ASK": 0.42 if mk == "m0" else 0.52})
     lab = BD.label_row(series[0], series)
-    assert lab["LABEL_STATUS"]["5S"] == BD.MISSING
+    assert lab["LABEL_STATUS"]["5S"] == \
+        BD.FIVE_SECOND_HORIZON_STATUS
     assert lab["LABEL_STATUS"]["30S"] == "PRESENT"
     assert lab["LABEL_REALISED_OFFSET_S"]["30S"] == -6.0   # m0's own row
     assert lab["MID_MOVE_30S"] == pytest.approx(0.0)       # m0 never moved

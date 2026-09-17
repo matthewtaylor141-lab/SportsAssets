@@ -233,6 +233,15 @@ LADDER_THRESHOLDS_ARE_A_SEPARATE_OPEN_QUESTION = (
 
 INTERACTION_POWER_STATUS = "PLANNING_APPROXIMATION_ONLY"
 
+PLANNING_PERMISSION_IS_NOT_EVIDENTIARY_PERMISSION = (
+    "MAY_ESTIMATE was a single boolean, and a planning-grade sample-size "
+    "calculation flipping it to True read downstream as 'this interaction is "
+    "now admissible evidence'. It is not. The calculation is a normal "
+    "approximation over a caller-supplied variance with a Bonferroni split; "
+    "clearing it says the estimate is worth RUNNING. Whether its result may "
+    "be ADMITTED is a separate question that this module answers BLOCKED "
+    "until the conditions in WHAT_FINAL_ADMISSION_NEEDS are met")
+
 WHY_PLANNING_ONLY = (
     "required_events_for_interaction() is a two-sided normal approximation "
     "with a Bonferroni split across interaction degrees of freedom and an "
@@ -410,6 +419,10 @@ def interaction(name, event_n=0, effect_size_of_interest=None,
         if not event_n_valid:
             blocked.append("INDEPENDENT_EVENT_N")
         out["MAY_ESTIMATE"] = NOT_IDENTIFIED
+        out["MAY_RUN_EXPLORATORY_ESTIMATE"] = NOT_IDENTIFIED
+        out["EVIDENTIARY_ADMISSION_STATUS"] = "BLOCKED"
+        out["PLANNING_PERMISSION_IS_NOT_EVIDENTIARY_PERMISSION"] = \
+            PLANNING_PERMISSION_IS_NOT_EVIDENTIARY_PERMISSION
         out["BLOCKED_ON"] = tuple(blocked)
         out["WHY_NOT"] = (
             "a non-negative integer event count is required; %r is not one"
@@ -420,9 +433,24 @@ def interaction(name, event_n=0, effect_size_of_interest=None,
         return out
 
     enough_events = event_n >= req["REQUIRED_EVENT_N"]
-    out["MAY_ESTIMATE"] = bool(enough_events and regime_ok)
+    may_explore = bool(enough_events and regime_ok)
+    out["MAY_RUN_EXPLORATORY_ESTIMATE"] = may_explore
+    # Back-compatible name, now explicitly the EXPLORATORY permission.
+    out["MAY_ESTIMATE"] = may_explore
+    out["MAY_ESTIMATE_MEANS"] = "MAY_RUN_EXPLORATORY_ESTIMATE"
+    # A planning-grade sample-size calculation clears the way to RUN the
+    # estimate. It does not make whatever the estimate returns admissible
+    # evidence: the requirement itself came from a normal approximation with
+    # a caller-supplied variance and a Bonferroni split, and
+    # INTERACTION_POWER_STATUS says so.
+    out["EVIDENTIARY_ADMISSION_STATUS"] = "BLOCKED"
+    out["EVIDENTIARY_ADMISSION_BLOCKED_ON"] = (
+        "INTERACTION_POWER_STATUS_IS_PLANNING_APPROXIMATION_ONLY",)
+    out["WHAT_FINAL_ADMISSION_NEEDS"] = WHAT_FINAL_ADMISSION_NEEDS
+    out["PLANNING_PERMISSION_IS_NOT_EVIDENTIARY_PERMISSION"] = \
+        PLANNING_PERMISSION_IS_NOT_EVIDENTIARY_PERMISSION
     out["REQUIRED_EVENT_N"] = req["REQUIRED_EVENT_N"]
-    out["WHY_NOT"] = None if out["MAY_ESTIMATE"] else (
+    out["WHY_NOT"] = None if may_explore else (
         "%d independent events against a derived requirement of %d, regime "
         "support %s" % (event_n, req["REQUIRED_EVENT_N"],
                         "sufficient" if regime_ok else "insufficient"))

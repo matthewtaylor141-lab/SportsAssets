@@ -652,3 +652,88 @@ def summarise_fills(rows):
         "PROFITABILITY": NOT_IDENTIFIED,
         "WIN_RATE": NOT_IDENTIFIED,
     }
+
+
+# ===========================================================================
+# Section 34. The fill QUANTITY interface. INTERFACES ONLY -- NOTHING IS
+# ESTIMATED HERE.
+#
+# The EV engine's P_FILL is a single scalar: the probability that a posted
+# order is filled. That is not the quantity a maker actually cares about. A
+# 5,000-share quote that gets 200 shares away is not "filled", and it is not
+# "not filled" either -- and the economics of the two readings differ by more
+# than an order of magnitude.
+#
+# Every field below is NOT_IDENTIFIED. BETTOR has posted no orders, so there
+# is no fill distribution to estimate, and a plausible shape invented here
+# would propagate straight into EV_TOTAL_USD. What this section fixes is that
+# the QUESTION was not even representable: the interface existed only for the
+# binary.
+# ===========================================================================
+
+FILL_QUANTITY_FIELDS = (
+    "P_ANY_FILL_BY_HORIZON",
+    "P_FULL_FILL_BY_HORIZON",
+    "EXPECTED_FILL_FRACTION_BY_HORIZON",
+    "EXPECTED_FILLED_QTY_BY_HORIZON",
+    "FILL_QTY_DISTRIBUTION",
+    "TIME_TO_FIRST_FILL",
+    "TIME_TO_FULL_FILL",
+)
+
+FILL_QUANTITY_STATUS = "INTERFACE_ONLY_NOT_ESTIMATED"
+
+A_SCALAR_P_FILL_IS_NOT_A_FILL_MODEL = (
+    "P_FILL answers 'was the order filled'. A resting maker quote is filled "
+    "in PARTS, over TIME, and the part that fills is selected -- the informed "
+    "flow takes the shares it wants and leaves the rest. EXPECTED_FILLED_QTY "
+    "and P_ANY_FILL can differ by an order of magnitude on the same quote, "
+    "and the EV built on the scalar cannot tell which it meant")
+
+WHY_EVERY_FIELD_IS_NOT_IDENTIFIED = (
+    "BETTOR has posted no orders. There is no BETTOR-native fill-size "
+    "distribution, no time-to-first-fill and no partial-fill curve, and a "
+    "shape guessed from venue mechanics would enter EV_TOTAL_USD as though "
+    "it had been measured. The interface is declared so the question can be "
+    "asked of the prospective capture; the answers stay NOT_IDENTIFIED")
+
+WHAT_WOULD_IDENTIFY_THESE = (
+    "BETTOR_NATIVE_RESTING_ORDER_LOG",
+    "PER_ORDER_PARTIAL_FILL_SEQUENCE",
+    "QUEUE_POSITION_AT_INSERT_AND_AT_EACH_FILL",
+    "EXECUTION_TAPE_JOIN_WITH_BLOCK_INDEX",
+)
+
+FILL_QUANTITY_MAY_ENTER_ACTION_EV = False
+
+
+def fill_quantity_interface(quote=None, horizons_s=(5, 30, 60, 300)):
+    """The fill-quantity question, representable and unanswered.
+
+    Returns every field NOT_IDENTIFIED, per horizon where a horizon applies.
+    No caller may substitute P_FILL for any of these: a scalar fill
+    probability is a different quantity, and the substitution is what this
+    interface exists to make visible.
+    """
+    by_horizon = {"%dS" % h: NOT_IDENTIFIED for h in horizons_s}
+    out = {
+        "QUOTE": (quote or {}).get("QUOTE_ID", NOT_IDENTIFIED),
+        "FILL_QUANTITY_STATUS": FILL_QUANTITY_STATUS,
+        "P_ANY_FILL_BY_HORIZON": dict(by_horizon),
+        "P_FULL_FILL_BY_HORIZON": dict(by_horizon),
+        "EXPECTED_FILL_FRACTION_BY_HORIZON": dict(by_horizon),
+        "EXPECTED_FILLED_QTY_BY_HORIZON": dict(by_horizon),
+        "FILL_QTY_DISTRIBUTION": NOT_IDENTIFIED,
+        "TIME_TO_FIRST_FILL": NOT_IDENTIFIED,
+        "TIME_TO_FULL_FILL": NOT_IDENTIFIED,
+        "FILL_QUANTITY_FIELDS": FILL_QUANTITY_FIELDS,
+        "HORIZONS_S": tuple(horizons_s),
+        "A_SCALAR_P_FILL_IS_NOT_A_FILL_MODEL":
+            A_SCALAR_P_FILL_IS_NOT_A_FILL_MODEL,
+        "WHY_EVERY_FIELD_IS_NOT_IDENTIFIED": WHY_EVERY_FIELD_IS_NOT_IDENTIFIED,
+        "WHAT_WOULD_IDENTIFY_THESE": WHAT_WOULD_IDENTIFY_THESE,
+        "MAY_ENTER_ACTION_EV": FILL_QUANTITY_MAY_ENTER_ACTION_EV,
+        "NOTHING_IS_TRAINED_HERE": True,
+        "NO_ORDER_IS_PLACED": True,
+    }
+    return out

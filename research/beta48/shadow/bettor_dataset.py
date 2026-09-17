@@ -185,7 +185,24 @@ LABEL_FIELDS = tuple(
                  "EXECUTABLE_BUY_PRICE", "EXECUTABLE_SELL_PRICE")
     for h in HORIZONS_S
 ) + tuple("MID_MOVE_%dS" % h for h in HORIZONS_S) \
-  + tuple("EXECUTABLE_MOVE_%dS" % h for h in HORIZONS_S)
+  + tuple("EXECUTABLE_MOVE_%dS" % h for h in HORIZONS_S) \
+  + tuple("EXECUTABLE_BUY_MOVE_%dS" % h for h in HORIZONS_S) \
+  + tuple("EXECUTABLE_SELL_MOVE_%dS" % h for h in HORIZONS_S)
+
+# The label families a target-specific status is published for.
+TARGET_BASES = ("MID_MOVE", "EXECUTABLE_MOVE", "EXECUTABLE_BUY_MOVE",
+                "EXECUTABLE_SELL_MOVE")
+
+ONE_SIDED_EXECUTABLE_LABEL_IS_NOT_SYMMETRIC = (
+    "EXECUTABLE_MOVE_h was BEST_BID(t+h) - BEST_ASK(t): buy at the ask now, "
+    "sell at the bid later. That is the BUY side alone. A short's round trip "
+    "is BEST_BID(t) - BEST_ASK(t+h), and it is not the negative of the buy "
+    "side -- each pays a different half of a spread that itself moves. A "
+    "model scored on the buy-side label and then used on both sides is "
+    "scored on a target it does not have. EXECUTABLE_MOVE_h is retained as "
+    "the BUY side under its original name and marked superseded")
+
+EXECUTABLE_MOVE_SUPERSEDED_BY = "EXECUTABLE_BUY_MOVE_<h>S"
 
 NO_INTERPOLATION_BEYOND_THE_HORIZON = (
     "a label at T+h is ONE observation nearest to T+h within a bounded "
@@ -367,7 +384,24 @@ WHY_A_TOLERANCE = (
     "widening it after seeing how many labels are missing is not")
 
 
-SUBJECT_KEYS = ("MARKET_ID", "CONDITION_ID", "TOKEN_ID", "EVENT_ID")
+# EVENT_ID is NOT a subject key. An event carries several markets -- a
+# moneyline and a total on the same game share it -- so matching on EVENT_ID
+# would take a DIFFERENT contract's later book as this contract's forward
+# observation, and call the price gap between them a "move".
+SUBJECT_KEYS = ("MARKET_ID", "CONDITION_ID", "TOKEN_ID")
+
+EVENT_ID_IS_NOT_A_MARKET_IDENTITY = (
+    "EVENT_ID was the last entry in SUBJECT_KEYS, so a row that named no "
+    "market but named an event matched every other market on that event. The "
+    "moneyline's T+60 book would label the total's move. An event is a "
+    "collection of markets, and a forward observation is THIS market later")
+
+A_ROW_WITH_NO_IDENTITY_MATCHES_NOTHING = (
+    "an origin row carrying no subject key at all used to match every "
+    "candidate, so a series spanning six interleaved markets was treated as "
+    "one market's. Identity must be established, not assumed from its "
+    "absence. The one exception is an explicit origin=None, which is the "
+    "caller stating the contract that the series is a single market's")
 
 TIE_BREAK_RULE = "MIN_TUPLE_ABS_TARGET_ERROR_THEN_OBSERVATION_TIMESTAMP"
 
@@ -398,14 +432,25 @@ def _same_subject(origin, candidate):
     names one and the candidate cannot answer, the candidate is skipped.
     """
     if origin is None:
+        # The caller states the contract: this series is one market's.
         return True
-    for k in SUBJECT_KEYS:
-        a = origin.get(k)
-        if a is None or a == NOT_IDENTIFIED:
+    named = [k for k in SUBJECT_KEYS
+             if origin.get(k) not in (None, NOT_IDENTIFIED)]
+    if not named:
+        # An origin row that identifies no market cannot be matched to a
+        # later book. Returning True here made a six-market interleaved
+        # series look like one market's.
+        return False
+    cand = candidate or {}
+    shared = 0
+    for k in named:
+        b = cand.get(k)
+        if b in (None, NOT_IDENTIFIED):
             continue
-        b = (candidate or {}).get(k)
-        return b is not None and b != NOT_IDENTIFIED and b == a
-    return True
+        if b != origin[k]:
+            return False
+        shared += 1
+    return shared > 0
 
 
 def forward_observation(series, t0, horizon_s, tolerance_s=HORIZON_TOLERANCE_S,
@@ -457,18 +502,37 @@ def label_row(state_row, series, horizons_s=HORIZONS_S,
     mid0 = _num(state_row.get("MID"))
     bid0, ask0 = (_num(state_row.get("BEST_BID")),
                   _num(state_row.get("BEST_ASK")))
-    statuses, offsets = {}, {}
+    statuses, offsets, horizon_status = {}, {}, {}
+    target_status = {}
+
+    def _blank(h, why):
+        for base in ("MID", "BEST_BID", "BEST_ASK",
+                     "EXECUTABLE_BUY_PRICE", "EXECUTABLE_SELL_PRICE"):
+            out["%s_T_PLUS_%dS" % (base, h)] = why
+        for base in TARGET_BASES:
+            out["%s_%dS" % (base, h)] = why
+            target_status["%s_%dS" % (base, h)] = why
+
     for h in horizons_s:
+        declared = HORIZON_STATUS_V1.get(h, NOT_IDENTIFIED)
+        horizon_status["%dS" % h] = declared
+        # A horizon the capture cannot observe is not labelled at all. With a
+        # 12 s tolerance a T+5s target would otherwise resolve to a row at
+        # T+17s and publish it as a five-second move -- the forbidden repair
+        # SUBSTITUTE_PLUS_24S_AND_CALL_IT_PLUS_5S, arrived at by accident.
+        if declared != "OBSERVABLE":
+            why = (declared if declared != NOT_IDENTIFIED
+                   else "HORIZON_OBSERVABILITY_NOT_IDENTIFIED")
+            statuses["%dS" % h] = why
+            offsets["%dS" % h] = why
+            _blank(h, why)
+            continue
         fwd, off = forward_observation(series, t0, h, tolerance_s,
                                        origin=state_row)
         if fwd is None:
             statuses["%dS" % h] = MISSING
-            for base in ("MID", "BEST_BID", "BEST_ASK",
-                         "EXECUTABLE_BUY_PRICE", "EXECUTABLE_SELL_PRICE"):
-                out["%s_T_PLUS_%dS" % (base, h)] = MISSING
-            out["MID_MOVE_%dS" % h] = MISSING
-            out["EXECUTABLE_MOVE_%dS" % h] = MISSING
             offsets["%dS" % h] = MISSING
+            _blank(h, MISSING)
             continue
         statuses["%dS" % h] = "PRESENT"
         offsets["%dS" % h] = round(off, 3)
@@ -483,22 +547,120 @@ def label_row(state_row, series, horizons_s=HORIZONS_S,
                                                       else MISSING)
         out["EXECUTABLE_SELL_PRICE_T_PLUS_%dS" % h] = (b if b is not None
                                                        else MISSING)
-        out["MID_MOVE_%dS" % h] = (round(m - mid0, 10)
-                                   if (m is not None and mid0 is not None)
-                                   else MISSING)
-        # Executable move is round-trip-aware: buy at the ask now, sell at the
-        # bid later. It is the move a maker could actually have realised.
-        out["EXECUTABLE_MOVE_%dS" % h] = (round(b - ask0, 10)
-                                          if (b is not None and ask0 is not None)
-                                          else MISSING)
+
+        def _put(name, value):
+            key = "%s_%dS" % (name, h)
+            out[key] = value
+            target_status[key] = (MISSING if value == MISSING else "PRESENT")
+
+        # A resolved horizon does NOT mean every target on it resolved. The
+        # forward row may carry a mid and no bid, and LABEL_STATUS said
+        # PRESENT for the whole horizon while EXECUTABLE_MOVE was MISSING.
+        _put("MID_MOVE", round(m - mid0, 10)
+             if (m is not None and mid0 is not None) else MISSING)
+        # BUY round trip: lift the ask now, hit the bid later.
+        buy = (round(b - ask0, 10)
+               if (b is not None and ask0 is not None) else MISSING)
+        # SELL round trip: hit the bid now, lift the ask later. NOT the
+        # negative of the buy side -- each pays a different half-spread.
+        sell = (round(bid0 - a, 10)
+                if (a is not None and bid0 is not None) else MISSING)
+        _put("EXECUTABLE_BUY_MOVE", buy)
+        _put("EXECUTABLE_SELL_MOVE", sell)
+        _put("EXECUTABLE_MOVE", buy)          # superseded name, BUY side
+
     out["LABEL_STATUS"] = statuses
+    out["HORIZON_STATUS"] = horizon_status
+    out["TARGET_LABEL_STATUS"] = target_status
     out["LABEL_REALISED_OFFSET_S"] = offsets
-    out["LABEL_STATUS_OVERALL"] = ("PRESENT" if all(
+    out["LABEL_STATUS_OVERALL"] = ("PRESENT" if statuses and all(
         v == "PRESENT" for v in statuses.values()) else MISSING)
+    out["TARGET_LABEL_STATUS_OVERALL"] = ("PRESENT" if target_status and all(
+        v == "PRESENT" for v in target_status.values()) else MISSING)
     out["NO_INTERPOLATION_BEYOND_THE_HORIZON"] = \
         NO_INTERPOLATION_BEYOND_THE_HORIZON
+    out["A_RESOLVED_HORIZON_IS_NOT_A_RESOLVED_TARGET"] = (
+        "LABEL_STATUS answers 'did a forward observation exist'. "
+        "TARGET_LABEL_STATUS answers 'did THIS target compute', which is a "
+        "different question whenever the forward row is partially populated")
+    out["ONE_SIDED_EXECUTABLE_LABEL_IS_NOT_SYMMETRIC"] = \
+        ONE_SIDED_EXECUTABLE_LABEL_IS_NOT_SYMMETRIC
+    out["EXECUTABLE_MOVE_SUPERSEDED_BY"] = EXECUTABLE_MOVE_SUPERSEDED_BY
     out["HORIZON_TOLERANCE_S"] = tolerance_s
     return out
+
+
+# --- Section 5b. The canonical label artifact. -----------------------------
+#
+# Labels were rebuilt at each call site from whatever series happened to be in
+# hand, so two modules could hold different MID_MOVE_60S for the same decision
+# and nothing would notice. A scored model and the labels it was scored on
+# must be provably the same labels.
+
+LABEL_BUILDER_VERSION = "BETTOR_LABELS_V1"
+
+LABEL_ARTIFACT_FIELDS = ("DECISION_ID", "SUBJECT", "HORIZONS_S",
+                         "HORIZON_TOLERANCE_S", "TIE_BREAK_RULE",
+                         "LABEL_BUILDER_VERSION", "HORIZON_STATUS",
+                         "TARGET_LABEL_STATUS", "LABELS")
+
+A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED = (
+    "every consumer rebuilding labels from its own view of the series means "
+    "a challenger and a baseline can be scored on different targets and "
+    "compared as if they were not. The artifact is built once, sealed with "
+    "LABEL_ARTIFACT_SHA, and the SHA travels with every score")
+
+LABEL_PROVENANCE_STATUSES = ("VALID", "SHA_MISMATCH", "NOT_SEALED")
+
+
+def _label_subject(state_row):
+    return {k: (state_row or {}).get(k, NOT_IDENTIFIED) for k in SUBJECT_KEYS}
+
+
+def label_artifact(state_row, series, horizons_s=HORIZONS_S,
+                   tolerance_s=HORIZON_TOLERANCE_S):
+    """Build the labels ONCE and seal them. The SHA is the label identity."""
+    labels = label_row(state_row, series, horizons_s, tolerance_s)
+    body = {
+        "DECISION_ID": (state_row or {}).get("DECISION_ID", NOT_IDENTIFIED),
+        "SUBJECT": _label_subject(state_row),
+        "HORIZONS_S": list(horizons_s),
+        "HORIZON_TOLERANCE_S": tolerance_s,
+        "TIE_BREAK_RULE": TIE_BREAK_RULE,
+        "LABEL_BUILDER_VERSION": LABEL_BUILDER_VERSION,
+        "HORIZON_STATUS": labels.get("HORIZON_STATUS", {}),
+        "TARGET_LABEL_STATUS": labels.get("TARGET_LABEL_STATUS", {}),
+        "LABELS": {k: labels[k] for k in sorted(labels)
+                   if k in LABEL_FIELDS},
+    }
+    body["LABEL_ARTIFACT_SHA"] = hashlib.sha256(
+        json.dumps(body, sort_keys=True, default=str).encode()).hexdigest()
+    body["LABEL_ARTIFACT_FIELDS"] = LABEL_ARTIFACT_FIELDS
+    body["A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED"] = \
+        A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED
+    body["LABEL_PROVENANCE_STATUS"] = "VALID"
+    return body
+
+
+def verify_label_artifact(artifact):
+    """Recompute the seal. Fails closed on an unsealed or altered artifact."""
+    a = dict(artifact or {})
+    claimed = a.pop("LABEL_ARTIFACT_SHA", None)
+    for k in ("LABEL_ARTIFACT_FIELDS", "A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED",
+              "LABEL_PROVENANCE_STATUS"):
+        a.pop(k, None)
+    if claimed is None:
+        return {"LABEL_PROVENANCE_STATUS": "NOT_SEALED",
+                "LABEL_ARTIFACT_SHA": NOT_IDENTIFIED,
+                "A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED":
+                    A_LABEL_REBUILT_IS_NOT_A_LABEL_AGREED}
+    got = hashlib.sha256(
+        json.dumps(a, sort_keys=True, default=str).encode()).hexdigest()
+    ok = got == claimed
+    return {"LABEL_PROVENANCE_STATUS": "VALID" if ok else "SHA_MISMATCH",
+            "LABEL_ARTIFACT_SHA": claimed,
+            "RECOMPUTED_SHA": got,
+            "LABEL_PROVENANCE_STATUSES": LABEL_PROVENANCE_STATUSES}
 
 
 # --- Section 6. Economic move labels. --------------------------------------
@@ -521,10 +683,17 @@ def economic_labels(state_row, labels, horizons_s=HORIZONS_S):
     for h in horizons_s:
         mv = labels.get("MID_MOVE_%dS" % h)
         key = "REALIZED_MOVE_TO_SPREAD_%dS" % h
-        if mv == MISSING or mv is None or not spread or spread <= 0:
-            out[key] = MISSING
+        # A label may be MISSING, or carry a horizon-status sentinel such as
+        # UNOBSERVABLE_AT_V1_CAPTURE_FREQUENCY. Anything that is not a number
+        # is not a move, and the reason is carried through rather than
+        # flattened to MISSING -- an unobservable horizon and a gap in the
+        # capture are different facts.
+        if not isinstance(mv, (int, float)) or isinstance(mv, bool) \
+                or not spread or spread <= 0:
+            why = mv if isinstance(mv, str) and mv != MISSING else MISSING
+            out[key] = why
             for t in THRESHOLD_FIELDS:
-                out["%s_%dS" % (t, h)] = MISSING
+                out["%s_%dS" % (t, h)] = why
             continue
         ratio = abs(float(mv)) / spread
         out[key] = round(ratio, 8)

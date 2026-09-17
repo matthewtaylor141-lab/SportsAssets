@@ -111,7 +111,11 @@ def test_a_label_cannot_be_the_origin_row_itself():
     """Without the strictly-after rule every MID_MOVE_5S would be zero."""
     s = _series(n=10, step=24)
     lab = BD.label_row(s[0], s)
-    assert lab["MID_T_PLUS_5S"] == "MISSING"      # a 24 s grid cannot label 5 s
+    # A 24 s grid cannot label 5 s, and the horizon is declared
+    # UNOBSERVABLE rather than merely MISSING -- the difference between a
+    # gap in the data and a horizon the capture cannot measure.
+    assert lab["MID_T_PLUS_5S"] == \
+        "UNOBSERVABLE_AT_V1_CAPTURE_FREQUENCY"
     assert lab["MID_MOVE_30S"] != 0
 
 
@@ -120,7 +124,8 @@ def test_the_realised_offset_is_recorded_on_every_label():
     s = _series(n=30, step=24)
     lab = BD.label_row(s[0], s)
     assert lab["LABEL_REALISED_OFFSET_S"]["30S"] == -6.0
-    assert lab["LABEL_REALISED_OFFSET_S"]["5S"] == "MISSING"
+    assert lab["LABEL_REALISED_OFFSET_S"]["5S"] == \
+        "UNOBSERVABLE_AT_V1_CAPTURE_FREQUENCY"
 
 
 def test_the_nearest_observation_wins_not_the_first_after():

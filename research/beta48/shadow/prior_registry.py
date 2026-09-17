@@ -63,10 +63,95 @@ STRENGTH_AFFECTS_UNCERTAINTY_NOT_MEAN = (
 # prior yields to data -- NOT to shift its centre.
 STRENGTH_PSEUDO_N = {"WEAK": 2.0, "MODERATE": 10.0, "STRONG": 50.0}
 
+SHRINKAGE_CALIBRATION_STATUS = "UNCALIBRATED_CONVENTION"
+
+SHRINKAGE_IS_A_CONVENTION_NOT_A_MEASUREMENT = (
+    "2 / 10 / 50 pseudo-observations, and the shrinkage k, are modelling "
+    "conventions chosen to make the machinery testable. No venue measurement "
+    "produced them. They may shape a diagnostic and may not create "
+    "decision-grade posterior precision")
+
+NO_DEFAULT_SHRINKAGE_K = (
+    "k had a production-looking default of 20. A caller who does not choose "
+    "a shrinkage strength has not made a modelling decision, and the "
+    "function must not make it for them")
+
 
 # --- Distributions. Small, exact, seedable. --------------------------------
 
-FAMILIES = ("BETA", "NORMAL", "LOGNORMAL", "TRIANGULAR", "POINT")
+FAMILIES = ("BETA", "NORMAL", "LOGNORMAL", "TRIANGULAR", "POINT",
+            "TRUNCATED_NORMAL", "LOGIT_NORMAL")
+
+# Families whose SUPPORT is mathematically bounded to [0, 1]. An unbounded
+# family is not a decision-grade probability model merely because its central
+# envelope happens to land inside the interval.
+BOUNDED_UNIT_FAMILIES = ("BETA", "TRIANGULAR", "POINT", "TRUNCATED_NORMAL",
+                         "LOGIT_NORMAL")
+BOUNDED_POSITIVE_FAMILIES = ("LOGNORMAL", "TRIANGULAR", "POINT",
+                             "TRUNCATED_NORMAL")
+
+PARAMETER_VALIDATION_IS_FAIL_CLOSED = (
+    "the family name was validated and its parameters were not, so "
+    "NORMAL(sigma=-1), BETA(alpha=0) and NaN everywhere were accepted and "
+    "produced numbers. A distribution with impossible parameters is an "
+    "INVALID_MODEL_SPECIFICATION, not a source of draws")
+
+TRUNCATION_IS_PART_OF_THE_MODEL = (
+    "clipping Monte Carlo draws and calling the result the original "
+    "distribution changes the distribution without changing its name. If "
+    "truncation is intended, TRUNCATED_NORMAL is the declared family and its "
+    "normalisation is part of the model")
+
+
+class InvalidModelSpecification(ValueError):
+    """Raised when a distribution cannot exist as specified."""
+
+
+def _finite(x):
+    return isinstance(x, (int, float)) and not isinstance(x, bool) \
+        and math.isfinite(float(x))
+
+
+def validate_params(family, params):
+    """Fail-closed parameter validation. Returns a list of problems."""
+    p, bad = dict(params or {}), []
+
+    def need(k):
+        if k not in p:
+            bad.append("MISSING_%s" % k)
+            return None
+        if not _finite(p[k]):
+            bad.append("NON_FINITE_%s" % k)
+            return None
+        return float(p[k])
+
+    if family == "BETA":
+        a, b = need("alpha"), need("beta")
+        if a is not None and a <= 0:
+            bad.append("ALPHA_NOT_POSITIVE")
+        if b is not None and b <= 0:
+            bad.append("BETA_NOT_POSITIVE")
+    elif family in ("NORMAL", "LOGNORMAL", "LOGIT_NORMAL"):
+        need("mu")
+        sd = need("sigma")
+        if sd is not None and sd <= 0:
+            bad.append("SIGMA_NOT_POSITIVE")
+    elif family == "TRUNCATED_NORMAL":
+        need("mu")
+        sd = need("sigma")
+        if sd is not None and sd <= 0:
+            bad.append("SIGMA_NOT_POSITIVE")
+        lo, hi = need("low"), need("high")
+        if lo is not None and hi is not None and not lo < hi:
+            bad.append("LOW_NOT_BELOW_HIGH")
+    elif family == "TRIANGULAR":
+        lo, mode, hi = need("low"), need("mode"), need("high")
+        if None not in (lo, mode, hi) and not lo <= mode <= hi:
+            bad.append("NOT_LOW_LE_MODE_LE_HIGH")
+    elif family == "POINT":
+        need("value")
+    return bad
+
 
 QUANTILE_LEVELS = (0.05, 0.10, 0.25, 0.50, 0.75, 0.90, 0.95)
 
@@ -103,8 +188,13 @@ class Dist:
 
     def __init__(self, family, params):
         if family not in FAMILIES:
-            raise ValueError("unknown family %r; declared %r"
-                             % (family, FAMILIES))
+            raise InvalidModelSpecification(
+                "unknown family %r; declared %r" % (family, FAMILIES))
+        bad = validate_params(family, params)
+        if bad:
+            raise InvalidModelSpecification(
+                "INVALID_MODEL_SPECIFICATION %s %r: %s"
+                % (family, dict(params or {}), ", ".join(bad)))
         self.family = family
         self.params = dict(params)
 
@@ -119,6 +209,11 @@ class Dist:
             return math.exp(p["mu"] + p["sigma"] ** 2 / 2.0)
         if f == "TRIANGULAR":
             return (p["low"] + p["mode"] + p["high"]) / 3.0
+        if f in ("TRUNCATED_NORMAL", "LOGIT_NORMAL"):
+            # No closed form worth the risk of a sign error: the exact
+            # quantile function exists, so integrate it deterministically.
+            n = 2000
+            return sum(self.quantile((i + 0.5) / n) for i in range(n)) / n
         return p["value"]
 
     def sample(self, rng):
@@ -131,6 +226,13 @@ class Dist:
             return math.exp(rng.gauss(p["mu"], p["sigma"]))
         if f == "TRIANGULAR":
             return rng.triangular(p["low"], p["high"], p["mode"])
+        if f == "TRUNCATED_NORMAL":
+            # Inverse-CDF on the NORMALISED truncated law. Exact, and never
+            # a clipped draw from the untruncated parent.
+            return self.quantile(rng.random())
+        if f == "LOGIT_NORMAL":
+            z = rng.gauss(p["mu"], p["sigma"])
+            return 1.0 / (1.0 + math.exp(-z))
         return p["value"]
 
     def quantile(self, q, rng_seed=20260917, draws=20000):
@@ -142,6 +244,21 @@ class Dist:
             return p["mu"] + p["sigma"] * _norm_ppf(q)
         if f == "LOGNORMAL":
             return math.exp(p["mu"] + p["sigma"] * _norm_ppf(q))
+        if f == "LOGIT_NORMAL":
+            z = p["mu"] + p["sigma"] * _norm_ppf(min(max(q, 1e-12),
+                                                     1 - 1e-12))
+            return 1.0 / (1.0 + math.exp(-z))
+        if f == "TRUNCATED_NORMAL":
+            mu, sd = float(p["mu"]), float(p["sigma"])
+            lo, hi = float(p["low"]), float(p["high"])
+
+            def _cdf(x):
+                return 0.5 * (1.0 + math.erf((x - mu) / (sd * math.sqrt(2.0))))
+            a, b = _cdf(lo), _cdf(hi)
+            if b <= a:
+                return lo
+            qq = min(max(q, 1e-12), 1 - 1e-12)
+            return mu + sd * _norm_ppf(a + qq * (b - a))
         rng = random.Random(rng_seed)
         xs = sorted(self.sample(rng) for _ in range(draws))
         i = min(int(q * (len(xs) - 1)), len(xs) - 1)
@@ -158,9 +275,21 @@ class Dist:
 
 
 def beta_from_mean_n(mean, pseudo_n):
-    """Beta with a given centre and a given strength. Centre is preserved."""
-    mean = min(max(float(mean), 1e-6), 1 - 1e-6)
-    n = max(float(pseudo_n), 0.2)
+    """Beta with a given centre and a given strength. Centre is preserved.
+
+    An out-of-range mean or a non-positive pseudo-N used to be clamped into
+    a legal one, which silently turned an impossible request into a
+    confident distribution. Both are now refused.
+    """
+    if not _finite(mean) or not 0.0 < float(mean) < 1.0:
+        raise InvalidModelSpecification(
+            "INVALID_MODEL_SPECIFICATION beta_from_mean_n: mean %r is not "
+            "strictly inside (0, 1)" % (mean,))
+    if not _finite(pseudo_n) or float(pseudo_n) <= 0.0:
+        raise InvalidModelSpecification(
+            "INVALID_MODEL_SPECIFICATION beta_from_mean_n: pseudo_n %r is "
+            "not positive" % (pseudo_n,))
+    mean, n = float(mean), float(pseudo_n)
     return Dist("BETA", {"alpha": mean * n, "beta": (1 - mean) * n})
 
 
@@ -486,6 +615,20 @@ def p_fill_from_mechanism(queue_ahead, trade_intensity_per_s, horizon_s,
     unless the intensity carries a real evidence class -- the mechanism does
     not manufacture its own input.
     """
+    bad = []
+    if not _finite(queue_ahead) or float(queue_ahead) < 0:
+        bad.append("QUEUE_AHEAD_NOT_NON_NEGATIVE_FINITE")
+    if not _finite(trade_intensity_per_s) or float(trade_intensity_per_s) < 0:
+        bad.append("TRADE_INTENSITY_NOT_NON_NEGATIVE_FINITE")
+    if not _finite(horizon_s) or float(horizon_s) <= 0:
+        bad.append("HORIZON_NOT_POSITIVE_FINITE")
+    if intensity_evidence_class not in EVIDENCE_CLASSES:
+        bad.append("EVIDENCE_CLASS_NOT_DECLARED")
+    if bad and not (queue_ahead is None or trade_intensity_per_s is None):
+        return {"P_FILL": NOT_IDENTIFIED, "STATUS": "INVALID_INPUTS",
+                "PROBLEMS": tuple(bad),
+                "QUEUE_MECHANISM_STATUS": QUEUE_MECHANISM_STATUS,
+                "MAY_ENTER_ACTION_EV_AS_P_FILL": False}
     if intensity_evidence_class == NOT_IDENTIFIED or \
             trade_intensity_per_s is None or queue_ahead is None:
         return {"P_FILL": NOT_IDENTIFIED,
@@ -511,6 +654,11 @@ def p_fill_from_mechanism(queue_ahead, trade_intensity_per_s, horizon_s,
                                if intensity_evidence_class == ESTIMATED_PRIOR
                                else intensity_evidence_class),
             "QUEUE_MECHANISM_STATUS": QUEUE_MECHANISM_STATUS,
+            "MAY_ENTER_ACTION_EV_AS_P_FILL": False,
+            "WHY_NOT_USABLE_AS_P_FILL": (
+                "the queue units are not reconciled -- lambda is a trade "
+                "COUNT rate and queue_ahead is a SHARE count -- so this "
+                "probability may not be supplied as P_FILL to the action EV"),
             "QUEUE_DIMENSIONAL_CONTRACT": QUEUE_DIMENSIONAL_CONTRACT,
             "NEVER_CALL_THIS_MEASURED_P_FILL":
                 NEVER_CALL_THIS_MEASURED_P_FILL,
@@ -553,9 +701,41 @@ POSTERIOR_PRECISION_UNMODELLED = \
     "NOT_IDENTIFIED_PENDING_DEPENDENCE_MODEL"
 
 
+EFFECTIVE_N_METHODS = ("EVENT_CLUSTERED_DESIGN_EFFECT",
+                       "HIERARCHICAL_EVENT_LEVEL_LIKELIHOOD",
+                       "BLOCK_BOOTSTRAP_OVER_EVENTS",
+                       "MEASURED_ICC_DESIGN_EFFECT")
+
+A_WARNING_IS_NOT_A_GATE = (
+    "reporting POSTERIOR_PRECISION_STATUS = NOT_IDENTIFIED while still "
+    "returning a posterior narrowed by raw row count leaves the narrowed "
+    "distribution sitting there for any caller that does not read the "
+    "warning. The narrowed object is now named DIAGNOSTIC_RAW_ROW_POSTERIOR "
+    "and DECISION_GRADE_POSTERIOR is absent until effective N is validated")
+
+
+def validate_effective_n(effective_n_value, effective_n_method,
+                         raw_rows=None, relation_to_raw_rows=None):
+    """Is this effective N usable for decision-grade precision? Fails closed."""
+    bad = []
+    if not _finite(effective_n_value) or float(effective_n_value) <= 0:
+        bad.append("EFFECTIVE_N_NOT_POSITIVE_FINITE")
+    if effective_n_method not in EFFECTIVE_N_METHODS:
+        bad.append("EFFECTIVE_N_METHOD_NOT_DECLARED")
+    if not relation_to_raw_rows:
+        bad.append("RELATION_TO_RAW_ROWS_NOT_EXPLAINED")
+    if _finite(effective_n_value) and _finite(raw_rows) \
+            and float(effective_n_value) > float(raw_rows):
+        bad.append("EFFECTIVE_N_EXCEEDS_RAW_ROWS")
+    return {"VALID": not bad, "PROBLEMS": tuple(bad),
+            "DECLARED_METHODS": EFFECTIVE_N_METHODS,
+            "A_WARNING_IS_NOT_A_GATE": A_WARNING_IS_NOT_A_GATE}
+
+
 def effective_n(raw_rows=None, markets=None, independent_events=None,
                 event_hours=None, dependence_cluster_ids=None,
-                effective_n=None, effective_n_method=None):
+                effective_n=None, effective_n_method=None,
+                relation_to_raw_rows=None):
     """Carry the whole provenance of an N. Never collapse rows into trials."""
     out = {
         "RAW_ROWS": raw_rows if raw_rows is not None else NOT_IDENTIFIED,
@@ -574,10 +754,12 @@ def effective_n(raw_rows=None, markets=None, independent_events=None,
         "RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS":
             RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS,
     }
+    v = validate_effective_n(effective_n, effective_n_method, raw_rows,
+                             relation_to_raw_rows)
+    out["EFFECTIVE_N_VALIDATION"] = v
+    out["RELATION_TO_RAW_ROWS"] = relation_to_raw_rows or NOT_IDENTIFIED
     out["POSTERIOR_PRECISION_STATUS"] = (
-        "MODELLED" if (out["EFFECTIVE_N"] != NOT_IDENTIFIED
-                       and out["EFFECTIVE_N_METHOD"] != NOT_IDENTIFIED)
-        else POSTERIOR_PRECISION_UNMODELLED)
+        "MODELLED" if v["VALID"] else POSTERIOR_PRECISION_UNMODELLED)
     return out
 
 
@@ -598,8 +780,15 @@ def update_beta(prior_dist, successes, trials, prior_version="1",
         return {"STATUS": "INVALID_DATA", "SUCCESSES": s, "TRIALS": n,
                 "WHY": "successes exceed trials"}
     post = Dist("BETA", {"alpha": a + s, "beta": b + (n - s)})
+    prov = n_provenance if n_provenance is not None else effective_n()
+    decision_grade = prov.get("POSTERIOR_PRECISION_STATUS") == "MODELLED"
     return {
         "STATUS": "UPDATED",
+        "DECISION_GRADE_POSTERIOR": (post if decision_grade
+                                     else NOT_IDENTIFIED),
+        "DIAGNOSTIC_RAW_ROW_POSTERIOR": (NOT_IDENTIFIED if decision_grade
+                                         else post),
+        "A_WARNING_IS_NOT_A_GATE": A_WARNING_IS_NOT_A_GATE,
         "PRIOR_VERSION": prior_version,
         "POSTERIOR_VERSION": "%s+n%d" % (prior_version, n),
         "LIKELIHOOD_SPEC": "BINOMIAL",
@@ -609,11 +798,9 @@ def update_beta(prior_dist, successes, trials, prior_version="1",
         "POSTERIOR_DIST": post,
         "PRIOR_TO_POSTERIOR_SHIFT": round(post.mean() - prior_dist.mean(), 10),
         "UPDATE_IS_VERSIONED": UPDATE_IS_VERSIONED,
-        "N_PROVENANCE": (n_provenance if n_provenance is not None
-                         else effective_n()),
-        "POSTERIOR_PRECISION_STATUS": (
-            (n_provenance or {}).get("POSTERIOR_PRECISION_STATUS")
-            or POSTERIOR_PRECISION_UNMODELLED),
+        "N_PROVENANCE": prov,
+        "POSTERIOR_PRECISION_STATUS": prov.get(
+            "POSTERIOR_PRECISION_STATUS", POSTERIOR_PRECISION_UNMODELLED),
         "RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS":
             RAW_ROWS_ARE_NOT_INDEPENDENT_OBSERVATIONS,
     }
@@ -665,20 +852,36 @@ HIERARCHY = ("GLOBAL", "SPORT", "LEAGUE", "MARKET_FAMILY", "PRICE_BAND",
              "LIQUIDITY_REGIME", "TIME_TO_EVENT_REGIME", "VENUE_STATE_REGIME")
 
 
-def shrink(subgroup_mean, subgroup_n, parent_mean, k=20.0):
-    """Partial pooling. Returns the parent when the subgroup is empty."""
+def shrink(subgroup_mean, subgroup_n, parent_mean, k=None):
+    """Partial pooling. Returns the parent when the subgroup is empty.
+
+    k has NO default. It is a shrinkage strength, and a caller who did not
+    choose one has not made the modelling decision; k=20 looked like a
+    production constant and was never anything of the kind.
+    """
     if subgroup_n is None or subgroup_n <= 0 or subgroup_mean is None:
         return {"SHRUNK_MEAN": parent_mean, "WEIGHT_ON_SUBGROUP": 0.0,
                 "SUBGROUP_N": subgroup_n or 0,
                 "SHRINKAGE_RULE": SHRINKAGE_RULE,
+                "SHRINKAGE_CALIBRATION_STATUS": SHRINKAGE_CALIBRATION_STATUS,
                 "WHY": "no subgroup observations; the parent is the estimate"}
+    if not _finite(k) or float(k) <= 0:
+        return {"SHRUNK_MEAN": NOT_IDENTIFIED,
+                "STATUS": "SHRINKAGE_K_NOT_IDENTIFIED",
+                "SUBGROUP_N": subgroup_n, "PARENT_MEAN": parent_mean,
+                "NO_DEFAULT_SHRINKAGE_K": NO_DEFAULT_SHRINKAGE_K,
+                "SHRINKAGE_CALIBRATION_STATUS": SHRINKAGE_CALIBRATION_STATUS}
     n = float(subgroup_n)
     w = n / (n + float(k))
     return {"SHRUNK_MEAN": round(w * float(subgroup_mean)
                                  + (1 - w) * float(parent_mean), 10),
             "WEIGHT_ON_SUBGROUP": round(w, 6),
             "SUBGROUP_N": subgroup_n, "PARENT_MEAN": parent_mean,
-            "K": k, "SHRINKAGE_RULE": SHRINKAGE_RULE}
+            "K": k, "SHRINKAGE_RULE": SHRINKAGE_RULE,
+            "SHRINKAGE_CALIBRATION_STATUS": SHRINKAGE_CALIBRATION_STATUS,
+            "SHRINKAGE_IS_A_CONVENTION_NOT_A_MEASUREMENT":
+                SHRINKAGE_IS_A_CONVENTION_NOT_A_MEASUREMENT,
+            "DECISION_GRADE_POSTERIOR_PRECISION": False}
 
 
 def describe():
@@ -700,6 +903,16 @@ def describe():
         "PRIOR_WIDTH_MUST_REMAIN_VISIBLE": PRIOR_WIDTH_MUST_REMAIN_VISIBLE,
         "POSTERIOR_MAY_MOVE_EITHER_WAY": POSTERIOR_MAY_MOVE_EITHER_WAY,
         "EARLIER_SOURCE_LABEL_SAID": EARLIER_SOURCE_LABEL_SAID,
+        "PARAMETER_VALIDATION_IS_FAIL_CLOSED":
+            PARAMETER_VALIDATION_IS_FAIL_CLOSED,
+        "TRUNCATION_IS_PART_OF_THE_MODEL": TRUNCATION_IS_PART_OF_THE_MODEL,
+        "BOUNDED_UNIT_FAMILIES": BOUNDED_UNIT_FAMILIES,
+        "SHRINKAGE_CALIBRATION_STATUS": SHRINKAGE_CALIBRATION_STATUS,
+        "SHRINKAGE_IS_A_CONVENTION_NOT_A_MEASUREMENT":
+            SHRINKAGE_IS_A_CONVENTION_NOT_A_MEASUREMENT,
+        "EFFECTIVE_N_METHODS": EFFECTIVE_N_METHODS,
+        "A_WARNING_IS_NOT_A_GATE": A_WARNING_IS_NOT_A_GATE,
+        "QUEUE_MECHANISM_STATUS": QUEUE_MECHANISM_STATUS,
         "REGISTRY_CENSUS": registry_census(),
         "HIERARCHY": HIERARCHY,
         "SHRINKAGE_RULE": SHRINKAGE_RULE,

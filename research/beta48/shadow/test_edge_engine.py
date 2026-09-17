@@ -166,6 +166,9 @@ def _terms(**over):
         "FEE": 0.001, "REBATE": 0.0005, "INVENTORY_COST": 0.0002,
         "EXIT_COST": 0.0, "CAPITAL_REQUIRED": 40.0,
         "OCCUPANCY_SECONDS": 1800.0,
+        # POST_BID is a fill-bearing action, so the fill-selection convention
+        # must be declared rather than defaulting silently to EXCLUDED.
+        "FILL_SELECTION_CONVENTION": "EXCLUDED",
     }
     t.update(over)
     return t
@@ -221,7 +224,11 @@ def test_the_evidence_mix_is_reported():
     # ALL_EV_TERMS, not EV_TERMS: the optional FILL_SELECTION_EFFECT carries
     # an evidence class like any other term, and an absent one counts as
     # UNIDENTIFIED rather than dropping out of the census.
-    assert m["MEASURED"] + m["ESTIMATED"] + m["UNIDENTIFIED"] == \
+    # UNVERIFIED is its own census line: a supplied number with no evidence
+    # reference is neither estimated nor unidentified, and folding it into
+    # either would make the census lie about what the row rests on.
+    assert m["MEASURED"] + m["ESTIMATED"] + m["UNVERIFIED"] + \
+        m["KNOWN_ZERO"] + m["NOT_APPLICABLE"] + m["UNIDENTIFIED"] == \
         len(MC.ALL_EV_TERMS)
     assert r["EVIDENCE_CLASS_BY_TERM"]["FILL_SELECTION_EFFECT"] == \
         "NOT_IDENTIFIED"
@@ -271,7 +278,14 @@ def test_break_even_verified_against_the_ev_at_that_point():
 
 
 def test_an_action_that_never_pays_reports_no_solution():
-    t = _terms(P_FILL=MC.NOT_IDENTIFIED, FEE=1.0)   # fee dwarfs any value
+    # A PLATFORM fee charged on every posted order, not a maker fee charged
+    # on the filled part: with every cost fill-conditioned, an order that is
+    # never filled costs exactly nothing, so EV at P_FILL = 0 is 0.0 and
+    # ALWAYS_NEGATIVE is correctly false. The always-negative case needs a
+    # cost that is actually incurred always.
+    t = _terms(P_FILL=MC.NOT_IDENTIFIED, FEE=1.0,
+               FEE_APPLIES_WHEN="ALWAYS", FEE_BASIS="PER_POSTED_SHARE",
+               FEE_UNIT="USD_PER_POSTED_SHARE")   # fee dwarfs any value
     r = MC.break_even("POST_BID", t, "P_FILL")
     assert r["STATUS"] == "NO_SOLUTION_IN_RANGE"
     assert r["ALWAYS_NEGATIVE"] is True
@@ -334,7 +348,12 @@ def test_voi_defers_to_break_even_when_a_critical_term_is_unknown():
 def test_robustly_positive_uses_the_conservative_tail():
     r = MC.action_ev_mc("POST_BID", _terms(), draws=4000)
     rob = MC.robustly_positive(r)
-    assert rob["ROBUSTLY_POSITIVE"] == (r["EV_P10"] > 0)
+    # The quantile reading is published as a SHADOW diagnostic. It is not
+    # promoted to ROBUSTLY_POSITIVE, because that is a claim about acting on
+    # the number and the decision-grade gate is blocked.
+    assert rob["SHADOW_ROBUSTNESS_DIAGNOSTIC"] == r["EV_P10"]
+    assert rob["ROBUSTLY_POSITIVE"] is False
+    assert rob["REASON"] == "DECISION_GRADE_BLOCKED"
     assert "management decision" in rob["ROBUSTNESS_THRESHOLD_NOT_CHOSEN"]
 
 

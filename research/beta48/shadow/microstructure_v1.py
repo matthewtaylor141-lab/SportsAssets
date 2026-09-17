@@ -185,7 +185,8 @@ def target_scoring_gate(target, rows=None, min_coverage_pct=None):
 
 CANDIDATE_FEATURES = (
     "ORDER_BOOK_IMBALANCE",
-    "ORDER_FLOW_IMBALANCE",
+    "RAW_OFI_SHARES",
+    "ORDER_FLOW_IMBALANCE_RATIO",
     "MICROPRICE_MINUS_MID",
     "SPREAD",
     "TOUCH_DEPTH",
@@ -211,6 +212,45 @@ EVALUATION_RULES = {
         "interval is event-clustered so it is not mistaken for independent "
         "evidence"),
 }
+
+# --- Feature units. A ratio and a share count are not the same quantity. ---
+#
+# ORDER_FLOW_IMBALANCE was sum(bid_size_delta - ask_size_delta) over a window:
+# a SIGNED SHARE COUNT, unbounded, in shares. It sat in DIMENSIONLESS_BASELINES
+# beside ORDER_BOOK_IMBALANCE -- a ratio in [-1, 1] -- and both were multiplied
+# by ONE shared `baseline_scale` to produce a price move. One scale cannot
+# convert both: the same number that turns a 0.3 ratio into a sensible move
+# turns a 4,000-share flow into a move of 1,200 probability points.
+
+FEATURE_UNITS = {
+    "ORDER_BOOK_IMBALANCE": "DIMENSIONLESS_RATIO_MINUS_ONE_TO_ONE",
+    "RAW_OFI_SHARES": "SIGNED_SHARES",
+    "ORDER_FLOW_IMBALANCE_RATIO": "DIMENSIONLESS_RATIO_MINUS_ONE_TO_ONE",
+    "MICROPRICE_MINUS_MID": "PROBABILITY_POINTS",
+    "SPREAD": "PROBABILITY_POINTS",
+    "TOUCH_DEPTH": "SHARES",
+    "DEPTH_SLOPE": "SHARES_PER_PROBABILITY_POINT",
+    "TRADE_FLOW": "SHARES",
+    "TRANSITION_FREQUENCY": "DIMENSIONLESS_RATE",
+    "PRICE_IMPROVEMENT": "PROBABILITY_POINTS",
+    "MOVE_THROUGH": "PROBABILITY_POINTS",
+    "SHORT_HORIZON_VOLATILITY": "PROBABILITY_POINTS",
+    "CROSS_MARKET_RESIDUAL": "PROBABILITY_POINTS",
+}
+
+A_SHARE_COUNT_IS_NOT_A_RATIO = (
+    "ORDER_FLOW_IMBALANCE was a signed share count carried in the "
+    "dimensionless-baseline set and scaled by the same constant as a "
+    "[-1, 1] book-imbalance ratio. It is split: RAW_OFI_SHARES keeps the "
+    "share count with its own PROBABILITY_POINTS_PER_SHARE scale, and "
+    "ORDER_FLOW_IMBALANCE_RATIO is the genuinely dimensionless normalisation "
+    "signed_flow / total_absolute_flow. Neither borrows the other's scale")
+
+OFI_RATIO_DEFINITION = (
+    "ORDER_FLOW_IMBALANCE_RATIO = sum(delta) / sum(abs(delta)) over the same "
+    "window, where delta is (bid_size change - ask_size change) per step. It "
+    "is in [-1, 1] by construction and is None when the window had no "
+    "movement at all -- a zero denominator is not a zero imbalance")
 
 THIS_IS_NOT_P_FILL = True
 NO_FEATURE_HERE_MAY_BE_USED_AS_A_FILL_PROXY = (
@@ -287,7 +327,13 @@ def tick_features(tick, prev=None, flow=None):
         deltas = [((b or 0) - (pb or 0)) - ((a or 0) - (pa or 0))
                   for (pb, pa), (b, a) in zip(sizes, sizes[1:])]
         if deltas:
-            f["ORDER_FLOW_IMBALANCE"] = sum(deltas)
+            # The raw signed share count, named for what it is.
+            f["RAW_OFI_SHARES"] = sum(deltas)
+            denom = sum(abs(d) for d in deltas)
+            # A window with no size movement has NO imbalance to report. A
+            # zero denominator is not a zero ratio.
+            f["ORDER_FLOW_IMBALANCE_RATIO"] = (sum(deltas) / denom
+                                               if denom > 0 else None)
     f["_MID"] = mid
     f["_MICROPRICE"] = micro
     return f
@@ -330,6 +376,24 @@ def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS,
     supplied = [x for x in ticks or () if t(x.get(time_key))]
     keys = {market_identity(x) for x in supplied}
     named = {k for k in keys if k is not None}
+    if None in keys and named:
+        # CHECKED BEFORE GROUPING. The mixed-identity refusal used to sit
+        # AFTER the grouping branch, so a series with two named markets and
+        # one unidentified row took the grouping path -- which quietly DROPPED
+        # the unidentified row from every part and returned a clean result.
+        # The refusal that was supposed to catch it never ran.
+        return [], {"STATUS": "REFUSED_MIXED_IDENTITY",
+                    "TICKS": 0,
+                    "UNIDENTIFIED_TICKS": sum(
+                        1 for x in supplied if market_identity(x) is None),
+                    "NAMED_MARKETS": sorted(str(k) for k in named),
+                    "WHY": ("some ticks carry a market identity and some do "
+                            "not; they cannot be proven to be one market's "
+                            "series, and dropping the unidentified rows would "
+                            "silently discard data"),
+                    "MARKET_IDENTITY_KEYS": MARKET_IDENTITY_KEYS,
+                    "EVENT_ID_IS_NOT_A_MARKET_IDENTITY":
+                        EVENT_ID_IS_NOT_A_MARKET_IDENTITY}
     if len(named) > 1:
         # Group internally rather than trust the caller. Each market's series
         # is built on its own and the results are concatenated.
@@ -348,17 +412,8 @@ def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS,
             "EVENT_ID_IS_NOT_A_MARKET_IDENTITY":
                 EVENT_ID_IS_NOT_A_MARKET_IDENTITY,
             "TICKS": len(out_all)}
-    if None in keys and named:
-        # Some rows identify a market and some do not: they cannot be shown
-        # to be the same series, so nothing is labelled.
-        return [], {"STATUS": "REFUSED_MIXED_IDENTITY",
-                    "TICKS": 0,
-                    "WHY": ("some ticks carry a market identity and some do "
-                            "not; they cannot be proven to be one market's "
-                            "series"),
-                    "MARKET_IDENTITY_KEYS": MARKET_IDENTITY_KEYS,
-                    "EVENT_ID_IS_NOT_A_MARKET_IDENTITY":
-                        EVENT_ID_IS_NOT_A_MARKET_IDENTITY}
+    identity_status = ("MARKET_IDENTITY_ESTABLISHED" if named
+                       else "CALLER_ASSERTED_SINGLE_MARKET")
 
     rows = sorted(supplied, key=lambda x: t(x[time_key]))
     stamps = [t(r[time_key]) for r in rows]
@@ -418,6 +473,8 @@ def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS,
         out.append(row)
     return out, {
         "TICKS": len(out),
+        "IDENTITY_STATUS": identity_status,
+        "MARKET_IDENTITY_KEYS": MARKET_IDENTITY_KEYS,
         "TRUNCATED_AT_CAPTURE_END": dict(truncated),
         "TRUNCATION_IS_DECLARED_NOT_DROPPED": True,
         "OUT_OF_TOLERANCE": dict(out_of_tolerance),
@@ -576,7 +633,34 @@ def relative_value_test(rows, horizons=TARGET_HORIZONS_SECONDS,
                                      if boot else None),
             "NEGATIVE_MEANS_THE_RESIDUAL_REVERTS": True,
         }
-    return {"STATUS": "MEASURED", "BY_HORIZON": out,
+    # The PARENT status is DERIVED from the children. It used to be the
+    # literal "MEASURED" regardless: a run in which every horizon was REFUSED
+    # or TOO_FEW still returned STATUS = MEASURED at the top, and a caller
+    # reading only the top level saw a measurement that did not happen.
+    child = [v.get("STATUS") for v in out.values()]
+    measured = [s for s in child if s == "MEASURED"]
+    if not child:
+        parent = "NO_HORIZON_EVALUATED"
+    elif not measured:
+        parent = "NOT_MEASURED"
+    elif len(measured) == len(child):
+        parent = "MEASURED"
+    else:
+        parent = "PARTIALLY_MEASURED"
+    return {"STATUS": parent,
+            "PARENT_STATUS_IS_DERIVED_FROM_CHILDREN": (
+                "a parent that says MEASURED while every child says REFUSED "
+                "reports a measurement nobody made. MEASURED requires every "
+                "evaluated horizon to have been measured"),
+            "HORIZON_STATUS_COUNTS": {s: child.count(s)
+                                      for s in sorted(set(child))},
+            "MEASURED_HORIZONS": tuple(
+                k for k, v in sorted(out.items())
+                if v.get("STATUS") == "MEASURED"),
+            "UNMEASURED_HORIZONS": tuple(
+                k for k, v in sorted(out.items())
+                if v.get("STATUS") != "MEASURED"),
+            "BY_HORIZON": out,
             "RULE": RELATIVE_VALUE_RULE,
             "NOTE": SETTLEMENT_IS_NO_LONGER_THE_ONLY_TARGET}
 
@@ -631,14 +715,32 @@ CHRONOLOGICALLY_OUT_OF_SAMPLE = True
 DIMENSIONLESS_BASELINES = ("B4_SIMPLE_BOOK_IMBALANCE",
                            "B5_SIMPLE_ORDER_FLOW_IMBALANCE")
 
+# Each scaled baseline names ITS OWN input feature and ITS OWN scale unit.
+# B5 reads a SHARE COUNT, so its scale is probability points PER SHARE; B4
+# reads a ratio, so its scale is probability points per unit of ratio. They
+# are different quantities and cannot share a constant.
+SCALED_BASELINE_INPUTS = {
+    "B4_SIMPLE_BOOK_IMBALANCE": ("ORDER_BOOK_IMBALANCE",
+                                 "PROBABILITY_POINTS_PER_UNIT_RATIO"),
+    "B5_SIMPLE_ORDER_FLOW_IMBALANCE": ("RAW_OFI_SHARES",
+                                       "PROBABILITY_POINTS_PER_SHARE"),
+}
+
+A_SHARED_SCALE_ACROSS_DIFFERENT_UNITS = (
+    "one `baseline_scale` used to feed both B4 and B5. B4's input is a "
+    "[-1, 1] ratio and B5's is an unbounded signed share count, so the "
+    "single constant was a unit conversion for at most one of them and "
+    "nonsense for the other. Each scaled baseline now takes its own scale "
+    "and its own declared source, and a baseline without one abstains")
+
 BASELINE_UNIT_CONTRACT = (
-    "book imbalance and order-flow imbalance are DIMENSIONLESS ratios in "
-    "[-1, 1]. A price move is in probability points. scale=1.0 asserts that "
-    "one unit of imbalance equals one full probability point, which is not a "
-    "fact about anything -- it is an arbitrary choice that decides whether "
-    "the baseline looks strong or weak. The transformation must be either "
-    "CALIBRATED ON TRAINING EVENTS ONLY or fixed before the experiment and "
-    "declared")
+    "book imbalance is a DIMENSIONLESS ratio in [-1, 1]; raw order-flow "
+    "imbalance is a SIGNED SHARE COUNT. A price move is in probability "
+    "points. scale=1.0 asserts that one unit of the input equals one full "
+    "probability point, which is not a fact about anything -- it is an "
+    "arbitrary choice that decides whether the baseline looks strong or "
+    "weak. Each transformation must be either CALIBRATED ON TRAINING EVENTS "
+    "ONLY or fixed before the experiment and declared, per baseline")
 
 BASELINE_SCALE_SOURCES = ("CALIBRATED_ON_TRAINING_EVENTS",
                           "PREDECLARED_FIXED_TRANSFORMATION")
@@ -649,13 +751,37 @@ NEVER_CALIBRATE_ON_THE_EVALUATION_FOLD = (
     "honest predictor for that reason alone")
 
 
+def baseline_scale_for(name, scales=None, scale=None, scale_source=None):
+    """(value, source) for ONE scaled baseline, or (None, None).
+
+    `scales` maps a baseline name to (value, source). The legacy singular
+    `scale`/`scale_source` pair is honoured for B4 ONLY -- it was declared
+    against a [-1, 1] ratio, and reusing it on B5's share count would be the
+    very dimensional error this split exists to remove.
+    """
+    entry = (scales or {}).get(name)
+    if entry is not None:
+        try:
+            value, source = entry
+        except (TypeError, ValueError):
+            return None, None
+        if value is None or source not in BASELINE_SCALE_SOURCES:
+            return None, None
+        return float(value), source
+    if name == "B4_SIMPLE_BOOK_IMBALANCE" and scale is not None \
+            and scale_source in BASELINE_SCALE_SOURCES:
+        return float(scale), scale_source
+    return None, None
+
+
 def baseline_prediction(name, feats, prev_move=None, scale=None,
-                        scale_source=None):
+                        scale_source=None, scales=None):
     """One baseline's predicted move. None when its inputs are absent.
 
-    A DIMENSIONLESS baseline returns None unless the caller supplies BOTH a
-    scale and a declared, admissible source for it. There is no default of
-    1.0: that default silently asserted a unit conversion nobody measured.
+    A SCALED baseline returns None unless the caller supplies BOTH a scale
+    and a declared, admissible source for THAT baseline. There is no default
+    of 1.0 and no shared scale: either default silently asserted a unit
+    conversion nobody measured.
     """
     if name in ("B0_NO_CHANGE", "B1_CURRENT_MID"):
         return 0.0
@@ -663,19 +789,37 @@ def baseline_prediction(name, feats, prev_move=None, scale=None,
         return feats.get("MICROPRICE_MINUS_MID")
     if name == "B3_LAST_MOVE_DIRECTION":
         return prev_move
-    if name in DIMENSIONLESS_BASELINES:
-        if scale is None or scale_source not in BASELINE_SCALE_SOURCES:
+    if name in SCALED_BASELINE_INPUTS:
+        s, src = baseline_scale_for(name, scales, scale, scale_source)
+        if s is None or src is None:
             return None                   # no unit contract, no prediction
-        key = ("ORDER_BOOK_IMBALANCE" if name == "B4_SIMPLE_BOOK_IMBALANCE"
-               else "ORDER_FLOW_IMBALANCE")
+        key = SCALED_BASELINE_INPUTS[name][0]
         v = feats.get(key)
-        return None if v is None else float(scale) * v
+        return None if v is None else s * v
     return None
+
+
+CHALLENGER_ADMISSION_STATUSES = ("ADMITTED", "NOT_ADMITTED",
+                                 "NOT_IDENTIFIED")
+
+AN_EMPTY_COMMON_SUPPORT_IS_NOT_A_WIN = (
+    "the fair comparison is the rows EVERY predictor could price. When a "
+    "baseline abstains everywhere -- a scaled baseline with no declared "
+    "scale, a feature absent from the capture -- that intersection is empty, "
+    "and the challenger's own-support scores were still published beside a "
+    "complete-looking baseline table. An empty or unrepresentative "
+    "intersection makes admission NOT_IDENTIFIED, never ADMITTED")
+
+BASELINE_SET_INCOMPLETE_BLOCKS_ADMISSION = (
+    "A_COMPLEX_MODEL_EARNS_ADMISSION_ONLY_BY_BEATING_ALL_OF_THESE means ALL "
+    "of them. A baseline that could not be scored has not been beaten, so "
+    "the admission comparison is not available -- the model is not admitted "
+    "by default because its rival was silent")
 
 
 def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
                     min_coverage_pct=None, baseline_scale=None,
-                    baseline_scale_source=None):
+                    baseline_scale_source=None, baseline_scales=None):
     """Score every baseline (and optionally a model) on one target.
 
     Returns absolute error and direction accuracy per predictor. A predictor
@@ -699,7 +843,8 @@ def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
             return r.get(pred_key)
         return baseline_prediction(name, r, r.get("_PREV_MOVE"),
                                    scale=baseline_scale,
-                                   scale_source=baseline_scale_source)
+                                   scale_source=baseline_scale_source,
+                                   scales=baseline_scales)
 
     # COMMON EVALUATION SUPPORT: the rows every predictor could price. A
     # predictor that abstains on the hard rows must not win on an easier
@@ -731,9 +876,61 @@ def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
         own["ON_COMMON_SUPPORT"] = score(name, common)
         own["ABSTAINED_ROWS"] = len(scorable) - own["N_SCORED"]
         out[name] = own
+
+    # --- Admission fails closed. -----------------------------------------
+    silent = tuple(nm for nm in baselines if out[nm]["N_SCORED"] == 0)
+    baseline_set_complete = not silent
+    scale_report = {}
+    for nm in SCALED_BASELINE_INPUTS:
+        s, src = baseline_scale_for(nm, baseline_scales, baseline_scale,
+                                    baseline_scale_source)
+        scale_report[nm] = {
+            "INPUT_FEATURE": SCALED_BASELINE_INPUTS[nm][0],
+            "SCALE_UNIT": SCALED_BASELINE_INPUTS[nm][1],
+            "SCALE": s if s is not None else NOT_IDENTIFIED,
+            "SCALE_SOURCE": src or NOT_IDENTIFIED,
+        }
+    if pred_key is None:
+        admission = NOT_IDENTIFIED
+        why = "no challenger supplied; this is a baseline table"
+    elif not baseline_set_complete:
+        admission = NOT_IDENTIFIED
+        why = ("baseline(s) %s scored no rows, so they have not been beaten"
+               % ", ".join(silent))
+    elif not common:
+        admission = NOT_IDENTIFIED
+        why = ("the common evaluation support is empty; there is no set of "
+               "rows on which every predictor was compared")
+    else:
+        me = out[pred_key]["ON_COMMON_SUPPORT"]["MEAN_ABSOLUTE_ERROR"]
+        rivals = [out[nm]["ON_COMMON_SUPPORT"]["MEAN_ABSOLUTE_ERROR"]
+                  for nm in baselines]
+        if me is None or any(r is None for r in rivals):
+            admission = NOT_IDENTIFIED
+            why = "a predictor has no error on the common support"
+        else:
+            beats_all = all(me < r for r in rivals)
+            admission = "ADMITTED" if beats_all else "NOT_ADMITTED"
+            why = ("challenger MAE %.10g vs baselines %s on %d common rows"
+                   % (me, [round(r, 10) for r in rivals], len(common)))
+
     return {"TARGET": target, "BY_PREDICTOR": out,
             "COMMON_EVALUATION_SUPPORT_ROWS": len(common),
             "SCORABLE_ROWS": len(scorable),
+            "BASELINE_SET_COMPLETE": baseline_set_complete,
+            "BASELINES_THAT_SCORED_NOTHING": silent,
+            "CHALLENGER_ADMISSION_COMPARISON_STATUS": admission,
+            "CHALLENGER_ADMISSION_STATUSES": CHALLENGER_ADMISSION_STATUSES,
+            "WHY_ADMISSION": why,
+            "AN_EMPTY_COMMON_SUPPORT_IS_NOT_A_WIN":
+                AN_EMPTY_COMMON_SUPPORT_IS_NOT_A_WIN,
+            "BASELINE_SET_INCOMPLETE_BLOCKS_ADMISSION":
+                BASELINE_SET_INCOMPLETE_BLOCKS_ADMISSION,
+            "BASELINE_SCALES": scale_report,
+            "SCALED_BASELINE_INPUTS": SCALED_BASELINE_INPUTS,
+            "A_SHARED_SCALE_ACROSS_DIFFERENT_UNITS":
+                A_SHARED_SCALE_ACROSS_DIFFERENT_UNITS,
+            "FEATURE_UNITS": FEATURE_UNITS,
             "COMMON_SUPPORT_IS_THE_FAIR_COMPARISON": (
                 "MEAN_ABSOLUTE_ERROR is each predictor's own support; "
                 "ON_COMMON_SUPPORT is the rows every predictor could price. "

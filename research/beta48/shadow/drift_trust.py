@@ -36,6 +36,43 @@ DRIFT_MONITORS = (
 
 DRIFT_KINDS = ("SUDDEN", "GRADUAL", "NONE")
 
+# --- The thresholds are provisional heuristics, not capital controls. ------
+#
+# z_sudden = 3.0 and gradual_sd = 1.5 are conventional defaults. Nothing in
+# BETTOR's own data chose them: no false-positive budget, no measured
+# reference-window autocorrelation, no cost of a missed drift against the
+# cost of a spurious stand-down. They are useful for a research alarm and
+# they are NOT a basis for sizing, standing down or moving capital.
+
+DRIFT_THRESHOLD_STATUS = "DIAGNOSTIC_PROVISIONAL_HEURISTICS"
+
+DEFAULT_Z_SUDDEN = 3.0
+DEFAULT_GRADUAL_SD = 1.5
+
+DRIFT_THRESHOLDS_ARE_NOT_CAPITAL_CONTROLS = (
+    "z_sudden = 3.0 and gradual_sd = 1.5 are round conventional numbers. No "
+    "false-positive budget, no measured autocorrelation of the reference "
+    "window and no relative cost of a missed drift versus a spurious "
+    "stand-down produced them. A drift verdict built on them may raise a "
+    "research flag and may not, on its own, reduce size, stand a model down "
+    "or move capital. Promoting a provisional heuristic to a control is the "
+    "same move as reading sufficiency off a round N")
+
+WHAT_A_DECISION_GRADE_THRESHOLD_NEEDS = (
+    "FALSE_POSITIVE_BUDGET",
+    "REFERENCE_WINDOW_AUTOCORRELATION_MEASURED",
+    "COST_OF_MISSED_DRIFT",
+    "COST_OF_SPURIOUS_STAND_DOWN",
+    "MULTIPLE_COMPARISON_CORRECTION_ACROSS_MONITORS",
+)
+
+DRIFT_ADMISSIBLE_ACTIONS = ("RAISE_RESEARCH_FLAG", "SCHEDULE_INVESTIGATION",
+                            "WIDEN_UNCERTAINTY_BUFFER", "LOWER_MODEL_TRUST")
+
+DRIFT_INADMISSIBLE_ACTIONS_UNDER_PROVISIONAL_THRESHOLDS = (
+    "REDUCE_ELIGIBLE_SIZE", "MOVE_MODEL_TO_SHADOW", "ROLL_BACK", "NO_TRADE",
+    "TRIGGER_CHALLENGER_RETRAIN")
+
 SUDDEN_AND_GRADUAL_ARE_DIFFERENT = (
     "a sudden shift is usually a venue or feed change; a gradual one is "
     "usually the market adapting or an edge decaying. Detecting only one "
@@ -100,6 +137,12 @@ def drift(reference, recent, monitor="FEATURE_DRIFT", z_sudden=3.0,
         "DRIFT_KIND": kind,
         "DRIFT_DETECTED": kind != "NONE",
         "DRIFT_STATUS": "DETECTED" if kind != "NONE" else "NOT_DETECTED",
+        "Z_SUDDEN_THRESHOLD": z_sudden,
+        "DRIFT_THRESHOLD_STATUS": DRIFT_THRESHOLD_STATUS,
+        "DRIFT_THRESHOLDS_ARE_NOT_CAPITAL_CONTROLS":
+            DRIFT_THRESHOLDS_ARE_NOT_CAPITAL_CONTROLS,
+        "WHAT_A_DECISION_GRADE_THRESHOLD_NEEDS":
+            WHAT_A_DECISION_GRADE_THRESHOLD_NEEDS,
         "SUDDEN_AND_GRADUAL_ARE_DIFFERENT": SUDDEN_AND_GRADUAL_ARE_DIFFERENT,
     }
 
@@ -166,16 +209,38 @@ def drift_response(drift_rows):
                 "UNDETERMINED_IS_NOT_CALM": UNDETERMINED_IS_NOT_CALM,
                 "WHY_A_TRI_STATE_NEEDS_AN_ENUM":
                     WHY_A_TRI_STATE_NEEDS_AN_ENUM,
+                "DRIFT_THRESHOLD_STATUS": DRIFT_THRESHOLD_STATUS,
+                "DRIFT_THRESHOLDS_ARE_NOT_CAPITAL_CONTROLS":
+                    DRIFT_THRESHOLDS_ARE_NOT_CAPITAL_CONTROLS,
+                "RESPONSES_ADMISSIBLE_NOW": (),
+                "RESPONSES_HELD_PENDING_THRESHOLD_DERIVATION": (),
                 "AUTO_DEPLOY": False}
     resp = ["LOWER_MODEL_TRUST", "WIDEN_UNCERTAINTY_BUFFER"]
     if any(d.get("DRIFT_KIND") == "SUDDEN" for d in fired):
         resp += ["MOVE_MODEL_TO_SHADOW", "NO_TRADE"]
     else:
         resp += ["REDUCE_ELIGIBLE_SIZE", "TRIGGER_CHALLENGER_RETRAIN"]
+    # A response list built off provisional thresholds is a RECOMMENDATION.
+    # The ones that move capital are separated out and held, because the
+    # number that fired them was a convention, not a measurement.
+    provisional = any(d.get("DRIFT_THRESHOLD_STATUS",
+                            DRIFT_THRESHOLD_STATUS)
+                      == DRIFT_THRESHOLD_STATUS for d in fired)
+    held = tuple(r for r in resp
+                 if provisional and
+                 r in DRIFT_INADMISSIBLE_ACTIONS_UNDER_PROVISIONAL_THRESHOLDS)
     return {
         "DRIFT_DETECTED": True,
         "DRIFT_STATUS": "DETECTED",
         "MONITORS_FIRED": [d["MONITOR"] for d in fired],
+        "DRIFT_THRESHOLD_STATUS": DRIFT_THRESHOLD_STATUS,
+        "RESPONSES_ADMISSIBLE_NOW": tuple(r for r in resp if r not in held),
+        "RESPONSES_HELD_PENDING_THRESHOLD_DERIVATION": held,
+        "DRIFT_THRESHOLDS_ARE_NOT_CAPITAL_CONTROLS":
+            DRIFT_THRESHOLDS_ARE_NOT_CAPITAL_CONTROLS,
+        "WHAT_A_DECISION_GRADE_THRESHOLD_NEEDS":
+            WHAT_A_DECISION_GRADE_THRESHOLD_NEEDS,
+        "DRIFT_ADMISSIBLE_ACTIONS": DRIFT_ADMISSIBLE_ACTIONS,
         "UNDETERMINED_MONITORS": [d.get("MONITOR") for d in undetermined],
         "UNDETERMINED_POLICY": (UNDETERMINED_POLICY if undetermined else ()),
         "WHY_A_TRI_STATE_NEEDS_AN_ENUM": WHY_A_TRI_STATE_NEEDS_AN_ENUM,

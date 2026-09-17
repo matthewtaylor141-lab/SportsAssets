@@ -61,7 +61,11 @@ def test_known_zero_is_the_only_state_that_contributes_a_numeric_zero():
     assert MC.CONTRIBUTES_ZERO == ("KNOWN_ZERO", "NOT_APPLICABLE")
     assert set(MC.TERM_STATES) == {
         "MEASURED_BETTOR_NATIVE", "ESTIMATED_PRIOR", "KNOWN_ZERO",
-        "NOT_APPLICABLE", "NOT_IDENTIFIED"}
+        "NOT_APPLICABLE", "NOT_IDENTIFIED", "UNVERIFIED_INPUT"}
+    # UNVERIFIED_INPUT resolves the arithmetic and blocks decision grade. It
+    # does NOT contribute a numeric zero.
+    assert "UNVERIFIED_INPUT" not in MC.CONTRIBUTES_ZERO
+    assert "UNVERIFIED_INPUT" not in MC.DECISION_GRADE_STATES
     r = MC.action_ev_mc("Q", _resolved(), draws=300)
     assert r["ACTION_EV_STATUS"] == "IDENTIFIED"
     assert r["TERM_STATES"]["FEE"] == "KNOWN_ZERO"
@@ -272,6 +276,7 @@ def test_every_term_carries_a_declared_domain():
 # --- 8. Artifact binding by EVALUATION_ID. --------------------------------
 
 def _fs(**over):
+    over.setdefault("FILL_SELECTION_CONVENTION", "SEPARATE_TERM")
     return _resolved(FILL_SELECTION_EFFECT=Dist("NORMAL", {"mu": 0.0,
                                                            "sigma": 0.004}),
                      **over)
@@ -484,14 +489,23 @@ def test_the_queue_units_are_frozen_and_the_mismatch_named():
 
 # --- 17. Baseline units and common evaluation support. --------------------
 
+# Each scaled baseline carries its own declared scale in its own unit.
+_SCALES = {
+    "B4_SIMPLE_BOOK_IMBALANCE": (0.01, "PREDECLARED_FIXED_TRANSFORMATION"),
+    "B5_SIMPLE_ORDER_FLOW_IMBALANCE": (0.0001,
+                                       "PREDECLARED_FIXED_TRANSFORMATION"),
+}
+
 def test_a_dimensionless_baseline_refuses_without_a_declared_scale():
-    feats = {"ORDER_BOOK_IMBALANCE": 0.5, "ORDER_FLOW_IMBALANCE": 0.5}
-    for b in MS.DIMENSIONLESS_BASELINES:
+    feats = {"ORDER_BOOK_IMBALANCE": 0.5, "RAW_OFI_SHARES": 50}
+    for b in MS.SCALED_BASELINE_INPUTS:
         assert MS.baseline_prediction(b, feats) is None
         assert MS.baseline_prediction(b, feats, scale=0.01) is None
+        # Each scaled baseline needs ITS OWN scale: B4 reads a [-1, 1] ratio
+        # and B5 a signed share count, so one constant cannot convert both.
         assert MS.baseline_prediction(
-            b, feats, scale=0.01,
-            scale_source="CALIBRATED_ON_TRAINING_EVENTS") is not None
+            b, feats, scales={b: (0.01,
+                                  "CALIBRATED_ON_TRAINING_EVENTS")}) is not None
 
 
 def test_the_evaluation_fold_is_never_an_admissible_scale_source():
@@ -503,14 +517,14 @@ def test_the_evaluation_fold_is_never_an_admissible_scale_source():
 def test_scores_are_reported_on_a_common_evaluation_support():
     # Row 1 is priceable by every predictor; row 2 is not (no imbalance).
     rows = [{"MID_MOVE_30S": 0.01, "MID_MOVE_30S_STATUS": "PRESENT",
-             "ORDER_BOOK_IMBALANCE": 0.5, "ORDER_FLOW_IMBALANCE": 0.4,
+             "ORDER_BOOK_IMBALANCE": 0.5, "RAW_OFI_SHARES": 40,
              "MICROPRICE_MINUS_MID": 0.001, "_PREV_MOVE": 0.002},
             {"MID_MOVE_30S": -0.01, "MID_MOVE_30S_STATUS": "PRESENT",
-             "ORDER_BOOK_IMBALANCE": None, "ORDER_FLOW_IMBALANCE": None,
+             "ORDER_BOOK_IMBALANCE": None, "RAW_OFI_SHARES": None,
              "MICROPRICE_MINUS_MID": -0.002, "_PREV_MOVE": -0.001}]
     out = MS.score_baselines(
-        rows, "MID_MOVE_30S", min_coverage_pct=50.0, baseline_scale=0.01,
-        baseline_scale_source="PREDECLARED_FIXED_TRANSFORMATION")
+        rows, "MID_MOVE_30S", min_coverage_pct=50.0,
+        baseline_scales=_SCALES)
     assert out["SCORABLE_ROWS"] == 2
     assert out["COMMON_EVALUATION_SUPPORT_ROWS"] == 1
     b0 = out["BY_PREDICTOR"]["B0_NO_CHANGE"]
@@ -526,11 +540,11 @@ def test_an_abstaining_predictor_cannot_win_on_an_easier_subset():
              "MID_MOVE_30S_STATUS": "PRESENT",
              "MICROPRICE_MINUS_MID": (0.01 if i % 2 else None),
              "_PREV_MOVE": 0.0,
-             "ORDER_BOOK_IMBALANCE": 0.1, "ORDER_FLOW_IMBALANCE": 0.1}
+             "ORDER_BOOK_IMBALANCE": 0.1, "RAW_OFI_SHARES": 10}
             for i in range(10)]
     out = MS.score_baselines(
-        rows, "MID_MOVE_30S", min_coverage_pct=50.0, baseline_scale=0.01,
-        baseline_scale_source="PREDECLARED_FIXED_TRANSFORMATION")
+        rows, "MID_MOVE_30S", min_coverage_pct=50.0,
+        baseline_scales=_SCALES)
     thin = out["BY_PREDICTOR"]["B2_MICROPRICE"]
     assert thin["ABSTAINED_ROWS"] == 5          # skipped every hard row
     assert thin["ON_COMMON_SUPPORT"]["N_SCORED"] == 5
