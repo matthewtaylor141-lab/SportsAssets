@@ -520,3 +520,89 @@ def robustness(fills):
             "which units are called matched is a convention, and a convention "
             "must not be what produces the finding"),
     }
+
+
+# ---------------------------------------------------------------------------
+# THE SELECTION TEST, AND IT CAME BACK NEGATIVE.
+#
+# The complete-coverage subset is 9,269 of 17,752 conditions (52.2%), which
+# looks like a comfortable half. It is not a random half. A condition is
+# "complete" only if EVERY one of its trades happened to carry a probe, and the
+# more trades a condition has the less likely that is. Completeness therefore
+# selects for FEW TRADES almost mechanically.
+#
+# Measured, standardised mean differences (complete vs partial):
+#
+#     u0_trade_count   4.74 vs 28.77   SMD -0.776   LARGE
+#     sides_seen       1.36 vs  1.69   SMD -0.690   LARGE
+#     u2_fill_count    4.74 vs 18.02   SMD -0.564   LARGE
+#     notional          749 vs  4,534  SMD -0.288   SMALL
+#     span_s          3,207 vs  5,195  SMD -0.202   SMALL
+#     first_price      0.46 vs   0.48  SMD -0.042   NEGLIGIBLE
+#
+#     sport mix: complete 60.8% Soccer / 10.7% Tennis
+#                partial  36.3% Soccer / 36.2% Tennis
+#
+# `sides_seen` is the one that bites. The complete subset is biased TOWARD
+# conditions where RN1 only ever touched ONE side -- which cannot pair at all --
+# and AWAY from the busy two-sided conditions where pairing actually happens.
+# The valid population is therefore systematically the SMALL, SIMPLE, ONE-SIDED
+# end of RN1's book, and that is precisely not the end the pair question is
+# about.
+# ---------------------------------------------------------------------------
+
+COMPLETE_SUBSET_SELECTION_STATUS = "SELECTED"
+SELECTION_MECHANISM = (
+    "completeness requires every trade to carry a probe, so conditions with "
+    "more trades are mechanically less likely to qualify; the filter selects "
+    "for few trades, and few trades means fewer sides and less pairing")
+SELECTION_LARGE_EFFECTS = {
+    "u0_trade_count": -0.776,
+    "sides_seen": -0.690,
+    "u2_fill_count": -0.564,
+}
+WHY_THE_AGGREGATE_MAY_NOT_GENERALISE = (
+    "the +$96k aggregate and the 38-39% loss-lock rate are valid ON the "
+    "complete subset; that subset under-samples the heavily traded two-sided "
+    "conditions where pairing concentrates, so neither figure may be carried "
+    "to RN1's whole book")
+EFFECT_SIZE_NOT_P_VALUES = (
+    "with 17,752 conditions almost any difference is 'significant'; these are "
+    "standardised mean differences, and three of them exceed 0.5")
+
+FULL_EXTRACTION_EXECUTED = "NO"
+FULL_EXTRACTION_BLOCKER = (
+    "the U0 population lives in the production database; no DATABASE_URL, no "
+    "PG environment variables and no credentials are present in this "
+    "environment, and production access is forbidden by standing instruction. "
+    "EV_CORE_WHALE_EXTRACTION_SPEC.md is ready for an authorised operator")
+
+
+def selection_report(complete_features, partial_features):
+    """Standardised mean differences between the two condition populations."""
+    import math
+    out = {}
+    for k in set(complete_features) & set(partial_features):
+        a, b = complete_features[k], partial_features[k]
+        if len(a) < 2 or len(b) < 2:
+            continue
+        ma = sum(a) / len(a)
+        mb = sum(b) / len(b)
+        va = sum((x - ma) ** 2 for x in a) / len(a)
+        vb = sum((x - mb) ** 2 for x in b) / len(b)
+        pooled = math.sqrt((va + vb) / 2)
+        d = (ma - mb) / pooled if pooled > 0 else 0.0
+        out[k] = {
+            "COMPLETE_MEAN": ma, "PARTIAL_MEAN": mb, "SMD": d,
+            "EFFECT": ("NEGLIGIBLE" if abs(d) < 0.1 else
+                       "SMALL" if abs(d) < 0.3 else
+                       "MEDIUM" if abs(d) < 0.5 else "LARGE"),
+        }
+    large = [k for k, v in out.items() if v["EFFECT"] == "LARGE"]
+    return {
+        "FEATURES": out,
+        "LARGE_EFFECTS": sorted(large),
+        "SELECTION_STATUS": ("SELECTED" if large else "REPRESENTATIVE"),
+        "EFFECT_SIZE_NOT_P_VALUES": EFFECT_SIZE_NOT_P_VALUES,
+        "SELECTION_MECHANISM": SELECTION_MECHANISM,
+    }

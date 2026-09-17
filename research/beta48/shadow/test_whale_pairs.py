@@ -245,3 +245,51 @@ class TheAccountingConventionMustNotCreateTheFinding(unittest.TestCase):
     def test_a_market_with_one_leg_has_no_pair_under_any_convention(self):
         f = [buy("1", 0, 100, "0.40")]
         self.assertEqual(WP.robustness(f)["PAIR_STATUS"], "NO_PAIR")
+
+
+class TheCompleteSubsetIsNotRepresentative(unittest.TestCase):
+    """52.2% coverage looks like half. It is a mechanically selected half."""
+
+    def test_the_selection_status_is_recorded_as_selected(self):
+        self.assertEqual(WP.COMPLETE_SUBSET_SELECTION_STATUS, "SELECTED")
+
+    def test_three_large_effects_are_named_with_their_magnitudes(self):
+        for k in ("u0_trade_count", "sides_seen", "u2_fill_count"):
+            self.assertIn(k, WP.SELECTION_LARGE_EFFECTS, k)
+            self.assertGreater(abs(WP.SELECTION_LARGE_EFFECTS[k]), 0.5, k)
+
+    def test_the_mechanism_is_explained_not_just_observed(self):
+        self.assertIn("mechanically less likely", WP.SELECTION_MECHANISM)
+
+    def test_the_aggregate_is_flagged_as_non_generalisable(self):
+        self.assertIn("may be carried", WP.WHY_THE_AGGREGATE_MAY_NOT_GENERALISE)
+        self.assertIn("under-samples", WP.WHY_THE_AGGREGATE_MAY_NOT_GENERALISE)
+
+    def test_effect_sizes_are_used_not_p_values(self):
+        self.assertIn("standardised mean differences",
+                      WP.EFFECT_SIZE_NOT_P_VALUES)
+        src = Path(WP.__file__).read_text()
+        code = src.split('"""', 2)[2]
+        self.assertNotIn("p_value", code)
+        self.assertNotIn("ttest", code)
+
+    def test_the_report_classifies_a_selected_population(self):
+        # Needs real variance: two constant lists have zero pooled SD, so the
+        # SMD is undefined and correctly returns 0 rather than infinity.
+        a = [1.0 + (i % 5) * 0.1 for i in range(50)]
+        b = [5.0 + (i % 5) * 0.1 for i in range(50)]
+        r = WP.selection_report({"x": a}, {"x": b})
+        self.assertEqual(r["SELECTION_STATUS"], "SELECTED")
+        self.assertIn("x", r["LARGE_EFFECTS"])
+
+    def test_the_report_classifies_a_representative_population(self):
+        a = [float(i % 10) for i in range(200)]
+        b = [float((i + 1) % 10) for i in range(200)]
+        r = WP.selection_report({"x": a}, {"x": b})
+        self.assertEqual(r["SELECTION_STATUS"], "REPRESENTATIVE")
+
+    def test_the_extraction_is_recorded_as_not_executed_with_its_blocker(self):
+        self.assertEqual(WP.FULL_EXTRACTION_EXECUTED, "NO")
+        self.assertIn("no DATABASE_URL", WP.FULL_EXTRACTION_BLOCKER)
+        self.assertIn("forbidden by standing instruction",
+                      WP.FULL_EXTRACTION_BLOCKER)
