@@ -1,5 +1,13 @@
 # THROUGHPUT V1 — CAN BETTOR BE HIGH-VOLUME WITHOUT LOWERING ITS EV STANDARD?
 
+> **SUPERSEDED IN PART BY `THROUGHPUT_V2_FINDINGS.md`.** Everything here counts
+> the opportunity set as a SNAPSHOT MARKET CENSUS and assumes one order per
+> market per day. That assumption is not a rule of this system — a market can be
+> quoted many times as its book moves — so any figure derived by multiplying the
+> market count by a clip size bounds nothing. V2 replaces the census with a
+> measured arrival RATE. The universe counts, the family breakdown and the
+> three-concept turnover model below all still stand.
+
 Plain English. Nothing here is a profitability claim, and nothing here changes
 what BETTOR is allowed to trade.
 
