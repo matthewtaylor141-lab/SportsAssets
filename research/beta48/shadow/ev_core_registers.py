@@ -1040,6 +1040,87 @@ NEXT_LARGEST_EXPECTED_INFORMATION_GAIN = (
 STATIC_SOCCER_MODEL_TUNING_IS_NOT_THE_NEXT_CYCLE = True
 
 
+# ---------------------------------------------------------------------------
+# Directive K4. The priority shift. Settlement research is frozen as a negative
+# control; the question becomes what moves the market before the market moves.
+# ---------------------------------------------------------------------------
+
+STATIC_SOCCER_V3_STATUS = "FROZEN_NEGATIVE_CONTROL"
+
+STATIC_SOCCER_V3_FREEZE = {
+    "FROZEN_AT": "2026-09-17",
+    "WHAT_IS_FROZEN": (
+        "HIGH_INTEGRITY_V3 and RESEARCH_LANE_V3: their feature sets, their "
+        "scores, their incremental results and the corrected power ladders"),
+    "HIGH_INTEGRITY_FEATURES": 30,
+    "RESEARCH_FEATURES": 37,
+    "COMMON_EVENTS": 47,
+    "CONTRACT_ROWS": 666,
+    "B0_LOG_LOSS": 0.582821,
+    "HIGH_INTEGRITY_LOG_LOSS": 0.734698,
+    "RESEARCH_LOG_LOSS": 0.726503,
+    "HIGH_INTEGRITY_INCREMENTAL_DELTA_LL": -0.02457,
+    "RESEARCH_INCREMENTAL_DELTA_LL": -0.02930,
+    "NOT_DETECTED_IS_NOT_PROVEN_ABSENT": True,
+    "WHY_FROZEN": (
+        "not because the question is answered, but because this data cannot "
+        "answer it. The incremental ladder needs thousands of events and the "
+        "sample is 47. Continuing to tune the same models against the same "
+        "fixtures would generate motion without evidence"),
+    "WHAT_WOULD_UNFREEZE_IT": (
+        "new data, new independent features, or a materially larger event N. "
+        "Not a new hyperparameter"),
+}
+
+FUNDAMENTAL_MODELS_STATUS = "SETTLEMENT_CHALLENGERS_MAINTENANCE_ONLY"
+FUNDAMENTAL_MODELS_RETAINED = (
+    "HI_INTERNAL_ELO", "B7_GRADIENT_BOOSTED", "B2_POISSON", "B3_DIXON_COLES",
+    "B4_BIVARIATE_POISSON", "B5_DYNAMIC_ATTACK_DEFENCE", "B6_REGULARIZED_GLM",
+)
+NOTHING_IS_DELETED = True
+WHY_RETAINED = (
+    "they may yet add value combined with timestamped external information, "
+    "which is a different experiment from the one that just failed. They are "
+    "kept, not tuned")
+
+# --- Sections 2-5. The odds lane. -------------------------------------------
+ODDS_ADAPTER_STATUS = "BUILT_PROVIDER_NEUTRAL_INTERFACE_ENFORCING_THE_INVARIANT"
+THE_ODDS_API_ADAPTER_STATUS = "BUILT_AWAITING_CREDENTIALS_NOTHING_PURCHASED"
+BETFAIR_HISTORICAL_ADAPTER_STATUS = "BUILT_AWAITING_DATA_NOTHING_PURCHASED"
+PROCUREMENT_REPORT_STATUS = "WRITTEN_EXACT_TIMESTAMP_ODDS_PROCUREMENT_MD"
+
+ODDS_PROVIDER_EGRESS = {
+    "api.the-odds-api.com": "BLOCKED",
+    "the-odds-api.com": "BLOCKED",
+    "historicaldata.betfair.com": "BLOCKED",
+    "developer.betfair.com": "BLOCKED",
+    "CONSEQUENCE": (
+        "credit formulae and plan prices could not be read, so they are "
+        "declared as PARAMETERS labelled NOT_VERIFIED and every cost number "
+        "inherits that status"),
+}
+
+# --- Sections 6-10. The new experiments, not yet runnable. ------------------
+TIMESTAMPED_CONSENSUS_EXPERIMENT_STATUS = "BUILT_AWAITING_DATA"
+LEAD_LAG_EXPERIMENT_STATUS = "BUILT_AWAITING_DATA"
+MICROSTRUCTURE_V1_STATUS = "BUILT_AWAITING_CAPTURE"
+RELATIVE_VALUE_CONTINUOUS_STATUS = "BUILT_AWAITING_CAPTURE"
+P_FILL_STATUS = "BETTOR_NATIVE_NOT_IDENTIFIED_MICRO_LIVE_REMAINS_NO_SUBMIT"
+
+THE_QUESTION_HAS_CHANGED = (
+    "stop asking only whether BETTOR can predict settlement better. Start "
+    "asking what information moves the market before the market moves, and "
+    "whether BETTOR can monetize that passively")
+
+CURRENT_STRONGEST_POTENTIAL_EDGE_LANE = "EXECUTION_AND_MICROSTRUCTURE"
+WHY_THAT_LANE = (
+    "settlement forecasting has been measured and the market wins; the "
+    "incremental question is unanswerable at this sample size. Short-horizon "
+    "price movement produces thousands of observations per capture rather than "
+    "one binary outcome per fixture, so it is the only lane where the evidence "
+    "can actually arrive at the rate the research needs")
+
+
 def describe():
     return {
         "EVIDENCE_LADDER": {("%.3f" % k): v
@@ -1066,6 +1147,23 @@ def describe():
             [dict(p) for p in EXACT_TIMESTAMP_ODDS_PROVIDER_OPTIONS],
         "NOTHING_HAS_BEEN_PURCHASED": NOTHING_HAS_BEEN_PURCHASED,
         "CANONICAL_DELTA_SIGN_STATUS": CANONICAL_DELTA_SIGN_STATUS,
+        "STATIC_SOCCER_V3_STATUS": STATIC_SOCCER_V3_STATUS,
+        "STATIC_SOCCER_V3_FREEZE": dict(STATIC_SOCCER_V3_FREEZE),
+        "FUNDAMENTAL_MODELS_STATUS": FUNDAMENTAL_MODELS_STATUS,
+        "ODDS_ADAPTER_STATUS": ODDS_ADAPTER_STATUS,
+        "THE_ODDS_API_ADAPTER_STATUS": THE_ODDS_API_ADAPTER_STATUS,
+        "BETFAIR_HISTORICAL_ADAPTER_STATUS": BETFAIR_HISTORICAL_ADAPTER_STATUS,
+        "PROCUREMENT_REPORT_STATUS": PROCUREMENT_REPORT_STATUS,
+        "ODDS_PROVIDER_EGRESS": dict(ODDS_PROVIDER_EGRESS),
+        "TIMESTAMPED_CONSENSUS_EXPERIMENT_STATUS":
+            TIMESTAMPED_CONSENSUS_EXPERIMENT_STATUS,
+        "LEAD_LAG_EXPERIMENT_STATUS": LEAD_LAG_EXPERIMENT_STATUS,
+        "MICROSTRUCTURE_V1_STATUS": MICROSTRUCTURE_V1_STATUS,
+        "RELATIVE_VALUE_CONTINUOUS_STATUS": RELATIVE_VALUE_CONTINUOUS_STATUS,
+        "P_FILL_STATUS": P_FILL_STATUS,
+        "THE_QUESTION_HAS_CHANGED": THE_QUESTION_HAS_CHANGED,
+        "CURRENT_STRONGEST_POTENTIAL_EDGE_LANE":
+            CURRENT_STRONGEST_POTENTIAL_EDGE_LANE,
         "POWER_LADDER_AUDIT_STATUS": POWER_LADDER_AUDIT_STATUS,
         "PRIMARY_MANAGEMENT_EVIDENCE_LADDER": PRIMARY_MANAGEMENT_EVIDENCE_LADDER,
         "STANDALONE_SD_EVENT": dict(STANDALONE_SD_EVENT),
