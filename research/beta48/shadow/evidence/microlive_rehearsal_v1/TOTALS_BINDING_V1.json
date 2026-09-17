@@ -1,0 +1,22 @@
+{
+ "ADDING_TOTALS_INCREASES_THE_OPPORTUNITY_SET_NOT_PERMISSION": "every totals market still passes BETTOR EV and risk independently",
+ "CONTESTS_INDEXED": 87,
+ "FAILS_CLOSED": "zero candidates is UNBOUND and two or more is AMBIGUOUS_REFUSED; a total that cannot name its contest is never assigned to one",
+ "MONEYLINE_SPREAD_TOTAL_EVENT_TRIPLETS": 41,
+ "NOT_A_TITLE_HEURISTIC": "title and question are never read; the tokens compared are the venue's own team abbreviations against the venue's own slug, matched exactly",
+ "NOT_TIME_PROXIMITY": "start times must be IDENTICAL; a nearby kickoff is not the same fixture",
+ "NO_EXPLICIT_VENUE_EVENT_ID": "no eventId, gameId, parentMarketId or groupId exists on any of the 20,000 sealed board rows; gameStartTime is the only grouping-capable field the venue supplies",
+ "STRONGER_CANONICAL_EVENT_ID_AVAILABLE": "NO",
+ "TOTALS_AMBIGUOUS_REFUSED": 0,
+ "TOTALS_BINDING_COVERAGE_PCT": 99.38556067588326,
+ "TOTALS_BINDING_SOURCE": "VENUE_START_TIME_PLUS_VENUE_TEAM_ABBREVIATIONS_IN_SLUG",
+ "TOTALS_CANONICALLY_BOUND": 647,
+ "TOTALS_MARKETS_OBSERVED": 651,
+ "TOTALS_UNBOUND": 4,
+ "UNBOUND_SLUGS": [
+  "tsc-eflc-eve-wol-2026-09-09-0pt5",
+  "tsc-eflc-eve-wol-2026-09-09-1pt5",
+  "tsc-eflc-eve-wol-2026-09-09-2pt5",
+  "tsc-eflc-eve-wol-2026-09-09-3pt5"
+ ]
+}
