@@ -26,147 +26,157 @@ before or after the observation being scored, and that *is* the comparison.
 
 So the gap is timing, not sport.
 
-## 2. What was verified, and what was not
+## 2. What is verified, and what is not
 
-**Egress from this environment is blocked to every provider host:**
+**The credit formula is VERIFIED** (owner's independent check of the public
+documentation, 2026-09-17):
 
-| Host | Result |
-|---|---|
-| `api.the-odds-api.com` | no response through the proxy |
-| `the-odds-api.com` | no response through the proxy |
-| `historicaldata.betfair.com` | no response through the proxy |
-| `developer.betfair.com` | no response through the proxy |
+```
+CREDITS_PER_HISTORICAL_REQUEST = 10 × NUMBER_OF_MARKETS × NUMBER_OF_REGIONS
+```
 
-Consequently **no price list and no quota formula was read.** Everything below
-that depends on either is labelled `NOT_VERIFIED` and is held as a *parameter*
-in `odds_api_adapter.CREDIT_FORMULA`, so correcting one constant re-computes
-every scenario.
+**Plan pricing is VERIFIED** as of **2026-09-17**. A vendor price list is a
+snapshot, not a constant — re-check before any purchase is authorised.
 
-**Cost in currency is deliberately left empty.** A fabricated price standing
-beside real request counts would be the most misleading number in this document.
+| Plan | Credits | USD / month |
+|---|---|---|
+| 20K | 20,000 | $30 |
+| 100K | 100,000 | $59 |
+| 5M | 5,000,000 | $119 |
+| 15M | 15,000,000 | $249 |
 
-## 3. Provider comparison
+**Still not verified:** the per-region bookmaker lists. Provider hosts remain
+egress-blocked from this environment, so no bookmaker count is asserted
+anywhere in this document.
 
-Ranked on **data suitability**, not vendor prestige and not price.
+## 2a. The billing unit was wrong, and it is corrected
 
-### Rank 1 — The Odds API
+The previous version of this document billed `EVENTS × MARKETS × HORIZONS`, as
+though each target game needed its own API call. **It does not.** The featured
+historical endpoint returns *all* events for a sport at a requested snapshot, so
+five Premier League matches kicking off together at 15:00 share one request at
+T−2H.
 
-| | |
-|---|---|
-| Historical start | 2020-06-06 (featured markets) |
-| Snapshot resolution | 5-minute from 2022-09; coarser before |
-| Books / exchange | ~40 books incl. Pinnacle, Betfair, US books |
-| Sports | soccer, NFL, NBA, MLB, NHL, tennis, more |
-| Market types | h2h / moneyline, spreads, totals, some player props |
-| Point-in-time guarantee | **yes** — returns the closest snapshot at or *earlier* than the requested time |
-| Access | REST, historical endpoint, by date range |
-| Pricing model | credit-based; **formula NOT_VERIFIED** |
-| Expected match rate | high for the eight evaluated European leagues |
+The billable unit is `(SPORT_KEY, SNAPSHOT_TIME, MARKET_SET, REGION_SET)`,
+deduplicated.
 
-**Advantages.** The only option pairing a per-snapshot timestamp with a
-documented sub-hourly cadence across the leagues this programme evaluates. Its
-selection rule is already this programme's invariant, implemented provider-side.
+**How much that actually saves — measured on 4,178 real fixtures with real
+kickoff times across the eight target leagues:**
 
-**Limitations.** Paid for historical access. 5-minute granularity starts
-2022-09, so earlier seasons are coarser. Credit cost scales with regions.
+| Target events | Static (3 horizons) | Dense 6h |
+|---|---|---|
+| 100 | 3.0% | 4.4% |
+| 500 | 10.7% | 15.2% |
+| 1,000 | 18.3% | 27.4% |
+| 5,000 | 38.4% | 57.1% |
 
-**Best BETTOR use.** The primary `P_EXTERNAL_TIMESTAMPED` consensus — several
-books at a known instant, which is what a consensus requires.
+Deduplication only fires when two events in the **same league** share a snapshot
+instant. At 100 events spread across eight leagues and a season, collisions are
+rare. At full-season density the Saturday and Sunday blocks overlap heavily, and
+on a five-minute grid a 15:00 kickoff's T−2H request *is* a 13:00 kickoff's T−0.
 
-### Rank 2 — Betfair Exchange historical
+**So dedup is real but it is not the big lever.** The big levers are markets
+(h2h only, not three) and regions (one, not two) — together they divide the bill
+by six. That correction matters far more than the collision rate.
 
-| | |
-|---|---|
-| Historical start | 2015-05 |
-| Snapshot resolution | stream publish times; package-dependent |
-| Books / exchange | one exchange — not a consensus |
-| Market types | h2h, totals, correct score, Asian lines |
-| Point-in-time guarantee | **yes** — publish time per record |
-| Access | bulk file download |
-| Pricing model | per-month archive packages; **NOT_VERIFIED** |
+## 3. Two experiments, not one
 
-**Advantages.** The best timestamps and the only real microstructure: back, lay,
-spread and traded volume rather than a single quote. Deep history.
+Three snapshots per event cannot estimate 5, 15, 30 and 60-minute following
+dynamics. These are separate designs and are costed separately.
 
-**Limitations.** It is *one venue*. Restrictive licensing with explicit
-non-redistribution. Which price objects a file carries depends on the package.
+**A. Static timestamped consensus** — T−24H, T−2H, T−15M. *Does external
+consensus improve settlement / fair value at selected decision points?*
 
-**Best BETTOR use.** An independent *exchange*-information source, modelled
-separately from bookmaker consensus — never merged with it. A bookmaker quote
-embeds one firm's margin and risk position; an exchange back/lay pair is other
-participants' orders with a spread between them. Averaging them produces a
-number that is neither, and the difference between them is itself a candidate
-signal that merging would destroy.
+**B. Dense lead/lag** — a 5-minute time series over T−2H→T−0 or T−6H→T−0. *Does
+external consensus lead the venue, and at what horizon?*
 
-### Rank 3 — OddsJam / OddsBlaze historical
+## 4. Phase 1 is deliberately narrow
 
-| | |
-|---|---|
-| Historical start | ~2023 for most books |
-| Snapshot resolution | sub-minute live; historical varies |
-| Books | 100+ including offshore and US retail |
-| Point-in-time guarantee | yes on the historical product |
-| Pricing model | enterprise quote; **NOT_VERIFIED** |
+**h2h only. One region.** Spreads and totals triple the bill; a second region
+doubles it again. Neither is worth buying before any external lead/lag value has
+been demonstrated at all.
 
-**Advantages.** Widest book coverage; strong player-prop breadth.
+**Region choice is PROVISIONAL and NOT MEASURED.** `uk` is suggested because the
+eight evaluated leagues are European and UK-listed books price them as primary
+markets — that is a reason to *test* uk first, not to skip the test. The
+`/sports` and current-odds endpoints are free or near-free relative to
+historical calls, so **on the day a credential exists, one current-odds call per
+candidate region returns the bookmaker list and settles the choice by
+measurement. Do that before spending historical credits.**
 
-**Limitations.** The 2023 start date is binding — it cannot price the training
-history the models already use.
+## 5. What the experiments cost (h2h, one region, deduplicated)
 
-**Best BETTOR use.** Breadth expansion *later*, not the first purchase.
+Credits per request = 10 × 1 × 1 = **10**.
 
-### Considered and excluded
-
-**Football-Data.co.uk** (current source, via xgabora). Free and deep, but
-`COARSE_PREMATCH_UNTIMESTAMPED` — no snapshot time at all, and opening versus
-closing is not distinguished per row. It is why this procurement exists.
-
-## 4. What the experiment costs
-
-Requests = **events × horizons × markets**. The historical endpoint returns all
-bookmakers for a sport, region and market in one response, so more books cost
-*regions*, not requests.
-
-Horizons: T−24H, T−12H, T−6H, T−3H, T−2H, T−1H, T−30M, T−15M, T−5M (9).
-Markets: h2h, spreads, totals (3). Regions: uk, eu (2).
-
-| Scenario | Events | Requests | Credits | Estimated cost |
+| Experiment | Events | Naive credits | **Deduped credits** | Saving |
 |---|---|---|---|---|
-| A | 100 | 2,700 | 54,000 | *not estimated* |
-| B | 500 | 13,500 | 270,000 | *not estimated* |
-| C | 1,000 | 27,000 | 540,000 | *not estimated* |
-| D | 5,000 | 135,000 | 2,700,000 | *not estimated* |
+| Static (3 horizons) | 100 | 3,000 | **2,910** | 3.0% |
+| Static (3 horizons) | 500 | 15,000 | **13,390** | 10.7% |
+| Dense T−2H @ 5min | 100 | 25,000 | **24,500** | 2.0% |
+| Dense T−2H @ 5min | 500 | 125,000 | **111,650** | 10.7% |
+| Dense T−6H @ 5min | 100 | 73,000 | **70,810** | 3.0% |
+| Dense T−6H @ 5min | 500 | 365,000 | **312,270** | 14.4% |
 
-Credits assume `markets × regions × 10` per historical request — **the
-multiplier is NOT_VERIFIED.** Correct it in one place and the table re-computes.
+Against verified pricing:
 
-## 5. Recommendation
+| Requirement | Smallest tier that fits | Cost |
+|---|---|---|
+| Static 500 (13,390) | **20K** | **$30/mo** |
+| Dense 2H / 100 (24,500) | **100K** | **$59/mo** |
+| Dense 6H / 100 (70,810) | **100K** | **$59/mo** |
+| Dense 2H / 500 (111,650) | 5M | $119/mo |
+| Dense 6H / 500 (312,270) | 5M | $119/mo |
 
-**Do not start at scenario D.** 5,000 events would satisfy the settlement
-ladder, but that is the expensive question and the one most likely to return
-another null.
+Note the cliff: dense-2H at 500 events needs 111,650 credits and **just**
+overruns the 100K tier. Trimming to ~440 events fits $59/month instead of $119.
 
-**Start with the lead/lag question**, which needs far fewer events because a
-price move is observed on *every* event whereas a settlement is one binary
-outcome per event.
+## 6. Recommendation
 
-> **Cheapest experiment that answers something real:** 500 events × 3 horizons
-> (T−24H, T−2H, T−15M) × 1 market (h2h) = **30,000 credits** — nine times
-> cheaper than scenario B and sufficient to measure whether external consensus
-> leads Polymarket and by how much.
+**100K plan, $59/month.** It covers the static 500-event experiment *and* a
+dense pilot at 100 events on either window, with headroom.
 
-What that buys:
+Sequence:
+1. Settle the region by measurement (one near-free current-odds call per region).
+2. Static 500 events — 13,390 credits.
+3. Dense T−2H, 100 events — 24,500 credits.
+4. Total ≈ 38,000 credits, inside 100K, leaving room to re-run.
 
-- **Can answer:** does external consensus lead Polymarket, and by how much,
-  conditional on disagreement size, liquidity, spread and time-to-event.
-- **Cannot answer:** whether external consensus improves settlement
-  forecasting. That needs the full incremental ladder.
+The 5M tier is unnecessary until the pilot produces evidence. The 20K tier is
+enough only if the dense pilot is dropped, which would leave the lead/lag
+question — the one that motivated this whole lane — unanswered.
 
-If the lead/lag result is positive, scenario B or C becomes justified on
-evidence rather than hope. If it is null, the programme has spent the smallest
-sum that could have told it so.
+## 7. The problem the odds data cannot solve on its own
 
-## 6. What is already built, awaiting only data
+**`HISTORICAL_POLY_LEAD_LAG_COVERAGE = INSUFFICIENT.`**
+
+A lead/lag experiment needs *both* sides at matched times. The venue side was
+measured directly:
+
+| | |
+|---|---|
+| Soccer observation rows | 32,162 |
+| Distinct market slugs | 2,912 |
+| Observations per market | **median 3**, max 353 |
+| Inter-observation gap | median 0.4 min, p90 10 min |
+| Forward point exists at +5m | 49.3% |
+| at +15m | 31.3% |
+| at +30m | 18.6% |
+| at +60m | **9.3%** |
+
+Worse than the sparsity: those observations are **RN1-trade-triggered**. They
+cluster around when a whale traded, so they are a *selected sample*, not a
+sampling grid. Buying dense external odds against this venue series would pair
+5-minute external snapshots with a venue series that has a forward point only 9%
+of the time at 60 minutes, and only where a whale happened to act.
+
+**Therefore the historical lead/lag experiment is not worth buying dense data
+for yet.** The prospective continuous capture is what makes dense external odds
+worth having, and the two should be commissioned together.
+
+No interpolation will be used to paper over this. Where a matched venue
+observation does not exist, `LEAD_LAG_ROW = UNAVAILABLE`.
+
+## 8. What is already built, awaiting only data
 
 | Component | Status |
 |---|---|
@@ -181,11 +191,16 @@ sum that could have told it so.
 Every one of these returns `NO_EXTERNAL_DATA` today. That is the honest status,
 and it is a status rather than a zero.
 
-## 7. The decision being asked for
+## 9. The decision being asked for
 
-1. Authorise a credential for The Odds API at the **30,000-credit** first step,
-   or decline.
+1. Authorise a credential for The Odds API on the **100K plan at $59/month**,
+   or decline. That covers the static 500-event experiment plus a 100-event
+   dense pilot with headroom (~38,000 of 100,000 credits).
 2. Nothing else. Betfair is rank 2 and can wait for the lead/lag result;
    OddsJam's history starts too late to be a first purchase.
+3. Note the sequencing constraint from section 7: the **dense** half of the
+   spend only becomes worth making alongside the prospective continuous
+   capture, because the historical venue series is too sparse and too selected
+   to pair against. The static half stands on its own today.
 
 Nothing in this document has been purchased, requested, or committed to.

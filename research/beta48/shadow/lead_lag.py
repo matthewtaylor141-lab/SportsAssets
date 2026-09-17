@@ -366,3 +366,188 @@ def describe():
         "TIERS": tier_status(),
         "CURRENT_STATUS": NO_EXTERNAL_DATA,
     }
+
+
+# ===========================================================================
+# Section 11. CHANGE-based targets, kept apart from LEVEL disagreement.
+#
+# A persistent level gap and a leading price movement are different signals and
+# a single "disagreement" number conflates them. A book that simply prices two
+# cents richer than the venue all season has a large level disagreement and
+# leads nothing. A book whose price MOVES first, by any amount, is the one
+# worth paying for.
+# ===========================================================================
+
+LEVEL_SIGNAL = "LEVEL_DISAGREEMENT"
+CHANGE_SIGNAL = "EXTERNAL_MOVE"
+
+TWO_SIGNALS_NOT_ONE = (
+    "LEVEL_DISAGREEMENT = P_EXTERNAL - P_POLY is a standing difference. "
+    "EXTERNAL_MOVE is what the external source just did. They are tested "
+    "separately because a constant offset is not a lead")
+
+EXTERNAL_MOVE_WINDOWS_MINUTES = (5, 15)
+POLY_FORWARD_WINDOWS_MINUTES = (5, 15, 30, 60)
+
+
+def change_rows(series):
+    """Build LEVEL and CHANGE features plus forward Poly moves.
+
+    `series` is a per-event, time-ordered list of dicts with T, P_EXTERNAL and
+    P_POLY. Backward and forward points are taken only where they EXIST -- no
+    interpolation, because interpolating a forward point uses future knowledge
+    and interpolating a backward one invents an observation.
+    """
+    import datetime
+
+    def P(x):
+        s = str(x).replace("Z", "+00:00")
+        try:
+            d = datetime.datetime.fromisoformat(s)
+        except Exception:
+            return None
+        return d if d.tzinfo else d.replace(tzinfo=datetime.timezone.utc)
+
+    out, missing = [], defaultdict(int)
+    for ev, rows in (series or {}).items():
+        pts = sorted([r for r in rows if P(r.get("T"))], key=lambda r: P(r["T"]))
+        stamps = [P(r["T"]) for r in pts]
+        for i, r in enumerate(pts):
+            if r.get("P_EXTERNAL") is None or r.get("P_POLY") is None:
+                missing["NO_PAIRED_STATE"] += 1
+                continue
+            row = {"EVENT_KEY": ev, "T": r["T"],
+                   "P_EXTERNAL": r["P_EXTERNAL"], "P_POLY": r["P_POLY"],
+                   "LEVEL_DISAGREEMENT": r["P_EXTERNAL"] - r["P_POLY"]}
+            for w in EXTERNAL_MOVE_WINDOWS_MINUTES:
+                key = "EXTERNAL_MOVE_%dM" % w
+                row[key] = None
+                tgt = stamps[i] - datetime.timedelta(minutes=w)
+                back = [j for j in range(i) if stamps[j] <= tgt]
+                if back and pts[back[-1]].get("P_EXTERNAL") is not None:
+                    row[key] = r["P_EXTERNAL"] - pts[back[-1]]["P_EXTERNAL"]
+                else:
+                    missing["NO_EXTERNAL_BACK_%dM" % w] += 1
+            any_fwd = False
+            for w in POLY_FORWARD_WINDOWS_MINUTES:
+                key = "POLY_MOVE_NEXT_%dM" % w
+                row[key] = None
+                tgt = stamps[i] + datetime.timedelta(minutes=w)
+                fwd = [j for j in range(i + 1, len(pts))
+                       if tgt <= stamps[j] <= tgt + datetime.timedelta(minutes=5)]
+                if fwd and pts[fwd[0]].get("P_POLY") is not None:
+                    row[key] = pts[fwd[0]]["P_POLY"] - r["P_POLY"]
+                    any_fwd = True
+                else:
+                    missing["NO_POLY_FORWARD_%dM" % w] += 1
+            if any_fwd:
+                out.append(row)
+    return out, dict(missing)
+
+
+def level_vs_change(rows, draws=1000):
+    """Test both signals against the same forward Poly moves, separately."""
+    if not rows:
+        return {"STATUS": NO_EXTERNAL_DATA}
+    import random
+    res = {}
+    for signal in [LEVEL_SIGNAL] + ["EXTERNAL_MOVE_%dM" % w
+                                    for w in EXTERNAL_MOVE_WINDOWS_MINUTES]:
+        per_signal = {}
+        for w in POLY_FORWARD_WINDOWS_MINUTES:
+            tgt = "POLY_MOVE_NEXT_%dM" % w
+            by = defaultdict(list)
+            for r in rows:
+                if r.get(signal) is not None and r.get(tgt) is not None:
+                    by[r["EVENT_KEY"]].append((r[signal], r[tgt]))
+            pairs = [p for v in by.values() for p in v]
+            if len(pairs) < 8 or len(by) < 3:
+                per_signal["%dM" % w] = {"STATUS": "TOO_FEW",
+                                         "N": len(pairs), "EVENTS": len(by)}
+                continue
+            evs = sorted(by)
+            rnd = random.Random(20260917)
+            boot = []
+            for _ in range(draws):
+                samp = []
+                for _ in range(len(evs)):
+                    samp += by[evs[rnd.randrange(len(evs))]]
+                c = _corr([a for a, _ in samp], [b for _, b in samp])
+                if c is not None:
+                    boot.append(c)
+            boot.sort()
+            per_signal["%dM" % w] = {
+                "STATUS": "MEASURED",
+                "N_OBSERVATIONS": len(pairs), "N_EVENTS": len(evs),
+                "CORRELATION": _corr([a for a, _ in pairs],
+                                     [b for _, b in pairs]),
+                "CI95_EVENT_BOOTSTRAP": ((boot[int(0.025 * len(boot))],
+                                          boot[int(0.975 * len(boot)) - 1])
+                                         if boot else None),
+            }
+        res[signal] = per_signal
+    return {"STATUS": "MEASURED", "BY_SIGNAL": res,
+            "TWO_SIGNALS_NOT_ONE": TWO_SIGNALS_NOT_ONE}
+
+
+# ===========================================================================
+# Section 12. Common information, and the limit of 5-minute resolution.
+#
+# If both markets move at once because a team sheet dropped, that is shared
+# news, not a lead anybody can trade. Separating the two requires temporal
+# ORDERING, and ordering is exactly what a five-minute snapshot grid measures
+# badly: two moves inside the same bucket are indistinguishable.
+# ===========================================================================
+
+ORDERING_FEATURES = ("EXTERNAL_MOVE_BEFORE_POLY", "POLY_MOVE_BEFORE_EXTERNAL",
+                     "SIMULTANEOUS_MOVE", "DISAGREEMENT_DURATION",
+                     "TIME_TO_CONVERGENCE")
+
+RESOLUTION_LIMIT_MINUTES = 5
+RESOLUTION_LIMITATION = (
+    "with 5-minute external snapshots, any ordering finer than 5 minutes is "
+    "UNRESOLVABLE. Two moves in the same bucket are recorded as simultaneous "
+    "whichever came first. So SIMULTANEOUS_MOVE is an upper bound on shared "
+    "news and a lower bound on lead, and no causal claim may be made at a "
+    "resolution the instrument does not have")
+
+COMMON_INFORMATION_CAVEAT = (
+    "a positive lead/lag correlation is consistent with the external source "
+    "leading AND with both sources reacting to the same news with the venue "
+    "slightly slower to update its book. Ordering statistics narrow that; they "
+    "do not close it at this resolution")
+
+
+def ordering(series, move_threshold=0.005):
+    """Classify each move pair by temporal order, with the limit declared."""
+    rows, _ = change_rows(series)
+    counts = defaultdict(int)
+    durations = []
+    for r in rows:
+        ext = r.get("EXTERNAL_MOVE_5M")
+        poly = r.get("POLY_MOVE_NEXT_5M")
+        if ext is None or poly is None:
+            counts["UNRESOLVABLE_MISSING_SIDE"] += 1
+            continue
+        moved_ext = abs(ext) >= move_threshold
+        moved_poly = abs(poly) >= move_threshold
+        if moved_ext and not moved_poly:
+            counts["EXTERNAL_MOVE_BEFORE_POLY"] += 1
+        elif moved_poly and not moved_ext:
+            counts["POLY_MOVE_BEFORE_EXTERNAL"] += 1
+        elif moved_ext and moved_poly:
+            counts["SIMULTANEOUS_MOVE"] += 1
+        else:
+            counts["NEITHER_MOVED"] += 1
+        if r.get("LEVEL_DISAGREEMENT") is not None:
+            durations.append(abs(r["LEVEL_DISAGREEMENT"]))
+    return {
+        "COUNTS": dict(counts),
+        "MOVE_THRESHOLD": move_threshold,
+        "MEAN_ABS_LEVEL_DISAGREEMENT": (sum(durations) / len(durations))
+        if durations else None,
+        "RESOLUTION_LIMIT_MINUTES": RESOLUTION_LIMIT_MINUTES,
+        "RESOLUTION_LIMITATION": RESOLUTION_LIMITATION,
+        "COMMON_INFORMATION_CAVEAT": COMMON_INFORMATION_CAVEAT,
+        "ORDERING_FEATURES": ORDERING_FEATURES,
+    }
