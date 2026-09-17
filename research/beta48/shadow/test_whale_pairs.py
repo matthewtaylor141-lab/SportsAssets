@@ -173,3 +173,75 @@ class OnlySomeComponentsActuallyNeedSells(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CoverageGatesEveryPairClaim(unittest.TestCase):
+    """The retained corpus is 22.3% of RN1's trades. Partial history is fatal."""
+
+    def test_a_complete_condition_is_recognised(self):
+        cov = WP.coverage_status("C1", [1, 2, 3], {"C1": {1, 2, 3}})
+        self.assertEqual(cov["COVERAGE"], "COMPLETE_ALL_TRADES_PROBED")
+        self.assertEqual(cov["MISSING_FILLS"], 0)
+
+    def test_a_partial_condition_is_flagged_with_its_gap(self):
+        cov = WP.coverage_status("C1", [1, 2], {"C1": {1, 2, 3, 4}})
+        self.assertEqual(cov["COVERAGE"], "PARTIAL_PROBE_COVERAGE")
+        self.assertEqual(cov["MISSING_FILLS"], 2)
+        self.assertAlmostEqual(cov["FRACTION"], 0.5)
+
+    def test_an_uncheckable_condition_is_not_assumed_complete(self):
+        cov = WP.coverage_status("C9", [1], {})
+        self.assertEqual(cov["COVERAGE"], "COVERAGE_NOT_CHECKABLE")
+
+    def test_the_account_is_proven_from_the_spec_not_inferred(self):
+        self.assertEqual(WP.CORPUS_IS_SINGLE_ACCOUNT, "YES")
+        self.assertEqual(WP.CORPUS_ACCOUNT, "RN1")
+        self.assertIn("trades.whale_id = RN1", WP.ACCOUNT_PROVENANCE)
+
+    def test_the_bias_directions_are_declared_and_differ(self):
+        """Matched qty is a lower bound; basis cannot be signed at all."""
+        self.assertEqual(WP.MATCHED_QTY_BIAS_ON_PARTIAL, "LOWER_BOUND")
+        self.assertEqual(WP.BASIS_BIAS_ON_PARTIAL, "UNSIGNED")
+
+    def test_a_missing_cheap_fill_moves_the_basis_the_other_way(self):
+        """Why the basis cannot be signed: it depends which fill is missing."""
+        seen = [buy("1", 0, 100, "0.70"), buy("2", 1, 100, "0.45")]
+        with_cheap = seen + [buy("3", 0, 100, "0.10")]
+        a = WP.pair_basis_by_method(seen, WP.METHOD_WEIGHTED)
+        b = WP.pair_basis_by_method(with_cheap, WP.METHOD_WEIGHTED)
+        self.assertGreater(a["MATCHED_PAIR_BASIS"], b["MATCHED_PAIR_BASIS"])
+
+
+class TheAccountingConventionMustNotCreateTheFinding(unittest.TestCase):
+
+    def test_all_three_conventions_are_implemented(self):
+        self.assertEqual(len(WP.METHODS), 3)
+        f = [buy("1", 0, 100, "0.40"), buy("2", 1, 100, "0.45")]
+        for m in WP.METHODS:
+            self.assertIsNotNone(WP.pair_basis_by_method(f, m), m)
+
+    def test_identical_prices_give_identical_answers(self):
+        f = [buy("1", 0, 100, "0.40"), buy("2", 1, 100, "0.45")]
+        vals = {str(WP.pair_basis_by_method(f, m)["MATCHED_PAIR_BASIS"])
+                for m in WP.METHODS}
+        self.assertEqual(len(vals), 1)
+
+    def test_conventions_can_disagree_when_prices_differ(self):
+        """FIFO matches the earliest lots; weighted averages them."""
+        f = [buy("1", 0, 100, "0.40"), buy("2", 0, 100, "0.70"),
+             buy("3", 1, 100, "0.45")]
+        w = WP.pair_basis_by_method(f, WP.METHOD_WEIGHTED)
+        fi = WP.pair_basis_by_method(f, WP.METHOD_FIFO)
+        self.assertNotEqual(w["MATCHED_PAIR_BASIS"], fi["MATCHED_PAIR_BASIS"])
+
+    def test_robustness_reports_whether_the_sign_survives(self):
+        f = [buy("1", 0, 100, "0.40"), buy("2", 0, 100, "0.70"),
+             buy("3", 1, 100, "0.45")]
+        r = WP.robustness(f)
+        self.assertIn("ALL_METHODS_AGREE_ON_SIGN", r)
+        self.assertIn("convention must not be what produces the finding",
+                      r["WHY_THREE_METHODS"])
+
+    def test_a_market_with_one_leg_has_no_pair_under_any_convention(self):
+        f = [buy("1", 0, 100, "0.40")]
+        self.assertEqual(WP.robustness(f)["PAIR_STATUS"], "NO_PAIR")

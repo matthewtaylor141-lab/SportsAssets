@@ -334,3 +334,189 @@ def to_json(rep):
     out = dict(rep)
     out.pop("MARKETS", None)
     return json.dumps(out, indent=1, sort_keys=True, default=str)
+
+
+# ---------------------------------------------------------------------------
+# THE COVERAGE GATE, AND IT INVALIDATED THE FIRST SET OF NUMBERS.
+#
+# The retained corpus (U2_SNAPSHOT_V1) is NOT RN1's full trade history. Its own
+# manifest says so: 962,509 RN1 trades existed at the audit cutoff and only
+# 214,609 of them carry a copy probe -- 22.3%. A pair reconstruction walks
+# CUMULATIVE leg quantities, so a condition whose fills are only partly
+# observed produces a matched quantity, a basis and a residual that are all
+# wrong. Not noisy: wrong.
+#
+# Only conditions where EVERY RN1 trade was probed can carry a pair claim.
+# `u0_timing_witness_v1` lists every trade id per condition, so completeness is
+# CHECKABLE rather than assumed, and this gate does the check.
+#
+# BIAS DIRECTION, WHERE IT IS KNOWABLE. A missing fill can only ADD to a leg,
+# and adding to a leg can only raise or hold min(YES, NO). So an incomplete
+# MATCHED_QTY is a LOWER BOUND. The BASIS has no such guarantee -- a missing
+# cheap fill lowers the true basis and a missing expensive one raises it -- so
+# the basis-above-one finding cannot be signed on partial data at all.
+# ---------------------------------------------------------------------------
+
+COVERAGE_COMPLETE = "COMPLETE_ALL_TRADES_PROBED"
+COVERAGE_PARTIAL = "PARTIAL_PROBE_COVERAGE"
+COVERAGE_UNKNOWN = "COVERAGE_NOT_CHECKABLE"
+
+CORPUS_IS_SINGLE_ACCOUNT = "YES"
+CORPUS_ACCOUNT = "RN1"
+ACCOUNT_PROVENANCE = (
+    "research/SNAPSHOT_CANONICAL_SPEC.md section 1 defines the population as "
+    "trades.whale_id = RN1 AND copy_probes.whale_id = RN1; the corpus is one "
+    "economic account by construction, so no cross-account leg matching can "
+    "occur")
+WHY_COVERAGE_GATES_THE_CLAIM = (
+    "cumulative legs need every fill; 22.3% of RN1's trades carry a probe, so "
+    "a pair statistic over all conditions mixes complete and partial histories")
+MATCHED_QTY_BIAS_ON_PARTIAL = "LOWER_BOUND"
+BASIS_BIAS_ON_PARTIAL = "UNSIGNED"
+
+
+def coverage_status(condition_id, observed_trade_ids, full_trade_ids_by_cond):
+    """Is this condition's fill history complete? Checked, never assumed."""
+    full = (full_trade_ids_by_cond or {}).get(condition_id)
+    if full is None:
+        return {"COVERAGE": COVERAGE_UNKNOWN, "OBSERVED": len(observed_trade_ids),
+                "TOTAL": NOT_IDENTIFIED, "FRACTION": NOT_IDENTIFIED}
+    obs = set(observed_trade_ids) & set(full)
+    frac = (len(obs) / float(len(full))) if full else 0.0
+    return {
+        "COVERAGE": (COVERAGE_COMPLETE if len(obs) == len(full)
+                     else COVERAGE_PARTIAL),
+        "OBSERVED": len(obs), "TOTAL": len(full), "FRACTION": frac,
+        "MISSING_FILLS": len(full) - len(obs),
+    }
+
+
+# --- ACCOUNTING CONVENTIONS -------------------------------------------------
+# Once the two legs were acquired at different prices, WHICH units are called
+# "matched" is a choice, and a choice can manufacture a result. Three
+# defensible conventions are implemented and compared, and a finding is only
+# reported as robust if it survives all three.
+
+METHOD_WEIGHTED = "WEIGHTED_AVERAGE_LEG_BASIS"
+METHOD_FIFO = "FIFO_LOT_MATCHING"
+METHOD_INCREMENTAL = "EXACT_INCREMENTAL_COMPLEMENT_MATCHING"
+METHODS = (METHOD_WEIGHTED, METHOD_FIFO, METHOD_INCREMENTAL)
+
+
+def _lots(fills, leg):
+    out = []
+    for f in fills:
+        if _leg_key(f) != leg:
+            continue
+        q, p = _d(f.get("size")), _d(f.get("price"))
+        if q is None or p is None or q <= 0:
+            continue
+        out.append([q, p, str(f.get("ts") or "")])
+    out.sort(key=lambda x: x[2])
+    return out
+
+
+def pair_basis_by_method(fills, method=METHOD_WEIGHTED):
+    """Matched quantity and its cost, under one declared convention."""
+    rows = [f for f in fills
+            if str(f.get("side") or "").upper() in ("BUY", "")]
+    legs = sorted({_leg_key(f) for f in rows})
+    if len(legs) < 2:
+        return None
+    a, b = legs[0], legs[1]
+    la, lb = _lots(rows, a), _lots(rows, b)
+    qa = sum(x[0] for x in la)
+    qb = sum(x[0] for x in lb)
+    matched = min(qa, qb)
+    if matched <= 0:
+        return None
+
+    if method == METHOD_WEIGHTED:
+        ca = sum(x[0] * x[1] for x in la) / qa
+        cb = sum(x[0] * x[1] for x in lb) / qb
+        cost = matched * (ca + cb)
+    elif method == METHOD_FIFO:
+        # The EARLIEST units of each leg are the matched ones.
+        cost = _take_fifo(la, matched) + _take_fifo(lb, matched)
+    elif method == METHOD_INCREMENTAL:
+        # Walk the stream: each increment pairs against the earliest unmatched
+        # units of the opposite leg, at the prices actually then outstanding.
+        cost = _incremental_cost(rows, a, b, matched)
+        if cost is None:
+            return None
+    else:
+        return None
+
+    basis = cost / matched
+    return {
+        "METHOD": method, "MATCHED_QTY": matched, "MATCHED_COST": cost,
+        "MATCHED_PAIR_BASIS": basis,
+        "LOCKED_PAIR_PNL": (D(1) - basis) * matched,
+        "BASIS_GT_1": basis > 1,
+        "RESIDUAL_QTY": (qa - matched) + (qb - matched),
+    }
+
+
+def _take_fifo(lots, want):
+    cost = D(0)
+    left = want
+    for q, p, _ in lots:
+        if left <= 0:
+            break
+        take = min(q, left)
+        cost += take * p
+        left -= take
+    return cost
+
+
+def _incremental_cost(rows, a, b, matched):
+    """Pair each increment against the oldest outstanding opposite units."""
+    rows = sorted(rows, key=lambda f: (str(f.get("ts") or ""),
+                                       str(f.get("trade_id") or "")))
+    open_ = {a: [], b: []}
+    cost = D(0)
+    done = D(0)
+    for f in rows:
+        k = _leg_key(f)
+        if k not in open_:
+            continue
+        q, p = _d(f.get("size")), _d(f.get("price"))
+        if q is None or p is None or q <= 0:
+            continue
+        other = b if k == a else a
+        while q > 0 and open_[other]:
+            oq, op = open_[other][0]
+            take = min(q, oq)
+            cost += take * (p + op)
+            done += take
+            q -= take
+            if oq - take <= 0:
+                open_[other].pop(0)
+            else:
+                open_[other][0][0] = oq - take
+        if q > 0:
+            open_[k].append([q, p])
+    return cost if done >= matched else (cost if done > 0 else None)
+
+
+def robustness(fills):
+    """Compare the three conventions on one market."""
+    out = {}
+    for m in METHODS:
+        r = pair_basis_by_method(fills, m)
+        out[m] = r
+    vals = [r for r in out.values() if r]
+    if not vals:
+        return {"METHODS": out, "PAIR_STATUS": "NO_PAIR"}
+    signs = {bool(r["BASIS_GT_1"]) for r in vals}
+    return {
+        "METHODS": {k: ({kk: str(vv) for kk, vv in v.items()} if v else None)
+                    for k, v in out.items()},
+        "ALL_METHODS_AGREE_ON_SIGN": len(signs) == 1,
+        "BASIS_GT_1_UNDER_ALL": signs == {True},
+        "BASIS_GT_1_UNDER_NONE": signs == {False},
+        "PAIR_STATUS": "COMPARED",
+        "WHY_THREE_METHODS": (
+            "which units are called matched is a convention, and a convention "
+            "must not be what produces the finding"),
+    }
