@@ -149,6 +149,50 @@ V2_PRECONDITIONS = (
 )
 
 
+# --- Section 24. The V2 design template. PREPARED, NOT DISPATCHED. --------
+
+V2_TEMPLATE_STATUS = "PREPARED_VALUES_DEFERRED_TO_V1_HARVEST"
+
+V2_DESIGN_DIMENSIONS = ("TARGET_INDEPENDENT_EVENTS", "TARGET_MARKETS_PER_EVENT",
+                        "TARGET_CAPTURE_DURATION_S", "TARGET_POLL_INTERVAL_S",
+                        "TARGET_MARKET_FAMILIES")
+
+V2_DIMENSIONS_ARE_CHOSEN_SEPARATELY = (
+    "event count and markets-per-event are DIFFERENT design targets and are "
+    "never traded against each other. More markets on the same three events "
+    "raises within-event derivative density and leaves the independent event "
+    "count exactly where it was")
+
+V2_VALUES_DEFERRED_UNTIL = ("TRANSITION_RATE_MEASURED", "RATE_LIMITS_MEASURED",
+                            "OBSERVATION_GAPS_MEASURED",
+                            "SIGNAL_VARIANCE_MEASURED")
+
+WHY_VALUES_ARE_DEFERRED = (
+    "choosing a poll interval before knowing the transition rate, or an event "
+    "count before knowing the signal variance, is guessing with a number "
+    "attached. V1 measures all four")
+
+
+def v2_template(measured=None):
+    """The V2 design, with every value NOT_IDENTIFIED until V1 measures it."""
+    measured = set(measured or ())
+    missing = [m for m in V2_VALUES_DEFERRED_UNTIL if m not in measured]
+    vals = {d: NOT_IDENTIFIED for d in V2_DESIGN_DIMENSIONS}
+    vals["TARGET_MARKET_FAMILIES"] = V2_MARKET_FAMILIES   # the one fixed choice
+    return {
+        "V2_TEMPLATE_STATUS": V2_TEMPLATE_STATUS,
+        "DESIGN_DIMENSIONS": V2_DESIGN_DIMENSIONS,
+        "VALUES": vals,
+        "MEASUREMENTS_REQUIRED": V2_VALUES_DEFERRED_UNTIL,
+        "MEASUREMENTS_MISSING": missing,
+        "MAY_FREEZE_VALUES": not missing,
+        "WHY_VALUES_ARE_DEFERRED": WHY_VALUES_ARE_DEFERRED,
+        "V2_DIMENSIONS_ARE_CHOSEN_SEPARATELY":
+            V2_DIMENSIONS_ARE_CHOSEN_SEPARATELY,
+        "DISPATCHED": False,
+    }
+
+
 def v2_gate(current_capture_completed=False, harvested=False,
             harvest_steps_done=(), authorized=False):
     """May V2 be dispatched? Fail closed on every precondition."""
@@ -189,5 +233,10 @@ def describe():
         "DO_NOT_CONFUSE_MARKETS_WITH_EVENTS": DO_NOT_CONFUSE_MARKETS_WITH_EVENTS,
         "V2_UNCHANGED_FROM_V1": V2_UNCHANGED_FROM_V1,
         "V2_PRECONDITIONS": V2_PRECONDITIONS,
+        "V2_TEMPLATE_STATUS": V2_TEMPLATE_STATUS,
+        "V2_DESIGN_DIMENSIONS": V2_DESIGN_DIMENSIONS,
+        "V2_DIMENSIONS_ARE_CHOSEN_SEPARATELY":
+            V2_DIMENSIONS_ARE_CHOSEN_SEPARATELY,
+        "V2_VALUES_DEFERRED_UNTIL": V2_VALUES_DEFERRED_UNTIL,
         "THE_FROZEN_CAPTURE_IS_NOT_ALTERED": True,
     }

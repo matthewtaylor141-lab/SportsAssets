@@ -85,7 +85,24 @@ DOUBLE_COUNT_WARNING = (
     "contains adverse selection. Subtracting it again double-counts and makes "
     "every quote look worse than it is. Declare which convention applies")
 
-ACTIONS = ("MAKER_QUOTE", "TAKER_CROSS", "CANCEL", "NO_ACTION")
+# Section 18. The full action vocabulary. A candidate action not on this list
+# is refused rather than priced, because an unnamed action has no declared
+# economics.
+ACTIONS = ("NO_TRADE", "POST_BID", "POST_ASK", "IMPROVE_BID", "IMPROVE_ASK",
+           "HOLD", "PAIR", "HEDGE", "PASSIVE_EXIT", "AGGRESSIVE_EXIT",
+           "SETTLE",
+           # retained for the earlier callers
+           "MAKER_QUOTE", "TAKER_CROSS", "CANCEL", "NO_ACTION")
+
+PASSIVE_ACTIONS = ("POST_BID", "POST_ASK", "IMPROVE_BID", "IMPROVE_ASK",
+                   "PASSIVE_EXIT", "MAKER_QUOTE")
+AGGRESSIVE_ACTIONS = ("AGGRESSIVE_EXIT", "TAKER_CROSS")
+NON_ORDER_ACTIONS = ("NO_TRADE", "HOLD", "SETTLE", "CANCEL", "NO_ACTION")
+
+WHY_PAIR_AND_SETTLE_ARE_ACTIONS = (
+    "on a binary event contract, buying the complement to lock a pair and "
+    "holding to settlement are real alternatives to quoting. An engine whose "
+    "only actions are quote and cross cannot see them")
 
 
 def action_ev(action, price=None, size=None, p_fill=None,
