@@ -1155,6 +1155,60 @@ MICROSTRUCTURE_VALIDATION_PROTOCOL_STATUS = "BUILT_EVENT_AND_CHRONOLOGICAL_BLOCK
 CURRENT_CAPTURE_RELATIVE_VALUE_IDENTIFIABILITY_STATUS = "AWAITING_HARVEST"
 SUBSTANTIVE_CAPTURE_V2_SPEC_STATUS = "PREPARED_NOT_DISPATCHED"
 
+# --- K6. The historical pilot is frozen; the prospective one is primary. ---
+
+HISTORICAL_STATIC_PILOT = "AVAILABLE_NOT_PRIORITY"
+WHY_AVAILABLE_NOT_PRIORITY = (
+    "222 events at ~2,030 credits, RN1_TRIGGERED_SELECTED. Cheap, defined, "
+    "and scientifically SECONDARY: it describes external consensus on the "
+    "states a whale traded. It stays available and is not purchased")
+
+PRIMARY_EXTERNAL_ODDS_EXPERIMENT = "PROSPECTIVE_CAPTURE_ALIGNED_BACKFILL"
+
+CAPTURE_MANIFEST_STATUS = "BUILT_WRITE_ONCE_AND_HASHED"
+WHAT_THE_MANIFEST_PREVENTS = (
+    "a harvest that reads the capture with today's constants and reports a "
+    "DIFFERENT experiment from the one that ran, without saying so. The "
+    "definition is frozen at dispatch, hashed, and verified at harvest; a "
+    "drifted field is NAMED and the harvest is blocked, never reconciled")
+
+CAPTURE_QUALITY_GATE_STATUS = "BUILT_BLOCKS_SIGNAL_ANALYSIS"
+QUALITY_BEFORE_ALPHA = (
+    "DID WE ACTUALLY MEASURE THE MARKET CORRECTLY? is answered first. A "
+    "signal result computed on a series that failed its own integrity checks "
+    "is not a weak result, it is not a result, so the gate BLOCKS rather "
+    "than annotates")
+
+TRANSITION_BOUND_RULE = {
+    "COUNT": "LOWER_BOUND_ON_TRUE_TRANSITIONS",
+    "FREQUENCY_PER_OBSERVED_TRANSITION": "NO_BOUND",
+    "WHY_THE_BOUND_DOES_NOT_TRAVEL": (
+        "a rate's DENOMINATOR is undercounted too, and undercounting both "
+        "parts of a ratio moves it in no determined direction"),
+}
+
+PROSPECTIVE_EVIDENCE_LABEL = "PILOT_PROSPECTIVE_MICROSTRUCTURE_EVIDENCE"
+WHY_PILOT = (
+    "the first substantive capture holds 3 independent events. Every figure "
+    "carries TIMESTAMP_ROWS and INDEPENDENT_EVENTS together, because 10,000 "
+    "snapshots are not 10,000 independent market experiments")
+
+HARVEST_DECISION_STATUS = "BUILT_THREE_OUTCOMES"
+STOP_IS_HARD_TO_REACH = (
+    "STOP_THIS_MICROSTRUCTURE_PATH requires an explicit structural negative "
+    "AND enough independent events for that negative to mean anything. On a "
+    "3-event pilot the decision function REFUSES stop and returns "
+    "GO_TO_LARGER_PROSPECTIVE_CAPTURE instead. An experiment that could not "
+    "have detected the effect has not falsified it")
+
+CAPTURE_V2_DISPATCH_RULE = (
+    "NOT automatic on V1 completion. V1 is harvested first, and its evidence "
+    "sets V2's poll rate, duration, event count, book-read load and which "
+    "measurements need repair. V2 is then frozen scientifically BEFORE it "
+    "runs. And V2 must raise INDEPENDENT EVENTS, not only market count: "
+    "TARGET_EVENT_N and TARGET_MARKETS_PER_EVENT are reported separately and "
+    "one is never traded for the other")
+
 PURCHASE_STATUS = "NOT_PURCHASED_CONDITION_A_MET_AWAITING_AUTHORIZATION"
 PURCHASE_GATE_SUMMARY = (
     "condition A IS met: the matched cohort is defined at 222 events, which "
@@ -1222,6 +1276,19 @@ def describe():
         "CURRENT_CAPTURE_RELATIVE_VALUE_IDENTIFIABILITY_STATUS":
             CURRENT_CAPTURE_RELATIVE_VALUE_IDENTIFIABILITY_STATUS,
         "SUBSTANTIVE_CAPTURE_V2_SPEC_STATUS": SUBSTANTIVE_CAPTURE_V2_SPEC_STATUS,
+        "HISTORICAL_STATIC_PILOT": HISTORICAL_STATIC_PILOT,
+        "WHY_AVAILABLE_NOT_PRIORITY": WHY_AVAILABLE_NOT_PRIORITY,
+        "PRIMARY_EXTERNAL_ODDS_EXPERIMENT": PRIMARY_EXTERNAL_ODDS_EXPERIMENT,
+        "CAPTURE_MANIFEST_STATUS": CAPTURE_MANIFEST_STATUS,
+        "WHAT_THE_MANIFEST_PREVENTS": WHAT_THE_MANIFEST_PREVENTS,
+        "CAPTURE_QUALITY_GATE_STATUS": CAPTURE_QUALITY_GATE_STATUS,
+        "QUALITY_BEFORE_ALPHA": QUALITY_BEFORE_ALPHA,
+        "TRANSITION_BOUND_RULE": dict(TRANSITION_BOUND_RULE),
+        "PROSPECTIVE_EVIDENCE_LABEL": PROSPECTIVE_EVIDENCE_LABEL,
+        "WHY_PILOT": WHY_PILOT,
+        "HARVEST_DECISION_STATUS": HARVEST_DECISION_STATUS,
+        "STOP_IS_HARD_TO_REACH": STOP_IS_HARD_TO_REACH,
+        "CAPTURE_V2_DISPATCH_RULE": CAPTURE_V2_DISPATCH_RULE,
         "PURCHASE_STATUS": PURCHASE_STATUS,
         "PURCHASE_GATE_SUMMARY": PURCHASE_GATE_SUMMARY,
         "WHAT_CONDITION_A_DOES_NOT_AUTHORIZE":
