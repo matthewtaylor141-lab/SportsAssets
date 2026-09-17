@@ -196,5 +196,104 @@ class FourAspectsNotOne(unittest.TestCase):
             self.assertIn(a, r, a)
 
 
+def pre_get(dispatch=A, executed=A, **over):
+    """The runner's pre-GET record: SHAs observed, rows not yet written."""
+    kw = dict(workflow_ref_sha=A, workflow_file_sha="wf", config_sha="cfg",
+              executed_sha_source="RUNNER_GIT_REV_PARSE")
+    kw.update(over)
+    return PV.pre_get_gate(dispatch, executed, **kw)
+
+
+class TheImpossibleProvenanceGate(unittest.TestCase):
+    """REGRESSION. Run 35175681195 aborted before its first venue GET with
+    EVIDENCE_RUN_VALIDITY = FAIL while CODE_PROVENANCE_VALIDITY was PASS and
+    FAILED_CHECKS was empty.
+
+    The workflow called the HARVEST verdict at step 6, which requires
+    DATA_OUTPUT_PROVENANCE = RECORDED. Step 8 writes those rows, and the CLI
+    had no flag to pass a data hash anyway, so the gate could not open for any
+    run at that revision -- a gate with no key. These tests pin the three
+    states that together prevent it coming back.
+    """
+
+    # ---- PRE-GET: no data hash exists yet, and that is not a failure -----
+    def test_pre_get_passes_as_pending_with_no_data_output_sha(self):
+        r = pre_get()
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], PV.PENDING)
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "PENDING_EXECUTION")
+        self.assertEqual(r["PRE_GET_PROVENANCE_GATE"], "PASS")
+        self.assertEqual(r["DATA_OUTPUT_SHA"], PV.NOT_IDENTIFIED)
+        self.assertEqual(r["DATA_OUTPUT_PROVENANCE"], "NOT_RECORDED")
+        self.assertNotIn("WHY_INVALID", r)
+
+    def test_pre_get_still_proves_the_code_provenance_in_full(self):
+        """The relaxation is ONLY the aggregate verdict. Every code check
+        that ran at harvest runs here, on the same observed checkout."""
+        r = pre_get()
+        self.assertEqual(r["CODE_PROVENANCE_VALIDITY"], "PASS")
+        self.assertEqual(r["EXECUTED_SHA_ACTUAL"], A)
+        self.assertEqual(r["DISPATCH_SHA"], A)
+        self.assertEqual(r["FAILED_CHECKS"], [])
+        for c in ("DISPATCH_SHA_PRESENT", "EXECUTED_SHA_ACTUAL_PRESENT",
+                  "EXECUTED_SHA_WAS_OBSERVED_NOT_EXPECTED",
+                  "DISPATCH_SHA_EQUALS_EXECUTED_SHA"):
+            self.assertTrue(r["CHECKS"][c], c)
+
+    def test_pre_get_fails_on_a_code_mismatch(self):
+        """No weakening: the wrong checkout is refused before any venue GET."""
+        r = pre_get(executed=B)
+        self.assertEqual(r["CODE_PROVENANCE_VALIDITY"], "FAIL")
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
+        self.assertEqual(r["PRE_GET_PROVENANCE_GATE"], "FAIL")
+        self.assertNotEqual(r["EVIDENCE_RUN_VALIDITY"], PV.PENDING)
+
+    def test_pre_get_fails_on_an_expected_rather_than_observed_sha(self):
+        r = pre_get(executed_sha_source="DISPATCHER_ECHO")
+        self.assertFalse(r["CHECKS"]["EXECUTED_SHA_WAS_OBSERVED_NOT_EXPECTED"])
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
+
+    def test_pre_get_fails_on_missing_workflow_or_config_provenance(self):
+        for kw in ({"workflow_file_sha": None}, {"config_sha": None}):
+            r = pre_get(**kw)
+            self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL", kw)
+
+    # ---- POST-RUN: the rows exist, and the full verdict can pass ---------
+    def test_post_run_full_check_passes_once_the_data_hash_exists(self):
+        r = full()
+        self.assertEqual(r["DATA_OUTPUT_PROVENANCE"], "RECORDED")
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "PASS")
+
+    # ---- POST-RUN WITHOUT ROWS: still FAIL, exactly as before ------------
+    def test_post_run_without_a_data_hash_still_fails(self):
+        """The pre-GET change must not let a run become valid without final
+        output provenance. This is the harvest path, unchanged."""
+        r = full(data_output_sha=None)
+        self.assertEqual(r["CODE_PROVENANCE_VALIDITY"], "PASS")
+        self.assertEqual(r["DATA_OUTPUT_PROVENANCE"], "NOT_RECORDED")
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "FAIL")
+
+    def test_pre_get_can_never_report_a_run_valid(self):
+        """PENDING_EXECUTION is not PASS, and no argument reaches PASS here."""
+        for kw in ({}, {"workflow_file_sha": "wf2"}, {"config_sha": "cfg2"}):
+            r = pre_get(**kw)
+            self.assertNotEqual(r["EVIDENCE_RUN_VALIDITY"], "PASS", kw)
+        self.assertTrue(pre_get()["PRE_GET_CANNOT_MAKE_A_RUN_VALID"])
+        self.assertEqual(pre_get()["FINAL_VALIDITY_STILL_REQUIRES"],
+                         list(PV.PROVENANCE_ASPECTS))
+
+    def test_pre_get_takes_no_data_output_argument_at_all(self):
+        """Structural, not remembered: there is no parameter through which a
+        data hash could be supplied early and read back as evidence."""
+        import inspect
+        self.assertNotIn("data_output_sha",
+                         inspect.signature(PV.pre_get_gate).parameters)
+
+    def test_the_harvest_verdict_still_requires_all_four_aspects(self):
+        r = full()
+        self.assertEqual(r["EVIDENCE_RUN_VALIDITY"], "PASS")
+        for a in PV.PROVENANCE_ASPECTS[1:]:
+            self.assertEqual(r[a], "RECORDED", a)
+
+
 if __name__ == "__main__":
     unittest.main()

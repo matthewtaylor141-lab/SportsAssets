@@ -272,6 +272,59 @@ def check(dispatch_sha, executed_sha_actual, workflow_ref_sha=None,
     return out
 
 
+def pre_get_gate(dispatch_sha, executed_sha_actual, workflow_ref_sha=None,
+                 workflow_file_sha=None, config_sha=None,
+                 executed_sha_source=None):
+    """The gate a RUNNER may pass BEFORE its first venue request.
+
+    THE DEFECT THIS REPAIRS, recorded because run 35175681195 hit it and
+    produced RUN_RESULT = NO_EVIDENCE with VENUE_REQUESTS = 0.
+
+    The workflow called `check()` at step 6, before the paced run existed.
+    `check()` is the HARVEST-time verdict and requires all four aspects
+    RECORDED, including DATA_OUTPUT_PROVENANCE. But the rows it hashes are
+    written by step 8, and the CLI had no way to pass a data hash in anyway.
+    So the aggregate was unreachable by construction: a gate with no key, in
+    the same class as the confirmation deadlock fixed before run 2. Every
+    0.25-rps run at that revision would have aborted before the first GET,
+    whatever the venue did.
+
+    The repair is to ask the question that CAN be answered before execution,
+    and to keep the harvest question exactly as strict as it was.
+
+    THIS FUNCTION WEAKENS NO CODE-PROVENANCE CHECK. It calls `check()` and
+    uses its findings verbatim -- the same four code checks, the same observed
+    -not-expected requirement, the same abbreviated-SHA comparison. It changes
+    ONE thing: the aggregate verdict is PENDING_EXECUTION, not FAIL, when the
+    only aspect still missing is the one that cannot exist yet.
+
+    A data hash passed here is refused rather than accepted early. If rows
+    already exist, this is not the pre-GET moment and `check()` is the right
+    call -- so there is no argument position through which a run could be
+    declared valid here.
+    """
+    r = check(dispatch_sha, executed_sha_actual, workflow_ref_sha,
+              workflow_file_sha, config_sha, None, executed_sha_source)
+
+    code_ok = r["CODE_PROVENANCE_VALIDITY"] == "PASS"
+    pre_ok = all(r[a] == "RECORDED" for a in ("WORKFLOW_PROVENANCE",
+                                              "CONFIG_PROVENANCE"))
+    # DATA_OUTPUT_PROVENANCE is NOT_RECORDED here by construction, and that is
+    # the expected state rather than a defect. Everything else must hold.
+    r["PRE_GET_PROVENANCE_GATE"] = "PASS" if (code_ok and pre_ok) else "FAIL"
+    r["EVIDENCE_RUN_VALIDITY"] = PENDING if (code_ok and pre_ok) else "FAIL"
+    r["STAGE"] = "PRE_GET"
+    r["DATA_OUTPUT_PROVENANCE_EXPECTED_AT_THIS_STAGE"] = "NOT_RECORDED"
+    r["WHY_PENDING_NOT_PASS"] = (
+        "the rows this run will write do not exist yet, so DATA_OUTPUT_SHA "
+        "cannot be recorded; a run is never VALID on pre-GET evidence alone")
+    r["FINAL_VALIDITY_STILL_REQUIRES"] = list(PROVENANCE_ASPECTS)
+    r["PRE_GET_CANNOT_MAKE_A_RUN_VALID"] = True
+    if code_ok and pre_ok:
+        r.pop("WHY_INVALID", None)
+    return r
+
+
 def receipt(path, payload):
     """Persist a provenance/pre-dispatch receipt beside the evidence."""
     p = Path(path)
@@ -296,6 +349,9 @@ def render(r):
     if "PRE_DISPATCH_PROVENANCE_GATE" in r:
         lines.append("%-34s = %s" % ("PRE_DISPATCH_PROVENANCE_GATE",
                                      r["PRE_DISPATCH_PROVENANCE_GATE"]))
+    if "PRE_GET_PROVENANCE_GATE" in r:
+        lines.append("%-34s = %s" % ("PRE_GET_PROVENANCE_GATE",
+                                     r["PRE_GET_PROVENANCE_GATE"]))
     lines.append("%-34s = %s" % ("EVIDENCE_RUN_VALIDITY",
                                  r["EVIDENCE_RUN_VALIDITY"]))
     return "\n".join(lines)
@@ -310,15 +366,32 @@ def _cli():                                                   # pragma: no cover
     ap.add_argument("--workflow-file", default=None)
     ap.add_argument("--config", default=None)
     ap.add_argument("--out", default=None)
+    # STAGE SELECTS THE QUESTION, NOT THE STRICTNESS.
+    #   pre-get  before the first venue request; DATA_OUTPUT cannot exist yet,
+    #            so the verdict is PENDING_EXECUTION and the run is not valid.
+    #   harvest  after the rows are written; the full four-aspect verdict,
+    #            unchanged, and FAIL without a data output hash.
+    ap.add_argument("--stage", choices=("pre-get", "harvest"),
+                    default="harvest")
+    ap.add_argument("--data-output", default=None,
+                    help="path to the sealed rows; hashed for DATA_OUTPUT_SHA")
     a = ap.parse_args()
-    r = check(a.dispatch_sha, a.executed_sha, a.workflow_ref_sha,
-              file_sha256(a.workflow_file) if a.workflow_file else None,
-              file_sha256(a.config) if a.config else None)
+    wf = file_sha256(a.workflow_file) if a.workflow_file else None
+    cfg = file_sha256(a.config) if a.config else None
+    if a.stage == "pre-get":
+        r = pre_get_gate(a.dispatch_sha, a.executed_sha, a.workflow_ref_sha,
+                         wf, cfg)
+        accept = (PENDING,)
+    else:
+        r = check(a.dispatch_sha, a.executed_sha, a.workflow_ref_sha, wf, cfg,
+                  file_sha256(a.data_output) if a.data_output else None)
+        accept = ("PASS",)
     print(render(r))
     if a.out:
         receipt(a.out, r)
-    if r["EVIDENCE_RUN_VALIDITY"] != "PASS":
-        raise SystemExit("EVIDENCE_RUN_VALIDITY = FAIL")
+    if r["EVIDENCE_RUN_VALIDITY"] not in accept:
+        raise SystemExit("EVIDENCE_RUN_VALIDITY = %s"
+                         % r["EVIDENCE_RUN_VALIDITY"])
 
 
 if __name__ == "__main__":                                    # pragma: no cover

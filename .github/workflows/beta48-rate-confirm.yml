@@ -114,13 +114,27 @@ jobs:
           echo "EXECUTED_SHA  = $EXECUTED_SHA"
           echo "WORKFLOW_REF  = ${{ github.sha }}"
           mkdir -p "evidence/rateconfirm_$SEG"
+          # STAGE pre-get. The code-provenance checks are IDENTICAL to the
+          # harvest ones -- pre_get_gate() calls check() and uses its findings
+          # verbatim. The only difference is the aggregate verdict:
+          # PENDING_EXECUTION rather than FAIL when the sole missing aspect is
+          # DATA_OUTPUT_PROVENANCE, which cannot exist until step 8 has
+          # written the rows.
+          #
+          # Run 35175681195 aborted here with EVIDENCE_RUN_VALIDITY = FAIL
+          # while CODE_PROVENANCE_VALIDITY was PASS and FAILED_CHECKS was
+          # empty, because the harvest verdict demanded a data hash the CLI
+          # could not even accept at this point. No run at that revision could
+          # ever have reached the venue. RUN_RESULT = NO_EVIDENCE,
+          # VENUE_REQUESTS = 0 -- never a rate result.
           python provenance.py \
+            --stage pre-get \
             --dispatch-sha "${{ github.event.inputs.code_sha }}" \
             --executed-sha "$EXECUTED_SHA" \
             --workflow-ref-sha "${{ github.sha }}" \
             --workflow-file "../../../.github/workflows/beta48-rate-confirm.yml" \
             --config tick_universe.json \
-            --out "evidence/rateconfirm_$SEG/provenance.json"
+            --out "evidence/rateconfirm_$SEG/provenance_pre_get.json"
           echo "EXECUTED_SHA=$EXECUTED_SHA" >> "$GITHUB_ENV"
 
       # GATE 3. No venue contact while another BETTOR collector is reading the
@@ -320,6 +334,23 @@ jobs:
           set -e
           D=research/beta48/shadow/evidence/rateconfirm_$SEG
           [ -d "$D" ] || exit 0
+          # FINAL PROVENANCE, AND IT IS AS STRICT AS IT EVER WAS. Now that the
+          # rows exist, run the full four-aspect harvest check with the data
+          # output hash. It FAILs without one, so the pre-GET relaxation
+          # cannot make a run valid on its own -- a run that never wrote rows
+          # still ends EVIDENCE_RUN_VALIDITY = FAIL here. Recorded, not
+          # gating on the job's exit: the abort classification comes from the
+          # sealed receipt, and sealing must happen either way.
+          ( cd research/beta48/shadow \
+            && python provenance.py \
+                 --stage harvest \
+                 --dispatch-sha "${{ github.event.inputs.code_sha }}" \
+                 --executed-sha "${EXECUTED_SHA:-}" \
+                 --workflow-ref-sha "${{ github.sha }}" \
+                 --workflow-file "../../../.github/workflows/beta48-rate-confirm.yml" \
+                 --config tick_universe.json \
+                 --data-output "evidence/rateconfirm_$SEG/confirm_report.json" \
+                 --out "evidence/rateconfirm_$SEG/provenance.json" || true )
           ( cd "$D" && sha256sum * > SEALED.sha256 2>/dev/null || true )
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
