@@ -45,7 +45,7 @@ whole does not.
 This module contacts nothing and can place no order.
 """
 import json
-from collections import defaultdict
+from collections import Counter, defaultdict
 from decimal import Decimal as D, InvalidOperation
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -89,7 +89,13 @@ def _leg_key(row):
     i = row.get("outcome_index")
     if i is not None:
         return int(i)
-    return str(row.get("outcome"))
+    o = row.get("outcome")
+    if o is None:
+        # A fill that names neither an index nor a label has no leg. Returning
+        # str(None) would bucket every such fill onto one shared phantom leg
+        # and pair them with each other, which is worse than losing them.
+        return None
+    return str(o)
 
 
 def reconstruct_market(fills):
@@ -778,3 +784,133 @@ WHY_INCREMENTAL_IS_PRIMARY = (
     "here', the incremental convention is the only one whose unit is the "
     "decision."
 )
+
+
+# ===========================================================================
+# COMPLEMENT SEMANTICS (directive section 4)
+# ===========================================================================
+#
+# Everything in this module rests on one assumption: that leg A and leg B of a
+# condition are COMPLEMENTS, so one of each pays exactly 1.00 whatever happens.
+# That is what makes MATCHED_LOCKED_PNL outcome-independent, and it is what
+# makes "basis above one" mean a locked loss rather than an open position.
+#
+# The assumption has never been checked. This checks it.
+#
+# WHAT CAN AND CANNOT BE VERIFIED
+# -------------------------------
+# The requirement is PAYOFF_A(s) + PAYOFF_B(s) = 1 for EVERY terminal state s.
+# A settled market shows us exactly ONE terminal state -- the one that actually
+# happened. So the corpus can verify the identity in the state it observed and
+# nowhere else.
+#
+# Two verdicts, kept apart, because collapsing them is exactly the error:
+#
+#   COMPLEMENT_VERIFIED_IN_OBSERVED_STATE  -- measurable, and measured below.
+#   COMPLEMENT_GUARANTEE_STATUS            -- the all-states claim. It stays
+#                                             NOT_VERIFIED until the venue's
+#                                             settlement rule is read from the
+#                                             venue, not inferred from outcomes.
+#
+# Observing 9,542 markets each pay 1.00 in its own realised state is strong
+# evidence and is not a proof. A market that pays 1.00 whenever the favourite
+# wins and 0.00 on a void would pass every observation we have and still break
+# the pair arithmetic on the day it voids.
+
+COMPLEMENT_GUARANTEE_STATUS = "NOT_VERIFIED"
+WHY_NOT_VERIFIED = (
+    "A settled market exhibits one terminal state. The all-states identity "
+    "cannot be established from realised outcomes at any sample size; it needs "
+    "the venue's published settlement rule, including its void, tie, "
+    "abandonment and early-settlement branches. Nothing in the retained corpus "
+    "contains that rule."
+)
+
+COMPLEMENT_OBSERVED_STATUS_VERIFIED = "VERIFIED_IN_OBSERVED_STATE"
+COMPLEMENT_OBSERVED_STATUS_VIOLATED = "VIOLATED_IN_OBSERVED_STATE"
+COMPLEMENT_OBSERVED_STATUS_UNCHECKABLE = "NOT_CHECKABLE"
+
+BINARY_TOKEN_COUNT = 2
+PAYOUT_SUM_TOLERANCE = D("0.000001")
+
+WHAT_A_VIOLATION_MEANS = (
+    "If a condition's observed payouts do not sum to 1.00, that condition is "
+    "not a binary complement and every pair number computed on it is wrong -- "
+    "not approximately wrong, categorically wrong, because the matched block "
+    "is no longer outcome-independent. A violation is a reason to exclude the "
+    "condition, never a rounding note."
+)
+
+
+def check_complement(settlement_row):
+    """Verify PAYOFF_A + PAYOFF_B = 1 in the one terminal state we observed.
+
+    Returns (status, detail). Refuses on anything it cannot read rather than
+    treating an unreadable market as a passing one.
+    """
+    if not settlement_row.get("resolved"):
+        return COMPLEMENT_OBSERVED_STATUS_UNCHECKABLE, {
+            "REASON": "NOT_RESOLVED"}
+    payouts = settlement_row.get("payouts")
+    tokens = settlement_row.get("tokens") or []
+    if not isinstance(payouts, (list, tuple)) or not payouts:
+        return COMPLEMENT_OBSERVED_STATUS_UNCHECKABLE, {
+            "REASON": "NO_PAYOUT_ARRAY"}
+    if len(tokens) != BINARY_TOKEN_COUNT:
+        # Three or more outcomes is not a binary complement at all. This is a
+        # structural fact about the market, not a data quality problem.
+        return COMPLEMENT_OBSERVED_STATUS_UNCHECKABLE, {
+            "REASON": "NOT_A_TWO_TOKEN_MARKET", "TOKEN_COUNT": len(tokens)}
+    if len(payouts) != BINARY_TOKEN_COUNT:
+        return COMPLEMENT_OBSERVED_STATUS_UNCHECKABLE, {
+            "REASON": "PAYOUT_LENGTH_DOES_NOT_MATCH_TOKEN_COUNT",
+            "PAYOUT_LEN": len(payouts), "TOKEN_COUNT": len(tokens)}
+    try:
+        vals = [D(str(p)) for p in payouts]
+    except Exception:                                          # noqa: BLE001
+        return COMPLEMENT_OBSERVED_STATUS_UNCHECKABLE, {
+            "REASON": "PAYOUT_NOT_NUMERIC", "PAYOUTS": list(payouts)}
+    total = sum(vals, D(0))
+    if abs(total - D(1)) <= PAYOUT_SUM_TOLERANCE:
+        return COMPLEMENT_OBSERVED_STATUS_VERIFIED, {
+            "PAYOUT_SUM": str(total), "PAYOUTS": [str(v) for v in vals]}
+    return COMPLEMENT_OBSERVED_STATUS_VIOLATED, {
+        "PAYOUT_SUM": str(total), "PAYOUTS": [str(v) for v in vals],
+        "WHAT_IT_MEANS": WHAT_A_VIOLATION_MEANS}
+
+
+def complement_report(settlement_rows):
+    """Run the check over a settlement corpus and report it honestly."""
+    counts = Counter()
+    violations, unreadable = [], Counter()
+    for row in settlement_rows or ():
+        status, detail = check_complement(row)
+        counts[status] += 1
+        if status == COMPLEMENT_OBSERVED_STATUS_VIOLATED:
+            violations.append({"CONDITION_ID": row.get("condition_id"),
+                               "MARKET_SLUG": row.get("market_slug"),
+                               **{k: v for k, v in detail.items()
+                                  if k != "WHAT_IT_MEANS"}})
+        elif status == COMPLEMENT_OBSERVED_STATUS_UNCHECKABLE:
+            unreadable[detail.get("REASON", "UNKNOWN")] += 1
+    checked = (counts[COMPLEMENT_OBSERVED_STATUS_VERIFIED]
+               + counts[COMPLEMENT_OBSERVED_STATUS_VIOLATED])
+    return {
+        "ROWS": sum(counts.values()),
+        "CHECKED": checked,
+        "VERIFIED_IN_OBSERVED_STATE": counts[COMPLEMENT_OBSERVED_STATUS_VERIFIED],
+        "VIOLATED_IN_OBSERVED_STATE": counts[COMPLEMENT_OBSERVED_STATUS_VIOLATED],
+        "NOT_CHECKABLE": counts[COMPLEMENT_OBSERVED_STATUS_UNCHECKABLE],
+        "NOT_CHECKABLE_REASONS": dict(unreadable),
+        "OBSERVED_STATE_PASS_RATE": (
+            counts[COMPLEMENT_OBSERVED_STATUS_VERIFIED] / checked
+            if checked else NOT_IDENTIFIED),
+        "VIOLATIONS": violations[:50],
+        "COMPLEMENT_GUARANTEE_STATUS": COMPLEMENT_GUARANTEE_STATUS,
+        "WHY_NOT_VERIFIED": WHY_NOT_VERIFIED,
+        "ONE_STATE_PER_MARKET": (
+            "each settled market contributes exactly one terminal state, so "
+            "this is evidence about realised states and not a proof about all "
+            "of them"),
+        "WHAT_A_VIOLATION_MEANS": WHAT_A_VIOLATION_MEANS,
+    }
