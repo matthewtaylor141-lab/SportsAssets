@@ -1221,6 +1221,64 @@ THRESHOLD_CHANGE_RULE = (
     "Re-scoring a finished capture under a revised threshold is not a "
     "correction, it is choosing the answer")
 
+# --- K7. The microstructure stack, declared before the data exists. --------
+
+MICRO_ZOO_STATUS = "DECLARED_NOTHING_TRAINED"
+MICRO_ZOO_OBJECTIVE = (
+    "the SIMPLEST model that creates the highest REPEATABLE FILL-CONDITIONED "
+    "NET EV -- not the best price predictor, and not the fanciest model")
+MICRO_ZOO_ADMISSION_RULE = (
+    "a rung is admitted only if it beats EVERY simpler rung on the SAME "
+    "folds. A tie is a loss, and an unevaluated simpler model blocks "
+    "admission because the comparison did not happen. The null M0 cannot win "
+    "by vacuity: if nothing beats it the answer is NOTHING_BEAT_THE_NULL")
+
+TARGET_SYSTEMS_STATUS = {
+    "PRICE_MOVE": "AWAITING_CAPTURE",
+    "TOXICITY": "MARKET_STATE_TOXICITY_ONLY",
+    "FILL": "NOT_IDENTIFIED",
+    "QUEUE": "DISTRIBUTIONAL_ONLY",
+}
+FOUR_SYSTEMS_ARE_NOT_ONE = (
+    "predicting the mid, predicting adverse selection, predicting whether we "
+    "fill, and estimating queue are four questions. Collapsing them is how a "
+    "price-prediction result gets reported as a trading edge")
+
+EXECUTION_SIMULATOR_STATUS = "BUILT_SPEC_UNVALIDATED"
+SIMULATOR_TRUST_RULE = (
+    "a simulator is not trusted because it is sophisticated. It is trusted "
+    "when SIMULATED_FILL_RATE, FILL_LATENCY, MARKOUT and QUEUE_DEPLETION "
+    "match measured reality ON THE SAME PERIOD. Until then UNVALIDATED")
+
+CONTENT_FRESHNESS_RAILS_STATUS = "BUILT"
+HEARTBEAT_IS_NOT_FRESHNESS = (
+    "message receipt, venue state time and content change are three separate "
+    "facts. A heartbeat proves the transport works and says nothing about "
+    "whether the publisher behind it is still producing state")
+
+TOXICITY_V1_LABEL = "MARKET_STATE_TOXICITY"
+TOXICITY_UPGRADE_REQUIRES = "BETTOR_NATIVE_FILL_EVIDENCE"
+WHY_MARKET_STATE_UNDERSTATES = (
+    "fills are SELECTED -- we are filled exactly when somebody wanted the "
+    "other side, and that wanting correlates with being right. So "
+    "fill-conditional toxicity is strictly worse than market-state toxicity, "
+    "and it is the one that costs money")
+
+BENIGN_FLOW_CAPACITY_STATUS = "NOT_IDENTIFIED"
+FOREIGN_CONSTANTS_REFUSED = ("14_OVER_PROB", "85_OVER_PROB",
+                             "SIMULATOR_TUNED_CONSTANTS", "MONOPOLY_STRATEGY",
+                             "CRYPTO_EXCHANGE_ASSUMPTIONS")
+
+DEEPLOB_STATUS = "NOT_ADMITTED_INSUFFICIENT_DATA"
+RL_STATUS = "NOT_ELIGIBLE"
+RL_PRECONDITIONS = ("P_FILL_IDENTIFIED", "LATENCY_MEASURED",
+                    "QUEUE_MODEL_CALIBRATED",
+                    "SIMULATED_FILLS_REPRODUCE_REAL_BETTOR_FILLS")
+
+FINAL_EDGE = "FILL_CONDITIONED_ACTION_EV"
+NOT_THE_EDGE = "PRICE_PREDICTION"
+EXACT_MONEY_ENGINE_STATUS = "ALREADY_EXACT_PROVEN_BY_TEST_NOT_REWRITTEN"
+
 PURCHASE_STATUS = "NOT_PURCHASED_CONDITION_A_MET_AWAITING_AUTHORIZATION"
 PURCHASE_GATE_SUMMARY = (
     "condition A IS met: the matched cohort is defined at 222 events, which "
@@ -1306,6 +1364,26 @@ def describe():
         "THRESHOLDS_FROZEN_BEFORE_ANY_CAPTURE_DATA":
             THRESHOLDS_FROZEN_BEFORE_ANY_CAPTURE_DATA,
         "THRESHOLD_CHANGE_RULE": THRESHOLD_CHANGE_RULE,
+        "MICRO_ZOO_STATUS": MICRO_ZOO_STATUS,
+        "MICRO_ZOO_OBJECTIVE": MICRO_ZOO_OBJECTIVE,
+        "MICRO_ZOO_ADMISSION_RULE": MICRO_ZOO_ADMISSION_RULE,
+        "TARGET_SYSTEMS_STATUS": dict(TARGET_SYSTEMS_STATUS),
+        "FOUR_SYSTEMS_ARE_NOT_ONE": FOUR_SYSTEMS_ARE_NOT_ONE,
+        "EXECUTION_SIMULATOR_STATUS": EXECUTION_SIMULATOR_STATUS,
+        "SIMULATOR_TRUST_RULE": SIMULATOR_TRUST_RULE,
+        "CONTENT_FRESHNESS_RAILS_STATUS": CONTENT_FRESHNESS_RAILS_STATUS,
+        "HEARTBEAT_IS_NOT_FRESHNESS": HEARTBEAT_IS_NOT_FRESHNESS,
+        "TOXICITY_V1_LABEL": TOXICITY_V1_LABEL,
+        "TOXICITY_UPGRADE_REQUIRES": TOXICITY_UPGRADE_REQUIRES,
+        "WHY_MARKET_STATE_UNDERSTATES": WHY_MARKET_STATE_UNDERSTATES,
+        "BENIGN_FLOW_CAPACITY_STATUS": BENIGN_FLOW_CAPACITY_STATUS,
+        "FOREIGN_CONSTANTS_REFUSED": FOREIGN_CONSTANTS_REFUSED,
+        "DEEPLOB_STATUS": DEEPLOB_STATUS,
+        "RL_STATUS": RL_STATUS,
+        "RL_PRECONDITIONS": RL_PRECONDITIONS,
+        "FINAL_EDGE": FINAL_EDGE,
+        "NOT_THE_EDGE": NOT_THE_EDGE,
+        "EXACT_MONEY_ENGINE_STATUS": EXACT_MONEY_ENGINE_STATUS,
         "PURCHASE_STATUS": PURCHASE_STATUS,
         "PURCHASE_GATE_SUMMARY": PURCHASE_GATE_SUMMARY,
         "WHAT_CONDITION_A_DOES_NOT_AUTHORIZE":
