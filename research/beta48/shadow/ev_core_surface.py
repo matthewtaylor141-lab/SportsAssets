@@ -69,6 +69,39 @@ DISAGREEMENT_MEANS = (
     "CONSISTENCY signal, not an informational edge")
 VALIDATION_STATUS = "NOT_YET_TESTED_AGAINST_SETTLEMENTS"
 
+# THE TIMING DEFECT, NAMED. The V0 fit took the LATEST price per contract
+# before settlement. Those prices are not contemporaneous with each other, and
+# for a live market a late one already incorporates the observed score. A
+# surface built that way cannot support ANY predictive claim -- not settlement,
+# not residual alpha, not convergence. It is a coherence prototype only.
+MARKET_SURFACE_V0_STATUS = "COHERENCE_PROTOTYPE_ONLY_NONCONTEMPORANEOUS"
+V0_MAY_NOT_BE_USED_FOR = (
+    "SETTLEMENT_PREDICTION", "RESIDUAL_ALPHA", "CONVERGENCE",
+    "FAIR_VALUE_VALIDATION",
+)
+V0_WHY = (
+    "inputs span hours and some postdate goals; the fit therefore partly "
+    "describes a known score rather than forecasting an unknown one")
+
+# V1 requires ONE common decision timestamp T. Every input must satisfy
+# PRICE_TIMESTAMP <= T, be the latest such observation, and be no older than
+# MAX_QUOTE_AGE_S. Quote age travels with every input.
+MARKET_SURFACE_V1_ASOF_STATUS = "SPECIFIED_NOT_YET_BUILT"
+V1_REQUIREMENTS = (
+    "one common T per fitted surface",
+    "every input PRICE_TIMESTAMP <= T",
+    "each input is the latest observation at or before T",
+    "each input no older than an explicit MAX_QUOTE_AGE_S",
+    "quote age reported per input; median, p90 and max per horizon",
+    "pregame and live never mixed; a live surface needs game state at T",
+)
+LIVE_SURFACE_STATUS = "NOT_IDENTIFIED"
+LIVE_SURFACE_WHY = (
+    "a live surface needs the state known at T -- score, clock, cards, period "
+    "-- and the retained corpus carries none of it; a live price observed "
+    "after a goal is not a pregame opinion, so contaminating the pregame "
+    "model with it is worse than having no live surface")
+
 TOTAL_RE = re.compile(r"-total-(\d+)pt5$")
 EXACT_RE = re.compile(r"-exact-score-(\d+)-(\d+)$")
 FIRST_HALF_RE = re.compile(r"-first-half-total-\d+pt5$")

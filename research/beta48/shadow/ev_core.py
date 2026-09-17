@@ -131,6 +131,48 @@ NEVER_CONFLATE_THE_OBJECTS = (
     "arithmetic consistency check into a claim of edge; the four objects carry "
     "distinct names for exactly that reason")
 
+# ---------------------------------------------------------------------------
+# WHAT "THE VENUE PRICE" ACTUALLY MEANS. "P_VENUE" was ambiguous and that is a
+# defect: a traded price, a bid, an ask and a mid are four different numbers
+# with four different uses, and mixing them silently is how a midpoint ends up
+# standing in for an executable price.
+# ---------------------------------------------------------------------------
+
+B0_DEFINITION = "P_LAST_TRADE"
+B0_DEFINITION_DETAIL = (
+    "the price of the whale fill that generated the observation -- a TRADED "
+    "price, not a quote; it is what the retained corpus carries per row")
+B0_TIMESTAMP_POLICY = (
+    "the observation's own trade timestamp `ts`, required strictly earlier "
+    "than the settlement it is labelled with; violations are refused and "
+    "counted, not clipped")
+B0_QUOTE_AGE_POLICY = (
+    "NOT_APPLICABLE to a traded price -- age zero by construction. The book "
+    "fields on the same row (best_ask, depth) were captured at probe time, "
+    "`reaction_s` after the trade, and that lag is carried on the row rather "
+    "than assumed negligible")
+
+MARKET_PRICE_FIELDS = {
+    "P_LAST_TRADE": {"AVAILABLE": True, "USE": "settlement probability (B0)"},
+    "P_BEST_ASK": {"AVAILABLE": True,
+                   "USE": "EXECUTION price for a buy -- never for probability"},
+    "P_BEST_BID": {"AVAILABLE": False,
+                   "WHY": "the probe captured ask-side depth only"},
+    "P_MID": {"AVAILABLE": False,
+              "WHY": "needs both sides; no bid was captured"},
+    "P_MICROPRICE": {"AVAILABLE": False,
+                     "WHY": "needs both sides with sizes"},
+}
+B0_LAST_STATUS = "BUILT_AND_WALK_FORWARD_TESTED"
+B0_MID_STATUS = "NOT_BUILT_NO_BID_SIDE_IN_CORPUS"
+NEVER_SUBSTITUTE_MID_FOR_EXECUTION = (
+    "a midpoint is not tradable; execution EV uses best bid or best ask, and "
+    "substituting a mid overstates every fill")
+BENCHMARK_FREEZE_RULE = (
+    "the prediction benchmark is frozen on walk-forward evidence; B0_LAST won "
+    "because it was tested, not because it was convenient. B0_MID has not been "
+    "tested and therefore has not lost -- it is unbuilt, not rejected")
+
 P_FILL_LADDER = ("NOT_IDENTIFIED", "PARTIALLY_IDENTIFIED", "IDENTIFIED")
 ONE_ORDER_DOES_NOT_IDENTIFY_P_FILL = (
     "the first micro-live order yields ONE observation; a usable fill model "
@@ -248,6 +290,9 @@ def price(event_id, market_id, market_family, side, as_of, p_venue,
         "CHAMPION_IS_THE_MARKET": CHAMPION_IS_THE_MARKET,
         "B0_VENUE_RAW": B0_VENUE_RAW,
         "B0_IS_NOT": B0_IS_NOT,
+        "B0_DEFINITION": B0_DEFINITION,
+        "B0_TIMESTAMP_POLICY": B0_TIMESTAMP_POLICY,
+        "B0_QUOTE_AGE_POLICY": B0_QUOTE_AGE_POLICY,
         "NEVER_CONFLATE_THE_OBJECTS": NEVER_CONFLATE_THE_OBJECTS,
         "ABSENT_BECAUSE": dict(ABSENT_BECAUSE),
     }
@@ -290,6 +335,15 @@ def describe():
         "B0_VENUE_RAW": B0_VENUE_RAW,
         "B0_IS_NOT": B0_IS_NOT,
         "GENERATION_1_FROZEN": GENERATION_1_FROZEN,
+        "B0_DEFINITION": B0_DEFINITION,
+        "B0_DEFINITION_DETAIL": B0_DEFINITION_DETAIL,
+        "B0_TIMESTAMP_POLICY": B0_TIMESTAMP_POLICY,
+        "B0_QUOTE_AGE_POLICY": B0_QUOTE_AGE_POLICY,
+        "B0_LAST_STATUS": B0_LAST_STATUS,
+        "B0_MID_STATUS": B0_MID_STATUS,
+        "MARKET_PRICE_FIELDS": dict(MARKET_PRICE_FIELDS),
+        "NEVER_SUBSTITUTE_MID_FOR_EXECUTION": NEVER_SUBSTITUTE_MID_FOR_EXECUTION,
+        "BENCHMARK_FREEZE_RULE": BENCHMARK_FREEZE_RULE,
         "GENERATION_1_RESULT": dict(GENERATION_1_RESULT),
         "GENERATION_1_FINAL_HOLDOUT": GENERATION_1_FINAL_HOLDOUT,
         "HOLDOUT_PERMITTED_USE": HOLDOUT_PERMITTED_USE,
