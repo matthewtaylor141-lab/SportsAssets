@@ -606,3 +606,175 @@ def selection_report(complete_features, partial_features):
         "EFFECT_SIZE_NOT_P_VALUES": EFFECT_SIZE_NOT_P_VALUES,
         "SELECTION_MECHANISM": SELECTION_MECHANISM,
     }
+
+
+# ===========================================================================
+# THE SELECTION FINDING, FROZEN (directive section 1)
+# ===========================================================================
+#
+# This block is the finding itself, in a form that TRAVELS. Any statement made
+# from the complete-coverage subset must carry these constants beside it. A
+# number that appears without them has been stripped of the only context that
+# makes it honest.
+
+SELECTION_FINDING_STATUS = "FROZEN"
+
+RN1_CONDITIONS_TOTAL = 17752
+RN1_CONDITIONS_COMPLETE_COVERAGE = 9269
+RN1_COMPLETE_COVERAGE_PCT = 52.2
+RN1_U2_FILLS_RETAINED = 214609
+RN1_U0_TRADES_AT_CUTOFF = 962509
+RN1_RETAINED_FRACTION_PCT = 22.3
+AUDIT_CUTOFF_TS = "2026-09-12T00:00:00Z"
+
+SUBSET_LABEL = "PIPELINE_VALIDATION_SELECTED_SUBSET"
+SUBSET_INFERENCE_LABEL = "NOT_VALID_FOR_RN1_POPULATION_INFERENCE"
+
+# What the subset MAY be used for.
+SUBSET_PERMITTED_USES = (
+    "testing that the code runs and the pipeline executes end to end",
+    "verifying accounting identities hold on real rows",
+    "building and exercising schemas",
+    "descriptive statistics explicitly scoped to the subset itself",
+)
+
+# What it may NOT be used for. This list is the operative one.
+SUBSET_FORBIDDEN_USES = (
+    "inferring RN1's population complement policy",
+    "estimating population pair profitability",
+    "estimating population loss-lock frequency",
+    "fitting production whale-policy coefficients",
+    "claiming any population-level causal or predictive relationship",
+)
+
+DO_NOT_TRAIN_OR_VALIDATE_BETTOR_POLICY_FROM_THIS_SUBSET = True
+
+
+def selection_constants():
+    """The constants that must travel with any subset-derived number."""
+    return {
+        "SELECTION_FINDING_STATUS": SELECTION_FINDING_STATUS,
+        "COMPLETE_SUBSET_SELECTION_STATUS": COMPLETE_SUBSET_SELECTION_STATUS,
+        "SELECTION_MECHANISM": SELECTION_MECHANISM,
+        "SELECTION_LARGE_EFFECTS": dict(SELECTION_LARGE_EFFECTS),
+        "EFFECT_SIZE_NOT_P_VALUES": EFFECT_SIZE_NOT_P_VALUES,
+        "RN1_CONDITIONS_TOTAL": RN1_CONDITIONS_TOTAL,
+        "RN1_CONDITIONS_COMPLETE_COVERAGE": RN1_CONDITIONS_COMPLETE_COVERAGE,
+        "RN1_COMPLETE_COVERAGE_PCT": RN1_COMPLETE_COVERAGE_PCT,
+        "RN1_U2_FILLS_RETAINED": RN1_U2_FILLS_RETAINED,
+        "RN1_U0_TRADES_AT_CUTOFF": RN1_U0_TRADES_AT_CUTOFF,
+        "RN1_RETAINED_FRACTION_PCT": RN1_RETAINED_FRACTION_PCT,
+        "AUDIT_CUTOFF_TS": AUDIT_CUTOFF_TS,
+        "SUBSET_LABEL": SUBSET_LABEL,
+        "SUBSET_INFERENCE_LABEL": SUBSET_INFERENCE_LABEL,
+        "SUBSET_PERMITTED_USES": list(SUBSET_PERMITTED_USES),
+        "SUBSET_FORBIDDEN_USES": list(SUBSET_FORBIDDEN_USES),
+        "DO_NOT_TRAIN_OR_VALIDATE_BETTOR_POLICY_FROM_THIS_SUBSET":
+            DO_NOT_TRAIN_OR_VALIDATE_BETTOR_POLICY_FROM_THIS_SUBSET,
+    }
+
+
+# ===========================================================================
+# THE TWO RN1 RESULTS, DOWNGRADED (directive section 2)
+# ===========================================================================
+#
+# Both results stand as facts about the subset. Neither is a fact about RN1.
+# The difference is not a caveat; it is the finding.
+
+POPULATION_GENERALIZABILITY = "NO"
+POPULATION_ESTIMATE = NOT_IDENTIFIED
+
+NEVER_DESCRIBE_AS = (
+    "RN1 overall",
+    "RN1's book",
+    "RN1's strategy",
+    "the whale's realised P&L",
+)
+
+RESULT_BASIS_ABOVE_ONE = {
+    "NAME": "RN1_BASIS_ABOVE_ONE_RATE",
+    "SCOPE": SUBSET_LABEL,
+    "MARKETS_IN_SCOPE": 3310,
+    "VALUE_BY_METHOD": {METHOD_WEIGHTED: 38.2,
+                        METHOD_FIFO: 39.1,
+                        METHOD_INCREMENTAL: 39.1},
+    "UNITS": "percent of paired markets",
+    "POPULATION_GENERALIZABILITY": POPULATION_GENERALIZABILITY,
+    "POPULATION_ESTIMATE": POPULATION_ESTIMATE,
+    "INFERENCE_LABEL": SUBSET_INFERENCE_LABEL,
+}
+
+RESULT_LOCKED_PNL = {
+    "NAME": "RN1_LOCKED_PAIR_PNL",
+    "SCOPE": SUBSET_LABEL,
+    "MARKETS_IN_SCOPE": 3310,
+    "VALUE_BY_METHOD": {METHOD_WEIGHTED: 97388.0,
+                        METHOD_FIFO: 95609.0,
+                        METHOD_INCREMENTAL: 95606.0},
+    "UNITS": "USD",
+    "SIGN_AGREEMENT_ACROSS_METHODS_PCT": 90.3,
+    "POPULATION_GENERALIZABILITY": POPULATION_GENERALIZABILITY,
+    "POPULATION_ESTIMATE": POPULATION_ESTIMATE,
+    "INFERENCE_LABEL": SUBSET_INFERENCE_LABEL,
+}
+
+RN1_RESULTS = (RESULT_BASIS_ABOVE_ONE, RESULT_LOCKED_PNL)
+
+
+def stamped(result):
+    """A subset result with its selection constants attached. Use this.
+
+    Reporting a subset number without the constants is the failure mode this
+    exists to prevent, so the stamping is a function rather than a convention.
+    """
+    out = dict(result)
+    out["SELECTION_CONSTANTS"] = selection_constants()
+    out["NEVER_DESCRIBE_AS"] = list(NEVER_DESCRIBE_AS)
+    return out
+
+
+# ===========================================================================
+# THE THREE ACCOUNTING OBJECTS, NAMED (directive section 5)
+# ===========================================================================
+#
+# Three conventions were computed and they answer three different questions.
+# Leaving them unnamed is what let "the pair cost basis" mean whichever of them
+# happened to be in scope.
+
+PORTFOLIO_MATCHED_ECONOMICS = {
+    "NAME": "PORTFOLIO_MATCHED_ECONOMICS",
+    "METHODS": (METHOD_WEIGHTED, METHOD_FIFO),
+    "QUESTION": ("given everything RN1 holds in this market, what does the "
+                 "matched block as a whole cost?"),
+    "UNIT": "the market's whole matched position",
+    "GOOD_FOR": ("mark-to-settlement of an existing book; reporting realised "
+                 "and locked P&L"),
+    "WRONG_FOR": ("asking what a single complement purchase was worth at the "
+                  "moment it was made -- a weighted average recomputes the "
+                  "basis of shares bought long ago"),
+}
+
+INCREMENTAL_COMPLEMENT_DECISION_ECONOMICS = {
+    "NAME": "INCREMENTAL_COMPLEMENT_DECISION_ECONOMICS",
+    "METHODS": (METHOD_INCREMENTAL,),
+    "QUESTION": ("at the moment RN1 bought this complement, what did THAT "
+                 "purchase lock in?"),
+    "UNIT": "the individual complement fill",
+    "GOOD_FOR": ("modelling the decision; every row of a policy training "
+                 "table; any statement about why a basis above one was "
+                 "accepted"),
+    "WRONG_FOR": "reporting the book's total position value",
+}
+
+ACCOUNTING_OBJECTS = (PORTFOLIO_MATCHED_ECONOMICS,
+                      INCREMENTAL_COMPLEMENT_DECISION_ECONOMICS)
+
+PRIMARY_FOR_COMPLEMENT_DECISIONS = "INCREMENTAL_COMPLEMENT_DECISION_ECONOMICS"
+WHY_INCREMENTAL_IS_PRIMARY = (
+    "A decision is made at a point in time with the prices available then. "
+    "Weighted-average basis answers a question about the portfolio, and FIFO "
+    "answers a question about lot ordering; neither is the question the "
+    "decision-maker faced. When the subject is 'why did he buy the other side "
+    "here', the incremental convention is the only one whose unit is the "
+    "decision."
+)

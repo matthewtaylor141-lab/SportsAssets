@@ -293,3 +293,70 @@ class TheCompleteSubsetIsNotRepresentative(unittest.TestCase):
         self.assertIn("no DATABASE_URL", WP.FULL_EXTRACTION_BLOCKER)
         self.assertIn("forbidden by standing instruction",
                       WP.FULL_EXTRACTION_BLOCKER)
+
+
+# ---------------------------------------------------------------------------
+# The selection freeze, the downgrade, and the named accounting objects
+# ---------------------------------------------------------------------------
+
+
+def test_the_selection_finding_is_frozen_with_its_numbers():
+    c = WP.selection_constants()
+    assert c["SELECTION_FINDING_STATUS"] == "FROZEN"
+    assert c["RN1_CONDITIONS_TOTAL"] == 17752
+    assert c["RN1_CONDITIONS_COMPLETE_COVERAGE"] == 9269
+    assert c["RN1_U2_FILLS_RETAINED"] == 214609
+    assert c["RN1_U0_TRADES_AT_CUTOFF"] == 962509
+    assert c["AUDIT_CUTOFF_TS"] == "2026-09-12T00:00:00Z"
+    assert set(c["SELECTION_LARGE_EFFECTS"]) == {
+        "u0_trade_count", "sides_seen", "u2_fill_count"}
+    assert all(v < -0.5 for v in c["SELECTION_LARGE_EFFECTS"].values())
+
+
+def test_the_subset_may_not_be_used_to_train_or_validate_policy():
+    assert WP.DO_NOT_TRAIN_OR_VALIDATE_BETTOR_POLICY_FROM_THIS_SUBSET is True
+    forb = " ".join(WP.SUBSET_FORBIDDEN_USES)
+    for phrase in ("complement policy", "pair profitability",
+                   "loss-lock frequency", "whale-policy coefficients",
+                   "population-level"):
+        assert phrase in forb
+    assert WP.SUBSET_INFERENCE_LABEL == "NOT_VALID_FOR_RN1_POPULATION_INFERENCE"
+
+
+def test_both_pair_results_carry_the_downgrade():
+    for r in WP.RN1_RESULTS:
+        assert r["POPULATION_GENERALIZABILITY"] == "NO"
+        assert r["POPULATION_ESTIMATE"] == WP.NOT_IDENTIFIED
+        assert r["SCOPE"] == "PIPELINE_VALIDATION_SELECTED_SUBSET"
+        assert r["INFERENCE_LABEL"] == WP.SUBSET_INFERENCE_LABEL
+
+
+def test_a_result_cannot_be_reported_without_its_selection_constants():
+    s = WP.stamped(WP.RESULT_LOCKED_PNL)
+    assert s["SELECTION_CONSTANTS"]["SELECTION_FINDING_STATUS"] == "FROZEN"
+    assert "RN1 overall" in s["NEVER_DESCRIBE_AS"]
+    # stamping does not mutate the original
+    assert "SELECTION_CONSTANTS" not in WP.RESULT_LOCKED_PNL
+
+
+def test_the_three_conventions_belong_to_exactly_two_named_objects():
+    assigned = set()
+    for obj in WP.ACCOUNTING_OBJECTS:
+        assigned |= set(obj["METHODS"])
+    assert assigned == set(WP.METHODS)
+    assert len(WP.PORTFOLIO_MATCHED_ECONOMICS["METHODS"]) == 2
+    assert WP.INCREMENTAL_COMPLEMENT_DECISION_ECONOMICS["METHODS"] == \
+        (WP.METHOD_INCREMENTAL,)
+
+
+def test_the_incremental_convention_is_primary_for_a_complement_decision():
+    assert WP.PRIMARY_FOR_COMPLEMENT_DECISIONS == \
+        "INCREMENTAL_COMPLEMENT_DECISION_ECONOMICS"
+    assert "whose unit is the decision" in WP.WHY_INCREMENTAL_IS_PRIMARY
+    assert "portfolio" in WP.PORTFOLIO_MATCHED_ECONOMICS["WRONG_FOR"] or \
+        "single complement" in WP.PORTFOLIO_MATCHED_ECONOMICS["WRONG_FOR"]
+
+
+def test_the_full_extraction_was_not_executed_here():
+    assert WP.FULL_EXTRACTION_EXECUTED == "NO"
+    assert "forbidden by standing instruction" in WP.FULL_EXTRACTION_BLOCKER
