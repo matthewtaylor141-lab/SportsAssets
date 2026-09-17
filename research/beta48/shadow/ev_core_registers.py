@@ -30,43 +30,127 @@ NOT_IDENTIFIED = "NOT_IDENTIFIED"
 # of a given size, two-sided at 5% with 80% power, and separately the number
 # needed for a 95% interval no wider than the effect itself:
 
-PAIRED_EVENT_SD = 0.1680
-PAIRED_EVENT_SD_SOURCE = (
-    "67 evaluation events, per-event mean log loss of market vs a 50/50 blend "
-    "with the V2 champion")
-
-EVIDENCE_LADDER = {
+# --- SUPERSEDED, and the reason is recorded rather than the number quietly
+# replaced. ------------------------------------------------------------------
+SUPERSEDED_PAIRED_EVENT_SD = 0.1680
+SUPERSEDED_LADDER = {
     0.002: {"EVENTS_FOR_80_PCT_POWER": 55386, "EVENTS_FOR_95_PCT_CI": 27109},
     0.005: {"EVENTS_FOR_80_PCT_POWER": 8862, "EVENTS_FOR_95_PCT_CI": 4338},
     0.010: {"EVENTS_FOR_80_PCT_POWER": 2216, "EVENTS_FOR_95_PCT_CI": 1085},
     0.020: {"EVENTS_FOR_80_PCT_POWER": 554, "EVENTS_FOR_95_PCT_CI": 272},
 }
+WHY_THE_OLD_LADDER_WAS_WRONG = (
+    "0.1680 was the SD of the per-event difference between the market and a "
+    "50/50 BLEND of the market with the V2 champion. A half-weight blend sits "
+    "much closer to the market than the challenger does, so its differences "
+    "are much smaller, and the ladder built on them understated the "
+    "requirement roughly fourfold. The contrast being tested is the "
+    "challenger against B0, so the SD must be of THAT difference. Section 21 "
+    "forced the object to be computed from the real paired differences and "
+    "the error surfaced immediately."
+)
+
+# --- Section 21. Measured from the real paired event-level differences. ------
+# Two different contrasts, two different ladders, and conflating them was the
+# whole of the error above.
+#
+#   STANDALONE: can the challenger, on its own, be distinguished from B0?
+#   INCREMENTAL: does ADDING the challenger to the market improve the blend?
+#
+# The second is the question section 14 asks, and it is far better powered,
+# because a stacked blend differs from the market only by the small amount the
+# fitted coefficient lets the challenger move it.
+
+PAIRED_EVENT_SD_STANDALONE = {
+    "P_V2_B7": 0.3392, "P_V3_B4": 0.3416, "P_V3_GBM": 0.3475,
+}
+PAIRED_EVENT_SD_INCREMENTAL = 0.0301
+PAIRED_EVENT_SD_SOURCE = (
+    "standalone: SD over 67 (62 for B4) evaluation events of D_EVENT = "
+    "within-event mean log loss of the challenger minus that of P_MARKET. "
+    "incremental: SD of D_EVENT between the stacked blend and the "
+    "market-only stack on the 27 nested test events")
+
+EVIDENCE_LADDER_STANDALONE = {
+    0.002: {"EVENTS_FOR_80_PCT_POWER": 236954},
+    0.005: {"EVENTS_FOR_80_PCT_POWER": 37913},
+    0.010: {"EVENTS_FOR_80_PCT_POWER": 9479},
+    0.020: {"EVENTS_FOR_80_PCT_POWER": 2370},
+}
+EVIDENCE_LADDER_INCREMENTAL = {
+    0.002: {"EVENTS_FOR_80_PCT_POWER": 1777},
+    0.005: {"EVENTS_FOR_80_PCT_POWER": 285},
+    0.010: {"EVENTS_FOR_80_PCT_POWER": 72},
+    0.020: {"EVENTS_FOR_80_PCT_POWER": 18},
+}
+EVIDENCE_LADDER = EVIDENCE_LADDER_INCREMENTAL  # the section 14 question
+
+WITHIN_EVENT_CORRELATION_OF_ROW_DIFFERENCES = {
+    "P_V2_B7": 0.5433, "P_V3_B4": 0.5353, "P_V3_GBM": 0.5651,
+}
+ROWS_PER_EVENT_MEAN = 13.9
+ROW_ACCOUNTING_UNDERSTATES_SHORTFALL_BY = 6.1
+WHY_ROWS_ARE_NOT_TRIES = (
+    "the row-level score differences correlate about 0.55 within a fixture, "
+    "because a challenger prices every contract on a match from ONE score "
+    "grid: a grid that is wrong for that match is wrong on all fourteen of "
+    "its rows in the same direction. Estimating variance from rows and "
+    "comparing it against the 932 rows held understates the shortfall by "
+    "about six times")
 
 INDEPENDENT_TEST_EVENTS_CURRENT = 27
 
 WHAT_THE_LADDER_MEANS = (
-    "The current test had 27 independent events. The smallest improvement the "
-    "programme would plausibly care about is around 0.010 log loss, and "
-    "detecting that needs about 2,200 events. Twenty-seven is roughly one "
-    "eightieth of what is required, and about one twentieth of what a very "
-    "large 0.020 effect would need.\n\n"
-    "So NOT_DETECTED_AT_THIS_SAMPLE_SIZE was never a result about football. It "
-    "was arithmetic about the sample. No challenger should be judged, kept or "
-    "discarded on that basis, and no broader claim about fundamental alpha can "
-    "rest on it."
+    "The nested test had 27 independent test events against an INCREMENTAL "
+    "ladder that needs about 72 events to detect a 0.010 improvement and 18 "
+    "for 0.020. The shortfall on the question section 14 actually asks is "
+    "therefore about 2.7x, not the 82x previously reported -- the old figure "
+    "came from a ladder built on the wrong contrast.\n\n"
+    "The STANDALONE question is a different matter. Distinguishing a "
+    "challenger from the market on its own needs about 9,500 events for 0.010, "
+    "and that will not be reached by this programme.\n\n"
+    "So the honest reading changed with the arithmetic. The incremental "
+    "experiment is underpowered but not hopelessly so: roughly 72 clean test "
+    "events would resolve a 0.010 effect, which is a data-acquisition target "
+    "within reach rather than an impossibility. NOT_DETECTED still means not "
+    "detected, and no challenger may be kept or discarded on it."
 )
 
 MINIMUM_EVIDENCE_BEFORE_A_NEGATIVE_RESULT = (
     "A negative result on incremental signal may be reported only when the "
-    "test sample reaches the rung of the ladder matching the effect size being "
-    "ruled out, and the rung must be named BEFORE the test is run. Ruling out "
-    "0.010 needs about 2,216 independent events. Below that the only "
-    "admissible statement is that the experiment was underpowered."
+    "test sample reaches the rung of the INCREMENTAL ladder matching the "
+    "effect size being ruled out, and the rung must be named BEFORE the test "
+    "is run. Ruling out 0.010 needs about 72 independent test events. Below "
+    "that the only admissible statement is that the experiment was "
+    "underpowered."
 )
 THE_LADDER_WAS_SET_BEFORE_THE_NEXT_RESULT = True
 
+# --- The sign error that section 21's recomputation exposed. ----------------
+SIGN_CONVENTION_CORRECTION = {
+    "WHAT_WAS_REPORTED": (
+        "the V3 report described the two negative Q4 point estimates as "
+        "sitting on the improving side"),
+    "WHY_THAT_WAS_WRONG": (
+        "DELTA_LOG_LOSS in ev_core_three_expert is MARKET_ONLY minus BLEND, so "
+        "POSITIVE means the blend is better. The negative values meant the "
+        "opposite of what was written: adding the challenger to the market "
+        "made the held-out forecast WORSE, by about 0.013 log loss"),
+    "CORRECTED_READING": (
+        "on the tested sample every challenger degraded the blend rather than "
+        "improving it, with intervals spanning zero. The nested re-run agrees: "
+        "the blend is worse by 0.0093, interval spanning zero"),
+    "WHAT_DOES_NOT_CHANGE": (
+        "the status is still NOT_DETECTED_AT_THIS_SAMPLE_SIZE, the market is "
+        "still the strongest settlement forecast, and no negative claim about "
+        "fundamental alpha is licensed"),
+    "WHAT_DOES_CHANGE": (
+        "the encouraging gloss does. There is no observed tendency for the "
+        "challengers to help; the point estimates lean the other way"),
+}
 
-def events_required(delta, sd=PAIRED_EVENT_SD, power=0.80):
+
+def events_required(delta, sd=PAIRED_EVENT_SD_INCREMENTAL, power=0.80):
     """Independent events needed to detect `delta`, two-sided 5%."""
     z = {0.80: 2.8016, 0.90: 3.2415, 0.95: 3.6049}.get(power)
     if z is None or delta <= 0:
@@ -480,15 +564,20 @@ V3_RESULT = {
                     "CI95": (-0.02672, 0.02963),
                     "STATUS": "NOT_DETECTED_AT_THIS_SAMPLE_SIZE"},
     },
+    "SIGN_CONVENTION": (
+        "DELTA_LOG_LOSS is MARKET_ONLY minus BLEND. POSITIVE means the blend "
+        "is better. All three values above are NEGATIVE, so on this sample "
+        "adding the challenger made the held-out forecast WORSE"),
     "WHAT_NOT_DETECTED_MEANS_HERE": (
-        "27 independent events against a ladder that needs 2,216 for a 0.010 "
-        "effect. Every interval above is consistent with a real improvement of "
-        "up to three log-loss points AND with a real degradation. The sign of "
-        "the point estimate is not evidence"),
+        "27 independent test events against an incremental ladder that needs "
+        "about 72 for a 0.010 effect. Every interval above is consistent with "
+        "a real improvement AND with a real degradation. The sign of the point "
+        "estimate is not evidence"),
     "WHAT_IS_ACTUALLY_INFORMATIVE": (
-        "the two negative point estimates sit on the improving side, and B4 "
-        "once repaired stopped being absurd. Neither is a result. The result "
-        "is that the experiment cannot yet distinguish them"),
+        "B4, once repaired, stopped being absurd. That is a plumbing result, "
+        "not a forecasting one. Nothing here shows a challenger helping; the "
+        "point estimates lean the other way, and the sample cannot resolve "
+        "either direction"),
     "ERROR_CORRELATION_READING": (
         "0.90 to 0.91 with the market. A challenger that shared no information "
         "with the market would be far below that, and one that merely "
@@ -497,6 +586,63 @@ V3_RESULT = {
         "independent view"),
     "B4_REPAIR_CONFIRMED": True,
     "NO_MODEL_WAS_TUNED_UNTIL_IT_LOOKED_PROFITABLE": True,
+    "THIS_TABLE_PREDATES_THE_SECTION_22_NESTING": True,
+    "SEE_ALSO": "NESTED_RESULT",
+}
+
+# ---------------------------------------------------------------------------
+# Section 22. The nested re-run. This, not V3_RESULT's Q4 block, is the valid
+# conditional-market measurement: the calibrator never saw a development or
+# test outcome, and the stack never saw a test outcome.
+# ---------------------------------------------------------------------------
+
+NESTED_RESULT = {
+    "PROTOCOL": "TRAIN(W0) -> CALIBRATE(W1) -> STACK(W2) -> TEST(W3)",
+    "W0_TRAIN": {"MATCHES": 87443, "CUTOFF": "DATE < 2026-05-01"},
+    "W1_CALIBRATION": {"EXTERNAL_MATCHES": 489, "PAIRS": 1956,
+                       "WINDOW": "2026-05-01 .. 2026-08-01",
+                       "CONTAINS_NO_EVALUATION_EVENT": True},
+    "W2_DEVELOPMENT": {"EVENTS": 40},
+    "W3_TEST": {"EVENTS": 27, "ROWS": 520},
+    "EVALUATION_FIXTURE_DATES": "2026-08-07 .. 2026-09-02",
+    "NO_EVALUATION_FIXTURE_IS_INSIDE_W0_OR_W1": True,
+    "LEAK_CHECK": "CLEAN",
+    "CALIBRATOR_SELECTED": "IDENTITY",
+    "CALIBRATOR_SELECTED_ON": "CALIBRATION_WINDOW_W1_KFOLD_CV",
+    "CALIBRATION_CV_SCORES_IN_W1": {
+        "IDENTITY": 0.62364, "PLATT": 0.62311, "BETA": 0.62311,
+        "TEMPERATURE": 0.62316, "ISOTONIC": 0.61534},
+    "WHY_IDENTITY_WON": (
+        "cross-validated inside the calibration window, no calibration map "
+        "beat leaving the probabilities alone. The candidates that looked "
+        "better in-sample did not survive being charged for their flexibility"),
+    "DELTA_LOG_LOSS": -0.00926,
+    "DELTA_SIGN_CONVENTION": "POSITIVE_MEANS_THE_BLEND_IS_BETTER",
+    "CI95_EVENT_BOOTSTRAP": (-0.00222, 0.02036),
+    "SD_D_EVENT": 0.0301,
+    "INCREMENTAL_SIGNAL_STATUS": "NOT_DETECTED_AT_THIS_SAMPLE_SIZE",
+    "POPULATION_TRANSPORT_ASSUMED": True,
+    "POPULATION_TRANSPORT_NOTE": (
+        "W1 is external-league fixtures and W3 is venue contracts, so the "
+        "calibrator is transported across populations. With IDENTITY selected "
+        "the transport carries no weight in this particular run, but the "
+        "assumption is recorded because a future run may select otherwise"),
+    "LEAK_MAGNITUDE_MEASURED": {
+        "METHOD": ("the forbidden variant was run deliberately: the same "
+                   "protocol with the calibrator fitted ON the test events"),
+        "DIFFERENCE_IN_DELTA_LOG_LOSS": 0.00000,
+        "WHY_SO_SMALL": (
+            "the selected calibrator is the identity map, which cannot carry "
+            "outcome information no matter what it is fitted on. The control "
+            "bound nothing on THIS run. That is a fact about this run, not a "
+            "reason to drop the control -- a run that selects isotonic or beta "
+            "would leak, and nothing in the numbers would show it"),
+    },
+    "WHAT_IT_SAYS": (
+        "under a protocol where no test outcome touched any probability, "
+        "adding the independent challenger to the market made the blend worse "
+        "by 0.0093 log loss, with a 95% event-clustered interval spanning "
+        "zero. No incremental signal, and no evidence of harm either"),
 }
 
 
@@ -504,7 +650,17 @@ def describe():
     return {
         "EVIDENCE_LADDER": {("%.3f" % k): v
                             for k, v in EVIDENCE_LADDER.items()},
-        "PAIRED_EVENT_SD": PAIRED_EVENT_SD,
+        "PAIRED_EVENT_SD_STANDALONE": dict(PAIRED_EVENT_SD_STANDALONE),
+        "PAIRED_EVENT_SD_INCREMENTAL": PAIRED_EVENT_SD_INCREMENTAL,
+        "EVIDENCE_LADDER_STANDALONE": {("%.3f" % k): v for k, v
+                                       in EVIDENCE_LADDER_STANDALONE.items()},
+        "SUPERSEDED_PAIRED_EVENT_SD": SUPERSEDED_PAIRED_EVENT_SD,
+        "WHY_THE_OLD_LADDER_WAS_WRONG": WHY_THE_OLD_LADDER_WAS_WRONG,
+        "SIGN_CONVENTION_CORRECTION": dict(SIGN_CONVENTION_CORRECTION),
+        "WITHIN_EVENT_CORRELATION_OF_ROW_DIFFERENCES":
+            dict(WITHIN_EVENT_CORRELATION_OF_ROW_DIFFERENCES),
+        "WHY_ROWS_ARE_NOT_TRIES": WHY_ROWS_ARE_NOT_TRIES,
+        "NESTED_RESULT": dict(NESTED_RESULT),
         "INDEPENDENT_TEST_EVENTS_CURRENT": INDEPENDENT_TEST_EVENTS_CURRENT,
         "WHAT_THE_LADDER_MEANS": WHAT_THE_LADDER_MEANS,
         "FORECAST_VALIDATION_WEIGHTING": FORECAST_VALIDATION_WEIGHTING,

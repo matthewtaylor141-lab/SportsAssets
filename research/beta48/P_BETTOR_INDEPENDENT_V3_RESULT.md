@@ -143,24 +143,155 @@ classic Elo, goal-difference Elo, and EWMA goals for/against — twelve features
 `ELO_SOURCE_PROVISIONAL` from 2025-06-15 onward remains flagged in the ingest
 module. The external Elo is now one input among several rather than the spine.
 
-## 7. Evidence ladder and the size of the sample (§10)
+## 7. Evidence ladder and the size of the sample (§10, corrected under §21)
 
-Observed paired event-level SD: **0.1680**.
+**The ladder published in §10 was wrong, and wrong in the flattering
+direction.** Control 21 forced the variance to be computed from the real paired
+event-level differences, and the error surfaced immediately.
 
-| Effect to detect (log loss) | Events for 80% power | Events for a 95% CI |
-|---|---|---|
-| 0.002 | **55,386** | 27,109 |
-| 0.005 | 8,862 | 4,338 |
-| 0.010 | 2,216 | 1,085 |
-| 0.020 | 554 | 272 |
+The old SD of 0.1680 was measured between the market and a **50/50 blend** of
+the market with the V2 champion. A half-weight blend sits much closer to the
+market than the challenger does, so its differences are much smaller. The
+contrast under test is the challenger against B0, so the SD has to be of *that*
+difference.
 
-`INDEPENDENT_TEST_EVENTS_CURRENT = 27`.
+There are in fact **two** ladders, and conflating them was the whole of the
+error:
 
-Twenty-seven against 2,216. The shortfall is a factor of **82** for the smallest
-effect the programme would plausibly act on, and a factor of **2,051** for a
-0.002 effect.
+**Standalone** — can the challenger, on its own, be told apart from B0?
+SD(D_EVENT) ≈ 0.34.
 
-The ladder was declared before the V3 result was computed.
+| Effect | Events for 80% power |
+|---|---|
+| 0.002 | 236,954 |
+| 0.005 | 37,913 |
+| 0.010 | **9,479** |
+| 0.020 | 2,370 |
+
+**Incremental** — does *adding* the challenger to the market improve the blend?
+This is the §14 question. SD(D_EVENT) = **0.0301**, because a stacked blend
+differs from the market only by the small amount the fitted coefficient lets the
+challenger move it.
+
+| Effect | Events for 80% power |
+|---|---|
+| 0.002 | 1,777 |
+| 0.005 | 285 |
+| 0.010 | **72** |
+| 0.020 | 18 |
+
+So on the question that matters, **27 test events against 72** — a shortfall of
+2.7×, not the 82× previously reported. The 27 events already clear the 0.020
+rung. The standalone question remains out of reach and always will be.
+
+`SUPERSEDED_PAIRED_EVENT_SD` and `WHY_THE_OLD_LADDER_WAS_WRONG` are kept in the
+register; the number was not quietly replaced.
+
+### Why rows are not tries
+
+The row-level score differences correlate **ρ ≈ 0.55** within a fixture, because
+a challenger prices every contract on a match from **one** score grid: a grid
+that is wrong for that match is wrong on all ~14 of its rows in the same
+direction. Estimating variance from rows and comparing it against the 932 rows
+held understates the shortfall by about **6×**. `row_level_sd_forbidden` exists
+so that error has a name and a number rather than a warning in a comment.
+
+## 7a. The sign error — correction
+
+The previous report said the negative Q4 point estimates "sit on the improving
+side." **That was backwards.** `DELTA_LOG_LOSS` is MARKET_ONLY − BLEND, so
+*positive* means the blend is better. All three values were negative, which
+means adding the challenger made the held-out forecast **worse** by about 0.013
+log loss.
+
+What does not change: the status is still `NOT_DETECTED_AT_THIS_SAMPLE_SIZE`,
+the market is still the strongest settlement forecast, and no negative claim
+about fundamental alpha is licensed. What does change is the encouraging gloss —
+there is no observed tendency for the challengers to help, and the point
+estimates lean the other way.
+
+## 7b. Nested calibration and orthogonality (§22)
+
+The conditional-market test was re-run under a strict four-window protocol so
+that no probability entering the test was shaped by a test outcome.
+
+```
+TRAIN (W0)        87,443 external matches, DATE < 2026-05-01
+CALIBRATE (W1)    489 external matches, 2026-05-01 .. 2026-08-01, 1,956 (p,y) pairs
+STACK (W2)        40 evaluation events
+TEST (W3)         27 evaluation events, 520 rows
+```
+
+Evaluation fixtures run 2026-08-07 to 2026-09-02, so **no evaluation fixture
+sits inside W0 or W1**. `LEAK_CHECK = CLEAN`, disjointness enforced by *event*,
+not by row — two contracts on one fixture share a scoreline.
+
+| | |
+|---|---|
+| Calibrator selected | **IDENTITY**, by k-fold CV *inside* W1 |
+| Δ log loss (blend − market) | **−0.00926** (blend worse) |
+| 95% event-clustered CI | [−0.00222, +0.02036] |
+| `INCREMENTAL_SIGNAL_STATUS` | `NOT_DETECTED_AT_THIS_SAMPLE_SIZE` |
+
+Two things were learned building this.
+
+**Method selection is part of fitting.** An in-sample comparison inside W1
+systematically hands the prize to the most flexible candidate: isotonic scored
+0.4925 in-sample against identity's 0.5259, but cross-validated at 0.5702 —
+*worse than doing nothing*. Selection is now by k-fold CV inside W1, which
+charges for flexibility without touching any outcome outside W1.
+
+**The leak was measured, not assumed.** The forbidden variant was run
+deliberately — same protocol, calibrator fitted **on** the test events. The
+difference was **0.00000** log loss, because the selected calibrator is the
+identity map and an identity map cannot carry outcome information wherever it is
+fitted. The control bound nothing on *this* run. That is a fact about this run
+and not a reason to drop the control: a run that selects isotonic or beta would
+leak, and nothing in the numbers would show it.
+
+One assumption is recorded rather than buried: W1 is external-league fixtures
+while W3 is venue contracts, so the calibrator is transported across
+populations. `POPULATION_TRANSPORT_ASSUMED = True`.
+
+## 7c. As-of provenance (§23)
+
+Every source now answers three questions before any feature drawn from it may
+enter a tight as-of claim: `PUBLICATION_TIMESTAMP_AVAILABLE`, `EVENT_TIMESTAMP`,
+`DATA_BECAME_KNOWN_TIMESTAMP`.
+
+| Source | Status |
+|---|---|
+| Venue settlement / observation stamps | `PROVEN` |
+| xgabora match results, shot counts, openfootball | `ASSUMED_BOUNDED` |
+| **xgabora Elo** | `NOT_PROVEN` |
+| xgabora odds | `NOT_PROVEN` |
+| xG — any provider | `NOT_PROVEN` |
+| Player availability — any provider | `NOT_PROVEN` |
+
+**Elo is the dangerous one.** The `date` column is the date the rating applies
+*to*, not the date it was computed. A rating series regenerated in one pass over
+completed history embeds later results in an earlier row, and nothing in the file
+distinguishes that from a genuine contemporaneous rating. The internal strength
+models of §6 exist partly so the programme is not dependent on it.
+
+Applying the gate to the 37 model features:
+
+- `HIGH_INTEGRITY` lane: **0 of 37 admitted** — 34 `ASSUMED_BOUNDED`, 3
+  `NOT_PROVEN` (the Elo trio).
+- `EXPLORATORY` lane: 37 of 37.
+- `TIGHT_ASOF_CLAIM_ALLOWED = False`.
+
+The gate currently refuses everything the programme holds. **That refusal is the
+finding, not a bug in the gate.** `ASSUMED_BOUNDED` means we believe the
+publication lag is smaller than the gap to the predicted match but have no
+timestamp proving it — admissible to loose horizons and the exploratory lane,
+never to a tight as-of claim. It costs nothing today because start-time class A
+is empty and no tight horizon is claimable anyway.
+
+For lineups and injuries the binding timestamp is the **announcement** time, not
+the match date. That is written into the register in advance, so a future source
+must clear it before admission.
+
 `THE_LADDER_WAS_SET_BEFORE_THE_NEXT_RESULT = True`.
 
 ## 8. Event-count expansion (§9)
@@ -214,10 +345,16 @@ standalone winner):
 | `P_V2_B7` | −0.01363 | [−0.03212, +0.00220] | `NOT_DETECTED_AT_THIS_SAMPLE_SIZE` |
 | `P_V3_B4` | +0.00553 | [−0.02672, +0.02963] | `NOT_DETECTED_AT_THIS_SAMPLE_SIZE` |
 
+Δ is MARKET_ONLY − BLEND: **positive means the blend is better**. Two of the
+three are negative, so on this sample adding the challenger made the blend
+*worse*. See §7a — the previous report read these the wrong way round.
+
+This table predates the §22 nesting. The valid conditional measurement is the
+nested one in §7b.
+
 **`NOT_DETECTED` here is arithmetic about the sample, not a finding about
-football.** Every interval above is consistent with a real improvement of up to
-three log-loss points *and* with a real degradation. The sign of the point
-estimate is not evidence.
+football.** Every interval above is consistent with a real improvement and with
+a real degradation. The sign of the point estimate is not evidence.
 
 Error correlations of 0.90–0.91 say the challengers are reading the same matches
 with weaker instruments. They are not finding an independent view, and they are
@@ -230,8 +367,9 @@ coverage and exact-timestamp odds; treating the market as the strongest
 settlement forecast currently held.
 
 **It does not license:** any claim that fundamental alpha is exhausted; any
-negative result on incremental signal (the sample is two orders of magnitude
-short of the declared rung); any trade; any tight-horizon pregame claim.
+negative result on incremental signal (27 test events against a declared rung of
+72); any trade; any tight-horizon pregame claim; any feature entering a
+high-integrity lane on as-of grounds.
 
 `MINIMUM_EVIDENCE_BEFORE_A_NEGATIVE_RESULT` binds: below the matching rung, the
 only admissible statement is that the experiment was underpowered.
@@ -245,9 +383,20 @@ only admissible statement is that the experiment was underpowered.
 > That is different from: *fundamentals have no value*.
 
 The honest summary is that the experiment is not yet capable of answering the
-question it was built to answer. The next gain comes from data acquisition —
-leagues, exact-timestamp odds, availability, real xG — not from another model
-class fitted to the same 67 events.
+question it was built to answer — but it is **closer than the previous report
+claimed**. Corrected arithmetic puts the incremental question about 2.7× short
+of resolution at a 0.010 effect, roughly 72 clean test events, which is a data
+acquisition target within reach rather than an impossibility. That is the one
+number in this report that moved in a favourable direction, and it moved because
+a mistake was corrected, not because a model improved.
+
+Against that, two things moved the other way. The challengers' point estimates
+lean toward *hurting* the blend, not helping it. And no feature the programme
+holds can support a tight as-of claim.
+
+The next gain still comes from data acquisition — leagues, exact-timestamp odds,
+availability, real xG, and publication timestamps for all of them — not from
+another model class fitted to the same 67 events.
 
 `DO NOT TUNE A MODEL UNTIL IT LOOKS PROFITABLE` was observed.
 `NO_MODEL_WAS_TUNED_UNTIL_IT_LOOKED_PROFITABLE = True`.

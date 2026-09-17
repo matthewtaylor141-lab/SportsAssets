@@ -286,11 +286,37 @@ def test_too_few_rows_refuses_rather_than_fitting():
 # ---------------------------------------------------------------------------
 
 
-def test_the_ladder_says_the_current_sample_can_resolve_nothing():
+def test_the_incremental_ladder_resolves_a_large_effect_but_not_a_small_one():
+    """Corrected under section 21. The old ladder used the wrong contrast.
+
+    27 events clear the 0.020 rung of the INCREMENTAL ladder (18 needed) and
+    fall short of 0.010 (72 needed). The previous pins asserted a shortfall of
+    50x and 15x, which came from an SD measured against a half-weight blend
+    rather than against the challenger.
+    """
     st = REG.ladder_status(REG.INDEPENDENT_TEST_EVENTS_CURRENT)
-    assert st["ANY_RUNG_POWERED"] is False
-    assert st["BY_EFFECT_SIZE"]["0.020"]["SHORTFALL_FACTOR"] > 15
-    assert st["BY_EFFECT_SIZE"]["0.010"]["SHORTFALL_FACTOR"] > 50
+    assert st["BY_EFFECT_SIZE"]["0.020"]["POWERED"] is True
+    assert st["BY_EFFECT_SIZE"]["0.010"]["POWERED"] is False
+    assert st["BY_EFFECT_SIZE"]["0.010"]["SHORTFALL_FACTOR"] < 5
+
+
+def test_the_standalone_ladder_is_far_out_of_reach():
+    """Distinguishing a challenger from the market on its own is hopeless here."""
+    assert REG.EVIDENCE_LADDER_STANDALONE[0.010]["EVENTS_FOR_80_PCT_POWER"] > 9000
+    assert (REG.EVIDENCE_LADDER_STANDALONE[0.010]["EVENTS_FOR_80_PCT_POWER"]
+            > 100 * REG.EVIDENCE_LADDER_INCREMENTAL[0.010]["EVENTS_FOR_80_PCT_POWER"])
+
+
+def test_the_old_ladder_is_kept_with_its_reason_not_silently_replaced():
+    assert REG.SUPERSEDED_PAIRED_EVENT_SD == 0.1680
+    assert "50/50 BLEND" in REG.WHY_THE_OLD_LADDER_WAS_WRONG
+
+
+def test_the_sign_error_is_recorded_and_corrected():
+    c = REG.SIGN_CONVENTION_CORRECTION
+    assert "POSITIVE means the blend is better" in c["WHY_THAT_WAS_WRONG"]
+    assert "WORSE" in c["WHY_THAT_WAS_WRONG"]
+    assert "NOT_DETECTED" in c["WHAT_DOES_NOT_CHANGE"]
 
 
 def test_the_required_events_scale_as_the_inverse_square_of_the_effect():
@@ -306,7 +332,9 @@ def test_the_ladder_was_fixed_before_the_next_result():
 
 
 def test_not_detected_is_explained_as_arithmetic_about_the_sample():
-    assert "never a result about football" in REG.WHAT_THE_LADDER_MEANS
+    assert "NOT_DETECTED still means not detected" in REG.WHAT_THE_LADDER_MEANS
+    assert "no challenger may be kept or discarded on it" in \
+        REG.WHAT_THE_LADDER_MEANS
 
 
 # ---------------------------------------------------------------------------
