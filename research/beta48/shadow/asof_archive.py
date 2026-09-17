@@ -177,6 +177,76 @@ def match_key(league_file, home, away, date):
     return "%s|%s|%s|%s" % (league_file, date, home, away)
 
 
+AVAILABILITY_BOUND = "ARCHIVE_FIRST_SEEN"
+
+WHAT_A_COMMIT_TIMESTAMP_PROVES = (
+    "VALUE_WAS_PRESENT_IN_THIS_ARCHIVE_BY_T. It does NOT prove the original "
+    "upstream publication moment, which was almost certainly earlier. That is "
+    "still sufficient for a conservative model lane, because it is an upper "
+    "bound on when BETTOR could certainly have obtained the value from this "
+    "source -- but the label must say ARCHIVE_FIRST_SEEN and not pretend to be "
+    "a publication stamp")
+
+WHY_THE_LABEL_MATTERS = (
+    "calling an archive observation a publication time would quietly convert a "
+    "conservative bound into a precise claim, and the next reader would treat "
+    "the gap between them as knowledge rather than slack")
+
+
+# ---------------------------------------------------------------------------
+# Section 7. Versioned values, not a blanket exclusion.
+#
+# 120 of the 44,764 indexed results changed after first publication. Throwing
+# every one of them away forever is one wrong answer; using today's corrected
+# value throughout history is the other. Both discard real information.
+#
+# The faithful treatment is a version history per row. At decision time T, use
+# the most recent version whose FIRST_SEEN_AT is at or before T. Then:
+#
+#   - a correction made AFTER T cannot touch the prediction at T;
+#   - a correction made BEFORE a later prediction is legitimately available to
+#     that later prediction, because by then the archive really did hold it.
+#
+# A row that was corrected in March is not poisoned for June.
+# ---------------------------------------------------------------------------
+
+def value_asof(versions, t):
+    """The archive's value as of T: latest version with FIRST_SEEN_AT <= T.
+
+    `versions` is the ordered VERSIONS list of a row record. Returns None when
+    no version had been observed by T -- which is a refusal, not a zero.
+    """
+    best = None
+    for v in versions or ():
+        fs = v.get("FIRST_SEEN_AT")
+        if fs and fs <= t:
+            if best is None or fs >= best["FIRST_SEEN_AT"]:
+                best = v
+    return best
+
+
+def asof_row(record, t):
+    """One archival row resolved to a decision time, or a refusal."""
+    v = value_asof(record.get("VERSIONS"), t)
+    if v is None:
+        return {"STATUS": "NOT_YET_IN_THE_ARCHIVE_AT_T",
+                "ROW_KEY": record.get("ROW_KEY"),
+                "AVAILABILITY_BOUND": AVAILABILITY_BOUND}
+    return {
+        "STATUS": "RESOLVED",
+        "ROW_KEY": record.get("ROW_KEY"),
+        "FEATURE_NAME": record.get("FEATURE_NAME"),
+        "VALUE": v["VALUE"],
+        "VERSION_INDEX": v["VERSION_INDEX"],
+        "VERSION_FIRST_SEEN_AT": v["FIRST_SEEN_AT"],
+        "VERSION_COMMIT_SHA": v.get("COMMIT_SHA"),
+        "VERSIONS_TOTAL": len(record.get("VERSIONS") or ()),
+        "A_LATER_VERSION_EXISTS": (
+            len(record.get("VERSIONS") or ()) > v["VERSION_INDEX"] + 1),
+        "AVAILABILITY_BOUND": AVAILABILITY_BOUND,
+    }
+
+
 def build_first_seen(repo=None, path_filter=None, since=None, verbose=False):
     """FIRST_PROVEN_AVAILABLE_AT for every (match, result) in the archive.
 
@@ -221,13 +291,23 @@ def build_first_seen(repo=None, path_filter=None, since=None, verbose=False):
                         "FIRST_PROVEN_AVAILABLE_AT": ts,
                         "LAST_VERIFIED_VALUE": val,
                         "VALUE_CHANGED_LATER": "NO",
+                        "AVAILABILITY_BOUND": AVAILABILITY_BOUND,
+                        "VERSIONS": [{"VERSION_INDEX": 0, "VALUE": val,
+                                      "FIRST_SEEN_AT": ts,
+                                      "COMMIT_SHA": sha}],
                     }
                 else:
                     rec["LAST_VERIFIED_VALUE"] = val
-                    if val != rec["FEATURE_VALUE"] and \
-                            rec["VALUE_CHANGED_LATER"] == "NO":
-                        rec["VALUE_CHANGED_LATER"] = "YES"
-                        changed += 1
+                    # a NEW value opens a new version; an unchanged value just
+                    # re-confirms the current one and must not create a version
+                    if val != rec["VERSIONS"][-1]["VALUE"]:
+                        rec["VERSIONS"].append(
+                            {"VERSION_INDEX": len(rec["VERSIONS"]),
+                             "VALUE": val, "FIRST_SEEN_AT": ts,
+                             "COMMIT_SHA": sha})
+                        if rec["VALUE_CHANGED_LATER"] == "NO":
+                            rec["VALUE_CHANGED_LATER"] = "YES"
+                            changed += 1
         if verbose:
             print("  %s %s  rows=%d" % (sha[:8], ts[:10], len(first_seen)))
     return first_seen, {
@@ -235,6 +315,11 @@ def build_first_seen(repo=None, path_filter=None, since=None, verbose=False):
         "COMMITS_CARRYING_DATA": scanned_commits,
         "ROWS_INDEXED": len(first_seen),
         "ROWS_WHOSE_VALUE_CHANGED_LATER": changed,
+        "REVISED_ROWS_VERSIONED": changed,
+        "TOTAL_VERSIONS": sum(len(r["VERSIONS"]) for r in first_seen.values()),
+        "AVAILABILITY_BOUND": AVAILABILITY_BOUND,
+        "WHAT_A_COMMIT_TIMESTAMP_PROVES": WHAT_A_COMMIT_TIMESTAMP_PROVES,
+        "REVISED_ROWS_ARE_VERSIONED_NOT_DISCARDED": True,
         "ARCHIVAL_PROVENANCE_STATUS": "BUILT",
     }
 
@@ -309,7 +394,8 @@ def provenance_rows(first_seen, limit=None):
         "SOURCE_REPOSITORY", "FILE_PATH", "COMMIT_SHA", "COMMIT_TIMESTAMP",
         "ROW_KEY", "MATCH_TIMESTAMP", "FEATURE_NAME", "FEATURE_VALUE",
         "FIRST_PROVEN_AVAILABLE_AT", "LAST_VERIFIED_VALUE",
-        "VALUE_CHANGED_LATER")} for r in rows]
+        "VALUE_CHANGED_LATER", "VERSIONS", "AVAILABILITY_BOUND")}
+        for r in rows]
 
 
 def index_digest(first_seen):
@@ -329,5 +415,8 @@ def describe():
         "THE_FORBIDDEN_INFERENCE": THE_FORBIDDEN_INFERENCE,
         "WHY_IT_IS_FORBIDDEN": WHY_IT_IS_FORBIDDEN,
         "ARCHIVE_PROOF_IS_CONSERVATIVE": ARCHIVE_PROOF_IS_CONSERVATIVE,
+        "AVAILABILITY_BOUND": AVAILABILITY_BOUND,
+        "WHAT_A_COMMIT_TIMESTAMP_PROVES": WHAT_A_COMMIT_TIMESTAMP_PROVES,
+        "WHY_THE_LABEL_MATTERS": WHY_THE_LABEL_MATTERS,
         "REPOS": {k: dict(v) for k, v in REPOS.items()},
     }

@@ -83,7 +83,7 @@ EVIDENCE_LADDER_INCREMENTAL = {
     0.010: {"EVENTS_FOR_80_PCT_POWER": 72},
     0.020: {"EVENTS_FOR_80_PCT_POWER": 18},
 }
-EVIDENCE_LADDER = EVIDENCE_LADDER_INCREMENTAL  # the section 14 question
+EVIDENCE_LADDER = EVIDENCE_LADDER_INCREMENTAL  # SUPERSEDED by INCREMENTAL_LADDER
 
 WITHIN_EVENT_CORRELATION_OF_ROW_DIFFERENCES = {
     "P_V2_B7": 0.5433, "P_V3_B4": 0.5353, "P_V3_GBM": 0.5651,
@@ -854,6 +854,192 @@ GEN3_CANDIDATE_STATUS = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Directive K3. TWO LADDERS, PERMANENTLY SEPARATE.
+#
+# The §21 report conflated them again. The number published there -- 0.010
+# needing 8,646 events -- is the STANDALONE ladder and is now labelled as
+# such. And the INCREMENTAL figure previously published (SD 0.0301, 72 events)
+# is ALSO superseded: it came from one chronological dev/test split in which
+# the stack happened to give the challenger a tiny coefficient, so the blend
+# barely moved and the differences were artificially small. Measured properly
+# -- out-of-fold, event-clustered, across all 47 common events -- the
+# incremental SD is 0.2435, not 0.0301, and the requirement is 4,654 events
+# rather than 72.
+#
+# Both published ladders were therefore wrong, in opposite directions, for the
+# same underlying reason: a variance estimated on the wrong contrast.
+# ---------------------------------------------------------------------------
+
+POWER_LADDER_AUDIT_STATUS = "CORRECTED_TWO_LADDERS_SEPARATED"
+
+SUPERSEDED_INCREMENTAL_SD = 0.0301
+WHY_THE_INCREMENTAL_SD_WAS_ALSO_WRONG = (
+    "0.0301 was the SD of the blend-minus-market difference on a single "
+    "chronological test window whose stack gave the challenger almost no "
+    "weight. A blend that barely differs from the market produces small "
+    "differences by construction, so the ladder built on it said 72 events "
+    "when the honest figure is several thousand. Out-of-fold event-clustered "
+    "stacking across the whole common set removes that artefact")
+
+STANDALONE_QUESTION = (
+    "how many independent events to establish that BETTOR's independent model "
+    "itself beats B0")
+INCREMENTAL_QUESTION = (
+    "how many independent events to establish that adding BETTOR information "
+    "improves the market forecast")
+
+PRIMARY_MANAGEMENT_EVIDENCE_LADDER = "INCREMENTAL"
+WHY_INCREMENTAL_IS_PRIMARY = (
+    "BETTOR does not need to prove P_BETTOR_INDEPENDENT > P_MARKET_RAW "
+    "standalone. The economically relevant question is whether MARKET plus "
+    "BETTOR information beats MARKET alone, so ensemble admission is judged on "
+    "the incremental ladder. The standalone ladder is retained as a research "
+    "benchmark and may not be quoted as the evidence requirement")
+
+LADDER_EVALUATION_SET = {
+    "COMMON_EVENTS": 47, "CONTRACT_ROWS": 666,
+    "EVENT_WEIGHTING_METHOD": "EVENT_EQUAL_WEIGHTED",
+    "TIME_RANGE": "2026-08-07 .. 2026-08-30",
+    "BOTH_LANES_ON_THE_SAME_EVENT_SET": True,
+}
+
+STANDALONE_SD_EVENT = {"P_HIGH_INTEGRITY": 0.3397, "P_RESEARCH": 0.3549}
+INCREMENTAL_SD_EVENT = {"P_HIGH_INTEGRITY": 0.2435, "P_RESEARCH": 0.1712}
+INCREMENTAL_SD_METHOD = (
+    "out-of-fold, event-clustered 5-fold stacking; each event's blend was "
+    "produced by a stack fitted on other events only")
+
+STANDALONE_LADDER = {
+    "P_HIGH_INTEGRITY": {
+        0.002: {"POINT": 226367, "P50": 215095, "P75": 274665,
+                "P90": 334216, "P95": 368847},
+        0.005: {"POINT": 36219, "P50": 34416, "P75": 43947,
+                "P90": 53475, "P95": 59016},
+        0.010: {"POINT": 9055, "P50": 8604, "P75": 10987,
+                "P90": 13369, "P95": 14754},
+        0.020: {"POINT": 2264, "P50": 2151, "P75": 2747,
+                "P90": 3343, "P95": 3689},
+    },
+    "P_RESEARCH": {
+        0.002: {"POINT": 247135, "P50": 236090, "P75": 287428,
+                "P90": 342842, "P95": 373740},
+        0.005: {"POINT": 39542, "P50": 37775, "P75": 45989,
+                "P90": 54855, "P95": 59799},
+        0.010: {"POINT": 9886, "P50": 9444, "P75": 11498,
+                "P90": 13714, "P95": 14950},
+        0.020: {"POINT": 2472, "P50": 2361, "P75": 2875,
+                "P90": 3429, "P95": 3738},
+    },
+}
+
+INCREMENTAL_LADDER = {
+    "P_HIGH_INTEGRITY": {
+        0.002: {"POINT": 116335, "P50": 111523, "P75": 188741,
+                "P90": 217537, "P95": 289894},
+        0.005: {"POINT": 18614, "P50": 17844, "P75": 30199,
+                "P90": 34806, "P95": 46383},
+        0.010: {"POINT": 4654, "P50": 4461, "P75": 7550,
+                "P90": 8702, "P95": 11596},
+        0.020: {"POINT": 1164, "P50": 1116, "P75": 1888,
+                "P90": 2176, "P95": 2899},
+    },
+    "P_RESEARCH": {
+        0.002: {"POINT": 57523, "P50": 54624, "P75": 88545,
+                "P90": 104709, "P95": 134704},
+        0.005: {"POINT": 9204, "P50": 8740, "P75": 14168,
+                "P90": 16754, "P95": 21553},
+        0.010: {"POINT": 2301, "P50": 2185, "P75": 3542,
+                "P90": 4189, "P95": 5389},
+        0.020: {"POINT": 576, "P50": 547, "P75": 886,
+                "P90": 1048, "P95": 1348},
+    },
+}
+
+LADDERS_MAY_NOT_BE_COMBINED = True
+
+INCREMENTAL_RESULT = {
+    "P_HIGH_INTEGRITY": {"DELTA_LOG_LOSS": -0.02457,
+                         "CI95": (-0.10545, 0.03233),
+                         "INDEPENDENT_EVENTS": 47, "CONTRACT_ROWS": 666,
+                         "STATUS": "NOT_DETECTED_AT_THIS_SAMPLE_SIZE"},
+    "P_RESEARCH": {"DELTA_LOG_LOSS": -0.02930,
+                   "CI95": (-0.08488, 0.01243),
+                   "INDEPENDENT_EVENTS": 47, "CONTRACT_ROWS": 666,
+                   "STATUS": "NOT_DETECTED_AT_THIS_SAMPLE_SIZE"},
+    "CONVENTION": "SCORE_B0 - SCORE_B0_PLUS_BETTOR; positive means BETTOR adds",
+    "NOT_DETECTED_IS_NOT_PROVEN_ABSENT": True,
+}
+
+# --- Section 5. Every score table carries its own N. ------------------------
+REQUIRED_TABLE_FIELDS = ("CONTRACT_ROWS", "INDEPENDENT_EVENTS",
+                         "EVENT_WEIGHTING_METHOD", "TIME_RANGE")
+NOT_DIRECTLY_COMPARABLE = "NOT_DIRECTLY_COMPARABLE"
+WHY_EVERY_TABLE_NEEDS_ITS_N = (
+    "a score without its independent event count cannot be read. Two of this "
+    "programme's own tables were compared across different event sets before "
+    "the common-set rule was imposed, and the difference between them was "
+    "partly the sample, not the model")
+
+# --- Section 9. The class-B audit. ------------------------------------------
+START_TIME_CLASS_B_AUDIT_STATUS = "AUDITED_AND_DOWNGRADED"
+START_TIME_CLASS_AUDIT = {
+    "POPULATION": "176 bound soccer events with at least one public clock",
+    "CLASS_A_EVENTS": 0,
+    "CLASS_B_EVENTS": 0,
+    "CLASS_B_SHARED_UPSTREAM_EVENTS": 40,
+    "CLASS_C_EVENTS": 136,
+    "DISTINCT_UPSTREAM_PAIRS": 1,
+    "SOURCE_1_UPSTREAM": "openfootball community curation of league schedules",
+    "SOURCE_2_UPSTREAM": "Football-Data.co.uk (stated in the xgabora README)",
+    "SHARED_ROOT_AUTHORITY": "the league's own published schedule",
+    "WHY_DOWNGRADED": (
+        "two compilations of one authority agree on transcription, not on the "
+        "true kick-off. A fixture moved after publication would be wrong in "
+        "both, which is the common-mode failure independence would have "
+        "caught"),
+    "UNCERTAINTY_RAISED_FROM_HOURS": 1.0,
+    "UNCERTAINTY_RAISED_TO_HOURS": 2.0,
+    "HORIZON_COST": "the T-2h rung is no longer claimable; T-24h and T-6h are",
+    "TIGHT_HORIZONS_STILL_REQUIRE_CLASS_A": True,
+}
+
+# --- Sections 10 and 11. Language. ------------------------------------------
+HIGH_INTEGRITY_INCREMENTAL_SIGNAL = "NOT_DETECTED"
+NOT_PROVEN_ABSENT = (
+    "HI_INTERNAL_ELO is materially worse than B0 standalone -- that is "
+    "factual. The incremental estimate is negative with an interval including "
+    "zero. That is NOT_DETECTED, not PROVEN_ABSENT. The sample is small and "
+    "the feature set is deliberately limited, so the lane is not exhausted")
+
+XG_PROCUREMENT_LANGUAGE = {
+    "WHAT_THE_RESEARCH_LANE_SHOWED": (
+        "on 47 common events the research lane beat high-integrity by about "
+        "0.008 event-equal log loss"),
+    "WHAT_THAT_MEANS": "CURRENT_UNPROVEN_FUNDAMENTAL_EXTRAS_ADD_LITTLE",
+    "WHAT_IT_DOES_NOT_MEAN": (
+        "it does not show that xG specifically is worth buying, because this "
+        "lane contains no real xG at all -- only shots, shots on target and "
+        "corners"),
+    "CORRECT_STATUS": "REAL_XG_REMAINS_UNTESTED",
+}
+
+EXACT_TIMESTAMP_ODDS_PROVIDER_STATUS = "COMPARISON_COMPLETE_RANKED_NOT_PURCHASED"
+WHY_ODDS_ARE_THE_CLEAREST_GAP = (
+    "current consensus odds are coarse and untimestamped; the market price is "
+    "the strongest forecast we hold; an independent market-consensus "
+    "observation at exactly T is what the comparison needs; and timing is "
+    "central to deciding whether information leads or lags")
+
+NEXT_LARGEST_EXPECTED_INFORMATION_GAIN = (
+    "EXACT_TIMESTAMP_EXTERNAL_ODDS",
+    "CONTINUOUS_SUBSTANTIVE_CAPTURE",
+    "MICROSTRUCTURE_RELATIVE_VALUE_EVIDENCE",
+    "BETTOR_NATIVE_PASSIVE_FILL_AND_TOXICITY_EVIDENCE",
+)
+STATIC_SOCCER_MODEL_TUNING_IS_NOT_THE_NEXT_CYCLE = True
+
+
 def describe():
     return {
         "EVIDENCE_LADDER": {("%.3f" % k): v
@@ -880,6 +1066,23 @@ def describe():
             [dict(p) for p in EXACT_TIMESTAMP_ODDS_PROVIDER_OPTIONS],
         "NOTHING_HAS_BEEN_PURCHASED": NOTHING_HAS_BEEN_PURCHASED,
         "CANONICAL_DELTA_SIGN_STATUS": CANONICAL_DELTA_SIGN_STATUS,
+        "POWER_LADDER_AUDIT_STATUS": POWER_LADDER_AUDIT_STATUS,
+        "PRIMARY_MANAGEMENT_EVIDENCE_LADDER": PRIMARY_MANAGEMENT_EVIDENCE_LADDER,
+        "STANDALONE_SD_EVENT": dict(STANDALONE_SD_EVENT),
+        "INCREMENTAL_SD_EVENT": dict(INCREMENTAL_SD_EVENT),
+        "STANDALONE_LADDER": {k: {("%.3f" % d): v for d, v in lad.items()}
+                              for k, lad in STANDALONE_LADDER.items()},
+        "INCREMENTAL_LADDER": {k: {("%.3f" % d): v for d, v in lad.items()}
+                               for k, lad in INCREMENTAL_LADDER.items()},
+        "INCREMENTAL_RESULT": dict(INCREMENTAL_RESULT),
+        "LADDER_EVALUATION_SET": dict(LADDER_EVALUATION_SET),
+        "SUPERSEDED_INCREMENTAL_SD": SUPERSEDED_INCREMENTAL_SD,
+        "START_TIME_CLASS_B_AUDIT_STATUS": START_TIME_CLASS_B_AUDIT_STATUS,
+        "START_TIME_CLASS_AUDIT": dict(START_TIME_CLASS_AUDIT),
+        "HIGH_INTEGRITY_INCREMENTAL_SIGNAL": HIGH_INTEGRITY_INCREMENTAL_SIGNAL,
+        "XG_PROCUREMENT_LANGUAGE": dict(XG_PROCUREMENT_LANGUAGE),
+        "EXACT_TIMESTAMP_ODDS_PROVIDER_STATUS":
+            EXACT_TIMESTAMP_ODDS_PROVIDER_STATUS,
         "VENUE_NATIVE_START_TIME_SEARCH": dict(VENUE_NATIVE_START_TIME_SEARCH),
         "ARCHIVAL_PROVENANCE_STATUS": ARCHIVAL_PROVENANCE_STATUS,
         "ARCHIVAL_RECOVERY": dict(ARCHIVAL_RECOVERY),

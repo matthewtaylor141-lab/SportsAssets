@@ -287,3 +287,113 @@ def classify_all(events):
         "PREGAME_PROVEN_CLAIM": PREGAME_PROVEN_CLAIM,
         "VENUE_NATIVE_START_TIME_COVERAGE": VENUE_NATIVE_START_TIME_COVERAGE,
     }
+
+
+# ---------------------------------------------------------------------------
+# Directive K3 section 9. The class-B independence audit, and its downgrade.
+#
+# Class B was defined as "two independent public sources agreeing after the
+# measured country offset". The audit asked what those sources actually are:
+#
+#   SOURCE_1  openfootball/football.json   upstream: community curation of the
+#                                          leagues' own published schedules
+#   SOURCE_2  xgabora/Club-Football-Match-Data
+#                                          upstream: Football-Data.co.uk,
+#                                          stated in the repository README
+#
+# Two DISTINCT COMPILATIONS, but one ROOT AUTHORITY: both ultimately transcribe
+# the league's published schedule. That makes their agreement evidence of
+# faithful transcription, not of the true kick-off. If the league publishes a
+# time and later moves the fixture without both compilers noticing, they agree
+# and they are both wrong -- the failure is common-mode, which is exactly the
+# failure two independent observations would have caught.
+#
+# DISTINCT_UPSTREAM_PAIRS = 1 across every audited class-B event. So the class
+# is downgraded rather than kept: agreement still rules out transcription
+# error, which is worth something, but it does not buy the uncertainty
+# reduction that genuine independence would.
+# ---------------------------------------------------------------------------
+
+CLASS_B_SHARED = "EXTERNAL_CROSS_VALIDATED_SHARED_UPSTREAM"
+
+CLASS_B_INDEPENDENCE_STATUS = "NOT_ESTABLISHED"
+
+CLASS_B_UPSTREAMS = {
+    "SOURCE_1": "openfootball/football.json",
+    "SOURCE_1_UPSTREAM": "community curation of published league schedules",
+    "SOURCE_2": "xgabora/Club-Football-Match-Data",
+    "SOURCE_2_UPSTREAM": "Football-Data.co.uk (stated in the repository README)",
+    "DISTINCT_UPSTREAM_PAIRS": 1,
+    "SHARED_ROOT_AUTHORITY": "the league's own published schedule",
+}
+
+WHY_THE_DOWNGRADE = (
+    "two mirrors of one upstream are not two confirmations. Their agreement "
+    "excludes transcription error and nothing else, so it cannot carry the "
+    "uncertainty reduction that two independent observations would")
+
+CLASS_B_SHARED_UNCERTAINTY_HOURS = 2.0
+CLASS_UNCERTAINTY_HOURS[CLASS_B_SHARED] = CLASS_B_SHARED_UNCERTAINTY_HOURS
+
+WHAT_AGREEMENT_STILL_BUYS = (
+    "a class-B-shared event is still better than class C: we know both "
+    "compilations read the same scheduled time, so a transcription slip in "
+    "either is ruled out. It is the SCHEDULE itself that remains unverified")
+
+
+def independence_of(source_1_upstream, source_2_upstream):
+    """Two upstreams, or one wearing two coats?"""
+    if not source_1_upstream or not source_2_upstream:
+        return "NOT_IDENTIFIED"
+    if source_1_upstream == source_2_upstream:
+        return "SHARED_UPSTREAM"
+    # distinct compilations of one root authority are still common-mode
+    return "DISTINCT_COMPILATIONS_SHARED_ROOT_AUTHORITY"
+
+
+def downgrade_for_dependence(classified, independence=None):
+    """Apply the section 9 downgrade to a classify() result.
+
+    A class-B verdict whose two sources are not independent becomes
+    CLASS_B_SHARED, with its uncertainty raised. Nothing else moves: class A
+    needs no corroboration and class C is already the floor.
+    """
+    if classified.get("START_TIME_STATUS") != CLASS_B:
+        return classified
+    ind = independence or independence_of(
+        CLASS_B_UPSTREAMS["SOURCE_1_UPSTREAM"],
+        CLASS_B_UPSTREAMS["SOURCE_2_UPSTREAM"])
+    if ind == "INDEPENDENT":
+        return classified
+    out = dict(classified)
+    out["START_TIME_STATUS"] = CLASS_B_SHARED
+    out["UNCERTAINTY_HOURS"] = CLASS_B_SHARED_UNCERTAINTY_HOURS
+    out["SOURCE_INDEPENDENCE"] = ind
+    out["DOWNGRADED_FROM"] = CLASS_B
+    out["WHY"] = WHY_THE_DOWNGRADE
+    return out
+
+
+def audit_row(event, ofm, cf, offset_hours, classified):
+    """The per-event record section 9 asks for."""
+    return {
+        "EVENT": event,
+        "SOURCE_1": CLASS_B_UPSTREAMS["SOURCE_1"],
+        "SOURCE_2": CLASS_B_UPSTREAMS["SOURCE_2"],
+        "SOURCE_1_UPSTREAM": CLASS_B_UPSTREAMS["SOURCE_1_UPSTREAM"],
+        "SOURCE_2_UPSTREAM": CLASS_B_UPSTREAMS["SOURCE_2_UPSTREAM"],
+        "TIME_1": (ofm or {}).get("TIME"),
+        "TIME_2": (cf or {}).get("TIME"),
+        "ABS_DIFFERENCE_SECONDS": round(
+            (classified.get("CROSS_SOURCE_GAP_HOURS") or 0.0) * 3600),
+        "TIMEZONE_ASSUMPTION": (
+            "measured constant offset %.1fh, not seasonal" % (offset_hours or 0.0)),
+        "UNCERTAINTY_SECONDS": int(classified.get("UNCERTAINTY_HOURS", 0) * 3600),
+        "SOURCE_INDEPENDENCE": classified.get("SOURCE_INDEPENDENCE",
+                                              "NOT_ESTABLISHED"),
+    }
+
+
+# A shared-upstream class B may not support any horizon a plain class B could
+# not, and loses the two-hour rung as well.
+TIGHT_HORIZONS_STILL_REQUIRE_CLASS_A = True
