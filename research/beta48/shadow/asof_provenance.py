@@ -46,17 +46,73 @@ database later.
 import datetime
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
+
+# ---------------------------------------------------------------------------
+# Section 6. Five classes. The earlier two-value split was too coarse to carry
+# the distinction that matters -- between a value we can PROVE was published
+# before the forecast and one we merely believe was.
+# ---------------------------------------------------------------------------
+
+PROVEN_NATIVE = "PROVEN_NATIVE"
+# the venue or source carries an authoritative timestamp of availability
+
+PROVEN_ARCHIVAL = "PROVEN_ARCHIVAL"
+# the value demonstrably existed in a frozen archival snapshot before decision T
+
+PROVEN_DERIVED = "PROVEN_DERIVED"
+# a deterministic causal transformation of PROVEN_NATIVE / PROVEN_ARCHIVAL
+# inputs, with a frozen algorithm that reads state strictly before the match
+# it consumes (section 7)
+
+CONSERVATIVELY_BOUNDED = "CONSERVATIVELY_BOUNDED"
+# availability can be bounded from event mechanics but is not timestamped
+
 NOT_PROVEN = "NOT_PROVEN"
-PROVEN = "PROVEN"
-ASSUMED_BOUNDED = "ASSUMED_BOUNDED"
+# no defensible availability bound
+
+# Retained so older records and tests resolve; it maps onto the new scheme.
+PROVEN = PROVEN_NATIVE
+ASSUMED_BOUNDED = CONSERVATIVELY_BOUNDED
+
+CLASSES = (PROVEN_NATIVE, PROVEN_ARCHIVAL, PROVEN_DERIVED,
+           CONSERVATIVELY_BOUNDED, NOT_PROVEN)
 
 THE_RULE = (
     "No feature earns admission merely because it existed somewhere in a "
     "historical database later.")
 
-LANES = ("HIGH_INTEGRITY", "EXPLORATORY")
+LANES = ("HIGH_INTEGRITY", "RESEARCH", "EXPLORATORY")
 
-HIGH_INTEGRITY_ADMITS = (PROVEN,)
+HIGH_INTEGRITY_ADMITS = (PROVEN_NATIVE, PROVEN_ARCHIVAL, PROVEN_DERIVED)
+RESEARCH_ADMITS = HIGH_INTEGRITY_ADMITS + (CONSERVATIVELY_BOUNDED,)
+
+D_IS_EXCLUDED_FROM_ANY_ASOF_MODEL = True
+
+LANE_RULES = {
+    "HIGH_INTEGRITY": {
+        "ADMITS": HIGH_INTEGRITY_ADMITS,
+        "MAY_BECOME_BETTOR_INDEPENDENT_FAIR_VALUE": True,
+        "NOTE": "the only lane eligible to become BETTOR independent fair value",
+    },
+    "RESEARCH": {
+        "ADMITS": RESEARCH_ADMITS,
+        "MAY_BECOME_BETTOR_INDEPENDENT_FAIR_VALUE": False,
+        "NOTE": ("tells us whether richer information looks promising. It can "
+                 "never directly earn production status, and every result it "
+                 "produces is labelled RESEARCH_ONLY"),
+    },
+    "EXPLORATORY": {
+        "ADMITS": CLASSES,
+        "MAY_BECOME_BETTOR_INDEPENDENT_FAIR_VALUE": False,
+        "NOTE": "anything with a declared source; diagnostics only",
+    },
+}
+
+WHY_RESULTS_SEPARATE_LANES = (
+    "if the research lane improves materially while the high-integrity lane "
+    "does not, that is not a disappointment. It is a measurement of what "
+    "better-timestamped data would be worth, and it becomes a procurement "
+    "case rather than a modelling one")
 
 WHY_ASSUMED_BOUNDED_IS_NOT_ENOUGH = (
     "ASSUMED_BOUNDED means we believe the publication lag is smaller than the "
@@ -105,13 +161,17 @@ def source_record(name, publication_timestamp_available, event_timestamp_field,
     A caller may override `status` only downward -- a source cannot declare
     itself PROVEN when it has no publication timestamp.
     """
-    derived = PROVEN if publication_timestamp_available and \
+    derived = PROVEN_NATIVE if publication_timestamp_available and \
         data_became_known_field else NOT_PROVEN
-    if status == ASSUMED_BOUNDED and derived == NOT_PROVEN:
-        derived = ASSUMED_BOUNDED
-    elif status and status != derived:
-        if status == NOT_PROVEN:
-            derived = NOT_PROVEN
+    # A caller may only move a source DOWN the ladder, never up. Declaring
+    # PROVEN_NATIVE without a publication timestamp is exactly the claim this
+    # module exists to refuse.
+    if status in (PROVEN_ARCHIVAL, PROVEN_DERIVED) and derived == NOT_PROVEN:
+        derived = status              # proven by the archive, not by a stamp
+    elif status == CONSERVATIVELY_BOUNDED and derived == NOT_PROVEN:
+        derived = CONSERVATIVELY_BOUNDED
+    elif status == NOT_PROVEN:
+        derived = NOT_PROVEN
     return {
         "SOURCE": name,
         "PUBLICATION_TIMESTAMP_AVAILABLE":
@@ -129,12 +189,28 @@ def source_record(name, publication_timestamp_available, event_timestamp_field,
 # ---------------------------------------------------------------------------
 
 SOURCES = {
+    "OPENFOOTBALL_ARCHIVAL_RESULTS": source_record(
+        "openfootball/football.json, proven from repository commit history",
+        # NOT a native publication stamp: the provider publishes no timestamp.
+        # The proof is the frozen commit, which is why this is class B and not
+        # class A. The distinction is the whole point of having both.
+        publication_timestamp_available=False,
+        event_timestamp_field="match date in the committed file",
+        data_became_known_field="FIRST_PROVEN_AVAILABLE_AT (commit timestamp)",
+        status=PROVEN_ARCHIVAL,
+        revision_risk="MEASURED",
+        detail=("233 data commits, 44,764 match results indexed, weekly "
+                "auto-updates. Each result carries the timestamp of the first "
+                "commit that contained it, so availability before a later "
+                "fixture is PROVEN rather than assumed. 120 of the 44,764 "
+                "rows changed value after first publication and are flagged "
+                "VALUE_CHANGED_LATER=YES rather than trusted")),
     "XGABORA_MATCH_RESULTS": source_record(
         "xgabora/Club-Football-Match-Data (FTHome/FTAway)",
         publication_timestamp_available=False,
         event_timestamp_field="MatchDate (+ MatchTime, timezone unverified)",
         data_became_known_field=None,
-        status=ASSUMED_BOUNDED,
+        status=CONSERVATIVELY_BOUNDED,
         revision_risk="LOW",
         detail=("a final score is knowable within minutes of the whistle and "
                 "is almost never restated. Used only as lagged history of "
@@ -146,7 +222,7 @@ SOURCES = {
         publication_timestamp_available=False,
         event_timestamp_field="MatchDate",
         data_became_known_field=None,
-        status=ASSUMED_BOUNDED,
+        status=CONSERVATIVELY_BOUNDED,
         revision_risk="MEDIUM",
         detail=("box-score aggregates are published with the match report, "
                 "typically within hours, but they ARE corrected -- a shot "
@@ -183,7 +259,7 @@ SOURCES = {
         publication_timestamp_available=False,
         event_timestamp_field="DATE + TIME (local, offset measured)",
         data_became_known_field=None,
-        status=ASSUMED_BOUNDED,
+        status=CONSERVATIVELY_BOUNDED,
         revision_risk="MEDIUM",
         detail=("a repository of scheduled fixtures edited over time; a "
                 "kickoff time moved after the fact leaves no trace. This is "
@@ -194,7 +270,7 @@ SOURCES = {
         publication_timestamp_available=True,
         event_timestamp_field="resolved_at",
         data_became_known_field="resolved_at",
-        status=PROVEN,
+        status=PROVEN_NATIVE,
         revision_risk="LOW",
         detail=("the venue's own settlement stamp is a publication timestamp "
                 "by construction: it is the moment the venue asserted the "
@@ -205,7 +281,7 @@ SOURCES = {
         publication_timestamp_available=True,
         event_timestamp_field="observation_time",
         data_became_known_field="observation_time",
-        status=PROVEN,
+        status=PROVEN_NATIVE,
         revision_risk="LOW",
         detail="the moment this programme observed a price; known by construction"),
     "XG_ANY_PROVIDER": source_record(
@@ -279,18 +355,91 @@ FEATURE_SOURCES = {
     "INT_EWMA_GA_AWAY": "XGABORA_MATCH_RESULTS",
 }
 
+# ---------------------------------------------------------------------------
+# Section 7. The high-integrity feature set, rebuilt on the archive.
+#
+# Every feature here is a deterministic causal transformation of openfootball
+# match results whose availability before the forecast is proven by a commit
+# timestamp. The algorithm is frozen and reads state strictly before the match
+# it consumes (bettor_internal_elo.assert_causal), so the outputs inherit the
+# status of the inputs: PROVEN_DERIVED.
+#
+# Note what is NOT here: shots, shots on target, corners, cards, repository
+# Elo, odds, xG. Not because they are useless -- because the archive cannot
+# prove them in time, and the standard is not being lowered to admit them.
+# ---------------------------------------------------------------------------
+
+HIGH_INTEGRITY_FEATURES = (
+    "HI_ELO_HOME", "HI_ELO_AWAY", "HI_ELO_DIFF", "HI_ELO_EXPECTED_HOME",
+    "HI_GD_ELO_HOME", "HI_GD_ELO_AWAY", "HI_GD_ELO_DIFF",
+    "HI_GD_ELO_EXPECTED_HOME",
+    "HI_EWMA_GF_HOME", "HI_EWMA_GA_HOME", "HI_EWMA_GF_AWAY", "HI_EWMA_GA_AWAY",
+    "HI_GF5_HOME", "HI_GA5_HOME", "HI_GF5_AWAY", "HI_GA5_AWAY",
+    "HI_GF10_HOME", "HI_GA10_HOME", "HI_GF10_AWAY", "HI_GA10_AWAY",
+    "HI_HOME_GF5_AT_HOME", "HI_HOME_GA5_AT_HOME",
+    "HI_AWAY_GF5_AT_AWAY", "HI_AWAY_GA5_AT_AWAY",
+    "HI_FORM5_HOME", "HI_FORM5_AWAY",
+    "HI_REST_DAYS_HOME", "HI_REST_DAYS_AWAY",
+    "HI_MATCHES_SEEN_HOME", "HI_MATCHES_SEEN_AWAY",
+)
+
+for _f in HIGH_INTEGRITY_FEATURES:
+    FEATURE_SOURCES[_f] = "OPENFOOTBALL_ARCHIVAL_RESULTS"
+
+DERIVED_FEATURES = set(HIGH_INTEGRITY_FEATURES)
+
+FEATURES_DELIBERATELY_EXCLUDED_FROM_HIGH_INTEGRITY = {
+    "SHOTS_TARGET_CORNERS_CARDS": (
+        "carried only by xgabora, whose last data commit before the August "
+        "2026 evaluation window is 2025-06-27 -- fourteen months early. The "
+        "recent history the rolling features need first appears in a commit "
+        "dated 2026-09-05, AFTER the fixtures being predicted"),
+    "REPOSITORY_ELO": (
+        "NOT_PROVEN on revision grounds regardless of cadence; replaced by "
+        "BETTOR_INTERNAL_ELO, which is PROVEN_DERIVED"),
+    "ODDS": "excluded from P_BETTOR_INDEPENDENT on separate grounds as well",
+    "XG": "no series held; XG_DATA_STATUS = NOT_IDENTIFIED",
+    "PLAYER_AVAILABILITY": "no announcement-time source held",
+}
+
+
+def feature_status(feature):
+    """A feature's own class, which is not always its source's class.
+
+    A deterministic causal transformation of proven inputs is PROVEN_DERIVED,
+    one step down from its inputs but still inside the high-integrity lane.
+    Anything else simply carries its source's class.
+    """
+    src = FEATURE_SOURCES.get(feature)
+    if src is None:
+        return NOT_IDENTIFIED
+    st = status_of(src)
+    if feature in DERIVED_FEATURES and st in (PROVEN_NATIVE, PROVEN_ARCHIVAL):
+        return PROVEN_DERIVED
+    return st
+
+
+def feature_census(features):
+    """Counts by class -- the numbers the report asks for."""
+    out = {c: [] for c in CLASSES}
+    out[NOT_IDENTIFIED] = []
+    for f in features:
+        out.setdefault(feature_status(f), []).append(f)
+    return {k: {"COUNT": len(v), "FEATURES": v} for k, v in out.items() if v}
+
 
 def admit(feature, lane="HIGH_INTEGRITY"):
     """May this feature enter this lane? Returns (bool, reason)."""
     if lane not in LANES:
         return False, "UNKNOWN_LANE"
-    src = FEATURE_SOURCES.get(feature)
-    if src is None:
+    if feature not in FEATURE_SOURCES:
         return False, "FEATURE_HAS_NO_DECLARED_SOURCE"
-    st = status_of(src)
+    st = feature_status(feature)
     if lane == "EXPLORATORY":
-        return st != NOT_IDENTIFIED, "SOURCE_%s" % st
-    return st in HIGH_INTEGRITY_ADMITS, "SOURCE_%s" % st
+        return st != NOT_IDENTIFIED, st
+    if lane == "RESEARCH":
+        return st in RESEARCH_ADMITS, st
+    return st in HIGH_INTEGRITY_ADMITS, st
 
 
 def lane_features(features, lane="HIGH_INTEGRITY"):
@@ -315,10 +464,10 @@ def tight_asof_claim_allowed(features):
     """
     unproven = []
     for f in features:
-        src = FEATURE_SOURCES.get(f)
-        st = status_of(src) if src else NOT_IDENTIFIED
+        st = feature_status(f)
         if st not in HIGH_INTEGRITY_ADMITS:
-            unproven.append({"FEATURE": f, "SOURCE": src or NOT_IDENTIFIED,
+            unproven.append({"FEATURE": f,
+                             "SOURCE": FEATURE_SOURCES.get(f, NOT_IDENTIFIED),
                              "STATUS": st})
     return {
         "TIGHT_ASOF_CLAIM_ALLOWED": not unproven,

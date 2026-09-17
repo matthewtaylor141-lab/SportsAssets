@@ -228,51 +228,81 @@ EXACT_TIMESTAMP_ODDS_REQUIRED_FIELDS = (
 EXACT_TIMESTAMP_ODDS_PROVIDER_OPTIONS = (
     {
         "PROVIDER": "The Odds API",
-        "HISTORICAL_DEPTH": "historical endpoints from roughly 2020",
-        "SNAPSHOT_FREQUENCY": "periodic snapshots, commonly 5-10 minutes on "
-                              "the historical plans",
-        "SPORTS": "broad, including the European football leagues we trade",
-        "MARKETS": "1X2, totals, spreads; player props on higher tiers",
-        "ACCESS": "commercial API key, tiered by request volume",
-        "ARE_THEY_POINT_IN_TIME": "YES for the historical snapshot endpoints; "
-                                  "this is the field that must be confirmed "
-                                  "before purchase",
-    },
-    {
-        "PROVIDER": "OddsJam / OddsBlaze",
-        "HISTORICAL_DEPTH": "several seasons",
-        "SNAPSHOT_FREQUENCY": "sub-minute on live tiers",
-        "SPORTS": "broad, strong US coverage, European football included",
-        "MARKETS": "wide, including alternate lines",
-        "ACCESS": "commercial, enterprise pricing",
-        "ARE_THEY_POINT_IN_TIME": "line-history products are marketed as "
-                                  "point-in-time; must be verified rather "
-                                  "than assumed",
+        "HISTORICAL_START_DATE": "2020-06 (odds snapshots); earlier coverage thin",
+        "SNAPSHOT_FREQUENCY": ("5-minute snapshots on recent plans; hourly and "
+                               "coarser further back"),
+        "BOOKMAKERS": "~40 including Pinnacle, Betfair, US books",
+        "SPORTS": "soccer, NFL, NBA, MLB, NHL, tennis, more",
+        "MARKET_TYPES": ("MONEYLINE", "SPREAD", "TOTAL", "some PLAYER_PROPS"),
+        "RAW_LINE_HISTORY": "YES",
+        "TIMESTAMP_PER_SNAPSHOT": "YES",
+        "ACCESS": "REST API, historical endpoint; bulk by date range",
+        "COST_PLAN": "published tiers by request quota; NOT_VERIFIED_HERE",
+        "LICENSING": "commercial terms; redistribution restricted",
+        "EXPECTED_MATCH_RATE_TO_BETTOR": ("HIGH for the eight covered soccer "
+                                          "leagues; NOT_IDENTIFIED elsewhere"),
+        "DATA_SUITABILITY_RANK": 1,
+        "WHY": ("the only option that pairs a per-snapshot timestamp with a "
+                "documented sub-hourly cadence across the leagues this "
+                "programme actually evaluates"),
     },
     {
         "PROVIDER": "Betfair Exchange historical data",
-        "HISTORICAL_DEPTH": "many years",
-        "SNAPSHOT_FREQUENCY": "full order-book stream, sub-second",
-        "SPORTS": "football among many",
-        "MARKETS": "exchange markets rather than bookmaker prices",
-        "ACCESS": "paid historical data downloads",
-        "ARE_THEY_POINT_IN_TIME": "YES -- it is a market stream, which is the "
-                                  "strongest form of the thing we need, and "
-                                  "it is an EXCHANGE, so it is the closest "
-                                  "analogue to our own venue",
+        "HISTORICAL_START_DATE": "2015 and earlier for major markets",
+        "SNAPSHOT_FREQUENCY": ("full order-book stream; millisecond "
+                               "granularity"),
+        "BOOKMAKERS": "one venue -- an exchange, not a bookmaker consensus",
+        "SPORTS": "soccer, tennis, horse racing, others",
+        "MARKET_TYPES": ("MONEYLINE", "TOTAL", "CORRECT_SCORE", "ASIAN_LINES"),
+        "RAW_LINE_HISTORY": "YES -- the richest of the three",
+        "TIMESTAMP_PER_SNAPSHOT": "YES",
+        "ACCESS": "bulk file download, per-market TAR archives",
+        "COST_PLAN": "published per-month archive pricing; NOT_VERIFIED_HERE",
+        "LICENSING": "restrictive; explicit non-redistribution",
+        "EXPECTED_MATCH_RATE_TO_BETTOR": ("HIGH for soccer; the exchange prices "
+                                          "the same contracts the venue lists"),
+        "DATA_SUITABILITY_RANK": 2,
+        "WHY": ("the best timestamps and the best microstructure, but it is ONE "
+                "venue's book. That makes it an excellent second opinion and a "
+                "poor consensus -- P_EXTERNAL_CONSENSUS needs several books"),
+    },
+    {
+        "PROVIDER": "OddsJam / OddsBlaze historical",
+        "HISTORICAL_START_DATE": "2023 onward for most books",
+        "SNAPSHOT_FREQUENCY": "sub-minute on live plans; historical varies",
+        "BOOKMAKERS": "100+ including offshore and US retail",
+        "SPORTS": "broad",
+        "MARKET_TYPES": ("MONEYLINE", "SPREAD", "TOTAL", "PLAYER_PROPS"),
+        "RAW_LINE_HISTORY": "YES on the historical product",
+        "TIMESTAMP_PER_SNAPSHOT": "YES",
+        "ACCESS": "REST API and bulk export",
+        "COST_PLAN": "enterprise quote; NOT_VERIFIED_HERE",
+        "LICENSING": "commercial; research use requires a specific agreement",
+        "EXPECTED_MATCH_RATE_TO_BETTOR": ("HIGH on breadth, but the history "
+                                          "starts too late to cover the older "
+                                          "seasons the models train on"),
+        "DATA_SUITABILITY_RANK": 3,
+        "WHY": ("widest book coverage, but the 2023 start date is the binding "
+                "constraint: it cannot price the training history"),
     },
 )
 
-WHY_EXACT_TIMESTAMPS_MATTER = (
-    "Without a snapshot time, an external price can only ever be compared "
-    "against the settlement outcome. That answers 'is the book good' and "
-    "cannot answer 'was the venue stale at the moment we could have traded', "
-    "which is the question with money attached. The Betfair exchange stream is "
-    "the strongest candidate precisely because it is a book rather than a "
-    "quote, and because an exchange's mechanics resemble our venue's."
-)
+PROVIDER_RANKING_CRITERION = "DATA_SUITABILITY_NOT_PRICE"
+PROVIDER_RANKING_REASONING = (
+    "ranked on timestamp fidelity first, then history depth, then breadth of "
+    "books, then market types. Price is recorded as NOT_VERIFIED_HERE "
+    "throughout because none of it was checked against a live quote and "
+    "nothing may be purchased")
+NOTHING_MAY_BE_PURCHASED = True
 NOTHING_HAS_BEEN_PURCHASED = True
 NOTHING_HAS_BEEN_REQUESTED = True
+
+WHY_EXACT_TIMESTAMPS_MATTER = (
+    "COARSE_PREMATCH_UNTIMESTAMPED odds cannot be used as an as-of consensus. "
+    "Without a snapshot time there is no way to say whether the consensus a "
+    "model is being compared against was formed before or after the "
+    "observation being scored, and that is the whole of the comparison")
+
 
 # ===========================================================================
 # SECTION 5: THE PLAYER / LINEUP AVAILABILITY CONTRACT
@@ -646,6 +676,184 @@ NESTED_RESULT = {
 }
 
 
+# ---------------------------------------------------------------------------
+# Directive K2. What the archival recovery produced, and the two lanes.
+# ---------------------------------------------------------------------------
+
+CANONICAL_DELTA_SIGN_STATUS = "ENFORCED_IN_ev_core_delta"
+
+VENUE_NATIVE_START_TIME_SEARCH = {
+    "ARTIFACTS_SCANNED": 123,
+    "SLUGS_CARRYING_A_START_TIME": 2384,
+    "DISTINCT_EVENTS_CARRYING_ONE": 63,
+    "SETTLED_MARKET_SLUGS_IN_THE_EV_POPULATION": 16943,
+    "RAW_SLUG_INTERSECTION": 0,
+    "JOINED_TO_SETTLED_EV_POPULATION": 0,
+    "AMBIGUOUS_JOINS": 0,
+    "VENUE_NATIVE_START_TIME_COVERAGE_PCT": 0.0,
+    "JOIN_METHOD": ("exact slug equality AND venue event-key equality, over "
+                    "every retained JSON artifact; no fuzzy matching"),
+    "WHY_ZERO": (
+        "the artifacts that carry gameStartTime are FORWARD boards captured "
+        "for run85 and the micro-live rehearsal -- start-time values run to "
+        "2027-07-01 and the leagues are cfb, nfl and mlb. The settled EV "
+        "population is historical soccer, slugs dated 2026-05-24 to "
+        "2026-09-11, resolved by 2026-09-12. The two sets are disjoint by "
+        "construction: one looks forward at markets not yet settled, the "
+        "other is built from markets already resolved"),
+    "THIS_IS_NOT_A_MATCHING_FAILURE": True,
+    "WHAT_WOULD_FIX_IT": (
+        "capturing gameStartTime prospectively alongside the forward board, so "
+        "that when those events settle the native clock is already held"),
+}
+
+ARCHIVAL_PROVENANCE_STATUS = "BUILT"
+
+ARCHIVAL_RECOVERY = {
+    "SOURCE": "openfootball/football.json",
+    "COMMITS_IN_REPO": 234,
+    "COMMITS_CARRYING_DATA": 233,
+    "MATCH_RESULTS_INDEXED": 44764,
+    "DISTINCT_FIRST_SEEN_COMMIT_STAMPS": 80,
+    "EARLIEST_PROVING_COMMIT": "2020-08-06T19:37:58+02:00",
+    "LATEST_PROVING_COMMIT": "2026-09-09T09:18:42+00:00",
+    "PROVING_COMMITS_INSIDE_THE_EVALUATION_WINDOW": (
+        "2026-08-24", "2026-08-26", "2026-09-02", "2026-09-09"),
+    "ROWS_WHOSE_VALUE_CHANGED_AFTER_FIRST_PUBLICATION": 120,
+    "CHANGED_ROWS_ARE_EXCLUDED_NOT_TRUSTED": True,
+    "PUBLICATION_LAG_DAYS_MEDIAN_AUG_2026": 3.4,
+    "PUBLICATION_LAG_DAYS_MAX_AUG_2026": 16.5,
+    "WHY_THIS_WORKS": (
+        "openfootball auto-updates weekly per league file, so a match played "
+        "before one of those commits and present in it is PROVEN to have been "
+        "knowable before any later fixture"),
+    "WHY_XGABORA_CANNOT_DO_THIS": (
+        "four data commits in total; the last one before the August 2026 "
+        "evaluation window is 2025-06-27, fourteen months early. The recent "
+        "history its rolling features need first appears on 2026-09-05, AFTER "
+        "the fixtures being predicted"),
+}
+
+FEATURE_CLASS_CENSUS = {
+    "PROVEN_NATIVE_FEATURES": 0,
+    "PROVEN_ARCHIVAL_FEATURES": 0,
+    "PROVEN_DERIVED_FEATURES": 30,
+    "CONSERVATIVELY_BOUNDED_FEATURES": 34,
+    "NOT_PROVEN_FEATURES": 3,
+    "NOTE": ("the 30 high-integrity features are PROVEN_DERIVED rather than "
+             "PROVEN_ARCHIVAL because each is a causal transformation of "
+             "archivally-proven results rather than a raw archived value. The "
+             "3 NOT_PROVEN are the repository Elo trio"),
+}
+
+HIGH_INTEGRITY_FEATURE_COUNT = 30
+INTERNAL_ELO_STATUS = "PROVEN_DERIVED"
+INTERNAL_ELO_CAUSALITY_TEST = {
+    "BASE_MATCHES": 4000,
+    "EARLIER_FEATURE_ROWS_IDENTICAL": True,
+    "EARLIER_STATE_SNAPSHOTS_IDENTICAL": True,
+    "CAUSAL": True,
+    "MEANING": "adding a future result changed no earlier Elo state",
+}
+
+HIGH_INTEGRITY_V3_RESULT = {
+    "STATUS": "BUILT_AND_MEASURED",
+    "MODELS": ("HI_GRADIENT_BOOSTED_FUNDAMENTALS", "HI_INTERNAL_ELO"),
+    "TRAINING_MATCHES": 44355,
+    "FEATURES": 30,
+    "EVENTS_WITH_PROVEN_FEATURES": 147,
+    "OWN_EVALUATION": {"EVENTS": 71, "ROWS": 1123,
+                       "B0_LOG_LOSS": 0.575143, "B0_BRIER": 0.190638,
+                       "P_HI_GBM_LOG_LOSS": 0.718779,
+                       "P_HI_GBM_BRIER": 0.253581,
+                       "DELTA_LOG_LOSS": -0.14364,
+                       "DELTA_BRIER": -0.06294},
+    "CHAMPION": "HI_INTERNAL_ELO",
+    "CHAMPION_NOTE": ("the Elo-only challenger scored 0.712979 against the "
+                      "GBM's 0.718779, so the extra 29 features did not pay "
+                      "for themselves inside the lane either"),
+    "NESTED_INCREMENTAL": {
+        "W3_EVENTS": 28, "W3_ROWS": 644,
+        "DELTA_LOG_LOSS": -0.11122,
+        "CI95_CANONICAL": (-0.22883, 0.01376),
+        "STATUS": "NOT_DETECTED_AT_THIS_SAMPLE_SIZE",
+        "CALIBRATOR_SELECTED": "TEMPERATURE",
+        "LEAK_CHECK": "CLEAN",
+    },
+}
+
+LANE_COMPARISON_COMMON_SET = {
+    "WHY_A_COMMON_SET": (
+        "the two lanes bind different event sets, so their headline numbers "
+        "are not comparable. The procurement question -- what is richer "
+        "information worth -- can only be answered on the events both lanes "
+        "can price"),
+    "COMMON_EVENTS": 47,
+    "COMMON_ROWS": 666,
+    "B0_LOG_LOSS": 0.582821,
+    "B0_BRIER": 0.198377,
+    "P_HIGH_INTEGRITY": {"LOG_LOSS": 0.734698, "BRIER": 0.263768,
+                         "DELTA_LOG_LOSS": -0.15188, "DELTA_BRIER": -0.06539},
+    "P_RESEARCH": {"LOG_LOSS": 0.726503, "BRIER": 0.260268,
+                   "DELTA_LOG_LOSS": -0.14368, "DELTA_BRIER": -0.06189},
+    "RESEARCH_MINUS_HIGH_INTEGRITY_LOG_LOSS": 0.008195,
+    "WHAT_THAT_BUYS": (
+        "the unproven extras -- shots, shots on target, corners, repository "
+        "Elo -- are worth about 0.008 event-equal log loss on this sample. "
+        "That is the measured value of the information the archive cannot "
+        "prove, and it is small"),
+    "THE_PROCUREMENT_READING": (
+        "recovering provenance cost almost nothing in accuracy: the proven "
+        "lane is within 0.008 of the richer one. So the procurement case is "
+        "NOT for better-timestamped shots and corners -- it is for the two "
+        "things neither lane holds at all, exact-timestamp odds and real xG"),
+    "BOTH_LANES_ARE_WORSE_THAN_THE_MARKET": True,
+}
+
+RESEARCH_LANE_V3_STATUS = "MEASURED_RESEARCH_ONLY"
+
+POWER_ESTIMATE_UNCERTAINTY_STATUS = "QUANTIFIED_BY_EVENT_BOOTSTRAP"
+
+POWER_LADDER_WITH_UNCERTAINTY = {
+    "LANE": "HIGH_INTEGRITY_STANDALONE_ON_THE_COMMON_SET",
+    "SD_D_EVENT": 0.3319,
+    "LADDER_USES": "P90",
+    0.002: {"POINT": 216138, "P90": 297620},
+    0.005: {"POINT": 34582, "P90": 47620},
+    0.010: {"POINT": 8646, "P90": 11905},
+    0.020: {"POINT": 2162, "P90": 2977},
+    "CLUSTER_SENSITIVITY_BY_LEAGUE_RAISES_NOTHING_MATERIALLY": True,
+}
+
+THE_0020_RUNG_LANGUAGE = {
+    "WHAT_MAY_NOT_BE_SAID": "WE HAVE PROVEN NO +0.020 EDGE EXISTS",
+    "WHY_NOT": (
+        "power is not retrospective proof. Four things would have to hold "
+        "first: the paired variance uncertainty incorporated (it now is, and "
+        "it RAISED the requirement); the experiment population scientifically "
+        "valid; as-of feature provenance passing; and the exact tested model "
+        "frozen prospectively. The last is not true -- these models were "
+        "built after the data was seen"),
+    "WHAT_MAY_BE_SAID": (
+        "on 47 common events, no incremental signal was detected, and the "
+        "sample is below the conservative rung for every effect size on the "
+        "ladder"),
+}
+
+GEN3_CANDIDATE_STATUS = {
+    "MODELS": ("HI_GRADIENT_BOOSTED_FUNDAMENTALS", "HI_INTERNAL_ELO",
+               "P_V3_GBM", "P_V3_B4"),
+    "GENERATION": "GEN3_CANDIDATE",
+    "WHY": ("every one of these was created after the Gen2 freeze stamp of "
+            "2026-09-17T14:00:00Z, and the Gen2 pre-registration names only "
+            "FULL_TIME_MONEYLINE, FULL_TIME_TOTAL, DRAW and EXACT_SCORE as "
+            "challengers. A model built later is a new generation, not a "
+            "late entry to an old one"),
+    "GEN2_OUTCOMES_WERE_NOT_INSPECTED": True,
+    "NOTHING_WAS_SELECTED_OR_TUNED_USING_GEN2_SETTLEMENTS": True,
+}
+
+
 def describe():
     return {
         "EVIDENCE_LADDER": {("%.3f" % k): v
@@ -671,6 +879,20 @@ def describe():
         "EXACT_TIMESTAMP_ODDS_PROVIDER_OPTIONS":
             [dict(p) for p in EXACT_TIMESTAMP_ODDS_PROVIDER_OPTIONS],
         "NOTHING_HAS_BEEN_PURCHASED": NOTHING_HAS_BEEN_PURCHASED,
+        "CANONICAL_DELTA_SIGN_STATUS": CANONICAL_DELTA_SIGN_STATUS,
+        "VENUE_NATIVE_START_TIME_SEARCH": dict(VENUE_NATIVE_START_TIME_SEARCH),
+        "ARCHIVAL_PROVENANCE_STATUS": ARCHIVAL_PROVENANCE_STATUS,
+        "ARCHIVAL_RECOVERY": dict(ARCHIVAL_RECOVERY),
+        "FEATURE_CLASS_CENSUS": dict(FEATURE_CLASS_CENSUS),
+        "HIGH_INTEGRITY_FEATURE_COUNT": HIGH_INTEGRITY_FEATURE_COUNT,
+        "INTERNAL_ELO_STATUS": INTERNAL_ELO_STATUS,
+        "HIGH_INTEGRITY_V3_RESULT": dict(HIGH_INTEGRITY_V3_RESULT),
+        "LANE_COMPARISON_COMMON_SET": dict(LANE_COMPARISON_COMMON_SET),
+        "POWER_ESTIMATE_UNCERTAINTY_STATUS": POWER_ESTIMATE_UNCERTAINTY_STATUS,
+        "POWER_LADDER_WITH_UNCERTAINTY": {str(k): v for k, v
+                                          in POWER_LADDER_WITH_UNCERTAINTY.items()},
+        "THE_0020_RUNG_LANGUAGE": dict(THE_0020_RUNG_LANGUAGE),
+        "GEN3_CANDIDATE_STATUS": dict(GEN3_CANDIDATE_STATUS),
         "EVENT_COUNT_EXPANSION": dict(EVENT_COUNT_EXPANSION),
         "V3_RESULT": dict(V3_RESULT),
         "XG_DATA_STATUS": XG_DATA_STATUS,

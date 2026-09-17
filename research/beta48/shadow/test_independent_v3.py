@@ -353,12 +353,26 @@ def test_the_three_consensus_timing_statuses_are_kept_apart():
 
 
 def test_the_odds_provider_options_carry_the_point_in_time_question():
+    """Field set widened by directive K2 section 15."""
     for p in REG.EXACT_TIMESTAMP_ODDS_PROVIDER_OPTIONS:
-        for k in ("PROVIDER", "HISTORICAL_DEPTH", "SNAPSHOT_FREQUENCY",
-                  "SPORTS", "MARKETS", "ACCESS", "ARE_THEY_POINT_IN_TIME"):
+        for k in ("PROVIDER", "HISTORICAL_START_DATE", "SNAPSHOT_FREQUENCY",
+                  "BOOKMAKERS", "SPORTS", "MARKET_TYPES", "RAW_LINE_HISTORY",
+                  "TIMESTAMP_PER_SNAPSHOT", "ACCESS", "COST_PLAN",
+                  "LICENSING", "EXPECTED_MATCH_RATE_TO_BETTOR",
+                  "DATA_SUITABILITY_RANK"):
             assert k in p, (p.get("PROVIDER"), k)
     assert REG.NOTHING_HAS_BEEN_PURCHASED is True
     assert REG.NOTHING_HAS_BEEN_REQUESTED is True
+
+
+def test_the_providers_are_ranked_on_suitability_not_price():
+    assert REG.PROVIDER_RANKING_CRITERION == "DATA_SUITABILITY_NOT_PRICE"
+    ranks = sorted(p["DATA_SUITABILITY_RANK"]
+                   for p in REG.EXACT_TIMESTAMP_ODDS_PROVIDER_OPTIONS)
+    assert ranks == list(range(1, len(ranks) + 1))
+    for p in REG.EXACT_TIMESTAMP_ODDS_PROVIDER_OPTIONS:
+        assert p["COST_PLAN"].endswith("NOT_VERIFIED_HERE")
+    assert REG.NOTHING_MAY_BE_PURCHASED is True
 
 
 def test_the_player_availability_contract_forbids_a_backfilled_status():

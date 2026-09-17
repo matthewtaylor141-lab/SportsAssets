@@ -335,9 +335,141 @@ def contrast_with_forbidden(rows, challenger, baseline="P_MARKET",
     }
 
 
+# ---------------------------------------------------------------------------
+# Section 22 (the second one): uncertainty AROUND the ladder.
+#
+# SD(D_EVENT) is itself an estimate from a small sample. Reporting "72 events"
+# as though it were a constant repeats, one level up, exactly the mistake the
+# paired-difference rule fixed: treating a noisy estimate as a fact.
+#
+# So the ladder is bootstrapped. Resample EVENTS (never rows), recompute the
+# SD, recompute the requirement, and report the distribution. The prospective
+# ladder then uses a CONSERVATIVE quantile rather than the point estimate,
+# because being wrong about how much evidence you need is only expensive in one
+# direction: you stop too early and call an underpowered null a result.
+# ---------------------------------------------------------------------------
+
+REQUIRED_N_QUANTILES = (0.50, 0.75, 0.90, 0.95)
+
+LADDER_USES_QUANTILE = 0.90
+
+WHY_A_CONSERVATIVE_QUANTILE = (
+    "the cost of over-estimating the requirement is delay. The cost of "
+    "under-estimating it is declaring a negative result on a sample that could "
+    "never have shown the effect. Those are not symmetric, so the prospective "
+    "ladder uses the P90 requirement, not the point estimate")
+
+
+def bootstrap_required_n(diffs, deltas=LADDER_DELTAS, power=0.80, draws=2000,
+                         seed=20260917, quantiles=REQUIRED_N_QUANTILES):
+    """Distribution of the required N, by resampling EVENTS.
+
+    Each draw resamples the events with replacement, recomputes SD(D_EVENT),
+    and converts that to a requirement. A draw whose SD is degenerate is
+    dropped and counted rather than silently treated as zero.
+    """
+    d = list(diffs.values()) if isinstance(diffs, dict) else list(diffs)
+    n = len(d)
+    if n < 8:
+        return {"STATUS": "TOO_FEW_EVENTS", "N_EVENTS": n}
+    rnd = random.Random(seed)
+    sds, degenerate = [], 0
+    for _ in range(draws):
+        samp = [d[rnd.randrange(n)] for _ in range(n)]
+        s = _sd(samp)
+        if not s:
+            degenerate += 1
+            continue
+        sds.append(s)
+    sds.sort()
+    point_sd = _sd(d)
+    out = {}
+    for delta in deltas:
+        reqs = sorted(events_required(delta, s, power) for s in sds)
+        row = {"REQUIRED_N_POINT_ESTIMATE": events_required(delta, point_sd,
+                                                            power)}
+        for q in quantiles:
+            idx = min(len(reqs) - 1, int(q * len(reqs)))
+            label = ("REQUIRED_N_BOOTSTRAP_MEDIAN" if q == 0.50
+                     else "REQUIRED_N_P%d" % int(q * 100))
+            row[label] = reqs[idx]
+        row["LADDER_VALUE"] = row["REQUIRED_N_P90"]
+        out[delta] = row
+    return {
+        "STATUS": "MEASURED",
+        "N_EVENTS": n,
+        "POINT_SD_D_EVENT": point_sd,
+        "BOOTSTRAP_SD_MEDIAN": sds[len(sds) // 2] if sds else NOT_IDENTIFIED,
+        "BOOTSTRAP_SD_P90": (sds[int(0.90 * len(sds))] if sds
+                             else NOT_IDENTIFIED),
+        "DRAWS": draws,
+        "DEGENERATE_DRAWS": degenerate,
+        "RESAMPLING_UNIT": "EVENT_NOT_ROW",
+        "BY_EFFECT_SIZE": out,
+        "LADDER_USES_QUANTILE": LADDER_USES_QUANTILE,
+        "WHY_A_CONSERVATIVE_QUANTILE": WHY_A_CONSERVATIVE_QUANTILE,
+        "POWER_ESTIMATE_UNCERTAINTY_STATUS": "QUANTIFIED_BY_EVENT_BOOTSTRAP",
+    }
+
+
+def cluster_sensitivity(diffs, cluster_of, deltas=LADDER_DELTAS, power=0.80,
+                        draws=2000, seed=20260917):
+    """A more conservative ladder that resamples CLUSTERS, not events.
+
+    Events are not fully independent either. Two fixtures in the same league on
+    the same weekend share a model, a data vintage and often a weather system.
+    If clusters are large enough to matter, resampling whole clusters widens
+    the interval and raises the requirement. `cluster_of` maps an event key to
+    its cluster label; a block bootstrap over those labels is the sensitivity.
+    """
+    if not isinstance(diffs, dict):
+        return {"STATUS": "NEEDS_KEYED_DIFFS"}
+    by = defaultdict(list)
+    for ev, v in diffs.items():
+        by[cluster_of(ev)].append(v)
+    clusters = sorted(by)
+    if len(clusters) < 4:
+        return {"STATUS": "TOO_FEW_CLUSTERS", "CLUSTERS": len(clusters)}
+    rnd = random.Random(seed)
+    sds = []
+    for _ in range(draws):
+        samp = []
+        for _ in range(len(clusters)):
+            samp += by[clusters[rnd.randrange(len(clusters))]]
+        s = _sd(samp)
+        if s:
+            sds.append(s)
+    sds.sort()
+    sizes = sorted(len(v) for v in by.values())
+    out = {}
+    for delta in deltas:
+        reqs = sorted(events_required(delta, s, power) for s in sds)
+        out[delta] = {
+            "REQUIRED_N_BOOTSTRAP_MEDIAN": reqs[len(reqs) // 2],
+            "REQUIRED_N_P90": reqs[int(0.90 * len(reqs))],
+        }
+    return {
+        "STATUS": "MEASURED",
+        "CLUSTERS": len(clusters),
+        "EVENTS": len(diffs),
+        "CLUSTER_SIZE_MEDIAN": sizes[len(sizes) // 2],
+        "CLUSTER_SIZE_MAX": sizes[-1],
+        "RESAMPLING_UNIT": "CLUSTER",
+        "BY_EFFECT_SIZE": out,
+        "THIS_IS_A_SENSITIVITY_NOT_THE_PRIMARY": True,
+        "WHEN_IT_MATTERS": (
+            "if the cluster ladder is materially above the event ladder, the "
+            "events are not behaving independently and the event ladder is "
+            "optimistic"),
+    }
+
+
 def describe():
     return {
         "POWER_VARIANCE_SOURCE": POWER_VARIANCE_SOURCE,
+        "REQUIRED_N_QUANTILES": REQUIRED_N_QUANTILES,
+        "LADDER_USES_QUANTILE": LADDER_USES_QUANTILE,
+        "WHY_A_CONSERVATIVE_QUANTILE": WHY_A_CONSERVATIVE_QUANTILE,
         "FORBIDDEN_VARIANCE_SOURCES": FORBIDDEN_VARIANCE_SOURCES,
         "WHY_THOSE_ARE_FORBIDDEN": WHY_THOSE_ARE_FORBIDDEN,
         "WITHIN_EVENT_DEPENDENCE_PRESERVED": WITHIN_EVENT_DEPENDENCE_PRESERVED,
