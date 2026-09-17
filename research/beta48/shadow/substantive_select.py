@@ -135,18 +135,39 @@ def eligible_events(markets, books_by_slug, now_iso,
     """
     now = _parse(now_iso)
     activity_of = activity_of or {}
+    books_by_slug = books_by_slug or {}
     by_event = {}
+    # EVERY ROW LANDS SOMEWHERE. `row_reason` maps slug -> why it did not reach
+    # the roster, and a row that is selected is recorded as SELECTED. There is
+    # no `continue` here that leaves a row unaccounted for: run 35209604615
+    # reported EVENTS_QUALIFYING = 0 with REJECTED_EVENTS = [], which said
+    # nothing at all about where 600 rows went.
+    row_reason = {}
     for m in markets or ():
         if not isinstance(m, dict):
             continue
-        eid, level = EI.event_identity(m)
-        if eid == NOT_IDENTIFIED or level != EI.LEVEL_V1_CONTEST:
-            continue                       # no venue-native contest identity
+        slug = m.get("slug")
+        if not slug:
+            continue
+        # THE CLOCK IS TESTED FIRST, AND ONLY SO THE REASON IS HONEST.
+        # `event_identity` already refuses a row with no gameStartTime, but it
+        # refuses it as "no team binding", which would report a row that has
+        # both its teams as though it had neither. The gate is the same; the
+        # reason is the true one.
         start = _parse(m.get("gameStartTime"))
         if start is None:
+            row_reason[slug] = "NO_GAME_START"
+            continue
+        eid, level = EI.event_identity(m)
+        if eid == NOT_IDENTIFIED or level != EI.LEVEL_V1_CONTEST:
+            # NOT a downgrade to SUBJECT and NOT a title fallback: a row the
+            # venue does not give two team ids for has no contest identity, and
+            # is refused rather than guessed.
+            row_reason[slug] = ("NO_VENUE_NATIVE_CONTEST_IDENTITY:%s" % level)
             continue
         if (start - now).total_seconds() > FUTURES_HORIZON_S:
-            continue                       # a season future, not a contest
+            row_reason[slug] = "SEASON_FUTURE_BEYOND_HORIZON"
+            continue
         by_event.setdefault(eid, []).append(m)
 
     out, rejected = [], []
@@ -155,11 +176,16 @@ def eligible_events(markets, books_by_slug, now_iso,
         for m in ms:
             slug = m.get("slug")
             act = activity_of.get(slug) or {}
+            if slug not in books_by_slug:
+                row_reason[slug] = "NO_BOOK_READ_WITHIN_READ_BUDGET"
+                continue
             if not two_sided(books_by_slug.get(slug)):
+                row_reason[slug] = "BOOK_NOT_TWO_SIDED"
                 continue
             if not (act.get("HIGH_ACTIVITY_AT_DECISION")
                     or act.get("ACTIVE_AT_DECISION")
                     or act.get("BROAD_AT_DECISION")):
+                row_reason[slug] = "NOT_CURRENTLY_ACTIVE"
                 continue
             keep.append(m)
         if len(keep) < MARKETS_PER_EVENT:
@@ -167,6 +193,10 @@ def eligible_events(markets, books_by_slug, now_iso,
                              "REASON": "FEWER_THAN_%d_ELIGIBLE_MARKETS"
                                        % MARKETS_PER_EVENT,
                              "ELIGIBLE_MARKETS": len(keep)})
+            for m in keep:
+                row_reason[m.get("slug")] = ("EVENT_HAS_FEWER_THAN_%d_"
+                                             "ELIGIBLE_MARKETS"
+                                             % MARKETS_PER_EVENT)
             continue
         keep.sort(key=lambda m: _salt_rank(m.get("slug")))
         start = _parse(keep[0].get("gameStartTime"))
@@ -179,15 +209,17 @@ def eligible_events(markets, books_by_slug, now_iso,
             "MARKETS": keep[:MARKETS_PER_EVENT],
             "ELIGIBLE_MARKET_COUNT": len(keep),
         })
+        for m in keep[MARKETS_PER_EVENT:]:
+            row_reason[m.get("slug")] = "ELIGIBLE_BUT_BEYOND_MARKETS_PER_EVENT"
     out.sort(key=lambda e: (e["RANK"], _salt_rank(e["EVENT_ID"])))
-    return out, rejected
+    return out, rejected, row_reason
 
 
 def freeze(markets, books_by_slug, now_iso, window_s=CAPTURE_WINDOW_S_DEFAULT,
            activity_of=None, events_required=EVENTS_REQUIRED):
     """Produce the frozen roster, or refuse and say the roster is short."""
-    ranked, rejected = eligible_events(markets, books_by_slug, now_iso,
-                                       window_s, activity_of)
+    ranked, rejected, row_reason = eligible_events(
+        markets, books_by_slug, now_iso, window_s, activity_of)
     chosen = ranked[:events_required]
     ok = len(chosen) >= events_required
     if not ok:
@@ -204,7 +236,32 @@ def freeze(markets, books_by_slug, now_iso, window_s=CAPTURE_WINDOW_S_DEFAULT,
             identity_of[blk["MARKET_SLUG"]] = blk
             rows.append(dict(blk, EVENT_NAME=e["EVENT_NAME"],
                              SELECTION_REASON=_reason(e)))
+    selected_slugs = {r["MARKET_SLUG"] for r in rows}
+
+    # AN EVENT THAT QUALIFIED BUT WAS NOT IN THE TOP N IS STILL ACCOUNTED FOR.
+    for e in ranked[len(chosen):]:
+        rejected.append({"EVENT_ID": e["EVENT_ID"],
+                         "REASON": "QUALIFIED_BUT_NOT_TOP_%d_BY_FROZEN_RANK"
+                                   % events_required,
+                         "RANK": e["RANK"]})
+        for m in e["MARKETS"]:
+            row_reason[m.get("slug")] = ("EVENT_QUALIFIED_BUT_NOT_TOP_%d"
+                                         % events_required)
+    if not ok:
+        for e in ranked:
+            for m in e["MARKETS"]:
+                row_reason.setdefault(
+                    m.get("slug"), "ROSTER_SHORT_NOTHING_SELECTED")
+
+    acct = row_accounting(markets, selected_slugs, row_reason)
     return {
+        "ROW_ACCOUNTING": acct,
+        "UNACCOUNTED_ROWS": acct["UNACCOUNTED_ROWS"],
+        "IDENTITY_FAILURES": acct["IDENTITY_FAILURES"],
+        "EVENTS_EVALUATED": len(ranked) + len(
+            [r for r in rejected if r.get("REASON", "").startswith("FEWER")]),
+        "CANONICAL_EVENTS_RESOLVED": acct["CANONICAL_EVENTS_RESOLVED"],
+        "EVENTS_REJECTED": len(rejected),
         "SELECTION_STATUS": SELECTION_OK if ok else SELECTION_INSUFFICIENT,
         "EVENT_SELECTION_FROZEN": "YES" if ok else "NO",
         "FROZEN_AT": now_iso,
@@ -228,6 +285,66 @@ def freeze(markets, books_by_slug, now_iso, window_s=CAPTURE_WINDOW_S_DEFAULT,
         "WAIT_RATHER_THAN_SUBSTITUTE": WAIT_RATHER_THAN_SUBSTITUTE,
         "NO_SUBSTITUTION_ON_SHORTFALL": True,
         "CAPTURE_MAY_START": "YES" if ok else "NO",
+    }
+
+
+SELECTED = "SELECTED"
+NO_INVISIBLE_DROP_PATH = (
+    "every board row reaching the selection pipeline lands in SELECTED or "
+    "REJECTED_WITH_REASON; run 35209604615 reported zero qualifying events and "
+    "an EMPTY rejection list, which said nothing about where 600 rows went")
+
+
+def row_accounting(markets, selected_slugs, row_reason):
+    """Every row in, every row accounted for. UNACCOUNTED_ROWS must be 0.
+
+    This is the audit that the previous run could not produce. A row is either
+    SELECTED or REJECTED_WITH_REASON; anything else is a hole in the pipeline
+    and is counted so it cannot hide.
+    """
+    selected_slugs = set(selected_slugs or ())
+    rows, counts, unaccounted = [], {}, []
+    ident_fail = 0
+    seen = set()
+    for m in markets or ():
+        if not isinstance(m, dict):
+            continue
+        slug = m.get("slug")
+        if not slug or slug in seen:
+            continue
+        seen.add(slug)
+        if slug in selected_slugs:
+            disp, reason = SELECTED, SELECTED
+        else:
+            reason = row_reason.get(slug)
+            if reason is None:
+                disp = "UNACCOUNTED"
+                reason = NOT_IDENTIFIED
+                unaccounted.append(slug)
+            else:
+                disp = "REJECTED_WITH_REASON"
+        if str(reason).startswith("NO_VENUE_NATIVE_CONTEST_IDENTITY"):
+            ident_fail += 1
+        counts[reason] = counts.get(reason, 0) + 1
+        rows.append({"MARKET_SLUG": slug, "DISPOSITION": disp,
+                     "REASON": reason})
+    canonical = len({EI.event_identity(m)[0] for m in (markets or ())
+                     if isinstance(m, dict)
+                     and EI.event_identity(m)[1] == EI.LEVEL_V1_CONTEST})
+    return {
+        "ROWS_IN": len(seen),
+        "SELECTED": len(selected_slugs & seen),
+        "REJECTED_WITH_REASON": sum(1 for r in rows
+                                    if r["DISPOSITION"]
+                                    == "REJECTED_WITH_REASON"),
+        "UNACCOUNTED_ROWS": len(unaccounted),
+        "UNACCOUNTED_SLUGS": unaccounted[:50],
+        "IDENTITY_FAILURES": ident_fail,
+        "CANONICAL_EVENTS_RESOLVED": canonical,
+        "REASON_COUNTS": dict(sorted(counts.items())),
+        "ROWS": rows,
+        "NO_INVISIBLE_DROP_PATH": NO_INVISIBLE_DROP_PATH,
+        "EVERY_ROW_ACCOUNTED": len(unaccounted) == 0,
     }
 
 
@@ -272,7 +389,20 @@ def write(path, sel):
 
 MARKETS_PATH = "/v1/markets"
 BOARD_PAGE_LIMIT = 100
-BOARD_MAX_PAGES = 6
+# THE CAP THAT CAUSED RUN 35209604615 TO SELECT NOTHING.
+#
+# The old cap was 6 pages -- 600 rows -- and the board is ordered futures
+# first. The 600 rows the run actually saw were 596 futures and 4 elections:
+# not one contest row, so the identity filter never met a game and reported
+# zero qualifying events. The board is ~20,000 markets, of which ~1,557 carry
+# two venue team ids (every moneyline, every spread).
+#
+# The walk now runs to EXHAUSTION -- a short page, or a page that contributes
+# no new slug -- and BOARD_LIST_EXHAUSTED records which. The cap survives only
+# as a runaway bound far above the observed board, and hitting it is reported
+# as NOT exhausted so a truncated universe can never look like a complete one.
+BOARD_MAX_PAGES = 400
+BOARD_CAP_IS_A_RUNAWAY_BOUND_NOT_A_STOP_RULE = True
 CANDIDATE_BOOK_READS_MAX = 40
 
 
@@ -337,6 +467,9 @@ def _cli():                                                   # pragma: no cover
         cands.sort(key=lambda m: (event_rank(_parse(m.get("gameStartTime")),
                                              now, a.window_s),
                                   _salt_rank(m.get("slug"))))
+        # THE READ BUDGET DECIDES WHO GETS A BOOK READ, NOT WHO IS ACCOUNTED
+        # FOR. Rows beyond it are rejected with
+        # NO_BOOK_READ_WITHIN_READ_BUDGET rather than vanishing.
         cands = cands[:CANDIDATE_BOOK_READS_MAX]
 
         books, activity = {}, {}
@@ -350,7 +483,8 @@ def _cli():                                                   # pragma: no cover
             activity[slug] = EL.decision_screen(
                 m, body, time.time(), _parse_epoch)
 
-    sel = freeze(cands, books, now_iso, a.window_s, activity)
+    # ACCOUNT FOR THE WHOLE BOARD, not just the rows that got a book read.
+    sel = freeze(list(by_slug.values()), books, now_iso, a.window_s, activity)
     sel.update({
         "SELECTION_READS": reads,
         "SELECTION_READS_ARE_PACED_AT_THE_CAPTURE_RATE": True,
