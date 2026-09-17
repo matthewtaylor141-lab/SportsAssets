@@ -51,7 +51,7 @@ def test_the_five_second_gate_fails_however_good_the_rows_look():
 def test_an_observable_horizon_with_coverage_passes_the_gate():
     rows = [{"LABEL_STATUS": {"30S": "PRESENT"}} for _ in range(80)]
     rows += [{"LABEL_STATUS": {"30S": "MISSING"}} for _ in range(20)]
-    g = BD.horizon_label_coverage_gate(rows, 30)
+    g = BD.horizon_label_coverage_gate(rows, 30, min_coverage_pct=50.0)
     assert g["MAY_EVALUATE"] is True
     assert g["LABEL_COVERAGE_PCT"] == 80.0
     assert g["RESULT"] is None
@@ -60,7 +60,7 @@ def test_an_observable_horizon_with_coverage_passes_the_gate():
 def test_an_observable_horizon_without_coverage_fails_the_gate():
     rows = [{"LABEL_STATUS": {"300S": "PRESENT"}} for _ in range(10)]
     rows += [{"LABEL_STATUS": {"300S": "MISSING"}} for _ in range(90)]
-    g = BD.horizon_label_coverage_gate(rows, 300)
+    g = BD.horizon_label_coverage_gate(rows, 300, min_coverage_pct=50.0)
     assert g["MAY_EVALUATE"] is False
     assert g["RESULT"] == "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"
 
@@ -234,15 +234,44 @@ def test_the_retraction_is_recorded_and_the_reason_given():
     assert "BUILT_REQUIRES_200_EVENTS" in R.EDGE_INTERACTION_EARLIER_REGISTER_SAID
 
 
-def test_no_live_constant_still_asserts_a_round_interaction_threshold():
-    """The phrase survives only inside the two retraction constants."""
-    retractions = {"EARLIER_THRESHOLD_SAID"}
+def test_the_power_analysis_is_the_only_source_of_the_threshold(monkeypatch):
+    """CORRECTED: this test used to scan for a token that never existed.
+
+    The earlier version looked for 'REQUIRES_200_EVENTS' among
+    edge_dashboard's strings. That token has never appeared in that module --
+    it lives only in the register's retraction constant, which the loop did
+    not read -- so the assertion could not fail and protected nothing.
+
+    This version is a mutation test. Blind the power analysis and the gate
+    must lose its ability to grant permission. If any other constant or
+    fallback could supply a threshold, this fails.
+    """
+    design = dict(event_n=100000, effect_size_of_interest=0.004,
+                  event_level_variance=0.0004,
+                  interaction_degrees_of_freedom=1,
+                  regime_support={"REGIMES_REQUIRED": 3,
+                                  "REGIMES_WITH_SUPPORT": 3},
+                  power_target={"ALPHA": 0.05, "POWER": 0.80})
+    assert ED.interaction("X", **design)["MAY_ESTIMATE"] is True
+
+    monkeypatch.setattr(ED, "required_events_for_interaction",
+                        lambda **kw: {"REQUIRED_EVENT_N": ED.NOT_IDENTIFIED,
+                                      "MISSING_INPUTS": ("BLINDED",)})
+    assert ED.interaction("X", **design)["MAY_ESTIMATE"] == "NOT_IDENTIFIED"
+
+
+def test_no_module_constant_supplies_an_interaction_event_threshold():
+    """A numeric constant whose name promises an event count is the relapse."""
     for name in dir(ED):
-        if name in retractions or name.startswith("_"):
+        if name.startswith("_"):
             continue
         v = getattr(ED, name)
-        if isinstance(v, str):
-            assert "REQUIRES_200_EVENTS" not in v, name
+        if isinstance(v, (int, float)) and not isinstance(v, bool):
+            assert "EVENTS_FOR" not in name and "EVENT_N" not in name, name
+    # The one numeric constant that remains is the derivation's logical
+    # floor -- you cannot detect anything with zero events. It is 1 because
+    # that is what "at least one" means, not because 1 felt safe.
+    assert ED.DERIVATION_FLOOR_EVENTS == 1
 
 
 def test_the_ladder_cutoffs_are_declared_a_separate_open_question():
@@ -484,3 +513,237 @@ def test_nothing_here_trains_tunes_or_trades():
     assert ED.NOTHING_IS_TRAINED_HERE is True
     assert BD.NOTHING_IS_TRAINED_HERE is True
     assert PR.NOTHING_IS_TRAINED_HERE is True
+
+
+# =========================================================================
+# AUDIT FIXES. Each test below pins a defect an adversarial review of
+# commit a18d1a2 confirmed. Every one reproduced before the fix.
+# =========================================================================
+
+import microstructure_v1 as MS
+
+
+# --- C1. The declaration was not a control. -------------------------------
+
+def test_the_target_builder_refuses_the_unobservable_horizon():
+    """The declaration lived in bettor_dataset; the builder ignored it."""
+    ticks = [{"REQUEST_UTC": "2026-09-17T18:0%d:%02dZ" % divmod(s, 60),
+              "BEST_BID": 0.40 + i * 0.01, "BEST_ASK": 0.42 + i * 0.01}
+             for i, s in enumerate((0, 24, 48, 72, 96))]
+    rows, meta = MS.build_targets(ticks, horizons=(5, 30))
+    assert rows[0]["MID_MOVE_5S"] is None
+    assert rows[0]["MID_MOVE_5S_STATUS"] == \
+        "UNOBSERVABLE_AT_V1_CAPTURE_FREQUENCY"
+    assert meta["REFUSED_HORIZONS"] == {
+        "MID_MOVE_5S": "UNOBSERVABLE_AT_V1_CAPTURE_FREQUENCY"}
+
+
+def test_the_thirty_second_label_is_nearest_not_first_at_or_after():
+    """First-at-or-after resolved +30s to +48s -- a longer horizon."""
+    ticks = [{"REQUEST_UTC": "2026-09-17T18:0%d:%02dZ" % divmod(s, 60),
+              "BEST_BID": 0.40 + i * 0.01, "BEST_ASK": 0.42 + i * 0.01}
+             for i, s in enumerate((0, 24, 48, 72, 96))]
+    rows, _ = MS.build_targets(ticks, horizons=(30,))
+    assert rows[0]["MID_MOVE_30S_REALISED_OFFSET_S"] == -6.0
+    assert rows[0]["MID_MOVE_30S"] == pytest.approx(0.01)
+
+
+def test_the_scorer_refuses_a_five_second_challenger():
+    rows = [{"MID_MOVE_5S": 0.01, "ORDER_BOOK_IMBALANCE": 0.4}] * 5
+    assert MS.score_baselines(rows, "MID_MOVE_5S")["STATUS"] == "REFUSED"
+
+
+def test_relative_value_refuses_to_publish_a_five_second_correlation():
+    rows = [{"EVENT_KEY": "e%d" % i, "RESIDUAL_T": 0.01,
+             "TARGET_CHANGE_5S": -0.01} for i in range(12)]
+    out = MS.relative_value_test(rows, horizons=(5,))
+    assert out["BY_HORIZON"]["5S"]["STATUS"] == "REFUSED"
+
+
+def test_the_coverage_gate_fails_closed_on_an_undeclared_horizon():
+    """It used to return MAY_EVALUATE True with HORIZON_STATUS NOT_IDENTIFIED."""
+    for h in (45, 10, 7):
+        g = BD.horizon_label_coverage_gate(
+            [{"LABEL_STATUS": {"%dS" % h: "PRESENT"}}] * 100, h, 50.0)
+        assert g["MAY_EVALUATE"] is False
+        assert g["HORIZON_STATUS"] == BD.NOT_IDENTIFIED
+
+
+def test_a_bool_horizon_is_not_the_integer_one():
+    g = BD.horizon_label_coverage_gate(
+        [{"LABEL_STATUS": {"1S": "PRESENT"}}] * 10, True, 50.0)
+    assert g["MAY_EVALUATE"] is False
+
+
+def test_the_coverage_bar_is_the_callers_not_a_round_default():
+    """MIN_LABEL_COVERAGE_PCT = 50.0 was the same sin Correction 2 retracts."""
+    assert BD.MIN_LABEL_COVERAGE_PCT == BD.NOT_IDENTIFIED
+    rows = [{"LABEL_STATUS": {"30S": "PRESENT"}}] * 100
+    g = BD.horizon_label_coverage_gate(rows, 30)
+    assert g["MAY_EVALUATE"] == BD.NOT_IDENTIFIED
+    assert "MIN_LABEL_COVERAGE_PCT" in g["BLOCKED_ON"]
+    assert BD.horizon_label_coverage_gate(
+        rows, 30, 50.0)["MAY_EVALUATE"] is True
+
+
+def test_a_forward_observation_is_the_same_market_later():
+    """Six markets polled 4 s apart: the nearest row is another contract."""
+    series = []
+    for i, mk in enumerate(("m0", "m1", "m2", "m3", "m4", "m5")):
+        for cyc in range(3):
+            series.append({
+                "MARKET_ID": mk,
+                "DECISION_TIMESTAMP_UTC":
+                    "2026-09-17T18:0%d:%02dZ" % divmod(cyc * 24 + i * 4, 60),
+                "BEST_BID": 0.40 if mk == "m0" else 0.50,
+                "BEST_ASK": 0.42 if mk == "m0" else 0.52})
+    origin = series[0]
+    row, off = BD.forward_observation(
+        series, origin["DECISION_TIMESTAMP_UTC"], 5, origin=origin)
+    assert row is None                       # m1 at +4 s must not match
+    row30, _ = BD.forward_observation(
+        series, origin["DECISION_TIMESTAMP_UTC"], 30, origin=origin)
+    assert row30 is not None and row30["MARKET_ID"] == "m0"
+
+
+def test_labels_are_not_borrowed_from_another_market():
+    series = []
+    for i, mk in enumerate(("m0", "m1")):
+        for cyc in range(3):
+            series.append({
+                "MARKET_ID": mk,
+                "DECISION_TIMESTAMP_UTC":
+                    "2026-09-17T18:0%d:%02dZ" % divmod(cyc * 24 + i * 4, 60),
+                "MID": 0.41 if mk == "m0" else 0.51,
+                "BEST_BID": 0.40 if mk == "m0" else 0.50,
+                "BEST_ASK": 0.42 if mk == "m0" else 0.52})
+    lab = BD.label_row(series[0], series)
+    assert lab["LABEL_STATUS"]["5S"] == BD.MISSING
+    assert lab["LABEL_STATUS"]["30S"] == "PRESENT"
+    assert lab["LABEL_REALISED_OFFSET_S"]["30S"] == -6.0   # m0's own row
+    assert lab["MID_MOVE_30S"] == pytest.approx(0.0)       # m0 never moved
+
+
+# --- C2. The gate must fail closed on its own inputs. ---------------------
+
+def test_a_string_event_count_cannot_buy_permission():
+    design = dict(effect_size_of_interest=0.1, event_level_variance=1.0,
+                  interaction_degrees_of_freedom=1,
+                  regime_support={"REGIMES_REQUIRED": 2,
+                                  "REGIMES_WITH_SUPPORT": 3},
+                  power_target={"ALPHA": 0.05, "POWER": 0.8})
+    for bad in ("999999", 1e9, 500.9, True, -1, None):
+        row = ED.interaction("X", event_n=bad, **design)
+        assert row["MAY_ESTIMATE"] == "NOT_IDENTIFIED", bad
+        assert "INDEPENDENT_EVENT_N" in row["BLOCKED_ON"]
+
+
+def test_a_non_finite_event_count_refuses_rather_than_raising():
+    design = dict(effect_size_of_interest=0.1, event_level_variance=1.0,
+                  interaction_degrees_of_freedom=1,
+                  regime_support={"REGIMES_REQUIRED": 2,
+                                  "REGIMES_WITH_SUPPORT": 3},
+                  power_target={"ALPHA": 0.05, "POWER": 0.8})
+    for bad in (float("nan"), float("inf")):
+        assert ED.interaction("X", event_n=bad,
+                              **design)["MAY_ESTIMATE"] == "NOT_IDENTIFIED"
+
+
+def test_a_degenerate_derivation_never_grants_permission_for_free():
+    """An infinite effect size derived REQUIRED_EVENT_N = 0, then True."""
+    for bad_effect in (float("inf"), 1e300):
+        r = ED.required_events_for_interaction(
+            effect_size_of_interest=bad_effect, event_level_variance=0.0004,
+            interaction_degrees_of_freedom=1,
+            power_target={"ALPHA": 0.05, "POWER": 0.80})
+        assert r["REQUIRED_EVENT_N"] == ED.NOT_IDENTIFIED
+    row = ED.interaction("X", event_n=0,
+                         effect_size_of_interest=float("inf"),
+                         event_level_variance=0.0004,
+                         interaction_degrees_of_freedom=1,
+                         regime_support={"REGIMES_REQUIRED": 1,
+                                         "REGIMES_WITH_SUPPORT": 1},
+                         power_target={"ALPHA": 0.05, "POWER": 0.80})
+    assert row["MAY_ESTIMATE"] == "NOT_IDENTIFIED"
+
+
+def test_a_bool_degrees_of_freedom_is_not_an_integer_one():
+    r = ED.required_events_for_interaction(
+        effect_size_of_interest=0.004, event_level_variance=0.0004,
+        interaction_degrees_of_freedom=True,
+        power_target={"ALPHA": 0.05, "POWER": 0.80})
+    assert r["REQUIRED_EVENT_N"] == ED.NOT_IDENTIFIED
+
+
+def test_bool_regime_counts_are_refused():
+    row = ED.interaction("X", event_n=500, effect_size_of_interest=0.004,
+                         event_level_variance=0.0004,
+                         interaction_degrees_of_freedom=1,
+                         regime_support={"REGIMES_REQUIRED": True,
+                                         "REGIMES_WITH_SUPPORT": True},
+                         power_target={"ALPHA": 0.05, "POWER": 0.80})
+    assert row["MAY_ESTIMATE"] == "NOT_IDENTIFIED"
+
+
+# --- C3. The refusal must reach every wired function. ---------------------
+
+def test_an_unknown_convention_is_refused_by_every_wired_function():
+    """It used to be visible only to action_ev_mc; the others held it at 0."""
+    t = _fs_terms(FILL_SELECTION_CONVENTION="IGNORE_IT")
+    assert MC.action_ev_mc("Q", t, draws=50)["STATUS"] == \
+        "UNKNOWN_FILL_SELECTION_CONVENTION"
+    assert MC.break_even("Q", t, "P_FILL")["STATUS"] == \
+        "UNKNOWN_FILL_SELECTION_CONVENTION"
+    assert MC.sensitivity("Q", t)["STATUS"] == \
+        "UNKNOWN_FILL_SELECTION_CONVENTION"
+    assert MC.value_of_information("Q", t, draws=50)["STATUS"] == \
+        "UNKNOWN_FILL_SELECTION_CONVENTION"
+
+
+def test_value_of_information_returns_a_status_instead_of_raising():
+    """It read EV_SD off a row action_ev_mc had declined to produce."""
+    t = {"P_FILL": Dist("BETA", {"alpha": 4.0, "beta": 40.0}),
+         "VALUE_IF_FILL": Dist("NORMAL", {"mu": 0.02, "sigma": 0.01})}
+    out = MC.value_of_information("Q", t, draws=50)      # TOXICITY absent
+    assert isinstance(out, dict) and "STATUS" in out
+    assert "EV_SD" not in out
+
+
+def test_break_even_will_not_claim_always_positive_off_the_wrong_range():
+    """The default [0,1] excludes the whole adverse side of this prior."""
+    be = MC.break_even("Q", _fs_terms(), "FILL_SELECTION_EFFECT")
+    assert be["STATUS"] == "RANGE_DOES_NOT_COVER_TERM_SUPPORT"
+    assert be["ALWAYS_POSITIVE"] == MC.NOT_IDENTIFIED
+    lo, hi = be["SUGGESTED_RANGE"]
+    solved = MC.break_even("Q", _fs_terms(), "FILL_SELECTION_EFFECT",
+                           lo=lo, hi=hi)
+    assert solved["STATUS"] == "SOLVED"
+    assert solved["BREAK_EVEN_VALUE"] < 0
+
+
+def test_break_even_and_the_ev_row_no_longer_contradict_each_other():
+    row = MC.action_ev_mc("Q", _fs_terms(), draws=3000)
+    be = MC.break_even("Q", _fs_terms(), "FILL_SELECTION_EFFECT")
+    # The EV row says the term flips the sign; break_even must not
+    # simultaneously report that the action pays regardless of it.
+    assert row["FILL_SELECTION_MATERIAL_TO_THIS_ACTION"] is True
+    assert be.get("ALWAYS_POSITIVE") is not True
+
+
+def test_exposure_is_not_discharged_by_another_actions_artifact():
+    t = _fs_terms()
+    row = MC.action_ev_mc("QUOTE_BID", t, draws=500)
+    stripped = {k: v for k, v in row.items()
+                if k not in MC.REQUIRED_FILL_SELECTION_EXPOSURE}
+    foreign = MC.sensitivity("A_COMPLETELY_DIFFERENT_ACTION", t)
+    chk = MC.fill_selection_exposure(stripped, foreign)
+    assert chk["REPORT_OK"] is False
+    assert "SENSITIVITY" in chk["UNBOUND_ARTIFACTS"]
+    own = MC.sensitivity("QUOTE_BID", t)
+    assert MC.fill_selection_exposure(stripped, own)["REPORT_OK"] is True
+
+
+def test_the_suite_still_places_no_order_and_trains_nothing():
+    assert MC.SHADOW_ONLY is True and MC.NO_ORDER_IS_PLACED is True
+    assert MS.THIS_IS_NOT_P_FILL is True
+    assert R.LIVE_ORDER_ACTIVITY == "NONE"

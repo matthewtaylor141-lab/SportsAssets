@@ -195,6 +195,30 @@ LADDER_THRESHOLDS_ARE_A_SEPARATE_OPEN_QUESTION = (
     "recorded here rather than silently repaired")
 
 
+def _strict_int(v):
+    """An int, and not a bool. In Python True == 1, which is not an answer."""
+    return isinstance(v, int) and not isinstance(v, bool)
+
+
+def _finite_number(v):
+    """A real, finite number. NaN and inf are not measurements."""
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        return False
+    import math
+    return math.isfinite(float(v))
+
+
+DERIVATION_FLOOR_EVENTS = 1     # logical floor, not a chosen size
+
+WHY_A_ZERO_REQUIREMENT_IS_REFUSED = (
+    "a derived requirement of 0 events would mean the design can detect the "
+    "effect with no data, which is never true and always the sign of a "
+    "degenerate input -- an infinite effect size, a vanishing variance, a "
+    "power target at the significance level. A gate whose premise is that "
+    "eligibility is DERIVED cannot accept a derivation that grants "
+    "permission for free")
+
+
 def required_events_for_interaction(effect_size_of_interest=None,
                                     event_level_variance=None,
                                     interaction_degrees_of_freedom=None,
@@ -207,20 +231,19 @@ def required_events_for_interaction(effect_size_of_interest=None,
     correction removed.
     """
     missing = []
-    if not isinstance(effect_size_of_interest, (int, float)) \
+    if not _finite_number(effect_size_of_interest) \
             or effect_size_of_interest == 0:
         missing.append("EFFECT_SIZE_OF_INTEREST")
-    if not isinstance(event_level_variance, (int, float)) \
-            or event_level_variance <= 0:
+    if not _finite_number(event_level_variance) or event_level_variance <= 0:
         missing.append("EVENT_LEVEL_VARIANCE")
-    if not isinstance(interaction_degrees_of_freedom, int) \
+    if not _strict_int(interaction_degrees_of_freedom) \
             or interaction_degrees_of_freedom < 1:
         missing.append("INTERACTION_DEGREES_OF_FREEDOM")
     tgt = power_target or {}
     alpha = tgt.get("ALPHA")
     power = tgt.get("POWER")
-    if not isinstance(alpha, (int, float)) or not 0 < alpha < 1 \
-            or not isinstance(power, (int, float)) or not 0 < power < 1:
+    if not _finite_number(alpha) or not 0 < alpha < 1 \
+            or not _finite_number(power) or not 0 < power < 1:
         missing.append("PROSPECTIVE_PRECISION_OR_POWER_TARGET")
     if missing:
         return {"REQUIRED_EVENT_N": NOT_IDENTIFIED,
@@ -237,8 +260,20 @@ def required_events_for_interaction(effect_size_of_interest=None,
     alpha_per_contrast = alpha / df
     z_a = nd.inv_cdf(1.0 - alpha_per_contrast / 2.0)
     z_b = nd.inv_cdf(power)
-    n = ((z_a + z_b) ** 2) * float(event_level_variance) \
-        / (float(effect_size_of_interest) ** 2)
+    try:
+        n = ((z_a + z_b) ** 2) * float(event_level_variance) \
+            / (float(effect_size_of_interest) ** 2)
+    except (OverflowError, ZeroDivisionError):
+        n = float("nan")
+    if not math.isfinite(n) or n < DERIVATION_FLOOR_EVENTS \
+            or math.ceil(n) < DERIVATION_FLOOR_EVENTS:
+        return {"REQUIRED_EVENT_N": NOT_IDENTIFIED,
+                "DEGENERATE_DERIVATION": True,
+                "RAW_N": (n if math.isfinite(n) else "NOT_FINITE"),
+                "MISSING_INPUTS": ("DEGENERATE_POWER_INPUTS",),
+                "WHY_A_ZERO_REQUIREMENT_IS_REFUSED":
+                    WHY_A_ZERO_REQUIREMENT_IS_REFUSED,
+                "POWER_ANALYSIS_INPUTS": POWER_ANALYSIS_INPUTS}
     return {
         "REQUIRED_EVENT_N": int(math.ceil(n)),
         "INPUTS_USED": {"EFFECT_SIZE_OF_INTEREST": effect_size_of_interest,
@@ -295,8 +330,8 @@ def interaction(name, event_n=0, effect_size_of_interest=None,
     req_reg = (rs or {}).get("REGIMES_REQUIRED")
     have_reg = (rs or {}).get("REGIMES_WITH_SUPPORT")
     regime_ok = None
-    if isinstance(req_reg, int) and req_reg >= 1 \
-            and isinstance(have_reg, int) and have_reg >= 0:
+    if _strict_int(req_reg) and req_reg >= 1 \
+            and _strict_int(have_reg) and have_reg >= 0:
         regime_ok = have_reg >= req_reg
     out["REGIME_SUPPORT"] = (
         {"REGIMES_REQUIRED": req_reg, "REGIMES_WITH_SUPPORT": have_reg,
@@ -304,21 +339,32 @@ def interaction(name, event_n=0, effect_size_of_interest=None,
         if regime_ok is not None else NOT_IDENTIFIED)
     out["REGIME_SUPPORT_FIELDS"] = REGIME_SUPPORT_FIELDS
 
-    if req["REQUIRED_EVENT_N"] == NOT_IDENTIFIED or regime_ok is None:
+    # The event count is validated ONCE, here, before either branch reads it.
+    # An earlier build checked it only inside the NOT_IDENTIFIED branch, so
+    # the branch that GRANTS permission applied int(event_n) to whatever the
+    # caller passed: event_n='999999' returned MAY_ESTIMATE = True, and a
+    # float or a NaN raised instead of refusing. A validity check that does
+    # not run where the decision is made is decoration.
+    event_n_valid = _strict_int(event_n) and event_n >= 0
+
+    if req["REQUIRED_EVENT_N"] == NOT_IDENTIFIED or regime_ok is None \
+            or not event_n_valid:
         blocked = list(req.get("MISSING_INPUTS", ()))
         if regime_ok is None:
             blocked.append("REGIME_SUPPORT")
-        if not isinstance(event_n, int) or event_n < 0:
+        if not event_n_valid:
             blocked.append("INDEPENDENT_EVENT_N")
         out["MAY_ESTIMATE"] = NOT_IDENTIFIED
         out["BLOCKED_ON"] = tuple(blocked)
         out["WHY_NOT"] = (
+            "a non-negative integer event count is required; %r is not one"
+            % (event_n,) if not event_n_valid else
             "no power analysis has been done for this interaction, so there "
             "is no threshold to compare %s events against. NOT_IDENTIFIED is "
-            "the answer, not False and not True" % event_n)
+            "the answer, not False and not True" % (event_n,))
         return out
 
-    enough_events = int(event_n) >= req["REQUIRED_EVENT_N"]
+    enough_events = event_n >= req["REQUIRED_EVENT_N"]
     out["MAY_ESTIMATE"] = bool(enough_events and regime_ok)
     out["REQUIRED_EVENT_N"] = req["REQUIRED_EVENT_N"]
     out["WHY_NOT"] = None if out["MAY_ESTIMATE"] else (

@@ -241,13 +241,46 @@ WHY_NO_REPAIR = (
     "tempting because it yields a full column of numbers, and it is the "
     "worst because nothing downstream can tell the difference")
 
+UNDECLARED_HORIZON_IS_NOT_PERMISSION = (
+    "this horizon has no declared observability status for the V1 capture. "
+    "NOT_IDENTIFIED is the absence of a finding, not a finding of "
+    "OBSERVABLE, and a gate that treated it as permission would let any "
+    "horizon nobody had thought about through")
+
 V2_DERIVES_CADENCE_FROM_HORIZONS = (
     "for V2, poll cadence is DERIVED from the horizons the experiment intends "
     "to measure -- not chosen first and then discovered to exclude one. V1 is "
     "not modified to fix this")
 
-# A horizon must clear this before any model is scored on it.
-MIN_LABEL_COVERAGE_PCT = 50.0
+# A horizon must clear a coverage bar before any model is scored on it --
+# but WHICH bar is not something this module gets to invent.
+#
+# An earlier build set MIN_LABEL_COVERAGE_PCT = 50.0 and let MAY_EVALUATE
+# turn on it. That is exactly the move the interaction-threshold correction
+# retracts in edge_dashboard: a round number deciding a permission, with no
+# derivation from a bias tolerance, a missingness mechanism or a precision
+# target. Applying that standard to someone else's constant and not to my own
+# would make the standard a rhetorical device.
+#
+# So there is no default. A caller that supplies a threshold gets a measured
+# verdict against it; a caller that supplies none gets NOT_IDENTIFIED, which
+# is not permission.
+MIN_LABEL_COVERAGE_PCT = NOT_IDENTIFIED
+
+WHY_NO_DEFAULT_COVERAGE_BAR = (
+    "the coverage a horizon needs depends on WHY the labels are missing. "
+    "Missing-at-random thins the sample; missing because the market was "
+    "moving removes exactly the rows that carry the signal, and no "
+    "percentage rescues that. A single number cannot express the "
+    "difference, and a number chosen without expressing it is a guess "
+    "wearing a threshold's clothes")
+
+COVERAGE_BAR_INPUTS = (
+    "MISSINGNESS_MECHANISM",
+    "TOLERABLE_BIAS_IN_THE_ESTIMATE",
+    "PRECISION_TARGET_AT_THE_SURVIVING_N",
+    "INDEPENDENT_EVENTS_SURVIVING",
+)
 
 
 def horizon_label_coverage_gate(rows, horizon_s, min_coverage_pct=None):
@@ -259,15 +292,24 @@ def horizon_label_coverage_gate(rows, horizon_s, min_coverage_pct=None):
     """
     min_coverage_pct = (MIN_LABEL_COVERAGE_PCT if min_coverage_pct is None
                         else min_coverage_pct)
-    declared = HORIZON_STATUS_V1.get(horizon_s)
-    if declared and declared != "OBSERVABLE":
+    # A horizon nobody declared is NOT permission. The earlier form asked
+    # `if declared and ...`, so an undeclared horizon (45 s, or True, which
+    # equals 1) skipped the refusal entirely and could reach MAY_EVALUATE =
+    # True carrying HORIZON_STATUS = NOT_IDENTIFIED -- a gate that published
+    # "we have not established this" as permission to evaluate.
+    declared = HORIZON_STATUS_V1.get(horizon_s, NOT_IDENTIFIED) \
+        if not isinstance(horizon_s, bool) else NOT_IDENTIFIED
+    if declared != "OBSERVABLE":
         return {
             "HORIZON_S": horizon_s,
             "HORIZON_STATUS": declared,
             "HORIZON_LABEL_COVERAGE_GATE": "FAIL",
             "MAY_EVALUATE": False,
             "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN",
-            "WHY": WHY_5S_IS_UNOBSERVABLE if horizon_s == 5 else declared,
+            "WHY": (WHY_5S_IS_UNOBSERVABLE if horizon_s == 5 else
+                    (UNDECLARED_HORIZON_IS_NOT_PERMISSION
+                     if declared == NOT_IDENTIFIED else declared)),
+            "DECLARED_HORIZONS": tuple(sorted(HORIZON_STATUS_V1)),
             "FORBIDDEN_REPAIRS": FORBIDDEN_5S_REPAIRS,
             "WHY_NO_REPAIR": WHY_NO_REPAIR,
         }
@@ -288,18 +330,35 @@ def horizon_label_coverage_gate(rows, horizon_s, min_coverage_pct=None):
                 "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN",
                 "WHY": "no row carried a label status for this horizon"}
     cov = 100.0 * present / total
-    ok = cov >= min_coverage_pct
-    return {
+    base = {
         "HORIZON_S": horizon_s,
-        "HORIZON_STATUS": declared or NOT_IDENTIFIED,
+        "HORIZON_STATUS": declared,
         "LABEL_COVERAGE_PCT": round(cov, 3),
         "MIN_LABEL_COVERAGE_PCT": min_coverage_pct,
         "LABELLED": present, "CANDIDATE_ROWS": total,
+    }
+    if not isinstance(min_coverage_pct, (int, float)) \
+            or isinstance(min_coverage_pct, bool):
+        base.update({
+            "HORIZON_LABEL_COVERAGE_GATE": "NOT_IDENTIFIED",
+            "MAY_EVALUATE": NOT_IDENTIFIED,
+            "RESULT": "COVERAGE_BAR_NOT_IDENTIFIED",
+            "BLOCKED_ON": ("MIN_LABEL_COVERAGE_PCT",),
+            "COVERAGE_BAR_INPUTS": COVERAGE_BAR_INPUTS,
+            "WHY_NO_DEFAULT_COVERAGE_BAR": WHY_NO_DEFAULT_COVERAGE_BAR,
+        })
+        return base
+    ok = cov >= min_coverage_pct
+    base.update({
         "HORIZON_LABEL_COVERAGE_GATE": "PASS" if ok else "FAIL",
         "MAY_EVALUATE": ok,
         "RESULT": (None if ok
                    else "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"),
-    }
+        "BAR_IS_THE_CALLERS": (
+            "%s%% was supplied by the caller, not derived here" %
+            min_coverage_pct),
+    })
+    return base
 
 
 WHY_A_TOLERANCE = (
@@ -308,8 +367,38 @@ WHY_A_TOLERANCE = (
     "widening it after seeing how many labels are missing is not")
 
 
+SUBJECT_KEYS = ("MARKET_ID", "CONDITION_ID", "TOKEN_ID", "EVENT_ID")
+
+A_FORWARD_OBSERVATION_IS_THE_SAME_MARKET_LATER = (
+    "matching on timestamp alone would take whichever market happened to be "
+    "polled next. The capture interleaves 6 markets 4 s apart, so the nearest "
+    "row to T+5s is almost always a DIFFERENT market, and the resulting "
+    "'move' would be the price gap between two unrelated contracts. Identity "
+    "is checked first, and an unidentifiable row is skipped rather than "
+    "assumed to match")
+
+
+def _same_subject(origin, candidate):
+    """Do these two rows describe the same market? Fails closed.
+
+    Compares on the first subject key the ORIGIN carries. If the origin names
+    no subject at all the series is taken to be a single market's (the
+    documented contract, and what every in-repo caller passes); if the origin
+    names one and the candidate cannot answer, the candidate is skipped.
+    """
+    if origin is None:
+        return True
+    for k in SUBJECT_KEYS:
+        a = origin.get(k)
+        if a is None or a == NOT_IDENTIFIED:
+            continue
+        b = (candidate or {}).get(k)
+        return b is not None and b != NOT_IDENTIFIED and b == a
+    return True
+
+
 def forward_observation(series, t0, horizon_s, tolerance_s=HORIZON_TOLERANCE_S,
-                        time_key="DECISION_TIMESTAMP_UTC"):
+                        time_key="DECISION_TIMESTAMP_UTC", origin=None):
     """The observation NEAREST to t0+h, strictly after t0, within tolerance.
 
     Returns (row, realised_offset_s) or (None, None).
@@ -332,6 +421,8 @@ def forward_observation(series, t0, horizon_s, tolerance_s=HORIZON_TOLERANCE_S,
     target = base + datetime.timedelta(seconds=horizon_s)
     best, best_gap, best_off = None, None, None
     for r in series or ():
+        if not _same_subject(origin, r):
+            continue                       # never another market's book
         t = _parse(r.get(time_key))
         if t is None or t <= base:
             continue                       # strictly after the origin
@@ -354,7 +445,8 @@ def label_row(state_row, series, horizons_s=HORIZONS_S,
                   _num(state_row.get("BEST_ASK")))
     statuses, offsets = {}, {}
     for h in horizons_s:
-        fwd, off = forward_observation(series, t0, h, tolerance_s)
+        fwd, off = forward_observation(series, t0, h, tolerance_s,
+                                       origin=state_row)
         if fwd is None:
             statuses["%dS" % h] = MISSING
             for base in ("MID", "BEST_BID", "BEST_ASK",

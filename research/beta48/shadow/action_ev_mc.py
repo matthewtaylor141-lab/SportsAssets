@@ -150,15 +150,21 @@ def _fill_selection_setup(terms):
     conv = (terms or {}).get("FILL_SELECTION_CONVENTION")
     dist = _as_dist((terms or {}).get(FILL_SELECTION_TERM))
     if conv is not None and conv not in FILL_SELECTION_CONVENTIONS:
+        # REFUSED is carried in its own field, not only in the status string.
+        # An earlier build signalled the refusal through FILL_SELECTION_STATUS
+        # alone while setting APPLIES=False, which is indistinguishable from
+        # "absent" to every caller that reads APPLIES -- so break_even() and
+        # sensitivity() silently held the term at 0.0 and answered anyway.
+        # A refusal that only one of four callers can see is not a refusal.
         return {"FILL_SELECTION_STATUS": "UNKNOWN_FILL_SELECTION_CONVENTION",
                 "DECLARED": FILL_SELECTION_CONVENTIONS, "DIST": None,
-                "APPLIES": False}
+                "APPLIES": False, "REFUSED": True}
     if dist is None:
         return {
             "FILL_SELECTION_STATUS": "EXCLUDED_NOT_ZERO",
             "FILL_SELECTION_CONVENTION": conv or "EXCLUDED",
             "ABSENT_IS_EXCLUDED_NOT_ZERO": ABSENT_IS_EXCLUDED_NOT_ZERO,
-            "DIST": None, "APPLIES": False,
+            "DIST": None, "APPLIES": False, "REFUSED": False,
         }
     conv = conv or "SEPARATE_TERM"
     if conv != "SEPARATE_TERM":
@@ -166,13 +172,13 @@ def _fill_selection_setup(terms):
             "FILL_SELECTION_STATUS": "EMBEDDED_IN_VALUE_IF_FILL_NOT_ADDED",
             "FILL_SELECTION_CONVENTION": conv,
             "DOUBLE_COUNT_GUARD": DOUBLE_COUNT_GUARD,
-            "DIST": dist, "APPLIES": False,
+            "DIST": dist, "APPLIES": False, "REFUSED": False,
         }
     return {
         "FILL_SELECTION_STATUS": "CARRIED_AS_SEPARATE_TERM",
         "FILL_SELECTION_CONVENTION": conv,
         "FILL_SELECTION_SIGN_CONVENTION": FILL_SELECTION_SIGN_CONVENTION,
-        "DIST": dist, "APPLIES": True,
+        "DIST": dist, "APPLIES": True, "REFUSED": False,
     }
 
 
@@ -350,6 +356,36 @@ def action_ev_mc(action, terms, convention="SEPARATE_TERM",
 
 # --- Break-even: the engine that makes unknowns actionable. ----------------
 
+A_RANGE_IS_PART_OF_THE_ANSWER = (
+    "'no solution in range' is only informative when the range contains the "
+    "values the term can plausibly take. Searched over the wrong interval it "
+    "reports confidence about a region nobody looked at, and the default "
+    "[0, 1] is a probability's range, not every term's")
+
+
+def _range_covers_support(dist, lo, hi):
+    """Does [lo, hi] contain the term's own P01..P99? NOT_IDENTIFIED if unknown.
+
+    A POINT term has no support to miss. A term with no distribution supplied
+    cannot be checked, and an unchecked range is not a verified one.
+    """
+    if dist is None or dist.family == "POINT":
+        return {"COVERS": NOT_IDENTIFIED, "WHY": "no distribution to check",
+                "SUPPORT": NOT_IDENTIFIED, "SUGGESTED_RANGE": NOT_IDENTIFIED}
+    try:
+        p01, p99 = dist.quantile(0.01), dist.quantile(0.99)
+    except Exception:
+        return {"COVERS": NOT_IDENTIFIED, "WHY": "support not computable",
+                "SUPPORT": NOT_IDENTIFIED, "SUGGESTED_RANGE": NOT_IDENTIFIED}
+    pad = max(abs(p99 - p01), 1e-12)
+    return {
+        "COVERS": bool(lo <= p01 and hi >= p99),
+        "SUPPORT": (round(p01, 10), round(p99, 10)),
+        "SUGGESTED_RANGE": (round(p01 - pad, 10), round(p99 + pad, 10)),
+        "A_RANGE_IS_PART_OF_THE_ANSWER": A_RANGE_IS_PART_OF_THE_ANSWER,
+    }
+
+
 BREAK_EVEN_TURNS_UNKNOWNS_INTO_QUESTIONS = (
     "'P_FILL is not identified' is a dead end. 'P_FILL must exceed 0.031 for "
     "this action to pay' is a research question with a number attached, and "
@@ -368,6 +404,12 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
         return {"STATUS": "UNKNOWN_TERM", "DECLARED": ALL_EV_TERMS}
 
     fsel = _fill_selection_setup(terms)
+    if fsel.get("REFUSED"):
+        return {"STATUS": "UNKNOWN_FILL_SELECTION_CONVENTION",
+                "DECLARED": FILL_SELECTION_CONVENTIONS,
+                "WHY": ("the terms declare a fill-selection convention this "
+                        "module does not recognise; solving past it would "
+                        "hold the term at 0.0 without saying so")}
     means = {}
     for k in EV_TERMS:
         dd = _as_dist(terms.get(k))
@@ -397,13 +439,43 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
                     m["REBATE"], m["INVENTORY_COST"], m["EXIT_COST"],
                     convention, m[FILL_SELECTION_TERM])
 
+    # Does the search range actually cover the term's own plausible support?
+    # The default [0, 1] suits a probability. For a term whose prior lives in
+    # +/-0.012 it excludes the entire adverse side, and the function would
+    # then report ALWAYS_POSITIVE while action_ev_mc() on the same terms
+    # reported a negative P10 EV -- two functions contradicting each other on
+    # identical inputs, with the more confident one wrong.
+    cover = _range_covers_support(_as_dist(terms.get(unknown_term)), lo, hi)
+
     f_lo, f_hi = ev_at(lo), ev_at(hi)
     if (f_lo > 0) == (f_hi > 0):
-        return {
+        out = {
             "STATUS": "NO_SOLUTION_IN_RANGE",
+            "ACTION": action,
             "UNKNOWN_TERM": unknown_term,
             "RANGE": (lo, hi),
             "EV_AT_LO": round(f_lo, 10), "EV_AT_HI": round(f_hi, 10),
+            "RANGE_COVERS_TERM_SUPPORT": cover["COVERS"],
+            "BREAK_EVEN_TURNS_UNKNOWNS_INTO_QUESTIONS":
+                BREAK_EVEN_TURNS_UNKNOWNS_INTO_QUESTIONS,
+        }
+        if cover["COVERS"] is False:
+            # Refuse the confident reading rather than publish it.
+            out.update({
+                "STATUS": "RANGE_DOES_NOT_COVER_TERM_SUPPORT",
+                "ALWAYS_POSITIVE": NOT_IDENTIFIED,
+                "ALWAYS_NEGATIVE": NOT_IDENTIFIED,
+                "TERM_SUPPORT_P01_P99": cover["SUPPORT"],
+                "SUGGESTED_RANGE": cover["SUGGESTED_RANGE"],
+                "INTERPRETATION": (
+                    "EV does not cross zero inside the range searched, but "
+                    "the range does not contain the values this term "
+                    "plausibly takes. 'No solution here' is not 'no "
+                    "solution', and ALWAYS_POSITIVE would be a claim about "
+                    "a region that was never searched"),
+            })
+            return out
+        out.update({
             "INTERPRETATION": (
                 "EV does not cross zero anywhere in the range. If both ends "
                 "are negative, no attainable value of this term rescues the "
@@ -411,9 +483,8 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
                 "it"),
             "ALWAYS_POSITIVE": f_lo > 0 and f_hi > 0,
             "ALWAYS_NEGATIVE": f_lo < 0 and f_hi < 0,
-            "BREAK_EVEN_TURNS_UNKNOWNS_INTO_QUESTIONS":
-                BREAK_EVEN_TURNS_UNKNOWNS_INTO_QUESTIONS,
-        }
+        })
+        return out
     a, b = lo, hi
     for _ in range(max_iter):
         mid = (a + b) / 2.0
@@ -447,6 +518,9 @@ def break_even(action, terms, unknown_term, convention="SEPARATE_TERM",
 def sensitivity(action, terms, convention="SEPARATE_TERM", seed=DEFAULT_SEED):
     """P25 -> P75 swing in EV attributable to each term, ranked."""
     fsel = _fill_selection_setup(terms)
+    if fsel.get("REFUSED"):
+        return {"STATUS": "UNKNOWN_FILL_SELECTION_CONVENTION",
+                "DECLARED": FILL_SELECTION_CONVENTIONS}
     dists = {k: _as_dist(terms.get(k)) for k in EV_TERMS}
     dists[FILL_SELECTION_TERM] = fsel["DIST"] if fsel["APPLIES"] else None
     if any(dists.get(k) is None for k in CRITICAL_TERMS):
@@ -495,6 +569,9 @@ def value_of_information(action, terms, convention="SEPARATE_TERM",
     resolution removes the most variance is the one worth an experiment.
     """
     fsel = _fill_selection_setup(terms)
+    if fsel.get("REFUSED"):
+        return {"STATUS": "UNKNOWN_FILL_SELECTION_CONVENTION",
+                "DECLARED": FILL_SELECTION_CONVENTIONS}
     dists = {k: _as_dist(terms.get(k)) for k in EV_TERMS}
     dists[FILL_SELECTION_TERM] = fsel["DIST"] if fsel["APPLIES"] else None
     if any(dists.get(k) is None for k in CRITICAL_TERMS):
@@ -504,6 +581,19 @@ def value_of_information(action, terms, convention="SEPARATE_TERM",
                 "WHY": ("with a critical term unidentified, the question is "
                         "not how much variance it explains but what it would "
                         "have to be. Use break_even()")}
+    # action_ev_mc() declines on conditions this guard does not cover (an
+    # unknown adverse-selection convention, TOXICITY absent under
+    # SEPARATE_TERM). Reading EV_SD off such a row raised KeyError instead of
+    # returning a STATUS -- a crash is not a refusal.
+    probe = action_ev_mc(action, terms, convention, draws=2, seed=seed)
+    if "EV_SD" not in probe:
+        return {"STATUS": probe.get("ACTION_EV_STATUS")
+                or probe.get("STATUS", "NOT_FULLY_IDENTIFIED"),
+                "UNDERLYING": {k: probe.get(k) for k in
+                               ("STATUS", "ACTION_EV_STATUS", "DECLARED",
+                                "MISSING_CRITICAL_TERMS") if k in probe},
+                "WHY": ("the EV itself is not identified under these terms, "
+                        "so there is no variance to attribute")}
 
     def var_with_frozen(frozen):
         t2 = dict(terms)
@@ -613,20 +703,45 @@ def fill_selection_exposure(ev_row, sens=None, be=None):
                 "FILL_SELECTION_STATUS": status,
                 "REPORT_OK": True,
                 "ABSENT_IS_EXCLUDED_NOT_ZERO": ABSENT_IS_EXCLUDED_NOT_ZERO}
+    # An artifact only discharges the requirement for the row it BELONGS to.
+    # Without this, a sensitivity run on a different action -- or on the same
+    # action with different terms -- satisfied the gate, so the width shown
+    # to the reader described a quote nobody was deciding about.
+    act = row.get("ACTION")
+
+    def _bound(art):
+        if not art:
+            return False
+        a = art.get("ACTION")
+        return a is not None and act is not None and a == act
+
     have_q = all(isinstance(row.get(k), (int, float))
                  for k in REQUIRED_FILL_SELECTION_EXPOSURE)
-    have_sens = bool(sens and any(
+    sens_names = bool(sens and any(
         r.get("TERM") == FILL_SELECTION_TERM
         for r in (sens.get("TORNADO") or ())))
-    have_be = bool(be and be.get("STATUS") in ("SOLVED", "NO_SOLUTION_IN_RANGE")
-                   and be.get("UNKNOWN_TERM") == FILL_SELECTION_TERM)
+    be_names = bool(
+        be and be.get("STATUS") in ("SOLVED", "NO_SOLUTION_IN_RANGE",
+                                    "RANGE_DOES_NOT_COVER_TERM_SUPPORT")
+        and be.get("UNKNOWN_TERM") == FILL_SELECTION_TERM)
+    have_sens = sens_names and _bound(sens)
+    have_be = be_names and _bound(be)
+    unbound = [n for n, named, bound in
+               (("SENSITIVITY", sens_names, have_sens),
+                ("BREAK_EVEN", be_names, have_be)) if named and not bound]
     ok = have_q or have_sens or have_be
     return {
         "EXPOSURE_REQUIRED": True,
         "FILL_SELECTION_STATUS": status,
+        "ACTION": act if act is not None else NOT_IDENTIFIED,
         "HAS_QUANTILE_EVS": have_q,
         "HAS_SENSITIVITY_ROW": have_sens,
         "HAS_BREAK_EVEN": have_be,
+        "UNBOUND_ARTIFACTS": tuple(unbound),
+        "WHY_UNBOUND_DOES_NOT_COUNT": (
+            "an artifact that names the term but belongs to a different "
+            "ACTION describes a different decision. It is not this row's "
+            "width" if unbound else None),
         "REPORT_OK": ok,
         "REPORT_STATUS": "COMPLETE" if ok else "REPORT_INCOMPLETE",
         "REQUIRED_FILL_SELECTION_EXPOSURE": REQUIRED_FILL_SELECTION_EXPOSURE,

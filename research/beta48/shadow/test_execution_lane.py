@@ -347,11 +347,56 @@ def test_forward_targets_are_attached_and_truncation_is_declared():
     ticks = [{"REQUEST_UTC": "2026-08-30T10:00:%02dZ" % s,
               "BEST_BID": 0.50 + s / 1000.0, "BEST_ASK": 0.52 + s / 1000.0}
              for s in range(0, 60, 4)]
-    rows, meta = MS.build_targets(ticks, horizons=(5, 300))
-    assert rows[0]["MID_MOVE_5S"] is not None
+    rows, meta = MS.build_targets(ticks, horizons=(30, 300))
+    assert rows[0]["MID_MOVE_30S"] is not None
+    assert rows[0]["MID_MOVE_30S_STATUS"] == "PRESENT"
+    assert abs(rows[0]["MID_MOVE_30S_REALISED_OFFSET_S"]) <= 12.0
     assert rows[0]["MID_MOVE_300S"] is None        # past the capture end
     assert meta["TRUNCATED_AT_CAPTURE_END"]["MID_MOVE_300S"] > 0
     assert meta["TRUNCATION_IS_DECLARED_NOT_DROPPED"] is True
+
+
+def test_the_five_second_horizon_is_refused_not_computed():
+    """CORRECTED: this used to return the +24 s move under a 5 s name.
+
+    The horizon was declared UNOBSERVABLE in bettor_dataset while this
+    module went on computing it, so the declaration did nothing.
+    """
+    ticks = [{"REQUEST_UTC": "2026-08-30T10:00:%02dZ" % s,
+              "BEST_BID": 0.50 + s / 1000.0, "BEST_ASK": 0.52 + s / 1000.0}
+             for s in range(0, 60, 4)]
+    rows, meta = MS.build_targets(ticks, horizons=(5, 30))
+    assert rows[0]["MID_MOVE_5S"] is None
+    assert rows[0]["MID_MOVE_5S_STATUS"] == \
+        "UNOBSERVABLE_AT_V1_CAPTURE_FREQUENCY"
+    assert "MID_MOVE_5S" in meta["REFUSED_HORIZONS"]
+    assert "SUBSTITUTE_PLUS_24S_AND_CALL_IT_PLUS_5S" in \
+        meta["FORBIDDEN_REPAIRS"]
+
+
+def test_no_predictor_can_be_scored_on_the_refused_horizon():
+    rows = [{"MID_MOVE_5S": 0.01, "ORDER_BOOK_IMBALANCE": 0.5}] * 4
+    out = MS.score_baselines(rows, "MID_MOVE_5S")
+    assert out["STATUS"] == "REFUSED"
+    assert out["GATE"]["RESULT"] == "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"
+
+
+def test_a_target_on_an_undeclared_horizon_is_refused_too():
+    """NOT_IDENTIFIED is the absence of a finding, not permission."""
+    g = MS.target_scoring_gate("MID_MOVE_45S")
+    assert g["MAY_SCORE"] is False
+    assert g["REASON"] == "HORIZON_OBSERVABILITY_NOT_DECLARED"
+
+
+def test_first_at_or_after_would_have_overshot():
+    """A 30 s horizon on a 24 s grid must not resolve to +48 s."""
+    ticks = [{"REQUEST_UTC": "2026-08-30T10:0%d:%02dZ" % divmod(s, 60),
+              "BEST_BID": 0.50 + i * 0.01, "BEST_ASK": 0.52 + i * 0.01}
+             for i, s in enumerate((0, 24, 48, 72, 96))]
+    rows, _ = MS.build_targets(ticks, horizons=(30,))
+    # nearest to +30 is +24 (offset -6), not the first at-or-after (+48)
+    assert rows[0]["MID_MOVE_30S_REALISED_OFFSET_S"] == -6.0
+    assert rows[0]["MID_MOVE_30S"] == pytest.approx(0.01)
 
 
 def test_the_relative_value_residual_has_the_declared_sign():
@@ -365,10 +410,19 @@ def test_a_reverting_residual_shows_a_negative_correlation():
         res = (i % 9 - 4) / 100.0
         obs.append({"EVENT_KEY": "e%d" % (i % 12), "MARKET": "m", "T": "t",
                     "P_TARGET": 0.50 + res, "P_SURFACE_EX_TARGET": 0.50,
-                    "TARGET_LATER": {5: 0.50 + 0.3 * res}})
-    rows, _ = MS.relative_value_rows(obs, horizons=(5,))
+                    "TARGET_LATER": {30: 0.50 + 0.3 * res}})
+    rows, _ = MS.relative_value_rows(obs, horizons=(30,))
+    out = MS.relative_value_test(rows, horizons=(30,))
+    assert out["BY_HORIZON"]["30S"]["CORRELATION"] < -0.5
+
+
+def test_relative_value_will_not_publish_a_five_second_correlation():
+    """SCORE_A_5_SECOND_CHALLENGER is a named forbidden repair."""
+    rows = [{"EVENT_KEY": "e%d" % i, "RESIDUAL_T": 0.01,
+             "TARGET_CHANGE_5S": -0.01} for i in range(12)]
     out = MS.relative_value_test(rows, horizons=(5,))
-    assert out["BY_HORIZON"]["5S"]["CORRELATION"] < -0.5
+    assert out["BY_HORIZON"]["5S"]["STATUS"] == "REFUSED"
+    assert "CORRELATION" not in out["BY_HORIZON"]["5S"]
 
 
 def test_the_surface_must_exclude_the_target():

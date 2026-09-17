@@ -44,6 +44,94 @@ TARGET_HORIZONS_SECONDS = (5, 30, 60, 300)
 TARGETS = tuple("MID_MOVE_%dS" % s for s in TARGET_HORIZONS_SECONDS) + \
     tuple("EXECUTABLE_MOVE_%dS" % s for s in TARGET_HORIZONS_SECONDS)
 
+# --- The horizon observability rule, enforced HERE and not only declared. ---
+#
+# bettor_dataset declares which horizons the V1 capture can actually label.
+# Declaring it there and building targets here without consulting it is how a
+# forbidden repair survives a correction: this module used to take the FIRST
+# tick at-or-after T+h with no tolerance, so on the ~24 s per-market grid every
+# MID_MOVE_5S was literally the +24 s move wearing a 5 s name, and every
+# MID_MOVE_30S the +48 s move. Both are named in
+# bettor_dataset.FORBIDDEN_5S_REPAIRS. The import makes the declaration
+# load-bearing instead of decorative.
+
+from bettor_dataset import (                                  # noqa: E402
+    HORIZON_STATUS_V1, HORIZON_TOLERANCE_S, FORBIDDEN_5S_REPAIRS,
+    horizon_label_coverage_gate)
+
+A_DECLARATION_IN_ANOTHER_MODULE_IS_NOT_A_CONTROL = (
+    "a rule written as a constant in the module that defines the dataset does "
+    "nothing to the module that builds the targets. Until the target builder "
+    "and the scorer both refuse, the rule is a comment")
+
+
+def horizon_status(h):
+    """OBSERVABLE, the declared refusal, or NOT_IDENTIFIED. Fails closed.
+
+    A horizon nobody has declared is NOT_IDENTIFIED, and NOT_IDENTIFIED is
+    not permission -- it is the absence of a finding about whether this
+    capture can measure the horizon at all.
+    """
+    return HORIZON_STATUS_V1.get(h, NOT_IDENTIFIED)
+
+
+def horizon_is_measurable(h):
+    return horizon_status(h) == "OBSERVABLE"
+
+
+def horizon_of_target(target):
+    """The horizon a target name claims, or None. '_STATUS' is not a target."""
+    import re
+    m = re.match(r"^[A-Z_]+_(\d+)S$", str(target or ""))
+    return int(m.group(1)) if m else None
+
+
+def target_scoring_gate(target, rows=None, min_coverage_pct=None):
+    """May any predictor be scored on this target? Fails closed.
+
+    Two conditions, in order. First the DECLARED status of the horizon the
+    target name claims -- a horizon this capture cannot label is refused no
+    matter what the rows contain. Then, when rows are supplied, measured label
+    coverage through the same gate the dataset module uses.
+    """
+    h = horizon_of_target(target)
+    if h is None:
+        return {"MAY_SCORE": False, "TARGET": target,
+                "REASON": "TARGET_HORIZON_NOT_PARSEABLE",
+                "WHY": ("a target whose horizon cannot be read cannot be "
+                        "checked against the capture's observability, and an "
+                        "unchecked target is not permission")}
+    st = horizon_status(h)
+    if st != "OBSERVABLE":
+        return {"MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
+                "HORIZON_STATUS": st,
+                "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN",
+                "REASON": ("HORIZON_UNOBSERVABLE" if st != NOT_IDENTIFIED
+                           else "HORIZON_OBSERVABILITY_NOT_DECLARED"),
+                "FORBIDDEN_REPAIRS": FORBIDDEN_5S_REPAIRS,
+                "A_DECLARATION_IN_ANOTHER_MODULE_IS_NOT_A_CONTROL":
+                    A_DECLARATION_IN_ANOTHER_MODULE_IS_NOT_A_CONTROL}
+    if rows:
+        status_key = "%s_STATUS" % target
+        shaped = [{"LABEL_STATUS": {"%dS" % h: r.get(status_key)}}
+                  for r in rows if r.get(status_key) is not None]
+        if shaped:
+            cov = horizon_label_coverage_gate(shaped, h, min_coverage_pct)
+            # MAY_EVALUATE is True, False, or NOT_IDENTIFIED -- and
+            # NOT_IDENTIFIED is a non-empty string, so a truthiness test
+            # would read "we do not know" as "yes".
+            if cov["MAY_EVALUATE"] is not True:
+                return {"MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
+                        "HORIZON_STATUS": st, "COVERAGE_GATE": cov,
+                        "REASON": "INSUFFICIENT_LABEL_COVERAGE",
+                        "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
+            return {"MAY_SCORE": True, "TARGET": target, "HORIZON_S": h,
+                    "HORIZON_STATUS": st, "COVERAGE_GATE": cov}
+    return {"MAY_SCORE": True, "TARGET": target, "HORIZON_S": h,
+            "HORIZON_STATUS": st,
+            "COVERAGE_GATE": "NOT_CHECKED_NO_LABEL_STATUS_ON_ROWS"}
+
+
 CANDIDATE_FEATURES = (
     "ORDER_BOOK_IMBALANCE",
     "ORDER_FLOW_IMBALANCE",
@@ -154,8 +242,25 @@ def tick_features(tick, prev=None, flow=None):
     return f
 
 
-def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS, time_key="REQUEST_UTC"):
-    """Attach forward price moves to each tick of one market.
+def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS,
+                  time_key="REQUEST_UTC", tolerance_s=HORIZON_TOLERANCE_S):
+    """Attach forward price moves to each tick of ONE MARKET.
+
+    Three rules, each load-bearing and each shared with
+    bettor_dataset.forward_observation():
+
+      - A horizon the capture cannot label is REFUSED, not computed at a
+        substitute offset. On the V1 ~24 s grid the 5 s horizon is
+        UNOBSERVABLE, and a number in MID_MOVE_5S would be the +24 s move.
+      - NEAREST to T+h, not the first at-or-after it. First-at-or-after
+        systematically overshoots on a grid: a 30 s horizon resolves to +48 s,
+        which labels a longer horizon than the one being claimed.
+      - WITHIN TOLERANCE or MISSING, with the REALISED OFFSET recorded so a
+        reader can see how far from the nominal horizon each label actually
+        sits.
+
+    `ticks` must be ONE market's series. Mixing markets would label a row with
+    another market's book.
 
     A tick whose horizon extends past the end of the capture gets None for that
     horizon -- truncating the capture would make the last observations look
@@ -177,24 +282,68 @@ def build_targets(ticks, horizons=TARGET_HORIZONS_SECONDS, time_key="REQUEST_UTC
     mids = [_mid(r.get("BEST_BID"), r.get("BEST_ASK")) for r in rows]
     out = []
     truncated = defaultdict(int)
+    out_of_tolerance = defaultdict(int)
+    refused = {}
+    for h in horizons:
+        st = horizon_status(h)
+        if st != "OBSERVABLE":
+            refused["MID_MOVE_%dS" % h] = st
     for i, r in enumerate(rows):
         row = dict(r)
         for h in horizons:
-            row["MID_MOVE_%dS" % h] = None
-            target = stamps[i] + datetime.timedelta(seconds=h)
-            j = None
-            for k in range(i + 1, len(rows)):
-                if stamps[k] >= target:
-                    j = k
-                    break
-            if j is None:
-                truncated["MID_MOVE_%dS" % h] += 1
+            key = "MID_MOVE_%dS" % h
+            row[key] = None
+            row[key + "_STATUS"] = None
+            row[key + "_REALISED_OFFSET_S"] = None
+            if key in refused:
+                # Never a number. A number here would be the +24 s move
+                # wearing a 5 s name, and nothing downstream could tell.
+                row[key + "_STATUS"] = refused[key]
                 continue
-            if mids[i] is not None and mids[j] is not None:
-                row["MID_MOVE_%dS" % h] = mids[j] - mids[i]
+            target = stamps[i] + datetime.timedelta(seconds=h)
+            # NEAREST to the target, STRICTLY after the origin, WITHIN
+            # tolerance -- the same three rules bettor_dataset uses. The old
+            # first-at-or-after rule systematically overshot on a grid.
+            best, best_gap, best_off = None, None, None
+            for k in range(i + 1, len(rows)):
+                off = (stamps[k] - target).total_seconds()
+                gap = abs(off)
+                if gap > tolerance_s:
+                    if stamps[k] > target and best is None:
+                        break          # sorted: everything later is worse
+                    continue
+                if best_gap is None or gap < best_gap:
+                    best, best_gap, best_off = k, gap, off
+            if best is None:
+                if stamps[-1] < target:
+                    truncated[key] += 1
+                    row[key + "_STATUS"] = "TRUNCATED_AT_CAPTURE_END"
+                else:
+                    out_of_tolerance[key] += 1
+                    row[key + "_STATUS"] = "NO_OBSERVATION_WITHIN_TOLERANCE"
+                continue
+            if mids[i] is not None and mids[best] is not None:
+                row[key] = mids[best] - mids[i]
+                row[key + "_STATUS"] = "PRESENT"
+                row[key + "_REALISED_OFFSET_S"] = round(best_off, 3)
+            else:
+                row[key + "_STATUS"] = "MID_MISSING"
         out.append(row)
-    return out, {"TICKS": len(out), "TRUNCATED_AT_CAPTURE_END": dict(truncated),
-                 "TRUNCATION_IS_DECLARED_NOT_DROPPED": True}
+    return out, {
+        "TICKS": len(out),
+        "TRUNCATED_AT_CAPTURE_END": dict(truncated),
+        "TRUNCATION_IS_DECLARED_NOT_DROPPED": True,
+        "OUT_OF_TOLERANCE": dict(out_of_tolerance),
+        "TOLERANCE_S": tolerance_s,
+        "REFUSED_HORIZONS": refused,
+        "WHY_REFUSED": (
+            "a horizon this capture cannot label is not computed at a "
+            "substitute offset. See bettor_dataset.FORBIDDEN_5S_REPAIRS"
+            if refused else None),
+        "FORBIDDEN_REPAIRS": FORBIDDEN_5S_REPAIRS if refused else (),
+        "A_DECLARATION_IN_ANOTHER_MODULE_IS_NOT_A_CONTROL":
+            A_DECLARATION_IN_ANOTHER_MODULE_IS_NOT_A_CONTROL,
+    }
 
 
 # --- Section 13. The continuous relative-value target. ---------------------
@@ -262,6 +411,14 @@ def relative_value_test(rows, horizons=TARGET_HORIZONS_SECONDS):
         return {"STATUS": NO_CAPTURE_YET}
     out = {}
     for h in horizons:
+        st = horizon_status(h)
+        if st != "OBSERVABLE":
+            out["%dS" % h] = {
+                "STATUS": "REFUSED", "HORIZON_STATUS": st,
+                "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN",
+                "WHY": ("publishing a correlation at this horizon would be "
+                        "scoring a challenger the capture cannot label")}
+            continue
         key = "TARGET_CHANGE_%dS" % h
         by = defaultdict(list)
         for r in rows:
@@ -373,7 +530,8 @@ def baseline_prediction(name, feats, prev_move=None, scale=1.0):
     return None
 
 
-def score_baselines(rows, target, pred_key=None, baselines=BASELINES):
+def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
+                    min_coverage_pct=None):
     """Score every baseline (and optionally a model) on one target.
 
     Returns absolute error and direction accuracy per predictor. A predictor
@@ -381,6 +539,13 @@ def score_baselines(rows, target, pred_key=None, baselines=BASELINES):
     and the count is reported so a thin predictor cannot look good by
     abstaining on the hard ones.
     """
+    # SCORE_A_5_SECOND_CHALLENGER is a named forbidden repair. The refusal
+    # lives here, at the scorer, because that is where a model would actually
+    # acquire a number it could be judged on.
+    gate = target_scoring_gate(target, rows, min_coverage_pct)
+    if not gate["MAY_SCORE"]:
+        return {"STATUS": "REFUSED", "TARGET": target, "GATE": gate}
+
     out = {}
     names = list(baselines) + ([pred_key] if pred_key else [])
     for name in names:
