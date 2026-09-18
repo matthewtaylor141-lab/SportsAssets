@@ -40,6 +40,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 import event_identity as EI
+import events_adapter as EA
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 SELECTION_SALT = "BETA48-SUBSTANTIVE-2026-09-17"
@@ -461,18 +462,61 @@ MARKETS_PATH = "/v1/markets"
 #   may not be certified until the contract is established. Switching
 #   endpoint is a separate, approved decision -- never an automatic fallback.
 EVENTS_PATH = "/v1/events"
+TERMINAL_EMPTY_PAGE = "EMPTY_ROW_ARRAY_AT_AN_OFFSET"
+
+# WHAT THE RETAINED EVIDENCE ACTUALLY SHOWS, KEPT APART FROM WHAT IT DOES NOT.
+#
+# The previous revision of this table said /v1/events was ESTABLISHED on the
+# basis of "RETAINED_EVIDENCE_TRACK_BL_BLOCK_3". That was wrong in the one way
+# this file exists to prevent. BLOCK_3's own sealed summary records
+#
+#     PAGINATION_ADVANCES        YES
+#     DISCOVERY_LIST_EXHAUSTED   NO
+#     FIRST_TERMINAL_OFFSET      null
+#     discovery_pages            26
+#     EVENTS_DISCOVERED          2600
+#
+# and its 26 retained page receipts are every one of them a full 100 events at
+# offsets 0..2500, with 2,600 distinct event ids and no repeats. That evidence
+# establishes that the offset ADVANCES. It says nothing whatever about how the
+# walk ENDS, because the walk never ended -- it stopped at its own page cap.
+#
+# So the two halves are recorded separately. The advance half is OBSERVED. The
+# terminal half is DECLARED from the documented limit/offset semantics and has
+# never been seen, which means it must be OBSERVED IN THE RUN THAT CLAIMS IT.
+# `certify_completion` enforces exactly that: no run inherits another run's
+# ending.
 BOARD_COMPLETION_CONTRACTS = {
     EVENTS_PATH: {
         "CONTRACT": "OFFSET_FORWARD_UNTIL_EMPTY_PAGE",
-        "BASIS": "RETAINED_EVIDENCE_TRACK_BL_BLOCK_3_AND_2G_R_SEALED_LOG",
+        "DECLARED_TERMINAL_CONDITION": TERMINAL_EMPTY_PAGE,
+        "TERMINAL_BASIS": "DOCUMENTED_LIMIT_OFFSET_SEMANTICS",
+        "ADVANCE_OBSERVED": True,
+        "ADVANCE_BASIS": ("RETAINED_BLOCK_3_RECEIPTS_26_PAGES_2600_DISTINCT_"
+                          "EVENT_IDS_0_REPEATS"),
+        "TERMINAL_OBSERVED_IN_RETAINED_EVIDENCE": False,
+        "TERMINAL_MUST_BE_OBSERVED_IN_THIS_RUN": True,
+        "SHORT_PAGE_IS_TERMINAL": False,
         "ESTABLISHED": True,
     },
     MARKETS_PATH: {
         "CONTRACT": NOT_IDENTIFIED,
-        "BASIS": "NO_RETAINED_CAPTURE_DEMONSTRATES_OFFSET_PAGING_OR_TERMINAL",
+        "DECLARED_TERMINAL_CONDITION": NOT_IDENTIFIED,
+        "TERMINAL_BASIS": NOT_IDENTIFIED,
+        "ADVANCE_OBSERVED": False,
+        "ADVANCE_BASIS": "NO_RETAINED_CAPTURE_DEMONSTRATES_OFFSET_PAGING",
+        "TERMINAL_OBSERVED_IN_RETAINED_EVIDENCE": False,
+        "TERMINAL_MUST_BE_OBSERVED_IN_THIS_RUN": True,
+        "SHORT_PAGE_IS_TERMINAL": False,
         "ESTABLISHED": False,
     },
 }
+AN_ADVANCE_IS_NOT_AN_ENDING = (
+    "26 pages that each advanced the offset prove the offset advances. They "
+    "do not prove what the venue returns when the rows run out, because the "
+    "rows never ran out -- the walk hit its own cap. ESTABLISHED here means "
+    "'this endpoint has a declared terminal condition a run may be required "
+    "to observe', never 'a previous run already observed it'")
 A_CONVENTION_IS_NOT_A_CONTRACT = (
     "a short page terminates a walk only on an endpoint whose paging "
     "semantics are established. Where the contract is not established the "
@@ -563,18 +607,40 @@ def _body_sha256(body):
 
 
 def pagination_contradicts_end(receipts, rows_seen):
-    """The venue's own paging fields saying more rows exist beats a short page."""
-    for rec in receipts:
-        pf = rec.get("PAGINATION_FIELDS") or {}
-        for k in ("has_more", "hasMore"):
-            if pf.get(k) is True:
-                return "PAGINATION_FIELD_%s_IS_TRUE" % k
-        for k in ("total", "total_count", "totalCount", "count"):
-            v = pf.get(k)
+    """The venue's own paging fields disputing THIS walk's ending.
+
+    A CONTINUATION FLAG ON AN ORDINARY NONTERMINAL PAGE MEANS CONTINUE.
+    The previous revision scanned every receipt for `has_more` and refused the
+    walk if any page carried it -- which is every healthy paginated walk ever:
+    page 1 of 26 saying "there is more" is the endpoint working correctly, not
+    a pagination error. Only the LAST page's flag can contradict the claim that
+    the last page was last.
+
+    A declared TOTAL is different in kind. It is a statement about the whole
+    collection, so it contradicts wherever it appears, and it is compared
+    against rows of the SAME KIND the caller counted -- event rows for an event
+    listing, market rows for a market listing. Comparing a venue event total
+    against extracted market rows would be the event/market count confusion,
+    not a completeness check.
+    """
+    receipts = list(receipts or ())
+    for k in ("total", "total_count", "totalCount", "count"):
+        for rec in receipts:
+            v = (rec.get("PAGINATION_FIELDS") or {}).get(k)
             if isinstance(v, int) and not isinstance(v, bool) and v > rows_seen:
                 return "PAGINATION_FIELD_%s_%d_EXCEEDS_ROWS_RETRIEVED_%d" % (
                     k, v, rows_seen)
+    if receipts:
+        pf = receipts[-1].get("PAGINATION_FIELDS") or {}
+        for k in ("has_more", "hasMore"):
+            if pf.get(k) is True:
+                return "TERMINAL_PAGE_PAGINATION_FIELD_%s_IS_TRUE" % k
     return None
+
+
+A_CONTINUATION_FLAG_MIDWALK_IS_NOT_AN_ERROR = (
+    "has_more on page 1 of 26 is the endpoint telling the walk to keep going. "
+    "Only the terminal page's own flag can dispute the ending")
 
 
 def board_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
@@ -671,6 +737,136 @@ def board_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
     return by_slug, receipts, status
 
 
+def discovery_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
+                   endpoint=EVENTS_PATH, retain_bodies=None):
+    """Walk /v1/events and flatten it to child market rows via the adapter.
+
+    The authorised V1 discovery source. It is the same receipt discipline and
+    the same failure vocabulary as `board_walk` -- that function is left
+    untouched for the markets endpoint -- with three differences the event
+    listing forces:
+
+    1. A page's rows are EVENTS. Pagination, staleness and the terminal
+       condition are all judged on the EVENT count, because that is the thing
+       the offset walks. The market rows are a product of the page, not the
+       page's length, and judging the walk on them would be comparing an
+       event-level total with a market-row count.
+    2. A SHORT PAGE IS NOT THE END. The declared terminal condition for this
+       endpoint is an empty rows array, so a page of 40 events at limit 100
+       means "read the next offset", not "the board is enumerated". This is
+       strictly more conservative than the markets walk and it is deliberate:
+       the terminal condition has never been observed, so the only thing that
+       may be allowed to prove it is the thing itself.
+    3. Extraction happens per page, so a malformed child row is attributed to
+       the page and offset it arrived on.
+
+    Returns (by_slug, event_index, receipts, status, adapter_block).
+    """
+    by_slug, event_index, receipts, blocks = {}, {}, [], []
+    status = BOARD_PAGE_CAP_REACHED
+    pages = 0
+    while pages < max_pages:
+        offset = pages * page_limit
+        params = {"active": "true", "closed": "false",
+                  "limit": page_limit, "offset": offset}
+        rec = {"PAGE": pages, "ENDPOINT": endpoint, "PARAMS": dict(params),
+               "REQUEST_UTC": _utc_now(), "RECEIPT_UTC": NOT_IDENTIFIED,
+               "HTTP_STATUS": NOT_IDENTIFIED, "RESPONSE_SHAPE": NOT_IDENTIFIED,
+               "ROWS_RETURNED": NOT_IDENTIFIED, "FRESH_EVENTS": NOT_IDENTIFIED,
+               "MARKET_ROWS_EXTRACTED": NOT_IDENTIFIED,
+               "PAGINATION_FIELDS": {}, "REPEATED_EARLIER_PAGE": NOT_IDENTIFIED,
+               "BODY_SHA256": NOT_IDENTIFIED, "BODY_ARTIFACT": NOT_IDENTIFIED,
+               "MALFORMED_ROWS": (), "ERROR": NOT_IDENTIFIED}
+        try:
+            r = get(params)
+            rec["RECEIPT_UTC"] = _utc_now()
+            rec["HTTP_STATUS"] = getattr(r, "status_code", NOT_IDENTIFIED)
+        except Exception as e:                                # noqa: BLE001
+            rec["ERROR"] = "%s: %s" % (type(e).__name__, e)
+            receipts.append(rec)
+            status = BOARD_HTTP_FAILURE
+            break
+        pages += 1
+        if rec["HTTP_STATUS"] != 200:
+            receipts.append(rec)
+            status = BOARD_HTTP_FAILURE
+            break
+        try:
+            body = r.json()
+        except Exception as e:                                # noqa: BLE001
+            rec["ERROR"] = "%s: %s" % (type(e).__name__, e)
+            rec["RESPONSE_SHAPE"] = "UNPARSEABLE_BODY"
+            receipts.append(rec)
+            status = BOARD_SCHEMA_FAILURE
+            break
+        rec["BODY_SHA256"] = _body_sha256(body)
+        if retain_bodies is not None:
+            rec["BODY_ARTIFACT"] = retain_bodies(rec["BODY_SHA256"], body)
+        rec["PAGINATION_FIELDS"] = _pagination_fields(body)
+
+        rows = EA.event_rows_of(body)
+        if rows is None:
+            # No `events` key, or it is not a list. NOT an empty page: an
+            # empty page is `{"events": []}` and is the terminal condition.
+            rec["RESPONSE_SHAPE"] = "NO_EVENTS_ARRAY:%s" % (
+                ",".join(sorted(body)[:8]) if isinstance(body, dict)
+                else type(body).__name__)
+            rec["ROWS_RETURNED"] = 0
+            receipts.append(rec)
+            status = BOARD_SCHEMA_FAILURE
+            break
+        rec["RESPONSE_SHAPE"] = "MAPPING_KEY:%s" % EA.EVENT_ROWS_KEY
+        rec["ROWS_RETURNED"] = len(rows)
+
+        markets, blk = EA.extract_markets(
+            rows, page_ref={"ENDPOINT": endpoint, "OFFSET": offset,
+                            "BODY_SHA256": rec["BODY_SHA256"]},
+            endpoint=endpoint)
+        blocks.append(blk)
+        rec["MARKET_ROWS_EXTRACTED"] = len(markets)
+        rec["MALFORMED_ROWS"] = tuple(blk["DROPPED_ROWS"])
+
+        fresh = 0
+        for ev in rows:
+            if isinstance(ev, dict) and ev.get("id") is not None:
+                eid = str(ev["id"])
+                if eid not in event_index:
+                    event_index[eid] = {"EVENT_SLUG": ev.get("slug"),
+                                        "OFFSET": offset}
+                    fresh += 1
+        rec["FRESH_EVENTS"] = fresh
+        rec["REPEATED_EARLIER_PAGE"] = bool(rows) and fresh == 0
+
+        for m in markets:
+            slug = m.get("slug")
+            if slug and slug not in by_slug:
+                by_slug[slug] = m
+
+        # A CONFLICTING DUPLICATE IS A SCHEMA FAILURE, NOT A ROW TO PICK FROM.
+        # An ordinary duplicate is deduplicated and counted; two rows claiming
+        # one identity with different identity fields cannot both be right and
+        # choosing between them would be a guess.
+        if blk["CONFLICTING_DUPLICATE_COUNT"]:
+            rec["RESPONSE_SHAPE"] += "+CONFLICTING_DUPLICATES:%d" % (
+                blk["CONFLICTING_DUPLICATE_COUNT"])
+            receipts.append(rec)
+            status = BOARD_SCHEMA_FAILURE
+            break
+        receipts.append(rec)
+
+        if not rows:
+            # THE DECLARED TERMINAL CONDITION. An empty FIRST page is one
+            # request that returned nothing and enumerates nothing.
+            status = (BOARD_VERIFIED_END if pages > 1
+                      else BOARD_SINGLE_PAGE_UNCORROBORATED)
+            break
+        if fresh == 0:
+            status = BOARD_PAGINATION_STALLED     # the server ignored `offset`
+            break
+        # NOTE: no short-page break. See (2) above.
+    return by_slug, event_index, receipts, status, EA.merge_blocks(blocks)
+
+
 def certify_completion(status, receipts, rows_seen, endpoint=MARKETS_PATH):
     """VERIFIED_END survives only a established contract and no contradiction."""
     if status != BOARD_VERIFIED_END:
@@ -686,6 +882,22 @@ def certify_completion(status, receipts, rows_seen, endpoint=MARKETS_PATH):
     if not contract.get("ESTABLISHED"):
         return (BOARD_COMPLETION_CONTRACT_NOT_ESTABLISHED,
                 "ENDPOINT_CONTRACT_NOT_ESTABLISHED:%s" % endpoint)
+    # THE DECLARED TERMINAL CONDITION MUST BE OBSERVED IN THIS RUN'S RECEIPTS.
+    # BLOCK_3 never saw one, so there is nothing to inherit; and even once one
+    # HAS been seen, a later run that stops for some other reason has not ended
+    # where this run ended. The receipt is the evidence, every time.
+    if contract.get("TERMINAL_MUST_BE_OBSERVED_IN_THIS_RUN"):
+        want = contract.get("DECLARED_TERMINAL_CONDITION")
+        if want == TERMINAL_EMPTY_PAGE:
+            last = receipts[-1] if receipts else None
+            if not last or last.get("ROWS_RETURNED") != 0:
+                got = None if not last else last.get("ROWS_RETURNED")
+                return (BOARD_COMPLETION_CONTRACT_NOT_ESTABLISHED,
+                        "DECLARED_TERMINAL_CONDITION_%s_NOT_OBSERVED:"
+                        "LAST_PAGE_ROWS=%s" % (want, got))
+        else:
+            return (BOARD_COMPLETION_CONTRACT_NOT_ESTABLISHED,
+                    "NO_DECLARED_TERMINAL_CONDITION_TO_OBSERVE:%s" % endpoint)
     return BOARD_VERIFIED_END, None
 
 
@@ -711,6 +923,41 @@ def board_retrieval_block(by_slug, receipts, status, endpoint=MARKETS_PATH):
         "A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD":
             A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD,
     }
+
+
+def discovery_retrieval_block(by_slug, event_index, receipts, status,
+                              adapter_block, endpoint=EVENTS_PATH):
+    """The evidence block for the EVENTS walk. Two counts, never conflated.
+
+    `rows_seen` for the completion check is the EVENT count, because the offset
+    walks events. The extracted market rows are reported beside it and are
+    never compared against a venue event total.
+    """
+    events_seen = len(event_index)
+    status, why = certify_completion(status, receipts, events_seen, endpoint)
+    complete = status == BOARD_VERIFIED_END
+    blk = board_retrieval_block(by_slug, receipts, status, endpoint=endpoint)
+    blk.update({
+        "DISCOVERY_ENDPOINT": endpoint,
+        "DISCOVERY_ADAPTER": adapter_block.get("ADAPTER_VERSION"),
+        "DISCOVERY_EVENT_ROWS": events_seen,
+        "DISCOVERY_PAGES": len(receipts),
+        "DISCOVERY_MARKET_ROWS_EXTRACTED":
+            adapter_block.get("MARKET_ROWS_EXTRACTED", 0),
+        "DISCOVERY_UNIQUE_MARKET_SLUGS": len(by_slug),
+        "DISCOVERY_DROPPED_ROWS": adapter_block.get("DROPPED_COUNT", 0),
+        "DISCOVERY_CONFLICTING_DUPLICATES":
+            adapter_block.get("CONFLICTING_DUPLICATE_COUNT", 0),
+        "DISCOVERY_ADAPTER_BLOCK": adapter_block,
+        "DISCOVERY_LIST_EXHAUSTED": "YES" if complete else "NO",
+        "FIRST_TERMINAL_OFFSET": (
+            receipts[-1]["PARAMS"].get("offset")
+            if complete and receipts else None),
+        "EVENT_TOTAL_COMPARED_WITH_MARKET_ROW_COUNT": False,
+        "AN_ADVANCE_IS_NOT_AN_ENDING": AN_ADVANCE_IS_NOT_AN_ENDING,
+        "COMPLETION_WITHHELD_BECAUSE": why or NOT_IDENTIFIED,
+    })
+    return blk
 
 
 def selection_status(board_status, roster_ok):
@@ -755,9 +1002,13 @@ def _cli():                                                   # pragma: no cover
         def _get(params):
             pacer.wait()
             counted.append(1)
-            return http.get(C.HOST + MARKETS_PATH, params=params, timeout=20.0)
+            return http.get(C.HOST + EVENTS_PATH, params=params, timeout=20.0)
 
-        by_slug, receipts, board_status = board_walk(_get)
+        # DISCOVERY IS THE EVENT LISTING (management decision 2026-09-18).
+        # The event rows are flattened to their OWN child markets by the
+        # adapter and handed to the unchanged eligibility rules below.
+        (by_slug, event_index, receipts, board_status,
+         adapter_block) = discovery_walk(_get, endpoint=EVENTS_PATH)
         reads += len(counted)
 
         # CANDIDATES FIRST, BOOKS SECOND. Only markets that already carry a
@@ -802,11 +1053,14 @@ def _cli():                                                   # pragma: no cover
         "CANDIDATES_BOOK_READ": len(books),
         "SYS_PATH_NOTE": sys_path_note,
     })
-    sel.update(board_retrieval_block(by_slug, receipts, board_status,
-                                     endpoint=MARKETS_PATH))
+    sel.update(discovery_retrieval_block(by_slug, event_index, receipts,
+                                         board_status, adapter_block,
+                                         endpoint=EVENTS_PATH))
     # THE SHORTFALL MAY ONLY BE BLAMED ON THE VENUE IF THE BOARD WAS READ.
-    certified, _why = certify_completion(board_status, receipts, len(by_slug),
-                                        MARKETS_PATH)
+    # `rows_seen` is the EVENT count: the offset walks events, so the event
+    # count is what a venue total would have to be compared against.
+    certified, _why = certify_completion(board_status, receipts,
+                                         len(event_index), EVENTS_PATH)
     sel["SELECTION_STATUS"] = selection_status(
         certified, sel.get("EVENT_SELECTION_FROZEN") == "YES")
     # AN UNENUMERATED BOARD MAY NOT START A CAPTURE, even if three events

@@ -305,7 +305,9 @@ def test_the_manifest_carries_the_roster_the_selection_froze():
     m = _manifest(sel)
     assert m["EVENT_IDS"] == sel["EVENT_IDS"]
     assert m["MARKET_IDS"] == sel["MARKET_IDS"]
-    assert m["ORCHESTRATION_VERSION"] == "2"
+    # v3: discovery moved to /v1/events behind the adapter. The ordering
+    # guarantee v2 established is unchanged and still asserted below.
+    assert m["ORCHESTRATION_VERSION"] == "3"
     assert m["MANIFEST_PRECEDES_FIRST_SAMPLED_GET"] is True
 
 

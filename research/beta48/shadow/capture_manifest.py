@@ -315,7 +315,11 @@ def describe():
 # cannot invent one; it refuses if the selection did not freeze; and because
 # the workflow runs it with `set -e` and no `if: always()`, the capture step
 # below it cannot execute unless it succeeded.
-ORCHESTRATION_VERSION = "2"
+# v3: discovery moved to /v1/events behind the events-to-markets adapter
+# (management decision 2026-09-18). The ordering guarantee v2 established is
+# unchanged; what changed is which endpoint produced the roster, and the
+# manifest now names it.
+ORCHESTRATION_VERSION = "3"
 ORDERING_IS_ENFORCED_BY_THE_JOB_NOT_A_CHECK_IN = (
     "approval -> frozen selection -> roster-bearing manifest -> first sampled "
     "GET. v1 left the third step to an external check-in that could only run "
@@ -420,6 +424,26 @@ def manifest_from_selection(selection, code_sha, run_id, capture_seconds,
     m["SAMPLING_START_UTC"] = "NOT_OBSERVED_AT_MANIFEST_TIME"
     m["MANIFEST_CREATED_AT_IS_NOT_SAMPLING_START"] = (
         MANIFEST_CREATED_AT_IS_NOT_SAMPLING_START)
+
+    # THE REVISED DISCOVERY SOURCE, NAMED ON THE MANIFEST ITSELF.
+    # Management's 2026-09-18 decision authorised one bounded migration of V1
+    # board discovery to /v1/events. A manifest that did not say which endpoint
+    # produced its roster would leave the next reader unable to tell a V1
+    # markets-walk capture from a V1 events-adapter capture, and the two were
+    # shown different universes.
+    m["DISCOVERY_ENDPOINT"] = selection.get(
+        "DISCOVERY_ENDPOINT", NOT_IDENTIFIED)
+    m["DISCOVERY_ADAPTER_VERSION"] = selection.get(
+        "DISCOVERY_ADAPTER", NOT_IDENTIFIED)
+    m["DISCOVERY_EVENT_ROWS"] = selection.get(
+        "DISCOVERY_EVENT_ROWS", NOT_IDENTIFIED)
+    m["DISCOVERY_MARKET_ROWS_EXTRACTED"] = selection.get(
+        "DISCOVERY_MARKET_ROWS_EXTRACTED", NOT_IDENTIFIED)
+    m["DISCOVERY_LIST_EXHAUSTED"] = selection.get(
+        "DISCOVERY_LIST_EXHAUSTED", NOT_IDENTIFIED)
+    m["FIRST_TERMINAL_OFFSET"] = selection.get(
+        "FIRST_TERMINAL_OFFSET", NOT_IDENTIFIED)
+    m["DISCOVERY_SOURCE_IS_AN_EXPLICIT_REVISION_NOT_A_FALLBACK"] = True
 
     # The approval scope travels with the manifest, unaltered and unclaimed.
     m["ORCHESTRATION_VERSION"] = ORCHESTRATION_VERSION

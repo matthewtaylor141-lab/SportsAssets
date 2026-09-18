@@ -141,18 +141,27 @@ jobs:
       # are paced at the SAME 0.25 rps and are counted separately from the
       # capture's own observations. A short roster exits non-zero and the
       # capture never starts.
+      #
+      # DISCOVERY IS /v1/events (management decision 2026-09-18). The step
+      # below walks the event listing and flattens it to the events' OWN child
+      # markets through events_adapter; the eligibility, identity, ranking and
+      # book-screening rules underneath are unchanged. This is a declared
+      # discovery-source revision, not a fallback: there is no second endpoint
+      # to fall back TO, and a failed walk stays failed.
       - name: Freeze the event selection
         working-directory: research/beta48/shadow
         env:
           SEG: ${{ github.run_id }}
         run: |
           set -e
+          echo "OBSERVED_STATE=DISCOVERING"
           python substantive_select.py \
             --rate "0.25" \
             --window-s "${{ github.event.inputs.capture_seconds || 5400 }}" \
             --out "evidence/substantive_$SEG/selection.json"
+          echo "OBSERVED_STATE=SELECTION_FROZEN"
 
-      # ORCHESTRATION v2 -- THE MANIFEST IS WRITTEN HERE, NOT AFTERWARDS.
+      # ORCHESTRATION v3 -- THE MANIFEST IS WRITTEN HERE, NOT AFTERWARDS.
       #
       # v1 left the manifest to an external check-in that could only run after
       # the job was already sampling, so the ordering the evidence claims
@@ -169,7 +178,7 @@ jobs:
         working-directory: research/beta48/shadow
         env:
           SEG: ${{ github.run_id }}
-          ORCHESTRATION_VERSION: "2"
+          ORCHESTRATION_VERSION: "3"
         run: |
           set -e
           python capture_manifest.py \
@@ -183,6 +192,7 @@ jobs:
           python capture_manifest.py --verify \
             --manifest "evidence/substantive_$SEG/capture_manifest.json" \
             --selection "evidence/substantive_$SEG/selection.json"
+          echo "OBSERVED_STATE=MANIFEST_VERIFIED"
 
       # THE CAPTURE. 0.25 rps, 4.0 s apart, 6 markets, 90 minutes.
       - name: Substantive public-book capture
@@ -191,6 +201,7 @@ jobs:
           SEG: ${{ github.run_id }}
         run: |
           set -e
+          echo "OBSERVED_STATE=SAMPLING"
           python substantive_capture.py \
             --selection "evidence/substantive_$SEG/selection.json" \
             --out "evidence/substantive_$SEG" \

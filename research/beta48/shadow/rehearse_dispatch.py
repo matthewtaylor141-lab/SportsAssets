@@ -50,7 +50,8 @@ def _run(args, cwd, env=None):
     return p.returncode, (p.stdout + p.stderr).strip()
 
 
-def _selection_file(d, frozen, events, markets, status="FROZEN"):
+def _selection_file(d, frozen, events, markets, status="FROZEN",
+                    discovery=None):
     """Write a selection the way the selection step writes it."""
     sel = {
         "EVENT_SELECTION_FROZEN": "YES" if frozen else "NO",
@@ -60,6 +61,16 @@ def _selection_file(d, frozen, events, markets, status="FROZEN"):
         "MARKET_IDS": list(markets),
         "MARKET_SLUGS": list(markets),
     }
+    # The discovery block the selection step now emits, so the manifest can
+    # name the endpoint and adapter that produced this roster.
+    sel.update(discovery or {
+        "DISCOVERY_ENDPOINT": "/v1/events",
+        "DISCOVERY_ADAPTER": "EVENTS_TO_MARKETS_V1",
+        "DISCOVERY_EVENT_ROWS": 6,
+        "DISCOVERY_MARKET_ROWS_EXTRACTED": 27,
+        "DISCOVERY_LIST_EXHAUSTED": "YES",
+        "FIRST_TERMINAL_OFFSET": 6,
+    })
     p = os.path.join(d, "selection.json")
     with open(p, "w") as fh:
         json.dump(sel, fh, indent=2)
@@ -116,6 +127,92 @@ def scenario_board_walk(name, responses, expect_status):
     return ok
 
 
+def rehearse_discovery():
+    """The ADAPTED path, on retained /v1/events bodies. No venue traffic.
+
+        retained event listing
+          -> child-market extraction
+          -> the unchanged eligibility and ranking rules
+          -> the unchanged freeze
+
+    Evaluated at the FIXTURE'S OWN AS-OF. These events were eligible on
+    2026-09-14 and are not eligible today; using the current clock would
+    present historical markets as current ones.
+    """
+    sys.path.insert(0, HERE)
+    import substantive_select as S
+    import events_adapter as EA
+    import event_identity as EI
+
+    with open(os.path.join(HERE, "fixtures_events_block3.json")) as fh:
+        fx = json.load(fh)
+    page0 = fx["RETAINED_PAGES"][0]["body"]
+    as_of = fx["AS_OF_UTC"]
+
+    print("  fixtures      %s (%d events retained, %d embedded)"
+          % (fx["PROVENANCE"]["SOURCE_RUN"],
+             fx["PROVENANCE"]["EVENTS_RETAINED"],
+             fx["PROVENANCE"]["EVENTS_EMBEDDED_HERE"]))
+    print("  as-of         %s  (HISTORICAL: %s)"
+          % (as_of, fx["AS_OF_IS_HISTORICAL"]))
+
+    class Resp:
+        def __init__(self, body, status=200):
+            self.status_code = status
+            self._b = body
+
+        def json(self):
+            return self._b
+
+    seq = [page0, {"events": []}]          # page, then the terminal page
+
+    def get(params):
+        i = int(params["offset"]) // int(params["limit"])
+        return Resp(seq[i] if i < len(seq) else {"events": []})
+
+    by, idx, rec, st, blk = S.discovery_walk(get, page_limit=6,
+                                             endpoint=S.EVENTS_PATH)
+    cert, why = S.certify_completion(st, rec, len(idx), S.EVENTS_PATH)
+    print("  walk          pages=%d  status=%s  certified=%s"
+          % (len(rec), st, cert))
+    print("  counts        EVENT_ROWS=%d  MARKET_ROWS=%d  (never compared)"
+          % (blk["EVENT_ROWS"], blk["MARKET_ROWS_EXTRACTED"]))
+    print("  dropped       %d  conflicting=%d"
+          % (blk["DROPPED_COUNT"], blk["CONFLICTING_DUPLICATE_COUNT"]))
+
+    lv = {}
+    for m in by.values():
+        _, l = EI.event_identity(m)
+        lv[l] = lv.get(l, 0) + 1
+    print("  identity      " + "  ".join(
+        "%s=%d" % (k.split("_")[1], v) for k, v in sorted(lv.items())))
+
+    books = {s: {"bids": [{"price": "0.4"}], "asks": [{"price": "0.6"}]}
+             for s in by}
+    act = {s: {"ACTIVE_AT_DECISION": True} for s in by}
+    sel = S.freeze(list(by.values()), books, as_of, activity_of=act)
+    sel.update(S.discovery_retrieval_block(by, idx, rec, st, blk,
+                                           endpoint=S.EVENTS_PATH))
+    sel["SELECTION_STATUS"] = S.selection_status(
+        cert, sel.get("EVENT_SELECTION_FROZEN") == "YES")
+
+    print("  freeze        FROZEN=%s  events=%d  markets=%d  status=%s"
+          % (sel["EVENT_SELECTION_FROZEN"], len(sel["EVENT_IDS"]),
+             len(sel["MARKET_IDS"]), sel["SELECTION_STATUS"]))
+
+    parents = {e["slug"] for e in page0["events"]}
+    parent_leak = set(sel["MARKET_SLUGS"]) & parents
+    print("  parent leak   %s" % (sorted(parent_leak) or "none"))
+
+    ok = (cert == S.BOARD_VERIFIED_END
+          and sel["EVENT_SELECTION_FROZEN"] == "YES"
+          and not parent_leak
+          and blk["CONFLICTING_DUPLICATE_COUNT"] == 0
+          and blk["MARKET_ROWS_EXTRACTED"] > blk["EVENT_ROWS"])
+    print("  -> %s" % ("OK" if ok else "FAILED"))
+    return ok, sel
+
+
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--only", default="")
@@ -140,6 +237,11 @@ def main():
         if not scenario_board_walk(nm, resp, exp):
             fails.append(nm)
 
+    print("\n== 1b. DISCOVERY, real /v1/events walk on RETAINED bodies ==")
+    ok, disc_sel = rehearse_discovery()
+    if not ok:
+        fails.append("events discovery")
+
     print("\n== 2. COMMAND SEQUENCE, real CLIs, non-sorted roster ==")
     d = tempfile.mkdtemp(prefix="rehearsal-")
     try:
@@ -149,7 +251,7 @@ def main():
         man = os.path.join(d, "capture_manifest.json")
 
         rc, out = _run(["capture_manifest.py",
-                        "--orchestration-version", "2",
+                        "--orchestration-version", "3",
                         "--selection", sel_path,
                         "--code-sha", "bbce49dae0f20d9bad86bfc8f3322f28dc097859",
                         "--run-id", "REHEARSAL",
@@ -180,7 +282,11 @@ def main():
             print("  --- written manifest ---")
             for k in ("MANIFEST_CREATED_AT", "SAMPLING_START_UTC",
                       "EVENT_IDS", "EVENT_ID_SCHEDULE", "MARKET_FAMILIES",
-                      "SELECTION_FILE_SHA256", "INDIRECT_ISOLATION_REGIME"):
+                      "SELECTION_FILE_SHA256", "INDIRECT_ISOLATION_REGIME",
+                      "ORCHESTRATION_VERSION", "DISCOVERY_ENDPOINT",
+                      "DISCOVERY_ADAPTER_VERSION", "DISCOVERY_EVENT_ROWS",
+                      "DISCOVERY_MARKET_ROWS_EXTRACTED",
+                      "DISCOVERY_LIST_EXHAUSTED", "FIRST_TERMINAL_OFFSET"):
                 print("      %-24s %s" % (k, json.dumps(m.get(k))[:90]))
             rp = m.get("REQUEST_POLICY", {})
             print("      %-24s %s" % ("GLOBAL_REQUEST_INTERVAL_S",
@@ -190,7 +296,7 @@ def main():
 
         print("\n== 3. WRITE-ONCE: a second write must refuse, nonzero, no SHA ==")
         rc3, out3 = _run(["capture_manifest.py",
-                          "--orchestration-version", "2",
+                          "--orchestration-version", "3",
                           "--selection", sel_path,
                           "--code-sha", "bbce49d", "--run-id", "REHEARSAL",
                           "--out", man], HERE)
@@ -210,7 +316,7 @@ def main():
                 status="BOARD_RETRIEVAL_INCOMPLETE:HTTP_FAILURE")
             man2 = os.path.join(d2, "capture_manifest.json")
             rc4, out4 = _run(["capture_manifest.py",
-                              "--orchestration-version", "2",
+                              "--orchestration-version", "3",
                               "--selection", sel2, "--code-sha", "x",
                               "--run-id", "R", "--out", man2], HERE)
             print("  manifest rc=%d  %s" % (rc4, out4.splitlines()[-1]
