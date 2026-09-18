@@ -27,6 +27,7 @@ import unittest
 from pathlib import Path
 
 import event_identity as EI
+import book_schema as BS
 import substantive_select as SS
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -39,8 +40,11 @@ def load():
 
 
 def two_sided_book():
-    return {"bids": [{"price": "0.50", "size": "100"}],
-            "asks": [{"price": "0.52", "size": "100"}]}
+    # NATIVE VENUE SHAPE. The old {"bids": ..., "asks": ...} literal was
+    # a shape the venue never sends; it is what hid the book-schema
+    # defect. book_schema.native_book emits the production contract.
+    return BS.native_book([{"px": {"value": "0.50"}, "qty": "100"}],
+                          [{"px": {"value": "0.52"}, "qty": "100"}])
 
 
 def active():
@@ -201,8 +205,8 @@ class Test5_EveryCandidateIsAccountedFor(unittest.TestCase):
                    "marketSides": [{"teamId": 11}, {"teamId": 12}]})
         ms.append({"slug": "onesided", "gameStartTime": start,
                    "marketSides": [{"teamId": 13}, {"teamId": 14}]})
-        books["onesided"] = {"bids": [{"price": "0.5", "size": "1"}],
-                             "asks": []}
+        books["onesided"] = BS.native_book(
+            [{"px": {"value": "0.5"}, "qty": "1"}], [])   # bids only
         act["onesided"] = active()
         ms.append({"slug": "quiet", "gameStartTime": start,
                    "marketSides": [{"teamId": 15}, {"teamId": 16}]})

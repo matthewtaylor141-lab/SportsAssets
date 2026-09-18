@@ -71,16 +71,17 @@ concurrency:
   # waiting. A queued evidence run can therefore be dropped without anything
   # being "cancelled in progress".
   #
-  # `queue: max` was authorised as a narrow admission correction but is NOT
-  # added here: `concurrency` is documented to accept `group` and
-  # `cancel-in-progress` only, an unrecognised key makes the whole workflow
-  # file invalid, and an invalid workflow cannot be dispatched at all. No
-  # validator (actionlint, schema) is available in this container and outbound
-  # egress to the schema is blocked, so the key could not be checked before
-  # being committed. Adding it unverified would trade a bounded queue risk for
-  # an unbounded dispatch failure. Verify against the Actions schema first.
+  # `queue: max` (GitHub changelog 2026-05-07, larger concurrency queues) is
+  # the admission correction for that: it keeps the whole queue rather than
+  # only the newest waiter, so a dispatched evidence run that must wait behind
+  # the scheduled collector is not silently dropped by a later arrival.
+  #
+  # IT IS SCOPED TO THIS WORKFLOW ONLY. Every other member of
+  # pmus-public-read-global keeps its own policy, unchanged, and this setting
+  # is not a claim about how the group behaves when members disagree.
   group: pmus-public-read-global
   cancel-in-progress: false
+  queue: max
 
 jobs:
   capture:

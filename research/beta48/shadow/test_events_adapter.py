@@ -12,6 +12,7 @@ import os
 import pytest
 
 import event_identity as EI
+import book_schema as BS
 import events_adapter as EA
 import substantive_select as S
 
@@ -33,6 +34,19 @@ def page0(fx):
 @pytest.fixture(scope="module")
 def as_of(fx):
     return fx["AS_OF_UTC"]
+
+
+def two_sided_native_book(bid="0.4700", ask="0.4800"):
+    """A two-sided book in the PRODUCTION shape, built explicitly.
+
+    Not a normalized stand-in: `book_schema.native_book` emits the venue's own
+    marketData/bids/offers contract, so a test written with it cannot pass
+    against a reader that expects some other shape. The old top-level
+    {"bids": [...], "asks": [...]} literal is gone from this file for exactly
+    that reason -- it was the shape that hid the book-schema defect.
+    """
+    return BS.native_book([{"px": {"value": bid}, "qty": "500"}],
+                          [{"px": {"value": ask}, "qty": "500"}])
 
 
 class Resp:
@@ -300,7 +314,7 @@ def test_missing_identity_never_silently_becomes_an_eligible_candidate(as_of):
                           "gameStartTime": "2026-09-14T18:00:00Z"}]}]
     markets, _ = EA.extract_markets(rows)
     assert len(markets) == 2                      # extracted...
-    books = {m["slug"]: {"bids": [1], "asks": [1]} for m in markets}
+    books = {m["slug"]: two_sided_native_book() for m in markets}
     act = {m["slug"]: {"ACTIVE_AT_DECISION": True} for m in markets}
     out, _rej, reasons = S.eligible_events(markets, books, as_of,
                                            activity_of=act)
@@ -657,8 +671,7 @@ def test_the_adapted_path_reaches_a_frozen_roster_at_the_historical_as_of(
     assert st == S.BOARD_VERIFIED_END
 
     markets = list(by.values())
-    books = {s: {"bids": [{"price": "0.4"}], "asks": [{"price": "0.6"}]}
-             for s in by}
+    books = {s: two_sided_native_book() for s in by}
     act = {s: {"ACTIVE_AT_DECISION": True} for s in by}
 
     sel = S.freeze(markets, books, as_of, activity_of=act)
@@ -673,7 +686,7 @@ def test_the_adapted_path_reaches_a_frozen_roster_at_the_historical_as_of(
 def test_the_frozen_roster_carries_venue_team_pair_identities(page0, as_of):
     pages = [{"body": page0}, {"body": {"events": []}}]
     by, idx, rec, st, blk = S.discovery_walk(walker(pages), page_limit=6)
-    books = {s: {"bids": [1], "asks": [1]} for s in by}
+    books = {s: two_sided_native_book() for s in by}
     act = {s: {"ACTIVE_AT_DECISION": True} for s in by}
     sel = S.freeze(list(by.values()), books, as_of, activity_of=act)
     for row in sel["IDENTITY_OF"].values():
@@ -686,7 +699,7 @@ def test_the_same_fixture_selects_nothing_against_a_much_earlier_clock(page0):
     """The as-of is load-bearing: a week early, every game is a future."""
     pages = [{"body": page0}, {"body": {"events": []}}]
     by, idx, rec, st, blk = S.discovery_walk(walker(pages), page_limit=6)
-    books = {s: {"bids": [1], "asks": [1]} for s in by}
+    books = {s: two_sided_native_book() for s in by}
     act = {s: {"ACTIVE_AT_DECISION": True} for s in by}
     sel = S.freeze(list(by.values()), books, "2026-09-07T00:00:00+00:00",
                    activity_of=act)
@@ -695,22 +708,20 @@ def test_the_same_fixture_selects_nothing_against_a_much_earlier_clock(page0):
         "SEASON_FUTURE_BEYOND_HORIZON", 0) > 0
 
 
-def test_two_sided_rejects_every_retained_venue_book():
-    """A BLOCKER, PINNED RATHER THAN FIXED.
+def test_two_sided_now_recognises_every_retained_venue_book():
+    """THE NATIVE-SCHEMA CORRECTION, MEASURED ON REAL VENUE BODIES.
 
-    `substantive_select.two_sided` reads book_body['bids'] / ['asks'].
-    The venue sends {'marketData': {'bids': [...], 'offers': [...]}}, which is
-    the shape `eligibility.book_bbo` reads correctly in the SAME pipeline.
+    `two_sided` used to read book_body['bids'] / ['asks']; the venue sends
+    {'marketData': {'bids': [...], 'offers': [...]}}. All 15 retained BLOCK_4
+    books are genuinely two-sided and the old reader accepted NONE of them, so
+    every candidate was refused BOOK_NOT_TWO_SIDED and the roster could never
+    fill. Both readers now route through `book_schema`.
 
-    Consequence: every candidate is rejected BOOK_NOT_TWO_SIDED, no event ever
-    reaches MARKETS_PER_EVENT, the roster is always short, and the run reports
-    'insufficient qualifying events' as though that described the venue.
-
-    All 15 retained BLOCK_4 books are genuinely two-sided. `two_sided` accepts
-    none of them. Management's decision freezes the eligibility path, so this
-    test records the measurement and the capture stays blocked until the
-    incompatibility is ruled on.
+    This asserts the correction on the venue's own bodies, and the refusal
+    tests below assert the requirement did not weaken with it.
     """
+    import sys
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "forward"))
     import eligibility as EL
     with open(os.path.join(HERE, "fixtures_books_block4.json")) as fh:
         bodies = json.load(fh)["RETAINED"]["BODIES"]
@@ -722,7 +733,10 @@ def test_two_sided_rejects_every_retained_venue_book():
     accepted = [s for s, b in bodies.items() if S.two_sided(b)]
 
     assert len(genuine) == 15          # the venue really did send both sides
-    assert accepted == []              # and the frozen reader accepts none
+    assert len(accepted) == 15         # ...and the corrected reader sees them
+    # The other reader in the pipeline agreed all along.
+    import throughput_v1 as TP
+    assert all(TP._two_sided(b) for b in bodies.values())
 
     # The other reader in the same pipeline gets it right, which is what makes
     # this a shape bug rather than a deliberate contract.
@@ -731,8 +745,8 @@ def test_two_sided_rejects_every_retained_venue_book():
     assert state == "MARKET_STATE_OPEN"
 
 
-def test_a_venue_shaped_book_is_refused_by_the_frozen_eligibility_path(as_of):
-    """The same blocker, reached through eligible_events rather than directly."""
+def test_a_venue_shaped_book_now_passes_the_eligibility_path(as_of):
+    """The same bodies, reached through eligible_events rather than directly."""
     rows = [{"id": "e1", "slug": "ev-1", "markets": [
         {"id": "m1", "slug": "m-1", "gameStartTime": "2026-09-14T18:00:00Z",
          "marketSides": [{"teamId": "A"}, {"teamId": "B"}]},
@@ -747,8 +761,54 @@ def test_a_venue_shaped_book_is_refused_by_the_frozen_eligibility_path(as_of):
     act = {m["slug"]: {"ACTIVE_AT_DECISION": True} for m in markets}
     out, rej, reasons = S.eligible_events(markets, books, as_of,
                                           activity_of=act)
+    assert len(out) == 1
+    assert len(out[0]["MARKETS"]) == S.MARKETS_PER_EVENT
+    assert all(reasons.get(m["slug"]) != "BOOK_NOT_TWO_SIDED"
+               for m in markets)
+
+
+def test_a_one_sided_book_is_still_refused_with_a_named_reason(as_of):
+    """The correction must not have weakened the requirement."""
+    rows = [{"id": "e1", "slug": "ev-1", "markets": [
+        {"id": "m1", "slug": "m-1", "gameStartTime": "2026-09-14T20:00:00Z",
+         "marketSides": [{"teamId": "A"}, {"teamId": "B"}]},
+        {"id": "m2", "slug": "m-2", "gameStartTime": "2026-09-14T20:00:00Z",
+         "marketSides": [{"teamId": "A"}, {"teamId": "B"}]}]}]
+    markets, _ = EA.extract_markets(rows)
+    cases = {
+        "m-1": BS.native_book([{"px": {"value": "0.47"}}], []),   # bids only
+        "m-2": BS.native_book([], [{"px": {"value": "0.48"}}]),   # offers only
+    }
+    act = {m["slug"]: {"ACTIVE_AT_DECISION": True} for m in markets}
+    out, rej, reasons = S.eligible_events(markets, cases, as_of,
+                                          activity_of=act)
     assert out == []
-    assert all(reasons[m["slug"]] == "BOOK_NOT_TWO_SIDED" for m in markets)
+    assert reasons["m-1"] == "BOOK_NOT_TWO_SIDED:" + BS.NO_ASKS
+    assert reasons["m-2"] == "BOOK_NOT_TWO_SIDED:" + BS.NO_BIDS
+
+
+def test_a_malformed_or_missing_book_is_refused_with_its_own_reason(as_of):
+    rows = [{"id": "e1", "slug": "ev-1", "markets": [
+        {"id": "m1", "slug": "m-1", "gameStartTime": "2026-09-14T20:00:00Z",
+         "marketSides": [{"teamId": "A"}, {"teamId": "B"}]},
+        {"id": "m2", "slug": "m-2", "gameStartTime": "2026-09-14T20:00:00Z",
+         "marketSides": [{"teamId": "A"}, {"teamId": "B"}]}]}]
+    markets, _ = EA.extract_markets(rows)
+    cases = {"m-1": {"marketData": "not-a-mapping"},
+             "m-2": {"marketData": {"bids": "not-a-list", "offers": []}}}
+    act = {m["slug"]: {"ACTIVE_AT_DECISION": True} for m in markets}
+    out, rej, reasons = S.eligible_events(markets, cases, as_of,
+                                          activity_of=act)
+    assert out == []
+    assert reasons["m-1"] == "BOOK_NOT_TWO_SIDED:" + BS.CONTAINER_NOT_A_MAPPING
+    assert reasons["m-2"] == "BOOK_NOT_TWO_SIDED:" + BS.SIDE_NOT_A_LIST
+
+
+def test_the_old_mock_shape_is_not_quietly_accepted():
+    """A test fixture may not redefine the production response contract."""
+    assert S.two_sided({"bids": [1], "asks": [1]}) is False
+    assert BS.reason({"bids": [1], "asks": [1]}) == BS.NO_CONTAINER
+    assert BS.LEGACY_TOP_LEVEL_SHAPE_IS_NOT_ACCEPTED is True
 
 
 def test_the_frozen_rule_has_no_lower_bound_on_start_time(page0):
@@ -769,7 +829,7 @@ def test_the_frozen_rule_has_no_lower_bound_on_start_time(page0):
     """
     pages = [{"body": page0}, {"body": {"events": []}}]
     by, idx, rec, st, blk = S.discovery_walk(walker(pages), page_limit=6)
-    books = {s: {"bids": [1], "asks": [1]} for s in by}
+    books = {s: two_sided_native_book() for s in by}
     act = {s: {"ACTIVE_AT_DECISION": True} for s in by}
     sel = S.freeze(list(by.values()), books, "2027-01-01T00:00:00+00:00",
                    activity_of=act)
@@ -784,7 +844,7 @@ def test_a_failed_discovery_blocks_the_roster_however_many_events_qualified(
     by, idx, rec, st, blk = S.discovery_walk(walker(pages), page_limit=6)
     cert, _ = S.certify_completion(st, rec, len(idx), S.EVENTS_PATH)
     assert cert == S.BOARD_HTTP_FAILURE
-    books = {s: {"bids": [1], "asks": [1]} for s in by}
+    books = {s: two_sided_native_book() for s in by}
     act = {s: {"ACTIVE_AT_DECISION": True} for s in by}
     sel = S.freeze(list(by.values()), books, as_of, activity_of=act)
     # Events did qualify from the rows that arrived...

@@ -156,7 +156,11 @@ def rehearse_discovery(workdir):
     with open(os.path.join(HERE, "fixtures_books_block4.json")) as fh:
         bx = json.load(fh)
     page0 = fx["RETAINED_PAGES"][0]["body"]
-    as_of = fx["AS_OF_UTC"]
+    # THE LATER OF THE TWO RETAINED CAPTURES. Serving a book captured at
+    # 19:48 while claiming a 17:13 decision time would present evidence as
+    # available before it existed.
+    as_of = bx["AS_OF_UTC"]
+    assert as_of >= fx["AS_OF_UTC"], "as-of precedes the retained event bodies"
 
     print("  event bodies  %s  RETAINED  (%d retained, %d embedded)"
           % (fx["PROVENANCE"]["SOURCE_RUN"],
@@ -166,7 +170,12 @@ def rehearse_discovery(workdir):
           "SYNTHETIC for the rest" % bx["RETAINED"]["COUNT"])
     print("  terminal page SYNTHETIC (%s)"
           % fx["SYNTHETIC_PAGES"]["DECLARED_TERMINAL_EMPTY_PAGE"]["PROVENANCE"])
-    print("  as-of         %s  INJECTED, HISTORICAL" % as_of)
+    print("  as-of         %s  INJECTED, HISTORICAL "
+          "(>= both retained captures)" % as_of)
+    print("  events cap.   %s   books cap.  %s"
+          % (fx["AS_OF_UTC"], bx["AS_OF_UTC"]))
+    import rehearsal_transport as _T
+    print("  synthetic clk %s" % _T.SYNTHETIC_CLOCK_ASSUMPTION[:96])
 
     sel_path = os.path.join(workdir, "selection.json")
     pages = [page0, {"events": []}]
@@ -261,22 +270,44 @@ def diagnose_book_shape():
             accepted += 1
     bid, ask, state = EL.book_bbo(list(bodies.values())[0])
 
-    print("  retained venue books                       %d" % len(bodies))
+    import throughput_v1 as TP
+    import book_schema as BS
+    tp_accepted = sum(1 for b in bodies.values() if TP._two_sided(b))
+
+    print("  retained venue books                         %d" % len(bodies))
     print("  genuinely two-sided (marketData.bids+offers) %d"
           % genuinely_two_sided)
     print("  accepted by substantive_select.two_sided     %d" % accepted)
+    print("  accepted by throughput_v1._two_sided         %d" % tp_accepted)
     print("  eligibility.book_bbo on the same body        bid=%s ask=%s state=%s"
           % (bid, ask, state))
     print()
-    print("  two_sided() reads   book_body['bids'] / book_body['asks']")
-    print("  the venue sends     body['marketData']['bids'] / ['offers']")
-    print("  book_bbo() reads    body['marketData']['bids'] / ['offers']  <- matches")
+    print("  both readers now route through book_schema: %s"
+          % BS.NATIVE_BOOK_PATH)
     print()
-    print("  BOOK_SHAPE_INCOMPATIBILITY = CONFIRMED")
-    print("  EFFECT: every candidate is rejected BOOK_NOT_TWO_SIDED, so no")
-    print("          event ever reaches MARKETS_PER_EVENT and the roster is")
-    print("          always short. NOT REPAIRED HERE: the eligibility path is")
-    print("          frozen by the management decision.")
+
+    # THE REQUIREMENT DID NOT WEAKEN, AND THIS SHOWS IT ON THE SAME PATH.
+    checks = [
+        ("one-sided (bids only)", BS.native_book([{"px": {"value": "1"}}], [])),
+        ("one-sided (offers only)", BS.native_book([], [{"px": {"value": "1"}}])),
+        ("empty book", BS.native_book([], [])),
+        ("no body at all", None),
+        ("marketData not a mapping", {"marketData": "nope"}),
+        ("a side that is not a list", {"marketData": {"bids": "x",
+                                                      "offers": []}}),
+        ("the OLD MOCK shape", {"bids": [1], "asks": [1]}),
+    ]
+    bad = [n for n, b in checks if S.two_sided(b)]
+    for n, b in checks:
+        print("  refused: %-26s %s" % (n, BS.reason(b)))
+
+    ok = (accepted == genuinely_two_sided == len(bodies)
+          and tp_accepted == len(bodies) and not bad)
+    print()
+    print("  NATIVE_BOOK_SCHEMA_CORRECTION = %s"
+          % ("APPLIED_AND_VERIFIED" if ok else "INCONSISTENT"))
+    if bad:
+        print("  WEAKENED: these should have been refused: %s" % bad)
     return accepted, genuinely_two_sided
 
 

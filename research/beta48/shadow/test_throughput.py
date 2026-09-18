@@ -19,6 +19,7 @@ import inspect
 import unittest
 from pathlib import Path
 
+import book_schema as BS
 import throughput_v1 as T
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -39,8 +40,11 @@ def future(slug, start, tid=900):
 
 
 def book():
-    return {"bids": [{"price": "0.50", "size": "100"}],
-            "asks": [{"price": "0.52", "size": "100"}]}
+    # NATIVE VENUE SHAPE. The old {"bids": ..., "asks": ...} literal was
+    # a shape the venue never sends; it is what hid the book-schema
+    # defect. book_schema.native_book emits the production contract.
+    return BS.native_book([{"px": {"value": "0.50"}, "qty": "100"}],
+                          [{"px": {"value": "0.52"}, "qty": "100"}])
 
 
 class TheFunnelStopsWhereTheEvidenceStops(unittest.TestCase):

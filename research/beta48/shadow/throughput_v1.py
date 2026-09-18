@@ -27,6 +27,7 @@ shape that flatters a system into trading.
 
 This module contacts nothing and can place no order.
 """
+import book_schema as _BS
 import json
 from collections import Counter, defaultdict
 from datetime import datetime, timezone
@@ -97,9 +98,14 @@ def _parse(ts):
 
 
 def _two_sided(book):
-    if not isinstance(book, dict):
-        return False
-    return bool(book.get("bids")) and bool(book.get("asks"))
+    """NATIVE-SCHEMA CORRECTION (authorised 2026-09-18).
+
+    Read the venue's own shape -- marketData.bids / marketData.offers -- via
+    the one shared reader, so this funnel and substantive_select's selection
+    can no longer disagree about what a two-sided book is. The requirement is
+    unchanged: both sides, or it does not count.
+    """
+    return _BS.two_sided(book)
 
 
 def funnel(board_rows, books_by_slug=None, activity_of=None, now_iso=None,

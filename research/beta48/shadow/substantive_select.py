@@ -39,6 +39,7 @@ import json
 from datetime import datetime, timezone
 from pathlib import Path
 
+import book_schema as BS
 import event_identity as EI
 import events_adapter as EA
 
@@ -136,12 +137,25 @@ def _salt_rank(key):
 
 
 def two_sided(book_body):
-    """A book with a bid AND an ask. One side is not a two-sided book."""
-    if not isinstance(book_body, dict):
-        return False
-    bids = book_body.get("bids") or []
-    asks = book_body.get("asks") or []
-    return bool(bids) and bool(asks)
+    """A book with a bid AND an offer. One side is not a two-sided book.
+
+    NATIVE-SCHEMA CORRECTION (authorised 2026-09-18). This used to read
+    book_body["bids"] / ["asks"]; the venue sends
+    body["marketData"]["bids"] / ["offers"]. All 15 retained BLOCK_4 books are
+    genuinely two-sided and the old reader accepted none of them, so every
+    candidate was refused BOOK_NOT_TWO_SIDED and the roster could never fill.
+
+    The REQUIREMENT is unchanged -- both sides, or it is not a two-sided book.
+    Only the field names it looks under are corrected, and they are defined
+    once in `book_schema` so this reader and throughput_v1's cannot drift
+    apart again.
+    """
+    return BS.two_sided(book_body)
+
+
+def book_refusal_reason(book_body):
+    """Why a book was not two-sided, for the row-accounting reason string."""
+    return BS.reason(book_body)
 
 
 def identity_block(market):
@@ -236,7 +250,11 @@ def eligible_events(markets, books_by_slug, now_iso,
                 row_reason[slug] = "NO_BOOK_READ_WITHIN_READ_BUDGET"
                 continue
             if not two_sided(books_by_slug.get(slug)):
-                row_reason[slug] = "BOOK_NOT_TWO_SIDED"
+                # The SPECIFIC reason, not a single flat verdict: a book that
+                # never arrived, a malformed container and a genuinely
+                # one-sided book are three different facts about the venue.
+                row_reason[slug] = "BOOK_NOT_TWO_SIDED:%s" % (
+                    book_refusal_reason(books_by_slug.get(slug)))
                 continue
             if not (act.get("HIGH_ACTIVITY_AT_DECISION")
                     or act.get("ACTIVE_AT_DECISION")

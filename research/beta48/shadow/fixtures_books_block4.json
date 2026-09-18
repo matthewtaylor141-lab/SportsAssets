@@ -3331,6 +3331,13 @@
   "stats",
   "transactTime"
  ],
- "AS_OF_UTC": "2026-09-14T17:13:39Z",
- "AS_OF_IS_HISTORICAL": true
+ "AS_OF_UTC": "2026-09-14T19:48:59Z",
+ "AS_OF_IS_HISTORICAL": true,
+ "AS_OF_COHERENCE": {
+  "RULE": "the injected as-of is at or after every retained capture it serves",
+  "EVENT_BODIES_CAPTURED_AT": "2026-09-14T17:13:39Z",
+  "BOOK_BODIES_CAPTURED_AT": "2026-09-14T19:48:59Z",
+  "REHEARSAL_AS_OF": "2026-09-14T19:48:59Z",
+  "WHY": "a book captured at 19:48 must not be presented as available at 17:13. The board is read before the books in the real run too, so board-older-than-books is the natural order."
+ }
 }

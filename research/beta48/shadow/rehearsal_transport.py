@@ -36,8 +36,14 @@ def _px(v):
     return {"px": {"value": "%.4f" % v, "currency": "USD"}, "qty": "500.0000"}
 
 
+SYNTHETIC_CLOCK_ASSUMPTION = (
+    "lastTradeSetTime and transactTime are set to the injected as-of, i.e. a "
+    "trade at the decision instant. Recency is therefore 0 s by construction; "
+    "this is an assumption of the fixture, not an observation of the venue.")
+
+
 def synthetic_book(slug, as_of_iso, bid=0.4700, ask=0.4800):
-    """A two-sided book in the VENUE'S OWN SHAPE.
+    """A two-sided book in the VENUE'S OWN SHAPE. SYNTHETIC.
 
     marketData.bids / marketData.offers -- not top-level bids/asks. Getting
     this wrong is precisely the defect the rehearsal exists to expose, so the

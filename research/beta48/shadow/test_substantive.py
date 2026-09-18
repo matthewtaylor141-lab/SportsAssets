@@ -18,6 +18,7 @@ from pathlib import Path
 import collect as C
 import substantive_capture as SC
 import substantive_harvest as SH
+import book_schema as BS
 import substantive_select as SS
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -32,8 +33,11 @@ def market(slug, start, tids, league="nfl"):
 
 
 def book(bid="0.50", ask="0.51"):
-    return {"bids": [{"price": bid, "size": "100"}],
-            "asks": [{"price": ask, "size": "100"}]}
+    # NATIVE VENUE SHAPE. The old {"bids": ..., "asks": ...} literal was
+    # a shape the venue never sends; it is what hid the book-schema
+    # defect. book_schema.native_book emits the production contract.
+    return BS.native_book([{"px": {"value": bid}, "qty": "100"}],
+                          [{"px": {"value": ask}, "qty": "100"}])
 
 
 def roster(n_events=3, start="2026-09-17T10:30:00+00:00"):
@@ -83,7 +87,9 @@ class SelectionIsFrozenBeforeTheFirstSampledGet(unittest.TestCase):
 
     def test_a_one_sided_book_is_not_a_two_sided_book(self):
         ms, books, act = roster()
-        books["ev0-m0"] = {"bids": [{"price": "0.5", "size": "1"}], "asks": []}
+        # A ONE-SIDED book in the venue's NATIVE shape: bids, no offers.
+        books["ev0-m0"] = {"marketData": {
+            "bids": [{"px": {"value": "0.5"}, "qty": "1"}], "offers": []}}
         sel = SS.freeze(ms, books, NOW, activity_of=act)
         self.assertEqual(sel["SELECTION_STATUS"],
                          "INSUFFICIENT_QUALIFYING_EVENTS")
