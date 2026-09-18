@@ -134,24 +134,43 @@ jobs:
             --out "evidence/substantive_$SEG/provenance_pre_get.json"
           echo "EXECUTED_SHA=$EXECUTED_SHA" >> "$GITHUB_ENV"
 
-      # GATE 3. No venue contact while another direct collector is running.
-      # A PENDING collector is not a confound -- it is the domain working, and
-      # it makes no request while it waits.
+      # GATE 3. THE COMPLETE CLEAN-START CENSUS, BEFORE ANY VENUE REQUEST.
+      #
+      # WHAT THIS STEP USED TO DO, AND WHY IT WAS NOT THE CENSUS.
+      # It curled ONE page of /actions/runs?status=in_progress and handed it to
+      # venue_domain.py. That CLI reads the rows it is given; it does not
+      # import run_census and never did. So the repaired census -- unfiltered
+      # retrieval per discovered workflow, pagination walked to verified
+      # exhaustion, a required non-empty inventory, reconciliation against the
+      # API's own totals, and the unattributable-row check -- was never
+      # executed by this job. Worse, `status=in_progress` HID every waiting
+      # row, and queued/pending/requested/waiting are precisely the states a
+      # concurrency-held collector sits in: the filter removed the population
+      # the gate exists to see.
+      #
+      # startup_census.py is the caller that was missing. It runs the census
+      # machinery UNCHANGED, refuses by name on an empty inventory, an
+      # unresolved walk, a retrieval error, a malformed response, an
+      # unrecognised status or an unattributable occupying row, and only then
+      # applies venue_domain's own isolation verdict to the complete
+      # population.
+      #
+      # THE POLICY IS UNCHANGED. A RUNNING domain member blocks. A WAITING one
+      # also blocks a START -- not as venue load, which it is not, but because
+      # a newer queued run can displace an older pending one. The two are
+      # counted separately (ACTIVE_ vs PENDING_DIRECT_CONFLICTS) so a
+      # compliant waiter is never reported as venue traffic.
       - name: Prove BETTOR collector isolation at start
         working-directory: research/beta48/shadow
         env:
           SEG: ${{ github.run_id }}
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          GITHUB_REPOSITORY: ${{ github.repository }}
         run: |
           set -e
-          curl -sS -H "Authorization: Bearer $GH_TOKEN" \
-               -H "Accept: application/vnd.github+json" \
-               "https://api.github.com/repos/${{ github.repository }}/actions/runs?status=in_progress&per_page=100" \
-               -o /tmp/active_start.json
-          python venue_domain.py --root ../../.. \
-            --active-runs /tmp/active_start.json \
+          python startup_census.py --root ../../.. \
+            --repo "$GITHUB_REPOSITORY" \
             --self-run-id "$SEG" \
-            --mode start \
             --out "evidence/substantive_$SEG/isolation_at_start.json"
 
       # GATE 4. THE ROSTER, FROZEN BEFORE THE FIRST SAMPLED GET. Selection reads
