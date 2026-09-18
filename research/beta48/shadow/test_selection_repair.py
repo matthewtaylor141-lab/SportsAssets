@@ -254,6 +254,17 @@ class Test5_EveryCandidateIsAccountedFor(unittest.TestCase):
                       " ".join(sel["ROW_ACCOUNTING"]["REASON_COUNTS"]))
 
 
+class _Resp:
+    """The response shape SS.board_walk() actually receives."""
+
+    def __init__(self, body, status=200):
+        self.status_code = status
+        self._body = body
+
+    def json(self):
+        return self._body
+
+
 class Test6_PaginationCannotSilentlyTruncate(unittest.TestCase):
 
     def test_the_cap_is_a_runaway_bound_far_above_the_observed_board(self):
@@ -265,20 +276,43 @@ class Test6_PaginationCannotSilentlyTruncate(unittest.TestCase):
         """600 rows was the whole defect."""
         self.assertGreater(SS.BOARD_MAX_PAGES, 6)
 
+    # SUPERSEDED BY THE RUN 35333848994 REPAIR. These two used to read the
+    # source text of SS._cli() for the boolean `exhausted`. That boolean was
+    # the defect: it collapsed a non-200, an unreadable body, a repeated page
+    # and a genuinely empty page into one "YES". The walk now lives in
+    # SS.board_walk() and returns a STATUS, so the assertions move from source
+    # text to behaviour. The intent -- a cap is not an exhausted board, and a
+    # short or repeated page terminates the walk -- is preserved below and
+    # covered in depth by test_board_retrieval.py.
+
     def test_hitting_the_cap_is_reported_as_not_exhausted(self):
-        import inspect
-        src = inspect.getsource(SS._cli)
-        self.assertIn('"BOARD_LIST_EXHAUSTED": "YES" if exhausted else "NO"',
-                      src)
-        # Exhaustion starts FALSE and is only set true by a terminal page, so
-        # running out of cap leaves it NO rather than silently claiming YES.
-        self.assertIn("by_slug, pages, exhausted = {}, 0, False", src)
-        self.assertIn("exhausted = True", src)
+        def get(params):
+            n = params["offset"]
+            return _Resp({"markets": [{"slug": "s%d" % (n + i)}
+                                      for i in range(2)]})
+
+        by_slug, receipts, st = SS.board_walk(get, max_pages=3, page_limit=2)
+        self.assertEqual(st, SS.BOARD_PAGE_CAP_REACHED)
+        blk = SS.board_retrieval_block(by_slug, receipts, st)
+        self.assertEqual(blk["BOARD_LIST_EXHAUSTED"], "NO")
+        self.assertFalse(blk["BOARD_UNIVERSE_ENUMERATED"])
 
     def test_a_short_page_or_a_stale_page_ends_the_walk(self):
-        import inspect
-        src = inspect.getsource(SS._cli)
-        self.assertIn("fresh == 0", src)
+        full = {"markets": [{"slug": "a"}, {"slug": "b"}]}
+
+        def short(params):
+            return _Resp(full if params["offset"] == 0
+                         else {"markets": [{"slug": "c"}]})
+
+        _, _, st = SS.board_walk(short, page_limit=2)
+        self.assertEqual(st, SS.BOARD_VERIFIED_END)
+
+        def stale(params):
+            return _Resp(full)
+
+        _, rec, st = SS.board_walk(stale, page_limit=2)
+        self.assertEqual(st, SS.BOARD_PAGINATION_STALLED)
+        self.assertTrue(rec[-1]["REPEATED_EARLIER_PAGE"])
 
 
 class Test7_IdentityTravelsIntoTheCaptureOutput(unittest.TestCase):

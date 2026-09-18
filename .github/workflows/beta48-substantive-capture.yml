@@ -152,6 +152,38 @@ jobs:
             --window-s "${{ github.event.inputs.capture_seconds || 5400 }}" \
             --out "evidence/substantive_$SEG/selection.json"
 
+      # ORCHESTRATION v2 -- THE MANIFEST IS WRITTEN HERE, NOT AFTERWARDS.
+      #
+      # v1 left the manifest to an external check-in that could only run after
+      # the job was already sampling, so the ordering the evidence claims
+      # (approval -> frozen selection -> roster-bearing manifest -> first
+      # sampled GET) was not the ordering the job enforced. This step sits
+      # BETWEEN the frozen selection and the first sampled GET, reads the
+      # roster the previous step just froze, and fails the job if the manifest
+      # cannot be written or does not verify. `set -e` plus no `if: always()`
+      # means the capture below cannot run without it.
+      #
+      # Nothing here is backdated. CAPTURE_START_UTC is stamped by this step,
+      # before sampling, and the sampling step records its own start.
+      - name: Write the immutable manifest before any sampled GET
+        working-directory: research/beta48/shadow
+        env:
+          SEG: ${{ github.run_id }}
+          ORCHESTRATION_VERSION: "2"
+        run: |
+          set -e
+          python capture_manifest.py \
+            --orchestration-version "$ORCHESTRATION_VERSION" \
+            --selection "evidence/substantive_$SEG/selection.json" \
+            --code-sha "${{ github.event.inputs.code_sha }}" \
+            --run-id "$SEG" \
+            --capture-seconds "${{ github.event.inputs.capture_seconds || 5400 }}" \
+            --indirect-isolation-regime "DISCLOSED_RESIDUAL" \
+            --out "evidence/substantive_$SEG/capture_manifest.json"
+          python capture_manifest.py --verify \
+            --manifest "evidence/substantive_$SEG/capture_manifest.json" \
+            --selection "evidence/substantive_$SEG/selection.json"
+
       # THE CAPTURE. 0.25 rps, 4.0 s apart, 6 markets, 90 minutes.
       - name: Substantive public-book capture
         working-directory: research/beta48/shadow

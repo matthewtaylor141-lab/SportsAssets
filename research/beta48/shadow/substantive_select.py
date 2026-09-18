@@ -51,6 +51,56 @@ CAPTURE_WINDOW_S_DEFAULT = 90 * 60
 
 SELECTION_OK = "FROZEN"
 SELECTION_INSUFFICIENT = "INSUFFICIENT_QUALIFYING_EVENTS"
+SELECTION_BOARD_INCOMPLETE = "BOARD_RETRIEVAL_INCOMPLETE"
+
+# --- Board retrieval: five outcomes, only one of which is an enumerated board.
+#
+# RUN 35333848994 IS WHY THIS EXISTS. The walk did
+#
+#     body = r.json() if r.status_code == 200 else {}
+#     items = body.get("markets") or body.get("data") or []
+#     if not items or fresh == 0:
+#         exhausted = True
+#
+# so a non-200, a 200 whose payload used a key we do not read, and a page the
+# server repeated because it ignored `offset` ALL produced the same bytes as a
+# genuinely empty page -- and every one of them was then written down as
+# BOARD_LIST_EXHAUSTED = YES. The run reported INSUFFICIENT_QUALIFYING_EVENTS
+# over a universe of ONE market. A failed retrieval is not a small board.
+#
+# Only VERIFIED_END_OF_BOARD may be called an enumerated universe. The others
+# say what went wrong and leave the universe unproven.
+BOARD_VERIFIED_END = "VERIFIED_END_OF_BOARD"
+BOARD_HTTP_FAILURE = "HTTP_FAILURE"
+BOARD_SCHEMA_FAILURE = "SCHEMA_FAILURE"
+BOARD_PAGINATION_STALLED = "PAGINATION_STALLED"
+BOARD_PAGE_CAP_REACHED = "PAGE_CAP_REACHED"
+# A SIXTH STATUS, STRICTER THAN THE FIVE ASKED FOR, AND HERE IS WHY.
+# The failed run's FIRST request returned one row against limit=100. Treating
+# a short FIRST page as a verified end would certify "the venue's whole board
+# is one market" from a single request in which pagination was never observed
+# to work at all -- the same unsupported claim the repair exists to stop, in
+# new clothes. An enumeration needs pagination to have demonstrably advanced:
+# at least one full page, or an explicitly empty follow-on page.
+BOARD_SINGLE_PAGE_UNCORROBORATED = "SINGLE_PAGE_UNCORROBORATED"
+BOARD_RETRIEVAL_STATUSES = (
+    BOARD_VERIFIED_END, BOARD_HTTP_FAILURE, BOARD_SCHEMA_FAILURE,
+    BOARD_PAGINATION_STALLED, BOARD_PAGE_CAP_REACHED,
+    BOARD_SINGLE_PAGE_UNCORROBORATED)
+ONE_REQUEST_IS_NOT_AN_ENUMERATION = (
+    "a short first page says the venue returned fewer rows than we asked for "
+    "on one request; it does not say the board ends there, because nothing "
+    "in that single exchange shows paging working. Only a full page followed "
+    "by a shorter or empty one demonstrates the walk advanced and then ended")
+VALID_UNIVERSE_WITH_SELECTION_SHORTFALL = (
+    "VALID_UNIVERSE_WITH_SELECTION_SHORTFALL")
+A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD = (
+    "a non-200, an unparseable body, a body with no row key we read, and a "
+    "page the server repeated are four different failures. Converting any of "
+    "them to an empty list and calling the walk exhausted turns 'we could not "
+    "read the board' into 'the board is empty', which is the one claim the "
+    "evidence cannot support")
+ROW_KEYS = ("markets", "data", "items", "results")
 WAIT_RATHER_THAN_SUBSTITUTE = (
     "a stale future substituted to fill the roster answers a different "
     "question while looking like an answer to this one")
@@ -406,6 +456,141 @@ BOARD_CAP_IS_A_RUNAWAY_BOUND_NOT_A_STOP_RULE = True
 CANDIDATE_BOOK_READS_MAX = 40
 
 
+def _rows_of(body):
+    """Return (rows, shape). `rows` is None when no row key could be read.
+
+    The distinction that run 35333848994 lost: a recognised key holding an
+    EMPTY list is a real short page; a body with no recognised key at all is a
+    schema failure. Both used to become `[]`.
+    """
+    if isinstance(body, list):
+        return list(body), "BARE_LIST"
+    if not isinstance(body, dict):
+        return None, "NOT_A_MAPPING_OR_LIST:%s" % type(body).__name__
+    for k in ROW_KEYS:
+        if k in body:
+            v = body[k]
+            if isinstance(v, list):
+                return list(v), "MAPPING_KEY:%s" % k
+            return None, "MAPPING_KEY_NOT_A_LIST:%s:%s" % (k, type(v).__name__)
+    return None, "NO_ROW_KEY:%s" % ",".join(sorted(body)[:8])
+
+
+def _pagination_fields(body):
+    """Whatever the venue says about paging, recorded and never interpreted."""
+    if not isinstance(body, dict):
+        return {}
+    names = ("next", "next_cursor", "nextCursor", "cursor", "offset", "limit",
+             "total", "total_count", "totalCount", "has_more", "hasMore",
+             "page", "pages", "count")
+    return {n: body[n] for n in names if n in body}
+
+
+def board_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
+               endpoint=MARKETS_PATH):
+    """Walk the board, classifying HOW the walk ended and retaining receipts.
+
+    `get(params)` returns a response carrying `.status_code` and `.json()`;
+    injecting it is what makes this path testable without a venue, which is
+    the second half of the defect -- the old walk lived inside `_cli()` and
+    only the pure eligibility functions had tests.
+
+    Returns (by_slug, receipts, status). Only BOARD_VERIFIED_END means the
+    universe was enumerated.
+    """
+    by_slug, receipts, status = {}, [], BOARD_PAGE_CAP_REACHED
+    pages = 0
+    while pages < max_pages:
+        params = {"active": "true", "closed": "false",
+                  "limit": page_limit, "offset": pages * page_limit}
+        rec = {"PAGE": pages, "ENDPOINT": endpoint, "PARAMS": dict(params),
+               "HTTP_STATUS": NOT_IDENTIFIED, "RESPONSE_SHAPE": NOT_IDENTIFIED,
+               "ROWS_RETURNED": NOT_IDENTIFIED, "FRESH_SLUGS": NOT_IDENTIFIED,
+               "PAGINATION_FIELDS": {}, "REPEATED_EARLIER_PAGE": NOT_IDENTIFIED,
+               "ERROR": NOT_IDENTIFIED}
+        try:
+            r = get(params)
+            rec["HTTP_STATUS"] = getattr(r, "status_code", NOT_IDENTIFIED)
+        except Exception as e:                                # noqa: BLE001
+            rec["ERROR"] = "%s: %s" % (type(e).__name__, e)
+            receipts.append(rec)
+            status = BOARD_HTTP_FAILURE
+            break
+        pages += 1
+        if rec["HTTP_STATUS"] != 200:
+            receipts.append(rec)
+            status = BOARD_HTTP_FAILURE
+            break
+        try:
+            body = r.json()
+        except Exception as e:                                # noqa: BLE001
+            rec["ERROR"] = "%s: %s" % (type(e).__name__, e)
+            rec["RESPONSE_SHAPE"] = "UNPARSEABLE_BODY"
+            receipts.append(rec)
+            status = BOARD_SCHEMA_FAILURE
+            break
+        rows, shape = _rows_of(body)
+        rec["RESPONSE_SHAPE"] = shape
+        rec["PAGINATION_FIELDS"] = _pagination_fields(body)
+        if rows is None:
+            rec["ROWS_RETURNED"] = 0
+            receipts.append(rec)
+            status = BOARD_SCHEMA_FAILURE
+            break
+        fresh = 0
+        for m in rows:
+            if isinstance(m, dict) and m.get("slug") not in by_slug:
+                by_slug[m["slug"]] = m
+                fresh += 1
+        rec["ROWS_RETURNED"] = len(rows)
+        rec["FRESH_SLUGS"] = fresh
+        rec["REPEATED_EARLIER_PAGE"] = bool(rows) and fresh == 0
+        receipts.append(rec)
+        if not rows:
+            # An empty follow-on page is a real end; an empty FIRST page is
+            # one request that returned nothing and proves no enumeration.
+            status = (BOARD_VERIFIED_END if pages > 1
+                      else BOARD_SINGLE_PAGE_UNCORROBORATED)
+            break
+        if fresh == 0:
+            status = BOARD_PAGINATION_STALLED    # server ignored `offset`
+            break
+        if len(rows) < page_limit:
+            status = (BOARD_VERIFIED_END if pages > 1
+                      else BOARD_SINGLE_PAGE_UNCORROBORATED)
+            break
+    return by_slug, receipts, status
+
+
+def board_retrieval_block(by_slug, receipts, status):
+    """The evidence block the run seals, with the claim it is allowed to make."""
+    complete = status == BOARD_VERIFIED_END
+    return {
+        "BOARD_RETRIEVAL_STATUS": status,
+        "BOARD_RETRIEVAL_STATUSES": BOARD_RETRIEVAL_STATUSES,
+        "BOARD_LIST_EXHAUSTED": "YES" if complete else "NO",
+        "BOARD_UNIVERSE_ENUMERATED": complete,
+        "BOARD_PAGES_FETCHED": len(receipts),
+        "BOARD_MARKETS_SEEN": len(by_slug),
+        "BOARD_REQUEST_RECEIPTS": tuple(receipts),
+        "A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD":
+            A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD,
+    }
+
+
+def selection_status(board_status, roster_ok):
+    """A shortfall may only be blamed on the board when the board was read.
+
+    VALID_UNIVERSE_WITH_SELECTION_SHORTFALL is the ONLY reading under which
+    'not enough qualifying events' is a statement about the venue.
+    """
+    if board_status != BOARD_VERIFIED_END:
+        return SELECTION_BOARD_INCOMPLETE + ":" + board_status
+    if roster_ok:
+        return SELECTION_OK
+    return VALID_UNIVERSE_WITH_SELECTION_SHORTFALL
+
+
 def _cli():                                                   # pragma: no cover
     import argparse
     import time
@@ -430,26 +615,15 @@ def _cli():                                                   # pragma: no cover
         # THE BOARD. Deduped by slug, and a page that adds nothing new ends the
         # walk -- this venue family has been observed to ignore paging params,
         # and a repeated page would make one market look like a whole board.
-        by_slug, pages, exhausted = {}, 0, False
-        while pages < BOARD_MAX_PAGES:
+        counted = []
+
+        def _get(params):
             pacer.wait()
-            reads += 1
-            r = http.get(C.HOST + MARKETS_PATH,
-                         params={"active": "true", "closed": "false",
-                                 "limit": BOARD_PAGE_LIMIT,
-                                 "offset": pages * BOARD_PAGE_LIMIT},
-                         timeout=20.0)
-            pages += 1
-            body = r.json() if r.status_code == 200 else {}
-            items = body.get("markets") or body.get("data") or []
-            fresh = 0
-            for m in items if isinstance(items, list) else ():
-                if isinstance(m, dict) and m.get("slug") not in by_slug:
-                    by_slug[m["slug"]] = m
-                    fresh += 1
-            if not items or fresh == 0:
-                exhausted = True
-                break
+            counted.append(1)
+            return http.get(C.HOST + MARKETS_PATH, params=params, timeout=20.0)
+
+        by_slug, receipts, board_status = board_walk(_get)
+        reads += len(counted)
 
         # CANDIDATES FIRST, BOOKS SECOND. Only markets that already carry a
         # venue-native contest identity inside the horizon are worth a book
@@ -490,12 +664,19 @@ def _cli():                                                   # pragma: no cover
         "SELECTION_READS_ARE_PACED_AT_THE_CAPTURE_RATE": True,
         "SELECTION_READS_PRECEDE_THE_FIRST_SAMPLED_GET": True,
         "SELECTION_READS_ARE_NOT_CAPTURE_OBSERVATIONS": True,
-        "BOARD_PAGES_FETCHED": pages,
-        "BOARD_LIST_EXHAUSTED": "YES" if exhausted else "NO",
-        "BOARD_MARKETS_SEEN": len(by_slug),
         "CANDIDATES_BOOK_READ": len(books),
         "SYS_PATH_NOTE": sys_path_note,
     })
+    sel.update(board_retrieval_block(by_slug, receipts, board_status))
+    # THE SHORTFALL MAY ONLY BE BLAMED ON THE VENUE IF THE BOARD WAS READ.
+    sel["SELECTION_STATUS"] = selection_status(
+        board_status, sel.get("EVENT_SELECTION_FROZEN") == "YES")
+    # AN UNENUMERATED BOARD MAY NOT START A CAPTURE, even if three events
+    # happened to qualify out of the rows that did arrive. The roster would
+    # be drawn from a universe nobody can describe.
+    if board_status != BOARD_VERIFIED_END:
+        sel["CAPTURE_MAY_START"] = "NO"
+        sel["CAPTURE_BLOCKED_BY"] = "BOARD_RETRIEVAL_" + board_status
     write(a.out, sel)
     print(render(sel))
     if sel["CAPTURE_MAY_START"] != "YES":

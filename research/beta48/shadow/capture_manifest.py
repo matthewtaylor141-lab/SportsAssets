@@ -297,3 +297,177 @@ def describe():
         "THRESHOLD_DRIFT_IS_THE_WORST_KIND": THRESHOLD_DRIFT_IS_THE_WORST_KIND,
         "THIS_MODULE_CONTACTS_NOTHING": THIS_MODULE_CONTACTS_NOTHING,
     }
+
+
+# --- The in-job manifest step (ORCHESTRATION v2). --------------------------
+#
+# RUN 35333848994 IS WHY THIS EXISTS AS A CLI.
+#
+# Under v1 the manifest was written by an EXTERNAL check-in fired after the
+# job had been dispatched, which meant the ordering the evidence claimed --
+# approval, frozen selection, roster-bearing manifest, first sampled GET --
+# was not the ordering anything enforced. The check-in could only arrive once
+# sampling had already begun, and a manifest written then and called
+# "pre-capture" would be a backdated record.
+#
+# This entry point runs INSIDE the job, between the frozen selection and the
+# first sampled GET. It reads the roster the selection step just froze, so it
+# cannot invent one; it refuses if the selection did not freeze; and because
+# the workflow runs it with `set -e` and no `if: always()`, the capture step
+# below it cannot execute unless it succeeded.
+ORCHESTRATION_VERSION = "2"
+ORDERING_IS_ENFORCED_BY_THE_JOB_NOT_A_CHECK_IN = (
+    "approval -> frozen selection -> roster-bearing manifest -> first sampled "
+    "GET. v1 left the third step to an external check-in that could only run "
+    "after sampling may have started, so the ordering was asserted rather "
+    "than enforced. v2 executes it in the job, before the sampling step")
+A_MANIFEST_WRITTEN_AFTER_SAMPLING_IS_NOT_A_PRE_CAPTURE_MANIFEST = (
+    "stamping a manifest with a start time that has already passed does not "
+    "make it a pre-capture record; it makes it a backdated one. The manifest "
+    "step stamps CAPTURE_START_UTC itself, before any sampled GET exists")
+
+
+def manifest_from_selection(selection, code_sha, run_id, capture_seconds,
+                            host, selection_sha, capture_spec_sha,
+                            capture_start_utc, request_policy,
+                            rate_limit_parameters, scientific_definitions,
+                            frozen_quality_thresholds=None,
+                            frozen_quality_thresholds_sha=None,
+                            poll_interval_s=4.0, rate_rps="0.25",
+                            indirect_isolation_regime="DISCLOSED_RESIDUAL"):
+    """Build the manifest from the roster the selection step actually froze.
+
+    Refuses a selection that did not freeze: a manifest with no roster is the
+    thing the write-once rule most needs to keep off disk.
+    """
+    if selection.get("EVENT_SELECTION_FROZEN") != "YES":
+        raise ValueError(
+            "SELECTION_NOT_FROZEN: EVENT_SELECTION_FROZEN=%r "
+            "SELECTION_STATUS=%r -- no roster, so no manifest"
+            % (selection.get("EVENT_SELECTION_FROZEN"),
+               selection.get("SELECTION_STATUS")))
+    event_ids = list(selection.get("EVENT_IDS") or ())
+    market_ids = list(selection.get("MARKET_IDS") or ())
+    if not event_ids or not market_ids:
+        raise ValueError("SELECTION_FROZEN_BUT_ROSTER_EMPTY: events=%d "
+                         "markets=%d" % (len(event_ids), len(market_ids)))
+    m = build_manifest(
+        code_sha=code_sha,
+        capture_start_utc=capture_start_utc,
+        capture_seconds=capture_seconds,
+        event_ids=event_ids,
+        market_ids=market_ids,
+        market_families=list(selection.get("MARKET_FAMILIES")
+                             or selection.get("MARKET_SLUGS") or ()),
+        poll_interval_s=poll_interval_s,
+        rate_rps=rate_rps,
+        request_policy=request_policy,
+        selection_sha=selection_sha,
+        capture_spec_sha=capture_spec_sha,
+        run_id=run_id,
+        host=host,
+        rate_limit_parameters=rate_limit_parameters,
+        scientific_definitions=scientific_definitions,
+        frozen_quality_thresholds=frozen_quality_thresholds,
+        frozen_quality_thresholds_sha=frozen_quality_thresholds_sha)
+    # The approval scope travels with the manifest, unaltered and unclaimed.
+    m["ORCHESTRATION_VERSION"] = ORCHESTRATION_VERSION
+    m["INDIRECT_ISOLATION_REGIME"] = indirect_isolation_regime
+    m["INDIRECT_BETTOR_PMUS_LOAD_ISOLATION"] = "NOT_ESTABLISHED"
+    m["INDIRECT_CONFOUND_MAGNITUDE"] = NOT_IDENTIFIED
+    m["ORDERING_IS_ENFORCED_BY_THE_JOB_NOT_A_CHECK_IN"] = (
+        ORDERING_IS_ENFORCED_BY_THE_JOB_NOT_A_CHECK_IN)
+    m["MANIFEST_PRECEDES_FIRST_SAMPLED_GET"] = True
+    m["MANIFEST_SHA"] = recompute_sha(m)
+    return m
+
+
+def manifest_binds_selection(manifest, selection):
+    """The manifest must name the roster this selection froze -- no other."""
+    out = {
+        "MANIFEST_INTACT": manifest_is_intact(manifest).get("INTACT"),
+        "ORCHESTRATION_VERSION": manifest.get("ORCHESTRATION_VERSION"),
+        "EVENT_IDS_MATCH":
+            list(manifest.get("EVENT_IDS") or ()) ==
+            list(selection.get("EVENT_IDS") or ()),
+        "MARKET_IDS_MATCH":
+            list(manifest.get("MARKET_IDS") or ()) ==
+            list(selection.get("MARKET_IDS") or ()),
+        "ROSTER_NON_EMPTY": bool(manifest.get("EVENT_IDS")),
+        "MANIFEST_PRECEDES_FIRST_SAMPLED_GET":
+            manifest.get("MANIFEST_PRECEDES_FIRST_SAMPLED_GET") is True,
+    }
+    out["VERIFIED"] = all(
+        out[k] is True for k in
+        ("MANIFEST_INTACT", "EVENT_IDS_MATCH", "MARKET_IDS_MATCH",
+         "ROSTER_NON_EMPTY", "MANIFEST_PRECEDES_FIRST_SAMPLED_GET"))
+    return out
+
+
+def _cli():                                                   # pragma: no cover
+    import argparse
+    import datetime as _dt
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--verify", action="store_true")
+    ap.add_argument("--manifest")
+    ap.add_argument("--selection")
+    ap.add_argument("--out")
+    ap.add_argument("--code-sha")
+    ap.add_argument("--run-id")
+    ap.add_argument("--capture-seconds", default="5400")
+    ap.add_argument("--orchestration-version", default=ORCHESTRATION_VERSION)
+    ap.add_argument("--indirect-isolation-regime", default="DISCLOSED_RESIDUAL")
+    a = ap.parse_args()
+
+    with open(a.selection) as fh:
+        selection = json.load(fh)
+
+    if a.verify:
+        with open(a.manifest) as fh:
+            manifest = json.load(fh)
+        v = manifest_binds_selection(manifest, selection)
+        for k in sorted(v):
+            print("%-42s %s" % (k, v[k]))
+        if not v["VERIFIED"]:
+            raise SystemExit("MANIFEST_DOES_NOT_BIND_THIS_SELECTION")
+        return
+
+    if a.orchestration_version != ORCHESTRATION_VERSION:
+        raise SystemExit("ORCHESTRATION_VERSION mismatch: workflow says %r, "
+                         "module is %r" % (a.orchestration_version,
+                                           ORCHESTRATION_VERSION))
+    import capture_quality as CQ
+    import collect as C
+    import substantive_capture as SC
+    start = _dt.datetime.now(_dt.timezone.utc).replace(
+        microsecond=0).isoformat().replace("+00:00", "Z")
+    m = manifest_from_selection(
+        selection,
+        code_sha=a.code_sha,
+        run_id=a.run_id,
+        capture_seconds=int(a.capture_seconds),
+        host=C.HOST,
+        selection_sha=file_sha256("substantive_select.py"),
+        capture_spec_sha=file_sha256("substantive_capture.py"),
+        capture_start_utc=start,
+        request_policy=getattr(SC, "REQUEST_POLICY", NOT_IDENTIFIED),
+        rate_limit_parameters=getattr(SC, "RATE_LIMIT_PARAMETERS",
+                                      NOT_IDENTIFIED),
+        scientific_definitions=getattr(SC, "SCIENTIFIC_DEFINITIONS",
+                                       NOT_IDENTIFIED),
+        frozen_quality_thresholds=CQ.FROZEN_QUALITY_THRESHOLDS,
+        frozen_quality_thresholds_sha=CQ.FROZEN_QUALITY_THRESHOLDS_SHA,
+        indirect_isolation_regime=a.indirect_isolation_regime)
+    intact = CQ.thresholds_intact()
+    if intact.get("INTACT") is not True:
+        raise SystemExit("FROZEN_QUALITY_THRESHOLDS_NOT_INTACT")
+    write_manifest(a.out, m)            # write-once
+    print("CAPTURE_MANIFEST_SHA = %s" % m["MANIFEST_SHA"])
+    print("CAPTURE_START_UTC    = %s" % m["CAPTURE_START_UTC"])
+    print("INDEPENDENT_EVENTS   = %d" % len(m["EVENT_IDS"]))
+    print("MARKETS              = %d" % len(m["MARKET_IDS"]))
+    print("ORCHESTRATION_VERSION= %s" % m["ORCHESTRATION_VERSION"])
+
+
+if __name__ == "__main__":                                    # pragma: no cover
+    _cli()
