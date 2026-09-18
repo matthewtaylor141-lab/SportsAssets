@@ -233,6 +233,14 @@ def bind_rows_to_artifacts(rows, target, by_sha):
         if r_off is not None and isinstance(a_off, (int, float)) and \
                 abs(float(r_off) - float(a_off)) > 1e-9:
             problems.append("REALISED_OFFSET_DIFFERS_FROM_ARTIFACT")
+        # The ORIGIN TIMESTAMP is the artifact's, not the row's. A copied
+        # row with a retyped stamp used to become a second observation;
+        # it is now a row that disagrees with its own provenance.
+        r_stamp = r.get("DECISION_TIMESTAMP_UTC")
+        a_stamp = chain.get("ORIGIN_TIMESTAMP")
+        if r_stamp is not None and a_stamp not in (None, NOT_IDENTIFIED) \
+                and r_stamp != a_stamp:
+            problems.append("ORIGIN_TIMESTAMP_DIFFERS_FROM_ARTIFACT")
         if problems:
             unbound.append({"ROW": i, "LABEL_ARTIFACT_SHA": sha,
                             "PROBLEMS": tuple(problems)})
@@ -253,35 +261,104 @@ ONE_ARTIFACT_IS_ONE_OBSERVATION = (
     "INDEPENDENT EVENT N remains a separate and stricter question")
 
 
-def deduplicate_label_observations(rows):
-    """Collapse rows that cite the same labelled observation."""
-    seen, unique, dupes = set(), [], 0
+SCORED_POPULATION_IS_THE_VERIFIED_POPULATION = (
+    "the gate verified the artifacts, bound each row to its own artifact "
+    "and de-duplicated the observations -- and then returned MAY_SCORE, "
+    "after which the scorer went back to the caller's original rows. Every "
+    "consumer now scores CANONICAL_OBSERVATION_POPULATION, the same set the "
+    "gate actually checked, and the common-support intersection is computed "
+    "over it too")
+
+OBSERVATION_IDENTITY_COMES_FROM_THE_ARTIFACT = (
+    "the de-duplication key used to include the row's own DECISION_ID and "
+    "DECISION_TIMESTAMP_UTC, so a caller could copy a row, retype its "
+    "timestamp and manufacture a second observation out of one labelled "
+    "event. Identity is now (VERIFIED_LABEL_ARTIFACT_SHA, TARGET): the "
+    "artifact IS the observation. The origin timestamp is hydrated from the "
+    "artifact's own observation chain, and a row that carries a DIFFERENT "
+    "one is refused rather than counted")
+
+A_CONFLICTING_COPY_IS_NOT_A_TIE_TO_BREAK = (
+    "two rows that cite the same labelled observation and disagree about "
+    "anything else are not a duplicate to collapse and not two observations "
+    "to count. One of them is wrong and the module does not get to pick. "
+    "The population is refused and both copies are named")
+
+# Fields whose disagreement between copies of one observation is a conflict.
+# Everything the scorer reads is in here by construction: it compares the
+# WHOLE row except the origin stamp it hydrates itself.
+_HYDRATED_KEYS = ("DECISION_TIMESTAMP_UTC",)
+
+
+def _artifact_origin_timestamp(art, target):
+    chain = ((art or {}).get("OBSERVATION_CHAIN") or {}).get(target) or {}
+    v = chain.get("ORIGIN_TIMESTAMP")
+    return None if v in (None, NOT_IDENTIFIED) else v
+
+
+def _comparable(row):
+    return tuple(sorted((k, repr(v)) for k, v in (row or {}).items()
+                        if k not in _HYDRATED_KEYS))
+
+
+def deduplicate_label_observations(rows, target=None, by_sha=None):
+    """Collapse rows that cite the same labelled observation. Fails closed.
+
+    Identity is (LABEL_ARTIFACT_SHA, TARGET) -- derived from the verified
+    artifact, never from a caller-supplied timestamp. Copies that disagree
+    on anything the scorer can read are REFUSED, not silently resolved.
+    """
+    by_sha = by_sha or {}
+    groups, order = {}, []
     shas, decisions, origins = set(), set(), set()
-    for r in rows or ():
+    conflicts, dupes = [], 0
+    for i, r in enumerate(rows or ()):
         sha = (r or {}).get(LABEL_ARTIFACT_KEY)
-        dec = (r or {}).get("DECISION_ID")
-        origin = tuple((r or {}).get(k) for k in MARKET_IDENTITY_KEYS) + \
-            ((r or {}).get("DECISION_TIMESTAMP_UTC"),)
-        key = (sha, dec, origin)
+        key = (sha, target)
         if sha:
             shas.add(sha)
+        dec = (r or {}).get("DECISION_ID")
         if dec:
             decisions.add(dec)
-        if any(x is not None for x in origin):
-            origins.add(origin)
-        if key in seen:
-            dupes += 1
+        hydrated = dict(r or {})
+        stamp = _artifact_origin_timestamp(by_sha.get(sha), target)
+        if stamp is not None:
+            hydrated["DECISION_TIMESTAMP_UTC"] = stamp
+        origins.add(tuple((r or {}).get(k) for k in MARKET_IDENTITY_KEYS)
+                    + (hydrated.get("DECISION_TIMESTAMP_UTC"),))
+        if key not in groups:
+            groups[key] = {"ROW": hydrated, "FINGERPRINT": _comparable(r),
+                           "FIRST_INDEX": i, "COPIES": 1}
+            order.append(key)
             continue
-        seen.add(key)
-        unique.append(r)
+        g = groups[key]
+        g["COPIES"] += 1
+        if _comparable(r) != g["FINGERPRINT"]:
+            conflicts.append({
+                "LABEL_ARTIFACT_SHA": sha, "TARGET": target,
+                "ROWS": (g["FIRST_INDEX"], i),
+                "WHY": "COPIES_OF_ONE_OBSERVATION_DISAGREE"})
+        else:
+            dupes += 1
+    # Deterministic order, so permuting the input cannot change the result.
+    unique = [groups[k]["ROW"] for k in sorted(
+        order, key=lambda k: (str(k[0]), groups[k]["FIRST_INDEX"]))]
     return {
         "UNIQUE_ROWS": unique,
         "ROWS": len(list(rows or ())),
+        "TARGET": target if target is not None else NOT_IDENTIFIED,
+        "OBSERVATION_IDENTITY_FIELDS": ("LABEL_ARTIFACT_SHA", "TARGET"),
+        "UNIQUE_OBSERVATIONS": len(unique),
         "UNIQUE_LABEL_ARTIFACTS": len(shas),
         "UNIQUE_DECISION_IDS": len(decisions),
         "UNIQUE_MARKET_TIME_ORIGINS": len(origins),
         "DUPLICATE_LABEL_ARTIFACT_ROWS": dupes,
+        "CONFLICTING_COPIES": tuple(conflicts),
         "ONE_ARTIFACT_IS_ONE_OBSERVATION": ONE_ARTIFACT_IS_ONE_OBSERVATION,
+        "OBSERVATION_IDENTITY_COMES_FROM_THE_ARTIFACT":
+            OBSERVATION_IDENTITY_COMES_FROM_THE_ARTIFACT,
+        "A_CONFLICTING_COPY_IS_NOT_A_TIE_TO_BREAK":
+            A_CONFLICTING_COPY_IS_NOT_A_TIE_TO_BREAK,
         "INDEPENDENT_EVENT_N_IS_A_SEPARATE_QUESTION": (
             "de-duplicating identical label citations removes double "
             "counting. It does not make the survivors independent"),
@@ -382,7 +459,17 @@ def target_scoring_gate(target, rows=None, min_coverage_pct=None,
             "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
 
     # One label artifact is ONE observation, however many rows cite it.
-    dedup = deduplicate_label_observations(rows)
+    dedup = deduplicate_label_observations(rows, target, by_sha)
+    if dedup["CONFLICTING_COPIES"]:
+        return {
+            "MAY_SCORE": False, "TARGET": target, "HORIZON_S": h,
+            "HORIZON_STATUS": st,
+            "REASON": "CONFLICTING_COPIES_OF_ONE_OBSERVATION",
+            "LABEL_OBSERVATION_DEDUPLICATION": {
+                k: v for k, v in dedup.items() if k != "UNIQUE_ROWS"},
+            "A_CONFLICTING_COPY_IS_NOT_A_TIE_TO_BREAK":
+                A_CONFLICTING_COPY_IS_NOT_A_TIE_TO_BREAK,
+            "RESULT": "NOT_MEASURABLE_UNDER_THIS_CAPTURE_DESIGN"}
     shaped = [{"LABEL_STATUS": {"%dS" % h: r.get(status_key)}}
               for r in dedup["UNIQUE_ROWS"]]
     cov = horizon_label_coverage_gate(shaped, h, min_coverage_pct)
@@ -399,6 +486,13 @@ def target_scoring_gate(target, rows=None, min_coverage_pct=None,
             "LABEL_PROVENANCE": "VERIFIED_CANONICAL_ARTIFACT",
             "VERIFIED_LABEL_ARTIFACT_SHAS": tuple(sorted(verified)),
             "ROW_ARTIFACT_BINDING": binding,
+            # THE population every downstream consumer must score. The gate
+            # used to verify and de-duplicate one set of rows and hand the
+            # caller back permission to score a different one.
+            "CANONICAL_OBSERVATION_POPULATION": tuple(dedup["UNIQUE_ROWS"]),
+            "SCORED_POPULATION_IS_THE_VERIFIED_POPULATION":
+                SCORED_POPULATION_IS_THE_VERIFIED_POPULATION,
+            "UNIQUE_OBSERVATIONS": dedup["UNIQUE_OBSERVATIONS"],
             "LABEL_OBSERVATION_DEDUPLICATION": {
                 k: v for k, v in dedup.items() if k != "UNIQUE_ROWS"},
             "UNIQUE_LABEL_ARTIFACTS": dedup["UNIQUE_LABEL_ARTIFACTS"],
@@ -843,8 +937,12 @@ def relative_value_test(rows, horizons=TARGET_HORIZONS_SECONDS,
                 "RELATIVE_VALUE_PROVENANCE_RULE":
                     RELATIVE_VALUE_PROVENANCE_RULE}
             continue
+        # Correlate over the population the gate verified and de-duplicated,
+        # not the caller's rows. Twelve copies of one labelled observation
+        # used to become twelve pairs in the bootstrap.
+        scored_rows = list(prov["CANONICAL_OBSERVATION_POPULATION"])
         by = defaultdict(list)
-        for r in rows:
+        for r in scored_rows:
             if r.get(key) is not None:
                 by[r.get("EVENT_KEY")].append((r["RESIDUAL_T"], r[key]))
         pairs = [p for v in by.values() for p in v]
@@ -1089,7 +1187,11 @@ def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
 
     out = {}
     names = list(baselines) + ([pred_key] if pred_key else [])
-    rows = list(rows or ())
+    # Score the population the gate VERIFIED and DE-DUPLICATED, not the rows
+    # the caller happened to pass. Twelve copies of one labelled observation
+    # used to become twelve scored rows the moment the gate said yes.
+    supplied = len(list(rows or ()))
+    rows = list(gate["CANONICAL_OBSERVATION_POPULATION"])
 
     def predict(name, r):
         if name == pred_key:
@@ -1170,6 +1272,13 @@ def score_baselines(rows, target, pred_key=None, baselines=BASELINES,
     return {"TARGET": target, "BY_PREDICTOR": out,
             "COMMON_EVALUATION_SUPPORT_ROWS": len(common),
             "SCORABLE_ROWS": len(scorable),
+            # The census of what was supplied against what was scored, so a
+            # reader can see de-duplication happen rather than infer it.
+            "ROWS_SUPPLIED": supplied,
+            "CANONICAL_OBSERVATIONS_SCORED": len(rows),
+            "DUPLICATE_ROWS_COLLAPSED": supplied - len(rows),
+            "SCORED_POPULATION_IS_THE_VERIFIED_POPULATION":
+                SCORED_POPULATION_IS_THE_VERIFIED_POPULATION,
             "BASELINE_SET_COMPLETE": baseline_set_complete,
             "BASELINES_THAT_SCORED_NOTHING": silent,
             "CHALLENGER_ADMISSION_COMPARISON_STATUS": admission,

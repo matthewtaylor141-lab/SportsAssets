@@ -1520,6 +1520,27 @@ IMPOSSIBLE_DRAW_STATUS = "REFUSED_NOT_CLIPPED_NOT_AVERAGED"
 GATE_ARTIFACT_EVALUATION_BINDING_STATUS = "BOUND_TO_THIS_EVALUATION_ID"
 FOURTH_PASS_ADVERSARIAL_TEST_STATUS = "REGRESSION_TESTS_ADDED"
 
+# --- Fifth-pass source review against bc53f55. ----------------------------
+#
+# Two integration defects of the fourth pass's own shape: a rule correct
+# where it was written and bypassed where the work happened. Trusted origin
+# was read off the artifact -- a field the supplying party can type -- and
+# the scorer went back to the caller's rows after the gate had verified and
+# de-duplicated a different set.
+ARTIFACT_ORIGIN_DERIVATION_STATUS = "RESOLVER_RETURN_NOT_PAYLOAD_METADATA"
+SCORED_POPULATION_STATUS = "CANONICAL_VERIFIED_DEDUPLICATED_POPULATION"
+OBSERVATION_IDENTITY_STATUS = "ARTIFACT_AND_TARGET_NOT_CALLER_TIMESTAMP"
+CONFLICTING_COPY_STATUS = "REFUSED_NOT_ARBITRARILY_RESOLVED"
+FIFTH_PASS_ADVERSARIAL_TEST_STATUS = "REGRESSION_TESTS_ADDED"
+
+ORIGIN_IS_THE_RESOLVER_NOT_THE_PAYLOAD = (
+    "an origin check exists precisely because the party supplying the "
+    "evidence must not be able to assert its provenance. Reading "
+    "ARTIFACT_RETRIEVED_FROM off the object handed the assertion straight "
+    "back to them. Trust is now the RETURN of the registered resolver, and "
+    "resolver-only fields are stripped from inline objects before anything "
+    "reads them")
+
 INTEGRITY_IS_NOT_VALIDITY_OR_TRUST = (
     "recomputing an artifact's digest and finding it unchanged proves one "
     "thing: nobody edited it after it was written. It does not prove the "
@@ -1781,6 +1802,16 @@ def describe():
             GATE_ARTIFACT_EVALUATION_BINDING_STATUS,
         "FOURTH_PASS_ADVERSARIAL_TEST_STATUS":
             FOURTH_PASS_ADVERSARIAL_TEST_STATUS,
+        # --- fifth pass: the resolver and the scored population (5) ---
+        "ARTIFACT_ORIGIN_DERIVATION_STATUS":
+            ARTIFACT_ORIGIN_DERIVATION_STATUS,
+        "SCORED_POPULATION_STATUS": SCORED_POPULATION_STATUS,
+        "OBSERVATION_IDENTITY_STATUS": OBSERVATION_IDENTITY_STATUS,
+        "CONFLICTING_COPY_STATUS": CONFLICTING_COPY_STATUS,
+        "FIFTH_PASS_ADVERSARIAL_TEST_STATUS":
+            FIFTH_PASS_ADVERSARIAL_TEST_STATUS,
+        "ORIGIN_IS_THE_RESOLVER_NOT_THE_PAYLOAD":
+            ORIGIN_IS_THE_RESOLVER_NOT_THE_PAYLOAD,
         "INTEGRITY_IS_NOT_VALIDITY_OR_TRUST":
             INTEGRITY_IS_NOT_VALIDITY_OR_TRUST,
         "EDGE_INTERACTION_THRESHOLD_STATUS":

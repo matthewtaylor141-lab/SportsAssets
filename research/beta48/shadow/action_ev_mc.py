@@ -1367,12 +1367,46 @@ def trusted_store_status():
     }
 
 
+ORIGIN_IS_THE_RESOLVER_NOT_THE_PAYLOAD = (
+    "trusted origin was read off the artifact -- ARTIFACT_RETRIEVED_FROM == "
+    "'TRUSTED_STORE' -- which is a field any caller can type into an object "
+    "they built themselves. The whole point of an origin check is that the "
+    "party supplying the evidence cannot assert it. Origin is now the RETURN "
+    "OF THE RESOLVER: an artifact is trusted when resolve_trusted_artifact() "
+    "found it in a registered store, and inline objects have those fields "
+    "stripped before anything reads them")
+
+# Fields only the resolver may set. Anything arriving on an inline object is
+# a forgery attempt or a copy-paste; either way it is removed before use.
+_RESOLVER_ONLY_KEYS = ("ARTIFACT_STORE_ID", "ARTIFACT_STORE_KIND",
+                       "ARTIFACT_RETRIEVED_FROM")
+
+
+def _strip_resolver_fields(obj):
+    """Return the caller's object with resolver-only metadata removed."""
+    if not isinstance(obj, dict):
+        return obj, ()
+    claimed = tuple(k for k in _RESOLVER_ONLY_KEYS if k in obj)
+    if not claimed:
+        return obj, ()
+    return {k: v for k, v in obj.items()
+            if k not in _RESOLVER_ONLY_KEYS}, claimed
+
+
 def resolve_trusted_artifact(sha):
-    """Fetch an artifact from a registered trusted store, or None."""
+    """Fetch an artifact from a registered trusted store, or None.
+
+    The returned object carries the store's identity, but no reader derives
+    trust from those fields: trust is that this function returned something
+    at all. They are provenance FOR THE READER, not evidence.
+    """
+    if not sha:
+        return None
     for store in _TRUSTED_STORES.values():
         obj = store["INDEX"].get(sha)
         if isinstance(obj, dict):
-            out = dict(obj)
+            out, _ = _strip_resolver_fields(obj)
+            out = dict(out)
             out["ARTIFACT_STORE_ID"] = store["STORE_ID"]
             out["ARTIFACT_STORE_KIND"] = store["KIND"]
             out["ARTIFACT_RETRIEVED_FROM"] = "TRUSTED_STORE"
@@ -1522,9 +1556,13 @@ def verify_decision_grade_artifacts(terms, binding=None):
     out, detail = {}, {}
     for sha_field, name in DECISION_GRADE_ARTIFACT_KEYS.items():
         claimed = (terms or {}).get(sha_field)
-        inline = arts.get(sha_field) or arts.get(name)
+        inline, forged = _strip_resolver_fields(
+            arts.get(sha_field) or arts.get(name))
         trusted = resolve_trusted_artifact(claimed) if claimed else None
-        obj = trusted if trusted is not None else inline
+        # ORIGIN IS THE RESOLVER. `from_resolver` is set here, by whether the
+        # lookup succeeded, and is never read back off the object.
+        from_resolver = trusted is not None
+        obj = trusted if from_resolver else inline
         if not isinstance(obj, dict):
             detail[name] = {
                 "STATUS": "ARTIFACT_ABSENT",
@@ -1539,13 +1577,14 @@ def verify_decision_grade_artifacts(terms, binding=None):
         got = _sha_of(obj, sha_field)
         integrity = bool(stored) and stored == got and (
             claimed is None or claimed == stored)
-        origin = obj.get("ARTIFACT_RETRIEVED_FROM") == "TRUSTED_STORE"
+        origin = from_resolver
         problems = ARTIFACT_SEMANTIC_VERIFIERS[name](obj) if integrity \
             else ["INTEGRITY_FAILED_SEMANTICS_NOT_EVALUATED"]
         semantics = not problems
         bind = _binding_ok(name, obj, binding)
         ok = integrity and origin and semantics and bind["BOUND"]
         detail[name] = {
+            "CLAIMED_RESOLVER_FIELDS_ON_INLINE_ARTIFACT": forged,
             "STATUS": "VERIFIED" if ok else "NOT_VERIFIED",
             "STORED_SHA": stored or NOT_IDENTIFIED,
             "RECOMPUTED_SHA": got,
@@ -1565,6 +1604,8 @@ def verify_decision_grade_artifacts(terms, binding=None):
     out["ARTIFACT_VERIFICATION_DIMENSIONS"] = ARTIFACT_VERIFICATION_DIMENSIONS
     out["INTEGRITY_IS_NOT_VALIDITY_OR_TRUST"] = \
         INTEGRITY_IS_NOT_VALIDITY_OR_TRUST
+    out["ORIGIN_IS_THE_RESOLVER_NOT_THE_PAYLOAD"] = \
+        ORIGIN_IS_THE_RESOLVER_NOT_THE_PAYLOAD
     out.update(trusted_store_status())
     out["A_STATUS_STRING_IS_NOT_A_PROOF"] = A_STATUS_STRING_IS_NOT_A_PROOF
     return out
@@ -1587,11 +1628,17 @@ A_FILL_QUANTITY_STATUS_STRING_IS_NOT_A_MODEL = (
 def verify_fill_quantity_artifact(terms, binding=None):
     """Integrity, trusted origin, internal consistency and binding."""
     sha = (terms or {}).get("FILL_QUANTITY_MODEL_ARTIFACT_SHA")
-    inline = (terms or {}).get("FILL_QUANTITY_MODEL_ARTIFACT") or \
-        (terms or {}).get("FILL_QUANTITY_MODEL")
+    inline, forged = _strip_resolver_fields(
+        (terms or {}).get("FILL_QUANTITY_MODEL_ARTIFACT")
+        or (terms or {}).get("FILL_QUANTITY_MODEL"))
     trusted = resolve_trusted_artifact(sha) if sha else None
-    obj = trusted if trusted is not None else inline
+    # ORIGIN IS THE RESOLVER, not a field on the object.
+    from_resolver = trusted is not None
+    obj = trusted if from_resolver else inline
     out = {"FILL_QUANTITY_ARTIFACT_BINDING": FILL_QUANTITY_ARTIFACT_BINDING,
+           "CLAIMED_RESOLVER_FIELDS_ON_INLINE_ARTIFACT": forged,
+           "ORIGIN_IS_THE_RESOLVER_NOT_THE_PAYLOAD":
+               ORIGIN_IS_THE_RESOLVER_NOT_THE_PAYLOAD,
            "A_FILL_QUANTITY_STATUS_STRING_IS_NOT_A_MODEL":
                A_FILL_QUANTITY_STATUS_STRING_IS_NOT_A_MODEL}
     if not isinstance(obj, dict):
@@ -1605,7 +1652,7 @@ def verify_fill_quantity_artifact(terms, binding=None):
     got = _sha_of(obj, field)
     integrity = bool(stored) and stored == got and (sha is None or sha ==
                                                     stored)
-    origin = obj.get("ARTIFACT_RETRIEVED_FROM") == "TRUSTED_STORE"
+    origin = from_resolver
     problems = []
     if obj.get("ARTIFACT_TYPE") != "FILL_QUANTITY_MODEL_ARTIFACT":
         problems.append("WRONG_ARTIFACT_TYPE")
