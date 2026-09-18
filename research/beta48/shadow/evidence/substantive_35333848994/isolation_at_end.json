@@ -1,0 +1,152 @@
+{
+ "ABSENCE_IS_NOT_ZERO": "not observing indirect traffic is not evidence that there was none; INDIRECT_LOAD stays NOT_IDENTIFIED until something actually counts it",
+ "ABSOLUTE_VENUE_ISOLATION": "REFUSED_NOT_KNOWABLE",
+ "ACTIVE_CONFLICTING_WORKFLOWS": 0,
+ "ACTIVE_DIRECT_CONFLICTS": 0,
+ "ALL_BETTOR_PMUS_TRAFFIC_ISOLATED": "NO",
+ "AUDIT_SCANS": "KNOWN_WORKFLOW_NAMES_AGAINST_LIVE_RUNS_NOT_GROUP_MEMBERSHIP",
+ "BETTOR_COLLECTOR_ISOLATION": "REFUSED_SCOPE_NOT_ESTABLISHED_FOR_INDIRECT_TRAFFIC",
+ "CONFLICTS": [],
+ "DIRECT_CONFLICTS_RUNNING_DURING_RUN": [],
+ "DIRECT_CONFLICT_STARTED_DURING_RUN": "NO",
+ "DIRECT_RESEARCH_COLLECTOR_ISOLATION": "ESTABLISHED",
+ "DISCOVERED_NOT_ASSUMED": true,
+ "DOMAIN_AUDIT": "PASS",
+ "GATE_SEMANTICS_DURING_RUN": "ONLY_RUNNING_IS_A_CONFOUND",
+ "GLOBAL_VENUE_CONCURRENCY_DOMAIN": "pmus-public-read-global",
+ "HOSTS_DELIBERATELY_EXCLUDED": [
+  "data-api.polymarket.com",
+  "lb-api.polymarket.com",
+  "user-pnl-api.polymarket.com",
+  "api.render.com"
+ ],
+ "INDIRECT_BETTOR_PMUS_LOAD_ISOLATION": "NOT_ESTABLISHED",
+ "INDIRECT_COLLECTOR_ISOLATION": "NOT_ESTABLISHED",
+ "INDIRECT_CONFOUND_MAGNITUDE": "NOT_IDENTIFIED",
+ "INDIRECT_VENUE_WORKFLOWS": [
+  "engine-diagnostic",
+  "gate-lever",
+  "mapper-evidence",
+  "pair-probe",
+  "ping",
+  "set-roster",
+  "venue-trades",
+  "whale-ledger-census"
+ ],
+ "KNOWN_DIRECT_PMUS_COLLECTORS_ACTIVE": [],
+ "KNOWN_DIRECT_PMUS_COLLECTORS_PENDING": [],
+ "KNOWN_VENUE_TOUCHING_WORKFLOWS": [
+  "beta48-capability-docs",
+  "beta48-forward-capture",
+  "beta48-rate-confirm",
+  "beta48-rate-pilot",
+  "beta48-shadow-tick",
+  "beta48-stage2-census",
+  "beta48-substantive-capture",
+  "phasex-crossvenue",
+  "run85-phase2-capture",
+  "run85-phase2a",
+  "run85-phase2b",
+  "run85-phase2c",
+  "run85-phase2d",
+  "run85-phase2e",
+  "run85-phase2f",
+  "run85-phase2g",
+  "run85-phase2gr",
+  "run85-trackbl-block",
+  "venue-probe"
+ ],
+ "MITIGATION": "DISPATCH_ONLY_INTO_AN_IDLE_DOMAIN_AND_VERIFY_THE_RUN_STARTED",
+ "NO_OTHER_CLIENT_ANYWHERE_IS_USING_THE_VENUE": "REFUSED_NOT_KNOWABLE",
+ "NO_OTHER_KNOWN_BETTOR_GITHUB_COLLECTOR_RUNNING": "YES",
+ "PENDING_COLLECTORS_DURING_RUN": [],
+ "PENDING_DIRECT_CONFLICTS": 0,
+ "PENDING_IS_NOT_A_CONFOUND": true,
+ "PENDING_RUN_MAY_BE_SUPERSEDED": "YES",
+ "PENDING_SUPERSESSION_IS": "AN_OPS_ISSUE_FOR_THAT_JOB_NOT_A_CONFIRMATION_FAULT",
+ "THIS_MODULE_CONTACTS_NOTHING": true,
+ "VENUE_TOUCHING_COUNT": 19,
+ "WHY_ABSOLUTE_IS_REFUSED": "we observe our own workflows, not the venue's global traffic",
+ "WHY_EACH_IS_VENUE_TOUCHING": {
+  "beta48-capability-docs": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:fwd_collect,test_doc_capture"
+  ],
+  "beta48-forward-capture": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:fwd_collect,test_fwd_collect"
+  ],
+  "beta48-rate-confirm": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:rate_confirm,venue_domain"
+  ],
+  "beta48-rate-pilot": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:rate_pilot"
+  ],
+  "beta48-shadow-tick": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:collect"
+  ],
+  "beta48-stage2-census": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:census_collect,fwd_collect,test_census_collect,test_fwd_collect"
+  ],
+  "beta48-substantive-capture": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:substantive_capture,substantive_select,venue_domain"
+  ],
+  "phasex-crossvenue": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phasex_run,test_trackp2,trackx_readonly_audit"
+  ],
+  "run85-phase2-capture": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phase2_capture,test_run85_pmus_collector"
+  ],
+  "run85-phase2a": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phase2a,run85_pmus_collector,test_run85_pmus_collector"
+  ],
+  "run85-phase2b": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phase2b,test_run85_pmus_collector"
+  ],
+  "run85-phase2c": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phase2c,test_run85_pmus_collector"
+  ],
+  "run85-phase2d": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phase2d,test_run85_pmus_collector"
+  ],
+  "run85-phase2e": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phase2e,test_run85_pmus_collector"
+  ],
+  "run85-phase2f": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phase2f,test_run85_pmus_collector"
+  ],
+  "run85-phase2g": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phase2g,test_run85_pmus_collector"
+  ],
+  "run85-phase2gr": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_phase2gr,test_run85_pmus_collector"
+  ],
+  "run85-trackbl-block": [
+   "NAMES_THE_VENUE_HOST",
+   "INVOKES_VENUE_CAPABLE_MODULE:run85_trackbl_block,test_run85_pmus_collector"
+  ],
+  "venue-probe": [
+   "NAMES_THE_VENUE_HOST"
+  ]
+ },
+ "WHY_INDIRECT_IS_NOT_DOMAINED": "they reach PMUS through our own API and are production ops; serialising the desk behind a research run would be a worse failure than the one being fixed",
+ "WHY_INDIRECT_IS_UNCONTROLLED": "it reaches PMUS through our own API, which no GitHub concurrency group gates, and no instrumentation counts those requests",
+ "WHY_PENDING_IS_NOT_A_CONFOUND": "a queued collector held behind us by the domain makes no venue request; it is the domain working, not a contamination",
+ "WHY_PENDING_IS_NOT_SAFE": "GitHub keeps at most one PENDING run per concurrency group; a newer queued run cancels the older pending one, so a waiting evidence run can be displaced by a cron firing",
+ "WORKFLOWS_OUTSIDE_THE_DOMAIN": {}
+}
