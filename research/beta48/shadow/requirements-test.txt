@@ -1,0 +1,40 @@
+# THE TEST DEPENDENCY SET OF THE BETA48 SHADOW SUITE.
+#
+# WHY THIS FILE EXISTS.
+# Four workflows ran `python -m pytest -q` over this whole directory after
+# installing two packages. The suite needs four. Run 35366130658 acquired
+# execution, reached GATE 1 and failed it: 33 failed, 2541 passed, every
+# failure `ModuleNotFoundError: No module named 'numpy'`. The gate did its
+# job -- it refused to let the run reach the venue -- but the environment it
+# proved was not the environment the suite needs. The pin list lived inline
+# in four separate workflow files, so nothing made them agree with the code.
+# It lives here now, once, and every workflow reads it.
+#
+# HOW THE SET WAS ESTABLISHED, NOT GUESSED.
+# In a clean Python 3.11 venv with no site packages, the runner's exact
+# install and pytest commands were reproduced, and the set was grown one
+# package at a time until the suite passed:
+#
+#   httpx + pytest              -> 33 failed, 2541 passed   (numpy)
+#   + numpy                     -> 20 failed, 2554 passed   (scipy)
+#   + scipy                     ->  0 failed, 2574 passed
+#
+# NumPy alone was NOT enough. Twenty further failures appeared behind it.
+#
+# THE TWO PACKAGES DELIBERATELY NOT HERE.
+# scikit-learn  -- imported at exactly two sites in p_bettor_independent_v2
+#   and _v3, each inside `try: ... except ImportError:` that records the
+#   named refusal {"FITTED": False, "REASON": "SKLEARN_NOT_AVAILABLE"}.
+#   It degrades by saying so, not by inventing a fitted model, and no test
+#   in this suite requires it. Absent here, absent on the runner, and the
+#   absence is legible in the output either way.
+# PyYAML        -- used only by rehearse_startup_gate.py, the offline
+#   harness that reads a step's `run:` text out of the workflow file. That
+#   harness is not part of `pytest -q` and does not execute on the runner.
+#
+# The two pre-existing pins are carried over unchanged. Only the two
+# missing packages are added; nothing is upgraded to "latest".
+httpx==0.27.2
+pytest==8.3.3
+numpy==2.4.6
+scipy==1.17.1

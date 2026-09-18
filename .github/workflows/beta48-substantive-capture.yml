@@ -100,8 +100,20 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install the one dependency
-        run: python -m pip install --quiet "httpx==0.27.2" "pytest==8.3.3"
+      # THE TEST DEPENDENCY SET, PINNED IN ONE PLACE.
+      # This step used to install two packages and then run a suite that
+      # needs four. Run 35366130658 failed GATE 1 on that gap: 33 failed,
+      # 2541 passed, every failure `No module named 'numpy'`. The list is
+      # no longer inline here -- it lives in requirements-test.txt beside
+      # the suite, which records how the set was established.
+      - name: Install the pinned test dependencies
+        run: python -m pip install --quiet -r research/beta48/shadow/requirements-test.txt
+
+      # GATE 0. A missing package is an ENVIRONMENT failure and must say so
+      # here, by name, before pytest reports it as thirty-three broken tests.
+      - name: Prove the environment before the boundary
+        working-directory: research/beta48/shadow
+        run: python prove_environment.py --requirements requirements-test.txt
 
       # GATE 1. No venue contact until the capability boundary is proved.
       - name: Prove the capability boundary offline

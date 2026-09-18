@@ -1,5 +1,9 @@
 {
-  "WHAT_THIS_IS": "Capture attempts that were ended before they executed, and why. A cancelled run keeps its GitHub metadata, but GitHub records only 'cancelled' -- it cannot record that the code was superseded. This file is that record.",
+  "WHAT_THIS_IS": "The disposition of every capture attempt that did not produce a sealed capture, and why. GitHub records 'cancelled' or 'failure' and nothing more: it cannot record that code was superseded, nor that a failure was environmental rather than substantive. This file is that record. Entries are PRESERVED, never deleted -- a failed attempt is evidence.",
+  "DISPOSITIONS_USED": {
+    "SUPERSEDED_BEFORE_EXECUTION": "cancelled while pending; no job ever started; no venue request",
+    "EXECUTED_AND_FAILED_A_GATE": "acquired execution and was refused by one of its own gates; what the gate refused, and whether the venue was reached, are recorded per entry"
+  },
   "RUNS": [
     {
       "RUN_ID": 35348871352,
@@ -27,6 +31,43 @@
         "DISPATCHED_AT": "2026-09-18T13:53:02Z"
       },
       "NOT_TOUCHED": "run85 and every other collector; no other run was cancelled, displaced, modified or rescheduled"
+    },
+    {
+      "RUN_ID": 35366130658,
+      "RUN_NUMBER": 5,
+      "WORKFLOW": "beta48-substantive-capture",
+      "HEAD_SHA": "af6d4c1a5202b7ecc499799af2f7a67fcfffaf2d",
+      "CODE_SHA_INPUT": "af6d4c1a5202b7ecc499799af2f7a67fcfffaf2d",
+      "BRANCH": "claude/session-njaewf",
+      "CREATED_AT": "2026-09-18T16:03:09Z",
+      "JOB_ID": 105675382409,
+      "JOB_STARTED_AT": "2026-09-18T16:22:50Z",
+      "WAITED_IN_THE_GROUP_QUEUE_S": 1181,
+      "COMPLETED_AT": "2026-09-18T16:24:27Z",
+      "GITHUB_CONCLUSION": "failure",
+      "DISPOSITION": "EXECUTED_AND_FAILED_A_GATE",
+      "GATE_THAT_REFUSED": "GATE 1 -- Prove the capability boundary offline",
+      "WHAT_THE_GATE_SAW": "33 failed, 2541 passed; every one of the 33 was ModuleNotFoundError: No module named 'numpy'",
+      "CAUSE": "ENVIRONMENTAL, NOT SUBSTANTIVE. The install step installed httpx and pytest. The suite imports four third-party packages. No test was broken and no capture logic was at fault.",
+      "WHY_THE_LOCAL_SUITE_DID_NOT_CATCH_IT": "the development container already had numpy and scipy, so the suite passed there for a reason that did not exist on the runner -- the recurring 'satisfied here, absent where the work happens' defect. Nothing tied the workflow's pin list to the code's imports until test_environment_pins.py.",
+      "STEPS_SKIPPED_BY_THE_REFUSAL": [
+        "Prove the executed revision",
+        "Prove BETTOR collector isolation at start",
+        "Freeze the event selection",
+        "Write the immutable manifest before any sampled GET",
+        "Substantive public-book capture"
+      ],
+      "VENUE_REQUESTS_MADE": 0,
+      "VENUE_REQUESTS_EVIDENCE": "GATE 1 precedes every venue-touching step and all five were skipped. The two steps that did run afterwards -- 'Check isolation again at the end' and 'Seal and commit the capture' -- reach api.github.com only. No request was made to the venue.",
+      "WHAT_THE_RUN_PROVES": "the gate is fail-CLOSED. It acquired the concurrency slot, refused to continue on a defective environment, made no venue request, and released the slot after 97 seconds.",
+      "SLOT": "acquired at 16:22:50Z, released at 16:24:27Z; no other run was cancelled, displaced or rescheduled by it",
+      "STATUS_CORRECTION": "PRESERVED AND RECORDED, NOT SUPERSEDED. The revision af6d4c1 was not withdrawn -- its capture code was never reached. The correction that follows is to the RUNNER ENVIRONMENT, not to the sampler, the selection, the pacing, the thresholds or the isolation policy, none of which are changed.",
+      "CORRECTED_BY": {
+        "WHAT_CHANGED": "research/beta48/shadow/requirements-test.txt (new, four exact pins), prove_environment.py (new GATE 0), test_environment_pins.py (new, ties the pin list to the code's imports), and the install step of the four workflows that run this suite",
+        "ESTABLISHED_HOW": "clean Python 3.11 venv, no site packages, the runner's exact install and pytest commands; the dependency set grown one package at a time: httpx+pytest -> 33 failed / 2541 passed; +numpy -> 20 failed / 2554 passed; +scipy -> 0 failed / 2574 passed",
+        "NUMPY_ALONE_WAS_NOT_ENOUGH": true
+      },
+      "NOT_TOUCHED": "run85, beta48-forward-capture and every other collector; no run cancelled, displaced, modified or rescheduled; capture_seconds, REQUEST_INTERVAL_S, NOMINAL_REVISIT_S, RATE_RPS, SELECTION_SALT, FUTURES_HORIZON_S, CANDIDATE_BOOK_READS_MAX and the frozen quality thresholds all unchanged"
     }
   ]
 }
