@@ -96,6 +96,11 @@ B_OUTCOME = "OUTCOME_NOT_IDENTIFIED"
 B_OUTCOME_SIDE = "OUTCOME_SIDE_NOT_IDENTIFIED"
 B_EXPIRY = "EXPIRY_NOT_IDENTIFIED"
 B_FEE_MODEL = "FEE_MODEL_PROVENANCE_NOT_OBTAINED"
+B_EXIT_PRICE_LIMIT = "EXIT_PRICE_LIMIT_NOT_STATED"
+B_CANCEL_DEADLINE = "ENTRY_CANCELLATION_DEADLINE_NOT_STATED"
+B_RESIDUAL_PLAN = "RESIDUAL_INVENTORY_FALLBACK_NOT_STATED"
+B_NO_CANDIDATE = "NO_CANDIDATE_IN_THE_SUPPORTED_UNIVERSE"
+B_EXIT_POLICY_MISSING = "EXIT_POLICY_NOT_STATED"
 
 # ── freshness blockers: what the literal True used to hide ───────────
 B_STALE = "EVIDENCE_STALE"
@@ -107,6 +112,49 @@ B_CROSSED_BOOK = "BOOK_CROSSED_OR_LOCKED"
 B_PRICE_OFF_TICK = "PASSIVE_PRICE_NOT_ON_THE_TICK_GRID"
 B_NOT_PASSIVE = "PRICE_WOULD_CROSS_THE_SPREAD"
 B_ORDER_TYPE_NOT_PRICEABLE = "ORDER_TYPE_HAS_NO_PASSIVE_PRICE_RULE"
+
+EXIT_SELLS_ONLY_WHAT_WE_OWN = (
+    "an exit may sell only RECONCILED inventory actually owned. Not an "
+    "expected fill, not an unreconciled one -- selling what we have not "
+    "confirmed we hold is how a lost placement becomes a short")
+
+NO_NEW_ENTRY_WHILE_UNRESOLVED = (
+    "no new entry while any order, fill, cancellation or inventory "
+    "remains unresolved. The single-lifecycle limit is spent on the "
+    "unresolved one")
+
+
+def exit_plan(policy):
+    """The exit, declared in full before the entry, or a named blocker.
+
+    A PERMITTED PARTIAL FILL DOES NOT AUTHORISE ANOTHER EXIT ORDER. With
+    automaticReplacementOrders false, whatever the one permitted order
+    does not sell is a remainder, and what happens to that remainder has
+    to be stated on the ticket. Holding it through settlement is a
+    decision, not a silence.
+    """
+    if not isinstance(policy, dict):
+        return {"BLOCKER": B_EXIT_POLICY_MISSING}
+    for field, blocker in (("exitPriceLimit", B_EXIT_PRICE_LIMIT),
+                           ("entryCancellationDeadline", B_CANCEL_DEADLINE),
+                           ("residualInventoryFallback", B_RESIDUAL_PLAN)):
+        v = policy.get(field)
+        if v in (None, "") or (field == "exitPriceLimit"
+                               and not isinstance(v, (int, float))):
+            return {"BLOCKER": blocker}
+    holds = policy.get("holdsRemainderThroughSettlement")
+    if holds not in (True, False):
+        return {"BLOCKER": B_RESIDUAL_PLAN,
+                "why": "holding a remainder through settlement must be "
+                       "explicit on the ticket, not assumed from silence"}
+    return {"BLOCKER": None,
+            "exitPriceLimit": float(policy["exitPriceLimit"]),
+            "entryCancellationDeadline": str(
+                policy["entryCancellationDeadline"]),
+            "residualInventoryFallback": str(
+                policy["residualInventoryFallback"]),
+            "holdsRemainderThroughSettlement": holds}
+
 
 NOTHING_IS_INVENTED = (
     "a field the venue did not give us stays null and becomes a named "
@@ -358,6 +406,13 @@ def propose(evidence, session, quantity=None, order_type="LIMIT_GTC_POST_ONLY",
 
     from . import calibration_fees as cf
 
+    plan = exit_plan(exit_policy)
+    if plan["BLOCKER"]:
+        return {"ticket": None, "blockers": [plan["BLOCKER"]],
+                "submittable": False,
+                "why": "the exit is declared before the entry; %s"
+                       % plan.get("why", "the policy does not state it")}
+
     rules = evidence["rules"]["value"]
     tick = float(rules["tick"])
     min_qty = int(rules["minQuantity"])
@@ -415,19 +470,30 @@ def propose(evidence, session, quantity=None, order_type="LIMIT_GTC_POST_ONLY",
                        "established; no ticket is built"}
 
     # THE VENUE'S OWN PREVIEW, for the order as sized. The documented
-    # coefficients were not retrieved by this code, so the arithmetic
-    # alone is not evidence; agreement with the preview is.
-    agreement = None
+    # coefficients and formula were not retrieved by this code, so the
+    # arithmetic alone is not evidence; agreement with the preview is.
+    #
+    # MISSING PREVIEW EVIDENCE IS A BLOCKER, NOT A SKIPPED CHECK. The
+    # previous version only reconciled when a preview happened to be
+    # passed, and the CLI never passed one -- so the check that made the
+    # documented numbers trustworthy never ran at all.
+    observed = None
     if preview is not None:
-        observed = cf.preview_fee(preview(price, qty) if callable(preview)
-                                  else preview)
-        agreement = cf.reconcile(entry_q, observed)
-        if not agreement["AGREED"]:
-            return {"ticket": None, "blockers": [agreement["BLOCKER"]],
-                    "submittable": False, "pricing": priced,
-                    "feeAgreement": agreement,
-                    "why": "the documented schedule and the venue's own "
-                           "preview disagree about this order's fee"}
+        try:
+            raw = preview(price, qty) if callable(preview) else preview
+        except Exception as exc:                               # noqa: BLE001
+            raw = None
+            observed = {"FEE": None, "BLOCKER": cf.B_PREVIEW_UNREADABLE,
+                        "error": type(exc).__name__}
+        if observed is None:
+            observed = cf.preview_fee(raw)
+    agreement = cf.reconcile(price, qty, observed)
+    if not agreement["AGREED"]:
+        return {"ticket": None, "blockers": [agreement["BLOCKER"]],
+                "submittable": False, "pricing": priced,
+                "feeAgreement": agreement,
+                "why": "the documented schedule was not confirmed against "
+                       "the venue's own preview for this exact order"}
 
     fresh = evidence["freshness"]
     ticket = {
@@ -453,7 +519,18 @@ def propose(evidence, session, quantity=None, order_type="LIMIT_GTC_POST_ONLY",
         "feeAgreement": agreement,
         "exitPolicy": dict(exit_policy or {}),
         "rebatesAreNotBudget": cf.REBATES_ARE_NOT_BUDGET,
-        "inventoryPlan": inventory_plan or "hold to settlement; no re-entry",
+        # THE EXIT IS DECLARED BEFORE THE ENTRY, in full. A permitted
+        # partial fill does NOT authorise another exit order, so what
+        # happens to a remainder has to be written down rather than
+        # assumed.
+        "entryCancellationDeadline": plan["entryCancellationDeadline"],
+        "exitPriceLimit": plan["exitPriceLimit"],
+        "residualInventoryFallback": plan["residualInventoryFallback"],
+        "holdsRemainderThroughSettlement": plan[
+            "holdsRemainderThroughSettlement"],
+        "exitMaySellOnlyReconciledInventory": EXIT_SELLS_ONLY_WHAT_WE_OWN,
+        "noNewEntryWhileUnresolved": NO_NEW_ENTRY_WHILE_UNRESOLVED,
+        "inventoryPlan": inventory_plan or plan["residualInventoryFallback"],
         "operatorStop": operator_stop,
         # COMPUTED. Never a literal.
         "stateFresh": bool(fresh["FRESH"]),
@@ -585,7 +662,14 @@ def account_identity(config=None):
     by the payload.
     """
     if config is None:
-        from .config import settings as config
+        from .config import settings
+        # `settings` is an lru_cache-wrapped FACTORY, not an instance.
+        # Reading `settings.pmus_key_id` off the wrapper returns nothing,
+        # which made a perfectly configured account report
+        # ACCOUNT_NOT_IDENTIFIED. Found by rehearsing the workflow's own
+        # command -- the unit tests passed a config object and never
+        # exercised this line.
+        config = settings() if callable(settings) else settings
     key = getattr(config, "pmus_key_id", None)
     if not key or not str(key).strip():
         return {"ACCOUNT": None, "BLOCKER": B_ACCOUNT_ID,
@@ -601,7 +685,8 @@ def account_identity(config=None):
             "fullKeyInEvidence": False}
 
 
-def default_readers(client=None, config=None, declared_side=None):
+def default_readers(client=None, config=None, declared_side=None,
+                    market_id=None):
     """The configured READ-ONLY venue readers, on the OFFICIAL field names.
 
     Each is backed by a call this codebase already uses for real reads:
@@ -617,6 +702,11 @@ def default_readers(client=None, config=None, declared_side=None):
 
     def _client():
         return client if client is not None else pmus._get_client()
+
+    def market_id_of():
+        if not market_id:
+            raise ValueError("PREVIEW_NEEDS_THE_MARKET_SLUG")
+        return market_id
 
     def account():
         resp = _client().account.balances()
@@ -695,6 +785,21 @@ def default_readers(client=None, config=None, declared_side=None):
                 "fields": {"tick": F_TICK, "minQuantity": F_MIN_QTY},
                 "source": "markets.retrieve_by_slug"}
 
+    def preview(price, quantity):
+        """The venue's OWN preview for exactly this sized ticket.
+
+        A documented read-only operation, built from the SAME mapping the
+        order would use (calibration_read.preview_params), so a
+        disagreement is about the order we would actually send. It
+        creates nothing.
+        """
+        from .calibration_read import preview_params
+        req = preview_params({"marketId": market_id_of(), "price": price,
+                              "quantity": quantity, "side": "BUY",
+                              "outcomeSide": declared_side,
+                              "orderType": "LIMIT_GTC_POST_ONLY"})
+        return _client().orders.preview(req)
+
     def fees(_market_id):
         from . import calibration_fees as cf
         # THE DOCUMENTED SCHEDULE, with its provenance attached. It is not
@@ -710,7 +815,8 @@ def default_readers(client=None, config=None, declared_side=None):
                 "source": "calibration_fees.SCHEDULE"}
 
     return {"account": account, "open_orders": open_orders,
-            "market": market, "book": book, "rules": rules, "fees": fees}
+            "market": market, "book": book, "rules": rules, "fees": fees,
+            "preview": preview}
 
 
 # ── research isolation: DELEGATED, and never optional ────────────────
@@ -787,11 +893,15 @@ def run(market_id, readers=None, session=None, quantity=None,
     else:
         report["sessionSource"] = "caller"
 
-    ev = gather(market_id,
-                readers or default_readers(declared_side=outcome_side),
-                quantity=quantity, outcome_side=outcome_side)
+    rs = readers or default_readers(declared_side=outcome_side,
+                                    market_id=market_id)
+    ev = gather(market_id, rs, quantity=quantity, outcome_side=outcome_side)
+    # THE PREVIEW IS ALWAYS SUPPLIED when the readers offer one. The
+    # previous CLI never passed it, so the reconciliation that makes the
+    # documented schedule trustworthy silently never ran.
+    pv = preview if preview is not None else rs.get("preview")
     proposal = propose(ev, session, quantity=quantity, order_type=order_type,
-                       exit_policy=exit_policy, preview=preview)
+                       exit_policy=exit_policy, preview=pv)
     report["evidence"] = ev
     report["proposal"] = proposal
     report["blockers"] = sorted(set(list(ev["evidenceBlockers"])
@@ -801,9 +911,29 @@ def run(market_id, readers=None, session=None, quantity=None,
 
 
 def _durable_session():
-    """The session the ledger holds. Raises when it cannot be read."""
+    """The session the ledger holds. Raises when it cannot be read.
+
+    `calibration_store.load` is a COROUTINE. The previous version returned
+    the coroutine object itself, which is truthy, never touches the
+    database, and would have sized a ticket against an object rather than
+    a budget -- a fresh $100 by accident. It is awaited here, on the real
+    async interface, and a failure propagates rather than falling back:
+    there is no invented session and no default allowance.
+    """
+    import asyncio
+
     from . import calibration_store as store
-    return store.load()
+
+    async def _read():
+        return await store.load()
+
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(_read())
+    raise RuntimeError(
+        "CALIBRATION_SESSION_READ_INSIDE_A_RUNNING_LOOP: call "
+        "calibration_store.load() directly from async code")
 
 
 def _cli(argv=None):
@@ -821,7 +951,22 @@ def _cli(argv=None):
                          "the reserve for an exit that has not happened.")
     ap.add_argument("--partial-fills", action="store_true",
                     help="the permitted exit policy allows partial fills, so "
-                         "a remainder may need a further order.")
+                         "a remainder may be left unsold.")
+    ap.add_argument("--automatic-replacement-orders", action="store_true",
+                    help="a partial fill's remainder may be re-offered. OFF "
+                         "by default: a permitted partial fill does not "
+                         "authorise another exit order.")
+    ap.add_argument("--exit-price-limit", type=float, default=None,
+                    help="the limit the exit order may not sell below.")
+    ap.add_argument("--entry-cancellation-deadline", default=None,
+                    help="when an unfilled entry is cancelled (ISO instant).")
+    ap.add_argument("--residual-inventory-fallback", default=None,
+                    help="what happens to inventory the one permitted exit "
+                         "order does not sell.")
+    ap.add_argument("--hold-remainder-through-settlement",
+                    dest="hold_remainder", action="store_true",
+                    help="state EXPLICITLY that a remainder is held to "
+                         "settlement. Silence is not this decision.")
     ap.add_argument("--accept-snapshot-only", action="store_true",
                     help="record an operator's EXPLICIT acceptance of a "
                          "census snapshot instead of an execution "
@@ -832,7 +977,13 @@ def _cli(argv=None):
     policy = None
     if a.max_exit_orders is not None:
         policy = {"maxExitOrders": a.max_exit_orders,
-                  "partialFillsAllowed": bool(a.partial_fills)}
+                  "partialFillsAllowed": bool(a.partial_fills),
+                  "automaticReplacementOrders": bool(
+                      a.automatic_replacement_orders),
+                  "exitPriceLimit": a.exit_price_limit,
+                  "entryCancellationDeadline": a.entry_cancellation_deadline,
+                  "residualInventoryFallback": a.residual_inventory_fallback,
+                  "holdsRemainderThroughSettlement": bool(a.hold_remainder)}
     report = run(a.market, quantity=a.quantity, order_type=a.order_type,
                  outcome_side=a.outcome_side, exit_policy=policy,
                  accept_snapshot_only=a.accept_snapshot_only)

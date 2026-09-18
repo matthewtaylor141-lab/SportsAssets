@@ -24,9 +24,28 @@ from sportsassets import calibration_fees as cf
 
 MARKET = "aec-atp-sin-alc-2026-09-18"
 
-# The exit policy is STATED, never defaulted: the reserve for an exit that
-# has not happened depends on how many orders it is allowed to take.
-EXIT_POLICY = {"maxExitOrders": 2, "partialFillsAllowed": True}
+# THE EXIT IS DECLARED BEFORE THE ENTRY, in full. Management's proposed
+# policy: one exit order, partial fills allowed, and NO automatic
+# replacement -- so a partial fill leaves a remainder that is not
+# re-offered, and what happens to it is stated rather than assumed.
+EXIT_POLICY = {
+    "maxExitOrders": 1,
+    "partialFillsAllowed": True,
+    "automaticReplacementOrders": False,
+    "exitPriceLimit": 0.35,
+    "entryCancellationDeadline": "2026-09-18T21:00:00Z",
+    "residualInventoryFallback": "hold to settlement; no re-entry",
+    "holdsRemainderThroughSettlement": True,
+}
+
+# The preview the venue returns for the sized order. It states the
+# expected charge AND the execution role, because the schedule is
+# role-dependent.
+def agreeing_preview(price, quantity):
+    return {"order": {"expectedFee": {
+        "value": str(cf.expected_fee(price, quantity,
+                                     role=cf.ROLE_TAKER)["FEE"]),
+        "currency": "USD"}, "executionRole": "TAKER"}}
 
 CLEAR_COORD = {"domain": {"STATE": "CLEAR"},
                "reservation": {"RESERVATION_HELD": True},
@@ -55,6 +74,17 @@ def readers(**over):
 
 def boom(*_a, **_k):
     raise RuntimeError("venue 503")
+
+
+# The CLI invocation the workflow uses, with every declared term.
+CLI_ARGS = [
+    "--market", MARKET, "--outcome-side", "LONG",
+    "--max-exit-orders", "1", "--partial-fills",
+    "--exit-price-limit", "0.35",
+    "--entry-cancellation-deadline", "2026-09-18T21:00:00Z",
+    "--residual-inventory-fallback", "hold to settlement; no re-entry",
+    "--hold-remainder-through-settlement",
+]
 
 
 def gathered(**over):
@@ -312,7 +342,8 @@ class TestThePriceBasisIsCarriedThrough:
 
     def test_the_ticket_carries_the_side_the_adapter_will_map(self):
         t = ce.propose(gathered(), cal.empty_session("S"),
-                       exit_policy=EXIT_POLICY)["ticket"]
+                       exit_policy=EXIT_POLICY,
+                       preview=agreeing_preview)["ticket"]
         from sportsassets import calibration_adapter as ad
         p = ad.order_params(dict(t, orderType=t["orderType"]))
         assert p["outcomeSide"] == "LONG"
@@ -335,53 +366,115 @@ class TestTheFeeScheduleAndItsProvenance:
         keeps a documented expectation from passing as an observation."""
         assert cf.SCHEDULE["RETRIEVED_HERE"] is False
         assert "403" in cf.SCHEDULE["WHY_NOT_RETRIEVED_HERE"]
-        assert cf.SCHEDULE["FORMULA_INDEPENDENTLY_RETRIEVED"] is False
+
+    def test_the_provenance_records_that_the_min_form_was_our_own_guess(self):
+        """The earlier `min(p, 1-p)` was not supplied by any directive.
+        Recording that is the difference between a corrected module and
+        one that quietly changed its mind."""
+        assert cf.SCHEDULE["FORMULA"] == \
+            "coefficient * quantity * price * (1 - price)"
+        assert "own guess" in cf.SCHEDULE["SUPPLIED_BY"]
+        assert "min(" in cf.SCHEDULE["SUPPLIED_BY"]
+
+    @pytest.mark.parametrize("quantity,price,expected", [
+        # SUPPLIED FROM THE SOURCE, asserted as literals. Not computed by
+        # the implementation under test -- that is how the wrong formula
+        # survived its first review.
+        (10, "0.39", "0.17"),
+        (100, "0.50", "1.74"),
+    ])
+    def test_the_independent_vectors(self, quantity, price, expected):
+        got = cf.expected_fee(price, quantity, role=cf.ROLE_TAKER)
+        assert got["FEE"] == Decimal(expected)
+
+    def test_the_min_form_would_have_failed_those_vectors(self):
+        """0.0695 * 10 * min(0.39, 0.61) = 0.27, not 0.17 -- the old
+        guess overstated the charge by 64% at this price."""
+        wrong = (Decimal("0.0695") * 10 * Decimal("0.39")).quantize(
+            Decimal("0.01"))
+        assert wrong == Decimal("0.27")
+        assert cf.expected_fee("0.39", 10)["FEE"] == Decimal("0.17")
 
     def test_the_arithmetic_is_exact_not_binary_float(self):
-        q = cf.quote(0.39, 11, role=cf.ROLE_TAKER)
+        q = cf.expected_fee("0.39", 10, role=cf.ROLE_TAKER)
         assert isinstance(q["FEE"], Decimal)
-        # 0.0695 * 11 * 0.39 = 0.2981...  -> reserve rounds UP
-        assert q["FEE"] == Decimal("0.30")
-        assert q["basis"] == Decimal("0.39")
+        assert q["priceFactor"] == Decimal("0.2379")
+        assert q["rounding"] == "ROUND_HALF_UP"
 
-    def test_the_basis_is_the_cheaper_side_of_the_dollar(self):
-        assert cf.fee_basis(0.39) == Decimal("0.39")
-        assert cf.fee_basis(0.61) == Decimal("0.39")
-        assert cf.fee_basis(0.50) == Decimal("0.5")
-        assert cf.fee_basis(0) is None and cf.fee_basis(1) is None
+    def test_the_price_factor_is_p_times_one_minus_p(self):
+        assert cf.price_factor("0.39") == Decimal("0.2379")
+        assert cf.price_factor("0.61") == Decimal("0.2379")   # symmetric
+        assert cf.price_factor("0.50") == Decimal("0.25")     # the maximum
+        assert cf.price_factor(0) is None and cf.price_factor(1) is None
+
+    def test_the_worst_price_factor_is_a_quarter(self):
+        assert cf.WORST_PRICE_FACTOR == Decimal("0.25")
+        for p in ("0.01", "0.25", "0.39", "0.5", "0.75", "0.99"):
+            assert cf.price_factor(p) <= cf.WORST_PRICE_FACTOR
 
     def test_a_schedule_not_yet_effective_does_not_apply(self):
-        q = cf.quote(0.39, 11, at="2026-09-16")
+        q = cf.expected_fee("0.39", 10, at="2026-09-16")
         assert q["BLOCKER"] == cf.B_SCHEDULE_NOT_EFFECTIVE
         assert q["FEE"] is None
 
     def test_an_unsupported_role_is_refused(self):
-        assert cf.quote(0.39, 11, role="WHATEVER")["BLOCKER"] == \
+        assert cf.expected_fee("0.39", 10, role="WHATEVER")["BLOCKER"] == \
             cf.B_UNSUPPORTED_ROLE
 
     def test_there_is_no_default_fee(self):
         assert "no default fee" in cf.NO_INVENTED_DEFAULT
-        assert cf.quote(None, 11)["BLOCKER"] == cf.B_BAD_INPUT
-        assert cf.quote(0.39, None)["BLOCKER"] == cf.B_BAD_INPUT
+        assert cf.expected_fee(None, 10)["BLOCKER"] == cf.B_BAD_INPUT
+        assert cf.expected_fee("0.39", None)["BLOCKER"] == cf.B_BAD_INPUT
+
+
+class TestTheThreeQuantitiesAreDistinct:
+    """Expected charge, reserved allowance and collected fee are three
+    different numbers. Collapsing any two is how a conservative reserve
+    starts being compared for equality with a maker charge."""
+
+    def test_they_are_labelled_and_rounded_differently(self):
+        exp = cf.expected_fee("0.39", 10)
+        res = cf.reserve_allowance("0.39", 10)
+        assert exp["kind"] == "EXPECTED_CHARGE"
+        assert res["kind"] == "RESERVE_ALLOWANCE"
+        assert exp["rounding"] == "ROUND_HALF_UP"
+        assert res["rounding"] == "ROUND_CEILING"
+        assert res["FEE"] >= exp["FEE"]
+
+    def test_the_reserve_is_not_a_prediction(self):
+        assert "EQUALITY" in cf.A_RESERVE_IS_NOT_A_PREDICTION
+        assert "notAPrediction" in cf.reserve_allowance("0.39", 10)
+
+    def test_a_rebate_role_reserves_zero_not_a_negative(self):
+        res = cf.reserve_allowance("0.39", 10, role=cf.ROLE_MAKER)
+        assert res["FEE"] == Decimal("0.00")
+        exp = cf.expected_fee("0.39", 10, role=cf.ROLE_MAKER)
+        assert exp["FEE"] < 0
+
+    def test_the_collected_fee_is_read_back_and_unreadable_is_not_zero(self):
+        assert cf.collected_fee({"feeCollected": "0.17"})["FEE"] == \
+            Decimal("0.17")
+        got = cf.collected_fee({})
+        assert got["FEE"] is None and got["BLOCKER"]
 
 
 class TestTheFeeDependsOnTheSizeSoItIsQuotedAfterSizing:
     def test_doubling_the_quantity_doubles_the_fee(self):
-        a = cf.quote(0.39, 10)["FEE"]
-        b = cf.quote(0.39, 20)["FEE"]
+        a = cf.expected_fee("0.39", 10)["FEE"]
+        b = cf.expected_fee("0.39", 20)["FEE"]
         assert b > a
         assert abs(b - 2 * a) <= Decimal("0.01")
 
     def test_the_ticket_fee_matches_the_ticket_quantity(self):
         got = ce.propose(gathered(), cal.empty_session("S"),
-                         exit_policy=EXIT_POLICY)
+                         exit_policy=EXIT_POLICY, preview=agreeing_preview)
         t = got["ticket"]
         expect = cf.entry_reserve(t["price"], t["quantity"])["FEE"]
         assert Decimal(str(t["entryFeeReserve"])) == expect
 
     def test_the_size_fits_the_cap_with_its_own_fee_not_another_size_s(self):
         got = ce.propose(gathered(), cal.empty_session("S"),
-                         exit_policy=EXIT_POLICY)
+                         exit_policy=EXIT_POLICY, preview=agreeing_preview)
         t = got["ticket"]
         assert got["allInCost"] <= cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE
         # one more share, with the fee THAT size would incur, does not fit
@@ -394,88 +487,187 @@ class TestTheFeeDependsOnTheSizeSoItIsQuotedAfterSizing:
 
 class TestTheEntryIsReservedAtTheTakerRate:
     def test_a_post_only_entry_still_reserves_the_taker_fee(self):
-        got = cf.entry_reserve(0.39, 11, post_only=True)
+        got = cf.entry_reserve("0.39", 10, post_only=True)
         assert got["role"] == cf.ROLE_TAKER
         assert got["FEE"] > 0
         assert "order 153" in got["whyTakerRate"]
 
     def test_the_rebate_is_never_netted_off_the_reserve(self):
-        entry = cf.entry_reserve(0.39, 11)["FEE"]
-        rebate = cf.recorded_rebate(0.39, 11, cf.ROLE_MAKER)
+        entry = cf.entry_reserve("0.39", 10)["FEE"]
+        rebate = cf.recorded_rebate("0.39", 10, cf.ROLE_MAKER)
         assert rebate["REBATE"] < 0
         assert entry > 0                       # unreduced
         assert rebate["appliedToBudget"] is False
-        assert "never reduces a reserve or replenishes" in rebate["note"]
+        assert rebate["appliedToReserve"] is False
+        assert "never reduces a reserve" in rebate["note"]
+        assert "cumulative session spending" in rebate["note"]
 
     def test_a_taker_role_earns_no_rebate_to_record(self):
-        assert cf.recorded_rebate(0.39, 11, cf.ROLE_TAKER)["REBATE"] == \
+        assert cf.recorded_rebate("0.39", 10, cf.ROLE_TAKER)["REBATE"] == \
             Decimal("0.00")
 
 
 class TestTheExitIsBoundedWithoutKnowingItsPrice:
-    def test_the_bound_uses_the_worst_admissible_basis(self):
-        got = cf.exit_reserve(11, EXIT_POLICY)
-        assert got["worstCaseBasis"] == Decimal("0.5")
-        # 0.0695 * 11 * 0.5 = 0.382..., rounded up, times two orders
-        assert got["perOrder"] == Decimal("0.39")
-        assert got["FEE"] == Decimal("0.78")
+    def test_the_bound_uses_the_worst_price_factor(self):
+        got = cf.exit_reserve(10, EXIT_POLICY)
+        assert got["worstPriceFactor"] == Decimal("0.25")
+        # 0.0695 * 10 * 0.25 = 0.17375, rounded UP, one permitted order
+        assert got["perOrder"] == Decimal("0.18")
+        assert got["FEE"] == Decimal("0.18")
 
     def test_more_permitted_exit_orders_reserve_more(self):
-        one = cf.exit_reserve(11, {"maxExitOrders": 1,
-                                   "partialFillsAllowed": True})["FEE"]
-        three = cf.exit_reserve(11, {"maxExitOrders": 3,
-                                     "partialFillsAllowed": True})["FEE"]
+        base = dict(EXIT_POLICY)
+        one = cf.exit_reserve(10, dict(base, maxExitOrders=1))["FEE"]
+        three = cf.exit_reserve(10, dict(base, maxExitOrders=3))["FEE"]
         assert three == 3 * one
 
     @pytest.mark.parametrize("policy", [
-        None, {}, {"maxExitOrders": 0, "partialFillsAllowed": True},
-        {"maxExitOrders": 2}, {"partialFillsAllowed": True},
-        {"maxExitOrders": True, "partialFillsAllowed": True},
+        None, {}, {"maxExitOrders": 0, "partialFillsAllowed": True,
+                   "automaticReplacementOrders": False},
+        {"maxExitOrders": 1, "automaticReplacementOrders": False},
+        {"partialFillsAllowed": True, "automaticReplacementOrders": False},
+        # automatic replacement unstated: how many fee events the exit can
+        # produce is then unknown
+        {"maxExitOrders": 1, "partialFillsAllowed": True},
     ])
     def test_an_unstated_exit_policy_is_a_blocker(self, policy):
-        assert cf.exit_reserve(11, policy)["BLOCKER"] == cf.B_EXIT_POLICY
+        assert cf.exit_reserve(10, policy)["BLOCKER"] == cf.B_EXIT_POLICY
+
+    def test_a_partial_fill_does_not_authorise_another_order(self):
+        got = cf.exit_reserve(10, EXIT_POLICY)
+        assert got["automaticReplacementOrders"] is False
+        assert got["maxExitOrders"] == 1
+        assert "not re-offered" in got["aPartialFillDoesNotAuthoriseAnother"]
 
     def test_a_preview_alone_does_not_bound_the_exit(self):
         assert "has not happened" in cf.A_PREVIEW_DOES_NOT_BOUND_THE_EXIT
-        assert "note" in cf.exit_reserve(11, EXIT_POLICY)
+        assert "note" in cf.exit_reserve(10, EXIT_POLICY)
 
     def test_no_ticket_without_a_stated_exit_policy(self):
         got = ce.propose(gathered(), cal.empty_session("S"), exit_policy=None)
         assert got["ticket"] is None
-        assert cf.B_EXIT_POLICY in got["blockers"]
+        assert ce.B_EXIT_POLICY_MISSING in got["blockers"]
+
+
+class TestTheTicketDeclaresItsExitInFull:
+    @pytest.mark.parametrize("drop,blocker", [
+        ("exitPriceLimit", ce.B_EXIT_PRICE_LIMIT),
+        ("entryCancellationDeadline", ce.B_CANCEL_DEADLINE),
+        ("residualInventoryFallback", ce.B_RESIDUAL_PLAN),
+    ])
+    def test_a_missing_term_blocks_the_ticket(self, drop, blocker):
+        policy = {k: v for k, v in EXIT_POLICY.items() if k != drop}
+        got = ce.propose(gathered(), cal.empty_session("S"),
+                         exit_policy=policy, preview=agreeing_preview)
+        assert got["ticket"] is None
+        assert got["blockers"] == [blocker]
+
+    def test_holding_through_settlement_must_be_explicit(self):
+        policy = {k: v for k, v in EXIT_POLICY.items()
+                  if k != "holdsRemainderThroughSettlement"}
+        got = ce.propose(gathered(), cal.empty_session("S"),
+                         exit_policy=policy, preview=agreeing_preview)
+        assert got["ticket"] is None
+        assert got["blockers"] == [ce.B_RESIDUAL_PLAN]
+
+    def test_a_complete_policy_puts_every_term_on_the_ticket(self):
+        t = ce.propose(gathered(), cal.empty_session("S"),
+                       exit_policy=EXIT_POLICY,
+                       preview=agreeing_preview)["ticket"]
+        assert t["exitPriceLimit"] == 0.35
+        assert t["entryCancellationDeadline"] == "2026-09-18T21:00:00Z"
+        assert t["residualInventoryFallback"] == \
+            "hold to settlement; no re-entry"
+        assert t["holdsRemainderThroughSettlement"] is True
+        assert "RECONCILED inventory" in t[
+            "exitMaySellOnlyReconciledInventory"]
+        assert "no new entry" in t["noNewEntryWhileUnresolved"].lower()
 
 
 class TestTheDocumentedFeeIsReconciledAgainstThePreview:
     def test_agreement_establishes_the_fee(self):
-        doc = cf.quote(0.39, 11)
-        obs = cf.preview_fee({"order": {"fee": {"value": "0.30"}}})
-        got = cf.reconcile(doc, obs)
+        obs = cf.preview_fee({"order": {"expectedFee": {"value": "0.17",
+                                                        "currency": "USD"},
+                                        "executionRole": "TAKER"}})
+        got = cf.reconcile("0.39", 10, obs)
         assert got["AGREED"] is True and got["BLOCKER"] is None
+        assert got["comparing"] == "EXPECTED_CHARGE vs EXPECTED_CHARGE"
 
     def test_a_disagreement_is_a_blocker_not_a_preference(self):
-        doc = cf.quote(0.39, 11)
-        obs = cf.preview_fee({"order": {"fee": {"value": "1.50"}}})
-        got = cf.reconcile(doc, obs)
+        obs = cf.preview_fee({"order": {"expectedFee": "1.50",
+                                        "executionRole": "TAKER"}})
+        got = cf.reconcile("0.39", 10, obs)
         assert got["AGREED"] is False
         assert got["BLOCKER"] == cf.B_DISAGREEMENT
 
+    def test_a_maker_preview_is_compared_at_the_maker_rate(self):
+        """NOT against the conservative taker reserve. The reserve rounds
+        up and assumes the taker role; requiring it to equal a maker
+        charge fails precisely when it is doing its job."""
+        maker = cf.expected_fee("0.39", 10, role=cf.ROLE_MAKER)["FEE"]
+        obs = cf.preview_fee({"order": {"expectedFee": str(maker),
+                                        "executionRole": "MAKER"}})
+        got = cf.reconcile("0.39", 10, obs)
+        assert got["AGREED"] is True
+        assert got["role"] == cf.ROLE_MAKER
+        assert got["documented"] < 0
+        # and it does NOT equal the reserve, which is a different quantity
+        assert cf.entry_reserve("0.39", 10)["FEE"] != abs(got["documented"])
+
     def test_a_preview_stating_no_fee_is_unreadable_not_zero(self):
-        got = cf.preview_fee({"order": {}})
+        got = cf.preview_fee({"order": {"executionRole": "TAKER"}})
         assert got["FEE"] is None
         assert got["BLOCKER"] == cf.B_PREVIEW_UNREADABLE
+
+    def test_a_collected_to_date_field_is_not_a_future_guarantee(self):
+        got = cf.preview_fee({"order": {"feeCollected": "0.00",
+                                        "executionRole": "TAKER"}})
+        assert got["BLOCKER"] == cf.B_PREVIEW_IS_HISTORICAL
+        assert "already taken" in got["why"]
+
+    def test_a_preview_without_a_role_cannot_be_checked(self):
+        got = cf.preview_fee({"order": {"expectedFee": "0.17"}})
+        assert got["BLOCKER"] == cf.B_PREVIEW_ROLE
+
+    def test_a_preview_in_unknown_units_is_refused(self):
+        got = cf.preview_fee({"order": {
+            "expectedFee": {"value": "0.17", "currency": "EUR"},
+            "executionRole": "TAKER"}})
+        assert got["BLOCKER"] == cf.B_PREVIEW_UNITS
+
+    def test_a_missing_preview_is_a_blocker_not_a_skipped_check(self):
+        """The old code reconciled only when a preview happened to be
+        passed, and the CLI never passed one."""
+        got = cf.reconcile("0.39", 10, None)
+        assert got["AGREED"] is False
+        assert got["BLOCKER"] == cf.B_PREVIEW_MISSING
+
+    def test_no_preview_means_no_ticket(self):
+        got = ce.propose(gathered(), cal.empty_session("S"),
+                         exit_policy=EXIT_POLICY, preview=None)
+        assert got["ticket"] is None
+        assert got["blockers"] == [cf.B_PREVIEW_MISSING]
+
+    def test_a_preview_that_raises_is_a_blocker(self):
+        def boom_preview(_p, _q):
+            raise RuntimeError("venue 503")
+        got = ce.propose(gathered(), cal.empty_session("S"),
+                         exit_policy=EXIT_POLICY, preview=boom_preview)
+        assert got["ticket"] is None
+        assert got["blockers"] == [cf.B_PREVIEW_UNREADABLE]
 
     def test_a_disagreeing_preview_stops_the_ticket(self):
         got = ce.propose(gathered(), cal.empty_session("S"),
                          exit_policy=EXIT_POLICY,
-                         preview=lambda p, q: {"order": {"fee": "9.99"}})
+                         preview=lambda p, q: {"order": {
+                             "expectedFee": "9.99",
+                             "executionRole": "TAKER"}})
         assert got["ticket"] is None
         assert got["blockers"] == [cf.B_DISAGREEMENT]
 
     def test_an_agreeing_preview_lets_the_ticket_through(self):
-        got = ce.propose(
-            gathered(), cal.empty_session("S"), exit_policy=EXIT_POLICY,
-            preview=lambda p, q: {"order": {"fee": str(
-                cf.entry_reserve(p, q)["FEE"])}})
+        got = ce.propose(gathered(), cal.empty_session("S"),
+                         exit_policy=EXIT_POLICY, preview=agreeing_preview)
         assert got["ticket"] is not None
         assert got["feeAgreement"]["AGREED"] is True
 
@@ -487,7 +679,8 @@ class TestTheDocumentedFeeIsReconciledAgainstThePreview:
 class TestFreshnessIsComputedNotAsserted:
     def test_a_fresh_gather_says_so_and_carries_its_age(self):
         t = ce.propose(gathered(), cal.empty_session("S"),
-                       exit_policy=EXIT_POLICY)["ticket"]
+                       exit_policy=EXIT_POLICY,
+                       preview=agreeing_preview)["ticket"]
         assert t["stateFresh"] is True
         assert t["stateAgeSeconds"] < ce.MAX_EVIDENCE_AGE_S
 
@@ -628,7 +821,7 @@ class TestCoordinationIsNotOptional:
 
 class TestTheCommandRuns:
     def test_run_returns_a_complete_report(self):
-        got = ce.run(MARKET, readers=readers(),
+        got = ce.run(MARKET, readers=readers(), preview=agreeing_preview,
                      session=cal.empty_session("S"), coordination=CLEAR_COORD,
                      outcome_side="LONG", exit_policy=EXIT_POLICY)
         assert got["evidence"]["evidenceComplete"] is True
@@ -642,9 +835,9 @@ class TestTheCommandRuns:
         def loader():
             seen.append(1)
             return cal.empty_session("DURABLE")
-        got = ce.run(MARKET, readers=readers(), session_loader=loader,
-                     coordination=CLEAR_COORD, outcome_side="LONG",
-                     exit_policy=EXIT_POLICY)
+        got = ce.run(MARKET, readers=readers(), preview=agreeing_preview,
+                     session_loader=loader, coordination=CLEAR_COORD,
+                     outcome_side="LONG", exit_policy=EXIT_POLICY)
         assert seen == [1] and got["sessionSource"] == "durable"
 
     def test_an_unavailable_budget_refuses_rather_than_assuming_one(self):
@@ -660,7 +853,9 @@ class TestTheCommandRuns:
             self, tmp_path, monkeypatch, capsys):
         import json as _json
         from sportsassets import pmus
-        sdk = FakeSDK()
+        sdk = FakeSDK(preview={"order": {
+            "expectedFee": {"value": "0.17", "currency": "USD"},
+            "executionRole": "TAKER"}})
         monkeypatch.setattr(pmus, "_get_client", lambda: sdk)
         monkeypatch.setattr(ce, "_durable_session",
                             lambda: cal.empty_session("S"))
@@ -668,13 +863,12 @@ class TestTheCommandRuns:
         monkeypatch.setattr(ce, "default_readers",
                             lambda **kw: real(
                                 client=sdk, config=Config,
-                                declared_side=kw.get("declared_side")))
+                                declared_side=kw.get("declared_side"),
+                                market_id=kw.get("market_id")))
         monkeypatch.setattr("sportsassets.calibration_domain.coordination",
                             lambda **kw: CLEAR_COORD)
         out = tmp_path / "evidence.json"
-        rc = ce._cli(["--market", MARKET, "--outcome-side", "LONG",
-                      "--max-exit-orders", "2", "--partial-fills",
-                      "--out", str(out)])
+        rc = ce._cli(CLI_ARGS + ["--out", str(out)])
         report = _json.loads(out.read_text())
         assert report["marketId"] == MARKET
         assert report["evidence"]["account"]["value"]["account"] == \
@@ -704,8 +898,9 @@ class TestTheCommandRuns:
         monkeypatch.setattr("sportsassets.calibration_domain.coordination",
                             lambda **kw: CLEAR_COORD)
         out = tmp_path / "e.json"
-        rc = ce._cli(["--market", MARKET, "--max-exit-orders", "2",
-                      "--partial-fills", "--out", str(out)])
+        rc = ce._cli([a for a in CLI_ARGS
+                      if a not in ("--outcome-side", "LONG")]
+                     + ["--out", str(out)])
         report = _json.loads(out.read_text())
         assert report["proposal"]["ticket"] is None
         assert ce.B_SIDE_NOT_DECLARED in report["blockers"]
@@ -733,7 +928,8 @@ class TestSubmissionIsNotReachable:
     def test_a_preview_is_a_read_and_a_create_is_not_reachable(self):
         """preview-order is one of the official sources. It is read-only;
         the fake raises if create is ever called."""
-        sdk = FakeSDK(preview={"order": {"fee": "0.30"}})
+        sdk = FakeSDK(preview={"order": {"expectedFee": "0.17",
+                                         "executionRole": "TAKER"}})
         got = cf.preview_fee(sdk.orders.preview({"request": {}}))
-        assert got["FEE"] == Decimal("0.30")
+        assert got["FEE"] == Decimal("0.17")
         assert sdk.orders.created == []

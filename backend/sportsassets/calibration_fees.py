@@ -2,46 +2,49 @@
 
 WHY THIS EXISTS. There was no programmatic fee read anywhere in this
 repository, so `calibration_evidence` reported FEE_TERMS_NOT_OBTAINED and
-no ticket could be built. Management located the official sources and
-directed that the documented calculation be implemented rather than
-waiting for a dedicated endpoint.
-
-THE SCHEDULE, AND HOW IT GOT HERE
+no ticket could be built.
 
     source          https://docs.polymarket.us/fees
     effective       2026-09-17
-    taker           0.0695
-    maker rebate   -0.0125
+    taker            0.0695
+    maker rebate    -0.0125
+    charge          coefficient x quantity x price x (1 - price)
 
-RETRIEVAL PROVENANCE IS RECORDED, NOT ASSUMED. These values were supplied
-by the management directive of 2026-09-18, citing the pages above. This
-container's egress proxy refuses CONNECT to docs.polymarket.us, so the
-pages were NOT fetched here and the numbers are NOT independently
-retrieved by this code. `SCHEDULE["RETRIEVED_HERE"]` is False and says
-why. That distinction is the whole point of the rest of this module:
-a documented expectation and an actual observation are kept apart, and a
-ticket is built only when they AGREE.
+A CORRECTION, RECORDED RATHER THAN QUIETLY FIXED. The first version of
+this module used `min(price, 1 - price)` as the price factor. That was
+NOT supplied by the management directive of 2026-09-18, which gave only
+the coefficients and the effective date -- it was my own guess at the
+form, written into a module whose whole purpose is not to guess at fee
+terms, and left standing because the tests that checked it were computed
+from the same wrong formula. The documented factor is `p x (1 - p)`. The
+two agree nowhere except p = 0 and p = 1, and at p = 0.39 the guess
+overstated the charge by 64%.
 
-THE CALCULATION IS EXACT. `Decimal`, never binary float. A fee is money;
-`0.0695 * 11 * 0.39` in binary float is not the number the venue
-computes, and a cent of drift in the wrong direction is a cent over an
-approved cap.
+THE INDEPENDENT CHECK IS INDEPENDENT. The two vectors this is verified
+against -- 10 contracts at 0.39 taker = 0.17, and 100 at 0.50 taker =
+1.74 -- were supplied from the source, not produced by this code. They
+are asserted as literals in the tests. A test that computes its own
+expected answer with the implementation under test proves only that the
+implementation is consistent with itself, which is exactly how the min()
+form survived its first review.
 
-WHAT THE COEFFICIENT MULTIPLIES. The documented form is
+THREE DISTINCT QUANTITIES, never collapsed:
 
-    fee = coefficient x quantity x min(price, 1 - price)
+    expected_fee()       what the schedule says this order should cost.
+                         Documented rounding: half-up to the cent.
+    reserve_allowance()  what the desk sets aside. Conservative: rounds
+                         UP, assumes the taker role, and for an exit
+                         assumes the worst price factor. It is not a
+                         prediction and must never be compared for
+                         EQUALITY with an expected charge.
+    collected_fee()      what the venue actually took, read back from
+                         the execution. The only one that is money that
+                         has moved.
 
-`FORMULA_INDEPENDENTLY_RETRIEVED` is False for the same reason the
-coefficients are, so this module NEVER lets the computed number stand on
-its own. `reconcile()` compares it against the venue's own PREVIEW for
-the actual order, and a disagreement beyond the rounding tolerance is
-`FEE_SOURCE_DISAGREEMENT` -- a named blocker, not a nudge toward the
-computed value. The preview is the observation; this is the expectation.
-
-FEES DEPEND ON QUANTITY, PRICE AND ROLE, so nothing here computes a fixed
-fee before sizing. `quote()` takes the sized order. The evidence command
-sizes, quotes, and then re-previews the sized order, rather than sizing
-against a fee computed for a different quantity.
+THE WORST PRICE FACTOR IS 0.25. `p x (1 - p)` is maximised at p = 0.5,
+so the most any order on a given quantity can be charged is
+`coefficient x quantity x 0.25`, whatever the book does. That is what
+bounds an exit that has not happened; a current preview cannot.
 
 THE ENTRY IS RESERVED AT THE TAKER RATE EVEN THOUGH IT IS POST-ONLY.
 A post-only order is supposed to be a maker, and the maker coefficient is
@@ -49,21 +52,15 @@ a REBATE. But this venue has already filled a post-only rest at create
 with maker=false (order 153, 2026-09-06, which is why post-only was
 switched off process-wide at 17:36Z that day). A reserve that assumes the
 venue honours post-only is a reserve that the one observed failure mode
-breaks. So the entry reserve is the taker fee.
+breaks.
 
-REBATES ARE NEVER NETTED OFF THE BUDGET. `maker_rebate()` exists to
-RECORD what was actually earned, separately. It is not subtracted from a
-reserve, not added to remaining spend, and not recycled: the $100 session
-allowance is not replenished by anything, and an expected rebate is not
-money in hand.
+EXPECTED REBATES REDUCE NOTHING. Not the reserve, not cumulative session
+spending, not remaining allowance. `recorded_rebate()` exists to record
+what was actually earned, separately, and proceeds are never recycled.
 
-THE EXIT IS BOUNDED WITHOUT KNOWING ITS PRICE. A current preview prices
-the order in front of us; it says nothing about an exit that has not
-happened. `min(p, 1 - p)` is maximised at p = 0.5, so the worst fee any
-single exit order can incur on a given quantity is `coefficient x
-quantity x 0.5`. The reserve is that bound times the number of exit
-orders the policy permits, because a partial fill leaves a remainder that
-needs another order and each one is its own fee event.
+THE ARITHMETIC IS EXACT. `Decimal` constructed via `str`, never binary
+float. A cent of drift in the wrong direction is a cent over an approved
+cap.
 """
 from __future__ import annotations
 
@@ -79,14 +76,22 @@ SCHEDULE = {
     "EFFECTIVE_DATE": "2026-09-17",
     "TAKER_COEFFICIENT": "0.0695",
     "MAKER_REBATE_COEFFICIENT": "-0.0125",
-    "FORMULA": "coefficient * quantity * min(price, 1 - price)",
-    "SUPPLIED_BY": "management directive 2026-09-18, citing the sources above",
+    "FORMULA": "coefficient * quantity * price * (1 - price)",
+    "WORST_PRICE_FACTOR": "0.25",
+    "SUPPLIED_BY": (
+        "coefficients and effective date: management directive 2026-09-18. "
+        "FORMULA: management directive 2026-09-19, correcting this module. "
+        "The earlier `min(price, 1 - price)` form was NOT supplied by any "
+        "directive -- it was this module's own guess and it was wrong"),
     "RETRIEVED_HERE": False,
     "WHY_NOT_RETRIEVED_HERE": (
         "this container's egress proxy refuses CONNECT to docs.polymarket.us "
         "(403, organisation policy), so the pages were not fetched by this "
         "code and the values are a RECORDED EXPECTATION, not an observation"),
-    "FORMULA_INDEPENDENTLY_RETRIEVED": False,
+    "VERIFIED_AGAINST": (
+        "two independently supplied vectors, asserted as literals rather "
+        "than computed by this implementation: 10 @ 0.39 taker = 0.17, "
+        "100 @ 0.50 taker = 1.74"),
     "APPLICABILITY": (
         "binary outcome markets on polymarket.us, per filled share, charged "
         "on execution and dependent on the execution role"),
@@ -96,17 +101,20 @@ TAKER = Decimal(SCHEDULE["TAKER_COEFFICIENT"])
 MAKER = Decimal(SCHEDULE["MAKER_REBATE_COEFFICIENT"])
 CENT = Decimal("0.01")
 
-# The worst value of min(p, 1-p) over any admissible price.
-WORST_FEE_BASIS = Decimal("0.5")
+# p * (1 - p) is maximised at p = 0.5.
+WORST_PRICE_FACTOR = Decimal(SCHEDULE["WORST_PRICE_FACTOR"])
 
 ROLE_TAKER = "TAKER"
 ROLE_MAKER = "MAKER"
 
 # ── named blockers ───────────────────────────────────────────────────
-B_SCHEDULE_NOT_APPLICABLE = "FEE_SCHEDULE_NOT_APPLICABLE_TO_THIS_MARKET"
 B_SCHEDULE_NOT_EFFECTIVE = "FEE_SCHEDULE_NOT_EFFECTIVE_AT_THIS_TIME"
 B_DISAGREEMENT = "FEE_SOURCE_DISAGREEMENT"
 B_PREVIEW_UNREADABLE = "FEE_PREVIEW_UNREADABLE"
+B_PREVIEW_MISSING = "FEE_PREVIEW_NOT_OBTAINED"
+B_PREVIEW_ROLE = "FEE_PREVIEW_ROLE_NOT_STATED"
+B_PREVIEW_UNITS = "FEE_PREVIEW_UNITS_NOT_STATED"
+B_PREVIEW_IS_HISTORICAL = "FEE_PREVIEW_FIELD_IS_COLLECTED_TO_DATE"
 B_UNSUPPORTED_ROLE = "FEE_ROLE_NOT_SUPPORTED"
 B_BAD_INPUT = "FEE_INPUT_NOT_A_NUMBER"
 B_EXIT_POLICY = "EXIT_POLICY_NOT_STATED"
@@ -116,18 +124,34 @@ NO_INVENTED_DEFAULT = (
     "market in front of it is a named blocker, and the ticket is not built")
 
 REBATES_ARE_NOT_BUDGET = (
-    "an expected maker rebate is not money in hand and never reduces a "
-    "reserve or replenishes the session allowance. Actual rebates are "
-    "recorded separately and proceeds are not recycled")
+    "an expected maker rebate is not money in hand. It never reduces a "
+    "reserve, never reduces cumulative session spending, and never "
+    "replenishes the allowance. Actual rebates are recorded separately "
+    "and proceeds are not recycled")
 
 A_PREVIEW_DOES_NOT_BOUND_THE_EXIT = (
     "a preview prices the order in front of us. An exit that has not "
-    "happened is bounded by the worst fee its permitted orders could "
+    "happened is bounded by the worst charge its permitted orders could "
     "incur, not by today's quote")
 
-# The rounding tolerance when comparing our arithmetic to the venue's.
-# One cent: below that the two agree for every purpose this uses.
+A_RESERVE_IS_NOT_A_PREDICTION = (
+    "the reserve is a conservative upper bound -- taker role, rounded up, "
+    "worst price factor where the price is unknown. Comparing it for "
+    "EQUALITY with an expected charge is comparing two different "
+    "quantities and will fail whenever the reserve is doing its job")
+
+# How far the documented EXPECTED charge and the venue's own expected
+# charge may differ and still be called agreement. One cent.
 AGREEMENT_TOLERANCE = Decimal("0.01")
+
+# Preview fields that report money ALREADY TAKEN over the life of an
+# order. They are not a quote for what this order will cost.
+COLLECTED_TO_DATE_FIELDS = ("feeCollected", "collectedFee", "cumFee",
+                            "cumulativeFee", "feesPaid", "totalFeesCollected")
+
+# Preview fields that state the expected charge for the previewed order.
+EXPECTED_FEE_FIELDS = ("expectedFee", "estimatedFee", "commission",
+                       "feeAmount", "fee")
 
 
 def _d(v):
@@ -142,77 +166,107 @@ def _d(v):
         return None
 
 
-def fee_basis(price):
-    """min(price, 1 - price), exactly. None when the price is unreadable."""
+def price_factor(price):
+    """p * (1 - p), exactly. None when the price is unreadable.
+
+    NOT min(p, 1 - p). See the module docstring: that was this module's
+    own guess and it overstated the charge everywhere except the ends.
+    """
     p = _d(price)
     if p is None or p <= 0 or p >= 1:
         return None
-    return min(p, Decimal("1") - p)
+    return p * (Decimal("1") - p)
 
 
-def _round_up_cent(x):
-    """Money the desk must RESERVE rounds up. A reserve that rounds down is
-    a reserve that is a cent short exactly when it matters."""
-    return x.quantize(CENT, rounding=ROUND_CEILING)
-
-
-def _round_half_up_cent(x):
-    """Money being REPORTED rounds the ordinary way."""
+def _half_up(x):
     return x.quantize(CENT, rounding=ROUND_HALF_UP)
 
 
-def quote(price, quantity, role=ROLE_TAKER, at=None):
-    """The documented fee for ONE sized order. Never a fixed number.
+def _ceil(x):
+    return x.quantize(CENT, rounding=ROUND_CEILING)
 
-    Returns {"FEE": Decimal or None, "BLOCKER": name or None, ...}. The
-    fee is positive for a taker charge and negative for a maker rebate,
-    because they are different directions of money and collapsing them
-    would let a rebate look like a cost of zero.
+
+def _coefficient(role):
+    return TAKER if role == ROLE_TAKER else MAKER
+
+
+def expected_fee(price, quantity, role=ROLE_TAKER, at=None):
+    """WHAT THE SCHEDULE SAYS THIS ORDER SHOULD COST.
+
+    Documented rounding: half-up to the cent. Positive for a taker
+    charge, negative for a maker rebate, because they are opposite
+    directions of money and collapsing them would let a rebate look like
+    a cost of zero.
+
+    This is an EXPECTATION. It is not the reserve and it is not what the
+    venue collected.
     """
-    out = {"role": role, "schedule": SCHEDULE["EFFECTIVE_DATE"],
+    out = {"role": role, "quantity": quantity, "price": price,
+           "schedule": SCHEDULE["EFFECTIVE_DATE"],
            "formula": SCHEDULE["FORMULA"],
+           "rounding": "ROUND_HALF_UP",
+           "kind": "EXPECTED_CHARGE",
            "retrievedHere": SCHEDULE["RETRIEVED_HERE"]}
     if role not in (ROLE_TAKER, ROLE_MAKER):
         return dict(out, FEE=None, BLOCKER=B_UNSUPPORTED_ROLE)
     if at is not None and str(at) < SCHEDULE["EFFECTIVE_DATE"]:
-        # A schedule that was not in force is not the applicable term.
         return dict(out, FEE=None, BLOCKER=B_SCHEDULE_NOT_EFFECTIVE)
-    q = _d(quantity)
-    basis = fee_basis(price)
-    if q is None or q <= 0 or basis is None:
+    q, factor = _d(quantity), price_factor(price)
+    if q is None or q <= 0 or factor is None:
         return dict(out, FEE=None, BLOCKER=B_BAD_INPUT)
+    coef = _coefficient(role)
+    raw = coef * q * factor
+    return dict(out, FEE=_half_up(raw), BLOCKER=None, priceFactor=factor,
+                coefficient=coef, raw=raw)
 
-    coef = TAKER if role == ROLE_TAKER else MAKER
-    raw = coef * q * basis
-    fee = _round_up_cent(raw) if coef > 0 else _round_half_up_cent(raw)
-    return dict(out, FEE=fee, BLOCKER=None, basis=basis, coefficient=coef,
-                quantity=q, raw=raw)
+
+def reserve_allowance(price, quantity, role=ROLE_TAKER):
+    """WHAT THE DESK SETS ASIDE. Conservative, and a different quantity.
+
+    Rounds UP and only ever reserves a CHARGE: a rebate role reserves
+    zero rather than a negative number, because expected rebates reduce
+    nothing.
+    """
+    out = {"role": role, "kind": "RESERVE_ALLOWANCE",
+           "rounding": "ROUND_CEILING",
+           "notAPrediction": A_RESERVE_IS_NOT_A_PREDICTION}
+    q, factor = _d(quantity), price_factor(price)
+    if q is None or q <= 0 or factor is None:
+        return dict(out, FEE=None, BLOCKER=B_BAD_INPUT)
+    coef = _coefficient(role)
+    if coef <= 0:
+        return dict(out, FEE=Decimal("0.00"), BLOCKER=None,
+                    why=REBATES_ARE_NOT_BUDGET)
+    return dict(out, FEE=_ceil(coef * q * factor), BLOCKER=None,
+                priceFactor=factor, coefficient=coef)
 
 
 def entry_reserve(price, quantity, post_only=True):
-    """What to reserve for the ENTRY fee.
+    """The ENTRY fee allowance, at the taker rate.
 
-    AT THE TAKER RATE even for a post-only order. The venue has filled a
-    post-only rest at create with maker=false before; a reserve that
-    assumes post-only is honoured is broken by the one failure mode that
-    has actually been observed. The rebate, if the order really is a
-    maker, is recorded afterwards and changes nothing here.
+    Even for a post-only order: this venue has filled a post-only rest at
+    create with maker=false, and a reserve that assumes otherwise is
+    broken by the one failure mode actually observed.
     """
-    q = quote(price, quantity, role=ROLE_TAKER)
-    q["postOnlyRequested"] = bool(post_only)
-    q["whyTakerRate"] = (
+    got = reserve_allowance(price, quantity, role=ROLE_TAKER)
+    got["postOnlyRequested"] = bool(post_only)
+    got["whyTakerRate"] = (
         "a post-only order has been filled as a taker on this venue "
         "(order 153, 2026-09-06); the reserve does not assume otherwise")
-    return q
+    return got
 
 
 def exit_reserve(quantity, policy):
-    """What to reserve for an exit that has not happened yet.
+    """The allowance for an exit that has not happened yet.
 
-    `policy` must state the number of exit orders permitted and whether
-    partial fills are allowed, because a partial fill leaves a remainder
-    that needs another order and each order is its own fee event. There
-    is no default: an unstated exit policy is a blocker.
+    `policy` must state how many exit orders are permitted, whether
+    partial fills are allowed, and whether automatic replacement orders
+    are permitted. There is no default: an unstated exit policy cannot
+    bound anything.
+
+    A PERMITTED PARTIAL FILL DOES NOT AUTHORISE ANOTHER EXIT ORDER. With
+    automaticReplacementOrders false the remainder is NOT re-offered, so
+    the bound is the permitted order count and no more.
     """
     if not isinstance(policy, dict):
         return {"FEE": None, "BLOCKER": B_EXIT_POLICY,
@@ -224,82 +278,156 @@ def exit_reserve(quantity, policy):
     if policy.get("partialFillsAllowed") not in (True, False):
         return {"FEE": None, "BLOCKER": B_EXIT_POLICY,
                 "note": A_PREVIEW_DOES_NOT_BOUND_THE_EXIT}
+    if policy.get("automaticReplacementOrders") not in (True, False):
+        return {"FEE": None, "BLOCKER": B_EXIT_POLICY,
+                "why": "whether a partial fill's remainder may be re-offered "
+                       "changes how many fee events the exit can produce",
+                "note": A_PREVIEW_DOES_NOT_BOUND_THE_EXIT}
     q = _d(quantity)
     if q is None or q <= 0:
         return {"FEE": None, "BLOCKER": B_BAD_INPUT}
 
-    # THE BOUND, not a quote. min(p, 1-p) <= 0.5 for every admissible
-    # price, so this is the most any single exit order on this quantity
-    # can cost, whatever the book does between now and then.
-    per_order = _round_up_cent(TAKER * q * WORST_FEE_BASIS)
-    total = _round_up_cent(per_order * Decimal(n))
-    return {"FEE": total, "BLOCKER": None, "perOrder": per_order,
+    # THE BOUND, not a quote. p * (1 - p) <= 0.25 for every admissible
+    # price, so this is the most a single exit order on this quantity can
+    # be charged, whatever the book does between now and then.
+    per_order = _ceil(TAKER * q * WORST_PRICE_FACTOR)
+    return {"FEE": _ceil(per_order * Decimal(n)), "BLOCKER": None,
+            "kind": "RESERVE_ALLOWANCE", "perOrder": per_order,
             "maxExitOrders": n,
             "partialFillsAllowed": policy["partialFillsAllowed"],
-            "worstCaseBasis": WORST_FEE_BASIS,
+            "automaticReplacementOrders": policy["automaticReplacementOrders"],
+            "worstPriceFactor": WORST_PRICE_FACTOR,
             "role": ROLE_TAKER,
+            "aPartialFillDoesNotAuthoriseAnother": (
+                "the remainder is not re-offered; the residual-inventory "
+                "fallback on the ticket is what happens to it"),
             "note": A_PREVIEW_DOES_NOT_BOUND_THE_EXIT}
 
 
-def preview_fee(preview):
-    """The fee the venue's OWN preview states, or a named refusal.
+# ── the venue's own preview ──────────────────────────────────────────
 
-    This is the observation. It is read, never inferred: a preview that
-    does not state a fee is unreadable, not a fee of zero.
+def preview_fee(preview):
+    """The EXPECTED charge the venue's own preview states.
+
+    Read, never inferred. Three specific refusals:
+
+      * a preview that states no fee at all is UNREADABLE, not zero;
+      * a field that reports fees COLLECTED TO DATE is history, not a
+        quote for this order, and is refused by name;
+      * a preview that does not state the execution ROLE it priced
+        cannot be compared against a role-dependent schedule.
     """
     if not isinstance(preview, dict):
         return {"FEE": None, "BLOCKER": B_PREVIEW_UNREADABLE}
     order = preview.get("order") if isinstance(preview.get("order"), dict) \
         else preview
-    for key in ("fee", "fees", "feeAmount", "totalFee", "estimatedFee"):
+
+    for key in COLLECTED_TO_DATE_FIELDS:
+        if order.get(key) is not None and not any(
+                order.get(k) is not None for k in EXPECTED_FEE_FIELDS):
+            return {"FEE": None, "BLOCKER": B_PREVIEW_IS_HISTORICAL,
+                    "field": key,
+                    "why": "this field is money already taken over the life "
+                           "of an order, not what the previewed order will "
+                           "cost"}
+
+    for key in EXPECTED_FEE_FIELDS:
         raw = order.get(key)
+        if raw is None:
+            continue
+        currency = None
+        if isinstance(raw, dict):
+            currency = raw.get("currency")
+            raw = raw.get("value", raw.get("amount"))
+        f = _d(raw)
+        if f is None:
+            return {"FEE": None, "BLOCKER": B_PREVIEW_UNREADABLE, "field": key}
+        if currency is not None and str(currency).upper() != "USD":
+            # A number in unknown units is not a number we can compare.
+            return {"FEE": None, "BLOCKER": B_PREVIEW_UNITS,
+                    "field": key, "currency": currency}
+        role = order.get("executionRole") or order.get("role") \
+            or order.get("liquidity")
+        if not role:
+            return {"FEE": None, "BLOCKER": B_PREVIEW_ROLE, "field": key,
+                    "why": "the schedule is role-dependent, so a charge "
+                           "whose role is unstated cannot be checked "
+                           "against it"}
+        role = ROLE_MAKER if "MAKER" in str(role).upper() else ROLE_TAKER
+        return {"FEE": _half_up(f), "BLOCKER": None, "field": key,
+                "role": role, "kind": "EXPECTED_CHARGE", "currency": "USD"}
+
+    return {"FEE": None, "BLOCKER": B_PREVIEW_UNREADABLE,
+            "why": "the preview states no expected fee field; an unstated "
+                   "fee is unreadable, not zero"}
+
+
+def reconcile(price, quantity, observed, at=None,
+              tolerance=AGREEMENT_TOLERANCE):
+    """The documented EXPECTED charge vs the venue's own EXPECTED charge.
+
+    EXPECTATION AGAINST EXPECTATION, at the role the venue says it
+    priced. The conservative reserve is deliberately not what is
+    compared: it rounds up and assumes the taker role, so requiring it to
+    equal a maker charge would fail precisely when it is doing its job.
+
+    Missing preview evidence is a named blocker. It is never skipped.
+    """
+    if observed is None:
+        return {"AGREED": False, "BLOCKER": B_PREVIEW_MISSING,
+                "why": "no preview was obtained for the sized order, so the "
+                       "documented schedule has nothing to be checked "
+                       "against and stands unverified"}
+    if observed.get("BLOCKER"):
+        return {"AGREED": False, "BLOCKER": observed["BLOCKER"],
+                "observedDetail": observed}
+
+    role = observed.get("role") or ROLE_TAKER
+    doc = expected_fee(price, quantity, role=role, at=at)
+    out = {"role": role, "documented": doc.get("FEE"),
+           "observed": observed.get("FEE"), "tolerance": tolerance,
+           "comparing": "EXPECTED_CHARGE vs EXPECTED_CHARGE",
+           "documentedRetrievedHere": SCHEDULE["RETRIEVED_HERE"]}
+    if doc.get("BLOCKER"):
+        return dict(out, AGREED=False, BLOCKER=doc["BLOCKER"])
+    delta = abs(doc["FEE"] - observed["FEE"])
+    if delta > tolerance:
+        return dict(out, AGREED=False, BLOCKER=B_DISAGREEMENT, delta=delta)
+    return dict(out, AGREED=True, BLOCKER=None, delta=delta)
+
+
+def collected_fee(status):
+    """WHAT THE VENUE ACTUALLY TOOK, from the execution.
+
+    The third quantity. Unreadable stays unreadable: a status that states
+    no fee is not a fee of zero, which is the defect settle() already
+    carries a named refusal for.
+    """
+    if not isinstance(status, dict):
+        return {"FEE": None, "BLOCKER": B_PREVIEW_UNREADABLE,
+                "kind": "COLLECTED"}
+    for key in COLLECTED_TO_DATE_FIELDS + EXPECTED_FEE_FIELDS:
+        raw = status.get(key)
         if raw is None:
             continue
         if isinstance(raw, dict):
             raw = raw.get("value", raw.get("amount"))
         f = _d(raw)
         if f is None:
-            return {"FEE": None, "BLOCKER": B_PREVIEW_UNREADABLE, "field": key}
-        return {"FEE": _round_half_up_cent(f), "BLOCKER": None, "field": key}
-    return {"FEE": None, "BLOCKER": B_PREVIEW_UNREADABLE,
-            "why": "the preview states no fee field; an unstated fee is "
-                   "unreadable, not zero"}
-
-
-def reconcile(documented, observed, tolerance=AGREEMENT_TOLERANCE):
-    """Documented expectation vs the venue's own preview.
-
-    AGREEMENT IS REQUIRED. The coefficients and the formula were not
-    retrieved by this code, so the arithmetic alone is not evidence. The
-    preview alone does not bound a future exit. Together, agreeing, they
-    establish the entry fee; apart, they establish a blocker.
-    """
-    out = {"documented": documented.get("FEE"),
-           "observed": observed.get("FEE"),
-           "tolerance": tolerance,
-           "documentedRetrievedHere": SCHEDULE["RETRIEVED_HERE"]}
-    if documented.get("BLOCKER"):
-        return dict(out, AGREED=False, BLOCKER=documented["BLOCKER"])
-    if observed.get("BLOCKER"):
-        return dict(out, AGREED=False, BLOCKER=observed["BLOCKER"])
-    delta = abs(documented["FEE"] - observed["FEE"])
-    if delta > tolerance:
-        # NOT resolved in favour of either. A disagreement about what an
-        # order costs is exactly the thing not to guess about.
-        return dict(out, AGREED=False, BLOCKER=B_DISAGREEMENT, delta=delta)
-    return dict(out, AGREED=True, BLOCKER=None, delta=delta,
-                FEE=max(documented["FEE"], observed["FEE"]))
+            return {"FEE": None, "BLOCKER": B_PREVIEW_UNREADABLE,
+                    "field": key, "kind": "COLLECTED"}
+        return {"FEE": _half_up(f), "BLOCKER": None, "field": key,
+                "kind": "COLLECTED"}
+    return {"FEE": None, "BLOCKER": B_PREVIEW_UNREADABLE, "kind": "COLLECTED",
+            "why": "the execution states no fee; unreadable is not zero"}
 
 
 def recorded_rebate(price, quantity, role):
-    """What a maker rebate actually came to. FOR THE RECORD ONLY.
-
-    Never subtracted from a reserve, never added to remaining spend,
-    never recycled into buying power.
-    """
+    """What a maker rebate actually came to. FOR THE RECORD ONLY."""
     if role != ROLE_MAKER:
-        return {"REBATE": Decimal("0.00"), "note": REBATES_ARE_NOT_BUDGET}
-    q = quote(price, quantity, role=ROLE_MAKER)
+        return {"REBATE": Decimal("0.00"), "note": REBATES_ARE_NOT_BUDGET,
+                "appliedToBudget": False, "appliedToReserve": False}
+    q = expected_fee(price, quantity, role=ROLE_MAKER)
     return {"REBATE": q["FEE"], "BLOCKER": q["BLOCKER"],
             "note": REBATES_ARE_NOT_BUDGET,
-            "appliedToBudget": False}
+            "appliedToBudget": False, "appliedToReserve": False}

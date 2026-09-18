@@ -74,6 +74,34 @@ A_SNAPSHOT_IS_NOT_A_LOCK = (
 # The group every venue-touching workflow shares. Read from venue_domain
 # rather than repeated here.
 RESERVATION_ENV = "PMUS_DOMAIN_RESERVATION"
+RUN_ID_ENV = "GITHUB_RUN_ID"
+WORKFLOW_ENV = "GITHUB_WORKFLOW"
+
+# WORKFLOWS THE RESEARCH-ONLY SCANNER DOES NOT FIND.
+#
+# `venue_domain.audit` recognises a member by the venue host patterns in
+# the code it runs. calibration-evidence reaches the venue through the
+# SDK client in this package, not through a literal gateway URL in a
+# shadow module, so the scanner returns 19 members and this one is not
+# among them -- checked, not assumed. A gather that is not in the
+# inventory is a gather the census cannot see, which would make an
+# executing evidence job invisible to the next collector's admission
+# check and would make this job's own ownership unprovable.
+EXPLICIT_MEMBERS = {
+    "calibration-evidence": (
+        "reaches the venue through sportsassets.pmus rather than a "
+        "literal gateway URL, so the research-only module scanner does "
+        "not classify it. It joins pmus-public-read-global in its own "
+        "workflow file and is a member by that membership"),
+}
+
+B_OWNERSHIP = "SLOT_OWNERSHIP_NOT_PROVEN"
+
+AN_ENV_VAR_IS_NOT_OWNERSHIP = (
+    "PMUS_DOMAIN_RESERVATION says which group this job BELIEVES it is "
+    "running under. It is not evidence that the job holds the slot: the "
+    "census must show this run executing, and this workflow must be a "
+    "member of the group. Running code is not proof of holding a lock")
 
 MAX_PAGES = 40
 PER_PAGE = 100
@@ -152,8 +180,21 @@ def inventory(root=None):
     out = []
     for n in names:
         out.append(n["workflow"] if isinstance(n, dict) else str(n))
-    _INVENTORY_CACHE[key] = sorted(set(out))
+    # The scanner's answer PLUS the members it structurally cannot find.
+    _INVENTORY_CACHE[key] = sorted(set(out) | set(EXPLICIT_MEMBERS))
     return list(_INVENTORY_CACHE[key])
+
+
+def scanner_only_inventory(root=None):
+    """What the research-only scanner finds, WITHOUT the explicit members.
+
+    Exposed so a test can show the gap rather than take it on trust.
+    """
+    _rc, vd = machinery(root)
+    a = vd.audit(str(_repo_root(root)))
+    names = a.get("KNOWN_VENUE_TOUCHING_WORKFLOWS") or []
+    return sorted({n["workflow"] if isinstance(n, dict) else str(n)
+                   for n in names})
 
 
 def _walk_workflow(fetch, repo, workflow, rc):
@@ -238,11 +279,18 @@ def domain_state(fetch=None, repo=None, root=None, self_run_id=None):
     verdict = vd.isolation(occupying, members, self_run_id=self_run_id)
     # venue_domain names its own verdict; this module does not re-derive it.
     clear = verdict.get("DIRECT_RESEARCH_COLLECTOR_ISOLATION") == "ESTABLISHED"
-    active = [r for r in occupying
+    # OUR OWN RUN IS NOT ANOTHER COLLECTOR. venue_domain.isolation
+    # already excludes it by id; the running/waiting lists must too, or
+    # a job that holds the slot reads its own execution as a conflict.
+    others = [r for r in occupying
+              if self_run_id is None or str(r.get("id")) != str(self_run_id)]
+    active = [r for r in others
               if (r.get("status") or "").lower() in rc.RUNNING_STATES]
-    waiting = [r for r in occupying
+    waiting = [r for r in others
                if (r.get("status") or "").lower() in rc.WAITING_STATES]
     return {
+        "census": cen,
+        "audit": vd.audit(str(_repo_root(root))),
         "STATE": CLEAR if clear else ACTIVE,
         "REASON": None if clear else "DOMAIN_OCCUPIED",
         "isolation": verdict,
@@ -257,12 +305,11 @@ def domain_state(fetch=None, repo=None, root=None, self_run_id=None):
 
 
 def reservation_state(env=None):
-    """Whether this process holds the group's own serialisation, or a snapshot.
+    """The env MARKER only. Not ownership -- see `ownership()`.
 
-    The GitHub concurrency group is the mechanism the collectors obey. A
-    job running inside it holds a real reservation; anything else holds a
-    snapshot. The workflow sets PMUS_DOMAIN_RESERVATION to the group name
-    it is running under, and this reads it rather than assuming.
+    This answers "which group does this job believe it is under", which
+    is necessary and nowhere near sufficient. Anyone can export an
+    environment variable.
     """
     env = env if env is not None else os.environ
     held = env.get(RESERVATION_ENV)
@@ -272,10 +319,56 @@ def reservation_state(env=None):
     except MachineryUnavailable:
         group = "pmus-public-read-global"
     if held and str(held).strip() == group:
-        return {"RESERVATION_HELD": True, "MECHANISM": "GITHUB_CONCURRENCY_GROUP",
-                "GROUP": group}
-    return {"RESERVATION_HELD": False, "MECHANISM": "SNAPSHOT_ONLY",
-            "GROUP": group, "why": A_SNAPSHOT_IS_NOT_A_LOCK}
+        return {"MARKER_PRESENT": True, "GROUP": group,
+                "note": AN_ENV_VAR_IS_NOT_OWNERSHIP}
+    return {"MARKER_PRESENT": False, "GROUP": group,
+            "why": A_SNAPSHOT_IS_NOT_A_LOCK,
+            "note": AN_ENV_VAR_IS_NOT_OWNERSHIP}
+
+
+def ownership(domain, env=None):
+    """DO WE ACTUALLY HOLD THE SLOT? Proven, not asserted.
+
+    Delegates to `startup_census.post_acquisition`, the same logic GATE 3
+    uses: our own run must appear in the COMPLETE census in an executing
+    state, our own workflow must be a member of the group, the audit must
+    pass, and no occupying run may be unattributable. A verified WAITING
+    follower is reported, not treated as competing execution -- by the
+    time this runs the slot is already held, so a waiter cannot be
+    displaced by us and issues no venue request while it waits.
+    """
+    env = env if env is not None else os.environ
+    marker = reservation_state(env)
+    run_id = env.get(RUN_ID_ENV)
+    workflow = env.get(WORKFLOW_ENV)
+
+    if not marker["MARKER_PRESENT"]:
+        return {"OWNED": False, "BLOCKER": B_NO_RESERVATION,
+                "marker": marker, "note": AN_ENV_VAR_IS_NOT_OWNERSHIP}
+    cen = (domain or {}).get("census")
+    audit = (domain or {}).get("audit")
+    if not isinstance(cen, dict) or not isinstance(audit, dict):
+        return {"OWNED": False, "BLOCKER": B_OWNERSHIP,
+                "why": "no census to prove ownership against",
+                "note": AN_ENV_VAR_IS_NOT_OWNERSHIP}
+
+    shadow = _repo_root() / "research" / "beta48" / "shadow"
+    try:
+        sc = _load("startup_census", shadow / "startup_census.py")
+    except Exception as exc:                                   # noqa: BLE001
+        return {"OWNED": False, "BLOCKER": B_NO_MACHINERY,
+                "why": "%s: %s" % (type(exc).__name__, exc)}
+
+    verdict = sc.post_acquisition(cen, domain.get("inventory") or [],
+                                  audit, run_id, workflow)
+    owned = verdict.get("POST_ACQUISITION_ISOLATION") == "ESTABLISHED"
+    return {"OWNED": owned,
+            "BLOCKER": None if owned else B_OWNERSHIP,
+            "verdict": verdict,
+            "selfRunId": run_id, "selfWorkflow": workflow,
+            "marker": marker,
+            "waitingFollowersReported": verdict.get("WAITING_FOLLOWERS", []),
+            "note": AN_ENV_VAR_IS_NOT_OWNERSHIP}
 
 
 def coordination(fetch=None, repo=None, root=None, self_run_id=None,
@@ -288,16 +381,26 @@ def coordination(fetch=None, repo=None, root=None, self_run_id=None,
     that records an operator's explicit acceptance of a snapshot-only
     read for a NON-PRODUCTION gather.
     """
+    env = env if env is not None else os.environ
+    self_run_id = self_run_id or env.get(RUN_ID_ENV)
     state = domain_state(fetch=fetch, repo=repo, root=root,
                          self_run_id=self_run_id)
-    res = reservation_state(env)
+    own = ownership(state, env) if require_reservation else {
+        "OWNED": False, "BLOCKER": None, "skipped": True}
+
     blockers = []
-    if state["STATE"] == ACTIVE:
-        blockers.append(B_DOMAIN)
-    elif state["STATE"] != CLEAR:
+    # ADMISSION: another EXECUTING collector, or a domain we could not
+    # read, blocks whatever we hold.
+    if state["STATE"] == UNKNOWN:
         blockers.append(B_DOMAIN_UNREADABLE)
-    if require_reservation and not res["RESERVATION_HELD"]:
-        blockers.append(B_NO_RESERVATION)
-    return {"domain": state, "reservation": res,
-            "blockers": sorted(set(blockers)),
+    elif state["STATE"] == ACTIVE and state.get("running"):
+        blockers.append(B_DOMAIN)
+    elif state["STATE"] == ACTIVE and not own.get("OWNED"):
+        # Only waiters, and we cannot prove we hold the slot they wait on.
+        blockers.append(B_DOMAIN)
+    if require_reservation and not own.get("OWNED"):
+        blockers.append(own.get("BLOCKER") or B_NO_RESERVATION)
+    return {"domain": state, "ownership": own,
+            "reservation": own.get("marker"),
+            "blockers": sorted(set(b for b in blockers if b)),
             "MAY_READ_THE_VENUE": not blockers}

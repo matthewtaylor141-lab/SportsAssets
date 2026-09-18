@@ -53,6 +53,20 @@ on:
         required: true
         type: boolean
         default: true
+      exit_price_limit:
+        description: "The limit the exit order may not sell below"
+        required: true
+      entry_cancellation_deadline:
+        description: "When an unfilled entry is cancelled (ISO instant)"
+        required: true
+      residual_inventory_fallback:
+        description: "What happens to inventory the one exit order leaves"
+        required: true
+      hold_remainder_through_settlement:
+        description: "Hold a remainder to settlement. Must be explicit."
+        required: true
+        type: boolean
+        default: true
 
 permissions:
   contents: read
@@ -77,12 +91,43 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install the pinned test dependencies
-        run: python -m pip install --quiet -r research/beta48/shadow/requirements-test.txt
+      # THE BACKEND'S OWN DEPENDENCIES, not just the shadow suite's.
+      # This job imports sportsassets.calibration_store, which talks to
+      # Postgres through asyncpg, and sportsassets.pmus, which needs the
+      # venue SDK. Installing only the shadow pins would fail at import
+      # -- and an import failure must be a FAILED COMMAND, not a blocked
+      # proposal, which is why the two are distinguished below.
+      - name: Install the backend and the pinned test dependencies
+        run: |
+          set -e
+          python -m pip install --quiet -r research/beta48/shadow/requirements-test.txt
+          python -m pip install --quiet -e ./backend
 
       - name: Prove the environment before anything else
         working-directory: research/beta48/shadow
         run: python prove_environment.py --requirements requirements-test.txt
+
+      # THE IMPORTS THE COMMAND NEEDS, proved before the command runs so
+      # a missing dependency is named here rather than surfacing as a
+      # mysterious non-zero exit later.
+      - name: Prove the command imports
+        working-directory: backend
+        run: |
+          set -e
+          python - <<'PY'
+          import importlib
+          for m in ("sportsassets.calibration_evidence",
+                    "sportsassets.calibration_fees",
+                    "sportsassets.calibration_domain",
+                    "sportsassets.calibration_store",
+                    "sportsassets.calibration_read"):
+              importlib.import_module(m)
+              print("IMPORT_OK", m)
+          import asyncpg, inspect                       # noqa: F401
+          from sportsassets import calibration_store as s
+          assert inspect.iscoroutinefunction(s.load), "load must be awaited"
+          print("STORE_LOAD_IS_A_COROUTINE")
+          PY
 
       - name: Gather the evidence and propose the ticket
         working-directory: backend
@@ -94,20 +139,80 @@ jobs:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
           PMUS_KEY_ID: ${{ secrets.PMUS_KEY_ID }}
           PMUS_SECRET_KEY: ${{ secrets.PMUS_SECRET_KEY }}
+          # THE APPROVED SECRET-BACKED DATABASE CONFIGURATION. The
+          # durable budget is read from the real ledger; this job never
+          # writes to it and never runs a migration.
+          DATABASE_URL: ${{ secrets.DATABASE_URL }}
+          CALIBRATION_READ_ONLY: "1"
         run: |
           set -e
+          set -o pipefail
+          OUT="evidence_${{ github.run_id }}.json"
+
+          # THE BLANKET `|| echo` IS GONE. It turned every failure --
+          # an import error, a crash, a missing artifact -- into a line
+          # of text and a green step. Two outcomes are distinguished:
+          #
+          #   rc 0  a clear proposal
+          #   rc 1  a VALID evidence report that found named blockers
+          #         -> a BLOCKED PROPOSAL, which is a successful command
+          #   any other rc, or a missing/malformed report
+          #         -> a FAILED COMMAND
+          set +e
           python -m sportsassets.calibration_evidence \
             --market "${{ github.event.inputs.market }}" \
             --outcome-side "${{ github.event.inputs.outcome_side }}" \
             --max-exit-orders "${{ github.event.inputs.max_exit_orders }}" \
             ${{ github.event.inputs.partial_fills == 'true' && '--partial-fills' || '' }} \
-            --out "evidence_${{ github.run_id }}.json" \
-          || echo "EVIDENCE_HAS_BLOCKERS (exit 1 is a successful read that found blockers)"
+            --exit-price-limit "${{ github.event.inputs.exit_price_limit }}" \
+            --entry-cancellation-deadline "${{ github.event.inputs.entry_cancellation_deadline }}" \
+            --residual-inventory-fallback "${{ github.event.inputs.residual_inventory_fallback }}" \
+            ${{ github.event.inputs.hold_remainder_through_settlement == 'true' && '--hold-remainder-through-settlement' || '' }} \
+            --out "$OUT" > command_stdout.txt 2> command_stderr.txt
+          RC=$?
+          set -e
 
-      - name: Publish the evidence record
+          # The stderr goes to the diagnostic artifact, never to the log
+          # where a secret could be echoed by a traceback.
+          tail -c 20000 command_stderr.txt > diagnostic_${{ github.run_id }}.txt || true
+          echo "COMMAND_EXIT=$RC" >> diagnostic_${{ github.run_id }}.txt
+
+          if [ "$RC" -ne 0 ] && [ "$RC" -ne 1 ]; then
+            echo "EVIDENCE_COMMAND_FAILED rc=$RC"
+            exit "$RC"
+          fi
+          if [ ! -s "$OUT" ]; then
+            echo "EVIDENCE_REPORT_MISSING_OR_EMPTY rc=$RC"
+            exit 2
+          fi
+          python - "$OUT" <<'PY'
+          import json, sys
+          try:
+              r = json.load(open(sys.argv[1]))
+          except Exception as exc:
+              print("EVIDENCE_REPORT_MALFORMED:", type(exc).__name__)
+              raise SystemExit(3)
+          for key in ("marketId", "coordination", "proposal", "blockers"):
+              if key not in r:
+                  print("EVIDENCE_REPORT_INCOMPLETE: missing", key)
+                  raise SystemExit(3)
+          blocked = bool(r.get("blockers"))
+          print("PROPOSAL_BLOCKED" if blocked else "PROPOSAL_CLEAR")
+          print("BLOCKERS", r.get("blockers"))
+          PY
+          if [ "$RC" -eq 1 ]; then
+            echo "BLOCKED_PROPOSAL: a valid report naming its blockers"
+          fi
+
+      # RETAINED FOR BOTH OUTCOMES: a blocked proposal and a failed
+      # command each leave something to read. The stderr capture is
+      # truncated and no secret is echoed into it.
+      - name: Publish the evidence record and the diagnostic
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: calibration-evidence-${{ github.run_id }}
-          path: backend/evidence_${{ github.run_id }}.json
+          path: |
+            backend/evidence_${{ github.run_id }}.json
+            backend/diagnostic_${{ github.run_id }}.txt
           if-no-files-found: warn

@@ -126,43 +126,100 @@ class TestTheFourVerifications:
         assert got["STATE"] == cd.CLEAR
 
 
-class TestASnapshotIsNotALock:
-    def test_a_process_outside_the_group_holds_no_reservation(self):
-        got = cd.reservation_state({})
-        assert got["RESERVATION_HELD"] is False
-        assert got["MECHANISM"] == "SNAPSHOT_ONLY"
-        assert "arrive a second later" in got["why"]
+SELF = {cd.RESERVATION_ENV: "pmus-public-read-global",
+        cd.RUN_ID_ENV: "999", cd.WORKFLOW_ENV: "calibration-evidence"}
 
-    def test_a_job_inside_the_group_holds_one(self):
-        got = cd.reservation_state(
-            {cd.RESERVATION_ENV: "pmus-public-read-global"})
-        assert got["RESERVATION_HELD"] is True
-        assert got["MECHANISM"] == "GITHUB_CONCURRENCY_GROUP"
 
-    def test_a_different_group_is_not_this_reservation(self):
-        got = cd.reservation_state({cd.RESERVATION_ENV: "some-other-group"})
-        assert got["RESERVATION_HELD"] is False
+def me(status="in_progress"):
+    return run(id=999, name="calibration-evidence", status=status)
 
-    def test_a_clear_census_without_a_reservation_still_blocks(self):
+
+class TestAnEnvVarIsNotOwnership:
+    def test_the_marker_is_only_a_marker(self):
+        got = cd.reservation_state(SELF)
+        assert got["MARKER_PRESENT"] is True
+        assert "not evidence that the job holds the slot" in got["note"]
+        assert "RESERVATION_HELD" not in got
+
+    def test_a_missing_marker_blocks(self):
         got = cd.coordination(fetch=pages({}), repo=REPO, env={})
-        assert got["domain"]["STATE"] == cd.CLEAR
         assert got["blockers"] == [cd.B_NO_RESERVATION]
         assert got["MAY_READ_THE_VENUE"] is False
 
-    def test_clear_plus_a_reservation_may_read(self):
+    def test_the_marker_alone_does_not_prove_ownership(self):
+        """A clear census and the env var, but our own run is nowhere in
+        the census -- so we cannot show we hold the slot."""
+        got = cd.coordination(fetch=pages({}), repo=REPO, env=SELF)
+        assert got["ownership"]["OWNED"] is False
+        assert got["blockers"] == [cd.B_OWNERSHIP]
+
+    def test_ownership_needs_our_run_EXECUTING(self):
         got = cd.coordination(
-            fetch=pages({}), repo=REPO,
-            env={cd.RESERVATION_ENV: "pmus-public-read-global"})
+            fetch=pages({"calibration-evidence": [me("queued")]}),
+            repo=REPO, env=SELF)
+        assert got["ownership"]["OWNED"] is False
+        assert cd.B_OWNERSHIP in got["blockers"]
+
+    def test_our_run_executing_in_the_group_is_ownership(self):
+        got = cd.coordination(
+            fetch=pages({"calibration-evidence": [me()]}),
+            repo=REPO, env=SELF)
+        assert got["ownership"]["OWNED"] is True, got["ownership"]
         assert got["blockers"] == []
         assert got["MAY_READ_THE_VENUE"] is True
 
-    def test_an_active_domain_blocks_even_with_a_reservation(self):
+    def test_a_workflow_outside_the_group_cannot_own_the_slot(self):
+        env = dict(SELF, **{cd.WORKFLOW_ENV: "some-other-workflow"})
         got = cd.coordination(
-            fetch=pages({"run85-phase2-capture": [
-                run(name="run85-phase2-capture", status="in_progress")]}),
-            repo=REPO,
-            env={cd.RESERVATION_ENV: "pmus-public-read-global"})
+            fetch=pages({"calibration-evidence": [me()]}),
+            repo=REPO, env=env)
+        assert got["ownership"]["OWNED"] is False
+
+
+class TestWaitingFollowersAreReportedNotTreatedAsCompetition:
+    def test_a_waiter_does_not_block_a_run_that_owns_the_slot(self):
+        """The post-acquisition rule: by the time we read, we hold the
+        slot, so a waiter cannot be displaced by us and issues no venue
+        request while it waits."""
+        got = cd.coordination(
+            fetch=pages({"calibration-evidence": [me()],
+                         "beta48-forward-capture": [
+                             run(id=7, name="beta48-forward-capture",
+                                 status="queued")]}),
+            repo=REPO, env=SELF)
+        assert got["ownership"]["OWNED"] is True, got["ownership"]
+        assert got["blockers"] == []
+        assert got["domain"]["waiting"][0]["workflow"] == \
+            "beta48-forward-capture"
+
+    def test_another_EXECUTING_collector_still_blocks(self):
+        got = cd.coordination(
+            fetch=pages({"calibration-evidence": [me()],
+                         "run85-phase2-capture": [
+                             run(id=8, name="run85-phase2-capture",
+                                 status="in_progress")]}),
+            repo=REPO, env=SELF)
         assert cd.B_DOMAIN in got["blockers"]
+
+    def test_an_unreadable_domain_blocks_whatever_we_hold(self):
+        def boom(_u):
+            raise RuntimeError("github 500")
+        got = cd.coordination(fetch=boom, repo=REPO, env=SELF)
+        assert cd.B_DOMAIN_UNREADABLE in got["blockers"]
+
+
+class TestTheInventoryIncludesTheGatherItself:
+    def test_the_scanner_alone_does_not_find_calibration_evidence(self):
+        """Checked, not assumed. It reaches the venue through the SDK in
+        this package, not a literal gateway URL in a shadow module."""
+        assert "calibration-evidence" not in cd.scanner_only_inventory()
+
+    def test_the_verified_inventory_includes_it(self):
+        assert "calibration-evidence" in cd.inventory()
+        assert "calibration-evidence" in cd.EXPLICIT_MEMBERS
+
+    def test_the_reason_is_recorded(self):
+        assert "scanner" in cd.EXPLICIT_MEMBERS["calibration-evidence"]
 
 
 class TestNoSecondCensusWasWritten:
