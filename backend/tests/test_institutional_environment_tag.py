@@ -492,80 +492,95 @@ class TestThePreprodRuntimeTakesNoCredentialFromTheForm:
         assert "api.prod.polymarketexchange.com" not in src
         assert "pmx-prod" not in src
 
-    def test_the_reconciliation_and_stream_probes_read_only(self):
+    def test_the_three_venue_operations_are_served_by_the_tested_module(self):
+        # reconcile-order and order-stream USED to be inline heredoc
+        # Python, where the search body, the pagination walk and the
+        # verdict could not be unit-tested. They now run
+        # research/institutional/pmx_preprod_ops.py, which is, and the
+        # heredoc refuses them so there is only one implementation.
         d, _ = self._wf()
+        names = [s.get("name") or s.get("uses")
+                 for s in d["jobs"]["preprod"]["steps"]]
+        assert "Run the preprod operation" in names
+        assert "actions/checkout@v4" in names      # the module has to exist
+
         run = [s for s in d["jobs"]["preprod"]["steps"]
-               if s.get("name") == "Run"][0]["run"]
-        script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
-
-        def branch(name):
-            rest = script.split('elif act == "%s":' % name, 1)[1]
-            return re.split(r"\nelif act ", rest, maxsplit=1)[0]
-
-        # admitted WITHOUT confirm=DO, because they read
+               if s.get("name") == "Run the exploratory read"][0]["run"]
         gate = run.split('case "$ACTION" in', 1)[1].split("esac", 1)[0]
-        free = gate.split("order|cancel")[0]
-        for act in ("reconcile-order", "duplicate-preview", "order-stream"):
-            assert act in free, act
-
-        rec, dup, stream = (branch("reconcile-order"),
-                            branch("duplicate-preview"),
-                            branch("order-stream"))
-        # none of the three reaches the insert endpoint
-        for name, body in (("reconcile", rec), ("duplicate", dup),
-                           ("stream", stream)):
-            assert 'f"{base}/v1/trading/orders"' not in body, name
-        assert "/v1/report/orders/search" in rec
-        assert "/v1/trading/orders/preview" in dup
-
-    def test_the_search_uses_the_documented_singular_fields(self):
-        # https://docs.polymarket.us/api-reference/report/search-orders
-        # `orderId` and `clordId`, distinct and singular. The guessed
-        # plural/capitalisation variants are gone.
-        d, _ = self._wf()
-        run = [s for s in d["jobs"]["preprod"]["steps"]
-               if s.get("name") == "Run"][0]["run"]
+        assert "served by the module step" in gate
         script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
-        rec = re.split(r"\nelif act ", script.split(
-            'elif act == "reconcile-order":', 1)[1], maxsplit=1)[0]
-        assert 'walk("by-orderId", "orderId"' in rec
-        assert 'walk("by-clordId", "clordId"' in rec
-        for guessed in ('"clordIds"', '"clOrdIds"', '"orderIds"'):
-            assert guessed not in rec, guessed
+        for gone in ("reconcile-order", "order-stream"):
+            assert 'act == "%s"' % gone not in script, gone
 
-    def test_the_search_is_bound_and_follows_pagination(self):
+    def test_the_guessed_stream_paths_are_gone(self):
+        # Three REST/SSE-shaped paths were guessed at. The real contract
+        # is gRPC, and the guesses must not survive anywhere in the file.
+        src = WORKFLOW.read_text()
+        for guessed in ("/v1/trading/orders/stream", "/v1/stream/orders",
+                        "/v1/trading/orders/subscribe"):
+            assert guessed not in src, guessed
+
+    def test_the_documented_grpc_contract_is_what_is_used(self):
+        src = WORKFLOW.read_text()
+        assert "grpc_tools.protoc" in src
+        assert "polymarket/v1" in src
+        assert "OrderEntryAPIStub" in src
+        assert "CreateOrderSubscriptionRequest" in src
+        # pinned runtime, not "latest"
+        assert 'grpcio==' in src and 'grpcio-tools==' in src \
+            and 'protobuf==' in src
+
+    def test_a_missing_generated_client_is_named_not_worked_around(self):
+        net = ROOT / "research/institutional/pmx_preprod_net.py"
+        src = net.read_text()
+        assert "GENERATED_CLIENT_MISSING" in src
+        # no hand-rolled stand-in for a protobuf message
+        assert "class CreateOrderSubscriptionRequest" not in src
+
+    def test_the_module_steps_pass_the_secrets_not_inputs(self):
         d, _ = self._wf()
-        run = [s for s in d["jobs"]["preprod"]["steps"]
-               if s.get("name") == "Run"][0]["run"]
-        script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
-        rec = re.split(r"\nelif act ", script.split(
-            'elif act == "reconcile-order":', 1)[1], maxsplit=1)[0]
-        for field in ("symbol", "startTime", "endTime", "account",
-                      "participantId"):
-            assert field in rec, field
-        assert "nextPageToken" in rec and "pageToken" in rec
-        assert "TRUNCATED" in rec          # a cut walk is not an empty one
+        step = [s for s in d["jobs"]["preprod"]["steps"]
+                if s.get("name") == "Run the preprod operation"][0]
+        env = step["env"]
+        for name in ("PMX_CLIENT_ID", "PMX_PARTICIPANT_ID", "PMX_KEY_ID",
+                     "PMX_PRIVATE_KEY_B64"):
+            assert "secrets.%s" % name in env[name], name
+
+    def test_an_unhandled_exception_is_not_a_named_verdict(self):
+        d, _ = self._wf()
+        step = [s for s in d["jobs"]["preprod"]["steps"]
+                if s.get("name") == "Run the preprod operation"][0]["run"]
+        # rc 0 clean, rc 1 a NAMED verdict, anything else fails the step
+        assert 'if [ "$RC" -gt 1 ]; then exit "$RC"; fi' in step
 
     def test_an_empty_result_is_not_read_as_non_submission(self):
-        src = WORKFLOW.read_text()
-        assert "NOT proof of non-submission" in src
-        assert "NOT permission to retry" in src
-        assert "venue-support trace package" in src
+        ops = (ROOT / "research/institutional/pmx_preprod_ops.py").read_text()
+        assert "NOT proof of non-submission" in ops
+        assert "permission to send another order" in ops
+        assert "trace package" in ops
+        # and the rule is enforced, not merely written down: no failure
+        # class may be classified NOT_FOUND
+        import sys
+        sys.path.insert(0, str(ROOT / "research" / "institutional"))
+        import pmx_preprod_ops as O
+        for cls in (O.B_HTTP, O.B_MALFORMED, O.B_ROW_SHAPE,
+                    O.B_TOKEN_REPEAT, O.B_PAGE_CAP):
+            q = [{"query": "orderId", "blockers": ["%s: x" % cls]}]
+            assert O.verdict(q, [])["status"] != O.R_NOT_FOUND
 
     def test_the_receipts_are_retained_and_sanitized(self):
         d, _ = self._wf()
         names = [s.get("name") for s in d["jobs"]["preprod"]["steps"]]
         assert "Publish the receipts" in names
-        src = WORKFLOW.read_text()
-        assert "never a key, a bearer, a signed assertion or a full" in src
-        # the receipt records identifiers and timings, not payloads
-        assert '"rowIds"' in src and '"requestedAt"' in src
-        assert '"body": r.text' not in src
+        ops = (ROOT / "research/institutional/pmx_preprod_ops.py").read_text()
+        # the writer REFUSES a credential rather than trusting the caller
+        assert "_refuse_secrets" in ops
+        assert "BEGIN PRIVATE" in ops and "access_token" in ops
 
     def test_the_duplicate_probe_claims_preview_repeatability_ONLY(self):
         d, _ = self._wf()
         run = [s for s in d["jobs"]["preprod"]["steps"]
-               if s.get("name") == "Run"][0]["run"]
+               if s.get("name") == "Run the exploratory read"][0]["run"]
         script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
         dup = re.split(r"\nelif act ", script.split(
             'elif act == "duplicate-preview":', 1)[1], maxsplit=1)[0]
@@ -588,23 +603,23 @@ class TestThePreprodRuntimeTakesNoCredentialFromTheForm:
     def test_the_trace_package_exists_and_does_not_claim_a_clord_id(self):
         pkg = ROOT / "research/institutional/SUPPORT_TRACE_PACKAGE.md"
         text = pkg.read_text()
-        # CDHM9PJV16R7 is the EXCHANGE id. Treating it as our client id is
-        # exactly the assumption the directive forbids.
         assert "exchange-returned `orderId`" in text
         assert "must not be treated as one" in text
         assert "NOT RECOVERED" in text
 
     def test_the_stream_run_does_not_claim_market_wide_aggressor(self):
-        src = WORKFLOW.read_text()
-        assert "OUR OWN executions only" in src
-        assert "remain" in src and "unverified claims" in src
+        ops = (ROOT / "research/institutional/pmx_preprod_ops.py").read_text()
+        assert "OUR OWN executions" in ops
+        assert "full-market aggressor coverage" in ops
+        assert "unverified" in ops
 
-    def test_the_embedded_script_compiles(self):
+    def test_the_embedded_script_still_compiles(self):
         d, _ = self._wf()
         run = [s for s in d["jobs"]["preprod"]["steps"]
-               if s.get("name") == "Run"][0]["run"]
+               if s.get("name") == "Run the exploratory read"][0]["run"]
         script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
         compile(script, "pmx-preprod.run", "exec")
+
 
 
 # ── the owning session is DERIVED, never supplied ────────────────────

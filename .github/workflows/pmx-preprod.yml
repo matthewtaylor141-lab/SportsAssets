@@ -62,6 +62,7 @@ jobs:
       PMX_BASE_URL: https://api.preprod.polymarketexchange.com
       PMX_AUDIENCE: https://api.preprod.polymarketexchange.com
     steps:
+      - uses: actions/checkout@v4
       - name: Stage the key from the secret store
         # A repository secret is masked by the runner before any step runs,
         # so `env:` is safe for it -- unlike a workflow_dispatch input,
@@ -77,7 +78,8 @@ jobs:
           echo "key staged ($(wc -c < "$RUNNER_TEMP/pk.pem") bytes)"
       - name: Install
         run: pip install -q pyjwt cryptography requests
-      - name: Run
+      - name: Run the exploratory read
+        if: ${{ !contains(fromJSON('["auth","reconcile-order","order-stream"]'), inputs.action) }}
         env:
           ACTION: ${{ inputs.action }}
           ARG: ${{ inputs.arg }}
@@ -92,9 +94,9 @@ jobs:
           done
           case "$ACTION" in
             whoami|health|refdata|instruments|bbo|book|positions|open-orders|report-orders|order-preview) ;;
-            reconcile-order) ;;      # the documented search contract; reads only
             duplicate-preview) ;;    # PREVIEW repeatability only; places nothing
-            order-stream) ;;         # subscribe and observe; sends no order
+            auth|reconcile-order|order-stream)
+              echo "refused: $ACTION is served by the module step, not this one"; exit 1 ;;
             order|cancel) if [ "$CONFIRM" != "DO" ]; then echo "refused: $ACTION needs confirm=DO"; exit 1; fi ;;
             *) echo "refused: unknown action '$ACTION'"; exit 1 ;;
           esac
@@ -183,139 +185,6 @@ jobs:
           elif act == "report-orders":
               body = json.loads(arg) if arg.strip() else {"stateFilter": "ORDER_STATE_FILTER_OPEN"}
               show(requests.post(f"{base}/v1/report/orders/search", headers=H, json=body, timeout=30))
-          elif act == "reconcile-order":
-              # THE DOCUMENTED SEARCH CONTRACT, used as documented.
-              #   https://docs.polymarket.us/api-reference/report/search-orders
-              # `orderId` and `clordId` are DISTINCT SINGULAR fields. The
-              # earlier probe tried plural and capitalisation variants; that
-              # was guessing, and it is gone.
-              #
-              # WHAT THIS RECONCILES. On 2026-09-10 an insert answered
-              # 200 {"orderId": "CDHM9PJV16R7"} and the order was then absent
-              # from open orders, positions and every search we ran. Those
-              # searches were run wrong. This runs them right, and it does
-              # NOT assume the exchange-returned id is our client id: the
-              # two are asked for separately, and the submitted clordId --
-              # which that run never recorded -- is searched for only if the
-              # operator supplies it.
-              #
-              # arg = JSON:
-              #   {"orderId": "...",          the exchange id, if known
-              #    "clordId": "...",          OUR submitted id, if known
-              #    "symbol": "...",           bind the search to the instrument
-              #    "startTime": "...Z",       the historical window
-              #    "endTime": "...Z",
-              #    "pageSize": 100}
-              #
-              # AN EMPTY RESULT PROVES NOTHING. It is not evidence the order
-              # was never submitted and it is not permission to send another.
-              spec = json.loads(arg) if arg.strip() else {}
-              acct = spec.get("account") or ""
-              want_oid = spec.get("orderId")
-              want_clord = spec.get("clordId")
-              if not want_oid and not want_clord:
-                  print("refused: reconcile-order needs orderId and/or clordId"); sys.exit(1)
-              page_size = int(spec.get("pageSize") or 100)
-              # the binding fields, applied to EVERY query below: an
-              # unbound search can answer about another account's order
-              bind = {}
-              for k in ("symbol", "startTime", "endTime", "account",
-                        "participantId", "stateFilter"):
-                  if spec.get(k):
-                      bind[k] = spec[k]
-              print("BINDING", json.dumps(bind), "account_arg", bool(acct))
-
-              seen_ids, seen_clords, receipts = set(), set(), []
-
-              def walk(label, key, value):
-                  # FOLLOW PAGINATION TO EXHAUSTION. A single page that does
-                  # not contain the id is not "no record": the id may be on a
-                  # page never read. A truncated walk is reported as
-                  # TRUNCATED, never as empty.
-                  token, pages, rows, truncated = "", 0, 0, False
-                  while True:
-                      body = {**bind, key: value, "pageSize": page_size}
-                      if token:
-                          body["pageToken"] = token
-                      t0 = time.time()
-                      r = requests.post(f"{base}/v1/report/orders/search",
-                                        headers=H, json=body, timeout=30)
-                      dt = time.time() - t0
-                      pages += 1
-                      try:
-                          j = r.json()
-                      except Exception:
-                          j = None
-                      got = (j or {}).get("order") or (j or {}).get("orders") or []
-                      rows += len(got)
-                      # SANITIZED RECEIPT: the request body (no credentials
-                      # are in it), the status, the identifiers returned, and
-                      # the timestamps. Never the full payload.
-                      receipts.append({
-                          "query": label, "page": pages, "request": body,
-                          "status": r.status_code,
-                          "requestedAt": t0, "elapsedS": round(dt, 3),
-                          "returnedAt": time.time(),
-                          "xRequestId": H["X-Request-Id"],
-                          "rowIds": [{"id": o.get("id") or o.get("orderId"),
-                                      "clordId": o.get("clordId") or o.get("clord_id"),
-                                      "symbol": o.get("symbol"),
-                                      "state": o.get("state"),
-                                      "account": o.get("account"),
-                                      "lastTransactTime": o.get("lastTransactTime")}
-                                     for o in got],
-                      })
-                      print(f"{label} page {pages} -> {r.status_code} rows {len(got)}")
-                      if r.status_code != 200:
-                          print(r.text[:1500]); break
-                      for o in got:
-                          if o.get("id"): seen_ids.add(str(o["id"]))
-                          if o.get("orderId"): seen_ids.add(str(o["orderId"]))
-                          c = o.get("clordId") or o.get("clord_id")
-                          if c: seen_clords.add(str(c))
-                      token = (j or {}).get("nextPageToken") or ""
-                      if not token:
-                          break
-                      if pages >= 50:
-                          truncated = True
-                          print(f"{label}: TRUNCATED after {pages} pages, a next token remains")
-                          break
-                  return {"query": label, "pages": pages, "rows": rows,
-                          "truncated": truncated}
-
-              summary = []
-              if want_oid:
-                  summary.append(walk("by-orderId", "orderId", want_oid))
-              if want_clord:
-                  summary.append(walk("by-clordId", "clordId", want_clord))
-
-              # VALIDATE WHAT CAME BACK. A search bound to one identifier
-              # that answers rows carrying a different one has not found our
-              # order; saying so is the point of asking.
-              print("SUMMARY", json.dumps(summary))
-              print("IDS_RETURNED", json.dumps(sorted(seen_ids)))
-              print("CLORDIDS_RETURNED", json.dumps(sorted(seen_clords)))
-              matched = []
-              if want_oid and str(want_oid) in seen_ids:
-                  matched.append("orderId")
-              if want_clord and str(want_clord) in seen_clords:
-                  matched.append("clordId")
-              any_truncated = any(s["truncated"] for s in summary)
-              if matched:
-                  print("RECONCILED_ON", json.dumps(matched))
-              elif any_truncated:
-                  print("RECONCILIATION_INCONCLUSIVE_TRUNCATED_WALK")
-              else:
-                  print("NOT_FOUND_ON_THIS_CONTRACT")
-                  print("An empty result is NOT proof of non-submission and "
-                        "NOT permission to retry. If the correct bound "
-                        "searches cannot reconcile an acknowledged order, "
-                        "the next step is a venue-support trace package, "
-                        "not another order.")
-              pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp"), "receipts.json") \
-                      .write_text(json.dumps({"summary": summary,
-                                              "receipts": receipts}, indent=1))
-              print("receipts written for the artifact step")
           elif act == "duplicate-preview":
               # PREVIEW_REPEATABILITY. THAT IS THE WHOLE CLAIM.
               #
@@ -354,98 +223,6 @@ jobs:
                     "duplicate-order protection, or permission to relax the "
                     "single-send boundary. Those need the separate authorized "
                     "duplicate-insert test.")
-          elif act == "order-stream":
-              # THE ORDER STREAM, OBSERVED BEFORE THE NEXT ORDER TEST.
-              #   https://docs.polymarket.us/streaming-endpoints/order-stream
-              #
-              # WHAT THIS RUN ESTABLISHES, and nothing beyond it: that a
-              # subscription can be opened with this credential, what the
-              # messages actually look like, which account they are scoped
-              # to, which identifiers they carry (exchange id, clordId, and
-              # whether an execution reports an AGGRESSOR), and what happens
-              # on reconnect. The schema is READ OFF THE WIRE, not assumed:
-              # this prints the observed top-level keys of each message
-              # rather than asserting a shape we have not seen.
-              #
-              # It sends no order. It only listens.
-              #
-              # arg = JSON {"seconds": 60, "symbol": "...", "path": "..."}
-              spec = json.loads(arg) if arg.strip() else {}
-              seconds = float(spec.get("seconds") or 60)
-              paths = ([spec["path"]] if spec.get("path") else
-                       ["/v1/trading/orders/stream", "/v1/stream/orders",
-                        "/v1/trading/orders/subscribe"])
-              sub = {}
-              if spec.get("symbol"):
-                  sub["symbols"] = [spec["symbol"]]
-              if spec.get("account"):
-                  sub["account"] = spec["account"]
-
-              def listen(path, label):
-                  url = f"{base}{path}"
-                  keys, msgs, execs, clords, accounts = set(), 0, 0, set(), set()
-                  t0 = time.time()
-                  try:
-                      with requests.post(url, headers={**H, "Accept": "application/json"},
-                                         json=sub, stream=True, timeout=(10, seconds + 15)) as r:
-                          print(f"{label} {url} -> {r.status_code} "
-                                f"content-type={r.headers.get('content-type')}")
-                          if r.status_code != 200:
-                              print(r.text[:1500]); return None
-                          for line in r.iter_lines(decode_unicode=True):
-                              if time.time() - t0 > seconds:
-                                  break
-                              if not line:
-                                  continue
-                              msgs += 1
-                              try:
-                                  m = json.loads(line[6:] if line.startswith("data: ") else line)
-                              except Exception:
-                                  print("  non-json frame:", str(line)[:200]); continue
-                              if isinstance(m, dict):
-                                  keys |= set(m.keys())
-                                  blob = json.dumps(m)
-                                  if "ggressor" in blob:
-                                      execs += 1
-                                  for k in ("clordId", "clord_id"):
-                                      if m.get(k): clords.add(str(m[k]))
-                                  if m.get("account"): accounts.add(str(m["account"]))
-                                  if msgs <= 5:
-                                      print(f"  msg {msgs}:", blob[:1200])
-                  except Exception as exc:
-                      print(f"{label}: {type(exc).__name__}: {str(exc)[:200]}")
-                      return None
-                  return {"path": path, "messages": msgs,
-                          "topLevelKeys": sorted(keys),
-                          "messagesMentioningAggressor": execs,
-                          "clordIdsSeen": sorted(clords),
-                          "accountsSeen": sorted(accounts),
-                          "seconds": round(time.time() - t0, 1)}
-
-              first = None
-              for path in paths:
-                  first = listen(path, "SUBSCRIBE")
-                  if first:
-                      break
-              if not first:
-                  print("ORDER_STREAM_NOT_ESTABLISHED: none of the tried paths "
-                        "answered a stream. The documented path must be read "
-                        "from the reference and passed as arg.path; this run "
-                        "does NOT conclude the stream is unavailable.")
-                  sys.exit(0)
-              print("STREAM_OBSERVED", json.dumps(first))
-              # RECONNECT: the same subscription again, so the run says
-              # whether a second connection is accepted and whether it
-              # replays or starts clean.
-              second = listen(first["path"], "RECONNECT")
-              print("RECONNECT_OBSERVED", json.dumps(second))
-              pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp"), "receipts.json") \
-                      .write_text(json.dumps({"stream": first,
-                                              "reconnect": second}, indent=1))
-              print("NOTE: an observed aggressor field on this stream is "
-                    "evidence about OUR OWN executions only. Full-market "
-                    "aggressor coverage and exact queue position remain "
-                    "separate, unverified claims.")
           elif act in ("order-preview", "order"):
               body = json.loads(arg)
               path = "/v1/trading/orders/preview" if act == "order-preview" else "/v1/trading/orders"
@@ -460,6 +237,70 @@ jobs:
               show(requests.post(f"{base}/v1/trading/orders/cancel", headers=H, json=body, timeout=30))
               show(requests.get(f"{base}/v1/trading/orders/open", headers=H, timeout=30))
           PY
+      # THE CANONICAL PROTO BUNDLE, for the gRPC subscription only.
+      #   https://docs.polymarket.us/streaming-endpoints/getting-started
+      # The generated client is the venue's own contract. Nothing here
+      # hand-writes a protobuf message, and a bundle that will not
+      # download or generate is a NAMED failure, never a fallback to a
+      # guessed shape.
+      - name: Generate the venue's gRPC client
+        if: ${{ inputs.action == 'order-stream' }}
+        run: |
+          set -euo pipefail
+          pip install -q "grpcio==1.68.1" "grpcio-tools==1.68.1" "protobuf==5.29.1"
+          mkdir -p protos gen
+          curl -sSL -o protos/bundle.zip "$PROTO_URL"
+          unzip -q -o protos/bundle.zip -d protos
+          ls protos
+          python -m grpc_tools.protoc --python_out=gen --grpc_python_out=gen \
+            --proto_path=protos/api \
+            protos/api/polymarket/v1/*.proto \
+            protos/api/google/api/*.proto \
+            protos/api/protoc-gen-openapiv2/options/*.proto
+          python - <<'PY'
+          import sys; sys.path.insert(0, "gen")
+          from polymarket.v1 import trading_pb2, trading_pb2_grpc
+          req = trading_pb2.CreateOrderSubscriptionRequest(
+              symbols=[], accounts=[], snapshot_only=True)
+          assert hasattr(trading_pb2_grpc, "OrderEntryAPIStub")
+          print("GENERATED_CLIENT_OK fields:",
+                sorted(f.name for f in req.DESCRIPTOR.fields))
+          PY
+        env:
+          PROTO_URL: "https://drive.google.com/uc?export=download&id=1oT9gaeBEn0vukHD9GOoj_YvzPnR3otng"
+
+      # THE MODULE, not a heredoc. `research/institutional/pmx_preprod_ops`
+      # holds the contract (search body, row validation, verdicts, auth
+      # classification) and is unit-tested; `pmx_preprod_net` opens the
+      # sockets and makes no decisions of its own.
+      - name: Run the preprod operation
+        if: ${{ contains(fromJSON('["auth","reconcile-order","order-stream"]'), inputs.action) }}
+        env:
+          PMX_CLIENT_ID: ${{ secrets.PMX_CLIENT_ID }}
+          PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}
+          PMX_KEY_ID: ${{ secrets.PMX_KEY_ID }}
+          PMX_PRIVATE_KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
+          ARG: ${{ inputs.arg }}
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$PWD/research/institutional:$PWD/gen:${PYTHONPATH:-}"
+          OP="${{ inputs.action }}"
+          [ "$OP" = "reconcile-order" ] && OP="reconcile"
+          [ "$OP" = "order-stream" ] && OP="stream"
+          # rc 0  the operation answered cleanly
+          # rc 1  a NAMED verdict (secret missing, rejected, permission
+          #       denied, NOT_FOUND, INCONCLUSIVE, FAILED) -- a completed
+          #       command that reports a real outcome
+          # any other rc -> the step fails, which is what an unhandled
+          #       exception must look like
+          set +e
+          python research/institutional/pmx_preprod_ops.py "$OP" \
+            --spec "$ARG" --out "$RUNNER_TEMP/receipts.json"
+          RC=$?
+          set -e
+          echo "OPERATION_EXIT=$RC"
+          if [ "$RC" -gt 1 ]; then exit "$RC"; fi
+
       - name: Stage the receipts for the artifact
         if: always()
         run: |
