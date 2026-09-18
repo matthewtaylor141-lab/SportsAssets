@@ -283,3 +283,64 @@ def test_a_non_mapping_job_record_is_rejected_not_indexed():
     got = C.acquired({"jobs": ["not-a-job", JOB]}, expected_run_id=42)
     assert got["ACQUIRED"] is True                  # the real one still counts
     assert "NON_MAPPING_JOB_RECORD" in got["REJECTED_JOBS"]
+
+
+# --- An occupying run the gate cannot attribute to a domain member -------
+#
+# venue_domain.domain_idle() matches a run to the domain by its WORKFLOW
+# NAME. A row with no name matches nothing, so a census that FOUND the run
+# still hands the gate something it reads as an idle domain. Blocking is
+# monotone only if the census refuses to certify such a census complete.
+
+def test_an_unnamed_occupying_run_fails_open_at_the_gate():
+    """The fail-open itself, before the refusal that now covers it."""
+    nameless = {"id": 35274725330, "status": "in_progress"}
+    fails_open = venue_domain.domain_idle([nameless], KNOWN)
+    assert fails_open["ACTIVE_DIRECT_CONFLICTS"] == 0
+    assert fails_open["DOMAIN_IDLE"] == "YES"          # over a live collector
+
+
+def test_the_census_refuses_an_unnamed_occupying_run():
+    walks = inventory_walks({"run85-phase2-capture": [
+        {"id": 35274725330, "status": "in_progress"}]})
+    c = C.census(walks, inventory=KNOWN)
+    assert c["CENSUS_COMPLETE"] is False
+    assert "cannot attribute" in c["WHY_NOT_COMPLETE"]
+    assert "35274725330" in c["WHY_NOT_COMPLETE"]
+    assert c["UNATTRIBUTABLE_OCCUPYING_RUNS"]
+    assert C.may_certify(c, age_s=5)["MAY_CERTIFY_IDLE"] is False
+
+
+def test_it_may_still_certify_blocked_over_an_unnamed_occupying_run():
+    """Monotone: the run was observed, so BLOCKED survives the refusal."""
+    walks = inventory_walks({"run85-phase2-capture": [
+        {"id": 35274725330, "status": "in_progress"}]})
+    v = C.may_certify(C.census(walks, inventory=KNOWN), age_s=5)
+    assert v["MAY_CERTIFY_BLOCKED"] is True
+    assert v["OBSERVED_CONFLICTS"] == 1
+
+
+def test_an_occupying_row_naming_another_workflow_is_refused():
+    walks = inventory_walks({"run85-phase2-capture": [
+        run(35274725330, "beta48-forward-capture", "in_progress")]})
+    c = C.census(walks, inventory=KNOWN)
+    assert c["CENSUS_COMPLETE"] is False
+    assert "walked under run85-phase2-capture" in c["WHY_NOT_COMPLETE"]
+
+
+def test_a_completed_row_needs_no_name_because_it_occupies_nothing():
+    """The check is on the OCCUPYING rows only -- history stays cheap."""
+    walks = inventory_walks({"run85-phase2-capture": [
+        {"id": 1, "status": "completed"}]})
+    c = C.census(walks, inventory=KNOWN)
+    assert c["CENSUS_COMPLETE"] is True
+    assert c["UNATTRIBUTABLE_OCCUPYING_RUNS"] == ()
+
+
+def test_every_waiting_state_is_covered_by_the_attribution_check():
+    for state in C.WAITING_STATES + C.RUNNING_STATES:
+        walks = inventory_walks({"beta48-forward-capture": [
+            {"id": 99, "status": state}]})
+        c = C.census(walks, inventory=KNOWN)
+        assert c["CENSUS_COMPLETE"] is False, state
+        assert "cannot attribute" in c["WHY_NOT_COMPLETE"], state

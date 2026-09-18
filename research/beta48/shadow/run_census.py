@@ -63,8 +63,16 @@ AN_EMPTY_INVENTORY_READS_AS_AN_IDLE_DOMAIN = (
     "and the gate reports zero conflicts. The inventory is required and "
     "non-empty on the runtime path, not merely asserted in a test")
 
+AN_UNNAMED_RUN_READS_AS_AN_IDLE_DOMAIN = (
+    "venue_domain.domain_idle() matches an occupying run to the domain by its "
+    "WORKFLOW NAME. A run row that carries no name -- a minimal projection, a "
+    "connector wrapper that drops the field, a shape we did not anticipate -- "
+    "matches nothing, and the gate reports zero conflicts over a census that "
+    "found the run. Every occupying row must name the workflow whose walk "
+    "returned it, or the census is not complete")
+
 BLOCKING_IS_MONOTONE = (
-    "an incomplete census cannot certify an IDLE domain, because the runs it "
+    "an incomplete census cannot certify an IDLE domain, because the runs it"
     "missed could be occupying it. It CAN certify a BLOCKED domain: a "
     "conflict already observed cannot be un-observed by retrieving more. "
     "Certifying blocked from partial evidence is sound; certifying idle is "
@@ -138,16 +146,31 @@ def census(walks, inventory, taken_at=None, errors=()):
     """
     inventory = list(inventory or ())
     walks = dict(walks or {})
-    rows, seen = [], set()
-    for w in walks.values():
+    rows, seen, walked_under = [], set(), {}
+    for wf, w in walks.items():
         for r in w.get("RUNS") or ():
             rid = (r or {}).get("id")
             if rid is None or rid in seen:
                 continue
             seen.add(rid)
+            walked_under[rid] = wf
             rows.append(r)
     occupying = [r for r in rows
                  if (r.get("status") or "").lower() in OCCUPYING_STATES]
+    # An occupying row the gate cannot attribute to a domain member reads to
+    # it as no conflict at all. Fail closed on the name, not on the status.
+    unattributable = []
+    for r in occupying:
+        name, wf = r.get("name"), walked_under.get(r.get("id"))
+        if not name:
+            unattributable.append("%s (no name; walked under %s)"
+                                  % (r.get("id"), wf))
+        elif name != wf:
+            unattributable.append("%s (names %r; walked under %s)"
+                                  % (r.get("id"), name, wf))
+        elif name not in inventory:
+            unattributable.append("%s (names %r, outside the inventory)"
+                                  % (r.get("id"), name))
     unknown = sorted({(r.get("status") or NOT_IDENTIFIED) for r in rows
                       if (r.get("status") or "").lower()
                       not in OCCUPYING_STATES + TERMINAL_STATES})
@@ -163,6 +186,9 @@ def census(walks, inventory, taken_at=None, errors=()):
         problems.append("incomplete walk for: %s" % ", ".join(incomplete))
     if unknown:
         problems.append("unrecognised statuses: %s" % ", ".join(unknown))
+    if unattributable:
+        problems.append("occupying run(s) the gate cannot attribute to a "
+                        "domain member: %s" % ", ".join(unattributable))
     if errors:
         problems.append("retrieval errors: %s" % "; ".join(map(str, errors)))
     return {
@@ -177,6 +203,7 @@ def census(walks, inventory, taken_at=None, errors=()):
         "OBSERVED_CONFLICTS": len(occupying),
         "CENSUS_TAKEN_AT": taken_at or NOT_IDENTIFIED,
         "UNRECOGNISED_STATUSES": tuple(unknown),
+        "UNATTRIBUTABLE_OCCUPYING_RUNS": tuple(unattributable),
         "OCCUPYING_STATES": OCCUPYING_STATES,
         "WAITING_STATES": WAITING_STATES,
         "WHY_NOT_COMPLETE": "; ".join(problems),
