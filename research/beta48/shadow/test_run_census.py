@@ -112,3 +112,44 @@ def test_a_dispatch_acknowledgement_is_not_acquisition():
          "started_at": "2026-09-18T03:22:03Z"}]}})
     assert got["ACQUIRED"] is True
     assert got["JOB_CREATED_AT"] == "2026-09-18T03:22:00Z"
+
+
+def test_the_api_history_count_cannot_establish_completeness():
+    """The live census exposed this: total_count is the repository's whole
+    run history (3,933), so a page can never match it and the gate would
+    never be evaluable."""
+    c = C.census([[run(1, "run85-phase2-capture", "in_progress")]], 3933)
+    assert c["CENSUS_COMPLETE"] is False
+    assert C.may_evaluate_gate(c)["MAY_EVALUATE_GATE"] is False
+
+
+def test_completeness_comes_from_the_domain_timeout_horizon():
+    """Nothing created longer ago than the longest timeout in the domain can
+    still be holding or awaiting the group."""
+    assert C.DOMAIN_MAX_TIMEOUT_MINUTES == 340
+    c = C.census([[run(1, "run85-phase2-capture", "in_progress")]],
+                 total_count=3933, covers_minutes=600)
+    assert c["CENSUS_COMPLETE"] is True
+    assert c["COMPLETENESS_BASIS"] == "OLDEST_RUN_PREDATES_MAX_TIMEOUT"
+    assert C.may_evaluate_gate(c)["MAY_EVALUATE_GATE"] is True
+
+
+def test_a_horizon_shorter_than_the_max_timeout_is_refused():
+    c = C.census([[run(1, "run85-phase2-capture", "in_progress")]],
+                 covers_minutes=120)
+    assert c["CENSUS_COMPLETE"] is False
+    assert "no completeness basis" in c["WHY_NOT_COMPLETE"]
+
+
+def test_a_queued_non_venue_workflow_is_counted_but_does_not_block():
+    """commit-guard was queued during the live census. It occupies the
+    census and is correctly NOT a venue-domain conflict."""
+    c = C.census([[run(1, "run85-phase2-capture", "in_progress"),
+                   run(2, "beta48-forward-capture", "pending"),
+                   run(3, "commit-guard", "queued")]], covers_minutes=600)
+    assert c["CENSUS_COMPLETE"] is True
+    assert len(c["GATE_INPUT"]) == 3
+    g = venue_domain.domain_idle(list(c["GATE_INPUT"]), KNOWN)
+    assert g["ACTIVE_DIRECT_CONFLICTS"] == 1
+    assert g["PENDING_DIRECT_CONFLICTS"] == 1
+    assert "commit-guard" not in g["KNOWN_DIRECT_PMUS_COLLECTORS_PENDING"]

@@ -39,12 +39,29 @@ AN_INCOMPLETE_CENSUS_IS_NOT_AN_IDLE_DOMAIN = (
     "reads exactly like an idle domain")
 
 
-def census(pages, total_count, errors=()):
+# The longest timeout-minutes on any workflow in the venue domain. A run
+# created earlier than this before `now` CANNOT still be live, which is the
+# only completeness argument available here: the API's own total_count is the
+# repository's entire run history (thousands), not the number of live runs,
+# and no status filter can express `pending`.
+DOMAIN_MAX_TIMEOUT_MINUTES = 340
+
+A_HISTORY_COUNT_IS_NOT_A_LIVE_COUNT = (
+    "list_workflow_runs reports total_count for the repository's whole run "
+    "history. Comparing a page against it can never succeed and says nothing "
+    "about live runs. Completeness here means: every run created within the "
+    "last DOMAIN_MAX_TIMEOUT_MINUTES has been retrieved, because nothing "
+    "older can still be holding or awaiting the group")
+
+
+def census(pages, total_count=None, errors=(), covers_minutes=None,
+           max_timeout_minutes=DOMAIN_MAX_TIMEOUT_MINUTES):
     """Assemble and validate a paginated run census.
 
-    `pages` is the list of per-page run lists as retrieved, `total_count` the
-    figure the API reported. Returns the census with CENSUS_COMPLETE, which
-    the caller must check before using GATE_INPUT for anything.
+    Completeness is established EITHER by `covers_minutes` -- the age of the
+    oldest retrieved run, which must exceed the domain's longest timeout --
+    OR, for a closed set such as a single-workflow listing, by `total_count`.
+    Neither supplied is not complete.
     """
     runs, seen = [], set()
     for page in pages or ():
@@ -56,7 +73,10 @@ def census(pages, total_count, errors=()):
             runs.append(r)
     retrieved = len(runs)
     expected = total_count if isinstance(total_count, int) else None
-    complete = (not errors) and expected is not None and retrieved >= expected
+    by_horizon = (isinstance(covers_minutes, (int, float))
+                  and covers_minutes > max_timeout_minutes)
+    by_count = expected is not None and retrieved >= expected
+    complete = (not errors) and (by_horizon or by_count)
     occupying = [r for r in runs
                  if (r.get("status") or "").lower() in OCCUPYING_STATES]
     unknown = sorted({(r.get("status") or NOT_IDENTIFIED)
@@ -68,6 +88,14 @@ def census(pages, total_count, errors=()):
         "RUNS_RETRIEVED": retrieved,
         "RUNS_REPORTED_BY_API": expected if expected is not None
         else NOT_IDENTIFIED,
+        "COMPLETENESS_BASIS": ("OLDEST_RUN_PREDATES_MAX_TIMEOUT" if by_horizon
+                               else "API_TOTAL_COUNT" if by_count
+                               else NOT_IDENTIFIED),
+        "COVERS_MINUTES": covers_minutes if covers_minutes is not None
+        else NOT_IDENTIFIED,
+        "DOMAIN_MAX_TIMEOUT_MINUTES": max_timeout_minutes,
+        "A_HISTORY_COUNT_IS_NOT_A_LIVE_COUNT":
+            A_HISTORY_COUNT_IS_NOT_A_LIVE_COUNT,
         "PAGES": len(list(pages or ())),
         "RETRIEVAL_ERRORS": tuple(errors or ()),
         "UNRECOGNISED_STATUSES": tuple(unknown),
@@ -82,9 +110,12 @@ def census(pages, total_count, errors=()):
             "" if complete and not unknown else
             "; ".join(filter(None, [
                 "retrieval errors" if errors else "",
-                "API total unknown" if expected is None else "",
+                ("no completeness basis: neither covers_minutes > %d nor an "
+                 "API total" % max_timeout_minutes)
+                if not by_horizon and expected is None else "",
                 ("retrieved %d of %d" % (retrieved, expected))
-                if expected is not None and retrieved < expected else "",
+                if not by_horizon and expected is not None
+                and retrieved < expected else "",
                 ("unrecognised statuses: %s" % ", ".join(unknown))
                 if unknown else "",
             ]))),
