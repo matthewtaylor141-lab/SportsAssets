@@ -32,10 +32,32 @@ from .db import get_pool
 
 SESSION_ID = "MICRO-EXEC-CAL-1"
 
+# THE RETAIL PRODUCTION LANE, which is what every session written before
+# migration 067 was. The defaults in that migration say the same thing.
+# The name the ticket builder already writes (`calibration_evidence`), and
+# therefore the name every lifecycle row written so far carries. The
+# migration's DEFAULT says the same word, so the backfill and the code
+# agree rather than merely looking alike.
+DEFAULT_VENUE = "polymarket-us"
+
+ENV_PRODUCTION = "PRODUCTION"
+ENV_PREPROD = "PREPROD"
+# One tuple, defined in `calibration` and re-exported here, so a third
+# environment cannot be admitted by one module and refused by the other.
+ENVIRONMENTS = cal.ENVIRONMENTS
+
 R_STOPPED = "OPERATOR_STOP_ENGAGED"
 R_NO_SESSION = "NO_CALIBRATION_SESSION"
 R_DUPLICATE = "DUPLICATE_CLIENT_ORDER_ID"
 R_STORE_UNREADABLE = "CALIBRATION_LEDGER_UNREADABLE"
+
+# A SESSION IS BOUND TO ONE VENUE AND ONE ENVIRONMENT (migration 067).
+# These are what a ticket naming a different pair is refused with. The
+# refusal is the separation: preproduction spend cannot reach a production
+# session's total because it cannot be written into that session at all.
+R_ENV_MISMATCH = "TICKET_ENVIRONMENT_IS_NOT_THIS_SESSION_S"
+R_VENUE_MISMATCH = "TICKET_VENUE_IS_NOT_THIS_SESSION_S"
+R_ENV_UNKNOWN = "TICKET_ENVIRONMENT_NOT_DECLARED"
 
 
 class StoreUnavailable(Exception):
@@ -47,13 +69,25 @@ class StoreUnavailable(Exception):
     """
 
 
-async def ensure_session(pool=None, session_id: str = SESSION_ID) -> None:
+async def ensure_session(pool=None, session_id: str = SESSION_ID,
+                         venue: str = DEFAULT_VENUE,
+                         environment: str = ENV_PRODUCTION) -> None:
     """Create the session row if it does not exist. Idempotent.
 
     The limits are written INTO the row at creation so the ceiling a
     session ran under is auditable afterwards, even if the constants in
     calibration.py are later changed by an authorised decision.
+
+    THE VENUE AND ENVIRONMENT ARE WRITTEN THE SAME WAY, and for the same
+    reason: a budget is only meaningful about something. `ON CONFLICT DO
+    NOTHING` means an existing session keeps the pair it was opened with,
+    so this can never quietly re-point a production session at a
+    preproduction exchange.
     """
+    if environment not in ENVIRONMENTS:
+        raise ValueError("CALIBRATION_UNKNOWN_ENVIRONMENT: %r" % (environment,))
+    if not isinstance(venue, str) or not venue.strip():
+        raise ValueError("CALIBRATION_SESSION_VENUE_NOT_DECLARED")
     # A DATABASE THAT CANNOT BE REACHED IS StoreUnavailable, NOT A 500.
     # The first cut let this raise raw, so a dead database answered the
     # budget endpoint with an internal error instead of the named
@@ -64,14 +98,15 @@ async def ensure_session(pool=None, session_id: str = SESSION_ID) -> None:
             """
             INSERT INTO calibration_sessions
                    (session_id, authorised_by, max_all_in_usd, max_spend_usd,
-                    max_open)
-            VALUES ($1, $2, $3, $4, $5)
+                    max_open, venue, environment)
+            VALUES ($1, $2, $3, $4, $5, $6, $7)
             ON CONFLICT (session_id) DO NOTHING
             """,
             session_id, cal.AUTHORISED_BY,
             cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE,
             cal.MAX_SESSION_CUMULATIVE_SPEND,
-            cal.MAX_CONCURRENT_ORDER_POSITION_LIFECYCLES)
+            cal.MAX_CONCURRENT_ORDER_POSITION_LIFECYCLES,
+            venue.strip(), environment)
     except Exception as exc:                                   # noqa: BLE001
         raise StoreUnavailable("%s: %s" % (R_STORE_UNREADABLE,
                                            type(exc).__name__)) from exc
@@ -79,12 +114,14 @@ async def ensure_session(pool=None, session_id: str = SESSION_ID) -> None:
 
 SESSION_SQL = """
 SELECT session_id, experiment, authorised_by, max_all_in_usd, max_spend_usd,
-       max_open, spent_usd, stopped, stopped_at, stopped_by, stop_reason
+       max_open, spent_usd, stopped, stopped_at, stopped_by, stop_reason,
+       venue, environment
   FROM calibration_sessions WHERE session_id = $1
 """
 
 LIFECYCLES_SQL = """
-SELECT client_order_id, market_id, outcome, venue, side, quantity, price,
+SELECT client_order_id, market_id, outcome, venue, environment, side,
+       quantity, price,
        reserve_usd, all_in_usd, spent_usd, state, venue_order_id,
        venue_terminal_state, fills_reconciled, created_at, updated_at
   FROM calibration_lifecycles
@@ -110,6 +147,12 @@ async def load(pool=None, session_id: str = SESSION_ID) -> dict:
         "experiment": s.get("experiment") or cal.EXPERIMENT,
         "sessionId": s["session_id"],
         "authorisedBy": s["authorised_by"],
+        # WHAT THIS BUDGET IS ABOUT. Every figure below -- the spend, the
+        # reserve, the lifecycles -- belongs to this pair and to nothing
+        # else. COMMAND prints them beside the numbers so a reader can
+        # never mistake preproduction activity for production performance.
+        "venue": s.get("venue") or DEFAULT_VENUE,
+        "environment": s.get("environment") or ENV_PRODUCTION,
         "limits": {
             "maxAllInCostPerTradeLifecycle": float(s["max_all_in_usd"]),
             "maxSessionCumulativeSpend": float(s["max_spend_usd"]),
@@ -130,6 +173,7 @@ def _lifecycle(r: dict) -> dict:
         "marketId": r["market_id"],
         "outcome": r["outcome"],
         "venue": r["venue"],
+        "environment": r.get("environment") or ENV_PRODUCTION,
         "side": r["side"],
         "quantity": int(r["quantity"]),
         "price": float(r["price"]),
@@ -150,7 +194,11 @@ async def budget(pool=None, session_id: str = SESSION_ID) -> dict:
     b = cal.budget_block(s)
     b.update(stopped=s["stopped"], stoppedBy=s.get("stoppedBy"),
              stopReason=s.get("stopReason"),
-             stoppedAt=str(s["stoppedAt"]) if s.get("stoppedAt") else None)
+             stoppedAt=str(s["stoppedAt"]) if s.get("stoppedAt") else None,
+             # A NUMBER WITHOUT ITS VENUE AND ENVIRONMENT IS NOT A BUDGET
+             # FIGURE, it is a number. These travel with it everywhere,
+             # including into COMMAND's own display.
+             venue=s["venue"], environment=s["environment"])
     return b
 
 
@@ -181,7 +229,24 @@ async def reserve(ticket: dict, account: dict | None, approved_by: str,
     s = await load(pool, session_id)
     if s["stopped"]:
         raise ValueError("CALIBRATION_TICKET_REFUSED: " + R_STOPPED)
-    why = cal.refusals(ticket, s, account)
+    why = list(cal.refusals(ticket, s, account))
+    # THE SESSION'S OWN BINDING, checked before anything is written. A
+    # session is one venue and one environment; a ticket naming another
+    # pair does not belong in this ledger row and is refused rather than
+    # coerced. This is what keeps preproduction spend out of a production
+    # session's total: not a filter on the way out, but a refusal on the
+    # way in.
+    #
+    # An ABSENT or unknown environment is already named by `cal.refusals`
+    # (it is an identity field there). What is added here is the only
+    # thing that module cannot know: whether it matches THIS session.
+    env = ticket.get("environment")
+    if env in ENVIRONMENTS and env != s["environment"]:
+        why.append("%s (ticket %s, session %s)"
+                   % (R_ENV_MISMATCH, env, s["environment"]))
+    if ticket.get("venue") != s["venue"]:
+        why.append("%s (ticket %r, session %r)"
+                   % (R_VENUE_MISMATCH, ticket.get("venue"), s["venue"]))
     if why:
         raise ValueError("CALIBRATION_TICKET_REFUSED: " + ", ".join(why))
 
@@ -192,14 +257,16 @@ async def reserve(ticket: dict, account: dict | None, approved_by: str,
         await pool.execute(
             """
             INSERT INTO calibration_lifecycles
-                   (session_id, client_order_id, venue, account, market_id,
+                   (session_id, client_order_id, venue, environment, account,
+                    market_id,
                     outcome, side, order_type, price, quantity,
                     entry_fee_usd, exit_fee_usd, all_in_usd, reserve_usd,
                     inventory_plan, approved_by, ticket)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$13,$14,$15,
-                    $16::jsonb)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$14,$15,
+                    $16,$17::jsonb)
             """,
             session_id, ticket["clientOrderId"], ticket["venue"],
+            ticket["environment"],
             ticket["account"], ticket["marketId"], ticket["outcome"],
             ticket.get("side", "BUY"), ticket["orderType"],
             float(ticket["price"]), int(ticket["quantity"]),
@@ -355,9 +422,9 @@ R_CLAIM_UNAVAILABLE = "CLAIM_STORE_UNAVAILABLE"
 
 # The economically relevant fields, bound server-side at claim time. A
 # send may be made with these and nothing else.
-BOUND_FIELDS = ("venue", "account", "marketId", "outcome", "outcomeSide",
-                "side", "orderType", "price", "quantity", "entryFeeReserve",
-                "exitFeeReserve")
+BOUND_FIELDS = ("venue", "environment", "account", "marketId", "outcome",
+                "outcomeSide", "side", "orderType", "price", "quantity",
+                "entryFeeReserve", "exitFeeReserve")
 
 ATTEMPT_UNRESOLVED = ("CLAIMED", "PRE_IMAGE_RECORDED", "SENT_OUTCOME_UNKNOWN")
 
@@ -378,6 +445,7 @@ def _bind(row: dict) -> dict:
     t = t if isinstance(t, dict) else {}
     bound = {
         "venue": row.get("venue"),
+        "environment": row.get("environment"),
         "account": row.get("account"),
         "marketId": row.get("market_id"),
         "outcome": row.get("outcome"),
@@ -402,7 +470,8 @@ def _bind(row: dict) -> dict:
 
 
 APPROVED_ROW_SQL = """
-    SELECT client_order_id, venue, account, market_id, outcome, side,
+    SELECT client_order_id, venue, environment, account, market_id,
+           outcome, side,
            order_type, price, quantity, entry_fee_usd, exit_fee_usd,
            all_in_usd, reserve_usd, inventory_plan, approved_by, state,
            venue_order_id, ticket
@@ -412,9 +481,29 @@ APPROVED_ROW_SQL = """
 
 UNRESOLVED_SQL = """
     SELECT attempt_id, client_order_id, state, claimed_by, claimed_at,
-           pre_open_order_ids, venue_order_id, outcome, reason
+           pre_open_order_ids, venue_order_id, outcome, reason,
+           venue, environment, venue_clord_id
       FROM calibration_send_attempts
      WHERE session_id = $1 AND state = ANY($2::text[])
+     ORDER BY claimed_at
+"""
+
+# THE SAME QUESTION WITHOUT THE SESSION FILTER. `claim_send` asks this one.
+#
+# The session-scoped read above answers "what does THIS session have
+# outstanding", which is the right question for a status display. It is the
+# WRONG question before a send: a second session -- the institutional
+# preproduction lane is exactly that -- holds its own attempts, and an
+# unresolved attempt there may correspond to a live order too. The approved
+# boundary is one unresolved lifecycle, not one per session, and the
+# lifecycle index enforces that globally; this makes the attempt check
+# agree with it instead of quietly being narrower.
+ANY_UNRESOLVED_SQL = """
+    SELECT attempt_id, session_id, client_order_id, state, claimed_by,
+           claimed_at, pre_open_order_ids, venue_order_id, outcome, reason,
+           venue, environment, venue_clord_id
+      FROM calibration_send_attempts
+     WHERE state = ANY($1::text[])
      ORDER BY claimed_at
 """
 
@@ -430,6 +519,23 @@ async def unresolved_attempt(pool=None, session_id: str = SESSION_ID):
     try:
         rows = await pool.fetch(UNRESOLVED_SQL, session_id,
                                 list(ATTEMPT_UNRESOLVED))
+    except Exception as exc:                                   # noqa: BLE001
+        raise StoreUnavailable("%s: %s" % (R_CLAIM_UNAVAILABLE,
+                                           type(exc).__name__)) from exc
+    return dict(rows[0]) if rows else None
+
+
+async def any_unresolved_attempt(pool=None):
+    """The attempt outstanding ANYWHERE in the ledger, or None.
+
+    Across every session and every environment. A send is refused while
+    this is not None, because the approved limit is one unresolved
+    lifecycle and a preproduction attempt occupies it just as a production
+    one does.
+    """
+    pool = pool or await get_pool()
+    try:
+        rows = await pool.fetch(ANY_UNRESOLVED_SQL, list(ATTEMPT_UNRESOLVED))
     except Exception as exc:                                   # noqa: BLE001
         raise StoreUnavailable("%s: %s" % (R_CLAIM_UNAVAILABLE,
                                            type(exc).__name__)) from exc
@@ -462,9 +568,12 @@ async def claim_send(client_order_id: str, claimed_by: str, pool=None,
     if s["stopped"]:
         return {"CLAIMED": False, "blockers": [R_STOPPED]}
 
-    # ANY UNRESOLVED ATTEMPT BLOCKS, including one for another ticket.
+    # ANY UNRESOLVED ATTEMPT BLOCKS -- for another ticket, and in another
+    # session or environment. Narrowing this to one session would let the
+    # institutional preproduction lane and the production lane each hold
+    # an unresolved send at the same time.
     try:
-        outstanding = await unresolved_attempt(pool, session_id)
+        outstanding = await any_unresolved_attempt(pool)
     except StoreUnavailable as exc:
         return {"CLAIMED": False, "blockers": ["%s" % exc]}
     if outstanding:
@@ -520,11 +629,16 @@ async def claim_send(client_order_id: str, claimed_by: str, pool=None,
             """
             INSERT INTO calibration_send_attempts
                    (attempt_id, session_id, client_order_id, claimed_by,
-                    bound_fields, state)
-            VALUES ($1,$2,$3,$4,$5::jsonb,'CLAIMED')
+                    bound_fields, state, venue, environment)
+            VALUES ($1,$2,$3,$4,$5::jsonb,'CLAIMED',$6,$7)
             """,
             attempt_id, session_id, client_order_id, claimed_by.strip(),
-            json.dumps(bound, default=str))
+            json.dumps(bound, default=str),
+            # FROM THE LIFECYCLE ROW, not from the session and not from the
+            # caller: the attempt says which exchange THIS approved order
+            # was for, so a reconciliation reading the attempts table alone
+            # never has to guess.
+            row.get("venue"), row.get("environment") or ENV_PRODUCTION)
     except Exception as exc:                                   # noqa: BLE001
         name = type(exc).__name__
         if "Unique" in name or "unique" in str(exc).lower():
@@ -538,21 +652,36 @@ async def claim_send(client_order_id: str, claimed_by: str, pool=None,
             "state": "CLAIMED"}
 
 
-async def record_pre_image(attempt_id: str, pre_ids, pool=None) -> None:
+async def record_pre_image(attempt_id: str, pre_ids, pool=None,
+                           venue_clord_id: str | None = None) -> None:
     """Persist the pre-image and move to PRE_IMAGE_RECORDED.
 
     BEFORE the network call. A send whose pre-image was never written
     down cannot be attributed afterwards, and the claim is already spent,
     so the failure has to happen here rather than after the order exists.
+
+    `venue_clord_id` IS THE VENUE'S OWN CORRELATION IDENTIFIER, where the
+    venue has one. It is written here, before the send, for the same
+    reason the pre-image is: an identifier minted and then lost with the
+    response correlates nothing. On the retail venue there is no such
+    field and this stays None -- which records that the venue offers none,
+    a different fact from having failed to record one. The pre-image is
+    still written either way: where both exist they corroborate, and the
+    stronger evidence does not excuse dropping the weaker.
     """
+    if venue_clord_id is not None and (not isinstance(venue_clord_id, str)
+                                       or not venue_clord_id.strip()):
+        raise ValueError("CALIBRATION_VENUE_CLORD_ID_NOT_A_STRING")
     pool = pool or await get_pool()
     n = await pool.execute(
         """
         UPDATE calibration_send_attempts
            SET pre_open_order_ids = $2::jsonb, pre_image_at = now(),
+               venue_clord_id = COALESCE($3, venue_clord_id),
                state = 'PRE_IMAGE_RECORDED', updated_at = now()
          WHERE attempt_id = $1 AND state = 'CLAIMED'
-        """, attempt_id, json.dumps(list(pre_ids or []), default=str))
+        """, attempt_id, json.dumps(list(pre_ids or []), default=str),
+        venue_clord_id.strip() if venue_clord_id else None)
     if isinstance(n, str) and n.endswith(" 0"):
         raise ValueError("CALIBRATION_ATTEMPT_NOT_CLAIMABLE: %s" % attempt_id)
 

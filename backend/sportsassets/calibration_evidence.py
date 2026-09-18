@@ -81,6 +81,16 @@ import time
 from . import calibration as cal
 
 # ── evidence blockers ────────────────────────────────────────────────
+# THE ENVIRONMENT THIS COMMAND'S READERS ACTUALLY REACH.
+#
+# Every reader below goes through `sportsassets.pmus`. That module has one
+# host and no preproduction one, so a ticket built here is a PRODUCTION
+# ticket -- observed from the reader, not assumed from the absence of an
+# override. The institutional preproduction exchange is a different module
+# (`sportsassets.pmx`, pinned to api.preprod.polymarketexchange.com by a
+# host guard) and a ticket gathered against it carries PREPROD.
+EVIDENCE_ENVIRONMENT = cal.ENVIRONMENTS[0]          # "PRODUCTION"
+
 B_ACCOUNT = "ACCOUNT_STATE_UNREADABLE"
 B_OPEN_ORDERS = "OPEN_ORDER_STATE_UNREADABLE"
 B_MARKET = "MARKET_IDENTITY_UNREADABLE"
@@ -498,6 +508,14 @@ def propose(evidence, session, quantity=None, order_type="LIMIT_GTC_POST_ONLY",
     fresh = evidence["freshness"]
     ticket = {
         "venue": evidence["market"]["value"].get("venue", "polymarket-us"),
+        # WHICH ENVIRONMENT OF THAT VENUE. This command reaches the venue
+        # through `sportsassets.pmus`, which has one host and no
+        # preproduction one, so PRODUCTION is a fact about the reader that
+        # built this evidence and not a default. A ticket for the
+        # institutional preproduction exchange is gathered by a different
+        # reader and says PREPROD; the ledger refuses either one into the
+        # other's session.
+        "environment": EVIDENCE_ENVIRONMENT,
         "account": evidence["account"]["value"]["account"],
         "marketId": evidence["market"]["value"]["slug"],
         "outcome": evidence["market"]["value"]["outcome"],

@@ -17,6 +17,7 @@ from sportsassets import calibration as cal
 def ticket(**over):
     t = {
         "venue": "polymarket-us",
+        "environment": "PRODUCTION",
         "account": "bettortoken-main",
         "marketId": "aec-atp-xxx-yyy-2026-09-18",
         "outcome": "XXX to win",

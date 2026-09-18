@@ -230,8 +230,19 @@ def budget_block(session: dict) -> dict:
 
 # ── ADMISSION ────────────────────────────────────────────────────────
 
-_REQUIRED_IDENTITY = ("venue", "account", "marketId", "outcome", "side",
-                      "orderType", "clientOrderId", "expiry")
+# WHICH EXCHANGE, AND WHICH ONE OF ITS ENVIRONMENTS. `venue` alone does
+# not say it: the institutional gateway has a production host and a
+# TEST-FUNDED preproduction host, and an order is not identified until it
+# is known which of the two it was for. An undeclared environment is a
+# named blocker here -- the same rule as every other identity field -- and
+# never a default, because defaulting it is exactly how preproduction
+# activity ends up summed into production performance.
+ENVIRONMENTS = ("PRODUCTION", "PREPROD")
+
+_REQUIRED_IDENTITY = ("venue", "environment", "account", "marketId", "outcome",
+                      "side", "orderType", "clientOrderId", "expiry")
+
+R_ENVIRONMENT = "ENVIRONMENT_NOT_ONE_OF_PRODUCTION_PREPROD"
 
 
 def refusals(ticket: dict, session: dict,
@@ -251,6 +262,11 @@ def refusals(ticket: dict, session: dict,
     for k in _REQUIRED_IDENTITY:
         if not isinstance(t.get(k), str) or not t[k].strip():
             out.append("%s:%s" % (R_IDENTITY, k))
+    if isinstance(t.get("environment"), str) and t["environment"].strip() \
+            and t["environment"] not in ENVIRONMENTS:
+        # Declared, but not one of the two. A third word here would be an
+        # environment nothing downstream knows how to keep separate.
+        out.append("%s:%s" % (R_ENVIRONMENT, t["environment"]))
     if t.get("side") not in (None, "BUY"):
         out.append(R_SHORT)
     if t.get("leverage") or t.get("borrow"):
@@ -347,6 +363,7 @@ def reserve(session: dict, ticket: dict,
         "marketId": ticket["marketId"],
         "outcome": ticket["outcome"],
         "venue": ticket["venue"],
+        "environment": ticket["environment"],
         "side": ticket.get("side", "BUY"),
         "quantity": ticket["quantity"],
         "price": ticket["price"],

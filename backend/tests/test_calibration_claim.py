@@ -101,7 +101,11 @@ class FakePool:
         if self.broken:
             raise RuntimeError("connection reset")
         if "FROM calibration_send_attempts" in sql:
-            states = set(a[1])
+            # TWO READS, TWO SHAPES. The session-scoped one takes
+            # (session_id, states); the GLOBAL one `claim_send` uses takes
+            # (states) alone, because an unresolved attempt in any session
+            # -- the institutional preprod lane included -- blocks a send.
+            states = set(a[0]) if "session_id = $1" not in sql else set(a[1])
             return [dict(x) for x in self.attempts if x["state"] in states]
         if "FROM calibration_lifecycles" in sql:
             return [dict(x) for x in self.lifecycles]
@@ -123,6 +127,7 @@ class FakePool:
                 "claimed_by": a[3], "bound_fields": json.loads(a[4]),
                 "state": "CLAIMED", "pre_open_order_ids": None,
                 "venue_order_id": None, "outcome": None, "reason": None,
+                "venue": a[5], "environment": a[6], "venue_clord_id": None,
                 "claimed_at": "2026-09-18T17:00:00Z"})
             return "INSERT 0 1"
 
@@ -141,6 +146,9 @@ class FakePool:
                     continue
                 if "'PRE_IMAGE_RECORDED'" in sql and "pre_open_order_ids" in sql:
                     x["pre_open_order_ids"] = json.loads(a[1])
+                    # COALESCE($3, venue_clord_id): None leaves it alone.
+                    if len(a) > 2 and a[2] is not None:
+                        x["venue_clord_id"] = a[2]
                     x["state"] = "PRE_IMAGE_RECORDED"
                 elif "'SENT_OUTCOME_UNKNOWN'" in sql and "sent_at" in sql:
                     x["state"] = "SENT_OUTCOME_UNKNOWN"
@@ -182,13 +190,15 @@ def session_row(**over):
     row = {"session_id": "MICRO-EXEC-CAL-1", "experiment": cal.EXPERIMENT,
            "authorised_by": cal.AUTHORISED_BY, "max_all_in_usd": 5.00,
            "max_spend_usd": 100.00, "max_open": 1, "spent_usd": 0.0,
+           "venue": "polymarket-us", "environment": "PRODUCTION",
            "stopped": False, "stopped_at": None, "stopped_by": None,
            "stop_reason": None}
     row.update(over)
     return row
 
 
-TICKET = {"venue": "polymarket-us", "account": "bettortoken-main",
+TICKET = {"venue": "polymarket-us", "environment": "PRODUCTION",
+          "account": "bettortoken-main",
           "marketId": "aec-atp-sin-alc-2026-09-18", "outcome": "SIN to win",
           "outcomeSide": "LONG", "side": "BUY",
           "orderType": "LIMIT_GTC_POST_ONLY", "price": 0.39, "quantity": 11}
@@ -196,6 +206,7 @@ TICKET = {"venue": "polymarket-us", "account": "bettortoken-main",
 
 def approved_row(**over):
     row = {"client_order_id": "CAL-0001", "venue": "polymarket-us",
+           "environment": "PRODUCTION",
            "account": "bettortoken-main",
            "market_id": "aec-atp-sin-alc-2026-09-18", "outcome": "SIN to win",
            "side": "BUY", "order_type": "LIMIT_GTC_POST_ONLY",

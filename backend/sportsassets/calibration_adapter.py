@@ -314,6 +314,27 @@ class LiveVenue:
         self._cancel = cancel_fn or pmus.cancel_order
         self._open = open_orders_fn or raw_open_orders
 
+    # THE VENUE'S OWN CORRELATION IDENTIFIER: this venue has none.
+    #
+    # `calibration_execute` asks every venue for one before it sends, and
+    # records what it gets beside the pre-image. Answering None here is a
+    # STATEMENT ABOUT THE RETAIL VENUE -- `CreateOrderParams` carries no
+    # client-supplied field, which is why the pre-image reconciliation
+    # exists at all -- and not a failure to mint one. An institutional
+    # adapter, whose REST order schema does carry `clordId`, answers with
+    # the identifier it is about to send.
+    #
+    # It is a method rather than a flag so that the identifier is minted
+    # ONCE, by whoever will actually put it on the wire, instead of being
+    # guessed here and hoped to match.
+    VENUE_HAS_NO_CLIENT_IDENTIFIER = (
+        "polymarket-us retail: CreateOrderParams has no client-supplied "
+        "order identifier, so an ambiguous response is reconciled against "
+        "the pre-image of resting order ids and nothing else")
+
+    def mint_client_id(self):
+        return None
+
     def open_order_ids(self, market_id):
         return read_open_order_ids(market_id, reader=self._open)["ids"]
 

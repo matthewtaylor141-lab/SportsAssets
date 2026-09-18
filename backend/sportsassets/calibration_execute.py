@@ -601,8 +601,42 @@ async def guarded_submit(venue, client_order_id: str, claimed_by: str,
                 "attemptId": attempt, "preOpenOrderIds": None,
                 "preImageReadable": False, "venueOrderId": None}
 
+    # THE VENUE'S OWN CORRELATION IDENTIFIER, WHERE THE VENUE HAS ONE.
+    #
+    # Minted by the adapter that will put it on the wire, and recorded
+    # BEFORE the send for the same reason the pre-image is: an identifier
+    # whose only copy went out with a request that never came back
+    # correlates nothing.
+    #
+    # THE PRE-IMAGE IS STILL WRITTEN, ALWAYS. Where the venue supports
+    # native correlation the two corroborate each other; the stronger
+    # evidence is not a licence to stop collecting the weaker, and on this
+    # venue there IS no stronger evidence -- `mint_client_id` answers None
+    # because the retail order schema has no such field. A venue whose
+    # minting raises is a venue we cannot name an order on, so nothing is
+    # sent: that is the same rule as an unreadable pre-image.
+    clord = None
     try:
-        await store.record_pre_image(attempt, pre, pool=pool)
+        minted = getattr(venue, "mint_client_id", None)
+        if callable(minted):
+            clord = minted()
+        if clord is not None and (not isinstance(clord, str)
+                                  or not clord.strip()):
+            raise ValueError("mint_client_id returned %r" % (clord,))
+    except Exception as exc:                                   # noqa: BLE001
+        await store.abandon_attempt(
+            attempt, "CLIENT_ID_NOT_MINTED: %s" % type(exc).__name__,
+            pool=pool)
+        return {"outcome": REFUSED_BY_VENUE, "sent": False,
+                "reason": "CLIENT_ID_NOT_MINTED: %s" % type(exc).__name__,
+                "attemptId": attempt, "preOpenOrderIds": pre,
+                "preImageReadable": True, "venueOrderId": None}
+    if clord:
+        ticket["clientIdForVenue"] = clord
+
+    try:
+        await store.record_pre_image(attempt, pre, pool=pool,
+                                     venue_clord_id=clord)
         await store.mark_sent(attempt, pool=pool)
     except Exception as exc:                                   # noqa: BLE001
         # THE RECORD FAILED, SO THE SEND DOES NOT HAPPEN. An unrecordable
@@ -625,6 +659,10 @@ async def guarded_submit(venue, client_order_id: str, claimed_by: str,
     result["clientOrderId"] = client_order_id
     result["attemptId"] = attempt
     result["boundFields"] = bound
+    # What the reconciliation has to work with, reported honestly: None
+    # here says the venue offers no client identifier, not that one was
+    # lost.
+    result["venueClordId"] = clord
     if not result.get("preOpenOrderIds"):
         result["preOpenOrderIds"] = pre
 

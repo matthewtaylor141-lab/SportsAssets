@@ -3,40 +3,45 @@ name: pmx-preprod
 # PREPRODUCTION ONLY. Talks to the institutional PRE-PRODUCTION exchange
 # (api.preprod.polymarketexchange.com / pmx-preprod.us.auth0.com) from the
 # runner, which has open internet. No production host is ever contacted:
-# the base URLs are fixed to preprod below and are not inputs. The private
-# key arrives base64 in an input, is masked at once, written 0600 to the
-# runner's temp dir and deleted at the end. Read-only actions (whoami,
-# health, refdata, bbo, positions, open-orders) need no confirm; any action
+# the base URLs are fixed to preprod below and are not inputs. Read-only
+# actions (whoami, health, refdata, bbo, positions, open-orders,
+# report-orders, report-by-clord, order-preview) need no confirm; any action
 # that could send an order needs confirm=DO.
+#
+# THE CREDENTIALS COME FROM THE SECRET STORE, NOT FROM THE FORM.
+#
+# They used to be workflow_dispatch INPUTS. The private key was handled
+# carefully -- read from the event payload on disk and masked before
+# anything could print it -- but the other three were not secret at all:
+# `client_id`, `participant_id` and `key_id` were mapped through a step's
+# `env:`, and the runner prints a step's env block into the log. Runs 1-24
+# on 2026-09-10 therefore carry the firm's client id, participant resource
+# name and key id in plain text in their logs, for anyone who can read this
+# repository's Actions history.
+#
+# They are now PMX_CLIENT_ID / PMX_PARTICIPANT_ID / PMX_KEY_ID /
+# PMX_PRIVATE_KEY_B64 in the repository secret store, so the runner masks
+# them, nobody has to paste a key into a web form to run a read, and a
+# scheduled or scripted dispatch becomes possible at all. Every one of them
+# is read from the event-free `secrets` context into the SCRIPT rather than
+# through a rendered `run:` line, for the same reason the key already was.
+#
+# Ask the venue to rotate the exposed preprod key id before this lane is
+# used for anything that matters; the identifiers in those logs cannot be
+# unpublished.
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: "whoami | health | refdata | instruments (arg=JSON body) | bbo (arg=symbol) | book (arg=symbol) | positions (arg=account name) | open-orders | report-orders (arg=JSON) | order-preview (arg=JSON) | order (arg=JSON, needs confirm=DO) | cancel (arg=JSON {orderId|clordId, symbol}, needs confirm=DO)"
+        description: "whoami | health | refdata | instruments (arg=JSON body) | bbo (arg=symbol) | book (arg=symbol) | positions (arg=account name) | open-orders | report-orders (arg=JSON) | report-by-clord (arg=clordId) | order-preview (arg=JSON) | duplicate-preview (arg=JSON, previews the same clordId twice, places nothing) | order (arg=JSON, needs confirm=DO) | cancel (arg=JSON {orderId|clordId, symbol}, needs confirm=DO)"
         required: true
         type: string
       arg:
-        description: "action argument: symbol for bbo; JSON body for order-preview / order; refdata filter text"
+        description: "action argument: symbol for bbo; JSON body for order-preview / order; refdata filter text; clordId for report-by-clord"
         required: false
         type: string
         default: ""
-      client_id:
-        description: "preprod client id"
-        required: true
-        type: string
-      participant_id:
-        description: "x-participant-id (firms/<firm>/users/<user>)"
-        required: true
-        type: string
-      key_id:
-        description: "preprod key id (JWT kid header)"
-        required: true
-        type: string
-      private_key_b64:
-        description: "the preprod RSA private key PEM, base64 (single line)"
-        required: true
-        type: string
       confirm:
         description: "DO to allow an action that can send an order"
         required: false
@@ -56,18 +61,17 @@ jobs:
       PMX_BASE_URL: https://api.preprod.polymarketexchange.com
       PMX_AUDIENCE: https://api.preprod.polymarketexchange.com
     steps:
-      - name: Mask and stage the key
-        # The key is NOT mapped through `env:` or `${{ }}` in `run:`: the runner
-        # prints a step's env block and its rendered script in the log header
-        # BEFORE the script's ::add-mask:: runs, which would expose the key.
-        # It is read from the event payload on disk instead and masked first.
+      - name: Stage the key from the secret store
+        # A repository secret is masked by the runner before any step runs,
+        # so `env:` is safe for it -- unlike a workflow_dispatch input,
+        # which is printed verbatim in the step's env block.
+        env:
+          KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
         run: |
           set -euo pipefail
           umask 077
-          KEY_B64="$(jq -r '.inputs.private_key_b64 // empty' "$GITHUB_EVENT_PATH")"
-          [ -n "$KEY_B64" ] || { echo "refused: no key"; exit 1; }
-          echo "::add-mask::$KEY_B64"
-          echo "$KEY_B64" | base64 -d > "$RUNNER_TEMP/pk.pem"
+          [ -n "${KEY_B64:-}" ] || { echo "refused: PMX_PRIVATE_KEY_B64 is not set"; exit 1; }
+          printf '%s' "$KEY_B64" | base64 -d > "$RUNNER_TEMP/pk.pem"
           head -c 32 "$RUNNER_TEMP/pk.pem" | grep -q "BEGIN" || { echo "refused: key is not a PEM"; exit 1; }
           echo "key staged ($(wc -c < "$RUNNER_TEMP/pk.pem") bytes)"
       - name: Install
@@ -77,13 +81,17 @@ jobs:
           ACTION: ${{ inputs.action }}
           ARG: ${{ inputs.arg }}
           CONFIRM: ${{ inputs.confirm }}
-          PMX_CLIENT_ID: ${{ inputs.client_id }}
-          PMX_PARTICIPANT_ID: ${{ inputs.participant_id }}
-          PMX_KEY_ID: ${{ inputs.key_id }}
+          PMX_CLIENT_ID: ${{ secrets.PMX_CLIENT_ID }}
+          PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}
+          PMX_KEY_ID: ${{ secrets.PMX_KEY_ID }}
         run: |
           set -euo pipefail
+          for v in PMX_CLIENT_ID PMX_PARTICIPANT_ID PMX_KEY_ID; do
+            [ -n "${!v:-}" ] || { echo "refused: $v is not set in the secret store"; exit 1; }
+          done
           case "$ACTION" in
-            whoami|health|refdata|instruments|bbo|book|positions|open-orders|report-orders|order-preview) ;;
+            whoami|health|refdata|instruments|bbo|book|positions|open-orders|report-orders|report-by-clord|order-preview) ;;
+            duplicate-preview) ;;
             order|cancel) if [ "$CONFIRM" != "DO" ]; then echo "refused: $ACTION needs confirm=DO"; exit 1; fi ;;
             *) echo "refused: unknown action '$ACTION'"; exit 1 ;;
           esac
@@ -172,6 +180,56 @@ jobs:
           elif act == "report-orders":
               body = json.loads(arg) if arg.strip() else {"stateFilter": "ORDER_STATE_FILTER_OPEN"}
               show(requests.post(f"{base}/v1/report/orders/search", headers=H, json=body, timeout=30))
+          elif act == "report-by-clord":
+              # CAN AN AMBIGUOUS SEND BE RECOVERED BY OUR OWN IDENTIFIER?
+              #
+              # This is the question the adapter's `clordId` only ANSWERS if
+              # the venue lets us search on it. Every recovery search this
+              # project has ever run was by `orderIds` or by `symbols` -- and
+              # the one probe order (CDHM9PJV16R7, 14:19Z 2026-09-10) came
+              # back 200 and was then absent from open orders, positions and
+              # every report search we tried. So the pre-image workaround is
+              # NOT yet replaceable: native correlation is SENT but its
+              # recovery path is unverified.
+              #
+              # arg = the clordId. Four shapes are tried because the
+              # documented body does not say which the search accepts, and a
+              # 400 naming the field is itself an answer. NOTHING IS SENT.
+              c = arg.strip()
+              if not c:
+                  print("refused: report-by-clord needs the clordId in arg"); sys.exit(1)
+              for body in ({"clordIds": [c], "pageSize": 100},
+                           {"clOrdIds": [c], "pageSize": 100},
+                           {"clordId": c, "pageSize": 100},
+                           {"orderIds": [c], "pageSize": 100}):
+                  r = requests.post(f"{base}/v1/report/orders/search", headers=H, json=body, timeout=30)
+                  print("BODY", json.dumps(body), "->", r.status_code)
+                  print(r.text[:2000])
+          elif act == "duplicate-preview":
+              # WHAT DOES THE VENUE DO WITH A REPEATED clordId?
+              #
+              # A retry after a lost response sends the SAME identifier. If
+              # the venue rejects the duplicate, a retry is safe and the
+              # single-send rule can relax; if it accepts it, a retry is a
+              # second order and the rule must stay exactly as it is.
+              #
+              # THIS ASKS THE PREVIEW ENDPOINT, WHICH PLACES NOTHING -- so
+              # it bounds the question without risking the answer. A preview
+              # that accepts a duplicate does not prove the insert would, and
+              # the run says so rather than concluding.
+              #
+              # arg = the JSON order request; its clordId is sent TWICE.
+              body = json.loads(arg)
+              req = body.get("request", body)
+              if not req.get("clordId"):
+                  print("refused: duplicate-preview needs a clordId in the request"); sys.exit(1)
+              for attempt in (1, 2):
+                  r = requests.post(f"{base}/v1/trading/orders/preview", headers=H, json=body, timeout=30)
+                  print(f"PREVIEW attempt {attempt} clordId={req['clordId']} ->", r.status_code)
+                  print(r.text[:2000])
+              print("NOTE: the preview places nothing. Whether the INSERT "
+                    "endpoint rejects a duplicate clordId is NOT established "
+                    "by this run.")
           elif act in ("order-preview", "order"):
               body = json.loads(arg)
               path = "/v1/trading/orders/preview" if act == "order-preview" else "/v1/trading/orders"

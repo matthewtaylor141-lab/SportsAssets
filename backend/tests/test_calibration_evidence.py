@@ -61,6 +61,7 @@ def readers(**over):
                              "outcomeSide": "LONG", "outcomeSideBlocker": None,
                              "priceBasis": "LONG", "sideIdentifier": "sin",
                              "venue": "polymarket-us",
+                             "environment": "PRODUCTION",
                              "expiry": "2026-09-18T23:00:00Z"},
         "book": lambda m: {"bid": 0.39, "ask": 0.40, "priceBasis": "LONG"},
         "rules": lambda m: {"tick": 0.01, "minQuantity": 1},

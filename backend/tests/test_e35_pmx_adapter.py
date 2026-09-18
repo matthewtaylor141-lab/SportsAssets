@@ -16,6 +16,7 @@ from __future__ import annotations
 import inspect
 import json
 import logging
+import pathlib
 import os
 import subprocess
 import sys
@@ -910,9 +911,22 @@ def test_the_import_refuses_a_non_preprod_host():
         pmx._host_guard({"PMX_AUDIENCE": "https://api.prod.polymarketexchange.com/"})
     pmx._host_guard({"PMX_BASE_URL": "https://api.preprod.polymarketexchange.com/",
                      "PMX_AUTH0_DOMAIN": "https://pmx-preprod.us.auth0.com", "PMX_AUDIENCE": ""})
-    env = {**os.environ, "PMX_BASE_URL": "https://api.prod.polymarketexchange.com"}
+    # THE GUARD IN A FRESH INTERPRETER, not just in this one.
+    #
+    # PYTHONPATH is set explicitly: the child inherits the runner's cwd, not
+    # pytest's sys.path, and without it the child died on
+    # ModuleNotFoundError -- a non-zero exit that looked like the guard
+    # firing while proving nothing about the host. The assertion below
+    # already required the guard's own words, so it failed honestly; this
+    # makes it able to pass for the right reason.
+    pkg_root = str(pathlib.Path(pmx.__file__).resolve().parents[1])
+    env = {**os.environ, "PMX_BASE_URL": "https://api.prod.polymarketexchange.com",
+           "PYTHONPATH": os.pathsep.join(
+               [pkg_root] + ([os.environ["PYTHONPATH"]]
+                             if os.environ.get("PYTHONPATH") else []))}
     r = subprocess.run([sys.executable, "-c", "import sportsassets.pmx"], env=env,
                        capture_output=True, text=True, timeout=120)
+    assert "ModuleNotFoundError" not in r.stderr, r.stderr
     assert r.returncode != 0 and "not the preprod host" in r.stderr
 
 

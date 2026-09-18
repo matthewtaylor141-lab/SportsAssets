@@ -83,6 +83,8 @@ def _session_row(**over):
         "max_spend_usd": 100.00,
         "max_open": 1,
         "spent_usd": 0.0,
+        "venue": "polymarket-us",
+        "environment": "PRODUCTION",
         "stopped": False,
         "stopped_at": None, "stopped_by": None, "stop_reason": None,
     }
@@ -92,9 +94,14 @@ def _session_row(**over):
 
 def _lifecycle_row(args):
     return {
-        "client_order_id": args[1], "venue": args[2], "market_id": args[4],
-        "outcome": args[5], "side": args[6], "quantity": args[9],
-        "price": args[8], "reserve_usd": args[12], "all_in_usd": args[12],
+        # POSITIONS, and they moved when `environment` joined the INSERT at
+        # $4 (migration 067). Keeping them in step with the statement is the
+        # point of this helper: a stale index here reads the order type as
+        # the price and the failure looks like a conversion error.
+        "client_order_id": args[1], "venue": args[2], "environment": args[3],
+        "market_id": args[5],
+        "outcome": args[6], "side": args[7], "quantity": args[10],
+        "price": args[9], "reserve_usd": args[13], "all_in_usd": args[13],
         "spent_usd": 0.0, "state": "APPROVED", "venue_order_id": None,
         "venue_terminal_state": None, "fills_reconciled": False,
         "created_at": None, "updated_at": None,
@@ -103,7 +110,8 @@ def _lifecycle_row(args):
 
 def ticket(**over):
     t = {
-        "venue": "polymarket-us", "account": "bettortoken-main",
+        "venue": "polymarket-us", "environment": "PRODUCTION",
+        "account": "bettortoken-main",
         "marketId": "aec-atp-xxx-yyy-2026-09-18", "outcome": "XXX to win",
         "side": "BUY", "orderType": "LIMIT_GTC_POST_ONLY",
         "clientOrderId": "CAL-0001", "expiry": "2026-09-18T23:00:00Z",
