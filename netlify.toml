@@ -10,8 +10,32 @@
 [build.environment]
   VITE_API_BASE = "https://sportsassets-api.onrender.com"
 
+# COMMAND's read endpoints, proxied to the API so they are SAME-ORIGIN.
+#
+# WHY A PROXY AND NOT AN ABSOLUTE URL. COMMAND's feed code refuses to
+# fetch anything outside /api/command/ (`core.endpoint()`) and fetches
+# with credentials:'same-origin'. That is deliberate: it means the page
+# cannot be re-pointed at another host and cannot carry a token in
+# JavaScript or in a URL. The cost is that the API has to appear on this
+# origin, which is what this rule does. The session cookie the API sets
+# is then a cookie of THIS origin -- HttpOnly, so the page never reads
+# it, and scoped to /api/command, so it is sent nowhere else.
+#
+# THE ORDER MATTERS. Netlify applies the first matching rule, so this
+# must stay ABOVE the SPA catch-all below. Underneath it, /api/command/
+# would fall through to index.html and COMMAND would parse a page of
+# HTML as its portfolio.
+[[redirects]]
+  from = "/api/command/*"
+  to = "https://sportsassets-api.onrender.com/api/command/:splat"
+  status = 200
+  force = true
+
 # SPA fallback: real files (sw.js, assets) are served as-is; everything else
 # routes to index.html so react-router deep links work.
+#
+# /command/ is a REAL DIRECTORY in the publish root (frontend/public is
+# copied verbatim by Vite), so it wins over this rule without force.
 [[redirects]]
   from = "/*"
   to = "/index.html"

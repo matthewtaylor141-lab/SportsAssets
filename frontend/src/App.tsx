@@ -56,6 +56,18 @@ const TABS = [
   { to: '/admin', label: 'Ops' },
 ]
 
+/* ── Pages that are NOT react-router routes ─────────────────────────
+ * COMMAND ships as a static page under public/command/, so it is a real
+ * directory in the publish root rather than a route in this app. That
+ * means a NavLink would be WRONG here: react-router would intercept the
+ * click, match nothing, and the SPA fallback would hand back index.html
+ * -- the link would silently reload this app instead of opening COMMAND.
+ * A plain anchor is the correct control, and it leaves every existing
+ * route exactly as it was. */
+const EXTERNAL_TABS = [
+  { href: '/command/', label: 'Command' },
+]
+
 /* ── Mobile bottom tab bar (PWA-first, owner directive 2026-08-22) ──
  * Under 720px the top nav collapses to a brand strip and these four
  * primary destinations move into a fixed bottom bar — thumb-reach,
@@ -117,6 +129,9 @@ function TabBar() {
               className={({ isActive }) => `sheet-link${isActive ? ' active' : ''}`}>
               {t.label}
             </NavLink>
+          ))}
+          {EXTERNAL_TABS.map((t) => (
+            <a key={t.href} className="sheet-link" href={t.href}>{t.label}</a>
           ))}
         </div>
       )}
@@ -223,6 +238,9 @@ export default function App() {
           >
             {t.label}
           </NavLink>
+        ))}
+        {EXTERNAL_TABS.map((t) => (
+          <a key={t.href} className="tab" href={t.href}>{t.label}</a>
         ))}
         <span className="spacer" />
         <NavClock />

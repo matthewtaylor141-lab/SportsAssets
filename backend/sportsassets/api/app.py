@@ -13,7 +13,8 @@ from contextlib import asynccontextmanager
 from datetime import datetime, timezone
 from typing import Any
 
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request
+from fastapi import (Cookie, Depends, FastAPI, Header, HTTPException, Query,
+                     Request)
 from fastapi.middleware.cors import CORSMiddleware
 from starlette.middleware.gzip import GZipMiddleware
 from fastapi.responses import PlainTextResponse, Response, StreamingResponse
@@ -765,6 +766,145 @@ async def wall_unlock(request: Request, body: DeskUnlockBody) -> dict:
         return {"ok": False, "error": "wrong password"}
     token, exp = mint_wall_token()
     return {"ok": True, "token": token, "expires_at": exp}
+
+
+# ── BETTORTOKEN COMMAND (2026-09-18) ────────────────────────────────
+# COMMAND is a static page served from the frontend origin. Its feed
+# code (`core.Feed`) is deliberately narrow: `core.endpoint()` refuses
+# any path that is not `/api/command/...`, it sends no custom headers,
+# and it fetches with `credentials: 'same-origin'`. That is a security
+# property, not an oversight -- it means COMMAND CANNOT be pointed at a
+# third-party host and cannot carry a token in JavaScript, a URL, or a
+# log line.
+#
+# So its session is a COOKIE, minted here and never readable by the
+# page: HttpOnly (JavaScript cannot read it), Secure (TLS only),
+# SameSite=Lax, and scoped to Path=/api/command so it is not attached to
+# any other endpoint. The credential itself is the existing desk
+# password and the token is the existing stateless desk HMAC -- no new
+# secret, no new store, and rotating the admin token still revokes
+# everything at once.
+#
+# THE COOKIE VALUE IS NEVER RETURNED IN A BODY and never logged.
+COMMAND_COOKIE = "bt_command"
+
+
+def require_command(bt_command: str = Cookie(default=""),
+                    x_desk_token: str = Header(default=""),
+                    x_admin_token: str = Header(default="")) -> str:
+    """Server-side access control for COMMAND. Cookie first, then the
+    existing header tokens so ops tooling and the TV wall keep working.
+    Returns the caller's role; COMMAND is read-only for every role."""
+    import hmac
+
+    if bt_command and (desk_token_ok(bt_command) or wall_token_ok(bt_command)):
+        return "command"
+    supplied = (x_admin_token or "").strip()
+    expected = (settings().admin_token or "").strip()
+    if expected and hmac.compare_digest(supplied, expected):
+        return "admin"
+    if x_desk_token and (desk_token_ok(x_desk_token)
+                         or wall_token_ok(x_desk_token)):
+        return "desk"
+    raise HTTPException(status_code=401, detail="command unlock required")
+
+
+@app.post("/api/command/session")
+async def command_session_open(request: Request, response: Response,
+                               body: DeskUnlockBody) -> dict:
+    """Desk password -> an HttpOnly COMMAND cookie. Shares the desk
+    throttle bucket so the unlock endpoints are one guess oracle, not
+    three. The token is set as a cookie and NEVER returned in the body."""
+    import hmac
+
+    if _throttled(_UNLOCK_HITS, request):
+        raise HTTPException(status_code=429, detail="slow down")
+    supplied = (body.password or "").strip()
+    expected = (settings().desk_password or "").strip()
+    if not expected or not hmac.compare_digest(supplied, expected):
+        return {"ok": False, "error": "wrong password"}
+    token, exp = mint_desk_token()
+    response.set_cookie(COMMAND_COOKIE, token, max_age=DESK_TOKEN_TTL_S,
+                        httponly=True, secure=True, samesite="lax",
+                        path="/api/command")
+    return {"ok": True, "expires_at": exp}
+
+
+@app.delete("/api/command/session")
+async def command_session_close(response: Response) -> dict:
+    response.delete_cookie(COMMAND_COOKIE, path="/api/command")
+    return {"ok": True}
+
+
+async def _command_payload() -> dict:
+    """Build the read model, or refuse by name.
+
+    A FAILED RETRIEVAL IS NOT AN EMPTY BOOK. Every path that cannot
+    produce the real records raises, and the routes below turn that into
+    503 -- COMMAND then shows FEED UNAVAILABLE and keeps its last
+    snapshot marked stale. It never shows a well-formed page of zeros
+    during an outage, which is the failure that would actually mislead
+    somebody.
+    """
+    from . import command_snapshot as CSNAP
+    from . import pmus_account as PA
+    from ..db import get_pool
+
+    try:
+        pool = await get_pool()
+    except Exception as exc:                                   # noqa: BLE001
+        raise CSNAP.RetrievalIncomplete(
+            "NO_DATABASE_POOL", type(exc).__name__) from exc
+
+    records = await CSNAP.read_records(pool)
+
+    # The account read is the SHARED 30-second cache, so N browsers are
+    # N reads of one snapshot -- never N venue collectors.
+    account, account_error = None, None
+    try:
+        acct = await PA.account_snapshot()
+        if acct.get("error") or not acct.get("configured", True):
+            account_error = str(acct.get("error")
+                                or acct.get("hint") or "not configured")
+        else:
+            account = acct.get("account") or acct
+    except Exception as exc:                                   # noqa: BLE001
+        account_error = "%s: %s" % (type(exc).__name__, str(exc)[:120])
+
+    # The sleeve's mode comes from ingestion_state['mirror_live'], the
+    # row the worker itself arms on -- not a second opinion.
+    return CSNAP.build(records=records, account=account, session=None,
+                       account_error=account_error)
+
+
+@app.get("/api/command/snapshot", dependencies=[Depends(require_command)])
+async def command_snapshot_route(response: Response) -> dict:
+    from . import command_snapshot as CSNAP
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await _command_payload()
+    except CSNAP.RetrievalIncomplete as inc:
+        raise HTTPException(status_code=503, detail={
+            "reason": inc.reason, "detail": inc.detail,
+            "note": "records unread -- COMMAND shows unavailable, not zero",
+        }) from inc
+
+
+@app.get("/api/command/investor/snapshot",
+         dependencies=[Depends(require_command)])
+async def command_investor_snapshot_route(response: Response) -> dict:
+    """The investor projection, made HERE. `core.projectInvestor` refuses
+    to run on anything but DEMO, and rightly: a browser that strips
+    internal rows has still received them."""
+    from . import command_snapshot as CSNAP
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return CSNAP.investor_projection(await _command_payload())
+    except CSNAP.RetrievalIncomplete as inc:
+        raise HTTPException(status_code=503, detail={
+            "reason": inc.reason, "detail": inc.detail}) from inc
 
 
 @app.post("/api/wall/renew")

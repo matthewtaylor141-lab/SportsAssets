@@ -1,0 +1,32 @@
+{
+  "WHAT_THIS_IS": "Capture attempts that were ended before they executed, and why. A cancelled run keeps its GitHub metadata, but GitHub records only 'cancelled' -- it cannot record that the code was superseded. This file is that record.",
+  "RUNS": [
+    {
+      "RUN_ID": 35348871352,
+      "RUN_NUMBER": 3,
+      "WORKFLOW": "beta48-substantive-capture",
+      "HEAD_SHA": "ced87204a6806f63f2e2dc1bb6ef1702f8a1d476",
+      "BRANCH": "claude/session-njaewf",
+      "CREATED_AT": "2026-09-18T13:12:31Z",
+      "STATE_AT_CANCELLATION": "pending",
+      "JOBS_STARTED": 0,
+      "VENUE_REQUESTS_MADE": 0,
+      "CANCELLED_AT": "2026-09-18T13:52:37Z",
+      "TERMINAL_STATE_CONFIRMED": "completed / cancelled",
+      "TERMINAL_CONFIRMED_HOW": "re-read of the run after the 202 acknowledgement; an acknowledgement alone was treated as insufficient",
+      "DISPOSITION": "SUPERSEDED_BEFORE_EXECUTION",
+      "REASON": "STARTUP_CENSUS_WIRING_REPAIR",
+      "WHY_IT_COULD_NOT_BE_REPAIRED_IN_PLACE": "a workflow_dispatch run resolves its workflow file at dispatch time, so the GATE 3 correction on the branch could never reach a run already pinned to ced8720. It would have executed the old curl 'status=in_progress' gate.",
+      "AUTHORISED_BY": "MANAGEMENT_DIRECTIVE_2026-09-18_SECTION_D (cancellation of this named run only; not general collector-cancellation authority)",
+      "REPLACED_BY": {
+        "RUN_ID": 35352837259,
+        "RUN_NUMBER": 4,
+        "HEAD_SHA": "69f662d83b39a48da041774965a7d5d3eb2061d6",
+        "CODE_SHA_INPUT": "69f662d83b39a48da041774965a7d5d3eb2061d6",
+        "CAPTURE_SECONDS": 5400,
+        "DISPATCHED_AT": "2026-09-18T13:53:02Z"
+      },
+      "NOT_TOUCHED": "run85 and every other collector; no other run was cancelled, displaced, modified or rescheduled"
+    }
+  ]
+}
