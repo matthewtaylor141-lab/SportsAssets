@@ -597,6 +597,25 @@ def _utc_now():
         ).replace("+00:00", "Z")
 
 
+NO_RESPONSE_RECEIVED = "NO_RESPONSE_RECEIVED"
+
+
+def _response_bytes(r):
+    """Exactly what arrived, before status or JSON is considered.
+
+    Returns None only when the object genuinely carries no body -- which, for
+    a real response, is itself worth recording. httpx exposes `.content`;
+    `.text` is the fallback; a test double may have neither.
+    """
+    raw = getattr(r, "content", None)
+    if isinstance(raw, (bytes, bytearray)):
+        return bytes(raw)
+    txt = getattr(r, "text", None)
+    if isinstance(txt, str):
+        return txt.encode("utf-8", "replace")
+    return None
+
+
 def _body_sha256(body):
     try:
         return hashlib.sha256(json.dumps(
@@ -763,6 +782,7 @@ def discovery_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
     Returns (by_slug, event_index, receipts, status, adapter_block).
     """
     by_slug, event_index, receipts, blocks = {}, {}, [], []
+    index = EA.WalkIndex()          # ONE index for the WHOLE walk
     status = BOARD_PAGE_CAP_REACHED
     pages = 0
     while pages < max_pages:
@@ -775,6 +795,9 @@ def discovery_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
                "ROWS_RETURNED": NOT_IDENTIFIED, "FRESH_EVENTS": NOT_IDENTIFIED,
                "MARKET_ROWS_EXTRACTED": NOT_IDENTIFIED,
                "PAGINATION_FIELDS": {}, "REPEATED_EARLIER_PAGE": NOT_IDENTIFIED,
+               "RESPONSE_BYTES": NOT_IDENTIFIED,
+               "RESPONSE_BYTES_SHA256": NOT_IDENTIFIED,
+               "BODY_CANONICAL_SHA256": NOT_IDENTIFIED,
                "BODY_SHA256": NOT_IDENTIFIED, "BODY_ARTIFACT": NOT_IDENTIFIED,
                "MALFORMED_ROWS": (), "ERROR": NOT_IDENTIFIED}
         try:
@@ -782,11 +805,30 @@ def discovery_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
             rec["RECEIPT_UTC"] = _utc_now()
             rec["HTTP_STATUS"] = getattr(r, "status_code", NOT_IDENTIFIED)
         except Exception as e:                                # noqa: BLE001
+            # A TRANSPORT FAILURE HAS NO RESPONSE, AND SAYS SO. It is not an
+            # empty body and it is not a zero-byte artifact; there is nothing
+            # to retain and the receipt must not imply otherwise.
             rec["ERROR"] = "%s: %s" % (type(e).__name__, e)
+            rec["RESPONSE_SHAPE"] = NO_RESPONSE_RECEIVED
+            rec["RESPONSE_BYTES"] = NO_RESPONSE_RECEIVED
+            rec["BODY_ARTIFACT"] = NO_RESPONSE_RECEIVED
             receipts.append(rec)
             status = BOARD_HTTP_FAILURE
             break
         pages += 1
+
+        # THE BYTES ARE TAKEN BEFORE ANY REJECTION. Run 35333848994 sealed no
+        # response evidence at all, so its failure could not be diagnosed after
+        # the fact. A 503's body, an HTML error page, a truncated JSON document
+        # -- each is the only thing that can explain the next failure, and each
+        # used to be discarded before it was ever written down.
+        raw = _response_bytes(r)
+        if raw is not None:
+            rec["RESPONSE_BYTES"] = len(raw)
+            rec["RESPONSE_BYTES_SHA256"] = hashlib.sha256(raw).hexdigest()
+        if retain_bodies is not None:
+            rec["BODY_ARTIFACT"] = retain_bodies(rec, raw)
+
         if rec["HTTP_STATUS"] != 200:
             receipts.append(rec)
             status = BOARD_HTTP_FAILURE
@@ -799,9 +841,12 @@ def discovery_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
             receipts.append(rec)
             status = BOARD_SCHEMA_FAILURE
             break
-        rec["BODY_SHA256"] = _body_sha256(body)
-        if retain_bodies is not None:
-            rec["BODY_ARTIFACT"] = retain_bodies(rec["BODY_SHA256"], body)
+        # TWO HASHES, NEVER INTERCHANGEABLE. The canonical hash digests the
+        # PARSED document with sorted keys, so two byte-different responses
+        # that mean the same thing share it; the byte hash digests exactly what
+        # arrived. Only the byte hash identifies the retained artifact.
+        rec["BODY_CANONICAL_SHA256"] = _body_sha256(body)
+        rec["BODY_SHA256"] = rec["BODY_CANONICAL_SHA256"]
         rec["PAGINATION_FIELDS"] = _pagination_fields(body)
 
         rows = EA.event_rows_of(body)
@@ -820,8 +865,10 @@ def discovery_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
 
         markets, blk = EA.extract_markets(
             rows, page_ref={"ENDPOINT": endpoint, "OFFSET": offset,
-                            "BODY_SHA256": rec["BODY_SHA256"]},
-            endpoint=endpoint)
+                            "PAGE": rec["PAGE"],
+                            "RESPONSE_BYTES_SHA256":
+                                rec["RESPONSE_BYTES_SHA256"]},
+            endpoint=endpoint, index=index)
         blocks.append(blk)
         rec["MARKET_ROWS_EXTRACTED"] = len(markets)
         rec["MALFORMED_ROWS"] = tuple(blk["DROPPED_ROWS"])
@@ -837,10 +884,12 @@ def discovery_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
         rec["FRESH_EVENTS"] = fresh
         rec["REPEATED_EARLIER_PAGE"] = bool(rows) and fresh == 0
 
+        # The adapter has already applied WALK-WIDE dedup, so anything it
+        # returns is new to the whole walk. The old `if slug not in by_slug`
+        # first-wins guard is gone: it was the silent arrival-order resolution
+        # that let a cross-page conflict pass unnamed.
         for m in markets:
-            slug = m.get("slug")
-            if slug and slug not in by_slug:
-                by_slug[slug] = m
+            by_slug[m["slug"]] = m
 
         # A CONFLICTING DUPLICATE IS A SCHEMA FAILURE, NOT A ROW TO PICK FROM.
         # An ordinary duplicate is deduplicated and counted; two rows claiming
@@ -864,7 +913,8 @@ def discovery_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
             status = BOARD_PAGINATION_STALLED     # the server ignored `offset`
             break
         # NOTE: no short-page break. See (2) above.
-    return by_slug, event_index, receipts, status, EA.merge_blocks(blocks)
+    return (by_slug, event_index, receipts, status,
+            EA.merge_blocks(blocks, index=index))
 
 
 def certify_completion(status, receipts, rows_seen, endpoint=MARKETS_PATH):
@@ -934,9 +984,34 @@ def discovery_retrieval_block(by_slug, event_index, receipts, status,
     never compared against a venue event total.
     """
     events_seen = len(event_index)
+    # ONE COMPLETION DECISION, MADE ON THE EVENT COUNT, USED EVERYWHERE.
+    # This block used to certify on the event count and then call
+    # `board_retrieval_block`, which certified a SECOND time against
+    # len(by_slug) -- the market-row count. Two decisions, one of them
+    # comparing a venue event total against extracted market rows, and the
+    # second one silently overwriting the first in the shared fields. The
+    # board-level fields are now derived from this single verdict.
     status, why = certify_completion(status, receipts, events_seen, endpoint)
     complete = status == BOARD_VERIFIED_END
-    blk = board_retrieval_block(by_slug, receipts, status, endpoint=endpoint)
+    blk = {
+        "BOARD_RETRIEVAL_STATUS": status,
+        "BOARD_RETRIEVAL_STATUSES": BOARD_RETRIEVAL_STATUSES,
+        "BOARD_LIST_EXHAUSTED": "YES" if complete else "NO",
+        "BOARD_UNIVERSE_ENUMERATED": complete,
+        "BOARD_PAGES_FETCHED": len(receipts),
+        "BOARD_MARKETS_SEEN": len(by_slug),
+        "BOARD_REQUEST_RECEIPTS": tuple(receipts),
+        "BOARD_ENDPOINT": endpoint,
+        "BOARD_COMPLETION_CONTRACT": BOARD_COMPLETION_CONTRACTS.get(
+            endpoint, {"CONTRACT": NOT_IDENTIFIED, "ESTABLISHED": False}),
+        "A_CONVENTION_IS_NOT_A_CONTRACT": A_CONVENTION_IS_NOT_A_CONTRACT,
+        "PAGINATION_EVIDENCE_MAY_CONTRADICT_A_SHORT_PAGE":
+            PAGINATION_EVIDENCE_MAY_CONTRADICT_A_SHORT_PAGE,
+        "A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD":
+            A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD,
+        "COMPLETION_CERTIFIED_ON": "EVENT_ROWS",
+        "COMPLETION_CERTIFIED_ONCE": True,
+    }
     blk.update({
         "DISCOVERY_ENDPOINT": endpoint,
         "DISCOVERY_ADAPTER": adapter_block.get("ADAPTER_VERSION"),
@@ -988,10 +1063,42 @@ def _cli():                                                   # pragma: no cover
     ap.add_argument("--out", required=True)
     ap.add_argument("--rate", default="0.25")
     ap.add_argument("--window-s", type=float, default=CAPTURE_WINDOW_S_DEFAULT)
+    # THE INJECTED CLOCK. Offline rehearsal on retained bodies must evaluate
+    # them at the time they were retained; the live job passes nothing and
+    # reads the real clock. Whichever applies is RECORDED on the selection, so
+    # a rehearsal artefact can never be mistaken for a live one.
+    ap.add_argument("--as-of", default=None,
+                    help="ISO-8601 UTC decision time. Offline rehearsal only.")
+    ap.add_argument("--retain-bodies-dir", default=None,
+                    help="Directory for retained response bodies.")
     a = ap.parse_args()
 
     pacer = RP.GlobalPacer(float(a.rate))
-    now_iso = datetime.now(timezone.utc).replace(microsecond=0).isoformat()
+    injected = bool(a.as_of)
+    now_dt = (_parse(a.as_of) if injected
+              else datetime.now(timezone.utc).replace(microsecond=0))
+    if now_dt is None:
+        raise SystemExit("UNPARSEABLE_AS_OF: %r" % (a.as_of,))
+    now_iso = now_dt.isoformat()
+    now_epoch = now_dt.timestamp()
+
+    # BODY RETENTION, IN THE REAL COMMAND. Defaults beside the selection file
+    # so the evidence archive picks it up with everything else.
+    bodies_dir = Path(a.retain_bodies_dir or
+                      (Path(a.out).parent / "discovery_bodies"))
+    bodies_dir.mkdir(parents=True, exist_ok=True)
+    retained = []
+
+    def _retain(rec, raw):
+        """Write exactly what arrived, name it by its own byte hash."""
+        if raw is None:
+            return NO_RESPONSE_RECEIVED
+        name = "page_%03d_%s.body" % (rec["PAGE"],
+                                      rec["RESPONSE_BYTES_SHA256"][:16])
+        (bodies_dir / name).write_bytes(raw)
+        retained.append(name)
+        return str(Path(bodies_dir.name) / name)
+
     reads = 0
     with httpx.Client(headers={"accept": "application/json"}) as http:
         # THE BOARD. Deduped by slug, and a page that adds nothing new ends the
@@ -1008,7 +1115,8 @@ def _cli():                                                   # pragma: no cover
         # The event rows are flattened to their OWN child markets by the
         # adapter and handed to the unchanged eligibility rules below.
         (by_slug, event_index, receipts, board_status,
-         adapter_block) = discovery_walk(_get, endpoint=EVENTS_PATH)
+         adapter_block) = discovery_walk(_get, endpoint=EVENTS_PATH,
+                                         retain_bodies=_retain)
         reads += len(counted)
 
         # CANDIDATES FIRST, BOOKS SECOND. Only markets that already carry a
@@ -1040,8 +1148,12 @@ def _cli():                                                   # pragma: no cover
             if err:
                 continue
             books[slug] = body
+            # ONE CLOCK. Trade recency is measured against the SAME decision
+            # time the horizon and the ranking use. Mixing an injected as-of
+            # with a wall clock here would make every retained book look days
+            # stale while the roster thought it was still 2026-09-14.
             activity[slug] = EL.decision_screen(
-                m, body, time.time(), _parse_epoch)
+                m, body, now_epoch if injected else time.time(), _parse_epoch)
 
     # ACCOUNT FOR THE WHOLE BOARD, not just the rows that got a book read.
     sel = freeze(list(by_slug.values()), books, now_iso, a.window_s, activity)
@@ -1052,6 +1164,13 @@ def _cli():                                                   # pragma: no cover
         "SELECTION_READS_ARE_NOT_CAPTURE_OBSERVATIONS": True,
         "CANDIDATES_BOOK_READ": len(books),
         "SYS_PATH_NOTE": sys_path_note,
+        # THE CLOCK THIS SELECTION WAS DECIDED ON, ON THE RECORD.
+        "DECISION_TIME_UTC": now_iso,
+        "DECISION_CLOCK_INJECTED": injected,
+        "DECISION_CLOCK_SOURCE": ("INJECTED_AS_OF_OFFLINE_REHEARSAL" if injected
+                                  else "WALL_CLOCK"),
+        "RETAINED_RESPONSE_BODIES": tuple(retained),
+        "RETAINED_RESPONSE_BODY_DIR": bodies_dir.name,
     })
     sel.update(discovery_retrieval_block(by_slug, event_index, receipts,
                                          board_status, adapter_block,

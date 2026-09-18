@@ -90,6 +90,11 @@ DROP_SLUG_EQUALS_PARENT = "CHILD_SLUG_EQUALS_PARENT_EVENT_SLUG"
 DROP_DUPLICATE_MARKET_ID = "DUPLICATE_MARKET_ID"
 DROP_DUPLICATE_MARKET_SLUG = "DUPLICATE_MARKET_SLUG"
 DROP_CONFLICTING_DUPLICATE = "CONFLICTING_DUPLICATE_MARKET_IDENTITY"
+# The three ways one market row can contradict one already seen ANYWHERE in
+# the walk. They are named apart because they are different venue claims.
+DROP_CONFLICTING_MARKET_ID = "CONFLICTING_MARKET_ID_IDENTITY"
+DROP_CONFLICTING_MARKET_SLUG = "CONFLICTING_MARKET_SLUG_IDENTITY"
+DROP_CROSSED_MARKET_IDENTITY = "CROSSED_MARKET_ID_AND_SLUG"
 
 EVENT_DROP_NOT_A_DICT = "EVENT_ROW_NOT_AN_OBJECT"
 EVENT_DROP_NO_ID = "EVENT_HAS_NO_ID"
@@ -130,14 +135,25 @@ def _identity_of_market(m):
             None if not slug else str(slug))
 
 
-def _fingerprint(m):
-    """A stable digest of the venue fields that decide identity.
+# THE IDENTITY FINGERPRINT IS IDENTITY ONLY. It digests the venue's own
+# identity-bearing fields -- id, slug, start time, and the team bindings the
+# frozen `event_identity` rule reads -- and NOTHING that moves during normal
+# trading. bestBidQuote, bestAskQuote, outcomePrices, ep3SyncedAt and updatedAt
+# are all deliberately excluded: a market whose quote changed between page 3
+# and page 17 is the same market, and flagging that as an identity conflict
+# would refuse every healthy walk of a live board.
+IDENTITY_FIELDS = ("id", "slug", "gameStartTime")
+IDENTITY_EXCLUDES_QUOTES = True
 
-    Two rows sharing an id are a duplicate. Two rows sharing an id whose
-    identity-bearing fields DIFFER are a conflict, and a conflict is named
-    rather than resolved: picking one of them would be a guess.
+
+def _fingerprint(m):
+    """A stable digest of the venue fields that decide a MARKET's identity.
+
+    Includes the id AND the slug, so the same digest answers both questions:
+    a repeated id whose slug changed and a repeated slug whose id changed both
+    come back as different fingerprints, and both are conflicts.
     """
-    parts = [str(m.get("slug")), str(m.get("gameStartTime"))]
+    parts = [str(m.get(k)) for k in IDENTITY_FIELDS]
     for s in (m.get("marketSides") or []):
         if isinstance(s, dict):
             t = s.get("team") or {}
@@ -146,21 +162,129 @@ def _fingerprint(m):
     return hashlib.sha256("|".join(parts).encode()).hexdigest()
 
 
-def extract_markets(event_rows, page_ref=None, endpoint=DISCOVERY_ENDPOINT):
+def _event_fingerprint(ev):
+    """An EVENT's identity: its own id, slug and ticker. Not its markets --
+    an event legitimately gains and loses markets between pages."""
+    return hashlib.sha256(("%s|%s|%s" % (
+        ev.get("id"), ev.get("slug"), ev.get("ticker"))).encode()).hexdigest()
+
+
+class WalkIndex(object):
+    """Duplicate and conflict accounting for a WHOLE walk, not one page.
+
+    THE DEFECT THIS EXISTS TO CLOSE. `extract_markets` used to build its
+    indexes fresh per page, so a row repeated on page 17 that had first
+    appeared on page 3 was invisible to it; `discovery_walk` then quietly kept
+    whichever copy arrived first with `if slug not in by_slug`. A conflicting
+    repeat therefore crossed page boundaries undetected and un-named, and the
+    walk resolved it by arrival order -- a guess wearing a dedup's clothes.
+
+    Three namespaces are kept apart, because they are three different claims
+    the venue is making: an event id, a market id, and a market slug. Each
+    entry remembers the fingerprint AND the page it arrived on, so a conflict
+    can name BOTH sources instead of only the newcomer.
+    """
+
+    __slots__ = ("events", "market_ids", "market_slugs",
+                 "duplicates", "conflicts")
+
+    def __init__(self):
+        self.events = {}            # eid  -> (fingerprint, page_ref)
+        self.market_ids = {}        # mid  -> (fingerprint, page_ref)
+        self.market_slugs = {}      # slug -> (fingerprint, page_ref)
+        self.duplicates = []
+        self.conflicts = []
+
+    # -- events ----------------------------------------------------------
+    def see_event(self, eid, fp, page_ref):
+        """Returns (verdict, record). FRESH / DUPLICATE / CONFLICT."""
+        prior = self.events.get(eid)
+        if prior is None:
+            self.events[eid] = (fp, page_ref)
+            return "FRESH", None
+        if prior[0] == fp:
+            rec = {"LEVEL": "EVENT", "REASON": EVENT_DROP_DUPLICATE,
+                   "EVENT_ID": eid,
+                   "FIRST_SEEN_PAGE": prior[1], "REPEATED_ON_PAGE": page_ref}
+            self.duplicates.append(rec)
+            return "DUPLICATE", rec
+        rec = {"LEVEL": "EVENT", "REASON": EVENT_DROP_CONFLICTING_DUPLICATE,
+               "EVENT_ID": eid,
+               "FIRST_SEEN_PAGE": prior[1], "CONFLICTING_PAGE": page_ref,
+               "FIRST_FINGERPRINT": prior[0], "CONFLICTING_FINGERPRINT": fp}
+        self.conflicts.append(rec)
+        return "CONFLICT", rec
+
+    # -- markets ---------------------------------------------------------
+    def see_market(self, mid, slug, fp, page_ref, eid=None):
+        prior_id = self.market_ids.get(mid)
+        prior_slug = self.market_slugs.get(slug)
+        if prior_id is None and prior_slug is None:
+            self.market_ids[mid] = (fp, page_ref)
+            self.market_slugs[slug] = (fp, page_ref)
+            return "FRESH", None
+
+        # Whichever namespace already knows this row decides which claim is
+        # being contradicted, and supplies the page to cite alongside.
+        if prior_id is not None and prior_id[0] != fp:
+            reason, prior = DROP_CONFLICTING_MARKET_ID, prior_id
+        elif prior_slug is not None and prior_slug[0] != fp:
+            reason, prior = DROP_CONFLICTING_MARKET_SLUG, prior_slug
+        elif prior_id is not None and prior_slug is not None \
+                and prior_id[1] != prior_slug[1]:
+            # Same fingerprint, but the id and the slug were last seen on
+            # different pages: the two namespaces have been crossed.
+            reason, prior = DROP_CROSSED_MARKET_IDENTITY, prior_id
+        else:
+            prior = prior_id if prior_id is not None else prior_slug
+            reason = (DROP_DUPLICATE_MARKET_ID if prior_id is not None
+                      else DROP_DUPLICATE_MARKET_SLUG)
+            rec = {"LEVEL": "MARKET", "REASON": reason, "EVENT_ID": eid,
+                   "MARKET_ID": mid, "MARKET_SLUG": slug,
+                   "FIRST_SEEN_PAGE": prior[1], "REPEATED_ON_PAGE": page_ref}
+            self.duplicates.append(rec)
+            return "DUPLICATE", rec
+
+        rec = {"LEVEL": "MARKET", "REASON": reason, "EVENT_ID": eid,
+               "MARKET_ID": mid, "MARKET_SLUG": slug,
+               "FIRST_SEEN_PAGE": prior[1], "CONFLICTING_PAGE": page_ref,
+               "FIRST_FINGERPRINT": prior[0], "CONFLICTING_FINGERPRINT": fp}
+        self.conflicts.append(rec)
+        return "CONFLICT", rec
+
+    def totals(self):
+        return {
+            "WALK_UNIQUE_EVENT_IDS": len(self.events),
+            "WALK_UNIQUE_MARKET_IDS": len(self.market_ids),
+            "WALK_UNIQUE_MARKET_SLUGS": len(self.market_slugs),
+            "WALK_DUPLICATES": len(self.duplicates),
+            "WALK_CONFLICTS": len(self.conflicts),
+            "WALK_CONFLICT_RECORDS": list(self.conflicts),
+            "IDENTITY_EXCLUDES_QUOTES": IDENTITY_EXCLUDES_QUOTES,
+        }
+
+
+def extract_markets(event_rows, page_ref=None, endpoint=DISCOVERY_ENDPOINT,
+                    index=None):
     """Flatten one page of events into child market rows plus an audit block.
+
+    `index` is the WALK-WIDE WalkIndex. Pass the same one for every page of a
+    walk and duplicate/conflict accounting spans the whole walk; omit it and a
+    fresh one is used, which is page-local and only correct for a single page.
+    `discovery_walk` always passes one.
 
     Returns (markets, block). `markets` are the venue's own child objects with
     provenance added and NOTHING removed or rewritten -- they go straight into
     the frozen eligibility rules. `block` counts events and market rows
     SEPARATELY and names every dropped row.
     """
+    idx = index if index is not None else WalkIndex()
     markets = []
-    by_id, by_slug, fp_of = {}, {}, {}
-    seen_events, event_fp = {}, {}
     dropped, conflicts = [], []
     event_rows_seen = 0
     events_kept = 0
     child_rows_seen = 0
+    page_ids, page_slugs = set(), set()
 
     for ev in (event_rows or ()):
         event_rows_seen += 1
@@ -174,19 +298,13 @@ def extract_markets(event_rows, page_ref=None, endpoint=DISCOVERY_ENDPOINT):
                             "EVENT_SLUG": ev.get("slug")})
             continue
         eid = str(eid)
-        efp = hashlib.sha256(
-            ("%s|%s" % (ev.get("slug"), ev.get("ticker"))).encode()).hexdigest()
-        if eid in seen_events:
-            reason = (EVENT_DROP_DUPLICATE if event_fp.get(eid) == efp
-                      else EVENT_DROP_CONFLICTING_DUPLICATE)
-            rec = {"LEVEL": "EVENT", "REASON": reason, "EVENT_ID": eid,
-                   "EVENT_SLUG": ev.get("slug")}
+        verdict, rec = idx.see_event(eid, _event_fingerprint(ev), page_ref)
+        if verdict != "FRESH":
+            rec = dict(rec, EVENT_SLUG=ev.get("slug"))
             dropped.append(rec)
-            if reason == EVENT_DROP_CONFLICTING_DUPLICATE:
+            if verdict == "CONFLICT":
                 conflicts.append(rec)
             continue
-        seen_events[eid] = True
-        event_fp[eid] = efp
 
         children = ev.get(CHILD_MARKETS_KEY)
         if not isinstance(children, list):
@@ -220,20 +338,11 @@ def extract_markets(event_rows, page_ref=None, endpoint=DISCOVERY_ENDPOINT):
                                 "MARKET_SLUG": slug})
                 continue
 
-            fp = _fingerprint(child)
-            prior_id = by_id.get(mid)
-            prior_slug = by_slug.get(slug)
-            if prior_id is not None or prior_slug is not None:
-                same = (fp_of.get(mid) == fp) and (fp_of.get(slug) == fp)
-                if same:
-                    reason = (DROP_DUPLICATE_MARKET_ID if prior_id is not None
-                              else DROP_DUPLICATE_MARKET_SLUG)
-                else:
-                    reason = DROP_CONFLICTING_DUPLICATE
-                rec = {"LEVEL": "MARKET", "REASON": reason, "EVENT_ID": eid,
-                       "MARKET_ID": mid, "MARKET_SLUG": slug}
+            verdict, rec = idx.see_market(mid, slug, _fingerprint(child),
+                                          page_ref, eid=eid)
+            if verdict != "FRESH":
                 dropped.append(rec)
-                if reason == DROP_CONFLICTING_DUPLICATE:
+                if verdict == "CONFLICT":
                     conflicts.append(rec)
                 continue
 
@@ -247,10 +356,8 @@ def extract_markets(event_rows, page_ref=None, endpoint=DISCOVERY_ENDPOINT):
             row[PROV_SOURCE_ENDPOINT] = endpoint
             row[PROV_ADAPTER] = ADAPTER_VERSION
 
-            by_id[mid] = row
-            by_slug[slug] = row
-            fp_of[mid] = fp
-            fp_of[slug] = fp
+            page_ids.add(mid)
+            page_slugs.add(slug)
             markets.append(row)
 
     block = {
@@ -263,8 +370,8 @@ def extract_markets(event_rows, page_ref=None, endpoint=DISCOVERY_ENDPOINT):
         "EVENTS_WITH_MARKETS": events_kept,
         "CHILD_MARKET_ROWS_SEEN": child_rows_seen,
         "MARKET_ROWS_EXTRACTED": len(markets),
-        "UNIQUE_MARKET_IDS": len(by_id),
-        "UNIQUE_MARKET_SLUGS": len(by_slug),
+        "UNIQUE_MARKET_IDS": len(page_ids),
+        "UNIQUE_MARKET_SLUGS": len(page_slugs),
 
         "DROPPED_ROWS": dropped,
         "DROPPED_COUNT": len(dropped),
@@ -275,12 +382,18 @@ def extract_markets(event_rows, page_ref=None, endpoint=DISCOVERY_ENDPOINT):
         "EVENT_SLUG_USED_AS_MARKET_SLUG": False,
         "CANONICAL_EVENT_ID_REPLACED_BY_PARENT_ID": False,
         "IDENTITY_INFERRED_FROM_TITLE_OR_PROXIMITY": False,
+        "DEDUPLICATION_IS_WALK_WIDE": index is not None,
     }
     return markets, block
 
 
-def merge_blocks(blocks):
-    """Sum per-page adapter blocks into the walk-level block."""
+def merge_blocks(blocks, index=None):
+    """Sum per-page adapter blocks into the walk-level block.
+
+    With `index`, the walk-wide unique counts and conflict records are folded
+    in too, so the block reports what the WALK saw rather than the sum of what
+    each page saw in isolation.
+    """
     out = {
         "ADAPTER_VERSION": ADAPTER_VERSION,
         "SOURCE_ENDPOINT": DISCOVERY_ENDPOINT,
@@ -305,6 +418,14 @@ def merge_blocks(blocks):
             out[k] += b.get(k, 0)
         out["DROPPED_ROWS"] += b.get("DROPPED_ROWS") or []
         out["CONFLICTING_DUPLICATES"] += b.get("CONFLICTING_DUPLICATES") or []
+    out["DEDUPLICATION_IS_WALK_WIDE"] = index is not None
+    if index is not None:
+        out.update(index.totals())
+        # The walk's own tallies are authoritative over the per-page sums.
+        out["CONFLICTING_DUPLICATE_COUNT"] = len(index.conflicts)
+        out["UNIQUE_MARKET_IDS"] = len(index.market_ids)
+        out["UNIQUE_MARKET_SLUGS"] = len(index.market_slugs)
+        out["UNIQUE_EVENT_IDS"] = len(index.events)
     return out
 
 

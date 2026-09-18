@@ -265,8 +265,9 @@ def test_a_conflicting_duplicate_is_named_and_never_resolved_by_guessing():
     markets, blk = EA.extract_markets(rows)
     assert len(markets) == 1                      # the first, not a merge
     assert blk["CONFLICTING_DUPLICATE_COUNT"] == 1
+    # The reason names WHICH claim was contradicted: the market id.
     assert blk["CONFLICTING_DUPLICATES"][0]["REASON"] == \
-        EA.DROP_CONFLICTING_DUPLICATE
+        EA.DROP_CONFLICTING_MARKET_ID
 
 
 def test_duplicate_events_are_deduplicated_separately_from_markets():
@@ -319,6 +320,156 @@ def test_two_markets_sharing_only_a_start_time_are_not_one_event(as_of):
     markets, _ = EA.extract_markets(rows)
     keys = {EI.event_identity(m)[0] for m in markets}
     assert len(keys) == 2                         # two subjects, not one game
+
+
+# --------------------------------- identity consistency ACROSS THE WHOLE WALK
+#
+# The defect these close: extract_markets rebuilt its indexes per page, so a
+# row first seen on page 1 and repeated on page 2 was invisible to it, and
+# discovery_walk resolved the repeat by arrival order with `if slug not in
+# by_slug`. A cross-page conflict therefore crossed undetected and un-named.
+
+def _ev(eid, slug, markets, ticker=None):
+    return {"id": eid, "slug": slug, "ticker": ticker or slug,
+            "markets": markets}
+
+
+def _mk(mid, slug, start="2026-09-14T18:00:00Z", team="A"):
+    return {"id": mid, "slug": slug, "gameStartTime": start,
+            "marketSides": [{"teamId": team}, {"teamId": "Z"}]}
+
+
+def test_an_identical_duplicate_ACROSS_PAGES_is_deduplicated_and_counted():
+    p1 = {"events": [_ev("e1", "ev-1", [_mk("m1", "m-1")])]}
+    p2 = {"events": [_ev("e2", "ev-2", [_mk("m1", "m-1"),      # exact repeat
+                                        _mk("m9", "m-9")])]}
+    by, idx, rec, st, blk = S.discovery_walk(
+        walker([{"body": p1}, {"body": p2}, {"body": {"events": []}}]),
+        page_limit=4)
+    assert st == S.BOARD_VERIFIED_END
+    assert blk["CONFLICTING_DUPLICATE_COUNT"] == 0
+    assert blk["WALK_UNIQUE_MARKET_IDS"] == 2                  # m1, m9
+    assert sorted(by) == ["m-1", "m-9"]
+    dup = [d for d in blk["DROPPED_ROWS"]
+           if d["REASON"] == EA.DROP_DUPLICATE_MARKET_ID]
+    assert len(dup) == 1
+    # BOTH pages are named, not just the newcomer.
+    assert dup[0]["FIRST_SEEN_PAGE"]["PAGE"] == 0
+    assert dup[0]["REPEATED_ON_PAGE"]["PAGE"] == 1
+
+
+def test_same_market_id_with_conflicting_identity_ACROSS_PAGES_is_refused():
+    p1 = {"events": [_ev("e1", "ev-1", [_mk("m1", "m-1")])]}
+    p2 = {"events": [_ev("e2", "ev-2",
+                         [_mk("m1", "m-DIFFERENT")])]}         # id reused
+    by, idx, rec, st, blk = S.discovery_walk(
+        walker([{"body": p1}, {"body": p2}]), page_limit=4)
+    assert st == S.BOARD_SCHEMA_FAILURE
+    c = blk["CONFLICTING_DUPLICATES"]
+    assert len(c) == 1 and c[0]["REASON"] == EA.DROP_CONFLICTING_MARKET_ID
+    assert c[0]["FIRST_SEEN_PAGE"]["PAGE"] == 0
+    assert c[0]["CONFLICTING_PAGE"]["PAGE"] == 1
+    assert c[0]["FIRST_FINGERPRINT"] != c[0]["CONFLICTING_FINGERPRINT"]
+
+
+def test_same_slug_with_conflicting_identity_ACROSS_PAGES_is_refused():
+    p1 = {"events": [_ev("e1", "ev-1", [_mk("m1", "m-1")])]}
+    p2 = {"events": [_ev("e2", "ev-2",
+                         [_mk("mDIFFERENT", "m-1")])]}         # slug reused
+    by, idx, rec, st, blk = S.discovery_walk(
+        walker([{"body": p1}, {"body": p2}]), page_limit=4)
+    assert st == S.BOARD_SCHEMA_FAILURE
+    c = blk["CONFLICTING_DUPLICATES"]
+    assert len(c) == 1 and c[0]["REASON"] == EA.DROP_CONFLICTING_MARKET_SLUG
+    assert c[0]["FIRST_SEEN_PAGE"]["PAGE"] == 0
+    assert c[0]["CONFLICTING_PAGE"]["PAGE"] == 1
+
+
+def test_repeated_event_id_with_conflicting_identity_ACROSS_PAGES_is_refused():
+    p1 = {"events": [_ev("e1", "ev-1", [_mk("m1", "m-1")])]}
+    p2 = {"events": [_ev("e1", "ev-RENAMED", [_mk("m2", "m-2")])]}
+    by, idx, rec, st, blk = S.discovery_walk(
+        walker([{"body": p1}, {"body": p2}]), page_limit=4)
+    assert st == S.BOARD_SCHEMA_FAILURE
+    c = blk["CONFLICTING_DUPLICATES"]
+    assert len(c) == 1
+    assert c[0]["REASON"] == EA.EVENT_DROP_CONFLICTING_DUPLICATE
+    assert c[0]["LEVEL"] == "EVENT"
+    assert c[0]["FIRST_SEEN_PAGE"]["PAGE"] == 0
+    assert c[0]["CONFLICTING_PAGE"]["PAGE"] == 1
+
+
+def test_a_conflict_beside_a_fresh_event_is_not_masked_by_stall_detection():
+    """The page advances AND contradicts. Both must be true at once.
+
+    If the conflicting repeat were the only row on the page, `fresh == 0` would
+    end the walk as PAGINATION_STALLED and the conflict would never be the
+    reported cause. Here the page also carries a genuinely new event, so the
+    stall test cannot fire and the conflict has to stand on its own.
+    """
+    p1 = {"events": [_ev("e1", "ev-1", [_mk("m1", "m-1")])]}
+    p2 = {"events": [_ev("e1", "ev-RENAMED", [_mk("m2", "m-2")]),   # conflict
+                     _ev("e2", "ev-2", [_mk("m3", "m-3")])]}        # fresh
+    by, idx, rec, st, blk = S.discovery_walk(
+        walker([{"body": p1}, {"body": p2}]), page_limit=4)
+    assert rec[-1]["FRESH_EVENTS"] == 1            # it DID advance
+    assert st == S.BOARD_SCHEMA_FAILURE            # and it DID contradict
+    assert st != S.BOARD_PAGINATION_STALLED
+    assert blk["CONFLICTING_DUPLICATE_COUNT"] == 1
+    assert "CONFLICTING_DUPLICATES" in rec[-1]["RESPONSE_SHAPE"]
+
+
+def test_a_changed_quote_is_not_an_identity_conflict():
+    """Ordinary trading must not look like a contradiction."""
+    a = dict(_mk("m1", "m-1"), bestBidQuote={"px": "0.41"},
+             outcomePrices='["0.41","0.59"]', updatedAt="2026-09-14T17:00:00Z")
+    b = dict(_mk("m1", "m-1"), bestBidQuote={"px": "0.55"},
+             outcomePrices='["0.55","0.45"]', updatedAt="2026-09-14T17:30:00Z")
+    p1, p2 = {"events": [_ev("e1", "ev-1", [a])]}, \
+             {"events": [_ev("e2", "ev-2", [b, _mk("m9", "m-9")])]}
+    by, idx, rec, st, blk = S.discovery_walk(
+        walker([{"body": p1}, {"body": p2}, {"body": {"events": []}}]),
+        page_limit=4)
+    assert blk["CONFLICTING_DUPLICATE_COUNT"] == 0
+    assert st == S.BOARD_VERIFIED_END
+    assert EA.IDENTITY_EXCLUDES_QUOTES is True
+
+
+def test_the_walk_reports_walk_wide_uniqueness_not_per_page_sums(page0):
+    pages = [{"body": page0}, {"body": distinct_page(page0, "p2")},
+             {"body": {"events": []}}]
+    by, idx, rec, st, blk = S.discovery_walk(walker(pages), page_limit=6)
+    assert blk["DEDUPLICATION_IS_WALK_WIDE"] is True
+    assert blk["WALK_UNIQUE_MARKET_SLUGS"] == len(by)
+    assert blk["WALK_UNIQUE_EVENT_IDS"] == len(idx)
+
+
+# ---------------------------------------- one completion decision, not two
+
+def test_completion_is_certified_once_on_the_event_count(page0):
+    pages = [{"body": page0}, {"body": {"events": []}}]
+    by, idx, rec, st, blk = S.discovery_walk(walker(pages), page_limit=6)
+    out = S.discovery_retrieval_block(by, idx, rec, st, blk)
+    assert out["COMPLETION_CERTIFIED_ONCE"] is True
+    assert out["COMPLETION_CERTIFIED_ON"] == "EVENT_ROWS"
+    # The two views agree because there is only one decision behind them.
+    assert out["BOARD_LIST_EXHAUSTED"] == out["DISCOVERY_LIST_EXHAUSTED"]
+    assert out["BOARD_UNIVERSE_ENUMERATED"] is True
+
+
+def test_a_venue_total_is_never_compared_against_the_market_row_count(page0):
+    """27 market rows from 6 events, with the venue declaring 6 events.
+
+    The old block certified a second time against len(by_slug); that comparison
+    would have read the event total as if it described market rows.
+    """
+    pages = [{"body": dict(page0, total=6)}, {"body": {"events": []}}]
+    by, idx, rec, st, blk = S.discovery_walk(walker(pages), page_limit=6)
+    out = S.discovery_retrieval_block(by, idx, rec, st, blk)
+    assert out["DISCOVERY_EVENT_ROWS"] == 6
+    assert out["DISCOVERY_MARKET_ROWS_EXTRACTED"] > 6
+    assert out["BOARD_RETRIEVAL_STATUS"] == S.BOARD_VERIFIED_END
+    assert out["EVENT_TOTAL_COMPARED_WITH_MARKET_ROW_COUNT"] is False
 
 
 # ------------------------------------------------------------- the walk rules
@@ -542,6 +693,62 @@ def test_the_same_fixture_selects_nothing_against_a_much_earlier_clock(page0):
     assert sel["EVENT_SELECTION_FROZEN"] == "NO"
     assert sel["ROW_ACCOUNTING"]["REASON_COUNTS"].get(
         "SEASON_FUTURE_BEYOND_HORIZON", 0) > 0
+
+
+def test_two_sided_rejects_every_retained_venue_book():
+    """A BLOCKER, PINNED RATHER THAN FIXED.
+
+    `substantive_select.two_sided` reads book_body['bids'] / ['asks'].
+    The venue sends {'marketData': {'bids': [...], 'offers': [...]}}, which is
+    the shape `eligibility.book_bbo` reads correctly in the SAME pipeline.
+
+    Consequence: every candidate is rejected BOOK_NOT_TWO_SIDED, no event ever
+    reaches MARKETS_PER_EVENT, the roster is always short, and the run reports
+    'insufficient qualifying events' as though that described the venue.
+
+    All 15 retained BLOCK_4 books are genuinely two-sided. `two_sided` accepts
+    none of them. Management's decision freezes the eligibility path, so this
+    test records the measurement and the capture stays blocked until the
+    incompatibility is ruled on.
+    """
+    import eligibility as EL
+    with open(os.path.join(HERE, "fixtures_books_block4.json")) as fh:
+        bodies = json.load(fh)["RETAINED"]["BODIES"]
+    assert len(bodies) == 15
+
+    genuine = [s for s, b in bodies.items()
+               if (b.get("marketData") or {}).get("bids")
+               and (b.get("marketData") or {}).get("offers")]
+    accepted = [s for s, b in bodies.items() if S.two_sided(b)]
+
+    assert len(genuine) == 15          # the venue really did send both sides
+    assert accepted == []              # and the frozen reader accepts none
+
+    # The other reader in the same pipeline gets it right, which is what makes
+    # this a shape bug rather than a deliberate contract.
+    bid, ask, state = EL.book_bbo(bodies[genuine[0]])
+    assert bid is not None and ask is not None
+    assert state == "MARKET_STATE_OPEN"
+
+
+def test_a_venue_shaped_book_is_refused_by_the_frozen_eligibility_path(as_of):
+    """The same blocker, reached through eligible_events rather than directly."""
+    rows = [{"id": "e1", "slug": "ev-1", "markets": [
+        {"id": "m1", "slug": "m-1", "gameStartTime": "2026-09-14T18:00:00Z",
+         "marketSides": [{"teamId": "A"}, {"teamId": "B"}]},
+        {"id": "m2", "slug": "m-2", "gameStartTime": "2026-09-14T18:00:00Z",
+         "marketSides": [{"teamId": "A"}, {"teamId": "B"}]}]}]
+    markets, _ = EA.extract_markets(rows)
+    venue_book = {"marketData": {
+        "bids": [{"px": {"value": "0.4700"}}],
+        "offers": [{"px": {"value": "0.4800"}}],
+        "state": "MARKET_STATE_OPEN"}}
+    books = {m["slug"]: venue_book for m in markets}
+    act = {m["slug"]: {"ACTIVE_AT_DECISION": True} for m in markets}
+    out, rej, reasons = S.eligible_events(markets, books, as_of,
+                                          activity_of=act)
+    assert out == []
+    assert all(reasons[m["slug"]] == "BOOK_NOT_TWO_SIDED" for m in markets)
 
 
 def test_the_frozen_rule_has_no_lower_bound_on_start_time(page0):

@@ -63,6 +63,22 @@ concurrency:
   # double the aggregate rate and contaminate each other's measurements.
   # QUEUE, NEVER CANCEL: a compliant scheduled collector waits its turn rather
   # than being killed, and an evidence run is never killed mid-collection.
+  #
+  # WHAT cancel-in-progress: false DOES AND DOES NOT PROMISE.
+  # It protects the RUNNING holder of the group: that run is never displaced.
+  # It does NOT protect a PENDING run. GitHub keeps at most one pending run per
+  # concurrency group, so a later arrival replaces an earlier one that is still
+  # waiting. A queued evidence run can therefore be dropped without anything
+  # being "cancelled in progress".
+  #
+  # `queue: max` was authorised as a narrow admission correction but is NOT
+  # added here: `concurrency` is documented to accept `group` and
+  # `cancel-in-progress` only, an unrecognised key makes the whole workflow
+  # file invalid, and an invalid workflow cannot be dispatched at all. No
+  # validator (actionlint, schema) is available in this container and outbound
+  # egress to the schema is blocked, so the key could not be checked before
+  # being committed. Adding it unverified would trade a bounded queue risk for
+  # an unbounded dispatch failure. Verify against the Actions schema first.
   group: pmus-public-read-global
   cancel-in-progress: false
 

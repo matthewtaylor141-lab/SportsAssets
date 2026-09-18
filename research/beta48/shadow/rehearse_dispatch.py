@@ -127,90 +127,157 @@ def scenario_board_walk(name, responses, expect_status):
     return ok
 
 
-def rehearse_discovery():
-    """The ADAPTED path, on retained /v1/events bodies. No venue traffic.
+def rehearse_discovery(workdir):
+    """THE CONTINUOUS PATH. The REAL selection CLI, mocked transport only.
 
-        retained event listing
-          -> child-market extraction
-          -> the unchanged eligibility and ranking rules
-          -> the unchanged freeze
+        retained /v1/events bodies + retained-or-synthetic book bodies
+          -> substantive_select._cli               (the actual command)
+             -> events_adapter                     (real)
+             -> event_identity                     (real)
+             -> eligibility.decision_screen        (real)
+             -> ranking + freeze + serialization   (real)
+          -> selection.json  <-- THE FILE
+          -> capture_manifest.py       reads THAT file
+          -> capture_manifest.py --verify  reads THAT file
+          -> sampling-entry sentinel
 
-    Evaluated at the FIXTURE'S OWN AS-OF. These events were eligible on
-    2026-09-14 and are not eligible today; using the current clock would
-    present historical markets as current ones.
+    Nothing between the CLI and the manifest reconstructs, re-writes or
+    overwrites the selection: the bytes the command emitted are the bytes the
+    manifest consumes. Only the TRANSPORT is mocked; no eligibility or
+    activity verdict is supplied by the harness.
+
+    The clock is injected explicitly (--as-of) because the bodies are retained
+    from 2026-09-14. Judging them by today's clock would present historical
+    markets as current ones.
     """
     sys.path.insert(0, HERE)
-    import substantive_select as S
-    import events_adapter as EA
-    import event_identity as EI
-
     with open(os.path.join(HERE, "fixtures_events_block3.json")) as fh:
         fx = json.load(fh)
+    with open(os.path.join(HERE, "fixtures_books_block4.json")) as fh:
+        bx = json.load(fh)
     page0 = fx["RETAINED_PAGES"][0]["body"]
     as_of = fx["AS_OF_UTC"]
 
-    print("  fixtures      %s (%d events retained, %d embedded)"
+    print("  event bodies  %s  RETAINED  (%d retained, %d embedded)"
           % (fx["PROVENANCE"]["SOURCE_RUN"],
              fx["PROVENANCE"]["EVENTS_RETAINED"],
              fx["PROVENANCE"]["EVENTS_EMBEDDED_HERE"]))
-    print("  as-of         %s  (HISTORICAL: %s)"
-          % (as_of, fx["AS_OF_IS_HISTORICAL"]))
+    print("  book bodies   run85_trackbl_BLOCK_4  RETAINED x%d, "
+          "SYNTHETIC for the rest" % bx["RETAINED"]["COUNT"])
+    print("  terminal page SYNTHETIC (%s)"
+          % fx["SYNTHETIC_PAGES"]["DECLARED_TERMINAL_EMPTY_PAGE"]["PROVENANCE"])
+    print("  as-of         %s  INJECTED, HISTORICAL" % as_of)
 
-    class Resp:
-        def __init__(self, body, status=200):
-            self.status_code = status
-            self._b = body
+    sel_path = os.path.join(workdir, "selection.json")
+    pages = [page0, {"events": []}]
+    runner = os.path.join(workdir, "run_real_cli.py")
+    with open(runner, "w") as fh:
+        fh.write(
+            "import json, sys\n"
+            "sys.path.insert(0, %r)\n"
+            "sys.path.insert(0, %r)\n"
+            "import rehearsal_transport as T\n"
+            "pages = json.load(open(%r))\n"
+            "log, prov = [], {}\n"
+            "T.install(pages, %r, log, prov)\n"
+            "import substantive_select as S\n"
+            "sys.argv = ['substantive_select.py', '--out', %r,\n"
+            "            '--rate', '25', '--as-of', %r]\n"
+            "rc = 0\n"
+            "try:\n"
+            "    S._cli()\n"
+            "except SystemExit as e:\n"
+            "    rc = e.code if isinstance(e.code, int) else 1\n"
+            "json.dump({'REQUESTS': log, 'BOOK_PROVENANCE': prov},\n"
+            "          open(%r, 'w'), indent=1)\n"
+            "raise SystemExit(rc)\n"
+            % (HERE, os.path.join(os.path.dirname(HERE), "forward"),
+               os.path.join(workdir, "pages.json"), as_of, sel_path, as_of,
+               os.path.join(workdir, "transport_log.json")))
+    with open(os.path.join(workdir, "pages.json"), "w") as fh:
+        json.dump(pages, fh)
 
-        def json(self):
-            return self._b
+    rc, out = _run([runner], HERE)
+    print("  selection CLI rc=%d" % rc)
+    for ln in out.splitlines()[-14:]:
+        print("      " + ln)
 
-    seq = [page0, {"events": []}]          # page, then the terminal page
+    tl = json.load(open(os.path.join(workdir, "transport_log.json")))
+    reqs = tl["REQUESTS"]
+    prov = tl["BOOK_PROVENANCE"]
+    ev_reqs = [r for r in reqs if "/v1/events" in r["url"]]
+    bk_reqs = [r for r in reqs if "/book" in r["url"]]
+    print("  transport     events=%d  books=%d  (all mocked; venue=0)"
+          % (len(ev_reqs), len(bk_reqs)))
+    print("  book source   RETAINED=%d  SYNTHETIC=%d"
+          % (sum(1 for v in prov.values() if v == "RETAINED"),
+             sum(1 for v in prov.values() if v != "RETAINED")))
 
-    def get(params):
-        i = int(params["offset"]) // int(params["limit"])
-        return Resp(seq[i] if i < len(seq) else {"events": []})
+    if not os.path.exists(sel_path):
+        print("  selection file NOT WRITTEN")
+        return False, None, sel_path
+    sel = json.load(open(sel_path))
+    print("  selection     FROZEN=%s  status=%s"
+          % (sel.get("EVENT_SELECTION_FROZEN"), sel.get("SELECTION_STATUS")))
+    print("  clock         %s  injected=%s"
+          % (sel.get("DECISION_TIME_UTC"), sel.get("DECISION_CLOCK_INJECTED")))
+    print("  discovery     endpoint=%s  events=%s  markets=%s  exhausted=%s"
+          % (sel.get("DISCOVERY_ENDPOINT"), sel.get("DISCOVERY_EVENT_ROWS"),
+             sel.get("DISCOVERY_MARKET_ROWS_EXTRACTED"),
+             sel.get("DISCOVERY_LIST_EXHAUSTED")))
+    print("  bodies kept   %d in %s/"
+          % (len(sel.get("RETAINED_RESPONSE_BODIES") or ()),
+             sel.get("RETAINED_RESPONSE_BODY_DIR")))
+    rc_counts = (sel.get("ROW_ACCOUNTING") or {}).get("REASON_COUNTS") or {}
+    for k, v in sorted(rc_counts.items(), key=lambda x: -x[1])[:6]:
+        print("      %-44s %d" % (k, v))
+    return rc == 0, sel, sel_path
 
-    by, idx, rec, st, blk = S.discovery_walk(get, page_limit=6,
-                                             endpoint=S.EVENTS_PATH)
-    cert, why = S.certify_completion(st, rec, len(idx), S.EVENTS_PATH)
-    print("  walk          pages=%d  status=%s  certified=%s"
-          % (len(rec), st, cert))
-    print("  counts        EVENT_ROWS=%d  MARKET_ROWS=%d  (never compared)"
-          % (blk["EVENT_ROWS"], blk["MARKET_ROWS_EXTRACTED"]))
-    print("  dropped       %d  conflicting=%d"
-          % (blk["DROPPED_COUNT"], blk["CONFLICTING_DUPLICATE_COUNT"]))
 
-    lv = {}
-    for m in by.values():
-        _, l = EI.event_identity(m)
-        lv[l] = lv.get(l, 0) + 1
-    print("  identity      " + "  ".join(
-        "%s=%d" % (k.split("_")[1], v) for k, v in sorted(lv.items())))
+def diagnose_book_shape():
+    """Measure `two_sided` against the VENUE'S OWN retained book bodies.
 
-    books = {s: {"bids": [{"price": "0.4"}], "asks": [{"price": "0.6"}]}
-             for s in by}
-    act = {s: {"ACTIVE_AT_DECISION": True} for s in by}
-    sel = S.freeze(list(by.values()), books, as_of, activity_of=act)
-    sel.update(S.discovery_retrieval_block(by, idx, rec, st, blk,
-                                           endpoint=S.EVENTS_PATH))
-    sel["SELECTION_STATUS"] = S.selection_status(
-        cert, sel.get("EVENT_SELECTION_FROZEN") == "YES")
+    Reported, not repaired. `substantive_select.two_sided` is part of the
+    frozen eligibility path and management's decision keeps that path
+    unchanged, so this prints the measurement and names the incompatibility
+    rather than editing the rule.
+    """
+    sys.path.insert(0, HERE)
+    sys.path.insert(0, os.path.join(os.path.dirname(HERE), "forward"))
+    import substantive_select as S
+    import eligibility as EL
 
-    print("  freeze        FROZEN=%s  events=%d  markets=%d  status=%s"
-          % (sel["EVENT_SELECTION_FROZEN"], len(sel["EVENT_IDS"]),
-             len(sel["MARKET_IDS"]), sel["SELECTION_STATUS"]))
+    with open(os.path.join(HERE, "fixtures_books_block4.json")) as fh:
+        bx = json.load(fh)
+    bodies = bx["RETAINED"]["BODIES"]
 
-    parents = {e["slug"] for e in page0["events"]}
-    parent_leak = set(sel["MARKET_SLUGS"]) & parents
-    print("  parent leak   %s" % (sorted(parent_leak) or "none"))
+    genuinely_two_sided = 0
+    accepted = 0
+    for slug, body in bodies.items():
+        md = body.get("marketData") or {}
+        if md.get("bids") and md.get("offers"):
+            genuinely_two_sided += 1
+        if S.two_sided(body):
+            accepted += 1
+    bid, ask, state = EL.book_bbo(list(bodies.values())[0])
 
-    ok = (cert == S.BOARD_VERIFIED_END
-          and sel["EVENT_SELECTION_FROZEN"] == "YES"
-          and not parent_leak
-          and blk["CONFLICTING_DUPLICATE_COUNT"] == 0
-          and blk["MARKET_ROWS_EXTRACTED"] > blk["EVENT_ROWS"])
-    print("  -> %s" % ("OK" if ok else "FAILED"))
-    return ok, sel
+    print("  retained venue books                       %d" % len(bodies))
+    print("  genuinely two-sided (marketData.bids+offers) %d"
+          % genuinely_two_sided)
+    print("  accepted by substantive_select.two_sided     %d" % accepted)
+    print("  eligibility.book_bbo on the same body        bid=%s ask=%s state=%s"
+          % (bid, ask, state))
+    print()
+    print("  two_sided() reads   book_body['bids'] / book_body['asks']")
+    print("  the venue sends     body['marketData']['bids'] / ['offers']")
+    print("  book_bbo() reads    body['marketData']['bids'] / ['offers']  <- matches")
+    print()
+    print("  BOOK_SHAPE_INCOMPATIBILITY = CONFIRMED")
+    print("  EFFECT: every candidate is rejected BOOK_NOT_TWO_SIDED, so no")
+    print("          event ever reaches MARKETS_PER_EVENT and the roster is")
+    print("          always short. NOT REPAIRED HERE: the eligibility path is")
+    print("          frozen by the management decision.")
+    return accepted, genuinely_two_sided
 
 
 def main():
@@ -237,12 +304,54 @@ def main():
         if not scenario_board_walk(nm, resp, exp):
             fails.append(nm)
 
-    print("\n== 1b. DISCOVERY, real /v1/events walk on RETAINED bodies ==")
-    ok, disc_sel = rehearse_discovery()
-    if not ok:
-        fails.append("events discovery")
+    print("\n== 1b. CONTINUOUS PATH, the REAL selection CLI, mocked transport ==")
+    dc = tempfile.mkdtemp(prefix="rehearsal-continuous-")
+    cont_ok, cont_sel, cont_sel_path = rehearse_discovery(dc)
 
-    print("\n== 2. COMMAND SEQUENCE, real CLIs, non-sorted roster ==")
+    print("\n== 1c. THE MANIFEST CONSUMES THAT EXACT FILE ==")
+    if not os.path.exists(cont_sel_path):
+        print("  no selection file to consume -- chain stops here")
+        print("  CONTINUOUS_CHAIN = BROKEN_AT_SELECTION")
+        fails.append("continuous chain: selection produced no file")
+    else:
+        before = open(cont_sel_path, "rb").read()
+        cman = os.path.join(dc, "capture_manifest.json")
+        rcm, outm = _run(["capture_manifest.py",
+                          "--orchestration-version", "3",
+                          "--selection", cont_sel_path,
+                          "--code-sha", "REHEARSAL_NOT_A_RELEASE",
+                          "--run-id", "REHEARSAL-CONTINUOUS",
+                          "--capture-seconds", "5400",
+                          "--indirect-isolation-regime", "DISCLOSED_RESIDUAL",
+                          "--out", cman], HERE)
+        print("  manifest rc=%d" % rcm)
+        for ln in outm.splitlines()[-6:]:
+            print("      " + ln)
+        rcv, outv = _run(["capture_manifest.py", "--verify",
+                          "--manifest", cman,
+                          "--selection", cont_sel_path], HERE)
+        print("  verify   rc=%d" % rcv)
+        print("  sampling entry  %s" % sampling_entry_sentinel(cman, rcv))
+        after = open(cont_sel_path, "rb").read()
+        same = before == after
+        print("  selection file unmodified by the manifest step: %s" % same)
+        if not same:
+            fails.append("the manifest step rewrote the selection file")
+        # The chain is CONTINUOUS if the same file flowed all the way through.
+        # Whether it reached SAMPLING_ENTERED is a separate question, and a
+        # refusal here is a real finding rather than a harness failure.
+        if cont_sel and cont_sel.get("EVENT_SELECTION_FROZEN") == "YES" \
+                and rcm == 0 and rcv == 0:
+            print("  CONTINUOUS_CHAIN = COMPLETE_TO_SAMPLING_ENTRY")
+        else:
+            print("  CONTINUOUS_CHAIN = RAN_END_TO_END_AND_REFUSED")
+            print("  refusal is the finding; see section 1d")
+
+    print("\n== 1d. WHY THE ROSTER CAME OUT THE WAY IT DID ==")
+    diagnose_book_shape()
+
+    print("\n== 2. REGRESSION: the deliberately NON-SORTED roster ==")
+    print("  (kept separate; it does NOT stand in for the adapted path above)")
     d = tempfile.mkdtemp(prefix="rehearsal-")
     try:
         events = ["ev-zulu", "ev-alpha", "ev-mike"]       # NOT sorted
@@ -347,14 +456,31 @@ def main():
         shutil.rmtree(d, ignore_errors=True)
 
     print("\n" + "=" * 62)
+    # THE HARNESS AND THE CHAIN ARE TWO DIFFERENT VERDICTS, AND CONFLATING
+    # THEM IS HOW A REFUSAL GETS REPORTED AS A PASS. Every scenario can behave
+    # exactly as designed while the capture is still blocked.
+    chain_ok = bool(cont_sel
+                    and cont_sel.get("EVENT_SELECTION_FROZEN") == "YES")
     if fails:
-        print("REHEARSAL_RESULT = FAIL")
+        print("REHEARSAL_HARNESS = FAIL")
         for f in fails:
             print("  FAILED: %s" % f)
-        return 1
-    print("REHEARSAL_RESULT = PASS")
+    else:
+        print("REHEARSAL_HARNESS = PASS   (every scenario behaved as designed)")
+
+    print("CONTINUOUS_CHAIN  = %s"
+          % ("COMPLETE_TO_SAMPLING_ENTRY" if chain_ok
+             else "RAN_END_TO_END_AND_REFUSED"))
+    if not chain_ok:
+        print("CAPTURE_READY     = NO")
+        print("BLOCKED_BY        = BOOK_SHAPE_INCOMPATIBILITY "
+              "(substantive_select.two_sided vs the venue's marketData shape)")
+        print("                    see section 1d; NOT repaired -- the "
+              "eligibility path is frozen")
+    else:
+        print("CAPTURE_READY     = YES")
     print("VENUE_REQUESTS = 0   ORDERS = 0   mirror_live = false")
-    return 0
+    return 1 if (fails or not chain_ok) else 0
 
 
 if __name__ == "__main__":
