@@ -83,10 +83,14 @@ BOARD_PAGE_CAP_REACHED = "PAGE_CAP_REACHED"
 # new clothes. An enumeration needs pagination to have demonstrably advanced:
 # at least one full page, or an explicitly empty follow-on page.
 BOARD_SINGLE_PAGE_UNCORROBORATED = "SINGLE_PAGE_UNCORROBORATED"
+BOARD_COMPLETION_CONTRACT_NOT_ESTABLISHED = "COMPLETION_CONTRACT_NOT_ESTABLISHED"
+BOARD_PAGINATION_CONTRADICTS_END = "PAGINATION_CONTRADICTS_END"
 BOARD_RETRIEVAL_STATUSES = (
     BOARD_VERIFIED_END, BOARD_HTTP_FAILURE, BOARD_SCHEMA_FAILURE,
     BOARD_PAGINATION_STALLED, BOARD_PAGE_CAP_REACHED,
-    BOARD_SINGLE_PAGE_UNCORROBORATED)
+    BOARD_SINGLE_PAGE_UNCORROBORATED,
+    BOARD_COMPLETION_CONTRACT_NOT_ESTABLISHED,
+    BOARD_PAGINATION_CONTRADICTS_END)
 ONE_REQUEST_IS_NOT_AN_ENUMERATION = (
     "a short first page says the venue returned fewer rows than we asked for "
     "on one request; it does not say the board ends there, because nothing "
@@ -101,6 +105,7 @@ A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD = (
     "read the board' into 'the board is empty', which is the one claim the "
     "evidence cannot support")
 ROW_KEYS = ("markets", "data", "items", "results")
+
 WAIT_RATHER_THAN_SUBSTITUTE = (
     "a stale future substituted to fill the roster answers a different "
     "question while looking like an answer to this one")
@@ -438,6 +443,46 @@ def write(path, sel):
 # ---------------------------------------------------------------------------
 
 MARKETS_PATH = "/v1/markets"
+
+# --- The endpoint's completion contract, per endpoint, from evidence. ------
+#
+# "A short page means the end" is a CONVENTION, not a fact about a venue. It
+# holds only where that endpoint's paging semantics are established. Run
+# 35333848994 assumed it for /v1/markets and certified a one-market board.
+#
+# EVENTS_PATH: established from RETAINED evidence -- Track B-L restored
+#   {"active":"true","closed":"false"} with forward `offset` paging and
+#   walked to the first empty page, and the 2G-R sealed log shows ~1,900
+#   events across 19 offset pages with disjoint id sets per page.
+# MARKETS_PATH: NOT ESTABLISHED. Phase 2B recorded that /v1/markets returns
+#   eventSlug = None on every row, which is why later phases moved discovery
+#   to /v1/events; no retained capture demonstrates that /v1/markets honours
+#   `offset` or terminates. Completion on this endpoint is NOT_IDENTIFIED and
+#   may not be certified until the contract is established. Switching
+#   endpoint is a separate, approved decision -- never an automatic fallback.
+EVENTS_PATH = "/v1/events"
+BOARD_COMPLETION_CONTRACTS = {
+    EVENTS_PATH: {
+        "CONTRACT": "OFFSET_FORWARD_UNTIL_EMPTY_PAGE",
+        "BASIS": "RETAINED_EVIDENCE_TRACK_BL_BLOCK_3_AND_2G_R_SEALED_LOG",
+        "ESTABLISHED": True,
+    },
+    MARKETS_PATH: {
+        "CONTRACT": NOT_IDENTIFIED,
+        "BASIS": "NO_RETAINED_CAPTURE_DEMONSTRATES_OFFSET_PAGING_OR_TERMINAL",
+        "ESTABLISHED": False,
+    },
+}
+A_CONVENTION_IS_NOT_A_CONTRACT = (
+    "a short page terminates a walk only on an endpoint whose paging "
+    "semantics are established. Where the contract is not established the "
+    "walk may still run, but completion stays NOT_IDENTIFIED and no "
+    "enumeration may be claimed")
+PAGINATION_EVIDENCE_MAY_CONTRADICT_A_SHORT_PAGE = (
+    "if the venue's own pagination fields say more rows exist -- has_more "
+    "true, or a total above the rows retrieved -- then a short page is a "
+    "truncated response, not the end of the board, and the contradiction "
+    "wins")
 BOARD_PAGE_LIMIT = 100
 # THE CAP THAT CAUSED RUN 35209604615 TO SELECT NOTHING.
 #
@@ -454,6 +499,23 @@ BOARD_PAGE_LIMIT = 100
 BOARD_MAX_PAGES = 400
 BOARD_CAP_IS_A_RUNAWAY_BOUND_NOT_A_STOP_RULE = True
 CANDIDATE_BOOK_READS_MAX = 40
+
+
+def _row_slug(m):
+    """Return (slug, problem). A malformed row is DESCRIBED, never raised on.
+
+    The pinned walk did `by_slug[m["slug"]]` after checking only
+    `m.get("slug") not in by_slug`, so a row with no slug key raised KeyError
+    and took the whole step down with no receipt.
+    """
+    if not isinstance(m, dict):
+        return None, "ROW_NOT_A_MAPPING:%s" % type(m).__name__
+    if "slug" not in m:
+        return None, "ROW_MISSING_SLUG_KEY"
+    slug = m["slug"]
+    if not isinstance(slug, str) or not slug:
+        return None, "ROW_SLUG_NOT_A_NON_EMPTY_STRING:%r" % (slug,)
+    return slug, None
 
 
 def _rows_of(body):
@@ -486,8 +548,37 @@ def _pagination_fields(body):
     return {n: body[n] for n in names if n in body}
 
 
+def _utc_now():
+    return datetime.now(timezone.utc).replace(microsecond=0).isoformat(
+        ).replace("+00:00", "Z")
+
+
+def _body_sha256(body):
+    try:
+        return hashlib.sha256(json.dumps(
+            body, sort_keys=True, separators=(",", ":"),
+            default=str).encode()).hexdigest()
+    except Exception:                                         # noqa: BLE001
+        return NOT_IDENTIFIED
+
+
+def pagination_contradicts_end(receipts, rows_seen):
+    """The venue's own paging fields saying more rows exist beats a short page."""
+    for rec in receipts:
+        pf = rec.get("PAGINATION_FIELDS") or {}
+        for k in ("has_more", "hasMore"):
+            if pf.get(k) is True:
+                return "PAGINATION_FIELD_%s_IS_TRUE" % k
+        for k in ("total", "total_count", "totalCount", "count"):
+            v = pf.get(k)
+            if isinstance(v, int) and not isinstance(v, bool) and v > rows_seen:
+                return "PAGINATION_FIELD_%s_%d_EXCEEDS_ROWS_RETRIEVED_%d" % (
+                    k, v, rows_seen)
+    return None
+
+
 def board_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
-               endpoint=MARKETS_PATH):
+               endpoint=MARKETS_PATH, retain_bodies=None):
     """Walk the board, classifying HOW the walk ended and retaining receipts.
 
     `get(params)` returns a response carrying `.status_code` and `.json()`;
@@ -504,12 +595,15 @@ def board_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
         params = {"active": "true", "closed": "false",
                   "limit": page_limit, "offset": pages * page_limit}
         rec = {"PAGE": pages, "ENDPOINT": endpoint, "PARAMS": dict(params),
+               "REQUEST_UTC": _utc_now(), "RECEIPT_UTC": NOT_IDENTIFIED,
                "HTTP_STATUS": NOT_IDENTIFIED, "RESPONSE_SHAPE": NOT_IDENTIFIED,
                "ROWS_RETURNED": NOT_IDENTIFIED, "FRESH_SLUGS": NOT_IDENTIFIED,
                "PAGINATION_FIELDS": {}, "REPEATED_EARLIER_PAGE": NOT_IDENTIFIED,
-               "ERROR": NOT_IDENTIFIED}
+               "BODY_SHA256": NOT_IDENTIFIED, "BODY_ARTIFACT": NOT_IDENTIFIED,
+               "MALFORMED_ROWS": (), "ERROR": NOT_IDENTIFIED}
         try:
             r = get(params)
+            rec["RECEIPT_UTC"] = _utc_now()
             rec["HTTP_STATUS"] = getattr(r, "status_code", NOT_IDENTIFIED)
         except Exception as e:                                # noqa: BLE001
             rec["ERROR"] = "%s: %s" % (type(e).__name__, e)
@@ -529,6 +623,9 @@ def board_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
             receipts.append(rec)
             status = BOARD_SCHEMA_FAILURE
             break
+        rec["BODY_SHA256"] = _body_sha256(body)
+        if retain_bodies is not None:
+            rec["BODY_ARTIFACT"] = retain_bodies(rec["BODY_SHA256"], body)
         rows, shape = _rows_of(body)
         rec["RESPONSE_SHAPE"] = shape
         rec["PAGINATION_FIELDS"] = _pagination_fields(body)
@@ -537,14 +634,26 @@ def board_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
             receipts.append(rec)
             status = BOARD_SCHEMA_FAILURE
             break
-        fresh = 0
-        for m in rows:
-            if isinstance(m, dict) and m.get("slug") not in by_slug:
-                by_slug[m["slug"]] = m
+        fresh, malformed = 0, []
+        for i, m in enumerate(rows):
+            slug, problem = _row_slug(m)
+            if problem:
+                malformed.append({"INDEX": i, "PROBLEM": problem})
+                continue
+            if slug not in by_slug:
+                by_slug[slug] = m
                 fresh += 1
         rec["ROWS_RETURNED"] = len(rows)
         rec["FRESH_SLUGS"] = fresh
+        rec["MALFORMED_ROWS"] = tuple(malformed)
         rec["REPEATED_EARLIER_PAGE"] = bool(rows) and fresh == 0
+        # A MALFORMED ROW IS A SCHEMA FAILURE WITH A RETAINED RECEIPT, not an
+        # uncaught KeyError that takes the step down and seals nothing.
+        if malformed:
+            rec["RESPONSE_SHAPE"] = shape + "+MALFORMED_ROWS:%d" % len(malformed)
+            receipts.append(rec)
+            status = BOARD_SCHEMA_FAILURE
+            break
         receipts.append(rec)
         if not rows:
             # An empty follow-on page is a real end; an empty FIRST page is
@@ -562,8 +671,27 @@ def board_walk(get, max_pages=BOARD_MAX_PAGES, page_limit=BOARD_PAGE_LIMIT,
     return by_slug, receipts, status
 
 
-def board_retrieval_block(by_slug, receipts, status):
+def certify_completion(status, receipts, rows_seen, endpoint=MARKETS_PATH):
+    """VERIFIED_END survives only a established contract and no contradiction."""
+    if status != BOARD_VERIFIED_END:
+        return status, None
+    # THE VENUE'S OWN PAGINATION EVIDENCE IS CHECKED FIRST. It is a direct
+    # contradiction of "this was the last page" and holds whatever the
+    # endpoint's contract status is; the contract question only arises once
+    # nothing in the responses disputes the ending.
+    why = pagination_contradicts_end(receipts, rows_seen)
+    if why:
+        return BOARD_PAGINATION_CONTRADICTS_END, why
+    contract = BOARD_COMPLETION_CONTRACTS.get(endpoint, {})
+    if not contract.get("ESTABLISHED"):
+        return (BOARD_COMPLETION_CONTRACT_NOT_ESTABLISHED,
+                "ENDPOINT_CONTRACT_NOT_ESTABLISHED:%s" % endpoint)
+    return BOARD_VERIFIED_END, None
+
+
+def board_retrieval_block(by_slug, receipts, status, endpoint=MARKETS_PATH):
     """The evidence block the run seals, with the claim it is allowed to make."""
+    status, why = certify_completion(status, receipts, len(by_slug), endpoint)
     complete = status == BOARD_VERIFIED_END
     return {
         "BOARD_RETRIEVAL_STATUS": status,
@@ -573,6 +701,13 @@ def board_retrieval_block(by_slug, receipts, status):
         "BOARD_PAGES_FETCHED": len(receipts),
         "BOARD_MARKETS_SEEN": len(by_slug),
         "BOARD_REQUEST_RECEIPTS": tuple(receipts),
+        "BOARD_ENDPOINT": endpoint,
+        "BOARD_COMPLETION_CONTRACT": BOARD_COMPLETION_CONTRACTS.get(
+            endpoint, {"CONTRACT": NOT_IDENTIFIED, "ESTABLISHED": False}),
+        "COMPLETION_WITHHELD_BECAUSE": why or NOT_IDENTIFIED,
+        "A_CONVENTION_IS_NOT_A_CONTRACT": A_CONVENTION_IS_NOT_A_CONTRACT,
+        "PAGINATION_EVIDENCE_MAY_CONTRADICT_A_SHORT_PAGE":
+            PAGINATION_EVIDENCE_MAY_CONTRADICT_A_SHORT_PAGE,
         "A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD":
             A_FAILED_RETRIEVAL_IS_NOT_A_SMALL_BOARD,
     }
@@ -667,16 +802,19 @@ def _cli():                                                   # pragma: no cover
         "CANDIDATES_BOOK_READ": len(books),
         "SYS_PATH_NOTE": sys_path_note,
     })
-    sel.update(board_retrieval_block(by_slug, receipts, board_status))
+    sel.update(board_retrieval_block(by_slug, receipts, board_status,
+                                     endpoint=MARKETS_PATH))
     # THE SHORTFALL MAY ONLY BE BLAMED ON THE VENUE IF THE BOARD WAS READ.
+    certified, _why = certify_completion(board_status, receipts, len(by_slug),
+                                        MARKETS_PATH)
     sel["SELECTION_STATUS"] = selection_status(
-        board_status, sel.get("EVENT_SELECTION_FROZEN") == "YES")
+        certified, sel.get("EVENT_SELECTION_FROZEN") == "YES")
     # AN UNENUMERATED BOARD MAY NOT START A CAPTURE, even if three events
     # happened to qualify out of the rows that did arrive. The roster would
     # be drawn from a universe nobody can describe.
-    if board_status != BOARD_VERIFIED_END:
+    if certified != BOARD_VERIFIED_END:
         sel["CAPTURE_MAY_START"] = "NO"
-        sel["CAPTURE_BLOCKED_BY"] = "BOARD_RETRIEVAL_" + board_status
+        sel["CAPTURE_BLOCKED_BY"] = "BOARD_RETRIEVAL_" + certified
     write(a.out, sel)
     print(render(sel))
     if sel["CAPTURE_MAY_START"] != "YES":
