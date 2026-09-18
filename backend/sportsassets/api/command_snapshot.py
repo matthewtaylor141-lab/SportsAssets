@@ -422,8 +422,27 @@ def account_block(acct: dict | None, session: dict | None) -> dict:
     }
 
 
-def gate_rows(mirror_live: bool, calibration_open: int,
-              deployed: bool) -> list:
+def gate_rows(mirror_live: bool, calibration_open, deployed: bool) -> list:
+    """`calibration_open` may be None -- the ledger was unreadable. That
+    is a PENDING gate with a stated reason, never a PASS: not knowing
+    how many lifecycles are open is not the same as knowing none are."""
+    if calibration_open is None:
+        return _gate_rows_unknown_calibration(mirror_live, deployed)
+    return _gate_rows(mirror_live, calibration_open, deployed)
+
+
+def _gate_rows_unknown_calibration(mirror_live: bool, deployed: bool) -> list:
+    rows = _gate_rows(mirror_live, 0, deployed)
+    for r in rows:
+        if r["name"] == "Calibration lifecycle limit":
+            r["status"] = "PENDING"
+            r["detail"] = ("calibration ledger unreadable -- open lifecycle "
+                           "count unknown, which is not zero")
+    return rows
+
+
+def _gate_rows(mirror_live: bool, calibration_open: int,
+               deployed: bool) -> list:
     return [
         {"name": "Order submission from COMMAND", "status": "BLOCKED",
          "detail": "this interface has no order authority and no venue client"},
@@ -649,6 +668,7 @@ def lane_of(book: dict, registered_keys: set) -> str:
 def build(records: dict, account: dict | None, session: dict | None,
           mirror_live: bool | None = None, now: float | None = None,
           account_error: str | None = None,
+          calibration_error: str | None = None,
           deployed_verified: bool = False) -> dict:
     """Records -> the bt.command.v1 payload. Pure; no I/O."""
     from .. import calibration as cal
@@ -680,9 +700,40 @@ def build(records: dict, account: dict | None, session: dict | None,
                       % account_error})
     services.sort(key=lambda s: s["name"])
 
-    session = session if session is not None else cal.empty_session("NONE")
+    # AN UNREADABLE BUDGET IS NOT AN EMPTY ONE. With no durable session
+    # the three numbers are withheld and `reserved` stays unknown, so
+    # `available` is unknown too rather than overstated by whatever is
+    # currently at risk.
     acct = account_block(account, session)
-    calib = cal.budget_block(session)
+    if session is None:
+        calib = {
+            "experiment": cal.EXPERIMENT,
+            "AVAILABLE": False,
+            "WHY_NOT": calibration_error or "CALIBRATION_LEDGER_NOT_READ",
+            "spent": None, "reserved": None, "remaining": None,
+            "openLifecycles": None,
+            "limits": {
+                "maxAllInCostPerTradeLifecycle":
+                    cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE,
+                "maxSessionCumulativeSpend": cal.MAX_SESSION_CUMULATIVE_SPEND,
+                "maxConcurrentOrderPositionLifecycles":
+                    cal.MAX_CONCURRENT_ORDER_POSITION_LIFECYCLES},
+            "UNREADABLE_IS_NOT_ZERO_SPENT": (
+                "a budget that reads $0 spent because its ledger was "
+                "unreadable claims the whole allowance is free"),
+        }
+    else:
+        calib = cal.budget_block(session)
+        calib["AVAILABLE"] = True
+        calib["stopped"] = bool(session.get("stopped"))
+        calib["stoppedBy"] = session.get("stoppedBy")
+        calib["stopReason"] = session.get("stopReason")
+        calib["lifecycles"] = [
+            {k: lc.get(k) for k in ("clientOrderId", "marketId", "outcome",
+                                    "state", "reserve", "allInCost",
+                                    "spentSoFar", "venueOrderId",
+                                    "venueTerminalState", "fillsReconciled")}
+            for lc in session.get("lifecycles", ())]
 
     unavailable = []
     if acct["cash"] is None:

@@ -14,6 +14,10 @@
   <div id="overlay-root"></div>
   <div id="toast" role="status" aria-live="polite"></div>
   <script src="config.js"></script>
+  <!-- Access, kept separate from the app on purpose: a sign-in step must not
+       be able to break navigation or reporting. It acts only on a 401/403
+       from the feed and never holds a credential. -->
+  <script src="unlock.js"></script>
   <script src="core.js"></script>
   <script src="report.js"></script>
   <script src="app.js"></script>

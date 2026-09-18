@@ -871,10 +871,22 @@ async def _command_payload() -> dict:
     except Exception as exc:                                   # noqa: BLE001
         account_error = "%s: %s" % (type(exc).__name__, str(exc)[:120])
 
+    # THE CALIBRATION BUDGET, FROM THE DURABLE LEDGER. If it cannot be
+    # read the block says so; it does not report $0 spent, which would
+    # claim the whole allowance is free, and `reserved` stays unknown so
+    # `available` stays unknown rather than being overstated.
+    from .. import calibration_store as CSTORE
+    session, calibration_error = None, None
+    try:
+        session = await CSTORE.load()
+    except Exception as exc:                                   # noqa: BLE001
+        calibration_error = "%s: %s" % (type(exc).__name__, str(exc)[:120])
+
     # The sleeve's mode comes from ingestion_state['mirror_live'], the
     # row the worker itself arms on -- not a second opinion.
-    return CSNAP.build(records=records, account=account, session=None,
-                       account_error=account_error)
+    return CSNAP.build(records=records, account=account, session=session,
+                       account_error=account_error,
+                       calibration_error=calibration_error)
 
 
 @app.get("/api/command/snapshot", dependencies=[Depends(require_command)])
@@ -905,6 +917,149 @@ async def command_investor_snapshot_route(response: Response) -> dict:
     except CSNAP.RetrievalIncomplete as inc:
         raise HTTPException(status_code=503, detail={
             "reason": inc.reason, "detail": inc.detail}) from inc
+
+
+# ── MICRO_EXECUTION_CALIBRATION (2026-09-18) ────────────────────────
+# The deployed entry points for the supervised execution experiment.
+# THEY PLACE NOTHING. /approve takes the reserve and records the ticket;
+# the venue call is a separate, later, human-approved act. Admin auth,
+# because these touch money accounting even when they touch no venue.
+class CalibrationTicketBody(BaseModel):
+    ticket: dict = {}
+    checks: dict = {}
+    approved_by: str = ""
+    confirm: str = ""
+
+
+class CalibrationStopBody(BaseModel):
+    by: str = ""
+    reason: str = ""
+
+
+def _cal_refusal(exc: Exception) -> HTTPException:
+    """A refusal is a 409 with its NAME, not a 500. The operator has to
+    be able to read which limit stopped the ticket."""
+    return HTTPException(status_code=409, detail=str(exc))
+
+
+@app.get("/api/calibration/state", dependencies=[Depends(require_admin)])
+async def calibration_state() -> dict:
+    from .. import calibration_store as CSTORE
+
+    try:
+        await CSTORE.ensure_session()
+        return {"ok": True, "budget": await CSTORE.budget()}
+    except CSTORE.StoreUnavailable as exc:
+        # UNREADABLE IS NOT ZERO SPENT. A budget that reads $0 because
+        # the database is down says the whole allowance is free.
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/calibration/preflight", dependencies=[Depends(require_admin)])
+async def calibration_preflight(body: CalibrationTicketBody) -> dict:
+    """The full pre-submission report for ONE ticket. Read-only."""
+    from .. import calibration_store as CSTORE
+    from . import pmus_account as PA
+
+    try:
+        await CSTORE.ensure_session()
+        acct = None
+        try:
+            snap = await PA.account_snapshot()
+            if not snap.get("error"):
+                a = snap.get("account") or snap
+                cash = a.get("cash") if "cash" in a else a.get("cash_usd")
+                acct = {"available": cash}
+        except Exception:                                      # noqa: BLE001
+            acct = None          # unknown cash -> refused by name, not assumed
+        return await CSTORE.preflight(body.ticket, acct, body.checks)
+    except CSTORE.StoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/calibration/approve", dependencies=[Depends(require_admin)])
+async def calibration_approve(body: CalibrationTicketBody) -> dict:
+    """Record an approved ticket and TAKE ITS RESERVE. Sends nothing.
+
+    `confirm` must be the exact client order id: an approval that can be
+    triggered by replaying a body with no per-ticket token is not an
+    approval. The reserve is taken before any venue call could exist,
+    because an order we cannot name is an order we cannot reconcile.
+    """
+    from .. import calibration_store as CSTORE
+
+    if body.confirm != (body.ticket or {}).get("clientOrderId"):
+        raise HTTPException(status_code=400, detail=(
+            "CALIBRATION_APPROVAL_NOT_CONFIRMED: confirm must equal the "
+            "ticket's clientOrderId"))
+    from . import pmus_account as PA
+
+    # The funding check reads the SHARED account cache, never a second
+    # venue call. Unknown cash is refused by name downstream, never
+    # assumed to be enough.
+    acct = None
+    try:
+        snap = await PA.account_snapshot()
+        if not snap.get("error"):
+            a = snap.get("account") or snap
+            acct = {"available": a.get("cash") if "cash" in a
+                    else a.get("cash_usd")}
+    except Exception:                                          # noqa: BLE001
+        acct = None
+    try:
+        await CSTORE.ensure_session()
+        budget = await CSTORE.reserve(body.ticket, acct, body.approved_by)
+    except ValueError as exc:
+        raise _cal_refusal(exc) from exc
+    except CSTORE.StoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+    return {"ok": True, "submitted": False,
+            "note": "reserve taken and ticket recorded; NOTHING WAS SENT",
+            "budget": budget}
+
+
+@app.post("/api/calibration/release", dependencies=[Depends(require_admin)])
+async def calibration_release(client_order_id: str = Query(...),
+                              venue_terminal_state: str = Query(""),
+                              fills_reconciled: bool = Query(False)) -> dict:
+    from .. import calibration_store as CSTORE
+
+    try:
+        return {"ok": True, "budget": await CSTORE.release(
+            client_order_id, venue_terminal_state, fills_reconciled)}
+    except ValueError as exc:
+        raise _cal_refusal(exc) from exc
+    except CSTORE.StoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/calibration/stop", dependencies=[Depends(require_admin)])
+async def calibration_stop(body: CalibrationStopBody) -> dict:
+    """THE OPERATOR STOP. Durable and attributed.
+
+    It refuses every further admission at once. It does NOT cancel an
+    outstanding order -- cancelling is a venue act with its own
+    reconciliation -- and reserves already held stay held, because a
+    stop does not make a resting order impossible to fill.
+    """
+    from .. import calibration_store as CSTORE
+
+    try:
+        await CSTORE.ensure_session()
+        return {"ok": True, "stopped": True,
+                "budget": await CSTORE.stop(body.by, body.reason)}
+    except CSTORE.StoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
+
+
+@app.post("/api/calibration/resume", dependencies=[Depends(require_admin)])
+async def calibration_resume(body: CalibrationStopBody) -> dict:
+    from .. import calibration_store as CSTORE
+
+    try:
+        return {"ok": True, "budget": await CSTORE.resume(body.by)}
+    except CSTORE.StoreUnavailable as exc:
+        raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
 @app.post("/api/wall/renew")
