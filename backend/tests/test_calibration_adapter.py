@@ -77,8 +77,12 @@ class FakeClient:
 
 
 def ticket(**over):
+    # `outcome` is the human description of the side; `outcomeSide` is the
+    # machine selector the venue reads through the intent. They are
+    # separate fields because only the second one can be mapped.
     t = {"marketId": "aec-atp-sin-alc-2026-09-18", "outcome": "SIN to win",
-         "side": "BUY", "orderType": "LIMIT_GTC_POST_ONLY",
+         "outcomeSide": "LONG", "side": "BUY",
+         "orderType": "LIMIT_GTC_POST_ONLY",
          "clientOrderId": "CAL-0001", "price": 0.40, "quantity": 10}
     t.update(over)
     return t
@@ -117,6 +121,45 @@ class TestTheMappingIsExplicit:
         the intent, not the slug -- the wrong-side incident."""
         assert ad.order_params(ticket())["intent"] == "ORDER_INTENT_BUY_LONG"
 
+    def test_a_ticket_that_does_not_name_its_outcome_side_is_refused(self):
+        """The first version defaulted to LONG. On this venue the two
+        sides of a market share one identifier, so a defaulted side is a
+        coin flip with money behind it."""
+        for missing in (None, "", "YES", "SIN to win"):
+            with pytest.raises(ValueError) as e:
+                ad.order_params(ticket(outcomeSide=missing))
+            assert ad.R_UNMAPPED_OUTCOME in str(e.value)
+
+    def test_every_operation_and_outcome_maps_to_a_stated_native_intent(self):
+        want = {
+            ("BUY", "LONG"): ("ORDER_INTENT_BUY_LONG", False,
+                              "ORDER_INTENT_BUY_LONG"),
+            ("BUY", "SHORT"): ("ORDER_INTENT_BUY_SHORT", False,
+                               "ORDER_INTENT_BUY_SHORT"),
+            ("SELL", "LONG"): ("ORDER_INTENT_BUY_LONG", True,
+                               "ORDER_INTENT_SELL_LONG"),
+            ("SELL", "SHORT"): ("ORDER_INTENT_BUY_SHORT", True,
+                                "ORDER_INTENT_SELL_SHORT"),
+        }
+        assert set(ad.INTENTS) == set(want)
+        for (op, side), (arg, sell, native) in want.items():
+            p = ad.order_params(ticket(side=op, outcomeSide=side))
+            assert p["intent"] == arg, (op, side)
+            assert p["sell"] is sell, (op, side)
+            assert p["nativeIntentExpected"] == native, (op, side)
+
+    def test_the_intent_argument_is_one_pmus_will_actually_accept(self):
+        """pmus.submit_fok answers 'bad_intent' and sends NOTHING for any
+        intent outside {BUY_LONG, BUY_SHORT}, so a SELL_* token passed as
+        the argument would be a silent no-op, not a sell."""
+        import inspect as _inspect
+        from sportsassets import pmus
+        src = _inspect.getsource(pmus.submit_fok)
+        assert 'if intent is not None and intent not in ("ORDER_INTENT_BUY_LONG",' in src
+        for (op, side) in ad.INTENTS:
+            arg = ad.order_params(ticket(side=op, outcomeSide=side))["intent"]
+            assert arg in ad.ACCEPTED_INTENT_ARGUMENTS, (op, side)
+
 
 class TestWhatActuallyReachesTheVenue:
     @staticmethod
@@ -130,7 +173,7 @@ class TestWhatActuallyReachesTheVenue:
         orders = FakeOrders()
         v = self._venue(monkeypatch, orders)
         v.submit(market_id="aec-atp-sin-alc-2026-09-18", price=0.40,
-                 quantity=10, side="BUY",
+                 quantity=10, side="BUY", outcome_side="LONG",
                  order_type="LIMIT_GTC_POST_ONLY",
                  client_order_id="CAL-0001")
         assert len(orders.created) == 1
@@ -150,7 +193,8 @@ class TestWhatActuallyReachesTheVenue:
         orders = FakeOrders()
         v = self._venue(monkeypatch, orders)
         v.submit(market_id="m", price=0.40, quantity=10, side="BUY",
-                 order_type="LIMIT_GTC", client_order_id="CAL-0001")
+                 outcome_side="LONG", order_type="LIMIT_GTC",
+                 client_order_id="CAL-0001")
         blob = repr(orders.created[0])
         assert "CAL-0001" not in blob
         assert not any("client" in k.lower() for k in orders.created[0])
@@ -161,7 +205,8 @@ class TestWhatActuallyReachesTheVenue:
         orders = FakeOrders()
         v = self._venue(monkeypatch, orders)
         v.submit(market_id="m", price=0.4, quantity=10, side="BUY",
-                 order_type="LIMIT_GTC", client_order_id=None)
+                 outcome_side="LONG", order_type="LIMIT_GTC",
+                 client_order_id=None)
         assert "participateDontInitiate" not in orders.created[0]
 
     def test_the_real_preview_guard_runs_before_the_create(self,
@@ -172,7 +217,8 @@ class TestWhatActuallyReachesTheVenue:
         orders = FakeOrders()
         v = self._venue(monkeypatch, orders)
         v.submit(market_id="m", price=0.4, quantity=10, side="BUY",
-                 order_type="LIMIT_GTC", client_order_id=None)
+                 outcome_side="LONG", order_type="LIMIT_GTC",
+                 client_order_id=None)
         assert len(orders.previewed) == 1
         assert orders.previewed[0]["request"]["tif"] == \
             "TIME_IN_FORCE_GOOD_TILL_CANCEL"
@@ -182,7 +228,8 @@ class TestWhatActuallyReachesTheVenue:
         orders = FakeOrders(preview_resp={"order": {}})   # no cost stated
         v = self._venue(monkeypatch, orders)
         r = v.submit(market_id="m", price=0.4, quantity=10, side="BUY",
-                     order_type="LIMIT_GTC", client_order_id=None)
+                     outcome_side="LONG", order_type="LIMIT_GTC",
+                     client_order_id=None)
         assert r["ok"] is False and r["status"] == "preview_unreadable"
         assert orders.created == []
 
@@ -250,7 +297,8 @@ class TestPaginationIsVerifiedNotAssumed:
         def reader(_slugs):
             return [{"id": "A"}]
         got = ad.read_open_order_ids("m", reader=reader)
-        assert got["paginationOffered"] is False and got["pages"] == 1
+        assert got["readerAcceptsCursor"] is False
+        assert got["paginated"] is False and got["pages"] == 1
 
     def test_an_unresolved_walk_raises_rather_than_returning_a_partial(self):
         """A partial pre-image is as dangerous as an unreadable one: a
@@ -263,10 +311,6 @@ class TestPaginationIsVerifiedNotAssumed:
 
 
 class TestAttributionWithoutAClientIdentifier:
-    def test_exactly_one_new_resting_order_is_an_attribution(self):
-        got = ad.adopt_from_pre_image(["A", "B"], ["A", "B", "C"])
-        assert got["outcome"] == ad.ADOPTED and got["venueOrderId"] == "C"
-
     def test_no_new_order_is_not_proof_it_was_never_placed(self):
         got = ad.adopt_from_pre_image(["A"], ["A"])
         assert got["outcome"] == ad.NONE_NEW
@@ -293,3 +337,309 @@ class TestTheStubIsGone:
         monkeypatch.setattr(pmus, "_get_client",
                             lambda: FakeClient(FakeOrders()))
         assert isinstance(ex.live_venue(), ad.LiveVenue)
+
+
+class TestTheNativeIntentThatReachesTheVenue:
+    """Through the PRODUCTION entry point, not a stand-in for it.
+
+    `order_params` states the native intent it expects; these drive
+    `pmus.submit_fok` for all four (operation, outcome) pairs and read the
+    intent off the CreateOrderParams the SDK was actually handed. The
+    first version of the adapter emitted BUY_LONG for both sides, which
+    would have bought the wrong side of a SHORT ticket and would have
+    been a no-op 'bad_intent' on an exit.
+    """
+
+    @staticmethod
+    def _venue(monkeypatch, orders):
+        from sportsassets import pmus
+        monkeypatch.setattr(pmus, "_get_client", lambda: FakeClient(orders))
+        return ad.LiveVenue()
+
+    @pytest.mark.parametrize("op,side,native", [
+        ("BUY", "LONG", "ORDER_INTENT_BUY_LONG"),
+        ("BUY", "SHORT", "ORDER_INTENT_BUY_SHORT"),
+        ("SELL", "LONG", "ORDER_INTENT_SELL_LONG"),
+        ("SELL", "SHORT", "ORDER_INTENT_SELL_SHORT"),
+    ])
+    def test_the_venue_receives_the_native_intent_for_each_case(
+            self, monkeypatch, op, side, native):
+        orders = FakeOrders()
+        v = self._venue(monkeypatch, orders)
+        v.submit(market_id="aec-atp-sin-alc-2026-09-18", price=0.40,
+                 quantity=10, side=op, outcome_side=side,
+                 order_type="LIMIT_GTC")
+        assert len(orders.created) == 1, (op, side)
+        assert orders.created[0]["intent"] == native, (op, side)
+        expected = ad.order_params(ticket(side=op, outcomeSide=side,
+                                          orderType="LIMIT_GTC"))
+        assert expected["nativeIntentExpected"] == native
+
+    def test_a_short_ticket_does_not_reach_the_venue_as_a_long_one(
+            self, monkeypatch):
+        """The exact defect: BUY_LONG emitted for a SHORT outcome buys
+        the other side of a shared-identifier market."""
+        orders = FakeOrders()
+        v = self._venue(monkeypatch, orders)
+        v.submit(market_id="m", price=0.4, quantity=10, side="BUY",
+                 outcome_side="SHORT", order_type="LIMIT_GTC")
+        assert orders.created[0]["intent"] != "ORDER_INTENT_BUY_LONG"
+
+    def test_naming_the_intent_keeps_the_exit_off_the_inferring_branch(self):
+        """pmus._exit_intent falls back to reading the venue POSITION
+        when the caller names no intent. The adapter always names one, so
+        that branch is never the thing that picks our side."""
+        import inspect as _inspect
+        from sportsassets import pmus
+        src = _inspect.getsource(pmus._exit_intent)
+        assert "position_side(us_market_slug)" in src      # the fallback
+        for side in ("LONG", "SHORT"):
+            p = ad.order_params(ticket(side="SELL", outcomeSide=side))
+            assert p["intent"] in ad.ACCEPTED_INTENT_ARGUMENTS
+            assert p["intent"] is not None
+
+
+class TestUnreadableNeverBecomesEmpty:
+    """Every shape that is not a response carrying orders must RAISE.
+
+    `list(resp or ())` turned None into []; `resp.get("orders") or []`
+    turned an error envelope into []. Either one lets an outage read as a
+    clean market, and a clean market is what makes an ambiguous send look
+    like a first order.
+    """
+
+    @pytest.mark.parametrize("resp,marker", [
+        (None, "RESPONSE_IS_NONE"),
+        ({"error": "rate limited"}, "ERROR_ENVELOPE"),
+        ({"errors": [{"code": 500}]}, "ERROR_ENVELOPE"),
+        ({"detail": "unauthorized"}, "ERROR_ENVELOPE"),
+        ({}, "HAS_NO_ORDERS_FIELD"),
+        ({"data": []}, "HAS_NO_ORDERS_FIELD"),
+        ({"orders": None}, "FIELD_IS_NULL"),
+        ({"orders": "nope"}, "FIELD_IS_NOT_A_LIST"),
+        ("<html>503</html>", "NOT_A_MAPPING_OR_LIST"),
+        (7, "NOT_A_MAPPING_OR_LIST"),
+    ])
+    def test_a_shape_that_is_not_orders_raises_rather_than_reading_empty(
+            self, resp, marker):
+        def reader(_slugs):
+            return resp
+        with pytest.raises(ex.VenueUnreadable) as e:
+            ad.read_open_order_ids("m", reader=reader)
+        assert marker in str(e.value)
+
+    def test_the_only_empty_that_counts_is_an_explicit_empty_order_list(self):
+        for resp in ({"orders": []}, []):
+            assert ad.read_open_order_ids(
+                "m", reader=lambda _s: resp)["ids"] == []
+
+    def test_a_non_mapping_row_raises_instead_of_being_dropped(self):
+        """pmus.open_orders silently drops a row that is not a mapping.
+        A dropped row is an order we cannot see in the after-image."""
+        def reader(_slugs):
+            return {"orders": [{"id": "A"}, "not-an-order"]}
+        with pytest.raises(ex.VenueUnreadable) as e:
+            ad.read_open_order_ids("m", reader=reader)
+        assert "ROW_NOT_A_MAPPING" in str(e.value)
+
+    def test_the_upstream_fail_open_is_named_and_routed_around(self):
+        """pmus.open_orders coerces None and error envelopes to [] before
+        this module can see them, so the adapter reads the raw response.
+        Pinned so the workaround cannot be quietly removed."""
+        import inspect as _inspect
+        from sportsassets import pmus
+        src = _inspect.getsource(pmus.open_orders)
+        assert "or {}" in src and 'resp.get("orders") or []' in src
+        assert ad.LiveVenue.__init__.__doc__ is None       # shape guard
+        v_src = _inspect.getsource(ad.LiveVenue.__init__)
+        assert "raw_open_orders" in v_src
+        assert "pmus.open_orders" not in v_src
+
+
+class TestPaginationIsNotInferredFromAnException:
+    def test_a_type_error_raised_inside_the_reader_is_unreadable(self):
+        """The old code caught TypeError and read it as 'this endpoint
+        offers no cursor', ending the walk on a partial page. A TypeError
+        from inside the reader says nothing about pagination."""
+        def reader(_slugs, cursor=None):
+            raise TypeError("SDK changed under us")
+        with pytest.raises(ex.VenueUnreadable) as e:
+            ad.read_open_order_ids("m", reader=reader)
+        assert "OPEN_ORDERS_UNREADABLE: TypeError" in str(e.value)
+
+    def test_support_is_decided_by_the_signature_not_by_trying_it(self):
+        def with_cursor(_slugs, cursor=None):
+            return {"orders": []}
+
+        def without_cursor(_slugs):
+            return {"orders": []}
+
+        def with_kwargs(_slugs, **kw):
+            return {"orders": []}
+        assert ad._reader_takes_a_cursor(with_cursor) is True
+        assert ad._reader_takes_a_cursor(without_cursor) is False
+        assert ad._reader_takes_a_cursor(with_kwargs) is True
+
+    def test_a_cursor_the_reader_cannot_follow_raises(self):
+        """The venue is offering pages this reader has no way to ask for.
+        That is an incomplete pre-image, not a one-page account."""
+        def reader(_slugs):
+            return {"orders": [{"id": "A"}], "nextCursor": "c1"}
+        with pytest.raises(ex.VenueUnreadable) as e:
+            ad.read_open_order_ids("m", reader=reader)
+        assert "CURSOR_THE_READER_CANNOT_FOLLOW" in str(e.value)
+
+    def test_the_real_reader_takes_no_cursor_and_that_is_recorded(self):
+        """Documented from the function, not assumed: pmus.open_orders
+        and the raw reader both take only slugs."""
+        assert ad._reader_takes_a_cursor(ad.raw_open_orders) is False
+
+
+def approved(**over):
+    e = {"market": "aec-atp-sin-alc-2026-09-18", "outcomeSide": "LONG",
+         "nativeIntent": "ORDER_INTENT_BUY_LONG", "price": 0.40,
+         "quantity": 10}
+    e.update(over)
+    return e
+
+
+def venue_row(**over):
+    r = {"id": "C", "marketSlug": "aec-atp-sin-alc-2026-09-18",
+         "intent": "ORDER_INTENT_BUY_LONG",
+         "price": {"value": "0.4000", "currency": "USD"},
+         "quantity": 10, "createTime": "2026-09-18T17:00:05Z"}
+    r.update(over)
+    return r
+
+
+WINDOW = {"sentAfter": "2026-09-18T17:00:00Z",
+          "readBefore": "2026-09-18T17:00:30Z"}
+ISOLATED = {"CONDITION": ad.ISOLATION_SOLE_CLAIM, "HOLDS": True,
+            "EVIDENCE": {"claimId": "CAL-0001",
+                         "openLifecycles": 1,
+                         "mirrorLive": False,
+                         "manualOrdersOnMarket": 0}}
+
+
+class TestOneNewIdIsOnlyACandidate:
+    """A difference of one is not an attribution.
+
+    Book 863 and book 1333 are both cases where the desk believed a
+    single reading and the venue disagreed. The pre-image difference
+    NARROWS the field; the corroboration is what identifies the order.
+    """
+
+    def test_a_corroborated_single_new_order_is_an_attribution(self):
+        got = ad.adopt_from_pre_image(
+            ["A", "B"], ["A", "B", "C"], expected=approved(),
+            rows=[venue_row()], window=WINDOW, writer_isolation=ISOLATED)
+        assert got["outcome"] == ad.ADOPTED and got["venueOrderId"] == "C"
+        assert got["writerIsolation"] == ad.ISOLATION_SOLE_CLAIM
+
+    def test_a_single_new_order_with_no_evidence_stays_ambiguous(self):
+        """This is the old behaviour, and it is now refused."""
+        got = ad.adopt_from_pre_image(["A", "B"], ["A", "B", "C"])
+        assert got["outcome"] == ad.UNCORROBORATED
+        assert got["venueOrderId"] is None
+        assert got["candidate"] == "C"
+        assert got["blocker"] == "NO_EXPECTED_TICKET_TO_CORROBORATE_AGAINST"
+
+    @pytest.mark.parametrize("over,blocker", [
+        ({"marketSlug": "some-other-market"}, "MARKET_MISMATCH"),
+        ({"intent": "ORDER_INTENT_BUY_SHORT"}, "INTENT_MISMATCH"),
+        ({"price": {"value": "0.4100"}}, "PRICE_MISMATCH"),
+        ({"quantity": 11}, "QUANTITY_MISMATCH"),
+        ({"createTime": "2026-09-18T16:59:00Z"},
+         "CREATED_OUTSIDE_THE_SEND_WINDOW"),
+        ({"createTime": "2026-09-18T17:05:00Z"},
+         "CREATED_OUTSIDE_THE_SEND_WINDOW"),
+    ])
+    def test_any_field_that_disagrees_leaves_it_unattributed(self, over,
+                                                             blocker):
+        got = ad.adopt_from_pre_image(
+            [], ["C"], expected=approved(), rows=[venue_row(**over)],
+            window=WINDOW, writer_isolation=ISOLATED)
+        assert got["outcome"] == ad.UNCORROBORATED, over
+        assert got["blocker"] == blocker, over
+
+    @pytest.mark.parametrize("over,blocker", [
+        ({"marketSlug": None}, "ORDER_NAMES_NO_MARKET"),
+        ({"intent": None}, "ORDER_NAMES_NO_INTENT"),
+        ({"price": {}}, "ORDER_PRICE_UNREADABLE"),
+        ({"quantity": None}, "ORDER_QUANTITY_UNREADABLE"),
+        ({"createTime": None}, "ORDER_NAMES_NO_CREATION_TIME"),
+    ])
+    def test_a_field_the_venue_did_not_report_is_not_a_match(self, over,
+                                                             blocker):
+        got = ad.adopt_from_pre_image(
+            [], ["C"], expected=approved(), rows=[venue_row(**over)],
+            window=WINDOW, writer_isolation=ISOLATED)
+        assert got["outcome"] == ad.UNCORROBORATED, over
+        assert got["blocker"] == blocker, over
+
+    def test_without_a_send_window_the_time_evidence_is_not_established(self):
+        got = ad.adopt_from_pre_image(
+            [], ["C"], expected=approved(), rows=[venue_row()],
+            window={}, writer_isolation=ISOLATED)
+        assert got["blocker"] == "SEND_WINDOW_NOT_ESTABLISHED"
+
+    def test_the_candidate_must_have_a_row_of_its_own(self):
+        got = ad.adopt_from_pre_image(
+            [], ["C"], expected=approved(), rows=[venue_row(id="OTHER")],
+            window=WINDOW, writer_isolation=ISOLATED)
+        assert got["blocker"] == "NO_ORDER_ROW_FOR_THE_CANDIDATE_ID"
+
+
+class TestWriterIsolationIsJustifiedNotAssumed:
+    @pytest.mark.parametrize("iso,blocker", [
+        (None, "WRITER_ISOLATION_NOT_ASSERTED"),
+        ("we are the only writer", "WRITER_ISOLATION_NOT_ASSERTED"),
+        ({"CONDITION": "PROBABLY_FINE", "HOLDS": True, "EVIDENCE": {"a": 1}},
+         "WRITER_ISOLATION_CONDITION_UNKNOWN"),
+        ({"CONDITION": ad.ISOLATION_SOLE_CLAIM, "HOLDS": False,
+          "EVIDENCE": {"a": 1}}, "WRITER_ISOLATION_DOES_NOT_HOLD"),
+        ({"CONDITION": ad.ISOLATION_SOLE_CLAIM, "HOLDS": "yes",
+          "EVIDENCE": {"a": 1}}, "WRITER_ISOLATION_DOES_NOT_HOLD"),
+        ({"CONDITION": ad.ISOLATION_SOLE_CLAIM, "HOLDS": True},
+         "WRITER_ISOLATION_UNJUSTIFIED"),
+        ({"CONDITION": ad.ISOLATION_SOLE_CLAIM, "HOLDS": True,
+          "EVIDENCE": {}}, "WRITER_ISOLATION_UNJUSTIFIED"),
+    ])
+    def test_a_fully_matching_order_is_still_not_ours_without_isolation(
+            self, iso, blocker):
+        got = ad.adopt_from_pre_image(
+            [], ["C"], expected=approved(), rows=[venue_row()],
+            window=WINDOW, writer_isolation=iso)
+        assert got["outcome"] == ad.UNCORROBORATED
+        assert got["blocker"] == blocker
+
+
+class TestAmbiguityIsNeverResolvedByCancelling:
+    def test_the_attribution_path_calls_nothing_that_cancels(self):
+        """Checked on the CALLS, not on the prose. A docstring saying a
+        function does not cancel is not evidence that it does not; an
+        earlier test in this codebase matched its own commentary and
+        proved nothing."""
+        import ast
+        import inspect as _inspect
+        import textwrap
+        tree = ast.parse(textwrap.dedent(
+            _inspect.getsource(ad.adopt_from_pre_image)))
+        called = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Call):
+                f = node.func
+                called.add(getattr(f, "attr", None) or getattr(f, "id", None))
+        assert not any("cancel" in (c or "").lower() for c in called), called
+        # and nothing it does call reaches one either
+        assert called <= {"set", "map", "str", "dict", "sorted", "len",
+                          "isinstance", "_order_id", "corroborate",
+                          "isolation_holds", "by_id.get", "get"}, called
+        assert "NOT cancelled to find out whose it is" in \
+            ad.NEVER_CANCEL_TO_RESOLVE
+
+    def test_every_refusing_outcome_carries_the_rule(self):
+        for got in (ad.adopt_from_pre_image([], []),
+                    ad.adopt_from_pre_image([], ["C", "D"]),
+                    ad.adopt_from_pre_image([], ["C"])):
+            assert got["neverCancelToResolve"] == ad.NEVER_CANCEL_TO_RESOLVE

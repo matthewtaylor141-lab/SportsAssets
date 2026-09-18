@@ -19,6 +19,10 @@ from sportsassets import calibration_execute as ex
 
 def ticket(**over):
     t = {"marketId": "aec-atp-xxx-yyy-2026-09-18", "outcome": "XXX to win",
+         # `outcomeSide` names WHICH side of a shared-identifier market.
+         # It has no default: the venue reads it through the intent, and
+         # the adapter refuses a ticket that does not state it.
+         "outcomeSide": "LONG",
          "side": "BUY", "orderType": "LIMIT_GTC_POST_ONLY",
          "clientOrderId": "CAL-0001", "price": 0.40, "quantity": 10,
          "inventoryPlan": "hold to settlement; no re-entry"}
@@ -321,3 +325,57 @@ class TestTheCallablePathChecksItsApprovedState:
         assert r["persisted"] is False
         assert r["persistError"] == "RuntimeError"
         assert "SEND HAPPENED AND THE RECORD DID NOT" in r["note"]
+
+
+class TestATicketTheAdapterCannotMapIsNeverSent:
+    """An unmappable ticket is refused BEFORE the pre-image read.
+
+    It must not come back as an ambiguous send. AMBIGUOUS means the venue
+    may hold an order we cannot name, and it holds the reserve and the
+    single-lifecycle slot until an operator resolves it. Spending that on
+    a ValueError raised before any socket opened would be a fabricated
+    unresolved lifecycle.
+    """
+
+    @pytest.mark.parametrize("over,marker", [
+        ({"outcomeSide": None}, "UNMAPPED_OUTCOME"),
+        ({"outcomeSide": "YES"}, "UNMAPPED_OUTCOME"),
+        ({"orderType": "LIMIT_WHATEVER"}, "UNMAPPED_ORDER_TYPE"),
+        ({"side": "SHORT"}, "UNMAPPED_SIDE"),
+    ])
+    def test_it_is_not_sent_and_not_ambiguous(self, over, marker):
+        v = MockVenue()
+        r = ex.submit(v, ticket(**over))
+        assert r["outcome"] == ex.NOT_SENT
+        assert r["sent"] is False
+        assert marker in r["reason"]
+        assert v.calls == []          # not even the pre-image was read
+
+    def test_a_mappable_ticket_still_goes_through(self):
+        v = MockVenue(submit=OK)
+        r = ex.submit(v, ticket())
+        assert r["outcome"] == ex.SUBMITTED
+        assert [c[0] for c in v.calls] == ["open_order_ids", "submit"]
+
+
+class TestTheSendWindowIsStampedAroundTheCall:
+    """Attribution needs a time interval, and it has to come from the
+    send itself. Inferring it afterwards from when someone happened to
+    look would admit an order created before we sent anything."""
+
+    def test_every_outcome_that_reached_the_network_carries_a_window(self):
+        for kw in ({"submit": OK}, {"raise_on_submit": True},
+                   {"submit": "not-a-dict"},
+                   {"submit": {"ok": True}},
+                   {"submit": {"ok": False,
+                               "status": "post_only_rejected"}}):
+            r = ex.submit(MockVenue(**kw), ticket())
+            assert r.get("sent") is True, kw
+            w = r.get("sendWindow")
+            assert w and w["sentAfter"] and w["readBefore"], kw
+            assert w["sentAfter"] <= w["readBefore"], kw
+            assert r["nativeIntent"] == "ORDER_INTENT_BUY_LONG", kw
+
+    def test_the_window_is_absent_where_nothing_was_sent(self):
+        assert "sendWindow" not in ex.submit(
+            MockVenue(), ticket(outcomeSide=None))

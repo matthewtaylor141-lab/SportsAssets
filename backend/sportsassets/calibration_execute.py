@@ -50,6 +50,12 @@ import math
 SUBMITTED = "SUBMITTED"
 REFUSED_BY_VENUE = "REFUSED_BY_VENUE"
 AMBIGUOUS = "AMBIGUOUS_RESPONSE"
+# A ticket the adapter cannot map is refused HERE, before the send. It is
+# not an ambiguous send: nothing reached the network, so `sent` is False
+# and no reconciliation is owed. Without this the ValueError would have
+# been caught by the send's own handler and reported as AMBIGUOUS with
+# sent=True -- an unresolved lifecycle for an order that never existed.
+NOT_SENT = "NOT_SENT_TICKET_UNMAPPABLE"
 FILLED = "FILLED"
 RESTING = "RESTING"
 PARTIAL = "PARTIAL"
@@ -94,7 +100,23 @@ def submit(venue, ticket: dict) -> dict:
     ambiguous send can be reconciled later against orders that were not
     already on the market.
     """
+    from datetime import datetime, timezone
+
+    from .calibration_adapter import order_params
+
     market = ticket["marketId"]
+
+    # MAP BEFORE READING, LET ALONE SENDING. order_params is pure and
+    # refuses an order type, operation or outcome side it cannot state
+    # exactly -- including a ticket that does not name which side of a
+    # shared-identifier market it is for.
+    try:
+        params = order_params(ticket)
+    except (ValueError, KeyError, TypeError) as exc:
+        return {"outcome": NOT_SENT, "sent": False,
+                "reason": "UNMAPPABLE_TICKET: %s" % exc,
+                "preOpenOrderIds": None, "venueOrderId": None}
+
     try:
         pre = sorted(set(str(x) for x in (venue.open_order_ids(market) or ())))
         pre_readable = True
@@ -108,22 +130,36 @@ def submit(venue, ticket: dict) -> dict:
                 "preImageReadable": False}
     del pre_readable
 
+    # THE SEND WINDOW. Attribution by read-back compares the candidate
+    # order's creation time against this interval; an order created
+    # outside it is not this send's, however well the rest lines up. It
+    # is stamped here, around the call, rather than inferred later.
+    sent_after = datetime.now(timezone.utc).isoformat()
+    window = {"sentAfter": sent_after, "readBefore": None}
+
     try:
         resp = venue.submit(
             market_id=market, price=ticket["price"],
             quantity=ticket["quantity"], side=ticket.get("side", "BUY"),
+            outcome_side=params["outcomeSide"],
             order_type=ticket["orderType"],
             client_order_id=ticket["clientOrderId"])
     except Exception as exc:                                   # noqa: BLE001
+        window["readBefore"] = datetime.now(timezone.utc).isoformat()
         return {"outcome": AMBIGUOUS, "sent": True,
                 "reason": "SEND_RAISED: %s" % type(exc).__name__,
                 "preOpenOrderIds": pre, "venueOrderId": None,
+                "sendWindow": window, "nativeIntent": params[
+                    "nativeIntentExpected"],
                 "note": A_LOST_RESPONSE_IS_NOT_A_REFUSAL}
+    window["readBefore"] = datetime.now(timezone.utc).isoformat()
 
     if not isinstance(resp, dict):
         return {"outcome": AMBIGUOUS, "sent": True,
                 "reason": "RESPONSE_NOT_A_MAPPING",
                 "preOpenOrderIds": pre, "venueOrderId": None,
+                "sendWindow": window,
+                "nativeIntent": params["nativeIntentExpected"],
                 "note": A_LOST_RESPONSE_IS_NOT_A_REFUSAL}
 
     if resp.get("ok") is False and resp.get("status") in (
@@ -132,19 +168,25 @@ def submit(venue, ticket: dict) -> dict:
         # did not accept the order, so nothing rests and nothing filled.
         return {"outcome": REFUSED_BY_VENUE, "sent": True,
                 "reason": str(resp.get("status")),
-                "preOpenOrderIds": pre, "venueOrderId": None}
+                "preOpenOrderIds": pre, "venueOrderId": None,
+                "sendWindow": window,
+                "nativeIntent": params["nativeIntentExpected"]}
 
     oid = resp.get("order_id")
     if not oid:
         return {"outcome": AMBIGUOUS, "sent": True,
                 "reason": "NO_ORDER_ID_IN_RESPONSE",
                 "preOpenOrderIds": pre, "venueOrderId": None,
+                "sendWindow": window,
+                "nativeIntent": params["nativeIntentExpected"],
                 "note": A_LOST_RESPONSE_IS_NOT_A_REFUSAL}
 
     filled = _f(resp.get("filled_shares")) or 0.0
     px = _f(resp.get("fill_price"))
     return {"outcome": SUBMITTED, "sent": True,
             "venueOrderId": str(oid), "preOpenOrderIds": pre,
+            "sendWindow": window,
+            "nativeIntent": params["nativeIntentExpected"],
             "filled": filled, "fillPrice": px,
             "cashOut": None if px is None else round(filled * px, 2)}
 
