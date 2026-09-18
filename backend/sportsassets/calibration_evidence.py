@@ -254,7 +254,7 @@ def passive_price(book, tick, order_type):
                 crossesTheSpread=False)
 
 
-def gather(market_id, readers, quantity=None):
+def gather(market_id, readers, quantity=None, outcome_side=None):
     """Every venue fact the preflight needs, each stamped, none invented.
 
     `readers` is a dict of callables so this is testable without a venue
@@ -263,6 +263,7 @@ def gather(market_id, readers, quantity=None):
     """
     ev = {
         "marketId": market_id,
+        "declaredOutcomeSide": outcome_side,
         "gatheredAt": _now(),
         "nothingIsInvented": NOTHING_IS_INVENTED,
         "account": _read(readers["account"]),
@@ -288,11 +289,15 @@ def gather(market_id, readers, quantity=None):
     if not ev["market"]["ok"] or not (market or {}).get("slug"):
         blockers.append(B_MARKET)
     else:
+        if market.get("outcomeSideBlocker"):
+            # DECLARED, THEN VERIFIED. The operator named a side and the
+            # venue record either confirms it or does not.
+            blockers.append(market["outcomeSideBlocker"])
         if not market.get("outcome"):
             blockers.append(B_OUTCOME)
         if market.get("outcomeSide") not in ("LONG", "SHORT"):
-            # Which side of a shared-identifier market this is. The venue
-            # reads it through the order intent; it cannot be defaulted.
+            blockers.append(B_OUTCOME_SIDE)
+        elif outcome_side and market["outcomeSide"] != outcome_side:
             blockers.append(B_OUTCOME_SIDE)
         if not market.get("expiry"):
             blockers.append(B_EXPIRY)
@@ -305,12 +310,23 @@ def gather(market_id, readers, quantity=None):
         blockers.append(B_TICK)
     if (rules or {}).get("minQuantity") is None:
         blockers.append(B_MIN_QTY)
+    # THE FEE SCHEDULE, not a fee. Fees depend on quantity, price and
+    # role, so the number is quoted after sizing in propose() and
+    # reconciled against the venue's own preview there. What gather
+    # establishes is that an applicable, dated schedule with provenance
+    # exists at all.
     fees = ev["fees"]["value"] if ev["fees"]["ok"] else None
-    if not fees or fees.get("entry") is None or fees.get("exit") is None:
+    sched = (fees or {}).get("schedule")
+    if not fees or not isinstance(sched, dict) or not sched.get(
+            "TAKER_COEFFICIENT"):
         blockers.append(B_FEES)
-    elif not fees.get("model"):
+    elif not fees.get("model") or not sched.get("EFFECTIVE_DATE"):
         # Numbers without provenance are numbers we cannot defend.
         blockers.append(B_FEE_MODEL)
+
+    # PRICE BASIS. The book must be quoted on the side the ticket is for.
+    if book and market and book.get("priceBasis") != market.get("outcomeSide"):
+        blockers.append(B_PRICE_BASIS)
 
     ev["freshness"] = freshness(ev)
     if ev["freshness"]["unreadableTimestamps"]:
@@ -324,7 +340,8 @@ def gather(market_id, readers, quantity=None):
 
 
 def propose(evidence, session, quantity=None, order_type="LIMIT_GTC_POST_ONLY",
-            inventory_plan=None, operator_stop="POST /api/calibration/stop"):
+            inventory_plan=None, operator_stop="POST /api/calibration/stop",
+            exit_policy=None, preview=None):
     """Build the ticket the evidence supports, and its exact blockers.
 
     THE SIZE IS DERIVED, NOT CHOSEN. The largest whole quantity whose
@@ -339,8 +356,9 @@ def propose(evidence, session, quantity=None, order_type="LIMIT_GTC_POST_ONLY",
                 "submittable": False,
                 "why": "the venue facts are incomplete; nothing is filled in"}
 
+    from . import calibration_fees as cf
+
     rules = evidence["rules"]["value"]
-    fees = evidence["fees"]["value"]
     tick = float(rules["tick"])
     min_qty = int(rules["minQuantity"])
 
@@ -353,21 +371,63 @@ def propose(evidence, session, quantity=None, order_type="LIMIT_GTC_POST_ONLY",
                        "cross"}
     price = priced["PRICE"]
 
-    # SIZED IN INTEGER CENTS. Both the cap and the venue's prices are
-    # cent-denominated, and binary floats are not: 4.40 // 0.40 is 10.0,
-    # not 11, so a float sizing quietly leaves a whole share of the
-    # approved allowance unused. Cents give the true largest quantity
-    # that fits, and the all-in check below is still what enforces the
-    # cap -- this only stops the arithmetic from being wrong in the
-    # tidy-looking direction.
+    # SIZED IN INTEGER CENTS, AND THE FEE IS QUOTED FOR THE SIZE.
+    # Fees depend on quantity, so a fee computed before sizing is a fee
+    # for a different order. The loop sizes against the fee its own
+    # quantity incurs and stops at the largest quantity whose all-in
+    # cost still fits; it never computes one fee and assumes it survives
+    # the sizing.
     room = min(cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE, cal.remaining(session))
     room_c = int(round(room * 100))
-    fees_c = int(round(float(fees["entry"]) * 100)) + \
-        int(round(float(fees["exit"]) * 100))
     price_c = int(round(price * 100))
-    qty = max(0, (room_c - fees_c) // price_c) if price_c > 0 else 0
+
+    def _fees_for(n):
+        entry = cf.entry_reserve(price, n, post_only=True)
+        exitr = cf.exit_reserve(n, exit_policy)
+        if entry["BLOCKER"] or exitr["BLOCKER"]:
+            return None, entry, exitr
+        return (int(entry["FEE"] * 100) + int(exitr["FEE"] * 100)), entry, exitr
+
+    qty, entry_q, exit_q = 0, None, None
     if quantity is not None:
         qty = int(quantity)
+        _c, entry_q, exit_q = _fees_for(qty)
+    elif price_c > 0:
+        n = (room_c) // price_c
+        while n > 0:
+            fc, entry_q, exit_q = _fees_for(n)
+            if fc is None:
+                break
+            if n * price_c + fc <= room_c:
+                qty = n
+                break
+            n -= 1
+        if qty == 0 and entry_q is None:
+            _c, entry_q, exit_q = _fees_for(1)
+
+    if entry_q is None or entry_q.get("BLOCKER") or (
+            exit_q is None or exit_q.get("BLOCKER")):
+        why = [b for b in ((entry_q or {}).get("BLOCKER"),
+                           (exit_q or {}).get("BLOCKER")) if b]
+        return {"ticket": None, "blockers": why or [cf.B_EXIT_POLICY],
+                "submittable": False, "pricing": priced,
+                "why": "the fee terms for the sized order could not be "
+                       "established; no ticket is built"}
+
+    # THE VENUE'S OWN PREVIEW, for the order as sized. The documented
+    # coefficients were not retrieved by this code, so the arithmetic
+    # alone is not evidence; agreement with the preview is.
+    agreement = None
+    if preview is not None:
+        observed = cf.preview_fee(preview(price, qty) if callable(preview)
+                                  else preview)
+        agreement = cf.reconcile(entry_q, observed)
+        if not agreement["AGREED"]:
+            return {"ticket": None, "blockers": [agreement["BLOCKER"]],
+                    "submittable": False, "pricing": priced,
+                    "feeAgreement": agreement,
+                    "why": "the documented schedule and the venue's own "
+                           "preview disagree about this order's fee"}
 
     fresh = evidence["freshness"]
     ticket = {
@@ -386,9 +446,13 @@ def propose(evidence, session, quantity=None, order_type="LIMIT_GTC_POST_ONLY",
         "quantity": qty,
         "tick": tick,
         "venueMinQuantity": min_qty,
-        "entryFeeReserve": float(fees["entry"]),
-        "exitFeeReserve": float(fees["exit"]),
-        "feeModel": fees["model"],
+        "entryFeeReserve": float(entry_q["FEE"]),
+        "exitFeeReserve": float(exit_q["FEE"]),
+        "feeModel": evidence["fees"]["value"]["model"],
+        "feeSchedule": evidence["fees"]["value"]["schedule"],
+        "feeAgreement": agreement,
+        "exitPolicy": dict(exit_policy or {}),
+        "rebatesAreNotBudget": cf.REBATES_ARE_NOT_BUDGET,
         "inventoryPlan": inventory_plan or "hold to settlement; no re-entry",
         "operatorStop": operator_stop,
         # COMPUTED. Never a literal.
@@ -399,7 +463,7 @@ def propose(evidence, session, quantity=None, order_type="LIMIT_GTC_POST_ONLY",
     why = cal.refusals(ticket, session,
                        {"available": evidence["account"]["value"].get("cash")})
     return {"ticket": ticket, "blockers": why, "submittable": False,
-            "pricing": priced,
+            "pricing": priced, "feeAgreement": agreement,
             "allInCost": cal.all_in_cost(qty, price, ticket["entryFeeReserve"],
                                          ticket["exitFeeReserve"]) if qty > 0
             else None,
@@ -419,16 +483,135 @@ def _amount(v):
         return None
 
 
-def default_readers(client=None):
-    """The configured READ-ONLY venue readers.
+# The venue's OWN schema field names, from the official references. The
+# first version guessed at these and every guess was wrong, which is why
+# they are named here as constants rather than spelled inline:
+#
+#   get-market-by-slug     orderPriceMinTickSize, minimumTradeQty,
+#                          marketSides[].long and its description
+#   get-account-balances   currentBalance, buyingPower
+#
+# CURRENT BALANCE IS NOT BUYING POWER. One is cash held; the other is what
+# the venue will let you commit, and on a margin-capable account they are
+# different numbers. The budget check needs the cash, so both are read and
+# kept apart rather than blended into one field called "cash".
+F_TICK = "orderPriceMinTickSize"
+F_MIN_QTY = "minimumTradeQty"
+F_BALANCE = "currentBalance"
+F_BUYING_POWER = "buyingPower"
+F_SIDES = "marketSides"
+F_LONG = "long"
+
+B_SIDE_NOT_FOUND = "OUTCOME_SIDE_NOT_ON_THE_VENUE_RECORD"
+B_SIDE_NOT_DECLARED = "OUTCOME_SIDE_NOT_DECLARED_BY_THE_OPERATOR"
+B_SIDE_AMBIGUOUS = "MARKET_SIDES_AMBIGUOUS"
+B_PRICE_BASIS = "PRICE_BASIS_INCONSISTENT"
+
+THE_SIDE_IS_DECLARED_THEN_VERIFIED = (
+    "the operator declares which side the ticket is for and the venue "
+    "record is then checked to confirm that side exists and which of the "
+    "two it is. It is NOT inferred from the market title, and it does not "
+    "default to LONG: on this venue both sides share one identifier, so a "
+    "defaulted side is a coin flip with money behind it")
+
+PRICE_BASIS_RULE = (
+    "every price in the evidence, the approval and the native order is "
+    "quoted ON THE DECLARED SIDE. The complementary outcome trades at "
+    "1 - p, so a book read for LONG and an order sent for SHORT would be "
+    "priced on two different bases and differ by exactly the spread "
+    "between them")
+
+
+def _amount(v):
+    """A venue money field as a float, or None when unreadable."""
+    if isinstance(v, dict):
+        v = v.get("value", v.get("amount"))
+    try:
+        return float(v)
+    except (TypeError, ValueError):
+        return None
+
+
+def _market_row(client, market_id):
+    m = (client.markets.retrieve_by_slug(market_id) or {})
+    m = m.get("market") if isinstance(m.get("market"), dict) else m
+    if not isinstance(m, dict):
+        raise ValueError("MARKET_RESPONSE_NOT_A_MAPPING")
+    return m
+
+
+def resolve_side(market_row, declared):
+    """Which venue side the operator's declared outcome side actually is.
+
+    DECLARED, THEN VERIFIED. The caller says LONG or SHORT; this finds
+    that side on the venue's own `marketSides` and returns its
+    description and identifier, or a named blocker. Nothing is read out
+    of the market title.
+    """
+    if declared not in ("LONG", "SHORT"):
+        return {"OUTCOME_SIDE": None, "BLOCKER": B_SIDE_NOT_DECLARED,
+                "rule": THE_SIDE_IS_DECLARED_THEN_VERIFIED}
+    sides = (market_row or {}).get(F_SIDES)
+    if not isinstance(sides, list) or not sides:
+        return {"OUTCOME_SIDE": None, "BLOCKER": B_SIDE_NOT_FOUND,
+                "rule": THE_SIDE_IS_DECLARED_THEN_VERIFIED}
+    want = declared == "LONG"
+    matches = [s for s in sides
+               if isinstance(s, dict) and s.get(F_LONG) is want]
+    if len(matches) != 1:
+        # Zero means the venue does not list that side; more than one
+        # means we cannot tell them apart. Neither is a side to trade.
+        return {"OUTCOME_SIDE": None,
+                "BLOCKER": B_SIDE_NOT_FOUND if not matches else B_SIDE_AMBIGUOUS,
+                "sidesSeen": len(sides), "matched": len(matches),
+                "rule": THE_SIDE_IS_DECLARED_THEN_VERIFIED}
+    side = matches[0]
+    return {"OUTCOME_SIDE": declared, "BLOCKER": None,
+            "description": side.get("description") or side.get("name"),
+            "identifier": side.get("identifier"),
+            "long": side.get(F_LONG),
+            "priceBasis": declared,
+            "rule": THE_SIDE_IS_DECLARED_THEN_VERIFIED}
+
+
+def account_identity(config=None):
+    """WHO the order would be sent as, from credential-bound configuration.
+
+    NOT from an accountId field in the balances response: the official
+    get-account-balances schema does not promise one, and requiring an
+    undocumented field to appear would make a real account look
+    unidentified. The identity is the configured key the reads and the
+    order both use, so it is bound to the credential rather than reported
+    by the payload.
+    """
+    if config is None:
+        from .config import settings as config
+    key = getattr(config, "pmus_key_id", None)
+    if not key or not str(key).strip():
+        return {"ACCOUNT": None, "BLOCKER": B_ACCOUNT_ID,
+                "why": "no PMUS key id is configured, so there is no "
+                       "credential to bind an account identity to"}
+    key = str(key).strip()
+    # The identity is the credential, not a secret: the key id names the
+    # account and the secret never leaves configuration. Only a short
+    # fingerprint is carried into evidence so an id cannot be copied out
+    # of a report.
+    return {"ACCOUNT": "pmus:%s" % key[:8], "BLOCKER": None,
+            "source": "credential-bound configuration (pmus_key_id)",
+            "fullKeyInEvidence": False}
+
+
+def default_readers(client=None, config=None, declared_side=None):
+    """The configured READ-ONLY venue readers, on the OFFICIAL field names.
 
     Each is backed by a call this codebase already uses for real reads:
-    `account.balances`, `orders.list` (through the calibration adapter's
-    strict wrapper), `markets.retrieve_by_slug` and `markets.bbo`. No
-    order path is imported.
+    `account.balances`, `orders.list` (through the calibration read
+    module's strict wrapper), `markets.retrieve_by_slug` and
+    `markets.bbo`. No order path is imported.
 
-    A fact with NO verified read raises `ReaderNotWired`, so it lands as
-    a named blocker rather than a plausible-looking number.
+    The fee reader is no longer a refusal: it quotes the published
+    schedule. What it CANNOT do alone is establish the fee, so it also
+    carries the preview the evidence command reconciles it against.
     """
     from . import pmus
 
@@ -448,10 +631,20 @@ def default_readers(client=None):
                     r.get("currency") or "").upper() in ("USD", ""):
                 usd = r
                 break
-        cash = _amount((usd or {}).get("cash") or (usd or {}).get("balance"))
-        return {"account": (resp.get("accountId") or resp.get("account")
-                            or (usd or {}).get("accountId")),
-                "cash": cash,
+        if usd is None:
+            raise ValueError("BALANCES_HAS_NO_USD_ROW")
+        ident = account_identity(config)
+        # BOTH numbers, kept apart. `cash` is the one the budget check
+        # uses; buying power is reported and never spent as cash.
+        return {"account": ident["ACCOUNT"],
+                "accountSource": ident.get("source"),
+                "cash": _amount(usd.get(F_BALANCE)),
+                "currentBalance": _amount(usd.get(F_BALANCE)),
+                "buyingPower": _amount(usd.get(F_BUYING_POWER)),
+                "balanceIsNotBuyingPower": (
+                    "currentBalance is cash held; buyingPower is what the "
+                    "venue will let us commit. The budget check uses the "
+                    "cash"),
                 "source": "account.balances"}
 
     def open_orders(market_id):
@@ -462,16 +655,18 @@ def default_readers(client=None):
         return read_open_order_ids(market_id)
 
     def market(market_id):
-        m = (_client().markets.retrieve_by_slug(market_id) or {})
-        m = m.get("market") if isinstance(m.get("market"), dict) else m
-        if not isinstance(m, dict):
-            raise ValueError("MARKET_RESPONSE_NOT_A_MAPPING")
+        m = _market_row(_client(), market_id)
+        side = resolve_side(m, declared_side)
         return {"slug": m.get("slug") or m.get("marketSlug"),
-                "outcome": m.get("title") or m.get("question") or m.get("name"),
-                # The venue does not publish a LONG/SHORT selector on the
-                # market row; which side the ticket is for is an approval
-                # input, so it stays unset here and blocks.
-                "outcomeSide": m.get("outcomeSide"),
+                # The outcome is the venue's OWN description of the side
+                # the operator declared -- not the market title, which
+                # names the event rather than a side.
+                "outcome": side.get("description"),
+                "outcomeSide": side.get("OUTCOME_SIDE"),
+                "outcomeSideBlocker": side.get("BLOCKER"),
+                "sideIdentifier": side.get("identifier"),
+                "priceBasis": side.get("priceBasis"),
+                "marketTitle": m.get("title") or m.get("question"),
                 "expiry": (m.get("closeTime") or m.get("endDate")
                            or m.get("expirationTime")),
                 "venue": "polymarket-us",
@@ -479,102 +674,71 @@ def default_readers(client=None):
 
     def book(market_id):
         bid, ask = pmus._bbo_quotes(_client(), market_id)
-        return {"bid": bid, "ask": ask,
-                "source": "markets.bbo marketData (the feed the side "
-                          "attribution was proven against, run 33395797987)"}
+        # THE BOOK IS READ ON THE LONG SIDE. For a SHORT ticket the
+        # complementary prices are 1 - ask / 1 - bid, and the conversion
+        # is done HERE, once, so one basis reaches everything downstream.
+        out = {"longBid": bid, "longAsk": ask, "priceBasis": declared_side,
+               "source": "markets.bbo marketData (the feed the side "
+                         "attribution was proven against, run 33395797987)",
+               "basisRule": PRICE_BASIS_RULE}
+        if declared_side == "SHORT":
+            out["bid"] = None if ask is None else round(1.0 - ask, 10)
+            out["ask"] = None if bid is None else round(1.0 - bid, 10)
+        else:
+            out["bid"], out["ask"] = bid, ask
+        return out
 
     def rules(market_id):
-        m = (_client().markets.retrieve_by_slug(market_id) or {})
-        m = m.get("market") if isinstance(m.get("market"), dict) else m
-        if not isinstance(m, dict):
-            raise ValueError("MARKET_RESPONSE_NOT_A_MAPPING")
-        return {"tick": _amount(m.get("tickSize")),
-                "minQuantity": m.get("minQuantity", m.get("minOrderQuantity")),
+        m = _market_row(_client(), market_id)
+        return {"tick": _amount(m.get(F_TICK)),
+                "minQuantity": m.get(F_MIN_QTY),
+                "fields": {"tick": F_TICK, "minQuantity": F_MIN_QTY},
                 "source": "markets.retrieve_by_slug"}
 
     def fees(_market_id):
-        raise ReaderNotWired(
-            "NO VERIFIED FEE READ EXISTS IN THIS CODEBASE. The venue's fee "
-            "schedule has never been read programmatically here, and the "
-            "$5 all-in cap cannot be enforced against a fee we invented. "
-            "This stays a blocker until a real read is added.")
+        from . import calibration_fees as cf
+        # THE DOCUMENTED SCHEDULE, with its provenance attached. It is not
+        # a fee for this order -- fees depend on quantity, price and role,
+        # and none of those is known until the ticket is sized. The
+        # evidence command quotes and reconciles after sizing.
+        return {"schedule": dict(cf.SCHEDULE),
+                "model": "%s effective %s (taker %s, maker %s)" % (
+                    cf.SCHEDULE["SOURCES"][0], cf.SCHEDULE["EFFECTIVE_DATE"],
+                    cf.SCHEDULE["TAKER_COEFFICIENT"],
+                    cf.SCHEDULE["MAKER_REBATE_COEFFICIENT"]),
+                "quotedAtSizing": True,
+                "source": "calibration_fees.SCHEDULE"}
 
     return {"account": account, "open_orders": open_orders,
             "market": market, "book": book, "rules": rules, "fees": fees}
 
 
-# ── research isolation ───────────────────────────────────────────────
-
-VENUE_TOUCHING_PREFIX = "beta48-"
-
-
-def domain_isolation(fetch=None, repo=None, token=None):
-    """Is a protected research collector holding or waiting for the slot?
-
-    Returns one of CLEAR / ACTIVE / UNKNOWN, never a bare boolean, so an
-    unreadable answer cannot be spent as an idle one. Every beta48-*
-    workflow counts as venue-touching: a superset of the concurrency
-    group, which errs towards refusing to read.
-    """
-    repo = repo or os.environ.get("GITHUB_REPOSITORY")
-    token = token or os.environ.get("GITHUB_TOKEN")
-    if fetch is None:
-        if not repo or not token:
-            return {"STATE": "UNKNOWN", "REASON": "NO_REPO_OR_TOKEN",
-                    "note": AN_UNESTABLISHED_ISOLATION_IS_NOT_IDLE}
-
-        def fetch(url):                                   # pragma: no cover
-            import httpx
-            r = httpx.get(url, timeout=20.0, headers={
-                "Authorization": "Bearer %s" % token,
-                "Accept": "application/vnd.github+json"})
-            r.raise_for_status()
-            return r.json()
-
-    occupying = []
-    try:
-        for status in ("in_progress", "queued"):
-            page = fetch("https://api.github.com/repos/%s/actions/runs"
-                         "?status=%s&per_page=100" % (repo, status))
-            if not isinstance(page, dict) or "workflow_runs" not in page:
-                return {"STATE": "UNKNOWN", "REASON": "CENSUS_UNREADABLE",
-                        "note": AN_UNESTABLISHED_ISOLATION_IS_NOT_IDLE}
-            rows = page.get("workflow_runs")
-            if not isinstance(rows, list):
-                return {"STATE": "UNKNOWN", "REASON": "CENSUS_UNREADABLE",
-                        "note": AN_UNESTABLISHED_ISOLATION_IS_NOT_IDLE}
-            if len(rows) < int(page.get("total_count") or 0):
-                # An incomplete walk cannot show an empty domain.
-                return {"STATE": "UNKNOWN", "REASON": "CENSUS_INCOMPLETE",
-                        "note": AN_UNESTABLISHED_ISOLATION_IS_NOT_IDLE}
-            for r in rows:
-                if not isinstance(r, dict):
-                    return {"STATE": "UNKNOWN", "REASON": "CENSUS_ROW_MALFORMED",
-                            "note": AN_UNESTABLISHED_ISOLATION_IS_NOT_IDLE}
-                name = r.get("name")
-                if not name:
-                    return {"STATE": "UNKNOWN",
-                            "REASON": "UNATTRIBUTABLE_OCCUPYING_RUN",
-                            "note": AN_UNESTABLISHED_ISOLATION_IS_NOT_IDLE}
-                if str(name).startswith(VENUE_TOUCHING_PREFIX):
-                    occupying.append({"workflow": name, "id": r.get("id"),
-                                      "status": status})
-    except Exception as exc:                                   # noqa: BLE001
-        return {"STATE": "UNKNOWN",
-                "REASON": "CENSUS_READ_FAILED: %s" % type(exc).__name__,
-                "note": AN_UNESTABLISHED_ISOLATION_IS_NOT_IDLE}
-
-    if occupying:
-        return {"STATE": "ACTIVE", "REASON": "COLLECTOR_HOLDS_THE_DOMAIN",
-                "runs": occupying}
-    return {"STATE": "CLEAR", "REASON": None, "runs": []}
-
+# ── research isolation: DELEGATED, and never optional ────────────────
+#
+# The previous version walked two status filters and identified members by
+# a `beta48-` prefix. run85-phase2-capture is a member of the venue
+# concurrency group and carries no such prefix, so an EXECUTING run85 read
+# as an idle domain -- the exact collector the coordination protects. And
+# `?status=queued` is a filter the API cannot express completely, so a
+# concurrency-held member could be invisible.
+#
+# It is replaced by calibration_domain, which delegates to the
+# repository's own tested machinery: the inventory venue_domain discovers
+# from the workflow files, the exhaustive per-workflow walk and census in
+# run_census, and venue_domain.isolation for the verdict. No second
+# census, no rule of its own.
+#
+# COORDINATION IS NOT A FLAG. `run()` calls it unconditionally. There is
+# no argument that turns it off; the only argument records an operator
+# EXPLICITLY accepting a snapshot-only read for a non-production gather,
+# and that acceptance is written into the report.
 
 # ── the command ──────────────────────────────────────────────────────
 
 def run(market_id, readers=None, session=None, quantity=None,
-        order_type="LIMIT_GTC_POST_ONLY", require_idle_domain=False,
-        isolation=None, session_loader=None):
+        order_type="LIMIT_GTC_POST_ONLY", coordination=None,
+        session_loader=None, accept_snapshot_only=False, outcome_side=None,
+        exit_policy=None, preview=None):
     """Gather, propose, and return the whole evidence record.
 
     Reads only. Returns a dict; never raises for an unreadable venue --
@@ -583,20 +747,25 @@ def run(market_id, readers=None, session=None, quantity=None,
     report = {"marketId": market_id, "ranAt": _now(),
               "submissionReachable": False}
 
-    if require_idle_domain:
-        iso = isolation if isinstance(isolation, dict) else (
-            isolation() if callable(isolation) else domain_isolation())
-        report["domainIsolation"] = iso
-        if iso.get("STATE") != "CLEAR":
-            # NOT IDLE, AND NOT READ. No venue request is made at all.
-            report["evidence"] = None
-            report["proposal"] = {"ticket": None, "submittable": False,
-                                  "blockers": [B_RESEARCH]}
-            report["blockers"] = [B_RESEARCH]
-            report["why"] = ("a protected research collector holds or may "
-                             "hold the venue slot, or the state could not "
-                             "be established; nothing was read")
-            return report
+    # COORDINATION FIRST, ALWAYS. Not behind a flag: omitting an argument
+    # must not be a way to read the venue during a protected capture.
+    from . import calibration_domain as cd
+    coord = coordination if isinstance(coordination, dict) else (
+        coordination() if callable(coordination)
+        else cd.coordination(require_reservation=not accept_snapshot_only))
+    report["coordination"] = coord
+    report["snapshotOnlyAccepted"] = bool(accept_snapshot_only)
+    if coord.get("blockers"):
+        # NOT COORDINATED, AND NOT READ. No venue request is made at all.
+        report["evidence"] = None
+        report["proposal"] = {"ticket": None, "submittable": False,
+                              "blockers": list(coord["blockers"])}
+        report["blockers"] = list(coord["blockers"])
+        report["why"] = ("a protected research collector holds or may hold "
+                         "the venue slot, the domain state could not be "
+                         "established, or no execution reservation is held; "
+                         "nothing was read")
+        return report
 
     if session is None:
         # THE DURABLE SESSION, not a dict made up here. The budget that
@@ -618,8 +787,11 @@ def run(market_id, readers=None, session=None, quantity=None,
     else:
         report["sessionSource"] = "caller"
 
-    ev = gather(market_id, readers or default_readers(), quantity=quantity)
-    proposal = propose(ev, session, quantity=quantity, order_type=order_type)
+    ev = gather(market_id,
+                readers or default_readers(declared_side=outcome_side),
+                quantity=quantity, outcome_side=outcome_side)
+    proposal = propose(ev, session, quantity=quantity, order_type=order_type,
+                       exit_policy=exit_policy, preview=preview)
     report["evidence"] = ev
     report["proposal"] = proposal
     report["blockers"] = sorted(set(list(ev["evidenceBlockers"])
@@ -639,12 +811,31 @@ def _cli(argv=None):
     ap.add_argument("--market", required=True)
     ap.add_argument("--quantity", type=int, default=None)
     ap.add_argument("--order-type", default="LIMIT_GTC_POST_ONLY")
-    ap.add_argument("--require-idle-domain", action="store_true")
+    ap.add_argument("--outcome-side", choices=("LONG", "SHORT"), default=None,
+                    help="WHICH SIDE the operator is proposing. Required for "
+                         "a ticket; verified against the venue record rather "
+                         "than inferred from the market title.")
+    ap.add_argument("--max-exit-orders", type=int, default=None,
+                    help="how many exit orders the permitted policy allows. "
+                         "No default: an unstated exit policy cannot bound "
+                         "the reserve for an exit that has not happened.")
+    ap.add_argument("--partial-fills", action="store_true",
+                    help="the permitted exit policy allows partial fills, so "
+                         "a remainder may need a further order.")
+    ap.add_argument("--accept-snapshot-only", action="store_true",
+                    help="record an operator's EXPLICIT acceptance of a "
+                         "census snapshot instead of an execution "
+                         "reservation. Does not disable the census.")
     ap.add_argument("--out", default=None)
     a = ap.parse_args(argv)
 
+    policy = None
+    if a.max_exit_orders is not None:
+        policy = {"maxExitOrders": a.max_exit_orders,
+                  "partialFillsAllowed": bool(a.partial_fills)}
     report = run(a.market, quantity=a.quantity, order_type=a.order_type,
-                 require_idle_domain=a.require_idle_domain)
+                 outcome_side=a.outcome_side, exit_policy=policy,
+                 accept_snapshot_only=a.accept_snapshot_only)
     text = json.dumps(report, indent=2, sort_keys=True, default=str)
     if a.out:
         with open(a.out, "w") as fh:

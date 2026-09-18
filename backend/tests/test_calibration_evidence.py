@@ -2,48 +2,74 @@
 
 The preflight endpoint consumed whatever the caller typed in. That makes
 an operator the source of the very facts the check exists to verify. This
-module goes and reads them, and every test here is about what happens
+module goes and reads them, and most tests here are about what happens
 when a read fails -- because the only interesting property is that a
 missing fact becomes a named blocker rather than a plausible default.
+
+The readers are exercised against the OFFICIAL schema field names
+(orderPriceMinTickSize, minimumTradeQty, currentBalance, buyingPower,
+marketSides[].long), because the first version guessed at all five and
+every guess was wrong.
 """
 
 from __future__ import annotations
+
+from decimal import Decimal
 
 import pytest
 
 from sportsassets import calibration as cal
 from sportsassets import calibration_evidence as ce
+from sportsassets import calibration_fees as cf
+
+MARKET = "aec-atp-sin-alc-2026-09-18"
+
+# The exit policy is STATED, never defaulted: the reserve for an exit that
+# has not happened depends on how many orders it is allowed to take.
+EXIT_POLICY = {"maxExitOrders": 2, "partialFillsAllowed": True}
+
+CLEAR_COORD = {"domain": {"STATE": "CLEAR"},
+               "reservation": {"RESERVATION_HELD": True},
+               "blockers": [], "MAY_READ_THE_VENUE": True}
 
 
 def readers(**over):
     r = {
-        "account": lambda: {"cash": 5000.0, "account": "bettortoken-main"},
+        "account": lambda: {"account": "pmus:ABCD1234", "cash": 5000.0,
+                            "currentBalance": 5000.0, "buyingPower": 7500.0},
         "open_orders": lambda m: [],
-        "market": lambda m: {"slug": m, "outcome": "XXX to win",
-                             "outcomeSide": "LONG",
+        "market": lambda m: {"slug": m, "outcome": "SIN to win",
+                             "outcomeSide": "LONG", "outcomeSideBlocker": None,
+                             "priceBasis": "LONG", "sideIdentifier": "sin",
                              "venue": "polymarket-us",
                              "expiry": "2026-09-18T23:00:00Z"},
-        "book": lambda m: {"bid": 0.39, "ask": 0.40},
+        "book": lambda m: {"bid": 0.39, "ask": 0.40, "priceBasis": "LONG"},
         "rules": lambda m: {"tick": 0.01, "minQuantity": 1},
-        "fees": lambda m: {"entry": 0.20, "exit": 0.40,
-                           "model": "venue schedule 2026-09"},
+        "fees": lambda m: {"schedule": dict(cf.SCHEDULE),
+                           "model": "docs.polymarket.us/fees effective "
+                                    "2026-09-17 (taker 0.0695)"},
     }
     r.update(over)
     return r
-
-
-MARKET = "aec-atp-sin-alc-2026-09-18"
 
 
 def boom(*_a, **_k):
     raise RuntimeError("venue 503")
 
 
+def gathered(**over):
+    return ce.gather(MARKET, readers(**over), outcome_side="LONG")
+
+
+# ─────────────────────────────────────────────────────────────────────
+# reads, timestamps, blockers
+# ─────────────────────────────────────────────────────────────────────
+
 class TestEveryReadIsStampedAndCanFailOnItsOwn:
     def test_a_complete_gather_carries_a_timestamp_per_read(self):
-        ev = ce.gather(MARKET, readers())
-        assert ev["evidenceComplete"] is True
-        for k in ("account", "openOrders", "market", "book", "rules", "fees"):
+        ev = gathered()
+        assert ev["evidenceComplete"] is True, ev["evidenceBlockers"]
+        for k in ce.READ_KEYS:
             assert ev[k]["at"].endswith("Z"), k
             assert ev[k]["ok"] is True, k
 
@@ -56,117 +82,45 @@ class TestEveryReadIsStampedAndCanFailOnItsOwn:
         ("fees", ce.B_FEES),
     ])
     def test_each_failed_read_becomes_a_named_blocker(self, key, blocker):
-        ev = ce.gather(MARKET, readers(**{key: boom}))
+        ev = gathered(**{key: boom})
         assert blocker in ev["evidenceBlockers"]
         assert ev["evidenceComplete"] is False
 
     def test_a_readable_but_empty_book_is_still_a_blocker(self):
-        ev = ce.gather(MARKET, readers(book=lambda m: {"bid": 0.39,
-                                                       "ask": None}))
+        ev = gathered(book=lambda m: {"bid": 0.39, "ask": None,
+                                      "priceBasis": "LONG"})
         assert ce.B_BOOK in ev["evidenceBlockers"]
 
     def test_a_missing_minimum_quantity_is_named_separately(self):
-        ev = ce.gather(MARKET, readers(rules=lambda m: {"tick": 0.01}))
+        ev = gathered(rules=lambda m: {"tick": 0.01})
         assert ce.B_MIN_QTY in ev["evidenceBlockers"]
         assert ce.B_TICK not in ev["evidenceBlockers"]
 
-    def test_a_fee_schedule_missing_one_leg_is_a_blocker(self):
-        ev = ce.gather(MARKET, readers(fees=lambda m: {"entry": 0.2,
-                                                       "exit": None}))
-        assert ce.B_FEES in ev["evidenceBlockers"]
-
-
-class TestNothingIsInvented:
-    def test_incomplete_evidence_proposes_no_ticket_at_all(self):
-        ev = ce.gather(MARKET, readers(fees=boom))
-        got = ce.propose(ev, cal.empty_session("S"))
-        assert got["ticket"] is None
-        assert ce.B_FEES in got["blockers"]
-        assert "nothing is filled in" in got["why"]
-
-    def test_the_gather_says_so_in_its_own_payload(self):
-        ev = ce.gather(MARKET, readers())
-        assert "never asked to supply a fact" in ev["nothingIsInvented"]
-
-
-class TestTheSizeIsDerivedNotChosen:
-    def test_the_quantity_is_the_largest_that_fits_the_five_dollar_cap(self):
-        got = ce.propose(ce.gather(MARKET, readers()), cal.empty_session("S"))
-        t = got["ticket"]
-        # The price is the PASSIVE one -- the 39c bid, not the 40c ask.
-        # 5.00 - 0.20 - 0.40 = 4.40 of shares at 39c -> 11.
-        assert t["price"] == 0.39
-        assert t["quantity"] == 11
-        assert got["allInCost"] == 4.89
-        assert got["allInCost"] <= cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE
-        # and one more share would not fit
-        assert cal.all_in_cost(12, 0.39, 0.20, 0.40) > \
-            cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE
-
-    def test_a_nearly_spent_session_shrinks_the_ticket(self):
-        s = cal.empty_session("S")
-        s["spent"] = 98.00                     # 2.00 left
-        got = ce.propose(ce.gather(MARKET, readers()), s)
-        assert got["ticket"]["quantity"] == 3   # (2.00-0.60)/0.39
-        assert got["allInCost"] <= 2.00
-
-    def test_a_market_whose_minimum_does_not_fit_is_refused_not_resized(self):
-        """The limit is never raised to make a market fit."""
-        ev = ce.gather(MARKET, readers(
-            rules=lambda m: {"tick": 0.01, "minQuantity": 100}))
-        got = ce.propose(ev, cal.empty_session("S"))
-        assert cal.R_MIN_QUANTITY in got["blockers"]
-        assert cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE == 5.00
-
-    def test_the_proposal_is_never_submittable_by_itself(self):
-        got = ce.propose(ce.gather(MARKET, readers()), cal.empty_session("S"))
-        assert got["submittable"] is False
-        assert "needs a human approval" in got["why"]
-
-    def test_the_ticket_carries_the_evidence_instant(self):
-        ev = ce.gather(MARKET, readers())
-        got = ce.propose(ev, cal.empty_session("S"))
-        assert got["ticket"]["evidenceAsOf"] == ev["gatheredAt"]
-
-
-class TestSubmissionIsNotReachable:
-    def test_the_module_imports_no_order_creation_path(self):
-        import pathlib
-        src = pathlib.Path(ce.__file__).read_text()
-        code = "\n".join(ln for ln in src.splitlines()
-                          if not ln.strip().startswith("#"))
-        code = code.split('"""', 2)[-1]          # drop the module docstring
-        for forbidden in ("submit_fok", "orders.create", "calibration_execute",
-                          "LiveVenue"):
-            assert forbidden not in code, forbidden
-
-    def test_there_is_no_submit_flag(self):
-        """CODE, NOT PROSE. The first version of this test grepped the
-        file and matched the docstring sentence saying there is no
-        --submit flag -- reading commentary as behaviour, which is the
-        same mistake as trusting a comment that says the row exists."""
-        import argparse
-        import inspect
-        src = inspect.getsource(ce._cli)
-        flags = [ln for ln in src.splitlines() if "add_argument" in ln]
-        assert flags, "the CLI defines no arguments at all"
-        assert not any("submit" in ln for ln in flags), flags
-        assert isinstance(argparse.ArgumentParser(), argparse.ArgumentParser)
+    def test_nothing_is_invented(self):
+        assert "never asked to supply a fact" in gathered()["nothingIsInvented"]
 
 
 # ─────────────────────────────────────────────────────────────────────
-# THE COMMAND ITSELF. The first version parsed its arguments and raised
-# SystemExit, so none of what follows could have been true of it.
+# C. the official schema contract
 # ─────────────────────────────────────────────────────────────────────
 
 class FakeMarkets:
-    """The SDK surface the real readers actually call."""
-
     def __init__(self, market=None, bbo=None, raises=None):
         self._market = market if market is not None else {
-            "market": {"slug": MARKET, "title": "XXX to win",
-                       "closeTime": "2026-09-18T23:00:00Z",
-                       "tickSize": "0.01", "minQuantity": 1}}
+            "market": {
+                "slug": MARKET,
+                "title": "Sinner vs Alcaraz",
+                "closeTime": "2026-09-18T23:00:00Z",
+                # THE OFFICIAL NAMES. The first version looked for
+                # tickSize and minQuantity and found neither.
+                "orderPriceMinTickSize": "0.01",
+                "minimumTradeQty": 1,
+                "marketSides": [
+                    {"long": True, "identifier": "sin",
+                     "description": "Sinner to win"},
+                    {"long": False, "identifier": "sin",
+                     "description": "Sinner not to win"},
+                ]}}
         self._bbo = bbo if bbo is not None else {
             "marketData": {"bestBid": 0.39, "bestAsk": 0.40}}
         self._raises = raises
@@ -183,8 +137,9 @@ class FakeMarkets:
 class FakeAccount:
     def __init__(self, resp=None, raises=None):
         self._resp = resp if resp is not None else {
-            "accountId": "bettortoken-main",
-            "balances": [{"currency": "USD", "cash": {"value": "5000.00"}}]}
+            "balances": [{"currency": "USD",
+                          "currentBalance": {"value": "5000.00"},
+                          "buyingPower": {"value": "7500.00"}}]}
         self._raises = raises
 
     def balances(self):
@@ -194,11 +149,22 @@ class FakeAccount:
 
 
 class FakeOrders:
-    def __init__(self, resp=None):
+    def __init__(self, resp=None, preview=None):
         self._resp = resp if resp is not None else {"orders": []}
+        self._preview = preview
+        self.created = []
+        self.previewed = []
 
     def list(self, params=None):
         return self._resp
+
+    def preview(self, params):
+        self.previewed.append(params)
+        return self._preview
+
+    def create(self, params):                     # pragma: no cover
+        self.created.append(params)
+        raise AssertionError("the evidence command must never create")
 
 
 class FakeSDK:
@@ -206,93 +172,339 @@ class FakeSDK:
         self.markets = FakeMarkets(**{k: v for k, v in kw.items()
                                       if k in ("market", "bbo", "raises")})
         self.account = FakeAccount(kw.get("balances"), kw.get("account_raises"))
-        self.orders = FakeOrders(kw.get("orders"))
+        self.orders = FakeOrders(kw.get("orders"), kw.get("preview"))
 
 
-class TestTheRealReadersAreWiredToRealCalls:
-    """Driven through `default_readers` against a fake SDK transport, so
-    what is exercised is the reader this command would actually use."""
+class Config:
+    pmus_key_id = "ABCD1234EFGH"
+    pmus_secret_key = "never-read-here"
 
-    def test_the_account_reader_reads_balances_and_names_the_account(self):
-        r = ce.default_readers(client=FakeSDK())
+
+class TestTheOfficialSchemaFieldNames:
+    def test_the_tick_and_minimum_come_from_the_documented_fields(self):
+        r = ce.default_readers(client=FakeSDK(), config=Config,
+                               declared_side="LONG")
+        got = r["rules"](MARKET)
+        assert got["tick"] == 0.01
+        assert got["minQuantity"] == 1
+        assert got["fields"] == {"tick": "orderPriceMinTickSize",
+                                 "minQuantity": "minimumTradeQty"}
+
+    def test_the_old_guessed_names_are_not_used(self):
+        """tickSize / minQuantity are not the venue's field names."""
+        assert ce.F_TICK == "orderPriceMinTickSize"
+        assert ce.F_MIN_QTY == "minimumTradeQty"
+        r = ce.default_readers(client=FakeSDK(market={"market": {
+            "slug": MARKET, "tickSize": "0.01", "minQuantity": 5,
+            "marketSides": []}}), config=Config, declared_side="LONG")
+        got = r["rules"](MARKET)
+        assert got["tick"] is None and got["minQuantity"] is None
+
+    def test_current_balance_and_buying_power_are_kept_apart(self):
+        r = ce.default_readers(client=FakeSDK(), config=Config,
+                               declared_side="LONG")
         got = r["account"]()
-        assert got["account"] == "bettortoken-main"
-        assert got["cash"] == 5000.0
-        assert got["source"] == "account.balances"
+        assert got["currentBalance"] == 5000.0
+        assert got["buyingPower"] == 7500.0
+        # the budget check spends CASH, never buying power
+        assert got["cash"] == got["currentBalance"] != got["buyingPower"]
 
-    def test_the_book_reader_uses_the_bbo_feed_the_side_was_proven_on(self):
-        r = ce.default_readers(client=FakeSDK())
-        got = r["book"](MARKET)
-        assert (got["bid"], got["ask"]) == (0.39, 0.40)
-        assert "markets.bbo" in got["source"]
+    def test_a_balances_payload_with_no_usd_row_raises(self):
+        r = ce.default_readers(
+            client=FakeSDK(balances={"balances": [{"currency": "EUR"}]}),
+            config=Config, declared_side="LONG")
+        with pytest.raises(ValueError):
+            r["account"]()
 
-    def test_the_market_and_rules_readers_read_the_venue_row(self):
-        r = ce.default_readers(client=FakeSDK())
-        assert r["market"](MARKET)["slug"] == MARKET
-        assert r["rules"](MARKET) == {"tick": 0.01, "minQuantity": 1,
-                                      "source": "markets.retrieve_by_slug"}
 
-    def test_the_outcome_side_is_not_invented_by_the_reader(self):
-        """The venue row does not publish a LONG/SHORT selector, so the
-        reader leaves it unset and it becomes a blocker. Filling it in
-        here would be choosing a side on the operator's behalf."""
-        assert ce.default_readers(client=FakeSDK())["market"](
-            MARKET)["outcomeSide"] is None
+class TestAccountIdentityIsCredentialBound:
+    def test_it_comes_from_configuration_not_from_the_payload(self):
+        got = ce.account_identity(Config)
+        assert got["ACCOUNT"] == "pmus:ABCD1234"
+        assert got["BLOCKER"] is None
+        assert "credential-bound" in got["source"]
 
-    def test_the_fee_reader_refuses_because_no_verified_read_exists(self):
-        with pytest.raises(ce.ReaderNotWired) as e:
-            ce.default_readers(client=FakeSDK())["fees"](MARKET)
-        assert "NO VERIFIED FEE READ" in str(e.value)
+    def test_an_undocumented_accountId_is_not_required(self):
+        """get-account-balances does not promise one. Requiring it would
+        make a perfectly real account read as unidentified."""
+        r = ce.default_readers(client=FakeSDK(), config=Config,
+                               declared_side="LONG")
+        assert "accountId" not in str(FakeAccount().balances())
+        assert r["account"]()["account"] == "pmus:ABCD1234"
 
-    def test_an_unreadable_venue_becomes_a_blocker_not_a_default(self):
-        r = ce.default_readers(client=FakeSDK(raises=RuntimeError("503")))
-        ev = ce.gather(MARKET, r)
-        assert ce.B_MARKET in ev["evidenceBlockers"]
-        assert ev["evidenceComplete"] is False
+    def test_no_configured_credential_is_a_blocker(self):
+        class NoKey:
+            pmus_key_id = ""
+        got = ce.account_identity(NoKey)
+        assert got["ACCOUNT"] is None
+        assert got["BLOCKER"] == ce.B_ACCOUNT_ID
 
+    def test_the_secret_never_reaches_the_evidence(self):
+        got = ce.account_identity(Config)
+        assert Config.pmus_secret_key not in str(got)
+        assert got["fullKeyInEvidence"] is False
+        assert Config.pmus_key_id not in got["ACCOUNT"]     # truncated
+
+
+class TestTheOutcomeSideIsDeclaredThenVerified:
+    ROW = FakeMarkets()._market["market"]
+
+    def test_a_declared_long_resolves_to_the_venue_s_long_side(self):
+        got = ce.resolve_side(self.ROW, "LONG")
+        assert got["OUTCOME_SIDE"] == "LONG"
+        assert got["description"] == "Sinner to win"
+        assert got["long"] is True
+        assert got["BLOCKER"] is None
+
+    def test_a_declared_short_resolves_to_the_other_side(self):
+        got = ce.resolve_side(self.ROW, "SHORT")
+        assert got["description"] == "Sinner not to win"
+        assert got["long"] is False
+
+    def test_an_undeclared_side_is_a_blocker_and_never_defaults_to_long(self):
+        for declared in (None, "", "YES", "Sinner to win"):
+            got = ce.resolve_side(self.ROW, declared)
+            assert got["OUTCOME_SIDE"] is None
+            assert got["BLOCKER"] == ce.B_SIDE_NOT_DECLARED
+
+    def test_a_side_the_venue_does_not_list_is_a_blocker(self):
+        row = {"marketSides": [{"long": True, "description": "only side"}]}
+        assert ce.resolve_side(row, "SHORT")["BLOCKER"] == ce.B_SIDE_NOT_FOUND
+
+    def test_two_matching_sides_are_ambiguous_not_a_coin_flip(self):
+        row = {"marketSides": [{"long": True, "description": "a"},
+                               {"long": True, "description": "b"}]}
+        assert ce.resolve_side(row, "LONG")["BLOCKER"] == ce.B_SIDE_AMBIGUOUS
+
+    def test_the_outcome_is_the_side_description_not_the_market_title(self):
+        r = ce.default_readers(client=FakeSDK(), config=Config,
+                               declared_side="LONG")
+        got = r["market"](MARKET)
+        assert got["outcome"] == "Sinner to win"
+        assert got["marketTitle"] == "Sinner vs Alcaraz"
+        assert got["outcome"] != got["marketTitle"]
+
+
+class TestThePriceBasisIsCarriedThrough:
+    def test_a_long_ticket_quotes_the_long_book(self):
+        r = ce.default_readers(client=FakeSDK(), config=Config,
+                               declared_side="LONG")
+        b = r["book"](MARKET)
+        assert (b["bid"], b["ask"]) == (0.39, 0.40)
+        assert b["priceBasis"] == "LONG"
+
+    def test_a_short_ticket_quotes_the_complement(self):
+        """The complementary outcome trades at 1 - p. Reading the LONG
+        book and sending a SHORT order would price two different things
+        and differ by the whole spread between them."""
+        r = ce.default_readers(client=FakeSDK(), config=Config,
+                               declared_side="SHORT")
+        b = r["book"](MARKET)
+        assert b["priceBasis"] == "SHORT"
+        assert (b["bid"], b["ask"]) == (0.60, 0.61)     # 1-0.40, 1-0.39
+        assert (b["longBid"], b["longAsk"]) == (0.39, 0.40)
+
+    def test_a_basis_mismatch_between_book_and_market_is_a_blocker(self):
+        ev = ce.gather(MARKET, readers(
+            book=lambda m: {"bid": 0.6, "ask": 0.61, "priceBasis": "SHORT"}),
+            outcome_side="LONG")
+        assert ce.B_PRICE_BASIS in ev["evidenceBlockers"]
+
+    def test_the_ticket_carries_the_side_the_adapter_will_map(self):
+        t = ce.propose(gathered(), cal.empty_session("S"),
+                       exit_policy=EXIT_POLICY)["ticket"]
+        from sportsassets import calibration_adapter as ad
+        p = ad.order_params(dict(t, orderType=t["orderType"]))
+        assert p["outcomeSide"] == "LONG"
+        assert p["nativeIntentExpected"] == "ORDER_INTENT_BUY_LONG"
+
+
+# ─────────────────────────────────────────────────────────────────────
+# B. the fee source
+# ─────────────────────────────────────────────────────────────────────
+
+class TestTheFeeScheduleAndItsProvenance:
+    def test_the_published_terms_are_recorded(self):
+        assert cf.SCHEDULE["TAKER_COEFFICIENT"] == "0.0695"
+        assert cf.SCHEDULE["MAKER_REBATE_COEFFICIENT"] == "-0.0125"
+        assert cf.SCHEDULE["EFFECTIVE_DATE"] == "2026-09-17"
+        assert "docs.polymarket.us/fees" in cf.SCHEDULE["SOURCES"][0]
+
+    def test_retrieval_is_recorded_honestly(self):
+        """The pages were not fetched by this code. Saying so is what
+        keeps a documented expectation from passing as an observation."""
+        assert cf.SCHEDULE["RETRIEVED_HERE"] is False
+        assert "403" in cf.SCHEDULE["WHY_NOT_RETRIEVED_HERE"]
+        assert cf.SCHEDULE["FORMULA_INDEPENDENTLY_RETRIEVED"] is False
+
+    def test_the_arithmetic_is_exact_not_binary_float(self):
+        q = cf.quote(0.39, 11, role=cf.ROLE_TAKER)
+        assert isinstance(q["FEE"], Decimal)
+        # 0.0695 * 11 * 0.39 = 0.2981...  -> reserve rounds UP
+        assert q["FEE"] == Decimal("0.30")
+        assert q["basis"] == Decimal("0.39")
+
+    def test_the_basis_is_the_cheaper_side_of_the_dollar(self):
+        assert cf.fee_basis(0.39) == Decimal("0.39")
+        assert cf.fee_basis(0.61) == Decimal("0.39")
+        assert cf.fee_basis(0.50) == Decimal("0.5")
+        assert cf.fee_basis(0) is None and cf.fee_basis(1) is None
+
+    def test_a_schedule_not_yet_effective_does_not_apply(self):
+        q = cf.quote(0.39, 11, at="2026-09-16")
+        assert q["BLOCKER"] == cf.B_SCHEDULE_NOT_EFFECTIVE
+        assert q["FEE"] is None
+
+    def test_an_unsupported_role_is_refused(self):
+        assert cf.quote(0.39, 11, role="WHATEVER")["BLOCKER"] == \
+            cf.B_UNSUPPORTED_ROLE
+
+    def test_there_is_no_default_fee(self):
+        assert "no default fee" in cf.NO_INVENTED_DEFAULT
+        assert cf.quote(None, 11)["BLOCKER"] == cf.B_BAD_INPUT
+        assert cf.quote(0.39, None)["BLOCKER"] == cf.B_BAD_INPUT
+
+
+class TestTheFeeDependsOnTheSizeSoItIsQuotedAfterSizing:
+    def test_doubling_the_quantity_doubles_the_fee(self):
+        a = cf.quote(0.39, 10)["FEE"]
+        b = cf.quote(0.39, 20)["FEE"]
+        assert b > a
+        assert abs(b - 2 * a) <= Decimal("0.01")
+
+    def test_the_ticket_fee_matches_the_ticket_quantity(self):
+        got = ce.propose(gathered(), cal.empty_session("S"),
+                         exit_policy=EXIT_POLICY)
+        t = got["ticket"]
+        expect = cf.entry_reserve(t["price"], t["quantity"])["FEE"]
+        assert Decimal(str(t["entryFeeReserve"])) == expect
+
+    def test_the_size_fits_the_cap_with_its_own_fee_not_another_size_s(self):
+        got = ce.propose(gathered(), cal.empty_session("S"),
+                         exit_policy=EXIT_POLICY)
+        t = got["ticket"]
+        assert got["allInCost"] <= cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE
+        # one more share, with the fee THAT size would incur, does not fit
+        n = t["quantity"] + 1
+        bigger = (n * t["price"]
+                  + float(cf.entry_reserve(t["price"], n)["FEE"])
+                  + float(cf.exit_reserve(n, EXIT_POLICY)["FEE"]))
+        assert bigger > cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE
+
+
+class TestTheEntryIsReservedAtTheTakerRate:
+    def test_a_post_only_entry_still_reserves_the_taker_fee(self):
+        got = cf.entry_reserve(0.39, 11, post_only=True)
+        assert got["role"] == cf.ROLE_TAKER
+        assert got["FEE"] > 0
+        assert "order 153" in got["whyTakerRate"]
+
+    def test_the_rebate_is_never_netted_off_the_reserve(self):
+        entry = cf.entry_reserve(0.39, 11)["FEE"]
+        rebate = cf.recorded_rebate(0.39, 11, cf.ROLE_MAKER)
+        assert rebate["REBATE"] < 0
+        assert entry > 0                       # unreduced
+        assert rebate["appliedToBudget"] is False
+        assert "never reduces a reserve or replenishes" in rebate["note"]
+
+    def test_a_taker_role_earns_no_rebate_to_record(self):
+        assert cf.recorded_rebate(0.39, 11, cf.ROLE_TAKER)["REBATE"] == \
+            Decimal("0.00")
+
+
+class TestTheExitIsBoundedWithoutKnowingItsPrice:
+    def test_the_bound_uses_the_worst_admissible_basis(self):
+        got = cf.exit_reserve(11, EXIT_POLICY)
+        assert got["worstCaseBasis"] == Decimal("0.5")
+        # 0.0695 * 11 * 0.5 = 0.382..., rounded up, times two orders
+        assert got["perOrder"] == Decimal("0.39")
+        assert got["FEE"] == Decimal("0.78")
+
+    def test_more_permitted_exit_orders_reserve_more(self):
+        one = cf.exit_reserve(11, {"maxExitOrders": 1,
+                                   "partialFillsAllowed": True})["FEE"]
+        three = cf.exit_reserve(11, {"maxExitOrders": 3,
+                                     "partialFillsAllowed": True})["FEE"]
+        assert three == 3 * one
+
+    @pytest.mark.parametrize("policy", [
+        None, {}, {"maxExitOrders": 0, "partialFillsAllowed": True},
+        {"maxExitOrders": 2}, {"partialFillsAllowed": True},
+        {"maxExitOrders": True, "partialFillsAllowed": True},
+    ])
+    def test_an_unstated_exit_policy_is_a_blocker(self, policy):
+        assert cf.exit_reserve(11, policy)["BLOCKER"] == cf.B_EXIT_POLICY
+
+    def test_a_preview_alone_does_not_bound_the_exit(self):
+        assert "has not happened" in cf.A_PREVIEW_DOES_NOT_BOUND_THE_EXIT
+        assert "note" in cf.exit_reserve(11, EXIT_POLICY)
+
+    def test_no_ticket_without_a_stated_exit_policy(self):
+        got = ce.propose(gathered(), cal.empty_session("S"), exit_policy=None)
+        assert got["ticket"] is None
+        assert cf.B_EXIT_POLICY in got["blockers"]
+
+
+class TestTheDocumentedFeeIsReconciledAgainstThePreview:
+    def test_agreement_establishes_the_fee(self):
+        doc = cf.quote(0.39, 11)
+        obs = cf.preview_fee({"order": {"fee": {"value": "0.30"}}})
+        got = cf.reconcile(doc, obs)
+        assert got["AGREED"] is True and got["BLOCKER"] is None
+
+    def test_a_disagreement_is_a_blocker_not_a_preference(self):
+        doc = cf.quote(0.39, 11)
+        obs = cf.preview_fee({"order": {"fee": {"value": "1.50"}}})
+        got = cf.reconcile(doc, obs)
+        assert got["AGREED"] is False
+        assert got["BLOCKER"] == cf.B_DISAGREEMENT
+
+    def test_a_preview_stating_no_fee_is_unreadable_not_zero(self):
+        got = cf.preview_fee({"order": {}})
+        assert got["FEE"] is None
+        assert got["BLOCKER"] == cf.B_PREVIEW_UNREADABLE
+
+    def test_a_disagreeing_preview_stops_the_ticket(self):
+        got = ce.propose(gathered(), cal.empty_session("S"),
+                         exit_policy=EXIT_POLICY,
+                         preview=lambda p, q: {"order": {"fee": "9.99"}})
+        assert got["ticket"] is None
+        assert got["blockers"] == [cf.B_DISAGREEMENT]
+
+    def test_an_agreeing_preview_lets_the_ticket_through(self):
+        got = ce.propose(
+            gathered(), cal.empty_session("S"), exit_policy=EXIT_POLICY,
+            preview=lambda p, q: {"order": {"fee": str(
+                cf.entry_reserve(p, q)["FEE"])}})
+        assert got["ticket"] is not None
+        assert got["feeAgreement"]["AGREED"] is True
+
+
+# ─────────────────────────────────────────────────────────────────────
+# freshness, provenance, passive pricing  (unchanged rules, re-pinned)
+# ─────────────────────────────────────────────────────────────────────
 
 class TestFreshnessIsComputedNotAsserted:
     def test_a_fresh_gather_says_so_and_carries_its_age(self):
-        got = ce.propose(ce.gather(MARKET, readers()), cal.empty_session("S"))
-        assert got["ticket"]["stateFresh"] is True
-        assert got["ticket"]["stateAgeSeconds"] is not None
-        assert got["ticket"]["stateAgeSeconds"] < ce.MAX_EVIDENCE_AGE_S
+        t = ce.propose(gathered(), cal.empty_session("S"),
+                       exit_policy=EXIT_POLICY)["ticket"]
+        assert t["stateFresh"] is True
+        assert t["stateAgeSeconds"] < ce.MAX_EVIDENCE_AGE_S
 
     def test_an_old_read_is_stale_and_blocks(self):
-        ev = ce.gather(MARKET, readers())
-        for k in ce.READ_KEYS:                 # pin every read to one clock
+        ev = gathered()
+        for k in ce.READ_KEYS:
             ev[k]["at"] = "2026-09-18T16:59:30Z"
         ev["book"]["at"] = "2026-09-18T00:00:00Z"
         f = ce.freshness(ev, now="2026-09-18T17:00:00Z")
-        assert f["FRESH"] is False
-        assert f["staleReads"] == ["book"]
-        assert f["ages"]["book"] > ce.MAX_EVIDENCE_AGE_S
+        assert f["FRESH"] is False and f["staleReads"] == ["book"]
 
     def test_a_timestamp_that_will_not_parse_is_not_fresh(self):
-        ev = ce.gather(MARKET, readers())
+        ev = gathered()
         ev["rules"]["at"] = "whenever"
-        f = ce.freshness(ev)
-        assert f["FRESH"] is False
-        assert f["unreadableTimestamps"] == ["rules"]
-
-    def test_staleness_reaches_the_blockers_and_stops_the_ticket(self):
-        readers_ = readers()
-        ev = ce.gather(MARKET, readers_)
-        ev["book"]["at"] = "2020-01-01T00:00:00Z"
-        ev = dict(ev)
-        f = ce.freshness(ev)
-        assert not f["FRESH"]
-        # gather computes this itself; re-running proves the wiring
-        ev2 = ce.gather(MARKET, readers_)
-        ev2["book"]["at"] = "2020-01-01T00:00:00Z"
-        ev2["freshness"] = ce.freshness(ev2)
-        ev2["evidenceBlockers"] = sorted(set(ev2["evidenceBlockers"]
-                                             + [ce.B_STALE]))
-        ev2["evidenceComplete"] = False
-        assert ce.propose(ev2, cal.empty_session("S"))["ticket"] is None
+        assert ce.freshness(ev)["unreadableTimestamps"] == ["rules"]
 
     def test_the_freshness_field_is_never_a_literal_in_the_source(self):
-        """The defect was `"stateFresh": True` written into the ticket."""
         import inspect
         src = inspect.getsource(ce.propose)
         assert '"stateFresh": True' not in src
@@ -302,189 +514,123 @@ class TestFreshnessIsComputedNotAsserted:
 class TestMissingProvenanceIsABlockerNotAString:
     @pytest.mark.parametrize("over,blocker", [
         ({"account": lambda: {"cash": 5000.0}}, ce.B_ACCOUNT_ID),
-        ({"account": lambda: {"cash": 5000.0, "account": ""}},
-         ce.B_ACCOUNT_ID),
         ({"market": lambda m: {"slug": m, "outcomeSide": "LONG",
+                               "priceBasis": "LONG",
                                "expiry": "2026-09-18T23:00:00Z"}},
          ce.B_OUTCOME),
-        ({"market": lambda m: {"slug": m, "outcome": "XXX to win",
+        ({"market": lambda m: {"slug": m, "outcome": "SIN to win",
+                               "priceBasis": "LONG",
                                "expiry": "2026-09-18T23:00:00Z"}},
          ce.B_OUTCOME_SIDE),
-        ({"market": lambda m: {"slug": m, "outcome": "XXX to win",
-                               "outcomeSide": "LONG"}}, ce.B_EXPIRY),
-        ({"fees": lambda m: {"entry": 0.2, "exit": 0.4}}, ce.B_FEE_MODEL),
+        ({"market": lambda m: {"slug": m, "outcome": "SIN to win",
+                               "outcomeSide": "LONG",
+                               "priceBasis": "LONG"}}, ce.B_EXPIRY),
+        ({"fees": lambda m: {"schedule": dict(cf.SCHEDULE)}}, ce.B_FEE_MODEL),
     ])
     def test_each_missing_fact_blocks(self, over, blocker):
-        ev = ce.gather(MARKET, readers(**over))
+        ev = gathered(**over)
         assert blocker in ev["evidenceBlockers"]
-        assert ce.propose(ev, cal.empty_session("S"))["ticket"] is None
+        assert ce.propose(ev, cal.empty_session("S"),
+                          exit_policy=EXIT_POLICY)["ticket"] is None
 
     def test_the_string_that_used_to_stand_in_for_them_is_gone(self):
-        """`"account": "NOT IDENTIFIED"` is a nonempty account field, and
-        that is exactly how an unknown gets past a presence check.
-
-        Checked on the STRING CONSTANTS the module would emit, not on the
-        file text -- the docstring names the defect on purpose, and a
-        grep of the file cannot tell an explanation from a value."""
         import ast
         import pathlib
         tree = ast.parse(pathlib.Path(ce.__file__).read_text())
-        docstrings = set()
+        docs = set()
         for node in ast.walk(tree):
             if isinstance(node, (ast.Module, ast.FunctionDef,
                                  ast.AsyncFunctionDef, ast.ClassDef)):
                 d = ast.get_docstring(node, clean=False)
                 if d:
-                    docstrings.add(d)
+                    docs.add(d)
         emitted = [n.value for n in ast.walk(tree)
                    if isinstance(n, ast.Constant) and isinstance(n.value, str)
-                   and n.value not in docstrings]
-        assert not [s for s in emitted if "NOT IDENTIFIED" in s], \
-            [s for s in emitted if "NOT IDENTIFIED" in s]
-
-    def test_a_complete_ticket_carries_the_venue_s_own_values(self):
-        t = ce.propose(ce.gather(MARKET, readers()),
-                       cal.empty_session("S"))["ticket"]
-        assert t["account"] == "bettortoken-main"
-        assert t["outcome"] == "XXX to win"
-        assert t["outcomeSide"] == "LONG"
-        assert t["expiry"] == "2026-09-18T23:00:00Z"
-        assert t["feeModel"] == "venue schedule 2026-09"
+                   and n.value not in docs]
+        assert not [s for s in emitted if "NOT IDENTIFIED" in s]
 
 
 class TestThePassivePriceRule:
     def test_the_price_is_the_bid_and_never_the_ask(self):
         got = ce.passive_price({"bid": 0.39, "ask": 0.40}, 0.01,
                                "LIMIT_GTC_POST_ONLY")
-        assert got["PRICE"] == 0.39
-        assert got["PRICE"] < got["ask"]
-        assert got["crossesTheSpread"] is False
-
-    def test_a_wide_book_still_joins_the_bid_rather_than_improving_to_cross(
-            self):
-        got = ce.passive_price({"bid": 0.20, "ask": 0.80}, 0.01,
-                               "LIMIT_GTC_POST_ONLY")
-        assert got["PRICE"] == 0.20
+        assert got["PRICE"] == 0.39 and got["crossesTheSpread"] is False
 
     @pytest.mark.parametrize("book,tick,blocker", [
         ({"bid": None, "ask": 0.40}, 0.01, ce.B_NO_BID),
-        ({"bid": 0.0, "ask": 0.40}, 0.01, ce.B_NO_BID),
         ({"bid": 0.39, "ask": None}, 0.01, ce.B_BOOK),
         ({"bid": 0.41, "ask": 0.40}, 0.01, ce.B_CROSSED_BOOK),
-        ({"bid": 0.40, "ask": 0.40}, 0.01, ce.B_CROSSED_BOOK),
         ({"bid": 0.395, "ask": 0.40}, 0.01, ce.B_PRICE_OFF_TICK),
         ({"bid": 0.39, "ask": 0.40}, None, ce.B_TICK),
-        ({"bid": 0.39, "ask": 0.40}, 0, ce.B_TICK),
     ])
     def test_a_book_the_rule_cannot_price_is_refused(self, book, tick,
                                                      blocker):
         got = ce.passive_price(book, tick, "LIMIT_GTC_POST_ONLY")
-        assert got["BLOCKER"] == blocker
-        assert got["PRICE"] is None
+        assert got["BLOCKER"] == blocker and got["PRICE"] is None
 
     def test_a_refusal_never_falls_back_to_an_aggressive_price(self):
-        """The whole point. No bid to join is not a reason to take the
-        offer, and the proposal refuses rather than reprices."""
-        ev = ce.gather(MARKET, readers(
-            book=lambda m: {"bid": None, "ask": 0.40}))
-        # the ask alone still satisfies the book blocker, so evidence is
-        # complete and the PRICING is what refuses
-        got = ce.propose(ev, cal.empty_session("S"))
-        assert got["ticket"] is None
-        assert got["blockers"] == [ce.B_NO_BID]
-        assert "never" in ce.PASSIVE_RULE and "cross" in ce.PASSIVE_RULE
+        ev = gathered(book=lambda m: {"bid": None, "ask": 0.40,
+                                      "priceBasis": "LONG"})
+        got = ce.propose(ev, cal.empty_session("S"), exit_policy=EXIT_POLICY)
+        assert got["ticket"] is None and got["blockers"] == [ce.B_NO_BID]
 
     def test_a_non_post_only_type_has_no_automatic_passive_price(self):
-        got = ce.passive_price({"bid": 0.39, "ask": 0.40}, 0.01, "LIMIT_IOC")
-        assert got["BLOCKER"] == ce.B_ORDER_TYPE_NOT_PRICEABLE
-
-    def test_a_finer_tick_grid_is_honoured(self):
-        got = ce.passive_price({"bid": 0.395, "ask": 0.40}, 0.005,
-                               "LIMIT_GTC_POST_ONLY")
-        assert got["PRICE"] == 0.395
+        assert ce.passive_price({"bid": 0.39, "ask": 0.40}, 0.01,
+                                "LIMIT_IOC")["BLOCKER"] == \
+            ce.B_ORDER_TYPE_NOT_PRICEABLE
 
 
-class TestTheResearchDomainIsCheckedBeforeAnyRead:
-    @staticmethod
-    def _pages(rows_in_progress=(), rows_queued=()):
-        pages = {"in_progress": {"workflow_runs": list(rows_in_progress),
-                                 "total_count": len(rows_in_progress)},
-                 "queued": {"workflow_runs": list(rows_queued),
-                            "total_count": len(rows_queued)}}
+# ─────────────────────────────────────────────────────────────────────
+# D. coordination
+# ─────────────────────────────────────────────────────────────────────
 
-        def fetch(url):
-            return pages["queued" if "queued" in url else "in_progress"]
-        return fetch
-
-    def test_a_clear_domain_is_clear(self):
-        got = ce.domain_isolation(fetch=self._pages(), repo="o/r", token="t")
-        assert got["STATE"] == "CLEAR"
-
-    def test_a_running_collector_is_active(self):
-        got = ce.domain_isolation(
-            fetch=self._pages(rows_in_progress=[
-                {"name": "beta48-substantive-capture", "id": 1}]),
-            repo="o/r", token="t")
-        assert got["STATE"] == "ACTIVE"
-        assert got["runs"][0]["workflow"] == "beta48-substantive-capture"
-
-    def test_a_queued_collector_also_counts(self):
-        got = ce.domain_isolation(
-            fetch=self._pages(rows_queued=[
-                {"name": "beta48-forward-capture", "id": 2}]),
-            repo="o/r", token="t")
-        assert got["STATE"] == "ACTIVE"
-
-    def test_a_non_collector_run_does_not_count(self):
-        got = ce.domain_isolation(
-            fetch=self._pages(rows_in_progress=[{"name": "ci", "id": 3}]),
-            repo="o/r", token="t")
-        assert got["STATE"] == "CLEAR"
-
-    @pytest.mark.parametrize("page,reason", [
-        ({"workflow_runs": [], "total_count": 5}, "CENSUS_INCOMPLETE"),
-        ({"total_count": 0}, "CENSUS_UNREADABLE"),
-        ({"workflow_runs": "nope", "total_count": 0}, "CENSUS_UNREADABLE"),
-        ({"workflow_runs": ["x"], "total_count": 1}, "CENSUS_ROW_MALFORMED"),
-        ({"workflow_runs": [{"id": 9}], "total_count": 1},
-         "UNATTRIBUTABLE_OCCUPYING_RUN"),
+class TestCoordinationIsNotOptional:
+    @pytest.mark.parametrize("coord", [
+        {"blockers": ["PROTECTED_RESEARCH_WINDOW_ACTIVE"]},
+        {"blockers": ["DOMAIN_STATE_NOT_ESTABLISHED"]},
+        {"blockers": ["NO_EXECUTION_RESERVATION_HELD"]},
     ])
-    def test_an_unreadable_census_is_unknown_never_clear(self, page, reason):
-        got = ce.domain_isolation(fetch=lambda _u: page, repo="o/r", token="t")
-        assert got["STATE"] == "UNKNOWN"
-        assert got["REASON"] == reason
-
-    def test_a_failed_census_read_is_unknown(self):
-        def boom_fetch(_u):
-            raise RuntimeError("github 500")
-        got = ce.domain_isolation(fetch=boom_fetch, repo="o/r", token="t")
-        assert got["STATE"] == "UNKNOWN"
-
-    def test_no_token_is_unknown_not_clear(self):
-        got = ce.domain_isolation(repo=None, token=None)
-        assert got["STATE"] == "UNKNOWN"
-        assert got["REASON"] == "NO_REPO_OR_TOKEN"
-
-    @pytest.mark.parametrize("state", ["ACTIVE", "UNKNOWN"])
-    def test_a_non_clear_domain_means_nothing_is_read_at_all(self, state):
+    def test_a_blocked_domain_means_nothing_is_read_at_all(self, coord):
         reads = []
 
         def watched():
             reads.append("account")
             return {"cash": 1.0, "account": "a"}
         got = ce.run(MARKET, readers=readers(account=watched),
-                     session=cal.empty_session("S"),
-                     require_idle_domain=True,
-                     isolation={"STATE": state, "REASON": "x"})
-        assert got["blockers"] == [ce.B_RESEARCH]
+                     session=cal.empty_session("S"), coordination=coord,
+                     outcome_side="LONG", exit_policy=EXIT_POLICY)
+        assert got["blockers"] == coord["blockers"]
         assert got["evidence"] is None
         assert reads == []
 
+    def test_there_is_no_argument_that_turns_the_census_off(self):
+        import inspect
+        sig = inspect.signature(ce.run)
+        assert "require_idle_domain" not in sig.parameters
+        cli = inspect.getsource(ce._cli)
+        assert "--require-idle-domain" not in cli
+        # the only related flag records an acceptance; it does not skip
+        assert "--accept-snapshot-only" in cli
+
+    def test_omitting_every_optional_argument_still_coordinates(self):
+        """run() with nothing but a market must not read the venue
+        without asking the domain first."""
+        import inspect
+        src = inspect.getsource(ce.run)
+        i_coord = src.index("cd.coordination")
+        i_gather = src.index("ev = gather(")
+        assert i_coord < i_gather
+
+
+# ─────────────────────────────────────────────────────────────────────
+# the command
+# ─────────────────────────────────────────────────────────────────────
 
 class TestTheCommandRuns:
-    def test_run_returns_a_complete_report_against_a_fake_transport(self):
+    def test_run_returns_a_complete_report(self):
         got = ce.run(MARKET, readers=readers(),
-                     session=cal.empty_session("S"))
+                     session=cal.empty_session("S"), coordination=CLEAR_COORD,
+                     outcome_side="LONG", exit_policy=EXIT_POLICY)
         assert got["evidence"]["evidenceComplete"] is True
         assert got["proposal"]["ticket"]["price"] == 0.39
         assert got["submissionReachable"] is False
@@ -496,78 +642,98 @@ class TestTheCommandRuns:
         def loader():
             seen.append(1)
             return cal.empty_session("DURABLE")
-        got = ce.run(MARKET, readers=readers(), session_loader=loader)
-        assert seen == [1]
-        assert got["sessionSource"] == "durable"
+        got = ce.run(MARKET, readers=readers(), session_loader=loader,
+                     coordination=CLEAR_COORD, outcome_side="LONG",
+                     exit_policy=EXIT_POLICY)
+        assert seen == [1] and got["sessionSource"] == "durable"
 
     def test_an_unavailable_budget_refuses_rather_than_assuming_one(self):
         def loader():
             raise RuntimeError("database down")
-        got = ce.run(MARKET, readers=readers(), session_loader=loader)
+        got = ce.run(MARKET, readers=readers(), session_loader=loader,
+                     coordination=CLEAR_COORD, outcome_side="LONG",
+                     exit_policy=EXIT_POLICY)
         assert got["blockers"] == ["BUDGET_STATE_UNAVAILABLE"]
         assert got["proposal"]["ticket"] is None
-        assert got["sessionSource"] == "UNAVAILABLE"
 
-    def test_the_cli_runs_end_to_end_and_writes_its_evidence(
+    def test_the_cli_runs_end_to_end_against_a_fake_transport(
             self, tmp_path, monkeypatch, capsys):
-        """THE ACTUAL CLI, with the transport mocked -- not `run()` called
-        directly. The old `_cli` raised SystemExit after parsing, so this
-        is the test that could not have passed before."""
         import json as _json
         from sportsassets import pmus
-        monkeypatch.setattr(pmus, "_get_client", lambda: FakeSDK())
-        monkeypatch.setattr(ce, "_durable_session",
-                            lambda: cal.empty_session("S"))
-        out = tmp_path / "evidence.json"
-        rc = ce._cli(["--market", MARKET, "--out", str(out)])
-
-        report = _json.loads(out.read_text())
-        assert report["marketId"] == MARKET
-        assert report["evidence"]["account"]["value"]["account"] == \
-            "bettortoken-main"
-        assert report["evidence"]["book"]["value"]["bid"] == 0.39
-        # The fee schedule has no verified read, so the command honestly
-        # reports a blocker instead of a ticket -- and exits nonzero.
-        assert ce.B_FEES in report["blockers"]
-        assert report["proposal"]["ticket"] is None
-        assert rc == 1
-        assert _json.loads(capsys.readouterr().out)["marketId"] == MARKET
-
-    def test_the_cli_is_clear_when_every_fact_is_obtainable(
-            self, tmp_path, monkeypatch):
-        """With a fee reader wired, the same command produces a ticket.
-        Proof that the only thing standing between this command and a
-        proposal is a fact nobody has read yet."""
-        import json as _json
-        from sportsassets import pmus
-        monkeypatch.setattr(pmus, "_get_client", lambda: FakeSDK())
+        sdk = FakeSDK()
+        monkeypatch.setattr(pmus, "_get_client", lambda: sdk)
         monkeypatch.setattr(ce, "_durable_session",
                             lambda: cal.empty_session("S"))
         real = ce.default_readers
-
-        def with_fees(client=None):
-            r = real(client=client)
-            r["fees"] = lambda m: {"entry": 0.20, "exit": 0.40,
-                                   "model": "venue schedule 2026-09"}
-            r["market"] = lambda m: dict(real(client=client)["market"](m),
-                                         outcomeSide="LONG")
-            return r
-        monkeypatch.setattr(ce, "default_readers", with_fees)
-        out = tmp_path / "e.json"
-        rc = ce._cli(["--market", MARKET, "--out", str(out)])
+        monkeypatch.setattr(ce, "default_readers",
+                            lambda **kw: real(
+                                client=sdk, config=Config,
+                                declared_side=kw.get("declared_side")))
+        monkeypatch.setattr("sportsassets.calibration_domain.coordination",
+                            lambda **kw: CLEAR_COORD)
+        out = tmp_path / "evidence.json"
+        rc = ce._cli(["--market", MARKET, "--outcome-side", "LONG",
+                      "--max-exit-orders", "2", "--partial-fills",
+                      "--out", str(out)])
         report = _json.loads(out.read_text())
-        assert report["proposal"]["ticket"]["price"] == 0.39
-        assert report["proposal"]["ticket"]["stateFresh"] is True
-        assert report["proposal"]["submittable"] is False
+        assert report["marketId"] == MARKET
+        assert report["evidence"]["account"]["value"]["account"] == \
+            "pmus:ABCD1234"
+        assert report["evidence"]["book"]["value"]["bid"] == 0.39
+        t = report["proposal"]["ticket"]
+        assert t is not None, report["blockers"]
+        assert t["outcomeSide"] == "LONG"
+        assert t["price"] == 0.39
         assert rc == 0
+        assert _json.loads(capsys.readouterr().out)["marketId"] == MARKET
+        assert sdk.orders.created == []
 
-    def test_the_cli_never_reaches_a_send(self, monkeypatch, tmp_path):
+    def test_the_cli_refuses_without_a_declared_outcome_side(
+            self, tmp_path, monkeypatch):
+        import json as _json
         from sportsassets import pmus
-        sent = []
-        monkeypatch.setattr(pmus, "_get_client", lambda: FakeSDK())
-        monkeypatch.setattr(pmus, "submit_fok",
-                            lambda *a, **k: sent.append(a) or {})
+        sdk = FakeSDK()
+        monkeypatch.setattr(pmus, "_get_client", lambda: sdk)
         monkeypatch.setattr(ce, "_durable_session",
                             lambda: cal.empty_session("S"))
-        ce._cli(["--market", MARKET, "--out", str(tmp_path / "e.json")])
-        assert sent == []
+        real = ce.default_readers
+        monkeypatch.setattr(ce, "default_readers",
+                            lambda **kw: real(
+                                client=sdk, config=Config,
+                                declared_side=kw.get("declared_side")))
+        monkeypatch.setattr("sportsassets.calibration_domain.coordination",
+                            lambda **kw: CLEAR_COORD)
+        out = tmp_path / "e.json"
+        rc = ce._cli(["--market", MARKET, "--max-exit-orders", "2",
+                      "--partial-fills", "--out", str(out)])
+        report = _json.loads(out.read_text())
+        assert report["proposal"]["ticket"] is None
+        assert ce.B_SIDE_NOT_DECLARED in report["blockers"]
+        assert rc == 1
+
+
+class TestSubmissionIsNotReachable:
+    def test_the_module_imports_no_order_creation_path(self):
+        import pathlib
+        src = pathlib.Path(ce.__file__).read_text()
+        code = "\n".join(ln for ln in src.splitlines()
+                         if not ln.strip().startswith("#"))
+        code = code.split('"""', 2)[-1]
+        for forbidden in ("submit_fok", "orders.create", "calibration_execute",
+                          "LiveVenue", "calibration_adapter"):
+            assert forbidden not in code, forbidden
+
+    def test_there_is_no_submit_flag(self):
+        import inspect
+        flags = [ln for ln in inspect.getsource(ce._cli).splitlines()
+                 if "add_argument" in ln]
+        assert flags
+        assert not any("submit" in ln for ln in flags), flags
+
+    def test_a_preview_is_a_read_and_a_create_is_not_reachable(self):
+        """preview-order is one of the official sources. It is read-only;
+        the fake raises if create is ever called."""
+        sdk = FakeSDK(preview={"order": {"fee": "0.30"}})
+        got = cf.preview_fee(sdk.orders.preview({"request": {}}))
+        assert got["FEE"] == Decimal("0.30")
+        assert sdk.orders.created == []

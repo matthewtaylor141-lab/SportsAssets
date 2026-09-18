@@ -1,0 +1,113 @@
+# THE FIRST-TICKET EVIDENCE GATHER, INSIDE THE VENUE'S OWN LOCK.
+#
+# WHY THIS IS A WORKFLOW AND NOT A SCRIPT SOMEBODY RUNS.
+#
+# A census is true at the instant it was taken. `calibration_domain` can
+# tell you the domain was quiet a second ago; it cannot stop a scheduled
+# collector arriving a second later. A CLEAR SNAPSHOT IS NOT A LOCK.
+#
+# The one mechanism that actually EXCLUDES the collectors is the one they
+# already obey: this concurrency group. A job running here cannot overlap
+# run85-phase2-capture or any beta48 collector, because GitHub will not
+# start two of them. So the evidence gather runs here, and
+# `PMUS_DOMAIN_RESERVATION` is how the command knows it holds the real
+# reservation rather than a snapshot -- without it the command refuses
+# with NO_EXECUTION_RESERVATION_HELD.
+#
+# IT READS. It has no `--submit` flag, imports no order-creation path, and
+# `calibration_execute` never loads. The venue calls it makes are the
+# account balance, the market row, the BBO, the account's resting orders
+# on one market, and -- once the ticket is sized -- the order PREVIEW,
+# which is a documented read-only endpoint and the observation the
+# published fee schedule is reconciled against.
+#
+# QUEUE, NEVER CANCEL. Like every other member: a gather that is waiting
+# is dropped or delayed, never a capture that is running.
+#
+# THE OUTCOME SIDE IS DECLARED BY THE OPERATOR and verified against the
+# venue's own marketSides. It is not inferred from the market title and
+# it does not default to LONG: both sides of a market on this venue share
+# one identifier, so a defaulted side is a coin flip with money behind
+# it. The EXIT POLICY is declared too -- the reserve for an exit that has
+# not happened depends on how many orders it is allowed to take.
+
+name: calibration-evidence
+
+on:
+  workflow_dispatch:
+    inputs:
+      market:
+        description: "The venue market slug to gather evidence for"
+        required: true
+      outcome_side:
+        description: "LONG or SHORT -- which side the ticket is for"
+        required: true
+        type: choice
+        options: ["LONG", "SHORT"]
+      max_exit_orders:
+        description: "Exit orders the permitted policy allows"
+        required: true
+        default: "2"
+      partial_fills:
+        description: "The permitted exit policy allows partial fills"
+        required: true
+        type: boolean
+        default: true
+
+permissions:
+  contents: read
+  actions: read          # the census walks this repository's own runs
+
+concurrency:
+  # THE GLOBAL PMUS VENUE-ACCESS DOMAIN. Membership is the point of this
+  # file: it is what makes the reservation real.
+  group: pmus-public-read-global
+  cancel-in-progress: false
+  queue: max
+
+jobs:
+  gather:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install the pinned test dependencies
+        run: python -m pip install --quiet -r research/beta48/shadow/requirements-test.txt
+
+      - name: Prove the environment before anything else
+        working-directory: research/beta48/shadow
+        run: python prove_environment.py --requirements requirements-test.txt
+
+      - name: Gather the evidence and propose the ticket
+        working-directory: backend
+        env:
+          # THE RESERVATION. Set here, inside the group, and nowhere else.
+          # The command refuses when it is absent.
+          PMUS_DOMAIN_RESERVATION: pmus-public-read-global
+          GITHUB_REPOSITORY: ${{ github.repository }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          PMUS_KEY_ID: ${{ secrets.PMUS_KEY_ID }}
+          PMUS_SECRET_KEY: ${{ secrets.PMUS_SECRET_KEY }}
+        run: |
+          set -e
+          python -m sportsassets.calibration_evidence \
+            --market "${{ github.event.inputs.market }}" \
+            --outcome-side "${{ github.event.inputs.outcome_side }}" \
+            --max-exit-orders "${{ github.event.inputs.max_exit_orders }}" \
+            ${{ github.event.inputs.partial_fills == 'true' && '--partial-fills' || '' }} \
+            --out "evidence_${{ github.run_id }}.json" \
+          || echo "EVIDENCE_HAS_BLOCKERS (exit 1 is a successful read that found blockers)"
+
+      - name: Publish the evidence record
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: calibration-evidence-${{ github.run_id }}
+          path: backend/evidence_${{ github.run_id }}.json
+          if-no-files-found: warn
