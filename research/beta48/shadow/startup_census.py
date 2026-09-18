@@ -28,13 +28,25 @@ This module is the caller. It runs the census machinery unchanged, refuses by
 name on anything incomplete, and only then applies the UNCHANGED isolation
 policy to the complete population.
 
-WHAT IT DOES NOT DO.
+TWO VERDICTS, KEPT APART.
 
-It does not change the policy. `venue_domain.isolation` decides, exactly as
-before: a RUNNING direct collector blocks; a WAITING one is the domain working
-as designed and is reported, not counted as venue load. Nothing here relaxes a
-verdict to obtain a pass -- the only way this command exits zero is a complete
-census over a non-empty inventory with isolation ESTABLISHED.
+`venue_domain.isolation` is unchanged and is reported as ADMISSION_VERDICT:
+before the slot, a waiting member blocks a START, because GitHub keeps one
+pending run per group and a newer arrival displaces an older waiter.
+
+GATE 3 runs INSIDE the job, which means the slot is already held, and it
+therefore asks the other question -- POST_ACQUISITION_ISOLATION. A waiting
+follower cannot be displaced by a run that is already executing and issues no
+venue request while it waits, so it is REPORTED rather than treated as
+competing execution. That relaxation is conditional on OWNERSHIP BEING PROVEN:
+our own run must appear in the complete census in an executing state and our
+own workflow must be a member of the group. Another EXECUTING collector,
+unknown ownership, an incomplete census, an unattributable occupying row or
+incompatible group membership all still block every venue read, by name.
+
+The exit code follows POST_ACQUISITION_ISOLATION, because that is the question
+the gate's position in the job actually poses. Both verdicts are written to
+the evidence file so neither can be read as the other.
 """
 from __future__ import annotations
 
@@ -93,8 +105,127 @@ def walk_workflow(fetch, wf, per_page=PER_PAGE, max_pages=MAX_PAGES):
                             errors=errors)
 
 
-def startup_census(root, fetch, self_run_id=None, taken_at=None):
-    """Discovered inventory -> complete census -> the unchanged policy."""
+ADMISSION_RULE = (
+    "BEFORE the slot: clear = not active and not waiting. A waiting member "
+    "blocks a START because GitHub keeps one pending run per group and a "
+    "newer arrival displaces an older waiter. venue_domain.isolation, "
+    "unchanged.")
+
+POST_ACQUISITION_RULE = (
+    "AFTER proven ownership of the slot: a verified same-group waiting "
+    "follower is REPORTED, not treated as competing execution. It cannot "
+    "displace a run that is already executing, and it issues no venue "
+    "request while it waits. Another EXECUTING collector, unknown "
+    "ownership, an incomplete census, an unattributable occupying row or "
+    "incompatible group membership still block every venue read.")
+
+OWNERSHIP_IS_PROVEN_NOT_ASSUMED = (
+    "the job does not assume it holds the slot because it is running code. "
+    "Its own run must appear in the complete census in an executing state, "
+    "and its own workflow must be a member of the group -- otherwise the "
+    "waiters it is about to excuse are not waiting on anything it holds.")
+
+B_SELF_NOT_FOUND = "SELF_RUN_NOT_IN_CENSUS"
+B_SELF_NOT_EXECUTING = "SELF_RUN_NOT_EXECUTING"
+B_SELF_WORKFLOW_UNKNOWN = "SELF_WORKFLOW_NOT_IDENTIFIED"
+B_SELF_OUTSIDE_GROUP = "SELF_WORKFLOW_OUTSIDE_THE_GROUP"
+B_GROUP_INCOMPATIBLE = "INCOMPATIBLE_GROUP_MEMBERSHIP"
+B_CENSUS = "CENSUS_INCOMPLETE"
+B_UNATTRIBUTABLE = "UNATTRIBUTABLE_OCCUPYING_RUNS"
+B_COMPETING = "COMPETING_EXECUTION"
+
+
+def post_acquisition(cen, inventory, rep, self_run_id, self_workflow):
+    """THE POST-ACQUISITION VERDICT, kept apart from admission.
+
+    WHY THE TWO DIFFER. `venue_domain.isolation` answers "may this run
+    START?" -- and there a waiting member blocks, because a newer
+    arrival displaces an older pending one and starting would risk
+    dropping a compliant collector. That rule is correct, unchanged, and
+    still reported as ADMISSION_VERDICT.
+
+    GATE 3 asks a different question. By the time it executes, the job
+    IS running: it already holds the concurrency slot, so nothing it does
+    can displace a waiter, and a waiter issues no venue request while it
+    waits. Blocking on a queued follower there does not protect anything
+    -- it just refuses a run that already won the slot, which is how the
+    previous attempt ended up cancelled rather than collected.
+
+    OWNERSHIP IS PROVEN, NOT ASSUMED. Excusing waiters is only sound if
+    we really hold the slot they are waiting on, so this requires our own
+    run to be in the complete census in an executing state AND our own
+    workflow to be a member of the group. Everything else still blocks,
+    by name.
+    """
+    blockers, notes = [], {}
+
+    gate_input = list(cen.get("GATE_INPUT") or ())
+    mine = [r for r in gate_input if str(r.get("id")) == str(self_run_id)]
+    if self_run_id is None or not mine:
+        blockers.append(B_SELF_NOT_FOUND)
+    else:
+        st = (mine[0].get("status") or "").lower()
+        notes["SELF_RUN_STATUS"] = st
+        if st not in RC.RUNNING_STATES:
+            blockers.append(B_SELF_NOT_EXECUTING)
+
+    # GROUP MEMBERSHIP, ours and everybody's.
+    if not self_workflow:
+        blockers.append(B_SELF_WORKFLOW_UNKNOWN)
+    elif self_workflow not in set(inventory):
+        blockers.append(B_SELF_OUTSIDE_GROUP)
+    outside = dict(rep.get("WORKFLOWS_OUTSIDE_THE_DOMAIN") or {})
+    if outside or rep.get("DOMAIN_AUDIT") != "PASS":
+        blockers.append("%s: %s" % (B_GROUP_INCOMPATIBLE, sorted(outside)))
+
+    if not cen.get("CENSUS_COMPLETE"):
+        blockers.append("%s: %s" % (B_CENSUS, cen.get("WHY_NOT_COMPLETE")))
+    if cen.get("UNATTRIBUTABLE_OCCUPYING_RUNS"):
+        blockers.append("%s: %d" % (B_UNATTRIBUTABLE,
+                                    len(cen["UNATTRIBUTABLE_OCCUPYING_RUNS"])))
+
+    known = set(inventory)
+    executing, waiting = [], []
+    for r in gate_input:
+        if str(r.get("id")) == str(self_run_id):
+            continue
+        if r.get("name") not in known:
+            continue                      # counted by the unattributable check
+        st = (r.get("status") or "").lower()
+        row = {"NAME": r.get("name"), "ID": str(r.get("id")), "STATUS": st}
+        if st in RC.RUNNING_STATES:
+            executing.append(row)
+        elif st in RC.WAITING_STATES:
+            waiting.append(row)
+    if executing:
+        blockers.append("%s: %s" % (B_COMPETING,
+                                    sorted(r["NAME"] for r in executing)))
+
+    return {
+        "POST_ACQUISITION_RULE": POST_ACQUISITION_RULE,
+        "OWNERSHIP_IS_PROVEN_NOT_ASSUMED": OWNERSHIP_IS_PROVEN_NOT_ASSUMED,
+        "SLOT_OWNERSHIP_PROVEN": not any(
+            b.startswith(p) for b in blockers
+            for p in (B_SELF_NOT_FOUND, B_SELF_NOT_EXECUTING,
+                      B_SELF_WORKFLOW_UNKNOWN, B_SELF_OUTSIDE_GROUP,
+                      B_GROUP_INCOMPATIBLE)),
+        "COMPETING_EXECUTION": tuple(sorted(r["NAME"] for r in executing)),
+        # REPORTED, NOT COUNTED AS LOAD. Kept as its own field so no
+        # reader can mistake a follower for a collector at the venue.
+        "WAITING_FOLLOWERS_REPORTED": tuple(sorted(r["NAME"] for r in waiting)),
+        "WAITING_FOLLOWERS_ARE_NOT_VENUE_LOAD": WAITING_IS_NOT_VENUE_LOAD,
+        "POST_ACQUISITION_BLOCKERS": tuple(blockers),
+        "POST_ACQUISITION_ISOLATION": ("ESTABLISHED" if not blockers
+                                       else "NOT_ESTABLISHED"),
+        "SELF_RUN_ID": None if self_run_id is None else str(self_run_id),
+        "SELF_WORKFLOW": self_workflow,
+        **notes,
+    }
+
+
+def startup_census(root, fetch, self_run_id=None, taken_at=None,
+                   self_workflow=None):
+    """Discovered inventory -> complete census -> both verdicts."""
     rep = VD.audit(root)
     inventory = sorted(rep["KNOWN_VENUE_TOUCHING_WORKFLOWS"])
 
@@ -135,9 +266,22 @@ def startup_census(root, fetch, self_run_id=None, taken_at=None):
     if not cen["CENSUS_COMPLETE"]:
         # BLOCKING IS MONOTONE. An incomplete census cannot certify IDLE, but
         # it can still certify BLOCKED, and that verdict is kept.
+        #
+        # THE POST-ACQUISITION BLOCK IS EMITTED ON THIS PATH TOO. An
+        # evidence file whose shape changes with the outcome invites the
+        # reader to mistake an absent field for a passing one, and a
+        # refusal that omits POST_ACQUISITION_ISOLATION would be exactly
+        # that. It is computed here as well, and an incomplete census is
+        # one of its named blockers.
         out["STARTUP_CENSUS_OK"] = False
         out["REFUSED_BECAUSE"] = "CENSUS_INCOMPLETE: " + cen["WHY_NOT_COMPLETE"]
         out["MAY_CERTIFY"] = RC.may_certify(cen, age_s=0)
+        out["ADMISSION_VERDICT"] = "NOT_ESTABLISHED"
+        out["ADMISSION_RULE"] = ADMISSION_RULE
+        out.update(post_acquisition(cen, inventory, rep, self_run_id,
+                                    self_workflow))
+        out["POST_ACQUISITION_ISOLATION"] = "NOT_ESTABLISHED"
+        out["STARTUP_CENSUS_OK"] = False
         return out
 
     # THE COMPLETE POPULATION, THROUGH THE UNCHANGED POLICY.
@@ -150,27 +294,18 @@ def startup_census(root, fetch, self_run_id=None, taken_at=None):
         sorted(str(r.get("name")) for r in gate_input
                if (r.get("status") or "").lower() in RC.WAITING_STATES
                and str(r.get("id")) != str(self_run_id)))
-    out["STARTUP_CENSUS_OK"] = (
-        iso["DIRECT_RESEARCH_COLLECTOR_ISOLATION"] == "ESTABLISHED")
+
+    # ADMISSION AND POST-ACQUISITION ARE TWO DIFFERENT QUESTIONS, kept
+    # apart and both reported. See post_acquisition() for why.
+    out["ADMISSION_VERDICT"] = iso["DIRECT_RESEARCH_COLLECTOR_ISOLATION"]
+    out["ADMISSION_RULE"] = ADMISSION_RULE
+    post = post_acquisition(cen, inventory, rep, self_run_id, self_workflow)
+    out.update(post)
+    out["STARTUP_CENSUS_OK"] = post["POST_ACQUISITION_ISOLATION"] == "ESTABLISHED"
     if not out["STARTUP_CENSUS_OK"]:
-        # NAME THE ACTUAL REASON. A start blocked by a WAITING member is a
-        # displacement risk, not venue load, and saying "active: unknown"
-        # when the active list is simply empty would misreport which of the
-        # two it was.
-        active = list(iso["KNOWN_DIRECT_PMUS_COLLECTORS_ACTIVE"])
-        pending = list(iso["KNOWN_DIRECT_PMUS_COLLECTORS_PENDING"])
-        parts = []
-        if active:
-            parts.append("RUNNING_DIRECT_COLLECTORS=%s" % active)
-        if pending:
-            parts.append("WAITING_DIRECT_COLLECTORS=%s (a START would risk "
-                         "displacing them; they are not venue load)" % pending)
-        if not parts:
-            parts.append("NO_NAMED_CONFLICT_IDENTIFIED: see "
-                         "UNATTRIBUTABLE_OCCUPYING_RUNS and OBSERVED_CONFLICTS")
-        out["REFUSED_BECAUSE"] = (
-            "DIRECT_RESEARCH_COLLECTOR_ISOLATION = NOT_ESTABLISHED: "
-            + "; ".join(parts))
+        out["REFUSED_BECAUSE"] = ("POST_ACQUISITION_ISOLATION = "
+                                  "NOT_ESTABLISHED: "
+                                  + "; ".join(post["POST_ACQUISITION_BLOCKERS"]))
     return out
 
 
@@ -199,6 +334,12 @@ def _cli():                                                   # pragma: no cover
     ap.add_argument("--root", default=".")
     ap.add_argument("--repo", default=os.environ.get("GITHUB_REPOSITORY"))
     ap.add_argument("--self-run-id", default=None)
+    # OUR OWN WORKFLOW, so slot ownership can be PROVEN rather than
+    # assumed. GITHUB_WORKFLOW carries the workflow's `name:`; every
+    # member of this group names itself after its file stem (checked),
+    # so it matches the discovered inventory.
+    ap.add_argument("--self-workflow",
+                    default=os.environ.get("GITHUB_WORKFLOW"))
     ap.add_argument("--out", default=None)
     a = ap.parse_args()
     token = os.environ.get("GH_TOKEN") or os.environ.get("GITHUB_TOKEN")
@@ -206,8 +347,12 @@ def _cli():                                                   # pragma: no cover
         raise SystemExit("STARTUP_CENSUS_REFUSED: repo or token missing")
 
     rep = startup_census(a.root, _http_fetch(a.repo, token),
-                         self_run_id=a.self_run_id)
+                         self_run_id=a.self_run_id,
+                         self_workflow=a.self_workflow)
     for k in ("DOMAIN_AUDIT", "INVENTORY_SIZE", "CENSUS_COMPLETE",
+              "ADMISSION_VERDICT", "SLOT_OWNERSHIP_PROVEN",
+              "COMPETING_EXECUTION", "WAITING_FOLLOWERS_REPORTED",
+              "POST_ACQUISITION_ISOLATION", "POST_ACQUISITION_BLOCKERS",
               "COMPLETENESS_BASIS", "RUNS_RETRIEVED", "GATE_POPULATION",
               "OBSERVED_CONFLICTS", "QUEUED_FOLLOWERS",
               "KNOWN_DIRECT_PMUS_COLLECTORS_ACTIVE",

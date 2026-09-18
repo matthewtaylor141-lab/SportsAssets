@@ -171,6 +171,7 @@ jobs:
           python startup_census.py --root ../../.. \
             --repo "$GITHUB_REPOSITORY" \
             --self-run-id "$SEG" \
+            --self-workflow "$GITHUB_WORKFLOW" \
             --out "evidence/substantive_$SEG/isolation_at_start.json"
 
       # GATE 4. THE ROSTER, FROZEN BEFORE THE FIRST SAMPLED GET. Selection reads

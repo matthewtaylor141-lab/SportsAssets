@@ -30,14 +30,18 @@ WHAT IS PROVED, PER MANAGEMENT'S FOUR NAMED REQUIREMENTS.
   C  INCOMPLETE       unfinished pagination blocks certification
   D  MALFORMED        a malformed response cannot read as an idle domain
   E  UNNAMED          an unnamed occupying row cannot read as an idle domain
-  F  QUEUED FOLLOWER  reported by name, counted apart from active venue load,
-                      and blocking a START under the approved policy
+  F  QUEUED FOLLOWER  reported by name and NOT blocking, once the slot is
+                      proven held
+  G  NO OWNERSHIP     our own run absent from the census: nothing may be
+                      excused on the strength of merely running code
+  H  SELF PENDING     a queued self is standing in the queue, not holding it
 
-F is the one that is easy to get wrong in the flattering direction. The
-approved policy is `clear = not active and not waiting`: a waiting domain
-member blocks a START because starting on top of it risks DISPLACING it, not
-because it is putting load on the venue. The rehearsal asserts BOTH halves --
-that it blocks, and that it is counted as PENDING and not as ACTIVE.
+F IS THE ONE THAT IS EASY TO GET WRONG IN THE FLATTERING DIRECTION, so it
+asserts all of it: the follower is named, nothing is executing beside us, the
+ADMISSION verdict is still NOT_ESTABLISHED (that rule did not move), ownership
+is proven, and only then does the post-acquisition verdict pass. G and H are
+the guards on that relaxation -- both are jobs that would have excused a
+waiter without holding anything.
 """
 from __future__ import annotations
 
@@ -55,6 +59,7 @@ WORKFLOW = ROOT / ".github/workflows/beta48-substantive-capture.yml"
 STEP_NAME = "Prove BETTOR collector isolation at start"
 
 SELF_RUN = "99999999999"
+SELF_WF = "beta48-substantive-capture"
 REPO = "matthewtaylor141-lab/SportsAssets"
 
 SHIM = '''
@@ -138,6 +143,7 @@ def invoke(command, scenario, seg):
         "REHEARSAL_SCENARIO": str(scen_path),
         "REHEARSAL_REQUEST_LOG": str(log),
         "GITHUB_REPOSITORY": REPO,
+        "GITHUB_WORKFLOW": SELF_WF,
         "GH_TOKEN": "REHEARSAL_TOKEN_NOT_A_CREDENTIAL",
         "SEG": seg,
     })
@@ -161,8 +167,27 @@ def quiet_for(wf):
         _run(wf, "completed", 1), _run(wf, "completed", 2)]}}}
 
 
-def scenario(overrides=None):
-    return {"DEFAULT": QUIET, "WORKFLOWS": dict(overrides or {})}
+def owning(extra_rows=()):
+    """OUR OWN RUN, EXECUTING. The post-acquisition rule excuses waiters
+    only once ownership of the slot is proven, so every scenario that
+    expects the relaxed verdict must actually show the job running."""
+    rows = [_run(SELF_WF, "in_progress", int(SELF_RUN))] + list(extra_rows)
+    return {"TOTAL": len(rows),
+            "PAGES": {"1": {"total_count": len(rows), "workflow_runs": rows}}}
+
+
+def owning_pending():
+    """Our own run QUEUED. It holds nothing, so it may excuse nothing."""
+    rows = [_run(SELF_WF, "queued", int(SELF_RUN))]
+    return {"TOTAL": 1,
+            "PAGES": {"1": {"total_count": 1, "workflow_runs": rows}}}
+
+
+def scenario(overrides=None, own=True):
+    wf = dict(overrides or {})
+    if own and SELF_WF not in wf:
+        wf[SELF_WF] = owning()
+    return {"DEFAULT": QUIET, "WORKFLOWS": wf}
 
 
 COLLECTOR = "beta48-substantive-capture"
@@ -172,10 +197,10 @@ SCENARIOS = {
         scenario(), 0,
         "a quiet domain certifies and the job may proceed"),
     "B_ACTIVE_COLLECTOR_BLOCKS": (
-        scenario({COLLECTOR: {"TOTAL": 1, "PAGES": {"1": {
+        scenario({"run85-phase2-capture": {"TOTAL": 1, "PAGES": {"1": {
             "total_count": 1, "workflow_runs": [
-                _run(COLLECTOR, "in_progress", 35300000001)]}}}}), 1,
-        "a RUNNING conflicting collector blocks venue access"),
+                _run("run85-phase2-capture", "in_progress", 35300000001)]}}}}),
+        1, "another EXECUTING collector blocks venue access, slot or no slot"),
     "C_INCOMPLETE_PAGINATION_BLOCKS": (
         scenario({COLLECTOR: {"TOTAL": 250, "PAGES": {
             "1": {"total_count": 250,
@@ -188,16 +213,29 @@ SCENARIOS = {
                               "PAGES": {"1": {"__MALFORMED__": True}}}}), 1,
         "a malformed body is unreadable, and unreadable is not empty"),
     "E_UNNAMED_OCCUPYING_ROW_BLOCKS": (
-        scenario({COLLECTOR: {"TOTAL": 1, "PAGES": {"1": {
+        scenario({"venue-probe": {"TOTAL": 1, "PAGES": {"1": {
             "total_count": 1, "workflow_runs": [
-                dict(_run(COLLECTOR, "in_progress", 35300000002), name="")]}}}}),
+                dict(_run("venue-probe", "in_progress", 35300000002),
+                     name="")]}}}}),
         1, "an occupying row we cannot attribute cannot read as idle"),
-    "F_QUEUED_FOLLOWER_REPORTED_AND_BLOCKS": (
-        scenario({COLLECTOR: {"TOTAL": 1, "PAGES": {"1": {
+    "F_QUEUED_FOLLOWER_REPORTED_NOT_BLOCKING": (
+        scenario({"beta48-forward-capture": {"TOTAL": 1, "PAGES": {"1": {
             "total_count": 1, "workflow_runs": [
-                _run(COLLECTOR, "queued", 35300000003)]}}}}), 1,
-        "a queued follower is named, counted apart from active venue load, "
-        "and still blocks a START to avoid displacing it"),
+                _run("beta48-forward-capture", "queued", 35300000003)]}}}}), 0,
+        "with the slot PROVEN held, a queued follower is named and reported; "
+        "it cannot be displaced by a run already executing and issues no "
+        "venue request while it waits"),
+    "G_OWNERSHIP_NOT_PROVEN_BLOCKS": (
+        scenario({}, own=False), 1,
+        "our own run is absent from the census, so the slot is not proven "
+        "held and no follower may be excused on the strength of it"),
+    "H_SELF_PENDING_CANNOT_EXCUSE_ITS_OWN_QUEUE": (
+        scenario({COLLECTOR: owning_pending(),
+                  "beta48-forward-capture": {"TOTAL": 1, "PAGES": {"1": {
+                      "total_count": 1, "workflow_runs": [
+                          _run("beta48-forward-capture", "queued",
+                               35300000004)]}}}}), 1,
+        "a PENDING self is standing in the queue, not holding it"),
 }
 
 
@@ -218,9 +256,13 @@ def main():
     print("-" * 78)
 
     failures = []
-    for i, (name, (scen, want_rc, why)) in enumerate(sorted(
-            SCENARIOS.items())):
-        seg = "REHEARSAL_%d" % i
+    # THE JOB'S OWN RUN ID IS $SEG, and the gate now proves ownership by
+    # finding THAT id executing in the census. So the rehearsal must use
+    # one id for both, or every scenario would arrive as a job that
+    # cannot find itself -- which is a real blocker, and would have made
+    # the whole rehearsal pass for the wrong reason.
+    seg = SELF_RUN
+    for name, (scen, want_rc, why) in sorted(SCENARIOS.items()):
         shutil.rmtree(HERE / ("evidence/substantive_%s" % seg),
                       ignore_errors=True)
         proc, rep, reqs = invoke(command, scen, seg)
@@ -240,10 +282,9 @@ def main():
                         and rep.get("COMPLETENESS_BASIS")
                         == "VERIFIED_PAGINATION_EXHAUSTION")
         if name == "B_ACTIVE_COLLECTOR_BLOCKS":
-            act = list((rep or {}).get("KNOWN_DIRECT_PMUS_COLLECTORS_ACTIVE")
-                       or ())
-            extra_ok = COLLECTOR in act
-            detail.append("active=%s" % act)
+            comp = list((rep or {}).get("COMPETING_EXECUTION") or ())
+            extra_ok = "run85-phase2-capture" in comp
+            detail.append("competing=%s" % comp)
         if name == "C_INCOMPLETE_PAGINATION_BLOCKS":
             extra_ok = (rep and rep.get("CENSUS_COMPLETE") is False
                         and str(rep.get("REFUSED_BECAUSE", "")
@@ -254,16 +295,33 @@ def main():
             un = list((rep or {}).get("UNATTRIBUTABLE_OCCUPYING_RUNS") or ())
             extra_ok = bool(un) and not (rep or {}).get("STARTUP_CENSUS_OK")
             detail.append("unattributable=%d" % len(un))
-        if name == "F_QUEUED_FOLLOWER_REPORTED_AND_BLOCKS":
-            foll = list((rep or {}).get("QUEUED_FOLLOWERS") or ())
-            pend = list((rep or {}).get("KNOWN_DIRECT_PMUS_COLLECTORS_PENDING")
-                        or ())
-            act = list((rep or {}).get("KNOWN_DIRECT_PMUS_COLLECTORS_ACTIVE")
-                       or ())
-            extra_ok = (COLLECTOR in foll and COLLECTOR in pend and not act
-                        and not (rep or {}).get("STARTUP_CENSUS_OK"))
-            detail.append("followers=%s pending=%s active=%s"
-                          % (foll, pend, act))
+        if name == "F_QUEUED_FOLLOWER_REPORTED_NOT_BLOCKING":
+            foll = list((rep or {}).get("WAITING_FOLLOWERS_REPORTED") or ())
+            comp = list((rep or {}).get("COMPETING_EXECUTION") or ())
+            # BOTH VERDICTS, side by side: admission still says a waiter
+            # makes a START unsafe; post-acquisition says it cannot
+            # displace a run that already holds the slot.
+            extra_ok = ("beta48-forward-capture" in foll and not comp
+                        and (rep or {}).get("ADMISSION_VERDICT")
+                        == "NOT_ESTABLISHED"
+                        and (rep or {}).get("SLOT_OWNERSHIP_PROVEN") is True
+                        and (rep or {}).get("POST_ACQUISITION_ISOLATION")
+                        == "ESTABLISHED"
+                        and (rep or {}).get("STARTUP_CENSUS_OK") is True)
+            detail.append("followers=%s competing=%s admission=%s post=%s"
+                          % (foll, comp, (rep or {}).get("ADMISSION_VERDICT"),
+                             (rep or {}).get("POST_ACQUISITION_ISOLATION")))
+        if name == "G_OWNERSHIP_NOT_PROVEN_BLOCKS":
+            extra_ok = ((rep or {}).get("SLOT_OWNERSHIP_PROVEN") is False
+                        and "SELF_RUN_NOT_IN_CENSUS"
+                        in ((rep or {}).get("POST_ACQUISITION_BLOCKERS") or ()))
+            detail.append("blockers=%s"
+                          % list((rep or {}).get("POST_ACQUISITION_BLOCKERS")
+                                 or ()))
+        if name == "H_SELF_PENDING_CANNOT_EXCUSE_ITS_OWN_QUEUE":
+            extra_ok = ("SELF_RUN_NOT_EXECUTING"
+                        in ((rep or {}).get("POST_ACQUISITION_BLOCKERS") or ()))
+            detail.append("self_status=%s" % (rep or {}).get("SELF_RUN_STATUS"))
         # NO SCENARIO MAY REACH THE VENUE, AND NONE MAY STATUS-FILTER.
         filt = [r for r in reqs if "status" in r.get("params", {})]
         no_filter = not filt
