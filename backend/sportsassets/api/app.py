@@ -936,6 +936,42 @@ class CalibrationStopBody(BaseModel):
     reason: str = ""
 
 
+# ── THE MONITORING-RELEASE GATE (2026-09-18) ────────────────────────
+# Management authorised a BOUNDED MONITORING RELEASE: COMMAND sign-in,
+# authenticated real-data monitoring, and the durable budget DISPLAY.
+# Approval, reserve release, resume and every venue submission stay
+# disabled in this release.
+#
+# The gate is ONE CONSTANT, read by a dependency, so enabling it later
+# is a visible one-line change with a commit behind it -- not a flag
+# spread across five handlers where one could be missed.
+#
+# WHAT IS ENABLED: /state and /preflight (both read-only) and /stop.
+# THE STOP IS DELIBERATELY ON. It is a safety control, it removes
+# authority rather than granting it, and shipping a monitoring surface
+# whose stop is disabled would mean the one control an operator may
+# need in a hurry is the one that does not work.
+#
+# WHAT IS DISABLED: /approve (takes a reserve and records an approved
+# ticket), /release (frees a reserve) and /resume (lifts a stop).
+# None of them contacts a venue even when enabled -- no venue
+# submission path exists in this codebase yet at all -- but each writes
+# money accounting, and this release is for monitoring.
+CALIBRATION_WRITES_ENABLED = False
+
+CALIBRATION_GATED = (
+    "CALIBRATION_WRITES_DISABLED_IN_THIS_RELEASE: the bounded monitoring "
+    "release of 2026-09-18 ships sign-in, real-data monitoring and the "
+    "budget display only. Approval, reserve release and resume are off, "
+    "and no venue submission path exists. Enabling requires flipping "
+    "CALIBRATION_WRITES_ENABLED with an authorised commit.")
+
+
+def require_calibration_writes() -> None:
+    if not CALIBRATION_WRITES_ENABLED:
+        raise HTTPException(status_code=503, detail=CALIBRATION_GATED)
+
+
 def _cal_refusal(exc: Exception) -> HTTPException:
     """A refusal is a 409 with its NAME, not a 500. The operator has to
     be able to read which limit stopped the ticket."""
@@ -977,7 +1013,9 @@ async def calibration_preflight(body: CalibrationTicketBody) -> dict:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/api/calibration/approve", dependencies=[Depends(require_admin)])
+@app.post("/api/calibration/approve",
+          dependencies=[Depends(require_admin),
+                        Depends(require_calibration_writes)])
 async def calibration_approve(body: CalibrationTicketBody) -> dict:
     """Record an approved ticket and TAKE ITS RESERVE. Sends nothing.
 
@@ -1018,7 +1056,9 @@ async def calibration_approve(body: CalibrationTicketBody) -> dict:
             "budget": budget}
 
 
-@app.post("/api/calibration/release", dependencies=[Depends(require_admin)])
+@app.post("/api/calibration/release",
+          dependencies=[Depends(require_admin),
+                        Depends(require_calibration_writes)])
 async def calibration_release(client_order_id: str = Query(...),
                               venue_terminal_state: str = Query(""),
                               fills_reconciled: bool = Query(False)) -> dict:
@@ -1052,7 +1092,9 @@ async def calibration_stop(body: CalibrationStopBody) -> dict:
         raise HTTPException(status_code=503, detail=str(exc)) from exc
 
 
-@app.post("/api/calibration/resume", dependencies=[Depends(require_admin)])
+@app.post("/api/calibration/resume",
+          dependencies=[Depends(require_admin),
+                        Depends(require_calibration_writes)])
 async def calibration_resume(body: CalibrationStopBody) -> dict:
     from .. import calibration_store as CSTORE
 

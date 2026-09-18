@@ -64,6 +64,19 @@ concurrency:
   # a scheduled job. The loser waits its turn.
   group: pmus-public-read-global
   cancel-in-progress: false
+  # queue: max added 2026-09-18 (sprint override, queue repair).
+  #
+  # WHY EVERY MEMBER NEEDS IT. GitHub keeps at most ONE pending run per
+  # concurrency group, and the run that ARRIVES decides what happens to
+  # the one already waiting. `queue: max` was set on
+  # beta48-substantive-capture alone, so on 2026-09-18 at 14:06:52Z the
+  # scheduled beta48-forward-capture arrived and the waiting evidence run
+  # was cancelled one second later. A queue policy on the waiter protects
+  # nothing; it has to be on the arrival.
+  #
+  # NOTHING ELSE CHANGES: same group, cancel-in-progress still false, same
+  # schedule, same job, same collector code.
+  queue: max
 
 jobs:
   measure:

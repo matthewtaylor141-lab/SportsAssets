@@ -137,6 +137,21 @@ def pool(monkeypatch):
     return p
 
 
+@pytest.fixture
+def writes_enabled(monkeypatch):
+    """Lift the BOUNDED MONITORING RELEASE gate for one test.
+
+    The gate is a release decision, not the budget's logic, and it has
+    its own tests in TestTheMonitoringReleaseGate (including that its
+    default really is off). The classes below are about the accounting
+    -- the reserve, the concurrency index, the stop, the release rule --
+    and they would be testing the gate instead of the budget if the gate
+    stayed on. `require_calibration_writes` reads the module global at
+    call time, so setting it here is enough.
+    """
+    monkeypatch.setattr(app_mod, "CALIBRATION_WRITES_ENABLED", True)
+
+
 H = {"X-Admin-Token": ADMIN}
 
 
@@ -203,8 +218,8 @@ class TestPreflightAtTheRoute:
 
 
 class TestApprovalTakesAReserveAndSendsNothing:
-    def test_approval_must_confirm_the_exact_client_order_id(self, client,
-                                                             pool):
+    def test_approval_must_confirm_the_exact_client_order_id(
+            self, client, pool, writes_enabled):
         r = client.post("/api/calibration/approve",
                         json={"ticket": ticket(), "approved_by": "matt",
                               "confirm": "CAL-0002"}, headers=H)
@@ -212,7 +227,7 @@ class TestApprovalTakesAReserveAndSendsNothing:
         assert "NOT_CONFIRMED" in r.json()["detail"]
 
     def test_an_unattributed_approval_is_refused(self, client, pool,
-                                                 monkeypatch):
+                                                 writes_enabled, monkeypatch):
         monkeypatch.setattr(app_mod, "settings", lambda: _Settings())
         r = client.post("/api/calibration/approve",
                         json={"ticket": ticket(), "approved_by": "",
@@ -220,7 +235,8 @@ class TestApprovalTakesAReserveAndSendsNothing:
         assert r.status_code == 409
         assert "APPROVAL_NOT_ATTRIBUTED" in r.json()["detail"]
 
-    def test_a_refused_ticket_comes_back_named_with_409(self, client, pool):
+    def test_a_refused_ticket_comes_back_named_with_409(self, client, pool,
+                                                        writes_enabled):
         r = client.post("/api/calibration/approve",
                         json={"ticket": ticket(exitFeeReserve=None),
                               "approved_by": "matt", "confirm": "CAL-0001"},
@@ -228,8 +244,8 @@ class TestApprovalTakesAReserveAndSendsNothing:
         assert r.status_code == 409
         assert cal.R_FEES_UNBOUNDED in r.json()["detail"]
 
-    def test_the_response_says_plainly_that_nothing_was_sent(self, client,
-                                                             pool):
+    def test_the_response_says_plainly_that_nothing_was_sent(
+            self, client, pool, writes_enabled):
         r = client.post("/api/calibration/approve",
                         json={"ticket": ticket(), "approved_by": "matt",
                               "confirm": "CAL-0001"},
@@ -240,7 +256,7 @@ class TestApprovalTakesAReserveAndSendsNothing:
         assert cal.R_CASH_UNKNOWN in r.json()["detail"]
 
     def test_a_funded_ticket_reserves_and_the_second_is_refused_by_the_index(
-            self, client, pool, monkeypatch):
+            self, client, pool, writes_enabled, monkeypatch):
         import sportsassets.api.pmus_account as PA
 
         async def _snap():
@@ -266,7 +282,7 @@ class TestApprovalTakesAReserveAndSendsNothing:
         assert cal.R_CONCURRENCY in r2.json()["detail"]
 
     def test_the_database_index_is_the_limit_when_the_read_was_stale(
-            self, client, monkeypatch):
+            self, client, writes_enabled, monkeypatch):
         """THE RACE THE PYTHON CHECK CANNOT WIN.
 
         `cal.refusals` reads the session, then `reserve` inserts. Between
@@ -312,7 +328,7 @@ class TestApprovalTakesAReserveAndSendsNothing:
 
 class TestTheOperatorStop:
     def test_the_stop_is_durable_attributed_and_refuses_admission(
-            self, client, pool, monkeypatch):
+            self, client, pool, writes_enabled, monkeypatch):
         import sportsassets.api.pmus_account as PA
 
         async def _snap():
@@ -349,7 +365,8 @@ class TestTheOperatorStop:
 
 
 class TestReleaseAtTheRoute:
-    def test_a_cancel_acknowledgement_does_not_release(self, client, pool):
+    def test_a_cancel_acknowledgement_does_not_release(self, client, pool,
+                                                       writes_enabled):
         r = client.post("/api/calibration/release"
                         "?client_order_id=CAL-0001&fills_reconciled=false",
                         headers=H)
@@ -357,9 +374,69 @@ class TestReleaseAtTheRoute:
         assert "RESERVE_HELD" in r.json()["detail"]
 
     def test_a_terminal_state_without_reconciled_fills_does_not_release(
-            self, client, pool):
+            self, client, pool, writes_enabled):
         r = client.post("/api/calibration/release?client_order_id=CAL-0001"
                         "&venue_terminal_state=CANCELLED"
                         "&fills_reconciled=false", headers=H)
         assert r.status_code == 409
         assert "fills not reconciled" in r.json()["detail"]
+
+
+# ── the bounded monitoring release gate ──────────────────────────────
+
+class TestTheMonitoringReleaseGate:
+    """What ships in the release of 2026-09-18, checked at the routes.
+
+    A gate asserted in a comment is not a gate. These drive the actual
+    endpoints with a valid admin token and a working ledger, so the only
+    thing that can refuse them is the gate itself.
+    """
+
+    def test_the_gate_is_off_by_default_in_this_release(self):
+        assert app_mod.CALIBRATION_WRITES_ENABLED is False
+
+    @pytest.mark.parametrize("path,payload", [
+        ("/api/calibration/approve", {"ticket": ticket(),
+                                      "approved_by": "matt",
+                                      "confirm": "CAL-0001"}),
+        ("/api/calibration/resume", {"by": "matt"}),
+    ])
+    def test_the_write_routes_refuse_with_the_named_reason(self, client, pool,
+                                                           path, payload):
+        r = client.post(path, json=payload, headers=H)
+        assert r.status_code == 503
+        assert "CALIBRATION_WRITES_DISABLED_IN_THIS_RELEASE" in r.json()["detail"]
+
+    def test_release_is_refused_even_with_both_conditions_satisfied(self,
+                                                                    client,
+                                                                    pool):
+        r = client.post("/api/calibration/release?client_order_id=CAL-0001"
+                        "&venue_terminal_state=FILLED&fills_reconciled=true",
+                        headers=H)
+        assert r.status_code == 503
+        assert "CALIBRATION_WRITES_DISABLED" in r.json()["detail"]
+
+    def test_the_monitoring_routes_still_work(self, client, pool):
+        assert client.get("/api/calibration/state",
+                          headers=H).status_code == 200
+        assert client.post("/api/calibration/preflight",
+                           json={"ticket": ticket()},
+                           headers=H).status_code == 200
+
+    def test_the_operator_stop_is_deliberately_still_enabled(self, client,
+                                                             pool):
+        """The stop removes authority rather than granting it. Shipping a
+        monitoring surface whose stop is disabled would mean the one
+        control an operator may need in a hurry is the one that does not
+        work."""
+        r = client.post("/api/calibration/stop",
+                        json={"by": "matt", "reason": "drill"}, headers=H)
+        assert r.status_code == 200 and r.json()["stopped"] is True
+
+    def test_no_route_can_reach_a_venue_submission_path(self):
+        """The strongest form of 'venue submission disabled': there is no
+        import of the execution module anywhere a request can reach."""
+        import pathlib
+        api = pathlib.Path(app_mod.__file__).resolve().parent
+        for p in api.glob("*.py"):
+            assert "calibration_execute" not in p.read_text(), p.name
