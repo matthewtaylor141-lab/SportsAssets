@@ -249,83 +249,26 @@ def row(**over):
     return r
 
 
-class TestTheCallablePathChecksItsApprovedState:
-    """The docstring used to say the row exists first. It said it; the
-    code did not check it, so `submit()` would have sent for a ticket no
-    approval had ever been written for. That is the uncalled-census
-    defect one layer down."""
+class TestTheCallerSuppliedRowIsGone:
+    """The old handoff took a row and a persist callable from the caller
+    and sent BEFORE recording. That whole contract is replaced by the
+    durable claim, and its tests live in test_calibration_claim.py.
 
-    def test_no_durable_row_refuses_before_any_send(self):
-        v = MockVenue(pre=[], submit=OK)
-        r = ex.guarded_submit(v, ticket(), None)
-        assert r["sent"] is False
-        assert ex.H_NO_ROW in r["blockers"]
-        assert v.calls == []                       # nothing was even read
+    What is pinned here is that the old shape cannot come back.
+    """
 
-    def test_a_row_in_the_wrong_state_refuses(self):
-        v = MockVenue(pre=[], submit=OK)
-        r = ex.guarded_submit(v, ticket(), row(state="SUBMITTED"))
-        assert r["sent"] is False
-        assert any(b.startswith(ex.H_WRONG_STATE) for b in r["blockers"])
-        assert v.calls == []
+    def test_guarded_submit_takes_no_ticket_and_no_persist_callable(self):
+        import inspect
+        sig = inspect.signature(ex.guarded_submit)
+        assert "ticket" not in sig.parameters
+        assert "row" not in sig.parameters
+        assert "persist" not in sig.parameters
+        assert "client_order_id" in sig.parameters
+        assert "store" in sig.parameters
 
-    def test_a_row_with_no_reserve_refuses(self):
-        r = ex.guarded_submit(MockVenue(), ticket(), row(reserve=0))
-        assert ex.H_NO_RESERVE in r["blockers"]
-
-    def test_a_row_that_already_has_a_venue_order_refuses(self):
-        """One send per lifecycle. A second would be the double-placement
-        this whole discipline exists to prevent."""
-        r = ex.guarded_submit(MockVenue(), ticket(), row(venueOrderId="V-1"))
-        assert any(b.startswith(ex.H_ALREADY_SENT) for b in r["blockers"])
-
-    def test_an_operator_stop_refuses_even_with_a_perfect_row(self):
-        r = ex.guarded_submit(MockVenue(), ticket(), row(),
-                              session_stopped=True)
-        assert ex.H_STOPPED in r["blockers"]
-
-    @pytest.mark.parametrize("field,value", [
-        ("price", 0.41), ("quantity", 11), ("marketId", "another-market"),
-        ("outcome", "YYY to win"), ("side", "SELL"),
-    ])
-    def test_a_ticket_that_drifts_from_the_approved_row_refuses(self, field,
-                                                                value):
-        """The row is what a human said yes to. A ticket differing in
-        any bound field is a different ticket wearing an approved name."""
-        r = ex.guarded_submit(MockVenue(), ticket(**{field: value}), row())
-        assert any(b.startswith(ex.H_TICKET_DRIFT) for b in r["blockers"]), \
-            r["blockers"]
-
-    def test_a_matching_approved_row_sends_exactly_once(self):
-        v = MockVenue(pre=["V-0"], submit=OK)
-        seen = []
-        r = ex.guarded_submit(v, ticket(), row(), persist=seen.append)
-        assert r["outcome"] == ex.SUBMITTED
-        assert sum(1 for c in v.calls if c[0] == "submit") == 1
-        assert [c[0] for c in v.calls] == ["open_order_ids", "submit"]
-        assert r["preOpenOrderIds"] == ["V-0"]
-        assert r["persisted"] is True and len(seen) == 1
-        assert seen[0]["clientOrderId"] == "CAL-0001"
-
-    def test_an_ambiguous_send_is_persisted_too(self):
-        """The ambiguous one is the ONLY one that must be written down:
-        it is the case where the record is all we will have."""
-        v = MockVenue(pre=["V-0"], raise_on_submit=True)
-        seen = []
-        r = ex.guarded_submit(v, ticket(), row(), persist=seen.append)
-        assert r["outcome"] == ex.AMBIGUOUS
-        assert r["persisted"] is True
-        assert seen[0]["preOpenOrderIds"] == ["V-0"]
-
-    def test_a_failed_persist_is_surfaced_not_swallowed(self):
-        def boom(_rec):
-            raise RuntimeError("database gone")
-        v = MockVenue(pre=[], submit=OK)
-        r = ex.guarded_submit(v, ticket(), row(), persist=boom)
-        assert r["persisted"] is False
-        assert r["persistError"] == "RuntimeError"
-        assert "SEND HAPPENED AND THE RECORD DID NOT" in r["note"]
-
+    def test_it_is_async_because_the_claim_is_a_database_write(self):
+        import inspect
+        assert inspect.iscoroutinefunction(ex.guarded_submit)
 
 class TestATicketTheAdapterCannotMapIsNeverSent:
     """An unmappable ticket is refused BEFORE the pre-image read.

@@ -25,6 +25,7 @@ it, and a stopped session refuses by name.
 from __future__ import annotations
 
 import json
+import uuid
 
 from . import calibration as cal
 from .db import get_pool
@@ -327,4 +328,358 @@ async def resume(by: str, pool=None, session_id: str = SESSION_ID) -> dict:
                stop_reason = NULL, updated_at = now()
          WHERE session_id = $1
         """, session_id, (by or "unattributed").strip())
+    return await budget(pool, session_id)
+
+
+# ─────────────────────────────────────────────────────────────────────
+# THE SEND CLAIM. One approval permits at most one send attempt.
+#
+# `guarded_submit` used to take a caller-supplied row and an optional
+# persistence callable, and it SENT BEFORE IT RECORDED. Two callers with
+# the same approved ticket both passed the checks and both reached the
+# venue; a crash between the send and the record left nothing to
+# reconcile against. One lifecycle row is not, by itself, one venue
+# submission.
+#
+# The claim is an INSERT with a UNIQUE client_order_id. The check and the
+# act are the same statement, so there is no window between them. The
+# second caller gets a unique violation and NO SEND.
+# ─────────────────────────────────────────────────────────────────────
+
+R_ALREADY_CLAIMED = "SEND_ALREADY_CLAIMED_FOR_THIS_APPROVAL"
+R_NOT_APPROVED = "LIFECYCLE_NOT_IN_APPROVED_STATE"
+R_NO_ROW = "NO_DURABLE_LIFECYCLE_ROW"
+R_NO_RESERVE = "NO_RESERVE_HELD"
+R_ALREADY_SENT = "LIFECYCLE_ALREADY_HAS_A_VENUE_ORDER"
+R_CLAIM_UNAVAILABLE = "CLAIM_STORE_UNAVAILABLE"
+
+# The economically relevant fields, bound server-side at claim time. A
+# send may be made with these and nothing else.
+BOUND_FIELDS = ("venue", "account", "marketId", "outcome", "outcomeSide",
+                "side", "orderType", "price", "quantity", "entryFeeReserve",
+                "exitFeeReserve")
+
+ATTEMPT_UNRESOLVED = ("CLAIMED", "PRE_IMAGE_RECORDED", "SENT_OUTCOME_UNKNOWN")
+
+AN_UNRESOLVED_ATTEMPT_BLOCKS_EVERYTHING = (
+    "an attempt whose outcome is unknown may correspond to a live order. "
+    "Until it is resolved no further send is permitted, on this approval "
+    "or any other, because the single-lifecycle limit is spent on it")
+
+
+def _bind(row: dict) -> dict:
+    """The approved economic fields, read from the DURABLE row."""
+    t = row.get("ticket")
+    if isinstance(t, str):
+        try:
+            t = json.loads(t)
+        except ValueError:
+            t = {}
+    t = t if isinstance(t, dict) else {}
+    bound = {
+        "venue": row.get("venue"),
+        "account": row.get("account"),
+        "marketId": row.get("market_id"),
+        "outcome": row.get("outcome"),
+        # The LONG/SHORT selector lives on the approved ticket; the
+        # lifecycle table predates it. It is bound from the ticket the
+        # human approved, never defaulted.
+        "outcomeSide": t.get("outcomeSide"),
+        "side": row.get("side"),
+        "orderType": row.get("order_type"),
+        "price": float(row["price"]) if row.get("price") is not None else None,
+        "quantity": int(row["quantity"]) if row.get("quantity") is not None
+        else None,
+        "entryFeeReserve": (float(row["entry_fee_usd"])
+                            if row.get("entry_fee_usd") is not None else None),
+        "exitFeeReserve": (float(row["exit_fee_usd"])
+                           if row.get("exit_fee_usd") is not None else None),
+    }
+    bound["clientOrderId"] = row.get("client_order_id")
+    bound["inventoryPlan"] = row.get("inventory_plan")
+    bound["approvedBy"] = row.get("approved_by")
+    return bound
+
+
+APPROVED_ROW_SQL = """
+    SELECT client_order_id, venue, account, market_id, outcome, side,
+           order_type, price, quantity, entry_fee_usd, exit_fee_usd,
+           all_in_usd, reserve_usd, inventory_plan, approved_by, state,
+           venue_order_id, ticket
+      FROM calibration_lifecycles
+     WHERE client_order_id = $1
+"""
+
+UNRESOLVED_SQL = """
+    SELECT attempt_id, client_order_id, state, claimed_by, claimed_at,
+           pre_open_order_ids, venue_order_id, outcome, reason
+      FROM calibration_send_attempts
+     WHERE session_id = $1 AND state = ANY($2::text[])
+     ORDER BY claimed_at
+"""
+
+
+async def unresolved_attempt(pool=None, session_id: str = SESSION_ID):
+    """The attempt a restart has to deal with, or None.
+
+    This is what makes ambiguity survive a crash: the row was written
+    before the network call, so a process that died mid-send left it
+    behind.
+    """
+    pool = pool or await get_pool()
+    try:
+        rows = await pool.fetch(UNRESOLVED_SQL, session_id,
+                                list(ATTEMPT_UNRESOLVED))
+    except Exception as exc:                                   # noqa: BLE001
+        raise StoreUnavailable("%s: %s" % (R_CLAIM_UNAVAILABLE,
+                                           type(exc).__name__)) from exc
+    return dict(rows[0]) if rows else None
+
+
+async def claim_send(client_order_id: str, claimed_by: str, pool=None,
+                     session_id: str = SESSION_ID) -> dict:
+    """Resolve the approved ticket SERVER-SIDE and claim the one send.
+
+    Returns {"CLAIMED": True, "attemptId": ..., "bound": {...}} or
+    {"CLAIMED": False, "blockers": [...]}. It never raises for a refusal
+    -- a refusal is an answer -- and it NEVER returns CLAIMED without a
+    durable row, so a caller that cannot reach the store cannot send.
+    """
+    if not isinstance(claimed_by, str) or not claimed_by.strip():
+        return {"CLAIMED": False, "blockers": ["CLAIM_NOT_ATTRIBUTED"]}
+    try:
+        pool = pool or await get_pool()
+    except Exception as exc:                                   # noqa: BLE001
+        return {"CLAIMED": False,
+                "blockers": ["%s: %s" % (R_CLAIM_UNAVAILABLE,
+                                         type(exc).__name__)]}
+
+    # THE SESSION AND THE STOP, from the ledger rather than an argument.
+    try:
+        s = await load(pool, session_id)
+    except StoreUnavailable as exc:
+        return {"CLAIMED": False, "blockers": ["%s" % exc]}
+    if s["stopped"]:
+        return {"CLAIMED": False, "blockers": [R_STOPPED]}
+
+    # ANY UNRESOLVED ATTEMPT BLOCKS, including one for another ticket.
+    try:
+        outstanding = await unresolved_attempt(pool, session_id)
+    except StoreUnavailable as exc:
+        return {"CLAIMED": False, "blockers": ["%s" % exc]}
+    if outstanding:
+        return {"CLAIMED": False,
+                "blockers": [R_ALREADY_CLAIMED],
+                "outstanding": outstanding,
+                "why": AN_UNRESOLVED_ATTEMPT_BLOCKS_EVERYTHING}
+
+    try:
+        row = await pool.fetchrow(APPROVED_ROW_SQL, client_order_id)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"CLAIMED": False,
+                "blockers": ["%s: %s" % (R_CLAIM_UNAVAILABLE,
+                                         type(exc).__name__)]}
+    if row is None:
+        return {"CLAIMED": False, "blockers": [R_NO_ROW]}
+    row = dict(row)
+
+    blockers = []
+    if row.get("state") != cal.APPROVED:
+        blockers.append(R_NOT_APPROVED)
+    if not float(row.get("reserve_usd") or 0) > 0:
+        blockers.append(R_NO_RESERVE)
+    if row.get("venue_order_id"):
+        blockers.append(R_ALREADY_SENT)
+    bound = _bind(row)
+    missing = [f for f in BOUND_FIELDS if bound.get(f) in (None, "")]
+    if missing:
+        blockers.append("APPROVED_FIELDS_INCOMPLETE: %s" % ",".join(missing))
+    # THE BUDGET, against the durable session. NOT cal.refusals(): those
+    # are ADMISSION checks for a ticket that has not been reserved yet,
+    # and this row's own reserve is already in the session's numbers, so
+    # running them here would refuse every claim for exceeding a limit
+    # with its own money. What is re-checked is what could have changed
+    # since approval.
+    allin = float(row.get("all_in_usd") or 0)
+    if allin > cal.MAX_ALL_IN_COST_PER_TRADE_LIFECYCLE + 1e-9:
+        blockers.append(cal.R_PER_TRADE)
+    if cal.spent(s) + cal.reserved(s) > cal.MAX_SESSION_CUMULATIVE_SPEND + 1e-9:
+        blockers.append(cal.R_SESSION)
+    open_ids = [lc["clientOrderId"] for lc in s["lifecycles"]
+                if lc["state"] in cal.OPEN_STATES]
+    if [i for i in open_ids if i != client_order_id]:
+        # Another lifecycle holds the one permitted slot.
+        blockers.append(cal.R_CONCURRENCY)
+    if blockers:
+        return {"CLAIMED": False, "blockers": sorted(set(blockers)),
+                "bound": bound}
+
+    attempt_id = "ATT-%s-%s" % (client_order_id, uuid.uuid4().hex[:12])
+    try:
+        await pool.execute(
+            """
+            INSERT INTO calibration_send_attempts
+                   (attempt_id, session_id, client_order_id, claimed_by,
+                    bound_fields, state)
+            VALUES ($1,$2,$3,$4,$5::jsonb,'CLAIMED')
+            """,
+            attempt_id, session_id, client_order_id, claimed_by.strip(),
+            json.dumps(bound, default=str))
+    except Exception as exc:                                   # noqa: BLE001
+        name = type(exc).__name__
+        if "Unique" in name or "unique" in str(exc).lower():
+            # THE DATABASE REFUSED THE SECOND CLAIM. This is the whole
+            # mechanism, not an internal error.
+            return {"CLAIMED": False, "blockers": [R_ALREADY_CLAIMED],
+                    "why": AN_UNRESOLVED_ATTEMPT_BLOCKS_EVERYTHING}
+        return {"CLAIMED": False,
+                "blockers": ["%s: %s" % (R_CLAIM_UNAVAILABLE, name)]}
+    return {"CLAIMED": True, "attemptId": attempt_id, "bound": bound,
+            "state": "CLAIMED"}
+
+
+async def record_pre_image(attempt_id: str, pre_ids, pool=None) -> None:
+    """Persist the pre-image and move to PRE_IMAGE_RECORDED.
+
+    BEFORE the network call. A send whose pre-image was never written
+    down cannot be attributed afterwards, and the claim is already spent,
+    so the failure has to happen here rather than after the order exists.
+    """
+    pool = pool or await get_pool()
+    n = await pool.execute(
+        """
+        UPDATE calibration_send_attempts
+           SET pre_open_order_ids = $2::jsonb, pre_image_at = now(),
+               state = 'PRE_IMAGE_RECORDED', updated_at = now()
+         WHERE attempt_id = $1 AND state = 'CLAIMED'
+        """, attempt_id, json.dumps(list(pre_ids or []), default=str))
+    if isinstance(n, str) and n.endswith(" 0"):
+        raise ValueError("CALIBRATION_ATTEMPT_NOT_CLAIMABLE: %s" % attempt_id)
+
+
+async def mark_sent(attempt_id: str, pool=None) -> None:
+    """The network call is about to happen. Durable BEFORE it does.
+
+    From here on the attempt is SENT_OUTCOME_UNKNOWN whatever happens to
+    this process: a crash between this write and the response leaves the
+    ambiguity recorded, which is the only state from which it can be
+    reconciled.
+    """
+    pool = pool or await get_pool()
+    n = await pool.execute(
+        """
+        UPDATE calibration_send_attempts
+           SET state = 'SENT_OUTCOME_UNKNOWN', sent_at = now(),
+               updated_at = now()
+         WHERE attempt_id = $1 AND state = 'PRE_IMAGE_RECORDED'
+        """, attempt_id)
+    if isinstance(n, str) and n.endswith(" 0"):
+        raise ValueError("CALIBRATION_ATTEMPT_NOT_SENDABLE: %s" % attempt_id)
+
+
+async def resolve_attempt(attempt_id: str, outcome: str, pool=None,
+                          venue_order_id: str | None = None,
+                          reason: str | None = None,
+                          resolved_by: str = "system",
+                          resolved: bool = True) -> None:
+    """Record what the venue said. AMBIGUITY IS NOT A RESOLUTION.
+
+    `resolved=False` keeps the attempt in SENT_OUTCOME_UNKNOWN while
+    still recording what is known, so a later reconciliation has the
+    details and the block stays in force.
+    """
+    pool = pool or await get_pool()
+    state = "RESOLVED" if resolved else "SENT_OUTCOME_UNKNOWN"
+    await pool.execute(
+        """
+        UPDATE calibration_send_attempts
+           SET state = $2, outcome = $3, reason = $4,
+               venue_order_id = COALESCE($5, venue_order_id),
+               read_before = now(),
+               resolved_at = CASE WHEN $2 = 'RESOLVED' THEN now() END,
+               resolved_by = $6, updated_at = now()
+         WHERE attempt_id = $1
+        """, attempt_id, state, outcome, reason, venue_order_id, resolved_by)
+
+
+async def abandon_attempt(attempt_id: str, reason: str, pool=None) -> None:
+    """Nothing was sent. Record that and stop.
+
+    NOT_SENT is terminal for the attempt but does NOT free the approval:
+    the client_order_id is used up and a further send needs a fresh
+    approval with a fresh id. An approval that could be retried after a
+    failed attempt would not be an approval for one send.
+    """
+    pool = pool or await get_pool()
+    await pool.execute(
+        """
+        UPDATE calibration_send_attempts
+           SET state = 'NOT_SENT', outcome = 'NOT_SENT', reason = $2,
+               resolved_at = now(), resolved_by = 'system', updated_at = now()
+         WHERE attempt_id = $1 AND state IN ('CLAIMED','PRE_IMAGE_RECORDED')
+        """, attempt_id, reason)
+
+
+async def book_cash(client_order_id: str, cash_total: float, pool=None,
+                    session_id: str = SESSION_ID) -> dict:
+    """Book the venue's CUMULATIVE cash for this lifecycle. Idempotent.
+
+    `record_spend` added a delta the caller computed from a prior total it
+    was holding. Two processes holding the same prior total book the same
+    cash twice, and a caller-provided prior total cannot establish
+    idempotency across processes -- which is the book 1333 shape, where
+    the ledger booked one of two fills.
+
+    Here the high-water mark lives in the DATABASE and the delta is
+    computed inside the statement: the lifecycle takes GREATEST(old, new)
+    and the session takes exactly the increase. Re-reading one terminal
+    status ten times books the cash once. A total that FALLS is the venue
+    contradicting itself and is refused, never netted.
+    """
+    if not isinstance(cash_total, (int, float)) or cash_total < 0:
+        raise ValueError("CALIBRATION_CASH_NOT_A_NON_NEGATIVE_TOTAL")
+    pool = pool or await get_pool()
+    async with pool.acquire() as con:
+        async with con.transaction():
+            row = await con.fetchrow(
+                """
+                SELECT cash_booked_usd
+                  FROM calibration_lifecycles
+                 WHERE client_order_id = $1
+                   FOR UPDATE
+                """, client_order_id)
+            if row is None:
+                raise ValueError("CALIBRATION_UNKNOWN_LIFECYCLE: %s"
+                                 % client_order_id)
+            booked = float(row["cash_booked_usd"] or 0)
+            if float(cash_total) + 1e-9 < booked:
+                # THE VENUE CONTRADICTING ITSELF. A cumulative total that
+                # falls is not a refund to net off; it is two readings
+                # that cannot both be true, and the second one is
+                # refused rather than quietly applied.
+                raise ValueError(
+                    "CALIBRATION_CASH_TOTAL_FELL: booked %.4f, read %.4f"
+                    % (booked, float(cash_total)))
+            await con.execute(
+                """
+                UPDATE calibration_lifecycles
+                   SET cash_booked_usd = GREATEST(cash_booked_usd, $2),
+                       spent_usd = GREATEST(spent_usd, $2),
+                       updated_at = now()
+                 WHERE client_order_id = $1
+                """, client_order_id, float(cash_total))
+            # The session total is the SUM of the per-lifecycle high-water
+            # marks, recomputed inside the same transaction. It needs no
+            # delta from the caller, so no caller can supply a wrong one,
+            # and it is monotone because every term is.
+            await con.execute(
+                """
+                UPDATE calibration_sessions s
+                   SET spent_usd = (
+                           SELECT COALESCE(SUM(l.cash_booked_usd), 0)
+                             FROM calibration_lifecycles l
+                            WHERE l.session_id = s.session_id),
+                       updated_at = now()
+                 WHERE s.session_id = $1
+                """, session_id)
     return await budget(pool, session_id)

@@ -528,41 +528,120 @@ def approved_state_blockers(ticket: dict, row: dict | None,
     return sorted(set(out))
 
 
-def guarded_submit(venue, ticket: dict, row: dict | None,
-                   session_stopped: bool = False, persist=None) -> dict:
-    """The whole handoff, in one callable that checks before it acts.
+NOT_CLAIMED = "NOT_CLAIMED_NOTHING_SENT"
+NO_CLAIM_STORE = "NO_CLAIM_STORE_NOTHING_SENT"
 
-        verified preflight
-          -> approved ticket            (a human said yes)
-          -> durable reserve + row      (checked HERE, not assumed)
-          -> pre-image                  (read inside submit())
-          -> ONE send                   (never retried)
-          -> persisted response or ambiguity
-          -> reconciliation             (reconcile/cancel/settle)
+A_CLAIM_IS_THE_PERMISSION = (
+    "one approval permits at most one send attempt. The claim is a row "
+    "the database makes exclusive, so the check and the act are the same "
+    "statement and there is no window between them. No claim, no send -- "
+    "and no claim store means no send either, because an unrecordable "
+    "send is one nobody can reconcile")
 
-    `persist(record)` is called with the outcome BEFORE this returns, on
-    every path including the ambiguous one -- an ambiguous send that was
-    not written down is the one that cannot be reconciled afterwards. If
-    persistence itself fails the failure is returned, not swallowed: we
-    would rather an operator sees "sent but not recorded" than a clean
-    result hiding it.
+
+async def guarded_submit(venue, client_order_id: str, claimed_by: str,
+                         store=None, pool=None, session_id=None):
+    """The whole handoff, server-resolved and claimed before it acts.
+
+        approved ticket, resolved FROM THE LEDGER by client_order_id
+          -> stop, budget, reserve and approval checked server-side
+          -> ATOMIC CLAIM                 (the database makes it exclusive)
+          -> pre-image read AND PERSISTED (before any network call)
+          -> the attempt marked sent      (before the response can be lost)
+          -> ONE send                     (never retried)
+          -> the outcome recorded; ambiguity stays UNRESOLVED
+
+    WHAT CHANGED AND WHY. The previous version took a caller-supplied row
+    and an optional persistence callable, and it sent BEFORE it recorded.
+    Two callers with the same approved ticket both passed the checks and
+    both reached the venue. A crash between the send and the record left
+    nothing to reconcile against. And `persist=None` meant a send with no
+    record at all, which is the one case that must never be allowed.
+
+    NO CLAIM STORE MEANS NO SEND. `store` is required; without it this
+    refuses before anything is read.
+
+    The ticket is NOT a parameter. Everything economically relevant is
+    read from the durable row and bound at claim time, so a caller cannot
+    send at a price or size no human approved.
     """
-    why = approved_state_blockers(ticket, row, session_stopped)
-    if why:
-        return {"outcome": REFUSED_BY_VENUE, "sent": False,
-                "reason": "APPROVED_STATE_NOT_VERIFIED: " + ", ".join(why),
-                "blockers": why, "preOpenOrderIds": None}
+    if store is None:
+        return {"outcome": NO_CLAIM_STORE, "sent": False,
+                "reason": A_CLAIM_IS_THE_PERMISSION,
+                "preOpenOrderIds": None, "venueOrderId": None}
 
-    result = submit(venue, ticket)
-    result["clientOrderId"] = ticket.get("clientOrderId")
-    if persist is not None:
+    kw = {"pool": pool}
+    if session_id is not None:
+        kw["session_id"] = session_id
+
+    claim = await store.claim_send(client_order_id, claimed_by, **kw)
+    if not claim.get("CLAIMED"):
+        # REFUSED BEFORE ANYTHING WAS READ FROM THE VENUE.
+        return {"outcome": NOT_CLAIMED, "sent": False,
+                "reason": ", ".join(claim.get("blockers") or ["REFUSED"]),
+                "blockers": claim.get("blockers"),
+                "outstanding": claim.get("outstanding"),
+                "preOpenOrderIds": None, "venueOrderId": None}
+
+    attempt = claim["attemptId"]
+    bound = claim["bound"]
+    ticket = dict(bound)
+    ticket["clientOrderId"] = client_order_id
+
+    # THE PRE-IMAGE, READ AND PERSISTED BEFORE THE SEND.
+    try:
+        pre = sorted(set(str(x) for x in
+                         (venue.open_order_ids(ticket["marketId"]) or ())))
+    except Exception as exc:                                   # noqa: BLE001
+        await store.abandon_attempt(
+            attempt, "PRE_IMAGE_UNREADABLE: %s" % type(exc).__name__,
+            pool=pool)
+        return {"outcome": REFUSED_BY_VENUE, "sent": False,
+                "reason": "PRE_IMAGE_UNREADABLE: %s" % type(exc).__name__,
+                "attemptId": attempt, "preOpenOrderIds": None,
+                "preImageReadable": False, "venueOrderId": None}
+
+    try:
+        await store.record_pre_image(attempt, pre, pool=pool)
+        await store.mark_sent(attempt, pool=pool)
+    except Exception as exc:                                   # noqa: BLE001
+        # THE RECORD FAILED, SO THE SEND DOES NOT HAPPEN. An unrecordable
+        # send is one nobody can reconcile, and refusing costs nothing.
         try:
-            persist(result)
-            result["persisted"] = True
-        except Exception as exc:                               # noqa: BLE001
-            result["persisted"] = False
-            result["persistError"] = type(exc).__name__
-            result["note"] = (
-                "THE SEND HAPPENED AND THE RECORD DID NOT. Reconcile "
-                "against preOpenOrderIds before anything else is sent.")
+            await store.abandon_attempt(
+                attempt, "PRE_IMAGE_NOT_PERSISTED: %s" % type(exc).__name__,
+                pool=pool)
+        except Exception:                                      # noqa: BLE001
+            pass
+        return {"outcome": NO_CLAIM_STORE, "sent": False,
+                "reason": "PRE_IMAGE_NOT_PERSISTED: %s" % type(exc).__name__,
+                "attemptId": attempt, "preOpenOrderIds": pre,
+                "venueOrderId": None}
+
+    # ONE SEND. The attempt is already durable and already marked sent, so
+    # a crash from here on leaves SENT_OUTCOME_UNKNOWN behind rather than
+    # silence.
+    result = submit(venue, ticket)
+    result["clientOrderId"] = client_order_id
+    result["attemptId"] = attempt
+    result["boundFields"] = bound
+    if not result.get("preOpenOrderIds"):
+        result["preOpenOrderIds"] = pre
+
+    resolved = result["outcome"] in (SUBMITTED, REFUSED_BY_VENUE, NOT_SENT)
+    try:
+        await store.resolve_attempt(
+            attempt, result["outcome"], pool=pool,
+            venue_order_id=result.get("venueOrderId"),
+            reason=result.get("reason"), resolved=resolved)
+        result["attemptRecorded"] = True
+        result["attemptResolved"] = resolved
+    except Exception as exc:                                   # noqa: BLE001
+        result["attemptRecorded"] = False
+        result["attemptResolved"] = False
+        result["recordError"] = type(exc).__name__
+        result["note"] = (
+            "THE SEND HAPPENED AND THE OUTCOME WAS NOT RECORDED. The "
+            "attempt row is already SENT_OUTCOME_UNKNOWN, so the block "
+            "holds and reconciliation has the pre-image.")
     return result
