@@ -286,35 +286,84 @@ async def reserve(ticket: dict, account: dict | None, approved_by: str,
     return await budget(pool, session_id)
 
 
+R_SESSION_NOT_THE_OWNER = "SESSION_IS_NOT_THIS_LIFECYCLE_S_OWNER"
+
+SUPERSEDED_BY_BOOK_CASH = (
+    "record_spend books a DELTA the caller computed. `book_cash` books the "
+    "venue's cumulative total and computes the delta inside the statement, "
+    "which is the only shape that is idempotent across processes. Nothing "
+    "in this codebase calls record_spend; it is kept because a delta is "
+    "still the right shape for a cost the venue reports only as an "
+    "increment, and it is now bound to the lifecycle's own session")
+
+
+async def _owning_session(con, client_order_id: str, supplied: str | None):
+    """The session this lifecycle belongs to, read INSIDE the transaction.
+
+    THE DEFECT THIS CLOSES. Both money paths took the lifecycle by
+    `client_order_id` and the session by a separately supplied (or
+    defaulted) `session_id`, and nothing checked that the second owned the
+    first. With one session that was merely redundant. With a second
+    session -- the institutional preproduction lane -- it is a cross-ledger
+    write: a preprod lifecycle booked against the production session moves
+    the real $100 allowance with test-funded money.
+
+    The owner is DERIVED, never assumed. A caller that supplied a different
+    session is refused by name before anything is written, because
+    retargeting its write to another ledger silently would be worse than
+    refusing it. `None` means "derive it", which is what every caller
+    should pass.
+    """
+    row = await con.fetchrow(
+        """
+        SELECT session_id, environment, venue, cash_booked_usd
+          FROM calibration_lifecycles
+         WHERE client_order_id = $1
+           FOR UPDATE
+        """, client_order_id)
+    if row is None:
+        raise ValueError("CALIBRATION_UNKNOWN_LIFECYCLE: %s" % client_order_id)
+    owner = row["session_id"]
+    if supplied is not None and supplied != owner:
+        raise ValueError(
+            "%s: lifecycle %s belongs to session %r (%s/%s), not %r"
+            % (R_SESSION_NOT_THE_OWNER, client_order_id, owner,
+               row["venue"], row["environment"], supplied))
+    return owner, row
+
+
 async def record_spend(client_order_id: str, amount: float, pool=None,
-                       session_id: str = SESSION_ID) -> dict:
+                       session_id: str | None = None) -> dict:
     """Cash left the account. Cumulative; never reversed.
 
     Both writes happen in ONE transaction. A lifecycle whose spend was
     booked while the session total was not would understate the
     cumulative ceiling for every later ticket.
+
+    THE SESSION IS THE LIFECYCLE'S OWN. `session_id` defaults to None,
+    meaning derive it; passing one that does not own this lifecycle is
+    refused and writes nothing. See `SUPERSEDED_BY_BOOK_CASH` for when to
+    reach for this at all.
     """
     if not isinstance(amount, (int, float)) or amount < 0:
         raise ValueError("CALIBRATION_SPEND_NOT_A_NON_NEGATIVE_AMOUNT")
     pool = pool or await get_pool()
     async with pool.acquire() as con:
         async with con.transaction():
-            n = await con.execute(
+            owner, _ = await _owning_session(con, client_order_id, session_id)
+            await con.execute(
                 """
                 UPDATE calibration_lifecycles
                    SET spent_usd = spent_usd + $2, updated_at = now()
                  WHERE client_order_id = $1
                 """, client_order_id, amount)
-            if n and n.endswith(" 0"):
-                raise ValueError("CALIBRATION_UNKNOWN_LIFECYCLE: %s"
-                                 % client_order_id)
             await con.execute(
                 """
                 UPDATE calibration_sessions
                    SET spent_usd = spent_usd + $2, updated_at = now()
                  WHERE session_id = $1
-                """, session_id, amount)
-    return await budget(pool, session_id)
+                """, owner, amount)
+    return await budget(pool, owner)
 
 
 async def advance(client_order_id: str, state: str, pool=None,
@@ -750,7 +799,7 @@ async def abandon_attempt(attempt_id: str, reason: str, pool=None) -> None:
 
 
 async def book_cash(client_order_id: str, cash_total: float, pool=None,
-                    session_id: str = SESSION_ID) -> dict:
+                    session_id: str | None = None) -> dict:
     """Book the venue's CUMULATIVE cash for this lifecycle. Idempotent.
 
     `record_spend` added a delta the caller computed from a prior total it
@@ -770,16 +819,12 @@ async def book_cash(client_order_id: str, cash_total: float, pool=None,
     pool = pool or await get_pool()
     async with pool.acquire() as con:
         async with con.transaction():
-            row = await con.fetchrow(
-                """
-                SELECT cash_booked_usd
-                  FROM calibration_lifecycles
-                 WHERE client_order_id = $1
-                   FOR UPDATE
-                """, client_order_id)
-            if row is None:
-                raise ValueError("CALIBRATION_UNKNOWN_LIFECYCLE: %s"
-                                 % client_order_id)
+            # THE OWNING SESSION, derived in this transaction and locked
+            # with the row. The session total below is recomputed for the
+            # lifecycle's OWN session, so a preprod lifecycle can never
+            # move a production allowance even if a caller names one.
+            owner, row = await _owning_session(con, client_order_id,
+                                               session_id)
             booked = float(row["cash_booked_usd"] or 0)
             if float(cash_total) + 1e-9 < booked:
                 # THE VENUE CONTRADICTING ITSELF. A cumulative total that
@@ -810,5 +855,5 @@ async def book_cash(client_order_id: str, cash_total: float, pool=None,
                             WHERE l.session_id = s.session_id),
                        updated_at = now()
                  WHERE s.session_id = $1
-                """, session_id)
-    return await budget(pool, session_id)
+                """, owner)
+    return await budget(pool, owner)

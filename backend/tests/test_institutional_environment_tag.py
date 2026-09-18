@@ -492,35 +492,112 @@ class TestThePreprodRuntimeTakesNoCredentialFromTheForm:
         assert "api.prod.polymarketexchange.com" not in src
         assert "pmx-prod" not in src
 
-    def test_the_two_recovery_probes_exist_and_place_nothing(self):
+    def test_the_reconciliation_and_stream_probes_read_only(self):
         d, _ = self._wf()
         run = [s for s in d["jobs"]["preprod"]["steps"]
                if s.get("name") == "Run"][0]["run"]
         script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
-        # they are ADMITTED without confirm=DO, because they read
-        gate = run.split("case \"$ACTION\" in", 1)[1].split("esac", 1)[0]
-        free = gate.split("order|cancel")[0]
-        assert "report-by-clord" in free
-        assert "duplicate-preview" in free
-        # and neither reaches the insert endpoint
+
         def branch(name):
-            # up to the NEXT top-level elif, whatever shape it takes
-            # (`elif act ==` and `elif act in (` both occur)
             rest = script.split('elif act == "%s":' % name, 1)[1]
             return re.split(r"\nelif act ", rest, maxsplit=1)[0]
 
-        clord = branch("report-by-clord")
-        dup = branch("duplicate-preview")
-        assert "/v1/trading/orders/preview" in dup
-        assert '"/v1/trading/orders"' not in dup
-        assert "f\"{base}/v1/trading/orders\"" not in dup
-        assert "/v1/report/orders/search" in clord
-        assert "/v1/trading/orders" not in clord
+        # admitted WITHOUT confirm=DO, because they read
+        gate = run.split('case "$ACTION" in', 1)[1].split("esac", 1)[0]
+        free = gate.split("order|cancel")[0]
+        for act in ("reconcile-order", "duplicate-preview", "order-stream"):
+            assert act in free, act
 
-    def test_the_duplicate_probe_refuses_to_conclude_about_the_insert(self):
+        rec, dup, stream = (branch("reconcile-order"),
+                            branch("duplicate-preview"),
+                            branch("order-stream"))
+        # none of the three reaches the insert endpoint
+        for name, body in (("reconcile", rec), ("duplicate", dup),
+                           ("stream", stream)):
+            assert 'f"{base}/v1/trading/orders"' not in body, name
+        assert "/v1/report/orders/search" in rec
+        assert "/v1/trading/orders/preview" in dup
+
+    def test_the_search_uses_the_documented_singular_fields(self):
+        # https://docs.polymarket.us/api-reference/report/search-orders
+        # `orderId` and `clordId`, distinct and singular. The guessed
+        # plural/capitalisation variants are gone.
+        d, _ = self._wf()
+        run = [s for s in d["jobs"]["preprod"]["steps"]
+               if s.get("name") == "Run"][0]["run"]
+        script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        rec = re.split(r"\nelif act ", script.split(
+            'elif act == "reconcile-order":', 1)[1], maxsplit=1)[0]
+        assert 'walk("by-orderId", "orderId"' in rec
+        assert 'walk("by-clordId", "clordId"' in rec
+        for guessed in ('"clordIds"', '"clOrdIds"', '"orderIds"'):
+            assert guessed not in rec, guessed
+
+    def test_the_search_is_bound_and_follows_pagination(self):
+        d, _ = self._wf()
+        run = [s for s in d["jobs"]["preprod"]["steps"]
+               if s.get("name") == "Run"][0]["run"]
+        script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        rec = re.split(r"\nelif act ", script.split(
+            'elif act == "reconcile-order":', 1)[1], maxsplit=1)[0]
+        for field in ("symbol", "startTime", "endTime", "account",
+                      "participantId"):
+            assert field in rec, field
+        assert "nextPageToken" in rec and "pageToken" in rec
+        assert "TRUNCATED" in rec          # a cut walk is not an empty one
+
+    def test_an_empty_result_is_not_read_as_non_submission(self):
         src = WORKFLOW.read_text()
-        assert "the preview places nothing" in src
-        assert "is NOT established" in src
+        assert "NOT proof of non-submission" in src
+        assert "NOT permission to retry" in src
+        assert "venue-support trace package" in src
+
+    def test_the_receipts_are_retained_and_sanitized(self):
+        d, _ = self._wf()
+        names = [s.get("name") for s in d["jobs"]["preprod"]["steps"]]
+        assert "Publish the receipts" in names
+        src = WORKFLOW.read_text()
+        assert "never a key, a bearer, a signed assertion or a full" in src
+        # the receipt records identifiers and timings, not payloads
+        assert '"rowIds"' in src and '"requestedAt"' in src
+        assert '"body": r.text' not in src
+
+    def test_the_duplicate_probe_claims_preview_repeatability_ONLY(self):
+        d, _ = self._wf()
+        run = [s for s in d["jobs"]["preprod"]["steps"]
+               if s.get("name") == "Run"][0]["run"]
+        script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
+        dup = re.split(r"\nelif act ", script.split(
+            'elif act == "duplicate-preview":', 1)[1], maxsplit=1)[0]
+        assert "PREVIEW_REPEATABILITY" in dup
+        for disclaimed in ("insert idempotency", "duplicate-order protection",
+                           "single-send boundary"):
+            assert disclaimed in dup, disclaimed
+        assert "DUPLICATE_INSERT_PROPOSAL.md" in dup
+
+    def test_the_duplicate_insert_test_is_proposed_not_performed(self):
+        prop = ROOT / "research/institutional/DUPLICATE_INSERT_PROPOSAL.md"
+        text = prop.read_text()
+        assert "NOT AUTHORIZED" in text and "NOT PERFORMED" in text
+        for section in ("Exact scope", "Maximum dummy exposure",
+                        "Observation plan", "Cleanup plan"):
+            assert section in text, section
+        assert "PREPROD ONLY" in text
+        assert "INCONCLUSIVE" in text
+
+    def test_the_trace_package_exists_and_does_not_claim_a_clord_id(self):
+        pkg = ROOT / "research/institutional/SUPPORT_TRACE_PACKAGE.md"
+        text = pkg.read_text()
+        # CDHM9PJV16R7 is the EXCHANGE id. Treating it as our client id is
+        # exactly the assumption the directive forbids.
+        assert "exchange-returned `orderId`" in text
+        assert "must not be treated as one" in text
+        assert "NOT RECOVERED" in text
+
+    def test_the_stream_run_does_not_claim_market_wide_aggressor(self):
+        src = WORKFLOW.read_text()
+        assert "OUR OWN executions only" in src
+        assert "remain" in src and "unverified claims" in src
 
     def test_the_embedded_script_compiles(self):
         d, _ = self._wf()
@@ -528,3 +605,220 @@ class TestThePreprodRuntimeTakesNoCredentialFromTheForm:
                if s.get("name") == "Run"][0]["run"]
         script = run.split("python3 - <<'PY'\n", 1)[1].rsplit("\nPY", 1)[0]
         compile(script, "pmx-preprod.run", "exec")
+
+
+# ── the owning session is DERIVED, never supplied ────────────────────
+
+class TestTheMoneyPathsCannotCrossLedgers:
+    """`record_spend` and `book_cash` took the lifecycle by its client order
+    id and the session by a separately supplied (or defaulted) id, and
+    nothing checked the second owned the first. With one session that was
+    redundant; with the institutional preprod lane it is a cross-ledger
+    write."""
+
+    def _pool(self, lifecycle_session="PMX-PREPROD-1"):
+        pool = FakePool(
+            session=session_row(),
+            lifecycles=[approved_row(session_id=lifecycle_session,
+                                     environment="PREPROD",
+                                     venue="pmx_preprod")])
+        return pool
+
+    def test_a_preprod_lifecycle_with_a_production_session_is_refused(self):
+        pool = self._pool()
+        with pytest.raises(ValueError) as exc:
+            run(store.book_cash("CAL-0001", 3.00, pool=pool,
+                                session_id="MICRO-EXEC-CAL-1"))
+        assert store.R_SESSION_NOT_THE_OWNER in str(exc.value)
+        assert "PMX-PREPROD-1" in str(exc.value)
+
+    def test_and_neither_ledger_is_touched(self):
+        pool = self._pool()
+        with pytest.raises(ValueError):
+            run(store.book_cash("CAL-0001", 3.00, pool=pool,
+                                session_id="MICRO-EXEC-CAL-1"))
+        wrote = [s for s, _ in pool.executed if s.strip().upper().startswith("UPDATE")]
+        assert wrote == [], wrote
+
+    def test_record_spend_refuses_the_same_crossing(self):
+        pool = self._pool()
+        with pytest.raises(ValueError) as exc:
+            run(store.record_spend("CAL-0001", 1.00, pool=pool,
+                                   session_id="MICRO-EXEC-CAL-1"))
+        assert store.R_SESSION_NOT_THE_OWNER in str(exc.value)
+        assert [s for s, _ in pool.executed
+                if s.strip().upper().startswith("UPDATE")] == []
+
+    def test_the_owner_is_derived_when_none_is_supplied(self):
+        # The default is None -- derive -- not the production session id.
+        import inspect
+        for fn in (store.book_cash, store.record_spend):
+            assert inspect.signature(fn).parameters["session_id"].default is None
+
+    def test_the_session_written_is_the_lifecycle_s_own(self):
+        pool = self._pool()
+        pool.session = session_row(session_id="PMX-PREPROD-1",
+                                   venue="pmx_preprod", environment="PREPROD")
+        run(store.book_cash("CAL-0001", 3.00, pool=pool))
+        sess = [(s, a) for s, a in pool.executed
+                if "UPDATE calibration_sessions" in s]
+        assert sess and sess[-1][1][0] == "PMX-PREPROD-1"
+
+    def test_an_unknown_lifecycle_is_still_named(self):
+        pool = FakePool(session=session_row(), lifecycles=[])
+        with pytest.raises(ValueError) as exc:
+            run(store.book_cash("NOPE", 1.0, pool=pool))
+        assert "CALIBRATION_UNKNOWN_LIFECYCLE" in str(exc.value)
+
+    def test_record_spend_says_what_supersedes_it(self):
+        assert "book_cash" in store.SUPERSEDED_BY_BOOK_CASH
+        assert "idempotent" in store.SUPERSEDED_BY_BOOK_CASH
+
+
+# ── the runtime destination, matched before anything is written ──────
+
+class TestLabelsDoNotEstablishTheDestination:
+    class Bare:
+        """Everything `guarded_submit` needs EXCEPT identity(). Not a
+        subclass of RecordingVenue: inheriting would bring the method back
+        and the test would measure nothing."""
+
+        def __init__(self):
+            self.sends, self.reads = [], []
+
+        def open_order_ids(self, market_id):
+            self.reads.append(market_id)
+            return []
+
+        def submit(self, **kw):
+            self.sends.append(kw)
+            return {"ok": True, "order_id": "V-1", "status": "open",
+                    "filled_shares": 0, "fill_price": None}
+
+    def _venue(self, identity):
+        if identity is _MISSING:
+            return self.Bare()
+        v = RecordingVenue(pre=[])
+        v.identity = identity if callable(identity) else (lambda: identity)
+        return v
+
+    def _go(self, v, bound_over=None):
+        row = approved_row(**(bound_over or {}))
+        pool = FakePool(session=session_row(), lifecycles=[row])
+        return pool, run(ex.guarded_submit(v, "CAL-0001", "matt",
+                                           store=store, pool=pool))
+
+    MATCHING = {"venue": "polymarket-us", "environment": "PRODUCTION",
+                "account": "bettortoken-main"}
+
+    def test_a_matching_runtime_sends(self):
+        v = self._venue(dict(self.MATCHING))
+        pool, got = self._go(v)
+        assert got["sent"] is True and len(v.sends) == 1
+
+    def test_a_different_environment_sends_nothing(self):
+        v = self._venue({**self.MATCHING, "environment": "PREPROD"})
+        pool, got = self._go(v)
+        assert got["sent"] is False and v.sends == []
+        assert ex.D_MISMATCH in got["reason"] and "environment" in got["reason"]
+
+    def test_a_different_venue_sends_nothing(self):
+        v = self._venue({**self.MATCHING, "venue": "pmx_preprod"})
+        _, got = self._go(v)
+        assert got["sent"] is False and ex.D_MISMATCH in got["reason"]
+
+    def test_a_different_account_sends_nothing(self):
+        v = self._venue({**self.MATCHING, "account": "someone-else"})
+        _, got = self._go(v)
+        assert got["sent"] is False and ex.D_MISMATCH in got["reason"]
+
+    def test_an_adapter_with_no_identity_sends_nothing(self):
+        v = self._venue(_MISSING)
+        _, got = self._go(v)
+        assert got["sent"] is False and ex.D_UNESTABLISHED in got["reason"]
+
+    def test_an_identity_that_raises_sends_nothing(self):
+        def boom():
+            raise RuntimeError("no config")
+        v = self._venue(boom)
+        _, got = self._go(v)
+        assert got["sent"] is False and ex.D_UNESTABLISHED in got["reason"]
+
+    def test_an_unidentified_account_sends_nothing(self):
+        v = self._venue({**self.MATCHING, "account": None,
+                         "accountBlocker": "ACCOUNT_NOT_IDENTIFIED"})
+        _, got = self._go(v)
+        assert got["sent"] is False and ex.D_UNESTABLISHED in got["reason"]
+
+    def test_the_check_happens_BEFORE_the_pre_image_is_read_or_written(self):
+        # Nothing about a send that must not occur is written down, and the
+        # venue is not even read.
+        v = self._venue({**self.MATCHING, "environment": "PREPROD"})
+        pool, got = self._go(v)
+        assert v.reads == []                      # open_order_ids never called
+        assert got["preOpenOrderIds"] is None
+        assert pool.attempts[0]["pre_open_order_ids"] is None
+        assert pool.attempts[0]["state"] == "NOT_SENT"
+
+    def test_the_retail_adapter_answers_its_own_runtime(self):
+        v = adapter.LiveVenue(submit_fn=lambda *a, **k: {},
+                              status_fn=lambda *a: None,
+                              cancel_fn=lambda *a: {},
+                              open_orders_fn=lambda *a, **k: [])
+        who = v.identity()
+        assert who["venue"] == "polymarket-us"
+        assert who["environment"] == "PRODUCTION"
+        assert "submitModule" in who
+
+
+_MISSING = object()
+
+
+# ── two clocks, kept apart ───────────────────────────────────────────
+
+class TestTheTokenLifetimeComesFromTheVenue:
+    def test_the_assertion_window_is_not_the_token_window(self):
+        from sportsassets import pmx
+        # TOKEN_EXP_S is the CLIENT ASSERTION's own exp. It must not be the
+        # thing the access-token cache is keyed on.
+        assert pmx.TOKEN_EXP_S == 60
+        assert pmx.token_reuse_window(86400) > pmx.TOKEN_EXP_S
+
+    def test_a_stated_lifetime_is_used_with_a_buffer(self):
+        from sportsassets import pmx
+        w = pmx.token_reuse_window(86400)
+        assert w == pytest.approx(86400 * 0.8)
+        assert w < 86400 - pmx.TOKEN_SAFETY_FLOOR_S
+
+    def test_a_short_lifetime_is_floored_not_fractioned(self):
+        from sportsassets import pmx
+        # 60 s: 80% is 48, but the floor says never within 30 s of expiry,
+        # so 30 wins. The SMALLER of the two always wins.
+        assert pmx.token_reuse_window(60) == pytest.approx(30.0)
+
+    def test_a_lifetime_shorter_than_the_floor_never_reuses(self):
+        from sportsassets import pmx
+        assert pmx.token_reuse_window(20) == 0.0
+
+    def test_no_stated_lifetime_falls_back_to_the_constant(self):
+        from sportsassets import pmx
+        assert pmx.token_reuse_window(None) == pmx.TOKEN_REFRESH_S
+
+    def test_expires_in_is_read_only_when_the_body_states_one(self):
+        from sportsassets import pmx
+        assert pmx._expires_in({"expires_in": 3600}) == 3600.0
+        assert pmx._expires_in({"expires_in": "3600"}) == 3600.0
+        assert pmx._expires_in({}) is None
+        assert pmx._expires_in({"expires_in": 0}) is None
+        assert pmx._expires_in({"expires_in": -5}) is None
+        assert pmx._expires_in({"expires_in": True}) is None
+        assert pmx._expires_in({"expires_in": "soon"}) is None
+        assert pmx._expires_in(None) is None
+
+    def test_the_150_second_constant_is_no_longer_the_cache_key(self):
+        from sportsassets import pmx
+        import inspect
+        src = inspect.getsource(pmx._token)
+        assert "TOKEN_REFRESH_S" not in src, \
+            "the cache must key on the venue's own window, not the constant"
+        assert '_tok["window"]' in src

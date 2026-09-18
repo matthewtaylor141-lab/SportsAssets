@@ -105,10 +105,16 @@ is what worked from the runner at 13:45Z): an RS256 client-assertion
 JWT {iss, sub, aud: "https://<domain>/", iat, exp: +60 s, jti} with the
 key id in the header, exchanged form-encoded at /oauth/token with
 client_id, client_assertion_type jwt-bearer, client_assertion, audience
-= the API base, grant_type client_credentials. The token is cached and
-re-minted after TOKEN_REFRESH_S = 150 s (the docs: "refreshed every
-3 minutes"), under one lock. THE PRIVATE KEY AND THE TOKEN ARE NEVER
-LOGGED and never appear in an exception's text.
+= the API base, grant_type client_credentials. TWO CLOCKS, KEPT APART:
+the assertion's own `exp` is +TOKEN_EXP_S = 60 s (a window on a JWT the
+venue consumes once), while the ACCESS TOKEN's life is whatever the
+venue's `expires_in` states and is reused for `token_reuse_window(ttl)`
+-- 80% of it, and never within TOKEN_SAFETY_FLOOR_S = 30 s of expiry.
+TOKEN_REFRESH_S = 150 s is now only the fallback for a response that
+states no lifetime; it came from the documentation ("refreshed every
+3 minutes") while the one preprod response seen stated 86400, and
+neither is a contract. THE PRIVATE KEY AND THE TOKEN ARE NEVER LOGGED
+and never appear in an exception's text.
 
 Credentials are raw environment reads (PMX_CLIENT_ID, PMX_KEY_ID,
 PMX_PRIVATE_KEY as PEM or base64 of a PEM, PMX_PARTICIPANT_ID,
@@ -334,7 +340,11 @@ def _private_key() -> str:
 
 
 _tok_lock = threading.Lock()
-_tok: dict[str, Any] = {"value": None, "minted": 0.0}
+_tok: dict[str, Any] = {"value": None, "minted": 0.0,
+                        # the reuse window ACTUALLY in force, derived from
+                        # the venue's own expires_in on the last mint; the
+                        # constant is only the no-answer fallback
+                        "window": TOKEN_REFRESH_S, "ttl": None}
 
 
 def _mint_token() -> str:
@@ -361,23 +371,77 @@ def _mint_token() -> str:
     body = _json_of(r)
     code = int(getattr(r, "status_code", 0) or 0)
     tok = body.get("access_token") if isinstance(body, dict) else None
+    ttl = _expires_in(body)
     if code != 200 or not tok:
         # the error's WORD only: a token body is never echoed
         why = ((body or {}).get("error") or (body or {}).get("error_description") or ""
                if isinstance(body, dict) else "")
         raise APIStatusError(code, f"pmx: token request answered {code}: {str(why)[:120]}", None)
-    return str(tok)
+    return str(tok), ttl
+
+
+def _expires_in(body: Any) -> float | None:
+    """The token's OWN lifetime from the response, or None.
+
+    Two different clocks were being conflated. `TOKEN_EXP_S` is how long
+    the CLIENT ASSERTION we sign stays valid -- a 60 s window on a JWT the
+    venue consumes once. `expires_in` is how long the ACCESS TOKEN the
+    venue issues stays valid, and it is the venue's to decide. One 2026-09-10
+    response said 86400; the documentation said refresh every 3 minutes;
+    `TOKEN_REFRESH_S = 150` was derived from the documentation. None of
+    those is a contract, and hardcoding any of them means a venue that
+    shortens its tokens hands us 401s we would read as a credential fault.
+
+    So the lifetime is taken from the response when the response states
+    one, and the constant is only the fallback for a response that does
+    not. Missing, unparseable or non-positive all answer None.
+    """
+    if not isinstance(body, dict):
+        return None
+    raw = body.get("expires_in")
+    if isinstance(raw, bool) or raw is None:
+        return None
+    try:
+        ttl = float(raw)
+    except (TypeError, ValueError):
+        return None
+    return ttl if ttl > 0 else None
+
+
+# THE SAFETY BUFFER on the venue's stated lifetime. A token re-minted at
+# the instant it expires is a token that expires in flight, so the cache
+# gives it back for a fraction of its life and never beyond a floor's
+# worth of it. Both are applied to whatever the venue said, never to a
+# remembered example.
+TOKEN_SAFETY_FRACTION = 0.8
+TOKEN_SAFETY_FLOOR_S = 30.0
+
+
+def token_reuse_window(ttl: float | None) -> float:
+    """How long a token minted now may be reused, given its stated life.
+
+    `ttl` None -- the response stated no lifetime -- falls back to
+    TOKEN_REFRESH_S, which is what this module did unconditionally before.
+    """
+    if ttl is None:
+        return float(TOKEN_REFRESH_S)
+    # Never longer than the fraction, never within the floor of expiry,
+    # and never negative for a life shorter than the floor.
+    return max(0.0, min(ttl * TOKEN_SAFETY_FRACTION, ttl - TOKEN_SAFETY_FLOOR_S))
 
 
 def _token(now: float | None = None) -> str:
-    """The cached bearer, re-minted after TOKEN_REFRESH_S under one
-    lock (so N threads waking together mint once)."""
+    """The cached bearer, re-minted inside the window the VENUE's own
+    `expires_in` allows, under one lock (so N threads waking together
+    mint once)."""
     now = time.monotonic() if now is None else float(now)
     with _tok_lock:
-        if _tok["value"] and now - float(_tok["minted"]) < TOKEN_REFRESH_S:
+        if _tok["value"] and now - float(_tok["minted"]) < float(_tok["window"]):
             return str(_tok["value"])
-        tok = _mint_token()
+        tok, ttl = _mint_token()
         _tok["value"], _tok["minted"] = tok, now
+        _tok["window"] = token_reuse_window(ttl)
+        _tok["ttl"] = ttl
         return tok
 
 

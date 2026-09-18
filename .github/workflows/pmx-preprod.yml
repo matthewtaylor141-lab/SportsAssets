@@ -5,7 +5,8 @@ name: pmx-preprod
 # runner, which has open internet. No production host is ever contacted:
 # the base URLs are fixed to preprod below and are not inputs. Read-only
 # actions (whoami, health, refdata, bbo, positions, open-orders,
-# report-orders, report-by-clord, order-preview) need no confirm; any action
+# report-orders, reconcile-order, order-stream, order-preview,
+# duplicate-preview) need no confirm; any action
 # that could send an order needs confirm=DO.
 #
 # THE CREDENTIALS COME FROM THE SECRET STORE, NOT FROM THE FORM.
@@ -34,11 +35,11 @@ on:
   workflow_dispatch:
     inputs:
       action:
-        description: "whoami | health | refdata | instruments (arg=JSON body) | bbo (arg=symbol) | book (arg=symbol) | positions (arg=account name) | open-orders | report-orders (arg=JSON) | report-by-clord (arg=clordId) | order-preview (arg=JSON) | duplicate-preview (arg=JSON, previews the same clordId twice, places nothing) | order (arg=JSON, needs confirm=DO) | cancel (arg=JSON {orderId|clordId, symbol}, needs confirm=DO)"
+        description: "whoami | health | refdata | instruments (arg=JSON body) | bbo (arg=symbol) | book (arg=symbol) | positions (arg=account name) | open-orders | report-orders (arg=JSON) | reconcile-order (arg=JSON {orderId?, clordId?, symbol?, startTime?, endTime?}) | order-stream (arg=JSON {seconds?, symbol?}) | order-preview (arg=JSON) | duplicate-preview (arg=JSON; PREVIEW REPEATABILITY ONLY, places nothing, establishes NOTHING about insert idempotency) | order (arg=JSON, needs confirm=DO) | cancel (arg=JSON {orderId|clordId, symbol}, needs confirm=DO)"
         required: true
         type: string
       arg:
-        description: "action argument: symbol for bbo; JSON body for order-preview / order; refdata filter text; clordId for report-by-clord"
+        description: "action argument: symbol for bbo; JSON body for order-preview / order; refdata filter text; JSON for reconcile-order and order-stream"
         required: false
         type: string
         default: ""
@@ -90,14 +91,16 @@ jobs:
             [ -n "${!v:-}" ] || { echo "refused: $v is not set in the secret store"; exit 1; }
           done
           case "$ACTION" in
-            whoami|health|refdata|instruments|bbo|book|positions|open-orders|report-orders|report-by-clord|order-preview) ;;
-            duplicate-preview) ;;
+            whoami|health|refdata|instruments|bbo|book|positions|open-orders|report-orders|order-preview) ;;
+            reconcile-order) ;;      # the documented search contract; reads only
+            duplicate-preview) ;;    # PREVIEW repeatability only; places nothing
+            order-stream) ;;         # subscribe and observe; sends no order
             order|cancel) if [ "$CONFIRM" != "DO" ]; then echo "refused: $ACTION needs confirm=DO"; exit 1; fi ;;
             *) echo "refused: unknown action '$ACTION'"; exit 1 ;;
           esac
           echo "== pmx-preprod $ACTION at $(date -u +%FT%TZ) base=$PMX_BASE_URL =="
           python3 - <<'PY'
-          import json, os, sys, time, uuid
+          import json, os, pathlib, sys, time, uuid
           import jwt, requests
           act = os.environ["ACTION"]; arg = os.environ.get("ARG", "")
           cid = os.environ["PMX_CLIENT_ID"]; kid = os.environ["PMX_KEY_ID"]
@@ -180,56 +183,269 @@ jobs:
           elif act == "report-orders":
               body = json.loads(arg) if arg.strip() else {"stateFilter": "ORDER_STATE_FILTER_OPEN"}
               show(requests.post(f"{base}/v1/report/orders/search", headers=H, json=body, timeout=30))
-          elif act == "report-by-clord":
-              # CAN AN AMBIGUOUS SEND BE RECOVERED BY OUR OWN IDENTIFIER?
+          elif act == "reconcile-order":
+              # THE DOCUMENTED SEARCH CONTRACT, used as documented.
+              #   https://docs.polymarket.us/api-reference/report/search-orders
+              # `orderId` and `clordId` are DISTINCT SINGULAR fields. The
+              # earlier probe tried plural and capitalisation variants; that
+              # was guessing, and it is gone.
               #
-              # This is the question the adapter's `clordId` only ANSWERS if
-              # the venue lets us search on it. Every recovery search this
-              # project has ever run was by `orderIds` or by `symbols` -- and
-              # the one probe order (CDHM9PJV16R7, 14:19Z 2026-09-10) came
-              # back 200 and was then absent from open orders, positions and
-              # every report search we tried. So the pre-image workaround is
-              # NOT yet replaceable: native correlation is SENT but its
-              # recovery path is unverified.
+              # WHAT THIS RECONCILES. On 2026-09-10 an insert answered
+              # 200 {"orderId": "CDHM9PJV16R7"} and the order was then absent
+              # from open orders, positions and every search we ran. Those
+              # searches were run wrong. This runs them right, and it does
+              # NOT assume the exchange-returned id is our client id: the
+              # two are asked for separately, and the submitted clordId --
+              # which that run never recorded -- is searched for only if the
+              # operator supplies it.
               #
-              # arg = the clordId. Four shapes are tried because the
-              # documented body does not say which the search accepts, and a
-              # 400 naming the field is itself an answer. NOTHING IS SENT.
-              c = arg.strip()
-              if not c:
-                  print("refused: report-by-clord needs the clordId in arg"); sys.exit(1)
-              for body in ({"clordIds": [c], "pageSize": 100},
-                           {"clOrdIds": [c], "pageSize": 100},
-                           {"clordId": c, "pageSize": 100},
-                           {"orderIds": [c], "pageSize": 100}):
-                  r = requests.post(f"{base}/v1/report/orders/search", headers=H, json=body, timeout=30)
-                  print("BODY", json.dumps(body), "->", r.status_code)
-                  print(r.text[:2000])
+              # arg = JSON:
+              #   {"orderId": "...",          the exchange id, if known
+              #    "clordId": "...",          OUR submitted id, if known
+              #    "symbol": "...",           bind the search to the instrument
+              #    "startTime": "...Z",       the historical window
+              #    "endTime": "...Z",
+              #    "pageSize": 100}
+              #
+              # AN EMPTY RESULT PROVES NOTHING. It is not evidence the order
+              # was never submitted and it is not permission to send another.
+              spec = json.loads(arg) if arg.strip() else {}
+              acct = spec.get("account") or ""
+              want_oid = spec.get("orderId")
+              want_clord = spec.get("clordId")
+              if not want_oid and not want_clord:
+                  print("refused: reconcile-order needs orderId and/or clordId"); sys.exit(1)
+              page_size = int(spec.get("pageSize") or 100)
+              # the binding fields, applied to EVERY query below: an
+              # unbound search can answer about another account's order
+              bind = {}
+              for k in ("symbol", "startTime", "endTime", "account",
+                        "participantId", "stateFilter"):
+                  if spec.get(k):
+                      bind[k] = spec[k]
+              print("BINDING", json.dumps(bind), "account_arg", bool(acct))
+
+              seen_ids, seen_clords, receipts = set(), set(), []
+
+              def walk(label, key, value):
+                  # FOLLOW PAGINATION TO EXHAUSTION. A single page that does
+                  # not contain the id is not "no record": the id may be on a
+                  # page never read. A truncated walk is reported as
+                  # TRUNCATED, never as empty.
+                  token, pages, rows, truncated = "", 0, 0, False
+                  while True:
+                      body = {**bind, key: value, "pageSize": page_size}
+                      if token:
+                          body["pageToken"] = token
+                      t0 = time.time()
+                      r = requests.post(f"{base}/v1/report/orders/search",
+                                        headers=H, json=body, timeout=30)
+                      dt = time.time() - t0
+                      pages += 1
+                      try:
+                          j = r.json()
+                      except Exception:
+                          j = None
+                      got = (j or {}).get("order") or (j or {}).get("orders") or []
+                      rows += len(got)
+                      # SANITIZED RECEIPT: the request body (no credentials
+                      # are in it), the status, the identifiers returned, and
+                      # the timestamps. Never the full payload.
+                      receipts.append({
+                          "query": label, "page": pages, "request": body,
+                          "status": r.status_code,
+                          "requestedAt": t0, "elapsedS": round(dt, 3),
+                          "returnedAt": time.time(),
+                          "xRequestId": H["X-Request-Id"],
+                          "rowIds": [{"id": o.get("id") or o.get("orderId"),
+                                      "clordId": o.get("clordId") or o.get("clord_id"),
+                                      "symbol": o.get("symbol"),
+                                      "state": o.get("state"),
+                                      "account": o.get("account"),
+                                      "lastTransactTime": o.get("lastTransactTime")}
+                                     for o in got],
+                      })
+                      print(f"{label} page {pages} -> {r.status_code} rows {len(got)}")
+                      if r.status_code != 200:
+                          print(r.text[:1500]); break
+                      for o in got:
+                          if o.get("id"): seen_ids.add(str(o["id"]))
+                          if o.get("orderId"): seen_ids.add(str(o["orderId"]))
+                          c = o.get("clordId") or o.get("clord_id")
+                          if c: seen_clords.add(str(c))
+                      token = (j or {}).get("nextPageToken") or ""
+                      if not token:
+                          break
+                      if pages >= 50:
+                          truncated = True
+                          print(f"{label}: TRUNCATED after {pages} pages, a next token remains")
+                          break
+                  return {"query": label, "pages": pages, "rows": rows,
+                          "truncated": truncated}
+
+              summary = []
+              if want_oid:
+                  summary.append(walk("by-orderId", "orderId", want_oid))
+              if want_clord:
+                  summary.append(walk("by-clordId", "clordId", want_clord))
+
+              # VALIDATE WHAT CAME BACK. A search bound to one identifier
+              # that answers rows carrying a different one has not found our
+              # order; saying so is the point of asking.
+              print("SUMMARY", json.dumps(summary))
+              print("IDS_RETURNED", json.dumps(sorted(seen_ids)))
+              print("CLORDIDS_RETURNED", json.dumps(sorted(seen_clords)))
+              matched = []
+              if want_oid and str(want_oid) in seen_ids:
+                  matched.append("orderId")
+              if want_clord and str(want_clord) in seen_clords:
+                  matched.append("clordId")
+              any_truncated = any(s["truncated"] for s in summary)
+              if matched:
+                  print("RECONCILED_ON", json.dumps(matched))
+              elif any_truncated:
+                  print("RECONCILIATION_INCONCLUSIVE_TRUNCATED_WALK")
+              else:
+                  print("NOT_FOUND_ON_THIS_CONTRACT")
+                  print("An empty result is NOT proof of non-submission and "
+                        "NOT permission to retry. If the correct bound "
+                        "searches cannot reconcile an acknowledged order, "
+                        "the next step is a venue-support trace package, "
+                        "not another order.")
+              pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp"), "receipts.json") \
+                      .write_text(json.dumps({"summary": summary,
+                                              "receipts": receipts}, indent=1))
+              print("receipts written for the artifact step")
           elif act == "duplicate-preview":
-              # WHAT DOES THE VENUE DO WITH A REPEATED clordId?
+              # PREVIEW_REPEATABILITY. THAT IS THE WHOLE CLAIM.
               #
-              # A retry after a lost response sends the SAME identifier. If
-              # the venue rejects the duplicate, a retry is safe and the
-              # single-send rule can relax; if it accepts it, a retry is a
-              # second order and the rule must stay exactly as it is.
+              # This previews the same clordId twice and reports what the
+              # PREVIEW endpoint does with a repeat. It does NOT establish:
+              #   * insert idempotency
+              #   * duplicate-order protection
+              #   * that a retry after a lost response is safe
+              #   * any relaxation of the single-send boundary
+              # The preview places nothing, so it cannot answer a question
+              # about placing. A preview that happily accepts a repeat and
+              # an insert that rejects one are entirely consistent, and so
+              # are the opposites.
               #
-              # THIS ASKS THE PREVIEW ENDPOINT, WHICH PLACES NOTHING -- so
-              # it bounds the question without risking the answer. A preview
-              # that accepts a duplicate does not prove the insert would, and
-              # the run says so rather than concluding.
+              # A REAL duplicate-INSERT test is a separate, authorized
+              # exercise. Its scope, maximum dummy exposure, observation and
+              # cleanup plan are written up in
+              # research/institutional/DUPLICATE_INSERT_PROPOSAL.md and it
+              # must not be performed from here.
               #
               # arg = the JSON order request; its clordId is sent TWICE.
               body = json.loads(arg)
               req = body.get("request", body)
               if not req.get("clordId"):
                   print("refused: duplicate-preview needs a clordId in the request"); sys.exit(1)
+              answers = []
               for attempt in (1, 2):
-                  r = requests.post(f"{base}/v1/trading/orders/preview", headers=H, json=body, timeout=30)
+                  r = requests.post(f"{base}/v1/trading/orders/preview",
+                                    headers=H, json=body, timeout=30)
+                  answers.append(r.status_code)
                   print(f"PREVIEW attempt {attempt} clordId={req['clordId']} ->", r.status_code)
                   print(r.text[:2000])
-              print("NOTE: the preview places nothing. Whether the INSERT "
-                    "endpoint rejects a duplicate clordId is NOT established "
-                    "by this run.")
+              print("RESULT PREVIEW_REPEATABILITY", json.dumps(answers))
+              print("SCOPE: this run establishes PREVIEW_REPEATABILITY only. "
+                    "It establishes NOTHING about insert idempotency, "
+                    "duplicate-order protection, or permission to relax the "
+                    "single-send boundary. Those need the separate authorized "
+                    "duplicate-insert test.")
+          elif act == "order-stream":
+              # THE ORDER STREAM, OBSERVED BEFORE THE NEXT ORDER TEST.
+              #   https://docs.polymarket.us/streaming-endpoints/order-stream
+              #
+              # WHAT THIS RUN ESTABLISHES, and nothing beyond it: that a
+              # subscription can be opened with this credential, what the
+              # messages actually look like, which account they are scoped
+              # to, which identifiers they carry (exchange id, clordId, and
+              # whether an execution reports an AGGRESSOR), and what happens
+              # on reconnect. The schema is READ OFF THE WIRE, not assumed:
+              # this prints the observed top-level keys of each message
+              # rather than asserting a shape we have not seen.
+              #
+              # It sends no order. It only listens.
+              #
+              # arg = JSON {"seconds": 60, "symbol": "...", "path": "..."}
+              spec = json.loads(arg) if arg.strip() else {}
+              seconds = float(spec.get("seconds") or 60)
+              paths = ([spec["path"]] if spec.get("path") else
+                       ["/v1/trading/orders/stream", "/v1/stream/orders",
+                        "/v1/trading/orders/subscribe"])
+              sub = {}
+              if spec.get("symbol"):
+                  sub["symbols"] = [spec["symbol"]]
+              if spec.get("account"):
+                  sub["account"] = spec["account"]
+
+              def listen(path, label):
+                  url = f"{base}{path}"
+                  keys, msgs, execs, clords, accounts = set(), 0, 0, set(), set()
+                  t0 = time.time()
+                  try:
+                      with requests.post(url, headers={**H, "Accept": "application/json"},
+                                         json=sub, stream=True, timeout=(10, seconds + 15)) as r:
+                          print(f"{label} {url} -> {r.status_code} "
+                                f"content-type={r.headers.get('content-type')}")
+                          if r.status_code != 200:
+                              print(r.text[:1500]); return None
+                          for line in r.iter_lines(decode_unicode=True):
+                              if time.time() - t0 > seconds:
+                                  break
+                              if not line:
+                                  continue
+                              msgs += 1
+                              try:
+                                  m = json.loads(line[6:] if line.startswith("data: ") else line)
+                              except Exception:
+                                  print("  non-json frame:", str(line)[:200]); continue
+                              if isinstance(m, dict):
+                                  keys |= set(m.keys())
+                                  blob = json.dumps(m)
+                                  if "ggressor" in blob:
+                                      execs += 1
+                                  for k in ("clordId", "clord_id"):
+                                      if m.get(k): clords.add(str(m[k]))
+                                  if m.get("account"): accounts.add(str(m["account"]))
+                                  if msgs <= 5:
+                                      print(f"  msg {msgs}:", blob[:1200])
+                  except Exception as exc:
+                      print(f"{label}: {type(exc).__name__}: {str(exc)[:200]}")
+                      return None
+                  return {"path": path, "messages": msgs,
+                          "topLevelKeys": sorted(keys),
+                          "messagesMentioningAggressor": execs,
+                          "clordIdsSeen": sorted(clords),
+                          "accountsSeen": sorted(accounts),
+                          "seconds": round(time.time() - t0, 1)}
+
+              first = None
+              for path in paths:
+                  first = listen(path, "SUBSCRIBE")
+                  if first:
+                      break
+              if not first:
+                  print("ORDER_STREAM_NOT_ESTABLISHED: none of the tried paths "
+                        "answered a stream. The documented path must be read "
+                        "from the reference and passed as arg.path; this run "
+                        "does NOT conclude the stream is unavailable.")
+                  sys.exit(0)
+              print("STREAM_OBSERVED", json.dumps(first))
+              # RECONNECT: the same subscription again, so the run says
+              # whether a second connection is accepted and whether it
+              # replays or starts clean.
+              second = listen(first["path"], "RECONNECT")
+              print("RECONNECT_OBSERVED", json.dumps(second))
+              pathlib.Path(os.environ.get("RUNNER_TEMP", "/tmp"), "receipts.json") \
+                      .write_text(json.dumps({"stream": first,
+                                              "reconnect": second}, indent=1))
+              print("NOTE: an observed aggressor field on this stream is "
+                    "evidence about OUR OWN executions only. Full-market "
+                    "aggressor coverage and exact queue position remain "
+                    "separate, unverified claims.")
           elif act in ("order-preview", "order"):
               body = json.loads(arg)
               path = "/v1/trading/orders/preview" if act == "order-preview" else "/v1/trading/orders"
@@ -244,6 +460,27 @@ jobs:
               show(requests.post(f"{base}/v1/trading/orders/cancel", headers=H, json=body, timeout=30))
               show(requests.get(f"{base}/v1/trading/orders/open", headers=H, timeout=30))
           PY
+      - name: Stage the receipts for the artifact
+        if: always()
+        run: |
+          mkdir -p receipts
+          if [ -s "$RUNNER_TEMP/receipts.json" ]; then
+            cp "$RUNNER_TEMP/receipts.json" "receipts/receipts_${{ github.run_id }}.json"
+            echo "receipts staged ($(wc -c < receipts/receipts_${{ github.run_id }}.json) bytes)"
+          else
+            echo "this action wrote no receipts" > "receipts/receipts_${{ github.run_id }}.json"
+          fi
+      # SANITIZED RECEIPTS, RETAINED. reconcile-order and order-stream write
+      # request bodies, statuses, the identifiers returned and the
+      # timestamps -- never a key, a bearer, a signed assertion or a full
+      # account payload. The evidence outlives the log.
+      - name: Publish the receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmx-preprod-receipts-${{ github.run_id }}
+          path: receipts/
+          if-no-files-found: warn
       - name: Scrub
         if: always()
         run: rm -f "$RUNNER_TEMP/pk.pem"; echo scrubbed

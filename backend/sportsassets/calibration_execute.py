@@ -531,6 +531,47 @@ def approved_state_blockers(ticket: dict, row: dict | None,
 NOT_CLAIMED = "NOT_CLAIMED_NOTHING_SENT"
 NO_CLAIM_STORE = "NO_CLAIM_STORE_NOTHING_SENT"
 
+D_UNESTABLISHED = "RUNTIME_DESTINATION_UNESTABLISHED"
+D_MISMATCH = "RUNTIME_DESTINATION_IS_NOT_THE_APPROVED_ONE"
+
+_DESTINATION_FIELDS = ("venue", "environment", "account")
+
+
+def _destination_mismatch(venue, bound: dict) -> str | None:
+    """None when the adapter's OWN identity matches the approval.
+
+    A label on a ticket is a statement of intent. This asks the object
+    that would make the call where it is bound, and compares all three
+    fields. Anything other than a clean match on every one -- including an
+    adapter with no `identity()`, an identity that raises, a missing field,
+    or an account the adapter itself reports as unidentified -- is a
+    refusal, because an unestablished destination is not a permitted one.
+    """
+    ask = getattr(venue, "identity", None)
+    if not callable(ask):
+        return "%s: the adapter exposes no identity()" % D_UNESTABLISHED
+    try:
+        got = ask()
+    except Exception as exc:                                   # noqa: BLE001
+        return "%s: identity() raised %s" % (D_UNESTABLISHED,
+                                             type(exc).__name__)
+    if not isinstance(got, dict):
+        return "%s: identity() did not answer a mapping" % D_UNESTABLISHED
+    if got.get("accountBlocker"):
+        return "%s: the adapter reports %s" % (D_UNESTABLISHED,
+                                               got["accountBlocker"])
+    out = []
+    for f in _DESTINATION_FIELDS:
+        runtime, approved = got.get(f), bound.get(f)
+        if runtime in (None, "") or approved in (None, ""):
+            out.append("%s: %s is not established (runtime %r, approved %r)"
+                       % (D_UNESTABLISHED, f, runtime, approved))
+        elif str(runtime) != str(approved):
+            out.append("%s: %s runtime %r, approved %r"
+                       % (D_MISMATCH, f, runtime, approved))
+    return ", ".join(out) if out else None
+
+
 A_CLAIM_IS_THE_PERMISSION = (
     "one approval permits at most one send attempt. The claim is a row "
     "the database makes exclusive, so the check and the act are the same "
@@ -587,6 +628,27 @@ async def guarded_submit(venue, client_order_id: str, claimed_by: str,
     bound = claim["bound"]
     ticket = dict(bound)
     ticket["clientOrderId"] = client_order_id
+
+    # THE RUNTIME DESTINATION, MATCHED TO THE APPROVAL. BEFORE ANYTHING.
+    #
+    # Every check up to here read LABELS: the ticket says which venue,
+    # environment and account it is for, and the ledger keeps those labels
+    # consistent with the session. None of that establishes where THIS
+    # PROCESS would actually send. A preprod-labelled ticket handed to a
+    # production-bound adapter satisfies every one of them.
+    #
+    # So the adapter is asked, and the answer must match the approval on
+    # all three. An adapter that cannot answer is refused: an
+    # unestablished destination is not a permitted one, and this happens
+    # before the pre-image so nothing is written down about a send that
+    # must not occur.
+    mismatch = _destination_mismatch(venue, bound)
+    if mismatch is not None:
+        await store.abandon_attempt(attempt, mismatch, pool=pool)
+        return {"outcome": REFUSED_BY_VENUE, "sent": False,
+                "reason": mismatch, "attemptId": attempt,
+                "preOpenOrderIds": None, "preImageReadable": None,
+                "venueOrderId": None, "boundFields": bound}
 
     # THE PRE-IMAGE, READ AND PERSISTED BEFORE THE SEND.
     try:

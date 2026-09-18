@@ -335,6 +335,37 @@ class LiveVenue:
     def mint_client_id(self):
         return None
 
+    # WHERE THIS ADAPTER ACTUALLY SENDS, read from the runtime it will use.
+    #
+    # The ticket's `venue` / `environment` / `account` are LABELS on an
+    # approval. They say what a human meant; they do not say what the
+    # process bound. A preprod-labelled ticket handed to an adapter
+    # configured for production would pass every ledger check in this
+    # codebase and still reach the wrong exchange.
+    #
+    # So the destination is asked of the adapter, not read off the ticket:
+    # the module the submit function actually came from, and the account
+    # the SAME credential the reads use is bound to. An adapter that cannot
+    # answer is one whose destination is unestablished, and
+    # `calibration_execute` refuses rather than assuming.
+    RUNTIME_ENVIRONMENT = "PRODUCTION"
+    RUNTIME_VENUE = "polymarket-us"
+
+    def identity(self):
+        from .calibration_evidence import account_identity
+        who = account_identity()
+        return {
+            "venue": self.RUNTIME_VENUE,
+            "environment": self.RUNTIME_ENVIRONMENT,
+            "account": who.get("ACCOUNT"),
+            "accountBlocker": who.get("BLOCKER"),
+            # The module the write actually goes through, so a swapped
+            # submit function is visible rather than implied.
+            "submitModule": getattr(self._submit, "__module__", None),
+            "source": "adapter runtime: credential-bound account identity "
+                      "plus the submit function's own module",
+        }
+
     def open_order_ids(self, market_id):
         return read_open_order_ids(market_id, reader=self._open)["ids"]
 

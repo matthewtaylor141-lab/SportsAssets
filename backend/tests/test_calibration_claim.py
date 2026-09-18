@@ -207,6 +207,9 @@ TICKET = {"venue": "polymarket-us", "environment": "PRODUCTION",
 def approved_row(**over):
     row = {"client_order_id": "CAL-0001", "venue": "polymarket-us",
            "environment": "PRODUCTION",
+           # THE OWNING SESSION lives on the lifecycle. The money paths
+           # derive it from here rather than taking a caller's word.
+           "session_id": "MICRO-EXEC-CAL-1",
            "account": "bettortoken-main",
            "market_id": "aec-atp-sin-alc-2026-09-18", "outcome": "SIN to win",
            "side": "BUY", "order_type": "LIMIT_GTC_POST_ONLY",
@@ -234,6 +237,16 @@ class RecordingVenue:
         self.raise_on_pre = raise_on_pre
         self.sends = []
         self.reads = []
+
+    # THE RUNTIME DESTINATION. `guarded_submit` asks every adapter where it
+    # is actually bound and refuses one that cannot say, so a fake that
+    # exercises the send path has to answer -- exactly as a real adapter
+    # does. These match `approved_row`'s venue / environment / account.
+    IDENTITY = {"venue": "polymarket-us", "environment": "PRODUCTION",
+                "account": "bettortoken-main"}
+
+    def identity(self):
+        return dict(self.IDENTITY)
 
     def open_order_ids(self, market_id):
         self.reads.append(market_id)
