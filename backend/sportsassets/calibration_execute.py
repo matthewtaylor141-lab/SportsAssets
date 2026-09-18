@@ -88,8 +88,9 @@ def _f(v):
     return x if math.isfinite(x) else None
 
 
-class VenueUnreadable(Exception):
-    """A read failed. Not an empty book, not a cancelled order."""
+# Defined in the read-only module and re-exported here, where every
+# existing caller and test already looks for it.
+from .calibration_read import VenueUnreadable                  # noqa: E402,F401
 
 
 def submit(venue, ticket: dict) -> dict:
