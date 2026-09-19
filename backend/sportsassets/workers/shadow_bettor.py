@@ -50,6 +50,7 @@ from .. import shadow_bettor as bettor
 # Operational telemetry lives apart from the decision path: the
 # decision module may not read the decision ledger at all.
 from .. import shadow_bettor_ops as ops
+from .. import shadow_bettor_policy as bpol
 from .. import shadow_store as store
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
@@ -228,10 +229,31 @@ async def run() -> None:
     pool = await get_pool()
 
     ready = await store.store_ready(pool)
+
+    # FREEZE BETTOR'S OWN POLICY BEFORE ROW 1. The benchmark lane's
+    # worker does the same for its own policy; this is BETTOR's, and
+    # neither can satisfy the other. This is the step that was missing:
+    # the
+    # decision table's foreign key into shadow_policy_versions refused
+    # every BETTOR decision for want of this row, 99 times, and the
+    # constraint was right to. The freeze is idempotent -- ALREADY_FROZEN
+    # on every later boot -- and REFUSED if the declaration ever changes
+    # under this version name, which is the whole point of freezing.
+    frozen = None
+    if ready["storeReady"]:
+        frozen = await store.freeze_policy(pool, policy=bpol.frozen_policy())
+        if frozen["status"] == "REFUSED":
+            ready = dict(ready, storeReady=False,
+                         problems=ready["problems"] + [frozen["why"]])
+
     boot = {"lane": "BETTOR_EV_SHADOW", "primary": True,
             "storeReady": ready["storeReady"],
             "problems": ready["problems"],
             "policy": bettor.POLICY_VERSION,
+            "policyFreeze": (frozen or {}).get("status", "NOT_ATTEMPTED"),
+            "policySha": bpol.POLICY_SHA[:16],
+            "policyCodeSha": bpol.POLICY_CODE_SHA[:16],
+            "codeShaMatches": (frozen or {}).get("codeShaMatches"),
             "universe": bettor.UNIVERSE_VERSION,
             "pBettor": "NOT_ESTABLISHED",
             "shadowMode": ready["shadowMode"],

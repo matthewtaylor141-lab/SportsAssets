@@ -543,3 +543,126 @@ def test_telemetry_can_never_become_a_decision_input():
     import it, and the import only runs the other way."""
     assert "shadow_bettor_ops" not in BETTOR_SRC
     assert "import shadow_bettor as bettor" in OPS_SRC
+
+
+# ── the frozen BETTOR policy ─────────────────────────────────────────
+#
+# Owner approval 2026-09-19: "This must be BETTOR's own policy
+# declaration -- do not reuse, alias, copy, or satisfy it with
+# RN1_SHADOW_V1."
+
+from sportsassets import shadow_bettor_policy as bpol      # noqa: E402
+from sportsassets import shadow_policy as rn1pol           # noqa: E402
+
+BPOL_SRC = (BACKEND / "sportsassets" / "shadow_bettor_policy.py").read_text()
+
+
+def test_the_bettor_policy_is_its_own_and_not_rn1s():
+    p = bpol.frozen_policy()
+    assert p["policyVersion"] == "BETTOR_EV_SHADOW_V1"
+    assert p["policyVersion"] != rn1pol.RN1_SHADOW_POLICY_VERSION
+    assert p["lane"] == lanes.BETTOR_EV_SHADOW
+    assert p["policySha"] != rn1pol.POLICY_SHA
+    assert p["policyCodeSha"] != rn1pol.POLICY_CODE_SHA
+    # Not an alias, not a copy: RN1's declaration is nowhere in it.
+    assert bpol.DECLARATION != rn1pol.DECLARATION
+    assert lanes.RN1_SHADOW not in bpol.canonical()
+
+
+def test_freezing_bettor_does_not_disturb_rn1s_frozen_hashes():
+    """RN1_SHADOW_V1 is already frozen and carries rows. Its declaration
+    hash is ENFORCED, so moving it would make the store refuse RN1's own
+    freeze on the next boot."""
+    assert rn1pol.POLICY_SHA == rn1pol.policy_sha()
+    assert "shadow_policy.py" not in bpol.CODE_FILES
+    assert "shadow_bettor_policy.py" not in rn1pol.CODE_FILES
+
+
+def test_the_declaration_states_the_system_as_it_is():
+    d = bpol.DECLARATION
+    assert d["lane"] == lanes.BETTOR_EV_SHADOW
+    assert d["universe"]["universeVersion"] == bettor.UNIVERSE_VERSION
+    assert d["belief"]["modelVersion"] == bettor.MODEL_VERSION
+    assert d["safety"]["shadowMode"] is True
+    assert d["safety"]["realOrderSubmissionEnabled"] is False
+    assert d["safety"]["capitalAtRisk"] == 0
+    assert d["independence"]["rn1FeaturesUsed"] is False
+    assert d["belief"]["pBettor"] == lanes.NOT_ESTABLISHED
+    assert d["belief"]["pFill"] == "NOT_IDENTIFIED"
+    assert d["decisionSemantics"]["currentEligibleAction"] == sh.NO_TRADE
+
+
+def test_the_action_set_is_exactly_no_trade():
+    """Not a placeholder for a richer set: it is the complete set this
+    policy can emit, because no validated Action EV exists."""
+    assert bpol.ACTION_SET == [sh.NO_TRADE]
+    assert bpol.frozen_policy()["actionSet"] == [sh.NO_TRADE]
+
+
+def test_the_whole_blocker_vocabulary_is_frozen_with_it():
+    frozen = bpol.DECLARATION["decisionSemantics"]["blockerVocabulary"]
+    assert set(frozen) == set(bettor.BLOCKERS)
+
+
+def test_nothing_unestablished_was_manufactured():
+    """"Do not manufacture values simply to populate the policy." A lane
+    that never sizes, holds or executes has no such rule, and the
+    declaration says so in those words."""
+    d = bpol.DECLARATION
+    for key in ("sizing", "pairing", "cashout", "executionReconstruction",
+                "scoring"):
+        assert d[key] == "NOT_APPLICABLE", key
+    assert d["latencyPolicy"] == lanes.NOT_ESTABLISHED
+    # The NOT NULL version columns carry the same honest strings.
+    p = bpol.frozen_policy()
+    for key in ("sizingPolicyVersion", "pairingRuleVersion",
+                "cashoutRuleVersion", "executionReconstructionVersion"):
+        assert p[key] == "NOT_APPLICABLE", key
+    assert p["latencyPolicyVersion"] == lanes.NOT_ESTABLISHED
+    # No invented version strings anywhere in the frozen row.
+    for value in p.values():
+        assert value not in ("SIZING_V1", "PAIR_V1", "CASHOUT_V1",
+                             "EXEC_RECON_V1", "LATENCY_V1")
+
+
+def test_the_hashes_are_real_digests_or_the_word():
+    p = bpol.frozen_policy()
+    assert re.fullmatch(r"[0-9a-f]{64}", p["policySha"])
+    assert (re.fullmatch(r"[0-9a-f]{64}", p["policyCodeSha"])
+            or p["policyCodeSha"] == "NOT_IDENTIFIED")
+    # A hash we could not compute is never a zero or an empty string.
+    assert p["policySha"] != "0" * 64
+
+
+def test_the_sha_moves_when_a_rule_moves():
+    changed = dict(bpol.DECLARATION)
+    changed["decisionSemantics"] = dict(changed["decisionSemantics"],
+                                        currentEligibleAction="BUY")
+    assert bpol.policy_sha(changed) != bpol.POLICY_SHA
+
+
+def test_the_worker_freezes_bettors_policy_before_row_one():
+    assert "shadow_bettor_policy" in WORKER_SRC
+    assert "freeze_policy(pool, policy=bpol.frozen_policy())" in WORKER_SRC
+    assert "policyFreeze" in WORKER_SRC
+    # And a REFUSED freeze stops collection rather than being ignored.
+    block = WORKER_SRC[WORKER_SRC.index("frozen = await store.freeze_policy"):]
+    block = block[:block.index("boot = {")]
+    assert 'REFUSED' in block and "storeReady=False" in block
+
+
+def test_the_repair_did_not_weaken_the_constraint():
+    """The foreign key that refused 99 decisions stays exactly as it
+    was: the fix is the missing row, never a relaxed rule."""
+    m070 = (BACKEND / "migrations"
+            / "070_rn1_prospective_observation.sql").read_text()
+    assert "shadow_decisions_policy_frozen" in m070
+    assert "shadow_decisions_policy_frozen" in store.REQUIRED_CONSTRAINTS
+    # A migration may DROP it only to re-ADD it in the same file -- that
+    # is the idempotent create. A drop with no add beside it is the
+    # weakening this test exists to refuse.
+    for mig in (BACKEND / "migrations").glob("*.sql"):
+        body = mig.read_text()
+        if "DROP CONSTRAINT IF EXISTS shadow_decisions_policy_frozen" in body:
+            assert "ADD CONSTRAINT shadow_decisions_policy_frozen" in body, \
+                mig.name
