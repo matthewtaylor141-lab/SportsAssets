@@ -161,6 +161,65 @@ class TestTheTwoLanesCannotTakeEachOthersKeys:
         assert "a-real-looking-value" not in json.dumps(out)
 
 
+class TestALocalKeyFaultIsNotAVenueFault:
+    """Run 1 on 2026-09-19 answered VENUE_UNREACHABLE when the private key
+    failed to base64-decode. No socket had been opened. binascii.Error's
+    type name is the bare word "Error", and the catch-all around the
+    token mint turned it into a transport verdict -- which would send
+    someone to check the venue's status page over a bad paste."""
+
+    PEM = "-----BEGIN PRIVATE KEY-----\nMIIabc\n-----END PRIVATE KEY-----\n"
+
+    def test_the_two_verdicts_are_different(self):
+        assert prod.A_KEY_NOT_USABLE != prod.A_UNREACHABLE
+        assert prod.A_KEY_NOT_USABLE == "CREDENTIAL_PRESENT_BUT_NOT_USABLE"
+
+    def test_an_undecodable_key_is_not_a_transport_failure(self, monkeypatch):
+        import pmx_production_net as net
+
+        monkeypatch.setenv("PMX_PRIVATE_KEY_B64", "not-a-key!!")
+        with pytest.raises(prod.KeyNotUsable):
+            net._private_key_pem()
+
+    def test_a_pem_and_its_base64_both_load(self, monkeypatch):
+        import base64 as b64
+
+        import pmx_production_net as net
+
+        for value in (self.PEM, b64.b64encode(self.PEM.encode()).decode(),
+                      b64.encodebytes(self.PEM.encode()).decode()):
+            monkeypatch.setenv("PMX_PRIVATE_KEY_B64", value)
+            assert "BEGIN PRIVATE KEY" in net._private_key_pem()
+
+    @pytest.mark.parametrize("value,verdict", [
+        ("", "EMPTY"),
+        ("   \n ", "EMPTY"),
+        ("not-a-key!!", "NOT_A_PRIVATE_KEY_WE_CAN_USE"),
+        ('{"kty":"RSA"}', "NOT_A_PRIVATE_KEY_WE_CAN_USE"),
+    ])
+    def test_the_shape_report_names_what_went_wrong(self, value, verdict):
+        assert prod.key_shape(value)["verdict"] == verdict
+
+    def test_the_public_half_is_caught_by_name(self):
+        pub = self.PEM.replace("PRIVATE", "PUBLIC")
+        got = prod.key_shape(pub)
+        assert got["verdict"] == "WRONG_HALF_OF_THE_PAIR"
+        assert got["pemLabel"] == "PUBLIC KEY"
+        assert "public half goes to Polymarket" in got["meaning"]
+
+    def test_an_rsa_labelled_private_key_is_usable(self):
+        rsa = self.PEM.replace("PRIVATE KEY", "RSA PRIVATE KEY")
+        assert prod.key_shape(rsa)["verdict"] == "USABLE_PEM"
+
+    def test_the_shape_report_never_contains_the_value(self):
+        secret = ("-----BEGIN PRIVATE KEY-----\nSUPERSECRETMATERIAL\n"
+                  "-----END PRIVATE KEY-----\n")
+        blob = json.dumps(prod.key_shape(secret))
+        assert "SUPERSECRETMATERIAL" not in blob
+        # and a receipt built from it is still refused if it ever did
+        assert prod.receipt("keyshape", **prod.key_shape(self.PEM))
+
+
 class TestTheAudiencesAreApartHereToo:
 
     def test_the_assertion_aud_is_the_production_token_endpoint(self):

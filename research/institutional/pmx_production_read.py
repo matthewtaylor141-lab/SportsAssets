@@ -171,10 +171,99 @@ def request_for(name: str, account: str = "", symbol: str = "") -> tuple:
 # ── verdicts, kept apart the way the preprod lane keeps them ─────────
 
 A_SECRET_MISSING = "SECRET_MISSING"
+A_KEY_NOT_USABLE = "CREDENTIAL_PRESENT_BUT_NOT_USABLE"
 A_REJECTED = "AUTHENTICATION_REJECTED"
 A_PERMISSION_DENIED = "AUTHENTICATED_BUT_ENDPOINT_PERMISSION_DENIED"
 A_OK = "AUTHENTICATED"
 A_UNREACHABLE = "VENUE_UNREACHABLE"
+
+
+class KeyNotUsable(RuntimeError):
+    """The key is present and did not decode. NOT a venue problem.
+
+    Run 1 on 2026-09-19 reported VENUE_UNREACHABLE for exactly this: the
+    private key failed base64 decoding, binascii.Error's type name is the
+    bare word "Error", and the catch-all around the token mint labelled
+    it a transport failure. No socket had been opened. Saying "the venue
+    is unreachable" when the venue was never contacted is the kind of
+    wrong answer that sends someone to check the wrong system, so a
+    local credential fault now has its own verdict and never borrows
+    that one.
+    """
+
+
+def key_shape(raw: str) -> dict:
+    """WHAT SHAPE the key material is, revealing none of it.
+
+    Everything here is a fact ABOUT the value -- its length, whether it
+    parses, which PEM label it carries -- and none of it is the value.
+    The point is to answer "what did I actually paste?" without anyone
+    having to paste it anywhere else to find out.
+    """
+    import re
+
+    raw = raw or ""
+    stripped = "".join(raw.split())
+    out = {"byteLength": len(raw),
+           "strippedLength": len(stripped),
+           "hasWhitespace": len(raw) != len(stripped),
+           "lineCount": raw.count("\n") + 1 if raw else 0,
+           "looksLikeJson": stripped[:1] in ("{", "["),
+           "containsBEGIN": "BEGIN" in raw,
+           "startsWithBEGIN": raw.lstrip()[:11] == "-----BEGIN ",
+           "base64Decodes": False,
+           "decodedLength": None,
+           "decodedIsPem": False,
+           "pemLabel": None}
+
+    label = re.search(r"-----BEGIN ([A-Z0-9 ]+)-----", raw)
+    if label:
+        out["pemLabel"] = label.group(1)
+    try:
+        import base64 as _b64
+
+        decoded = _b64.b64decode(stripped, validate=True)
+        out["base64Decodes"] = True
+        out["decodedLength"] = len(decoded)
+        text = decoded.decode("utf-8", "replace")
+        out["decodedIsPem"] = "-----BEGIN " in text
+        inner = re.search(r"-----BEGIN ([A-Z0-9 ]+)-----", text)
+        if inner:
+            out["pemLabel"] = inner.group(1)
+    except Exception as exc:                                   # noqa: BLE001
+        out["base64Error"] = "%s: %s" % (type(exc).__name__, str(exc)[:60])
+
+    # A PEM is not enough: it has to be the PRIVATE half. A public key
+    # would stage cleanly and then fail at signing time with a message
+    # about the key, which is a slow way to learn the wrong half of the
+    # pair was installed.
+    private = bool(out["pemLabel"]) and "PRIVATE" in (out["pemLabel"] or "")
+    public = bool(out["pemLabel"]) and "PUBLIC" in (out["pemLabel"] or "")
+
+    if not raw.strip():
+        out["verdict"] = "EMPTY"
+    elif public:
+        out["verdict"] = "WRONG_HALF_OF_THE_PAIR"
+    elif out["startsWithBEGIN"] and private:
+        out["verdict"] = "USABLE_PEM"
+    elif out["decodedIsPem"] and private:
+        out["verdict"] = "USABLE_BASE64_OF_PEM"
+    else:
+        out["verdict"] = "NOT_A_PRIVATE_KEY_WE_CAN_USE"
+
+    out["meaning"] = {
+        "EMPTY": "the secret is not set, or is set to whitespace",
+        "USABLE_PEM": "a private-key PEM pasted as-is; staged verbatim",
+        "USABLE_BASE64_OF_PEM": "base64 of a private-key PEM; decoded",
+        "WRONG_HALF_OF_THE_PAIR":
+            "this is the PUBLIC key. The public half goes to Polymarket; "
+            "the PRIVATE half goes in this secret and never leaves.",
+        "NOT_A_PRIVATE_KEY_WE_CAN_USE":
+            "the value is neither a private-key PEM nor base64 of one. "
+            "Re-save it as `base64 -w0 <key>.pem`, or paste the PEM "
+            "itself, including its BEGIN and END lines.",
+    }[out["verdict"]]
+    return out
 
 # An OBSERVED_PRODUCTION reading is its own evidence class. It is not
 # preprod evidence and preprod evidence is not it.
@@ -331,7 +420,7 @@ def request_id() -> str:
 
 def _cli(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument("op", choices=("presence", "verify"))
+    ap.add_argument("op", choices=("presence", "keyshape", "verify"))
     ap.add_argument("--reads", default="", help="comma-separated read names")
     ap.add_argument("--symbol", default="", help="symbol for bbo / book")
     ap.add_argument("--out", default="")
@@ -343,6 +432,15 @@ def _cli(argv=None) -> int:
         if a.out:
             write_receipt(a.out, out)
         return 0 if out["verdict"] is None else 1
+
+    if a.op == "keyshape":
+        # No network. Facts ABOUT the value, never the value.
+        out = receipt("keyshape",
+                      **key_shape(os.environ.get("PMX_PRIVATE_KEY_B64", "")))
+        print(json.dumps(out, indent=1))
+        if a.out:
+            write_receipt(a.out, out)
+        return 0 if out["verdict"] != "NOT_A_PRIVATE_KEY_WE_CAN_USE" else 1
 
     from pmx_production_net import run_verify                  # noqa: E402
     return run_verify(a)

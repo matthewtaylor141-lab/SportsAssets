@@ -88,6 +88,14 @@ jobs:
           set -euo pipefail
           export PYTHONPATH="$PWD/research/institutional:${PYTHONPATH:-}"
           python research/institutional/pmx_production_read.py presence
+          # WHAT SHAPE the key material is, revealing none of it. Run 1
+          # died because the value would not decode, and the runner's own
+          # "Error" said nothing about which of several wrong shapes it
+          # was. rc 1 here is a named verdict, not a crash, so it does not
+          # stop the read from attempting and reporting for itself.
+          set +e
+          python research/institutional/pmx_production_read.py keyshape
+          set -e
 
       - name: Read production
         env:

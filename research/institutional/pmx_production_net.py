@@ -18,12 +18,20 @@ TIMEOUT = (10.0, 30.0)
 
 
 def _private_key_pem() -> str:
+    """A PEM as-is, or base64 of one. Anything else raises KeyNotUsable,
+    which is NOT a transport failure -- see prod.KeyNotUsable."""
     raw = os.environ["PMX_PRIVATE_KEY_B64"]
     if "-----BEGIN" in raw[:64]:
         return raw                     # a PEM pasted as-is
-    pem = base64.b64decode("".join(raw.split())).decode()
+    try:
+        pem = base64.b64decode("".join(raw.split()), validate=True).decode()
+    except Exception as exc:                                   # noqa: BLE001
+        raise prod.KeyNotUsable(
+            "the key is set but is neither a PEM nor base64 of one "
+            "(%s)" % type(exc).__name__) from None
     if "BEGIN" not in pem:
-        raise RuntimeError("PMX_PRIVATE_KEY_B64 did not decode to a PEM")
+        raise prod.KeyNotUsable(
+            "the key decoded to %d bytes with no PEM header" % len(pem))
     return pem
 
 
@@ -98,10 +106,24 @@ def run_verify(args) -> int:
     t0 = time.time()
     try:
         tok_status, token, expires_in, why = mint_token(session)
+    except prod.KeyNotUsable as exc:
+        # NOT the venue. No socket was opened. Run 1 reported this as
+        # VENUE_UNREACHABLE and that was wrong.
+        out = prod.receipt("verify",
+                           verdict=prod.A_KEY_NOT_USABLE,
+                           why=str(exc),
+                           keyShape=prod.key_shape(
+                               os.environ.get("PMX_PRIVATE_KEY_B64", "")),
+                           venueContacted=False)
+        print(json.dumps(out, indent=1))
+        if args.out:
+            prod.write_receipt(args.out, out)
+        return 1
     except Exception as exc:                                   # noqa: BLE001
         out = prod.receipt("verify",
                            verdict=prod.A_UNREACHABLE,
-                           transportError=type(exc).__name__)
+                           transportError=type(exc).__name__,
+                           venueContacted=True)
         print(json.dumps(out, indent=1))
         if args.out:
             prod.write_receipt(args.out, out)
