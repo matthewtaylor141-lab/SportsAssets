@@ -243,6 +243,14 @@ jobs:
                  "$API/v2/trades?limit=20" || echo 000)
           echo "global /v2/trades?limit=20 http=$CODE" \
             | tee -a "$GITHUB_STEP_SUMMARY"
+          # WHAT is trading, not merely THAT something is. A watermark
+          # carried entirely by one asset class would not establish that
+          # the feed is current for the markets our roster trades, and
+          # verdict C rests on exactly that.
+          jq -r "$ROWS_FILTER[]? | \"  \" + (.timestamp|tostring) + \"  \"
+                 + ((.slug // .title // \"NO_SLUG\")|tostring)" \
+             /tmp/any.json 2>/dev/null | head -20 \
+             | tee -a "$GITHUB_STEP_SUMMARY" || true
           GMAX=$(jq -r "[$ROWS_FILTER[]? | (.timestamp // .time // .ts // empty)]
                         | max // empty" /tmp/any.json 2>/dev/null || true)
           if [ -n "$GMAX" ] && [ "$GMAX" != "null" ]; then

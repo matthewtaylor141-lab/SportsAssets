@@ -36,6 +36,8 @@ MIGRATION = (BACKEND / "migrations"
              / "071_bettor_opportunities.sql").read_text()
 SHADOW_JS = (ROOT / "frontend" / "public" / "command"
              / "shadow.js").read_text()
+CS_SRC = (BACKEND / "sportsassets" / "api"
+          / "command_shadow.py").read_text()
 
 NOW = datetime(2026, 9, 19, 18, 30, 0, tzinfo=timezone.utc)
 
@@ -266,3 +268,45 @@ def test_a_missing_bettor_store_does_not_503_the_whole_screen():
         BACKEND / "sportsassets" / "api" / "command_shadow.py").read_text()
     assert "_bettor_counts" in (
         BACKEND / "sportsassets" / "api" / "command_shadow.py").read_text()
+
+
+# ── the benchmark feed's health is reported beside BETTOR, not through it ──
+
+
+def test_the_rn1_feed_is_its_own_health_component():
+    """Owner: "Never let an RN1 feed failure make BETTOR appear down."
+    So the feed is a component in its own right, and it declares that
+    BETTOR does not depend on it."""
+    comps = CS.HEALTH_COMPONENTS
+    assert "RN1_BENCHMARK_FEED" in comps
+    assert comps[0] == "BETTOR_EV_ENGINE", "the primary engine is read first"
+    assert len(set(comps)) == len(comps), "a duplicated key hides a component"
+
+
+def test_the_feed_row_carries_the_four_named_fields():
+    for field in ("rn1FeedLastSourceEvent", "rn1FeedLastReceivedEvent",
+                  "rn1FeedLagSeconds", "rn1FeedStatus"):
+        assert field in CS_SRC, field
+    assert '"affectsBettor": False' in CS_SRC
+
+
+def test_bettor_health_does_not_depend_on_rn1():
+    assert "dependsOnRn1=False" in CS_SRC
+
+
+def test_the_ui_draws_every_component_the_server_reports():
+    """A panel keyed off a hard-coded list silently omits a component the
+    server added -- the one shape of this screen that could hide a
+    failure."""
+    assert "function healthKeys" in SHADOW_JS
+    assert "RN1_BENCHMARK_FEED" in SHADOW_JS
+    for field in ("rn1FeedLastSourceEvent", "rn1FeedLastReceivedEvent",
+                  "rn1FeedLagSeconds", "affectsBettor"):
+        assert field in SHADOW_JS, field
+
+
+def test_the_ui_health_list_leads_with_bettor():
+    block = SHADOW_JS[SHADOW_JS.index("const HEALTH_LABEL = {"):]
+    block = block[:block.index("};")]
+    assert block.index("BETTOR_EV_ENGINE") < block.index("RN1_BENCHMARK_FEED")
+    assert block.index("BETTOR_EV_ENGINE") < block.index("RN1_LISTENER")

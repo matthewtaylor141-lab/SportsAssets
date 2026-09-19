@@ -325,12 +325,52 @@
   }
 
   const HEALTH_LABEL = {
-    RN1_LISTENER: 'RN1 listener', SHADOW_WRITER: 'Shadow writer',
-    DATABASE: 'Database', INSTITUTIONAL_MARKET_DATA: 'Institutional market data',
-    L2: 'L2 depth', LABEL_MATURITY: 'Label maturity',
-    SHADOW_ENGINE: 'Shadow engine', BETTOR_EV_ENGINE: 'BETTOR EV engine',
-    COMMAND_API: 'Command API'
+    BETTOR_EV_ENGINE: 'BETTOR EV engine',
+    INSTITUTIONAL_MARKET_DATA: 'Institutional market data',
+    L2: 'L2 depth',
+    RN1_BENCHMARK_FEED: 'RN1 benchmark feed',
+    RN1_LISTENER: 'RN1 listener', SHADOW_ENGINE: 'Shadow engine',
+    SHADOW_WRITER: 'Shadow writer', LABEL_MATURITY: 'Label maturity',
+    DATABASE: 'Database', COMMAND_API: 'Command API'
   };
+
+  /* A component key with no label of its own is still DRAWN, under its
+   * own name. A health panel that silently omitted a component the
+   * server reported would be the one shape of this screen that could
+   * hide a failure -- and the server's order is the hierarchy's order,
+   * so it is taken from the payload rather than re-decided here. */
+  function healthKeys(comps) {
+    const seen = Object.keys(comps || {});
+    const known = Object.keys(HEALTH_LABEL).filter(k => seen.includes(k));
+    const extra = seen.filter(k => !(k in HEALTH_LABEL));
+    const missing = Object.keys(HEALTH_LABEL).filter(k => !seen.includes(k));
+    return known.concat(extra, missing);
+  }
+
+  function healthLabel(key) {
+    return HEALTH_LABEL[key] ||
+      key.replace(/_/g, ' ').toLowerCase().replace(/^./, c => c.toUpperCase());
+  }
+
+  /* The benchmark feed carries its own four fields, and one of them is
+   * the answer to the question an operator actually asks when RN1 goes
+   * quiet: is BETTOR affected? It is not, and the row says so rather
+   * than leaving it to be inferred from two green dots. */
+  function feedDetail(key, c) {
+    if (key !== 'RN1_BENCHMARK_FEED') return str(c.detail);
+    const lag = (c.rn1FeedLagSeconds === null ||
+                 c.rn1FeedLagSeconds === undefined)
+      ? NI : `${c.rn1FeedLagSeconds}s`;
+    return `<span class="sh-feed-facts">
+      <span>last source event <b>${c.rn1FeedLastSourceEvent
+        ? stamp(c.rn1FeedLastSourceEvent) : NI}</b></span>
+      <span>last received <b>${c.rn1FeedLastReceivedEvent
+        ? stamp(c.rn1FeedLastReceivedEvent) : NI}</b></span>
+      <span>lag <b>${esc(lag)}</b></span>
+      <span class="sh-feed-isolated">${c.affectsBettor === false
+        ? 'BETTOR unaffected' : 'affects BETTOR'}</span>
+    </span><span class="sh-feed-note">${str(c.detail)}</span>`;
+  }
 
   function healthPanel() {
     const h = state.data['health'];
@@ -341,17 +381,18 @@
     return `<section class="sh-panel"><div class="sh-panel-head">
       <h2>System health</h2>
       <span class="sh-sub">Each state comes from a source row's own timestamp. A browser heartbeat is not freshness.</span>
-      </div><div class="sh-health">${Object.keys(HEALTH_LABEL).map(key => {
+      </div><div class="sh-health">${healthKeys(comps).map(key => {
         const c = comps[key] || { state: 'NOT_ESTABLISHED' };
         const st = String(c.state || 'NOT_ESTABLISHED');
         const tone = st === 'LIVE' ? 'green' : st === 'DEGRADED' ? 'amber'
           : st === 'STALE' ? 'amber' : st === 'BLOCKED' ? 'red' : 'grey';
-        return `<div class="sh-health-row">
+        const primary = key === 'BETTOR_EV_ENGINE' ? ' primary' : '';
+        return `<div class="sh-health-row${primary}">
           <span class="sh-dot ${tone} ${st === 'LIVE' ? 'pulse' : ''}"></span>
-          <span class="sh-health-name">${esc(HEALTH_LABEL[key])}</span>
+          <span class="sh-health-name">${esc(healthLabel(key))}</span>
           <span class="sh-health-state ${tone}">${esc(st.replace(/_/g, ' '))}</span>
           <span class="sh-health-src">${c.sourceTimestamp ? stamp(c.sourceTimestamp) : NI}</span>
-          <span class="sh-health-detail">${str(c.detail)}</span></div>`;
+          <span class="sh-health-detail">${feedDetail(key, c)}</span></div>`;
       }).join('')}</div></section>`;
   }
 

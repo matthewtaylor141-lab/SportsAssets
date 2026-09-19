@@ -325,6 +325,22 @@
 .sh-health-state.grey { color: var(--sh-grey) }
 .sh-health-src { font: 500 10.5px/1 var(--mono, ui-monospace, monospace); color: var(--sh-muted) }
 .sh-health-detail { color: var(--sh-muted); font-size: 10.5px; overflow-wrap: anywhere }
+
+/* The primary engine's row is the one an operator should land on, so it
+   carries a rail. The benchmark feed's row states its own four facts and
+   whether BETTOR is affected -- a quiet RN1 must never read as an
+   outage of the product. */
+.sh-health-row.primary { background: var(--sh-raise, rgba(255, 255, 255, .02)) }
+.sh-health-row.primary .sh-health-name { box-shadow: inset 2px 0 0 var(--sh-accent, currentColor); padding-left: 8px }
+.sh-feed-facts { display: flex; flex-wrap: wrap; gap: 4px 14px; align-items: baseline }
+.sh-feed-facts b { font: 500 10.5px/1 var(--mono, ui-monospace, monospace); color: var(--sh-ink, inherit) }
+.sh-feed-isolated {
+  font: 700 9px/1 var(--sans, system-ui); letter-spacing: .09em;
+  text-transform: uppercase; color: var(--sh-green);
+  border: 1px solid currentColor; border-radius: 3px; padding: 3px 6px;
+}
+.sh-feed-note { display: block; margin-top: 4px }
+
 .sh-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor }
 .sh-dot.green { color: var(--sh-green) } .sh-dot.amber { color: var(--sh-amber) }
 .sh-dot.red { color: var(--sh-red) } .sh-dot.grey { color: var(--sh-grey) }
