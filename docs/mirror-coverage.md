@@ -2558,3 +2558,109 @@ JSON-clean.
 
 Meanwhile the decision loop's last success is **20:15:31Z, 16 s old**.
 Two planes, one broken.
+
+## 87. BETTOR_EV_SHADOW_V2: a boundary that can be enforced
+
+Section 86 diagnosed why V1's code hash drifted and why nothing blocked.
+This is the repair, approved 2026-09-19 20:2xZ. **V1 is untouched** — not
+rehashed, not rewritten, its boundary not changed retroactively.
+
+### 87.1 The boundary
+
+V1 hashed **whole file bytes** of four files. V2 hashes the **parsed
+decision path**: a named manifest of the symbols BETTOR's decision
+actually depends on, as AST with docstrings stripped. That fixes both
+defects section 86 measured:
+
+| | V1 | V2 |
+|---|---|---|
+| content | bytes — comments and docstrings count | parsed tree — they cannot reach it |
+| scope | 4 whole files, 2 shared with RN1 | named symbols only; RN1's are outside |
+| on mismatch | recorded, not enforced | **enforced** |
+
+`shadow_bettor_policy.py` is deliberately outside V2's boundary: it *is*
+the declaration, already covered by `POLICY_SHA`, and hashing it twice
+would let a prose edit block decision writing. Opportunity collection is
+outside too — it must keep running when decisions are blocked, so it
+cannot sit inside the boundary that blocks them.
+
+### 87.2 Pinned by mutation, not by assertion
+
+Each case rewrites the module's source and recomputes the digest:
+
+```
+COMMENT_ONLY      same     WHITESPACE_ONLY   same    REORDER_DEFS     same
+DOCSTRING_ONLY    same     RN1_ONLY_EDIT     same
+ACTION            differs  BLOCKER           differs P_BETTOR_STATUS  differs
+P_FILL_STATUS     differs  LINEAGE           differs POLICY_VERSION   differs
+CAPITAL_AT_RISK   differs  MISSING_SYMBOL    raises BoundaryIncomplete
+```
+
+A missing symbol **raises** rather than hashing fewer. V1 returned the
+word `NOT_IDENTIFIED` when a file was unreadable, which was survivable
+only because nothing enforced it; an enforced digest that quietly lost a
+symbol would compare unequal for an unreconstructable reason.
+
+### 87.3 Fail closed, without losing observations
+
+```
+running sha != frozen sha  ->  POLICY_CODE_DRIFT
+                               DECISION_WRITING_ALLOWED = FALSE
+                               OBSERVE MARKET = YES
+                               WRITE OPPORTUNITY = YES
+```
+
+The gate sits around the **decision write only**, *after* the opportunity
+is already recorded. A market observed during a drift is still evidence,
+and evidence never written cannot be recovered. Withheld decisions are
+counted in `decisionsWithheld`, never silent.
+
+Boot order: store ready → declaration → running code sha → freeze →
+enable. `decision_writing_allowed` starts **False**, so no ordering of
+those steps can leave it true by accident — which is what "there must be
+no interval where V2 code writes decisions as V1" requires.
+
+### 87.4 The heartbeat, fixed at the cause
+
+`pipeline_health()` converts its three timestamp columns to
+timezone-aware ISO-8601 **by name** (`TIMESTAMP_FIELDS`), and
+`db.heartbeat` stays strict. Not `json.dumps(default=str)` — that would
+have fixed this symptom and hidden the next unsupported type behind a
+string that looks deliberate. `None` stays `None` rather than becoming
+`"None"`, which would read as a real instant.
+
+The failure path is now `log.error` with the exception plus a recorded
+failure row. It was `log.debug`, below the configured level, which is
+exactly how a `TypeError` hid for 62 minutes. The regression test uses
+the real asyncpg payload and asserts it **raised before the fix**.
+
+### 87.5 Five BETTOR planes, five sources
+
+| component | source |
+|---|---|
+| `BETTOR_OPPORTUNITY_COLLECTOR` | opportunity rows |
+| `BETTOR_DECISION_PIPELINE` | decision rows, orphans, failures |
+| `BETTOR_POLICY_INTEGRITY` | the boot marker |
+| `BETTOR_TELEMETRY` | the heartbeat |
+| `BETTOR_EV_STATUS` | the belief state |
+
+No component derives from another's source. During the incident this
+would have read: collector HEALTHY, pipeline HEALTHY, integrity DRIFTED,
+telemetry DEGRADED, EV LEARNING — five true statements one tile could
+not make. The telemetry row carries `affectsDecisionPipeline: false` in
+the payload, not just in the CSS.
+
+### 87.6 What was deliberately left alone
+
+`BETTOR_SHADOW_SIZING_V1`, $1,000, sha `0081c77c…` — unchanged. Its
+declaration names V1 as the EV policy in force when it was frozen, and
+it **must keep naming it**: updating the string would move the frozen
+hash and the next boot would answer `REFUSED` over a cosmetic edit. A
+test pins that. The claim the field makes is unaffected — eligibility
+rests with the EV policy, whichever version is in force.
+
+The comment naming `belief()` is corrected to `probabilities()`, and now
+also records that `probabilities()` is never called on this path — so
+the live statements of the vocabulary rule are the frozen declaration
+and the blocker name. It rides with V2 because correcting it moves the
+hash, which is the discipline V2 exists to enforce.
