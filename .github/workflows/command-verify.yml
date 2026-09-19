@@ -29,6 +29,15 @@ on:
         description: "COMMAND host to verify"
         required: false
         default: "command.bettortoken.com"
+      base:
+        description: >-
+          Path prefix the COMMAND assets sit under on this host.
+          EMPTY for command.bettortoken.com, where the netlify host
+          rule already rewrites the whole site into /command/ -- asking
+          there for /command/shadow.js asks for /command/command/shadow.js
+          and correctly 404s. Use /command for www.bettortoken.com.
+        required: false
+        default: ""
       api:
         description: "API origin behind the proxy"
         required: false
@@ -49,25 +58,32 @@ jobs:
         id: reach
         run: |
           HOST="${{ inputs.host }}"
+          BAD=""
           echo "## COMMAND production acceptance" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
-          for path in "/" "/command/" "/command/index.html" \
-                      "/command/shadow.js" "/command/shadow.css" \
-                      "/command/app.js" "/command/core.js"; do
+          B="${{ inputs.base }}"
+          for path in "/" "$B/" "$B/index.html" \
+                      "$B/shadow.js" "$B/shadow.css" \
+                      "$B/app.js" "$B/core.js"; do
             code=$(curl -s -o /tmp/body -w '%{http_code}' --max-time 25 \
                    "https://$HOST$path" || echo 000)
             size=$(wc -c < /tmp/body 2>/dev/null || echo 0)
             printf '%-28s %s  %s bytes\n' "$path" "$code" "$size" \
               | tee -a "$GITHUB_STEP_SUMMARY"
+            # Fail HERE on a missing asset, not three steps later as a
+            # confusing grep miss against the body of an error page.
+            [ "$code" = "200" ] || BAD="$BAD $path($code)"
           done
           echo '```' >> "$GITHUB_STEP_SUMMARY"
+          [ -z "$BAD" ] || { echo "NOT SERVED:$BAD"; exit 1; }
 
       - name: The SHADOW environment is actually published
         run: |
           HOST="${{ inputs.host }}"
-          curl -s --max-time 25 "https://$HOST/command/index.html" > /tmp/index
-          curl -s --max-time 25 "https://$HOST/command/shadow.js" > /tmp/shadow
-          curl -s --max-time 25 "https://$HOST/command/app.js" > /tmp/app
+          B="${{ inputs.base }}"
+          curl -s --max-time 25 "https://$HOST$B/index.html" > /tmp/index
+          curl -s --max-time 25 "https://$HOST$B/shadow.js" > /tmp/shadow
+          curl -s --max-time 25 "https://$HOST$B/app.js" > /tmp/app
           {
             echo "### Published assets"
             echo '```'
@@ -113,7 +129,8 @@ jobs:
               fi
             done
           done
-          curl -s --max-time 25 "https://${{ inputs.host }}/command/config.js" \
+          curl -s --max-time 25 \
+            "https://${{ inputs.host }}${{ inputs.base }}/config.js" \
             > /tmp/config || true
           grep -Eq 'PMX_|PRIVATE_KEY|postgres://|client_secret' /tmp/config \
             && { echo "CREDENTIAL IN config.js"; FAIL=1; }
