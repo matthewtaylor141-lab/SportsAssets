@@ -316,6 +316,34 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
 
 # ── §12: the markouts, appended as later facts ───────────────────────
 
+# The bridge's own cadence. A request is bucketed to it so one fetch
+# answers one bucket instead of sixty ticks writing sixty rows.
+BRIDGE_CADENCE_S = 600
+
+# How long after the last horizon a markout request is still worth
+# queueing. Past this the miss is recorded and the symbol is dropped:
+# a book fetched half an hour after a 300-second target is not that
+# markout under any tolerance, and asking for it forever would load
+# the venue to produce rows nothing can use.
+MARKOUT_REQUEST_GRACE_S = 1800
+
+
+def _bridge_bucket(at):
+    epoch = int(at.timestamp()) // BRIDGE_CADENCE_S * BRIDGE_CADENCE_S
+    return datetime.fromtimestamp(epoch, tz=timezone.utc)
+
+
+def _markout_window_open(subject, now, taken) -> bool:
+    """Is any horizon on this position still worth fetching a book for?"""
+    longest = max(s for _h, s in mk.HORIZONS)
+    if now > subject["decisionTimestamp"] + timedelta(
+            seconds=longest + MARKOUT_REQUEST_GRACE_S):
+        return False
+    return any((subject["experimentalDecisionId"], h) not in taken
+               for h, _s in mk.HORIZONS)
+
+
+
 
 async def take_markouts(pool, *, now=None, window_s=86400,
                         limit=100) -> dict:
@@ -328,16 +356,41 @@ async def take_markouts(pool, *, now=None, window_s=86400,
     """
     now = now or _now()
     stats = {"subjects": 0, "observed": 0, "notIdentified": 0,
-             "notYetMature": 0}
+             "notYetMature": 0, "requested": 0}
     subjects = await xstore.markout_subjects(pool, window_s=window_s,
                                              limit=limit)
     if not subjects:
         return stats
     taken = await xstore.markouts_taken(
         pool, [s["experimentalDecisionId"] for s in subjects])
+    requested: set = set()
 
     for subject in subjects:
         stats["subjects"] += 1
+        # THE BRIDGE FETCHES ONLY WHAT IS ASKED FOR. Without this the
+        # only institutional book that ever exists for a symbol is its
+        # arrival, and every markout would be measured against the book
+        # the position was opened on -- which is not a markout at all,
+        # it is the entry price wearing a later label. So while a
+        # position still has an unresolved horizon, a request is queued
+        # for the bridge to serve.
+        #
+        # ONE REQUEST PER SYMBOL PER BRIDGE CYCLE, not per tick: the
+        # request id is derived from (symbol, purpose, instant), so
+        # bucketing the instant to the bridge's own cadence makes the
+        # insert idempotent instead of writing sixty rows an hour that
+        # one fetch would answer.
+        if _markout_window_open(subject, now, taken):
+            key = (subject["symbol"], _bridge_bucket(now))
+            if key not in requested:
+                requested.add(key)
+                await xstore.request_l2(
+                    pool, symbol=subject["symbol"],
+                    requested_by=REQUESTED_BY,
+                    purpose=xstore.PURPOSE_MARKOUT,
+                    at=_bridge_bucket(now))
+                stats["requested"] += 1
+
         for horizon, seconds in mk.HORIZONS:
             key = (subject["experimentalDecisionId"], horizon)
             if key in taken:

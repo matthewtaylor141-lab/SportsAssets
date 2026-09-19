@@ -77,6 +77,7 @@ class FakePool:
         self.populations: dict = {}
         self.requests: list = []
         self.experiments: list = []
+        self.markouts: list = []
 
     # -- reads -------------------------------------------------------
     async def fetch(self, sql, *args):
@@ -131,6 +132,9 @@ class FakePool:
         if sql.strip().startswith("INSERT INTO bettor_experiments"):
             self.experiments.append(args[0])
             return {"experiment_id": args[0]}
+        if sql.strip().startswith("INSERT INTO bettor_experimental_markouts"):
+            self.markouts.append(args)
+            return {"markout_id": args[0]}
         raise AssertionError("unexpected fetchrow: %.60s" % sql)
 
     async def execute(self, sql, *args):
@@ -475,3 +479,66 @@ async def test_a_table_without_its_later_columns_is_not_ready():
     assert out["storeReady"] is False
     assert out["problems"] == [
         "bettor_experimental_decisions.walked_book_sha is absent"]
+
+
+# ── §12: the bridge only fetches what is asked for ───────────────────
+
+
+@pytest.mark.asyncio
+async def test_an_open_horizon_queues_a_markout_book_request():
+    """WITHOUT THIS THERE ARE NO MARKOUTS AT ALL. The bridge fetches
+    only what a request names, so the only institutional book that
+    would ever exist for a symbol is its arrival -- and a markout
+    measured against the book the position was opened on is the entry
+    price wearing a later label."""
+    class Pool(FakePool):
+        async def fetch(self, sql, *args):
+            if "JOIN bettor_experimental_positions" in sql:
+                return [{"experimental_decision_id": "xdec_1",
+                         "market_id": SYMBOL,
+                         "decision_timestamp": NOW,
+                         "position_id": "xpos_1",
+                         "entry_qty": 500.0, "entry_vwap": 0.414}]
+            if "FROM bettor_experimental_markouts" in sql:
+                return []
+            return await super().fetch(sql, *args)
+
+        async def fetchrow(self, sql, *args):
+            if "FROM bettor_l2_evidence" in sql:
+                return None
+            return await super().fetchrow(sql, *args)
+
+    pool = Pool()
+    out = await worker.take_markouts(pool, now=NOW + timedelta(seconds=400))
+    assert out["requested"] == 1
+    assert pool.requests[0][5] == "MARKOUT"
+
+
+@pytest.mark.asyncio
+async def test_one_request_per_symbol_per_bridge_cycle_not_per_tick():
+    """The id is derived from (symbol, purpose, instant), so the
+    instant is bucketed to the bridge's own cadence -- otherwise sixty
+    ticks an hour would write sixty rows one fetch would answer."""
+    a = worker._bridge_bucket(NOW)
+    b = worker._bridge_bucket(NOW + timedelta(seconds=59))
+    c = worker._bridge_bucket(NOW + timedelta(seconds=900))
+    assert a == b and a != c
+    assert int(a.timestamp()) % worker.BRIDGE_CADENCE_S == 0
+
+
+def test_a_position_past_every_horizon_stops_being_asked_about():
+    """A book half an hour after a 300-second target is not that
+    markout under any tolerance; asking forever would load the venue
+    to produce rows nothing can use."""
+    subject = {"experimentalDecisionId": "xdec_1", "symbol": SYMBOL,
+               "decisionTimestamp": NOW}
+    assert worker._markout_window_open(
+        subject, NOW + timedelta(seconds=400), set()) is True
+    assert worker._markout_window_open(
+        subject, NOW + timedelta(hours=2), set()) is False
+    # and a position whose every horizon is already written is done
+    done = {("xdec_1", h) for h, _s in
+            __import__("sportsassets.shadow_experimental_markouts",
+                       fromlist=["x"]).HORIZONS}
+    assert worker._markout_window_open(
+        subject, NOW + timedelta(seconds=400), done) is False
