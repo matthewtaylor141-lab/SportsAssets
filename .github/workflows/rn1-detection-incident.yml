@@ -58,6 +58,14 @@ jobs:
       SERVICE: sportsassets-db
       KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
       API: https://data-api.polymarket.com
+      # ONE row-normaliser, shared by every step, so discovery and the
+      # sweep cannot disagree about what "a row" is. Two different
+      # filters is how the 2026-09-19 run reported CONTRACT_OK=no beside
+      # a populated LATEST_V2 column.
+      # Parenthesised, because `end[]?` is a jq SYNTAX error and every
+      # call site here is guarded by 2>/dev/null -- it would have failed
+      # silently and read as "no rows".
+      ROWS_FILTER: '(if type=="array" then . else (.data // .results // .trades // .activity // []) end)'
     steps:
       - uses: actions/checkout@v4
 
@@ -128,11 +136,24 @@ jobs:
             echo "::error::roster read failed rc=$RC"
             grep -v -F "$PW" /tmp/roster.err | head -20; exit 1
           fi
-          echo "wallets read: $(wc -l < /tmp/roster.txt)"
+          # BELT AND BRACES. The SQL no longer emits a banner, but the
+          # runner does not get to assume that: anything that is not a
+          # hex address followed by a pipe is not a wallet, and a line
+          # that fails this test is PRINTED as dropped rather than
+          # silently discarded. The 2026-09-19 run tested 13 "wallets"
+          # against a roster of 12 because nothing enforced this.
+          mv /tmp/roster.txt /tmp/roster.raw
+          grep -E '^0x[0-9a-fA-F]{6,}\|' /tmp/roster.raw > /tmp/roster.txt || true
+          DROPPED=$(grep -c -v -E '^0x[0-9a-fA-F]{6,}\|' /tmp/roster.raw || true)
+          echo "wallets read: $(wc -l < /tmp/roster.txt)  non-wallet lines dropped: $DROPPED"
+          [ -s /tmp/roster.txt ] || { echo "::error::roster empty after filtering"; exit 1; }
           {
             echo "## Configured roster (address | label | local last ts | local rows after cutoff)"
             echo '```'
             cat /tmp/roster.txt
+            echo "-- non-wallet lines dropped from the raw read: $DROPPED"
+            grep -v -E '^0x[0-9a-fA-F]{6,}\|' /tmp/roster.raw \
+              | sed 's/^/-- dropped: /' || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -140,9 +161,19 @@ jobs:
         id: contract
         run: |
           set -u
+          # The probe wallet is the roster's MOST ACTIVE address -- the
+          # roster is ordered by our own post-cutoff row count desc, so
+          # line 1 is the wallet most likely to have venue-side history.
+          # Probing a quiet wallet and reading its honest zero as "wrong
+          # parameter" would be the same mistake in the other direction.
           WALLET=$(head -1 /tmp/roster.txt | cut -d'|' -f1)
+          case "$WALLET" in
+            0x*) : ;;
+            *) echo "::error::probe wallet is not an address: [$WALLET]"; exit 1 ;;
+          esac
           echo "probe wallet: $WALLET"
           echo "## Data API V2 contract discovery" >> "$GITHUB_STEP_SUMMARY"
+          echo "probe wallet: \`$WALLET\`" >> "$GITHUB_STEP_SUMMARY"
           echo '```' >> "$GITHUB_STEP_SUMMARY"
           BEST=""
           # Candidate spellings. Each is TRIED and its outcome PRINTED;
@@ -159,17 +190,19 @@ jobs:
             URL="$API/v2/$EP?$Q"
             CODE=$(curl -sS --max-time 40 -o /tmp/probe.json \
                    -D /tmp/probe.hdr -w '%{http_code}' "$URL" || echo 000)
-            ROWS=$(jq -r '(.data // .results // .trades // .activity // .)
-                          | if type=="array" then length else "NOT_ARRAY" end' \
-                   /tmp/probe.json 2>/dev/null || echo "UNPARSED")
+            # A BARE ARRAY IS A VALID SHAPE. `.data` applied to an array
+            # is a jq type error, which the old filter swallowed into
+            # "UNPARSED" -- indistinguishable from a broken feed. Rows
+            # are normalised first, then counted.
+            ROWS=$(jq -r "$ROWS_FILTER | length" /tmp/probe.json \
+                   2>/dev/null || echo "UNPARSED")
             printf '%-12s %-22s http=%s rows=%s\n' "$EP" "${Q%%=*}" \
               "$CODE" "$ROWS" | tee -a "$GITHUB_STEP_SUMMARY"
             head -c 240 /tmp/probe.json | tr -d '\n' \
               | sed 's/^/    body: /' | tee -a "$GITHUB_STEP_SUMMARY"
             echo "" | tee -a "$GITHUB_STEP_SUMMARY"
-            if [ "$CODE" = "200" ] && [ "$ROWS" != "NOT_ARRAY" ] \
-               && [ "$ROWS" != "UNPARSED" ] && [ "$ROWS" != "0" ] \
-               && [ -z "$BEST" ]; then
+            if [ "$CODE" = "200" ] && [ "$ROWS" != "UNPARSED" ] \
+               && [ "$ROWS" != "0" ] && [ -z "$BEST" ]; then
               BEST="$spec"
             fi
           done
@@ -210,11 +243,31 @@ jobs:
                  "$API/v2/trades?limit=20" || echo 000)
           echo "global /v2/trades?limit=20 http=$CODE" \
             | tee -a "$GITHUB_STEP_SUMMARY"
-          jq -r '[(.data // .results // .trades // .)[]?
-                  | (.timestamp // .time // .ts // empty)] | max // "NONE"' \
-             /tmp/any.json 2>/dev/null \
-             | sed 's/^/global newest venue timestamp: /' \
-             | tee -a "$GITHUB_STEP_SUMMARY"
+          GMAX=$(jq -r "[$ROWS_FILTER[]? | (.timestamp // .time // .ts // empty)]
+                        | max // empty" /tmp/any.json 2>/dev/null || true)
+          if [ -n "$GMAX" ] && [ "$GMAX" != "null" ]; then
+            GISO=$(date -u -d @"$GMAX" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$GMAX")
+            LAG=$(( NOW_EPOCH - GMAX ))
+            echo "global newest venue timestamp: $GISO ($GMAX), age at job start: ${LAG}s" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            # THIS IS THE STEP THAT SEPARATES B FROM C. A feed whose own
+            # newest row for ANY wallet is minutes old is current, and a
+            # zero for our roster then means something. A feed stuck at
+            # our own cutoff is the suspect itself.
+            if [ "$LAG" -lt 900 ]; then
+              echo "FEED_FRESHNESS=CURRENT" >> "$GITHUB_ENV"
+            else
+              echo "FEED_FRESHNESS=STALE" >> "$GITHUB_ENV"
+            fi
+            echo "FEED_GLOBAL_NEWEST=$GISO" >> "$GITHUB_ENV"
+            echo "FEED_GLOBAL_LAG_S=$LAG" >> "$GITHUB_ENV"
+          else
+            echo "global newest venue timestamp: NOT_IDENTIFIED" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "FEED_FRESHNESS=NOT_IDENTIFIED" >> "$GITHUB_ENV"
+            echo "FEED_GLOBAL_NEWEST=NOT_IDENTIFIED" >> "$GITHUB_ENV"
+            echo "FEED_GLOBAL_LAG_S=NOT_IDENTIFIED" >> "$GITHUB_ENV"
+          fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
       - name: Sweep every configured wallet on both feeds
@@ -250,15 +303,32 @@ jobs:
                     | tee -a "$GITHUB_STEP_SUMMARY"
                   break
                 fi
+                # RAW EVIDENCE, ONCE. The previous run could not say
+                # whether the venue had been reached at all, because the
+                # only thing it printed was a derived count. One verbatim
+                # status line, header and body head settles that -- and
+                # the addresses here are public, so nothing is exposed.
+                if [ "$TESTED" = "1" ] && [ "$PAGE" = "1" ]; then
+                  {
+                    echo "--- raw evidence, wallet 1 / $EP / page 1 ---"
+                    echo "URL    $API/v2/$EP?$Q"
+                    echo "HTTP   $CODE"
+                    echo "TYPE   $(jq -r 'type' /tmp/p.json 2>/dev/null || echo UNPARSED)"
+                    echo "KEYS   $(jq -r 'if type=="object" then (keys|join(",")) else "n/a" end' /tmp/p.json 2>/dev/null || echo UNPARSED)"
+                    echo "ROWS   $(jq -r "$ROWS_FILTER | length" /tmp/p.json 2>/dev/null || echo UNPARSED)"
+                    echo "BODY   $(head -c 400 /tmp/p.json | tr -d '\n')"
+                    echo "--- end raw evidence ---"
+                  } | tee -a "$GITHUB_STEP_SUMMARY"
+                fi
                 # rows in the window, and the newest venue timestamp seen
-                N=$(jq -r --argjson c "$CUTOFF_EPOCH" '
-                      [(.data // .results // .trades // .activity // .)[]?
+                N=$(jq -r --argjson c "$CUTOFF_EPOCH" "
+                      [$ROWS_FILTER[]?
                        | (.timestamp // .time // .ts // 0) | tonumber?
-                       | select(. > $c)] | length' /tmp/p.json 2>/dev/null \
+                       | select(. > \$c)] | length" /tmp/p.json 2>/dev/null \
                       || echo 0)
-                MX=$(jq -r '[(.data // .results // .trades // .activity // .)[]?
+                MX=$(jq -r "[$ROWS_FILTER[]?
                              | (.timestamp // .time // .ts // empty)]
-                            | max // empty' /tmp/p.json 2>/dev/null || true)
+                            | max // empty" /tmp/p.json 2>/dev/null || true)
                 [ -n "$MX" ] && [ "$MX" != "null" ] && {
                   if [ "$LATEST" = "NONE" ] || [ "$MX" -gt "$LATEST" ] 2>/dev/null
                   then LATEST="$MX"; fi; }
@@ -289,7 +359,10 @@ jobs:
             echo "WALLETS_WITH_V2_TRADES_AFTER_LOCAL_CUTOFF=$WALLETS_WITH"
             echo "TOTAL_V2_TRADES_AFTER_LOCAL_CUTOFF=$TOTAL_V2"
             echo "CONTRACT_OK=${CONTRACT_OK:-no}"
-          } | tee -a "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY" | tee -a "$GITHUB_ENV"
+          # The classifier runs in its own shell, so the counters have to
+          # travel through GITHUB_ENV. The previous run's classifier could
+          # only see CONTRACT_OK and so could only ever say D.
 
       - name: Classify
         run: |
@@ -298,11 +371,39 @@ jobs:
           # evidence that produced it, and the INCONCLUSIVE branch is a
           # real outcome rather than a failure to try.
           echo "## Verdict" >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo '```'
+            echo "CONTRACT_OK              ${CONTRACT_OK:-no}"
+            echo "PARAM_NAME               ${PARAM_NAME:-NOT_IDENTIFIED}"
+            echo "FEED_FRESHNESS           ${FEED_FRESHNESS:-NOT_IDENTIFIED}"
+            echo "FEED_GLOBAL_NEWEST       ${FEED_GLOBAL_NEWEST:-NOT_IDENTIFIED}"
+            echo "FEED_GLOBAL_LAG_S        ${FEED_GLOBAL_LAG_S:-NOT_IDENTIFIED}"
+            echo "WALLETS_TESTED           ${WALLETS_TESTED:-NOT_IDENTIFIED}"
+            echo "WALLETS_WITH_V2_AFTER    ${WALLETS_WITH_V2_TRADES_AFTER_LOCAL_CUTOFF:-NOT_IDENTIFIED}"
+            echo "TOTAL_V2_AFTER           ${TOTAL_V2_TRADES_AFTER_LOCAL_CUTOFF:-NOT_IDENTIFIED}"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+          # THE VERDICT IS DERIVED FROM THOSE FIVE FACTS, in this order.
+          # Contract first, because a zero from an unconfirmed contract
+          # is my typo, not the venue's answer. Then freshness, because
+          # the directive is explicit: "zero wallet trades from a stale
+          # public API is not evidence that the wallets were inactive."
           if [ "${CONTRACT_OK:-no}" != "yes" ]; then
-            echo "INCIDENT_VERDICT=D_INCONCLUSIVE" | tee -a "$GITHUB_STEP_SUMMARY"
-            echo "reason: no Data API V2 parameter spelling returned rows for a known-active wallet, so a zero from the sweep cannot be read as wallet inactivity" \
-              | tee -a "$GITHUB_STEP_SUMMARY"
+            V=D_INCONCLUSIVE
+            R="no Data API V2 parameter spelling returned rows for the roster's most active wallet, so a zero from the sweep cannot be read as wallet inactivity"
+          elif [ "${WALLETS_WITH_V2_TRADES_AFTER_LOCAL_CUTOFF:-0}" -gt 0 ] 2>/dev/null; then
+            V=A_LOCAL_INGESTION_INCIDENT_CONFIRMED
+            R="the independent public feed shows wallet activity after the frozen cutoff that our own store does not contain; the loss is on our side of the wire"
+          elif [ "${FEED_FRESHNESS:-NOT_IDENTIFIED}" = "STALE" ]; then
+            V=B_UPSTREAM_PUBLIC_FEED_STALL_OR_LAG
+            R="the witness feed's own newest row for ANY wallet is ${FEED_GLOBAL_LAG_S}s old, so its zero for our roster is a property of the feed, not of the wallets"
+          elif [ "${FEED_FRESHNESS:-NOT_IDENTIFIED}" = "CURRENT" ]; then
+            V=C_WALLET_ACTIVITY_GENUINELY_NOT_OBSERVED
+            R="the witness feed is demonstrably current (newest global row ${FEED_GLOBAL_NEWEST}, ${FEED_GLOBAL_LAG_S}s old) and contains no post-cutoff rows for the configured addresses. THIS IS NOT A CLAIM THAT THE WALLETS STOPPED TRADING -- it is the absence of observed activity on one public feed over one window"
           else
-            echo "see the per-wallet table above; a non-zero V2 count against a local zero is verdict A" \
-              | tee -a "$GITHUB_STEP_SUMMARY"
+            V=D_INCONCLUSIVE
+            R="the witness feed served no global watermark, so its freshness is NOT_IDENTIFIED and a zero cannot be separated from a stall"
           fi
+          echo "INCIDENT_VERDICT=$V" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "reason: $R" | tee -a "$GITHUB_STEP_SUMMARY"

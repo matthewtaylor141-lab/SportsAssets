@@ -801,9 +801,13 @@ async def trade(pool, shadow_decision_id: str) -> dict:
 
 # ── system health ────────────────────────────────────────────────────
 
-HEALTH_COMPONENTS = ("RN1_LISTENER", "SHADOW_WRITER", "DATABASE",
-                     "INSTITUTIONAL_MARKET_DATA", "L2", "LABEL_MATURITY",
-                     "SHADOW_ENGINE", "BETTOR_EV_ENGINE", "COMMAND_API")
+# ORDERED BY THE HIERARCHY. The primary engine is read first, and the
+# benchmark's feed sits directly under it so an operator can see at a
+# glance that one is healthy while the other is not.
+HEALTH_COMPONENTS = ("BETTOR_EV_ENGINE", "INSTITUTIONAL_MARKET_DATA", "L2",
+                     "RN1_BENCHMARK_FEED", "RN1_LISTENER", "SHADOW_ENGINE",
+                     "SHADOW_WRITER", "LABEL_MATURITY", "DATABASE",
+                     "COMMAND_API")
 
 
 async def health(pool) -> dict:
@@ -839,13 +843,59 @@ async def health(pool) -> dict:
     last_obs = await _guard(pool, "SHADOW_COUNTS_UNREAD", pool.fetchval,
                             "SELECT max(bettor_received_ts) "
                             "FROM rn1_observations")
+
+    # THE RN1 BENCHMARK FEED, MEASURED SEPARATELY FROM BETTOR.
+    #
+    # Owner directive 2026-09-19: "Never let an RN1 feed failure make
+    # BETTOR appear down." On 2026-09-19 the detection lane went silent
+    # at 17:01:06Z while BETTOR's own collection was unaffected -- it
+    # reads the book, not RN1's fills -- and a health panel that folded
+    # the two together would have reported the primary product down
+    # when it was running fine.
+    #
+    # TWO CLOCKS, KEPT APART. last_source_event is the VENUE's newest
+    # fill timestamp; last_received_event is when WE wrote one. A gap
+    # between them is our lag; both stalling together is the feed.
+    feed = await _guard(
+        pool, "RN1_FEED_UNREAD", pool.fetchrow,
+        """
+        SELECT max(t.ts)          AS last_source,
+               max(t.detected_at) AS last_received
+          FROM trades t
+         WHERE t.detected_at > now() - interval '24 hours'
+        """)
     bettor_n = await _guard(pool, "SHADOW_COUNTS_UNREAD", pool.fetchval,
                             "SELECT count(*) FROM shadow_decisions "
                             "WHERE lane = 'BETTOR_EV_SHADOW'")
     scores_n = await _guard(pool, "SHADOW_SCORES_UNREAD", pool.fetchval,
                             "SELECT count(*) FROM shadow_scores")
 
+    src = feed["last_source"] if feed else None
+    rcv = feed["last_received"] if feed else None
+    src_lag = (now - src).total_seconds() if isinstance(src, datetime) else None
+    rcv_lag = (now - rcv).total_seconds() if isinstance(rcv, datetime) else None
+    # DEGRADED before STALE: a feed that stopped minutes ago is not the
+    # same claim as one that stopped an hour ago, and an operator acts
+    # differently on each.
+    feed_state = ("NOT_ESTABLISHED" if rcv_lag is None
+                  else "LIVE" if rcv_lag <= 300
+                  else "DEGRADED" if rcv_lag <= STALE_AFTER_S
+                  else "STALE")
+
     components = {
+        "RN1_BENCHMARK_FEED": {
+            "state": feed_state,
+            "sourceTimestamp": _iso(src),
+            "sourceAgeSeconds": src_lag,
+            "rn1FeedLastSourceEvent": _iso(src),
+            "rn1FeedLastReceivedEvent": _iso(rcv),
+            "rn1FeedLagSeconds": rcv_lag,
+            "rn1FeedStatus": feed_state,
+            "affectsBettor": False,
+            "detail": ("the external benchmark's detection lane; a "
+                       "failure here does not affect BETTOR, which "
+                       "reads the book rather than RN1's fills"),
+        },
         "RN1_LISTENER": from_beat("chain_listener"),
         "SHADOW_WRITER": {
             "state": "LIVE" if last_obs else "LISTENING",
@@ -867,10 +917,14 @@ async def health(pool) -> dict:
             "sourceTimestamp": None,
             "detail": "%d scored horizons" % int(scores_n or 0)},
         "SHADOW_ENGINE": from_beat("shadow_rn1"),
-        "BETTOR_EV_ENGINE": {
-            "state": "LIVE" if bettor_n else "NOT_ESTABLISHED",
-            "sourceTimestamp": None,
-            "detail": "P_BETTOR NOT ESTABLISHED — no independent EV yet"},
+        # FROM ITS OWN HEARTBEAT. Not from whether it has produced a
+        # decision, and never from RN1's feed: "LIVE / LEARNING" is a
+        # statement about the loop running, and an engine that is
+        # collecting honest NO_TRADEs is not down.
+        "BETTOR_EV_ENGINE": dict(
+            from_beat("shadow_bettor"),
+            pBettor=lanes.NOT_ESTABLISHED,
+            dependsOnRn1=False),
         "COMMAND_API": {"state": "LIVE",
                         "sourceTimestamp": now.isoformat(),
                         "detail": "serving"},

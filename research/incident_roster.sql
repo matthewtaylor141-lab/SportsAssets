@@ -1,4 +1,12 @@
-\echo -- the configured roster, for the detection-stall incident
+-- the configured roster, for the detection-stall incident
+--
+-- NO \echo HERE, AND NO OTHER META-COMMAND. psql -t suppresses the
+-- column headers but NOT \echo, so a banner line lands in the output
+-- as though it were a row. It did, on 2026-09-19: the runner read it
+-- as a 13th wallet, the probe step took the first line as its address,
+-- and six candidate spellings all came back curl(3) malformed-URL --
+-- which the job then honestly reported as "no spelling returned rows".
+-- A cosmetic line turned into a false INCONCLUSIVE.
 --
 -- THE EXACT CONFIGURED ADDRESS, not the friendly label. The directive
 -- is explicit about this, and identity mismatch is one of the named
