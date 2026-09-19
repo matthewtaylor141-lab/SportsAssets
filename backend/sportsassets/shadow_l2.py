@@ -265,6 +265,19 @@ FEATURE_SOURCE_VERSION_DUPLICATED = "BETTOR_COLLECTOR_LEG_DUPLICATED_V1"
 _YES_LEGS = frozenset({"yes", "over", "long"})
 _NO_LEGS = frozenset({"no", "under", "short"})
 
+# THE WORD THE FEATURE BUILDER ACTUALLY USES. A raw market-state record
+# carries `readable`; the FEATURES built from it carry `status`
+# MEASURED and no `readable` key at all. bind_leg is called on the
+# FEATURES (shadow_bettor.microstructure_of's output), so a gate that
+# only read `readable` sent every row -- readable or not -- down the
+# market-level branch, and the first hour of production wrote 127
+# opportunities of which not one was YES-bound.
+MEASURED = "MEASURED"
+
+
+def _is_readable(state: dict) -> bool:
+    return bool(state.get("readable")) or state.get("status") == MEASURED
+
 
 def bind_leg(market_state: dict | None, outcome_leg) -> dict:
     """Stamp a retail BBO with the leg it actually describes.
@@ -279,7 +292,7 @@ def bind_leg(market_state: dict | None, outcome_leg) -> dict:
     leg = str(outcome_leg or "").strip().lower()
     state["featureSourceVersion"] = FEATURE_SOURCE_VERSION
 
-    if not state.get("readable"):
+    if not _is_readable(state):
         state["bboBinding"] = BIND_MARKET_LEVEL
         return state
     if leg in _YES_LEGS:

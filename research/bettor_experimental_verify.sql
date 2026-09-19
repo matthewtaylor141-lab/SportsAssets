@@ -167,14 +167,21 @@ SELECT 'REAL_ORDERS|' || count(*) FILTER (WHERE real_order_submitted)
 
 \echo ''
 \echo '--- 12. THE COLLECTOR: are corrected, YES-bound rows arriving? ---'
+-- The BINDING and the book's own READABILITY are separate facts. A
+-- market-level row because the venue returned no quote is the market
+-- being shut; a market-level row on a MEASURED book is a defect in the
+-- binding, and only printing both tells them apart.
 SELECT 'opportunities_1h|' || COALESCE(microstructure ->> 'bboBinding',
                                        'ABSENT')
        || '|' || COALESCE(microstructure ->> 'featureSourceVersion',
                           'ABSENT')
+       || '|status=' || COALESCE(microstructure ->> 'status', 'ABSENT')
+       || '|leg=' || COALESCE(outcome_leg, 'ABSENT')
        || '|n=' || count(*)
        || '|symbols=' || count(DISTINCT symbol)
   FROM bettor_opportunities
  WHERE observed_at > now() - interval '1 hour'
  GROUP BY microstructure ->> 'bboBinding',
-          microstructure ->> 'featureSourceVersion'
- ORDER BY count(*) DESC LIMIT 10;
+          microstructure ->> 'featureSourceVersion',
+          microstructure ->> 'status', outcome_leg
+ ORDER BY count(*) DESC LIMIT 12;

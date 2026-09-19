@@ -223,3 +223,48 @@ def test_the_retail_and_institutional_sources_are_never_interchangeable():
     two being pooled."""
     assert l2.L2_SOURCE_INSTITUTIONAL != l2.L2_SOURCE_INSTITUTIONAL_BBO
     assert book()["l2Source"] == l2.L2_SOURCE_INSTITUTIONAL
+
+
+# ── the binding must accept what the FEATURE BUILDER actually emits ───
+
+
+def test_bind_leg_reads_the_features_the_collector_really_produces():
+    """THE DEFECT THIS PINS, found in production and not in a fixture.
+
+    `bind_leg` is called on shadow_bettor.microstructure_of's output,
+    not on a raw market-state record. That output carries `status`
+    MEASURED and NO `readable` key, so a gate reading only `readable`
+    sent every row down the market-level branch: 127 opportunities in
+    the first production hour, 71 symbols, not one of them YES-bound,
+    and the experimental lane's eligible population was therefore
+    empty while every part of it reported healthy.
+
+    The fixtures passed because they were hand-built with
+    `readable: True` -- which the real producer never sets. So this
+    test builds its input with the real producer.
+    """
+    from datetime import datetime, timezone
+
+    from sportsassets import shadow_bettor as bettor
+    from sportsassets import shadow_store as store
+
+    state = store.market_state_record(
+        captured_at=datetime(2026, 9, 19, 23, 40, tzinfo=timezone.utc),
+        symbol="astatc-mls-sje-laf-2026-09-19-sh-ftts-laf",
+        evidence_source="PMUS_BBO", readable=True, bid=0.40, ask=0.41)
+    features = bettor.microstructure_of(state)
+    assert "readable" not in features        # the shape that caused it
+    assert features["status"] == "MEASURED"
+
+    bound = l2.bind_leg(features, "yes")
+    assert bound["bboBinding"] == l2.BIND_YES
+    assert l2.leg_is_execution_bound(bound) is True
+
+    no_side = l2.bind_leg(bettor.microstructure_of(state), "no")
+    assert no_side["bboBinding"] == l2.BIND_NOT_IDENTIFIED
+    assert no_side["bid"] is None
+
+    # and an unreadable book still goes to market level
+    unreadable = bettor.microstructure_of(None)
+    assert l2.bind_leg(unreadable, "yes")["bboBinding"] == \
+        l2.BIND_MARKET_LEVEL
