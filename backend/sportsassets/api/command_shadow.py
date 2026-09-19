@@ -108,6 +108,24 @@ def environment() -> dict:
         "policyVersion": pol.RN1_SHADOW_POLICY_VERSION,
         "policySha": pol.POLICY_SHA,
         "lanes": list(lanes.LANES),
+        # THE HIERARCHY, STATED BY THE SERVER RATHER THAN BY THE CSS.
+        # Owner clarification 2026-09-19: "BETTOR EV ENGINE IS THE
+        # PRIMARY PRODUCT. RN1_SHADOW is a secondary benchmark/research
+        # lane." A front end can reorder cards; only the payload can
+        # make the ordering a fact every reader of this API inherits,
+        # including a PDF or a future client nobody has written yet.
+        "identity": "BETTOR EV ENGINE",
+        "primaryLane": lanes.BETTOR_EV_SHADOW,
+        "benchmarkLane": lanes.RN1_SHADOW,
+        "laneOrder": [lanes.BETTOR_EV_SHADOW, lanes.RN1_SHADOW],
+        "laneRoles": {
+            lanes.BETTOR_EV_SHADOW: "PRIMARY — INDEPENDENT INTELLIGENCE",
+            lanes.RN1_SHADOW: "BENCHMARK — EXTERNAL MECHANISM RESEARCH",
+        },
+        "hybridLane": {"name": "RN1_PLUS_BETTOR",
+                       "state": "NOT_YET_ACTIVE",
+                       "why": ("a future hybrid challenger; it does not "
+                               "exist and no row is attributed to it")},
     }
 
 
@@ -167,9 +185,65 @@ _BLOCKER_SQL = """
 """
 
 
+_BETTOR_SQL = """
+    SELECT
+      (SELECT count(*) FROM bettor_opportunities)        AS opportunities,
+      (SELECT max(observed_at) FROM bettor_opportunities) AS last_seen,
+      (SELECT count(DISTINCT symbol) FROM bettor_opportunities)
+                                                        AS markets,
+      (SELECT count(*) FROM shadow_decisions
+        WHERE lane = 'BETTOR_EV_SHADOW'
+          AND proposed_action = 'NO_TRADE')             AS no_trades,
+      (SELECT count(*) FROM shadow_decisions
+        WHERE lane = 'BETTOR_EV_SHADOW'
+          AND proposed_action <> 'NO_TRADE')            AS trades
+"""
+
+_BETTOR_BLOCKER_SQL = """
+    SELECT jsonb_array_elements(d.blockers) ->> 'code' AS code,
+           count(*) AS n
+      FROM shadow_decisions d
+     WHERE d.lane = 'BETTOR_EV_SHADOW'
+       AND jsonb_array_length(d.blockers) > 0
+     GROUP BY 1
+     ORDER BY 2 DESC
+     LIMIT 12
+"""
+
+
+async def _bettor_counts(pool) -> dict:
+    """BETTOR's own collection, or a NAMED reason it could not be read.
+
+    This one does NOT raise into the page. The primary lane's table
+    arrives with migration 071, and on a deployment that has not applied
+    it yet the honest render is a named blocker on an otherwise working
+    screen -- not FEED UNAVAILABLE across the whole management view,
+    which would misreport a staged rollout as an outage.
+    """
+    try:
+        row = await pool.fetchrow(_BETTOR_SQL)
+        blockers = await pool.fetch(_BETTOR_BLOCKER_SQL)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"state": "STORE_NOT_READY",
+                "why": "%s — migration 071 may not have applied yet"
+                       % type(exc).__name__,
+                "opportunitiesObserved": None, "marketsObserved": None,
+                "noTrades": None, "trades": None, "lastObservedAt": None,
+                "blockers": []}
+    return {"state": "COLLECTING",
+            "opportunitiesObserved": int(row["opportunities"]),
+            "marketsObserved": int(row["markets"]),
+            "noTrades": int(row["no_trades"]),
+            "trades": int(row["trades"]),
+            "lastObservedAt": _iso(row["last_seen"]),
+            "blockers": [{"code": b["code"], "count": int(b["n"])}
+                         for b in blockers]}
+
+
 async def summary(pool) -> dict:
     counts = await _guard(pool, "SHADOW_COUNTS_UNREAD", pool.fetchrow,
                           _COUNTS_SQL)
+    bettor = await _bettor_counts(pool)
     lat = await _guard(pool, "SHADOW_LATENCY_UNREAD", pool.fetchrow,
                        _LATENCY_SQL)
     econ = await _guard(pool, "SHADOW_ECONOMICS_UNREAD", pool.fetch, _ECON_SQL)
@@ -240,8 +314,32 @@ async def summary(pool) -> dict:
             "no combined P&L is reported: RN1_SHADOW is a mechanism "
             "benchmark and BETTOR_EV_SHADOW is an intelligence claim, "
             "and one number would support neither"),
+        # BETTOR IS THE PRIMARY PRODUCT AND IS REPORTED FIRST.
+        "bettor": bettor,
         "lanes": {
+            lanes.BETTOR_EV_SHADOW: {
+                "role": "PRIMARY — INDEPENDENT INTELLIGENCE",
+                "decisions": int(counts["bettor_decisions"]),
+                "opportunitiesObserved": bettor["opportunitiesObserved"],
+                "trades": bettor["trades"],
+                "noTrades": bettor["noTrades"],
+                # LIVE / LEARNING is the state the directive names: the
+                # engine is running and collecting, and has earned no
+                # independent EV yet. It is not "not yet eligible" as a
+                # euphemism for "nothing is happening".
+                "state": ("LIVE / LEARNING"
+                          if bettor["state"] == "COLLECTING"
+                          else "BLOCKED"),
+                "pBettor": lanes.NOT_ESTABLISHED,
+                "informationEv": lanes.NOT_ESTABLISHED,
+                "blockers": bettor["blockers"],
+                "note": ("BETTOR's own prospective dataset: the market "
+                         "state it actually had, the features it could "
+                         "honestly compute, and every refusal with its "
+                         "reason. RN1 is excluded from this lane."),
+            },
             lanes.RN1_SHADOW: {
+                "role": "BENCHMARK — EXTERNAL MECHANISM RESEARCH",
                 "decisions": rn1_n,
                 "state": "LIVE" if rn1_n else "LISTENING",
                 "pBettor": lanes.NOT_ESTABLISHED,
@@ -250,14 +348,6 @@ async def summary(pool) -> dict:
                          "latency, sizing and execution would have done "
                          "observing RN1. No fair value is manufactured "
                          "from RN1 activity."),
-            },
-            lanes.BETTOR_EV_SHADOW: {
-                "decisions": int(counts["bettor_decisions"]),
-                "state": ("LIVE" if counts["bettor_decisions"]
-                          else "NOT_YET_ELIGIBLE"),
-                "pBettor": lanes.NOT_ESTABLISHED,
-                "informationEv": lanes.NOT_ESTABLISHED,
-                "note": "LEARNING / NOT YET ELIGIBLE — P_BETTOR NOT ESTABLISHED",
             },
         },
         "blockers": [{"code": r["code"], "count": int(r["n"])}

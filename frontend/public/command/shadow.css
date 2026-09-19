@@ -454,3 +454,48 @@
   .sh-stage { opacity: 1; transform: none }
   .sh-compare-bar i { transition: none }
 }
+
+/* ── THE HIERARCHY, DRAWN ────────────────────────────────────────────
+ *
+ * Owner clarification 2026-09-19: BETTOR is the primary product and RN1
+ * is a benchmark. The order comes from the server's laneOrder; these
+ * rules give the primary lane the visual weight to match, so a manager
+ * glancing at the screen reads the hierarchy without being told it.
+ *
+ * The benchmark is not dimmed or hidden -- it is real evidence and it
+ * may well have more rows first. It simply is not the centre. */
+
+.sh-lane.primary {
+  border-color: rgba(79, 214, 232, .34);
+  background:
+    linear-gradient(180deg, rgba(79,214,232,.055), transparent 60%),
+    var(--sh-surface);
+}
+.sh-lane-role {
+  display: block; margin-bottom: 10px;
+  font: 700 8.5px/1.4 var(--sans, system-ui); letter-spacing: .14em;
+  color: var(--sh-muted);
+}
+.sh-lane.primary .sh-lane-role { color: var(--sh-cyan) }
+.sh-lane.primary .sh-lane-n { font-size: 34px }
+
+.sh-lane-counts {
+  display: grid; gap: 1px; margin-bottom: 11px;
+  grid-template-columns: repeat(3, 1fr);
+  background: var(--sh-line); border: 1px solid var(--sh-line);
+  border-radius: 9px; overflow: hidden;
+}
+.sh-lane-counts span {
+  background: var(--sh-raise); padding: 9px 10px;
+  display: flex; flex-direction: column; gap: 4px; min-width: 0;
+}
+.sh-lane-counts label {
+  font: 600 8px/1.3 var(--sans, system-ui); letter-spacing: .1em;
+  color: var(--sh-muted); text-transform: uppercase;
+}
+.sh-lane-counts b {
+  font: 500 15px/1 var(--mono, ui-monospace, monospace);
+}
+@media (max-width: 520px) {
+  .sh-lane-counts { grid-template-columns: 1fr }
+}

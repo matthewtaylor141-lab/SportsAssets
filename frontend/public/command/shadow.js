@@ -207,10 +207,15 @@
 
   /* ── OVERVIEW ──────────────────────────────────────────────────── */
 
+  // ORDERED BY THE HIERARCHY, not by which lane happened to collect
+  // first. RN1 data may arrive sooner; that is not a reason to make the
+  // benchmark the visual centre of the management screen.
   const KPI = [
-    ['rn1SignalsObserved', 'RN1 signals observed', zeroOk],
-    ['rn1ShadowDecisions', 'RN1 shadow decisions', zeroOk],
     ['bettorEvDecisions', 'BETTOR EV decisions', zeroOk],
+    ['bettorOpportunitiesObserved', 'BETTOR opportunities observed', zeroOk],
+    ['bettorNoTrades', 'BETTOR no-trades', zeroOk],
+    ['rn1SignalsObserved', 'RN1 signals observed (benchmark)', zeroOk],
+    ['rn1ShadowDecisions', 'RN1 shadow decisions (benchmark)', zeroOk],
     ['shadowPositions', 'Shadow positions', zeroOk],
     ['shadowCapitalEmployed', 'Shadow capital employed', zeroOk],
     ['shadowPnl', 'Shadow P&L', zeroOk],
@@ -224,7 +229,11 @@
   ];
 
   function kpiGrid(s) {
-    const k = s.kpi || {};
+    const b = s.bettor || {};
+    const k = Object.assign({}, s.kpi || {}, {
+      bettorOpportunitiesObserved: b.opportunitiesObserved,
+      bettorNoTrades: b.noTrades
+    });
     return `<div class="sh-kpis">${KPI.map(([key, label, fmt]) => {
       const raw = k[key];
       // A STRING SENTINEL FROM THE SERVER IS RENDERED AS ITSELF. The
@@ -244,22 +253,40 @@
     const card = (id, title, sub) => {
       const l = L[id] || {};
       const live = l.state === 'LIVE';
-      return `<div class="sh-lane ${live ? 'live' : 'idle'}">
+      const primary = id === (s.environment && s.environment.primaryLane);
+      const extra = id === 'BETTOR_EV_SHADOW' ? `
+        <div class="sh-lane-counts">
+          <span><label>Opportunities observed</label><b>${zeroOk(l.opportunitiesObserved)}</b></span>
+          <span><label>Trades</label><b>${zeroOk(l.trades)}</b></span>
+          <span><label>No-trades</label><b>${zeroOk(l.noTrades)}</b></span>
+        </div>` : '';
+      return `<div class="sh-lane ${live ? 'live' : 'idle'} ${primary ? 'primary' : ''}">
+        ${l.role ? `<span class="sh-lane-role">${esc(l.role)}</span>` : ''}
         <div class="sh-lane-head"><h3>${esc(title)}</h3>
           <span class="sh-chip ${live ? 'green' : 'grey'}">
             <i class="sh-beat ${live ? 'on' : ''}"></i>${esc(String(l.state || 'NOT ESTABLISHED').replace(/_/g, ' '))}</span></div>
         <div class="sh-lane-n">${zeroOk(l.decisions)}<small>decisions</small></div>
+        ${extra}
         <div class="sh-lane-meta">
           <span>P_BETTOR <b>${esc(String(l.pBettor || 'NOT_ESTABLISHED').replace(/_/g, ' '))}</b></span>
           <span>INFORMATION EV <b>${esc(String(l.informationEv || 'NOT_ESTABLISHED').replace(/_/g, ' '))}</b></span>
         </div>
         <p class="sh-lane-note">${esc(l.note || sub)}</p></div>`;
     };
+    // THE PRIMARY PRODUCT IS FIRST, and the order comes from the
+    // SERVER's laneOrder rather than from this file, so a future client
+    // or a PDF inherits the same hierarchy instead of re-deciding it.
+    const order = (s.environment && s.environment.laneOrder)
+      || ['BETTOR_EV_SHADOW', 'RN1_SHADOW'];
+    const titles = {
+      BETTOR_EV_SHADOW: ['BETTOR EV Shadow',
+        'What BETTOR independently decides. RN1 is excluded from this lane.'],
+      RN1_SHADOW: ['RN1 Shadow',
+        'What BETTOR would have done observing RN1, under BETTOR execution conditions.']
+    };
     return `<div class="sh-lanes">
-      ${card('RN1_SHADOW', 'RN1 Shadow',
-        'What BETTOR would have done observing RN1, under BETTOR execution conditions.')}
-      ${card('BETTOR_EV_SHADOW', 'BETTOR EV Shadow',
-        'What BETTOR independently decides. RN1 is excluded from this lane.')}
+      ${order.map(id => card(id, titles[id] ? titles[id][0] : id,
+                             titles[id] ? titles[id][1] : '')).join('')}
       <div class="sh-lane split">
         <div class="sh-lane-head"><h3>Combined P&amp;L</h3>
           <span class="sh-chip grey">WITHHELD</span></div>
@@ -268,11 +295,28 @@
     </div>`;
   }
 
+  function bettorBlockerPanel(s) {
+    const b = s.bettor || {};
+    if (b.state !== 'COLLECTING')
+      return panelNote('BETTOR STORE',
+        esc(b.why || 'BETTOR collection is not ready'), 'amber');
+    const rows = b.blockers || [];
+    return `<section class="sh-panel"><div class="sh-panel-head">
+      <h2>Why BETTOR said no</h2>
+      <span class="sh-sub">A refusal recorded prospectively is part of the dataset. These are what currently prevent the most trades.</span>
+      </div>${rows.length ? `<div class="sh-blockers">${rows.map(x => `
+        <div class="sh-blocker"><span class="sh-blocker-code">${esc(String(x.code || NI).replace(/_/g, ' '))}</span>
+        <span class="sh-blocker-n">${zeroOk(x.count)}</span></div>`).join('')}</div>`
+      : `<div class="sh-panel-body">${emptyState('No refusal recorded yet',
+          'BETTOR has not yet looked at a market on this deployment.')}</div>`}
+      </section>`;
+  }
+
   function blockerPanel(s) {
     const rows = s.blockers || [];
     if (!rows.length) return '';
     return `<section class="sh-panel"><div class="sh-panel-head">
-      <h2>Why the engine said no</h2>
+      <h2>Why the RN1 benchmark said no</h2>
       <span class="sh-sub">Every NO_TRADE is retained. A refusal is evidence, not an absence.</span>
       </div><div class="sh-blockers">${rows.map(b => `
         <div class="sh-blocker"><span class="sh-blocker-code">${esc(String(b.code || NI).replace(/_/g, ' '))}</span>
@@ -382,7 +426,7 @@
       ${laneCards(s)}
       <div class="sh-two">
         <div>${tape()}</div>
-        <div>${healthPanel()}${blockerPanel(s)}${policyPanel(s)}</div>
+        <div>${bettorBlockerPanel(s)}${healthPanel()}${blockerPanel(s)}${policyPanel(s)}</div>
       </div>`;
   }
 
@@ -726,8 +770,10 @@
     return `<div class="sh-env">
       <header class="sh-head">
         <div class="sh-head-mark"><span class="sh-core"><i></i><i></i><i></i></span></div>
-        <div><h1>Shadow</h1>
-          <p>Prospective decisions, recorded before the outcome is known, with no real order behind any of them.</p></div>
+        <div><h1>BETTOR EV Engine</h1>
+          <p>The primary intelligence lane, collecting its own prospective evidence.
+             RN1 Shadow runs beside it as an external benchmark, and the two are
+             never combined into one number.</p></div>
       </header>
       <nav class="sh-tabs">${TABS.map(([id, label]) =>
         `<button class="${state.tab === id ? 'on' : ''}" data-shadow-tab="${id}">${esc(label)}</button>`).join('')}</nav>
