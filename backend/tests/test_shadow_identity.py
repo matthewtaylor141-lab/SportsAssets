@@ -173,3 +173,81 @@ def test_the_binding_sha_is_stable_for_the_same_pair():
     a = ident.classify(inst(), ident.retail_identity(RETAIL_YES))
     b = ident.classify(inst(), ident.retail_identity(RETAIL_YES))
     assert a["identityBindingSha"] == b["identityBindingSha"]
+
+
+# ── THE RESOLVED SET (research run 35472636412, 2026-09-19 22:12:22Z) ─
+#
+# The retail board lists THREE identifiers under productId
+# astatc-mls-sje-laf-2026-09-19-sh-ftts, each with a yes and a no side,
+# and each with its own question:
+#
+#   ...-sh-ftts-laf   "Will Los Angeles FC be the first to score a goal
+#                      in the second half on 2026-09-19 7:30PM ET?"
+#   ...-sh-ftts-sje   "Will San Jose Earthquakes be the first ..."
+#   ...-sh-ftts-none  "Will None be the first ..."
+#
+# So BOTH venues model the same three-outcome mutually exclusive set.
+# Retail gives each outcome its own YES/NO binary; institutional gives
+# each outcome its own instrument. That is what settles §2: the
+# structures are not different, they are two encodings of one set.
+
+RETAIL_SIBLINGS = (
+    "astatc-mls-sje-laf-2026-09-19-sh-ftts-laf",
+    "astatc-mls-sje-laf-2026-09-19-sh-ftts-sje",
+    "astatc-mls-sje-laf-2026-09-19-sh-ftts-none",
+)
+
+
+def test_the_retail_board_enumerates_the_same_three_outcomes():
+    """The candidate set came from the OTHER venue's own board, not
+    from us guessing LAF / SJE / NEITHER."""
+    assert len(RETAIL_SIBLINGS) == 3
+    assert INSTRUMENT["symbol"] in RETAIL_SIBLINGS
+    # every sibling sits under the institutional productId
+    for s in RETAIL_SIBLINGS:
+        assert s.startswith(INSTRUMENT["productId"] + "-")
+
+
+def test_the_yes_side_binds_one_to_one():
+    """RETAIL `-laf` YES settles to 1 exactly when LAF scores first in
+    the second half -- which is what INSTITUTIONAL `-laf` settles to.
+    One outcome, one instrument."""
+    row = dict(RETAIL_YES, outcome_leg="laf")
+    out = ident.classify(inst(), ident.retail_identity(row))
+    assert out["verdict"] == ident.EXACT_ONE_TO_ONE
+    assert out["executionEligible"] is True
+
+
+def test_the_no_side_is_a_two_leg_complement_basket():
+    """RETAIL `-laf` NO settles to 1 when LAF does NOT score first --
+    which is SJE *or* NONE. Two instruments, not one. Pricing it off a
+    single sibling would call the missing leg edge."""
+    primary = {"symbol": RETAIL_SIBLINGS[0], "siblingSetComplete": True}
+    siblings = [{"symbol": s} for s in RETAIL_SIBLINGS[1:]]
+    basket = ident.complement_basket(primary, siblings, retail_leg="no")
+    assert basket["verdict"] == ident.EXACT_ONE_TO_COMPLEMENT_BASKET
+    assert set(basket["complementInstrumentIds"]) == {
+        "astatc-mls-sje-laf-2026-09-19-sh-ftts-sje",
+        "astatc-mls-sje-laf-2026-09-19-sh-ftts-none"}
+    assert basket["settlementEquivalenceRule"]
+
+
+def test_the_no_side_is_not_executable_until_its_basket_is_walkable():
+    """§7: "Do not pretend one sibling represents NO." An exact basket
+    whose books cannot be walked still leaves that side
+    NOT_IDENTIFIED -- and it must not block the proven YES side."""
+    primary = {"symbol": RETAIL_SIBLINGS[0], "siblingSetComplete": True}
+    siblings = [{"symbol": s} for s in RETAIL_SIBLINGS[1:]]
+    basket = ident.complement_basket(primary, siblings, retail_leg="no")
+    with pytest.raises(ident.IdentityRefusal):
+        ident.assert_execution_eligible(basket)
+    ident.assert_execution_eligible(basket, basket_walkable=True)
+
+
+def test_both_venues_word_the_proposition_identically():
+    """SUPPORTING evidence, not the proof. The structural match --
+    same productId, same event, same enumerated outcome set -- is what
+    carries the binding; the wording agreeing is corroboration."""
+    retail_question = ("Will Los Angeles FC be the first to score a goal "
+                       "in the second half on 2026-09-19 7:30PM ET?")
+    assert inst()["question"] == retail_question

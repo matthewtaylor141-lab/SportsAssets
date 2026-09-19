@@ -58,14 +58,23 @@ import json
 # ── the verdicts, exactly as the directive names them ────────────────
 
 EXACT_SAME_CONTRACT = "EXACT_SAME_CONTRACT"
+# Kept as the one-to-one name the later directive gave it. The original
+# name stays bound to the same string so nothing written under it moves.
+EXACT_ONE_TO_ONE = EXACT_SAME_CONTRACT
+EXACT_ONE_TO_COMPLEMENT_BASKET = "EXACT_ONE_TO_COMPLEMENT_BASKET"
 DIFFERENT_CONTRACT = "DIFFERENT_CONTRACT"
 AMBIGUOUS = "AMBIGUOUS"
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
-VERDICTS = (EXACT_SAME_CONTRACT, DIFFERENT_CONTRACT, AMBIGUOUS,
-            NOT_IDENTIFIED)
+VERDICTS = (EXACT_ONE_TO_ONE, EXACT_ONE_TO_COMPLEMENT_BASKET,
+            DIFFERENT_CONTRACT, AMBIGUOUS, NOT_IDENTIFIED)
 
-# Only ONE of these may feed execution reconstruction (§4).
-EXECUTION_ELIGIBLE = frozenset({EXACT_SAME_CONTRACT})
+# §4/§7: a basket binding is EXACT, but it is only executable once the
+# basket itself can actually be walked. `assert_execution_eligible`
+# therefore demands a reconstructable basket for the second verdict --
+# an exact mapping to instruments whose books we cannot walk still
+# leaves that side's execution NOT_IDENTIFIED.
+EXECUTION_ELIGIBLE = frozenset({EXACT_ONE_TO_ONE,
+                                EXACT_ONE_TO_COMPLEMENT_BASKET})
 
 BINDING_VERSION = "BETTOR_IDENTITY_BINDING_V1"
 
@@ -238,13 +247,87 @@ def _result(institutional, retail, verdict, why, agree) -> dict:
     }
 
 
-def assert_execution_eligible(binding: dict) -> dict:
-    """§4: only an exact binding may feed execution reconstruction."""
-    if not isinstance(binding, dict) or not binding.get("executionEligible"):
+def complement_basket(primary: dict, siblings, *, retail_leg,
+                      settlement_rule=None) -> dict:
+    """§3/§4: what the retail NO side actually corresponds to.
+
+    THE DISTINCTION THAT IS LOAD-BEARING. On a mutually exclusive set
+    {LAF, SJE, NEITHER}, the complement of LAF is SJE + NEITHER -- not
+    one sibling. Forcing a one-to-one mapping here would price the NO
+    side off a single instrument and call the difference edge.
+
+    Returns the basket and its verdict. It is EXACT only when the
+    sibling set is COMPLETE: a basket missing one outcome does not
+    settle to the complement, it settles to less, and the gap would
+    show up as a persistent mispricing that is really a missing leg.
+    """
+    prim = (primary or {}).get("symbol")
+    others = [s for s in (siblings or [])
+              if isinstance(s, dict) and s.get("symbol")
+              and s.get("symbol") != prim]
+    complete = bool((primary or {}).get("siblingSetComplete"))
+
+    if not prim:
+        verdict, why = NOT_IDENTIFIED, ["no primary instrument"]
+    elif not others:
+        # A set of one is not a set. Either the venue lists no
+        # siblings (so the "mutually exclusive" reading is wrong) or we
+        # failed to enumerate them; neither is a basket.
+        verdict, why = AMBIGUOUS, [
+            "no sibling instruments were enumerated, so the complement "
+            "of %r is not established" % prim]
+    elif not complete:
+        verdict, why = AMBIGUOUS, [
+            "the sibling set is not confirmed complete; a basket missing "
+            "an outcome settles to less than the complement, and the gap "
+            "would read as edge"]
+    else:
+        verdict, why = EXACT_ONE_TO_COMPLEMENT_BASKET, []
+
+    return {
+        "bindingVersion": BINDING_VERSION,
+        "verdict": verdict,
+        "retailLeg": retail_leg,
+        "primaryInstrumentId": prim,
+        "complementInstrumentIds": [s["symbol"] for s in others],
+        "settlementEquivalenceRule": settlement_rule or (
+            "retail %r settles to 1 exactly when none of the complement "
+            "instruments settles to 1; the basket is every mutually "
+            "exclusive outcome other than %r" % (retail_leg, prim)),
+        "siblingSetComplete": complete,
+        "why": why,
+        # THE SHA COVERS THE WHOLE MAPPING (§4), primary and basket
+        # together -- a binding that added or dropped a leg must not
+        # keep the hash of the one that did not.
+        "identityBindingSha": binding_sha(
+            {"primary": prim,
+             "complement": sorted(s["symbol"] for s in others),
+             "complete": complete},
+            {"retailLeg": retail_leg}, verdict),
+    }
+
+
+def assert_execution_eligible(binding: dict, *, basket_walkable=None) -> dict:
+    """§4/§7: only an exact binding may feed execution reconstruction.
+
+    `basket_walkable` is required for a complement-basket binding: an
+    exact mapping onto instruments whose books cannot be walked is
+    still not an executable side. "Do not pretend one sibling
+    represents NO."
+    """
+    verdict = (binding or {}).get("verdict", NOT_IDENTIFIED)
+    if not isinstance(binding, dict) or not binding.get("executionEligible",
+                                                        verdict in
+                                                        EXECUTION_ELIGIBLE):
         raise IdentityRefusal(
             "refused: identity is %s, not %s. No fuzzy mapping, no title "
             "mapping, and no slug-only mapping where the slug is not "
             "proven unique to the economic contract."
-            % ((binding or {}).get("verdict", NOT_IDENTIFIED),
-               EXACT_SAME_CONTRACT))
+            % (verdict, " or ".join(sorted(EXECUTION_ELIGIBLE))))
+    if verdict == EXACT_ONE_TO_COMPLEMENT_BASKET and not basket_walkable:
+        raise IdentityRefusal(
+            "refused: %r is an exact complement basket but its execution "
+            "is not reconstructable, so this side stays NOT_IDENTIFIED. "
+            "One sibling does not represent the complement."
+            % binding.get("retailLeg"))
     return binding
