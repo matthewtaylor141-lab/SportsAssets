@@ -1,0 +1,214 @@
+name: pmx-l2-bridge
+
+# THE L2 EVIDENCE BRIDGE. Institutional market data crosses; the
+# credential never does.
+#
+# Owner directive 2026-09-19 23:0xZ: the production PMX private key
+# exists only as a GitHub repository secret and cannot be recovered, so
+# Render cannot reach institutional L2 directly. This lane authenticates
+# inside the runner, reads instruments / BBO / L2 orderbook READ-ONLY,
+# and writes the BOOKS into the experimental evidence tables. The token,
+# the assertion and the key never leave the runner and are never written
+# into the SQL this job emits.
+#
+# WHAT IT CANNOT DO, by construction rather than by promise:
+#
+#   * No order, cancel, replace, preview or funding path exists in
+#     either module it runs. A job step greps for them BEFORE a
+#     credential is staged, so an added mutating call stops the run
+#     before it can authenticate rather than after.
+#   * It writes exactly two tables: bettor_l2_evidence (append-only, and
+#     CHECKed to OBSERVED_PRODUCTION) and the status column of
+#     bettor_l2_requests. The emitted SQL is greped for anything else
+#     before psql sees it, and the whole file is published as an
+#     artifact so the write is auditable after the fact.
+#   * It cannot touch preproduction: the read module's
+#     `assert_production` refuses every non-production host.
+#
+# There is deliberately no `confirm` input, because nothing here can
+# change anything at the venue.
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: "comma-separated institutional symbols to fetch (blank = drain pending requests)"
+        required: false
+        type: string
+        default: ""
+      drain:
+        description: "also serve PENDING rows in bettor_l2_requests (true/false)"
+        required: false
+        type: string
+        default: "true"
+      service:
+        description: "database name"
+        required: false
+        type: string
+        default: "sportsassets-db"
+  schedule:
+    # Every 10 minutes while X1 is collecting. THE BRIDGE'S CADENCE IS
+    # ITS LATENCY REGIME: a book fetched here is minutes old relative to
+    # the request, which is why every row is stamped GITHUB_BRIDGE and
+    # the schema refuses to pool it with a persistent worker's.
+    - cron: "*/10 * * * *"
+
+concurrency:
+  group: pmx-l2-bridge
+  cancel-in-progress: false
+
+jobs:
+  bridge:
+    runs-on: ubuntu-latest
+    timeout-minutes: 12
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the bridge has no trading path
+        # Cheap, and it runs BEFORE a credential is staged: if a
+        # mutating call is ever added, this stops the job before it can
+        # authenticate, not after.
+        run: |
+          set -euo pipefail
+          F=research/institutional
+          # The same list the production lane guards itself with. NOT
+          # /v1/positions/balance: that is a READ in the production
+          # lane's own allow-list, and grepping for it here would fail
+          # the job on a path that changes nothing.
+          for bad in "/v1/trading/orders" "/v1/funding" "orders/cancel" \
+                     "orders/preview" "orders/replace"; do
+            for f in "$F/pmx_l2_bridge.py" "$F/pmx_production_read.py" \
+                     "$F/pmx_production_net.py"; do
+              if grep -qF -- "$bad" "$f"; then
+                echo "REFUSED: the bridge names a mutating path: $bad in $f"
+                exit 1
+              fi
+            done
+          done
+          echo "no order, cancel, replace, preview or funding path present"
+
+      - name: Install
+        run: pip install -q pyjwt cryptography requests
+
+      - name: Resolve the database and collect pending requests
+        id: pending
+        env:
+          KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+          SERVICE: ${{ inputs.service || 'sportsassets-db' }}
+        run: |
+          set -euo pipefail
+          KEY="$KEY_SECRET"
+          [ -z "$KEY" ] && { echo "no Render key"; exit 1; }
+          echo "::add-mask::$KEY"
+          API=https://api.render.com/v1
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" \
+                       -H "Accept: application/json" "$API$1"; }
+          PG=$(get "/postgres?name=$SERVICE&limit=20" \
+               | jq -r --arg n "$SERVICE" \
+                 '.[]? | select(.postgres.name==$n) | .postgres.id' | head -1)
+          [ -z "$PG" ] && { echo "no database named $SERVICE"; exit 1; }
+          command -v psql >/dev/null 2>&1 || {
+            sudo apt-get update -qq >/dev/null 2>&1
+            sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+          get "/postgres/$PG/connection-info" > /tmp/ci.json
+          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
+          PW=$(jq -r '.password // empty' /tmp/ci.json)
+          [ -n "$PW" ] && echo "::add-mask::$PW"
+          [ -n "$EXT" ] && echo "::add-mask::$EXT"
+          [ -z "$EXT" ] && { echo "no connection string"; exit 1; }
+          printf '%s' "$EXT" > /tmp/pgurl
+          chmod 600 /tmp/pgurl
+
+          DRAIN="$(jq -r '.inputs.drain // "true"' "$GITHUB_EVENT_PATH")"
+          if [ "$DRAIN" = "true" ]; then
+            PGOPTIONS="-c default_transaction_read_only=on" psql "$EXT" -X -tAq -c "
+              SELECT coalesce(json_agg(row_to_json(t)), '[]'::json) FROM (
+                SELECT l2_request_id, symbol, identity_binding_sha,
+                       to_char(requested_at,'YYYY-MM-DD\"T\"HH24:MI:SS.USOF')
+                         AS requested_at
+                  FROM bettor_l2_requests
+                 WHERE status = 'PENDING'
+                   AND requested_at > now() - interval '30 minutes'
+                 ORDER BY requested_at
+                 LIMIT 20) t;" > /tmp/pending.json 2>/dev/null || echo '[]' > /tmp/pending.json
+          else
+            echo '[]' > /tmp/pending.json
+          fi
+          echo "pending: $(jq 'length' /tmp/pending.json 2>/dev/null || echo 0)"
+
+      - name: Read production L2 and emit evidence SQL
+        env:
+          PMX_CLIENT_ID: ${{ secrets.PMX_CLIENT_ID }}
+          PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}
+          PMX_KEY_ID: ${{ secrets.PMX_KEY_ID }}
+          PMX_PRIVATE_KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
+          PMX_TRADING_ACCOUNT: ${{ secrets.PMX_TRADING_ACCOUNT }}
+          PMX_ACCOUNT: ${{ secrets.PMX_ACCOUNT }}
+          SYMBOLS: ${{ inputs.symbols }}
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$PWD/research/institutional:${PYTHONPATH:-}"
+          set +e
+          python research/institutional/pmx_l2_bridge.py \
+            --symbols "$SYMBOLS" \
+            --requests "$(cat /tmp/pending.json)" \
+            --out /tmp/evidence.sql
+          RC=$?
+          set -e
+          if [ "$RC" -gt 1 ]; then exit "$RC"; fi
+          [ -f /tmp/evidence.sql ] || : > /tmp/evidence.sql
+
+      - name: Refuse anything outside the evidence write scope
+        # THE SECOND GUARD, on the OUTPUT rather than the source. The
+        # module already refuses these, and this re-checks the bytes
+        # that will actually reach psql -- the module could be changed;
+        # this step reads what was produced.
+        run: |
+          set -euo pipefail
+          if [ ! -s /tmp/evidence.sql ]; then
+            echo "no statements produced"; exit 0
+          fi
+          if grep -qiE '\b(drop|alter|truncate|grant|revoke|create|delete|copy)\b' /tmp/evidence.sql; then
+            echo "REFUSED: the emitted SQL contains a statement outside the bridge's scope"
+            grep -niE '\b(drop|alter|truncate|grant|revoke|create|delete|copy)\b' /tmp/evidence.sql | head
+            exit 1
+          fi
+          if grep -qvE '^(INSERT INTO bettor_l2_evidence|UPDATE bettor_l2_requests|VALUES|ON CONFLICT|--|\s|$)' /tmp/evidence.sql; then
+            echo "REFUSED: a line naming something other than the two evidence tables"
+            grep -nvE '^(INSERT INTO bettor_l2_evidence|UPDATE bettor_l2_requests|VALUES|ON CONFLICT|--|\s|$)' /tmp/evidence.sql | head
+            exit 1
+          fi
+          for bad in "BEGIN RSA" "BEGIN PRIVATE" "access_token" "Bearer ey" \
+                     "client_assertion"; do
+            if grep -qF -- "$bad" /tmp/evidence.sql; then
+              echo "REFUSED: the emitted SQL appears to contain credential material"
+              exit 1
+            fi
+          done
+          echo "write scope clean: $(grep -c 'INSERT INTO bettor_l2_evidence' /tmp/evidence.sql) evidence rows"
+
+      - name: Apply the evidence
+        run: |
+          set -euo pipefail
+          [ -s /tmp/evidence.sql ] || { echo "nothing to apply"; exit 0; }
+          EXT="$(cat /tmp/pgurl)"
+          echo "::add-mask::$EXT"
+          psql "$EXT" -X -v ON_ERROR_STOP=1 -f /tmp/evidence.sql
+          echo "applied at $(date -u +%FT%TZ)"
+
+      - name: Publish the emitted SQL
+        if: always()
+        run: |
+          mkdir -p bridge
+          cp /tmp/evidence.sql "bridge/evidence_${GITHUB_RUN_ID}.sql" 2>/dev/null \
+            || echo "-- this run emitted nothing" > "bridge/evidence_${GITHUB_RUN_ID}.sql"
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: pmx-l2-bridge-${{ github.run_id }}
+          path: bridge/
+
+      - name: Scrub
+        if: always()
+        run: rm -f /tmp/pgurl /tmp/ci.json /tmp/pending.json || true
