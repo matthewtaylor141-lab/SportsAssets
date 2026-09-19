@@ -102,10 +102,18 @@ WHAT IS DIFFERENT ON THIS VENUE, AND HOW IT IS READ:
 
 Auth (the venue's own helper, .github/workflows/pmx-preprod.yml, which
 is what worked from the runner at 13:45Z): an RS256 client-assertion
-JWT {iss, sub, aud: "https://<domain>/", iat, exp: +60 s, jti} with the
-key id in the header, exchanged form-encoded at /oauth/token with
-client_id, client_assertion_type jwt-bearer, client_assertion, audience
-= the API base, grant_type client_credentials. TWO CLOCKS, KEPT APART:
+JWT {iss, sub, aud, iat, exp: +60 s, jti} with the key id in the header,
+exchanged form-encoded at /oauth/token with client_id,
+client_assertion_type jwt-bearer, client_assertion, audience, grant_type
+client_credentials. TWO AUDIENCES, KEPT APART (corrected 2026-09-19):
+the assertion's `aud` CLAIM is CLIENT_ASSERTION_AUD, Auth0's token
+endpoint; the request's `audience` FIELD is TOKEN_REQUEST_AUDIENCE, the
+API base. The bare issuer the assertion used to carry was accepted by
+the venue on 2026-09-10 but is not the documented value, and it is kept
+only as CLIENT_ASSERTION_AUD_PREVIOUSLY_ACCEPTED -- nothing falls back
+to it. The FORM ENCODING is unchanged: retained venue evidence (runs
+1-24) establishes it is accepted, so the documentation's JSON example
+does not displace it. TWO CLOCKS, KEPT APART:
 the assertion's own `exp` is +TOKEN_EXP_S = 60 s (a window on a JWT the
 venue consumes once), while the ACCESS TOKEN's life is whatever the
 venue's `expires_in` states and is reused for `token_reuse_window(ttl)`
@@ -147,6 +155,21 @@ log = logging.getLogger(__name__)
 # ── THE HOSTS: constants, preprod only ──────────────────────────────
 PMX_AUTH0_DOMAIN = "pmx-preprod.us.auth0.com"
 PMX_BASE_URL = "https://api.preprod.polymarketexchange.com"
+
+# THE TWO AUDIENCES, WHICH ARE NOT THE SAME VALUE.
+#   CLIENT_ASSERTION_AUD   the `aud` CLAIM inside the signed JWT: who
+#                          consumes the assertion (Auth0's token endpoint)
+#   TOKEN_REQUEST_AUDIENCE the `audience` FORM FIELD of the request: which
+#                          API the issued access token is for
+# Built from different constants so an edit cannot collapse them. Until
+# 2026-09-19 the assertion carried the bare issuer, "https://<domain>/";
+# the venue accepted that on 2026-09-10, so it is tolerated, but the
+# current documentation specifies the token endpoint and that is what we
+# send. No automatic fallback: a silent retry on the old value would
+# leave us unable to say which audience the venue took.
+CLIENT_ASSERTION_AUD = f"https://{PMX_AUTH0_DOMAIN}/oauth/token"
+TOKEN_REQUEST_AUDIENCE = PMX_BASE_URL
+CLIENT_ASSERTION_AUD_PREVIOUSLY_ACCEPTED = f"https://{PMX_AUTH0_DOMAIN}/"
 VENUE = "pmx_preprod"
 # requests' (connect, read) timeout: the venue's docs put a 504 past 30 s
 TIMEOUT = (10.0, 30.0)
@@ -357,7 +380,7 @@ def _mint_token() -> str:
     cid, kid = _env("PMX_CLIENT_ID"), _env("PMX_KEY_ID")
     key = _private_key()
     iat = int(time.time())
-    assertion = jwt.encode({"iss": cid, "sub": cid, "aud": f"https://{PMX_AUTH0_DOMAIN}/",
+    assertion = jwt.encode({"iss": cid, "sub": cid, "aud": CLIENT_ASSERTION_AUD,
                             "iat": iat, "exp": iat + TOKEN_EXP_S, "jti": str(uuid.uuid4())},
                            key, algorithm="RS256", headers={"kid": kid})
     pace()
@@ -365,7 +388,7 @@ def _mint_token() -> str:
         "POST", _assert_preprod(f"https://{PMX_AUTH0_DOMAIN}/oauth/token"),
         data={"client_id": cid,
               "client_assertion_type": "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
-              "client_assertion": assertion, "audience": PMX_BASE_URL,
+              "client_assertion": assertion, "audience": TOKEN_REQUEST_AUDIENCE,
               "grant_type": "client_credentials"},
         headers={"Content-Type": "application/x-www-form-urlencoded"}, timeout=TIMEOUT)
     body = _json_of(r)

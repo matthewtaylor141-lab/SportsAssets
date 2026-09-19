@@ -5,7 +5,7 @@ name: pmx-preprod
 # runner, which has open internet. No production host is ever contacted:
 # the base URLs are fixed to preprod below and are not inputs. Read-only
 # actions (whoami, health, refdata, bbo, positions, open-orders,
-# report-orders, reconcile-order, order-stream, order-preview,
+# report-orders, reconcile-order, order-stream, grpc-probe, order-preview,
 # duplicate-preview) need no confirm; any action
 # that could send an order needs confirm=DO.
 #
@@ -27,15 +27,25 @@ name: pmx-preprod
 # is read from the event-free `secrets` context into the SCRIPT rather than
 # through a rendered `run:` line, for the same reason the key already was.
 #
-# Ask the venue to rotate the exposed preprod key id before this lane is
-# used for anything that matters; the identifiers in those logs cannot be
-# unpublished.
+# THE PRIVATE KEY WAS NOT EXPOSED, and that is verified rather than
+# assumed: run 24 (job 102911933685) was re-read on 2026-09-19. The key
+# never appeared in an `env:` block or a rendered `run:` line -- it was
+# read from $GITHUB_EVENT_PATH with jq, ::add-mask::'d before the base64
+# was decoded, written 0600 to $RUNNER_TEMP/pk.pem, and removed by the
+# scrub step. The staging step printed only a byte count. No "BEGIN", no
+# bearer token and no signed assertion appears in any of those logs.
+#
+# What IS in them is the client id, the participant resource name and the
+# key id. Identifiers are not key material. Rotating the preprod kid is a
+# HYGIENE RECOMMENDATION, not a prerequisite for anything, and it is the
+# venue's to perform -- we do not revoke unilaterally. Nothing is blocked
+# on it. The identifiers themselves cannot be unpublished.
 
 on:
   workflow_dispatch:
     inputs:
       action:
-        description: "whoami | health | refdata | instruments (arg=JSON body) | bbo (arg=symbol) | book (arg=symbol) | positions (arg=account name) | open-orders | report-orders (arg=JSON) | reconcile-order (arg=JSON {orderId?, clordId?, symbol?, startTime?, endTime?}) | order-stream (arg=JSON {seconds?, symbol?}) | order-preview (arg=JSON) | duplicate-preview (arg=JSON; PREVIEW REPEATABILITY ONLY, places nothing, establishes NOTHING about insert idempotency) | order (arg=JSON, needs confirm=DO) | cancel (arg=JSON {orderId|clordId, symbol}, needs confirm=DO)"
+        description: "whoami | health | refdata | instruments (arg=JSON body) | bbo (arg=symbol) | book (arg=symbol) | positions (arg=account name) | open-orders | report-orders (arg=JSON) | reconcile-order (arg=JSON {orderId?, clordId?, symbol?, startTime?, endTime?}) | order-stream (arg=JSON {seconds?, symbol?, target?}) | grpc-probe (arg=JSON {targets?}; READ-ONLY hostname diagnostic over the documented preprod gRPC candidates) | order-preview (arg=JSON) | duplicate-preview (arg=JSON; PREVIEW REPEATABILITY ONLY, places nothing, establishes NOTHING about insert idempotency) | order (arg=JSON, needs confirm=DO) | cancel (arg=JSON {orderId|clordId, symbol}, needs confirm=DO)"
         required: true
         type: string
       arg:
@@ -79,7 +89,7 @@ jobs:
       - name: Install
         run: pip install -q pyjwt cryptography requests
       - name: Run the exploratory read
-        if: ${{ !contains(fromJSON('["auth","reconcile-order","order-stream"]'), inputs.action) }}
+        if: ${{ !contains(fromJSON('["auth","reconcile-order","order-stream","grpc-probe"]'), inputs.action) }}
         env:
           ACTION: ${{ inputs.action }}
           ARG: ${{ inputs.arg }}
@@ -95,7 +105,7 @@ jobs:
           case "$ACTION" in
             whoami|health|refdata|instruments|bbo|book|positions|open-orders|report-orders|order-preview) ;;
             duplicate-preview) ;;    # PREVIEW repeatability only; places nothing
-            auth|reconcile-order|order-stream)
+            auth|reconcile-order|order-stream|grpc-probe)
               echo "refused: $ACTION is served by the module step, not this one"; exit 1 ;;
             order|cancel) if [ "$CONFIRM" != "DO" ]; then echo "refused: $ACTION needs confirm=DO"; exit 1; fi ;;
             *) echo "refused: unknown action '$ACTION'"; exit 1 ;;
@@ -114,8 +124,16 @@ jobs:
               print("health", r.status_code, r.text[:500]); sys.exit(0)
           def token():
               now = int(time.time())
-              # the venue's own helper: aud = https://<domain>/ and a form-encoded token call
-              a = jwt.encode({"iss": cid, "sub": cid, "aud": f"https://{dom}/", "iat": now,
+              # TWO AUDIENCES, NOT ONE (corrected 2026-09-19).
+              #   the assertion's `aud` CLAIM  -> Auth0's TOKEN ENDPOINT
+              #   the request's `audience` FIELD -> the API base (PMX_AUDIENCE)
+              # Until today the claim carried the bare issuer, f"https://{dom}/".
+              # The venue accepted that on 2026-09-10, so it is tolerated -- but
+              # the current documentation specifies the token endpoint, and that
+              # is what we send. The form encoding is UNCHANGED: runs 1-24 prove
+              # it is accepted, so the docs' JSON example does not displace it.
+              a = jwt.encode({"iss": cid, "sub": cid, "aud": f"https://{dom}/oauth/token",
+                              "iat": now,
                               "exp": now + 60, "jti": str(uuid.uuid4())}, pk, algorithm="RS256",
                              headers={"kid": kid})
               r = requests.post(f"https://{dom}/oauth/token", data={
@@ -244,7 +262,7 @@ jobs:
       # download or generate is a NAMED failure, never a fallback to a
       # guessed shape.
       - name: Generate the venue's gRPC client
-        if: ${{ inputs.action == 'order-stream' }}
+        if: ${{ contains(fromJSON('["order-stream","grpc-probe"]'), inputs.action) }}
         run: |
           set -euo pipefail
           pip install -q "grpcio==1.68.1" "grpcio-tools==1.68.1" "protobuf==5.29.1"
@@ -274,7 +292,7 @@ jobs:
       # classification) and is unit-tested; `pmx_preprod_net` opens the
       # sockets and makes no decisions of its own.
       - name: Run the preprod operation
-        if: ${{ contains(fromJSON('["auth","reconcile-order","order-stream"]'), inputs.action) }}
+        if: ${{ contains(fromJSON('["auth","reconcile-order","order-stream","grpc-probe"]'), inputs.action) }}
         env:
           PMX_CLIENT_ID: ${{ secrets.PMX_CLIENT_ID }}
           PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}

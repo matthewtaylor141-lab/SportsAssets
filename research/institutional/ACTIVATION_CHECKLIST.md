@@ -56,14 +56,22 @@ firms/20260902-bettortokenllc-api-clearing-member/accounts/20260902-bettortokenl
 So it is a parameter we already hold, not a discovery. Set it at the same
 time if convenient; nothing before SUBMIT reads it.
 
-### One thing to ask Polymarket at the same time
+### One optional hygiene item — it blocks nothing
 
 Runs 1–24 on 2026-09-10 printed the **preprod** client id, participant
-resource name and key id into Actions logs (the private key was never
-exposed). Ask Polymarket to rotate the preprod `kid`; then set the new value.
-This is preproduction only and blocks nothing — but do it before the lane
-carries anything that matters. Rotation is venue-coordinated; we do not
-revoke unilaterally.
+resource name and key id into Actions logs.
+
+**The private key was not exposed, and that is verified rather than assumed.**
+Run 24's log was re-read on 2026-09-19: the key never passed through an
+`env:` block or a rendered `run:` line — it was read from the event payload
+on disk, masked before decoding, written 0600, and scrubbed. The staging step
+printed a byte count and nothing else. No key material, bearer token or signed
+assertion appears in any of those logs.
+
+Identifiers are not key material. Rotating the preprod `kid` is therefore a
+hygiene recommendation, not a prerequisite, and it is Polymarket's to perform
+— we do not revoke unilaterally. Ask for it whenever convenient; nothing waits
+on it.
 
 ---
 

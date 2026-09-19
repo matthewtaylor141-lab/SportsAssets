@@ -206,11 +206,19 @@ def test_token_is_the_venues_helper_flow_and_refreshes_at_150s(world):
     assert form["client_id"] == "cid-1" and form["grant_type"] == "client_credentials"
     assert form["client_assertion_type"] == "urn:ietf:params:oauth:client-assertion-type:jwt-bearer"
     assert form["audience"] == "https://api.preprod.polymarketexchange.com"
+    # TWO AUDIENCES AND THEY ARE NOT THE SAME VALUE (corrected 2026-09-19).
+    # The FORM FIELD above names the API the token is for. The CLAIM below
+    # names who consumes the assertion: Auth0's token endpoint. This test
+    # used to decode against the bare issuer, which is what we sent until
+    # today -- the venue tolerated it, but it is not the documented value.
+    assert form["audience"] == pmx.TOKEN_REQUEST_AUDIENCE
+    assert pmx.CLIENT_ASSERTION_AUD != pmx.TOKEN_REQUEST_AUDIENCE
     # the assertion: RS256 under OUR key, kid in the header, the venue's claims
     assertion = form["client_assertion"]
     assert jwt.get_unverified_header(assertion)["kid"] == "kid-1"
     claims = jwt.decode(assertion, PUB, algorithms=["RS256"],
-                        audience="https://pmx-preprod.us.auth0.com/")
+                        audience="https://pmx-preprod.us.auth0.com/oauth/token")
+    assert claims["aud"] == pmx.CLIENT_ASSERTION_AUD
     assert claims["iss"] == "cid-1" and claims["sub"] == "cid-1"
     assert claims["exp"] - claims["iat"] == 60 and claims["jti"]
     # cached inside the refresh window, re-minted past it

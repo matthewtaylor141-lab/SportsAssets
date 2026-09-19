@@ -18,17 +18,40 @@ bearer token, and full account payloads. Receipts carry request bodies
 (which contain no credential), statuses, request identifiers, timestamps
 and the identifiers returned -- nothing else.
 
-THE AUTHENTICATION EXCHANGE IS THE ONE THAT IS ALREADY VERIFIED and is not
-changed here. Two discrepancies with the streaming documentation's example
-were found while writing this and are recorded rather than adopted:
+THE AUTHENTICATION EXCHANGE HAS TWO AUDIENCES AND THEY ARE NOT THE SAME
+VALUE. Conflating them is the defect this module now pins:
 
-  * the example signs `aud = "https://<domain>/oauth/token"` and POSTs
-    JSON; the exchange that actually returned 200 from the runner on
-    2026-09-10 signs `aud = "https://<domain>/"` and POSTs form-encoded.
-  * the example says "tokens expire in 180 seconds"; the observed
-    response said `expires_in: 86400`.
+  CLIENT_ASSERTION_AUD    the `aud` CLAIM INSIDE the signed JWT. It names
+                          the party that consumes the assertion -- Auth0's
+                          token endpoint.
+                          https://pmx-preprod.us.auth0.com/oauth/token
 
-Neither is adopted. The lifetime is read from the response either way.
+  TOKEN_REQUEST_AUDIENCE  the `audience` FORM FIELD of the token request.
+                          It names the API the issued access token is for.
+                          https://api.preprod.polymarketexchange.com
+
+Until 2026-09-19 the assertion was signed with `aud = "https://<domain>/"`
+-- the bare issuer. That is what the runner sent on 2026-09-10 and the
+venue accepted it (200, a token, eleven scopes), so it is a value Auth0
+tolerates; it is NOT the value the current documentation specifies. The
+documented value is now what we send. The historical one is kept below as
+CLIENT_ASSERTION_AUD_PREVIOUSLY_ACCEPTED, as evidence and as a deliberate
+second attempt if the first is rejected -- there is NO automatic fallback,
+because a silent retry would leave us unable to say which value the venue
+took.
+
+THE ENCODING IS NOT CHANGED, and this is the documented exception rather
+than an oversight. The documentation's example POSTs JSON. Retained venue
+evidence establishes that FORM ENCODING IS ACCEPTED: runs 1-24 on
+2026-09-10 (workflow revision a95b54e) posted
+`application/x-www-form-urlencoded` and were answered 200 with a usable
+bearer token. An accepted encoding is not replaced on the strength of an
+example. If the venue ever rejects it, the JSON body is a one-line change
+and the rejection will be legible.
+
+One further discrepancy, recorded and not adopted: the example says
+"tokens expire in 180 seconds"; the observed response said
+`expires_in: 86400`. The lifetime is read from the response either way.
 """
 from __future__ import annotations
 
@@ -44,7 +67,55 @@ import uuid
 
 AUTH0_DOMAIN = "pmx-preprod.us.auth0.com"
 REST_BASE = "https://api.preprod.polymarketexchange.com"
+
+# THE TWO AUDIENCES. Read the module docstring before touching either.
+# They are deliberately built from different constants so that a future
+# edit cannot collapse them into one value by accident.
+CLIENT_ASSERTION_AUD = "https://%s/oauth/token" % AUTH0_DOMAIN
+TOKEN_REQUEST_AUDIENCE = REST_BASE
+
+# What the runner actually sent on 2026-09-10 and the venue accepted.
+# Kept as EVIDENCE and as a deliberate second attempt. Nothing in this
+# codebase falls back to it automatically.
+CLIENT_ASSERTION_AUD_PREVIOUSLY_ACCEPTED = "https://%s/" % AUTH0_DOMAIN
+
+# Retained venue evidence, not a preference: form encoding was answered
+# 200 with a usable token by runs 1-24 (workflow revision a95b54e).
+TOKEN_REQUEST_ENCODING = "application/x-www-form-urlencoded"
+TOKEN_REQUEST_ENCODING_EVIDENCE = (
+    "OBSERVED_PREPROD 2026-09-10: application/x-www-form-urlencoded was "
+    "answered 200 with an access token and eleven scopes. The current "
+    "documentation's example posts JSON; an accepted encoding is not "
+    "replaced on the strength of an example.")
+
+# ── the gRPC target is NOT settled, and the docs disagree with the docs
+#
+# Four spellings appear across the captured documentation. Three of them
+# name preproduction and are candidates. The fourth carries no
+# environment at all and is therefore NOT identifiably preprod, so it is
+# deliberately absent from both lists below and `assert_preprod` refuses
+# it -- an unqualified host could be production.
+#
+#   grpc-api.preprod...   /grpc-api/overview, /streaming-endpoints/*
+#   grpc-preprod...       /trader-guide/environments, /connection-issues
+#   grpc.preprod...       /data-guide/market-data, /candlestick-data
+#   grpc-api...  (no env) /changelog                    <- NOT a candidate
+#
+# GRPC_TARGET stays the most-cited spelling. It is NOT rotated silently
+# on a failure: `grpc-probe` tests the candidates and reports which of
+# the five stages each one reaches, and a human reads that before any
+# constant moves.
 GRPC_TARGET = "grpc-api.preprod.polymarketexchange.com:443"
+
+GRPC_CANDIDATES = (
+    "grpc-api.preprod.polymarketexchange.com:443",
+    "grpc-preprod.polymarketexchange.com:443",
+    "grpc.preprod.polymarketexchange.com:443",
+)
+
+# Production is not probed, not guessed and not derived from a preprod
+# result. It is a string that says so, and it is not a host.
+PRODUCTION_GRPC_TARGET = "NOT_IDENTIFIED"
 
 # api.preprod... is the host this project has actually transacted with.
 # The streaming example names rest.preprod...; that is NOT adopted, for
@@ -52,8 +123,7 @@ GRPC_TARGET = "grpc-api.preprod.polymarketexchange.com:443"
 _PREPROD_HOSTS = frozenset({
     "api.preprod.polymarketexchange.com",
     "pmx-preprod.us.auth0.com",
-    "grpc-api.preprod.polymarketexchange.com",
-})
+} | {c.rsplit(":", 1)[0] for c in GRPC_CANDIDATES})
 
 CREDENTIALS_EXPECTED = ("PMX_CLIENT_ID", "PMX_PARTICIPANT_ID", "PMX_KEY_ID",
               "PMX_PRIVATE_KEY_B64")
@@ -330,6 +400,63 @@ def verdict(queries: list, matched: list) -> dict:
 # The generated client comes from the venue's own downloadable proto
 # bundle, generated on the runner. Nothing here hand-writes a message.
 
+#
+# ── THE HOSTNAME DIAGNOSTIC ──────────────────────────────────────────
+#
+# Five stages, reported separately, because "it did not connect" hides
+# which of five different things went wrong and who owns it:
+#
+#   DNS_RESOLUTION       does the name exist at all?        (their DNS)
+#   TCP_TLS_CONNECTION   does :443 answer and negotiate?    (their edge)
+#   GRPC_CHANNEL_READY   does a gRPC channel reach READY?   (their proxy)
+#   AUTHENTICATED_RPC    does the RPC start with our token? (our creds)
+#   PERMISSION_RESULT    what does the service say we may do?  (scopes)
+#
+# A host that fails at DNS_RESOLUTION says NOTHING about the service. A
+# host that reaches AUTHENTICATED_RPC and then returns PERMISSION_DENIED
+# says nothing about the hostname. Keeping the stages apart is the whole
+# point of the probe.
+
+G_DNS = "DNS_RESOLUTION"
+G_TCP = "TCP_TLS_CONNECTION"
+G_READY = "GRPC_CHANNEL_READY"
+G_RPC = "AUTHENTICATED_RPC"
+G_PERM = "PERMISSION_RESULT"
+GRPC_STAGES = (G_DNS, G_TCP, G_READY, G_RPC, G_PERM)
+
+GRPC_UNAVAILABLE_MEANING = (
+    "UNAVAILABLE (code 14) on ONE hostname is evidence about THAT NAME "
+    "and nothing else. It is not evidence that the institutional gRPC "
+    "service is down, that our credentials are wrong, or that the "
+    "capability does not exist. Only a host that reaches "
+    "AUTHENTICATED_RPC can produce evidence about the service.")
+
+
+def grpc_probe_verdict(candidates: list) -> dict:
+    """Summarize a probe WITHOUT choosing a winner for anyone.
+
+    `candidates` is a list of per-host dicts each carrying a `stages`
+    mapping of stage name -> bool/None. This returns which hosts reached
+    which stage. It deliberately does NOT write GRPC_TARGET, return a
+    "use this one" field, or collapse to a single answer: rotating a
+    host is a human decision, and in production it is not ours at all.
+    """
+    reached = {stage: [] for stage in GRPC_STAGES}
+    for c in candidates or []:
+        stages = (c or {}).get("stages") or {}
+        for stage in GRPC_STAGES:
+            if stages.get(stage) is True:
+                reached[stage].append(c.get("target"))
+    return {"environment": "PREPROD",
+            "candidatesTried": [c.get("target") for c in (candidates or [])],
+            "reachedStage": reached,
+            "authenticatedRpc": reached[G_RPC],
+            "configuredTarget": GRPC_TARGET,
+            "targetRotated": False,
+            "productionGrpcTarget": PRODUCTION_GRPC_TARGET,
+            "meaning": GRPC_UNAVAILABLE_MEANING}
+
+
 PROTO_BUNDLE_URL = ("https://drive.google.com/uc?export=download"
                     "&id=1oT9gaeBEn0vukHD9GOoj_YvzPnR3otng")
 
@@ -442,7 +569,7 @@ def write_receipt(path, payload) -> str:
 def _cli(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("op", choices=("auth", "reconcile", "stream",
-                                   "presence"))
+                                   "grpc-probe", "presence"))
     ap.add_argument("--spec", default="", help="JSON argument for the op")
     ap.add_argument("--out", default="", help="where to write the receipt")
     ap.add_argument("--seconds", type=float, default=60.0)

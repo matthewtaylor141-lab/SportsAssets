@@ -447,11 +447,30 @@ class TestTheSplitIsReal:
         assert "ops.scope_blockers(" in src
         assert "ops.validate_row(" in src
 
-    def test_the_verified_auth_exchange_is_not_swapped_for_the_example(self):
+    def test_the_auth_exchange_reads_both_audiences_from_the_contract(self):
+        """Superseded 2026-09-19. This test used to pin the assertion's
+        `aud` to the bare issuer, `https://<domain>/`, on the grounds that
+        it was the value the runner had actually been answered 200 on.
+        That reasoning was wrong for the CLAIM: a value Auth0 tolerates is
+        not the value the documentation specifies, and the two audiences
+        in this exchange mean different things. The claim now carries the
+        token endpoint.
+
+        The reasoning still holds for the ENCODING, which is why the form
+        body is still pinned here: there the retained evidence is not
+        'a value was tolerated' but 'this exact encoding was accepted and
+        returned a usable token'.
+
+        The values themselves are pinned in test_pmx_auth_contract.py,
+        including on the wire.
+        """
         net = pathlib.Path(ops.__file__).with_name("pmx_preprod_net.py")
         src = net.read_text()
-        # ours: aud = https://<domain>/ , form-encoded
-        assert '"aud": "https://%s/" % ops.AUTH0_DOMAIN' in src
-        assert "application/x-www-form-urlencoded" in src
-        # the streaming example's shape, NOT adopted
-        assert "/oauth/token\"," not in src.split("aud")[1][:80]
+        # neither audience is spelled inline any more: both come from the
+        # contract module, so they cannot drift apart or converge
+        assert "ops.CLIENT_ASSERTION_AUD" in src
+        assert "ops.TOKEN_REQUEST_AUDIENCE" in src
+        assert '"aud": "https://%s/" % ops.AUTH0_DOMAIN' not in src
+        # the encoding IS still ours, and the docs' JSON example is not
+        assert "ops.TOKEN_REQUEST_ENCODING" in src
+        assert ops.TOKEN_REQUEST_ENCODING == "application/x-www-form-urlencoded"

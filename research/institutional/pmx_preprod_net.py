@@ -39,10 +39,23 @@ def mint_token(session) -> tuple:
     THE TOKEN GOES STRAIGHT INTO A HEADER and is never written into a
     receipt: `ops.write_receipt` refuses a payload containing one.
 
-    This is the exchange that ACTUALLY returned 200 from the runner on
-    2026-09-10: `aud = https://<domain>/` and a FORM-ENCODED post. The
-    streaming documentation's example signs a different audience and posts
-    JSON; it is recorded in `pmx_preprod_ops` and deliberately not copied.
+    TWO AUDIENCES, NOT ONE. The `aud` CLAIM inside the signed assertion
+    names Auth0's token endpoint (ops.CLIENT_ASSERTION_AUD); the
+    `audience` FORM FIELD of the request names the API the token is for
+    (ops.TOKEN_REQUEST_AUDIENCE). They are different values and are read
+    from two different constants so they cannot silently converge.
+
+    Until 2026-09-19 the assertion was signed with the bare issuer,
+    `https://<domain>/`. The venue accepted that on 2026-09-10, so it is
+    a tolerated value -- but the current documentation specifies the
+    token endpoint, and that is now what we send. There is no automatic
+    fallback to the old value: a silent retry would leave us unable to
+    say which audience the venue actually took.
+
+    THE ENCODING IS UNCHANGED and that is deliberate. The documentation's
+    example posts JSON; retained venue evidence (runs 1-24, revision
+    a95b54e) establishes that form encoding is accepted. See
+    ops.TOKEN_REQUEST_ENCODING_EVIDENCE.
     """
     import jwt
 
@@ -50,7 +63,7 @@ def mint_token(session) -> tuple:
     kid = os.environ["PMX_KEY_ID"]
     now = int(time.time())
     assertion = jwt.encode(
-        {"iss": cid, "sub": cid, "aud": "https://%s/" % ops.AUTH0_DOMAIN,
+        {"iss": cid, "sub": cid, "aud": ops.CLIENT_ASSERTION_AUD,
          "iat": now, "exp": now + 60, "jti": str(uuid.uuid4())},
         _private_key_pem(), algorithm="RS256", headers={"kid": kid})
     url = ops.assert_preprod("https://%s/oauth/token" % ops.AUTH0_DOMAIN)
@@ -59,9 +72,9 @@ def mint_token(session) -> tuple:
         "client_assertion_type":
             "urn:ietf:params:oauth:client-assertion-type:jwt-bearer",
         "client_assertion": assertion,
-        "audience": ops.REST_BASE,
+        "audience": ops.TOKEN_REQUEST_AUDIENCE,
         "grant_type": "client_credentials"},
-        headers={"Content-Type": "application/x-www-form-urlencoded"},
+        headers={"Content-Type": ops.TOKEN_REQUEST_ENCODING},
         timeout=TIMEOUT)
     body = {}
     try:
@@ -306,7 +319,11 @@ def op_stream(args) -> int:
             ops.write_receipt(args.out, out)
         return 1
 
-    target = ops.assert_preprod(ops.GRPC_TARGET)
+    # An operator may name one of the documented candidates explicitly;
+    # it is still asserted preprod. NOTHING ROTATES ON ITS OWN -- if the
+    # configured target fails, the run says so and `grpc-probe` is the
+    # tool that establishes which name works.
+    target = ops.assert_preprod(spec.get("target") or ops.GRPC_TARGET)
     meta = [("authorization", "Bearer %s" % token)]
 
     def once(label, snapshot_only):
@@ -346,6 +363,157 @@ def op_stream(args) -> int:
     return 0 if out["established"] else 1
 
 
+# ── op: grpc-probe ───────────────────────────────────────────────────
+#
+# PREPRODUCTION ONLY, and read-only: the one RPC it opens is the order
+# SUBSCRIPTION, which places nothing. Its job is to say which of the
+# documented hostnames exists, answers, and serves us -- five stages
+# kept apart, so a DNS miss on one name is never reported as the venue
+# being down. See ops.GRPC_UNAVAILABLE_MEANING.
+
+def _dns_and_tls(host: str, port: int, out: dict) -> None:
+    import socket
+    import ssl
+
+    t0 = time.time()
+    try:
+        infos = socket.getaddrinfo(host, port, proto=socket.IPPROTO_TCP)
+        out["stages"][ops.G_DNS] = True
+        # the count only -- an address is infrastructure detail we have
+        # no need to write down
+        out["dnsAnswers"] = len(infos)
+    except Exception as exc:                                   # noqa: BLE001
+        out["stages"][ops.G_DNS] = False
+        out["dnsError"] = type(exc).__name__
+        return
+    finally:
+        out["dnsMs"] = round((time.time() - t0) * 1000, 1)
+
+    t1 = time.time()
+    try:
+        ctx = ssl.create_default_context()
+        with socket.create_connection((host, port), timeout=10.0) as sock:
+            with ctx.wrap_socket(sock, server_hostname=host) as tls:
+                out["stages"][ops.G_TCP] = True
+                out["tlsVersion"] = tls.version()
+    except Exception as exc:                                   # noqa: BLE001
+        out["stages"][ops.G_TCP] = False
+        out["tlsError"] = "%s: %s" % (type(exc).__name__, str(exc)[:120])
+    finally:
+        out["tlsMs"] = round((time.time() - t1) * 1000, 1)
+
+
+def _channel_and_rpc(grpc, target: str, token: str, seconds: float,
+                     out: dict) -> None:
+    t0 = time.time()
+    channel = grpc.secure_channel(target, grpc.ssl_channel_credentials())
+    try:
+        try:
+            grpc.channel_ready_future(channel).result(timeout=10.0)
+            out["stages"][ops.G_READY] = True
+        except Exception as exc:                               # noqa: BLE001
+            out["stages"][ops.G_READY] = False
+            out["channelError"] = type(exc).__name__
+            return
+        finally:
+            out["channelMs"] = round((time.time() - t0) * 1000, 1)
+
+        try:
+            from polymarket.v1 import trading_pb2, trading_pb2_grpc
+        except ImportError as exc:
+            out["rpcSkipped"] = "GENERATED_CLIENT_MISSING: %s" % exc
+            return
+
+        t1 = time.time()
+        stub = trading_pb2_grpc.OrderEntryAPIStub(channel)
+        req = ops.build_subscription_request(trading_pb2, snapshot_only=True)
+        meta = [("authorization", "Bearer %s" % token)]
+        try:
+            for response in stub.CreateOrderSubscription(req, metadata=meta):
+                # one message is all the evidence this stage needs
+                out["stages"][ops.G_RPC] = True
+                out["stages"][ops.G_PERM] = True
+                out["permissionResult"] = "SERVED"
+                seen: dict = {}
+                ops.observe_message(response, seen)
+                # the SHAPE that arrived, never its contents
+                out["firstMessage"] = sorted(
+                    k for k in seen
+                    if k in ("heartbeat", "snapshot", "update"))
+                break
+            else:
+                out["stages"][ops.G_RPC] = True
+                out["stages"][ops.G_PERM] = True
+                out["permissionResult"] = "SERVED_EMPTY"
+        except grpc.RpcError as exc:
+            code = str(exc.code())
+            out["rpcError"] = {"code": code,
+                               "details": str(exc.details())[:200]}
+            if "PERMISSION_DENIED" in code:
+                # the service answered ABOUT US: reached and authenticated
+                out["stages"][ops.G_RPC] = True
+                out["stages"][ops.G_PERM] = True
+                out["permissionResult"] = "PERMISSION_DENIED"
+            elif "UNAUTHENTICATED" in code:
+                out["stages"][ops.G_RPC] = False
+                out["stages"][ops.G_PERM] = True
+                out["permissionResult"] = "UNAUTHENTICATED"
+            else:
+                # UNAVAILABLE / UNIMPLEMENTED / DEADLINE_EXCEEDED: the
+                # service never judged us. NOT a permission result, and
+                # NOT evidence about the service -- only about this name.
+                out["stages"][ops.G_RPC] = False
+                out["permissionResult"] = "NOT_REACHED"
+        finally:
+            out["rpcMs"] = round((time.time() - t1) * 1000, 1)
+    finally:
+        channel.close()
+
+
+def op_grpc_probe(args) -> int:
+    import grpc
+    import requests
+
+    spec = json.loads(args.spec) if args.spec.strip() else {}
+    asked = spec.get("targets") or list(ops.GRPC_CANDIDATES)
+    targets = [ops.assert_preprod(t) for t in asked]
+
+    # The token is minted ONCE and shared, so a difference between hosts
+    # is a difference between hosts and not a difference between tokens.
+    s = requests.Session()
+    tok_status, token, _, why = mint_token(s)
+    if tok_status != 200 or not token:
+        out = ops.receipt("grpc-probe", authenticated=False,
+                          blockers=["token %s %s" % (tok_status, why)],
+                          meaning="no token: stages 4 and 5 cannot be "
+                                  "attempted for ANY host, and stages 1-3 "
+                                  "would say nothing about entitlement")
+        print(json.dumps(out, indent=1))
+        if args.out:
+            ops.write_receipt(args.out, out)
+        return 1
+
+    results = []
+    for target in targets:
+        host, _, port = target.rpartition(":")
+        one = {"target": target, "requestId": _request_id(),
+               "at": time.time(),
+               "stages": {stage: None for stage in ops.GRPC_STAGES}}
+        _dns_and_tls(host, int(port or 443), one)
+        if one["stages"][ops.G_TCP]:
+            _channel_and_rpc(grpc, target, token,
+                             min(args.seconds, 20.0), one)
+        results.append(one)
+
+    out = ops.receipt("grpc-probe", authenticated=True,
+                      candidates=results, **ops.grpc_probe_verdict(results))
+    print(json.dumps(out, indent=1))
+    if args.out:
+        ops.write_receipt(args.out, out)
+    # rc 1 is a NAMED verdict, not a crash: no candidate served us.
+    return 0 if out["authenticatedRpc"] else 1
+
+
 def run_op(args) -> int:
     return {"auth": op_auth, "reconcile": op_reconcile,
-            "stream": op_stream}[args.op](args)
+            "stream": op_stream, "grpc-probe": op_grpc_probe}[args.op](args)
