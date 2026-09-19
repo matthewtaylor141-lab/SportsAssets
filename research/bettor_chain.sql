@@ -96,7 +96,10 @@ SELECT 'first_chain_opportunity|' || o.bettor_opportunity_id || '|'
 
 \echo ''
 \echo '--- BLOCKERS ON THAT DECISION, NAMED ---'
-SELECT 'first_chain_blocker|' || b.value ->> 'code'
+-- PARENTHESISED. `||` binds tighter than `->>`, so without these the
+-- whole concatenated string was handed to the JSON operator and the
+-- query died on "Token \"first_chain_blocker\" is invalid".
+SELECT 'first_chain_blocker|' || (b.value ->> 'code')
   FROM shadow_decisions d,
        LATERAL jsonb_array_elements(COALESCE(d.blockers, '[]'::jsonb)) AS b
  WHERE d.lane = 'BETTOR_EV_SHADOW'
