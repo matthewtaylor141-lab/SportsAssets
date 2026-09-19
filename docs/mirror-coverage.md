@@ -2414,3 +2414,147 @@ select list` — three queries grouped by output position where position 1
 was a concatenation containing `count(*)`. I had run the accounting
 module against a local PostgreSQL but not the verification file. The
 round trip was avoidable and the habit is the same one section 84 named.
+
+## 86. POLICY_CODE_SHA drift: what moved, whether it decided anything, and why nothing blocked
+
+Owner finding, 2026-09-19 20:0xZ: the live worker reported
+`codeShaMatches = False` and kept writing decisions.
+
+### 86.1 The diff, in full
+
+`CODE_FILES` covers four files. Three are **byte-identical** between the
+code frozen at 19:33 (`628e5d5`, `POLICY_CODE_SHA 34fbb4ab…`) and the
+code running at 19:58 (`f3fe70b`, `3e1a7fab…`). One file changed:
+
+```diff
+--- a/backend/sportsassets/shadow_bettor.py
++++ b/backend/sportsassets/shadow_bettor.py
+@@ -341,7 +341,22 @@ def decide(...)
+-        pFillStatus=lanes.NOT_ESTABLISHED,
++        # …15 lines of comment…
++        pFillStatus=lanes.NOT_IDENTIFIED,
+```
+
+Measured, not estimated: **16 lines added — 15 comment/blank, 1
+executable; 1 line removed — 1 executable.** One real line changed in
+the whole hash boundary.
+
+| class | lines |
+|---|---|
+| `DECISION_SEMANTICS_AFFECTING` | 0 |
+| `VOCABULARY_ONLY` | 1 — `pFillStatus` `NOT_ESTABLISHED` → `NOT_IDENTIFIED` |
+| `ACCOUNTING_ONLY` | 0 (the accounting work touched no hashed file) |
+| `TELEMETRY_ONLY` | 0 |
+| `OTHER` (comment/blank) | 15 |
+
+### 86.2 Is it load-bearing? No — and the rows prove it
+
+`pFillStatus` occurs in exactly three places: the changed line, which
+**sets** it; `probabilities()` in `shadow_lanes.py`, which is **never
+called anywhere in the codebase**; and `shadow_store.py`, which
+**writes** it to a column. `shadow.py` does not contain the string at
+all. It is a write-only label: nothing reads it to decide anything.
+
+Structurally: `blocks = blockers_for(opportunity, market_state)` is
+computed *before* the record and takes neither the status nor the
+record as input; `proposedAction` is hard-set to `NO_TRADE` inside
+`not_yet_eligible`; `featureLineage` comes from `assert_lineage`.
+
+The production comparison settles it. Because the diff is one line, the
+drift population has an exact marker — rows written under the new code
+are precisely those whose `p_fill_status` is `NOT_IDENTIFIED`, with no
+reliance on the boot marker or a deploy timestamp:
+
+| blocker | MATCHED (112) | MISMATCHED (75) |
+|---|---|---|
+| INDEPENDENT_EV_NOT_ESTABLISHED | 112 (100%) | 75 (100%) |
+| NO_FAIR_VALUE | 112 (100%) | 75 (100%) |
+| P_FILL_NOT_IDENTIFIED | 112 (100%) | 75 (100%) |
+| INSUFFICIENT_DEPTH | 56 | 39 |
+| MARKET_STATE_UNREADABLE | 56 | 36 |
+| SPREAD_TOO_WIDE | 32 | 25 |
+
+Same six codes; the three unconditional ones at 100% in both. The two
+market-dependent ones **partition each population exactly** — 56+56=112
+and 39+36=75 — so the branch behaves identically on both sides. Actions:
+`NO_TRADE` 112 and `NO_TRADE` 75, nothing else. `p_bettor_status`
+`NOT_ESTABLISHED` on all 187. `rn1_features_used` true on 0.
+
+Note the corroboration: the blocker `P_FILL_NOT_IDENTIFIED` was already
+being emitted 112 times **under the frozen code**, while that same code
+wrote `NOT_ESTABLISHED` into the column. The inconsistency the fix
+addressed is visible in the frozen population itself.
+
+**DECISION_SEMANTICS_CHANGED = NO.** What did change is the word
+persisted in `p_fill_status`. That is a change in what a row *says*, not
+in what the system *decides* — but it is mid-version, and whether the
+recorded vocabulary is part of V1's contract is the owner's call, not
+mine.
+
+### 86.3 Why nothing blocked
+
+`freeze_policy()` returns three statuses. The worker checks one:
+
+```python
+frozen = await store.freeze_policy(pool, policy=bpol.frozen_policy())
+if frozen["status"] == "REFUSED":
+    ready = dict(ready, storeReady=False, ...)
+```
+
+`REFUSED` fires only on a **declaration** hash mismatch. This was
+`ALREADY_FROZEN` with `codeShaMatches: False`, which no branch reads;
+it is copied into the boot marker and nothing else. So the drift was
+published and collection continued.
+
+That was deliberate, and the contract is in my own docstring on
+`freeze_policy`: *"a mismatch there means the implementing modules'
+bytes moved without the rules moving, which is a question for a human,
+not a reason to stop collecting."* The reasoning was that a byte hash
+over whole files moves on a comment edit, so enforcing it would make the
+freeze unusable. This incident is that reasoning meeting its
+consequence: 15 of the 16 changed lines were comments, and the guarantee
+degraded to a notification. The owner is right that this is too weak for
+load-bearing decision code.
+
+### 86.4 The boundary is too broad — measured
+
+- It is a **byte** hash over whole files, so comments and docstrings
+  move it. Control: stripping one comment line from the running file
+  moves the byte digest and leaves a parsed-code digest (AST with
+  docstrings removed) unchanged.
+- Two of the four files, `shadow.py` and `shadow_lanes.py`, are **shared
+  with RN1**. An RN1-only edit there would move BETTOR's code hash with
+  no BETTOR semantic change. Latent here — both were byte-identical —
+  but it is the same defect.
+
+Per the directive, V1's boundary is **not** changed retroactively and
+its recorded `34fbb4ab…` is **not** rehashed. Both belong to a future
+version.
+
+### 86.5 The heartbeat: reproduced, not inferred
+
+`pipeline_health()` returns `dict(row)` straight from asyncpg, so
+`last_opportunity`, `last_decision` and `last_failure` are **`datetime`
+objects**. The worker puts that dict into the heartbeat detail, and
+`db.heartbeat()` calls `json.dumps(detail or {})` **with no `default=`
+handler**. Reproduced locally:
+
+```
+json.dumps(pipeline) -> TypeError: Object of type datetime is not JSON serializable
+```
+
+The worker swallows it with `except Exception: log.debug(...)`, below
+the configured log level, so nothing is emitted anywhere.
+
+The production row is the direct confirmation. The last heartbeat that
+ever landed is **19:13:51.810761Z**, and its detail keys are
+`capitalAtRisk, disclosure, lane, pBettor, policy, primary, problems,
+shadowMode, status, storeReady, tickS, universe` — **no `pipeline`
+key**. Commit `4a27260`, which added `stats["pipeline"]`, went live at
+19:13:16Z. Every beat since would carry `pipeline`; none has landed.
+Controls: `chain_listener` 49 s, `poller` 1 s, `shadow_rn1` 30 s — the
+same `heartbeat()` works for every service whose detail is
+JSON-clean.
+
+Meanwhile the decision loop's last success is **20:15:31Z, 16 s old**.
+Two planes, one broken.
