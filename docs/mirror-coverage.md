@@ -2365,3 +2365,52 @@ recorded as a named problem and the tick goes on — unlike the EV policy
 freeze, whose absence the decision table's foreign key makes fatal by
 design. *"Do not delay prospective BETTOR collection while adding this
 reporting."*
+
+### 85.1 Verified in production, 20:02Z
+
+`f3fe70b` went live on sportsassets-workers at **19:58:15Z**; the workers
+applied 074 at boot and froze the sizing standard at **19:58:29.435Z**.
+Read back from the production replica rather than inferred:
+
+| | |
+|---|---|
+| migration 074 | 9 dollar columns PRESENT, 6 CHECKs PRESENT, both objects PRESENT |
+| sizing freeze | `BETTOR_SHADOW_SIZING_V1` / `BETTOR_$1000_STANDARD` / `BETTOR_EV_SHADOW` / **1000** / sha `0081c77c85529cc4` |
+| rows in that table | 1, non-BETTOR 0 |
+| `BETTOR_EV_SHADOW_V1` | `POLICY_SHA` **6db08437ceed0dc8 — unchanged**, `sizing_declared=NOT_APPLICABLE` |
+| `RN1_SHADOW_V1` | `6ed3560babe907a5` — untouched |
+| collection | 349 opportunities / 126 decisions, both **4 s old**; since boot **18 / 18** |
+| write failures | 169, newest **19:33:19Z** — none since the policy freeze |
+| accounting | positions 0, executions 0, entry notional 0, turnover 0, capital-timeline rows 0 |
+| actions | `NO_TRADE` × 126, nothing else |
+| safety | shadow_mode false rows 0, capital at risk nonzero 0, RN1 features used 0 |
+
+**The P_FILL flip, checked rather than assumed.** The bucket counts came
+back 14 post-boot rows carrying `NOT_IDENTIFIED` and 4 still carrying
+`NOT_ESTABLISHED`, which fits two very different stories. The instants
+separate them: newest old-word row **19:58:31.716**, oldest new-word row
+**19:58:30.916**, and exactly **one** old-word row written after the
+first new-word row. That is 0.8 seconds of overlap — the shape of two
+processes sharing the database during a deploy handover, not a live path
+still writing the old word, which would keep producing them. Every
+decision since, including the newest at 20:00:42, carries
+`NOT_IDENTIFIED`. Worth one more read later to confirm the old word
+never reappears; on this evidence it has not.
+
+**One thing is wrong, and it is not this work.** `shadow_bettor`'s
+heartbeat reads `tick_failed`, age **2893 s**, while that same worker is
+demonstrably writing 18 opportunities and 18 decisions since boot and
+the newest is four seconds old. The decision loop runs; the heartbeat
+write does not land, and `except Exception: log.debug(...)` swallows
+whatever is stopping it. This matters because COMMAND derives the
+`BETTOR_EV_ENGINE` tile from exactly that row, so the panel will report
+the primary lane STALE while it is healthy — the mirror image of the
+failure section 82 exists to prevent, and still a false statement on the
+health surface. Not diagnosed; no instruction covers it.
+
+**A method note.** The first production dispatch of
+`bettor_accounting_verify.sql` died on `ORDER BY position 2 is not in
+select list` — three queries grouped by output position where position 1
+was a concatenation containing `count(*)`. I had run the accounting
+module against a local PostgreSQL but not the verification file. The
+round trip was avoidable and the habit is the same one section 84 named.
