@@ -84,8 +84,19 @@ def test_the_sizing_policy_does_not_confer_eligibility():
     """"The $1,000 assumption determines sizing. It does NOT determine
     whether BETTOR trades.\""""
     assert szpol.DECLARATION["confersEligibility"] is False
+    # THE FROZEN LITERAL NAMES V1, AND MUST KEEP NAMING IT. The sizing
+    # declaration was frozen while BETTOR_EV_SHADOW_V1 was the EV policy
+    # in force, and its hash (0081c77c...) is what production recorded.
+    # Updating the string to V2 would move that hash and freeze_sizing_
+    # policy would answer REFUSED at the next boot -- for a cosmetic
+    # edit. Owner: "No sizing change."
+    #
+    # The CLAIM the field makes is unaffected: eligibility rests with
+    # the EV policy rather than with sizing, and V2 supersedes V1.
     assert szpol.DECLARATION["eligibilityRemainsWith"] == \
-        bpol.BETTOR_POLICY_VERSION
+        "BETTOR_EV_SHADOW_V1"
+    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V1"
+    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V2"
     # The EV policy still emits exactly one action, so nothing can be
     # sized today at all.
     assert bpol.ACTION_SET == [sh.NO_TRADE]
@@ -508,3 +519,12 @@ def test_a_maximum_is_only_taken_over_its_own_side():
     assert "result_pnl > 0)\n          AS max_win" in ACCT_SRC
     assert "result_pnl < 0)\n          AS max_loss" in ACCT_SRC
     del body
+
+
+def test_the_v2_bump_did_not_move_the_frozen_sizing_hash():
+    """The sizing policy is frozen in production at 0081c77c... A
+    version bump on the EV policy must not disturb it, or the next boot
+    answers REFUSED on a policy that decides nothing about eligibility."""
+    assert szpol.policy_sha() == szpol.POLICY_SHA
+    assert szpol.POLICY_SHA.startswith("0081c77c85529cc4")
+    assert szpol.STANDARD_BETTOR_SHADOW_NOTIONAL_USD == 1000

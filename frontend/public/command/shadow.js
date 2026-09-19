@@ -326,9 +326,18 @@
       </div></section>`;
   }
 
+  /* FIVE BETTOR ROWS, NOT ONE. During the 2026-09-19 incident a single
+   * BETTOR_EV_ENGINE row derived from the heartbeat said STALE while
+   * the decision loop was writing 18 of 18 -- one row cannot say that
+   * the health writer is broken AND the decision writer is fine. They
+   * are listed first and in plane order, so an operator reads collector
+   * -> decisions -> integrity -> telemetry -> belief. */
   const HEALTH_LABEL = {
-    BETTOR_EV_ENGINE: 'BETTOR EV engine',
+    BETTOR_OPPORTUNITY_COLLECTOR: 'BETTOR opportunity collector',
     BETTOR_DECISION_PIPELINE: 'BETTOR decision pipeline',
+    BETTOR_POLICY_INTEGRITY: 'BETTOR policy integrity',
+    BETTOR_TELEMETRY: 'BETTOR telemetry / heartbeat',
+    BETTOR_EV_STATUS: 'BETTOR EV status',
     INSTITUTIONAL_MARKET_DATA: 'Institutional market data',
     L2: 'L2 depth',
     RN1_BENCHMARK_FEED: 'RN1 benchmark feed',
@@ -364,6 +373,33 @@
    * saying so. They are now drawn next to each other, and an orphan or
    * a recorded failure paints the row DEGRADED however healthy
    * collection looks. */
+  /* POLICY INTEGRITY carries the two hashes and, above all, whether
+   * decision writing is ALLOWED. A drifted policy blocks decisions and
+   * never blocks collection, so both facts belong on the row. */
+  function integrityDetail(c) {
+    const gate = c.decisionWritingAllowed === false
+      ? '<span class="sh-pipe-bad">DECISION WRITING BLOCKED</span>'
+      : c.decisionWritingAllowed === true ? 'decision writing allowed' : NI;
+    return `<div class="sh-stage-kv">
+      <div><label>Integrity</label><b>${word(c.policyIntegrityStatus)}</b></div>
+      <div><label>Policy</label><b>${str(c.policyVersion)}</b></div>
+      <div><label>Declaration sha</label><b>${c.policySha ? esc(String(c.policySha).slice(0, 16)) : NI}</b></div>
+      <div><label>Code sha</label><b>${c.policyCodeSha ? esc(String(c.policyCodeSha).slice(0, 16)) : NI}</b></div>
+      <div><label>Boundary</label><b>${str(c.codeBoundary)}</b></div>
+      <div><label>Gate</label><b>${gate}</b></div>
+    </div>`;
+  }
+
+  /* TELEMETRY says, in the row itself, that it does not speak for the
+   * decision pipeline. That sentence is the fix for the incident. */
+  function telemetryDetail(c) {
+    return `<div class="sh-stage-kv">
+      <div><label>Heartbeat</label><b>${str(c.heartbeatStatus)}</b></div>
+      <div><label>Age</label><b>${isNum(c.sourceAgeSeconds) ? hold(c.sourceAgeSeconds) : NI}</b></div>
+      <div><label>Affects decisions</label><b>NO</b></div>
+    </div>`;
+  }
+
   function pipelineDetail(c) {
     const rate = (c.opportunityToDecisionSuccessRate === null ||
                   c.opportunityToDecisionSuccessRate === undefined)
@@ -384,6 +420,8 @@
 
   function feedDetail(key, c) {
     if (key === 'BETTOR_DECISION_PIPELINE') return pipelineDetail(c);
+    if (key === 'BETTOR_POLICY_INTEGRITY') return integrityDetail(c);
+    if (key === 'BETTOR_TELEMETRY') return telemetryDetail(c);
     if (key !== 'RN1_BENCHMARK_FEED') return str(c.detail);
     const lag = (c.rn1FeedLagSeconds === null ||
                  c.rn1FeedLagSeconds === undefined)
@@ -413,7 +451,7 @@
         const st = String(c.state || 'NOT_ESTABLISHED');
         const tone = st === 'LIVE' ? 'green' : st === 'DEGRADED' ? 'amber'
           : st === 'STALE' ? 'amber' : st === 'BLOCKED' ? 'red' : 'grey';
-        const primary = key === 'BETTOR_EV_ENGINE' ? ' primary' : '';
+        const primary = key === 'BETTOR_EV_STATUS' ? ' primary' : '';
         return `<div class="sh-health-row${primary}">
           <span class="sh-dot ${tone} ${st === 'LIVE' ? 'pulse' : ''}"></span>
           <span class="sh-health-name">${esc(healthLabel(key))}</span>

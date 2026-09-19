@@ -44,7 +44,7 @@ from . import shadow_store as store
 log = logging.getLogger(__name__)
 
 MODEL_VERSION = "bettor_ev_v0_collecting"
-POLICY_VERSION = "BETTOR_EV_SHADOW_V1"
+POLICY_VERSION = "BETTOR_EV_SHADOW_V2"
 
 # THE SELECTION RULE, FROZEN. A dataset whose selection rule is
 # unrecorded cannot be reasoned about later -- every measurement over it
@@ -342,20 +342,24 @@ def decide(opportunity: dict, market_state: dict | None, *,
                      "established, so no alternative can be ranked")}
             for a in (sh.BUY, sh.SELL, sh.HOLD)],
         # NOT_IDENTIFIED, NOT NOT_ESTABLISHED. The two words are not
-        # interchangeable and shadow_lanes.belief() settles which
-        # applies: pBettorStatus falls back to NOT_ESTABLISHED because a
-        # BELIEF is something we have not yet established, while
-        # pMarketStatus and pFillStatus fall back to NOT_IDENTIFIED
-        # because a QUANTITY is something we could not identify. The
-        # frozen declaration says pFill NOT_IDENTIFIED and the blocker
-        # is named P_FILL_NOT_IDENTIFIED; this line was the only place
-        # disagreeing with all three.
+        # interchangeable: a BELIEF is something we have not yet
+        # ESTABLISHED, while a QUANTITY is something we could not
+        # IDENTIFY. So pBettorStatus falls back to NOT_ESTABLISHED and
+        # pFillStatus to NOT_IDENTIFIED.
         #
-        # PROSPECTIVE ONLY. The 16 decisions already written under
-        # BETTOR_EV_SHADOW_V1 keep the word they were written with --
-        # they are append-only evidence of what the system said at the
-        # time, and revising them would be exactly the retrospective
-        # edit the whole ledger exists to prevent.
+        # THE CONVENTION IS WRITTEN DOWN IN probabilities() IN
+        # shadow_lanes.py -- NOT belief(), which does not exist; an
+        # earlier comment here named it and was wrong. Note also that
+        # probabilities() is never called on this path, so the live
+        # statements of the rule are the frozen declaration
+        # (BELIEF.pFillStatus = NOT_IDENTIFIED) and the blocker name
+        # P_FILL_NOT_IDENTIFIED. This line agrees with both.
+        #
+        # PROSPECTIVE ONLY, ALWAYS. Rows already written keep the word
+        # they were written with -- they are append-only evidence of
+        # what the system said at the time, and revising them would be
+        # exactly the retrospective edit the ledger exists to prevent.
+        # The 112 V1 rows carrying NOT_ESTABLISHED stay as they are.
         pFillStatus=lanes.NOT_IDENTIFIED,
         actionEvStatus=NOT_IDENTIFIED,
         marketBid=(market_state or {}).get("bid"),

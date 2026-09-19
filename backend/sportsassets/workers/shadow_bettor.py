@@ -74,6 +74,17 @@ W_NO_QUOTE = "VENUE_RETURNED_NO_QUOTE"
 W_VENUE_STATE = "VENUE_MARKET_STATE_%s"
 W_READ_FAILED = "QUOTE_READ_FAILED_%s"
 
+# ── policy integrity, as a named state rather than a boolean ─────────
+#
+# Owner directive 2026-09-19 20:2xZ: a running code sha that differs
+# from the frozen one is POLICY_CODE_DRIFT and DECISION_WRITING_ALLOWED
+# is FALSE. V1 published this condition and carried on; V2 stops.
+INTEGRITY_OK = "VERIFIED"
+INTEGRITY_DRIFT = "POLICY_CODE_DRIFT"
+INTEGRITY_DECLARATION_REFUSED = "POLICY_DECLARATION_REFUSED"
+INTEGRITY_STORE_NOT_READY = "STORE_NOT_READY"
+INTEGRITY_NOT_ESTABLISHED = "NOT_ESTABLISHED"
+
 
 def _off(name: str, default: str = "on") -> bool:
     return os.getenv(name, default).strip().lower() in (
@@ -130,9 +141,25 @@ async def _note(pool, stage, exc, opportunity_id, symbol) -> None:
         log.debug("shadow_bettor: failure note failed", exc_info=True)
 
 
-async def tick(pool) -> dict:
+async def tick(pool, *, decision_writing_allowed: bool = True,
+               integrity: str = INTEGRITY_OK) -> dict:
+    """One cycle. OBSERVATION IS UNCONDITIONAL; the DECISION is
+    not.
+
+    Owner directive 2026-09-19 20:2xZ: "OBSERVE MARKET = YES /
+    WRITE OPPORTUNITY = YES / WRITE DECISION = NO until policy
+    integrity is restored. Do not lose prospective market
+    observations because a decision policy fails integrity."
+
+    So the gate sits around the decision write ONLY. A market
+    observed during a drift is still evidence, and evidence
+    that was never written cannot be recovered later.
+    """
     stats = {"looked": 0, "opportunities": 0, "decisions": 0,
-             "unreadable": 0, "failures": 0, "status": "ok"}
+             "unreadable": 0, "failures": 0, "status": "ok",
+             "decisionWritingAllowed": decision_writing_allowed,
+             "policyIntegrity": integrity,
+             "decisionsWithheld": 0}
 
     # EVERY ORPHAN GETS A NAMED REASON, every cycle. This is the counter
     # whose absence let 31 opportunities sit beside zero decisions for an
@@ -201,6 +228,12 @@ async def tick(pool) -> dict:
 
         if was_new:
             stats["opportunities"] += 1
+            # THE FAIL-CLOSED GATE. The opportunity above is already
+            # written -- that is the point of putting the gate here and
+            # not at the top of the loop.
+            if not decision_writing_allowed:
+                stats["decisionsWithheld"] += 1
+                continue
             try:
                 _did, decided = await bettor.write_decision(
                     opportunity, state if state["readable"] else None,
@@ -240,29 +273,61 @@ async def run() -> None:
     # constraint was right to. The freeze is idempotent -- ALREADY_FROZEN
     # on every later boot -- and REFUSED if the declaration ever changes
     # under this version name, which is the whole point of freezing.
+    # ── THE V2 BOOT ORDER, exactly as mandated ───────────────────────
+    #
+    #   STORE READY -> V2 DECLARATION VERIFIED -> V2 RUNNING CODE SHA
+    #   VERIFIED -> V2 POLICY FROZEN -> DECISION WRITING ENABLED
+    #
+    # "There must be no interval where V2 code writes decisions as V1."
+    # That is why decision_writing_allowed starts FALSE and is only ever
+    # set true at the end of this sequence: there is no ordering of the
+    # steps below that can leave it true by accident.
     frozen = None
     sized = None
-    if ready["storeReady"]:
+    decision_writing_allowed = False
+    integrity = INTEGRITY_NOT_ESTABLISHED
+    integrity_why = "policy integrity has not been checked yet"
+
+    if not ready["storeReady"]:
+        integrity = INTEGRITY_STORE_NOT_READY
+        integrity_why = "; ".join(ready["problems"]) or "store not ready"
+    else:
+        # STEP 2: THE DECLARATION. A REFUSED freeze means the rules
+        # changed under a version already carrying rows.
         frozen = await store.freeze_policy(pool, policy=bpol.frozen_policy())
         if frozen["status"] == "REFUSED":
+            integrity = INTEGRITY_DECLARATION_REFUSED
+            integrity_why = frozen["why"]
             ready = dict(ready, storeReady=False,
                          problems=ready["problems"] + [frozen["why"]])
+        else:
+            # STEP 3: THE RUNNING CODE. On a fresh freeze the running
+            # sha IS the frozen one by construction; on a later boot
+            # freeze_policy compares them and reports the answer.
+            matches = frozen.get("codeShaMatches")
+            if frozen["status"] == "FROZEN":
+                matches = True
+            if matches is False:
+                # FAIL CLOSED. Collection continues; decisions do not.
+                integrity = INTEGRITY_DRIFT
+                integrity_why = (
+                    "running code sha %s does not match the frozen %s for "
+                    "%s; decision writing is blocked until policy "
+                    "integrity is restored"
+                    % (bpol.POLICY_CODE_SHA[:16],
+                       str(frozen.get("policyCodeSha"))[:16],
+                       bpol.BETTOR_POLICY_VERSION))
+                log.error("shadow_bettor: %s", integrity_why)
+            else:
+                # STEP 4/5: frozen and verified -> decisions enabled.
+                integrity = INTEGRITY_OK
+                integrity_why = "declaration and code sha both verified"
+                decision_writing_allowed = True
 
-        # THE $1,000 STANDARD, FROZEN BEFORE THE FIRST ELIGIBLE ENTRY.
-        #
-        # Owner directive 2026-09-19: "Before the first eligible BETTOR
-        # shadow trade: STANDARD_BETTOR_SHADOW_NOTIONAL_USD = 1000."
-        # There are zero eligible entries today, so this is the only
-        # moment at which the sizing rule cannot have been chosen to
-        # flatter a result that already exists.
-        #
-        # A REFUSED SIZING FREEZE DOES NOT STOP COLLECTION. Unlike the
-        # EV policy -- whose absence the decision table's foreign key
-        # makes fatal by design -- sizing is consulted only when an
-        # eligible entry exists, and none can exist while the frozen
-        # action set is [NO_TRADE]. "Do not delay prospective BETTOR
-        # collection while adding this reporting." It is recorded as a
-        # named problem and the tick goes on.
+        # THE $1,000 STANDARD, frozen before the first eligible entry.
+        # A REFUSED sizing freeze does NOT stop collection: sizing is
+        # consulted only once an entry is eligible, and none can be
+        # while the action set is [NO_TRADE].
         sized = await store.freeze_sizing_policy(
             pool, policy=szpol.frozen_policy())
         if sized["status"] == "REFUSED":
@@ -274,6 +339,10 @@ async def run() -> None:
             "problems": ready["problems"],
             "policy": bettor.POLICY_VERSION,
             "policyFreeze": (frozen or {}).get("status", "NOT_ATTEMPTED"),
+            "policyIntegrity": integrity,
+            "policyIntegrityWhy": integrity_why,
+            "decisionWritingAllowed": decision_writing_allowed,
+            "codeBoundary": bpol.CODE_BOUNDARY,
             "sizingFreeze": (sized or {}).get("status", "NOT_ATTEMPTED"),
             "sizingPolicy": szpol.SIZING_POLICY_VERSION,
             "standardNotionalUsd": szpol.STANDARD_BETTOR_SHADOW_NOTIONAL_USD,
@@ -292,10 +361,14 @@ async def run() -> None:
             await heartbeat("shadow_bettor", "store_not_ready", boot)
             await asyncio.sleep(BACKOFF_S)
 
+    beat_failures = 0
     while True:
         started = time.monotonic()
         try:
-            stats = await tick(pool)
+            stats = await tick(
+                pool,
+                decision_writing_allowed=decision_writing_allowed,
+                integrity=integrity)
         except Exception as exc:                               # noqa: BLE001
             log.warning("shadow_bettor: tick failed", exc_info=True)
             # THE ERROR TRAVELS WITH THE STATUS. `problems` below comes
@@ -319,11 +392,26 @@ async def run() -> None:
             stats["pipeline"] = await ops.pipeline_health(pool)
         except Exception:                                      # noqa: BLE001
             stats["pipeline"] = {"state": "NOT_IDENTIFIED"}
+        # A HEARTBEAT FAILURE MUST BE DIAGNOSABLE.
+        #
+        # This was log.debug, below the configured level, and it hid a
+        # TypeError on every beat for 62 minutes while COMMAND showed a
+        # stale tick_failed and the decision loop ran perfectly. The
+        # telemetry plane still may not take the decision plane down --
+        # so this catches, but it catches LOUDLY, names the exception,
+        # and records the failure in the database the same way a
+        # decision failure is recorded.
         try:
             await heartbeat("shadow_bettor",
                             str(stats.get("status") or "ok"), stats)
-        except Exception:                                      # noqa: BLE001
-            log.debug("shadow_bettor: heartbeat failed")
+            beat_failures = 0
+        except Exception as exc:                               # noqa: BLE001
+            beat_failures += 1
+            log.error("shadow_bettor: HEARTBEAT WRITE FAILED (%d in a row): "
+                      "%s: %s -- the decision loop is unaffected, but "
+                      "COMMAND's telemetry plane is now stale",
+                      beat_failures, type(exc).__name__, exc, exc_info=True)
+            await _note(pool, "NOT_IDENTIFIED", exc, None, "HEARTBEAT")
         await asyncio.sleep(
             BACKOFF_S if stats.get("status") == "venue_unreadable"
             else TICK_S)

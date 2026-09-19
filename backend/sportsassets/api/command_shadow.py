@@ -884,11 +884,112 @@ async def trade(pool, shadow_decision_id: str) -> dict:
 # ORDERED BY THE HIERARCHY. The primary engine is read first, and the
 # benchmark's feed sits directly under it so an operator can see at a
 # glance that one is healthy while the other is not.
-HEALTH_COMPONENTS = ("BETTOR_EV_ENGINE", "BETTOR_DECISION_PIPELINE",
-                     "INSTITUTIONAL_MARKET_DATA", "L2",
-                     "RN1_BENCHMARK_FEED", "RN1_LISTENER", "SHADOW_ENGINE",
-                     "SHADOW_WRITER", "LABEL_MATURITY", "DATABASE",
-                     "COMMAND_API")
+# ── THE BETTOR PLANES ARE SEPARATE COMPONENTS ────────────────────────
+#
+# Owner directive 2026-09-19 20:2xZ: "Do not collapse them into one
+# BETTOR status." On 2026-09-19 a single BETTOR_EV_ENGINE tile derived
+# from the heartbeat reported the primary lane STALE while the decision
+# loop was writing 18 of 18 -- because the HEALTH writer was broken and
+# the DECISION writer was not. One tile could not say both things.
+#
+# The correct presentation during that incident, which these five
+# BETTOR components now produce:
+#
+#   OPPORTUNITY COLLECTOR = HEALTHY
+#   DECISION PIPELINE     = HEALTHY
+#   POLICY INTEGRITY      = DRIFTED
+#   TELEMETRY             = DEGRADED
+#   BETTOR EV             = LEARNING / NO ELIGIBLE TRADES
+#
+# Each reads a DIFFERENT source: rows for the first two, the boot
+# marker for integrity, the heartbeat for telemetry, and the belief
+# state for EV. No component may be derived from another's source.
+BETTOR_COMPONENTS = ("BETTOR_OPPORTUNITY_COLLECTOR",
+                     "BETTOR_DECISION_PIPELINE",
+                     "BETTOR_POLICY_INTEGRITY",
+                     "BETTOR_TELEMETRY",
+                     "BETTOR_EV_STATUS")
+
+HEALTH_COMPONENTS = BETTOR_COMPONENTS + (
+    "INSTITUTIONAL_MARKET_DATA", "L2",
+    "RN1_BENCHMARK_FEED", "RN1_LISTENER", "SHADOW_ENGINE",
+    "SHADOW_WRITER", "LABEL_MATURITY", "DATABASE",
+    "COMMAND_API")
+
+# How stale the COLLECTOR's newest row may be before it is not healthy.
+# The worker ticks every 60 s, so 5 minutes is five missed cycles.
+COLLECTOR_STALE_AFTER_S = 300
+
+
+async def _bettor_planes(pool) -> dict:
+    """The five BETTOR components, each from its own source."""
+    now = datetime.now(tz=timezone.utc)
+
+    # 1. COLLECTOR -- from the opportunity rows themselves. Never from
+    #    the heartbeat: that is the plane that broke.
+    row = await _guard(
+        pool, "BETTOR_COLLECTOR_UNREAD", pool.fetchrow,
+        "SELECT count(*) AS n, max(observed_at) AS newest "
+        "FROM bettor_opportunities")
+    newest = row["newest"] if row else None
+    age = ((now - newest).total_seconds()
+           if isinstance(newest, datetime) else None)
+    collector = {
+        "state": ("NOT_ESTABLISHED" if age is None
+                  else "HEALTHY" if age <= COLLECTOR_STALE_AFTER_S
+                  else "STALE"),
+        "sourceTimestamp": _iso(newest),
+        "sourceAgeSeconds": age,
+        "opportunities": int((row["n"] if row else 0) or 0),
+        "detail": ("observations are written whether or not decisions "
+                   "are allowed; a policy drift never stops collection"),
+    }
+
+    # 2. POLICY INTEGRITY -- from the boot marker the worker writes.
+    boot = await _guard(
+        pool, "BETTOR_BOOT_UNREAD", pool.fetchval,
+        "SELECT value FROM ingestion_state WHERE key = 'workers_boot'")
+    b = _js(boot) or {}
+    integrity_state = b.get("policyIntegrity") or "NOT_ESTABLISHED"
+    integrity = {
+        "state": ("HEALTHY" if integrity_state == "VERIFIED"
+                  else "NOT_ESTABLISHED" if integrity_state
+                  in ("NOT_ESTABLISHED", None)
+                  else "BLOCKED"),
+        "policyIntegrityStatus": integrity_state,
+        "sourceTimestamp": b.get("at"),
+        "policyVersion": b.get("policy"),
+        "policySha": b.get("policySha"),
+        "policyCodeSha": b.get("policyCodeSha"),
+        "codeShaMatches": b.get("codeShaMatches"),
+        "codeBoundary": b.get("codeBoundary"),
+        "decisionWritingAllowed": b.get("decisionWritingAllowed"),
+        "detail": b.get("policyIntegrityWhy") or NOT_IDENTIFIED,
+    }
+
+    # 3. TELEMETRY -- from the heartbeat, and ONLY this component is.
+    beat = await _guard(
+        pool, "SERVICE_HEARTBEATS_UNREAD", pool.fetchrow,
+        "SELECT status, beat_at FROM service_heartbeats "
+        "WHERE service = 'shadow_bettor'")
+    beat_age = ((now - beat["beat_at"]).total_seconds()
+                if beat and isinstance(beat["beat_at"], datetime) else None)
+    telemetry = {
+        "state": ("NOT_ESTABLISHED" if beat_age is None
+                  else "HEALTHY" if beat_age <= STALE_AFTER_S
+                  else "DEGRADED"),
+        "sourceTimestamp": _iso(beat["beat_at"]) if beat else None,
+        "sourceAgeSeconds": beat_age,
+        "heartbeatStatus": (beat["status"] if beat else NOT_IDENTIFIED),
+        # THE WHOLE POINT OF THE SPLIT, said in the payload.
+        "affectsDecisionPipeline": False,
+        "detail": ("a stale heartbeat means the HEALTH writer is "
+                   "degraded; read the decision pipeline component for "
+                   "whether decisions are landing"),
+    }
+    return {"collector": collector, "integrity": integrity,
+            "telemetry": telemetry}
+
 
 
 async def health(pool) -> dict:
@@ -964,6 +1065,7 @@ async def health(pool) -> dict:
                   else "STALE")
 
     pipeline = await _pipeline(pool)
+    planes = await _bettor_planes(pool)
 
     components = {
         "RN1_BENCHMARK_FEED": {
@@ -1000,15 +1102,26 @@ async def health(pool) -> dict:
             "sourceTimestamp": None,
             "detail": "%d scored horizons" % int(scores_n or 0)},
         "SHADOW_ENGINE": from_beat("shadow_rn1"),
-        # FROM ITS OWN HEARTBEAT. Not from whether it has produced a
-        # decision, and never from RN1's feed: "LIVE / LEARNING" is a
-        # statement about the loop running, and an engine that is
-        # collecting honest NO_TRADEs is not down.
-        "BETTOR_EV_ENGINE": dict(
-            from_beat("shadow_bettor"),
-            pBettor=lanes.NOT_ESTABLISHED,
-            dependsOnRn1=False),
+        # FIVE BETTOR COMPONENTS, FIVE SOURCES. None is derived from
+        # another, which is why a broken telemetry writer can no longer
+        # make the primary lane read STALE.
+        "BETTOR_OPPORTUNITY_COLLECTOR": planes["collector"],
         "BETTOR_DECISION_PIPELINE": pipeline,
+        "BETTOR_POLICY_INTEGRITY": planes["integrity"],
+        "BETTOR_TELEMETRY": planes["telemetry"],
+        "BETTOR_EV_STATUS": {
+            # THE BELIEF STATE, not a liveness claim. An engine
+            # recording honest NO_TRADEs is not down; it is learning.
+            "state": "LEARNING",
+            "sourceTimestamp": None,
+            "pBettor": lanes.NOT_ESTABLISHED,
+            "pFill": "NOT_IDENTIFIED",
+            "eligibleTrades": 0,
+            "dependsOnRn1": False,
+            "detail": ("LEARNING / NO ELIGIBLE TRADES -- no independently "
+                       "validated Action EV exists, so NO_TRADE is the "
+                       "correct output and not a failure"),
+        },
         "COMMAND_API": {"state": "LIVE",
                         "sourceTimestamp": now.isoformat(),
                         "detail": "serving"},

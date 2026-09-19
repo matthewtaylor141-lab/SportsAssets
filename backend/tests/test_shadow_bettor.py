@@ -285,7 +285,11 @@ def test_the_rn1_feed_is_its_own_health_component():
     BETTOR does not depend on it."""
     comps = CS.HEALTH_COMPONENTS
     assert "RN1_BENCHMARK_FEED" in comps
-    assert comps[0] == "BETTOR_EV_ENGINE", "the primary engine is read first"
+    # FIVE BETTOR ROWS NOW, NOT ONE. The invariant is unchanged: the
+    # primary lane is read first. Which BETTOR row leads is a
+    # presentation choice; that a BETTOR row leads is the contract.
+    assert comps[0].startswith("BETTOR_"), "the primary lane is read first"
+    assert comps[0] == "BETTOR_OPPORTUNITY_COLLECTOR"
     assert len(set(comps)) == len(comps), "a duplicated key hides a component"
 
 
@@ -297,7 +301,7 @@ def test_the_feed_row_carries_the_four_named_fields():
 
 
 def test_bettor_health_does_not_depend_on_rn1():
-    assert "dependsOnRn1=False" in CS_SRC
+    assert '"dependsOnRn1": False' in CS_SRC
 
 
 def test_the_ui_draws_every_component_the_server_reports():
@@ -314,8 +318,10 @@ def test_the_ui_draws_every_component_the_server_reports():
 def test_the_ui_health_list_leads_with_bettor():
     block = SHADOW_JS[SHADOW_JS.index("const HEALTH_LABEL = {"):]
     block = block[:block.index("};")]
-    assert block.index("BETTOR_EV_ENGINE") < block.index("RN1_BENCHMARK_FEED")
-    assert block.index("BETTOR_EV_ENGINE") < block.index("RN1_LISTENER")
+    assert block.index("BETTOR_OPPORTUNITY_COLLECTOR") < \
+        block.index("RN1_BENCHMARK_FEED")
+    assert block.index("BETTOR_OPPORTUNITY_COLLECTOR") < \
+        block.index("RN1_LISTENER")
 
 
 # ── the writer actually writes ───────────────────────────────────────
@@ -559,7 +565,7 @@ BPOL_SRC = (BACKEND / "sportsassets" / "shadow_bettor_policy.py").read_text()
 
 def test_the_bettor_policy_is_its_own_and_not_rn1s():
     p = bpol.frozen_policy()
-    assert p["policyVersion"] == "BETTOR_EV_SHADOW_V1"
+    assert p["policyVersion"] == "BETTOR_EV_SHADOW_V2"
     assert p["policyVersion"] != rn1pol.RN1_SHADOW_POLICY_VERSION
     assert p["lane"] == lanes.BETTOR_EV_SHADOW
     assert p["policySha"] != rn1pol.POLICY_SHA
@@ -574,7 +580,7 @@ def test_freezing_bettor_does_not_disturb_rn1s_frozen_hashes():
     hash is ENFORCED, so moving it would make the store refuse RN1's own
     freeze on the next boot."""
     assert rn1pol.POLICY_SHA == rn1pol.policy_sha()
-    assert "shadow_policy.py" not in bpol.CODE_FILES
+    assert "shadow_policy.py" not in bpol.CODE_FILES_V1
     assert "shadow_bettor_policy.py" not in rn1pol.CODE_FILES
 
 
@@ -718,4 +724,197 @@ def test_the_declaration_hash_did_not_move_for_a_code_correction():
     reason."""
     assert bpol.policy_sha() == bpol.POLICY_SHA
     assert bpol.POLICY_CODE_SHA != bpol.POLICY_SHA
-    assert "shadow_bettor.py" in bpol.CODE_FILES
+    assert "shadow_bettor.py" in bpol.CODE_FILES_V1
+    # And V2 gates on the parsed decision path instead.
+    assert "shadow_bettor.py" in codesha.DECISION_PATH
+
+
+# ── V2: fail closed on policy code drift ─────────────────────────────
+#
+# Owner directive 2026-09-19 20:2xZ: "if RUNNING_POLICY_CODE_SHA !=
+# FROZEN_POLICY_CODE_SHA then POLICY_INTEGRITY_STATUS =
+# POLICY_CODE_DRIFT, DECISION_WRITING_ALLOWED = FALSE. Opportunity
+# collection continues."
+
+import sportsassets.workers.shadow_bettor as W
+from sportsassets import shadow_bettor_codesha as codesha
+
+
+def test_v2_is_the_running_policy_version():
+    assert bettor.POLICY_VERSION == "BETTOR_EV_SHADOW_V2"
+    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V2"
+    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V1"
+
+
+def test_v1s_recorded_hashes_are_kept_and_never_recomputed():
+    """"Do not rehash V1." Its frozen numbers are constants here so the
+    evidence that code changed after the freeze survives."""
+    assert bpol.V1_FROZEN_POLICY_SHA.startswith("6db08437ceed0dc8")
+    assert bpol.V1_FROZEN_POLICY_CODE_SHA.startswith("34fbb4ab992cf2a3")
+    # V2's declaration is a DIFFERENT hash -- it is a different policy.
+    assert bpol.POLICY_SHA != bpol.V1_FROZEN_POLICY_SHA
+
+
+def test_v2_uses_the_semantic_boundary_and_v1s_method_still_exists():
+    assert bpol.POLICY_CODE_SHA == codesha.semantic_code_sha()
+    assert bpol.CODE_BOUNDARY == codesha.BOUNDARY_VERSION
+    assert bpol.DECLARATION["codeShaEnforced"] is True
+    # V1's byte method is still callable and still hashes whole files.
+    assert callable(bpol.policy_code_sha_v1)
+
+
+def test_v2_canonical_semantics_are_declared():
+    """P_BETTOR NOT_ESTABLISHED, P_FILL NOT_IDENTIFIED, RN1 FALSE."""
+    assert bpol.BELIEF["pBettorStatus"] == "NOT_ESTABLISHED"
+    assert bpol.BELIEF["pFillStatus"] == "NOT_IDENTIFIED"
+    assert bpol.INDEPENDENCE["rn1FeaturesUsed"] is False
+    assert bpol.ACTION_SET == [sh.NO_TRADE]
+
+
+def test_the_comment_names_probabilities_not_belief():
+    """The old comment named belief(), which does not exist. Corrected
+    as part of V2, because correcting it moves the code hash."""
+    block = BETTOR_SRC[BETTOR_SRC.index("pFillStatus=lanes.NOT_IDENTIFIED")
+                       - 1400:]
+    block = block[:block.index("pFillStatus=lanes.NOT_IDENTIFIED")]
+    assert "probabilities()" in block
+    assert "NOT belief()" in block
+
+
+def test_drift_blocks_decisions_and_never_blocks_collection():
+    """The gate is around the DECISION write only."""
+    src = WORKER_SRC
+    assert "INTEGRITY_DRIFT = \"POLICY_CODE_DRIFT\"" in src
+    # decision writing starts FALSE and is only enabled at the end.
+    assert "decision_writing_allowed = False" in src
+    boot = src[src.index("decision_writing_allowed = False"):
+               src.index('boot = {"lane"')]
+    assert boot.index("freeze_policy") < boot.index(
+        "decision_writing_allowed = True")
+    # the gate sits AFTER the opportunity write in the tick
+    tick = src[src.index("async def tick("):src.index("async def run(")]
+    assert tick.index("record_opportunity") < tick.index(
+        "if not decision_writing_allowed:")
+    assert "decisionsWithheld" in tick
+
+
+def test_a_withheld_decision_is_counted_not_silent():
+    tick = WORKER_SRC[WORKER_SRC.index("async def tick("):]
+    assert 'stats["decisionsWithheld"] += 1' in tick
+    assert '"policyIntegrity": integrity' in tick
+
+
+def test_the_boot_marker_publishes_the_integrity_verdict():
+    for key in ("policyIntegrity", "policyIntegrityWhy",
+                "decisionWritingAllowed", "codeBoundary"):
+        assert '"%s"' % key in WORKER_SRC, key
+
+
+# ── the heartbeat, fixed and pinned ──────────────────────────────────
+
+
+def test_pipeline_health_converts_its_datetimes_by_name():
+    """"Explicitly convert the known datetime fields ... Unexpected
+    unsupported types should remain detectable." Not default=str."""
+    assert ops.TIMESTAMP_FIELDS == ("last_opportunity", "last_decision",
+                                    "last_failure")
+    code = "\n".join(l for l in OPS_SRC.splitlines()
+                     if not l.lstrip().startswith("#"))
+    assert "default=str" not in code
+    assert "astimezone(timezone.utc).isoformat()" in OPS_SRC
+
+
+def test_the_heartbeat_serializer_stays_strict():
+    """A blanket default= would fix this symptom and hide the next."""
+    db_src = (BACKEND / "sportsassets" / "db.py").read_text()
+    beat = db_src[db_src.index("async def heartbeat("):]
+    beat = beat[:beat.index("\nasync def ", 5)] if "\nasync def " in beat[5:] \
+        else beat[:2000]
+    assert "json.dumps(detail or {})" in beat
+    assert "default=" not in beat
+
+
+def test_a_heartbeat_failure_is_loud_and_recorded():
+    """It was log.debug, below the configured level, and hid a
+    TypeError on every beat for 62 minutes."""
+    # The LOOP heartbeat, not the store_not_ready one above it.
+    block = WORKER_SRC[WORKER_SRC.index("HEARTBEAT WRITE FAILED") - 900:]
+    block = block[:block.index("await asyncio.sleep(")]
+    assert "log.error" in block
+    code = "\n".join(l for l in block.splitlines()
+                     if not l.lstrip().startswith("#"))
+    assert "log.debug" not in code
+    assert "HEARTBEAT WRITE FAILED" in block
+    assert "_note(" in block
+
+
+def test_the_real_asyncpg_datetime_payload_serializes():
+    """THE REGRESSION, with the actual shape pipeline_health returns:
+    timezone-aware datetimes straight out of asyncpg."""
+    import json
+    from datetime import datetime, timezone as tz
+    row = {"opportunities": 349,
+           "last_opportunity": datetime(2026, 9, 19, 20, 0, 42, 384173,
+                                        tzinfo=tz.utc),
+           "decisions": 187,
+           "last_decision": datetime(2026, 9, 19, 20, 15, 31, 17595,
+                                     tzinfo=tz.utc),
+           "orphans": 223, "failures": 169,
+           "last_failure": datetime(2026, 9, 19, 19, 33, 19, 192574,
+                                    tzinfo=tz.utc)}
+    # Before the fix this raised TypeError.
+    with pytest.raises(TypeError):
+        json.dumps(row)
+    for field in ops.TIMESTAMP_FIELDS:
+        row[field] = row[field].astimezone(tz.utc).isoformat()
+    json.dumps({"status": "ok", "pipeline": row})   # strict, no default=
+    assert row["last_decision"] == "2026-09-19T20:15:31.017595+00:00"
+
+
+def test_a_null_timestamp_stays_null_rather_than_becoming_a_string():
+    """last_failure is None on a clean pipeline. 'None' as a string
+    would read as a real instant."""
+    from datetime import datetime
+    row = {"last_failure": None}
+    value = row.get("last_failure")
+    assert not isinstance(value, datetime)
+    assert value is None
+
+
+# ── COMMAND: five BETTOR planes, five sources ────────────────────────
+
+
+def test_command_shows_five_independent_bettor_components():
+    for key in ("BETTOR_OPPORTUNITY_COLLECTOR", "BETTOR_DECISION_PIPELINE",
+                "BETTOR_POLICY_INTEGRITY", "BETTOR_TELEMETRY",
+                "BETTOR_EV_STATUS"):
+        assert key in CS.HEALTH_COMPONENTS, key
+    # and the collapsed tile is gone
+    assert "BETTOR_EV_ENGINE" not in CS.HEALTH_COMPONENTS
+    for key in ("INSTITUTIONAL_MARKET_DATA", "RN1_BENCHMARK_FEED"):
+        assert key in CS.HEALTH_COMPONENTS
+
+
+def test_the_collector_is_not_derived_from_the_heartbeat():
+    """The whole incident: the health writer broke and the tile said
+    the primary lane was stale."""
+    src = (BACKEND / "sportsassets" / "api" / "command_shadow.py").read_text()
+    block = src[src.index("async def _bettor_planes("):]
+    block = block[:block.index("return {\"collector\"")]
+    collector = block[:block.index("# 2. POLICY INTEGRITY")]
+    assert "bettor_opportunities" in collector
+    assert "service_heartbeats" not in collector
+
+
+def test_telemetry_says_it_does_not_speak_for_decisions():
+    src = (BACKEND / "sportsassets" / "api" / "command_shadow.py").read_text()
+    assert '"affectsDecisionPipeline": False' in src
+
+
+def test_the_ui_draws_all_five_bettor_rows():
+    ui = (ROOT / "frontend" / "public" / "command" / "shadow.js").read_text()
+    for key in ("BETTOR_OPPORTUNITY_COLLECTOR", "BETTOR_POLICY_INTEGRITY",
+                "BETTOR_TELEMETRY", "BETTOR_EV_STATUS"):
+        assert key in ui, key
+    assert "integrityDetail" in ui and "telemetryDetail" in ui
+    assert "DECISION WRITING BLOCKED" in ui

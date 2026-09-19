@@ -43,6 +43,7 @@ import os
 
 from . import shadow as sh
 from . import shadow_bettor as bettor
+from . import shadow_bettor_codesha as codesha
 from . import shadow_lanes as lanes
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -157,6 +158,12 @@ DECLARATION = {
     "cashoutRuleVersion": CASHOUT_RULE_VERSION,
     "executionReconstruction": NOT_APPLICABLE,
     "executionReconstructionVersion": EXECUTION_RECONSTRUCTION_VERSION,
+    # WHICH CODE BOUNDARY THIS VERSION IS GATED ON. Part of the
+    # declaration, so the rule that decides whether decisions may be
+    # written is itself frozen rather than merely current practice.
+    "codeBoundary": codesha.BOUNDARY_VERSION,
+    "codeShaEnforced": True,
+    "supersedes": "BETTOR_EV_SHADOW_V1",
     "latencyPolicy": NOT_ESTABLISHED,
     "latencyPolicyVersion": LATENCY_POLICY_VERSION,
     # Scoring belongs to outcomes, and this lane has produced no action
@@ -178,12 +185,30 @@ def policy_sha(declaration: dict | None = None) -> str:
 
 # BETTOR's OWN implementing modules, in fixed order. shadow_policy.py is
 # deliberately absent: RN1's rule file implements nothing on this lane.
-CODE_FILES = ("shadow.py", "shadow_lanes.py", "shadow_bettor.py",
-              "shadow_bettor_policy.py")
+# ── V1's boundary, kept EXACTLY as it was ────────────────────────────
+#
+# "Do not change V1's historical hash methodology." This function still
+# hashes whole file bytes, so 34fbb4ab992cf2a3... remains reproducible
+# from the code frozen at 19:33 on 2026-09-19. Nothing calls it for
+# freezing any more; it exists so V1's recorded number stays checkable.
+#
+# ITS TWO DEFECTS, for the record, both fixed in V2's boundary and
+# NEITHER applied retroactively: bytes include comments (15 of the 16
+# lines that drifted it were comments), and two of these four files are
+# shared with RN1, so RN1's own edits would move BETTOR's hash.
+
+CODE_FILES_V1 = ("shadow.py", "shadow_lanes.py", "shadow_bettor.py",
+                 "shadow_bettor_policy.py")
+
+# The value recorded in production for V1, immutable.
+V1_FROZEN_POLICY_SHA = (
+    "6db08437ceed0dc82fb491d23e9da0a534ef255422f045a2d3345aa0b6b48101")
+V1_FROZEN_POLICY_CODE_SHA = (
+    "34fbb4ab992cf2a395c35a2b3b8bda89998a02096fb57d719ea836b68a234ad1")
 
 
-def policy_code_sha() -> str:
-    """Hash the implementing modules' bytes, or say NOT_IDENTIFIED.
+def policy_code_sha_v1() -> str:
+    """V1's boundary: whole file bytes, or NOT_IDENTIFIED.
 
     Never a partial hash: a digest over four files that silently became
     a digest over three would compare unequal for a reason nobody could
@@ -191,7 +216,7 @@ def policy_code_sha() -> str:
     """
     here = os.path.dirname(os.path.abspath(__file__))
     digest = hashlib.sha256()
-    for name in CODE_FILES:
+    for name in CODE_FILES_V1:
         try:
             with open(os.path.join(here, name), "rb") as fh:
                 digest.update(fh.read())
@@ -200,8 +225,21 @@ def policy_code_sha() -> str:
     return digest.hexdigest()
 
 
+# ── V2's boundary: the parsed decision path ──────────────────────────
+#
+# Owner directive 2026-09-19 20:2xZ. Defined in shadow_bettor_codesha
+# and pinned there by mutation tests: a comment or whitespace edit
+# leaves it unchanged, while a change to the action, a blocker,
+# pBettorStatus, pFillStatus or the lineage moves it.
+#
+# shadow_bettor_policy.py is deliberately NOT in that boundary. This
+# file IS the declaration, and the declaration is already covered by
+# POLICY_SHA; hashing it twice would make a prose edit here block
+# decision writing for no reason.
+
 POLICY_SHA = policy_sha()
-POLICY_CODE_SHA = policy_code_sha()
+POLICY_CODE_SHA = codesha.semantic_code_sha()
+CODE_BOUNDARY = codesha.BOUNDARY_VERSION
 
 
 def frozen_policy() -> dict:

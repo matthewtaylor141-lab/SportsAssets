@@ -136,6 +136,12 @@ async def annotate_orphans(pool, *, limit: int = 200) -> dict:
     return written
 
 
+# The columns of pipeline_health's query that come back as datetimes.
+# Named individually so a new timestamp column is a visible edit here
+# rather than a silent one covered by a catch-all serializer.
+TIMESTAMP_FIELDS = ("last_opportunity", "last_decision", "last_failure")
+
+
 async def pipeline_health(pool) -> dict:
     """What COMMAND shows, read from rows rather than inferred.
 
@@ -160,6 +166,28 @@ async def pipeline_health(pool) -> dict:
           (SELECT max(failed_at) FROM bettor_decision_failures) AS last_failure
         """, lanes.BETTOR_EV_SHADOW)
     h = dict(row)
+    # ── THE DEFECT THAT COST 62 HEARTBEATS ───────────────────────────
+    #
+    # asyncpg returns timestamptz as datetime objects, and db.heartbeat
+    # serializes its detail with json.dumps and NO default= handler. So
+    # from 19:13:51Z on 2026-09-19 every beat raised
+    #
+    #   TypeError: Object of type datetime is not JSON serializable
+    #
+    # which the worker swallowed with log.debug. COMMAND read a stale
+    # tick_failed row for 62 minutes while the decision loop was
+    # demonstrably writing 18 of 18.
+    #
+    # THE CONVERSION IS EXPLICIT AND BY NAME, not json.dumps(...,
+    # default=str). Owner directive 2026-09-19 20:2xZ: "Explicitly
+    # convert the known datetime fields ... Unexpected unsupported types
+    # should remain detectable." A blanket default= would have fixed
+    # this symptom and hidden the next one -- a Decimal, a UUID, an
+    # asyncpg Range -- behind a string that looks deliberate.
+    for field in TIMESTAMP_FIELDS:
+        value = h.get(field)
+        if isinstance(value, datetime):
+            h[field] = value.astimezone(timezone.utc).isoformat()
     # A RATE IS ONLY MEANINGFUL AGAINST A SETTLED DENOMINATOR. In-flight
     # opportunities are excluded, because counting them as misses would
     # make a healthy pipeline look like a failing one on every tick.
