@@ -31,11 +31,47 @@
   status = 200
   force = true
 
+# command.bettortoken.com IS COMMAND, AND NOTHING ELSE.
+#
+# Owner decision 2026-09-19: the COMMAND interface is the whole product on
+# that hostname. Performance, Mission and the rest of the React app are
+# obsolete there and must not be reachable.
+#
+# This is a full-URL `from`, which Netlify matches against the REQUEST HOST,
+# so it applies to command.bettortoken.com alone. www.bettortoken.com is
+# untouched and still serves the React app at / and COMMAND at /command/.
+#
+# WHY IT SITS BELOW THE API PROXY AND ABOVE THE SPA FALLBACK. Netlify takes
+# the first matching rule. The /api/command/* proxy above is path-only, so
+# it matches on EVERY host including this one -- which is required, because
+# COMMAND's core.endpoint() refuses to fetch anything outside /api/command/
+# and fetches same-origin. Below, the SPA fallback would otherwise hand
+# this host the React app, which is the exact thing being removed.
+#
+# COMMAND ROUTES ON THE HASH (location.hash + hashchange, no pushState), so
+# every view -- portfolio, orders, EV decisions, risk, intelligence,
+# reporting, audit trail, investor briefing -- lives on ONE document at /
+# and never reaches the server. The splat exists for the real files beside
+# it: command.css, motion.css, config.js, core.js, report.js, motion.js,
+# unlock.js, app.js and assets/.
+#
+# A path that is NOT one of those files 404s rather than falling through to
+# the old site. That is deliberate: an obsolete route should say it is gone,
+# not quietly serve the page it replaced.
+[[redirects]]
+  from = "https://command.bettortoken.com/*"
+  to = "/command/:splat"
+  status = 200
+  force = true
+
 # SPA fallback: real files (sw.js, assets) are served as-is; everything else
 # routes to index.html so react-router deep links work.
 #
 # /command/ is a REAL DIRECTORY in the publish root (frontend/public is
 # copied verbatim by Vite), so it wins over this rule without force.
+#
+# This is www.bettortoken.com's rule now. The host-scoped rule above takes
+# command.bettortoken.com before this one is reached.
 [[redirects]]
   from = "/*"
   to = "/index.html"
