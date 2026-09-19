@@ -125,16 +125,23 @@ SELECT 'collection|write_failures|' || count(*)::text || '|newest='
 \echo '--- 4. P_FILL VOCABULARY, PROSPECTIVE ONLY ---'
 -- The correction must show up in NEW rows and leave the old ones
 -- exactly as written. Two buckets, split at the running build's boot.
-SELECT 'p_fill|' || CASE
-         WHEN d.created_at > (SELECT (value ->> 'at')::timestamptz
-                                FROM ingestion_state WHERE key = 'workers_boot')
-         THEN 'AFTER_BOOT' ELSE 'BEFORE_BOOT' END
-       || '|' || COALESCE(d.p_fill_status, 'NULL')
-       || '|' || count(*)::text
-  FROM shadow_decisions d
- WHERE d.lane = 'BETTOR_EV_SHADOW'
- GROUP BY 1, 2
- ORDER BY 1, 2;
+-- GROUP BY THE REAL EXPRESSIONS, not by output position. Position 1
+-- here is the whole concatenated string, and it CONTAINS count(*) --
+-- which is why the first run of this file died on "ORDER BY position 2
+-- is not in select list". One output column, so the grouping keys have
+-- to be written out.
+WITH b AS (
+    SELECT CASE
+             WHEN d.created_at > (SELECT (value ->> 'at')::timestamptz
+                                    FROM ingestion_state
+                                   WHERE key = 'workers_boot')
+             THEN 'AFTER_BOOT' ELSE 'BEFORE_BOOT' END       AS windw,
+           COALESCE(d.p_fill_status, 'NULL')                AS status
+      FROM shadow_decisions d
+     WHERE d.lane = 'BETTOR_EV_SHADOW'
+)
+SELECT 'p_fill|' || b.windw || '|' || b.status || '|' || count(*)::text
+  FROM b GROUP BY b.windw, b.status ORDER BY b.windw, b.status;
 
 -- pBETTOR must still be NOT_ESTABLISHED everywhere: a BELIEF and a
 -- QUANTITY fall back to different words, and only pFill moved.
@@ -142,7 +149,7 @@ SELECT 'p_bettor|' || COALESCE(d.p_bettor_status, 'NULL') || '|'
        || count(*)::text
   FROM shadow_decisions d
  WHERE d.lane = 'BETTOR_EV_SHADOW'
- GROUP BY 1 ORDER BY 1;
+ GROUP BY d.p_bettor_status ORDER BY d.p_bettor_status;
 
 -- THE ROWS ALREADY WRITTEN ARE UNTOUCHED. An append-only table cannot
 -- be updated at all, but the count and the oldest instant are printed
@@ -188,7 +195,7 @@ SELECT 'acct|capital_timeline_rows|' || count(*)::text
 SELECT 'acct|action|' || d.proposed_action || '|' || count(*)::text
   FROM shadow_decisions d
  WHERE d.lane = 'BETTOR_EV_SHADOW'
- GROUP BY 1 ORDER BY 1;
+ GROUP BY d.proposed_action ORDER BY d.proposed_action;
 
 \echo ''
 \echo '--- SAFETY, RESTATED FROM ROWS ---'
