@@ -2158,7 +2158,16 @@ the change. The fix was to move the telemetry into
 `shadow_bettor_ops.py`, not to carve an exception into the test —
 `decide()` cannot reach it, and the import only runs one way.
 
-## 83. The fix never deployed, and the reason was my own commit order
+## 83. WRONG POST-MORTEM — superseded by section 84
+
+> **Everything below this line is incorrect and is kept only so the
+> mistake is legible.** I claimed the writer fix never deployed and
+> blamed my own `[skip render]` commit order. Render's deploy history
+> refutes both halves: `5f3aae2` went live at 18:57:04Z and `4a27260`
+> at 19:13:16Z. The code was running the whole time. I asserted a
+> mechanism I had not checked, and then held a commit back on the
+> strength of it. Section 84 has the real cause.
+
 
 Between 19:02Z and 19:17Z the BETTOR writer fix sat in `main` and never
 reached the running worker. Production at 19:17:13Z:
@@ -2189,3 +2198,48 @@ marker moved, and only then push skip-render work.
 `ingestion_state.workers_boot` already records
 `RENDER_GIT_COMMIT[:7]` and the boot instant, so which build is running
 is a row to read, never an inference from the repository.
+
+
+## 84. The real cause: BETTOR's policy was never frozen
+
+The watchdog from section 82 answered this in one read, which is the
+whole reason it exists — no inference, no symptom-chasing:
+
+```
+stage        DECISION_WRITE
+error_class  ForeignKeyViolationError
+error_text   insert or update on table "shadow_decisions" violates foreign
+             key constraint "shadow_decisions_policy_frozen"
+             DETAIL: Key (policy_version)=(BETTOR_EV_SHADOW_V1) is not
+             present in table "shadow_policy_versions".
+99 failures, latest 2026-09-19T19:23:37Z
+```
+
+Migration 070 makes `shadow_decisions.policy_version` a foreign key into
+`shadow_policy_versions` — the directive's "freeze the policy version
+before row 1", enforced by the database rather than by intention. I
+froze `RN1_SHADOW_V1` at 17:53:05Z and **never froze
+`BETTOR_EV_SHADOW_V1`**. Every BETTOR decision has been refused by a
+constraint I wrote, behaving exactly as designed.
+
+So the earlier "two bugs" diagnosis (section 80) was incomplete rather
+than wrong: the camelCase `RETURNING` read and the missing
+`bettor_opportunity_id` binding were both real and both fixed, and
+underneath them sat a third blocker that only became visible once the
+first two stopped masking it. Fixing a defect and finding the next one
+is not the same as having fixed the problem, and I reported it as the
+latter.
+
+**What this run establishes about the watchdog.** It named a foreign key
+violation, verbatim, with the offending key and the table it was missing
+from, 99 times, with the opportunity id and symbol on each row. The
+previous incarnation of this same failure cost an hour of guessing from
+`tick_failed` and an empty problems list.
+
+**Two corrections to the record.** `ROOT_CAUSE` for the *detection*
+incident stays `NOT_IDENTIFIED` (section 81) — this is a different
+incident. And a note on my own method: three times in this session I
+wrote down a cause before checking it (the `\echo` line was real; the
+`[skip render]` theory was not; "the fix is deployed and working" was
+premature). The deploy history and the failures table were both one
+read away in each case.
