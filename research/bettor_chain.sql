@@ -35,7 +35,7 @@ SELECT 'counter|last_bettor_opportunity_at|'
   FROM bettor_opportunities;
 
 SELECT 'counter|last_bettor_decision_at|'
-       || COALESCE(max(decided_at)::text, 'NONE')
+       || COALESCE(max(created_at)::text, 'NONE')
   FROM shadow_decisions WHERE lane = 'BETTOR_EV_SHADOW';
 
 \echo ''
@@ -73,12 +73,12 @@ SELECT 'first_chain|' || d.bettor_opportunity_id || '|'
        || d.rn1_features_used::text || '|'
        || COALESCE(d.rn1_observation_id, 'NO_RN1_OBSERVATION') || '|'
        || d.evidence_source || '|'
-       || d.decision_ts::text || '|' || d.decided_at::text || '|'
+       || d.decision_ts::text || '|' || d.created_at::text || '|'
        || jsonb_array_length(COALESCE(d.blockers, '[]'::jsonb))::text || '|'
        || COALESCE(d.reason_codes::text, '[]')
   FROM shadow_decisions d
  WHERE d.lane = 'BETTOR_EV_SHADOW'
- ORDER BY d.decided_at ASC
+ ORDER BY d.created_at ASC
  LIMIT 1;
 
 \echo ''
@@ -92,7 +92,7 @@ SELECT 'first_chain_opportunity|' || o.bettor_opportunity_id || '|'
  WHERE o.bettor_opportunity_id = (
          SELECT d.bettor_opportunity_id FROM shadow_decisions d
           WHERE d.lane = 'BETTOR_EV_SHADOW'
-          ORDER BY d.decided_at ASC LIMIT 1);
+          ORDER BY d.created_at ASC LIMIT 1);
 
 \echo ''
 \echo '--- BLOCKERS ON THAT DECISION, NAMED ---'
@@ -103,16 +103,16 @@ SELECT 'first_chain_blocker|' || b.value ->> 'code'
    AND d.shadow_decision_id = (
          SELECT d2.shadow_decision_id FROM shadow_decisions d2
           WHERE d2.lane = 'BETTOR_EV_SHADOW'
-          ORDER BY d2.decided_at ASC LIMIT 1);
+          ORDER BY d2.created_at ASC LIMIT 1);
 
 \echo ''
 \echo '--- THE NEWEST CHAIN TOO, so the proof is not a single lucky row ---'
 SELECT 'newest_chain|' || d.bettor_opportunity_id || '|'
        || d.shadow_decision_id || '|' || d.proposed_action || '|'
-       || d.decided_at::text
+       || d.created_at::text
   FROM shadow_decisions d
  WHERE d.lane = 'BETTOR_EV_SHADOW'
- ORDER BY d.decided_at DESC
+ ORDER BY d.created_at DESC
  LIMIT 5;
 
 \echo ''
