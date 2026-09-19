@@ -14,7 +14,11 @@ import time
 
 import pmx_production_read as prod
 
-TIMEOUT = (10.0, 30.0)
+# OBSERVED_PRODUCTION 2026-09-19: /v1/users answered in 11.2 s and
+# /v1/refdata/symbols had not answered at 30 s. The old (10, 30) was
+# shorter than this venue's own tail, so a slow endpoint was recorded as
+# a transport failure -- which is a statement about us, not about them.
+TIMEOUT = (10.0, 75.0)
 
 
 def _private_key_pem() -> str:

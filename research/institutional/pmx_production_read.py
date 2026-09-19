@@ -355,6 +355,23 @@ def identity_of(body) -> dict:
     return out
 
 
+def error_of(body) -> str:
+    """The venue's OWN reason for a non-2xx, short and never a payload.
+
+    Run 3 returned 400 on `balances` and the receipt said only "400",
+    which is not evidence -- it names no cause and suggests no fix. The
+    venue sends a reason; not reading it was the defect.
+    """
+    if not isinstance(body, dict):
+        return ""
+    for key in ("message", "error", "detail", "reason"):
+        if body.get(key):
+            return str(body[key])[:200]
+    if body.get("code") is not None:
+        return "code %s" % body["code"]
+    return ""
+
+
 def summarize(name: str, status: int, body) -> dict:
     """What a read SAW, without reproducing the payload.
 
@@ -363,6 +380,8 @@ def summarize(name: str, status: int, body) -> dict:
     the few figures the verification is for.
     """
     out = {"read": name, "status": status}
+    if isinstance(status, int) and status >= 400:
+        out["venueSaid"] = error_of(body) or "(no reason in the body)"
     if not isinstance(body, dict):
         out["shape"] = type(body).__name__
         return out

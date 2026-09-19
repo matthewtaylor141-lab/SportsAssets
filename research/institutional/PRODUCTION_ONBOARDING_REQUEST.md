@@ -41,22 +41,37 @@ Our firm today: **BettorToken LLC**, preproduction participant
 5. Our production **clearing member and trading account resource names** —
    `firms/<firm>/accounts/<account>`.
 
-## 3. Entitlements actually granted
+## 3. Entitlements — mostly answered by observation on 2026-09-19
 
-6. The **exact scope list** granted to our production credential. Our
-   preproduction credential carries:
-   `read:marketdata read:instruments read:l2marketdata read:orders
-   write:orders read:reports read:positions read:dropcopy read:accounts
-   write:accounts read:funding`
-   — we are **not** assuming production matches it.
-7. Specifically: is **`read:l2marketdata`** (documented as premium) granted
-   in production, and on what commercial terms?
-8. Is **`read:dropcopy`** granted?
+We authenticated to production and read our own token, so the scope list,
+`read:l2marketdata` and `read:dropcopy` are no longer questions. Our
+production credential carries eleven scopes, identical to preproduction's:
 
-*Context for 6–8: in preproduction, `GET /v1/accounts/accounts` returned 403
-with a token that carried `read:accounts`. We would like to understand
-whether the scope list is the whole permission model or whether additional
-per-endpoint entitlement applies.*
+```
+read:marketdata  read:instruments  read:l2marketdata  read:orders
+write:orders     read:reports      read:positions     read:dropcopy
+read:accounts    write:accounts    read:funding
+```
+
+One question survives, and it is now asked with evidence rather than as a
+guess:
+
+6. **`GET /v1/accounts/accounts` returns 403 with a token that carries
+   `read:accounts`.** This reproduces exactly across BOTH environments —
+   preproduction on 2026-09-10 and production on 2026-09-19, two separate
+   credentials, same endpoint, same 403, the scope present in the token
+   both times.
+
+   So the scope list appears not to be the whole permission model. What
+   additional entitlement governs that endpoint, and how is it granted?
+
+   Practical consequence: we cannot enumerate our own accounts through the
+   API, so the trading account resource name has to be supplied to us out
+   of band.
+
+7. Is **`read:l2marketdata`** — which we hold, and which your documentation
+   describes as premium — chargeable? We are asking about terms, not
+   access.
 
 ## 4. Economics
 
