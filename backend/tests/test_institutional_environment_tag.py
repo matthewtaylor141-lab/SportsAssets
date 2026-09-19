@@ -477,20 +477,23 @@ class TestThePreprodRuntimeTakesNoCredentialFromTheForm:
         src = WORKFLOW.read_text()
         for name in ("PMX_CLIENT_ID", "PMX_PARTICIPANT_ID", "PMX_KEY_ID",
                      "PMX_PRIVATE_KEY_B64"):
-            assert "secrets.%s" % name in src, name
+            assert "secrets.PMX_PREPROD_%s" % name[4:] in src, name
         assert "inputs.private_key_b64" not in src
         assert "inputs.client_id" not in src
 
     def test_a_missing_secret_refuses_before_any_request(self):
         src = WORKFLOW.read_text()
         assert "is not set in the secret store" in src
-        assert "PMX_PRIVATE_KEY_B64 is not set" in src
+        assert "PMX_PREPROD_PRIVATE_KEY_B64 is not set" in src
 
     def test_the_hosts_are_still_preprod_only(self):
         src = WORKFLOW.read_text()
         assert "api.preprod.polymarketexchange.com" in src
         assert "api.prod.polymarketexchange.com" not in src
-        assert "pmx-prod" not in src
+        # "pmx-prod" alone now collides with the filename
+        # pmx-production.yml, which this lane's header names to say where
+        # production credentials go. The host is what must be absent.
+        assert "pmx-prod.us.auth0.com" not in src
 
     def test_the_three_venue_operations_are_served_by_the_tested_module(self):
         # reconcile-order and order-stream USED to be inline heredoc
@@ -542,8 +545,10 @@ class TestThePreprodRuntimeTakesNoCredentialFromTheForm:
         step = [s for s in d["jobs"]["preprod"]["steps"]
                 if s.get("name") == "Run the preprod operation"][0]
         env = step["env"]
-        for name in ("PMX_CLIENT_ID", "PMX_PARTICIPANT_ID", "PMX_KEY_ID",
-                     "PMX_PRIVATE_KEY_B64"):
+        # PREFIXED since 2026-09-19: the unprefixed PMX_* slots hold the
+        # PRODUCTION credentials and are read by pmx-production.yml alone.
+        for name in ("PMX_PREPROD_CLIENT_ID", "PMX_PREPROD_PARTICIPANT_ID",
+                     "PMX_PREPROD_KEY_ID", "PMX_PREPROD_PRIVATE_KEY_B64"):
             assert "secrets.%s" % name in env[name], name
 
     def test_an_unhandled_exception_is_not_a_named_verdict(self):

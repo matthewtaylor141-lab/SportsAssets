@@ -26,10 +26,13 @@ TIMEOUT = (10.0, 30.0)
 # ── the verified authentication exchange, unchanged ──────────────────
 
 def _private_key_pem() -> str:
-    raw = os.environ["PMX_PRIVATE_KEY_B64"]
-    pem = base64.b64decode(raw).decode()
+    raw = os.environ["PMX_PREPROD_PRIVATE_KEY_B64"]
+    if "-----BEGIN" in raw[:64]:
+        return raw                     # a PEM pasted as-is
+    pem = base64.b64decode("".join(raw.split())).decode()
     if "BEGIN" not in pem:
-        raise RuntimeError("PMX_PRIVATE_KEY_B64 did not decode to a PEM")
+        raise RuntimeError(
+            "PMX_PREPROD_PRIVATE_KEY_B64 is neither a PEM nor base64 of one")
     return pem
 
 
@@ -59,8 +62,8 @@ def mint_token(session) -> tuple:
     """
     import jwt
 
-    cid = os.environ["PMX_CLIENT_ID"]
-    kid = os.environ["PMX_KEY_ID"]
+    cid = os.environ["PMX_PREPROD_CLIENT_ID"]
+    kid = os.environ["PMX_PREPROD_KEY_ID"]
     now = int(time.time())
     assertion = jwt.encode(
         {"iss": cid, "sub": cid, "aud": ops.CLIENT_ASSERTION_AUD,
@@ -89,8 +92,8 @@ def mint_token(session) -> tuple:
 
 def _headers(token: str) -> dict:
     return {"Authorization": "Bearer %s" % token,
-            "X-Client-Id": os.environ["PMX_CLIENT_ID"],
-            "x-participant-id": os.environ["PMX_PARTICIPANT_ID"],
+            "X-Client-Id": os.environ["PMX_PREPROD_CLIENT_ID"],
+            "x-participant-id": os.environ["PMX_PREPROD_PARTICIPANT_ID"],
             "Content-Type": "application/json"}
 
 

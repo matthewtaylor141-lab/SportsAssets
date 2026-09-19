@@ -14,9 +14,12 @@ name: pmx-production
 #     non-production host, the mirror image of the preprod lane's guard.
 #     Neither guard is parameterized; an environment that can be talked
 #     into being the other one is not a boundary.
-#   * It cannot pick up the preprod lane's keys. It reads PMX_PROD_*,
-#     which nothing else reads; the preprod lane reads PMX_* and
-#     additionally requires an explicit PREPROD attestation.
+#   * It cannot pick up the preprod lane's keys. It reads PMX_*; the
+#     preprod lane reads PMX_PREPROD_*. The PREFIX IS THE ATTESTATION:
+#     unprefixed means production, prefixed means preproduction. The
+#     production values were installed in the unprefixed slots first, so
+#     the lanes were named around them rather than asking for four
+#     secrets to be re-entered by hand.
 #
 # There is deliberately no `confirm` input, because there is nothing to
 # confirm: no action here can change anything at the venue.
@@ -32,7 +35,12 @@ on:
   workflow_dispatch:
     inputs:
       reads:
-        description: "comma-separated reads, or blank for all: whoami, users, accounts, positions, balance, balances, instruments, symbols, orders, executions"
+        description: "comma-separated reads, or blank for the account sweep: whoami, users, accounts, positions, balance, balances, instruments, symbols, orders, executions, bbo, book"
+        required: false
+        type: string
+        default: ""
+      symbol:
+        description: "instrument symbol, required by bbo and book (e.g. aec-nfl-ne-sea-2026-09-09)"
         required: false
         type: string
         default: ""
@@ -71,11 +79,11 @@ jobs:
       - name: Which credentials arrived
         # No network at all. Names only; no value is read or printed.
         env:
-          PMX_PROD_CLIENT_ID: ${{ secrets.PMX_PROD_CLIENT_ID }}
-          PMX_PROD_PARTICIPANT_ID: ${{ secrets.PMX_PROD_PARTICIPANT_ID }}
-          PMX_PROD_KEY_ID: ${{ secrets.PMX_PROD_KEY_ID }}
-          PMX_PROD_PRIVATE_KEY_B64: ${{ secrets.PMX_PROD_PRIVATE_KEY_B64 }}
-          PMX_PROD_ACCOUNT: ${{ secrets.PMX_PROD_ACCOUNT }}
+          PMX_CLIENT_ID: ${{ secrets.PMX_CLIENT_ID }}
+          PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}
+          PMX_KEY_ID: ${{ secrets.PMX_KEY_ID }}
+          PMX_PRIVATE_KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
+          PMX_ACCOUNT: ${{ secrets.PMX_ACCOUNT }}
         run: |
           set -euo pipefail
           export PYTHONPATH="$PWD/research/institutional:${PYTHONPATH:-}"
@@ -83,12 +91,13 @@ jobs:
 
       - name: Read production
         env:
-          PMX_PROD_CLIENT_ID: ${{ secrets.PMX_PROD_CLIENT_ID }}
-          PMX_PROD_PARTICIPANT_ID: ${{ secrets.PMX_PROD_PARTICIPANT_ID }}
-          PMX_PROD_KEY_ID: ${{ secrets.PMX_PROD_KEY_ID }}
-          PMX_PROD_PRIVATE_KEY_B64: ${{ secrets.PMX_PROD_PRIVATE_KEY_B64 }}
-          PMX_PROD_ACCOUNT: ${{ secrets.PMX_PROD_ACCOUNT }}
+          PMX_CLIENT_ID: ${{ secrets.PMX_CLIENT_ID }}
+          PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}
+          PMX_KEY_ID: ${{ secrets.PMX_KEY_ID }}
+          PMX_PRIVATE_KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
+          PMX_ACCOUNT: ${{ secrets.PMX_ACCOUNT }}
           READS: ${{ inputs.reads }}
+          SYMBOL: ${{ inputs.symbol }}
         run: |
           set -euo pipefail
           export PYTHONPATH="$PWD/research/institutional:${PYTHONPATH:-}"
@@ -100,7 +109,8 @@ jobs:
           #       exception must look like
           set +e
           python research/institutional/pmx_production_read.py verify \
-            --reads "$READS" --out "$RUNNER_TEMP/receipts.json"
+            --reads "$READS" --symbol "$SYMBOL" \
+            --out "$RUNNER_TEMP/receipts.json"
           RC=$?
           set -e
           if [ "$RC" -gt 1 ]; then exit "$RC"; fi

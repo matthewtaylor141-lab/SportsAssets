@@ -125,8 +125,13 @@ _PREPROD_HOSTS = frozenset({
     "pmx-preprod.us.auth0.com",
 } | {c.rsplit(":", 1)[0] for c in GRPC_CANDIDATES})
 
-CREDENTIALS_EXPECTED = ("PMX_CLIENT_ID", "PMX_PARTICIPANT_ID", "PMX_KEY_ID",
-              "PMX_PRIVATE_KEY_B64")
+# PREFIXED, and the prefix IS the attestation: an unprefixed PMX_* slot
+# is PRODUCTION and is read by the production lane alone. Renamed
+# 2026-09-19 when the PMX_* slots were filled with production values --
+# moving the preprod lane is free (it has no keys today) and moving the
+# production ones would have meant re-entering four secrets by hand.
+CREDENTIALS_EXPECTED = ("PMX_PREPROD_CLIENT_ID", "PMX_PREPROD_PARTICIPANT_ID",
+              "PMX_PREPROD_KEY_ID", "PMX_PREPROD_PRIVATE_KEY_B64")
 
 
 class NotPreprod(RuntimeError):

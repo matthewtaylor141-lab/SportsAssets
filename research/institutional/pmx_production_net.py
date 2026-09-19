@@ -18,12 +18,12 @@ TIMEOUT = (10.0, 30.0)
 
 
 def _private_key_pem() -> str:
-    raw = os.environ["PMX_PROD_PRIVATE_KEY_B64"]
+    raw = os.environ["PMX_PRIVATE_KEY_B64"]
     if "-----BEGIN" in raw[:64]:
         return raw                     # a PEM pasted as-is
     pem = base64.b64decode("".join(raw.split())).decode()
     if "BEGIN" not in pem:
-        raise RuntimeError("PMX_PROD_PRIVATE_KEY_B64 did not decode to a PEM")
+        raise RuntimeError("PMX_PRIVATE_KEY_B64 did not decode to a PEM")
     return pem
 
 
@@ -36,8 +36,8 @@ def mint_token(session) -> tuple:
     """
     import jwt
 
-    cid = os.environ["PMX_PROD_CLIENT_ID"]
-    kid = os.environ["PMX_PROD_KEY_ID"]
+    cid = os.environ["PMX_CLIENT_ID"]
+    kid = os.environ["PMX_KEY_ID"]
     now = int(time.time())
     assertion = jwt.encode(
         {"iss": cid, "sub": cid, "aud": prod.CLIENT_ASSERTION_AUD,
@@ -65,8 +65,8 @@ def mint_token(session) -> tuple:
 
 def _headers(token: str, rid: str) -> dict:
     return {"Authorization": "Bearer %s" % token,
-            "X-Client-Id": os.environ["PMX_PROD_CLIENT_ID"],
-            "x-participant-id": os.environ["PMX_PROD_PARTICIPANT_ID"],
+            "X-Client-Id": os.environ["PMX_CLIENT_ID"],
+            "x-participant-id": os.environ["PMX_PARTICIPANT_ID"],
             "X-Request-Id": rid,
             "Content-Type": "application/json"}
 
@@ -83,12 +83,16 @@ def run_verify(args) -> int:
         return 1
 
     names = [n.strip() for n in (args.reads or "").split(",") if n.strip()]
-    names = names or list(prod.READS)
-    # refuse the whole run before opening anything, if one name is not a read
-    for name in names:
-        prod.request_for(name)
-
+    symbol = (getattr(args, "symbol", "") or "").strip()
+    if not names:
+        # the default sweep skips the symbol reads, because a symbol is
+        # not guessable and an empty one is not a question worth asking
+        names = [n for n in prod.READS if n not in prod.SYMBOL_READS]
     account = (os.environ.get(prod.ACCOUNT_ENV) or "").strip()
+    # refuse the whole run before opening anything, if one name is not a
+    # read or a symbol read has no symbol
+    for name in names:
+        prod.request_for(name, account, symbol)
     session = requests.Session()
 
     t0 = time.time()
@@ -117,7 +121,7 @@ def run_verify(args) -> int:
     scopes = prod.scopes_of(token)
     results, first_probe = [], None
     for name in names:
-        method, url, body = prod.request_for(name, account)
+        method, url, body = prod.request_for(name, account, symbol)
         rid = prod.request_id()
         t1 = time.time()
         try:
@@ -151,6 +155,7 @@ def run_verify(args) -> int:
         scopes=scopes,
         scopeCount=len(scopes),
         accountSupplied=bool(account),
+        symbol=symbol or None,
         reads=results,
         permissionDenied=denied,
         readsAttempted=len(results),

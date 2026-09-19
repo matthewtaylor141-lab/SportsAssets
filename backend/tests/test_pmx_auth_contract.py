@@ -130,9 +130,10 @@ def wire(monkeypatch):
     fake_jwt = _RecordingJWT()
     monkeypatch.setitem(sys.modules, "jwt", fake_jwt)
     pem = b"-----BEGIN PRIVATE KEY-----\nnot-a-key\n-----END PRIVATE KEY-----\n"
-    monkeypatch.setenv("PMX_PRIVATE_KEY_B64", base64.b64encode(pem).decode())
-    monkeypatch.setenv("PMX_CLIENT_ID", "client-id")
-    monkeypatch.setenv("PMX_KEY_ID", "key-id")
+    monkeypatch.setenv("PMX_PREPROD_PRIVATE_KEY_B64",
+                       base64.b64encode(pem).decode())
+    monkeypatch.setenv("PMX_PREPROD_CLIENT_ID", "client-id")
+    monkeypatch.setenv("PMX_PREPROD_KEY_ID", "key-id")
 
     import pmx_preprod_net as net
 
@@ -257,36 +258,37 @@ class TestTheWorkflowSignsTheSameThing:
         src = self.WF.read_text()
         assert '"Content-Type": "application/x-www-form-urlencoded"' in src
 
-    def test_the_lane_refuses_a_credential_not_attested_as_preprod(self):
-        """The hosts were always preprod; the CREDENTIAL's environment is
-        not visible in a key, so it is attested and the refusal is
-        structural. Production values belong in PMX_PROD_*."""
-        src = self.WF.read_text()
-        assert 'PMX_ENVIRONMENT: ${{ secrets.PMX_ENVIRONMENT }}' in src
-        assert '"${PMX_ENVIRONMENT:-}" != "PREPROD"' in src
-        assert "ENVIRONMENT_NOT_ATTESTED_AS_PREPROD" in src
-        # and it is the FIRST gate: it must run before the key is decoded
-        step = src.split("Stage the key from the secret store", 1)[1]
-        assert step.index("ENVIRONMENT_NOT_ATTESTED_AS_PREPROD") < \
-            step.index("base64 -d")
+    def test_exactly_one_workflow_reads_each_credential_namespace(self):
+        """Rewritten twice on 2026-09-19, and the reasoning is kept.
 
-    def test_only_the_production_lane_reads_a_production_credential(self):
-        """Rewritten 2026-09-19. This test used to assert that NO workflow
-        reads PMX_PROD_*, on the grounds that no production path was
-        authorized. The owner then authorized one -- read-only, against an
-        unfunded account -- so the rule is no longer "none" but "exactly
-        one, and it is not this one". Naming PMX_PROD_* in the preprod
-        lane's refusal message is still fine; reading it there is not.
+        First it asserted that NO workflow reads a production credential,
+        because no production path was authorized. The owner then
+        authorized one -- read-only, against an unfunded account.
+
+        Then the namespaces were swapped: the production values were
+        already installed in the unprefixed PMX_* slots, so rather than
+        have four secrets re-entered by hand, the PRODUCTION lane took
+        the unprefixed namespace and the PREPROD lane moved to
+        PMX_PREPROD_*. The prefix is now the attestation, which replaced
+        a separate PMX_ENVIRONMENT secret that had to be remembered.
         """
-        readers = sorted(p.name for p in self.WF.parent.glob("*.yml")
-                         if "secrets.PMX_PROD_" in p.read_text())
-        assert readers == ["pmx-production.yml"]
-        assert "secrets.PMX_PROD_" not in self.WF.read_text()
+        def readers(marker):
+            return sorted(p.name for p in self.WF.parent.glob("*.yml")
+                          if marker in p.read_text())
 
-    def test_the_preprod_lane_is_the_only_reader_of_preprod_credentials(self):
-        readers = sorted(p.name for p in self.WF.parent.glob("*.yml")
-                         if "secrets.PMX_CLIENT_ID" in p.read_text())
-        assert readers == ["pmx-preprod.yml"]
+        assert readers("secrets.PMX_PREPROD_") == ["pmx-preprod.yml"]
+        assert readers("secrets.PMX_CLIENT_ID") == ["pmx-production.yml"]
+
+    def test_the_preprod_lane_reads_no_unprefixed_slot(self):
+        src = self.WF.read_text()
+        for name in ("PMX_CLIENT_ID", "PMX_PARTICIPANT_ID", "PMX_KEY_ID",
+                     "PMX_PRIVATE_KEY_B64", "PMX_ACCOUNT"):
+            assert "secrets.%s " % name not in src
+            assert "secrets.%s }}" % name not in src
+
+    def test_the_environment_attestation_secret_is_gone(self):
+        """Replaced by the prefix, which has no moving part to forget."""
+        assert "PMX_ENVIRONMENT:" not in self.WF.read_text()
 
     def test_the_key_staging_step_names_every_way_it_can_fail(self):
         """Run 25 died on the runner's own "base64: invalid input", which

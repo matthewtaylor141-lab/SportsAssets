@@ -11,7 +11,7 @@ pinned below:
   2. absence -- no insert, cancel, replace, preview or funding path
      appears in either production source file, asserted against the
      text, and the workflow re-checks it before staging a credential;
-  3. separation -- production reads PMX_PROD_*, preprod reads PMX_*,
+  3. separation -- production reads PMX_*, preprod reads PMX_PREPROD_*,
      the host guards are mirror images, and neither is parameterized.
 
 NOTHING HERE OPENS A SOCKET.
@@ -79,8 +79,22 @@ class TestItCannotLeaveProduction:
 
     def test_every_read_url_is_a_production_host(self):
         for name in prod.READS:
-            _method, url, _body = prod.request_for(name, "acct")
+            _method, url, _body = prod.request_for(name, "acct", "a-symbol")
             assert url.startswith("https://api.prod.polymarketexchange.com")
+
+    def test_a_symbol_read_refuses_an_empty_or_path_bearing_symbol(self):
+        """A symbol is a slug. If it could carry a slash it could
+        retarget the path, which is the one way an allow-list of paths
+        can be talked out of being one."""
+        for name in prod.SYMBOL_READS:
+            with pytest.raises(prod.SymbolRequired):
+                prod.request_for(name, "acct", "")
+            for bad in ("a/../b", "s?x=1", "s#f"):
+                with pytest.raises(prod.SymbolRequired):
+                    prod.request_for(name, "acct", bad)
+
+    def test_the_symbol_reads_are_the_live_market_ones(self):
+        assert sorted(prod.SYMBOL_READS) == ["bbo", "book"]
 
     def test_a_preprod_host_is_refused(self):
         for host in ("https://api.preprod.polymarketexchange.com/v1/whoami",
@@ -101,17 +115,33 @@ class TestItCannotLeaveProduction:
 
 class TestTheTwoLanesCannotTakeEachOthersKeys:
 
-    def test_production_reads_only_prod_named_credentials(self):
+    def test_production_holds_the_unprefixed_slots(self):
+        """THE PREFIX IS THE ATTESTATION. Unprefixed means production,
+        prefixed means preproduction. The production values were
+        installed in the unprefixed slots first, so the lanes were named
+        around them rather than asking for four secrets to be re-entered.
+        """
         assert prod.CREDENTIALS_EXPECTED == (
-            "PMX_PROD_CLIENT_ID", "PMX_PROD_PARTICIPANT_ID",
-            "PMX_PROD_KEY_ID", "PMX_PROD_PRIVATE_KEY_B64")
-        assert prod.ACCOUNT_ENV == "PMX_PROD_ACCOUNT"
+            "PMX_CLIENT_ID", "PMX_PARTICIPANT_ID",
+            "PMX_KEY_ID", "PMX_PRIVATE_KEY_B64")
+        assert prod.ACCOUNT_ENV == "PMX_ACCOUNT"
+
+    def test_preprod_holds_the_prefixed_slots(self):
+        assert all(n.startswith("PMX_PREPROD_")
+                   for n in pre.CREDENTIALS_EXPECTED)
+
+    def test_neither_namespace_is_a_prefix_of_a_slot_in_the_other(self):
+        # the failure this rules out: a lane reading PMX_CLIENT_ID and
+        # silently matching PMX_PREPROD_CLIENT_ID, or the reverse
+        for a in prod.CREDENTIALS_EXPECTED:
+            for b in pre.CREDENTIALS_EXPECTED:
+                assert a != b and not b.endswith("_" + a)
 
     def test_no_credential_name_is_shared_with_preprod(self):
         assert not (set(prod.CREDENTIALS_EXPECTED)
                     & set(pre.CREDENTIALS_EXPECTED))
 
-    def test_the_production_source_never_names_a_preprod_slot(self):
+    def test_the_production_source_never_names_a_prefixed_slot(self):
         for path in SOURCES:
             text = path.read_text()
             for name in pre.CREDENTIALS_EXPECTED:
@@ -125,9 +155,9 @@ class TestTheTwoLanesCannotTakeEachOthersKeys:
         out = prod.credential_presence()
         assert out["verdict"] == prod.A_SECRET_MISSING
         assert sorted(out["missing"]) == sorted(prod.CREDENTIALS_EXPECTED)
-        monkeypatch.setenv("PMX_PROD_CLIENT_ID", "a-real-looking-value")
+        monkeypatch.setenv("PMX_CLIENT_ID", "a-real-looking-value")
         out = prod.credential_presence()
-        assert out["present"] == ["PMX_PROD_CLIENT_ID"]
+        assert out["present"] == ["PMX_CLIENT_ID"]
         assert "a-real-looking-value" not in json.dumps(out)
 
 
@@ -221,12 +251,12 @@ class TestTheWorkflow:
 
         spec = yaml.safe_load(self.WF.read_text())
         inputs = (spec.get(True) or spec.get("on"))["workflow_dispatch"]
-        assert set(inputs["inputs"]) == {"reads"}
+        assert set(inputs["inputs"]) == {"reads", "symbol"}
 
     def test_it_checks_for_an_order_path_before_staging_a_credential(self):
         src = self.WF.read_text()
         assert src.index("Confirm the lane has no order path") < \
-            src.index("secrets.PMX_PROD_")
+            src.index("secrets.PMX_CLIENT_ID")
         for bad in ("/v1/trading/orders", "/v1/funding"):
             assert bad in src          # named in the grep guard
 

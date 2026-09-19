@@ -59,11 +59,11 @@ class TestTheFourAuthOutcomes:
         assert got["missing"] == list(ops.CREDENTIALS_EXPECTED)
 
     def test_some_present_is_unavailable_to_this_workflow(self):
-        got = ops.credential_presence({"PMX_CLIENT_ID": "a",
-                                       "PMX_KEY_ID": "b"})
+        got = ops.credential_presence({"PMX_PREPROD_CLIENT_ID": "a",
+                                       "PMX_PREPROD_KEY_ID": "b"})
         assert got["verdict"] == ops.A_SECRET_UNAVAILABLE
-        assert got["present"] == ["PMX_CLIENT_ID", "PMX_KEY_ID"]
-        assert "PMX_PRIVATE_KEY_B64" in got["missing"]
+        assert got["present"] == ["PMX_PREPROD_CLIENT_ID", "PMX_PREPROD_KEY_ID"]
+        assert "PMX_PREPROD_PRIVATE_KEY_B64" in got["missing"]
 
     def test_whitespace_is_not_a_secret(self):
         got = ops.credential_presence({n: "   " for n in ops.CREDENTIALS_EXPECTED})

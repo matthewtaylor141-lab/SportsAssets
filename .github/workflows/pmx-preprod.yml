@@ -20,8 +20,10 @@ name: pmx-preprod
 # name and key id in plain text in their logs, for anyone who can read this
 # repository's Actions history.
 #
-# They are now PMX_CLIENT_ID / PMX_PARTICIPANT_ID / PMX_KEY_ID /
-# PMX_PRIVATE_KEY_B64 in the repository secret store, so the runner masks
+# They are now PMX_PREPROD_CLIENT_ID / PMX_PREPROD_PARTICIPANT_ID /
+# PMX_PREPROD_KEY_ID / PMX_PREPROD_PRIVATE_KEY_B64 in the repository secret
+# store -- PREFIXED, because the unprefixed PMX_* slots are PRODUCTION and
+# belong to pmx-production.yml -- so the runner masks
 # them, nobody has to paste a key into a web form to run a read, and a
 # scheduled or scripted dispatch becomes possible at all. Every one of them
 # is read from the event-free `secrets` context into the SCRIPT rather than
@@ -78,43 +80,35 @@ jobs:
         # so `env:` is safe for it -- unlike a workflow_dispatch input,
         # which is printed verbatim in the step's env block.
         env:
-          KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
-          PMX_ENVIRONMENT: ${{ secrets.PMX_ENVIRONMENT }}
+          KEY_B64: ${{ secrets.PMX_PREPROD_PRIVATE_KEY_B64 }}
         run: |
           set -euo pipefail
           umask 077
-          # ── THE ENVIRONMENT ATTESTATION ────────────────────────────
+          # ── THE PREFIX IS THE ATTESTATION ──────────────────────────
           #
-          # Added 2026-09-19, after the PMX_* slots were found to be
-          # holding PRODUCTION credentials. Nothing ran -- run 25 had
-          # already failed at decoding and this lane has no schedule --
-          # but it was one working paste away from signing a PRODUCTION
+          # On 2026-09-19 the unprefixed PMX_* slots turned out to hold
+          # PRODUCTION credentials. Nothing ran -- run 25 had already
+          # failed at decoding and this lane has no schedule -- but it
+          # was one working paste away from signing a PRODUCTION
           # assertion and posting it to the PREPRODUCTION Auth0 tenant.
           #
-          # This lane is preproduction by construction: every host below
-          # is fixed to preprod and `assert_preprod` refuses anything
-          # else. What it could NOT check is which environment the
-          # CREDENTIAL belongs to, because that is not visible in a key.
-          # So it is attested instead, and the refusal is structural
-          # rather than a note in a README: no attestation, no run.
+          # The first fix was a separate PMX_ENVIRONMENT secret to attest
+          # the environment. That is now gone, replaced by something with
+          # no moving part: this lane reads PMX_PREPROD_*, the production
+          # lane reads PMX_*, and the two namespaces do not intersect.
+          # An unprefixed slot is production; a prefixed one is
+          # preproduction. Nothing to set, nothing to forget, and no way
+          # for either lane to pick up the other's keys.
           #
-          # PRODUCTION CREDENTIALS DO NOT GO IN PMX_*. They go in
-          # PMX_PROD_* and are read by a production path that does not
-          # exist yet and is not authorized yet.
-          if [ "${PMX_ENVIRONMENT:-}" != "PREPROD" ]; then
-            echo "ENVIRONMENT_NOT_ATTESTED_AS_PREPROD"
-            echo "  This workflow only ever contacts preproduction hosts."
-            echo "  It will not use a credential that has not been"
-            echo "  attested as a PREPRODUCTION credential."
-            echo "  Set the repository secret PMX_ENVIRONMENT to PREPROD"
-            echo "  once PMX_CLIENT_ID / PMX_PARTICIPANT_ID / PMX_KEY_ID /"
-            echo "  PMX_PRIVATE_KEY_B64 hold PREPROD values."
-            echo "  Production values belong in PMX_PROD_*, never here."
-            exit 1
-          fi
+          # The hosts were never the problem: every one below is fixed to
+          # preprod and `assert_preprod` refuses anything else.
           # NOTHING BELOW ECHOES THE VALUE. Every branch reports a NAME.
           if [ -z "${KEY_B64:-}" ]; then
-            echo "SECRET_MISSING: PMX_PRIVATE_KEY_B64 is not set"; exit 1
+            echo "SECRET_MISSING: PMX_PREPROD_PRIVATE_KEY_B64 is not set"
+            echo "  Preproduction credentials go in PMX_PREPROD_*."
+            echo "  The unprefixed PMX_* slots are PRODUCTION and are read"
+            echo "  by pmx-production.yml, never by this workflow."
+            exit 1
           fi
           # EITHER FORM IS ACCEPTED, because the first attempt on 2026-09-19
           # (run 25) died on "base64: invalid input" -- the secret was set but
@@ -129,7 +123,7 @@ jobs:
           else
             printf '%s' "$KEY_B64" | tr -d '[:space:]' | base64 -d \
               > "$RUNNER_TEMP/pk.pem" 2>/dev/null || {
-              echo "SECRET_PRESENT_BUT_NOT_DECODABLE: PMX_PRIVATE_KEY_B64 is"
+              echo "SECRET_PRESENT_BUT_NOT_DECODABLE: the preprod key is"
               echo "  set but is neither a PEM nor valid base64 of one."
               echo "  Re-set it with:  base64 -w0 <key>.pem"
               echo "  (macOS: base64 -i <key>.pem | tr -d '\\n')"
@@ -150,12 +144,12 @@ jobs:
           ACTION: ${{ inputs.action }}
           ARG: ${{ inputs.arg }}
           CONFIRM: ${{ inputs.confirm }}
-          PMX_CLIENT_ID: ${{ secrets.PMX_CLIENT_ID }}
-          PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}
-          PMX_KEY_ID: ${{ secrets.PMX_KEY_ID }}
+          PMX_PREPROD_CLIENT_ID: ${{ secrets.PMX_PREPROD_CLIENT_ID }}
+          PMX_PREPROD_PARTICIPANT_ID: ${{ secrets.PMX_PREPROD_PARTICIPANT_ID }}
+          PMX_PREPROD_KEY_ID: ${{ secrets.PMX_PREPROD_KEY_ID }}
         run: |
           set -euo pipefail
-          for v in PMX_CLIENT_ID PMX_PARTICIPANT_ID PMX_KEY_ID; do
+          for v in PMX_PREPROD_CLIENT_ID PMX_PREPROD_PARTICIPANT_ID PMX_PREPROD_KEY_ID; do
             [ -n "${!v:-}" ] || { echo "refused: $v is not set in the secret store"; exit 1; }
           done
           case "$ACTION" in
@@ -171,9 +165,9 @@ jobs:
           import json, os, pathlib, sys, time, uuid
           import jwt, requests
           act = os.environ["ACTION"]; arg = os.environ.get("ARG", "")
-          cid = os.environ["PMX_CLIENT_ID"]; kid = os.environ["PMX_KEY_ID"]
+          cid = os.environ["PMX_PREPROD_CLIENT_ID"]; kid = os.environ["PMX_PREPROD_KEY_ID"]
           dom = os.environ["PMX_AUTH0_DOMAIN"]; base = os.environ["PMX_BASE_URL"].rstrip("/")
-          aud = os.environ["PMX_AUDIENCE"]; pid = os.environ["PMX_PARTICIPANT_ID"]
+          aud = os.environ["PMX_AUDIENCE"]; pid = os.environ["PMX_PREPROD_PARTICIPANT_ID"]
           pk = open(os.path.join(os.environ["RUNNER_TEMP"], "pk.pem")).read()
           if act == "health":
               r = requests.get(f"{base}/v1/health", timeout=30)
@@ -350,10 +344,10 @@ jobs:
       - name: Run the preprod operation
         if: ${{ contains(fromJSON('["auth","reconcile-order","order-stream","grpc-probe"]'), inputs.action) }}
         env:
-          PMX_CLIENT_ID: ${{ secrets.PMX_CLIENT_ID }}
-          PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}
-          PMX_KEY_ID: ${{ secrets.PMX_KEY_ID }}
-          PMX_PRIVATE_KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
+          PMX_PREPROD_CLIENT_ID: ${{ secrets.PMX_PREPROD_CLIENT_ID }}
+          PMX_PREPROD_PARTICIPANT_ID: ${{ secrets.PMX_PREPROD_PARTICIPANT_ID }}
+          PMX_PREPROD_KEY_ID: ${{ secrets.PMX_PREPROD_KEY_ID }}
+          PMX_PREPROD_PRIVATE_KEY_B64: ${{ secrets.PMX_PREPROD_PRIVATE_KEY_B64 }}
           ARG: ${{ inputs.arg }}
         run: |
           set -euo pipefail

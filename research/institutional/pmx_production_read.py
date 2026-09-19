@@ -21,9 +21,10 @@ HOW "NO ORDER" IS ENFORCED, rather than promised:
   * Every entry in it is a read. No insert, cancel, replace, preview or
     funding path appears anywhere in this module, and a test asserts
     their absence from the source text.
-  * The credential slots are PMX_PROD_*, which nothing else reads. The
-    preprod lane reads PMX_* and additionally requires an explicit
-    PREPROD attestation, so neither lane can pick up the other's keys.
+  * The credential slots are PMX_*, which only this lane reads. The
+    preprod lane reads PMX_PREPROD_*. The prefix IS the attestation:
+    an unprefixed slot is production, a prefixed one is preproduction,
+    and neither lane can pick up the other's keys.
 
 THE TWO AUDIENCES, as corrected on 2026-09-19: the `aud` CLAIM inside the
 signed assertion is Auth0's TOKEN ENDPOINT; the `audience` FORM FIELD of
@@ -67,11 +68,11 @@ _PRODUCTION_HOSTS = frozenset({
     "pmx-prod.us.auth0.com",
 })
 
-CREDENTIALS_EXPECTED = ("PMX_PROD_CLIENT_ID", "PMX_PROD_PARTICIPANT_ID",
-                        "PMX_PROD_KEY_ID", "PMX_PROD_PRIVATE_KEY_B64")
+CREDENTIALS_EXPECTED = ("PMX_CLIENT_ID", "PMX_PARTICIPANT_ID",
+                        "PMX_KEY_ID", "PMX_PRIVATE_KEY_B64")
 # Needed only by the balance and positions reads, which say so by name
 # rather than failing obscurely.
-ACCOUNT_ENV = "PMX_PROD_ACCOUNT"
+ACCOUNT_ENV = "PMX_ACCOUNT"
 
 
 class NotProduction(RuntimeError):
@@ -115,12 +116,26 @@ READ_ONLY_PATHS = {
     "symbols":      ("POST", "/v1/refdata/symbols",         "page"),
     "orders":       ("POST", "/v1/report/orders/search",    "search"),
     "executions":   ("POST", "/v1/report/executions/search", "search"),
+    # THE LIVE MARKET READS. These are the reason production beats
+    # preproduction for observation: preprod's instrument universe is
+    # disjoint from the one RN1 actually trades (OBSERVED_PREPROD
+    # 2026-09-10: aec-itfme-matesta-leoros-2026-09-10 -> 404 instrument
+    # does not exist), so no preprod book can measure real overlap,
+    # real depth or real latency. Both are GETs and take a symbol.
+    "bbo":          ("GET",  "/v1/orderbook/{symbol}/bbo",  "symbol"),
+    "book":         ("GET",  "/v1/orderbook/{symbol}",      "symbol"),
 }
 
 READS = tuple(READ_ONLY_PATHS)
+SYMBOL_READS = tuple(n for n, v in READ_ONLY_PATHS.items()
+                     if v[2] == "symbol")
 
 
-def request_for(name: str, account: str = "") -> tuple:
+class SymbolRequired(RuntimeError):
+    pass
+
+
+def request_for(name: str, account: str = "", symbol: str = "") -> tuple:
     """(method, url, body) for one named read, or refuse.
 
     Refusal is by NAME and happens before any socket is opened.
@@ -140,6 +155,16 @@ def request_for(name: str, account: str = "") -> tuple:
         body = {"pageSize": 20}
     elif shape == "search":
         body = {"pageSize": 50}
+    elif shape == "symbol":
+        symbol = str(symbol or "").strip()
+        if not symbol:
+            raise SymbolRequired(
+                "refused: %r needs a symbol. Pass one rather than letting "
+                "the read ask the venue an empty question." % name)
+        if "/" in symbol or "?" in symbol or "#" in symbol:
+            # a symbol is a slug; anything else could retarget the path
+            raise SymbolRequired("refused: %r is not a symbol" % symbol)
+        path = path.replace("{symbol}", symbol)
     return method, assert_production(REST_BASE + path), body
 
 
@@ -236,6 +261,19 @@ def summarize(name: str, status: int, body) -> dict:
     elif name in ("orders", "executions"):
         rows = body.get("order") or body.get("execution") or []
         out["rowCount"] = len(rows) if isinstance(rows, list) else None
+    elif name in ("bbo", "book"):
+        # depth and touch, which are facts about the market rather than
+        # about our account, so the actual numbers travel
+        for key in ("symbol", "bidPrice", "bidQty", "askPrice", "askQty",
+                    "lastPrice", "timestamp"):
+            if key in body:
+                out[key] = body[key]
+        for side in ("bids", "asks"):
+            rows = body.get(side)
+            if isinstance(rows, list):
+                out[side + "Levels"] = len(rows)
+                if rows and isinstance(rows[0], dict):
+                    out[side + "Top"] = rows[0]
     elif name == "accounts":
         rows = body.get("accounts") or []
         out["accountCount"] = len(rows) if isinstance(rows, list) else None
@@ -295,6 +333,7 @@ def _cli(argv=None) -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("op", choices=("presence", "verify"))
     ap.add_argument("--reads", default="", help="comma-separated read names")
+    ap.add_argument("--symbol", default="", help="symbol for bbo / book")
     ap.add_argument("--out", default="")
     a = ap.parse_args(argv)
 
