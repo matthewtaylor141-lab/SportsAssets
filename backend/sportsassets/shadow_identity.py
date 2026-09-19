@@ -62,6 +62,14 @@ EXACT_SAME_CONTRACT = "EXACT_SAME_CONTRACT"
 # name stays bound to the same string so nothing written under it moves.
 EXACT_ONE_TO_ONE = EXACT_SAME_CONTRACT
 EXACT_ONE_TO_COMPLEMENT_BASKET = "EXACT_ONE_TO_COMPLEMENT_BASKET"
+# THE HONEST STATE OF THE COMPLEMENT TODAY. Retail enumerated -laf,
+# -sje and -none; institutional refdata has confirmed -laf ALONE. A
+# basket whose legs one venue lists and the other has not answered for
+# is structurally identified, not exact -- calling it exact would let
+# retail's board vouch for instruments the institutional venue has
+# never said exist.
+STRUCTURAL_COMPLEMENT_PENDING = (
+    "STRUCTURALLY_IDENTIFIED_COMPLEMENT_PENDING_INSTITUTIONAL_CONFIRMATION")
 DIFFERENT_CONTRACT = "DIFFERENT_CONTRACT"
 AMBIGUOUS = "AMBIGUOUS"
 NOT_IDENTIFIED = "NOT_IDENTIFIED"

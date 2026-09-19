@@ -226,3 +226,81 @@ def bbo_from(response, *, price_scale=None, qty_scale=None, **kw) -> dict:
         "isDepth": False,
     })
     return touch
+
+
+# ── WHICH LEG A RETAIL BBO ACTUALLY BELONGS TO ───────────────────────
+#
+# Owner directive 2026-09-19 22:4xZ §2. THE DEFECT, stated plainly: the
+# collector's universe returns one row per (market_slug, side_norm), so
+# a slug with a `yes` and a `no` row is read TWICE -- and both reads
+# call `bbo_read(slug)`, which takes no side. Both legs were therefore
+# stamped with the same bid and ask, and a leg-conditional feature
+# built on that series would be reading the YES book under the NO name.
+#
+# WHAT THE ENDPOINT ACTUALLY RETURNS, established from the adapter
+# rather than assumed: there is ONE long contract per slug. The venue's
+# intents map BUY_LONG -> SIDE_BUY at L and BUY_SHORT -> SIDE_SELL at
+# the SAME L (pmx._SIDE_FOR). The retail `no` leg is a SELL of the yes
+# contract, not a second book. So `bbo_read(slug)` is the YES
+# contract's book, and it is the institutional `-laf` instrument's
+# counterpart.
+#
+# WHY NO IS NOT DERIVED. On a mutually exclusive exhaustive set the NO
+# *probability* is 1 - P(yes), but the NO *book* is not: executing the
+# complement means walking the sibling instruments' depth, which is a
+# different quantity from 1 minus a price. §2 allows a derivation only
+# where "the transformation is mathematically exact"; for depth it is
+# not, so NO_BBO is NOT_IDENTIFIED rather than a mirrored copy.
+
+BIND_YES = "YES_CONTRACT_BOOK"
+BIND_NOT_IDENTIFIED = "NO_LEG_BOOK_NOT_IDENTIFIED"
+BIND_MARKET_LEVEL = "MARKET_LEVEL_NOT_LEG_SPECIFIC"
+
+# Bumped whenever the collector's leg semantics change. It travels on
+# every opportunity so an experiment can require the corrected
+# semantics and never train on the duplicated rows (§3).
+FEATURE_SOURCE_VERSION = "BETTOR_COLLECTOR_LEG_BOUND_V2"
+FEATURE_SOURCE_VERSION_DUPLICATED = "BETTOR_COLLECTOR_LEG_DUPLICATED_V1"
+
+_YES_LEGS = frozenset({"yes", "over", "long"})
+_NO_LEGS = frozenset({"no", "under", "short"})
+
+
+def bind_leg(market_state: dict | None, outcome_leg) -> dict:
+    """Stamp a retail BBO with the leg it actually describes.
+
+    Returns the state unchanged in shape, plus `bboBinding` and -- for
+    a leg whose book this is NOT -- bid/ask/mid/spread blanked to
+    NOT_IDENTIFIED. Blanking rather than dropping keeps the row's
+    shape stable so a reader cannot mistake "not this leg's book" for
+    "no observation was made".
+    """
+    state = dict(market_state or {})
+    leg = str(outcome_leg or "").strip().lower()
+    state["featureSourceVersion"] = FEATURE_SOURCE_VERSION
+
+    if not state.get("readable"):
+        state["bboBinding"] = BIND_MARKET_LEVEL
+        return state
+    if leg in _YES_LEGS:
+        state["bboBinding"] = BIND_YES
+        return state
+    if leg in _NO_LEGS:
+        # NOT a copy of the yes book, and not 1 - yes either.
+        state["bboBinding"] = BIND_NOT_IDENTIFIED
+        for field in ("bid", "ask", "mid", "spread", "spreadRelative"):
+            state[field] = None
+        state["whyLegBookAbsent"] = (
+            "the retail endpoint returns the YES contract's book; the NO "
+            "leg is a SELL of that contract and its complement depth is "
+            "the sibling instruments', which this read does not carry")
+        return state
+    # An unnamed or unfamiliar leg gets the market-level word rather
+    # than being guessed into one side.
+    state["bboBinding"] = BIND_MARKET_LEVEL
+    return state
+
+
+def leg_is_execution_bound(market_state: dict | None) -> bool:
+    """Only a YES-bound book may feed X1's feature series today."""
+    return (market_state or {}).get("bboBinding") == BIND_YES

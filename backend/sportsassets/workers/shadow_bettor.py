@@ -52,6 +52,7 @@ from .. import shadow_bettor as bettor
 from .. import shadow_bettor_ops as ops
 from .. import shadow_bettor_policy as bpol
 from .. import shadow_bettor_sizing as szpol
+from .. import shadow_l2 as l2
 from .. import shadow_store as store
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
@@ -192,12 +193,29 @@ async def tick(pool, *, decision_writing_allowed: bool = True,
             misses += 1
             stats["unreadable"] += 1
 
+        # THE LEG BINDING (owner directive 2026-09-19 22:4xZ §2). The
+        # universe returns one subject per (slug, side_norm), and both
+        # call bbo_read(slug), which takes no side -- so the `yes` and
+        # `no` rows of one market were stamped with the SAME bid and
+        # ask. There is one long contract per slug (BUY_SHORT is
+        # SIDE_SELL at the same price), so that book is the YES
+        # contract's. It is bound to YES and withheld from NO rather
+        # than copied across, because the NO leg's executable depth is
+        # the sibling instruments' and this read does not carry it.
+        #
+        # The MARKET STATE row below is left exactly as read: it is a
+        # market-level observation and is recorded as one. Only the
+        # opportunity's FEATURES carry the leg.
+        features = l2.bind_leg(
+            bettor.microstructure_of(state if state["readable"] else None),
+            subject.get("outcomeLeg"))
         opportunity = bettor.opportunity_record(
             symbol=subject["symbol"], observed_at=captured_at,
             outcome_leg=subject.get("outcomeLeg"),
             event_id=subject.get("eventId"),
             evidence_source=EVIDENCE_SOURCE,
             market_state=state if state["readable"] else None,
+            features=features,
             cadence_s=CADENCE_S)
         # The market state row is written whether or not it was
         # readable: an unreadable book at a known instant is evidence,
