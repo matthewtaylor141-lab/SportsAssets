@@ -50,6 +50,23 @@ OBSERVATION = "OBSERVATION"
 OBSERVATION_INVALIDATED = "OBSERVATION_INVALIDATED"
 OBSERVATION_CORRECTED = "OBSERVATION_CORRECTED"
 
+# A FILL THAT ARRIVES AFTER AN INGESTION INCIDENT IS NOT A SIGHTING.
+# Owner directive 2026-09-19 section 7: recovered fills "MAY NOT BE
+# INSERTED AS THOUGH THEY WERE PROSPECTIVE RN1_SHADOW OBSERVATIONS ...
+# They cannot generate a prospective shadow decision."
+#
+# The row is still kept -- it is real evidence about the venue. What it
+# is not is evidence about what we knew at T0, and migration 072 makes
+# the database enforce that rather than this module: shadow_decisions
+# references (observation_id, prospective_kind), and prospective_kind is
+# NULL on anything that is not a plain OBSERVATION.
+RECOVERED_AFTER_INGESTION_INCIDENT = "RECOVERED_AFTER_INGESTION_INCIDENT"
+
+# The kinds that may back a prospective decision. There is exactly one,
+# and it is named here so a future caller has to edit this line rather
+# than discover the rule by reading a CHECK constraint.
+PROSPECTIVE_KINDS = (OBSERVATION,)
+
 VENUE_NATIVE_FILL_ID = "VENUE_NATIVE_FILL_ID"
 DERIVED_FILL_TUPLE = "DERIVED_FILL_TUPLE"
 
@@ -171,6 +188,12 @@ REQUIRED_CONSTRAINTS = (
     "shadow_decisions_rn1_observed",
     "shadow_decisions_policy_frozen",
     "rn1_obs_correction_references",
+    # Section 7's prohibition, as a composite foreign key rather than a
+    # convention: a decision can only descend from a row whose
+    # prospective_kind is set, and that column is NULL for everything
+    # except a plain OBSERVATION.
+    "shadow_decisions_prospective_only",
+    "rn1_obs_recovery_named",
 )
 
 

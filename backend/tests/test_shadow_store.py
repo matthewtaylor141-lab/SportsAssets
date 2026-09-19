@@ -496,3 +496,67 @@ def test_the_shadow_hook_cannot_break_ingestion():
     statements = [ln.strip() for ln in body.splitlines()
                   if ln.strip().startswith("raise")]
     assert not statements, statements
+
+
+# ── section 7: a recovered fill is not a prospective observation ──────
+
+M072 = (BACKEND / "migrations"
+        / "072_recovered_is_not_prospective.sql").read_text()
+
+
+def test_recovered_is_a_named_kind_not_an_absence():
+    """A late fill is real evidence about the venue and is kept. What it
+    may not do is claim to be evidence about our own foresight."""
+    assert store.RECOVERED_AFTER_INGESTION_INCIDENT in M072
+    assert "'RECOVERED_AFTER_INGESTION_INCIDENT'" in M072
+
+
+def test_exactly_one_kind_may_back_a_prospective_decision():
+    assert store.PROSPECTIVE_KINDS == (store.OBSERVATION,)
+
+
+def test_the_prohibition_is_a_foreign_key_not_a_convention():
+    """Owner: recovered fills "cannot generate a prospective shadow
+    decision." A writer that merely declines to is a writer that can be
+    edited in a hurry during the next outage."""
+    assert "prospective_kind" in M072
+    assert "shadow_decisions_prospective_only" in M072
+    assert "FOREIGN KEY (rn1_observation_id, rn1_observation_kind)" in M072
+    assert "REFERENCES rn1_observations (rn1_observation_id, prospective_kind)" \
+        in M072
+
+
+def test_prospective_kind_is_null_for_every_other_kind():
+    """The whole guard rests on this CASE having no ELSE."""
+    gen = M072[M072.index("prospective_kind"):]
+    gen = gen[:gen.index("STORED")]
+    assert "CASE WHEN record_kind = 'OBSERVATION' THEN 'OBSERVATION' END" in gen
+    assert "ELSE" not in gen.upper()
+
+
+def test_a_recovered_row_names_its_incident():
+    assert "rn1_obs_recovery_named" in M072
+    assert "recovery_incident" in M072 and "recovered_at" in M072
+
+
+def test_recovery_is_not_a_correction():
+    """It supersedes nothing, because nothing was there -- so the
+    correction constraint must not demand a predecessor of it."""
+    # rindex, because the statement above it DROPs the old constraint by
+    # the same name and the DROP is not what is being read here.
+    block = M072[M072.rindex("ADD CONSTRAINT rn1_obs_correction_references"):]
+    block = block[:block.index(";")]
+    assert "'RECOVERED_AFTER_INGESTION_INCIDENT'" in block
+    assert "supersedes_observation_id IS NULL" in block
+
+
+def test_the_readiness_check_requires_the_new_guards():
+    for name in ("shadow_decisions_prospective_only", "rn1_obs_recovery_named"):
+        assert name in store.REQUIRED_CONSTRAINTS, name
+
+
+def test_the_migration_writes_nothing_to_existing_rows():
+    """Append-only is not suspended to add a guard."""
+    for pattern in (r"\bUPDATE\s+\w+\s+SET\b", r"\bDELETE\s+FROM\b",
+                    r"\bTRUNCATE\b", r"\bDROP\s+TABLE\b"):
+        assert not re.search(pattern, M072, re.IGNORECASE), pattern

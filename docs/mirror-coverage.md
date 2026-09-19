@@ -1961,3 +1961,66 @@ which a chart would present as a real measured result.
 P_BETTOR stays NOT_ESTABLISHED. The BETTOR lane's honest output until
 independent EV is earned is NO_TRADE, and no trade is invented to fill
 a panel.
+
+## 79. The 17:01:06Z detection stall: verdict C, and two bugs in my own witness
+
+**The incident.** No fill written since 17:16:33Z; newest fill 17:01:06Z
+across all twelve active wallets; `chain_listener` heartbeat `ok` but
+`events_seen: 0`, `decoded: 0`, `ingested: 0`.
+
+**Verdict C_WALLET_ACTIVITY_GENUINELY_NOT_OBSERVED**, run 35462152287.
+Not A. Our store holds everything the public feed holds, so there is no
+`FIRST_MISSING_LOCAL_EVENT`, no failing component to name, and no
+recovered fill in existence. The listener's zeroes were correct.
+
+| | |
+|---|---|
+| `CONTRACT_OK` | yes — param `user`, HTTP 200, `data,pagination`, 100 rows, `proxy_wallet` echoed |
+| `FEED_FRESHNESS_SOURCE` | `VENUE_STATUS_ENDPOINT` |
+| `FEED_SERVING_LAG_S` | 1 (worst mechanism `custody_balances`) |
+| `WALLETS_TESTED` | 12 |
+| `WALLETS_WITH_V2_AFTER` | 0 |
+
+For every wallet the venue's own newest timestamp equals ours exactly —
+RN1 17:01:00, nigiri99 17:01:05, DoNotTailMe 17:01:06, down to
+HomeRunHazard 16:54:41.
+
+C is recorded as the absence of observed activity on one public feed
+over one window. It is **not** a claim that the wallets stopped trading,
+and twelve addresses falling silent inside seven minutes remains
+unexplained.
+
+**Two bugs in the witness, both mine, both caught before the verdict.**
+
+1. `research/incident_roster.sql` opened with `\echo`, which `psql -t`
+   does not suppress. Line 1 of the roster was the banner; the probe
+   step took line 1 as its wallet and asked the venue about
+   `-- the configured roster, ...`; spaces in a URL gave curl(3) on all
+   six spellings; `CONTRACT_OK=no`. The same line swept as a 13th
+   wallet. One cosmetic line produced a false INCONCLUSIVE **and** a
+   wrong denominator.
+2. The freshness test measured a cache. Unfiltered `/v2/trades?limit=20`
+   returned newest row 18:39:29Z at 18:39:30 (reading 1s) and the *same*
+   18:39:29Z at 18:41:49 (reading 136s). `/v2/status` is the authority
+   now; the watermark is corroboration only, and with no declaration the
+   verdict falls to D.
+
+A third, latent: `end[]?` is a jq syntax error, and every call site was
+behind `2>/dev/null`, so the shared row filter is parenthesised.
+
+**The standing rule, built while nothing was on fire.** Migration 072
+makes section 7 structural. `RECOVERED_AFTER_INGESTION_INCIDENT` is a
+first-class `record_kind` that must name its incident and recovery time;
+`prospective_kind` is a generated column holding `'OBSERVATION'` only
+for a plain sighting and NULL otherwise; and `shadow_decisions`
+references `(rn1_observation_id, prospective_kind)`. A recovered fill is
+kept and queryable but cannot back a prospective decision — enforced by
+the database, not by a writer that can be edited at three in the
+morning. Nothing updates or deletes; append-only is not suspended to
+add a guard.
+
+**COMMAND.** `RN1_BENCHMARK_FEED` is its own health component carrying
+`rn1FeedLastSourceEvent` / `LastReceivedEvent` / `LagSeconds` /
+`Status`, marked `affectsBettor: false`. The panel takes its component
+order from the server, so a component the API adds cannot be dropped by
+a hard-coded list. An RN1 feed failure never draws BETTOR as down.
