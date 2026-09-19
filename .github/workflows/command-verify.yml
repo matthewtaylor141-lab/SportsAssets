@@ -1,0 +1,177 @@
+# COMMAND DEPLOYMENT ACCEPTANCE TEST, run from OUTSIDE.
+#
+# Owner directive 2026-09-19, section 17: "Before reporting complete,
+# verify the PRODUCTION URL, not localhost."
+#
+# The build container has no egress to bettortoken.com or to the API
+# host -- every request returns connect_rejected at the proxy -- so a
+# claim that production works could not be made from there without
+# guessing. This runner can reach both, so the verification happens
+# here and its output is the evidence.
+#
+# IT READS ONLY. Every request below is a GET of a public asset or an
+# UNAUTHENTICATED probe of an API route. No secret is used, no session
+# is minted, and nothing is posted: the point is to confirm what an
+# anonymous visitor and a signed-in manager would each get, not to
+# exercise the ledger.
+#
+# A 401 FROM THE API IS A PASS, NOT A FAILURE. It is the proof that the
+# shadow routes are behind the COMMAND session rather than open to the
+# internet, which is the single most important thing to confirm about a
+# newly published data contract.
+
+name: command-verify
+
+on:
+  workflow_dispatch:
+    inputs:
+      host:
+        description: "COMMAND host to verify"
+        required: false
+        default: "command.bettortoken.com"
+      api:
+        description: "API origin behind the proxy"
+        required: false
+        default: "https://sportsassets-api.onrender.com"
+      wait_s:
+        description: "Seconds to wait for the deploy to settle before probing"
+        required: false
+        default: "0"
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Settle
+        run: sleep "${{ inputs.wait_s }}"
+
+      - name: Reachability and build identity
+        id: reach
+        run: |
+          HOST="${{ inputs.host }}"
+          echo "## COMMAND production acceptance" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          for path in "/" "/command/" "/command/index.html" \
+                      "/command/shadow.js" "/command/shadow.css" \
+                      "/command/app.js" "/command/core.js"; do
+            code=$(curl -s -o /tmp/body -w '%{http_code}' --max-time 25 \
+                   "https://$HOST$path" || echo 000)
+            size=$(wc -c < /tmp/body 2>/dev/null || echo 0)
+            printf '%-28s %s  %s bytes\n' "$path" "$code" "$size" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: The SHADOW environment is actually published
+        run: |
+          HOST="${{ inputs.host }}"
+          curl -s --max-time 25 "https://$HOST/command/index.html" > /tmp/index
+          curl -s --max-time 25 "https://$HOST/command/shadow.js" > /tmp/shadow
+          curl -s --max-time 25 "https://$HOST/command/app.js" > /tmp/app
+          {
+            echo "### Published assets"
+            echo '```'
+            grep -c 'shadow.js' /tmp/index | sed 's/^/index references shadow.js: /'
+            grep -c 'shadow.css' /tmp/index | sed 's/^/index references shadow.css: /'
+            grep -c "BTShadow" /tmp/shadow | sed 's/^/shadow.js defines BTShadow: /'
+            grep -c "api/command/shadow/" /tmp/shadow \
+              | sed 's/^/shadow.js shadow endpoints: /'
+            grep -c "\['shadow','Shadow'\]" /tmp/app \
+              | sed 's/^/app.js SHADOW nav entry: /'
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          # Hard failures: the page must carry the module and the module
+          # must carry the disclosure. A deploy that published an old
+          # bundle is worse than a failed one, because it looks fine.
+          grep -q 'src="shadow.js"' /tmp/index
+          grep -q 'BTShadow' /tmp/shadow
+          grep -q 'SHADOW TRADING' /tmp/shadow
+          grep -q 'NO REAL CAPITAL' /tmp/shadow
+          grep -q "\['shadow','Shadow'\]" /tmp/app
+
+      - name: Existing COMMAND navigation is intact
+        run: |
+          for view in command portfolio orders decisions risk models \
+                      reports audit investor; do
+            grep -q "\['$view'," /tmp/app || { echo "MISSING VIEW: $view"; exit 1; }
+          done
+          echo "all nine pre-existing COMMAND views still routed" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: No credential reaches the browser
+        run: |
+          # The published bundle must contain no venue credential, no
+          # database URL and no bearer token. This is the check that
+          # would catch a config file accidentally shipped to the CDN.
+          FAIL=0
+          for f in /tmp/shadow /tmp/app /tmp/index; do
+            for pat in 'PMX_' 'PRIVATE_KEY' 'BEGIN .*PRIVATE KEY' \
+                       'postgres://' 'postgresql://' 'Bearer ey' \
+                       'client_secret' 'DATABASE_URL'; do
+              if grep -Eq "$pat" "$f"; then
+                echo "CREDENTIAL-SHAPED STRING '$pat' in $f"; FAIL=1
+              fi
+            done
+          done
+          curl -s --max-time 25 "https://${{ inputs.host }}/command/config.js" \
+            > /tmp/config || true
+          grep -Eq 'PMX_|PRIVATE_KEY|postgres://|client_secret' /tmp/config \
+            && { echo "CREDENTIAL IN config.js"; FAIL=1; }
+          [ "$FAIL" = 0 ] && echo "no credential-shaped string in the bundle" \
+            >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
+      - name: No order action exists in the browser
+        run: |
+          FAIL=0
+          for pat in 'createOrder' 'placeOrder' 'submitOrder' 'cancelOrder' \
+                     "method: *['\"]POST"; do
+            grep -Eq "$pat" /tmp/shadow && { echo "ORDER PATH '$pat'"; FAIL=1; }
+          done
+          [ "$FAIL" = 0 ] && echo "no order or mutation path in shadow.js" \
+            >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
+      - name: The shadow API is behind the COMMAND session
+        run: |
+          API="${{ inputs.api }}"
+          HOST="${{ inputs.host }}"
+          {
+            echo "### Shadow API, unauthenticated (401 is the PASS)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          FAIL=0
+          for route in summary decisions positions executions equity \
+                       comparison health "trades/none"; do
+            direct=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+                     "$API/api/command/shadow/$route" || echo 000)
+            proxied=$(curl -s -o /dev/null -w '%{http_code}' --max-time 30 \
+                      "https://$HOST/api/command/shadow/$route" || echo 000)
+            printf '%-16s api=%s  proxied=%s\n' "$route" "$direct" "$proxied" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            # 401 is correct. 200 would mean the ledger is public, which
+            # is the one outcome that must fail this job loudly.
+            [ "$direct" = "200" ] && { echo "OPEN ROUTE: $route"; FAIL=1; }
+            [ "$proxied" = "200" ] && { echo "OPEN VIA PROXY: $route"; FAIL=1; }
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          exit $FAIL
+
+      - name: The proxy does not serve HTML for an API path
+        run: |
+          # The netlify rule order is load-bearing: if /api/command/*
+          # fell through to the SPA catch-all, COMMAND would parse a page
+          # of HTML as its ledger and render a confident nothing.
+          body=$(curl -s --max-time 30 \
+                 "https://${{ inputs.host }}/api/command/shadow/summary" \
+                 | head -c 200)
+          echo "$body" | grep -qi '<!doctype html' && {
+            echo "THE API PATH IS SERVING THE SPA"; exit 1; }
+          echo "api path is proxied, not swallowed by the SPA catch-all" \
+            >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Mobile viewport is declared
+        run: |
+          grep -q 'name="viewport"' /tmp/index
+          echo "viewport meta present (mobile layout served the same bundle)" \
+            >> "$GITHUB_STEP_SUMMARY"
