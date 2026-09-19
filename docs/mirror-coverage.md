@@ -1735,3 +1735,229 @@ PINNED (`backend/tests/test_e38_two_legged.py`, 40 tests). The leg/net identity 
 COUNTS. New: `analytics/mirror_two_legged.py` (616 lines, pure). Changed: `workers/mirror_shadow.py` (+~180 lines: `two_leg_block`, two call sites, four judge statements); `.github/workflows/render-ops.yml` (three presets, +~90 lines); the two hash re-pins. `mirror_live.py`: **zero lines**. Suite, judged by failure SET and never by count: the clean tip 43a7863 gives 226 failures, this lane 93 over two runs on a checksum-frozen tree with identical sets, and the set difference against the baseline is EXACTLY ONE name -- test_mirror_live_worker.py::test_r_take_cycles_burn_the_entry_budget_but_an_exit_or_a_side_change_is_never_gated, which STILL FAILS with this lane's mirror_shadow.py reverted to the tip and its test file deleted (the A/B run, 106 failures), so it is not this lane's; that file passes 367/367 alone here. `test_e38_two_legged.py` 40 passed; the shadow's own files (test_mirror_shadow, test_e19_smaller_reading, test_d1_fills_dedup, test_e11_venue_gate, test_e7_cand_memo) 180 passed; the three re-pinned files 58 passed.
 
 **DOES NOT FIX.** It does not change what the live mirror sends -- not one order, not one cent -- and it does not make the mirror proportional; it MEASURES whether a matched-pair mirror could be, and the switch is a later lane and an owner decision. It does not establish that his 0.9325 was ever liftable: the `pair-when` preset that settles it had not been run when this was written, and the strongest evidence in hand (his largest book pairing at 1.0136, which no simultaneous arbitrageur would pay) says it was not -- if the 1-minute and 10-minute columns come back near 1.00, the objective changes again and the `both_pct` column becomes the only thing that matters. It does not price the fee: the default is 0 and `breakeven_fee_pc` is what an operator reads until a live probe lands the real figure; at the measured spreads the margin is half the spread per contract, which a fee could erase entirely. It does not read PER-SIDE markets' second leg (their book is a slug this worker never reads -- recorded as `per_side_unread`, never guessed), does not read the second leg of anything the mapper could not map (those rows are the coverage denominator, not the numerator), and does not follow his residual at all -- by design, and that is a deliberate decision to decline 41.4% of his cost, not an oversight. It does not measure our own execution against a real counterparty: `two_leg_both_obtainable` is a judge against the book we read, not a fill, and a post-only rest that would have been queued behind size the BBO cannot see is counted as obtainable. It adds no migration and no column: everything rides the 046 JSONB detail. And it does not re-cut anyone else's red -- the three render-ops pins were re-cut because THIS lane moved that file, and the fold may have to cut them again.
+
+## 78. SHADOW -- the PROSPECTIVE RN1 ledger, and COMMAND reading it live: sightings written at arrival with no venue call, decisions written by their own worker against the book BETTOR actually had, a policy frozen and hashed before row one, corrections appended and never applied, and a first-class SHADOW environment in COMMAND with no fixture anywhere in it (2026-09-19, owner reorder + COMMAND-IS-P0 addendum)
+
+SHADOW_MODE TRUE / REAL_ORDER_SUBMISSION DISABLED / CAPITAL_AT_RISK 0 /
+mirror_live false. Nothing in this section touches the money path.
+
+### What the owner asked for, and in what order
+
+Two directives, hours apart. The first reordered the work: "START
+ACCUMULATING PROSPECTIVE RN1_SHADOW EVIDENCE AS SOON AS POSSIBLE. Do
+not wait for COMMAND UI, PDF reporting or the complete API before
+prospective collection begins." The second overrode the tail of that
+order: "COMMAND IS P0. Do not interpret the previous sequencing as
+permission to leave COMMAND until the end." So the two ran as parallel
+tracks, with the store's contract as the seam between them.
+
+### Why a prospective ledger is a different object from a backtest
+
+A backtest asks what a rule would have produced on data we already
+have. This ledger asks what BETTOR CLAIMED IT KNEW at T0, recorded
+before the outcome existed, and it is only worth anything if nothing
+learned afterwards can change that claim. Three defences, and they are
+independent on purpose:
+
+1. `shadow_append_only()` refuses UPDATE and DELETE at the DATABASE on
+   every ledger table. A comment saying "append-only" does not survive
+   one convenient edit during an incident.
+2. `shadow_store.py` contains no mutating statement at all, and
+   `test_shadow_store.py` reads the module's own source text and fails
+   the build if one appears. The trigger protects the table from
+   anyone; this protects it from us.
+3. Everything that necessarily arrives later -- scores, markouts,
+   settlement, corrections -- lives in its own table or its own row,
+   keyed to the decision. It ANNOTATES. It never rewrites.
+
+### Dedup had to be solved BEFORE collection, not after
+
+A ledger collected wrong cannot be repaired by a later query: two rows
+that are really one fill and one row that is really two fills look
+identical once written. So `rn1_observations` carries an idempotency
+key built from VENUE-NATIVE identifiers, and the basis it was built on:
+
+  VENUE_NATIVE_FILL_ID   the venue named the fill. Preferred always.
+  DERIVED_FILL_TUPLE     it did not, so the key is the transaction, the
+                         token, the side, the SIZE, the PRICE and the
+                         SOURCE INSTANT.
+
+The tuple is deliberately NOT (market, side, price): the directive is
+explicit that economically distinct RN1 fills must not collapse merely
+because those three agree, and tests pin that two fills differing only
+in size, or only in instant, or only in transaction, produce three
+different keys. The residue is stated rather than hidden -- two truly
+identical fills in one transaction at one instant would still collapse,
+which is the limit of what venue-native identifiers support, and is why
+the basis rides on the row instead of being assumed by a later reader.
+
+### A reorg does not edit the sighting it contradicts
+
+The unique index is PARTIAL -- `WHERE record_kind = 'OBSERVATION'` --
+so an `OBSERVATION_INVALIDATED` or `OBSERVATION_CORRECTED` row
+legitimately carries the SAME key as the row it supersedes. That is how
+the two are known to be about the same fill. A CHECK enforces the
+relationship in both directions: a correction must name what it
+corrects and give a reason, and a sighting must not pretend to be one.
+
+The original stays exactly as written. That is not sentiment: the fact
+that BETTOR acted on a sighting the chain later withdrew is itself a
+measurement of this system, and erasing the sighting erases the only
+evidence of it.
+
+### The policy was frozen before row one, and the freeze is enforceable
+
+`shadow_policy.py` DECLARES the rule set -- action vocabulary, sizing,
+latency policy, execution reconstruction, pairing, cash-out, scoring
+horizons -- and hashes it. `shadow_decisions.policy_version` carries a
+FOREIGN KEY into `shadow_policy_versions`, so a decision produced under
+an unfrozen policy cannot physically be written.
+
+Two hashes, because there are two ways to drift:
+
+  POLICY_SHA       the DECLARATION, hashed. Enforced: a changed rule
+                   under an existing version name is REFUSED, and a new
+                   version is the only way forward.
+  POLICY_CODE_SHA  the implementing modules' BYTES, hashed. Recorded
+                   and compared, NOT enforced -- a typo fix in a comment
+                   moves it, and a freeze that breaks on a comment would
+                   be abandoned within a week and then protect nothing.
+
+A hash that could not be computed is the string NOT_IDENTIFIED, never a
+zero and never a plausible-looking digest.
+
+The sizing policy is a deliberate COPY of the live mirror's knobs at
+their 2026-09-19 values, not a read of them. Those knobs are operator
+dials that have moved several times by owner order, correctly -- and a
+frozen policy that READ them would move with them, which is exactly the
+drift the freeze exists to prevent.
+
+### Two steps, because the clocks are the measurement
+
+  STEP 1, on the ingestion path, at arrival: write the SIGHTING. No
+  venue call, nothing that can block. The one fact only this system
+  holds is WHEN BETTOR HEARD, and it is worthless if measured after a
+  network round trip -- the anchor is stamped before `get_pool()`, for
+  the same reason run 83's is.
+
+  STEP 2, in `workers/shadow_rn1.py`: get the book, decide, write the
+  DECISION. Slower, because getting a book is slower, and that is the
+  point: the gap between `bettor_received_ts` and `decision_ts` is a
+  MEASUREMENT of this system, not an embarrassment to hide by stamping
+  both at once.
+
+The hook sits after the `was_insert` gate -- a fill re-presented by the
+poll lane is not a new sighting, and observing it there would be the
+run 83.2 defect rebuilt in a new table -- and after the `notify` gate,
+because `notify=False` IS the deep history import. Those rows are
+genuine first inserts of fills that happened weeks ago, and writing
+them into a ledger whose whole claim is "recorded before the outcome
+was known" would turn a prospective instrument into a backtest wearing
+its name.
+
+It cannot raise into ingestion. A research instrument that can drop a
+real fill is not an instrument, it is a new way to lose money.
+
+### RN1_PRICE is not BETTOR's executable price
+
+Four prices, four columns, never substituted: what RN1 got, the price
+when we OBSERVED, the price when we DECIDED, and the price at SHADOW
+ARRIVAL (with the execution's VWAP a fifth). A test pins the case
+exactly: RN1 fills 1,000 at 0.42; BETTOR's shadow decision is 100
+shares at the 0.43 ask we actually saw. A SELL is priced off the bid.
+Depth is read from the side we would have to take, because reading the
+wrong side grants liquidity that was never offered.
+
+And a size is never invented. Where depth is not established the frozen
+policy REFUSES to state one -- the decision is a recorded NO_TRADE with
+blocker `OBSERVED_DEPTH_NOT_ESTABLISHED`, which is the honest state of
+the evidence until an L2 feed exists, written down rather than papered
+over with a top-of-book quantity.
+
+### An unreadable book is a state, not a zero
+
+`shadow_market_states` records `readable=false` with a named reason.
+The venue was halted venue-wide for five hours on 2026-09-05 and
+answered 200 with null quotes on every market; a ledger that booked
+those as zeros would have priced five hours of decisions against a
+market that was not trading.
+
+### Nothing is admitted until the guarantees are real
+
+`store_ready()` checks, against the LIVE CATALOG, every invariant the
+directive names: the append-only trigger on each ledger table, `lane`
+NOT NULL with NO DEFAULT, the foreign key that makes an unfrozen policy
+unwritable, the partial unique index that makes the RN1 dedupe real,
+and the shadow_mode / capital_at_risk constraint. The worker writes no
+row until it passes; a boot that cannot verify beats the blocker by
+name instead, so an operator sees WHY the ledger is empty rather than
+an empty ledger with no explanation.
+
+### COMMAND: the distinction the whole screen is built around
+
+Four states that a lesser dashboard collapses into one:
+
+  0 decisions        a REAL zero, shown beside LISTENING
+  engine blocked     the blocker, by name, from the decision's own row
+  source gone quiet  STALE, derived from the SOURCE timestamp
+  read failed        FEED UNAVAILABLE -- never a page of zeros
+
+The last pair is the one that matters. "We measured nothing" and "we
+could not read" are different claims and only one is about the world; a
+dashboard confidently reporting no activity during an outage looks
+exactly like one reporting a quiet day. So every read path in
+`api/command_shadow.py` raises `RetrievalIncomplete` by name and the
+routes turn it into 503.
+
+Staleness comes from the source row's own timestamp, never from the
+poll. LAST SOURCE UPDATE and LAST UI UPDATE are shown side by side and
+labelled, so a page happily polling a dead writer reads STALE next to a
+ticking browser clock.
+
+No combined P&L exists anywhere. RN1_SHADOW is a mechanism benchmark
+and BETTOR_EV_SHADOW is an intelligence claim; `combinedPnl` is null
+with the reason attached, because one number would support neither.
+Economics come back keyed by execution class and are never pre-summed,
+and only ACTUAL_FILL is flagged realizable -- of which there are none,
+by construction, while no real order exists.
+
+### The frontend holds no fixture
+
+Not behind a flag, not for an empty state. `shadow.js` has no demo
+path, no placeholder series and no synthetic tape; the tape's lines are
+real columns from real rows with their real timestamps, and when the
+ledger is empty the tape is empty and says LISTENING. Motion marks NEW
+DATA, a STATE TRANSITION or HEALTH -- a row illuminates because it was
+not in the previous payload, a dot pulses because its SOURCE is live. A
+dead engine renders still, which is information.
+
+Read-only structurally: no order method, no venue client, no credential.
+Every fetch goes through `core.endpoint()`, the guard that refuses any
+path outside `/api/command/`; the query string is appended AFTER
+validation rather than the guard being loosened to admit one.
+
+### Verified from outside, because it could not be verified from inside
+
+The build container's egress to bettortoken.com and to the API host is
+refused at the proxy, so "the production URL works" is not a claim that
+could honestly be made from there. `.github/workflows/command-verify.yml`
+makes it from the runner: asset reachability, that the published bundle
+actually carries the SHADOW module and its disclosure, that all nine
+pre-existing COMMAND views are still routed, that no credential-shaped
+string or order path reached the browser, that the netlify rule order
+still proxies `/api/command/*` instead of letting the SPA catch-all
+swallow it -- and that every shadow route answers 401 unauthenticated.
+A 200 there would mean the ledger is public, and it fails the job.
+
+### What is deliberately still NOT_IDENTIFIED
+
+Shadow capital employed, shadow P&L, settled and unrealized P&L,
+average entry EV, pair basis, latency drag and locked pair result. None
+of them has an input yet. They render as NOT IDENTIFIED -- dimmer,
+smaller, unmistakably not a number -- rather than as zeros, and the
+equity panel renders an empty state rather than a flat line at zero,
+which a chart would present as a real measured result.
+
+P_BETTOR stays NOT_ESTABLISHED. The BETTOR lane's honest output until
+independent EV is earned is NO_TRADE, and no trade is invented to fill
+a panel.
