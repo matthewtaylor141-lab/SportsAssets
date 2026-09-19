@@ -356,6 +356,17 @@ async def run() -> None:
             "disclosure": ready["disclosure"]}
     log.info("shadow_bettor: %s", boot)
 
+    # THE INTEGRITY VERDICT NEEDS A SOURCE OF ITS OWN, and the write
+    # lives in the ops module rather than here. The append-only rule
+    # refuses any upserting statement anywhere in the decision writer
+    # or this worker, and it is right to: a boot marker is current
+    # state,
+    # not prospective evidence, and mixing the two in one file is how
+    # the distinction erodes. Same reason the telemetry reads moved out
+    # earlier -- move the code, never the rule.
+    await ops.record_boot(pool, boot)
+
+
     if not ready["storeReady"]:
         while True:
             await heartbeat("shadow_bettor", "store_not_ready", boot)

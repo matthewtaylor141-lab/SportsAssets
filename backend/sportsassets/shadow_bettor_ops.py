@@ -25,6 +25,7 @@ that one counter is 31 while another is zero."
 
 from __future__ import annotations
 
+import json
 import logging
 from datetime import datetime, timezone
 
@@ -198,3 +199,33 @@ async def pipeline_health(pool) -> dict:
                   else "LIVE" if h["decisions"]
                   else "LISTENING")
     return h
+
+
+async def record_boot(pool, boot: dict) -> None:
+    """Persist the boot verdict on BETTOR's OWN ingestion_state key.
+
+    WHY A SEPARATE KEY FROM workers_boot. That one is written by
+    workers/all.py and carries only {commit, at}. The first V2 deploy
+    showed COMMAND's BETTOR_POLICY_INTEGRITY tile reading ABSENT for
+    exactly that reason: the verdict existed in this process's log and
+    inside the heartbeat detail, and nowhere the health surface looked.
+
+    WHY NOT READ IT FROM THE HEARTBEAT. The heartbeat carries it too,
+    but sourcing integrity from the telemetry plane would mean a broken
+    health writer takes the integrity tile down with it -- the exact
+    coupling the five-plane split exists to remove. Five components,
+    five sources.
+
+    NEVER RAISES. A marker that could stop collection would be worse
+    than a marker nobody can read, but the failure is logged at error
+    rather than swallowed -- the lesson of the 62 silent minutes.
+    """
+    try:
+        await pool.execute(
+            "INSERT INTO ingestion_state (key, value) "
+            "VALUES ('bettor_boot', $1::jsonb) "
+            "ON CONFLICT (key) DO UPDATE SET value = $1::jsonb",
+            json.dumps(boot))
+    except Exception:                                          # noqa: BLE001
+        log.error("shadow_bettor: bettor_boot marker write failed",
+                  exc_info=True)

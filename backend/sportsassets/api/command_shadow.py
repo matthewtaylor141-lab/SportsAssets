@@ -946,9 +946,13 @@ async def _bettor_planes(pool) -> dict:
     }
 
     # 2. POLICY INTEGRITY -- from the boot marker the worker writes.
+    # ITS OWN KEY. `workers_boot` is written by workers/all.py and
+    # carries only {commit, at} -- the first V2 deploy showed this tile
+    # reading ABSENT because the integrity verdict was never there.
+    # The bettor worker now writes `bettor_boot` itself.
     boot = await _guard(
         pool, "BETTOR_BOOT_UNREAD", pool.fetchval,
-        "SELECT value FROM ingestion_state WHERE key = 'workers_boot'")
+        "SELECT value FROM ingestion_state WHERE key = 'bettor_boot'")
     b = _js(boot) or {}
     integrity_state = b.get("policyIntegrity") or "NOT_ESTABLISHED"
     integrity = {

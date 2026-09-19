@@ -236,3 +236,45 @@ def test_v1s_byte_methodology_is_untouched():
     block = block[:block.index("\ndef ", 5)]
     assert "fh.read()" in block and "hashlib.sha256()" in block
     assert "ast" not in block
+
+
+# ── what production taught the boundary ──────────────────────────────
+
+
+def test_the_worker_and_the_api_are_outside_the_boundary():
+    """They were edited after V2 was frozen, to give the integrity tile
+    its own source. If either were in the boundary that edit would have
+    moved the running sha away from the frozen one and fail-closed the
+    decision writer -- correctly, but for a change that decides
+    nothing."""
+    for name in cs.DECISION_PATH:
+        assert not name.startswith("workers/")
+        assert not name.startswith("api/")
+    assert set(cs.DECISION_PATH) == {"shadow.py", "shadow_lanes.py",
+                                     "shadow_bettor.py"}
+
+
+def test_the_digest_is_environment_dependent_and_that_is_recorded():
+    """A FINDING, NOT A FEATURE. ast.dump() emits version-specific
+    fields -- Python 3.12 added type_params to FunctionDef -- so the
+    same source yields a different digest on 3.11 and 3.12. Production
+    runs 3.12 and recorded 2934de9a...; this box runs 3.11 and computes
+    5220d2e7...
+
+    That is STABLE WITHIN an environment, which is why the gate works
+    today, and it fails CLOSED on a runtime upgrade rather than open.
+    But it cannot be checked from a differently-versioned box, and it
+    is not fixable under V2: changing the digest function now would
+    move the running sha away from the frozen 2934de9a and block
+    decisions. It belongs to a future version.
+
+    This test records the property so nobody rediscovers it by
+    watching production fail closed after a base-image bump.
+    """
+    import ast
+    import sys
+    dumped = ast.dump(ast.parse("def f(): pass").body[0])
+    has_type_params = "type_params" in dumped
+    assert has_type_params == (sys.version_info >= (3, 12)), (
+        "ast.dump's field set changed with the Python version, which is "
+        "exactly the dependency this test documents")
