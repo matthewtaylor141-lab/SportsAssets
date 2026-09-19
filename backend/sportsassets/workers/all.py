@@ -26,8 +26,8 @@ from ..db import heartbeat
 from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
                metadata_refresher, mirror_live, mirror_shadow, poller, premap,
                price_path, reconciler, retention, rn1_observability, roster,
-               roster_auto, shadow_bettor, shadow_rn1, underdog,
-               whale_exits)
+               roster_auto, shadow_bettor, shadow_experimental, shadow_rn1,
+               underdog, whale_exits)
 
 # THE ARENA CAP, AT IMPORT (2026-09-05). sportsassets-workers was
 # OOM-killed at 2 GiB thirteen times between 17:59:41 and 20:21:49:
@@ -347,6 +347,12 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # universe and keeps collecting while RN1 is idle, or while fill
     # detection itself is down. MEASUREMENT ONLY, same guarantees.
     ("shadow_bettor", shadow_bettor.run),
+    # BETTOR_EXPERIMENTAL_SHADOW -- the research lane, registered AFTER
+    # the decision-grade one and deliberately not a member of
+    # lanes.LANES. It may not write a decision-grade row, and the
+    # decision-grade lane may not read anything it produces. Two lanes,
+    # never pooled.
+    ("shadow_experimental", shadow_experimental.run),
     ("shadow_rn1", shadow_rn1.run),
     ("memory", memory_watch),
 ]

@@ -252,7 +252,10 @@ def execute(sealed: dict, *, evidence=None, binding=None,
         "observedArrivalLatencyMs": (evidence or {}).get("bridgeLatencyMs"),
         "executionContract": ec.CONTRACT_VERSION,
         "executionContractSha": ec.CONTRACT_SHA,
+        # the evidence's own digest, which joins this row to the book
         "l2BookSha": (evidence or {}).get("l2BookSha"),
+        # the frozen contract's digest over what the walk consumed
+        "walkedBookSha": None,
         "l2SourceTimestamp": (evidence or {}).get("l2SourceTimestamp"),
         "l2ReceivedTimestamp": (evidence or {}).get("l2ReceivedTimestamp"),
         "priceScale": (evidence or {}).get("priceScale"),
@@ -305,6 +308,15 @@ def execute(sealed: dict, *, evidence=None, binding=None,
               sh.UNFILLED: UNFILLED,
               sh.NOT_IDENTIFIED: NOT_IDENTIFIED}.get(econ["status"],
                                                      NOT_IDENTIFIED)
+    # TWO DIGESTS OVER ONE BOOK, AND THEY ARE NOT INTERCHANGEABLE. The
+    # bridge's `l2BookSha` is taken over the VENUE'S RAW LEVELS and is
+    # how this row joins back to the evidence that produced it; the
+    # contract's is taken over the PARSED book this walk actually
+    # consumed. Writing the second one into the first one's column
+    # would make the decision and its evidence disagree about a book
+    # neither of them changed -- so the evidence's sha is kept where a
+    # reader expects it, and the walked digest travels beside it.
+    walked_sha = econ.get("l2BookSha")
     if status == NOT_IDENTIFIED:
         # UNFILLED AND NOT_IDENTIFIED ARE DIFFERENT FACTS. Unfilled
         # means the book was walked and gave nothing; not-identified
@@ -312,7 +324,7 @@ def execute(sealed: dict, *, evidence=None, binding=None,
         # the second would assert a measurement nobody made, and the
         # accounting would then count it as a real zero.
         return dict(base, executionStatus=NOT_IDENTIFIED,
-                    l2BookSha=econ.get("l2BookSha"),
+                    walkedBookSha=walked_sha,
                     why=econ.get("why") or "the arrival book could not be "
                                            "walked under the frozen contract")
     out = dict(base,
@@ -321,7 +333,7 @@ def execute(sealed: dict, *, evidence=None, binding=None,
                unfilledNotionalUsd=econ["unfilledNotionalUsd"],
                filledQty=econ["filledQty"], vwap=econ["vwap"],
                slippage=econ["slippage"], spreadCost=econ["spreadCost"],
-               l2BookSha=econ["l2BookSha"], why=econ.get("why"))
+               walkedBookSha=walked_sha, why=econ.get("why"))
     if status in (EXECUTED, PARTIAL) and (econ["executedNotionalUsd"] or 0) > 0:
         out["positionId"] = position_id(out["experimentalDecisionId"])
     return out

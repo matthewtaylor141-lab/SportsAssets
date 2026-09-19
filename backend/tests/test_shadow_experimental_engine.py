@@ -70,7 +70,7 @@ def evidence(offers=None, **kw):
          "offers": offers if offers is not None
          else [{"px": "41", "qty": "30000"}, {"px": "42", "qty": "20000"}]},
         price_scale=100, qty_scale=100, request_id="rq")
-    book.update({"l2EvidenceId": "l2ev_1",
+    book.update({"l2EvidenceId": "l2ev_1", "l2BookSha": "bridge16",
                  "latencyRegime": "GITHUB_BRIDGE",
                  "bridgeLatencyMs": 612000.0})
     book.update(kw)
@@ -245,7 +245,13 @@ def test_the_execution_carries_its_contract_and_its_latency_regime():
     # "Do not manufacture latency" -- the bridge's real figure travels
     assert out["observedArrivalLatencyMs"] == 612000.0
     assert out["l2EvidenceId"] == "l2ev_1"
-    assert out["l2BookSha"]
+    # TWO DIGESTS, KEPT APART. The evidence's sha is the join back to
+    # the recorded book; the walked sha is the contract's own over what
+    # the walk consumed. Writing the second into the first's column
+    # would make a decision and its evidence disagree about a book
+    # neither of them changed.
+    assert out["l2BookSha"] == "bridge16"
+    assert out["walkedBookSha"] and out["walkedBookSha"] != "bridge16"
 
 
 # ── §7/§9: the control runs beside the candidate ─────────────────────

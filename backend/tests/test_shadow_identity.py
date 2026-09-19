@@ -251,3 +251,54 @@ def test_both_venues_word_the_proposition_identically():
     retail_question = ("Will Los Angeles FC be the first to score a goal "
                        "in the second half on 2026-09-19 7:30PM ET?")
     assert inst()["question"] == retail_question
+
+
+# ── the YES leg, one to one with its institutional outcome ───────────
+
+
+def test_the_yes_leg_of_a_slug_that_names_an_outcome_is_that_outcome():
+    """The retail board lists -laf, -sje and -none SEPARATELY, each
+    with a yes and a no leg (run 35472636412). So the retail market is
+    a binary over ONE outcome of the same mutually exclusive set, and
+    its yes leg is that outcome."""
+    binding = ident.yes_leg_binding(
+        inst(), ident.retail_identity(
+            {"market_slug": RETAIL_SIBLINGS[0], "side_norm": "yes",
+             "identifier": "0xabc"}))
+    assert binding["verdict"] == ident.EXACT_ONE_TO_ONE
+    assert binding["executionEligible"] is True
+    assert binding["identityBindingSha"]
+
+
+def test_the_no_leg_gets_no_shortcut_from_the_yes_rule():
+    """It falls through to the general gate, which refuses it. The NO
+    side is the complement BASKET and is established separately."""
+    binding = ident.yes_leg_binding(
+        inst(), ident.retail_identity(
+            {"market_slug": RETAIL_SIBLINGS[0], "side_norm": "no"}))
+    assert binding["verdict"] != ident.EXACT_ONE_TO_ONE
+    assert binding["executionEligible"] is False
+
+
+def test_a_slug_whose_terminal_token_is_not_the_outcome_is_refused():
+    """SLUG EQUALITY ALONE IS INSUFFICIENT (§2). The rule needs the
+    slug's own terminal token to BE the institutional outcome; a slug
+    that merely matches the symbol does not reach the verdict."""
+    other = dict(inst())
+    other["outcomeStrike"] = "sje"
+    binding = ident.yes_leg_binding(
+        other, ident.retail_identity(
+            {"market_slug": RETAIL_SIBLINGS[0], "side_norm": "yes"}))
+    assert binding["verdict"] != ident.EXACT_ONE_TO_ONE
+
+
+def test_an_exact_contract_we_cannot_price_is_not_executable():
+    """A binding without the venue's scales would have to assume one,
+    and an assumed scale misprices every row that does not use it."""
+    unpriced = dict(inst())
+    unpriced["priceScale"] = None
+    binding = ident.yes_leg_binding(
+        unpriced, ident.retail_identity(
+            {"market_slug": RETAIL_SIBLINGS[0], "side_norm": "yes"}))
+    assert binding["verdict"] == ident.AMBIGUOUS
+    assert binding["executionEligible"] is False

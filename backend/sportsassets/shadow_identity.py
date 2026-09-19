@@ -255,6 +255,79 @@ def _result(institutional, retail, verdict, why, agree) -> dict:
     }
 
 
+def _slug_outcome(slug):
+    """The outcome token a retail slug ENDS in, or None.
+
+    Not a parse of meaning -- the terminal token of the venue's own key.
+    `astatc-...-sh-ftts-laf` ends in `laf`, and `laf` is the
+    institutional instrument's `outcome_strike`. Two venues keying on
+    the same token is a statement by both of them.
+    """
+    text = _text(slug)
+    if not text or "-" not in text:
+        return None
+    return text.rsplit("-", 1)[-1].lower() or None
+
+
+def yes_leg_binding(institutional: dict, retail: dict) -> dict:
+    """The retail YES leg of a slug that NAMES an institutional outcome.
+
+    WHY `classify` ALONE CANNOT REACH THIS VERDICT, and why that was
+    right. It compares the retail `outcome_leg` against the
+    institutional `outcome_strike`: `yes` is not `laf`, so a
+    mutually-exclusive instrument beside a binary leg lands AMBIGUOUS.
+    That default protected us until the structure was actually read.
+
+    WHAT WAS READ (run 35472636412, 2026-09-19 22:2xZ). The retail board
+    for this event lists THREE markets -- `...-ftts-laf`, `...-ftts-sje`
+    and `...-ftts-none` -- each carrying its own `yes` and `no` legs. So
+    the retail slug is not a binary over the event; it is a binary over
+    ONE OUTCOME of the same mutually-exclusive set the institutional
+    venue enumerates, and the slug's terminal token is the outcome's
+    name in BOTH venues' keys.
+
+    Given that, BUYING `yes` ON THE SLUG THAT NAMES OUTCOME X IS BUYING
+    OUTCOME X, which is exactly the institutional instrument. That is
+    one-to-one, and it is established from venue-native keys on both
+    sides -- never from the question text, and never from slug equality
+    alone, which §2 rejects and which this function does not rely on:
+    the terminal token must also be the institutional outcome.
+
+    ANY OTHER CASE FALLS BACK TO `classify`. A non-YES leg, a slug whose
+    terminal token is not the outcome, or a missing field returns
+    whatever the general gate says -- which is AMBIGUOUS, and refused.
+    """
+    inst = institutional or {}
+    rt = retail or {}
+    leg = (rt.get("outcomeLeg") or "").lower()
+    outcome = (inst.get("outcomeStrike") or "").lower()
+    slug = rt.get("marketSlug")
+    symbol = inst.get("symbol")
+
+    if (leg in ("yes", "long") and outcome and symbol and slug
+            and symbol == slug and _slug_outcome(slug) == outcome):
+        agree = [
+            "retail slug %r and institutional symbol %r are the same "
+            "venue key" % (slug, symbol),
+            "the slug's terminal token %r is the institutional "
+            "outcome_strike, so the retail market is a binary over that "
+            "one outcome rather than over the event" % outcome,
+            "the %r leg of a binary over outcome %r is that outcome"
+            % (leg, outcome),
+        ]
+        # The scales must still be present: an exact contract we cannot
+        # price is not an executable one.
+        missing = [n for n in ("priceScale", "qtyScale", "payoutValue")
+                   if not inst.get(n)]
+        if missing:
+            return _result(inst, rt, AMBIGUOUS,
+                           ["institutional %s is absent" % n
+                            for n in missing], agree)
+        return _result(inst, rt, EXACT_ONE_TO_ONE, [], agree)
+
+    return classify(inst, rt)
+
+
 def complement_basket(primary: dict, siblings, *, retail_leg,
                       settlement_rule=None) -> dict:
     """§3/§4: what the retail NO side actually corresponds to.
