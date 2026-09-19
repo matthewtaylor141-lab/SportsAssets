@@ -79,13 +79,69 @@ jobs:
         # which is printed verbatim in the step's env block.
         env:
           KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
+          PMX_ENVIRONMENT: ${{ secrets.PMX_ENVIRONMENT }}
         run: |
           set -euo pipefail
           umask 077
-          [ -n "${KEY_B64:-}" ] || { echo "refused: PMX_PRIVATE_KEY_B64 is not set"; exit 1; }
-          printf '%s' "$KEY_B64" | base64 -d > "$RUNNER_TEMP/pk.pem"
-          head -c 32 "$RUNNER_TEMP/pk.pem" | grep -q "BEGIN" || { echo "refused: key is not a PEM"; exit 1; }
-          echo "key staged ($(wc -c < "$RUNNER_TEMP/pk.pem") bytes)"
+          # ── THE ENVIRONMENT ATTESTATION ────────────────────────────
+          #
+          # Added 2026-09-19, after the PMX_* slots were found to be
+          # holding PRODUCTION credentials. Nothing ran -- run 25 had
+          # already failed at decoding and this lane has no schedule --
+          # but it was one working paste away from signing a PRODUCTION
+          # assertion and posting it to the PREPRODUCTION Auth0 tenant.
+          #
+          # This lane is preproduction by construction: every host below
+          # is fixed to preprod and `assert_preprod` refuses anything
+          # else. What it could NOT check is which environment the
+          # CREDENTIAL belongs to, because that is not visible in a key.
+          # So it is attested instead, and the refusal is structural
+          # rather than a note in a README: no attestation, no run.
+          #
+          # PRODUCTION CREDENTIALS DO NOT GO IN PMX_*. They go in
+          # PMX_PROD_* and are read by a production path that does not
+          # exist yet and is not authorized yet.
+          if [ "${PMX_ENVIRONMENT:-}" != "PREPROD" ]; then
+            echo "ENVIRONMENT_NOT_ATTESTED_AS_PREPROD"
+            echo "  This workflow only ever contacts preproduction hosts."
+            echo "  It will not use a credential that has not been"
+            echo "  attested as a PREPRODUCTION credential."
+            echo "  Set the repository secret PMX_ENVIRONMENT to PREPROD"
+            echo "  once PMX_CLIENT_ID / PMX_PARTICIPANT_ID / PMX_KEY_ID /"
+            echo "  PMX_PRIVATE_KEY_B64 hold PREPROD values."
+            echo "  Production values belong in PMX_PROD_*, never here."
+            exit 1
+          fi
+          # NOTHING BELOW ECHOES THE VALUE. Every branch reports a NAME.
+          if [ -z "${KEY_B64:-}" ]; then
+            echo "SECRET_MISSING: PMX_PRIVATE_KEY_B64 is not set"; exit 1
+          fi
+          # EITHER FORM IS ACCEPTED, because the first attempt on 2026-09-19
+          # (run 25) died on "base64: invalid input" -- the secret was set but
+          # was not decodable, and a foot-gun that costs a dispatch round-trip
+          # to diagnose is a defect in this step, not in the operator. A PEM
+          # pasted as-is is now staged verbatim; anything else is treated as
+          # base64 with whitespace stripped, since a wrapped paste is the
+          # other likely shape.
+          if printf '%s' "$KEY_B64" | head -c 64 | grep -q -- "-----BEGIN"; then
+            printf '%s' "$KEY_B64" > "$RUNNER_TEMP/pk.pem"
+            FORM=raw-pem
+          else
+            printf '%s' "$KEY_B64" | tr -d '[:space:]' | base64 -d \
+              > "$RUNNER_TEMP/pk.pem" 2>/dev/null || {
+              echo "SECRET_PRESENT_BUT_NOT_DECODABLE: PMX_PRIVATE_KEY_B64 is"
+              echo "  set but is neither a PEM nor valid base64 of one."
+              echo "  Re-set it with:  base64 -w0 <key>.pem"
+              echo "  (macOS: base64 -i <key>.pem | tr -d '\\n')"
+              exit 1; }
+            FORM=base64
+          fi
+          if ! head -c 64 "$RUNNER_TEMP/pk.pem" | grep -q -- "-----BEGIN"; then
+            echo "SECRET_DECODED_BUT_NOT_A_PEM: the value decoded to"
+            echo "  $(wc -c < "$RUNNER_TEMP/pk.pem") bytes with no PEM header."
+            exit 1
+          fi
+          echo "key staged ($FORM, $(wc -c < "$RUNNER_TEMP/pk.pem") bytes)"
       - name: Install
         run: pip install -q pyjwt cryptography requests
       - name: Run the exploratory read

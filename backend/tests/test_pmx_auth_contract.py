@@ -257,6 +257,52 @@ class TestTheWorkflowSignsTheSameThing:
         src = self.WF.read_text()
         assert '"Content-Type": "application/x-www-form-urlencoded"' in src
 
+    def test_the_lane_refuses_a_credential_not_attested_as_preprod(self):
+        """The hosts were always preprod; the CREDENTIAL's environment is
+        not visible in a key, so it is attested and the refusal is
+        structural. Production values belong in PMX_PROD_*."""
+        src = self.WF.read_text()
+        assert 'PMX_ENVIRONMENT: ${{ secrets.PMX_ENVIRONMENT }}' in src
+        assert '"${PMX_ENVIRONMENT:-}" != "PREPROD"' in src
+        assert "ENVIRONMENT_NOT_ATTESTED_AS_PREPROD" in src
+        # and it is the FIRST gate: it must run before the key is decoded
+        step = src.split("Stage the key from the secret store", 1)[1]
+        assert step.index("ENVIRONMENT_NOT_ATTESTED_AS_PREPROD") < \
+            step.index("base64 -d")
+
+    def test_no_workflow_reads_a_production_credential_slot(self):
+        """Naming PMX_PROD_* in a refusal message is the point; READING
+        one would mean a production path exists, and none is authorized."""
+        for path in self.WF.parent.glob("*.yml"):
+            assert "secrets.PMX_PROD_" not in path.read_text(), path.name
+
+    def test_the_key_staging_step_names_every_way_it_can_fail(self):
+        """Run 25 died on the runner's own "base64: invalid input", which
+        says nothing about which of three different problems it was."""
+        src = self.WF.read_text()
+        for verdict in ("SECRET_MISSING",
+                        "SECRET_PRESENT_BUT_NOT_DECODABLE",
+                        "SECRET_DECODED_BUT_NOT_A_PEM"):
+            assert verdict in src, verdict
+
+    def test_the_key_staging_step_accepts_a_pem_or_its_base64(self):
+        src = self.WF.read_text()
+        # a PEM pasted as-is is staged verbatim
+        assert 'head -c 64 | grep -q -- "-----BEGIN"' in src
+        # anything else is base64, with a wrapped paste tolerated
+        assert "tr -d '[:space:]' | base64 -d" in src
+
+    def test_the_key_is_never_echoed_by_the_staging_step(self):
+        src = self.WF.read_text()
+        step = src.split("Stage the key from the secret store", 1)[1]
+        step = step.split("- name: Install", 1)[0]
+        for line in step.splitlines():
+            if "echo" in line or "printf" in line:
+                # the value may be piped, never printed
+                assert "echo \"$KEY_B64" not in line
+                assert "echo $KEY_B64" not in line
+                assert "printf '%s\\n' \"$KEY_B64\"" not in line
+
 
 # ── the gRPC hostname: four spellings, three candidates, no rotation ──
 
