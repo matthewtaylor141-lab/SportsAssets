@@ -200,6 +200,24 @@ class TestALocalKeyFaultIsNotAVenueFault:
     def test_the_shape_report_names_what_went_wrong(self, value, verdict):
         assert prod.key_shape(value)["verdict"] == verdict
 
+    def test_a_filename_is_caught_by_name(self):
+        """Run 2 held 77 bytes, one line, no whitespace, no BEGIN, not
+        JSON, not base64 -- exactly the length of the production key's own
+        filename. The secret had the NAME of the key, not its CONTENTS."""
+        for value in ("pmx-mm-prod-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+                      "-20260919T161500Z-private-key.pem",
+                      "/Users/someone/Downloads/key.pem",
+                      "~/keys/prod.p8", "C:\\keys\\a.key", "creds.json"):
+            got = prod.key_shape(value)
+            assert got["verdict"] == "LOOKS_LIKE_A_FILENAME_NOT_KEY_MATERIAL"
+            assert "CONTENTS" in got["meaning"]
+
+    def test_a_filename_beats_the_generic_verdict(self):
+        # it must not fall through to NOT_A_PRIVATE_KEY_WE_CAN_USE, which
+        # would send someone to re-run base64 on the same wrong input
+        assert prod.key_shape("x.pem")["verdict"] != \
+            "NOT_A_PRIVATE_KEY_WE_CAN_USE"
+
     def test_the_public_half_is_caught_by_name(self):
         pub = self.PEM.replace("PRIVATE", "PUBLIC")
         got = prod.key_shape(pub)

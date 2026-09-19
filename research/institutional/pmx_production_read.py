@@ -240,8 +240,21 @@ def key_shape(raw: str) -> dict:
     private = bool(out["pemLabel"]) and "PRIVATE" in (out["pemLabel"] or "")
     public = bool(out["pemLabel"]) and "PUBLIC" in (out["pemLabel"] or "")
 
+    # A FILENAME IS NOT A FILE. Run 2 on 2026-09-19 held 77 bytes, one
+    # line, no whitespace, no BEGIN, not JSON, not base64 -- which is
+    # exactly the length of the production key's own filename
+    # (pmx-mm-prod-<32-char client id>-<timestamp>-private-key.pem). The
+    # secret had the NAME of the key rather than its CONTENTS. That is an
+    # easy paste to make and a slow one to diagnose from "invalid input",
+    # so it gets said out loud.
+    low = raw.strip().lower()
+    filename = (low.endswith((".pem", ".key", ".p8", ".p12", ".json"))
+                or low.startswith(("/", "~/", "./", "c:\\")))
+
     if not raw.strip():
         out["verdict"] = "EMPTY"
+    elif filename:
+        out["verdict"] = "LOOKS_LIKE_A_FILENAME_NOT_KEY_MATERIAL"
     elif public:
         out["verdict"] = "WRONG_HALF_OF_THE_PAIR"
     elif out["startsWithBEGIN"] and private:
@@ -253,6 +266,11 @@ def key_shape(raw: str) -> dict:
 
     out["meaning"] = {
         "EMPTY": "the secret is not set, or is set to whitespace",
+        "LOOKS_LIKE_A_FILENAME_NOT_KEY_MATERIAL":
+            "this is the NAME of a key file, not its CONTENTS. Paste what "
+            "is inside the file: `base64 -w0 <that file>` (macOS: "
+            "`base64 -i <that file> | tr -d '\\n'`), or the PEM text "
+            "itself including its BEGIN and END lines.",
         "USABLE_PEM": "a private-key PEM pasted as-is; staged verbatim",
         "USABLE_BASE64_OF_PEM": "base64 of a private-key PEM; decoded",
         "WRONG_HALF_OF_THE_PAIR":
