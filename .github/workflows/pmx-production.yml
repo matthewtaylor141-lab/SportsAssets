@@ -83,6 +83,7 @@ jobs:
           PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}
           PMX_KEY_ID: ${{ secrets.PMX_KEY_ID }}
           PMX_PRIVATE_KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
+          PMX_TRADING_ACCOUNT: ${{ secrets.PMX_TRADING_ACCOUNT }}
           PMX_ACCOUNT: ${{ secrets.PMX_ACCOUNT }}
         run: |
           set -euo pipefail
@@ -103,6 +104,7 @@ jobs:
           PMX_PARTICIPANT_ID: ${{ secrets.PMX_PARTICIPANT_ID }}
           PMX_KEY_ID: ${{ secrets.PMX_KEY_ID }}
           PMX_PRIVATE_KEY_B64: ${{ secrets.PMX_PRIVATE_KEY_B64 }}
+          PMX_TRADING_ACCOUNT: ${{ secrets.PMX_TRADING_ACCOUNT }}
           PMX_ACCOUNT: ${{ secrets.PMX_ACCOUNT }}
           READS: ${{ inputs.reads }}
           SYMBOL: ${{ inputs.symbol }}

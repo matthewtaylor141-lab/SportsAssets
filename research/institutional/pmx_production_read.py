@@ -72,7 +72,24 @@ CREDENTIALS_EXPECTED = ("PMX_CLIENT_ID", "PMX_PARTICIPANT_ID",
                         "PMX_KEY_ID", "PMX_PRIVATE_KEY_B64")
 # Needed only by the balance and positions reads, which say so by name
 # rather than failing obscurely.
-ACCOUNT_ENV = "PMX_ACCOUNT"
+#
+# PMX_TRADING_ACCOUNT is the primary and the better name: the venue's own
+# model distinguishes the CLEARING MEMBER from the TRADING ACCOUNT
+# beneath it (firms/<firm>/accounts/<account>), and "account" alone does
+# not say which. PMX_ACCOUNT stays readable as a fallback so an existing
+# value is not orphaned by the rename.
+ACCOUNT_ENV = "PMX_TRADING_ACCOUNT"
+ACCOUNT_ENV_FALLBACK = "PMX_ACCOUNT"
+
+
+def account_of(env=None) -> str:
+    """The trading account resource name, or "" -- never a guess."""
+    env = os.environ if env is None else env
+    for name in (ACCOUNT_ENV, ACCOUNT_ENV_FALLBACK):
+        value = (env.get(name) or "").strip()
+        if value:
+            return value
+    return ""
 
 
 class NotProduction(RuntimeError):
@@ -294,7 +311,10 @@ def credential_presence(env=None) -> dict:
     present = [n for n in CREDENTIALS_EXPECTED if (env.get(n) or "").strip()]
     missing = [n for n in CREDENTIALS_EXPECTED if n not in present]
     return {"present": present, "missing": missing,
-            "accountSupplied": bool((env.get(ACCOUNT_ENV) or "").strip()),
+            "accountSupplied": bool(account_of(env)),
+            "accountFrom": (ACCOUNT_ENV if (env.get(ACCOUNT_ENV) or "").strip()
+                            else ACCOUNT_ENV_FALLBACK
+                            if account_of(env) else None),
             "verdict": A_SECRET_MISSING if missing else None}
 
 

@@ -96,7 +96,7 @@ def run_verify(args) -> int:
         # the default sweep skips the symbol reads, because a symbol is
         # not guessable and an empty one is not a question worth asking
         names = [n for n in prod.READS if n not in prod.SYMBOL_READS]
-    account = (os.environ.get(prod.ACCOUNT_ENV) or "").strip()
+    account = prod.account_of()
     # refuse the whole run before opening anything, if one name is not a
     # read or a symbol read has no symbol
     for name in names:
@@ -177,6 +177,7 @@ def run_verify(args) -> int:
         scopes=scopes,
         scopeCount=len(scopes),
         accountSupplied=bool(account),
+        account=account or None,
         symbol=symbol or None,
         reads=results,
         permissionDenied=denied,

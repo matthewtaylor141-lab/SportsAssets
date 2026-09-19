@@ -124,7 +124,30 @@ class TestTheTwoLanesCannotTakeEachOthersKeys:
         assert prod.CREDENTIALS_EXPECTED == (
             "PMX_CLIENT_ID", "PMX_PARTICIPANT_ID",
             "PMX_KEY_ID", "PMX_PRIVATE_KEY_B64")
-        assert prod.ACCOUNT_ENV == "PMX_ACCOUNT"
+        assert prod.ACCOUNT_ENV == "PMX_TRADING_ACCOUNT"
+        assert prod.ACCOUNT_ENV_FALLBACK == "PMX_ACCOUNT"
+
+    def test_the_trading_account_wins_over_the_older_name(self):
+        """The venue distinguishes the clearing member from the trading
+        account beneath it; "account" alone does not say which. The older
+        name still reads so an existing value is not orphaned."""
+        acct = "firms/f/accounts/a"
+        assert prod.account_of({"PMX_TRADING_ACCOUNT": acct,
+                                "PMX_ACCOUNT": "older"}) == acct
+        assert prod.account_of({"PMX_ACCOUNT": "older"}) == "older"
+        assert prod.account_of({}) == ""
+        assert prod.account_of({"PMX_TRADING_ACCOUNT": "  "}) == ""
+
+    def test_presence_says_which_name_supplied_the_account(self):
+        got = prod.credential_presence({"PMX_TRADING_ACCOUNT": "firms/f/a"})
+        assert got["accountSupplied"] is True
+        assert got["accountFrom"] == "PMX_TRADING_ACCOUNT"
+        assert prod.credential_presence({})["accountFrom"] is None
+
+    def test_the_workflow_passes_both_account_names(self):
+        src = (ROOT / ".github" / "workflows" / "pmx-production.yml").read_text()
+        assert "secrets.PMX_TRADING_ACCOUNT" in src
+        assert "secrets.PMX_ACCOUNT" in src
 
     def test_preprod_holds_the_prefixed_slots(self):
         assert all(n.startswith("PMX_PREPROD_")
