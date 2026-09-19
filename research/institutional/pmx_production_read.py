@@ -129,7 +129,13 @@ READ_ONLY_PATHS = {
     "positions":    ("GET",  "/v1/positions",               None),
     "balance":      ("POST", "/v1/positions/balance",       "account"),
     "balances":     ("POST", "/v1/positions/balances",      "account"),
-    "instruments":  ("POST", "/v1/refdata/instruments",     "page"),
+    # SAME PATH, optionally filtered. The unfiltered first page answers
+    # expired commodity rows, which carry no useful scale for the sports
+    # instrument an experiment actually executes against. A symbol
+    # filter is a narrower question on an already-allowed read, not a
+    # new capability -- the body shape is the one preproduction proved
+    # on 2026-09-10 ({"symbols": [...], "pageSize": N}).
+    "instruments":  ("POST", "/v1/refdata/instruments",     "page_or_symbol"),
     "symbols":      ("POST", "/v1/refdata/symbols",         "page"),
     "orders":       ("POST", "/v1/report/orders/search",    "search"),
     "executions":   ("POST", "/v1/report/executions/search", "search"),
@@ -164,7 +170,15 @@ def request_for(name: str, account: str = "", symbol: str = "") -> tuple:
             "not added by passing its name." % name)
     method, path, shape = READ_ONLY_PATHS[name]
     body = None
-    if shape == "account":
+    if shape == "page_or_symbol":
+        symbol = str(symbol or "").strip()
+        if symbol:
+            if "/" in symbol or "?" in symbol or "#" in symbol:
+                raise SymbolRequired("refused: %r is not a symbol" % symbol)
+            body = {"symbols": [symbol], "pageSize": 50}
+        else:
+            body = {"pageSize": 20}
+    elif shape == "account":
         body = {"account": account, "currency": "USD"} if account else {}
         if name == "balances":
             body.pop("currency", None)
@@ -403,6 +417,18 @@ def summarize(name: str, status: int, body) -> dict:
             first = rows[0] if isinstance(rows[0], dict) else {}
             out["firstSymbol"] = first.get("symbol")
             out["firstState"] = first.get("state")
+            # THE CANONICAL RECORD, VERBATIM, when the read was narrowed
+            # to one instrument. An instrument is REFERENCE DATA about a
+            # market -- scales, ticks, outcomes, settlement -- not an
+            # account payload, and the whole reason to ask for it is
+            # that price and quantity cannot be converted to dollars
+            # without it. Every key travels so the units are read off
+            # the venue rather than assumed; a partial projection here
+            # would put us back to guessing which field is the scale.
+            if len(rows) <= 3:
+                out["instrumentRecords"] = [r for r in rows
+                                            if isinstance(r, dict)]
+                out["instrumentKeys"] = sorted(first)
         out["nextPageToken"] = bool(body.get("nextPageToken"))
     elif name in ("orders", "executions"):
         rows = body.get("order") or body.get("execution") or []
