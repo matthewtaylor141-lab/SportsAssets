@@ -388,3 +388,4 @@ async def universe(pool, *, fresh_s=7200, limit=40) -> list:
              "eventId": r["event_slug"], "eventTitle": r["event_title"],
              "outcomeLeg": r["side_norm"], "kind": r["kind"]}
             for r in rows]
+

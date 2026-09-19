@@ -515,3 +515,8 @@
 @media (max-width: 520px) {
   .sh-lane-counts { grid-template-columns: 1fr }
 }
+
+/* The counter pair whose silent disagreement WAS the incident. A bad
+   value is coloured so it cannot be read past. */
+.sh-pipe-bad { color: var(--sh-amber) }
+.sh-pipe-bad b { color: var(--sh-amber) }

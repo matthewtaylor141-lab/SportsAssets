@@ -47,6 +47,9 @@ from datetime import datetime, timezone
 
 from .. import pmus
 from .. import shadow_bettor as bettor
+# Operational telemetry lives apart from the decision path: the
+# decision module may not read the decision ledger at all.
+from .. import shadow_bettor_ops as ops
 from .. import shadow_store as store
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
@@ -113,10 +116,39 @@ def _market_state(subject: dict, quote: dict, captured_at) -> dict:
         **common)
 
 
+async def _note(pool, stage, exc, opportunity_id, symbol) -> None:
+    """Record the failure. NEVER raise from here: a writer that could
+    fail while writing down its own failure is the shape of bug this
+    whole mechanism exists to end."""
+    try:
+        await ops.record_failure(
+            stage=stage, error=exc, pool=pool,
+            bettor_opportunity_id=opportunity_id, symbol=symbol)
+    except Exception:                                          # noqa: BLE001
+        log.debug("shadow_bettor: failure note failed", exc_info=True)
+
+
 async def tick(pool) -> dict:
     stats = {"looked": 0, "opportunities": 0, "decisions": 0,
-             "unreadable": 0, "status": "ok"}
-    subjects = await bettor.universe(pool, limit=MAX_READS_PER_TICK)
+             "unreadable": 0, "failures": 0, "status": "ok"}
+
+    # EVERY ORPHAN GETS A NAMED REASON, every cycle. This is the counter
+    # whose absence let 31 opportunities sit beside zero decisions for an
+    # hour with nothing anywhere saying so.
+    try:
+        stats["annotated"] = await ops.annotate_orphans(pool)
+    except Exception as exc:                                   # noqa: BLE001
+        stats["annotated"] = {"error": type(exc).__name__}
+        log.warning("shadow_bettor: orphan sweep failed", exc_info=True)
+
+    try:
+        subjects = await bettor.universe(pool, limit=MAX_READS_PER_TICK)
+    except Exception as exc:                                   # noqa: BLE001
+        stats["status"] = "universe_unreadable"
+        stats["failures"] += 1
+        stats["lastError"] = "%s: %s" % (type(exc).__name__, exc)
+        await _note(pool, "UNIVERSE_READ", exc, None, None)
+        return stats
     if not subjects:
         stats["status"] = "no_universe"
         return stats
@@ -145,13 +177,41 @@ async def tick(pool) -> dict:
         await store.record_market_state(state, pool=pool)
         opportunity["marketStateId"] = state["marketStateId"]
 
-        _oid, was_new = await bettor.record_opportunity(opportunity,
-                                                        pool=pool)
+        # ONE MARKET'S FAILURE IS NOT THE TICK'S FAILURE. Before this,
+        # any exception here abandoned the whole cycle and reported
+        # tick_failed with the STORE-READINESS problems list -- which is
+        # empty when the store is fine. Nine healthy markets were
+        # discarded because the tenth raised, and the heartbeat said
+        # nothing about why. Now the failure is written down in the
+        # database's own words and the loop continues.
+        try:
+            _oid, was_new = await bettor.record_opportunity(opportunity,
+                                                            pool=pool)
+        except Exception as exc:                               # noqa: BLE001
+            stats["failures"] += 1
+            stats["lastError"] = "%s: %s" % (type(exc).__name__, exc)
+            log.warning("shadow_bettor: opportunity write failed for %s",
+                        subject["symbol"], exc_info=True)
+            await _note(pool, "OPPORTUNITY_WRITE", exc,
+                        opportunity.get("bettorOpportunityId"),
+                        subject["symbol"])
+            continue
+
         if was_new:
             stats["opportunities"] += 1
-            _did, decided = await bettor.write_decision(
-                opportunity, state if state["readable"] else None,
-                pool=pool)
+            try:
+                _did, decided = await bettor.write_decision(
+                    opportunity, state if state["readable"] else None,
+                    pool=pool)
+            except Exception as exc:                           # noqa: BLE001
+                stats["failures"] += 1
+                stats["lastError"] = "%s: %s" % (type(exc).__name__, exc)
+                log.warning("shadow_bettor: decision write failed for %s",
+                            subject["symbol"], exc_info=True)
+                await _note(pool, "DECISION_WRITE", exc,
+                            opportunity["bettorOpportunityId"],
+                            subject["symbol"])
+                continue
             if decided:
                 stats["decisions"] += 1
 
@@ -188,11 +248,29 @@ async def run() -> None:
         started = time.monotonic()
         try:
             stats = await tick(pool)
-        except Exception:                                      # noqa: BLE001
+        except Exception as exc:                               # noqa: BLE001
             log.warning("shadow_bettor: tick failed", exc_info=True)
-            stats = {"status": "tick_failed"}
+            # THE ERROR TRAVELS WITH THE STATUS. `problems` below comes
+            # from the STORE-READINESS check and is empty whenever the
+            # schema is fine -- so a tick_failed heartbeat used to carry
+            # a reassuring empty list and no cause at all.
+            stats = {"status": "tick_failed",
+                     "tickError": "%s: %s" % (type(exc).__name__, exc)}
+            try:
+                await ops.record_failure(stage="NOT_IDENTIFIED",
+                                            error=exc, pool=pool)
+            except Exception:                                  # noqa: BLE001
+                log.debug("shadow_bettor: tick failure note failed")
         stats.update(boot)
         stats["tickS"] = round(time.monotonic() - started, 3)
+        # READ BACK, NOT ASSUMED. COMMAND must not show LIVE merely
+        # because opportunity collection works, so the component state
+        # is derived from the orphan and failure counts in the database
+        # rather than from the fact that this loop reached its end.
+        try:
+            stats["pipeline"] = await ops.pipeline_health(pool)
+        except Exception:                                      # noqa: BLE001
+            stats["pipeline"] = {"state": "NOT_IDENTIFIED"}
         try:
             await heartbeat("shadow_bettor",
                             str(stats.get("status") or "ok"), stats)

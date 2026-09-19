@@ -23,6 +23,7 @@ import pytest
 
 from sportsassets import shadow as sh
 from sportsassets import shadow_bettor as bettor
+from sportsassets import shadow_bettor_ops as ops
 from sportsassets import shadow_lanes as lanes
 from sportsassets import shadow_store as store
 from sportsassets.api import command_shadow as CS
@@ -32,6 +33,11 @@ BACKEND = ROOT / "backend"
 BETTOR_SRC = (BACKEND / "sportsassets" / "shadow_bettor.py").read_text()
 WORKER_SRC = (BACKEND / "sportsassets" / "workers"
               / "shadow_bettor.py").read_text()
+# Operational telemetry, deliberately OUTSIDE the decision module: the
+# independence test below refuses any FROM shadow_decisions in
+# shadow_bettor.py, and the right answer when it fired was to move the
+# code rather than loosen the rule.
+OPS_SRC = (BACKEND / "sportsassets" / "shadow_bettor_ops.py").read_text()
 MIGRATION = (BACKEND / "migrations"
              / "071_bettor_opportunities.sql").read_text()
 SHADOW_JS = (ROOT / "frontend" / "public" / "command"
@@ -388,3 +394,152 @@ def test_every_lane_check_column_is_actually_written():
         assert col in decision_insert, (
             "lane %s requires %s but the decision INSERT never binds it"
             % (lane, col))
+
+
+# ── the pipeline watches itself ──────────────────────────────────────
+
+M073 = (BACKEND / "migrations"
+        / "073_bettor_decision_pipeline.sql").read_text()
+
+
+def test_an_annotation_is_not_a_decision():
+    """Owner: the 31 opportunities "may NOT be presented as prospective
+    shadow decisions." An annotation has no action, no price, no size
+    and no lane -- it is a note that a decision is missing."""
+    block = M073[M073.index("CREATE TABLE IF NOT EXISTS bettor_opportunity_annotations"):]
+    block = block[:block.index(");")]
+    for forbidden in ("proposed_action", "proposed_price", "proposed_side",
+                      "proposed_quantity", "lane", "p_bettor"):
+        assert forbidden not in block, forbidden
+
+
+def test_an_annotation_is_stamped_when_it_was_made():
+    """Retrospective evidence must not wear a prospective timestamp."""
+    assert "bettor_annotation_is_retrospective" in M073
+    assert "CHECK (annotated_at >= observed_at)" in M073
+
+
+def test_the_annotation_kinds_are_the_declared_two():
+    assert ops.ANNOTATION_WRITER_INCIDENT == \
+        "DECISION_NOT_RECORDED_DUE_TO_WRITER_INCIDENT"
+    assert ops.ANNOTATION_WRITER_INCIDENT in M073
+    assert ops.ANNOTATION_UNEXPLAINED in M073
+
+
+def test_annotations_and_failures_are_append_only():
+    for table in ("bettor_opportunity_annotations", "bettor_decision_failures"):
+        assert "%s_immutable" % table in M073, table
+    assert M073.count("shadow_append_only()") >= 2
+
+
+def test_the_orphan_allowance_is_one_number_in_two_places():
+    """The worker, the API and any research query must not drift into
+    three different ideas of what an orphan is."""
+    assert "interval '180 seconds'" in M073
+    assert ops.ORPHAN_ALLOWANCE_S == 180
+
+
+def test_an_in_flight_opportunity_is_not_an_orphan():
+    view = M073[M073.index("CREATE OR REPLACE VIEW bettor_orphan_opportunities"):]
+    assert "o.observed_at < now() - interval '180 seconds'" in view
+
+
+def test_a_failure_records_the_error_in_its_own_words():
+    """A paraphrase would reproduce the incident, where the worker
+    caught its exception and reported an empty problems list."""
+    assert "error_text" in M073
+    assert "type(error).__name__" in OPS_SRC
+    assert "error_text" in OPS_SRC
+
+
+def test_every_failure_stage_the_worker_uses_is_a_legal_stage():
+    used = set(re.findall(r'_note\(pool, "(\w+)"', WORKER_SRC))
+    used |= set(re.findall(r'record_failure\(stage="(\w+)"', WORKER_SRC))
+    assert used, "the worker records no failures at all"
+    for stage in used:
+        assert stage in ops.FAILURE_STAGES, stage
+        assert "'%s'" % stage in M073, stage
+
+
+def test_one_markets_failure_does_not_discard_the_tick():
+    """Nine healthy markets were thrown away because the tenth raised."""
+    body = WORKER_SRC[WORKER_SRC.index("async def tick("):]
+    body = body[:body.index("async def run(")]
+    assert body.count("continue") >= 2, \
+        "a per-market failure must not break the loop"
+    assert "_note(pool, \"DECISION_WRITE\"" in body
+    assert "_note(pool, \"OPPORTUNITY_WRITE\"" in body
+
+
+def test_a_failed_tick_names_its_own_error():
+    """`problems` comes from the STORE-READINESS check and is empty
+    whenever the schema is fine, so tick_failed used to carry a
+    reassuring empty list and no cause at all."""
+    assert "tickError" in WORKER_SRC
+    assert WORKER_SRC.index("tickError") < WORKER_SRC.index("stats.update(boot)")
+
+
+def test_the_worker_never_raises_while_recording_a_failure():
+    note = WORKER_SRC[WORKER_SRC.index("async def _note("):]
+    note = note[:note.index("async def tick(")]
+    assert "except Exception" in note, \
+        "a writer that can fail while writing down its own failure is " \
+        "the bug this mechanism exists to end"
+
+
+# ── COMMAND shows it honestly ────────────────────────────────────────
+
+
+def test_command_has_a_pipeline_component():
+    assert "BETTOR_DECISION_PIPELINE" in CS.HEALTH_COMPONENTS
+    assert "_pipeline" in CS_SRC
+
+
+def test_collection_working_is_not_enough_for_live():
+    """Owner: "Do not show LIVE / HEALTHY merely because opportunity
+    collection works." An orphan or a recorded failure is DEGRADED."""
+    block = CS_SRC[CS_SRC.index("async def _pipeline("):]
+    block = block[:block.index("async def summary(")]
+    assert 'if orphans or failures:' in block
+    assert block.index("DEGRADED") < block.index('state = "LIVE"')
+
+
+def test_the_pipeline_declares_no_target_rate():
+    """Owner: do not invent a target success rate after seeing the
+    result. The number is reported and judged by a human."""
+    block = CS_SRC[CS_SRC.index("async def _pipeline("):]
+    block = block[:block.index("async def summary(")]
+    assert not re.search(r"successRate\s*[<>]=?\s*0\.\d", block)
+    assert "opportunityToDecisionSuccessRate" in block
+
+
+def test_a_missing_073_degrades_rather_than_503s():
+    block = CS_SRC[CS_SRC.index("async def _pipeline("):]
+    block = block[:block.index("async def summary(")]
+    assert "STORE_NOT_READY" in block
+    assert "migration 073" in block
+
+
+def test_the_ui_draws_the_two_counters_side_by_side():
+    """31 beside 0 with nothing saying so WAS the incident."""
+    assert "BETTOR_DECISION_PIPELINE" in SHADOW_JS
+    assert "pipelineDetail" in SHADOW_JS
+    for field in ("orphanOpportunities", "decisionWriteFailures",
+                  "lastSuccessfulDecision", "lastFailure",
+                  "opportunityToDecisionSuccessRate"):
+        assert field in SHADOW_JS, field
+
+
+def test_the_decision_module_never_reads_the_decision_ledger():
+    """The wall stayed blunt. When adding pipeline health made
+    shadow_bettor.py read shadow_decisions, the fix was to move the
+    code out, not to carve an exception into the independence test."""
+    assert "shadow_decisions" not in BETTOR_SRC
+    assert "shadow_decisions" in OPS_SRC
+
+
+def test_telemetry_can_never_become_a_decision_input():
+    """decide() cannot reach the ops module: shadow_bettor does not
+    import it, and the import only runs the other way."""
+    assert "shadow_bettor_ops" not in BETTOR_SRC
+    assert "import shadow_bettor as bettor" in OPS_SRC

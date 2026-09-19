@@ -1962,7 +1962,13 @@ P_BETTOR stays NOT_ESTABLISHED. The BETTOR lane's honest output until
 independent EV is earned is NO_TRADE, and no trade is invented to fill
 a panel.
 
-## 79. The 17:01:06Z detection stall: verdict C, and two bugs in my own witness
+## 79. The 17:01:06Z detection stall — SUPERSEDED HEADLINE, see the correction below
+
+> **The verdict recorded in this section is superseded.** The matched
+> cohort control changed the interpretation, and the owner corrected
+> the label on 2026-09-19. The final classification is in section 81.
+> The evidence in this section stands; only the headline was wrong.
+
 
 **The incident.** No fill written since 17:16:33Z; newest fill 17:01:06Z
 across all twelve active wallets; `chain_listener` heartbeat `ok` but
@@ -2074,3 +2080,80 @@ is read by the database's own name and never the camelCase one; and --
 derived from the migrations rather than hardcoded -- every
 `CHECK (lane <> 'X' OR col IS NOT NULL)` names a column the decision
 INSERT actually binds.
+
+
+## 81. FINAL incident classification, corrected, and the incident closed
+
+The matched cohort control changed the interpretation, and the label
+follows the evidence rather than the first criterion that happened to
+fire.
+
+```
+FINAL_INCIDENT_VERDICT        MARKET_COHORT_INACTIVITY_OBSERVED_ON_FROZEN_SAMPLE
+ROOT_CAUSE                    NOT_IDENTIFIED
+LOCAL_INGESTION_FAILURE_STATUS NOT_DETECTED_AGAINST_V2_WITNESS
+COHORT_COVERAGE               CAPPED_40_MARKET_SAMPLE
+GLOBAL_FEED_FRESHNESS         CURRENT (venue-declared serving lag 1-3s)
+RELEVANT_COHORT_FRESHNESS     STALE (newest cohort trade 17:01:11Z)
+MARKET_COHORT_INCIDENT_STATUS CLOSED
+```
+
+**`ROOT_CAUSE = NOT_IDENTIFIED`, not `NOT_OURS`.** I wrote `NOT_OURS`
+earlier and it was an overreach. What was established is narrower and
+is now stated at its real width: local storage is not missing wallet
+events *visible through the V2 witness*. That is not the same as
+establishing that every relevant upstream mechanism is independent or
+complete, and the difference matters because the second claim would
+close off exactly the investigation a recurrence would need.
+
+**`COHORT_COVERAGE = CAPPED_40_MARKET_SAMPLE`.** The 40-market cap was
+hit; the window held more. Nothing here generalizes to the complete
+venue, and "40 markets, 5 with post-cutoff activity" is not "the venue
+went quiet".
+
+Incident research stops here unless new contradictory evidence appears.
+
+## 82. The pipeline watches itself
+
+The writer incident lasted an hour because nothing was watching the one
+thing that mattered: 31 opportunities beside 0 decisions, with the
+worker heartbeat reporting `tick_failed` and an **empty** problems list
+— that list comes from the store-readiness check, which is empty
+whenever the schema is fine.
+
+**Migration 073** adds two append-only tables and one view.
+`bettor_opportunity_annotations` records, for an opportunity that never
+got a decision, that it never got one — with no action, no price, no
+size and no lane, so it can never be read as a decision. The 31 are
+kept exactly as prospective observations and are labelled
+`DECISION_NOT_RECORDED_DUE_TO_WRITER_INCIDENT`; **no decision is
+reconstructed after the fact.** `bettor_decision_failures` stores the
+database's own error text, because the paraphrase-and-swallow is what
+made this invisible. `bettor_orphan_opportunities` holds the single
+definition of an orphan — past a **declared 180s allowance** with no
+decision — so the worker, the API and research cannot drift into three
+different ideas of it. An in-flight opportunity is not an orphan.
+
+**The incident boundary is derived, not guessed.** Any orphan observed
+before the first BETTOR decision the store ever accepted belongs to the
+writer incident; anything after is a *new* gap labelled
+`REASON_NOT_IDENTIFIED` rather than filed under an incident that has
+been fixed.
+
+**The worker no longer throws away nine markets because the tenth
+raised.** Each market's write is guarded, the failure is recorded, the
+loop continues, and a failed tick carries `tickError` so the cause
+travels with the status.
+
+**COMMAND** gains `BETTOR_DECISION_PIPELINE`, drawn beside the engine:
+opportunities, decisions, orphans, write failures, success rate, last
+success, last failure. An orphan or a recorded failure is **DEGRADED**,
+however healthy collection looks — `LIVE` is not available merely
+because opportunities land. No target rate is declared; the number is
+reported and judged by a person.
+
+**The independence wall stayed blunt.** Adding pipeline health made
+`shadow_bettor.py` read `shadow_decisions`, and its own test refused
+the change. The fix was to move the telemetry into
+`shadow_bettor_ops.py`, not to carve an exception into the test —
+`decide()` cannot reach it, and the import only runs one way.

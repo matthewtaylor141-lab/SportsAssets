@@ -240,6 +240,83 @@ async def _bettor_counts(pool) -> dict:
                          for b in blockers]}
 
 
+_PIPELINE_SQL = """
+    SELECT
+      (SELECT count(*) FROM bettor_opportunities)             AS opportunities,
+      (SELECT max(observed_at) FROM bettor_opportunities)     AS last_opportunity,
+      (SELECT count(*) FROM shadow_decisions
+        WHERE lane = 'BETTOR_EV_SHADOW')                       AS decisions,
+      (SELECT max(created_at) FROM shadow_decisions
+        WHERE lane = 'BETTOR_EV_SHADOW')                       AS last_decision,
+      (SELECT count(*) FROM bettor_orphan_opportunities)       AS orphans,
+      (SELECT min(observed_at) FROM bettor_orphan_opportunities)
+                                                               AS oldest_orphan,
+      (SELECT count(*) FROM bettor_decision_failures)          AS failures,
+      (SELECT max(failed_at) FROM bettor_decision_failures)    AS last_failure,
+      (SELECT error_text FROM bettor_decision_failures
+        ORDER BY failed_at DESC LIMIT 1)                       AS last_failure_text
+"""
+
+
+async def _pipeline(pool) -> dict:
+    """The decision pipeline's own verdict, from rows.
+
+    "Do not show LIVE / HEALTHY merely because opportunity collection
+    works." On 2026-09-19 opportunity collection worked perfectly while
+    the decision writer failed on every single row, and nothing on this
+    screen would have said so. An orphan or a recorded failure is
+    DEGRADED, full stop, and the numbers that produced the verdict
+    travel with it so an operator never has to compare two counters by
+    eye to discover an outage.
+    """
+    try:
+        row = await pool.fetchrow(_PIPELINE_SQL)
+    except Exception as exc:                                   # noqa: BLE001
+        return {"state": "STORE_NOT_READY",
+                "detail": "%s — migration 073 may not have applied yet"
+                          % type(exc).__name__,
+                "orphanOpportunities": None, "decisionWriteFailures": None,
+                "lastSuccessfulDecision": None, "lastFailure": None,
+                "opportunitiesObserved": None, "decisionsRecorded": None,
+                "opportunityToDecisionSuccessRate": None}
+    opportunities = int(row["opportunities"] or 0)
+    decisions = int(row["decisions"] or 0)
+    orphans = int(row["orphans"] or 0)
+    failures = int(row["failures"] or 0)
+    if orphans or failures:
+        state = "DEGRADED"
+    elif decisions:
+        state = "LIVE"
+    else:
+        # Not an outage and not health either: nothing has been asked of
+        # the writer yet, and saying LIVE here would be the same claim
+        # that hid the incident.
+        state = "LISTENING"
+    return {
+        "state": state,
+        "opportunitiesObserved": opportunities,
+        "decisionsRecorded": decisions,
+        "orphanOpportunities": orphans,
+        "oldestOrphanAt": _iso(row["oldest_orphan"]),
+        "decisionWriteFailures": failures,
+        "lastSuccessfulDecision": _iso(row["last_decision"]),
+        "lastOpportunityAt": _iso(row["last_opportunity"]),
+        "lastFailure": _iso(row["last_failure"]),
+        "lastFailureText": row["last_failure_text"] or NOT_IDENTIFIED,
+        # A RATE NEEDS A DENOMINATOR THAT MEANS SOMETHING. No target is
+        # declared here: the directive says not to invent one after
+        # seeing the result, so the number is reported and judged by a
+        # human.
+        "opportunityToDecisionSuccessRate": (
+            None if not opportunities
+            else round(decisions / opportunities, 4)),
+        "affectsBettor": True,
+        "detail": ("every opportunity must end in a decision or a named "
+                   "failure; an orphan is an opportunity past its "
+                   "180s allowance with neither"),
+    }
+
+
 async def summary(pool) -> dict:
     counts = await _guard(pool, "SHADOW_COUNTS_UNREAD", pool.fetchrow,
                           _COUNTS_SQL)
@@ -804,7 +881,8 @@ async def trade(pool, shadow_decision_id: str) -> dict:
 # ORDERED BY THE HIERARCHY. The primary engine is read first, and the
 # benchmark's feed sits directly under it so an operator can see at a
 # glance that one is healthy while the other is not.
-HEALTH_COMPONENTS = ("BETTOR_EV_ENGINE", "INSTITUTIONAL_MARKET_DATA", "L2",
+HEALTH_COMPONENTS = ("BETTOR_EV_ENGINE", "BETTOR_DECISION_PIPELINE",
+                     "INSTITUTIONAL_MARKET_DATA", "L2",
                      "RN1_BENCHMARK_FEED", "RN1_LISTENER", "SHADOW_ENGINE",
                      "SHADOW_WRITER", "LABEL_MATURITY", "DATABASE",
                      "COMMAND_API")
@@ -882,6 +960,8 @@ async def health(pool) -> dict:
                   else "DEGRADED" if rcv_lag <= STALE_AFTER_S
                   else "STALE")
 
+    pipeline = await _pipeline(pool)
+
     components = {
         "RN1_BENCHMARK_FEED": {
             "state": feed_state,
@@ -925,6 +1005,7 @@ async def health(pool) -> dict:
             from_beat("shadow_bettor"),
             pBettor=lanes.NOT_ESTABLISHED,
             dependsOnRn1=False),
+        "BETTOR_DECISION_PIPELINE": pipeline,
         "COMMAND_API": {"state": "LIVE",
                         "sourceTimestamp": now.isoformat(),
                         "detail": "serving"},

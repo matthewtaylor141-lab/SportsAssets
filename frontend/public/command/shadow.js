@@ -326,6 +326,7 @@
 
   const HEALTH_LABEL = {
     BETTOR_EV_ENGINE: 'BETTOR EV engine',
+    BETTOR_DECISION_PIPELINE: 'BETTOR decision pipeline',
     INSTITUTIONAL_MARKET_DATA: 'Institutional market data',
     L2: 'L2 depth',
     RN1_BENCHMARK_FEED: 'RN1 benchmark feed',
@@ -356,7 +357,31 @@
    * the answer to the question an operator actually asks when RN1 goes
    * quiet: is BETTOR affected? It is not, and the row says so rather
    * than leaving it to be inferred from two green dots. */
+  /* The counters whose disagreement was the whole incident: 31
+   * opportunities beside 0 decisions, with nothing on this screen
+   * saying so. They are now drawn next to each other, and an orphan or
+   * a recorded failure paints the row DEGRADED however healthy
+   * collection looks. */
+  function pipelineDetail(c) {
+    const rate = (c.opportunityToDecisionSuccessRate === null ||
+                  c.opportunityToDecisionSuccessRate === undefined)
+      ? NI : (c.opportunityToDecisionSuccessRate * 100).toFixed(1) + '%';
+    const bad = (c.orphanOpportunities || 0) || (c.decisionWriteFailures || 0);
+    return `<span class="sh-feed-facts">
+      <span>opportunities <b>${zeroOk(c.opportunitiesObserved)}</b></span>
+      <span>decisions <b>${zeroOk(c.decisionsRecorded)}</b></span>
+      <span class="${c.orphanOpportunities ? 'sh-pipe-bad' : ''}">orphans <b>${zeroOk(c.orphanOpportunities)}</b></span>
+      <span class="${c.decisionWriteFailures ? 'sh-pipe-bad' : ''}">write failures <b>${zeroOk(c.decisionWriteFailures)}</b></span>
+      <span>rate <b>${esc(rate)}</b></span>
+    </span><span class="sh-feed-facts">
+      <span>last decision <b>${c.lastSuccessfulDecision ? stamp(c.lastSuccessfulDecision) : NI}</b></span>
+      <span>last failure <b>${c.lastFailure ? stamp(c.lastFailure) : NI}</b></span>
+    </span>${bad ? `<span class="sh-feed-note sh-pipe-bad">${str(c.lastFailureText)}</span>` : ''}
+    <span class="sh-feed-note">${str(c.detail)}</span>`;
+  }
+
   function feedDetail(key, c) {
+    if (key === 'BETTOR_DECISION_PIPELINE') return pipelineDetail(c);
     if (key !== 'RN1_BENCHMARK_FEED') return str(c.detail);
     const lag = (c.rn1FeedLagSeconds === null ||
                  c.rn1FeedLagSeconds === undefined)
