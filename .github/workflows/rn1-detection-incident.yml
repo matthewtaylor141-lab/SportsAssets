@@ -1,0 +1,308 @@
+# DETECTION STALL INCIDENT: an INDEPENDENT witness for the 17:01:06Z cutoff.
+#
+# Owner directive 2026-09-19: "Use Polymarket's current public Data API
+# V2 as an independent witness. Do not use our local whale database as
+# the authority for whether the wallet traded after the cutoff."
+#
+# WHY A WORKFLOW AND NOT A LOCAL SCRIPT. The build container's egress to
+# data-api.polymarket.com is refused at the proxy (connect_rejected), so
+# the question cannot be asked from there at all. This runner can reach
+# both the public feed and, through the Render API, the production
+# database -- so the comparison happens in one place, in one job, with
+# both sides read at the same moment.
+#
+# IT IS READ-ONLY ON BOTH SIDES. The database half runs under
+# default_transaction_read_only with the same mutating-keyword guard the
+# research surface uses; the venue half is unauthenticated GETs of a
+# public feed. Nothing is written anywhere.
+#
+# THE CONTRACT IS DISCOVERED, NOT ASSUMED. I do not know this feed's
+# exact parameter spelling from memory, and guessing one and reporting
+# "0 rows" would manufacture verdict C out of my own typo. So the job
+# tries several documented-looking spellings against ONE wallet first,
+# prints what each returned, and only then sweeps -- recording which
+# spelling it used. A sweep whose contract was never confirmed is not
+# evidence.
+
+name: rn1-detection-incident
+
+on:
+  workflow_dispatch:
+    inputs:
+      cutoff:
+        description: "Incident cutoff, ISO8601 Z (the local last fill)"
+        required: false
+        default: "2026-09-19T17:01:06Z"
+      lookback_min:
+        description: "Minutes before the cutoff to start the window"
+        required: false
+        default: "5"
+      max_pages:
+        description: "Pagination ceiling per wallet per endpoint"
+        required: false
+        default: "10"
+      render_key:
+        description: "Render API key (blank uses the RENDER_API_KEY secret)"
+        required: false
+        default: ""
+
+concurrency:
+  group: rn1-detection-incident
+  cancel-in-progress: false
+
+jobs:
+  witness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 25
+    env:
+      SERVICE: sportsassets-db
+      KEY_SECRET: ${{ secrets.RENDER_API_KEY }}
+      API: https://data-api.polymarket.com
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Freeze the incident window
+        run: |
+          set -u
+          CUT="${{ inputs.cutoff }}"
+          LOOK="${{ inputs.lookback_min }}"
+          CUT_EPOCH=$(date -u -d "$CUT" +%s)
+          START_EPOCH=$(( CUT_EPOCH - LOOK * 60 ))
+          NOW_EPOCH=$(date -u +%s)
+          {
+            echo "CUTOFF_ISO=$CUT"
+            echo "CUTOFF_EPOCH=$CUT_EPOCH"
+            echo "START_EPOCH=$START_EPOCH"
+            echo "START_ISO=$(date -u -d @$START_EPOCH +%Y-%m-%dT%H:%M:%SZ)"
+            echo "NOW_EPOCH=$NOW_EPOCH"
+            echo "NOW_ISO=$(date -u -d @$NOW_EPOCH +%Y-%m-%dT%H:%M:%SZ)"
+          } >> "$GITHUB_ENV"
+          # ONE frozen value, used everywhere after this. A window that
+          # drifted between endpoints would make the two halves of the
+          # comparison incomparable.
+          {
+            echo "## Incident window (frozen)"
+            echo '```'
+            echo "CUTOFF   $CUT  ($CUT_EPOCH)"
+            echo "START    $(date -u -d @$START_EPOCH +%Y-%m-%dT%H:%M:%SZ)  ($START_EPOCH)"
+            echo "END      $(date -u -d @$NOW_EPOCH +%Y-%m-%dT%H:%M:%SZ)  ($NOW_EPOCH)"
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: The configured roster, and our own post-cutoff counts
+        run: |
+          set +e
+          set -u
+          KEY_INPUT="$(jq -r '.inputs.render_key // empty' "$GITHUB_EVENT_PATH")"
+          [ -n "$KEY_INPUT" ] && echo "::add-mask::$KEY_INPUT"
+          KEY="$KEY_SECRET"; [ -z "$KEY" ] && KEY="$KEY_INPUT"
+          [ -z "$KEY" ] && { echo "no Render key"; exit 1; }
+          echo "::add-mask::$KEY"
+          get() { curl -sS --max-time 45 -H "Authorization: Bearer $KEY" \
+                  -H "Accept: application/json" "https://api.render.com/v1$1"; }
+          PG=$(get "/postgres?name=$SERVICE&limit=20" \
+               | jq -r --arg n "$SERVICE" \
+                 '.[]? | select(.postgres.name==$n) | .postgres.id' | head -1)
+          [ -z "$PG" ] && { echo "no database named $SERVICE"; exit 1; }
+          command -v psql >/dev/null 2>&1 || {
+            sudo apt-get update -qq >/dev/null 2>&1
+            sudo apt-get install -y -qq postgresql-client >/dev/null 2>&1; }
+          get "/postgres/$PG/connection-info" > /tmp/ci.json
+          EXT=$(jq -r '.externalConnectionString // empty' /tmp/ci.json)
+          PW=$(jq -r '.password // empty' /tmp/ci.json)
+          [ -n "$PW" ] && echo "::add-mask::$PW"
+          [ -n "$EXT" ] && echo "::add-mask::$EXT"
+          [ -z "$EXT" ] && { echo "no connection string"; exit 1; }
+          echo "$EXT" > /tmp/conn; chmod 600 /tmp/conn
+
+          # The roster query lives in research/incident_roster.sql and
+          # binds the frozen cutoff through psql -v, so both halves of
+          # this job use the identical window.
+          PGOPTIONS="-c statement_timeout=120000 -c default_transaction_read_only=on" \
+            psql "$(cat /tmp/conn)" -X -A -t -q -v ON_ERROR_STOP=1 \
+                 -v cutoff_epoch="$CUTOFF_EPOCH" \
+                 -f research/incident_roster.sql \
+                 > /tmp/roster.txt 2>/tmp/roster.err
+          RC=$?
+          if [ "$RC" != "0" ]; then
+            echo "::error::roster read failed rc=$RC"
+            grep -v -F "$PW" /tmp/roster.err | head -20; exit 1
+          fi
+          echo "wallets read: $(wc -l < /tmp/roster.txt)"
+          {
+            echo "## Configured roster (address | label | local last ts | local rows after cutoff)"
+            echo '```'
+            cat /tmp/roster.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Discover the Data API V2 contract before trusting a zero
+        id: contract
+        run: |
+          set -u
+          WALLET=$(head -1 /tmp/roster.txt | cut -d'|' -f1)
+          echo "probe wallet: $WALLET"
+          echo "## Data API V2 contract discovery" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          BEST=""
+          # Candidate spellings. Each is TRIED and its outcome PRINTED;
+          # nothing here assumes which one the live service accepts.
+          for spec in \
+            "trades:user=$WALLET&limit=5" \
+            "trades:proxyWallet=$WALLET&limit=5" \
+            "trades:wallet=$WALLET&limit=5" \
+            "trades:address=$WALLET&limit=5" \
+            "activity:user=$WALLET&type=TRADE&limit=5" \
+            "activity:proxyWallet=$WALLET&type=TRADE&limit=5" \
+          ; do
+            EP="${spec%%:*}"; Q="${spec#*:}"
+            URL="$API/v2/$EP?$Q"
+            CODE=$(curl -sS --max-time 40 -o /tmp/probe.json \
+                   -D /tmp/probe.hdr -w '%{http_code}' "$URL" || echo 000)
+            ROWS=$(jq -r '(.data // .results // .trades // .activity // .)
+                          | if type=="array" then length else "NOT_ARRAY" end' \
+                   /tmp/probe.json 2>/dev/null || echo "UNPARSED")
+            printf '%-12s %-22s http=%s rows=%s\n' "$EP" "${Q%%=*}" \
+              "$CODE" "$ROWS" | tee -a "$GITHUB_STEP_SUMMARY"
+            head -c 240 /tmp/probe.json | tr -d '\n' \
+              | sed 's/^/    body: /' | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "" | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$CODE" = "200" ] && [ "$ROWS" != "NOT_ARRAY" ] \
+               && [ "$ROWS" != "UNPARSED" ] && [ "$ROWS" != "0" ] \
+               && [ -z "$BEST" ]; then
+              BEST="$spec"
+            fi
+          done
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ -z "$BEST" ]; then
+            echo "CONTRACT_OK=no" >> "$GITHUB_ENV"
+            echo "::warning::no candidate spelling returned rows; the sweep" \
+                 "below cannot distinguish 'wallet inactive' from 'wrong" \
+                 "parameter', so the verdict will be INCONCLUSIVE"
+          else
+            echo "CONTRACT_OK=yes" >> "$GITHUB_ENV"
+            echo "PARAM=${BEST#*:}" >> "$GITHUB_ENV"
+            echo "PARAM_NAME=$(echo "${BEST#*:}" | cut -d= -f1)" >> "$GITHUB_ENV"
+            echo "chose: $BEST"
+          fi
+
+      - name: The API's own freshness, where it serves one
+        run: |
+          set -u
+          echo "## Data API freshness probes" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          # ZERO ROWS FROM A STALE PUBLIC API IS NOT EVIDENCE THE WALLETS
+          # WERE INACTIVE. These paths are candidates: each is tried and
+          # its real answer printed, including 404, so the report says
+          # what the service actually offers rather than what I hoped.
+          for p in /v2/health /health /healthz /v2/status /status \
+                   /v2/meta /v2/service /live; do
+            CODE=$(curl -sS --max-time 25 -o /tmp/f.json -w '%{http_code}' \
+                   "$API$p" || echo 000)
+            printf '%-14s http=%s  %s\n' "$p" "$CODE" \
+              "$(head -c 180 /tmp/f.json | tr -d '\n')" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          done
+          # An indirect watermark that needs no documented endpoint: the
+          # newest timestamp the feed will serve for ANY wallet. If that
+          # is also stuck at the cutoff, the staleness is upstream.
+          CODE=$(curl -sS --max-time 40 -o /tmp/any.json -w '%{http_code}' \
+                 "$API/v2/trades?limit=20" || echo 000)
+          echo "global /v2/trades?limit=20 http=$CODE" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          jq -r '[(.data // .results // .trades // .)[]?
+                  | (.timestamp // .time // .ts // empty)] | max // "NONE"' \
+             /tmp/any.json 2>/dev/null \
+             | sed 's/^/global newest venue timestamp: /' \
+             | tee -a "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Sweep every configured wallet on both feeds
+        run: |
+          set -u
+          MAXP="${{ inputs.max_pages }}"
+          echo "## Per-wallet witness" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          printf '%-44s %-22s %8s %8s %-22s %-22s\n' \
+            WALLET LABEL V2_TRADES V2_ACT LATEST_V2 LOCAL_LAST \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+          TOTAL_V2=0; WALLETS_WITH=0; TESTED=0
+          while IFS='|' read -r ADDR LABEL LOCALTS LOCALN; do
+            [ -z "$ADDR" ] && continue
+            TESTED=$((TESTED+1))
+            PNAME="${PARAM_NAME:-user}"
+            LATEST="NONE"; NT=0; NA=0
+            for EP in trades activity; do
+              CURSOR=""; PAGE=0; COUNT=0
+              while [ "$PAGE" -lt "$MAXP" ]; do
+                PAGE=$((PAGE+1))
+                Q="$PNAME=$ADDR&limit=100"
+                [ "$EP" = "activity" ] && Q="$Q&type=TRADE"
+                [ -n "$CURSOR" ] && Q="$Q&next_cursor=$CURSOR"
+                REQ_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                CODE=$(curl -sS --max-time 40 -o /tmp/p.json -D /tmp/p.hdr \
+                       -w '%{http_code}' "$API/v2/$EP?$Q" || echo 000)
+                RES_AT=$(date -u +%Y-%m-%dT%H:%M:%SZ)
+                TRACE=$(grep -i '^x-trace-id:' /tmp/p.hdr | tr -d '\r' \
+                        | cut -d' ' -f2- || true)
+                if [ "$CODE" != "200" ]; then
+                  echo "  $ADDR $EP page=$PAGE http=$CODE req=$REQ_AT res=$RES_AT trace=${TRACE:-NONE}" \
+                    | tee -a "$GITHUB_STEP_SUMMARY"
+                  break
+                fi
+                # rows in the window, and the newest venue timestamp seen
+                N=$(jq -r --argjson c "$CUTOFF_EPOCH" '
+                      [(.data // .results // .trades // .activity // .)[]?
+                       | (.timestamp // .time // .ts // 0) | tonumber?
+                       | select(. > $c)] | length' /tmp/p.json 2>/dev/null \
+                      || echo 0)
+                MX=$(jq -r '[(.data // .results // .trades // .activity // .)[]?
+                             | (.timestamp // .time // .ts // empty)]
+                            | max // empty' /tmp/p.json 2>/dev/null || true)
+                [ -n "$MX" ] && [ "$MX" != "null" ] && {
+                  if [ "$LATEST" = "NONE" ] || [ "$MX" -gt "$LATEST" ] 2>/dev/null
+                  then LATEST="$MX"; fi; }
+                COUNT=$((COUNT + N))
+                CURSOR=$(jq -r '.next_cursor // .nextCursor // empty' \
+                         /tmp/p.json 2>/dev/null || true)
+                HASMORE=$(jq -r '.has_more // .hasMore // empty' \
+                          /tmp/p.json 2>/dev/null || true)
+                # V2 IS CURSOR-PAGINATED. No offset walk: stop when the
+                # feed says there is no next cursor, as its contract says.
+                [ -z "$CURSOR" ] || [ "$CURSOR" = "null" ] && break
+                [ "$HASMORE" = "false" ] && break
+              done
+              [ "$EP" = "trades" ] && NT="$COUNT" || NA="$COUNT"
+            done
+            [ "$NT" -gt 0 ] 2>/dev/null && WALLETS_WITH=$((WALLETS_WITH+1))
+            TOTAL_V2=$((TOTAL_V2 + NT))
+            LATEST_ISO="$LATEST"
+            [ "$LATEST" != "NONE" ] && LATEST_ISO=$(date -u -d @"$LATEST" \
+              +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$LATEST")
+            printf '%-44s %-22s %8s %8s %-22s %-22s\n' \
+              "$ADDR" "$(echo "$LABEL" | cut -c1-22)" "$NT" "$NA" \
+              "$LATEST_ISO" "$LOCALTS" | tee -a "$GITHUB_STEP_SUMMARY"
+          done < /tmp/roster.txt
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "WALLETS_TESTED=$TESTED"
+            echo "WALLETS_WITH_V2_TRADES_AFTER_LOCAL_CUTOFF=$WALLETS_WITH"
+            echo "TOTAL_V2_TRADES_AFTER_LOCAL_CUTOFF=$TOTAL_V2"
+            echo "CONTRACT_OK=${CONTRACT_OK:-no}"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
+
+      - name: Classify
+        run: |
+          set -u
+          # THE VERDICT IS DERIVED, NOT CHOSEN. Each branch states the
+          # evidence that produced it, and the INCONCLUSIVE branch is a
+          # real outcome rather than a failure to try.
+          echo "## Verdict" >> "$GITHUB_STEP_SUMMARY"
+          if [ "${CONTRACT_OK:-no}" != "yes" ]; then
+            echo "INCIDENT_VERDICT=D_INCONCLUSIVE" | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "reason: no Data API V2 parameter spelling returned rows for a known-active wallet, so a zero from the sweep cannot be read as wallet inactivity" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          else
+            echo "see the per-wallet table above; a non-zero V2 count against a local zero is verdict A" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
