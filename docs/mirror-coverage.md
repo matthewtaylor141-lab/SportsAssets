@@ -2157,3 +2157,35 @@ reported and judged by a person.
 the change. The fix was to move the telemetry into
 `shadow_bettor_ops.py`, not to carve an exception into the test —
 `decide()` cannot reach it, and the import only runs one way.
+
+## 83. The fix never deployed, and the reason was my own commit order
+
+Between 19:02Z and 19:17Z the BETTOR writer fix sat in `main` and never
+reached the running worker. Production at 19:17:13Z:
+
+```
+bettor_opportunities_observed   93     (19:02: 31, 19:08: 46)
+bettor_decisions_recorded       0
+orphans                         63
+shadow_bettor heartbeat         tick_failed, problems: [], 202s stale
+```
+
+The heartbeat payload is the tell: it still has the **pre-fix shape**
+— no `tickError`, no `pipeline`, no `failures`. Those fields exist only
+in the new code, so the worker was demonstrably running the old build.
+That is an observed runtime signal; a git SHA would have proved nothing.
+
+**Render skips a deploy when the commit message carries
+`[skip render]`, and it reads the TIP.** I pushed `5f3aae2`
+(`[deploy-approved]`) and then, minutes later, `17adb31` (`[skip
+render]`) for a research query. Same again for `4a27260` followed by
+`a2a37cd`. Each research commit became the tip and cancelled the deploy
+of the fix underneath it.
+
+The rule this earns: **a `[skip render]` commit must never be pushed on
+top of a `[deploy-approved]` one.** Land the deploy, confirm the boot
+marker moved, and only then push skip-render work.
+
+`ingestion_state.workers_boot` already records
+`RENDER_GIT_COMMIT[:7]` and the boot instant, so which build is running
+is a row to read, never an inference from the repository.
