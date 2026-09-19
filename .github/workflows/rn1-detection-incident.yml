@@ -235,6 +235,15 @@ jobs:
             printf '%-14s http=%s  %s\n' "$p" "$CODE" \
               "$(head -c 180 /tmp/f.json | tr -d '\n')" \
               | tee -a "$GITHUB_STEP_SUMMARY"
+            # /v2/status IS THE VENUE'S OWN FRESHNESS DECLARATION, and it
+            # beats anything I can infer. Kept verbatim and in full.
+            if [ "$p" = "/v2/status" ] && [ "$CODE" = "200" ]; then
+              cp /tmp/f.json /tmp/status.json
+              echo "  --- /v2/status, in full ---" | tee -a "$GITHUB_STEP_SUMMARY"
+              jq -S . /tmp/status.json 2>/dev/null | head -60 \
+                | sed 's/^/  /' | tee -a "$GITHUB_STEP_SUMMARY" || true
+              echo "  --- end /v2/status ---" | tee -a "$GITHUB_STEP_SUMMARY"
+            fi
           done
           # An indirect watermark that needs no documented endpoint: the
           # newest timestamp the feed will serve for ANY wallet. If that
@@ -247,8 +256,18 @@ jobs:
           # carried entirely by one asset class would not establish that
           # the feed is current for the markets our roster trades, and
           # verdict C rests on exactly that.
-          jq -r "$ROWS_FILTER[]? | \"  \" + (.timestamp|tostring) + \"  \"
-                 + ((.slug // .title // \"NO_SLUG\")|tostring)" \
+          # jq's // only falls through on null/false, and these rows carry
+          # slug as an EMPTY STRING -- the first reading printed a column
+          # of blanks that looked like a bug in the probe rather than an
+          # absent field. Empty is now named.
+          jq -r "$ROWS_FILTER[]?
+                 | . as \$r
+                 | ((\$r.slug // \"\") | tostring) as \$s
+                 | ((\$r.title // \"\") | tostring) as \$t
+                 | \"  \" + (\$r.timestamp | tostring) + \"  \"
+                   + (if \$s != \"\" then \$s
+                      elif \$t != \"\" then \$t
+                      else \"NO_SLUG_SERVED\" end)" \
              /tmp/any.json 2>/dev/null | head -20 \
              | tee -a "$GITHUB_STEP_SUMMARY" || true
           GMAX=$(jq -r "[$ROWS_FILTER[]? | (.timestamp // .time // .ts // empty)]
@@ -258,23 +277,46 @@ jobs:
             LAG=$(( NOW_EPOCH - GMAX ))
             echo "global newest venue timestamp: $GISO ($GMAX), age at job start: ${LAG}s" \
               | tee -a "$GITHUB_STEP_SUMMARY"
-            # THIS IS THE STEP THAT SEPARATES B FROM C. A feed whose own
-            # newest row for ANY wallet is minutes old is current, and a
-            # zero for our roster then means something. A feed stuck at
-            # our own cutoff is the suspect itself.
-            if [ "$LAG" -lt 900 ]; then
-              echo "FEED_FRESHNESS=CURRENT" >> "$GITHUB_ENV"
-            else
-              echo "FEED_FRESHNESS=STALE" >> "$GITHUB_ENV"
-            fi
-            echo "FEED_GLOBAL_NEWEST=$GISO" >> "$GITHUB_ENV"
-            echo "FEED_GLOBAL_LAG_S=$LAG" >> "$GITHUB_ENV"
           else
+            GISO=NOT_IDENTIFIED; LAG=NOT_IDENTIFIED
             echo "global newest venue timestamp: NOT_IDENTIFIED" \
               | tee -a "$GITHUB_STEP_SUMMARY"
+          fi
+          echo "FEED_GLOBAL_NEWEST=$GISO" >> "$GITHUB_ENV"
+          echo "FEED_GLOBAL_LAG_S=$LAG" >> "$GITHUB_ENV"
+
+          # THE VENUE'S OWN DECLARATION OUTRANKS ANYTHING I INFER.
+          # /v2/status carries serving.lag_seconds and names its worst
+          # mechanism. The unfiltered /v2/trades?limit=20 watermark is
+          # NOT a substitute: on 2026-09-19 it returned the identical
+          # newest row (18:39:29Z) at 18:39:30 and again at 18:41:49,
+          # reading as 1s fresh and then 136s stale for the same data --
+          # it is cached, and resting verdict C on it would have rested
+          # C on a cache. It is kept only as corroboration.
+          SRC=NOT_IDENTIFIED; SLAG=NOT_IDENTIFIED; WORST=NOT_IDENTIFIED
+          if [ -s /tmp/status.json ]; then
+            SLAG=$(jq -r '.data.serving.lag_seconds // .serving.lag_seconds
+                          // empty' /tmp/status.json 2>/dev/null || true)
+            WORST=$(jq -r '.data.serving.worst // .serving.worst
+                           // "NOT_IDENTIFIED"' /tmp/status.json 2>/dev/null || true)
+            [ -n "$SLAG" ] && SRC=VENUE_STATUS_ENDPOINT
+          fi
+          echo "FEED_FRESHNESS_SOURCE=$SRC" >> "$GITHUB_ENV"
+          echo "FEED_SERVING_LAG_S=${SLAG:-NOT_IDENTIFIED}" >> "$GITHUB_ENV"
+          echo "FEED_WORST_MECHANISM=${WORST:-NOT_IDENTIFIED}" >> "$GITHUB_ENV"
+          echo "venue-declared serving lag: ${SLAG:-NOT_IDENTIFIED}s (worst: ${WORST:-NOT_IDENTIFIED})" \
+            | tee -a "$GITHUB_STEP_SUMMARY"
+
+          if [ "$SRC" = "VENUE_STATUS_ENDPOINT" ] \
+             && [ "${SLAG:-x}" -lt 900 ] 2>/dev/null; then
+            echo "FEED_FRESHNESS=CURRENT" >> "$GITHUB_ENV"
+          elif [ "$SRC" = "VENUE_STATUS_ENDPOINT" ]; then
+            echo "FEED_FRESHNESS=STALE" >> "$GITHUB_ENV"
+          else
+            # No declaration, and the inferred watermark is known to be
+            # cached -- so freshness is NOT_IDENTIFIED and the verdict
+            # falls to D. An unverifiable witness is not a witness.
             echo "FEED_FRESHNESS=NOT_IDENTIFIED" >> "$GITHUB_ENV"
-            echo "FEED_GLOBAL_NEWEST=NOT_IDENTIFIED" >> "$GITHUB_ENV"
-            echo "FEED_GLOBAL_LAG_S=NOT_IDENTIFIED" >> "$GITHUB_ENV"
           fi
           echo '```' >> "$GITHUB_STEP_SUMMARY"
 
@@ -384,7 +426,10 @@ jobs:
             echo "CONTRACT_OK              ${CONTRACT_OK:-no}"
             echo "PARAM_NAME               ${PARAM_NAME:-NOT_IDENTIFIED}"
             echo "FEED_FRESHNESS           ${FEED_FRESHNESS:-NOT_IDENTIFIED}"
-            echo "FEED_GLOBAL_NEWEST       ${FEED_GLOBAL_NEWEST:-NOT_IDENTIFIED}"
+            echo "FEED_FRESHNESS_SOURCE    ${FEED_FRESHNESS_SOURCE:-NOT_IDENTIFIED}"
+            echo "FEED_SERVING_LAG_S       ${FEED_SERVING_LAG_S:-NOT_IDENTIFIED}"
+            echo "FEED_WORST_MECHANISM     ${FEED_WORST_MECHANISM:-NOT_IDENTIFIED}"
+            echo "FEED_GLOBAL_NEWEST       ${FEED_GLOBAL_NEWEST:-NOT_IDENTIFIED}  (cached; corroboration only)"
             echo "FEED_GLOBAL_LAG_S        ${FEED_GLOBAL_LAG_S:-NOT_IDENTIFIED}"
             echo "WALLETS_TESTED           ${WALLETS_TESTED:-NOT_IDENTIFIED}"
             echo "WALLETS_WITH_V2_AFTER    ${WALLETS_WITH_V2_TRADES_AFTER_LOCAL_CUTOFF:-NOT_IDENTIFIED}"
@@ -405,13 +450,13 @@ jobs:
             R="the independent public feed shows wallet activity after the frozen cutoff that our own store does not contain; the loss is on our side of the wire"
           elif [ "${FEED_FRESHNESS:-NOT_IDENTIFIED}" = "STALE" ]; then
             V=B_UPSTREAM_PUBLIC_FEED_STALL_OR_LAG
-            R="the witness feed's own newest row for ANY wallet is ${FEED_GLOBAL_LAG_S}s old, so its zero for our roster is a property of the feed, not of the wallets"
+            R="the venue declares its own serving lag at ${FEED_SERVING_LAG_S}s (worst mechanism ${FEED_WORST_MECHANISM}), so its zero for our roster is a property of the feed, not of the wallets"
           elif [ "${FEED_FRESHNESS:-NOT_IDENTIFIED}" = "CURRENT" ]; then
             V=C_WALLET_ACTIVITY_GENUINELY_NOT_OBSERVED
-            R="the witness feed is demonstrably current (newest global row ${FEED_GLOBAL_NEWEST}, ${FEED_GLOBAL_LAG_S}s old) and contains no post-cutoff rows for the configured addresses. THIS IS NOT A CLAIM THAT THE WALLETS STOPPED TRADING -- it is the absence of observed activity on one public feed over one window"
+            R="the venue declares its own serving lag at ${FEED_SERVING_LAG_S}s (worst mechanism ${FEED_WORST_MECHANISM}), so the feed is current by its own account, and it contains no post-cutoff rows for the configured addresses. THIS IS NOT A CLAIM THAT THE WALLETS STOPPED TRADING -- it is the absence of observed activity on one public feed over one window"
           else
             V=D_INCONCLUSIVE
-            R="the witness feed served no global watermark, so its freshness is NOT_IDENTIFIED and a zero cannot be separated from a stall"
+            R="the venue served no freshness declaration, and the unfiltered /v2/trades watermark is cached (identical newest row returned 2m19s apart on 2026-09-19), so freshness is NOT_IDENTIFIED and a zero cannot be separated from a stall"
           fi
           echo "INCIDENT_VERDICT=$V" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "reason: $R" | tee -a "$GITHUB_STEP_SUMMARY"
