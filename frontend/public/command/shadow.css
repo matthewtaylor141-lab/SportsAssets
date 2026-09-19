@@ -1,0 +1,456 @@
+/* COMMAND · THE SHADOW ENVIRONMENT.
+ *
+ * Institutional trading desk + mission control. Motion carries meaning:
+ * a row illuminates because it JUST ARRIVED, a dot pulses because its
+ * source is LIVE, a stage animates in because the replay is walking it.
+ * Nothing here moves to look busy -- a dead engine renders still, and
+ * that stillness is information.
+ *
+ * It borrows COMMAND's own tokens so the environment reads as part of
+ * the same product, then takes one deliberate departure: a cold
+ * instrument cyan reserved for shadow, used nowhere else in COMMAND, so
+ * a screenshot of this environment is identifiably NOT the live desk. */
+
+.sh-env {
+  --sh-ink: var(--text, #e7edf6);
+  --sh-muted: var(--muted, #8b98ad);
+  --sh-line: rgba(140, 165, 200, .14);
+  --sh-surface: rgba(14, 20, 30, .62);
+  --sh-raise: rgba(22, 31, 45, .78);
+  --sh-cyan: #4fd6e8;
+  --sh-cyan-dim: rgba(79, 214, 232, .16);
+  --sh-green: #46d39a;
+  --sh-amber: #e8b04f;
+  --sh-red: #ef6b6b;
+  --sh-grey: #7d8ba1;
+  color: var(--sh-ink);
+}
+
+/* ── header ─────────────────────────────────────────────────────── */
+
+.sh-head { display: flex; gap: 18px; align-items: center; margin-bottom: 18px; }
+.sh-head h1 {
+  font: 600 26px/1.15 var(--serif, Georgia, serif);
+  letter-spacing: -.01em; margin: 0 0 4px;
+}
+.sh-head p { margin: 0; font-size: 12.5px; color: var(--sh-muted); max-width: 62ch; line-height: 1.7; }
+.sh-head-mark {
+  width: 54px; height: 54px; flex: none; border-radius: 15px;
+  background: radial-gradient(circle at 50% 45%, var(--sh-cyan-dim), transparent 70%);
+  border: 1px solid var(--sh-line);
+  display: grid; place-items: center; position: relative; overflow: hidden;
+}
+/* THE INTELLIGENCE CORE. Three rings, always in slow motion, because
+   the ENVIRONMENT is running even when the ledger is empty. It never
+   stands in for engine activity -- engine state is the health panel's
+   job and it is stated in words. */
+.sh-core { position: relative; width: 26px; height: 26px; display: block; }
+.sh-core i {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 1px solid var(--sh-cyan); opacity: .55;
+  animation: sh-orbit 5.5s linear infinite;
+}
+.sh-core i:nth-child(2) { inset: 4px; opacity: .38; animation-duration: 8s; animation-direction: reverse; }
+.sh-core i:nth-child(3) { inset: 9px; opacity: .8; background: var(--sh-cyan-dim); animation-duration: 3.4s; }
+@keyframes sh-orbit { to { transform: rotate(360deg) } }
+
+/* ── the standing disclosure ────────────────────────────────────── */
+
+.sh-disclosure {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 9px;
+  padding: 10px 15px; margin-bottom: 14px; border-radius: 11px;
+  background: linear-gradient(90deg, rgba(79,214,232,.10), rgba(79,214,232,.02));
+  border: 1px solid rgba(79, 214, 232, .3);
+  font: 600 10.5px/1 var(--sans, system-ui); letter-spacing: .12em;
+}
+.sh-disclosure strong { color: var(--sh-cyan); font-weight: 700; }
+.sh-disc-dot {
+  width: 7px; height: 7px; border-radius: 50%; background: var(--sh-cyan);
+  box-shadow: 0 0 0 4px rgba(79, 214, 232, .16);
+}
+.sh-disc-tail { margin-left: auto; color: var(--sh-muted); letter-spacing: .1em; }
+.sh-sep { color: var(--sh-muted); opacity: .5; margin: 0 2px; }
+
+/* ── tabs ───────────────────────────────────────────────────────── */
+
+.sh-tabs {
+  display: flex; gap: 3px; overflow-x: auto; margin-bottom: 18px;
+  border-bottom: 1px solid var(--sh-line); padding-bottom: 0;
+  scrollbar-width: none;
+}
+.sh-tabs::-webkit-scrollbar { display: none }
+.sh-tabs button {
+  appearance: none; background: none; border: 0; cursor: pointer;
+  color: var(--sh-muted); font: 600 11.5px/1 var(--sans, system-ui);
+  letter-spacing: .07em; text-transform: uppercase;
+  padding: 11px 14px 12px; border-bottom: 2px solid transparent;
+  white-space: nowrap; transition: color .18s, border-color .18s;
+}
+.sh-tabs button:hover { color: var(--sh-ink) }
+.sh-tabs button.on { color: var(--sh-cyan); border-bottom-color: var(--sh-cyan) }
+
+/* ── freshness strip ────────────────────────────────────────────── */
+
+.sh-fresh {
+  display: flex; flex-wrap: wrap; align-items: center; gap: 20px;
+  padding: 11px 15px; margin-bottom: 16px; border-radius: 11px;
+  background: var(--sh-surface); border: 1px solid var(--sh-line);
+}
+.sh-fresh-pair { display: flex; flex-direction: column; gap: 3px }
+.sh-fresh-pair label, .sh-kv label, .sh-kpi label {
+  font: 600 9.5px/1 var(--sans, system-ui); letter-spacing: .13em;
+  color: var(--sh-muted); text-transform: uppercase;
+}
+.sh-fresh-pair b { font: 500 12px/1 var(--mono, ui-monospace, monospace) }
+
+.sh-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 10px; border-radius: 999px;
+  font: 700 10px/1 var(--sans, system-ui); letter-spacing: .1em;
+  border: 1px solid var(--sh-line); color: var(--sh-muted);
+}
+.sh-chip.green { color: var(--sh-green); border-color: rgba(70,211,154,.32) }
+.sh-chip.amber { color: var(--sh-amber); border-color: rgba(232,176,79,.32) }
+.sh-chip.grey  { color: var(--sh-grey) }
+.sh-beat { width: 6px; height: 6px; border-radius: 50%; background: currentColor; opacity: .35 }
+/* A HEARTBEAT ONLY WHERE THERE IS A HEART. `.on` is set from the
+   SOURCE state, so a stale feed shows a still dot beside a ticking
+   browser clock -- which is precisely the distinction that matters. */
+.sh-beat.on { opacity: 1; animation: sh-pulse 2.1s ease-in-out infinite }
+@keyframes sh-pulse {
+  0%, 100% { box-shadow: 0 0 0 0 currentColor; opacity: 1 }
+  55% { box-shadow: 0 0 0 5px transparent; opacity: .45 }
+}
+
+/* ── KPI grid ───────────────────────────────────────────────────── */
+
+.sh-kpis {
+  display: grid; gap: 1px; margin-bottom: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(178px, 1fr));
+  background: var(--sh-line); border: 1px solid var(--sh-line);
+  border-radius: 13px; overflow: hidden;
+}
+.sh-kpi {
+  background: var(--sh-surface); padding: 15px 16px 16px;
+  display: flex; flex-direction: column; gap: 8px; min-width: 0;
+}
+.sh-kpi strong {
+  font: 500 21px/1 var(--mono, ui-monospace, monospace);
+  letter-spacing: -.01em; overflow-wrap: anywhere;
+}
+/* NOT IDENTIFIED IS DRAWN AS ITSELF -- dimmer, smaller, unmistakably
+   not a number. A figure the system does not have must never be able
+   to be mistaken for one it does. */
+.sh-kpi.unknown strong {
+  font: 600 11px/1.4 var(--sans, system-ui); letter-spacing: .1em;
+  color: var(--sh-muted);
+}
+
+/* ── lane cards ─────────────────────────────────────────────────── */
+
+.sh-lanes {
+  display: grid; gap: 14px; margin-bottom: 18px;
+  grid-template-columns: repeat(auto-fit, minmax(270px, 1fr));
+}
+.sh-lane {
+  background: var(--sh-surface); border: 1px solid var(--sh-line);
+  border-radius: 14px; padding: 17px 18px 18px; position: relative;
+  overflow: hidden;
+}
+.sh-lane.live::before {
+  content: ''; position: absolute; inset: 0 auto 0 0; width: 2px;
+  background: linear-gradient(180deg, transparent, var(--sh-cyan), transparent);
+  animation: sh-rail 3.6s ease-in-out infinite;
+}
+@keyframes sh-rail { 0%,100% { opacity: .25 } 50% { opacity: 1 } }
+.sh-lane-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 12px }
+.sh-lane-head h3 { margin: 0; font: 600 14px/1.2 var(--sans, system-ui) }
+.sh-lane-n { font: 500 30px/1 var(--mono, ui-monospace, monospace); margin-bottom: 11px }
+.sh-lane-n small { font: 600 10px/1 var(--sans, system-ui); letter-spacing: .12em; color: var(--sh-muted); margin-left: 8px }
+.sh-lane-meta { display: flex; flex-wrap: wrap; gap: 6px 16px; margin-bottom: 11px }
+.sh-lane-meta span { font: 600 9.5px/1.5 var(--sans, system-ui); letter-spacing: .1em; color: var(--sh-muted) }
+.sh-lane-meta b { color: var(--sh-amber); font-weight: 700; margin-left: 5px }
+.sh-lane-note { margin: 0; font-size: 11.5px; line-height: 1.75; color: var(--sh-muted) }
+.sh-lane.split .sh-lane-n { color: var(--sh-muted) }
+
+/* ── panels ─────────────────────────────────────────────────────── */
+
+.sh-panel {
+  background: var(--sh-surface); border: 1px solid var(--sh-line);
+  border-radius: 14px; margin-bottom: 16px; overflow: hidden;
+}
+.sh-panel-head {
+  padding: 15px 18px 13px; border-bottom: 1px solid var(--sh-line);
+  display: flex; flex-wrap: wrap; align-items: baseline; gap: 6px 14px;
+}
+.sh-panel-head h2 { margin: 0; font: 600 14px/1.2 var(--sans, system-ui) }
+.sh-sub { font-size: 11px; color: var(--sh-muted); line-height: 1.6 }
+.sh-panel-body { padding: 17px 18px 19px }
+.sh-panel-footer {
+  padding: 11px 18px; border-top: 1px solid var(--sh-line);
+  font: 600 9.5px/1.6 var(--sans, system-ui); letter-spacing: .09em;
+  color: var(--sh-muted);
+}
+.sh-h3 { margin: 0 0 12px; font: 600 12px/1 var(--sans, system-ui); letter-spacing: .08em; text-transform: uppercase; color: var(--sh-muted) }
+.sh-two { display: grid; gap: 16px; grid-template-columns: minmax(0, 1.35fr) minmax(0, 1fr) }
+@media (max-width: 1100px) { .sh-two { grid-template-columns: 1fr } }
+
+.sh-kv { display: grid; gap: 1px; background: var(--sh-line); grid-template-columns: repeat(auto-fit, minmax(160px, 1fr)) }
+.sh-kv > div { background: var(--sh-surface); padding: 13px 16px; display: flex; flex-direction: column; gap: 6px }
+.sh-kv b { font: 500 13px/1.3 var(--mono, ui-monospace, monospace); overflow-wrap: anywhere }
+
+/* ── notes and empty states ─────────────────────────────────────── */
+
+.sh-note {
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: baseline;
+  padding: 12px 16px; margin: 0 0 14px; border-radius: 11px;
+  border: 1px solid var(--sh-line); background: var(--sh-raise);
+  font-size: 11.5px; line-height: 1.7; color: var(--sh-muted);
+}
+.sh-note.red { border-color: rgba(239,107,107,.38); background: rgba(239,107,107,.07) }
+.sh-note.amber { border-color: rgba(232,176,79,.34); background: rgba(232,176,79,.06) }
+.sh-note-label { font: 700 10px/1 var(--sans, system-ui); letter-spacing: .12em; color: var(--sh-ink) }
+.sh-note.red .sh-note-label { color: var(--sh-red) }
+.sh-note.amber .sh-note-label { color: var(--sh-amber) }
+
+.sh-empty { text-align: center; padding: 46px 22px 50px; max-width: 54ch; margin: 0 auto }
+.sh-empty h3 { margin: 0 0 9px; font: 600 15px/1.3 var(--sans, system-ui); letter-spacing: .02em }
+.sh-empty p { margin: 0; font-size: 12px; line-height: 1.85; color: var(--sh-muted) }
+/* The empty state is a QUIET instrument, not an error. It breathes
+   slowly so the screen reads as armed and waiting rather than broken. */
+.sh-empty-mark {
+  width: 36px; height: 36px; margin: 0 auto 16px; border-radius: 50%;
+  border: 1px solid var(--sh-cyan); opacity: .5;
+  animation: sh-breathe 4.2s ease-in-out infinite;
+}
+@keyframes sh-breathe {
+  0%, 100% { transform: scale(.82); opacity: .28 }
+  50% { transform: scale(1); opacity: .62 }
+}
+
+/* ── the tape ───────────────────────────────────────────────────── */
+
+.sh-tape { max-height: 560px; overflow-y: auto }
+.sh-tape-row {
+  display: grid; width: 100%; text-align: left; gap: 14px; align-items: baseline;
+  grid-template-columns: 96px minmax(130px, auto) minmax(0, 1fr);
+  padding: 9px 18px; border: 0; border-bottom: 1px solid var(--sh-line);
+  background: none; color: var(--sh-ink); cursor: pointer;
+  font: 500 11.5px/1.5 var(--mono, ui-monospace, monospace);
+  transition: background .18s;
+}
+.sh-tape-row:hover { background: var(--sh-raise) }
+.sh-tape-clock { color: var(--sh-muted); font-size: 11px }
+.sh-tape-kind { font-weight: 600; letter-spacing: .05em; color: var(--sh-cyan) }
+.sh-tape-kind.green { color: var(--sh-green) }
+.sh-tape-kind.amber { color: var(--sh-amber) }
+.sh-tape-note { color: var(--sh-muted); overflow-wrap: anywhere }
+/* NEW-EVENT ILLUMINATION. It fires once, on a row that was not in the
+   previous payload -- so the flash means "this just arrived", and a
+   quiet tape stays genuinely quiet. */
+.sh-new { animation: sh-arrive .9s ease-out }
+@keyframes sh-arrive {
+  0% { background: rgba(79,214,232,.22); transform: translateX(-4px) }
+  100% { background: transparent; transform: none }
+}
+
+/* ── tables ─────────────────────────────────────────────────────── */
+
+.sh-scroll { overflow-x: auto }
+.sh-table { width: 100%; border-collapse: collapse; font-size: 11.5px }
+.sh-table th {
+  text-align: left; padding: 11px 13px; white-space: nowrap;
+  font: 600 9.5px/1 var(--sans, system-ui); letter-spacing: .11em;
+  text-transform: uppercase; color: var(--sh-muted);
+  border-bottom: 1px solid var(--sh-line); position: sticky; top: 0;
+  background: var(--sh-raise);
+}
+.sh-table td {
+  padding: 10px 13px; border-bottom: 1px solid var(--sh-line);
+  white-space: nowrap; font-variant-numeric: tabular-nums;
+}
+.sh-table tr.sh-click { cursor: pointer; transition: background .16s }
+.sh-table tr.sh-click:hover { background: var(--sh-raise) }
+.sh-reason { white-space: normal; max-width: 280px; color: var(--sh-muted); font-size: 10.5px }
+.mono { font-family: var(--mono, ui-monospace, monospace) }
+
+.sh-tag {
+  display: inline-block; padding: 3px 8px; border-radius: 5px;
+  font: 700 9px/1.3 var(--sans, system-ui); letter-spacing: .09em;
+  border: 1px solid var(--sh-line); color: var(--sh-muted);
+}
+.sh-tag.rn1 { color: var(--sh-cyan); border-color: rgba(79,214,232,.34) }
+.sh-tag.bettor { color: var(--sh-amber); border-color: rgba(232,176,79,.3) }
+.sh-action {
+  display: inline-block; padding: 3px 9px; border-radius: 5px;
+  font: 700 9.5px/1.3 var(--sans, system-ui); letter-spacing: .08em;
+}
+.sh-action.no { color: var(--sh-amber); background: rgba(232,176,79,.12) }
+.sh-action.yes { color: var(--sh-green); background: rgba(70,211,154,.12) }
+.sh-blocker-inline { color: var(--sh-amber); font-weight: 600; letter-spacing: .05em }
+.sh-class {
+  display: inline-block; padding: 3px 8px; border-radius: 5px;
+  font: 700 9px/1.3 var(--sans, system-ui); letter-spacing: .07em;
+}
+/* SIMULATED AND OBSERVED ARE NEVER THE SAME COLOUR. The eye must be
+   able to tell a counterfactual number from a realized one across a
+   room, because the two are never summed. */
+.sh-class.sim { color: var(--sh-cyan); background: rgba(79,214,232,.1) }
+.sh-class.real { color: var(--sh-green); background: rgba(70,211,154,.12) }
+
+/* ── blockers ───────────────────────────────────────────────────── */
+
+.sh-blockers { padding: 6px 0 }
+.sh-blocker {
+  display: flex; justify-content: space-between; align-items: center; gap: 14px;
+  padding: 10px 18px; border-bottom: 1px solid var(--sh-line);
+}
+.sh-blocker:last-child { border-bottom: 0 }
+.sh-blocker-code { font: 600 10.5px/1.4 var(--sans, system-ui); letter-spacing: .07em; color: var(--sh-amber) }
+.sh-blocker-n { font: 500 15px/1 var(--mono, ui-monospace, monospace) }
+
+/* ── health ─────────────────────────────────────────────────────── */
+
+.sh-health-row {
+  display: grid; gap: 12px; align-items: center;
+  grid-template-columns: 10px minmax(120px, 1.1fr) 96px 92px minmax(0, 1.4fr);
+  padding: 10px 18px; border-bottom: 1px solid var(--sh-line); font-size: 11px;
+}
+.sh-health-row:last-child { border-bottom: 0 }
+.sh-health-name { font-weight: 600 }
+.sh-health-state { font: 700 9.5px/1 var(--sans, system-ui); letter-spacing: .1em }
+.sh-health-state.green { color: var(--sh-green) }
+.sh-health-state.amber { color: var(--sh-amber) }
+.sh-health-state.red { color: var(--sh-red) }
+.sh-health-state.grey { color: var(--sh-grey) }
+.sh-health-src { font: 500 10.5px/1 var(--mono, ui-monospace, monospace); color: var(--sh-muted) }
+.sh-health-detail { color: var(--sh-muted); font-size: 10.5px; overflow-wrap: anywhere }
+.sh-dot { width: 8px; height: 8px; border-radius: 50%; background: currentColor }
+.sh-dot.green { color: var(--sh-green) } .sh-dot.amber { color: var(--sh-amber) }
+.sh-dot.red { color: var(--sh-red) } .sh-dot.grey { color: var(--sh-grey) }
+.sh-dot.pulse { animation: sh-pulse 2.4s ease-in-out infinite }
+@media (max-width: 760px) {
+  .sh-health-row { grid-template-columns: 10px 1fr auto; row-gap: 4px }
+  .sh-health-src, .sh-health-detail { grid-column: 2 / -1 }
+}
+
+/* ── execution classes ──────────────────────────────────────────── */
+
+.sh-classgrid {
+  display: grid; gap: 12px; padding: 16px 18px 18px;
+  grid-template-columns: repeat(auto-fit, minmax(230px, 1fr));
+}
+.sh-classcard {
+  border: 1px solid var(--sh-line); border-radius: 12px; padding: 14px 15px 13px;
+  background: var(--sh-raise); display: flex; flex-direction: column; gap: 9px;
+}
+.sh-classcard.sim { border-left: 2px solid var(--sh-cyan) }
+.sh-classcard.real { border-left: 2px solid var(--sh-green) }
+.sh-classcard label { font: 600 9.5px/1.3 var(--sans, system-ui); letter-spacing: .1em; color: var(--sh-muted) }
+.sh-classcard strong { font: 500 20px/1 var(--mono, ui-monospace, monospace) }
+.sh-classcard strong small { font: 600 9.5px/1 var(--sans, system-ui); letter-spacing: .1em; color: var(--sh-muted); margin-left: 7px }
+.sh-kv-mini { display: flex; flex-direction: column; gap: 5px }
+.sh-kv-mini span { display: flex; justify-content: space-between; gap: 10px; font-size: 10.5px; color: var(--sh-muted) }
+.sh-kv-mini b { font-family: var(--mono, ui-monospace, monospace); color: var(--sh-ink); font-weight: 500 }
+.sh-realflag { font: 700 8.5px/1.4 var(--sans, system-ui); letter-spacing: .12em; color: var(--sh-muted) }
+.sh-classcard.real .sh-realflag { color: var(--sh-green) }
+
+/* ── comparison ─────────────────────────────────────────────────── */
+
+.sh-compare { padding: 8px 0 12px }
+.sh-compare-row {
+  display: grid; gap: 14px; align-items: center;
+  grid-template-columns: minmax(150px, 1fr) minmax(90px, 2fr) 60px 60px;
+  padding: 9px 18px; font-size: 11.5px;
+}
+.sh-compare-name { font-weight: 600 }
+.sh-compare-bar { height: 6px; border-radius: 3px; background: rgba(140,165,200,.1); overflow: hidden }
+.sh-compare-bar i {
+  display: block; height: 100%; border-radius: 3px;
+  background: linear-gradient(90deg, var(--sh-cyan), rgba(79,214,232,.42));
+  transition: width .6s cubic-bezier(.22,.8,.3,1);
+}
+.sh-compare-n, .sh-compare-share { text-align: right; font-family: var(--mono, ui-monospace, monospace) }
+.sh-compare-share { color: var(--sh-muted) }
+
+/* ── trade audit ────────────────────────────────────────────────── */
+
+.sh-audit-wrap { display: grid; gap: 16px; grid-template-columns: 290px minmax(0, 1fr) }
+@media (max-width: 1000px) { .sh-audit-wrap { grid-template-columns: 1fr } }
+.sh-audit-list {
+  background: var(--sh-surface); border: 1px solid var(--sh-line);
+  border-radius: 14px; overflow: hidden auto; max-height: 720px;
+}
+.sh-audit-pick {
+  display: flex; flex-direction: column; gap: 5px; width: 100%; text-align: left;
+  padding: 12px 15px; background: none; border: 0;
+  border-bottom: 1px solid var(--sh-line); cursor: pointer; color: var(--sh-ink);
+  transition: background .16s;
+}
+.sh-audit-pick:hover, .sh-audit-pick.on { background: var(--sh-raise) }
+.sh-audit-pick.on { box-shadow: inset 2px 0 0 var(--sh-cyan) }
+.sh-audit-pick-top { display: flex; justify-content: space-between; align-items: center; gap: 9px; font-size: 12px }
+.sh-audit-pick-sub { font: 500 10px/1 var(--mono, ui-monospace, monospace); color: var(--sh-muted) }
+
+.sh-replay { list-style: none; margin: 0; padding: 18px 18px 6px }
+.sh-stage {
+  display: grid; grid-template-columns: 22px minmax(0, 1fr); gap: 12px;
+  /* LIFECYCLE ANIMATION: each stage arrives in sequence, so the reader
+     watches the trade being walked rather than seeing a wall of text. */
+  animation: sh-stage-in .5s ease-out both;
+  animation-delay: calc(var(--i) * 55ms);
+}
+@keyframes sh-stage-in {
+  from { opacity: 0; transform: translateY(7px) }
+  to { opacity: 1; transform: none }
+}
+.sh-stage-rail { position: relative; display: flex; justify-content: center }
+.sh-stage-rail::before {
+  content: ''; position: absolute; top: 0; bottom: -2px; width: 1px;
+  background: var(--sh-line);
+}
+.sh-stage:last-child .sh-stage-rail::before { bottom: 50% }
+.sh-stage-rail i {
+  position: relative; width: 9px; height: 9px; margin-top: 5px;
+  border-radius: 50%; background: var(--sh-cyan); flex: none;
+  box-shadow: 0 0 0 3px rgba(79,214,232,.14);
+}
+.sh-stage.absent .sh-stage-rail i { background: var(--sh-grey); box-shadow: none }
+.sh-stage-body { padding-bottom: 18px; min-width: 0 }
+.sh-stage-head { display: flex; flex-wrap: wrap; align-items: baseline; gap: 10px; margin-bottom: 7px }
+.sh-stage-head strong { font: 600 11.5px/1 var(--sans, system-ui); letter-spacing: .07em }
+.sh-stage-clock { font: 500 11px/1 var(--mono, ui-monospace, monospace); color: var(--sh-muted) }
+.sh-stage.absent .sh-stage-clock { color: var(--sh-grey); letter-spacing: .08em; font-size: 9.5px; font-weight: 700 }
+/* THE MILLISECONDS BETWEEN STAGES are the point of this view, so they
+   are given their own emphatic treatment rather than buried in a cell. */
+.sh-elapsed {
+  font: 700 10px/1 var(--mono, ui-monospace, monospace); color: var(--sh-cyan);
+  padding: 3px 7px; border-radius: 5px; background: rgba(79,214,232,.1);
+}
+.sh-stage-kv { display: grid; gap: 4px 20px; grid-template-columns: repeat(auto-fit, minmax(190px, 1fr)) }
+.sh-stage-kv span { display: flex; flex-direction: column; gap: 2px; min-width: 0 }
+.sh-stage-kv label { font: 600 8.5px/1.3 var(--sans, system-ui); letter-spacing: .11em; color: var(--sh-muted) }
+.sh-stage-kv b { font: 500 11px/1.5 var(--mono, ui-monospace, monospace); overflow-wrap: anywhere; font-weight: 500 }
+
+/* ── performance ────────────────────────────────────────────────── */
+
+.sh-perf-lanes { display: grid; gap: 16px; grid-template-columns: repeat(auto-fit, minmax(300px, 1fr)) }
+.sh-curve { margin-bottom: 20px; color: var(--sh-cyan) }
+.sh-curve label, .sh-curve-empty label {
+  display: block; margin-bottom: 8px;
+  font: 600 9.5px/1 var(--sans, system-ui); letter-spacing: .11em;
+  color: var(--sh-muted); text-transform: uppercase;
+}
+.sh-curve svg { width: 100%; height: 120px; display: block }
+.sh-curve-meta { display: block; margin-top: 7px; font-size: 10.5px; color: var(--sh-muted) }
+.sh-curve-empty { padding: 12px 0; color: var(--sh-muted); font-size: 11px }
+.sh-curve-empty span { font: 600 10px/1 var(--sans, system-ui); letter-spacing: .1em }
+
+.sh-body { padding: 10px 0 }
+
+@media (prefers-reduced-motion: reduce) {
+  .sh-core i, .sh-beat.on, .sh-dot.pulse, .sh-empty-mark,
+  .sh-lane.live::before, .sh-new, .sh-stage { animation: none !important }
+  .sh-stage { opacity: 1; transform: none }
+  .sh-compare-bar i { transition: none }
+}

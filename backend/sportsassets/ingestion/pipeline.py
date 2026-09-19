@@ -27,6 +27,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 
@@ -194,6 +195,54 @@ def _obs_admit(pending, *, was_insert: bool) -> None:
         pass
 
 
+def _shadow_subjects() -> frozenset:
+    """Whose fills the prospective shadow ledger observes.
+
+    RN1 by default, because RN1_SHADOW is defined as "what BETTOR would
+    have done observing RN1" and observing anyone else would put a
+    different subject's fills in a lane named for his.
+    """
+    raw = os.getenv("SHADOW_RN1_SUBJECTS", "rn1")
+    return frozenset(n.strip().lower() for n in raw.split(",") if n.strip())
+
+
+async def _shadow_observe(ev: TradeEvent, received_at: datetime) -> None:
+    """STEP 1 OF THE PROSPECTIVE LEDGER: write the sighting. Never raises.
+
+    Owner directive 2026-09-19: start accumulating RN1_SHADOW evidence
+    now. This is the hook that starts it, and it is contained the same
+    way _obs_stamp is and for the same reason -- a research instrument
+    that can break ingestion is not an instrument, it is a new way to
+    lose fills.
+
+    NO VENUE CALL HAPPENS HERE. The one fact only this system holds is
+    WHEN BETTOR HEARD, and `received_at` was stamped at arrival, before
+    the pool round trip. The book, and the decision that needs it,
+    belong to the worker -- and the gap between the two timestamps is a
+    measurement, not something to hide by writing both at once.
+
+    NOTHING HERE CHANGES RN1 DETECTION. No new call, no widened filter,
+    no altered cadence: this reads the fill the existing lanes already
+    produced and writes beside it.
+    """
+    if os.getenv("SHADOW_RN1_OBSERVE", "on").strip().lower() in (
+            "off", "0", "false", "no"):
+        return
+    if (ev.whale_username or "").strip().lower() not in _shadow_subjects():
+        return
+    try:
+        from .. import shadow_rn1                              # noqa: PLC0415
+
+        await shadow_rn1.observe(ev, received_at=received_at)
+    except Exception:                                          # noqa: BLE001
+        # One line, not silence: unlike the obs collector this path has
+        # no counter of its own yet, and an observation that never
+        # lands is a hole in prospective evidence that no later query
+        # can notice. It must not, however, cost the fill.
+        log.warning("shadow observation not written for %s", ev.dedupe_key,
+                    exc_info=True)
+
+
 def _feed_payload(trade_id: int, ev: TradeEvent, detected_at: datetime, enriched: bool) -> dict:
     latency = detected_at.timestamp() - ev.ts_epoch
     return {
@@ -272,6 +321,11 @@ async def ingest_trade_result(ev: TradeEvent,
     # fill. The anchor stays the pre-insert instant; the insert's cost is
     # recorded separately as admission_delay_ms and is never folded into it.
     _obs_pending = _obs_stamp(ev)
+    # THE SHADOW LEDGER'S ARRIVAL INSTANT, taken here for the same
+    # reason the anchor above is: BETTOR_RECEIVED_TIMESTAMP must be when
+    # the event entered this process, not when a pool round trip
+    # finished. Stamped now, used after the insert.
+    _shadow_received = datetime.now(tz=timezone.utc)
 
     pool = await get_pool()
     detected_at = datetime.now(tz=timezone.utc)
@@ -391,6 +445,20 @@ async def ingest_trade_result(ev: TradeEvent,
 
     if not notify:
         return trade_id, True
+
+    # PROSPECTIVE ONLY, FIRST-SIGHT ONLY, AND NEVER THE BACKFILL.
+    #
+    # After was_insert, because a re-presented fill the ledger has held
+    # for days is not a new sighting -- observing it here would be the
+    # run 83.2 defect rebuilt in a new table.
+    #
+    # After the notify gate, because notify=False IS the deep history
+    # import: those rows are genuine first inserts of fills that
+    # happened weeks ago, and writing them into a ledger whose entire
+    # claim is "recorded before the outcome was known" would turn a
+    # prospective instrument into a backtest wearing its name. The
+    # directive is explicit -- "This is not a backtest."
+    await _shadow_observe(ev, _shadow_received)
 
     # THE MIRROR'S WAKE, AT THE FILL'S WRITE (E9, 2026-09-07). The copy
     # lane's hand-off gate (live_executor.maybe_execute, spec 3.1) woke

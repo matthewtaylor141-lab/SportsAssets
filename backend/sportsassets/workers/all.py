@@ -26,7 +26,7 @@ from ..db import heartbeat
 from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
                metadata_refresher, mirror_live, mirror_shadow, poller, premap,
                price_path, reconciler, retention, rn1_observability, roster,
-               roster_auto, underdog, whale_exits)
+               roster_auto, shadow_rn1, underdog, whale_exits)
 
 # THE ARENA CAP, AT IMPORT (2026-09-05). sportsassets-workers was
 # OOM-killed at 2 GiB thirteen times between 17:59:41 and 20:21:49:
@@ -332,6 +332,15 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # the watch's own moves, by one stagger step, in the direction it already
     # wants.
     ("rn1_obs", rn1_observability.main),
+    # THE PROSPECTIVE SHADOW LEDGER'S DECISION LOOP (2026-09-19, the
+    # approved reorder). MEASUREMENT ONLY: SHADOW_MODE true,
+    # REAL_ORDER_SUBMISSION disabled, CAPITAL_AT_RISK 0, and no order
+    # path anywhere in its import graph -- a test fails the build if one
+    # appears. It refuses to write a single row until store_ready()
+    # verifies the append-only guarantees against the live catalog, so
+    # registering it on a deployment whose migrations have not run costs
+    # a heartbeat naming the blocker and nothing else.
+    ("shadow_rn1", shadow_rn1.run),
     ("memory", memory_watch),
 ]
 

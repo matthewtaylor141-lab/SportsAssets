@@ -919,6 +919,145 @@ async def command_investor_snapshot_route(response: Response) -> dict:
             "reason": inc.reason, "detail": inc.detail}) from inc
 
 
+# ── COMMAND SHADOW: the read-only shadow data contract (2026-09-19) ──
+#
+# Owner directive: COMMAND IS P0. These routes serve the REAL
+# append-only shadow ledger to COMMAND while the prospective dataset
+# starts accumulating -- zero decisions render as ZERO, a blocked
+# engine renders its blocker, a failed read renders unavailable.
+#
+# READ-ONLY, THREE WAYS. The module they call holds no mutating
+# statement (a test reads its source and fails the build if one
+# appears), it imports no venue client, and every route here is a GET
+# behind require_command. The browser receives BETTOR's own shadow
+# records and nothing else: no venue credential, no database
+# credential, and no path that could place, cancel or price an order.
+def _shadow_unavailable(inc) -> HTTPException:
+    """A failed read is named, never flattened into zeros. COMMAND shows
+    FEED UNAVAILABLE and keeps its last payload marked stale."""
+    return HTTPException(status_code=503, detail={
+        "reason": inc.reason, "detail": inc.detail,
+        "note": "shadow ledger unread -- COMMAND shows unavailable, not zero",
+    })
+
+
+def _shadow_lane(lane: str = ""):
+    return (lane or "").strip().upper() or None
+
+
+@app.get("/api/command/shadow/summary",
+         dependencies=[Depends(require_command)])
+async def command_shadow_summary(response: Response) -> dict:
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.summary(await get_pool())
+    except CS.RetrievalIncomplete as inc:
+        raise _shadow_unavailable(inc) from inc
+
+
+@app.get("/api/command/shadow/decisions",
+         dependencies=[Depends(require_command)])
+async def command_shadow_decisions(response: Response, lane: str = "",
+                                   limit: int = 100) -> dict:
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.decisions(await get_pool(), lane=_shadow_lane(lane),
+                                  limit=limit)
+    except CS.RetrievalIncomplete as inc:
+        raise _shadow_unavailable(inc) from inc
+
+
+@app.get("/api/command/shadow/positions",
+         dependencies=[Depends(require_command)])
+async def command_shadow_positions(response: Response, lane: str = "",
+                                   limit: int = 100) -> dict:
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.positions(await get_pool(), lane=_shadow_lane(lane),
+                                  limit=limit)
+    except CS.RetrievalIncomplete as inc:
+        raise _shadow_unavailable(inc) from inc
+
+
+@app.get("/api/command/shadow/executions",
+         dependencies=[Depends(require_command)])
+async def command_shadow_executions(response: Response, lane: str = "",
+                                    limit: int = 100) -> dict:
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.executions(await get_pool(), lane=_shadow_lane(lane),
+                                   limit=limit)
+    except CS.RetrievalIncomplete as inc:
+        raise _shadow_unavailable(inc) from inc
+
+
+@app.get("/api/command/shadow/equity",
+         dependencies=[Depends(require_command)])
+async def command_shadow_equity(response: Response) -> dict:
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.equity(await get_pool())
+    except CS.RetrievalIncomplete as inc:
+        raise _shadow_unavailable(inc) from inc
+
+
+@app.get("/api/command/shadow/comparison",
+         dependencies=[Depends(require_command)])
+async def command_shadow_comparison(response: Response) -> dict:
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.comparison(await get_pool())
+    except CS.RetrievalIncomplete as inc:
+        raise _shadow_unavailable(inc) from inc
+
+
+@app.get("/api/command/shadow/health",
+         dependencies=[Depends(require_command)])
+async def command_shadow_health(response: Response) -> dict:
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.health(await get_pool())
+    except CS.RetrievalIncomplete as inc:
+        raise _shadow_unavailable(inc) from inc
+
+
+@app.get("/api/command/shadow/trades/{decision_id}",
+         dependencies=[Depends(require_command)])
+async def command_shadow_trade(decision_id: str, response: Response) -> dict:
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.trade(await get_pool(), decision_id)
+    except CS.RetrievalIncomplete as inc:
+        if inc.reason == "SHADOW_DECISION_NOT_FOUND":
+            raise HTTPException(status_code=404, detail={
+                "reason": inc.reason, "detail": inc.detail}) from inc
+        raise _shadow_unavailable(inc) from inc
+
+
 # ── MICRO_EXECUTION_CALIBRATION (2026-09-18) ────────────────────────
 # The deployed entry points for the supervised execution experiment.
 # THEY PLACE NOTHING. /approve takes the reserve and records the ticket;
