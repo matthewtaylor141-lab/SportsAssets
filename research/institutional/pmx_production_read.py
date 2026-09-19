@@ -410,16 +410,29 @@ def summarize(name: str, status: int, body) -> dict:
     elif name in ("bbo", "book"):
         # depth and touch, which are facts about the market rather than
         # about our account, so the actual numbers travel
-        for key in ("symbol", "bidPrice", "bidQty", "askPrice", "askQty",
-                    "lastPrice", "timestamp"):
+        #
+        # THE FIELD NAMES ARE REPORTED, NOT ASSUMED. This branch used to
+        # look only for bidPrice / bidQty / bids / asks, which are not
+        # what this venue sends: the preprod BBO answers bestBid /
+        # bestOffer with the price under `px`, and the depth sides are
+        # named `offers`, not `asks`. A summary written against guessed
+        # names reports an empty book and a real one identically, and
+        # the execution reconstruction would then be built on the guess.
+        # So: every top-level key travels, and the first levels of
+        # whichever side arrays exist travel verbatim.
+        out["bodyKeys"] = sorted(body)
+        for key in ("symbol", "state", "timestamp", "sequence",
+                    "bestBid", "bestOffer", "lastPrice"):
             if key in body:
                 out[key] = body[key]
-        for side in ("bids", "asks"):
+        for side in ("bids", "asks", "offers", "bidLevels", "askLevels",
+                     "offerLevels"):
             rows = body.get(side)
             if isinstance(rows, list):
-                out[side + "Levels"] = len(rows)
-                if rows and isinstance(rows[0], dict):
-                    out[side + "Top"] = rows[0]
+                out[side + "Count"] = len(rows)
+                # VERBATIM, so the price and quantity field names and
+                # the sort order are readable rather than inferred
+                out[side + "Sample"] = rows[:3]
     elif name == "accounts":
         rows = body.get("accounts") or []
         out["accountCount"] = len(rows) if isinstance(rows, list) else None
