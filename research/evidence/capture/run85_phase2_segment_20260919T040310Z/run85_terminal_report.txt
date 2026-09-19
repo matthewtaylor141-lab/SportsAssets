@@ -1,0 +1,56 @@
+=== RUN 85 PHASE 2 OBSERVATIONAL CAPTURE -- SEGMENT 20260919T040310Z ===
+SEGMENT_START_UTC = 2026-09-19T04:03:10Z
+SEGMENT_END_UTC   = 2026-09-19T09:01:43Z
+COHORT_SHA256 = 8cdedf26479a309bf7e22c292ebdd2f562673e2b8dccb2ec2793d9ad29187efe
+COHORT_SIZE = 12  (frozen; no selection, no substitution)
+STOP_REASON = PLAN_EXHAUSTED
+
+--- rate ---
+NOMINAL_RPS = 0.40   SPACING_S = 2.50
+VENUE_REQUESTS = 2340
+ACHIEVED_RPS = 0.1306   (N-1)/(last_start - first_start)
+GAP_S min=2.5 median=2.5 max=77.5
+HTTP_429 = 0   GRID_REANCHORS = 0
+
+--- observations ---
+PLANNED_SETS = 513   SETS_COMPLETED = 234   ABANDONED_AT_END = 0
+VALID_HORIZON_SETS = 234 of 234
+BOOK_OBSERVATIONS = 1170
+BBO_OBSERVATIONS  = 1170
+IDENTITY_FAILURES = 0
+
+--- markout register (separated, as required) ---
+h=5.0   AVAILABLE=234   ALL_POSTABLE=171   BOOK_CHANGED=6     TOUCHED=0     CROSSED=0     ZERO_MID_MARKOUT=170
+h=10.0  AVAILABLE=234   ALL_POSTABLE=171   BOOK_CHANGED=13    TOUCHED=0     CROSSED=0     ZERO_MID_MARKOUT=170
+h=30.0  AVAILABLE=234   ALL_POSTABLE=171   BOOK_CHANGED=42    TOUCHED=0     CROSSED=0     ZERO_MID_MARKOUT=169
+h=60.0  AVAILABLE=234   ALL_POSTABLE=171   BOOK_CHANGED=61    TOUCHED=0     CROSSED=0     ZERO_MID_MARKOUT=169
+ZERO MARKOUTS ARE RETAINED. The primary set is conditioned on nothing.
+PASSIVE_FILL_PROBABILITY = NOT_IDENTIFIED  (a touch is not a fill)
+PAIR_COMPLETED = NOT_IDENTIFIED  (two touches are not a completed pair)
+
+--- cross-route freshness (lag 2.5s, corroboration not proof) ---
+AGREE = 1166   DISAGREE = 4   ABSENT = 0
+
+--- subjects ---
+aec-cfb-portst-ore-2026-09-18                            sets=17    RETIRED VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED @ 2026-09-19T05:55:10.569496+00:00
+aec-nfl-chi-car-2026-09-13                               sets=1     RETIRED VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED @ 2026-09-19T04:03:45.569738+00:00
+aec-boxing-canalv-chrmbi-2026-10-31-canalv-chrmbi        sets=43    OBSERVABLE
+asc-epl-mnu-mnc-2026-09-13-fh-neg-1pt5                   sets=1     RETIRED VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED @ 2026-09-19T04:04:55.569946+00:00
+aec-cfb-coast-del-2026-09-19                             sets=43    OBSERVABLE
+aec-nfl-bal-ind-2026-09-13                               sets=1     RETIRED VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED @ 2026-09-19T04:06:05.569938+00:00
+atc-lmx-ame-tij-2026-09-05-tij                           sets=43    OBSERVABLE
+aec-cfb-kentst-ohiost-2026-09-19                         sets=40    RETIRED SUSTAINED_NO_TWO_SIDED_BOOK @ 2026-09-19T08:40:15.569754+00:00
+aec-nfl-atl-pit-2026-09-13                               sets=1     RETIRED VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED @ 2026-09-19T04:07:50.569973+00:00
+atc-lmx-pue-tol-2026-09-04-draw                          sets=1     RETIRED VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED @ 2026-09-19T04:08:25.570011+00:00
+aec-cfb-uwg-etnst-2026-09-19                             sets=42    OBSERVABLE
+aec-nfl-cle-jax-2026-09-13                               sets=1     RETIRED VENUE_TERMINAL_STATE:MARKET_STATE_EXPIRED @ 2026-09-19T04:09:35.569929+00:00
+MARKETS_STILL_OBSERVABLE = 4 of 12
+RETIREMENT_SCOPE = WITHIN_SEGMENT (no market is ever substituted)
+
+--- carried forward, unchanged ---
+PASSIVE_REALIZABLE_EDGE = NOT_IDENTIFIED
+PASSIVE_FILL_PROBABILITY = NOT_IDENTIFIED
+PMUS_FEES_RESOLVED = NO
+RPS_LIMIT_NOT_ESTABLISHED = YES
+NET_EXPECTANCY / NET_ROI / DEPLOYABLE_EDGE / GUARANTEED_PROFIT: NOT REPORTED
+mirror_live = false
