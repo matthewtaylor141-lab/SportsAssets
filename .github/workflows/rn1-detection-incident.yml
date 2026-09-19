@@ -41,6 +41,17 @@ on:
         description: "Pagination ceiling per wallet per endpoint"
         required: false
         default: "10"
+      # PREDECLARED, BEFORE THE RUN. The cohort window and its size cap
+      # are inputs so they are on the record as chosen in advance rather
+      # than tuned until the answer looked right.
+      cohort_lookback_s:
+        description: "Seconds BEFORE the cutoff that define the market cohort"
+        required: false
+        default: "3600"
+      cohort_cap:
+        description: "Maximum markets in the cohort (newest first; the cut is logged)"
+        required: false
+        default: "40"
       render_key:
         description: "Render API key (blank uses the RENDER_API_KEY secret)"
         required: false
@@ -156,6 +167,58 @@ jobs:
               | sed 's/^/-- dropped: /' || true
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Freeze the market cohort from PRE-CUTOFF rows only
+        run: |
+          set +e
+          set -u
+          LOOK="${{ inputs.cohort_lookback_s }}"
+          CAP="${{ inputs.cohort_cap }}"
+          # THE COHORT IS CHOSEN BEFORE ANY POST-CUTOFF QUESTION IS
+          # ASKED, and the SQL is bounded above by the cutoff so it
+          # cannot see the answer even in principle. This step runs
+          # before the venue is asked anything about these markets.
+          PGOPTIONS="-c statement_timeout=120000 -c default_transaction_read_only=on" \
+            psql "$(cat /tmp/conn)" -X -A -t -q -v ON_ERROR_STOP=1 \
+                 -v cutoff_epoch="$CUTOFF_EPOCH" \
+                 -v lookback_s="$LOOK" -v cohort_cap="$CAP" \
+                 -f research/incident_cohort.sql \
+                 > /tmp/cohort.raw 2>/tmp/cohort.err
+          RC=$?
+          if [ "$RC" != "0" ]; then
+            echo "::error::cohort read failed rc=$RC"; head -20 /tmp/cohort.err; exit 1
+          fi
+          grep -E '^0x[0-9a-fA-F]{6,}\|' /tmp/cohort.raw > /tmp/cohort.txt || true
+          N=$(wc -l < /tmp/cohort.txt)
+          # THE HASH IS OVER THE FROZEN IDS ALONE, sorted, so the same
+          # window reproduces the same value and a cohort silently
+          # re-chosen later would not match.
+          HASH=$(cut -d'|' -f1 /tmp/cohort.txt | LC_ALL=C sort \
+                 | sha256sum | cut -c1-32)
+          {
+            echo "COHORT_HASH=$HASH"
+            echo "COHORT_MARKETS=$N"
+            echo "COHORT_LOOKBACK_S=$LOOK"
+            echo "COHORT_CAP=$CAP"
+          } | tee -a "$GITHUB_STEP_SUMMARY" | tee -a "$GITHUB_ENV"
+          # NO SILENT CAP. If the window held more markets than the cap
+          # admits, the number left out is printed, because "40 markets,
+          # none active" and "40 of 300 markets, none active" are
+          # different claims.
+          if [ "$N" -ge "$CAP" ]; then
+            echo "::warning::cohort hit the cap of $CAP; the window may hold more markets"
+            echo "COHORT_CAPPED=yes" >> "$GITHUB_ENV"
+          else
+            echo "COHORT_CAPPED=no" >> "$GITHUB_ENV"
+          fi
+          {
+            echo "## Frozen market cohort (condition_id | slug | our rows | our newest ts)"
+            echo "window: $(date -u -d @$(( CUTOFF_EPOCH - LOOK )) +%Y-%m-%dT%H:%M:%SZ) .. ${CUTOFF_ISO}, bounded ABOVE by the cutoff"
+            echo '```'
+            cat /tmp/cohort.txt
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+          [ -s /tmp/cohort.txt ] || echo "::warning::cohort is empty"
 
       - name: Discover the Data API V2 contract before trusting a zero
         id: contract
@@ -414,6 +477,111 @@ jobs:
           # travel through GITHUB_ENV. The previous run's classifier could
           # only see CONTRACT_OK and so could only ever say D.
 
+      - name: Did the SAME frozen markets keep trading, for anyone at all
+        run: |
+          set -u
+          echo "## Cohort control" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          if [ ! -s /tmp/cohort.txt ]; then
+            echo "cohort empty; market-specific freshness cannot be established" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            echo "COHORT_CONTRACT_OK=no" >> "$GITHUB_ENV"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+
+          # A SECOND CONTRACT, DISCOVERED THE SAME WAY. The market filter
+          # is a different parameter from the wallet filter, and assuming
+          # its spelling would manufacture "the cohort went quiet" out of
+          # a typo exactly as the first one nearly did. The probe market
+          # is the cohort's newest, with NO time filter, so a zero here
+          # can only mean the spelling is wrong.
+          PROBE=$(head -1 /tmp/cohort.txt | cut -d'|' -f1)
+          echo "probe market: $PROBE" | tee -a "$GITHUB_STEP_SUMMARY"
+          CBEST=""
+          for P in market condition_id conditionId market_id condition; do
+            U="$API/v2/trades?$P=$PROBE&limit=5"
+            C=$(curl -sS --max-time 40 -o /tmp/c.json -w '%{http_code}' "$U" || echo 000)
+            R=$(jq -r "$ROWS_FILTER | length" /tmp/c.json 2>/dev/null || echo UNPARSED)
+            printf '%-14s http=%s rows=%s  %s\n' "$P" "$C" "$R" \
+              "$(head -c 160 /tmp/c.json | tr -d '\n')" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+            if [ "$C" = "200" ] && [ "$R" != "UNPARSED" ] && [ "$R" != "0" ] \
+               && [ -z "$CBEST" ]; then CBEST="$P"; fi
+          done
+          if [ -z "$CBEST" ]; then
+            echo "COHORT_CONTRACT_OK=no" >> "$GITHUB_ENV"
+            echo "::warning::no market-filter spelling returned rows; cohort freshness NOT_IDENTIFIED"
+            echo '```' >> "$GITHUB_STEP_SUMMARY"; exit 0
+          fi
+          echo "COHORT_CONTRACT_OK=yes" >> "$GITHUB_ENV"
+          echo "cohort param: $CBEST" | tee -a "$GITHUB_STEP_SUMMARY"
+
+          MKTS=0; WITH=0; TOTAL=0; LATEST=0
+          : > /tmp/others.txt
+          printf '%-68s %-28s %8s %10s %-22s\n' \
+            MARKET SLUG TRADES OTHER_WALL LATEST | tee -a "$GITHUB_STEP_SUMMARY"
+          while IFS='|' read -r CID SLUG OURN OURTS; do
+            [ -z "$CID" ] && continue
+            MKTS=$((MKTS+1))
+            CURSOR=""; PAGE=0; N=0; MX=0
+            while [ "$PAGE" -lt 5 ]; do
+              PAGE=$((PAGE+1))
+              Q="$CBEST=$CID&limit=100"
+              [ -n "$CURSOR" ] && Q="$Q&next_cursor=$CURSOR"
+              C=$(curl -sS --max-time 40 -o /tmp/m.json -w '%{http_code}' \
+                  "$API/v2/trades?$Q" || echo 000)
+              [ "$C" != "200" ] && { echo "  $CID http=$C" \
+                | tee -a "$GITHUB_STEP_SUMMARY"; break; }
+              # Rows after the cutoff, and the wallets that made them.
+              # THE ROSTER IS EXCLUDED HERE ON PURPOSE: the question is
+              # whether ANYONE ELSE kept trading these markets, and the
+              # directive is explicit that they need not be whales of
+              # ours.
+              K=$(jq -r --argjson c "$CUTOFF_EPOCH" "
+                    [$ROWS_FILTER[]? | select((.timestamp // 0) > \$c)] | length" \
+                  /tmp/m.json 2>/dev/null || echo 0)
+              jq -r --argjson c "$CUTOFF_EPOCH" "
+                $ROWS_FILTER[]? | select((.timestamp // 0) > \$c)
+                | (.proxy_wallet // .proxyWallet // \"NO_WALLET\") | ascii_downcase" \
+                 /tmp/m.json 2>/dev/null >> /tmp/others.txt || true
+              M=$(jq -r "[$ROWS_FILTER[]? | (.timestamp // empty)] | max // 0" \
+                  /tmp/m.json 2>/dev/null || echo 0)
+              [ "$M" -gt "$MX" ] 2>/dev/null && MX="$M"
+              N=$((N + K))
+              # Rows come newest first, so a page whose newest row is
+              # already older than the cutoff ends the walk.
+              [ "$M" -le "$CUTOFF_EPOCH" ] 2>/dev/null && break
+              CURSOR=$(jq -r '.pagination.next_cursor // .next_cursor
+                              // .nextCursor // empty' /tmp/m.json 2>/dev/null || true)
+              [ -z "$CURSOR" ] || [ "$CURSOR" = "null" ] && break
+            done
+            [ "$N" -gt 0 ] 2>/dev/null && WITH=$((WITH+1))
+            TOTAL=$((TOTAL + N))
+            [ "$MX" -gt "$LATEST" ] 2>/dev/null && LATEST="$MX"
+            MISO=NONE
+            [ "$MX" -gt 0 ] 2>/dev/null && MISO=$(date -u -d @"$MX" \
+              +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$MX")
+            printf '%-68s %-28s %8s %10s %-22s\n' "$CID" \
+              "$(echo "$SLUG" | cut -c1-28)" "$N" "-" "$MISO" \
+              | tee -a "$GITHUB_STEP_SUMMARY"
+          done < /tmp/cohort.txt
+
+          # Distinct wallets that are NOT on our roster.
+          OTHERS=$(LC_ALL=C sort -u /tmp/others.txt \
+                   | grep -v -F -x -f <(cut -d'|' -f1 /tmp/roster.txt \
+                                        | tr 'A-Z' 'a-z') \
+                   | grep -c . || echo 0)
+          LISO=NONE
+          [ "$LATEST" -gt 0 ] 2>/dev/null && LISO=$(date -u -d @"$LATEST" \
+            +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || echo "$LATEST")
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
+          {
+            echo "COHORT_MARKETS_WITH_ANY_POST_CUTOFF_TRADE=$WITH"
+            echo "OTHER_WALLETS_TRADING_COHORT_AFTER_CUTOFF=$OTHERS"
+            echo "TOTAL_COHORT_TRADES_AFTER_CUTOFF=$TOTAL"
+            echo "LATEST_COHORT_TRADE_TIMESTAMP=$LISO"
+          } | tee -a "$GITHUB_STEP_SUMMARY" | tee -a "$GITHUB_ENV"
+
       - name: Classify
         run: |
           set -u
@@ -434,6 +602,13 @@ jobs:
             echo "WALLETS_TESTED           ${WALLETS_TESTED:-NOT_IDENTIFIED}"
             echo "WALLETS_WITH_V2_AFTER    ${WALLETS_WITH_V2_TRADES_AFTER_LOCAL_CUTOFF:-NOT_IDENTIFIED}"
             echo "TOTAL_V2_AFTER           ${TOTAL_V2_TRADES_AFTER_LOCAL_CUTOFF:-NOT_IDENTIFIED}"
+            echo "COHORT_HASH              ${COHORT_HASH:-NOT_IDENTIFIED}"
+            echo "COHORT_CONTRACT_OK       ${COHORT_CONTRACT_OK:-no}"
+            echo "COHORT_MARKETS           ${COHORT_MARKETS:-NOT_IDENTIFIED} (capped: ${COHORT_CAPPED:-NOT_IDENTIFIED})"
+            echo "COHORT_MKTS_WITH_AFTER   ${COHORT_MARKETS_WITH_ANY_POST_CUTOFF_TRADE:-NOT_IDENTIFIED}"
+            echo "OTHER_WALLETS_IN_COHORT  ${OTHER_WALLETS_TRADING_COHORT_AFTER_CUTOFF:-NOT_IDENTIFIED}"
+            echo "TOTAL_COHORT_AFTER       ${TOTAL_COHORT_TRADES_AFTER_CUTOFF:-NOT_IDENTIFIED}"
+            echo "LATEST_COHORT_TRADE      ${LATEST_COHORT_TRADE_TIMESTAMP:-NOT_IDENTIFIED}"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 
@@ -451,12 +626,45 @@ jobs:
           elif [ "${FEED_FRESHNESS:-NOT_IDENTIFIED}" = "STALE" ]; then
             V=B_UPSTREAM_PUBLIC_FEED_STALL_OR_LAG
             R="the venue declares its own serving lag at ${FEED_SERVING_LAG_S}s (worst mechanism ${FEED_WORST_MECHANISM}), so its zero for our roster is a property of the feed, not of the wallets"
-          elif [ "${FEED_FRESHNESS:-NOT_IDENTIFIED}" = "CURRENT" ]; then
-            V=C_WALLET_ACTIVITY_GENUINELY_NOT_OBSERVED
-            R="the venue declares its own serving lag at ${FEED_SERVING_LAG_S}s (worst mechanism ${FEED_WORST_MECHANISM}), so the feed is current by its own account, and it contains no post-cutoff rows for the configured addresses. THIS IS NOT A CLAIM THAT THE WALLETS STOPPED TRADING -- it is the absence of observed activity on one public feed over one window"
-          else
+          elif [ "${FEED_FRESHNESS:-NOT_IDENTIFIED}" != "CURRENT" ]; then
             V=D_INCONCLUSIVE
             R="the venue served no freshness declaration, and the unfiltered /v2/trades watermark is cached (identical newest row returned 2m19s apart on 2026-09-19), so freshness is NOT_IDENTIFIED and a zero cannot be separated from a stall"
+
+          # ── THE COHORT CONTROL. Global freshness is necessary and NOT
+          # sufficient: a feed current for the venue as a whole says
+          # nothing about whether the MARKET POPULATION these twelve
+          # wallets were actually in kept trading. The three branches
+          # below are the three things that control can return.
+          elif [ "${COHORT_CONTRACT_OK:-no}" != "yes" ]; then
+            V=MARKET_SPECIFIC_FRESHNESS_NOT_ESTABLISHED
+            R="global data is current (venue-declared serving lag ${FEED_SERVING_LAG_S}s) but the frozen cohort of ${COHORT_MARKETS:-0} markets could not be shown current -- no market-filter spelling returned rows, so cohort silence cannot be separated from a wrong parameter"
+          elif [ "${COHORT_MARKETS_WITH_ANY_POST_CUTOFF_TRADE:-0}" -gt 0 ] 2>/dev/null; then
+            V=C_WALLET_ACTIVITY_GENUINELY_NOT_OBSERVED
+            R="the frozen cohort (hash ${COHORT_HASH}, ${COHORT_MARKETS} markets chosen from pre-cutoff rows only) DID keep trading after the cutoff -- ${COHORT_MARKETS_WITH_ANY_POST_CUTOFF_TRADE} of them, ${TOTAL_COHORT_TRADES_AFTER_CUTOFF} trades by ${OTHER_WALLETS_TRADING_COHORT_AFTER_CUTOFF} wallets not on our roster, latest ${LATEST_COHORT_TRADE_TIMESTAMP} -- while all 12 tracked wallets did not. No post-cutoff activity for the 12 tracked wallets was observed in the current venue-served feed. THIS IS NOT A CLAIM THAT THE WALLETS STOPPED TRADING"
+          else
+            V=MARKET_COHORT_INACTIVITY_OBSERVED
+            R="the frozen cohort (hash ${COHORT_HASH}, ${COHORT_MARKETS} markets) shows NO subsequent activity from anyone, so the twelve wallets' silence is a property of the markets they were in rather than of the wallets or of our ingestion"
           fi
           echo "INCIDENT_VERDICT=$V" | tee -a "$GITHUB_STEP_SUMMARY"
           echo "reason: $R" | tee -a "$GITHUB_STEP_SUMMARY"
+          echo "FINAL_INCIDENT_VERDICT=$V" >> "$GITHUB_ENV"
+
+      - name: The closing contract, read from production
+        if: always()
+        run: |
+          set +e
+          set -u
+          # BETTOR'S STATE IS REPORTED INDEPENDENTLY OF RN1'S, from real
+          # rows. A component with no row reads NOT_IDENTIFIED rather
+          # than being quietly omitted or assumed healthy.
+          PGOPTIONS="-c statement_timeout=120000 -c default_transaction_read_only=on" \
+            psql "$(cat /tmp/conn)" -X -A -t -q \
+                 -f research/incident_close.sql > /tmp/close.txt 2>/tmp/close.err
+          RC=$?
+          {
+            echo "## Closing contract (production rows)"
+            echo '```'
+            if [ "$RC" = "0" ]; then cat /tmp/close.txt
+            else echo "close read failed rc=$RC"; head -20 /tmp/close.err; fi
+            echo '```'
+          } | tee -a "$GITHUB_STEP_SUMMARY"
