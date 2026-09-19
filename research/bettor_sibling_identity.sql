@@ -22,7 +22,10 @@
 -- THE PRODUCT UNDER TEST, from the institutional record
 -- (run 35472190984): productId astatc-mls-sje-laf-2026-09-19-sh-ftts.
 
-\set product 'astatc-mls-sje-laf-2026-09-19-sh-ftts'
+-- THE PRODUCT IS INLINED AS A LITERAL, not a \set variable: the
+-- research runner refuses every psql meta-command but \echo, and that
+-- guard is right -- a file that can set variables can set more than a
+-- product name. Inlining costs a few repeats and keeps the guard whole.
 
 \echo '--- 1. EVERY RETAIL ROW UNDER THIS PRODUCT (the candidate set) ---'
 SELECT 'sib|' || p.identifier
@@ -32,8 +35,8 @@ SELECT 'sib|' || p.identifier
        || '|kind=' || coalesce(p.kind, 'NULL')
        || '|line=' || coalesce(p.line, 'NULL')
   FROM us_premap p
- WHERE p.identifier LIKE :'product' || '%'
-    OR p.market_slug LIKE :'product' || '%'
+ WHERE p.identifier LIKE 'astatc-mls-sje-laf-2026-09-19-sh-ftts%'
+    OR p.market_slug LIKE 'astatc-mls-sje-laf-2026-09-19-sh-ftts%'
  ORDER BY p.identifier, p.side_norm;
 
 \echo ''
@@ -43,8 +46,8 @@ SELECT 'q|' || p.identifier
        || '|title=' || coalesce(left(p.event_title, 60), 'NULL')
        || '|question=' || coalesce(left(p.question, 130), 'NULL')
   FROM us_premap p
- WHERE p.identifier LIKE :'product' || '%'
-    OR p.market_slug LIKE :'product' || '%'
+ WHERE p.identifier LIKE 'astatc-mls-sje-laf-2026-09-19-sh-ftts%'
+    OR p.market_slug LIKE 'astatc-mls-sje-laf-2026-09-19-sh-ftts%'
  ORDER BY p.identifier
  LIMIT 12;
 
@@ -57,7 +60,7 @@ SELECT 'obs|' || o.symbol
        || '|last_ask=' || coalesce(max(o.microstructure ->> 'ask'), 'NULL')
        || '|newest=' || to_char(max(o.observed_at), 'HH24:MI:SSZ')
   FROM bettor_opportunities o
- WHERE o.symbol LIKE :'product' || '%'
+ WHERE o.symbol LIKE 'astatc-mls-sje-laf-2026-09-19-sh-ftts%'
  GROUP BY o.symbol, o.outcome_leg
  ORDER BY o.symbol, o.outcome_leg;
 
@@ -70,8 +73,8 @@ SELECT 'shape|retail_rows=' || count(*)
        || '|distinct_identifiers=' || count(DISTINCT p.identifier)
        || '|distinct_sides=' || count(DISTINCT p.side_norm)
   FROM us_premap p
- WHERE p.identifier LIKE :'product' || '%'
-    OR p.market_slug LIKE :'product' || '%';
+ WHERE p.identifier LIKE 'astatc-mls-sje-laf-2026-09-19-sh-ftts%'
+    OR p.market_slug LIKE 'astatc-mls-sje-laf-2026-09-19-sh-ftts%';
 
 \echo ''
 \echo '--- 5. THE SAME SHAPE FOR THE WHOLE EVENT (context) ---'
