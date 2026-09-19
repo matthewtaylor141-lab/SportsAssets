@@ -270,11 +270,23 @@ class TestTheWorkflowSignsTheSameThing:
         assert step.index("ENVIRONMENT_NOT_ATTESTED_AS_PREPROD") < \
             step.index("base64 -d")
 
-    def test_no_workflow_reads_a_production_credential_slot(self):
-        """Naming PMX_PROD_* in a refusal message is the point; READING
-        one would mean a production path exists, and none is authorized."""
-        for path in self.WF.parent.glob("*.yml"):
-            assert "secrets.PMX_PROD_" not in path.read_text(), path.name
+    def test_only_the_production_lane_reads_a_production_credential(self):
+        """Rewritten 2026-09-19. This test used to assert that NO workflow
+        reads PMX_PROD_*, on the grounds that no production path was
+        authorized. The owner then authorized one -- read-only, against an
+        unfunded account -- so the rule is no longer "none" but "exactly
+        one, and it is not this one". Naming PMX_PROD_* in the preprod
+        lane's refusal message is still fine; reading it there is not.
+        """
+        readers = sorted(p.name for p in self.WF.parent.glob("*.yml")
+                         if "secrets.PMX_PROD_" in p.read_text())
+        assert readers == ["pmx-production.yml"]
+        assert "secrets.PMX_PROD_" not in self.WF.read_text()
+
+    def test_the_preprod_lane_is_the_only_reader_of_preprod_credentials(self):
+        readers = sorted(p.name for p in self.WF.parent.glob("*.yml")
+                         if "secrets.PMX_CLIENT_ID" in p.read_text())
+        assert readers == ["pmx-preprod.yml"]
 
     def test_the_key_staging_step_names_every_way_it_can_fail(self):
         """Run 25 died on the runner's own "base64: invalid input", which

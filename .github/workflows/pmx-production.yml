@@ -1,0 +1,124 @@
+name: pmx-production
+
+# PRODUCTION, READ ONLY. Authorized by the owner on 2026-09-19 after
+# production credentials were issued for an account holding no funds.
+#
+# WHAT THIS LANE CANNOT DO, by construction rather than by promise:
+#
+#   * It cannot send an order. `research/institutional/pmx_production_read`
+#     has no insert, cancel, replace, preview or funding path in it, and
+#     `request_for` refuses by name any path outside its read allow-list
+#     before a socket is opened. A test asserts those strings are absent
+#     from the source.
+#   * It cannot touch preproduction. `assert_production` refuses every
+#     non-production host, the mirror image of the preprod lane's guard.
+#     Neither guard is parameterized; an environment that can be talked
+#     into being the other one is not a boundary.
+#   * It cannot pick up the preprod lane's keys. It reads PMX_PROD_*,
+#     which nothing else reads; the preprod lane reads PMX_* and
+#     additionally requires an explicit PREPROD attestation.
+#
+# There is deliberately no `confirm` input, because there is nothing to
+# confirm: no action here can change anything at the venue.
+#
+# THE CREDENTIALS COME FROM THE SECRET STORE, never from the form. A
+# repository secret is masked by the runner before any step runs.
+#
+# This lane opens no gRPC stream: PRODUCTION_GRPC_TARGET is NOT_IDENTIFIED
+# (the documentation spells the host four ways) and a read does not need
+# one.
+
+on:
+  workflow_dispatch:
+    inputs:
+      reads:
+        description: "comma-separated reads, or blank for all: whoami, users, accounts, positions, balance, balances, instruments, symbols, orders, executions"
+        required: false
+        type: string
+        default: ""
+
+concurrency:
+  group: pmx-production
+  cancel-in-progress: false
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Confirm the lane has no order path
+        # Cheap, and it runs BEFORE a credential is staged: if someone
+        # ever adds a mutating call to the module, this job stops before
+        # it can authenticate, not after.
+        run: |
+          set -euo pipefail
+          F=research/institutional
+          for bad in "/v1/trading/orders" "/v1/funding" "orders/cancel" \
+                     "orders/preview" "orders/replace"; do
+            if grep -qF -- "$bad" "$F/pmx_production_read.py" \
+                              "$F/pmx_production_net.py"; then
+              echo "REFUSED: the production lane names a mutating path: $bad"
+              exit 1
+            fi
+          done
+          echo "no order, cancel, replace, preview or funding path present"
+
+      - name: Install
+        run: pip install -q pyjwt cryptography requests
+
+      - name: Which credentials arrived
+        # No network at all. Names only; no value is read or printed.
+        env:
+          PMX_PROD_CLIENT_ID: ${{ secrets.PMX_PROD_CLIENT_ID }}
+          PMX_PROD_PARTICIPANT_ID: ${{ secrets.PMX_PROD_PARTICIPANT_ID }}
+          PMX_PROD_KEY_ID: ${{ secrets.PMX_PROD_KEY_ID }}
+          PMX_PROD_PRIVATE_KEY_B64: ${{ secrets.PMX_PROD_PRIVATE_KEY_B64 }}
+          PMX_PROD_ACCOUNT: ${{ secrets.PMX_PROD_ACCOUNT }}
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$PWD/research/institutional:${PYTHONPATH:-}"
+          python research/institutional/pmx_production_read.py presence
+
+      - name: Read production
+        env:
+          PMX_PROD_CLIENT_ID: ${{ secrets.PMX_PROD_CLIENT_ID }}
+          PMX_PROD_PARTICIPANT_ID: ${{ secrets.PMX_PROD_PARTICIPANT_ID }}
+          PMX_PROD_KEY_ID: ${{ secrets.PMX_PROD_KEY_ID }}
+          PMX_PROD_PRIVATE_KEY_B64: ${{ secrets.PMX_PROD_PRIVATE_KEY_B64 }}
+          PMX_PROD_ACCOUNT: ${{ secrets.PMX_PROD_ACCOUNT }}
+          READS: ${{ inputs.reads }}
+        run: |
+          set -euo pipefail
+          export PYTHONPATH="$PWD/research/institutional:${PYTHONPATH:-}"
+          # rc 0  authenticated and read cleanly
+          # rc 1  a NAMED verdict (secret missing, rejected, permission
+          #       denied, venue unreachable) -- a completed command that
+          #       reports a real outcome
+          # any other rc -> the step fails, which is what an unhandled
+          #       exception must look like
+          set +e
+          python research/institutional/pmx_production_read.py verify \
+            --reads "$READS" --out "$RUNNER_TEMP/receipts.json"
+          RC=$?
+          set -e
+          if [ "$RC" -gt 1 ]; then exit "$RC"; fi
+
+      - name: Stage the receipts for the artifact
+        if: always()
+        run: |
+          set -euo pipefail
+          mkdir -p receipts
+          if [ -s "$RUNNER_TEMP/receipts.json" ]; then
+            cp "$RUNNER_TEMP/receipts.json" "receipts/receipts_${GITHUB_RUN_ID}.json"
+          else
+            echo "this run wrote no receipts" > "receipts/receipts_${GITHUB_RUN_ID}.json"
+          fi
+
+      - name: Publish the receipts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: pmx-production-receipts-${{ github.run_id }}
+          path: receipts/
