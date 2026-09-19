@@ -666,3 +666,56 @@ def test_the_repair_did_not_weaken_the_constraint():
         if "DROP CONSTRAINT IF EXISTS shadow_decisions_policy_frozen" in body:
             assert "ADD CONSTRAINT shadow_decisions_policy_frozen" in body, \
                 mig.name
+
+
+# ── the two words are not interchangeable ────────────────────────────
+#
+# Owner, 2026-09-19: "the policy/blocker says P_FILL = NOT_IDENTIFIED,
+# while persisted decisions currently say p_fill_status =
+# NOT_ESTABLISHED. Determine the canonical vocabulary from the frozen
+# contracts and correct future rows only if required. Do not mutate the
+# 16 existing decisions."
+
+
+def test_a_belief_is_not_established_and_a_quantity_is_not_identified():
+    """shadow_lanes.probabilities() is the contract that settles the
+    words, so read the rule out of it rather than asserting a
+    preference."""
+    b = lanes.probabilities(p_market=None, p_bettor=None, p_fill=None)
+    # A BELIEF we have not yet established.
+    assert b["pBettorStatus"] == lanes.NOT_ESTABLISHED
+    # QUANTITIES we could not identify.
+    assert b["pMarketStatus"] == lanes.NOT_IDENTIFIED
+    assert b["pFillStatus"] == lanes.NOT_IDENTIFIED
+    assert lanes.NOT_ESTABLISHED != lanes.NOT_IDENTIFIED
+
+
+def test_the_persisted_p_fill_status_agrees_with_the_frozen_policy():
+    """Three contracts must say the same word, and before this fix one
+    line in shadow_bettor.py disagreed with all three."""
+    assert bpol.BELIEF["pFill"] == lanes.NOT_IDENTIFIED
+    assert bpol.BELIEF["pFillStatus"] == lanes.NOT_IDENTIFIED
+    assert bettor.B_P_FILL_NOT_IDENTIFIED == "P_FILL_NOT_IDENTIFIED"
+    assert "pFillStatus=lanes.NOT_IDENTIFIED" in BETTOR_SRC
+    assert "pFillStatus=lanes.NOT_ESTABLISHED" not in BETTOR_SRC
+
+
+def test_no_code_path_rewrites_an_already_written_decision():
+    """The correction is PROSPECTIVE. The rows already written keep the
+    word they were written with -- revising them would be exactly the
+    retrospective edit the ledger exists to prevent."""
+    for src in (BETTOR_SRC, WORKER_SRC, OPS_SRC,
+                (BACKEND / "sportsassets" / "shadow_store.py").read_text()):
+        assert not re.search(r"UPDATE\s+shadow_decisions", src, re.I)
+        assert not re.search(r"DELETE\s+FROM\s+shadow_decisions", src, re.I)
+
+
+def test_the_declaration_hash_did_not_move_for_a_code_correction():
+    """POLICY_SHA covers the RULES. Conforming the implementation to a
+    rule it was contradicting changes no rule, so the freeze is not
+    disturbed and freeze_policy cannot return REFUSED. POLICY_CODE_SHA
+    does move, and it is recorded rather than enforced for exactly this
+    reason."""
+    assert bpol.policy_sha() == bpol.POLICY_SHA
+    assert bpol.POLICY_CODE_SHA != bpol.POLICY_SHA
+    assert "shadow_bettor.py" in bpol.CODE_FILES

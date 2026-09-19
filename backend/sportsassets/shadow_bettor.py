@@ -341,7 +341,22 @@ def decide(opportunity: dict, market_state: dict | None, *,
              "why": ("not evaluated: independent Action EV is not "
                      "established, so no alternative can be ranked")}
             for a in (sh.BUY, sh.SELL, sh.HOLD)],
-        pFillStatus=lanes.NOT_ESTABLISHED,
+        # NOT_IDENTIFIED, NOT NOT_ESTABLISHED. The two words are not
+        # interchangeable and shadow_lanes.belief() settles which
+        # applies: pBettorStatus falls back to NOT_ESTABLISHED because a
+        # BELIEF is something we have not yet established, while
+        # pMarketStatus and pFillStatus fall back to NOT_IDENTIFIED
+        # because a QUANTITY is something we could not identify. The
+        # frozen declaration says pFill NOT_IDENTIFIED and the blocker
+        # is named P_FILL_NOT_IDENTIFIED; this line was the only place
+        # disagreeing with all three.
+        #
+        # PROSPECTIVE ONLY. The 16 decisions already written under
+        # BETTOR_EV_SHADOW_V1 keep the word they were written with --
+        # they are append-only evidence of what the system said at the
+        # time, and revising them would be exactly the retrospective
+        # edit the whole ledger exists to prevent.
+        pFillStatus=lanes.NOT_IDENTIFIED,
         actionEvStatus=NOT_IDENTIFIED,
         marketBid=(market_state or {}).get("bid"),
         marketAsk=(market_state or {}).get("ask"),
