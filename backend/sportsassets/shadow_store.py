@@ -642,12 +642,12 @@ _DECISION_INSERT = """
         feature_lineage, rn1_features_used, specialist_outputs,
         action_ev_components, action_ev_status, rn1_observation_id,
         market_state_id, rn1_price, price_when_bettor_observed,
-        price_when_bettor_decided)
+        price_when_bettor_decided, bettor_opportunity_id)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,
             $18,$19::jsonb,$20::jsonb,$21,$22,$23,$24,$25,$26,$27,$28,
             $29,$30,$31,$32,$33,$34::jsonb,$35::jsonb,$36::jsonb,
             $37::jsonb,$38,$39,$40,$41,$42::jsonb,$43,$44::jsonb,
-            $45::jsonb,$46,$47,$48,$49,$50,$51)
+            $45::jsonb,$46,$47,$48,$49,$50,$51,$52)
     ON CONFLICT DO NOTHING
     RETURNING shadow_decision_id
 """
@@ -684,7 +684,14 @@ async def record_decision(record: dict, pool=None) -> tuple[str, bool]:
         _j(r.get("specialistOutputs")), _j(r.get("actionEvComponents")),
         r.get("actionEvStatus"), r.get("rn1ObservationId"),
         r.get("marketStateId"), r.get("rn1Price"),
-        r.get("priceWhenBettorObserved"), r.get("priceWhenBettorDecided"))
+        r.get("priceWhenBettorObserved"), r.get("priceWhenBettorDecided"),
+        # THE COLUMN MIGRATION 071's CHECK REQUIRES. Its absence here is
+        # what made every BETTOR_EV_SHADOW decision fail its insert from
+        # the moment 071 landed: 31 opportunities observed, zero
+        # decisions written, and the worker reporting tick_failed with
+        # an empty problems list. The lane that is the product was
+        # silently writing nothing.
+        r.get("bettorOpportunityId"))
     if row is not None:
         return row["shadow_decision_id"], True
     return r["shadowDecisionId"], False

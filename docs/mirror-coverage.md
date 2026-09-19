@@ -2024,3 +2024,53 @@ add a guard.
 `Status`, marked `affectsBettor: false`. The panel takes its component
 order from the server, so a component the API adds cannot be dropped by
 a hard-coded list. An RN1 feed failure never draws BETTOR as down.
+
+
+## 80. The cohort control, and the BETTOR writer that was writing half of itself
+
+**Cohort control** (run 35462525559). Frozen from pre-cutoff rows only,
+hash `9a9f7e31c5c547c9a5ca21c133c56b52`, 40 markets, **capped** (the
+window held more). Contract confirmed on `market=`. Result:
+
+| | |
+|---|---|
+| `COHORT_MARKETS_WITH_ANY_POST_CUTOFF_TRADE` | 5 |
+| `OTHER_WALLETS_TRADING_COHORT_AFTER_CUTOFF` | 6 |
+| `TOTAL_COHORT_TRADES_AFTER_CUTOFF` | 24 |
+| `LATEST_COHORT_TRADE_TIMESTAMP` | **2026-09-19T17:01:11Z** |
+
+The literal criterion returns C: other wallets did trade the same frozen
+markets after the cutoff. But the cohort's own newest trade is **five
+seconds** after the cutoff, and nothing since. `RELEVANT_COHORT_FRESHNESS
+= STALE`. The markets these twelve wallets were in went quiet at
+essentially the same instant they did, while the venue as a whole keeps
+serving rows at a 1-3s lag. The synchronized silence is wider than our
+roster, which points at a market-side event around 17:01 rather than at
+wallet behaviour and certainly not at our ingestion.
+
+`COHORT_MARKETS_WITH_ANY_POST_CUTOFF_TRADE > 0` was too coarse a
+discriminator for a freshness question, and it is recorded here rather
+than re-tuned after the fact: changing the threshold once the answer is
+visible is the failure this whole investigation kept catching.
+
+**BETTOR was writing half of itself.** The same run's closing contract
+showed `shadow_bettor` at `tick_failed`, 31 opportunities observed in
+the hour, and **zero decisions ever written** -- with `problems: []`.
+Two bugs, both mine, in the lane that is the product:
+
+1. `record_opportunity` read back `row["bettorOpportunityId"]`, but
+   asyncpg keys a Row by the name Postgres returns -- `RETURNING
+   bettor_opportunity_id`. KeyError on every first sighting of a market,
+   raised *after* the row was written, so the opportunity landed and the
+   tick died before it could decide.
+2. `record_decision` never bound `bettor_opportunity_id`, which
+   migration 071's CHECK requires on every `BETTOR_EV_SHADOW` row. Every
+   decision insert would have failed the constraint even had it been
+   reached.
+
+Three new tests, all verified to fail against the broken source: the
+INSERT binds as many values as it names columns; every `RETURNING <col>`
+is read by the database's own name and never the camelCase one; and --
+derived from the migrations rather than hardcoded -- every
+`CHECK (lane <> 'X' OR col IS NOT NULL)` names a column the decision
+INSERT actually binds.

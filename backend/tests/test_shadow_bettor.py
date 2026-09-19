@@ -310,3 +310,81 @@ def test_the_ui_health_list_leads_with_bettor():
     block = block[:block.index("};")]
     assert block.index("BETTOR_EV_ENGINE") < block.index("RN1_BENCHMARK_FEED")
     assert block.index("BETTOR_EV_ENGINE") < block.index("RN1_LISTENER")
+
+
+# ── the writer actually writes ───────────────────────────────────────
+#
+# Both bugs below were live in production for the whole first hour of
+# BETTOR collection: 31 opportunities observed, ZERO decisions written,
+# the worker reporting tick_failed with an empty problems list. Neither
+# was visible to any test that only read the module's prose.
+
+STORE_SRC = (BACKEND / "sportsassets" / "shadow_store.py").read_text()
+
+
+def _insert_shape(src, name):
+    """(column count, highest $N) for a named INSERT constant."""
+    block = src[src.index(name):]
+    block = block[:block.index('"""', block.index('"""') + 3)]
+    cols = block[block.index("(") + 1:block.index(")")]
+    ncols = len([c for c in cols.replace("\n", " ").split(",") if c.strip()])
+    highest = max(int(m) for m in re.findall(r"\$(\d+)", block))
+    return ncols, highest
+
+
+@pytest.mark.parametrize("module,const", [
+    ("shadow_store.py", "_DECISION_INSERT"),
+    ("shadow_bettor.py", "_OPPORTUNITY_INSERT"),
+])
+def test_every_insert_binds_as_many_values_as_it_names_columns(module, const):
+    src = STORE_SRC if module == "shadow_store.py" else BETTOR_SRC
+    ncols, highest = _insert_shape(src, const)
+    assert ncols == highest, (
+        "%s names %d columns but binds $1..$%d" % (const, ncols, highest))
+
+
+def test_a_bettor_decision_carries_the_column_its_check_requires():
+    """Migration 071 requires bettor_opportunity_id on every
+    BETTOR_EV_SHADOW row. An INSERT that omitted it failed the CHECK on
+    every single decision -- silently, because the worker caught the
+    exception and reported tick_failed with no problem named."""
+    assert "bettor_opportunity_id" in STORE_SRC, \
+        "record_decision does not write the column 071's CHECK demands"
+    assert 'r.get("bettorOpportunityId")' in STORE_SRC
+    assert bettor.decide(_op(), _book())["bettorOpportunityId"]
+
+
+@pytest.mark.parametrize("src_name", ["shadow_store.py", "shadow_bettor.py"])
+def test_returning_columns_are_read_by_the_name_the_database_uses(src_name):
+    """asyncpg keys a Row by the column name Postgres returns, which is
+    snake_case unless quoted. Reading row["camelCase"] raises KeyError
+    AFTER the row is already written -- the worst shape of failure,
+    because the store is right and the caller dies."""
+    src = STORE_SRC if src_name == "shadow_store.py" else BETTOR_SRC
+    for col in re.findall(r"RETURNING\s+(\w+)", src):
+        assert 'row["%s"]' % col in src, (
+            "%s RETURNs %s but never reads row[%r]" % (src_name, col, col))
+        camel = re.sub(r"_(\w)", lambda m: m.group(1).upper(), col)
+        assert 'row["%s"]' % camel not in src, (
+            "%s reads row[%r]; Postgres returns %r" % (src_name, camel, col))
+
+
+def test_every_lane_check_column_is_actually_written():
+    """Derived from the migrations, not hardcoded: any constraint of the
+    shape CHECK (lane <> 'X' OR col IS NOT NULL) names a column the
+    decision INSERT must bind. Hardcoding one name would leave the next
+    lane's constraint to be discovered the way this one was -- in
+    production, an hour later, with zero rows written."""
+    decision_insert = STORE_SRC[STORE_SRC.index("_DECISION_INSERT"):]
+    decision_insert = decision_insert[:decision_insert.index("ON CONFLICT")]
+    required = set()
+    for mig in sorted((BACKEND / "migrations").glob("*.sql")):
+        for lane, col in re.findall(
+                r"CHECK\s*\(\s*lane\s*<>\s*'(\w+)'\s*OR\s*(\w+)\s+IS\s+NOT\s+NULL",
+                mig.read_text(), re.IGNORECASE):
+            required.add((lane, col))
+    assert required, "no lane constraints found; the test has gone blind"
+    for lane, col in sorted(required):
+        assert col in decision_insert, (
+            "lane %s requires %s but the decision INSERT never binds it"
+            % (lane, col))

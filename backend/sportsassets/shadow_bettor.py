@@ -256,7 +256,13 @@ async def record_opportunity(record: dict, pool=None) -> tuple[str, bool]:
         _j(r.get("latency")), _j(r.get("modelOutputs")),
         _j(r.get("featureLineage")), r["rn1FeaturesUsed"])
     if row is not None:
-        return row["bettorOpportunityId"], True
+        # THE DATABASE RETURNS ITS OWN COLUMN NAME, not ours. Reading the
+        # camelCase key here raised KeyError on every FIRST sighting of a
+        # market -- after the row had already been written -- so the
+        # opportunity landed and the tick died before it could decide.
+        # 31 opportunities, zero decisions, status tick_failed, problems
+        # empty. The lane that is the product was writing half of itself.
+        return row["bettor_opportunity_id"], True
     return r["bettorOpportunityId"], False
 
 
