@@ -216,3 +216,48 @@ SELECT 'heartbeat|' || h.service || '|' || h.status || '|age_s='
   FROM service_heartbeats h
  WHERE h.service IN ('shadow_bettor', 'shadow_rn1', 'chain_listener')
  ORDER BY h.service;
+
+\echo ''
+\echo '--- 4b. DID THE VOCABULARY FLIP CLEANLY, OR IS IT MIXED? ---'
+-- THE QUESTION THE BUCKET COUNTS CANNOT ANSWER. The first production
+-- read showed 14 post-boot rows saying NOT_IDENTIFIED and 4 still
+-- saying NOT_ESTABLISHED, which has two very different explanations:
+--
+--   a deploy handover -- the previous build's last tick overlapping
+--   the new build's boot -- in which case the words are separated by a
+--   single instant and never interleave; or
+--
+--   a live code path still writing the old word, in which case the two
+--   keep appearing alongside each other.
+--
+-- These print the boundary instants so the difference is visible
+-- rather than assumed. If the newest NOT_ESTABLISHED row is OLDER than
+-- the oldest NOT_IDENTIFIED row, the handover is the explanation and
+-- nothing is still writing the old word.
+SELECT 'boundary|newest_NOT_ESTABLISHED|'
+       || COALESCE(max(created_at)::text, 'NONE')
+  FROM shadow_decisions
+ WHERE lane = 'BETTOR_EV_SHADOW' AND p_fill_status = 'NOT_ESTABLISHED';
+
+SELECT 'boundary|oldest_NOT_IDENTIFIED|'
+       || COALESCE(min(created_at)::text, 'NONE')
+  FROM shadow_decisions
+ WHERE lane = 'BETTOR_EV_SHADOW' AND p_fill_status = 'NOT_IDENTIFIED';
+
+-- The decisive count: rows written with the OLD word AFTER the first
+-- row written with the NEW one. Zero means the flip was clean.
+SELECT 'boundary|old_word_after_first_new_word|' || count(*)::text
+  FROM shadow_decisions d
+ WHERE d.lane = 'BETTOR_EV_SHADOW'
+   AND d.p_fill_status = 'NOT_ESTABLISHED'
+   AND d.created_at > (SELECT min(created_at) FROM shadow_decisions
+                        WHERE lane = 'BETTOR_EV_SHADOW'
+                          AND p_fill_status = 'NOT_IDENTIFIED');
+
+-- And the newest decision's own word, which is what every future row
+-- will carry if the running build is the one writing.
+SELECT 'boundary|newest_decision|' || d.created_at::text || '|'
+       || COALESCE(d.p_fill_status, 'NULL')
+  FROM shadow_decisions d
+ WHERE d.lane = 'BETTOR_EV_SHADOW'
+ ORDER BY d.created_at DESC LIMIT 1;
