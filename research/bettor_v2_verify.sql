@@ -12,6 +12,9 @@ SELECT 'build|' || COALESCE(value ->> 'commit', 'NOT_IDENTIFIED')
        || '|policy=' || COALESCE(value ->> 'policy', 'ABSENT')
   FROM ingestion_state WHERE key = 'workers_boot';
 
+-- FROM bettor_boot, NOT workers_boot. The first V2 read came back
+-- ABSENT on every field because workers_boot is written by
+-- workers/all.py and carries only {commit, at}.
 SELECT 'integrity|' || COALESCE(value ->> 'policyIntegrity', 'ABSENT')
        || '|decisionWritingAllowed='
        || COALESCE(value ->> 'decisionWritingAllowed', 'ABSENT')
@@ -22,12 +25,13 @@ SELECT 'integrity|' || COALESCE(value ->> 'policyIntegrity', 'ABSENT')
   FROM ingestion_state WHERE key = 'workers_boot';
 
 SELECT 'integrity_why|' || COALESCE(value ->> 'policyIntegrityWhy', 'ABSENT')
-  FROM ingestion_state WHERE key = 'workers_boot';
+  FROM ingestion_state WHERE key = 'bettor_boot';
 
 SELECT 'boot_sha|running_policy_sha='
        || COALESCE(value ->> 'policySha', 'ABSENT')
        || '|running_code_sha=' || COALESCE(value ->> 'policyCodeSha', 'ABSENT')
-  FROM ingestion_state WHERE key = 'workers_boot';
+       || '|policy=' || COALESCE(value ->> 'policy', 'ABSENT')
+  FROM ingestion_state WHERE key = 'bettor_boot';
 
 \echo ''
 \echo '--- 2. THE FROZEN POLICY ROWS: V1 IMMUTABLE, V2 BESIDE IT ---'
