@@ -59,6 +59,7 @@ from datetime import datetime, timedelta, timezone
 from .. import shadow_experiment_registry as reg
 from .. import shadow_experiment_signals as sig
 from .. import shadow_experimental_engine as eng
+from .. import shadow_experimental_markouts as mk
 from .. import shadow_experimental_store as xstore
 from .. import shadow_experiments as xp
 from .. import shadow_identity as ident
@@ -313,10 +314,66 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
     return stats
 
 
+# ── §12: the markouts, appended as later facts ───────────────────────
+
+
+async def take_markouts(pool, *, now=None, window_s=86400,
+                        limit=100) -> dict:
+    """30S / 60S / 300S for every filled position, once each.
+
+    NOTHING HERE TOUCHES THE DECISION IT MEASURES. Each markout is its
+    own append, keyed back, so the T0 row stays readable exactly as it
+    was sealed -- §12's requirement and the reason markouts have their
+    own table.
+    """
+    now = now or _now()
+    stats = {"subjects": 0, "observed": 0, "notIdentified": 0,
+             "notYetMature": 0}
+    subjects = await xstore.markout_subjects(pool, window_s=window_s,
+                                             limit=limit)
+    if not subjects:
+        return stats
+    taken = await xstore.markouts_taken(
+        pool, [s["experimentalDecisionId"] for s in subjects])
+
+    for subject in subjects:
+        stats["subjects"] += 1
+        for horizon, seconds in mk.HORIZONS:
+            key = (subject["experimentalDecisionId"], horizon)
+            if key in taken:
+                continue
+            target = mk.target_at(subject["decisionTimestamp"], seconds)
+            if now < target:
+                stats["notYetMature"] += 1
+                continue
+            try:
+                book = await xstore.evidence_nearest(
+                    pool, subject["symbol"], target=target)
+            except l2.ScalesRequired:
+                book = None
+            out = mk.markout(
+                horizon=horizon, horizon_s=seconds,
+                decision_at=subject["decisionTimestamp"],
+                position={"qty": subject["qty"], "vwap": subject["vwap"]},
+                book=book,
+                observed_at=(book or {}).get("l2ReceivedTimestamp"),
+                now=now)
+            if out["status"] == mk.NOT_YET_MATURE:
+                stats["notYetMature"] += 1
+                continue
+            await xstore.record_markout(pool,
+                                        subject["experimentalDecisionId"],
+                                        subject["positionId"], out)
+            stats["observed" if out["status"] == mk.OBSERVED
+                  else "notIdentified"] += 1
+    return stats
+
+
 async def tick(pool, *, now=None) -> dict:
     now = now or _now()
     stats = {"lane": LANE, "status": "ok"}
     stats["drain"] = await drain_seals(pool, now=now)
+    stats["markouts"] = await take_markouts(pool, now=now)
     stats["seal"] = await seal_population(pool, now=now)
     if stats["seal"].get("status"):
         stats["status"] = stats["seal"]["status"]

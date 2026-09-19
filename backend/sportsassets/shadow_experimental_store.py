@@ -496,6 +496,118 @@ async def record_decision(pool, sealed: dict, execution: dict) -> bool:
     return row is not None
 
 
+# ── §12: the later facts, appended ───────────────────────────────────
+
+MARKOUT_SUBJECTS_SQL = """
+    SELECT d.experimental_decision_id, d.market_id, d.decision_timestamp,
+           d.position_id, p.entry_qty, p.entry_vwap
+      FROM bettor_experimental_decisions d
+      JOIN bettor_experimental_positions p
+        ON p.position_id = d.position_id
+     WHERE d.decision_timestamp > now() - ($1 || ' seconds')::interval
+       AND EXISTS (SELECT 1 FROM bettor_l2_evidence e
+                    WHERE e.instrument_id = d.market_id)
+     ORDER BY d.decision_timestamp
+     LIMIT $2
+"""
+
+
+async def markout_subjects(pool, *, window_s=86400, limit=100) -> list:
+    """The filled positions whose markouts may still be takeable.
+
+    A decision with no position has nothing to mark: §12 measures where
+    a POSITION went, and a NO_TRADE or an unfilled walk never opened
+    one. Those rows are already complete evidence as they stand.
+    """
+    rows = await pool.fetch(MARKOUT_SUBJECTS_SQL, str(int(window_s)),
+                            int(limit))
+    return [{"experimentalDecisionId": r["experimental_decision_id"],
+             "symbol": r["market_id"],
+             "decisionTimestamp": r["decision_timestamp"],
+             "positionId": r["position_id"],
+             "qty": r["entry_qty"], "vwap": float(r["entry_vwap"])}
+            for r in rows]
+
+
+async def markouts_taken(pool, decision_ids) -> set:
+    if not decision_ids:
+        return set()
+    rows = await pool.fetch(
+        "SELECT experimental_decision_id, horizon "
+        "FROM bettor_experimental_markouts "
+        "WHERE experimental_decision_id = ANY($1::text[])",
+        list(decision_ids))
+    return {(r["experimental_decision_id"], r["horizon"]) for r in rows}
+
+
+async def record_markout(pool, decision_id, position_id, m: dict) -> bool:
+    """Append one markout. Never an update -- §12's whole point."""
+    row = await pool.fetchrow(
+        """
+        INSERT INTO bettor_experimental_markouts (
+            markout_id, experimental_decision_id, position_id, horizon,
+            observed_at, mid_markout_usd, executable_markout_usd,
+            mark_price, l2_book_sha, l2_source_timestamp, status, why,
+            target_at, tolerance_ms, observed_lag_ms, latency_regime,
+            l2_evidence_id, position_qty, entry_vwap, exitable_qty,
+            exit_vwap)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
+                $17,$18,$19,$20,$21)
+        ON CONFLICT (markout_id) DO NOTHING
+        RETURNING markout_id
+        """,
+        markout_id(decision_id, m["horizon"]), decision_id, position_id,
+        m["horizon"], m.get("observedAt") or m["targetAt"],
+        m.get("midMarkoutUsd"), m.get("executableMarkoutUsd"),
+        m.get("markPrice"), m.get("l2BookSha"), m.get("l2SourceTimestamp"),
+        m["status"], m.get("why"), m.get("targetAt"), m.get("toleranceMs"),
+        m.get("observedLagMs"), m.get("latencyRegime"),
+        m.get("l2EvidenceId"), m.get("positionQty"), m.get("entryVwap"),
+        m.get("exitableQty"), m.get("exitVwap"))
+    return row is not None
+
+
+def markout_id(decision_id, horizon) -> str:
+    return "xmk_" + hashlib.sha256(
+        ("%s|%s" % (decision_id, horizon)).encode()).hexdigest()[:36]
+
+
+async def evidence_nearest(pool, symbol, *, target) -> dict | None:
+    """The institutional book observed CLOSEST to `target`, either side.
+
+    Nearest, not next: a markout is about an instant, and the honest
+    nearest observation to T+60s may be a little before it. Whether
+    that observation is close ENOUGH is the markout's own decision, not
+    this query's -- it returns the candidate and the lag travels with
+    it.
+    """
+    row = await pool.fetchrow(
+        """
+        SELECT l2_evidence_id, request_id, instrument_id, source_timestamp,
+               received_timestamp, l2_book_sha, bids, offers, price_scale,
+               quantity_scale, latency_regime, venue_state
+          FROM bettor_l2_evidence
+         WHERE instrument_id = $1
+           AND price_scale IS NOT NULL
+         ORDER BY abs(extract(epoch FROM (received_timestamp - $2)))
+         LIMIT 1
+        """, symbol, target)
+    if row is None:
+        return None
+    book = l2.book_from(
+        {"symbol": row["instrument_id"], "state": row["venue_state"],
+         l2.F_TRANSACT_TIME: row["source_timestamp"],
+         l2.SIDE_BIDS: _load(row["bids"]) or [],
+         l2.SIDE_OFFERS: _load(row["offers"]) or []},
+        price_scale=row["price_scale"], qty_scale=row["quantity_scale"],
+        request_id=row["request_id"],
+        received_at=row["received_timestamp"])
+    book.update({"l2EvidenceId": row["l2_evidence_id"],
+                 "l2BookSha": row["l2_book_sha"],
+                 "latencyRegime": row["latency_regime"]})
+    return book
+
+
 async def open_position(pool, sealed: dict, execution: dict) -> str | None:
     """The shadow position an execution opened. Never one without a fill."""
     ex = execution or {}
