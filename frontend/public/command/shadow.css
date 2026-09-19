@@ -520,3 +520,33 @@
    value is coloured so it cannot be read past. */
 .sh-pipe-bad { color: var(--sh-amber) }
 .sh-pipe-bad b { color: var(--sh-amber) }
+
+/* ── management accounting ───────────────────────────────────────────
+ * The disclosure band sits ABOVE the numbers and inside the exportable
+ * area, because a screenshot of this tab is the single most likely
+ * artifact to be mistaken for actual investment performance. */
+.sh-acct-banner{display:flex;flex-wrap:wrap;align-items:center;gap:8px;
+  padding:10px 12px;margin:0 0 14px;border:1px solid var(--sh-line,#2a2f3a);
+  border-radius:8px;background:var(--sh-panel,#141822)}
+.sh-acct-cohort{font-size:11px;letter-spacing:.02em;opacity:.78}
+
+.sh-acct-top{display:grid;gap:1px;margin:0 0 18px;
+  grid-template-columns:repeat(auto-fit,minmax(168px,1fr));
+  background:var(--sh-line,#2a2f3a);border:1px solid var(--sh-line,#2a2f3a);
+  border-radius:8px;overflow:hidden}
+.sh-acct-top>div{background:var(--sh-panel,#141822);padding:12px 14px}
+.sh-acct-top label{display:block;font-size:10px;letter-spacing:.08em;
+  text-transform:uppercase;opacity:.62;margin-bottom:5px}
+/* tabular-nums so the columns line up and a reader can compare down a
+ * column rather than re-reading each figure. */
+.sh-acct-top b{font-size:17px;font-weight:600;font-variant-numeric:tabular-nums}
+
+.sh-acct-periods{width:100%;border-collapse:collapse;font-size:12px}
+.sh-acct-periods th,.sh-acct-periods td{padding:7px 10px;text-align:right;
+  border-bottom:1px solid var(--sh-line,#2a2f3a);
+  font-variant-numeric:tabular-nums}
+.sh-acct-periods thead th{font-size:10px;letter-spacing:.06em;
+  text-transform:uppercase;opacity:.62;font-weight:500}
+.sh-acct-periods tbody th{text-align:left;font-weight:600}
+
+.sh-acct-foot{font-size:11px;opacity:.68;line-height:1.55;padding:10px 2px 0}

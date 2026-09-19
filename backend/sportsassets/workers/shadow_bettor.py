@@ -51,6 +51,7 @@ from .. import shadow_bettor as bettor
 # decision module may not read the decision ledger at all.
 from .. import shadow_bettor_ops as ops
 from .. import shadow_bettor_policy as bpol
+from .. import shadow_bettor_sizing as szpol
 from .. import shadow_store as store
 from ..db import get_pool, heartbeat
 from ..venue_pace import pace
@@ -240,17 +241,42 @@ async def run() -> None:
     # on every later boot -- and REFUSED if the declaration ever changes
     # under this version name, which is the whole point of freezing.
     frozen = None
+    sized = None
     if ready["storeReady"]:
         frozen = await store.freeze_policy(pool, policy=bpol.frozen_policy())
         if frozen["status"] == "REFUSED":
             ready = dict(ready, storeReady=False,
                          problems=ready["problems"] + [frozen["why"]])
 
+        # THE $1,000 STANDARD, FROZEN BEFORE THE FIRST ELIGIBLE ENTRY.
+        #
+        # Owner directive 2026-09-19: "Before the first eligible BETTOR
+        # shadow trade: STANDARD_BETTOR_SHADOW_NOTIONAL_USD = 1000."
+        # There are zero eligible entries today, so this is the only
+        # moment at which the sizing rule cannot have been chosen to
+        # flatter a result that already exists.
+        #
+        # A REFUSED SIZING FREEZE DOES NOT STOP COLLECTION. Unlike the
+        # EV policy -- whose absence the decision table's foreign key
+        # makes fatal by design -- sizing is consulted only when an
+        # eligible entry exists, and none can exist while the frozen
+        # action set is [NO_TRADE]. "Do not delay prospective BETTOR
+        # collection while adding this reporting." It is recorded as a
+        # named problem and the tick goes on.
+        sized = await store.freeze_sizing_policy(
+            pool, policy=szpol.frozen_policy())
+        if sized["status"] == "REFUSED":
+            ready = dict(ready,
+                         problems=ready["problems"] + [sized["why"]])
+
     boot = {"lane": "BETTOR_EV_SHADOW", "primary": True,
             "storeReady": ready["storeReady"],
             "problems": ready["problems"],
             "policy": bettor.POLICY_VERSION,
             "policyFreeze": (frozen or {}).get("status", "NOT_ATTEMPTED"),
+            "sizingFreeze": (sized or {}).get("status", "NOT_ATTEMPTED"),
+            "sizingPolicy": szpol.SIZING_POLICY_VERSION,
+            "standardNotionalUsd": szpol.STANDARD_BETTOR_SHADOW_NOTIONAL_USD,
             "policySha": bpol.POLICY_SHA[:16],
             "policyCodeSha": bpol.POLICY_CODE_SHA[:16],
             "codeShaMatches": (frozen or {}).get("codeShaMatches"),

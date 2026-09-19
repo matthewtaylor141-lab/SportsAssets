@@ -1016,6 +1016,43 @@ async def command_shadow_equity(response: Response) -> dict:
         raise _shadow_unavailable(inc) from inc
 
 
+@app.get("/api/command/shadow/accounting",
+         dependencies=[Depends(require_command)])
+async def command_shadow_accounting(response: Response,
+                                    period: str = "ALL") -> dict:
+    """BETTOR EV SHADOW management accounting for ONE period.
+
+    "Allow management to view: TODAY / 7 DAYS / 30 DAYS / ALL TIME."
+    The boundary is computed in the database in UTC from event
+    timestamps, never from the browser's clock.
+    """
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.accounting(await get_pool(), period=period)
+    except CS.RetrievalIncomplete as inc:
+        if inc.reason == "SHADOW_ACCOUNTING_PERIOD_UNKNOWN":
+            raise HTTPException(status_code=400, detail={
+                "reason": inc.reason, "detail": inc.detail}) from inc
+        raise _shadow_unavailable(inc) from inc
+
+
+@app.get("/api/command/shadow/accounting/all",
+         dependencies=[Depends(require_command)])
+async def command_shadow_accounting_all(response: Response) -> dict:
+    """Every period side by side, for the management panel."""
+    from . import command_shadow as CS
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CS.accounting_all(await get_pool())
+    except CS.RetrievalIncomplete as inc:
+        raise _shadow_unavailable(inc) from inc
+
+
 @app.get("/api/command/shadow/comparison",
          dependencies=[Depends(require_command)])
 async def command_shadow_comparison(response: Response) -> dict:

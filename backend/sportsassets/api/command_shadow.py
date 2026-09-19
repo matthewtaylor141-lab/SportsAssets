@@ -33,11 +33,14 @@ back keyed by execution class, never pre-summed.
 
 from __future__ import annotations
 
+import functools
 import json
 import logging
 from datetime import datetime, timezone
 
 from .. import shadow as sh
+from .. import shadow_bettor_accounting as acct
+from .. import shadow_bettor_sizing as sizing
 from .. import shadow_lanes as lanes
 from .. import shadow_policy as pol
 from .command_snapshot import RetrievalIncomplete
@@ -1012,3 +1015,54 @@ async def health(pool) -> dict:
     }
     return {"environment": environment(), "generatedAt": now.isoformat(),
             "components": components}
+
+
+# ── the management accounting panel ──────────────────────────────────
+#
+# Owner directive 2026-09-19: "COMMAND must continuously answer: HOW
+# MUCH CAPITAL HAVE WE PLAYED THROUGH? HOW MUCH CAPITAL DID WE ACTUALLY
+# NEED? HOW MANY TIMES DID WE RECYCLE IT? HOW MUCH DID WE MAKE? WHAT
+# RETURN DID THAT CAPITAL PRODUCE?"
+#
+# A FAILED READ IS NOT A FLAT ZERO. The accounting module's SELECTs go
+# through the same _guard as every other panel, so an unreadable ledger
+# raises RetrievalIncomplete and COMMAND shows FEED UNAVAILABLE rather
+# than a tidy page of $0 -- which, on this screen more than any other,
+# would be a claim about performance.
+
+
+async def accounting(pool, *, period: str = "ALL") -> dict:
+    """The BETTOR EV SHADOW management accounting, for one period."""
+    if period not in acct.PERIODS:
+        raise RetrievalIncomplete(
+            "SHADOW_ACCOUNTING_PERIOD_UNKNOWN",
+            "period %r is not one of %s" % (period, ", ".join(acct.PERIODS)))
+    # _guard passes POSITIONAL arguments only, so the period is bound
+    # here rather than handed through as a keyword.
+    return await _guard(pool, "SHADOW_ACCOUNTING_UNREAD",
+                        functools.partial(acct.report, pool, period=period))
+
+
+async def accounting_all(pool) -> dict:
+    """TODAY / 7 DAYS / 30 DAYS / ALL TIME, side by side.
+
+    "Use event timestamps, not browser-local grouping." Every boundary
+    is computed in the database in UTC, so the same screen read from two
+    time zones reports the same numbers.
+    """
+    periods = {}
+    for p in acct.PERIODS:
+        periods[p] = await _guard(
+            pool, "SHADOW_ACCOUNTING_UNREAD",
+            functools.partial(acct.report, pool, period=p))
+    head = periods["ALL"]
+    return {
+        "environment": environment(),
+        "lane": acct.LANE,
+        "cohort": sizing.COHORT,
+        "sizingPolicyVersion": sizing.SIZING_POLICY_VERSION,
+        "standardNotionalUsd": sizing.STANDARD_BETTOR_SHADOW_NOTIONAL_USD,
+        "periods": periods,
+        # EVERY PANEL STAYS VISIBLY SHADOW.
+        "disclosure": head["disclosure"],
+    }

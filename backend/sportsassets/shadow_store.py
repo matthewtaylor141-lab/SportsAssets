@@ -37,6 +37,7 @@ from datetime import datetime, timezone
 
 from . import shadow as sh
 from . import shadow_lanes as lanes
+from . import shadow_bettor_sizing as szpol
 from . import shadow_policy as pol
 from .db import get_pool
 
@@ -345,6 +346,77 @@ async def freeze_policy(pool=None, policy: dict | None = None) -> dict:
             "policySha": p["policySha"],
             "policyCodeSha": p["policyCodeSha"],
             "codeShaMatches": True}
+
+
+async def freeze_sizing_policy(pool=None, policy: dict | None = None) -> dict:
+    """Freeze the $1,000 standard, once, before the first eligible entry.
+
+    THE SAME THREE OUTCOMES AS freeze_policy, for the same reason. A
+    sizing rule that could be edited after results existed would let the
+    denominator of every return be chosen to flatter the numerator, and
+    "Do not choose starting capital retrospectively to flatter returns"
+    is the same instinct one table over.
+
+    SEPARATE FROM THE EV POLICY ON PURPOSE. BETTOR_EV_SHADOW_V1 decides
+    WHETHER to act and its frozen declaration says sizing is
+    NOT_APPLICABLE -- still true, because V1's action set is exactly
+    [NO_TRADE]. This decides HOW MUCH once something is already
+    eligible. Migration 074's header carries the full reasoning,
+    including why editing the frozen EV declaration would be refused by
+    the database rather than merely unwise.
+    """
+    pool = pool or await get_pool()
+    p = policy or szpol.frozen_policy()
+
+    if await pool.fetchval(
+            "SELECT to_regclass('public.bettor_sizing_policies')") is None:
+        return {"status": "STORE_NOT_READY",
+                "sizingPolicyVersion": p["sizingPolicyVersion"],
+                "why": "migration 074 has not been applied"}
+
+    existing = await pool.fetchrow(
+        """
+        SELECT sizing_policy_version, policy_sha, standard_notional_usd,
+               frozen_at
+          FROM bettor_sizing_policies
+         WHERE sizing_policy_version = $1
+        """, p["sizingPolicyVersion"])
+    if existing is not None:
+        if existing["policy_sha"] != p["policySha"]:
+            return {
+                "status": "REFUSED",
+                "sizingPolicyVersion": p["sizingPolicyVersion"],
+                "why": ("%s is already frozen with a different sizing "
+                        "declaration. Entries recorded under it were sized "
+                        "by the FROZEN rule. Bump the version."
+                        % p["sizingPolicyVersion"]),
+                "frozenSha": existing["policy_sha"],
+                "declaredSha": p["policySha"],
+            }
+        return {
+            "status": "ALREADY_FROZEN",
+            "sizingPolicyVersion": p["sizingPolicyVersion"],
+            "policySha": existing["policy_sha"],
+            "standardNotionalUsd": float(existing["standard_notional_usd"]),
+            "frozenAt": existing["frozen_at"],
+        }
+
+    await pool.execute(
+        """
+        INSERT INTO bettor_sizing_policies (
+            sizing_policy_version, cohort, lane, standard_notional_usd,
+            policy_sha, declaration)
+        VALUES ($1,$2,$3,$4,$5,$6::jsonb)
+        ON CONFLICT DO NOTHING
+        """,
+        p["sizingPolicyVersion"], p["cohort"], p["lane"],
+        p["standardNotionalUsd"], p["policySha"],
+        json.dumps(p["declaration"], default=str))
+
+    return {"status": "FROZEN",
+            "sizingPolicyVersion": p["sizingPolicyVersion"],
+            "policySha": p["policySha"],
+            "standardNotionalUsd": float(p["standardNotionalUsd"])}
 
 
 # ── RN1 observations ─────────────────────────────────────────────────

@@ -46,6 +46,7 @@
     ['pairing', 'Pairing'],
     ['comparison', 'RN1 vs BETTOR'],
     ['audit', 'Trade audit'],
+    ['accounting', 'Capital & P&L'],
     ['performance', 'Performance']
   ];
 
@@ -118,6 +119,7 @@
     pairing: ['positions'],
     comparison: ['comparison', 'summary'],
     audit: ['decisions?limit=60'],
+    accounting: ['accounting/all'],
     performance: ['equity', 'summary']
   };
 
@@ -824,12 +826,202 @@
     }).join('');
   }
 
+  /* ── management accounting ─────────────────────────────────────────
+   * Owner directive 2026-09-19: "COMMAND must continuously answer: HOW
+   * MUCH CAPITAL HAVE WE PLAYED THROUGH? HOW MUCH CAPITAL DID WE
+   * ACTUALLY NEED? HOW MANY TIMES DID WE RECYCLE IT? HOW MUCH DID WE
+   * MAKE? WHAT RETURN DID THAT CAPITAL PRODUCE?"
+   *
+   * THE SENTINELS ARE RENDERED, NOT SWALLOWED. The server sends the
+   * literal strings NOT_APPLICABLE / NOT_IDENTIFIED / NOT_SELECTED
+   * where a figure does not exist, and this draws them as words. "Where
+   * denominator is zero: NOT_APPLICABLE, not 0%" is only true on the
+   * screen if the screen refuses to coerce the string to a number --
+   * which is why every formatter below tests for a number first and
+   * prints the server's own word otherwise, rather than defaulting. */
+
+  const word = v => esc(String(v || '').replace(/_/g, ' '));
+  const money = (v, d) => isNum(v) ? C.usd(v, d == null ? 2 : d) : word(v);
+  const moneySigned = v => isNum(v) ? C.signed(v, 2) : word(v);
+  const rate = v => isNum(v) ? (v * 100).toFixed(2) + '%' : word(v);
+  const turns = v => isNum(v) ? v.toFixed(2) + '×' : word(v);
+  const hold = v => {
+    if (!isNum(v)) return word(v);
+    if (v < 90) return v.toFixed(0) + ' s';
+    if (v < 5400) return (v / 60).toFixed(1) + ' min';
+    return (v / 3600).toFixed(1) + ' h';
+  };
+
+  // THE TOP-LINE PANEL, in the directive's own order.
+  const TOPLINE = [
+    ['NET SHADOW P&L', r => moneySigned(r.pnl.netShadowPnlUsd), 'all'],
+    ["TODAY'S P&L", (r, t) => moneySigned(t.pnl.netShadowPnlUsd), 'all'],
+    ['ENTRY NOTIONAL PLAYED', r => money(r.capitalPlayed.entryNotionalPlayedUsd)],
+    ['GROSS TRADING TURNOVER', r => money(r.capitalPlayed.grossTradingTurnoverUsd)],
+    ['CURRENT CAPITAL DEPLOYED', r => money(r.capitalRequired.currentCapitalDeployedUsd)],
+    ['PEAK CAPITAL DEPLOYED', r => money(r.capitalRequired.peakCapitalDeployedUsd)],
+    ['CAPITAL TURNS', r => turns(r.capitalRequired.capitalTurns)],
+    ['RETURN ON ENTRY NOTIONAL', r => rate(r.returns.returnOnEntryNotional)],
+    ['RETURN ON PEAK CAPITAL', r => rate(r.returns.returnOnPeakCapital)],
+    ['OPEN POSITIONS', r => String(r.statistics.positionsOpen)],
+    ['CLOSED POSITIONS', r => String(r.statistics.positionsClosed)],
+    ['WIN RATE', r => rate(r.statistics.winRate)],
+    ['MAX DRAWDOWN', r => money(r.equity.maxDrawdownUsd)],
+    ['AVG HOLD TIME', r => hold(r.holdTime.averageHoldSeconds)]
+  ];
+
+  const PERIOD_LABEL = { TODAY: 'Today', '7D': '7 days', '30D': '30 days',
+    ALL: 'All time' };
+
+  function acctTopline(all) {
+    const r = all.periods.ALL, today = all.periods.TODAY;
+    return `<div class="sh-acct-top">${TOPLINE.map(([label, fn]) =>
+      `<div><label>${esc(label)}</label><b>${fn(r, today)}</b></div>`).join('')}</div>`;
+  }
+
+  function acctPeriods(all) {
+    const rows = Object.keys(PERIOD_LABEL).map(p => {
+      const r = all.periods[p];
+      if (!r) return '';
+      return `<tr><th>${esc(PERIOD_LABEL[p])}</th>
+        <td>${money(r.capitalPlayed.entryNotionalPlayedUsd)}</td>
+        <td>${money(r.capitalPlayed.grossTradingTurnoverUsd)}</td>
+        <td>${moneySigned(r.pnl.netShadowPnlUsd)}</td>
+        <td>${rate(r.returns.returnOnEntryNotional)}</td>
+        <td>${money(r.capitalRequired.peakCapitalDeployedUsd)}</td>
+        <td>${r.statistics.shadowTradesEntered}</td>
+        <td>${rate(r.statistics.winRate)}</td>
+        <td>${money(r.equity.maxDrawdownUsd)}</td></tr>`;
+    }).join('');
+    return `<table class="sh-acct-periods">
+      <thead><tr><th>Period</th><th>Entry notional</th><th>Turnover</th>
+        <th>Net P&amp;L</th><th>Return</th><th>Capital required</th>
+        <th>Trades</th><th>Win rate</th><th>Drawdown</th></tr></thead>
+      <tbody>${rows}</tbody></table>`;
+  }
+
+  // THE WATERFALL, COMPONENT BY COMPONENT. The directive lists these
+  // separately because they answer different questions and mature on
+  // different clocks; one blended P&L number would hide all of it.
+  const WATERFALL = [
+    ['Settled', p => moneySigned(p.settledPnlUsd)],
+    ['Realized exit', p => moneySigned(p.realizedExitPnlUsd)],
+    ['Pairing', p => moneySigned(p.pairingPnlUsd)],
+    ['Cash-out', p => moneySigned(p.cashoutPnlUsd)],
+    ['Unrealized executable', p => moneySigned(p.unrealizedExecutablePnlUsd)],
+    ['Fees', p => money(p.feesUsd)],
+    ['Spread cost', p => money(p.spreadCostUsd)],
+    ['Slippage', p => money(p.slippageCostUsd)],
+    ['Adverse selection', p => moneySigned(p.adverseSelectionUsd)],
+    ['NET SHADOW P&L', p => moneySigned(p.netShadowPnlUsd)]
+  ];
+
+  const CAPITAL_ROWS = [
+    ['Current capital deployed', r => money(r.capitalRequired.currentCapitalDeployedUsd)],
+    ['Peak capital deployed', r => money(r.capitalRequired.peakCapitalDeployedUsd)],
+    ['Average capital deployed', r => money(r.capitalRequired.averageCapitalDeployedUsd)],
+    ['Capital hours', r => isNum(r.capitalRequired.capitalHours)
+      ? C.count(Math.round(r.capitalRequired.capitalHours)) + ' $·h'
+      : word(r.capitalRequired.capitalHours)],
+    ['Capital turns', r => turns(r.capitalRequired.capitalTurns)],
+    ['Turnover / average capital', r => turns(r.capitalRequired.turnoverOnAverageCapital)],
+    ['Net P&L per $1,000 capital-hour', r => money(r.capitalRequired.netPnlPer1000CapitalHour)]
+  ];
+
+  const RETURN_ROWS = [
+    ['Return on entry notional', r => rate(r.returns.returnOnEntryNotional)],
+    ['Return on peak capital', r => rate(r.returns.returnOnPeakCapital)],
+    ['Return on average capital', r => rate(r.returns.returnOnAverageCapital)],
+    ['Settled return on entry notional', r => rate(r.returns.settledReturnOnEntryNotional)],
+    ['Realized return on entry notional', r => rate(r.returns.realizedReturnOnEntryNotional)]
+  ];
+
+  const STAT_ROWS = [
+    ['Opportunities evaluated', r => C.count(r.statistics.opportunitiesEvaluated)],
+    ['NO_TRADE decisions', r => C.count(r.statistics.noTradeDecisions)],
+    ['Shadow trades entered', r => C.count(r.statistics.shadowTradesEntered)],
+    ['Positions open / closed / settled', r => r.statistics.positionsOpen + ' / '
+      + r.statistics.positionsClosed + ' / ' + r.statistics.positionsSettled],
+    ['Intended notional', r => money(r.capitalPlayed.intendedNotionalUsd)],
+    ['Entry notional played', r => money(r.capitalPlayed.entryNotionalPlayedUsd)],
+    ['Unfilled notional', r => money(r.capitalPlayed.unfilledNotionalUsd)],
+    ['Gross trading turnover', r => money(r.capitalPlayed.grossTradingTurnoverUsd)],
+    ['Winning / losing / breakeven', r => r.statistics.winningClosedPositions + ' / '
+      + r.statistics.losingClosedPositions + ' / ' + r.statistics.breakevenClosedPositions],
+    ['Win rate', r => rate(r.statistics.winRate)],
+    ['Average win', r => money(r.statistics.averageWinUsd)],
+    ['Average loss', r => money(r.statistics.averageLossUsd)],
+    ['Profit factor', r => isNum(r.statistics.profitFactor)
+      ? r.statistics.profitFactor.toFixed(2) : word(r.statistics.profitFactor)],
+    ['Average return per closed trade', r => rate(r.statistics.averageReturnPerClosedTrade)],
+    ['Median return per closed trade', r => rate(r.statistics.medianReturnPerClosedTrade)],
+    ['Max win', r => money(r.statistics.maxWinUsd)],
+    ['Max loss', r => money(r.statistics.maxLossUsd)],
+    ['Median hold time', r => hold(r.holdTime.medianHoldSeconds)],
+    ['Average hold time', r => hold(r.holdTime.averageHoldSeconds)],
+    ['P90 hold time', r => hold(r.holdTime.p90HoldSeconds)]
+  ];
+
+  const EQUITY_ROWS = [
+    ['Starting shadow capital', r => money(r.equity.startingShadowCapital)],
+    ['Cumulative shadow P&L', r => moneySigned(r.equity.currentShadowPnl)],
+    ['High-water mark', r => moneySigned(r.equity.highWaterMarkPnl)],
+    ['Current drawdown', r => money(r.equity.currentDrawdownUsd)],
+    ['Max drawdown', r => money(r.equity.maxDrawdownUsd)],
+    ['Max drawdown %', r => rate(r.equity.maxDrawdownPct)]
+  ];
+
+  const kvRows = (r, rows) => `<div class="sh-kv">${rows.map(
+    ([label, fn]) => `<div><label>${esc(label)}</label><b>${fn(r)}</b></div>`
+  ).join('')}</div>`;
+
+  function acctPanel(title, sub, body) {
+    return `<section class="sh-panel"><div class="sh-panel-head">
+      <h2>${esc(title)}</h2><span class="sh-sub">${esc(sub)}</span></div>
+      <div class="sh-panel-body">${body}</div></section>`;
+  }
+
+  function accountingTab() {
+    const all = state.data['accounting/all'];
+    const problem = feedProblem('accounting/all');
+    if (!all) return `${problem || ''}${emptyState('Reading the shadow ledger…', '')}`;
+    const r = all.periods.ALL;
+    const d = all.disclosure || {};
+    // THE COHORT AND THE SIZING RULE ARE PART OF THE HEADLINE. A
+    // performance figure whose sizing assumption is not on the same
+    // screen invites the assumption to be forgotten.
+    return `${disclosure(all.environment)}${problem || ''}
+      <div class="sh-acct-banner">
+        <span class="sh-chip amber">${word(d.lane || 'BETTOR EV SHADOW')}</span>
+        <span class="sh-chip grey">${word(d.capital || 'NO REAL CAPITAL')}</span>
+        <span class="sh-chip grey">${word(d.execution || '')}</span>
+        <span class="sh-acct-cohort">${esc(all.cohort)} ·
+          ${esc(all.sizingPolicyVersion)} · intended
+          ${C.usd(all.standardNotionalUsd, 0)} per eligible entry,
+          subject to actual executable liquidity</span>
+      </div>
+      ${acctTopline(all)}
+      ${acctPanel('By period', 'Cut on event timestamps in UTC, never on the browser clock.', acctPeriods(all))}
+      ${acctPanel('Capital required', 'What we would actually have had to fund, and how often it was recycled. Capital turns is recycling, not leverage.', kvRows(r, CAPITAL_ROWS))}
+      ${acctPanel('P&L waterfall', 'Every component separately. Unidentified passive fills and counterfactual markout are excluded from all of it.', kvRows(r, WATERFALL.map(([l, f]) => [l, x => f(x.pnl)])))}
+      ${acctPanel('Returns', 'Each against its own denominator. These are not interchangeable.', kvRows(r, RETURN_ROWS))}
+      ${acctPanel('Trade statistics', 'All time.', kvRows(r, STAT_ROWS))}
+      ${acctPanel('Equity and drawdown', 'Built from prospective economics. No hypothetical starting bankroll has been selected, so the percentage stays NOT APPLICABLE.', kvRows(r, EQUITY_ROWS))}
+      <div class="sh-acct-foot">
+        Excluded from economics:
+        ${Object.keys(r.excludedFromEconomics.counts).map(k =>
+          `${word(k)} ${r.excludedFromEconomics.counts[k]}`).join(' · ')}.
+        ${esc(r.excludedFromEconomics.why)}
+      </div>`;
+  }
+
   /* ── shell ─────────────────────────────────────────────────────── */
 
   const VIEW = {
     overview, decisions: decisionsTab, positions: positionsTab,
     execution: executionTab, pairing: pairingTab, comparison: comparisonTab,
-    audit: auditTab, performance: performanceTab
+    audit: auditTab, accounting: accountingTab,
+    performance: performanceTab
   };
 
   function shell() {

@@ -2243,3 +2243,125 @@ wrote down a cause before checking it (the `\echo` line was real; the
 `[skip render]` theory was not; "the fix is deployed and working" was
 premature). The deploy history and the failures table were both one
 read away in each case.
+
+## 85. Management accounting for the BETTOR shadow lane
+
+Owner directive, 2026-09-19: *"Management does not only want P&L. COMMAND
+must continuously answer: HOW MUCH CAPITAL HAVE WE PLAYED THROUGH? HOW
+MUCH CAPITAL DID WE ACTUALLY NEED? HOW MANY TIMES DID WE RECYCLE IT? HOW
+MUCH DID WE MAKE? WHAT RETURN DID THAT CAPITAL PRODUCE?"*
+
+**No second ledger.** `shadow_positions`, `shadow_position_events` and
+`shadow_executions` from migration 068 already ARE the prospective shadow
+ledger, and the directive says every figure must be *"sourced from the
+actual prospective shadow ledger."* A parallel accounting ledger would be
+a second version of the truth that could disagree with the first. So
+migration 074 adds the dollar facts those rows were missing — leg kind,
+intended / executed / unfilled notional, fees, spread, slippage, adverse
+selection — and everything else is derived by reading.
+
+**The three capital numbers are three numbers.** The directive is
+explicit that they must not be collapsed, and the schema is what keeps
+them apart:
+
+| | question | how it is computed |
+|---|---|---|
+| `ENTRY_NOTIONAL_PLAYED` | dollars put through on entries | sum over `ENTRY` legs |
+| `GROSS_TRADING_TURNOVER` | total trading activity generated | sum over every position-changing leg |
+| `CAPITAL_DEPLOYED` | what we would have had to fund | a step function over time |
+
+The first two are sums and differ only because `execution_leg_kind` tells
+them apart. The third is not a sum at all, which is the whole point of
+`CAPITAL_TURNS`.
+
+**Capital deployed is derived, never sampled.** A periodic sampler would
+miss a position that opened and closed between two samples and would
+report a peak that depends on the sampling rate. `bettor_capital_timeline`
+reads the position events that already exist, so `PEAK_CAPITAL_DEPLOYED`
+is the true maximum of the true step function. The measure is COST BASIS
+rather than mark: what management would have had to fund is what the
+shares cost, and marking the requirement to market would make "capital we
+needed" move with P&L.
+
+**The arithmetic was proved on rows before it was believed.** The empty
+state proves nothing about the maths, so a fixture built the directive's
+own worked example against a real PostgreSQL:
+
+```
+A  intended 1000, executed  650   open T-6h, closed T-4h, +65
+B  intended 1000, executed 1000   open T-3h, still open
+
+ENTRY_NOTIONAL_PLAYED  1650    650 + 1000
+PEAK_CAPITAL_DEPLOYED  1000    they never overlap
+CAPITAL_TURNS          1.65    the same dollars, twice
+CAPITAL_HOURS          4300    650x2h + 1000x3h
+```
+
+If peak had come out 1,650 the system would have been claiming we needed
+to fund both at once — which is exactly the question management is
+asking. It came out 1,000.
+
+**Two bugs that only rows could have found.** `MAX_LOSS` printed
+**+65.00** on the first fixture, because `min()` ranged over every closed
+trade and the only closed trade was a winner; with no losers there is no
+worst loss, and the answer is `NOT_IDENTIFIED`. And `CS.accounting` raised
+`TypeError` the first time it ran, because `_guard` takes positional
+arguments only and the period was being passed as a keyword. Neither was
+visible by reading the file; both now have tests.
+
+**The $1,000 standard is frozen beside the EV policy, not inside it.**
+Three reasons, and they agree:
+
+1. `BETTOR_EV_SHADOW_V1`'s frozen declaration says sizing is
+   `NOT_APPLICABLE`, and that is still TRUE — V1's action set is exactly
+   `[NO_TRADE]`, so no V1 decision can ever size anything.
+2. Editing that declaration would move `POLICY_SHA`, and
+   `shadow_decisions_policy_frozen` would then REFUSE every further BETTOR
+   decision — the exact failure that cost 99 of them (section 84).
+3. *"If sizing changes later, preserve the $1,000 cohort as a benchmark so
+   performance remains comparable over time."* A cohort that outlives
+   changes to the EV policy has to be versioned independently of it.
+
+So `BETTOR_SHADOW_SIZING_V1` lives in `bettor_sizing_policies` with its
+own hash, and `BETTOR_EV_SHADOW_V1`'s `POLICY_SHA` is untouched.
+
+**Intended is not executed.** `size()` is the only sizing arithmetic in
+the system, and the rule is a `min()`: the executable book caps the
+intended $1,000 and never raises it. A book nobody read is neither $0 nor
+$1,000 — it is `EXECUTABLE_LIQUIDITY_NOT_IDENTIFIED`, because an entry may
+not be sized against evidence that does not exist. The database enforces
+the same thing three ways: executed ≤ intended, intended = executed +
+unfilled, and no negative notional.
+
+**What is not counted, and why.** `PASSIVE_QUEUE_MODEL_ESTIMATE` is an
+unidentified passive fill — a queue model's opinion about whether we would
+have been filled is not a fill. `PASSIVE_COUNTERFACTUAL_MARKOUT` is
+counterfactual markout. Both stay in the ledger for research and are
+excluded from every dollar on the screen; the panel prints how many it
+left out rather than dropping them silently. Note that shadow-economic is
+a different question from `sh.REALIZABLE_CLASSES`, which asks "would this
+have been real money" and is today exactly `{ACTUAL_FILL}` — a class the
+schema forbids from carrying any quantity while no real order exists.
+Conflating the two is how a shadow return starts reading as an investment
+return.
+
+**Zero is a claim.** A zero denominator yields `NOT_APPLICABLE`, never
+0%; a figure nobody established reads `NOT_IDENTIFIED`. The front end
+tests `isNum` first and falls through to the server's own word, so
+`NOT_APPLICABLE` can never be coerced into `NaN` or `0.00%` on the way to
+the screen. The only honest zeros are the ones the directive names: with
+no eligible entry yet, dollars played and P&L really are `$0`.
+
+**Today's state, unchanged by any of this.** Every post-freeze BETTOR
+decision is `NO_TRADE`, so the panel reads `$0` played, `$0` turnover,
+`$0` deployed, `$0` net, and `NOT_APPLICABLE` for every return. Nothing
+here makes BETTOR trade: the accounting module has no decision path, no
+threshold and no write, and sizing is consulted only once an entry is
+already eligible. *"The $1,000 assumption determines sizing. It does NOT
+determine whether BETTOR trades."*
+
+**Collection was not paused to build it.** A REFUSED sizing freeze is
+recorded as a named problem and the tick goes on — unlike the EV policy
+freeze, whose absence the decision table's foreign key makes fatal by
+design. *"Do not delay prospective BETTOR collection while adding this
+reporting."*
