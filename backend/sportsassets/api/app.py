@@ -1079,6 +1079,52 @@ async def command_shadow_health(response: Response) -> dict:
         raise _shadow_unavailable(inc) from inc
 
 
+# ── BETTOR_EXPERIMENTAL_SHADOW (2026-09-19 §13) ─────────────────────
+# A SEPARATE LANE WITH ITS OWN ENDPOINTS, and deliberately not folded
+# into /shadow/summary. The decision-grade lane's totals may not absorb
+# a research lane's, in either direction: an experiment's shadow P&L is
+# not evidence about BETTOR_EV_SHADOW, and BETTOR_EV_SHADOW's frozen
+# framework does not govern an experiment. Two lanes, two reads.
+#
+# The paths sit under /shadow/ only because COMMAND's transport is
+# pinned to that prefix; the payloads share no figure with it.
+
+
+@app.get("/api/command/shadow/experimental",
+         dependencies=[Depends(require_command)])
+async def command_experimental_summary(response: Response) -> dict:
+    from . import command_experimental as CX
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CX.summary(await get_pool())
+    except CX.RetrievalIncomplete as inc:
+        raise HTTPException(status_code=503, detail={
+            "reason": "EXPERIMENTAL_LEDGER_UNREAD",
+            "what": inc.what, "detail": inc.cause,
+            "note": ("the experimental ledger could not be read -- "
+                     "COMMAND shows unavailable, not zero"),
+        }) from inc
+
+
+@app.get("/api/command/shadow/experimental/tape",
+         dependencies=[Depends(require_command)])
+async def command_experimental_tape(response: Response,
+                                    limit: int = 100) -> dict:
+    from . import command_experimental as CX
+    from ..db import get_pool
+
+    response.headers["Cache-Control"] = "no-store"
+    try:
+        return await CX.tape(await get_pool(), limit=limit)
+    except CX.RetrievalIncomplete as inc:
+        raise HTTPException(status_code=503, detail={
+            "reason": "EXPERIMENTAL_LEDGER_UNREAD",
+            "what": inc.what, "detail": inc.cause,
+        }) from inc
+
+
 @app.get("/api/command/shadow/trades/{decision_id}",
          dependencies=[Depends(require_command)])
 async def command_shadow_trade(decision_id: str, response: Response) -> dict:

@@ -550,3 +550,14 @@
 .sh-acct-periods tbody th{text-align:left;font-weight:600}
 
 .sh-acct-foot{font-size:11px;opacity:.68;line-height:1.55;padding:10px 2px 0}
+
+/* ── EXPERIMENTAL SHADOW (§13) ──────────────────────────────────────
+   The note under a KPI on this panel carries what the figure does NOT
+   cover -- the unmarked positions, the sample size, the intended
+   notional the fill fell short of. It is small and it is always
+   there, because a headline number here without its qualifier is the
+   thing this lane exists not to produce. */
+.sh-kpi-note {
+  font: 500 10px/1.5 var(--sans, system-ui);
+  letter-spacing: .04em; color: var(--sh-muted); overflow-wrap: anywhere;
+}

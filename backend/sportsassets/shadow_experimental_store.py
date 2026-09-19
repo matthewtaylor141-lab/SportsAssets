@@ -75,9 +75,17 @@ REQUIRED_TABLES = ("bettor_eligible_populations", "bettor_experiments",
                    "bettor_experimental_positions",
                    "bettor_experimental_seals", "bettor_l2_requests",
                    "bettor_l2_evidence")
+# EVERY COLUMN A LATER MIGRATION ADDED THAT AN INSERT HERE NAMES. An
+# ALTER that has not run leaves a table that exists and a statement
+# that cannot, and the failure would otherwise surface as a tick error
+# per market rather than as one heartbeat naming the missing column.
 REQUIRED_COLUMNS = (("bettor_experimental_decisions", "l2_evidence_id"),
                     ("bettor_experimental_decisions", "latency_regime"),
-                    ("bettor_experimental_decisions", "walked_book_sha"))
+                    ("bettor_experimental_decisions", "walked_book_sha"),
+                    ("bettor_experimental_decisions", "why"),
+                    ("bettor_experimental_markouts", "target_at"),
+                    ("bettor_experimental_markouts", "observed_lag_ms"),
+                    ("bettor_experimental_markouts", "exitable_qty"))
 
 
 async def store_ready(pool) -> dict:
@@ -430,10 +438,10 @@ DECISION_INSERT = """
         execution_contract, execution_contract_sha, executed_notional_usd,
         unfilled_notional_usd, filled_qty, vwap, slippage, spread_cost,
         position_id, l2_evidence_id, latency_regime,
-        observed_arrival_latency_ms)
+        observed_arrival_latency_ms, why)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,
             $17::jsonb,$18,$19,$20,$21,$22,$23,$24::jsonb,$25,$26,$27,$28,
-            $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42)
+            $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43)
     ON CONFLICT (experimental_decision_id) DO NOTHING
     RETURNING experimental_decision_id
 """
@@ -492,7 +500,11 @@ async def record_decision(pool, sealed: dict, execution: dict) -> bool:
         ex.get("filledQty"), ex.get("vwap"), ex.get("slippage"),
         ex.get("spreadCost"), ex.get("positionId"),
         ex.get("l2EvidenceId"), ex.get("latencyRegime"),
-        ex.get("observedArrivalLatencyMs"))
+        ex.get("observedArrivalLatencyMs"),
+        # THE REASON, AS ITS OWN COLUMN. "Management should eventually
+        # see which blockers prevent the most trades" is a GROUP BY,
+        # and a reason inside a JSONB blob is not one.
+        ex.get("why") or sealed.get("why"))
     return row is not None
 
 

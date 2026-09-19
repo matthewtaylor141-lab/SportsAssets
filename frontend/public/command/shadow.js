@@ -47,7 +47,10 @@
     ['comparison', 'RN1 vs BETTOR'],
     ['audit', 'Trade audit'],
     ['accounting', 'Capital & P&L'],
-    ['performance', 'Performance']
+    ['performance', 'Performance'],
+    // §13's SEPARATE LANE. It is last, and it is labelled, because
+    // nothing on it is evidence about the decision-grade lane above.
+    ['experimental', 'Experimental shadow']
   ];
 
   const POLL_MS = 8000;
@@ -120,7 +123,8 @@
     comparison: ['comparison', 'summary'],
     audit: ['decisions?limit=60'],
     accounting: ['accounting/all'],
-    performance: ['equity', 'summary']
+    performance: ['equity', 'summary'],
+    experimental: ['experimental', 'experimental/tape?limit=60']
   };
 
   async function refresh() {
@@ -1053,13 +1057,200 @@
       </div>`;
   }
 
+  /* ── EXPERIMENTAL SHADOW (§13) ─────────────────────────────────────
+   * A LANE OF ITS OWN, and the label is part of the page rather than
+   * part of the operator's memory: EXPERIMENTAL / NO REAL CAPITAL /
+   * NOT VALIDATED PERFORMANCE renders above every figure here.
+   *
+   * Three things this panel will not do, each because the honest
+   * answer is the less flattering one:
+   *
+   *   AN UNMARKED POSITION IS NOT PRINTED AS ZERO. Its value has not
+   *   been measured, and under the GitHub bridge most short-horizon
+   *   markouts miss their tolerance -- so a screen that counted them
+   *   flat would turn a lane of unknowns into a lane of flat trades.
+   *   The unmarked count sits beside the P&L it is excluded from.
+   *
+   *   TWO LATENCY REGIMES ARE NEVER POOLED. One block per regime, no
+   *   total across them.
+   *
+   *   A TINY SAMPLE IS NOT RANKED. The leaderboard prints the sample
+   *   and says SAMPLE TOO SMALL rather than ordering on noise.
+   */
+
+  const usd = v => isNum(v) ? C.signed(v, 2) : NI;
+  const usdFlat = v => isNum(v) ? '$' + v.toFixed(2) : NI;
+
+  // The existing KPI cell, reused rather than a new class invented: a
+  // figure the system does not have renders as NOT IDENTIFIED in the
+  // dimmer `unknown` treatment, which is exactly the distinction this
+  // panel most needs to keep.
+  function xpTile(label, value, note) {
+    const unknown = value === NI;
+    return `<div class="sh-kpi ${unknown ? 'unknown' : ''}">
+      <label>${esc(label)}</label><strong>${value}</strong>
+      ${note ? `<span class="sh-kpi-note">${note}</span>` : ''}</div>`;
+  }
+
+  function xpRegime(r) {
+    const marked = isNum(r.markedPositions) ? r.markedPositions : 0;
+    const unmarked = isNum(r.unmarkedPositions) ? r.unmarkedPositions : 0;
+    return `<section class="sh-panel"><div class="sh-panel-head">
+        <h2>${esc(String(r.latencyRegime || NI).replace(/_/g, ' '))}</h2>
+        <span class="sh-sub">Figures are for this execution regime only and are
+          never pooled with another's.</span></div>
+      <div class="sh-kpis">
+        ${xpTile('Net shadow P&L', usd(r.netShadowPnlUsd),
+          marked ? `marked on ${marked} position${marked === 1 ? '' : 's'}`
+                 : 'no position has a measured mark yet')}
+        ${xpTile('Today P&L', usd(r.todayPnlUsd))}
+        ${xpTile('Entry notional played', usdFlat(r.entryNotionalPlayedUsd),
+          `of ${usdFlat(r.intendedNotionalUsd)} intended`)}
+        ${xpTile('Unfilled notional', usdFlat(r.unfilledNotionalUsd),
+          'the book did not have it')}
+        ${xpTile('Return on entry notional', pctv(r.returnOnEntryNotional, 3))}
+        ${xpTile('Trades', zeroOk(r.trades),
+          `${zeroOk(r.decisions)} decisions`)}
+        ${xpTile('Win rate', pctv(r.winRate),
+          r.sufficientSample ? `n = ${zeroOk(r.winRateSample)}`
+            : `n = ${zeroOk(r.winRateSample)} — SAMPLE TOO SMALL TO RANK`)}
+        ${xpTile('Unmarked positions', zeroOk(unmarked),
+          'excluded from every figure above — not counted flat')}
+      </div></section>`;
+  }
+
+  function xpLeaderboard(rows) {
+    if (!rows || !rows.length)
+      return emptyState('No experiment has traded yet',
+        'A row appears when an ARMED experiment seals a decision and its '
+        + 'arrival book is observed. Until then this is empty — it is not '
+        + 'a leaderboard of zeros.');
+    return `<div class="sh-scroll"><table class="sh-table">
+      <thead><tr><th>Experiment</th><th>Regime</th><th>Role</th>
+      <th>Trades</th><th>No-trades</th><th>Entry played</th>
+      <th>Net P&L</th><th>Return</th><th>Marked</th><th>Rankable</th>
+      </tr></thead><tbody>${rows.map(r => `<tr>
+        <td class="mono">${str(r.experimentId)}</td>
+        <td>${esc(String(r.latencyRegime || NI).replace(/_/g, ' '))}</td>
+        <td>${r.isControlFor ? 'CONTROL for ' + esc(r.isControlFor)
+          : 'CANDIDATE'}</td>
+        <td>${zeroOk(r.trades)}</td><td>${zeroOk(r.noTrades)}</td>
+        <td>${usdFlat(r.entryNotionalPlayedUsd)}</td>
+        <td>${usd(r.netShadowPnlUsd)}</td>
+        <td>${pctv(r.returnOnEntryNotional, 3)}</td>
+        <td>${zeroOk(r.markedPositions)}</td>
+        <td>${r.rankable ? 'YES' : 'SAMPLE TOO SMALL'}</td></tr>`).join('')}
+      </tbody></table></div>`;
+  }
+
+  function xpCoverage(rows) {
+    if (!rows || !rows.length) return '';
+    return `<div class="sh-scroll"><table class="sh-table">
+      <thead><tr><th>Horizon</th><th>Status</th><th>n</th>
+      <th>Median lag</th><th>Tolerance</th></tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td>${str(r.horizon)}</td>
+        <td>${esc(String(r.status || NI).replace(/_/g, ' '))}</td>
+        <td>${zeroOk(r.n)}</td><td>${ms(r.medianLagMs)}</td>
+        <td>${ms(r.toleranceMs)}</td></tr>`).join('')}</tbody></table></div>`;
+  }
+
+  function xpTape(rows) {
+    if (!rows || !rows.length)
+      return emptyState('The tape is empty',
+        'Every sealed experimental decision appears here, whether or not it '
+        + 'could be executed.');
+    return `<div class="sh-scroll"><table class="sh-table">
+      <thead><tr><th>Decided</th><th>Experiment</th><th>Market</th>
+      <th>Action</th><th>Execution</th><th>Intended</th><th>Executed</th>
+      <th>Unfilled</th><th>Qty</th><th>VWAP</th><th>Arrival latency</th>
+      <th>Binding</th></tr></thead>
+      <tbody>${rows.map(r => `<tr>
+        <td>${stamp(r.decisionTimestamp)}</td>
+        <td class="mono">${str(r.experimentId)}</td>
+        <td class="mono">${str(r.marketId)}</td>
+        <td><span class="sh-tag bettor">${esc(String(r.action || NI).replace(/_/g, ' '))}</span></td>
+        <td>${esc(String(r.executionStatus || NI).replace(/_/g, ' '))}</td>
+        <td>${usdFlat(r.intendedNotionalUsd)}</td>
+        <td>${usdFlat(r.executedNotionalUsd)}</td>
+        <td>${usdFlat(r.unfilledNotionalUsd)}</td>
+        <td>${qty(r.filledQty)}</td><td>${px(r.vwap)}</td>
+        <td>${ms(r.observedArrivalLatencyMs)}</td>
+        <td>${esc(String(r.identityBindingStatus || NI).replace(/_/g, ' '))}</td>
+      </tr>`).join('')}</tbody></table></div>`;
+  }
+
+  function experimentalTab() {
+    const s = state.data['experimental'];
+    const t = state.data['experimental/tape?limit=60'];
+    const problem = feedProblem('experimental');
+    const env = s && s.environment;
+    const reg = s && s.registry;
+    return `${disclosure(env)}
+      ${problem || ''}
+      ${env ? panelNote('SEPARATE LANE', esc(env.separateLaneNote), 'amber')
+            : ''}
+      ${env ? panelNote('P&L BASIS', esc(env.pnlBasis)) : ''}
+      ${env ? panelNote('LATENCY REGIME', esc(env.regimeNote)) : ''}
+      ${reg ? `<section class="sh-panel"><div class="sh-panel-head">
+          <h2>The frozen registry</h2>
+          <span class="sh-sub">Declared before the first outcome was known.
+            A rule edited under a live experiment shows here as a hash
+            mismatch, not as a quietly different history.</span></div>
+        <div class="sh-panel-body">
+          <p>ARMED: ${(reg.armed || []).map(esc).join(', ') || 'NONE'}</p>
+          <p>Hashes verified: <b>${reg.hashesVerified ? 'YES' : 'NO'}</b>${
+            (reg.mismatched || []).length
+              ? ' — mismatched: ' + reg.mismatched.map(esc).join(', ') : ''}</p>
+          ${(reg.awaitingFeature || []).length ? `<p>Awaiting a feature:</p>
+            <ul>${reg.awaitingFeature.map(a =>
+              `<li><b>${esc(a.experimentId)}</b> needs
+               ${(a.requiredFeatures || []).map(esc).join(', ')} —
+               ${esc(a.why || '')}</li>`).join('')}</ul>` : ''}
+        </div></section>` : ''}
+      ${(s && s.regimes || []).map(xpRegime).join('')
+        || (problem ? '' : emptyState('No experimental decision yet',
+            'The lane seals a decision when an eligible, YES-bound market '
+            + 'has enough captured samples. Nothing here is a zero.'))}
+      <section class="sh-panel"><div class="sh-panel-head">
+        <h2>Leaderboard</h2>
+        <span class="sh-sub">Printed, never promoted. Promotion to the
+          decision-grade lane is governed by the existing frozen framework,
+          which this lane neither reads nor calls.</span></div>
+        ${xpLeaderboard(s && s.leaderboard)}</section>
+      ${(s && s.markoutCoverage || []).length ? `<section class="sh-panel">
+        <div class="sh-panel-head"><h2>Markout coverage</h2>
+        <span class="sh-sub">A book outside its horizon's tolerance is NOT
+          that horizon's markout. The misses are a finding about this
+          latency regime, not a gap in the data.</span></div>
+        ${xpCoverage(s.markoutCoverage)}</section>` : ''}
+      ${(s && s.refusals || []).length ? `<section class="sh-panel">
+        <div class="sh-panel-head"><h2>Why no trade was made</h2>
+        <span class="sh-sub">The refusals are the dataset. An action is
+          never rewritten into NO_TRADE because it could not be executed.
+          </span></div>
+        <div class="sh-scroll"><table class="sh-table">
+          <thead><tr><th>Action</th><th>Execution</th><th>n</th><th>Why</th>
+          </tr></thead><tbody>${s.refusals.map(r => `<tr>
+            <td>${esc(String(r.action || NI).replace(/_/g, ' '))}</td>
+            <td>${esc(String(r.executionStatus || NI).replace(/_/g, ' '))}</td>
+            <td>${zeroOk(r.n)}</td><td>${str(r.why)}</td></tr>`).join('')}
+          </tbody></table></div></section>` : ''}
+      <section class="sh-panel"><div class="sh-panel-head">
+        <h2>Live tape</h2>
+        <span class="sh-sub">ACTION and EXECUTION are separate columns. A
+          BUY_NO that could not be executed reads as BUY_NO beside its
+          blocker.</span></div>
+        ${xpTape(t && t.decisions)}</section>`;
+  }
+
   /* ── shell ─────────────────────────────────────────────────────── */
 
   const VIEW = {
     overview, decisions: decisionsTab, positions: positionsTab,
     execution: executionTab, pairing: pairingTab, comparison: comparisonTab,
     audit: auditTab, accounting: accountingTab,
-    performance: performanceTab
+    performance: performanceTab, experimental: experimentalTab
   };
 
   function shell() {
