@@ -7,6 +7,7 @@
   <meta name="description" content="BettorToken Command — a read-only institutional workspace for portfolio, execution and research oversight.">
   <title>BettorToken Command | Institutional Workspace</title>
   <link rel="stylesheet" href="command.css">
+  <link rel="stylesheet" href="motion.css">
 </head>
 <body>
   <a class="skip-link" href="#pagebody">Skip to dashboard</a>
@@ -20,6 +21,10 @@
   <script src="unlock.js"></script>
   <script src="core.js"></script>
   <script src="report.js"></script>
+  <!-- Motion Edition 1.1. Presentation only: it reads BTCore and decorates
+       views. It loads BEFORE app.js because app.js looks for it, and AFTER
+       core.js because it uses BTCore.esc. It is not in the access path. -->
+  <script src="motion.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
