@@ -173,16 +173,17 @@ _DUE_SQL = """
 async def mids_due(horizon_s: int, *, limit=8, pool=None) -> list:
     """Observations whose horizon has come and gone unrecorded.
 
-    The upper bound is the horizon plus its tolerance: an observation
-    whose window has already closed is NOT read late and stamped with
-    the nominal horizon. It is simply left unrecorded, which is the
-    honest state -- a missing row says no read happened, and a late row
-    stamped 60s would say one did.
+    The upper bound is the horizon plus HORIZON_DUE_WINDOW_S. A late
+    read is still recorded with its ACTUAL lag and with
+    WITHIN_TOLERANCE false, so it is never mistaken for an on-time one
+    -- the wide window buys coverage, the tight tolerance keeps the
+    honesty. At a 30s window only 3.4% of observations ever got their
+    60s mid, because the window closed while the tick was busy.
     """
     pool = pool or await get_pool()
     rows = await pool.fetch(
         _DUE_SQL, str(int(horizon_s)),
-        str(int(horizon_s + sc.HORIZON_TOLERANCE_S)),
+        str(int(horizon_s + sc.HORIZON_DUE_WINDOW_S)),
         int(horizon_s), int(limit))
     return [dict(r) for r in rows]
 

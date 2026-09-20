@@ -64,9 +64,16 @@ def test_the_plan_sha_moves_when_the_plan_moves():
     assert pre.plan_sha() == before
 
 
-def test_the_plan_records_that_it_predates_the_data():
+def test_the_plan_records_the_sampling_version_it_was_registered_against():
+    """Pinned as history, not read live. The earlier form asserted the
+    plan tracked the CURRENT rule sha, which is precisely the coupling
+    that broke the freeze when the sampling rule was amended."""
     assert pre.PLAN_REGISTERED_BEFORE_ANY_ROW_MATURED is True
-    assert pre.describe_plan()["ruleSha"] == sc.RULE_SHA
+    p = pre.describe_plan()
+    assert p["registeredAgainstRuleSha"] == pre.REGISTERED_AGAINST_RULE_SHA
+    assert p["registeredAgainstUniverseVersion"] == \
+        "BETTOR_UNSELECTED_STATE_V1"
+    assert sc.UNIVERSE_VERSION != p["registeredAgainstUniverseVersion"]
 
 
 def test_the_multiplicity_family_is_the_declared_test_list():
@@ -169,3 +176,70 @@ def test_the_plan_identifies_a_and_disclaims_b_c_and_d():
 def test_the_plan_cannot_be_given_a_forbidden_name():
     with pytest.raises(sc.ForbiddenName):
         sc.forbidden_name("UNCONDITIONAL_MAKER_ADVERSE_SELECTION")
+
+
+# ── the chronology, the amendments, and the sha disclosure ───────────
+
+def test_the_plan_predates_the_current_sampling_versions_first_row():
+    """The load-bearing ordering. A zero maturation count is an
+    assertion about a table; this is an assertion about the record."""
+    ev = {c["event"]: c["at"] for c in pre.CHRONOLOGY}
+    assert ev["PLAN_FROZEN"] < ev["CAPTURE_V2_DEPLOY_LIVE"]
+    assert ev["FIRST_OUTCOME_ACCESS"] == "NOT_YET_OCCURRED"
+
+
+def test_the_chronology_is_ordered_and_every_entry_has_a_reference():
+    stamped = [c for c in pre.CHRONOLOGY if c["at"] != "NOT_YET_OCCURRED"]
+    assert [c["at"] for c in stamped] == sorted(c["at"] for c in stamped)
+    for c in stamped:
+        assert c.get("ref"), c["event"]
+        assert c["at"].endswith("Z"), c["event"]
+
+
+def test_no_amendment_touched_a_hypothesis_or_a_gate():
+    """Amendments may change how data is collected. They may not change
+    what is being tested or when the test is allowed to run."""
+    for a in pre.AMENDMENTS:
+        assert a["hypothesesChanged"] is False, a["id"]
+        assert a["gatesChanged"] is False, a["id"]
+        assert a["outcomeDataSeenFirst"] is False, a["id"]
+        assert a["appliesToCohort"], a["id"]
+        assert a["why"], a["id"]
+
+
+def test_the_frozen_fields_are_named_and_still_hold_their_values():
+    """Asserted against the VALUES, independently of any hash -- which
+    is what makes the sha disclosure checkable rather than a promise."""
+    assert "H0" in pre.FROZEN_ACROSS_ALL_AMENDMENTS
+    assert "PRICE_BANDS" in pre.FROZEN_ACROSS_ALL_AMENDMENTS
+    assert len(pre.PRICE_BANDS) == 7
+    assert len(pre.TESTS) == 5
+    assert pre.MULTIPLICITY["alpha"] == "0.05"
+    assert pre.MIN_INDEPENDENT_EVENTS == 400
+    assert pre.MIN_MATURED_SETTLEMENTS == 1_000
+    assert pre.MIN_EVENTS_PER_BAND == 30
+
+
+def test_the_lost_original_sha_is_disclosed_not_quietly_replaced():
+    assert pre.ORIGINAL_PLAN_SHA == "5c81ca7b0accf747"
+    assert pre.PLAN_SHA[:16] != pre.ORIGINAL_PLAN_SHA
+    d = pre.PLAN_SHA_DISCLOSURE
+    assert "5c81ca7b0accf747" in d
+    assert "no hypothesis, band, test, correction or gate changed" in d
+
+
+def test_the_plan_no_longer_tracks_the_live_sampling_rule():
+    """The coupling that broke the freeze: an analysis plan must not
+    take its identity from a sampling version it is meant to span."""
+    import inspect
+    src = inspect.getsource(pre.describe_plan)
+    assert "sc.RULE_SHA" not in src
+    assert "sc.UNIVERSE_VERSION" not in src
+    assert pre.REGISTERED_AGAINST_RULE_SHA == "552cc26d247732f2"
+    before = pre.plan_sha()
+    saved = sc.RULE_SHA
+    try:
+        sc.RULE_SHA = "a-completely-different-rule"
+        assert pre.plan_sha() == before
+    finally:
+        sc.RULE_SHA = saved

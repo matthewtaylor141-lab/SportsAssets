@@ -544,10 +544,25 @@ def test_the_readable_subset_is_not_assumed_missing_at_random():
     when games are live, and live status is correlated with the
     dynamics being measured."""
     t = sc.READABILITY_IS_NOT_MISSING_AT_RANDOM
-    assert "sampling frame is unbiased" in t
-    assert "READABLE SUBSET may not be" in t
+    assert "refusals are VISIBLE" in t
+    assert "not established to be missing at random" in t
     assert "LIVE_STATUS" in t
-    assert "must carry this caveat" in t
+    # Similar rates across the categories looked at would be a failure
+    # to detect, not a proof of randomness.
+    assert "WOULD NOT PROVE RANDOMNESS" in t
+    assert "limitation stands" in t
+
+
+def test_the_frame_claim_is_narrow_and_the_unbiased_claim_is_withdrawn():
+    """"The sampling frame is unbiased" described the DESIGN. The rows
+    on disk are the design minus losses to rate limiting, budget shrink
+    and abandonment -- and the last two write nothing at all."""
+    f = sc.FRAME_CLAIM
+    assert "THE SCHEDULE is selection-independent" in f
+    assert "NOT yet established to be an unbiased sample" in f
+    assert "budget shrink" in f
+    src = open(sc.__file__, encoding="utf-8").read()
+    assert "TOO STRONG and is withdrawn" in src
 
 
 def test_every_row_carries_the_readability_caveat():

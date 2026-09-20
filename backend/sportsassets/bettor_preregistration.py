@@ -46,8 +46,156 @@ import json
 from . import bettor_state_capture as sc
 
 PLAN_VERSION = "BETTOR_UNSELECTED_PREREG_V1"
+
+# THE ORIGINAL VALUE, UNCHANGED, BECAUSE IT IS HASHED.
+#
+# Refining this to a precise timestamp moved PLAN_SHA from
+# 5c81ca7b0accf747 to a new value -- which is exactly the drift the
+# freeze exists to detect, caused by an edit that was only meant to add
+# precision. The lesson is the point of the mechanism: a frozen plan is
+# frozen against improvements too, or it is not frozen. The precise
+# timestamp lives beside it, unhashed.
 PLAN_REGISTERED_AT = "2026-09-20"
+PLAN_REGISTERED_AT_UTC = "2026-09-20T19:25:36Z"     # not hashed
+ORIGINAL_PLAN_SHA = "5c81ca7b0accf747"
+
+# THE SAMPLING VERSION THE PLAN WAS REGISTERED AGAINST. Pinned as a
+# literal so it records history rather than tracking the present.
+REGISTERED_AGAINST_UNIVERSE = "BETTOR_UNSELECTED_STATE_V1"
+REGISTERED_AGAINST_RULE_SHA = "552cc26d247732f2"
+
+# ── DISCLOSURE: THE ORIGINAL PLAN_SHA CANNOT BE REPRODUCED ──────────
+#
+# Stated plainly because a pre-registration that quietly loses its own
+# hash is worse than one that never had a hash.
+#
+# WHAT HAPPENED. describe_plan() hashed `sc.RULE_SHA` -- a LIVE lookup
+# of the capture's sampling rule. When the sampling rule was legitimately
+# amended (V1 -> V2, 19:31:45Z), the analysis plan's hash moved with it,
+# even though no hypothesis, band, test, correction or gate had changed.
+# The coupling was a design error in this module: an analysis plan's
+# identity must not depend on a sampling version it is meant to outlive
+# and to span.
+#
+# WHAT WAS VERIFIED BEFORE RE-FREEZING. The scientific content is
+# unchanged and this is checkable in git: `git diff 157969c..HEAD --
+# backend/sportsassets/bettor_preregistration.py` touches no line of
+# H0, H1, PRICE_BANDS, TESTS, MULTIPLICITY, MIN_INDEPENDENT_EVENTS,
+# MIN_MATURED_SETTLEMENTS or MIN_EVENTS_PER_BAND. Those are the fields
+# listed in FROZEN_ACROSS_ALL_AMENDMENTS, and test_bettor_
+# preregistration asserts their values independently of any hash.
+#
+# WHAT IS TRUE NOW. ORIGINAL_PLAN_SHA is the value the plan carried at
+# registration and cannot be recomputed from the current source.
+# PLAN_SHA is the re-frozen value over a decoupled plan. Both are
+# published. An analysis quoting this plan must quote PLAN_SHA and this
+# disclosure together.
+PLAN_SHA_DISCLOSURE = (
+    "ORIGINAL_PLAN_SHA 5c81ca7b0accf747 was computed over a plan that "
+    "included a LIVE lookup of the capture's rule sha. Amending the "
+    "sampling rule (V1->V2) moved it, though no hypothesis, band, "
+    "test, correction or gate changed. The plan is re-frozen with that "
+    "coupling removed; the scientific content is unchanged and the "
+    "diff is checkable in git at 157969c..HEAD")
 PLAN_REGISTERED_BEFORE_ANY_ROW_MATURED = True
+
+# ── CHRONOLOGY, IN UTC, FROM COMMIT AND DEPLOY RECORDS ───────────────
+#
+# Owner 2026-09-20 §5: "Zero recorded maturation counts alone do not
+# establish that outcomes were unavailable or unseen."
+#
+# Correct. A count of zero is an assertion about a table, not about
+# what anyone looked at. What actually supports the claim is the
+# ORDERING below, every entry of which has an independent record: a
+# commit timestamp, a Render deploy record, or a workflow run id.
+#
+# The load-bearing fact is that the plan (19:25:36Z) predates the first
+# row the current sampling version ever wrote (19:32:38Z), and that
+# nothing in the capture writes a settlement at all -- the settlement
+# appender has never had a resolved market to append, and no query run
+# in this session has selected a settlement or a settlement-minus-quote
+# term. The status and coverage queries are written without one by
+# construction, which is checkable in their source.
+CHRONOLOGY = (
+    {"at": "2026-09-20T19:21:10Z", "event": "CAPTURE_V1_COMMITTED",
+     "ref": "0492d54"},
+    {"at": "2026-09-20T19:23:17Z", "event": "CAPTURE_V1_DEPLOY_LIVE",
+     "ref": "render deploy 0492d54"},
+    {"at": "2026-09-20T19:23:35Z", "event": "FIRST_CAPTURED_ROW",
+     "ref": "bettor_state_observations.min(observed_at)"},
+    {"at": "2026-09-20T19:25:36Z", "event": "PLAN_FROZEN",
+     "ref": "157969c", "note": "PLAN_SHA 5c81ca7b0accf747"},
+    {"at": "2026-09-20T19:26:39Z", "event": "UNIVERSE_SIZE_MEASURED",
+     "ref": "58cd0f4 / research-sql run 167",
+     "note": "47,078 eligible legs; no outcome term in the query"},
+    {"at": "2026-09-20T19:31:45Z",
+     "event": "AMENDMENT_1_SAMPLING_V1_TO_V2", "ref": "c1b5983"},
+    {"at": "2026-09-20T19:32:38Z", "event": "CAPTURE_V2_DEPLOY_LIVE",
+     "ref": "render deploy c1b5983"},
+    {"at": "2026-09-20T19:46:39Z", "event": "AMENDMENT_2_BACKOFF",
+     "ref": "0a503ce"},
+    {"at": "2026-09-20T19:47:28Z", "event": "BACKOFF_DEPLOY_LIVE",
+     "ref": "render deploy 0a503ce"},
+    {"at": "2026-09-20T20:45:00Z",
+     "event": "AMENDMENT_3_FOLLOWUP_WINDOW", "ref": "this commit"},
+    {"at": "NOT_YET_OCCURRED", "event": "FIRST_OUTCOME_ACCESS",
+     "ref": None,
+     "note": ("no settlement row exists and no query run in this "
+              "session has selected a settlement or a "
+              "settlement-minus-quote term. The first such access will "
+              "be recorded here when it happens")},
+)
+
+# ── AMENDMENTS. The plan is not edited; amendments are appended ──────
+#
+# Each says what changed, why, and WHICH COHORT it applies to. None of
+# them touches H0, H1, the price bands, the test list, the multiplicity
+# correction or the gate -- those are frozen, and a change to any of
+# them would require a new PLAN_VERSION, leaving this version's result
+# standing.
+AMENDMENTS = (
+    {"id": "AMENDMENT_1_SAMPLING_V1_TO_V2",
+     "at": "2026-09-20T19:31:45Z",
+     "appliesToCohort": "BETTOR_UNSELECTED_STATE_V2 and later",
+     "leavesUntouched": "BETTOR_UNSELECTED_STATE_V1 rows, retained",
+     "what": ("rotation 277->787 slices, cap per leg -> per market, "
+              "bucket read across 5 ticks instead of one burst"),
+     "why": ("the V1 rotation could not cover the universe: sized for "
+             "~9,700 eligible legs against a measured 47,078, so the "
+             "cap bound on every pass and the stable ordering drew a "
+             "fixed panel. Every V1 row carries slice_truncated"),
+     "outcomeDataSeenFirst": False,
+     "hypothesesChanged": False, "gatesChanged": False},
+    {"id": "AMENDMENT_2_BACKOFF",
+     "at": "2026-09-20T19:46:39Z",
+     "appliesToCohort": "rows written after 19:47:28Z",
+     "leavesUntouched": "all earlier rows",
+     "what": ("read pacing 0.4s -> 1.0s base with multiplicative "
+              "backoff to 8s and a shrinking per-tick budget"),
+     "why": "33 of 53 reads refused with HTTP 429",
+     "outcomeDataSeenFirst": False,
+     "hypothesesChanged": False, "gatesChanged": False},
+    {"id": "AMENDMENT_3_FOLLOWUP_WINDOW",
+     "at": "2026-09-20T20:45:00Z",
+     "appliesToCohort": "follow-up mids read after this deploy",
+     "leavesUntouched": ("mid rows already written, and every T0 state "
+                         "row"),
+     "what": ("horizon due-window 30s -> 600s; a rate-limited tick now "
+              "halves its follow-up budget instead of zeroing it. "
+              "WITHIN_TOLERANCE is still judged at the tight 30s, so "
+              "what counts as on-time is unchanged"),
+     "why": ("measured follow-up coverage was 7 of 205 at the 60s "
+             "horizon (3.4%) and 14 of 194 at 300s (7.2%): the due "
+             "window closed while the tick was busy or refused, and "
+             "the observation was then skipped forever"),
+     "outcomeDataSeenFirst": False,
+     "hypothesesChanged": False, "gatesChanged": False},
+)
+
+FROZEN_ACROSS_ALL_AMENDMENTS = (
+    "H0", "H1", "PRICE_BANDS", "TESTS", "MULTIPLICITY",
+    "MIN_INDEPENDENT_EVENTS", "MIN_MATURED_SETTLEMENTS",
+    "MIN_EVENTS_PER_BAND")
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 NOT_YET_EVALUABLE = "NOT_YET_EVALUABLE_INSUFFICIENT_MATURED_DATA"
@@ -253,8 +401,9 @@ def describe_plan() -> dict:
         "registeredAt": PLAN_REGISTERED_AT,
         "registeredBeforeAnyRowMatured":
             PLAN_REGISTERED_BEFORE_ANY_ROW_MATURED,
-        "universeVersion": sc.UNIVERSE_VERSION,
-        "ruleSha": sc.RULE_SHA,
+        # PINNED LITERALS, NOT LIVE LOOKUPS. See PLAN_SHA_DISCLOSURE.
+        "registeredAgainstUniverseVersion": REGISTERED_AGAINST_UNIVERSE,
+        "registeredAgainstRuleSha": REGISTERED_AGAINST_RULE_SHA,
         "H0": H0,
         "H1": H1,
         "priceBands": [list(b) for b in PRICE_BANDS],

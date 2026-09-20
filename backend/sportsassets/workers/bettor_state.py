@@ -287,12 +287,19 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
 
     # ── pass 2: the declared horizons ────────────────────────────────
     #
-    # A TICK THAT IS BEING RATE LIMITED DOES NOT THEN GO AND READ MORE.
-    # Follow-ups are skipped entirely when the sampling pass hit the
-    # venue's limit; a missing follow-up leaves a visible gap, while
-    # pushing through a 429 makes the next sampling read fail too.
-    follow_budget = 0 if stats["rateLimited"] else min(
-        MAX_FOLLOWUP_READS, max(0, budget))
+    # FOLLOW-UPS ARE NOT OPTIONAL. Skipping them wholesale on any
+    # rate-limited tick cost almost all of them: 21 mid rows against
+    # 205 observations, 3.4% coverage at the 60s horizon. A T0 with no
+    # follow-up is a state observation with no outcome, which is half a
+    # dataset.
+    #
+    # So a refused tick now HALVES the follow-up budget instead of
+    # zeroing it, and the outcome side keeps a floor of one read. The
+    # sampling pass can be made up on the next rotation; a horizon that
+    # passes unobserved cannot be.
+    follow_budget = min(MAX_FOLLOWUP_READS, max(0, budget))
+    if stats["rateLimited"]:
+        follow_budget = max(1, follow_budget // 2)
     for horizon in sc.HORIZONS_OBSERVABLE_S:
         if follow_budget <= 0:
             break

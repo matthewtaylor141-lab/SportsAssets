@@ -282,7 +282,17 @@ HORIZON_NOT_OBSERVABLE_REASON = (
 
 # Tolerance around a horizon. A read that lands outside it is recorded
 # with its ACTUAL lag and never relabelled as the nominal horizon.
+#
+# WIDENED 2026-09-20 20:45Z after measurement. At 30s, only 7 of 205
+# observations past their 60s horizon ever got a 60s mid (3.4%) and 14
+# of 194 got a 300s one (7.2%): the due-window closed while the tick was
+# busy or rate-limited, and the observation was then skipped forever.
+# A wider window does not make a late read pretend to be an on-time one
+# -- ACTUAL_LAG_S and WITHIN_TOLERANCE still carry the truth, and
+# WITHIN_TOLERANCE is now judged against the TIGHT figure so the
+# analysis can still select on-time reads only.
 HORIZON_TOLERANCE_S = 30
+HORIZON_DUE_WINDOW_S = 600
 
 FROZEN_RULE = {
     "UNIVERSE_VERSION": UNIVERSE_VERSION,
@@ -524,46 +534,86 @@ NEVER_MANUFACTURED = (
     "MISSING_REASONS. It is never 0, never the other side's value, and "
     "never carried forward from a previous read")
 
-# ── THE READABILITY CAVEAT. Named, because it is not obvious ─────────
+# ── WHAT THE FRAME IS, STATED NARROWLY ──────────────────────────────
 #
-# The SAMPLING FRAME is unbiased: a market chosen by the rotation writes
-# a row whether or not its book could be read, so the set of rows is a
-# clean sample of the universe.
+# AN EARLIER VERSION OF THIS MODULE SAID "the sampling frame is
+# unbiased". THAT WAS TOO STRONG and is withdrawn.
 #
-# THE READABLE SUBSET MAY NOT BE. Measured 2026-09-20 19:37Z, 33 of 53
-# reads came back HTTP 429 -- rate limiting from the shared gateway this
-# process puts every venue read through. A 429 is caused by the
-# PROCESS's aggregate request rate, not by anything about the market, so
-# at first glance it is missing-completely-at-random.
+# What is supported: the SCHEDULE is selection-independent. Which
+# markets a cycle picks is a pure function of the venue identifier and
+# the clock, computed before any book is read.
 #
-# It is not, and the reason matters. The heaviest other consumer of that
-# gateway is the live mirror, which is busiest when games are live. So
-# the probability that OUR read is refused rises exactly when markets
-# are live -- and live/pregame is correlated with spread, volatility and
-# the future-value dynamics this dataset exists to measure. Conditioning
-# an analysis on BOOK_READABILITY_STATUS = READABLE therefore risks
-# under-representing live states, which is a selection on a variable
-# that is not independent of the estimand.
+# What is NOT supported: that the ROWS ON DISK are an unbiased sample of
+# the universe. Three things sit between the schedule and the rows, and
+# each one drops markets:
 #
-# WHAT IS DONE ABOUT IT. Three things, none of which is "assume it away":
-#   1. Every refused read is stored with its own reason, distinct from a
-#      venue that published no book, so the two are never pooled.
-#   2. The refusal rate is reportable by LIVE_STATUS and by hour, so the
-#      correlation can be MEASURED rather than argued about.
-#   3. The capture backs off hard on 429 -- it is the lowest-priority
-#      consumer of that gateway and yields to everything else.
+#   1. RATE LIMITING. Measured 20:31Z on V2: 66 of 187 attempts refused
+#      (35.3%), 94 readable (50.3%), 27 otherwise unreadable (14.4%).
+#      A refused attempt still writes a row, so it is visible.
+#   2. BUDGET SHRINK. A refused tick halves its own read budget, so the
+#      tail of that tick's share is never attempted. Those markets
+#      write NO ROW AT ALL and are invisible on disk -- they can only
+#      be inferred from the gap between what the rule would have picked
+#      and what landed.
+#   3. ABANDONMENT. A tick that hits MISS_ABANDON stops early, same
+#      effect.
 #
-# Until (2) has been measured, any estimate computed on readable rows
-# alone carries this caveat and must state it.
+# So the honest statement is: THE SCHEDULE IS SELECTION-INDEPENDENT;
+# THE REALISED SAMPLE IS THE SCHEDULE MINUS LOSSES THAT ARE NOT YET
+# CHARACTERISED. The rotating within-slice cursor spreads (3) across
+# passes so the same tail is not always dropped, but "spread out" is
+# not "absent", and none of this is established until coverage is
+# measured against the schedule rather than against itself.
+FRAME_CLAIM = (
+    "THE SCHEDULE is selection-independent: which markets a cycle picks "
+    "is a pure function of venue identifier and clock, computed before "
+    "any book is read. THE REALISED SAMPLE is that schedule minus reads "
+    "lost to rate limiting, budget shrink and tick abandonment. Losses "
+    "of the first kind write a row and are visible; losses of the "
+    "second and third kinds write nothing and are invisible on disk. "
+    "The realised sample is NOT yet established to be an unbiased "
+    "sample of the universe, and must not be described as one")
+
+# ── THE READABILITY CAVEAT, WITH ITS MECHANISM CORRECTED ────────────
+#
+# AN EARLIER VERSION SAID the refusals come from "the live mirror,
+# which is busiest when games are live". THE WORKER LOGS REFUTE THE
+# MECHANISM (2026-09-20 20:32Z), and mirror_live = false made it
+# suspect in the first place.
+#
+# What the logs actually show sharing gateway.polymarket.us:
+#   - dense data-api.polymarket.com /trades polling across many watched
+#     wallets, repeatedly, several per second;
+#   - polygon-mainnet chain reads;
+#   - api.polymarket.us /portfolio/positions, /orders/open,
+#     /portfolio/activities, /order/{id} reconciliation;
+#   - gateway.polymarket.us /book and /bbo -- ours and mirror_shadow's,
+#     both refused in the same second for the same market.
+#
+# AND mirror_live = false DOES NOT STOP READS. The log line "LIVE
+# refused: homerunhazard not funded (edge-not-demonstrated)" shows the
+# copy lane running its full evaluation -- reading books, classifying
+# exits, computing conviction -- and refusing only at the SUBMIT step.
+# The pause gates ORDER SUBMISSION, not market-data reads.
+#
+# The corrected mechanism: gateway load is driven by the copy lane's
+# EVALUATION AND RECONCILIATION traffic, which intensifies when watched
+# wallets trade. Those wallets trade during games. So the CONCLUSION --
+# refusal probability may rise when markets are live -- can still hold,
+# but by a different route than was claimed, and it remains a
+# hypothesis to be measured rather than a mechanism to be asserted.
 READABILITY_IS_NOT_MISSING_AT_RANDOM = (
-    "the sampling frame is unbiased -- a selected market writes a row "
-    "either way -- but the READABLE SUBSET may not be. Read refusals "
-    "come from the shared gateway's aggregate rate, whose heaviest "
-    "other consumer is busiest when games are live, so refusal "
-    "probability may rise with LIVE_STATUS, which is correlated with "
-    "the dynamics being measured. Any estimate computed on readable "
-    "rows alone must carry this caveat until the refusal rate has been "
-    "measured against LIVE_STATUS and hour of day")
+    "a refused read writes a row, so refusals are VISIBLE -- but the "
+    "READABLE SUBSET is still not established to be missing at random. "
+    "Refusals come from the shared gateway's aggregate rate, driven by "
+    "the copy lane's evaluation and reconciliation traffic, which "
+    "intensifies when watched wallets trade, which happens during "
+    "games. So refusal probability may rise with LIVE_STATUS, which is "
+    "correlated with the dynamics being measured. SIMILAR REFUSAL "
+    "RATES ACROSS OBSERVED CATEGORIES WOULD NOT PROVE RANDOMNESS -- "
+    "they would fail to detect a difference on the categories looked "
+    "at, which is weaker. The limitation stands on any readable-only "
+    "estimate regardless of what the rates show")
 
 LIVE = "LIVE"
 PREGAME = "PREGAME"
@@ -836,6 +886,9 @@ def mid_observation(observation_id_: str, *, horizon_s: int,
                 "STATUS": HORIZON_NOT_OBSERVABLE_REASON,
                 "isNotAFill": A_FUTURE_READ_IS_NOT_A_FILL}
     lag = (read_at - observed_at).total_seconds()
+    # WITHIN_TOLERANCE stays judged against the TIGHT tolerance even
+    # though the due window is wider. Widening the window buys coverage;
+    # it must not quietly widen what counts as on time.
     return {
         "outcomeVersion": OUTCOME_VERSION,
         "OBSERVATION_ID": observation_id_,
