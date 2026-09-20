@@ -153,3 +153,47 @@ def test_an_unidentified_state_decides_nothing_either_way():
 def test_one_table_serves_every_engine():
     assert "offered by one engine and refused by another" in \
         ap.describe()["oneTableNotOnePerEngine"]
+
+
+# ── §3: the canonical state object, under its contract names ─────────
+
+@pytest.mark.parametrize("rows,state", [
+    (YES_ROWS, ap.YES_RESIDUAL),
+    (NO_ROWS, ap.NO_RESIDUAL),
+    (PARTIAL_ROWS, ap.PARTIALLY_MATCHED_WITH_YES_RESIDUAL),
+    ([{"leg": "NO", "qty": "100", "price": "0.49"},
+      {"leg": "YES", "qty": "60", "price": "0.48"}],
+     ap.PARTIALLY_MATCHED_WITH_NO_RESIDUAL),
+    (FULL_ROWS, ap.FULLY_MATCHED_PAIR),
+])
+def test_every_non_flat_state_carries_every_field(rows, state):
+    """§3, proved by fixture. No production inventory is created."""
+    s = ap.inventory_state(_inv(rows))
+    assert s["state"] == state
+    for field in ap.STATE_FIELDS:
+        assert field in s, field
+
+
+def test_the_matched_and_residual_books_are_both_present():
+    """§7: matched inventory must never erase residual inventory."""
+    from decimal import Decimal
+    s = ap.inventory_state(_inv(PARTIAL_ROWS))
+    assert Decimal(s["MATCHED_QTY"]) == 60
+    assert Decimal(s["RESIDUAL_YES_QTY"]) == 40
+    assert Decimal(s["CAPITAL_IN_MATCHED_INVENTORY"]) > 0
+    assert Decimal(s["CAPITAL_IN_RESIDUAL_INVENTORY"]) > 0
+    assert Decimal(s["PAIR_LOCKED_PNL"]) > 0
+
+
+def test_a_flat_book_reports_zero_quantities_not_missing_ones():
+    s = ap.inventory_state(_inv(FLAT_ROWS))
+    assert s["state"] == ap.FLAT
+    assert s["YES_QTY"] == "0" and s["NO_QTY"] == "0"
+    # A leg with no quantity has no basis -- that is unidentified, not 0.
+    assert s["YES_AVG_BASIS"] == ap.NOT_IDENTIFIED
+
+
+def test_the_residual_basis_follows_the_leg_it_came_from():
+    s = ap.inventory_state(_inv(PARTIAL_ROWS))
+    assert s["RESIDUAL_YES_BASIS"] == s["YES_AVG_BASIS"]
+    assert s["RESIDUAL_NO_BASIS"] == ap.NOT_IDENTIFIED

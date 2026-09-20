@@ -103,6 +103,19 @@ OPEN_MAKER_QUOTES_NO_POSITION = "OPEN_MAKER_QUOTES_NO_POSITION"
 OPEN_MAKER_QUOTES_WITH_POSITION = "OPEN_MAKER_QUOTES_WITH_POSITION"
 STATE_NOT_IDENTIFIED = "STATE_NOT_IDENTIFIED"
 
+# The §3 field names every downstream engine reads. Declared so a
+# rename cannot happen silently in one consumer.
+STATE_FIELDS = (
+    "YES_QTY", "YES_AVG_BASIS", "NO_QTY", "NO_AVG_BASIS",
+    "MATCHED_QTY", "MATCHED_PAIR_BASIS",
+    "RESIDUAL_YES_QTY", "RESIDUAL_YES_BASIS",
+    "RESIDUAL_NO_QTY", "RESIDUAL_NO_BASIS",
+    "PAIR_LOCKED_PNL",
+    "CAPITAL_IN_MATCHED_INVENTORY", "CAPITAL_IN_RESIDUAL_INVENTORY",
+    "OPEN_PASSIVE_YES_QTY", "OPEN_PASSIVE_NO_QTY",
+    "COMPLEMENT_IDENTITY_STATUS", "PAIR_STATUS",
+)
+
 STATES = (FLAT, YES_RESIDUAL, NO_RESIDUAL, BOTH_LEGS_UNMATCHED,
           PARTIALLY_MATCHED_WITH_YES_RESIDUAL,
           PARTIALLY_MATCHED_WITH_NO_RESIDUAL, FULLY_MATCHED_PAIR,
@@ -189,12 +202,31 @@ def inventory_state(inventory: dict | None, *,
     zero = Decimal("0")
     flat_legs = (yq == zero and nq == zero)
 
+    # §3: THE CANONICAL STATE OBJECT, under the directive's own field
+    # names. Every engine downstream reads these, so the names are the
+    # contract -- not whatever bettor_inventory happens to call them
+    # internally. A term the inventory could not compute arrives here
+    # as NOT_IDENTIFIED rather than missing.
     out = {
-        "YES_QTY": str(yq), "NO_QTY": str(nq),
+        "YES_QTY": str(yq),
+        "YES_AVG_BASIS": inventory.get("YES_AVG_BASIS", NOT_IDENTIFIED),
+        "NO_QTY": str(nq),
+        "NO_AVG_BASIS": inventory.get("NO_AVG_BASIS", NOT_IDENTIFIED),
         "MATCHED_QTY": inventory.get("MATCHED_QTY", NOT_IDENTIFIED),
+        "MATCHED_PAIR_BASIS": inventory.get("MATCHED_PAIR_BASIS",
+                                            NOT_IDENTIFIED),
         "RESIDUAL_YES_QTY": inventory.get("RESIDUAL_YES_QTY",
                                           NOT_IDENTIFIED),
+        "RESIDUAL_YES_BASIS": inventory.get("RESIDUAL_YES_BASIS",
+                                            NOT_IDENTIFIED),
         "RESIDUAL_NO_QTY": inventory.get("RESIDUAL_NO_QTY", NOT_IDENTIFIED),
+        "RESIDUAL_NO_BASIS": inventory.get("RESIDUAL_NO_BASIS",
+                                           NOT_IDENTIFIED),
+        "PAIR_LOCKED_PNL": inventory.get("LOCKED_PNL", NOT_IDENTIFIED),
+        "CAPITAL_IN_MATCHED_INVENTORY": inventory.get("MATCHED_CAPITAL",
+                                                      NOT_IDENTIFIED),
+        "CAPITAL_IN_RESIDUAL_INVENTORY": inventory.get("RESIDUAL_CAPITAL",
+                                                       NOT_IDENTIFIED),
         "OPEN_PASSIVE_YES_QTY": str(pq_yes),
         "OPEN_PASSIVE_NO_QTY": str(pq_no),
         "COMPLEMENT_IDENTITY_STATUS": inventory.get("identityStatus",
