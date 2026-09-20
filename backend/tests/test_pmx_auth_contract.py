@@ -271,13 +271,37 @@ class TestTheWorkflowSignsTheSameThing:
         the unprefixed namespace and the PREPROD lane moved to
         PMX_PREPROD_*. The prefix is now the attestation, which replaced
         a separate PMX_ENVIRONMENT secret that had to be remembered.
+
+        REWRITTEN AGAIN 2026-09-20, and the earlier wording is kept
+        above because the reasoning still holds. A second production
+        reader now exists on purpose: pmx-l2-bridge.yml is the L2
+        bridge, and the directive of 2026-09-20 §2 says to keep the
+        existing GitHub credential working as the fallback path until
+        the worker's own credential has proven AUTHENTICATION ->
+        REFDATA -> BBO -> L2 ("No risky cutover"). So the count is no
+        longer the invariant.
+
+        WHAT IS STILL THE INVARIANT, and is the thing this test was
+        always really protecting: the two namespaces never meet. Each
+        production reader is named here explicitly, so a THIRD one
+        cannot appear without this test being edited by somebody who
+        had to say what it is for.
         """
         def readers(marker):
             return sorted(p.name for p in self.WF.parent.glob("*.yml")
                           if marker in p.read_text())
 
         assert readers("secrets.PMX_PREPROD_") == ["pmx-preprod.yml"]
-        assert readers("secrets.PMX_CLIENT_ID") == ["pmx-production.yml"]
+        assert readers("secrets.PMX_CLIENT_ID") == ["pmx-l2-bridge.yml",
+                                                    "pmx-production.yml"]
+
+        # NO WORKFLOW READS BOTH. A lane that could reach either
+        # namespace is a lane that could report preproduction activity
+        # as production performance.
+        both = [p.name for p in self.WF.parent.glob("*.yml")
+                if "secrets.PMX_PREPROD_" in p.read_text()
+                and "secrets.PMX_CLIENT_ID" in p.read_text()]
+        assert both == [], both
 
     def test_the_preprod_lane_reads_no_unprefixed_slot(self):
         src = self.WF.read_text()

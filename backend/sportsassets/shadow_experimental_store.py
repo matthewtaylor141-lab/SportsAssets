@@ -393,6 +393,57 @@ async def evidence_for(pool, symbol, *, after) -> dict | None:
     return book
 
 
+# ── §3/§5: the DIRECT worker's own institutional evidence ────────────
+
+REGIME_DIRECT = "DIRECT_INSTITUTIONAL_WORKER"
+REGIME_BRIDGE = "GITHUB_BRIDGE"
+
+
+def direct_evidence_id(symbol, received_at, sha) -> str:
+    raw = "|".join(["DIRECT", str(symbol), received_at.isoformat(), str(sha)])
+    return "l2dw_" + hashlib.sha256(raw.encode()).hexdigest()[:36]
+
+
+async def record_direct_evidence(pool, row: dict) -> bool:
+    """One in-memory book, written down as immutable evidence.
+
+    SAME TABLE, DIFFERENT REGIME. A book the worker holds in memory and
+    a book a CI runner fetched minutes late are both OBSERVED_PRODUCTION
+    and belong in one ledger -- but they are different execution
+    environments, so `latency_regime` separates them and the schema's
+    CHECK refuses anything that is neither.
+
+    `bridge_latency_ms` is deliberately NULL here. There is no bridge
+    round trip to measure, and writing a zero would claim one was
+    measured at zero.
+    """
+    received = row["BETTOR_RECEIVED_TIMESTAMP"]
+    eid = direct_evidence_id(row["INSTRUMENT_ID"], received, row["BOOK_SHA"])
+    out = await pool.fetchrow(
+        """
+        INSERT INTO bettor_l2_evidence (
+            l2_evidence_id, request_id, instrument_id, source_timestamp,
+            received_timestamp, l2_book_sha, bids, offers, price_scale,
+            quantity_scale, evidence_class, venue_request_ms,
+            bridge_latency_ms, latency_regime, venue_state,
+            instrument_record, evidence_environment, market_data_lag_ms,
+            freshness_status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7::jsonb,$8::jsonb,$9,$10,
+                'OBSERVED_PRODUCTION',$11,NULL,$12,$13,$14::jsonb,$15,$16,$17)
+        ON CONFLICT (l2_evidence_id) DO NOTHING
+        RETURNING l2_evidence_id
+        """,
+        eid, row.get("requestId"), row["INSTRUMENT_ID"],
+        row.get("SOURCE_TIMESTAMP"), received, row["BOOK_SHA"],
+        _j(row.get("BIDS") or []), _j(row.get("OFFERS") or []),
+        row.get("priceScale"), row.get("qtyScale"),
+        row.get("venueRequestMs"), REGIME_DIRECT, row.get("venueState"),
+        _j((row.get("instrumentRecord") or None)),
+        row.get("evidenceEnvironment", REGIME_DIRECT),
+        row.get("MARKET_DATA_LAG_MS"), row.get("FRESHNESS_STATUS"))
+    return out is not None
+
+
 # ── the request the bridge drains ────────────────────────────────────
 
 
@@ -567,11 +618,20 @@ DECISION_INSERT = """
         execution_contract, execution_contract_sha, executed_notional_usd,
         unfilled_notional_usd, filled_qty, vwap, slippage, spread_cost,
         position_id, l2_evidence_id, latency_regime,
-        observed_arrival_latency_ms, why, experimental_observation_id)
+        observed_arrival_latency_ms, why, experimental_observation_id,
+        venue_source_timestamp, bettor_received_timestamp,
+        features_sealed_timestamp, model_start_timestamp,
+        model_end_timestamp, modeled_send_timestamp,
+        modeled_arrival_timestamp, persisted_timestamp,
+        market_data_lag_ms, feature_compute_ms, model_compute_ms,
+        source_to_decision_ms, modeled_execution_latency_ms,
+        source_to_modeled_arrival_ms, book_freshness_status, book_age_ms,
+        execution_latency_basis, evidence_environment)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15::jsonb,$16,
             $17::jsonb,$18,$19,$20,$21,$22,$23,$24::jsonb,$25,$26,$27,$28,
             $29,$30,$31,$32,$33,$34,$35,$36,$37,$38,$39,$40,$41,$42,$43,
-            $44)
+            $44,$45,$46,$47,$48,$49,$50,$51,$52,$53,$54,$55,$56,$57,$58,
+            $59,$60,$61,$62)
     ON CONFLICT (experimental_decision_id) DO NOTHING
     RETURNING experimental_decision_id
 """
@@ -598,14 +658,27 @@ def _ts(value):
         return None
 
 
-async def record_decision(pool, sealed: dict, execution: dict) -> bool:
+async def record_decision(pool, sealed: dict, execution: dict,
+                          latency: dict | None = None) -> bool:
     """Append the sealed decision together with the arrival that scored it.
 
     NOTHING IS UPDATED. If the row is already there this is a no-op and
     returns False -- a re-run of a tick cannot rewrite a trade, which
     is the whole reason the id is derived from the seal's own hash.
+
+    `latency` IS §8, AND IT IS OPTIONAL BY DESIGN. The bridge path has
+    no in-memory book and therefore no venue source instant or market
+    data lag to state; it writes NULLs rather than zeroes, because a
+    zero in a lag column is a measurement and NULL is the absence of
+    one. The direct path supplies every instant it actually observed.
     """
     ex = execution or {}
+    lat = latency or {}
+    # THE PERSIST INSTANT IS STAMPED HERE, where the persist happens.
+    # Taking it from the caller would let a value computed before an
+    # await describe a write that landed later.
+    persisted = _ts(lat.get("persistedTimestamp")) or datetime.now(
+        tz=timezone.utc)
     row = await pool.fetchrow(
         DECISION_INSERT,
         ex["experimentalDecisionId"], sealed["experimentId"],
@@ -635,7 +708,28 @@ async def record_decision(pool, sealed: dict, execution: dict) -> bool:
         # see which blockers prevent the most trades" is a GROUP BY,
         # and a reason inside a JSONB blob is not one.
         ex.get("why") or sealed.get("why"),
-        sealed.get("experimentalObservationId"))
+        sealed.get("experimentalObservationId"),
+        # ── §8: the instants, each where it happened ──────────────────
+        # VENUE_SOURCE_TIMESTAMP stays TEXT exactly as the venue sent
+        # it. Parsing it into a timestamptz here would silently invent
+        # a timezone for a string whose format the venue owns.
+        lat.get("venueSourceTimestamp"),
+        _ts(lat.get("bettorReceivedTimestamp")),
+        _ts(lat.get("featuresSealedTimestamp")),
+        _ts(lat.get("modelStartTimestamp")),
+        _ts(lat.get("modelEndTimestamp")),
+        _ts(lat.get("modeledSendTimestamp")),
+        _ts(lat.get("modeledArrivalTimestamp")),
+        persisted,
+        # ── the intervals, each derived from two named instants ───────
+        lat.get("marketDataLagMs"), lat.get("featureComputeMs"),
+        lat.get("modelComputeMs"), lat.get("sourceToDecisionMs"),
+        lat.get("modeledExecutionLatencyMs"),
+        lat.get("sourceToModeledArrivalMs"),
+        lat.get("bookFreshnessStatus"), lat.get("bookAgeMs"),
+        # §9: the basis is a word on the row. It is never written as
+        # an observed execution latency, because none was observed.
+        lat.get("executionLatencyBasis"), lat.get("evidenceEnvironment"))
     return row is not None
 
 

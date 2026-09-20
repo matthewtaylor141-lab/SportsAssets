@@ -24,10 +24,11 @@ from collections.abc import Awaitable, Callable
 from .. import procmem
 from ..db import heartbeat
 from . import (analytics, chain_listener, copy_sweep, dispatcher, edge_marks,
-               metadata_refresher, mirror_live, mirror_shadow, poller, premap,
-               price_path, reconciler, retention, rn1_observability, roster,
-               roster_auto, shadow_bettor, shadow_experimental, shadow_rn1,
-               underdog, whale_exits)
+               institutional_md, metadata_refresher, mirror_live,
+               mirror_shadow, poller, premap, price_path, reconciler,
+               retention, rn1_observability, roster, roster_auto,
+               shadow_bettor, shadow_experimental, shadow_rn1, underdog,
+               whale_exits)
 
 # THE ARENA CAP, AT IMPORT (2026-09-05). sportsassets-workers was
 # OOM-killed at 2 GiB thirteen times between 17:59:41 and 20:21:49:
@@ -352,6 +353,25 @@ LOOPS: list[tuple[str, Callable[[], Awaitable[None]]]] = [
     # lanes.LANES. It may not write a decision-grade row, and the
     # decision-grade lane may not read anything it produces. Two lanes,
     # never pooled.
+    # THE PERSISTENT INSTITUTIONAL MARKET-DATA PROCESS (2026-09-20 §5).
+    # Registered BEFORE the lane that reads it, so the in-memory book is
+    # already filling by the time the experimental loop's first tick
+    # asks for one; a decision taken against an ABSENT book is a
+    # NOT_IDENTIFIED row, and there is no reason to write one merely
+    # because of a registration order.
+    #
+    # READ-ONLY BY CONSTRUCTION. Its client has an allow-list of exactly
+    # three venue reads and no insert, cancel, replace, preview or
+    # funding path in its source; a test fails the build if one appears.
+    # Even where the venue's token carries write:orders,
+    # ORDER_SUBMISSION_IMPLEMENTATION is NONE -- a scope the venue
+    # granted is not a capability this process has.
+    #
+    # INERT WITHOUT THE CREDENTIAL. With any PMX_* name absent it beats
+    # 'credential_missing' and reads nothing, so registering it on a
+    # deployment that has no institutional credential costs a heartbeat
+    # and no venue traffic. INSTITUTIONAL_MD=off stops it outright.
+    ("institutional_md", institutional_md.run),
     ("shadow_experimental", shadow_experimental.run),
     ("shadow_rn1", shadow_rn1.run),
     ("memory", memory_watch),

@@ -185,3 +185,118 @@ SELECT 'opportunities_1h|' || COALESCE(microstructure ->> 'bboBinding',
           microstructure ->> 'featureSourceVersion',
           microstructure ->> 'status', outcome_leg
  ORDER BY count(*) DESC LIMIT 12;
+
+\echo ''
+\echo '--- 13. THE DIRECT WORKER: is the credential authenticating? ---'
+-- §1/§3. The heartbeat carries the boot verdict and the sweep's own
+-- counters. AUTH_STATUS, TOKEN_SCOPES and READ_L2_PERMISSION are
+-- written there at boot; nothing about any secret's VALUE is.
+SELECT 'institutional_md|' || status
+       || '|auth=' || COALESCE(detail #>> '{auth,AUTH_STATUS}',
+                               detail ->> 'authStatus', 'ABSENT')
+       || '|readL2=' || COALESCE(detail #>> '{auth,READ_L2_PERMISSION}',
+                                 'ABSENT')
+       || '|mechanism=' || COALESCE(detail ->> 'marketDataMechanism',
+                                    'ABSENT')
+       || '|orderImpl=' || COALESCE(
+              detail ->> 'orderSubmissionImplementation', 'ABSENT')
+       || '|books=' || COALESCE(detail ->> 'books', 'ABSENT')
+       || '|priceable=' || COALESCE(detail ->> 'priceable', 'ABSENT')
+       || '|read=' || COALESCE(detail ->> 'read', 'ABSENT')
+       || '|failed=' || COALESCE(detail ->> 'failed', 'ABSENT')
+       || '|venueMsP50=' || COALESCE(detail ->> 'venueMsP50', 'ABSENT')
+       || '|at=' || to_char(beat_at, 'HH24:MI:SS')
+  FROM service_heartbeats
+ WHERE service = 'institutional_md'
+ ORDER BY beat_at DESC LIMIT 5;
+
+\echo ''
+\echo '--- 14. THE THREE REGIMES, COUNTED APART (never pooled) ---'
+-- A book the worker held in memory and a book a CI runner fetched
+-- minutes late are different execution environments. If these two ever
+-- appear as one row, the schema has stopped keeping them apart.
+SELECT 'regime|' || COALESCE(latency_regime, 'ABSENT')
+       || '|decisions=' || count(*)
+       || '|filled=' || count(*) FILTER (
+              WHERE COALESCE(executed_notional_usd, 0) > 0)
+       || '|executed_usd=' || round(
+              COALESCE(sum(executed_notional_usd), 0)::numeric, 2)
+  FROM bettor_experimental_decisions
+ WHERE decision_timestamp > now() - interval '24 hours'
+ GROUP BY latency_regime
+ ORDER BY count(*) DESC;
+
+\echo ''
+\echo '--- 15. §8: THE INSTANTS, NEVER COLLAPSED INTO ONE NUMBER ---'
+-- Six intervals, each derived from two named instants. A slow venue, a
+-- slow model and a slow persist have completely different remedies and
+-- one number cannot tell them apart.
+SELECT 'latency|' || experiment_id
+       || '|n=' || count(*)
+       || '|mdLagP50=' || COALESCE(round(percentile_cont(0.5)
+              WITHIN GROUP (ORDER BY market_data_lag_ms)::numeric, 1)
+              ::text, 'NULL')
+       || '|featureP50=' || COALESCE(round(percentile_cont(0.5)
+              WITHIN GROUP (ORDER BY feature_compute_ms)::numeric, 1)
+              ::text, 'NULL')
+       || '|modelP50=' || COALESCE(round(percentile_cont(0.5)
+              WITHIN GROUP (ORDER BY model_compute_ms)::numeric, 1)
+              ::text, 'NULL')
+       || '|srcToDecisionP50=' || COALESCE(round(percentile_cont(0.5)
+              WITHIN GROUP (ORDER BY source_to_decision_ms)::numeric, 1)
+              ::text, 'NULL')
+       || '|srcToDecisionP95=' || COALESCE(round(percentile_cont(0.95)
+              WITHIN GROUP (ORDER BY source_to_decision_ms)::numeric, 1)
+              ::text, 'NULL')
+       || '|modeledExecP50=' || COALESCE(round(percentile_cont(0.5)
+              WITHIN GROUP (ORDER BY modeled_execution_latency_ms)::numeric,
+              1)::text, 'NULL')
+  FROM bettor_experimental_decisions
+ WHERE decision_timestamp > now() - interval '24 hours'
+   AND evidence_environment = 'DIRECT_INSTITUTIONAL_WORKER'
+ GROUP BY experiment_id
+ ORDER BY experiment_id;
+
+\echo ''
+\echo '--- 16. §9: THE BASIS IS MODELED, ON EVERY DIRECT ROW ---'
+-- "Never represent it as observed production execution latency." This
+-- lane has never sent an order, so no execution latency has been
+-- observed and no row may claim one.
+SELECT 'basis|' || COALESCE(execution_latency_basis, 'NULL')
+       || '|n=' || count(*)
+  FROM bettor_experimental_decisions
+ WHERE evidence_environment = 'DIRECT_INSTITUTIONAL_WORKER'
+ GROUP BY execution_latency_basis
+ ORDER BY count(*) DESC;
+
+\echo ''
+\echo '--- 17. §6: WAS THE BOOK CURRENT WHEN IT WAS WALKED? ---'
+-- A stale book is not executable evidence, so a STALE or ABSENT row
+-- must carry no fill. That is asserted rather than described.
+SELECT 'book|' || COALESCE(book_freshness_status, 'NULL')
+       || '|n=' || count(*)
+       || '|filled=' || count(*) FILTER (
+              WHERE COALESCE(executed_notional_usd, 0) > 0)
+       || '|ageMsP50=' || COALESCE(round(percentile_cont(0.5)
+              WITHIN GROUP (ORDER BY book_age_ms)::numeric, 1)::text, 'NULL')
+  FROM bettor_experimental_decisions
+ WHERE evidence_environment = 'DIRECT_INSTITUTIONAL_WORKER'
+ GROUP BY book_freshness_status
+ ORDER BY count(*) DESC;
+
+\echo ''
+\echo '--- 18. THE DIRECT SAFETY RAILS. EVERY ONE MUST BE ZERO. ---'
+SELECT 'STALE_BOOK_FILLED|' || count(*) FILTER (
+             WHERE book_freshness_status IS DISTINCT FROM 'CURRENT'
+               AND COALESCE(executed_notional_usd, 0) > 0)
+       || '|OBSERVED_EXECUTION_LATENCY_CLAIMED|' || count(*) FILTER (
+             WHERE execution_latency_basis = 'OBSERVED_TRANSPORT_LATENCY'
+                                             '_NOT_EXECUTION')
+       || '|ARRIVAL_BEFORE_DECISION|' || count(*) FILTER (
+             WHERE modeled_arrival_timestamp < decision_timestamp)
+       || '|BOOK_RECEIVED_AFTER_ARRIVAL|' || count(*) FILTER (
+             WHERE bettor_received_timestamp > modeled_arrival_timestamp)
+       || '|NEGATIVE_MODEL_TIME|' || count(*) FILTER (
+             WHERE model_compute_ms < 0)
+  FROM bettor_experimental_decisions
+ WHERE evidence_environment = 'DIRECT_INSTITUTIONAL_WORKER';

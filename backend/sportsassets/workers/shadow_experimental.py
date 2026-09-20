@@ -57,6 +57,7 @@ import time
 from datetime import datetime, timedelta, timezone
 
 from .. import pmus
+from .. import institutional_book as ib
 from .. import shadow_experiment_registry as reg
 from .. import shadow_experiment_signals as sig
 from .. import shadow_experimental_engine as eng
@@ -121,8 +122,9 @@ def binding_at_t0(sealed: dict) -> dict:
             "basketWalkable": False}
 
 
-async def _persist(pool, sealed, execution) -> bool:
-    written = await xstore.record_decision(pool, sealed, execution)
+async def _persist(pool, sealed, execution, latency=None) -> bool:
+    written = await xstore.record_decision(pool, sealed, execution,
+                                           latency=latency)
     if written:
         await xstore.open_position(pool, sealed, execution)
     return written
@@ -376,7 +378,17 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
                                    opportunity_count=len(fresh))
 
     series_of = {symbol: s for _at, symbol, _rows, s in subjects}
+    # WHICH MARKETS HAVE A CURRENT BOOK IN MEMORY, read once for the
+    # whole pass. A market without one falls back to the bridge rather
+    # than being skipped: the decision is still worth sealing, and its
+    # arrival simply comes from the slower path.
+    books = {s: ib.STORE.current(s, at=now) for s in fresh}
+    stats["booksCurrent"] = len(
+        [1 for b in books.values()
+         if b.get("FRESHNESS_STATUS") == ib.CURRENT])
     for symbol, opportunity in fresh.items():
+        direct = books.get(symbol, {}).get(
+            "FRESHNESS_STATUS") == ib.CURRENT
         binding = bind_yes(instruments.get(symbol), retail.get(
             (symbol, (opportunity.get("outcomeLeg") or "").lower())))
         if not binding.get("executionEligible"):
@@ -385,6 +397,19 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
             if (experiment["experimentId"],
                     opportunity["experimentalObservationId"]) in already:
                 continue
+            # §7's hot path: the model runs between two instants that
+            # are both recorded, and nothing slow sits between them.
+            #
+            # THE SEAL'S CLOCK IS THE TICK'S DECLARED INSTANT, not the
+            # instant the model happened to start. The decision id and
+            # the population id are both derived from it, and a seal
+            # has to re-derive byte-for-byte before it may execute; a
+            # clock read fresh inside the loop would make the same tick
+            # irreproducible. §8 keeps the two apart anyway --
+            # DECISION_TIMESTAMP and MODELED_SEND_TIMESTAMP are named
+            # separately there -- so nothing is lost by being exact
+            # about which is which.
+            model_start = _now()
             try:
                 sealed = eng.seal(experiment=experiment,
                                   opportunity=opportunity,
@@ -397,8 +422,15 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
                 log.warning("shadow_experimental: seal refused for %s: %s",
                             symbol, exc)
                 continue
+            model_end = _now()
 
             decision_id = eng.decision_id(sealed)
+            # THE SEAL IS WRITTEN BEFORE THE ARRIVAL, still. §7 asks for
+            # evidence persisted immediately after the T0 decision, and
+            # the ordering it proves -- decided, then executed -- is the
+            # same property the bridge era needed. One small insert,
+            # taken during the modeled-latency wait rather than before
+            # the model.
             if not await xstore.record_seal(pool, sealed,
                                             decision_id=decision_id):
                 continue
@@ -410,12 +442,35 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
                 # same tick it was sealed.
                 execution = eng.execute(sealed, evidence=None,
                                         binding=binding, arrival_at=None)
-                await _persist(pool, sealed, execution)
+                await _persist(pool, sealed, execution,
+                               latency=latency_block(
+                                   observation=opportunity,
+                                   sealed_at=now,
+                                   model_start=model_start,
+                                   model_end=model_end,
+                                   modeled_arrival=None,
+                                   book_row=books.get(symbol),
+                                   persisted_at=_now()))
                 await xstore.close_seal(pool, decision_id,
                                         status=xstore.EXECUTED_SEAL, at=now)
                 stats["noTrade"] += 1
                 continue
 
+            if direct:
+                await _execute_direct(pool, sealed, binding,
+                                      decision_id=decision_id,
+                                      observation=opportunity,
+                                      sealed_at=now,
+                                      model_start=model_start,
+                                      model_end=model_end,
+                                      stats=stats)
+                continue
+
+            # THE BRIDGE PATH REMAINS, unused while the direct one is
+            # available and deliberately not deleted: it is the only
+            # market-data path if the worker's own credential ever
+            # stops authenticating, and a fallback removed the day the
+            # primary worked is a fallback nobody has when it matters.
             request_id = await xstore.request_l2(
                 pool, symbol=symbol, requested_by=REQUESTED_BY,
                 purpose=xstore.PURPOSE_ARRIVAL,
@@ -425,6 +480,175 @@ async def seal_population(pool, *, now=None, window_s=WINDOW_S,
             requested.add(request_id)
     stats["requested"] = len(requested)
     return stats
+
+
+async def _execute_direct(pool, sealed, binding, *, decision_id,
+                          observation, sealed_at, model_start, model_end,
+                          stats) -> None:
+    """Wait out the frozen modeled latency, then walk the CURRENT book.
+
+    §9: the wait is real. The book at the decision instant and the book
+    250ms later are different objects on a moving market, and awarding
+    the shadow the earlier one would be handing it an execution nobody
+    could have got.
+
+    THE ARRIVAL IS MEASURED FROM MODEL_END, the instant the decision
+    actually existed in this process, and not from the seal's declared
+    tick instant. They are close in production and they are not the
+    same thing, and taking the earlier of the two would quietly refund
+    the model's own compute time out of the modeled latency -- which is
+    the one number §9 exists to stop anyone shrinking.
+    """
+    modeled_arrival = ib.modeled_arrival(model_end, reg.ARRIVAL_LATENCY_MS)
+    remaining = (modeled_arrival - _now()).total_seconds()
+    if remaining > 0:
+        await asyncio.sleep(remaining)
+
+    symbol = sealed["marketId"]
+    book_row = ib.STORE.executable(symbol, at=modeled_arrival)
+    if book_row is None:
+        # STALE OR ABSENT. Not a fill at an old price, and not a zero.
+        current = ib.STORE.current(symbol, at=modeled_arrival)
+        execution = eng.execute(sealed, evidence=None, binding=binding,
+                                arrival_at=modeled_arrival)
+        execution = dict(execution,
+                         why=current.get("why") or execution.get("why"))
+        await _persist(pool, sealed, execution,
+                       latency=latency_block(
+                           observation=observation, sealed_at=sealed_at,
+                           model_start=model_start, model_end=model_end,
+                           modeled_arrival=modeled_arrival,
+                           book_row=current, persisted_at=_now()))
+        await xstore.close_seal(pool, decision_id,
+                                status=xstore.EXPIRED_SEAL, at=_now())
+        stats["bookNotCurrent"] = stats.get("bookNotCurrent", 0) + 1
+        return
+
+    # THE EXACT BOOK WALKED IS WRITTEN DOWN, so the fill can be
+    # re-derived from the levels it came from rather than believed.
+    try:
+        await xstore.record_direct_evidence(pool, book_row)
+    except Exception:                                          # noqa: BLE001
+        log.debug("shadow_experimental: direct evidence write failed",
+                  exc_info=True)
+    evidence_id = xstore.direct_evidence_id(
+        symbol, book_row["BETTOR_RECEIVED_TIMESTAMP"], book_row["BOOK_SHA"])
+
+    execution = eng.execute(
+        sealed, evidence=evidence_from_memory(book_row, evidence_id),
+        binding=binding, arrival_at=modeled_arrival)
+    await _persist(pool, sealed, execution,
+                   latency=latency_block(
+                       observation=observation, sealed_at=sealed_at,
+                       model_start=model_start, model_end=model_end,
+                       modeled_arrival=modeled_arrival,
+                       book_row=book_row, persisted_at=_now()))
+    await xstore.close_seal(pool, decision_id,
+                            status=xstore.EXECUTED_SEAL, at=_now())
+    stats["direct"] = stats.get("direct", 0) + 1
+    if execution.get("positionId"):
+        stats["filled"] = stats.get("filled", 0) + 1
+        log.info("shadow_experimental: DIRECT %s %s %s executed $%s of $%s "
+                 "at vwap %s (book %sms old, modeled arrival %sms)",
+                 sealed["experimentId"], sealed["action"], symbol,
+                 execution["executedNotionalUsd"],
+                 sealed["intendedNotionalUsd"], execution["vwap"],
+                 book_row.get("bookAgeMs"), reg.ARRIVAL_LATENCY_MS)
+
+
+# ── §5/§7/§9: the DIRECT hot path ────────────────────────────────────
+#
+# CURRENT IN-MEMORY BOOK -> CURRENT FEATURES -> X1 -> ACTION -> MODELED
+# ARRIVAL -> EXECUTION RECONSTRUCTION, in one tick, with no GitHub
+# Action anywhere in it.
+#
+# §9 IS THE CLAUSE THAT COSTS SOMETHING AND IS KEPT ANYWAY. Having the
+# book in memory does not mean BETTOR would have executed at the
+# decision instant, so the walk is against the book CURRENT AT MODELED
+# ARRIVAL -- the loop actually waits out the frozen latency and re-reads
+# the store, rather than walking the book the decision was made on. That
+# is the difference between reconstructing an execution and awarding
+# oneself a free one, and on a moving book it is not a small one.
+#
+# A STALE BOOK IS NOT EXECUTABLE EVIDENCE (§6). The store returns
+# freshness with every read and `executable()` returns nothing at all
+# when the book has aged past the frozen limit; the decision is then
+# recorded NOT_IDENTIFIED with the book's real age, never filled at a
+# price whose provenance has gone quiet.
+
+DIRECT = "DIRECT_INSTITUTIONAL_WORKER"
+MODELED_BASIS = "MODELED_EXECUTION_LATENCY"
+
+
+def _ms(a, b):
+    """Milliseconds from a to b, or None if either instant is absent."""
+    if a is None or b is None:
+        return None
+    return round((b - a).total_seconds() * 1000, 3)
+
+
+def evidence_from_memory(row: dict, evidence_id=None) -> dict:
+    """An in-memory book, in the shape the engine's walk expects.
+
+    `observedArrivalLatencyMs` is deliberately absent: there is no
+    transport round trip between BETTOR and the venue at this instant,
+    because the book was already here. The latency that DOES apply is
+    the modeled execution latency, and it travels in its own column
+    under its own name so the two can never be read as one number.
+    """
+    book = dict(row.get("book") or {})
+    book.update({
+        "l2EvidenceId": evidence_id,
+        "l2BookSha": row.get("BOOK_SHA"),
+        "latencyRegime": DIRECT,
+        "bridgeLatencyMs": None,
+        "l2SourceTimestamp": row.get("SOURCE_TIMESTAMP"),
+        "l2ReceivedTimestamp": row.get("BETTOR_RECEIVED_TIMESTAMP"),
+        "priceScale": row.get("priceScale"),
+        "qtyScale": row.get("qtyScale"),
+    })
+    return book
+
+
+def latency_block(*, observation, sealed_at, model_start, model_end,
+                  modeled_arrival, book_row, persisted_at=None) -> dict:
+    """§8, every instant and every interval derived from two of them.
+
+    "Do not collapse these into one latency number." One number cannot
+    tell a slow venue from a slow model from a slow persist, and the
+    three have completely different remedies.
+    """
+    received = (book_row or {}).get("BETTOR_RECEIVED_TIMESTAMP")
+    source_ts = (book_row or {}).get("SOURCE_TIMESTAMP")
+    feature_asof = (observation or {}).get("observedAt")
+    lag = (book_row or {}).get("MARKET_DATA_LAG_MS")
+    return {
+        "venueSourceTimestamp": source_ts,
+        "bettorReceivedTimestamp": received,
+        "featuresSealedTimestamp": feature_asof,
+        "modelStartTimestamp": model_start,
+        "modelEndTimestamp": model_end,
+        "decisionTimestamp": sealed_at,
+        "modeledSendTimestamp": sealed_at,
+        "modeledArrivalTimestamp": modeled_arrival,
+        "persistedTimestamp": persisted_at,
+        # the intervals
+        "marketDataLagMs": lag,
+        "featureComputeMs": _ms(feature_asof, model_start),
+        "modelComputeMs": _ms(model_start, model_end),
+        "sourceToDecisionMs": (None if lag is None
+                               else round(lag + (_ms(received, sealed_at)
+                                                 or 0.0), 3)),
+        "modeledExecutionLatencyMs": _ms(sealed_at, modeled_arrival),
+        "sourceToModeledArrivalMs": (
+            None if lag is None
+            else round(lag + (_ms(received, modeled_arrival) or 0.0), 3)),
+        "bookFreshnessStatus": (book_row or {}).get("FRESHNESS_STATUS"),
+        "bookAgeMs": (book_row or {}).get("bookAgeMs"),
+        # §9: the word, on the row, always.
+        "executionLatencyBasis": MODELED_BASIS,
+        "evidenceEnvironment": DIRECT,
+    }
 
 
 # ── §12: the markouts, appended as later facts ───────────────────────
