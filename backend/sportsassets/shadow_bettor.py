@@ -498,7 +498,13 @@ UNIVERSE_SQL = """
 
 async def universe(pool, *, fresh_s=7200, limit=40) -> list:
     rows = await pool.fetch(UNIVERSE_SQL, str(int(fresh_s)), int(limit))
+    # marketId IS the venue's market slug, carried under its own name.
+    # Without it the decision path cannot look up the per-leg inventory
+    # for this market, and every action falls to
+    # STATE_NOT_IDENTIFIED -- which is what production showed: 210 V5
+    # action rows, not one of them in a decided state.
     return [{"identifier": r["identifier"], "symbol": r["market_slug"],
+             "marketId": r["market_slug"],
              "eventId": r["event_slug"], "eventTitle": r["event_title"],
              "outcomeLeg": r["side_norm"], "kind": r["kind"]}
             for r in rows]

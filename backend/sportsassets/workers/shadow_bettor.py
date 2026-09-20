@@ -213,6 +213,10 @@ async def tick(pool, *, decision_writing_allowed: bool = True,
             symbol=subject["symbol"], observed_at=captured_at,
             outcome_leg=subject.get("outcomeLeg"),
             event_id=subject.get("eventId"),
+            # Carried so write_decision can read this market's per-leg
+            # inventory. Absent, the portfolio state is unidentified and
+            # nothing is priced -- correctly, but uselessly.
+            market_id=subject.get("marketId"),
             evidence_source=EVIDENCE_SOURCE,
             market_state=state if state["readable"] else None,
             features=features,
