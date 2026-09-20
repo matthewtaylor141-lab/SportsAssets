@@ -234,3 +234,22 @@ def test_a_non_sport_does_not_fall_through_to_the_league():
 def test_not_a_sport_is_a_declared_reason():
     assert sm.R_NOT_A_SPORT in sm.UNRESOLVED_REASONS
     assert "election" in sm.describe()["nonSportCategories"].values()
+
+
+def test_the_residual_query_filter_matches_the_declared_prefix_set():
+    """research/bettor_sport_residual.sql duplicates the prefix list as
+    a FILTER. It assigns no sport, but a drifted filter would select
+    the wrong rows to reason about, so the two are pinned together."""
+    import pathlib
+    import re
+    sql = pathlib.Path(__file__).resolve().parents[2].joinpath(
+        "research", "bettor_sport_residual.sql").read_text()
+    # The NOT(...) block is the sport-prefix filter. The election and
+    # moneyline counts elsewhere in the file are their own categories
+    # and are deliberately not part of that set.
+    block = sql[sql.index("NOT (p.sports_type"):]
+    block = block[:block.index(")\n")]
+    in_sql = {m.replace("\\", "") + "_"
+              for m in re.findall(r"LIKE '([a-z\\_]+)_%'", block)}
+    declared = {p for p, _s, _n in sm.MARKET_TYPE_PREFIXES}
+    assert in_sql == declared, (declared - in_sql, in_sql - declared)
