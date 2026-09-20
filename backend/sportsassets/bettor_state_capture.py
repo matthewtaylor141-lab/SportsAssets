@@ -201,6 +201,77 @@ MEASUREMENT_WINDOW = {
 }
 
 
+# ── W2, DECLARED BEFORE THE REPAIR IS DEPLOYED ──────────────────────
+#
+# Written and committed BEFORE the reservation fix went live, so its
+# acceptance criteria cannot have been fitted to its results. W1 is
+# untouched and keeps running out to its own deadlines.
+#
+# W1's operational result was FAILED: zero ON_TIME reads at every
+# horizon. W2 asks whether reserving the follow-up budget changes that,
+# and at what cost to initial coverage -- because the reservation is a
+# REALLOCATION of a fixed budget, not an increase, so any gain in
+# follow-ups is paid for in initial reads.
+MEASUREMENT_WINDOW_W2 = {
+    "id": "POST_RESERVATION_REPAIR_W2",
+    "declaredAt": "2026-09-20T22:10Z",
+    "declaredBeforeRepairDeployed": True,
+    "startRule": ("completion of the deploy carrying the follow-up "
+                  "budget reservation, PLUS a 10-minute warm-up, "
+                  "identical to W1's rule"),
+    "lengthMinutes": 30,
+    "cohort": ("observations whose observed_at falls inside the "
+               "window, then followed to each horizon's own recovery "
+               "deadline. Identical construction to W1"),
+
+    # ── DENOMINATORS, the same four buckets W1 reports ──────────────
+    "reportedBuckets": ("NOT_YET_DUE", "DUE_ON_TIME",
+                        "DUE_LATE_RECOVERY", "DUE_PENDING",
+                        "DUE_FINALLY_MISSING"),
+    "everyCohortObservationAccountedAtEveryHorizon": True,
+
+    # ── OPERATIONAL ACCEPTANCE CRITERIA, fixed in advance ───────────
+    #
+    # Stated as thresholds, not as "improvement", because any non-zero
+    # number improves on W1's zero and that is too weak a bar to be
+    # worth measuring against.
+    "PASS_IF": {
+        "ON_TIME_300S": (
+            ">= 50% of the 300s-due cohort is ON_TIME. The 300s window "
+            "is [270,330]s -- 60s wide against a 60s tick -- so a tick "
+            "should nearly always fall inside it when budget exists. "
+            "This is the horizon the repair must fix"),
+        "ON_TIME_60S": (
+            "> 0% of the 60s-due cohort is ON_TIME. The 60s window is "
+            "[30,90]s and a 60s tick can miss it entirely by phase, so "
+            "full coverage is not achievable by budget alone and is "
+            "NOT claimed as a criterion"),
+        "INITIAL_COVERAGE_COST": (
+            "obs_attempted / obs_scheduled reported and compared with "
+            "W1's 44.6%. A fall is EXPECTED and is the price of the "
+            "reallocation; it is reported, not hidden"),
+    },
+    "FAIL_IF": (
+        "ON_TIME remains 0 at every horizon, which would mean the "
+        "bottleneck is not budget allocation and the diagnosis was "
+        "wrong"),
+
+    # ── WHAT W2 CANNOT ESTABLISH ────────────────────────────────────
+    "capacityRemainsInsufficient": (
+        "measured demand is ~14.6 reads/tick (8 sampling + ~6.6 "
+        "follow-up at the observed 2.2 arrivals/tick across the 60s, "
+        "300s and 900s horizons) against a capacity of 1-7 reads/tick. "
+        "The system is CAPACITY-BOUND, not merely mis-scheduled. A "
+        "reservation can only decide WHICH reads are lost, never "
+        "eliminate the loss. Closing the gap needs fewer horizons, a "
+        "lower sampling rate, or more venue headroom -- each a "
+        "separate decision, none taken here"),
+    "notAClaimOfCompleteness": (
+        "the collection system is NOT complete and W2 cannot make it "
+        "so. W2 measures one specific repair"),
+}
+
+
 # ── §4. THE FROZEN UNIVERSE RULE ─────────────────────────────────────
 
 UNIVERSE_VERSION = "BETTOR_UNSELECTED_STATE_V2"

@@ -215,6 +215,7 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
              "obsSkippedBudget": 0, "obsSkippedAbandon": 0,
              "unreadableOther": 0, "fuDue": 0, "fuAttempted": 0,
              "fuSkippedBudget": 0, "fuOnTime": 0, "fuLate": 0,
+             "fuSelected": 0,
              "fuFailed": 0,
              "sliceTruncated": False, "followups": 0, "reads": 0}
 
@@ -242,9 +243,35 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
                   sc.MAX_MARKETS_PER_CYCLE, sel["SLICE_TRUNCATED_BY"])
 
     misses = 0
-    budget = max(1, int(MAX_READS_PER_TICK * min(
+    # ── THE TICK'S READ BUDGET, SPLIT BEFORE EITHER PASS RUNS ────────
+    #
+    # W1 DIAGNOSIS (2026-09-20, research-sql run on 6612731). Follow-ups
+    # were funded from whatever the sampling pass LEFT OVER, and the
+    # sampling pass almost always exhausted it:
+    #
+    #   18 ticks where sampling exhausted budget -> 0.28 follow-ups/tick
+    #    7 ticks with budget left over           -> 2.14 follow-ups/tick
+    #
+    # and all five follow-ups on starved ticks came from the rate-limit
+    # floor max(1, 0//2) = 1, an accident of that branch rather than a
+    # design. Zero reads were ON_TIME at any horizon.
+    #
+    # THE ORDERING HYPOTHESIS IS REFUTED. Reads that happened were late
+    # because they waited for a rare spare-budget tick, not because the
+    # queue was sorted oldest-first. Reordering a queue that is never
+    # serviced changes nothing.
+    #
+    # THE FIX IS A RESERVATION, NOT AN INCREASE. Total reads per tick
+    # are unchanged, so gateway pacing is preserved exactly; the split
+    # happens before either pass and the follow-up share can no longer
+    # be consumed by sampling.
+    total_budget = max(2, int(MAX_READS_PER_TICK * min(
         1.0, READ_PACING_BASE_S / pacing)))
+    fu_reserve = max(1, total_budget // 2)
+    budget = max(1, total_budget - fu_reserve)
     stats["budget"] = budget
+    stats["fuReserve"] = fu_reserve
+    stats["totalBudget"] = total_budget
     # SCHEDULED IS THE DENOMINATOR, recorded before any read. Coverage
     # computed against what was attempted can only ever be 100%.
     stats["scheduled"] = len(sel["SELECTED"])
@@ -324,18 +351,31 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     # zeroing it, and the outcome side keeps a floor of one read. The
     # sampling pass can be made up on the next rotation; a horizon that
     # passes unobserved cannot be.
-    follow_budget = min(MAX_FOLLOWUP_READS, max(0, budget))
+    # The reserve, plus anything the sampling pass did not need. A
+    # refused tick still halves it -- backing off from the venue is
+    # preserved -- but it can no longer fall to zero because sampling
+    # took everything.
+    follow_budget = min(MAX_FOLLOWUP_READS,
+                        fu_reserve + max(0, budget))
     if stats["rateLimited"]:
         follow_budget = max(1, follow_budget // 2)
     for horizon in sc.HORIZONS_OBSERVABLE_S:
         if follow_budget <= 0:
             break
         try:
+            # DEMAND IS COUNTED BEFORE THE LIMIT. Previously fu_due was
+            # len(due) AFTER mids_due applied the budget as a LIMIT, so
+            # fu_due could never exceed the budget and FU_DUE ==
+            # FU_ATTEMPTED was a tautology rather than a
+            # reconciliation. True demand had never been recorded.
+            outstanding = await sstore.mids_outstanding(horizon,
+                                                        pool=pool)
             due = await sstore.mids_due(horizon, limit=follow_budget,
                                         pool=pool)
         except Exception:                                      # noqa: BLE001
             break
-        stats["fuDue"] += len(due)
+        stats["fuDue"] += outstanding
+        stats["fuSelected"] += len(due)
         for j, d in enumerate(due):
             if follow_budget <= 0:
                 stats["fuSkippedBudget"] += len(due) - j
@@ -390,6 +430,7 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
         "OBS_WRITTEN": stats["written"],
         "OBS_DUPLICATE_BUCKET": stats["duplicateBucket"],
         "FU_DUE": stats["fuDue"],
+        "FU_SELECTED": stats["fuSelected"],
         "FU_ATTEMPTED": stats["fuAttempted"],
         "FU_SKIPPED_BUDGET": stats["fuSkippedBudget"],
         "FU_ON_TIME": stats["fuOnTime"],

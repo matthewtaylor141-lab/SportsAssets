@@ -121,9 +121,9 @@ _TICK_INSERT = """
         obs_skipped_abandon, obs_readable, obs_rate_limited,
         obs_unreadable_other, obs_written, obs_duplicate_bucket,
         fu_due, fu_attempted, fu_skipped_budget, fu_on_time, fu_late,
-        fu_failed, status, obs_never_attempted)
+        fu_failed, status, obs_never_attempted, fu_selected)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-            $17,$18,$19,$20,$21,$22,$23,$24,$25)
+            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
     ON CONFLICT DO NOTHING
 """
 
@@ -149,7 +149,8 @@ async def record_tick(row: dict, pool=None) -> None:
             row["OBS_DUPLICATE_BUCKET"], row["FU_DUE"],
             row["FU_ATTEMPTED"], row["FU_SKIPPED_BUDGET"],
             row["FU_ON_TIME"], row["FU_LATE"], row["FU_FAILED"],
-            str(row["STATUS"]), row["OBS_NEVER_ATTEMPTED"])
+            str(row["STATUS"]), row["OBS_NEVER_ATTEMPTED"],
+            row.get("FU_SELECTED", 0))
     except Exception:                                          # noqa: BLE001
         pass
 
@@ -227,6 +228,35 @@ async def mids_due(horizon_s: int, *, limit=8, pool=None) -> list:
         str(int(horizon_s + sc.HORIZON_DUE_WINDOW_S)),
         int(horizon_s), int(limit))
     return [dict(r) for r in rows]
+
+
+_OUTSTANDING_SQL = """
+    SELECT count(*)::int AS n
+      FROM bettor_state_observations o
+     WHERE o.observed_at <= now() - ($1 || ' seconds')::interval
+       AND o.observed_at >  now() - ($2 || ' seconds')::interval
+       AND NOT EXISTS (SELECT 1 FROM bettor_state_mids m
+                        WHERE m.observation_id = o.observation_id
+                          AND m.horizon_s = $3)
+"""
+
+
+async def mids_outstanding(horizon_s: int, *, pool=None) -> int:
+    """TRUE demand: every eligible observation, with NO limit applied.
+
+    mids_due takes a LIMIT, so counting its result measures the budget
+    rather than the backlog. This is the denominator that makes
+    "attempted vs due" a real reconciliation instead of a tautology.
+    """
+    pool = pool or await get_pool()
+    try:
+        row = await pool.fetchrow(
+            _OUTSTANDING_SQL, str(int(horizon_s)),
+            str(int(horizon_s + sc.HORIZON_DUE_WINDOW_S)),
+            int(horizon_s))
+        return int(row["n"]) if row else 0
+    except Exception:                                          # noqa: BLE001
+        return 0
 
 
 _READY_SQL = """
