@@ -224,6 +224,9 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
              "unreadableOther": 0, "fuDue": 0, "fuAttempted": 0,
              "fuSkippedBudget": 0, "fuOnTime": 0, "fuLate": 0,
              "fuSelected": 0,
+             # None, not 60: a tick with no follow-up budget had no
+             # rotation head at all, and the two must not collapse.
+             "fuRotationHead": None, "fuPerHorizonCap": None,
              "fuFailed": 0,
              "sliceTruncated": False, "followups": 0, "reads": 0}
 
@@ -391,8 +394,8 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
         k = _FU_SERVICE_OPS % len(order)
         order = order[k:] + order[:k]
         _FU_SERVICE_OPS += 1
+        stats["fuRotationHead"] = order[0]
     per_horizon_cap = max(1, follow_budget // len(order))
-    stats["fuRotationHead"] = order[0]
     stats["fuPerHorizonCap"] = per_horizon_cap
 
     for horizon in order:
@@ -470,6 +473,9 @@ async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
         "OBS_DUPLICATE_BUCKET": stats["duplicateBucket"],
         "FU_DUE": stats["fuDue"],
         "FU_SELECTED": stats["fuSelected"],
+        # None when the tick had no follow-up budget: no horizon led.
+        "FU_ROTATION_HEAD": stats.get("fuRotationHead"),
+        "FU_PER_HORIZON_CAP": stats.get("fuPerHorizonCap"),
         "FU_ATTEMPTED": stats["fuAttempted"],
         "FU_SKIPPED_BUDGET": stats["fuSkippedBudget"],
         "FU_ON_TIME": stats["fuOnTime"],

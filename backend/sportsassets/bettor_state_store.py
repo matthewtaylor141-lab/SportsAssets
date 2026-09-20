@@ -121,9 +121,10 @@ _TICK_INSERT = """
         obs_skipped_abandon, obs_readable, obs_rate_limited,
         obs_unreadable_other, obs_written, obs_duplicate_bucket,
         fu_due, fu_attempted, fu_skipped_budget, fu_on_time, fu_late,
-        fu_failed, status, obs_never_attempted, fu_selected)
+        fu_failed, status, obs_never_attempted, fu_selected,
+        fu_rotation_head, fu_per_horizon_cap)
     VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,
-            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26)
+            $17,$18,$19,$20,$21,$22,$23,$24,$25,$26,$27,$28)
     ON CONFLICT DO NOTHING
 """
 
@@ -150,7 +151,12 @@ async def record_tick(row: dict, pool=None) -> None:
             row["FU_ATTEMPTED"], row["FU_SKIPPED_BUDGET"],
             row["FU_ON_TIME"], row["FU_LATE"], row["FU_FAILED"],
             str(row["STATUS"]), row["OBS_NEVER_ATTEMPTED"],
-            row.get("FU_SELECTED", 0))
+            row.get("FU_SELECTED", 0),
+            # NULL, not 0 and not the first horizon: a tick with no
+            # follow-up budget had no head, and that is a different
+            # state from "60s led".
+            row.get("FU_ROTATION_HEAD"),
+            row.get("FU_PER_HORIZON_CAP"))
     except Exception:                                          # noqa: BLE001
         pass
 

@@ -276,3 +276,33 @@ def test_the_eligibility_change_is_versioned_and_states_its_own_limit():
     assert "unchanged at 30" in claim
     # and the constant cannot silently grow past the band it opens
     assert sc.HORIZON_EARLY_ELIGIBILITY_S <= sc.HORIZON_TOLERANCE_S
+
+
+def test_the_rotation_head_is_recorded_so_it_can_be_verified_live():
+    """Offline the head is observable; in production it was not
+    recorded at all, so a rotation that never reached a horizon could
+    only be inferred from attempt counts -- which can look even for the
+    wrong reason. Migration 091 adds the column; this pins the wiring.
+
+    The default is None rather than the first horizon: a tick with no
+    follow-up budget had no head, and collapsing that into '60s led'
+    would corrupt exactly the evidence the column exists to provide.
+    (With the current budget floor follow_budget never reaches 0, so
+    None is a guard, not an expected value.)"""
+    import inspect
+    from sportsassets import bettor_state_store as ss
+    src = inspect.getsource(ss)
+    assert "fu_rotation_head" in src and "fu_per_horizon_cap" in src
+    assert 'row.get("FU_ROTATION_HEAD")' in src
+
+    wsrc = inspect.getsource(w)
+    assert '"FU_ROTATION_HEAD": stats.get("fuRotationHead")' in wsrc
+    assert '"fuRotationHead": None' in wsrc
+
+    # placeholders and columns still line up after the addition
+    ins = [s for s in src.split('"""')
+           if "INSERT INTO bettor_capture_ticks" in s][0]
+    cols = ins.split("(", 1)[1].split(")", 1)[0]
+    n_cols = len([c for c in cols.split(",") if c.strip()])
+    n_vals = ins.count("$")
+    assert n_cols == n_vals, (n_cols, n_vals)
