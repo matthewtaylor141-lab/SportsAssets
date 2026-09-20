@@ -517,6 +517,47 @@ NEVER_MANUFACTURED = (
     "MISSING_REASONS. It is never 0, never the other side's value, and "
     "never carried forward from a previous read")
 
+# ── THE READABILITY CAVEAT. Named, because it is not obvious ─────────
+#
+# The SAMPLING FRAME is unbiased: a market chosen by the rotation writes
+# a row whether or not its book could be read, so the set of rows is a
+# clean sample of the universe.
+#
+# THE READABLE SUBSET MAY NOT BE. Measured 2026-09-20 19:37Z, 33 of 53
+# reads came back HTTP 429 -- rate limiting from the shared gateway this
+# process puts every venue read through. A 429 is caused by the
+# PROCESS's aggregate request rate, not by anything about the market, so
+# at first glance it is missing-completely-at-random.
+#
+# It is not, and the reason matters. The heaviest other consumer of that
+# gateway is the live mirror, which is busiest when games are live. So
+# the probability that OUR read is refused rises exactly when markets
+# are live -- and live/pregame is correlated with spread, volatility and
+# the future-value dynamics this dataset exists to measure. Conditioning
+# an analysis on BOOK_READABILITY_STATUS = READABLE therefore risks
+# under-representing live states, which is a selection on a variable
+# that is not independent of the estimand.
+#
+# WHAT IS DONE ABOUT IT. Three things, none of which is "assume it away":
+#   1. Every refused read is stored with its own reason, distinct from a
+#      venue that published no book, so the two are never pooled.
+#   2. The refusal rate is reportable by LIVE_STATUS and by hour, so the
+#      correlation can be MEASURED rather than argued about.
+#   3. The capture backs off hard on 429 -- it is the lowest-priority
+#      consumer of that gateway and yields to everything else.
+#
+# Until (2) has been measured, any estimate computed on readable rows
+# alone carries this caveat and must state it.
+READABILITY_IS_NOT_MISSING_AT_RANDOM = (
+    "the sampling frame is unbiased -- a selected market writes a row "
+    "either way -- but the READABLE SUBSET may not be. Read refusals "
+    "come from the shared gateway's aggregate rate, whose heaviest "
+    "other consumer is busiest when games are live, so refusal "
+    "probability may rise with LIVE_STATUS, which is correlated with "
+    "the dynamics being measured. Any estimate computed on readable "
+    "rows alone must carry this caveat until the refusal rate has been "
+    "measured against LIVE_STATUS and hour of day")
+
 LIVE = "LIVE"
 PREGAME = "PREGAME"
 LIVE_STATUS_UNKNOWN = "NOT_IDENTIFIED"
@@ -721,6 +762,8 @@ def state_record(subject: dict, *, observed_at: datetime,
             snap.get("MISSING_FIELD_REASONS") or []),
         "missingReasonsDeclared": list(MISSING_REASONS),
         "neverManufactured": NEVER_MANUFACTURED,
+        "readabilityIsNotMissingAtRandom":
+            READABILITY_IS_NOT_MISSING_AT_RANDOM,
 
         # ── provenance and the frozen rule ───────────────────────────
         "UNIVERSE_VERSION": UNIVERSE_VERSION,

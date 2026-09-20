@@ -48,7 +48,24 @@ log = logging.getLogger(__name__)
 
 TICK_S = 60.0
 BACKOFF_S = 120.0
-READ_PACING_S = 0.4
+
+# ── THIS LOOP YIELDS TO EVERYTHING ELSE ──────────────────────────────
+#
+# It is the lowest-priority consumer of the shared venue gateway: no
+# latency requirement, no capital, no decision waiting on it. When the
+# venue refuses reads, the right response is for THIS loop to get out
+# of the way, not to keep claiming gaps the mirror needs.
+#
+# Measured 2026-09-20 19:37Z: 33 of 53 reads came back 429 at a 0.4s
+# base pacing. The base is raised and a 429 in one tick multiplies the
+# next tick's pacing and halves its budget, recovering a step at a time
+# once reads succeed again. The alternative -- pushing through -- costs
+# the mirror its gaps AND biases this dataset's readable subset toward
+# quiet hours, which is the worse of the two failures.
+READ_PACING_BASE_S = 1.0
+READ_PACING_MAX_S = 8.0
+BACKOFF_GROWTH = 2.0
+BACKOFF_RECOVERY = 0.75
 # One tick's share of the bucket, plus a little slack so a tick can
 # finish its share when an earlier one fell short. NOT the bucket's
 # whole slice: that was V1's burst.
@@ -74,9 +91,9 @@ def _off(name: str, default: str = "on") -> bool:
         "off", "0", "false", "no")
 
 
-def _read_book(slug: str) -> dict:
+def _read_book(slug: str, pacing: float = READ_PACING_BASE_S) -> dict:
     """One paced public book read, off the event loop. Never raises."""
-    pace(READ_PACING_S)
+    pace(pacing)
     try:
         client = pmus._get_client()
     except Exception as exc:                                   # noqa: BLE001
@@ -141,7 +158,7 @@ async def _candidates(pool) -> list:
     return list(by_market.values())
 
 
-async def tick(pool) -> dict:
+async def tick(pool, *, pacing: float = READ_PACING_BASE_S) -> dict:
     """One 60s cycle: this tick's share of the bucket's markets.
 
     The loop ticks every 60s and the sampling cadence is 300s, so five
@@ -166,7 +183,7 @@ async def tick(pool) -> dict:
              "rotationSlices": sc.ROTATION_SLICES,
              "eligible": 0, "inSlice": 0, "read": 0, "written": 0,
              "duplicateBucket": 0, "unreadable": 0, "failures": 0,
-             "rateLimited": 0,
+             "rateLimited": 0, "pacingS": round(pacing, 2),
              "sliceTruncated": False, "followups": 0, "reads": 0}
 
     try:
@@ -193,7 +210,9 @@ async def tick(pool) -> dict:
                   sc.MAX_MARKETS_PER_CYCLE, sel["SLICE_TRUNCATED_BY"])
 
     misses = 0
-    budget = MAX_READS_PER_TICK
+    budget = max(1, int(MAX_READS_PER_TICK * min(
+        1.0, READ_PACING_BASE_S / pacing)))
+    stats["budget"] = budget
     for subject in sel["SELECTED"]:
         if budget <= 0:
             stats["status"] = "read_budget_exhausted"
@@ -202,7 +221,8 @@ async def tick(pool) -> dict:
         stats["reads"] += 1
 
         request_at = datetime.now(tz=timezone.utc)
-        book = await asyncio.to_thread(_read_book, subject["symbol"])
+        book = await asyncio.to_thread(_read_book, subject["symbol"],
+                                       pacing)
         received_at = datetime.now(tz=timezone.utc)
         stats["read"] += 1
 
@@ -270,7 +290,8 @@ async def tick(pool) -> dict:
                 break
             follow_budget -= 1
             stats["reads"] += 1
-            book = await asyncio.to_thread(_read_book, d["market_id"])
+            book = await asyncio.to_thread(_read_book, d["market_id"],
+                                           pacing)
             read_at = datetime.now(tz=timezone.utc)
             mid = _mid_of(book)
             try:
@@ -317,10 +338,27 @@ async def run() -> None:
             await heartbeat("bettor_state", "store_not_ready", boot)
             await asyncio.sleep(BACKOFF_S)
 
+    pacing = READ_PACING_BASE_S
     while True:
         started = time.monotonic()
         try:
-            stats = await tick(pool)
+            stats = await tick(pool, pacing=pacing)
+            # ADAPTIVE, AND ASYMMETRIC ON PURPOSE. A refused read
+            # multiplies the gap; a clean tick only walks it back a
+            # step. Backing off fast and recovering slowly is what
+            # keeps this loop out of the mirror's way, and the cost of
+            # being too slow here is a smaller dataset, while the cost
+            # of being too fast is the mirror's latency.
+            if stats.get("rateLimited"):
+                pacing = min(READ_PACING_MAX_S, pacing * BACKOFF_GROWTH)
+                log.warning(
+                    "bettor_state: %d of %d reads refused by the venue; "
+                    "pacing now %.2fs. The readable subset of this "
+                    "dataset is NOT missing-at-random while this "
+                    "persists -- see READABILITY_IS_NOT_MISSING_AT_RANDOM",
+                    stats["rateLimited"], stats.get("read", 0), pacing)
+            elif stats.get("read"):
+                pacing = max(READ_PACING_BASE_S, pacing * BACKOFF_RECOVERY)
         except Exception as exc:                               # noqa: BLE001
             log.warning("bettor_state: tick failed", exc_info=True)
             stats = {"status": "tick_failed",

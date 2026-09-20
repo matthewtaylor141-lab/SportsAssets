@@ -533,3 +533,50 @@ def test_the_worker_does_not_order_its_universe_by_activity():
     assert "ORDER BY" not in w.PREMAP_SQL
     assert "LIMIT" not in w.PREMAP_SQL
     assert "updated_at" in inspect.getsource(w)   # only in the WHERE
+
+
+# ── the instrument's own bias, named rather than assumed away ────────
+
+def test_the_readable_subset_is_not_assumed_missing_at_random():
+    """THE CAVEAT THAT WOULD OTHERWISE BE SILENT. The frame is unbiased
+    -- a selected market writes a row either way -- but read refusals
+    come from a shared gateway whose heaviest other consumer is busiest
+    when games are live, and live status is correlated with the
+    dynamics being measured."""
+    t = sc.READABILITY_IS_NOT_MISSING_AT_RANDOM
+    assert "sampling frame is unbiased" in t
+    assert "READABLE SUBSET may not be" in t
+    assert "LIVE_STATUS" in t
+    assert "must carry this caveat" in t
+
+
+def test_every_row_carries_the_readability_caveat():
+    for book in (BOOK, None):
+        r = sc.state_record(_subject(), observed_at=T0, book=book)
+        assert r["readabilityIsNotMissingAtRandom"] == \
+            sc.READABILITY_IS_NOT_MISSING_AT_RANDOM
+
+
+def test_a_refused_read_is_distinguishable_from_an_empty_book():
+    """The two call for opposite responses: one means slow down, the
+    other is a fact about the market. Pooling them would hide both."""
+    refused = sc.state_record(_subject(), observed_at=T0, book=None,
+                              read_error="RateLimitError")
+    empty = sc.state_record(_subject(), observed_at=T0, book={
+        "bids": [], "offers": [], "stats": {}})
+    assert "RateLimit" in refused["BOOK_READABILITY_STATUS"]
+    assert "RateLimit" not in empty["BOOK_READABILITY_STATUS"]
+    assert refused["BOOK_READABILITY_STATUS"] != \
+        empty["BOOK_READABILITY_STATUS"]
+
+
+def test_the_capture_backs_off_fast_and_recovers_slowly():
+    """It is the lowest-priority consumer of the shared gateway. The
+    cost of being too slow is a smaller dataset; the cost of being too
+    fast is the mirror's latency."""
+    from sportsassets.workers import bettor_state as w
+    assert w.BACKOFF_GROWTH > 1.0
+    assert 0 < w.BACKOFF_RECOVERY < 1.0
+    # Asymmetric: one refusal must not be undone by one clean tick.
+    assert w.BACKOFF_GROWTH * w.BACKOFF_RECOVERY > 1.0
+    assert w.READ_PACING_MAX_S > w.READ_PACING_BASE_S
