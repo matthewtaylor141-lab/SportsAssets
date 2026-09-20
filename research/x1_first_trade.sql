@@ -329,5 +329,29 @@ SELECT 'reentry|' || p.experiment_id
                    ORDER BY p.opened_at))) < 60)::text, 'N/A')
        || '|notional=' || round(p.entry_notional_usd::numeric, 2)
   FROM bettor_experimental_positions p
- ORDER BY p.experiment_id, p.market_id, p.opened_at
+ ORDER BY p.experiment_id DESC, p.market_id, p.opened_at
  LIMIT 40;
+
+\echo ''
+\echo '--- 12. RE-ENTRY VIOLATIONS against the frozen 60S horizon ---'
+-- EXIT_RULE_HORIZON: "no discretionary hold, no averaging down, no
+-- re-entry inside the horizon". X1's frozen horizon is 60S. Counted
+-- rather than eyeballed, per experiment.
+WITH gaps AS (
+    SELECT p.experiment_id, p.market_id, p.opened_at,
+           EXTRACT(EPOCH FROM (p.opened_at - lag(p.opened_at) OVER (
+               PARTITION BY p.experiment_id, p.market_id
+                ORDER BY p.opened_at))) AS gap_s
+      FROM bettor_experimental_positions p
+)
+SELECT 'reentry_census|' || experiment_id
+       || '|POSITIONS=' || count(*)
+       || '|REENTRIES=' || count(*) FILTER (WHERE gap_s IS NOT NULL)
+       || '|INSIDE_60S_HORIZON=' || count(*) FILTER (WHERE gap_s < 60)
+       || '|min_gap_s=' || COALESCE(round(min(gap_s)::numeric, 1)::text, 'NA')
+       || '|p50_gap_s=' || COALESCE(round(percentile_cont(0.5) WITHIN GROUP (
+              ORDER BY gap_s)::numeric, 1)::text, 'NA')
+       || '|REENTRY_POLICY=EXIT_RULE_HORIZON_DECLARED_BUT_NOT_EXECUTED'
+  FROM gaps
+ GROUP BY experiment_id
+ ORDER BY experiment_id;
