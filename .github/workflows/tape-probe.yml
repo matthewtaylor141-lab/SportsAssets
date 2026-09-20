@@ -54,7 +54,10 @@ jobs:
         # AST gate actually verifies.
         run: |
           set -eu
-          python3 -m pip install --quiet pytest
+          # httpx too: test_tape_capture imports the capturer, which
+          # imports httpx at module scope. The guard must be able to
+          # PARSE the module it is gating.
+          python3 -m pip install --quiet pytest httpx
           cd research/beta48/tape
           python3 -m pytest test_tape_capture.py -q
           python3 guard_probe.py tape_probe.py
@@ -64,7 +67,6 @@ jobs:
           set -eu
           MAX="$(jq -r '.inputs.max_files // "1"' "$GITHUB_EVENT_PATH")"
           case "$MAX" in ''|*[!0-9]*) echo "refused: max_files must be digits"; exit 1 ;; esac
-          python3 -m pip install --quiet httpx
           cd research/beta48/tape
           python3 tape_probe.py --out /tmp/tape --max-files "$MAX"
 
