@@ -23,6 +23,11 @@ on:
     paths:
       - "backend/Dockerfile"
       - "backend/sportsassets/bettor_ev_bridge.py"
+      # .dockerignore decides what reaches the build at all: an
+      # over-broad rule there ships an image whose bridge can never
+      # load, and nothing else in CI would notice.
+      - ".dockerignore"
+      - ".github/workflows/backend-image-check.yml"
       - "render.yaml"
       - "research/beta48/shadow/**"
 permissions:
