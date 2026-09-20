@@ -786,9 +786,32 @@ async def take_markouts(pool, *, now=None, window_s=86400,
             if out["status"] == mk.NOT_YET_MATURE:
                 stats["notYetMature"] += 1
                 continue
-            await xstore.record_markout(pool,
-                                        subject["experimentalDecisionId"],
-                                        subject["positionId"], out)
+            # SCORING MUST NOT BE ABLE TO STOP DECIDING (found in
+            # production 2026-09-20 01:23Z). take_markouts runs BEFORE
+            # seal_population in the tick, so one rejected markout
+            # insert -- a CHECK that had not been widened for the
+            # direct regime -- took down the whole experiment for
+            # twenty-five minutes: no markouts AND no new decisions,
+            # while the sampler kept writing observations and the lane
+            # looked alive from outside.
+            #
+            # A MARKOUT IS A LATER FACT ABOUT A TRADE THAT ALREADY
+            # HAPPENED. Failing to write one must cost that markout and
+            # nothing else. The failure is counted and logged rather
+            # than swallowed silently, and the horizon stays unmarked
+            # so the next tick retries it.
+            try:
+                await xstore.record_markout(
+                    pool, subject["experimentalDecisionId"],
+                    subject["positionId"], out)
+            except Exception as exc:                           # noqa: BLE001
+                stats["writeFailed"] = stats.get("writeFailed", 0) + 1
+                stats["writeError"] = "%s: %s" % (type(exc).__name__,
+                                                  str(exc)[:160])
+                log.error("shadow_experimental: markout write failed for "
+                          "%s %s: %s", subject["experimentalDecisionId"],
+                          horizon, exc, exc_info=True)
+                continue
             stats["observed" if out["status"] == mk.OBSERVED
                   else "notIdentified"] += 1
     return stats
