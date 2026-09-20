@@ -461,3 +461,28 @@ SELECT 'focus_quality|' || symbol
  WHERE observed_at > now() - interval '2 hours'
  GROUP BY symbol
  ORDER BY count(*) DESC LIMIT 20;
+
+\echo ''
+\echo '--- 22c. EVERY 30S ROW: how much time actually elapsed ---'
+-- The 30S classification is STRUCTURAL: the 30s tolerance on a 30s
+-- horizon admits a window whose lower bound is the decision instant,
+-- so a book at zero elapsed time would qualify. Whether that actually
+-- HAPPENED in the rows already written is a separate question, and
+-- this answers it per row rather than by inference from a median.
+-- elapsed = observed_at - decision_timestamp; a value near 0 is the
+-- entry book wearing a later label, a value near 30 is a real markout
+-- that simply cannot be GUARANTEED on a ~61s grid.
+SELECT 'elapsed|' || m.horizon
+       || '|' || m.experimental_decision_id
+       || '|elapsed_s=' || round(EXTRACT(EPOCH FROM (
+              m.observed_at - d.decision_timestamp))::numeric, 1)
+       || '|lag_s=' || round((m.observed_lag_ms / 1000.0)::numeric, 1)
+       || '|tol_s=' || round((m.tolerance_ms / 1000.0)::numeric, 1)
+       || '|status=' || m.status
+       || '|executable=' || COALESCE(round(m.executable_markout_usd::numeric,
+                                           2)::text, 'NULL')
+  FROM bettor_experimental_markouts m
+  JOIN bettor_experimental_decisions d
+    ON d.experimental_decision_id = m.experimental_decision_id
+ WHERE m.horizon = '30S'
+ ORDER BY m.observed_at;
