@@ -593,7 +593,8 @@ def _scaled(per_contract, size):
 
 
 def evaluate(market_state: dict | None, *, size=None, fee=None,
-             root=None, no_fill_context=None) -> dict:
+             root=None, no_fill_context=None, risk_observed=None,
+             risk_state=None) -> dict:
     """The whole canonical action table for one observation."""
     try:
         machinery(root)
@@ -609,11 +610,31 @@ def evaluate(market_state: dict | None, *, size=None, fee=None,
                     "comparison" % exc),
         }
 
+    from . import bettor_risk_engine as risk
+
     band = fill_selection_band(root)
     table = [evaluate_action(a, market_state, size=size, fee=fee,
                              root=root, band=band,
                              no_fill_context=no_fill_context)
              for a in acts.ACTIONS]
+
+    # §18. THE RISK GATE IS CONSULTED HERE, not left as a module nobody
+    # calls -- which is the exact failure this whole integration
+    # started by fixing. Risk and economics are separate verdicts on
+    # every row: an action can be economically unidentified AND risk
+    # blocked, and collapsing them would lose which one to fix.
+    for row in table:
+        verdict = risk.evaluate(row["action"], observed=risk_observed,
+                                state=risk_state)
+        row["risk"] = {
+            "direction": verdict["direction"],
+            "permitted": verdict["permitted"],
+            "grossExposure": verdict["grossExposure"],
+            "directionalExposure": verdict["directionalExposure"],
+            "railsNotPassed": verdict["railsNotPassed"],
+            "gatesNotPassed": verdict["gatesNotPassed"],
+            "why": verdict["why"],
+        }
 
     cost_identified = [r["action"] for r in table
                        if r.get("status") == "EXECUTION_COST_IDENTIFIED"]
@@ -637,6 +658,10 @@ def evaluate(market_state: dict | None, *, size=None, fee=None,
         "fairValueSeparation": FAIR_VALUE_SEPARATION,
         FV_BETTOR_INDEPENDENT: NOT_IDENTIFIED,
         "fillSelectionPrior": band,
+        "riskPermittedActions": [r["action"] for r in table
+                                 if r["risk"]["permitted"]],
+        "riskBlockedActions": [r["action"] for r in table
+                               if not r["risk"]["permitted"]],
         "whyNoTrade": (
             "no action has an identified settlement EV, because that "
             "would require an independent fair value and none is "

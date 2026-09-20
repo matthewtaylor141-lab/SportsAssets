@@ -206,13 +206,56 @@ CANONICAL_ACTIONS = {
 
 ACTIONS = tuple(CANONICAL_ACTIONS)
 
-# Actions that can ever open or increase exposure. Listed so a reader
-# can see at a glance which half of the table is gated by the standing
-# "no new trades" instruction rather than by economics.
-EXPOSURE_INCREASING = (
-    "MAKE_YES", "MAKE_NO", "MAKE_BOTH", "TAKE_YES", "TAKE_NO",
-    "POST_COMPLEMENT", "TAKE_COMPLEMENT", "HEDGE",
-)
+# ── what each action does to exposure, on BOTH axes ──────────────────
+#
+# THIS IS THE SINGLE SOURCE. The risk engine consumes it rather than
+# keeping its own copy: an earlier version had both, they disagreed
+# about COMPLETE_PAIR, and a safety gate whose notion of "increases
+# exposure" differs from the action table's is a gate that can be
+# walked around by naming the action differently.
+#
+# GROSS is how much position exists. DIRECTIONAL is how much outcome
+# risk it carries. A hedge raises the first and lowers the second, so
+# a single axis must misclassify it whichever way it chooses.
+
+INCREASE = "INCREASE"
+DECREASE = "DECREASE"
+UNCHANGED = "UNCHANGED"
+
+EXPOSURE_EFFECT = {
+    "MAKE_YES": (INCREASE, INCREASE),
+    "MAKE_NO": (INCREASE, INCREASE),
+    # Both legs resting seeks a pair, so a completed MAKE_BOTH is
+    # directionally neutral -- but only if BOTH fill. One leg alone is
+    # a directional position, which is the Ferrari residual.
+    "MAKE_BOTH": (INCREASE, UNCHANGED),
+    "TAKE_YES": (INCREASE, INCREASE),
+    "TAKE_NO": (INCREASE, INCREASE),
+    "POST_COMPLEMENT": (INCREASE, DECREASE),
+    "TAKE_COMPLEMENT": (INCREASE, DECREASE),
+    # COMPLETING A PAIR BUYS THE SECOND LEG. It neutralises outcome
+    # risk and it occupies MORE capital, on a second position, with its
+    # own fees. It belongs on the gated side of the table, and leaving
+    # it off was a real omission.
+    "COMPLETE_PAIR": (INCREASE, DECREASE),
+    "HEDGE": (INCREASE, DECREASE),
+    "MERGE": (DECREASE, UNCHANGED),
+    "DIRECT_EXIT": (DECREASE, DECREASE),
+    "HOLD": (UNCHANGED, UNCHANGED),
+    "WAIT_REQUOTE": (UNCHANGED, UNCHANGED),
+    "HOLD_TO_SETTLEMENT": (UNCHANGED, UNCHANGED),
+    "NO_TRADE": (UNCHANGED, UNCHANGED),
+}
+
+TWO_AXES = (
+    "GROSS exposure is how much position exists; DIRECTIONAL exposure "
+    "is how much outcome risk it carries. A hedge raises the first and "
+    "lowers the second, so a single-axis model must misclassify it "
+    "whichever way it chooses")
+
+# Derived, never hand-maintained beside the table above.
+EXPOSURE_INCREASING = tuple(
+    a for a in CANONICAL_ACTIONS if EXPOSURE_EFFECT[a][0] == INCREASE)
 
 UNKNOWN_IS_NEVER_ZERO = (
     "a term whose value is not identified propagates as "
