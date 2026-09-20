@@ -191,6 +191,15 @@ def analyse(csv_text, *, url=None, fetched_at=None, sha256=None,
     out["symbolLengthHistogram"] = dict(
         Counter(len(s) for s in uniq).most_common(10))
 
+    # THE JOIN TEST'S INPUT. The busiest symbols, so the membership
+    # check against us_premap.market_slug runs on markets that actually
+    # traded rather than on whichever names sort first.
+    sym_rows = Counter(s for s in syms if s)
+    out["topSymbolsByRows"] = [{"symbol": k, "rows": n}
+                               for k, n in sym_rows.most_common(40)]
+    out["symbolKindHistogram"] = dict(
+        Counter(s.split("-", 1)[0] for s in uniq).most_common(20))
+
     out["PRICE_PRECISION"] = dict(
         Counter(_decimals(v) for v in pxs).most_common())
     out["QUANTITY_PRECISION"] = dict(
@@ -402,6 +411,17 @@ def probe(outdir: Path, max_files: int = 1) -> dict:
     block["file"] = analyse(first.get("text"), url=first.get("url"),
                             fetched_at=first.get("requested_at_utc"),
                             sha256=first.get("sha256"))
+    # A CAPPED READ MAKES EVERY COUNT A FLOOR. tape_capture stops at
+    # MAX_BYTES, and a 64 MiB file read to exactly 64 MiB was cut. Row
+    # counts, unique symbols and the LATEST transaction timestamp are
+    # then lower bounds on the day, not the day.
+    block["file"]["TRUNCATED_AT_MAX_BYTES"] = bool(first.get("truncated"))
+    block["file"]["MAX_BYTES"] = TC.MAX_BYTES
+    if first.get("truncated"):
+        block["file"]["truncationCaveat"] = (
+            "the read stopped at MAX_BYTES, so TAPE_ROWS, UNIQUE_SYMBOLS "
+            "and LATEST_TRANSACTION_TIMESTAMP are FLOORS for this "
+            "business day rather than its totals. EARLIEST is unaffected")
     # PUBLICATION LAG, OBSERVED. The gap between the file's business date
     # and the moment we successfully retrieved it. Not a promise about
     # the venue's schedule -- one observation of it.

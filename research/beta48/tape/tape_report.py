@@ -32,6 +32,8 @@ FILE_FIELDS = (
     "maxPrintsAtOneTimeSymbolPrice", "runningTotalColumns",
     "symbolsWithQuantityNonDecreasing", "symbolsCheckedForMonotonicity",
     "TAPE_CUMULATIVE_OR_INCREMENTAL",
+    "TRUNCATED_AT_MAX_BYTES", "MAX_BYTES", "truncationCaveat",
+    "symbolKindHistogram",
 )
 
 
@@ -44,7 +46,8 @@ def main(argv=None):
     out["file"] = {k: f.get(k) for k in FILE_FIELDS if k in f}
     # A short sample for the deterministic-join test against
     # us_premap.market_slug. Capped: the file carries ~97k symbols.
-    out["file"]["symbolSample"] = (f.get("symbolSample") or [])[:12]
+    out["file"]["symbolSample"] = (f.get("symbolSample") or [])[:8]
+    out["file"]["topSymbolsByRows"] = (f.get("topSymbolsByRows") or [])[:40]
     print(json.dumps(out, indent=1))
     return 0
 
