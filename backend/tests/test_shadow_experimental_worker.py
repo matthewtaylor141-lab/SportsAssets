@@ -26,6 +26,7 @@ THE FAILURES THESE PREVENT:
 from __future__ import annotations
 
 import json
+import pathlib
 from datetime import datetime, timedelta, timezone
 
 import pytest
@@ -616,3 +617,17 @@ def test_the_eligibility_rule_changed_and_its_hash_says_so():
     assert "focus-set sampler" in xstore.ELIGIBILITY_RULE
     assert len(xstore.ELIGIBILITY_RULE_SHA) == 16
     assert xstore.ELIGIBILITY_RULE_SHA != "9b3d16e000000000"
+
+
+@pytest.mark.asyncio
+async def test_the_store_wait_re_checks_and_wakes_when_the_alter_lands():
+    """THE API SERVICE RUNS THE MIGRATIONS; THIS WORKER IS A DIFFERENT
+    SERVICE, and the two deploy in no guaranteed order. A wait loop
+    that only heartbeated would leave the lane dark until someone
+    restarted it by hand -- minutes after the ALTER it was waiting for
+    had landed, and with nothing saying so."""
+    src = (pathlib.Path(worker.__file__).read_text())
+    body = src.split("async def run(")[1]
+    assert "while not ready[\"storeReady\"]:" in body
+    assert "await xstore.store_ready(pool)" in body.split(
+        "while not ready[\"storeReady\"]:")[1]

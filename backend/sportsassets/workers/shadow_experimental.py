@@ -585,10 +585,28 @@ async def run() -> None:
                 disclosure=xp.EXPERIMENTAL_DISCLOSURE)
     log.info("shadow_experimental: %s", boot)
 
-    if not ready["storeReady"]:
-        while True:
-            await heartbeat("shadow_experimental", "store_not_ready", boot)
-            await asyncio.sleep(BACKOFF_S)
+    # IT RE-CHECKS, AND THAT MATTERS HERE. The API service runs the
+    # migrations on ITS boot; this worker is a different service and
+    # the two deploy in no guaranteed order. A wait loop that only
+    # heartbeated would leave the lane dark until somebody restarted
+    # it by hand -- minutes after the ALTER it was waiting for had
+    # landed, and with nothing saying so.
+    while not ready["storeReady"]:
+        await heartbeat("shadow_experimental", "store_not_ready", boot)
+        await asyncio.sleep(BACKOFF_S)
+        try:
+            ready = await xstore.store_ready(pool)
+        except Exception as exc:                               # noqa: BLE001
+            log.warning("shadow_experimental: store check failed: %s", exc)
+            continue
+        boot = dict(boot, storeReady=ready["storeReady"],
+                    problems=ready["problems"])
+        if ready["storeReady"]:
+            # The registry is written down the moment the store can
+            # take it, not at the next restart.
+            frozen = await xstore.freeze_experiments(pool, reg.EXPERIMENTS)
+            boot = dict(boot, experimentsWritten=frozen["written"])
+            log.info("shadow_experimental: store became ready; %s", boot)
 
     if mismatched:
         # FAIL CLOSED. A declaration whose hash no longer re-derives
