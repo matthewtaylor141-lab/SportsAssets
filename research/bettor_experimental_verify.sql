@@ -849,6 +849,21 @@ SELECT 'block_effective|' || b.experiment_id
        || '|last_position_written='
        || COALESCE(to_char(max(p.written_at),
                            'YYYY-MM-DD HH24:MI:SSZ'), 'NONE')
+       -- THE FIGURE THAT STAYS AN ALARM. The count above includes the
+       -- deploy transition: on 2026-09-20 two X1C positions were
+       -- written at 13:11:50Z, one second after the guard's first
+       -- refusal at 13:11:49Z, by a worker process that had not yet
+       -- restarted onto the guarded code. Those two rows are real,
+       -- preserved, and will make `positions_written_after` read 2
+       -- forever -- which would mask a genuine recurrence.
+       --
+       -- So the LIVE alarm is the one below: anything written more
+       -- than a restart window after blocking began cannot be a
+       -- rolling deploy and is a leak in the guard itself. It must
+       -- stay 0.
+       || '|LEAKED_AFTER_TRANSITION=' || count(p.position_id)
+              FILTER (WHERE p.written_at
+                            > b.blocking_began + interval '120 seconds')
   FROM first_block b
   LEFT JOIN positions p
     ON p.experiment_id = b.experiment_id
