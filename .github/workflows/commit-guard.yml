@@ -7,6 +7,25 @@ name: commit-guard
 # commit loud and permanent in the run history rather than invisible.
 #
 # THIS WORKFLOW MUST NOT DEPLOY ANYTHING. It reads commit messages and exits.
+#
+# TWO WAYS A DEPLOY-APPROVED COMMIT SILENTLY FAILS TO DEPLOY (2026-09-20).
+# Both were hit in one session; neither produces an error anywhere.
+#
+# 1. RENDER EVALUATES ONLY THE TIP OF A PUSH. Push two commits where the
+#    first is deploy-approved and the second suppresses the build, and
+#    the first never deploys -- it gets no Render event at all, so it
+#    does not even appear as ignored. This guard checks that EVERY
+#    pushed commit declares its intent, which is the right check for its
+#    own question, and it cannot see this one.
+#
+# 2. RENDER SCANS THE WHOLE COMMIT MESSAGE, NOT JUST THE SUBJECT. A
+#    commit whose BODY quotes the suppression directive -- for example a
+#    message explaining this very trap -- suppresses itself. That is how
+#    7f7a9a6 was ignored while carrying deploy-approved in its subject.
+#
+# If a deploy-approved commit does not appear in `render-ops deploys`,
+# check `render-ops events` for commit_ignored before assuming it is
+# live. A push is not a deploy.
 
 on:
   push:
