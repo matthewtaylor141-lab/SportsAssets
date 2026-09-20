@@ -212,9 +212,32 @@ MEASUREMENT_WINDOW = {
 # and at what cost to initial coverage -- because the reservation is a
 # REALLOCATION of a fixed budget, not an increase, so any gain in
 # follow-ups is paid for in initial reads.
+# The repair's deployment, recorded so outcomes collected before and
+# after it stay distinguishable without inference from row timestamps.
+REPAIR_DEPLOYMENTS = (
+    {"change": "FOLLOWUP_BUDGET_RESERVATION",
+     "commit": "7101382",
+     "deployStarted": "2026-09-20T22:07:22Z",
+     "deployEnded": "2026-09-20T22:08:17Z",
+     "pacingVersion": "BETTOR_CAPTURE_PACING_V2_ADAPTIVE",
+     "universeVersion": "BETTOR_UNSELECTED_STATE_V2",
+     "what": ("tick budget split before either pass; follow-up share "
+              "can no longer be consumed by sampling. Total reads per "
+              "tick unchanged, so gateway pacing is identical"),
+     "alsoFixed": ("fu_due now counts true outstanding demand via "
+                   "mids_outstanding rather than the post-limit batch; "
+                   "fu_selected records what the budget admitted"),
+     "cohortsBefore": "W1 and everything earlier, on 1dc4854 and prior",
+     "cohortsAfter": "W2 and everything later"},
+)
+
 MEASUREMENT_WINDOW_W2 = {
     "id": "POST_RESERVATION_REPAIR_W2",
     "declaredAt": "2026-09-20T22:10Z",
+    "startsAt": "2026-09-20T22:18:17Z",
+    "endsAt": "2026-09-20T22:48:17Z",
+    "boundsFixedBy": ("deploy 7101382 ended 22:08:17Z + 10 min warm-up; "
+                      "the rule, not a choice made after seeing data"),
     "declaredBeforeRepairDeployed": True,
     "startRule": ("completion of the deploy carrying the follow-up "
                   "budget reservation, PLUS a 10-minute warm-up, "
