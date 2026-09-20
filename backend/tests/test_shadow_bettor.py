@@ -565,7 +565,7 @@ BPOL_SRC = (BACKEND / "sportsassets" / "shadow_bettor_policy.py").read_text()
 
 def test_the_bettor_policy_is_its_own_and_not_rn1s():
     p = bpol.frozen_policy()
-    assert p["policyVersion"] == "BETTOR_EV_SHADOW_V4"
+    assert p["policyVersion"] == "BETTOR_EV_SHADOW_V5"
     assert p["policyVersion"] != rn1pol.RN1_SHADOW_POLICY_VERSION
     assert p["lane"] == lanes.BETTOR_EV_SHADOW
     assert p["policySha"] != rn1pol.POLICY_SHA
@@ -740,7 +740,7 @@ import sportsassets.workers.shadow_bettor as W
 from sportsassets import shadow_bettor_codesha as codesha
 
 
-def test_v4_is_the_running_policy_version():
+def test_v5_is_the_running_policy_version():
     """V3 computes the action table; V2 stubbed it.
 
     THE BUMP IS WHAT KEEPS DECISIONS WRITING. `decide` is inside the
@@ -753,12 +753,12 @@ def test_v4_is_the_running_policy_version():
     with the 4,503 rows that mean what V2's rules said -- is left
     exactly as it was.
     """
-    assert bettor.POLICY_VERSION == "BETTOR_EV_SHADOW_V4"
-    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V4"
-    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V3"
+    assert bettor.POLICY_VERSION == "BETTOR_EV_SHADOW_V5"
+    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V5"
+    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V4"
 
 
-def test_v4_considers_more_than_it_can_produce():
+def test_v5_considers_more_than_it_can_produce():
     """The lane still emits only NO_TRADE -- now after weighing 15."""
     assert bpol.ACTION_SET == [sh.NO_TRADE]
     assert len(bpol.CONSIDERED_ACTION_SET) == 15

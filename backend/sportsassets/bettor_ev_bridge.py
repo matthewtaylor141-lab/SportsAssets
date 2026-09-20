@@ -80,6 +80,7 @@ import sys
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
+from . import bettor_applicability as applic
 from . import bettor_ev_actions as acts
 
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
@@ -407,25 +408,96 @@ def _break_even_band(gross, fee, band):
 
 # ── the evaluation ───────────────────────────────────────────────────
 
+# ── §14: fields every row carries, present even when unknown ─────────
+#
+# An ABSENT field and an UNIDENTIFIED one read differently: absence
+# invites a reader to assume the engine does not model the term at all,
+# while NOT_IDENTIFIED says it is modelled and unmeasured. These are
+# stamped on every row before anything is priced.
+
+ALWAYS_PRESENT_FIELDS = (
+    "P_FILL_STATUS", "P_FILL_SOURCE",
+    "PAIR_EV", "PAIR_EV_STATUS",
+    "DIRECTIONAL_EV", "DIRECTIONAL_EV_STATUS",
+    "RESIDUAL_EV", "RESIDUAL_EV_STATUS",
+    "EXIT_HEDGE_EV", "EXIT_HEDGE_EV_STATUS",
+    "APPLICABILITY_STATUS", "APPLICABILITY_REASON",
+    "INVENTORY_STATE", "INVENTORY_STATE_REFERENCE",
+)
+
+P_FILL_SOURCE_REQUIRED = "BETTOR_NATIVE_ADMITTED_FILLS_REQUIRED"
+
+
+def _blank_row(action, spec, inventory_state, state_reference) -> dict:
+    """Every §14 field, defaulted to NOT_IDENTIFIED rather than omitted."""
+    row = {
+        "action": action,
+        "leg": spec["leg"],
+        "aggression": spec["aggression"],
+        "what": spec["what"],
+        "INVENTORY_STATE": inventory_state,
+        "INVENTORY_STATE_REFERENCE": state_reference or NOT_IDENTIFIED,
+        "P_FILL_STATUS": NOT_IDENTIFIED,
+        "P_FILL_SOURCE": P_FILL_SOURCE_REQUIRED,
+        # Carried on EVERY row, applicable or not, so a reader can
+        # never lose the separation by looking at an unpriced action.
+        FV_BETTOR_INDEPENDENT: NOT_IDENTIFIED,
+        "settlementEv": SETTLEMENT_EV_NOT_IDENTIFIED,
+    }
+    for term in ("PAIR_EV", "DIRECTIONAL_EV", "RESIDUAL_EV",
+                 "EXIT_HEDGE_EV"):
+        row[term] = NOT_IDENTIFIED
+        row["%s_STATUS" % term] = NOT_IDENTIFIED
+    return row
+
+
 def evaluate_action(action: str, market_state: dict | None, *,
                     size=None, fee=None, root=None, band=None,
-                    no_fill_context=None) -> dict:
-    """Price one canonical action, or say exactly why it cannot be."""
+                    no_fill_context=None, inventory_state=None,
+                    state_reference=None) -> dict:
+    """Price one canonical action, or say exactly why it cannot be.
+
+    APPLICABILITY RUNS FIRST (§2). An action that cannot exist in the
+    current inventory state is never priced and never reaches the risk
+    engine -- a zero on an impossible action outranks a negative on a
+    real one, so it carries no number at all.
+    """
     spec = acts.CANONICAL_ACTIONS.get(action)
     if spec is None:
         return {"action": action, "status": "UNKNOWN_ACTION",
                 "declared": list(acts.ACTIONS)}
+
+    state = inventory_state or applic.STATE_NOT_IDENTIFIED
+    row = _blank_row(action, spec, state, state_reference)
+    verdict = applic.applicability(action, state)
+    row.update({
+        "APPLICABILITY_STATUS": verdict["APPLICABILITY_STATUS"],
+        "APPLICABILITY_REASON": verdict["APPLICABILITY_REASON"],
+        "decisionScope": verdict.get("decisionScope"),
+    })
+
+    if verdict["APPLICABILITY_STATUS"] != applic.APPLICABLE:
+        # NOT PRICED, AND NOT RISK-EVALUATED. The economic and risk
+        # statuses say NOT_EVALUATED_NOT_APPLICABLE rather than
+        # NOT_IDENTIFIED: nothing was attempted, so nothing failed.
+        row.update({
+            "status": verdict["APPLICABILITY_STATUS"],
+            "ECONOMIC_STATUS": applic.NOT_EVALUATED,
+            "RISK_STATUS": applic.NOT_EVALUATED,
+            "expectedNetDollarsPerContract": NOT_IDENTIFIED,
+            "expectedNetDollars": NOT_IDENTIFIED,
+            "whyNot": verdict["APPLICABILITY_REASON"],
+            "whyNotZero": applic.WHY_ZERO_IS_WORSE_THAN_NOTHING,
+        })
+        return row
 
     m = machinery(root)
     AE = m["action_ev"]
     band = band if band is not None else fill_selection_band(root)
 
     fv = fair_value(market_state)
-    row = {
-        "action": action,
-        "leg": spec["leg"],
-        "aggression": spec["aggression"],
-        "what": spec["what"],
+    row.update({
+        "ECONOMIC_STATUS": "EVALUATED",
         "fairValueKind": fv["kind"],
         "fairValueBasis": fv["basis"],
         # §1: kept on EVERY row, so no reader can mistake a
@@ -435,7 +507,7 @@ def evaluate_action(action: str, market_state: dict | None, *,
         "researchVocabulary": {
             v: acts.research_action(action, v)
             for v in ("evCore", "actionEv", "positionState")},
-    }
+    })
     if spec.get("note"):
         row["note"] = spec["note"]
 
@@ -594,7 +666,8 @@ def _scaled(per_contract, size):
 
 def evaluate(market_state: dict | None, *, size=None, fee=None,
              root=None, no_fill_context=None, risk_observed=None,
-             risk_state=None) -> dict:
+             risk_state=None, inventory=None,
+             state_reference=None) -> dict:
     """The whole canonical action table for one observation."""
     try:
         machinery(root)
@@ -613,9 +686,16 @@ def evaluate(market_state: dict | None, *, size=None, fee=None,
     from . import bettor_risk_engine as risk
 
     band = fill_selection_band(root)
+    # §3: THE PORTFOLIO STATE IS DERIVED FIRST, and an unknown one
+    # is never forced into FLAT -- that would make every entry
+    # action look available on a book we cannot see.
+    st = applic.inventory_state(inventory)
+    state = st["state"]
     table = [evaluate_action(a, market_state, size=size, fee=fee,
                              root=root, band=band,
-                             no_fill_context=no_fill_context)
+                             no_fill_context=no_fill_context,
+                             inventory_state=state,
+                             state_reference=state_reference)
              for a in acts.ACTIONS]
 
     # §18. THE RISK GATE IS CONSULTED HERE, not left as a module nobody
@@ -624,6 +704,15 @@ def evaluate(market_state: dict | None, *, size=None, fee=None,
     # every row: an action can be economically unidentified AND risk
     # blocked, and collapsing them would lose which one to fix.
     for row in table:
+        # AN INAPPLICABLE ACTION IS NEVER RISK-EVALUATED. Reporting
+        # it as risk-permitted would say an impossible action is
+        # allowed, which is how DIRECT_EXIT came to read
+        # permitted=true on a book holding nothing.
+        if row.get("APPLICABILITY_STATUS") != applic.APPLICABLE:
+            row["risk"] = {"permitted": False,
+                           "RISK_STATUS": applic.NOT_EVALUATED,
+                           "why": row.get("APPLICABILITY_REASON")}
+            continue
         verdict = risk.evaluate(row["action"], observed=risk_observed,
                                 state=risk_state)
         row["risk"] = {
@@ -635,6 +724,8 @@ def evaluate(market_state: dict | None, *, size=None, fee=None,
             "gatesNotPassed": verdict["gatesNotPassed"],
             "why": verdict["why"],
         }
+        row["RISK_STATUS"] = ("PERMITTED" if verdict["permitted"]
+                              else "BLOCKED")
 
     cost_identified = [r["action"] for r in table
                        if r.get("status") == "EXECUTION_COST_IDENTIFIED"]

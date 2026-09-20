@@ -99,8 +99,8 @@ def test_the_sizing_policy_does_not_confer_eligibility():
     # at the next boot for a cosmetic edit.
     assert szpol.DECLARATION["eligibilityRemainsWith"] == \
         "BETTOR_EV_SHADOW_V1"
-    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V3"
-    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V4"
+    assert bpol.DECLARATION["supersedes"] == "BETTOR_EV_SHADOW_V4"
+    assert bpol.BETTOR_POLICY_VERSION == "BETTOR_EV_SHADOW_V5"
     # The EV policy still emits exactly one action, so nothing can be
     # sized today at all.
     assert bpol.ACTION_SET == [sh.NO_TRADE]

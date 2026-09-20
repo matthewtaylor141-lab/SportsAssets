@@ -168,23 +168,54 @@ def test_the_residual_rail_names_the_ferrari_failure():
 
 # ── §18 wired, not merely built ──────────────────────────────────────
 
+def _res_inventory():
+    from sportsassets import bettor_inventory as binv
+    return binv.inventory(
+        [{"leg": "YES", "qty": "100", "price": "0.48"},
+         {"leg": "NO", "qty": "60", "price": "0.49"}],
+        identity_status="EXACT_ONE_TO_COMPLEMENT_BASKET")
+
+
 def test_the_risk_gate_is_actually_consulted_by_the_bridge():
     """A risk module nobody calls is the failure this work began by fixing."""
     from sportsassets import bettor_ev_bridge as evb
     out = evb.evaluate({"bid": "0.48", "ask": "0.52", "mid": "0.50",
-                        "readable": True}, fee="0.001")
+                        "readable": True}, fee="0.001",
+                       inventory=_res_inventory())
     assert all("risk" in r for r in out["table"])
-    assert set(out["riskBlockedActions"]) == set(acts.EXPOSURE_INCREASING)
+    # Every exposure-increasing action that is APPLICABLE here is
+    # risk-blocked; inapplicable ones were never risk-evaluated at all.
+    applicable = {r["action"] for r in out["table"]
+                  if r["APPLICABILITY_STATUS"] == "APPLICABLE"}
+    assert set(out["riskBlockedActions"]) >= (
+        applicable & set(acts.EXPOSURE_INCREASING))
     assert "DIRECT_EXIT" in out["riskPermittedActions"]
+
+
+def test_an_inapplicable_action_is_never_risk_permitted():
+    """DIRECT_EXIT read permitted=true on a book holding nothing."""
+    from sportsassets import bettor_ev_bridge as evb
+    from sportsassets import bettor_inventory as binv
+    flat = binv.inventory([], identity_status="EXACT_ONE_TO_COMPLEMENT_BASKET")
+    out = evb.evaluate({"bid": "0.48", "ask": "0.52", "mid": "0.50",
+                        "readable": True}, fee="0.001", inventory=flat)
+    rows = {r["action"]: r for r in out["table"]}
+    for action in ("DIRECT_EXIT", "HOLD", "MERGE", "COMPLETE_PAIR"):
+        assert rows[action]["risk"]["permitted"] is False, action
+        assert rows[action]["risk"]["RISK_STATUS"] == \
+            "NOT_EVALUATED_NOT_APPLICABLE", action
+        assert action not in out["riskPermittedActions"], action
 
 
 def test_risk_and_economics_are_separate_verdicts():
     """An action can be risk-clear and economically unidentified."""
     from sportsassets import bettor_ev_bridge as evb
     out = evb.evaluate({"bid": "0.48", "ask": "0.52", "mid": "0.50",
-                        "readable": True}, fee="0.001")
+                        "readable": True}, fee="0.001",
+                       inventory=_res_inventory())
     rows = {r["action"]: r for r in out["table"]}
     merge = rows["MERGE"]
+    assert merge["APPLICABILITY_STATUS"] == "APPLICABLE"
     assert merge["risk"]["permitted"] is True      # reduces gross exposure
     assert merge["status"] == evb.NOT_IDENTIFIED   # no venue mechanism
 

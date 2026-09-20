@@ -38,6 +38,7 @@ import logging
 from datetime import datetime, timezone
 
 from . import bettor_ev_bridge as evb
+from . import bettor_inventory as binv
 from . import shadow as sh
 from . import shadow_lanes as lanes
 from . import shadow_store as store
@@ -45,30 +46,31 @@ from . import shadow_store as store
 log = logging.getLogger(__name__)
 
 MODEL_VERSION = "bettor_ev_v0_collecting"
-# V3 -> V4. V3 WAS FROZEN AGAINST CODE THAT NO LONGER EXISTS.
+# THE VERSION LEDGER. Each bump marks a real change in what the lane
+# DOES, so rows written under one version always mean what that
+# version's rules said. The guard enforces it: change `decide` without
+# bumping and production refuses to write at all.
 #
-# An unintended deploy of the first bridge froze V3 at 15:07:07 with
-# that version's code sha (8247f618e2a0777e). The corrections that
-# followed -- carrying FILL_SELECTION_EFFECT as a prior instead of
-# zeroing it, and renaming the crossing result to an execution cost
-# rather than a refuted EV -- changed `decide`, so the running sha
-# became a09a6c2aad2e8c39 and the production worker refused to write:
+#   V1  collecting; action table stubbed
+#   V2  collecting; action table stubbed
+#   V3  action table computed -- but the EV machinery could not load in
+#       the deployed image, so every V3 row reads
+#       EV_MACHINERY_UNAVAILABLE and none carries a priced action.
+#       Frozen against the first bridge's sha, which is why the
+#       corrections could not be written under it.
+#   V4  machinery loaded; 15 actions priced. BUT priced ALL of them,
+#       including actions that cannot exist -- HOLD on an empty book at
+#       EV 0, DIRECT_EXIT risk-permitted with nothing to sell.
+#   V5  APPLICABILITY GATES ECONOMICS. The portfolio state is derived
+#       first and an action that cannot exist in it is never priced and
+#       never risk-evaluated.
 #
-#     policyIntegrity   POLICY_CODE_DRIFT
-#     decision writing  BLOCKED
-#
-# That is the guard working, not failing. A version whose rows claim
-# one set of rules must not be extended by code implementing another,
-# and freeze_policy says the remedy in as many words: bump the version.
-#
-# WHAT THE BOUNDARY NOW MEANS, which is worth more than the fix. V3 is
-# exactly the cohort written while the EV machinery could not load --
-# every one of its rows reads EV_MACHINERY_UNAVAILABLE. V4 is the first
-# version able to load the engines at all. The two regimes are
-# separated by a version rather than by a timestamp anyone has to
-# remember, and V3's rows stay immutable evidence of the period before
-# the packaging landed.
-POLICY_VERSION = "BETTOR_EV_SHADOW_V4"
+# WHY V4 COULD NOT SIMPLY BE AMENDED. A zero on an impossible action is
+# not a harmless placeholder: zero beats every negative number, so a
+# nonexistent HOLD would outrank a real take in any ranking. V4's rows
+# say something different about the world than V5's do, and the
+# version is what keeps them distinguishable.
+POLICY_VERSION = "BETTOR_EV_SHADOW_V5"
 
 # THE SELECTION RULE, FROZEN. A dataset whose selection rule is
 # unrecorded cannot be reasoned about later -- every measurement over it
@@ -328,7 +330,7 @@ def blockers_for(opportunity: dict, market_state: dict | None) -> list:
 
 
 def decide(opportunity: dict, market_state: dict | None, *,
-           decision_ts=None) -> dict:
+           decision_ts=None, inventory=None) -> dict:
     """BETTOR's own prospective decision.
 
     NO_TRADE TODAY, ALWAYS, AND HONESTLY. This function has no path that
@@ -359,7 +361,14 @@ def decide(opportunity: dict, market_state: dict | None, *,
     # the entire book and report its dollars as if we meant to send it.
     # The per-contract economics, which the book DOES determine, are
     # reported in full.
-    ev = evb.evaluate(market_state)
+    # §2/§3: THE PORTFOLIO STATE DECIDES WHICH ACTIONS EXIST, before
+    # any of them is priced. `inventory` is read by write_decision and
+    # passed in; when it is absent the state is STATE_NOT_IDENTIFIED
+    # and NOTHING is priced -- an unknown book is never assumed flat,
+    # because that would make every entry action look available on
+    # inventory we could not see.
+    ev = evb.evaluate(market_state, inventory=inventory,
+                      state_reference=opportunity.get("marketId"))
     record = lanes.not_yet_eligible(
         features=opportunity.get("featureLineage") or {},
         shadowDecisionId=_id("bdec", opportunity["bettorOpportunityId"],
@@ -442,11 +451,31 @@ def decide(opportunity: dict, market_state: dict | None, *,
 
 
 async def write_decision(opportunity: dict, market_state: dict | None, *,
-                         pool=None, decision_ts=None) -> tuple[str, bool]:
+                         pool=None, decision_ts=None,
+                         inventory=None) -> tuple[str, bool]:
     if market_state is not None:
         await store.record_market_state(market_state, pool=pool)
+    # THE PER-LEG INVENTORY FOR THIS MARKET, ON THIS LANE. Read here
+    # rather than inside decide() because decide() is synchronous and
+    # must stay so: it is inside the frozen code boundary, and a
+    # decision that could block on a database read is a decision whose
+    # timing depends on the database.
+    #
+    # A FAILED READ IS NOT AN EMPTY BOOK. If inventory cannot be read
+    # the state stays NOT_IDENTIFIED and nothing is priced, which is
+    # the honest outcome: we do not know what we hold.
+    if inventory is None and pool is not None:
+        try:
+            market_id = opportunity.get("marketId")
+            if market_id:
+                inventory = await binv.load(pool, market_id)
+        except Exception as exc:                           # noqa: BLE001
+            log.warning("bettor inventory read failed for %s: %s: %s",
+                        opportunity.get("marketId"), type(exc).__name__, exc)
+            inventory = None
     return await store.record_decision(
-        decide(opportunity, market_state, decision_ts=decision_ts),
+        decide(opportunity, market_state, decision_ts=decision_ts,
+               inventory=inventory),
         pool=pool)
 
 

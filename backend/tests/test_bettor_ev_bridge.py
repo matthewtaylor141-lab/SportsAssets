@@ -18,6 +18,34 @@ from sportsassets import shadow_bettor as sb
 BOOK = {"bid": "0.48", "ask": "0.52", "mid": "0.50",
         "availableDepth": "250", "readable": True}
 
+CONFIRMED = "EXACT_ONE_TO_COMPLEMENT_BASKET"
+
+
+def _flat():
+    """A DECLARED flat book. Absent inventory is STATE_NOT_IDENTIFIED,
+    never FLAT, so a test that wants entry actions priced has to say
+    which state it is testing."""
+    from sportsassets import bettor_inventory as binv
+    return binv.inventory([], identity_status=CONFIRMED)
+
+
+def _yes_residual(qty="100", px="0.48"):
+    from sportsassets import bettor_inventory as binv
+    return binv.inventory([{"leg": "YES", "qty": qty, "price": px}],
+                          identity_status=CONFIRMED)
+
+
+def _partially_matched():
+    from sportsassets import bettor_inventory as binv
+    return binv.inventory(
+        [{"leg": "YES", "qty": "100", "price": "0.48"},
+         {"leg": "NO", "qty": "60", "price": "0.49"}],
+        identity_status=CONFIRMED)
+
+
+def _ev(book=BOOK, inventory=None, **kw):
+    return evb.evaluate(book, inventory=inventory or _flat(), **kw)
+
 
 def _row(result, action):
     return {r["action"]: r for r in result["table"]}[action]
@@ -28,7 +56,7 @@ def _row(result, action):
 def test_the_engine_is_imported_not_reimplemented():
     """§0: do not create duplicate engines. The bridge must LOAD them."""
     assert evb.available(), "research EV machinery did not load"
-    prov = evb.evaluate(BOOK)["engineProvenance"]
+    prov = _ev()["engineProvenance"]
     assert prov["loadedFrom"].endswith("research/beta48/shadow")
     assert "action_ev" in prov["modules"]
     # §2: every named module must import, not just the first one.
@@ -42,7 +70,7 @@ def test_missing_machinery_refuses_rather_than_improvises(monkeypatch):
         raise evb.MachineryUnavailable("simulated absence")
 
     monkeypatch.setattr(evb, "machinery", boom)
-    out = evb.evaluate(BOOK)
+    out = _ev()
     assert out["actionEvStatus"] == evb.MACHINERY_UNAVAILABLE
     assert out["bestAction"] == "NO_TRADE"
     assert out["table"] == []
@@ -60,13 +88,13 @@ def test_an_absent_fee_is_not_a_zero_fee():
     "any fill rate whatsoever makes this pay" -- which is a confident
     claim manufactured entirely out of a term nobody measured.
     """
-    r = _row(evb.evaluate(BOOK), "MAKE_YES")
+    r = _row(_ev(), "MAKE_YES")
     assert r["feeStatus"] == evb.NOT_IDENTIFIED
     assert r["BREAK_EVEN_P_FILL_BAND"] == evb.NOT_IDENTIFIED
 
 
 def test_passive_ev_is_not_identified_because_p_fill_never_was():
-    r = _row(evb.evaluate(BOOK), "MAKE_YES")
+    r = _row(_ev(), "MAKE_YES")
     assert r["expectedNetDollarsPerContract"] == evb.NOT_IDENTIFIED
     assert "P_FILL" in r["missingCriticalTerms"]
     assert "never rested an order" in r["whyNot"]
@@ -92,7 +120,7 @@ def test_fill_selection_is_carried_not_zeroed():
 
 def test_no_sign_constraint_is_imposed_on_fill_selection():
     """A bound needs a sign. This term has none, so there is no bound."""
-    r = _row(evb.evaluate(BOOK, fee="0.001"), "MAKE_YES")
+    r = _row(_ev(fee="0.001"), "MAKE_YES")
     assert "BREAK_EVEN_P_FILL_LOWER_BOUND" not in r
     assert "noSignIsAssumed" in r
     assert r["fillSelectionConvention"] == "SEPARATE_TERM"
@@ -100,7 +128,7 @@ def test_no_sign_constraint_is_imposed_on_fill_selection():
 
 def test_the_break_even_is_reported_across_the_whole_band():
     """The width must travel with the mean, or the prior is lost."""
-    r = _row(evb.evaluate(BOOK, fee="0.001"), "MAKE_YES")
+    r = _row(_ev(fee="0.001"), "MAKE_YES")
     band = r["BREAK_EVEN_P_FILL_BAND"]
     assert set(band) == {"P10", "P50", "P90"}
     # An ADVERSE fill-selection draw demands a HIGHER fill rate; a
@@ -110,24 +138,24 @@ def test_the_break_even_is_reported_across_the_whole_band():
 
 def test_a_cross_cannot_be_selected_against_so_the_term_is_excluded():
     """EXCLUDED, never 0.0 -- the distinction prior_registry insists on."""
-    r = _row(evb.evaluate(BOOK, fee="0.001"), "TAKE_YES")
+    r = _row(_ev(fee="0.001"), "TAKE_YES")
     assert r["fillSelectionConvention"] == "EXCLUDED"
     assert "not zero" in r["whyFillSelectionExcluded"]
 
 
 def test_an_unknown_size_does_not_become_one():
     """Order-level dollars go unidentified; per-contract survives."""
-    r = _row(evb.evaluate(BOOK, fee="0.001"), "TAKE_YES")
+    r = _row(_ev(fee="0.001"), "TAKE_YES")
     assert r["expectedNetDollars"] == evb.NOT_IDENTIFIED
     assert r["expectedNetDollarsPerContract"] == "-0.021000"
 
-    sized = _row(evb.evaluate(BOOK, size="100", fee="0.001"), "TAKE_YES")
+    sized = _row(_ev(size="100", fee="0.001"), "TAKE_YES")
     assert sized["expectedNetDollars"] == "-2.100000"
 
 
 def test_per_contract_and_order_level_are_not_the_same_field():
     """A units error here reads a per-contract figure as order dollars."""
-    r = _row(evb.evaluate(BOOK, size="100", fee="0.001"), "TAKE_YES")
+    r = _row(_ev(size="100", fee="0.001"), "TAKE_YES")
     assert Decimal(r["expectedNetDollars"]) == (
         Decimal(r["expectedNetDollarsPerContract"]) * 100)
 
@@ -137,9 +165,15 @@ def test_per_contract_and_order_level_are_not_the_same_field():
 # ── §1: a venue-relative cost is not a settlement EV ─────────────────
 
 def test_crossing_costs_money_against_the_venue_benchmark():
-    """What the number IS: an execution cost, measured and real."""
-    out = evb.evaluate(BOOK)
-    for action in ("TAKE_YES", "TAKE_NO", "DIRECT_EXIT"):
+    """What the number IS: an execution cost, measured and real.
+
+    DIRECT_EXIT is priced from a RESIDUAL state -- while flat there is
+    nothing to exit, so it is not applicable and carries no number.
+    """
+    flat_out = _ev()
+    res_out = _ev(inventory=_yes_residual())
+    for action, out in (("TAKE_YES", flat_out), ("TAKE_NO", flat_out),
+                        ("DIRECT_EXIT", res_out)):
         r = _row(out, action)
         assert r["status"] == "EXECUTION_COST_IDENTIFIED", action
         assert Decimal(r[evb.SNAPSHOT_EXECUTION_COST]) < 0
@@ -148,7 +182,7 @@ def test_crossing_costs_money_against_the_venue_benchmark():
 
 def test_that_cost_is_not_a_settlement_ev_and_not_alpha():
     """What the number IS NOT. B0 is the venue measured against itself."""
-    out = evb.evaluate(BOOK)
+    out = _ev()
     r = _row(out, "TAKE_YES")
     assert r["settlementEv"] == evb.SETTLEMENT_EV_NOT_IDENTIFIED
     assert r[evb.FV_BETTOR_INDEPENDENT] == evb.NOT_IDENTIFIED
@@ -157,7 +191,7 @@ def test_that_cost_is_not_a_settlement_ev_and_not_alpha():
 
 
 def test_the_two_fair_values_never_merge():
-    out = evb.evaluate(BOOK)
+    out = _ev()
     assert out[evb.FV_BETTOR_INDEPENDENT] == evb.NOT_IDENTIFIED
     assert evb.fair_value(BOOK)["kind"] == evb.FV_VENUE_IMPLIED
     assert "cannot be evidence against itself" in evb.fair_value(BOOK)["why"]
@@ -169,23 +203,41 @@ def test_the_two_fair_values_never_merge():
 def test_no_action_ever_claims_an_identified_settlement_ev():
     """The gate that matters while independent fair value is absent."""
     for fee in (None, "0.001", "0.05"):
-        out = evb.evaluate(BOOK, fee=fee)
+        out = _ev(fee=fee)
         assert out["actionEvStatus"] == evb.NOT_IDENTIFIED
         assert out["bestAction"] == "NO_TRADE"
 
 
 # ── actions that name their missing precondition ─────────────────────
 
-@pytest.mark.parametrize("action,precondition", [
-    ("MERGE", "MERGE_MECHANISM_CONFIRMED"),
-    ("HEDGE", "HEDGE_TAX"),
-    ("HOLD_TO_SETTLEMENT", "SETTLEMENT_SEMANTICS_RESOLVED"),
-    ("MAKE_BOTH", "JOINT_FILL_MODEL"),
+@pytest.mark.parametrize("action,precondition,state", [
+    ("MERGE", "MERGE_MECHANISM_CONFIRMED", "partial"),
+    ("HEDGE", "HEDGE_TAX", "residual"),
+    ("HOLD_TO_SETTLEMENT", "SETTLEMENT_SEMANTICS_RESOLVED", "residual"),
+    ("MAKE_BOTH", "JOINT_FILL_MODEL", "flat"),
 ])
-def test_unmet_preconditions_are_named_not_swallowed(action, precondition):
-    r = _row(evb.evaluate(BOOK, fee="0.001"), action)
+def test_unmet_preconditions_are_named_not_swallowed(action, precondition,
+                                                     state):
+    """A precondition is named only once the action is APPLICABLE.
+
+    While flat, MERGE has nothing to merge -- that is an applicability
+    fact, not a missing venue mechanism, and reporting the mechanism
+    would answer a question nobody could ask yet.
+    """
+    inv = {"flat": _flat(), "residual": _yes_residual(),
+           "partial": _partially_matched()}[state]
+    r = _row(_ev(fee="0.001", inventory=inv), action)
+    assert r["APPLICABILITY_STATUS"] == "APPLICABLE"
     assert r["status"] == evb.NOT_IDENTIFIED
     assert precondition in r["unmetPreconditions"]
+
+
+def test_merge_while_flat_is_inapplicable_not_a_missing_mechanism():
+    """§13: there is nothing to merge, which is a different answer."""
+    r = _row(_ev(fee="0.001"), "MERGE")
+    assert r["APPLICABILITY_STATUS"] == "NOT_APPLICABLE_CURRENT_STATE"
+    assert "unmetPreconditions" not in r
+    assert "matched quantity" in r["APPLICABILITY_REASON"]
 
 
 def test_make_both_is_not_the_sum_of_its_legs():
@@ -194,13 +246,13 @@ def test_make_both_is_not_the_sum_of_its_legs():
     MAKE_BOTH must not inherit MAKE_YES's single-leg break-even, which
     would price a joint fill as though the legs were independent.
     """
-    out = evb.evaluate(BOOK, fee="0.001")
+    out = _ev(fee="0.001")
     assert _row(out, "MAKE_YES")["BREAK_EVEN_P_FILL_BAND"]["P50"] == "0.050000"
     assert "BREAK_EVEN_P_FILL_BAND" not in _row(out, "MAKE_BOTH")
 
 
 def test_an_unreadable_book_prices_nothing():
-    out = evb.evaluate({"readable": False})
+    out = evb.evaluate({"readable": False}, inventory=_flat())
     assert out["actionEvStatus"] == evb.NOT_IDENTIFIED
     assert out["bestAction"] == "NO_TRADE"
     assert all(r.get("expectedNetDollarsPerContract",
@@ -211,7 +263,7 @@ def test_an_unreadable_book_prices_nothing():
 # ── the canonical action table (§1, §23) ─────────────────────────────
 
 def test_every_canonical_action_appears_exactly_once():
-    out = evb.evaluate(BOOK)
+    out = _ev()
     seen = [r["action"] for r in out["table"]]
     assert seen == list(acts.ACTIONS)
     assert len(set(seen)) == len(seen)
@@ -247,13 +299,24 @@ def test_vocabulary_gaps_are_recorded_not_aliased():
 
 def _opportunity():
     return sb.opportunity_record(
-        symbol="TEST-YES", outcome_leg="YES",
+        symbol="TEST-YES", outcome_leg="YES", market_id="mkt-test",
         evidence_source="INSTITUTIONAL_INSTRUMENTS")
+
+
+def test_an_unknown_inventory_prices_nothing():
+    """§4: an unidentified state is never forced into FLAT."""
+    d = sb.decide(_opportunity(), BOOK)          # no inventory supplied
+    rows = d["actionEvComponents"]["table"]
+    assert all(r["INVENTORY_STATE"] == "STATE_NOT_IDENTIFIED" for r in rows)
+    assert all(r["APPLICABILITY_STATUS"] == "APPLICABILITY_NOT_IDENTIFIED"
+               for r in rows)
+    assert all(r["expectedNetDollarsPerContract"] == evb.NOT_IDENTIFIED
+               for r in rows)
 
 
 def test_the_lane_still_refuses_to_trade():
     """The gate does not move. Nothing here produces a BUY or a SELL."""
-    d = sb.decide(_opportunity(), BOOK)
+    d = sb.decide(_opportunity(), BOOK, inventory=_flat())
     comp = d["actionEvComponents"]
     assert comp["bestAction"] == "NO_TRADE"
     assert comp["settlementEvStatus"] == evb.SETTLEMENT_EV_NOT_IDENTIFIED
@@ -262,7 +325,7 @@ def test_the_lane_still_refuses_to_trade():
 
 
 def test_no_trade_is_now_a_conclusion_rather_than_an_assertion():
-    d = sb.decide(_opportunity(), BOOK)
+    d = sb.decide(_opportunity(), BOOK, inventory=_flat())
     assert len(d["alternatives"]) == len(acts.ACTIONS)
     # The old stub said the same sentence about all three alternatives.
     whys = {a["why"] for a in d["alternatives"]}
@@ -274,12 +337,15 @@ def test_no_trade_is_now_a_conclusion_rather_than_an_assertion():
     costs = [a for a in d["alternatives"]
              if a.get("snapshotExecutionCostVsVenuePrice")
              not in (None, evb.NOT_IDENTIFIED)]
-    assert len(costs) == 5, "aggressive execution costs were not recorded"
+    # TWO, not five. On a flat book the only aggressive actions that
+    # exist are the entries: TAKE_COMPLEMENT and COMPLETE_PAIR need a
+    # held leg to act on, and DIRECT_EXIT needs something to sell.
+    assert {a["action"] for a in costs} == {"TAKE_YES", "TAKE_NO"}
 
 
 def test_the_lane_does_not_invent_an_order_size():
     """availableDepth is the book's depth, never BETTOR's intended size."""
-    d = sb.decide(_opportunity(), BOOK)
+    d = sb.decide(_opportunity(), BOOK, inventory=_flat())
     for a in d["alternatives"]:
         assert a["expectedNetDollarsPerContract"] is not None
     # Order-level dollars stay unidentified because no sizing policy
@@ -292,7 +358,7 @@ def test_the_lane_does_not_invent_an_order_size():
 
 def test_the_policy_version_moved_with_the_behaviour():
     """V2's 4,503 rows must stay readable as what V2 believed."""
-    assert sb.POLICY_VERSION == "BETTOR_EV_SHADOW_V4"
+    assert sb.POLICY_VERSION == "BETTOR_EV_SHADOW_V5"
     assert sb.POLICY_VERSION != "BETTOR_EV_SHADOW_V2"
 
 
@@ -315,14 +381,14 @@ def test_a_passive_exit_that_does_not_fill_still_owns_the_position():
 
 
 def test_a_passive_order_has_three_outcomes_not_two():
-    r = _row(evb.evaluate(BOOK, fee="0.001"), "MAKE_YES")
+    r = _row(_ev(fee="0.001"), "MAKE_YES")
     assert r["fillOutcomes"] == ["FULL_FILL", "PARTIAL_FILL", "NO_FILL"]
     assert "never silently zero" in r["noFillRule"]
 
 
 def test_the_no_fill_context_is_a_parameter_not_an_assumption():
-    entry = _row(evb.evaluate(BOOK, fee="0.001"), "MAKE_YES")
-    exit_ = _row(evb.evaluate(BOOK, fee="0.001",
+    entry = _row(_ev(fee="0.001"), "MAKE_YES")
+    exit_ = _row(_ev(fee="0.001",
                               no_fill_context=evb.PASSIVE_EXIT), "MAKE_YES")
     assert entry["EV_IF_NO_FILL"] == "0"
     assert exit_["EV_IF_NO_FILL"] == evb.NOT_IDENTIFIED

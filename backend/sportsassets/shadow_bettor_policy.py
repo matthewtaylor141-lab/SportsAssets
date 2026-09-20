@@ -172,13 +172,13 @@ DECLARATION = {
     # written is itself frozen rather than merely current practice.
     "codeBoundary": codesha.BOUNDARY_VERSION,
     "codeShaEnforced": True,
-    # WHAT V3 WEIGHS BEFORE REFUSING. Frozen in the declaration so the
+    # WHAT V5 WEIGHS BEFORE REFUSING. Frozen in the declaration so the
     # breadth of the comparison is part of the policy rather than a
     # property of whatever the code happened to loop over that day.
     "consideredActionSet": CONSIDERED_ACTION_SET,
     "actionEvEngine": "research/beta48/shadow/action_ev.py",
     "actionEvEngineIsImportedNotCopied": True,
-    "supersedes": "BETTOR_EV_SHADOW_V3",
+    "supersedes": "BETTOR_EV_SHADOW_V4",
     "latencyPolicy": NOT_ESTABLISHED,
     "latencyPolicyVersion": LATENCY_POLICY_VERSION,
     # Scoring belongs to outcomes, and this lane has produced no action
