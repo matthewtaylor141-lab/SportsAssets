@@ -161,7 +161,7 @@ def test_the_pnl_buckets_are_never_blended():
 
 def test_the_mandate_status_is_on_the_panel():
     m = _panel()["shadowMandate"]
-    assert m["MANDATE_STATUS"] == "PROPOSED_AWAITING_OWNER_APPROVAL"
+    assert m["MANDATE_STATUS"] == "PROPOSED_AWAITING_EVIDENCE_AND_OWNER_APPROVAL"
     assert m["BETTOR_EV_SHADOW_POSITIONS"] == 0
     assert m["BETTOR_EV_REAL_ORDER_ACTIVITY"] == "NONE"
     assert m["BETTOR_EV_REAL_CAPITAL_AT_RISK"] == 0

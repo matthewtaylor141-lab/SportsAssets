@@ -58,7 +58,12 @@ MANDATE_VERSION = "BETTOR_EV_SHADOW_MANDATE_V1_PROPOSED"
 
 # ── the gate. Both False, and only the owner moves them ──────────────
 
-MANDATE_STATUS = "PROPOSED_AWAITING_OWNER_APPROVAL"
+# §6 of "STOP here": the owner declined to let OWNER_APPROVAL become
+# the only thing between this system and inventory creation while
+# P_FILL has zero rows, EXIT has zero rows, the maker engine prices
+# nothing and the allocator ranks nothing. EVIDENCE is now a gate of
+# its own, ahead of approval and not satisfiable by it.
+MANDATE_STATUS = "PROPOSED_AWAITING_EVIDENCE_AND_OWNER_APPROVAL"
 MANDATE_FROZEN = False
 MANDATE_ACTIVE = False
 
@@ -156,6 +161,74 @@ PROPOSED = {
 # by a stated rule should not be created.
 UNRESOLVED_PARAMETERS = ("EXIT_RULE",)
 
+# ── THE EVIDENCE GATE, WHICH APPROVAL CANNOT SATISFY ─────────────────
+#
+# Owner directive, "STOP here" §6:
+#
+#     "I do not want OWNER_APPROVAL to become the only thing standing
+#     between the current system and inventory creation while P_FILL =
+#     zero rows, EXIT = zero rows, maker = nothing priced, allocator =
+#     nothing ranked."
+#
+# So the freeze now takes TWO independent gates and the owner holds only
+# one of them. A mandate approved while the engine has measured nothing
+# would be a mandate about a system nobody has observed.
+
+EVIDENCE_REQUIRED = (
+    "P_FILL_DATASET_ROWS_ABOVE_ZERO",
+    "P_FILL_IDENTIFIED_POSITIVES_ABOVE_ZERO",
+    "P_FILL_IDENTIFIED_NEGATIVES_ABOVE_ZERO",
+    "EXIT_LEARNING_DATASET_ROWS_ABOVE_ZERO",
+    "MAKER_ENGINE_PRICES_AT_LEAST_ONE_ACTION",
+    "CAPITAL_ALLOCATOR_RANKS_AT_LEAST_ONE_CANDIDATE",
+)
+
+WHY_EVIDENCE_IS_A_SEPARATE_GATE = (
+    "owner approval is a judgement about a system. With zero P_FILL "
+    "rows, zero exit rows, nothing priced and nothing ranked there is "
+    "no system to judge -- approval would be consent to a description "
+    "rather than to a measurement. The evidence gate cannot be "
+    "satisfied by an approval token and the approval gate cannot be "
+    "satisfied by evidence; both must clear on their own terms")
+
+
+def evidence_status(*, p_fill_rows=0, p_fill_positives=0,
+                    p_fill_negatives=0, exit_rows=0,
+                    maker_actions_priced=0,
+                    allocator_candidates_ranked=0) -> dict:
+    """Has the engine measured enough to be worth writing a mandate for?
+
+    Defaults are the current production values, so calling it with no
+    arguments reports the state of the world rather than a blank form.
+    """
+    missing = []
+    if p_fill_rows <= 0:
+        missing.append("P_FILL_DATASET_ROWS_ABOVE_ZERO")
+    if p_fill_positives <= 0:
+        missing.append("P_FILL_IDENTIFIED_POSITIVES_ABOVE_ZERO")
+    if p_fill_negatives <= 0:
+        missing.append("P_FILL_IDENTIFIED_NEGATIVES_ABOVE_ZERO")
+    if exit_rows <= 0:
+        missing.append("EXIT_LEARNING_DATASET_ROWS_ABOVE_ZERO")
+    if maker_actions_priced <= 0:
+        missing.append("MAKER_ENGINE_PRICES_AT_LEAST_ONE_ACTION")
+    if allocator_candidates_ranked <= 0:
+        missing.append("CAPITAL_ALLOCATOR_RANKS_AT_LEAST_ONE_CANDIDATE")
+    return {
+        "EVIDENCE_SUFFICIENT": not missing,
+        "required": list(EVIDENCE_REQUIRED),
+        "missing": missing,
+        "observed": {
+            "P_FILL_DATASET_ROWS": p_fill_rows,
+            "P_FILL_IDENTIFIED_POSITIVES": p_fill_positives,
+            "P_FILL_IDENTIFIED_NEGATIVES": p_fill_negatives,
+            "EXIT_LEARNING_DATASET_ROWS": exit_rows,
+            "MAKER_ACTIONS_PRICED": maker_actions_priced,
+            "ALLOCATOR_CANDIDATES_RANKED": allocator_candidates_ranked,
+        },
+        "whyASeparateGate": WHY_EVIDENCE_IS_A_SEPARATE_GATE,
+    }
+
 WHY_EXIT_RULE_BLOCKS_THE_FREEZE = (
     "the exit rule is the output of the exit learning dataset and the "
     "ML exit interface, both downstream in the §11 sequence. Freezing a "
@@ -183,6 +256,8 @@ def proposal() -> dict:
         "MANDATE_ACTIVE": MANDATE_ACTIVE,
         "PROPOSAL_SHA": PROPOSAL_SHA,
         "requiredParameters": list(REQUIRED_PARAMETERS),
+        "evidenceRequired": list(EVIDENCE_REQUIRED),
+        "evidenceStatus": evidence_status(),
         "proposed": dict(PROPOSED),
         "parametersAbsent": missing,
         "parametersPresentButUnresolved": list(UNRESOLVED_PARAMETERS),
@@ -214,13 +289,18 @@ def creating_actions_are_real_actions() -> dict:
     }
 
 
-def freeze(*, owner_approval_token=None, parameters=None) -> dict:
-    """Freeze the mandate. REFUSES without explicit owner approval.
+def freeze(*, owner_approval_token=None, parameters=None,
+           evidence=None) -> dict:
+    """Freeze the mandate. REFUSES without BOTH evidence and approval.
 
-    Fails closed on three separate conditions, each named, so a refusal
-    says which one rather than reading as a generic error.
+    Fails closed on four separate conditions, each named, so a refusal
+    says which one rather than reading as a generic error. The evidence
+    gate is not satisfiable by an approval token: see §6.
     """
     blockers = []
+    ev = evidence if evidence is not None else evidence_status()
+    if not ev.get("EVIDENCE_SUFFICIENT"):
+        blockers.append("EVIDENCE_INSUFFICIENT")
     if not owner_approval_token:
         blockers.append("OWNER_APPROVAL_ABSENT")
     params = dict(parameters or PROPOSED)
@@ -239,13 +319,16 @@ def freeze(*, owner_approval_token=None, parameters=None) -> dict:
             "blockers": blockers,
             "parametersAbsent": missing,
             "parametersUnresolved": unresolved,
+            "evidence": ev,
             "whyExitRuleBlocksTheFreeze": WHY_EXIT_RULE_BLOCKS_THE_FREEZE,
+            "whyEvidenceIsASeparateGate": WHY_EVIDENCE_IS_A_SEPARATE_GATE,
             "chosenBeforeResults": CHOSEN_BEFORE_RESULTS,
         }
     return {
         "frozen": True,
         "MANDATE_STATUS": "FROZEN",
         "MANDATE_SHA": _sha(params),
+        "evidence": ev,
         "frozenAt": "SET_BY_CALLER",
         "parameters": params,
         "chosenBeforeResults": CHOSEN_BEFORE_RESULTS,
@@ -283,6 +366,7 @@ def describe() -> dict:
     return {
         **proposal(),
         "creatingActions": creating_actions_are_real_actions(),
+        "whyEvidenceIsASeparateGate": WHY_EVIDENCE_IS_A_SEPARATE_GATE,
         "freezeRefusal": freeze(),
         "mayCreateInventory": may_create_inventory(
             label="COUNTERFACTUAL_FILL_SUPPORTED"),
