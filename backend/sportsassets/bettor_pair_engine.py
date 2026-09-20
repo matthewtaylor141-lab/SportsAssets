@@ -115,6 +115,49 @@ PAIR_EV_IS_NOT = (
     "the capital those legs occupy while waiting, and before "
     "incentives. Each of those can change its sign")
 
+# ── §7: identity, status and capital release ─────────────────────────
+
+COMPLEMENT_IDENTITY_BASIS = (
+    "deterministic venue-native fields only. No fuzzy title matching, "
+    "no approximate team-name matching, no price matching. A complement "
+    "we cannot name deterministically is NOT_IDENTIFIED, and a pair "
+    "built on a guessed identity is not a pair")
+
+# §7 asks for PAIR_COMPLETION_PROBABILITY *and* STATUS. The probability
+# is the number; the status is why there is no number. Collapsing them
+# loses the reason, and the reason is what says which evidence would
+# change the answer.
+PAIR_COMPLETION_STATUS = "NOT_IDENTIFIED_NO_BETTOR_NATIVE_COMPLETION_EVIDENCE"
+
+WHY_CAPITAL_RELEASE_NOT_IDENTIFIED = (
+    "completing a pair only returns capital to the allocator if the "
+    "venue lets the matched quantity be merged or netted. Retail "
+    "netting is established; the institutional MERGE_MECHANISM is "
+    "NOT_IDENTIFIED, so the release is NOT_IDENTIFIED too. It is not "
+    "zero: zero would say completing the pair frees nothing, which is a "
+    "claim about the venue we have not established. This is the core "
+    "RN1/Ferrari lesson -- PAIR COMPLETE -> MERGE/NET -> RELEASE "
+    "CAPITAL -> RECORD LOCKED PAIR PNL -> CAPITAL RETURNS TO ALLOCATOR "
+    "-- and the chain breaks at the merge step")
+
+# A field renamed because its old name made a claim the value does not
+# support. The old key is kept as an alias so nothing breaks silently.
+RENAMED_FIELDS = {
+    "EXPECTED_COMPLEMENT_PRICE": {
+        "now": "CURRENT_COMPLEMENT_PRICE",
+        "why": ("it is the ask on the complement leg RIGHT NOW, not a "
+                "forecast of the price at which the pair would "
+                "complete. The old name read as a forecast while the "
+                "module's own note said it was not one"),
+        "aliasKept": True,
+    },
+    "EXPECTED_COMPLEMENT_DEPTH": {
+        "now": "CURRENT_COMPLEMENT_DEPTH",
+        "why": "same reason: observed depth now, not expected depth",
+        "aliasKept": True,
+    },
+}
+
 # ── §6: the restrictions, carried rather than summarised ─────────────
 
 WHALE_RESTRICTIONS = {
@@ -276,18 +319,37 @@ def pair_view(inventory: dict, complement_book: dict | None = None, *,
     residual_qty = _d(inventory.get("RESIDUAL_%s_QTY" % held_leg)) or \
         (yq if held_leg == binv.LEG_YES else nq)
 
-    # EXPECTED_COMPLEMENT_PRICE: the ask on the leg we would buy. This
-    # IS observable, and it is the only input here that is.
+    # §7: COMPLEMENT_IDENTITY. Which contract we would have to buy, and
+    # on what basis we believe it is the complement. Deterministic
+    # venue-native identity only -- no fuzzy title matching, no
+    # approximate team-name matching, no price matching.
+    view["COMPLEMENT_IDENTITY"] = (complement_book or {}).get(
+        "complementId", NOT_IDENTIFIED)
+    view["COMPLEMENT_IDENTITY_STATUS"] = (complement_book or {}).get(
+        "identityStatus", NOT_IDENTIFIED)
+    view["complementIdentityBasis"] = COMPLEMENT_IDENTITY_BASIS
+
+    # CURRENT_COMPLEMENT_PRICE: the ask on the leg we would buy. This IS
+    # observable, and it is the only input here that is.
+    #
+    # RENAMED. This field was EXPECTED_COMPLEMENT_PRICE, which read as a
+    # forecast of the completion price when it is the ask right now --
+    # the module's own note said "it is not a forecast" while the key
+    # said otherwise. The old key is kept as an alias so no consumer
+    # breaks silently, and it is marked.
     ask = _d((complement_book or {}).get("ask"))
     depth = _d((complement_book or {}).get("availableDepth"))
-    view["EXPECTED_COMPLEMENT_PRICE"] = str(ask) if ask is not None \
+    view["CURRENT_COMPLEMENT_PRICE"] = str(ask) if ask is not None \
         else NOT_IDENTIFIED
+    view["EXPECTED_COMPLEMENT_PRICE"] = view["CURRENT_COMPLEMENT_PRICE"]
+    view["renamedFields"] = dict(RENAMED_FIELDS)
     view["complementPriceBasis"] = (
         "the ask on the complement leg: what acquiring it would cost "
         "aggressively RIGHT NOW. It is not a forecast of the price at "
         "which the pair would actually complete")
-    view["EXPECTED_COMPLEMENT_DEPTH"] = str(depth) if depth is not None \
+    view["CURRENT_COMPLEMENT_DEPTH"] = str(depth) if depth is not None \
         else NOT_IDENTIFIED
+    view["EXPECTED_COMPLEMENT_DEPTH"] = view["CURRENT_COMPLEMENT_DEPTH"]
 
     if own_basis is not None and ask is not None:
         basis = own_basis + ask
@@ -305,6 +367,10 @@ def pair_view(inventory: dict, complement_book: dict | None = None, *,
     # take to identify it.
     view.update({
         "P_PAIR_COMPLETION": NOT_IDENTIFIED,
+        # §7 asks for PROBABILITY *and* STATUS. They are different
+        # answers: the probability is the number, the status is why
+        # there is no number. Collapsing them loses the reason.
+        "PAIR_COMPLETION_STATUS": PAIR_COMPLETION_STATUS,
         "whyPCompletionNotIdentified": (
             "BETTOR has never rested an order, so it has no completion "
             "evidence of its own. The whale hazard below is a DIFFERENT "
@@ -337,6 +403,17 @@ def pair_view(inventory: dict, complement_book: dict | None = None, *,
             str(residual_qty * own_basis)
             if own_basis is not None and residual_qty is not None
             else NOT_IDENTIFIED),
+        # §7: EXPECTED_CAPITAL_RELEASE. What completing the pair would
+        # free. This is the RN1/Ferrari lesson expressed as a field: a
+        # completed pair only returns capital to the allocator if the
+        # venue lets the matched quantity be merged or netted, and the
+        # institutional MERGE_MECHANISM is NOT_IDENTIFIED. So the
+        # release is not identified either, and it is NOT zero -- zero
+        # would say completing the pair frees nothing, which is a claim
+        # about the venue we have not established.
+        "EXPECTED_CAPITAL_RELEASE": NOT_IDENTIFIED,
+        "whyCapitalReleaseNotIdentified": WHY_CAPITAL_RELEASE_NOT_IDENTIFIED,
+        "capitalReleaseRequires": ("MERGE_MECHANISM", "MATCHED_QTY"),
         "status": "STRUCTURE_IDENTIFIED_COMPLETION_NOT_IDENTIFIED",
     })
 

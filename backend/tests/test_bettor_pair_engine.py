@@ -161,3 +161,69 @@ def test_missing_priors_fail_closed(monkeypatch):
     h = pe.completion_hazard(3.0)
     assert h["status"] == pe.PRIORS_UNAVAILABLE
     assert h["WHALE_COMPLETION_HAZARD"] == pe.NOT_IDENTIFIED
+
+
+# ── §7: the fields the directive names, each present by that name ────
+
+def test_every_directive_field_is_on_the_view():
+    """§7's list, checked by the directive's own names."""
+    v = pe.pair_view(_holding_yes(), _book(), seconds_unpaired=120)
+    for field in ("COMPLEMENT_IDENTITY", "CURRENT_COMPLEMENT_PRICE",
+                  "P_PAIR_COMPLETION", "PAIR_COMPLETION_STATUS",
+                  "WHALE_COMPLETION_HAZARD_PRIOR",
+                  "EXPECTED_TIME_TO_COMPLETION", "EXPECTED_PAIR_BASIS",
+                  "EXPECTED_PAIR_MARGIN_GROSS", "EXPECTED_RESIDUAL_QTY",
+                  "EXPECTED_RESIDUAL_LOSS", "CAPITAL_HOURS_TO_COMPLETION",
+                  "EXPECTED_CAPITAL_RELEASE"):
+        assert field in v, field
+
+
+def test_the_complement_identity_is_venue_native_or_not_identified():
+    v = pe.pair_view(_holding_yes(), _book())
+    assert v["COMPLEMENT_IDENTITY"] == pe.NOT_IDENTIFIED
+    assert v["COMPLEMENT_IDENTITY_STATUS"] == pe.NOT_IDENTIFIED
+    assert "no price matching" in v["complementIdentityBasis"]
+
+    named = pe.pair_view(_holding_yes(),
+                         dict(_book(), complementId="nfl-abc-NO",
+                              identityStatus="VENUE_NATIVE_ID_MATCH"))
+    assert named["COMPLEMENT_IDENTITY"] == "nfl-abc-NO"
+
+
+def test_completion_probability_and_status_are_two_fields():
+    """The probability is the number; the status is why there is none."""
+    v = pe.pair_view(_holding_yes(), _book())
+    assert v["P_PAIR_COMPLETION"] == pe.NOT_IDENTIFIED
+    assert v["PAIR_COMPLETION_STATUS"] == \
+        "NOT_IDENTIFIED_NO_BETTOR_NATIVE_COMPLETION_EVIDENCE"
+
+
+def test_capital_release_is_not_identified_and_is_not_zero():
+    """The RN1/Ferrari chain breaks at the merge step, and the field
+    says so rather than reporting a zero release."""
+    v = pe.pair_view(_holding_yes(), _book())
+    assert v["EXPECTED_CAPITAL_RELEASE"] == pe.NOT_IDENTIFIED
+    assert v["EXPECTED_CAPITAL_RELEASE"] != "0"
+    assert "MERGE_MECHANISM" in v["capitalReleaseRequires"]
+    assert "It is not zero" in v["whyCapitalReleaseNotIdentified"]
+    assert "CAPITAL RETURNS TO ALLOCATOR" in \
+        v["whyCapitalReleaseNotIdentified"]
+
+
+# ── the rename, and the alias that keeps callers working ─────────────
+
+def test_the_current_complement_price_is_not_called_expected():
+    """The old key claimed a forecast while the value is the ask now.
+    Both keys are served; only one of them is the right name."""
+    v = pe.pair_view(_holding_yes(), _book(ask="0.49"))
+    assert v["CURRENT_COMPLEMENT_PRICE"] == "0.49"
+    assert v["EXPECTED_COMPLEMENT_PRICE"] == v["CURRENT_COMPLEMENT_PRICE"]
+    assert v["CURRENT_COMPLEMENT_DEPTH"] == v["EXPECTED_COMPLEMENT_DEPTH"]
+    assert "not a forecast" in v["complementPriceBasis"]
+
+
+def test_the_rename_is_recorded_rather_than_done_silently():
+    r = pe.RENAMED_FIELDS["EXPECTED_COMPLEMENT_PRICE"]
+    assert r["now"] == "CURRENT_COMPLEMENT_PRICE"
+    assert r["aliasKept"] is True
+    assert "read as a forecast" in r["why"]
