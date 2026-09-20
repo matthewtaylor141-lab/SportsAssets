@@ -171,7 +171,31 @@ TICKS_ALONE_SUPPORT_POSITIVE_FILL = False
 TICKS_ALONE_SUPPORT_REFUTATION = True
 
 QUEUE_AHEAD_BASIS = "DISPLAYED_SIZE_AT_OUR_LEVEL_AT_INSERT"
+
+# A LOWER BOUND ON WHAT WAS DISPLAYED AT INSERT, AND ON NOTHING ELSE. Hidden
+# size at our level at that instant makes the true queue longer, so this is a
+# lower bound AT T0. It is NOT a bound on queue-ahead later in the resting
+# window: cancellations ahead of us deplete the queue while we rest, additions
+# ahead lengthen it again, and ticks cannot separate a cancellation from a
+# trade. The extrapolation from the instant to the interval is the defect the
+# constant below refuses, and every consumer of this module must read the two
+# together.
 QUEUE_AHEAD_IS_A_LOWER_BOUND = True
+QUEUE_AHEAD_AT_T0_IS_NOT_A_BOUND_ON_THE_INTERVAL = True
+QUEUE_DEPLETION_FROM_CANCELLATIONS = NOT_IDENTIFIED
+QUEUE_ADDITION_AHEAD = NOT_IDENTIFIED
+QUEUE_AHEAD_DYNAMIC_STATUS = "NOT_OBSERVED"
+QUEUE_EVOLUTION_NOT_SEPARABLE_FROM_TICKS = (
+    "VISIBLE_DEPTH_REMOVED_AHEAD is the shrink in DISPLAYED size at our level. "
+    "It cannot be decomposed into trades and cancellations, so "
+    "QUEUE_DEPLETION_FROM_CANCELLATIONS is NOT_IDENTIFIED from ticks alone")
+
+# The reason a queue-based refutation is withheld, named so a consumer can tell
+# it apart from the volume-semantics gate it sits beside.
+QUEUE_EVOLUTION_REFUTATION_INSUFFICIENT = (
+    "INITIAL_QUEUE_NOT_DEPLETED_BY_TRADE_VOLUME_BUT_QUEUE_CANCELLATION_AND_"
+    "PRIORITY_EVOLUTION_NOT_IDENTIFIED")
+
 HIDDEN_LIQUIDITY = NOT_IDENTIFIED
 AGGRESSOR_SIDE = NOT_IDENTIFIED
 PER_PRICE_ATTRIBUTION_FROM_TICKS = NOT_IDENTIFIED
@@ -457,10 +481,20 @@ def fill_status(quote, walk, model="F1", semantics=None, runtime=None):
     bound = _bound_fails(model, maximal, ahead, size)
     ref = TS.refutation_status(bound is True, semantics, runtime)
 
-    if ref["FILL_REFUTATION_STATUS"] == "REFUTED":
-        status, why = NOT_FILLED, (
-            "MAXIMAL_ATTRIBUTION_DOES_NOT_CLEAR_QUEUE_AHEAD"
-            if maximal != 0 else "NO_VOLUME_TRADED_IN_WINDOW")
+    if ref["FILL_REFUTATION_STATUS"] == "REFUTED" and maximal == 0:
+        # THE ONE REFUTATION QUEUE EVOLUTION CANNOT TOUCH. Nothing traded in
+        # the window at all, so no order at any queue position was reached.
+        # Cancellations ahead do not fill anybody; this survives §5.
+        status, why = NOT_FILLED, "NO_VOLUME_TRADED_IN_WINDOW"
+    elif ref["FILL_REFUTATION_STATUS"] == "REFUTED":
+        # THE QUEUE-BASED REFUTATION, WITHHELD. `maximal <= ahead` compares
+        # window volume against queue-ahead AT INSERT and reads a shortfall as
+        # proof we were never reached. It is not: 400 of the 500 ahead of us
+        # may have CANCELLED, leaving 100, which 200 of volume clears. Ticks
+        # cannot separate a cancellation from a trade, so
+        # QUEUE_DEPLETION_FROM_CANCELLATIONS is NOT_IDENTIFIED and this gate
+        # stays shut regardless of the volume field's semantics.
+        status, why = UNKNOWN, QUEUE_EVOLUTION_REFUTATION_INSUFFICIENT
     elif bound is NOT_IDENTIFIED:
         status, why = UNKNOWN, "WINDOW_UNREADABLE"
     elif bound is True:
@@ -477,6 +511,15 @@ def fill_status(quote, walk, model="F1", semantics=None, runtime=None):
         "AGGREGATE_VOLUME_BOUND_ARITHMETIC": bound,
         "MAXIMAL_ATTRIBUTION_AT_OUR_PRICE": maximal,
         "QUEUE_AHEAD_ESTIMATE": ahead,
+        # The snapshot and the process, side by side and never collapsed.
+        "QUEUE_AHEAD_AT_T0": ahead,
+        "QUEUE_AHEAD_DYNAMIC_STATUS": QUEUE_AHEAD_DYNAMIC_STATUS,
+        "QUEUE_DEPLETION_FROM_TRADES": NOT_IDENTIFIED,
+        "QUEUE_DEPLETION_FROM_CANCELLATIONS": QUEUE_DEPLETION_FROM_CANCELLATIONS,
+        "QUEUE_ADDITION_AHEAD": QUEUE_ADDITION_AHEAD,
+        "VISIBLE_DEPTH_REMOVED_AHEAD": walk.get("VISIBLE_DEPTH_REMOVED_AHEAD",
+                                                NOT_IDENTIFIED),
+        "QUEUE_EVOLUTION_NOT_SEPARABLE": QUEUE_EVOLUTION_NOT_SEPARABLE_FROM_TICKS,
         "VOLUME_AT_OUR_PRICE": NOT_IDENTIFIED,
 
         # The three events, side by side, never collapsed into one another.

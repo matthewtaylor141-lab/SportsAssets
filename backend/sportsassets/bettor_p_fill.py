@@ -43,10 +43,29 @@ volume-at-price, which side consumed it, and our queue position are all
 NOT_IDENTIFIED -- and every fill model needs volume-at-price above
 zero. So no positive fill support comes out of tick data at all.
 
-But REFUTATION does: if the total volume that traded while our
-hypothetical order rested is smaller than the queue that was ahead of
-it, that order cannot have filled, whatever the model. That is an
-arithmetic upper bound, not a verdict, and it is available today.
+REFUTATION IS ALSO NOT FREE, AND AN EARLIER REVISION OF THIS FILE SAID
+IT WAS. The retracted version of the paragraph below read:
+
+    "But REFUTATION does: if the total volume that traded while our
+    hypothetical order rested is smaller than the queue that was ahead
+    of it, that order cannot have filled, whatever the model."
+
+RETRACTED. It treats displayed queue-ahead at insert as a standing
+lower bound on queue-ahead for the whole resting interval, and it is
+not one. Cancellations ahead of us deplete the queue during the
+interval: 500 displayed at T0, 400 ahead cancel, 200 then trade at our
+price -- 200 < 500 reads as refuted while the effective queue was 100
+and the order may have been reached. Hidden liquidity lengthens the
+true queue, cancellations shorten it, additions lengthen it again, and
+the NET direction is not identified from a snapshot.
+
+What ticks can still do is narrower and it is stated as such in
+`bettor_shadow_execution.py`: a negative requires OBSERVED queue
+evolution -- trades AND cancellations AND additions ahead -- under
+identified priority semantics and identified hidden liquidity. Absent
+any of those, the row is COUNTERFACTUAL_FILL_NOT_IDENTIFIED with
+EVIDENCE_CLASS = INTERVAL_CENSORED, which is preserved and weighted,
+never trained on as a no-fill.
 
 THE STRONGEST POSITIVE OUTPUT IS STILL COUNTERFACTUAL. The module
 never writes FILLED for any input, because BETTOR placed no order.
@@ -102,12 +121,50 @@ ONE_FILL_DOES_NOT_IDENTIFY_IT = (
 # ── what ticks can and cannot settle ─────────────────────────────────
 
 TICK_ASYMMETRY = (
-    "tick data alone can REFUTE a hypothetical fill and cannot SUPPORT "
-    "one. Refutation is arithmetic: if the volume that traded while the "
-    "order rested is below the queue ahead of it, it cannot have "
-    "filled. Support needs volume-at-price, which no tick row carries")
+    "tick data alone cannot SUPPORT a hypothetical fill: support needs "
+    "volume-at-price, which no tick row carries. It can bear on the "
+    "NEGATIVE, but not by arithmetic on the insert snapshot -- a "
+    "supported negative requires observed queue evolution through the "
+    "resting interval (trades, cancellations and additions ahead) under "
+    "identified priority semantics and identified hidden liquidity")
+
+RETRACTED_REFUTATION_CLAIM = {
+    "claim": ("queue-ahead is measured from DISPLAYED size at our "
+              "level, so it is a LOWER bound on the true queue and the "
+              "refutation is conservative -- it fires less often than "
+              "truth would justify, never more"),
+    "status": "RETRACTED",
+    "why": ("displayed queue-ahead at insert is not a standing lower "
+            "bound on queue-ahead throughout the resting interval. "
+            "Cancellations ahead deplete it. Hidden liquidity lengthens "
+            "the true queue, cancellations shorten it, additions "
+            "lengthen it again, and the net direction is not identified "
+            "from a snapshot"),
+    "counterexample": ("500 displayed ahead at T0; 400 ahead cancel; "
+                       "200 then trade at our price. 200 < 500 reads as "
+                       "refuted, but the effective queue was 100"),
+    "replacedBy": ("bettor_shadow_execution.NEGATIVE_REQUIRES -- the "
+                   "negative is earned from observed queue evolution, "
+                   "never manufactured from an initial snapshot"),
+    "mustNotAppearIn": ("code comments", "tests", "management claims",
+                        "P_FILL labels", "training documentation"),
+}
 
 POSITIVE_SUPPORT_REQUIRES = "EXECUTION_TAPE_JOIN"
+
+# Rows that do not resolve are not discarded and are not negatives.
+INTERVAL_CENSORED_ROWS_ARE_KEPT = (
+    "a quote whose fate was not identified still carries information "
+    "bounded by its resting interval. It is retained with EVIDENCE_"
+    "CLASS = INTERVAL_CENSORED and never trained on as a no-fill")
+
+# The set of rows that DO resolve is selected, and the selection is not
+# random with respect to fill probability.
+IDENTIFICATION_SELECTION = (
+    "trade-through resolution concentrates in fast, informed markets "
+    "and full queue-evolution observability in thin ones, so a model "
+    "fitted on resolved rows alone estimates P(FILL | RESOLVABLE) "
+    "rather than P(FILL). P_FILL must model that selection explicitly")
 
 NEVER_WRITES_FILLED = (
     "BETTOR placed no order, so there is no input for which this path "
@@ -174,20 +231,29 @@ def p_fill(*, bettor_native_fills=0, root=None) -> dict:
 
 
 def refutation_available(root=None) -> dict:
-    """What ticks CAN settle today: the negative, by arithmetic."""
+    """What a negative costs. NOT arithmetic on the insert snapshot."""
     st = machinery_status(root)
     if st.get("status") != "LOADED":
         return {"available": False, **st}
+    from . import bettor_shadow_execution as sx
     return {
+        # Available as a PATH, not as a result: ticks alone do not carry
+        # the cancellation dynamics the negative requires, so today the
+        # condition is essentially never satisfied and that is correct.
         "available": True,
-        "direction": "REFUTATION_ONLY",
-        "rule": ("if the volume traded while the order rested is below "
-                 "the queue ahead of it at insert, that order cannot "
-                 "have filled -- whatever the model"),
-        "isAnUpperBound": ("queue-ahead is measured from DISPLAYED size "
-                           "at our level, so it is a LOWER bound on the "
-                           "true queue and the refutation is "
-                           "conservative"),
+        "direction": "NEGATIVE_MUST_BE_EARNED",
+        "rule": ("a negative requires observed queue evolution through "
+                 "the resting interval -- depletion from trades AND "
+                 "from cancellations AND additions ahead -- under "
+                 "identified priority semantics and identified hidden "
+                 "liquidity, with the effective queue ahead never "
+                 "reaching zero"),
+        "requires": list(sx.NEGATIVE_REQUIRES),
+        "insufficient": ("comparing traded volume against displayed "
+                         "queue-ahead at insert. That yields "
+                         "EVIDENCE_CLASS = INTERVAL_CENSORED with reason "
+                         + sx.REASON_INITIAL_QUEUE_ONLY),
+        "retracted": dict(RETRACTED_REFUTATION_CLAIM),
         "cannotSupportAFill": st["POSITIVE_FILL_SUPPORT_REQUIRES"],
         "tickAsymmetry": TICK_ASYMMETRY,
     }
@@ -209,19 +275,31 @@ def accumulation_contract() -> dict:
             "exists"),
         "perQuote": (
             "QUOTE_PRICE", "QUOTE_SIZE", "SIDE", "INSERT_TIMESTAMP",
-            "QUEUE_AHEAD_AT_INSERT", "BOOK_SHA_AT_INSERT"),
+            "QUEUE_AHEAD_AT_T0", "HIDDEN_LIQUIDITY_STATUS",
+            "QUEUE_POSITION_STATUS", "BOOK_SHA_AT_INSERT"),
+        # The dynamic fields are what the negative actually needs, and
+        # they are the ones tick data does not currently carry. Naming
+        # them here is how the gap stays visible instead of being
+        # papered over by arithmetic on the snapshot.
         "perObservation": (
             "OBSERVATION_TIMESTAMP", "BEST_BID", "BEST_ASK",
             "SHARES_TRADED_DELTA", "DISPLAYED_SIZE_AT_OUR_LEVEL",
+            "QUEUE_DEPLETION_FROM_TRADES",
+            "QUEUE_DEPLETION_FROM_CANCELLATIONS",
+            "QUEUE_ADDITION_AHEAD", "QUEUE_AHEAD_DYNAMIC_STATUS",
             "TOUCHED", "TRADED_THROUGH"),
         "notRecordedAsFills": (
             "TOUCHED and TRADED_THROUGH are observations about the "
             "market, stored under their own names. Neither is ever "
             "counted toward a fill rate"),
-        "queueAheadIsALowerBound": (
-            "it is measured from displayed size at our level at insert, "
-            "so hidden liquidity makes the true queue longer and the "
-            "resulting refutation conservative"),
+        "queueAheadAtT0IsNotABound": (
+            "displayed size at our level at insert is a snapshot, not a "
+            "standing bound on queue-ahead for the resting interval. "
+            "Cancellations ahead deplete it, hidden liquidity lengthens "
+            "it, additions lengthen it again, and the net direction is "
+            "not identified from the snapshot"),
+        "intervalCensoredRowsAreKept": INTERVAL_CENSORED_ROWS_ARE_KEPT,
+        "identificationSelection": IDENTIFICATION_SELECTION,
     }
 
 
@@ -231,6 +309,9 @@ def describe() -> dict:
         "requiredSource": REQUIRED_SOURCE,
         "forbiddenSubstitutes": list(FORBIDDEN_AS_P_FILL),
         "tickAsymmetry": TICK_ASYMMETRY,
+        "retractedRefutationClaim": dict(RETRACTED_REFUTATION_CLAIM),
+        "intervalCensoredRowsAreKept": INTERVAL_CENSORED_ROWS_ARE_KEPT,
+        "identificationSelection": IDENTIFICATION_SELECTION,
         "positiveSupportRequires": POSITIVE_SUPPORT_REQUIRES,
         "neverWritesFilled": NEVER_WRITES_FILLED,
         "machinery": machinery_status(),

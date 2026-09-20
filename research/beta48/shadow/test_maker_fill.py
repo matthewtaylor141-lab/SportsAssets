@@ -249,12 +249,29 @@ class TheArithmeticBehindTheGate(unittest.TestCase):
             self.assertEqual(r["FILL_STATUS"], MF.NOT_FILLED, m)
             self.assertEqual(r["WHY"], "NO_VOLUME_TRADED_IN_WINDOW")
 
-    def test_volume_below_the_queue_refutes_f1(self):
-        r = self._status(["50", "40"])          # 90 < 100 ahead
+    def test_volume_below_the_queue_does_not_refute_f1(self):
+        """THE CORRECTED DEFECT. This used to assert NOT_FILLED.
+
+        `maximal <= ahead` compares window volume against queue-ahead AT
+        INSERT. A shortfall is not proof we were never reached: 400 of
+        the 500 ahead may have CANCELLED, leaving 100 for 200 of volume
+        to clear. Ticks cannot separate a cancellation from a trade, so
+        the gate stays shut even with the volume field's semantics
+        established.
+        """
+        r = self._status(["50", "40"])          # 90 < 100 displayed at T0
+        self.assertEqual(r["FILL_STATUS"], MF.UNKNOWN)
+        self.assertEqual(r["WHY"], MF.QUEUE_EVOLUTION_REFUTATION_INSUFFICIENT)
+        self.assertEqual(r["QUEUE_DEPLETION_FROM_CANCELLATIONS"],
+                         MF.NOT_IDENTIFIED)
+        self.assertTrue(MF.QUEUE_AHEAD_AT_T0_IS_NOT_A_BOUND_ON_THE_INTERVAL)
+
+    def test_the_only_surviving_tick_refutation_is_no_volume_at_all(self):
+        """Cancellations ahead do not fill anybody, so a window with no
+        trades refutes at every queue position. That one survives."""
+        r = self._status(["0", "0"])
         self.assertEqual(r["FILL_STATUS"], MF.NOT_FILLED)
-        self.assertEqual(r["FILL_REFUTATION_STATUS"], "REFUTED")
-        self.assertEqual(r["WHY"],
-                         "MAXIMAL_ATTRIBUTION_DOES_NOT_CLEAR_QUEUE_AHEAD")
+        self.assertEqual(r["WHY"], "NO_VOLUME_TRADED_IN_WINDOW")
 
     def test_even_then_it_is_not_execution_evidence(self):
         r = self._status(["50"])
@@ -273,12 +290,17 @@ class TheArithmeticBehindTheGate(unittest.TestCase):
             if f1["FILL_STATUS"] == MF.NOT_FILLED:
                 self.assertEqual(f0["FILL_STATUS"], MF.NOT_FILLED, deltas)
 
-    def test_f0_is_refutable_where_f1_is_not(self):
-        # 105 clears the queue of 100 but not the queue PLUS our 10.
-        self.assertEqual(self._status(["105"], model="F1")["FILL_STATUS"],
-                         MF.UNKNOWN)
-        self.assertEqual(self._status(["105"], model="F0")["FILL_STATUS"],
-                         MF.NOT_FILLED)
+    def test_the_f0_f1_arithmetic_gap_survives_but_no_longer_refutes(self):
+        """105 clears a T0 queue of 100 but not that queue PLUS our 10, so
+        the ARITHMETIC still separates the models. Neither reaches a
+        verdict: both are queue-based and queue evolution is unobserved."""
+        f1 = self._status(["105"], model="F1")
+        f0 = self._status(["105"], model="F0")
+        self.assertFalse(f1["AGGREGATE_VOLUME_BOUND_ARITHMETIC"])
+        self.assertTrue(f0["AGGREGATE_VOLUME_BOUND_ARITHMETIC"])
+        self.assertEqual(f1["FILL_STATUS"], MF.UNKNOWN)
+        self.assertEqual(f0["FILL_STATUS"], MF.UNKNOWN)
+        self.assertEqual(f0["WHY"], MF.QUEUE_EVOLUTION_REFUTATION_INSUFFICIENT)
 
     def test_f2_is_not_refuted_by_the_queue_because_cancels_clear_it(self):
         r = self._status(["50"], model="F2")

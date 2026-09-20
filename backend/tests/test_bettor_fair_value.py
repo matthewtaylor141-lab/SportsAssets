@@ -93,11 +93,17 @@ def test_ticks_refute_but_cannot_support():
     assert m["POSITIVE_FILL_SUPPORT_REQUIRES"] == "EXECUTION_TAPE_JOIN"
 
 
-def test_refutation_is_available_today_and_is_conservative():
+def test_the_negative_must_be_earned_not_computed_from_the_snapshot():
+    """The old assertion here demanded a 'conservative' refutation built
+    on displayed queue-ahead at insert. That claim is retracted: a T0
+    snapshot is not a bound on queue-ahead later in the interval."""
     r = pf.refutation_available()
     assert r["available"] is True
-    assert r["direction"] == "REFUTATION_ONLY"
-    assert "LOWER bound on the true queue" in r["isAnUpperBound"]
+    assert r["direction"] == "NEGATIVE_MUST_BE_EARNED"
+    assert "isAnUpperBound" not in r
+    assert r["retracted"]["status"] == "RETRACTED"
+    assert "QUEUE_DEPLETION_FROM_CANCELLATIONS IDENTIFIED" in r["requires"]
+    assert "INITIAL_QUEUE_NOT_DEPLETED" in r["insufficient"]
 
 
 def test_nothing_on_this_path_can_write_filled():
@@ -114,8 +120,15 @@ def test_a_touch_is_not_a_fill_status():
 def test_the_accumulation_contract_is_prospective():
     c = pf.accumulation_contract()
     assert "leaves no trace to recover" in c["whyProspective"]
-    assert "QUEUE_AHEAD_AT_INSERT" in c["perQuote"]
+    assert "QUEUE_AHEAD_AT_T0" in c["perQuote"]
     # Observations about the market are stored under their own names.
     assert "TOUCHED" in c["perObservation"]
     assert "Neither is ever counted toward a fill rate" in \
         c["notRecordedAsFills"]
+    # The dynamic queue fields the negative needs are named here so the
+    # gap in today's tick data stays visible.
+    for field in ("QUEUE_DEPLETION_FROM_CANCELLATIONS",
+                  "QUEUE_ADDITION_AHEAD", "QUEUE_AHEAD_DYNAMIC_STATUS"):
+        assert field in c["perObservation"], field
+    assert "not identified from the snapshot" in c["queueAheadAtT0IsNotABound"]
+    assert "never trained on as a no-fill" in c["intervalCensoredRowsAreKept"]
