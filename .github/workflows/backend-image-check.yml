@@ -1,0 +1,80 @@
+# Does the backend image BUILD from the repository root, and do the
+# tested EV modules actually IMPORT inside it?
+#
+# WHY THIS WORKFLOW EXISTS. `sportsassets.bettor_ev_bridge` imports the
+# EV engines from research/beta48/shadow rather than carrying a copy,
+# because a copy drifts from the implementation the tests cover. That
+# only works if the image CONTAINS them. It did not: render.yaml built
+# with `rootDir: backend`, so the bridge failed closed in production
+# while every local test passed.
+#
+# A passing backend-tests run cannot catch that -- it runs in a source
+# checkout, where the directory is always present. The only thing that
+# settles it is the built image, so this builds it exactly as Render
+# now does and imports every required module inside the container.
+#
+# Owner directive, §2: "Do not deploy until the actual container
+# imports them successfully."
+name: backend-image-check
+on:
+  workflow_dispatch:
+  push:
+    branches: ["claude/**"]
+    paths:
+      - "backend/Dockerfile"
+      - "backend/sportsassets/bettor_ev_bridge.py"
+      - "render.yaml"
+      - "research/beta48/shadow/**"
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # ROOT CONTEXT, exactly as render.yaml now declares it:
+      #     rootDir: .
+      #     dockerfilePath: ./backend/Dockerfile
+      - name: Build the backend image exactly as Render would
+        run: docker build -t sportsassets-ci -f backend/Dockerfile .
+
+      - name: The research tree is actually in the image
+        run: |
+          docker run --rm sportsassets-ci \
+            test -f /app/research/beta48/shadow/action_ev.py
+
+      # THE PREFLIGHT IS THE POINT. It resolves the explicit
+      # BETTOR_RESEARCH_ROOT contract and imports every required
+      # module, failing the job if any one of them is absent or raises.
+      - name: Preflight the EV bridge inside the container
+        run: |
+          docker run --rm sportsassets-ci python -c "
+          import json, sys
+          from sportsassets.bettor_ev_bridge import preflight
+          p = preflight()
+          print(json.dumps(p, indent=2))
+          if not p['ok']:
+              sys.exit('EV MACHINERY DID NOT LOAD IN THE IMAGE')
+          print('RESEARCH ROOT:', p['researchRoot'])
+          "
+
+      # And prove it PRICES, not merely imports. A module that loads
+      # but cannot evaluate an action would pass the step above and
+      # still leave the lane writing nothing.
+      - name: The lane prices the canonical action table in the image
+        run: |
+          docker run --rm sportsassets-ci python -c "
+          import sys
+          from sportsassets import bettor_ev_bridge as B
+          r = B.evaluate({'bid':'0.48','ask':'0.52','mid':'0.50','readable':True})
+          if r['actionEvStatus'] == B.MACHINERY_UNAVAILABLE:
+              sys.exit('bridge degraded to MACHINERY_UNAVAILABLE: %s' % r['why'])
+          if len(r['table']) != 15:
+              sys.exit('expected 15 canonical actions, got %d' % len(r['table']))
+          print('ACTIONS PRICED :', len(r['table']))
+          print('EXECUTION COST :', r['executionCostIdentifiedFor'])
+          print('SETTLEMENT EV  :', r['settlementEvStatus'])
+          print('BEST ACTION    :', r['bestAction'])
+          "

@@ -373,10 +373,16 @@ def decide(opportunity: dict, market_state: dict | None, *,
              "status": r["status"],
              "expectedNetDollarsPerContract": r.get(
                  "expectedNetDollarsPerContract", NOT_IDENTIFIED),
-             "breakEvenPFillLowerBound": r.get(
-                 "BREAK_EVEN_P_FILL_LOWER_BOUND"),
+             # A BAND, NOT A BOUND. FILL_SELECTION_EFFECT has no
+             # established direction, so the required fill rate is
+             # reported across the frozen prior's P10/P50/P90 rather
+             # than at an assumed sign.
+             "breakEvenPFillBand": r.get("BREAK_EVEN_P_FILL_BAND"),
+             "snapshotExecutionCostVsVenuePrice": r.get(
+                 "SNAPSHOT_EXECUTION_COST_VS_VENUE_PRICE"),
+             "settlementEv": r.get("settlementEv"),
              "why": r.get("whyNot") or r.get("whyIdentified")
-                    or r.get("whyNotRecommended")}
+                    or r.get("whatThisDoesNotEstablish")}
             for r in ev["table"]],
         actionEvComponents=ev,
         # NOT_IDENTIFIED, NOT NOT_ESTABLISHED. The two words are not

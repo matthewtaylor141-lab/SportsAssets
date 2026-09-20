@@ -91,8 +91,15 @@ services:
     # standard = 2 GB, the size the owner chose. Change it here, never
     # in the dashboard.
     plan: standard
-    rootDir: backend
-    dockerfilePath: ./Dockerfile
+    # ROOT CONTEXT (owner decision, "CONTINUE THE BUILD" §2). The image
+    # must contain research/beta48/shadow, because
+    # sportsassets.bettor_ev_bridge IMPORTS the tested EV modules
+    # instead of carrying a copy. rootDir: backend could not see them,
+    # so the bridge failed closed in production while passing locally.
+    # Vendoring them into backend/ was considered and rejected: it
+    # creates a second engine that drifts from the one the tests cover.
+    rootDir: .
+    dockerfilePath: ./backend/Dockerfile
     dockerCommand: sh start.sh
     healthCheckPath: /healthz
     envVars: &backend_env
@@ -103,6 +110,15 @@ services:
       # at import (mallopt); the environment is the belt to that brace.
       - key: MALLOC_ARENA_MAX
         value: "2"
+      # WHERE THE TESTED EV MODULES LIVE IN THE IMAGE. The Dockerfile
+      # also sets it; declaring it here too means the contract is
+      # visible in the blueprint rather than buried in a build stage,
+      # and a future base-image change cannot quietly drop it. The
+      # bridge resolves this path BEFORE any parent-directory guess and
+      # fails closed if the modules are absent -- it never prices an
+      # action from an engine it could not load.
+      - key: BETTOR_RESEARCH_ROOT
+        value: /app/research/beta48/shadow
       - key: DATABASE_URL
         fromDatabase:
           name: sportsassets-db
@@ -176,8 +192,11 @@ services:
     # needed. Revert to `starter` here once the workers have run a day
     # under the fixes with room to spare -- and only here.
     plan: standard
-    rootDir: backend
-    dockerfilePath: ./Dockerfile
+    # Root context, for the same reason as the API above: the workers
+    # run the decision lane, which is the process that actually calls
+    # the bridge.
+    rootDir: .
+    dockerfilePath: ./backend/Dockerfile
     dockerCommand: python -m sportsassets.workers.all
     envVars: *backend_env
 
