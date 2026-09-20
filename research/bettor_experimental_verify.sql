@@ -738,3 +738,80 @@ SELECT 'realized|' || p.experiment_id
     ON e.position_id = p.position_id
  GROUP BY p.experiment_id
  ORDER BY p.experiment_id;
+
+\echo ''
+\echo '--- 28. VERSION LIFECYCLE: who may still open a position ---'
+-- Owner directive 2026-09-20: X1 V1 and its control are closed to NEW
+-- positions under EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE. This
+-- is NOT a performance stop -- their frozen contract cannot complete a
+-- position lifecycle, so a position opened under it could never reach
+-- POSITION_CLOSED.
+--
+-- The blocker lives in code, OUTSIDE the hashed declaration, so that
+-- X1's frozen sha (77c930248609d057) keeps matching the four
+-- production positions that carry it. What the database can show is
+-- the CONSEQUENCE: no position rows created after the block.
+SELECT 'version_positions|' || p.experiment_id
+       || '|positions=' || count(*)
+       || '|first=' || to_char(min(p.opened_at), 'YYYY-MM-DD HH24:MI:SSZ')
+       || '|last='  || to_char(max(p.opened_at), 'YYYY-MM-DD HH24:MI:SSZ')
+       || '|entry_notional_usd='
+       || to_char(sum(p.entry_notional_usd), 'FM999999990.00')
+  FROM bettor_experimental_positions p
+ GROUP BY p.experiment_id
+ ORDER BY p.experiment_id;
+
+\echo ''
+\echo '--- 28b. DECISIONS BLOCKED BY THEIR OWN VERSION (migration 087) ---'
+-- A blocked entry is still RECORDED -- "Do not discard observations or
+-- decisions" -- but it carries no position id and no economics, so it
+-- can never be counted as a trade. Zero rows before the block deploys
+-- is the expected result; any row after it is an entry the frozen
+-- contract's incompleteness stopped.
+SELECT 'version_blocked|' || experiment_id
+       || '|n=' || count(*)
+       || '|with_a_position=' || count(*) FILTER (WHERE position_id
+                                                  IS NOT NULL)
+       || '|with_economics=' || count(*) FILTER (
+              WHERE executed_notional_usd IS NOT NULL
+                 OR filled_qty IS NOT NULL)
+       || '|first=' || COALESCE(to_char(min(decision_timestamp),
+                                        'YYYY-MM-DD HH24:MI:SSZ'), 'NONE')
+  FROM bettor_experimental_decisions
+ WHERE execution_status
+       = 'BLOCKED_EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE'
+ GROUP BY experiment_id
+ ORDER BY experiment_id;
+
+\echo ''
+\echo '--- 28c. THE SUCCESSOR HAS NOT TRADED ---'
+-- §10: "Then stop for review before the successor opens its first
+-- position." An empty result is the expected finding and the thing to
+-- re-check before saying the successor is holding.
+SELECT 'successor_activity|' || e.experiment_id
+       || '|decisions=' || count(DISTINCT d.experimental_decision_id)
+       || '|positions=' || count(DISTINCT p.position_id)
+  FROM (VALUES ('X1_SHORT_HORIZON_DIRECTION_V2'),
+               ('X1C_NULL_CONTROL_V2')) AS e(experiment_id)
+  LEFT JOIN bettor_experimental_decisions d
+    ON d.experiment_id = e.experiment_id
+  LEFT JOIN bettor_experimental_positions p
+    ON p.experiment_id = e.experiment_id
+ GROUP BY e.experiment_id
+ ORDER BY e.experiment_id;
+
+\echo ''
+\echo '--- 28d. THE RAILS THE DATABASE HOLDS AFTER 087 ---'
+SELECT 'constraint|' || con.conname
+       || '|admits_reentry_refusal='
+       || (pg_get_constraintdef(con.oid)
+           LIKE '%REFUSED_REENTRY_INSIDE_HORIZON%')
+       || '|admits_version_block='
+       || (pg_get_constraintdef(con.oid)
+           LIKE '%BLOCKED_EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE%')
+  FROM pg_constraint con
+  JOIN pg_class rel ON rel.oid = con.conrelid
+ WHERE rel.relname = 'bettor_experimental_decisions'
+   AND con.conname IN ('bettor_exp_execution_status',
+                       'bettor_exp_refusal_has_no_position')
+ ORDER BY con.conname;

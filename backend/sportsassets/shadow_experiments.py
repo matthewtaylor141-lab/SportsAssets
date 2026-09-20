@@ -105,7 +105,13 @@ NOT_BLOCKERS_HERE = ("INDEPENDENT_EV_NOT_ESTABLISHED", "NO_FAIR_VALUE",
 ARMED = "ARMED"
 AWAITING_FEATURE = "AWAITING_FEATURE"
 RETIRED = "RETIRED"
-READINESS = (ARMED, AWAITING_FEATURE, RETIRED)
+# A version that is COMPLETELY specified but has not been reviewed.
+# Distinct from AWAITING_FEATURE, which means evidence is missing:
+# nothing is missing here except the owner's word. A successor sits in
+# this state from declaration until review, so that "fully specified"
+# and "allowed to trade" can never be the same fact.
+DECLARED_AWAITING_REVIEW = "DECLARED_AWAITING_REVIEW"
+READINESS = (ARMED, AWAITING_FEATURE, RETIRED, DECLARED_AWAITING_REVIEW)
 
 # ── §9: the control is a policy too ──────────────────────────────────
 
@@ -126,6 +132,59 @@ REQUIRED_DECLARATION_FIELDS = (
     "pairingRule", "cashoutRule", "latencyAssumption",
     "intendedNotionalUsd", "startTimestamp",
 )
+
+# ── the exit sub-rules a COMPLETE lifecycle needs ────────────────────
+#
+# X1 V1 satisfied every field above and still could not close a
+# position: `exitRule` is one sentence, and one sentence cannot say
+# what happens when the book is too thin to absorb the position or how
+# stale "the book observed at that instant" may be. Owner directive
+# 2026-09-20: "The new declaration must completely specify entry AND
+# exit before its first position exists."
+#
+# THESE ARE ALL-OR-NOTHING AND THEY ARE OPTIONAL, and both halves of
+# that matter:
+#
+#   optional      -- because adding a key to EVERY declaration would
+#                    change every declaration's hash, and X1 V1's hash
+#                    (77c930248609d057) is stored on four production
+#                    positions. A hash that moves is supposed to mean
+#                    "a rule was edited under a live experiment". It
+#                    must not move because a later version needed more
+#                    fields.
+#   all-or-nothing -- because a half-specified exit is exactly V1's
+#                    failure, and a declaration that supplied three of
+#                    the six would look complete in a listing.
+EXIT_SEMANTICS_FIELDS = (
+    "exitAnchor", "exitAnchorRule", "exitAction", "exitTimingRule",
+    "exitIntendedQtyRule", "partialExitRule", "residualRule",
+    "exitRetryRule", "maxExitObservationDelayMs", "maxExitDelayBasis",
+)
+
+# Hashed like the rest, but not required for completeness: they record
+# detail around the contract rather than a rule a position's lifecycle
+# depends on. Enumerated rather than matched by prefix, because the
+# point of rejecting an unrecognised key is to catch a typo -- and a
+# typo that happens to start with "exit" is still a typo.
+EXIT_SEMANTICS_OPTIONAL_FIELDS = (
+    "exitHorizonS", "exitAtMarketCloseRule", "maxExitDelayRevisionRule",
+    "exitEvidenceFields",
+)
+
+LIFECYCLE_COMPLETE = "LIFECYCLE_COMPLETE"
+LIFECYCLE_EXIT_INCOMPLETE = "LIFECYCLE_EXIT_SEMANTICS_INCOMPLETE"
+
+
+def lifecycle_completeness(declaration: dict) -> str:
+    """Can a position under this declaration ever reach POSITION_CLOSED?
+
+    Read off the declaration itself rather than tracked beside it, so
+    a version cannot claim completeness it did not freeze.
+    """
+    have = [f for f in EXIT_SEMANTICS_FIELDS
+            if declaration.get(f) not in (None, "", [], ())]
+    return (LIFECYCLE_COMPLETE if len(have) == len(EXIT_SEMANTICS_FIELDS)
+            else LIFECYCLE_EXIT_INCOMPLETE)
 
 
 def _canonical(obj) -> str:
@@ -151,7 +210,8 @@ def declare(*, experiment_id, policy_version, model_version, feature_set,
             pairing_rule, cashout_rule, latency_assumption,
             start_timestamp, intended_notional_usd=None,
             role=CANDIDATE, readiness=AWAITING_FEATURE,
-            control_for=None, required_features=(), notes=None) -> dict:
+            control_for=None, required_features=(), notes=None,
+            exit_semantics=None, supersedes=None) -> dict:
     """One frozen experimental policy. Pure -- no database.
 
     EVERY §4 FIELD IS REQUIRED, and none of them may be empty. An
@@ -228,6 +288,38 @@ def declare(*, experiment_id, policy_version, model_version, feature_set,
             "before the first outcome is known, and a rule added after "
             "an outcome is not a rule, it is a description"
             % (experiment_id, ", ".join(missing)))
+
+    # ── the optional, all-or-nothing exit semantics ──────────────────
+    #
+    # ADDED ONLY WHEN SUPPLIED. A declaration that does not carry them
+    # keeps a body byte-identical to the one it had before this
+    # parameter existed, and therefore keeps its hash. See
+    # EXIT_SEMANTICS_FIELDS for why that is load-bearing.
+    if exit_semantics:
+        supplied = {k: v for k, v in dict(exit_semantics).items()
+                    if v not in (None, "", [], ())}
+        absent = [f for f in EXIT_SEMANTICS_FIELDS if f not in supplied]
+        if absent:
+            raise ExperimentRefusal(
+                "refused: %s supplies exit semantics but omits %s. A "
+                "partially specified exit is exactly the defect this "
+                "parameter exists to prevent -- X1 V1 satisfied every "
+                "required field and still could not close a position"
+                % (experiment_id, ", ".join(absent)))
+        unknown = [k for k in supplied
+                   if k not in EXIT_SEMANTICS_FIELDS
+                   and k not in EXIT_SEMANTICS_OPTIONAL_FIELDS]
+        if unknown:
+            raise ExperimentRefusal(
+                "refused: %s declares unknown exit semantics %s"
+                % (experiment_id, ", ".join(sorted(unknown))))
+        declaration.update(supplied)
+
+    # LINEAGE, when this version replaces an earlier one. Recorded on
+    # the declaration so the successor can never be mistaken for the
+    # original, and the original is never rewritten to point forward.
+    if supersedes:
+        declaration["supersedes"] = supersedes
 
     declaration["experimentSha"] = experiment_sha(declaration)
     return declaration

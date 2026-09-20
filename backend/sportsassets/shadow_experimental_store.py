@@ -993,7 +993,8 @@ async def reentry_verdict(pool, sealed: dict, execution: dict,
                        last_opened_at=prior.get(sealed["marketId"]))
 
 
-def refused_execution(execution: dict, verdict: dict) -> dict:
+def refused_execution(execution: dict, verdict: dict, *,
+                      status=None) -> dict:
     """The execution as it must be RECORDED when the entry was refused.
 
     THE DEFECT THIS PREVENTS. `record_decision` writes
@@ -1007,9 +1008,21 @@ def refused_execution(execution: dict, verdict: dict) -> dict:
     EVIDENCE STAYS: that book was really observed at that instant, and
     it is the evidence that the refusal cost something. What is removed
     is only the claim that an entry happened.
+
+    `status` names WHICH refusal. The two kinds -- a re-entry inside
+    the frozen horizon, and a version whose exit contract cannot close
+    a position -- are recorded separately because they are different
+    findings, but they strip the same fields, because in both cases no
+    position exists.
     """
     out = dict(execution or {})
-    out["executionStatus"] = eng.REFUSED_REENTRY
+    status = status or eng.REFUSED_REENTRY
+    if status not in eng.NO_POSITION_STATUSES:
+        raise ValueError(
+            "refused: %r is not a no-position status; a refusal that "
+            "is not enumerated would escape migration 087's invariant"
+            % status)
+    out["executionStatus"] = status
     out["positionId"] = None
     for key in ("executedNotionalUsd", "unfilledNotionalUsd", "filledQty",
                 "vwap", "slippage", "spreadCost"):

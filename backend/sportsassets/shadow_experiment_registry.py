@@ -45,6 +45,7 @@ frozen promotion framework, which this module neither reads nor calls.
 from __future__ import annotations
 
 from . import shadow as sh
+from . import shadow_exit_spec as xspec
 from . import shadow_experiment_signals as sig
 from . import shadow_experiments as xp
 
@@ -252,7 +253,127 @@ X5 = _declare(
            "book is a latency artefact, not a disagreement."),
 )
 
-EXPERIMENTS = (X1, X1C, X2, X3, X4, X5)
+# ── the successor: entry carried forward, exit completely frozen ─────
+#
+# Owner directive 2026-09-20, "DO NOT RETROFIT MISSING EXIT SEMANTICS
+# INTO X1 V1":
+#
+#     "Create a new prospective experiment version... Do not overwrite
+#     X1 V1. The new declaration must completely specify entry AND exit
+#     before its first position exists. Do not change the
+#     signal/threshold merely because X1 V1 lost. Carry forward the
+#     existing entry rule unchanged unless there is a separate
+#     pre-existing reason to change it."
+#
+# SO THE ENTRY HALF IS COPIED, NOT REWRITTEN. direction_rule,
+# entry_rule, target, horizon, feature_set and notional are the same
+# expressions X1 V1 was built from -- the same sig.M1 constants, the
+# same $1,000, the same spread gate. There is no pre-existing reason to
+# change any of them, and "the first cohort lost" is explicitly not
+# one. Only the exit is new, because only the exit was incomplete.
+#
+# ITS OWN FREEZE INSTANT. A LITERAL, for the reason in the module
+# docstring: the successor is a different experiment frozen on a
+# different day, and it says so rather than inheriting V1's date.
+SUCCESSOR_START_UTC = "2026-09-20T04:45:00Z"
+
+
+def _declare_v2(**kw):
+    return xp.declare(latency_assumption=LATENCY_ASSUMPTION,
+                      start_timestamp=SUCCESSOR_START_UTC,
+                      exit_semantics=xspec.exit_semantics(), **kw)
+
+
+# The exit rule SENTENCE the successor freezes. It says the same thing
+# EXIT_RULE_HORIZON said and then keeps going, because the sentence
+# alone was never enough -- the structured contract beside it is what
+# makes the lifecycle completable.
+EXIT_RULE_HORIZON_V2 = (
+    "exit at the frozen horizon by marketable reconstruction against "
+    "the first legitimately observed book at or after the target "
+    "instant, within the declared maximum observation delay; no "
+    "discretionary hold, no averaging down, no re-entry inside the "
+    "horizon; the intended exit quantity is all remaining open "
+    "quantity, a thin book yields a PARTIAL_EXIT for the depth it "
+    "genuinely showed, and the residual remains an exit obligation "
+    "attempted against every subsequent observed book until it is "
+    "flat -- never invented depth, never an interpolated price, and "
+    "never a close merely because the horizon expired")
+
+X1V2 = _declare_v2(
+    experiment_id="X1_SHORT_HORIZON_DIRECTION_V2",
+    supersedes="X1_SHORT_HORIZON_DIRECTION",
+    policy_version="BETTOR_EXP_SHORT_HORIZON_V2",
+    model_version="short_horizon_direction_v1",      # THE SAME MODEL
+    feature_set=("microstructure.mid", "microstructure.spreadRelative"),
+    required_features=("mid",),
+    target="mid at +60s versus mid at arrival",
+    horizon="60S",
+    direction_rule=(
+        "signed drift of the mid over the last %d captured samples "
+        "(minimum %d); LONG above +%.4f, SHORT below -%.4f, otherwise "
+        "FLAT and no trade"
+        % (sig.M1_LOOKBACK_SAMPLES, sig.M1_MIN_SAMPLES,
+           sig.M1_ENTRY_THRESHOLD, sig.M1_ENTRY_THRESHOLD)),
+    entry_rule=(
+        "marketable reconstruction of $%d intended notional against the "
+        "observed executable book at simulated arrival; refuse the trade "
+        "when relative spread exceeds %.2f, when the input is blocked, "
+        "or when no executable depth is observed -- never a filled size "
+        "the book did not show"
+        % (1000, sig.M1_MAX_SPREAD_RELATIVE)),
+    exit_rule=EXIT_RULE_HORIZON_V2,
+    pairing_rule=PAIRING_RULE_NONE,
+    cashout_rule=CASHOUT_RULE_NONE,
+    readiness=xp.DECLARED_AWAITING_REVIEW,
+    notes=("Successor to X1_SHORT_HORIZON_DIRECTION. The ENTRY half is "
+           "carried forward unchanged -- same signal, same threshold, "
+           "same notional, same spread gate -- because the V1 result is "
+           "not a reason to change it. The EXIT half is completely "
+           "frozen for the first time, including the residual "
+           "obligation and a maximum observation delay derived from "
+           "measured capture cadence rather than from any outcome. "
+           "V1's four positions are untouched and keep "
+           "EXIT_MECHANISM_UNAVAILABLE_AT_ENTRY."),
+)
+
+X1CV2 = _declare_v2(
+    experiment_id="X1C_NULL_CONTROL_V2",
+    role=xp.CONTROL,
+    control_for="X1_SHORT_HORIZON_DIRECTION_V2",
+    supersedes="X1C_NULL_CONTROL",
+    policy_version="BETTOR_EXP_NULL_CONTROL_V2",
+    model_version="null_control_v1",
+    feature_set=(),
+    required_features=(),
+    target="mid at +60s versus mid at arrival",
+    horizon="60S",
+    direction_rule=(
+        "always LONG; reads no feature and ignores every signal, so any "
+        "difference against X1 V2 on the same markets at the same "
+        "instants is the model's information and not the market's "
+        "direction"),
+    entry_rule=(
+        "identical to X1 V2's entry in every respect except the "
+        "direction rule -- same notional, same book, same arrival, same "
+        "input gate; a control that traded a different tape would "
+        "compare nothing"),
+    exit_rule=EXIT_RULE_HORIZON_V2,
+    pairing_rule=PAIRING_RULE_NONE,
+    cashout_rule=CASHOUT_RULE_NONE,
+    readiness=xp.DECLARED_AWAITING_REVIEW,
+    notes=("THE CONTROL IS PART OF THE SUCCESSOR, not an optional "
+           "extra. §9 of the founding directive -- 'We need to learn: "
+           "DID THE MODEL ADD VALUE? not merely: DID THE MARKET GO "
+           "UP?' -- is only answerable if the null runs beside the "
+           "candidate on the same population at the same instants. A "
+           "successor declared without one would silently drop that "
+           "property. It carries V2's complete exit contract for the "
+           "same reason X1C carried V1's: a control that exits by a "
+           "different rule compares two things at once."),
+)
+
+EXPERIMENTS = (X1, X1C, X2, X3, X4, X5, X1V2, X1CV2)
 
 BY_ID = {e["experimentId"]: e for e in EXPERIMENTS}
 
@@ -266,6 +387,11 @@ SIGNAL_FOR = {
     "X3_MICROPRICE": sig.M2,
     "X4_ORDER_FLOW_IMBALANCE": sig.M3,
     "X5_EXTERNAL_DISAGREEMENT": sig.M5,
+    # THE SUCCESSOR RUNS THE SAME SIGNAL FUNCTIONS. "Do not change the
+    # signal/threshold merely because X1 V1 lost" -- so the mapping
+    # points at the same callables, not at new ones.
+    "X1_SHORT_HORIZON_DIRECTION_V2": sig.M1,
+    "X1C_NULL_CONTROL_V2": sig.C0,
 }
 
 

@@ -45,6 +45,8 @@ from .. import shadow_latency_integrity as lat
 from .. import shadow_position_lifecycle as lc
 from .. import shadow_reentry_guard as rg
 from .. import shadow_exit_semantics as xsem
+from .. import shadow_exit_spec as xspec
+from .. import shadow_experiment_versions as ver
 from .. import shadow_experimental_store as xstore
 from .. import shadow_experiments as xp
 
@@ -512,6 +514,77 @@ _ELIGIBLE_BY_EXPERIMENT = """
 """ % tm.performance_eligible_sql()
 
 
+def _version_tile(experiment_id: str) -> dict:
+    """What management must understand about THIS version (§8).
+
+    A version whose frozen contract cannot close a position is not a
+    book of live positions awaiting a discretionary exit. It is a
+    finished historical cohort whose exits were never available, and
+    the tile says exactly that rather than leaving it to be inferred
+    from a status column elsewhere.
+    """
+    declaration = reg.BY_ID.get(experiment_id, {})
+    verdict = ver.position_creation(experiment_id, declaration=declaration)
+    complete = xp.lifecycle_completeness(declaration) \
+        if declaration else xp.LIFECYCLE_EXIT_INCOMPLETE
+    historical = not verdict["permitted"] \
+        and complete != xp.LIFECYCLE_COMPLETE
+    return {
+        "EXPERIMENT_VERSION": experiment_id,
+        "NEW_POSITION_CREATION": (
+            "PERMITTED" if verdict["permitted"] else "BLOCKED"),
+        "BLOCKER": None if verdict["permitted"] else verdict["decision"],
+        "BLOCKER_IS_PERFORMANCE_BASED": verdict.get(
+            "performanceBased", False),
+        "LIFECYCLE": complete,
+        "STATUS": ("HISTORICAL_PROSPECTIVE_EXPERIMENT" if historical
+                   else "PROSPECTIVE"),
+        "EXIT_POLICY_AT_ENTRY": (
+            "INCOMPLETE" if complete != xp.LIFECYCLE_COMPLETE else
+            "COMPLETE"),
+        "REALIZED_PNL_USD": None,
+        "REALIZED_PNL_STATUS": cap.NOT_APPLICABLE,
+        "supersededBy": verdict.get("supersededBy"),
+        "why": verdict.get("why"),
+        "readerNote": (
+            "these positions are NOT live positions waiting for a "
+            "discretionary exit. The exit mechanism was unavailable "
+            "when they opened and the frozen contract cannot complete "
+            "them; the figure beside them is an executable markout, "
+            "never realized P&L" if historical else None),
+    }
+
+
+def _successor_tile() -> dict:
+    """The successor: complete, declared, and not trading (§8/§10)."""
+    ids = [e["experimentId"] for e in reg.EXPERIMENTS
+           if e.get("supersedes")]
+    return {
+        "SUCCESSOR_EXPERIMENT_IDS": ids,
+        "POSITIONS": 0,
+        "STATUS": "PROSPECTIVE",
+        "READINESS": xp.DECLARED_AWAITING_REVIEW,
+        "NEW_POSITION_CREATION": "BLOCKED",
+        "BLOCKER": ver.AWAITING_REVIEW,
+        "LIFECYCLE": xp.LIFECYCLE_COMPLETE,
+        "ENTRY_AND_EXIT_FROZEN": True,
+        "MAX_EXIT_OBSERVATION_DELAY_MS":
+            xspec.MAX_EXIT_OBSERVATION_DELAY_MS,
+        "MAX_EXIT_DELAY_BASIS": xspec.MAX_EXIT_DELAY_BASIS,
+        "exitSemantics": xspec.exit_semantics(),
+        "completeness": xspec.completeness(),
+        "declarations": [
+            {"experimentId": e["experimentId"],
+             "experimentSha": e["experimentSha"],
+             "supersedes": e["supersedes"],
+             "role": e["role"]}
+            for e in reg.EXPERIMENTS if e.get("supersedes")],
+        "why": ("declared completely -- entry carried forward "
+                "unchanged, exit frozen for the first time -- and "
+                "holding for review before its first position"),
+    }
+
+
 async def _management(pool) -> dict:
     """The three performance classes, each with its own economics.
 
@@ -590,6 +663,11 @@ async def _management(pool) -> dict:
             "SETTLEMENT_SEMANTICS_STATUS": settlement[
                 "SETTLEMENT_SEMANTICS_STATUS"],
             "settlement": settlement,
+            # §8 (owner 2026-09-20): "Do not make management think the
+            # V1 positions are still normal live positions waiting for
+            # discretionary exits." The version's own status travels
+            # with its economics, on the same tile.
+            "version": _version_tile(experiment),
         }
 
     return {
@@ -598,6 +676,10 @@ async def _management(pool) -> dict:
         # absent from the frozen spec, so the trigger is not built. The
         # blockage is on the panel rather than in a comment.
         "exitMechanism": xsem.exit_mechanism_status(),
+        # §1/§2 (owner 2026-09-20): which versions may still open a
+        # position, and the successor that is declared but not armed.
+        "versions": ver.report(reg.EXPERIMENTS),
+        "successor": _successor_tile(),
         # §10: the historical re-entry violation, preserved.
         "reentry": {
             "X1_REENTRY_ENFORCEMENT_STATUS": "ENFORCED_BEFORE_CREATION",

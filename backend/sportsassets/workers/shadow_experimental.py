@@ -61,6 +61,7 @@ from .. import pmx_institutional as pmx
 from .. import institutional_book as ib
 from .. import shadow_experiment_registry as reg
 from .. import shadow_experiment_signals as sig
+from .. import shadow_experiment_versions as ver
 from .. import shadow_experimental_engine as eng
 from .. import shadow_experimental_markouts as mk
 from .. import shadow_experimental_store as xstore
@@ -133,13 +134,33 @@ def _declaration_of(experiment_id):
 
 
 async def _persist(pool, sealed, execution, latency=None) -> bool:
-    # §10/§11: THE FROZEN RE-ENTRY CLAUSE IS ASKED FIRST, before
+    declaration = _declaration_of(sealed.get("experimentId"))
+
+    # §1 (owner 2026-09-20): A VERSION WHOSE FROZEN CONTRACT CANNOT
+    # CLOSE A POSITION MAY NOT OPEN ONE. Asked before the re-entry
+    # clause because it is the broader refusal: there is no point
+    # asking whether THIS entry re-enters too soon when the version
+    # may not enter at all.
+    #
+    # The DECISION is still written -- "Do not discard observations or
+    # decisions", and the lane may keep producing model evidence. Only
+    # the position stops. This is not a performance stop; the check
+    # cannot read a P&L.
+    version = ver.position_creation(sealed.get("experimentId"),
+                                    declaration=declaration)
+    if not version["permitted"] and execution.get("positionId"):
+        return await xstore.record_decision(
+            pool, sealed,
+            xstore.refused_execution(execution, version,
+                                     status=eng.BLOCKED_VERSION),
+            latency=latency)
+
+    # §10/§11: THE FROZEN RE-ENTRY CLAUSE IS ASKED NEXT, before
     # anything is written, from the lane's OWN declaration -- so that
     # the decision row and the position row cannot disagree about
     # whether this entry was permitted.
     verdict = await xstore.reentry_verdict(
-        pool, sealed, execution,
-        declaration=_declaration_of(sealed.get("experimentId")))
+        pool, sealed, execution, declaration=declaration)
 
     if verdict is not None and verdict["decision"] == xstore.guard.REFUSED:
         # A REFUSED RE-ENTRY IS STILL RECORDED -- it is evidence about

@@ -32,8 +32,10 @@ from datetime import datetime, timedelta, timezone
 import pytest
 
 from sportsassets import shadow_experiment_registry as reg
+from sportsassets import shadow_experiment_versions as ver
 from sportsassets import shadow_experimental_engine as eng
 from sportsassets import shadow_experimental_store as xstore
+from sportsassets import shadow_experiments as xp
 from sportsassets import shadow_identity as ident
 from sportsassets import shadow_l2 as l2
 from sportsassets.workers import shadow_experimental as worker
@@ -58,6 +60,37 @@ INSTRUMENT = {
 RETAIL = {"identifier": "0xabc", "market_slug": SYMBOL,
           "event_slug": "mls-sje-laf-2026-09-19", "side_norm": "yes",
           "kind": "ftts", "line": None}
+
+
+# ── mechanism versus policy, kept apart ──────────────────────────────
+#
+# X1 V1 and its control are BLOCKED from creating new positions (owner
+# 2026-09-20 §1, EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE). That is
+# a policy fact about today, and it is pinned by its own tests below.
+#
+# The tests that exercise the WALK, the SEAL and the RE-ENTRY BOUNDARY
+# are about mechanism, and they must keep working when the policy moves
+# -- otherwise the day the successor is armed, the machinery it runs on
+# has no coverage at all. So they lift the version blocker explicitly
+# and say so, rather than being deleted or quietly left failing.
+
+
+@pytest.fixture
+def version_unblocked(monkeypatch):
+    """Run the position-creation machinery under a COMPLETE contract.
+
+    Clearing the blocker list is not enough, and the reason is worth
+    stating: position_creation falls back to reading the declaration
+    itself, and X1 V1's exit contract is genuinely incomplete -- so it
+    is refused by the backstop even with the list empty. That backstop
+    is the point, so the fixture does not disable it. It supplies the
+    successor's contract instead, armed, which is what these tests will
+    be covering once the successor is reviewed.
+    """
+    armed = dict(reg.X1V2, readiness=xp.ARMED)
+    monkeypatch.setattr(ver, "POSITION_CREATION_BLOCKED", {})
+    monkeypatch.setattr(worker, "_declaration_of", lambda _id: armed)
+    return armed
 
 
 # ── a fake pool that speaks just enough asyncpg ──────────────────────
@@ -361,7 +394,7 @@ async def test_the_first_book_after_the_seal_is_the_arrival():
 
 
 @pytest.mark.asyncio
-async def test_the_walk_fills_what_the_book_had_and_opens_a_position():
+async def test_the_walk_fills_what_the_book_had_and_opens_a_position(version_unblocked):
     later = NOW + timedelta(minutes=6)
     pool = FakePool(opportunities=RISING, instrument=INSTRUMENT,
                     retail=RETAIL, evidence=[ev_row(later)])
@@ -703,7 +736,7 @@ def _second_tick_opportunities(at):
 
 
 @pytest.mark.asyncio
-async def test_a_second_entry_inside_the_frozen_horizon_is_refused():
+async def test_a_second_entry_inside_the_frozen_horizon_is_refused(version_unblocked):
     """30s after the first entry, on the same market, in the loop."""
     first = NOW + timedelta(minutes=6)
     second = first + timedelta(seconds=30)
@@ -742,7 +775,7 @@ async def test_a_second_entry_inside_the_frozen_horizon_is_refused():
 
 
 @pytest.mark.asyncio
-async def test_an_entry_outside_the_frozen_horizon_is_permitted():
+async def test_an_entry_outside_the_frozen_horizon_is_permitted(version_unblocked):
     """The guard must refuse re-entry, not entry. 65s apart -- the
     cadence that has been doing this work by accident -- still opens."""
     first = NOW + timedelta(minutes=6)

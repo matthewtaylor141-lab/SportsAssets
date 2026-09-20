@@ -52,6 +52,15 @@ NO_EXECUTION_INTENDED = "NO_EXECUTION_INTENDED"
 # was unavailable was permission to enter, not liquidity. Migration
 # 086 widened the CHECK for it.
 REFUSED_REENTRY = "REFUSED_REENTRY_INSIDE_HORIZON"
+# The experiment version's own frozen contract cannot complete a
+# position lifecycle, so it may not start one. Migration 087. NOT a
+# performance stop -- see shadow_experiment_versions.
+BLOCKED_VERSION = "BLOCKED_EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE"
+
+# The statuses that mean "a decision was recorded and NO position was
+# created". Enumerated so the writer and migration 087's invariant
+# cannot drift apart.
+NO_POSITION_STATUSES = (REFUSED_REENTRY, BLOCKED_VERSION)
 
 # The actions X1's frozen rule may emit (§6).
 BUY_YES = "BUY_YES"
