@@ -67,20 +67,24 @@ HAVING count(DISTINCT o.bettor_opportunity_id) >= 30
 -- 4%. Relative spread is what a maker actually captures per dollar of
 -- capital, so the bands are the cohort that matters most.
 SELECT 'SPREAD_BY_PRICE_BAND' AS section,
-       width_bucket((s.bid + s.ask) / 2, 0, 1, 10)       AS band,
+       t.band,
        count(*)                                          AS observations,
-       round(min((s.bid + s.ask) / 2)::numeric, 3)       AS band_lo_mid,
-       round(max((s.bid + s.ask) / 2)::numeric, 3)       AS band_hi_mid,
+       round(min(t.mid)::numeric, 3)                     AS band_lo_mid,
+       round(max(t.mid)::numeric, 3)                     AS band_hi_mid,
        round(percentile_cont(0.50) WITHIN GROUP (
-             ORDER BY s.ask - s.bid)::numeric, 4)        AS median_spread,
+             ORDER BY t.spread)::numeric, 4)             AS median_spread,
        round(percentile_cont(0.50) WITHIN GROUP (
-             ORDER BY (s.ask - s.bid) / nullif((s.bid + s.ask) / 2, 0)
-             )::numeric, 4)                              AS median_rel_spread
-  FROM bettor_opportunities o
-  JOIN shadow_market_states s ON s.market_state_id = o.market_state_id
- WHERE s.bid IS NOT NULL AND s.ask IS NOT NULL
- GROUP BY 1
- ORDER BY band;
+             ORDER BY t.spread / nullif(t.mid, 0))::numeric, 4)
+                                                         AS median_rel_spread
+  FROM (SELECT (s.bid + s.ask) / 2                       AS mid,
+               s.ask - s.bid                             AS spread,
+               width_bucket((s.bid + s.ask) / 2, 0, 1, 10) AS band
+          FROM bettor_opportunities o
+          JOIN shadow_market_states s
+            ON s.market_state_id = o.market_state_id
+         WHERE s.bid IS NOT NULL AND s.ask IS NOT NULL) t
+ GROUP BY t.band
+ ORDER BY t.band;
 
 -- ── 4. THE TAKER PAIR, PRICED DIRECTLY ───────────────────────────────
 -- ask + (1 - bid) = 1 + spread. Anything at or below 1.00 would be a
