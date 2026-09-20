@@ -46,6 +46,7 @@ from __future__ import annotations
 
 from . import shadow as sh
 from . import shadow_exit_spec as xspec
+from . import shadow_exit_spec_v3 as xspec3
 from . import shadow_experiment_signals as sig
 from . import shadow_experiments as xp
 
@@ -373,7 +374,146 @@ X1CV2 = _declare_v2(
            "different rule compares two things at once."),
 )
 
-EXPERIMENTS = (X1, X1C, X2, X3, X4, X5, X1V2, X1CV2)
+# ── V2's review result, recorded WITHOUT touching V2 ─────────────────
+#
+# Owner review 2026-09-20 §7: "Preserve them exactly. Do not mutate
+# them. Do not delete them. Do not reuse their SHAs."
+#
+# So the verdict lives here, beside the declarations, never inside
+# them. Writing NOT_APPROVED into X1V2 would change its hash -- and a
+# rejected experiment whose hash moved is no longer the thing that was
+# rejected.
+
+V2_REVIEW = {
+    "X1_SHORT_HORIZON_DIRECTION_V2": {
+        "result": "NOT_APPROVED",
+        "sha": "0a1319e68fe02ff9",
+        "positions": 0,
+        "reviewedAt": "2026-09-20",
+        "reasons": [
+            "MAX_EXIT_OBSERVATION_DELAY was derived from "
+            "bettor_l2_evidence row spacing, which is the collector's "
+            "60s background trail and not the capture cadence the "
+            "DIRECT execution path reads",
+            "the 65,000ms bound was contradicted by contemporaneous "
+            "measurement of that same trail (N=1,351 P50 62.127s "
+            "P95 66.901s MAX 70.992s), so it could refuse an exit "
+            "merely because our own collector took 67-71s",
+            "the bound was computed at import from "
+            "shadow_markout_observability, a telemetry module whose "
+            "values are explicitly replaceable, so a re-measurement "
+            "could have changed a frozen experiment's sha without "
+            "anyone changing its economic policy",
+            "SUCCESSOR_START_UTC 2026-09-20T04:45:00Z precedes the "
+            "instant the rules actually froze in production "
+            "(~2026-09-20T13:11:40Z) by more than eight hours; a "
+            "prospective experiment cannot begin before its own rules "
+            "exist",
+        ],
+    },
+    "X1C_NULL_CONTROL_V2": {
+        "result": "NOT_APPROVED",
+        "sha": "d7643c9f622b9e3d",
+        "positions": 0,
+        "reviewedAt": "2026-09-20",
+        "reasons": ["carries V2's exit contract; rejected with its "
+                    "candidate"],
+    },
+}
+
+
+# ── V3: the corrected successor ──────────────────────────────────────
+#
+# §5's defect fixed by construction: this instant is AFTER the review
+# that produced V3 and after the deploy that carries it, so the
+# experiment cannot claim to have begun before its own rules existed.
+# A literal, for the reason in the module docstring.
+V3_START_UTC = "2026-09-20T15:00:00Z"
+
+
+def _declare_v3(**kw):
+    return xp.declare(latency_assumption=LATENCY_ASSUMPTION,
+                      start_timestamp=V3_START_UTC,
+                      exit_semantics=_V3_EXIT_SEMANTICS, **kw)
+
+
+# The exit contract, assembled from LITERALS in shadow_exit_spec_v3.
+# §6: nothing here is read from a telemetry module at import.
+_V3_EXIT_SEMANTICS = {
+    "exitAnchor": "ARRIVAL",
+    "exitAnchorRule": xspec.EXIT_ANCHOR_RULE,
+    "exitAction": xspec.EXIT_ACTION,
+    "exitTimingRule": xspec3.INITIAL_EXIT_DELAY_BASIS,
+    "exitIntendedQtyRule": xspec.EXIT_INTENDED_QTY_RULE,
+    "partialExitRule": xspec.PARTIAL_EXIT_RULE,
+    "residualRule": xspec.RESIDUAL_RULE,
+    "exitRetryRule": xspec3.RESIDUAL_RETRY_DELAY_BASIS,
+    "maxExitObservationDelayMs": xspec3.INITIAL_EXIT_MAX_DELAY_MS,
+    "maxExitDelayBasis": xspec3.OPERATIONAL_BOUND_BASIS,
+    "exitHorizonS": 60,
+    "exitAtMarketCloseRule": xspec.EXIT_AT_CLOSE_RULE,
+    "maxExitDelayRevisionRule": (
+        "a change to the collector's configured contract -- sweep "
+        "period, instrument count, request timeout, retry policy or "
+        "the store's freshness limit -- requires a NEW experiment "
+        "version carrying a re-derived bound. The bound is never "
+        "widened in place, never widened because of which exits it "
+        "refused, and never recomputed from a telemetry module at "
+        "import"),
+    "exitEvidenceFields": list(xspec.EXIT_EVIDENCE_FIELDS) + [
+        "EXIT_ATTEMPT_NO", "EXIT_PREVIOUS_BOOK_TIMESTAMP"],
+}
+
+EXIT_RULE_HORIZON_V3 = EXIT_RULE_HORIZON_V2
+
+X1V3 = _declare_v3(
+    experiment_id="X1_SHORT_HORIZON_DIRECTION_V3",
+    supersedes="X1_SHORT_HORIZON_DIRECTION_V2",
+    policy_version="BETTOR_EXP_SHORT_HORIZON_V3",
+    model_version="short_horizon_direction_v1",      # THE SAME MODEL
+    feature_set=("microstructure.mid", "microstructure.spreadRelative"),
+    required_features=("mid",),
+    target="mid at +60s versus mid at arrival",
+    horizon="60S",
+    direction_rule=X1["directionRule"],              # byte-identical
+    entry_rule=X1["entryRule"],                      # byte-identical
+    exit_rule=EXIT_RULE_HORIZON_V3,
+    pairing_rule=PAIRING_RULE_NONE,
+    cashout_rule=CASHOUT_RULE_NONE,
+    readiness=xp.DECLARED_AWAITING_REVIEW,
+    notes=("Corrected successor. The ENTRY half is the SAME STRING as "
+           "X1 V1's -- taken from the declaration rather than retyped, "
+           "so it cannot drift. The EXIT bound is the execution-"
+           "admissibility contract the entry already answers to "
+           "(FRESHNESS_LIMIT_S = 5.0s), not a figure derived from the "
+           "60s evidence trail V2 wrongly bounded on, and every "
+           "provenance value is a literal so future telemetry cannot "
+           "move this hash."),
+)
+
+X1CV3 = _declare_v3(
+    experiment_id="X1C_NULL_CONTROL_V3",
+    role=xp.CONTROL,
+    control_for="X1_SHORT_HORIZON_DIRECTION_V3",
+    supersedes="X1C_NULL_CONTROL_V2",
+    policy_version="BETTOR_EXP_NULL_CONTROL_V3",
+    model_version="null_control_v1",
+    feature_set=(),
+    required_features=(),
+    target="mid at +60s versus mid at arrival",
+    horizon="60S",
+    direction_rule=X1C["directionRule"],
+    entry_rule=X1C["entryRule"],
+    exit_rule=EXIT_RULE_HORIZON_V3,
+    pairing_rule=PAIRING_RULE_NONE,
+    cashout_rule=CASHOUT_RULE_NONE,
+    readiness=xp.DECLARED_AWAITING_REVIEW,
+    notes=("The null beside X1 V3, on V3's exit contract. §9 of the "
+           "founding directive is only answerable with a control on "
+           "the same population at the same instants."),
+)
+
+EXPERIMENTS = (X1, X1C, X2, X3, X4, X5, X1V2, X1CV2, X1V3, X1CV3)
 
 BY_ID = {e["experimentId"]: e for e in EXPERIMENTS}
 
@@ -392,6 +532,8 @@ SIGNAL_FOR = {
     # points at the same callables, not at new ones.
     "X1_SHORT_HORIZON_DIRECTION_V2": sig.M1,
     "X1C_NULL_CONTROL_V2": sig.C0,
+    "X1_SHORT_HORIZON_DIRECTION_V3": sig.M1,
+    "X1C_NULL_CONTROL_V3": sig.C0,
 }
 
 

@@ -37,6 +37,10 @@ from . import shadow_experiments as xp
 
 EXIT_SEMANTICS_INCOMPLETE = "EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE"
 AWAITING_REVIEW = "EXPERIMENT_VERSION_AWAITING_OWNER_REVIEW"
+# Reviewed and rejected. Distinct from AWAITING_REVIEW because the
+# answer is known: this version will never open a position, and saying
+# so is different from saying nobody has looked yet.
+NOT_APPROVED = "EXPERIMENT_VERSION_REVIEW_NOT_APPROVED"
 
 PERMITTED = "POSITION_CREATION_PERMITTED"
 
@@ -61,6 +65,27 @@ POSITION_CREATION_BLOCKED = {
             "version is closed to new positions instead"),
         "performanceBased": False,
         "supersededBy": "X1_SHORT_HORIZON_DIRECTION_V2",
+    },
+    "X1_SHORT_HORIZON_DIRECTION_V2": {
+        "blocker": NOT_APPROVED,
+        "since": "2026-09-20",
+        "why": (
+            "reviewed and rejected: its exit-delay bound was derived "
+            "from the collector's 60s evidence trail rather than from "
+            "the in-memory book the execution path reads, was "
+            "contradicted by contemporaneous measurement of that same "
+            "trail, was recomputed from replaceable telemetry at "
+            "import, and its declared start preceded its own freeze by "
+            "more than eight hours. Preserved unmutated; superseded"),
+        "performanceBased": False,
+        "supersededBy": "X1_SHORT_HORIZON_DIRECTION_V3",
+    },
+    "X1C_NULL_CONTROL_V2": {
+        "blocker": NOT_APPROVED,
+        "since": "2026-09-20",
+        "why": "carries V2's exit contract; rejected with its candidate",
+        "performanceBased": False,
+        "supersededBy": "X1C_NULL_CONTROL_V3",
     },
     "X1C_NULL_CONTROL": {
         "blocker": EXIT_SEMANTICS_INCOMPLETE,

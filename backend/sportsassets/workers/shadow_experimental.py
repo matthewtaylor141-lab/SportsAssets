@@ -61,6 +61,7 @@ from .. import pmx_institutional as pmx
 from .. import institutional_book as ib
 from .. import shadow_experiment_registry as reg
 from .. import shadow_experiment_signals as sig
+from .. import shadow_block_enforcement as blk
 from .. import shadow_experiment_versions as ver
 from .. import shadow_experimental_engine as eng
 from .. import shadow_experimental_markouts as mk
@@ -903,6 +904,22 @@ async def run() -> None:
 
     boot = dict(reg.registry_report(),
                 lane=LANE,
+                # §2 (owner review 2026-09-20): THE ENFORCEMENT EPOCH,
+                # made observable. "Establish one explicit
+                # BLOCK_ENFORCEMENT_EPOCH based on an OBSERVED running
+                # revision / worker boot after the blocking code is
+                # active."
+                #
+                # Without this the epoch can only be inferred from the
+                # first refusal -- which proves the guard was running
+                # BY then and says nothing about when it started, so
+                # anything written before it would be silently exempt.
+                # Recording the boot instant beside the guard revision
+                # makes "was the guarded code running" a fact about a
+                # process rather than a guess about an interval.
+                blockEnforcementEpoch=_now().isoformat(),
+                blockGuardRevision=blk.GUARD_REVISION,
+                blockedVersions=list(ver.blocked_ids()),
                 storeReady=ready["storeReady"],
                 problems=ready["problems"],
                 experimentsWritten=frozen["written"],

@@ -199,11 +199,20 @@ def test_the_successor_is_not_armed():
 
 
 def test_the_successor_may_not_create_a_position_yet():
+    """V2 WAS reviewed, and rejected (owner 2026-09-20). So its blocker
+    is no longer AWAITING_REVIEW -- the answer is known. The
+    awaiting-review case now belongs to V3."""
     out = ver.position_creation("X1_SHORT_HORIZON_DIRECTION_V2",
                                 declaration=reg.X1V2)
     assert out["permitted"] is False
-    assert out["decision"] == ver.AWAITING_REVIEW
+    assert out["decision"] == ver.NOT_APPROVED
     assert out["performanceBased"] is False
+
+    pending = ver.position_creation("X1_SHORT_HORIZON_DIRECTION_V3",
+                                    declaration=reg.X1V3)
+    assert pending["permitted"] is False
+    assert pending["decision"] == ver.AWAITING_REVIEW
+    assert pending["performanceBased"] is False
 
 
 def test_nothing_at_all_may_open_a_position_today():

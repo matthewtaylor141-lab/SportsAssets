@@ -841,6 +841,21 @@ positions AS (
     SELECT d.experiment_id, d.position_id, d.written_at
       FROM bettor_experimental_decisions d
      WHERE d.position_id IS NOT NULL
+),
+-- §1: the exact deploy-transition rows, identified by ID and never by
+-- a time range. A range would re-admit anything that fell inside it.
+contaminated AS (
+    SELECT d.position_id
+      FROM bettor_experimental_decisions d
+      JOIN (SELECT experiment_id, min(written_at) AS began
+              FROM bettor_experimental_decisions
+             WHERE execution_status
+                 = 'BLOCKED_EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE'
+             GROUP BY experiment_id) f
+        ON f.experiment_id = d.experiment_id
+     WHERE d.position_id IS NOT NULL
+       AND d.written_at > f.began
+       AND d.written_at < f.began + interval '60 seconds'
 )
 SELECT 'block_effective|' || b.experiment_id
        || '|blocking_began=' || to_char(b.blocking_began,
@@ -849,21 +864,18 @@ SELECT 'block_effective|' || b.experiment_id
        || '|last_position_written='
        || COALESCE(to_char(max(p.written_at),
                            'YYYY-MM-DD HH24:MI:SSZ'), 'NONE')
-       -- THE FIGURE THAT STAYS AN ALARM. The count above includes the
-       -- deploy transition: on 2026-09-20 two X1C positions were
-       -- written at 13:11:50Z, one second after the guard's first
-       -- refusal at 13:11:49Z, by a worker process that had not yet
-       -- restarted onto the guarded code. Those two rows are real,
-       -- preserved, and will make `positions_written_after` read 2
-       -- forever -- which would mask a genuine recurrence.
-       --
-       -- So the LIVE alarm is the one below: anything written more
-       -- than a restart window after blocking began cannot be a
-       -- rolling deploy and is a leak in the guard itself. It must
-       -- stay 0.
-       || '|LEAKED_AFTER_TRANSITION=' || count(p.position_id)
-              FILTER (WHERE p.written_at
-                            > b.blocking_began + interval '120 seconds')
+       -- §2 (owner review): THE 120-SECOND WINDOW THAT WAS HERE IS
+       -- GONE. It declared a grace interval in which leakage was
+       -- implicitly acceptable, and it could not tell a slow deploy
+       -- from a real leak because it was not measuring whether the
+       -- guarded code was running. Section 28h asks that instead, from
+       -- the worker's observed boot. What stays here is the raw count,
+       -- with the two known contaminated ids named rather than timed
+       -- out of the result.
+       || '|excluding_known_contamination='
+       || count(p.position_id) FILTER (
+              WHERE p.position_id NOT IN (
+                  SELECT position_id FROM contaminated))
   FROM first_block b
   LEFT JOIN positions p
     ON p.experiment_id = b.experiment_id
@@ -973,3 +985,69 @@ SELECT 'collector|' || service
   FROM service_heartbeats
  WHERE service IN ('institutional_md', 'shadow_experimental')
  ORDER BY service;
+
+\echo ''
+\echo '--- 28g. THE DEPLOY-TRANSITION ROWS, BY ID ---'
+-- §1: "Classify the exact two rows as DEPLOY_TRANSITION_CONTAMINATION
+-- ... Never silently subtract the two rows from the raw ledger."
+-- Named here so the classification attaches to identities, not to a
+-- window. X1C_ALL_POSITIONS keeps counting them; the paired
+-- comparison does not.
+WITH first_block AS (
+    SELECT experiment_id, min(written_at) AS began
+      FROM bettor_experimental_decisions
+     WHERE execution_status
+         = 'BLOCKED_EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE'
+     GROUP BY experiment_id
+)
+SELECT 'contamination|' || d.experiment_id
+       || '|' || d.position_id
+       || '|' || d.market_id
+       || '|written=' || to_char(d.written_at, 'YYYY-MM-DD HH24:MI:SSZ')
+       || '|after_first_block_s='
+       || round(EXTRACT(EPOCH FROM (d.written_at - f.began))::numeric, 1)
+       || '|notional=' || COALESCE(to_char(d.executed_notional_usd,
+                                           'FM999999990.00'), 'NULL')
+       || '|class=DEPLOY_TRANSITION_CONTAMINATION'
+  FROM bettor_experimental_decisions d
+  JOIN first_block f ON f.experiment_id = d.experiment_id
+ WHERE d.position_id IS NOT NULL
+   AND d.written_at > f.began
+ ORDER BY d.written_at;
+
+\echo ''
+\echo '--- 28h. X1C: ALL RECORDED vs CLEAN PAIRED ---'
+-- Both figures, always together. §1: the raw ledger is never silently
+-- reduced -- it is reported beside the paired-eligible subset with the
+-- difference named.
+WITH first_block AS (
+    SELECT experiment_id, min(written_at) AS began
+      FROM bettor_experimental_decisions
+     WHERE execution_status
+         = 'BLOCKED_EXPERIMENT_VERSION_EXIT_SEMANTICS_INCOMPLETE'
+     GROUP BY experiment_id
+),
+contaminated AS (
+    SELECT d.position_id
+      FROM bettor_experimental_decisions d
+      JOIN first_block f ON f.experiment_id = d.experiment_id
+     WHERE d.position_id IS NOT NULL
+       AND d.written_at > f.began
+)
+SELECT 'paired|' || p.experiment_id
+       || '|ALL_POSITIONS=' || count(*)
+       || '|ALL_ENTRY_NOTIONAL='
+       || to_char(sum(p.entry_notional_usd), 'FM999999990.00')
+       || '|CONTAMINATED=' || count(*) FILTER (
+              WHERE p.position_id IN (SELECT position_id FROM contaminated))
+       || '|CLEAN_PAIRED_POSITIONS=' || count(*) FILTER (
+              WHERE p.position_id NOT IN (
+                  SELECT position_id FROM contaminated))
+       || '|CLEAN_PAIRED_ENTRY_NOTIONAL='
+       || to_char(sum(p.entry_notional_usd) FILTER (
+              WHERE p.position_id NOT IN (
+                  SELECT position_id FROM contaminated)),
+              'FM999999990.00')
+  FROM bettor_experimental_positions p
+ GROUP BY p.experiment_id
+ ORDER BY p.experiment_id;
