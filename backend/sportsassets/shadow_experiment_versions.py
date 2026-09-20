@@ -87,6 +87,26 @@ POSITION_CREATION_BLOCKED = {
         "performanceBased": False,
         "supersededBy": "X1C_NULL_CONTROL_V3",
     },
+    "X1_SHORT_HORIZON_DIRECTION_V3": {
+        "blocker": NOT_APPROVED,
+        "since": "2026-09-20",
+        "why": (
+            "reviewed and rejected: its timing contract conflated BOOK "
+            "FRESHNESS with TARGET-TO-OBSERVATION DELAY. A book "
+            "received 20s after the target whose own age is 1s is "
+            "fresh and admissible, and V3's [TARGET, TARGET+5s] window "
+            "would have refused it for a reason that was never about "
+            "staleness. Preserved unmutated; superseded"),
+        "performanceBased": False,
+        "supersededBy": "X1_SHORT_HORIZON_DIRECTION_V4",
+    },
+    "X1C_NULL_CONTROL_V3": {
+        "blocker": NOT_APPROVED,
+        "since": "2026-09-20",
+        "why": "carries V3's exit contract; rejected with its candidate",
+        "performanceBased": False,
+        "supersededBy": "X1C_NULL_CONTROL_V4",
+    },
     "X1C_NULL_CONTROL": {
         "blocker": EXIT_SEMANTICS_INCOMPLETE,
         "since": "2026-09-20",

@@ -208,8 +208,13 @@ def test_the_successor_may_not_create_a_position_yet():
     assert out["decision"] == ver.NOT_APPROVED
     assert out["performanceBased"] is False
 
-    pending = ver.position_creation("X1_SHORT_HORIZON_DIRECTION_V3",
-                                    declaration=reg.X1V3)
+    # V3 was reviewed and rejected too; the pending case is now V4.
+    rejected_v3 = ver.position_creation("X1_SHORT_HORIZON_DIRECTION_V3",
+                                        declaration=reg.X1V3)
+    assert rejected_v3["decision"] == ver.NOT_APPROVED
+
+    pending = ver.position_creation("X1_SHORT_HORIZON_DIRECTION_V4",
+                                    declaration=reg.X1V4)
     assert pending["permitted"] is False
     assert pending["decision"] == ver.AWAITING_REVIEW
     assert pending["performanceBased"] is False

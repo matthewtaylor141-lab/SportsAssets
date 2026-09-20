@@ -47,6 +47,7 @@ from __future__ import annotations
 from . import shadow as sh
 from . import shadow_exit_spec as xspec
 from . import shadow_exit_spec_v3 as xspec3
+from . import shadow_exit_spec_v4 as xspec4
 from . import shadow_experiment_signals as sig
 from . import shadow_experiments as xp
 
@@ -513,7 +514,138 @@ X1CV3 = _declare_v3(
            "the same population at the same instants."),
 )
 
-EXPERIMENTS = (X1, X1C, X2, X3, X4, X5, X1V2, X1CV2, X1V3, X1CV3)
+# ── V3's review result, recorded WITHOUT touching V3 ─────────────────
+#
+# Owner review 2026-09-20 §2: "V3 is already frozen in production...
+# Do not change either declaration."
+
+V3_REVIEW = {
+    "X1_SHORT_HORIZON_DIRECTION_V3": {
+        "result": "NOT_APPROVED",
+        "sha": "066cdad7a8816f44",
+        "positions": 0,
+        "reviewedAt": "2026-09-20",
+        "frozenInProductionAt": "2026-09-20T14:25:22Z",
+        "reasons": [
+            "its timing contract conflated TWO DIFFERENT QUANTITIES: "
+            "BOOK FRESHNESS (how old the book itself may be, computed "
+            "from the book's own timestamps) and TARGET-TO-OBSERVATION "
+            "DELAY (how long after the target we may wait for a book). "
+            "FRESHNESS_LIMIT_S = 5.0s establishes the first and says "
+            "nothing about the second",
+            "the window [TARGET, TARGET + 5s] would therefore refuse a "
+            "book that is perfectly fresh but arrives late: source "
+            "10:00:19, received 10:00:20, age 1s, delay 20s -- "
+            "admissible on freshness, refused by a rule that was never "
+            "about waiting",
+            "the same error was carried into "
+            "RESIDUAL_RETRY_MAX_INTERBOOK_DELAY = 5s, which bounded "
+            "time BETWEEN books with a rule about the age OF a book",
+        ],
+    },
+    "X1C_NULL_CONTROL_V3": {
+        "result": "NOT_APPROVED",
+        "sha": "5c1d3bcdcf18f463",
+        "positions": 0,
+        "reviewedAt": "2026-09-20",
+        "reasons": ["carries V3's exit contract; rejected with its "
+                    "candidate"],
+    },
+}
+
+
+# ── V4: the two quantities separated ─────────────────────────────────
+#
+# §11: "Do not choose a V4 start time before the declaration has
+# actually been reviewed, deployed, frozen, verified in production.
+# The actual activation epoch must be an OBSERVED production fact
+# after the frozen declaration exists."
+#
+# V2 AND V3 BOTH FAILED THIS IN DIFFERENT WAYS -- V2 by declaring a
+# start eight hours before its own freeze, V3 by naming a future
+# instant (15:00Z) chosen before anyone had reviewed it. A pre-chosen
+# future time is the same defect wearing a different sign: it claims
+# an activation that has not happened.
+#
+# So V4 declares NO start instant at all. The sentinel is hashed like
+# any other field, and the real activation epoch is recorded as an
+# observed production fact once the worker boots with V4 armed --
+# exactly as BLOCK_ENFORCEMENT_EPOCH now is.
+V4_ACTIVATION_EPOCH_SENTINEL = "ACTIVATION_EPOCH_NOT_YET_ESTABLISHED"
+
+
+def _declare_v4(**kw):
+    return xp.declare(latency_assumption=LATENCY_ASSUMPTION,
+                      start_timestamp=V4_ACTIVATION_EPOCH_SENTINEL,
+                      exit_semantics=xspec4.exit_semantics(), **kw)
+
+
+EXIT_RULE_HORIZON_V4 = (
+    "exit at the frozen horizon by marketable reconstruction against "
+    "the FIRST LEGITIMATELY OBSERVED FRESH BOOK at or after the target "
+    "instant, where 'fresh' is the book's OWN age within the frozen "
+    "freshness limit and is checked independently of how long after "
+    "the target it arrived; no discretionary hold, no averaging down, "
+    "no re-entry inside the horizon; the intended exit quantity is all "
+    "remaining open quantity, a thin book yields a PARTIAL_EXIT for "
+    "the depth it genuinely showed, and the residual remains an exit "
+    "obligation attempted against every subsequent fresh book until it "
+    "is flat. No maximum target-to-book delay and no maximum interbook "
+    "delay are established, so the obligation WAITS and the actual "
+    "delay is recorded -- never invented depth, never an interpolated "
+    "price, never a close merely because the horizon expired, and "
+    "never a late book relabelled as an on-time execution")
+
+X1V4 = _declare_v4(
+    experiment_id="X1_SHORT_HORIZON_DIRECTION_V4",
+    supersedes="X1_SHORT_HORIZON_DIRECTION_V3",
+    policy_version="BETTOR_EXP_SHORT_HORIZON_V4",
+    model_version="short_horizon_direction_v1",      # THE SAME MODEL
+    feature_set=("microstructure.mid", "microstructure.spreadRelative"),
+    required_features=("mid",),
+    target="mid at +60s versus mid at arrival",
+    horizon="60S",
+    direction_rule=X1["directionRule"],              # byte-identical
+    entry_rule=X1["entryRule"],                      # byte-identical
+    exit_rule=EXIT_RULE_HORIZON_V4,
+    pairing_rule=PAIRING_RULE_NONE,
+    cashout_rule=CASHOUT_RULE_NONE,
+    readiness=xp.DECLARED_AWAITING_REVIEW,
+    notes=("Corrected successor to V3. BOOK FRESHNESS and "
+           "TARGET-TO-OBSERVATION DELAY are separate checks: the first "
+           "is established at 5,000ms from the book's own timestamps, "
+           "the second is NOT_ESTABLISHED and is recorded rather than "
+           "bounded. The exit obligation waits for the first "
+           "admissible fresh book however long that takes, a data "
+           "outage leaves capital deployed as EXIT_PENDING_DATA rather "
+           "than deleting the trade, and the actual delay is always "
+           "reported. The ENTRY half is the SAME STRING as X1 V1's. No "
+           "start instant is declared -- the activation epoch will be "
+           "an observed production fact."),
+)
+
+X1CV4 = _declare_v4(
+    experiment_id="X1C_NULL_CONTROL_V4",
+    role=xp.CONTROL,
+    control_for="X1_SHORT_HORIZON_DIRECTION_V4",
+    supersedes="X1C_NULL_CONTROL_V3",
+    policy_version="BETTOR_EXP_NULL_CONTROL_V4",
+    model_version="null_control_v1",
+    feature_set=(),
+    required_features=(),
+    target="mid at +60s versus mid at arrival",
+    horizon="60S",
+    direction_rule=X1C["directionRule"],
+    entry_rule=X1C["entryRule"],
+    exit_rule=EXIT_RULE_HORIZON_V4,
+    pairing_rule=PAIRING_RULE_NONE,
+    cashout_rule=CASHOUT_RULE_NONE,
+    readiness=xp.DECLARED_AWAITING_REVIEW,
+    notes=("The null beside X1 V4, on V4's exit contract."),
+)
+
+EXPERIMENTS = (X1, X1C, X2, X3, X4, X5, X1V2, X1CV2, X1V3, X1CV3,
+               X1V4, X1CV4)
 
 BY_ID = {e["experimentId"]: e for e in EXPERIMENTS}
 
@@ -534,6 +666,8 @@ SIGNAL_FOR = {
     "X1C_NULL_CONTROL_V2": sig.C0,
     "X1_SHORT_HORIZON_DIRECTION_V3": sig.M1,
     "X1C_NULL_CONTROL_V3": sig.C0,
+    "X1_SHORT_HORIZON_DIRECTION_V4": sig.M1,
+    "X1C_NULL_CONTROL_V4": sig.C0,
 }
 
 

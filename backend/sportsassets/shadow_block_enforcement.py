@@ -114,6 +114,17 @@ CONTAMINATION_RECORD = {
 
 EPOCH_NOT_ESTABLISHED = "BLOCK_ENFORCEMENT_EPOCH_NOT_ESTABLISHED"
 
+# ── §12: ESTABLISHED. An observed production fact, not a guess. ──────
+#
+# Owner verified independently 2026-09-20: the worker booted on the
+# guard revision at this instant and has written zero positions for a
+# blocked version since. This replaces the arbitrary restart-window
+# rule permanently -- no grace interval exists prospectively.
+OBSERVED_EPOCH = "2026-09-20T14:25:22.609978Z"
+OBSERVED_EPOCH_REVISION = "c95e3f2"
+OBSERVED_POST_EPOCH_LEAKS = 0
+OBSERVED_BY = "owner, independent production query"
+
 # The revision that first carried the version guard. Recorded as a
 # literal so that "was the guard running" is answered by a commit, not
 # by a duration.
