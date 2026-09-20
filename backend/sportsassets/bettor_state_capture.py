@@ -290,7 +290,7 @@ MEASUREMENT_WINDOW_W2 = {
         "so WITHIN-WINDOW follow-up demand is 7.9/tick and STEADY "
         "STATE is 10.6/tick, against 8 sampling wanted and a capacity "
         "of 1-7 reads/tick. Short-window demand understates the "
-        "standing requirement by one horizon's worth. 
+        "standing requirement by one horizon's worth. "
         "The system is CAPACITY-BOUND, not merely mis-scheduled. A "
         "reservation can only decide WHICH reads are lost, never "
         "eliminate the loss. Closing the gap needs fewer horizons, a "
