@@ -45,31 +45,39 @@ SELECT 'R1_DECISION' AS section,
  LIMIT 1;
 
 -- R2. Its full action table, every canonical action.
+--
+-- The decision is chosen FIRST and expanded second. An earlier version
+-- put LIMIT 1 outside jsonb_array_elements, which limited the expanded
+-- ROWS to one rather than the decisions to one, and printed a
+-- one-action "table".
 SELECT 'R2_ACTION_TABLE' AS section,
        r ->> 'action'                 AS action,
        r ->> 'leg'                    AS leg,
        r ->> 'aggression'             AS aggression,
        r ->> 'status'                 AS status,
        r ->> 'FV_BETTOR_INDEPENDENT'  AS fv_bettor_indep,
-       r ->> 'settlementEv'           AS settlement_ev,
        r ->> 'SNAPSHOT_EXECUTION_COST_VS_VENUE_PRICE' AS exec_cost,
        r ->> 'feeStatus'              AS fee,
        r #>> '{BREAK_EVEN_P_FILL_BAND,P10}' AS be_p10,
        r #>> '{BREAK_EVEN_P_FILL_BAND,P50}' AS be_p50,
        r #>> '{BREAK_EVEN_P_FILL_BAND,P90}' AS be_p90,
        r ->> 'EV_IF_NO_FILL'          AS ev_if_no_fill,
+       r ->> 'fillSelectionConvention' AS fs_convention,
        r #>> '{risk,permitted}'       AS risk_ok,
        r #>> '{risk,direction}'       AS risk_dir,
        left(coalesce(r ->> 'whyNot', r ->> 'whyIdentified',
-                     r ->> 'whatThisDoesNotEstablish'), 60) AS why
+                     r ->> 'whatThisDoesNotEstablish'), 52) AS why
   FROM (
-    SELECT jsonb_array_elements(action_ev_components -> 'table') AS r
-      FROM shadow_decisions
-     WHERE lane = 'BETTOR_EV_SHADOW'
-       AND policy_version = 'BETTOR_EV_SHADOW_V4'
-       AND action_ev_components::text
-           LIKE '%SNAPSHOT_EXECUTION_COST_VS_VENUE_PRICE": "-%'
-     ORDER BY decision_ts
-     LIMIT 1
+    SELECT jsonb_array_elements(c.comp -> 'table') AS r
+      FROM (
+        SELECT action_ev_components AS comp
+          FROM shadow_decisions
+         WHERE lane = 'BETTOR_EV_SHADOW'
+           AND policy_version = 'BETTOR_EV_SHADOW_V4'
+           AND action_ev_components::text
+               LIKE '%SNAPSHOT_EXECUTION_COST_VS_VENUE_PRICE": "-%'
+         ORDER BY decision_ts
+         LIMIT 1
+      ) c
   ) x
  ORDER BY 2;
