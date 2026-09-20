@@ -210,3 +210,124 @@ SELECT 'SAFETY|REAL_ORDERS=' || count(*) FILTER (
        || '|DECISION_GRADE=' || count(*) FILTER (
            WHERE NOT d.not_decision_grade)
   FROM bettor_experimental_decisions d;
+
+\echo ''
+\echo '--- 7. CAPITAL FROM THE POSITION EVENT SERIES (not entry notional) ---'
+-- S4. The ledger carries ONE event per position: opened_at. There is
+-- no closed_at and the only write in the codebase is the INSERT, so a
+-- position can never leave 'OPEN' -- an UPDATE is refused by the
+-- append-only trigger. Every position therefore overlaps every later
+-- one and capital is strictly ADDITIVE: CURRENT == PEAK, and
+-- CAPITAL_TURNS of 1.0 means no capital has ever been recycled.
+WITH pos AS (
+    SELECT experiment_id, market_id, opened_at,
+           entry_notional_usd::numeric AS notional
+      FROM bettor_experimental_positions
+)
+SELECT 'capital|' || experiment_id
+       || '|POSITIONS=' || count(*)
+       || '|ENTRY_NOTIONAL_PLAYED=' || round(sum(notional), 2)
+       || '|CURRENT_CAPITAL_DEPLOYED=' || round(sum(notional), 2)
+       || '|PEAK_CAPITAL_DEPLOYED=' || round(sum(notional), 2)
+       || '|CAPITAL_HOURS=' || round(sum(notional * EXTRACT(EPOCH FROM (
+              now() - opened_at)) / 3600.0), 4)
+       || '|AVERAGE_CAPITAL_DEPLOYED=' || round(
+              sum(notional * EXTRACT(EPOCH FROM (now() - opened_at)))
+              / NULLIF(EXTRACT(EPOCH FROM (now() - min(opened_at))), 0), 2)
+       || '|CAPITAL_TURNS=1.0_NO_RECYCLING'
+       || '|CLOSED_POSITIONS=' || count(*) FILTER (WHERE FALSE)
+       || '|first=' || to_char(min(opened_at), 'HH24:MI:SS')
+  FROM pos
+ GROUP BY experiment_id
+ ORDER BY experiment_id;
+
+\echo ''
+\echo '--- 8. CONCENTRATION: four entries in one market are not four samples ---'
+SELECT 'concentration|' || p.experiment_id
+       || '|POSITIONS=' || count(*)
+       || '|UNIQUE_MARKETS_TRADED=' || count(DISTINCT p.market_id)
+       || '|UNIQUE_EVENTS_TRADED=' || count(DISTINCT array_to_string(
+              (string_to_array(p.market_id, '-'))[1:5], '-'))
+       || '|MAX_MARKET_CONCENTRATION_PCT=' || round(100.0 * max(
+              per_market.notional) / NULLIF(sum(DISTINCT
+              per_market.total), 0), 2)
+  FROM bettor_experimental_positions p
+  JOIN LATERAL (
+      SELECT sum(x.entry_notional_usd::numeric) AS notional,
+             (SELECT sum(y.entry_notional_usd::numeric)
+                FROM bettor_experimental_positions y
+               WHERE y.experiment_id = p.experiment_id) AS total
+        FROM bettor_experimental_positions x
+       WHERE x.experiment_id = p.experiment_id
+         AND x.market_id = p.market_id
+  ) per_market ON TRUE
+ GROUP BY p.experiment_id
+ ORDER BY p.experiment_id;
+
+\echo ''
+\echo '--- 9. LATENCY CLOCK DOMAIN: is the lifecycle monotonic? ---'
+-- S6. DECISION_COMMIT comes from the tick's sealed clock while
+-- MODEL_START/END and BETTOR_RECEIVED come from wall-clock, so their
+-- difference has no physical meaning. Where the ordering fails, no
+-- latency number is reported at all.
+SELECT 'clockdomain|' || d.experiment_id
+       || '|n=' || count(*)
+       || '|monotonic=' || count(*) FILTER (
+              WHERE d.bettor_received_timestamp
+                    <= d.features_sealed_timestamp
+                AND d.features_sealed_timestamp <= d.model_start_timestamp
+                AND d.model_start_timestamp <= d.model_end_timestamp
+                AND d.model_end_timestamp <= d.decision_timestamp
+                AND d.decision_timestamp <= d.modeled_arrival_timestamp)
+       || '|decision_before_model_end=' || count(*) FILTER (
+              WHERE d.decision_timestamp < d.model_end_timestamp)
+       || '|LATENCY_STATUS=' || (CASE WHEN count(*) FILTER (
+              WHERE d.decision_timestamp < d.model_end_timestamp) > 0
+              THEN 'NOT_IDENTIFIED_CLOCK_DOMAIN_CONFLICT'
+              ELSE 'MONOTONIC' END)
+       || '|modeled_arrival_minus_model_end_ms_p50=' || round(
+              percentile_cont(0.5) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM
+                  (d.modeled_arrival_timestamp - d.model_end_timestamp))
+                  * 1000.0)::numeric, 1)
+  FROM bettor_experimental_decisions d
+ WHERE d.position_id IS NOT NULL
+ GROUP BY d.experiment_id
+ ORDER BY d.experiment_id;
+
+\echo ''
+\echo '--- 10. SETTLEMENT SEMANTICS on the traded markets (not identity) ---'
+SELECT 'settlement|' || b.market_id
+       || '|leg=' || b.outcome_leg
+       || '|identity=' || b.identity_status
+       || '|SETTLEMENT_SEMANTICS_STATUS=' || (CASE
+              WHEN b.settlement_prose_conflict IS NOT NULL
+              THEN 'CONFLICTING_VENUE_PROSE' ELSE 'IDENTIFIED' END)
+       || '|conflict=' || COALESCE(left(b.settlement_prose_conflict, 90),
+                                   'NONE')
+  FROM bettor_identity_bindings b
+ WHERE b.market_id IN (SELECT DISTINCT market_id
+                         FROM bettor_experimental_positions)
+ ORDER BY b.market_id, b.outcome_leg
+ LIMIT 20;
+
+\echo ''
+\echo '--- 11. RE-ENTRY: spacing against the frozen 60S horizon ---'
+-- S8. EXIT_RULE_HORIZON says "no re-entry inside the horizon". X1's
+-- frozen horizon is 60S. This prints the gap between consecutive
+-- entries in the SAME market so the rule can be checked rather than
+-- assumed either way.
+SELECT 'reentry|' || p.experiment_id
+       || '|' || p.market_id
+       || '|opened=' || to_char(p.opened_at, 'HH24:MI:SS')
+       || '|since_previous_s=' || COALESCE(round(EXTRACT(EPOCH FROM (
+              p.opened_at - lag(p.opened_at) OVER (
+                  PARTITION BY p.experiment_id, p.market_id
+                   ORDER BY p.opened_at)))::numeric, 1)::text, 'FIRST')
+       || '|INSIDE_60S_HORIZON=' || COALESCE((EXTRACT(EPOCH FROM (
+              p.opened_at - lag(p.opened_at) OVER (
+                  PARTITION BY p.experiment_id, p.market_id
+                   ORDER BY p.opened_at))) < 60)::text, 'N/A')
+       || '|notional=' || round(p.entry_notional_usd::numeric, 2)
+  FROM bettor_experimental_positions p
+ ORDER BY p.experiment_id, p.market_id, p.opened_at
+ LIMIT 40;

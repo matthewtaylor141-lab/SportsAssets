@@ -40,6 +40,8 @@ from .. import shadow_experiment_registry as reg
 from .. import shadow_experimental_markouts as mk
 from .. import shadow_markout_observability as ob
 from .. import shadow_markout_timing as tm
+from .. import shadow_experimental_capital as cap
+from .. import shadow_latency_integrity as lat
 from .. import shadow_experimental_store as xstore
 from .. import shadow_experiments as xp
 
@@ -297,14 +299,39 @@ def _headline(r) -> dict:
         # the model, and that is the single most misreadable number on
         # this panel.
         "isNullControl": experiment == X1_CONTROL,
-        "portfolio": ("X1C NULL CONTROL" if experiment == X1_CONTROL
-                      else "X1 MODEL" if experiment == X1_MODEL
-                      else experiment),
-        "isBettorEvPerformance": experiment != X1_CONTROL,
+        # THE CLASS, not just the portfolio. X1 is experimental model
+        # evidence; only the EV lane's own class is decision-grade.
+        "performanceClass": PERFORMANCE_CLASS.get(experiment, experiment),
+        "portfolio": CLASS_LABEL.get(
+            PERFORMANCE_CLASS.get(experiment), experiment),
+        # CORRECTED 2026-09-20: this was True for X1, which attributed
+        # an experimental model's economics to the BETTOR EV engine.
+        # Only the decision-grade class is EV performance, and neither
+        # experiment in this lane is it.
+        "isBettorEvPerformance": (
+            PERFORMANCE_CLASS.get(experiment) == DECISION_GRADE_CLASS),
+        "decisionGrade": False,
         "latencyRegime": r["latency_regime"],
         # §13's tiles, in its own words.
+        # §3 (owner 2026-09-20): "Do not label the 300S markout simply
+        # 'P&L' without its status." These are EXECUTABLE MARKOUTS --
+        # where the position could have been exited on the observed
+        # book at that instant. Nothing has exited and nothing has
+        # settled, so realized and settled are NOT_APPLICABLE rather
+        # than zero. The legacy key is kept beside the correct one so
+        # an older reader is not silently broken, and it carries its
+        # status rather than standing alone.
+        "currentExecutableMarkoutUsd": pnl,
+        "currentExecutableMarkoutStatus": cap.UNREALIZED_MARKOUT,
+        "realizedPnlUsd": None,
+        "realizedPnlStatus": cap.NOT_APPLICABLE,
+        "settledPnlUsd": None,
+        "settledPnlStatus": cap.NOT_APPLICABLE,
         "netShadowPnlUsd": pnl,
+        "netShadowPnlIsMarkoutNotRealized": True,
+        "todayExecutableMarkoutUsd": _f(r["pnl_today"]),
         "todayPnlUsd": _f(r["pnl_today"]),
+        "midMarkoutUsd": _f(r["pnl_mid"]),
         "midPnlUsd": _f(r["pnl_mid"]),
         "entryNotionalPlayedUsd": entry,
         "unfilledNotionalUsd": _f(r["unfilled"]),
@@ -349,6 +376,38 @@ def _headline(r) -> dict:
 
 X1_MODEL = "X1_SHORT_HORIZON_DIRECTION"
 X1_CONTROL = "X1C_NULL_CONTROL"
+
+# ── THREE PERFORMANCE CLASSES, NEVER ONE NUMBER ──────────────────────
+#
+# Owner directive 2026-09-20: "X1 IS AN EXPERIMENTAL BETTOR MODEL. X1
+# IS NOT YET THE DECISION-GRADE BETTOR EV ENGINE... The current X1
+# economics must therefore be displayed as BETTOR X1 - EXPERIMENTAL
+# SHADOW, not BETTOR EV ENGINE P&L."
+#
+# The distinction is an attribution claim, not a label: X1 emits a
+# signed drift and nothing else. It produces no P_BETTOR, no P_FILL
+# and no CONSERVATIVE_ACTION_EV, and every one of its rows carries
+# not_decision_grade, so calling its economics BETTOR EV performance
+# would attribute an experimental model's result to an engine that has
+# not yet made a trade.
+
+CLASS_EV = "BETTOR_EV_SHADOW"
+CLASS_X1 = "BETTOR_X1_EXPERIMENTAL_SHADOW"
+CLASS_CONTROL = "X1C_NULL_CONTROL"
+
+PERFORMANCE_CLASS = {
+    X1_MODEL: CLASS_X1,
+    X1_CONTROL: CLASS_CONTROL,
+}
+
+CLASS_LABEL = {
+    CLASS_EV: "BETTOR EV SHADOW",
+    CLASS_X1: "BETTOR X1 EXPERIMENTAL",
+    CLASS_CONTROL: "X1C NULL CONTROL",
+}
+
+# Which class, if any, may ever be described as BETTOR EV performance.
+DECISION_GRADE_CLASS = CLASS_EV
 
 _VS_CONTROL = """
     WITH marked AS (%s),
@@ -438,6 +497,103 @@ def vs_control(r) -> dict:
     }
 
 
+_ELIGIBLE_BY_EXPERIMENT = """
+    SELECT d.experiment_id, m.horizon,
+           sum(m.executable_markout_usd) AS executable
+      FROM bettor_experimental_markouts m
+      JOIN bettor_experimental_decisions d
+        ON d.experimental_decision_id = m.experimental_decision_id
+     WHERE m.executable_markout_usd IS NOT NULL
+       AND %s
+     GROUP BY d.experiment_id, m.horizon
+""" % tm.performance_eligible_sql()
+
+
+async def _management(pool) -> dict:
+    """The three performance classes, each with its own economics.
+
+    ONE CLASS PER BLOCK AND NO TOTAL ACROSS THEM. The panel cannot
+    render a combined figure because this function never computes one:
+    there is no "all experiments" branch to fall back to.
+    """
+    positions = await cap.position_events(pool)
+    eligible = await _guard(pool, "eligible markouts by experiment",
+                            _ELIGIBLE_BY_EXPERIMENT)
+    latency = await lat.latency_rows(pool)
+
+    by_experiment = {}
+    for p in positions:
+        by_experiment.setdefault(p["experiment_id"], []).append(p)
+    markouts = {}
+    for r in eligible:
+        markouts.setdefault(r["experiment_id"], {})[r["horizon"]] = _f(
+            r["executable"])
+
+    now = datetime.now(tz=timezone.utc)
+    classes = {}
+
+    # CLASS A: the decision-grade EV lane. It keeps NO rows in this
+    # store, and that is the point -- this lane is the experimental
+    # one. Its zeros are stated explicitly rather than left as an
+    # absence a reader might fill in with X1's numbers.
+    classes[CLASS_EV] = {
+        "label": CLASS_LABEL[CLASS_EV],
+        "DECISION_GRADE": True,
+        "ENTRY_NOTIONAL_PLAYED_USD": 0.0,
+        "POSITIONS": 0,
+        "ELIGIBLE_TRADES": 0,
+        "NET_PNL_USD": 0.0,
+        "RETURN": cap.NOT_APPLICABLE,
+        "STATUS": "LEARNING / NO DECISION-GRADE TRADE YET",
+        "note": ("the BETTOR EV SHADOW lane writes to its own ledger "
+                 "and has produced no trade; X1's economics are never "
+                 "shown here"),
+    }
+
+    for experiment, rows in sorted(by_experiment.items()):
+        klass = PERFORMANCE_CLASS.get(experiment, experiment)
+        capital = cap.capital(rows, now=now)
+        conc = cap.concentration(rows)
+        econ = cap.economics(
+            entry_notional_usd=capital["ENTRY_NOTIONAL_PLAYED_USD"],
+            eligible_markouts=markouts.get(experiment, {}))
+        mine = [v for v in latency if v["EXPERIMENT_ID"] == experiment]
+        settlement = await cap.settlement_semantics(
+            pool, [p["market_id"] for p in rows])
+        classes[klass] = {
+            "label": CLASS_LABEL.get(klass, experiment),
+            "experimentId": experiment,
+            # X1 IS NOT THE EV ENGINE. It emits a signed drift and no
+            # P_BETTOR, P_FILL or CONSERVATIVE_ACTION_EV, and every row
+            # is not_decision_grade.
+            "DECISION_GRADE": False,
+            "IS_NULL_CONTROL": experiment == X1_CONTROL,
+            "capital": capital,
+            "concentration": conc,
+            "economics": econ,
+            "LATENCY_STATUS": lat.census(mine)["byStatus"],
+            "latencyUsableForEconomics": lat.census(
+                mine)["usableForEconomics"],
+            "SETTLEMENT_SEMANTICS_STATUS": settlement[
+                "SETTLEMENT_SEMANTICS_STATUS"],
+            "settlement": settlement,
+        }
+
+    return {
+        "classes": classes,
+        "neverCombined": (
+            "BETTOR EV SHADOW, BETTOR X1 EXPERIMENTAL and X1C NULL "
+            "CONTROL are three separate performance classes. Their "
+            "P&L, notional, positions, win rate and returns are never "
+            "combined. X1 is experimental model evidence, not BETTOR "
+            "EV engine performance; X1C is always-long control "
+            "evidence and is not performance at all."),
+        "disclosure": "EXPERIMENTAL SHADOW / NO REAL CAPITAL",
+        "REAL_ORDER_ACTIVITY": "NONE",
+        "REAL_CAPITAL_AT_RISK": 0,
+    }
+
+
 async def summary(pool) -> dict:
     """The panel's headline, its leaderboard and its refusals."""
     regimes = await _guard(pool, "experimental headline", _HEADLINE)
@@ -476,6 +632,16 @@ async def summary(pool) -> dict:
         timing_rows = await tm.timing_rows(pool)
     except Exception as exc:                                   # noqa: BLE001
         timing_rows = {"unavailable": "%s: %s" % (type(exc).__name__, exc)}
+
+    # §4/§5/§6/§7 (owner 2026-09-20). Capital from the position event
+    # series, never inferred from entry notional; concentration so four
+    # entries in one market are not read as four samples; the clock
+    # check so no latency number is manufactured; and settlement
+    # semantics kept apart from instrument identity.
+    try:
+        management = await _management(pool)
+    except Exception as exc:                                   # noqa: BLE001
+        management = {"unavailable": "%s: %s" % (type(exc).__name__, exc)}
 
     try:
         funnel = await xstore.funnel(pool, window_s=FUNNEL_WINDOW_S)
@@ -544,6 +710,8 @@ async def summary(pool) -> dict:
                    "why": v["why"]}
             for name, v in ob.by_horizon().items()},
         "performanceHorizons": list(ob.observable_horizons()),
+        # §2/§12: the management panel, three classes, never combined.
+        "management": management,
         # §1 OF THE 2026-09-20 DIRECTIVE: a row is eligible because of
         # WHEN IT WAS OBSERVED, never because of its label. Both gates
         # are reported separately so a reader can see which one

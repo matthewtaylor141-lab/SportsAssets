@@ -111,8 +111,14 @@ async def test_the_control_gets_its_own_tile_and_is_labelled_as_one():
     assert rows[X1C]["portfolio"] == "X1C NULL CONTROL"
     assert rows[X1C]["isBettorEvPerformance"] is False
     assert rows[X1]["isNullControl"] is False
-    assert rows[X1]["portfolio"] == "X1 MODEL"
-    assert rows[X1]["isBettorEvPerformance"] is True
+    # RELABELLED 2026-09-20 by owner directive. "X1 IS AN EXPERIMENTAL
+    # BETTOR MODEL. X1 IS NOT YET THE DECISION-GRADE BETTOR EV ENGINE."
+    # isBettorEvPerformance was True here, which attributed an
+    # experimental model's economics to an engine that has never
+    # traded. Pinned in test_experimental_attribution.py.
+    assert rows[X1]["portfolio"] == "BETTOR X1 EXPERIMENTAL"
+    assert rows[X1]["performanceClass"] == ce.CLASS_X1
+    assert rows[X1]["isBettorEvPerformance"] is False
 
 
 @pytest.mark.asyncio
