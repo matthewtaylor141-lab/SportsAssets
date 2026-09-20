@@ -330,7 +330,7 @@ SELECT 'reentry|' || p.experiment_id
        || '|notional=' || round(p.entry_notional_usd::numeric, 2)
   FROM bettor_experimental_positions p
  ORDER BY p.experiment_id DESC, p.market_id, p.opened_at
- LIMIT 40;
+ LIMIT 12;
 
 \echo ''
 \echo '--- 12. RE-ENTRY VIOLATIONS against the frozen 60S horizon ---'
