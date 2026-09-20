@@ -85,6 +85,63 @@ from . import bettor_ev_actions as acts
 NOT_IDENTIFIED = "NOT_IDENTIFIED"
 MACHINERY_UNAVAILABLE = "EV_MACHINERY_UNAVAILABLE"
 
+# ── §14: the no-fill branch, which is not always nothing ─────────────
+#
+# A passive order is NOT P_FILL x profit_if_filled. It has three
+# outcomes -- FULL_FILL, PARTIAL_FILL, NO_FILL -- and the last one
+# depends on WHAT THE POSITION WOULD BE IF NOTHING HAPPENED:
+#
+#     PASSIVE ENTRY FROM FLAT   no fill -> no exposure. EV_IF_NO_FILL
+#                               is genuinely 0, and that zero is
+#                               MEASURED, not assumed.
+#
+#     PASSIVE EXIT              no fill -> WE STILL OWN THE POSITION.
+#                               EV_IF_NO_FILL is the value of
+#                               continuing to hold, which needs a fair
+#                               value we do not have.
+#
+# Collapsing the second into zero is the error the distinction exists
+# to prevent: it prices a failed exit as though the risk had gone away.
+
+FILL_OUTCOMES = ("FULL_FILL", "PARTIAL_FILL", "NO_FILL")
+
+ENTRY_FROM_FLAT = "ENTRY_FROM_FLAT"
+PASSIVE_EXIT = "PASSIVE_EXIT"
+
+NO_FILL_RULE = (
+    "EV_IF_NO_FILL is priced explicitly and is never silently zero. It "
+    "is zero only for a passive ENTRY FROM FLAT, where not filling "
+    "leaves no exposure -- there the zero is a measured consequence of "
+    "the state. For a passive EXIT, not filling means we still own the "
+    "position, so EV_IF_NO_FILL is the value of continuing to hold and "
+    "is NOT_IDENTIFIED while no independent fair value exists")
+
+
+def no_fill_branch(context=ENTRY_FROM_FLAT) -> dict:
+    """What happens to the book if the resting order never fills."""
+    if context == ENTRY_FROM_FLAT:
+        return {
+            "context": ENTRY_FROM_FLAT,
+            "EV_IF_NO_FILL": "0",
+            "evIfNoFillStatus": "IDENTIFIED",
+            "why": ("a passive entry that does not fill leaves no "
+                    "position, so the outcome is exactly nothing. This "
+                    "zero is measured from the state, not assumed"),
+            "residualExposure": "NONE",
+        }
+    return {
+        "context": PASSIVE_EXIT,
+        "EV_IF_NO_FILL": NOT_IDENTIFIED,
+        "evIfNoFillStatus": NOT_IDENTIFIED,
+        "why": ("a passive exit that does not fill leaves the position "
+                "OPEN. The no-fill branch is therefore the value of "
+                "continuing to hold, which requires a fair value that "
+                "does not exist. Pricing it as zero would book a failed "
+                "exit as though the risk had gone away"),
+        "residualExposure": "UNCHANGED",
+    }
+
+
 # ── the two fair values, kept apart by name (§1) ─────────────────────
 
 FV_VENUE_IMPLIED = "FV_VENUE_IMPLIED"
@@ -351,7 +408,8 @@ def _break_even_band(gross, fee, band):
 # ── the evaluation ───────────────────────────────────────────────────
 
 def evaluate_action(action: str, market_state: dict | None, *,
-                    size=None, fee=None, root=None, band=None) -> dict:
+                    size=None, fee=None, root=None, band=None,
+                    no_fill_context=None) -> dict:
     """Price one canonical action, or say exactly why it cannot be."""
     spec = acts.CANONICAL_ACTIONS.get(action)
     if spec is None:
@@ -508,7 +566,18 @@ def evaluate_action(action: str, market_state: dict | None, *,
         "fillSelectionPrior": band,
         "unknownIsNotZero": acts.UNKNOWN_IS_NEVER_ZERO,
         "recommended": False,
+        # §14: three outcomes, not two. The no-fill branch is priced
+        # rather than assumed away.
+        "fillOutcomes": list(FILL_OUTCOMES),
+        "noFillRule": NO_FILL_RULE,
     })
+    # Every passive action in the CANONICAL table is an entry or a
+    # complement acquisition from a book we do not yet hold, so the
+    # no-fill branch leaves no NEW exposure. A passive EXIT is priced
+    # by the exit engine, which passes PASSIVE_EXIT instead -- the
+    # context is a parameter precisely so this file cannot decide it
+    # by assumption.
+    row.update(no_fill_branch(no_fill_context or ENTRY_FROM_FLAT))
     row.update(_break_even_band(gross, fee_d, band))
     return row
 
@@ -524,7 +593,7 @@ def _scaled(per_contract, size):
 
 
 def evaluate(market_state: dict | None, *, size=None, fee=None,
-             root=None) -> dict:
+             root=None, no_fill_context=None) -> dict:
     """The whole canonical action table for one observation."""
     try:
         machinery(root)
@@ -542,7 +611,8 @@ def evaluate(market_state: dict | None, *, size=None, fee=None,
 
     band = fill_selection_band(root)
     table = [evaluate_action(a, market_state, size=size, fee=fee,
-                             root=root, band=band)
+                             root=root, band=band,
+                             no_fill_context=no_fill_context)
              for a in acts.ACTIONS]
 
     cost_identified = [r["action"] for r in table

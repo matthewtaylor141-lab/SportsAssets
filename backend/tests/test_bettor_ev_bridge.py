@@ -294,3 +294,35 @@ def test_the_policy_version_moved_with_the_behaviour():
     """V2's 4,503 rows must stay readable as what V2 believed."""
     assert sb.POLICY_VERSION == "BETTOR_EV_SHADOW_V3"
     assert sb.POLICY_VERSION != "BETTOR_EV_SHADOW_V2"
+
+
+# ── §14: the no-fill branch is priced, not assumed away ──────────────
+
+def test_a_passive_entry_that_does_not_fill_leaves_nothing():
+    """Zero here is MEASURED from the state, not defaulted."""
+    b = evb.no_fill_branch(evb.ENTRY_FROM_FLAT)
+    assert b["EV_IF_NO_FILL"] == "0"
+    assert b["evIfNoFillStatus"] == "IDENTIFIED"
+    assert b["residualExposure"] == "NONE"
+
+
+def test_a_passive_exit_that_does_not_fill_still_owns_the_position():
+    """The error the distinction exists to prevent."""
+    b = evb.no_fill_branch(evb.PASSIVE_EXIT)
+    assert b["EV_IF_NO_FILL"] == evb.NOT_IDENTIFIED
+    assert b["residualExposure"] == "UNCHANGED"
+    assert "as though the risk had gone away" in b["why"]
+
+
+def test_a_passive_order_has_three_outcomes_not_two():
+    r = _row(evb.evaluate(BOOK, fee="0.001"), "MAKE_YES")
+    assert r["fillOutcomes"] == ["FULL_FILL", "PARTIAL_FILL", "NO_FILL"]
+    assert "never silently zero" in r["noFillRule"]
+
+
+def test_the_no_fill_context_is_a_parameter_not_an_assumption():
+    entry = _row(evb.evaluate(BOOK, fee="0.001"), "MAKE_YES")
+    exit_ = _row(evb.evaluate(BOOK, fee="0.001",
+                              no_fill_context=evb.PASSIVE_EXIT), "MAKE_YES")
+    assert entry["EV_IF_NO_FILL"] == "0"
+    assert exit_["EV_IF_NO_FILL"] == evb.NOT_IDENTIFIED

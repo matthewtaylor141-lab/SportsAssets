@@ -176,3 +176,17 @@ def test_the_actions_come_from_the_canonical_table():
     from sportsassets import bettor_ev_actions as acts
     for a in ee.RESIDUAL_ACTIONS:
         assert a in acts.CANONICAL_ACTIONS, a
+
+
+# ── §14 in the exit engine ───────────────────────────────────────────
+
+def test_a_resting_complement_that_does_not_fill_leaves_the_leg_open():
+    """POST_COMPLEMENT is a passive EXIT: no fill means full exposure."""
+    from sportsassets import bettor_ev_bridge as evb
+    r = ee.evaluate(_holding_yes(), held_book={"bid": "0.45"},
+                    complement_book={"ask": "0.49"})
+    p = _row(r, "POST_COMPLEMENT")
+    assert p["EV_IF_NO_FILL"] == ee.NOT_IDENTIFIED
+    assert p["residualExposure"] == "UNCHANGED"
+    assert p["context"] == evb.PASSIVE_EXIT
+    assert p["fillOutcomes"] == ["FULL_FILL", "PARTIAL_FILL", "NO_FILL"]

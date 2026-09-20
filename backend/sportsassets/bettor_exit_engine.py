@@ -216,12 +216,23 @@ def evaluate(inventory: dict, *, held_book=None, complement_book=None,
             continue
 
         if action == "POST_COMPLEMENT":
+            # §14. THE NO-FILL BRANCH HERE IS NOT NOTHING. Resting a bid
+            # on the complement is a PASSIVE EXIT: if it does not fill we
+            # still own the leg we started with, at full exposure. A
+            # zero here would price a failed hedge as though the risk had
+            # been removed.
             rows.append(_unranked(
                 action,
                 ("a resting complement bid has no identified fill "
                  "probability -- BETTOR has never rested an order -- so "
                  "neither its cost nor its value is identified"),
-                P_FILL=NOT_IDENTIFIED))
+                P_FILL=NOT_IDENTIFIED,
+                fillOutcomes=list(evb.FILL_OUTCOMES),
+                # `why` is renamed on the way in: the branch's own
+                # reason is about NOT FILLING, while _unranked's `why`
+                # is about not being RANKED. Two different sentences.
+                **{("whyNoFill" if k == "why" else k): v
+                   for k, v in evb.no_fill_branch(evb.PASSIVE_EXIT).items()}))
             continue
 
         if action == "MERGE":
