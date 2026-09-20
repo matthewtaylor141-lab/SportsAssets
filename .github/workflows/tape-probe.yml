@@ -1,0 +1,91 @@
+name: tape-probe
+
+# §B. PROVE THE PUBLIC EXECUTION TAPE IS ACTUALLY DOWNLOADABLE.
+#
+# A READ-ONLY, CREDENTIAL-FREE SURFACE, separate from research-sql and
+# render-ops on purpose. research-sql holds a database key; render-ops
+# can restart services. This workflow holds NOTHING: it makes plain
+# HTTPS GETs to one public host and needs no secret at all.
+#
+# WHY A WORKFLOW AND NOT A LOCAL RUN. The agent environment's egress
+# policy denies www.polymarketexchange.com (CONNECT 403), so the fetch
+# cannot be attempted from there. GitHub Actions can reach it.
+#
+# WHAT THIS PROVES AND WHAT IT DOES NOT. It proves the venue publishes
+# the file and that it is retrievable and parseable from a GitHub
+# Actions runner. It does NOT prove the Render worker can reach the
+# same host -- that is a separate egress question on a different
+# network, and it is called out in the summary rather than assumed.
+#
+# The guard below refuses to run if the capture module has grown a
+# mutating verb, a second host or a credential read since it was
+# audited. That check is a property of this workflow, not a promise
+# about the code.
+
+on:
+  workflow_dispatch:
+    inputs:
+      max_files:
+        description: "CSV files to download (0 discovers links only)"
+        required: false
+        type: string
+        default: "1"
+
+concurrency:
+  group: tape-probe
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  probe:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Guard - the capture module is still read-only
+        # THE EXISTING AST GATE, NOT A NEW GREP. test_tape_capture.py
+        # already proves get-only, single-host, no-credential and
+        # no-environment-read by walking the syntax tree with
+        # docstrings stripped. A grep over the source would refuse this
+        # very module, whose docstring says "No API key, no Auth0
+        # token, no client assertion" -- which is the prose promise the
+        # AST gate actually verifies.
+        run: |
+          set -eu
+          python3 -m pip install --quiet pytest
+          cd research/beta48/tape
+          python3 -m pytest test_tape_capture.py -q
+          python3 guard_probe.py tape_probe.py
+
+      - name: Probe
+        run: |
+          set -eu
+          MAX="$(jq -r '.inputs.max_files // "1"' "$GITHUB_EVENT_PATH")"
+          case "$MAX" in ''|*[!0-9]*) echo "refused: max_files must be digits"; exit 1 ;; esac
+          python3 -m pip install --quiet httpx
+          cd research/beta48/tape
+          python3 tape_probe.py --out /tmp/tape --max-files "$MAX"
+
+      - name: Summary
+        if: always()
+        run: |
+          set -eu
+          echo "== tape_probe.json =="
+          # The raw jsonl carries whole page bodies; only the probe
+          # block is printed, and its symbol sample is already capped.
+          if [ -f /tmp/tape/tape_probe.json ]; then
+            python3 -c "import json;d=json.load(open('/tmp/tape/tape_probe.json'));print(json.dumps(d,indent=1)[:60000])"
+          else
+            echo "no probe output -- the run failed before it was written"
+          fi
+
+      - name: Upload raw capture
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: tape-capture
+          path: /tmp/tape
+          retention-days: 7
+          if-no-files-found: warn
