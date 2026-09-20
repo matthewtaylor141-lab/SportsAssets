@@ -45,6 +45,7 @@ import os
 import time
 from datetime import datetime, timezone
 
+from .. import bettor_book_snapshot as booksnap
 from .. import pmus
 from .. import shadow_bettor as bettor
 # Operational telemetry lives apart from the decision path: the
@@ -93,13 +94,51 @@ def _off(name: str, default: str = "on") -> bool:
 
 
 def _read_quote(slug: str) -> dict:
-    """One paced quote read, off the event loop. Never raises."""
+    """One paced BOOK read, off the event loop. Never raises.
+
+    ONE REQUEST, TWO READINGS. The venue's `book` feed returns a
+    marketData object carrying the bid and offer ladders with their
+    `qty`, the depth level counts and `stats.sharesTraded`. `bbo_read`
+    takes four keys from it; `book_snapshot` keeps all of it. Reading
+    the endpoint twice would double our request rate against a venue we
+    pace deliberately, so the payload is fetched once and both readings
+    are derived from it.
+
+    THE BBO FALLBACK STAYS. If the book feed is unreachable or carries
+    no marketData, the quote read falls back to `bbo_read` exactly as
+    before and the snapshot records why it is absent. A market we can
+    quote but not ladder is still worth observing; it simply carries no
+    depth, and says so.
+    """
     pace(READ_PACING_S)
     try:
-        return pmus.bbo_read(pmus._get_client(), slug)
+        client = pmus._get_client()
     except Exception as exc:                                   # noqa: BLE001
         return {"bid": None, "ask": None, "state": None,
+                "error": type(exc).__name__, "book": None}
+    try:
+        book = pmus.book_read(client, slug)
+    except Exception as exc:                                   # noqa: BLE001
+        book = {"marketData": None, "feed": None,
                 "error": type(exc).__name__}
+    md = book.get("marketData")
+    if isinstance(md, dict):
+        b = pmus._quote_px(md, "bestBid", "best_bid", "bid")
+        a = pmus._quote_px(md, "bestAsk", "best_ask", "ask")
+        st = md.get("state")
+        if b is not None or a is not None:
+            return {"bid": b, "ask": a,
+                    "state": str(st) if st is not None else None,
+                    "error": None, "book": book}
+    # No quote from the book feed. Fall back to the reader the mirror
+    # uses, unchanged, and carry the book attempt's outcome alongside.
+    try:
+        q = pmus.bbo_read(client, slug)
+    except Exception as exc:                                   # noqa: BLE001
+        q = {"bid": None, "ask": None, "state": None,
+             "error": type(exc).__name__}
+    q["book"] = book
+    return q
 
 
 def _market_state(subject: dict, quote: dict, captured_at) -> dict:
@@ -118,14 +157,33 @@ def _market_state(subject: dict, quote: dict, captured_at) -> dict:
             readable=False,
             why_unreadable=(W_VENUE_STATE % state) if state else W_NO_QUOTE,
             **common)
+    # THE DEPTH THAT WAS ALWAYS IN THE PAYLOAD. available_depth used to
+    # be None on every row with a comment calling that the honest state
+    # of the evidence. It was honest about what we STORED and wrong
+    # about what the venue SENT: the same response carries the ladders
+    # and stats.sharesTraded, and the read discarded them.
+    #
+    # DISPLAYED DEPTH IS NOT QUEUE AHEAD. What lands here is a book
+    # OBSERVATION -- ladders, level counts, cumulative traded shares --
+    # with its raw source kept so every derived value can be audited.
+    # Queue-ahead is a counterfactual about an order that does not
+    # exist and is derived separately, per hypothetical price, with its
+    # assumptions attached.
+    book = quote.get("book") or {}
+    snap = booksnap.snapshot(
+        book.get("marketData"), symbol=subject["symbol"],
+        captured_at=captured_at, feed=book.get("feed"))
+    if book.get("error") and "BOOK_FEED_ERROR" not in \
+            snap.get("MISSING_FIELD_REASONS", []):
+        snap.setdefault("MISSING_FIELD_REASONS", []).append(
+            "BOOK_FEED_ERROR:%s" % book["error"])
     return store.market_state_record(
         readable=True, bid=quote.get("bid"), ask=quote.get("ask"),
-        # NOT pretended to be depth. The frozen BETTOR blocker
-        # INSUFFICIENT_DEPTH fires from exactly this absence, which is
-        # the honest state of the evidence until institutional L2 is
-        # established as the source.
-        available_depth=None,
-        l2_reference={"feed": "bbo", "depth": "NOT_IDENTIFIED",
+        available_depth=snap,
+        l2_reference={"feed": book.get("feed") or "bbo",
+                      "depth": snap.get("PARSE_STATUS")
+                               or booksnap.PARSE_NO_MARKET_DATA,
+                      "snapshotVersion": booksnap.SNAPSHOT_VERSION,
                       "venueState": quote.get("state")},
         **common)
 

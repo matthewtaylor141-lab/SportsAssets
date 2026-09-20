@@ -333,6 +333,9 @@ def probe(outdir: Path, max_files: int = 1) -> dict:
         "probedAtUtc": datetime.now(tz=timezone.utc).isoformat(),
         "TAPE_FETCH_STATUS": "PROVEN" if ok else "FAILED",
         "landingPages": summary.get("landing_pages"),
+        "CSV_LINK_DISCOVERY": summary.get("CSV_LINK_DISCOVERY",
+                                          "FOUND_IN_PAGE_HREF"),
+        "scriptAssets": summary.get("script_assets", []),
         "csvLinksFound": len(summary.get("csv_links_found") or []),
         "csvLinkSample": (summary.get("csv_links_found") or [])[:10],
         "PUBLIC_TIME_SALES_AVAILABLE":

@@ -856,6 +856,48 @@ def bbo_read(client, us_slug: str) -> dict:
     return out
 
 
+def book_read(client, us_slug: str) -> dict:
+    """The venue's `marketData` object, WHOLE. For BETTOR's book capture.
+
+    `bbo_read` above extracts four keys from this same payload and
+    discards the rest -- the bid and offer ladders with their `qty`, the
+    depth level counts, and `stats.sharesTraded`. That is correct for
+    the mirror, which needs a quote and nothing else, and it is why
+    `shadow_market_states.available_depth` has been NULL on every row
+    BETTOR has ever written and INSUFFICIENT_DEPTH has fired on half
+    its decisions.
+
+    BBO_READ IS NOT CHANGED. The mirror lane depends on its exact
+    four-key return and the mirror is frozen. This is a second reader
+    over the same endpoint, and the two never share a result.
+
+    Only the `book` feed is tried: `bbo` is a top-of-book summary and
+    does not carry ladders. A feed that raises is NAMED rather than
+    swallowed into a silent empty book, because an unreachable venue
+    and an empty book are different facts and only one of them is about
+    the market.
+
+    Returns {"marketData", "feed", "error"} and never raises.
+    """
+    out = {"marketData": None, "feed": None, "error": None}
+    fn = getattr(getattr(client, "markets", None), "book", None)
+    if fn is None:
+        out["error"] = "NO_BOOK_FEED_ON_CLIENT"
+        return out
+    try:
+        payload = fn(us_slug) or {}
+    except Exception as exc:  # noqa: BLE001 -- named, never swallowed
+        out["error"] = type(exc).__name__
+        return out
+    md = payload.get("marketData") if isinstance(payload, dict) else None
+    out["feed"] = "book"
+    if md is None:
+        out["error"] = "NO_MARKET_DATA_IN_PAYLOAD"
+        return out
+    out["marketData"] = md
+    return out
+
+
 def slug_bid(us_slug: str, long_leg: bool | None = None) -> float | None:
     """Live best BID for one orderable US slug (desk cash-out, owner
     directive 2026-08-22). None when the venue has no readable bid —

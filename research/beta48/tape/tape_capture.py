@@ -130,6 +130,15 @@ def fetch(client, pacer, url, binary=False):
 
 
 _HREF = re.compile(r"""href\s*=\s*["']([^"']+)["']""", re.I)
+# The landing pages turned out to be JavaScript shells: 0 anchors, 0
+# .csv strings, one page-specific script each. An href scan over them
+# finds nothing, which looks identical to "the venue publishes
+# nothing" and is not the same finding. So the page's OWN script
+# reference is followed one level, and the strings that script names
+# are reported. Still no URL is constructed from a convention.
+_SRC = re.compile(r"""src\s*=\s*["']([^"']+)["']""", re.I)
+# String literals inside a script that look like a path or a URL.
+_JS_PATHISH = re.compile(r"""["'](/[A-Za-z0-9_./-]{2,}|https?://[^"']{4,})["']""")
 
 
 def csv_links(page_text, page_url):
@@ -142,6 +151,30 @@ def csv_links(page_text, page_url):
                 and p.path.lower().endswith(".csv"):
             if url not in out:
                 out.append(url)
+    return out
+
+
+def script_links(page_text, page_url):
+    """Same-host script assets the page itself references."""
+    out = []
+    for raw in _SRC.findall(page_text or ""):
+        url = urljoin(page_url, raw)
+        p = urlparse(url)
+        if p.scheme == "https" and p.hostname == TAPE_HOST \
+                and p.path.lower().endswith(".js"):
+            if url not in out:
+                out.append(url)
+    return out
+
+
+def script_pathish(script_text):
+    """Path-shaped literals a script names. Reported, never fetched
+    blindly: a candidate this produces is still the SCRIPT's word, and
+    a caller decides whether to follow it."""
+    out = []
+    for m in _JS_PATHISH.findall(script_text or ""):
+        if m not in out:
+            out.append(m)
     return out
 
 
@@ -197,6 +230,7 @@ def capture(outdir: Path, max_files: int = 0) -> dict:
                             "FETCH_TIMESTAMP"),
     }
     links = []
+    script_sources = []
     with httpx.Client(headers={"User-Agent": CAPTURE_VERSION}) as client, \
             raw.open("a") as fh:
         for path in LANDING_PAGES:
@@ -216,9 +250,36 @@ def capture(outdir: Path, max_files: int = 0) -> dict:
                 for u in csv_links(row.get("text"), url):
                     if u not in links:
                         links.append(u)
+                for sj in script_links(row.get("text"), url):
+                    if sj not in script_sources:
+                        script_sources.append(sj)
         summary["csv_links_found"] = links
         if not links:
             summary["CSV_LINK_DISCOVERY"] = "NO_LINKS_FOUND"
+            # The pages are script shells. Follow the script each page
+            # names, and report the paths IT names, so the difference
+            # between "venue publishes nothing" and "our reader reads
+            # the wrong layer" is settled by evidence.
+            scripts = []
+            for url in script_sources:
+                row = fetch(client, pacer, url)
+                fh.write(json.dumps({"kind": "SCRIPT", **row}) + "\n")
+                named = script_pathish(row.get("text"))
+                scripts.append({"url": url,
+                                "http_status": row["http_status"],
+                                "bytes": row["bytes"],
+                                "pathsNamed": named[:80]})
+                for cand in named:
+                    cu = urljoin(url, cand)
+                    pu = urlparse(cu)
+                    if (pu.scheme == "https" and pu.hostname == TAPE_HOST
+                            and pu.path.lower().endswith(".csv")
+                            and cu not in links):
+                        links.append(cu)
+            summary["script_assets"] = scripts
+            summary["csv_links_found"] = links
+            if links:
+                summary["CSV_LINK_DISCOVERY"] = "FOUND_VIA_PAGE_SCRIPT"
         for url in links[:int(max_files)]:
             row = fetch(client, pacer, url)
             hdr = parse_header(row.get("text"))
