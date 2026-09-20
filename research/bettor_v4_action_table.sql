@@ -1,38 +1,26 @@
--- THE FULL ACTION TABLE OF THE FIRST POST-PACKAGING DECISION (§6).
--- Read-only. Every canonical action, with what is identified and what
--- is not -- NOT_IDENTIFIED is never collapsed to zero.
+-- THE FIRST POST-PACKAGING ACTION TABLE ON A READABLE BOOK (§6).
+--
+-- The very first V4 decision priced all 15 actions but against an
+-- unreadable book -- no mid, no two-sided quote -- so every cell was
+-- NOT_IDENTIFIED for a market-data reason rather than a modelling one.
+-- That is honest and uninformative. This finds the first decision where
+-- the book WAS readable, so the engine's actual output is visible.
 
-WITH d AS (
-    SELECT shadow_decision_id, decision_ts, policy_version,
-           action_ev_status, action_ev_components
-      FROM shadow_decisions
-     WHERE shadow_decision_id =
-           'bdec_e8e5d8f23f56df1d8bdc2cfa6a578899a17b025a'
-), a AS (
-    SELECT jsonb_array_elements(d.action_ev_components -> 'table') AS r
-      FROM d
-)
-SELECT 'T1_ACTION_TABLE' AS section,
-       r ->> 'action'                 AS action,
-       r ->> 'leg'                    AS leg,
-       r ->> 'aggression'             AS aggression,
-       r ->> 'status'                 AS status,
-       r ->> 'fairValueKind'          AS fv_venue_implied_kind,
-       r ->> 'FV_BETTOR_INDEPENDENT'  AS fv_bettor_independent,
-       r ->> 'settlementEv'           AS settlement_ev,
-       r ->> 'SNAPSHOT_EXECUTION_COST_VS_VENUE_PRICE'
-                                      AS snapshot_execution_cost,
-       r ->> 'feeStatus'              AS fee_status,
-       r -> 'BREAK_EVEN_P_FILL_BAND'  AS break_even_p_fill_band,
-       r #>> '{risk,permitted}'       AS risk_permitted,
-       r #>> '{risk,direction}'       AS risk_direction,
-       coalesce(r ->> 'whyNot', r ->> 'whyIdentified',
-                r ->> 'whatThisDoesNotEstablish') AS why_not
-  FROM a
- ORDER BY 2;
+-- R0. How often the book is readable at all, which is its own finding.
+SELECT 'R0_BOOK_READABILITY' AS section,
+       count(*) AS v4_decisions,
+       count(*) FILTER (
+           WHERE action_ev_components::text
+                 LIKE '%SNAPSHOT_EXECUTION_COST_VS_VENUE_PRICE": "-%')
+           AS with_priced_execution_cost,
+       min(decision_ts) AS first_v4,
+       max(decision_ts) AS latest_v4
+  FROM shadow_decisions
+ WHERE lane = 'BETTOR_EV_SHADOW'
+   AND policy_version = 'BETTOR_EV_SHADOW_V4';
 
--- T2. The decision-level facts and the fill-selection prior it carried.
-SELECT 'T2_DECISION' AS section,
+-- R1. The decision-level facts of the first readable-book V4 decision.
+SELECT 'R1_DECISION' AS section,
        shadow_decision_id,
        decision_ts,
        policy_version,
@@ -48,4 +36,40 @@ SELECT 'T2_DECISION' AS section,
                                                      AS fs_direction_assumed,
        action_ev_components #>> '{engineProvenance,loadedFrom}'
                                                      AS engine_loaded_from
-  FROM d;
+  FROM shadow_decisions
+ WHERE lane = 'BETTOR_EV_SHADOW'
+   AND policy_version = 'BETTOR_EV_SHADOW_V4'
+   AND action_ev_components::text
+       LIKE '%SNAPSHOT_EXECUTION_COST_VS_VENUE_PRICE": "-%'
+ ORDER BY decision_ts
+ LIMIT 1;
+
+-- R2. Its full action table, every canonical action.
+SELECT 'R2_ACTION_TABLE' AS section,
+       r ->> 'action'                 AS action,
+       r ->> 'leg'                    AS leg,
+       r ->> 'aggression'             AS aggression,
+       r ->> 'status'                 AS status,
+       r ->> 'FV_BETTOR_INDEPENDENT'  AS fv_bettor_indep,
+       r ->> 'settlementEv'           AS settlement_ev,
+       r ->> 'SNAPSHOT_EXECUTION_COST_VS_VENUE_PRICE' AS exec_cost,
+       r ->> 'feeStatus'              AS fee,
+       r #>> '{BREAK_EVEN_P_FILL_BAND,P10}' AS be_p10,
+       r #>> '{BREAK_EVEN_P_FILL_BAND,P50}' AS be_p50,
+       r #>> '{BREAK_EVEN_P_FILL_BAND,P90}' AS be_p90,
+       r ->> 'EV_IF_NO_FILL'          AS ev_if_no_fill,
+       r #>> '{risk,permitted}'       AS risk_ok,
+       r #>> '{risk,direction}'       AS risk_dir,
+       left(coalesce(r ->> 'whyNot', r ->> 'whyIdentified',
+                     r ->> 'whatThisDoesNotEstablish'), 60) AS why
+  FROM (
+    SELECT jsonb_array_elements(action_ev_components -> 'table') AS r
+      FROM shadow_decisions
+     WHERE lane = 'BETTOR_EV_SHADOW'
+       AND policy_version = 'BETTOR_EV_SHADOW_V4'
+       AND action_ev_components::text
+           LIKE '%SNAPSHOT_EXECUTION_COST_VS_VENUE_PRICE": "-%'
+     ORDER BY decision_ts
+     LIMIT 1
+  ) x
+ ORDER BY 2;
